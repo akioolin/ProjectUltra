@@ -8,12 +8,12 @@
 
 ---
 
-## Overall Progress: ~65% Complete
+## Overall Progress: ~75% Complete
 
 ```
 Phase 1: Core Interfaces     [####------] 40%
 Phase 2: Waveform Impl       [########--] 80%
-Phase 3: ModemEngine Refactor[########--] 80%  (Acquisition thread removed!)
+Phase 3: ModemEngine Refactor[#########-] 90%  (TX path unified!)
 Phase 4: Sync Methods        [----------]  0%
 Phase 5: Configuration       [----------]  0%
 Phase 6: Bug Fixes           [######----] 60%  (BUG-002 fixed by StreamingDecoder)
@@ -135,11 +135,13 @@ Phase 6: Bug Fixes           [######----] 60%  (BUG-002 fixed by StreamingDecode
 **Status:** ❌ NOT STARTED
 
 ### 3.3 Refactor TX Path
-- [x] TX uses IWaveform for OFDM_CHIRP (partial)
-- [ ] TX uses IWaveform for all modes
-- [ ] Remove waveform-specific TX code
+- [x] TX uses IWaveform for OFDM_CHIRP
+- [x] TX uses IWaveform for MC_DPSK
+- [x] TX uses IWaveform for OFDM_COX
+- [ ] TX uses IWaveform for OTFS (no OTFSWaveform yet)
+- [ ] Remove legacy TX modulators (cleanup)
 
-**Status:** ⚠️ PARTIAL
+**Status:** ✅ MOSTLY COMPLETE (OTFS pending)
 
 ### 3.4 Refactor RX Path with StreamingDecoder (Replaces RxPipeline)
 - [x] Create `src/gui/modem/rx_pipeline.hpp` (DEPRECATED - has bug)
@@ -297,11 +299,15 @@ Remaining:
    - Removed ~1200 lines of legacy code (acquisitionLoop, processRxBuffer_*, etc.)
    - Mode switches now call streaming_decoder_->reset()
    - All 11 regression tests pass
-5. [ ] Delete RxPipeline (deprecated, no longer used for decoding)
-6. [ ] Verify OFDM_COX CFO correction
-7. [ ] Add OFDM_COX to test_iwaveform
-8. [ ] Create WaveformState class (optional, nice-to-have)
-9. [ ] Simplify ModemEngine
+5. [x] TX Path Unification (Phase 4) - DONE 2026-01-28
+   - transmit() now uses IWaveform for MC_DPSK, OFDM_CHIRP, OFDM_COX
+   - OTFS keeps legacy path (no OTFSWaveform yet)
+   - All 11 regression tests pass
+6. [ ] Delete RxPipeline (deprecated, no longer used for decoding)
+7. [ ] Verify OFDM_COX CFO correction
+8. [ ] Add OFDM_COX to test_iwaveform
+9. [ ] Create WaveformState class (optional, nice-to-have)
+10. [ ] Remove legacy TX modulators (mc_dpsk_modulator_, ofdm_modulator_)
 
 ---
 

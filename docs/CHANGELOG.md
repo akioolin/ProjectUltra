@@ -10,6 +10,39 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-01-28: TX Path Unification (Phase 4)
+
+**What was changed:**
+The TX path in `transmit()` now uses IWaveform abstraction instead of direct modulator calls.
+
+**Before:** 4 separate if-else branches with direct modulator calls:
+- MC-DPSK: `mc_dpsk_modulator_->modulate()` + `chirp_sync_->generate()`
+- OFDM_CHIRP: `OFDMModulator chirp_modulator` + `chirp_sync_->generate()`
+- OFDM_COX: `ofdm_modulator_->generatePreamble()` + `ofdm_modulator_->modulate()`
+- OTFS: `otfs_modulator_->generatePreamble()` + `otfs_modulator_->modulate()`
+
+**After:** Single IWaveform path for MC_DPSK, OFDM_CHIRP, OFDM_COX:
+```cpp
+ensureTxWaveform(active_waveform, tx_modulation, tx_code_rate);
+preamble = active_tx_waveform_->generatePreamble();
+modulated = active_tx_waveform_->modulate(to_modulate);
+```
+
+**OTFS:** Kept legacy path (no OTFSWaveform yet)
+
+**Benefits:**
+- Adding new waveform only requires implementing IWaveform (no TX code changes)
+- Reduced code duplication (~50 lines removed)
+- Consistent TX interface across all waveforms
+
+**Test verification:**
+```bash
+./tests/regression_matrix.sh
+# Expected: ALL TESTS PASSED! (11/11)
+```
+
+---
+
 ## 2026-01-28: Remove Legacy Acquisition Thread
 
 **What was changed:**
