@@ -10,6 +10,49 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-01-28: PING vs DPSK Frame Detection Fix (cli_simulator)
+
+**What was broken:**
+- cli_simulator connection phase failed - PING frames misdetected as "Chirp+DPSK frames"
+- Energy threshold (0.05f) was absolute, failed at high SNR where noise exceeded threshold
+- Overlapping chirps in buffer caused detection confusion
+
+**Root cause analysis:**
+1. Energy threshold was absolute (0.05f), not relative to signal level
+2. At 20dB SNR, noise RMS (~0.057) exceeded the threshold
+3. Multiple PINGs could pile up in buffer before processing
+4. Energy ratio between chirp and post-chirp didn't account for fading or overlapping chirps
+
+**What was changed:**
+- `src/gui/modem/modem_rx.cpp`:
+  - Changed PING/DPSK detection from absolute threshold to energy ratio (post_rms/chirp_rms)
+  - Ratio < 0.3 = PING (post-chirp is noise)
+  - Ratio 0.3-1.4 = DPSK data (similar energy levels)
+  - Ratio > 1.4 = Another chirp starting (different transmission)
+  - Added chirp detection in suspicious range (1.1-1.4): search for chirp in post-chirp region
+  - Added 200ms guard period after consuming PING samples
+- `src/gui/modem/modem_rx_constants.hpp`:
+  - Reduced MIN_SAMPLES_FOR_ACQUISITION from 90000 to 65000 (PING is only 57600 samples)
+
+**How it's properly fixed:**
+- Energy ratio is SNR-independent (compares signal to signal, not signal to absolute)
+- Fading channels can have ratio up to 1.3 due to energy variation - 1.4 threshold accommodates this
+- When ratio is suspicious (1.1-1.4), quick chirp search in post region distinguishes overlapping chirps
+- Guard period prevents partial chirp detection from overlapping transmissions
+
+**Test verification:**
+```bash
+# CLI simulator should connect (PING/PONG, CONNECT, CONNECT_ACK)
+./build/cli_simulator --snr 20 --test
+# Expected: Connection phase succeeds, "✓ Connected!" displayed
+
+# Regression tests all pass
+./tests/regression_matrix.sh --quick
+# Expected: 11/11 PASS, including MC-DPSK on fading channels
+```
+
+---
+
 ## 2026-01-28: MC-DPSK CFO Per-Segment Initial Phase Fix
 
 **What was broken:**

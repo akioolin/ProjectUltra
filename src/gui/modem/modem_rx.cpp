@@ -96,12 +96,50 @@ void ModemEngine::acquisitionLoop() {
 
             if (chirp_end + training_len + ref_symbol_len + 1000 < samples.size()) {
                 // Check energy in the samples after chirp (training sequence)
-                float energy = 0.0f;
-                for (size_t i = chirp_end; i < chirp_end + training_len; i++) {
-                    energy += samples[i] * samples[i];
+                // Compare to chirp energy to make detection SNR-independent
+                // PING = chirp only (post-chirp is noise), DPSK = chirp + data (similar energy)
+
+                // Measure chirp RMS (last 25% of chirp to avoid transients)
+                size_t chirp_measure_start = chirp_start + 3 * chirp_total / 4;
+                size_t chirp_measure_len = chirp_total / 4;
+                float chirp_energy = 0.0f;
+                for (size_t i = chirp_measure_start; i < chirp_measure_start + chirp_measure_len; i++) {
+                    chirp_energy += samples[i] * samples[i];
                 }
-                float rms = std::sqrt(energy / training_len);
-                has_data_after = (rms > 0.05f);  // Threshold for signal presence
+                float chirp_rms = std::sqrt(chirp_energy / chirp_measure_len);
+
+                // Measure post-chirp RMS (training region)
+                float post_energy = 0.0f;
+                for (size_t i = chirp_end; i < chirp_end + training_len; i++) {
+                    post_energy += samples[i] * samples[i];
+                }
+                float post_rms = std::sqrt(post_energy / training_len);
+
+                // Data present if post-chirp energy is similar to chirp energy (30-140%)
+                // PING: post_rms ~ noise floor (much lower than chirp, ratio < 0.3)
+                // DPSK: post_rms ~ chirp_rms (similar signal level, ratio 0.3-1.4)
+                //       Note: On fading channels, ratio can reach 1.3 due to energy variation
+                // Another chirp: post_rms >> chirp_rms (ratio >= 1.4 - different transmission)
+                float energy_ratio = (chirp_rms > 0.001f) ? (post_rms / chirp_rms) : 0.0f;
+                has_data_after = (energy_ratio > 0.3f && energy_ratio < 1.4f);
+
+                // Extra check for suspicious range (1.1-1.4): search for chirp in post region
+                // If we find a strong chirp correlation, it's overlapping chirps, not DPSK data
+                if (has_data_after && energy_ratio > 1.1f) {
+                    // Quick chirp search in post-chirp region
+                    SampleSpan post_span(samples.data() + chirp_end,
+                                         std::min(chirp_total, samples.size() - chirp_end));
+                    auto post_result = chirp_sync_->detectDualChirp(post_span, 0.15f);
+                    if (post_result.success && post_result.up_correlation > 0.5f) {
+                        // Found another chirp starting in post region - treat as PING, not DPSK
+                        has_data_after = false;
+                        LOG_MODEM(INFO, "[%s] Acq: Suspicious ratio %.2f - found chirp in post region (corr=%.3f), treating as PING",
+                                  log_prefix_.c_str(), energy_ratio, post_result.up_correlation);
+                    }
+                }
+
+                LOG_MODEM(DEBUG, "[%s] Acq: chirp_rms=%.4f, post_rms=%.4f, ratio=%.2f, has_data=%d",
+                          log_prefix_.c_str(), chirp_rms, post_rms, energy_ratio, has_data_after);
             }
 
             if (has_data_after) {
@@ -131,8 +169,12 @@ void ModemEngine::acquisitionLoop() {
                 LOG_MODEM(INFO, "[%s] Acquisition: Chirp PING at %d (corr=%.3f, CFO=%.1f Hz)",
                           log_prefix_.c_str(), chirp_start, chirp_corr, cfo_hz);
 
-                if (chirp_end > samples.size()) chirp_end = samples.size();
-                consumeSamples(chirp_end);
+                // Consume chirp samples plus a guard period (200ms) to avoid detecting
+                // partial chirps from overlapping transmissions
+                size_t guard_samples = 48000 / 5;  // 200ms @ 48kHz
+                size_t consume_end = chirp_end + guard_samples;
+                if (consume_end > samples.size()) consume_end = samples.size();
+                consumeSamples(consume_end);
 
                 if (ping_received_callback_) {
                     ping_received_callback_(getCurrentSNR());

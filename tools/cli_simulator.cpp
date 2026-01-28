@@ -460,13 +460,17 @@ private:
         // Debug: show audio flow periodically
         static size_t tick_count = 0;
         static size_t total_alpha_tx = 0, total_bravo_rx = 0;
+        static size_t total_bravo_tx = 0, total_alpha_rx = 0;
         total_alpha_tx += alpha_tx_moved;
         total_bravo_rx += bravo_rx_fed;
-        if (++tick_count % 1000 == 0) {
-            std::cout << "  [TICK " << tick_count << "] pending=" << our_tx_pending_.size()
-                      << ", channel=" << channel_to_virtual_.size()
-                      << ", total_tx=" << total_alpha_tx
-                      << ", total_rx=" << total_bravo_rx << std::endl;
+        total_bravo_tx += bravo_tx_moved;
+        total_alpha_rx += alpha_rx_fed;
+        if (++tick_count % 500 == 0) {
+            std::cout << "  [TICK " << tick_count << "] A_tx=" << total_alpha_tx
+                      << ", B_rx=" << total_bravo_rx
+                      << ", B_tx=" << total_bravo_tx
+                      << ", A_rx=" << total_alpha_rx
+                      << std::endl;
         }
 
         // Tick protocols with actual elapsed time

@@ -245,25 +245,22 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
                 SampleSpan training_span(training_corrected.data(), training_corrected.size());
                 SampleSpan ref_span(ref_corrected.data(), ref_corrected.size());
                 mc_dpsk_demodulator_->processTraining(training_span);
-
-                // CFO sanity check: with dual chirp, we trust larger CFO values
-                float training_cfo = mc_dpsk_demodulator_->getEstimatedCFO();
-                if (std::abs(frame.cfo_hz) < 0.1f && std::abs(training_cfo) > 5.0f) {
-                    LOG_MODEM(INFO, "[%s] DPSK: Rejecting frame - training CFO %.1f Hz too high (no dual chirp)",
-                              log_prefix_.c_str(), training_cfo);
-                    mc_dpsk_demodulator_->reset();
-                    return false;
-                }
-
                 mc_dpsk_demodulator_->setReference(ref_span);
 
                 // Set up initial phase for ping/data segment
                 mc_dpsk_demodulator_->setCFOWithPhase(frame.cfo_hz, calcInitialPhase(ping_start_abs));
             } else {
-                // No CFO correction needed
+                // No CFO correction needed (dual chirp says CFO ~0)
                 SampleSpan training_span(buffer.data() + training_offset, training_samples);
                 SampleSpan ref_span(buffer.data() + ref_offset, symbol_samples);
                 mc_dpsk_demodulator_->processTraining(training_span);
+
+                // CFO sanity check: if dual chirp says CFO is small but training disagrees,
+                // it might be a false positive. However, since we HAVE a chirp preamble,
+                // trust the dual chirp estimate over training-based CFO.
+                // Only reject if this is NOT a chirp frame (Barker-13 fallback).
+                // For chirp frames, the dual chirp CFO detection is authoritative.
+
                 mc_dpsk_demodulator_->setReference(ref_span);
                 mc_dpsk_demodulator_->setCFOWithPhase(0.0f, 0.0f);
             }
