@@ -14,7 +14,7 @@
 | Tool | Purpose | CFO Method | Status |
 |------|---------|------------|--------|
 | `test_iwaveform` | IWaveform interface testing | Hilbert transform (correct) | ✅ WORKING |
-| `cli_simulator` | Full protocol (2 stations) | tx_cfo_hz (BROKEN - BUG-001) | ⚠️ NEEDS FIX |
+| `cli_simulator` | Full protocol (2 stations) | tx_cfo_hz (partial) | ⚠️ CONNECTION OK, DATA needs fix |
 
 **LEGACY tools (to be removed):**
 

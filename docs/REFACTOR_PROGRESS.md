@@ -4,7 +4,7 @@
 
 **Source Plan:** `~/.claude/plans/eager-percolating-naur.md`
 
-**Last Updated:** 2026-01-27
+**Last Updated:** 2026-01-28
 
 ---
 
@@ -214,7 +214,7 @@ Phase 6: Bug Fixes           [####------] 40%
 | Tool | Status | Future |
 |------|--------|--------|
 | **test_iwaveform** | ✅ WORKING | **PRIMARY** - Will become official test tool (rename planned) |
-| **cli_simulator** | ❌ CFO BROKEN | **PRIMARY** - Full protocol testing (needs BUG-001 fix) |
+| **cli_simulator** | ⚠️ CONNECTION OK | **PRIMARY** - Connection phase works (PING/PONG/CONNECT), DATA phase needs RxPipeline fix |
 | test_hf_modem | ⚠️ LEGACY | **DEPRECATE** - Reference only, will be removed |
 | profile_acquisition | ⚠️ UNKNOWN | TBD |
 
@@ -227,10 +227,10 @@ Phase 6: Bug Fixes           [####------] 40%
    - Single-frame and multi-frame testing
    - All waveforms, channels, SNR, CFO combinations
 
-2. `cli_simulator` → Fix CFO, keep for protocol testing
+2. `cli_simulator` → Keep for protocol testing
    - Full protocol flow (PING → CONNECT → DATA → DISCONNECT)
    - Two-station simulation
-   - Needs BUG-001 fix for CFO testing
+   - Connection phase working (2026-01-28), DATA phase needs RxPipeline fix
 
 **Legacy (to be removed):**
 - `test_hf_modem` - Old approach, reference only

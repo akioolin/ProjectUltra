@@ -8,34 +8,33 @@
 
 ## Active Bugs
 
-### BUG-001: cli_simulator CFO Simulation is Broken
+### BUG-001: cli_simulator CFO Simulation is Incomplete
 
-**Status:** OPEN - HIGH PRIORITY
+**Status:** PARTIAL FIX - Connection phase works, DATA phase needs RxPipeline
 **Discovered:** 2026-01-27
+**Updated:** 2026-01-28
 **Location:** `tools/cli_simulator.cpp`
 
 **Description:**
-The `tx_cfo_hz` parameter only shifts the chirp preamble frequency, NOT the OFDM/DPSK data. This means CFO testing through cli_simulator is invalid - the chirp detector sees CFO but the demodulator sees 0 Hz offset.
+The `tx_cfo_hz` parameter only shifts the chirp preamble frequency, NOT the OFDM/DPSK data. However, the connection phase (PING/PONG/CONNECT) now works correctly.
 
-**Root Cause:**
-```cpp
-// In cli_simulator, tx_cfo_hz is passed to:
-chirp_cfg.tx_cfo_hz = tx_cfo_hz;  // Chirp gets CFO ✓
-// But NOT to:
-ofdm_modulator_cfg.tx_cfo_hz     // OFDM data has NO CFO ✗
-```
+**2026-01-28 Fix:**
+Fixed PING vs DPSK detection in `modem_rx.cpp`:
+- Changed from absolute energy threshold to relative ratio (post_rms/chirp_rms)
+- Added chirp search in suspicious range (1.1-1.4) to detect overlapping PINGs
+- Reduced MIN_SAMPLES_FOR_ACQUISITION from 90000 to 65000
+
+**Current Status:**
+- ✅ Connection phase works: PING/PONG, CONNECT, CONNECT_ACK, mode negotiation
+- ❌ DATA phase doesn't work (uses RxPipeline for connected mode, separate issue)
 
 **Impact:**
-- cli_simulator cannot be used to verify CFO correction
-- Full protocol testing with CFO is not possible
-- Only test_iwaveform.cpp has correct CFO simulation (via Hilbert transform)
+- cli_simulator can test connection establishment
+- Full data transfer testing needs RxPipeline fix (BUG-002)
+- Use `test_iwaveform` for CFO testing of individual frames
 
 **Workaround:**
 Use `test_iwaveform` for CFO testing instead of `cli_simulator`.
-
-**Fix Plan:**
-Option A: Apply Hilbert-based CFO shift in `applyChannel()` function
-Option B: Pass `tx_cfo_hz` to all modulators consistently
 
 ---
 
