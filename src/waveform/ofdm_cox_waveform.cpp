@@ -1,5 +1,7 @@
 // OFDMNvisWaveform - Implementation
 
+#define _USE_MATH_DEFINES
+#include <cmath>
 #include "ofdm_cox_waveform.hpp"
 #include "ultra/logging.hpp"
 #include <sstream>
@@ -96,32 +98,32 @@ Samples OFDMNvisWaveform::modulate(const Bytes& encoded_data) {
 }
 
 bool OFDMNvisWaveform::detectSync(SampleSpan samples, SyncResult& result, float threshold) {
-    // Use the optimized streaming process() which does fast Schmidl-Cox detection
-    // This finds sync AND demodulates in one pass
+    // Use Schmidl-Cox detection to find sync and CFO (like CHIRP does with chirp detection)
+    // This does NOT demodulate - it just finds where training starts and estimates CFO
     if (!demodulator_) {
         return false;
     }
 
-    // Feed samples to the streaming demodulator
-    bool has_data = demodulator_->process(samples);
+    size_t lts_position = 0;
+    float cfo_hz = 0.0f;
 
-    if (demodulator_->isSynced()) {
+    // searchForSync finds STS, estimates CFO, returns position where LTS starts
+    bool found = demodulator_->searchForSync(samples, lts_position, cfo_hz, threshold);
+
+    if (found) {
         result.detected = true;
-        result.start_sample = static_cast<int>(demodulator_->getLastSyncOffset());
-        result.cfo_hz = demodulator_->getFrequencyOffset();
-        result.snr_estimate = demodulator_->getEstimatedSNR();
+        result.start_sample = static_cast<int>(lts_position);
+        result.cfo_hz = cfo_hz;
+        result.snr_estimate = 0.0f;  // Will be estimated during process()
         result.has_training = true;
-        result.correlation = 0.7f;
+        result.correlation = 0.9f;
 
-        cfo_hz_ = result.cfo_hz;
+        cfo_hz_ = cfo_hz;
+        synced_ = true;
+        training_start_sample_ = lts_position;
 
-        // If we have data, grab the soft bits now (process() already demodulated)
-        if (has_data) {
-            soft_bits_ = demodulator_->getSoftBits();
-        }
-
-        LOG_MODEM(INFO, "OFDMNvisWaveform::detectSync: synced at %d, CFO=%.1f Hz, has_data=%d",
-                  result.start_sample, result.cfo_hz, has_data ? 1 : 0);
+        LOG_MODEM(INFO, "OFDMNvisWaveform::detectSync: found sync, LTS at %zu, CFO=%.1f Hz",
+                  lts_position, cfo_hz);
         return true;
     }
 
@@ -133,16 +135,39 @@ bool OFDMNvisWaveform::process(SampleSpan samples) {
         return false;
     }
 
-    // If we already have soft bits from detectSync(), return them
+    // If we already have soft bits, return them
     if (!soft_bits_.empty()) {
         return true;
     }
 
-    // Otherwise continue processing (for multi-codeword frames)
-    bool ready = demodulator_->process(samples);
+    // Calculate the initial CFO phase based on elapsed samples since audio start
+    // (same approach as OFDM_CHIRP)
+    // The CFO has been accumulating since sample 0, so at training_start_sample_:
+    //   phase = -2π × CFO × training_start_sample_ / sample_rate
+    float initial_phase_rad = -2.0f * M_PI * cfo_hz_ * training_start_sample_ / config_.sample_rate;
+
+    // Wrap to [-π, π]
+    while (initial_phase_rad > M_PI) initial_phase_rad -= 2.0f * M_PI;
+    while (initial_phase_rad < -M_PI) initial_phase_rad += 2.0f * M_PI;
+
+    LOG_MODEM(INFO, "OFDMNvisWaveform::process: CFO=%.1f Hz, training_start=%zu, initial_phase=%.1f°, samples=%zu",
+              cfo_hz_, training_start_sample_, initial_phase_rad * 180.0f / M_PI, samples.size());
+
+    // Pass CFO and initial phase to demodulator (same as OFDM_CHIRP)
+    demodulator_->setFrequencyOffsetWithPhase(cfo_hz_, initial_phase_rad);
+
+    // Use processPresynced - samples should start at LTS position (same as OFDM_CHIRP)
+    // 2 = number of LTS training symbols for channel estimation
+    bool ready = demodulator_->processPresynced(samples, 2);
 
     if (ready) {
-        soft_bits_ = demodulator_->getSoftBits();
+        // Retrieve all soft bits
+        soft_bits_.clear();
+        while (demodulator_->hasPendingData()) {
+            auto chunk = demodulator_->getSoftBits();
+            if (chunk.empty()) break;
+            soft_bits_.insert(soft_bits_.end(), chunk.begin(), chunk.end());
+        }
     }
 
     return ready;
@@ -157,12 +182,14 @@ void OFDMNvisWaveform::reset() {
         demodulator_->reset();
     }
     soft_bits_.clear();
+    synced_ = false;
+    training_start_sample_ = 0;
     // NOTE: CFO is intentionally preserved across reset() for continuous tracking
     // Use setFrequencyOffset(0) to explicitly clear if needed
 }
 
 bool OFDMNvisWaveform::isSynced() const {
-    return demodulator_ && demodulator_->isSynced();
+    return synced_ || (demodulator_ && demodulator_->isSynced());
 }
 
 bool OFDMNvisWaveform::hasData() const {

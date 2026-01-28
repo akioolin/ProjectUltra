@@ -579,6 +579,7 @@ bool StreamingDecoder::detectAndDecode() {
     // Advance past this frame
     {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
+        size_t old_search = search_pos_;
         size_t advance = sync_result.start_sample + min_frame_samples;
         search_pos_ = (search_pos_ + advance) % MAX_BUFFER_SAMPLES;
         // Also advance read_pos to release consumed samples
@@ -586,8 +587,8 @@ bool StreamingDecoder::detectAndDecode() {
         read_pos_ = search_pos_;
         trimOldSamples(MIN_SAMPLES_FOR_SEARCH * 2);
 
-        LOG_MODEM(DEBUG, "StreamingDecoder: Advanced past frame, search=%zu, read=%zu",
-                  search_pos_, read_pos_);
+        LOG_MODEM(INFO, "StreamingDecoder: search_pos %zu -> %zu (advance=%zu = start_sample=%d + min_frame=%zu)",
+                  old_search, search_pos_, advance, sync_result.start_sample, min_frame_samples);
     }
 
     return result.success;

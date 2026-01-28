@@ -568,26 +568,39 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 LOG_SYNC(DEBUG, "LTS phase check: is_differential=%d, use_pilots=%d",
                         is_differential, impl_->config.use_pilots);
 
-                // Consume preamble
+                // Consume preamble: from start up through LTS
+                // Data starts after: refined_lts_start + 2 LTS symbols
                 size_t consume = refined_lts_start + 2 * preamble_symbol_len + impl_->manual_timing_offset;
                 LOG_SYNC(DEBUG, "Consume calc: refined_lts=%zu + 2*preamble_sym=%zu + offset=%d = %zu",
                         refined_lts_start, 2 * preamble_symbol_len, impl_->manual_timing_offset, consume);
                 impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
                                        impl_->rx_buffer.begin() + consume);
 
-                // Transition to SYNCED
+                // Transition to SYNCED state
                 impl_->state.store(Impl::State::SYNCED);
                 impl_->synced_symbol_count.store(0);
                 impl_->mixer.reset();
-                impl_->dbpsk_prev_equalized.clear();
 
+                // Reset channel estimate to unity - will be updated by pilot tracking
+                std::fill(impl_->channel_estimate.begin(), impl_->channel_estimate.end(), Complex(1, 0));
+                impl_->snr_symbol_count = 0;
+                impl_->estimated_snr_linear = 1.0f;
+                impl_->noise_variance = 0.1f;
+                impl_->prev_pilot_phases.clear();
+
+                // Reset adaptive equalizer
+                std::fill(impl_->lms_weights.begin(), impl_->lms_weights.end(), Complex(1, 0));
+                std::fill(impl_->last_decisions.begin(), impl_->last_decisions.end(), Complex(0, 0));
+                std::fill(impl_->rls_P.begin(), impl_->rls_P.end(), 1.0f);
+
+                impl_->dbpsk_prev_equalized.clear();
                 if (!is_differential || impl_->config.use_pilots) {
                     impl_->carrier_phase_initialized = false;
                     impl_->carrier_phase_correction = Complex(1, 0);
                 }
                 impl_->dqpsk_skip_first_symbol = false;
                 impl_->timing_offset_samples = 0.0f;
-                LOG_SYNC(INFO, "Coherent mode: timing_offset=0 (LTS gives exact timing)");
+                LOG_SYNC(INFO, "Schmidl-Cox sync complete, CFO=%.1f Hz, ready for data", coarse_cfo);
             }
         } else {
             // No preamble found - trim old data

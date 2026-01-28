@@ -103,6 +103,8 @@ private:
     // State
     float cfo_hz_ = 0.0f;
     std::vector<float> soft_bits_;
+    size_t training_start_sample_ = 0;  // Position where LTS starts (for CFO phase calc)
+    bool synced_ = false;
 };
 
 } // namespace ultra
