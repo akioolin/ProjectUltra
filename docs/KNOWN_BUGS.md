@@ -40,36 +40,32 @@ Use `test_iwaveform` for CFO testing instead of `cli_simulator`.
 
 ### BUG-002: RxPipeline Chirp Detection Fails
 
-**Status:** OPEN - HIGH PRIORITY
+**Status:** FIXED - 2026-01-28 (StreamingDecoder created)
 **Discovered:** 2026-01-26
 **Location:** `src/gui/modem/rx_pipeline.cpp`
 
 **Description:**
 RxPipeline was created to provide a clean IWaveform-based RX path, but chirp detection fails when used through the pipeline. Works fine when IWaveform is used directly (test_iwaveform.cpp).
 
-**Evidence:**
-- Commits `398cbd0` and `ffc979c` are marked "WIP" for this issue
-- test_iwaveform works 100% by calling IWaveform directly
-- RxPipeline integration in ModemEngine fails
+**Root Cause (FOUND):**
+RxPipeline had incorrect IWaveform call sequence:
+- Line 147: `waveform_->setFrequencyOffset(sync_result.cfo_hz);` - CFO applied
+- Line 172: `waveform_->reset();` - CFO CLEARED (violates INV-WAVE-002!)
+- Line 173: `waveform_->process(process_span);` - Process with wrong CFO
 
-**Root Cause:**
-Unknown - needs investigation. Possibly:
-- Buffer management issues
-- State not being reset properly between frames
-- Timing/threading issues when integrated into ModemEngine
+**Fix:**
+Created `StreamingDecoder` class with correct call sequence:
+- reset() → detectSync() → setFrequencyOffset() → process()
 
-**Impact:**
-- ModemEngine cannot use the new IWaveform interface for RX
-- Still using legacy `processRxBuffer_*` methods
-- Refactor is blocked on this
+See `docs/CHANGELOG.md` entry "2026-01-28: StreamingDecoder Created" for details.
 
-**Workaround:**
-ModemEngine uses old code paths. IWaveform works for isolated testing.
+**Files:**
+- `src/gui/modem/streaming_decoder.hpp`
+- `src/gui/modem/streaming_decoder.cpp`
 
-**Fix Plan:**
-1. Add detailed logging to RxPipeline
-2. Compare buffer contents between working (test_iwaveform) and failing (RxPipeline) paths
-3. Identify where they diverge
+**Next steps:**
+- Integrate StreamingDecoder into ModemEngine
+- Delete RxPipeline after integration verified
 
 ---
 

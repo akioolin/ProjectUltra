@@ -45,18 +45,12 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
 
     waveform_mode_ = mode;
 
-    // Reset the appropriate demodulator for the new mode
-    // Clear RX state when switching modes
-    rx_frame_state_.clear();
-    detected_frame_queue_.clear();
-    {
-        std::lock_guard<std::mutex> lock(rx_buffer_mutex_);
-        rx_sample_buffer_.clear();
+    // Reset StreamingDecoder when switching modes
+    if (streaming_decoder_) {
+        streaming_decoder_->reset();
     }
 
-    // ========================================================================
-    // NEW: Switch RxPipeline to use the new waveform
-    // ========================================================================
+    // Switch RxPipeline to use the new waveform (when connected)
     if (connected_) {
         switchRxWaveform(mode);
     }
@@ -134,13 +128,10 @@ void ModemEngine::setConnected(bool connected) {
         handshake_complete_ = false;
         use_connected_waveform_once_ = false;  // Clear any leftover flag
 
-        // CRITICAL: Clear RX buffer and state when entering connected state
+        // CRITICAL: Reset StreamingDecoder when entering connected state
         // Old samples from DPSK handshake would corrupt OFDM preamble detection
-        rx_frame_state_.clear();
-        detected_frame_queue_.clear();
-        {
-            std::lock_guard<std::mutex> lock(rx_buffer_mutex_);
-            rx_sample_buffer_.clear();
+        if (streaming_decoder_) {
+            streaming_decoder_->reset();
         }
 
         // Configure OFDM modulator/demodulator to match data_modulation_
@@ -176,18 +167,13 @@ void ModemEngine::setConnected(bool connected) {
         decoder_->setRate(CodeRate::R1_4);
         ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(rx_config);
 
-        // CRITICAL: Clear RX state so acquisition thread can detect new PINGs
-        rx_frame_state_.clear();
-        detected_frame_queue_.clear();
-        {
-            std::lock_guard<std::mutex> lock(rx_buffer_mutex_);
-            rx_sample_buffer_.clear();
+        // CRITICAL: Reset StreamingDecoder so it can detect new PINGs
+        if (streaming_decoder_) {
+            streaming_decoder_->reset();
         }
         dpsk_demodulator_->reset();
 
-        // ========================================================================
-        // NEW: Clear RxPipeline when disconnecting
-        // ========================================================================
+        // Clear RxPipeline when disconnecting
         if (rx_pipeline_) {
             rx_pipeline_->clearBuffer();
             rx_pipeline_->setDataMode(CodeRate::R1_4, false);

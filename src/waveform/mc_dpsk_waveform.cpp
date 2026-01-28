@@ -28,6 +28,15 @@ void MCDPSKWaveform::initComponents() {
     modulator_ = std::make_unique<MultiCarrierDPSKModulator>(config_);
     demodulator_ = std::make_unique<MultiCarrierDPSKDemodulator>(config_);
     chirp_sync_ = std::make_unique<sync::ChirpSync>(config_.getChirpConfig());
+
+    // Debug: print config
+    auto freqs = config_.getCarrierFreqs();
+    fprintf(stderr, "[MCDPSKWaveform] Created with %d carriers, samples_per_sym=%d, freqs: ",
+            config_.num_carriers, config_.samples_per_symbol);
+    for (int i = 0; i < std::min(4, config_.num_carriers); i++) {
+        fprintf(stderr, "%.0f ", freqs[i]);
+    }
+    fprintf(stderr, "...\n");
 }
 
 WaveformCapabilities MCDPSKWaveform::getCapabilities() const {
@@ -116,16 +125,23 @@ bool MCDPSKWaveform::detectSync(SampleSpan samples, SyncResult& result, float th
         last_cfo_ = chirp_result.cfo_hz;
 
         // Calculate where TRAINING starts (process() needs training+ref+data)
-        // Layout: [CHIRP][GAP][DOWN-CHIRP][GAP][TRAINING][REF][DATA...]
-        //                                      ^-- start_sample points here
-        // processGotChirp() expects preamble (training+ref) followed by data
+        // Layout: [UP-CHIRP][GAP][DOWN-CHIRP][GAP][TRAINING][REF][DATA...]
+        //                                         ^-- start_sample points here
+        //
+        // IMPORTANT: Use down_chirp position for training_start calculation!
+        // With CFO, up_chirp and down_chirp positions shift in OPPOSITE directions:
+        //   up_chirp: shifts by -CFO × cfo_to_samples
+        //   down_chirp: shifts by +CFO × cfo_to_samples
+        // Using up_chirp_start + fixed_offset gives growing error with CFO.
+        // Using down_chirp_start gives more accurate training position.
+        // (Same approach as OFDMChirpWaveform)
         size_t chirp_samples = chirp_sync_->getChirpSamples();
         size_t gap_samples = static_cast<size_t>(config_.sample_rate * config_.getChirpConfig().gap_ms / 1000.0f);
 
         if (config_.use_dual_chirp) {
-            // After dual chirp: training starts after second gap
-            result.start_sample = chirp_result.up_chirp_start +
-                                  2 * chirp_samples + 2 * gap_samples;
+            // Training starts after down chirp + gap
+            result.start_sample = chirp_result.down_chirp_start +
+                                  chirp_samples + gap_samples;
         } else {
             // Single chirp
             result.start_sample = chirp_result.up_chirp_start +
@@ -133,8 +149,9 @@ bool MCDPSKWaveform::detectSync(SampleSpan samples, SyncResult& result, float th
         }
         // NOTE: Do NOT add training_samples + ref_samples - process() needs them
 
-        LOG_MODEM(INFO, "MCDPSKWaveform: Chirp detected at %d, CFO=%.1f Hz, training_start=%d",
-                  chirp_result.up_chirp_start, chirp_result.cfo_hz, result.start_sample);
+        LOG_MODEM(INFO, "MCDPSKWaveform: Chirp detected at up=%d, down=%d, CFO=%.1f Hz, training_start=%d",
+                  chirp_result.up_chirp_start, chirp_result.down_chirp_start,
+                  chirp_result.cfo_hz, result.start_sample);
     }
 
     return result.detected;
@@ -144,6 +161,25 @@ bool MCDPSKWaveform::process(SampleSpan samples) {
     if (!demodulator_) {
         return false;
     }
+
+    // Debug: Check signal energy at different positions
+    // Training should be at start (samples[0]), ref at training_end, data after
+    size_t training_samples = config_.training_symbols * config_.samples_per_symbol;
+    size_t ref_samples = config_.samples_per_symbol;
+
+    auto calcRMS = [&](size_t start, size_t len) {
+        float e = 0.0f;
+        for (size_t i = start; i < start + len && i < samples.size(); i++) {
+            e += samples[i] * samples[i];
+        }
+        return std::sqrt(e / std::min(len, samples.size() - start));
+    };
+
+    fprintf(stderr, "[MC-DPSK] process: samples=%zu, training=%zu, ref=%zu\n",
+            samples.size(), training_samples, ref_samples);
+    fprintf(stderr, "[MC-DPSK] RMS: training[0]=%f, ref[%zu]=%f, data[%zu]=%f\n",
+            calcRMS(0, 512), training_samples, calcRMS(training_samples, 512),
+            training_samples + ref_samples, calcRMS(training_samples + ref_samples, 512));
 
     // Tell demodulator that chirp was already detected externally via detectSync()
     // This puts it in GOT_CHIRP state so it processes data directly without

@@ -116,15 +116,45 @@ ModemEngine::ModemEngine() {
 
     LOG_MODEM(INFO, "[%s] RxPipeline + IWaveforms initialized", log_prefix_.c_str());
 
-    // Start RX threads (acquisition + decode)
-    startAcquisitionThread();
+    // ========================================================================
+    // NEW: Initialize StreamingDecoder (replaces RxPipeline + acquisition thread)
+    // ========================================================================
+    streaming_decoder_ = std::make_unique<StreamingDecoder>();
+
+    // Set callbacks to wire into existing ModemEngine callbacks
+    streaming_decoder_->setFrameCallback([this](const DecodeResult& result) {
+        if (result.success && !result.frame_data.empty()) {
+            deliverFrame(result.frame_data);
+            notifyFrameParsed(result.frame_data, result.frame_type);
+        }
+        // Update stats
+        updateStats([&](LoopbackStats& s) {
+            s.snr_db = result.snr_db;
+            s.synced = result.success;
+        });
+        // Save peer CFO for future frames
+        if (std::abs(result.cfo_hz) > 0.1f) {
+            peer_cfo_hz_ = result.cfo_hz;
+        }
+        last_rx_complete_time_ = std::chrono::steady_clock::now();
+    });
+
+    streaming_decoder_->setPingCallback([this](float snr_db, float cfo_hz) {
+        if (ping_received_callback_) {
+            ping_received_callback_(snr_db);
+        }
+        updateStats([](LoopbackStats& s) { s.frames_received++; });
+        last_rx_complete_time_ = std::chrono::steady_clock::now();
+    });
+
+    LOG_MODEM(INFO, "[%s] StreamingDecoder initialized", log_prefix_.c_str());
+
+    // Start RX decode thread (StreamingDecoder handles acquisition)
     startRxDecodeThread();
 }
 
 ModemEngine::~ModemEngine() {
-    // Stop threads in reverse order
     stopRxDecodeThread();
-    stopAcquisitionThread();
 }
 
 // ============================================================================
@@ -827,36 +857,15 @@ std::vector<std::complex<float>> ModemEngine::getConstellationSymbols() const {
 }
 
 void ModemEngine::reset() {
-    // Clear sample buffer
-    {
-        std::lock_guard<std::mutex> lock(rx_buffer_mutex_);
-        rx_sample_buffer_.clear();
-    }
-
     std::lock_guard<std::mutex> lock(rx_mutex_);
     std::queue<Bytes> empty;
     std::swap(rx_data_queue_, empty);
 
     ofdm_demodulator_->reset();
     adaptive_.reset();
-
-    // Reset codeword accumulation state
-    ofdm_accumulated_soft_bits_.clear();
-    ofdm_expected_codewords_ = 0;
-    ofdm_chirp_found_ = false;
-    dpsk_accumulated_soft_bits_.clear();
-    dpsk_expected_codewords_ = 0;
-    otfs_accumulated_soft_bits_.clear();
-    otfs_expected_codewords_ = 0;
-
-    // Reset RX state and clear queues
-    rx_frame_state_.clear();
-    detected_frame_queue_.clear();
     use_connected_waveform_once_ = false;
 
-    // ========================================================================
-    // NEW: Reset RxPipeline and IWaveforms
-    // ========================================================================
+    // Reset RxPipeline and IWaveforms
     if (rx_pipeline_) {
         rx_pipeline_->clearBuffer();
         rx_pipeline_->reset();
@@ -864,6 +873,11 @@ void ModemEngine::reset() {
     if (rx_waveform_ofdm_) rx_waveform_ofdm_->reset();
     if (rx_waveform_ofdm_chirp_) rx_waveform_ofdm_chirp_->reset();
     if (rx_waveform_mc_dpsk_) rx_waveform_mc_dpsk_->reset();
+
+    // Reset StreamingDecoder (primary decoder)
+    if (streaming_decoder_) {
+        streaming_decoder_->reset();
+    }
 
     // Reset carrier sense
     channel_energy_.store(0.0f);

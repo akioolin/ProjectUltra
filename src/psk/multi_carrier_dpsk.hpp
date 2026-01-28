@@ -581,28 +581,32 @@ private:
             size_t training_start = chirp_offset;  // 0 if external chirp, chirp_samples_ otherwise
             SampleSpan train_span(sample_buffer_.data() + training_start, training_samples_);
 
-            // If we have good CFO from chirp, save it and restore after training
-            // (processTraining adds residual, which can be wrong)
+            // If external chirp detection was used, ALWAYS trust the chirp CFO
+            // (processTraining's CFO estimate is unreliable - it can give spurious values
+            // even when processing correct training samples, especially at low SNR)
+            // The dual chirp CFO measurement is more robust.
             float saved_cfo = cfo_hz_;
-            bool has_chirp_cfo = external_chirp_detected_ && std::abs(dual_chirp_cfo) > 0.1f;
 
             processTraining(train_span);
             fprintf(stderr, "[MC-DPSK-DEMOD] after processTraining: cfo=%.1f (was %.1f)\n", cfo_hz_, saved_cfo);
 
-            if (has_chirp_cfo) {
+            if (external_chirp_detected_) {
                 // Restore chirp CFO - it's more accurate than training estimate
+                // even when chirp CFO is ~0 Hz
                 cfo_hz_ = saved_cfo;
-                fprintf(stderr, "[MC-DPSK-DEMOD] restored chirp CFO=%.1f\n", cfo_hz_);
+                fprintf(stderr, "[MC-DPSK-DEMOD] restored chirp CFO=%.1f (external chirp detected)\n", cfo_hz_);
             }
 
             // CFO sanity check: only reject if NO dual chirp CFO but high training CFO
-            if (std::abs(dual_chirp_cfo) < 0.1f && std::abs(cfo_hz_) > 5.0f) {
+            // Skip this check when external chirp detection was used - the chirp detector
+            // already validated with good correlation, so trust it even with zero CFO
+            if (!external_chirp_detected_ &&
+                std::abs(dual_chirp_cfo) < 0.1f && std::abs(cfo_hz_) > 5.0f) {
                 // False positive - reset and keep searching
-                size_t consume = external_chirp_detected_ ? training_samples_ : chirp_samples_;
+                size_t consume = chirp_samples_;  // Internal detection only
                 sample_buffer_.erase(sample_buffer_.begin(),
                                     sample_buffer_.begin() + consume);
                 state_ = State::IDLE;
-                external_chirp_detected_ = false;
                 return false;
             }
         }

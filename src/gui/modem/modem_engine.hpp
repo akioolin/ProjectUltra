@@ -15,7 +15,8 @@
 #include "../adaptive_mode.hpp"
 #include "protocol/frame_v2.hpp"  // v2::FrameType
 #include "waveform/waveform_interface.hpp"  // IWaveform abstraction
-#include "rx_pipeline.hpp"  // RxPipeline for streaming RX
+#include "rx_pipeline.hpp"  // RxPipeline for streaming RX (DEPRECATED)
+#include "streaming_decoder.hpp"  // StreamingDecoder - replaces RxPipeline
 #include <memory>
 #include <vector>
 #include <queue>
@@ -157,7 +158,15 @@ public:
     // MC-DPSK configuration
     int getMCDPSKCarriers() const { return mc_dpsk_config_.num_carriers; }
     float getMCDPSKThroughput() const { return mc_dpsk_config_.getRawBitRate() * 0.25f; } // R1/4 FEC
-    void setMCDPSKCarriers(int num_carriers) { mc_dpsk_config_.num_carriers = num_carriers; }
+    void setMCDPSKCarriers(int num_carriers) {
+        mc_dpsk_config_.num_carriers = num_carriers;
+        // Recreate TX/RX modulators with new carrier count
+        mc_dpsk_modulator_ = std::make_unique<MultiCarrierDPSKModulator>(mc_dpsk_config_);
+        mc_dpsk_demodulator_ = std::make_unique<MultiCarrierDPSKDemodulator>(mc_dpsk_config_);
+        if (streaming_decoder_) {
+            streaming_decoder_->setMCDPSKCarriers(num_carriers);
+        }
+    }
 
     // Interleaving control
     void setInterleavingEnabled(bool enabled) { interleaving_enabled_ = enabled; }
@@ -222,10 +231,21 @@ private:
     std::unique_ptr<IWaveform> rx_waveform_mc_dpsk_;   // MC-DPSK (Chirp + DPSK)
 
     // RxPipeline handles streaming decode (buffer, sync, demod, LDPC)
+    // DEPRECATED: Being replaced by StreamingDecoder
     std::unique_ptr<RxPipeline> rx_pipeline_;
 
     // Current active waveform for connected mode RX
     IWaveform* active_rx_waveform_ = nullptr;
+
+    // ========================================================================
+    // NEW: StreamingDecoder (replaces RxPipeline + acquisition thread)
+    // ========================================================================
+    // StreamingDecoder handles BOTH connected and disconnected modes:
+    // - Circular buffer with bounded size
+    // - Sliding window chirp detection
+    // - Correct IWaveform call sequence (fixes BUG-002)
+    // - Thread-safe with condition variable
+    std::unique_ptr<StreamingDecoder> streaming_decoder_;
 
     // Helper to switch waveform when mode changes
     void switchRxWaveform(protocol::WaveformMode mode);
@@ -233,28 +253,6 @@ private:
     // ========================================================================
     // RX ARCHITECTURE
     // ========================================================================
-
-    // Sample buffer (feedAudio writes directly here, threads read from here)
-    std::vector<float> rx_sample_buffer_;
-    size_t total_samples_fed_ = 0;          // Absolute count for CFO phase calculation
-    size_t samples_consumed_ = 0;           // Samples removed from buffer (for absolute position)
-    mutable std::mutex rx_buffer_mutex_;
-
-    // Frame queue (acquisition -> RX)
-    FrameQueue detected_frame_queue_;
-
-    // RX thread state
-    RxFrameState rx_frame_state_;
-
-    // Acquisition thread
-    std::thread acquisition_thread_;
-    std::atomic<bool> acquisition_running_{false};
-    std::condition_variable acquisition_cv_;
-    std::mutex acquisition_mutex_;
-
-    void acquisitionLoop();
-    void startAcquisitionThread();
-    void stopAcquisitionThread();
 
     // RX/Decode thread
     std::thread rx_decode_thread_;
@@ -267,33 +265,9 @@ private:
     void stopRxDecodeThread();
 
     // RX decode helpers (implemented in modem_rx_decode.cpp)
-    bool rxDecodeDPSK(const DetectedFrame& frame);
-    bool rxDecodeOFDM();
-    bool detectPing(const std::vector<float>& soft_bits);
-    bool waitForSamples(size_t required);
-    std::vector<float> deinterleaveCodewords(const std::vector<float>& soft_bits);
     void deliverFrame(const Bytes& frame_data);
     void notifyFrameParsed(const Bytes& frame_data, protocol::v2::FrameType frame_type);
     void updateStats(std::function<void(LoopbackStats&)> updater);
-
-    // OFDM multi-codeword accumulation
-    std::vector<float> ofdm_accumulated_soft_bits_;
-    int ofdm_expected_codewords_ = 0;
-
-    // OFDM_CHIRP state (chirp-based timing sync + OFDM demodulation)
-    bool ofdm_chirp_found_ = false;
-
-    // DPSK multi-codeword accumulation (follows same pattern as OFDM)
-    std::vector<float> dpsk_accumulated_soft_bits_;
-    int dpsk_expected_codewords_ = 0;
-
-    // OTFS multi-codeword accumulation (1 OTFS frame = 1 codeword)
-    std::vector<float> otfs_accumulated_soft_bits_;
-    int otfs_expected_codewords_ = 0;
-
-    // Multi-detect rate limiting
-    size_t last_multidetect_buffer_size_ = 0;
-    static constexpr size_t MULTIDETECT_MIN_NEW_SAMPLES = 4800;
 
     // Buffer limit
     static constexpr size_t MAX_PENDING_SAMPLES = 960000;
@@ -343,13 +317,6 @@ private:
 
     // IWaveform TX helper - ensures active_tx_waveform_ is configured for the given mode
     void ensureTxWaveform(protocol::WaveformMode mode, Modulation mod, CodeRate rate);
-    std::vector<float> getBufferSnapshot() const;
-    size_t getBufferSize() const;
-    void consumeSamples(size_t count);
-    void processRxBuffer_OFDM();
-    void processRxBuffer_OTFS();
-    void processRxBuffer_DPSK();
-    void processRxBuffer_OFDM_CHIRP();
 };
 
 } // namespace gui

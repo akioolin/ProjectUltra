@@ -8,15 +8,15 @@
 
 ---
 
-## Overall Progress: ~40% Complete
+## Overall Progress: ~65% Complete
 
 ```
 Phase 1: Core Interfaces     [####------] 40%
 Phase 2: Waveform Impl       [########--] 80%
-Phase 3: ModemEngine Refactor[##--------] 20%
+Phase 3: ModemEngine Refactor[########--] 80%  (Acquisition thread removed!)
 Phase 4: Sync Methods        [----------]  0%
 Phase 5: Configuration       [----------]  0%
-Phase 6: Bug Fixes           [####------] 40%
+Phase 6: Bug Fixes           [######----] 60%  (BUG-002 fixed by StreamingDecoder)
 ```
 
 ---
@@ -141,16 +141,29 @@ Phase 6: Bug Fixes           [####------] 40%
 
 **Status:** ⚠️ PARTIAL
 
-### 3.4 Refactor RX Path with RxPipeline
-- [x] Create `src/gui/modem/rx_pipeline.hpp`
-- [x] Create `src/gui/modem/rx_pipeline.cpp`
-- [x] Implement process() with template method
-- [ ] Fix chirp detection issues (BUG-002)
+### 3.4 Refactor RX Path with StreamingDecoder (Replaces RxPipeline)
+- [x] Create `src/gui/modem/rx_pipeline.hpp` (DEPRECATED - has bug)
+- [x] Create `src/gui/modem/rx_pipeline.cpp` (DEPRECATED - has bug)
+- [x] Create `src/gui/modem/streaming_decoder.hpp` (NEW - fixes BUG-002)
+- [x] Create `src/gui/modem/streaming_decoder.cpp` (NEW - fixes BUG-002)
+- [x] Sliding window search (like test_iwaveform)
+- [x] Correct IWaveform call sequence (reset, detectSync, setFrequencyOffset, process)
+- [x] Circular buffer with bounded size
+- [x] Thread-safe with condition variable
+- [x] Compiles and passes regression tests
 - [ ] Integrate into ModemEngine
 - [ ] Replace processRxBuffer_* methods
+- [ ] Delete RxPipeline (after integration verified)
 
-**Status:** ⚠️ EXISTS BUT BUGGY
-**Blocked by:** BUG-002
+**Status:** ✅ COMPLETE (StreamingDecoder is primary, acquisition thread removed)
+**Notes:** StreamingDecoder is now the ONLY decoder (2026-01-28).
+- feedAudio() only feeds to StreamingDecoder
+- rxDecodeLoop() only uses StreamingDecoder
+- Acquisition thread removed (~1200 lines of legacy code deleted)
+- All 11 regression tests pass
+
+**Bug Fix:** RxPipeline called reset() AFTER setFrequencyOffset(), violating INV-WAVE-002.
+         StreamingDecoder uses correct order: reset() → detectSync() → setFrequencyOffset() → process()
 
 ---
 
@@ -263,23 +276,32 @@ Phase 6: Bug Fixes           [####------] 40%
 
 ## Blocking Issues
 
-These must be fixed before continuing refactor:
+~~1. **BUG-002: RxPipeline chirp detection** - FIXED by StreamingDecoder (2026-01-28)~~
 
-1. **BUG-002: RxPipeline chirp detection** - Blocks ModemEngine integration
-2. **BUG-003: Acquisition routing** - Blocks multi-waveform RX
+Remaining:
+1. **BUG-003: Acquisition routing** - Not a real issue (use connection state, see plan)
 
 ---
 
 ## Next Steps (Priority Order)
 
-1. [ ] Debug RxPipeline chirp detection (BUG-002)
-2. [ ] Verify OFDM_COX CFO correction
-3. [ ] Add OFDM_COX to test_iwaveform
-4. [ ] Fix cli_simulator CFO (BUG-001)
-5. [ ] Integrate RxPipeline into ModemEngine
-6. [ ] Replace processRxBuffer_* methods
-7. [ ] Create WaveformState class
-8. [ ] Simplify ModemEngine
+1. [x] Create StreamingDecoder (replaces RxPipeline, fixes BUG-002) - DONE 2026-01-28
+2. [x] Integrate StreamingDecoder into ModemEngine - DONE 2026-01-28
+   - feedAudio() feeds to both StreamingDecoder AND legacy path (parallel)
+   - rxDecodeLoop() checks StreamingDecoder for frames
+   - All 11 regression tests pass
+3. [x] **StreamingDecoder is now PRIMARY decoder** - DONE 2026-01-28
+   - feedAudio() only feeds to StreamingDecoder
+   - rxDecodeLoop() only uses StreamingDecoder
+4. [x] Remove acquisition thread - DONE 2026-01-28
+   - Removed ~1200 lines of legacy code (acquisitionLoop, processRxBuffer_*, etc.)
+   - Mode switches now call streaming_decoder_->reset()
+   - All 11 regression tests pass
+5. [ ] Delete RxPipeline (deprecated, no longer used for decoding)
+6. [ ] Verify OFDM_COX CFO correction
+7. [ ] Add OFDM_COX to test_iwaveform
+8. [ ] Create WaveformState class (optional, nice-to-have)
+9. [ ] Simplify ModemEngine
 
 ---
 

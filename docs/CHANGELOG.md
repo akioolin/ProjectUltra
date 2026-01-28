@@ -10,6 +10,164 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-01-28: Remove Legacy Acquisition Thread
+
+**What was changed:**
+The acquisition thread was running but its output (`detected_frame_queue_`) was never consumed.
+StreamingDecoder now handles all RX processing, making the acquisition thread dead code.
+
+**Files removed/modified:**
+- `modem_engine.hpp`: Removed acquisition thread members, legacy RX buffer, processRxBuffer_* declarations
+- `modem_rx.cpp`: Removed acquisitionLoop(), startAcquisitionThread(), stopAcquisitionThread(), buffer helpers
+- `modem_rx_decode.cpp`: Removed ~1200 lines of legacy decode code (rxDecodeDPSK, processRxBuffer_*, etc.)
+- `modem_engine.cpp`: Removed acquisition thread start/stop calls
+- `modem_mode.cpp`: Replaced legacy buffer clears with `streaming_decoder_->reset()`
+
+**Removed components:**
+- `acquisition_thread_`, `acquisition_running_`, `acquisition_cv_`, `acquisition_mutex_`
+- `rx_sample_buffer_`, `samples_consumed_`, `rx_buffer_mutex_`
+- `detected_frame_queue_`, `rx_frame_state_`
+- `rxDecodeDPSK()`, `processRxBuffer_OFDM/OTFS/DPSK/OFDM_CHIRP()`
+- `waitForSamples()`, `deinterleaveCodewords()`, `detectPing()`
+- Legacy accumulation state (ofdm_accumulated_soft_bits_, dpsk_accumulated_soft_bits_, etc.)
+
+**Architecture after cleanup:**
+- RX decode thread runs `rxDecodeLoop()` which drives `streaming_decoder_->processBuffer()`
+- `feedAudio()` only feeds to StreamingDecoder
+- Frame delivery via callbacks set in ModemEngine constructor
+- Mode switches call `streaming_decoder_->reset()` instead of clearing legacy buffers
+
+**Test verification:**
+```bash
+./tests/regression_matrix.sh
+# Expected: ALL TESTS PASSED! (11/11)
+```
+
+---
+
+## 2026-01-28: StreamingDecoder Becomes Primary Decoder
+
+**What was broken:**
+- StreamingDecoder frame decoding worked (3/3 codewords) but ConnectFrame::deserialize() failed
+- CW0 decoded to 21 bytes instead of expected 20 bytes
+- Frame reassembly used 21 bytes from CW0, causing 1-byte shift and CRC failure
+
+**Root cause:**
+LDPC R1/4 has 162 info bits = 20.25 bytes. Decoder returns `ceil(162/8) = 21` bytes,
+but protocol `getBytesPerCodeword(R1_4)` returns `162/8 = 20` bytes (integer division).
+The extra byte at position 20 is padding from fractional bits.
+
+**What was changed:**
+- `streaming_decoder.cpp`: Added CW0 resize to `bytes_per_cw` (20 bytes) after LDPC decode
+- `modem_engine.hpp`: Fixed `setMCDPSKCarriers()` to recreate TX modulator and update StreamingDecoder
+- `streaming_decoder.hpp/cpp`: Added `setMCDPSKCarriers()` method for carrier count sync
+
+**How it's properly fixed:**
+After LDPC decode, resize CW0 to exactly 20 bytes (discard padding):
+```cpp
+if (cw0_data.size() > bytes_per_cw) {
+    cw0_data.resize(bytes_per_cw);  // Truncate to 20 bytes
+}
+```
+
+**CFO handling verified:**
+- Python analysis confirmed carrier frequencies shift by exactly the expected CFO amount
+- CFO=30Hz: All 8 carriers shifted by 29.3-30.8 Hz (mean=30.0 Hz)
+- CFO=0Hz: No shift (all 0.0 Hz)
+
+**Test verification:**
+```bash
+./test_iwaveform --snr 10 -w mc_dpsk --frames 3 --cfo 30
+# Expected: Decoded: 3/3 (100%)
+
+./tests/regression_matrix.sh
+# Expected: ALL TESTS PASSED! (11/11)
+```
+
+---
+
+## 2026-01-28: StreamingDecoder Created (Fixes BUG-002: RxPipeline Broken)
+
+**What was broken:**
+- RxPipeline failed to detect chirps when integrated into ModemEngine
+- test_iwaveform worked 100% using IWaveform directly
+- RxPipeline integration in ModemEngine failed
+
+**Root cause analysis:**
+RxPipeline had incorrect IWaveform call sequence:
+1. Line 147: `waveform_->setFrequencyOffset(sync_result.cfo_hz);` - CFO applied
+2. Line 172: `waveform_->reset();` - CFO CLEARED (violates INV-WAVE-002!)
+3. Line 173: `waveform_->process(process_span);` - Process with wrong CFO
+
+Per INV-WAVE-002: "reset() MUST clear cfo_hz_ to prevent stale values"
+This means calling reset() AFTER setFrequencyOffset() erases the CFO.
+
+**What was changed:**
+- Created `src/gui/modem/streaming_decoder.hpp` (~230 lines)
+- Created `src/gui/modem/streaming_decoder.cpp` (~460 lines)
+- Correct call sequence: reset() → detectSync() → setFrequencyOffset() → process()
+- Circular buffer with bounded size (4 seconds max)
+- Sliding window search (like test_iwaveform)
+- Thread-safe with condition variable for blocking wait
+- PING detection via energy ratio
+- SNR estimation from chirp correlation
+- Added to CMakeLists.txt for all executables
+
+**How it's properly fixed:**
+StreamingDecoder uses the correct IWaveform call sequence per INV-WAVE-001:
+```cpp
+waveform->reset();                           // Clear state
+waveform->detectSync(samples, sync_result);  // Find preamble
+waveform->setFrequencyOffset(sync_result.cfo_hz);  // Store CFO
+waveform->process(samples_from_start);       // Demodulate
+auto bits = waveform->getSoftBits();         // Get output
+```
+
+**Test verification:**
+```bash
+# Build with StreamingDecoder
+make -j4 test_iwaveform  # Should compile without errors
+
+# Regression tests pass
+./tests/regression_matrix.sh
+# Expected: ALL TESTS PASSED!
+```
+
+**Next steps:**
+1. ~~Integrate StreamingDecoder into ModemEngine~~ DONE 2026-01-28
+2. Make StreamingDecoder the primary decoder (currently parallel)
+3. Remove acquisition thread
+4. Replace processRxBuffer_* methods
+5. Delete RxPipeline after integration verified
+
+---
+
+## 2026-01-28: StreamingDecoder Integration (Phase 2)
+
+**What was changed:**
+- `src/gui/modem/modem_engine.hpp`: Added `streaming_decoder_` member
+- `src/gui/modem/modem_engine.cpp`: Initialize StreamingDecoder in constructor, set callbacks
+- `src/gui/modem/modem_rx.cpp`:
+  - feedAudio(): Feeds to StreamingDecoder in parallel with legacy path
+  - rxDecodeLoop(): Checks StreamingDecoder for decoded frames
+
+**Integration approach:**
+Running in parallel mode for safety:
+- Audio is fed to BOTH StreamingDecoder AND legacy path
+- Legacy path (acquisition thread) still does primary decoding
+- StreamingDecoder is receiving audio and processing but not yet primary
+
+**Test verification:**
+```bash
+# All regression tests pass
+./tests/regression_matrix.sh
+# Expected: 11/11 PASS
+```
+
+**Status:** Parallel mode working. Next: Make StreamingDecoder primary.
+
+---
+
 ## 2026-01-28: PING vs DPSK Frame Detection Fix (cli_simulator)
 
 **What was broken:**
