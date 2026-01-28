@@ -21,18 +21,8 @@ StreamingDecoder::StreamingDecoder() {
     // Allocate circular buffer
     buffer_.resize(MAX_BUFFER_SAMPLES, 0.0f);
 
-    // Create chirp sync detector
-    // IMPORTANT: These parameters MUST match ModemEngine's chirp config!
-    sync::ChirpConfig chirp_cfg;
-    chirp_cfg.sample_rate = 48000.0f;
-    chirp_cfg.f_start = 300.0f;
-    chirp_cfg.f_end = 2700.0f;
-    chirp_cfg.duration_ms = 500.0f;
-    chirp_cfg.gap_ms = 100.0f;           // Must match ModemEngine (100ms gap)
-    chirp_cfg.use_dual_chirp = true;     // Must match ModemEngine (dual chirp)
-    chirp_sync_ = std::make_unique<sync::ChirpSync>(chirp_cfg);
-
     // Create default waveform (MC-DPSK for disconnected state)
+    // The waveform handles its own sync detection internally (ChirpSync or Schmidl-Cox)
     waveform_ = WaveformFactory::create(protocol::WaveformMode::MC_DPSK);
 
     // Create interleaver (30 carriers x 2 bits DQPSK = 60 bits/symbol for OFDM)
@@ -119,26 +109,34 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
 // ============================================================================
 
 void StreamingDecoder::processBuffer() {
+    // Calculate minimum samples based on waveform type
+    // Chirp-based waveforms need ~3 seconds, OFDM_COX needs much less
+    size_t min_samples = MIN_SAMPLES_FOR_SEARCH;  // Default for chirp
+    if (mode_ == protocol::WaveformMode::OFDM_COX && waveform_) {
+        // OFDM_COX: preamble + frame is much shorter (~20000 samples max)
+        min_samples = std::max(size_t(48000), size_t(waveform_->getMinSamplesForFrame() * 2));
+    }
+
     // Wait for enough data or shutdown
     {
         std::unique_lock<std::mutex> lock(buffer_mutex_);
 
         size_t samples_before = samplesInBuffer();
         auto timeout = std::chrono::milliseconds(100);
-        data_cv_.wait_for(lock, timeout, [this] {
-            return samplesInBuffer() >= MIN_SAMPLES_FOR_SEARCH || shutdown_.load();
+        data_cv_.wait_for(lock, timeout, [this, min_samples] {
+            return samplesInBuffer() >= min_samples || shutdown_.load();
         });
 
         if (shutdown_.load()) return;
 
         size_t samples_now = samplesInBuffer();
         static int proc_iter = 0;
-        if (++proc_iter % 20 == 0 || samples_now >= MIN_SAMPLES_FOR_SEARCH) {
+        if (++proc_iter % 20 == 0 || samples_now >= min_samples) {
             LOG_MODEM(DEBUG, "StreamingDecoder::processBuffer: buf=%zu (before=%zu), min=%zu",
-                      samples_now, samples_before, MIN_SAMPLES_FOR_SEARCH);
+                      samples_now, samples_before, min_samples);
         }
 
-        if (samples_now < MIN_SAMPLES_FOR_SEARCH) return;  // Timeout, no data
+        if (samples_now < min_samples) return;  // Timeout, no data
     }
 
     // Try to detect and decode a frame
@@ -167,7 +165,13 @@ DecodeResult StreamingDecoder::getFrame() {
 void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
 
-    if (mode_ == mode && connected_ == connected) return;  // No change
+    LOG_MODEM(INFO, "StreamingDecoder::setMode called: current=%d, new=%d, connected=%d",
+              static_cast<int>(mode_), static_cast<int>(mode), connected);
+
+    if (mode_ == mode && connected_ == connected) {
+        LOG_MODEM(INFO, "StreamingDecoder::setMode: No change, returning early");
+        return;
+    }
 
     mode_ = mode;
     connected_ = connected;
@@ -213,6 +217,21 @@ void StreamingDecoder::setMCDPSKCarriers(int num_carriers) {
         // Update interleaver for new carrier count
         size_t bits_per_symbol = mc_dpsk_carriers_ * 2;  // DQPSK
         interleaver_ = std::make_unique<ChannelInterleaver>(bits_per_symbol, v2::LDPC_CODEWORD_BITS);
+    }
+}
+
+void StreamingDecoder::setDataMode(Modulation mod, CodeRate rate) {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+
+    LOG_MODEM(INFO, "StreamingDecoder::setDataMode: mod=%d, rate=%d",
+              static_cast<int>(mod), static_cast<int>(rate));
+
+    // Store code rate for LDPC decode
+    code_rate_ = rate;
+
+    // Configure the waveform with the new modulation and code rate
+    if (waveform_) {
+        waveform_->configure(mod, rate);
     }
 }
 
@@ -341,8 +360,18 @@ void StreamingDecoder::trimOldSamples(size_t keep_samples) {
 }
 
 bool StreamingDecoder::detectAndDecode() {
-    if (!waveform_ || !chirp_sync_) {
+    if (!waveform_) {
         return false;
+    }
+
+    // Waveform handles its own sync detection internally:
+    // - MC-DPSK and OFDM_CHIRP use ChirpSync
+    // - OFDM_COX uses Schmidl-Cox
+
+    // Calculate mode-dependent minimum samples (same logic as processBuffer)
+    size_t min_samples_for_search = MIN_SAMPLES_FOR_SEARCH;  // Default for chirp
+    if (mode_ == protocol::WaveformMode::OFDM_COX && waveform_) {
+        min_samples_for_search = std::max(size_t(48000), size_t(waveform_->getMinSamplesForFrame() * 2));
     }
 
     // Copy samples for processing (release lock during heavy work)
@@ -359,7 +388,7 @@ bool StreamingDecoder::detectAndDecode() {
             available = MAX_BUFFER_SAMPLES - search_pos_ + write_pos_;
         }
 
-        if (available < MIN_SAMPLES_FOR_SEARCH) {
+        if (available < min_samples_for_search) {
             return false;
         }
 
@@ -416,10 +445,12 @@ bool StreamingDecoder::detectAndDecode() {
     last_cfo_.store(sync_result.cfo_hz);
 
     // Check if this is PING only (chirp without data)
-    // For PING detection, look at energy after chirp ends
-    // chirp_end = position in work_buffer where training starts (after chirp)
+    // PING detection only applies to chirp-based modes (MC-DPSK, OFDM_CHIRP)
+    // OFDM_COX uses Schmidl-Cox sync and doesn't have chirp-based PINGs
+    bool uses_chirp_ping = (mode_ == protocol::WaveformMode::MC_DPSK ||
+                            mode_ == protocol::WaveformMode::OFDM_CHIRP);
     size_t chirp_end_in_workbuf = static_cast<size_t>(sync_result.start_sample);
-    if (isPingOnly(work_buffer, chirp_end_in_workbuf)) {
+    if (uses_chirp_ping && isPingOnly(work_buffer, chirp_end_in_workbuf)) {
         // PING detected - queue result and advance
         DecodeResult result;
         result.success = true;
@@ -646,8 +677,8 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
         cw0_bits = interleaver_->deinterleave(cw0_bits);
     }
 
-    // Decode CW0 with R1/4 (always R1/4 for disconnected, negotiated for connected)
-    CodeRate frame_rate = connected_ ? CodeRate::R1_4 : CodeRate::R1_4;  // TODO: get from mode
+    // Decode CW0 with negotiated code rate (or R1_4 for disconnected)
+    CodeRate frame_rate = connected_ ? code_rate_ : CodeRate::R1_4;
     size_t bytes_per_cw = v2::getBytesPerCodeword(frame_rate);
 
     LDPCDecoder decoder(frame_rate);

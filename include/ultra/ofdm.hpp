@@ -121,6 +121,12 @@ public:
     // Reset state (e.g., after sync loss)
     void reset();
 
+    // Search for Schmidl-Cox sync without changing internal state
+    // Use for IWaveform::detectSync() to find sync position
+    // Returns true if preamble found, fills out_position and out_cfo_hz
+    // Does NOT consume samples or change demodulator state
+    bool searchForSync(SampleSpan samples, size_t& out_position, float& out_cfo_hz, float threshold = 0.5f);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

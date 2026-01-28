@@ -96,16 +96,14 @@ Samples OFDMNvisWaveform::modulate(const Bytes& encoded_data) {
 }
 
 bool OFDMNvisWaveform::detectSync(SampleSpan samples, SyncResult& result, float threshold) {
-    // OFDMDemodulator handles Schmidl-Cox sync internally in process()
-    // We can't easily separate detection from processing with current interface
-    // So this method is mainly used to check if demodulator found sync
-
-    // Process samples and check for sync
+    // Use the optimized streaming process() which does fast Schmidl-Cox detection
+    // This finds sync AND demodulates in one pass
     if (!demodulator_) {
         return false;
     }
 
-    demodulator_->process(samples);
+    // Feed samples to the streaming demodulator
+    bool has_data = demodulator_->process(samples);
 
     if (demodulator_->isSynced()) {
         result.detected = true;
@@ -113,6 +111,17 @@ bool OFDMNvisWaveform::detectSync(SampleSpan samples, SyncResult& result, float 
         result.cfo_hz = demodulator_->getFrequencyOffset();
         result.snr_estimate = demodulator_->getEstimatedSNR();
         result.has_training = true;
+        result.correlation = 0.7f;
+
+        cfo_hz_ = result.cfo_hz;
+
+        // If we have data, grab the soft bits now (process() already demodulated)
+        if (has_data) {
+            soft_bits_ = demodulator_->getSoftBits();
+        }
+
+        LOG_MODEM(INFO, "OFDMNvisWaveform::detectSync: synced at %d, CFO=%.1f Hz, has_data=%d",
+                  result.start_sample, result.cfo_hz, has_data ? 1 : 0);
         return true;
     }
 
@@ -124,6 +133,12 @@ bool OFDMNvisWaveform::process(SampleSpan samples) {
         return false;
     }
 
+    // If we already have soft bits from detectSync(), return them
+    if (!soft_bits_.empty()) {
+        return true;
+    }
+
+    // Otherwise continue processing (for multi-codeword frames)
     bool ready = demodulator_->process(samples);
 
     if (ready) {

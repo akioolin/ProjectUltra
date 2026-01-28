@@ -805,25 +805,29 @@ int main(int argc, char** argv) {
             }
         }
     } else {
-        // MC-DPSK: Use SINGLE ModemEngine for entire audio stream
+        // MC-DPSK/OFDM_COX: Use SINGLE ModemEngine for entire audio stream
         ModemEngine rx_modem;
         rx_modem.setLogPrefix("RX");
         rx_modem.setWaveformMode(waveform_mode);
-        rx_modem.setInterleavingEnabled(false);
+        rx_modem.setInterleavingEnabled(is_ofdm_mode);
 
         if (waveform_mode == protocol::WaveformMode::MC_DPSK) {
             rx_modem.setMCDPSKCarriers(num_carriers);
+        } else if (waveform_mode == protocol::WaveformMode::OFDM_COX) {
+            // OFDM_COX needs to be set up like TX (connected mode with DQPSK)
+            rx_modem.setConnected(true);
+            rx_modem.setHandshakeComplete(true);
+            rx_modem.setDataMode(Modulation::DQPSK, ofdm_code_rate);
         }
 
         // Set up callback to track decoded frames
         rx_modem.setRawDataCallback([&](const Bytes& data) {
-            if (data.size() >= 2 && data[0] == 0x55 && data[1] == 0x4C) {
-                auto parsed = v2::ConnectFrame::deserialize(data);
+            if (data.size() >= 3 && data[0] == 0x55 && data[1] == 0x4C) {
+                auto parsed = v2::DataFrame::deserialize(data);
                 if (parsed) {
                     std::lock_guard<std::mutex> lock(decoded_mutex);
                     decoded_seqs.insert(parsed->seq);
-                    printf("  [RX] Decoded seq=%d src=%s\n",
-                           parsed->seq, parsed->getSrcCallsign().c_str());
+                    printf("  [RX] Decoded seq=%d\n", parsed->seq);
                 }
             }
         });

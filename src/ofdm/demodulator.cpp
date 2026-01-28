@@ -685,6 +685,14 @@ bool OFDMDemodulator::process(SampleSpan samples) {
 
             impl_->updateQuality();
 
+            // Break early once we have enough for a codeword
+            // This prevents processing multiple frames in one call
+            if (impl_->soft_bits.size() >= LDPC_BLOCK_SIZE) {
+                LOG_DEMOD(DEBUG, "Have %zu soft bits (>= %zu), returning early",
+                          impl_->soft_bits.size(), LDPC_BLOCK_SIZE);
+                break;
+            }
+
             int sym_count = ++impl_->synced_symbol_count;
             if (sym_count > MAX_SYMBOLS_BEFORE_TIMEOUT) {
                 LOG_SYNC(WARN, "Sync timeout after %d symbols (%zu soft bits accumulated), resetting to SEARCHING",
@@ -1014,6 +1022,99 @@ void OFDMDemodulator::reset() {
     std::fill(impl_->lms_weights.begin(), impl_->lms_weights.end(), Complex(1, 0));
     std::fill(impl_->last_decisions.begin(), impl_->last_decisions.end(), Complex(0, 0));
     std::fill(impl_->rls_P.begin(), impl_->rls_P.end(), 1.0f);
+}
+
+bool OFDMDemodulator::searchForSync(SampleSpan samples, size_t& out_position, float& out_cfo_hz, float threshold) {
+    // Search for Schmidl-Cox sync in samples WITHOUT changing internal state
+    // This is used by IWaveform::detectSync() to find preamble position
+
+    if (samples.size() < MIN_SEARCH_SAMPLES) {
+        return false;
+    }
+
+    // Temporarily store samples for correlation (don't modify rx_buffer)
+    std::vector<float> search_buffer(samples.begin(), samples.end());
+
+    // Preamble size constants
+    size_t preamble_symbol_len = impl_->config.fft_size + impl_->config.getCyclicPrefix();
+    size_t preamble_total_len = preamble_symbol_len * 6;
+    size_t correlation_window = preamble_symbol_len * 2;
+
+    if (search_buffer.size() < preamble_total_len + correlation_window) {
+        return false;
+    }
+
+    // Save original rx_buffer and restore after search
+    std::vector<float> saved_buffer = std::move(impl_->rx_buffer);
+    impl_->rx_buffer = std::move(search_buffer);
+
+    // Search for preamble
+    bool found_sync = false;
+    size_t sync_offset = 0;
+    float sync_cfo = 0.0f;
+
+    size_t search_end = impl_->rx_buffer.size() - preamble_total_len - correlation_window;
+
+    // Use larger step for faster search (64 samples = ~1.3ms at 48kHz)
+    // This is a quick search to find candidates, not fine timing
+    constexpr size_t QUICK_SEARCH_STEP = 64;
+
+    for (size_t i = 0; i < search_end; i += QUICK_SEARCH_STEP) {
+        if (!impl_->hasMinimumEnergy(i, correlation_window)) {
+            i += correlation_window / 2 - QUICK_SEARCH_STEP;
+            continue;
+        }
+
+        float corr = impl_->measureCorrelation(i);
+
+        if (corr > threshold) {
+            // Search for plateau
+            size_t plateau_count = 0;
+            float peak_corr = corr;
+            size_t peak_pos = i;
+
+            for (size_t j = 0; j <= PLATEAU_SEARCH_WINDOW && i + j + preamble_total_len < impl_->rx_buffer.size(); j += 8) {
+                float ref_corr = impl_->measureCorrelation(i + j);
+                if (ref_corr >= PLATEAU_THRESHOLD) {
+                    plateau_count++;
+                }
+                if (ref_corr > peak_corr) {
+                    peak_corr = ref_corr;
+                    peak_pos = i + j;
+                }
+            }
+
+            if (plateau_count >= MIN_PLATEAU_SAMPLES) {
+                // Verify with LTS
+                size_t refined_lts = impl_->refineLTSTiming(peak_pos);
+                if (refined_lts != SIZE_MAX) {
+                    found_sync = true;
+                    sync_offset = peak_pos;
+                    sync_cfo = impl_->estimateCoarseCFO(peak_pos);
+
+                    LOG_SYNC(INFO, "searchForSync: found at %zu, corr=%.3f, CFO=%.1f Hz",
+                             sync_offset, peak_corr, sync_cfo);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Restore original buffer (do NOT modify state)
+    impl_->rx_buffer = std::move(saved_buffer);
+
+    if (found_sync) {
+        out_cfo_hz = sync_cfo;
+
+        // Calculate where LTS (training) starts
+        // Preamble: 4 STS + 2 LTS = 6 symbols
+        // processPresynced expects samples starting at LTS (it needs training for channel est)
+        // So we return position of LTS start (after 4 STS symbols)
+        size_t sts_symbols = 4;
+        out_position = sync_offset + sts_symbols * preamble_symbol_len;
+    }
+
+    return found_sync;
 }
 
 // =============================================================================

@@ -45,9 +45,9 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
 
     waveform_mode_ = mode;
 
-    // Reset StreamingDecoder when switching modes
+    // Update StreamingDecoder to use the new waveform
     if (streaming_decoder_) {
-        streaming_decoder_->reset();
+        streaming_decoder_->setMode(mode, connected_);
     }
 
     // Switch RxPipeline to use the new waveform (when connected)
@@ -128,10 +128,10 @@ void ModemEngine::setConnected(bool connected) {
         handshake_complete_ = false;
         use_connected_waveform_once_ = false;  // Clear any leftover flag
 
-        // CRITICAL: Reset StreamingDecoder when entering connected state
-        // Old samples from DPSK handshake would corrupt OFDM preamble detection
+        // CRITICAL: Update StreamingDecoder when entering connected state
+        // This resets the buffer and updates the connected flag
         if (streaming_decoder_) {
-            streaming_decoder_->reset();
+            streaming_decoder_->setMode(waveform_mode_, true);  // true = connected
         }
 
         // Configure OFDM modulator/demodulator to match data_modulation_
@@ -167,9 +167,9 @@ void ModemEngine::setConnected(bool connected) {
         decoder_->setRate(CodeRate::R1_4);
         ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(rx_config);
 
-        // CRITICAL: Reset StreamingDecoder so it can detect new PINGs
+        // CRITICAL: Update StreamingDecoder for disconnected state (can detect new PINGs)
         if (streaming_decoder_) {
-            streaming_decoder_->reset();
+            streaming_decoder_->setMode(waveform_mode_, false);  // false = disconnected
         }
         dpsk_demodulator_->reset();
 
@@ -226,6 +226,11 @@ void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
 
         LOG_MODEM(INFO, "TX/RX OFDM updated: mod=%d, rate=%d, use_pilots=%d",
                   static_cast<int>(mod), static_cast<int>(rate), config_.use_pilots ? 1 : 0);
+    }
+
+    // Update StreamingDecoder's waveform configuration
+    if (streaming_decoder_) {
+        streaming_decoder_->setDataMode(mod, rate);
     }
 
     LOG_MODEM(INFO, "Data mode set to: %s", getModeDescription(mod, rate));

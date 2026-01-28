@@ -147,6 +147,9 @@ ModemEngine::ModemEngine() {
         last_rx_complete_time_ = std::chrono::steady_clock::now();
     });
 
+    // Sync StreamingDecoder with initial waveform mode
+    streaming_decoder_->setMode(waveform_mode_, connected_);
+
     LOG_MODEM(INFO, "[%s] StreamingDecoder initialized", log_prefix_.c_str());
 
     // Start RX decode thread (StreamingDecoder handles acquisition)

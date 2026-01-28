@@ -36,7 +36,6 @@
 
 #include "waveform/waveform_interface.hpp"
 #include "waveform/waveform_factory.hpp"
-#include "sync/chirp_sync.hpp"
 #include "protocol/frame_v2.hpp"
 #include "ultra/fec.hpp"
 #include <vector>
@@ -121,6 +120,10 @@ public:
 
     // Set MC-DPSK carrier count (recreates waveform if currently in MC-DPSK mode)
     void setMCDPSKCarriers(int num_carriers);
+
+    // Set data mode (modulation and code rate) for the waveform
+    // Called when connection is established with negotiated settings
+    void setDataMode(Modulation mod, CodeRate rate);
 
     // Get current mode
     protocol::WaveformMode getMode() const { return mode_; }
@@ -208,15 +211,13 @@ private:
     mutable std::mutex buffer_mutex_;
     std::condition_variable data_cv_;
 
-    // Sync detection
-    std::unique_ptr<sync::ChirpSync> chirp_sync_;
-
-    // Active waveform for demodulation
+    // Active waveform for demodulation (handles its own sync internally)
     WaveformFactory waveform_factory_;
     std::unique_ptr<IWaveform> waveform_;
     protocol::WaveformMode mode_ = protocol::WaveformMode::MC_DPSK;
     bool connected_ = false;
     int mc_dpsk_carriers_ = 8;  // MC-DPSK carrier count (default 8)
+    CodeRate code_rate_ = CodeRate::R1_4;  // Code rate for LDPC decode
 
     // Interleaver (matches TX)
     std::unique_ptr<ChannelInterleaver> interleaver_;
