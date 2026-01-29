@@ -51,6 +51,8 @@ add_library(ultra_core STATIC
     src/otfs/otfs.cpp
     src/fec/ldpc_encoder.cpp
     src/fec/ldpc_decoder.cpp
+    src/fec/ldpc_codec.cpp
+    src/fec/codec_factory.cpp
     src/framing/frame_builder.cpp
     src/arq/arq_controller.cpp
     src/dsp/fft.cpp
@@ -293,6 +295,11 @@ if(ULTRA_BUILD_TOOLS)
     add_executable(test_ofdm_chirp_cfo tools/test_ofdm_chirp_cfo.cpp)
     target_include_directories(test_ofdm_chirp_cfo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test_ofdm_chirp_cfo PRIVATE ultra_core)
+
+    # FEC Codec Factory test
+    add_executable(test_codec_factory tools/test_codec_factory.cpp)
+    target_include_directories(test_codec_factory PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_codec_factory PRIVATE ultra_core)
 
     # IWaveform interface test (uses ModemEngine with IWaveform integration)
     add_executable(test_iwaveform

@@ -38,6 +38,7 @@
 #include "waveform/waveform_factory.hpp"
 #include "protocol/frame_v2.hpp"
 #include "ultra/fec.hpp"
+#include "fec/codec_factory.hpp"  // ICodec for FEC decoding
 #include <vector>
 #include <queue>
 #include <mutex>
@@ -124,6 +125,11 @@ public:
     // Set data mode (modulation and code rate) for the waveform
     // Called when connection is established with negotiated settings
     void setDataMode(Modulation mod, CodeRate rate);
+
+    // Set FEC codec type (for dynamic codec switching based on SNR)
+    // Recreates the codec if type changes
+    void setCodecType(fec::CodecType type);
+    fec::CodecType getCodecType() const { return codec_type_; }
 
     // Get current mode
     protocol::WaveformMode getMode() const { return mode_; }
@@ -221,11 +227,15 @@ private:
     protocol::WaveformMode mode_ = protocol::WaveformMode::MC_DPSK;
     bool connected_ = false;
     int mc_dpsk_carriers_ = 8;  // MC-DPSK carrier count (default 8)
-    CodeRate code_rate_ = CodeRate::R1_4;  // Code rate for LDPC decode
+    CodeRate code_rate_ = CodeRate::R1_4;  // Code rate for FEC decode
+    fec::CodecType codec_type_ = fec::CodecType::LDPC;  // FEC codec type
     size_t mode_switch_write_pos_ = 0;  // write_pos at mode switch (skip old data)
 
     // Interleaver (matches TX)
     std::unique_ptr<ChannelInterleaver> interleaver_;
+
+    // FEC codec (uses ICodec interface)
+    fec::CodecPtr codec_;
 
     // Decoded frame queue
     std::queue<DecodeResult> frame_queue_;
@@ -250,17 +260,15 @@ private:
 
     // Constants - Buffer sizes
     static constexpr size_t MAX_BUFFER_SAMPLES = 480000;    // 10 seconds at 48kHz
-    static constexpr size_t MIN_SAMPLES_DISCONNECTED = 72000; // 1.5 sec - disconnected MC-DPSK
-    static constexpr size_t MIN_SAMPLES_CONNECTED = 60000;    // 1.25 sec - connected MC-DPSK
-    static constexpr size_t MIN_SAMPLES_OFDM = 15000;         // 0.3 sec - OFDM modes
-    static constexpr size_t SLIDE_STEP = 4800;              // 100ms max advancement
+    static constexpr size_t MIN_SAMPLES_FOR_SEARCH = 144000; // 3 seconds - ensure full chirp visible
+    static constexpr size_t SLIDE_STEP = 4800;              // 100ms between searches
     static constexpr size_t CHIRP_SAMPLES = 53000;          // ~1.1 second (dual chirp + gap)
 
-    // Constants - Adaptive acquisition thresholds
+    // Constants - Adaptive acquisition thresholds (disabled for now)
     static constexpr float CORR_NOISE_THRESHOLD = 0.05f;    // Below = pure noise, don't advance
     static constexpr float CORR_WEAK_THRESHOLD = 0.10f;     // Below = weak, advance slowly
     static constexpr float CORR_DETECT_THRESHOLD = 0.15f;   // At/above = detected
-    static constexpr float ENERGY_GATE_MULTIPLIER = 2.0f;   // RMS must be > noise * this
+    static constexpr float ENERGY_GATE_MULTIPLIER = 0.0f;   // Disabled - noise floor estimation is inaccurate
     static constexpr float PING_ENERGY_RATIO = 0.3f;        // Post-chirp/chirp energy ratio
 };
 

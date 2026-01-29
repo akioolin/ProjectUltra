@@ -6,6 +6,7 @@
 // Currently wraps LDPCEncoder and LDPCDecoder.
 
 #include "ultra/types.hpp"
+#include <memory>
 #include <string>
 #include <vector>
 #include <utility>

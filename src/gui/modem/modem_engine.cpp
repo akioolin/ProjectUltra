@@ -21,7 +21,7 @@ ModemEngine::ModemEngine() {
     // DQPSK is differential and doesn't need pilots for channel estimation
     config_.use_pilots = false;
 
-    encoder_ = std::make_unique<LDPCEncoder>(config_.code_rate);
+    encoder_ = fec::CodecFactory::create(fec::CodecType::LDPC, config_.code_rate);
 
     // OFDM modulator uses config (TX modulation is determined per-frame)
     ofdm_modulator_ = std::make_unique<OFDMModulator>(config_);
@@ -32,7 +32,7 @@ ModemEngine::ModemEngine() {
     rx_config.modulation = Modulation::DQPSK;
     rx_config.code_rate = CodeRate::R1_4;
     rx_config.use_pilots = false;  // DQPSK doesn't need pilots
-    decoder_ = std::make_unique<LDPCDecoder>(rx_config.code_rate);
+    decoder_ = fec::CodecFactory::create(fec::CodecType::LDPC, rx_config.code_rate);
     ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(rx_config);
 
     // OTFS modulator/demodulator (used for data frames when negotiated)

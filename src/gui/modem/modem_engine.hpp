@@ -7,7 +7,8 @@
 #include "ultra/types.hpp"
 #include "ultra/ofdm.hpp"
 #include "ultra/otfs.hpp"
-#include "ultra/fec.hpp"  // LDPCEncoder, LDPCDecoder, Interleaver
+#include "ultra/fec.hpp"  // Interleaver, ChannelInterleaver
+#include "fec/codec_factory.hpp"  // ICodec, CodecFactory
 #include "ultra/dsp.hpp"  // FIRFilter
 #include "psk/dpsk.hpp"   // DPSKModulator, DPSKDemodulator
 #include "psk/multi_carrier_dpsk.hpp"  // MultiCarrierDPSK for fading channels
@@ -171,6 +172,12 @@ public:
     void setInterleavingEnabled(bool enabled) { interleaving_enabled_ = enabled; }
     bool isInterleavingEnabled() const { return interleaving_enabled_; }
 
+    // FEC codec control
+    void setCodecType(fec::CodecType type);
+    fec::CodecType getCodecType() const { return codec_type_; }
+    static fec::CodecType recommendCodecType(float snr_db);
+    static fec::CodecType getCodecForWaveform(protocol::WaveformMode mode);
+
 private:
     ModemConfig config_;
     std::string log_prefix_ = "MODEM";
@@ -187,9 +194,10 @@ private:
     // Data frame modulation (negotiated after probing)
     Modulation data_modulation_ = Modulation::QPSK;
     CodeRate data_code_rate_ = CodeRate::R1_2;
+    fec::CodecType codec_type_ = fec::CodecType::LDPC;  // FEC codec type
 
     // TX chain - OFDM
-    std::unique_ptr<LDPCEncoder> encoder_;
+    fec::CodecPtr encoder_;  // ICodec for encoding (currently LDPC)
     std::unique_ptr<OFDMModulator> ofdm_modulator_;
 
     // TX chain - OTFS
@@ -197,7 +205,7 @@ private:
     OTFSConfig otfs_config_;
 
     // RX chain - OFDM
-    std::unique_ptr<LDPCDecoder> decoder_;
+    fec::CodecPtr decoder_;  // ICodec for decoding (currently LDPC) - mostly unused, StreamingDecoder handles RX
     std::unique_ptr<OFDMDemodulator> ofdm_demodulator_;
 
     // RX chain - OTFS

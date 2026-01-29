@@ -295,5 +295,62 @@ void ModemEngine::setDPSKMode(DPSKModulation mod, int samples_per_symbol) {
               dpsk_config_.raw_bps());
 }
 
+void ModemEngine::setCodecType(fec::CodecType type) {
+    if (codec_type_ == type) return;  // No change
+
+    codec_type_ = type;
+
+    // Recreate encoder and decoder with new codec type
+    encoder_ = fec::CodecFactory::create(type, config_.code_rate);
+    decoder_ = fec::CodecFactory::create(type, data_code_rate_);
+
+    // Update StreamingDecoder to use the same codec
+    if (streaming_decoder_) {
+        streaming_decoder_->setCodecType(type);
+    }
+
+    LOG_MODEM(INFO, "Codec type set to: %s", encoder_->getName().c_str());
+}
+
+fec::CodecType ModemEngine::recommendCodecType(float snr_db) {
+    // Codec selection based on SNR:
+    // - LDPC: Works well at moderate-high SNR (>5 dB), steep waterfall curve
+    // - Convolutional: Better at very low SNR (<5 dB), graceful degradation
+    // - Turbo: Excellent near Shannon limit, but high latency
+    //
+    // For now, always use LDPC since it's the only implemented codec.
+    // When convolutional codec is implemented, use it for SNR < 5 dB.
+
+    if (snr_db < 5.0f) {
+        // Low SNR: Would prefer convolutional, but LDPC is all we have
+        // return fec::CodecType::CONVOLUTIONAL;  // Future
+        return fec::CodecType::LDPC;
+    } else {
+        // Moderate to high SNR: LDPC is optimal
+        return fec::CodecType::LDPC;
+    }
+}
+
+fec::CodecType ModemEngine::getCodecForWaveform(protocol::WaveformMode mode) {
+    // Map waveform modes to optimal codec types:
+    // - MC-DPSK (low SNR): Would benefit from convolutional (when implemented)
+    // - OFDM_CHIRP (medium SNR): LDPC with R1/4 or R1/2
+    // - OFDM_COX (high SNR): LDPC with higher rates
+    //
+    // For now, always return LDPC since it's the only implemented codec.
+
+    switch (mode) {
+        case protocol::WaveformMode::MC_DPSK:
+            // Low SNR waveform - would prefer convolutional
+            // return fec::CodecType::CONVOLUTIONAL;  // Future
+            return fec::CodecType::LDPC;
+
+        case protocol::WaveformMode::OFDM_CHIRP:
+        case protocol::WaveformMode::OFDM_COX:
+        default:
+            return fec::CodecType::LDPC;
+    }
+}
+
 } // namespace gui
 } // namespace ultra
