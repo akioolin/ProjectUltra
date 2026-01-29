@@ -222,6 +222,7 @@ private:
     bool connected_ = false;
     int mc_dpsk_carriers_ = 8;  // MC-DPSK carrier count (default 8)
     CodeRate code_rate_ = CodeRate::R1_4;  // Code rate for LDPC decode
+    size_t mode_switch_write_pos_ = 0;  // write_pos at mode switch (skip old data)
 
     // Interleaver (matches TX)
     std::unique_ptr<ChannelInterleaver> interleaver_;

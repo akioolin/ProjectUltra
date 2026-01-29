@@ -195,6 +195,16 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     }
     interleaver_ = std::make_unique<ChannelInterleaver>(bits_per_symbol, v2::LDPC_CODEWORD_BITS);
 
+    // When switching to OFDM mode, save write_pos so we can skip old MC-DPSK data
+    // Old data before this point is from previous mode and useless for OFDM detection
+    if (connected && (mode == protocol::WaveformMode::OFDM_COX ||
+                      mode == protocol::WaveformMode::OFDM_CHIRP)) {
+        mode_switch_write_pos_ = write_pos_;
+        LOG_MODEM(INFO, "StreamingDecoder: OFDM mode, will skip data before pos %zu", mode_switch_write_pos_);
+    } else {
+        mode_switch_write_pos_ = 0;  // Disabled for MC-DPSK
+    }
+
     // Reset search position (don't lose buffered audio)
     search_pos_ = read_pos_;
 
@@ -382,6 +392,30 @@ bool StreamingDecoder::detectAndDecode() {
     size_t search_start_pos = 0;
     {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
+
+        // OPTIMIZATION: Skip old MC-DPSK data when in OFDM mode
+        // mode_switch_write_pos_ marks where OFDM data starts (set during mode switch)
+        if (mode_switch_write_pos_ != 0) {
+            // Check if search_pos is behind mode_switch_write_pos_ (old data)
+            bool search_behind = false;
+            if (mode_switch_write_pos_ >= search_pos_) {
+                // No wrap: search_pos is behind if it's less than switch pos
+                search_behind = (mode_switch_write_pos_ - search_pos_) > 1000;
+            } else {
+                // Wrapped: search_pos is behind if it's in the "old" region
+                // Old region is [search_pos_, MAX) + [0, mode_switch_write_pos_)
+                search_behind = true;  // If wrapped, search is definitely behind
+            }
+
+            if (search_behind) {
+                LOG_MODEM(INFO, "StreamingDecoder: Skipping old data, search %zu -> %zu (mode_switch_pos)",
+                          search_pos_, mode_switch_write_pos_);
+                search_pos_ = mode_switch_write_pos_;
+                read_pos_ = search_pos_;
+            }
+            // Clear the marker - only skip once
+            mode_switch_write_pos_ = 0;
+        }
 
         // Calculate available samples from search position
         size_t available = 0;
