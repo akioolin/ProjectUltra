@@ -8,15 +8,15 @@
 
 ---
 
-## Overall Progress: ~85% Complete
+## Overall Progress: ~90% Complete
 
 ```
 Phase 1: Core Interfaces     [####------] 40%
 Phase 2: Waveform Impl       [##########] 100%  (OFDM_COX CFO fixed!)
-Phase 3: ModemEngine Refactor[#########-] 90%   (TX path unified!)
+Phase 3: ModemEngine Refactor[##########] 100%  (RxPipeline deleted!)
 Phase 4: Sync Methods        [----------]  0%
 Phase 5: Configuration       [----------]  0%
-Phase 6: Bug Fixes           [########--] 80%   (All CFO issues fixed!)
+Phase 6: Bug Fixes           [##########] 100%  (All CFO issues fixed!)
 ```
 
 ---
@@ -146,18 +146,16 @@ Phase 6: Bug Fixes           [########--] 80%   (All CFO issues fixed!)
 **Status:** ✅ MOSTLY COMPLETE (OTFS pending)
 
 ### 3.4 Refactor RX Path with StreamingDecoder (Replaces RxPipeline)
-- [x] Create `src/gui/modem/rx_pipeline.hpp` (DEPRECATED - has bug)
-- [x] Create `src/gui/modem/rx_pipeline.cpp` (DEPRECATED - has bug)
-- [x] Create `src/gui/modem/streaming_decoder.hpp` (NEW - fixes BUG-002)
-- [x] Create `src/gui/modem/streaming_decoder.cpp` (NEW - fixes BUG-002)
+- [x] Create `src/gui/modem/streaming_decoder.hpp` (fixes BUG-002)
+- [x] Create `src/gui/modem/streaming_decoder.cpp`
 - [x] Sliding window search (like test_iwaveform)
 - [x] Correct IWaveform call sequence (reset, detectSync, setFrequencyOffset, process)
 - [x] Circular buffer with bounded size
 - [x] Thread-safe with condition variable
 - [x] Compiles and passes regression tests
-- [ ] Integrate into ModemEngine
-- [ ] Replace processRxBuffer_* methods
-- [ ] Delete RxPipeline (after integration verified)
+- [x] Integrate into ModemEngine
+- [x] Replace processRxBuffer_* methods
+- [x] Delete RxPipeline (DELETED 2026-01-28)
 
 **Status:** ✅ COMPLETE (StreamingDecoder is primary, acquisition thread removed)
 **Notes:** StreamingDecoder is now the ONLY decoder (2026-01-28).
@@ -310,7 +308,12 @@ Remaining:
    - Uses searchForSync() for Schmidl-Cox detection
    - Uses processPresynced() for demodulation (same as OFDM_CHIRP!)
    - 100% decode at 17+ dB AWGN with CFO=±50Hz
-7. [ ] Delete RxPipeline (deprecated, no longer used for decoding)
+7. [x] Delete RxPipeline (deprecated, no longer used for decoding) - DONE 2026-01-28
+   - Removed rx_pipeline_ member from ModemEngine
+   - Removed all references from modem_engine.cpp, modem_mode.cpp
+   - Deleted rx_pipeline.hpp and rx_pipeline.cpp
+   - Updated CMakeLists.txt to remove from all build targets
+   - All 11 regression tests pass
 8. [ ] Create WaveformState class (optional, nice-to-have)
 9. [ ] Remove legacy TX modulators (mc_dpsk_modulator_, ofdm_modulator_)
 10. [ ] Implement channel condition detection for adaptive mode selection

@@ -147,13 +147,8 @@ void ModemEngine::setConnected(bool connected) {
         decoder_->setRate(data_code_rate_);
         ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(config_);
 
-        // ========================================================================
-        // NEW: Initialize RxPipeline for connected mode
-        // ========================================================================
+        // Switch RX waveform for connected mode
         switchRxWaveform(waveform_mode_);
-        if (rx_pipeline_) {
-            rx_pipeline_->setDataMode(data_code_rate_, true);
-        }
 
         LOG_MODEM(INFO, "Entered connected state, configured for %s %s (pilots=%d)",
                   modulationToString(data_modulation_), codeRateToString(data_code_rate_),
@@ -172,12 +167,6 @@ void ModemEngine::setConnected(bool connected) {
             streaming_decoder_->setMode(waveform_mode_, false);  // false = disconnected
         }
         dpsk_demodulator_->reset();
-
-        // Clear RxPipeline when disconnecting
-        if (rx_pipeline_) {
-            rx_pipeline_->clearBuffer();
-            rx_pipeline_->setDataMode(CodeRate::R1_4, false);
-        }
         active_rx_waveform_ = nullptr;
 
         // Keep using connected waveform for the next TX (DISCONNECT ACK)

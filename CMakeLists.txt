@@ -102,7 +102,6 @@ if(ULTRA_BUILD_TOOLS)
         src/gui/modem/modem_rx_decode.cpp
         src/gui/modem/modem_mode.cpp
         src/gui/modem/modem_carrier_sense.cpp
-        src/gui/modem/rx_pipeline.cpp
         src/gui/modem/streaming_decoder.cpp
         src/gui/adaptive_mode.cpp
     )
@@ -119,7 +118,6 @@ if(ULTRA_BUILD_TOOLS)
         src/gui/modem/modem_rx_decode.cpp
         src/gui/modem/modem_mode.cpp
         src/gui/modem/modem_carrier_sense.cpp
-        src/gui/modem/rx_pipeline.cpp
         src/gui/modem/streaming_decoder.cpp
         src/gui/adaptive_mode.cpp
     )
@@ -136,7 +134,6 @@ if(ULTRA_BUILD_TOOLS)
         src/gui/modem/modem_rx_decode.cpp
         src/gui/modem/modem_mode.cpp
         src/gui/modem/modem_carrier_sense.cpp
-        src/gui/modem/rx_pipeline.cpp
         src/gui/modem/streaming_decoder.cpp
         src/gui/adaptive_mode.cpp
     )
@@ -153,7 +150,6 @@ if(ULTRA_BUILD_TOOLS)
         src/gui/modem/modem_rx_decode.cpp
         src/gui/modem/modem_mode.cpp
         src/gui/modem/modem_carrier_sense.cpp
-        src/gui/modem/rx_pipeline.cpp
         src/gui/modem/streaming_decoder.cpp
         src/gui/adaptive_mode.cpp
     )
@@ -200,7 +196,6 @@ if(ULTRA_BUILD_TOOLS)
         src/gui/modem/modem_rx_decode.cpp
         src/gui/modem/modem_mode.cpp
         src/gui/modem/modem_carrier_sense.cpp
-        src/gui/modem/rx_pipeline.cpp
         src/gui/modem/streaming_decoder.cpp
         src/gui/adaptive_mode.cpp
     )
@@ -227,7 +222,6 @@ if(ULTRA_BUILD_TOOLS)
         src/gui/modem/modem_rx_decode.cpp
         src/gui/modem/modem_mode.cpp
         src/gui/modem/modem_carrier_sense.cpp
-        src/gui/modem/rx_pipeline.cpp
         src/gui/modem/streaming_decoder.cpp
         src/gui/adaptive_mode.cpp
     )
@@ -276,7 +270,6 @@ if(ULTRA_BUILD_TOOLS)
         src/gui/modem/modem_rx_decode.cpp
         src/gui/modem/modem_mode.cpp
         src/gui/modem/modem_carrier_sense.cpp
-        src/gui/modem/rx_pipeline.cpp
         src/gui/modem/streaming_decoder.cpp
         src/gui/adaptive_mode.cpp
     )
@@ -308,7 +301,6 @@ if(ULTRA_BUILD_TOOLS)
         src/gui/modem/modem_rx_decode.cpp
         src/gui/modem/modem_mode.cpp
         src/gui/modem/modem_carrier_sense.cpp
-        src/gui/modem/rx_pipeline.cpp
         src/gui/modem/streaming_decoder.cpp
         src/gui/adaptive_mode.cpp
     )
@@ -343,7 +335,6 @@ if(ULTRA_BUILD_GUI)
             src/gui/modem/modem_rx_decode.cpp
             src/gui/modem/modem_mode.cpp
             src/gui/modem/modem_carrier_sense.cpp
-        src/gui/modem/rx_pipeline.cpp
         src/gui/modem/streaming_decoder.cpp
             src/gui/adaptive_mode.cpp
             src/gui/widgets/constellation.cpp

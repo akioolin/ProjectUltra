@@ -13,7 +13,6 @@
 namespace ultra {
 
 // CodeRate is defined in ultra/types.hpp - include it if needed
-// However, rx_pipeline.hpp already includes waveform_interface.hpp which includes ultra/types.hpp
 
 namespace fec {
 

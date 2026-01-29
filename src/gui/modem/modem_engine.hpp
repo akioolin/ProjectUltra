@@ -15,8 +15,7 @@
 #include "../adaptive_mode.hpp"
 #include "protocol/frame_v2.hpp"  // v2::FrameType
 #include "waveform/waveform_interface.hpp"  // IWaveform abstraction
-#include "rx_pipeline.hpp"  // RxPipeline for streaming RX (DEPRECATED)
-#include "streaming_decoder.hpp"  // StreamingDecoder - replaces RxPipeline
+#include "streaming_decoder.hpp"  // StreamingDecoder - primary decoder
 #include <memory>
 #include <vector>
 #include <queue>
@@ -229,10 +228,6 @@ private:
     std::unique_ptr<IWaveform> rx_waveform_ofdm_;      // OFDM_COX (Schmidl-Cox)
     std::unique_ptr<IWaveform> rx_waveform_ofdm_chirp_;// OFDM_CHIRP (Chirp + OFDM)
     std::unique_ptr<IWaveform> rx_waveform_mc_dpsk_;   // MC-DPSK (Chirp + DPSK)
-
-    // RxPipeline handles streaming decode (buffer, sync, demod, LDPC)
-    // DEPRECATED: Being replaced by StreamingDecoder
-    std::unique_ptr<RxPipeline> rx_pipeline_;
 
     // Current active waveform for connected mode RX
     IWaveform* active_rx_waveform_ = nullptr;

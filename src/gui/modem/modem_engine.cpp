@@ -93,28 +93,7 @@ ModemEngine::ModemEngine() {
     rx_waveform_ofdm_chirp_ = WaveformFactory::create(protocol::WaveformMode::OFDM_CHIRP, config_);
     rx_waveform_mc_dpsk_ = WaveformFactory::create(protocol::WaveformMode::MC_DPSK, config_);
 
-    // Create RxPipeline for streaming decode
-    rx_pipeline_ = std::make_unique<RxPipeline>(log_prefix_);
-    rx_pipeline_->setInterleavingEnabled(interleaving_enabled_);
-    rx_pipeline_->setInterleaverConfig(interleaver_bits_per_symbol_);
-
-    // Set callbacks to wire into existing ModemEngine callbacks
-    rx_pipeline_->setFrameCallback([this](const Bytes& frame_data, protocol::v2::FrameType frame_type) {
-        deliverFrame(frame_data);
-        notifyFrameParsed(frame_data, frame_type);
-    });
-    rx_pipeline_->setPingCallback([this](float snr_db) {
-        if (ping_received_callback_) {
-            ping_received_callback_(snr_db);
-        }
-    });
-    rx_pipeline_->setStatusCallback([this](const std::string& msg) {
-        if (status_callback_) {
-            status_callback_(msg);
-        }
-    });
-
-    LOG_MODEM(INFO, "[%s] RxPipeline + IWaveforms initialized", log_prefix_.c_str());
+    LOG_MODEM(INFO, "[%s] IWaveforms initialized", log_prefix_.c_str());
 
     // ========================================================================
     // NEW: Initialize StreamingDecoder (replaces RxPipeline + acquisition thread)
@@ -625,18 +604,11 @@ void ModemEngine::switchRxWaveform(protocol::WaveformMode mode) {
     if (new_waveform != active_rx_waveform_) {
         active_rx_waveform_ = new_waveform;
 
-        // Configure RxPipeline with new waveform
-        if (rx_pipeline_ && active_rx_waveform_) {
-            rx_pipeline_->clearBuffer();  // Clear buffer on mode switch
-            rx_pipeline_->setWaveform(active_rx_waveform_);
-            rx_pipeline_->setDataMode(data_code_rate_, connected_);
-
-            // Configure interleaving based on waveform type
-            // OFDM modes use interleaving, MC-DPSK does not
+        // StreamingDecoder handles waveform switching via setMode()
+        // Just log for debugging
+        if (active_rx_waveform_) {
             bool use_interleaving = (mode == protocol::WaveformMode::OFDM_COX ||
                                      mode == protocol::WaveformMode::OFDM_CHIRP);
-            rx_pipeline_->setInterleavingEnabled(use_interleaving);
-
             LOG_MODEM(INFO, "[%s] RX waveform switched to %s (interleaving=%d)",
                       log_prefix_.c_str(), active_rx_waveform_->getName().c_str(),
                       use_interleaving ? 1 : 0);
@@ -823,11 +795,7 @@ void ModemEngine::reset() {
     adaptive_.reset();
     use_connected_waveform_once_ = false;
 
-    // Reset RxPipeline and IWaveforms
-    if (rx_pipeline_) {
-        rx_pipeline_->clearBuffer();
-        rx_pipeline_->reset();
-    }
+    // Reset IWaveforms
     if (rx_waveform_ofdm_) rx_waveform_ofdm_->reset();
     if (rx_waveform_ofdm_chirp_) rx_waveform_ofdm_chirp_->reset();
     if (rx_waveform_mc_dpsk_) rx_waveform_mc_dpsk_->reset();

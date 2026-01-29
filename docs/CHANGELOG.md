@@ -10,6 +10,35 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-01-28: Delete RxPipeline (Cleanup)
+
+**What was changed:**
+Removed the deprecated RxPipeline class. StreamingDecoder now handles all RX processing.
+
+**Files removed:**
+- `src/gui/modem/rx_pipeline.hpp` - DELETED
+- `src/gui/modem/rx_pipeline.cpp` - DELETED
+
+**Files modified:**
+- `modem_engine.hpp`: Removed `rx_pipeline_` member and include
+- `modem_engine.cpp`: Removed `rx_pipeline_` reset block
+- `modem_mode.cpp`: Removed `rx_pipeline_` mode handling
+- `fec/codec_interface.hpp`: Removed outdated comment
+- `CMakeLists.txt`: Removed rx_pipeline.cpp from all 9 build targets
+
+**Benefits:**
+- Removed ~400 lines of deprecated code
+- Cleaner codebase with single RX path (StreamingDecoder)
+- Reduced binary size
+
+**Test verification:**
+```bash
+./tests/regression_matrix.sh
+# Expected: ALL TESTS PASSED! (11/11)
+```
+
+---
+
 ## 2026-01-28: TX Path Unification (Phase 4)
 
 **What was changed:**
