@@ -66,9 +66,10 @@ ModemEngine::ModemEngine() {
     chirp_sync_ = std::make_unique<sync::ChirpSync>(chirp_cfg);
 
     // Multi-Carrier DPSK (for fading channels - frequency diversity)
-    // Using level10: 13 carriers, 93.75 baud, DQPSK (~1203 bps)
+    // Using level8: 8 carriers, 93.75 baud, DQPSK (~735 bps)
+    // 8 carriers is more robust than 13 at low SNR with CFO (tested: 100% vs 40% at moderate fading)
     // IMPORTANT: Sync chirp config with modem's chirp_sync_ so TX and RX use same chirp
-    mc_dpsk_config_ = mc_dpsk_presets::level10();
+    mc_dpsk_config_ = mc_dpsk_presets::level8();
     mc_dpsk_config_.chirp_f_start = chirp_cfg.f_start;
     mc_dpsk_config_.chirp_f_end = chirp_cfg.f_end;
     mc_dpsk_config_.chirp_duration_ms = chirp_cfg.duration_ms;
