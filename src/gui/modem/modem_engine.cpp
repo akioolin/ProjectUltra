@@ -129,7 +129,11 @@ ModemEngine::ModemEngine() {
     protocol::WaveformMode decoder_mode = connected_ ? waveform_mode_ : protocol::WaveformMode::MC_DPSK;
     streaming_decoder_->setMode(decoder_mode, connected_);
 
-    LOG_MODEM(INFO, "[%s] StreamingDecoder initialized", log_prefix_.c_str());
+    // Sync MC-DPSK carrier count with ModemEngine's config
+    streaming_decoder_->setMCDPSKCarriers(mc_dpsk_config_.num_carriers);
+
+    LOG_MODEM(INFO, "[%s] StreamingDecoder initialized (MC-DPSK: %d carriers)",
+              log_prefix_.c_str(), mc_dpsk_config_.num_carriers);
 
     // Start RX decode thread (StreamingDecoder handles acquisition)
     startRxDecodeThread();
@@ -600,12 +604,23 @@ void ModemEngine::ensureTxWaveform(protocol::WaveformMode mode, Modulation mod, 
     }
 
     // Create new waveform using factory
-    active_tx_waveform_ = WaveformFactory::create(mode, config_);
+    // For MC-DPSK, use the configured carrier count from mc_dpsk_config_
+    if (mode == protocol::WaveformMode::MC_DPSK) {
+        active_tx_waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_.num_carriers);
+        LOG_MODEM(INFO, "[%s] TX waveform created: MC-DPSK (%d carriers), %s %s",
+                  log_prefix_.c_str(), mc_dpsk_config_.num_carriers,
+                  modulationToString(mod), codeRateToString(rate));
+    } else {
+        active_tx_waveform_ = WaveformFactory::create(mode, config_);
+        if (active_tx_waveform_) {
+            LOG_MODEM(INFO, "[%s] TX waveform created: %s, %s %s",
+                      log_prefix_.c_str(), active_tx_waveform_->getName().c_str(),
+                      modulationToString(mod), codeRateToString(rate));
+        }
+    }
+
     if (active_tx_waveform_) {
         active_tx_waveform_->configure(mod, rate);
-        LOG_MODEM(INFO, "[%s] TX waveform created: %s, %s %s",
-                  log_prefix_.c_str(), active_tx_waveform_->getName().c_str(),
-                  modulationToString(mod), codeRateToString(rate));
     } else {
         LOG_MODEM(ERROR, "[%s] Failed to create TX waveform for mode %d",
                   log_prefix_.c_str(), static_cast<int>(mode));

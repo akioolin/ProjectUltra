@@ -161,6 +161,14 @@ public:
     // This includes training, reference, and data for at least one codeword
     // Used by RxPipeline to know when enough samples are available
     virtual int getMinSamplesForFrame() const = 0;
+
+    // Get minimum samples needed for decoder to search and decode one frame
+    // This includes preamble + training + data + margin
+    // Used by StreamingDecoder for buffer threshold in connected mode
+    virtual int getMinSamplesForSearch() const {
+        // Default: preamble + frame + 20% margin
+        return static_cast<int>((getPreambleSamples() + getMinSamplesForFrame()) * 1.2);
+    }
 };
 
 // Convenience alias

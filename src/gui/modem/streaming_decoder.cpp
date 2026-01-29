@@ -112,13 +112,14 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
 // ============================================================================
 
 void StreamingDecoder::processBuffer() {
-    // Calculate minimum samples based on waveform type
-    // Chirp-based waveforms need ~3 seconds, OFDM_COX needs much less
-    size_t min_samples = MIN_SAMPLES_FOR_SEARCH;  // Default for chirp
-    if (mode_ == protocol::WaveformMode::OFDM_COX && waveform_) {
-        // OFDM_COX: Schmidl-Cox preamble (~1024) + frame (~7000) + margin for sync search
-        // Use getMinSamplesForFrame * 2 which is ~14000 samples (sufficient for sync + frame)
-        min_samples = std::max(size_t(15000), size_t(waveform_->getMinSamplesForFrame() * 2));
+    // Calculate minimum samples based on connection state
+    // Disconnected: always MC-DPSK, need full search buffer for acquisition (3 seconds)
+    // Connected: use waveform's getMinSamplesForSearch() which knows its own timing
+    size_t min_samples = MIN_SAMPLES_FOR_SEARCH;  // Default for disconnected (MC-DPSK)
+
+    if (connected_ && waveform_) {
+        // Connected mode: waveform knows how many samples it needs
+        min_samples = static_cast<size_t>(waveform_->getMinSamplesForSearch());
     }
 
     // Wait for enough data or shutdown
@@ -395,11 +396,13 @@ bool StreamingDecoder::detectAndDecode() {
     // - MC-DPSK and OFDM_CHIRP use ChirpSync
     // - OFDM_COX uses Schmidl-Cox
 
-    // Calculate mode-dependent minimum samples (same logic as processBuffer)
-    size_t min_samples_for_search = MIN_SAMPLES_FOR_SEARCH;  // Default for chirp
-    if (mode_ == protocol::WaveformMode::OFDM_COX && waveform_) {
-        // OFDM_COX: Schmidl-Cox preamble + frame + margin (same logic as processBuffer)
-        min_samples_for_search = std::max(size_t(15000), size_t(waveform_->getMinSamplesForFrame() * 2));
+    // Calculate minimum samples (same logic as processBuffer)
+    // Disconnected: always MC-DPSK, need full buffer for robust acquisition
+    // Connected: waveform knows its own timing requirements
+    size_t min_samples_for_search = MIN_SAMPLES_FOR_SEARCH;  // Default for disconnected
+
+    if (connected_ && waveform_) {
+        min_samples_for_search = static_cast<size_t>(waveform_->getMinSamplesForSearch());
     }
 
     // Copy samples for processing (release lock during heavy work)
