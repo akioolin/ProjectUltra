@@ -108,7 +108,6 @@ void ModemEngine::setConnectWaveform(protocol::WaveformMode mode) {
     // Configure DPSK for medium preset (DQPSK 62b R1/4) for connection attempts
     if (mode == protocol::WaveformMode::MC_DPSK) {
         dpsk_config_ = dpsk_presets::medium();  // DQPSK 62.5 baud
-        dpsk_modulator_ = std::make_unique<DPSKModulator>(dpsk_config_);
         dpsk_demodulator_ = std::make_unique<DPSKDemodulator>(dpsk_config_);
         LOG_MODEM(INFO, "DPSK connect mode: %d-PSK, %.1f baud",
                   dpsk_config_.num_phases(), dpsk_config_.symbol_rate());
@@ -276,8 +275,7 @@ void ModemEngine::setDPSKMode(DPSKModulation mod, int samples_per_symbol) {
     dpsk_config_.modulation = mod;
     dpsk_config_.samples_per_symbol = samples_per_symbol;
 
-    // Recreate modulator/demodulator with new config
-    dpsk_modulator_ = std::make_unique<DPSKModulator>(dpsk_config_);
+    // Recreate demodulator with new config
     dpsk_demodulator_ = std::make_unique<DPSKDemodulator>(dpsk_config_);
 
     const char* mod_name = "DQPSK";

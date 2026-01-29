@@ -49,10 +49,8 @@ ModemEngine::ModemEngine() {
     otfs_modulator_ = std::make_unique<OTFSModulator>(otfs_config_);
     otfs_demodulator_ = std::make_unique<OTFSDemodulator>(otfs_config_);
 
-    // DPSK modulator/demodulator (single-carrier, for very low SNR AWGN)
-    // Default to medium preset for connection attempts (DQPSK 62.5 baud)
+    // DPSK demodulator (single-carrier, for very low SNR mode switching)
     dpsk_config_ = dpsk_presets::medium();
-    dpsk_modulator_ = std::make_unique<DPSKModulator>(dpsk_config_);
     dpsk_demodulator_ = std::make_unique<DPSKDemodulator>(dpsk_config_);
 
     // Chirp sync for robust presence detection on fading channels
@@ -75,8 +73,7 @@ ModemEngine::ModemEngine() {
     mc_dpsk_config_.chirp_f_end = chirp_cfg.f_end;
     mc_dpsk_config_.chirp_duration_ms = chirp_cfg.duration_ms;
     mc_dpsk_config_.use_dual_chirp = chirp_cfg.use_dual_chirp;
-    mc_dpsk_modulator_ = std::make_unique<MultiCarrierDPSKModulator>(mc_dpsk_config_);
-    mc_dpsk_demodulator_ = std::make_unique<MultiCarrierDPSKDemodulator>(mc_dpsk_config_);
+    // Note: Actual MC-DPSK modulation is done by IWaveform via StreamingDecoder
 
     // Channel interleaver for time-frequency diversity on fading channels
     // Default: 60 bits/symbol for OFDM_CHIRP (30 data carriers × 2 bits DQPSK)

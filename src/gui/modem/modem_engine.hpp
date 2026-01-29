@@ -159,9 +159,7 @@ public:
     float getMCDPSKThroughput() const { return mc_dpsk_config_.getRawBitRate() * 0.25f; } // R1/4 FEC
     void setMCDPSKCarriers(int num_carriers) {
         mc_dpsk_config_.num_carriers = num_carriers;
-        // Recreate TX/RX modulators with new carrier count
-        mc_dpsk_modulator_ = std::make_unique<MultiCarrierDPSKModulator>(mc_dpsk_config_);
-        mc_dpsk_demodulator_ = std::make_unique<MultiCarrierDPSKDemodulator>(mc_dpsk_config_);
+        // Update StreamingDecoder (it creates its own waveforms internally)
         if (streaming_decoder_) {
             streaming_decoder_->setMCDPSKCarriers(num_carriers);
         }
@@ -203,14 +201,11 @@ private:
     // RX chain - OTFS
     std::unique_ptr<OTFSDemodulator> otfs_demodulator_;
 
-    // TX/RX chain - DPSK (single carrier, for very low SNR)
-    std::unique_ptr<DPSKModulator> dpsk_modulator_;
+    // DPSK demodulator (single carrier, for very low SNR mode switching)
     std::unique_ptr<DPSKDemodulator> dpsk_demodulator_;
     DPSKConfig dpsk_config_;
 
-    // TX/RX chain - Multi-Carrier DPSK (for fading channels)
-    std::unique_ptr<MultiCarrierDPSKModulator> mc_dpsk_modulator_;
-    std::unique_ptr<MultiCarrierDPSKDemodulator> mc_dpsk_demodulator_;
+    // Multi-Carrier DPSK config (actual modulation done by IWaveform via StreamingDecoder)
     MultiCarrierDPSKConfig mc_dpsk_config_;
 
     // Chirp sync for robust presence detection on fading channels

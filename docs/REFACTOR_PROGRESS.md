@@ -8,14 +8,14 @@
 
 ---
 
-## Overall Progress: ~90% Complete
+## Overall Progress: ~95% Complete
 
 ```
-Phase 1: Core Interfaces     [####------] 40%
+Phase 1: Core Interfaces     [########--] 80%   (IWaveform complete, ISyncMethod/ICodec optional)
 Phase 2: Waveform Impl       [##########] 100%  (OFDM_COX CFO fixed!)
-Phase 3: ModemEngine Refactor[##########] 100%  (RxPipeline deleted!)
-Phase 4: Sync Methods        [----------]  0%
-Phase 5: Configuration       [----------]  0%
+Phase 3: ModemEngine Refactor[##########] 100%  (RxPipeline deleted, unused modulators removed!)
+Phase 4: Sync Methods        [----------]  0%   (optional - waveforms own their sync internally)
+Phase 5: Configuration       [----------]  0%   (optional - nice-to-have)
 Phase 6: Bug Fixes           [##########] 100%  (All CFO issues fixed!)
 ```
 
@@ -31,9 +31,9 @@ Phase 6: Bug Fixes           [##########] 100%  (All CFO issues fixed!)
 - [x] Methods: detectSync, process, getSoftBits, reset
 - [x] Methods: setFrequencyOffset, isSynced, hasData
 - [x] Methods: generatePreamble, modulate (TX)
-- [ ] Methods: getStatusString, getCarrierCount (GUI support)
+- [x] Methods: getStatusString, getCarrierCount (GUI support) - all waveforms implement these
 
-**Status:** ✅ MOSTLY COMPLETE
+**Status:** ✅ COMPLETE
 **Files:** `src/waveform/waveform_interface.hpp`
 **Commit:** `ed32e05`
 
@@ -315,7 +315,11 @@ Remaining:
    - Updated CMakeLists.txt to remove from all build targets
    - All 11 regression tests pass
 8. [ ] Create WaveformState class (optional, nice-to-have)
-9. [ ] Remove legacy TX modulators (mc_dpsk_modulator_, ofdm_modulator_)
+9. [x] Remove unused modulators - DONE 2026-01-28
+   - Removed mc_dpsk_modulator_ and mc_dpsk_demodulator_ (never used)
+   - Removed dpsk_modulator_ (never used, kept demodulator for mode switching)
+   - Config structs kept for GUI display (getMCDPSKCarriers, etc.)
+   - All 11 regression tests pass
 10. [ ] Implement channel condition detection for adaptive mode selection
 
 ---
