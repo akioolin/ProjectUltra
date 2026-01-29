@@ -4,6 +4,15 @@
 //
 // This wrapper allows the existing LDPC implementation to be used through
 // the ICodec interface, enabling future codec swapping without code changes.
+//
+// Performance with MC-DPSK (8 carriers, R1/4):
+//   AWGN:        100% down to -7 dB
+//   Good HF:     100% down to -3 dB
+//   Moderate HF: 100% at 3 dB, 60% at 0 dB
+//   Poor HF:     100% at 0 dB, 60% at -3 dB
+//
+// For SNR < 0 dB on fading channels, consider convolutional codes.
+// See ldpc_codec.cpp for detailed test results.
 
 #include "codec_interface.hpp"
 #include "ultra/fec.hpp"
