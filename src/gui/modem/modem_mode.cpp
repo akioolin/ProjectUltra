@@ -46,11 +46,13 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
     waveform_mode_ = mode;
 
     // Update StreamingDecoder to use the new waveform
+    // When disconnected, always use MC_DPSK for PING detection (chirp-based sync)
     if (streaming_decoder_) {
-        streaming_decoder_->setMode(mode, connected_);
+        protocol::WaveformMode decoder_mode = connected_ ? mode : protocol::WaveformMode::MC_DPSK;
+        streaming_decoder_->setMode(decoder_mode, connected_);
     }
 
-    // Switch RxPipeline to use the new waveform (when connected)
+    // Switch RX waveform (when connected)
     if (connected_) {
         switchRxWaveform(mode);
     }
@@ -161,9 +163,10 @@ void ModemEngine::setConnected(bool connected) {
         decoder_->setRate(CodeRate::R1_4);
         ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(rx_config);
 
-        // CRITICAL: Update StreamingDecoder for disconnected state (can detect new PINGs)
+        // CRITICAL: Update StreamingDecoder for disconnected state
+        // Use MC_DPSK to detect new PINGs (chirp-based sync)
         if (streaming_decoder_) {
-            streaming_decoder_->setMode(waveform_mode_, false);  // false = disconnected
+            streaming_decoder_->setMode(protocol::WaveformMode::MC_DPSK, false);  // false = disconnected
         }
         dpsk_demodulator_->reset();
         active_rx_waveform_ = nullptr;

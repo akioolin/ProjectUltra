@@ -117,6 +117,10 @@ public:
     void setMeasuredSNR(float snr_db);
     float getMeasuredSNR() const;
 
+    // Set channel quality including fading detection
+    void setChannelQuality(float snr_db, float fading_index);
+    float getFadingIndex() const;
+
     // Get current data mode
     Modulation getDataModulation() const;
     CodeRate getDataCodeRate() const;

@@ -124,7 +124,10 @@ ModemEngine::ModemEngine() {
     });
 
     // Sync StreamingDecoder with initial waveform mode
-    streaming_decoder_->setMode(waveform_mode_, connected_);
+    // When disconnected, use MC_DPSK for PING detection (chirp-based sync)
+    // When connected, use the negotiated waveform
+    protocol::WaveformMode decoder_mode = connected_ ? waveform_mode_ : protocol::WaveformMode::MC_DPSK;
+    streaming_decoder_->setMode(decoder_mode, connected_);
 
     LOG_MODEM(INFO, "[%s] StreamingDecoder initialized", log_prefix_.c_str());
 
@@ -270,16 +273,42 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 
     if (is_v2_frame) {
         // === V2 Frame Path ===
-        // Encoding strategy:
-        // - Control frames: All CWs use R1/4 for reliability
         // Protocol rate selection:
-        // - CONNECT/CONNECT_ACK (pre-negotiation): R1/4 for robustness
-        // - DATA frames (post-negotiation): ALL codewords at negotiated rate
+        // - Pre-connection (PING/PONG/CONNECT): R1/4 for robustness
+        // - During handshake (CONNECT_ACK): R1/4 (remote not yet confirmed)
+        // - Post-handshake: ALL frames (data AND control) use negotiated rate
+        //   (ACK/NACK/DISCONNECT must use same rate as data for RX to decode)
 
         std::vector<Bytes> encoded_cws;
-        tx_code_rate = (is_data_frame && connected_) ? data_code_rate_ : CodeRate::R1_4;
+        // Use negotiated rate if connected+handshake OR for disconnect ACK (use_connected_waveform_once_)
+        tx_code_rate = ((connected_ && handshake_complete_) || use_connected_waveform_once_) ? data_code_rate_ : CodeRate::R1_4;
 
-        encoded_cws = v2::encodeFrameWithLDPC(data, tx_code_rate);
+        // Patch total_cw in frame header to match actual encoding rate
+        // Only for frames with total_cw field (Data frames 0x30-0x33, Connect frames 0x12-0x15)
+        // Control frames (ACK 0x20, NACK 0x21, etc.) are fixed 20 bytes = 1 codeword, no patching needed
+        Bytes tx_data = data;  // Make mutable copy
+        if (tx_data.size() >= 17) {  // Need at least header size for data/connect frames
+            uint8_t frame_type = tx_data[2];
+            bool is_data_or_connect = (frame_type >= 0x10 && frame_type <= 0x19) ||  // Connect frames
+                                      (frame_type >= 0x30 && frame_type <= 0x3F);    // Data frames
+            if (is_data_or_connect) {
+                // Get payload size from header (bytes 13-14)
+                uint16_t payload_len = (static_cast<uint16_t>(tx_data[13]) << 8) | tx_data[14];
+                // Calculate correct total_cw for this rate
+                uint8_t correct_cw = v2::DataFrame::calculateCodewords(payload_len, tx_code_rate);
+                if (tx_data[12] != correct_cw) {
+                    LOG_MODEM(DEBUG, "TX v2: Patching total_cw from %d to %d for %s",
+                              tx_data[12], correct_cw, codeRateToString(tx_code_rate));
+                    tx_data[12] = correct_cw;
+                    // Recalculate header CRC (over bytes 0-14)
+                    uint16_t hcrc = v2::ControlFrame::calculateCRC(tx_data.data(), 15);
+                    tx_data[15] = (hcrc >> 8) & 0xFF;
+                    tx_data[16] = hcrc & 0xFF;
+                }
+            }
+        }
+
+        encoded_cws = v2::encodeFrameWithLDPC(tx_data, tx_code_rate);
         LOG_MODEM(INFO, "TX v2: %zu bytes -> %zu codewords (all %s)",
                   data.size(), encoded_cws.size(), codeRateToString(tx_code_rate));
 
@@ -534,7 +563,13 @@ std::vector<float> ModemEngine::transmitPing() {
         }
     }
 
-    LOG_MODEM(INFO, "[%s] TX PING (chirp): %zu samples (%.2f sec)",
+    // Add trailing silence so receiver's buffer fills enough to detect the chirp
+    // StreamingDecoder needs MIN_SAMPLES_FOR_SEARCH (144000) to search
+    // Chirp is ~57600 samples, so add ~100000 samples of trailing silence
+    constexpr size_t TRAILING_SILENCE = 100000;  // ~2.1 seconds
+    output.resize(output.size() + TRAILING_SILENCE, 0.0f);
+
+    LOG_MODEM(INFO, "[%s] TX PING (chirp): %zu samples (%.2f sec, incl trailing silence)",
               log_prefix_.c_str(), output.size(), output.size() / 48000.0f);
 
     return output;
@@ -773,6 +808,17 @@ bool ModemEngine::isSynced() const {
 float ModemEngine::getCurrentSNR() const {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     return stats_.snr_db;
+}
+
+float ModemEngine::getFadingIndex() const {
+    if (streaming_decoder_) {
+        return streaming_decoder_->getLastFadingIndex();
+    }
+    return 0.0f;
+}
+
+bool ModemEngine::isFading() const {
+    return getFadingIndex() > 0.4f;
 }
 
 ChannelQuality ModemEngine::getChannelQuality() const {

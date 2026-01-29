@@ -30,6 +30,10 @@ public:
 
     void setCallsigns(const std::string& local, const std::string& remote) override;
 
+    // Set the code rate for DATA frame total_cw calculation
+    void setCodeRate(CodeRate rate) { code_rate_ = rate; }
+    CodeRate getCodeRate() const { return code_rate_; }
+
     bool sendData(const Bytes& data) override;
     bool sendData(const std::string& text) override;
     bool sendDataWithFlags(const Bytes& data, uint8_t flags) override;
@@ -72,6 +76,7 @@ private:
     Bytes pending_frame_data_;  // Serialized frame to send/resend
     int retry_count_ = 0;
     uint32_t timeout_remaining_ms_ = 0;
+    CodeRate code_rate_ = CodeRate::R1_4;  // Default R1/4, updated when connected
 
     // RX state
     uint16_t rx_expected_seq_ = 0;

@@ -262,21 +262,22 @@ if(ULTRA_BUILD_TOOLS)
         target_link_libraries(test_chirp_cfo_shift PRIVATE m)
     endif()
 
-    # HF Modem Test - Full ModemEngine pipeline with realistic HF conditions
-    add_executable(test_hf_modem
-        tools/test_hf_modem.cpp
-        src/gui/modem/modem_engine.cpp
-        src/gui/modem/modem_rx.cpp
-        src/gui/modem/modem_rx_decode.cpp
-        src/gui/modem/modem_mode.cpp
-        src/gui/modem/modem_carrier_sense.cpp
-        src/gui/modem/streaming_decoder.cpp
-        src/gui/adaptive_mode.cpp
-    )
-    target_include_directories(test_hf_modem PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-    )
-    target_link_libraries(test_hf_modem PRIVATE ultra_core)
+    # HF Modem Test - DEPRECATED (references deleted rx_pipeline.hpp)
+    # Kept for reference only - use test_iwaveform instead
+    # add_executable(test_hf_modem
+    #     tools/test_hf_modem.cpp
+    #     src/gui/modem/modem_engine.cpp
+    #     src/gui/modem/modem_rx.cpp
+    #     src/gui/modem/modem_rx_decode.cpp
+    #     src/gui/modem/modem_mode.cpp
+    #     src/gui/modem/modem_carrier_sense.cpp
+    #     src/gui/modem/streaming_decoder.cpp
+    #     src/gui/adaptive_mode.cpp
+    # )
+    # target_include_directories(test_hf_modem PRIVATE
+    #     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    # )
+    # target_link_libraries(test_hf_modem PRIVATE ultra_core)
 
     # OTFS vs OFDM comparison test
     add_executable(test_otfs_vs_ofdm tools/test_otfs_vs_ofdm.cpp)

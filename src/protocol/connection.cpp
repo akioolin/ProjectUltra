@@ -419,6 +419,7 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                                       codeRateToString(pending_code_rate_));
                             data_modulation_ = pending_modulation_;
                             data_code_rate_ = pending_code_rate_;
+                            arq_.setCodeRate(data_code_rate_);  // Update ARQ for correct total_cw
                             mode_change_pending_ = false;
 
                             // Notify application of mode change

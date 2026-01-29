@@ -146,6 +146,10 @@ public:
     // Get last measured CFO
     float getLastCFO() const { return last_cfo_.load(); }
 
+    // Get last measured fading index (from per-carrier magnitude variance)
+    // 0-1 range, > 0.4 indicates significant fading
+    float getLastFadingIndex() const { return last_fading_index_.load(); }
+
     // Get buffer fill level (0-100%)
     float getBufferFillPercent() const;
 
@@ -237,6 +241,7 @@ private:
     // Status (atomic for lock-free read from GUI)
     std::atomic<float> last_snr_{0.0f};
     std::atomic<float> last_cfo_{0.0f};
+    std::atomic<float> last_fading_index_{0.0f};
     float noise_floor_ = 0.001f;
 
     // Lifecycle

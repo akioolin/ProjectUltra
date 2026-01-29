@@ -10,6 +10,188 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-01-28: Fix Disconnect ACK Code Rate (GUI Simulator)
+
+**What was broken:**
+- GUI simulator: After receiving DISCONNECT, the ACK was sent with R1/4 instead of R2/3
+- Initiator couldn't decode ACK → timeout after 30 seconds
+- Sequence: ACK queued → setConnected(false) called → ACK transmitted with wrong rate
+
+**Root cause:**
+- V2 Frame Path at modem_engine.cpp:283 checked `connected_ && handshake_complete_`
+- When `setConnected(false)` was called, `connected_` became false
+- The queued ACK was then transmitted with R1/4 instead of negotiated rate
+
+**Files modified:**
+- `src/gui/modem/modem_engine.cpp`: Added `use_connected_waveform_once_` to code rate check
+  ```cpp
+  // Before:
+  tx_code_rate = (connected_ && handshake_complete_) ? data_code_rate_ : CodeRate::R1_4;
+  // After:
+  tx_code_rate = ((connected_ && handshake_complete_) || use_connected_waveform_once_) ? data_code_rate_ : CodeRate::R1_4;
+  ```
+
+**How it works:**
+- `use_connected_waveform_once_` is set true when `setConnected(false)` is called
+- This flag preserves the negotiated code rate for the disconnect ACK
+- Flag is cleared after the ACK is transmitted
+
+**Test verification:**
+```bash
+./build/cli_simulator --snr 20 --test
+# Expected: DISCONNECT phase completes without timeout
+# ✓ Disconnected!
+```
+
+---
+
+## 2026-01-28: Fix total_cw Mismatch for Negotiated Code Rate Frames
+
+**What was broken:**
+- DISCONNECT frame (type=0x15) showed "PARTIAL (1/3 codewords)" on receiver
+- Header had `total_cw=3` (calculated assuming R1/4) but encoded with R2/3 (1 codeword)
+- `ConnectFrame::serialize()` calculates total_cw using R1/4 (default), but TX uses negotiated rate
+
+**Root cause:**
+- Frame serialization happens before code rate is determined
+- `total_cw` in header is calculated at serialize time, not encode time
+- Disconnect frame: 44 bytes payload → 3 codewords at R1/4, but 1 codeword at R2/3
+
+**Files modified:**
+- `src/gui/modem/modem_engine.cpp`: Added total_cw patching before LDPC encoding
+  - Only patches data/connect frames (types 0x10-0x19 and 0x30-0x3F)
+  - Control frames (ACK 0x20, NACK 0x21, etc.) are fixed 20 bytes = 1 codeword, no patching
+  - Recalculates header CRC after patching
+
+**How it works:**
+1. Check if frame is data or connect type (needs total_cw field)
+2. Read payload_len from header bytes 13-14
+3. Calculate correct total_cw for actual TX code rate
+4. Patch byte 12 if different
+5. Recalculate header CRC (bytes 15-16)
+6. Encode patched frame with LDPC
+
+**Test verification:**
+```bash
+./build/cli_simulator --snr 20 --test
+# Expected: DISCONNECT phase completes
+# ✓ Disconnected!
+# DISCONNECT frame shows total_cw=1 (not 3)
+```
+
+---
+
+## 2026-01-28: Fix OFDM_COX Minimum Samples for Short Frames
+
+**What was broken:**
+- After receiving DATA, StreamingDecoder couldn't find ACK or subsequent frames
+- OFDM_COX min_samples was set to 48000 but short frames (ACK = ~18000 samples) are smaller
+- Available samples (19452) < min_samples (48000) caused decoder to skip
+
+**Files modified:**
+- `src/gui/modem/streaming_decoder.cpp`:
+  - Changed OFDM_COX min_samples from `max(48000, getMinSamplesForFrame() * 2)` (was wrong)
+  - To `max(15000, getMinSamplesForFrame() * 2)` (~14000 samples sufficient)
+
+**Test verification:**
+```bash
+./build/cli_simulator --snr 20 --test
+# Expected: All 3 messages received correctly
+# ✓ Message 1 received correctly!
+# ✓ Message 2 received correctly!
+# ✓ Message 3 received correctly!
+```
+
+---
+
+## 2026-01-28: Fix Control Frame Code Rate When Connected
+
+**What was broken:**
+- After connection, control frames (ACK, NACK, DISCONNECT) were sent with R1/4
+- But receiver expected negotiated rate (e.g., R2/3)
+- Caused ACK decode failures after DATA received correctly
+
+**Root cause:**
+- `modem_engine.cpp` line 283: `tx_code_rate = (is_data_frame && connected_) ? data_code_rate_ : CodeRate::R1_4;`
+- This only used negotiated rate for DATA frames, not control frames
+
+**Files modified:**
+- `src/gui/modem/modem_engine.cpp`:
+  - Changed rate selection: `tx_code_rate = (connected_ && handshake_complete_) ? data_code_rate_ : CodeRate::R1_4;`
+  - Now ALL frames (data AND control) use negotiated rate after handshake
+
+**How it works:**
+1. Pre-connection (PING/PONG/CONNECT): Use R1/4 for robustness
+2. During handshake (CONNECT_ACK): Still use R1/4 (remote not confirmed yet)
+3. Post-handshake: ALL frames use negotiated rate for proper decoding
+
+**Test verification:**
+```bash
+./build/cli_simulator --snr 20 --test
+# Expected: All 3 messages received + ACKs decoded correctly
+```
+
+---
+
+## 2026-01-28: Fix PING Detection in cli_simulator (Connection Phase)
+
+**What was broken:**
+- PING frames (chirp-only) were not being detected by StreamingDecoder
+- Two root causes:
+  1. Receiver needed MIN_SAMPLES_FOR_SEARCH (144000) but PING/PONG was only 57600 samples
+  2. PING detection logic checked `codewords_ok == 0` but LDPC "succeeded" on garbage (codewords_ok=1)
+
+**Files modified:**
+- `src/gui/modem/modem_engine.cpp`: Added 100000 samples trailing silence to PING/PONG so receiver buffer fills
+- `src/gui/modem/streaming_decoder.cpp`: Fixed PING detection logic
+  - Changed check from `!result.success && result.codewords_ok == 0 && result.frame_data.empty()`
+  - To `!result.success && result.frame_data.empty()` (catches LDPC "success" on garbage)
+  - Added handlePingDetection() lambda for cleaner PING handling
+
+**How it works:**
+1. PING = chirp only (no training/data after)
+2. After chirp detection, try to decode data
+3. If no valid "UL" magic header found → it's a PING (regardless of LDPC success on noise)
+4. Trailing silence ensures receiver has enough samples for chirp detection
+
+**Test verification:**
+```bash
+./build/cli_simulator --snr 20
+# Expected: Phase 1 CONNECTION shows "✓ Connected!"
+# PING→PONG→CONNECT→CONNECT_ACK flow works
+```
+
+**Known limitation:** DATA phase still failing (separate issue with OFDM codeword handling)
+
+---
+
+## 2026-01-28: Add Fading Detection for Mode Negotiation
+
+**What was changed:**
+- Added per-carrier magnitude variance tracking to detect frequency-selective fading
+- Mode negotiation now considers both SNR and fading index
+
+**Files modified:**
+- `src/psk/multi_carrier_dpsk.hpp`: Added `carrier_magnitudes_`, `getFadingIndex()`, `isFading()`
+- `src/waveform/waveform_interface.hpp`: Added virtual `getFadingIndex()`, `isFading()`
+- `src/waveform/mc_dpsk_waveform.hpp/cpp`: Override fading methods
+- `src/gui/modem/streaming_decoder.hpp/cpp`: Added `last_fading_index_`, `getLastFadingIndex()`
+- `src/gui/modem/modem_engine.hpp/cpp`: Added `getFadingIndex()`, `isFading()`
+- `src/protocol/connection.hpp/cpp`: Added `fading_index_`, `setChannelQuality()`
+- `src/protocol/connection_handlers.cpp`: Updated `negotiateMode()` with fading-aware logic
+- `tools/cli_simulator.cpp`: Pass channel quality (SNR + fading) to protocol
+
+**Mode selection logic:**
+- SNR < 0 dB: MFSK (not implemented yet)
+- SNR 0-10 dB: MC_DPSK
+- SNR 10-17 dB: OFDM_CHIRP if fading, MC_DPSK if stable
+- SNR > 17 dB: OFDM_COX if stable, OFDM_CHIRP if fading
+
+**Fading index calculation:**
+Coefficient of variation (std_dev / mean) of per-carrier magnitudes. Values > 0.4 indicate significant fading.
+
+---
+
 ## 2026-01-28: Delete RxPipeline (Cleanup)
 
 **What was changed:**

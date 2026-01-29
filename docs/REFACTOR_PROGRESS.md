@@ -8,16 +8,24 @@
 
 ---
 
-## Overall Progress: ~95% Complete
+## Overall Progress: ~98% Complete
 
 ```
 Phase 1: Core Interfaces     [########--] 80%   (IWaveform complete, ISyncMethod/ICodec optional)
 Phase 2: Waveform Impl       [##########] 100%  (OFDM_COX CFO fixed!)
-Phase 3: ModemEngine Refactor[##########] 100%  (RxPipeline deleted, unused modulators removed!)
+Phase 3: ModemEngine Refactor[##########] 100%  (RxPipeline deleted, fading detection added!)
 Phase 4: Sync Methods        [----------]  0%   (optional - waveforms own their sync internally)
 Phase 5: Configuration       [----------]  0%   (optional - nice-to-have)
-Phase 6: Bug Fixes           [##########] 100%  (All CFO issues fixed!)
+Phase 6: Bug Fixes           [##########] 100%  (CFO + PING detection fixed!)
 ```
+
+### Recent Updates (2026-01-28)
+- ✅ Fixed PING detection in cli_simulator (connection phase works)
+- ✅ Added fading detection for mode negotiation
+- ✅ Fixed control frame code rate (ACK/NACK use negotiated rate when connected)
+- ✅ Fixed OFDM_COX min_samples for short frames (ACK detection now works)
+- ✅ **cli_simulator DATA phase WORKING!** All 3 messages sent/received correctly
+- ✅ **cli_simulator DISCONNECT phase WORKING!** Fixed total_cw mismatch for negotiated rate
 
 ---
 
@@ -163,9 +171,33 @@ Phase 6: Bug Fixes           [##########] 100%  (All CFO issues fixed!)
 - rxDecodeLoop() only uses StreamingDecoder
 - Acquisition thread removed (~1200 lines of legacy code deleted)
 - All 11 regression tests pass
+- PING detection fixed (2026-01-28): cli_simulator connection phase works
 
 **Bug Fix:** RxPipeline called reset() AFTER setFrequencyOffset(), violating INV-WAVE-002.
          StreamingDecoder uses correct order: reset() → detectSync() → setFrequencyOffset() → process()
+
+### 3.5 Fading Detection for Mode Negotiation
+- [x] Add per-carrier magnitude tracking to MultiCarrierDPSKDemodulator
+- [x] Implement getFadingIndex() (coefficient of variation)
+- [x] Add to IWaveform interface
+- [x] Add to MCDPSKWaveform
+- [x] Add to StreamingDecoder (last_fading_index_)
+- [x] Add to ModemEngine (getFadingIndex, isFading)
+- [x] Update Connection class (setChannelQuality)
+- [x] Update negotiateMode() in connection_handlers.cpp
+
+**Status:** ✅ COMPLETE (2026-01-28)
+**Notes:** Mode negotiation now considers both SNR and fading index
+
+### 3.6 CLI Simulator Full Protocol Flow
+- [x] Fix PING detection in StreamingDecoder
+- [x] Add trailing silence to PING/PONG for buffer fill
+- [x] PING → PONG → CONNECT → CONNECT_ACK flow works
+- [x] DATA phase works (all 3 messages sent/received correctly)
+- [x] DISCONNECT phase works (fixed total_cw mismatch for negotiated rate)
+
+**Status:** ✅ COMPLETE (all 4 phases work)
+**Notes:** Full protocol flow working at SNR 20 dB AWGN: PING→PONG→CONNECT→DATA×3→DISCONNECT
 
 ---
 
@@ -230,8 +262,8 @@ Phase 6: Bug Fixes           [##########] 100%  (All CFO issues fixed!)
 | Tool | Status | Future |
 |------|--------|--------|
 | **test_iwaveform** | ✅ WORKING | **PRIMARY** - Will become official test tool (rename planned) |
-| **cli_simulator** | ⚠️ CONNECTION OK | **PRIMARY** - Connection phase works (PING/PONG/CONNECT), DATA phase needs RxPipeline fix |
-| test_hf_modem | ⚠️ LEGACY | **DEPRECATE** - Reference only, will be removed |
+| **cli_simulator** | ✅ FULLY WORKING | **PRIMARY** - Full PING→CONNECT→DATA→DISCONNECT flow works! |
+| test_hf_modem | ❌ DEPRECATED | Removed from build - references deleted rx_pipeline.hpp |
 | profile_acquisition | ⚠️ UNKNOWN | TBD |
 
 ### Testing Strategy
@@ -246,10 +278,11 @@ Phase 6: Bug Fixes           [##########] 100%  (All CFO issues fixed!)
 2. `cli_simulator` → Keep for protocol testing
    - Full protocol flow (PING → CONNECT → DATA → DISCONNECT)
    - Two-station simulation
-   - Connection phase working (2026-01-28), DATA phase needs RxPipeline fix
+   - **DATA phase working (2026-01-28)** - All messages sent/received correctly
+   - All 4 phases complete (DISCONNECT fixed 2026-01-28)
 
-**Legacy (to be removed):**
-- `test_hf_modem` - Old approach, reference only
+**Removed:**
+- `test_hf_modem` - Removed from build, references deleted rx_pipeline.hpp
 
 ---
 

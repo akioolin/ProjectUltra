@@ -402,6 +402,16 @@ float ProtocolEngine::getMeasuredSNR() const {
     return connection_.getMeasuredSNR();
 }
 
+void ProtocolEngine::setChannelQuality(float snr_db, float fading_index) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_.setChannelQuality(snr_db, fading_index);
+}
+
+float ProtocolEngine::getFadingIndex() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return connection_.getFadingIndex();
+}
+
 Modulation ProtocolEngine::getDataModulation() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return connection_.getDataModulation();

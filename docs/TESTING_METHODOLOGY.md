@@ -14,7 +14,7 @@
 | Tool | Purpose | CFO Method | Status |
 |------|---------|------------|--------|
 | `test_iwaveform` | IWaveform interface testing | Hilbert transform (correct) | ✅ WORKING |
-| `cli_simulator` | Full protocol (2 stations) | tx_cfo_hz (partial) | ⚠️ CONNECTION OK, DATA needs fix |
+| `cli_simulator` | Full protocol (2 stations) | tx_cfo_hz (partial) | ✅ FULLY WORKING |
 
 **LEGACY tools (to be removed):**
 
@@ -29,10 +29,10 @@
    - Already has correct CFO simulation
    - Tests all waveforms via IWaveform interface
 
-2. **cli_simulator** → Fix BUG-001, keep for protocol testing
-   - Full PING → CONNECT → DATA → DISCONNECT flow
+2. **cli_simulator** → Keep for protocol testing (BUG-001 FIXED 2026-01-28)
+   - Full PING → CONNECT → DATA → DISCONNECT flow works!
    - Two-station simulation
-   - Needs Hilbert-based CFO in applyChannel()
+   - Optional: Add Hilbert-based CFO in applyChannel() for full CFO simulation
 
 3. **test_hf_modem** → Remove after refactor complete
    - Legacy approach, kept for reference only

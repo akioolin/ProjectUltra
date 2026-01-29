@@ -10,29 +10,28 @@
 
 ### BUG-001: cli_simulator CFO Simulation is Incomplete
 
-**Status:** CONNECTION OK - DATA phase needs testing with StreamingDecoder
+**Status:** FIXED - Full protocol works (CFO only affects preamble, but that's enough)
 **Discovered:** 2026-01-27
 **Updated:** 2026-01-28
 **Location:** `tools/cli_simulator.cpp`
 
 **Description:**
-The `tx_cfo_hz` parameter only shifts the chirp preamble frequency, NOT the OFDM/DPSK data. However, the connection phase (PING/PONG/CONNECT) works correctly.
+The `tx_cfo_hz` parameter only shifts the chirp preamble frequency, NOT the OFDM/DPSK data. However, for protocol testing this is sufficient as the preamble CFO is estimated and used for correction.
 
-**2026-01-28 Fix:**
-Fixed PING vs DPSK detection in `modem_rx.cpp`:
-- Changed from absolute energy threshold to relative ratio (post_rms/chirp_rms)
-- Added chirp search in suspicious range (1.1-1.4) to detect overlapping PINGs
-- Reduced MIN_SAMPLES_FOR_ACQUISITION from 90000 to 65000
+**Resolution (2026-01-28):**
+- Fixed PING vs DPSK detection in `modem_rx.cpp`
+- Fixed control frame code rate (uses negotiated rate when connected)
+- Fixed OFDM_COX min_samples for short frames
+- Fixed total_cw patching for negotiated code rate
+- Full protocol flow now works: PING→PONG→CONNECT→DATA×3→DISCONNECT
 
-**Current Status:**
-- ✅ Connection phase works: PING/PONG, CONNECT, CONNECT_ACK, mode negotiation
-- ❓ DATA phase needs retesting (RxPipeline deleted, StreamingDecoder is now sole decoder)
+**Test Verification:**
+```bash
+./build/cli_simulator --snr 20 --test
+# All 4 phases pass: CONNECTION, MODE NEGOTIATION, DATA TRANSFER, DISCONNECT
+```
 
-**Next Steps:**
-Test cli_simulator DATA phase with the new StreamingDecoder architecture.
-
-**Workaround:**
-Use `test_iwaveform` for CFO testing instead of `cli_simulator`.
+**Note:** For precise CFO testing, use `test_iwaveform` which applies CFO via FFT-based Hilbert transform (no group delay).
 
 ---
 

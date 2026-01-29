@@ -276,7 +276,9 @@ private:
         });
 
         modem_.setRawDataCallback([this](const Bytes& data) {
-            protocol_.setMeasuredSNR(snr_db_);
+            // Pass channel quality (SNR + fading) to protocol for mode negotiation
+            float fading_index = modem_.getFadingIndex();
+            protocol_.setChannelQuality(snr_db_, fading_index);
             protocol_.onRxData(data);
         });
 
@@ -347,7 +349,9 @@ private:
         });
 
         virtual_modem_->setRawDataCallback([this](const Bytes& data) {
-            virtual_protocol_.setMeasuredSNR(snr_db_);
+            // Pass channel quality (SNR + fading) to protocol for mode negotiation
+            float fading_index = virtual_modem_->getFadingIndex();
+            virtual_protocol_.setChannelQuality(snr_db_, fading_index);
             virtual_protocol_.onRxData(data);
         });
 

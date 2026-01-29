@@ -300,4 +300,18 @@ int MCDPSKWaveform::getMinSamplesForFrame() const {
     return training_samples + ref_samples + data_samples;
 }
 
+float MCDPSKWaveform::getFadingIndex() const {
+    if (demodulator_) {
+        return demodulator_->getFadingIndex();
+    }
+    return 0.0f;
+}
+
+bool MCDPSKWaveform::isFading() const {
+    if (demodulator_) {
+        return demodulator_->isFading();
+    }
+    return false;
+}
+
 } // namespace ultra

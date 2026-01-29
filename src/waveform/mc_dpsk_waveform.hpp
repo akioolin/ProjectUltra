@@ -97,6 +97,17 @@ public:
     // Get configuration
     const MultiCarrierDPSKConfig& getConfig() const { return config_; }
 
+    // ========================================================================
+    // Channel Quality / Fading Detection (IWaveform override)
+    // ========================================================================
+
+    // Get fading index (0-1, higher = more fading)
+    // Based on per-carrier signal magnitude variance
+    float getFadingIndex() const override;
+
+    // Check if channel appears to be fading (uses threshold 0.4)
+    bool isFading() const override;
+
 private:
     void initComponents();
 

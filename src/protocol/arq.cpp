@@ -25,8 +25,8 @@ bool StopAndWaitARQ::sendData(const Bytes& data) {
         return false;
     }
 
-    // Create v2 DATA frame
-    auto frame = v2::DataFrame::makeData(local_call_, remote_call_, tx_seq_, data);
+    // Create v2 DATA frame with correct code rate for total_cw calculation
+    auto frame = v2::DataFrame::makeData(local_call_, remote_call_, tx_seq_, data, code_rate_);
     pending_frame_data_ = frame.serialize();
     retry_count_ = 0;
 
@@ -57,8 +57,8 @@ bool StopAndWaitARQ::sendDataWithFlags(const Bytes& data, uint8_t flags) {
         return false;
     }
 
-    // Create v2 DATA frame with custom flags
-    auto frame = v2::DataFrame::makeData(local_call_, remote_call_, tx_seq_, data);
+    // Create v2 DATA frame with custom flags and correct code rate
+    auto frame = v2::DataFrame::makeData(local_call_, remote_call_, tx_seq_, data, code_rate_);
     frame.flags = flags;
     pending_frame_data_ = frame.serialize();
     retry_count_ = 0;

@@ -113,8 +113,9 @@ void StreamingDecoder::processBuffer() {
     // Chirp-based waveforms need ~3 seconds, OFDM_COX needs much less
     size_t min_samples = MIN_SAMPLES_FOR_SEARCH;  // Default for chirp
     if (mode_ == protocol::WaveformMode::OFDM_COX && waveform_) {
-        // OFDM_COX: preamble + frame is much shorter (~20000 samples max)
-        min_samples = std::max(size_t(48000), size_t(waveform_->getMinSamplesForFrame() * 2));
+        // OFDM_COX: Schmidl-Cox preamble (~1024) + frame (~7000) + margin for sync search
+        // Use getMinSamplesForFrame * 2 which is ~14000 samples (sufficient for sync + frame)
+        min_samples = std::max(size_t(15000), size_t(waveform_->getMinSamplesForFrame() * 2));
     }
 
     // Wait for enough data or shutdown
@@ -291,6 +292,7 @@ void StreamingDecoder::reset() {
     noise_floor_ = 0.001f;
     last_snr_.store(0.0f);
     last_cfo_.store(0.0f);
+    last_fading_index_.store(0.0f);
 
     LOG_MODEM(INFO, "StreamingDecoder: Reset");
 }
@@ -371,7 +373,8 @@ bool StreamingDecoder::detectAndDecode() {
     // Calculate mode-dependent minimum samples (same logic as processBuffer)
     size_t min_samples_for_search = MIN_SAMPLES_FOR_SEARCH;  // Default for chirp
     if (mode_ == protocol::WaveformMode::OFDM_COX && waveform_) {
-        min_samples_for_search = std::max(size_t(48000), size_t(waveform_->getMinSamplesForFrame() * 2));
+        // OFDM_COX: Schmidl-Cox preamble + frame + margin (same logic as processBuffer)
+        min_samples_for_search = std::max(size_t(15000), size_t(waveform_->getMinSamplesForFrame() * 2));
     }
 
     // Copy samples for processing (release lock during heavy work)
@@ -443,25 +446,28 @@ bool StreamingDecoder::detectAndDecode() {
     float snr = estimateSNRFromChirp(sync_result.correlation, noise_floor_);
     last_snr_.store(snr);
     last_cfo_.store(sync_result.cfo_hz);
+    // Fading index will be updated after process() when we have per-carrier data
 
-    // Check if this is PING only (chirp without data)
-    // PING detection only applies to chirp-based modes (MC-DPSK, OFDM_CHIRP)
+    // Check if this is a chirp-based mode (MC-DPSK, OFDM_CHIRP)
     // OFDM_COX uses Schmidl-Cox sync and doesn't have chirp-based PINGs
     bool uses_chirp_ping = (mode_ == protocol::WaveformMode::MC_DPSK ||
                             mode_ == protocol::WaveformMode::OFDM_CHIRP);
-    size_t chirp_end_in_workbuf = static_cast<size_t>(sync_result.start_sample);
-    if (uses_chirp_ping && isPingOnly(work_buffer, chirp_end_in_workbuf)) {
+
+    // Helper lambda to handle PING detection when decode fails
+    auto handlePingDetection = [&]() {
+        if (!uses_chirp_ping) return false;
+
         // PING detected - queue result and advance
-        DecodeResult result;
-        result.success = true;
-        result.is_ping = true;
-        result.frame_type = v2::FrameType::PING;
-        result.snr_db = snr;
-        result.cfo_hz = sync_result.cfo_hz;
+        DecodeResult ping_result;
+        ping_result.success = true;
+        ping_result.is_ping = true;
+        ping_result.frame_type = v2::FrameType::PING;
+        ping_result.snr_db = snr;
+        ping_result.cfo_hz = sync_result.cfo_hz;
 
         {
             std::lock_guard<std::mutex> lock(queue_mutex_);
-            frame_queue_.push(result);
+            frame_queue_.push(ping_result);
         }
 
         if (ping_callback_) {
@@ -473,19 +479,21 @@ bool StreamingDecoder::detectAndDecode() {
             stats_.pings_received++;
         }
 
-        // Advance past chirp (use actual position from work_buffer)
+        // Advance past chirp
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
-            // Advance to just past where chirp ended + guard
-            size_t advance = chirp_end_in_workbuf + SLIDE_STEP;
+            // Advance past the chirp position + some guard
+            size_t chirp_samples = 57600;  // ~1.2 sec chirp
+            size_t advance = static_cast<size_t>(sync_result.start_sample) + chirp_samples;
             search_pos_ = (search_pos_ + advance) % MAX_BUFFER_SAMPLES;
+            read_pos_ = search_pos_;
             trimOldSamples(MIN_SAMPLES_FOR_SEARCH * 2);
         }
 
-        LOG_MODEM(INFO, "StreamingDecoder: PING detected, SNR=%.1f dB, CFO=%.1f Hz",
+        LOG_MODEM(INFO, "StreamingDecoder: PING detected (no valid data after chirp), SNR=%.1f dB, CFO=%.1f Hz",
                   snr, sync_result.cfo_hz);
         return true;
-    }
+    };
 
     // Data frame - apply CFO and process
     // NOTE: Don't call reset() here - detectSync already set up waveform state
@@ -495,6 +503,8 @@ bool StreamingDecoder::detectAndDecode() {
     // Get frame data starting from sync position
     int data_start = sync_result.start_sample;
     if (data_start < 0 || static_cast<size_t>(data_start) >= work_buffer.size()) {
+        // Invalid position - might be PING (chirp at end of buffer with no data)
+        if (handlePingDetection()) return true;
         std::lock_guard<std::mutex> lock(buffer_mutex_);
         search_pos_ = (search_pos_ + SLIDE_STEP) % MAX_BUFFER_SAMPLES;
         return false;
@@ -505,8 +515,26 @@ bool StreamingDecoder::detectAndDecode() {
     size_t available_after_chirp = work_buffer.size() - static_cast<size_t>(data_start);
 
     if (available_after_chirp < min_frame_samples) {
+        // Not enough samples for a full data frame
+        // This could be a PING (chirp-only, no data follows)
+        // Check if we have SOME samples after chirp but they're mostly silence/noise
+        if (available_after_chirp > 1000) {
+            // We have some samples - check if they look like data or noise
+            float energy = 0.0f;
+            size_t check_len = std::min(available_after_chirp, size_t(5000));
+            for (size_t i = 0; i < check_len; i++) {
+                float s = work_buffer[data_start + i];
+                energy += s * s;
+            }
+            energy = std::sqrt(energy / check_len);
+
+            // If energy is very low (< 0.1 RMS), it's likely a PING
+            if (energy < 0.1f) {
+                if (handlePingDetection()) return true;
+            }
+        }
+
         // Not enough samples yet - wait for more data
-        // Don't advance search_pos, let buffer fill more
         LOG_MODEM(DEBUG, "StreamingDecoder: Need more samples (have %zu, need %zu)",
                   available_after_chirp, min_frame_samples);
         return false;
@@ -522,7 +550,9 @@ bool StreamingDecoder::detectAndDecode() {
     bool process_ok = waveform_->process(frame_span);
 
     if (!process_ok) {
-        LOG_MODEM(DEBUG, "StreamingDecoder: process() returned false");
+        LOG_MODEM(DEBUG, "StreamingDecoder: process() returned false - checking for PING");
+        // process() failed - could be PING (no training/data after chirp)
+        if (handlePingDetection()) return true;
         std::lock_guard<std::mutex> lock(buffer_mutex_);
         size_t advance = sync_result.start_sample + SLIDE_STEP;
         search_pos_ = (search_pos_ + advance) % MAX_BUFFER_SAMPLES;
@@ -533,13 +563,18 @@ bool StreamingDecoder::detectAndDecode() {
     // Get soft bits
     auto soft_bits = waveform_->getSoftBits();
     if (soft_bits.empty()) {
-        LOG_MODEM(DEBUG, "StreamingDecoder: No soft bits from waveform");
+        LOG_MODEM(DEBUG, "StreamingDecoder: No soft bits from waveform - checking for PING");
+        // No soft bits - could be PING
+        if (handlePingDetection()) return true;
         std::lock_guard<std::mutex> lock(buffer_mutex_);
         size_t advance = sync_result.start_sample + SLIDE_STEP;
         search_pos_ = (search_pos_ + advance) % MAX_BUFFER_SAMPLES;
         read_pos_ = search_pos_;  // Prevent infinite loop
         return false;
     }
+
+    // Update fading index from waveform (available after process/getSoftBits)
+    last_fading_index_.store(waveform_->getFadingIndex());
 
     // Decode frame
     DecodeResult result = decodeFrame(soft_bits, snr, sync_result.cfo_hz);
@@ -557,6 +592,17 @@ bool StreamingDecoder::detectAndDecode() {
         }
         // Exponential moving average for decode time
         stats_.avg_decode_time_ms = 0.9f * stats_.avg_decode_time_ms + 0.1f * decode_time_ms;
+    }
+
+    // Check if decode failed to produce a valid frame - might be PING
+    // A PING has chirp but no data, so LDPC will decode garbage without valid "UL" header
+    // This happens when:
+    //   1. LDPC decode fails completely (codewords_ok == 0)
+    //   2. LDPC succeeds but decoded data has no valid "UL" magic (frame_data empty)
+    if (!result.success && result.frame_data.empty()) {
+        LOG_MODEM(INFO, "StreamingDecoder: No valid frame after chirp (cw_ok=%d) - checking for PING",
+                  result.codewords_ok);
+        if (handlePingDetection()) return true;
     }
 
     // Queue result if we got any data

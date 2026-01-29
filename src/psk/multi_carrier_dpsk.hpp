@@ -363,6 +363,36 @@ public:
     // Get last chirp correlation value
     float getLastChirpCorrelation() const { return last_chirp_corr_; }
 
+    // Get fading index (coefficient of variation of per-carrier magnitudes)
+    // Returns 0-1 where: < 0.3 = stable, 0.3-0.6 = mild fading, > 0.6 = heavy fading
+    float getFadingIndex() const {
+        if (carrier_magnitudes_.empty()) return 0.0f;
+
+        // Calculate mean
+        float sum = 0.0f;
+        for (float m : carrier_magnitudes_) sum += m;
+        float mean = sum / carrier_magnitudes_.size();
+
+        if (mean < 0.001f) return 0.0f;  // No signal
+
+        // Calculate standard deviation
+        float var_sum = 0.0f;
+        for (float m : carrier_magnitudes_) {
+            float diff = m - mean;
+            var_sum += diff * diff;
+        }
+        float std_dev = std::sqrt(var_sum / carrier_magnitudes_.size());
+
+        // Coefficient of variation (normalized std dev)
+        return std_dev / mean;
+    }
+
+    // Check if channel appears to be fading based on per-carrier variance
+    // threshold: fading index above this is considered "fading" (default 0.4)
+    bool isFading(float threshold = 0.4f) const {
+        return getFadingIndex() > threshold;
+    }
+
     // Set expected data size in bytes (to know when frame is complete)
     void setExpectedDataBytes(size_t bytes) {
         expected_data_bytes_ = bytes;
@@ -380,6 +410,7 @@ public:
         chirp_position_ = -1;
         last_chirp_corr_ = 0.0f;
         expected_data_bytes_ = 0;
+        carrier_magnitudes_.clear();
     }
 
     const MultiCarrierDPSKConfig& getConfig() const { return config_; }
@@ -439,12 +470,18 @@ public:
         std::vector<float> soft_bits;
         soft_bits.reserve(num_symbols * config_.num_carriers * config_.bits_per_symbol);
 
+        // Track per-carrier magnitudes for fading detection
+        std::vector<float> carrier_mag_sum(config_.num_carriers, 0.0f);
+
         for (int sym = 0; sym < num_symbols; sym++) {
             const float* sym_data = data.data() + sym * config_.samples_per_symbol;
 
             for (int c = 0; c < config_.num_carriers; c++) {
                 Complex current = demodulateOneSymbol(sym_data, c);
                 float mag = std::abs(current);
+
+                // Accumulate magnitude for fading detection
+                carrier_mag_sum[c] += mag;
 
                 Complex normalized = (mag > 0.0001f) ? current / mag : Complex(1.0f, 0.0f);
                 Complex diff = normalized * std::conj(prev_symbols_[c]);
@@ -466,6 +503,12 @@ public:
                     soft_bits.push_back(std::max(-10.0f, std::min(10.0f, sb)));
                 }
             }
+        }
+
+        // Store average per-carrier magnitudes for fading detection
+        carrier_magnitudes_.resize(config_.num_carriers);
+        for (int c = 0; c < config_.num_carriers; c++) {
+            carrier_magnitudes_[c] = (num_symbols > 0) ? carrier_mag_sum[c] / num_symbols : 0.0f;
         }
 
         return soft_bits;
@@ -696,6 +739,9 @@ private:
     float last_chirp_corr_;
     size_t expected_data_bytes_ = 0;
     bool external_chirp_detected_ = false;  // True when chirp detected via external detectSync()
+
+    // Per-carrier signal magnitudes (for fading detection)
+    std::vector<float> carrier_magnitudes_;
 
     // Precomputed sizes
     size_t chirp_samples_;

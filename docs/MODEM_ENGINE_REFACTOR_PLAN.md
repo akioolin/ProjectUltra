@@ -691,16 +691,16 @@ SyncInfo getLastSync() const { return last_sync_; }
 
 ## Success Criteria
 
-- [ ] All regression tests pass
-- [ ] test_iwaveform works for MC-DPSK, OFDM_CHIRP, OFDM_COX
-- [ ] cli_simulator full protocol (PING→CONNECT→DATA→DISCONNECT) works
+- [x] All regression tests pass (11/11 pass)
+- [x] test_iwaveform works for MC-DPSK, OFDM_CHIRP, OFDM_COX
+- [x] cli_simulator full protocol (PING→CONNECT→DATA→DISCONNECT) works ✅ 2026-01-28
 - [ ] ModemEngine has ~4 pointers (down from 13+)
 - [ ] 2 threads instead of 3
-- [ ] processRxBuffer_* methods removed (-800 lines)
-- [ ] RxPipeline deleted, replaced by StreamingDecoder
-- [ ] Adding new waveform = only implement IWaveform class
-- [ ] PING detection works (chirp-only frames)
-- [ ] SNR estimation works (for mode negotiation)
+- [x] processRxBuffer_* methods removed (-800 lines)
+- [x] RxPipeline deleted, replaced by StreamingDecoder
+- [x] Adding new waveform = only implement IWaveform class
+- [x] PING detection works (chirp-only frames)
+- [x] SNR estimation works (for mode negotiation)
 - [ ] Graceful shutdown (no hangs, no crashes)
 - [ ] Continuous operation stable (1+ hour stress test)
 

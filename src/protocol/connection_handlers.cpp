@@ -173,6 +173,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // Set our local data mode immediately
         data_modulation_ = rec_mod;
         data_code_rate_ = rec_rate;
+        arq_.setCodeRate(data_code_rate_);  // Update ARQ for correct total_cw calculation
 
         // Use hash-based method since we may not know the actual callsign
         // CONNECT_ACK now carries the initial data mode - no separate MODE_CHANGE needed!
@@ -218,6 +219,7 @@ void Connection::handleConnectAck(const v2::ConnectFrame& frame, const std::stri
     // Apply the initial data mode immediately
     data_modulation_ = init_mod;
     data_code_rate_ = init_rate;
+    arq_.setCodeRate(data_code_rate_);  // Update ARQ for correct total_cw calculation
 
     // Update remote callsign if we got it from the frame
     if (!src_call.empty() && (remote_call_.empty() || remote_call_ == "REMOTE")) {
@@ -444,29 +446,57 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
         }
     }
 
-    // AUTO mode: Select based on measured SNR
-    // Thresholds based on testing (see CLAUDE.md):
-    //   < 0 dB:  MFSK (works at -17 dB reported)
-    //   0-17 dB: DPSK (single-carrier, robust - OFDM sync fails below ~17 dB)
-    //   > 17 dB: OFDM (highest throughput)
+    // AUTO mode: Select based on measured SNR and channel fading
+    // Thresholds based on testing:
+    //   < 0 dB:   MFSK (very low SNR)
+    //   0-10 dB:  MC_DPSK (robust for low SNR and fading)
+    //   10-17 dB: OFDM_CHIRP if fading, MC_DPSK otherwise (transitional range)
+    //   > 17 dB:  OFDM_COX if stable, OFDM_CHIRP if fading (high throughput)
     float snr = measured_snr_db_;
-    LOG_MODEM(INFO, "Connection: AUTO mode selection, SNR=%.1f dB", snr);
+    bool is_fading = isFading();
+    LOG_MODEM(INFO, "Connection: AUTO mode selection, SNR=%.1f dB, fading_index=%.2f (%s)",
+              snr, fading_index_, is_fading ? "FADING" : "STABLE");
 
+    // Very low SNR: use MFSK
     if (snr < 0.0f && (common & ModeCapabilities::MFSK)) {
         LOG_MODEM(INFO, "Connection: Selected MFSK for very low SNR (%.1f dB)", snr);
         return WaveformMode::MFSK;
     }
 
-    if (snr < 17.0f && (common & ModeCapabilities::MC_DPSK)) {
-        LOG_MODEM(INFO, "Connection: Selected DPSK for low/mid SNR (%.1f dB)", snr);
+    // Low SNR (0-10 dB): always use MC_DPSK for robustness
+    if (snr < 10.0f && (common & ModeCapabilities::MC_DPSK)) {
+        LOG_MODEM(INFO, "Connection: Selected MC_DPSK for low SNR (%.1f dB)", snr);
         return WaveformMode::MC_DPSK;
     }
 
-    // Default priority for adequate SNR: OFDM > OTFS > DPSK > MFSK
-    if (common & ModeCapabilities::OFDM_COX) {
-        LOG_MODEM(INFO, "Connection: Selected OFDM (SNR=%.1f dB)", snr);
-        return WaveformMode::OFDM_COX;
+    // Mid SNR (10-17 dB): use OFDM_CHIRP if fading, MC_DPSK otherwise
+    if (snr < 17.0f) {
+        if (is_fading && (common & ModeCapabilities::OFDM_CHIRP)) {
+            LOG_MODEM(INFO, "Connection: Selected OFDM_CHIRP for mid SNR (%.1f dB) with fading", snr);
+            return WaveformMode::OFDM_CHIRP;
+        }
+        if (common & ModeCapabilities::MC_DPSK) {
+            LOG_MODEM(INFO, "Connection: Selected MC_DPSK for mid SNR (%.1f dB) stable channel", snr);
+            return WaveformMode::MC_DPSK;
+        }
     }
+
+    // High SNR (17+ dB): use OFDM_COX if stable, OFDM_CHIRP if fading
+    if (is_fading) {
+        if (common & ModeCapabilities::OFDM_CHIRP) {
+            LOG_MODEM(INFO, "Connection: Selected OFDM_CHIRP for high SNR (%.1f dB) with fading", snr);
+            return WaveformMode::OFDM_CHIRP;
+        }
+    } else {
+        if (common & ModeCapabilities::OFDM_COX) {
+            LOG_MODEM(INFO, "Connection: Selected OFDM_COX for high SNR (%.1f dB) stable channel", snr);
+            return WaveformMode::OFDM_COX;
+        }
+    }
+
+    // Fallback priority: OFDM_COX > OFDM_CHIRP > OTFS > MC_DPSK > MFSK
+    if (common & ModeCapabilities::OFDM_COX) return WaveformMode::OFDM_COX;
+    if (common & ModeCapabilities::OFDM_CHIRP) return WaveformMode::OFDM_CHIRP;
     if (common & ModeCapabilities::OTFS_EQ) return WaveformMode::OTFS_EQ;
     if (common & ModeCapabilities::OTFS_RAW) return WaveformMode::OTFS_RAW;
     if (common & ModeCapabilities::MC_DPSK) return WaveformMode::MC_DPSK;

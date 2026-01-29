@@ -90,6 +90,8 @@ public:
     LoopbackStats getStats() const;
     bool isSynced() const;
     float getCurrentSNR() const;
+    float getFadingIndex() const;  // Fading index from per-carrier variance (0-1)
+    bool isFading() const;         // True if fading_index > 0.4
     ChannelQuality getChannelQuality() const;
     std::vector<std::complex<float>> getConstellationSymbols() const;
 
