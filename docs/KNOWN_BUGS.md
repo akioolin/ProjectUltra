@@ -10,13 +10,13 @@
 
 ### BUG-001: cli_simulator CFO Simulation is Incomplete
 
-**Status:** PARTIAL FIX - Connection phase works, DATA phase needs RxPipeline
+**Status:** CONNECTION OK - DATA phase needs testing with StreamingDecoder
 **Discovered:** 2026-01-27
 **Updated:** 2026-01-28
 **Location:** `tools/cli_simulator.cpp`
 
 **Description:**
-The `tx_cfo_hz` parameter only shifts the chirp preamble frequency, NOT the OFDM/DPSK data. However, the connection phase (PING/PONG/CONNECT) now works correctly.
+The `tx_cfo_hz` parameter only shifts the chirp preamble frequency, NOT the OFDM/DPSK data. However, the connection phase (PING/PONG/CONNECT) works correctly.
 
 **2026-01-28 Fix:**
 Fixed PING vs DPSK detection in `modem_rx.cpp`:
@@ -26,12 +26,10 @@ Fixed PING vs DPSK detection in `modem_rx.cpp`:
 
 **Current Status:**
 - ✅ Connection phase works: PING/PONG, CONNECT, CONNECT_ACK, mode negotiation
-- ❌ DATA phase doesn't work (uses RxPipeline for connected mode, separate issue)
+- ❓ DATA phase needs retesting (RxPipeline deleted, StreamingDecoder is now sole decoder)
 
-**Impact:**
-- cli_simulator can test connection establishment
-- Full data transfer testing needs RxPipeline fix (BUG-002)
-- Use `test_iwaveform` for CFO testing of individual frames
+**Next Steps:**
+Test cli_simulator DATA phase with the new StreamingDecoder architecture.
 
 **Workaround:**
 Use `test_iwaveform` for CFO testing instead of `cli_simulator`.
@@ -40,82 +38,49 @@ Use `test_iwaveform` for CFO testing instead of `cli_simulator`.
 
 ### BUG-002: RxPipeline Chirp Detection Fails
 
-**Status:** FIXED - 2026-01-28 (StreamingDecoder created)
+**Status:** FIXED and DELETED - 2026-01-28
 **Discovered:** 2026-01-26
-**Location:** `src/gui/modem/rx_pipeline.cpp`
 
 **Description:**
-RxPipeline was created to provide a clean IWaveform-based RX path, but chirp detection fails when used through the pipeline. Works fine when IWaveform is used directly (test_iwaveform.cpp).
+RxPipeline had incorrect IWaveform call sequence. Fixed by StreamingDecoder, then RxPipeline deleted entirely.
 
-**Root Cause (FOUND):**
-RxPipeline had incorrect IWaveform call sequence:
-- Line 147: `waveform_->setFrequencyOffset(sync_result.cfo_hz);` - CFO applied
-- Line 172: `waveform_->reset();` - CFO CLEARED (violates INV-WAVE-002!)
-- Line 173: `waveform_->process(process_span);` - Process with wrong CFO
-
-**Fix:**
-Created `StreamingDecoder` class with correct call sequence:
-- reset() → detectSync() → setFrequencyOffset() → process()
-
-See `docs/CHANGELOG.md` entry "2026-01-28: StreamingDecoder Created" for details.
-
-**Files:**
-- `src/gui/modem/streaming_decoder.hpp`
-- `src/gui/modem/streaming_decoder.cpp`
-
-**Next steps:**
-- Integrate StreamingDecoder into ModemEngine
-- Delete RxPipeline after integration verified
+**Resolution:**
+- Created `StreamingDecoder` with correct call sequence (reset → detectSync → setFrequencyOffset → process)
+- Deleted RxPipeline completely (2026-01-28)
+- StreamingDecoder is now the sole RX decoder
 
 ---
 
 ### BUG-003: ModemEngine Routes ALL Chirp Frames to MC-DPSK
 
-**Status:** OPEN - MEDIUM PRIORITY
+**Status:** OBSOLETE - Acquisition thread removed
 **Discovered:** 2026-01-27
-**Location:** `src/gui/modem/modem_rx_decode.cpp`
 
 **Description:**
-The acquisition thread detects chirp preambles but doesn't know if the frame is MC-DPSK or OFDM_CHIRP. It routes everything through `rxDecodeDPSK()`, which fails for OFDM_CHIRP frames.
+The acquisition thread was removed (2026-01-28). StreamingDecoder now handles all RX processing and uses the waveform mode set by the protocol/connection state.
 
-**Root Cause:**
-No frame type indicator in the chirp preamble. Both MC-DPSK and OFDM_CHIRP use the same dual-chirp sync.
-
-**Impact:**
-- Cannot receive OFDM_CHIRP frames through ModemEngine
-- Only works in test_iwaveform where waveform type is explicitly specified
-
-**Workaround:**
-Use test_iwaveform for OFDM_CHIRP testing. In production, use MC-DPSK for connection (it's more robust anyway).
-
-**Fix Plan:**
-Options:
-A) Add frame type indicator after chirp (e.g., short tone burst)
-B) Try MC-DPSK first, if decode fails try OFDM_CHIRP
-C) Detect from training symbol structure (different between MC-DPSK and OFDM)
+**Current Behavior:**
+- Disconnected mode: StreamingDecoder uses MC-DPSK for PING detection
+- Connected mode: StreamingDecoder uses the negotiated waveform
+- Waveform selection is determined by connection state, not frame detection
 
 ---
 
 ### BUG-004: OFDM_COX CFO Correction Not Verified
 
-**Status:** OPEN - MEDIUM PRIORITY
+**Status:** FIXED - 2026-01-28
 **Discovered:** 2026-01-27
-**Location:** `src/waveform/ofdm_cox_waveform.cpp`
+**Commit:** `7264753`
 
-**Description:**
-OFDM_COX (Schmidl-Cox sync) has CFO estimation code, but it hasn't been tested with the IWaveform interface. The old ModemEngine code path may work, but the new interface hasn't been verified.
+**Resolution:**
+OFDM_COX now uses the same path as OFDM_CHIRP:
+- detectSync() uses searchForSync() for Schmidl-Cox sync detection
+- process() calculates accumulated CFO phase and calls processPresynced()
+- Both waveforms share processPresynced() for demodulation (no code duplication)
 
-**Impact:**
-- Real-world OFDM_COX usage (17+ dB) may fail with radio frequency offset
-- Only AWGN with CFO=0 is verified
-
-**Workaround:**
-Use OFDM_CHIRP for 10-17 dB range (CFO verified).
-
-**Fix Plan:**
-1. Add OFDM_COX to test_iwaveform
-2. Test with CFO = ±30, ±50 Hz
-3. Verify Schmidl-Cox CFO estimation is applied correctly
+**Test Results:**
+- 100% decode at 17+ dB AWGN with CFO = ±50 Hz
+- Works on stable channels; use OFDM_CHIRP for fading channels
 
 ---
 
@@ -135,6 +100,11 @@ Use OFDM_CHIRP for 10-17 dB range (CFO verified).
 **Status:** FIXED - 2026-01-26
 **Commit:** `f1fce06`
 **Details:** See docs/CHANGELOG.md
+
+### BUG-F004: OFDM_COX CFO Correction
+**Status:** FIXED - 2026-01-28
+**Commit:** `7264753`
+**Details:** OFDM_COX now uses processPresynced() path like OFDM_CHIRP. 100% at ±50 Hz on AWGN 17+ dB.
 
 ---
 
