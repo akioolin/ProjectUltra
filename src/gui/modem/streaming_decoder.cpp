@@ -109,13 +109,21 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
 // ============================================================================
 
 void StreamingDecoder::processBuffer() {
-    // Calculate minimum samples based on waveform type
-    // Chirp-based waveforms need ~3 seconds, OFDM_COX needs much less
-    size_t min_samples = MIN_SAMPLES_FOR_SEARCH;  // Default for chirp
-    if (mode_ == protocol::WaveformMode::OFDM_COX && waveform_) {
-        // OFDM_COX: Schmidl-Cox preamble (~1024) + frame (~7000) + margin for sync search
-        // Use getMinSamplesForFrame * 2 which is ~14000 samples (sufficient for sync + frame)
-        min_samples = std::max(size_t(15000), size_t(waveform_->getMinSamplesForFrame() * 2));
+    // Mode-aware minimum samples for search
+    // - OFDM: Schmidl-Cox needs very little data
+    // - Connected MC-DPSK: faster response for ACKs
+    // - Disconnected MC-DPSK: reliable chirp detection
+    size_t min_samples;
+    if (mode_ == protocol::WaveformMode::OFDM_COX ||
+        mode_ == protocol::WaveformMode::OFDM_CHIRP) {
+        min_samples = MIN_SAMPLES_OFDM;
+        if (waveform_) {
+            min_samples = std::max(min_samples, size_t(waveform_->getMinSamplesForFrame() * 2));
+        }
+    } else if (connected_) {
+        min_samples = MIN_SAMPLES_CONNECTED;
+    } else {
+        min_samples = MIN_SAMPLES_DISCONNECTED;
     }
 
     // Wait for enough data or shutdown
@@ -380,11 +388,19 @@ bool StreamingDecoder::detectAndDecode() {
     // - MC-DPSK and OFDM_CHIRP use ChirpSync
     // - OFDM_COX uses Schmidl-Cox
 
-    // Calculate mode-dependent minimum samples (same logic as processBuffer)
-    size_t min_samples_for_search = MIN_SAMPLES_FOR_SEARCH;  // Default for chirp
-    if (mode_ == protocol::WaveformMode::OFDM_COX && waveform_) {
-        // OFDM_COX: Schmidl-Cox preamble + frame + margin (same logic as processBuffer)
-        min_samples_for_search = std::max(size_t(15000), size_t(waveform_->getMinSamplesForFrame() * 2));
+    // Mode-aware minimum samples (same logic as processBuffer)
+    size_t min_samples_for_search;
+    if (mode_ == protocol::WaveformMode::OFDM_COX ||
+        mode_ == protocol::WaveformMode::OFDM_CHIRP) {
+        min_samples_for_search = MIN_SAMPLES_OFDM;
+        if (waveform_) {
+            min_samples_for_search = std::max(min_samples_for_search,
+                                               size_t(waveform_->getMinSamplesForFrame() * 2));
+        }
+    } else if (connected_) {
+        min_samples_for_search = MIN_SAMPLES_CONNECTED;
+    } else {
+        min_samples_for_search = MIN_SAMPLES_DISCONNECTED;
     }
 
     // Copy samples for processing (release lock during heavy work)
@@ -442,6 +458,26 @@ bool StreamingDecoder::detectAndDecode() {
                   search_start_pos, available, work_buffer.size());
     }
 
+    // ENERGY GATE: Don't search through pure noise/silence
+    // This prevents advancing search_pos past the real signal
+    // NOTE: Only apply in disconnected mode - in connected mode we expect frames
+    // Also check energy across the whole buffer, not just the start (frame might be later)
+    if (!connected_) {
+        float sum_sq = 0.0f;
+        // Check energy across the whole search window, not just the start
+        for (size_t i = 0; i < work_buffer.size(); i++) {
+            sum_sq += work_buffer[i] * work_buffer[i];
+        }
+        float rms = std::sqrt(sum_sq / work_buffer.size());
+
+        if (rms < noise_floor_ * ENERGY_GATE_MULTIPLIER) {
+            // Pure silence/noise - skip search, don't advance search_pos
+            LOG_MODEM(DEBUG, "StreamingDecoder: Energy gate - rms=%.6f < threshold=%.6f, skipping",
+                      rms, noise_floor_ * ENERGY_GATE_MULTIPLIER);
+            return false;
+        }
+    }
+
     // Create sample span for search
     SampleSpan search_span(work_buffer.data(), work_buffer.size());
 
@@ -458,18 +494,37 @@ bool StreamingDecoder::detectAndDecode() {
     }
 
     if (!sync_found) {
-        // No sync - advance search position and trim old samples
+        // ADAPTIVE ADVANCEMENT based on correlation quality
+        // - Pure noise: don't advance (would miss real signal)
+        // - Weak signal: advance slowly (might be nearby)
+        // - Close to threshold: advance minimally (we're close!)
         std::lock_guard<std::mutex> lock(buffer_mutex_);
 
-        // Advance search position
+        float corr = sync_result.correlation;
+        size_t advance = 0;
+
+        if (corr < CORR_NOISE_THRESHOLD) {
+            // Pure noise (< 0.05) - don't advance at all
+            advance = 0;
+        } else if (corr < CORR_WEAK_THRESHOLD) {
+            // Weak signal (0.05-0.10) - advance slowly
+            advance = SLIDE_STEP / 4;  // 1200 samples = 25ms
+        } else {
+            // Close to detection (0.10-0.15) - advance minimally
+            advance = SLIDE_STEP / 8;  // 600 samples = 12ms
+        }
+
         size_t old_search = search_pos_;
-        search_pos_ = (search_pos_ + SLIDE_STEP) % MAX_BUFFER_SAMPLES;
+        if (advance > 0) {
+            search_pos_ = (search_pos_ + advance) % MAX_BUFFER_SAMPLES;
+        }
 
-        // Trim old samples (this may reset search_pos to read_pos if we advanced too far)
-        trimOldSamples(MIN_SAMPLES_FOR_SEARCH * 2);
+        // Trim old samples
+        size_t trim_threshold = connected_ ? MIN_SAMPLES_CONNECTED * 2 : MIN_SAMPLES_DISCONNECTED * 2;
+        trimOldSamples(trim_threshold);
 
-        LOG_MODEM(DEBUG, "StreamingDecoder: No sync, corr=%.3f, search %zu->%zu, read=%zu",
-                  sync_result.correlation, old_search, search_pos_, read_pos_);
+        LOG_MODEM(DEBUG, "StreamingDecoder: No sync, corr=%.3f, advance=%zu, search %zu->%zu",
+                  corr, advance, old_search, search_pos_);
         return false;
     }
 
@@ -521,7 +576,7 @@ bool StreamingDecoder::detectAndDecode() {
             size_t advance = static_cast<size_t>(sync_result.start_sample) + chirp_samples;
             search_pos_ = (search_pos_ + advance) % MAX_BUFFER_SAMPLES;
             read_pos_ = search_pos_;
-            trimOldSamples(MIN_SAMPLES_FOR_SEARCH * 2);
+            trimOldSamples(MIN_SAMPLES_DISCONNECTED * 2);
         }
 
         LOG_MODEM(INFO, "StreamingDecoder: PING detected (no valid data after chirp), SNR=%.1f dB, CFO=%.1f Hz",
@@ -665,7 +720,7 @@ bool StreamingDecoder::detectAndDecode() {
         // Also advance read_pos to release consumed samples
         // This prevents infinite loop when samplesInBuffer() > MIN but available < MIN
         read_pos_ = search_pos_;
-        trimOldSamples(MIN_SAMPLES_FOR_SEARCH * 2);
+        trimOldSamples(MIN_SAMPLES_DISCONNECTED * 2);
 
         LOG_MODEM(INFO, "StreamingDecoder: search_pos %zu -> %zu (advance=%zu = start_sample=%d + min_frame=%zu)",
                   old_search, search_pos_, advance, sync_result.start_sample, min_frame_samples);

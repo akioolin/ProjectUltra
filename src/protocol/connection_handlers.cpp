@@ -30,17 +30,10 @@ static void recommendDataMode(float snr_db, Modulation& mod, CodeRate& rate) {
         // Typical good HF - balanced speed/reliability
         mod = Modulation::DQPSK;
         rate = CodeRate::R1_2;  // 2x baseline
-    } else if (snr_db >= 12.0f) {
-        // Typical HF - prioritize reliability
-        mod = Modulation::DQPSK;
-        rate = CodeRate::R1_4;  // Baseline
-    } else if (snr_db >= 8.0f) {
-        // Marginal conditions
-        mod = Modulation::DBPSK;
-        rate = CodeRate::R1_4;  // Most robust
     } else {
-        // Very poor SNR - maximum robustness
-        mod = Modulation::DBPSK;
+        // SNR < 16 dB - use DQPSK with R1/4 for robustness
+        // Never use DBPSK - DQPSK with strong FEC is more reliable
+        mod = Modulation::DQPSK;
         rate = CodeRate::R1_4;
     }
 }

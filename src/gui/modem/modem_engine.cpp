@@ -385,13 +385,13 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     }
 
     // Modulation selection
-    // When connected, ALL frames (including control) use negotiated modulation
-    // so RX demodulator (also configured to negotiated mode) can decode them.
+    // During handshake (connected but not handshake_complete), use DQPSK for reliability.
+    // After handshake, use negotiated modulation so RX demodulator can decode.
     // Robustness is handled by code rate: CW0 header always uses R1/4.
     // IMPORTANT: When use_connected_waveform_once_ is set (for DISCONNECT ACK),
     // we must also use the connected modulation since the remote is still expecting it.
     Modulation tx_modulation = Modulation::DQPSK;
-    if (connected_ || use_connected_waveform_once_) {
+    if ((connected_ && handshake_complete_) || use_connected_waveform_once_) {
         tx_modulation = data_modulation_;
         LOG_MODEM(INFO, "[%s] TX: Using %s modulation %s",
                   log_prefix_.c_str(),

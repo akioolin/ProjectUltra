@@ -135,10 +135,9 @@ void Connection::acceptCall() {
             mod = Modulation::DQPSK; rate = CodeRate::R2_3;
         } else if (snr_db >= 16.0f) {
             mod = Modulation::DQPSK; rate = CodeRate::R1_2;
-        } else if (snr_db >= 12.0f) {
-            mod = Modulation::DQPSK; rate = CodeRate::R1_4;
         } else {
-            mod = Modulation::DBPSK; rate = CodeRate::R1_4;
+            // SNR < 16 dB - DQPSK with R1/4 (never use DBPSK)
+            mod = Modulation::DQPSK; rate = CodeRate::R1_4;
         }
     };
 
