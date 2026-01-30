@@ -2,40 +2,37 @@
 // Split from connection.cpp for maintainability
 
 #include "connection.hpp"
+#include "waveform_selection.hpp"  // Shared waveform/rate selection algorithm
 #include "ultra/logging.hpp"
 
 namespace ultra {
 namespace protocol {
 
-// Recommend data mode based on measured SNR
-// Conservative thresholds calibrated for REAL HF channels (not just AWGN)
-// HF has multipath fading that requires 3-6 dB extra margin vs AWGN
-static void recommendDataMode(float snr_db, Modulation& mod, CodeRate& rate) {
-    // Typical HF SNR: 10-18 dB (50% of time), 18-25 dB (good, ~20%)
-    // These thresholds include ~4 dB margin for fading
+// Recommend data mode based on SNR and fading index
+// Uses shared recommendWaveformAndRate() algorithm
+static void recommendDataModeWithFading(float snr_db, float fading_index,
+                                         Modulation& mod, CodeRate& rate,
+                                         WaveformMode& waveform) {
+    auto rec = recommendWaveformAndRate(snr_db, fading_index);
+    waveform = rec.waveform;
+    rate = rec.rate;
 
-    if (snr_db >= 30.0f) {
-        // Excellent conditions (rare) - use high throughput
-        mod = Modulation::QAM16;
-        rate = CodeRate::R3_4;  // 3x baseline
-    } else if (snr_db >= 25.0f) {
-        // Very good conditions
-        mod = Modulation::QAM16;
-        rate = CodeRate::R2_3;  // 2.7x baseline
-    } else if (snr_db >= 20.0f) {
-        // Good conditions - sweet spot for speed
-        mod = Modulation::DQPSK;
-        rate = CodeRate::R2_3;  // 2.7x baseline, differential for robustness
-    } else if (snr_db >= 16.0f) {
-        // Typical good HF - balanced speed/reliability
-        mod = Modulation::DQPSK;
-        rate = CodeRate::R1_2;  // 2x baseline
-    } else {
-        // SNR < 16 dB - use DQPSK with R1/4 for robustness
-        // Never use DBPSK - DQPSK with strong FEC is more reliable
-        mod = Modulation::DQPSK;
-        rate = CodeRate::R1_4;
-    }
+    // Modulation is determined by waveform:
+    // - MC_DPSK: always DQPSK
+    // - OFDM_CHIRP: always DQPSK (differential, no pilots)
+    // - OFDM_COX: DQPSK for now (could use QAM at very high SNR)
+    mod = Modulation::DQPSK;
+
+    LOG_MODEM(INFO, "recommendDataModeWithFading: SNR=%.1f, fading=%.2f -> %s %s (%.0f bps)",
+              snr_db, fading_index,
+              waveformModeToString(waveform), codeRateToString(rate),
+              rec.estimated_throughput_bps);
+}
+
+// Legacy function - uses default fading=0 (assumes no fading info available)
+static void recommendDataMode(float snr_db, Modulation& mod, CodeRate& rate) {
+    WaveformMode dummy_waveform;
+    recommendDataModeWithFading(snr_db, 0.0f, mod, rate, dummy_waveform);
 }
 
 // =============================================================================
@@ -137,26 +134,28 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         Modulation rec_mod;
         CodeRate rec_rate;
 
+        // Get recommended mode based on SNR AND fading
+        WaveformMode rec_waveform;
+        recommendDataModeWithFading(snr_db, fading_index_, rec_mod, rec_rate, rec_waveform);
+
+        // Override with forced values if specified
         if (forced_mod != Modulation::AUTO) {
-            // Initiator forced a specific modulation - honor it
             rec_mod = forced_mod;
             LOG_MODEM(INFO, "Connection: Using FORCED modulation %s from initiator",
                       modulationToString(rec_mod));
-        } else {
-            // AUTO - recommend based on measured SNR
-            CodeRate dummy_rate;
-            recommendDataMode(snr_db, rec_mod, dummy_rate);
         }
 
         if (forced_rate != CodeRate::AUTO) {
-            // Initiator forced a specific code rate - honor it
             rec_rate = forced_rate;
             LOG_MODEM(INFO, "Connection: Using FORCED code rate %s from initiator",
                       codeRateToString(rec_rate));
-        } else {
-            // AUTO - recommend based on measured SNR
-            Modulation dummy_mod;
-            recommendDataMode(snr_db, dummy_mod, rec_rate);
+        }
+
+        // Update negotiated mode if auto-selected waveform differs
+        if (negotiated_mode_ == WaveformMode::AUTO) {
+            negotiated_mode_ = rec_waveform;
+            LOG_MODEM(INFO, "Connection: Auto-selected waveform %s based on fading=%.2f",
+                      waveformModeToString(rec_waveform), fading_index_);
         }
 
         LOG_MODEM(INFO, "Connection: Initial data mode %s %s (SNR=%.1f dB, forced_mod=%d, forced_rate=%d)",

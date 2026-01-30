@@ -263,7 +263,7 @@ void ModemEngine::recommendDataMode(float snr_db, Modulation& mod, CodeRate& rat
 }
 
 protocol::WaveformMode ModemEngine::recommendWaveformMode(float snr_db) {
-    // Waveform selection based on measured SNR
+    // Legacy SNR-only selection (use recommendWaveformAndRate for better results)
     // DPSK works down to -11 dB SNR (tested), so we use it for low SNR
     // OFDM requires ~17 dB for reliable sync detection
     if (snr_db < 17.0f) {
@@ -271,6 +271,17 @@ protocol::WaveformMode ModemEngine::recommendWaveformMode(float snr_db) {
     } else {
         return protocol::WaveformMode::OFDM_COX;
     }
+}
+
+ModemEngine::WaveformRecommendation ModemEngine::recommendWaveformAndRate(float snr_db, float fading_index) {
+    // Delegate to shared algorithm in protocol namespace
+    auto rec = protocol::recommendWaveformAndRate(snr_db, fading_index);
+    LOG_MODEM(DEBUG, "recommendWaveformAndRate: SNR=%.1f, fading=%.2f -> %s %s (%.0f bps)",
+              snr_db, fading_index,
+              protocol::waveformModeToString(rec.waveform),
+              codeRateToString(rec.rate),
+              rec.estimated_throughput_bps);
+    return rec;
 }
 
 void ModemEngine::setDPSKMode(DPSKModulation mod, int samples_per_symbol) {
@@ -350,6 +361,20 @@ fec::CodecType ModemEngine::getCodecForWaveform(protocol::WaveformMode mode) {
         default:
             return fec::CodecType::LDPC;
     }
+}
+
+int ModemEngine::recommendMCDPSKCarriers(float snr_db, float fading_index) {
+    // MC-DPSK is used for SNR 0-10 dB range (above 10 dB switches to OFDM)
+    // Testing with 20Hz CFO shows 8 carriers is optimal for this range:
+    //   - 8 carriers: 100% at SNR 5, moderate fading, 20Hz CFO
+    //   - 9+ carriers: 40-60% at same conditions
+    //
+    // Always use 8 carriers for MC-DPSK - it's the most robust choice
+    // for the challenging conditions where MC-DPSK is selected.
+    (void)snr_db;       // Unused - always 8
+    (void)fading_index; // Unused - always 8
+
+    return 8;
 }
 
 } // namespace gui

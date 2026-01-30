@@ -15,6 +15,7 @@
 #include "sync/chirp_sync.hpp"  // ChirpSync for robust fading channel detection
 #include "../adaptive_mode.hpp"
 #include "protocol/frame_v2.hpp"  // v2::FrameType
+#include "protocol/waveform_selection.hpp"  // WaveformRecommendation, recommendWaveformAndRate
 #include "waveform/waveform_interface.hpp"  // IWaveform abstraction
 #include "streaming_decoder.hpp"  // StreamingDecoder - primary decoder
 #include <memory>
@@ -153,6 +154,12 @@ public:
     static void recommendDataMode(float snr_db, Modulation& mod, CodeRate& rate);
     static protocol::WaveformMode recommendWaveformMode(float snr_db);
 
+    // Waveform + rate recommendation based on SNR AND fading
+    // This is the primary recommendation function - uses both metrics
+    // Delegates to protocol::recommendWaveformAndRate() for the algorithm
+    using WaveformRecommendation = protocol::WaveformRecommendation;
+    static WaveformRecommendation recommendWaveformAndRate(float snr_db, float fading_index);
+
     void setDPSKMode(DPSKModulation mod, int samples_per_symbol = 384);
     DPSKModulation getDPSKModulation() const { return dpsk_config_.modulation; }
     const DPSKConfig& getDPSKConfig() const { return dpsk_config_; }
@@ -167,6 +174,10 @@ public:
             streaming_decoder_->setMCDPSKCarriers(num_carriers);
         }
     }
+
+    // Recommend MC-DPSK carrier count based on channel conditions
+    // Returns 8 for fading/low SNR, up to 13 for stable/high SNR
+    static int recommendMCDPSKCarriers(float snr_db, float fading_index);
 
     // Interleaving control
     void setInterleavingEnabled(bool enabled) { interleaving_enabled_ = enabled; }
