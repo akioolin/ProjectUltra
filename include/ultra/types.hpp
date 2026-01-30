@@ -143,22 +143,22 @@ struct ModemConfig {
     // With 30 carriers @ 93.75 Hz spacing, bandwidth = ±1406 Hz from center
     // At 1500 Hz: carriers span 94-2906 Hz (fits 2.8 kHz SSB filter)
 
-    // OFDM parameters - optimized for 2.8 kHz HF channel
-    // 512 FFT at 48kHz = 93.75 Hz bin spacing
-    // 30 carriers × 93.75 Hz = 2812 Hz (fills 2.8 kHz)
-    uint32_t fft_size = 512;           // FFT size (93.75 Hz bin spacing)
-    uint32_t num_carriers = 30;        // Number of data carriers (2.8 kHz)
+    // OFDM parameters - optimized for 2.8 kHz HF channel with fading resilience
+    // 1024 FFT at 48kHz = 46.875 Hz bin spacing (narrower = better fading performance)
+    // 59 carriers × 46.875 Hz ≈ 2766 Hz (fills 2.8 kHz)
+    uint32_t fft_size = 1024;          // FFT size (46.875 Hz bin spacing)
+    uint32_t num_carriers = 59;        // Number of data carriers (2.8 kHz)
 
     // Adaptive cyclic prefix (key performance lever!)
+    // MEDIUM at 1024 FFT = 256 samples = 5.3ms (good for HF multipath)
     CyclicPrefixMode cp_mode = CyclicPrefixMode::MEDIUM;
-    uint32_t symbol_guard = 4;         // Guard samples (reduced from 8)
+    uint32_t symbol_guard = 0;         // No extra guard needed with longer CP
 
     // Pilot configuration for frequency-selective channel estimation
-    // Coherence BW for 1ms delay ≈ 159 Hz, carrier spacing = 93.75 Hz
-    // pilot_spacing=2 gives 15 pilots, 15 data (50% overhead) - best fading performance
     // NOTE: For differential modulation (DQPSK), set use_pilots=false to use ALL carriers
+    // DQPSK is the default for HF - no pilots needed, all 59 carriers carry data
     uint32_t pilot_spacing = 2;        // Pilot every 2 carriers (when use_pilots=true)
-    bool use_pilots = true;            // false = all carriers are data (for DQPSK)
+    bool use_pilots = false;           // false = all carriers are data (for DQPSK)
     bool scattered_pilots = true;      // Rotate pilot positions each symbol
 
     // Initial modulation/coding (will adapt)
@@ -274,13 +274,12 @@ inline ModemConfig conservative() {
 }
 
 // Balanced: Good trade-off for typical HF conditions
+// Uses 1024 FFT / 59 carriers (46.875 Hz spacing) for fading resilience
 inline ModemConfig balanced() {
-    ModemConfig cfg;
-    cfg.cp_mode = CyclicPrefixMode::MEDIUM;    // 48 samples = 1ms
-    cfg.symbol_guard = 4;
-    cfg.pilot_spacing = 2;                      // Dense pilots required for HF fading
-    cfg.modulation = Modulation::QAM64;
-    cfg.code_rate = CodeRate::R3_4;
+    ModemConfig cfg;  // Inherits 1024 FFT, 59 carriers, DQPSK, no pilots
+    cfg.cp_mode = CyclicPrefixMode::MEDIUM;    // 256 samples = 5.3ms at 1024 FFT
+    cfg.modulation = Modulation::DQPSK;        // Differential for HF
+    cfg.code_rate = CodeRate::R1_2;            // R1/2 for typical conditions
     cfg.speed_profile = SpeedProfile::BALANCED;
     return cfg;
 }
@@ -310,47 +309,23 @@ inline ModemConfig turbo() {
 // Note: pilot_spacing=4 gives +17% throughput vs spacing=3, but requires
 // Good or better conditions. For Moderate/Poor channels, use conservative().
 inline ModemConfig high_throughput() {
-    ModemConfig cfg;
-    cfg.fft_size = 1024;                       // 46.875 Hz spacing (vs 93.75)
-    cfg.num_carriers = 59;                     // 59 carriers for ~2.8 kHz bandwidth
-    cfg.cp_mode = CyclicPrefixMode::MEDIUM;    // 96 samples (2ms) for 1024 FFT
-    cfg.symbol_guard = 0;                       // No extra guard
+    ModemConfig cfg;  // Inherits 1024 FFT, 59 carriers
+    cfg.cp_mode = CyclicPrefixMode::MEDIUM;    // 256 samples (5.3ms) for 1024 FFT
+    cfg.use_pilots = true;                     // Enable pilots for coherent modes
     cfg.pilot_spacing = 4;                     // 15 pilots, 44 data (25% overhead)
     cfg.modulation = Modulation::QAM16;
     cfg.code_rate = CodeRate::R2_3;            // R2/3 - robust enough for Good conds
     cfg.speed_profile = SpeedProfile::BALANCED;
-    cfg.adaptive_eq_enabled = false;           // ZF works well with dense pilots
-    cfg.adaptive_eq_use_rls = false;
-    cfg.rls_lambda = 0.97f;
     return cfg;
 }
 
-// NVIS High-Speed Mode: Maximum throughput for stable channels (NVIS, local, cable)
-// Matches industry-leader performance: ~42 baud, 59 carriers
-//
-// Target throughput (matching industry leader):
-//   DQPSK R3/4: 3,900 bps (all 59 carriers as data, no pilots)
-//   D8PSK R3/4: 5,800 bps (all 59 carriers as data, no pilots)
-//   16QAM R3/4: 7,000 bps (uses preamble-only channel estimation)
-//   32QAM R3/4: 8,500 bps (uses preamble-only channel estimation)
-//
-// Key insight: Differential modes (DQPSK/D8PSK) don't need pilots, so all
-// 59 carriers carry data. For coherent modes (16QAM/32QAM), we use preamble-
-// based channel estimation which works well on stable NVIS paths.
-//
-// Use default balanced() for challenging HF (flutter, polar, multipath).
-inline ModemConfig nvis_mode() {
-    ModemConfig cfg;
-    cfg.fft_size = 1024;                       // 46.875 Hz bin spacing
-    cfg.num_carriers = 59;                     // 59 carriers for ~2.8 kHz bandwidth
-    cfg.cp_mode = CyclicPrefixMode::MEDIUM;    // 96 samples (2ms) at 1024 FFT
-    cfg.symbol_guard = 0;                      // No extra guard needed for stable paths
-    cfg.use_pilots = false;                    // All carriers as data (for DQPSK/D8PSK)
-    cfg.pilot_spacing = 2;                     // Only used if use_pilots=true
-    cfg.modulation = Modulation::DQPSK;        // Default to DQPSK
-    cfg.code_rate = CodeRate::R3_4;            // R3/4 for good NVIS conditions
+// High-speed mode for good conditions (15+ dB SNR)
+// Uses DQPSK R3/4 for higher throughput with default 1024 FFT / 59 carriers
+inline ModemConfig high_speed() {
+    ModemConfig cfg;  // Inherits 1024 FFT, 59 carriers, DQPSK, no pilots
+    cfg.modulation = Modulation::DQPSK;
+    cfg.code_rate = CodeRate::R3_4;            // R3/4 for good conditions
     cfg.speed_profile = SpeedProfile::TURBO;
-    cfg.adaptive_eq_enabled = false;
     return cfg;
 }
 

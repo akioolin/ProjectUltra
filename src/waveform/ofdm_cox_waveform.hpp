@@ -25,6 +25,10 @@ public:
     // Create with specific config
     explicit OFDMNvisWaveform(const ModemConfig& config);
 
+    // Create with NVIS configuration (1024 FFT, 59 carriers, 46.875 Hz spacing)
+    // Matches industry-leader parameters for better fading performance
+    static std::unique_ptr<OFDMNvisWaveform> createNvisMode();
+
     ~OFDMNvisWaveform() override = default;
 
     // ========================================================================

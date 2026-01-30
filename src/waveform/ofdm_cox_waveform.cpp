@@ -24,6 +24,23 @@ OFDMNvisWaveform::OFDMNvisWaveform(const ModemConfig& config)
     initComponents();
 }
 
+std::unique_ptr<OFDMNvisWaveform> OFDMNvisWaveform::createNvisMode() {
+    // NVIS configuration: 1024 FFT, 59 carriers, 46.875 Hz spacing
+    // Matches industry-leader parameters for better fading performance
+    ModemConfig cfg;
+    cfg.fft_size = 1024;                       // 46.875 Hz spacing (vs 93.75)
+    cfg.num_carriers = 59;                     // 59 carriers for ~2.8 kHz bandwidth
+    cfg.cp_mode = CyclicPrefixMode::MEDIUM;    // 256 samples (5.3ms) for 1024 FFT
+    cfg.symbol_guard = 0;
+    cfg.use_pilots = false;                    // All carriers as data (for DQPSK)
+    cfg.modulation = Modulation::DQPSK;        // Default to DQPSK
+    cfg.code_rate = CodeRate::R1_2;            // R1/2 for fading conditions
+    cfg.sample_rate = 48000;
+
+    LOG_MODEM(INFO, "OFDMNvisWaveform: Creating NVIS mode (FFT=1024, carriers=59, spacing=46.875Hz)");
+    return std::make_unique<OFDMNvisWaveform>(cfg);
+}
+
 void OFDMNvisWaveform::initComponents() {
     modulator_ = std::make_unique<OFDMModulator>(config_);
     demodulator_ = std::make_unique<OFDMDemodulator>(config_);

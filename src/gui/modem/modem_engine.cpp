@@ -77,8 +77,8 @@ ModemEngine::ModemEngine() {
     // Note: Actual MC-DPSK modulation is done by IWaveform via StreamingDecoder
 
     // Channel interleaver for time-frequency diversity on fading channels
-    // Default: 60 bits/symbol for OFDM_CHIRP (30 data carriers × 2 bits DQPSK)
-    updateChannelInterleaver(60);
+    // Default: 118 bits/symbol for OFDM (59 data carriers × 2 bits DQPSK)
+    updateChannelInterleaver(config_.num_carriers * 2);
 
     // Initialize audio filters
     rebuildFilters();
@@ -180,6 +180,21 @@ void ModemEngine::setConfig(const ModemConfig& config) {
     } else {
         ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(config_);
         LOG_MODEM(INFO, "setConfig: RX using connected mode (config settings)");
+    }
+
+    // Update channel interleaver for new carrier count
+    // DQPSK = 2 bits per carrier
+    size_t bps = config_.num_carriers * 2;
+    updateChannelInterleaver(bps);
+
+    // Propagate OFDM config to StreamingDecoder for OFDM modes
+    // This allows custom FFT/carrier settings (like NVIS mode with 1024 FFT)
+    if (streaming_decoder_ &&
+        (waveform_mode_ == protocol::WaveformMode::OFDM_COX ||
+         waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP)) {
+        streaming_decoder_->setOFDMConfig(config_);
+        LOG_MODEM(INFO, "setConfig: StreamingDecoder OFDM config updated (FFT=%d, carriers=%d)",
+                  config_.fft_size, config_.num_carriers);
     }
 
     // Recreate OTFS modulator/demodulator with new config

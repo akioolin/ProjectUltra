@@ -11,6 +11,7 @@
 
 #include "gui/modem/modem_engine.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
+#include "ultra/types.hpp"  // For presets::high_speed()
 #include "waveform/waveform_factory.hpp"
 #include "protocol/frame_v2.hpp"
 #include "ultra/fec.hpp"
@@ -248,6 +249,7 @@ int main(int argc, char** argv) {
     bool save_signals = false;
     std::string save_prefix = "/tmp/iwaveform";
     std::string rate_str = "r1_2";  // Default code rate
+    bool use_nvis = false;  // Use NVIS mode (1024 FFT, 59 carriers)
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--snr") == 0 && i + 1 < argc) {
@@ -272,6 +274,8 @@ int main(int argc, char** argv) {
             save_prefix = argv[++i];
         } else if (strcmp(argv[i], "--rate") == 0 && i + 1 < argc) {
             rate_str = argv[++i];
+        } else if (strcmp(argv[i], "--nvis") == 0) {
+            use_nvis = true;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             printf("Usage: %s [options]\n", argv[0]);
             printf("  --snr N       SNR in dB (default: 15)\n");
@@ -282,6 +286,7 @@ int main(int argc, char** argv) {
             printf("  --carriers N  Number of carriers for MC-DPSK (default: 8)\n");
             printf("  --rate R      Code rate for OFDM: r1_4, r1_3, r1_2, r2_3, r3_4 (default: r1_2)\n");
             printf("                (MC-DPSK always uses R1/4 per protocol)\n");
+            printf("  --nvis        Use NVIS mode for OFDM_COX (1024 FFT, 59 carriers, 46.875 Hz spacing)\n");
             printf("  --seed N      Random seed (default: 42)\n");
             printf("  --save-signals  Save signals to files for analysis\n");
             printf("  --save-prefix P Prefix for saved signal files (default: /tmp/iwaveform)\n");
@@ -369,6 +374,15 @@ int main(int argc, char** argv) {
     {   // TX scope
         ModemEngine tx_modem;
         tx_modem.setLogPrefix("TX");
+
+        // Apply NVIS config if requested (1024 FFT, 59 carriers)
+        if (use_nvis && is_ofdm_mode) {
+            ModemConfig nvis_cfg = presets::high_speed();
+            nvis_cfg.code_rate = ofdm_code_rate;  // Use requested code rate
+            tx_modem.setConfig(nvis_cfg);
+            printf("NVIS mode: FFT=1024, carriers=59, spacing=46.875Hz\n");
+        }
+
         tx_modem.setWaveformMode(waveform_mode);
         tx_modem.setConnectWaveform(waveform_mode);
         // Enable interleaving for OFDM modes (spreads burst errors from fading)
@@ -808,6 +822,14 @@ int main(int argc, char** argv) {
         // MC-DPSK/OFDM_COX: Use SINGLE ModemEngine for entire audio stream
         ModemEngine rx_modem;
         rx_modem.setLogPrefix("RX");
+
+        // Apply NVIS config if requested (1024 FFT, 59 carriers)
+        if (use_nvis && is_ofdm_mode) {
+            ModemConfig nvis_cfg = presets::high_speed();
+            nvis_cfg.code_rate = ofdm_code_rate;  // Use requested code rate
+            rx_modem.setConfig(nvis_cfg);
+        }
+
         rx_modem.setWaveformMode(waveform_mode);
         rx_modem.setInterleavingEnabled(is_ofdm_mode);
 

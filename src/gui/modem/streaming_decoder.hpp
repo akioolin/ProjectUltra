@@ -130,6 +130,10 @@ public:
     // Set MC-DPSK carrier count (recreates waveform if currently in MC-DPSK mode)
     void setMCDPSKCarriers(int num_carriers);
 
+    // Set OFDM config (recreates waveform with the given config)
+    // Use this for NVIS mode (1024 FFT, 59 carriers) or custom OFDM settings
+    void setOFDMConfig(const ModemConfig& config);
+
     // Set data mode (modulation and code rate) for the waveform
     // Called when connection is established with negotiated settings
     void setDataMode(Modulation mod, CodeRate rate);

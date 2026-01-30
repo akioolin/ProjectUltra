@@ -13,6 +13,8 @@
 // - FFT-based correlation for speed when signal present
 
 #include "streaming_decoder.hpp"
+#include "waveform/ofdm_cox_waveform.hpp"
+#include "waveform/ofdm_chirp_waveform.hpp"
 #include "ultra/logging.hpp"
 #include <algorithm>
 #include <chrono>
@@ -660,6 +662,26 @@ void StreamingDecoder::setMCDPSKCarriers(int n) {
         waveform_ = WaveformFactory::createMCDPSK(n);
         interleaver_ = std::make_unique<ChannelInterleaver>(n * 2, v2::LDPC_CODEWORD_BITS);
     }
+}
+
+void StreamingDecoder::setOFDMConfig(const ModemConfig& config) {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+
+    // Create appropriate OFDM waveform based on current mode
+    if (mode_ == protocol::WaveformMode::OFDM_CHIRP) {
+        waveform_ = std::make_unique<OFDMChirpWaveform>(config);
+        LOG_MODEM(INFO, "StreamingDecoder: OFDM_CHIRP config set (FFT=%d, carriers=%d)",
+                  config.fft_size, config.num_carriers);
+    } else {
+        waveform_ = std::make_unique<OFDMNvisWaveform>(config);
+        LOG_MODEM(INFO, "StreamingDecoder: OFDM_COX config set (FFT=%d, carriers=%d)",
+                  config.fft_size, config.num_carriers);
+    }
+
+    // Update interleaver for new carrier count
+    // DQPSK = 2 bits per carrier
+    size_t bps = config.num_carriers * 2;
+    interleaver_ = std::make_unique<ChannelInterleaver>(bps, v2::LDPC_CODEWORD_BITS);
 }
 
 void StreamingDecoder::setDataMode(Modulation mod, CodeRate rate) {

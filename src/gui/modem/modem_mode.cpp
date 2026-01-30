@@ -50,6 +50,14 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
     if (streaming_decoder_) {
         protocol::WaveformMode decoder_mode = connected_ ? mode : protocol::WaveformMode::MC_DPSK;
         streaming_decoder_->setMode(decoder_mode, connected_);
+
+        // For OFDM modes, propagate the current config (for custom FFT/carriers like NVIS mode)
+        if (mode == protocol::WaveformMode::OFDM_COX ||
+            mode == protocol::WaveformMode::OFDM_CHIRP) {
+            streaming_decoder_->setOFDMConfig(config_);
+            LOG_MODEM(INFO, "setWaveformMode: StreamingDecoder OFDM config set (FFT=%d, carriers=%d)",
+                      config_.fft_size, config_.num_carriers);
+        }
     }
 
     // Switch RX waveform (when connected)
@@ -133,6 +141,12 @@ void ModemEngine::setConnected(bool connected) {
         // This resets the buffer and updates the connected flag
         if (streaming_decoder_) {
             streaming_decoder_->setMode(waveform_mode_, true);  // true = connected
+
+            // For OFDM modes, propagate the current config (for custom FFT/carriers like NVIS mode)
+            if (waveform_mode_ == protocol::WaveformMode::OFDM_COX ||
+                waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP) {
+                streaming_decoder_->setOFDMConfig(config_);
+            }
         }
 
         // Configure OFDM modulator/demodulator to match data_modulation_
