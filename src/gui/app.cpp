@@ -228,33 +228,49 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
 
     // Wire up modem ping detection to protocol
     modem_.setPingReceivedCallback([this](float snr) {
+        // In simulation mode, use the configured SNR instead of detected SNR
+        // (chirp detection sees clean loopback signal, not the simulated channel)
+        float display_snr = simulation_enabled_ ? simulation_snr_db_ : snr;
+
         // Check state to show appropriate message
         if (protocol_.getState() == protocol::ConnectionState::PROBING) {
-            guiLog("RX PONG: Remote station responded! (SNR=%.1f dB)", snr);
+            guiLog("RX PONG: Remote station responded! (SNR=%.1f dB)", display_snr);
             // Add to message log so user sees it in the app
             char buf[64];
-            snprintf(buf, sizeof(buf), "[PONG] Station responded (SNR=%.0f dB)", snr);
+            snprintf(buf, sizeof(buf), "[PONG] Station responded (SNR=%.0f dB)", display_snr);
             rx_log_.push_back(buf);
             if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
         } else {
-            guiLog("MODEM: Detected PING/PONG (SNR=%.1f dB)", snr);
+            guiLog("MODEM: Detected PING/PONG (SNR=%.1f dB)", display_snr);
         }
         protocol_.onPingReceived();
     });
 
     protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate, float snr_db) {
-        guiLog("MODE_CHANGE: %s R%s (SNR=%.1f dB)",
+        // Update modem engine with new data mode
+        modem_.setDataMode(mod, rate);
+
+        // Get waveform mode from modem (safe, just reads member variable)
+        auto waveform = modem_.getWaveformMode();
+
+        guiLog("MODE_CHANGE: %s %s %s (SNR=%.1f dB)",
+               protocol::waveformModeToString(waveform),
                modulationToString(mod),
                codeRateToString(rate),
                snr_db);
 
-        // Update modem engine with new data mode
-        modem_.setDataMode(mod, rate);
-
-        std::string msg = "[MODE] " + std::string(modulationToString(mod)) + " " +
-                          std::string(codeRateToString(rate)) + " (SNR=" +
-                          std::to_string(static_cast<int>(snr_db)) + " dB)";
-        rx_log_.push_back(msg);
+        // Format display with waveform info
+        char buf[80];
+        if (waveform == protocol::WaveformMode::MC_DPSK) {
+            snprintf(buf, sizeof(buf), "[MODE] MC-DPSK 8 carriers %s (SNR=%d dB)",
+                     codeRateToString(rate), static_cast<int>(snr_db));
+        } else {
+            snprintf(buf, sizeof(buf), "[MODE] %s %s %s (SNR=%d dB)",
+                     protocol::waveformModeToString(waveform),
+                     modulationToString(mod), codeRateToString(rate),
+                     static_cast<int>(snr_db));
+        }
+        rx_log_.push_back(buf);
         if (rx_log_.size() > MAX_RX_LOG) {
             rx_log_.pop_front();
         }
@@ -262,20 +278,22 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
 
     // Waveform mode negotiation callback (OFDM, DPSK, MFSK switching)
     protocol_.setModeNegotiatedCallback([this](protocol::WaveformMode mode) {
-        const char* mode_name = "OFDM";
+        std::string mode_name;
         switch (mode) {
-            case protocol::WaveformMode::MC_DPSK: mode_name = "MC-DPSK"; break;
+            case protocol::WaveformMode::MC_DPSK: mode_name = "MC-DPSK 8 carriers"; break;
             case protocol::WaveformMode::MFSK: mode_name = "MFSK"; break;
             case protocol::WaveformMode::OTFS_EQ: mode_name = "OTFS-EQ"; break;
             case protocol::WaveformMode::OTFS_RAW: mode_name = "OTFS-RAW"; break;
+            case protocol::WaveformMode::OFDM_CHIRP: mode_name = "OFDM-CHIRP"; break;
+            case protocol::WaveformMode::OFDM_COX: mode_name = "OFDM-COX"; break;
             default: mode_name = "OFDM"; break;
         }
-        guiLog("WAVEFORM_CHANGE: %s", mode_name);
+        guiLog("WAVEFORM_CHANGE: %s", mode_name.c_str());
 
         // Update modem engine with new waveform mode
         modem_.setWaveformMode(mode);
 
-        std::string msg = "[WAVEFORM] " + std::string(mode_name);
+        std::string msg = "[WAVEFORM] " + mode_name;
         rx_log_.push_back(msg);
         if (rx_log_.size() > MAX_RX_LOG) {
             rx_log_.pop_front();
