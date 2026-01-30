@@ -49,6 +49,9 @@ add_library(ultra_core STATIC
     src/ofdm/channel_equalizer.cpp
     src/ofdm/adaptive_modem.cpp
     src/otfs/otfs.cpp
+    # AFDM - Affine Frequency Division Multiplexing (for fading channels)
+    src/afdm/daft.cpp
+    src/afdm/afdm.cpp
     src/fec/ldpc_encoder.cpp
     src/fec/ldpc_decoder.cpp
     src/fec/ldpc_codec.cpp
@@ -285,6 +288,11 @@ if(ULTRA_BUILD_TOOLS)
     add_executable(test_otfs_vs_ofdm tools/test_otfs_vs_ofdm.cpp)
     target_include_directories(test_otfs_vs_ofdm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test_otfs_vs_ofdm PRIVATE ultra_core)
+
+    # AFDM test - Affine Frequency Division Multiplexing
+    add_executable(test_afdm tools/test_afdm.cpp)
+    target_include_directories(test_afdm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_afdm PRIVATE ultra_core)
 
     # OFDMChirpWaveform direct test (uses new IWaveform interface)
     add_executable(test_ofdm_chirp_waveform tools/test_ofdm_chirp_waveform.cpp)

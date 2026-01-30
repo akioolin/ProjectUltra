@@ -823,6 +823,39 @@ float OFDMDemodulator::getFrequencyOffset() const {
     return impl_->freq_offset_hz;
 }
 
+float OFDMDemodulator::getFadingIndex() const {
+    // Compute coefficient of variation of per-carrier channel estimate magnitudes
+    // Uses data_carrier_indices to get magnitudes of active carriers only
+    const auto& indices = impl_->data_carrier_indices;
+    if (indices.empty()) return 0.0f;
+
+    // Collect carrier magnitudes
+    std::vector<float> magnitudes;
+    magnitudes.reserve(indices.size());
+    for (int idx : indices) {
+        float mag = std::abs(impl_->channel_estimate[idx]);
+        magnitudes.push_back(mag);
+    }
+
+    // Calculate mean
+    float sum = 0.0f;
+    for (float m : magnitudes) sum += m;
+    float mean = sum / magnitudes.size();
+
+    if (mean < 0.001f) return 0.0f;  // No signal
+
+    // Calculate standard deviation
+    float var_sum = 0.0f;
+    for (float m : magnitudes) {
+        float diff = m - mean;
+        var_sum += diff * diff;
+    }
+    float std_dev = std::sqrt(var_sum / magnitudes.size());
+
+    // Coefficient of variation (normalized std dev)
+    return std_dev / mean;
+}
+
 void OFDMDemodulator::setFrequencyOffset(float cfo_hz) {
     LOG_DEMOD(INFO, "setFrequencyOffset: CFO=%.2f Hz (was %.2f Hz)", cfo_hz, impl_->freq_offset_hz);
     impl_->freq_offset_hz = cfo_hz;

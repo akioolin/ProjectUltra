@@ -127,6 +127,11 @@ public:
     // Does NOT consume samples or change demodulator state
     bool searchForSync(SampleSpan samples, size_t& out_position, float& out_cfo_hz, float threshold = 0.5f);
 
+    // Get fading index from per-carrier channel estimate magnitudes
+    // Returns coefficient of variation (std_dev / mean) of carrier magnitudes
+    // 0-1 range: < 0.1 = flat (AWGN), 0.2-0.4 = mild fading, > 0.4 = heavy fading
+    float getFadingIndex() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

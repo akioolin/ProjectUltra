@@ -116,6 +116,31 @@ Phase 6: Bug Fixes           [##########] 100%  (CFO + PING detection fixed!)
 **Status:** ❌ NOT STARTED
 **Notes:** Deferred until core refactor is complete
 
+#### AFDMWaveform (IN PROGRESS)
+- [x] Create `src/afdm/afdm_config.hpp` - configuration parameters
+- [x] Create `src/afdm/daft.hpp/cpp` - DAFT/IDAFT transforms
+- [x] Create `src/afdm/afdm.hpp/cpp` - modulator/demodulator
+- [x] Create `tools/test_afdm.cpp` - test suite
+- [x] DAFT roundtrip tests PASS (error ~5e-7)
+- [x] Complex baseband chain PASSES (0% BER at SNR=10 dB)
+- [x] Upmix/downmix with lowpass filter PASSES for narrowband signals
+- [ ] Update modulator to use `num_carriers` instead of all N bins
+- [ ] Update demodulator to extract only active carrier bins
+- [ ] Integrate with IWaveform interface
+- [ ] Test on fading channels
+
+**Status:** 🔄 IN PROGRESS (~50%)
+**Files:** `src/afdm/afdm_config.hpp`, `src/afdm/daft.hpp`, `src/afdm/daft.cpp`, `src/afdm/afdm.hpp`, `src/afdm/afdm.cpp`, `tools/test_afdm.cpp`
+
+**Key Finding:** AFDM audio chain requires using only `num_carriers` (e.g., 30) out of the full N bins (e.g., 512) to create a narrowband signal that fits within the HF audio band (300-3000 Hz). This allows lowpass filtering to remove the 2×fc image without destroying the signal.
+
+**Remaining Work:**
+1. Modify `insertPilots()` to populate only bins around DC (±15 bins for 30 carriers)
+2. Modify `extractDataSymbols()` to only read from active bins
+3. Update `estimateChannel()` to only use pilots in active bins
+4. Create `AFDMWaveform` class implementing `IWaveform`
+5. Add AFDM to `WaveformFactory`
+
 ### 2.2 WaveformFactory
 - [x] Create `src/waveform/waveform_factory.hpp`
 - [x] Create `src/waveform/waveform_factory.cpp`
