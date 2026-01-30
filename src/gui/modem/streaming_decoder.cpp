@@ -474,6 +474,9 @@ void StreamingDecoder::decodeCurrentFrame() {
     }
     rms = std::sqrt(rms / check_len);
 
+    LOG_MODEM(INFO, "[%s] PING check: RMS=%.4f (threshold=0.08), sync_pos=%zu",
+              log_prefix_.c_str(), rms, sync_position_);
+
     if (rms < 0.08f) {
         // PING detected
         LOG_MODEM(INFO, "[%s] PING detected (RMS=%.4f), SNR=%.1f dB, CFO=%.1f Hz",
@@ -498,6 +501,13 @@ void StreamingDecoder::decodeCurrentFrame() {
             stats_.pings_received++;
         }
 
+        // CRITICAL: Skip all old audio - only process new audio from now on
+        // This prevents re-detecting old chirps that are still in the circular buffer
+        {
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            correlation_pos_ = write_pos_;
+        }
+
         state_ = DecoderState::SEARCHING;
         return;
     }
@@ -516,9 +526,11 @@ void StreamingDecoder::decodeCurrentFrame() {
 
     auto soft_bits = waveform_->getSoftBits();
     if (soft_bits.empty()) {
+        LOG_MODEM(DEBUG, "[%s] getSoftBits() returned empty", log_prefix_.c_str());
         state_ = DecoderState::SEARCHING;
         return;
     }
+    LOG_MODEM(INFO, "[%s] Got %zu soft bits, proceeding to decode", log_prefix_.c_str(), soft_bits.size());
 
     last_fading_index_.store(waveform_->getFadingIndex());
 
@@ -577,6 +589,16 @@ void StreamingDecoder::decodeCurrentFrame() {
         LOG_MODEM(INFO, "[%s] StreamingDecoder: Frame decoded, %d/%d CWs, SNR=%.1f dB, CFO=%.1f Hz",
                   log_prefix_.c_str(), result.codewords_ok, result.codewords_ok + result.codewords_failed,
                   sync_snr_, sync_cfo_);
+    } else {
+        LOG_MODEM(WARN, "[%s] StreamingDecoder: Decode failed (cw_ok=%d, cw_fail=%d, is_ping=%d)",
+                  log_prefix_.c_str(), result.codewords_ok, result.codewords_failed, result.is_ping ? 1 : 0);
+    }
+
+    // CRITICAL: Skip all old audio - only process new audio from now on
+    // This prevents re-detecting old syncs that are still in the circular buffer
+    {
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        correlation_pos_ = write_pos_;
     }
 
     state_ = DecoderState::SEARCHING;
@@ -689,6 +711,7 @@ void StreamingDecoder::reset() {
     state_ = DecoderState::SEARCHING;
     pending_total_cw_ = 0;
     new_data_available_ = false;
+    last_decoded_sync_pos_ = SIZE_MAX;
 
     std::fill(buffer_.begin(), buffer_.end(), 0.0f);
     if (waveform_) waveform_->reset();
@@ -745,6 +768,7 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
 
     auto [ok0, data0] = codec_->decode(cw0);
     if (!ok0) {
+        LOG_MODEM(DEBUG, "[%s] LDPC decode failed for cw0 (%zu soft bits)", log_prefix_.c_str(), soft_bits.size());
         result.codewords_failed++;
         return result;
     }
@@ -752,6 +776,8 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     result.codewords_ok++;
 
     if (data0.size() < 2 || data0[0] != 0x55 || data0[1] != 0x4C) {
+        LOG_MODEM(DEBUG, "[%s] Invalid header: size=%zu, [0]=0x%02X, [1]=0x%02X",
+                  log_prefix_.c_str(), data0.size(), data0.size()>0 ? data0[0] : 0, data0.size()>1 ? data0[1] : 0);
         return result;
     }
 

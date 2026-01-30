@@ -232,6 +232,7 @@ private:
     float sync_cfo_ = 0.0f;           // CFO from sync detection
     float sync_snr_ = 0.0f;           // SNR estimate from sync detection
     size_t correlation_pos_ = 0;      // Current position for correlation search
+    size_t last_decoded_sync_pos_ = SIZE_MAX;  // Last successfully decoded sync position (to prevent duplicates)
 
     // Active waveform for demodulation (handles its own sync internally)
     WaveformFactory waveform_factory_;

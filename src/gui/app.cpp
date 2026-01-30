@@ -608,22 +608,16 @@ std::vector<float> App::applyChannelEffects(const std::vector<float>& samples) {
 
     std::vector<float> result = samples;
 
-    // Apply AWGN
+    // Apply AWGN with fixed reference signal power (matches cli_simulator)
+    // Using fixed reference ensures consistent SNR regardless of signal amplitude
     if (simulation_snr_db_ < 50.0f) {
         float snr_linear = std::pow(10.0f, simulation_snr_db_ / 10.0f);
+        constexpr float REFERENCE_SIGNAL_POWER = 0.01f;  // Same as cli_simulator
+        float noise_stddev = std::sqrt(REFERENCE_SIGNAL_POWER / snr_linear);
+        std::normal_distribution<float> noise_dist(0.0f, noise_stddev);
 
-        float sum_sq = 0.0f;
-        for (float s : samples) sum_sq += s * s;
-        float signal_rms = std::sqrt(sum_sq / samples.size());
-
-        if (signal_rms > 1e-6f) {
-            float noise_power = (signal_rms * signal_rms) / snr_linear;
-            float noise_stddev = std::sqrt(noise_power);
-            std::normal_distribution<float> noise_dist(0.0f, noise_stddev);
-
-            for (float& s : result) {
-                s += noise_dist(sim_rng_);
-            }
+        for (float& s : result) {
+            s += noise_dist(sim_rng_);
         }
     }
 
@@ -663,10 +657,10 @@ void App::simulationLoop() {
     guiLog("SIM: Simulation loop started");
 
     constexpr size_t CHUNK_SIZE = 480;  // 10ms at 48kHz for waterfall display
-    // Audio streaming: feed samples gradually to simulate real-time audio arrival
-    // At 48kHz, 1ms = 48 samples. Feed 4800 samples/tick for ~100x real-time (fast simulation)
-    // This ensures decoder gets samples fast enough to avoid pending frame timeouts
-    constexpr size_t SAMPLES_PER_TICK = 4800;
+    // Audio streaming: feed samples at REAL-TIME rate to match StreamingDecoder expectations
+    // Loop runs every 10ms, feed 480 samples = 10ms of audio at 48kHz
+    // This matches how real audio arrives and how cli_simulator works
+    constexpr size_t SAMPLES_PER_TICK = 480;  // 10ms at 48kHz
     auto last_protocol_tick = std::chrono::steady_clock::now();
 
     // Intermediate buffers for gradual streaming
@@ -751,10 +745,9 @@ void App::simulationLoop() {
 
         // Generate continuous noise when idle (simulates real radio - always receiving audio)
         // This ensures decoders waiting for samples will get them (as noise)
-        // Use REAL-TIME rate (48 samples/ms at 48kHz) - this is how real audio works!
-        // Skip waterfall updates for noise to avoid GUI overhead (1000 FFTs/sec would be slow)
+        // Feed 480 samples (10ms) per tick to match SAMPLES_PER_TICK
         if (!had_activity && !tx_in_progress_) {
-            constexpr size_t IDLE_SAMPLES_PER_TICK = 48;  // Real-time rate (48kHz / 1000 ticks/sec)
+            constexpr size_t IDLE_SAMPLES_PER_TICK = 480;  // 10ms at 48kHz
 
             float typical_rms = 0.1f;
             float snr_linear = std::pow(10.0f, simulation_snr_db_ / 10.0f);
@@ -771,8 +764,8 @@ void App::simulationLoop() {
             virtual_modem_->feedAudio(noise);
         }
 
-        // Small sleep to avoid busy-waiting (1ms like cli_simulator)
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        // Sleep 10ms to match real-time audio rate (480 samples / 48kHz = 10ms)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
     guiLog("SIM: Simulation loop stopped");

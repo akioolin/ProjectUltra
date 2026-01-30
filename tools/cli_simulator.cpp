@@ -187,6 +187,8 @@ public:
         message_callback_ = cb;
     }
 
+    void setSNR(float snr) { snr_db_ = snr; }
+
     void tick() {
         protocol_.tick(CALLBACK_INTERVAL_MS);
     }
@@ -363,6 +365,10 @@ public:
         // Create stations
         alpha_ = std::make_unique<SimulatedStation>("ALPHA", channel_, true);
         bravo_ = std::make_unique<SimulatedStation>("BRAVO", channel_, false);
+
+        // Set channel SNR for mode negotiation
+        alpha_->setSNR(snr_db_);
+        bravo_->setSNR(snr_db_);
 
         // Setup message callback on BRAVO
         bravo_->setMessageCallback([this](const std::string& msg) {

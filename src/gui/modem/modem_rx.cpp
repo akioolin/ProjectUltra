@@ -70,13 +70,7 @@ void ModemEngine::rxDecodeLoop() {
             auto result = streaming_decoder_->getFrame();
 
             if (result.success) {
-                LOG_MODEM(INFO, "[%s] StreamingDecoder: Frame decoded, %d/%d CWs, SNR=%.1f dB, CFO=%.1f Hz",
-                          log_prefix_.c_str(), result.codewords_ok,
-                          result.codewords_ok + result.codewords_failed,
-                          result.snr_db, result.cfo_hz);
-
-                // Frame delivery already happened via callback
-                // Just update stats here
+                // Frame already logged by StreamingDecoder - just update stats
                 updateStats([&](LoopbackStats& s) {
                     s.frames_received++;
                     s.snr_db = result.snr_db;
@@ -84,14 +78,11 @@ void ModemEngine::rxDecodeLoop() {
                 });
 
             } else if (result.is_ping) {
-                LOG_MODEM(INFO, "[%s] StreamingDecoder: PING detected, SNR=%.1f dB, CFO=%.1f Hz",
-                          log_prefix_.c_str(), result.snr_db, result.cfo_hz);
+                // PING already logged by StreamingDecoder
                 // PING callback already fired
 
             } else if (result.codewords_failed > 0) {
-                LOG_MODEM(INFO, "[%s] StreamingDecoder: Frame failed, %d/%d CWs OK",
-                          log_prefix_.c_str(), result.codewords_ok,
-                          result.codewords_ok + result.codewords_failed);
+                // Failure already logged by StreamingDecoder
                 updateStats([](LoopbackStats& s) { s.frames_failed++; });
             }
         }
