@@ -427,32 +427,40 @@ private:
         }
         std::cout << "  \033[32m✓ Handshake complete!\033[0m\n";
 
-        // Phase 3: Send message
-        std::cout << "\n=== PHASE 3: DATA TRANSFER ===\n";
-        std::string test_msg = "Hello from ALPHA!";
+        // Phase 3: Send 5 numbered messages
+        std::cout << "\n=== PHASE 3: DATA TRANSFER (5 messages) ===\n";
 
-        if (!waitFor([this]{ return alpha_->isReadyToSend(); }, 10)) {
-            std::cout << "  \033[31m✗ ARQ not ready!\033[0m\n";
-            return false;
-        }
+        for (int msg_num = 1; msg_num <= 5; msg_num++) {
+            std::string test_msg = "Message " + std::to_string(msg_num) + " from ALPHA";
 
-        std::cout << "  Sending: \"" << test_msg << "\"\n";
-        alpha_->sendMessage(test_msg);
-
-        if (!waitFor([this]{ return message_received_.load(); }, 30)) {
-            std::cout << "  \033[31m✗ Message not received!\033[0m\n";
-            return false;
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(msg_mutex_);
-            if (received_message_ == test_msg) {
-                std::cout << "  \033[32m✓ Message received: \"" << received_message_ << "\"\033[0m\n";
-            } else {
-                std::cout << "  \033[31m✗ Message corrupted!\033[0m\n";
+            if (!waitFor([this]{ return alpha_->isReadyToSend(); }, 10)) {
+                std::cout << "  \033[31m✗ ARQ not ready for message " << msg_num << "!\033[0m\n";
                 return false;
             }
+
+            // Reset received flag before sending
+            message_received_.store(false);
+
+            std::cout << "  [" << msg_num << "/5] Sending: \"" << test_msg << "\"\n";
+            alpha_->sendMessage(test_msg);
+
+            if (!waitFor([this]{ return message_received_.load(); }, 30)) {
+                std::cout << "  \033[31m✗ Message " << msg_num << " not received!\033[0m\n";
+                return false;
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(msg_mutex_);
+                if (received_message_ == test_msg) {
+                    std::cout << "  \033[32m✓ [" << msg_num << "/5] Received: \"" << received_message_ << "\"\033[0m\n";
+                } else {
+                    std::cout << "  \033[31m✗ Message " << msg_num << " corrupted! Got: \"" << received_message_ << "\"\033[0m\n";
+                    return false;
+                }
+            }
         }
+
+        std::cout << "  \033[32m✓ All 5 messages transferred successfully!\033[0m\n";
 
         // Phase 4: Disconnect
         std::cout << "\n=== PHASE 4: DISCONNECT ===\n";
