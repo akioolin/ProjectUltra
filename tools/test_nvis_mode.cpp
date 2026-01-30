@@ -143,7 +143,7 @@ int main(int argc, char* argv[]) {
     std::cout << "=============================================================================\n\n";
 
     // Get NVIS mode config
-    ModemConfig nvis_cfg = presets::nvis_mode();
+    ModemConfig nvis_cfg = presets::high_speed();
 
     std::cout << "NVIS Mode Parameters:\n";
     std::cout << "  FFT size:        " << nvis_cfg.fft_size << "\n";

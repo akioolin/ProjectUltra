@@ -67,5 +67,40 @@ inline WaveformRecommendation recommendWaveformAndRate(float snr_db, float fadin
     return rec;
 }
 
+// Recommend modulation and code rate for data mode within an established connection
+// This is used after waveform negotiation to set the data transmission parameters.
+// Should be consistent with recommendWaveformAndRate() thresholds.
+//
+// For OFDM modes (OFDM_CHIRP, OFDM_COX):
+//   - Always use DQPSK (differential for phase stability)
+//   - Code rate based on SNR
+//
+// For MC-DPSK:
+//   - Always DQPSK R1/4 (fixed for robustness)
+//
+inline void recommendDataMode(float snr_db, WaveformMode waveform,
+                               Modulation& mod, CodeRate& rate) {
+    // MC-DPSK always uses DQPSK R1/4 for robustness
+    if (waveform == WaveformMode::MC_DPSK) {
+        mod = Modulation::DQPSK;
+        rate = CodeRate::R1_4;
+        return;
+    }
+
+    // OFDM modes: DQPSK with SNR-based code rate
+    // Thresholds aligned with recommendWaveformAndRate()
+    mod = Modulation::DQPSK;
+
+    if (snr_db >= 25.0f) {
+        rate = CodeRate::R3_4;   // High throughput
+    } else if (snr_db >= 17.0f) {
+        rate = CodeRate::R2_3;   // Good balance (matches OFDM_COX threshold)
+    } else if (snr_db >= 10.0f) {
+        rate = CodeRate::R1_2;   // More robust (matches OFDM_CHIRP threshold)
+    } else {
+        rate = CodeRate::R1_4;   // Maximum robustness
+    }
+}
+
 } // namespace protocol
 } // namespace ultra

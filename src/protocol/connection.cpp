@@ -2,6 +2,7 @@
 // Frame handlers are in connection_handlers.cpp
 
 #include "connection.hpp"
+#include "waveform_selection.hpp"
 #include "ultra/logging.hpp"
 
 namespace ultra {
@@ -125,31 +126,14 @@ void Connection::acceptCall() {
     Modulation rec_mod;
     CodeRate rec_rate;
 
-    // Helper to recommend mode based on SNR
-    auto recommendMode = [this](float snr_db, Modulation& mod, CodeRate& rate) {
-        if (snr_db >= 30.0f) {
-            mod = Modulation::QAM16; rate = CodeRate::R3_4;
-        } else if (snr_db >= 25.0f) {
-            mod = Modulation::QAM16; rate = CodeRate::R2_3;
-        } else if (snr_db >= 20.0f) {
-            mod = Modulation::DQPSK; rate = CodeRate::R2_3;
-        } else if (snr_db >= 16.0f) {
-            mod = Modulation::DQPSK; rate = CodeRate::R1_2;
-        } else {
-            // SNR < 16 dB - DQPSK with R1/4 (never use DBPSK)
-            mod = Modulation::DQPSK; rate = CodeRate::R1_4;
-        }
-    };
+    // Use centralized algorithm from waveform_selection.hpp
+    recommendDataMode(measured_snr_db_, negotiated_mode_, rec_mod, rec_rate);
 
     if (pending_forced_modulation_ != Modulation::AUTO) {
         // Initiator forced a specific modulation - honor it
         rec_mod = pending_forced_modulation_;
         LOG_MODEM(INFO, "Connection: Using FORCED modulation %s from initiator",
                   modulationToString(rec_mod));
-    } else {
-        // AUTO - recommend based on measured SNR
-        CodeRate dummy_rate;
-        recommendMode(measured_snr_db_, rec_mod, dummy_rate);
     }
 
     if (pending_forced_code_rate_ != CodeRate::AUTO) {
@@ -157,10 +141,6 @@ void Connection::acceptCall() {
         rec_rate = pending_forced_code_rate_;
         LOG_MODEM(INFO, "Connection: Using FORCED code rate %s from initiator",
                   codeRateToString(rec_rate));
-    } else {
-        // AUTO - recommend based on measured SNR
-        Modulation dummy_mod;
-        recommendMode(measured_snr_db_, dummy_mod, rec_rate);
     }
 
     // Clear pending forced modes
