@@ -258,8 +258,22 @@ private:
     // Lifecycle
     std::atomic<bool> shutdown_{false};
 
+    // Pending frame state (for dynamic codeword handling)
+    // When we detect sync and decode header but don't have enough samples for full frame,
+    // we save state here and wait for more audio
+    bool pending_frame_ = false;              // True if waiting for more samples
+    size_t pending_search_pos_ = 0;           // search_pos when sync was found
+    int pending_data_start_ = 0;              // Where frame data starts (relative to search_pos)
+    int pending_total_cw_ = 0;                // Total codewords from header
+    float pending_snr_ = 0.0f;                // SNR from sync detection
+    float pending_cfo_ = 0.0f;                // CFO from sync detection
+    int pending_retry_count_ = 0;             // How many times we've tried to resume
+    static constexpr int MAX_PENDING_RETRIES = 5;  // Give up after this many attempts
+
     // Constants - Buffer sizes
-    static constexpr size_t MAX_BUFFER_SAMPLES = 480000;    // 10 seconds at 48kHz
+    // Buffer must hold worst-case test scenario: 5 frames × ~150k samples = 750k + margin
+    // Real-world: audio arrives at 48kHz so buffer just needs to hold 2-3 frames
+    static constexpr size_t MAX_BUFFER_SAMPLES = 960000;    // 20 seconds at 48kHz
     static constexpr size_t MIN_SAMPLES_FOR_SEARCH = 144000; // 3 seconds - ensure full chirp visible
     static constexpr size_t SLIDE_STEP = 4800;              // 100ms between searches
     static constexpr size_t CHIRP_SAMPLES = 53000;          // ~1.1 second (dual chirp + gap)

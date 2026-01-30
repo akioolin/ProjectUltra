@@ -405,6 +405,55 @@ bool StreamingDecoder::detectAndDecode() {
         min_samples_for_search = static_cast<size_t>(waveform_->getMinSamplesForSearch());
     }
 
+    size_t min_frame_samples = static_cast<size_t>(waveform_->getMinSamplesForFrame());
+
+    // ========================================================================
+    // PENDING FRAME HANDLING
+    // If we previously found sync and decoded header but didn't have enough
+    // samples for the full frame, check if we have enough now.
+    // Also handle timeout: if TX stopped mid-frame, don't wait forever.
+    // ========================================================================
+    if (pending_frame_) {
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+
+        // Check retry limit - if TX stopped mid-frame, give up and move on
+        pending_retry_count_++;
+        if (pending_retry_count_ > MAX_PENDING_RETRIES) {
+            LOG_MODEM(WARN, "StreamingDecoder: Pending frame timeout after %d retries, giving up",
+                      pending_retry_count_);
+            // Advance past the failed sync position
+            size_t advance = static_cast<size_t>(pending_data_start_) + min_frame_samples;
+            search_pos_ = (pending_search_pos_ + advance) % MAX_BUFFER_SAMPLES;
+            read_pos_ = search_pos_;
+            pending_frame_ = false;
+            pending_retry_count_ = 0;
+            return false;
+        }
+
+        // Calculate how many samples we need for remaining codewords
+        size_t cw_data_samples = (min_frame_samples * 9) / 10;  // ~90% is data per codeword
+        size_t total_frame_samples = min_frame_samples + (pending_total_cw_ - 1) * cw_data_samples;
+
+        // Calculate available samples from pending search position
+        size_t available = 0;
+        if (write_pos_ >= pending_search_pos_) {
+            available = write_pos_ - pending_search_pos_;
+        } else {
+            available = MAX_BUFFER_SAMPLES - pending_search_pos_ + write_pos_;
+        }
+
+        size_t needed = static_cast<size_t>(pending_data_start_) + total_frame_samples;
+        if (available < needed) {
+            LOG_MODEM(DEBUG, "StreamingDecoder: Pending frame needs %zu samples, have %zu, waiting (retry %d/%d)...",
+                      needed, available, pending_retry_count_, MAX_PENDING_RETRIES);
+            return false;  // Still waiting for more samples
+        }
+
+        LOG_MODEM(INFO, "StreamingDecoder: Resuming pending frame (%d codewords, have %zu samples, retry %d)",
+                  pending_total_cw_, available, pending_retry_count_);
+        // Continue to decode with enough samples - pending state will be cleared after decode
+    }
+
     // Copy samples for processing (release lock during heavy work)
     std::vector<float> work_buffer;
     size_t search_start_pos = 0;
@@ -435,44 +484,86 @@ bool StreamingDecoder::detectAndDecode() {
             mode_switch_write_pos_ = 0;
         }
 
+        // Use pending search position if resuming, otherwise current search_pos
+        size_t effective_search_pos = pending_frame_ ? pending_search_pos_ : search_pos_;
+
         // Calculate available samples from search position
         size_t available = 0;
-        if (write_pos_ >= search_pos_) {
-            available = write_pos_ - search_pos_;
+        if (write_pos_ >= effective_search_pos) {
+            available = write_pos_ - effective_search_pos;
         } else {
-            available = MAX_BUFFER_SAMPLES - search_pos_ + write_pos_;
+            available = MAX_BUFFER_SAMPLES - effective_search_pos + write_pos_;
         }
 
         if (available < min_samples_for_search) {
             return false;
         }
 
-        search_start_pos = search_pos_;
+        search_start_pos = effective_search_pos;
 
-        // Need enough samples to find chirp AND decode frame after it
-        // Chirp can be up to ~1.5s into buffer (72000 samples of lead-in)
-        // Plus chirp itself (~58000) plus frame data (up to ~70000 for MC-DPSK 3 CWs)
-        // So we need at least 200000 samples for reliable decode
-        size_t max_search = std::min(available, size_t(250000));  // 5+ seconds
+        // Search window calculation:
+        // - If pending frame: need enough for full frame (we know total_cw now)
+        // - If new search: just enough for sync + 1 codeword (to read header)
+        size_t search_window;
+        if (pending_frame_) {
+            // Calculate search window based on expected codewords
+            // If pending_total_cw_ <= 1, we don't know actual count yet - just use 1 codeword
+            // After decoding header, we'll learn actual total_cw and can wait for more
+            size_t cw_data_samples = (min_frame_samples * 9) / 10;
+            size_t total_frame_samples;
+            if (pending_total_cw_ > 1) {
+                total_frame_samples = min_frame_samples + (pending_total_cw_ - 1) * cw_data_samples;
+            } else {
+                total_frame_samples = min_frame_samples;  // Just 1 codeword to read header
+            }
+            search_window = static_cast<size_t>(pending_data_start_) + total_frame_samples + 1000;  // margin
+        } else {
+            // New search: just sync + 1 codeword for header
+            size_t preamble = static_cast<size_t>(waveform_->getPreambleSamples());
+            size_t lead_in = 72000;  // Lead-in before first frame
+            search_window = lead_in + preamble + min_frame_samples;
+        }
+
+        size_t max_search = std::min(available, search_window);
+
+        // Temporarily set search_pos for copyOutSamples
+        size_t saved_search_pos = search_pos_;
+        search_pos_ = effective_search_pos;
         work_buffer = copyOutSamples(max_search);
+        search_pos_ = saved_search_pos;
 
-        LOG_MODEM(DEBUG, "StreamingDecoder::detectAndDecode: search_pos=%zu, available=%zu, work_buf=%zu",
-                  search_start_pos, available, work_buffer.size());
+        LOG_MODEM(DEBUG, "StreamingDecoder::detectAndDecode: search_pos=%zu, available=%zu, work_buf=%zu%s",
+                  search_start_pos, available, work_buffer.size(),
+                  pending_frame_ ? " (resuming)" : "");
     }
 
     // Create sample span for search
     SampleSpan search_span(work_buffer.data(), work_buffer.size());
 
-    // Use waveform's detectSync - it properly calculates where training starts
-    // The waveform knows its own preamble structure and handles the position correctly
-    waveform_->reset();  // Reset before detection
-
     SyncResult sync_result;
-    bool sync_found = waveform_->detectSync(search_span, sync_result, 0.15f);
+    bool sync_found = false;
 
-    if (sync_found) {
-        LOG_MODEM(INFO, "StreamingDecoder: Sync at %d, CFO=%.1f Hz, corr=%.3f",
-                  sync_result.start_sample, sync_result.cfo_hz, sync_result.correlation);
+    // If resuming a pending frame, use saved sync position instead of detecting again
+    if (pending_frame_) {
+        // Restore saved sync state - skip detection
+        sync_result.detected = true;
+        sync_result.start_sample = pending_data_start_;
+        sync_result.cfo_hz = pending_cfo_;
+        sync_result.correlation = 1.0f;  // Already validated
+        sync_found = true;
+
+        LOG_MODEM(INFO, "StreamingDecoder: Resuming pending frame, using saved position %d, CFO=%.1f Hz",
+                  sync_result.start_sample, sync_result.cfo_hz);
+    } else {
+        // New search - use waveform's detectSync
+        // The waveform knows its own preamble structure and handles the position correctly
+        waveform_->reset();  // Reset before detection
+        sync_found = waveform_->detectSync(search_span, sync_result, 0.15f);
+
+        if (sync_found) {
+            LOG_MODEM(INFO, "StreamingDecoder: Sync at %d, CFO=%.1f Hz, corr=%.3f",
+                      sync_result.start_sample, sync_result.cfo_hz, sync_result.correlation);
+        }
     }
 
     if (!sync_found) {
@@ -495,7 +586,8 @@ bool StreamingDecoder::detectAndDecode() {
               sync_result.start_sample, sync_result.cfo_hz, sync_result.correlation);
 
     // Store SNR and CFO for status
-    float snr = estimateSNRFromChirp(sync_result.correlation, noise_floor_);
+    // Use saved values if resuming pending frame, otherwise estimate from chirp
+    float snr = pending_frame_ ? pending_snr_ : estimateSNRFromChirp(sync_result.correlation, noise_floor_);
     last_snr_.store(snr);
     last_cfo_.store(sync_result.cfo_hz);
     // Fading index will be updated after process() when we have per-carrier data
@@ -535,9 +627,10 @@ bool StreamingDecoder::detectAndDecode() {
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
             // Advance past the chirp position + some guard
+            // NOTE: sync_result.start_sample is relative to search_start_pos (where work_buffer started)
             size_t chirp_samples = 57600;  // ~1.2 sec chirp
             size_t advance = static_cast<size_t>(sync_result.start_sample) + chirp_samples;
-            search_pos_ = (search_pos_ + advance) % MAX_BUFFER_SAMPLES;
+            search_pos_ = (search_start_pos + advance) % MAX_BUFFER_SAMPLES;
             read_pos_ = search_pos_;
             trimOldSamples(MIN_SAMPLES_FOR_SEARCH * 2);
         }
@@ -558,12 +651,14 @@ bool StreamingDecoder::detectAndDecode() {
         // Invalid position - might be PING (chirp at end of buffer with no data)
         if (handlePingDetection()) return true;
         std::lock_guard<std::mutex> lock(buffer_mutex_);
-        search_pos_ = (search_pos_ + SLIDE_STEP) % MAX_BUFFER_SAMPLES;
+        // Advance from search_start_pos (not search_pos_)
+        search_pos_ = (search_start_pos + SLIDE_STEP) % MAX_BUFFER_SAMPLES;
+        pending_frame_ = false;
+        pending_retry_count_ = 0;
         return false;
     }
 
     // Check if we have enough samples for a frame
-    size_t min_frame_samples = waveform_->getMinSamplesForFrame();
     size_t available_after_chirp = work_buffer.size() - static_cast<size_t>(data_start);
 
     if (available_after_chirp < min_frame_samples) {
@@ -586,15 +681,33 @@ bool StreamingDecoder::detectAndDecode() {
             }
         }
 
-        // Not enough samples yet - wait for more data
-        LOG_MODEM(DEBUG, "StreamingDecoder: Need more samples (have %zu, need %zu)",
+        // Save sync position as pending state and wait for more samples
+        // This prevents infinite loop of finding same sync repeatedly
+        LOG_MODEM(INFO, "StreamingDecoder: Sync found but need more samples (have %zu, need %zu) - saving pending state",
                   available_after_chirp, min_frame_samples);
+        pending_frame_ = true;
+        pending_search_pos_ = search_start_pos;
+        pending_data_start_ = data_start;
+        pending_total_cw_ = 1;  // Assume at least 1 codeword, will update after header decode
+        pending_snr_ = snr;
+        pending_cfo_ = sync_result.cfo_hz;
+        pending_retry_count_ = 0;  // New pending state, reset retry counter
         return false;
     }
 
-    // Limit frame span to avoid processing too much data
-    size_t max_frame_samples = min_frame_samples * 4;  // Allow up to 4 codewords
-    size_t frame_span_size = std::min(available_after_chirp, max_frame_samples);
+    // Dynamic codeword handling:
+    // If pending_total_cw_ > 1, we know the actual count from header
+    // If pending_total_cw_ == 1 or not pending, we need to read header first
+    size_t frame_span_size;
+    if (pending_frame_ && pending_total_cw_ > 1) {
+        // We know total_cw from header - calculate exact frame size needed
+        size_t cw_data_samples = (min_frame_samples * 9) / 10;  // ~90% is data per cw
+        size_t needed = min_frame_samples + (pending_total_cw_ - 1) * cw_data_samples;
+        frame_span_size = std::min(available_after_chirp, needed);
+    } else {
+        // First pass or unknown total_cw - just enough for 1 codeword to read header
+        frame_span_size = std::min(available_after_chirp, min_frame_samples);
+    }
     SampleSpan frame_span(work_buffer.data() + data_start, frame_span_size);
 
     // Process frame
@@ -606,9 +719,12 @@ bool StreamingDecoder::detectAndDecode() {
         // process() failed - could be PING (no training/data after chirp)
         if (handlePingDetection()) return true;
         std::lock_guard<std::mutex> lock(buffer_mutex_);
+        // NOTE: sync_result.start_sample is relative to search_start_pos
         size_t advance = sync_result.start_sample + SLIDE_STEP;
-        search_pos_ = (search_pos_ + advance) % MAX_BUFFER_SAMPLES;
+        search_pos_ = (search_start_pos + advance) % MAX_BUFFER_SAMPLES;
         read_pos_ = search_pos_;  // Prevent infinite loop
+        pending_frame_ = false;
+        pending_retry_count_ = 0;
         return false;
     }
 
@@ -619,17 +735,72 @@ bool StreamingDecoder::detectAndDecode() {
         // No soft bits - could be PING
         if (handlePingDetection()) return true;
         std::lock_guard<std::mutex> lock(buffer_mutex_);
+        // NOTE: sync_result.start_sample is relative to search_start_pos
         size_t advance = sync_result.start_sample + SLIDE_STEP;
-        search_pos_ = (search_pos_ + advance) % MAX_BUFFER_SAMPLES;
+        search_pos_ = (search_start_pos + advance) % MAX_BUFFER_SAMPLES;
         read_pos_ = search_pos_;  // Prevent infinite loop
+        pending_frame_ = false;
+        pending_retry_count_ = 0;
         return false;
     }
 
     // Update fading index from waveform (available after process/getSoftBits)
     last_fading_index_.store(waveform_->getFadingIndex());
 
-    // Decode frame
+    // ========================================================================
+    // DYNAMIC CODEWORD CHECK
+    // If this is first pass (not pending) OR pending with unknown total_cw,
+    // decode header to get total_cw. If we don't have enough soft bits, save
+    // pending state and wait for more samples.
+    // ========================================================================
+    constexpr size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;
+
+    // Check header if: not pending, OR pending with unknown total_cw (<=1)
+    bool need_header_check = !pending_frame_ || pending_total_cw_ <= 1;
+    if (need_header_check && soft_bits.size() >= LDPC_BLOCK) {
+        // Peek at header to get total_cw without fully decoding
+        // Deinterleave CW0
+        std::vector<float> cw0_bits(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
+        bool use_interleaving = (mode_ == protocol::WaveformMode::OFDM_CHIRP ||
+                                 mode_ == protocol::WaveformMode::OFDM_COX);
+        if (use_interleaving && interleaver_) {
+            cw0_bits = interleaver_->deinterleave(cw0_bits);
+        }
+
+        // Decode CW0
+        CodeRate frame_rate = connected_ ? code_rate_ : CodeRate::R1_4;
+        codec_->setRate(frame_rate);
+        auto [cw0_success, cw0_data] = codec_->decode(cw0_bits);
+
+        if (cw0_success && cw0_data.size() >= 4 && cw0_data[0] == 0x55 && cw0_data[1] == 0x4C) {
+            // Valid header - parse total_cw
+            auto header = v2::parseHeader(cw0_data);
+            if (header.valid) {
+                int total_cw = header.total_cw;
+                int available_cw = static_cast<int>(soft_bits.size() / LDPC_BLOCK);
+
+                if (available_cw < total_cw) {
+                    // Not enough soft bits for full frame - save pending state
+                    LOG_MODEM(INFO, "StreamingDecoder: Header says %d codewords, have %d - waiting for more samples",
+                              total_cw, available_cw);
+                    pending_frame_ = true;
+                    pending_search_pos_ = search_start_pos;
+                    pending_data_start_ = data_start;
+                    pending_total_cw_ = total_cw;
+                    pending_snr_ = snr;
+                    pending_cfo_ = sync_result.cfo_hz;
+                    return false;  // Wait for more samples
+                }
+            }
+        }
+    }
+
+    // Decode full frame (either first pass with enough data, or resumed pending frame)
     DecodeResult result = decodeFrame(soft_bits, snr, sync_result.cfo_hz);
+
+    // Clear pending state after decode attempt
+    pending_frame_ = false;
+    pending_retry_count_ = 0;
 
     auto decode_end = std::chrono::steady_clock::now();
     float decode_time_ms = std::chrono::duration<float, std::milli>(decode_end - decode_start).count();
@@ -675,18 +846,43 @@ bool StreamingDecoder::detectAndDecode() {
     }
 
     // Advance past this frame
+    // The advance must account for:
+    // - data_start: where training/data STARTS in work_buffer (AFTER chirp)
+    // - actual frame data (based on codewords decoded)
+    // - silence: inter-frame gap (~7200 samples = 150ms)
+    //
+    // NOTE: We do NOT add preamble here because start_sample already points past the chirp!
+    // The sync detector returns the position where training/data begins, not where chirp begins.
     {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
-        size_t old_search = search_pos_;
-        size_t advance = sync_result.start_sample + min_frame_samples;
-        search_pos_ = (search_pos_ + advance) % MAX_BUFFER_SAMPLES;
-        // Also advance read_pos to release consumed samples
-        // This prevents infinite loop when samplesInBuffer() > MIN but available < MIN
-        read_pos_ = search_pos_;
-        trimOldSamples(MIN_SAMPLES_FOR_SEARCH * 2);
 
-        LOG_MODEM(INFO, "StreamingDecoder: search_pos %zu -> %zu (advance=%zu = start_sample=%d + min_frame=%zu)",
-                  old_search, search_pos_, advance, sync_result.start_sample, min_frame_samples);
+        // Use the correct base position (saved for pending, current for new)
+        size_t base_search_pos = search_start_pos;
+        int frame_data_start = data_start;
+
+        // Calculate actual frame samples based on codewords decoded
+        // min_frame_samples = training + ref + 1_codeword_data
+        // For N codewords: actual = training + ref + N * codeword_data
+        //                        = min_frame_samples + (N-1) * codeword_data
+        // Estimate codeword_data = min_frame_samples * 0.9 (training/ref is ~10%)
+        int total_cw = result.codewords_ok + result.codewords_failed;
+        if (total_cw < 1) total_cw = 1;  // At least 1 codeword
+        size_t cw_data_samples = (min_frame_samples * 9) / 10;  // ~90% is data
+        size_t actual_frame_samples = min_frame_samples + (total_cw - 1) * cw_data_samples;
+
+        // Calculate frame advance from base position
+        size_t silence_gap = 7200;  // 150ms inter-frame gap
+        size_t advance = static_cast<size_t>(frame_data_start) + actual_frame_samples + silence_gap;
+
+        // Advance both search_pos and read_pos together
+        // NOTE: Don't call trimOldSamples here - it would reset search_pos to a wrong position
+        // The advance already moves us past consumed data, trimming is not needed after each frame
+        size_t old_search = search_pos_;
+        search_pos_ = (base_search_pos + advance) % MAX_BUFFER_SAMPLES;
+        read_pos_ = search_pos_;
+
+        LOG_MODEM(INFO, "StreamingDecoder: search_pos %zu -> %zu (advance=%zu = start=%d + frame=%zu [%d cw] + gap=%zu)",
+                  old_search, search_pos_, advance, frame_data_start, actual_frame_samples, total_cw, silence_gap);
     }
 
     return result.success;

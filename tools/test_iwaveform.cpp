@@ -576,9 +576,9 @@ int main(int argc, char** argv) {
     // - Let receiver detect sync autonomously
     // - Do NOT create new receiver per frame (that's cheating)
 
-    // OFDM_CHIRP: ModemEngine's acquisition thread routes chirp frames to MC-DPSK decoder,
-    // which is broken. Use IWaveform directly for now (still single instance).
-    bool use_iwaveform_direct = (waveform_mode == protocol::WaveformMode::OFDM_CHIRP);
+    // All waveforms use StreamingDecoder via ModemEngine for realistic testing
+    // IWaveform direct mode is only for debugging specific issues
+    bool use_iwaveform_direct = false;
 
     printf("Decoding via %s (single RX instance)...\n\n",
            use_iwaveform_direct ? "IWaveform directly" : "ModemEngine.feedAudio()");
@@ -813,8 +813,9 @@ int main(int argc, char** argv) {
 
         if (waveform_mode == protocol::WaveformMode::MC_DPSK) {
             rx_modem.setMCDPSKCarriers(num_carriers);
-        } else if (waveform_mode == protocol::WaveformMode::OFDM_COX) {
-            // OFDM_COX needs to be set up like TX (connected mode with DQPSK)
+        } else if (waveform_mode == protocol::WaveformMode::OFDM_COX ||
+                   waveform_mode == protocol::WaveformMode::OFDM_CHIRP) {
+            // OFDM modes need to be set up like TX (connected mode with DQPSK)
             rx_modem.setConnected(true);
             rx_modem.setHandshakeComplete(true);
             rx_modem.setDataMode(Modulation::DQPSK, ofdm_code_rate);
@@ -835,22 +836,27 @@ int main(int argc, char** argv) {
         // Give RX threads time to fully initialize before first frame
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-        // Feed ENTIRE audio stream in chunks (like real audio callback from sound card)
-        printf("Feeding %zu samples (%.1f sec) in %zu-sample chunks...\n",
-               full_audio.size(), full_audio.size() / 48000.0f, chunk_size);
+        // Feed audio at 2x real-time speed to simulate realistic operation
+        // This prevents multiple frames accumulating in buffer before processing
+        // Feed 2 seconds of audio, wait 1 second -> 2x speedup
+        constexpr size_t FEED_CHUNK = 48000 * 2;  // 2 seconds of audio
+        constexpr int WAIT_MS = 1000;             // 1 second wait -> 2x real-time
 
-        // Feed audio with periodic pauses to let acquisition process
-        // This prevents buffer overflow (MAX_PENDING_SAMPLES = 960000 = 20s)
-        // Pause every ~5 seconds of audio to let acquisition catch up
-        constexpr size_t PAUSE_INTERVAL = 48000 * 5;  // 5 seconds of audio
+        printf("Feeding %zu samples (%.1f sec) at 2x real-time...\n",
+               full_audio.size(), full_audio.size() / 48000.0f);
 
-        for (size_t j = 0; j < full_audio.size(); j += chunk_size) {
-            size_t len = std::min(chunk_size, full_audio.size() - j);
-            rx_modem.feedAudio(full_audio.data() + j, len);
+        for (size_t j = 0; j < full_audio.size(); j += FEED_CHUNK) {
+            size_t len = std::min(FEED_CHUNK, full_audio.size() - j);
 
-            // Pause every 5 seconds of audio to let acquisition process
-            if (j > 0 && j % PAUSE_INTERVAL < chunk_size) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+            // Feed this chunk in small pieces (like audio callback)
+            for (size_t k = 0; k < len; k += chunk_size) {
+                size_t piece_len = std::min(chunk_size, len - k);
+                rx_modem.feedAudio(full_audio.data() + j + k, piece_len);
+            }
+
+            // Wait to simulate 2x real-time
+            if (j + FEED_CHUNK < full_audio.size()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(WAIT_MS));
             }
         }
 
