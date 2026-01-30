@@ -210,12 +210,17 @@ void StreamingDecoder::processBuffer() {
 void StreamingDecoder::searchForSync() {
     if (!waveform_) return;
 
-    // Get preamble size from waveform (chirp length)
+    // Get preamble size from waveform
     size_t preamble = static_cast<size_t>(waveform_->getPreambleSamples());
 
-    // Minimum samples needed for one search window
-    // Need enough for the full dual chirp + margin for detection
-    size_t min_search = preamble + 20000;
+    // Minimum samples needed for dual chirp detection:
+    //   - Up chirp can appear at position 0 to ~preamble in the search buffer
+    //   - Down chirp is ~28800 samples after up chirp
+    //   - Down chirp detection needs ~50000 samples (2*chirp_len + margin for FFT)
+    // Worst case: up_pos at ~50000 (typical max), need ~50000 + 28800 + 50000 = ~130000
+    // Use preamble + 65000 to handle typical up_pos positions, cap to avoid excess latency
+    constexpr size_t MAX_SEARCH_SIZE = 120000;  // ~2.5 seconds, balances reliability vs latency
+    size_t min_search = std::min(preamble + 65000, MAX_SEARCH_SIZE);
 
     std::vector<float> search_buffer;
     size_t search_start;

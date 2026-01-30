@@ -146,20 +146,23 @@ run_test "MC-DPSK AWGN SNR=0 CFO=30" \
     "$BUILD_DIR/test_iwaveform --snr 0 --cfo 30 --channel awgn -w mc_dpsk --frames 5" \
     60
 
-# MC-DPSK Fading - marginal at SNR=5, relaxed threshold for stability
-# These tests are at the edge of MC-DPSK capability on fading channels
+# MC-DPSK Fading - 100% on moderate fading at SNR=5+ after search buffer fix
 run_test "MC-DPSK Moderate SNR=5 CFO=0" \
     "$BUILD_DIR/test_iwaveform --snr 5 --cfo 0 --channel moderate -w mc_dpsk --frames 5" \
-    40
+    100
 
 run_test "MC-DPSK Moderate SNR=5 CFO=30" \
     "$BUILD_DIR/test_iwaveform --snr 5 --cfo 30 --channel moderate -w mc_dpsk --frames 5" \
-    40
+    100
 
-# MC-DPSK on poor fading - should be most robust mode
+run_test "MC-DPSK Moderate SNR=10 CFO=30" \
+    "$BUILD_DIR/test_iwaveform --snr 10 --cfo 30 --channel moderate -w mc_dpsk --frames 5" \
+    100
+
+# MC-DPSK on poor fading - still challenging, use relaxed thresholds
 run_test "MC-DPSK Poor SNR=15 CFO=30" \
     "$BUILD_DIR/test_iwaveform --snr 15 --cfo 30 --channel poor -w mc_dpsk --frames 5" \
-    60
+    80
 
 echo ""
 echo "--- OFDM_CHIRP Tests (R1/2 default, R1/4 for fading) ---"
@@ -203,11 +206,11 @@ if [[ "$MODE" == "full" ]]; then
     # MC-DPSK on poor fading - this is where MC-DPSK shines
     run_test "MC-DPSK Poor SNR=10 CFO=0" \
         "$BUILD_DIR/test_iwaveform --snr 10 --cfo 0 --channel poor -w mc_dpsk --frames 10" \
-        80
+        90
 
     run_test "MC-DPSK Poor SNR=10 CFO=30" \
         "$BUILD_DIR/test_iwaveform --snr 10 --cfo 30 --channel poor -w mc_dpsk --frames 10" \
-        60
+        90
 
     echo ""
     echo "--- Extended OFDM_CHIRP Tests (Full Mode) ---"
