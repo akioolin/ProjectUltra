@@ -23,16 +23,15 @@ struct WaveformRecommendation {
 
 // Recommend waveform and rate based on SNR and fading index
 //
-// Key findings from testing (2026-01-29, CFO=20Hz):
+// Key findings from testing (2026-01-30):
 // - SNR < 10 dB: MC-DPSK is most robust (~938 bps)
-// - SNR >= 10 dB: Fading index determines optimal mode
-//   - fading < 0.1 (AWGN): OFDM_CHIRP R2/3 works (~2.3 kbps)
-//   - fading >= 0.1: MC-DPSK is more reliable than OFDM on fading channels
-// - SNR >= 17 dB + no fading: OFDM_COX for highest throughput
+// - SNR >= 10 dB + AWGN: OFDM_CHIRP R2/3 or OFDM_COX (high SNR)
+// - SNR >= 15 dB + Good (fading 0.1-0.35): OFDM_CHIRP R1/4 (100%)
+// - SNR >= 16 dB + Moderate (fading 0.35-0.55): OFDM_CHIRP R1/4 (100%)
+// - Poor channel or below thresholds: MC-DPSK
 //
-// Note: Original testing suggested OFDM_CHIRP R1/2 for fading 0.1-0.35, but
-// verification showed MC-DPSK (938 bps) outperforms OFDM on "good" channel
-// (fading ~0.32). OFDM only reliable on AWGN-like channels (fading < 0.1).
+// Fading thresholds match fadingToQuality() in GUI:
+//   < 0.10: AWGN, < 0.35: Good, < 0.55: Moderate, >= 0.55: Poor
 inline WaveformRecommendation recommendWaveformAndRate(float snr_db, float fading_index) {
     WaveformRecommendation rec;
 
@@ -43,22 +42,33 @@ inline WaveformRecommendation recommendWaveformAndRate(float snr_db, float fadin
         rec.estimated_throughput_bps = 938.0f;
     }
     else if (fading_index < 0.1f) {
-        // No fading (AWGN-like): Use OFDM for higher throughput
+        // AWGN (no fading): Use OFDM for higher throughput
         if (snr_db >= 17.0f) {
-            // High SNR + no fading: OFDM_COX for maximum throughput
+            // High SNR + AWGN: OFDM_COX for maximum throughput
             rec.waveform = WaveformMode::OFDM_COX;
             rec.rate = CodeRate::R2_3;
             rec.estimated_throughput_bps = 5300.0f;
         } else {
-            // Mid SNR + no fading: OFDM_CHIRP R2/3
+            // Mid SNR + AWGN: OFDM_CHIRP R2/3
             rec.waveform = WaveformMode::OFDM_CHIRP;
             rec.rate = CodeRate::R2_3;
             rec.estimated_throughput_bps = 2300.0f;
         }
     }
+    else if (fading_index < 0.35f && snr_db >= 15.0f) {
+        // Good channel (fading 0.1-0.35) + SNR >= 15: OFDM_CHIRP R1/4
+        rec.waveform = WaveformMode::OFDM_CHIRP;
+        rec.rate = CodeRate::R1_4;
+        rec.estimated_throughput_bps = 1150.0f;
+    }
+    else if (fading_index < 0.55f && snr_db >= 16.0f) {
+        // Moderate channel (fading 0.35-0.55) + SNR >= 16: OFDM_CHIRP R1/4
+        rec.waveform = WaveformMode::OFDM_CHIRP;
+        rec.rate = CodeRate::R1_4;
+        rec.estimated_throughput_bps = 1150.0f;
+    }
     else {
-        // Any fading (>= 0.1): MC-DPSK is more reliable than OFDM
-        // Testing showed OFDM_CHIRP fails on "good" channel (fading ~0.32)
+        // Poor channel or below SNR thresholds: MC-DPSK
         rec.waveform = WaveformMode::MC_DPSK;
         rec.rate = CodeRate::R1_4;
         rec.estimated_throughput_bps = 938.0f;

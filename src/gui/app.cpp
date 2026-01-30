@@ -1,6 +1,7 @@
 #include "app.hpp"
 #include "imgui.h"
 #include "ultra/logging.hpp"
+#include "sim/hf_channel.hpp"
 #include <SDL.h>
 #include <cstring>
 #include <cmath>
@@ -59,6 +60,27 @@ static void guiLog(const char* fmt, ...) {
 
     fprintf(g_gui_log_file, "[%3d.%03d][INFO ][GUI  ] %s\n", secs, ms, buf);
     fflush(g_gui_log_file);
+}
+
+// Convert fading index to channel quality string
+static const char* fadingToQuality(float fading) {
+    if (fading < 0.1f) return "AWGN";
+    if (fading < 0.35f) return "Good";
+    if (fading < 0.55f) return "Moderate";
+    return "Poor";
+}
+
+// User-friendly waveform name (hides internal variants like OFDM_COX/OFDM_CHIRP)
+static const char* waveformDisplayName(protocol::WaveformMode mode) {
+    switch (mode) {
+        case protocol::WaveformMode::MC_DPSK: return "MC-DPSK";
+        case protocol::WaveformMode::MFSK: return "MFSK";
+        case protocol::WaveformMode::OTFS_EQ:
+        case protocol::WaveformMode::OTFS_RAW: return "OTFS";
+        case protocol::WaveformMode::OFDM_CHIRP:
+        case protocol::WaveformMode::OFDM_COX:
+        default: return "OFDM";
+    }
 }
 
 App::App() : App(Options{}) {}
@@ -232,16 +254,20 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         // (chirp detection sees clean loopback signal, not the simulated channel)
         float display_snr = simulation_enabled_ ? simulation_snr_db_ : snr;
 
+        // Get fading index from modem
+        float fading = modem_.getFadingIndex();
+
         // Check state to show appropriate message
+        const char* quality = fadingToQuality(fading);
         if (protocol_.getState() == protocol::ConnectionState::PROBING) {
-            guiLog("RX PONG: Remote station responded! (SNR=%.1f dB)", display_snr);
+            guiLog("RX PONG: Remote station responded! (SNR=%.1f dB, %s)", display_snr, quality);
             // Add to message log so user sees it in the app
-            char buf[64];
-            snprintf(buf, sizeof(buf), "[PONG] Station responded (SNR=%.0f dB)", display_snr);
+            char buf[80];
+            snprintf(buf, sizeof(buf), "[PONG] Station responded (SNR=%.0f dB, %s)", display_snr, quality);
             rx_log_.push_back(buf);
             if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
         } else {
-            guiLog("MODEM: Detected PING/PONG (SNR=%.1f dB)", display_snr);
+            guiLog("MODEM: Detected PING/PONG (SNR=%.1f dB, %s)", display_snr, quality);
         }
         protocol_.onPingReceived();
     });
@@ -250,25 +276,25 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         // Update modem engine with new data mode
         modem_.setDataMode(mod, rate);
 
-        // Get waveform mode from modem (safe, just reads member variable)
+        // Get waveform mode and fading index from modem
         auto waveform = modem_.getWaveformMode();
+        float fading = modem_.getFadingIndex();
 
-        guiLog("MODE_CHANGE: %s %s %s (SNR=%.1f dB)",
-               protocol::waveformModeToString(waveform),
-               modulationToString(mod),
-               codeRateToString(rate),
-               snr_db);
+        const char* quality = fadingToQuality(fading);
+        const char* wf_name = waveformDisplayName(waveform);
+        guiLog("MODE_CHANGE: %s %s %s (SNR=%.1f dB, %s)",
+               wf_name, modulationToString(mod), codeRateToString(rate),
+               snr_db, quality);
 
-        // Format display with waveform info
-        char buf[80];
+        // Format display with waveform info and channel quality
+        char buf[100];
         if (waveform == protocol::WaveformMode::MC_DPSK) {
-            snprintf(buf, sizeof(buf), "[MODE] MC-DPSK 8 carriers %s (SNR=%d dB)",
-                     codeRateToString(rate), static_cast<int>(snr_db));
+            snprintf(buf, sizeof(buf), "[MODE] MC-DPSK 8 carriers %s (SNR=%d dB, %s)",
+                     codeRateToString(rate), static_cast<int>(snr_db), quality);
         } else {
-            snprintf(buf, sizeof(buf), "[MODE] %s %s %s (SNR=%d dB)",
-                     protocol::waveformModeToString(waveform),
-                     modulationToString(mod), codeRateToString(rate),
-                     static_cast<int>(snr_db));
+            snprintf(buf, sizeof(buf), "[MODE] %s %s %s (SNR=%d dB, %s)",
+                     wf_name, modulationToString(mod), codeRateToString(rate),
+                     static_cast<int>(snr_db), quality);
         }
         rx_log_.push_back(buf);
         if (rx_log_.size() > MAX_RX_LOG) {
@@ -282,10 +308,10 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         switch (mode) {
             case protocol::WaveformMode::MC_DPSK: mode_name = "MC-DPSK 8 carriers"; break;
             case protocol::WaveformMode::MFSK: mode_name = "MFSK"; break;
-            case protocol::WaveformMode::OTFS_EQ: mode_name = "OTFS-EQ"; break;
-            case protocol::WaveformMode::OTFS_RAW: mode_name = "OTFS-RAW"; break;
-            case protocol::WaveformMode::OFDM_CHIRP: mode_name = "OFDM-CHIRP"; break;
-            case protocol::WaveformMode::OFDM_COX: mode_name = "OFDM-COX"; break;
+            case protocol::WaveformMode::OTFS_EQ: mode_name = "OTFS"; break;
+            case protocol::WaveformMode::OTFS_RAW: mode_name = "OTFS"; break;
+            case protocol::WaveformMode::OFDM_CHIRP: mode_name = "OFDM"; break;
+            case protocol::WaveformMode::OFDM_COX: mode_name = "OFDM"; break;
             default: mode_name = "OFDM"; break;
         }
         guiLog("WAVEFORM_CHANGE: %s", mode_name.c_str());
@@ -625,6 +651,31 @@ std::vector<float> App::applyChannelEffects(const std::vector<float>& samples) {
     if (samples.empty()) return samples;
 
     std::vector<float> result = samples;
+
+    // Apply fading/multipath if not AWGN
+    if (simulation_channel_type_ > 0) {
+        sim::WattersonChannel::Config cfg;
+        switch (simulation_channel_type_) {
+            case 1:  // Good
+                cfg = sim::itu_r_f1487::good(simulation_snr_db_);
+                break;
+            case 2:  // Moderate
+                cfg = sim::itu_r_f1487::moderate(simulation_snr_db_);
+                break;
+            case 3:  // Poor
+                cfg = sim::itu_r_f1487::poor(simulation_snr_db_);
+                break;
+            default:
+                cfg = sim::itu_r_f1487::good(simulation_snr_db_);
+                break;
+        }
+        // Disable noise in WattersonChannel - we'll add it with fixed reference below
+        cfg.noise_enabled = false;
+
+        sim::WattersonChannel channel(cfg, sim_rng_());
+        SampleSpan input(result.data(), result.size());
+        result = channel.process(input);
+    }
 
     // Apply AWGN with fixed reference signal power (matches cli_simulator)
     // Using fixed reference ensures consistent SNR regardless of signal amplitude
@@ -1099,7 +1150,7 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         // CONNECTED - show remote mode (their view) AND our SNR (our view)
         // Row 1: Remote's negotiated mode + implied channel condition
         auto waveform = modem_.getWaveformMode();
-        const char* wf_str = protocol::waveformModeToString(waveform);
+        const char* wf_str = waveformDisplayName(waveform);
         ImVec4 wf_color = (waveform == protocol::WaveformMode::OFDM_COX) ? ImVec4(0.4f, 0.8f, 1.0f, 1.0f) :
                           (waveform == protocol::WaveformMode::MC_DPSK) ? ImVec4(0.8f, 0.8f, 0.4f, 1.0f) :
                           (waveform == protocol::WaveformMode::MFSK) ? ImVec4(0.8f, 0.4f, 0.8f, 1.0f) :
@@ -1165,12 +1216,12 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
     if (conn_state == protocol::ConnectionState::DISCONNECTED) {
         // Show default connect waveform (DPSK R1/4)
         auto connect_wf = protocol_.getConnectWaveform();
-        const char* wf_str = protocol::waveformModeToString(connect_wf);
+        const char* wf_str = waveformDisplayName(connect_wf);
         ImGui::TextDisabled("%s R1/4 (default)", wf_str);
     } else if (conn_state == protocol::ConnectionState::CONNECTING) {
         // Show actual waveform being used for connection attempt (always R1/4)
         auto connect_wf = protocol_.getConnectWaveform();
-        const char* wf_str = protocol::waveformModeToString(connect_wf);
+        const char* wf_str = waveformDisplayName(connect_wf);
         ImVec4 wf_color = (connect_wf == protocol::WaveformMode::OFDM_COX) ? ImVec4(0.4f, 0.8f, 1.0f, 1.0f) :
                           (connect_wf == protocol::WaveformMode::MC_DPSK) ? ImVec4(0.8f, 0.8f, 0.4f, 1.0f) :
                           (connect_wf == protocol::WaveformMode::MFSK) ? ImVec4(0.8f, 0.4f, 0.8f, 1.0f) :
@@ -1245,8 +1296,12 @@ void App::renderOperateTab() {
                     ImGui::SameLine();
                     ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "[REC %.1fs]", recorded_samples_.size() / 48000.0f);
                 }
-                ImGui::SetNextItemWidth(120);
-                ImGui::SliderFloat("SNR", &simulation_snr_db_, 5.0f, 40.0f, "%.0f dB");
+                ImGui::SetNextItemWidth(100);
+                ImGui::SliderFloat("SNR", &simulation_snr_db_, 0.0f, 40.0f, "%.0f dB");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(90);
+                const char* channel_types[] = {"AWGN", "Good", "Moderate", "Poor"};
+                ImGui::Combo("##Channel", &simulation_channel_type_, channel_types, 4);
             }
         } else {
             ImGui::PopStyleColor();

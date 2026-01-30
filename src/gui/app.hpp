@@ -100,6 +100,7 @@ private:
     bool sim_ui_visible_ = false;               // Show simulation UI (-sim flag)
     bool simulation_enabled_ = false;           // Enable virtual station
     float simulation_snr_db_ = 20.0f;           // Simulated channel SNR
+    int simulation_channel_type_ = 0;           // 0=AWGN, 1=Good, 2=Moderate, 3=Poor
 
     // Audio recording (requires -rec flag)
     bool recording_enabled_ = false;            // Currently recording
