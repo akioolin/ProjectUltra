@@ -254,20 +254,17 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         // (chirp detection sees clean loopback signal, not the simulated channel)
         float display_snr = simulation_enabled_ ? simulation_snr_db_ : snr;
 
-        // Get fading index from modem
-        float fading = modem_.getFadingIndex();
-
+        // Note: Fading index not shown here - it's only reliable after decoding data frames
         // Check state to show appropriate message
-        const char* quality = fadingToQuality(fading);
         if (protocol_.getState() == protocol::ConnectionState::PROBING) {
-            guiLog("RX PONG: Remote station responded! (SNR=%.1f dB, %s)", display_snr, quality);
+            guiLog("RX PONG: Remote station responded! (SNR=%.1f dB)", display_snr);
             // Add to message log so user sees it in the app
             char buf[80];
-            snprintf(buf, sizeof(buf), "[PONG] Station responded (SNR=%.0f dB, %s)", display_snr, quality);
+            snprintf(buf, sizeof(buf), "[PONG] Station responded (SNR=%.0f dB)", display_snr);
             rx_log_.push_back(buf);
             if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
         } else {
-            guiLog("MODEM: Detected PING/PONG (SNR=%.1f dB, %s)", display_snr, quality);
+            guiLog("MODEM: Detected PING/PONG (SNR=%.1f dB)", display_snr);
         }
         protocol_.onPingReceived();
     });
