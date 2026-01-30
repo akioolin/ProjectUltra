@@ -281,7 +281,7 @@ private:
     // Probing state (PING/PONG fast presence check)
     int ping_retry_count_ = 0;
     static constexpr int MAX_PING_RETRIES = 5;  // Try 5 pings before giving up
-    static constexpr uint32_t PING_TIMEOUT_MS = 3000;  // 3 seconds per ping attempt
+    static constexpr uint32_t PING_TIMEOUT_MS = 8000;  // 8 seconds per ping (PING=3.3s + PONG=3.3s + margin)
 
     // Handshake state - responder waits for first frame before confirming
     bool is_initiator_ = false;           // True if we initiated the connection

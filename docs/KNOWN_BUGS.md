@@ -50,6 +50,45 @@ RxPipeline had incorrect IWaveform call sequence. Fixed by StreamingDecoder, the
 
 ---
 
+### BUG-005: StreamingDecoder Batch-Search Causes Buffer Position Drift
+
+**Status:** IN PROGRESS - Redesign needed
+**Discovered:** 2026-01-30
+**Location:** `src/gui/modem/streaming_decoder.cpp`
+
+**Description:**
+The StreamingDecoder uses a batch-search architecture that doesn't match real receiver behavior:
+1. Waits for 144000 samples (3 seconds) before first search
+2. Copies buffer to work_buffer, searches for chirp
+3. By the time search happens, buffer positions have drifted
+4. Result: chirp is found, but `process()` reads noise instead of signal
+
+**Symptom:**
+```
+[MC-DPSK] RMS: training[0]=0.005609, ref[4096]=0.005656, data[4608]=0.005596
+```
+RMS is 0.005 (noise) when it should be 0.28 (signal).
+
+**Impact:**
+- cli_simulator connection fails at CONNECT_ACK phase
+- gui_simulator with virtual station has same issue
+- test_iwaveform works because it injects entire signal at once (no timing issues)
+
+**Root Cause:**
+Real receivers use **continuous correlation** - run matched filter on every incoming sample. Current code uses **batch search** - wait 3 seconds, then search. This creates timing drift between audio thread and decode thread.
+
+**Workaround:**
+Use test_iwaveform for testing (batch file injection works fine).
+
+**Fix Plan:**
+See `docs/STREAMING_DECODER_REDESIGN.md` for detailed plan:
+1. Move correlation from processBuffer() to feedAudio()
+2. Simple state machine: SEARCHING → SYNC_FOUND → DECODING
+3. Remove MIN_SAMPLES_FOR_SEARCH requirement
+4. Reduce buffer size from 960k to 120k samples
+
+---
+
 ### BUG-003: ModemEngine Routes ALL Chirp Frames to MC-DPSK
 
 **Status:** OBSOLETE - Acquisition thread removed

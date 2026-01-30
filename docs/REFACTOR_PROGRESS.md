@@ -4,28 +4,42 @@
 
 **Source Plan:** `~/.claude/plans/eager-percolating-naur.md`
 
-**Last Updated:** 2026-01-28
+**Last Updated:** 2026-01-30
 
 ---
 
-## Overall Progress: ~98% Complete
+## Overall Progress: ~90% Complete
 
 ```
 Phase 1: Core Interfaces     [########--] 80%   (IWaveform complete, ISyncMethod/ICodec optional)
 Phase 2: Waveform Impl       [##########] 100%  (OFDM_COX CFO fixed!)
-Phase 3: ModemEngine Refactor[##########] 100%  (RxPipeline deleted, fading detection added!)
+Phase 3: ModemEngine Refactor[########--] 80%   (StreamingDecoder needs redesign for continuous audio)
 Phase 4: Sync Methods        [----------]  0%   (optional - waveforms own their sync internally)
 Phase 5: Configuration       [----------]  0%   (optional - nice-to-have)
-Phase 6: Bug Fixes           [##########] 100%  (CFO + PING detection fixed!)
+Phase 6: Bug Fixes           [########--] 80%   (BUG-005: StreamingDecoder batch search issue)
+Phase 7: Continuous Audio    [####------] 40%   (NEW - cli_simulator/gui_simulator real-time audio)
 ```
 
-### Recent Updates (2026-01-28)
+### Recent Updates (2026-01-30)
+- ⚠️ **DISCOVERED BUG-005**: StreamingDecoder batch-search causes buffer position drift
+- ⚠️ cli_simulator connection fails at CONNECT_ACK (chirp found, but data reads noise)
+- ✅ cli_simulator audio model is CORRECT (single I/O thread per station)
+- ✅ Root cause identified: 3-second MIN_SAMPLES_FOR_SEARCH delays search
+- 📝 Created `docs/STREAMING_DECODER_REDESIGN.md` with full fix plan
+- 🔄 **NEXT**: Implement continuous correlation in feedAudio()
+
+### Previous Updates (2026-01-28)
 - ✅ Fixed PING detection in cli_simulator (connection phase works)
 - ✅ Added fading detection for mode negotiation
 - ✅ Fixed control frame code rate (ACK/NACK use negotiated rate when connected)
 - ✅ Fixed OFDM_COX min_samples for short frames (ACK detection now works)
 - ✅ **cli_simulator DATA phase WORKING!** All 3 messages sent/received correctly
 - ✅ **cli_simulator DISCONNECT phase WORKING!** Fixed total_cw mismatch for negotiated rate
+
+### Blocking Issue
+**BUG-005** blocks cli_simulator and gui_simulator from working with continuous audio.
+- test_iwaveform still works (batch file injection)
+- See `docs/STREAMING_DECODER_REDESIGN.md` for fix plan
 
 ---
 

@@ -115,7 +115,7 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_link_libraries(ultra PRIVATE ultra_core)
 
-    # CLI Simulator - Command-line version of GUI test mode
+    # CLI Simulator - Command-line version of GUI test mode (real-time audio)
     add_executable(cli_simulator
         tools/cli_simulator.cpp
         src/gui/modem/modem_engine.cpp

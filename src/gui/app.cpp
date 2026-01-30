@@ -663,71 +663,75 @@ void App::simulationLoop() {
     guiLog("SIM: Simulation loop started");
 
     constexpr size_t CHUNK_SIZE = 480;  // 10ms at 48kHz for waterfall display
+    // Audio streaming: feed samples gradually to simulate real-time audio arrival
+    // At 48kHz, 1ms = 48 samples. Feed 4800 samples/tick for ~100x real-time (fast simulation)
+    // This ensures decoder gets samples fast enough to avoid pending frame timeouts
+    constexpr size_t SAMPLES_PER_TICK = 4800;
     auto last_protocol_tick = std::chrono::steady_clock::now();
+
+    // Intermediate buffers for gradual streaming
+    std::vector<float> our_channel_buffer;     // Our TX -> channel -> virtual RX
+    std::vector<float> virtual_channel_buffer; // Virtual TX -> channel -> our RX
 
     while (sim_thread_running_) {
         bool had_activity = false;
 
-        // === Our TX -> Virtual RX ===
-        // Batch process all pending samples (like cli_simulator)
-        std::vector<float> our_samples;
+        // === Our TX -> Channel buffer (queue all new samples) ===
         {
             std::lock_guard<std::mutex> lock(our_tx_pending_mutex_);
             if (!our_tx_pending_.empty()) {
-                our_samples = std::move(our_tx_pending_);
+                guiLog("SIM: Queued %zu TX samples for streaming", our_tx_pending_.size());
+                // Apply channel effects and queue for gradual streaming
+                auto noisy = applyChannelEffects(our_tx_pending_);
+                our_channel_buffer.insert(our_channel_buffer.end(), noisy.begin(), noisy.end());
+                // Show on waterfall
+                for (size_t i = 0; i < our_tx_pending_.size(); i += CHUNK_SIZE) {
+                    size_t chunk_size = std::min(CHUNK_SIZE, our_tx_pending_.size() - i);
+                    waterfall_.addSamples(our_tx_pending_.data() + i, chunk_size);
+                }
+                // Record if enabled
+                if (recording_enabled_) {
+                    recorded_samples_.insert(recorded_samples_.end(), noisy.begin(), noisy.end());
+                }
                 our_tx_pending_.clear();
             }
         }
 
-        if (!our_samples.empty()) {
+        // === Channel buffer -> Virtual RX (stream gradually) ===
+        if (!our_channel_buffer.empty()) {
             had_activity = true;
-            guiLog("SIM: Processing %zu TX samples -> virtual", our_samples.size());
-
-            // Show on waterfall in chunks (for display)
-            for (size_t i = 0; i < our_samples.size(); i += CHUNK_SIZE) {
-                size_t chunk_size = std::min(CHUNK_SIZE, our_samples.size() - i);
-                waterfall_.addSamples(our_samples.data() + i, chunk_size);
-            }
-
-            // Apply channel effects and feed ALL to virtual modem at once
-            auto noisy = applyChannelEffects(our_samples);
-            virtual_modem_->feedAudio(noisy);
-
-            // Record if enabled
-            if (recording_enabled_) {
-                recorded_samples_.insert(recorded_samples_.end(), noisy.begin(), noisy.end());
-            }
+            size_t to_feed = std::min(SAMPLES_PER_TICK, our_channel_buffer.size());
+            virtual_modem_->feedAudio(our_channel_buffer.data(), to_feed);
+            our_channel_buffer.erase(our_channel_buffer.begin(), our_channel_buffer.begin() + to_feed);
         }
 
-        // === Virtual TX -> Our RX ===
-        std::vector<float> virtual_samples;
+        // === Virtual TX -> Channel buffer (queue all new samples) ===
         {
             std::lock_guard<std::mutex> lock(virtual_tx_pending_mutex_);
             if (!virtual_tx_pending_.empty()) {
-                virtual_samples = std::move(virtual_tx_pending_);
+                guiLog("SIM: Queued %zu RX samples for streaming", virtual_tx_pending_.size());
+                // Apply channel effects and queue for gradual streaming
+                auto noisy = applyChannelEffects(virtual_tx_pending_);
+                virtual_channel_buffer.insert(virtual_channel_buffer.end(), noisy.begin(), noisy.end());
+                // Record if enabled
+                if (recording_enabled_) {
+                    recorded_samples_.insert(recorded_samples_.end(), noisy.begin(), noisy.end());
+                }
                 virtual_tx_pending_.clear();
             }
         }
 
-        if (!virtual_samples.empty()) {
+        // === Channel buffer -> Our RX (stream gradually) ===
+        if (!virtual_channel_buffer.empty()) {
             had_activity = true;
-            guiLog("SIM: Processing %zu RX samples <- virtual", virtual_samples.size());
+            size_t to_feed = std::min(SAMPLES_PER_TICK, virtual_channel_buffer.size());
+            modem_.feedAudio(virtual_channel_buffer.data(), to_feed);
+            virtual_channel_buffer.erase(virtual_channel_buffer.begin(), virtual_channel_buffer.begin() + to_feed);
 
-            // Apply channel effects and feed ALL to our modem at once
-            auto noisy = applyChannelEffects(virtual_samples);
-            modem_.feedAudio(noisy);
-
-            // Show on waterfall in chunks (RX from virtual)
+            // Show on waterfall
             if (!tx_in_progress_) {
-                for (size_t i = 0; i < noisy.size(); i += CHUNK_SIZE) {
-                    size_t chunk_size = std::min(CHUNK_SIZE, noisy.size() - i);
-                    waterfall_.addSamples(noisy.data() + i, chunk_size);
-                }
-            }
-
-            // Record if enabled
-            if (recording_enabled_) {
-                recorded_samples_.insert(recorded_samples_.end(), noisy.begin(), noisy.end());
+                // Only show what we just fed
+                // (waterfall expects continuous stream, not bursts)
             }
         }
 
@@ -745,17 +749,26 @@ void App::simulationLoop() {
             last_protocol_tick = now;
         }
 
-        // Generate noise floor for waterfall when idle (once per tick)
+        // Generate continuous noise when idle (simulates real radio - always receiving audio)
+        // This ensures decoders waiting for samples will get them (as noise)
+        // Use REAL-TIME rate (48 samples/ms at 48kHz) - this is how real audio works!
+        // Skip waterfall updates for noise to avoid GUI overhead (1000 FFTs/sec would be slow)
         if (!had_activity && !tx_in_progress_) {
+            constexpr size_t IDLE_SAMPLES_PER_TICK = 48;  // Real-time rate (48kHz / 1000 ticks/sec)
+
             float typical_rms = 0.1f;
             float snr_linear = std::pow(10.0f, simulation_snr_db_ / 10.0f);
             float noise_power = (typical_rms * typical_rms) / snr_linear;
             float noise_stddev = std::sqrt(noise_power);
             std::normal_distribution<float> noise_dist(0.0f, noise_stddev);
 
-            std::vector<float> noise(CHUNK_SIZE);
+            std::vector<float> noise(IDLE_SAMPLES_PER_TICK);
             for (float& s : noise) s = noise_dist(sim_rng_);
-            waterfall_.addSamples(noise.data(), noise.size());
+
+            // Feed noise to modems only (simulates continuous RX like real radio)
+            // Don't update waterfall - noise isn't interesting and FFT every 1ms is expensive
+            modem_.feedAudio(noise);
+            virtual_modem_->feedAudio(noise);
         }
 
         // Small sleep to avoid busy-waiting (1ms like cli_simulator)
