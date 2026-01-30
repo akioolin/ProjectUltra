@@ -53,6 +53,14 @@ namespace gui {
 // Forward declarations
 namespace v2 = protocol::v2;
 
+// Decoder state machine for continuous correlation
+// Real receivers run correlation continuously, not in batches
+enum class DecoderState {
+    SEARCHING,      // Running correlation on incoming samples
+    SYNC_FOUND,     // Chirp detected, collecting frame samples
+    DECODING,       // Have enough samples, decoding in progress
+};
+
 // Result of decoding a frame
 struct DecodeResult {
     bool success = false;           // True if frame decoded successfully
@@ -141,6 +149,7 @@ public:
 
     void setFrameCallback(FrameDecodedCallback callback) { frame_callback_ = callback; }
     void setPingCallback(StreamingPingCallback callback) { ping_callback_ = callback; }
+    void setLogPrefix(const std::string& prefix) { log_prefix_ = prefix; }
 
     // ========================================================================
     // STATUS
@@ -183,31 +192,28 @@ private:
     // INTERNAL HELPERS
     // ========================================================================
 
-    // Copy samples from circular buffer for processing
-    // Returns span of samples, caller owns the data
-    std::vector<float> copyOutSamples(size_t count);
+    // Search for sync in recent samples
+    void searchForSync();
 
-    // Advance read position past processed samples
-    void advanceReadPos(size_t count);
+    // Check if we have enough samples to decode
+    void checkIfReadyToDecode();
 
-    // Trim old samples to prevent overflow
-    void trimOldSamples(size_t keep_samples);
-
-    // Detect chirp and decode frame
-    // Returns true if frame decoded (result queued)
-    bool detectAndDecode();
-
-    // Check if post-chirp energy indicates data or just PING
-    bool isPingOnly(const std::vector<float>& samples, size_t chirp_end);
+    // Decode the current frame
+    void decodeCurrentFrame();
 
     // Estimate SNR from chirp correlation strength
     float estimateSNRFromChirp(float correlation, float noise_floor);
 
-    // Update noise floor estimate
-    void updateNoiseFloor(const float* samples, size_t count);
-
     // Decode soft bits into frame data
     DecodeResult decodeFrame(const std::vector<float>& soft_bits, float snr, float cfo);
+
+    // Legacy methods (kept for compatibility, do nothing)
+    bool runCorrelationSearch(size_t new_samples);
+    bool tryDecodeFrame();
+    std::vector<float> copySamplesFrom(size_t start_pos, size_t count);
+    size_t samplesAvailableFrom(size_t pos) const;
+    bool isPingOnly(const std::vector<float>& samples, size_t chirp_end);
+    void updateNoiseFloor(const float* samples, size_t count);
 
     // ========================================================================
     // STATE
@@ -215,11 +221,17 @@ private:
 
     // Circular buffer for audio samples
     std::vector<float> buffer_;
-    size_t write_pos_ = 0;          // Next position to write
-    size_t read_pos_ = 0;           // Next position to read (for search)
-    size_t search_pos_ = 0;         // Current search position (can be > read_pos_)
+    size_t write_pos_ = 0;          // Next position to write (only pointer we need)
     mutable std::mutex buffer_mutex_;
     std::condition_variable data_cv_;
+
+    // Continuous correlation state machine (like real receivers)
+    DecoderState state_ = DecoderState::SEARCHING;
+    size_t sync_position_ = 0;        // Buffer position where sync was found
+    size_t samples_since_sync_ = 0;   // How many samples collected since sync
+    float sync_cfo_ = 0.0f;           // CFO from sync detection
+    float sync_snr_ = 0.0f;           // SNR estimate from sync detection
+    size_t correlation_pos_ = 0;      // Current position for correlation search
 
     // Active waveform for demodulation (handles its own sync internally)
     WaveformFactory waveform_factory_;
@@ -257,26 +269,25 @@ private:
 
     // Lifecycle
     std::atomic<bool> shutdown_{false};
+    bool new_data_available_ = false;  // Flag to wake decode thread immediately
 
-    // Pending frame state (for dynamic codeword handling)
-    // When we detect sync and decode header but don't have enough samples for full frame,
-    // we save state here and wait for more audio
-    bool pending_frame_ = false;              // True if waiting for more samples
-    size_t pending_search_pos_ = 0;           // search_pos when sync was found
-    int pending_data_start_ = 0;              // Where frame data starts (relative to search_pos)
-    int pending_total_cw_ = 0;                // Total codewords from header
-    float pending_snr_ = 0.0f;                // SNR from sync detection
-    float pending_cfo_ = 0.0f;                // CFO from sync detection
-    int pending_retry_count_ = 0;             // How many times we've tried to resume
-    static constexpr int MAX_PENDING_RETRIES = 5;  // Give up after this many attempts
+    // Logging
+    std::string log_prefix_ = "StreamingDecoder";
+    size_t total_fed_ = 0;      // Total samples fed (per-instance)
+    int feed_iter_ = 0;         // Feed counter (per-instance)
+
+    // Pending frame state for multi-codeword frames
+    // After reading header, if more codewords needed, wait for more samples
+    int pending_total_cw_ = 0;                // Total codewords expected (0 = unknown)
+    std::chrono::steady_clock::time_point sync_start_time_;  // When sync was found
+    static constexpr int FRAME_TIMEOUT_MS = 5000;  // Give up after 5 seconds
 
     // Constants - Buffer sizes
-    // Buffer must hold worst-case test scenario: 5 frames × ~150k samples = 750k + margin
-    // Real-world: audio arrives at 48kHz so buffer just needs to hold 2-3 frames
-    static constexpr size_t MAX_BUFFER_SAMPLES = 960000;    // 20 seconds at 48kHz
-    static constexpr size_t MIN_SAMPLES_FOR_SEARCH = 144000; // 3 seconds - ensure full chirp visible
-    static constexpr size_t SLIDE_STEP = 4800;              // 100ms between searches
-    static constexpr size_t CHIRP_SAMPLES = 53000;          // ~1.1 second (dual chirp + gap)
+    // Need enough for chirp (~1.2s) + frame (~1s) + search margin
+    // Larger buffer to avoid wraparound issues during testing
+    static constexpr size_t MAX_BUFFER_SAMPLES = 480000;    // 10 seconds at 48kHz
+    static constexpr size_t CHIRP_SAMPLES = 57600;          // ~1.2 second (dual chirp)
+    static constexpr size_t CORRELATION_STEP = 4800;        // 100ms at 48kHz (faster search)
 
     // Constants - Adaptive acquisition thresholds (disabled for now)
     static constexpr float CORR_NOISE_THRESHOLD = 0.05f;    // Below = pure noise, don't advance

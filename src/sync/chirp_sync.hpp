@@ -12,13 +12,15 @@
 // - Linear up-chirp: 300 Hz -> 2700 Hz over 500ms
 // - Repeated 2-3 times with short gaps
 // - Total duration: ~1.5 seconds
-// - Detection via matched filter correlation
+// - Detection via FFT-based matched filter correlation (fast!)
 
 #include "ultra/types.hpp"
 #include "ultra/dsp.hpp"
 #include <vector>
 #include <cmath>
 #include <complex>
+#include <memory>
+#include <mutex>
 
 namespace ultra {
 namespace sync {
@@ -419,12 +421,13 @@ public:
         // Detect DOWN chirp (search in limited window after UP chirp)
         // Expected down chirp is at: up_pos + chirp_len + gap_samples
         // With ±100 Hz CFO, position shifts by up to ±1000 samples (100 Hz * 10 samples/Hz)
-        // Use window: from half chirp after up_pos to 2x expected gap position
         size_t down_search_start = up_pos + chirp_len / 2;
         size_t expected_down_pos = up_pos + chirp_len + gap_samples;
-        // Search window covers expected position ± 2x chirp length (generous for CFO)
-        size_t search_margin = 2 * chirp_len;
-        size_t down_search_end = std::min(samples.size(), expected_down_pos + search_margin);
+        // Search margin: ensure buffer is large enough to use FFT (>= 2 * chirp_len = 48000)
+        // This avoids slow time-domain fallback
+        size_t min_search_len = 2 * chirp_len + 1000;  // 49000 samples to ensure FFT path
+        size_t down_search_end = std::min(samples.size(),
+            std::max(expected_down_pos + 10000 + chirp_len, down_search_start + min_search_len));
 
         if (down_search_start >= samples.size()) {
             return result;
@@ -441,6 +444,8 @@ public:
                                                               down_template_energy_, threshold);
 
         if (down_pos_rel < 0) {
+            fprintf(stderr, "[DUAL-CHIRP] Down chirp NOT found (up was at %d, corr=%.3f)\n",
+                    up_pos, up_corr);
             return result;  // Down chirp not found
         }
 
@@ -554,8 +559,159 @@ private:
     float template_energy_ = 0.0f;
     float down_template_energy_ = 0.0f;
 
+    // FFT-based correlation (fast!)
+    // Pre-computed template spectra for O(N log N) correlation instead of O(N*M)
+    static constexpr size_t FFT_SIZE = 131072;  // 128K samples (~2.7s at 48kHz)
+    mutable std::unique_ptr<FFT> fft_;          // Lazy-initialized
+    mutable std::vector<Complex> up_template_fft_;    // FFT of complex up-chirp template
+    mutable std::vector<Complex> down_template_fft_;  // FFT of complex down-chirp template
+    mutable bool fft_initialized_ = false;
+    mutable std::mutex fft_init_mutex_;  // Protects FFT initialization
+
+    // Initialize FFT for fast correlation (lazy, thread-safe)
+    void initFFT() const {
+        if (fft_initialized_) return;  // Fast path - already initialized
+
+        std::lock_guard<std::mutex> lock(fft_init_mutex_);
+        if (fft_initialized_) return;  // Double-check after acquiring lock
+
+        fft_ = std::make_unique<FFT>(FFT_SIZE);
+
+        // Create complex chirp templates (analytic signal: cos + j*sin)
+        // For cross-correlation via FFT: R = IFFT(FFT(signal) * conj(FFT(template)))
+        // We store conj(FFT(template)) directly for efficiency
+        const size_t chirp_len = up_chirp_template_.size();
+
+        // Up-chirp: create complex template and compute conj(FFT)
+        std::vector<Complex> up_complex(FFT_SIZE, Complex(0, 0));
+        for (size_t i = 0; i < chirp_len; i++) {
+            // Complex template: cos + j*sin (analytic signal)
+            up_complex[i] = Complex(up_chirp_template_cos_[i], up_chirp_template_[i]);
+        }
+        std::vector<Complex> up_fft(FFT_SIZE);
+        fft_->forward(up_complex.data(), up_fft.data());
+        // Store conjugate for correlation
+        up_template_fft_.resize(FFT_SIZE);
+        for (size_t i = 0; i < FFT_SIZE; i++) {
+            up_template_fft_[i] = std::conj(up_fft[i]);
+        }
+
+        // Down-chirp: same treatment
+        std::vector<Complex> down_complex(FFT_SIZE, Complex(0, 0));
+        for (size_t i = 0; i < chirp_len; i++) {
+            down_complex[i] = Complex(down_chirp_template_cos_[i], down_chirp_template_[i]);
+        }
+        std::vector<Complex> down_fft(FFT_SIZE);
+        fft_->forward(down_complex.data(), down_fft.data());
+        // Store conjugate for correlation
+        down_template_fft_.resize(FFT_SIZE);
+        for (size_t i = 0; i < FFT_SIZE; i++) {
+            down_template_fft_[i] = std::conj(down_fft[i]);
+        }
+
+        fft_initialized_ = true;
+
+        // Debug: verify templates
+        float up_energy = 0, down_energy = 0;
+        for (size_t i = 0; i < FFT_SIZE; i++) {
+            up_energy += std::norm(up_template_fft_[i]);
+            down_energy += std::norm(down_template_fft_[i]);
+        }
+        fprintf(stderr, "[CHIRP-FFT] Templates initialized: up_fft_energy=%.1f, down_fft_energy=%.1f, chirp_len=%zu\n",
+                up_energy, down_energy, chirp_len);
+    }
+
+    // FFT-based chirp detection - O(N log N) instead of O(N*M)
+    // Returns: (position, correlation) where position is the chirp start
+    std::pair<int, float> detectChirpTemplateFFT(SampleSpan samples,
+                                                  const std::vector<Complex>& tmpl_fft,
+                                                  float tmpl_energy,
+                                                  float threshold) const {
+        const size_t chirp_len = up_chirp_template_.size();
+        if (samples.size() < chirp_len) {
+            return {-1, 0.0f};
+        }
+
+        // Ensure FFT is initialized
+        initFFT();
+
+        // Limit search to FFT_SIZE - chirp_len to avoid wrap-around artifacts
+        const size_t search_len = std::min(samples.size(), FFT_SIZE) - chirp_len;
+        const size_t fft_input_len = std::min(samples.size(), FFT_SIZE);
+
+        // Zero-pad signal and compute FFT
+        std::vector<Complex> signal_complex(FFT_SIZE, Complex(0, 0));
+        for (size_t i = 0; i < fft_input_len; i++) {
+            signal_complex[i] = Complex(samples[i], 0);
+        }
+
+        std::vector<Complex> signal_fft(FFT_SIZE);
+        fft_->forward(signal_complex.data(), signal_fft.data());
+
+        // Multiply in frequency domain
+        std::vector<Complex> product(FFT_SIZE);
+        for (size_t i = 0; i < FFT_SIZE; i++) {
+            product[i] = signal_fft[i] * tmpl_fft[i];
+        }
+
+        // IFFT to get correlation
+        std::vector<Complex> corr_complex(FFT_SIZE);
+        fft_->inverse(product.data(), corr_complex.data());
+
+        // Compute signal energy for normalization (sliding window approximation)
+        // Pre-compute cumulative energy for O(1) per-position normalization
+        std::vector<float> cumsum_energy(fft_input_len + 1, 0.0f);
+        for (size_t i = 0; i < fft_input_len; i++) {
+            cumsum_energy[i + 1] = cumsum_energy[i] + samples[i] * samples[i];
+        }
+
+        // Find peak correlation (magnitude for CFO tolerance)
+        // Cross-correlation R[k] = sum_n s[n] * conj(h[n-k])
+        // Peak at position k means template starts at position k in signal
+        float best_corr = 0.0f;
+        int best_pos = -1;
+
+        for (size_t pos = 0; pos < search_len; pos++) {
+            // Correlation magnitude (CFO-invariant)
+            // The correlation output at index pos corresponds to template starting at pos
+            float corr_mag = std::abs(corr_complex[pos]);
+
+            // Normalize by signal and template energy
+            float sig_energy = cumsum_energy[pos + chirp_len] - cumsum_energy[pos];
+            float denom = std::sqrt(sig_energy * tmpl_energy);
+            float norm_corr = (denom > 1e-10f) ? corr_mag / denom : 0.0f;
+
+            if (norm_corr > best_corr) {
+                best_corr = norm_corr;
+                best_pos = static_cast<int>(pos);
+            }
+        }
+
+        // Debug: show FFT correlation result and check for signal
+        static int fft_debug_count = 0;
+        if (++fft_debug_count % 20 == 1 || best_corr >= threshold) {
+            // Check RMS at a few positions to find where signal is
+            float rms_start = 0, rms_mid = 0;
+            for (size_t i = 0; i < 1000 && i < fft_input_len; i++) {
+                rms_start += samples[i] * samples[i];
+                size_t mid = fft_input_len / 2;
+                if (mid + i < fft_input_len) rms_mid += samples[mid + i] * samples[mid + i];
+            }
+            rms_start = std::sqrt(rms_start / 1000);
+            rms_mid = std::sqrt(rms_mid / 1000);
+            fprintf(stderr, "[CHIRP-FFT] buf=%zu, best_corr=%.3f at pos=%d, rms_start=%.3f, rms_mid=%.3f\n",
+                    samples.size(), best_corr, best_pos, rms_start, rms_mid);
+        }
+
+        if (best_corr < threshold) {
+            return {-1, best_corr};
+        }
+
+        return {best_pos, best_corr};
+    }
+
     // Detect chirp using COMPLEX correlation (CFO-tolerant!)
-    // Takes sin and cos templates for I/Q correlation
+    // Uses FFT-based correlation for speed, falls back to time-domain for small buffers
     // Returns: (position, correlation) where position is the TRUE chirp start
     std::pair<int, float> detectChirpTemplate(SampleSpan samples,
                                                const Samples& tmpl_sin,
@@ -567,6 +723,25 @@ private:
             return {-1, 0.0f};
         }
 
+        // Use FFT-based correlation for large buffers (much faster)
+        // For small buffers, time-domain is fine and avoids FFT overhead
+        if (samples.size() >= chirp_len * 2) {
+            // Determine which template FFT to use
+            const std::vector<Complex>* tmpl_fft = nullptr;
+            if (&tmpl_sin == &up_chirp_template_) {
+                initFFT();
+                tmpl_fft = &up_template_fft_;
+            } else if (&tmpl_sin == &down_chirp_template_) {
+                initFFT();
+                tmpl_fft = &down_template_fft_;
+            }
+
+            if (tmpl_fft && !tmpl_fft->empty()) {
+                return detectChirpTemplateFFT(samples, *tmpl_fft, tmpl_energy, threshold);
+            }
+        }
+
+        // Fallback: time-domain correlation for small buffers or if FFT not available
         const size_t search_len = samples.size() - chirp_len;
 
         float best_corr = 0.0f;
@@ -574,6 +749,14 @@ private:
 
         // Coarse search with complex correlation (CFO-tolerant!)
         constexpr size_t COARSE_STEP = 48;  // 1ms at 48kHz
+
+        // Debug: check signal at start
+        float rms_check = 0;
+        for (size_t i = 0; i < 1000 && i < samples.size(); i++) {
+            rms_check += samples[i] * samples[i];
+        }
+        rms_check = std::sqrt(rms_check / 1000);
+
         for (size_t pos = 0; pos < search_len; pos += COARSE_STEP) {
             float corr = computeComplexTemplateCorrelation(samples, pos, tmpl_sin, tmpl_cos, tmpl_energy);
             if (corr > best_corr) {
@@ -582,8 +765,16 @@ private:
             }
         }
 
+        // Debug: print search results and check correlation at different positions
+        static int td_debug_count = 0;
+        if (++td_debug_count % 10 == 1 || best_corr > 0.3f) {
+            float corr_at_0 = computeComplexTemplateCorrelation(samples, 0, tmpl_sin, tmpl_cos, tmpl_energy);
+            float corr_at_7200 = search_len > 7200 ? computeComplexTemplateCorrelation(samples, 7200, tmpl_sin, tmpl_cos, tmpl_energy) : 0;
+            fprintf(stderr, "[CHIRP-TD] buf=%zu, best=%.3f@%d, @0=%.3f, @7200=%.3f, rms=%.3f\n",
+                    samples.size(), best_corr, best_pos, corr_at_0, corr_at_7200, rms_check);
+        }
+
         if (best_pos < 0 || best_corr < threshold * 0.3f) {
-            // Debug: log when chirp search fails
             if (samples.size() > 50000) {
                 fprintf(stderr, "[CHIRP] FAIL: buf=%zu, max_corr=%.3f at pos=%d (threshold=%.2f)\n",
                         samples.size(), best_corr, best_pos, threshold);
@@ -613,13 +804,11 @@ private:
             if (std::abs(denom) > 1e-10f) {
                 float delta = (c0 - c2) / denom;
                 delta = std::max(-1.0f, std::min(1.0f, delta));
-                // Return integer position (sub-sample precision tracked internally)
                 best_pos = static_cast<int>(std::round(best_pos + delta));
             }
         }
 
         if (best_corr < threshold && samples.size() > 50000) {
-            // Debug: chirp below threshold after fine search
             fprintf(stderr, "[CHIRP] WEAK: buf=%zu, best_corr=%.3f at pos=%d (need %.2f)\n",
                     samples.size(), best_corr, best_pos, threshold);
         }

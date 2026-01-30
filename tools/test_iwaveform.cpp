@@ -836,13 +836,12 @@ int main(int argc, char** argv) {
         // Give RX threads time to fully initialize before first frame
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-        // Feed audio at 2x real-time speed to simulate realistic operation
-        // This prevents multiple frames accumulating in buffer before processing
-        // Feed 2 seconds of audio, wait 1 second -> 2x speedup
-        constexpr size_t FEED_CHUNK = 48000 * 2;  // 2 seconds of audio
-        constexpr int WAIT_MS = 1000;             // 1 second wait -> 2x real-time
+        // Feed audio at 1x real-time speed to match how StreamingDecoder expects data
+        // Feed 1 second of audio, wait 1 second -> 1x real-time
+        constexpr size_t FEED_CHUNK = 48000;      // 1 second of audio
+        constexpr int WAIT_MS = 1000;             // 1 second wait -> 1x real-time
 
-        printf("Feeding %zu samples (%.1f sec) at 2x real-time...\n",
+        printf("Feeding %zu samples (%.1f sec) at 1x real-time...\n",
                full_audio.size(), full_audio.size() / 48000.0f);
 
         for (size_t j = 0; j < full_audio.size(); j += FEED_CHUNK) {
@@ -854,7 +853,7 @@ int main(int argc, char** argv) {
                 rx_modem.feedAudio(full_audio.data() + j + k, piece_len);
             }
 
-            // Wait to simulate 2x real-time
+            // Wait to simulate 1x real-time
             if (j + FEED_CHUNK < full_audio.size()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(WAIT_MS));
             }

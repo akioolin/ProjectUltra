@@ -37,7 +37,7 @@ public:
     ~ModemEngine();
 
     // Set a name/prefix for logging (e.g., "OUR" or "SIM")
-    void setLogPrefix(const std::string& prefix) { log_prefix_ = prefix; }
+    void setLogPrefix(const std::string& prefix);
     const std::string& getLogPrefix() const { return log_prefix_; }
 
     // ========================================================================

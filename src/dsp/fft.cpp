@@ -1,5 +1,6 @@
 #define _USE_MATH_DEFINES  // For M_PI on MSVC
 #include <cmath>
+#include <mutex>
 #include "ultra/dsp.hpp"
 #include <stdexcept>
 
@@ -35,6 +36,9 @@ struct FFT::Impl {
 #endif
 };
 
+// Global mutex to protect FFTW plan creation (FFTW planner is not thread-safe)
+static std::mutex g_fftw_planner_mutex;
+
 FFT::FFT(size_t size) : size_(size), impl_(std::make_unique<Impl>()) {
     if ((size & (size - 1)) != 0) {
         throw std::invalid_argument("FFT size must be power of 2");
@@ -43,33 +47,36 @@ FFT::FFT(size_t size) : size_(size), impl_(std::make_unique<Impl>()) {
     impl_->size = size;
 
 #ifdef ULTRA_HAS_FFTW
+    // Protect plan creation with global mutex (FFTW planner is not thread-safe)
+    std::lock_guard<std::mutex> lock(g_fftw_planner_mutex);
+
     impl_->buffer = fftwf_alloc_complex(size);
     impl_->real_buffer = fftwf_alloc_real(size);
 
     impl_->forward_plan = fftwf_plan_dft_1d(
         size,
         impl_->buffer, impl_->buffer,
-        FFTW_FORWARD, FFTW_MEASURE
+        FFTW_FORWARD, FFTW_ESTIMATE
     );
 
     impl_->inverse_plan = fftwf_plan_dft_1d(
         size,
         impl_->buffer, impl_->buffer,
-        FFTW_BACKWARD, FFTW_MEASURE
+        FFTW_BACKWARD, FFTW_ESTIMATE
     );
 
     impl_->forward_real_plan = fftwf_plan_dft_r2c_1d(
         size,
         impl_->real_buffer,
         impl_->buffer,
-        FFTW_MEASURE
+        FFTW_ESTIMATE
     );
 
     impl_->inverse_real_plan = fftwf_plan_dft_c2r_1d(
         size,
         impl_->buffer,
         impl_->real_buffer,
-        FFTW_MEASURE
+        FFTW_ESTIMATE
     );
 #else
     // Precompute twiddle factors

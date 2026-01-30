@@ -97,6 +97,7 @@ ModemEngine::ModemEngine() {
     // NEW: Initialize StreamingDecoder (replaces RxPipeline + acquisition thread)
     // ========================================================================
     streaming_decoder_ = std::make_unique<StreamingDecoder>();
+    streaming_decoder_->setLogPrefix(log_prefix_);
 
     // Set callbacks to wire into existing ModemEngine callbacks
     streaming_decoder_->setFrameCallback([this](const DecodeResult& result) {
@@ -142,6 +143,13 @@ ModemEngine::ModemEngine() {
 
 ModemEngine::~ModemEngine() {
     stopRxDecodeThread();
+}
+
+void ModemEngine::setLogPrefix(const std::string& prefix) {
+    log_prefix_ = prefix;
+    if (streaming_decoder_) {
+        streaming_decoder_->setLogPrefix(prefix);
+    }
 }
 
 // ============================================================================
@@ -498,7 +506,9 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 
     // Combine lead-in + preamble + data + tail guard
     const size_t LEAD_IN_SAMPLES = 48000 * 150 / 1000;  // 150ms
-    const size_t TAIL_SAMPLES = 576 * 2;
+    // Small tail guard for processing margin
+    // With continuous noise feeding in simulator, decoder gets samples after TX ends
+    const size_t TAIL_SAMPLES = 2400;  // 50ms guard
     std::vector<float> output;
     output.reserve(LEAD_IN_SAMPLES + preamble.size() + modulated.size() + TAIL_SAMPLES);
 
@@ -548,33 +558,38 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 std::vector<float> ModemEngine::transmitPing() {
     // Generate chirp sync signal for robust presence detection
     // Chirp spreads energy across 400-2600 Hz, robust to frequency-selective fading
-    auto output = chirp_sync_->generate();
+    auto chirp = chirp_sync_->generate();
 
     // Apply TX bandpass filter
     if (filter_config_.enabled && tx_filter_) {
-        SampleSpan span(output.data(), output.size());
-        output = tx_filter_->process(span);
+        SampleSpan span(chirp.data(), chirp.size());
+        chirp = tx_filter_->process(span);
     }
 
     // Scale for audio output
     float max_val = 0.0f;
-    for (float s : output) {
+    for (float s : chirp) {
         max_val = std::max(max_val, std::abs(s));
     }
     if (max_val > 0.0f) {
         float scale = 0.8f / max_val;
-        for (float& s : output) {
+        for (float& s : chirp) {
             s *= scale;
         }
     }
 
-    // Add trailing silence so receiver's buffer fills enough to detect the chirp
-    // StreamingDecoder needs MIN_SAMPLES_FOR_SEARCH (144000) to search
-    // Chirp is ~57600 samples, so add ~100000 samples of trailing silence
-    constexpr size_t TRAILING_SILENCE = 100000;  // ~2.1 seconds
-    output.resize(output.size() + TRAILING_SILENCE, 0.0f);
+    // Lead-in silence for receiver AGC settling + trailing silence
+    // All TX must have lead-in for consistent receiver behavior
+    constexpr size_t LEAD_IN_SAMPLES = 48000 * 150 / 1000;   // 150ms for AGC
+    constexpr size_t TRAILING_SILENCE = 2400;                 // 50ms guard
 
-    LOG_MODEM(INFO, "[%s] TX PING (chirp): %zu samples (%.2f sec, incl trailing silence)",
+    std::vector<float> output;
+    output.reserve(LEAD_IN_SAMPLES + chirp.size() + TRAILING_SILENCE);
+    output.resize(LEAD_IN_SAMPLES, 0.0f);  // Lead-in silence
+    output.insert(output.end(), chirp.begin(), chirp.end());
+    output.resize(output.size() + TRAILING_SILENCE, 0.0f);  // Trailing silence
+
+    LOG_MODEM(INFO, "[%s] TX PING (chirp): %zu samples (%.2f sec, incl lead-in+trail)",
               log_prefix_.c_str(), output.size(), output.size() / 48000.0f);
 
     return output;
