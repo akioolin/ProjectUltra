@@ -127,7 +127,7 @@ void Connection::acceptCall() {
     CodeRate rec_rate;
 
     // Use centralized algorithm from waveform_selection.hpp
-    recommendDataMode(measured_snr_db_, negotiated_mode_, rec_mod, rec_rate);
+    recommendDataMode(measured_snr_db_, negotiated_mode_, rec_mod, rec_rate, fading_index_);
 
     if (pending_forced_modulation_ != Modulation::AUTO) {
         // Initiator forced a specific modulation - honor it

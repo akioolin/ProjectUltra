@@ -83,13 +83,15 @@ inline WaveformRecommendation recommendWaveformAndRate(float snr_db, float fadin
 //
 // For OFDM modes (OFDM_CHIRP, OFDM_COX):
 //   - Always use DQPSK (differential for phase stability)
-//   - Code rate based on SNR
+//   - Code rate based on SNR AND fading
+//   - Fading channels need R1/4 regardless of SNR
+//   - Only AWGN can use higher rates
 //
 // For MC-DPSK:
 //   - Always DQPSK R1/4 (fixed for robustness)
 //
 inline void recommendDataMode(float snr_db, WaveformMode waveform,
-                               Modulation& mod, CodeRate& rate) {
+                               Modulation& mod, CodeRate& rate, float fading_index = 0.0f) {
     // MC-DPSK always uses DQPSK R1/4 for robustness
     if (waveform == WaveformMode::MC_DPSK) {
         mod = Modulation::DQPSK;
@@ -97,16 +99,23 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
         return;
     }
 
-    // OFDM modes: DQPSK with SNR-based code rate
-    // Thresholds aligned with recommendWaveformAndRate()
+    // OFDM modes: DQPSK with SNR and fading-based code rate
     mod = Modulation::DQPSK;
 
+    // Fading channels (>= 0.1) must use R1/4 for reliability
+    // Only AWGN (< 0.1) can use higher rates
+    if (fading_index >= 0.1f) {
+        rate = CodeRate::R1_4;
+        return;
+    }
+
+    // AWGN: Use SNR-based code rate
     if (snr_db >= 25.0f) {
         rate = CodeRate::R3_4;   // High throughput
     } else if (snr_db >= 17.0f) {
         rate = CodeRate::R2_3;   // Good balance (matches OFDM_COX threshold)
     } else if (snr_db >= 10.0f) {
-        rate = CodeRate::R1_2;   // More robust (matches OFDM_CHIRP threshold)
+        rate = CodeRate::R1_2;   // More robust
     } else {
         rate = CodeRate::R1_4;   // Maximum robustness
     }
