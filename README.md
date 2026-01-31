@@ -45,26 +45,12 @@ ProjectUltra is a software modem that achieves reliable, high-speed data transfe
 | SNR | Mode | Throughput | Notes |
 |-----|------|------------|-------|
 | -5 to 5 dB | MC-DPSK | 938 bps | Hard floor at -5 dB |
-| 30+ dB | OFDM 16QAM R3/4 | 7.2 kbps | Requires stable channel |
-
-**NVIS / Local / Cable (stable phase) - Standard 512 FFT:**
-| SNR | Mode | Throughput | Notes |
-|-----|------|------------|-------|
-| 20+ dB | OFDM 16QAM R2/3 | 3.4 kbps | Coherent with pilots |
-| 25+ dB | OFDM 16QAM R3/4 | 3.8 kbps | Good NVIS conditions |
-| 28+ dB | OFDM 16QAM R5/6 | 4.3 kbps | Excellent NVIS/local |
-
-**NVIS High-Speed Mode (1024 FFT, 59 carriers, ~42 baud):**
-| SNR | Mode | Throughput | Notes |
-|-----|------|------------|-------|
-| 25+ dB | OFDM DQPSK R3/4 | 3.8 kbps | All 59 carriers as data |
-| 25+ dB | OFDM D8PSK R3/4 | 5.7 kbps | All 59 carriers as data |
-| 30+ dB | OFDM 16QAM R3/4 | 5.8 kbps | 45 data + 14 pilot carriers |
+| 25+ dB | OFDM 16QAM R3/4 | 5.8 kbps | Coherent mode, stable channels |
 | 30+ dB | OFDM 32QAM R3/4 | **7.2 kbps** | Maximum throughput |
 
-**When to use 16QAM:** NVIS propagation (300-500 km), ground wave, or direct cable
-connection. These paths have stable phase, allowing coherent demodulation with
-pilot-assisted channel estimation. Use the GUI Expert settings to force 16QAM mode.
+**When to use coherent modes (16QAM/32QAM):** Stable propagation paths like
+ground wave or direct cable connection. These paths have stable phase, allowing
+coherent demodulation with pilot-assisted channel estimation.
 
 ### Waveform Strategy
 
@@ -155,14 +141,15 @@ full CONNECT sequence. If no response after 5 PINGs (15 seconds), connection fai
 
 ### Signal Parameters
 
-| Parameter | Standard Mode | NVIS Mode |
-|-----------|---------------|-----------|
+| Parameter | MC-DPSK | OFDM |
+|-----------|---------|------|
 | Sample Rate | 48 kHz | 48 kHz |
-| Bandwidth | ~2.8 kHz | ~2.8 kHz |
+| Bandwidth | ~2.4 kHz | ~2.8 kHz |
 | Center Frequency | 1500 Hz | 1500 Hz |
-| FFT Size | 512 | 1024 |
-| OFDM Carriers | 30 | 59 |
-| Symbol Rate | ~85 baud | ~42 baud |
+| Carriers | 8 | 59 |
+| FFT Size | N/A | 1024 |
+| Symbol Rate | ~94 baud | ~42 baud |
+| Sync Method | Dual Chirp | Dual Chirp or Schmidl-Cox |
 | LDPC Codeword | 648 bits | 648 bits |
 
 ### LDPC Codes
