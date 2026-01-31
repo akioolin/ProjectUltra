@@ -148,6 +148,8 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                 guiLog("SIM: Queued %zu TX samples (+ %zu PTT noise) for streaming", samples.size(), ptt_samples);
             } else {
                 // Normal mode: send to real audio device (it streams at 48kHz)
+                // Stop capture during TX to prevent acoustic feedback (speaker → microphone)
+                audio_.stopCapture();
                 size_t tx_duration_ms = (samples.size() * 1000) / 48000;
                 tx_in_progress_ = true;
                 tx_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(tx_duration_ms + 100);
