@@ -45,7 +45,8 @@ void printUsage(const char* prog) {
     std::cerr << "  -s <call>       Source callsign (default: N0CALL)\n";
     std::cerr << "  -d <call>       Destination callsign (default: CQ)\n";
     std::cerr << "  -o <file>       Output to file instead of stdout\n";
-    std::cerr << "  -w <waveform>   Waveform: ofdm, dpsk (default: ofdm)\n";
+    std::cerr << "  -w <waveform>   Waveform: chirp, cox, dpsk (default: chirp)\n";
+    std::cerr << "  -r <rate>       Code rate: r1_4, r1_2, r2_3, r3_4 (default: r1_4)\n";
     std::cerr << "\nExamples:\n";
     std::cerr << "  # Send PING probe and play audio\n";
     std::cerr << "  " << prog << " ptx ping -s MYCALL | aplay -f FLOAT_LE -r 48000\n\n";
@@ -82,18 +83,30 @@ void printInfo() {
 }
 
 // Waveform type
-enum class WaveformType { OFDM, DPSK };
+enum class WaveformType { OFDM_COX, OFDM_CHIRP, DPSK };
 
 WaveformType parseWaveform(const char* s) {
     if (strcmp(s, "dpsk") == 0) return WaveformType::DPSK;
-    return WaveformType::OFDM;
+    if (strcmp(s, "chirp") == 0) return WaveformType::OFDM_CHIRP;
+    if (strcmp(s, "cox") == 0) return WaveformType::OFDM_COX;
+    // Default "ofdm" maps to chirp (more robust, works on fading)
+    return WaveformType::OFDM_CHIRP;
 }
 
 protocol::WaveformMode toWaveformMode(WaveformType w) {
     switch (w) {
         case WaveformType::DPSK: return protocol::WaveformMode::MC_DPSK;
+        case WaveformType::OFDM_CHIRP: return protocol::WaveformMode::OFDM_CHIRP;
         default: return protocol::WaveformMode::OFDM_COX;
     }
+}
+
+CodeRate parseCodeRate(const char* s) {
+    if (strcmp(s, "r1_4") == 0 || strcmp(s, "1/4") == 0) return CodeRate::R1_4;
+    if (strcmp(s, "r1_2") == 0 || strcmp(s, "1/2") == 0) return CodeRate::R1_2;
+    if (strcmp(s, "r2_3") == 0 || strcmp(s, "2/3") == 0) return CodeRate::R2_3;
+    if (strcmp(s, "r3_4") == 0 || strcmp(s, "3/4") == 0) return CodeRate::R3_4;
+    return CodeRate::R1_4;  // Default to most robust
 }
 
 // ============================================================================
@@ -101,13 +114,14 @@ protocol::WaveformMode toWaveformMode(WaveformType w) {
 // ============================================================================
 int runProtocolTx(const char* message, const char* output_file,
                   const std::string& src_call, const std::string& dst_call,
-                  WaveformType waveform) {
+                  WaveformType waveform, CodeRate rate) {
 
     std::cerr << "Protocol TX: " << src_call << " -> " << dst_call << "\n";
 
     ModemEngine modem;
     modem.setLogPrefix("TX");
     modem.setWaveformMode(toWaveformMode(waveform));
+    modem.setDataMode(Modulation::DQPSK, rate);
 
     std::vector<float> samples;
     std::string frame_type;
@@ -294,7 +308,8 @@ int main(int argc, char* argv[]) {
     const char* input_file = nullptr;
     std::string src_call = "N0CALL";
     std::string dst_call = "CQ";
-    WaveformType waveform = WaveformType::OFDM;
+    WaveformType waveform = WaveformType::OFDM_CHIRP;
+    CodeRate rate = CodeRate::R1_4;
 
     // Parse arguments
     for (int i = 1; i < argc; ++i) {
@@ -306,6 +321,8 @@ int main(int argc, char* argv[]) {
             dst_call = argv[++i];
         } else if (strcmp(argv[i], "-w") == 0 && i + 1 < argc) {
             waveform = parseWaveform(argv[++i]);
+        } else if (strcmp(argv[i], "-r") == 0 && i + 1 < argc) {
+            rate = parseCodeRate(argv[++i]);
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             printUsage(argv[0]);
             return 0;
@@ -327,7 +344,7 @@ int main(int argc, char* argv[]) {
         printInfo();
         return 0;
     } else if (strcmp(command, "ptx") == 0) {
-        return runProtocolTx(input_file, output_file, src_call, dst_call, waveform);
+        return runProtocolTx(input_file, output_file, src_call, dst_call, waveform, rate);
     } else if (strcmp(command, "prx") == 0) {
         return runProtocolRx(input_file, waveform);
     } else {
