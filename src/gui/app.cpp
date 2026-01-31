@@ -233,7 +233,15 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                 our_tx_pending_.insert(our_tx_pending_.end(), samples.begin(), samples.end());
                 guiLog("SIM: Queued %zu PING samples", samples.size());
             } else {
-                // Send to real audio
+                // Send to real audio - mute RX to prevent acoustic feedback
+                audio_.setRxMuted(true);
+                audio_.stopCapture();
+                audio_.clearRxBuffer();
+                modem_.clearRxBuffer();
+                size_t tx_duration_ms = (samples.size() * 1000) / 48000;
+                tx_in_progress_ = true;
+                tx_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(tx_duration_ms + 100);
+                waterfall_.addSamples(samples.data(), samples.size());
                 audio_.queueTxSamples(samples);
             }
         }
@@ -250,7 +258,15 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                 our_tx_pending_.insert(our_tx_pending_.end(), samples.begin(), samples.end());
                 guiLog("SIM: Queued %zu PONG samples", samples.size());
             } else {
-                // Send to real audio
+                // Send to real audio - mute RX to prevent acoustic feedback
+                audio_.setRxMuted(true);
+                audio_.stopCapture();
+                audio_.clearRxBuffer();
+                modem_.clearRxBuffer();
+                size_t tx_duration_ms = (samples.size() * 1000) / 48000;
+                tx_in_progress_ = true;
+                tx_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(tx_duration_ms + 100);
+                waterfall_.addSamples(samples.data(), samples.size());
                 audio_.queueTxSamples(samples);
             }
         }

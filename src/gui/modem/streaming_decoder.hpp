@@ -238,6 +238,10 @@ private:
     size_t correlation_pos_ = 0;      // Current position for correlation search
     size_t last_decoded_sync_pos_ = SIZE_MAX;  // Last successfully decoded sync position (to prevent duplicates)
 
+    // Reset generation counter - incremented on reset(), checked after slow operations
+    // to detect if state was reset mid-operation (e.g., during correlation)
+    std::atomic<uint32_t> reset_generation_{0};
+
     // Active waveform for demodulation (handles its own sync internally)
     WaveformFactory waveform_factory_;
     std::unique_ptr<IWaveform> waveform_;

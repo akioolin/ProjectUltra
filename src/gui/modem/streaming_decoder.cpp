@@ -210,6 +210,10 @@ void StreamingDecoder::processBuffer() {
 void StreamingDecoder::searchForSync() {
     if (!waveform_) return;
 
+    // Save generation counter - if reset() is called during our search,
+    // we'll detect it and discard our results
+    uint32_t gen_at_start = reset_generation_.load();
+
     // Get preamble size from waveform
     size_t preamble = static_cast<size_t>(waveform_->getPreambleSamples());
 
@@ -356,6 +360,12 @@ void StreamingDecoder::searchForSync() {
 
     auto search_end_time = std::chrono::steady_clock::now();
     float search_ms = std::chrono::duration<float, std::milli>(search_end_time - search_start_time).count();
+
+    // Check if reset() was called during our search - if so, discard results
+    if (reset_generation_.load() != gen_at_start) {
+        LOG_MODEM(INFO, "[%s] searchForSync: ABORTED - reset() called during search", log_prefix_.c_str());
+        return;
+    }
 
     // Log timing: total_fed_ tells us how much audio has arrived
     float audio_sec = total_fed_ / 48000.0f;
@@ -727,6 +737,9 @@ size_t StreamingDecoder::samplesInBuffer() const {
 // ============================================================================
 
 void StreamingDecoder::reset() {
+    // Increment generation BEFORE acquiring lock - any ongoing search will see new value
+    reset_generation_.fetch_add(1);
+
     std::lock_guard<std::mutex> lock(buffer_mutex_);
 
     write_pos_ = 0;
