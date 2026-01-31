@@ -101,11 +101,13 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     // Set up raw data callback for protocol layer
     modem_.setRawDataCallback([this](const Bytes& data) {
         guiLog("Our modem decoded %zu bytes", data.size());
-        // Update protocol layer with current SNR before processing frame
+        // Update protocol layer with current SNR and fading before processing frame
         // In simulation mode, use the known simulation SNR (DPSK doesn't measure SNR)
         // In real mode, use measured SNR from OFDM demodulator
         float snr_db = simulation_enabled_ ? simulation_snr_db_ : modem_.getStats().snr_db;
+        float fading = modem_.getFadingIndex();
         protocol_.setMeasuredSNR(snr_db);
+        protocol_.setChannelQuality(snr_db, fading);
         protocol_.onRxData(data);
     });
 
