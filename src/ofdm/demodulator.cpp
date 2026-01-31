@@ -276,6 +276,19 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
         }
     }
 
+    // Two-pass D8PSK decoding: use embedded DQPSK grid to estimate common phase error
+    // and correct it before decoding. Only activates on fading channels.
+    if (mod == Modulation::D8PSK && d8psk_two_pass_enabled_) {
+        float fading_index = computeFadingIndex();
+        if (fading_index > TWO_PASS_FADING_THRESHOLD) {
+            LOG_DEMOD(DEBUG, "D8PSK two-pass: fading=%.3f > %.3f, applying correction",
+                      fading_index, TWO_PASS_FADING_THRESHOLD);
+            demodulateD8PSKTwoPass(equalized, noise_variance);
+            snr_symbol_count++;
+            return;  // Two-pass handled everything
+        }
+    }
+
     for (size_t i = 0; i < equalized.size(); ++i) {
         const auto& sym = equalized[i];
         float base_nv = (i < carrier_noise_var.size()) ? carrier_noise_var[i] : noise_variance;
@@ -435,6 +448,98 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
             }
         }
     }
+}
+
+// =============================================================================
+// TWO-PASS D8PSK DECODING
+// =============================================================================
+
+float OFDMDemodulator::Impl::computeFadingIndex() const {
+    // Coefficient of variation of channel estimate magnitudes
+    if (data_carrier_indices.empty()) return 0.0f;
+
+    float sum = 0.0f;
+    for (int idx : data_carrier_indices) {
+        sum += std::abs(channel_estimate[idx]);
+    }
+    float mean = sum / data_carrier_indices.size();
+    if (mean < 0.001f) return 0.0f;
+
+    float var_sum = 0.0f;
+    for (int idx : data_carrier_indices) {
+        float diff = std::abs(channel_estimate[idx]) - mean;
+        var_sum += diff * diff;
+    }
+    return std::sqrt(var_sum / data_carrier_indices.size()) / mean;
+}
+
+bool OFDMDemodulator::Impl::demodulateD8PSKTwoPass(
+    const std::vector<Complex>& equalized,
+    float base_noise_variance)
+{
+    // Two-pass D8PSK: Use embedded DQPSK grid (45°, 135°, 225°, 315°) to estimate
+    // common phase drift, then apply correction before D8PSK decoding.
+    // DQPSK has 45° margins vs D8PSK's 22.5°, so decisions are more robust.
+
+    float ce_margin = soft_demap::getCEErrorMargin(Modulation::D8PSK);
+
+    // PASS 1: Estimate common phase error using DQPSK decisions
+    float sin_sum = 0.0f, cos_sum = 0.0f, weight_sum = 0.0f;
+
+    for (size_t i = 0; i < equalized.size(); ++i) {
+        Complex prev_sym = dbpsk_prev_equalized[i];
+        float signal_power = std::abs(equalized[i]) * std::abs(prev_sym);
+
+        if (signal_power > 0.1f) {
+            Complex diff = equalized[i] * std::conj(prev_sym);
+            float phase = std::atan2(diff.imag(), diff.real());
+
+            // Find nearest DQPSK point (45°, 135°, 225°, 315°)
+            float phase_minus_offset = phase - M_PI / 4.0f;
+            int quadrant = (int)std::round(phase_minus_offset * 2.0f / M_PI);
+            quadrant = ((quadrant % 4) + 4) % 4;
+            float expected = quadrant * M_PI / 2.0f + M_PI / 4.0f;
+
+            float error = phase - expected;
+            while (error > M_PI) error -= 2 * M_PI;
+            while (error < -M_PI) error += 2 * M_PI;
+
+            // Weighted circular mean
+            sin_sum += signal_power * std::sin(error);
+            cos_sum += signal_power * std::cos(error);
+            weight_sum += signal_power;
+        }
+    }
+
+    // Compute mean phase error
+    float mean_error = (weight_sum > 0.1f) ? std::atan2(sin_sum, cos_sum) : 0.0f;
+
+    // Only apply partial correction (50%) to avoid over-correction
+    // Only if error is significant (> 3°) but not too large (< 15°)
+    Complex phase_correction(1.0f, 0.0f);
+    float correction_factor = 0.5f;  // Apply only half the estimated error
+    if (std::abs(mean_error) > 0.05f && std::abs(mean_error) < 0.26f) {
+        float corrected_error = mean_error * correction_factor;
+        phase_correction = Complex(std::cos(-corrected_error), std::sin(-corrected_error));
+        LOG_DEMOD(DEBUG, "D8PSK two-pass: err=%.1f°, applying %.1f°",
+                  mean_error * 180.0f / M_PI, corrected_error * 180.0f / M_PI);
+    }
+
+    // PASS 2: Apply correction and decode
+    for (size_t i = 0; i < equalized.size(); ++i) {
+        Complex prev_sym = dbpsk_prev_equalized[i];
+        float nv = (i < carrier_noise_var.size()) ? carrier_noise_var[i] : base_noise_variance;
+        nv *= ce_margin;
+
+        Complex corrected_sym = equalized[i] * phase_correction;
+        auto llrs = soft_demap::demapD8PSK(corrected_sym, prev_sym, nv);
+        soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
+
+        // Update reference with corrected symbol
+        dbpsk_prev_equalized[i] = corrected_sym;
+    }
+
+    return true;
 }
 
 void OFDMDemodulator::Impl::updateQuality() {

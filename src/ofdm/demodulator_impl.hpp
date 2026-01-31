@@ -118,6 +118,11 @@ struct OFDMDemodulator::Impl {
     // Per-carrier noise variance after equalization
     std::vector<float> carrier_noise_var;
 
+    // Two-pass D8PSK decoding (DQPSK-assisted phase correction)
+    // Uses embedded DQPSK grid (45° margins) for robust phase estimation
+    bool d8psk_two_pass_enabled_ = true;
+    static constexpr float TWO_PASS_FADING_THRESHOLD = 0.3f;
+
     // ==========================================================================
     // CONSTRUCTOR
     // ==========================================================================
@@ -164,6 +169,8 @@ struct OFDMDemodulator::Impl {
     // DEMODULATION (demodulator.cpp)
     // ==========================================================================
     void demodulateSymbol(const std::vector<Complex>& equalized, Modulation mod);
+    bool demodulateD8PSKTwoPass(const std::vector<Complex>& equalized, float noise_variance);
+    float computeFadingIndex() const;
     void updateQuality();
 };
 
