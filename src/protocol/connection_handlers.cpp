@@ -8,21 +8,18 @@
 namespace ultra {
 namespace protocol {
 
-// Recommend data mode based on SNR and fading index
+// Recommend data mode based on SNR, fading, and the NEGOTIATED waveform
 // Uses shared recommendDataMode() algorithm from waveform_selection.hpp
-static void recommendDataModeWithFading(float snr_db, float fading_index,
-                                         Modulation& mod, CodeRate& rate,
-                                         WaveformMode& waveform) {
-    auto rec = recommendWaveformAndRate(snr_db, fading_index);
-    waveform = rec.waveform;
-
+// IMPORTANT: waveform should be the negotiated/forced waveform, NOT auto-selected
+static void recommendDataModeForWaveform(float snr_db, float fading_index,
+                                          WaveformMode waveform,
+                                          Modulation& mod, CodeRate& rate) {
     // Use shared algorithm for modulation and rate selection
     recommendDataMode(snr_db, waveform, mod, rate, fading_index);
 
-    LOG_MODEM(INFO, "recommendDataModeWithFading: SNR=%.1f, fading=%.2f -> %s %s %s (%.0f bps)",
+    LOG_MODEM(INFO, "recommendDataModeForWaveform: SNR=%.1f, fading=%.2f, waveform=%s -> %s %s",
               snr_db, fading_index,
-              waveformModeToString(waveform), modulationToString(mod), codeRateToString(rate),
-              rec.estimated_throughput_bps);
+              waveformModeToString(waveform), modulationToString(mod), codeRateToString(rate));
 }
 
 // =============================================================================
@@ -124,9 +121,17 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         Modulation rec_mod;
         CodeRate rec_rate;
 
-        // Get recommended mode based on SNR AND fading
-        WaveformMode rec_waveform;
-        recommendDataModeWithFading(snr_db, fading_index_, rec_mod, rec_rate, rec_waveform);
+        // If waveform is AUTO, select based on SNR/fading first
+        if (negotiated_mode_ == WaveformMode::AUTO) {
+            auto rec = recommendWaveformAndRate(snr_db, fading_index_);
+            negotiated_mode_ = rec.waveform;
+            LOG_MODEM(INFO, "Connection: Auto-selected waveform %s based on SNR=%.1f, fading=%.2f",
+                      waveformModeToString(negotiated_mode_), snr_db, fading_index_);
+        }
+
+        // Get recommended mode based on SNR, fading AND the negotiated waveform
+        // This ensures MC-DPSK uses R1/4, OFDM uses appropriate rate, etc.
+        recommendDataModeForWaveform(snr_db, fading_index_, negotiated_mode_, rec_mod, rec_rate);
 
         // Override with forced values if specified
         if (forced_mod != Modulation::AUTO) {
@@ -139,13 +144,6 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             rec_rate = forced_rate;
             LOG_MODEM(INFO, "Connection: Using FORCED code rate %s from initiator",
                       codeRateToString(rec_rate));
-        }
-
-        // Update negotiated mode if auto-selected waveform differs
-        if (negotiated_mode_ == WaveformMode::AUTO) {
-            negotiated_mode_ = rec_waveform;
-            LOG_MODEM(INFO, "Connection: Auto-selected waveform %s based on fading=%.2f",
-                      waveformModeToString(rec_waveform), fading_index_);
         }
 
         LOG_MODEM(INFO, "Connection: Initial data mode %s %s (SNR=%.1f dB, forced_mod=%d, forced_rate=%d)",

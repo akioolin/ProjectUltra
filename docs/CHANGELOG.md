@@ -10,6 +10,43 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-01-31: Fix MC-DPSK AUTO Rate Bug
+
+**What was broken:**
+- When forcing `--waveform mc_dpsk` without `--rate`, the system selected R1/2 instead of R1/4
+- The algorithm in `waveform_selection.hpp` specifies MC-DPSK should ALWAYS use R1/4
+- Log showed: `Connection: Initial data mode DQPSK R1/2 (SNR=10.0 dB, forced_mod=255, forced_rate=255)`
+
+**Root cause:**
+- `recommendDataModeWithFading()` auto-selected a waveform based on SNR/fading, ignoring the negotiated waveform
+- At SNR=10/AWGN, it auto-selected OFDM_CHIRP, then passed that to `recommendDataMode()`
+- Since OFDM (not MC-DPSK) was passed, the OFDM rate logic ran → R1/2 at SNR=10
+
+**Files modified:**
+- `src/protocol/connection_handlers.cpp`:
+  - Renamed `recommendDataModeWithFading()` to `recommendDataModeForWaveform()`
+  - Changed function to take waveform as INPUT instead of auto-selecting it
+  - Call site now passes `negotiated_mode_` (the forced/negotiated waveform) instead of ignoring it
+
+**How it works:**
+- Waveform negotiation happens FIRST via `negotiateMode()` (respects forced waveform)
+- If AUTO, select waveform based on SNR/fading
+- Then call `recommendDataModeForWaveform()` with the negotiated waveform
+- MC-DPSK now correctly triggers the R1/4 path in `recommendDataMode()`
+
+**Test verification:**
+```bash
+./build/cli_simulator --snr 10 --test --waveform mc_dpsk 2>&1 | grep "Initial data mode"
+# Expected: DQPSK R1/4
+# ✓ Connection: Initial data mode DQPSK R1/4 (SNR=10.0 dB, forced_mod=255, forced_rate=255)
+
+./build/cli_simulator --snr 8 --test 2>&1 | grep "Initial data mode"
+# Expected: AUTO selects MC-DPSK R1/4 at low SNR
+# ✓ Connection: Initial data mode DQPSK R1/4 (SNR=8.0 dB)
+```
+
+---
+
 ## 2026-01-28: Fix Disconnect ACK Code Rate (GUI Simulator)
 
 **What was broken:**

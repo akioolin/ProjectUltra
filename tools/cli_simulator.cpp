@@ -188,6 +188,9 @@ public:
     }
 
     void setSNR(float snr) { snr_db_ = snr; }
+    void setForcedModulation(Modulation mod) { protocol_.setForcedModulation(mod); }
+    void setForcedCodeRate(CodeRate rate) { protocol_.setForcedCodeRate(rate); }
+    void setPreferredWaveform(WaveformMode mode) { protocol_.setPreferredMode(mode); }
 
     void tick() {
         protocol_.tick(CALLBACK_INTERVAL_MS);
@@ -355,6 +358,9 @@ public:
     void setSNR(float snr) { snr_db_ = snr; }
     void setVerbose(bool v) { verbose_ = v; }
     void setFading(bool f) { use_fading_ = f; }
+    void setForcedModulation(Modulation mod) { forced_mod_ = mod; }
+    void setForcedCodeRate(CodeRate rate) { forced_rate_ = rate; }
+    void setPreferredWaveform(WaveformMode mode) { forced_waveform_ = mode; }
 
     bool runTest() {
         printHeader();
@@ -369,6 +375,18 @@ public:
         // Set channel SNR for mode negotiation
         alpha_->setSNR(snr_db_);
         bravo_->setSNR(snr_db_);
+
+        // Set forced settings on INITIATOR only (alpha)
+        // Responder (bravo) reads these from the CONNECT frame and honors them
+        if (forced_mod_ != Modulation::AUTO) {
+            alpha_->setForcedModulation(forced_mod_);
+        }
+        if (forced_rate_ != CodeRate::AUTO) {
+            alpha_->setForcedCodeRate(forced_rate_);
+        }
+        if (forced_waveform_ != WaveformMode::AUTO) {
+            alpha_->setPreferredWaveform(forced_waveform_);
+        }
 
         // Setup message callback on BRAVO
         bravo_->setMessageCallback([this](const std::string& msg) {
@@ -398,6 +416,9 @@ private:
     float snr_db_ = 20.0f;
     bool verbose_ = false;
     bool use_fading_ = false;
+    Modulation forced_mod_ = Modulation::AUTO;
+    CodeRate forced_rate_ = CodeRate::AUTO;
+    WaveformMode forced_waveform_ = WaveformMode::AUTO;
 
     SimulatedChannel channel_;
     std::unique_ptr<SimulatedStation> alpha_;
@@ -534,14 +555,61 @@ int main(int argc, char* argv[]) {
             sim.setVerbose(true);
         } else if (arg == "--fading" || arg == "-f") {
             sim.setFading(true);
+        } else if (arg == "--mod" || arg == "-m") {
+            if (i + 1 < argc) {
+                std::string mod_str = argv[++i];
+                if (mod_str == "dqpsk" || mod_str == "DQPSK") {
+                    sim.setForcedModulation(Modulation::DQPSK);
+                } else if (mod_str == "d8psk" || mod_str == "D8PSK") {
+                    sim.setForcedModulation(Modulation::D8PSK);
+                } else if (mod_str == "dbpsk" || mod_str == "DBPSK") {
+                    sim.setForcedModulation(Modulation::DBPSK);
+                } else {
+                    std::cerr << "Unknown modulation: " << mod_str << " (use dqpsk, d8psk, dbpsk)\n";
+                    return 1;
+                }
+            }
+        } else if (arg == "--rate" || arg == "-r") {
+            if (i + 1 < argc) {
+                std::string rate_str = argv[++i];
+                if (rate_str == "r1_4" || rate_str == "R1_4") {
+                    sim.setForcedCodeRate(CodeRate::R1_4);
+                } else if (rate_str == "r1_2" || rate_str == "R1_2") {
+                    sim.setForcedCodeRate(CodeRate::R1_2);
+                } else if (rate_str == "r2_3" || rate_str == "R2_3") {
+                    sim.setForcedCodeRate(CodeRate::R2_3);
+                } else if (rate_str == "r3_4" || rate_str == "R3_4") {
+                    sim.setForcedCodeRate(CodeRate::R3_4);
+                } else {
+                    std::cerr << "Unknown code rate: " << rate_str << " (use r1_4, r1_2, r2_3, r3_4)\n";
+                    return 1;
+                }
+            }
+        } else if (arg == "--waveform" || arg == "-w") {
+            if (i + 1 < argc) {
+                std::string wf_str = argv[++i];
+                if (wf_str == "mc_dpsk" || wf_str == "dpsk") {
+                    sim.setPreferredWaveform(WaveformMode::MC_DPSK);
+                } else if (wf_str == "ofdm_chirp") {
+                    sim.setPreferredWaveform(WaveformMode::OFDM_CHIRP);
+                } else if (wf_str == "ofdm_cox" || wf_str == "ofdm") {
+                    sim.setPreferredWaveform(WaveformMode::OFDM_COX);
+                } else {
+                    std::cerr << "Unknown waveform: " << wf_str << " (use mc_dpsk, ofdm_chirp, ofdm_cox)\n";
+                    return 1;
+                }
+            }
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "CLI Simulator - Single Audio I/O Thread Model\n\n";
             std::cout << "Each station has ONE audio thread (like real sound card).\n";
             std::cout << "Every 10ms: read RX, feed decoder, get TX, send to channel.\n\n";
             std::cout << "Options:\n";
-            std::cout << "  --snr, -s <dB>   SNR (default: 20)\n";
-            std::cout << "  --fading, -f     Enable fading channel\n";
-            std::cout << "  --verbose, -v    Verbose output\n";
+            std::cout << "  --snr, -s <dB>      SNR (default: 20)\n";
+            std::cout << "  --fading, -f        Enable fading channel\n";
+            std::cout << "  --mod, -m <MOD>     Force modulation: dqpsk, d8psk, dbpsk\n";
+            std::cout << "  --rate, -r <RATE>   Force code rate: r1_4, r1_2, r2_3, r3_4\n";
+            std::cout << "  --waveform, -w <WF> Force waveform: mc_dpsk, ofdm_chirp, ofdm_cox\n";
+            std::cout << "  --verbose, -v       Verbose output\n";
             return 0;
         }
     }

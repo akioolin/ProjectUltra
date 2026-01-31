@@ -230,9 +230,10 @@ bool decodeOFDMChirpFrame(SampleSpan audio, const Bytes& expected_data, bool ver
 
 const char* channelName(const std::string& type) {
     if (type == "awgn") return "AWGN";
-    if (type == "good") return "Good HF";
-    if (type == "moderate") return "Moderate HF";
-    if (type == "poor") return "Poor HF";
+    if (type == "good") return "ITU-R Good HF (0.5ms, 0.1Hz)";
+    if (type == "moderate") return "ITU-R Moderate HF (1ms, 0.5Hz)";
+    if (type == "poor") return "ITU-R Poor HF (2ms, 1Hz)";
+    if (type == "flutter") return "ITU-R Flutter (0.5ms, 10Hz)";
     return "Unknown";
 }
 
@@ -283,7 +284,12 @@ int main(int argc, char** argv) {
             printf("Usage: %s [options]\n", argv[0]);
             printf("  --snr N       SNR in dB (default: 15)\n");
             printf("  --cfo N       CFO in Hz (default: 0)\n");
-            printf("  --channel T   Channel: awgn, good, moderate, poor (default: awgn)\n");
+            printf("  --channel T   Channel type (ITU-R F.1487 profiles):\n");
+            printf("                  awgn     - Pure AWGN (no fading)\n");
+            printf("                  good     - 0.5ms delay, 0.1Hz Doppler\n");
+            printf("                  moderate - 1.0ms delay, 0.5Hz Doppler (typical HF)\n");
+            printf("                  poor     - 2.0ms delay, 1.0Hz Doppler\n");
+            printf("                  flutter  - 0.5ms delay, 10Hz Doppler (polar)\n");
             printf("  --frames N    Number of frames (default: 10)\n");
             printf("  -w TYPE       Waveform: mc_dpsk, ofdm_chirp (default: mc_dpsk)\n");
             printf("  --carriers N  Number of carriers for MC-DPSK (default: 8)\n");
@@ -553,34 +559,21 @@ int main(int argc, char** argv) {
     if (channel_type == "awgn") {
         addNoise(full_audio, snr_db, rng);
     } else {
+        // Use ITU-R F.1487 standard HF channel profiles
         WattersonChannel::Config ch_cfg;
-        ch_cfg.sample_rate = 48000.0f;
-        ch_cfg.snr_db = snr_db;
-        ch_cfg.noise_enabled = true;
-        ch_cfg.cfo_enabled = false;
 
         if (channel_type == "good") {
-            ch_cfg.fading_enabled = true;
-            ch_cfg.multipath_enabled = true;
-            ch_cfg.delay_spread_ms = 0.5f;
-            ch_cfg.doppler_spread_hz = 0.2f;
-            ch_cfg.path1_gain = 0.9f;
-            ch_cfg.path2_gain = 0.4f;
+            ch_cfg = itu_r_f1487::good(snr_db);
         } else if (channel_type == "moderate") {
-            ch_cfg.fading_enabled = true;
-            ch_cfg.multipath_enabled = true;
-            ch_cfg.delay_spread_ms = 1.0f;
-            ch_cfg.doppler_spread_hz = 0.5f;
-            ch_cfg.path1_gain = 0.707f;
-            ch_cfg.path2_gain = 0.707f;
+            ch_cfg = itu_r_f1487::moderate(snr_db);
         } else if (channel_type == "poor") {
-            ch_cfg.fading_enabled = true;
-            ch_cfg.multipath_enabled = true;
-            ch_cfg.delay_spread_ms = 2.0f;
-            ch_cfg.doppler_spread_hz = 1.0f;
-            ch_cfg.path1_gain = 0.6f;
-            ch_cfg.path2_gain = 0.8f;
+            ch_cfg = itu_r_f1487::poor(snr_db);
+        } else if (channel_type == "flutter") {
+            ch_cfg = itu_r_f1487::flutter(snr_db);
         }
+
+        // Disable CFO in channel (we apply it separately if --cfo is specified)
+        ch_cfg.cfo_enabled = false;
 
         WattersonChannel channel(ch_cfg, seed);
         SampleSpan input_span(full_audio.data(), full_audio.size());
