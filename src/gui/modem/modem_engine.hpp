@@ -112,6 +112,7 @@ public:
     void setPingReceivedCallback(PingReceivedCallback callback) { ping_received_callback_ = callback; }
 
     void reset();
+    void clearRxBuffer();  // Clear RX audio buffer (use before TX to prevent echo)
 
     // ========================================================================
     // CARRIER SENSE (Listen Before Talk)

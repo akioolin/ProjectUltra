@@ -903,6 +903,14 @@ void ModemEngine::reset() {
     }
 }
 
+void ModemEngine::clearRxBuffer() {
+    // Clear streaming decoder buffer to discard any pending audio
+    // Use this before TX to prevent decoding our own transmission (acoustic echo)
+    if (streaming_decoder_) {
+        streaming_decoder_->reset();
+    }
+}
+
 void ModemEngine::updateChannelInterleaver(size_t bits_per_symbol) {
     if (bits_per_symbol == interleaver_bits_per_symbol_ && channel_interleaver_) {
         return;  // Already configured
