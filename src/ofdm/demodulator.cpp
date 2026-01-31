@@ -386,9 +386,12 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
                         quadrant = ((quadrant % 4) + 4) % 4;
                         expected_phase = quadrant * M_PI / 2.0f;
                     } else {
-                        int octant = (int)std::round(phase * 4.0f / M_PI);
+                        // D8PSK constellation has 22.5° offset: 22.5°, 67.5°, 112.5°, etc.
+                        // Must account for this offset when finding nearest constellation point
+                        float phase_minus_offset = phase - M_PI / 8.0f;  // Subtract 22.5°
+                        int octant = (int)std::round(phase_minus_offset * 4.0f / M_PI);
                         octant = ((octant % 8) + 8) % 8;
-                        expected_phase = octant * M_PI / 4.0f;
+                        expected_phase = octant * M_PI / 4.0f + M_PI / 8.0f;  // Add offset back
                     }
 
                     // Phase error for this carrier
