@@ -70,6 +70,23 @@ static const char* fadingToQuality(float fading) {
     return "Poor";
 }
 
+// Same as above but also sets color for GUI display
+static const char* fadingToQualityWithColor(float fading, ImVec4& color) {
+    if (fading < 0.1f) {
+        color = ImVec4(0.0f, 1.0f, 0.5f, 1.0f);  // Cyan
+        return "AWGN";
+    } else if (fading < 0.35f) {
+        color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);  // Green
+        return "Good";
+    } else if (fading < 0.55f) {
+        color = ImVec4(0.8f, 0.8f, 0.0f, 1.0f);  // Yellow
+        return "Moderate";
+    } else {
+        color = ImVec4(1.0f, 0.5f, 0.0f, 1.0f);  // Orange
+        return "Poor";
+    }
+}
+
 // User-friendly waveform name (hides internal variants like OFDM_COX/OFDM_CHIRP)
 static const char* waveformDisplayName(protocol::WaveformMode mode) {
     switch (mode) {
@@ -1071,59 +1088,6 @@ void App::stopRadioRx() {
     radio_rx_enabled_ = false;
 }
 
-// Helper function to get implied channel condition from negotiated mode
-// (what channel the remote station measured to choose this mode)
-static const char* getModeImpliedQuality(Modulation mod, CodeRate rate, ImVec4& color) {
-    // Based on mode selection thresholds - using standard HF terms
-    // High rates = AWGN-like, Low rates = Poor channel
-    if (mod == Modulation::QAM16) {
-        if (rate == CodeRate::R3_4 || rate == CodeRate::R5_6) {
-            color = ImVec4(0.0f, 1.0f, 0.5f, 1.0f);  // Cyan
-            return "AWGN";  // Lab-like conditions
-        } else {
-            color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);  // Green
-            return "Good";
-        }
-    } else if (mod == Modulation::DQPSK || mod == Modulation::QPSK) {
-        if (rate == CodeRate::R2_3) {
-            color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);  // Green
-            return "Good";
-        } else if (rate == CodeRate::R1_2) {
-            color = ImVec4(0.8f, 0.8f, 0.0f, 1.0f);  // Yellow
-            return "Moderate";
-        } else {
-            color = ImVec4(1.0f, 0.5f, 0.0f, 1.0f);  // Orange
-            return "Poor";
-        }
-    } else {
-        color = ImVec4(1.0f, 0.3f, 0.0f, 1.0f);  // Red
-        return "Very Poor";
-    }
-}
-
-// Helper function to classify channel quality based on SNR (standard HF terms)
-static const char* getChannelQuality(float snr_db, ImVec4& color) {
-    if (snr_db >= 30.0f) {
-        color = ImVec4(0.0f, 1.0f, 0.5f, 1.0f);  // Cyan
-        return "AWGN";  // Lab-like, ideal conditions
-    } else if (snr_db >= 20.0f) {
-        color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);  // Green
-        return "Good";
-    } else if (snr_db >= 15.0f) {
-        color = ImVec4(0.8f, 0.8f, 0.0f, 1.0f);  // Yellow
-        return "Moderate";
-    } else if (snr_db >= 10.0f) {
-        color = ImVec4(1.0f, 0.5f, 0.0f, 1.0f);  // Orange
-        return "Poor";
-    } else if (snr_db >= 0.0f) {
-        color = ImVec4(1.0f, 0.3f, 0.0f, 1.0f);  // Red-orange
-        return "Very Poor";
-    } else {
-        color = ImVec4(1.0f, 0.1f, 0.1f, 1.0f);  // Red
-        return "Very Poor";
-    }
-}
-
 void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data_mod, CodeRate data_rate) {
     // Compact horizontal Channel Status display
     ImGui::BeginChild("ChannelStatus", ImVec2(0, 110), false);
@@ -1188,25 +1152,18 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         ImVec4 mode_quality_color;
         const char* mode_quality = "Good";
 
+        // Get actual channel quality from fading measurement
+        float fading = modem_.getFadingIndex();
+        mode_quality = fadingToQualityWithColor(fading, mode_quality_color);
+
         if (waveform == protocol::WaveformMode::MC_DPSK) {
             // For MC-DPSK, just show carrier count (DQPSK R1/4 is implicit)
             int carriers = modem_.getMCDPSKCarriers();
             throughput_bps = modem_.getMCDPSKThroughput();
             ImGui::Text("%d carriers", carriers);
-            // Quality based on SNR for MC-DPSK
-            if (stats.snr_db >= 10.0f) {
-                mode_quality = "Good"; mode_quality_color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);
-            } else if (stats.snr_db >= 5.0f) {
-                mode_quality = "Fair"; mode_quality_color = ImVec4(1.0f, 1.0f, 0.2f, 1.0f);
-            } else if (stats.snr_db >= 0.0f) {
-                mode_quality = "Poor"; mode_quality_color = ImVec4(1.0f, 0.5f, 0.2f, 1.0f);
-            } else {
-                mode_quality = "Very Poor"; mode_quality_color = ImVec4(1.0f, 0.1f, 0.1f, 1.0f);
-            }
         } else {
             // For OFDM modes, show negotiated modulation/rate
             ImGui::Text("%s %s", modulationToString(data_mod), codeRateToString(data_rate));
-            mode_quality = getModeImpliedQuality(data_mod, data_rate, mode_quality_color);
             throughput_bps = config_.getTheoreticalThroughput(data_mod, data_rate);
         }
         ImGui::SameLine();
@@ -1219,15 +1176,20 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         ImGui::SameLine();
         ImGui::Text("SNR:");
         ImGui::SameLine();
-        ImVec4 quality_color;
-        const char* quality_str = getChannelQuality(stats.snr_db, quality_color);
-        ImGui::TextColored(quality_color, "[%s]", quality_str);
-        ImGui::SameLine();
 
-        // SNR bar
+        // SNR bar - color indicates signal strength
         float snr_normalized = stats.snr_db / 40.0f;
         snr_normalized = std::max(0.0f, std::min(1.0f, snr_normalized));
-        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, quality_color);
+        // Color based on SNR value (green=good signal, yellow=moderate, red=weak)
+        ImVec4 snr_color;
+        if (stats.snr_db >= 15.0f) {
+            snr_color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);  // Green
+        } else if (stats.snr_db >= 5.0f) {
+            snr_color = ImVec4(0.8f, 0.8f, 0.0f, 1.0f);  // Yellow
+        } else {
+            snr_color = ImVec4(1.0f, 0.4f, 0.2f, 1.0f);  // Orange-red
+        }
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, snr_color);
         char snr_text[16];
         snprintf(snr_text, sizeof(snr_text), "%.1f dB", stats.snr_db);
         ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
