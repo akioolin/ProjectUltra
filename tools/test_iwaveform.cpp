@@ -250,6 +250,7 @@ int main(int argc, char** argv) {
     std::string save_prefix = "/tmp/iwaveform";
     std::string rate_str = "r1_2";  // Default code rate
     bool use_nvis = false;  // Use NVIS mode (1024 FFT, 59 carriers)
+    std::string mod_str = "dqpsk";  // Default modulation for OFDM modes
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--snr") == 0 && i + 1 < argc) {
@@ -276,6 +277,8 @@ int main(int argc, char** argv) {
             rate_str = argv[++i];
         } else if (strcmp(argv[i], "--nvis") == 0) {
             use_nvis = true;
+        } else if (strcmp(argv[i], "--mod") == 0 && i + 1 < argc) {
+            mod_str = argv[++i];
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             printf("Usage: %s [options]\n", argv[0]);
             printf("  --snr N       SNR in dB (default: 15)\n");
@@ -286,6 +289,7 @@ int main(int argc, char** argv) {
             printf("  --carriers N  Number of carriers for MC-DPSK (default: 8)\n");
             printf("  --rate R      Code rate for OFDM: r1_4, r1_3, r1_2, r2_3, r3_4 (default: r1_2)\n");
             printf("                (MC-DPSK always uses R1/4 per protocol)\n");
+            printf("  --mod M       Modulation for OFDM: dqpsk, d8psk (default: dqpsk)\n");
             printf("  --nvis        Use NVIS mode for OFDM_COX (1024 FFT, 59 carriers, 46.875 Hz spacing)\n");
             printf("  --seed N      Random seed (default: 42)\n");
             printf("  --save-signals  Save signals to files for analysis\n");
@@ -371,6 +375,19 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Parse modulation for OFDM modes
+    Modulation ofdm_modulation = Modulation::DQPSK;
+    if (mod_str == "dqpsk" || mod_str == "DQPSK") {
+        ofdm_modulation = Modulation::DQPSK;
+    } else if (mod_str == "d8psk" || mod_str == "D8PSK") {
+        ofdm_modulation = Modulation::D8PSK;
+    } else if (mod_str == "dbpsk" || mod_str == "DBPSK") {
+        ofdm_modulation = Modulation::DBPSK;
+    } else {
+        fprintf(stderr, "Unknown modulation: %s (use dqpsk, d8psk, dbpsk)\n", mod_str.c_str());
+        return 1;
+    }
+
     {   // TX scope
         ModemEngine tx_modem;
         tx_modem.setLogPrefix("TX");
@@ -401,10 +418,9 @@ int main(int argc, char** argv) {
         if (is_ofdm_mode) {
             tx_modem.setConnected(true);
             tx_modem.setHandshakeComplete(true);
-            tx_modem.setDataMode(Modulation::DQPSK, ofdm_code_rate);
+            tx_modem.setDataMode(ofdm_modulation, ofdm_code_rate);
             printf("OFDM mode: Using DATA frames with %s modulation, code rate %s, interleaving=ON\n",
-                   waveform_mode == protocol::WaveformMode::OFDM_CHIRP ? "DQPSK" : "configured",
-                   rate_str.c_str());
+                   mod_str.c_str(), rate_str.c_str());
         }
 
         // Build continuous audio stream: [silence][frame1][silence][frame2]...
@@ -469,8 +485,8 @@ int main(int argc, char** argv) {
             }
         }
 
-        // Add trailing silence
-        full_audio.resize(full_audio.size() + 48000, 0.0f);  // 1s trailing
+        // Add trailing silence - needs ~2.5s for StreamingDecoder to trigger final search
+        full_audio.resize(full_audio.size() + 144000, 0.0f);  // 3s trailing
         total_samples = full_audio.size();
 
         printf("Total audio: %.1fs (%zu samples)\n",
@@ -837,10 +853,10 @@ int main(int argc, char** argv) {
             rx_modem.setMCDPSKCarriers(num_carriers);
         } else if (waveform_mode == protocol::WaveformMode::OFDM_COX ||
                    waveform_mode == protocol::WaveformMode::OFDM_CHIRP) {
-            // OFDM modes need to be set up like TX (connected mode with DQPSK)
+            // OFDM modes need to be set up like TX (connected mode with same modulation)
             rx_modem.setConnected(true);
             rx_modem.setHandshakeComplete(true);
-            rx_modem.setDataMode(Modulation::DQPSK, ofdm_code_rate);
+            rx_modem.setDataMode(ofdm_modulation, ofdm_code_rate);
         }
 
         // Set up callback to track decoded frames

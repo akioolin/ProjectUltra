@@ -152,7 +152,8 @@ public:
     Modulation getDataModulation() const { return data_modulation_; }
     CodeRate getDataCodeRate() const { return data_code_rate_; }
 
-    static void recommendDataMode(float snr_db, Modulation& mod, CodeRate& rate);
+    // NOTE: For modulation/rate selection, use protocol::recommendDataMode()
+    // from waveform_selection.hpp instead
     static protocol::WaveformMode recommendWaveformMode(float snr_db);
 
     // Waveform + rate recommendation based on SNR AND fading

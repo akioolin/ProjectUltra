@@ -99,25 +99,29 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
         return;
     }
 
-    // OFDM modes: DQPSK with SNR and fading-based code rate
-    mod = Modulation::DQPSK;
+    // OFDM modes: Select modulation and code rate based on SNR and fading
 
-    // Fading channels (>= 0.1) must use R1/4 for reliability
-    // Only AWGN (< 0.1) can use higher rates
+    // Fading channels (>= 0.1) must use DQPSK R1/4 for reliability
     if (fading_index >= 0.1f) {
+        mod = Modulation::DQPSK;
         rate = CodeRate::R1_4;
         return;
     }
 
-    // AWGN: Use SNR-based code rate
-    if (snr_db >= 25.0f) {
-        rate = CodeRate::R3_4;   // High throughput
+    // AWGN: Use SNR-based modulation and code rate
+    // D8PSK gives +50% throughput but needs higher SNR
+    if (snr_db >= 20.0f) {
+        mod = Modulation::D8PSK;  // 3 bits/carrier (+50% vs DQPSK)
+        rate = CodeRate::R1_2;    // ~5.3 kbps
     } else if (snr_db >= 17.0f) {
-        rate = CodeRate::R2_3;   // Good balance (matches OFDM_COX threshold)
+        mod = Modulation::DQPSK;
+        rate = CodeRate::R2_3;    // Good balance
     } else if (snr_db >= 10.0f) {
-        rate = CodeRate::R1_2;   // More robust
+        mod = Modulation::DQPSK;
+        rate = CodeRate::R1_2;    // More robust
     } else {
-        rate = CodeRate::R1_4;   // Maximum robustness
+        mod = Modulation::DQPSK;
+        rate = CodeRate::R1_4;    // Maximum robustness
     }
 }
 

@@ -124,32 +124,7 @@ protocol::WaveformMode WaveformFactory::recommendMode(float snr_db) {
     }
 }
 
-void WaveformFactory::recommendDataMode(float snr_db, Modulation& mod, CodeRate& rate) {
-    // Conservative thresholds for real HF channels (not AWGN)
-    if (snr_db >= 30.0f) {
-        mod = Modulation::QAM16;
-        rate = CodeRate::R3_4;
-    } else if (snr_db >= 25.0f) {
-        mod = Modulation::QAM16;
-        rate = CodeRate::R2_3;
-    } else if (snr_db >= 20.0f) {
-        mod = Modulation::DQPSK;
-        rate = CodeRate::R2_3;
-    } else if (snr_db >= 16.0f) {
-        mod = Modulation::DQPSK;
-        rate = CodeRate::R1_2;
-    } else if (snr_db >= 12.0f) {
-        mod = Modulation::DQPSK;
-        rate = CodeRate::R1_4;
-    } else if (snr_db >= 8.0f) {
-        mod = Modulation::DBPSK;
-        rate = CodeRate::R1_4;
-    } else {
-        // Very poor conditions
-        mod = Modulation::DBPSK;
-        rate = CodeRate::R1_4;
-    }
-}
+// NOTE: recommendDataMode() removed - use protocol::recommendDataMode() from waveform_selection.hpp
 
 float WaveformFactory::getMinSNR(protocol::WaveformMode mode) {
     switch (mode) {

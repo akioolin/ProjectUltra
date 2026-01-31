@@ -233,6 +233,11 @@ void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
                   static_cast<int>(mod), static_cast<int>(rate), config_.use_pilots ? 1 : 0);
     }
 
+    // Update channel interleaver for the new modulation
+    // D8PSK = 3 bits/carrier, DQPSK = 2 bits/carrier, DBPSK = 1 bit/carrier
+    size_t bits_per_symbol = config_.num_carriers * getBitsPerSymbol(mod);
+    updateChannelInterleaver(bits_per_symbol);
+
     // Update StreamingDecoder's waveform configuration
     if (streaming_decoder_) {
         streaming_decoder_->setDataMode(mod, rate);
@@ -241,40 +246,7 @@ void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
     LOG_MODEM(INFO, "Data mode set to: %s", getModeDescription(mod, rate));
 }
 
-void ModemEngine::recommendDataMode(float snr_db, Modulation& mod, CodeRate& rate) {
-    // Conservative thresholds calibrated for REAL HF channels (not just AWGN)
-    // HF has multipath fading that requires 3-6 dB extra margin vs AWGN
-    // These match the thresholds in connection.cpp for consistency
-    if (snr_db >= 30.0f) {
-        // Excellent conditions (rare) - use high throughput
-        mod = Modulation::QAM16;
-        rate = CodeRate::R3_4;
-    } else if (snr_db >= 25.0f) {
-        // Very good conditions
-        mod = Modulation::QAM16;
-        rate = CodeRate::R2_3;
-    } else if (snr_db >= 20.0f) {
-        // Good conditions - sweet spot for speed
-        mod = Modulation::DQPSK;
-        rate = CodeRate::R2_3;
-    } else if (snr_db >= 16.0f) {
-        // Typical good HF - balanced speed/reliability
-        mod = Modulation::DQPSK;
-        rate = CodeRate::R1_2;
-    } else if (snr_db >= 12.0f) {
-        // Typical HF - prioritize reliability
-        mod = Modulation::DQPSK;
-        rate = CodeRate::R1_4;
-    } else if (snr_db >= 8.0f) {
-        // Marginal conditions
-        mod = Modulation::BPSK;
-        rate = CodeRate::R1_4;
-    } else {
-        // Very poor conditions - maximum robustness
-        mod = Modulation::BPSK;
-        rate = CodeRate::R1_4;
-    }
-}
+// NOTE: recommendDataMode() removed - use protocol::recommendDataMode() from waveform_selection.hpp
 
 protocol::WaveformMode ModemEngine::recommendWaveformMode(float snr_db) {
     // Legacy SNR-only selection (use recommendWaveformAndRate for better results)

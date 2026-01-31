@@ -9,30 +9,20 @@ namespace ultra {
 namespace protocol {
 
 // Recommend data mode based on SNR and fading index
-// Uses shared recommendWaveformAndRate() algorithm
+// Uses shared recommendDataMode() algorithm from waveform_selection.hpp
 static void recommendDataModeWithFading(float snr_db, float fading_index,
                                          Modulation& mod, CodeRate& rate,
                                          WaveformMode& waveform) {
     auto rec = recommendWaveformAndRate(snr_db, fading_index);
     waveform = rec.waveform;
-    rate = rec.rate;
 
-    // Modulation is determined by waveform:
-    // - MC_DPSK: always DQPSK
-    // - OFDM_CHIRP: always DQPSK (differential, no pilots)
-    // - OFDM_COX: DQPSK for now (could use QAM at very high SNR)
-    mod = Modulation::DQPSK;
+    // Use shared algorithm for modulation and rate selection
+    recommendDataMode(snr_db, waveform, mod, rate, fading_index);
 
-    LOG_MODEM(INFO, "recommendDataModeWithFading: SNR=%.1f, fading=%.2f -> %s %s (%.0f bps)",
+    LOG_MODEM(INFO, "recommendDataModeWithFading: SNR=%.1f, fading=%.2f -> %s %s %s (%.0f bps)",
               snr_db, fading_index,
-              waveformModeToString(waveform), codeRateToString(rate),
+              waveformModeToString(waveform), modulationToString(mod), codeRateToString(rate),
               rec.estimated_throughput_bps);
-}
-
-// Legacy function - uses default fading=0 (assumes no fading info available)
-static void recommendDataMode(float snr_db, Modulation& mod, CodeRate& rate) {
-    WaveformMode dummy_waveform;
-    recommendDataModeWithFading(snr_db, 0.0f, mod, rate, dummy_waveform);
 }
 
 // =============================================================================

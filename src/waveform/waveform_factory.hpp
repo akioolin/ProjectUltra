@@ -44,8 +44,8 @@ public:
     // Uses conservative thresholds calibrated for real HF channels
     static protocol::WaveformMode recommendMode(float snr_db);
 
-    // Recommend modulation and code rate for given SNR
-    static void recommendDataMode(float snr_db, Modulation& mod, CodeRate& rate);
+    // NOTE: For modulation/rate selection, use protocol::recommendDataMode()
+    // from waveform_selection.hpp instead
 
     // Get minimum SNR for a mode to work reliably
     static float getMinSNR(protocol::WaveformMode mode);

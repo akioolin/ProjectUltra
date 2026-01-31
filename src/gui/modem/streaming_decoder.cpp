@@ -694,16 +694,27 @@ void StreamingDecoder::setOFDMConfig(const ModemConfig& config) {
                   config.fft_size, config.num_carriers);
     }
 
-    // Update interleaver for new carrier count
-    // DQPSK = 2 bits per carrier
-    size_t bps = config.num_carriers * 2;
+    // Store carrier count for interleaver updates
+    ofdm_carriers_ = config.num_carriers;
+
+    // Update interleaver for new carrier count (using current modulation)
+    size_t bps = config.num_carriers * getBitsPerSymbol(current_modulation_);
     interleaver_ = std::make_unique<ChannelInterleaver>(bps, v2::LDPC_CODEWORD_BITS);
 }
 
 void StreamingDecoder::setDataMode(Modulation mod, CodeRate rate) {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
     code_rate_ = rate;
+    current_modulation_ = mod;
     if (waveform_) waveform_->configure(mod, rate);
+
+    // Update interleaver for new modulation
+    // Use OFDM carriers for OFDM modes, MC-DPSK carriers for DPSK mode
+    int carriers = (mode_ == protocol::WaveformMode::MC_DPSK) ? mc_dpsk_carriers_ : ofdm_carriers_;
+    size_t bps = carriers * getBitsPerSymbol(mod);
+    interleaver_ = std::make_unique<ChannelInterleaver>(bps, v2::LDPC_CODEWORD_BITS);
+    LOG_MODEM(INFO, "StreamingDecoder: interleaver updated for %s (%zu bits/symbol)",
+              modulationToString(mod), bps);
 }
 
 void StreamingDecoder::setCodecType(fec::CodecType type) {
