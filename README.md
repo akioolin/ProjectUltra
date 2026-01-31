@@ -2,7 +2,7 @@
 
 **High-performance HF modem for amateur radio**
 
-*Last updated: 2026-01-30*
+*Last updated: 2026-01-31*
 
 > **EXPERIMENTAL SOFTWARE - WORK IN PROGRESS**
 >
@@ -38,7 +38,8 @@ ProjectUltra is a software modem that achieves reliable, high-speed data transfe
 | 5+ dB | MC-DPSK (8 carriers) | 938 bps | 100% verified, ±50 Hz CFO |
 | 10+ dB | OFDM-CHIRP R1/4 | 1.8 kbps | 100% verified, ±50 Hz CFO |
 | 17+ dB | OFDM-COX R1/4 | 1.8 kbps | DATA phase verified |
-| 20+ dB | OFDM DQPSK R1/2 | 3.6 kbps | 90% verified |
+| 20+ dB | OFDM DQPSK R1/2 | 3.6 kbps | 100% verified |
+| 20+ dB | OFDM D8PSK R1/2 | 5.3 kbps | 100% AWGN, 88% fading |
 | 25+ dB | OFDM DQPSK R2/3 | 5.4 kbps | 90% verified |
 
 **Theoretical (pending HF validation):**
@@ -66,6 +67,8 @@ SNR Range           Waveform              Why
 ```
 
 **MC-DPSK (Multi-Carrier DPSK)**: 8 carriers with differential encoding. Works reliably at 5+ dB SNR with ±50 Hz CFO tolerance. Uses dual chirp synchronization for robust timing recovery.
+
+**D8PSK (8-Phase DPSK)**: +50% throughput over DQPSK (3 bits/symbol vs 2). Auto-selected on AWGN channels at SNR >= 20 dB. For fading channels, a two-pass decoder uses the embedded DQPSK grid to estimate and correct phase drift before D8PSK decoding.
 
 **Two OFDM sync modes**:
 - **OFDM-CHIRP**: Dual chirp preamble for robust sync, works at 10+ dB
@@ -190,7 +193,13 @@ full CONNECT sequence. If no response after 5 PINGs (15 seconds), connection fai
 cd build
 
 # Primary test tool - continuous RX with channel simulation
-./test_iwaveform --snr 10 -w ofdm --frames 5
+./test_iwaveform --snr 10 -w ofdm_chirp --frames 5
+
+# Test D8PSK modulation (auto-selected at SNR >= 20 on AWGN)
+./test_iwaveform --snr 20 --channel awgn -w ofdm_chirp --mod d8psk --frames 5
+
+# Test D8PSK on fading (requires R1/4 for robustness)
+./test_iwaveform --snr 20 --channel good -w ofdm_chirp --mod d8psk --rate r1_4 --frames 5
 
 # Full protocol test (PING/CONNECT/DATA/DISCONNECT)
 ./cli_simulator --snr 20 --test
@@ -201,6 +210,18 @@ cd build
 # Run unit tests
 ctest
 ```
+
+**Manual Modulation Selection:**
+
+The `--mod` flag allows testing specific modulations:
+- `dqpsk` - 4-phase differential (default, 2 bits/symbol)
+- `d8psk` - 8-phase differential (+50% throughput, 3 bits/symbol)
+- `dbpsk` - 2-phase differential (most robust, 1 bit/symbol)
+
+The `--rate` flag selects LDPC code rate:
+- `r1_4` - Most robust (required for fading channels)
+- `r1_2` - Balanced (default for AWGN)
+- `r2_3`, `r3_4`, `r5_6` - Higher throughput, needs better SNR
 
 **Test Tools:**
 | Tool | Purpose |
