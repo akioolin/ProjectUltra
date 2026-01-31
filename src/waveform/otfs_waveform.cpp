@@ -17,7 +17,11 @@ OTFSWaveform::OTFSWaveform() {
     config_.sample_rate = 48000;
     config_.center_freq = 1500.0f;
     config_.modulation = Modulation::QPSK;
-    config_.tf_equalization = true;
+    config_.tf_equalization = true;    // TF equalization from preamble
+    config_.dd_differential = false;   // Coherent QPSK
+    config_.dd_pilot_enable = false;   // Disable DD pilot - use TF eq only
+    config_.dd_pilot_guard_delay = 0;
+    config_.dd_pilot_guard_doppler = 0;
     initComponents();
 }
 

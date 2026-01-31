@@ -150,6 +150,60 @@ const Complex PILOT_SYMBOL = Complex(1.0f, 0.0f);
 constexpr float REAL_TO_COMPLEX_SCALE = 2.4f;  // Compensates for single-sideband extraction
 constexpr float PREAMBLE_TARGET_RMS = 0.1f;
 
+// LLR clipping for numerical stability
+constexpr float MAX_LLR = 30.0f;
+constexpr float MIN_LLR_MAG = 0.001f;
+constexpr float QAM16_THRESHOLD = 0.6324555320336759f;  // 2/sqrt(10)
+
+inline float clipLLR(float llr) {
+    float clipped = std::max(-MAX_LLR, std::min(MAX_LLR, llr));
+    if (std::abs(clipped) < MIN_LLR_MAG) {
+        clipped = (clipped >= 0) ? MIN_LLR_MAG : -MIN_LLR_MAG;
+    }
+    return clipped;
+}
+
+// DQPSK differential phase rotations (Gray-coded: 00→0°, 01→90°, 11→180°, 10→-90°)
+const Complex DQPSK_ROTATIONS[] = {
+    Complex(1.0f, 0.0f),   // 00 → 0°   (no rotation)
+    Complex(0.0f, 1.0f),   // 01 → +90° (multiply by j)
+    Complex(0.0f, -1.0f),  // 10 → -90° (multiply by -j)
+    Complex(-1.0f, 0.0f),  // 11 → 180° (multiply by -1)
+};
+
+// Soft demap DQPSK differential symbol (0°/90°/180°/270° constellation)
+// Input: phase difference symbol (current * conj(previous))
+// Output: 2 LLRs for the 2 bits
+//
+// Gray-coded constellation (matching DQPSK_ROTATIONS):
+//   00 → 0°   → (+1, 0)
+//   01 → 90°  → (0, +1)
+//   10 → 270° → (0, -1)
+//   11 → 180° → (-1, 0)
+//
+// Decision boundaries are at 45° angles, not I/Q axes:
+//   bit0=0 when I+Q > 0 (upper-right half-plane)
+//   bit0=1 when I+Q < 0 (lower-left half-plane)
+//   bit1=0 when I-Q > 0 (lower-right half-plane)
+//   bit1=1 when I-Q < 0 (upper-left half-plane)
+void softDemapDQPSK(const Complex& diff_symbol, float noise_var,
+                    std::vector<float>& llrs) {
+    noise_var = std::max(0.001f, noise_var);
+
+    float I = diff_symbol.real();
+    float Q = diff_symbol.imag();
+    float scale = 2.0f / noise_var;
+
+    // LLR for bit 0: based on I+Q (positive → bit0=0)
+    float llr0 = clipLLR(scale * (I + Q));
+
+    // LLR for bit 1: based on I-Q (positive → bit1=0)
+    float llr1 = clipLLR(scale * (I - Q));
+
+    llrs.push_back(llr0);
+    llrs.push_back(llr1);
+}
+
 Complex mapBits(uint32_t bits, Modulation mod) {
     switch (mod) {
         case Modulation::BPSK:
@@ -166,19 +220,6 @@ Complex mapBits(uint32_t bits, Modulation mod) {
         default:
             return QPSK_MAP[bits & 3];
     }
-}
-
-// LLR clipping for numerical stability
-constexpr float MAX_LLR = 30.0f;
-constexpr float MIN_LLR_MAG = 0.001f;
-constexpr float QAM16_THRESHOLD = 0.6324555320336759f;  // 2/sqrt(10)
-
-inline float clipLLR(float llr) {
-    float clipped = std::max(-MAX_LLR, std::min(MAX_LLR, llr));
-    if (std::abs(clipped) < MIN_LLR_MAG) {
-        clipped = (clipped >= 0) ? MIN_LLR_MAG : -MIN_LLR_MAG;
-    }
-    return clipped;
 }
 
 // Soft demapping with proper LLR scaling
@@ -306,35 +347,89 @@ size_t OTFSModulator::bitsPerFrame(Modulation mod) const {
 
 std::vector<Complex> OTFSModulator::mapToDD(ByteSpan data, Modulation mod) {
     const auto& cfg = impl_->config;
-    size_t bits_per_symbol = getBitsPerSymbol(mod);
 
-    // Create DD grid (data only - pilots added in TF domain)
+    // Create DD grid
     std::vector<Complex> dd_grid(cfg.M * cfg.N, Complex(0, 0));
 
-    size_t data_idx = 0;
-    size_t bit_idx = 0;
-    size_t symbol_count = 0;
+    // DD-domain differential encoding: each symbol is a phase rotation from previous
+    // This makes OTFS robust to phase errors on fading channels
+    if (cfg.dd_differential) {
+        // Differential encoding: 2 bits per symbol (DQPSK-style)
+        Complex prev_symbol(1.0f, 0.0f);  // Reference symbol
+        size_t data_idx = 0;
+        size_t bit_idx = 0;
 
-    for (uint32_t k = 0; k < cfg.M; ++k) {
-        for (uint32_t l = 0; l < cfg.N; ++l) {
-            size_t grid_idx = k * cfg.N + l;
+        for (uint32_t k = 0; k < cfg.M; ++k) {
+            for (uint32_t l = 0; l < cfg.N; ++l) {
+                size_t grid_idx = k * cfg.N + l;
 
-            if (data_idx < data.size()) {
-                uint32_t bits = 0;
-                for (size_t b = 0; b < bits_per_symbol; ++b) {
-                    if (data_idx < data.size()) {
-                        uint8_t byte = data[data_idx];
-                        uint8_t bit = (byte >> (7 - bit_idx)) & 1;
-                        bits = (bits << 1) | bit;
-                        ++bit_idx;
-                        if (bit_idx >= 8) {
-                            bit_idx = 0;
-                            ++data_idx;
+                if (data_idx < data.size()) {
+                    // Extract 2 bits for DQPSK
+                    uint32_t bits = 0;
+                    for (size_t b = 0; b < 2; ++b) {
+                        if (data_idx < data.size()) {
+                            uint8_t byte = data[data_idx];
+                            uint8_t bit = (byte >> (7 - bit_idx)) & 1;
+                            bits = (bits << 1) | bit;
+                            ++bit_idx;
+                            if (bit_idx >= 8) {
+                                bit_idx = 0;
+                                ++data_idx;
+                            }
                         }
                     }
+
+                    // Apply phase rotation to previous symbol
+                    Complex rotation = DQPSK_ROTATIONS[bits & 0x3];
+                    Complex current = prev_symbol * rotation;
+                    dd_grid[grid_idx] = current;
+                    prev_symbol = current;
                 }
-                dd_grid[grid_idx] = mapBits(bits, mod);
-                symbol_count++;
+            }
+        }
+    } else {
+        // Non-differential (coherent) encoding with DD-domain pilots
+        size_t bits_per_symbol = getBitsPerSymbol(mod);
+        size_t data_idx = 0;
+        size_t bit_idx = 0;
+
+        // DD pilot configuration
+        uint32_t guard_k = cfg.dd_pilot_enable ? cfg.dd_pilot_guard_delay : 0;
+        uint32_t guard_l = cfg.dd_pilot_enable ? cfg.dd_pilot_guard_doppler : 0;
+
+        for (uint32_t k = 0; k < cfg.M; ++k) {
+            for (uint32_t l = 0; l < cfg.N; ++l) {
+                size_t grid_idx = k * cfg.N + l;
+
+                // Check if this is pilot or guard region
+                if (cfg.dd_pilot_enable && k < guard_k && l < guard_l) {
+                    if (k == 0 && l == 0) {
+                        // Pilot symbol at (0,0) - boosted for reliable detection
+                        dd_grid[grid_idx] = Complex(2.0f, 0.0f);
+                    } else {
+                        // Guard region - zeros
+                        dd_grid[grid_idx] = Complex(0.0f, 0.0f);
+                    }
+                    continue;
+                }
+
+                // Data symbol
+                if (data_idx < data.size()) {
+                    uint32_t bits = 0;
+                    for (size_t b = 0; b < bits_per_symbol; ++b) {
+                        if (data_idx < data.size()) {
+                            uint8_t byte = data[data_idx];
+                            uint8_t bit = (byte >> (7 - bit_idx)) & 1;
+                            bits = (bits << 1) | bit;
+                            ++bit_idx;
+                            if (bit_idx >= 8) {
+                                bit_idx = 0;
+                                ++data_idx;
+                            }
+                        }
+                    }
+                    dd_grid[grid_idx] = mapBits(bits, mod);
+                }
             }
         }
     }
@@ -819,8 +914,30 @@ bool OTFSDemodulator::process(SampleSpan samples) {
 
             // Step 4: Generate soft bits from DD symbols
             impl_->soft_bits.clear();
-            for (const auto& sym : impl_->dd_symbols) {
-                softDemap(sym, impl_->config.modulation, impl_->estimated_noise_var, impl_->soft_bits);
+
+            if (impl_->config.dd_differential) {
+                // Differential decoding: compute phase differences between adjacent symbols
+                // diff[i] = dd_symbols[i] * conj(dd_symbols[i-1])
+                Complex prev_symbol(1.0f, 0.0f);  // Reference (matches TX)
+
+                for (size_t i = 0; i < impl_->dd_symbols.size(); ++i) {
+                    Complex current = impl_->dd_symbols[i];
+                    Complex diff = current * std::conj(prev_symbol);
+
+                    // Normalize diff to unit magnitude (removes amplitude variation)
+                    float mag = std::abs(diff);
+                    if (mag > 0.01f) {
+                        diff /= mag;
+                    }
+
+                    softDemapDQPSK(diff, impl_->estimated_noise_var, impl_->soft_bits);
+                    prev_symbol = current;
+                }
+            } else {
+                // Coherent demapping (original behavior)
+                for (const auto& sym : impl_->dd_symbols) {
+                    softDemap(sym, impl_->config.modulation, impl_->estimated_noise_var, impl_->soft_bits);
+                }
             }
 
             impl_->state = Impl::State::SEARCHING;
@@ -923,7 +1040,7 @@ bool OTFSDemodulator::processPresynced(SampleSpan samples, int preamble_symbols)
         impl_->demodulateSymbol(baseband, n);
     }
 
-    // === PHASE 3: TF equalization ===
+    // === PHASE 3: TF equalization (optional, may help with coarse correction) ===
     if (impl_->config.tf_equalization && impl_->channel_estimated) {
         impl_->equalizeTFGrid();
     } else {
@@ -933,14 +1050,74 @@ bool OTFSDemodulator::processPresynced(SampleSpan samples, int preamble_symbols)
     // === PHASE 4: SFFT to get DD symbols ===
     sfft(impl_->tf_equalized, impl_->dd_symbols, impl_->config.M, impl_->config.N);
 
-    // === PHASE 5: Normalize DD symbols to unit power ===
+    // === PHASE 5: DD-domain channel estimation and equalization ===
+    // Estimate channel from DD pilot region, perform matched-filter style equalization
+    if (impl_->config.dd_pilot_enable) {
+        uint32_t guard_k = impl_->config.dd_pilot_guard_delay;
+        uint32_t guard_l = impl_->config.dd_pilot_guard_doppler;
+
+        // Find the dominant channel tap in the pilot region
+        // The pilot region contains the DD channel impulse response (scaled by pilot=2.0)
+        Complex h_sum(0, 0);
+        float max_power = 0;
+        Complex h_dominant(0, 0);
+
+        for (uint32_t k = 0; k < guard_k && k < impl_->config.M; ++k) {
+            for (uint32_t l = 0; l < guard_l && l < impl_->config.N; ++l) {
+                size_t idx = k * impl_->config.N + l;
+                Complex h_tap = impl_->dd_symbols[idx] / Complex(2.0f, 0.0f);
+                float tap_power = std::norm(h_tap);
+
+                h_sum += h_tap;  // Coherent sum (matched filter)
+
+                if (tap_power > max_power) {
+                    max_power = tap_power;
+                    h_dominant = h_tap;
+                }
+            }
+        }
+
+        // Use coherent sum for equalization (acts as matched filter)
+        float h_sum_mag = std::abs(h_sum);
+        if (h_sum_mag > 0.01f) {
+            // Matched-filter style equalization: conjugate of channel sum, normalized
+            Complex h_eq = std::conj(h_sum) / (h_sum_mag * h_sum_mag);
+
+            // Apply to all symbols outside pilot/guard region
+            for (uint32_t k = 0; k < impl_->config.M; ++k) {
+                for (uint32_t l = 0; l < impl_->config.N; ++l) {
+                    if (k < guard_k && l < guard_l) continue;
+
+                    size_t idx = k * impl_->config.N + l;
+                    impl_->dd_symbols[idx] *= h_eq;
+                }
+            }
+        }
+
+        // Zero out pilot/guard region (don't decode as data)
+        for (uint32_t k = 0; k < guard_k && k < impl_->config.M; ++k) {
+            for (uint32_t l = 0; l < guard_l && l < impl_->config.N; ++l) {
+                size_t idx = k * impl_->config.N + l;
+                impl_->dd_symbols[idx] = Complex(0, 0);
+            }
+        }
+    }
+
+    // === PHASE 5b: Normalize DD data symbols to unit power ===
     float avg_power = 0;
     size_t nonzero_count = 0;
-    for (const auto& sym : impl_->dd_symbols) {
-        float p = std::norm(sym);
-        if (p > 1e-8f) {
-            avg_power += p;
-            nonzero_count++;
+    uint32_t guard_k = impl_->config.dd_pilot_enable ? impl_->config.dd_pilot_guard_delay : 0;
+    uint32_t guard_l = impl_->config.dd_pilot_enable ? impl_->config.dd_pilot_guard_doppler : 0;
+
+    for (uint32_t k = 0; k < impl_->config.M; ++k) {
+        for (uint32_t l = 0; l < impl_->config.N; ++l) {
+            if (k < guard_k && l < guard_l) continue;  // Skip pilot region
+            size_t idx = k * impl_->config.N + l;
+            float p = std::norm(impl_->dd_symbols[idx]);
+            if (p > 1e-8f) {
+                avg_power += p;
+                nonzero_count++;
+            }
         }
     }
 
@@ -954,51 +1131,23 @@ bool OTFSDemodulator::processPresynced(SampleSpan samples, int preamble_symbols)
         }
     }
 
-    // === PHASE 5b: Decision-directed common phase error correction ===
-    // On fading channels, there's often a common phase rotation across all symbols.
-    // Use QPSK decision-directed feedback to estimate and correct it.
-    {
-        float phase_error_sum = 0.0f;
-        int phase_count = 0;
-        const float POWER_THRESHOLD = 0.5f;  // Only use strong symbols
-
-        for (const auto& sym : impl_->dd_symbols) {
-            float power = std::norm(sym);
-            if (power > POWER_THRESHOLD) {
-                // Quantize to nearest QPSK point
-                float phase = std::atan2(sym.imag(), sym.real());
-                // QPSK points at 45°, 135°, -135°, -45° (i.e., ±π/4, ±3π/4)
-                int quadrant = static_cast<int>(std::round(phase * 2.0f / M_PI));
-                quadrant = ((quadrant % 4) + 4) % 4;
-                float expected_phase = quadrant * M_PI / 2.0f - M_PI / 4.0f;  // Shift to QPSK grid
-
-                float error = phase - expected_phase;
-                // Wrap to [-π, π]
-                while (error > M_PI) error -= 2 * M_PI;
-                while (error < -M_PI) error += 2 * M_PI;
-
-                phase_error_sum += error;
-                phase_count++;
-            }
-        }
-
-        if (phase_count > 10) {
-            float avg_phase_error = phase_error_sum / phase_count;
-            // Apply full correction
-            Complex correction(std::cos(-avg_phase_error), std::sin(-avg_phase_error));
-            for (auto& sym : impl_->dd_symbols) {
-                sym *= correction;
-            }
-        }
-    }
-
     // Fixed noise variance for consistent LLR scaling
     impl_->estimated_noise_var = 0.1f;
 
-    // === PHASE 6: Generate soft bits ===
+    // === PHASE 6: Generate soft bits (skip pilot/guard region) ===
     impl_->soft_bits.clear();
-    for (const auto& sym : impl_->dd_symbols) {
-        softDemap(sym, impl_->config.modulation, impl_->estimated_noise_var, impl_->soft_bits);
+
+    for (uint32_t k = 0; k < impl_->config.M; ++k) {
+        for (uint32_t l = 0; l < impl_->config.N; ++l) {
+            // Skip pilot and guard region
+            if (impl_->config.dd_pilot_enable && k < guard_k && l < guard_l) {
+                continue;
+            }
+
+            size_t idx = k * impl_->config.N + l;
+            const Complex& sym = impl_->dd_symbols[idx];
+            softDemap(sym, impl_->config.modulation, impl_->estimated_noise_var, impl_->soft_bits);
+        }
     }
 
     return impl_->soft_bits.size() > 0;

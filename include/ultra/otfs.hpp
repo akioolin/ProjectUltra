@@ -43,6 +43,17 @@ struct OTFSConfig {
     uint32_t tf_pilot_spacing = 4;    // Pilot every N subcarriers in TF domain
     bool tf_equalization = true;      // Enable TF-domain equalization before SFFT
 
+    // DD-domain differential encoding (robust to phase errors on fading)
+    // When true, uses DQPSK-style differential encoding within the DD grid
+    // Each symbol encoded as phase difference from previous symbol
+    bool dd_differential = false;
+
+    // DD-domain pilot for proper OTFS channel estimation
+    // Place a pilot at (0,0) with guard region to estimate DD channel
+    bool dd_pilot_enable = true;
+    uint32_t dd_pilot_guard_delay = 4;    // Guard in delay dimension
+    uint32_t dd_pilot_guard_doppler = 4;  // Guard in Doppler dimension
+
     // Derived parameters
     uint32_t frame_symbols() const { return N; }
     uint32_t subcarriers() const { return M; }
