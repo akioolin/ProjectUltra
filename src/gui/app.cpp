@@ -538,9 +538,11 @@ void App::initVirtualStation() {
     // Virtual modem RX → virtual protocol
     virtual_modem_->setRawDataCallback([this](const Bytes& data) {
         guiLog("SIM: Virtual modem decoded %zu bytes", data.size());
-        // Use simulation SNR - DPSK demodulator doesn't measure SNR
+        // Use simulation SNR and fading from virtual modem
         // The virtual station sees the same channel as our station
+        float fading = virtual_modem_->getFadingIndex();
         virtual_protocol_.setMeasuredSNR(simulation_snr_db_);
+        virtual_protocol_.setChannelQuality(simulation_snr_db_, fading);
         virtual_protocol_.onRxData(data);
     });
 
