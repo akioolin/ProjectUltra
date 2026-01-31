@@ -2,7 +2,7 @@
 
 **High-performance HF modem for amateur radio**
 
-*Last updated: 2026-01-23*
+*Last updated: 2026-01-30*
 
 > **EXPERIMENTAL SOFTWARE - WORK IN PROGRESS**
 >
@@ -32,14 +32,20 @@ ProjectUltra is a software modem that achieves reliable, high-speed data transfe
 
 ## Performance
 
-**General HF (multipath, fading):**
+**Verified Performance (loopback + acoustic testing):**
 | SNR | Mode | Throughput | Notes |
 |-----|------|------------|-------|
-| -11 to 0 dB | Single-carrier DPSK | 125 bps | Noise stronger than signal! |
-| 0-17 dB | Single-carrier DPSK | 125-300 bps | Flutter/polar paths |
-| 17+ dB | OFDM DQPSK R1/4 | 1.3 kbps | Reliable on most HF |
-| 25+ dB | OFDM DQPSK R1/2 | 2.5 kbps | Good conditions |
-| 30+ dB | OFDM DQPSK R2/3 | 3.4 kbps | Excellent conditions |
+| 5+ dB | MC-DPSK (8 carriers) | 938 bps | 100% verified, ±50 Hz CFO |
+| 10+ dB | OFDM-CHIRP R1/4 | 1.8 kbps | 100% verified, ±50 Hz CFO |
+| 17+ dB | OFDM-COX R1/4 | 1.8 kbps | DATA phase verified |
+| 20+ dB | OFDM DQPSK R1/2 | 3.6 kbps | Good conditions |
+| 25+ dB | OFDM DQPSK R2/3 | 5.4 kbps | Excellent conditions |
+
+**Theoretical (pending HF validation):**
+| SNR | Mode | Throughput | Notes |
+|-----|------|------------|-------|
+| -5 to 5 dB | MC-DPSK | 938 bps | Hard floor at -5 dB |
+| 30+ dB | OFDM 16QAM R3/4 | 7.2 kbps | Requires stable channel |
 
 **NVIS / Local / Cable (stable phase) - Standard 512 FFT:**
 | SNR | Mode | Throughput | Notes |
@@ -62,25 +68,24 @@ pilot-assisted channel estimation. Use the GUI Expert settings to force 16QAM mo
 
 ### Waveform Strategy
 
-ProjectUltra uses two waveform families optimized for different SNR ranges:
+ProjectUltra uses adaptive waveform selection based on channel conditions:
 
 ```
 SNR Range           Waveform              Why
 ─────────────────────────────────────────────────────────────
--11 to 17 dB        Single-carrier DPSK   Full power in one carrier, no ICI
-17+ dB              OFDM 512-FFT          High throughput, fast symbols (85 baud)
-25+ dB (NVIS)       OFDM 1024-FFT         Max throughput, slow symbols (42 baud)
+5-10 dB             MC-DPSK (8 carriers)  Robust sync, differential encoding
+10-17 dB            OFDM-CHIRP 1024-FFT   Dual chirp sync, 59 carriers
+17+ dB              OFDM-COX 1024-FFT     Schmidl-Cox sync, max throughput
+25+ dB (NVIS)       OFDM 16QAM            Coherent mode, 7.2 kbps
 ```
 
-**Key insight**: Single-carrier DPSK works down to **-11 dB SNR** (noise 12× stronger than signal). This eliminates the need for MFSK, which would only provide ~6 dB additional sensitivity at 1/3 the speed.
+**MC-DPSK (Multi-Carrier DPSK)**: 8 carriers with differential encoding. Works reliably at 5+ dB SNR with ±50 Hz CFO tolerance. Uses dual chirp synchronization for robust timing recovery.
 
-**Two OFDM modes** for different channel conditions:
-- **512 FFT (85 baud)**: Fast symbols tolerate Doppler/flutter, 30 carriers
-- **1024 FFT (42 baud)**: Slow symbols maximize throughput on stable paths, 59 carriers
+**Two OFDM sync modes**:
+- **OFDM-CHIRP**: Dual chirp preamble for robust sync, works at 10+ dB
+- **OFDM-COX**: Schmidl-Cox sync for faster acquisition, requires 17+ dB
 
-**Key insight**: On challenging HF channels (multipath, flutter), single-carrier DPSK achieves 100% success where multi-carrier schemes fail. This is because DPSK concentrates all power in one carrier and differential encoding cancels phase distortion.
-
-**NVIS/Local optimization**: For stable paths like NVIS (Near Vertical Incidence Skywave), 16QAM with pilots provides better performance than differential modes. The pilots track slow phase drift and frequency-selective fading that would corrupt D8PSK's tight 45° phase spacing.
+**NVIS/Local optimization**: For stable paths like NVIS (Near Vertical Incidence Skywave), 16QAM with pilots provides better performance than differential modes. The pilots track slow phase drift and frequency-selective fading.
 
 ---
 
@@ -91,15 +96,16 @@ SNR Range           Waveform              Why
 - Linux, macOS, or Windows
 - CMake 3.16+
 - SDL2 (for GUI)
+- **FFTW3** (required for fast chirp detection)
 - C++20 compiler (GCC 10+, Clang 12+, MSVC 2019+)
 
 ### Building
 
 ```bash
 # Install dependencies
-# Ubuntu/Debian: sudo apt install libsdl2-dev cmake build-essential
-# macOS: brew install sdl2 cmake
-# Windows: vcpkg install sdl2
+# Ubuntu/Debian: sudo apt install libsdl2-dev libfftw3-dev cmake build-essential
+# macOS: brew install sdl2 fftw cmake
+# Windows: vcpkg install sdl2 fftw3
 
 git clone https://github.com/mfrigerio/ProjectUltra.git
 cd ProjectUltra
@@ -196,18 +202,25 @@ full CONNECT sequence. If no response after 5 PINGs (15 seconds), connection fai
 ```bash
 cd build
 
-# Run unit tests
-ctest
+# Primary test tool - continuous RX with channel simulation
+./test_iwaveform --snr 10 -w ofdm --frames 5
 
-# Comprehensive modem test
-./tests/test_comprehensive_modem
-
-# CLI protocol simulator
+# Full protocol test (PING/CONNECT/DATA/DISCONNECT)
 ./cli_simulator --snr 20 --test
 
-# OFDM + LDPC integration test
-./test_ofdm_ldpc_r23
+# Regression matrix (all waveforms, multiple SNR levels)
+../tests/regression_matrix.sh
+
+# Run unit tests
+ctest
 ```
+
+**Test Tools:**
+| Tool | Purpose |
+|------|---------|
+| `test_iwaveform` | Primary - continuous RX, all waveforms |
+| `cli_simulator` | Full protocol testing |
+| `regression_matrix.sh` | Automated multi-config testing |
 
 ---
 
@@ -248,25 +261,38 @@ power necessary. Be ready to QSY if causing interference.
 
 ## Current Status
 
-> **Note**: All features below have been tested in simulation only (ITU-R F.1487 Watterson
-> channel model). On-air testing with real HF equipment is in progress. Real-world
-> performance may differ significantly from simulation results.
+> **Note**: Core waveforms have been verified in loopback and acoustic testing.
+> On-air HF testing is in progress.
 
-**Working (in simulation):**
+### Verified Performance (2026-01-30)
+
+| Waveform | SNR Range | CFO Tolerance | Status |
+|----------|-----------|---------------|--------|
+| **MC-DPSK** (8 carriers) | 5+ dB | ±50 Hz | 100% verified |
+| **OFDM-CHIRP** (59 carriers) | 10+ dB | ±50 Hz | 100% verified |
+| **OFDM-COX** (Schmidl-Cox sync) | 17+ dB | TBD | DATA phase working |
+
+**Acoustic Channel Test**: Successfully decoded CONNECT and DATA frames through
+speaker → air → microphone path at 70% volume (~22 dB SNR). This validates
+real-world audio chain compatibility.
+
+**Working:**
 - All LDPC code rates (R1/4 through R5/6)
 - OFDM with DQPSK/D8PSK modulation (differential)
 - OFDM with QPSK/16QAM/32QAM modulation (coherent, for NVIS/local)
 - **NVIS high-speed mode**: 1024 FFT, 59 carriers, up to 7.2 kbps
-- Single-carrier DPSK (works to -11 dB SNR!)
+- Multi-carrier DPSK (8 carriers, robust sync)
+- Full protocol: PING/PONG/CONNECT/DATA/DISCONNECT
 - ARQ protocol with retransmission
 - GUI with waterfall and constellation
 - Expert mode for forcing waveform/modulation settings
 - CLI transmit/receive tools
 - HF channel simulator (ITU-R F.1487)
+- Continuous streaming RX decoder
 
 **In Progress:**
-- On-air testing
-- Automatic waveform switching
+- On-air HF testing
+- Automatic waveform switching based on SNR
 - File transfer optimization
 
 ---
@@ -302,9 +328,10 @@ ProjectUltra is a research platform for investigating advanced modulation and co
 
 | Mode | ProjectUltra | Industry Leader | Gap |
 |------|--------------|-----------------|-----|
-| Max throughput | 7.2 kbps | 8.5 kbps | -15% |
-| Low-SNR floor | -11 dB | ~0 dB | **+11 dB better** |
-| Doppler tolerance | Untested | Good | TBD |
+| Max throughput (verified) | 5.4 kbps | 8.5 kbps | -36% |
+| Max throughput (theoretical) | 7.2 kbps | 8.5 kbps | -15% |
+| Low-SNR floor (verified) | 5 dB | ~0 dB | Needs work |
+| CFO tolerance | ±50 Hz | ±100 Hz | TBD |
 
 ### How to Contribute
 
@@ -387,4 +414,5 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 - [Dear ImGui](https://github.com/ocornut/imgui) - GUI framework
 - [SDL2](https://libsdl.org/) - Audio and windowing
+- [FFTW3](https://www.fftw.org/) - Fast Fourier Transform (required for chirp detection)
 - [miniz](https://github.com/richgel999/miniz) - Compression
