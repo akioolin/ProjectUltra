@@ -518,11 +518,11 @@ void StreamingDecoder::decodeCurrentFrame() {
             stats_.pings_received++;
         }
 
-        // CRITICAL: Skip all old audio - only process new audio from now on
-        // This prevents re-detecting old chirps that are still in the circular buffer
+        // Skip past the PING (sync_position_ + min_frame)
+        // Don't skip to write_pos_ - that would miss frames already in buffer
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
-            correlation_pos_ = write_pos_;
+            correlation_pos_ = (sync_position_ + min_frame) % MAX_BUFFER_SAMPLES;
         }
 
         state_ = DecoderState::SEARCHING;
@@ -611,11 +611,12 @@ void StreamingDecoder::decodeCurrentFrame() {
                   log_prefix_.c_str(), result.codewords_ok, result.codewords_failed, result.is_ping ? 1 : 0);
     }
 
-    // CRITICAL: Skip all old audio - only process new audio from now on
-    // This prevents re-detecting old syncs that are still in the circular buffer
+    // Skip past the frame we just decoded
+    // sync_position_ is at training start (after chirp), frame_buffer.size() is frame data
+    // Don't skip to write_pos_ - that would miss frames already in buffer
     {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
-        correlation_pos_ = write_pos_;
+        correlation_pos_ = (sync_position_ + frame_buffer.size()) % MAX_BUFFER_SAMPLES;
     }
 
     state_ = DecoderState::SEARCHING;

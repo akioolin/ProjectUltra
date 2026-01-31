@@ -38,8 +38,8 @@ ProjectUltra is a software modem that achieves reliable, high-speed data transfe
 | 5+ dB | MC-DPSK (8 carriers) | 938 bps | 100% verified, ±50 Hz CFO |
 | 10+ dB | OFDM-CHIRP R1/4 | 1.8 kbps | 100% verified, ±50 Hz CFO |
 | 17+ dB | OFDM-COX R1/4 | 1.8 kbps | DATA phase verified |
-| 20+ dB | OFDM DQPSK R1/2 | 3.6 kbps | Good conditions |
-| 25+ dB | OFDM DQPSK R2/3 | 5.4 kbps | Excellent conditions |
+| 20+ dB | OFDM DQPSK R1/2 | 3.6 kbps | 90% verified |
+| 25+ dB | OFDM DQPSK R2/3 | 5.4 kbps | 90% verified |
 
 **Theoretical (pending HF validation):**
 | SNR | Mode | Throughput | Notes |
