@@ -291,7 +291,7 @@ int main(int argc, char** argv) {
             printf("                  poor     - 2.0ms delay, 1.0Hz Doppler\n");
             printf("                  flutter  - 0.5ms delay, 10Hz Doppler (polar)\n");
             printf("  --frames N    Number of frames (default: 10)\n");
-            printf("  -w TYPE       Waveform: mc_dpsk, ofdm_chirp (default: mc_dpsk)\n");
+            printf("  -w TYPE       Waveform: mc_dpsk, ofdm_chirp, otfs (default: mc_dpsk)\n");
             printf("  --carriers N  Number of carriers for MC-DPSK (default: 8)\n");
             printf("  --rate R      Code rate for OFDM: r1_4, r1_3, r1_2, r2_3, r3_4 (default: r1_2)\n");
             printf("                (MC-DPSK always uses R1/4 per protocol)\n");
@@ -317,6 +317,9 @@ int main(int argc, char** argv) {
     } else if (waveform_str == "ofdm_cox" || waveform_str == "ofdm") {
         waveform_mode = protocol::WaveformMode::OFDM_COX;
         waveform_name = "OFDM_COX";
+    } else if (waveform_str == "otfs") {
+        waveform_mode = protocol::WaveformMode::OTFS_EQ;
+        waveform_name = "OTFS";
     } else {
         fprintf(stderr, "Unknown waveform: %s\n", waveform_str.c_str());
         return 1;
@@ -359,10 +362,12 @@ int main(int argc, char** argv) {
     // - Frames separated by silence periods (simulating PTT gaps)
     // - This creates a realistic continuous audio stream
 
-    // Determine if this is an OFDM mode (needs DATA frames in connected state)
+    // Determine if this is a data mode (needs DATA frames in connected state)
     // vs MC-DPSK (uses CONNECT frames in disconnected state)
     bool is_ofdm_mode = (waveform_mode == protocol::WaveformMode::OFDM_CHIRP ||
-                         waveform_mode == protocol::WaveformMode::OFDM_COX);
+                         waveform_mode == protocol::WaveformMode::OFDM_COX ||
+                         waveform_mode == protocol::WaveformMode::OTFS_EQ ||
+                         waveform_mode == protocol::WaveformMode::OTFS_RAW);
 
     // Code rate for OFDM modes (MC-DPSK always uses R1/4 per protocol)
     CodeRate ofdm_code_rate = CodeRate::R1_2;
@@ -844,9 +849,8 @@ int main(int argc, char** argv) {
 
         if (waveform_mode == protocol::WaveformMode::MC_DPSK) {
             rx_modem.setMCDPSKCarriers(num_carriers);
-        } else if (waveform_mode == protocol::WaveformMode::OFDM_COX ||
-                   waveform_mode == protocol::WaveformMode::OFDM_CHIRP) {
-            // OFDM modes need to be set up like TX (connected mode with same modulation)
+        } else if (is_ofdm_mode) {
+            // OFDM/OTFS modes need to be set up like TX (connected mode with same modulation)
             rx_modem.setConnected(true);
             rx_modem.setHandshakeComplete(true);
             rx_modem.setDataMode(ofdm_modulation, ofdm_code_rate);

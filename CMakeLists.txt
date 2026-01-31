@@ -76,6 +76,7 @@ add_library(ultra_core STATIC
     src/waveform/mc_dpsk_waveform.cpp
     src/waveform/ofdm_cox_waveform.cpp
     src/waveform/ofdm_chirp_waveform.cpp
+    src/waveform/otfs_waveform.cpp
     src/waveform/waveform_factory.cpp
     # miniz compression library (public domain)
     thirdparty/miniz/miniz.c

@@ -92,6 +92,14 @@ public:
     // Process incoming samples, returns true if frame ready
     bool process(SampleSpan samples);
 
+    // Process pre-synced samples (after external sync like chirp)
+    // Expects samples starting at OTFS preamble (4 repeated symbols)
+    // preamble_symbols: number of preamble symbols for channel estimation (default 4)
+    bool processPresynced(SampleSpan samples, int preamble_symbols = 4);
+
+    // Set frequency offset for CFO correction (call before processPresynced)
+    void setFrequencyOffset(float cfo_hz);
+
     // Get demodulated DD symbols (after SFFT)
     std::vector<Complex> getDDSymbols();
 
@@ -100,6 +108,9 @@ public:
 
     // Get estimated channel in DD domain (sparse!)
     std::vector<Complex> getDDChannel();
+
+    // Get estimated SNR
+    float getEstimatedSNR() const;
 
     // Reset state
     void reset();

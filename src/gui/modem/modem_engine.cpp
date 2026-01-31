@@ -456,67 +456,24 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
                   log_prefix_.c_str(), static_cast<int>(active_waveform));
     }
 
-    bool use_otfs = (active_waveform == protocol::WaveformMode::OTFS_EQ ||
-                     active_waveform == protocol::WaveformMode::OTFS_RAW);
-
     Samples preamble, modulated;
 
-    if (use_otfs) {
-        // OTFS: Keep legacy path (no OTFSWaveform yet)
-        // 1 codeword per frame, multiple frames for multi-codeword messages
-        constexpr size_t BYTES_PER_CODEWORD = 81;
-        size_t num_codewords = (to_modulate.size() + BYTES_PER_CODEWORD - 1) / BYTES_PER_CODEWORD;
+    // All modes now use IWaveform interface (MC_DPSK, OFDM_CHIRP, OFDM_COX, OTFS)
+    ensureTxWaveform(active_waveform, tx_modulation, tx_code_rate);
 
-        LOG_MODEM(INFO, "[%s] TX: Using OTFS modulation (%s, M=%d, N=%d, %zu codewords)",
+    if (active_tx_waveform_) {
+        preamble = active_tx_waveform_->generatePreamble();
+        modulated = active_tx_waveform_->modulate(to_modulate);
+
+        LOG_MODEM(INFO, "[%s] TX: Using %s (%s, %s)",
                   log_prefix_.c_str(),
-                  active_waveform == protocol::WaveformMode::OTFS_EQ ? "TF-EQ" : "RAW",
-                  otfs_config_.M, otfs_config_.N, num_codewords);
-
-        otfs_config_.tf_equalization = (active_waveform == protocol::WaveformMode::OTFS_EQ);
-        otfs_modulator_ = std::make_unique<OTFSModulator>(otfs_config_);
-
-        const size_t INTER_FRAME_GAP = 480;
-
-        for (size_t cw = 0; cw < num_codewords; cw++) {
-            size_t start = cw * BYTES_PER_CODEWORD;
-            size_t end = std::min(start + BYTES_PER_CODEWORD, to_modulate.size());
-            Bytes cw_data(to_modulate.begin() + start, to_modulate.begin() + end);
-
-            while (cw_data.size() < BYTES_PER_CODEWORD) {
-                cw_data.push_back(0);
-            }
-
-            auto dd_symbols = otfs_modulator_->mapToDD(cw_data, tx_modulation);
-            auto frame_preamble = otfs_modulator_->generatePreamble();
-            auto frame_data = otfs_modulator_->modulate(dd_symbols, tx_modulation);
-
-            modulated.insert(modulated.end(), frame_preamble.begin(), frame_preamble.end());
-            modulated.insert(modulated.end(), frame_data.begin(), frame_data.end());
-
-            if (cw + 1 < num_codewords) {
-                modulated.resize(modulated.size() + INTER_FRAME_GAP, 0.0f);
-            }
-        }
-
-        preamble.clear();
+                  active_tx_waveform_->getName().c_str(),
+                  modulationToString(tx_modulation),
+                  codeRateToString(tx_code_rate));
     } else {
-        // All other modes: Use IWaveform (MC_DPSK, OFDM_CHIRP, OFDM_COX)
-        ensureTxWaveform(active_waveform, tx_modulation, tx_code_rate);
-
-        if (active_tx_waveform_) {
-            preamble = active_tx_waveform_->generatePreamble();
-            modulated = active_tx_waveform_->modulate(to_modulate);
-
-            LOG_MODEM(INFO, "[%s] TX: Using %s (%s, %s)",
-                      log_prefix_.c_str(),
-                      active_tx_waveform_->getName().c_str(),
-                      modulationToString(tx_modulation),
-                      codeRateToString(tx_code_rate));
-        } else {
-            LOG_MODEM(ERROR, "[%s] TX: Failed to create waveform for mode %d",
-                      log_prefix_.c_str(), static_cast<int>(active_waveform));
-            return {};
-        }
+        LOG_MODEM(ERROR, "[%s] TX: Failed to create waveform for mode %d",
+                  log_prefix_.c_str(), static_cast<int>(active_waveform));
+        return {};
     }
 
     // Combine lead-in + preamble + data + tail guard

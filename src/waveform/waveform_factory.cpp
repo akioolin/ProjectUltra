@@ -4,6 +4,7 @@
 #include "mc_dpsk_waveform.hpp"
 #include "ofdm_cox_waveform.hpp"
 #include "ofdm_chirp_waveform.hpp"
+#include "otfs_waveform.hpp"
 #include "ultra/logging.hpp"
 
 namespace ultra {
@@ -25,9 +26,7 @@ WaveformPtr WaveformFactory::create(protocol::WaveformMode mode) {
 
         case protocol::WaveformMode::OTFS_EQ:
         case protocol::WaveformMode::OTFS_RAW:
-            // OTFS not yet wrapped - fall back to OFDM
-            LOG_MODEM(WARN, "WaveformFactory: OTFS modes not yet implemented, using OFDM_COX");
-            return std::make_unique<OFDMNvisWaveform>();
+            return std::make_unique<OTFSWaveform>();
 
         case protocol::WaveformMode::MFSK:
             // MFSK deprecated - use MC-DPSK instead
@@ -82,7 +81,7 @@ bool WaveformFactory::isSupported(protocol::WaveformMode mode) {
 
         case protocol::WaveformMode::OTFS_EQ:
         case protocol::WaveformMode::OTFS_RAW:
-            return false;  // Not yet wrapped
+            return true;  // Now supported
 
         case protocol::WaveformMode::MFSK:
             return false;  // Deprecated

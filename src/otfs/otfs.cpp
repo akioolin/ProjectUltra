@@ -423,6 +423,9 @@ struct OTFSDemodulator::Impl {
     std::vector<Complex> sync_sequence;
     float sync_threshold = 0.7f;  // Threshold for sync detection
 
+    // CFO correction (set by external chirp detection)
+    float cfo_hz = 0.0f;
+
     Impl(const OTFSConfig& cfg)
         : config(cfg)
         , fft(cfg.fft_size)
@@ -453,6 +456,86 @@ struct OTFSDemodulator::Impl {
             baseband[i] = Complex(samples[i], 0) * std::conj(carrier);
         }
         return baseband;
+    }
+
+    // Baseband conversion with CFO correction (for processPresynced)
+    std::vector<Complex> toBasebandWithCFO(const float* samples, size_t count, size_t sample_offset = 0) {
+        std::vector<Complex> baseband(count);
+
+        // Combined frequency: center_freq + cfo
+        float total_freq = config.center_freq + cfo_hz;
+        NCO temp_mixer(total_freq, config.sample_rate);
+
+        // Advance phase to account for preamble samples
+        for (size_t i = 0; i < sample_offset; ++i) temp_mixer.next();
+
+        for (size_t i = 0; i < count; ++i) {
+            Complex carrier = temp_mixer.next();
+            baseband[i] = Complex(samples[i], 0) * std::conj(carrier);
+        }
+        return baseband;
+    }
+
+    // Channel estimation with CFO correction
+    void estimateChannelFromPreambleWithCFO(const float* preamble_samples, size_t preamble_len) {
+        size_t sym_len = config.fft_size + config.cp_length;
+        size_t num_symbols = preamble_len / sym_len;
+
+        if (num_symbols < 1) return;
+
+        // Average channel estimates from preamble symbols
+        std::vector<Complex> h_sum(config.M, Complex(0, 0));
+        float total_noise_power = 0;
+        int noise_samples = 0;
+
+        for (size_t sym = 0; sym < num_symbols; ++sym) {
+            size_t sym_offset = sym * sym_len;
+            auto baseband = toBasebandWithCFO(preamble_samples + sym_offset, sym_len, sym_offset);
+
+            std::vector<Complex> time_domain(baseband.begin() + config.cp_length,
+                                              baseband.begin() + config.cp_length + config.fft_size);
+
+            std::vector<Complex> freq_domain;
+            fft.forward(time_domain, freq_domain);
+
+            for (size_t m = 0; m < config.M; ++m) {
+                size_t idx = m + 1;
+                if (idx < config.fft_size / 2) {
+                    Complex received = freq_domain[idx] * REAL_TO_COMPLEX_SCALE;
+                    Complex expected = sync_sequence[m];
+
+                    float expected_mag_sq = std::norm(expected);
+                    if (expected_mag_sq > 0.01f) {
+                        Complex h = received * std::conj(expected) / expected_mag_sq;
+                        h_sum[m] += h;
+
+                        // Estimate noise from last symbol
+                        if (sym == num_symbols - 1) {
+                            Complex error = received - h * expected;
+                            total_noise_power += std::norm(error);
+                            noise_samples++;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Average the estimates
+        channel_est.resize(config.M);
+        for (size_t m = 0; m < config.M; ++m) {
+            channel_est[m] = h_sum[m] / static_cast<float>(num_symbols);
+            if (std::norm(channel_est[m]) < 0.01f) {
+                channel_est[m] = Complex(1, 0);
+            }
+        }
+
+        // Update noise variance
+        if (noise_samples > 0) {
+            estimated_noise_var = total_noise_power / noise_samples;
+            estimated_noise_var = std::max(0.001f, std::min(1.0f, estimated_noise_var));
+        }
+
+        channel_estimated = true;
     }
 
     bool detectSyncReal(const float* samples, size_t count) {
@@ -778,6 +861,147 @@ void OTFSDemodulator::reset() {
 
 bool OTFSDemodulator::isSynced() const {
     return impl_->state == Impl::State::SYNCED;
+}
+
+void OTFSDemodulator::setFrequencyOffset(float cfo_hz) {
+    // Store CFO for frequency correction during baseband conversion
+    impl_->cfo_hz = cfo_hz;
+}
+
+float OTFSDemodulator::getEstimatedSNR() const {
+    // Estimate SNR from noise variance: SNR = signal_power / noise_power
+    // After normalization, signal power is ~1.0
+    if (impl_->estimated_noise_var > 1e-6f) {
+        float snr_linear = 1.0f / impl_->estimated_noise_var;
+        return 10.0f * std::log10(snr_linear);
+    }
+    return 20.0f;  // Default ~20 dB if no estimate
+}
+
+bool OTFSDemodulator::processPresynced(SampleSpan samples, int preamble_symbols) {
+    // Process samples after external sync (chirp preamble)
+    //
+    // Expected input: samples starting at OTFS preamble position
+    // Structure: [OTFS_PREAMBLE (4 symbols)] [DATA (N symbols)]
+    //
+    // The OTFS preamble contains 4 repeated Zadoff-Chu symbols for channel estimation.
+    // After channel estimation, we process N data symbols.
+
+    const size_t sym_len = impl_->config.fft_size + impl_->config.cp_length;
+    const size_t preamble_len = preamble_symbols * sym_len;
+    const size_t data_len = impl_->config.N * sym_len;
+    const size_t total_needed = preamble_len + data_len;
+
+    if (samples.size() < total_needed) {
+        return false;  // Not enough samples
+    }
+
+    // Reset state
+    impl_->soft_bits.clear();
+    impl_->dd_symbols.clear();
+    impl_->mixer.reset();
+    impl_->symbols_received = 0;
+    impl_->channel_estimated = false;
+    std::fill(impl_->channel_est.begin(), impl_->channel_est.end(), Complex(1, 0));
+
+    const float* ptr = samples.data();
+
+    // === PHASE 1: Channel estimation from preamble ===
+    if (preamble_symbols > 0 && impl_->config.tf_equalization) {
+        impl_->estimateChannelFromPreambleWithCFO(ptr, preamble_len);
+    }
+
+    // Skip past preamble to data section
+    ptr += preamble_len;
+
+    // === PHASE 2: Demodulate data symbols ===
+    // Process N data OFDM symbols into TF grid
+    // IMPORTANT: symbol_offset must account for preamble samples to maintain phase continuity
+    for (uint32_t n = 0; n < impl_->config.N; ++n) {
+        size_t symbol_offset = preamble_len + n * sym_len;  // Continue phase from after preamble
+        auto baseband = impl_->toBasebandWithCFO(ptr + n * sym_len, sym_len, symbol_offset);
+        impl_->demodulateSymbol(baseband, n);
+    }
+
+    // === PHASE 3: TF equalization ===
+    if (impl_->config.tf_equalization && impl_->channel_estimated) {
+        impl_->equalizeTFGrid();
+    } else {
+        impl_->tf_equalized = impl_->tf_buffer;
+    }
+
+    // === PHASE 4: SFFT to get DD symbols ===
+    sfft(impl_->tf_equalized, impl_->dd_symbols, impl_->config.M, impl_->config.N);
+
+    // === PHASE 5: Normalize DD symbols to unit power ===
+    float avg_power = 0;
+    size_t nonzero_count = 0;
+    for (const auto& sym : impl_->dd_symbols) {
+        float p = std::norm(sym);
+        if (p > 1e-8f) {
+            avg_power += p;
+            nonzero_count++;
+        }
+    }
+
+    if (nonzero_count > 0) {
+        avg_power /= nonzero_count;
+        if (avg_power > 1e-6f) {
+            float scale = 1.0f / std::sqrt(avg_power);
+            for (auto& sym : impl_->dd_symbols) {
+                sym *= scale;
+            }
+        }
+    }
+
+    // === PHASE 5b: Decision-directed common phase error correction ===
+    // On fading channels, there's often a common phase rotation across all symbols.
+    // Use QPSK decision-directed feedback to estimate and correct it.
+    {
+        float phase_error_sum = 0.0f;
+        int phase_count = 0;
+        const float POWER_THRESHOLD = 0.5f;  // Only use strong symbols
+
+        for (const auto& sym : impl_->dd_symbols) {
+            float power = std::norm(sym);
+            if (power > POWER_THRESHOLD) {
+                // Quantize to nearest QPSK point
+                float phase = std::atan2(sym.imag(), sym.real());
+                // QPSK points at 45°, 135°, -135°, -45° (i.e., ±π/4, ±3π/4)
+                int quadrant = static_cast<int>(std::round(phase * 2.0f / M_PI));
+                quadrant = ((quadrant % 4) + 4) % 4;
+                float expected_phase = quadrant * M_PI / 2.0f - M_PI / 4.0f;  // Shift to QPSK grid
+
+                float error = phase - expected_phase;
+                // Wrap to [-π, π]
+                while (error > M_PI) error -= 2 * M_PI;
+                while (error < -M_PI) error += 2 * M_PI;
+
+                phase_error_sum += error;
+                phase_count++;
+            }
+        }
+
+        if (phase_count > 10) {
+            float avg_phase_error = phase_error_sum / phase_count;
+            // Apply full correction
+            Complex correction(std::cos(-avg_phase_error), std::sin(-avg_phase_error));
+            for (auto& sym : impl_->dd_symbols) {
+                sym *= correction;
+            }
+        }
+    }
+
+    // Fixed noise variance for consistent LLR scaling
+    impl_->estimated_noise_var = 0.1f;
+
+    // === PHASE 6: Generate soft bits ===
+    impl_->soft_bits.clear();
+    for (const auto& sym : impl_->dd_symbols) {
+        softDemap(sym, impl_->config.modulation, impl_->estimated_noise_var, impl_->soft_bits);
+    }
+
+    return impl_->soft_bits.size() > 0;
 }
 
 } // namespace ultra
