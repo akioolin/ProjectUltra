@@ -230,6 +230,11 @@ void AudioEngine::stopCapture() {
     }
 }
 
+void AudioEngine::clearRxBuffer() {
+    std::lock_guard<std::mutex> lock(rx_mutex_);
+    rx_buffer_.clear();
+}
+
 void AudioEngine::outputCallback(void* userdata, Uint8* stream, int len) {
     AudioEngine* engine = static_cast<AudioEngine*>(userdata);
 
@@ -301,8 +306,8 @@ void AudioEngine::inputCallback(void* userdata, Uint8* stream, int len) {
         engine->rx_buffer_.insert(engine->rx_buffer_.end(), captured.begin(), captured.end());
     }
 
-    // Notify via callback
-    if (engine->rx_callback_) {
+    // Notify via callback (skip if muted during TX)
+    if (engine->rx_callback_ && !engine->rx_muted_.load()) {
         engine->rx_callback_(captured);
     }
 }

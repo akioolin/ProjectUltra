@@ -60,6 +60,8 @@ public:
     void startCapture();
     void stopCapture();
     bool isCapturing() const { return capturing_; }
+    void clearRxBuffer();  // Clear captured audio buffer
+    void setRxMuted(bool muted) { rx_muted_ = muted; }  // Prevent callback from firing
 
     // Audio parameters
     int getSampleRate() const { return sample_rate_; }
@@ -102,6 +104,7 @@ private:
     // State
     std::atomic<bool> playing_{false};
     std::atomic<bool> capturing_{false};
+    std::atomic<bool> rx_muted_{false};  // Prevent RX callback from firing during TX
     bool initialized_ = false;
 
     // Audio parameters

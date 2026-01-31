@@ -148,10 +148,12 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                 guiLog("SIM: Queued %zu TX samples (+ %zu PTT noise) for streaming", samples.size(), ptt_samples);
             } else {
                 // Normal mode: send to real audio device (it streams at 48kHz)
-                // Stop capture and clear RX buffer to prevent acoustic feedback
+                // Mute RX, stop capture, and clear all buffers to prevent acoustic feedback
                 // (speaker → microphone would cause us to decode our own TX)
-                audio_.stopCapture();
-                modem_.clearRxBuffer();
+                audio_.setRxMuted(true);   // Prevent callback from feeding modem
+                audio_.stopCapture();       // Stop SDL audio capture
+                audio_.clearRxBuffer();     // Clear audio engine buffer
+                modem_.clearRxBuffer();     // Clear modem decoder buffer
                 size_t tx_duration_ms = (samples.size() * 1000) / 48000;
                 tx_in_progress_ = true;
                 tx_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(tx_duration_ms + 100);
@@ -1493,7 +1495,10 @@ void App::renderOperateTab() {
     // TX Message Input
     if (tx_in_progress_ && audio_.isTxQueueEmpty()) {
         tx_in_progress_ = false;
-        if (!ptt_active_ && !simulation_enabled_) audio_.startCapture();
+        if (!ptt_active_ && !simulation_enabled_) {
+            audio_.setRxMuted(false);  // Re-enable RX callback
+            audio_.startCapture();
+        }
     }
 
     bool can_send = !tx_in_progress_ && strlen(tx_text_buffer_) > 0 &&
