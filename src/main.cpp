@@ -45,7 +45,7 @@ void printUsage(const char* prog) {
     std::cerr << "  -s <call>       Source callsign (default: N0CALL)\n";
     std::cerr << "  -d <call>       Destination callsign (default: CQ)\n";
     std::cerr << "  -o <file>       Output to file instead of stdout\n";
-    std::cerr << "  -w <waveform>   Waveform: chirp, cox, dpsk (default: chirp)\n";
+    std::cerr << "  -w <waveform>   Waveform: ofdm, mcdpsk (default: ofdm)\n";
     std::cerr << "  -r <rate>       Code rate: r1_4, r1_2, r2_3, r3_4 (default: r1_4)\n";
     std::cerr << "\nExamples:\n";
     std::cerr << "  # Send PING probe and play audio\n";
@@ -54,10 +54,10 @@ void printUsage(const char* prog) {
     std::cerr << "  " << prog << " ptx connect -s MYCALL -d THEIRCALL -o connect.f32\n\n";
     std::cerr << "  # Decode recording (auto-detect waveform)\n";
     std::cerr << "  " << prog << " prx recording.f32\n\n";
-    std::cerr << "  # Decode DPSK recording\n";
-    std::cerr << "  " << prog << " prx -w dpsk recording.f32\n\n";
+    std::cerr << "  # Decode MC-DPSK recording\n";
+    std::cerr << "  " << prog << " prx -w mcdpsk recording.f32\n\n";
     std::cerr << "  # Loopback test\n";
-    std::cerr << "  " << prog << " ptx ping | " << prog << " prx -w dpsk\n";
+    std::cerr << "  " << prog << " ptx ping | " << prog << " prx -w mcdpsk\n";
     std::cerr << "\n";
 }
 
@@ -71,8 +71,8 @@ void printInfo() {
     std::cout << "  LDPC codeword:  648 bits\n\n";
 
     std::cout << "Waveforms:\n";
-    std::cout << "  OFDM    High throughput, good SNR (>17 dB)\n";
-    std::cout << "  DPSK    Single-carrier, low SNR (-11 to 17 dB)\n\n";
+    std::cout << "  OFDM      High throughput, good SNR (>10 dB)\n";
+    std::cout << "  MC-DPSK   Multi-carrier DPSK, low SNR (-3 to 10 dB)\n\n";
 
     std::cout << "Code Rates:\n";
     std::cout << "  R1/4    20 info bytes, most robust\n";
@@ -86,10 +86,10 @@ void printInfo() {
 enum class WaveformType { OFDM_COX, OFDM_CHIRP, DPSK };
 
 WaveformType parseWaveform(const char* s) {
-    if (strcmp(s, "dpsk") == 0) return WaveformType::DPSK;
-    if (strcmp(s, "chirp") == 0) return WaveformType::OFDM_CHIRP;
+    if (strcmp(s, "mcdpsk") == 0 || strcmp(s, "dpsk") == 0) return WaveformType::DPSK;
+    if (strcmp(s, "ofdm") == 0 || strcmp(s, "chirp") == 0) return WaveformType::OFDM_CHIRP;
     if (strcmp(s, "cox") == 0) return WaveformType::OFDM_COX;
-    // Default "ofdm" maps to chirp (more robust, works on fading)
+    // Default to OFDM (chirp-based, more robust on fading)
     return WaveformType::OFDM_CHIRP;
 }
 
@@ -275,6 +275,16 @@ int runProtocolRx(const char* input_file, WaveformType waveform) {
         total_samples += samples_read;
     }
 
+    // Add trailing silence to ensure decoder processes all buffered audio
+    // StreamingDecoder needs ~2.5s of audio after frame to complete processing
+    buffer.resize(960);
+    std::fill(buffer.begin(), buffer.end(), 0.0f);
+    for (int i = 0; i < 150 && !got_frame; i++) {  // ~3 seconds of silence
+        modem.feedAudio(buffer);
+        total_samples += buffer.size();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
     // Wait for modem to process buffered audio
     // ModemEngine has background threads - wait until frame received or timeout
     auto wait_start = std::chrono::steady_clock::now();
@@ -282,7 +292,7 @@ int runProtocolRx(const char* input_file, WaveformType waveform) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - wait_start).count();
-        if (elapsed > 5000) break;  // 5 second timeout
+        if (elapsed > 3000) break;  // 3 second timeout (reduced since we added silence)
     }
 
     // Small extra delay to catch any remaining callbacks
