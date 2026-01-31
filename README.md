@@ -223,6 +223,17 @@ The `--rate` flag selects LDPC code rate:
 - `r1_2` - Balanced (default for AWGN)
 - `r2_3`, `r3_4`, `r5_6` - Higher throughput, needs better SNR
 
+**GUI Expert Settings:**
+
+To force specific modulation in the GUI application:
+1. Open **Settings** (gear icon)
+2. Go to **Expert** tab
+3. Set **Forced Modulation** to desired mode (D8PSK, DQPSK, etc.)
+4. Optionally set **Forced Code Rate** (R1/4 recommended for fading)
+
+When D8PSK is forced on a fading channel, the two-pass decoder automatically
+activates to improve reliability (uses embedded DQPSK grid for phase correction).
+
 **Test Tools:**
 | Tool | Purpose |
 |------|---------|
