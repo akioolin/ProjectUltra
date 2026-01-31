@@ -145,8 +145,10 @@ int runProtocolTx(const char* message, const char* output_file,
         samples = modem.transmit(frame.serialize());
 
     } else {
-        // DATA frame with text message
+        // DATA frame with text message - use "connected" mode with specified waveform/rate
         frame_type = "DATA";
+        modem.setConnected(true);
+        modem.setHandshakeComplete(true);
         auto frame = v2::DataFrame::makeData(src_call, dst_call, 1, std::string(message));
         samples = modem.transmit(frame.serialize());
     }
@@ -176,7 +178,7 @@ int runProtocolTx(const char* message, const char* output_file,
 // ============================================================================
 // Protocol RX - Uses ModemEngine with callbacks for clean frame decoding
 // ============================================================================
-int runProtocolRx(const char* input_file, WaveformType waveform) {
+int runProtocolRx(const char* input_file, WaveformType waveform, CodeRate rate) {
 
     std::cerr << "Protocol RX";
     if (input_file) std::cerr << " from " << input_file;
@@ -202,7 +204,14 @@ int runProtocolRx(const char* input_file, WaveformType waveform) {
     // Create modem engine
     ModemEngine modem;
     modem.setLogPrefix("RX");
+
+    // For OFDM waveforms, set connected mode so decoder uses OFDM path
+    if (waveform == WaveformType::OFDM_CHIRP || waveform == WaveformType::OFDM_COX) {
+        modem.setConnected(true);
+        modem.setHandshakeComplete(true);
+    }
     modem.setWaveformMode(toWaveformMode(waveform));
+    modem.setDataMode(Modulation::DQPSK, rate);
 
     // Callback for PING detection
     modem.setPingReceivedCallback([&](float snr) {
@@ -356,7 +365,7 @@ int main(int argc, char* argv[]) {
     } else if (strcmp(command, "ptx") == 0) {
         return runProtocolTx(input_file, output_file, src_call, dst_call, waveform, rate);
     } else if (strcmp(command, "prx") == 0) {
-        return runProtocolRx(input_file, waveform);
+        return runProtocolRx(input_file, waveform, rate);
     } else {
         std::cerr << "Unknown command: " << command << "\n";
         printUsage(argv[0]);
