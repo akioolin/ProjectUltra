@@ -289,6 +289,21 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
         }
     }
 
+    // Two-pass DQPSK decoding: estimate per-carrier phase errors from hard decisions,
+    // correct them before computing soft LLRs.
+    // Only activates for DQPSK + R1/2 + fading (R1/4 doesn't need it - already robust)
+    bool is_r1_2 = (config.code_rate == CodeRate::R1_2);
+    if (mod == Modulation::DQPSK && dqpsk_two_pass_enabled_ && is_r1_2) {
+        float fading_index = computeFadingIndex();
+        if (fading_index > TWO_PASS_FADING_THRESHOLD) {
+            LOG_DEMOD(DEBUG, "DQPSK two-pass (R1/2): fading=%.3f > %.3f, applying correction",
+                      fading_index, TWO_PASS_FADING_THRESHOLD);
+            demodulateDQPSKTwoPass(equalized, noise_variance);
+            snr_symbol_count++;
+            return;  // Two-pass handled everything
+        }
+    }
+
     for (size_t i = 0; i < equalized.size(); ++i) {
         const auto& sym = equalized[i];
         float base_nv = (i < carrier_noise_var.size()) ? carrier_noise_var[i] : noise_variance;
@@ -540,6 +555,84 @@ bool OFDMDemodulator::Impl::demodulateD8PSKTwoPass(
     }
 
     return true;
+}
+
+// =============================================================================
+// TWO-PASS DQPSK DECODING
+// =============================================================================
+
+void OFDMDemodulator::Impl::demodulateDQPSKTwoPass(
+    const std::vector<Complex>& equalized,
+    float base_noise_variance)
+{
+    // Two-pass DQPSK: Estimate per-carrier phase errors from hard decisions,
+    // then apply corrections before computing soft LLRs.
+    //
+    // The key insight: DQPSK hard decisions are robust (45° margin to nearest
+    // wrong symbol). If we see 98° instead of 90°, we're confident it's 90°.
+    // The 8° error is from channel drift, not wrong data. We can correct it.
+
+    float ce_margin = soft_demap::getCEErrorMargin(Modulation::DQPSK);
+
+    // PASS 1: Estimate per-carrier phase errors
+    std::vector<float> phase_errors(equalized.size(), 0.0f);
+    float total_error = 0.0f;
+    int valid_count = 0;
+
+    for (size_t i = 0; i < equalized.size(); ++i) {
+        Complex prev_sym = dbpsk_prev_equalized[i];
+        float signal_power = std::abs(equalized[i]) * std::abs(prev_sym);
+
+        if (signal_power > 0.1f) {
+            phase_errors[i] = soft_demap::computeDQPSKPhaseError(equalized[i], prev_sym);
+            total_error += phase_errors[i];
+            valid_count++;
+        }
+    }
+
+    // Compute mean phase error across carriers (common phase drift)
+    float mean_error = (valid_count > 0) ? (total_error / valid_count) : 0.0f;
+
+    // Log if significant correction
+    if (snr_symbol_count < 5 && std::abs(mean_error) > 0.05f) {
+        LOG_DEMOD(DEBUG, "DQPSK two-pass sym=%d: mean_err=%.1f°, valid=%d/%zu",
+                  snr_symbol_count, mean_error * 180.0f / M_PI,
+                  valid_count, equalized.size());
+    }
+
+    // Compute variance of phase errors to measure correction reliability
+    float var_sum = 0.0f;
+    for (size_t i = 0; i < equalized.size(); ++i) {
+        if (std::abs(phase_errors[i]) > 0.001f) {
+            float diff = phase_errors[i] - mean_error;
+            var_sum += diff * diff;
+        }
+    }
+    float phase_variance = (valid_count > 1) ? (var_sum / (valid_count - 1)) : 0.0f;
+    float phase_std = std::sqrt(phase_variance);
+
+    // PASS 2: Apply common phase correction and compute LLRs
+    // Use mean error across all carriers (common phase drift from CFO/channel)
+    float correction = -mean_error;  // Negate to correct
+
+    // Inflate noise variance if phase errors are inconsistent (high variance)
+    // This reduces LLR confidence when correction is uncertain
+    // phase_std > 0.1 rad (5.7°) indicates unreliable correction
+    float nv_inflation = 1.0f + 5.0f * phase_std;  // 1x to ~2x for typical errors
+
+    for (size_t i = 0; i < equalized.size(); ++i) {
+        Complex prev_sym = dbpsk_prev_equalized[i];
+        float nv = (i < carrier_noise_var.size()) ? carrier_noise_var[i] : base_noise_variance;
+        nv *= ce_margin * nv_inflation;
+
+        // Apply common correction and demap
+        auto llrs = soft_demap::demapDQPSKCorrected(equalized[i], prev_sym, nv, correction);
+        soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
+
+        // Update reference with ORIGINAL symbol (not corrected)
+        // This keeps the reference tracking the actual channel, not our corrections
+        dbpsk_prev_equalized[i] = equalized[i];
+    }
 }
 
 void OFDMDemodulator::Impl::updateQuality() {

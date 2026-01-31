@@ -237,6 +237,46 @@ inline std::array<float, 3> demapD8PSK(Complex sym, Complex prev_sym, float nois
 }
 
 // =============================================================================
+// TWO-PASS DQPSK HELPERS
+// =============================================================================
+
+// Extract nearest DQPSK phase (0°, 90°, 180°, 270°) from differential symbol
+// Returns the ideal phase that the hard decision would produce
+inline float extractDQPSKIdealPhase(float actual_phase) {
+    // Quantize to nearest 90° (DQPSK grid: 0°, 90°, 180°, 270°)
+    static const float pi = 3.14159265358979f;
+    static const float half_pi = pi / 2.0f;
+    int quadrant = static_cast<int>(std::round(actual_phase / half_pi));
+    // Wrap to [-2, 1] → maps to -180°, -90°, 0°, 90°
+    quadrant = ((quadrant + 2) % 4) - 2;  // Results in -2, -1, 0, 1
+    return quadrant * half_pi;
+}
+
+// Compute phase error: difference between actual differential phase and ideal DQPSK phase
+// Positive error means actual phase is ahead of ideal
+inline float computeDQPSKPhaseError(Complex sym, Complex prev_sym) {
+    Complex diff = sym * std::conj(prev_sym);
+    float actual_phase = std::atan2(diff.imag(), diff.real());
+    float ideal_phase = extractDQPSKIdealPhase(actual_phase);
+    float error = actual_phase - ideal_phase;
+    // Wrap to [-π, π]
+    static const float pi = 3.14159265358979f;
+    if (error > pi) error -= 2 * pi;
+    if (error < -pi) error += 2 * pi;
+    return error;
+}
+
+// DQPSK soft demapping with phase correction applied
+// Same as demapDQPSK but applies a phase correction before computing LLRs
+inline std::array<float, 2> demapDQPSKCorrected(Complex sym, Complex prev_sym,
+                                                  float noise_var, float phase_correction) {
+    // Apply phase correction to the symbol before differential detection
+    Complex correction(std::cos(phase_correction), std::sin(phase_correction));
+    Complex corrected_sym = sym * correction;
+    return demapDQPSK(corrected_sym, prev_sym, noise_var);
+}
+
+// =============================================================================
 // CHANNEL ESTIMATION ERROR MARGIN HELPER
 // =============================================================================
 

@@ -734,16 +734,27 @@ std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>&
     bool is_differential = (mod == Modulation::DBPSK || mod == Modulation::DQPSK || mod == Modulation::D8PSK);
 
     if (is_differential) {
-        // For differential modes on fading channels, use ZF equalization with the
-        // channel estimate from LTS + decision-directed updates.
+        // For differential modes on fading channels, use MMSE equalization.
         //
-        // Key insight: DQPSK measures phase DIFFERENCES between consecutive symbols.
-        // ZF equalization divides by H, so if H changes between symbols, we get:
-        //   diff = (rx[n]/H[n]) * conj(rx[n-1]/H[n-1])
-        // If we use the SAME H estimate for both, errors cancel somewhat.
+        // Key insight: ZF equalization (divide by H) amplifies noise on deeply
+        // faded carriers. MMSE adds noise variance to the denominator, limiting
+        // noise boost while accepting some signal distortion on weak carriers.
         //
-        // The channel_estimate[] is updated by decision-directed tracking in
-        // demodulateSymbol(), so it adapts over the frame.
+        // MMSE: equalized = conj(H) * rx / (|H|² + σ²)
+        // ZF:   equalized = conj(H) * rx / |H|²
+        //
+        // For deep fades: |H|² << σ², MMSE ≈ conj(H) * rx / σ² (bounded)
+        //                           ZF  ≈ conj(H) * rx / tiny  (explodes)
+
+        // First pass: compute average channel power for fade detection
+        float avg_h_power = 0.0f;
+        for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
+            int idx = data_carrier_indices[i];
+            avg_h_power += std::norm(channel_estimate[idx]);
+        }
+        avg_h_power /= data_carrier_indices.size();
+        float fade_threshold = FADE_THRESHOLD_RATIO * avg_h_power;
+
         for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
             int idx = data_carrier_indices[i];
             Complex received = freq_domain[idx];
@@ -756,15 +767,25 @@ std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>&
             float timing_phase = 2.0f * M_PI * k * timing_offset_samples / config.fft_size;
             Complex timing_correction = std::exp(Complex(0, timing_phase));
 
-            // ZF equalization per carrier, then common phase correction
-            if (h_power > 1e-6f) {
-                equalized[i] = received * std::conj(h) / h_power * pilot_phase_correction * timing_correction;
-                carrier_noise_var[i] = noise_variance / h_power;
+            // MMSE equalization: conj(H) / (|H|² + σ²)
+            float mmse_denom = h_power + noise_variance;
+            if (mmse_denom < 1e-10f) {
+                // Extremely deep fade - zero output, mark unreliable
+                equalized[i] = Complex(0, 0);
+                carrier_noise_var[i] = MAX_CARRIER_NOISE_VAR;
             } else {
-                // Deep fade - just apply phase correction, mark as unreliable
-                equalized[i] = received * pilot_phase_correction * timing_correction;
+                equalized[i] = received * std::conj(h) / mmse_denom * pilot_phase_correction * timing_correction;
+                // MMSE output noise variance approximation
+                // True formula: σ² * |H|² / (|H|² + σ²)², but simplified for LLR scaling
+                carrier_noise_var[i] = noise_variance / (h_power + noise_variance);
+            }
+
+            // Soft erasure for deeply faded carriers
+            // This tells LDPC "don't trust this carrier" by increasing noise variance
+            if (h_power < fade_threshold) {
                 carrier_noise_var[i] = MAX_CARRIER_NOISE_VAR;
             }
+
             carrier_noise_var[i] = std::max(MIN_CARRIER_NOISE_VAR, std::min(MAX_CARRIER_NOISE_VAR, carrier_noise_var[i]));
         }
         return equalized;

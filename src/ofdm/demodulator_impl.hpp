@@ -123,6 +123,10 @@ struct OFDMDemodulator::Impl {
     bool d8psk_two_pass_enabled_ = true;
     static constexpr float TWO_PASS_FADING_THRESHOLD = 0.3f;
 
+    // Two-pass DQPSK decoding (per-carrier phase correction)
+    // Estimates phase error from hard decisions, corrects before soft demapping
+    bool dqpsk_two_pass_enabled_ = true;  // Enable for fading channel improvement
+
     // ==========================================================================
     // CONSTRUCTOR
     // ==========================================================================
@@ -170,6 +174,7 @@ struct OFDMDemodulator::Impl {
     // ==========================================================================
     void demodulateSymbol(const std::vector<Complex>& equalized, Modulation mod);
     bool demodulateD8PSKTwoPass(const std::vector<Complex>& equalized, float noise_variance);
+    void demodulateDQPSKTwoPass(const std::vector<Complex>& equalized, float noise_variance);
     float computeFadingIndex() const;
     void updateQuality();
 };
