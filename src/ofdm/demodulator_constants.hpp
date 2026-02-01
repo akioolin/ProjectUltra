@@ -19,8 +19,9 @@ constexpr size_t LDPC_BLOCK_SIZE = 648;
 // LLR clipping to prevent overconfident decisions
 // On fading channels, channel estimation errors can produce huge LLRs
 // that are confidently WRONG. Clipping allows LDPC to correct them.
-// Value of 5.0 is industry standard for LDPC soft-decision decoding.
-constexpr float MAX_LLR = 5.0f;
+// Value of 20.0 allows proper soft information at high SNR while still
+// preventing runaway values on fading channels.
+constexpr float MAX_LLR = 20.0f;
 
 // Minimum LLR magnitude to prevent complete erasures
 // When symbol is near decision boundary, give weak opinion for LDPC

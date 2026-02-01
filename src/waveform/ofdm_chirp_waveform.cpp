@@ -516,10 +516,13 @@ int OFDMChirpWaveform::getDataPreambleSamples() const {
 }
 
 int OFDMChirpWaveform::getMinSamplesForFrame() const {
-    // Training symbols + minimum data for 1 codeword (648 bits)
+    // Training symbols + data for fixed 4-codeword frame (2592 bits)
+    // Frame interleaving requires all 4 CWs to be received before decoding
     int training_samples = 2 * getSamplesPerSymbol();  // 2 OFDM training symbols
 
-    // Data samples for 1 LDPC codeword (648 bits)
+    // Data samples for 4 LDPC codewords (2592 bits) - fixed frame with interleaving
+    constexpr int FRAME_BITS = 4 * 648;  // 4 CWs × 648 bits = 2592 bits
+
     // For DQPSK: 2 bits per carrier
     int bits_per_carrier = 2;  // DQPSK
     switch (config_.modulation) {
@@ -539,7 +542,7 @@ int OFDMChirpWaveform::getMinSamplesForFrame() const {
     int data_carriers = static_cast<int>(config_.num_carriers) - pilot_count;
 
     int bits_per_symbol = data_carriers * bits_per_carrier;
-    int data_symbols = (648 + bits_per_symbol - 1) / bits_per_symbol;
+    int data_symbols = (FRAME_BITS + bits_per_symbol - 1) / bits_per_symbol;
     int data_samples = data_symbols * getSamplesPerSymbol();
 
     return training_samples + data_samples;

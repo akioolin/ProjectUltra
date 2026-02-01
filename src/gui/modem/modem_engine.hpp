@@ -284,8 +284,12 @@ private:
     // Spreads consecutive LDPC bits across different OFDM symbols
     std::unique_ptr<ChannelInterleaver> channel_interleaver_;
     size_t interleaver_bits_per_symbol_ = 60;  // Default for OFDM_CHIRP (30 carriers × 2 bits DQPSK)
-    bool interleaving_enabled_ = false;  // DISABLED FOR TESTING
+    bool interleaving_enabled_ = false;  // Per-CW interleaving - DISABLED FOR TESTING
     void updateChannelInterleaver(size_t bits_per_symbol);
+
+    // Frame-level interleaving for fixed 4-CW DATA frames
+    // Spreads errors across all 4 codewords for burst fading resistance
+    bool frame_interleaving_enabled_ = true;  // ENABLED - for DATA frames only
 
     // Audio filters
     FilterConfig filter_config_;

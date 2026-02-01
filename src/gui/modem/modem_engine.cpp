@@ -3,6 +3,7 @@
 
 #include "modem_engine.hpp"
 #include "protocol/frame_v2.hpp"
+#include "fec/frame_interleaver.hpp"  // Frame-level interleaving for 4-CW DATA frames
 #include "ultra/logging.hpp"
 #include "waveform/waveform_factory.hpp"
 #include <cstring>
@@ -253,80 +254,65 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         // Use negotiated rate if connected+handshake OR for disconnect ACK (use_connected_waveform_once_)
         tx_code_rate = ((connected_ && handshake_complete_) || use_connected_waveform_once_) ? data_code_rate_ : CodeRate::R1_4;
 
-        // Patch total_cw in frame header to match actual encoding rate
-        // Only for frames with total_cw field (Data frames 0x30-0x33, Connect frames 0x12-0x15)
-        // Control frames (ACK 0x20, NACK 0x21, etc.) are fixed 20 bytes = 1 codeword, no patching needed
+        // Determine frame type to decide encoding strategy
+        // Control frames (1 CW): ACK, NACK, PROBE, etc. - no frame interleaving
+        // Multi-CW frames (Connect, DATA): Always 4 CWs with frame-level interleaving
         Bytes tx_data = data;  // Make mutable copy
-        if (tx_data.size() >= 17) {  // Need at least header size for data/connect frames
-            uint8_t frame_type = tx_data[2];
-            bool is_data_or_connect = (frame_type >= 0x10 && frame_type <= 0x19) ||  // Connect frames
-                                      (frame_type >= 0x30 && frame_type <= 0x3F);    // Data frames
-            if (is_data_or_connect) {
-                // Get payload size from header (bytes 13-14)
+        uint8_t frame_type = tx_data.size() >= 3 ? tx_data[2] : 0;
+        bool is_control_frame = v2::isControlFrame(static_cast<v2::FrameType>(frame_type));
+        bool is_multi_cw_frame = (frame_type >= 0x10 && frame_type <= 0x19) ||  // Connect frames
+                                 (frame_type >= 0x30 && frame_type <= 0x3F);    // Data frames
+
+        if (is_control_frame) {
+            // === Control Frame Path (1 CW, no frame interleaving) ===
+            encoded_cws = v2::encodeFrameWithLDPC(tx_data, tx_code_rate);
+            LOG_MODEM(INFO, "TX v2 control: %zu bytes -> %zu CW (no frame interleave)",
+                      data.size(), encoded_cws.size());
+
+            for (const auto& cw : encoded_cws) {
+                to_modulate.insert(to_modulate.end(), cw.begin(), cw.end());
+            }
+        } else if (is_multi_cw_frame && frame_interleaving_enabled_) {
+            // === Multi-CW Frame Path (4 CWs with frame-level interleaving) ===
+            // Patch total_cw to 4 in header (frame interleaving always uses 4 CWs)
+            if (tx_data.size() >= 17 && tx_data[12] != v2::FIXED_FRAME_CODEWORDS) {
+                LOG_MODEM(DEBUG, "TX v2: Patching total_cw from %d to %d for frame interleaving",
+                          tx_data[12], v2::FIXED_FRAME_CODEWORDS);
+                tx_data[12] = v2::FIXED_FRAME_CODEWORDS;
+                // Recalculate header CRC (over bytes 0-14)
+                uint16_t hcrc = v2::ControlFrame::calculateCRC(tx_data.data(), 15);
+                tx_data[15] = (hcrc >> 8) & 0xFF;
+                tx_data[16] = hcrc & 0xFF;
+            }
+
+            // Encode with frame-level interleaving (returns 324 bytes = 2592 bits, already interleaved)
+            to_modulate = v2::encodeFixedFrame(tx_data, tx_code_rate);
+            LOG_MODEM(INFO, "TX v2 multi-CW: %zu bytes -> 4 CWs with frame interleave (%zu coded bytes)",
+                      data.size(), to_modulate.size());
+        } else {
+            // === Fallback: Variable CWs without frame interleaving ===
+            // (when frame_interleaving_enabled_ is false)
+            if (is_multi_cw_frame && tx_data.size() >= 17) {
                 uint16_t payload_len = (static_cast<uint16_t>(tx_data[13]) << 8) | tx_data[14];
-                // Calculate correct total_cw for this rate
                 uint8_t correct_cw = v2::DataFrame::calculateCodewords(payload_len, tx_code_rate);
                 if (tx_data[12] != correct_cw) {
-                    LOG_MODEM(DEBUG, "TX v2: Patching total_cw from %d to %d for %s",
-                              tx_data[12], correct_cw, codeRateToString(tx_code_rate));
                     tx_data[12] = correct_cw;
-                    // Recalculate header CRC (over bytes 0-14)
                     uint16_t hcrc = v2::ControlFrame::calculateCRC(tx_data.data(), 15);
                     tx_data[15] = (hcrc >> 8) & 0xFF;
                     tx_data[16] = hcrc & 0xFF;
                 }
             }
-        }
 
-        encoded_cws = v2::encodeFrameWithLDPC(tx_data, tx_code_rate);
-        LOG_MODEM(INFO, "TX v2: %zu bytes -> %zu codewords (all %s)",
-                  data.size(), encoded_cws.size(), codeRateToString(tx_code_rate));
+            encoded_cws = v2::encodeFrameWithLDPC(tx_data, tx_code_rate);
+            LOG_MODEM(INFO, "TX v2 fallback: %zu bytes -> %zu CWs (no frame interleave)",
+                      data.size(), encoded_cws.size());
 
-        // Concatenate all encoded codewords (with optional interleaving per-codeword)
-        // Channel interleaver spreads bits across OFDM symbols for time diversity
-        // IMPORTANT: Determine actual waveform for this TX (not just waveform_mode_)
-        // When not connected, waveform_mode_ may still be OFDM_COX but we're actually using MC-DPSK
-        // For disconnect ACK (use_connected_waveform_once_), use disconnect_waveform_ (saved negotiated mode)
-        protocol::WaveformMode tx_waveform = use_connected_waveform_once_ ? disconnect_waveform_ :
-                                             (!connected_ ? connect_waveform_ :
-                                              (!handshake_complete_ ? last_rx_waveform_ : waveform_mode_));
-        bool use_interleaving = interleaving_enabled_ && channel_interleaver_ &&
-                                (tx_waveform == protocol::WaveformMode::OFDM_COX ||
-                                 tx_waveform == protocol::WaveformMode::OFDM_CHIRP);
-        LOG_MODEM(INFO, "TX v2: interleaving=%d (enabled=%d, interleaver=%p, waveform=%d)",
-                  use_interleaving, interleaving_enabled_, (void*)channel_interleaver_.get(),
-                  static_cast<int>(tx_waveform));
-        for (size_t cw_idx = 0; cw_idx < encoded_cws.size(); cw_idx++) {
-            const auto& cw = encoded_cws[cw_idx];
-            if (use_interleaving) {
-                // Debug: show first 10 bytes BEFORE interleaving
-                if (cw_idx == 0 && cw.size() >= 10) {
-                    LOG_MODEM(INFO, "TX v2 CW0: BEFORE interleave bytes 0-9: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
-                              cw[0], cw[1], cw[2], cw[3], cw[4], cw[5], cw[6], cw[7], cw[8], cw[9]);
-                }
-                Bytes interleaved = channel_interleaver_->interleave(cw);
-                // Debug: show first 10 bytes AFTER interleaving
-                if (cw_idx == 0 && interleaved.size() >= 10) {
-                    LOG_MODEM(INFO, "TX v2 CW0: AFTER interleave bytes 0-9: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
-                              interleaved[0], interleaved[1], interleaved[2], interleaved[3], interleaved[4],
-                              interleaved[5], interleaved[6], interleaved[7], interleaved[8], interleaved[9]);
-                }
-                to_modulate.insert(to_modulate.end(), interleaved.begin(), interleaved.end());
-            } else {
+            for (const auto& cw : encoded_cws) {
                 to_modulate.insert(to_modulate.end(), cw.begin(), cw.end());
             }
         }
 
-        // Print as bits for easier comparison with RX soft bits
-        if (to_modulate.size() > 0) {
-            LOG_MODEM(INFO, "TX v2: First byte 0x%02x as bits: %d%d%d%d%d%d%d%d",
-                      to_modulate[0],
-                      (to_modulate[0] >> 7) & 1, (to_modulate[0] >> 6) & 1,
-                      (to_modulate[0] >> 5) & 1, (to_modulate[0] >> 4) & 1,
-                      (to_modulate[0] >> 3) & 1, (to_modulate[0] >> 2) & 1,
-                      (to_modulate[0] >> 1) & 1, (to_modulate[0] >> 0) & 1);
-        }
-        LOG_MODEM(INFO, "TX v2: Total encoded %zu bytes, first 8: %02x %02x %02x %02x %02x %02x %02x %02x",
+        LOG_MODEM(INFO, "TX v2: Total %zu coded bytes, first 8: %02x %02x %02x %02x %02x %02x %02x %02x",
                   to_modulate.size(),
                   to_modulate.size() > 0 ? to_modulate[0] : 0,
                   to_modulate.size() > 1 ? to_modulate[1] : 0,

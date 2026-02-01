@@ -1,5 +1,6 @@
 #include "frame_v2.hpp"
 #include "ultra/fec.hpp"  // LDPC encoder/decoder
+#include "../fec/frame_interleaver.hpp"  // Frame-level interleaving
 #include <cstring>
 #include <algorithm>
 #include <cctype>
@@ -726,7 +727,8 @@ ConnectFrame ConnectFrame::makeConnectNakByHash(const std::string& src, uint32_t
 }
 
 Bytes ConnectFrame::serialize() const {
-    // Use DATA frame format: header (17B) + payload (22B) + CRC (2B) = 41 bytes
+    // Use DATA frame format: header (17B) + payload (25B) + CRC (2B) = 44 bytes
+    // Always uses 4 codewords with frame-level interleaving for fading resistance
     Bytes out;
     out.reserve(DataFrame::HEADER_SIZE + PAYLOAD_SIZE + DataFrame::CRC_SIZE);
 
@@ -748,9 +750,8 @@ Bytes ConnectFrame::serialize() const {
     out.push_back((dst_hash >> 8) & 0xFF);
     out.push_back(dst_hash & 0xFF);
 
-    // Total codewords (1 byte) - 41 bytes = 3 codewords
-    uint8_t total_cw = DataFrame::calculateCodewords(PAYLOAD_SIZE);
-    out.push_back(total_cw);
+    // Total codewords (1 byte) - Always 4 for frame interleaving
+    out.push_back(FIXED_FRAME_CODEWORDS);
 
     // Payload length (2 bytes)
     out.push_back((PAYLOAD_SIZE >> 8) & 0xFF);
@@ -1237,6 +1238,100 @@ CodewordInfo identifyCodeword(const Bytes& cw_data) {
 
     // Unknown codeword type
     return info;
+}
+
+// ============================================================================
+// Fixed 4-Codeword Frame Implementation
+// ============================================================================
+
+Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate) {
+    using namespace fec;
+
+    size_t bytes_per_cw = getBytesPerCodeword(rate);
+    size_t total_info_bytes = FIXED_FRAME_CODEWORDS * bytes_per_cw;
+
+    // Pad frame data to exactly 4 CWs worth of info bytes
+    Bytes padded = frame_data;
+    if (padded.size() < total_info_bytes) {
+        padded.resize(total_info_bytes, 0);
+    } else if (padded.size() > total_info_bytes) {
+        padded.resize(total_info_bytes);  // Truncate (caller should have chunked)
+    }
+
+    // Split into 4 info chunks and LDPC encode each
+    LDPCEncoder encoder(rate);
+    std::vector<std::vector<uint8_t>> coded_codewords;
+    coded_codewords.reserve(FIXED_FRAME_CODEWORDS);
+
+    for (int cw = 0; cw < FIXED_FRAME_CODEWORDS; ++cw) {
+        // Extract info bytes for this CW
+        Bytes info_chunk(padded.begin() + cw * bytes_per_cw,
+                         padded.begin() + (cw + 1) * bytes_per_cw);
+
+        // LDPC encode → 81 bytes (648 bits)
+        auto coded = encoder.encode(info_chunk);
+        coded_codewords.push_back(std::move(coded));
+    }
+
+    // Apply frame-level interleaving
+    return FrameInterleaver::interleave(coded_codewords);
+}
+
+CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate) {
+    using namespace fec;
+
+    CodewordStatus status;
+    status.decoded.resize(FIXED_FRAME_CODEWORDS, false);
+    status.data.resize(FIXED_FRAME_CODEWORDS);
+
+    // Check we have enough soft bits
+    if (interleaved_soft.size() < FrameInterleaver::TOTAL_FRAME_BITS) {
+        return status;  // All failed - not enough data
+    }
+
+    // Deinterleave to restore original CW order
+    auto cw_soft_bits = FrameInterleaver::deinterleave(interleaved_soft);
+
+    // Decode each codeword
+    LDPCDecoder decoder(rate);
+    size_t bytes_per_cw = getBytesPerCodeword(rate);
+
+    for (int cw = 0; cw < FIXED_FRAME_CODEWORDS; ++cw) {
+        auto decoded = decoder.decodeSoft(cw_soft_bits[cw]);
+        bool success = decoder.lastDecodeSuccess();
+
+        status.decoded[cw] = success;
+        if (success && decoded.size() >= bytes_per_cw) {
+            // Take exactly bytes_per_cw bytes
+            status.data[cw].assign(decoded.begin(), decoded.begin() + bytes_per_cw);
+        }
+    }
+
+    return status;
+}
+
+DataFrame makeFixedDataFrame(const std::string& src, const std::string& dst,
+                              uint16_t seq, const Bytes& payload, CodeRate rate) {
+    size_t capacity = getFixedFramePayloadCapacity(rate);
+
+    // Truncate or use as-is
+    Bytes actual_payload = payload;
+    if (actual_payload.size() > capacity) {
+        actual_payload.resize(capacity);
+    }
+
+    // Create frame with explicit total_cw = 4
+    DataFrame frame;
+    frame.type = FrameType::DATA;
+    frame.flags = Flags::VERSION_V2;
+    frame.seq = seq;
+    frame.src_hash = hashCallsign(src);
+    frame.dst_hash = hashCallsign(dst);
+    frame.payload = actual_payload;
+    frame.payload_len = static_cast<uint16_t>(actual_payload.size());
+    frame.total_cw = FIXED_FRAME_CODEWORDS;  // Always 4
+
+    return frame;
 }
 
 } // namespace v2

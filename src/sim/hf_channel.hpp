@@ -107,11 +107,19 @@ public:
         Samples output(input.size());
 
         // Calculate input RMS for SNR normalization
+        // IMPORTANT: Only count non-zero samples to match addNoise() behavior
+        // This ensures consistent SNR between AWGN and fading channels
         float input_power = 0.0f;
+        size_t signal_samples = 0;
         for (size_t i = 0; i < input.size(); ++i) {
-            input_power += input[i] * input[i];
+            if (std::abs(input[i]) > 1e-6f) {
+                input_power += input[i] * input[i];
+                signal_samples++;
+            }
         }
-        float input_rms = std::sqrt(input_power / input.size());
+        float input_rms = (signal_samples > 0)
+            ? std::sqrt(input_power / signal_samples)
+            : 0.1f;  // Default if no signal
 
         // Normalize noise to achieve correct SNR relative to actual signal power
         // SNR = 10*log10(Ps/Pn), so Pn = Ps * 10^(-SNR/10)

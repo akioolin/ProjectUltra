@@ -15,6 +15,7 @@
 #include "streaming_decoder.hpp"
 #include "waveform/ofdm_cox_waveform.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
+#include "fec/frame_interleaver.hpp"  // Frame-level interleaving for 4-CW frames
 #include "ultra/logging.hpp"
 #include <algorithm>
 #include <chrono>
@@ -878,73 +879,137 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     result.cfo_hz = cfo;
 
     constexpr size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;
+    constexpr size_t FRAME_INTERLEAVE_BITS = fec::FrameInterleaver::TOTAL_FRAME_BITS;  // 2592
+
     if (soft_bits.size() < LDPC_BLOCK) return result;
-
-    bool use_interleave = false;  // DISABLED FOR TESTING
-
-    std::vector<float> cw0(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
-    if (use_interleave && interleaver_) {
-        cw0 = interleaver_->deinterleave(cw0);
-    }
 
     CodeRate rate = connected_ ? code_rate_ : CodeRate::R1_4;
     size_t bytes_per_cw = v2::getBytesPerCodeword(rate);
     codec_->setRate(rate);
 
-    auto [ok0, data0] = codec_->decode(cw0);
-    if (!ok0) {
-        LOG_MODEM(DEBUG, "[%s] LDPC decode failed for cw0 (%zu soft bits)", log_prefix_.c_str(), soft_bits.size());
-        result.codewords_failed++;
-        return result;
+    // ========================================================================
+    // "Try Both" Strategy for Frame Interleaving
+    // ========================================================================
+    // 1. First, try to decode first 648 bits as non-interleaved CW0
+    // 2. If it's a valid 1-CW control frame → done
+    // 3. If decode fails OR it's a 4-CW frame → try frame-interleaved decode
+    // ========================================================================
+
+    // Step 1: Try to decode CW0 without deinterleaving
+    std::vector<float> cw0_bits(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
+    auto [ok0, data0] = codec_->decode(cw0_bits);
+
+    bool try_frame_interleave = false;
+
+    if (ok0 && data0.size() >= 2 && data0[0] == 0x55 && data0[1] == 0x4C) {
+        // CW0 decoded and has valid magic - check if it's a control frame
+        if (data0.size() > bytes_per_cw) data0.resize(bytes_per_cw);
+
+        auto hdr = v2::parseHeader(data0);
+        if (hdr.valid) {
+            result.frame_type = hdr.type;
+
+            if (hdr.total_cw == 1) {
+                // === Control frame (1 CW) - no frame interleaving ===
+                LOG_MODEM(DEBUG, "[%s] Control frame decoded (1 CW)", log_prefix_.c_str());
+                result.success = true;
+                result.codewords_ok = 1;
+                result.frame_data = data0;
+                return result;
+            } else if (hdr.total_cw == v2::FIXED_FRAME_CODEWORDS) {
+                // === Multi-CW frame with 4 CWs - likely frame interleaved ===
+                LOG_MODEM(DEBUG, "[%s] Header shows 4 CWs - trying frame deinterleave", log_prefix_.c_str());
+                try_frame_interleave = true;
+            } else {
+                // === Multi-CW frame with != 4 CWs - old format, no frame interleaving ===
+                // Fall through to legacy decode path
+                LOG_MODEM(DEBUG, "[%s] Multi-CW frame (%d CWs) - legacy decode", log_prefix_.c_str(), hdr.total_cw);
+            }
+        }
+    } else {
+        // CW0 decode failed or invalid magic - might be interleaved
+        LOG_MODEM(DEBUG, "[%s] CW0 decode failed/invalid - trying frame deinterleave", log_prefix_.c_str());
+        try_frame_interleave = true;
     }
-    if (data0.size() > bytes_per_cw) data0.resize(bytes_per_cw);
-    result.codewords_ok++;
 
-    if (data0.size() < 2 || data0[0] != 0x55 || data0[1] != 0x4C) {
-        LOG_MODEM(DEBUG, "[%s] Invalid header: size=%zu, [0]=0x%02X, [1]=0x%02X",
-                  log_prefix_.c_str(), data0.size(), data0.size()>0 ? data0[0] : 0, data0.size()>1 ? data0[1] : 0);
-        return result;
-    }
+    // Step 2: Try frame-interleaved decode if needed
+    if (try_frame_interleave && soft_bits.size() >= FRAME_INTERLEAVE_BITS) {
+        LOG_MODEM(DEBUG, "[%s] Attempting 4-CW frame deinterleave decode", log_prefix_.c_str());
 
-    auto hdr = v2::parseHeader(data0);
-    if (!hdr.valid) return result;
+        // Use decodeFixedFrame which deinterleaves then decodes
+        auto cw_status = v2::decodeFixedFrame(soft_bits, rate);
 
-    result.frame_type = hdr.type;
-    int total_cw = hdr.total_cw;
-    int avail_cw = static_cast<int>(soft_bits.size() / LDPC_BLOCK);
-
-    if (avail_cw < total_cw) {
-        result.frame_data = data0;
-        return result;
-    }
-
-    v2::CodewordStatus cw_status;
-    cw_status.decoded.resize(total_cw, false);
-    cw_status.data.resize(total_cw);
-    cw_status.decoded[0] = true;
-    cw_status.data[0] = data0;
-
-    for (int i = 1; i < total_cw; i++) {
-        size_t off = i * LDPC_BLOCK;
-        std::vector<float> bits(soft_bits.begin() + off, soft_bits.begin() + off + LDPC_BLOCK);
-        if (use_interleave && interleaver_) {
-            bits = interleaver_->deinterleave(bits);
+        result.codewords_ok = 0;
+        result.codewords_failed = 0;
+        for (int i = 0; i < v2::FIXED_FRAME_CODEWORDS; ++i) {
+            if (cw_status.decoded[i]) {
+                result.codewords_ok++;
+            } else {
+                result.codewords_failed++;
+            }
         }
 
-        auto [ok, data] = codec_->decode(bits);
-        if (ok && data.size() >= bytes_per_cw) {
-            data.resize(bytes_per_cw);
-            cw_status.decoded[i] = true;
-            cw_status.data[i] = data;
-            result.codewords_ok++;
+        if (cw_status.allSuccess()) {
+            result.success = true;
+            result.frame_data = cw_status.reassemble();
+
+            // Parse header to get frame type
+            if (result.frame_data.size() >= 3) {
+                result.frame_type = static_cast<v2::FrameType>(result.frame_data[2]);
+            }
+
+            LOG_MODEM(INFO, "[%s] Frame deinterleave decode SUCCESS (%d/%d CWs)",
+                      log_prefix_.c_str(), result.codewords_ok, v2::FIXED_FRAME_CODEWORDS);
+            return result;
         } else {
-            result.codewords_failed++;
+            LOG_MODEM(DEBUG, "[%s] Frame deinterleave decode FAILED (%d/%d CWs)",
+                      log_prefix_.c_str(), result.codewords_ok, v2::FIXED_FRAME_CODEWORDS);
         }
     }
 
-    if (cw_status.allSuccess()) {
-        result.success = true;
-        result.frame_data = cw_status.reassemble();
+    // Step 3: Legacy decode path (non-interleaved multi-CW frames)
+    // This handles old-format frames or when frame interleaving is disabled
+    if (ok0 && data0.size() >= 2 && data0[0] == 0x55 && data0[1] == 0x4C) {
+        if (data0.size() > bytes_per_cw) data0.resize(bytes_per_cw);
+        result.codewords_ok = 1;
+
+        auto hdr = v2::parseHeader(data0);
+        if (!hdr.valid) return result;
+
+        result.frame_type = hdr.type;
+        int total_cw = hdr.total_cw;
+        int avail_cw = static_cast<int>(soft_bits.size() / LDPC_BLOCK);
+
+        if (avail_cw < total_cw) {
+            result.frame_data = data0;
+            return result;
+        }
+
+        v2::CodewordStatus cw_status;
+        cw_status.decoded.resize(total_cw, false);
+        cw_status.data.resize(total_cw);
+        cw_status.decoded[0] = true;
+        cw_status.data[0] = data0;
+
+        for (int i = 1; i < total_cw; i++) {
+            size_t off = i * LDPC_BLOCK;
+            std::vector<float> bits(soft_bits.begin() + off, soft_bits.begin() + off + LDPC_BLOCK);
+
+            auto [ok, data] = codec_->decode(bits);
+            if (ok && data.size() >= bytes_per_cw) {
+                data.resize(bytes_per_cw);
+                cw_status.decoded[i] = true;
+                cw_status.data[i] = data;
+                result.codewords_ok++;
+            } else {
+                result.codewords_failed++;
+            }
+        }
+
+        if (cw_status.allSuccess()) {
+            result.success = true;
+            result.frame_data = cw_status.reassemble();
+        }
     }
 
     return result;

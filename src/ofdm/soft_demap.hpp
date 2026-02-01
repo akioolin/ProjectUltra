@@ -200,7 +200,19 @@ inline std::array<float, 2> demapDQPSK(Complex sym, Complex prev_sym, float nois
         return llrs;  // Neutral LLRs for weak signal
     }
 
-    float scale = 2.0f * signal_power / noise_var;
+    // LLR scaling for DQPSK soft demapping
+    //
+    // Theoretical optimal: scale = 2 * SNR (for pure AWGN, perfect sync)
+    // Practical choice: scale = 2 * sqrt(SNR) (conservative, robust)
+    //
+    // We use sqrt(SNR) because:
+    // 1. Accounts for unmodeled impairments (timing, CFO residual, CE errors)
+    // 2. Robust to noise_var estimation errors (noise_var is hardcoded at 0.1)
+    // 3. Prevents overconfident wrong decisions that LDPC can't correct
+    //
+    // This "LLR compression" is common in real systems with uncertain channels.
+    float snr_linear = signal_power / noise_var;
+    float scale = 2.0f * std::sqrt(snr_linear);
     static const float pi = 3.14159265358979f;
 
     // bit1 (MSB): use sin(phase + π/4) as soft metric

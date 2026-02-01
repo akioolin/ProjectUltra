@@ -56,6 +56,7 @@ add_library(ultra_core STATIC
     src/fec/ldpc_decoder.cpp
     src/fec/ldpc_codec.cpp
     src/fec/codec_factory.cpp
+    src/fec/frame_interleaver.cpp
     src/framing/frame_builder.cpp
     src/arq/arq_controller.cpp
     src/dsp/fft.cpp
@@ -245,6 +246,11 @@ if(ULTRA_BUILD_TOOLS)
     add_executable(test_mc_dpsk_frame tools/test_mc_dpsk_frame.cpp)
     target_include_directories(test_mc_dpsk_frame PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test_mc_dpsk_frame PRIVATE ultra_core)
+
+    # Frame interleaver test (4-CW fixed frames with burst error protection)
+    add_executable(test_frame_interleaver tools/test_frame_interleaver.cpp)
+    target_include_directories(test_frame_interleaver PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_frame_interleaver PRIVATE ultra_core)
 
     # OFDM with chirp sync + pilots test (coherent QPSK for fading channels)
     add_executable(test_ofdm_chirp_pilots tools/test_ofdm_chirp_pilots.cpp)
