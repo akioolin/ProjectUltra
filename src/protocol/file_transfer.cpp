@@ -116,7 +116,8 @@ bool FileTransferController::startSend(const std::string& filepath) {
 
     tx_offset_ = 0;
     tx_metadata_sent_ = false;
-    tx_waiting_ack_ = false;
+    chunks_sent_ = 0;
+    chunks_acked_ = 0;
     state_ = FileTransferState::SENDING;
 
     notifyProgress();
@@ -124,20 +125,24 @@ bool FileTransferController::startSend(const std::string& filepath) {
 }
 
 Bytes FileTransferController::getNextChunk() {
-    if (state_ != FileTransferState::SENDING || tx_waiting_ack_) {
+    if (state_ != FileTransferState::SENDING) {
         return {};
     }
+
+    // Note: We no longer block on tx_waiting_ack_ since Selective Repeat ARQ
+    // handles multiple frames in flight. The ARQ window controls pacing.
 
     Bytes payload;
 
     if (!tx_metadata_sent_) {
         payload = buildMetadataPayload();
-    } else {
+        tx_metadata_sent_ = true;  // Mark sent immediately (ARQ handles retries)
+    } else if (tx_offset_ < tx_data_.size()) {
         payload = buildDataPayload();
     }
 
     if (!payload.empty()) {
-        tx_waiting_ack_ = true;
+        chunks_sent_++;
     }
 
     return payload;
@@ -155,15 +160,12 @@ void FileTransferController::onChunkAcked() {
         return;
     }
 
-    tx_waiting_ack_ = false;
-
-    if (!tx_metadata_sent_) {
-        tx_metadata_sent_ = true;
-    }
+    // Track how many chunks have been ACKed for progress
+    chunks_acked_++;
 
     notifyProgress();
 
-    if (!hasMoreChunks()) {
+    if (!hasMoreChunks() && !hasPendingChunks()) {
         state_ = FileTransferState::COMPLETE;
 
         if (on_sent_) {
@@ -461,7 +463,8 @@ void FileTransferController::resetTxState() {
     tx_offset_ = 0;
     tx_flags_ = 0;
     tx_metadata_sent_ = false;
-    tx_waiting_ack_ = false;
+    chunks_sent_ = 0;
+    chunks_acked_ = 0;
     state_ = FileTransferState::IDLE;
 }
 

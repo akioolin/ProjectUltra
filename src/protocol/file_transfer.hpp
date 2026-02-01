@@ -85,6 +85,9 @@ public:
     // Check if there are more chunks to send
     bool hasMoreChunks() const;
 
+    // Check if there are chunks sent but not yet ACKed
+    bool hasPendingChunks() const { return chunks_sent_ > chunks_acked_; }
+
     // Called when the current chunk is ACKed
     void onChunkAcked();
 
@@ -128,7 +131,8 @@ private:
     uint32_t tx_offset_ = 0;   // Current offset in tx_data_
     uint8_t tx_flags_ = 0;     // FileFlags
     bool tx_metadata_sent_ = false;
-    bool tx_waiting_ack_ = false;
+    uint32_t chunks_sent_ = 0;      // Chunks queued to ARQ (for window tracking)
+    uint32_t chunks_acked_ = 0;     // Chunks confirmed by ARQ
 
     // RX state
     std::string rx_dir_ = ".";

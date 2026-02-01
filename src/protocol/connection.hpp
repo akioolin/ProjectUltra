@@ -2,6 +2,7 @@
 
 #include "frame_v2.hpp"
 #include "arq.hpp"
+#include "selective_repeat_arq.hpp"
 #include "file_transfer.hpp"
 #include "ultra/types.hpp"
 #include <functional>
@@ -242,8 +243,8 @@ private:
     static constexpr uint32_t MODE_CHANGE_TIMEOUT_MS = 45000;  // 45s for DPSK round trip
     static constexpr int MODE_CHANGE_MAX_RETRIES = 2;
 
-    // ARQ for reliable data transfer
-    StopAndWaitARQ arq_;
+    // ARQ for reliable data transfer (Selective Repeat for higher throughput)
+    SelectiveRepeatARQ arq_;
 
     // File transfer controller
     FileTransferController file_transfer_;

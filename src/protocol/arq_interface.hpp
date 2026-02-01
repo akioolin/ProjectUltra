@@ -17,13 +17,14 @@ const char* arqModeToString(ARQMode mode);
 
 // ARQ configuration (shared across modes)
 struct ARQConfig {
-    uint32_t ack_timeout_ms = 45000;    // Time to wait for ACK (45s for DPSK round trip)
+    uint32_t ack_timeout_ms = 8000;     // Time to wait for ACK (8s for faster retries on fading)
     uint32_t turnaround_ms = 500;       // TX to RX switch time
-    int max_retries = 3;                // Max retransmission attempts
+    int max_retries = 10;               // Max retransmission attempts (more retries for fading)
 
     // Selective Repeat specific
     size_t window_size = 4;             // TX window size (SR only)
     size_t rx_buffer_size = 8;          // RX reorder buffer size (SR only)
+    uint32_t sack_delay_ms = 2000;      // Delay before sending SACK (wait for burst to complete)
 };
 
 // ARQ statistics (shared across modes)

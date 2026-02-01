@@ -286,17 +286,18 @@ void Connection::sendNextFileChunk() {
         return;
     }
 
-    if (!arq_.isReadyToSend()) {
-        return;
-    }
+    // Fill the ARQ window with as many chunks as possible
+    // Selective Repeat ARQ can have multiple frames in flight
+    while (arq_.isReadyToSend() && file_transfer_.hasMoreChunks()) {
+        Bytes chunk = file_transfer_.getNextChunk();
+        if (chunk.empty()) {
+            break;
+        }
 
-    Bytes chunk = file_transfer_.getNextChunk();
-    if (chunk.empty()) {
-        return;
+        // MORE_FRAG indicates more data remaining in file (not burst)
+        uint8_t flags = file_transfer_.hasMoreChunks() ? v2::Flags::MORE_FRAG : v2::Flags::NONE;
+        arq_.sendDataWithFlags(chunk, flags);
     }
-
-    uint8_t flags = file_transfer_.hasMoreChunks() ? v2::Flags::MORE_FRAG : v2::Flags::NONE;
-    arq_.sendDataWithFlags(chunk, flags);
 }
 
 // =============================================================================

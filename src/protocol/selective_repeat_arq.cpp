@@ -151,11 +151,15 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
             LOG_MODEM(DEBUG, "SR-ARQ: Duplicate DATA seq=%d", seq);
         }
 
-        sendSack();
+        // Delayed SACK for half-duplex: wait for burst to complete
+        // Reset timer on each frame received - only send SACK after silence
+        sack_pending_ = true;
+        sack_timer_ms_ = config_.sack_delay_ms;
 
     } else {
         LOG_MODEM(WARN, "SR-ARQ: DATA seq=%d outside window [%d, %d)",
                   seq, rx_base_seq_, (rx_base_seq_ + config_.window_size) & 0xFFFF);
+        // Out-of-window: send SACK immediately to help sender recover
         sendSack();
     }
 }
@@ -195,6 +199,7 @@ void SelectiveRepeatARQ::handleNackFrame(const v2::ControlFrame& frame) {
 }
 
 void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
+    // TX side: check for timeouts and retransmit
     for (size_t i = 0; i < config_.window_size; i++) {
         size_t slot = seqToSlot((tx_base_seq_ + i) & 0xFFFF);
         TXSlot& s = tx_window_[slot];
@@ -206,6 +211,18 @@ void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
             } else {
                 s.timeout_ms -= elapsed_ms;
             }
+        }
+    }
+
+    // RX side: delayed SACK for half-duplex burst handling
+    if (sack_pending_) {
+        if (elapsed_ms >= sack_timer_ms_) {
+            LOG_MODEM(DEBUG, "SR-ARQ: SACK timer expired, sending SACK");
+            sendSack();
+            sack_pending_ = false;
+            sack_timer_ms_ = 0;
+        } else {
+            sack_timer_ms_ -= elapsed_ms;
         }
     }
 }
@@ -357,6 +374,9 @@ void SelectiveRepeatARQ::reset() {
 
     last_rx_more_data_ = false;
     last_rx_flags_ = 0;
+
+    sack_pending_ = false;
+    sack_timer_ms_ = 0;
 
     LOG_MODEM(DEBUG, "SR-ARQ: Reset");
 }

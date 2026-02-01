@@ -61,6 +61,10 @@ public:
 
     void reset() override;
 
+    // Set the code rate for DATA frame total_cw calculation
+    void setCodeRate(CodeRate rate) { code_rate_ = rate; }
+    CodeRate getCodeRate() const { return code_rate_; }
+
 private:
     // TX state per frame in window
     struct TXSlot {
@@ -84,6 +88,7 @@ private:
     static constexpr size_t MAX_WINDOW = 8;
 
     ARQConfig config_;
+    CodeRate code_rate_ = CodeRate::R1_4;  // Default R1/4, updated when connected
 
     // Callsigns
     std::string local_call_;
@@ -100,6 +105,10 @@ private:
     uint16_t rx_base_seq_ = 0;      // Next expected sequence
     bool last_rx_more_data_ = false;
     uint8_t last_rx_flags_ = 0;
+
+    // Delayed SACK for half-duplex (wait for burst to complete)
+    bool sack_pending_ = false;     // SACK waiting to be sent
+    uint32_t sack_timer_ms_ = 0;    // Time until SACK is sent
 
     // Statistics
     ARQStats stats_;
