@@ -21,6 +21,42 @@ struct WaveformRecommendation {
     float estimated_throughput_bps;
 };
 
+// Shared helper: Select code rate for OFDM modes based on SNR and fading
+// This is the SINGLE SOURCE OF TRUTH for rate selection thresholds.
+// Both recommendWaveformAndRate() and recommendDataMode() use this.
+//
+// Thresholds (2026-02-01):
+//   AWGN (< 0.10):         R3/4 @ SNR >= 15, R2/3 @ SNR >= 10
+//   Good (0.10-0.25):      R2/3 @ SNR >= 14, R1/2 @ SNR >= 10
+//   Light-mod (0.25-0.30): R1/2 @ SNR >= 12
+//   Moderate (0.30-0.50):  R1/4 @ SNR >= 10 (pilots not enough, need max LDPC)
+//   Heavy (>= 0.50):       R1/4 only
+inline CodeRate selectOFDMCodeRate(float snr_db, float fading_index) {
+    // AWGN (no fading): Highest rates
+    if (fading_index < 0.10f) {
+        if (snr_db >= 15.0f) return CodeRate::R3_4;
+        if (snr_db >= 10.0f) return CodeRate::R2_3;
+        return CodeRate::R1_4;  // Fallback
+    }
+    // Good fading (0.10-0.25): R2/3 or R1/2
+    if (fading_index < 0.25f) {
+        if (snr_db >= 14.0f) return CodeRate::R2_3;
+        if (snr_db >= 10.0f) return CodeRate::R1_2;
+        return CodeRate::R1_4;  // Fallback
+    }
+    // Light-moderate fading (0.25-0.30): R1/2
+    if (fading_index < 0.30f) {
+        if (snr_db >= 12.0f) return CodeRate::R1_2;
+        return CodeRate::R1_4;  // Fallback
+    }
+    // Moderate fading (0.30-0.50): R1/4 only (pilots not reliable enough)
+    if (fading_index < 0.50f) {
+        return CodeRate::R1_4;
+    }
+    // Heavy fading (>= 0.50): R1/4 only
+    return CodeRate::R1_4;
+}
+
 // Recommend waveform and rate based on SNR and fading index
 //
 // Key findings from testing (2026-01-30) + adaptive pilots update (2026-02-01):
@@ -105,19 +141,11 @@ inline WaveformRecommendation recommendWaveformAndRate(float snr_db, float fadin
 
 // Recommend modulation and code rate for data mode within an established connection
 // This is used after waveform negotiation to set the data transmission parameters.
-// Should be consistent with recommendWaveformAndRate() thresholds.
+// Uses selectOFDMCodeRate() for rate selection to stay consistent with recommendWaveformAndRate().
 //
-// For OFDM modes (OFDM_CHIRP, OFDM_COX):
-//   - Always use DQPSK (differential for phase stability)
-//   - Code rate based on SNR AND fading index
-//   - With adaptive pilots (enabled for R1/2+), higher rates work on fading:
-//     * R1/4 (0 pilots): Heavy fading (>= 0.45) - max LDPC redundancy
-//     * R1/2 (6 pilots): Moderate fading (0.25-0.45) at SNR >= 10 dB
-//     * R2/3 (6 pilots): Good fading (0.10-0.25) at SNR >= 12 dB
-//     * R3/4 (4 pilots): AWGN (< 0.10) at SNR >= 15 dB
-//
-// For MC-DPSK:
-//   - Always DQPSK R1/4 (fixed for robustness)
+// For OFDM modes: DQPSK with rate from selectOFDMCodeRate()
+// Special case: D8PSK R1/2 at SNR >= 20 + AWGN (experimental, +50% throughput)
+// For MC-DPSK: Always DQPSK R1/4
 //
 inline void recommendDataMode(float snr_db, WaveformMode waveform,
                                Modulation& mod, CodeRate& rate, float fading_index = 0.0f) {
@@ -128,48 +156,18 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
         return;
     }
 
-    // OFDM modes with adaptive pilots
-    // Pilots enable per-symbol channel tracking, allowing higher rates on fading
-
+    // OFDM modes: use shared rate selection helper
     mod = Modulation::DQPSK;  // Always differential for HF phase stability
 
-    // AWGN (fading < 0.10): Use highest rates
-    if (fading_index < 0.10f) {
-        if (snr_db >= 20.0f) {
-            mod = Modulation::D8PSK;  // 3 bits/carrier (+50% vs DQPSK)
-            rate = CodeRate::R1_2;    // ~5.3 kbps with D8PSK
-        } else if (snr_db >= 15.0f) {
-            rate = CodeRate::R3_4;    // 4 pilots, ~3.5 kbps
-        } else if (snr_db >= 12.0f) {
-            rate = CodeRate::R2_3;    // 6 pilots, ~3.0 kbps
-        } else if (snr_db >= 10.0f) {
-            rate = CodeRate::R1_2;    // 6 pilots, ~2.3 kbps
-        } else {
-            rate = CodeRate::R1_4;    // 0 pilots, max robustness
-        }
+    // Special case: D8PSK at very high SNR + AWGN (experimental)
+    if (fading_index < 0.10f && snr_db >= 20.0f) {
+        mod = Modulation::D8PSK;  // 3 bits/carrier (+50% vs DQPSK)
+        rate = CodeRate::R1_2;    // ~5.3 kbps with D8PSK
+        return;
     }
-    // Good fading (0.10-0.25): R2/3 with pilots for channel tracking
-    else if (fading_index < 0.25f) {
-        if (snr_db >= 14.0f) {
-            rate = CodeRate::R2_3;    // 6 pilots, ~3.0 kbps
-        } else if (snr_db >= 10.0f) {
-            rate = CodeRate::R1_2;    // 6 pilots, ~2.3 kbps
-        } else {
-            rate = CodeRate::R1_4;    // 0 pilots, fallback
-        }
-    }
-    // Moderate fading (0.25-0.45): R1/2 with pilots
-    else if (fading_index < 0.45f) {
-        if (snr_db >= 10.0f) {
-            rate = CodeRate::R1_2;    // 6 pilots, ~2.3 kbps
-        } else {
-            rate = CodeRate::R1_4;    // 0 pilots, fallback
-        }
-    }
-    // Heavy fading (>= 0.45): R1/4 only (no pilots, max LDPC protection)
-    else {
-        rate = CodeRate::R1_4;        // 0 pilots, ~1.3 kbps
-    }
+
+    // Use shared helper for rate selection (SINGLE SOURCE OF TRUTH)
+    rate = selectOFDMCodeRate(snr_db, fading_index);
 }
 
 } // namespace protocol
