@@ -359,16 +359,30 @@ void StreamingDecoder::searchForSync() {
     // When connected, try light sync detection first (training only, no chirp)
     // This matches the TX side which uses generateDataPreamble() when connected
     // If light sync fails, fall back to full chirp sync (handles first frame or resync)
+    //
+    // IMPORTANT: Light sync can produce false positives within a chirp signal (corr ~0.2-0.25)
+    // Real training symbols have autocorrelation ~0.3+ even with CFO up to 30 Hz.
+    // Use 0.28 threshold to reject chirp false positives but accept training with CFO.
+    constexpr float LIGHT_SYNC_CONFIDENCE = 0.28f;
+
     if (connected_ && waveform_->supportsDataPreamble()) {
         float known_cfo = last_cfo_.load();
         found = waveform_->detectDataSync(
             SampleSpan(search_buffer.data(), search_buffer.size()),
             sync_result, known_cfo, CORR_DETECT_THRESHOLD);
+
+        // Check confidence - low correlation likely means false positive in a chirp signal
+        if (found && sync_result.correlation < LIGHT_SYNC_CONFIDENCE) {
+            LOG_MODEM(INFO, "[%s] DATA sync low confidence (corr=%.2f < %.2f), falling back to chirp",
+                      log_prefix_.c_str(), sync_result.correlation, LIGHT_SYNC_CONFIDENCE);
+            found = false;  // Reject and try chirp sync instead
+        }
+
         if (found) {
-            LOG_MODEM(INFO, "[%s] DATA sync detected (training only, known CFO=%.1f Hz)",
-                      log_prefix_.c_str(), known_cfo);
+            LOG_MODEM(INFO, "[%s] DATA sync detected (training only, known CFO=%.1f Hz, corr=%.2f)",
+                      log_prefix_.c_str(), known_cfo, sync_result.correlation);
         } else {
-            // Light sync failed - try full chirp sync (handles first frame, resync after errors)
+            // Light sync failed or low confidence - try full chirp sync
             found = waveform_->detectSync(
                 SampleSpan(search_buffer.data(), search_buffer.size()),
                 sync_result, CORR_DETECT_THRESHOLD);
