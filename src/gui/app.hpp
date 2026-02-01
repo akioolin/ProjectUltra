@@ -84,6 +84,7 @@ private:
     char file_path_buffer_[512] = "";
     std::string last_received_file_;  // Path of last received file
     bool file_browser_open_ = false;
+    int last_progress_milestone_ = 0;  // Last logged milestone (0, 25, 50, 75)
 
     // ========================================
     // Developer Options

@@ -379,10 +379,22 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
 
     // File transfer callbacks
     protocol_.setFileProgressCallback([this](const protocol::FileTransferProgress& p) {
-        // Progress is displayed in renderOperateTab()
+        // Log progress milestones (25%, 50%, 75%)
+        int pct = static_cast<int>(p.percentage());
+        int milestone = (pct / 25) * 25;  // Round down to 25, 50, 75
+        if (milestone > 0 && milestone < 100 && milestone > last_progress_milestone_) {
+            last_progress_milestone_ = milestone;
+            std::string msg = "[FILE] " + std::string(p.is_sending ? "TX" : "RX") +
+                              " " + std::to_string(p.transferred_bytes) + "/" +
+                              std::to_string(p.total_bytes) + " bytes (" +
+                              std::to_string(milestone) + "%)";
+            rx_log_.push_back(msg);
+            if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
+        }
     });
 
     protocol_.setFileReceivedCallback([this](const std::string& path, bool success) {
+        last_progress_milestone_ = 0;  // Reset for next transfer
         std::string msg;
         if (success) {
             msg = "[FILE] Received: " + path;
@@ -397,6 +409,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     });
 
     protocol_.setFileSentCallback([this](bool success, const std::string& error) {
+        last_progress_milestone_ = 0;  // Reset for next transfer
         std::string msg;
         if (success) {
             msg = "[FILE] Transfer complete";
@@ -1509,7 +1522,17 @@ void App::renderOperateTab() {
         ImGui::SameLine();
         ImGui::ProgressBar(progress.percentage() / 100.0f, ImVec2(100, 16));
         ImGui::SameLine();
-        ImGui::Text("%.0f%%", progress.percentage());
+        // Show bytes transferred / total with appropriate units
+        if (progress.total_bytes >= 1024) {
+            ImGui::Text("%.1f/%.1f KB (%.0f%%)",
+                progress.transferred_bytes / 1024.0f,
+                progress.total_bytes / 1024.0f,
+                progress.percentage());
+        } else {
+            ImGui::Text("%u/%u B (%.0f%%)",
+                progress.transferred_bytes, progress.total_bytes,
+                progress.percentage());
+        }
         ImGui::SameLine();
         if (ImGui::SmallButton("Cancel")) protocol_.cancelFileTransfer();
     } else {
@@ -1525,6 +1548,7 @@ void App::renderOperateTab() {
                              strlen(file_path_buffer_) > 0;
         ImGui::BeginDisabled(!can_send_file);
         if (ImGui::Button("Send##file", ImVec2(60, 0))) {
+            last_progress_milestone_ = 0;  // Reset milestone tracker
             if (protocol_.sendFile(file_path_buffer_)) {
                 rx_log_.push_back("[FILE] Sending: " + std::string(file_path_buffer_));
             } else {
