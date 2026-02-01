@@ -214,21 +214,13 @@ private:
 
     // TX chain - OFDM
     fec::CodecPtr encoder_;  // ICodec for encoding (currently LDPC)
-    std::unique_ptr<OFDMModulator> ofdm_modulator_;
-
-    // TX chain - OTFS
-    std::unique_ptr<OTFSModulator> otfs_modulator_;
-    OTFSConfig otfs_config_;
+    // NOTE: TX uses active_tx_waveform_ (IWaveform interface) - no separate modulator
 
     // RX chain - OFDM
     fec::CodecPtr decoder_;  // ICodec for decoding (currently LDPC) - mostly unused, StreamingDecoder handles RX
-    std::unique_ptr<OFDMDemodulator> ofdm_demodulator_;
+    // NOTE: RX uses streaming_decoder_ (which has its own waveform) - no separate demodulator
 
-    // RX chain - OTFS
-    std::unique_ptr<OTFSDemodulator> otfs_demodulator_;
-
-    // DPSK demodulator (single carrier, for very low SNR mode switching)
-    std::unique_ptr<DPSKDemodulator> dpsk_demodulator_;
+    // DPSK config (used by StreamingDecoder, kept here for API compatibility)
     DPSKConfig dpsk_config_;
 
     // Multi-Carrier DPSK config (actual modulation done by IWaveform via StreamingDecoder)
@@ -242,19 +234,7 @@ private:
     std::unique_ptr<IWaveform> active_tx_waveform_;
 
     // ========================================================================
-    // NEW: IWaveform + RxPipeline for Connected Mode RX
-    // ========================================================================
-    // These replace the per-waveform processRxBuffer_* methods
-    // Each waveform type has its own IWaveform instance
-    std::unique_ptr<IWaveform> rx_waveform_ofdm_;      // OFDM_COX (Schmidl-Cox)
-    std::unique_ptr<IWaveform> rx_waveform_ofdm_chirp_;// OFDM_CHIRP (Chirp + OFDM)
-    std::unique_ptr<IWaveform> rx_waveform_mc_dpsk_;   // MC-DPSK (Chirp + DPSK)
-
-    // Current active waveform for connected mode RX
-    IWaveform* active_rx_waveform_ = nullptr;
-
-    // ========================================================================
-    // NEW: StreamingDecoder (replaces RxPipeline + acquisition thread)
+    // StreamingDecoder (primary RX path)
     // ========================================================================
     // StreamingDecoder handles BOTH connected and disconnected modes:
     // - Circular buffer with bounded size
@@ -262,9 +242,6 @@ private:
     // - Correct IWaveform call sequence (fixes BUG-002)
     // - Thread-safe with condition variable
     std::unique_ptr<StreamingDecoder> streaming_decoder_;
-
-    // Helper to switch waveform when mode changes
-    void switchRxWaveform(protocol::WaveformMode mode);
 
     // ========================================================================
     // RX ARCHITECTURE
@@ -307,7 +284,7 @@ private:
     // Spreads consecutive LDPC bits across different OFDM symbols
     std::unique_ptr<ChannelInterleaver> channel_interleaver_;
     size_t interleaver_bits_per_symbol_ = 60;  // Default for OFDM_CHIRP (30 carriers × 2 bits DQPSK)
-    bool interleaving_enabled_ = true;
+    bool interleaving_enabled_ = false;  // DISABLED FOR TESTING
     void updateChannelInterleaver(size_t bits_per_symbol);
 
     // Audio filters

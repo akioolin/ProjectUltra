@@ -14,7 +14,7 @@ OFDMChirpWaveform::OFDMChirpWaveform() {
     config_.num_carriers = 30;
     config_.modulation = Modulation::DQPSK;  // Differential for fading
     config_.code_rate = CodeRate::R1_2;
-    config_.use_pilots = false;  // DQPSK doesn't need pilots
+    configurePilotsForCodeRate(config_.code_rate);
     initComponents();
 }
 
@@ -27,7 +27,7 @@ OFDMChirpWaveform::OFDMChirpWaveform(const ModemConfig& config)
         config_.modulation != Modulation::D8PSK) {
         config_.modulation = Modulation::DQPSK;
     }
-    config_.use_pilots = false;
+    configurePilotsForCodeRate(config_.code_rate);
     initComponents();
 }
 
@@ -66,6 +66,47 @@ WaveformCapabilities OFDMChirpWaveform::getCapabilities() const {
     return caps;
 }
 
+void OFDMChirpWaveform::configurePilotsForCodeRate(CodeRate rate) {
+    // Adaptive pilots based on code rate:
+    // - R1/4: No pilots - all carriers data, LDPC handles fading (most robust)
+    // - R1/2, R2/3: 6 pilots (every 10th carrier) for per-symbol channel tracking
+    // - R3/4: 4 pilots (every 15th carrier) for light fading/AWGN
+    //
+    // This enables higher throughput on moderate/good fading channels by providing
+    // channel tracking while using higher code rates.
+
+    // Adaptive pilots based on code rate:
+    // - R1/4: No pilots - all carriers data, LDPC handles fading (most robust)
+    // - R1/2, R2/3: 6 pilots (every 10th carrier) for per-symbol channel tracking
+    // - R3/4: 4 pilots (every 15th carrier) for light fading/AWGN
+    //
+    // NOTE: For differential modes (DQPSK), updateChannelEstimate() uses low alpha (0.1)
+    // to keep H stable between consecutive symbols, preserving the differential property.
+
+    switch (rate) {
+        case CodeRate::R3_4:
+            // 4 pilots for light fading/AWGN
+            config_.use_pilots = true;
+            config_.pilot_spacing = 15;  // ~4 pilots out of 59
+            break;
+
+        case CodeRate::R2_3:
+        case CodeRate::R1_2:
+            // 6 pilots for moderate fading
+            config_.use_pilots = true;
+            config_.pilot_spacing = 10;  // ~6 pilots out of 59
+            break;
+
+        case CodeRate::R1_4:
+        case CodeRate::R1_3:
+        default:
+            // No pilots - all carriers data (maximum LDPC redundancy handles fading)
+            config_.use_pilots = false;
+            config_.pilot_spacing = 1;
+            break;
+    }
+}
+
 void OFDMChirpWaveform::configure(Modulation mod, CodeRate rate) {
     // Only differential modulations allowed for chirp mode
     if (mod != Modulation::DBPSK && mod != Modulation::DQPSK && mod != Modulation::D8PSK) {
@@ -76,13 +117,20 @@ void OFDMChirpWaveform::configure(Modulation mod, CodeRate rate) {
 
     config_.modulation = mod;
     config_.code_rate = rate;
-    config_.use_pilots = false;
+    configurePilotsForCodeRate(rate);
 
-    // Reinitialize
+    // Reinitialize with new config
     initComponents();
 
-    LOG_MODEM(INFO, "OFDMChirpWaveform: configured for %s %s",
-              modulationToString(mod), codeRateToString(rate));
+    int pilot_count = 0;
+    if (config_.use_pilots) {
+        pilot_count = (config_.num_carriers + config_.pilot_spacing - 1) / config_.pilot_spacing;
+    }
+    int data_carriers = config_.num_carriers - pilot_count;
+
+    LOG_MODEM(INFO, "OFDMChirpWaveform: configured for %s %s (%d data, %d pilots)",
+              modulationToString(mod), codeRateToString(rate),
+              data_carriers, pilot_count);
 }
 
 void OFDMChirpWaveform::setFrequencyOffset(float cfo_hz) {
@@ -399,8 +447,26 @@ float OFDMChirpWaveform::getThroughput(CodeRate rate) const {
         default: bits_per_carrier = 2; break;
     }
 
-    // All carriers are data (no pilots for differential)
-    int data_carriers = config_.num_carriers;
+    // Calculate data carriers based on pilot configuration for the given rate
+    // Use same formula as setupCarriers() for consistency
+    int pilot_count = 0;
+    int pilot_spacing = 0;
+    switch (rate) {
+        case CodeRate::R3_4:
+            pilot_spacing = 15;
+            break;
+        case CodeRate::R2_3:
+        case CodeRate::R1_2:
+            pilot_spacing = 10;
+            break;
+        default:
+            pilot_spacing = 0;  // R1/4, R1/3: no pilots
+            break;
+    }
+    if (pilot_spacing > 0) {
+        pilot_count = (config_.num_carriers + pilot_spacing - 1) / pilot_spacing;
+    }
+    int data_carriers = config_.num_carriers - pilot_count;
 
     // Symbol rate
     float symbol_rate = static_cast<float>(config_.sample_rate) / getSamplesPerSymbol();
@@ -463,7 +529,16 @@ int OFDMChirpWaveform::getMinSamplesForFrame() const {
         default: bits_per_carrier = 2; break;
     }
 
-    int bits_per_symbol = static_cast<int>(config_.num_carriers) * bits_per_carrier;
+    // Account for pilots reducing available data carriers
+    // Use same formula as setupCarriers(): pilots at indices where idx % spacing == 0
+    // For 59 carriers, spacing 10: indices 0,10,20,30,40,50 = 6 pilots
+    int pilot_count = 0;
+    if (config_.use_pilots) {
+        pilot_count = (config_.num_carriers + config_.pilot_spacing - 1) / config_.pilot_spacing;
+    }
+    int data_carriers = static_cast<int>(config_.num_carriers) - pilot_count;
+
+    int bits_per_symbol = data_carriers * bits_per_carrier;
     int data_symbols = (648 + bits_per_symbol - 1) / bits_per_symbol;
     int data_samples = data_symbols * getSamplesPerSymbol();
 

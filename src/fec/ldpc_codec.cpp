@@ -46,7 +46,7 @@ size_t LDPCCodec::getInfoBitsForRate(CodeRate rate) {
 
 LDPCCodec::LDPCCodec(CodeRate rate)
     : rate_(rate)
-    , max_iterations_(50)
+    , max_iterations_(getRecommendedIterations(rate))
 {
     encoder_ = std::make_unique<LDPCEncoder>(rate);
     decoder_ = std::make_unique<LDPCDecoder>(rate);
@@ -66,6 +66,14 @@ void LDPCCodec::setRate(CodeRate rate) {
     rate_ = rate;
     encoder_->setRate(rate);
     decoder_->setRate(rate);
+
+    // Auto-adjust max iterations based on code rate
+    // Higher rates need more iterations for convergence
+    int recommended = getRecommendedIterations(rate);
+    if (max_iterations_ != recommended) {
+        max_iterations_ = recommended;
+        decoder_->setMaxIterations(max_iterations_);
+    }
 }
 
 CodeRate LDPCCodec::getRate() const {

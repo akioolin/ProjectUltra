@@ -286,18 +286,33 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
             phase_advance.real(), phase_advance.imag());
 
     for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
-        // With correct initial CFO phase (set in setFrequencyOffsetWithPhase), the CFO
-        // is FULLY compensated:
-        //   - Signal has phase: +2π × CFO × (training_start + n) / sr
-        //   - Correction has phase: -2π × CFO × (training_start + n) / sr
-        //   - These cancel exactly, so corrected signal = TX signal
+        // For DQPSK with pilots, the differential reference must account for
+        // per-carrier phase errors in the channel estimate.
         //
-        // This means equalized symbols equal TX symbols with NO extra phase.
-        // TX initializes dbpsk_prev_symbols to (1,0), so reference = (1,0).
+        // Equalization produces: eq = rx × conj(H_est) / |H_est|²
+        // If H_est has phase error φ (from noise, timing, etc.):
+        //   eq = TX × H_true × conj(H_est) / |H_est|²
+        //      = TX × |H_true| × e^{jθ} × |H_est| × e^{-j(θ+φ)} / |H_est|²
+        //      ≈ TX × e^{-jφ}  (approximately, when |H_true| ≈ |H_est|)
         //
-        // NOTE: phase_advance was needed when CFO correction started at 0 instead of
-        // the accumulated phase. With correct initial phase, no compensation needed.
-        lts_carrier_phases[i] = Complex(1.0f, 0.0f);
+        // For differential decoding: diff = eq[n] × conj(ref)
+        // If ref = (1,0), then diff = TX × e^{-jφ} which has the wrong phase!
+        //
+        // Fix: Set ref to match the phase error that will appear in equalized symbols.
+        // ref[i] = unit_phase(H_est[i])^* = conj(H_est[i]) / |H_est[i]|
+        //
+        // Then: diff = TX × e^{-jφ} × conj(e^{-jφ}) = TX × e^{-jφ} × e^{+jφ} = TX ✓
+        //
+        int idx = data_carrier_indices[i];
+        Complex h = channel_estimate[idx];
+        float h_mag = std::abs(h);
+        if (h_mag > 0.01f) {
+            // Reference = unit vector in direction of conj(H)
+            // This matches the phase that equalization will produce
+            lts_carrier_phases[i] = std::conj(h) / h_mag;
+        } else {
+            lts_carrier_phases[i] = Complex(1.0f, 0.0f);
+        }
     }
 
     // Also compute a single phase offset for backwards compatibility
@@ -328,9 +343,30 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
 }
 
 void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& freq_domain) {
-    // For FIRST symbol after sync, use pilot estimate directly (no smoothing)
-    // If snr_symbol_count > 0, we have a pre-existing estimate (from training or previous symbols)
-    float alpha = (snr_symbol_count == 0) ? 1.0f : 0.9f;
+    // Smoothing factor for channel estimate update:
+    // - First symbol: alpha=1.0 (use pilot estimate directly)
+    // - Subsequent symbols: depends on modulation type
+    //
+    // For DIFFERENTIAL modes (DQPSK, D8PSK, DBPSK):
+    //   Use very low alpha (0.1) to keep H stable between consecutive symbols.
+    //   Differential decoding computes diff = eq[n] × conj(eq[n-1]), which requires
+    //   H to be nearly constant. High alpha breaks this property.
+    //
+    // For COHERENT modes (QPSK, QAM):
+    //   Use high alpha (0.9) to track channel changes quickly.
+    //
+    bool is_differential = (config.modulation == Modulation::DBPSK ||
+                            config.modulation == Modulation::DQPSK ||
+                            config.modulation == Modulation::D8PSK);
+
+    float alpha;
+    if (snr_symbol_count == 0) {
+        alpha = 1.0f;  // First symbol: use pilot estimate directly
+    } else if (is_differential) {
+        alpha = 0.1f;  // Differential: keep H stable for differential decoding
+    } else {
+        alpha = 0.9f;  // Coherent: track channel changes
+    }
 
     // First pass: compute all LS estimates and their average
     std::vector<Complex> h_ls_all(pilot_carrier_indices.size());

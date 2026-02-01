@@ -22,36 +22,12 @@ ModemEngine::ModemEngine() {
     config_.use_pilots = false;
 
     encoder_ = fec::CodecFactory::create(fec::CodecType::LDPC, config_.code_rate);
+    decoder_ = fec::CodecFactory::create(fec::CodecType::LDPC, CodeRate::R1_4);
+    // NOTE: TX uses active_tx_waveform_ (IWaveform), RX uses streaming_decoder_
+    // No separate ofdm_modulator_/ofdm_demodulator_ needed
 
-    // OFDM modulator uses config (TX modulation is determined per-frame)
-    ofdm_modulator_ = std::make_unique<OFDMModulator>(config_);
-
-    // RX starts in disconnected state, so use DQPSK R1/4 for link establishment
-    // This will be switched to negotiated mode when setConnected(true) is called
-    ModemConfig rx_config = config_;
-    rx_config.modulation = Modulation::DQPSK;
-    rx_config.code_rate = CodeRate::R1_4;
-    rx_config.use_pilots = false;  // DQPSK doesn't need pilots
-    decoder_ = fec::CodecFactory::create(fec::CodecType::LDPC, rx_config.code_rate);
-    ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(rx_config);
-
-    // OTFS modulator/demodulator (used for data frames when negotiated)
-    // OTFS uses delay-Doppler grid: M delay bins × N Doppler bins
-    // 1 OTFS frame = 1 LDPC codeword (648 bits = 324 QPSK symbols)
-    // M=32, N=16 = 512 symbols capacity (enough for 1 codeword + pilots)
-    otfs_config_.M = 32;   // Delay bins
-    otfs_config_.N = 16;   // Doppler bins = OFDM symbols per frame
-    otfs_config_.fft_size = config_.fft_size;
-    otfs_config_.cp_length = 64;  // Fixed CP for OTFS (different from OFDM)
-    otfs_config_.sample_rate = config_.sample_rate;
-    otfs_config_.center_freq = config_.center_freq;
-    otfs_config_.modulation = Modulation::QPSK;  // Default for OTFS
-    otfs_modulator_ = std::make_unique<OTFSModulator>(otfs_config_);
-    otfs_demodulator_ = std::make_unique<OTFSDemodulator>(otfs_config_);
-
-    // DPSK demodulator (single-carrier, for very low SNR mode switching)
+    // DPSK config (used by StreamingDecoder, kept here for API compatibility)
     dpsk_config_ = dpsk_presets::medium();
-    dpsk_demodulator_ = std::make_unique<DPSKDemodulator>(dpsk_config_);
 
     // Chirp sync for robust presence detection on fading channels
     // Dual chirp (up + down) enables CFO estimation via radar technique
@@ -84,17 +60,7 @@ ModemEngine::ModemEngine() {
     rebuildFilters();
 
     // ========================================================================
-    // NEW: Initialize IWaveforms for Connected Mode RX
-    // ========================================================================
-    // Create waveforms for each mode using the factory
-    rx_waveform_ofdm_ = WaveformFactory::create(protocol::WaveformMode::OFDM_COX, config_);
-    rx_waveform_ofdm_chirp_ = WaveformFactory::create(protocol::WaveformMode::OFDM_CHIRP, config_);
-    rx_waveform_mc_dpsk_ = WaveformFactory::create(protocol::WaveformMode::MC_DPSK, config_);
-
-    LOG_MODEM(INFO, "[%s] IWaveforms initialized", log_prefix_.c_str());
-
-    // ========================================================================
-    // NEW: Initialize StreamingDecoder (replaces RxPipeline + acquisition thread)
+    // Initialize StreamingDecoder (primary RX path)
     // ========================================================================
     streaming_decoder_ = std::make_unique<StreamingDecoder>();
     streaming_decoder_->setLogPrefix(log_prefix_);
@@ -167,20 +133,8 @@ void ModemEngine::setConfig(const ModemConfig& config) {
     LOG_MODEM(INFO, "setConfig: encoder_rate=%d, decoder_rate=%d (decoder unchanged for disconnected)",
               static_cast<int>(config.code_rate), static_cast<int>(decoder_->getRate()));
 
-    // Recreate OFDM modulator with new config (TX uses config directly)
-    ofdm_modulator_ = std::make_unique<OFDMModulator>(config_);
-
-    // For RX: if disconnected, use DQPSK R1/4 (robust mode), not config's mode
-    if (!connected_) {
-        ModemConfig rx_config = config_;
-        rx_config.modulation = Modulation::DQPSK;
-        rx_config.code_rate = CodeRate::R1_4;
-        ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(rx_config);
-        LOG_MODEM(INFO, "setConfig: RX using disconnected mode (DQPSK R1/4)");
-    } else {
-        ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(config_);
-        LOG_MODEM(INFO, "setConfig: RX using connected mode (config settings)");
-    }
+    // NOTE: TX uses active_tx_waveform_, RX uses streaming_decoder_
+    // No separate ofdm_modulator_/ofdm_demodulator_ to recreate
 
     // Update channel interleaver for new carrier count
     // DQPSK = 2 bits per carrier
@@ -196,18 +150,6 @@ void ModemEngine::setConfig(const ModemConfig& config) {
         LOG_MODEM(INFO, "setConfig: StreamingDecoder OFDM config updated (FFT=%d, carriers=%d)",
                   config_.fft_size, config_.num_carriers);
     }
-
-    // Recreate OTFS modulator/demodulator with new config
-    // Keep M=32 fixed (1 codeword per OTFS frame)
-    // OTFS uses fixed CP=64 (different from OFDM)
-    otfs_config_.M = 32;
-    otfs_config_.fft_size = config_.fft_size;
-    otfs_config_.cp_length = 64;  // Fixed for OTFS
-    otfs_config_.sample_rate = config_.sample_rate;
-    otfs_config_.center_freq = config_.center_freq;
-    otfs_config_.modulation = Modulation::QPSK;
-    otfs_modulator_ = std::make_unique<OTFSModulator>(otfs_config_);
-    otfs_demodulator_ = std::make_unique<OTFSDemodulator>(otfs_config_);
 
     // Recreate chirp sync with new CFO setting (for simulation)
     sync::ChirpConfig chirp_cfg;
@@ -630,42 +572,6 @@ void ModemEngine::ensureTxWaveform(protocol::WaveformMode mode, Modulation mod, 
     }
 }
 
-void ModemEngine::switchRxWaveform(protocol::WaveformMode mode) {
-    // Select the appropriate waveform for connected mode RX
-    IWaveform* new_waveform = nullptr;
-
-    switch (mode) {
-        case protocol::WaveformMode::OFDM_COX:
-            new_waveform = rx_waveform_ofdm_.get();
-            break;
-        case protocol::WaveformMode::OFDM_CHIRP:
-            new_waveform = rx_waveform_ofdm_chirp_.get();
-            break;
-        case protocol::WaveformMode::MC_DPSK:
-            new_waveform = rx_waveform_mc_dpsk_.get();
-            break;
-        default:
-            LOG_MODEM(WARN, "[%s] switchRxWaveform: Unsupported mode %d, using MC-DPSK",
-                      log_prefix_.c_str(), static_cast<int>(mode));
-            new_waveform = rx_waveform_mc_dpsk_.get();
-            break;
-    }
-
-    if (new_waveform != active_rx_waveform_) {
-        active_rx_waveform_ = new_waveform;
-
-        // StreamingDecoder handles waveform switching via setMode()
-        // Just log for debugging
-        if (active_rx_waveform_) {
-            bool use_interleaving = (mode == protocol::WaveformMode::OFDM_COX ||
-                                     mode == protocol::WaveformMode::OFDM_CHIRP);
-            LOG_MODEM(INFO, "[%s] RX waveform switched to %s (interleaving=%d)",
-                      log_prefix_.c_str(), active_rx_waveform_->getName().c_str(),
-                      use_interleaving ? 1 : 0);
-        }
-    }
-}
-
 // ============================================================================
 // TEST SIGNAL GENERATION
 // ============================================================================
@@ -722,8 +628,15 @@ std::vector<float> ModemEngine::transmitTestPattern(int pattern) {
     encoder_->setRate(saved_rate);
     LOG_MODEM(INFO, "TX Test: %zu bytes -> %zu encoded bytes (R1/4 forced)", test_data.size(), encoded.size());
 
-    Samples preamble = ofdm_modulator_->generatePreamble();
-    Samples modulated = ofdm_modulator_->modulate(encoded, Modulation::DQPSK);
+    // Use waveform interface for TX
+    ensureTxWaveform(protocol::WaveformMode::OFDM_CHIRP, Modulation::DQPSK, CodeRate::R1_4);
+    if (!active_tx_waveform_) {
+        LOG_MODEM(ERROR, "TX Test: Failed to create waveform");
+        return {};
+    }
+
+    Samples preamble = active_tx_waveform_->generatePreamble();
+    Samples modulated = active_tx_waveform_->modulate(encoded);
 
     std::vector<float> output;
     output.reserve(preamble.size() + modulated.size());
@@ -766,8 +679,15 @@ std::vector<float> ModemEngine::transmitRawOFDM(int pattern) {
             LOG_MODEM(INFO, "TX Raw OFDM: ALL 0xAA (%zu bytes)", test_size);
     }
 
-    Samples preamble = ofdm_modulator_->generatePreamble();
-    Samples modulated = ofdm_modulator_->modulate(test_data, Modulation::DQPSK);
+    // Use waveform interface for TX
+    ensureTxWaveform(protocol::WaveformMode::OFDM_CHIRP, Modulation::DQPSK, CodeRate::R1_4);
+    if (!active_tx_waveform_) {
+        LOG_MODEM(ERROR, "TX Raw OFDM: Failed to create waveform");
+        return {};
+    }
+
+    Samples preamble = active_tx_waveform_->generatePreamble();
+    Samples modulated = active_tx_waveform_->modulate(test_data);
 
     std::vector<float> output;
     output.reserve(preamble.size() + modulated.size());
@@ -820,7 +740,10 @@ LoopbackStats ModemEngine::getStats() const {
 }
 
 bool ModemEngine::isSynced() const {
-    return ofdm_demodulator_->isSynced();
+    if (streaming_decoder_) {
+        return streaming_decoder_->isSynced();
+    }
+    return false;
 }
 
 float ModemEngine::getCurrentSNR() const {
@@ -840,7 +763,9 @@ bool ModemEngine::isFading() const {
 }
 
 ChannelQuality ModemEngine::getChannelQuality() const {
-    return ofdm_demodulator_->getChannelQuality();
+    // ChannelQuality not exposed through streaming_decoder_ yet
+    // Return default for now
+    return ChannelQuality{};
 }
 
 void ModemEngine::setKnownCFO(float cfo_hz) {
@@ -850,7 +775,10 @@ void ModemEngine::setKnownCFO(float cfo_hz) {
 }
 
 std::vector<std::complex<float>> ModemEngine::getConstellationSymbols() const {
-    return ofdm_demodulator_->getConstellationSymbols();
+    if (streaming_decoder_) {
+        return streaming_decoder_->getConstellationSymbols();
+    }
+    return {};
 }
 
 void ModemEngine::reset() {
@@ -858,14 +786,8 @@ void ModemEngine::reset() {
     std::queue<Bytes> empty;
     std::swap(rx_data_queue_, empty);
 
-    ofdm_demodulator_->reset();
     adaptive_.reset();
     use_connected_waveform_once_ = false;
-
-    // Reset IWaveforms
-    if (rx_waveform_ofdm_) rx_waveform_ofdm_->reset();
-    if (rx_waveform_ofdm_chirp_) rx_waveform_ofdm_chirp_->reset();
-    if (rx_waveform_mc_dpsk_) rx_waveform_mc_dpsk_->reset();
 
     // Reset StreamingDecoder (primary decoder)
     if (streaming_decoder_) {

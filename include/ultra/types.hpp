@@ -127,6 +127,61 @@ inline const char* codeRateToString(CodeRate rate) {
     }
 }
 
+// Adaptive pilot configuration based on code rate
+// Higher code rates use more pilots for better channel tracking on fading channels
+// Lower code rates (R1/4) use no pilots - all carriers data, relies on LDPC redundancy
+struct PilotConfig {
+    int num_pilots = 0;                    // Number of pilot carriers (0, 4, or 6)
+    std::vector<int> pilot_indices;        // Logical carrier indices for pilots (0 to num_carriers-1)
+    bool enable_freq_interleaving = true;  // Scatter bits across carriers
+
+    // Get number of data carriers for a given total carrier count
+    int getDataCarriers(int total_carriers) const {
+        return total_carriers - num_pilots;
+    }
+
+    // Create pilot config for a given code rate (59 carriers)
+    // R1/4: 0 pilots, max data, LDPC handles fading
+    // R1/2, R2/3: 6 pilots every ~10 carriers for per-symbol tracking
+    // R3/4: 4 pilots every ~15 carriers for light fading/AWGN
+    static PilotConfig forCodeRate(CodeRate rate, int num_carriers = 59) {
+        PilotConfig cfg;
+
+        switch (rate) {
+            case CodeRate::R3_4:
+                // 4 pilots for light fading/AWGN - every 15th carrier
+                cfg.num_pilots = 4;
+                cfg.pilot_indices = {0, 15, 30, 44};
+                break;
+
+            case CodeRate::R2_3:
+            case CodeRate::R1_2:
+                // 6 pilots for moderate fading - every 10th carrier
+                cfg.num_pilots = 6;
+                cfg.pilot_indices = {0, 10, 20, 30, 40, 50};
+                break;
+
+            case CodeRate::R1_4:
+            case CodeRate::R1_3:
+            default:
+                // 0 pilots for heavy fading - all carriers data, rely on LDPC
+                cfg.num_pilots = 0;
+                cfg.pilot_indices.clear();
+                break;
+        }
+
+        return cfg;
+    }
+
+    // Check if a logical carrier index is a pilot
+    bool isPilot(int carrier_idx) const {
+        for (int p : pilot_indices) {
+            if (p == carrier_idx) return true;
+        }
+        return false;
+    }
+};
+
 // Channel quality estimate
 struct ChannelQuality {
     float snr_db;           // Estimated SNR in dB
@@ -155,10 +210,11 @@ struct ModemConfig {
     uint32_t symbol_guard = 0;         // No extra guard needed with longer CP
 
     // Pilot configuration for frequency-selective channel estimation
-    // NOTE: For differential modulation (DQPSK), set use_pilots=false to use ALL carriers
-    // DQPSK is the default for HF - no pilots needed, all 59 carriers carry data
-    uint32_t pilot_spacing = 2;        // Pilot every 2 carriers (when use_pilots=true)
-    bool use_pilots = false;           // false = all carriers are data (for DQPSK)
+    // Adaptive pilots: higher code rates use more pilots for channel tracking
+    // R1/4: 0 pilots (all carriers data), R1/2+R2/3: 6 pilots, R3/4: 4 pilots
+    PilotConfig pilot_config;          // Adaptive pilot placement
+    uint32_t pilot_spacing = 2;        // Legacy: pilot every N carriers (when use_pilots=true)
+    bool use_pilots = false;           // Legacy: false = all carriers are data (for DQPSK)
     bool scattered_pilots = true;      // Rotate pilot positions each symbol
 
     // Initial modulation/coding (will adapt)

@@ -360,10 +360,10 @@ void StreamingDecoder::searchForSync() {
     // This matches the TX side which uses generateDataPreamble() when connected
     // If light sync fails, fall back to full chirp sync (handles first frame or resync)
     //
-    // IMPORTANT: Light sync can produce false positives within a chirp signal (corr ~0.2-0.25)
-    // Real training symbols have autocorrelation ~0.3+ even with CFO up to 30 Hz.
-    // Use 0.28 threshold to reject chirp false positives but accept training with CFO.
-    constexpr float LIGHT_SYNC_CONFIDENCE = 0.28f;
+    // IMPORTANT: Light sync can produce false positives from channel effects (corr ~0.3-0.4)
+    // Real training symbols have autocorrelation ~0.8+ on decent channels.
+    // Use 0.5 threshold to reject false positives while accepting degraded real frames.
+    constexpr float LIGHT_SYNC_CONFIDENCE = 0.5f;
 
     if (connected_ && waveform_->supportsDataPreamble()) {
         float known_cfo = last_cfo_.load();
@@ -598,8 +598,9 @@ void StreamingDecoder::decodeCurrentFrame() {
         // Peek at header
         std::vector<float> cw0(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
 
-        bool use_interleave = (mode_ == protocol::WaveformMode::OFDM_CHIRP ||
-                               mode_ == protocol::WaveformMode::OFDM_COX);
+        bool use_interleave = false;  // DISABLED FOR TESTING
+        (void)(mode_ == protocol::WaveformMode::OFDM_CHIRP ||
+               mode_ == protocol::WaveformMode::OFDM_COX);
         if (use_interleave && interleaver_) {
             cw0 = interleaver_->deinterleave(cw0);
         }
@@ -735,10 +736,12 @@ void StreamingDecoder::setOFDMConfig(const ModemConfig& config) {
     }
 
     // Store carrier count for interleaver updates
+    // Use getDataCarriers() to account for pilot overhead
     ofdm_carriers_ = config.num_carriers;
+    ofdm_data_carriers_ = config.getDataCarriers();
 
     // Update interleaver for new carrier count (using current modulation)
-    size_t bps = config.num_carriers * getBitsPerSymbol(current_modulation_);
+    size_t bps = ofdm_data_carriers_ * getBitsPerSymbol(current_modulation_);
     interleaver_ = std::make_unique<ChannelInterleaver>(bps, v2::LDPC_CODEWORD_BITS);
 }
 
@@ -748,9 +751,27 @@ void StreamingDecoder::setDataMode(Modulation mod, CodeRate rate) {
     current_modulation_ = mod;
     if (waveform_) waveform_->configure(mod, rate);
 
+    // After configure(), the waveform has updated pilot config
+    // Recalculate data carriers based on new code rate's pilot requirement
+    if (mode_ != protocol::WaveformMode::MC_DPSK && waveform_) {
+        // Calculate pilot count to match OFDMChirpWaveform::configurePilotsForCodeRate()
+        int pilot_count = 0;
+        int pilot_spacing = 0;
+        switch (rate) {
+            case CodeRate::R3_4: pilot_spacing = 15; break;  // ~4 pilots
+            case CodeRate::R2_3:
+            case CodeRate::R1_2: pilot_spacing = 10; break;  // ~6 pilots
+            default: pilot_spacing = 0; break;  // R1/4: no pilots
+        }
+        if (pilot_spacing > 0) {
+            pilot_count = (ofdm_carriers_ + pilot_spacing - 1) / pilot_spacing;
+        }
+        ofdm_data_carriers_ = ofdm_carriers_ - pilot_count;
+    }
+
     // Update interleaver for new modulation
-    // Use OFDM carriers for OFDM modes, MC-DPSK carriers for DPSK mode
-    int carriers = (mode_ == protocol::WaveformMode::MC_DPSK) ? mc_dpsk_carriers_ : ofdm_carriers_;
+    // Use data carriers (not total) to account for pilot overhead
+    int carriers = (mode_ == protocol::WaveformMode::MC_DPSK) ? mc_dpsk_carriers_ : ofdm_data_carriers_;
     size_t bps = carriers * getBitsPerSymbol(mod);
     interleaver_ = std::make_unique<ChannelInterleaver>(bps, v2::LDPC_CODEWORD_BITS);
     LOG_MODEM(INFO, "StreamingDecoder: interleaver updated for %s (%zu bits/symbol)",
@@ -782,6 +803,19 @@ DecoderStats StreamingDecoder::getStats() const {
 size_t StreamingDecoder::samplesInBuffer() const {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
     return std::min(total_fed_, MAX_BUFFER_SAMPLES);
+}
+
+bool StreamingDecoder::isSynced() const {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    return state_ == DecoderState::SYNC_FOUND || state_ == DecoderState::DECODING;
+}
+
+std::vector<std::complex<float>> StreamingDecoder::getConstellationSymbols() const {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    if (waveform_) {
+        return waveform_->getConstellationSymbols();
+    }
+    return {};
 }
 
 // ============================================================================
@@ -846,8 +880,7 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     constexpr size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;
     if (soft_bits.size() < LDPC_BLOCK) return result;
 
-    bool use_interleave = (mode_ == protocol::WaveformMode::OFDM_CHIRP ||
-                           mode_ == protocol::WaveformMode::OFDM_COX);
+    bool use_interleave = false;  // DISABLED FOR TESTING
 
     std::vector<float> cw0(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
     if (use_interleave && interleaver_) {

@@ -81,6 +81,19 @@ public:
     static constexpr size_t CODEWORD_BITS = 648;
     static constexpr size_t CODEWORD_BYTES = 81;
 
+    // Get recommended max iterations for a code rate
+    // Higher rates (less redundancy) need more iterations to converge
+    static int getRecommendedIterations(CodeRate rate) {
+        switch (rate) {
+            case CodeRate::R3_4: return 60;  // Least redundancy, most iterations
+            case CodeRate::R2_3: return 70;
+            case CodeRate::R1_2: return 80;  // Fading + R1/2 needs most
+            case CodeRate::R1_3: return 60;
+            case CodeRate::R1_4: return 50;  // Most redundancy, default
+            default:            return 50;
+        }
+    }
+
 private:
     std::unique_ptr<LDPCEncoder> encoder_;
     std::unique_ptr<LDPCDecoder> decoder_;

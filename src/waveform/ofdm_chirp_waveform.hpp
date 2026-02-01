@@ -102,6 +102,7 @@ public:
 private:
     void initComponents();
     sync::ChirpConfig getChirpConfig() const;
+    void configurePilotsForCodeRate(CodeRate rate);
 
     ModemConfig config_;
     std::unique_ptr<OFDMModulator> modulator_;

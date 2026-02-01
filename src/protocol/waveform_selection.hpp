@@ -23,15 +23,17 @@ struct WaveformRecommendation {
 
 // Recommend waveform and rate based on SNR and fading index
 //
-// Key findings from testing (2026-01-30):
+// Key findings from testing (2026-01-30) + adaptive pilots update (2026-02-01):
 // - SNR < 10 dB: MC-DPSK is most robust (~938 bps)
 // - SNR >= 10 dB + AWGN: OFDM_CHIRP R2/3 or OFDM_COX (high SNR)
-// - SNR >= 15 dB + Good (fading 0.1-0.35): OFDM_CHIRP R1/4 (100%)
-// - SNR >= 16 dB + Moderate (fading 0.35-0.55): OFDM_CHIRP R1/4 (100%)
+// - With adaptive pilots, OFDM_CHIRP can now use higher rates on fading:
+//   * Good fading (0.10-0.25): R2/3 @ SNR >= 14 dB (~3000 bps)
+//   * Moderate fading (0.25-0.45): R1/2 @ SNR >= 10 dB (~2300 bps)
+//   * Heavy fading (>= 0.45): R1/4 (~1150 bps) or MC-DPSK
 // - Poor channel or below thresholds: MC-DPSK
 //
-// Fading thresholds match fadingToQuality() in GUI:
-//   < 0.10: AWGN, < 0.35: Good, < 0.55: Moderate, >= 0.55: Poor
+// Fading thresholds (updated for adaptive pilots):
+//   < 0.10: AWGN, < 0.25: Good, < 0.45: Moderate, >= 0.45: Heavy
 inline WaveformRecommendation recommendWaveformAndRate(float snr_db, float fading_index) {
     WaveformRecommendation rec;
 
@@ -41,34 +43,51 @@ inline WaveformRecommendation recommendWaveformAndRate(float snr_db, float fadin
         rec.rate = CodeRate::R1_4;
         rec.estimated_throughput_bps = 938.0f;
     }
-    else if (fading_index < 0.1f) {
+    else if (fading_index < 0.10f) {
         // AWGN (no fading): Use OFDM for higher throughput
         if (snr_db >= 17.0f) {
             // High SNR + AWGN: OFDM_COX for maximum throughput
             rec.waveform = WaveformMode::OFDM_COX;
             rec.rate = CodeRate::R2_3;
             rec.estimated_throughput_bps = 5300.0f;
+        } else if (snr_db >= 15.0f) {
+            // Mid-high SNR + AWGN: OFDM_CHIRP R3/4
+            rec.waveform = WaveformMode::OFDM_CHIRP;
+            rec.rate = CodeRate::R3_4;
+            rec.estimated_throughput_bps = 3500.0f;
         } else {
             // Mid SNR + AWGN: OFDM_CHIRP R2/3
             rec.waveform = WaveformMode::OFDM_CHIRP;
             rec.rate = CodeRate::R2_3;
+            rec.estimated_throughput_bps = 3000.0f;
+        }
+    }
+    else if (fading_index < 0.25f && snr_db >= 12.0f) {
+        // Good channel (fading 0.10-0.25): OFDM_CHIRP with pilots
+        if (snr_db >= 14.0f) {
+            rec.waveform = WaveformMode::OFDM_CHIRP;
+            rec.rate = CodeRate::R2_3;  // 6 pilots for tracking
+            rec.estimated_throughput_bps = 3000.0f;
+        } else {
+            rec.waveform = WaveformMode::OFDM_CHIRP;
+            rec.rate = CodeRate::R1_2;  // 6 pilots for tracking
             rec.estimated_throughput_bps = 2300.0f;
         }
     }
-    else if (fading_index < 0.35f && snr_db >= 15.0f) {
-        // Good channel (fading 0.1-0.35) + SNR >= 15: OFDM_CHIRP R1/4
+    else if (fading_index < 0.45f && snr_db >= 10.0f) {
+        // Moderate channel (fading 0.25-0.45): OFDM_CHIRP R1/2 with pilots
         rec.waveform = WaveformMode::OFDM_CHIRP;
-        rec.rate = CodeRate::R1_4;
-        rec.estimated_throughput_bps = 1150.0f;
+        rec.rate = CodeRate::R1_2;  // 6 pilots for tracking
+        rec.estimated_throughput_bps = 2300.0f;
     }
-    else if (fading_index < 0.55f && snr_db >= 16.0f) {
-        // Moderate channel (fading 0.35-0.55) + SNR >= 16: OFDM_CHIRP R1/4
+    else if (fading_index < 0.55f && snr_db >= 12.0f) {
+        // Heavy fading (0.45-0.55): OFDM_CHIRP R1/4 (no pilots, max LDPC)
         rec.waveform = WaveformMode::OFDM_CHIRP;
         rec.rate = CodeRate::R1_4;
         rec.estimated_throughput_bps = 1150.0f;
     }
     else {
-        // Poor channel or below SNR thresholds: MC-DPSK
+        // Very heavy fading or low SNR: MC-DPSK
         rec.waveform = WaveformMode::MC_DPSK;
         rec.rate = CodeRate::R1_4;
         rec.estimated_throughput_bps = 938.0f;
@@ -83,9 +102,12 @@ inline WaveformRecommendation recommendWaveformAndRate(float snr_db, float fadin
 //
 // For OFDM modes (OFDM_CHIRP, OFDM_COX):
 //   - Always use DQPSK (differential for phase stability)
-//   - Code rate based on SNR AND fading
-//   - Fading channels need R1/4 regardless of SNR
-//   - Only AWGN can use higher rates
+//   - Code rate based on SNR AND fading index
+//   - With adaptive pilots (enabled for R1/2+), higher rates work on fading:
+//     * R1/4 (0 pilots): Heavy fading (>= 0.45) - max LDPC redundancy
+//     * R1/2 (6 pilots): Moderate fading (0.25-0.45) at SNR >= 10 dB
+//     * R2/3 (6 pilots): Good fading (0.10-0.25) at SNR >= 12 dB
+//     * R3/4 (4 pilots): AWGN (< 0.10) at SNR >= 15 dB
 //
 // For MC-DPSK:
 //   - Always DQPSK R1/4 (fixed for robustness)
@@ -99,29 +121,47 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
         return;
     }
 
-    // OFDM modes: Select modulation and code rate based on SNR and fading
+    // OFDM modes with adaptive pilots
+    // Pilots enable per-symbol channel tracking, allowing higher rates on fading
 
-    // Fading channels (>= 0.1) must use DQPSK R1/4 for reliability
-    if (fading_index >= 0.1f) {
-        mod = Modulation::DQPSK;
-        rate = CodeRate::R1_4;
-        return;
+    mod = Modulation::DQPSK;  // Always differential for HF phase stability
+
+    // AWGN (fading < 0.10): Use highest rates
+    if (fading_index < 0.10f) {
+        if (snr_db >= 20.0f) {
+            mod = Modulation::D8PSK;  // 3 bits/carrier (+50% vs DQPSK)
+            rate = CodeRate::R1_2;    // ~5.3 kbps with D8PSK
+        } else if (snr_db >= 15.0f) {
+            rate = CodeRate::R3_4;    // 4 pilots, ~3.5 kbps
+        } else if (snr_db >= 12.0f) {
+            rate = CodeRate::R2_3;    // 6 pilots, ~3.0 kbps
+        } else if (snr_db >= 10.0f) {
+            rate = CodeRate::R1_2;    // 6 pilots, ~2.3 kbps
+        } else {
+            rate = CodeRate::R1_4;    // 0 pilots, max robustness
+        }
     }
-
-    // AWGN: Use SNR-based modulation and code rate
-    // D8PSK gives +50% throughput but needs higher SNR
-    if (snr_db >= 20.0f) {
-        mod = Modulation::D8PSK;  // 3 bits/carrier (+50% vs DQPSK)
-        rate = CodeRate::R1_2;    // ~5.3 kbps
-    } else if (snr_db >= 17.0f) {
-        mod = Modulation::DQPSK;
-        rate = CodeRate::R2_3;    // Good balance
-    } else if (snr_db >= 10.0f) {
-        mod = Modulation::DQPSK;
-        rate = CodeRate::R1_2;    // More robust
-    } else {
-        mod = Modulation::DQPSK;
-        rate = CodeRate::R1_4;    // Maximum robustness
+    // Good fading (0.10-0.25): R2/3 with pilots for channel tracking
+    else if (fading_index < 0.25f) {
+        if (snr_db >= 14.0f) {
+            rate = CodeRate::R2_3;    // 6 pilots, ~3.0 kbps
+        } else if (snr_db >= 10.0f) {
+            rate = CodeRate::R1_2;    // 6 pilots, ~2.3 kbps
+        } else {
+            rate = CodeRate::R1_4;    // 0 pilots, fallback
+        }
+    }
+    // Moderate fading (0.25-0.45): R1/2 with pilots
+    else if (fading_index < 0.45f) {
+        if (snr_db >= 10.0f) {
+            rate = CodeRate::R1_2;    // 6 pilots, ~2.3 kbps
+        } else {
+            rate = CodeRate::R1_4;    // 0 pilots, fallback
+        }
+    }
+    // Heavy fading (>= 0.45): R1/4 only (no pilots, max LDPC protection)
+    else {
+        rate = CodeRate::R1_4;        // 0 pilots, ~1.3 kbps
     }
 }
 

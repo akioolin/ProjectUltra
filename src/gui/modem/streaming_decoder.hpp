@@ -181,6 +181,12 @@ public:
     // Get number of samples in buffer
     size_t samplesInBuffer() const;
 
+    // Check if waveform is synchronized
+    bool isSynced() const;
+
+    // Get constellation symbols for display
+    std::vector<std::complex<float>> getConstellationSymbols() const;
+
     // ========================================================================
     // LIFECYCLE
     // ========================================================================
@@ -252,6 +258,7 @@ private:
     bool connected_ = false;
     int mc_dpsk_carriers_ = 8;  // MC-DPSK carrier count (default 8)
     int ofdm_carriers_ = 30;    // OFDM carrier count (default 30 for standard mode)
+    int ofdm_data_carriers_ = 30;  // Data carriers after pilot allocation (for interleaver)
     Modulation current_modulation_ = Modulation::DQPSK;  // Current modulation for interleaver
     CodeRate code_rate_ = CodeRate::R1_4;  // Code rate for FEC decode
     fec::CodecType codec_type_ = fec::CodecType::LDPC;  // FEC codec type

@@ -323,6 +323,14 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_include_directories(test_iwaveform PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test_iwaveform PRIVATE ultra_core)
+
+    # Simple waveform test (clean TX/RX with consistent config)
+    add_executable(test_waveform_simple
+        tools/test_waveform_simple.cpp
+        src/gui/modem/streaming_decoder.cpp
+    )
+    target_include_directories(test_waveform_simple PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_waveform_simple PRIVATE ultra_core)
 endif()
 
 # GUI Application

@@ -60,44 +60,21 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
         }
     }
 
-    // Switch RX waveform (when connected)
-    if (connected_) {
-        switchRxWaveform(mode);
-    }
-
     switch (mode) {
         case protocol::WaveformMode::MC_DPSK:
-            dpsk_demodulator_->reset();
             LOG_MODEM(INFO, "DPSK mode active: %d-PSK, %d samples/sym, %.1f bps",
                       dpsk_config_.num_phases(),
                       dpsk_config_.samples_per_symbol,
                       dpsk_config_.raw_bps());
             break;
 
-        case protocol::WaveformMode::OTFS_EQ:
-        case protocol::WaveformMode::OTFS_RAW:
-            otfs_demodulator_->reset();
-            LOG_MODEM(INFO, "OTFS mode active: M=%d, N=%d",
-                      otfs_config_.M, otfs_config_.N);
+        case protocol::WaveformMode::OFDM_CHIRP:
+            LOG_MODEM(INFO, "OFDM_CHIRP mode active: %d carriers, DQPSK (differential)",
+                      config_.num_carriers);
             break;
-
-        case protocol::WaveformMode::OFDM_CHIRP: {
-            // OFDM_CHIRP uses DQPSK (differential) for fading channels
-            // Chirp provides robust sync at low SNR, DQPSK is robust to phase drift
-            // No pilots needed - differential modulation compares adjacent symbols
-            ModemConfig chirp_config = config_;
-            chirp_config.modulation = Modulation::DQPSK;
-            chirp_config.use_pilots = false;  // DQPSK doesn't need pilots
-            ofdm_modulator_ = std::make_unique<OFDMModulator>(chirp_config);
-            ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(chirp_config);
-            LOG_MODEM(INFO, "OFDM_CHIRP mode active: %d data carriers, DQPSK (differential)",
-                      chirp_config.num_carriers);
-            break;
-        }
 
         case protocol::WaveformMode::OFDM_COX:
         default:
-            ofdm_demodulator_->reset();
             LOG_MODEM(INFO, "OFDM mode active: %d carriers, %s",
                       config_.num_carriers,
                       connected_ ? "connected" : "disconnected");
@@ -118,7 +95,6 @@ void ModemEngine::setConnectWaveform(protocol::WaveformMode mode) {
     // Configure DPSK for medium preset (DQPSK 62b R1/4) for connection attempts
     if (mode == protocol::WaveformMode::MC_DPSK) {
         dpsk_config_ = dpsk_presets::medium();  // DQPSK 62.5 baud
-        dpsk_demodulator_ = std::make_unique<DPSKDemodulator>(dpsk_config_);
         LOG_MODEM(INFO, "DPSK connect mode: %d-PSK, %.1f baud",
                   dpsk_config_.num_phases(), dpsk_config_.symbol_rate());
     }
@@ -158,32 +134,20 @@ void ModemEngine::setConnected(bool connected) {
         config_.code_rate = data_code_rate_;
         config_.use_pilots = !is_differential;
 
-        ofdm_modulator_ = std::make_unique<OFDMModulator>(config_);
         decoder_->setRate(data_code_rate_);
-        ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(config_);
-
-        // Switch RX waveform for connected mode
-        switchRxWaveform(waveform_mode_);
 
         LOG_MODEM(INFO, "Entered connected state, configured for %s %s (pilots=%d)",
                   modulationToString(data_modulation_), codeRateToString(data_code_rate_),
                   config_.use_pilots ? 1 : 0);
     } else {
         // Switching to disconnected state - use robust mode for RX
-        ModemConfig rx_config = config_;
-        rx_config.modulation = Modulation::DQPSK;
-        rx_config.code_rate = CodeRate::R1_4;
-
         decoder_->setRate(CodeRate::R1_4);
-        ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(rx_config);
 
         // CRITICAL: Update StreamingDecoder for disconnected state
         // Use MC_DPSK to detect new PINGs (chirp-based sync)
         if (streaming_decoder_) {
             streaming_decoder_->setMode(protocol::WaveformMode::MC_DPSK, false);  // false = disconnected
         }
-        dpsk_demodulator_->reset();
-        active_rx_waveform_ = nullptr;
 
         // Keep using connected waveform for the next TX (DISCONNECT ACK)
         // Save the current negotiated waveform BEFORE it might be reset
@@ -210,32 +174,38 @@ void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
     data_modulation_ = mod;
     data_code_rate_ = rate;
 
-    // Determine if modulation is differential (doesn't need pilots)
+    // Determine if modulation is differential
     bool is_differential = (mod == Modulation::DBPSK ||
                            mod == Modulation::DQPSK ||
                            mod == Modulation::D8PSK);
 
+    // Pilots for channel tracking:
+    // - Differential (DQPSK): No pilots needed, differential encoding handles phase
+    // - Coherent (QPSK/QAM): Pilots required for channel estimation
+    //
+    // NOTE: Adaptive pilots for differential modes (to enable higher code rates on fading)
+    // is a future enhancement. Currently DQPSK works best without pilots and with R1/4.
+    bool use_pilots = !is_differential;  // Only coherent needs pilots
+    int pilot_spacing = 2;  // Default spacing for coherent
+
     // If already connected, update both TX and RX to match
     if (connected_) {
-        // Update base config for TX modulator
+        // Update base config (TX waveform will pick this up via ensureTxWaveform)
         config_.modulation = mod;
         config_.code_rate = rate;
-        config_.use_pilots = !is_differential;  // QAM needs pilots, DQPSK doesn't
+        config_.use_pilots = use_pilots;
+        config_.pilot_spacing = pilot_spacing;
 
-        // Recreate modulator with new config
-        ofdm_modulator_ = std::make_unique<OFDMModulator>(config_);
-
-        // Recreate demodulator with matching config
         decoder_->setRate(rate);
-        ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(config_);
 
-        LOG_MODEM(INFO, "TX/RX OFDM updated: mod=%d, rate=%d, use_pilots=%d",
-                  static_cast<int>(mod), static_cast<int>(rate), config_.use_pilots ? 1 : 0);
+        LOG_MODEM(INFO, "TX/RX OFDM config updated: mod=%d, rate=%d, use_pilots=%d",
+                  static_cast<int>(mod), static_cast<int>(rate), use_pilots ? 1 : 0);
     }
 
     // Update channel interleaver for the new modulation
     // D8PSK = 3 bits/carrier, DQPSK = 2 bits/carrier, DBPSK = 1 bit/carrier
-    size_t bits_per_symbol = config_.num_carriers * getBitsPerSymbol(mod);
+    // Use getDataCarriers() which accounts for pilot overhead
+    size_t bits_per_symbol = config_.getDataCarriers() * getBitsPerSymbol(mod);
     updateChannelInterleaver(bits_per_symbol);
 
     // Update StreamingDecoder's waveform configuration
@@ -274,9 +244,6 @@ void ModemEngine::setDPSKMode(DPSKModulation mod, int samples_per_symbol) {
     // Configure DPSK based on modulation type and symbol rate
     dpsk_config_.modulation = mod;
     dpsk_config_.samples_per_symbol = samples_per_symbol;
-
-    // Recreate demodulator with new config
-    dpsk_demodulator_ = std::make_unique<DPSKDemodulator>(dpsk_config_);
 
     const char* mod_name = "DQPSK";
     switch (mod) {
