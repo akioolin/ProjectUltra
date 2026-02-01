@@ -422,41 +422,24 @@ uint8_t DataFrame::calculateCodewords(size_t payload_size) {
     // Total frame size = header (17) + payload + frame_CRC (2)
     size_t total = HEADER_SIZE + payload_size + CRC_SIZE;
 
-    // CW0 carries 20 bytes of raw frame data
-    if (total <= BYTES_PER_CODEWORD) {
-        return 1;
-    }
+    // Calculate based on bit-level encoding (matches ldpc_encoder.cpp)
+    // For R1/4: 162 info bits per codeword
+    size_t total_bits = total * 8;
+    constexpr size_t info_bits = 162;  // R1/4
 
-    // Remaining bytes after CW0
-    size_t remaining = total - BYTES_PER_CODEWORD;
-
-    // Each CW1+ carries DATA_CW_PAYLOAD_SIZE (18) bytes due to marker + index overhead
-    size_t additional_cws = (remaining + DATA_CW_PAYLOAD_SIZE - 1) / DATA_CW_PAYLOAD_SIZE;
-
-    return static_cast<uint8_t>(1 + additional_cws);
+    return static_cast<uint8_t>((total_bits + info_bits - 1) / info_bits);
 }
 
 uint8_t DataFrame::calculateCodewords(size_t payload_size, CodeRate rate) {
     // Total frame size = header (17) + payload + frame_CRC (2)
     size_t total = HEADER_SIZE + payload_size + CRC_SIZE;
 
-    // All codewords use the same rate
-    size_t bytes_per_cw = getBytesPerCodeword(rate);
+    // Calculate based on bit-level encoding (matches ldpc_encoder.cpp)
+    // Encoder packs total*8 bits into codewords of info_bits each
+    size_t total_bits = total * 8;
+    size_t info_bits = getInfoBitsForRate(rate);
 
-    // CW0 contains first bytes_per_cw bytes
-    if (total <= bytes_per_cw) {
-        return 1;
-    }
-
-    // Remaining bytes after CW0
-    size_t remaining = total - bytes_per_cw;
-
-    // CW1+ have 2-byte header (marker + index), rest is payload
-    size_t cw_payload_bytes = bytes_per_cw - DATA_CW_HEADER_SIZE;
-
-    size_t additional_cws = (remaining + cw_payload_bytes - 1) / cw_payload_bytes;
-
-    return static_cast<uint8_t>(1 + additional_cws);
+    return static_cast<uint8_t>((total_bits + info_bits - 1) / info_bits);
 }
 
 DataFrame DataFrame::makeData(const std::string& src, const std::string& dst,
