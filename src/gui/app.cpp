@@ -560,6 +560,7 @@ void App::initVirtualStation() {
     virtual_protocol_.setLocalCallsign(virtual_callsign_);
     virtual_modem_->setLogPrefix(virtual_callsign_);
     virtual_protocol_.setAutoAccept(true);  // Auto-accept incoming calls
+    virtual_protocol_.setReceiveDirectory(settings_.getReceiveDirectory());  // Save files to same dir
 
     // Virtual station TX → queue for real-time streaming → our RX
     virtual_protocol_.setTxDataCallback([this](const Bytes& data) {
@@ -659,6 +660,29 @@ void App::initVirtualStation() {
     virtual_protocol_.setHandshakeConfirmedCallback([this]() {
         guiLog("SIM: Virtual HANDSHAKE confirmed");
         virtual_modem_->setHandshakeComplete(true);
+    });
+
+    // Virtual station file transfer callbacks
+    virtual_protocol_.setFileReceivedCallback([this](const std::string& path, bool success) {
+        std::string msg = "[SIM] ";
+        if (success) {
+            msg += "Received file: " + path;
+        } else {
+            msg += "File receive failed";
+        }
+        rx_log_.push_back(msg);
+        if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
+    });
+
+    virtual_protocol_.setFileSentCallback([this](bool success, const std::string& error) {
+        std::string msg = "[SIM] ";
+        if (success) {
+            msg += "File sent successfully";
+        } else {
+            msg += "File send failed: " + error;
+        }
+        rx_log_.push_back(msg);
+        if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
     });
 
     virtual_protocol_.setMessageReceivedCallback([this](const std::string& from, const std::string& text) {
