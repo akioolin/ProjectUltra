@@ -64,6 +64,7 @@ struct TestConfig {
     bool verbose = true;
     bool save_signals = false;
     std::string save_prefix = "/tmp/waveform";
+    bool session_mode = false;  // If true, first frame uses full preamble, rest use light
 
     // Derived: configure pilots based on code rate
     void configurePilotsForCodeRate() {
@@ -137,6 +138,9 @@ struct TestConfig {
         }
         printf("Channel: %s, SNR: %.1f dB, CFO: %.1f Hz\n", channel_type.c_str(), snr_db, cfo_hz);
         printf("Frames: %d, Seed: %u\n", num_frames, seed);
+        if (session_mode) {
+            printf("Session mode: ON (first frame full preamble, rest light)\n");
+        }
         printf("==========================\n\n");
     }
 };
@@ -309,9 +313,22 @@ std::vector<float> generateFrames(const TestConfig& cfg, std::mt19937& rng,
                    frame.seq, frame.payload.size(), frame_data.size(), encoded.size());
         }
 
-        // Modulate - use FULL preamble (chirp + LTS) for independent frame testing
-        // Light preamble requires continuous timing tracking which doesn't work for isolated frames
-        Samples preamble = waveform->generatePreamble();
+        // Modulate with appropriate preamble
+        // - Session mode: first frame uses full preamble (chirp + LTS), rest use light (LTS only)
+        // - Normal mode: all frames use full preamble (for independent frame testing)
+        Samples preamble;
+        bool use_light = cfg.session_mode && i > 0 && waveform->supportsDataPreamble();
+        if (use_light) {
+            preamble = waveform->generateDataPreamble();
+            if (cfg.verbose) {
+                printf("  Frame %d: Using LIGHT preamble (%zu samples)\n", frame.seq, preamble.size());
+            }
+        } else {
+            preamble = waveform->generatePreamble();
+            if (cfg.verbose && cfg.session_mode) {
+                printf("  Frame %d: Using FULL preamble (%zu samples) - establishes CFO\n", frame.seq, preamble.size());
+            }
+        }
         Samples modulated = waveform->modulate(encoded);
 
         // Record position
@@ -442,6 +459,7 @@ void printUsage(const char* prog) {
     printf("  --carriers N  MC-DPSK carriers (default: 8)\n");
     printf("  --seed N      Random seed (default: 42)\n");
     printf("  --save        Save signals to files\n");
+    printf("  --session     Session mode: first frame full preamble, rest light\n");
     printf("  -q            Quiet mode\n");
     printf("  -h            Show this help\n");
 }
@@ -506,6 +524,9 @@ int main(int argc, char** argv) {
         }
         else if (arg == "--save") {
             cfg.save_signals = true;
+        }
+        else if (arg == "--session") {
+            cfg.session_mode = true;
         }
         else if (arg == "-q") {
             cfg.verbose = false;
