@@ -85,8 +85,14 @@ public:
     // TX PATH
     // ========================================================================
 
-    // Generate preamble (sync sequence + training if applicable)
+    // Generate full preamble (sync sequence + training)
+    // Used for: PING, CONNECT, first frame, periodic re-sync
     virtual Samples generatePreamble() = 0;
+
+    // Generate light preamble (training only, no sync sequence)
+    // Used for: DATA frames when already connected (saves ~1.2s per frame)
+    // Default: falls back to full preamble for waveforms that don't support it
+    virtual Samples generateDataPreamble() { return generatePreamble(); }
 
     // Modulate encoded data (LDPC-encoded bits packed as bytes)
     // Returns audio samples ready for transmission
@@ -99,6 +105,18 @@ public:
     // Detect sync/preamble in sample buffer
     // Returns true if sync detected, fills result with details
     virtual bool detectSync(SampleSpan samples, SyncResult& result, float threshold = 0.3f) = 0;
+
+    // Detect sync on training-only preamble (for DATA frames when connected)
+    // Uses known CFO from previous frames, correlates against training pattern
+    // Default: falls back to full detectSync for waveforms that don't support it
+    virtual bool detectDataSync(SampleSpan samples, SyncResult& result,
+                                 float known_cfo_hz = 0.0f, float threshold = 0.3f) {
+        (void)known_cfo_hz;  // Unused in default implementation
+        return detectSync(samples, result, threshold);
+    }
+
+    // Check if this waveform supports light/data preamble mode
+    virtual bool supportsDataPreamble() const { return false; }
 
     // Process samples after sync detection
     // Returns true if a complete symbol/frame is ready
@@ -154,8 +172,12 @@ public:
     // Get samples required for one complete symbol
     virtual int getSamplesPerSymbol() const = 0;
 
-    // Get total preamble duration in samples
+    // Get total preamble duration in samples (full preamble with sync)
     virtual int getPreambleSamples() const = 0;
+
+    // Get light preamble duration in samples (training only)
+    // Default: same as full preamble for waveforms that don't support light mode
+    virtual int getDataPreambleSamples() const { return getPreambleSamples(); }
 
     // Get minimum samples needed AFTER sync detection for one complete frame
     // This includes training, reference, and data for at least one codeword

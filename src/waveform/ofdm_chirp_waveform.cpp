@@ -4,6 +4,7 @@
 #include "ultra/logging.hpp"
 #include "ultra/dsp.hpp"  // FFT class is in here
 #include <sstream>
+#include <cmath>
 
 namespace ultra {
 
@@ -118,6 +119,17 @@ Samples OFDMChirpWaveform::generatePreamble() {
     return preamble;
 }
 
+Samples OFDMChirpWaveform::generateDataPreamble() {
+    if (!modulator_) {
+        return Samples();
+    }
+
+    // Light preamble: just training symbols (no chirp)
+    // Saves ~1.2 seconds per frame when already connected
+    // Receiver uses known CFO from previous frames
+    return modulator_->generateTrainingSymbols(2);
+}
+
 Samples OFDMChirpWaveform::modulate(const Bytes& encoded_data) {
     if (!modulator_) {
         return Samples();
@@ -166,6 +178,111 @@ bool OFDMChirpWaveform::detectSync(SampleSpan samples, SyncResult& result, float
 
         LOG_MODEM(INFO, "OFDMChirpWaveform: Chirp detected at %d, CFO=%.1f Hz, training_start=%d",
                   chirp_result.up_chirp_start, chirp_result.cfo_hz, result.start_sample);
+    }
+
+    return result.detected;
+}
+
+bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
+                                        float known_cfo_hz, float threshold) {
+    // Detect training-only preamble (no chirp) for DATA frames
+    // Uses Schmidl-Cox style detection: LTS has two identical symbols,
+    // so we correlate sample[n] with sample[n + symbol_length]
+
+    result.detected = false;
+    result.correlation = 0.0f;
+    result.cfo_hz = known_cfo_hz;  // Use known CFO from previous frames
+    result.has_training = true;
+
+    const int symbol_samples = getSamplesPerSymbol();
+    const int search_window = symbol_samples * 4;  // Search first 4 symbols worth
+
+    if (samples.size() < static_cast<size_t>(symbol_samples * 3)) {
+        return false;  // Need at least 3 symbols (2 LTS + margin)
+    }
+
+    // Energy-based gate: find where signal starts
+    float noise_floor = 0.0f;
+    size_t noise_samples = std::min(samples.size() / 4, size_t(4800));  // First 100ms
+    for (size_t i = 0; i < noise_samples; ++i) {
+        noise_floor += samples[i] * samples[i];
+    }
+    noise_floor = std::sqrt(noise_floor / noise_samples);
+    float energy_threshold = noise_floor * 3.0f + 0.01f;  // 3x noise or minimum
+
+    // Find first sample above energy threshold
+    size_t signal_start = 0;
+    for (size_t i = 0; i < samples.size() - symbol_samples * 2; ++i) {
+        float energy = 0.0f;
+        for (int j = 0; j < 64; ++j) {  // Check 64 samples
+            if (i + j < samples.size()) {
+                energy += samples[i + j] * samples[i + j];
+            }
+        }
+        energy = std::sqrt(energy / 64);
+        if (energy > energy_threshold) {
+            signal_start = i;
+            break;
+        }
+    }
+
+    // Schmidl-Cox style autocorrelation for LTS detection
+    // LTS has 2 identical symbols, so correlate with 1 symbol delay
+    float best_corr = 0.0f;
+    int best_offset = 0;
+
+    int search_end = std::min(static_cast<int>(signal_start) + search_window,
+                              static_cast<int>(samples.size()) - symbol_samples * 2);
+
+    for (int offset = static_cast<int>(signal_start);
+         offset < search_end; offset += 8) {  // Step by 8 for speed
+
+        // Correlate: P = sum(samples[n] * conj(samples[n + L]))
+        float P_real = 0.0f, P_imag = 0.0f;
+        float energy1 = 0.0f, energy2 = 0.0f;
+
+        for (int n = 0; n < symbol_samples; ++n) {
+            int idx1 = offset + n;
+            int idx2 = offset + n + symbol_samples;
+            if (idx2 >= static_cast<int>(samples.size())) break;
+
+            // Apply known CFO correction for better correlation
+            float phase = -2.0f * M_PI * known_cfo_hz * idx1 / config_.sample_rate;
+            float cos_p = std::cos(phase);
+            float sin_p = std::sin(phase);
+
+            float s1 = samples[idx1];
+            float s2 = samples[idx2];
+
+            // CFO-corrected correlation
+            float s1_corr = s1 * cos_p;
+            float s2_corr = s2 * std::cos(phase + 2.0f * M_PI * known_cfo_hz * symbol_samples / config_.sample_rate);
+
+            P_real += s1 * s2;  // Simplified: real-valued correlation
+            energy1 += s1 * s1;
+            energy2 += s2 * s2;
+        }
+
+        float denom = std::sqrt(energy1 * energy2) + 1e-10f;
+        float corr = std::abs(P_real) / denom;
+
+        if (corr > best_corr) {
+            best_corr = corr;
+            best_offset = offset;
+        }
+    }
+
+    result.correlation = best_corr;
+
+    if (best_corr > threshold) {
+        result.detected = true;
+        result.start_sample = best_offset;  // Training starts here
+        training_start_sample_ = best_offset;
+        synced_ = true;
+        last_cfo_ = known_cfo_hz;
+
+        LOG_MODEM(INFO, "OFDMChirpWaveform: Data sync detected at %d, corr=%.2f, using CFO=%.1f Hz",
+                  best_offset, best_corr, known_cfo_hz);
     }
 
     return result.detected;
@@ -324,6 +441,12 @@ int OFDMChirpWaveform::getPreambleSamples() const {
                                   : static_cast<int>(config_.sample_rate * 1.2f);  // ~1.2 sec default
     int training = 2 * getSamplesPerSymbol();  // 2 OFDM training symbols
     return chirp_total + training;
+}
+
+int OFDMChirpWaveform::getDataPreambleSamples() const {
+    // Light preamble: just training symbols (no chirp)
+    // 2 LTS symbols for channel estimation
+    return 2 * getSamplesPerSymbol();
 }
 
 int OFDMChirpWaveform::getMinSamplesForFrame() const {

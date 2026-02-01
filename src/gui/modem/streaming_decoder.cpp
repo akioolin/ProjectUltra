@@ -354,9 +354,35 @@ void StreamingDecoder::searchForSync() {
 
     waveform_->reset();
     SyncResult sync_result;
-    bool found = waveform_->detectSync(
-        SampleSpan(search_buffer.data(), search_buffer.size()),
-        sync_result, CORR_DETECT_THRESHOLD);
+    bool found = false;
+
+    // When connected, try light sync detection first (training only, no chirp)
+    // This matches the TX side which uses generateDataPreamble() when connected
+    // If light sync fails, fall back to full chirp sync (handles first frame or resync)
+    if (connected_ && waveform_->supportsDataPreamble()) {
+        float known_cfo = last_cfo_.load();
+        found = waveform_->detectDataSync(
+            SampleSpan(search_buffer.data(), search_buffer.size()),
+            sync_result, known_cfo, CORR_DETECT_THRESHOLD);
+        if (found) {
+            LOG_MODEM(INFO, "[%s] DATA sync detected (training only, known CFO=%.1f Hz)",
+                      log_prefix_.c_str(), known_cfo);
+        } else {
+            // Light sync failed - try full chirp sync (handles first frame, resync after errors)
+            found = waveform_->detectSync(
+                SampleSpan(search_buffer.data(), search_buffer.size()),
+                sync_result, CORR_DETECT_THRESHOLD);
+            if (found) {
+                LOG_MODEM(INFO, "[%s] Fallback to CHIRP sync (CFO=%.1f Hz)",
+                          log_prefix_.c_str(), sync_result.cfo_hz);
+            }
+        }
+    } else {
+        // Use full sync detection with chirp
+        found = waveform_->detectSync(
+            SampleSpan(search_buffer.data(), search_buffer.size()),
+            sync_result, CORR_DETECT_THRESHOLD);
+    }
 
     auto search_end_time = std::chrono::steady_clock::now();
     float search_ms = std::chrono::duration<float, std::milli>(search_end_time - search_start_time).count();

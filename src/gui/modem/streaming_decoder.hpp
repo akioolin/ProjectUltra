@@ -165,6 +165,9 @@ public:
     // Get last measured CFO
     float getLastCFO() const { return last_cfo_.load(); }
 
+    // Set known CFO (for testing or when CFO is known from other source)
+    void setKnownCFO(float cfo_hz) { last_cfo_.store(cfo_hz); }
+
     // Get last measured fading index (from per-carrier magnitude variance)
     // 0-1 range, > 0.4 indicates significant fading
     float getLastFadingIndex() const { return last_fading_index_.load(); }

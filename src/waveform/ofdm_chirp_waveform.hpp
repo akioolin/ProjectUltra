@@ -52,6 +52,7 @@ public:
     // ========================================================================
 
     Samples generatePreamble() override;
+    Samples generateDataPreamble() override;  // Training only, no chirp
     Samples modulate(const Bytes& encoded_data) override;
 
     // ========================================================================
@@ -59,6 +60,9 @@ public:
     // ========================================================================
 
     bool detectSync(SampleSpan samples, SyncResult& result, float threshold = 0.15f) override;
+    bool detectDataSync(SampleSpan samples, SyncResult& result,
+                        float known_cfo_hz = 0.0f, float threshold = 0.3f) override;
+    bool supportsDataPreamble() const override { return true; }
     bool process(SampleSpan samples) override;
     std::vector<float> getSoftBits() override;
     void reset() override;
@@ -82,6 +86,7 @@ public:
     float getThroughput(CodeRate rate) const override;
     int getSamplesPerSymbol() const override;
     int getPreambleSamples() const override;
+    int getDataPreambleSamples() const override;  // Training only
     int getMinSamplesForFrame() const override;
 
     // ========================================================================

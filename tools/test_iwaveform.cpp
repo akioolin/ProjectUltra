@@ -854,6 +854,14 @@ int main(int argc, char** argv) {
             rx_modem.setConnected(true);
             rx_modem.setHandshakeComplete(true);
             rx_modem.setDataMode(ofdm_modulation, ofdm_code_rate);
+
+            // Set known CFO for light preamble mode
+            // In real protocol, CFO is established during chirp-based handshake
+            // For testing, we set it explicitly since we skip handshake
+            if (std::abs(cfo_hz) > 0.001f) {
+                rx_modem.setKnownCFO(cfo_hz);
+                printf("Set known CFO for light preamble mode: %.1f Hz\n", cfo_hz);
+            }
         }
 
         // Set up callback to track decoded frames

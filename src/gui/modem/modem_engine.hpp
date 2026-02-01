@@ -95,6 +95,9 @@ public:
     float getFadingIndex() const;  // Fading index from per-carrier variance (0-1)
     bool isFading() const;         // True if fading_index > 0.4
     ChannelQuality getChannelQuality() const;
+
+    // Set known CFO for light preamble mode (for testing or external CFO source)
+    void setKnownCFO(float cfo_hz);
     std::vector<std::complex<float>> getConstellationSymbols() const;
 
     using DataCallback = std::function<void(const std::string&)>;

@@ -462,7 +462,22 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     ensureTxWaveform(active_waveform, tx_modulation, tx_code_rate);
 
     if (active_tx_waveform_) {
-        preamble = active_tx_waveform_->generatePreamble();
+        // Use light preamble (training only, no chirp) for DATA frames when connected
+        // This saves ~1.2 seconds per frame, nearly tripling throughput
+        // Requirements: connected, handshake complete, waveform supports it
+        bool use_light_preamble = connected_ && handshake_complete_ &&
+                                   active_tx_waveform_->supportsDataPreamble();
+
+        if (use_light_preamble) {
+            preamble = active_tx_waveform_->generateDataPreamble();
+            LOG_MODEM(INFO, "[%s] TX: Using LIGHT preamble (training only, %zu samples)",
+                      log_prefix_.c_str(), preamble.size());
+        } else {
+            preamble = active_tx_waveform_->generatePreamble();
+            LOG_MODEM(INFO, "[%s] TX: Using FULL preamble (chirp+training, %zu samples)",
+                      log_prefix_.c_str(), preamble.size());
+        }
+
         modulated = active_tx_waveform_->modulate(to_modulate);
 
         LOG_MODEM(INFO, "[%s] TX: Using %s (%s, %s)",
@@ -826,6 +841,12 @@ bool ModemEngine::isFading() const {
 
 ChannelQuality ModemEngine::getChannelQuality() const {
     return ofdm_demodulator_->getChannelQuality();
+}
+
+void ModemEngine::setKnownCFO(float cfo_hz) {
+    if (streaming_decoder_) {
+        streaming_decoder_->setKnownCFO(cfo_hz);
+    }
 }
 
 std::vector<std::complex<float>> ModemEngine::getConstellationSymbols() const {
