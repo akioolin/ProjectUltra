@@ -242,6 +242,21 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         is_data_frame = (frame_type >= 0x30 && frame_type <= 0x33);
     }
 
+    // Determine waveform type EARLY - needed for encoding decisions
+    // 4-CW frame interleaving only makes sense for OFDM, not MC-DPSK
+    protocol::WaveformMode tx_waveform_mode;
+    if (use_connected_waveform_once_) {
+        tx_waveform_mode = disconnect_waveform_;
+    } else if (!connected_) {
+        tx_waveform_mode = connect_waveform_;
+    } else if (!handshake_complete_) {
+        tx_waveform_mode = last_rx_waveform_;
+    } else {
+        tx_waveform_mode = waveform_mode_;
+    }
+    bool is_ofdm_waveform = (tx_waveform_mode == protocol::WaveformMode::OFDM_CHIRP ||
+                             tx_waveform_mode == protocol::WaveformMode::OFDM_COX);
+
     if (is_v2_frame) {
         // === V2 Frame Path ===
         // Protocol rate selection:
@@ -256,12 +271,13 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 
         // Determine frame type to decide encoding strategy
         // Control frames (1 CW): ACK, NACK, PROBE, etc. - no frame interleaving
-        // Multi-CW frames (Connect, DATA): Always 4 CWs with frame-level interleaving
+        // DATA frames with OFDM: 4 CWs with frame-level interleaving
+        // DATA frames with MC-DPSK: Variable CWs, no frame interleaving (MC-DPSK doesn't support 4-CW)
         Bytes tx_data = data;  // Make mutable copy
         uint8_t frame_type = tx_data.size() >= 3 ? tx_data[2] : 0;
         bool is_control_frame = v2::isControlFrame(static_cast<v2::FrameType>(frame_type));
-        bool is_multi_cw_frame = (frame_type >= 0x10 && frame_type <= 0x19) ||  // Connect frames
-                                 (frame_type >= 0x30 && frame_type <= 0x3F);    // Data frames
+        // Only use 4-CW frame interleaving for DATA frames AND OFDM waveform
+        bool is_multi_cw_frame = (frame_type >= 0x30 && frame_type <= 0x3F) && is_ofdm_waveform;
 
         if (is_control_frame) {
             // === Control Frame Path (1 CW, no frame interleaving) ===
@@ -291,19 +307,23 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
                       data.size(), to_modulate.size());
         } else {
             // === Fallback: Variable CWs without frame interleaving ===
-            // (when frame_interleaving_enabled_ is false)
-            if (is_multi_cw_frame && tx_data.size() >= 17) {
-                uint16_t payload_len = (static_cast<uint16_t>(tx_data[13]) << 8) | tx_data[14];
-                uint8_t correct_cw = v2::DataFrame::calculateCodewords(payload_len, tx_code_rate);
-                if (tx_data[12] != correct_cw) {
-                    tx_data[12] = correct_cw;
-                    uint16_t hcrc = v2::ControlFrame::calculateCRC(tx_data.data(), 15);
-                    tx_data[15] = (hcrc >> 8) & 0xFF;
-                    tx_data[16] = hcrc & 0xFF;
-                }
-            }
-
+            // Used for: MC-DPSK frames (CONNECT, DATA at low SNR), or when interleaving disabled
+            // Must patch total_cw in header to match actual encoded CW count
             encoded_cws = v2::encodeFrameWithLDPC(tx_data, tx_code_rate);
+
+            // Patch total_cw to match actual encoded CWs (header may have wrong value)
+            uint8_t actual_cw = static_cast<uint8_t>(encoded_cws.size());
+            if (tx_data.size() >= 17 && tx_data[12] != actual_cw) {
+                LOG_MODEM(DEBUG, "TX v2: Patching total_cw from %d to %d for variable CW encoding",
+                          tx_data[12], actual_cw);
+                tx_data[12] = actual_cw;
+                uint16_t hcrc = v2::ControlFrame::calculateCRC(tx_data.data(), 15);
+                tx_data[15] = (hcrc >> 8) & 0xFF;
+                tx_data[16] = hcrc & 0xFF;
+
+                // Re-encode CW0 with corrected header
+                encoded_cws = v2::encodeFrameWithLDPC(tx_data, tx_code_rate);
+            }
             LOG_MODEM(INFO, "TX v2 fallback: %zu bytes -> %zu CWs (no frame interleave)",
                       data.size(), encoded_cws.size());
 

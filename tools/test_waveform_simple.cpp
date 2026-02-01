@@ -309,7 +309,8 @@ std::vector<float> generateFrames(const TestConfig& cfg, std::mt19937& rng,
                    frame.seq, frame.payload.size(), frame_data.size(), encoded.size());
         }
 
-        // Modulate
+        // Modulate - use FULL preamble (chirp + LTS) for independent frame testing
+        // Light preamble requires continuous timing tracking which doesn't work for isolated frames
         Samples preamble = waveform->generatePreamble();
         Samples modulated = waveform->modulate(encoded);
 

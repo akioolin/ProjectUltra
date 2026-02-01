@@ -45,8 +45,9 @@ inline WaveformRecommendation recommendWaveformAndRate(float snr_db, float fadin
     }
     else if (fading_index < 0.10f) {
         // AWGN (no fading): Use OFDM for higher throughput
-        if (snr_db >= 17.0f) {
-            // High SNR + AWGN: OFDM_COX for maximum throughput
+        if (snr_db >= 25.0f) {
+            // Very high SNR + AWGN: OFDM_COX for maximum throughput
+            // (Raised threshold - OFDM_COX needs more testing)
             rec.waveform = WaveformMode::OFDM_COX;
             rec.rate = CodeRate::R2_3;
             rec.estimated_throughput_bps = 5300.0f;
@@ -74,14 +75,20 @@ inline WaveformRecommendation recommendWaveformAndRate(float snr_db, float fadin
             rec.estimated_throughput_bps = 2300.0f;
         }
     }
-    else if (fading_index < 0.45f && snr_db >= 10.0f) {
-        // Moderate channel (fading 0.25-0.45): OFDM_CHIRP R1/2 with pilots
+    else if (fading_index < 0.30f && snr_db >= 12.0f) {
+        // Light-moderate fading (0.25-0.30): OFDM_CHIRP R1/2 with pilots
         rec.waveform = WaveformMode::OFDM_CHIRP;
         rec.rate = CodeRate::R1_2;  // 6 pilots for tracking
         rec.estimated_throughput_bps = 2300.0f;
     }
-    else if (fading_index < 0.55f && snr_db >= 12.0f) {
-        // Heavy fading (0.45-0.55): OFDM_CHIRP R1/4 (no pilots, max LDPC)
+    else if (fading_index < 0.50f && snr_db >= 10.0f) {
+        // Moderate fading (0.30-0.50): OFDM_CHIRP R1/4 (more robust)
+        rec.waveform = WaveformMode::OFDM_CHIRP;
+        rec.rate = CodeRate::R1_4;
+        rec.estimated_throughput_bps = 1150.0f;
+    }
+    else if (fading_index < 0.60f && snr_db >= 12.0f) {
+        // Heavy fading (0.50-0.60): OFDM_CHIRP R1/4 (no pilots, max LDPC)
         rec.waveform = WaveformMode::OFDM_CHIRP;
         rec.rate = CodeRate::R1_4;
         rec.estimated_throughput_bps = 1150.0f;
