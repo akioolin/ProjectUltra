@@ -85,6 +85,7 @@ private:
     std::string last_received_file_;  // Path of last received file
     bool file_browser_open_ = false;
     int last_progress_milestone_ = 0;  // Last logged milestone (0, 25, 50, 75)
+    std::chrono::steady_clock::time_point file_transfer_start_time_;  // For duration display
 
     // ========================================
     // Developer Options

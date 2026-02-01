@@ -379,6 +379,11 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
 
     // File transfer callbacks
     protocol_.setFileProgressCallback([this](const protocol::FileTransferProgress& p) {
+        // Start timing on first progress (for receiving files)
+        if (last_progress_milestone_ == 0 && !p.is_sending) {
+            file_transfer_start_time_ = std::chrono::steady_clock::now();
+        }
+
         // Log progress milestones (25%, 50%, 75%)
         int pct = static_cast<int>(p.percentage());
         int milestone = (pct / 25) * 25;  // Round down to 25, 50, 75
@@ -395,9 +400,14 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
 
     protocol_.setFileReceivedCallback([this](const std::string& path, bool success) {
         last_progress_milestone_ = 0;  // Reset for next transfer
+        auto duration = std::chrono::steady_clock::now() - file_transfer_start_time_;
+        float seconds = std::chrono::duration<float>(duration).count();
+
         std::string msg;
         if (success) {
-            msg = "[FILE] Received: " + path;
+            char buf[256];
+            snprintf(buf, sizeof(buf), "[FILE] Received: %s (%.1fs)", path.c_str(), seconds);
+            msg = buf;
             last_received_file_ = path;
         } else {
             msg = "[FILE] Receive failed";
@@ -410,9 +420,14 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
 
     protocol_.setFileSentCallback([this](bool success, const std::string& error) {
         last_progress_milestone_ = 0;  // Reset for next transfer
+        auto duration = std::chrono::steady_clock::now() - file_transfer_start_time_;
+        float seconds = std::chrono::duration<float>(duration).count();
+
         std::string msg;
         if (success) {
-            msg = "[FILE] Transfer complete";
+            char buf[128];
+            snprintf(buf, sizeof(buf), "[FILE] Transfer complete (%.1fs)", seconds);
+            msg = buf;
         } else {
             msg = "[FILE] Transfer failed: " + error;
         }
@@ -1573,6 +1588,7 @@ void App::renderOperateTab() {
         ImGui::BeginDisabled(!can_send_file);
         if (ImGui::Button("Send##file", ImVec2(60, 0))) {
             last_progress_milestone_ = 0;  // Reset milestone tracker
+            file_transfer_start_time_ = std::chrono::steady_clock::now();  // Start timing
             if (protocol_.sendFile(file_path_buffer_)) {
                 rx_log_.push_back("[FILE] Sending: " + std::string(file_path_buffer_));
             } else {
