@@ -791,6 +791,17 @@ std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>&
         avg_h_power /= data_carrier_indices.size();
         float fade_threshold = FADE_THRESHOLD_RATIO * avg_h_power;
 
+        // CRITICAL FIX: Scale noise_variance to match channel power
+        // The hardcoded noise_variance (0.1) assumes unity channel power.
+        // With FFT scaling, channel power is ~100-150, so noise must scale accordingly.
+        // Use the measured channel power and assume nominal 15 dB SNR for R1/4 (no pilots).
+        float scaled_noise_var = avg_h_power / DEFAULT_SNR_LINEAR;
+        if (noise_variance > 1e-6f && avg_h_power > 1.0f) {
+            // If we have pilot-based noise estimate, use it scaled by channel power
+            // Otherwise fall back to nominal SNR assumption
+            scaled_noise_var = std::max(scaled_noise_var, noise_variance * avg_h_power);
+        }
+
         for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
             int idx = data_carrier_indices[i];
             Complex received = freq_domain[idx];
@@ -804,16 +815,16 @@ std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>&
             Complex timing_correction = std::exp(Complex(0, timing_phase));
 
             // MMSE equalization: conj(H) / (|H|² + σ²)
-            float mmse_denom = h_power + noise_variance;
+            float mmse_denom = h_power + scaled_noise_var;
             if (mmse_denom < 1e-10f) {
                 // Extremely deep fade - zero output, mark unreliable
                 equalized[i] = Complex(0, 0);
                 carrier_noise_var[i] = MAX_CARRIER_NOISE_VAR;
             } else {
                 equalized[i] = received * std::conj(h) / mmse_denom * pilot_phase_correction * timing_correction;
-                // MMSE output noise variance approximation
-                // True formula: σ² * |H|² / (|H|² + σ²)², but simplified for LLR scaling
-                carrier_noise_var[i] = noise_variance / (h_power + noise_variance);
+                // MMSE output noise variance: σ² / |H|² after equalization
+                // This represents the noise power relative to unity signal power
+                carrier_noise_var[i] = scaled_noise_var / (h_power + scaled_noise_var);
             }
 
             // Soft erasure for deeply faded carriers
