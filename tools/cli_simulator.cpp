@@ -14,6 +14,7 @@
 
 #include <iostream>
 #include <iomanip>
+#include <fstream>
 #include <string>
 #include <vector>
 #include <chrono>
@@ -182,9 +183,20 @@ public:
     bool isHandshakeComplete() const { return handshake_complete_; }
     bool isReadyToSend() { return protocol_.isReadyToSend(); }
 
+    // File transfer interface
+    bool sendFile(const std::string& filepath) { return protocol_.sendFile(filepath); }
+    void setReceiveDirectory(const std::string& dir) { protocol_.setReceiveDirectory(dir); }
+    bool isFileTransferInProgress() const { return protocol_.isFileTransferInProgress(); }
+    protocol::FileTransferProgress getFileProgress() const { return protocol_.getFileProgress(); }
+
     // For receiving messages
     void setMessageCallback(std::function<void(const std::string&)> cb) {
         message_callback_ = cb;
+    }
+
+    // For receiving files
+    void setFileReceivedCallback(std::function<void(const std::string&, bool)> cb) {
+        file_received_callback_ = cb;
     }
 
     void setSNR(float snr) { snr_db_ = snr; }
@@ -217,6 +229,7 @@ private:
     std::atomic<bool> connected_{false};
     std::atomic<bool> handshake_complete_{false};
     std::function<void(const std::string&)> message_callback_;
+    std::function<void(const std::string&, bool)> file_received_callback_;
 
     std::atomic<uint64_t> total_samples_{0};
     float snr_db_ = 20.0f;
@@ -277,6 +290,13 @@ private:
         protocol_.setMessageReceivedCallback([this](const std::string&, const std::string& text) {
             if (message_callback_) {
                 message_callback_(text);
+            }
+        });
+
+        // File received
+        protocol_.setFileReceivedCallback([this](const std::string& filepath, bool success) {
+            if (file_received_callback_) {
+                file_received_callback_(filepath, success);
             }
         });
     }
@@ -361,6 +381,8 @@ public:
     void setForcedModulation(Modulation mod) { forced_mod_ = mod; }
     void setForcedCodeRate(CodeRate rate) { forced_rate_ = rate; }
     void setPreferredWaveform(WaveformMode mode) { forced_waveform_ = mode; }
+    void setTestFileTransfer(bool v) { test_file_transfer_ = v; }
+    void setTestFileSize(size_t bytes) { test_file_size_ = bytes; }
 
     bool runTest() {
         printHeader();
@@ -395,12 +417,21 @@ public:
             message_received_ = true;
         });
 
+        // Setup file received callback on BRAVO
+        bravo_->setReceiveDirectory("/tmp");
+        bravo_->setFileReceivedCallback([this](const std::string& path, bool success) {
+            std::lock_guard<std::mutex> lock(msg_mutex_);
+            received_file_path_ = path;
+            file_transfer_success_ = success;
+            file_received_ = true;
+        });
+
         // Start audio threads
         alpha_->start();
         bravo_->start();
 
-        // Run protocol test
-        bool success = runProtocolTest();
+        // Run protocol test (message or file)
+        bool success = test_file_transfer_ ? runFileTransferTest() : runProtocolTest();
 
         // Stop
         alpha_->stop();
@@ -416,6 +447,8 @@ private:
     float snr_db_ = 20.0f;
     bool verbose_ = false;
     bool use_fading_ = false;
+    bool test_file_transfer_ = false;
+    size_t test_file_size_ = 256;  // Default 256 bytes test file
     Modulation forced_mod_ = Modulation::AUTO;
     CodeRate forced_rate_ = CodeRate::AUTO;
     WaveformMode forced_waveform_ = WaveformMode::AUTO;
@@ -427,6 +460,11 @@ private:
     std::mutex msg_mutex_;
     std::string received_message_;
     std::atomic<bool> message_received_{false};
+
+    // File transfer state
+    std::string received_file_path_;
+    bool file_transfer_success_ = false;
+    std::atomic<bool> file_received_{false};
 
     bool runProtocolTest() {
         // Phase 1: Connect
@@ -492,6 +530,133 @@ private:
             return false;
         }
         std::cout << "  \033[32m✓ Disconnected!\033[0m\n";
+
+        return true;
+    }
+
+    bool runFileTransferTest() {
+        // Create test file
+        std::string test_file = "/tmp/cli_sim_test_file.bin";
+        {
+            std::ofstream ofs(test_file, std::ios::binary);
+            if (!ofs) {
+                std::cout << "  \033[31m✗ Failed to create test file!\033[0m\n";
+                return false;
+            }
+            // Write test pattern
+            for (size_t i = 0; i < test_file_size_; i++) {
+                ofs.put(static_cast<char>(i & 0xFF));
+            }
+        }
+        std::cout << "  Created test file: " << test_file << " (" << test_file_size_ << " bytes)\n";
+
+        // Phase 1: Connect
+        std::cout << "\n=== PHASE 1: CONNECTION ===\n";
+        std::cout << "  ALPHA connecting to BRAVO...\n";
+        alpha_->connect("BRAVO");
+
+        if (!waitFor([this]{ return alpha_->isConnected() && bravo_->isConnected(); }, 30)) {
+            std::cout << "  \033[31m✗ Connection timeout!\033[0m\n";
+            return false;
+        }
+        std::cout << "  \033[32m✓ Both stations connected!\033[0m\n";
+
+        // Phase 2: Mode negotiation
+        std::cout << "\n=== PHASE 2: MODE NEGOTIATION ===\n";
+        if (!waitFor([this]{ return alpha_->isHandshakeComplete(); }, 30)) {
+            std::cout << "  \033[31m✗ Mode negotiation timeout!\033[0m\n";
+            return false;
+        }
+        std::cout << "  \033[32m✓ Handshake complete!\033[0m\n";
+
+        // Phase 3: File transfer
+        std::cout << "\n=== PHASE 3: FILE TRANSFER ===\n";
+
+        if (!waitFor([this]{ return alpha_->isReadyToSend(); }, 10)) {
+            std::cout << "  \033[31m✗ ARQ not ready!\033[0m\n";
+            return false;
+        }
+
+        file_received_.store(false);
+        std::cout << "  Sending file: " << test_file << " (" << test_file_size_ << " bytes)\n";
+
+        if (!alpha_->sendFile(test_file)) {
+            std::cout << "  \033[31m✗ Failed to start file transfer!\033[0m\n";
+            return false;
+        }
+
+        // Wait for file transfer with progress updates
+        auto start = std::chrono::steady_clock::now();
+        int last_progress = -1;
+        while (!file_received_.load()) {
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start).count();
+
+            if (elapsed >= 120) {  // 2 minute timeout for file transfer
+                std::cout << "  \033[31m✗ File transfer timeout!\033[0m\n";
+                return false;
+            }
+
+            alpha_->tick();
+            bravo_->tick();
+
+            // Show progress
+            auto progress = alpha_->getFileProgress();
+            int pct = static_cast<int>(progress.percentage());
+            if (pct != last_progress && pct % 10 == 0) {
+                std::cout << "  Progress: " << pct << "% (" << progress.transferred_bytes << "/" << progress.total_bytes << " bytes)\n";
+                last_progress = pct;
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        // Verify received file
+        {
+            std::lock_guard<std::mutex> lock(msg_mutex_);
+            if (!file_transfer_success_) {
+                std::cout << "  \033[31m✗ File transfer reported failure!\033[0m\n";
+                return false;
+            }
+            std::cout << "  \033[32m✓ File received: " << received_file_path_ << "\033[0m\n";
+
+            // Verify contents
+            std::ifstream ifs(received_file_path_, std::ios::binary);
+            if (!ifs) {
+                std::cout << "  \033[31m✗ Cannot open received file!\033[0m\n";
+                return false;
+            }
+
+            bool content_ok = true;
+            for (size_t i = 0; i < test_file_size_; i++) {
+                char c;
+                if (!ifs.get(c) || static_cast<uint8_t>(c) != (i & 0xFF)) {
+                    content_ok = false;
+                    break;
+                }
+            }
+
+            if (content_ok) {
+                std::cout << "  \033[32m✓ File contents verified!\033[0m\n";
+            } else {
+                std::cout << "  \033[31m✗ File contents corrupted!\033[0m\n";
+                return false;
+            }
+        }
+
+        // Phase 4: Disconnect
+        std::cout << "\n=== PHASE 4: DISCONNECT ===\n";
+        alpha_->disconnect();
+
+        if (!waitFor([this]{ return !alpha_->isConnected() && !bravo_->isConnected(); }, 30)) {
+            std::cout << "  \033[31m✗ Disconnect timeout!\033[0m\n";
+            return false;
+        }
+        std::cout << "  \033[32m✓ Disconnected!\033[0m\n";
+
+        // Cleanup
+        std::remove(test_file.c_str());
+        std::remove(received_file_path_.c_str());
 
         return true;
     }
@@ -599,6 +764,12 @@ int main(int argc, char* argv[]) {
                     return 1;
                 }
             }
+        } else if (arg == "--file" || arg == "--test-file") {
+            sim.setTestFileTransfer(true);
+            // Optional file size argument
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                sim.setTestFileSize(std::stoul(argv[++i]));
+            }
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "CLI Simulator - Single Audio I/O Thread Model\n\n";
             std::cout << "Each station has ONE audio thread (like real sound card).\n";
@@ -609,6 +780,7 @@ int main(int argc, char* argv[]) {
             std::cout << "  --mod, -m <MOD>     Force modulation: dqpsk, d8psk, dbpsk\n";
             std::cout << "  --rate, -r <RATE>   Force code rate: r1_4, r1_2, r2_3, r3_4\n";
             std::cout << "  --waveform, -w <WF> Force waveform: mc_dpsk, ofdm_chirp, ofdm_cox\n";
+            std::cout << "  --file [SIZE]       Test file transfer (default: 256 bytes)\n";
             std::cout << "  --verbose, -v       Verbose output\n";
             return 0;
         }
