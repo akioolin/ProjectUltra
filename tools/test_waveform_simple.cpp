@@ -283,9 +283,6 @@ std::vector<float> generateFrames(const TestConfig& cfg, std::mt19937& rng,
         return full_audio;
     }
 
-    // Create encoder
-    auto encoder = fec::CodecFactory::create(fec::CodecType::LDPC, cfg.code_rate);
-
     // Add leading silence
     const size_t LEAD_IN = 48000;  // 1 second
     full_audio.resize(LEAD_IN, 0.0f);
@@ -303,12 +300,12 @@ std::vector<float> generateFrames(const TestConfig& cfg, std::mt19937& rng,
         auto df = v2::DataFrame::makeData("TEST", "RX", frame.seq, frame.payload, cfg.code_rate);
         Bytes frame_data = df.serialize();
 
-        // Encode with LDPC
-        encoder->setRate(cfg.code_rate);
-        Bytes encoded = encoder->encode(frame_data);
+        // Encode with frame interleaving (4 CWs per frame)
+        // This uses encodeFixedFrame which includes LDPC + interleaving
+        Bytes encoded = v2::encodeFixedFrame(frame_data, cfg.code_rate);
 
         if (cfg.verbose) {
-            printf("  Frame %d: %zu bytes payload -> %zu bytes frame -> %zu bytes encoded\n",
+            printf("  Frame %d: %zu bytes payload -> %zu bytes frame -> %zu bytes encoded (interleaved)\n",
                    frame.seq, frame.payload.size(), frame_data.size(), encoded.size());
         }
 
