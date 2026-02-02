@@ -117,16 +117,10 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_link_libraries(ultra PRIVATE ultra_core)
 
-    # CLI Simulator - Command-line version of GUI test mode (real-time audio)
+    # CLI Simulator - Uses IWaveform + StreamingDecoder directly (NOT ModemEngine)
     add_executable(cli_simulator
         tools/cli_simulator.cpp
-        src/gui/modem/modem_engine.cpp
-        src/gui/modem/modem_rx.cpp
-        src/gui/modem/modem_rx_decode.cpp
-        src/gui/modem/modem_mode.cpp
-        src/gui/modem/modem_carrier_sense.cpp
         src/gui/modem/streaming_decoder.cpp
-        src/gui/adaptive_mode.cpp
     )
     target_include_directories(cli_simulator PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -317,18 +311,9 @@ if(ULTRA_BUILD_TOOLS)
     target_link_libraries(test_codec_factory PRIVATE ultra_core)
 
     # IWaveform interface test (uses ModemEngine with IWaveform integration)
-    add_executable(test_iwaveform
-        tools/test_iwaveform.cpp
-        src/gui/modem/modem_engine.cpp
-        src/gui/modem/modem_rx.cpp
-        src/gui/modem/modem_rx_decode.cpp
-        src/gui/modem/modem_mode.cpp
-        src/gui/modem/modem_carrier_sense.cpp
-        src/gui/modem/streaming_decoder.cpp
-        src/gui/adaptive_mode.cpp
-    )
-    target_include_directories(test_iwaveform PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_iwaveform PRIVATE ultra_core)
+    # DEPRECATED: test_iwaveform - DO NOT USE
+    # Use test_waveform_simple instead (clean TX/RX with consistent config)
+    # add_executable(test_iwaveform ...)  # Removed - file renamed to test_iwaveform_DO_NOT_USE.cpp
 
     # Simple waveform test (clean TX/RX with consistent config)
     add_executable(test_waveform_simple

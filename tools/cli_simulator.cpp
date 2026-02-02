@@ -4,12 +4,12 @@
  * Each station has ONE audio thread that handles both TX and RX,
  * exactly like a real sound card callback:
  *   - Every 10ms, read RX samples from channel
- *   - Feed RX to modem decoder
- *   - Check if modem has TX samples pending
+ *   - Feed RX to StreamingDecoder
+ *   - Check if we have TX samples pending
  *   - Send TX samples to channel
  *
- * This matches real hardware behavior where you have a single
- * audio callback that handles both input and output.
+ * REFACTORED: Uses IWaveform + StreamingDecoder directly (not ModemEngine)
+ * This ensures consistent configuration between TX and RX.
  */
 
 #include <iostream>
@@ -25,8 +25,12 @@
 #include <cmath>
 #include <functional>
 
-#include "gui/modem/modem_engine.hpp"
+#include "waveform/waveform_factory.hpp"
+#include "waveform/ofdm_chirp_waveform.hpp"
+#include "waveform/mc_dpsk_waveform.hpp"
+#include "gui/modem/streaming_decoder.hpp"
 #include "protocol/protocol_engine.hpp"
+#include "protocol/frame_v2.hpp"
 #include "ultra/logging.hpp"
 #include "sim/hf_channel.hpp"
 
@@ -34,6 +38,7 @@ using namespace ultra;
 using namespace ultra::gui;
 using namespace ultra::protocol;
 using namespace ultra::sim;
+namespace v2 = protocol::v2;
 
 /**
  * SimulatedChannel - The "air" between two stations
@@ -135,12 +140,8 @@ private:
 /**
  * SimulatedStation - One station with single audio I/O thread
  *
- * Like a real sound card, one thread handles both TX and RX:
- * - Every 10ms (480 samples at 48kHz):
- *   1. Read RX samples from channel
- *   2. Feed to modem decoder
- *   3. Check for pending TX
- *   4. Send TX to channel
+ * Uses IWaveform for TX and StreamingDecoder for RX (NOT ModemEngine).
+ * This ensures consistent configuration between TX and RX paths.
  */
 class SimulatedStation {
 public:
@@ -151,9 +152,15 @@ public:
     SimulatedStation(const std::string& callsign, SimulatedChannel& channel, bool is_station_a)
         : callsign_(callsign), channel_(channel), is_station_a_(is_station_a) {
 
-        modem_.setLogPrefix(callsign);
         protocol_.setLocalCallsign(callsign);
         protocol_.setAutoAccept(true);
+
+        // Initialize with default OFDM config (NVIS mode)
+        ofdm_config_ = createOFDMConfig();
+
+        // Create TX waveform and RX decoder
+        createWaveform();
+        createDecoder();
 
         setupCallbacks();
     }
@@ -170,6 +177,7 @@ public:
 
     void stop() {
         running_ = false;
+        if (decoder_) decoder_->stop();
         if (audio_thread_.joinable()) {
             audio_thread_.join();
         }
@@ -215,7 +223,19 @@ private:
     SimulatedChannel& channel_;
     bool is_station_a_;
 
-    ModemEngine modem_;
+    // TX: IWaveform directly
+    std::unique_ptr<IWaveform> tx_waveform_;
+    WaveformMode tx_waveform_mode_ = WaveformMode::MC_DPSK;  // Start with DPSK for PING/CONNECT
+
+    // RX: StreamingDecoder directly
+    std::unique_ptr<StreamingDecoder> decoder_;
+
+    // OFDM configuration (shared between TX and RX)
+    ModemConfig ofdm_config_;
+    Modulation data_modulation_ = Modulation::DQPSK;
+    CodeRate data_code_rate_ = CodeRate::R1_4;
+
+    // Protocol engine
     ProtocolEngine protocol_{ConnectionConfig{}};
 
     std::atomic<bool> running_{false};
@@ -228,62 +248,270 @@ private:
     // State
     std::atomic<bool> connected_{false};
     std::atomic<bool> handshake_complete_{false};
+    float last_cfo_hz_ = 0.0f;  // CFO from chirp detection, used for light preamble
+
     std::function<void(const std::string&)> message_callback_;
     std::function<void(const std::string&, bool)> file_received_callback_;
 
     std::atomic<uint64_t> total_samples_{0};
     float snr_db_ = 20.0f;
 
+    ModemConfig createOFDMConfig() {
+        ModemConfig cfg;
+        cfg.fft_size = 1024;       // NVIS mode
+        cfg.num_carriers = 59;     // NVIS mode
+        cfg.sample_rate = SAMPLE_RATE;
+        cfg.center_freq = 1500.0f;
+        cfg.cp_mode = CyclicPrefixMode::LONG;
+        cfg.modulation = Modulation::DQPSK;
+        cfg.code_rate = CodeRate::R1_4;
+        // Pilots for R1/4 (6 pilots, spacing 10)
+        cfg.use_pilots = true;
+        cfg.pilot_spacing = 10;
+        return cfg;
+    }
+
+    void createWaveform() {
+        if (tx_waveform_mode_ == WaveformMode::MC_DPSK) {
+            tx_waveform_ = WaveformFactory::createMCDPSK(8);  // 8 carriers for DPSK
+        } else {
+            // OFDM_CHIRP with proper config
+            tx_waveform_ = std::make_unique<OFDMChirpWaveform>(ofdm_config_);
+            static_cast<OFDMChirpWaveform*>(tx_waveform_.get())->configure(
+                data_modulation_, data_code_rate_);
+        }
+        LOG_MODEM(INFO, "[%s] TX waveform: %s", callsign_.c_str(),
+                  waveformModeToString(tx_waveform_mode_));
+    }
+
+    void createDecoder() {
+        decoder_ = std::make_unique<StreamingDecoder>();
+        decoder_->setLogPrefix(callsign_);
+
+        // Start in disconnected mode (MC_DPSK for PING detection)
+        decoder_->setMode(WaveformMode::MC_DPSK, false);
+        decoder_->setMCDPSKCarriers(8);
+
+        // Set frame callback
+        decoder_->setFrameCallback([this](const DecodeResult& result) {
+            handleDecodedFrame(result);
+        });
+
+        // Set ping callback
+        decoder_->setPingCallback([this](float snr_db, float cfo_hz) {
+            last_cfo_hz_ = cfo_hz;
+            protocol_.onPingReceived();
+        });
+    }
+
+    void handleDecodedFrame(const DecodeResult& result) {
+        if (!result.success) return;
+
+        if (result.is_ping) {
+            // PING handled by ping callback
+            return;
+        }
+
+        // Update CFO from frame
+        last_cfo_hz_ = result.cfo_hz;
+
+        // Pass frame data to protocol
+        if (!result.frame_data.empty()) {
+            protocol_.setChannelQuality(snr_db_, 0.0f);  // TODO: get fading from decoder
+            protocol_.onRxData(result.frame_data);
+        }
+    }
+
+    void setWaveformMode(WaveformMode mode) {
+        if (tx_waveform_mode_ == mode) return;
+
+        tx_waveform_mode_ = mode;
+        createWaveform();
+
+        LOG_MODEM(INFO, "[%s] Switched to waveform: %s",
+                  callsign_.c_str(), waveformModeToString(mode));
+    }
+
+    void setDataMode(Modulation mod, CodeRate rate) {
+        data_modulation_ = mod;
+        data_code_rate_ = rate;
+
+        // Update OFDM config with pilots based on code rate
+        ofdm_config_.modulation = mod;
+        ofdm_config_.code_rate = rate;
+
+        // Configure pilots based on code rate (matching OFDMChirpWaveform)
+        switch (rate) {
+            case CodeRate::R3_4:
+                ofdm_config_.use_pilots = true;
+                ofdm_config_.pilot_spacing = 15;  // ~4 pilots
+                break;
+            case CodeRate::R2_3:
+            case CodeRate::R1_2:
+            case CodeRate::R1_4:
+            default:
+                ofdm_config_.use_pilots = true;
+                ofdm_config_.pilot_spacing = 10;  // ~6 pilots
+                break;
+        }
+
+        // Recreate TX waveform if it's OFDM
+        if (tx_waveform_mode_ != WaveformMode::MC_DPSK) {
+            createWaveform();
+        }
+
+        // Update RX decoder
+        if (decoder_) {
+            decoder_->setOFDMConfig(ofdm_config_);
+            decoder_->setDataMode(mod, rate);
+        }
+
+        LOG_MODEM(INFO, "[%s] Data mode: %s %s (pilots=%d, spacing=%d)",
+                  callsign_.c_str(), modulationToString(mod), codeRateToString(rate),
+                  ofdm_config_.use_pilots ? 1 : 0, ofdm_config_.pilot_spacing);
+    }
+
+    void setConnected(bool connected) {
+        if (connected_.load() == connected) return;
+
+        connected_ = connected;
+
+        if (connected) {
+            // Switch decoder to connected mode with negotiated waveform
+            if (decoder_) {
+                decoder_->setMode(tx_waveform_mode_, true);
+                decoder_->setOFDMConfig(ofdm_config_);
+                decoder_->setDataMode(data_modulation_, data_code_rate_);
+
+                // Set known CFO for light preamble detection
+                decoder_->setKnownCFO(last_cfo_hz_);
+            }
+            LOG_MODEM(INFO, "[%s] Entered CONNECTED state, CFO=%.1f Hz",
+                      callsign_.c_str(), last_cfo_hz_);
+        } else {
+            // Switch back to disconnected mode (MC_DPSK for PING detection)
+            if (decoder_) {
+                decoder_->setMode(WaveformMode::MC_DPSK, false);
+            }
+            handshake_complete_ = false;
+            LOG_MODEM(INFO, "[%s] Entered DISCONNECTED state", callsign_.c_str());
+        }
+    }
+
+    void setHandshakeComplete(bool complete) {
+        handshake_complete_ = complete;
+        if (complete) {
+            LOG_MODEM(INFO, "[%s] Handshake complete", callsign_.c_str());
+        }
+    }
+
+    std::vector<float> transmitFrame(const Bytes& data) {
+        if (!tx_waveform_) {
+            LOG_MODEM(ERROR, "[%s] No TX waveform!", callsign_.c_str());
+            return {};
+        }
+
+        // Encode frame data
+        Bytes encoded = v2::encodeFixedFrame(data, data_code_rate_);
+
+        // Generate preamble based on connection state
+        Samples preamble;
+        bool use_light = connected_.load() && handshake_complete_.load() &&
+                         tx_waveform_->supportsDataPreamble();
+
+        if (use_light) {
+            preamble = tx_waveform_->generateDataPreamble();
+            LOG_MODEM(DEBUG, "[%s] TX: Light preamble (%zu samples)",
+                      callsign_.c_str(), preamble.size());
+        } else {
+            preamble = tx_waveform_->generatePreamble();
+            LOG_MODEM(DEBUG, "[%s] TX: Full preamble (%zu samples)",
+                      callsign_.c_str(), preamble.size());
+        }
+
+        // Modulate
+        Samples modulated = tx_waveform_->modulate(encoded);
+
+        // Combine preamble + data
+        std::vector<float> result;
+        result.reserve(preamble.size() + modulated.size());
+        result.insert(result.end(), preamble.begin(), preamble.end());
+        result.insert(result.end(), modulated.begin(), modulated.end());
+
+        return result;
+    }
+
+    std::vector<float> transmitPing() {
+        // PING is just chirp preamble with no data
+        if (!tx_waveform_) return {};
+
+        // Ensure we're using MC_DPSK waveform for PING
+        if (tx_waveform_mode_ != WaveformMode::MC_DPSK) {
+            auto saved_mode = tx_waveform_mode_;
+            tx_waveform_mode_ = WaveformMode::MC_DPSK;
+            createWaveform();
+            auto preamble = tx_waveform_->generatePreamble();
+            tx_waveform_mode_ = saved_mode;
+            createWaveform();
+            return std::vector<float>(preamble.begin(), preamble.end());
+        }
+
+        auto preamble = tx_waveform_->generatePreamble();
+        return std::vector<float>(preamble.begin(), preamble.end());
+    }
+
+    std::vector<float> transmitPong() {
+        // PONG is same as PING
+        return transmitPing();
+    }
+
     void setupCallbacks() {
-        // TX callback - queue samples for transmission
+        // TX callback - encode and modulate frame
         protocol_.setTxDataCallback([this](const Bytes& data) {
-            auto samples = modem_.transmit(data);
+            auto samples = transmitFrame(data);
             queueTx(samples);
         });
 
-        // RX callback
-        modem_.setRawDataCallback([this](const Bytes& data) {
-            protocol_.setChannelQuality(snr_db_, modem_.getFadingIndex());
-            protocol_.onRxData(data);
-        });
-
-        // Connection state
+        // Connection state changes
         protocol_.setConnectionChangedCallback([this](ConnectionState state, const std::string&) {
             if (state == ConnectionState::CONNECTED) {
-                connected_ = true;
-                modem_.setConnected(true);
+                setConnected(true);
             } else if (state == ConnectionState::DISCONNECTED) {
-                connected_ = false;
-                modem_.setConnected(false);
+                setConnected(false);
             }
         });
 
-        // Mode callbacks
+        // Data mode changes (modulation + code rate)
         protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate, float) {
-            modem_.setDataMode(mod, rate);
+            setDataMode(mod, rate);
         });
+
+        // Waveform mode changes
         protocol_.setModeNegotiatedCallback([this](WaveformMode mode) {
-            modem_.setWaveformMode(mode);
+            setWaveformMode(mode);
         });
+
         protocol_.setConnectWaveformChangedCallback([this](WaveformMode mode) {
-            modem_.setConnectWaveform(mode);
+            // This is for connection attempts - use MC_DPSK initially
+            if (!connected_.load()) {
+                setWaveformMode(mode);
+            }
         });
+
+        // Handshake confirmed
         protocol_.setHandshakeConfirmedCallback([this]() {
-            modem_.setHandshakeComplete(true);
-            handshake_complete_ = true;
+            setHandshakeComplete(true);
         });
 
         // PING/PONG
         protocol_.setPingTxCallback([this]() {
-            auto samples = modem_.transmitPing();
+            auto samples = transmitPing();
             queueTx(samples);
         });
+
         protocol_.setPingReceivedCallback([this]() {
-            auto samples = modem_.transmitPong();
+            auto samples = transmitPong();
             queueTx(samples);
-        });
-        modem_.setPingReceivedCallback([this](float) {
-            protocol_.onPingReceived();
         });
 
         // Message received
@@ -324,13 +552,11 @@ private:
                 rx_samples = channel_.receiveForB(SAMPLES_PER_CALLBACK);
             }
 
-            // Calculate RMS for debug
-            float rx_rms = 0.0f;
-            for (float s : rx_samples) rx_rms += s * s;
-            rx_rms = std::sqrt(rx_rms / rx_samples.size());
-
-            // 2. FEED TO MODEM DECODER
-            modem_.feedAudio(rx_samples);
+            // 2. FEED TO DECODER (StreamingDecoder directly)
+            if (decoder_) {
+                decoder_->feedAudio(rx_samples.data(), rx_samples.size());
+                decoder_->processBuffer();
+            }
 
             // 3. GET TX SAMPLES - check if we have anything to transmit
             std::vector<float> tx_samples(SAMPLES_PER_CALLBACK, 0.0f);
@@ -358,6 +584,9 @@ private:
 
             // Log continuous audio status every 2 seconds (200 callbacks at 10ms each)
             if (callback_count % 200 == 0) {
+                float rx_rms = 0.0f;
+                for (float s : rx_samples) rx_rms += s * s;
+                rx_rms = std::sqrt(rx_rms / rx_samples.size());
                 printf("[%s] Audio loop: %.1fs, RX_RMS=%.4f, TX_pending=%zu\n",
                        callsign_.c_str(), getSimTime(), rx_rms, tx_pending);
             }
@@ -691,7 +920,7 @@ private:
     void printHeader() {
         std::cout << "\n";
         std::cout << "╔══════════════════════════════════════════════════════════════╗\n";
-        std::cout << "║   CLI Simulator - Single Audio I/O Thread Model              ║\n";
+        std::cout << "║   CLI Simulator - IWaveform + StreamingDecoder               ║\n";
         std::cout << "╚══════════════════════════════════════════════════════════════╝\n";
         std::cout << "\n";
         std::cout << "  SNR:     " << snr_db_ << " dB\n";
@@ -771,8 +1000,8 @@ int main(int argc, char* argv[]) {
                 sim.setTestFileSize(std::stoul(argv[++i]));
             }
         } else if (arg == "--help" || arg == "-h") {
-            std::cout << "CLI Simulator - Single Audio I/O Thread Model\n\n";
-            std::cout << "Each station has ONE audio thread (like real sound card).\n";
+            std::cout << "CLI Simulator - IWaveform + StreamingDecoder Model\n\n";
+            std::cout << "Uses IWaveform for TX and StreamingDecoder for RX directly.\n";
             std::cout << "Every 10ms: read RX, feed decoder, get TX, send to channel.\n\n";
             std::cout << "Options:\n";
             std::cout << "  --snr, -s <dB>      SNR (default: 20)\n";

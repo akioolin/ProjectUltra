@@ -100,9 +100,10 @@ void OFDMChirpWaveform::configurePilotsForCodeRate(CodeRate rate) {
         case CodeRate::R1_4:
         case CodeRate::R1_3:
         default:
-            // No pilots - all carriers data (maximum LDPC redundancy handles fading)
-            config_.use_pilots = false;
-            config_.pilot_spacing = 1;
+            // 6 pilots for channel tracking on fading channels
+            // R1/4 needs pilots too for per-symbol tracking on fading
+            config_.use_pilots = true;
+            config_.pilot_spacing = 10;  // ~6 pilots out of 59
             break;
     }
 }
