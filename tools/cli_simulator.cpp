@@ -32,6 +32,8 @@
 #include "protocol/protocol_engine.hpp"
 #include "protocol/frame_v2.hpp"
 #include "ultra/logging.hpp"
+#include "ultra/fec.hpp"  // ChannelInterleaver, LDPCEncoder
+#include "fec/frame_interleaver.hpp"  // FrameInterleaver
 #include "sim/hf_channel.hpp"
 
 using namespace ultra;
@@ -237,6 +239,9 @@ private:
     Modulation data_modulation_ = Modulation::DQPSK;
     CodeRate data_code_rate_ = CodeRate::R1_4;
 
+    // Channel interleaver for OFDM TX (must match StreamingDecoder RX)
+    std::unique_ptr<ChannelInterleaver> channel_interleaver_;
+
     // Protocol engine
     ProtocolEngine protocol_{ConnectionConfig{}};
 
@@ -281,11 +286,21 @@ private:
 
         if (tx_waveform_mode_ == WaveformMode::MC_DPSK) {
             tx_waveform_ = WaveformFactory::createMCDPSK(8);  // 8 carriers for DPSK
+            channel_interleaver_.reset();  // No channel interleaving for MC-DPSK
         } else {
             // OFDM_CHIRP with proper config
             tx_waveform_ = std::make_unique<OFDMChirpWaveform>(ofdm_config_);
             static_cast<OFDMChirpWaveform*>(tx_waveform_.get())->configure(
                 data_modulation_, data_code_rate_);
+
+            // Create channel interleaver matching the OFDM config
+            // bits_per_symbol = data_carriers × 2 (DQPSK)
+            int pilot_count = ofdm_config_.use_pilots ?
+                ((ofdm_config_.num_carriers + ofdm_config_.pilot_spacing - 1) / ofdm_config_.pilot_spacing) : 0;
+            int data_carriers = ofdm_config_.num_carriers - pilot_count;
+            int bits_per_symbol = data_carriers * 2;  // DQPSK = 2 bits/carrier
+            channel_interleaver_ = std::make_unique<ChannelInterleaver>(bits_per_symbol, 648);
+            LOG_MODEM(INFO, "[%s] Channel interleaver: %d bits/symbol", callsign_.c_str(), bits_per_symbol);
         }
         LOG_MODEM(INFO, "[%s] TX waveform: %s", callsign_.c_str(),
                   waveformModeToString(tx_waveform_mode_));
@@ -470,6 +485,7 @@ private:
                       callsign_.c_str(), tx_data.size(), cws.size(), encoded.size());
         } else {
             // OFDM: 4-CW encoding with frame interleaving
+            // Channel interleaving is disabled for now - need to integrate into frame_v2.cpp
             encoded = v2::encodeFixedFrame(tx_data, data_code_rate_);
             LOG_MODEM(INFO, "[%s] TX OFDM: %zu bytes -> 4 CWs (%zu coded bytes)",
                       callsign_.c_str(), tx_data.size(), encoded.size());

@@ -361,13 +361,16 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
                             config.modulation == Modulation::D8PSK);
     bool has_pilots = !pilot_carrier_indices.empty();
 
+    // Use soft_bits.empty() to detect first DATA symbol (snr_symbol_count may be > 0 from LTS)
+    bool is_first_data_symbol = soft_bits.empty();
+
     float alpha;
-    if (snr_symbol_count == 0) {
-        alpha = 1.0f;  // First symbol: use pilot estimate directly
+    if (is_first_data_symbol) {
+        alpha = 1.0f;  // First data symbol: use pilot estimate directly (channel changed since LTS)
     } else if (is_differential) {
-        // With pilots: track fading more aggressively (pilots provide phase reference)
+        // With pilots: track fading VERY aggressively (channel changes faster than symbol rate)
         // Without pilots: keep H stable for differential decoding
-        alpha = has_pilots ? 0.5f : 0.1f;
+        alpha = has_pilots ? 0.8f : 0.1f;
     } else {
         alpha = 0.9f;  // Coherent: track channel changes
     }

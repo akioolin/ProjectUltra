@@ -80,8 +80,10 @@ constexpr float PHASE_INTERPOLATION_THRESHOLD = 1.5708f;  // π/2 = 90°
 // Default SNR assumption for first symbol (15 dB = 31.6 linear)
 constexpr float DEFAULT_SNR_LINEAR = 31.6f;
 
-// Fade detection threshold (10 dB below average = 0.1 * average)
-constexpr float FADE_THRESHOLD_RATIO = 0.1f;
+// Fade detection threshold - carriers below this ratio of average power get soft erasure
+// Higher value = more aggressive erasure (helps fading but hurts AWGN)
+// 0.25 = 6 dB below average = mark ~20% of carriers as faded on moderate fading
+constexpr float FADE_THRESHOLD_RATIO = 0.25f;
 
 // =============================================================================
 // SOFT DEMAPPING

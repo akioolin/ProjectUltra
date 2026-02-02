@@ -612,9 +612,11 @@ void StreamingDecoder::decodeCurrentFrame() {
         // Peek at header
         std::vector<float> cw0(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
 
-        bool use_interleave = false;  // DISABLED FOR TESTING
-        (void)(mode_ == protocol::WaveformMode::OFDM_CHIRP ||
-               mode_ == protocol::WaveformMode::OFDM_COX);
+        // Channel deinterleaving for OFDM modes (spreads fading errors across LDPC codeword)
+        // TEMPORARILY DISABLED FOR TESTING
+        bool use_interleave = false;
+        (void)((mode_ == protocol::WaveformMode::OFDM_CHIRP ||
+                mode_ == protocol::WaveformMode::OFDM_COX));
         if (use_interleave && interleaver_) {
             cw0 = interleaver_->deinterleave(cw0);
         }
@@ -769,17 +771,13 @@ void StreamingDecoder::setDataMode(Modulation mod, CodeRate rate) {
     // Recalculate data carriers based on new code rate's pilot requirement
     if (mode_ != protocol::WaveformMode::MC_DPSK && waveform_) {
         // Calculate pilot count to match OFDMChirpWaveform::configurePilotsForCodeRate()
-        int pilot_count = 0;
+        // ALL code rates now use pilots for per-symbol channel tracking on fading
         int pilot_spacing = 0;
         switch (rate) {
             case CodeRate::R3_4: pilot_spacing = 15; break;  // ~4 pilots
-            case CodeRate::R2_3:
-            case CodeRate::R1_2: pilot_spacing = 10; break;  // ~6 pilots
-            default: pilot_spacing = 0; break;  // R1/4: no pilots
+            default: pilot_spacing = 10; break;  // R2/3, R1/2, R1/4: 6 pilots
         }
-        if (pilot_spacing > 0) {
-            pilot_count = (ofdm_carriers_ + pilot_spacing - 1) / pilot_spacing;
-        }
+        int pilot_count = (ofdm_carriers_ + pilot_spacing - 1) / pilot_spacing;
         ofdm_data_carriers_ = ofdm_carriers_ - pilot_count;
     }
 
@@ -900,6 +898,20 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     size_t bytes_per_cw = v2::getBytesPerCodeword(rate);
     codec_->setRate(rate);
 
+    // Channel deinterleaving for OFDM modes (spreads fading errors across LDPC codeword)
+    // TEMPORARILY DISABLED FOR TESTING
+    bool use_channel_interleave = false;
+    (void)((mode_ == protocol::WaveformMode::OFDM_CHIRP ||
+            mode_ == protocol::WaveformMode::OFDM_COX) && interleaver_);
+
+    // Helper to deinterleave a codeword if needed
+    auto deinterleave_cw = [&](const std::vector<float>& cw) -> std::vector<float> {
+        if (use_channel_interleave) {
+            return interleaver_->deinterleave(cw);
+        }
+        return cw;
+    };
+
     // ========================================================================
     // "Try Both" Strategy for Frame Interleaving
     // ========================================================================
@@ -908,8 +920,9 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     // 3. If decode fails OR it's a 4-CW frame → try frame-interleaved decode
     // ========================================================================
 
-    // Step 1: Try to decode CW0 without deinterleaving
+    // Step 1: Try to decode CW0 (with channel deinterleaving if OFDM)
     std::vector<float> cw0_bits(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
+    cw0_bits = deinterleave_cw(cw0_bits);
     auto [ok0, data0] = codec_->decode(cw0_bits);
 
     bool try_frame_interleave = false;
@@ -949,7 +962,7 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     if (try_frame_interleave && soft_bits.size() >= FRAME_INTERLEAVE_BITS) {
         LOG_MODEM(DEBUG, "[%s] Attempting 4-CW frame deinterleave decode", log_prefix_.c_str());
 
-        // Use decodeFixedFrame which deinterleaves then decodes
+        // Use v2::decodeFixedFrame which handles frame deinterleaving + LDPC decode
         auto cw_status = v2::decodeFixedFrame(soft_bits, rate);
 
         result.codewords_ok = 0;
@@ -1007,6 +1020,7 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
         for (int i = 1; i < total_cw; i++) {
             size_t off = i * LDPC_BLOCK;
             std::vector<float> bits(soft_bits.begin() + off, soft_bits.begin() + off + LDPC_BLOCK);
+            bits = deinterleave_cw(bits);
 
             auto [ok, data] = codec_->decode(bits);
             if (ok && data.size() >= bytes_per_cw) {
