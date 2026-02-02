@@ -225,7 +225,9 @@ private:
 
     // TX: IWaveform directly
     std::unique_ptr<IWaveform> tx_waveform_;
+    std::unique_ptr<IWaveform> control_waveform_;  // Always MC-DPSK for CONNECT/CONNECT_ACK
     WaveformMode tx_waveform_mode_ = WaveformMode::MC_DPSK;  // Start with DPSK for PING/CONNECT
+    WaveformMode negotiated_waveform_ = WaveformMode::MC_DPSK;  // Store negotiated mode, switch after handshake
 
     // RX: StreamingDecoder directly
     std::unique_ptr<StreamingDecoder> decoder_;
@@ -272,6 +274,11 @@ private:
     }
 
     void createWaveform() {
+        // Always have an MC-DPSK waveform ready for control frames
+        if (!control_waveform_) {
+            control_waveform_ = WaveformFactory::createMCDPSK(8);
+        }
+
         if (tx_waveform_mode_ == WaveformMode::MC_DPSK) {
             tx_waveform_ = WaveformFactory::createMCDPSK(8);  // 8 carriers for DPSK
         } else {
@@ -377,23 +384,33 @@ private:
         connected_ = connected;
 
         if (connected) {
-            // Switch decoder to connected mode with negotiated waveform
-            if (decoder_) {
-                decoder_->setMode(tx_waveform_mode_, true);
-                decoder_->setOFDMConfig(ofdm_config_);
-                decoder_->setDataMode(data_modulation_, data_code_rate_);
-
-                // Set known CFO for light preamble detection
-                decoder_->setKnownCFO(last_cfo_hz_);
+            // Switch to negotiated waveform now
+            if (negotiated_waveform_ != WaveformMode::MC_DPSK) {
+                setWaveformMode(negotiated_waveform_);
+                if (decoder_) {
+                    decoder_->setMode(negotiated_waveform_, true);
+                    decoder_->setOFDMConfig(ofdm_config_);
+                    decoder_->setDataMode(data_modulation_, data_code_rate_);
+                    decoder_->setKnownCFO(last_cfo_hz_);
+                }
+                LOG_MODEM(INFO, "[%s] Entered CONNECTED state, switched to %s, CFO=%.1f Hz",
+                          callsign_.c_str(), waveformModeToString(negotiated_waveform_), last_cfo_hz_);
+            } else {
+                LOG_MODEM(INFO, "[%s] Entered CONNECTED state (MC-DPSK), CFO=%.1f Hz",
+                          callsign_.c_str(), last_cfo_hz_);
             }
-            LOG_MODEM(INFO, "[%s] Entered CONNECTED state, CFO=%.1f Hz",
-                      callsign_.c_str(), last_cfo_hz_);
         } else {
             // Switch back to disconnected mode (MC_DPSK for PING detection)
             if (decoder_) {
                 decoder_->setMode(WaveformMode::MC_DPSK, false);
             }
+            // Reset TX waveform to MC-DPSK
+            if (tx_waveform_mode_ != WaveformMode::MC_DPSK) {
+                tx_waveform_mode_ = WaveformMode::MC_DPSK;
+                createWaveform();
+            }
             handshake_complete_ = false;
+            negotiated_waveform_ = WaveformMode::MC_DPSK;
             LOG_MODEM(INFO, "[%s] Entered DISCONNECTED state", callsign_.c_str());
         }
     }
@@ -411,40 +428,75 @@ private:
             return {};
         }
 
+        // Check if this is a connection setup frame (CONNECT, CONNECT_ACK)
+        // These ALWAYS use MC-DPSK. DISCONNECT uses the negotiated waveform.
+        // Frame format: Magic (2B) + Type (1B) + ...
+        bool is_control_frame = false;
+        if (data.size() >= 3) {
+            uint8_t frame_type = data[2];  // Type is at byte 2 (after 2-byte magic)
+            // Only CONNECT (0x12) and CONNECT_ACK (0x13) use MC-DPSK
+            is_control_frame = (frame_type == 0x12 || frame_type == 0x13);
+        }
+
         // Encode frame data based on waveform mode
+        // Control frames always use MC-DPSK encoding
         Bytes encoded;
-        if (tx_waveform_mode_ == WaveformMode::MC_DPSK) {
+        Bytes tx_data = data;  // Make mutable copy for header patching
+
+        bool use_mcdpsk = (tx_waveform_mode_ == WaveformMode::MC_DPSK) || is_control_frame;
+
+        if (use_mcdpsk) {
             // MC-DPSK: variable CW encoding (single or multiple CWs)
-            auto cws = v2::encodeFrameWithLDPC(data, data_code_rate_);
+            auto cws = v2::encodeFrameWithLDPC(tx_data, data_code_rate_);
+
+            // Patch total_cw in header to match actual CW count (like ModemEngine)
+            uint8_t actual_cw = static_cast<uint8_t>(cws.size());
+            if (tx_data.size() >= 17 && tx_data[12] != actual_cw) {
+                LOG_MODEM(DEBUG, "[%s] Patching total_cw from %d to %d",
+                          callsign_.c_str(), tx_data[12], actual_cw);
+                tx_data[12] = actual_cw;
+                // Recalculate header CRC (bytes 0-14)
+                uint16_t hcrc = v2::ControlFrame::calculateCRC(tx_data.data(), 15);
+                tx_data[15] = (hcrc >> 8) & 0xFF;
+                tx_data[16] = hcrc & 0xFF;
+                // Re-encode with corrected header
+                cws = v2::encodeFrameWithLDPC(tx_data, data_code_rate_);
+            }
+
             for (const auto& cw : cws) {
                 encoded.insert(encoded.end(), cw.begin(), cw.end());
             }
             LOG_MODEM(INFO, "[%s] TX MC-DPSK: %zu bytes -> %zu CWs (%zu coded bytes)",
-                      callsign_.c_str(), data.size(), cws.size(), encoded.size());
+                      callsign_.c_str(), tx_data.size(), cws.size(), encoded.size());
         } else {
             // OFDM: 4-CW encoding with frame interleaving
-            encoded = v2::encodeFixedFrame(data, data_code_rate_);
+            encoded = v2::encodeFixedFrame(tx_data, data_code_rate_);
             LOG_MODEM(INFO, "[%s] TX OFDM: %zu bytes -> 4 CWs (%zu coded bytes)",
-                      callsign_.c_str(), data.size(), encoded.size());
+                      callsign_.c_str(), tx_data.size(), encoded.size());
         }
 
+        // Select waveform for preamble/modulation
+        // Control frames always use MC-DPSK waveform
+        IWaveform* waveform = is_control_frame ? control_waveform_.get() : tx_waveform_.get();
+
         // Generate preamble based on connection state
+        // Control frames always use full preamble (chirp sync)
         Samples preamble;
-        bool use_light = connected_.load() && handshake_complete_.load() &&
-                         tx_waveform_->supportsDataPreamble();
+        bool use_light = !is_control_frame && connected_.load() && handshake_complete_.load() &&
+                         waveform->supportsDataPreamble();
 
         if (use_light) {
-            preamble = tx_waveform_->generateDataPreamble();
+            preamble = waveform->generateDataPreamble();
             LOG_MODEM(DEBUG, "[%s] TX: Light preamble (%zu samples)",
                       callsign_.c_str(), preamble.size());
         } else {
-            preamble = tx_waveform_->generatePreamble();
+            preamble = waveform->generatePreamble();
             LOG_MODEM(DEBUG, "[%s] TX: Full preamble (%zu samples)",
                       callsign_.c_str(), preamble.size());
         }
 
         // Modulate
-        Samples modulated = tx_waveform_->modulate(encoded);
+        Samples modulated = waveform->modulate(encoded);
 
         // Combine preamble + data
         std::vector<float> result;
@@ -500,21 +552,23 @@ private:
             setDataMode(mod, rate);
         });
 
-        // Waveform mode changes
+        // Waveform mode changes - store but DON'T switch yet (still need MC-DPSK for CONNECT_ACK)
         protocol_.setModeNegotiatedCallback([this](WaveformMode mode) {
-            setWaveformMode(mode);
+            negotiated_waveform_ = mode;
+            LOG_MODEM(INFO, "[%s] Mode negotiated: %s (will switch after handshake)",
+                      callsign_.c_str(), waveformModeToString(mode));
         });
 
         protocol_.setConnectWaveformChangedCallback([this](WaveformMode mode) {
-            // This is for connection attempts - use MC_DPSK initially
-            if (!connected_.load()) {
-                setWaveformMode(mode);
-            }
+            negotiated_waveform_ = mode;
+            LOG_MODEM(INFO, "[%s] Connect waveform set: %s (staying on MC-DPSK for handshake)",
+                      callsign_.c_str(), waveformModeToString(mode));
         });
 
-        // Handshake confirmed
+        // Handshake confirmed (initiator only - responder switches in setConnected)
         protocol_.setHandshakeConfirmedCallback([this]() {
             setHandshakeComplete(true);
+            LOG_MODEM(INFO, "[%s] Handshake confirmed", callsign_.c_str());
         });
 
         // PING/PONG

@@ -159,8 +159,8 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
     // OFDM modes: use shared rate selection helper
     mod = Modulation::DQPSK;  // Always differential for HF phase stability
 
-    // Special case: D8PSK at very high SNR + AWGN (experimental)
-    if (fading_index < 0.10f && snr_db >= 20.0f) {
+    // Special case: D8PSK at very high SNR + AWGN (experimental, not recommended yet)
+    if (fading_index < 0.10f && snr_db >= 25.0f) {
         mod = Modulation::D8PSK;  // 3 bits/carrier (+50% vs DQPSK)
         rate = CodeRate::R1_2;    // ~5.3 kbps with D8PSK
         return;
