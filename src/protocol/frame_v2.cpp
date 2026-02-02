@@ -1248,12 +1248,9 @@ CodewordInfo identifyCodeword(const Bytes& cw_data) {
 Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, bool use_channel_interleave) {
     using namespace fec;
 
-    // NOTE: Channel interleaving is currently disabled due to a bug where CW1 consistently
-    // fails to decode when channel interleaving is enabled. The self-test passes but the
-    // real modulator/demodulator pipeline has a mismatch. Frame interleaving alone provides
-    // good fading resistance for R1/4.
-    // TODO: Debug the byte-to-soft-bit ordering mismatch between TX and RX
-    (void)use_channel_interleave;  // Suppress unused warning
+    // Channel interleaving spreads consecutive bits across OFDM symbols for fading resistance.
+    // Uses 106 bits/symbol (53 data carriers * 2 bits for DQPSK) as the standard config.
+    static constexpr size_t BITS_PER_SYMBOL = 106;
 
     size_t bytes_per_cw = getBytesPerCodeword(rate);
     size_t total_info_bytes = FIXED_FRAME_CODEWORDS * bytes_per_cw;
@@ -1271,6 +1268,12 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, bool use_channel_
     std::vector<std::vector<uint8_t>> coded_codewords;
     coded_codewords.reserve(FIXED_FRAME_CODEWORDS);
 
+    // Create channel interleaver if enabled
+    std::unique_ptr<ChannelInterleaver> interleaver;
+    if (use_channel_interleave) {
+        interleaver = std::make_unique<ChannelInterleaver>(BITS_PER_SYMBOL, LDPC_CODEWORD_BITS);
+    }
+
     for (int cw = 0; cw < FIXED_FRAME_CODEWORDS; ++cw) {
         // Extract info bytes for this CW
         Bytes info_chunk(padded.begin() + cw * bytes_per_cw,
@@ -1278,6 +1281,12 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, bool use_channel_
 
         // LDPC encode → 81 bytes (648 bits)
         auto coded = encoder.encode(info_chunk);
+
+        // Apply channel interleaving if enabled
+        if (use_channel_interleave && interleaver) {
+            coded = interleaver->interleave(coded);
+        }
+
         coded_codewords.push_back(std::move(coded));
     }
 
@@ -1293,8 +1302,8 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate) {
 CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate, bool use_channel_deinterleave) {
     using namespace fec;
 
-    // NOTE: Channel deinterleaving is disabled - see comment in encodeFixedFrame
-    (void)use_channel_deinterleave;
+    // Channel deinterleaving must match TX - uses same 106 bits/symbol
+    static constexpr size_t BITS_PER_SYMBOL = 106;
 
     CodewordStatus status;
     status.decoded.resize(FIXED_FRAME_CODEWORDS, false);
@@ -1308,12 +1317,23 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
     // Deinterleave to restore original CW order (frame-level)
     auto cw_soft_bits = FrameInterleaver::deinterleave(interleaved_soft);
 
+    // Create channel interleaver for deinterleaving if enabled
+    std::unique_ptr<ChannelInterleaver> interleaver;
+    if (use_channel_deinterleave) {
+        interleaver = std::make_unique<ChannelInterleaver>(BITS_PER_SYMBOL, LDPC_CODEWORD_BITS);
+    }
+
     // Decode each codeword
     LDPCDecoder decoder(rate);
     size_t bytes_per_cw = getBytesPerCodeword(rate);
 
     for (int cw = 0; cw < FIXED_FRAME_CODEWORDS; ++cw) {
-        auto& cw_bits = cw_soft_bits[cw];
+        auto cw_bits = cw_soft_bits[cw];
+
+        // Apply channel deinterleaving if enabled
+        if (use_channel_deinterleave && interleaver) {
+            cw_bits = interleaver->deinterleave(cw_bits);
+        }
 
         // Debug: check LLR statistics for this CW
         float llr_sum = 0, llr_abs_sum = 0;
