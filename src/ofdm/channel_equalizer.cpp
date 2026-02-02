@@ -345,12 +345,13 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
 void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& freq_domain) {
     // Smoothing factor for channel estimate update:
     // - First symbol: alpha=1.0 (use pilot estimate directly)
-    // - Subsequent symbols: depends on modulation type
+    // - Subsequent symbols: depends on modulation type and pilot availability
     //
     // For DIFFERENTIAL modes (DQPSK, D8PSK, DBPSK):
-    //   Use very low alpha (0.1) to keep H stable between consecutive symbols.
-    //   Differential decoding computes diff = eq[n] × conj(eq[n-1]), which requires
-    //   H to be nearly constant. High alpha breaks this property.
+    //   WITHOUT pilots: Use low alpha (0.1) to keep H stable
+    //   WITH pilots: Use higher alpha (0.5) to track fading - pilots provide
+    //                reliable per-symbol phase reference that makes differential
+    //                decoding robust even with faster tracking
     //
     // For COHERENT modes (QPSK, QAM):
     //   Use high alpha (0.9) to track channel changes quickly.
@@ -358,12 +359,15 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     bool is_differential = (config.modulation == Modulation::DBPSK ||
                             config.modulation == Modulation::DQPSK ||
                             config.modulation == Modulation::D8PSK);
+    bool has_pilots = !pilot_carrier_indices.empty();
 
     float alpha;
     if (snr_symbol_count == 0) {
         alpha = 1.0f;  // First symbol: use pilot estimate directly
     } else if (is_differential) {
-        alpha = 0.1f;  // Differential: keep H stable for differential decoding
+        // With pilots: track fading more aggressively (pilots provide phase reference)
+        // Without pilots: keep H stable for differential decoding
+        alpha = has_pilots ? 0.5f : 0.1f;
     } else {
         alpha = 0.9f;  // Coherent: track channel changes
     }
