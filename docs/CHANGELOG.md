@@ -10,6 +10,41 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-02-02: Fix CW[0] LDPC Decode Failures in OFDM
+
+**What was broken:**
+- OFDM_CHIRP at SNR 20 dB with R1/4 intermittently failed to decode CW[0]
+- CW[0] hit 50 iterations (max) and failed while CW[1-3] decoded with 3-5 iterations
+- LLR statistics showed low |llr|_avg (~1.0-1.2) instead of expected 3-4 for SNR 20
+
+**Root cause:**
+- In `updateChannelEstimate()`, the first symbol fallback path sets `noise_count=1`
+- But the noise variance update condition was `if (noise_count > 1)`, which FAILED
+- Result: `noise_variance` stayed at hardcoded 0.1f instead of estimated ~0.01
+- This compressed LLRs by ~3x, causing borderline decodes that sometimes failed
+- CW[0] was more affected because its data has mixed bit polarity (llr_avg≈0)
+
+**Files modified:**
+- `src/ofdm/channel_equalizer.cpp`:
+  - Changed condition from `noise_count > 1` to `noise_count > 0`
+  - Handle single-sample fallback case (noise_count==1) separately
+- `src/protocol/frame_v2.cpp`:
+  - Added CW decode logging with LLR statistics for debugging
+
+**How it works:**
+- First symbol: noise_count=1 (fallback), now updates noise_variance from estimated 15dB SNR
+- Subsequent symbols: noise_count=6 (from 6 pilots), updates from temporal comparison
+- Correct noise_variance → correct LLR scaling → reliable LDPC decode
+
+**Test verification:**
+```bash
+./build/cli_simulator --snr 20 -w ofdm_chirp --rate r1_4 --test
+# Expected: All frames decode with 4/4 CWs
+# ✓ TEST PASSED - all 5 messages transferred, all CW[0] decode OK
+```
+
+---
+
 ## 2026-01-31: Fix MC-DPSK AUTO Rate Bug
 
 **What was broken:**
