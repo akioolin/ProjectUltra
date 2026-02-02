@@ -525,15 +525,28 @@ void StreamingDecoder::decodeCurrentFrame() {
     }
 
     // Check for PING (low energy after sync = chirp only, no data)
-    float rms = 0.0f;
-    size_t check_len = std::min(frame_buffer.size(), size_t(5000));
-    for (size_t i = 0; i < check_len; i++) {
-        rms += frame_buffer[i] * frame_buffer[i];
+    // For MC-DPSK: training=4096, ref=512, so data starts at 4608
+    // We need to check AFTER training region to detect PING correctly
+    size_t training_skip = 0;
+    if (mode_ == protocol::WaveformMode::MC_DPSK) {
+        training_skip = 4608;  // training + ref samples
+    } else {
+        // OFDM: check after preamble (2 LTS = ~1024 samples)
+        training_skip = 1024;
     }
-    rms = std::sqrt(rms / check_len);
 
-    LOG_MODEM(INFO, "[%s] PING check: RMS=%.4f (threshold=0.08), sync_pos=%zu",
-              log_prefix_.c_str(), rms, sync_position_);
+    float rms = 0.0f;
+    size_t check_start = std::min(training_skip, frame_buffer.size());
+    size_t check_len = std::min(frame_buffer.size() - check_start, size_t(5000));
+    if (check_len > 0) {
+        for (size_t i = 0; i < check_len; i++) {
+            rms += frame_buffer[check_start + i] * frame_buffer[check_start + i];
+        }
+        rms = std::sqrt(rms / check_len);
+    }
+
+    LOG_MODEM(INFO, "[%s] PING check: RMS=%.4f (threshold=0.08), sync_pos=%zu, check_start=%zu",
+              log_prefix_.c_str(), rms, sync_position_, check_start);
 
     if (rms < 0.08f) {
         // PING detected

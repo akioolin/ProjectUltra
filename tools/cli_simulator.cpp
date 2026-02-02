@@ -411,8 +411,22 @@ private:
             return {};
         }
 
-        // Encode frame data
-        Bytes encoded = v2::encodeFixedFrame(data, data_code_rate_);
+        // Encode frame data based on waveform mode
+        Bytes encoded;
+        if (tx_waveform_mode_ == WaveformMode::MC_DPSK) {
+            // MC-DPSK: variable CW encoding (single or multiple CWs)
+            auto cws = v2::encodeFrameWithLDPC(data, data_code_rate_);
+            for (const auto& cw : cws) {
+                encoded.insert(encoded.end(), cw.begin(), cw.end());
+            }
+            LOG_MODEM(INFO, "[%s] TX MC-DPSK: %zu bytes -> %zu CWs (%zu coded bytes)",
+                      callsign_.c_str(), data.size(), cws.size(), encoded.size());
+        } else {
+            // OFDM: 4-CW encoding with frame interleaving
+            encoded = v2::encodeFixedFrame(data, data_code_rate_);
+            LOG_MODEM(INFO, "[%s] TX OFDM: %zu bytes -> 4 CWs (%zu coded bytes)",
+                      callsign_.c_str(), data.size(), encoded.size());
+        }
 
         // Generate preamble based on connection state
         Samples preamble;
