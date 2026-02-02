@@ -624,8 +624,16 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     }
 
     // Update noise variance and SNR
-    if (noise_count > 1 && noise_power_sum > 0.0f) {
-        noise_variance = noise_power_sum / (noise_count - 1);
+    // Note: noise_count == 1 means first symbol fallback (no prev_pilot_phases yet)
+    // In that case, noise_power_sum = signal_power / DEFAULT_SNR_LINEAR is already the variance
+    if (noise_count > 0 && noise_power_sum > 0.0f) {
+        if (noise_count > 1) {
+            // Temporal comparison: divide by (count-1) since we're measuring variance of differences
+            noise_variance = noise_power_sum / (noise_count - 1);
+        } else {
+            // First symbol fallback: noise_power_sum is already the estimated variance
+            noise_variance = noise_power_sum;
+        }
         if (noise_variance < 1e-6f) noise_variance = 1e-6f;
 
         float instantaneous_snr = signal_power / noise_variance;

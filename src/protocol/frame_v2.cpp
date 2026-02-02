@@ -1314,8 +1314,22 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
 
     for (int cw = 0; cw < FIXED_FRAME_CODEWORDS; ++cw) {
         auto& cw_bits = cw_soft_bits[cw];
+
+        // Debug: check LLR statistics for this CW
+        float llr_sum = 0, llr_abs_sum = 0;
+        for (float llr : cw_bits) {
+            llr_sum += llr;
+            llr_abs_sum += std::abs(llr);
+        }
+        float llr_avg = llr_sum / cw_bits.size();
+        float llr_abs_avg = llr_abs_sum / cw_bits.size();
+
         auto decoded = decoder.decodeSoft(cw_bits);
         bool success = decoder.lastDecodeSuccess();
+        int iterations = decoder.lastIterations();
+
+        LOG_MODEM(INFO, "CW[%d]: %s (iters=%d, llr_avg=%.2f, |llr|_avg=%.2f)",
+                  cw, success ? "OK" : "FAIL", iterations, llr_avg, llr_abs_avg);
 
         status.decoded[cw] = success;
         if (success && decoded.size() >= bytes_per_cw) {
