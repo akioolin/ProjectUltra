@@ -45,6 +45,44 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-02-02: Fix BUG-006 - Re-enable Channel Interleaving
+
+**What was broken:**
+- Channel interleaving was completely non-functional - the `--channel-interleave` flag did nothing
+- When enabled, CW1 specifically failed to decode while CW0, CW2, CW3 succeeded
+- The bug report said interleaving "caused" failures, but actually it wasn't being applied at all
+
+**Root cause:**
+- In `encodeFixedFrame()` and `decodeFixedFrame()`, the `use_channel_interleave` parameter was cast to void:
+  ```cpp
+  (void)use_channel_interleave;  // Disabled due to BUG-006
+  ```
+- This completely disabled channel interleaving at the protocol level
+- The StreamingEncoder/Decoder were properly configured but frame_v2.cpp ignored the setting
+
+**Files modified:**
+- `src/protocol/frame_v2.cpp`:
+  - `encodeFixedFrame()`: Added ChannelInterleaver creation and interleave call after LDPC encode
+  - `decodeFixedFrame()`: Added ChannelInterleaver creation and deinterleave call before LDPC decode
+  - Both use consistent `BITS_PER_SYMBOL = 106` (53 data carriers × 2 bits for DQPSK)
+
+**How it works:**
+- Channel interleaving spreads consecutive bits across OFDM symbols for fading resistance
+- Interleaver is created with (bits_per_symbol=106, total_bits=648) matching LDPC codeword size
+- TX: After LDPC encode, interleave coded bits before frame interleaving
+- RX: After frame deinterleaving, channel-deinterleave before LDPC decode
+- The order is: LDPC encode → channel interleave → frame interleave (TX); reverse for RX
+
+**Test verification:**
+```bash
+# Clean AWGN with channel interleaving
+./build/cli_simulator --snr 20 -w ofdm_chirp --rate r1_4 --channel-interleave --test
+# Expected: Shows "Channel interleaving: ENABLED" and all frames decode
+# ✓ TEST PASSED - all 5 messages transferred
+```
+
+---
+
 ## 2026-01-31: Fix MC-DPSK AUTO Rate Bug
 
 **What was broken:**

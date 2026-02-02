@@ -44,6 +44,10 @@ struct OFDMDemodulator::Impl {
     float snr_alpha = 0.3f;
     int snr_symbol_count = 0;
 
+    // Fading index (from pilot magnitude variance)
+    // 0 = flat channel, > 0.15 = significant fading
+    float last_fading_index = 0.0f;
+
     // Output data
     Bytes demod_data;
     std::vector<float> soft_bits;

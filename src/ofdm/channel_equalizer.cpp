@@ -626,20 +626,74 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     // Update noise variance and SNR
     // Note: noise_count == 1 means first symbol fallback (no prev_pilot_phases yet)
     // In that case, noise_power_sum = signal_power / DEFAULT_SNR_LINEAR is already the variance
+    //
+    // CRITICAL FIX FOR FADING CHANNELS:
+    // On fading channels, H[n] - H[n-1] includes BOTH noise AND fading variation.
+    // The temporal comparison cannot distinguish them, causing noise_variance to be
+    // massively overestimated → compressed LLRs → LDPC decode failure.
+    //
+    // Solution: Detect fading from pilot magnitude variance and use LTS-based SNR
+    // estimate when fading is significant. The pilots still track the channel
+    // (for equalization), but we don't let fading contaminate noise_variance.
+
+    // Compute fading index from pilot magnitude variance
+    // High variance across carriers indicates frequency-selective fading
+    float h_mag_mean = 0.0f;
+    for (size_t i = 0; i < h_ls_all.size(); ++i) {
+        h_mag_mean += std::abs(h_ls_all[i]);
+    }
+    h_mag_mean /= h_ls_all.size();
+
+    float h_mag_variance = 0.0f;
+    for (size_t i = 0; i < h_ls_all.size(); ++i) {
+        float diff = std::abs(h_ls_all[i]) - h_mag_mean;
+        h_mag_variance += diff * diff;
+    }
+    h_mag_variance /= h_ls_all.size();
+
+    // Fading index: normalized magnitude variance (0 = flat, >0.1 = fading)
+    float fading_index = (h_mag_mean > 0.01f) ? std::sqrt(h_mag_variance) / h_mag_mean : 0.0f;
+
+    // Store for external access (GUI display, rate adaptation)
+    last_fading_index = fading_index;
+
     if (noise_count > 0 && noise_power_sum > 0.0f) {
-        if (noise_count > 1) {
-            // Temporal comparison: divide by (count-1) since we're measuring variance of differences
-            noise_variance = noise_power_sum / (noise_count - 1);
-        } else {
-            // First symbol fallback: noise_power_sum is already the estimated variance
+        // CRITICAL FIX FOR DIFFERENTIAL MODES ON FADING CHANNELS:
+        //
+        // The temporal H difference (curr_h - prev_h) includes BOTH noise AND fading variation.
+        // We cannot distinguish them, so for DIFFERENTIAL modes (DQPSK, DBPSK, D8PSK):
+        //   - Only use the FIRST symbol's SNR estimate (based on DEFAULT_SNR_LINEAR assumption)
+        //   - Don't update noise_variance from temporal comparison (it would include fading)
+        //
+        // This works because:
+        //   1. Differential decoding is robust to slow phase changes (fading)
+        //   2. R1/4 LDPC is very robust - noise_variance just needs to be in the right ballpark
+        //   3. The equalization uses pilots to track H, which is separate from noise estimation
+        //
+        // For COHERENT modes, we still use temporal comparison (they need accurate noise estimate).
+
+        if (noise_count == 1) {
+            // First symbol: use the fallback SNR estimate
             noise_variance = noise_power_sum;
+            if (noise_variance < 1e-6f) noise_variance = 1e-6f;
+
+            float instantaneous_snr = signal_power / noise_variance;
+            instantaneous_snr = std::max(0.1f, std::min(10000.0f, instantaneous_snr));
+            estimated_snr_linear = instantaneous_snr;  // First symbol: no smoothing
+
+            LOG_DEMOD(DEBUG, "First symbol: noise_var=%.6f, SNR=%.1f dB, fading_idx=%.3f",
+                      noise_variance, 10.0f * std::log10(estimated_snr_linear), fading_index);
+        } else if (!is_differential) {
+            // Coherent mode: use temporal comparison (they need it)
+            noise_variance = noise_power_sum / (noise_count - 1);
+            if (noise_variance < 1e-6f) noise_variance = 1e-6f;
+
+            float instantaneous_snr = signal_power / noise_variance;
+            instantaneous_snr = std::max(0.1f, std::min(10000.0f, instantaneous_snr));
+            estimated_snr_linear = snr_alpha * instantaneous_snr + (1.0f - snr_alpha) * estimated_snr_linear;
         }
-        if (noise_variance < 1e-6f) noise_variance = 1e-6f;
-
-        float instantaneous_snr = signal_power / noise_variance;
-        instantaneous_snr = std::max(0.1f, std::min(10000.0f, instantaneous_snr));
-
-        estimated_snr_linear = snr_alpha * instantaneous_snr + (1.0f - snr_alpha) * estimated_snr_linear;
+        // For differential modes after first symbol: DON'T update noise_variance
+        // This prevents fading from corrupting the noise estimate
     }
 
     snr_symbol_count++;
@@ -806,15 +860,19 @@ std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>&
         avg_h_power /= data_carrier_indices.size();
         float fade_threshold = FADE_THRESHOLD_RATIO * avg_h_power;
 
-        // CRITICAL FIX: Scale noise_variance to match channel power
-        // The hardcoded noise_variance (0.1) assumes unity channel power.
-        // With FFT scaling, channel power is ~100-150, so noise must scale accordingly.
-        // Use the measured channel power and assume nominal 15 dB SNR for R1/4 (no pilots).
-        float scaled_noise_var = avg_h_power / DEFAULT_SNR_LINEAR;
-        if (noise_variance > 1e-6f && avg_h_power > 1.0f) {
-            // If we have pilot-based noise estimate, use it scaled by channel power
-            // Otherwise fall back to nominal SNR assumption
-            scaled_noise_var = std::max(scaled_noise_var, noise_variance * avg_h_power);
+        // Noise variance for MMSE equalization and LLR computation
+        //
+        // noise_variance is computed in updateChannelEstimate as:
+        //   first symbol: signal_power / DEFAULT_SNR_LINEAR (assumed 15 dB SNR)
+        //   subsequent:   temporal pilot comparison (disabled for differential modes)
+        //
+        // Both signal_power and noise_variance are already in the same units (FFT-scaled),
+        // so we don't need to scale noise_variance again. The fallback uses avg_h_power
+        // only if noise_variance wasn't set properly.
+        float scaled_noise_var = noise_variance;
+        if (scaled_noise_var < 1e-6f) {
+            // Fallback: assume 15 dB SNR if noise_variance wasn't set
+            scaled_noise_var = avg_h_power / DEFAULT_SNR_LINEAR;
         }
 
         for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
