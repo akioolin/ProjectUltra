@@ -689,11 +689,18 @@ inline size_t getFixedFramePayloadCapacity(CodeRate rate) {
  * 1. Serialize frame (header + payload + CRC)
  * 2. Pad to exactly 4 codewords worth of info bytes
  * 3. LDPC encode each codeword
- * 4. Interleave coded bits across all 4 CWs
+ * 4. Optionally channel interleave each codeword (for fading resistance)
+ * 5. Interleave coded bits across all 4 CWs
  *
  * @param frame_data Serialized frame data (from DataFrame::serialize())
  * @param rate Code rate for LDPC encoding
+ * @param use_channel_interleave If true, apply channel interleaving within each CW
  * @return Interleaved coded bits (4 × 648 = 2592 bits = 324 bytes)
+ */
+Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, bool use_channel_interleave);
+
+/**
+ * Encode without channel interleaving (backward compatible).
  */
 Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate);
 
@@ -701,13 +708,20 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate);
  * Decode a fixed 4-CW frame with frame-level deinterleaving.
  *
  * Steps:
- * 1. Deinterleave soft bits to restore original CW order
- * 2. LDPC decode each codeword
- * 3. Reassemble into frame data
+ * 1. Deinterleave soft bits to restore original CW order (frame-level)
+ * 2. Optionally channel deinterleave each CW (restore within-CW order)
+ * 3. LDPC decode each codeword
+ * 4. Reassemble into frame data
  *
  * @param interleaved_soft Soft bits from demodulator (2592 floats)
  * @param rate Code rate for LDPC decoding
+ * @param use_channel_deinterleave If true, apply channel deinterleaving within each CW
  * @return CodewordStatus with decode results for all 4 CWs
+ */
+CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate, bool use_channel_deinterleave);
+
+/**
+ * Decode without channel deinterleaving (backward compatible).
  */
 CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate);
 

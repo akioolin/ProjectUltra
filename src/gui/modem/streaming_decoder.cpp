@@ -812,6 +812,30 @@ DecoderStats StreamingDecoder::getStats() const {
     return stats_;
 }
 
+StreamingDecoder::DecoderConfig StreamingDecoder::getConfig() const {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+
+    DecoderConfig cfg;
+    cfg.mode = mode_;
+    cfg.modulation = current_modulation_;
+    cfg.code_rate = code_rate_;
+    cfg.num_carriers = ofdm_carriers_;
+    cfg.data_carriers = ofdm_data_carriers_;
+    cfg.bits_per_symbol = ofdm_data_carriers_ * getBitsPerSymbol(current_modulation_);
+
+    // Get pilot config from the OFDM config if we have a waveform
+    // Note: These defaults match OFDMChirpWaveform with 59 carriers, spacing 10
+    cfg.use_pilots = true;
+    cfg.pilot_spacing = 10;
+
+    // Interleaving settings
+    cfg.use_channel_interleave = use_channel_interleave_;
+    cfg.use_frame_interleave = (mode_ == protocol::WaveformMode::OFDM_CHIRP ||
+                                 mode_ == protocol::WaveformMode::OFDM_COX);
+
+    return cfg;
+}
+
 size_t StreamingDecoder::samplesInBuffer() const {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
     return std::min(total_fed_, MAX_BUFFER_SAMPLES);
@@ -898,15 +922,16 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     size_t bytes_per_cw = v2::getBytesPerCodeword(rate);
     codec_->setRate(rate);
 
-    // Channel deinterleaving for OFDM modes (spreads fading errors across LDPC codeword)
-    // TEMPORARILY DISABLED FOR TESTING
-    bool use_channel_interleave = false;
-    (void)((mode_ == protocol::WaveformMode::OFDM_CHIRP ||
-            mode_ == protocol::WaveformMode::OFDM_COX) && interleaver_);
+    // Channel interleaving only applies to OFDM modes, NOT MC-DPSK
+    // Disabled by default due to BUG-006 (CW1 consistently fails when enabled)
+    // Set via setChannelInterleave() to match TX encoder setting
+    bool is_ofdm = (mode_ == protocol::WaveformMode::OFDM_CHIRP ||
+                    mode_ == protocol::WaveformMode::OFDM_COX);
+    bool apply_channel_deinterleave = use_channel_interleave_ && is_ofdm;
 
     // Helper to deinterleave a codeword if needed
     auto deinterleave_cw = [&](const std::vector<float>& cw) -> std::vector<float> {
-        if (use_channel_interleave) {
+        if (apply_channel_deinterleave) {
             return interleaver_->deinterleave(cw);
         }
         return cw;
@@ -962,8 +987,10 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     if (try_frame_interleave && soft_bits.size() >= FRAME_INTERLEAVE_BITS) {
         LOG_MODEM(DEBUG, "[%s] Attempting 4-CW frame deinterleave decode", log_prefix_.c_str());
 
-        // Use v2::decodeFixedFrame which handles frame deinterleaving + LDPC decode
-        auto cw_status = v2::decodeFixedFrame(soft_bits, rate);
+        // Use v2::decodeFixedFrame which handles frame + channel deinterleaving + LDPC decode
+        // Channel deinterleaving restores the original bit order within each CW
+        // Only enable for OFDM modes (MC-DPSK doesn't use channel interleaving)
+        auto cw_status = v2::decodeFixedFrame(soft_bits, rate, apply_channel_deinterleave);
 
         result.codewords_ok = 0;
         result.codewords_failed = 0;

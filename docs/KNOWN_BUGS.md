@@ -122,6 +122,41 @@ OFDM_COX now uses the same path as OFDM_CHIRP:
 
 ---
 
+### BUG-006: Channel Interleaving Causes CW1 Decode Failures
+
+**Status:** ACTIVE - Channel interleaving DISABLED
+**Discovered:** 2026-02-02
+**Location:** `src/protocol/frame_v2.cpp`, `src/fec/ldpc_decoder.cpp`
+
+**Description:**
+When channel interleaving is enabled for OFDM, codeword 1 (CW1) consistently fails to decode even at high SNR (28+ dB). The channel interleaver's self-test passes (interleave→soft bits→deinterleave→bytes matches), but when the actual modulator/demodulator is in the pipeline, there's a mismatch.
+
+**Symptoms:**
+- CW1 specifically fails while CW0, CW2, CW3 decode correctly
+- Problem occurs only when channel interleaving is enabled on TX
+- RX channel deinterleaving must also be disabled to get frame decode
+
+**Impact:**
+- Cannot use channel interleaving for improved fading resistance
+- Frame interleaving alone still provides good R1/4 fading resistance
+
+**Workaround:**
+Channel interleaving is disabled in both `encodeFixedFrame()` and `decodeFixedFrame()`.
+Frame interleaving is still active and provides burst error distribution across CWs.
+
+**Investigation Notes:**
+- Byte-to-bit conversion uses MSB-first in both channel interleaver and modulator
+- DQPSK demapper produces LLRs in same order as modulator encodes bits
+- Self-test converts bytes→soft bits→bytes correctly
+- Issue may be in how frame interleaving positions interact with channel interleaving
+
+**Fix Plan:**
+1. Add detailed bit tracing through entire TX→RX pipeline
+2. Compare expected vs actual bit positions at each stage
+3. Check for off-by-one or bit ordering issues between frame and channel interleaving
+
+---
+
 ## Fixed Bugs (Reference)
 
 ### BUG-F001: MC-DPSK CFO Correction for Training Samples

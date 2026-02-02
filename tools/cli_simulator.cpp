@@ -27,8 +27,10 @@
 
 #include "waveform/waveform_factory.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
+#include "waveform/ofdm_cox_waveform.hpp"
 #include "waveform/mc_dpsk_waveform.hpp"
 #include "gui/modem/streaming_decoder.hpp"
+#include "gui/modem/streaming_encoder.hpp"  // TX encoding (mirrors StreamingDecoder)
 #include "protocol/protocol_engine.hpp"
 #include "protocol/frame_v2.hpp"
 #include "ultra/logging.hpp"
@@ -160,8 +162,8 @@ public:
         // Initialize with default OFDM config (NVIS mode)
         ofdm_config_ = createOFDMConfig();
 
-        // Create TX waveform and RX decoder
-        createWaveform();
+        // Create TX encoder and RX decoder (both use same config)
+        createEncoder();
         createDecoder();
 
         setupCallbacks();
@@ -214,6 +216,18 @@ public:
     void setForcedCodeRate(CodeRate rate) { protocol_.setForcedCodeRate(rate); }
     void setPreferredWaveform(WaveformMode mode) { protocol_.setPreferredMode(mode); }
 
+    // Enable channel interleaving on both TX encoder and RX decoder (for BUG-006 testing)
+    void setChannelInterleave(bool enable) {
+        if (encoder_) {
+            encoder_->setChannelInterleave(enable);
+        }
+        if (decoder_) {
+            decoder_->setChannelInterleave(enable);
+        }
+        LOG_MODEM(INFO, "[%s] Channel interleaving: %s (TX+RX)",
+                  callsign_.c_str(), enable ? "ENABLED" : "disabled");
+    }
+
     void tick() {
         protocol_.tick(CALLBACK_INTERVAL_MS);
     }
@@ -225,22 +239,18 @@ private:
     SimulatedChannel& channel_;
     bool is_station_a_;
 
-    // TX: IWaveform directly
-    std::unique_ptr<IWaveform> tx_waveform_;
-    std::unique_ptr<IWaveform> control_waveform_;  // Always MC-DPSK for CONNECT/CONNECT_ACK
+    // TX: StreamingEncoder (unified TX encoding, mirrors StreamingDecoder)
+    std::unique_ptr<StreamingEncoder> encoder_;
     WaveformMode tx_waveform_mode_ = WaveformMode::MC_DPSK;  // Start with DPSK for PING/CONNECT
     WaveformMode negotiated_waveform_ = WaveformMode::MC_DPSK;  // Store negotiated mode, switch after handshake
 
-    // RX: StreamingDecoder directly
+    // RX: StreamingDecoder
     std::unique_ptr<StreamingDecoder> decoder_;
 
-    // OFDM configuration (shared between TX and RX)
+    // OFDM configuration (shared between TX encoder and RX decoder)
     ModemConfig ofdm_config_;
     Modulation data_modulation_ = Modulation::DQPSK;
     CodeRate data_code_rate_ = CodeRate::R1_4;
-
-    // Channel interleaver for OFDM TX (must match StreamingDecoder RX)
-    std::unique_ptr<ChannelInterleaver> channel_interleaver_;
 
     // Protocol engine
     ProtocolEngine protocol_{ConnectionConfig{}};
@@ -278,32 +288,22 @@ private:
         return cfg;
     }
 
-    void createWaveform() {
-        // Always have an MC-DPSK waveform ready for control frames
-        if (!control_waveform_) {
-            control_waveform_ = WaveformFactory::createMCDPSK(8);
+    void createEncoder() {
+        if (!encoder_) {
+            encoder_ = std::make_unique<StreamingEncoder>();
         }
 
-        if (tx_waveform_mode_ == WaveformMode::MC_DPSK) {
-            tx_waveform_ = WaveformFactory::createMCDPSK(8);  // 8 carriers for DPSK
-            channel_interleaver_.reset();  // No channel interleaving for MC-DPSK
-        } else {
-            // OFDM_CHIRP with proper config
-            tx_waveform_ = std::make_unique<OFDMChirpWaveform>(ofdm_config_);
-            static_cast<OFDMChirpWaveform*>(tx_waveform_.get())->configure(
-                data_modulation_, data_code_rate_);
+        // Configure encoder with current settings
+        encoder_->setOFDMConfig(ofdm_config_);
+        encoder_->setMode(tx_waveform_mode_);
+        encoder_->setDataMode(data_modulation_, data_code_rate_);
+        encoder_->setMCDPSKCarriers(8);
 
-            // Create channel interleaver matching the OFDM config
-            // bits_per_symbol = data_carriers × 2 (DQPSK)
-            int pilot_count = ofdm_config_.use_pilots ?
-                ((ofdm_config_.num_carriers + ofdm_config_.pilot_spacing - 1) / ofdm_config_.pilot_spacing) : 0;
-            int data_carriers = ofdm_config_.num_carriers - pilot_count;
-            int bits_per_symbol = data_carriers * 2;  // DQPSK = 2 bits/carrier
-            channel_interleaver_ = std::make_unique<ChannelInterleaver>(bits_per_symbol, 648);
-            LOG_MODEM(INFO, "[%s] Channel interleaver: %d bits/symbol", callsign_.c_str(), bits_per_symbol);
-        }
-        LOG_MODEM(INFO, "[%s] TX waveform: %s", callsign_.c_str(),
-                  waveformModeToString(tx_waveform_mode_));
+        LOG_MODEM(INFO, "[%s] TX encoder: mode=%s, carriers=%d, data_carriers=%d",
+                  callsign_.c_str(),
+                  waveformModeToString(tx_waveform_mode_),
+                  encoder_->getConfig().num_carriers,
+                  encoder_->getConfig().data_carriers);
     }
 
     void createDecoder() {
@@ -348,10 +348,59 @@ private:
         if (tx_waveform_mode_ == mode) return;
 
         tx_waveform_mode_ = mode;
-        createWaveform();
+        createEncoder();
 
         LOG_MODEM(INFO, "[%s] Switched to waveform: %s",
                   callsign_.c_str(), waveformModeToString(mode));
+
+        // Verify TX/RX configs match
+        verifyTxRxConfig();
+    }
+
+    // Verify TX encoder and RX decoder have matching configs
+    void verifyTxRxConfig() {
+        if (!encoder_ || !decoder_) return;
+
+        auto tx_cfg = encoder_->getConfig();
+        auto rx_cfg = decoder_->getConfig();
+
+        bool mismatch = false;
+        std::string issues;
+
+        if (tx_cfg.mode != rx_cfg.mode) {
+            issues += "mode; ";
+            mismatch = true;
+        }
+        if (tx_cfg.data_carriers != rx_cfg.data_carriers) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "data_carriers(TX=%d RX=%d); ",
+                     tx_cfg.data_carriers, rx_cfg.data_carriers);
+            issues += buf;
+            mismatch = true;
+        }
+        if (tx_cfg.bits_per_symbol != rx_cfg.bits_per_symbol) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "bits_per_symbol(TX=%d RX=%d); ",
+                     tx_cfg.bits_per_symbol, rx_cfg.bits_per_symbol);
+            issues += buf;
+            mismatch = true;
+        }
+        if (tx_cfg.use_channel_interleave != rx_cfg.use_channel_interleave) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "channel_interleave(TX=%s RX=%s); ",
+                     tx_cfg.use_channel_interleave ? "yes" : "no",
+                     rx_cfg.use_channel_interleave ? "yes" : "no");
+            issues += buf;
+            mismatch = true;
+        }
+
+        if (mismatch) {
+            LOG_MODEM(WARN, "[%s] TX/RX CONFIG MISMATCH: %s", callsign_.c_str(), issues.c_str());
+        } else {
+            LOG_MODEM(INFO, "[%s] TX/RX config verified: %d data carriers, %d bits/symbol, ch_interleave=%s",
+                      callsign_.c_str(), tx_cfg.data_carriers, tx_cfg.bits_per_symbol,
+                      tx_cfg.use_channel_interleave ? "yes" : "no");
+        }
     }
 
     void setDataMode(Modulation mod, CodeRate rate) {
@@ -379,7 +428,7 @@ private:
 
         // Recreate TX waveform if it's OFDM
         if (tx_waveform_mode_ != WaveformMode::MC_DPSK) {
-            createWaveform();
+            createEncoder();
         }
 
         // Update RX decoder
@@ -419,10 +468,10 @@ private:
             if (decoder_) {
                 decoder_->setMode(WaveformMode::MC_DPSK, false);
             }
-            // Reset TX waveform to MC-DPSK
+            // Reset TX encoder to MC-DPSK
             if (tx_waveform_mode_ != WaveformMode::MC_DPSK) {
                 tx_waveform_mode_ = WaveformMode::MC_DPSK;
-                createWaveform();
+                createEncoder();
             }
             handshake_complete_ = false;
             negotiated_waveform_ = WaveformMode::MC_DPSK;
@@ -438,112 +487,59 @@ private:
     }
 
     std::vector<float> transmitFrame(const Bytes& data) {
-        if (!tx_waveform_) {
-            LOG_MODEM(ERROR, "[%s] No TX waveform!", callsign_.c_str());
+        if (!encoder_) {
+            LOG_MODEM(ERROR, "[%s] No TX encoder!", callsign_.c_str());
             return {};
         }
 
         // Check if this is a connection setup frame (CONNECT, CONNECT_ACK)
         // These ALWAYS use MC-DPSK. DISCONNECT uses the negotiated waveform.
-        // Frame format: Magic (2B) + Type (1B) + ...
         bool is_control_frame = false;
         if (data.size() >= 3) {
             uint8_t frame_type = data[2];  // Type is at byte 2 (after 2-byte magic)
-            // Only CONNECT (0x12) and CONNECT_ACK (0x13) use MC-DPSK
             is_control_frame = (frame_type == 0x12 || frame_type == 0x13);
         }
 
-        // Encode frame data based on waveform mode
-        // Control frames always use MC-DPSK encoding
-        Bytes encoded;
-        Bytes tx_data = data;  // Make mutable copy for header patching
+        // Temporarily switch encoder mode for control frames
+        auto saved_mode = encoder_->getMode();
+        auto saved_rate = encoder_->getCodeRate();
 
-        bool use_mcdpsk = (tx_waveform_mode_ == WaveformMode::MC_DPSK) || is_control_frame;
-
-        if (use_mcdpsk) {
-            // MC-DPSK: variable CW encoding (single or multiple CWs)
-            auto cws = v2::encodeFrameWithLDPC(tx_data, data_code_rate_);
-
-            // Patch total_cw in header to match actual CW count (like ModemEngine)
-            uint8_t actual_cw = static_cast<uint8_t>(cws.size());
-            if (tx_data.size() >= 17 && tx_data[12] != actual_cw) {
-                LOG_MODEM(DEBUG, "[%s] Patching total_cw from %d to %d",
-                          callsign_.c_str(), tx_data[12], actual_cw);
-                tx_data[12] = actual_cw;
-                // Recalculate header CRC (bytes 0-14)
-                uint16_t hcrc = v2::ControlFrame::calculateCRC(tx_data.data(), 15);
-                tx_data[15] = (hcrc >> 8) & 0xFF;
-                tx_data[16] = hcrc & 0xFF;
-                // Re-encode with corrected header
-                cws = v2::encodeFrameWithLDPC(tx_data, data_code_rate_);
-            }
-
-            for (const auto& cw : cws) {
-                encoded.insert(encoded.end(), cw.begin(), cw.end());
-            }
-            LOG_MODEM(INFO, "[%s] TX MC-DPSK: %zu bytes -> %zu CWs (%zu coded bytes)",
-                      callsign_.c_str(), tx_data.size(), cws.size(), encoded.size());
-        } else {
-            // OFDM: 4-CW encoding with frame interleaving
-            // Channel interleaving is disabled for now - need to integrate into frame_v2.cpp
-            encoded = v2::encodeFixedFrame(tx_data, data_code_rate_);
-            LOG_MODEM(INFO, "[%s] TX OFDM: %zu bytes -> 4 CWs (%zu coded bytes)",
-                      callsign_.c_str(), tx_data.size(), encoded.size());
+        if (is_control_frame) {
+            // Control frames always use MC-DPSK R1/4
+            encoder_->setMode(WaveformMode::MC_DPSK);
+            encoder_->setDataMode(Modulation::DQPSK, CodeRate::R1_4);
         }
 
-        // Select waveform for preamble/modulation
-        // Control frames always use MC-DPSK waveform
-        IWaveform* waveform = is_control_frame ? control_waveform_.get() : tx_waveform_.get();
-
-        // Generate preamble based on connection state
-        // Control frames always use full preamble (chirp sync)
-        Samples preamble;
-        bool use_light = !is_control_frame && connected_.load() && handshake_complete_.load() &&
-                         waveform->supportsDataPreamble();
+        // Encode frame using the encoder
+        std::vector<float> result;
+        bool use_light = !is_control_frame && connected_.load() && handshake_complete_.load();
 
         if (use_light) {
-            preamble = waveform->generateDataPreamble();
-            LOG_MODEM(DEBUG, "[%s] TX: Light preamble (%zu samples)",
-                      callsign_.c_str(), preamble.size());
+            result = encoder_->encodeFrameLight(data);
         } else {
-            preamble = waveform->generatePreamble();
-            LOG_MODEM(DEBUG, "[%s] TX: Full preamble (%zu samples)",
-                      callsign_.c_str(), preamble.size());
+            result = encoder_->encodeFrame(data);
         }
 
-        // Modulate
-        Samples modulated = waveform->modulate(encoded);
+        // Restore encoder mode if we changed it
+        if (is_control_frame) {
+            encoder_->setMode(saved_mode);
+            encoder_->setDataMode(data_modulation_, saved_rate);
+        }
 
-        // Combine preamble + data
-        std::vector<float> result;
-        result.reserve(preamble.size() + modulated.size());
-        result.insert(result.end(), preamble.begin(), preamble.end());
-        result.insert(result.end(), modulated.begin(), modulated.end());
+        LOG_MODEM(INFO, "[%s] TX frame: %zu bytes -> %zu samples (mode=%s, %s)",
+                  callsign_.c_str(), data.size(), result.size(),
+                  is_control_frame ? "MC-DPSK" : waveformModeToString(encoder_->getMode()),
+                  use_light ? "light" : "full");
 
         return result;
     }
 
     std::vector<float> transmitPing() {
-        // PING is just chirp preamble with no data
-        if (!tx_waveform_) return {};
-
-        // Ensure we're using MC_DPSK waveform for PING
-        if (tx_waveform_mode_ != WaveformMode::MC_DPSK) {
-            auto saved_mode = tx_waveform_mode_;
-            tx_waveform_mode_ = WaveformMode::MC_DPSK;
-            createWaveform();
-            auto preamble = tx_waveform_->generatePreamble();
-            tx_waveform_mode_ = saved_mode;
-            createWaveform();
-            return std::vector<float>(preamble.begin(), preamble.end());
-        }
-
-        auto preamble = tx_waveform_->generatePreamble();
-        return std::vector<float>(preamble.begin(), preamble.end());
+        if (!encoder_) return {};
+        return encoder_->encodePing();
     }
 
     std::vector<float> transmitPong() {
-        // PONG is same as PING
         return transmitPing();
     }
 
@@ -696,6 +692,7 @@ public:
     void setPreferredWaveform(WaveformMode mode) { forced_waveform_ = mode; }
     void setTestFileTransfer(bool v) { test_file_transfer_ = v; }
     void setTestFileSize(size_t bytes) { test_file_size_ = bytes; }
+    void setChannelInterleave(bool enable) { use_channel_interleave_ = enable; }
 
     bool runTest() {
         printHeader();
@@ -721,6 +718,13 @@ public:
         }
         if (forced_waveform_ != WaveformMode::AUTO) {
             alpha_->setPreferredWaveform(forced_waveform_);
+        }
+
+        // Apply channel interleaving to both stations (for BUG-006 testing)
+        if (use_channel_interleave_) {
+            alpha_->setChannelInterleave(true);
+            bravo_->setChannelInterleave(true);
+            std::cout << "  \033[33mChannel interleaving ENABLED (BUG-006 testing)\033[0m\n";
         }
 
         // Setup message callback on BRAVO
@@ -761,6 +765,7 @@ private:
     bool verbose_ = false;
     bool use_fading_ = false;
     bool test_file_transfer_ = false;
+    bool use_channel_interleave_ = false;  // For BUG-006 testing
     size_t test_file_size_ = 256;  // Default 256 bytes test file
     Modulation forced_mod_ = Modulation::AUTO;
     CodeRate forced_rate_ = CodeRate::AUTO;
@@ -1083,6 +1088,8 @@ int main(int argc, char* argv[]) {
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 sim.setTestFileSize(std::stoul(argv[++i]));
             }
+        } else if (arg == "--channel-interleave" || arg == "-ci") {
+            sim.setChannelInterleave(true);
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "CLI Simulator - IWaveform + StreamingDecoder Model\n\n";
             std::cout << "Uses IWaveform for TX and StreamingDecoder for RX directly.\n";
@@ -1094,6 +1101,7 @@ int main(int argc, char* argv[]) {
             std::cout << "  --rate, -r <RATE>   Force code rate: r1_4, r1_2, r2_3, r3_4\n";
             std::cout << "  --waveform, -w <WF> Force waveform: mc_dpsk, ofdm_chirp, ofdm_cox\n";
             std::cout << "  --file [SIZE]       Test file transfer (default: 256 bytes)\n";
+            std::cout << "  --channel-interleave, -ci  Enable channel interleaving (for BUG-006 testing)\n";
             std::cout << "  --verbose, -v       Verbose output\n";
             return 0;
         }

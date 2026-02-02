@@ -1,6 +1,7 @@
 #include "frame_v2.hpp"
-#include "ultra/fec.hpp"  // LDPC encoder/decoder
+#include "ultra/fec.hpp"  // LDPC encoder/decoder + ChannelInterleaver
 #include "../fec/frame_interleaver.hpp"  // Frame-level interleaving
+#include "ultra/logging.hpp"  // LOG_MODEM
 #include <cstring>
 #include <algorithm>
 #include <cctype>
@@ -1244,8 +1245,15 @@ CodewordInfo identifyCodeword(const Bytes& cw_data) {
 // Fixed 4-Codeword Frame Implementation
 // ============================================================================
 
-Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate) {
+Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, bool use_channel_interleave) {
     using namespace fec;
+
+    // NOTE: Channel interleaving is currently disabled due to a bug where CW1 consistently
+    // fails to decode when channel interleaving is enabled. The self-test passes but the
+    // real modulator/demodulator pipeline has a mismatch. Frame interleaving alone provides
+    // good fading resistance for R1/4.
+    // TODO: Debug the byte-to-soft-bit ordering mismatch between TX and RX
+    (void)use_channel_interleave;  // Suppress unused warning
 
     size_t bytes_per_cw = getBytesPerCodeword(rate);
     size_t total_info_bytes = FIXED_FRAME_CODEWORDS * bytes_per_cw;
@@ -1277,8 +1285,16 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate) {
     return FrameInterleaver::interleave(coded_codewords);
 }
 
-CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate) {
+// Default: no channel interleaving (backward compatible)
+Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate) {
+    return encodeFixedFrame(frame_data, rate, false);
+}
+
+CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate, bool use_channel_deinterleave) {
     using namespace fec;
+
+    // NOTE: Channel deinterleaving is disabled - see comment in encodeFixedFrame
+    (void)use_channel_deinterleave;
 
     CodewordStatus status;
     status.decoded.resize(FIXED_FRAME_CODEWORDS, false);
@@ -1289,7 +1305,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
         return status;  // All failed - not enough data
     }
 
-    // Deinterleave to restore original CW order
+    // Deinterleave to restore original CW order (frame-level)
     auto cw_soft_bits = FrameInterleaver::deinterleave(interleaved_soft);
 
     // Decode each codeword
@@ -1297,7 +1313,8 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
     size_t bytes_per_cw = getBytesPerCodeword(rate);
 
     for (int cw = 0; cw < FIXED_FRAME_CODEWORDS; ++cw) {
-        auto decoded = decoder.decodeSoft(cw_soft_bits[cw]);
+        auto& cw_bits = cw_soft_bits[cw];
+        auto decoded = decoder.decodeSoft(cw_bits);
         bool success = decoder.lastDecodeSuccess();
 
         status.decoded[cw] = success;
@@ -1308,6 +1325,11 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
     }
 
     return status;
+}
+
+// Default: no channel deinterleaving (backward compatible)
+CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate) {
+    return decodeFixedFrame(interleaved_soft, rate, false);
 }
 
 DataFrame makeFixedDataFrame(const std::string& src, const std::string& dst,

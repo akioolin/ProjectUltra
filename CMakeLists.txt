@@ -110,6 +110,7 @@ if(ULTRA_BUILD_TOOLS)
         src/gui/modem/modem_mode.cpp
         src/gui/modem/modem_carrier_sense.cpp
         src/gui/modem/streaming_decoder.cpp
+        src/gui/modem/streaming_encoder.cpp
         src/gui/adaptive_mode.cpp
     )
     target_include_directories(ultra PRIVATE
@@ -117,10 +118,11 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_link_libraries(ultra PRIVATE ultra_core)
 
-    # CLI Simulator - Uses IWaveform + StreamingDecoder directly (NOT ModemEngine)
+    # CLI Simulator - Uses IWaveform + StreamingDecoder/Encoder directly (NOT ModemEngine)
     add_executable(cli_simulator
         tools/cli_simulator.cpp
         src/gui/modem/streaming_decoder.cpp
+        src/gui/modem/streaming_encoder.cpp
     )
     target_include_directories(cli_simulator PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src

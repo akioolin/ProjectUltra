@@ -143,9 +143,30 @@ public:
     void setCodecType(fec::CodecType type);
     fec::CodecType getCodecType() const { return codec_type_; }
 
+    // Enable channel interleaving (must match TX encoder setting)
+    // Default: disabled due to BUG-006
+    void setChannelInterleave(bool enable) { use_channel_interleave_ = enable; }
+    bool getChannelInterleave() const { return use_channel_interleave_; }
+
     // Get current mode
     protocol::WaveformMode getMode() const { return mode_; }
     bool isConnected() const { return connected_; }
+
+    // Get current configuration (for comparison with encoder)
+    // Returns: mode, modulation, code_rate, carriers, interleaving settings
+    struct DecoderConfig {
+        protocol::WaveformMode mode = protocol::WaveformMode::MC_DPSK;
+        Modulation modulation = Modulation::DQPSK;
+        CodeRate code_rate = CodeRate::R1_4;
+        int num_carriers = 59;
+        int data_carriers = 53;
+        int bits_per_symbol = 106;
+        bool use_pilots = true;
+        int pilot_spacing = 10;
+        bool use_channel_interleave = false;
+        bool use_frame_interleave = true;
+    };
+    DecoderConfig getConfig() const;
 
     // ========================================================================
     // CALLBACKS
@@ -266,6 +287,7 @@ private:
 
     // Interleaver (matches TX)
     std::unique_ptr<ChannelInterleaver> interleaver_;
+    bool use_channel_interleave_ = false;  // Disabled by default due to BUG-006
 
     // FEC codec (uses ICodec interface)
     fec::CodecPtr codec_;
