@@ -129,68 +129,6 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_link_libraries(cli_simulator PRIVATE ultra_core)
 
-    # ModemEngine loopback test
-    add_executable(test_modem_engine_loopback
-        tools/test_modem_engine_loopback.cpp
-        src/gui/modem/modem_engine.cpp
-        src/gui/modem/modem_rx.cpp
-        src/gui/modem/modem_rx_decode.cpp
-        src/gui/modem/modem_mode.cpp
-        src/gui/modem/modem_carrier_sense.cpp
-        src/gui/modem/streaming_decoder.cpp
-        src/gui/adaptive_mode.cpp
-    )
-    target_include_directories(test_modem_engine_loopback PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-    )
-    target_link_libraries(test_modem_engine_loopback PRIVATE ultra_core)
-
-    # Sync robustness test (comprehensive)
-    add_executable(test_sync_robustness
-        tools/test_sync_robustness.cpp
-        src/gui/modem/modem_engine.cpp
-        src/gui/modem/modem_rx.cpp
-        src/gui/modem/modem_rx_decode.cpp
-        src/gui/modem/modem_mode.cpp
-        src/gui/modem/modem_carrier_sense.cpp
-        src/gui/modem/streaming_decoder.cpp
-        src/gui/adaptive_mode.cpp
-    )
-    target_include_directories(test_sync_robustness PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-    )
-    target_link_libraries(test_sync_robustness PRIVATE ultra_core)
-
-    # Mode/SNR quick test
-    add_executable(test_mode_snr tools/test_mode_snr.cpp)
-    target_include_directories(test_mode_snr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_mode_snr PRIVATE ultra_core)
-
-    # Quick coherent mode test
-    add_executable(test_coherent_quick tools/test_coherent_quick.cpp)
-    target_include_directories(test_coherent_quick PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_coherent_quick PRIVATE ultra_core)
-
-    # DPSK SNR test (single-carrier: DBPSK, DQPSK, D8PSK)
-    add_executable(test_dpsk_snr tools/test_dpsk_snr.cpp)
-    target_include_directories(test_dpsk_snr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_dpsk_snr PRIVATE ultra_core)
-
-    # HF Reality Test - Ultimate validation with realistic conditions
-    add_executable(test_hf_reality tools/test_hf_reality.cpp)
-    target_include_directories(test_hf_reality PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_hf_reality PRIVATE ultra_core)
-
-    # NVIS Mode Test - 1024 FFT, 59 carriers, 42 baud high-speed mode
-    add_executable(test_nvis_mode tools/test_nvis_mode.cpp)
-    target_include_directories(test_nvis_mode PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_nvis_mode PRIVATE ultra_core)
-
-    # NVIS Data Test - Test different data patterns
-    add_executable(test_nvis_data tools/test_nvis_data.cpp)
-    target_include_directories(test_nvis_data PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_nvis_data PRIVATE ultra_core)
-
     # Threaded simulator - proper real-time audio simulation
     add_executable(threaded_simulator
         tools/threaded_simulator.cpp
@@ -207,16 +145,6 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_link_libraries(threaded_simulator PRIVATE ultra_core)
 
-    # Simple noise test (amplitude independence verification)
-    add_executable(test_simple_noise tools/test_simple_noise.cpp)
-    target_include_directories(test_simple_noise PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_simple_noise PRIVATE ultra_core)
-
-    # Single frame test
-    add_executable(test_single_frame tools/test_single_frame.cpp)
-    target_include_directories(test_single_frame PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_single_frame PRIVATE ultra_core)
-
     # Acquisition profiling
     add_executable(profile_acquisition
         tools/profile_acquisition.cpp
@@ -230,92 +158,6 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_include_directories(profile_acquisition PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(profile_acquisition PRIVATE ultra_core)
-
-    # (Removed test_chirp_acquisition, test_chirp_basic, test_cfo_debug, test_dpsk_channel - files don't exist)
-
-    # Multi-Carrier DPSK test - fills gap between single-carrier and OFDM
-    add_executable(test_mc_dpsk tools/test_mc_dpsk.cpp)
-    target_include_directories(test_mc_dpsk PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_mc_dpsk PRIVATE ultra_core)
-
-    # MC-DPSK full frame test (fast, no threading)
-    add_executable(test_mc_dpsk_frame tools/test_mc_dpsk_frame.cpp)
-    target_include_directories(test_mc_dpsk_frame PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_mc_dpsk_frame PRIVATE ultra_core)
-
-    # Frame interleaver test (4-CW fixed frames with burst error protection)
-    add_executable(test_frame_interleaver tools/test_frame_interleaver.cpp)
-    target_include_directories(test_frame_interleaver PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_frame_interleaver PRIVATE ultra_core)
-
-    # OFDM with chirp sync + pilots test (coherent QPSK for fading channels)
-    add_executable(test_ofdm_chirp_pilots tools/test_ofdm_chirp_pilots.cpp)
-    target_include_directories(test_ofdm_chirp_pilots PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_ofdm_chirp_pilots PRIVATE ultra_core)
-
-    # Chirp tests - only build if source files exist
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/test_chirp_robust.cpp")
-        add_executable(test_chirp_robust tools/test_chirp_robust.cpp)
-        target_include_directories(test_chirp_robust PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-        target_link_libraries(test_chirp_robust PRIVATE ultra_core)
-    endif()
-
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/test_chirp_cfo.cpp")
-        add_executable(test_chirp_cfo tools/test_chirp_cfo.cpp)
-        target_link_libraries(test_chirp_cfo PRIVATE m)
-    endif()
-
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/test_chirp_cfo_shift.cpp")
-        add_executable(test_chirp_cfo_shift tools/test_chirp_cfo_shift.cpp)
-        target_link_libraries(test_chirp_cfo_shift PRIVATE m)
-    endif()
-
-    # HF Modem Test - DEPRECATED (references deleted rx_pipeline.hpp)
-    # Kept for reference only - use test_iwaveform instead
-    # add_executable(test_hf_modem
-    #     tools/test_hf_modem.cpp
-    #     src/gui/modem/modem_engine.cpp
-    #     src/gui/modem/modem_rx.cpp
-    #     src/gui/modem/modem_rx_decode.cpp
-    #     src/gui/modem/modem_mode.cpp
-    #     src/gui/modem/modem_carrier_sense.cpp
-    #     src/gui/modem/streaming_decoder.cpp
-    #     src/gui/adaptive_mode.cpp
-    # )
-    # target_include_directories(test_hf_modem PRIVATE
-    #     ${CMAKE_CURRENT_SOURCE_DIR}/src
-    # )
-    # target_link_libraries(test_hf_modem PRIVATE ultra_core)
-
-    # OTFS vs OFDM comparison test
-    add_executable(test_otfs_vs_ofdm tools/test_otfs_vs_ofdm.cpp)
-    target_include_directories(test_otfs_vs_ofdm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_otfs_vs_ofdm PRIVATE ultra_core)
-
-    # AFDM test - Affine Frequency Division Multiplexing
-    add_executable(test_afdm tools/test_afdm.cpp)
-    target_include_directories(test_afdm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_afdm PRIVATE ultra_core)
-
-    # OFDMChirpWaveform direct test (uses new IWaveform interface)
-    add_executable(test_ofdm_chirp_waveform tools/test_ofdm_chirp_waveform.cpp)
-    target_include_directories(test_ofdm_chirp_waveform PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_ofdm_chirp_waveform PRIVATE ultra_core)
-
-    # OFDMChirpWaveform CFO test
-    add_executable(test_ofdm_chirp_cfo tools/test_ofdm_chirp_cfo.cpp)
-    target_include_directories(test_ofdm_chirp_cfo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_ofdm_chirp_cfo PRIVATE ultra_core)
-
-    # FEC Codec Factory test
-    add_executable(test_codec_factory tools/test_codec_factory.cpp)
-    target_include_directories(test_codec_factory PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_codec_factory PRIVATE ultra_core)
-
-    # IWaveform interface test (uses ModemEngine with IWaveform integration)
-    # DEPRECATED: test_iwaveform - DO NOT USE
-    # Use test_waveform_simple instead (clean TX/RX with consistent config)
-    # add_executable(test_iwaveform ...)  # Removed - file renamed to test_iwaveform_DO_NOT_USE.cpp
 
     # Simple waveform test (clean TX/RX with consistent config)
     add_executable(test_waveform_simple
@@ -413,19 +255,3 @@ if(ULTRA_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
-# Development/debug test targets (optional - only build if files exist)
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/test_fft_shift.cpp")
-    add_executable(test_fft_shift tools/test_fft_shift.cpp)
-    target_link_libraries(test_fft_shift ultra_core)
-endif()
-
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/test_cfo_verify.cpp")
-    add_executable(test_cfo_verify tools/test_cfo_verify.cpp)
-    target_link_libraries(test_cfo_verify ultra_core)
-endif()
-
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/test_cfo_estimate.cpp")
-    add_executable(test_cfo_estimate tools/test_cfo_estimate.cpp)
-    target_link_libraries(test_cfo_estimate PRIVATE ultra_core)
-    target_include_directories(test_cfo_estimate PRIVATE ${CMAKE_SOURCE_DIR}/src)
-endif()

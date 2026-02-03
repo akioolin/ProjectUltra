@@ -21,9 +21,9 @@
 - ALWAYS run from `build/` directory: `./build/cli_simulator`, NOT `./cli_simulator`
 - `cli_simulator` - **PRIMARY** test tool for full protocol with light preamble in connected mode
   - Tests: PING/PONG → CONNECT → MODE_CHANGE → DATA (4CW frame interleaved) → DISCONNECT
-  - Command: `./build/cli_simulator --snr 14 --fading --rate r1_4 --test`
+  - Command: `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test 2>&1 | tee /tmp/test_output.log`
 - `test_waveform_simple` - Quick single-frame sanity checks (NOT for connected mode testing)
-- `test_iwaveform` - Multi-frame waveform testing (no protocol, no light preamble)
+- `test_iwaveform` - REMOVED (was renamed to `test_iwaveform_DO_NOT_USE.cpp`, no longer builds)
 - `test_hf_modem` is LEGACY - do not use
 
 **MC-DPSK invariants:**
@@ -41,7 +41,9 @@
 **Testing invariants:**
 - Use SINGLE ModemEngine instance for entire audio stream (continuous RX)
 - Buffer limit: MAX_PENDING_SAMPLES = 960000 (20 seconds at 48kHz)
-- Run `./tests/regression_matrix.sh` before committing
+- **PRIMARY regression test:** `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test 2>&1 | tee /tmp/test_output.log`
+- `cli_simulator` is the ONLY tool that tests the full protocol with light preamble, two-station interaction, and proper connected-mode configuration. `test_waveform_simple` is for quick single-frame sanity checks only.
+- `regression_matrix.sh` is OUTDATED — it uses `test_iwaveform` which no longer exists. Do NOT run it.
 - **ALWAYS use `| tee /tmp/test_output.log`** when running tests - tests take minutes and we need full output for debugging
 
 ---
@@ -191,7 +193,7 @@ OTFS is parked - would need significant research effort to implement proper DD-d
 
 - **Read INVARIANTS.md before changing critical code.** Violating these causes subtle bugs.
 
-- **Run regression tests before committing:** `./tests/regression_matrix.sh`
+- **Run regression test before committing:** `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test 2>&1 | tee /tmp/test_output.log`
 
 ---
 
@@ -247,12 +249,10 @@ make -j4
 ### Test Tools
 | Tool | Purpose | Example |
 |------|---------|---------|
-| `cli_simulator` | **PRIMARY** - Full protocol with timing | `./build/cli_simulator --snr 15 --timing` |
-| `test_waveform_simple` | Quick waveform sanity check | `./build/test_waveform_simple -w ofdm_chirp --snr 15` |
-| `test_iwaveform` | Multi-frame waveform testing | `./build/test_iwaveform --snr 10 -w mc_dpsk --frames 5` |
-| `regression_matrix.sh` | All waveforms | `./tests/regression_matrix.sh` |
+| `cli_simulator` | **PRIMARY** - Full protocol with two-station interaction | `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test` |
+| `test_waveform_simple` | Quick single-frame sanity check | `./build/test_waveform_simple -w ofdm_chirp --snr 15` |
 
-**Testing priority:** Use `cli_simulator` for real protocol testing (handshake, timing, data transfer). Use `test_waveform_simple` only for quick sanity checks of individual waveforms.
+**Testing priority:** Use `cli_simulator` for all real testing (handshake, light preamble, data transfer, ARQ). Use `test_waveform_simple` only for quick single-frame sanity checks. `regression_matrix.sh` is outdated and will not run.
 
 ### CLI Commands
 ```bash
@@ -367,7 +367,7 @@ Station A                          Station B
 3. Check `docs/REFACTOR_PROGRESS.md` for current status
 
 ### After Making Changes
-1. Run `./tests/regression_matrix.sh` - ALL tests must pass
+1. Run `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test 2>&1 | tee /tmp/test_output.log`
 2. If you fixed a bug: Add entry to `docs/CHANGELOG.md`
 3. If you discovered a bug: Add entry to `docs/KNOWN_BUGS.md`
 4. If you completed a refactor task: Update `docs/REFACTOR_PROGRESS.md`

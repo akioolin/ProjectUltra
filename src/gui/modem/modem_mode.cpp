@@ -113,32 +113,46 @@ void ModemEngine::setConnected(bool connected) {
         handshake_complete_ = false;
         use_connected_waveform_once_ = false;  // Clear any leftover flag
 
-        // CRITICAL: Update StreamingDecoder when entering connected state
-        // This resets the buffer and updates the connected flag
-        if (streaming_decoder_) {
-            streaming_decoder_->setMode(waveform_mode_, true);  // true = connected
-
-            // For OFDM modes, propagate the current config (for custom FFT/carriers like NVIS mode)
-            if (waveform_mode_ == protocol::WaveformMode::OFDM_COX ||
-                waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP) {
-                streaming_decoder_->setOFDMConfig(config_);
-            }
-        }
-
-        // Configure OFDM modulator/demodulator to match data_modulation_
-        // This ensures TX and RX use the same constellation when connected
-        bool is_differential = (data_modulation_ == Modulation::DBPSK ||
-                               data_modulation_ == Modulation::DQPSK ||
-                               data_modulation_ == Modulation::D8PSK);
+        // Configure OFDM config FIRST so it's correct when propagated to decoder
         config_.modulation = data_modulation_;
         config_.code_rate = data_code_rate_;
-        config_.use_pilots = !is_differential;
+        config_.use_pilots = true;  // Always — must match OFDMChirpWaveform
+
+        // Pilot spacing based on code rate (matching OFDMChirpWaveform)
+        switch (data_code_rate_) {
+            case CodeRate::R3_4:
+                config_.pilot_spacing = 15;
+                break;
+            default:
+                config_.pilot_spacing = 10;
+                break;
+        }
 
         decoder_->setRate(data_code_rate_);
 
-        LOG_MODEM(INFO, "Entered connected state, configured for %s %s (pilots=%d)",
+        // CRITICAL: Update StreamingDecoder when entering connected state
+        // Config must be set above BEFORE propagating here
+        if (streaming_decoder_) {
+            streaming_decoder_->setMode(waveform_mode_, true);  // true = connected
+
+            // For OFDM modes, propagate the correct config (with proper pilot settings)
+            if (waveform_mode_ == protocol::WaveformMode::OFDM_COX ||
+                waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP) {
+                streaming_decoder_->setOFDMConfig(config_);
+                streaming_decoder_->setDataMode(data_modulation_, data_code_rate_);
+            }
+
+            // Propagate known CFO from handshake to StreamingDecoder
+            // This seeds the CFO feedback loop so the first OFDM frame uses correct CFO
+            if (std::abs(peer_cfo_hz_) > 0.01f) {
+                streaming_decoder_->setKnownCFO(peer_cfo_hz_);
+                LOG_MODEM(INFO, "setConnected: seeded CFO=%.2f Hz from handshake", peer_cfo_hz_);
+            }
+        }
+
+        LOG_MODEM(INFO, "Entered connected state, configured for %s %s (pilots=%d, spacing=%d)",
                   modulationToString(data_modulation_), codeRateToString(data_code_rate_),
-                  config_.use_pilots ? 1 : 0);
+                  config_.use_pilots ? 1 : 0, config_.pilot_spacing);
     } else {
         // Switching to disconnected state - use robust mode for RX
         decoder_->setRate(CodeRate::R1_4);
@@ -174,32 +188,34 @@ void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
     data_modulation_ = mod;
     data_code_rate_ = rate;
 
-    // Determine if modulation is differential
-    bool is_differential = (mod == Modulation::DBPSK ||
-                           mod == Modulation::DQPSK ||
-                           mod == Modulation::D8PSK);
+    // CRITICAL: Pilots are ALWAYS enabled — OFDMChirpWaveform::configurePilotsForCodeRate()
+    // always sets use_pilots=true regardless of differential/coherent modulation.
+    // The pilot carriers are used for CFO tracking and channel estimation even in
+    // differential mode. Disabling them causes data/pilot layout mismatch.
+    config_.modulation = mod;
+    config_.code_rate = rate;
+    config_.use_pilots = true;  // Always — must match OFDMChirpWaveform
 
-    // Pilots for channel tracking:
-    // - Differential (DQPSK): No pilots needed, differential encoding handles phase
-    // - Coherent (QPSK/QAM): Pilots required for channel estimation
-    //
-    // NOTE: Adaptive pilots for differential modes (to enable higher code rates on fading)
-    // is a future enhancement. Currently DQPSK works best without pilots and with R1/4.
-    bool use_pilots = !is_differential;  // Only coherent needs pilots
-    int pilot_spacing = 2;  // Default spacing for coherent
+    // Configure pilot spacing based on code rate (matching OFDMChirpWaveform)
+    switch (rate) {
+        case CodeRate::R3_4:
+            config_.pilot_spacing = 15;  // ~4 pilots
+            break;
+        case CodeRate::R2_3:
+        case CodeRate::R1_2:
+        case CodeRate::R1_4:
+        default:
+            config_.pilot_spacing = 10;  // ~6 pilots
+            break;
+    }
 
     // If already connected, update both TX and RX to match
     if (connected_) {
-        // Update base config (TX waveform will pick this up via ensureTxWaveform)
-        config_.modulation = mod;
-        config_.code_rate = rate;
-        config_.use_pilots = use_pilots;
-        config_.pilot_spacing = pilot_spacing;
-
         decoder_->setRate(rate);
 
-        LOG_MODEM(INFO, "TX/RX OFDM config updated: mod=%d, rate=%d, use_pilots=%d",
-                  static_cast<int>(mod), static_cast<int>(rate), use_pilots ? 1 : 0);
+        LOG_MODEM(INFO, "TX/RX OFDM config updated: mod=%d, rate=%d, use_pilots=%d, pilot_spacing=%d",
+                  static_cast<int>(mod), static_cast<int>(rate),
+                  config_.use_pilots ? 1 : 0, config_.pilot_spacing);
     }
 
     // Update channel interleaver for the new modulation
@@ -209,11 +225,16 @@ void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
     updateChannelInterleaver(bits_per_symbol);
 
     // Update StreamingDecoder's waveform configuration
+    // CRITICAL: Set OFDM config BEFORE setDataMode so decoder has correct pilot layout
     if (streaming_decoder_) {
+        if (waveform_mode_ != protocol::WaveformMode::MC_DPSK) {
+            streaming_decoder_->setOFDMConfig(config_);
+        }
         streaming_decoder_->setDataMode(mod, rate);
     }
 
-    LOG_MODEM(INFO, "Data mode set to: %s", getModeDescription(mod, rate));
+    LOG_MODEM(INFO, "Data mode set to: %s (pilots=%d, spacing=%d)",
+              getModeDescription(mod, rate), config_.use_pilots ? 1 : 0, config_.pilot_spacing);
 }
 
 // NOTE: recommendDataMode() removed - use protocol::recommendDataMode() from waveform_selection.hpp
