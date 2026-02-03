@@ -44,6 +44,15 @@ using namespace ultra::protocol;
 using namespace ultra::sim;
 namespace v2 = protocol::v2;
 
+// Channel condition types (ITU-R F.1487)
+enum class ChannelType {
+    AWGN,       // No fading, no multipath
+    GOOD,       // 0.5ms delay, 0.1Hz Doppler (quiet mid-latitude)
+    MODERATE,   // 1.0ms delay, 0.5Hz Doppler (typical mid-latitude)
+    POOR,       // 2.0ms delay, 1.0Hz Doppler (disturbed conditions)
+    FLUTTER     // 0.5ms delay, 10Hz Doppler (auroral/polar)
+};
+
 /**
  * SimulatedChannel - The "air" between two stations
  *
@@ -52,14 +61,31 @@ namespace v2 = protocol::v2;
  */
 class SimulatedChannel {
 public:
-    void configure(float snr_db, bool use_fading = false) {
+    void configure(float snr_db, ChannelType channel_type = ChannelType::AWGN) {
         snr_db_ = snr_db;
         float snr_linear = std::pow(10.0f, snr_db / 10.0f);
         float signal_power = 0.01f;
         noise_stddev_ = std::sqrt(signal_power / snr_linear);
 
-        if (use_fading) {
-            auto cfg = itu_r_f1487::moderate(snr_db);
+        if (channel_type != ChannelType::AWGN) {
+            WattersonChannel::Config cfg;
+            switch (channel_type) {
+                case ChannelType::GOOD:
+                    cfg = itu_r_f1487::good(snr_db);
+                    break;
+                case ChannelType::MODERATE:
+                    cfg = itu_r_f1487::moderate(snr_db);
+                    break;
+                case ChannelType::POOR:
+                    cfg = itu_r_f1487::poor(snr_db);
+                    break;
+                case ChannelType::FLUTTER:
+                    cfg = itu_r_f1487::flutter(snr_db);
+                    break;
+                default:
+                    cfg = itu_r_f1487::moderate(snr_db);
+                    break;
+            }
             cfg.cfo_hz = 0.0f;
             channel_a_to_b_ = std::make_unique<WattersonChannel>(cfg, 42);
             channel_b_to_a_ = std::make_unique<WattersonChannel>(cfg, 43);
@@ -687,6 +713,7 @@ public:
     void setSNR(float snr) { snr_db_ = snr; }
     void setVerbose(bool v) { verbose_ = v; }
     void setFading(bool f) { use_fading_ = f; }
+    void setChannelType(ChannelType t) { channel_type_ = t; use_fading_ = (t != ChannelType::AWGN); }
     void setForcedModulation(Modulation mod) { forced_mod_ = mod; }
     void setForcedCodeRate(CodeRate rate) { forced_rate_ = rate; }
     void setPreferredWaveform(WaveformMode mode) { forced_waveform_ = mode; }
@@ -698,7 +725,7 @@ public:
         printHeader();
 
         // Setup channel
-        channel_.configure(snr_db_, use_fading_);
+        channel_.configure(snr_db_, channel_type_);
 
         // Create stations
         alpha_ = std::make_unique<SimulatedStation>("ALPHA", channel_, true);
@@ -764,6 +791,7 @@ private:
     float snr_db_ = 20.0f;
     bool verbose_ = false;
     bool use_fading_ = false;
+    ChannelType channel_type_ = ChannelType::AWGN;
     bool test_file_transfer_ = false;
     bool use_channel_interleave_ = false;  // For BUG-006 testing
     size_t test_file_size_ = 256;  // Default 256 bytes test file
@@ -1006,6 +1034,17 @@ private:
         return true;
     }
 
+    const char* channelTypeName() const {
+        switch (channel_type_) {
+            case ChannelType::AWGN:     return "AWGN (no fading)";
+            case ChannelType::GOOD:     return "Good (0.5ms, 0.1Hz)";
+            case ChannelType::MODERATE: return "Moderate (1ms, 0.5Hz)";
+            case ChannelType::POOR:     return "Poor (2ms, 1Hz)";
+            case ChannelType::FLUTTER:  return "Flutter (0.5ms, 10Hz)";
+            default:                    return "Unknown";
+        }
+    }
+
     void printHeader() {
         std::cout << "\n";
         std::cout << "╔══════════════════════════════════════════════════════════════╗\n";
@@ -1013,7 +1052,7 @@ private:
         std::cout << "╚══════════════════════════════════════════════════════════════╝\n";
         std::cout << "\n";
         std::cout << "  SNR:     " << snr_db_ << " dB\n";
-        std::cout << "  Channel: " << (use_fading_ ? "Fading" : "AWGN") << "\n";
+        std::cout << "  Channel: " << channelTypeName() << "\n";
         std::cout << "  Model:   Real-time (48kHz, 10ms callbacks)\n";
         std::cout << "\n";
     }
@@ -1037,7 +1076,25 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--verbose" || arg == "-v") {
             sim.setVerbose(true);
         } else if (arg == "--fading" || arg == "-f") {
-            sim.setFading(true);
+            sim.setChannelType(ChannelType::MODERATE);  // Default fading = moderate
+        } else if (arg == "--channel" || arg == "-c") {
+            if (i + 1 < argc) {
+                std::string ch_str = argv[++i];
+                if (ch_str == "awgn" || ch_str == "AWGN") {
+                    sim.setChannelType(ChannelType::AWGN);
+                } else if (ch_str == "good" || ch_str == "GOOD") {
+                    sim.setChannelType(ChannelType::GOOD);
+                } else if (ch_str == "moderate" || ch_str == "MODERATE") {
+                    sim.setChannelType(ChannelType::MODERATE);
+                } else if (ch_str == "poor" || ch_str == "POOR") {
+                    sim.setChannelType(ChannelType::POOR);
+                } else if (ch_str == "flutter" || ch_str == "FLUTTER") {
+                    sim.setChannelType(ChannelType::FLUTTER);
+                } else {
+                    std::cerr << "Unknown channel: " << ch_str << " (use awgn, good, moderate, poor, flutter)\n";
+                    return 1;
+                }
+            }
         } else if (arg == "--mod" || arg == "-m") {
             if (i + 1 < argc) {
                 std::string mod_str = argv[++i];
@@ -1096,12 +1153,18 @@ int main(int argc, char* argv[]) {
             std::cout << "Every 10ms: read RX, feed decoder, get TX, send to channel.\n\n";
             std::cout << "Options:\n";
             std::cout << "  --snr, -s <dB>      SNR (default: 20)\n";
-            std::cout << "  --fading, -f        Enable fading channel\n";
+            std::cout << "  --channel, -c <CH>  Channel type: awgn, good, moderate, poor, flutter\n";
+            std::cout << "                        awgn     - No fading, no multipath\n";
+            std::cout << "                        good     - 0.5ms delay, 0.1Hz Doppler (quiet)\n";
+            std::cout << "                        moderate - 1.0ms delay, 0.5Hz Doppler (typical)\n";
+            std::cout << "                        poor     - 2.0ms delay, 1.0Hz Doppler (disturbed)\n";
+            std::cout << "                        flutter  - 0.5ms delay, 10Hz Doppler (auroral)\n";
+            std::cout << "  --fading, -f        Alias for --channel moderate\n";
             std::cout << "  --mod, -m <MOD>     Force modulation: dqpsk, d8psk, dbpsk\n";
             std::cout << "  --rate, -r <RATE>   Force code rate: r1_4, r1_2, r2_3, r3_4\n";
             std::cout << "  --waveform, -w <WF> Force waveform: mc_dpsk, ofdm_chirp, ofdm_cox\n";
             std::cout << "  --file [SIZE]       Test file transfer (default: 256 bytes)\n";
-            std::cout << "  --channel-interleave, -ci  Enable channel interleaving (for BUG-006 testing)\n";
+            std::cout << "  --channel-interleave, -ci  Enable channel interleaving\n";
             std::cout << "  --verbose, -v       Verbose output\n";
             return 0;
         }

@@ -368,7 +368,8 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     if (is_first_data_symbol) {
         alpha = 1.0f;  // First data symbol: use pilot estimate directly (channel changed since LTS)
     } else if (is_differential) {
-        // With pilots: track fading VERY aggressively (channel changes faster than symbol rate)
+        // With pilots: track fading aggressively but with some smoothing
+        // alpha=0.8 works better than 1.0 (noise filtering helps)
         // Without pilots: keep H stable for differential decoding
         alpha = has_pilots ? 0.8f : 0.1f;
     } else {
