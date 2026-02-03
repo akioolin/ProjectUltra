@@ -63,22 +63,23 @@ static void guiLog(const char* fmt, ...) {
 }
 
 // Convert fading index to channel quality string
+// Thresholds aligned with waveform_selection.hpp (2026-02-02)
 static const char* fadingToQuality(float fading) {
-    if (fading < 0.1f) return "AWGN";
-    if (fading < 0.35f) return "Good";
-    if (fading < 0.55f) return "Moderate";
+    if (fading < 0.10f) return "AWGN";
+    if (fading < 0.25f) return "Good";
+    if (fading < 0.50f) return "Moderate";
     return "Poor";
 }
 
 // Same as above but also sets color for GUI display
 static const char* fadingToQualityWithColor(float fading, ImVec4& color) {
-    if (fading < 0.1f) {
+    if (fading < 0.10f) {
         color = ImVec4(0.0f, 1.0f, 0.5f, 1.0f);  // Cyan
         return "AWGN";
-    } else if (fading < 0.35f) {
+    } else if (fading < 0.25f) {
         color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);  // Green
         return "Good";
-    } else if (fading < 0.55f) {
+    } else if (fading < 0.50f) {
         color = ImVec4(0.8f, 0.8f, 0.0f, 1.0f);  // Yellow
         return "Moderate";
     } else {
