@@ -625,6 +625,18 @@ void StreamingDecoder::decodeCurrentFrame() {
 
     last_fading_index_.store(waveform_->getFadingIndex());
 
+    // Feed back pilot-corrected CFO to cached value
+    // Chirp-based CFO can be wrong on fading channels. The demodulator uses
+    // pilot tracking to refine it. Update our cached CFO so subsequent frames
+    // don't re-inject the wrong chirp CFO.
+    float corrected_cfo = waveform_->estimatedCFO();
+    if (std::abs(corrected_cfo - last_cfo_.load()) > 0.1f) {
+        LOG_MODEM(INFO, "[%s] CFO updated: %.2f → %.2f Hz (pilot-corrected)",
+                  log_prefix_.c_str(), last_cfo_.load(), corrected_cfo);
+    }
+    last_cfo_.store(corrected_cfo);
+    sync_cfo_ = corrected_cfo;
+
     // Check if we need more codewords
     constexpr size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;
 

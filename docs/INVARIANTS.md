@@ -12,29 +12,27 @@
 
 ## CFO (Carrier Frequency Offset) Invariants
 
-### INV-CFO-001: Chirp CFO is Always More Accurate Than Training CFO
+### INV-CFO-001: Chirp CFO is Coarse — LTS Refines It
 
-**Rule:** When chirp-based CFO is available, ALWAYS use it. Never let training-based CFO estimation overwrite it.
+**Rule:** Chirp CFO is more accurate than training-based estimation on AWGN, but on fading channels it can be wrong by ±2 Hz. The LTS residual estimation in `estimateChannelFromLTS()` REFINES chirp CFO per frame. The pilot tracking FURTHER refines it per symbol. The feedback loop propagates corrections back.
 
-**Why:** Chirp uses 1+ second of signal (two 500ms chirps). Training uses ~100ms. Longer signal = more accurate.
+**Why:** Fading distorts chirp peaks → false CFO. LTS compares 2 known training symbols to measure the residual. Pilots track per-symbol drift. Without this pipeline, a 1.4 Hz error causes 13°/symbol phase drift → DQPSK decode failures.
 
-**Implementation:**
-```cpp
-// MC-DPSK: Save and restore chirp CFO around training processing
-float saved_cfo = cfo_hz_;
-processTraining(samples);  // May corrupt cfo_hz_
-if (has_chirp_cfo) {
-    cfo_hz_ = saved_cfo;  // Restore chirp CFO
-}
-
-// OFDM: Flag to skip training CFO estimation
-if (chirp_cfo_estimated) {
-    // Use pre-set CFO, skip estimateCFOFromTraining()
-}
+**Implementation (4 stages):**
+```
+1. Chirp coarse CFO → stored as last_cfo_ (±50 Hz range, ±2 Hz accuracy on fading)
+2. LTS residual fix → corrects freq_offset_hz if residual > 0.3 Hz
+3. Pilot tracking → refines freq_offset_hz per data symbol
+4. Feedback loop → propagates corrected CFO back to waveform and StreamingDecoder
 ```
 
+**See `docs/CFO_CORRECTION_FLOW.md` for full details.**
+
 **Locations:**
-- `src/psk/multi_carrier_dpsk.hpp:578-588`
+- `src/sync/chirp_sync.hpp` (chirp detection)
+- `src/ofdm/channel_equalizer.cpp` (LTS residual, pilot tracking, toBaseband)
+- `src/waveform/ofdm_chirp_waveform.cpp` (feedback: `cfo_hz_ = demodulator_->getFrequencyOffset()`)
+- `src/gui/modem/streaming_decoder.cpp` (feedback: `last_cfo_.store(corrected_cfo)`)
 - `src/ofdm/demodulator_impl.hpp` (chirp_cfo_estimated flag)
 
 ---

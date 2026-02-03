@@ -530,13 +530,11 @@ private:
 
         // Check frame type to determine encoding mode
         // CONNECT/CONNECT_ACK always use MC-DPSK (even before negotiation)
-        // ACK/NACK use the negotiated waveform but need special handling for MC-DPSK
+        // All other frames use the negotiated waveform
         bool is_handshake_frame = false;
-        bool is_ack_nack = false;
         if (data.size() >= 3) {
             uint8_t frame_type = data[2];  // Type is at byte 2 (after 2-byte magic)
             is_handshake_frame = (frame_type == 0x12 || frame_type == 0x13);  // CONNECT, CONNECT_ACK
-            is_ack_nack = (frame_type == 0x20 || frame_type == 0x21);  // ACK, NACK
         }
 
         // Temporarily switch encoder mode for handshake frames
@@ -550,11 +548,12 @@ private:
         }
 
         // Encode frame using the encoder
-        // MC-DPSK: ALWAYS use full preamble, no light sync (simple stop-and-wait)
-        // OFDM: Use light preamble for data frames after handshake
+        // MC-DPSK: ALWAYS use full preamble (is_mc_dpsk covers all MC-DPSK frames incl ACK/NACK)
+        // OFDM: Use light preamble for all frames after handshake (DATA, ACK, NACK, etc.)
+        // Handshake frames (CONNECT/CONNECT_ACK): Always full preamble (pre-negotiation)
         std::vector<float> result;
         bool is_mc_dpsk = (encoder_->getMode() == WaveformMode::MC_DPSK);
-        bool use_light = !is_handshake_frame && !is_ack_nack && !is_mc_dpsk &&
+        bool use_light = !is_handshake_frame && !is_mc_dpsk &&
                          connected_.load() && handshake_complete_.load();
 
         if (use_light) {
@@ -1093,7 +1092,24 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--verbose" || arg == "-v") {
             sim.setVerbose(true);
         } else if (arg == "--fading" || arg == "-f") {
-            sim.setChannelType(ChannelType::MODERATE);  // Default fading = moderate
+            // --fading alone = moderate, --fading <type> = specified type
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                std::string ftype = argv[++i];
+                if (ftype == "good" || ftype == "GOOD") {
+                    sim.setChannelType(ChannelType::GOOD);
+                } else if (ftype == "moderate" || ftype == "MODERATE") {
+                    sim.setChannelType(ChannelType::MODERATE);
+                } else if (ftype == "poor" || ftype == "POOR") {
+                    sim.setChannelType(ChannelType::POOR);
+                } else if (ftype == "flutter" || ftype == "FLUTTER") {
+                    sim.setChannelType(ChannelType::FLUTTER);
+                } else {
+                    std::cerr << "Unknown fading type: " << ftype << " (use good, moderate, poor, flutter)\n";
+                    return 1;
+                }
+            } else {
+                sim.setChannelType(ChannelType::MODERATE);  // Default fading = moderate
+            }
         } else if (arg == "--channel" || arg == "-c") {
             if (i + 1 < argc) {
                 std::string ch_str = argv[++i];

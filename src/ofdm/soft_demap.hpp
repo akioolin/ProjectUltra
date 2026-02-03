@@ -215,7 +215,8 @@ inline std::array<float, 2> demapDQPSK(Complex sym, Complex prev_sym, float nois
     float scale = 2.0f * std::sqrt(snr_linear);
     static const float pi = 3.14159265358979f;
 
-    // bit1 (MSB): use sin(phase + π/4) as soft metric
+    // bit1 (MSB): sin(phase + π/4) - distance to boundary at 135°/-45°
+    // Magnitude at ideal DQPSK points: |sin(±π/4)| = 0.707
     llrs[0] = clipLLR(scale * std::sin(phase + pi/4));
 
     // bit0: use cos(2*phase) as soft metric

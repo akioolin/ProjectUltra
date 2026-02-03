@@ -173,6 +173,89 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
 
     if (valid_symbols == 0) return;
 
+    // === RESIDUAL CFO ESTIMATION FROM LTS ===
+    // Even when chirp-based CFO is applied, fading can cause chirp peak position errors
+    // that result in a wrong CFO estimate (e.g., -1.4 Hz when actual is 0).
+    // The toBaseband() above applied this wrong CFO, so we can detect the residual
+    // by measuring the phase rotation between training symbols.
+    //
+    // If H[sym0] and H[sym1] differ by a consistent phase across carriers,
+    // that phase = residual_CFO × T_symbol.
+    if (valid_symbols >= 2) {
+        Complex phase_diff_sum(0, 0);
+        int cfo_valid = 0;
+
+        for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
+            Complex h0 = h_per_symbol[0][i];
+            Complex h1 = h_per_symbol[1][i];
+            if (std::abs(h0) > 0.01f && std::abs(h1) > 0.01f) {
+                Complex diff = h1 * std::conj(h0);
+                float mag = std::abs(diff);
+                if (mag > 1e-6f) {
+                    phase_diff_sum += diff / mag;  // Normalized unit vector
+                    cfo_valid++;
+                }
+            }
+        }
+
+        if (cfo_valid > 10) {
+            float avg_phase = std::atan2(phase_diff_sum.imag(), phase_diff_sum.real());
+            float symbol_duration = static_cast<float>(symbol_samples) / config.sample_rate;
+            float residual_cfo = avg_phase / (2.0f * M_PI * symbol_duration);
+
+            // Only correct if residual is significant (> 0.3 Hz) but sane (< 5 Hz)
+            if (std::abs(residual_cfo) > 0.3f && std::abs(residual_cfo) < 5.0f) {
+                float old_cfo = freq_offset_hz;
+                freq_offset_hz += residual_cfo;
+                freq_offset_filtered = freq_offset_hz;
+
+                LOG_DEMOD(WARN, "LTS residual CFO: %.2f Hz detected (chirp gave %.2f, corrected to %.2f Hz)",
+                          residual_cfo, old_cfo, freq_offset_hz);
+
+                // Re-process training symbols with corrected CFO for accurate channel estimate
+                // Reset mixer to start position and re-run
+                mixer.reset();
+                freq_correction_phase = 0.0f;
+
+                // Recompute phase increment with corrected CFO
+                const float* ptr2 = training_samples;
+                for (auto& v : h_per_symbol) std::fill(v.begin(), v.end(), Complex(0, 0));
+                std::fill(h_sum_data.begin(), h_sum_data.end(), Complex(0, 0));
+                std::fill(h_sum_pilot.begin(), h_sum_pilot.end(), Complex(0, 0));
+
+                for (size_t sym = 0; sym < num_symbols; ++sym) {
+                    SampleSpan sym_span(ptr2, symbol_samples);
+                    auto baseband = toBaseband(sym_span);
+                    auto freq = extractSymbol(baseband, 0);
+
+                    for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
+                        int idx = data_carrier_indices[i];
+                        Complex rx = freq[idx];
+                        Complex tx = sync_sequence[i % sync_sequence.size()];
+                        if (std::abs(tx) > 0.01f) {
+                            Complex h_ls = rx / tx;
+                            h_sum_data[i] += h_ls;
+                            h_per_symbol[sym][i] = h_ls;
+                        }
+                    }
+                    for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
+                        int idx = pilot_carrier_indices[i];
+                        Complex rx = freq[idx];
+                        Complex tx = pilot_sequence[i];
+                        if (std::abs(tx) > 0.01f) {
+                            h_sum_pilot[i] += rx / tx;
+                        }
+                    }
+                    ptr2 += symbol_samples;
+                }
+
+                LOG_DEMOD(INFO, "LTS re-processed with corrected CFO=%.2f Hz", freq_offset_hz);
+            } else if (std::abs(residual_cfo) > 0.1f) {
+                LOG_DEMOD(DEBUG, "LTS residual CFO: %.2f Hz (below correction threshold)", residual_cfo);
+            }
+        }
+    }
+
     // For data carriers: use LAST symbol's H estimate
     // This is closest in time to the first data symbol, minimizing CFO-induced phase mismatch
     // Using the first symbol caused decode failures at CFO=30 Hz due to 2-symbol phase drift
@@ -195,14 +278,6 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
 
     LOG_DEMOD(INFO, "LTS channel estimate: %zu data + %zu pilot carriers",
               data_carrier_indices.size(), pilot_carrier_indices.size());
-
-    // For coherent modes with pilots, skip noise/CFO estimation from LTS.
-    // The pilot tracking in updateChannelEstimate() will handle these.
-    // LTS gives us initial channel estimate; pilots refine it per symbol.
-    //
-    // Note: For differential modes (DQPSK) without pilots, the old noise/CFO
-    // estimation code could be re-enabled, but differential modes don't need
-    // as precise channel tracking anyway.
 
     // Compute average channel response for logging
     Complex h_avg(0, 0);

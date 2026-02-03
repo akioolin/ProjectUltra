@@ -375,6 +375,18 @@ bool OFDMChirpWaveform::process(SampleSpan samples) {
             soft_bits_.insert(soft_bits_.end(), chunk.begin(), chunk.end());
         }
         last_snr_ = demodulator_->getEstimatedSNR();
+
+        // Feed back pilot-corrected CFO from demodulator
+        // On fading channels, chirp-based CFO can be wrong. The demodulator's
+        // pilot tracking and LTS residual estimation correct it. Propagate
+        // this correction back so subsequent frames use the refined CFO.
+        float corrected_cfo = demodulator_->getFrequencyOffset();
+        if (std::abs(corrected_cfo - cfo_hz_) > 0.1f) {
+            fprintf(stderr, "[OFDM_CHIRP] CFO feedback: chirp=%.2f → corrected=%.2f Hz\n",
+                    cfo_hz_, corrected_cfo);
+        }
+        cfo_hz_ = corrected_cfo;
+        last_cfo_ = corrected_cfo;
     }
 
     return ready;
