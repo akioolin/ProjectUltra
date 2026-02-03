@@ -123,6 +123,13 @@ public:
     // Call getSoftBits() to retrieve demodulated data
     virtual bool process(SampleSpan samples) = 0;
 
+    // Set the absolute sample position where training starts (for CFO phase calc)
+    // This is needed because detectSync/detectDataSync return positions relative
+    // to the search buffer, but CFO phase accumulation needs the absolute position
+    // in the audio stream since sample 0.
+    // Default implementation does nothing (for waveforms that don't need it)
+    virtual void setAbsoluteTrainingPosition(size_t pos) { (void)pos; }
+
     // Get soft bits from last process() call
     // Returns LLR values for LDPC decoder
     virtual std::vector<float> getSoftBits() = 0;

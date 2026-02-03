@@ -988,9 +988,15 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 result.frame_data = data0;
                 return result;
             } else if (hdr.total_cw == v2::FIXED_FRAME_CODEWORDS) {
-                // === Multi-CW frame with 4 CWs - likely frame interleaved ===
-                LOG_MODEM(DEBUG, "[%s] Header shows 4 CWs - trying frame deinterleave", log_prefix_.c_str());
-                try_frame_interleave = true;
+                // === Multi-CW frame with 4 CWs ===
+                // MC-DPSK: NO frame interleaving - decode CWs sequentially (legacy path)
+                // OFDM: Uses frame interleaving - try deinterleave first
+                if (mode_ != protocol::WaveformMode::MC_DPSK) {
+                    LOG_MODEM(DEBUG, "[%s] Header shows 4 CWs - trying frame deinterleave", log_prefix_.c_str());
+                    try_frame_interleave = true;
+                } else {
+                    LOG_MODEM(DEBUG, "[%s] MC-DPSK 4 CWs - using sequential decode (no frame interleaving)", log_prefix_.c_str());
+                }
             } else {
                 // === Multi-CW frame with != 4 CWs - old format, no frame interleaving ===
                 // Fall through to legacy decode path

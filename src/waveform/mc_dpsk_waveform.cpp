@@ -288,14 +288,16 @@ void MCDPSKWaveform::setCarrierCount(int carriers) {
 }
 
 int MCDPSKWaveform::getMinSamplesForFrame() const {
-    // Training symbols + reference symbol + minimum data for 1 codeword (648 bits)
-    // This is the minimum needed to decode the header and determine full frame size
+    // Training symbols + reference symbol + data for 1 LDPC codeword (648 bits)
+    // MC-DPSK does NOT use frame interleaving - CW0 can be decoded independently
+    // to parse the header and determine how many more CWs to request
     int training_samples = config_.training_symbols * config_.samples_per_symbol;
     int ref_samples = config_.samples_per_symbol;
 
-    // Data samples for 1 LDPC codeword (648 bits) - enough to read header
+    // Data samples for 1 LDPC codeword (648 bits)
+    constexpr int LDPC_BLOCK_SIZE = 648;
     int bits_per_symbol = config_.num_carriers * config_.bits_per_symbol;
-    int data_symbols = (648 + bits_per_symbol - 1) / bits_per_symbol;
+    int data_symbols = (LDPC_BLOCK_SIZE + bits_per_symbol - 1) / bits_per_symbol;
     int data_samples = data_symbols * config_.samples_per_symbol;
 
     return training_samples + ref_samples + data_samples;

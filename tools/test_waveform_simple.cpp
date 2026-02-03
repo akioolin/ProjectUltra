@@ -304,13 +304,26 @@ std::vector<float> generateFrames(const TestConfig& cfg, std::mt19937& rng,
         auto df = v2::DataFrame::makeData("TEST", "RX", frame.seq, frame.payload, cfg.code_rate);
         Bytes frame_data = df.serialize();
 
-        // Encode with frame interleaving (4 CWs per frame)
-        // This uses encodeFixedFrame which includes LDPC + interleaving
-        Bytes encoded = v2::encodeFixedFrame(frame_data, cfg.code_rate);
-
-        if (cfg.verbose) {
-            printf("  Frame %d: %zu bytes payload -> %zu bytes frame -> %zu bytes encoded (interleaved)\n",
-                   frame.seq, frame.payload.size(), frame_data.size(), encoded.size());
+        // Encode - MC-DPSK uses non-interleaved, OFDM uses frame interleaving
+        Bytes encoded;
+        if (cfg.waveform == protocol::WaveformMode::MC_DPSK) {
+            // MC-DPSK: LDPC encode WITHOUT frame interleaving
+            // CW0 can be decoded independently to parse header
+            auto codewords = v2::encodeFrameWithLDPC(frame_data, cfg.code_rate);
+            for (const auto& cw : codewords) {
+                encoded.insert(encoded.end(), cw.begin(), cw.end());
+            }
+            if (cfg.verbose) {
+                printf("  Frame %d: %zu bytes payload -> %zu bytes frame -> %zu CWs -> %zu bytes encoded (non-interleaved)\n",
+                       frame.seq, frame.payload.size(), frame_data.size(), codewords.size(), encoded.size());
+            }
+        } else {
+            // OFDM: Encode with frame interleaving (4 CWs per frame)
+            encoded = v2::encodeFixedFrame(frame_data, cfg.code_rate);
+            if (cfg.verbose) {
+                printf("  Frame %d: %zu bytes payload -> %zu bytes frame -> %zu bytes encoded (interleaved)\n",
+                       frame.seq, frame.payload.size(), frame_data.size(), encoded.size());
+            }
         }
 
         // Modulate with appropriate preamble
@@ -385,6 +398,9 @@ std::set<uint16_t> decodeFrames(const std::vector<float>& audio, const TestConfi
                cfg.getDataCarriers());
     } else if (cfg.waveform == protocol::WaveformMode::MC_DPSK) {
         decoder.setMCDPSKCarriers(cfg.mc_dpsk_carriers);
+        // MC-DPSK always uses DQPSK R1/4 per protocol, but still need to configure
+        // interleaver via setDataMode()
+        decoder.setDataMode(Modulation::DQPSK, CodeRate::R1_4);
         printf("RX: Configured StreamingDecoder for MC-DPSK (%d carriers)\n",
                cfg.mc_dpsk_carriers);
     }
@@ -531,6 +547,12 @@ int main(int argc, char** argv) {
         else if (arg == "-q") {
             cfg.verbose = false;
         }
+    }
+
+    // MC-DPSK always uses R1/4 per protocol
+    if (cfg.waveform == protocol::WaveformMode::MC_DPSK) {
+        cfg.code_rate = CodeRate::R1_4;
+        cfg.modulation = Modulation::DQPSK;
     }
 
     // Configure pilots based on code rate
