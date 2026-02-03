@@ -133,14 +133,16 @@ inline WaveformRecommendation recommendWaveformAndRate(float snr_db, float fadin
         rec.rate = CodeRate::R1_4;
         rec.estimated_throughput_bps = 1150.0f;
     }
-    else if (snr_db >= 10.0f) {
+    else if (snr_db >= 11.0f) {
         // Heavy fading or borderline SNR: OFDM_CHIRP R1/4 still viable
+        // Tested: SNR=11 good fading passes, SNR=10 fails
         rec.waveform = WaveformMode::OFDM_CHIRP;
         rec.rate = CodeRate::R1_4;
         rec.estimated_throughput_bps = 1150.0f;
     }
     else {
         // Very heavy fading or low SNR: MC-DPSK
+        // SNR < 11 with fading needs MC-DPSK robustness
         rec.waveform = WaveformMode::MC_DPSK;
         rec.rate = CodeRate::R1_4;
         rec.estimated_throughput_bps = 938.0f;

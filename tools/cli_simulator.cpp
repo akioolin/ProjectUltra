@@ -460,7 +460,10 @@ private:
 
         // Update RX decoder
         if (decoder_) {
-            decoder_->setOFDMConfig(ofdm_config_);
+            // Only update OFDM config for OFDM modes - MC-DPSK doesn't use it
+            if (negotiated_waveform_ != WaveformMode::MC_DPSK) {
+                decoder_->setOFDMConfig(ofdm_config_);
+            }
             decoder_->setDataMode(mod, rate);
         }
 
