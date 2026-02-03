@@ -568,6 +568,15 @@ void Connection::enterConnected() {
     arq_.setCallsigns(local_call_, remote_call_);
     arq_.reset();
 
+    // MC-DPSK uses stop-and-wait (window=1), OFDM uses sliding window (window=4)
+    if (negotiated_mode_ == WaveformMode::MC_DPSK) {
+        arq_.setWindowSize(1);
+        LOG_MODEM(INFO, "Connection: ARQ window=1 (stop-and-wait for MC-DPSK)");
+    } else {
+        arq_.setWindowSize(4);
+        LOG_MODEM(INFO, "Connection: ARQ window=4 (sliding window for OFDM)");
+    }
+
     LOG_MODEM(INFO, "Connection: Now CONNECTED to %s (mode=%s)",
               remote_call_.c_str(), waveformModeToString(negotiated_mode_));
 

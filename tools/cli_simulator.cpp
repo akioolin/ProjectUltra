@@ -490,6 +490,12 @@ private:
                 LOG_MODEM(INFO, "[%s] Entered CONNECTED state, switched to %s, CFO=%.1f Hz",
                           callsign_.c_str(), waveformModeToString(negotiated_waveform_), last_cfo_hz_);
             } else {
+                // MC-DPSK: Still need to update decoder's connected state and CFO
+                if (decoder_) {
+                    decoder_->setMode(WaveformMode::MC_DPSK, true);  // true = connected
+                    decoder_->setDataMode(data_modulation_, data_code_rate_);
+                    decoder_->setKnownCFO(last_cfo_hz_);
+                }
                 LOG_MODEM(INFO, "[%s] Entered CONNECTED state (MC-DPSK), CFO=%.1f Hz",
                           callsign_.c_str(), last_cfo_hz_);
             }
@@ -522,27 +528,34 @@ private:
             return {};
         }
 
-        // Check if this is a connection setup frame (CONNECT, CONNECT_ACK)
-        // These ALWAYS use MC-DPSK. DISCONNECT uses the negotiated waveform.
-        bool is_control_frame = false;
+        // Check frame type to determine encoding mode
+        // CONNECT/CONNECT_ACK always use MC-DPSK (even before negotiation)
+        // ACK/NACK use the negotiated waveform but need special handling for MC-DPSK
+        bool is_handshake_frame = false;
+        bool is_ack_nack = false;
         if (data.size() >= 3) {
             uint8_t frame_type = data[2];  // Type is at byte 2 (after 2-byte magic)
-            is_control_frame = (frame_type == 0x12 || frame_type == 0x13);
+            is_handshake_frame = (frame_type == 0x12 || frame_type == 0x13);  // CONNECT, CONNECT_ACK
+            is_ack_nack = (frame_type == 0x20 || frame_type == 0x21);  // ACK, NACK
         }
 
-        // Temporarily switch encoder mode for control frames
+        // Temporarily switch encoder mode for handshake frames
         auto saved_mode = encoder_->getMode();
         auto saved_rate = encoder_->getCodeRate();
 
-        if (is_control_frame) {
-            // Control frames always use MC-DPSK R1/4
+        if (is_handshake_frame) {
+            // Handshake frames always use MC-DPSK R1/4
             encoder_->setMode(WaveformMode::MC_DPSK);
             encoder_->setDataMode(Modulation::DQPSK, CodeRate::R1_4);
         }
 
         // Encode frame using the encoder
+        // MC-DPSK: ALWAYS use full preamble, no light sync (simple stop-and-wait)
+        // OFDM: Use light preamble for data frames after handshake
         std::vector<float> result;
-        bool use_light = !is_control_frame && connected_.load() && handshake_complete_.load();
+        bool is_mc_dpsk = (encoder_->getMode() == WaveformMode::MC_DPSK);
+        bool use_light = !is_handshake_frame && !is_ack_nack && !is_mc_dpsk &&
+                         connected_.load() && handshake_complete_.load();
 
         if (use_light) {
             result = encoder_->encodeFrameLight(data);
@@ -551,14 +564,14 @@ private:
         }
 
         // Restore encoder mode if we changed it
-        if (is_control_frame) {
+        if (is_handshake_frame) {
             encoder_->setMode(saved_mode);
             encoder_->setDataMode(data_modulation_, saved_rate);
         }
 
         LOG_MODEM(INFO, "[%s] TX frame: %zu bytes -> %zu samples (mode=%s, %s)",
                   callsign_.c_str(), data.size(), result.size(),
-                  is_control_frame ? "MC-DPSK" : waveformModeToString(encoder_->getMode()),
+                  is_handshake_frame ? "MC-DPSK" : waveformModeToString(encoder_->getMode()),
                   use_light ? "light" : "full");
 
         return result;

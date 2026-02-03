@@ -65,6 +65,14 @@ public:
     void setCodeRate(CodeRate rate) { code_rate_ = rate; }
     CodeRate getCodeRate() const { return code_rate_; }
 
+    // Set window size (1 = stop-and-wait behavior for MC-DPSK)
+    void setWindowSize(size_t size) {
+        if (size < 1) size = 1;
+        if (size > MAX_WINDOW) size = MAX_WINDOW;
+        config_.window_size = size;
+    }
+    size_t getWindowSize() const { return config_.window_size; }
+
 private:
     // TX state per frame in window
     struct TXSlot {

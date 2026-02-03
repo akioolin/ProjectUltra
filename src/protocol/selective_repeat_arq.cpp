@@ -305,7 +305,16 @@ void SelectiveRepeatARQ::sendSack() {
 
     stats_.sacks_sent++;
     stats_.acks_sent++;
-    transmitData(sack.serialize());
+
+    auto data = sack.serialize();
+    LOG_MODEM(INFO, "SR-ARQ: ACK TX bytes[0-9]  = %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+              data[0], data[1], data[2], data[3], data[4],
+              data[5], data[6], data[7], data[8], data[9]);
+    LOG_MODEM(INFO, "SR-ARQ: ACK TX bytes[10-19] = %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+              data[10], data[11], data[12], data[13], data[14],
+              data[15], data[16], data[17], data[18], data[19]);
+
+    transmitData(data);
 
     LOG_MODEM(DEBUG, "SR-ARQ: Sent SACK base=%d bitmap=0x%02X",
               (rx_base_seq_ - 1) & 0xFFFF, bitmap);

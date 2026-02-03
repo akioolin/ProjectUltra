@@ -343,21 +343,38 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
                     mode_ == protocol::WaveformMode::OFDM_COX);
 
     if (!is_ofdm) {
-        // MC-DPSK: variable CW encoding
+        // MC-DPSK: Simple variable CW encoding (no frame interleaving)
+        // Control frames (20 bytes): ACK, NACK, etc. - encode as-is, no patching
+        // Data frames (>20 bytes): May need total_cw patching
+
+        // Check if this is a control frame (20 bytes, type 0x10-0x21 or 0x40)
+        bool is_control_frame = false;
+        if (tx_data.size() == 20 && tx_data.size() >= 3) {
+            uint8_t frame_type = tx_data[2];
+            // Control frame types: PROBE(0x10), PROBE_ACK(0x11), CONNECT(0x12),
+            // CONNECT_ACK(0x13), CONNECT_NAK(0x14), DISCONNECT(0x15), KEEPALIVE(0x16),
+            // MODE_CHANGE(0x17), ACK(0x20), NACK(0x21), BEACON(0x40)
+            is_control_frame = (frame_type >= 0x10 && frame_type <= 0x21) ||
+                               (frame_type == 0x40);
+        }
+
         auto cws = v2::encodeFrameWithLDPC(tx_data, code_rate_);
 
-        // Patch total_cw in header if needed
-        uint8_t actual_cw = static_cast<uint8_t>(cws.size());
-        if (tx_data.size() >= 17 && tx_data[12] != actual_cw) {
-            LOG_MODEM(DEBUG, "[%s] Patching total_cw %d -> %d",
-                      log_prefix_.c_str(), tx_data[12], actual_cw);
-            tx_data[12] = actual_cw;
-            // Recalculate header CRC
-            uint16_t hcrc = v2::ControlFrame::calculateCRC(tx_data.data(), 15);
-            tx_data[15] = (hcrc >> 8) & 0xFF;
-            tx_data[16] = hcrc & 0xFF;
-            // Re-encode with corrected header
-            cws = v2::encodeFrameWithLDPC(tx_data, code_rate_);
+        // Only patch DATA frames (not control frames)
+        // DATA frames have total_cw at byte 12, header_crc at bytes 15-16
+        if (!is_control_frame && tx_data.size() >= 17) {
+            uint8_t actual_cw = static_cast<uint8_t>(cws.size());
+            if (tx_data[12] != actual_cw) {
+                LOG_MODEM(DEBUG, "[%s] Patching total_cw %d -> %d",
+                          log_prefix_.c_str(), tx_data[12], actual_cw);
+                tx_data[12] = actual_cw;
+                // Recalculate header CRC (over first 15 bytes for DATA frames)
+                uint16_t hcrc = v2::ControlFrame::calculateCRC(tx_data.data(), 15);
+                tx_data[15] = (hcrc >> 8) & 0xFF;
+                tx_data[16] = hcrc & 0xFF;
+                // Re-encode with corrected header
+                cws = v2::encodeFrameWithLDPC(tx_data, code_rate_);
+            }
         }
 
         // Concatenate codewords
@@ -366,8 +383,9 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
             encoded.insert(encoded.end(), cw.begin(), cw.end());
         }
 
-        LOG_MODEM(DEBUG, "[%s] MC-DPSK: %zu bytes -> %zu CWs (%zu coded)",
-                  log_prefix_.c_str(), tx_data.size(), cws.size(), encoded.size());
+        LOG_MODEM(DEBUG, "[%s] MC-DPSK: %zu bytes -> %zu CWs (%zu coded, control=%s)",
+                  log_prefix_.c_str(), tx_data.size(), cws.size(), encoded.size(),
+                  is_control_frame ? "yes" : "no");
         return encoded;
     }
 

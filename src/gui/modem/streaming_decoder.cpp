@@ -928,6 +928,123 @@ float StreamingDecoder::estimateSNRFromChirp(float corr, float /*noise*/) {
     return std::max(-5.0f, std::min(30.0f, snr));
 }
 
+// ============================================================================
+// MC-DPSK: Simple sequential codeword decode (no frame interleaving)
+// ============================================================================
+DecodeResult StreamingDecoder::decodeMCDPSKFrame(const std::vector<float>& soft_bits,
+                                                   CodeRate rate, size_t bytes_per_cw,
+                                                   float snr, float cfo) {
+    DecodeResult result;
+    result.snr_db = snr;
+    result.cfo_hz = cfo;
+
+    constexpr size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;
+
+    if (soft_bits.size() < LDPC_BLOCK) return result;
+
+    codec_->setRate(rate);
+
+    // Decode CW0 (header codeword)
+    std::vector<float> cw0_bits(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
+    auto [ok0, data0] = codec_->decode(cw0_bits);
+
+    if (!ok0 || data0.size() < 2 || data0[0] != 0x55 || data0[1] != 0x4C) {
+        LOG_MODEM(INFO, "[%s] MC-DPSK: CW0 decode failed (ok=%d, size=%zu, magic=0x%02X%02X)",
+                  log_prefix_.c_str(), ok0 ? 1 : 0, data0.size(),
+                  data0.size() >= 1 ? data0[0] : 0, data0.size() >= 2 ? data0[1] : 0);
+        return result;
+    }
+
+    // Truncate to bytes_per_cw if needed
+    if (data0.size() > bytes_per_cw) data0.resize(bytes_per_cw);
+
+    // Parse header
+    auto hdr = v2::parseHeader(data0);
+    if (!hdr.valid) {
+        // Log CRC details for control frames (ACK, etc.)
+        if (data0.size() >= 20) {
+            uint16_t received_crc = (static_cast<uint16_t>(data0[18]) << 8) | data0[19];
+
+            // Full 18 bytes
+            uint8_t full18[18];
+            for (int i = 0; i < 18; i++) full18[i] = data0[i];
+            uint16_t calc18 = v2::ControlFrame::calculateCRC(full18, 18);
+
+            // Print all 20 bytes for inspection
+            LOG_MODEM(INFO, "[%s] MC-DPSK: CRC fail - rcv=0x%04X calc18=0x%04X",
+                      log_prefix_.c_str(), received_crc, calc18);
+            LOG_MODEM(INFO, "[%s] MC-DPSK: bytes[0-9]  = %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+                      log_prefix_.c_str(),
+                      data0[0], data0[1], data0[2], data0[3], data0[4],
+                      data0[5], data0[6], data0[7], data0[8], data0[9]);
+            LOG_MODEM(INFO, "[%s] MC-DPSK: bytes[10-19] = %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+                      log_prefix_.c_str(),
+                      data0[10], data0[11], data0[12], data0[13], data0[14],
+                      data0[15], data0[16], data0[17], data0[18], data0[19]);
+        } else {
+            LOG_MODEM(INFO, "[%s] MC-DPSK: Header invalid - data too small (%zu bytes)",
+                      log_prefix_.c_str(), data0.size());
+        }
+        return result;
+    }
+
+    result.frame_type = hdr.type;
+    result.codewords_ok = 1;
+
+    // 1-CW frame (control frame like ACK, PROBE, etc.)
+    if (hdr.total_cw == 1) {
+        result.success = true;
+        result.frame_data = data0;
+        LOG_MODEM(DEBUG, "[%s] MC-DPSK: Control frame (1 CW) decoded", log_prefix_.c_str());
+        return result;
+    }
+
+    // Multi-CW frame - decode remaining codewords sequentially
+    int total_cw = hdr.total_cw;
+    int avail_cw = static_cast<int>(soft_bits.size() / LDPC_BLOCK);
+
+    if (avail_cw < total_cw) {
+        // Not enough codewords available
+        result.frame_data = data0;
+        LOG_MODEM(DEBUG, "[%s] MC-DPSK: Need %d CWs, have %d - partial", log_prefix_.c_str(), total_cw, avail_cw);
+        return result;
+    }
+
+    // Set up codeword status for reassembly
+    v2::CodewordStatus cw_status;
+    cw_status.decoded.resize(total_cw, false);
+    cw_status.data.resize(total_cw);
+    cw_status.decoded[0] = true;
+    cw_status.data[0] = data0;
+
+    // Decode CW1+
+    for (int i = 1; i < total_cw; i++) {
+        size_t off = i * LDPC_BLOCK;
+        std::vector<float> bits(soft_bits.begin() + off, soft_bits.begin() + off + LDPC_BLOCK);
+
+        auto [ok, data] = codec_->decode(bits);
+        if (ok && data.size() >= bytes_per_cw) {
+            data.resize(bytes_per_cw);
+            cw_status.decoded[i] = true;
+            cw_status.data[i] = data;
+            result.codewords_ok++;
+        } else {
+            result.codewords_failed++;
+        }
+    }
+
+    if (cw_status.allSuccess()) {
+        result.success = true;
+        result.frame_data = cw_status.reassemble();
+        LOG_MODEM(DEBUG, "[%s] MC-DPSK: %d/%d CWs decoded OK", log_prefix_.c_str(), total_cw, total_cw);
+    } else {
+        LOG_MODEM(DEBUG, "[%s] MC-DPSK: %d/%d CWs failed", log_prefix_.c_str(),
+                  result.codewords_failed, total_cw);
+    }
+
+    return result;
+}
+
 DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, float snr, float cfo) {
     DecodeResult result;
     result.snr_db = snr;
@@ -958,7 +1075,17 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     };
 
     // ========================================================================
-    // "Try Both" Strategy for Frame Interleaving
+    // MC-DPSK: Simple sequential decode (no frame interleaving ever)
+    // OFDM: "Try Both" strategy with frame interleaving for 4-CW frames
+    // ========================================================================
+
+    // For MC-DPSK, ALWAYS use simple sequential decode - skip all frame interleaving logic
+    if (mode_ == protocol::WaveformMode::MC_DPSK) {
+        return decodeMCDPSKFrame(soft_bits, rate, bytes_per_cw, snr, cfo);
+    }
+
+    // ========================================================================
+    // OFDM: "Try Both" Strategy for Frame Interleaving
     // ========================================================================
     // 1. First, try to decode first 648 bits as non-interleaved CW0
     // 2. If it's a valid 1-CW control frame → done
@@ -988,15 +1115,9 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 result.frame_data = data0;
                 return result;
             } else if (hdr.total_cw == v2::FIXED_FRAME_CODEWORDS) {
-                // === Multi-CW frame with 4 CWs ===
-                // MC-DPSK: NO frame interleaving - decode CWs sequentially (legacy path)
-                // OFDM: Uses frame interleaving - try deinterleave first
-                if (mode_ != protocol::WaveformMode::MC_DPSK) {
-                    LOG_MODEM(DEBUG, "[%s] Header shows 4 CWs - trying frame deinterleave", log_prefix_.c_str());
-                    try_frame_interleave = true;
-                } else {
-                    LOG_MODEM(DEBUG, "[%s] MC-DPSK 4 CWs - using sequential decode (no frame interleaving)", log_prefix_.c_str());
-                }
+                // === Multi-CW frame with 4 CWs - try frame interleaving ===
+                LOG_MODEM(DEBUG, "[%s] Header shows 4 CWs - trying frame deinterleave", log_prefix_.c_str());
+                try_frame_interleave = true;
             } else {
                 // === Multi-CW frame with != 4 CWs - old format, no frame interleaving ===
                 // Fall through to legacy decode path

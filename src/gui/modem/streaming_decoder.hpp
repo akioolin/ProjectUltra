@@ -241,6 +241,11 @@ private:
     // Decode soft bits into frame data
     DecodeResult decodeFrame(const std::vector<float>& soft_bits, float snr, float cfo);
 
+    // MC-DPSK specific decode (simple sequential, no frame interleaving)
+    DecodeResult decodeMCDPSKFrame(const std::vector<float>& soft_bits,
+                                    CodeRate rate, size_t bytes_per_cw,
+                                    float snr, float cfo);
+
     // Legacy methods (kept for compatibility, do nothing)
     bool runCorrelationSearch(size_t new_samples);
     bool tryDecodeFrame();
