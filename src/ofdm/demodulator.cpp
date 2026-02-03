@@ -239,14 +239,17 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
     // Solution: When fading is detected, increase noise variance (reduce LLR confidence).
     // This tells LDPC "don't trust these soft bits as much".
     //
-    // Scale: ce_margin × (1 + 6 × fading_index²)
-    // - fading_index=0: no change
-    // - fading_index=0.3: ×1.54 (moderate reduction)
-    // - fading_index=0.5: ×2.5 (significant reduction)
-    // - fading_index=0.7: ×3.94 (large reduction)
+    // Scale: ce_margin × (1 + 20 × fading_index²)
+    // Note: OFDM pilots measure lower fading index than MC-DPSK (6 pilots vs 8 carriers),
+    // so we use 20× instead of 6× to compensate. At OFDM fading_index=0.15, this gives
+    // 1.45× scaling (similar to MC-DPSK fading_index=0.35 with 6×).
+    //
+    // - fading_index=0.12: ×1.29 (compensates for underestimate)
+    // - fading_index=0.20: ×1.80
+    // - fading_index=0.30: ×2.80 (significant reduction)
     float fading_index = last_fading_index;  // From updateChannelEstimate()
-    if (fading_index > 0.1f) {
-        float fading_scale = 1.0f + 6.0f * fading_index * fading_index;
+    if (fading_index > 0.08f) {  // Lower threshold for OFDM's underestimate
+        float fading_scale = 1.0f + 20.0f * fading_index * fading_index;
         ce_error_margin *= fading_scale;
         if (snr_symbol_count < 3) {
             LOG_DEMOD(DEBUG, "Fading LLR scaling: index=%.3f, margin=%.2f", fading_index, ce_error_margin);

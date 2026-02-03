@@ -420,6 +420,13 @@ float OFDMChirpWaveform::estimatedCFO() const {
     return cfo_hz_;
 }
 
+float OFDMChirpWaveform::getFadingIndex() const {
+    if (demodulator_) {
+        return demodulator_->getFadingIndex();
+    }
+    return 0.0f;
+}
+
 std::vector<std::complex<float>> OFDMChirpWaveform::getConstellationSymbols() const {
     if (demodulator_) {
         return demodulator_->getConstellationSymbols();

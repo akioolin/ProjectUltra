@@ -365,7 +365,8 @@ private:
 
         // Pass frame data to protocol
         if (!result.frame_data.empty()) {
-            protocol_.setChannelQuality(snr_db_, 0.0f);  // TODO: get fading from decoder
+            float fading_index = decoder_ ? decoder_->getLastFadingIndex() : 0.0f;
+            protocol_.setChannelQuality(snr_db_, fading_index);
             protocol_.onRxData(result.frame_data);
         }
     }

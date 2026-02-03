@@ -75,6 +75,7 @@ public:
     bool hasData() const override;
     float estimatedSNR() const override;
     float estimatedCFO() const override;
+    float getFadingIndex() const override;  // From demodulator pilot variance
     std::vector<std::complex<float>> getConstellationSymbols() const override;
 
     // ========================================================================
