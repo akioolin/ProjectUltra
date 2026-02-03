@@ -73,6 +73,10 @@ public:
     }
     size_t getWindowSize() const { return config_.window_size; }
 
+    // Set ACK timeout (adaptive based on waveform frame duration)
+    void setAckTimeout(uint32_t timeout_ms) { config_.ack_timeout_ms = timeout_ms; }
+    uint32_t getAckTimeout() const { return config_.ack_timeout_ms; }
+
 private:
     // TX state per frame in window
     struct TXSlot {

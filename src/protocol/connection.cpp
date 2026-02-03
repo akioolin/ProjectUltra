@@ -569,12 +569,17 @@ void Connection::enterConnected() {
     arq_.reset();
 
     // MC-DPSK uses stop-and-wait (window=1), OFDM uses sliding window (window=4)
+    // Timeout must exceed round-trip time: TX frame + RX decode + ACK TX + ACK decode
+    //   MC-DPSK: full chirp preamble (1.3s) + data (~0.6s) + search buffer (~2.5s) each way → RTT ~13s
+    //   OFDM:    light preamble (~0.3s) + data (~1s) + LTS sync (~0.5s) each way → RTT ~6s
     if (negotiated_mode_ == WaveformMode::MC_DPSK) {
         arq_.setWindowSize(1);
-        LOG_MODEM(INFO, "Connection: ARQ window=1 (stop-and-wait for MC-DPSK)");
+        arq_.setAckTimeout(18000);
+        LOG_MODEM(INFO, "Connection: ARQ window=1, timeout=18s (MC-DPSK)");
     } else {
         arq_.setWindowSize(4);
-        LOG_MODEM(INFO, "Connection: ARQ window=4 (sliding window for OFDM)");
+        arq_.setAckTimeout(10000);
+        LOG_MODEM(INFO, "Connection: ARQ window=4, timeout=10s (OFDM)");
     }
 
     LOG_MODEM(INFO, "Connection: Now CONNECTED to %s (mode=%s)",
