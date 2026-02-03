@@ -31,12 +31,13 @@ void MCDPSKWaveform::initComponents() {
 
     // Debug: print config
     auto freqs = config_.getCarrierFreqs();
-    fprintf(stderr, "[MCDPSKWaveform] Created with %d carriers, samples_per_sym=%d, freqs: ",
-            config_.num_carriers, config_.samples_per_symbol);
+    char freq_buf[128] = "";
+    int pos = 0;
     for (int i = 0; i < std::min(4, config_.num_carriers); i++) {
-        fprintf(stderr, "%.0f ", freqs[i]);
+        pos += snprintf(freq_buf + pos, sizeof(freq_buf) - pos, "%.0f ", freqs[i]);
     }
-    fprintf(stderr, "...\n");
+    LOG_MODEM(INFO, "MCDPSKWaveform: Created with %d carriers, samples_per_sym=%d, freqs: %s...",
+              config_.num_carriers, config_.samples_per_symbol, freq_buf);
 }
 
 WaveformCapabilities MCDPSKWaveform::getCapabilities() const {
@@ -175,28 +176,28 @@ bool MCDPSKWaveform::process(SampleSpan samples) {
         return std::sqrt(e / std::min(len, samples.size() - start));
     };
 
-    fprintf(stderr, "[MC-DPSK] process: samples=%zu, training=%zu, ref=%zu\n",
-            samples.size(), training_samples, ref_samples);
-    fprintf(stderr, "[MC-DPSK] RMS: training[0]=%f, ref[%zu]=%f, data[%zu]=%f\n",
-            calcRMS(0, 512), training_samples, calcRMS(training_samples, 512),
-            training_samples + ref_samples, calcRMS(training_samples + ref_samples, 512));
+    LOG_MODEM(DEBUG, "MCDPSKWaveform: process: samples=%zu, training=%zu, ref=%zu",
+              samples.size(), training_samples, ref_samples);
+    LOG_MODEM(DEBUG, "MCDPSKWaveform: RMS: training[0]=%f, ref[%zu]=%f, data[%zu]=%f",
+              calcRMS(0, 512), training_samples, calcRMS(training_samples, 512),
+              training_samples + ref_samples, calcRMS(training_samples + ref_samples, 512));
 
     // Tell demodulator that chirp was already detected externally via detectSync()
     // This puts it in GOT_CHIRP state so it processes data directly without
     // looking for chirp in the samples
-    fprintf(stderr, "[MC-DPSK] process: setting CFO=%.1f Hz in demodulator\n", cfo_hz_);
+    LOG_MODEM(DEBUG, "MCDPSKWaveform: process: setting CFO=%.1f Hz in demodulator", cfo_hz_);
     demodulator_->setChirpDetected(cfo_hz_);
 
     // Process samples through demodulator
     bool ready = demodulator_->process(samples);
 
-    fprintf(stderr, "[MC-DPSK] process: input_samples=%zu, ready=%d, demod_cfo=%.1f\n",
-            samples.size(), ready, demodulator_->getEstimatedCFO());
+    LOG_MODEM(DEBUG, "MCDPSKWaveform: process: input_samples=%zu, ready=%d, demod_cfo=%.1f",
+              samples.size(), ready, demodulator_->getEstimatedCFO());
 
     if (ready) {
         // Get soft bits from demodulator's internal state (computed in processGotChirp)
         soft_bits_ = demodulator_->getSoftBits();
-        fprintf(stderr, "[MC-DPSK] got %zu soft bits\n", soft_bits_.size());
+        LOG_MODEM(DEBUG, "MCDPSKWaveform: got %zu soft bits", soft_bits_.size());
         synced_ = true;
     }
 

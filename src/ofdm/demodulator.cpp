@@ -1265,8 +1265,8 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     LOG_SYNC(INFO, "processPresynced: total %d symbols, got %zu soft bits",
              impl_->synced_symbol_count.load(), impl_->soft_bits.size());
 
-    fprintf(stderr, "[OFDM-DBG] processPresynced: %d symbols, %zu soft bits, need %d\n",
-            impl_->synced_symbol_count.load(), impl_->soft_bits.size(), LDPC_BLOCK_SIZE);
+    LOG_DEMOD(DEBUG, "OFDM processPresynced: %d symbols, %zu soft bits, need %d",
+              impl_->synced_symbol_count.load(), impl_->soft_bits.size(), LDPC_BLOCK_SIZE);
 
     return impl_->soft_bits.size() >= LDPC_BLOCK_SIZE;
 }

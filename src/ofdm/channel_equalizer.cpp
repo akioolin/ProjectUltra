@@ -25,9 +25,9 @@ std::vector<Complex> OFDMDemodulator::Impl::toBaseband(SampleSpan samples) {
     // Log CFO correction
     static int tb_call_count = 0;
     if (std::abs(freq_offset_hz) > 0.01f && tb_call_count < 5) {
-        fprintf(stderr, "[toBaseband #%d] CFO=%.2f Hz, phase_inc=%.6f, start_phase=%.2f rad (%.1f deg), samples=%zu\n",
-                tb_call_count, freq_offset_hz, phase_increment, freq_correction_phase,
-                freq_correction_phase * 180.0f / M_PI, samples.size());
+        LOG_DEMOD(DEBUG, "toBaseband #%d: CFO=%.2f Hz, phase_inc=%.6f, start_phase=%.2f rad (%.1f deg), samples=%zu",
+                  tb_call_count, freq_offset_hz, phase_increment, freq_correction_phase,
+                  freq_correction_phase * 180.0f / M_PI, samples.size());
         tb_call_count++;
     }
 
@@ -93,11 +93,14 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
              num_symbols, symbol_samples, training_samples[0]);
 
     // DEBUG: Print carrier indices
-    fprintf(stderr, "[LTS-DBG] RX carrier indices (first 5): ");
-    for (size_t i = 0; i < std::min(size_t(5), data_carrier_indices.size()); ++i) {
-        fprintf(stderr, "%d ", data_carrier_indices[i]);
+    {
+        char idx_buf[128] = "";
+        int pos = 0;
+        for (size_t i = 0; i < std::min(size_t(5), data_carrier_indices.size()); ++i) {
+            pos += snprintf(idx_buf + pos, sizeof(idx_buf) - pos, "%d ", data_carrier_indices[i]);
+        }
+        LOG_DEMOD(DEBUG, "LTS RX carrier indices (first 5): %s(total %zu)", idx_buf, data_carrier_indices.size());
     }
-    fprintf(stderr, "(total %zu)\n", data_carrier_indices.size());
 
     if (num_symbols == 0 || data_carrier_indices.empty()) return;
 
@@ -120,18 +123,16 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
 
         // DEBUG: Print first few freq domain values on first training symbol
         if (sym == 0) {
-            fprintf(stderr, "[LTS-DBG] RX freq[idx] for first 5 carriers: ");
+            char rx_buf[256] = "", tx_buf[256] = "";
+            int rp = 0, tp = 0;
             for (size_t i = 0; i < std::min(size_t(5), data_carrier_indices.size()); ++i) {
                 int idx = data_carrier_indices[i];
-                fprintf(stderr, "[%d]=(%.3f,%.3f) ", idx, freq[idx].real(), freq[idx].imag());
-            }
-            fprintf(stderr, "\n");
-            fprintf(stderr, "[LTS-DBG] TX sync_seq for first 5 carriers: ");
-            for (size_t i = 0; i < std::min(size_t(5), data_carrier_indices.size()); ++i) {
+                rp += snprintf(rx_buf + rp, sizeof(rx_buf) - rp, "[%d]=(%.3f,%.3f) ", idx, freq[idx].real(), freq[idx].imag());
                 Complex tx = sync_sequence[i % sync_sequence.size()];
-                fprintf(stderr, "(%.3f,%.3f) ", tx.real(), tx.imag());
+                tp += snprintf(tx_buf + tp, sizeof(tx_buf) - tp, "(%.3f,%.3f) ", tx.real(), tx.imag());
             }
-            fprintf(stderr, "\n");
+            LOG_DEMOD(DEBUG, "LTS RX freq[idx] first 5 carriers: %s", rx_buf);
+            LOG_DEMOD(DEBUG, "LTS TX sync_seq first 5 carriers: %s", tx_buf);
         }
 
         // Estimate H for each data carrier
@@ -303,16 +304,16 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
               valid_symbols, h_mag_avg, std::arg(h_avg) * 180.0f / M_PI);
 
     // DEBUG: Print first few channel estimates from first and last training symbols
-    fprintf(stderr, "[LTS-DBG] H from sym0 (first 5): ");
-    for (size_t i = 0; i < std::min(size_t(5), data_carrier_indices.size()); ++i) {
-        fprintf(stderr, "%.0f° ", std::arg(h_per_symbol[0][i]) * 180.0f / M_PI);
+    {
+        char h0_buf[128] = "", hn_buf[128] = "";
+        int p0 = 0, pn = 0;
+        for (size_t i = 0; i < std::min(size_t(5), data_carrier_indices.size()); ++i) {
+            p0 += snprintf(h0_buf + p0, sizeof(h0_buf) - p0, "%.0f deg ", std::arg(h_per_symbol[0][i]) * 180.0f / M_PI);
+            pn += snprintf(hn_buf + pn, sizeof(hn_buf) - pn, "%.0f deg ", std::arg(h_per_symbol[num_symbols - 1][i]) * 180.0f / M_PI);
+        }
+        LOG_DEMOD(DEBUG, "LTS H from sym0 (first 5): %s", h0_buf);
+        LOG_DEMOD(DEBUG, "LTS H from sym%zu (last, first 5): %s", num_symbols - 1, hn_buf);
     }
-    fprintf(stderr, "\n");
-    fprintf(stderr, "[LTS-DBG] H from sym%zu (last, first 5): ", num_symbols - 1);
-    for (size_t i = 0; i < std::min(size_t(5), data_carrier_indices.size()); ++i) {
-        fprintf(stderr, "%.0f° ", std::arg(h_per_symbol[num_symbols - 1][i]) * 180.0f / M_PI);
-    }
-    fprintf(stderr, "\n");
 
     // === DQPSK PER-CARRIER PHASE REFERENCES ===
     // TX sends LTS with sync_sequence (Zadoff-Chu), BUT initializes dbpsk_prev_symbols to (1,0).
@@ -356,9 +357,9 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     // Phase advance from last training to first data: 1 symbol
     Complex phase_advance(std::cos(phase_per_symbol), std::sin(phase_per_symbol));
 
-    fprintf(stderr, "[LTS-DBG] CFO=%.1f Hz, phase_per_sym=%.0f°, phase_advance=(%.3f,%.3f)\n",
-            freq_offset_hz, phase_per_symbol * 180.0f / M_PI,
-            phase_advance.real(), phase_advance.imag());
+    LOG_DEMOD(DEBUG, "LTS CFO=%.1f Hz, phase_per_sym=%.0f deg, phase_advance=(%.3f,%.3f)",
+              freq_offset_hz, phase_per_symbol * 180.0f / M_PI,
+              phase_advance.real(), phase_advance.imag());
 
     for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
         // For DQPSK with pilots, the differential reference must account for
@@ -400,11 +401,14 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     avg_h /= static_cast<float>(data_carrier_indices.size());
     lts_phase_offset = avg_h / std::abs(avg_h + Complex(1e-10f, 0));
 
-    fprintf(stderr, "[LTS-DBG] DQPSK ref phases (first 5): ");
-    for (size_t i = 0; i < std::min(size_t(5), lts_carrier_phases.size()); ++i) {
-        fprintf(stderr, "%.0f° ", std::arg(lts_carrier_phases[i]) * 180.0f / M_PI);
+    {
+        char phase_buf[128] = "";
+        int pp = 0;
+        for (size_t i = 0; i < std::min(size_t(5), lts_carrier_phases.size()); ++i) {
+            pp += snprintf(phase_buf + pp, sizeof(phase_buf) - pp, "%.0f deg ", std::arg(lts_carrier_phases[i]) * 180.0f / M_PI);
+        }
+        LOG_DEMOD(DEBUG, "LTS DQPSK ref phases (first 5): %s(H avg phase=%.0f deg)", phase_buf, std::arg(lts_phase_offset) * 180.0f / M_PI);
     }
-    fprintf(stderr, "(H avg phase=%.0f°)\n", std::arg(lts_phase_offset) * 180.0f / M_PI);
 
     // DON'T set carrier_phase_initialized here - let updateChannelEstimate() do it
     // on the first data symbol. This ensures we use fresh pilot data for phase
@@ -1061,11 +1065,12 @@ std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>&
 
     // DEBUG: Print first few equalized symbols on first data symbol
     if (soft_bits.empty() && !result.empty()) {
-        fprintf(stderr, "[EQ-DBG] First 5 equalized (sym 0): ");
+        char eq_buf[256] = "";
+        int ep = 0;
         for (size_t i = 0; i < std::min(size_t(5), result.size()); ++i) {
-            fprintf(stderr, "(%.3f,%.3f) ", result[i].real(), result[i].imag());
+            ep += snprintf(eq_buf + ep, sizeof(eq_buf) - ep, "(%.3f,%.3f) ", result[i].real(), result[i].imag());
         }
-        fprintf(stderr, "\n");
+        LOG_DEMOD(DEBUG, "EQ first 5 equalized (sym 0): %s", eq_buf);
     }
 
     return result;

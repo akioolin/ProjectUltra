@@ -10,6 +10,7 @@
 #include "audio_engine.hpp"
 #include "modem/modem_engine.hpp"
 #include "protocol/protocol_engine.hpp"
+#include "sim/hf_channel.hpp"
 
 #include <vector>
 #include <complex>
@@ -126,8 +127,10 @@ private:
     std::mutex virtual_tx_pending_mutex_;
     std::vector<float> virtual_tx_pending_;
 
-    // Channel simulation RNG
+    // Channel simulation RNG and persistent fading channel
     std::mt19937 sim_rng_{42};
+    std::unique_ptr<sim::WattersonChannel> sim_channel_;
+    int sim_channel_active_type_ = -1;  // Track which channel type is active
 
     // Single simulation thread handles everything
     std::thread sim_thread_;

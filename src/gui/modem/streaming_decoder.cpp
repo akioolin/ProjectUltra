@@ -47,7 +47,7 @@ static void dumpBufferSnapshot(const std::vector<float>& buffer, size_t write_po
 
     std::ofstream file(filename, std::ios::binary);
     if (!file) {
-        fprintf(stderr, "[SD-DEBUG] Failed to create dump file: %s\n", filename);
+        LOG_MODEM(WARN, "StreamingDecoder: Failed to create dump file: %s", filename);
         return;
     }
 
@@ -81,8 +81,8 @@ static void dumpBufferSnapshot(const std::vector<float>& buffer, size_t write_po
     }
     rms = std::sqrt(rms / std::min(valid_samples, size_t(10000)));
 
-    fprintf(stderr, "[SD-DEBUG] Dumped %s: %zu samples to %s (RMS=%.4f, peak=%.4f)\n",
-            label.c_str(), valid_samples, filename, rms, max_val);
+    LOG_MODEM(DEBUG, "StreamingDecoder: Dumped %s: %zu samples to %s (RMS=%.4f, peak=%.4f)",
+              label.c_str(), valid_samples, filename, rms, max_val);
 }
 
 StreamingDecoder::StreamingDecoder() {
@@ -344,8 +344,8 @@ void StreamingDecoder::searchForSync() {
             }
             rms = std::sqrt(rms / std::min(search_buffer.size(), size_t(10000)));
 
-            fprintf(stderr, "[SD-DEBUG] Search #%d: dumped %zu samples to %s (start=%zu, RMS=%.4f, peak=%.4f)\n",
-                    search_dump_count, search_buffer.size(), filename, search_start, rms, max_val);
+            LOG_MODEM(DEBUG, "StreamingDecoder: Search #%d: dumped %zu samples to %s (start=%zu, RMS=%.4f, peak=%.4f)",
+                      search_dump_count, search_buffer.size(), filename, search_start, rms, max_val);
         }
         search_dump_count++;
     }

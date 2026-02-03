@@ -748,28 +748,37 @@ std::vector<float> App::applyChannelEffects(const std::vector<float>& samples) {
     std::vector<float> result = samples;
 
     // Apply fading/multipath if not AWGN
+    // Use persistent channel so fading state evolves continuously across frames
     if (simulation_channel_type_ > 0) {
-        sim::WattersonChannel::Config cfg;
-        switch (simulation_channel_type_) {
-            case 1:  // Good
-                cfg = sim::itu_r_f1487::good(simulation_snr_db_);
-                break;
-            case 2:  // Moderate
-                cfg = sim::itu_r_f1487::moderate(simulation_snr_db_);
-                break;
-            case 3:  // Poor
-                cfg = sim::itu_r_f1487::poor(simulation_snr_db_);
-                break;
-            default:
-                cfg = sim::itu_r_f1487::good(simulation_snr_db_);
-                break;
+        // Recreate channel only when type changes (not per-frame)
+        if (!sim_channel_ || sim_channel_active_type_ != simulation_channel_type_) {
+            sim::WattersonChannel::Config cfg;
+            switch (simulation_channel_type_) {
+                case 1:  // Good
+                    cfg = sim::itu_r_f1487::good(simulation_snr_db_);
+                    break;
+                case 2:  // Moderate
+                    cfg = sim::itu_r_f1487::moderate(simulation_snr_db_);
+                    break;
+                case 3:  // Poor
+                    cfg = sim::itu_r_f1487::poor(simulation_snr_db_);
+                    break;
+                default:
+                    cfg = sim::itu_r_f1487::good(simulation_snr_db_);
+                    break;
+            }
+            // Disable noise in WattersonChannel - we'll add it with fixed reference below
+            cfg.noise_enabled = false;
+            sim_channel_ = std::make_unique<sim::WattersonChannel>(cfg, sim_rng_());
+            sim_channel_active_type_ = simulation_channel_type_;
         }
-        // Disable noise in WattersonChannel - we'll add it with fixed reference below
-        cfg.noise_enabled = false;
 
-        sim::WattersonChannel channel(cfg, sim_rng_());
         SampleSpan input(result.data(), result.size());
-        result = channel.process(input);
+        result = sim_channel_->process(input);
+    } else if (sim_channel_) {
+        // Switched to AWGN — release fading channel
+        sim_channel_.reset();
+        sim_channel_active_type_ = -1;
     }
 
     // Apply AWGN with fixed reference signal power (matches cli_simulator)

@@ -354,8 +354,8 @@ bool OFDMChirpWaveform::process(SampleSpan samples) {
     while (initial_phase_rad > M_PI) initial_phase_rad -= 2.0f * M_PI;
     while (initial_phase_rad < -M_PI) initial_phase_rad += 2.0f * M_PI;
 
-    fprintf(stderr, "[OFDM_CHIRP] process(): cfo_hz_=%.1f, training_start=%zu, initial_phase=%.1f°, samples=%zu\n",
-            cfo_hz_, training_start_sample_, initial_phase_rad * 180.0f / M_PI, samples.size());
+    LOG_MODEM(DEBUG, "OFDMChirpWaveform: process(): cfo_hz=%.1f, training_start=%zu, initial_phase=%.1f deg, samples=%zu",
+              cfo_hz_, training_start_sample_, initial_phase_rad * 180.0f / M_PI, samples.size());
 
     // Pass CFO and initial phase to demodulator
     // This ensures CFO correction starts from the correct accumulated phase
@@ -382,8 +382,8 @@ bool OFDMChirpWaveform::process(SampleSpan samples) {
         // this correction back so subsequent frames use the refined CFO.
         float corrected_cfo = demodulator_->getFrequencyOffset();
         if (std::abs(corrected_cfo - cfo_hz_) > 0.1f) {
-            fprintf(stderr, "[OFDM_CHIRP] CFO feedback: chirp=%.2f → corrected=%.2f Hz\n",
-                    cfo_hz_, corrected_cfo);
+            LOG_MODEM(INFO, "OFDMChirpWaveform: CFO feedback: chirp=%.2f -> corrected=%.2f Hz",
+                      cfo_hz_, corrected_cfo);
         }
         cfo_hz_ = corrected_cfo;
         last_cfo_ = corrected_cfo;

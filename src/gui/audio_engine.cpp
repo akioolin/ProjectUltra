@@ -1,6 +1,7 @@
 #define _USE_MATH_DEFINES  // For M_PI on MSVC
 #include <cmath>
 #include "audio_engine.hpp"
+#include "ultra/logging.hpp"
 #include <cstring>
 #include <algorithm>
 
@@ -82,13 +83,13 @@ bool AudioEngine::openOutput(const std::string& device) {
 
     output_device_ = SDL_OpenAudioDevice(dev_name, 0, &want, &have, 0);
     if (output_device_ == 0) {
-        printf("[AUDIO] Failed to open OUTPUT device: %s (error: %s)\n",
-               dev_name ? dev_name : "Default", SDL_GetError());
+        LOG_MODEM(ERROR, "AudioEngine: Failed to open OUTPUT device: %s (error: %s)",
+                  dev_name ? dev_name : "Default", SDL_GetError());
         return false;
     }
 
-    printf("[AUDIO] Opened OUTPUT device: %s (id=%d, rate=%d)\n",
-           dev_name ? dev_name : "Default", output_device_, have.freq);
+    LOG_MODEM(INFO, "AudioEngine: Opened OUTPUT device: %s (id=%d, rate=%d)",
+              dev_name ? dev_name : "Default", output_device_, have.freq);
     sample_rate_ = have.freq;
     return true;
 }
@@ -113,13 +114,13 @@ bool AudioEngine::openInput(const std::string& device) {
 
     input_device_ = SDL_OpenAudioDevice(dev_name, 1, &want, &have, 0);
     if (input_device_ == 0) {
-        printf("[AUDIO] Failed to open INPUT device: %s (error: %s)\n",
-               dev_name ? dev_name : "Default", SDL_GetError());
+        LOG_MODEM(ERROR, "AudioEngine: Failed to open INPUT device: %s (error: %s)",
+                  dev_name ? dev_name : "Default", SDL_GetError());
         return false;
     }
 
-    printf("[AUDIO] Opened INPUT device: %s (id=%d, rate=%d)\n",
-           dev_name ? dev_name : "Default", input_device_, have.freq);
+    LOG_MODEM(INFO, "AudioEngine: Opened INPUT device: %s (id=%d, rate=%d)",
+              dev_name ? dev_name : "Default", input_device_, have.freq);
     return true;
 }
 
@@ -146,7 +147,7 @@ void AudioEngine::queueTxSamples(const std::vector<float>& samples) {
     }
 
     // If loopback is enabled, also feed to RX (with optional channel simulation)
-    printf("[AUDIO] TX queueing %zu samples, loopback=%s\n", samples.size(), loopback_enabled_ ? "ON" : "OFF");
+    LOG_MODEM(DEBUG, "AudioEngine: TX queueing %zu samples, loopback=%s", samples.size(), loopback_enabled_ ? "ON" : "OFF");
     if (loopback_enabled_) {
         std::vector<float> loopback_samples = samples;
         addChannelNoise(loopback_samples);

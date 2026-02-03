@@ -16,6 +16,7 @@
 
 #include "ultra/types.hpp"
 #include "ultra/dsp.hpp"
+#include "ultra/logging.hpp"
 #include <vector>
 #include <cmath>
 #include <complex>
@@ -79,8 +80,8 @@ public:
         // Apply CFO offset (for testing - simulates radio frequency error)
         float cfo = config_.tx_cfo_hz;
         if (std::abs(cfo) > 0.001f) {
-            fprintf(stderr, "[CHIRP-TX] Generating chirp with CFO=%.1f Hz (f_start=%.0f+%.0f, f_end=%.0f+%.0f)\n",
-                    cfo, config_.f_start, cfo, config_.f_end, cfo);
+            LOG_SYNC(INFO, "ChirpSync: Generating chirp with CFO=%.1f Hz (f_start=%.0f+%.0f, f_end=%.0f+%.0f)",
+                     cfo, config_.f_start, cfo, config_.f_end, cfo);
         }
 
         // ===== Generate UP-CHIRP (300 → 2700 Hz) =====
@@ -368,8 +369,8 @@ public:
         const size_t gap_samples = static_cast<size_t>(config_.sample_rate * config_.gap_ms / 1000.0f);
 
         if (samples.size() < 2 * chirp_len + gap_samples) {
-            fprintf(stderr, "[DUAL-CHIRP] Not enough samples: %zu < %zu\n",
-                    samples.size(), 2 * chirp_len + gap_samples);
+            LOG_SYNC(DEBUG, "ChirpSync: Not enough samples: %zu < %zu",
+                     samples.size(), 2 * chirp_len + gap_samples);
             return result;  // Not enough samples
         }
 
@@ -386,10 +387,10 @@ public:
                 sig_energy_start += samples[i] * samples[i];
                 if (mid + i < samples.size()) sig_energy_mid += samples[mid + i] * samples[mid + i];
             }
-            fprintf(stderr, "[DUAL-CHIRP] tmpl_energy=%.1f, sig@0=%.4f, sig@%zu=%.4f\n",
-                    tmpl_energy, std::sqrt(sig_energy_start/1000), mid, std::sqrt(sig_energy_mid/1000));
-            fprintf(stderr, "[DUAL-CHIRP] config: f_start=%.0f, f_end=%.0f, duration=%.0f ms, chirp_len=%zu\n",
-                    config_.f_start, config_.f_end, config_.duration_ms, chirp_len);
+            LOG_SYNC(DEBUG, "ChirpSync: tmpl_energy=%.1f, sig@0=%.4f, sig@%zu=%.4f",
+                     tmpl_energy, std::sqrt(sig_energy_start/1000), mid, std::sqrt(sig_energy_mid/1000));
+            LOG_SYNC(DEBUG, "ChirpSync: config: f_start=%.0f, f_end=%.0f, duration=%.0f ms, chirp_len=%zu",
+                     config_.f_start, config_.f_end, config_.duration_ms, chirp_len);
 
             // Compute correlation at expected chirp position (~20000)
             if (chirp_len < samples.size()) {
@@ -404,8 +405,8 @@ public:
                     }
                     float denom = std::sqrt(test_sig_energy * tmpl_energy);
                     float norm_corr = (denom > 1e-10f) ? std::abs(test_corr) / denom : 0.0f;
-                    fprintf(stderr, "[DUAL-CHIRP] corr at pos 20000: %.4f (sig_energy=%.1f)\n",
-                            norm_corr, test_sig_energy);
+                    LOG_SYNC(DEBUG, "ChirpSync: corr at pos 20000: %.4f (sig_energy=%.1f)",
+                             norm_corr, test_sig_energy);
                 }
             }
         }
@@ -444,8 +445,8 @@ public:
                                                               down_template_energy_, threshold);
 
         if (down_pos_rel < 0) {
-            fprintf(stderr, "[DUAL-CHIRP] Down chirp NOT found (up was at %d, corr=%.3f)\n",
-                    up_pos, up_corr);
+            LOG_SYNC(INFO, "ChirpSync: Down chirp NOT found (up was at %d, corr=%.3f)",
+                     up_pos, up_corr);
             return result;  // Down chirp not found
         }
 
@@ -472,17 +473,17 @@ public:
         float gap_error = static_cast<float>(actual_gap - expected_gap);
         result.cfo_hz = gap_error / (2.0f * cfo_to_samples);
 
-        printf("[CHIRP-RX] Dual chirp: up_pos=%d, down_pos=%d, gap=%d (expected=%d), gap_error=%.1f\n",
-               up_pos, down_pos, actual_gap, expected_gap, gap_error);
-        printf("[CHIRP-RX] CFO estimate: %.2f Hz (cfo_to_samples=%.1f, correction=%.1f samples)\n",
-               result.cfo_hz, cfo_to_samples, result.cfo_hz * cfo_to_samples);
+        LOG_SYNC(INFO, "ChirpSync: Dual chirp: up_pos=%d, down_pos=%d, gap=%d (expected=%d), gap_error=%.1f",
+                 up_pos, down_pos, actual_gap, expected_gap, gap_error);
+        LOG_SYNC(INFO, "ChirpSync: CFO estimate: %.2f Hz (cfo_to_samples=%.1f, correction=%.1f samples)",
+                 result.cfo_hz, cfo_to_samples, result.cfo_hz * cfo_to_samples);
 
         // Sanity check: reject if estimated CFO is unreasonably large
         // Real HF radios have at most ±100 Hz frequency error
         constexpr float MAX_REASONABLE_CFO_HZ = 100.0f;
         if (std::abs(result.cfo_hz) > MAX_REASONABLE_CFO_HZ) {
-            printf("[CHIRP-RX] Rejecting detection: CFO=%.1f Hz exceeds max reasonable (±%.0f Hz)\n",
-                   result.cfo_hz, MAX_REASONABLE_CFO_HZ);
+            LOG_SYNC(WARN, "ChirpSync: Rejecting detection: CFO=%.1f Hz exceeds max reasonable (+/-%.0f Hz)",
+                     result.cfo_hz, MAX_REASONABLE_CFO_HZ);
             return result;  // success = false
         }
 
@@ -503,8 +504,8 @@ public:
         result.up_chirp_start = static_cast<int>(std::round(up_pos + up_correction));
         result.down_chirp_start = static_cast<int>(std::round(down_pos + down_correction));
 
-        printf("[CHIRP-RX] Position correction: up=%d (raw=%d, corr=%+.0f), down=%d\n",
-               result.up_chirp_start, up_pos, up_correction, result.down_chirp_start);
+        LOG_SYNC(INFO, "ChirpSync: Position correction: up=%d (raw=%d, corr=%+.0f), down=%d",
+                 result.up_chirp_start, up_pos, up_correction, result.down_chirp_start);
 
         result.success = true;
         return result;
@@ -617,8 +618,8 @@ private:
             up_energy += std::norm(up_template_fft_[i]);
             down_energy += std::norm(down_template_fft_[i]);
         }
-        fprintf(stderr, "[CHIRP-FFT] Templates initialized: up_fft_energy=%.1f, down_fft_energy=%.1f, chirp_len=%zu\n",
-                up_energy, down_energy, chirp_len);
+        LOG_SYNC(DEBUG, "ChirpSync: FFT templates initialized: up_fft_energy=%.1f, down_fft_energy=%.1f, chirp_len=%zu",
+                 up_energy, down_energy, chirp_len);
     }
 
     // FFT-based chirp detection - O(N log N) instead of O(N*M)
@@ -699,8 +700,8 @@ private:
             }
             rms_start = std::sqrt(rms_start / 1000);
             rms_mid = std::sqrt(rms_mid / 1000);
-            fprintf(stderr, "[CHIRP-FFT] buf=%zu, best_corr=%.3f at pos=%d, rms_start=%.3f, rms_mid=%.3f\n",
-                    samples.size(), best_corr, best_pos, rms_start, rms_mid);
+            LOG_SYNC(DEBUG, "ChirpSync: FFT buf=%zu, best_corr=%.3f at pos=%d, rms_start=%.3f, rms_mid=%.3f",
+                     samples.size(), best_corr, best_pos, rms_start, rms_mid);
         }
 
         if (best_corr < threshold) {
@@ -770,14 +771,14 @@ private:
         if (++td_debug_count % 10 == 1 || best_corr > 0.3f) {
             float corr_at_0 = computeComplexTemplateCorrelation(samples, 0, tmpl_sin, tmpl_cos, tmpl_energy);
             float corr_at_7200 = search_len > 7200 ? computeComplexTemplateCorrelation(samples, 7200, tmpl_sin, tmpl_cos, tmpl_energy) : 0;
-            fprintf(stderr, "[CHIRP-TD] buf=%zu, best=%.3f@%d, @0=%.3f, @7200=%.3f, rms=%.3f\n",
-                    samples.size(), best_corr, best_pos, corr_at_0, corr_at_7200, rms_check);
+            LOG_SYNC(DEBUG, "ChirpSync: TD buf=%zu, best=%.3f@%d, @0=%.3f, @7200=%.3f, rms=%.3f",
+                     samples.size(), best_corr, best_pos, corr_at_0, corr_at_7200, rms_check);
         }
 
         if (best_pos < 0 || best_corr < threshold * 0.3f) {
             if (samples.size() > 50000) {
-                fprintf(stderr, "[CHIRP] FAIL: buf=%zu, max_corr=%.3f at pos=%d (threshold=%.2f)\n",
-                        samples.size(), best_corr, best_pos, threshold);
+                LOG_SYNC(INFO, "ChirpSync: FAIL buf=%zu, max_corr=%.3f at pos=%d (threshold=%.2f)",
+                         samples.size(), best_corr, best_pos, threshold);
             }
             return {-1, best_corr};
         }
@@ -809,8 +810,8 @@ private:
         }
 
         if (best_corr < threshold && samples.size() > 50000) {
-            fprintf(stderr, "[CHIRP] WEAK: buf=%zu, best_corr=%.3f at pos=%d (need %.2f)\n",
-                    samples.size(), best_corr, best_pos, threshold);
+            LOG_SYNC(INFO, "ChirpSync: WEAK buf=%zu, best_corr=%.3f at pos=%d (need %.2f)",
+                     samples.size(), best_corr, best_pos, threshold);
         }
         return (best_corr >= threshold) ? std::make_pair(best_pos, best_corr)
                                         : std::make_pair(-1, best_corr);

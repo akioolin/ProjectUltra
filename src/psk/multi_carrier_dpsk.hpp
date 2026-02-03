@@ -14,6 +14,7 @@
 
 #include "ultra/types.hpp"
 #include "ultra/dsp.hpp"
+#include "ultra/logging.hpp"
 #include "sync/chirp_sync.hpp"
 #include <vector>
 #include <complex>
@@ -679,14 +680,14 @@ private:
         // Apply CFO correction to samples BEFORE demodulation (like OFDM does)
         if (std::abs(cfo_hz_) > 0.1f) {
             applyCFOCorrection(sample_buffer_, cfo_hz_);
-            fprintf(stderr, "[MC-DPSK-DEMOD] Applied CFO correction: %.1f Hz to %zu samples\n",
-                    cfo_hz_, sample_buffer_.size());
+            LOG_DEMOD(DEBUG, "MC-DPSK: Applied CFO correction: %.1f Hz to %zu samples",
+                      cfo_hz_, sample_buffer_.size());
         }
 
         // Save dual chirp CFO estimate before training processing
         float dual_chirp_cfo = cfo_hz_;
-        fprintf(stderr, "[MC-DPSK-DEMOD] processGotChirp: external=%d, cfo_before=%.1f\n",
-                external_chirp_detected_, cfo_hz_);
+        LOG_DEMOD(DEBUG, "MC-DPSK: processGotChirp: external=%d, cfo_before=%.1f",
+                  external_chirp_detected_, cfo_hz_);
 
         // Process training sequence to refine CFO estimate
         // Always run processTraining for now - it may help with timing/phase alignment
@@ -702,13 +703,13 @@ private:
             float saved_cfo = cfo_hz_;
 
             processTraining(train_span);
-            fprintf(stderr, "[MC-DPSK-DEMOD] after processTraining: cfo=%.1f (was %.1f)\n", cfo_hz_, saved_cfo);
+            LOG_DEMOD(DEBUG, "MC-DPSK: after processTraining: cfo=%.1f (was %.1f)", cfo_hz_, saved_cfo);
 
             if (external_chirp_detected_) {
                 // Restore chirp CFO - it's more accurate than training estimate
                 // even when chirp CFO is ~0 Hz
                 cfo_hz_ = saved_cfo;
-                fprintf(stderr, "[MC-DPSK-DEMOD] restored chirp CFO=%.1f (external chirp detected)\n", cfo_hz_);
+                LOG_DEMOD(DEBUG, "MC-DPSK: restored chirp CFO=%.1f (external chirp detected)", cfo_hz_);
             }
 
             // CFO sanity check: only reject if NO dual chirp CFO but high training CFO

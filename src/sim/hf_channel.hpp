@@ -9,6 +9,7 @@
 #endif
 
 #include "ultra/types.hpp"
+#include "ultra/logging.hpp"
 #include <random>
 #include <complex>
 #include <deque>
@@ -390,8 +391,8 @@ inline WattersonChannel::Config awgn(float snr_db = 15.0f) {
 
 // Print channel condition summary
 inline void printConfig(const WattersonChannel::Config& cfg, const char* name) {
-    printf("  %s: SNR=%.0fdB, delay=%.1fms, doppler=%.1fHz\n",
-           name, cfg.snr_db, cfg.delay_spread_ms, cfg.doppler_spread_hz);
+    LOG_MODEM(INFO, "Channel %s: SNR=%.0fdB, delay=%.1fms, doppler=%.1fHz",
+              name, cfg.snr_db, cfg.delay_spread_ms, cfg.doppler_spread_hz);
 }
 
 } // namespace ccir

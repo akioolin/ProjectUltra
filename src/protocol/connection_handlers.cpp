@@ -8,6 +8,15 @@
 namespace ultra {
 namespace protocol {
 
+// Classify combined fading index into channel quality label
+// Thresholds match app.cpp fadingToQuality() (2026-02-03)
+static const char* fadingLabel(float fading) {
+    if (fading < 0.15f) return "AWGN";
+    if (fading < 0.75f) return "Good";
+    if (fading < 1.10f) return "Moderate";
+    return "Poor";
+}
+
 // Recommend data mode based on SNR, fading, and the NEGOTIATED waveform
 // Uses shared recommendDataMode() algorithm from waveform_selection.hpp
 // IMPORTANT: waveform should be the negotiated/forced waveform, NOT auto-selected
@@ -430,16 +439,16 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
     // AUTO mode: Use shared algorithm from waveform_selection.hpp
     // This ensures negotiateMode and recommendDataModeWithFading use same logic
     float snr = measured_snr_db_;
-    LOG_MODEM(INFO, "Connection: AUTO mode selection, SNR=%.1f dB, fading_index=%.2f",
-              snr, fading_index_);
+    LOG_MODEM(INFO, "Connection: AUTO mode selection, SNR=%.1f dB, fading_index=%.2f (%s)",
+              snr, fading_index_, fadingLabel(fading_index_));
 
     auto rec = recommendWaveformAndRate(snr, fading_index_);
     WaveformMode selected = rec.waveform;
 
     // Check if selected mode is supported by both sides
     if (common & modeToBit(selected)) {
-        LOG_MODEM(INFO, "Connection: Selected %s (SNR=%.1f, fading=%.2f)",
-                  waveformModeToString(selected), snr, fading_index_);
+        LOG_MODEM(INFO, "Connection: Selected %s (SNR=%.1f, fading=%.2f %s)",
+                  waveformModeToString(selected), snr, fading_index_, fadingLabel(fading_index_));
         return selected;
     }
 

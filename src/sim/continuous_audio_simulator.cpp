@@ -8,6 +8,7 @@
  */
 
 #include "continuous_audio_simulator.hpp"
+#include "ultra/logging.hpp"
 #include <algorithm>
 #include <cstring>
 
@@ -88,13 +89,13 @@ void ContinuousAudioSimulator::queueTx(StationId station, const std::vector<floa
     if (station == StationId::A) {
         std::lock_guard<std::mutex> lock(tx_mutex_a_);
         tx_queue_a_.insert(tx_queue_a_.end(), samples.begin(), samples.end());
-        fprintf(stderr, "[AUDIO-SIM] Station A queued TX: %zu samples, RMS=%.4f, queue_size=%zu\n",
-                samples.size(), rms, tx_queue_a_.size());
+        LOG_MODEM(DEBUG, "AudioSim: Station A queued TX: %zu samples, RMS=%.4f, queue_size=%zu",
+                  samples.size(), rms, tx_queue_a_.size());
     } else {
         std::lock_guard<std::mutex> lock(tx_mutex_b_);
         tx_queue_b_.insert(tx_queue_b_.end(), samples.begin(), samples.end());
-        fprintf(stderr, "[AUDIO-SIM] Station B queued TX: %zu samples, RMS=%.4f, queue_size=%zu\n",
-                samples.size(), rms, tx_queue_b_.size());
+        LOG_MODEM(DEBUG, "AudioSim: Station B queued TX: %zu samples, RMS=%.4f, queue_size=%zu",
+                  samples.size(), rms, tx_queue_b_.size());
     }
 }
 
@@ -319,8 +320,8 @@ void ContinuousAudioSimulator::produceAudio(size_t num_samples) {
                 float rms = 0.0f;
                 for (size_t i = 0; i < b_tx_taken; i++) rms += b_to_a[i] * b_to_a[i];
                 rms = std::sqrt(rms / b_tx_taken);
-                fprintf(stderr, "[AUDIO-SIM] B->A: processed %zu signal samples (total=%zu), RMS=%.4f\n",
-                        b_tx_taken, b_signal_samples, rms);
+                LOG_MODEM(DEBUG, "AudioSim: B->A: processed %zu signal samples (total=%zu), RMS=%.4f",
+                          b_tx_taken, b_signal_samples, rms);
             }
         }
 

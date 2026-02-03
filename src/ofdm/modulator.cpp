@@ -132,9 +132,9 @@ struct OFDMModulator::Impl {
         , mixer(cfg.center_freq + cfg.tx_cfo_hz, cfg.sample_rate)  // Apply TX CFO to carrier
     {
         if (std::abs(cfg.tx_cfo_hz) > 0.01f) {
-            printf("[OFDM_MOD] *** CFO=%.1f Hz applied (mixer: %.1f + %.1f = %.1f Hz) ***\n",
-                   cfg.tx_cfo_hz, (float)cfg.center_freq, cfg.tx_cfo_hz,
-                   cfg.center_freq + cfg.tx_cfo_hz);
+            LOG_MODEM(INFO, "OFDMModulator: CFO=%.1f Hz applied (mixer: %.1f + %.1f = %.1f Hz)",
+                      cfg.tx_cfo_hz, (float)cfg.center_freq, cfg.tx_cfo_hz,
+                      cfg.center_freq + cfg.tx_cfo_hz);
         }
         setupCarriers();
         generateSequences();
@@ -546,11 +546,14 @@ Samples OFDMModulator::generateTrainingSymbols(int count) {
     impl_->dbpsk_prev_symbols.assign(impl_->data_carrier_indices.size(), Complex(1, 0));
 
     // DEBUG: Print carrier indices
-    fprintf(stderr, "[LTS-TX-DBG] TX carrier indices (first 5): ");
-    for (size_t i = 0; i < std::min(size_t(5), impl_->data_carrier_indices.size()); ++i) {
-        fprintf(stderr, "%d ", impl_->data_carrier_indices[i]);
+    {
+        char idx_buf[128] = "";
+        int pos = 0;
+        for (size_t i = 0; i < std::min(size_t(5), impl_->data_carrier_indices.size()); ++i) {
+            pos += snprintf(idx_buf + pos, sizeof(idx_buf) - pos, "%d ", impl_->data_carrier_indices[i]);
+        }
+        LOG_DEMOD(DEBUG, "LTS TX carrier indices (first 5): %s(total %zu)", idx_buf, impl_->data_carrier_indices.size());
     }
-    fprintf(stderr, "(total %zu)\n", impl_->data_carrier_indices.size());
 
     Samples training;
 
