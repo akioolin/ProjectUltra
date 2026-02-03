@@ -186,13 +186,13 @@ public:
     float getMeasuredSNR() const { return measured_snr_db_; }
 
     // Set channel quality including fading detection
-    // fading_index: 0-1, where > 0.4 indicates significant fading
+    // fading_index: combined freq_cv + temporal_cv, where > 0.75 indicates significant fading
     void setChannelQuality(float snr_db, float fading_index) {
         measured_snr_db_ = snr_db;
         fading_index_ = fading_index;
     }
     float getFadingIndex() const { return fading_index_; }
-    bool isFading() const { return fading_index_ > 0.4f; }
+    bool isFading() const { return fading_index_ > 0.75f; }
 
     // Callback when remote station requests mode change
     using DataModeChangedCallback = std::function<void(Modulation mod, CodeRate rate, float snr_db)>;
@@ -230,7 +230,7 @@ private:
     CodeRate data_code_rate_ = CodeRate::R1_4;
     uint16_t mode_change_seq_ = 0;  // Sequence number for MODE_CHANGE frames
     float measured_snr_db_ = 15.0f;  // SNR measured by modem (updated via setMeasuredSNR)
-    float fading_index_ = 0.0f;      // Fading index (0-1, > 0.4 = significant fading)
+    float fading_index_ = 0.0f;      // Fading index (0-2, > 0.75 = significant fading)
 
     // MODE_CHANGE timeout/retry tracking
     bool mode_change_pending_ = false;

@@ -363,9 +363,19 @@ public:
     // Get last chirp correlation value
     float getLastChirpCorrelation() const { return last_chirp_corr_; }
 
-    // Get fading index (coefficient of variation of per-carrier magnitudes)
-    // Returns 0-1 where: < 0.3 = stable, 0.3-0.6 = mild fading, > 0.6 = heavy fading
+    // Get combined fading index (frequency selectivity + temporal variation)
+    // Combines frequency CV (multipath) with temporal CV (Doppler spread)
+    // This separates Good (low Doppler) from Moderate (high Doppler) channels
     float getFadingIndex() const {
+        float freq_cv = getFrequencyFadingIndex();
+        // beta=1.0 weights temporal variation equally with frequency selectivity
+        // Temporal CV is the key differentiator: Good ~0.02-0.05, Moderate ~0.10-0.20
+        constexpr float beta = 1.0f;
+        return freq_cv + beta * temporal_fading_index_;
+    }
+
+    // Get frequency-domain fading index only (CV of per-carrier magnitudes)
+    float getFrequencyFadingIndex() const {
         if (carrier_magnitudes_.empty()) return 0.0f;
 
         // Calculate mean
@@ -387,9 +397,12 @@ public:
         return std_dev / mean;
     }
 
-    // Check if channel appears to be fading based on per-carrier variance
-    // threshold: fading index above this is considered "fading" (default 0.4)
-    bool isFading(float threshold = 0.4f) const {
+    // Get temporal fading index only (Doppler-related magnitude variation over time)
+    float getTemporalFadingIndex() const { return temporal_fading_index_; }
+
+    // Check if channel appears to be fading based on combined fading index
+    // threshold: fading index above this is considered "fading" (default 0.75)
+    bool isFading(float threshold = 0.75f) const {
         return getFadingIndex() > threshold;
     }
 
@@ -411,6 +424,7 @@ public:
         last_chirp_corr_ = 0.0f;
         expected_data_bytes_ = 0;
         carrier_magnitudes_.clear();
+        temporal_fading_index_ = 0.0f;
     }
 
     const MultiCarrierDPSKConfig& getConfig() const { return config_; }
@@ -472,6 +486,10 @@ public:
 
         // Track per-carrier magnitudes for fading detection
         std::vector<float> carrier_mag_sum(config_.num_carriers, 0.0f);
+        std::vector<float> carrier_mag_sq_sum(config_.num_carriers, 0.0f);  // For temporal variance
+
+        // Per-symbol total magnitude for silence detection
+        std::vector<float> sym_total_mag(num_symbols, 0.0f);
 
         for (int sym = 0; sym < num_symbols; sym++) {
             const float* sym_data = data.data() + sym * config_.samples_per_symbol;
@@ -480,8 +498,11 @@ public:
                 Complex current = demodulateOneSymbol(sym_data, c);
                 float mag = std::abs(current);
 
+                sym_total_mag[sym] += mag;
+
                 // Accumulate magnitude for fading detection
                 carrier_mag_sum[c] += mag;
+                carrier_mag_sq_sum[c] += mag * mag;  // For temporal variance
 
                 Complex normalized = (mag > 0.0001f) ? current / mag : Complex(1.0f, 0.0f);
                 Complex diff = normalized * std::conj(prev_symbols_[c]);
@@ -505,10 +526,60 @@ public:
             }
         }
 
-        // Store average per-carrier magnitudes for fading detection
+        // Detect and exclude trailing silence symbols from fading measurement
+        // Use first few symbols as reference energy, exclude symbols below 20% of reference
+        int valid_symbols = num_symbols;
+        if (num_symbols >= 4) {
+            // Reference: average magnitude of first 4 symbols
+            float ref_mag = 0.0f;
+            for (int s = 0; s < 4; s++) ref_mag += sym_total_mag[s];
+            ref_mag /= 4.0f;
+
+            if (ref_mag > 0.001f) {
+                float threshold = ref_mag * 0.2f;
+                // Scan from end to find last valid symbol
+                while (valid_symbols > 4 && sym_total_mag[valid_symbols - 1] < threshold) {
+                    valid_symbols--;
+                }
+                if (valid_symbols < num_symbols) {
+                    // Recompute carrier_mag_sum/sq_sum without silence symbols
+                    std::fill(carrier_mag_sum.begin(), carrier_mag_sum.end(), 0.0f);
+                    std::fill(carrier_mag_sq_sum.begin(), carrier_mag_sq_sum.end(), 0.0f);
+                    for (int sym = 0; sym < valid_symbols; sym++) {
+                        const float* sym_data = data.data() + sym * config_.samples_per_symbol;
+                        for (int c = 0; c < config_.num_carriers; c++) {
+                            float mag = std::abs(demodulateOneSymbol(sym_data, c));
+                            carrier_mag_sum[c] += mag;
+                            carrier_mag_sq_sum[c] += mag * mag;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Store average per-carrier magnitudes for fading detection (using valid symbols only)
         carrier_magnitudes_.resize(config_.num_carriers);
         for (int c = 0; c < config_.num_carriers; c++) {
-            carrier_magnitudes_[c] = (num_symbols > 0) ? carrier_mag_sum[c] / num_symbols : 0.0f;
+            carrier_magnitudes_[c] = (valid_symbols > 0) ? carrier_mag_sum[c] / valid_symbols : 0.0f;
+        }
+
+        // Compute temporal fading index from symbol-to-symbol magnitude variance
+        // Uses E[x^2] - E[x]^2 formula per carrier, then averages CV across carriers
+        if (valid_symbols >= 4) {
+            float temporal_cv_sum = 0.0f;
+            int valid_carriers = 0;
+            for (int c = 0; c < config_.num_carriers; c++) {
+                float mean = carrier_mag_sum[c] / valid_symbols;
+                if (mean < 0.001f) continue;  // Skip dead carriers
+                float mean_sq = carrier_mag_sq_sum[c] / valid_symbols;
+                float variance = std::max(0.0f, mean_sq - mean * mean);
+                float cv = std::sqrt(variance) / mean;
+                temporal_cv_sum += cv;
+                valid_carriers++;
+            }
+            temporal_fading_index_ = (valid_carriers > 0) ? temporal_cv_sum / valid_carriers : 0.0f;
+        } else {
+            temporal_fading_index_ = 0.0f;
         }
 
         return soft_bits;
@@ -742,6 +813,9 @@ private:
 
     // Per-carrier signal magnitudes (for fading detection)
     std::vector<float> carrier_magnitudes_;
+
+    // Temporal fading index (Doppler-related magnitude variation over symbols)
+    float temporal_fading_index_ = 0.0f;
 
     // Precomputed sizes
     size_t chirp_samples_;
