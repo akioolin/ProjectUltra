@@ -230,6 +230,29 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
 
     // Get channel estimation error margin
     float ce_error_margin = soft_demap::getCEErrorMargin(mod);
+
+    // FADING-AWARE LLR SCALING:
+    // On fading channels, channel estimate may be significantly wrong, causing
+    // soft demapper to produce confident LLRs for wrong bits. LDPC can't recover
+    // from confident wrong bits.
+    //
+    // Solution: When fading is detected, increase noise variance (reduce LLR confidence).
+    // This tells LDPC "don't trust these soft bits as much".
+    //
+    // Scale: ce_margin × (1 + 6 × fading_index²)
+    // - fading_index=0: no change
+    // - fading_index=0.3: ×1.54 (moderate reduction)
+    // - fading_index=0.5: ×2.5 (significant reduction)
+    // - fading_index=0.7: ×3.94 (large reduction)
+    float fading_index = last_fading_index;  // From updateChannelEstimate()
+    if (fading_index > 0.1f) {
+        float fading_scale = 1.0f + 6.0f * fading_index * fading_index;
+        ce_error_margin *= fading_scale;
+        if (snr_symbol_count < 3) {
+            LOG_DEMOD(DEBUG, "Fading LLR scaling: index=%.3f, margin=%.2f", fading_index, ce_error_margin);
+        }
+    }
+
     float llr_sign = llr_sign_flip ? -1.0f : 1.0f;
 
     // Initialize DQPSK/D8PSK reference
