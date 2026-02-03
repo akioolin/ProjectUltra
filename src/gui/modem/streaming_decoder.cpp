@@ -363,8 +363,10 @@ void StreamingDecoder::searchForSync() {
     //
     // IMPORTANT: Light sync can produce false positives from channel effects (corr ~0.3-0.4)
     // Real training symbols have autocorrelation ~0.8+ on decent channels.
-    // Use 0.5 threshold to reject false positives while accepting degraded real frames.
-    constexpr float LIGHT_SYNC_CONFIDENCE = 0.5f;
+    // On fading channels, low correlation (0.5-0.8) often indicates timing error
+    // which causes complete frame failure. Use 0.8 threshold to force fallback
+    // to chirp sync for marginal cases.
+    constexpr float LIGHT_SYNC_CONFIDENCE = 0.8f;
 
     if (connected_ && waveform_->supportsDataPreamble()) {
         float known_cfo = last_cfo_.load();
@@ -419,7 +421,25 @@ void StreamingDecoder::searchForSync() {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
 
         sync_position_ = (search_start + sync_result.start_sample) % MAX_BUFFER_SAMPLES;
-        sync_cfo_ = sync_result.cfo_hz;
+
+        // CFO handling: On fading channels, chirp-based CFO measurement can be corrupted
+        // by multipath (peaks shift differently for up vs down chirp).
+        // When connected, trust the established CFO and limit drift.
+        float new_cfo = sync_result.cfo_hz;
+        float known_cfo = last_cfo_.load();
+
+        if (connected_ && std::abs(known_cfo) > 0.01f) {
+            // Limit CFO change to ±1 Hz per frame (oscillator drift is slow)
+            constexpr float MAX_CFO_DRIFT_HZ = 1.0f;
+            float cfo_diff = new_cfo - known_cfo;
+            if (std::abs(cfo_diff) > MAX_CFO_DRIFT_HZ) {
+                LOG_MODEM(INFO, "[%s] CFO sanity: measured=%.1f, known=%.1f, diff=%.1f > %.1f, using known",
+                          log_prefix_.c_str(), new_cfo, known_cfo, cfo_diff, MAX_CFO_DRIFT_HZ);
+                new_cfo = known_cfo;  // Trust established CFO over noisy measurement
+            }
+        }
+
+        sync_cfo_ = new_cfo;
         sync_snr_ = estimateSNRFromChirp(sync_result.correlation, noise_floor_);
         sync_start_time_ = std::chrono::steady_clock::now();
         pending_total_cw_ = 0;

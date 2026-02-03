@@ -307,10 +307,12 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
 
     // Two-pass D8PSK decoding: use embedded DQPSK grid to estimate common phase error
     // and correct it before decoding. Only activates on fading channels.
+    // NOTE: Use last_fading_index (from pilot variance), NOT computeFadingIndex()
+    // because channel_estimate is reset to unity after sync.
     if (mod == Modulation::D8PSK && d8psk_two_pass_enabled_) {
-        float fading_index = computeFadingIndex();
+        float fading_index = last_fading_index;
         if (fading_index > TWO_PASS_FADING_THRESHOLD) {
-            LOG_DEMOD(DEBUG, "D8PSK two-pass: fading=%.3f > %.3f, applying correction",
+            LOG_DEMOD(INFO, "D8PSK two-pass: fading=%.3f > %.3f, applying correction",
                       fading_index, TWO_PASS_FADING_THRESHOLD);
             demodulateD8PSKTwoPass(equalized, noise_variance);
             snr_symbol_count++;
@@ -320,12 +322,13 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
 
     // Two-pass DQPSK decoding: estimate per-carrier phase errors from hard decisions,
     // correct them before computing soft LLRs.
-    // Only activates for DQPSK + R1/2 + fading (R1/4 doesn't need it - already robust)
-    bool is_r1_2 = (config.code_rate == CodeRate::R1_2);
-    if (mod == Modulation::DQPSK && dqpsk_two_pass_enabled_ && is_r1_2) {
-        float fading_index = computeFadingIndex();
+    // Enable for ALL code rates on fading channels - phase correction helps R1/4 too
+    // NOTE: Use last_fading_index (from pilot variance), NOT computeFadingIndex()
+    // because channel_estimate is reset to unity after sync.
+    if (mod == Modulation::DQPSK && dqpsk_two_pass_enabled_) {
+        float fading_index = last_fading_index;
         if (fading_index > TWO_PASS_FADING_THRESHOLD) {
-            LOG_DEMOD(DEBUG, "DQPSK two-pass (R1/2): fading=%.3f > %.3f, applying correction",
+            LOG_DEMOD(INFO, "DQPSK two-pass: fading=%.3f > %.3f, applying correction",
                       fading_index, TWO_PASS_FADING_THRESHOLD);
             demodulateDQPSKTwoPass(equalized, noise_variance);
             snr_symbol_count++;

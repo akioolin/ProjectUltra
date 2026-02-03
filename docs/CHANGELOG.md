@@ -10,6 +10,74 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-02-02: Fix Light Sync Timing Errors on Fading Channels (68%→93%)
+
+**What was broken:**
+- OFDM R1/4 on moderate fading had ~68% CW success rate instead of expected ~100%
+- Frames with low light sync correlation (0.5-0.8) failed completely with random LLR
+- All 4 CWs would fail with |llr|_avg ~2.5 (random) instead of ~5-7 (valid)
+
+**Root cause:**
+- Light sync (Schmidl-Cox on LTS) uses 0.5 correlation threshold
+- On fading channels, multipath can cause timing errors in sync detection
+- Low correlation (0.6-0.75) indicates sync found at wrong position
+- Wrong timing → wrong channel estimate → complete frame corruption
+
+**Files modified:**
+- `src/gui/modem/streaming_decoder.cpp`:
+  - Raised LIGHT_SYNC_CONFIDENCE from 0.5 to 0.8
+  - Marginal syncs now fall back to full chirp with accurate timing
+  - Added CFO drift limit (±1 Hz) when connected to reject multipath-induced false CFO
+
+**How it works:**
+- Light sync with corr < 0.8 triggers fallback to chirp sync
+- Chirp sync has sub-sample timing accuracy from dual chirp gap measurement
+- Full chirp takes ~1.2s longer but gives reliable timing on fading channels
+
+**Test verification:**
+```bash
+./build/cli_simulator --snr 25 --fading moderate --test
+# Before: 68% CW success (48/71)
+# After: 93% CW success (130/140 over 3 tests, including 1 test at 100%)
+```
+
+---
+
+## 2026-02-02: Fix Two-Pass DQPSK Not Triggering on Fading Channels
+
+**What was broken:**
+- Two-pass DQPSK decoding (phase error correction) never triggered on fading channels
+- Log showed no "DQPSK two-pass" messages during moderate fading tests
+- Moderate fading CW success was ~63% when it should be ~68% with two-pass
+
+**Root cause:**
+- `demodulateSymbol()` called `computeFadingIndex()` to decide if two-pass should trigger
+- `computeFadingIndex()` computes coefficient of variation from `channel_estimate[]` array
+- After sync, `channel_estimate` is reset to unity (all 1.0) at line 814 in demodulator.cpp
+- Unity channel estimate has zero variance → `computeFadingIndex()` returns 0
+- Two-pass threshold (0.12) was never exceeded because fading index was always 0
+
+**Files modified:**
+- `src/ofdm/demodulator.cpp`:
+  - Changed from `float fading_index = computeFadingIndex();`
+  - To: `float fading_index = last_fading_index;`
+  - `last_fading_index` is measured from pilot variance (correct source)
+  - Also changed LOG_DEMOD(DEBUG) to LOG_DEMOD(INFO) to see triggering in logs
+
+**How it works:**
+- `last_fading_index` is updated during pilot tracking from actual pilot magnitude variance
+- This correctly reflects channel fading state (0.12-0.50 on fading channels)
+- Two-pass now triggers when fading > 0.12, applying per-carrier phase correction
+
+**Test verification:**
+```bash
+./build/cli_simulator --snr 25 --fading moderate --test 2>&1 | grep "DQPSK two-pass"
+# Expected: Many lines showing "DQPSK two-pass: fading=0.xxx > 0.120, applying correction"
+# ✓ TEST PASSED - two-pass triggers, moderate fading CW success improved to ~68%
+```
+
+---
+
 ## 2026-02-02: Fix CW[0] LDPC Decode Failures in OFDM
 
 **What was broken:**
