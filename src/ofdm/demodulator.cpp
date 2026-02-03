@@ -247,12 +247,15 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
     // - fading_index=0.12: ×1.29 (compensates for underestimate)
     // - fading_index=0.20: ×1.80
     // - fading_index=0.30: ×2.80 (significant reduction)
-    float fading_index = last_fading_index;  // From updateChannelEstimate()
-    if (fading_index > 0.08f) {  // Lower threshold for OFDM's underestimate
-        float fading_scale = 1.0f + 20.0f * fading_index * fading_index;
+    // Only apply fading scaling on moderate+ fading (index > 0.15)
+    // Good channel (index < 0.15) works fine without scaling
+    float fading_index = last_fading_index;
+    if (fading_index > 0.15f) {
+        // Moderate scaling: 1 + 10×fading² gives ~1.25× at index=0.15, ~2.0× at index=0.3
+        float fading_scale = 1.0f + 10.0f * fading_index * fading_index;
         ce_error_margin *= fading_scale;
         if (snr_symbol_count < 3) {
-            LOG_DEMOD(DEBUG, "Fading LLR scaling: index=%.3f, margin=%.2f", fading_index, ce_error_margin);
+            LOG_DEMOD(DEBUG, "Fading LLR scaling: index=%.3f, scale=%.2f", fading_index, fading_scale);
         }
     }
 
