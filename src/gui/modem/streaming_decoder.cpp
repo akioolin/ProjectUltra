@@ -218,14 +218,16 @@ void StreamingDecoder::searchForSync() {
     // Get preamble size from waveform
     size_t preamble = static_cast<size_t>(waveform_->getPreambleSamples());
 
-    // Minimum samples needed for dual chirp detection:
-    //   - Up chirp can appear at position 0 to ~preamble in the search buffer
-    //   - Down chirp is ~28800 samples after up chirp
-    //   - Down chirp detection needs ~50000 samples (2*chirp_len + margin for FFT)
-    // Worst case: up_pos at ~50000 (typical max), need ~50000 + 28800 + 50000 = ~130000
-    // Use preamble + 65000 to handle typical up_pos positions, cap to avoid excess latency
-    constexpr size_t MAX_SEARCH_SIZE = 120000;  // ~2.5 seconds, balances reliability vs latency
-    size_t min_search = std::min(preamble + 65000, MAX_SEARCH_SIZE);
+    // Search buffer sizing depends on sync mode:
+    // - Chirp sync (disconnected): needs ~120k samples for dual chirp correlation
+    // - Light sync (connected, LTS): needs only ~24k samples (LTS is ~1024 samples)
+    // Using a smaller buffer when connected cuts per-hop latency from ~2.8s to <1s
+    constexpr size_t CHIRP_MAX_SEARCH = 120000;   // ~2.5s for dual chirp detection
+    constexpr size_t LIGHT_SEARCH_SIZE = 24000;    // ~0.5s for LTS detection
+
+    size_t chirp_min_search = std::min(preamble + 65000, CHIRP_MAX_SEARCH);
+    bool use_light_search = connected_ && waveform_->supportsDataPreamble();
+    size_t min_search = use_light_search ? LIGHT_SEARCH_SIZE : chirp_min_search;
 
     std::vector<float> search_buffer;
     size_t search_start;
@@ -384,8 +386,8 @@ void StreamingDecoder::searchForSync() {
         if (found) {
             LOG_MODEM(INFO, "[%s] DATA sync detected (training only, known CFO=%.1f Hz, corr=%.2f)",
                       log_prefix_.c_str(), known_cfo, sync_result.correlation);
-        } else {
-            // Light sync failed or low confidence - try full chirp sync
+        } else if (search_buffer.size() >= chirp_min_search) {
+            // Light sync failed — only try chirp fallback if buffer is large enough
             found = waveform_->detectSync(
                 SampleSpan(search_buffer.data(), search_buffer.size()),
                 sync_result, CORR_DETECT_THRESHOLD);
@@ -452,10 +454,12 @@ void StreamingDecoder::searchForSync() {
         LOG_MODEM(INFO, "[%s] SYNC at pos=%zu, CFO=%.1f Hz, SNR=%.1f dB",
                   log_prefix_.c_str(), sync_position_, sync_cfo_, sync_snr_);
 
-        // Skip past this sync for next search
+        // Skip past the entire frame for next search
+        // Use frame size (from sync_position_) to avoid re-detecting the same frame
+        size_t frame_size = static_cast<size_t>(waveform_->getMinSamplesForFrame());
+        size_t skip_amount = std::max(min_search, frame_size + 4800);  // frame + 100ms margin
+        size_t skip_to = (sync_position_ + skip_amount) % MAX_BUFFER_SAMPLES;
         // Don't jump ahead of actual data - cap at write_pos_
-        size_t skip_to = (sync_position_ + min_search) % MAX_BUFFER_SAMPLES;
-        // If skip_to is ahead of write_pos_ (in a non-wrapped buffer), cap it
         if (total_fed_ < MAX_BUFFER_SAMPLES && skip_to > write_pos_) {
             skip_to = write_pos_;
         }
@@ -565,10 +569,13 @@ void StreamingDecoder::decodeCurrentFrame() {
         rms = std::sqrt(rms / check_len);
     }
 
-    LOG_MODEM(INFO, "[%s] PING check: RMS=%.4f (threshold=0.08), sync_pos=%zu, check_start=%zu",
-              log_prefix_.c_str(), rms, sync_position_, check_start);
+    // PING threshold: noise floor ~0.01, faded data ~0.07, normal data ~0.15
+    // Use 0.04 to avoid misclassifying faded data frames as PINGs
+    constexpr float PING_RMS_THRESHOLD = 0.04f;
+    LOG_MODEM(INFO, "[%s] PING check: RMS=%.4f (threshold=%.2f), sync_pos=%zu, check_start=%zu",
+              log_prefix_.c_str(), rms, PING_RMS_THRESHOLD, sync_position_, check_start);
 
-    if (rms < 0.08f) {
+    if (rms < PING_RMS_THRESHOLD) {
         // PING detected
         LOG_MODEM(INFO, "[%s] PING detected (RMS=%.4f), SNR=%.1f dB, CFO=%.1f Hz",
                   log_prefix_.c_str(), rms, sync_snr_, sync_cfo_);

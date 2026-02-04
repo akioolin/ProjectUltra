@@ -151,10 +151,17 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
             LOG_MODEM(DEBUG, "SR-ARQ: Duplicate DATA seq=%d", seq);
         }
 
-        // Delayed SACK for half-duplex: wait for burst to complete
-        // Reset timer on each frame received - only send SACK after silence
-        sack_pending_ = true;
-        sack_timer_ms_ = config_.sack_delay_ms;
+        // ACK strategy: immediate for single frames, delayed for bursts
+        if (last_rx_more_data_) {
+            // More fragments coming (file transfer) — delay to batch-ACK
+            sack_pending_ = true;
+            sack_timer_ms_ = config_.sack_delay_ms;
+        } else {
+            // Single frame or last fragment — ACK immediately
+            sendSack();
+            sack_pending_ = false;
+            sack_timer_ms_ = 0;
+        }
 
     } else {
         LOG_MODEM(WARN, "SR-ARQ: DATA seq=%d outside window [%d, %d)",

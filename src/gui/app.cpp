@@ -328,14 +328,14 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                snr_db, quality);
 
         // Format display with waveform info and channel quality
-        char buf[100];
+        char buf[120];
         if (waveform == protocol::WaveformMode::MC_DPSK) {
-            snprintf(buf, sizeof(buf), "[MODE] MC-DPSK 8 carriers %s (SNR=%d dB, %s)",
-                     codeRateToString(rate), static_cast<int>(snr_db), quality);
+            snprintf(buf, sizeof(buf), "[MODE] MC-DPSK 8 carriers %s (SNR=%d dB, %s fading=%.2f)",
+                     codeRateToString(rate), static_cast<int>(snr_db), quality, fading);
         } else {
-            snprintf(buf, sizeof(buf), "[MODE] %s %s %s (SNR=%d dB, %s)",
+            snprintf(buf, sizeof(buf), "[MODE] %s %s %s (SNR=%d dB, %s fading=%.2f)",
                      wf_name, modulationToString(mod), codeRateToString(rate),
-                     static_cast<int>(snr_db), quality);
+                     static_cast<int>(snr_db), quality, fading);
         }
         rx_log_.push_back(buf);
         if (rx_log_.size() > MAX_RX_LOG) {
@@ -645,12 +645,25 @@ void App::initVirtualStation() {
     });
 
     virtual_protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate, float snr_db) {
-        guiLog("SIM: Virtual MODE_CHANGE: %s R%s (SNR=%.1f dB)",
-               modulationToString(mod),
-               codeRateToString(rate),
-               snr_db);
         // Update virtual modem engine with new data mode
         virtual_modem_->setDataMode(mod, rate);
+
+        // Show [SIM-MODE] line so user can see what the responder actually measured
+        auto waveform = virtual_modem_->getWaveformMode();
+        float fading = virtual_modem_->getFadingIndex();
+        const char* quality = fadingToQuality(fading);
+        const char* wf_name = waveformDisplayName(waveform);
+
+        guiLog("SIM: Virtual MODE_CHANGE: %s %s %s (SNR=%.1f dB, %s fading=%.2f)",
+               wf_name, modulationToString(mod), codeRateToString(rate),
+               snr_db, quality, fading);
+
+        char buf[120];
+        snprintf(buf, sizeof(buf), "[SIM-MODE] %s %s %s (SNR=%d dB, %s fading=%.2f)",
+                 wf_name, modulationToString(mod), codeRateToString(rate),
+                 static_cast<int>(snr_db), quality, fading);
+        rx_log_.push_back(buf);
+        if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
     });
 
     virtual_protocol_.setModeNegotiatedCallback([this](protocol::WaveformMode mode) {
@@ -917,22 +930,16 @@ void App::simulationLoop() {
         }
 
         // Generate continuous noise when idle (simulates real radio - always receiving audio)
-        // This ensures decoders waiting for samples will get them (as noise)
-        // Feed 480 samples (10ms) per tick to match SAMPLES_PER_TICK
+        // CRITICAL: Process silence through sim_channel_ so fading state evolves
+        // continuously. Without this, the channel freezes during idle periods and
+        // retransmissions hit the same deep fade repeatedly (frozen channel bug).
         if (!had_activity && !tx_in_progress_) {
             constexpr size_t IDLE_SAMPLES_PER_TICK = 480;  // 10ms at 48kHz
 
-            float typical_rms = 0.1f;
-            float snr_linear = std::pow(10.0f, simulation_snr_db_ / 10.0f);
-            float noise_power = (typical_rms * typical_rms) / snr_linear;
-            float noise_stddev = std::sqrt(noise_power);
-            std::normal_distribution<float> noise_dist(0.0f, noise_stddev);
+            std::vector<float> silence(IDLE_SAMPLES_PER_TICK, 0.0f);
+            auto noise = applyChannelEffects(silence);
 
-            std::vector<float> noise(IDLE_SAMPLES_PER_TICK);
-            for (float& s : noise) s = noise_dist(sim_rng_);
-
-            // Feed noise to modems only (simulates continuous RX like real radio)
-            // Don't update waterfall - noise isn't interesting and FFT every 1ms is expensive
+            // Feed channel-filtered noise to modems
             modem_.feedAudio(noise);
             virtual_modem_->feedAudio(noise);
         }
