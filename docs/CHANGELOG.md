@@ -10,6 +10,47 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-02-03: Refactor ModemEngine TX to use StreamingEncoder
+
+**What was broken:**
+- ModemEngine::transmit() had ~300 lines of inline TX encoding (LDPC, frame interleaving,
+  CW patching, waveform creation) that duplicated StreamingEncoder
+- Config mismatch bugs between GUI and cli_simulator (pilot settings, CRC, CFO)
+- Two divergent TX paths to maintain
+- Control frames (ACK/NACK) encoded as 1-CW in GUI but 4-CW in cli_simulator
+
+**What was changed:**
+- `src/gui/modem/modem_engine.hpp`:
+  - Added `StreamingEncoder` member, removed `encoder_` (fec::CodecPtr),
+    `active_tx_waveform_`, `channel_interleaver_`, `ack_4cw_enabled_`,
+    `interleaving_enabled_`, `interleaver_bits_per_symbol_`, `frame_interleaving_enabled_`
+  - Removed `ensureTxWaveform()`, `updateChannelInterleaver()`, `setInterleavingEnabled()`
+  - Added `postProcessTx()` helper
+- `src/gui/modem/modem_engine.cpp`:
+  - Constructor creates StreamingEncoder instead of encoder_/channel_interleaver_
+  - `transmit()` reduced from ~280 lines to ~60 lines: waveform decision + StreamingEncoder delegation
+  - `transmitPing()/transmitPong()` delegate to `streaming_encoder_->encodePing()`
+  - `transmitTestPattern()/transmitRawOFDM()` use StreamingEncoder
+  - Extracted `postProcessTx()` for lead-in, filter, scale, stats
+  - Deleted `ensureTxWaveform()` and `updateChannelInterleaver()`
+- `src/gui/modem/modem_mode.cpp`:
+  - `setWaveformMode()`, `setConnected()`, `setDataMode()` now mirror config to StreamingEncoder
+  - `setCodecType()` no longer recreates encoder_ (StreamingEncoder manages its own)
+- `CMakeLists.txt`: Added streaming_encoder.cpp to ultra_gui, threaded_simulator, profile_acquisition
+
+**Key behavioral change:**
+- OFDM control frames (ACK/NACK) now get 4-CW frame interleaving via StreamingEncoder,
+  matching cli_simulator behavior. Should reduce ACK loss on fading channels.
+
+**Test verification:**
+```
+./build/cli_simulator --snr 20 --test              # AWGN: PASS, 0 retransmissions
+./build/cli_simulator --snr 15 --fading good --rate r1_4 --test   # Good fading: PASS, 0 retransmissions
+./build/cli_simulator --snr 15 --fading moderate --rate r1_4 --test  # Moderate: PASS, 2 retransmissions (expected)
+```
+
+---
+
 ## 2026-02-02: Fix Light Sync Timing Errors on Fading Channels (68%→93%)
 
 **What was broken:**

@@ -60,6 +60,15 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
         }
     }
 
+    // Update StreamingEncoder to match
+    if (streaming_encoder_) {
+        streaming_encoder_->setMode(mode);
+        if (mode == protocol::WaveformMode::OFDM_COX ||
+            mode == protocol::WaveformMode::OFDM_CHIRP) {
+            streaming_encoder_->setOFDMConfig(config_);
+        }
+    }
+
     switch (mode) {
         case protocol::WaveformMode::MC_DPSK:
             LOG_MODEM(INFO, "DPSK mode active: %d-PSK, %d samples/sym, %.1f bps",
@@ -150,6 +159,16 @@ void ModemEngine::setConnected(bool connected) {
             }
         }
 
+        // Update StreamingEncoder for connected state
+        if (streaming_encoder_) {
+            streaming_encoder_->setMode(waveform_mode_);
+            if (waveform_mode_ == protocol::WaveformMode::OFDM_COX ||
+                waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP) {
+                streaming_encoder_->setOFDMConfig(config_);
+                streaming_encoder_->setDataMode(data_modulation_, data_code_rate_);
+            }
+        }
+
         LOG_MODEM(INFO, "Entered connected state, configured for %s %s (pilots=%d, spacing=%d)",
                   modulationToString(data_modulation_), codeRateToString(data_code_rate_),
                   config_.use_pilots ? 1 : 0, config_.pilot_spacing);
@@ -218,12 +237,6 @@ void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
                   config_.use_pilots ? 1 : 0, config_.pilot_spacing);
     }
 
-    // Update channel interleaver for the new modulation
-    // D8PSK = 3 bits/carrier, DQPSK = 2 bits/carrier, DBPSK = 1 bit/carrier
-    // Use getDataCarriers() which accounts for pilot overhead
-    size_t bits_per_symbol = config_.getDataCarriers() * getBitsPerSymbol(mod);
-    updateChannelInterleaver(bits_per_symbol);
-
     // Update StreamingDecoder's waveform configuration
     // CRITICAL: Set OFDM config BEFORE setDataMode so decoder has correct pilot layout
     if (streaming_decoder_) {
@@ -231,6 +244,14 @@ void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
             streaming_decoder_->setOFDMConfig(config_);
         }
         streaming_decoder_->setDataMode(mod, rate);
+    }
+
+    // Update StreamingEncoder to match
+    if (streaming_encoder_) {
+        if (waveform_mode_ != protocol::WaveformMode::MC_DPSK) {
+            streaming_encoder_->setOFDMConfig(config_);
+        }
+        streaming_encoder_->setDataMode(mod, rate);
     }
 
     LOG_MODEM(INFO, "Data mode set to: %s (pilots=%d, spacing=%d)",
@@ -285,8 +306,7 @@ void ModemEngine::setCodecType(fec::CodecType type) {
 
     codec_type_ = type;
 
-    // Recreate encoder and decoder with new codec type
-    encoder_ = fec::CodecFactory::create(type, config_.code_rate);
+    // Recreate decoder with new codec type (encoder is managed by StreamingEncoder)
     decoder_ = fec::CodecFactory::create(type, data_code_rate_);
 
     // Update StreamingDecoder to use the same codec
@@ -294,7 +314,7 @@ void ModemEngine::setCodecType(fec::CodecType type) {
         streaming_decoder_->setCodecType(type);
     }
 
-    LOG_MODEM(INFO, "Codec type set to: %s", encoder_->getName().c_str());
+    LOG_MODEM(INFO, "Codec type set to: %s", decoder_->getName().c_str());
 }
 
 fec::CodecType ModemEngine::recommendCodecType(float snr_db) {

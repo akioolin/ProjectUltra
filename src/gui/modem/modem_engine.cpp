@@ -2,10 +2,7 @@
 // Constructor, destructor, configuration, and TX functions
 
 #include "modem_engine.hpp"
-#include "protocol/frame_v2.hpp"
-#include "fec/frame_interleaver.hpp"  // Frame-level interleaving for 4-CW DATA frames
 #include "ultra/logging.hpp"
-#include "waveform/waveform_factory.hpp"
 #include <cstring>
 #include <algorithm>
 #include <fstream>
@@ -22,10 +19,8 @@ ModemEngine::ModemEngine() {
     // DQPSK is differential and doesn't need pilots for channel estimation
     config_.use_pilots = false;
 
-    encoder_ = fec::CodecFactory::create(fec::CodecType::LDPC, config_.code_rate);
     decoder_ = fec::CodecFactory::create(fec::CodecType::LDPC, CodeRate::R1_4);
-    // NOTE: TX uses active_tx_waveform_ (IWaveform), RX uses streaming_decoder_
-    // No separate ofdm_modulator_/ofdm_demodulator_ needed
+    // NOTE: TX uses streaming_encoder_, RX uses streaming_decoder_
 
     // DPSK config (used by StreamingDecoder, kept here for API compatibility)
     dpsk_config_ = dpsk_presets::medium();
@@ -53,9 +48,10 @@ ModemEngine::ModemEngine() {
     mc_dpsk_config_.use_dual_chirp = chirp_cfg.use_dual_chirp;
     // Note: Actual MC-DPSK modulation is done by IWaveform via StreamingDecoder
 
-    // Channel interleaver for time-frequency diversity on fading channels
-    // Default: 118 bits/symbol for OFDM (59 data carriers × 2 bits DQPSK)
-    updateChannelInterleaver(config_.num_carriers * 2);
+    // Initialize StreamingEncoder (unified TX path)
+    streaming_encoder_ = std::make_unique<StreamingEncoder>();
+    streaming_encoder_->setOFDMConfig(config_);
+    streaming_encoder_->setMCDPSKCarriers(mc_dpsk_config_.num_carriers);
 
     // Initialize audio filters
     rebuildFilters();
@@ -128,19 +124,15 @@ void ModemEngine::setConfig(const ModemConfig& config) {
               static_cast<int>(config.code_rate), static_cast<int>(config.modulation));
     config_ = config;
 
-    encoder_->setRate(config.code_rate);
     // BUG FIX: Don't change decoder rate here - it should stay at R1_4 for disconnected mode
     // The decoder rate should only change when setConnected(true) is called
-    LOG_MODEM(INFO, "setConfig: encoder_rate=%d, decoder_rate=%d (decoder unchanged for disconnected)",
-              static_cast<int>(config.code_rate), static_cast<int>(decoder_->getRate()));
+    LOG_MODEM(INFO, "setConfig: decoder_rate=%d (decoder unchanged for disconnected)",
+              static_cast<int>(decoder_->getRate()));
 
-    // NOTE: TX uses active_tx_waveform_, RX uses streaming_decoder_
-    // No separate ofdm_modulator_/ofdm_demodulator_ to recreate
-
-    // Update channel interleaver for new carrier count
-    // DQPSK = 2 bits per carrier
-    size_t bps = config_.num_carriers * 2;
-    updateChannelInterleaver(bps);
+    // Propagate OFDM config to StreamingEncoder
+    if (streaming_encoder_) {
+        streaming_encoder_->setOFDMConfig(config_);
+    }
 
     // Propagate OFDM config to StreamingDecoder for OFDM modes
     // This allows custom FFT/carrier settings (like NVIS mode with 1024 FFT)
@@ -214,256 +206,120 @@ std::vector<float> ModemEngine::transmit(const std::string& text) {
 }
 
 std::vector<float> ModemEngine::transmit(const Bytes& data) {
-    namespace v2 = protocol::v2;
-
     if (data.empty()) {
         return {};
     }
 
-    // Check for v2 frame magic "UL" (0x55, 0x4C)
-    bool is_v2_frame = (data.size() >= 2 && data[0] == 0x55 && data[1] == 0x4C);
-
-    LOG_MODEM(INFO, "[%s] TX: Input %zu bytes, first 4: %02x %02x %02x %02x, v2=%d",
+    LOG_MODEM(INFO, "[%s] TX: Input %zu bytes, first 4: %02x %02x %02x %02x",
               log_prefix_.c_str(),
               data.size(),
               data.size() > 0 ? data[0] : 0,
               data.size() > 1 ? data[1] : 0,
               data.size() > 2 ? data[2] : 0,
-              data.size() > 3 ? data[3] : 0,
-              is_v2_frame);
+              data.size() > 3 ? data[3] : 0);
 
-    Bytes to_modulate;
-    CodeRate tx_code_rate = CodeRate::R1_4;  // Default, set below based on frame type
-
-    // Determine if this is a DATA frame (used for modulation selection later)
-    bool is_data_frame = false;
-    if (is_v2_frame && data.size() >= 3 && connected_) {
-        uint8_t frame_type = data[2];
-        is_data_frame = (frame_type >= 0x30 && frame_type <= 0x33);
-    }
-
-    // Determine waveform type EARLY - needed for encoding decisions
-    // 4-CW frame interleaving only makes sense for OFDM, not MC-DPSK
+    // ========================================================================
+    // 1. Determine waveform mode (4-way decision)
+    // ========================================================================
     protocol::WaveformMode tx_waveform_mode;
     if (use_connected_waveform_once_) {
         tx_waveform_mode = disconnect_waveform_;
+        LOG_MODEM(INFO, "[%s] TX: use_connected_waveform_once_ -> disconnect_waveform_=%d",
+                  log_prefix_.c_str(), static_cast<int>(tx_waveform_mode));
     } else if (!connected_) {
         tx_waveform_mode = connect_waveform_;
+        LOG_MODEM(INFO, "[%s] TX: NOT connected -> connect_waveform_=%d",
+                  log_prefix_.c_str(), static_cast<int>(tx_waveform_mode));
     } else if (!handshake_complete_) {
         tx_waveform_mode = last_rx_waveform_;
+        LOG_MODEM(INFO, "[%s] TX: Handshake mode -> last_rx_waveform_=%d",
+                  log_prefix_.c_str(), static_cast<int>(tx_waveform_mode));
     } else {
         tx_waveform_mode = waveform_mode_;
+        LOG_MODEM(INFO, "[%s] TX: Connected+handshake -> waveform_mode_=%d",
+                  log_prefix_.c_str(), static_cast<int>(tx_waveform_mode));
     }
-    bool is_ofdm_waveform = (tx_waveform_mode == protocol::WaveformMode::OFDM_CHIRP ||
-                             tx_waveform_mode == protocol::WaveformMode::OFDM_COX);
+    bool is_ofdm = (tx_waveform_mode == protocol::WaveformMode::OFDM_CHIRP ||
+                    tx_waveform_mode == protocol::WaveformMode::OFDM_COX);
 
-    if (is_v2_frame) {
-        // === V2 Frame Path ===
-        // Protocol rate selection:
-        // - Pre-connection (PING/PONG/CONNECT): R1/4 for robustness
-        // - During handshake (CONNECT_ACK): R1/4 (remote not yet confirmed)
-        // - Post-handshake: ALL frames (data AND control) use negotiated rate
-        //   (ACK/NACK/DISCONNECT must use same rate as data for RX to decode)
-
-        std::vector<Bytes> encoded_cws;
-        // Use negotiated rate if connected+handshake OR for disconnect ACK (use_connected_waveform_once_)
-        tx_code_rate = ((connected_ && handshake_complete_) || use_connected_waveform_once_) ? data_code_rate_ : CodeRate::R1_4;
-
-        // Determine frame type to decide encoding strategy
-        // Control frames (1 CW): ACK, NACK, PROBE, etc. - no frame interleaving
-        // DATA frames with OFDM: 4 CWs with frame-level interleaving
-        // DATA frames with MC-DPSK: Variable CWs, no frame interleaving (MC-DPSK doesn't support 4-CW)
-        Bytes tx_data = data;  // Make mutable copy
-        uint8_t frame_type = tx_data.size() >= 3 ? tx_data[2] : 0;
-        bool is_control_frame = v2::isControlFrame(static_cast<v2::FrameType>(frame_type));
-        // Only use 4-CW frame interleaving for DATA frames AND OFDM waveform
-        bool is_multi_cw_frame = (frame_type >= 0x30 && frame_type <= 0x3F) && is_ofdm_waveform;
-
-        if (is_control_frame) {
-            // === Control Frame Path (1 CW, no frame interleaving) ===
-            encoded_cws = v2::encodeFrameWithLDPC(tx_data, tx_code_rate);
-            LOG_MODEM(INFO, "TX v2 control: %zu bytes -> %zu CW (no frame interleave)",
-                      data.size(), encoded_cws.size());
-
-            for (const auto& cw : encoded_cws) {
-                to_modulate.insert(to_modulate.end(), cw.begin(), cw.end());
-            }
-        } else if (is_multi_cw_frame && frame_interleaving_enabled_) {
-            // === Multi-CW Frame Path (4 CWs with frame-level interleaving) ===
-            // Patch total_cw to 4 in header (frame interleaving always uses 4 CWs)
-            if (tx_data.size() >= 17 && tx_data[12] != v2::FIXED_FRAME_CODEWORDS) {
-                LOG_MODEM(DEBUG, "TX v2: Patching total_cw from %d to %d for frame interleaving",
-                          tx_data[12], v2::FIXED_FRAME_CODEWORDS);
-                tx_data[12] = v2::FIXED_FRAME_CODEWORDS;
-                // Recalculate header CRC (over bytes 0-14)
-                uint16_t hcrc = v2::ControlFrame::calculateCRC(tx_data.data(), 15);
-                tx_data[15] = (hcrc >> 8) & 0xFF;
-                tx_data[16] = hcrc & 0xFF;
-                // Recalculate frame CRC (over all bytes except last 2)
-                // The frame CRC covers byte 12 (total_cw) and bytes 15-16 (header CRC),
-                // both of which were just modified. Without this, RX CRC check fails.
-                if (tx_data.size() >= v2::DataFrame::HEADER_SIZE + v2::DataFrame::CRC_SIZE) {
-                    uint16_t fcrc = v2::ControlFrame::calculateCRC(tx_data.data(), tx_data.size() - 2);
-                    tx_data[tx_data.size() - 2] = (fcrc >> 8) & 0xFF;
-                    tx_data[tx_data.size() - 1] = fcrc & 0xFF;
-                }
-            }
-
-            // Encode with frame-level interleaving (returns 324 bytes = 2592 bits, already interleaved)
-            to_modulate = v2::encodeFixedFrame(tx_data, tx_code_rate);
-            LOG_MODEM(INFO, "TX v2 multi-CW: %zu bytes -> 4 CWs with frame interleave (%zu coded bytes)",
-                      data.size(), to_modulate.size());
-        } else {
-            // === Fallback: Variable CWs without frame interleaving ===
-            // Used for: MC-DPSK frames (CONNECT, DATA at low SNR), or when interleaving disabled
-            // Must patch total_cw in header to match actual encoded CW count
-            encoded_cws = v2::encodeFrameWithLDPC(tx_data, tx_code_rate);
-
-            // Patch total_cw to match actual encoded CWs (header may have wrong value)
-            uint8_t actual_cw = static_cast<uint8_t>(encoded_cws.size());
-            if (tx_data.size() >= 17 && tx_data[12] != actual_cw) {
-                LOG_MODEM(DEBUG, "TX v2: Patching total_cw from %d to %d for variable CW encoding",
-                          tx_data[12], actual_cw);
-                tx_data[12] = actual_cw;
-                uint16_t hcrc = v2::ControlFrame::calculateCRC(tx_data.data(), 15);
-                tx_data[15] = (hcrc >> 8) & 0xFF;
-                tx_data[16] = hcrc & 0xFF;
-                // Recalculate frame CRC (covers patched bytes 12, 15-16)
-                if (tx_data.size() >= v2::DataFrame::HEADER_SIZE + v2::DataFrame::CRC_SIZE) {
-                    uint16_t fcrc = v2::ControlFrame::calculateCRC(tx_data.data(), tx_data.size() - 2);
-                    tx_data[tx_data.size() - 2] = (fcrc >> 8) & 0xFF;
-                    tx_data[tx_data.size() - 1] = fcrc & 0xFF;
-                }
-
-                // Re-encode CW0 with corrected header and frame CRC
-                encoded_cws = v2::encodeFrameWithLDPC(tx_data, tx_code_rate);
-            }
-            LOG_MODEM(INFO, "TX v2 fallback: %zu bytes -> %zu CWs (no frame interleave)",
-                      data.size(), encoded_cws.size());
-
-            for (const auto& cw : encoded_cws) {
-                to_modulate.insert(to_modulate.end(), cw.begin(), cw.end());
-            }
-        }
-
-        LOG_MODEM(INFO, "TX v2: Total %zu coded bytes, first 8: %02x %02x %02x %02x %02x %02x %02x %02x",
-                  to_modulate.size(),
-                  to_modulate.size() > 0 ? to_modulate[0] : 0,
-                  to_modulate.size() > 1 ? to_modulate[1] : 0,
-                  to_modulate.size() > 2 ? to_modulate[2] : 0,
-                  to_modulate.size() > 3 ? to_modulate[3] : 0,
-                  to_modulate.size() > 4 ? to_modulate[4] : 0,
-                  to_modulate.size() > 5 ? to_modulate[5] : 0,
-                  to_modulate.size() > 6 ? to_modulate[6] : 0,
-                  to_modulate.size() > 7 ? to_modulate[7] : 0);
-    } else {
-        // === Raw Data Path (non-v2 frame) ===
-        // Use connected code rate if still connected OR for disconnect ACK
-        tx_code_rate = (connected_ || use_connected_waveform_once_) ? data_code_rate_ : CodeRate::R1_4;
-
-        encoder_->setRate(tx_code_rate);
-        Bytes encoded = encoder_->encode(data);
-
-        LOG_MODEM(INFO, "TX raw: %zu bytes -> %zu encoded (rate=%d)",
-                  data.size(), encoded.size(), static_cast<int>(tx_code_rate));
-
-        // Channel interleaver spreads bits across OFDM symbols for time diversity
-        bool use_interleaving = interleaving_enabled_ && channel_interleaver_ &&
-                                (waveform_mode_ == protocol::WaveformMode::OFDM_COX ||
-                                 waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP);
-        to_modulate = use_interleaving ? channel_interleaver_->interleave(encoded) : encoded;
-    }
-
-    // Modulation selection
-    // During handshake (connected but not handshake_complete), use DQPSK for reliability.
-    // After handshake, use negotiated modulation so RX demodulator can decode.
-    // Robustness is handled by code rate: CW0 header always uses R1/4.
-    // IMPORTANT: When use_connected_waveform_once_ is set (for DISCONNECT ACK),
-    // we must also use the connected modulation since the remote is still expecting it.
+    // ========================================================================
+    // 2. Determine modulation and code rate
+    // ========================================================================
     Modulation tx_modulation = Modulation::DQPSK;
+    CodeRate tx_code_rate = CodeRate::R1_4;
+
     if ((connected_ && handshake_complete_) || use_connected_waveform_once_) {
         tx_modulation = data_modulation_;
-        LOG_MODEM(INFO, "[%s] TX: Using %s modulation %s",
+        tx_code_rate = data_code_rate_;
+        LOG_MODEM(INFO, "[%s] TX: Using %s %s (%s)",
                   log_prefix_.c_str(),
-                  connected_ ? "negotiated" : "preserved (disconnect ACK)",
-                  modulationToString(tx_modulation));
-    }
-
-    // Determine which waveform to use
-    LOG_MODEM(INFO, "[%s] TX WAVEFORM DECISION: connected_=%d, handshake_complete_=%d, "
-              "waveform_mode_=%d, connect_waveform_=%d, last_rx_waveform_=%d, use_once_=%d",
-              log_prefix_.c_str(), connected_ ? 1 : 0, handshake_complete_ ? 1 : 0,
-              static_cast<int>(waveform_mode_), static_cast<int>(connect_waveform_),
-              static_cast<int>(last_rx_waveform_), use_connected_waveform_once_ ? 1 : 0);
-
-    protocol::WaveformMode active_waveform;
-    if (use_connected_waveform_once_) {
-        // For disconnect ACK, use disconnect_waveform_ (saved when setConnected(false) was called)
-        // This is the negotiated waveform that was in use during the connection
-        active_waveform = disconnect_waveform_;
-        use_connected_waveform_once_ = false;
-        LOG_MODEM(INFO, "[%s] TX: use_connected_waveform_once_ -> using disconnect_waveform_=%d",
-                  log_prefix_.c_str(), static_cast<int>(active_waveform));
-    } else if (!connected_) {
-        active_waveform = connect_waveform_;
-        LOG_MODEM(INFO, "[%s] TX: NOT connected -> using connect_waveform_=%d",
-                  log_prefix_.c_str(), static_cast<int>(active_waveform));
-    } else if (!handshake_complete_) {
-        active_waveform = last_rx_waveform_;
-        LOG_MODEM(INFO, "[%s] TX: Handshake mode -> using last_rx_waveform_=%d",
-                  log_prefix_.c_str(), static_cast<int>(active_waveform));
-    } else {
-        active_waveform = waveform_mode_;
-        LOG_MODEM(INFO, "[%s] TX: Connected+handshake -> using waveform_mode_=%d",
-                  log_prefix_.c_str(), static_cast<int>(active_waveform));
-    }
-
-    Samples preamble, modulated;
-
-    // All modes now use IWaveform interface (MC_DPSK, OFDM_CHIRP, OFDM_COX, OTFS)
-    ensureTxWaveform(active_waveform, tx_modulation, tx_code_rate);
-
-    if (active_tx_waveform_) {
-        // Use light preamble (training only, no chirp) for DATA frames when connected
-        // This saves ~1.2 seconds per frame, nearly tripling throughput
-        // Requirements: connected, handshake complete, waveform supports it
-        bool use_light_preamble = connected_ && handshake_complete_ &&
-                                   active_tx_waveform_->supportsDataPreamble();
-
-        if (use_light_preamble) {
-            preamble = active_tx_waveform_->generateDataPreamble();
-            LOG_MODEM(INFO, "[%s] TX: Using LIGHT preamble (training only, %zu samples)",
-                      log_prefix_.c_str(), preamble.size());
-        } else {
-            preamble = active_tx_waveform_->generatePreamble();
-            LOG_MODEM(INFO, "[%s] TX: Using FULL preamble (chirp+training, %zu samples)",
-                      log_prefix_.c_str(), preamble.size());
-        }
-
-        modulated = active_tx_waveform_->modulate(to_modulate);
-
-        LOG_MODEM(INFO, "[%s] TX: Using %s (%s, %s)",
-                  log_prefix_.c_str(),
-                  active_tx_waveform_->getName().c_str(),
                   modulationToString(tx_modulation),
-                  codeRateToString(tx_code_rate));
-    } else {
-        LOG_MODEM(ERROR, "[%s] TX: Failed to create waveform for mode %d",
-                  log_prefix_.c_str(), static_cast<int>(active_waveform));
+                  codeRateToString(tx_code_rate),
+                  connected_ ? "negotiated" : "disconnect ACK");
+    }
+
+    // Clear one-shot flag AFTER using it for decisions above
+    if (use_connected_waveform_once_) {
+        use_connected_waveform_once_ = false;
+    }
+
+    // ========================================================================
+    // 3. Configure StreamingEncoder and encode
+    // ========================================================================
+    streaming_encoder_->setMode(tx_waveform_mode);
+    streaming_encoder_->setDataMode(tx_modulation, tx_code_rate);
+
+    bool use_light = connected_ && handshake_complete_ && is_ofdm;
+    auto samples = use_light ? streaming_encoder_->encodeFrameLight(data)
+                             : streaming_encoder_->encodeFrame(data);
+
+    if (samples.empty()) {
+        LOG_MODEM(ERROR, "[%s] TX: StreamingEncoder returned empty samples", log_prefix_.c_str());
         return {};
     }
 
-    // Combine lead-in + preamble + data + tail guard
-    const size_t LEAD_IN_SAMPLES = 48000 * 150 / 1000;  // 150ms
-    // Small tail guard for processing margin
-    // With continuous noise feeding in simulator, decoder gets samples after TX ends
-    const size_t TAIL_SAMPLES = 2400;  // 50ms guard
-    std::vector<float> output;
-    output.reserve(LEAD_IN_SAMPLES + preamble.size() + modulated.size() + TAIL_SAMPLES);
+    LOG_MODEM(INFO, "[%s] TX: %zu bytes -> %zu samples (%s, %s, %s preamble)",
+              log_prefix_.c_str(), data.size(), samples.size(),
+              protocol::waveformModeToString(tx_waveform_mode),
+              modulationToString(tx_modulation),
+              use_light ? "light" : "full");
 
+    return postProcessTx(samples);
+}
+
+// ============================================================================
+// PING/PONG PROBE (minimal presence check)
+// ============================================================================
+
+std::vector<float> ModemEngine::transmitPing() {
+    auto samples = streaming_encoder_->encodePing();
+
+    LOG_MODEM(INFO, "[%s] TX PING (chirp): %zu samples",
+              log_prefix_.c_str(), samples.size());
+
+    return postProcessTx(samples);
+}
+
+std::vector<float> ModemEngine::transmitPong() {
+    // Pong is identical to ping - context determines meaning
+    // (Ping = initiator probe, Pong = responder reply)
+    LOG_MODEM(INFO, "[%s] TX PONG (same as PING)", log_prefix_.c_str());
+    return transmitPing();
+}
+
+// ============================================================================
+// TX POST-PROCESSING (lead-in, filter, scale, stats)
+// ============================================================================
+
+std::vector<float> ModemEngine::postProcessTx(const std::vector<float>& samples) {
+    // Combine lead-in + signal + tail guard
+    const size_t LEAD_IN_SAMPLES = 48000 * 150 / 1000;  // 150ms for AGC settling
+    const size_t TAIL_SAMPLES = 2400;  // 50ms guard
+
+    std::vector<float> output;
+    output.reserve(LEAD_IN_SAMPLES + samples.size() + TAIL_SAMPLES);
     output.resize(LEAD_IN_SAMPLES, 0.0f);
-    output.insert(output.end(), preamble.begin(), preamble.end());
-    output.insert(output.end(), modulated.begin(), modulated.end());
+    output.insert(output.end(), samples.begin(), samples.end());
     output.resize(output.size() + TAIL_SAMPLES, 0.0f);
 
     // Apply TX bandpass filter
@@ -498,98 +354,6 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     }
 
     return output;
-}
-
-// ============================================================================
-// PING/PONG PROBE (minimal presence check)
-// ============================================================================
-
-std::vector<float> ModemEngine::transmitPing() {
-    // Generate chirp sync signal for robust presence detection
-    // Chirp spreads energy across 400-2600 Hz, robust to frequency-selective fading
-    auto chirp = chirp_sync_->generate();
-
-    // Apply TX bandpass filter
-    if (filter_config_.enabled && tx_filter_) {
-        SampleSpan span(chirp.data(), chirp.size());
-        chirp = tx_filter_->process(span);
-    }
-
-    // Scale for audio output
-    float max_val = 0.0f;
-    for (float s : chirp) {
-        max_val = std::max(max_val, std::abs(s));
-    }
-    if (max_val > 0.0f) {
-        float scale = 0.8f / max_val;
-        for (float& s : chirp) {
-            s *= scale;
-        }
-    }
-
-    // Lead-in silence for receiver AGC settling + trailing silence
-    // All TX must have lead-in for consistent receiver behavior
-    constexpr size_t LEAD_IN_SAMPLES = 48000 * 150 / 1000;   // 150ms for AGC
-    constexpr size_t TRAILING_SILENCE = 2400;                 // 50ms guard
-
-    std::vector<float> output;
-    output.reserve(LEAD_IN_SAMPLES + chirp.size() + TRAILING_SILENCE);
-    output.resize(LEAD_IN_SAMPLES, 0.0f);  // Lead-in silence
-    output.insert(output.end(), chirp.begin(), chirp.end());
-    output.resize(output.size() + TRAILING_SILENCE, 0.0f);  // Trailing silence
-
-    LOG_MODEM(INFO, "[%s] TX PING (chirp): %zu samples (%.2f sec, incl lead-in+trail)",
-              log_prefix_.c_str(), output.size(), output.size() / 48000.0f);
-
-    return output;
-}
-
-std::vector<float> ModemEngine::transmitPong() {
-    // Pong is identical to ping - context determines meaning
-    // (Ping = initiator probe, Pong = responder reply)
-    LOG_MODEM(INFO, "[%s] TX PONG (same as PING)", log_prefix_.c_str());
-    return transmitPing();
-}
-
-// ============================================================================
-// WAVEFORM ABSTRACTION HELPERS
-// ============================================================================
-
-void ModemEngine::ensureTxWaveform(protocol::WaveformMode mode, Modulation mod, CodeRate rate) {
-    // Check if we need to create or reconfigure the waveform
-    if (active_tx_waveform_ && active_tx_waveform_->getMode() == mode) {
-        // Same mode - just reconfigure modulation/rate if needed
-        if (active_tx_waveform_->getModulation() != mod ||
-            active_tx_waveform_->getCodeRate() != rate) {
-            active_tx_waveform_->configure(mod, rate);
-            LOG_MODEM(INFO, "[%s] TX waveform reconfigured: %s %s",
-                      log_prefix_.c_str(), modulationToString(mod), codeRateToString(rate));
-        }
-        return;
-    }
-
-    // Create new waveform using factory
-    // For MC-DPSK, use the configured carrier count from mc_dpsk_config_
-    if (mode == protocol::WaveformMode::MC_DPSK) {
-        active_tx_waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_.num_carriers);
-        LOG_MODEM(INFO, "[%s] TX waveform created: MC-DPSK (%d carriers), %s %s",
-                  log_prefix_.c_str(), mc_dpsk_config_.num_carriers,
-                  modulationToString(mod), codeRateToString(rate));
-    } else {
-        active_tx_waveform_ = WaveformFactory::create(mode, config_);
-        if (active_tx_waveform_) {
-            LOG_MODEM(INFO, "[%s] TX waveform created: %s, %s %s",
-                      log_prefix_.c_str(), active_tx_waveform_->getName().c_str(),
-                      modulationToString(mod), codeRateToString(rate));
-        }
-    }
-
-    if (active_tx_waveform_) {
-        active_tx_waveform_->configure(mod, rate);
-    } else {
-        LOG_MODEM(ERROR, "[%s] Failed to create TX waveform for mode %d",
-                  log_prefix_.c_str(), static_cast<int>(mode));
-    }
 }
 
 // ============================================================================
@@ -641,36 +405,18 @@ std::vector<float> ModemEngine::transmitTestPattern(int pattern) {
             LOG_MODEM(INFO, "TX Test Pattern: ALTERNATING 1010 (%zu bytes)", test_data.size());
     }
 
-    // LDPC encode
-    CodeRate saved_rate = encoder_->getRate();
-    encoder_->setRate(CodeRate::R1_4);
-    Bytes encoded = encoder_->encode(test_data);
-    encoder_->setRate(saved_rate);
-    LOG_MODEM(INFO, "TX Test: %zu bytes -> %zu encoded bytes (R1/4 forced)", test_data.size(), encoded.size());
+    // Use StreamingEncoder for test pattern TX
+    streaming_encoder_->setMode(protocol::WaveformMode::OFDM_CHIRP);
+    streaming_encoder_->setDataMode(Modulation::DQPSK, CodeRate::R1_4);
+    auto samples = streaming_encoder_->encodeFrame(test_data);
 
-    // Use waveform interface for TX
-    ensureTxWaveform(protocol::WaveformMode::OFDM_CHIRP, Modulation::DQPSK, CodeRate::R1_4);
-    if (!active_tx_waveform_) {
-        LOG_MODEM(ERROR, "TX Test: Failed to create waveform");
+    if (samples.empty()) {
+        LOG_MODEM(ERROR, "TX Test: Failed to encode");
         return {};
     }
 
-    Samples preamble = active_tx_waveform_->generatePreamble();
-    Samples modulated = active_tx_waveform_->modulate(encoded);
-
-    std::vector<float> output;
-    output.reserve(preamble.size() + modulated.size());
-    output.insert(output.end(), preamble.begin(), preamble.end());
-    output.insert(output.end(), modulated.begin(), modulated.end());
-
-    float max_val = 0.0f;
-    for (float s : output) max_val = std::max(max_val, std::abs(s));
-    if (max_val > 0.0f) {
-        float scale = 0.8f / max_val;
-        for (float& s : output) s *= scale;
-    }
-
-    return output;
+    LOG_MODEM(INFO, "TX Test: %zu bytes -> %zu samples (R1/4 forced)", test_data.size(), samples.size());
+    return postProcessTx(samples);
 }
 
 std::vector<float> ModemEngine::transmitRawOFDM(int pattern) {
@@ -699,21 +445,24 @@ std::vector<float> ModemEngine::transmitRawOFDM(int pattern) {
             LOG_MODEM(INFO, "TX Raw OFDM: ALL 0xAA (%zu bytes)", test_size);
     }
 
-    // Use waveform interface for TX
-    ensureTxWaveform(protocol::WaveformMode::OFDM_CHIRP, Modulation::DQPSK, CodeRate::R1_4);
-    if (!active_tx_waveform_) {
+    // Use StreamingEncoder's waveform directly for raw (no LDPC) modulation
+    streaming_encoder_->setMode(protocol::WaveformMode::OFDM_CHIRP);
+    streaming_encoder_->setDataMode(Modulation::DQPSK, CodeRate::R1_4);
+    IWaveform* wfm = streaming_encoder_->getWaveform();
+    if (!wfm) {
         LOG_MODEM(ERROR, "TX Raw OFDM: Failed to create waveform");
         return {};
     }
 
-    Samples preamble = active_tx_waveform_->generatePreamble();
-    Samples modulated = active_tx_waveform_->modulate(test_data);
+    Samples preamble = wfm->generatePreamble();
+    Samples modulated = wfm->modulate(test_data);
 
     std::vector<float> output;
     output.reserve(preamble.size() + modulated.size());
     output.insert(output.end(), preamble.begin(), preamble.end());
     output.insert(output.end(), modulated.begin(), modulated.end());
 
+    // Scale for audio output
     float max_val = 0.0f;
     for (float s : output) max_val = std::max(max_val, std::abs(s));
     if (max_val > 0.0f) {
@@ -829,18 +578,6 @@ void ModemEngine::clearRxBuffer() {
     if (streaming_decoder_) {
         streaming_decoder_->reset();
     }
-}
-
-void ModemEngine::updateChannelInterleaver(size_t bits_per_symbol) {
-    if (bits_per_symbol == interleaver_bits_per_symbol_ && channel_interleaver_) {
-        return;  // Already configured
-    }
-
-    interleaver_bits_per_symbol_ = bits_per_symbol;
-    channel_interleaver_ = std::make_unique<ChannelInterleaver>(bits_per_symbol, protocol::v2::LDPC_CODEWORD_BITS);
-
-    LOG_MODEM(INFO, "Channel interleaver updated: %zu bits/symbol, symbol separation=%zu",
-              bits_per_symbol, channel_interleaver_->getSymbolSeparation());
 }
 
 } // namespace gui

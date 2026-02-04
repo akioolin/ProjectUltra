@@ -18,6 +18,7 @@
 #include "protocol/waveform_selection.hpp"  // WaveformRecommendation, recommendWaveformAndRate
 #include "waveform/waveform_interface.hpp"  // IWaveform abstraction
 #include "streaming_decoder.hpp"  // StreamingDecoder - primary decoder
+#include "streaming_encoder.hpp"  // StreamingEncoder - unified TX encoder
 #include <memory>
 #include <vector>
 #include <queue>
@@ -174,19 +175,17 @@ public:
     float getMCDPSKThroughput() const { return mc_dpsk_config_.getRawBitRate() * 0.25f; } // R1/4 FEC
     void setMCDPSKCarriers(int num_carriers) {
         mc_dpsk_config_.num_carriers = num_carriers;
-        // Update StreamingDecoder (it creates its own waveforms internally)
         if (streaming_decoder_) {
             streaming_decoder_->setMCDPSKCarriers(num_carriers);
+        }
+        if (streaming_encoder_) {
+            streaming_encoder_->setMCDPSKCarriers(num_carriers);
         }
     }
 
     // Recommend MC-DPSK carrier count based on channel conditions
     // Returns 8 for fading/low SNR, up to 13 for stable/high SNR
     static int recommendMCDPSKCarriers(float snr_db, float fading_index);
-
-    // Interleaving control
-    void setInterleavingEnabled(bool enabled) { interleaving_enabled_ = enabled; }
-    bool isInterleavingEnabled() const { return interleaving_enabled_; }
 
     // FEC codec control
     void setCodecType(fec::CodecType type);
@@ -212,9 +211,8 @@ private:
     CodeRate data_code_rate_ = CodeRate::R1_2;
     fec::CodecType codec_type_ = fec::CodecType::LDPC;  // FEC codec type
 
-    // TX chain - OFDM
-    fec::CodecPtr encoder_;  // ICodec for encoding (currently LDPC)
-    // NOTE: TX uses active_tx_waveform_ (IWaveform interface) - no separate modulator
+    // TX chain - StreamingEncoder (unified encoding for all waveform types)
+    std::unique_ptr<StreamingEncoder> streaming_encoder_;
 
     // RX chain - OFDM
     fec::CodecPtr decoder_;  // ICodec for decoding (currently LDPC) - mostly unused, StreamingDecoder handles RX
@@ -228,10 +226,6 @@ private:
 
     // Chirp sync for robust presence detection on fading channels
     std::unique_ptr<sync::ChirpSync> chirp_sync_;
-
-    // IWaveform abstraction for TX (gradually transitioning from direct modulators)
-    // This will eventually replace the individual modulator pointers
-    std::unique_ptr<IWaveform> active_tx_waveform_;
 
     // ========================================================================
     // StreamingDecoder (primary RX path)
@@ -280,17 +274,6 @@ private:
     // Adaptive modulation controller
     AdaptiveModeController adaptive_;
 
-    // Channel interleaver for time-frequency diversity on fading channels
-    // Spreads consecutive LDPC bits across different OFDM symbols
-    std::unique_ptr<ChannelInterleaver> channel_interleaver_;
-    size_t interleaver_bits_per_symbol_ = 60;  // Default for OFDM_CHIRP (30 carriers × 2 bits DQPSK)
-    bool interleaving_enabled_ = false;  // Per-CW interleaving - DISABLED FOR TESTING
-    void updateChannelInterleaver(size_t bits_per_symbol);
-
-    // Frame-level interleaving for fixed 4-CW DATA frames
-    // Spreads errors across all 4 codewords for burst fading resistance
-    bool frame_interleaving_enabled_ = true;  // ENABLED - for DATA frames only
-
     // Audio filters
     FilterConfig filter_config_;
     std::unique_ptr<FIRFilter> tx_filter_;
@@ -312,8 +295,8 @@ private:
     void rebuildFilters();
     void updateChannelEnergy(const std::vector<float>& samples);
 
-    // IWaveform TX helper - ensures active_tx_waveform_ is configured for the given mode
-    void ensureTxWaveform(protocol::WaveformMode mode, Modulation mod, CodeRate rate);
+    // Post-process TX samples (lead-in, filter, scale, stats)
+    std::vector<float> postProcessTx(const std::vector<float>& samples);
 };
 
 } // namespace gui

@@ -138,6 +138,7 @@ if(ULTRA_BUILD_TOOLS)
         src/gui/modem/modem_mode.cpp
         src/gui/modem/modem_carrier_sense.cpp
         src/gui/modem/streaming_decoder.cpp
+        src/gui/modem/streaming_encoder.cpp
         src/gui/adaptive_mode.cpp
     )
     target_include_directories(threaded_simulator PRIVATE
@@ -154,6 +155,7 @@ if(ULTRA_BUILD_TOOLS)
         src/gui/modem/modem_mode.cpp
         src/gui/modem/modem_carrier_sense.cpp
         src/gui/modem/streaming_decoder.cpp
+        src/gui/modem/streaming_encoder.cpp
         src/gui/adaptive_mode.cpp
     )
     target_include_directories(profile_acquisition PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -196,6 +198,7 @@ if(ULTRA_BUILD_GUI)
             src/gui/modem/modem_mode.cpp
             src/gui/modem/modem_carrier_sense.cpp
         src/gui/modem/streaming_decoder.cpp
+            src/gui/modem/streaming_encoder.cpp
             src/gui/adaptive_mode.cpp
             src/gui/widgets/constellation.cpp
             src/gui/widgets/controls.cpp
