@@ -359,16 +359,12 @@ void StreamingDecoder::searchForSync() {
     SyncResult sync_result;
     bool found = false;
 
-    // When connected, try light sync detection first (training only, no chirp)
-    // This matches the TX side which uses generateDataPreamble() when connected
-    // If light sync fails, fall back to full chirp sync (handles first frame or resync)
-    //
-    // IMPORTANT: Light sync can produce false positives from channel effects (corr ~0.3-0.4)
-    // Real training symbols have autocorrelation ~0.8+ on decent channels.
-    // On fading channels, low correlation (0.5-0.8) often indicates timing error
-    // which causes complete frame failure. Use 0.8 threshold to force fallback
-    // to chirp sync for marginal cases.
-    constexpr float LIGHT_SYNC_CONFIDENCE = 0.8f;
+    // When connected, use light sync only (LTS training symbols, no chirp).
+    // TX sends LTS-only preamble when connected — chirp fallback can NEVER work
+    // because there is no chirp in the signal. Reject only clear false positives
+    // (corr < 0.5) and let LDPC handle marginal timing. On moderate fading,
+    // real LTS correlation is 0.6-0.9; rejecting at 0.8 loses valid frames.
+    constexpr float LIGHT_SYNC_MIN_CONFIDENCE = 0.50f;
 
     if (connected_ && waveform_->supportsDataPreamble()) {
         float known_cfo = last_cfo_.load();
@@ -376,26 +372,18 @@ void StreamingDecoder::searchForSync() {
             SampleSpan(search_buffer.data(), search_buffer.size()),
             sync_result, known_cfo, CORR_DETECT_THRESHOLD);
 
-        // Check confidence - low correlation likely means false positive in a chirp signal
-        if (found && sync_result.correlation < LIGHT_SYNC_CONFIDENCE) {
-            LOG_MODEM(INFO, "[%s] DATA sync low confidence (corr=%.2f < %.2f), falling back to chirp",
-                      log_prefix_.c_str(), sync_result.correlation, LIGHT_SYNC_CONFIDENCE);
-            found = false;  // Reject and try chirp sync instead
+        // Reject clear false positives (noise floor is ~0.2-0.4)
+        if (found && sync_result.correlation < LIGHT_SYNC_MIN_CONFIDENCE) {
+            LOG_MODEM(INFO, "[%s] DATA sync rejected (corr=%.2f < %.2f)",
+                      log_prefix_.c_str(), sync_result.correlation, LIGHT_SYNC_MIN_CONFIDENCE);
+            found = false;
         }
 
         if (found) {
             LOG_MODEM(INFO, "[%s] DATA sync detected (training only, known CFO=%.1f Hz, corr=%.2f)",
                       log_prefix_.c_str(), known_cfo, sync_result.correlation);
-        } else if (search_buffer.size() >= chirp_min_search) {
-            // Light sync failed — only try chirp fallback if buffer is large enough
-            found = waveform_->detectSync(
-                SampleSpan(search_buffer.data(), search_buffer.size()),
-                sync_result, CORR_DETECT_THRESHOLD);
-            if (found) {
-                LOG_MODEM(INFO, "[%s] Fallback to CHIRP sync (CFO=%.1f Hz)",
-                          log_prefix_.c_str(), sync_result.cfo_hz);
-            }
         }
+        // No chirp fallback — TX sends LTS only when connected, chirp won't be found
     } else {
         // Use full sync detection with chirp
         found = waveform_->detectSync(
