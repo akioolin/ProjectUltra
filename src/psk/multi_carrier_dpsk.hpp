@@ -402,8 +402,8 @@ public:
     float getTemporalFadingIndex() const { return temporal_fading_index_; }
 
     // Check if channel appears to be fading based on combined fading index
-    // threshold: fading index above this is considered "fading" (default 0.75)
-    bool isFading(float threshold = 0.75f) const {
+    // threshold: fading index above this is considered "fading" (default 0.65)
+    bool isFading(float threshold = 0.65f) const {
         return getFadingIndex() > threshold;
     }
 

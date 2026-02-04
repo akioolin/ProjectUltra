@@ -68,7 +68,7 @@ static void guiLog(const char* fmt, ...) {
 // Calibrated: AWGN ~0.04, Good ~0.62, Moderate ~0.90, Poor ~0.82
 static const char* fadingToQuality(float fading) {
     if (fading < 0.15f) return "AWGN";
-    if (fading < 0.75f) return "Good";
+    if (fading < 0.65f) return "Good";
     if (fading < 1.10f) return "Moderate";
     return "Poor";
 }
@@ -78,7 +78,7 @@ static const char* fadingToQualityWithColor(float fading, ImVec4& color) {
     if (fading < 0.15f) {
         color = ImVec4(0.0f, 1.0f, 0.5f, 1.0f);  // Cyan
         return "AWGN";
-    } else if (fading < 0.75f) {
+    } else if (fading < 0.65f) {
         color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);  // Green
         return "Good";
     } else if (fading < 1.10f) {

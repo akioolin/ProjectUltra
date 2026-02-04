@@ -154,12 +154,12 @@ public:
     virtual float estimatedCFO() const = 0;
 
     // Fading index from per-carrier magnitude variance + temporal variation
-    // Combined freq_cv + temporal_cv; > 0.75 indicates significant fading
+    // Combined freq_cv + temporal_cv; > 0.65 indicates significant fading
     // Returns 0 for single-carrier modes or modes without fading detection
     virtual float getFadingIndex() const { return 0.0f; }
 
     // Check if channel appears to be fading
-    virtual bool isFading() const { return getFadingIndex() > 0.75f; }
+    virtual bool isFading() const { return getFadingIndex() > 0.65f; }
 
     // Get constellation symbols for GUI display
     virtual std::vector<std::complex<float>> getConstellationSymbols() const = 0;

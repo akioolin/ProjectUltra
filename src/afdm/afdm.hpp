@@ -203,8 +203,8 @@ public:
     // Fading index (coefficient of variation of channel magnitudes)
     float fadingIndex() const { return fading_index_; }
 
-    // Is channel significantly fading? (fading_index > 0.75)
-    bool isFading() const { return fading_index_ > 0.75f; }
+    // Is channel significantly fading? (fading_index > 0.65)
+    bool isFading() const { return fading_index_ > 0.65f; }
 
     // Get channel estimate in DAFT domain
     const std::vector<Complex>& channelEstimate() const { return channel_estimate_; }

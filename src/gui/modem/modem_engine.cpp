@@ -528,7 +528,7 @@ float ModemEngine::getFadingIndex() const {
 }
 
 bool ModemEngine::isFading() const {
-    return getFadingIndex() > 0.75f;
+    return getFadingIndex() > 0.65f;
 }
 
 ChannelQuality ModemEngine::getChannelQuality() const {

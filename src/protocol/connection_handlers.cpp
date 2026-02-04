@@ -12,7 +12,7 @@ namespace protocol {
 // Thresholds match app.cpp fadingToQuality() (2026-02-03)
 static const char* fadingLabel(float fading) {
     if (fading < 0.15f) return "AWGN";
-    if (fading < 0.75f) return "Good";
+    if (fading < 0.65f) return "Good";
     if (fading < 1.10f) return "Moderate";
     return "Poor";
 }

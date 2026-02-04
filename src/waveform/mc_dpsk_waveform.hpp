@@ -105,7 +105,7 @@ public:
     // Based on per-carrier signal magnitude variance
     float getFadingIndex() const override;
 
-    // Check if channel appears to be fading (uses threshold 0.75)
+    // Check if channel appears to be fading (uses threshold 0.65)
     bool isFading() const override;
 
 private:
