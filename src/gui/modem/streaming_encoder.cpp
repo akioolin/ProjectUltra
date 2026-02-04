@@ -372,7 +372,13 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
                 uint16_t hcrc = v2::ControlFrame::calculateCRC(tx_data.data(), 15);
                 tx_data[15] = (hcrc >> 8) & 0xFF;
                 tx_data[16] = hcrc & 0xFF;
-                // Re-encode with corrected header
+                // Recalculate frame CRC (covers patched bytes 12, 15-16)
+                if (tx_data.size() >= v2::DataFrame::HEADER_SIZE + v2::DataFrame::CRC_SIZE) {
+                    uint16_t fcrc = v2::ControlFrame::calculateCRC(tx_data.data(), tx_data.size() - 2);
+                    tx_data[tx_data.size() - 2] = (fcrc >> 8) & 0xFF;
+                    tx_data[tx_data.size() - 1] = fcrc & 0xFF;
+                }
+                // Re-encode with corrected header and frame CRC
                 cws = v2::encodeFrameWithLDPC(tx_data, code_rate_);
             }
         }

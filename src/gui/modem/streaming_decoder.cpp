@@ -629,10 +629,25 @@ void StreamingDecoder::decodeCurrentFrame() {
     // Chirp-based CFO can be wrong on fading channels. The demodulator uses
     // pilot tracking to refine it. Update our cached CFO so subsequent frames
     // don't re-inject the wrong chirp CFO.
+    // CRITICAL: On fading channels, pilot tracking can give wildly wrong CFO
+    // estimates (e.g. 31 Hz when real CFO is 0). Clamp the drift to prevent
+    // the feedback loop from oscillating.
     float corrected_cfo = waveform_->estimatedCFO();
-    if (std::abs(corrected_cfo - last_cfo_.load()) > 0.1f) {
+    float current_cfo = last_cfo_.load();
+
+    if (connected_) {
+        constexpr float MAX_PILOT_CFO_DRIFT_HZ = 2.0f;
+        float drift = corrected_cfo - current_cfo;
+        if (std::abs(drift) > MAX_PILOT_CFO_DRIFT_HZ) {
+            LOG_MODEM(WARN, "[%s] Pilot CFO drift clamped: %.2f → %.2f Hz (drift=%.2f, max=%.1f)",
+                      log_prefix_.c_str(), current_cfo, corrected_cfo, drift, MAX_PILOT_CFO_DRIFT_HZ);
+            corrected_cfo = current_cfo + std::copysign(MAX_PILOT_CFO_DRIFT_HZ, drift);
+        }
+    }
+
+    if (std::abs(corrected_cfo - current_cfo) > 0.1f) {
         LOG_MODEM(INFO, "[%s] CFO updated: %.2f → %.2f Hz (pilot-corrected)",
-                  log_prefix_.c_str(), last_cfo_.load(), corrected_cfo);
+                  log_prefix_.c_str(), current_cfo, corrected_cfo);
     }
     last_cfo_.store(corrected_cfo);
     sync_cfo_ = corrected_cfo;
