@@ -77,6 +77,10 @@ public:
     void setAckTimeout(uint32_t timeout_ms) { config_.ack_timeout_ms = timeout_ms; }
     uint32_t getAckTimeout() const { return config_.ack_timeout_ms; }
 
+    // Set max retries before giving up on a frame
+    void setMaxRetries(int retries) { config_.max_retries = std::max(1, retries); }
+    int getMaxRetries() const { return config_.max_retries; }
+
 private:
     // TX state per frame in window
     struct TXSlot {

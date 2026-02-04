@@ -578,8 +578,9 @@ void Connection::enterConnected() {
         LOG_MODEM(INFO, "Connection: ARQ window=1, timeout=18s (MC-DPSK)");
     } else {
         arq_.setWindowSize(4);
-        arq_.setAckTimeout(5000);
-        LOG_MODEM(INFO, "Connection: ARQ window=4, timeout=5s (OFDM)");
+        arq_.setAckTimeout(5000);   // RTT ~3s + window pipeline ~2.8s, needs ≥5s
+        arq_.setMaxRetries(15);     // More attempts compensate for ACK loss on fading
+        LOG_MODEM(INFO, "Connection: ARQ window=4, timeout=5s, max_retries=15 (OFDM)");
     }
 
     LOG_MODEM(INFO, "Connection: Now CONNECTED to %s (mode=%s)",
