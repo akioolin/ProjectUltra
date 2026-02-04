@@ -15,8 +15,45 @@ using namespace rx_constants;
 // RX/DECODE THREAD
 // ============================================================================
 
+void ModemEngine::setSynchronousMode(bool enabled) {
+    if (synchronous_mode_ == enabled) return;
+
+    synchronous_mode_ = enabled;
+
+    if (enabled) {
+        // Stop decode thread — caller will drive processRxBuffer() directly
+        stopRxDecodeThread();
+        LOG_MODEM(INFO, "[%s] Synchronous RX mode enabled (no decode thread)", log_prefix_.c_str());
+    } else {
+        // Restart decode thread for async operation
+        startRxDecodeThread();
+        LOG_MODEM(INFO, "[%s] Asynchronous RX mode enabled (decode thread)", log_prefix_.c_str());
+    }
+}
+
+void ModemEngine::processRxBuffer() {
+    if (!streaming_decoder_) return;
+
+    // Same as one iteration of rxDecodeLoop — process + deliver frames
+    streaming_decoder_->processBuffer();
+
+    while (streaming_decoder_->hasFrame()) {
+        auto result = streaming_decoder_->getFrame();
+
+        if (result.success) {
+            updateStats([&](LoopbackStats& s) {
+                s.frames_received++;
+                s.snr_db = result.snr_db;
+                s.synced = true;
+            });
+        } else if (result.codewords_failed > 0) {
+            updateStats([](LoopbackStats& s) { s.frames_failed++; });
+        }
+    }
+}
+
 void ModemEngine::startRxDecodeThread() {
-    if (rx_decode_running_) return;
+    if (rx_decode_running_ || synchronous_mode_) return;
 
     rx_decode_running_ = true;
     rx_decode_thread_ = std::thread(&ModemEngine::rxDecodeLoop, this);
@@ -37,6 +74,14 @@ void ModemEngine::stopRxDecodeThread() {
     if (rx_decode_thread_.joinable()) {
         rx_decode_thread_.join();
     }
+
+    // Clear shutdown flag so decoder can be reused:
+    // - In synchronous mode via processRxBuffer()
+    // - Or via a new decode thread (startRxDecodeThread)
+    if (streaming_decoder_) {
+        streaming_decoder_->clearShutdown();
+    }
+
     LOG_MODEM(INFO, "[%s] RX decode thread stopped", log_prefix_.c_str());
 }
 

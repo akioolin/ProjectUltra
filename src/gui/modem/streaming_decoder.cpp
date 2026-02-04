@@ -442,16 +442,16 @@ void StreamingDecoder::searchForSync() {
         LOG_MODEM(INFO, "[%s] SYNC at pos=%zu, CFO=%.1f Hz, SNR=%.1f dB",
                   log_prefix_.c_str(), sync_position_, sync_cfo_, sync_snr_);
 
-        // Skip past the entire frame for next search
-        // Use frame size (from sync_position_) to avoid re-detecting the same frame
-        size_t frame_size = static_cast<size_t>(waveform_->getMinSamplesForFrame());
-        size_t skip_amount = std::max(min_search, frame_size + 4800);  // frame + 100ms margin
-        size_t skip_to = (sync_position_ + skip_amount) % MAX_BUFFER_SAMPLES;
-        // Don't jump ahead of actual data - cap at write_pos_
-        if (total_fed_ < MAX_BUFFER_SAMPLES && skip_to > write_pos_) {
-            skip_to = write_pos_;
-        }
-        correlation_pos_ = skip_to;
+        // NOTE: Do NOT advance correlation_pos_ past the frame here.
+        // It was already advanced by CORRELATION_STEP at line 323 during search.
+        // The post-decode skip at decodeCurrentFrame() line 718 handles advancing
+        // past the decoded frame when we return to SEARCHING.
+        //
+        // Previously, this code jumped correlation_pos_ past the entire frame,
+        // which could place it AHEAD of write_pos_ in circular buffer space
+        // (especially after buffer wraps). This caused feedAudio()'s overflow
+        // check to compute unsearched ≈ buffer_size, triggering spurious
+        // buffer overflows and data loss during async decode.
     }
 }
 
@@ -782,7 +782,18 @@ void StreamingDecoder::setMCDPSKCarriers(int n) {
 void StreamingDecoder::setOFDMConfig(const ModemConfig& config) {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
 
-    // Create appropriate OFDM waveform based on current mode
+    // Store carrier counts regardless of current mode (used when switching to OFDM later)
+    ofdm_carriers_ = config.num_carriers;
+    ofdm_data_carriers_ = config.getDataCarriers();
+
+    // Only recreate waveform if currently in an OFDM mode.
+    // When in MC-DPSK mode (e.g., disconnected waiting for PINGs), do NOT replace
+    // the MC-DPSK waveform — that would break chirp-based sync detection.
+    if (mode_ == protocol::WaveformMode::MC_DPSK) {
+        LOG_MODEM(INFO, "StreamingDecoder: OFDM config stored (mode=MC-DPSK, not replacing waveform)");
+        return;
+    }
+
     if (mode_ == protocol::WaveformMode::OFDM_CHIRP) {
         waveform_ = std::make_unique<OFDMChirpWaveform>(config);
         LOG_MODEM(INFO, "StreamingDecoder: OFDM_CHIRP config set (FFT=%d, carriers=%d)",
@@ -792,11 +803,6 @@ void StreamingDecoder::setOFDMConfig(const ModemConfig& config) {
         LOG_MODEM(INFO, "StreamingDecoder: OFDM_COX config set (FFT=%d, carriers=%d)",
                   config.fft_size, config.num_carriers);
     }
-
-    // Store carrier count for interleaver updates
-    // Use getDataCarriers() to account for pilot overhead
-    ofdm_carriers_ = config.num_carriers;
-    ofdm_data_carriers_ = config.getDataCarriers();
 
     // Update interleaver for new carrier count (using current modulation)
     size_t bps = ofdm_data_carriers_ * getBitsPerSymbol(current_modulation_);

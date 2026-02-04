@@ -755,16 +755,19 @@ void App::initVirtualStation() {
 // Simplified Simulator (single thread model like cli_simulator)
 // ========================================
 
-std::vector<float> App::applyChannelEffects(const std::vector<float>& samples) {
+std::vector<float> App::applyChannelEffects(const std::vector<float>& samples, int direction) {
     if (samples.empty()) return samples;
 
     std::vector<float> result = samples;
 
+    // Select channel for this direction (independent fading per direction, like cli_simulator)
+    auto& channel = (direction == 0) ? sim_channel_a_to_b_ : sim_channel_b_to_a_;
+
     // Apply fading/multipath if not AWGN
     // Use persistent channel so fading state evolves continuously across frames
     if (simulation_channel_type_ > 0) {
-        // Recreate channel only when type changes (not per-frame)
-        if (!sim_channel_ || sim_channel_active_type_ != simulation_channel_type_) {
+        // Recreate channels only when type changes (not per-frame)
+        if (!channel || sim_channel_active_type_ != simulation_channel_type_) {
             sim::WattersonChannel::Config cfg;
             switch (simulation_channel_type_) {
                 case 1:  // Good
@@ -782,15 +785,18 @@ std::vector<float> App::applyChannelEffects(const std::vector<float>& samples) {
             }
             // Disable noise in WattersonChannel - we'll add it with fixed reference below
             cfg.noise_enabled = false;
-            sim_channel_ = std::make_unique<sim::WattersonChannel>(cfg, sim_rng_());
+            // Use different seeds per direction (like cli_simulator: 42, 43)
+            sim_channel_a_to_b_ = std::make_unique<sim::WattersonChannel>(cfg, 42);
+            sim_channel_b_to_a_ = std::make_unique<sim::WattersonChannel>(cfg, 43);
             sim_channel_active_type_ = simulation_channel_type_;
         }
 
         SampleSpan input(result.data(), result.size());
-        result = sim_channel_->process(input);
-    } else if (sim_channel_) {
-        // Switched to AWGN — release fading channel
-        sim_channel_.reset();
+        result = channel->process(input);
+    } else if (sim_channel_a_to_b_ || sim_channel_b_to_a_) {
+        // Switched to AWGN — release fading channels
+        sim_channel_a_to_b_.reset();
+        sim_channel_b_to_a_.reset();
         sim_channel_active_type_ = -1;
     }
 
@@ -814,6 +820,13 @@ void App::startSimulator() {
     if (sim_thread_running_) return;
 
     guiLog("SIM: Starting simulator");
+
+    // Switch both modems to synchronous mode — sim loop drives decode directly,
+    // no separate decode thread. This prevents buffer overflows during LDPC decode
+    // (same model as cli_simulator: feed + process in lockstep).
+    modem_.setSynchronousMode(true);
+    virtual_modem_->setSynchronousMode(true);
+
     sim_thread_running_ = true;
     sim_thread_ = std::thread(&App::simulationLoop, this);
 }
@@ -825,6 +838,10 @@ void App::stopSimulator() {
     sim_thread_running_ = false;
 
     if (sim_thread_.joinable()) sim_thread_.join();
+
+    // Restore async decode mode for real audio operation
+    modem_.setSynchronousMode(false);
+    virtual_modem_->setSynchronousMode(false);
 
     // Clear buffers
     {
@@ -854,15 +871,17 @@ void App::simulationLoop() {
     std::vector<float> virtual_channel_buffer; // Virtual TX -> channel -> our RX
 
     while (sim_thread_running_) {
-        bool had_activity = false;
+        bool a_to_b_active = false;  // Track activity per direction
+        bool b_to_a_active = false;
 
         // === Our TX -> Channel buffer (queue all new samples) ===
+        // Direction 0: our station -> virtual station (independent fading channel)
         {
             std::lock_guard<std::mutex> lock(our_tx_pending_mutex_);
             if (!our_tx_pending_.empty()) {
                 guiLog("SIM: Queued %zu TX samples for streaming", our_tx_pending_.size());
                 // Apply channel effects and queue for gradual streaming
-                auto noisy = applyChannelEffects(our_tx_pending_);
+                auto noisy = applyChannelEffects(our_tx_pending_, 0);
                 our_channel_buffer.insert(our_channel_buffer.end(), noisy.begin(), noisy.end());
                 // Show on waterfall
                 for (size_t i = 0; i < our_tx_pending_.size(); i += CHUNK_SIZE) {
@@ -879,19 +898,21 @@ void App::simulationLoop() {
 
         // === Channel buffer -> Virtual RX (stream gradually) ===
         if (!our_channel_buffer.empty()) {
-            had_activity = true;
+            a_to_b_active = true;
             size_t to_feed = std::min(SAMPLES_PER_TICK, our_channel_buffer.size());
             virtual_modem_->feedAudio(our_channel_buffer.data(), to_feed);
+            virtual_modem_->processRxBuffer();
             our_channel_buffer.erase(our_channel_buffer.begin(), our_channel_buffer.begin() + to_feed);
         }
 
         // === Virtual TX -> Channel buffer (queue all new samples) ===
+        // Direction 1: virtual station -> our station (independent fading channel)
         {
             std::lock_guard<std::mutex> lock(virtual_tx_pending_mutex_);
             if (!virtual_tx_pending_.empty()) {
                 guiLog("SIM: Queued %zu RX samples for streaming", virtual_tx_pending_.size());
                 // Apply channel effects and queue for gradual streaming
-                auto noisy = applyChannelEffects(virtual_tx_pending_);
+                auto noisy = applyChannelEffects(virtual_tx_pending_, 1);
                 virtual_channel_buffer.insert(virtual_channel_buffer.end(), noisy.begin(), noisy.end());
                 // Record if enabled
                 if (recording_enabled_) {
@@ -903,16 +924,11 @@ void App::simulationLoop() {
 
         // === Channel buffer -> Our RX (stream gradually) ===
         if (!virtual_channel_buffer.empty()) {
-            had_activity = true;
+            b_to_a_active = true;
             size_t to_feed = std::min(SAMPLES_PER_TICK, virtual_channel_buffer.size());
             modem_.feedAudio(virtual_channel_buffer.data(), to_feed);
+            modem_.processRxBuffer();
             virtual_channel_buffer.erase(virtual_channel_buffer.begin(), virtual_channel_buffer.begin() + to_feed);
-
-            // Show on waterfall
-            if (!tx_in_progress_) {
-                // Only show what we just fed
-                // (waterfall expects continuous stream, not bursts)
-            }
         }
 
         // Check if TX finished
@@ -929,19 +945,28 @@ void App::simulationLoop() {
             last_protocol_tick = now;
         }
 
-        // Generate continuous noise when idle (simulates real radio - always receiving audio)
-        // CRITICAL: Process silence through sim_channel_ so fading state evolves
-        // continuously. Without this, the channel freezes during idle periods and
+        // Evolve idle channels and feed noise to modems without active signal.
+        // CRITICAL: Each direction's fading channel must evolve continuously by
+        // processing silence, even when only the other direction has traffic.
+        // Without this, the channel freezes during idle periods and
         // retransmissions hit the same deep fade repeatedly (frozen channel bug).
-        if (!had_activity && !tx_in_progress_) {
+        {
             constexpr size_t IDLE_SAMPLES_PER_TICK = 480;  // 10ms at 48kHz
 
-            std::vector<float> silence(IDLE_SAMPLES_PER_TICK, 0.0f);
-            auto noise = applyChannelEffects(silence);
-
-            // Feed channel-filtered noise to modems
-            modem_.feedAudio(noise);
-            virtual_modem_->feedAudio(noise);
+            if (!a_to_b_active) {
+                // A→B channel idle: evolve fading and feed noise to virtual modem
+                std::vector<float> silence(IDLE_SAMPLES_PER_TICK, 0.0f);
+                auto noise = applyChannelEffects(silence, 0);
+                virtual_modem_->feedAudio(noise);
+                virtual_modem_->processRxBuffer();
+            }
+            if (!b_to_a_active) {
+                // B→A channel idle: evolve fading and feed noise to our modem
+                std::vector<float> silence(IDLE_SAMPLES_PER_TICK, 0.0f);
+                auto noise = applyChannelEffects(silence, 1);
+                modem_.feedAudio(noise);
+                modem_.processRxBuffer();
+            }
         }
 
         // Sleep 10ms to match real-time audio rate (480 samples / 48kHz = 10ms)

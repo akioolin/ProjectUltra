@@ -77,6 +77,15 @@ public:
     void feedAudio(const float* samples, size_t count);
     void feedAudio(const std::vector<float>& samples);
 
+    // Synchronous mode: caller drives decode instead of internal thread.
+    // Use for simulation where feed+decode must be lockstep (no overflows).
+    void setSynchronousMode(bool enabled);
+    bool isSynchronousMode() const { return synchronous_mode_; }
+
+    // Process RX buffer synchronously (call after feedAudio in sync mode).
+    // Does one round of search/decode, same as the internal decode thread would.
+    void processRxBuffer();
+
     // Inject test signal from file (for debugging/testing)
     size_t injectSignalFromFile(const std::string& filepath);
 
@@ -241,7 +250,8 @@ private:
     // RX ARCHITECTURE
     // ========================================================================
 
-    // RX/Decode thread
+    // RX/Decode thread (disabled in synchronous mode)
+    bool synchronous_mode_ = false;
     std::thread rx_decode_thread_;
     std::atomic<bool> rx_decode_running_{false};
     std::condition_variable rx_decode_cv_;

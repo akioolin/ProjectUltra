@@ -218,6 +218,10 @@ public:
     // Signal shutdown - wakes processBuffer() to return
     void stop();
 
+    // Clear shutdown flag (call after stop() + join() to reuse decoder)
+    // Needed when switching from async decode thread to synchronous mode
+    void clearShutdown() { shutdown_.store(false); }
+
     // Check if decoder is running (not stopped)
     bool isRunning() const { return !shutdown_.load(); }
 

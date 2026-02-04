@@ -127,9 +127,10 @@ private:
     std::mutex virtual_tx_pending_mutex_;
     std::vector<float> virtual_tx_pending_;
 
-    // Channel simulation RNG and persistent fading channel
+    // Channel simulation RNG and persistent fading channels (one per direction)
     std::mt19937 sim_rng_{42};
-    std::unique_ptr<sim::WattersonChannel> sim_channel_;
+    std::unique_ptr<sim::WattersonChannel> sim_channel_a_to_b_;  // Our TX -> virtual RX
+    std::unique_ptr<sim::WattersonChannel> sim_channel_b_to_a_;  // Virtual TX -> our RX
     int sim_channel_active_type_ = -1;  // Track which channel type is active
 
     // Single simulation thread handles everything
@@ -146,8 +147,8 @@ private:
     // Main simulation loop (runs in sim_thread_)
     void simulationLoop();
 
-    // Channel simulation
-    std::vector<float> applyChannelEffects(const std::vector<float>& samples);
+    // Channel simulation (direction: 0 = our TX→virtual RX, 1 = virtual TX→our RX)
+    std::vector<float> applyChannelEffects(const std::vector<float>& samples, int direction);
 
     // ========================================
     // UI Rendering

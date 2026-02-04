@@ -205,13 +205,15 @@ void Connection::disconnect() {
         LOG_MODEM(INFO, "Connection: Disconnecting from %s", remote_call_.c_str());
 
         auto disc = v2::ConnectFrame::makeDisconnect(local_call_, remote_call_);
-        Bytes disc_data = disc.serialize();
+        disconnect_frame_ = disc.serialize();
 
-        LOG_MODEM(INFO, "Connection: Sending DISCONNECT (%zu bytes)", disc_data.size());
-        transmitFrame(disc_data);
+        LOG_MODEM(INFO, "Connection: Sending DISCONNECT (%zu bytes)", disconnect_frame_.size());
+        transmitFrame(disconnect_frame_);
 
         state_ = ConnectionState::DISCONNECTING;
         timeout_remaining_ms_ = config_.disconnect_timeout_ms;
+        disconnect_retry_count_ = 0;
+        disconnect_retransmit_ms_ = DISCONNECT_RETRANSMIT_INTERVAL_MS;
         stats_.disconnects++;
     }
 }
@@ -533,15 +535,52 @@ void Connection::tick(uint32_t elapsed_ms) {
                 }
             }
 
+            // Disconnect grace period (responder side): stay connected and
+            // proactively re-send ACK until initiator confirms (goes silent)
+            if (disconnect_pending_) {
+                if (elapsed_ms >= disconnect_pending_ms_) {
+                    disconnect_pending_ = false;
+                    disconnect_ack_frame_.clear();
+                    enterDisconnected("Remote disconnected");
+                    break;
+                }
+                disconnect_pending_ms_ -= elapsed_ms;
+
+                // Proactively re-send ACK periodically (fading may have lost it)
+                if (!disconnect_ack_frame_.empty()) {
+                    if (elapsed_ms >= disconnect_ack_retransmit_ms_) {
+                        disconnect_ack_retransmit_ms_ = DISCONNECT_ACK_RETRANSMIT_MS;
+                        LOG_MODEM(INFO, "Connection: Re-sending disconnect ACK (proactive, %dms remaining)",
+                                  disconnect_pending_ms_);
+                        transmitFrame(disconnect_ack_frame_);
+                    } else {
+                        disconnect_ack_retransmit_ms_ -= elapsed_ms;
+                    }
+                }
+            }
+
             arq_.tick(elapsed_ms);
             break;
 
         case ConnectionState::DISCONNECTING:
             if (elapsed_ms >= timeout_remaining_ms_) {
-                LOG_MODEM(DEBUG, "Connection: Disconnect timeout, forcing disconnect");
+                LOG_MODEM(INFO, "Connection: Disconnect timeout, forcing disconnect");
                 enterDisconnected("Disconnect timeout");
             } else {
                 timeout_remaining_ms_ -= elapsed_ms;
+
+                // Retransmit DISCONNECT periodically (fading can lose the frame)
+                if (elapsed_ms >= disconnect_retransmit_ms_) {
+                    disconnect_retransmit_ms_ = DISCONNECT_RETRANSMIT_INTERVAL_MS;
+                    if (disconnect_retry_count_ < DISCONNECT_MAX_RETRIES && !disconnect_frame_.empty()) {
+                        disconnect_retry_count_++;
+                        LOG_MODEM(INFO, "Connection: Retransmitting DISCONNECT (%d/%d)",
+                                  disconnect_retry_count_, DISCONNECT_MAX_RETRIES);
+                        transmitFrame(disconnect_frame_);
+                    }
+                } else {
+                    disconnect_retransmit_ms_ -= elapsed_ms;
+                }
             }
             break;
 
@@ -601,6 +640,9 @@ void Connection::enterDisconnected(const std::string& reason) {
     remote_call_.clear();
     pending_remote_call_.clear();
     mode_change_pending_ = false;
+    disconnect_frame_.clear();
+    disconnect_pending_ = false;
+    disconnect_ack_frame_.clear();
     arq_.reset();
     file_transfer_.cancel();
 

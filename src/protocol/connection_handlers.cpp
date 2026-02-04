@@ -258,10 +258,24 @@ void Connection::handleDisconnect(const v2::ControlFrame& frame, const std::stri
     LOG_MODEM(INFO, "Connection: Disconnect from %s", remote_call_.c_str());
 
     auto ack = v2::ControlFrame::makeAck(local_call_, remote_call_, 0);
-    transmitFrame(ack.serialize());
+    disconnect_ack_frame_ = ack.serialize();
+    transmitFrame(disconnect_ack_frame_);
 
+    if (disconnect_pending_) {
+        // Already in grace period from a previous DISCONNECT — re-sent ACK, reset timer
+        LOG_MODEM(INFO, "Connection: Re-sent disconnect ACK (retransmit detected)");
+        disconnect_pending_ms_ = DISCONNECT_GRACE_MS;
+        disconnect_ack_retransmit_ms_ = DISCONNECT_ACK_RETRANSMIT_MS;
+        return;
+    }
+
+    // Enter grace period: stay connected so we can re-send ACK if initiator retransmits
     stats_.disconnects++;
-    enterDisconnected("Remote disconnected");
+    disconnect_pending_ = true;
+    disconnect_pending_ms_ = DISCONNECT_GRACE_MS;
+    disconnect_ack_retransmit_ms_ = DISCONNECT_ACK_RETRANSMIT_MS;
+    LOG_MODEM(INFO, "Connection: Disconnect ACK sent, grace period %dms (re-send ACK every %dms)",
+              DISCONNECT_GRACE_MS, DISCONNECT_ACK_RETRANSMIT_MS);
 }
 
 void Connection::handleDisconnectFrame(const v2::ConnectFrame& frame, const std::string& src_call) {
@@ -273,10 +287,24 @@ void Connection::handleDisconnectFrame(const v2::ConnectFrame& frame, const std:
 
     // Send ACK for the disconnect
     auto ack = v2::ControlFrame::makeAck(local_call_, remote_call_, frame.seq);
-    transmitFrame(ack.serialize());
+    disconnect_ack_frame_ = ack.serialize();
+    transmitFrame(disconnect_ack_frame_);
 
+    if (disconnect_pending_) {
+        // Already in grace period — re-sent ACK, reset timer
+        LOG_MODEM(INFO, "Connection: Re-sent disconnect ACK (retransmit detected)");
+        disconnect_pending_ms_ = DISCONNECT_GRACE_MS;
+        disconnect_ack_retransmit_ms_ = DISCONNECT_ACK_RETRANSMIT_MS;
+        return;
+    }
+
+    // Enter grace period: stay connected so we can re-send ACK if initiator retransmits
     stats_.disconnects++;
-    enterDisconnected("Remote disconnected");
+    disconnect_pending_ = true;
+    disconnect_pending_ms_ = DISCONNECT_GRACE_MS;
+    disconnect_ack_retransmit_ms_ = DISCONNECT_ACK_RETRANSMIT_MS;
+    LOG_MODEM(INFO, "Connection: Disconnect ACK sent, grace period %dms (re-send ACK every %dms)",
+              DISCONNECT_GRACE_MS, DISCONNECT_ACK_RETRANSMIT_MS);
 }
 
 // =============================================================================

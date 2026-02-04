@@ -258,7 +258,8 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
                   connected_ ? "negotiated" : "disconnect ACK");
     }
 
-    // Clear one-shot flag AFTER using it for decisions above
+    // Save one-shot flag before clearing (needed for light preamble decision below)
+    bool is_disconnect_ack = use_connected_waveform_once_;
     if (use_connected_waveform_once_) {
         use_connected_waveform_once_ = false;
     }
@@ -269,7 +270,10 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     streaming_encoder_->setMode(tx_waveform_mode);
     streaming_encoder_->setDataMode(tx_modulation, tx_code_rate);
 
-    bool use_light = connected_ && handshake_complete_ && is_ofdm;
+    // Use light preamble (LTS only) when the remote station expects it:
+    // - Normal connected mode: connected_ && handshake_complete_
+    // - Disconnect ACK: remote is still connected and looking for LTS sync, not chirp
+    bool use_light = ((connected_ && handshake_complete_) || is_disconnect_ack) && is_ofdm;
     auto samples = use_light ? streaming_encoder_->encodeFrameLight(data)
                              : streaming_encoder_->encodeFrame(data);
 

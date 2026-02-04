@@ -254,6 +254,23 @@ private:
     int connect_retry_count_ = 0;
     uint32_t connected_time_ms_ = 0;
 
+    // Disconnect retransmission (initiator side)
+    Bytes disconnect_frame_;                // Cached DISCONNECT frame for retransmission
+    int disconnect_retry_count_ = 0;
+    uint32_t disconnect_retransmit_ms_ = 0; // Time until next retransmit
+    static constexpr uint32_t DISCONNECT_RETRANSMIT_INTERVAL_MS = 5000;
+    static constexpr int DISCONNECT_MAX_RETRIES = 3;
+
+    // Disconnect grace period (responder side)
+    // After receiving DISCONNECT, stay connected briefly and re-send ACK
+    // periodically to ensure the initiator gets it (fading can lose frames)
+    bool disconnect_pending_ = false;
+    uint32_t disconnect_pending_ms_ = 0;
+    uint32_t disconnect_ack_retransmit_ms_ = 0; // Time until next ACK re-send
+    Bytes disconnect_ack_frame_;            // Cached ACK for re-sending
+    static constexpr uint32_t DISCONNECT_GRACE_MS = 15000;           // 15s total grace period
+    static constexpr uint32_t DISCONNECT_ACK_RETRANSMIT_MS = 3000;   // Re-send ACK every 3s
+
     // Adaptive calling waveform (DPSK first, fallback to MFSK)
     // Start with DPSK medium (DQPSK 62b R1/4), switch to MFSK after 5 attempts
     WaveformMode connect_waveform_ = WaveformMode::MC_DPSK;
