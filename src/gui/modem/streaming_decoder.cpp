@@ -897,7 +897,38 @@ bool StreamingDecoder::isSynced() const {
 std::vector<std::complex<float>> StreamingDecoder::getConstellationSymbols() const {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
     if (waveform_) {
-        return waveform_->getConstellationSymbols();
+        auto symbols = waveform_->getConstellationSymbols();
+        static int log_count = 0;
+        if (log_count < 10 && !symbols.empty()) {
+            // Phase histogram to diagnose constellation display
+            int bins[8] = {0}; // 45° bins: 0-45, 45-90, ..., 315-360
+            float mag_sum = 0, mag_min = 1e9, mag_max = 0;
+            for (const auto& s : symbols) {
+                float phase = std::atan2(s.imag(), s.real()) * 180.0f / 3.14159265f;
+                if (phase < 0) phase += 360.0f;
+                int bin = static_cast<int>(phase / 45.0f) % 8;
+                bins[bin]++;
+                float mag = std::abs(s);
+                mag_sum += mag;
+                if (mag < mag_min) mag_min = mag;
+                if (mag > mag_max) mag_max = mag;
+            }
+            float mag_avg = mag_sum / symbols.size();
+            LOG_MODEM(INFO, "getConstellationSymbols: %zu symbols (mode=%d) mag=[%.3f,%.3f,%.3f] phase_hist: %d %d %d %d %d %d %d %d",
+                      symbols.size(), static_cast<int>(mode_),
+                      mag_min, mag_avg, mag_max,
+                      bins[0], bins[1], bins[2], bins[3], bins[4], bins[5], bins[6], bins[7]);
+            // Log first 10 symbols
+            if (log_count < 2) {
+                for (size_t i = 0; i < std::min(size_t(20), symbols.size()); i++) {
+                    float ph = std::atan2(symbols[i].imag(), symbols[i].real()) * 180.0f / 3.14159265f;
+                    LOG_MODEM(INFO, "  sym[%zu]: (%.4f, %.4f) mag=%.4f phase=%.1f°",
+                              i, symbols[i].real(), symbols[i].imag(), std::abs(symbols[i]), ph);
+                }
+            }
+            log_count++;
+        }
+        return symbols;
     }
     return {};
 }

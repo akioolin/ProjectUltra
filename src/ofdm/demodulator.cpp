@@ -197,15 +197,15 @@ void OFDMDemodulator::Impl::buildInterpTable() {
 // =============================================================================
 
 void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equalized, Modulation mod) {
-    // Save symbols for constellation display
-    {
-        std::lock_guard<std::mutex> lock(constellation_mutex);
-        constellation_symbols.insert(constellation_symbols.end(), equalized.begin(), equalized.end());
-        if (constellation_symbols.size() > MAX_CONSTELLATION_SYMBOLS) {
-            constellation_symbols.erase(constellation_symbols.begin(),
-                                       constellation_symbols.begin() + (constellation_symbols.size() - MAX_CONSTELLATION_SYMBOLS));
-        }
+    // Debug: confirm function is called
+    static int entry_log = 0;
+    if (entry_log++ < 3) {
+        LOG_DEMOD(INFO, ">>> demodulateSymbol ENTRY: mod=%d, eq.size=%zu",
+                  static_cast<int>(mod), equalized.size());
     }
+
+    // Constellation symbols collected during demodulation (differential decoded for DPSK modes)
+    std::vector<Complex> constellation_update;
 
     // Phase inversion detection (disabled - raw data can have extreme bias)
     if (soft_bits.empty() && !equalized.empty()) {
@@ -265,44 +265,24 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
     // TX initializes dbpsk_prev_symbols to (1,0) in generateTrainingSymbols(), so first data
     // symbol is encoded relative to (1,0), NOT relative to the training symbol (sync_sequence).
     //
-    // With CFO and timing errors, each carrier has a different phase offset (φ) in its H estimate.
-    // The RX reference must be (1,0) × e^{-jφ} = conj(h_unit) to match TX:
-    //   TX first data: (1,0) × DQPSK_phase
-    //   RX equalized: (1,0) × DQPSK_phase × e^{-jφ}
-    //   RX reference: (1,0) × e^{-jφ} = conj(h_unit)
-    //   diff = eq × conj(ref) = DQPSK_phase  ✓  (phase errors cancel!)
+    // MMSE equalization: eq = rx × conj(H) / (|H|² + σ²) = TX × |H|² / (|H|² + σ²)
+    // This produces a REAL-valued scaling (no phase rotation when H_est ≈ H_true).
+    // So the equalized first data symbol ≈ TX × real_scale = dqpsk_phase × real_scale.
     //
-    // The lts_carrier_phases array is computed in estimateChannelFromLTS() and contains
-    // the DQPSK reference: (1,0) × e^{-j×arg(H)} = conj(H)/|H|
+    // The correct reference is (1,0) because:
+    //   TX first data: (1,0) × DQPSK_phase
+    //   RX equalized:  DQPSK_phase × real_scale  (MMSE removes channel phase)
+    //   RX reference:  (1,0)
+    //   diff = eq × conj(ref) = DQPSK_phase × real_scale  ✓
+    //
+    // NOTE: The old code used conj(H)/|H| as reference, which was derived assuming ZF
+    // equalization (eq = rx/H = TX × e^{-jφ}). With MMSE, equalization already removes
+    // the channel phase, so adding conj(H)/|H| re-introduces arg(H) into the differential,
+    // causing the constellation to show a circle instead of DQPSK clusters.
     if ((mod == Modulation::DQPSK || mod == Modulation::D8PSK) && dbpsk_prev_equalized.empty()) {
-        dbpsk_prev_equalized.resize(equalized.size());
-
-        if (!lts_carrier_phases.empty() && lts_carrier_phases.size() == equalized.size()) {
-            // Use the computed DQPSK reference (captures all phase errors)
-            for (size_t i = 0; i < equalized.size(); ++i) {
-                dbpsk_prev_equalized[i] = lts_carrier_phases[i];
-            }
-            LOG_DEMOD(DEBUG, "DQPSK: Using (1,0)×e^{-jφ} reference (first 3: %.0f° %.0f° %.0f°)",
-                      std::arg(dbpsk_prev_equalized[0]) * 180.0f / M_PI,
-                      equalized.size() > 1 ? std::arg(dbpsk_prev_equalized[1]) * 180.0f / M_PI : 0.0f,
-                      equalized.size() > 2 ? std::arg(dbpsk_prev_equalized[2]) * 180.0f / M_PI : 0.0f);
-        } else if (!sync_sequence.empty() && sync_sequence.size() >= equalized.size()) {
-            // Fallback: use (1,0) if lts_carrier_phases not available (CFO=0 case)
-            // Note: this fallback is WRONG if sync_sequence is not (1,0)
-            for (size_t i = 0; i < equalized.size(); ++i) {
-                dbpsk_prev_equalized[i] = Complex(1, 0);  // Use (1,0), NOT sync_sequence
-            }
-            LOG_DEMOD(DEBUG, "DQPSK: Fallback to (1,0) (first 3: %.0f° %.0f° %.0f°)",
-                      std::arg(dbpsk_prev_equalized[0]) * 180.0f / M_PI,
-                      equalized.size() > 1 ? std::arg(dbpsk_prev_equalized[1]) * 180.0f / M_PI : 0.0f,
-                      equalized.size() > 2 ? std::arg(dbpsk_prev_equalized[2]) * 180.0f / M_PI : 0.0f);
-        } else {
-            // Fallback to single phase offset for all carriers
-            Complex ref = lts_phase_offset;
-            dbpsk_prev_equalized.assign(equalized.size(), ref);
-            LOG_DEMOD(DEBUG, "DQPSK: Initialized reference with (%.3f,%.3f) = %.1f° (common offset)",
-                      ref.real(), ref.imag(), std::arg(ref) * 180.0f / M_PI);
-        }
+        dbpsk_prev_equalized.assign(equalized.size(), Complex(1, 0));
+        dqpsk_skip_first_symbol = true;  // First diff uses synthetic ref → skip constellation
+        LOG_DEMOD(INFO, "DQPSK: Reference initialized to (1,0) for %zu carriers", equalized.size());
     }
 
     // Two-pass D8PSK decoding: use embedded DQPSK grid to estimate common phase error
@@ -316,7 +296,8 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
                       fading_index, TWO_PASS_FADING_THRESHOLD);
             demodulateD8PSKTwoPass(equalized, noise_variance);
             snr_symbol_count++;
-            return;  // Two-pass handled everything
+            dqpsk_skip_first_symbol = false;
+            return;  // Two-pass handled everything (constellation updated inside)
         }
     }
 
@@ -332,8 +313,17 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
                       fading_index, TWO_PASS_FADING_THRESHOLD);
             demodulateDQPSKTwoPass(equalized, noise_variance);
             snr_symbol_count++;
-            return;  // Two-pass handled everything
+            dqpsk_skip_first_symbol = false;
+            return;  // Two-pass handled everything (constellation updated inside)
         }
+    }
+
+    // Debug: log modulation value once per symbol
+    static int mod_log_once = 0;
+    if (mod_log_once++ < 5) {
+        LOG_DEMOD(INFO, "demodulateSymbol: mod=%d (DQPSK=%d), carriers=%zu, snr_count=%d",
+                  static_cast<int>(mod), static_cast<int>(Modulation::DQPSK),
+                  equalized.size(), snr_symbol_count);
     }
 
     for (size_t i = 0; i < equalized.size(); ++i) {
@@ -345,25 +335,47 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
             case Modulation::DBPSK: {
                 if (dbpsk_prev_equalized.empty()) {
                     dbpsk_prev_equalized.assign(equalized.size(), Complex(1, 0));
+                    dqpsk_skip_first_symbol = true;
                 }
                 Complex prev_sym = dbpsk_prev_equalized[i];
                 float llr = soft_demap::demapDBPSK(sym, prev_sym, nv);
                 soft_bits.push_back(llr);
+                if (!dqpsk_skip_first_symbol) {
+                    Complex diff = sym * std::conj(prev_sym);
+                    constellation_update.push_back(diff);
+                }
                 dbpsk_prev_equalized[i] = sym;
                 break;
             }
             case Modulation::DQPSK: {
+                // One-time log to confirm we're hitting this code path
+                static int dqpsk_log_once = 0;
+                if (dqpsk_log_once++ < 3 && i == 0) {
+                    LOG_DEMOD(INFO, "DQPSK demodulation active: snr_symbol_count=%d, carriers=%zu",
+                              snr_symbol_count, equalized.size());
+                }
+
                 Complex prev_sym = dbpsk_prev_equalized[i];
+                Complex diff = sym * std::conj(prev_sym);
                 auto llrs = soft_demap::demapDQPSK(sym, prev_sym, nv);
                 soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
 
-                if (snr_symbol_count < 5 && i < 3) {
-                    Complex diff = sym * std::conj(prev_sym);
+                // Detailed diagnostic logging for first symbols
+                // Note: snr_symbol_count starts at 3 after LTS (2 training + 1 increment)
+                if (snr_symbol_count < 6 && i < 5) {
+                    float sym_phase = std::atan2(sym.imag(), sym.real()) * 180.0f / M_PI;
+                    float prev_phase = std::atan2(prev_sym.imag(), prev_sym.real()) * 180.0f / M_PI;
                     float diff_phase = std::atan2(diff.imag(), diff.real()) * 180.0f / M_PI;
-                    LOG_DEMOD(DEBUG, "DQPSK sym=%d car=%zu: phase=%.1f° LLRs=[%.2f,%.2f]",
-                             snr_symbol_count, i, diff_phase, llrs[0], llrs[1]);
+                    LOG_DEMOD(INFO, "DQPSK sym=%d car=%zu: eq=%.2f∠%.0f° prev=%.2f∠%.0f° diff=%.0f° LLRs=[%.1f,%.1f]",
+                             snr_symbol_count, i,
+                             std::abs(sym), sym_phase,
+                             std::abs(prev_sym), prev_phase,
+                             diff_phase, llrs[0], llrs[1]);
                 }
 
+                if (!dqpsk_skip_first_symbol) {
+                    constellation_update.push_back(diff);
+                }
                 dbpsk_prev_equalized[i] = sym;
                 break;
             }
@@ -371,16 +383,22 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
                 Complex prev_sym = dbpsk_prev_equalized[i];
                 auto llrs = soft_demap::demapD8PSK(sym, prev_sym, nv);
                 soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
+                if (!dqpsk_skip_first_symbol) {
+                    Complex diff = sym * std::conj(prev_sym);
+                    constellation_update.push_back(diff);
+                }
                 dbpsk_prev_equalized[i] = sym;
                 break;
             }
             case Modulation::BPSK:
                 soft_bits.push_back(soft_demap::demapBPSK(sym, nv) * llr_sign);
+                constellation_update.push_back(sym);
                 break;
             case Modulation::QPSK: {
                 auto llrs = soft_demap::demapQPSK(sym, nv);
                 for (auto& llr : llrs) llr *= llr_sign;
                 soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
+                constellation_update.push_back(sym);
                 break;
             }
             case Modulation::QAM16: {
@@ -495,6 +513,35 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
             }
         }
     }
+
+    // Store constellation symbols (differential decoded for DPSK, raw equalized for coherent)
+    if (!constellation_update.empty()) {
+        // DEBUG: Phase histogram for first few symbols
+        static int hist_count = 0;
+        if (hist_count < 3 && mod == Modulation::DQPSK) {
+            int bins[8] = {0}; // 0-45, 45-90, 90-135, 135-180, 180-225, 225-270, 270-315, 315-360
+            for (const auto& sym : constellation_update) {
+                float phase = std::atan2(sym.imag(), sym.real()) * 180.0f / M_PI;
+                if (phase < 0) phase += 360.0f;
+                int bin = static_cast<int>(phase / 45.0f) % 8;
+                bins[bin]++;
+            }
+            LOG_DEMOD(INFO, "Phase histogram: 0-45:%d 45-90:%d 90-135:%d 135-180:%d 180-225:%d 225-270:%d 270-315:%d 315-360:%d",
+                      bins[0], bins[1], bins[2], bins[3], bins[4], bins[5], bins[6], bins[7]);
+            hist_count++;
+        }
+
+        std::lock_guard<std::mutex> lock(constellation_mutex);
+        constellation_symbols.insert(constellation_symbols.end(),
+                                     constellation_update.begin(), constellation_update.end());
+        if (constellation_symbols.size() > MAX_CONSTELLATION_SYMBOLS) {
+            constellation_symbols.erase(constellation_symbols.begin(),
+                constellation_symbols.begin() + (constellation_symbols.size() - MAX_CONSTELLATION_SYMBOLS));
+        }
+    }
+
+    // Clear skip flag so subsequent symbols show in constellation
+    dqpsk_skip_first_symbol = false;
 }
 
 // =============================================================================
@@ -573,6 +620,7 @@ bool OFDMDemodulator::Impl::demodulateD8PSKTwoPass(
     }
 
     // PASS 2: Apply correction and decode
+    std::vector<Complex> constellation_update;
     for (size_t i = 0; i < equalized.size(); ++i) {
         Complex prev_sym = dbpsk_prev_equalized[i];
         float nv = (i < carrier_noise_var.size()) ? carrier_noise_var[i] : base_noise_variance;
@@ -582,8 +630,24 @@ bool OFDMDemodulator::Impl::demodulateD8PSKTwoPass(
         auto llrs = soft_demap::demapD8PSK(corrected_sym, prev_sym, nv);
         soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
 
+        if (!dqpsk_skip_first_symbol) {
+            Complex diff = corrected_sym * std::conj(prev_sym);
+            constellation_update.push_back(diff);
+        }
+
         // Update reference with corrected symbol
         dbpsk_prev_equalized[i] = corrected_sym;
+    }
+
+    // Store differential symbols for constellation display
+    {
+        std::lock_guard<std::mutex> lock(constellation_mutex);
+        constellation_symbols.insert(constellation_symbols.end(),
+                                     constellation_update.begin(), constellation_update.end());
+        if (constellation_symbols.size() > MAX_CONSTELLATION_SYMBOLS) {
+            constellation_symbols.erase(constellation_symbols.begin(),
+                constellation_symbols.begin() + (constellation_symbols.size() - MAX_CONSTELLATION_SYMBOLS));
+        }
     }
 
     return true;
@@ -652,6 +716,7 @@ void OFDMDemodulator::Impl::demodulateDQPSKTwoPass(
     // phase_std > 0.1 rad (5.7°) indicates unreliable correction
     float nv_inflation = 1.0f + 5.0f * phase_std;  // 1x to ~2x for typical errors
 
+    std::vector<Complex> constellation_update;
     for (size_t i = 0; i < equalized.size(); ++i) {
         Complex prev_sym = dbpsk_prev_equalized[i];
         float nv = (i < carrier_noise_var.size()) ? carrier_noise_var[i] : base_noise_variance;
@@ -661,9 +726,39 @@ void OFDMDemodulator::Impl::demodulateDQPSKTwoPass(
         auto llrs = soft_demap::demapDQPSKCorrected(equalized[i], prev_sym, nv, correction);
         soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
 
+        // Compute corrected differential symbol for constellation display
+        if (!dqpsk_skip_first_symbol) {
+            Complex phase_corr(std::cos(correction), std::sin(correction));
+            Complex diff = equalized[i] * phase_corr * std::conj(prev_sym);
+            constellation_update.push_back(diff);
+        }
+
         // Update reference with ORIGINAL symbol (not corrected)
         // This keeps the reference tracking the actual channel, not our corrections
         dbpsk_prev_equalized[i] = equalized[i];
+    }
+
+    // Store differential symbols for constellation display
+    {
+        std::lock_guard<std::mutex> lock(constellation_mutex);
+        constellation_symbols.insert(constellation_symbols.end(),
+                                     constellation_update.begin(), constellation_update.end());
+        if (constellation_symbols.size() > MAX_CONSTELLATION_SYMBOLS) {
+            constellation_symbols.erase(constellation_symbols.begin(),
+                constellation_symbols.begin() + (constellation_symbols.size() - MAX_CONSTELLATION_SYMBOLS));
+        }
+    }
+
+    // DEBUG: log first few differential phases to diagnose constellation
+    if (snr_symbol_count < 3 && !constellation_update.empty()) {
+        char buf[256] = "";
+        int bp = 0;
+        for (size_t i = 0; i < std::min(size_t(8), constellation_update.size()); ++i) {
+            float phase_deg = std::atan2(constellation_update[i].imag(), constellation_update[i].real()) * 180.0f / M_PI;
+            bp += snprintf(buf + bp, sizeof(buf) - bp, "%.0f° ", phase_deg);
+        }
+        LOG_DEMOD(INFO, "DQPSK two-pass constellation sym=%d: %s(correction=%.1f°)",
+                  snr_symbol_count, buf, correction * 180.0f / M_PI);
     }
 }
 
@@ -1188,6 +1283,12 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     impl_->carrier_phase_correction = Complex(1, 0);
     impl_->lts_phase_offset = Complex(1, 0);  // Will be updated by estimateChannelFromLTS
 
+    // Clear constellation symbols so we only show the current frame's data
+    {
+        std::lock_guard<std::mutex> lock(impl_->constellation_mutex);
+        impl_->constellation_symbols.clear();
+    }
+
     // Set state to SYNCED
     impl_->state.store(Impl::State::SYNCED);
 
@@ -1249,8 +1350,14 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
 
         // For coherent modes with pilots, we MUST call updateChannelEstimate for per-symbol
         // pilot tracking. The LTS estimate is just a starting point - pilots refine it.
-        // For differential modes without pilots, we can skip it (LTS estimate is sufficient).
-        if (!impl_->pilot_carrier_indices.empty()) {
+        // For differential modes (DBPSK, DQPSK, D8PSK), skip pilot-based channel update.
+        // Differential decoding extracts data from phase DIFFERENCE between symbols,
+        // so channel estimate errors cancel out. Pilot-based updates actually CORRUPT
+        // the LTS-derived H by interpolating from pilot positions.
+        bool is_differential = (impl_->config.modulation == Modulation::DBPSK ||
+                               impl_->config.modulation == Modulation::DQPSK ||
+                               impl_->config.modulation == Modulation::D8PSK);
+        if (!impl_->pilot_carrier_indices.empty() && !is_differential) {
             impl_->updateChannelEstimate(fd);
         }
         auto eq = impl_->equalize(fd);

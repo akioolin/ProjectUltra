@@ -389,6 +389,13 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
         } else {
             lts_carrier_phases[i] = Complex(1.0f, 0.0f);
         }
+
+        // Debug: log first 3 carrier H phases
+        if (i < 3) {
+            LOG_DEMOD(INFO, "LTS carrier %zu: H=%.1f∠%.0f° -> ref=%.0f°",
+                      i, h_mag, std::arg(h) * 180.0f / M_PI,
+                      std::arg(lts_carrier_phases[i]) * 180.0f / M_PI);
+        }
     }
 
     // Also compute a single phase offset for backwards compatibility
@@ -955,17 +962,14 @@ std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>&
             scaled_noise_var = avg_h_power / DEFAULT_SNR_LINEAR;
         }
 
+        // Debug: log first symbol equalization details
+        static int eq_log_count = 0;
+
         for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
             int idx = data_carrier_indices[i];
             Complex received = freq_domain[idx];
             Complex h = channel_estimate[idx];
             float h_power = std::norm(h);
-
-            // Apply timing correction
-            int k = idx;
-            if (k > (int)config.fft_size / 2) k -= config.fft_size;
-            float timing_phase = 2.0f * M_PI * k * timing_offset_samples / config.fft_size;
-            Complex timing_correction = std::exp(Complex(0, timing_phase));
 
             // MMSE equalization: conj(H) / (|H|² + σ²)
             float mmse_denom = h_power + scaled_noise_var;
@@ -974,7 +978,24 @@ std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>&
                 equalized[i] = Complex(0, 0);
                 carrier_noise_var[i] = MAX_CARRIER_NOISE_VAR;
             } else {
-                equalized[i] = received * std::conj(h) / mmse_denom * pilot_phase_correction * timing_correction;
+                // For differential modes (DQPSK, D8PSK, DBPSK): do NOT apply
+                // pilot_phase_correction or timing_correction. Differential decode
+                // extracts data from the phase DIFFERENCE between consecutive symbols,
+                // so absolute phase corrections cancel out. Worse, these corrections
+                // change per-symbol (via pilot tracking), so applying them ADDS
+                // phase noise to the differential: diff includes the ratio
+                // correction_k / correction_{k-1} which is non-unity.
+                equalized[i] = received * std::conj(h) / mmse_denom;
+
+                // Debug log first few carriers of first few symbols
+                if (eq_log_count < 3 && i < 3) {
+                    float rx_phase = std::arg(received) * 180.0f / M_PI;
+                    float h_phase = std::arg(h) * 180.0f / M_PI;
+                    float eq_phase = std::arg(equalized[i]) * 180.0f / M_PI;
+                    LOG_DEMOD(INFO, "EQ car %zu: rx=%.1f∠%.0f° H=%.1f∠%.0f° -> eq=%.2f∠%.0f° (rx-H=%.0f°)",
+                              i, std::abs(received), rx_phase, std::abs(h), h_phase,
+                              std::abs(equalized[i]), eq_phase, rx_phase - h_phase);
+                }
                 // MMSE output noise variance: σ² / |H|² after equalization
                 // This represents the noise power relative to unity signal power
                 carrier_noise_var[i] = scaled_noise_var / (h_power + scaled_noise_var);
@@ -988,6 +1009,7 @@ std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>&
 
             carrier_noise_var[i] = std::max(MIN_CARRIER_NOISE_VAR, std::min(MAX_CARRIER_NOISE_VAR, carrier_noise_var[i]));
         }
+        eq_log_count++;
         return equalized;
     }
 

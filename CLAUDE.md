@@ -177,9 +177,11 @@ OTFS is parked - would need significant research effort to implement proper DD-d
   correction in StreamingDecoder. The LTS residual fix (in demodulator) corrects CFO after sync,
   but pre-correcting audio samples in StreamingDecoder would improve LTS detection reliability
   on fading+CFO channels. Cost: O(N) complex multiply per sample - very cheap.
-- **Per-Symbol Pilot Tracking:** R1/2 fails on moderate fading because LTS channel estimate becomes
-  stale. Need to use pilot carriers in each data symbol to track channel evolution (Phase 3 of
-  adaptive pilot plan). Currently pilots are allocated but not used for per-symbol tracking.
+- **Per-Symbol Pilot Tracking:** IMPLEMENTED and active in `channel_equalizer.cpp:424-694`.
+  Every data symbol updates H via LS pilot estimation, alpha-smoothed tracking (alpha=0.8
+  for differential w/ pilots), residual CFO tracking, and timing recovery from pilot phase slope.
+  Pilots spaced every 10 carriers (~6 pilots across 59 carriers). R1/2 still struggles on
+  moderate fading due to insufficient LDPC redundancy, not missing pilot tracking.
 
 ---
 

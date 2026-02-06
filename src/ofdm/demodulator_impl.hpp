@@ -125,7 +125,7 @@ struct OFDMDemodulator::Impl {
     // Two-pass D8PSK decoding (DQPSK-assisted phase correction)
     // Uses embedded DQPSK grid (45° margins) for robust phase estimation
     bool d8psk_two_pass_enabled_ = true;
-    static constexpr float TWO_PASS_FADING_THRESHOLD = 0.12f;  // Lowered for OFDM pilot measurement
+    static constexpr float TWO_PASS_FADING_THRESHOLD = 0.30f;  // Above AWGN noise floor (~0.12-0.28)
 
     // Two-pass DQPSK decoding (per-carrier phase correction)
     // Estimates phase error from hard decisions, corrects before soft demapping

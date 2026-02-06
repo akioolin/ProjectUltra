@@ -7,7 +7,8 @@ namespace gui {
 
 void ConstellationWidget::render(const std::vector<std::complex<float>>& symbols,
                                   Modulation mod) {
-    ImGui::Text("Constellation Diagram");
+    // Show symbol count for debugging
+    ImGui::Text("Constellation (%zu symbols)", symbols.size());
     ImGui::Separator();
 
     // Get available space
@@ -74,15 +75,23 @@ void ConstellationWidget::drawGrid(ImDrawList* draw_list, ImVec2 center, float s
     // Draw ideal constellation points
     ImU32 ideal_color = IM_COL32(80, 80, 100, 255);
     float point_radius = 3.0f;
-    float radius = half * 0.7f;
+    float radius = half * 0.8f;  // Match symbol scaling in drawSymbols()
 
     // PSK modulations: points on a circle
     if (mod == Modulation::DBPSK || mod == Modulation::BPSK) {
         // BPSK: 2 points on I axis
         draw_list->AddCircleFilled(ImVec2(center.x - radius, center.y), point_radius, ideal_color);
         draw_list->AddCircleFilled(ImVec2(center.x + radius, center.y), point_radius, ideal_color);
-    } else if (mod == Modulation::DQPSK || mod == Modulation::QPSK) {
-        // QPSK/DQPSK: 4 points at 45°, 135°, 225°, 315°
+    } else if (mod == Modulation::DQPSK) {
+        // DQPSK: differential phase differences at 0°, 90°, 180°, 270°
+        for (int i = 0; i < 4; i++) {
+            float angle = i * M_PI / 2;  // 0°, 90°, 180°, 270°
+            float px = center.x + radius * std::cos(angle);
+            float py = center.y - radius * std::sin(angle);  // Flip Y
+            draw_list->AddCircleFilled(ImVec2(px, py), point_radius, ideal_color);
+        }
+    } else if (mod == Modulation::QPSK) {
+        // QPSK (coherent): 4 points at 45°, 135°, 225°, 315°
         for (int i = 0; i < 4; i++) {
             float angle = M_PI / 4 + i * M_PI / 2;  // 45° + i*90°
             float px = center.x + radius * std::cos(angle);
