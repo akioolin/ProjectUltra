@@ -10,6 +10,35 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-02-06: Fix burst block detection in detectDataSync
+
+**What was broken:**
+- Burst blocks 2-4 failed to decode (corr=0.76→0.65 degrading). File transfer timed out.
+- Root cause: `detectDataSync()` energy gate was designed for silence→signal transitions.
+  In burst continuation, the search buffer starts with previous block's data (noise_floor=0.21),
+  causing the energy threshold to never be exceeded. The 4-symbol search window from signal_start=0
+  was too narrow to reach the actual LTS training at offset ~9600 in the search buffer.
+
+**What was changed:**
+- `src/waveform/ofdm_chirp_waveform.cpp`: Modified `detectDataSync()` to detect when the buffer
+  starts with signal (noise_floor >= 0.05) vs silence (noise_floor < 0.05).
+  - Silence: Use existing energy gate + narrow search window (skip quiet region efficiently)
+  - Signal present: Skip energy gate, search entire buffer. LTS autocorrelation (~0.99) is
+    distinctive enough to stand out from data autocorrelation (~0.2-0.4).
+- `src/gui/modem/streaming_decoder.cpp`: Removed unused `LEAD_IN_SAMPLES` constant.
+
+**How it works:**
+- The LTS training has two identical OFDM symbols, giving Schmidl-Cox autocorrelation ~0.99.
+  Random OFDM data gives ~0.2-0.4. This contrast is sufficient for detection without energy gating.
+- Each burst block still has its own 2 LTS training symbols for per-block channel estimation.
+
+**Test verification:**
+- `./build/cli_simulator --snr 20 --rate r1_4 --test`: PASSED (0 retransmissions)
+- `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test`: PASSED (0 retransmissions)
+- `./build/cli_simulator --snr 20 --rate r1_4 --file 512`: PASSED (512 bytes transferred, verified)
+
+---
+
 ## 2026-02-06: OFDM burst mode for multi-frame transmission
 
 **What was broken:**

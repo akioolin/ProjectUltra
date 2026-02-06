@@ -302,7 +302,6 @@ void StreamingDecoder::searchForSync() {
         // in the lead-in silence. The TX lead-in is ~150ms (7200 samples), so we should
         // back up at least that much to ensure the chirp START is in our search window.
         // FIX: We may have skipped past the chirp start during low-RMS phases.
-        constexpr size_t LEAD_IN_SAMPLES = 7200;  // 150ms TX lead-in
         constexpr size_t SEARCH_BACKTRACK = 9600; // Back up slightly more than lead-in
 
         if (correlation_pos_ >= SEARCH_BACKTRACK) {

@@ -251,6 +251,11 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
     }
 
     // Energy-based gate: find where signal starts
+    // When the buffer starts with silence (noise_floor low), the energy gate efficiently
+    // skips the quiet region. When the buffer starts with signal (burst continuation,
+    // noise_floor high), the energy gate can't find a transition, so we search the
+    // full buffer instead — the LTS autocorrelation peak is distinctive enough to
+    // stand out from data autocorrelation.
     float noise_floor = 0.0f;
     size_t noise_samples = std::min(samples.size() / 4, size_t(4800));  // First 100ms
     for (size_t i = 0; i < noise_samples; ++i) {
@@ -259,28 +264,37 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
     noise_floor = std::sqrt(noise_floor / noise_samples);
     float energy_threshold = noise_floor * 3.0f + 0.01f;  // 3x noise or minimum
 
-    // Find first sample above energy threshold
     size_t signal_start = 0;
-    for (size_t i = 0; i < samples.size() - symbol_samples * 2; ++i) {
-        float energy = 0.0f;
-        for (int j = 0; j < 64; ++j) {  // Check 64 samples
-            if (i + j < samples.size()) {
-                energy += samples[i + j] * samples[i + j];
+    bool signal_in_noise = (noise_floor < 0.05f);  // Buffer starts with silence
+
+    if (signal_in_noise) {
+        // Find first sample above energy threshold (skip silence region)
+        for (size_t i = 0; i < samples.size() - symbol_samples * 2; ++i) {
+            float energy = 0.0f;
+            for (int j = 0; j < 64; ++j) {  // Check 64 samples
+                if (i + j < samples.size()) {
+                    energy += samples[i + j] * samples[i + j];
+                }
+            }
+            energy = std::sqrt(energy / 64);
+            if (energy > energy_threshold) {
+                signal_start = i;
+                break;
             }
         }
-        energy = std::sqrt(energy / 64);
-        if (energy > energy_threshold) {
-            signal_start = i;
-            break;
-        }
     }
+    // If !signal_in_noise: signal_start stays 0, search entire buffer
 
     // Schmidl-Cox style autocorrelation for LTS detection
     // LTS has 2 identical symbols, so correlate with 1 symbol delay
     float best_corr = 0.0f;
     int best_offset = 0;
 
-    int search_end = std::min(static_cast<int>(signal_start) + search_window,
+    // When buffer starts with signal (burst continuation), use wider search window
+    // to find the LTS peak anywhere in the buffer. LTS autocorrelation (~0.99) is
+    // much higher than random data autocorrelation (~0.2-0.4).
+    int actual_search_window = signal_in_noise ? search_window : static_cast<int>(samples.size());
+    int search_end = std::min(static_cast<int>(signal_start) + actual_search_window,
                               static_cast<int>(samples.size()) - symbol_samples * 2);
 
     for (int offset = static_cast<int>(signal_start);
