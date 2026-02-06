@@ -10,6 +10,47 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-02-06: OFDM throughput improvements — 1-CW ACK + R1/2 rate selection
+
+**What was changed:**
+
+1. **1-CW OFDM ACK frames:** OFDM control frames (ACK, NACK, MODE_CHANGE, etc.) are only 20 bytes
+   = 1 codeword. Previously encoded as 4-CW fixed frames with frame interleaving (25 data symbols,
+   0.648s). Now encoded as 1-CW frames without interleaving (7 data symbols, 0.216s). Data frames
+   still use full 4-CW frame interleaving for fading protection.
+
+2. **R1/2 rate selection enabled:** `selectOFDMCodeRate()` was hardcoded to R1/4. Now selects R1/2
+   when channel conditions allow:
+   - AWGN (fading < 0.15) at SNR >= 15: R1/2
+   - Good fading (< 0.65) at SNR >= 20: R1/2
+   - Everything else: R1/4
+
+**Files changed:**
+- `src/gui/modem/streaming_encoder.cpp`: Control frames use `encodeFrameWithLDPC()` (1 CW)
+  instead of `encodeFixedFrame()` (4 CWs). Detection via `v2::isControlFrame()`.
+- `src/protocol/waveform_selection.hpp`: `selectOFDMCodeRate()` SNR/fading thresholds for R1/2.
+  `recommendWaveformAndRate()` uses dynamic rate selection instead of hardcoded R1/4.
+- `src/waveform/ofdm_chirp_waveform.cpp`: Added `getMinSamplesForControlFrame()` and shared
+  `getMinSamplesForCWCount()` helper.
+- `src/waveform/ofdm_chirp_waveform.hpp`: Declared new methods.
+- `src/waveform/waveform_interface.hpp`: Added virtual `getMinSamplesForControlFrame()` to IWaveform.
+
+**Decoder:** Existing "try CW0 non-interleaved" path in streaming_decoder.cpp already handles
+1-CW frames — no decoder changes needed. The decoder waits for full 4-CW sample threshold,
+but 1-CW frames arrive faster (shorter TX), so the decoder naturally processes them sooner.
+
+**Impact:**
+- ACK time: 0.648s → 0.216s (3× faster)
+- R1/2 doubles payload per frame: 61 → 141 bytes
+- Combined: ~2.5× throughput improvement on good channels
+
+**Test verification:**
+- R1/2 AWGN SNR=20: PASSED, 0 retransmissions
+- R1/2 good fading SNR=20: PASSED, 16 retransmissions (all delivered)
+- R1/4 good fading SNR=15 regression: PASSED, 0 retransmissions, 100% CW success
+
+---
+
 ## 2026-02-06: Fix MC-DPSK at low SNR (two issues)
 
 **What was broken:**

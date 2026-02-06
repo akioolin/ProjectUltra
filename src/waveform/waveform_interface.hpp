@@ -192,6 +192,10 @@ public:
     // Used by RxPipeline to know when enough samples are available
     virtual int getMinSamplesForFrame() const = 0;
 
+    // Get minimum samples for a 1-CW control frame (ACK, NACK, etc.)
+    // Default: same as full frame (override for OFDM to get shorter ACK frames)
+    virtual int getMinSamplesForControlFrame() const { return getMinSamplesForFrame(); }
+
     // Get minimum samples needed for decoder to search and decode one frame
     // This includes preamble + training + data + margin
     // Used by StreamingDecoder for buffer threshold in connected mode

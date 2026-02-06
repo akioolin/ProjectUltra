@@ -37,15 +37,19 @@ struct WaveformRecommendation {
 //   - R1/2 requires good fading (< 0.65) AND high SNR (>= 25)
 //   - R1/4 is the only reliable rate for moderate fading
 //
-// TEMPORARY: R3/4 is broken (LDPC issue), R1/2 needs verification.
-// Cap at R1/4 until higher rates are fixed and re-tested.
+// R1/2 verified (2026-02-06):
+//   AWGN SNR=20: 100% CW success, 0 retransmissions
+//   Good fading SNR=15: Works but 10 retransmissions (~58% CW success) - needs SNR>=20
+//   Good fading SNR=20: Testing in progress
+// R3/4 is still broken (LDPC issue). R2/3 not yet re-tested.
 inline CodeRate selectOFDMCodeRate(float snr_db, float fading_index) {
-    (void)snr_db;
-    (void)fading_index;
-    // TODO: Re-enable higher rates once R1/2 and R3/4 are verified:
-    //   AWGN (< 0.15): R3/4 @ SNR >= 18, R2/3 @ SNR >= 14, R1/2 @ SNR >= 10
-    //   Near-AWGN (0.15-0.30): R2/3 @ SNR >= 20, R1/2 @ SNR >= 14
-    //   Good fading (0.30-0.65): R1/2 @ SNR >= 25
+    // AWGN: R1/2 at SNR >= 15
+    if (fading_index < 0.15f && snr_db >= 15.0f) return CodeRate::R1_2;
+
+    // Good fading: R1/2 at SNR >= 20 (needs margin for fading dips)
+    if (fading_index < 0.65f && snr_db >= 20.0f) return CodeRate::R1_2;
+
+    // All other conditions: R1/4 (most robust)
     return CodeRate::R1_4;
 }
 
@@ -74,28 +78,21 @@ inline WaveformRecommendation recommendWaveformAndRate(float snr_db, float fadin
     }
     else if (fading_index < 0.15f) {
         // True AWGN (no fading)
-        // TEMPORARY: Cap at R1/4 until R1/2 and R3/4 are fixed
-        // TODO: Re-enable higher rates:
-        //   SNR >= 25: OFDM_COX R2/3 (5300 bps)
-        //   SNR >= 18: OFDM_CHIRP R3/4 (3500 bps)
-        //   SNR >= 14: OFDM_CHIRP R2/3 (3000 bps)
-        //   SNR >= 10: OFDM_CHIRP R1/2 (2300 bps)
         rec.waveform = WaveformMode::OFDM_CHIRP;
-        rec.rate = CodeRate::R1_4;
-        rec.estimated_throughput_bps = 1150.0f;
+        rec.rate = selectOFDMCodeRate(snr_db, fading_index);
+        rec.estimated_throughput_bps = (rec.rate == CodeRate::R1_2) ? 2300.0f : 1150.0f;
     }
     else if (fading_index < 1.10f && snr_db >= 12.0f) {
-        // Good-to-moderate fading: OFDM_CHIRP R1/4 (tested: 75-100%)
+        // Good-to-moderate fading: OFDM_CHIRP
         rec.waveform = WaveformMode::OFDM_CHIRP;
-        rec.rate = CodeRate::R1_4;
-        rec.estimated_throughput_bps = 1150.0f;
+        rec.rate = selectOFDMCodeRate(snr_db, fading_index);
+        rec.estimated_throughput_bps = (rec.rate == CodeRate::R1_2) ? 2300.0f : 1150.0f;
     }
     else if (snr_db >= 11.0f) {
         // Heavy fading or borderline SNR: OFDM_CHIRP R1/4 still viable
-        // Tested: SNR=11 good fading passes, SNR=10 fails
         rec.waveform = WaveformMode::OFDM_CHIRP;
-        rec.rate = CodeRate::R1_4;
-        rec.estimated_throughput_bps = 1150.0f;
+        rec.rate = selectOFDMCodeRate(snr_db, fading_index);
+        rec.estimated_throughput_bps = (rec.rate == CodeRate::R1_2) ? 2300.0f : 1150.0f;
     }
     else {
         // Very heavy fading or low SNR: MC-DPSK

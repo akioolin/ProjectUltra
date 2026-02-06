@@ -550,12 +550,18 @@ int OFDMChirpWaveform::getDataPreambleSamples() const {
 }
 
 int OFDMChirpWaveform::getMinSamplesForFrame() const {
-    // Training symbols + data for fixed 4-codeword frame (2592 bits)
-    // Frame interleaving requires all 4 CWs to be received before decoding
+    return getMinSamplesForCWCount(4);
+}
+
+int OFDMChirpWaveform::getMinSamplesForControlFrame() const {
+    return getMinSamplesForCWCount(1);
+}
+
+int OFDMChirpWaveform::getMinSamplesForCWCount(int num_cw) const {
+    // Training symbols + data for num_cw codewords
     int training_samples = 2 * getSamplesPerSymbol();  // 2 OFDM training symbols
 
-    // Data samples for 4 LDPC codewords (2592 bits) - fixed frame with interleaving
-    constexpr int FRAME_BITS = 4 * 648;  // 4 CWs × 648 bits = 2592 bits
+    int frame_bits = num_cw * 648;
 
     // For DQPSK: 2 bits per carrier
     int bits_per_carrier = 2;  // DQPSK
@@ -567,8 +573,6 @@ int OFDMChirpWaveform::getMinSamplesForFrame() const {
     }
 
     // Account for pilots reducing available data carriers
-    // Use same formula as setupCarriers(): pilots at indices where idx % spacing == 0
-    // For 59 carriers, spacing 10: indices 0,10,20,30,40,50 = 6 pilots
     int pilot_count = 0;
     if (config_.use_pilots) {
         pilot_count = (config_.num_carriers + config_.pilot_spacing - 1) / config_.pilot_spacing;
@@ -576,7 +580,7 @@ int OFDMChirpWaveform::getMinSamplesForFrame() const {
     int data_carriers = static_cast<int>(config_.num_carriers) - pilot_count;
 
     int bits_per_symbol = data_carriers * bits_per_carrier;
-    int data_symbols = (FRAME_BITS + bits_per_symbol - 1) / bits_per_symbol;
+    int data_symbols = (frame_bits + bits_per_symbol - 1) / bits_per_symbol;
     int data_samples = data_symbols * getSamplesPerSymbol();
 
     return training_samples + data_samples;

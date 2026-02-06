@@ -430,11 +430,35 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
         return encoded;
     }
 
-    // OFDM: 4-CW fixed frame encoding with frame interleaving
+    // OFDM: Check if this is a control frame (1 CW) or data frame (4 CWs)
+    // Control frames (ACK, NACK, MODE_CHANGE, etc.) are 20 bytes = 1 CW
+    // Data frames use 4-CW fixed frame encoding with frame interleaving
+    bool is_control_frame = false;
+    if (tx_data.size() <= 20 && tx_data.size() >= 3) {
+        uint8_t frame_type = tx_data[2];
+        is_control_frame = v2::isControlFrame(static_cast<v2::FrameType>(frame_type));
+    }
+
+    if (is_control_frame) {
+        // 1-CW encoding for control frames (no frame interleaving needed)
+        // Control frames always use R1/4 for robustness (20 bytes fits in 1 CW at R1/4)
+        auto cws = v2::encodeFrameWithLDPC(tx_data, CodeRate::R1_4);
+
+        Bytes encoded;
+        for (const auto& cw : cws) {
+            encoded.insert(encoded.end(), cw.begin(), cw.end());
+        }
+
+        LOG_MODEM(DEBUG, "[%s] OFDM control: %zu bytes -> %zu CW (%zu coded)",
+                  log_prefix_.c_str(), tx_data.size(), cws.size(), encoded.size());
+        return encoded;
+    }
+
+    // Data frames: 4-CW fixed frame encoding with frame interleaving
     // Channel interleaving is controlled by use_channel_interleave_ flag
     Bytes encoded = v2::encodeFixedFrame(tx_data, code_rate_, use_channel_interleave_);
 
-    LOG_MODEM(DEBUG, "[%s] OFDM: %zu bytes -> 4 CWs (%zu coded, frame_interleave=%s, channel_interleave=%s)",
+    LOG_MODEM(DEBUG, "[%s] OFDM data: %zu bytes -> 4 CWs (%zu coded, frame_interleave=%s, channel_interleave=%s)",
               log_prefix_.c_str(), tx_data.size(), encoded.size(),
               use_frame_interleave_ ? "yes" : "no",
               use_channel_interleave_ ? "yes" : "no");

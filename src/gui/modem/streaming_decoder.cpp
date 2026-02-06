@@ -486,10 +486,14 @@ void StreamingDecoder::checkIfReadyToDecode() {
     }
 
     // Calculate how much we need
-    size_t needed = min_frame;
-    if (pending_total_cw_ > 1) {
+    size_t needed;
+    if (pending_total_cw_ > 0) {
+        // We know the frame size from CW0 peek - wait for all CWs
         size_t cw_data = (min_frame * 9) / 10;
         needed = min_frame + (pending_total_cw_ - 1) * cw_data;
+    } else {
+        // Disconnected: always expect full frames
+        needed = min_frame;
     }
 
     if (available >= needed) {

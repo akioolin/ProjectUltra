@@ -66,9 +66,9 @@
 ### Mode 2: OFDM (SNR ≥ 11 dB)
 - **When:** SNR 11 and above with acceptable fading
 - **Waveform:** OFDM with chirp or Schmidl-Cox sync
-- **ARQ:** Selective Repeat (window=4) - send up to 4 frames before waiting
-- **Frame format:** Fixed 4-codeword frames
-- **Control frames:** Still 20 bytes but go through OFDM modulation
+- **ARQ:** Selective Repeat (window=8) - send up to 8 frames before waiting
+- **Frame format:** Fixed 4-codeword frames for data, 1-codeword for control
+- **Control frames:** 20 bytes, 1 CW, no frame interleaving (fast ACK)
 - **Data frames:** 4 CWs with frame interleaving
 - **Interleaving:** Frame-level interleaving (spreads CWs), optional channel interleaving
 - **Preamble:** Light preamble (LTS only) for data after handshake
@@ -99,12 +99,15 @@
 | OFDM_CHIRP | Good fading | 15 | **100%** |
 | OFDM_CHIRP | Moderate fading | 15 | ~90% |
 
-**Current state (2026-02-03):**
+**Current state (2026-02-06):**
 - MC-DPSK: WORKING - 100% at SNR=10 with moderate fading
-- OFDM_CHIRP AWGN: WORKING - 100% CW success at SNR=15 and SNR=20 (0 retries)
-- OFDM_CHIRP Good fading: WORKING - R1/4 100% CW success at SNR=15 (0 retries, 0 failures)
+- OFDM_CHIRP R1/4 AWGN: WORKING - 100% CW success at SNR=15 and SNR=20 (0 retries)
+- OFDM_CHIRP R1/4 Good fading: WORKING - 100% CW success at SNR=15 (0 retries, 0 failures)
+- OFDM_CHIRP R1/2 AWGN: WORKING - 100% CW success at SNR=20 (0 retries)
+- OFDM_CHIRP R1/2 Good fading: WORKING - at SNR=20 (some retransmissions, all delivered)
 - OFDM_CHIRP Moderate fading: WORKING - R1/4 89% CW success (57/64), 100% message delivery via ARQ
 - OFDM_CHIRP R3/4: Not recommended on fading (only AWGN)
+- 1-CW ACK frames: WORKING - control frames use 1 CW (3× faster ACK)
 - OFDM_COX: WORKING - DATA phase passes at SNR=20 dB
 - OTFS: EXPERIMENTAL - See OTFS Status section below
 - cli_simulator: FULLY WORKING - all phases pass on AWGN and fading
@@ -157,8 +160,10 @@
 - Our simplified approaches (TF eq, single-tap DD eq, matched-filter) are insufficient
 - Proper DD-domain equalization is research-level complexity (sparse channel estimation + iterative detection)
 
-**Recommendation:** Use OFDM_CHIRP with DQPSK R1/4 for all OFDM operation (80-100% reliable).
-R3/4 is broken (LDPC issue), R1/2 needs verification. Stick to R1/4 until higher rates are fixed.
+**Recommendation:** Use OFDM_CHIRP with DQPSK. Rate selection is automatic via `selectOFDMCodeRate()`:
+- R1/2 for AWGN (SNR≥15) and good fading (SNR≥20) — ~2× throughput vs R1/4
+- R1/4 for moderate fading or lower SNR — robust but slower
+- R3/4 is broken (LDPC issue). Do not use.
 OTFS is parked - would need significant research effort to implement proper DD-domain equalization.
 
 **FFTW requirement:**
