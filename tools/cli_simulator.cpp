@@ -581,6 +581,28 @@ private:
         return result;
     }
 
+    std::vector<float> transmitBurst(const std::vector<Bytes>& frame_data_list) {
+        if (!encoder_ || frame_data_list.empty()) return {};
+
+        // All burst frames use connected OFDM mode
+        auto saved_mode = encoder_->getMode();
+        auto saved_rate = encoder_->getCodeRate();
+
+        // Ensure encoder is in connected OFDM mode
+        if (tx_waveform_mode_ != WaveformMode::MC_DPSK) {
+            encoder_->setMode(tx_waveform_mode_);
+            encoder_->setDataMode(data_modulation_, data_code_rate_);
+        }
+
+        auto result = encoder_->encodeBurstLight(frame_data_list);
+
+        LOG_MODEM(INFO, "[%s] TX burst: %zu frames -> %zu samples (mode=%s)",
+                  callsign_.c_str(), frame_data_list.size(), result.size(),
+                  waveformModeToString(tx_waveform_mode_));
+
+        return result;
+    }
+
     std::vector<float> transmitPing() {
         if (!encoder_) return {};
         return encoder_->encodePing();
@@ -628,6 +650,12 @@ private:
         protocol_.setHandshakeConfirmedCallback([this]() {
             setHandshakeComplete(true);
             LOG_MODEM(INFO, "[%s] Handshake confirmed", callsign_.c_str());
+        });
+
+        // Burst TX callback - encode multiple frames as single OFDM burst
+        protocol_.setTransmitBurstCallback([this](const std::vector<Bytes>& frames) {
+            auto samples = transmitBurst(frames);
+            queueTx(samples);
         });
 
         // PING/PONG

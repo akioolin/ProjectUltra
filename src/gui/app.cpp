@@ -183,6 +183,31 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         }
     });
 
+    // Burst TX callback - encode multiple frames as single OFDM burst
+    protocol_.setTransmitBurstCallback([this](const std::vector<Bytes>& frames) {
+        auto samples = modem_.transmitBurst(frames);
+        if (!samples.empty()) {
+            if (simulation_enabled_) {
+                size_t tx_duration_ms = (samples.size() * 1000) / 48000;
+                tx_in_progress_ = true;
+                tx_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(tx_duration_ms + 100);
+                std::lock_guard<std::mutex> lock(our_tx_pending_mutex_);
+                our_tx_pending_.insert(our_tx_pending_.end(), samples.begin(), samples.end());
+                guiLog("SIM: Queued burst of %zu frames (%zu samples)", frames.size(), samples.size());
+            } else {
+                audio_.setRxMuted(true);
+                audio_.stopCapture();
+                audio_.clearRxBuffer();
+                modem_.clearRxBuffer();
+                size_t tx_duration_ms = (samples.size() * 1000) / 48000;
+                tx_in_progress_ = true;
+                tx_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(tx_duration_ms + 100);
+                waterfall_.addSamples(samples.data(), samples.size());
+                audio_.queueTxSamples(samples);
+            }
+        }
+    });
+
     protocol_.setMessageReceivedCallback([this](const std::string& from, const std::string& text) {
         // Received a message via ARQ
         std::string msg = "[RX " + from + "] " + text;
@@ -603,6 +628,15 @@ void App::initVirtualStation() {
         // Queue PTT noise + signal for real-time streaming
         std::lock_guard<std::mutex> lock(virtual_tx_pending_mutex_);
         virtual_tx_pending_.insert(virtual_tx_pending_.end(), ptt_noise.begin(), ptt_noise.end());
+        virtual_tx_pending_.insert(virtual_tx_pending_.end(), samples.begin(), samples.end());
+    });
+
+    // Virtual station burst TX callback
+    virtual_protocol_.setTransmitBurstCallback([this](const std::vector<Bytes>& frames) {
+        guiLog("SIM: Virtual station burst TX %zu frames", frames.size());
+        auto samples = virtual_modem_->transmitBurst(frames);
+        guiLog("SIM: Virtual burst produced %zu samples", samples.size());
+        std::lock_guard<std::mutex> lock(virtual_tx_pending_mutex_);
         virtual_tx_pending_.insert(virtual_tx_pending_.end(), samples.begin(), samples.end());
     });
 

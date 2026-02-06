@@ -308,6 +308,16 @@ bool Connection::sendFile(const std::string& filepath) {
         return false;
     }
 
+    // Set chunk size to match frame capacity for current mode
+    bool is_ofdm = (negotiated_mode_ == WaveformMode::OFDM_CHIRP ||
+                    negotiated_mode_ == WaveformMode::OFDM_COX);
+    if (is_ofdm) {
+        size_t capacity = v2::getFixedFramePayloadCapacity(data_code_rate_);
+        file_transfer_.setMaxChunkPayload(capacity);
+        LOG_MODEM(INFO, "Connection: File chunk payload limited to %zu bytes (OFDM %s)",
+                  capacity, codeRateToString(data_code_rate_));
+    }
+
     LOG_MODEM(INFO, "Connection: Starting file transfer: %s", filepath.c_str());
 
     if (!file_transfer_.startSend(filepath)) {
@@ -340,6 +350,15 @@ void Connection::sendNextFileChunk() {
         return;
     }
 
+    bool is_ofdm = (negotiated_mode_ == WaveformMode::OFDM_CHIRP ||
+                    negotiated_mode_ == WaveformMode::OFDM_COX);
+
+    // Enable burst buffering for OFDM mode
+    if (is_ofdm && on_transmit_burst_) {
+        burst_mode_active_ = true;
+        burst_tx_buffer_.clear();
+    }
+
     // Fill the ARQ window with as many chunks as possible
     // Selective Repeat ARQ can have multiple frames in flight
     while (arq_.isReadyToSend() && file_transfer_.hasMoreChunks()) {
@@ -352,9 +371,24 @@ void Connection::sendNextFileChunk() {
         uint8_t flags = file_transfer_.hasMoreChunks() ? v2::Flags::MORE_FRAG : v2::Flags::NONE;
         arq_.sendDataWithFlags(chunk, flags);
     }
+
+    // Flush burst buffer
+    if (is_ofdm && on_transmit_burst_) {
+        burst_mode_active_ = false;
+        flushBurstBuffer();
+    }
 }
 
 void Connection::sendNextFragment() {
+    bool is_ofdm = (negotiated_mode_ == WaveformMode::OFDM_CHIRP ||
+                    negotiated_mode_ == WaveformMode::OFDM_COX);
+
+    // Enable burst buffering for OFDM mode
+    if (is_ofdm && on_transmit_burst_) {
+        burst_mode_active_ = true;
+        burst_tx_buffer_.clear();
+    }
+
     while (arq_.isReadyToSend() && next_fragment_idx_ < pending_tx_fragments_.size()) {
         const Bytes& chunk = pending_tx_fragments_[next_fragment_idx_];
         bool is_last = (next_fragment_idx_ + 1 == pending_tx_fragments_.size());
@@ -366,6 +400,12 @@ void Connection::sendNextFragment() {
 
         arq_.sendDataWithFlags(chunk, flags);
         next_fragment_idx_++;
+    }
+
+    // Flush burst buffer
+    if (is_ofdm && on_transmit_burst_) {
+        burst_mode_active_ = false;
+        flushBurstBuffer();
     }
 }
 
@@ -662,6 +702,13 @@ void Connection::tick(uint32_t elapsed_ms) {
 
 void Connection::transmitFrame(const Bytes& frame_data) {
     LOG_MODEM(DEBUG, "Connection: TX %zu bytes", frame_data.size());
+
+    // If burst mode is active, buffer instead of transmitting immediately
+    if (burst_mode_active_ && on_transmit_burst_) {
+        burst_tx_buffer_.push_back(frame_data);
+        return;
+    }
+
     if (on_transmit_) {
         on_transmit_(frame_data);
     }
@@ -684,9 +731,9 @@ void Connection::enterConnected() {
         LOG_MODEM(INFO, "Connection: ARQ window=1, timeout=18s (MC-DPSK)");
     } else {
         arq_.setWindowSize(4);
-        arq_.setAckTimeout(5000);   // RTT ~3s + window pipeline ~2.8s, needs ≥5s
+        arq_.setAckTimeout(8000);   // Burst of 4 blocks ≈ 2.9s + decode + ACK TX ≈ 4.5s
         arq_.setMaxRetries(15);     // More attempts compensate for ACK loss on fading
-        LOG_MODEM(INFO, "Connection: ARQ window=4, timeout=5s, max_retries=15 (OFDM)");
+        LOG_MODEM(INFO, "Connection: ARQ window=4, timeout=8s, max_retries=15 (OFDM burst)");
     }
 
     LOG_MODEM(INFO, "Connection: Now CONNECTED to %s (mode=%s)",
@@ -710,6 +757,8 @@ void Connection::enterDisconnected(const std::string& reason) {
     disconnect_frame_.clear();
     disconnect_pending_ = false;
     disconnect_ack_frame_.clear();
+    burst_mode_active_ = false;
+    burst_tx_buffer_.clear();
     arq_.reset();
     file_transfer_.cancel();
     pending_tx_fragments_.clear();
@@ -733,6 +782,28 @@ void Connection::enterDisconnected(const std::string& reason) {
 
 void Connection::setTransmitCallback(TransmitCallback cb) {
     on_transmit_ = std::move(cb);
+}
+
+void Connection::setTransmitBurstCallback(TransmitBurstCallback cb) {
+    on_transmit_burst_ = std::move(cb);
+}
+
+void Connection::flushBurstBuffer() {
+    if (burst_tx_buffer_.empty()) return;
+
+    if (burst_tx_buffer_.size() == 1 && on_transmit_) {
+        // Single frame, no burst needed
+        on_transmit_(burst_tx_buffer_[0]);
+    } else if (on_transmit_burst_) {
+        LOG_MODEM(INFO, "Connection: Flushing burst of %zu frames", burst_tx_buffer_.size());
+        on_transmit_burst_(burst_tx_buffer_);
+    } else if (on_transmit_) {
+        // Fallback: send individually
+        for (const auto& frame : burst_tx_buffer_) {
+            on_transmit_(frame);
+        }
+    }
+    burst_tx_buffer_.clear();
 }
 
 void Connection::setConnectedCallback(ConnectedCallback cb) {
@@ -802,6 +873,8 @@ void Connection::reset() {
     data_modulation_ = Modulation::DQPSK;
     data_code_rate_ = CodeRate::R1_4;
     connect_waveform_ = WaveformMode::MC_DPSK;  // Reset to DPSK for next connect attempt
+    burst_mode_active_ = false;
+    burst_tx_buffer_.clear();
     arq_.reset();
     file_transfer_.cancel();
     pending_tx_fragments_.clear();

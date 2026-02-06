@@ -328,6 +328,11 @@ private:
     size_t total_fed_ = 0;      // Total samples fed (per-instance)
     int feed_iter_ = 0;         // Feed counter (per-instance)
 
+    // Burst mode continuation (OFDM only)
+    // After decoding a frame in connected OFDM mode, check for next block at known position
+    int burst_blocks_decoded_ = 0;     // Blocks decoded in current burst
+    static constexpr int MAX_BURST_BLOCKS = 8;  // Safety limit
+
     // Pending frame state for multi-codeword frames
     // After reading header, if more codewords needed, wait for more samples
     int pending_total_cw_ = 0;                // Total codewords expected (0 = unknown)

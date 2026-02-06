@@ -120,6 +120,12 @@ public:
     // --- Callbacks ---
 
     void setTransmitCallback(TransmitCallback cb);
+
+    // Burst mode TX callback - transmits multiple frames as single audio burst
+    // Only used for OFDM connected mode (file transfer, message fragmentation)
+    using TransmitBurstCallback = std::function<void(const std::vector<Bytes>&)>;
+    void setTransmitBurstCallback(TransmitBurstCallback cb);
+
     void setConnectedCallback(ConnectedCallback cb);
     void setDisconnectedCallback(DisconnectedCallback cb);
     void setMessageReceivedCallback(MessageReceivedCallback cb);
@@ -286,6 +292,13 @@ private:
 
     // Statistics
     ConnectionStats stats_;
+
+    // Burst mode TX buffering (OFDM only)
+    std::vector<Bytes> burst_tx_buffer_;
+    bool burst_mode_active_ = false;
+    TransmitBurstCallback on_transmit_burst_;
+
+    void flushBurstBuffer();
 
     // Callbacks
     TransmitCallback on_transmit_;

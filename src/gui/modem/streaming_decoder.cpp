@@ -710,12 +710,113 @@ void StreamingDecoder::decodeCurrentFrame() {
                   log_prefix_.c_str(), result.codewords_ok, result.codewords_failed, result.is_ping ? 1 : 0);
     }
 
-    // Skip past the frame we just decoded
-    // sync_position_ is at training start (after chirp), frame_buffer.size() is frame data
-    // Don't skip to write_pos_ - that would miss frames already in buffer
+    // After successful decode in connected OFDM mode, check for burst continuation
+    // MC-DPSK never enters burst mode (uses window=1, full chirp preamble)
+    bool is_ofdm = (mode_ == protocol::WaveformMode::OFDM_CHIRP ||
+                    mode_ == protocol::WaveformMode::OFDM_COX);
+
+    size_t next_block_pos = (sync_position_ + frame_buffer.size()) % MAX_BUFFER_SAMPLES;
+
+    if (result.success && connected_ && is_ofdm) {
+        size_t min_block = static_cast<size_t>(waveform_->getMinSamplesForFrame());
+
+        // Loop to decode multiple burst continuation blocks
+        while (burst_blocks_decoded_ < MAX_BURST_BLOCKS) {
+            // Check if there are enough samples for another block
+            size_t next_available;
+            {
+                std::lock_guard<std::mutex> lock(buffer_mutex_);
+                if (write_pos_ >= next_block_pos) {
+                    next_available = write_pos_ - next_block_pos;
+                } else {
+                    next_available = MAX_BUFFER_SAMPLES - next_block_pos + write_pos_;
+                }
+            }
+
+            if (next_available < min_block) break;  // Not enough samples, burst over
+
+            // Copy next block samples
+            std::vector<float> next_block(min_block);
+            {
+                std::lock_guard<std::mutex> lock(buffer_mutex_);
+                for (size_t i = 0; i < min_block; i++) {
+                    next_block[i] = buffer_[(next_block_pos + i) % MAX_BUFFER_SAMPLES];
+                }
+            }
+
+            // Check RMS energy to detect if there's actually a signal
+            float next_rms = 0.0f;
+            size_t check_start = std::min(size_t(1024), min_block);  // Skip training area
+            size_t check_len = std::min(min_block - check_start, size_t(5000));
+            if (check_len > 0) {
+                for (size_t i = 0; i < check_len; i++) {
+                    next_rms += next_block[check_start + i] * next_block[check_start + i];
+                }
+                next_rms = std::sqrt(next_rms / check_len);
+            }
+
+            constexpr float BURST_ENERGY_THRESHOLD = 0.04f;
+            if (next_rms < BURST_ENERGY_THRESHOLD) break;  // No energy, burst over
+
+            // Energy present - try to decode as continuation block
+            burst_blocks_decoded_++;
+            LOG_MODEM(INFO, "[%s] Burst continuation: block %d, RMS=%.4f, pos=%zu",
+                      log_prefix_.c_str(), burst_blocks_decoded_, next_rms, next_block_pos);
+
+            waveform_->setFrequencyOffset(sync_cfo_);
+            bool next_ok = waveform_->process(SampleSpan(next_block.data(), next_block.size()));
+
+            if (!next_ok) break;  // Process failed, burst over
+
+            auto next_soft_bits = waveform_->getSoftBits();
+            if (next_soft_bits.empty()) break;
+
+            // Update CFO from pilot tracking
+            float next_corrected_cfo = waveform_->estimatedCFO();
+            float cfo_drift = next_corrected_cfo - sync_cfo_;
+            constexpr float MAX_BURST_CFO_DRIFT_HZ = 2.0f;
+            if (std::abs(cfo_drift) > MAX_BURST_CFO_DRIFT_HZ) {
+                next_corrected_cfo = sync_cfo_ + std::copysign(MAX_BURST_CFO_DRIFT_HZ, cfo_drift);
+            }
+            sync_cfo_ = next_corrected_cfo;
+            last_cfo_.store(next_corrected_cfo);
+            last_fading_index_.store(waveform_->getFadingIndex());
+
+            // Decode the continuation block
+            DecodeResult next_result = decodeFrame(next_soft_bits, sync_snr_, sync_cfo_);
+
+            {
+                std::lock_guard<std::mutex> slock(stats_mutex_);
+                if (next_result.success) stats_.frames_decoded++;
+                else stats_.frames_failed++;
+            }
+
+            if (next_result.success || next_result.codewords_ok > 0) {
+                {
+                    std::lock_guard<std::mutex> qlock(queue_mutex_);
+                    frame_queue_.push(next_result);
+                }
+                if (next_result.success && frame_callback_) frame_callback_(next_result);
+
+                LOG_MODEM(INFO, "[%s] Burst block %d decoded: %d/%d CWs",
+                          log_prefix_.c_str(), burst_blocks_decoded_,
+                          next_result.codewords_ok, next_result.codewords_ok + next_result.codewords_failed);
+            }
+
+            // Advance position for next iteration (or final correlation_pos_)
+            sync_position_ = next_block_pos;
+            next_block_pos = (next_block_pos + min_block) % MAX_BUFFER_SAMPLES;
+
+            // If decode failed completely, stop the burst
+            if (!next_result.success && next_result.codewords_ok == 0) break;
+        }
+    }
+
+    // Burst over (or non-burst) - skip past everything we decoded and return to SEARCHING
+    burst_blocks_decoded_ = 0;
     {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
-        correlation_pos_ = (sync_position_ + frame_buffer.size()) % MAX_BUFFER_SAMPLES;
+        correlation_pos_ = (next_block_pos) % MAX_BUFFER_SAMPLES;
     }
 
     state_ = DecoderState::SEARCHING;
@@ -951,6 +1052,7 @@ void StreamingDecoder::reset() {
     feed_iter_ = 0;
     state_ = DecoderState::SEARCHING;
     pending_total_cw_ = 0;
+    burst_blocks_decoded_ = 0;
     new_data_available_ = false;
     last_decoded_sync_pos_ = SIZE_MAX;
 

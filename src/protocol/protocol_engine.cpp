@@ -427,6 +427,11 @@ void ProtocolEngine::setDataModeChangedCallback(DataModeChangedCallback cb) {
     connection_.setDataModeChangedCallback(std::move(cb));
 }
 
+void ProtocolEngine::setTransmitBurstCallback(TransmitBurstCallback cb) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_.setTransmitBurstCallback(std::move(cb));
+}
+
 void ProtocolEngine::setPingTxCallback(PingTxCallback cb) {
     std::lock_guard<std::mutex> lock(mutex_);
     connection_.setPingTxCallback(std::move(cb));

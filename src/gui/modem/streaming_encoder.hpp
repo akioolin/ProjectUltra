@@ -82,6 +82,11 @@ public:
     // Only works if waveform supports data preamble
     std::vector<float> encodeFrameLight(const Bytes& frame_data);
 
+    // Encode multiple frames as a single burst with one LTS preamble
+    // Each frame gets its own training symbols for per-block channel estimation
+    // Returns: [LTS] + [train+data_0] + [train+data_1] + ... + [train+data_N]
+    std::vector<float> encodeBurstLight(const std::vector<Bytes>& frame_data_list);
+
     // Encode PING (chirp preamble only, no data)
     std::vector<float> encodePing();
 

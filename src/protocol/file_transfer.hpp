@@ -62,8 +62,10 @@ enum class FileTransferState {
  */
 class FileTransferController {
 public:
-    // Maximum data per chunk (256 - 1 type - 4 offset - 1 safety margin)
-    static constexpr size_t CHUNK_SIZE = 250;
+    // Default max data per chunk (256 - 1 type - 4 offset - 1 safety margin)
+    // For OFDM fixed frames, call setMaxChunkPayload() to match frame capacity
+    static constexpr size_t DEFAULT_CHUNK_SIZE = 250;
+    static constexpr size_t FILE_DATA_OVERHEAD = 5;  // TYPE(1) + OFFSET(4)
 
     // Callbacks
     using ProgressCallback = std::function<void(const FileTransferProgress&)>;
@@ -72,6 +74,14 @@ public:
 
     FileTransferController() = default;
     ~FileTransferController();
+
+    // Set max payload per ARQ frame (call before startSend).
+    // Chunk data size = max_payload - FILE_DATA_OVERHEAD (5 bytes for type+offset)
+    void setMaxChunkPayload(size_t max_payload) {
+        if (max_payload > FILE_DATA_OVERHEAD) {
+            chunk_size_ = max_payload - FILE_DATA_OVERHEAD;
+        }
+    }
 
     // --- TX Side ---
 
@@ -121,6 +131,7 @@ public:
 
 private:
     FileTransferState state_ = FileTransferState::IDLE;
+    size_t chunk_size_ = DEFAULT_CHUNK_SIZE;
 
     // TX state
     std::string tx_filepath_;

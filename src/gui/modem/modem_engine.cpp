@@ -295,6 +295,28 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 // PING/PONG PROBE (minimal presence check)
 // ============================================================================
 
+std::vector<float> ModemEngine::transmitBurst(const std::vector<Bytes>& frame_data_list) {
+    if (frame_data_list.empty()) return {};
+
+    // Burst mode is only for connected OFDM mode
+    streaming_encoder_->setMode(waveform_mode_);
+    streaming_encoder_->setDataMode(data_modulation_, data_code_rate_);
+
+    auto samples = streaming_encoder_->encodeBurstLight(frame_data_list);
+
+    if (samples.empty()) {
+        LOG_MODEM(ERROR, "[%s] TX Burst: encodeBurstLight returned empty", log_prefix_.c_str());
+        return {};
+    }
+
+    LOG_MODEM(INFO, "[%s] TX Burst: %zu frames -> %zu samples (%s, %s)",
+              log_prefix_.c_str(), frame_data_list.size(), samples.size(),
+              protocol::waveformModeToString(waveform_mode_),
+              modulationToString(data_modulation_));
+
+    return postProcessTx(samples);
+}
+
 std::vector<float> ModemEngine::transmitPing() {
     auto samples = streaming_encoder_->encodePing();
 

@@ -282,8 +282,9 @@ Bytes FileTransferController::buildMetadataPayload() {
     payload.push_back((tx_crc_ >> 8) & 0xFF);
     payload.push_back(tx_crc_ & 0xFF);
 
-    // Filename (truncate if too long)
-    size_t max_name_len = 256 - 10;
+    // Filename (truncate if too long to fit in one frame)
+    // Metadata overhead: TYPE(1) + FLAGS(1) + SIZE(4) + CRC32(4) = 10 bytes
+    size_t max_name_len = chunk_size_ + FILE_DATA_OVERHEAD - 10;
     std::string name = tx_filename_.substr(0, max_name_len);
     payload.insert(payload.end(), name.begin(), name.end());
 
@@ -304,7 +305,7 @@ Bytes FileTransferController::buildDataPayload() {
 
     // Data chunk
     size_t remaining = tx_data_.size() - tx_offset_;
-    size_t chunk_size = std::min(remaining, CHUNK_SIZE);
+    size_t chunk_size = std::min(remaining, chunk_size_);
 
     payload.insert(payload.end(),
                    tx_data_.begin() + tx_offset_,

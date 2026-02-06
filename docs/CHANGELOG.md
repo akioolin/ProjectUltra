@@ -10,6 +10,46 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-02-06: OFDM burst mode for multi-frame transmission
+
+**What was broken:**
+- OFDM file transfer and long message fragmentation sent each frame with its own LTS preamble.
+  With ARQ window=4, frames 3-4 could fail because the decoder returned to SEARCHING state
+  and couldn't re-acquire LTS fast enough (overlapping search windows).
+
+**What was changed:**
+- `src/gui/modem/streaming_encoder.hpp/.cpp`: Added `encodeBurstLight()` — encodes multiple
+  frames as a single burst with one LTS preamble. First frame uses `encodeFrameLight()`,
+  subsequent frames get training symbols + modulated data appended directly.
+- `src/gui/modem/streaming_decoder.hpp/.cpp`: Added burst continuation logic in
+  `decodeCurrentFrame()`. After successful decode in connected OFDM mode, checks for energy
+  at the expected next block position. If energy present, processes as continuation block
+  via `waveform_->process()` with CFO tracking. Loops for up to 8 continuation blocks.
+- `src/protocol/connection.hpp/.cpp`: Added burst TX buffering. `sendNextFileChunk()` and
+  `sendNextFragment()` accumulate frames when in OFDM mode, then flush as a single burst.
+  `TransmitBurstCallback` added for the burst TX path. ACK timeout increased 5s→8s for
+  burst RTT.
+- `src/protocol/protocol_engine.hpp/.cpp`: Passthrough for `setTransmitBurstCallback()`.
+- `src/gui/modem/modem_engine.hpp/.cpp`: Added `transmitBurst()` method.
+- `src/gui/app.cpp`: Wired burst callbacks for main and virtual station protocols.
+- `tools/cli_simulator.cpp`: Added `transmitBurst()` and burst callback in `SimulatedStation`.
+
+**How it works:**
+- TX: Burst format is `[LTS][train+data_0][train+data_1]...[train+data_N]`
+- RX: Burst continuation checks energy at known position after each block decode.
+  In synchronous simulator, continuation rarely fires (audio not yet buffered), but
+  blocks are decoded via normal LTS re-sync since each block has 2 LTS training symbols.
+  In real-time GUI mode, burst continuation provides direct block-to-block decode.
+- OFDM-only: all burst logic gated on `is_ofdm` checks. MC-DPSK path unaffected.
+- ARQ unchanged: per-frame seq nums, SACK bitmap, retransmission all preserved.
+
+**Test verification:**
+- `./build/cli_simulator --snr 20 --rate r1_4 --test`: PASSED (0 retransmissions)
+- `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test`: PASSED (3 retransmissions)
+- `./build/cli_simulator --snr 20 --rate r1_4 --file 1024`: PASSED (1024 bytes transferred, verified)
+
+---
+
 ## 2026-02-05: Long message fragmentation for OFDM
 
 **What was broken:**

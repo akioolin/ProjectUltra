@@ -175,6 +175,41 @@ std::vector<float> StreamingEncoder::encodeFrameLight(const Bytes& frame_data) {
     return result;
 }
 
+std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& frame_data_list) {
+    if (frame_data_list.empty()) return {};
+    if (!waveform_) {
+        LOG_MODEM(ERROR, "[%s] No waveform!", log_prefix_.c_str());
+        return {};
+    }
+
+    // Single frame: just use normal encodeFrameLight
+    if (frame_data_list.size() == 1) {
+        return encodeFrameLight(frame_data_list[0]);
+    }
+
+    // First frame: LTS preamble + training + data (same as encodeFrameLight)
+    std::vector<float> result = encodeFrameLight(frame_data_list[0]);
+
+    // Subsequent frames: training + data (no LTS detection preamble)
+    for (size_t i = 1; i < frame_data_list.size(); i++) {
+        Bytes encoded = encodeFrameBytes(frame_data_list[i]);
+
+        // Generate inter-block training symbols (2 LTS symbols for channel re-estimation)
+        Samples training = waveform_->generateDataPreamble();
+
+        // Modulate data
+        Samples modulated = waveform_->modulate(encoded);
+
+        result.insert(result.end(), training.begin(), training.end());
+        result.insert(result.end(), modulated.begin(), modulated.end());
+    }
+
+    LOG_MODEM(INFO, "[%s] Encoded burst: %zu blocks -> %zu samples",
+              log_prefix_.c_str(), frame_data_list.size(), result.size());
+
+    return result;
+}
+
 std::vector<float> StreamingEncoder::encodePing() {
     // PING is just the preamble (chirp) with no data
     // Always use MC-DPSK waveform for PING

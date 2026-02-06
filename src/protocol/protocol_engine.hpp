@@ -132,6 +132,10 @@ public:
     // --- Ping/Pong (fast presence check) ---
 
     // Callback when protocol wants to send a ping (modem transmits raw "ULTR")
+    // Burst mode TX callback - transmits multiple frames as single audio burst (OFDM only)
+    using TransmitBurstCallback = Connection::TransmitBurstCallback;
+    void setTransmitBurstCallback(TransmitBurstCallback cb);
+
     using PingTxCallback = Connection::PingTxCallback;
     void setPingTxCallback(PingTxCallback cb);
 
