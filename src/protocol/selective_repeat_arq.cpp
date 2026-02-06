@@ -292,6 +292,15 @@ void SelectiveRepeatARQ::advanceRXWindow() {
 
         LOG_MODEM(DEBUG, "SR-ARQ: Delivering seq=%d", rx_base_seq_);
 
+        // Update flags from the delivered frame's stored flags (not from the
+        // last arrived frame). When advanceRXWindow delivers multiple buffered
+        // frames in sequence (e.g., after retransmission fills a gap), the
+        // Connection layer calls lastRxHadMoreData() to check MORE_FRAG.
+        // Without this, it would see the flags from handleDataFrame's last
+        // call, which is the gap-filling frame — not the frame being delivered.
+        last_rx_flags_ = rx_window_[slot].flags;
+        last_rx_more_data_ = (rx_window_[slot].flags & v2::Flags::MORE_FRAG) != 0;
+
         if (on_data_received_) {
             on_data_received_(rx_window_[slot].payload);
         }

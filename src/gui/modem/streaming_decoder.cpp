@@ -733,9 +733,22 @@ void StreamingDecoder::decodeCurrentFrame() {
     bool is_ofdm = (mode_ == protocol::WaveformMode::OFDM_CHIRP ||
                     mode_ == protocol::WaveformMode::OFDM_COX);
 
-    size_t next_block_pos = (sync_position_ + frame_buffer.size()) % MAX_BUFFER_SAMPLES;
+    // For 1-CW control frames (ACK/NACK), only consume the actual frame samples
+    // instead of the full 4-CW size, to avoid eating into the next frame's signal
+    bool is_1cw_control = (result.codewords_ok == 1 && result.codewords_failed == 0);
+    size_t consumed = frame_buffer.size();
+    if (is_1cw_control && is_ofdm) {
+        size_t control_size = static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
+        if (control_size < consumed) {
+            LOG_MODEM(INFO, "[%s] 1-CW control frame: advancing %zu samples (not %zu)",
+                      log_prefix_.c_str(), control_size, consumed);
+            consumed = control_size;
+        }
+    }
+    size_t next_block_pos = (sync_position_ + consumed) % MAX_BUFFER_SAMPLES;
 
-    if (result.success && connected_ && is_ofdm) {
+    // Skip burst continuation for 1-CW control frames (ACKs are standalone, not part of a burst)
+    if (result.success && connected_ && is_ofdm && !is_1cw_control) {
         size_t min_block = static_cast<size_t>(waveform_->getMinSamplesForFrame());
 
         // Loop to decode multiple burst continuation blocks

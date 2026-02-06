@@ -92,7 +92,7 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     LOG_DEMOD(DEBUG, "estimateChannelFromLTS: num_symbols=%zu, symbol_samples=%zu, first_sample=%.6f",
              num_symbols, symbol_samples, training_samples[0]);
 
-    // DEBUG: Print carrier indices
+    // Print carrier indices
     {
         char idx_buf[128] = "";
         int pos = 0;
@@ -392,7 +392,7 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
 
         // Debug: log first 3 carrier H phases
         if (i < 3) {
-            LOG_DEMOD(INFO, "LTS carrier %zu: H=%.1f∠%.0f° -> ref=%.0f°",
+            LOG_DEMOD(DEBUG, "LTS carrier %zu: H=%.1f∠%.0f° -> ref=%.0f°",
                       i, h_mag, std::arg(h) * 180.0f / M_PI,
                       std::arg(lts_carrier_phases[i]) * 180.0f / M_PI);
         }

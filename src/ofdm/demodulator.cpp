@@ -197,13 +197,6 @@ void OFDMDemodulator::Impl::buildInterpTable() {
 // =============================================================================
 
 void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equalized, Modulation mod) {
-    // Debug: confirm function is called
-    static int entry_log = 0;
-    if (entry_log++ < 3) {
-        LOG_DEMOD(INFO, ">>> demodulateSymbol ENTRY: mod=%d, eq.size=%zu",
-                  static_cast<int>(mod), equalized.size());
-    }
-
     // Constellation symbols collected during demodulation (differential decoded for DPSK modes)
     std::vector<Complex> constellation_update;
 
@@ -282,7 +275,7 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
     if ((mod == Modulation::DQPSK || mod == Modulation::D8PSK) && dbpsk_prev_equalized.empty()) {
         dbpsk_prev_equalized.assign(equalized.size(), Complex(1, 0));
         dqpsk_skip_first_symbol = true;  // First diff uses synthetic ref → skip constellation
-        LOG_DEMOD(INFO, "DQPSK: Reference initialized to (1,0) for %zu carriers", equalized.size());
+        LOG_DEMOD(DEBUG, "DQPSK: Reference initialized to (1,0) for %zu carriers", equalized.size());
     }
 
     // Two-pass D8PSK decoding: use embedded DQPSK grid to estimate common phase error
@@ -292,7 +285,7 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
     if (mod == Modulation::D8PSK && d8psk_two_pass_enabled_) {
         float fading_index = last_fading_index;
         if (fading_index > TWO_PASS_FADING_THRESHOLD) {
-            LOG_DEMOD(INFO, "D8PSK two-pass: fading=%.3f > %.3f, applying correction",
+            LOG_DEMOD(DEBUG, "D8PSK two-pass: fading=%.3f > %.3f, applying correction",
                       fading_index, TWO_PASS_FADING_THRESHOLD);
             demodulateD8PSKTwoPass(equalized, noise_variance);
             snr_symbol_count++;
@@ -309,7 +302,7 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
     if (mod == Modulation::DQPSK && dqpsk_two_pass_enabled_) {
         float fading_index = last_fading_index;
         if (fading_index > TWO_PASS_FADING_THRESHOLD) {
-            LOG_DEMOD(INFO, "DQPSK two-pass: fading=%.3f > %.3f, applying correction",
+            LOG_DEMOD(DEBUG, "DQPSK two-pass: fading=%.3f > %.3f, applying correction",
                       fading_index, TWO_PASS_FADING_THRESHOLD);
             demodulateDQPSKTwoPass(equalized, noise_variance);
             snr_symbol_count++;
@@ -321,7 +314,7 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
     // Debug: log modulation value once per symbol
     static int mod_log_once = 0;
     if (mod_log_once++ < 5) {
-        LOG_DEMOD(INFO, "demodulateSymbol: mod=%d (DQPSK=%d), carriers=%zu, snr_count=%d",
+        LOG_DEMOD(DEBUG, "demodulateSymbol: mod=%d (DQPSK=%d), carriers=%zu, snr_count=%d",
                   static_cast<int>(mod), static_cast<int>(Modulation::DQPSK),
                   equalized.size(), snr_symbol_count);
     }
@@ -348,30 +341,10 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
                 break;
             }
             case Modulation::DQPSK: {
-                // One-time log to confirm we're hitting this code path
-                static int dqpsk_log_once = 0;
-                if (dqpsk_log_once++ < 3 && i == 0) {
-                    LOG_DEMOD(INFO, "DQPSK demodulation active: snr_symbol_count=%d, carriers=%zu",
-                              snr_symbol_count, equalized.size());
-                }
-
                 Complex prev_sym = dbpsk_prev_equalized[i];
                 Complex diff = sym * std::conj(prev_sym);
                 auto llrs = soft_demap::demapDQPSK(sym, prev_sym, nv);
                 soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
-
-                // Detailed diagnostic logging for first symbols
-                // Note: snr_symbol_count starts at 3 after LTS (2 training + 1 increment)
-                if (snr_symbol_count < 6 && i < 5) {
-                    float sym_phase = std::atan2(sym.imag(), sym.real()) * 180.0f / M_PI;
-                    float prev_phase = std::atan2(prev_sym.imag(), prev_sym.real()) * 180.0f / M_PI;
-                    float diff_phase = std::atan2(diff.imag(), diff.real()) * 180.0f / M_PI;
-                    LOG_DEMOD(INFO, "DQPSK sym=%d car=%zu: eq=%.2f∠%.0f° prev=%.2f∠%.0f° diff=%.0f° LLRs=[%.1f,%.1f]",
-                             snr_symbol_count, i,
-                             std::abs(sym), sym_phase,
-                             std::abs(prev_sym), prev_phase,
-                             diff_phase, llrs[0], llrs[1]);
-                }
 
                 if (!dqpsk_skip_first_symbol) {
                     constellation_update.push_back(diff);
@@ -516,21 +489,6 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
 
     // Store constellation symbols (differential decoded for DPSK, raw equalized for coherent)
     if (!constellation_update.empty()) {
-        // DEBUG: Phase histogram for first few symbols
-        static int hist_count = 0;
-        if (hist_count < 3 && mod == Modulation::DQPSK) {
-            int bins[8] = {0}; // 0-45, 45-90, 90-135, 135-180, 180-225, 225-270, 270-315, 315-360
-            for (const auto& sym : constellation_update) {
-                float phase = std::atan2(sym.imag(), sym.real()) * 180.0f / M_PI;
-                if (phase < 0) phase += 360.0f;
-                int bin = static_cast<int>(phase / 45.0f) % 8;
-                bins[bin]++;
-            }
-            LOG_DEMOD(INFO, "Phase histogram: 0-45:%d 45-90:%d 90-135:%d 135-180:%d 180-225:%d 225-270:%d 270-315:%d 315-360:%d",
-                      bins[0], bins[1], bins[2], bins[3], bins[4], bins[5], bins[6], bins[7]);
-            hist_count++;
-        }
-
         std::lock_guard<std::mutex> lock(constellation_mutex);
         constellation_symbols.insert(constellation_symbols.end(),
                                      constellation_update.begin(), constellation_update.end());
@@ -757,7 +715,7 @@ void OFDMDemodulator::Impl::demodulateDQPSKTwoPass(
             float phase_deg = std::atan2(constellation_update[i].imag(), constellation_update[i].real()) * 180.0f / M_PI;
             bp += snprintf(buf + bp, sizeof(buf) - bp, "%.0f° ", phase_deg);
         }
-        LOG_DEMOD(INFO, "DQPSK two-pass constellation sym=%d: %s(correction=%.1f°)",
+        LOG_DEMOD(DEBUG, "DQPSK two-pass constellation sym=%d: %s(correction=%.1f°)",
                   snr_symbol_count, buf, correction * 180.0f / M_PI);
     }
 }
@@ -1344,6 +1302,7 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     impl_->rx_buffer.insert(impl_->rx_buffer.end(), ptr, ptr + remaining);
 
     while (impl_->rx_buffer.size() >= impl_->symbol_samples) {
+
         SampleSpan sym_samples(impl_->rx_buffer.data(), impl_->symbol_samples);
         auto bb = impl_->toBaseband(sym_samples);
         auto fd = impl_->extractSymbol(bb, 0);
@@ -1369,8 +1328,31 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
         impl_->updateQuality();
     }
 
-    LOG_SYNC(INFO, "processPresynced: total %d symbols, got %zu soft bits",
-             impl_->synced_symbol_count.load(), impl_->soft_bits.size());
+    // Debug: count positive vs negative soft bits to check for all-zero demod issue
+    {
+        int pos_count = 0, neg_count = 0, zero_count = 0;
+        float min_abs = 999, max_abs = 0;
+        for (size_t i = 0; i < std::min(impl_->soft_bits.size(), size_t(648)); i++) {
+            float v = impl_->soft_bits[i];
+            if (v > 0.1f) pos_count++;
+            else if (v < -0.1f) neg_count++;
+            else zero_count++;
+            float av = std::abs(v);
+            if (av < min_abs) min_abs = av;
+            if (av > max_abs) max_abs = av;
+        }
+        LOG_SYNC(INFO, "processPresynced: %d symbols, %zu soft bits. CW0 stats: pos=%d neg=%d zero=%d min_abs=%.2f max_abs=%.2f first8=[%.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f]",
+                 impl_->synced_symbol_count.load(), impl_->soft_bits.size(),
+                 pos_count, neg_count, zero_count, min_abs, max_abs,
+                 impl_->soft_bits.size() > 0 ? impl_->soft_bits[0] : 0,
+                 impl_->soft_bits.size() > 1 ? impl_->soft_bits[1] : 0,
+                 impl_->soft_bits.size() > 2 ? impl_->soft_bits[2] : 0,
+                 impl_->soft_bits.size() > 3 ? impl_->soft_bits[3] : 0,
+                 impl_->soft_bits.size() > 4 ? impl_->soft_bits[4] : 0,
+                 impl_->soft_bits.size() > 5 ? impl_->soft_bits[5] : 0,
+                 impl_->soft_bits.size() > 6 ? impl_->soft_bits[6] : 0,
+                 impl_->soft_bits.size() > 7 ? impl_->soft_bits[7] : 0);
+    }
 
     LOG_DEMOD(DEBUG, "OFDM processPresynced: %d symbols, %zu soft bits, need %d",
               impl_->synced_symbol_count.load(), impl_->soft_bits.size(), LDPC_BLOCK_SIZE);

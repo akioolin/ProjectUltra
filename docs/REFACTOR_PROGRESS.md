@@ -4,29 +4,36 @@
 
 **Source Plan:** `~/.claude/plans/eager-percolating-naur.md`
 
-**Last Updated:** 2026-01-30
+**Last Updated:** 2026-02-06
 
 ---
 
-## Overall Progress: ~90% Complete
+## Overall Progress: ~95% Complete
 
 ```
 Phase 1: Core Interfaces     [########--] 80%   (IWaveform complete, ISyncMethod/ICodec optional)
 Phase 2: Waveform Impl       [##########] 100%  (OFDM_COX CFO fixed!)
-Phase 3: ModemEngine Refactor[########--] 80%   (StreamingDecoder needs redesign for continuous audio)
+Phase 3: ModemEngine Refactor[##########] 100%  (StreamingDecoder works, continuous audio fixed)
 Phase 4: Sync Methods        [----------]  0%   (optional - waveforms own their sync internally)
 Phase 5: Configuration       [----------]  0%   (optional - nice-to-have)
-Phase 6: Bug Fixes           [########--] 80%   (BUG-005: StreamingDecoder batch search issue)
-Phase 7: Continuous Audio    [####------] 40%   (NEW - cli_simulator/gui_simulator real-time audio)
+Phase 6: Bug Fixes           [##########] 100%  (BUG-005 fixed, all active bugs resolved)
+Phase 7: Continuous Audio    [##########] 100%  (cli_simulator full protocol working)
+Phase 8: Throughput          [##########] 100%  (1-CW ACK + R1/2 rate selection)
 ```
 
-### Recent Updates (2026-01-30)
-- ⚠️ **DISCOVERED BUG-005**: StreamingDecoder batch-search causes buffer position drift
-- ⚠️ cli_simulator connection fails at CONNECT_ACK (chirp found, but data reads noise)
-- ✅ cli_simulator audio model is CORRECT (single I/O thread per station)
-- ✅ Root cause identified: 3-second MIN_SAMPLES_FOR_SEARCH delays search
-- 📝 Created `docs/STREAMING_DECODER_REDESIGN.md` with full fix plan
-- 🔄 **NEXT**: Implement continuous correlation in feedAudio()
+### Recent Updates (2026-02-06)
+- ✅ **1-CW OFDM ACK frames**: Control frames encoded as 1 CW (0.216s) instead of 4 CW (0.648s)
+- ✅ **R1/2 rate selection enabled**: Automatic selection based on SNR + fading index
+- ✅ **Fixed detectDataSync false peaks**: Early exit at corr>0.95 prevents LDPC zero-padding peaks
+- ✅ **Fixed 1-CW sample overconsumption**: Decoder advances by correct frame size for control frames
+- ✅ **Fixed ARQ advanceRXWindow MORE_FRAG**: Per-slot flag delivery prevents message reassembly failure
+- ✅ **Diagnostic cleanup**: Removed all temporary INFO-level debug logging
+
+### Previous Updates (2026-01-30)
+- ✅ **FIXED BUG-005**: StreamingDecoder batch-search → continuous audio fixed
+- ✅ cli_simulator full protocol working (PING→CONNECT→MODE→DATA→DISCONNECT)
+- ✅ Good fading 100% CW success at R1/4 SNR=15 (CFO feedback + LTS residual correction)
+- ✅ MC-DPSK low SNR fix (relative PING detection + SNR-proportional soft bits)
 
 ### Previous Updates (2026-01-28)
 - ✅ Fixed PING detection in cli_simulator (connection phase works)

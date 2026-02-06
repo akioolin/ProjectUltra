@@ -441,16 +441,21 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
 
     if (is_control_frame) {
         // 1-CW encoding for control frames (no frame interleaving needed)
-        // Control frames always use R1/4 for robustness (20 bytes fits in 1 CW at R1/4)
-        auto cws = v2::encodeFrameWithLDPC(tx_data, CodeRate::R1_4);
+        // Use the negotiated code rate so decoder expects the same rate
+        auto cws = v2::encodeFrameWithLDPC(tx_data, code_rate_);
 
         Bytes encoded;
         for (const auto& cw : cws) {
             encoded.insert(encoded.end(), cw.begin(), cw.end());
         }
 
-        LOG_MODEM(DEBUG, "[%s] OFDM control: %zu bytes -> %zu CW (%zu coded)",
-                  log_prefix_.c_str(), tx_data.size(), cws.size(), encoded.size());
+        LOG_MODEM(INFO, "[%s] OFDM control: %zu bytes -> %zu CW (%zu coded bytes), rate=%d, first_encoded=[%02x %02x %02x %02x %02x %02x %02x %02x]",
+                  log_prefix_.c_str(), tx_data.size(), cws.size(), encoded.size(),
+                  static_cast<int>(code_rate_),
+                  encoded.size() > 0 ? encoded[0] : 0, encoded.size() > 1 ? encoded[1] : 0,
+                  encoded.size() > 2 ? encoded[2] : 0, encoded.size() > 3 ? encoded[3] : 0,
+                  encoded.size() > 4 ? encoded[4] : 0, encoded.size() > 5 ? encoded[5] : 0,
+                  encoded.size() > 6 ? encoded[6] : 0, encoded.size() > 7 ? encoded[7] : 0);
         return encoded;
     }
 

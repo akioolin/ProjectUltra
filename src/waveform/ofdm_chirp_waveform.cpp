@@ -333,6 +333,15 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
             best_corr = corr;
             best_offset = offset;
         }
+
+        // Early exit on first high-confidence peak. The LTS (two identical training
+        // symbols) is always the FIRST pair of identical symbols in the frame. With
+        // 1-CW LDPC zero-padding, data symbols can also be identical (all-zero bits →
+        // 0° DQPSK phase change), creating false peaks later in the search window.
+        // By stopping at the first peak above 0.95, we always lock onto the real LTS.
+        if (corr > 0.95f) {
+            break;
+        }
     }
 
     result.correlation = best_corr;
@@ -368,8 +377,8 @@ bool OFDMChirpWaveform::process(SampleSpan samples) {
     while (initial_phase_rad > M_PI) initial_phase_rad -= 2.0f * M_PI;
     while (initial_phase_rad < -M_PI) initial_phase_rad += 2.0f * M_PI;
 
-    LOG_MODEM(DEBUG, "OFDMChirpWaveform: process(): cfo_hz=%.1f, training_start=%zu, initial_phase=%.1f deg, samples=%zu",
-              cfo_hz_, training_start_sample_, initial_phase_rad * 180.0f / M_PI, samples.size());
+    LOG_MODEM(INFO, "OFDMChirpWaveform::process(): samples=%zu, cfo=%.1f, training_start=%zu",
+              samples.size(), cfo_hz_, training_start_sample_);
 
     // Pass CFO and initial phase to demodulator
     // This ensures CFO correction starts from the correct accumulated phase

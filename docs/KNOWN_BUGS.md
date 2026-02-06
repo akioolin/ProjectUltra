@@ -52,7 +52,7 @@ RxPipeline had incorrect IWaveform call sequence. Fixed by StreamingDecoder, the
 
 ### BUG-005: StreamingDecoder Batch-Search Causes Buffer Position Drift
 
-**Status:** IN PROGRESS - Redesign needed
+**Status:** FIXED - 2026-02-01 (StreamingDecoder redesigned with continuous correlation)
 **Discovered:** 2026-01-30
 **Location:** `src/gui/modem/streaming_decoder.cpp`
 
@@ -143,6 +143,21 @@ OFDM_COX now uses the same path as OFDM_CHIRP:
 **Status:** FIXED - 2026-01-28
 **Commit:** `7264753`
 **Details:** OFDM_COX now uses processPresynced() path like OFDM_CHIRP. 100% at ±50 Hz on AWGN 17+ dB.
+
+### BUG-F007: ARQ advanceRXWindow Delivers Frames With Wrong MORE_FRAG Flag
+**Status:** FIXED - 2026-02-06
+**Location:** `src/protocol/selective_repeat_arq.cpp`
+**Details:** When `advanceRXWindow()` delivered multiple buffered frames in sequence after retransmission filled a gap, `lastRxHadMoreData()` returned the flag from the last-arrived frame (the gap-filler), not the frame being delivered. Fixed by updating `last_rx_flags_` and `last_rx_more_data_` from each slot's stored flags before calling the delivery callback.
+
+### BUG-F008: detectDataSync False Peaks From 1-CW LDPC Zero-Padding
+**Status:** FIXED - 2026-02-06
+**Location:** `src/waveform/ofdm_chirp_waveform.cpp`
+**Details:** 1-CW ACK frames have LDPC zero-padding creating identical adjacent OFDM symbols. Schmidl-Cox autocorrelation found false ~1.0 peaks from these data symbols. Fixed by early exit at first peak > 0.95 (the real LTS is always first).
+
+### BUG-F009: 1-CW Control Frame Sample Overconsumption
+**Status:** FIXED - 2026-02-06
+**Location:** `src/gui/modem/streaming_decoder.cpp`
+**Details:** After decoding a 1-CW ACK (10368 samples), decoder consumed 31104 samples (4-CW size), eating into the next data frame. Fixed by detecting 1-CW control frames and advancing by `getMinSamplesForControlFrame()`.
 
 ### BUG-F005: CW[0] Decode Failures Due to Noise Variance
 **Status:** FIXED - 2026-02-02
