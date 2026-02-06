@@ -861,40 +861,53 @@ private:
         }
         std::cout << "  \033[32m✓ Handshake complete!\033[0m\n";
 
-        // Phase 3: Send 5 numbered messages
-        std::cout << "\n=== PHASE 3: DATA TRANSFER (5 messages) ===\n";
+        // Phase 3: Send 5 short + 2 long messages
+        std::cout << "\n=== PHASE 3: DATA TRANSFER (7 messages) ===\n";
 
-        for (int msg_num = 1; msg_num <= 5; msg_num++) {
-            std::string test_msg = "Message " + std::to_string(msg_num) + " from ALPHA";
+        std::vector<std::string> test_messages;
+        for (int i = 1; i <= 5; i++) {
+            test_messages.push_back("Message " + std::to_string(i) + " from ALPHA");
+        }
+        // Long messages that exceed single-frame capacity (61 bytes at R1/4)
+        test_messages.push_back(
+            "This is a long test message that exceeds the 61-byte frame capacity "
+            "and must be fragmented across multiple OFDM frames for delivery.");
+        test_messages.push_back(
+            "CQ CQ CQ de ALPHA. Testing long message fragmentation over HF radio. "
+            "The quick brown fox jumps over the lazy dog. 73 de ALPHA.");
 
-            if (!waitFor([this]{ return alpha_->isReadyToSend(); }, 10)) {
-                std::cout << "  \033[31m✗ ARQ not ready for message " << msg_num << "!\033[0m\n";
+        int total = static_cast<int>(test_messages.size());
+        for (int msg_num = 0; msg_num < total; msg_num++) {
+            const std::string& test_msg = test_messages[msg_num];
+
+            if (!waitFor([this]{ return alpha_->isReadyToSend(); }, 30)) {
+                std::cout << "  \033[31m✗ ARQ not ready for message " << (msg_num+1) << "!\033[0m\n";
                 return false;
             }
 
             // Reset received flag before sending
             message_received_.store(false);
 
-            std::cout << "  [" << msg_num << "/5] Sending: \"" << test_msg << "\"\n";
+            std::cout << "  [" << (msg_num+1) << "/" << total << "] Sending (" << test_msg.size() << "b): \"" << test_msg << "\"\n";
             alpha_->sendMessage(test_msg);
 
-            if (!waitFor([this]{ return message_received_.load(); }, 30)) {
-                std::cout << "  \033[31m✗ Message " << msg_num << " not received!\033[0m\n";
+            if (!waitFor([this]{ return message_received_.load(); }, 60)) {
+                std::cout << "  \033[31m✗ Message " << (msg_num+1) << " not received!\033[0m\n";
                 return false;
             }
 
             {
                 std::lock_guard<std::mutex> lock(msg_mutex_);
                 if (received_message_ == test_msg) {
-                    std::cout << "  \033[32m✓ [" << msg_num << "/5] Received: \"" << received_message_ << "\"\033[0m\n";
+                    std::cout << "  \033[32m✓ [" << (msg_num+1) << "/" << total << "] Received (" << received_message_.size() << "b): \"" << received_message_ << "\"\033[0m\n";
                 } else {
-                    std::cout << "  \033[31m✗ Message " << msg_num << " corrupted! Got: \"" << received_message_ << "\"\033[0m\n";
+                    std::cout << "  \033[31m✗ Message " << (msg_num+1) << " corrupted! Got: \"" << received_message_ << "\"\033[0m\n";
                     return false;
                 }
             }
         }
 
-        std::cout << "  \033[32m✓ All 5 messages transferred successfully!\033[0m\n";
+        std::cout << "  \033[32m✓ All " << total << " messages transferred successfully!\033[0m\n";
 
         // Phase 4: Disconnect (non-fatal if timeout - data transfer already proved)
         std::cout << "\n=== PHASE 4: DISCONNECT ===\n";

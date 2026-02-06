@@ -403,19 +403,46 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data) {
         return;
     }
 
+    if (more_data) {
+        // Fragment with MORE_FRAG - accumulate
+        rx_reassembly_buffer_.insert(rx_reassembly_buffer_.end(), payload.begin(), payload.end());
+        LOG_MODEM(DEBUG, "Connection: Accumulated fragment (%zu bytes, buffer now %zu bytes)",
+                  payload.size(), rx_reassembly_buffer_.size());
+
+        if (on_data_received_) {
+            on_data_received_(payload, true);
+        }
+        return;
+    }
+
+    // Final or single frame
+    Bytes complete_payload;
+    if (!rx_reassembly_buffer_.empty()) {
+        // Last fragment - combine with accumulated data
+        rx_reassembly_buffer_.insert(rx_reassembly_buffer_.end(), payload.begin(), payload.end());
+        complete_payload = std::move(rx_reassembly_buffer_);
+        rx_reassembly_buffer_.clear();
+        LOG_MODEM(INFO, "Connection: Reassembled %zu-byte message from fragments",
+                  complete_payload.size());
+    } else {
+        // Single-frame message (backwards compatible)
+        complete_payload = payload;
+    }
+
+    // Strip TEXT_MESSAGE type prefix if present
     size_t start = 0;
-    if (!payload.empty() && payload[0] == static_cast<uint8_t>(PayloadType::TEXT_MESSAGE)) {
+    if (!complete_payload.empty() && complete_payload[0] == static_cast<uint8_t>(PayloadType::TEXT_MESSAGE)) {
         start = 1;
     }
 
-    std::string text(payload.begin() + start, payload.end());
+    std::string text(complete_payload.begin() + start, complete_payload.end());
 
     if (on_message_received_) {
         on_message_received_(text);
     }
 
     if (on_data_received_) {
-        on_data_received_(payload, more_data);
+        on_data_received_(complete_payload, false);
     }
 }
 

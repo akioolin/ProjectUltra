@@ -44,6 +44,29 @@ Connection::Connection(const ConnectionConfig& config)
             } else {
                 file_transfer_.onSendFailed();
             }
+        } else if (!pending_tx_fragments_.empty()) {
+            if (!success) {
+                // Fragment send failed - abort remaining fragments
+                LOG_MODEM(WARN, "Connection: Fragment send failed, aborting remaining %zu fragments",
+                          pending_tx_fragments_.size() - next_fragment_idx_);
+                pending_tx_fragments_.clear();
+                next_fragment_idx_ = 0;
+                if (on_message_sent_) {
+                    on_message_sent_(false);
+                }
+            } else if (next_fragment_idx_ < pending_tx_fragments_.size()) {
+                // More fragments to send
+                sendNextFragment();
+            } else {
+                // All fragments ACKed
+                LOG_MODEM(INFO, "Connection: All %zu fragments sent and ACKed",
+                          pending_tx_fragments_.size());
+                pending_tx_fragments_.clear();
+                next_fragment_idx_ = 0;
+                if (on_message_sent_) {
+                    on_message_sent_(true);
+                }
+            }
         } else {
             if (on_message_sent_) {
                 on_message_sent_(success);
@@ -228,7 +251,36 @@ bool Connection::sendMessage(const std::string& text) {
         return false;
     }
 
-    return arq_.sendData(text);
+    // MC-DPSK uses variable-length codewords (no fixed frame limit), so no fragmentation needed.
+    // OFDM uses fixed 4-CW frames with a hard capacity limit that requires fragmentation.
+    bool is_ofdm = (negotiated_mode_ == WaveformMode::OFDM_CHIRP ||
+                    negotiated_mode_ == WaveformMode::OFDM_COX);
+
+    Bytes data(text.begin(), text.end());
+
+    if (!is_ofdm || data.size() <= v2::getFixedFramePayloadCapacity(data_code_rate_)) {
+        // Single frame - MC-DPSK can handle any size, OFDM fits in one frame
+        return arq_.sendData(data);
+    }
+
+    size_t capacity = v2::getFixedFramePayloadCapacity(data_code_rate_);
+
+    // Fragment the message into chunks that fit in one frame each
+    LOG_MODEM(INFO, "Connection: Fragmenting %zu byte message into %zu-byte chunks",
+              data.size(), capacity);
+
+    pending_tx_fragments_.clear();
+    next_fragment_idx_ = 0;
+
+    for (size_t offset = 0; offset < data.size(); offset += capacity) {
+        size_t chunk_size = std::min(capacity, data.size() - offset);
+        pending_tx_fragments_.emplace_back(data.begin() + offset, data.begin() + offset + chunk_size);
+    }
+
+    LOG_MODEM(INFO, "Connection: Split into %zu fragments", pending_tx_fragments_.size());
+
+    sendNextFragment();
+    return true;
 }
 
 bool Connection::isReadyToSend() const {
@@ -299,6 +351,21 @@ void Connection::sendNextFileChunk() {
         // MORE_FRAG indicates more data remaining in file (not burst)
         uint8_t flags = file_transfer_.hasMoreChunks() ? v2::Flags::MORE_FRAG : v2::Flags::NONE;
         arq_.sendDataWithFlags(chunk, flags);
+    }
+}
+
+void Connection::sendNextFragment() {
+    while (arq_.isReadyToSend() && next_fragment_idx_ < pending_tx_fragments_.size()) {
+        const Bytes& chunk = pending_tx_fragments_[next_fragment_idx_];
+        bool is_last = (next_fragment_idx_ + 1 == pending_tx_fragments_.size());
+        uint8_t flags = is_last ? v2::Flags::NONE : v2::Flags::MORE_FRAG;
+
+        LOG_MODEM(DEBUG, "Connection: Sending fragment %zu/%zu (%zu bytes, %s)",
+                  next_fragment_idx_ + 1, pending_tx_fragments_.size(), chunk.size(),
+                  is_last ? "FINAL" : "MORE_FRAG");
+
+        arq_.sendDataWithFlags(chunk, flags);
+        next_fragment_idx_++;
     }
 }
 
@@ -645,6 +712,9 @@ void Connection::enterDisconnected(const std::string& reason) {
     disconnect_ack_frame_.clear();
     arq_.reset();
     file_transfer_.cancel();
+    pending_tx_fragments_.clear();
+    next_fragment_idx_ = 0;
+    rx_reassembly_buffer_.clear();
 
     // Reset connect waveform to DPSK for next connection attempt
     connect_waveform_ = WaveformMode::MC_DPSK;
@@ -734,6 +804,9 @@ void Connection::reset() {
     connect_waveform_ = WaveformMode::MC_DPSK;  // Reset to DPSK for next connect attempt
     arq_.reset();
     file_transfer_.cancel();
+    pending_tx_fragments_.clear();
+    next_fragment_idx_ = 0;
+    rx_reassembly_buffer_.clear();
     LOG_MODEM(DEBUG, "Connection: Full reset");
 }
 

@@ -249,6 +249,13 @@ private:
     // File transfer controller
     FileTransferController file_transfer_;
 
+    // Message fragmentation (TX) - splits long messages across multiple ARQ frames
+    std::vector<Bytes> pending_tx_fragments_;
+    size_t next_fragment_idx_ = 0;
+
+    // Message reassembly (RX) - accumulates fragments into complete messages
+    Bytes rx_reassembly_buffer_;
+
     // Connection timing
     uint32_t timeout_remaining_ms_ = 0;
     int connect_retry_count_ = 0;
@@ -321,6 +328,7 @@ private:
 
     WaveformMode negotiateMode(uint8_t remote_caps, WaveformMode remote_pref);
     void sendNextFileChunk();
+    void sendNextFragment();
 };
 
 } // namespace protocol

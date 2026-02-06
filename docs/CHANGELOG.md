@@ -10,6 +10,47 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-02-05: Long message fragmentation for OFDM
+
+**What was broken:**
+- Long text messages (>61 bytes at R1/4) were silently truncated by `encodeFixedFrame()` to fit
+  the 4-CW OFDM frame. The receiver got truncated data, couldn't parse the protocol frame
+  (payload_len field says 233 bytes but only 63 bytes arrived), and never sent an ACK.
+  The sender retransmitted forever.
+
+**What was changed:**
+- `src/protocol/connection.hpp`:
+  - Added `pending_tx_fragments_`, `next_fragment_idx_`, `rx_reassembly_buffer_` members
+  - Added `sendNextFragment()` method declaration
+- `src/protocol/connection.cpp`:
+  - `sendMessage()`: Checks `getFixedFramePayloadCapacity(data_code_rate_)`, fragments if needed
+  - `sendNextFragment()`: Drip-feeds fragments with MORE_FRAG flag via ARQ window
+  - `sendComplete` callback: Handles fragment ACKs, sends more or fires on_message_sent_
+  - `enterDisconnected()` / `reset()`: Clear fragment buffers
+- `src/protocol/connection_handlers.cpp`:
+  - `handleDataPayload()`: Accumulates fragments when `more_data=true`, delivers complete
+    reassembled message when final fragment arrives (no MORE_FRAG)
+- `tools/cli_simulator.cpp`:
+  - Added 2 long test messages (132b, 126b) to the test suite alongside the 5 short ones
+
+**How it works:**
+- TX: `sendMessage()` splits into chunks of `getFixedFramePayloadCapacity()` bytes, queues them,
+  and feeds them through ARQ with `MORE_FRAG` flag on all but the last chunk
+- RX: `handleDataPayload()` accumulates payloads with `more_data=true` into `rx_reassembly_buffer_`,
+  then delivers the complete message when the final fragment (no flag) arrives
+- Single-frame messages are unchanged (backwards compatible)
+
+**Test verification:**
+```
+./build/cli_simulator --snr 15 --fading good --rate r1_4 --test
+# All 7 messages (5 short + 2 long) delivered correctly
+# 132-byte message: 3 fragments, reassembled correctly
+# 126-byte message: 3 fragments, reassembled correctly
+# TEST PASSED
+```
+
+---
+
 ## 2026-02-03: Refactor ModemEngine TX to use StreamingEncoder
 
 **What was broken:**
