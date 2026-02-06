@@ -492,6 +492,14 @@ public:
         // Per-symbol total magnitude for silence detection
         std::vector<float> sym_total_mag(num_symbols, 0.0f);
 
+        // Cache differential phases for two-pass demodulation
+        std::vector<float> cached_phases(num_symbols * config_.num_carriers);
+
+        // Phase noise estimation accumulators
+        float noise_sum = 0.0f;
+        int noise_count = 0;
+
+        // Pass 1: Demodulate all symbols, cache phases, estimate phase noise
         for (int sym = 0; sym < num_symbols; sym++) {
             const float* sym_data = data.data() + sym * config_.samples_per_symbol;
 
@@ -510,19 +518,54 @@ public:
                 prev_symbols_[c] = normalized;
 
                 float phase = std::arg(diff);
-                float confidence = mag * config_.num_carriers * 4.0f;
+                cached_phases[sym * config_.num_carriers + c] = phase;
 
-                while (phase < 0) phase += 2.0f * M_PI;
-                while (phase >= 2.0f * M_PI) phase -= 2.0f * M_PI;
+                // Estimate phase noise: find nearest ideal constellation point
+                if (config_.bits_per_symbol == 2) {
+                    // DQPSK ideal phases: ±π/4, ±3π/4
+                    // Quantize to nearest multiple of π/2, offset by π/4
+                    float shifted = phase - (float)M_PI / 4.0f;
+                    float nearest_idx = std::round(shifted / ((float)M_PI / 2.0f));
+                    float ideal_phase = nearest_idx * (float)M_PI / 2.0f + (float)M_PI / 4.0f;
+                    float phase_error = phase - ideal_phase;
+                    // Wrap to [-π, π]
+                    while (phase_error > (float)M_PI) phase_error -= 2.0f * (float)M_PI;
+                    while (phase_error < -(float)M_PI) phase_error += 2.0f * (float)M_PI;
+                    noise_sum += phase_error * phase_error;
+                    noise_count++;
+                } else {
+                    // DBPSK ideal phases: 0, π
+                    float nearest_idx = std::round(phase / (float)M_PI);
+                    float ideal_phase = nearest_idx * (float)M_PI;
+                    float phase_error = phase - ideal_phase;
+                    while (phase_error > (float)M_PI) phase_error -= 2.0f * (float)M_PI;
+                    while (phase_error < -(float)M_PI) phase_error += 2.0f * (float)M_PI;
+                    noise_sum += phase_error * phase_error;
+                    noise_count++;
+                }
+            }
+        }
+
+        // Compute SNR-proportional scale from phase noise variance
+        float phase_noise_var = (noise_count > 0) ? noise_sum / noise_count : 0.5f;
+        phase_noise_var = std::max(0.01f, phase_noise_var);   // Floor: prevents inf at high SNR
+        float scale = 2.0f * std::sqrt(1.0f / phase_noise_var);
+        scale = std::min(scale, 20.0f);                        // Cap: prevents overconfident LLRs
+
+
+        // Pass 2: Compute soft bits using calibrated scale
+        for (int sym = 0; sym < num_symbols; sym++) {
+            for (int c = 0; c < config_.num_carriers; c++) {
+                float phase = cached_phases[sym * config_.num_carriers + c];
 
                 if (config_.bits_per_symbol == 2) {
-                    float sb0 = confidence * std::sin(phase);
-                    float sb1 = confidence * std::sin(2.0f * phase);
-                    soft_bits.push_back(std::max(-10.0f, std::min(10.0f, sb0)));
-                    soft_bits.push_back(std::max(-10.0f, std::min(10.0f, sb1)));
+                    float sb0 = scale * std::sin(phase);
+                    float sb1 = scale * std::sin(2.0f * phase);
+                    soft_bits.push_back(std::max(-20.0f, std::min(20.0f, sb0)));
+                    soft_bits.push_back(std::max(-20.0f, std::min(20.0f, sb1)));
                 } else {
-                    float sb = confidence * std::cos(phase);
-                    soft_bits.push_back(std::max(-10.0f, std::min(10.0f, sb)));
+                    float sb = scale * std::cos(phase);
+                    soft_bits.push_back(std::max(-20.0f, std::min(20.0f, sb)));
                 }
             }
         }

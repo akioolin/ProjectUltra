@@ -10,6 +10,48 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-02-06: Fix MC-DPSK at low SNR (two issues)
+
+**What was broken:**
+- MC-DPSK failed at SNR=5 AWGN — CW0 decode failed every time. PING never detected,
+  connection timed out after 3 retries.
+- Two independent root causes:
+
+1. **PING detection used fixed RMS threshold (0.04):** PING frames are chirp-only (no data).
+   Detection checks if data region RMS < 0.04. At SNR=5, noise RMS is ~0.056, exceeding the
+   threshold. Decoder mistakenly tried to LDPC-decode noise, producing garbage.
+
+2. **MC-DPSK soft bits used fixed confidence scaling:** `confidence = mag × num_carriers × 4`
+   produced LLRs of magnitude ~20-32, hard-clipped to ±10. At low SNR, wrong bits also clipped
+   to ±10, making them indistinguishable from correct bits. LDPC couldn't converge.
+
+**What was changed:**
+- `src/gui/modem/streaming_decoder.cpp`: Replaced fixed PING RMS threshold with **relative
+  ratio** (data_RMS / training_RMS). PING has ratio < 0.5 at any SNR; DATA frames have ratio
+  ~0.9-1.2. Works across all SNR levels since it's a relative measurement.
+
+- `src/psk/multi_carrier_dpsk.hpp`: Restructured `demodulateSoft()` into two passes:
+  - **Pass 1**: Demodulate, cache differential phases, estimate phase noise variance from
+    nearest-constellation-point errors.
+  - **Pass 2**: Compute LLRs using SNR-proportional scale: `2 × sqrt(1/phase_noise_var)`,
+    capped at 20.0, floored via phase_noise_var minimum of 0.01.
+  - Raised clip limit from ±10 to ±20 to match OFDM's MAX_LLR.
+
+**How it works:**
+- Phase noise variance is naturally proportional to 1/SNR for differential modulation.
+  At SNR=5: var≈0.03, scale≈12. At SNR=20: var≈0.01, scale=20 (cap). This produces
+  appropriately soft LLRs at low SNR that LDPC can distinguish and correct.
+- Relative PING threshold: training region has chirp signal, data region has only noise for
+  PING. The ratio is SNR-independent since both regions see the same noise floor.
+
+**Test verification:**
+- `./build/cli_simulator --snr 5 --rate r1_4 --test`: PASSED (100% CW, 0 retransmissions)
+- `./build/cli_simulator --snr 0 --fading moderate --rate r1_4 --test`: PASSED (90% CW, 1 retransmission, all 7 messages)
+- `./build/cli_simulator --snr 10 --fading moderate --rate r1_4 --test`: PASSED (100% CW, 0 retransmissions)
+- `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test`: PASSED (100% CW, 0 retransmissions — OFDM regression)
+
+---
+
 ## 2026-02-06: Fix burst block detection in detectDataSync
 
 **What was broken:**

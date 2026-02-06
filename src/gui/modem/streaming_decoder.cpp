@@ -546,6 +546,17 @@ void StreamingDecoder::decodeCurrentFrame() {
         training_skip = 1024;
     }
 
+    // Compute training region RMS (signal + noise)
+    float training_rms = 0.0f;
+    size_t train_len = std::min(training_skip, frame_buffer.size());
+    if (train_len > 0) {
+        for (size_t i = 0; i < train_len; i++) {
+            training_rms += frame_buffer[i] * frame_buffer[i];
+        }
+        training_rms = std::sqrt(training_rms / train_len);
+    }
+
+    // Compute data region RMS
     float rms = 0.0f;
     size_t check_start = std::min(training_skip, frame_buffer.size());
     size_t check_len = std::min(frame_buffer.size() - check_start, size_t(5000));
@@ -556,13 +567,17 @@ void StreamingDecoder::decodeCurrentFrame() {
         rms = std::sqrt(rms / check_len);
     }
 
-    // PING threshold: noise floor ~0.01, faded data ~0.07, normal data ~0.15
-    // Use 0.04 to avoid misclassifying faded data frames as PINGs
-    constexpr float PING_RMS_THRESHOLD = 0.04f;
-    LOG_MODEM(INFO, "[%s] PING check: RMS=%.4f (threshold=%.2f), sync_pos=%zu, check_start=%zu",
-              log_prefix_.c_str(), rms, PING_RMS_THRESHOLD, sync_position_, check_start);
+    // PING detection: use ratio of data RMS to training RMS
+    // PING (chirp only): data region is noise-only, ratio << 1 (typically 0.15-0.45)
+    // DATA frame: data region has signal, ratio ~0.5-1.0
+    // Ratio threshold 0.5 works across all SNR levels since it's relative
+    float rms_ratio = (training_rms > 0.001f) ? rms / training_rms : 0.0f;
+    bool is_ping = rms_ratio < 0.5f;
 
-    if (rms < PING_RMS_THRESHOLD) {
+    LOG_MODEM(INFO, "[%s] PING check: RMS=%.4f, train_RMS=%.4f, ratio=%.3f (threshold=0.5), sync_pos=%zu",
+              log_prefix_.c_str(), rms, training_rms, rms_ratio, sync_position_);
+
+    if (is_ping) {
         // PING detected
         LOG_MODEM(INFO, "[%s] PING detected (RMS=%.4f), SNR=%.1f dB, CFO=%.1f Hz",
                   log_prefix_.c_str(), rms, sync_snr_, sync_cfo_);
