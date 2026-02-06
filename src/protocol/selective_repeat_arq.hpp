@@ -125,6 +125,7 @@ private:
     // Delayed SACK for half-duplex (wait for burst to complete)
     bool sack_pending_ = false;     // SACK waiting to be sent
     uint32_t sack_timer_ms_ = 0;    // Time until SACK is sent
+    uint32_t frames_since_ack_ = 0; // Frames received since last ACK sent
 
     // Statistics
     ARQStats stats_;

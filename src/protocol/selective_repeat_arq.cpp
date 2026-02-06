@@ -151,16 +151,18 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
             LOG_MODEM(DEBUG, "SR-ARQ: Duplicate DATA seq=%d", seq);
         }
 
-        // ACK strategy: immediate for single frames, delayed for bursts
-        if (last_rx_more_data_) {
-            // More fragments coming (file transfer) — delay to batch-ACK
-            sack_pending_ = true;
-            sack_timer_ms_ = config_.sack_delay_ms;
-        } else {
-            // Single frame or last fragment — ACK immediately
+        // ACK strategy: immediate when burst window is full or last fragment
+        frames_since_ack_++;
+        if (!last_rx_more_data_ || frames_since_ack_ >= config_.window_size) {
+            // Window full or last fragment — ACK immediately
             sendSack();
             sack_pending_ = false;
             sack_timer_ms_ = 0;
+            frames_since_ack_ = 0;
+        } else {
+            // More fragments coming, window not full — short delay as fallback
+            sack_pending_ = true;
+            sack_timer_ms_ = config_.sack_delay_ms;
         }
 
     } else {
@@ -228,6 +230,7 @@ void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
             sendSack();
             sack_pending_ = false;
             sack_timer_ms_ = 0;
+            frames_since_ack_ = 0;
         } else {
             sack_timer_ms_ -= elapsed_ms;
         }
@@ -393,6 +396,7 @@ void SelectiveRepeatARQ::reset() {
 
     sack_pending_ = false;
     sack_timer_ms_ = 0;
+    frames_since_ack_ = 0;
 
     LOG_MODEM(DEBUG, "SR-ARQ: Reset");
 }
