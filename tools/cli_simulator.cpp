@@ -203,6 +203,7 @@ public:
         if (running_) return;
         running_ = true;
         audio_thread_ = std::thread(&SimulatedStation::audioLoop, this);
+        decode_thread_ = std::thread(&SimulatedStation::decodeLoop, this);
     }
 
     void stop() {
@@ -210,6 +211,9 @@ public:
         if (decoder_) decoder_->stop();
         if (audio_thread_.joinable()) {
             audio_thread_.join();
+        }
+        if (decode_thread_.joinable()) {
+            decode_thread_.join();
         }
     }
 
@@ -288,6 +292,7 @@ private:
 
     std::atomic<bool> running_{false};
     std::thread audio_thread_;
+    std::thread decode_thread_;
 
     // TX queue - samples waiting to be transmitted
     std::mutex tx_mutex_;
@@ -707,10 +712,9 @@ private:
                 rx_samples = channel_.receiveForB(SAMPLES_PER_CALLBACK);
             }
 
-            // 2. FEED TO DECODER (StreamingDecoder directly)
+            // 2. FEED TO DECODER (audio thread only buffers - decode thread processes)
             if (decoder_) {
                 decoder_->feedAudio(rx_samples.data(), rx_samples.size());
-                decoder_->processBuffer();
             }
 
             // 3. GET TX SAMPLES - check if we have anything to transmit
@@ -749,6 +753,20 @@ private:
             // Wait for next callback (real-time pacing)
             next_callback += std::chrono::milliseconds(CALLBACK_INTERVAL_MS);
             std::this_thread::sleep_until(next_callback);
+        }
+    }
+
+    // DECODE THREAD - like the real ModemEngine::rxDecodeLoop()
+    // Runs independently from audio feed, just like a real sound card + decoder
+    void decodeLoop() {
+        while (running_) {
+            if (decoder_) {
+                // processBuffer() blocks until data is available (via condition variable)
+                // or until stop() is called
+                decoder_->processBuffer();
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
         }
     }
 };
