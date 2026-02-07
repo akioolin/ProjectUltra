@@ -90,6 +90,7 @@ public:
     int getDataPreambleSamples() const override;  // Training only
     int getMinSamplesForFrame() const override;
     int getMinSamplesForControlFrame() const override;
+    int getMinSamplesForCWCount(int num_cw) const override;
 
     // ========================================================================
     // OFDM-Chirp Specific
@@ -105,7 +106,6 @@ private:
     void initComponents();
     sync::ChirpConfig getChirpConfig() const;
     void configurePilotsForCodeRate(CodeRate rate);
-    int getMinSamplesForCWCount(int num_cw) const;
 
     ModemConfig config_;
     std::unique_ptr<OFDMModulator> modulator_;

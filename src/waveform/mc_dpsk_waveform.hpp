@@ -86,6 +86,7 @@ public:
     int getSamplesPerSymbol() const override { return config_.samples_per_symbol; }
     int getPreambleSamples() const override;
     int getMinSamplesForFrame() const override;
+    int getMinSamplesForCWCount(int num_cw) const override;
 
     // ========================================================================
     // MC-DPSK Specific

@@ -108,6 +108,7 @@
 - OFDM_CHIRP Moderate fading: WORKING - R1/4 89% CW success (57/64), 100% message delivery via ARQ
 - OFDM_CHIRP R3/4: Not recommended on fading (only AWGN)
 - 1-CW ACK frames: WORKING - control frames use 1 CW (3× faster ACK)
+- Variable-CW frames: WORKING - CONNECT/DISCONNECT use exact CW count (2 at R1/2, 3 at R1/4)
 - OFDM_COX: WORKING - DATA phase passes at SNR=20 dB
 - OTFS: EXPERIMENTAL - See OTFS Status section below
 - cli_simulator: FULLY WORKING - all phases pass on AWGN and fading

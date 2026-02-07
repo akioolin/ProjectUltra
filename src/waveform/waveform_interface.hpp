@@ -196,6 +196,13 @@ public:
     // Default: same as full frame (override for OFDM to get shorter ACK frames)
     virtual int getMinSamplesForControlFrame() const { return getMinSamplesForFrame(); }
 
+    // Get minimum samples for a frame with exactly N codewords
+    // Used by decoder to compute exact buffer sizes after peeking CW0 header
+    virtual int getMinSamplesForCWCount(int num_cw) const {
+        // Default: 1 CW = control frame, N CWs = full frame
+        return (num_cw <= 1) ? getMinSamplesForControlFrame() : getMinSamplesForFrame();
+    }
+
     // Get minimum samples needed for decoder to search and decode one frame
     // This includes preamble + training + data + margin
     // Used by StreamingDecoder for buffer threshold in connected mode

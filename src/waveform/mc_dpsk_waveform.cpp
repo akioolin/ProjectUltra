@@ -304,6 +304,19 @@ int MCDPSKWaveform::getMinSamplesForFrame() const {
     return training_samples + ref_samples + data_samples;
 }
 
+int MCDPSKWaveform::getMinSamplesForCWCount(int num_cw) const {
+    // Training + reference + data for num_cw codewords
+    int training_samples = config_.training_symbols * config_.samples_per_symbol;
+    int ref_samples = config_.samples_per_symbol;
+
+    constexpr int LDPC_BLOCK_SIZE = 648;
+    int bits_per_symbol = config_.num_carriers * config_.bits_per_symbol;
+    int data_symbols_per_cw = (LDPC_BLOCK_SIZE + bits_per_symbol - 1) / bits_per_symbol;
+    int data_samples = num_cw * data_symbols_per_cw * config_.samples_per_symbol;
+
+    return training_samples + ref_samples + data_samples;
+}
+
 float MCDPSKWaveform::getFadingIndex() const {
     if (demodulator_) {
         return demodulator_->getFadingIndex();

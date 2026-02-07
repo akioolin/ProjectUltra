@@ -10,6 +10,57 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-02-06: Restructure variable-CW frame handling — fix DISCONNECT at R1/2
+
+**What was broken:**
+- DISCONNECT frame decode failed at R1/2 OFDM. BRAVO never saw ALPHA's DISCONNECT, connection timed out.
+- Three root causes:
+  1. `ConnectFrame::serialize()` hardcodes `total_cw=4` (frame_v2.cpp:755), but actual LDPC encoding
+     produces 2 CWs at R1/2 and 3 CWs at R1/4 for 44-byte ConnectFrames.
+  2. No way for decoder to compute exact buffer size for N CWs — `getMinSamplesForCWCount(int)` was
+     private in OFDMChirpWaveform, inaccessible to decoder.
+  3. OFDM decoder always processed full 4-CW buffer (31104 samples). For 2-CW DISCONNECT (17280 samples),
+     the extra 13824 samples of noise degraded LLR quality → decode failure.
+
+**What was changed:**
+
+1. **Promoted `getMinSamplesForCWCount(int)` to IWaveform interface** with default implementation.
+   OFDMChirpWaveform overrides with exact calculation. Added override to MCDPSKWaveform with
+   proper `training + ref + N × data_per_cw` calculation.
+
+2. **Encoder patches `total_cw` for OFDM ConnectFrames**: After LDPC encoding, compares actual CW
+   count with header's total_cw. If different, patches byte 12 (total_cw), recalculates header CRC
+   (bytes 15-16) and frame CRC (last 2 bytes), then re-encodes.
+
+3. **Decoder restructured with CW0 peek-first strategy**:
+   - MC-DPSK: Always starts with 1-CW buffer, peeks CW0 header for total_cw, waits for exact size.
+   - Connected OFDM: Starts with full 4-CW buffer (data frames use frame interleaving, CW0 can't be
+     decoded independently). If 4-CW decode fails, falls back to small-frame recovery: 1-CW peek →
+     read total_cw → reprocess with exact `getMinSamplesForCWCount(N)` size.
+   - Disconnected OFDM: 1-CW initial buffer for control frame detection.
+
+4. **Exact consumed-sample calculation**: Non-data frames advance by `getMinSamplesForCWCount(actual_cw)`
+   instead of full 4-CW frame size. E.g., 2-CW DISCONNECT advances 17280 samples, not 31104.
+
+5. **`checkIfReadyToDecode()` uses exact calculations**: Replaced crude `(min_frame * 9) / 10`
+   arithmetic with three-way logic based on pending_total_cw, connected OFDM, or MC-DPSK/disconnected.
+
+**Files changed:**
+- `src/waveform/waveform_interface.hpp`: Added virtual `getMinSamplesForCWCount(int)` to IWaveform
+- `src/waveform/ofdm_chirp_waveform.hpp`: Moved method from private to public with override
+- `src/waveform/mc_dpsk_waveform.hpp`: Added `getMinSamplesForCWCount` override declaration
+- `src/waveform/mc_dpsk_waveform.cpp`: Added implementation with proper sample calculation
+- `src/gui/modem/streaming_encoder.cpp`: Added total_cw patching for OFDM ConnectFrames
+- `src/gui/modem/streaming_decoder.cpp`: Restructured `checkIfReadyToDecode()` and `decodeCurrentFrame()`
+
+**Test verification:**
+- R1/2 AWGN SNR=20: PASSED, 0 retransmissions, DISCONNECT decoded as 2/2 CWs
+- R1/4 good fading SNR=15 regression: PASSED, 0 retransmissions, 100% CW success
+- MC-DPSK moderate fading SNR=10 regression: PASSED, 0 retransmissions, 100% success
+- R1/2 good fading SNR=20: PASSED, 8 retransmissions (all 7 messages delivered)
+
+---
+
 ## 2026-02-06: OFDM throughput improvements — 1-CW ACK + R1/2 rate selection
 
 **What was changed:**

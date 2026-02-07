@@ -430,32 +430,54 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
         return encoded;
     }
 
-    // OFDM: Check if this is a control frame (1 CW) or data frame (4 CWs)
+    // OFDM: Check if this is a control/connect frame or data frame
     // Control frames (ACK, NACK, MODE_CHANGE, etc.) are 20 bytes = 1 CW
+    // Connect frames (CONNECT, DISCONNECT, etc.) are 44 bytes = 2 CWs at R1/2
+    // Both use variable-CW encoding (no frame interleaving)
     // Data frames use 4-CW fixed frame encoding with frame interleaving
-    bool is_control_frame = false;
-    if (tx_data.size() <= 20 && tx_data.size() >= 3) {
+    bool is_variable_cw_frame = false;
+    if (tx_data.size() >= 3) {
         uint8_t frame_type = tx_data[2];
-        is_control_frame = v2::isControlFrame(static_cast<v2::FrameType>(frame_type));
+        auto ft = static_cast<v2::FrameType>(frame_type);
+        is_variable_cw_frame = v2::isControlFrame(ft) || v2::isConnectFrame(ft);
     }
 
-    if (is_control_frame) {
-        // 1-CW encoding for control frames (no frame interleaving needed)
-        // Use the negotiated code rate so decoder expects the same rate
+    if (is_variable_cw_frame) {
+        // Variable-CW encoding (no frame interleaving needed)
+        // Control frames = 1 CW, Connect frames = 2 CWs at R1/2
         auto cws = v2::encodeFrameWithLDPC(tx_data, code_rate_);
+        uint8_t actual_cw = static_cast<uint8_t>(cws.size());
+
+        // Patch total_cw for ConnectFrames (CONNECT, DISCONNECT, etc.)
+        // ConnectFrame::serialize() hardcodes total_cw=4 at byte 12, but actual
+        // encoding may produce fewer CWs (e.g. 2 at R1/2 for 44-byte ConnectFrame)
+        // ControlFrames (20 bytes) don't have total_cw field — parseHeader() returns 1
+        auto ft = static_cast<v2::FrameType>(tx_data[2]);
+        if (v2::isConnectFrame(ft) && tx_data.size() > 16 && tx_data[12] != actual_cw) {
+            LOG_MODEM(INFO, "[%s] OFDM: Patching ConnectFrame total_cw %d -> %d",
+                      log_prefix_.c_str(), tx_data[12], actual_cw);
+            tx_data[12] = actual_cw;
+            // Recalculate header CRC (bytes 0..14 → CRC at 15-16)
+            uint16_t hcrc = v2::ControlFrame::calculateCRC(tx_data.data(), 15);
+            tx_data[15] = (hcrc >> 8) & 0xFF;
+            tx_data[16] = hcrc & 0xFF;
+            // Recalculate frame CRC (last 2 bytes cover everything before them)
+            size_t fcrc_offset = tx_data.size() - 2;
+            uint16_t fcrc = v2::ControlFrame::calculateCRC(tx_data.data(), fcrc_offset);
+            tx_data[fcrc_offset] = (fcrc >> 8) & 0xFF;
+            tx_data[fcrc_offset + 1] = fcrc & 0xFF;
+            // Re-encode with patched header
+            cws = v2::encodeFrameWithLDPC(tx_data, code_rate_);
+        }
 
         Bytes encoded;
         for (const auto& cw : cws) {
             encoded.insert(encoded.end(), cw.begin(), cw.end());
         }
 
-        LOG_MODEM(INFO, "[%s] OFDM control: %zu bytes -> %zu CW (%zu coded bytes), rate=%d, first_encoded=[%02x %02x %02x %02x %02x %02x %02x %02x]",
+        LOG_MODEM(INFO, "[%s] OFDM control/connect: %zu bytes -> %zu CW (%zu coded bytes), rate=%d",
                   log_prefix_.c_str(), tx_data.size(), cws.size(), encoded.size(),
-                  static_cast<int>(code_rate_),
-                  encoded.size() > 0 ? encoded[0] : 0, encoded.size() > 1 ? encoded[1] : 0,
-                  encoded.size() > 2 ? encoded[2] : 0, encoded.size() > 3 ? encoded[3] : 0,
-                  encoded.size() > 4 ? encoded[4] : 0, encoded.size() > 5 ? encoded[5] : 0,
-                  encoded.size() > 6 ? encoded[6] : 0, encoded.size() > 7 ? encoded[7] : 0);
+                  static_cast<int>(code_rate_));
         return encoded;
     }
 

@@ -460,8 +460,6 @@ void StreamingDecoder::checkIfReadyToDecode() {
         return;
     }
 
-    size_t min_frame = static_cast<size_t>(waveform_->getMinSamplesForFrame());
-
     // How many samples do we have from sync position?
     size_t available;
     {
@@ -485,15 +483,19 @@ void StreamingDecoder::checkIfReadyToDecode() {
         return;
     }
 
-    // Calculate how much we need
+    // Calculate how much we need — must match decodeCurrentFrame() buffer sizing
+    bool is_ofdm_here = (mode_ == protocol::WaveformMode::OFDM_CHIRP ||
+                         mode_ == protocol::WaveformMode::OFDM_COX);
     size_t needed;
     if (pending_total_cw_ > 0) {
-        // We know the frame size from CW0 peek - wait for all CWs
-        size_t cw_data = (min_frame * 9) / 10;
-        needed = min_frame + (pending_total_cw_ - 1) * cw_data;
+        // We know exact CW count from CW0 peek — get exact sample count
+        needed = static_cast<size_t>(waveform_->getMinSamplesForCWCount(pending_total_cw_));
+    } else if (is_ofdm_here && connected_) {
+        // Connected OFDM: expect full 4-CW data frames
+        needed = static_cast<size_t>(waveform_->getMinSamplesForFrame());
     } else {
-        // Disconnected: always expect full frames
-        needed = min_frame;
+        // MC-DPSK or disconnected: 1-CW minimum for header peek
+        needed = static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
     }
 
     if (available >= needed) {
@@ -507,7 +509,26 @@ void StreamingDecoder::decodeCurrentFrame() {
         return;
     }
 
-    size_t min_frame = static_cast<size_t>(waveform_->getMinSamplesForFrame());
+    bool is_ofdm = (mode_ == protocol::WaveformMode::OFDM_CHIRP ||
+                    mode_ == protocol::WaveformMode::OFDM_COX);
+
+    // Determine how many samples to copy from buffer
+    // Strategy depends on mode and state:
+    // - pending_total_cw_ > 0: exact size from prior CW0 peek
+    // - Connected OFDM, first pass: full 4-CW buffer (most frames are data, frame-interleaved)
+    // - MC-DPSK: 1-CW for peek (MC-DPSK getMinSamplesForFrame() == 1 CW by design)
+    // - Disconnected: full frame (always MC-DPSK for handshake)
+    size_t frame_len;
+    if (pending_total_cw_ > 0) {
+        frame_len = static_cast<size_t>(waveform_->getMinSamplesForCWCount(pending_total_cw_));
+    } else if (is_ofdm && connected_) {
+        // Connected OFDM: expect 4-CW data frames (frame-interleaved, can't peek CW0)
+        // If it turns out to be a smaller frame, we'll retry with smaller buffer
+        frame_len = static_cast<size_t>(waveform_->getMinSamplesForFrame());
+    } else {
+        // MC-DPSK or disconnected: 1-CW peek
+        frame_len = static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
+    }
 
     // Copy frame samples from buffer
     std::vector<float> frame_buffer;
@@ -521,11 +542,6 @@ void StreamingDecoder::decodeCurrentFrame() {
             available = MAX_BUFFER_SAMPLES - sync_position_ + write_pos_;
         }
 
-        size_t frame_len = min_frame;
-        if (pending_total_cw_ > 1) {
-            size_t cw_data = (min_frame * 9) / 10;
-            frame_len = min_frame + (pending_total_cw_ - 1) * cw_data;
-        }
         frame_len = std::min(frame_len, available);
 
         frame_buffer.resize(frame_len);
@@ -605,10 +621,10 @@ void StreamingDecoder::decodeCurrentFrame() {
             stats_.pings_received++;
         }
 
-        // Skip past the PING (sync_position_ + min_frame)
-        // Don't skip to write_pos_ - that would miss frames already in buffer
+        // Skip past the PING
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
+            size_t min_frame = static_cast<size_t>(waveform_->getMinSamplesForFrame());
             correlation_pos_ = (sync_position_ + min_frame) % MAX_BUFFER_SAMPLES;
         }
 
@@ -616,7 +632,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         return;
     }
 
-    // Data frame - decode
+    // Data frame - process audio to get soft bits
     waveform_->setFrequencyOffset(sync_cfo_);
 
     auto decode_start = std::chrono::steady_clock::now();
@@ -634,17 +650,12 @@ void StreamingDecoder::decodeCurrentFrame() {
         state_ = DecoderState::SEARCHING;
         return;
     }
-    LOG_MODEM(INFO, "[%s] Got %zu soft bits, proceeding to decode", log_prefix_.c_str(), soft_bits.size());
+    LOG_MODEM(INFO, "[%s] Got %zu soft bits (%zu samples), proceeding to decode",
+              log_prefix_.c_str(), soft_bits.size(), frame_buffer.size());
 
     last_fading_index_.store(waveform_->getFadingIndex());
 
     // Feed back pilot-corrected CFO to cached value
-    // Chirp-based CFO can be wrong on fading channels. The demodulator uses
-    // pilot tracking to refine it. Update our cached CFO so subsequent frames
-    // don't re-inject the wrong chirp CFO.
-    // CRITICAL: On fading channels, pilot tracking can give wildly wrong CFO
-    // estimates (e.g. 31 Hz when real CFO is 0). Clamp the drift to prevent
-    // the feedback loop from oscillating.
     float corrected_cfo = waveform_->estimatedCFO();
     float current_cfo = last_cfo_.load();
 
@@ -665,43 +676,81 @@ void StreamingDecoder::decodeCurrentFrame() {
     last_cfo_.store(corrected_cfo);
     sync_cfo_ = corrected_cfo;
 
-    // Check if we need more codewords
     constexpr size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;
+    CodeRate rate = connected_ ? code_rate_ : CodeRate::R1_4;
 
-    if (pending_total_cw_ == 0 && soft_bits.size() >= LDPC_BLOCK) {
-        // Peek at header
+    // ========================================================================
+    // CW0 peek for MC-DPSK (non-OFDM, 1-CW buffer)
+    // MC-DPSK starts with 1-CW buffer, needs to check total_cw before decode
+    // ========================================================================
+
+    if (pending_total_cw_ == 0 && !is_ofdm && soft_bits.size() >= LDPC_BLOCK) {
         std::vector<float> cw0(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
-
-        // Channel deinterleaving for OFDM modes (spreads fading errors across LDPC codeword)
-        // TEMPORARILY DISABLED FOR TESTING
-        bool use_interleave = false;
-        (void)((mode_ == protocol::WaveformMode::OFDM_CHIRP ||
-                mode_ == protocol::WaveformMode::OFDM_COX));
-        if (use_interleave && interleaver_) {
-            cw0 = interleaver_->deinterleave(cw0);
-        }
-
-        CodeRate rate = connected_ ? code_rate_ : CodeRate::R1_4;
         codec_->setRate(rate);
-        auto [ok, data] = codec_->decode(cw0);
+        auto [peek_ok, peek_data] = codec_->decode(cw0);
 
-        if (ok && data.size() >= 4 && data[0] == 0x55 && data[1] == 0x4C) {
-            auto hdr = v2::parseHeader(data);
-            if (hdr.valid) {
+        if (peek_ok && peek_data.size() >= 4 && peek_data[0] == 0x55 && peek_data[1] == 0x4C) {
+            auto hdr = v2::parseHeader(peek_data);
+            if (hdr.valid && hdr.total_cw > 1) {
                 int avail_cw = static_cast<int>(soft_bits.size() / LDPC_BLOCK);
                 if (avail_cw < hdr.total_cw) {
                     pending_total_cw_ = hdr.total_cw;
                     state_ = DecoderState::SYNC_FOUND;
-                    LOG_MODEM(INFO, "[%s] Need %d codewords, have %d - waiting",
-                              log_prefix_.c_str(), hdr.total_cw, avail_cw);
+                    LOG_MODEM(INFO, "[%s] CW0 peek: need %d CWs (have %d) — waiting for %d samples",
+                              log_prefix_.c_str(), hdr.total_cw, avail_cw,
+                              waveform_->getMinSamplesForCWCount(hdr.total_cw));
                     return;
                 }
             }
         }
     }
 
-    // Decode full frame
+    // Decode the frame using the soft bits
     DecodeResult result = decodeFrame(soft_bits, sync_snr_, sync_cfo_);
+
+    // ========================================================================
+    // Small-frame recovery for OFDM connected mode:
+    // If full 4-CW buffer decode failed, the frame might be a small non-data
+    // frame (e.g. DISCONNECT = 2 CWs at R1/2) where trailing noise symbols
+    // degraded LLR quality. Retry with 1-CW peek to determine actual size.
+    // ========================================================================
+
+    if (!result.success && is_ofdm && connected_ && pending_total_cw_ == 0) {
+        size_t one_cw_s = static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
+        if (one_cw_s <= frame_buffer.size()) {
+            waveform_->setFrequencyOffset(sync_cfo_);
+            waveform_->process(SampleSpan(frame_buffer.data(), one_cw_s));
+            auto short_bits = waveform_->getSoftBits();
+
+            if (short_bits.size() >= LDPC_BLOCK) {
+                std::vector<float> cw0_short(short_bits.begin(), short_bits.begin() + LDPC_BLOCK);
+                codec_->setRate(rate);
+                auto [ok2, data2] = codec_->decode(cw0_short);
+
+                if (ok2 && data2.size() >= 4 && data2[0] == 0x55 && data2[1] == 0x4C) {
+                    auto hdr2 = v2::parseHeader(data2);
+                    if (hdr2.valid && hdr2.total_cw == 1) {
+                        // 1-CW control frame — already decoded
+                        result = decodeFrame(short_bits, sync_snr_, sync_cfo_);
+                        frame_len = one_cw_s;
+                    } else if (hdr2.valid && hdr2.total_cw > 1 && hdr2.total_cw < v2::FIXED_FRAME_CODEWORDS) {
+                        // Variable-CW frame (2-3 CWs) — reprocess with exact size
+                        size_t exact_size = static_cast<size_t>(
+                            waveform_->getMinSamplesForCWCount(hdr2.total_cw));
+                        exact_size = std::min(exact_size, frame_buffer.size());
+
+                        LOG_MODEM(INFO, "[%s] Small-frame recovery: reprocessing %zu samples (%d CWs)",
+                                  log_prefix_.c_str(), exact_size, hdr2.total_cw);
+                        waveform_->setFrequencyOffset(sync_cfo_);
+                        waveform_->process(SampleSpan(frame_buffer.data(), exact_size));
+                        auto recovered_bits = waveform_->getSoftBits();
+                        result = decodeFrame(recovered_bits, sync_snr_, sync_cfo_);
+                        frame_len = exact_size;
+                    }
+                }
+            }
+        }
+    }
 
     auto decode_end = std::chrono::steady_clock::now();
     float ms = std::chrono::duration<float, std::milli>(decode_end - decode_start).count();
@@ -728,27 +777,33 @@ void StreamingDecoder::decodeCurrentFrame() {
                   log_prefix_.c_str(), result.codewords_ok, result.codewords_failed, result.is_ping ? 1 : 0);
     }
 
-    // After successful decode in connected OFDM mode, check for burst continuation
-    // MC-DPSK never enters burst mode (uses window=1, full chirp preamble)
-    bool is_ofdm = (mode_ == protocol::WaveformMode::OFDM_CHIRP ||
-                    mode_ == protocol::WaveformMode::OFDM_COX);
+    // Calculate consumed samples based on actual frame content
+    // For non-data frames (control/connect), use exact sample count to avoid eating into next frame
+    bool is_non_data_frame = false;
+    if (result.success && result.frame_data.size() >= 3) {
+        auto ft = static_cast<v2::FrameType>(result.frame_data[2]);
+        is_non_data_frame = v2::isControlFrame(ft) || v2::isConnectFrame(ft);
+    }
 
-    // For 1-CW control frames (ACK/NACK), only consume the actual frame samples
-    // instead of the full 4-CW size, to avoid eating into the next frame's signal
-    bool is_1cw_control = (result.codewords_ok == 1 && result.codewords_failed == 0);
-    size_t consumed = frame_buffer.size();
-    if (is_1cw_control && is_ofdm) {
-        size_t control_size = static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
-        if (control_size < consumed) {
-            LOG_MODEM(INFO, "[%s] 1-CW control frame: advancing %zu samples (not %zu)",
-                      log_prefix_.c_str(), control_size, consumed);
-            consumed = control_size;
+    size_t consumed = frame_len;
+    if (result.success && is_non_data_frame && is_ofdm) {
+        // Use exact sample count for the actual CW count
+        int actual_cw = result.codewords_ok + result.codewords_failed;
+        if (actual_cw > 0) {
+            size_t exact_consumed = static_cast<size_t>(waveform_->getMinSamplesForCWCount(actual_cw));
+            if (exact_consumed < consumed) {
+                LOG_MODEM(INFO, "[%s] Non-data frame (%d CWs): advancing %zu samples (not %zu)",
+                          log_prefix_.c_str(), actual_cw, exact_consumed, consumed);
+                consumed = exact_consumed;
+            }
         }
     }
     size_t next_block_pos = (sync_position_ + consumed) % MAX_BUFFER_SAMPLES;
 
-    // Skip burst continuation for 1-CW control frames (ACKs are standalone, not part of a burst)
-    if (result.success && connected_ && is_ofdm && !is_1cw_control) {
+    // After successful decode in connected OFDM mode, check for burst continuation
+    // MC-DPSK never enters burst mode (uses window=1, full chirp preamble)
+    // Skip burst continuation for non-data frames (control/connect are standalone)
+    if (result.success && connected_ && is_ofdm && !is_non_data_frame) {
         size_t min_block = static_cast<size_t>(waveform_->getMinSamplesForFrame());
 
         // Loop to decode multiple burst continuation blocks
@@ -777,13 +832,13 @@ void StreamingDecoder::decodeCurrentFrame() {
 
             // Check RMS energy to detect if there's actually a signal
             float next_rms = 0.0f;
-            size_t check_start = std::min(size_t(1024), min_block);  // Skip training area
-            size_t check_len = std::min(min_block - check_start, size_t(5000));
-            if (check_len > 0) {
-                for (size_t i = 0; i < check_len; i++) {
-                    next_rms += next_block[check_start + i] * next_block[check_start + i];
+            size_t burst_check_start = std::min(size_t(1024), min_block);  // Skip training area
+            size_t burst_check_len = std::min(min_block - burst_check_start, size_t(5000));
+            if (burst_check_len > 0) {
+                for (size_t i = 0; i < burst_check_len; i++) {
+                    next_rms += next_block[burst_check_start + i] * next_block[burst_check_start + i];
                 }
-                next_rms = std::sqrt(next_rms / check_len);
+                next_rms = std::sqrt(next_rms / burst_check_len);
             }
 
             constexpr float BURST_ENERGY_THRESHOLD = 0.04f;
