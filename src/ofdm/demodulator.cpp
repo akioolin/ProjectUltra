@@ -628,6 +628,13 @@ void OFDMDemodulator::Impl::demodulateDQPSKTwoPass(
 
     float ce_margin = soft_demap::getCEErrorMargin(Modulation::DQPSK);
 
+    // Apply fading-aware LLR scaling (same as normal path)
+    float fading_index = last_fading_index;
+    if (fading_index > 0.15f) {
+        float fading_scale = 1.0f + 10.0f * fading_index * fading_index;
+        ce_margin *= fading_scale;
+    }
+
     // PASS 1: Estimate per-carrier phase errors
     std::vector<float> phase_errors(equalized.size(), 0.0f);
     float total_error = 0.0f;

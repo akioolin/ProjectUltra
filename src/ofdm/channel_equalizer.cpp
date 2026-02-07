@@ -424,6 +424,28 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     // The LTS channel estimates provide magnitude and approximate phase.
     // The first data symbol's pilots will refine the common phase offset.
 
+    // Compute fading index from LTS channel estimate
+    // This is critical for differential modes (DQPSK, DBPSK, D8PSK) which skip
+    // updateChannelEstimate() — without this, last_fading_index stays at 0 and
+    // LLR fading scaling + two-pass decoding never activate on fading channels.
+    {
+        float h_mag_mean = 0.0f;
+        for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
+            h_mag_mean += std::abs(channel_estimate[data_carrier_indices[i]]);
+        }
+        h_mag_mean /= data_carrier_indices.size();
+
+        float h_mag_var = 0.0f;
+        for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
+            float diff = std::abs(channel_estimate[data_carrier_indices[i]]) - h_mag_mean;
+            h_mag_var += diff * diff;
+        }
+        h_mag_var /= data_carrier_indices.size();
+
+        last_fading_index = (h_mag_mean > 0.01f) ? std::sqrt(h_mag_var) / h_mag_mean : 0.0f;
+        LOG_DEMOD(INFO, "LTS fading index: %.3f (threshold: LLR>0.15, two-pass>0.30)", last_fading_index);
+    }
+
     // Mark that we have a valid channel estimate (for smoothing factor selection)
     snr_symbol_count = num_symbols;
 }
