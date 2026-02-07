@@ -430,16 +430,19 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
         return encoded;
     }
 
-    // OFDM: Check if this is a control/connect frame or data frame
-    // Control frames (ACK, NACK, MODE_CHANGE, etc.) are 20 bytes = 1 CW
-    // Connect frames (CONNECT, DISCONNECT, etc.) are 44 bytes = 2 CWs at R1/2
-    // Both use variable-CW encoding (no frame interleaving)
+    // OFDM: Check if this is a control frame or data/connect frame
+    // Control frames (ACK, NACK, MODE_CHANGE, etc.) are 20 bytes = 1 CW, no interleaving
+    // Connect frames (DISCONNECT) in OFDM mode use 4-CW frame interleaving for fading protection
+    //   (CONNECT/CONNECT_ACK are always MC-DPSK, so only DISCONNECT reaches here)
     // Data frames use 4-CW fixed frame encoding with frame interleaving
     bool is_variable_cw_frame = false;
     if (tx_data.size() >= 3) {
         uint8_t frame_type = tx_data[2];
         auto ft = static_cast<v2::FrameType>(frame_type);
-        is_variable_cw_frame = v2::isControlFrame(ft) || v2::isConnectFrame(ft);
+        if (v2::isControlFrame(ft)) {
+            is_variable_cw_frame = true;
+        }
+        // Connect frames (DISCONNECT) go through encodeFixedFrame() for 4-CW interleaving
     }
 
     if (is_variable_cw_frame) {

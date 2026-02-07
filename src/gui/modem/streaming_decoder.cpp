@@ -360,10 +360,10 @@ void StreamingDecoder::searchForSync() {
 
     // When connected, use light sync only (LTS training symbols, no chirp).
     // TX sends LTS-only preamble when connected — chirp fallback can NEVER work
-    // because there is no chirp in the signal. Reject only clear false positives
-    // (corr < 0.5) and let LDPC handle marginal timing. On moderate fading,
-    // real LTS correlation is 0.6-0.9; rejecting at 0.8 loses valid frames.
-    constexpr float LIGHT_SYNC_MIN_CONFIDENCE = 0.50f;
+    // because there is no chirp in the signal. Reject false positives where data
+    // autocorrelation produces spurious peaks (observed up to 0.63). Real LTS
+    // correlation is always >0.81 even on moderate fading.
+    constexpr float LIGHT_SYNC_MIN_CONFIDENCE = 0.70f;
 
     if (connected_ && waveform_->supportsDataPreamble()) {
         float known_cfo = last_cfo_.load();

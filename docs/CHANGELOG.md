@@ -10,6 +10,40 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-02-07: Fix DISCONNECT decode failure on fading + false LTS detection
+
+**What was broken:**
+- At SNR=20 with good fading, R1/4 showed 12+ retransmissions while SNR=15 showed 0.
+- Two distinct failure types:
+  1. DISCONNECT always failed (all 4 CWs fail, |llr|=3.3-4.2) — BRAVO never saw ALPHA's DISCONNECT
+  2. False LTS detection (corr=0.63 on data, threshold 0.50) — phantom frame trigger, all CWs fail
+
+**What was changed:**
+
+1. **Route OFDM DISCONNECT through `encodeFixedFrame()` for frame interleaving**
+   (`src/gui/modem/streaming_encoder.cpp`)
+   - DISCONNECT was encoded via `encodeFrameWithLDPC()` (sequential, no interleaving) — each CW's
+     bits map to consecutive OFDM symbols, so temporal fading wipes entire CWs
+   - Changed `is_variable_cw_frame` logic: `isControlFrame()` → true (1-CW ACK path),
+     `isConnectFrame()` → false (4-CW interleaved path via `encodeFixedFrame()`)
+   - Decoder needs no change: "try both" strategy in `decodeFrame()` falls through to
+     `try_frame_interleave = true` and succeeds
+   - `ConnectFrame::serialize()` already hardcodes `total_cw=4`, matching `encodeFixedFrame()` expectations
+
+2. **Raise LTS confidence threshold from 0.50 to 0.70**
+   (`src/gui/modem/streaming_decoder.cpp`)
+   - Data autocorrelation can produce spurious peaks up to 0.63, triggering false frame detection
+   - Real LTS correlation is always >0.81 even on moderate fading
+   - Changed `LIGHT_SYNC_MIN_CONFIDENCE` from 0.50f to 0.70f
+
+**Test verification:**
+- `./build/cli_simulator --snr 20 --fading good --rate r1_4 --test` — PASS, retransmissions 12+ → 3
+- `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test` — PASS, 0 retransmissions (regression OK)
+- `./build/cli_simulator --snr 10 --fading moderate --test` — PASS, MC-DPSK unaffected
+- `./build/cli_simulator --snr 20 --fading good --rate r1_2 --test` — PASS, DISCONNECT decoded 4/4 CWs
+
+---
+
 ## 2026-02-06: Restructure variable-CW frame handling — fix DISCONNECT at R1/2
 
 **What was broken:**
