@@ -8,7 +8,6 @@
 #include <cctype>
 #include <cmath>
 #include <random>
-#include <unordered_map>
 
 namespace ultra {
 namespace protocol {
@@ -1685,12 +1684,6 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                             }
                         }
 
-                        // Build hash map for delta lookups (used by 2-bit and 3-bit search)
-                        std::unordered_map<uint16_t, std::vector<size_t>> delta_map;
-                        for (size_t p = 0; p < data_bits; ++p) {
-                            delta_map[deltas[p]].push_back(p);
-                        }
-
                         // Helper to apply/undo bit fix in status.data
                         auto fixBit = [&](size_t p) {
                             size_t fb = p / 8;
@@ -1700,106 +1693,112 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                                 status.data[cw][cb] ^= (1 << (p % 8));
                         };
 
-                        // Two-bit search using delta hash map
+                        // -------------------------------------------------------
+                        // Build suspect set: LDPC-flipped info bits
+                        // Multi-bit searches MUST be restricted to suspects to
+                        // prevent false CRC matches. With 16-bit CRC, arbitrary
+                        // n-bit search has too many candidates:
+                        //   C(1280,2)/65536 ≈ 12.5 expected false matches
+                        //   C(1280,3)/65536 ≈ 5.3M expected false matches
+                        // Restricting to 30 suspects:
+                        //   C(30,2)/65536 ≈ 0.007 — safe
+                        //   C(30,3)/65536 ≈ 0.062 — acceptable
+                        //   C(15,4)/65536 ≈ 0.021 — safe (with LLR threshold)
+                        // -------------------------------------------------------
+                        struct SuspectBit { size_t frame_bit; float abs_llr; };
+                        std::vector<SuspectBit> suspects;
+
+                        for (int c = 0; c < FIXED_FRAME_CODEWORDS; ++c) {
+                            auto soft = cw_soft_bits[c];
+                            if (use_channel_deinterleave && interleaver) {
+                                soft = interleaver->deinterleave(soft);
+                            }
+                            for (size_t i = 0; i < bytes_per_cw * 8 && i < soft.size(); ++i) {
+                                size_t frame_bit = c * bytes_per_cw * 8 + i;
+                                if (frame_bit / 8 >= data_bytes) continue;
+                                int ch_bit = (soft[i] < 0) ? 1 : 0;
+                                int dec_bit = (status.data[c][i / 8] >> (i % 8)) & 1;
+                                if (ch_bit != dec_bit) {
+                                    suspects.push_back({frame_bit, std::abs(soft[i])});
+                                }
+                            }
+                        }
+                        std::sort(suspects.begin(), suspects.end(),
+                                  [](const SuspectBit& a, const SuspectBit& b) { return a.abs_llr < b.abs_llr; });
+
+                        constexpr int MAX_S = 30;
+                        int ns = std::min(MAX_S, static_cast<int>(suspects.size()));
+
+                        std::vector<uint16_t> sd(ns);
+                        for (int i = 0; i < ns; ++i)
+                            sd[i] = deltas[suspects[i].frame_bit];
+
+                        // 2-bit among suspects: C(30,2) = 435 — safe
                         if (!recovered) {
-                            for (size_t p1 = 0; p1 < data_bits && !recovered; ++p1) {
-                                uint16_t need = syndrome ^ deltas[p1];
-                                auto it = delta_map.find(need);
-                                if (it != delta_map.end()) {
-                                    for (size_t p2 : it->second) {
-                                        if (p2 > p1) {
-                                            fixBit(p1);
-                                            fixBit(p2);
-                                            auto trial = status.reassemble();
-                                            if (verifyFrame(trial)) {
-                                                LOG_MODEM(INFO, "FALSE POSITIVE RECOVERED (2-bit flip frame bits %zu,%zu)", p1, p2);
-                                                recovered = true;
-                                                break;
-                                            }
-                                            fixBit(p1);
-                                            fixBit(p2);
+                            for (int a = 0; a < ns && !recovered; ++a) {
+                                for (int b = a + 1; b < ns && !recovered; ++b) {
+                                    if ((sd[a] ^ sd[b]) == syndrome) {
+                                        fixBit(suspects[a].frame_bit);
+                                        fixBit(suspects[b].frame_bit);
+                                        auto trial = status.reassemble();
+                                        if (verifyFrame(trial)) {
+                                            LOG_MODEM(INFO, "FALSE POSITIVE RECOVERED (2-bit suspects, bits %zu,%zu, |LLR|=%.2f,%.2f)",
+                                                      suspects[a].frame_bit, suspects[b].frame_bit,
+                                                      suspects[a].abs_llr, suspects[b].abs_llr);
+                                            recovered = true;
+                                        } else {
+                                            fixBit(suspects[a].frame_bit);
+                                            fixBit(suspects[b].frame_bit);
                                         }
                                     }
                                 }
                             }
                         }
 
-                        // Three-bit search: for each p1, look up (syndrome ^ delta[p1]) pairs
-                        // For each (p1, p2) pair: check if (syndrome ^ delta[p1] ^ delta[p2])
-                        // exists in delta_map. O(n²) with O(1) hash lookups.
+                        // 3-bit among suspects: C(30,3) = 4060 — acceptable
                         if (!recovered) {
-                            for (size_t p1 = 0; p1 < data_bits && !recovered; ++p1) {
-                                uint16_t partial1 = syndrome ^ deltas[p1];
-                                for (size_t p2 = p1 + 1; p2 < data_bits && !recovered; ++p2) {
-                                    uint16_t need3 = partial1 ^ deltas[p2];
-                                    auto it = delta_map.find(need3);
-                                    if (it != delta_map.end()) {
-                                        for (size_t p3 : it->second) {
-                                            if (p3 > p2) {
-                                                fixBit(p1);
-                                                fixBit(p2);
-                                                fixBit(p3);
-                                                auto trial = status.reassemble();
-                                                if (verifyFrame(trial)) {
-                                                    LOG_MODEM(INFO, "FALSE POSITIVE RECOVERED (3-bit flip frame bits %zu,%zu,%zu)", p1, p2, p3);
-                                                    recovered = true;
-                                                    break;
-                                                }
-                                                fixBit(p1);
-                                                fixBit(p2);
-                                                fixBit(p3);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Suspect-augmented search: target LDPC-flipped info bits
-                        // LDPC false positives flip some info bits incorrectly.
-                        // These wrong flips are a subset of all LDPC corrections
-                        // (bits where decoder output != channel LLR sign).
-                        // Search 4-8 bit error patterns among suspects, then
-                        // hybrid: 2 suspects + 2 arbitrary via delta_map.
-                        if (!recovered) {
-                            struct SuspectBit { size_t frame_bit; float abs_llr; };
-                            std::vector<SuspectBit> suspects;
-
-                            for (int c = 0; c < FIXED_FRAME_CODEWORDS; ++c) {
-                                auto soft = cw_soft_bits[c];
-                                if (use_channel_deinterleave && interleaver) {
-                                    soft = interleaver->deinterleave(soft);
-                                }
-                                for (size_t i = 0; i < bytes_per_cw * 8 && i < soft.size(); ++i) {
-                                    size_t frame_bit = c * bytes_per_cw * 8 + i;
-                                    if (frame_bit / 8 >= data_bytes) continue;
-                                    int ch_bit = (soft[i] < 0) ? 1 : 0;
-                                    int dec_bit = (status.data[c][i / 8] >> (i % 8)) & 1;
-                                    if (ch_bit != dec_bit) {
-                                        suspects.push_back({frame_bit, std::abs(soft[i])});
-                                    }
-                                }
-                            }
-                            // Sort by weakest |LLR| first (most likely wrong corrections)
-                            std::sort(suspects.begin(), suspects.end(),
-                                      [](const SuspectBit& a, const SuspectBit& b) { return a.abs_llr < b.abs_llr; });
-
-                            constexpr int MAX_S = 30;
-                            int ns = std::min(MAX_S, static_cast<int>(suspects.size()));
-
-                            // Extract suspect deltas
-                            std::vector<uint16_t> sd(ns);
-                            for (int i = 0; i < ns; ++i)
-                                sd[i] = deltas[suspects[i].frame_bit];
-
-                            // 4-bit among suspects: C(ns,4) ≈ 27K checks
                             for (int a = 0; a < ns && !recovered; ++a) {
                                 uint16_t da = sd[a];
                                 for (int b = a + 1; b < ns && !recovered; ++b) {
                                     uint16_t dab = da ^ sd[b];
                                     for (int c2 = b + 1; c2 < ns && !recovered; ++c2) {
+                                        if ((dab ^ sd[c2]) == syndrome) {
+                                            fixBit(suspects[a].frame_bit);
+                                            fixBit(suspects[b].frame_bit);
+                                            fixBit(suspects[c2].frame_bit);
+                                            auto trial = status.reassemble();
+                                            if (verifyFrame(trial)) {
+                                                LOG_MODEM(INFO, "FALSE POSITIVE RECOVERED (3-bit suspects, bits %zu,%zu,%zu)",
+                                                          suspects[a].frame_bit, suspects[b].frame_bit, suspects[c2].frame_bit);
+                                                recovered = true;
+                                            } else {
+                                                fixBit(suspects[a].frame_bit);
+                                                fixBit(suspects[b].frame_bit);
+                                                fixBit(suspects[c2].frame_bit);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 4-bit among weak suspects: limit |LLR| < 3.0 to reduce false matches
+                        // With ~15 weak suspects: C(15,4) ≈ 1365 — safe (0.021 expected false CRC matches)
+                        // NOTE: 5-bit (C(30,5)/65536≈2.17), 6-bit (≈9.1), and hybrid (≈8.5)
+                        // searches were REMOVED — too many false CRC matches with 16-bit CRC.
+                        if (!recovered) {
+                            constexpr float MAX_SUSPECT_LLR = 3.0f;
+                            for (int a = 0; a < ns && !recovered; ++a) {
+                                if (suspects[a].abs_llr > MAX_SUSPECT_LLR) break;
+                                uint16_t da = sd[a];
+                                for (int b = a + 1; b < ns && !recovered; ++b) {
+                                    if (suspects[b].abs_llr > MAX_SUSPECT_LLR) break;
+                                    uint16_t dab = da ^ sd[b];
+                                    for (int c2 = b + 1; c2 < ns && !recovered; ++c2) {
+                                        if (suspects[c2].abs_llr > MAX_SUSPECT_LLR) break;
                                         uint16_t dabc = dab ^ sd[c2];
                                         for (int d = c2 + 1; d < ns && !recovered; ++d) {
+                                            if (suspects[d].abs_llr > MAX_SUSPECT_LLR) break;
                                             if ((dabc ^ sd[d]) == syndrome) {
                                                 fixBit(suspects[a].frame_bit);
                                                 fixBit(suspects[b].frame_bit);
@@ -1815,107 +1814,6 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                                                     fixBit(suspects[b].frame_bit);
                                                     fixBit(suspects[c2].frame_bit);
                                                     fixBit(suspects[d].frame_bit);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // 5-bit among suspects: C(ns,5) ≈ 142K checks
-                            for (int a = 0; a < ns && !recovered; ++a) {
-                                uint16_t da = sd[a];
-                                for (int b = a + 1; b < ns && !recovered; ++b) {
-                                    uint16_t dab = da ^ sd[b];
-                                    for (int c2 = b + 1; c2 < ns && !recovered; ++c2) {
-                                        uint16_t dabc = dab ^ sd[c2];
-                                        for (int d = c2 + 1; d < ns && !recovered; ++d) {
-                                            uint16_t dabcd = dabc ^ sd[d];
-                                            for (int e = d + 1; e < ns && !recovered; ++e) {
-                                                if ((dabcd ^ sd[e]) == syndrome) {
-                                                    fixBit(suspects[a].frame_bit);
-                                                    fixBit(suspects[b].frame_bit);
-                                                    fixBit(suspects[c2].frame_bit);
-                                                    fixBit(suspects[d].frame_bit);
-                                                    fixBit(suspects[e].frame_bit);
-                                                    auto trial = status.reassemble();
-                                                    if (verifyFrame(trial)) {
-                                                        LOG_MODEM(INFO, "FALSE POSITIVE RECOVERED (5-bit suspects)");
-                                                        recovered = true;
-                                                    } else {
-                                                        fixBit(suspects[a].frame_bit);
-                                                        fixBit(suspects[b].frame_bit);
-                                                        fixBit(suspects[c2].frame_bit);
-                                                        fixBit(suspects[d].frame_bit);
-                                                        fixBit(suspects[e].frame_bit);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // 6-bit among suspects: C(ns,6) ≈ 594K checks
-                            for (int a = 0; a < ns && !recovered; ++a) {
-                                uint16_t da = sd[a];
-                                for (int b = a + 1; b < ns && !recovered; ++b) {
-                                    uint16_t dab = da ^ sd[b];
-                                    for (int c2 = b + 1; c2 < ns && !recovered; ++c2) {
-                                        uint16_t dabc = dab ^ sd[c2];
-                                        for (int d = c2 + 1; d < ns && !recovered; ++d) {
-                                            uint16_t dabcd = dabc ^ sd[d];
-                                            for (int e = d + 1; e < ns && !recovered; ++e) {
-                                                uint16_t dabcde = dabcd ^ sd[e];
-                                                for (int f = e + 1; f < ns && !recovered; ++f) {
-                                                    if ((dabcde ^ sd[f]) == syndrome) {
-                                                        size_t bits[] = {suspects[a].frame_bit, suspects[b].frame_bit,
-                                                                         suspects[c2].frame_bit, suspects[d].frame_bit,
-                                                                         suspects[e].frame_bit, suspects[f].frame_bit};
-                                                        for (auto bp : bits) fixBit(bp);
-                                                        auto trial = status.reassemble();
-                                                        if (verifyFrame(trial)) {
-                                                            LOG_MODEM(INFO, "FALSE POSITIVE RECOVERED (6-bit suspects)");
-                                                            recovered = true;
-                                                        } else {
-                                                            for (auto bp : bits) fixBit(bp);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Hybrid: 2 suspects + 2 arbitrary via delta_map
-                            if (!recovered) {
-                                for (int si = 0; si < ns && !recovered; ++si) {
-                                    for (int sj = si + 1; sj < ns && !recovered; ++sj) {
-                                        uint16_t partial = syndrome ^ sd[si] ^ sd[sj];
-                                        for (size_t p = 0; p < data_bits && !recovered; ++p) {
-                                            if (p == suspects[si].frame_bit || p == suspects[sj].frame_bit) continue;
-                                            uint16_t need = partial ^ deltas[p];
-                                            auto it = delta_map.find(need);
-                                            if (it != delta_map.end()) {
-                                                for (size_t p4 : it->second) {
-                                                    if (p4 > p && p4 != suspects[si].frame_bit && p4 != suspects[sj].frame_bit) {
-                                                        fixBit(suspects[si].frame_bit);
-                                                        fixBit(suspects[sj].frame_bit);
-                                                        fixBit(p);
-                                                        fixBit(p4);
-                                                        auto trial = status.reassemble();
-                                                        if (verifyFrame(trial)) {
-                                                            LOG_MODEM(INFO, "FALSE POSITIVE RECOVERED (hybrid 2s+2a, suspects %zu,%zu + %zu,%zu)",
-                                                                      suspects[si].frame_bit, suspects[sj].frame_bit, p, p4);
-                                                            recovered = true;
-                                                            break;
-                                                        }
-                                                        fixBit(suspects[si].frame_bit);
-                                                        fixBit(suspects[sj].frame_bit);
-                                                        fixBit(p);
-                                                        fixBit(p4);
-                                                    }
                                                 }
                                             }
                                         }
