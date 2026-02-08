@@ -181,8 +181,10 @@ inline float demapDBPSK(Complex sym, Complex prev_sym, float noise_var) {
     }
 
     // cos(phase_diff) gives distance from boundaries
+    // Cap confidence to prevent overconfident wrong bits at high SNR
     float cos_diff = std::cos(phase_diff);
-    float llr = 2.0f * signal_power * cos_diff / noise_var;
+    float confidence = std::min(2.0f * signal_power / noise_var, MAX_LLR * 0.75f);
+    float llr = confidence * cos_diff;
 
     return clipLLR(llr);
 }
@@ -202,10 +204,13 @@ inline std::array<float, 2> demapDQPSK(Complex sym, Complex prev_sym, float nois
         return llrs;  // Neutral LLRs for weak signal
     }
 
-    // LLR scaling: 2 * sqrt(SNR) — conservative but robust
+    // LLR scaling: 2 * sqrt(SNR), capped to prevent overconfident wrong bits
+    // At high SNR (25+), faded carriers produce wrong-sign LLRs at max confidence,
+    // creating LDPC trapping sets. Cap scale at ~15 (≈ SNR=20 equivalent) so that
+    // wrong bits from faded carriers don't overwhelm the decoder.
     float signal_power = std::abs(sym) * std::abs(prev_sym);
     float snr_linear = signal_power / noise_var;
-    float scale = 2.0f * std::sqrt(snr_linear);
+    float scale = std::min(2.0f * std::sqrt(snr_linear), MAX_LLR * 0.75f);
 
     // Max-log-MAP demapping for DQPSK constellation at (1,0),(0,1),(-1,0),(0,-1):
     //
@@ -238,7 +243,8 @@ inline std::array<float, 3> demapD8PSK(Complex sym, Complex prev_sym, float nois
     }
 
     // D8PSK: 8 phases at 45° increments (natural binary, no Gray code)
-    float confidence = signal_power / noise_var;
+    // Cap confidence to prevent overconfident wrong bits at high SNR
+    float confidence = std::min(signal_power / noise_var, MAX_LLR * 0.75f);
 
     // Use sin-based formulas (matches working single-carrier DPSK)
     llrs[0] = clipLLR(confidence * std::sin(phase_diff));
