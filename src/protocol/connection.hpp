@@ -281,8 +281,8 @@ private:
     uint32_t disconnect_pending_ms_ = 0;
     uint32_t disconnect_ack_retransmit_ms_ = 0; // Time until next ACK re-send
     Bytes disconnect_ack_frame_;            // Cached ACK for re-sending
-    static constexpr uint32_t DISCONNECT_GRACE_MS = 15000;           // 15s total grace period
-    static constexpr uint32_t DISCONNECT_ACK_RETRANSMIT_MS = 3000;   // Re-send ACK every 3s
+    static constexpr uint32_t DISCONNECT_GRACE_MS = 5000;            // 5s total grace period
+    static constexpr uint32_t DISCONNECT_ACK_RETRANSMIT_MS = 2000;   // Re-send ACK every 2s
 
     // Adaptive calling waveform (DPSK first, fallback to MFSK)
     // Start with DPSK medium (DQPSK 62b R1/4), switch to MFSK after 5 attempts
