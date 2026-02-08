@@ -61,11 +61,14 @@ enum class ChannelType {
  */
 class SimulatedChannel {
 public:
+    void setSeed(uint32_t seed) { seed_ = seed; }
+
     void configure(float snr_db, ChannelType channel_type = ChannelType::AWGN) {
         snr_db_ = snr_db;
         float snr_linear = std::pow(10.0f, snr_db / 10.0f);
         float signal_power = 0.01f;
         noise_stddev_ = std::sqrt(signal_power / snr_linear);
+        rng_.seed(seed_);
 
         if (channel_type != ChannelType::AWGN) {
             WattersonChannel::Config cfg;
@@ -87,8 +90,8 @@ public:
                     break;
             }
             cfg.cfo_hz = 0.0f;
-            channel_a_to_b_ = std::make_unique<WattersonChannel>(cfg, 42);
-            channel_b_to_a_ = std::make_unique<WattersonChannel>(cfg, 43);
+            channel_a_to_b_ = std::make_unique<WattersonChannel>(cfg, seed_);
+            channel_b_to_a_ = std::make_unique<WattersonChannel>(cfg, seed_ + 1);
         }
     }
 
@@ -144,6 +147,7 @@ public:
 private:
     float snr_db_ = 20.0f;
     float noise_stddev_ = 0.01f;
+    uint32_t seed_ = 42;
     std::mt19937 rng_{42};
     std::normal_distribution<float> noise_dist_{0.0f, 1.0f};
 
@@ -787,11 +791,13 @@ public:
     void setTestFileTransfer(bool v) { test_file_transfer_ = v; }
     void setTestFileSize(size_t bytes) { test_file_size_ = bytes; }
     void setChannelInterleave(bool enable) { use_channel_interleave_ = enable; }
+    void setSeed(uint32_t seed) { seed_ = seed; }
 
     bool runTest() {
         printHeader();
 
         // Setup channel
+        channel_.setSeed(seed_);
         channel_.configure(snr_db_, channel_type_);
 
         // Create stations
@@ -870,6 +876,7 @@ private:
     bool test_file_transfer_ = false;
     bool use_channel_interleave_ = false;  // For BUG-006 testing
     size_t test_file_size_ = 256;  // Default 256 bytes test file
+    uint32_t seed_ = 42;
     Modulation forced_mod_ = Modulation::AUTO;
     CodeRate forced_rate_ = CodeRate::AUTO;
     WaveformMode forced_waveform_ = WaveformMode::AUTO;
@@ -1291,6 +1298,8 @@ int main(int argc, char* argv[]) {
             }
         } else if (arg == "--channel-interleave" || arg == "-ci") {
             sim.setChannelInterleave(true);
+        } else if (arg == "--seed" && i + 1 < argc) {
+            sim.setSeed(static_cast<uint32_t>(std::stoul(argv[++i])));
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "CLI Simulator - IWaveform + StreamingDecoder Model\n\n";
             std::cout << "Uses IWaveform for TX and StreamingDecoder for RX directly.\n";
@@ -1307,6 +1316,7 @@ int main(int argc, char* argv[]) {
             std::cout << "  --mod, -m <MOD>     Force modulation: dqpsk, d8psk, dbpsk\n";
             std::cout << "  --rate, -r <RATE>   Force code rate: r1_4, r1_2, r2_3, r3_4\n";
             std::cout << "  --waveform, -w <WF> Force waveform: mc_dpsk, ofdm_chirp, ofdm_cox\n";
+            std::cout << "  --seed <N>          Random seed (default: 42)\n";
             std::cout << "  --file [SIZE]       Test file transfer (default: 256 bytes)\n";
             std::cout << "  --channel-interleave, -ci  Enable channel interleaving\n";
             std::cout << "  --verbose, -v       Verbose output\n";
