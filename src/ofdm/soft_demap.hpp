@@ -184,9 +184,10 @@ inline float demapDBPSK(Complex sym, Complex prev_sym, float noise_var) {
     float diff_noise_var = 2.0f * noise_var;
 
     // cos(phase_diff) gives distance from boundaries
-    // Cap confidence to prevent overconfident wrong bits at high SNR
+    // No fixed cap here — noise_var already includes per-carrier quality and fading scaling
+    // from ce_error_margin. clipLLR() caps final LLR at ±MAX_LLR.
     float cos_diff = std::cos(phase_diff);
-    float confidence = std::min(2.0f * signal_power / diff_noise_var, MAX_LLR * 0.75f);
+    float confidence = 2.0f * signal_power / diff_noise_var;
     float llr = confidence * cos_diff;
 
     return clipLLR(llr);
@@ -210,10 +211,11 @@ inline std::array<float, 2> demapDQPSK(Complex sym, Complex prev_sym, float nois
     // Differential detection doubles noise: diff = sym*conj(prev) combines noise from both symbols
     float diff_noise_var = 2.0f * noise_var;
 
-    // LLR scaling: 2 * sqrt(SNR), capped to prevent overconfident wrong bits
+    // LLR scaling: 2 * sqrt(SNR). No fixed cap — noise_var already includes
+    // per-carrier quality and fading scaling. clipLLR() caps final LLR at ±MAX_LLR.
     float signal_power = std::abs(sym) * std::abs(prev_sym);
     float snr_linear = signal_power / diff_noise_var;
-    float scale = std::min(2.0f * std::sqrt(snr_linear), MAX_LLR * 0.75f);
+    float scale = 2.0f * std::sqrt(snr_linear);
 
     // Max-log-MAP demapping for DQPSK constellation at (1,0),(0,1),(-1,0),(0,-1):
     //
@@ -249,8 +251,8 @@ inline std::array<float, 3> demapD8PSK(Complex sym, Complex prev_sym, float nois
     float diff_noise_var = 2.0f * noise_var;
 
     // D8PSK: 8 phases at 45° increments (natural binary, no Gray code)
-    // Cap confidence to prevent overconfident wrong bits at high SNR
-    float confidence = std::min(signal_power / diff_noise_var, MAX_LLR * 0.75f);
+    // No fixed cap — noise_var includes per-carrier quality and fading scaling.
+    float confidence = signal_power / diff_noise_var;
 
     // Use sin-based formulas (matches working single-carrier DPSK)
     llrs[0] = clipLLR(confidence * std::sin(phase_diff));

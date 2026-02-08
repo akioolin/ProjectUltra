@@ -1782,23 +1782,20 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                             }
                         }
 
-                        // 4-bit among weak suspects: limit |LLR| < 3.0 to reduce false matches
-                        // With ~15 weak suspects: C(15,4) ≈ 1365 — safe (0.021 expected false CRC matches)
-                        // NOTE: 5-bit (C(30,5)/65536≈2.17), 6-bit (≈9.1), and hybrid (≈8.5)
-                        // searches were REMOVED — too many false CRC matches with 16-bit CRC.
+                        // 4-bit among weak suspects: hard limit to 15 suspects max
+                        // C(15,4)/65536 = 0.021 expected false CRC matches — safe
+                        // C(30,4)/65536 = 0.418 — too dangerous (MIN_LLR_MAG creates many 0.50 suspects)
+                        // NOTE: 5-bit, 6-bit, and hybrid searches REMOVED (all >1.0 expected false matches)
                         if (!recovered) {
-                            constexpr float MAX_SUSPECT_LLR = 3.0f;
-                            for (int a = 0; a < ns && !recovered; ++a) {
-                                if (suspects[a].abs_llr > MAX_SUSPECT_LLR) break;
+                            constexpr int MAX_S_4BIT = 15;
+                            int ns4 = std::min(ns, MAX_S_4BIT);
+                            for (int a = 0; a < ns4 && !recovered; ++a) {
                                 uint16_t da = sd[a];
-                                for (int b = a + 1; b < ns && !recovered; ++b) {
-                                    if (suspects[b].abs_llr > MAX_SUSPECT_LLR) break;
+                                for (int b = a + 1; b < ns4 && !recovered; ++b) {
                                     uint16_t dab = da ^ sd[b];
-                                    for (int c2 = b + 1; c2 < ns && !recovered; ++c2) {
-                                        if (suspects[c2].abs_llr > MAX_SUSPECT_LLR) break;
+                                    for (int c2 = b + 1; c2 < ns4 && !recovered; ++c2) {
                                         uint16_t dabc = dab ^ sd[c2];
-                                        for (int d = c2 + 1; d < ns && !recovered; ++d) {
-                                            if (suspects[d].abs_llr > MAX_SUSPECT_LLR) break;
+                                        for (int d = c2 + 1; d < ns4 && !recovered; ++d) {
                                             if ((dabc ^ sd[d]) == syndrome) {
                                                 fixBit(suspects[a].frame_bit);
                                                 fixBit(suspects[b].frame_bit);
