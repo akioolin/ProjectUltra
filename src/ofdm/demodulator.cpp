@@ -244,7 +244,8 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
     // Good channel (index < 0.15) works fine without scaling
     float fading_index = last_fading_index;
     if (fading_index > 0.15f) {
-        // Moderate scaling: 1 + 10×fading² gives ~1.25× at index=0.15, ~2.0× at index=0.3
+        // Scaling: 1 + 10×fading² (no cap — decoder diversity handles trapping sets)
+        // At fading=0.15: 1.23×, fading=0.3: 1.9×, fading=0.5: 3.5×, fading=0.6: 4.6×
         float fading_scale = 1.0f + 10.0f * fading_index * fading_index;
         ce_error_margin *= fading_scale;
         if (snr_symbol_count < 3) {
@@ -294,22 +295,19 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
         }
     }
 
-    // Two-pass DQPSK decoding: estimate per-carrier phase errors from hard decisions,
-    // correct them before computing soft LLRs.
-    // Enable for ALL code rates on fading channels - phase correction helps R1/4 too
-    // NOTE: Use last_fading_index (from pilot variance), NOT computeFadingIndex()
-    // because channel_estimate is reset to unity after sync.
-    if (mod == Modulation::DQPSK && dqpsk_two_pass_enabled_) {
-        float fading_index = last_fading_index;
-        if (fading_index > TWO_PASS_FADING_THRESHOLD) {
-            LOG_DEMOD(DEBUG, "DQPSK two-pass: fading=%.3f > %.3f, applying correction",
-                      fading_index, TWO_PASS_FADING_THRESHOLD);
-            demodulateDQPSKTwoPass(equalized, noise_variance);
-            snr_symbol_count++;
-            dqpsk_skip_first_symbol = false;
-            return;  // Two-pass handled everything (constellation updated inside)
-        }
-    }
+    // Two-pass DQPSK decoding: DISABLED.
+    // Testing shows it compresses LLR dynamic range too much at SNR=20,
+    // reducing scale from ~20 to 5-13. The normal path with per-carrier
+    // noise_var + fading scaling + perturbation retry works better.
+    // if (mod == Modulation::DQPSK && dqpsk_two_pass_enabled_) {
+    //     float fading_index = last_fading_index;
+    //     if (fading_index > TWO_PASS_FADING_THRESHOLD) {
+    //         demodulateDQPSKTwoPass(equalized, noise_variance);
+    //         snr_symbol_count++;
+    //         dqpsk_skip_first_symbol = false;
+    //         return;
+    //     }
+    // }
 
     // Debug: log modulation value once per symbol
     static int mod_log_once = 0;
@@ -619,87 +617,107 @@ void OFDMDemodulator::Impl::demodulateDQPSKTwoPass(
     const std::vector<Complex>& equalized,
     float base_noise_variance)
 {
-    // Two-pass DQPSK: Estimate per-carrier phase errors from hard decisions,
-    // then apply corrections before computing soft LLRs.
+    // Two-pass DQPSK with phase-variance-based LLR scaling.
     //
-    // The key insight: DQPSK hard decisions are robust (45° margin to nearest
-    // wrong symbol). If we see 98° instead of 90°, we're confident it's 90°.
-    // The 8° error is from channel drift, not wrong data. We can correct it.
+    // Problem: MMSE carrier_noise_var gives very different values for peak vs faded
+    // carriers (5-50× range). Combined with signal_power in the demapper, peak carriers
+    // produce LLRs of 10-15 while faded carriers produce 2-5. At high SNR, the peaks
+    // dominate and LDPC can't correct wrong bits from faded carriers.
+    //
+    // Solution: Use the observed phase noise VARIANCE (from pass 1) as a uniform
+    // LLR scale for all carriers in this symbol. This naturally adapts to actual
+    // channel quality: clean symbols get high scale, faded symbols get low scale.
+    // Per-carrier discrimination comes from the differential PHASE (data information),
+    // not from amplitude/noise estimates.
 
-    float ce_margin = soft_demap::getCEErrorMargin(Modulation::DQPSK);
+    static const float PI = 3.14159265358979f;
 
-    // Apply fading-aware LLR scaling (same as normal path)
-    float fading_index = last_fading_index;
-    if (fading_index > 0.15f) {
-        float fading_scale = 1.0f + 10.0f * fading_index * fading_index;
-        ce_margin *= fading_scale;
-    }
-
-    // PASS 1: Estimate per-carrier phase errors
-    std::vector<float> phase_errors(equalized.size(), 0.0f);
-    float total_error = 0.0f;
-    int valid_count = 0;
+    // PASS 1: Estimate per-carrier phase errors using hard decisions
+    std::vector<float> valid_errors;
+    valid_errors.reserve(equalized.size());
 
     for (size_t i = 0; i < equalized.size(); ++i) {
         Complex prev_sym = dbpsk_prev_equalized[i];
-        float signal_power = std::abs(equalized[i]) * std::abs(prev_sym);
+        float sp = std::abs(equalized[i]) * std::abs(prev_sym);
 
-        if (signal_power > 0.1f) {
-            phase_errors[i] = soft_demap::computeDQPSKPhaseError(equalized[i], prev_sym);
-            total_error += phase_errors[i];
-            valid_count++;
+        if (sp > 0.1f) {
+            float err = soft_demap::computeDQPSKPhaseError(equalized[i], prev_sym);
+            valid_errors.push_back(err);
         }
     }
 
-    // Compute mean phase error across carriers (common phase drift)
-    float mean_error = (valid_count > 0) ? (total_error / valid_count) : 0.0f;
-
-    // Log if significant correction
-    if (snr_symbol_count < 5 && std::abs(mean_error) > 0.05f) {
-        LOG_DEMOD(DEBUG, "DQPSK two-pass sym=%d: mean_err=%.1f°, valid=%d/%zu",
-                  snr_symbol_count, mean_error * 180.0f / M_PI,
-                  valid_count, equalized.size());
-    }
-
-    // Compute variance of phase errors to measure correction reliability
-    float var_sum = 0.0f;
-    for (size_t i = 0; i < equalized.size(); ++i) {
-        if (std::abs(phase_errors[i]) > 0.001f) {
-            float diff = phase_errors[i] - mean_error;
-            var_sum += diff * diff;
+    // Compute median for common phase correction (robust to outliers)
+    float median_error = 0.0f;
+    if (!valid_errors.empty()) {
+        std::sort(valid_errors.begin(), valid_errors.end());
+        size_t mid = valid_errors.size() / 2;
+        if (valid_errors.size() % 2 == 0) {
+            median_error = (valid_errors[mid - 1] + valid_errors[mid]) / 2.0f;
+        } else {
+            median_error = valid_errors[mid];
         }
     }
-    float phase_variance = (valid_count > 1) ? (var_sum / (valid_count - 1)) : 0.0f;
-    float phase_std = std::sqrt(phase_variance);
 
-    // PASS 2: Apply common phase correction and compute LLRs
-    // Use mean error across all carriers (common phase drift from CFO/channel)
-    float correction = -mean_error;  // Negate to correct
+    // Compute phase noise variance from valid errors
+    // This directly measures differential demodulation quality for this symbol
+    float phase_var = 0.05f;  // Default: moderate quality
+    if (valid_errors.size() > 5) {
+        float sum_sq = 0.0f;
+        for (float e : valid_errors) {
+            float d = e - median_error;
+            sum_sq += d * d;
+        }
+        phase_var = sum_sq / valid_errors.size();
+        phase_var = std::max(0.002f, phase_var);  // Floor to prevent infinite scale
+    }
 
-    // Inflate noise variance if phase errors are inconsistent (high variance)
-    // This reduces LLR confidence when correction is uncertain
-    // phase_std > 0.1 rad (5.7°) indicates unreliable correction
-    float nv_inflation = 1.0f + 5.0f * phase_std;  // 1x to ~2x for typical errors
+    // PASS 2: Compute LLRs using phase-variance-based uniform scaling
+    // Scale = 2/sqrt(phase_var), same principle as MC-DPSK two-pass
+    // phase_var already captures channel quality — no additional fading factor needed
+    // (fading increases phase errors → higher phase_var → lower scale automatically)
+    float correction = -median_error;
+
+    float scale = 2.0f / std::sqrt(phase_var);
+    scale = std::min(scale, MAX_LLR);  // Cap scale at MAX_LLR
+
+    if (snr_symbol_count < 5) {
+        LOG_DEMOD(INFO, "DQPSK two-pass sym=%d: median_err=%.1f°, phase_var=%.4f, scale=%.1f, valid=%zu/%zu",
+                  snr_symbol_count, median_error * 180.0f / PI, phase_var, scale,
+                  valid_errors.size(), equalized.size());
+    }
+
+    Complex phase_corr(std::cos(correction), std::sin(correction));
 
     std::vector<Complex> constellation_update;
     for (size_t i = 0; i < equalized.size(); ++i) {
         Complex prev_sym = dbpsk_prev_equalized[i];
-        float nv = (i < carrier_noise_var.size()) ? carrier_noise_var[i] : base_noise_variance;
-        nv *= ce_margin * nv_inflation;
+        float sp = std::abs(equalized[i]) * std::abs(prev_sym);
 
-        // Apply common correction and demap
-        auto llrs = soft_demap::demapDQPSKCorrected(equalized[i], prev_sym, nv, correction);
-        soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
+        std::array<float, 2> llrs;
+        if (sp < 0.05f) {
+            // Deep fade — erasure (near-zero LLRs)
+            llrs = {MIN_LLR_MAG, MIN_LLR_MAG};
+        } else {
+            // Apply median correction and compute corrected differential phase
+            Complex corrected = equalized[i] * phase_corr;
+            Complex diff = corrected * std::conj(prev_sym);
+            float phase = std::atan2(diff.imag(), diff.real());
 
-        // Compute corrected differential symbol for constellation display
+            // Uniform LLR scale from phase_var — all carriers weighted equally
+            llrs[0] = soft_demap::clipLLR(scale * std::sin(phase + PI / 4.0f));
+            llrs[1] = soft_demap::clipLLR(scale * std::cos(2.0f * phase));
+        }
+
+        soft_bits.push_back(llrs[0]);
+        soft_bits.push_back(llrs[1]);
+
+        // Constellation display
         if (!dqpsk_skip_first_symbol) {
-            Complex phase_corr(std::cos(correction), std::sin(correction));
             Complex diff = equalized[i] * phase_corr * std::conj(prev_sym);
             constellation_update.push_back(diff);
         }
 
         // Update reference with ORIGINAL symbol (not corrected)
-        // This keeps the reference tracking the actual channel, not our corrections
         dbpsk_prev_equalized[i] = equalized[i];
     }
 

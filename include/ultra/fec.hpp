@@ -71,6 +71,10 @@ public:
     // Set max iterations (tradeoff: more = better correction, slower)
     void setMaxIterations(int max_iter);
 
+    // Set min-sum normalization factor (default 0.75, range 0.5-1.0)
+    // Different factors give different message-passing dynamics, useful for decoder diversity
+    void setMinSumFactor(float factor);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

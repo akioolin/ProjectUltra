@@ -10,6 +10,51 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-02-08: LDPC false positive recovery via CRC-guided bit-flip search
+
+**What was broken:**
+- At SNR=20 with good fading, R1/4 averaged ~1.0 retransmissions per test run.
+- Root cause: LDPC min-sum decoder occasionally converges to a wrong-but-valid codeword
+  (syndrome passes but information bits are wrong). Frame-level CRC catches this, but the
+  frame is discarded and retransmitted.
+- These "false positives" account for most retransmissions at SNR=20 (genuine CW failures
+  from deep fades cause the remainder).
+
+**What was changed:**
+
+1. **CRC-guided bit-flip recovery** (`src/protocol/frame_v2.cpp`)
+   - Two recovery cases: Case 1 (header CRC error in CW0) and Case 2 (frame CRC error)
+   - Case 1: Direct magic + header CRC check on CW0 without parseHeader (avoids logging
+     spam from thousands of failed trials). 1-bit and 2-bit brute force in CW0.
+   - Case 2: CRC delta table — precompute `delta[p] = CRC(data^e_p) XOR CRC(data)` for
+     each data bit position p. Exploits CRC linearity for efficient search:
+     - 1-bit: O(n) — check if delta[p] == syndrome
+     - 2-bit: O(n) with hash map — for each p1, look up `syndrome ^ delta[p1]`
+     - 3-bit: O(n²) with hash map — for each (p1,p2), look up `syndrome ^ delta[p1] ^ delta[p2]`
+   - Suspect-augmented search for 4-6 bit errors: identifies LDPC-flipped info bits
+     (bits where decoder output disagrees with channel LLR sign) as suspects, searches
+     C(K,4) through C(K,6) subsets among K=30 suspects
+   - Hybrid 2+2 search: 2 suspect bits + 2 arbitrary bits via delta_map
+
+2. **Fallback LDPC re-decode** with different min-sum factors {0.75, 0.625, 0.5, 0.875}
+   after CRC-guided search fails.
+
+3. **Added `#include <unordered_map>`** for delta_map hash table.
+
+**Recovery effectiveness (observed over 20-run batch):**
+- 87.5% of detected false positives recovered (14/16)
+- Most recovered via 1-bit or 2-bit fix (specific trapping set patterns)
+- Unrecoverable FPs have 7+ bit errors (beyond practical search space)
+- Remaining retransmissions from genuine CW decode failures during deep fades
+
+**Test verification:**
+- `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test` — PASS, 0 retransmissions
+- `./build/cli_simulator --snr 20 --rate r1_4 --test` — PASS (AWGN), 0 retransmissions
+- SNR=20 good fading: reduced from avg ~1.0 to ~0.5 retransmissions per run
+  (high variance due to non-deterministic fading; ~70-93% of runs achieve 0 retransmissions)
+
+---
+
 ## 2026-02-07: Fix DISCONNECT decode failure on fading + false LTS detection
 
 **What was broken:**

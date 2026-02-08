@@ -12,10 +12,20 @@ bool FrameInterleaver::tables_initialized_ = false;
 void FrameInterleaver::ensureTablesInitialized() {
     if (tables_initialized_) return;
 
-    // Build permutation tables for block interleaving
-    // Pattern: Take 1 bit from each CW in round-robin
-    //   Original: [CW0: bits 0-647][CW1: bits 648-1295][CW2: bits 1296-1943][CW3: bits 1944-2591]
-    //   Interleaved: [bit0_CW0, bit0_CW1, bit0_CW2, bit0_CW3, bit1_CW0, bit1_CW1, ...]
+    // Build permutation tables for rotating round-robin interleaving
+    //
+    // For DQPSK, each carrier produces 2 bits with different reliability:
+    //   MSB (sin-based): ±90° decision margin → more reliable
+    //   LSB (cos-based): ±45° decision margin → less reliable
+    //
+    // Simple round-robin (bit*4 + cw) assigns CW0,CW2 always to MSB and
+    // CW1,CW3 always to LSB, creating a systematic reliability imbalance.
+    //
+    // Fix: rotate CW assignment by LDPC bit position:
+    //   interleaved_idx = bit * 4 + (cw + bit) % 4
+    //
+    // This ensures each CW gets 50% MSB + 50% LSB positions over every
+    // 4 LDPC bit positions, equalizing reliability across all codewords.
     //
     // interleave_table_[original_idx] = interleaved_idx
     // deinterleave_table_[interleaved_idx] = original_idx
@@ -26,7 +36,7 @@ void FrameInterleaver::ensureTablesInitialized() {
     for (int cw = 0; cw < NUM_CODEWORDS; ++cw) {
         for (int bit = 0; bit < BITS_PER_CODEWORD; ++bit) {
             int original_idx = cw * BITS_PER_CODEWORD + bit;
-            int interleaved_idx = bit * NUM_CODEWORDS + cw;
+            int interleaved_idx = bit * NUM_CODEWORDS + (cw + bit) % NUM_CODEWORDS;
 
             interleave_table_[original_idx] = interleaved_idx;
             deinterleave_table_[interleaved_idx] = original_idx;

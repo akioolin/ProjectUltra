@@ -1400,13 +1400,21 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
             result.success = true;
             result.frame_data = cw_status.reassemble();
 
-            // Parse header to get frame type
-            if (result.frame_data.size() >= 3) {
-                result.frame_type = static_cast<v2::FrameType>(result.frame_data[2]);
+            if (result.frame_data.empty()) {
+                // LDPC said 4/4 OK but reassemble failed — likely LDPC false positive
+                result.success = false;
+                LOG_MODEM(WARN, "[%s] Frame deinterleave: 4/4 CWs OK but reassemble FAILED (LDPC false positive?)",
+                          log_prefix_.c_str());
+            } else {
+                // Parse header to get frame type
+                if (result.frame_data.size() >= 3) {
+                    result.frame_type = static_cast<v2::FrameType>(result.frame_data[2]);
+                }
             }
 
-            LOG_MODEM(INFO, "[%s] Frame deinterleave decode SUCCESS (%d/%d CWs)",
-                      log_prefix_.c_str(), result.codewords_ok, v2::FIXED_FRAME_CODEWORDS);
+            LOG_MODEM(INFO, "[%s] Frame deinterleave decode SUCCESS (%d/%d CWs, data=%zu bytes)",
+                      log_prefix_.c_str(), result.codewords_ok, v2::FIXED_FRAME_CODEWORDS,
+                      result.frame_data.size());
             return result;
         } else {
             LOG_MODEM(DEBUG, "[%s] Frame deinterleave decode FAILED (%d/%d CWs)",

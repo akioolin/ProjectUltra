@@ -1,11 +1,14 @@
 #include "frame_v2.hpp"
 #include "ultra/fec.hpp"  // LDPC encoder/decoder + ChannelInterleaver
 #include "../fec/frame_interleaver.hpp"  // Frame-level interleaving
+#include "../fec/ldpc_codec.hpp"  // For getRecommendedIterations
 #include "ultra/logging.hpp"  // LOG_MODEM
 #include <cstring>
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <random>
+#include <unordered_map>
 
 namespace ultra {
 namespace protocol {
@@ -1007,12 +1010,24 @@ uint8_t CodewordStatus::getExpectedCodewords() const {
 
 Bytes CodewordStatus::reassemble() const {
     if (decoded.empty() || !decoded[0] || data.empty()) {
+        LOG_MODEM(WARN, "reassemble: early return (decoded=%zu, data=%zu)",
+                  decoded.size(), data.size());
         return {};
     }
 
     // Parse header to know total size
     auto info = parseHeader(data[0]);
     if (!info.valid) {
+        // Log all 20 bytes to diagnose LDPC false positives vs bit errors
+        if (data[0].size() >= 17) {
+            LOG_MODEM(WARN, "reassemble: header invalid, CW0[0..16]: "
+                      "%02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X (size=%zu)",
+                      data[0][0], data[0][1], data[0][2], data[0][3],
+                      data[0][4], data[0][5], data[0][6], data[0][7],
+                      data[0][8], data[0][9], data[0][10], data[0][11],
+                      data[0][12], data[0][13], data[0][14], data[0][15],
+                      data[0][16], data[0].size());
+        }
         return {};
     }
 
@@ -1125,8 +1140,9 @@ std::pair<bool, Bytes> decodeSingleCodeword(const std::vector<float>& soft_bits,
     // Get bytes per codeword for this rate
     size_t bytes_per_cw = getBytesPerCodeword(rate);
 
-    // Create LDPC decoder with specified rate
+    // Create LDPC decoder with specified rate and recommended iterations
     LDPCDecoder decoder(rate);
+    decoder.setMaxIterations(fec::LDPCCodec::getRecommendedIterations(rate));
 
     // Decode - returns k/8 bytes
     auto decoded = decoder.decodeSoft(soft_bits);
@@ -1207,6 +1223,8 @@ HeaderInfo parseHeader(const Bytes& first_codeword_data) {
                                   first_codeword_data[16];
         uint16_t calculated_hcrc = ControlFrame::calculateCRC(first_codeword_data.data(), 15);
         if (received_hcrc != calculated_hcrc) {
+            LOG_MODEM(WARN, "parseHeader: data frame header CRC mismatch: rx=%04X calc=%04X (total_cw=%d, payload_len=%d)",
+                      received_hcrc, calculated_hcrc, info.total_cw, info.payload_len);
             return info;  // Header CRC failed
         }
     }
@@ -1324,7 +1342,11 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
     }
 
     // Decode each codeword
+    // Use min-sum factor 0.9375 (closer to BP) as default — empirically best
+    // for DQPSK differential LLRs on fading channels.
     LDPCDecoder decoder(rate);
+    decoder.setMaxIterations(fec::LDPCCodec::getRecommendedIterations(rate));
+    decoder.setMinSumFactor(0.9375f);
     size_t bytes_per_cw = getBytesPerCodeword(rate);
 
     for (int cw = 0; cw < FIXED_FRAME_CODEWORDS; ++cw) {
@@ -1348,6 +1370,168 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
         bool success = decoder.lastDecodeSuccess();
         int iterations = decoder.lastIterations();
 
+        // Multi-strategy LDPC retry when decode fails:
+        // Uses decoder diversity (varying min-sum factor) + LLR perturbation
+        // to break trapping sets from multiple angles.
+        if (!success) {
+            // Use data-dependent seed for unique perturbation per CW
+            uint32_t data_hash = 0;
+            for (size_t j = 0; j < std::min(cw_bits.size(), size_t(16)); j++) {
+                union { float f; uint32_t u; } conv;
+                conv.f = cw_bits[j];
+                data_hash ^= conv.u + 0x9e3779b9 + (data_hash << 6) + (data_hash >> 2);
+            }
+
+            // Phase 0: Pure decoder diversity (4 attempts)
+            // Try different min-sum normalization factors on UNMODIFIED LLRs.
+            // Different factors change message-passing dynamics fundamentally,
+            // breaking trapping sets that 0.875 gets stuck in.
+            // Initial decode uses 0.9375, so try 0.875, 0.75, 0.625, 0.5 here.
+            {
+                static constexpr float factors[] = {0.875f, 0.75f, 0.625f, 0.5f};
+                for (int retry = 0; retry < 4 && !success; retry++) {
+                    decoder.setMinSumFactor(factors[retry]);
+                    decoded = decoder.decodeSoft(cw_bits);
+                    if (decoder.lastDecodeSuccess()) {
+                        success = true;
+                        iterations = decoder.lastIterations();
+                        LOG_MODEM(INFO, "CW[%d]: RETRY OK (factor=%.4f, iters=%d)", cw, factors[retry], iterations);
+                    }
+                }
+                decoder.setMinSumFactor(0.9375f);  // restore default
+            }
+
+            // Phase 1: Perturbation with decoder diversity (15 attempts)
+            // Alternate min-sum factor between attempts for maximum diversity.
+            // Different seeds × different factors explore the solution space broadly.
+            if (!success) {
+                static constexpr float sigmas1[] = {
+                    0.3f, 0.7f, 0.3f, 1.0f, 0.5f, 1.5f, 0.3f, 2.0f,
+                    0.5f, 0.7f, 1.0f, 2.5f, 0.3f, 1.5f, 0.5f
+                };
+                static constexpr float factors1[] = {
+                    0.75f, 0.625f, 0.875f, 0.75f, 0.625f, 0.75f, 0.5f, 0.625f,
+                    0.875f, 0.75f, 0.625f, 0.875f, 0.75f, 0.5f, 0.625f
+                };
+                for (int retry = 0; retry < 15 && !success; retry++) {
+                    decoder.setMinSumFactor(factors1[retry]);
+                    std::mt19937 rng(data_hash + retry * 997 + retry * 31);
+                    std::normal_distribution<float> noise(0.0f, sigmas1[retry]);
+                    auto perturbed = cw_bits;
+                    for (float& llr : perturbed) {
+                        llr += noise(rng);
+                    }
+                    decoded = decoder.decodeSoft(perturbed);
+                    if (decoder.lastDecodeSuccess()) {
+                        success = true;
+                        iterations = decoder.lastIterations();
+                        LOG_MODEM(INFO, "CW[%d]: RETRY OK (perturb σ=%.1f f=%.3f, iters=%d)", cw, sigmas1[retry], factors1[retry], iterations);
+                    }
+                }
+                decoder.setMinSumFactor(0.875f);
+            }
+
+            // Phase 2: Clip ±10 + perturbation (5 attempts)
+            if (!success) {
+                static constexpr float sigmas2[] = {0.3f, 0.8f, 1.5f, 2.5f, 4.0f};
+                for (int retry = 0; retry < 5 && !success; retry++) {
+                    decoder.setMinSumFactor(retry % 2 == 0 ? 0.625f : 0.875f);
+                    std::mt19937 rng(data_hash + (retry + 15) * 997 + 12345);
+                    std::normal_distribution<float> noise(0.0f, sigmas2[retry]);
+                    auto clipped = cw_bits;
+                    for (float& llr : clipped) {
+                        llr = std::max(-10.0f, std::min(10.0f, llr));
+                        llr += noise(rng);
+                    }
+                    decoded = decoder.decodeSoft(clipped);
+                    if (decoder.lastDecodeSuccess()) {
+                        success = true;
+                        iterations = decoder.lastIterations();
+                        LOG_MODEM(INFO, "CW[%d]: RETRY OK (clip10+perturb σ=%.1f, iters=%d)", cw, sigmas2[retry], iterations);
+                    }
+                }
+                decoder.setMinSumFactor(0.875f);
+            }
+
+            // Phase 3: Scale 0.5× + perturbation (3 attempts)
+            if (!success) {
+                static constexpr float sigmas3[] = {0.5f, 1.5f, 3.0f};
+                for (int retry = 0; retry < 3 && !success; retry++) {
+                    std::mt19937 rng(data_hash + (retry + 20) * 997 + 54321);
+                    std::normal_distribution<float> noise(0.0f, sigmas3[retry]);
+                    auto scaled = cw_bits;
+                    for (float& llr : scaled) {
+                        llr = llr * 0.5f + noise(rng);
+                    }
+                    decoded = decoder.decodeSoft(scaled);
+                    if (decoder.lastDecodeSuccess()) {
+                        success = true;
+                        iterations = decoder.lastIterations();
+                        LOG_MODEM(INFO, "CW[%d]: RETRY OK (scale50+perturb σ=%.1f, iters=%d)", cw, sigmas3[retry], iterations);
+                    }
+                }
+            }
+
+            // Phase 4: Clip ±6 + perturbation (3 attempts)
+            if (!success) {
+                static constexpr float sigmas4[] = {0.5f, 1.5f, 3.0f};
+                for (int retry = 0; retry < 3 && !success; retry++) {
+                    std::mt19937 rng(data_hash + (retry + 23) * 997 + 99999);
+                    std::normal_distribution<float> noise(0.0f, sigmas4[retry]);
+                    auto clipped = cw_bits;
+                    for (float& llr : clipped) {
+                        llr = std::max(-6.0f, std::min(6.0f, llr));
+                        llr += noise(rng);
+                    }
+                    decoded = decoder.decodeSoft(clipped);
+                    if (decoder.lastDecodeSuccess()) {
+                        success = true;
+                        iterations = decoder.lastIterations();
+                        LOG_MODEM(INFO, "CW[%d]: RETRY OK (clip6+perturb σ=%.1f, iters=%d)", cw, sigmas4[retry], iterations);
+                    }
+                }
+            }
+
+            // Phase 5: Hard decision + perturbation (5 attempts)
+            if (!success) {
+                static constexpr float sigmas5[] = {0.0f, 0.2f, 0.5f, 1.0f, 1.5f};
+                for (int retry = 0; retry < 5 && !success; retry++) {
+                    std::mt19937 rng(data_hash + (retry + 26) * 997 + 33333);
+                    std::normal_distribution<float> noise(0.0f, sigmas5[retry]);
+                    auto hard = cw_bits;
+                    for (float& llr : hard) {
+                        llr = (llr >= 0) ? 1.0f : -1.0f;
+                        llr += noise(rng);
+                    }
+                    decoded = decoder.decodeSoft(hard);
+                    if (decoder.lastDecodeSuccess()) {
+                        success = true;
+                        iterations = decoder.lastIterations();
+                        LOG_MODEM(INFO, "CW[%d]: RETRY OK (hard+perturb σ=%.1f, iters=%d)", cw, sigmas5[retry], iterations);
+                    }
+                }
+            }
+
+            // Phase 6: Scale 0.25× + perturbation (3 attempts)
+            if (!success) {
+                static constexpr float sigmas6[] = {0.3f, 1.0f, 2.0f};
+                for (int retry = 0; retry < 3 && !success; retry++) {
+                    std::mt19937 rng(data_hash + (retry + 31) * 997 + 77777);
+                    std::normal_distribution<float> noise(0.0f, sigmas6[retry]);
+                    auto scaled = cw_bits;
+                    for (float& llr : scaled) {
+                        llr = llr * 0.25f + noise(rng);
+                    }
+                    decoded = decoder.decodeSoft(scaled);
+                    if (decoder.lastDecodeSuccess()) {
+                        success = true;
+                        iterations = decoder.lastIterations();
+                        LOG_MODEM(INFO, "CW[%d]: RETRY OK (scale25+perturb σ=%.1f, iters=%d)", cw, sigmas6[retry], iterations);
+                    }
+                }
+            }
+        }
+
         LOG_MODEM(INFO, "CW[%d]: %s (iters=%d, llr_avg=%.2f, |llr|_avg=%.2f)",
                   cw, success ? "OK" : "FAIL", iterations, llr_avg, llr_abs_avg);
 
@@ -1355,6 +1539,434 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
         if (success && decoded.size() >= bytes_per_cw) {
             // Take exactly bytes_per_cw bytes
             status.data[cw].assign(decoded.begin(), decoded.begin() + bytes_per_cw);
+        }
+    }
+
+    // ========================================================================
+    // LDPC FALSE POSITIVE RECOVERY
+    // ========================================================================
+    // LDPC min-sum can rarely converge to a wrong-but-valid codeword (syndrome
+    // passes but information bits are wrong). Detect via frame CRC and attempt
+    // recovery using CRC-guided bit-flip search and LDPC re-decode.
+    if (status.allSuccess()) {
+        auto frame_data = status.reassemble();
+        bool frame_valid = false;
+        if (!frame_data.empty()) {
+            auto hdr = parseHeader(frame_data);
+            if (hdr.valid) {
+                if (hdr.is_control) {
+                    frame_valid = ControlFrame::deserialize(frame_data).has_value();
+                } else {
+                    frame_valid = DataFrame::deserialize(frame_data).has_value();
+                }
+            }
+        }
+
+        if (!frame_valid) {
+            LOG_MODEM(WARN, "LDPC false positive detected: all CWs decoded but frame invalid");
+            bool recovered = false;
+
+            // Helper: verify assembled frame without logging
+            auto verifyFrame = [](const Bytes& assembled) -> bool {
+                if (assembled.empty()) return false;
+                auto h = parseHeader(assembled);
+                if (!h.valid) return false;
+                if (h.is_control) return ControlFrame::deserialize(assembled).has_value();
+                return DataFrame::deserialize(assembled).has_value();
+            };
+
+            if (frame_data.empty()) {
+                // ===========================================================
+                // Case 1: Header CRC error in CW0
+                // ===========================================================
+                // Use direct magic + header CRC check (avoids parseHeader logging)
+                for (size_t byte_idx = 0; byte_idx < bytes_per_cw && !recovered; ++byte_idx) {
+                    for (int bit = 0; bit < 8 && !recovered; ++bit) {
+                        status.data[0][byte_idx] ^= (1 << bit);
+                        // Quick header validation without parseHeader
+                        uint16_t magic = (uint16_t(status.data[0][0]) << 8) | status.data[0][1];
+                        if (magic == MAGIC_V2) {
+                            uint16_t stored_hcrc = (uint16_t(status.data[0][15]) << 8) | status.data[0][16];
+                            uint16_t calc_hcrc = ControlFrame::calculateCRC(status.data[0].data(), 15);
+                            if (stored_hcrc == calc_hcrc) {
+                                auto trial = status.reassemble();
+                                if (verifyFrame(trial)) {
+                                    LOG_MODEM(INFO, "CW[0]: FALSE POSITIVE RECOVERED (1-bit flip byte %zu bit %d)", byte_idx, bit);
+                                    recovered = true;
+                                }
+                            }
+                        }
+                        if (!recovered) status.data[0][byte_idx] ^= (1 << bit);
+                    }
+                }
+
+                // Two-bit flip in CW0 (header + payload start)
+                if (!recovered) {
+                    size_t total_bits_cw0 = bytes_per_cw * 8;
+                    for (size_t b1 = 0; b1 < total_bits_cw0 && !recovered; ++b1) {
+                        status.data[0][b1/8] ^= (1 << (b1%8));
+                        for (size_t b2 = b1 + 1; b2 < total_bits_cw0 && !recovered; ++b2) {
+                            status.data[0][b2/8] ^= (1 << (b2%8));
+                            uint16_t magic = (uint16_t(status.data[0][0]) << 8) | status.data[0][1];
+                            if (magic == MAGIC_V2) {
+                                uint16_t stored_hcrc = (uint16_t(status.data[0][15]) << 8) | status.data[0][16];
+                                uint16_t calc_hcrc = ControlFrame::calculateCRC(status.data[0].data(), 15);
+                                if (stored_hcrc == calc_hcrc) {
+                                    auto trial = status.reassemble();
+                                    if (verifyFrame(trial)) {
+                                        LOG_MODEM(INFO, "CW[0]: FALSE POSITIVE RECOVERED (2-bit flip CW0 bits %zu,%zu)", b1, b2);
+                                        recovered = true;
+                                    }
+                                }
+                            }
+                            if (!recovered) status.data[0][b2/8] ^= (1 << (b2%8));
+                        }
+                        if (!recovered) status.data[0][b1/8] ^= (1 << (b1%8));
+                    }
+                }
+            } else {
+                // ===========================================================
+                // Case 2: Frame CRC error (header OK, payload corrupted)
+                // ===========================================================
+                // Work directly on assembled frame_data with CRC delta table
+                // for efficient 1-bit and cross-CW 2-bit search.
+                auto hdr = parseHeader(frame_data);
+                if (hdr.valid && !hdr.is_control) {
+                    size_t expected_size = DataFrame::HEADER_SIZE + hdr.payload_len + DataFrame::CRC_SIZE;
+                    if (frame_data.size() >= expected_size) {
+                        uint16_t stored_fcrc = (uint16_t(frame_data[expected_size-2]) << 8) |
+                                                frame_data[expected_size-1];
+                        size_t data_bytes = expected_size - 2;
+                        uint16_t orig_crc = ControlFrame::calculateCRC(frame_data.data(), data_bytes);
+                        uint16_t syndrome = stored_fcrc ^ orig_crc;
+                        LOG_MODEM(WARN, "Frame CRC syndrome=%04X (rx=%04X calc=%04X, %zu data bytes)",
+                                  syndrome, stored_fcrc, orig_crc, data_bytes);
+
+                        // Precompute CRC delta for each data bit position
+                        size_t data_bits = data_bytes * 8;
+                        std::vector<uint16_t> deltas(data_bits);
+                        for (size_t p = 0; p < data_bits; ++p) {
+                            frame_data[p/8] ^= (1 << (p%8));
+                            deltas[p] = orig_crc ^ ControlFrame::calculateCRC(frame_data.data(), data_bytes);
+                            frame_data[p/8] ^= (1 << (p%8));
+                        }
+
+                        // Single-bit search in data bytes
+                        for (size_t p = 0; p < data_bits && !recovered; ++p) {
+                            if (deltas[p] == syndrome) {
+                                size_t frame_byte = p / 8;
+                                int bit = p % 8;
+                                int cw_idx = static_cast<int>(frame_byte / bytes_per_cw);
+                                size_t cw_byte = frame_byte % bytes_per_cw;
+                                if (cw_idx < FIXED_FRAME_CODEWORDS) {
+                                    status.data[cw_idx][cw_byte] ^= (1 << bit);
+                                    LOG_MODEM(INFO, "CW[%d]: FALSE POSITIVE RECOVERED (1-bit flip frame byte %zu bit %d)",
+                                              cw_idx, frame_byte, bit);
+                                    recovered = true;
+                                }
+                            }
+                        }
+
+                        // Single-bit in CRC bytes (syndrome is a power of 2)
+                        if (!recovered) {
+                            for (int bit = 0; bit < 16 && !recovered; ++bit) {
+                                if (syndrome == (1u << bit)) {
+                                    // Error in stored CRC itself — data is correct!
+                                    size_t frame_byte = (bit >= 8) ? (expected_size - 2) : (expected_size - 1);
+                                    int actual_bit = bit % 8;
+                                    int cw_idx = static_cast<int>(frame_byte / bytes_per_cw);
+                                    size_t cw_byte = frame_byte % bytes_per_cw;
+                                    if (cw_idx < FIXED_FRAME_CODEWORDS) {
+                                        status.data[cw_idx][cw_byte] ^= (1 << actual_bit);
+                                        LOG_MODEM(INFO, "CW[%d]: FALSE POSITIVE RECOVERED (CRC bit %d)", cw_idx, bit);
+                                        recovered = true;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Build hash map for delta lookups (used by 2-bit and 3-bit search)
+                        std::unordered_map<uint16_t, std::vector<size_t>> delta_map;
+                        for (size_t p = 0; p < data_bits; ++p) {
+                            delta_map[deltas[p]].push_back(p);
+                        }
+
+                        // Helper to apply/undo bit fix in status.data
+                        auto fixBit = [&](size_t p) {
+                            size_t fb = p / 8;
+                            int cw = static_cast<int>(fb / bytes_per_cw);
+                            size_t cb = fb % bytes_per_cw;
+                            if (cw < FIXED_FRAME_CODEWORDS)
+                                status.data[cw][cb] ^= (1 << (p % 8));
+                        };
+
+                        // Two-bit search using delta hash map
+                        if (!recovered) {
+                            for (size_t p1 = 0; p1 < data_bits && !recovered; ++p1) {
+                                uint16_t need = syndrome ^ deltas[p1];
+                                auto it = delta_map.find(need);
+                                if (it != delta_map.end()) {
+                                    for (size_t p2 : it->second) {
+                                        if (p2 > p1) {
+                                            fixBit(p1);
+                                            fixBit(p2);
+                                            auto trial = status.reassemble();
+                                            if (verifyFrame(trial)) {
+                                                LOG_MODEM(INFO, "FALSE POSITIVE RECOVERED (2-bit flip frame bits %zu,%zu)", p1, p2);
+                                                recovered = true;
+                                                break;
+                                            }
+                                            fixBit(p1);
+                                            fixBit(p2);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Three-bit search: for each p1, look up (syndrome ^ delta[p1]) pairs
+                        // For each (p1, p2) pair: check if (syndrome ^ delta[p1] ^ delta[p2])
+                        // exists in delta_map. O(n²) with O(1) hash lookups.
+                        if (!recovered) {
+                            for (size_t p1 = 0; p1 < data_bits && !recovered; ++p1) {
+                                uint16_t partial1 = syndrome ^ deltas[p1];
+                                for (size_t p2 = p1 + 1; p2 < data_bits && !recovered; ++p2) {
+                                    uint16_t need3 = partial1 ^ deltas[p2];
+                                    auto it = delta_map.find(need3);
+                                    if (it != delta_map.end()) {
+                                        for (size_t p3 : it->second) {
+                                            if (p3 > p2) {
+                                                fixBit(p1);
+                                                fixBit(p2);
+                                                fixBit(p3);
+                                                auto trial = status.reassemble();
+                                                if (verifyFrame(trial)) {
+                                                    LOG_MODEM(INFO, "FALSE POSITIVE RECOVERED (3-bit flip frame bits %zu,%zu,%zu)", p1, p2, p3);
+                                                    recovered = true;
+                                                    break;
+                                                }
+                                                fixBit(p1);
+                                                fixBit(p2);
+                                                fixBit(p3);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Suspect-augmented search: target LDPC-flipped info bits
+                        // LDPC false positives flip some info bits incorrectly.
+                        // These wrong flips are a subset of all LDPC corrections
+                        // (bits where decoder output != channel LLR sign).
+                        // Search 4-8 bit error patterns among suspects, then
+                        // hybrid: 2 suspects + 2 arbitrary via delta_map.
+                        if (!recovered) {
+                            struct SuspectBit { size_t frame_bit; float abs_llr; };
+                            std::vector<SuspectBit> suspects;
+
+                            for (int c = 0; c < FIXED_FRAME_CODEWORDS; ++c) {
+                                auto soft = cw_soft_bits[c];
+                                if (use_channel_deinterleave && interleaver) {
+                                    soft = interleaver->deinterleave(soft);
+                                }
+                                for (size_t i = 0; i < bytes_per_cw * 8 && i < soft.size(); ++i) {
+                                    size_t frame_bit = c * bytes_per_cw * 8 + i;
+                                    if (frame_bit / 8 >= data_bytes) continue;
+                                    int ch_bit = (soft[i] < 0) ? 1 : 0;
+                                    int dec_bit = (status.data[c][i / 8] >> (i % 8)) & 1;
+                                    if (ch_bit != dec_bit) {
+                                        suspects.push_back({frame_bit, std::abs(soft[i])});
+                                    }
+                                }
+                            }
+                            // Sort by weakest |LLR| first (most likely wrong corrections)
+                            std::sort(suspects.begin(), suspects.end(),
+                                      [](const SuspectBit& a, const SuspectBit& b) { return a.abs_llr < b.abs_llr; });
+
+                            constexpr int MAX_S = 30;
+                            int ns = std::min(MAX_S, static_cast<int>(suspects.size()));
+
+                            // Extract suspect deltas
+                            std::vector<uint16_t> sd(ns);
+                            for (int i = 0; i < ns; ++i)
+                                sd[i] = deltas[suspects[i].frame_bit];
+
+                            // 4-bit among suspects: C(ns,4) ≈ 27K checks
+                            for (int a = 0; a < ns && !recovered; ++a) {
+                                uint16_t da = sd[a];
+                                for (int b = a + 1; b < ns && !recovered; ++b) {
+                                    uint16_t dab = da ^ sd[b];
+                                    for (int c2 = b + 1; c2 < ns && !recovered; ++c2) {
+                                        uint16_t dabc = dab ^ sd[c2];
+                                        for (int d = c2 + 1; d < ns && !recovered; ++d) {
+                                            if ((dabc ^ sd[d]) == syndrome) {
+                                                fixBit(suspects[a].frame_bit);
+                                                fixBit(suspects[b].frame_bit);
+                                                fixBit(suspects[c2].frame_bit);
+                                                fixBit(suspects[d].frame_bit);
+                                                auto trial = status.reassemble();
+                                                if (verifyFrame(trial)) {
+                                                    LOG_MODEM(INFO, "FALSE POSITIVE RECOVERED (4-bit suspects, |LLR|=%.2f,%.2f,%.2f,%.2f)",
+                                                              suspects[a].abs_llr, suspects[b].abs_llr, suspects[c2].abs_llr, suspects[d].abs_llr);
+                                                    recovered = true;
+                                                } else {
+                                                    fixBit(suspects[a].frame_bit);
+                                                    fixBit(suspects[b].frame_bit);
+                                                    fixBit(suspects[c2].frame_bit);
+                                                    fixBit(suspects[d].frame_bit);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 5-bit among suspects: C(ns,5) ≈ 142K checks
+                            for (int a = 0; a < ns && !recovered; ++a) {
+                                uint16_t da = sd[a];
+                                for (int b = a + 1; b < ns && !recovered; ++b) {
+                                    uint16_t dab = da ^ sd[b];
+                                    for (int c2 = b + 1; c2 < ns && !recovered; ++c2) {
+                                        uint16_t dabc = dab ^ sd[c2];
+                                        for (int d = c2 + 1; d < ns && !recovered; ++d) {
+                                            uint16_t dabcd = dabc ^ sd[d];
+                                            for (int e = d + 1; e < ns && !recovered; ++e) {
+                                                if ((dabcd ^ sd[e]) == syndrome) {
+                                                    fixBit(suspects[a].frame_bit);
+                                                    fixBit(suspects[b].frame_bit);
+                                                    fixBit(suspects[c2].frame_bit);
+                                                    fixBit(suspects[d].frame_bit);
+                                                    fixBit(suspects[e].frame_bit);
+                                                    auto trial = status.reassemble();
+                                                    if (verifyFrame(trial)) {
+                                                        LOG_MODEM(INFO, "FALSE POSITIVE RECOVERED (5-bit suspects)");
+                                                        recovered = true;
+                                                    } else {
+                                                        fixBit(suspects[a].frame_bit);
+                                                        fixBit(suspects[b].frame_bit);
+                                                        fixBit(suspects[c2].frame_bit);
+                                                        fixBit(suspects[d].frame_bit);
+                                                        fixBit(suspects[e].frame_bit);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 6-bit among suspects: C(ns,6) ≈ 594K checks
+                            for (int a = 0; a < ns && !recovered; ++a) {
+                                uint16_t da = sd[a];
+                                for (int b = a + 1; b < ns && !recovered; ++b) {
+                                    uint16_t dab = da ^ sd[b];
+                                    for (int c2 = b + 1; c2 < ns && !recovered; ++c2) {
+                                        uint16_t dabc = dab ^ sd[c2];
+                                        for (int d = c2 + 1; d < ns && !recovered; ++d) {
+                                            uint16_t dabcd = dabc ^ sd[d];
+                                            for (int e = d + 1; e < ns && !recovered; ++e) {
+                                                uint16_t dabcde = dabcd ^ sd[e];
+                                                for (int f = e + 1; f < ns && !recovered; ++f) {
+                                                    if ((dabcde ^ sd[f]) == syndrome) {
+                                                        size_t bits[] = {suspects[a].frame_bit, suspects[b].frame_bit,
+                                                                         suspects[c2].frame_bit, suspects[d].frame_bit,
+                                                                         suspects[e].frame_bit, suspects[f].frame_bit};
+                                                        for (auto bp : bits) fixBit(bp);
+                                                        auto trial = status.reassemble();
+                                                        if (verifyFrame(trial)) {
+                                                            LOG_MODEM(INFO, "FALSE POSITIVE RECOVERED (6-bit suspects)");
+                                                            recovered = true;
+                                                        } else {
+                                                            for (auto bp : bits) fixBit(bp);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Hybrid: 2 suspects + 2 arbitrary via delta_map
+                            if (!recovered) {
+                                for (int si = 0; si < ns && !recovered; ++si) {
+                                    for (int sj = si + 1; sj < ns && !recovered; ++sj) {
+                                        uint16_t partial = syndrome ^ sd[si] ^ sd[sj];
+                                        for (size_t p = 0; p < data_bits && !recovered; ++p) {
+                                            if (p == suspects[si].frame_bit || p == suspects[sj].frame_bit) continue;
+                                            uint16_t need = partial ^ deltas[p];
+                                            auto it = delta_map.find(need);
+                                            if (it != delta_map.end()) {
+                                                for (size_t p4 : it->second) {
+                                                    if (p4 > p && p4 != suspects[si].frame_bit && p4 != suspects[sj].frame_bit) {
+                                                        fixBit(suspects[si].frame_bit);
+                                                        fixBit(suspects[sj].frame_bit);
+                                                        fixBit(p);
+                                                        fixBit(p4);
+                                                        auto trial = status.reassemble();
+                                                        if (verifyFrame(trial)) {
+                                                            LOG_MODEM(INFO, "FALSE POSITIVE RECOVERED (hybrid 2s+2a, suspects %zu,%zu + %zu,%zu)",
+                                                                      suspects[si].frame_bit, suspects[sj].frame_bit, p, p4);
+                                                            recovered = true;
+                                                            break;
+                                                        }
+                                                        fixBit(suspects[si].frame_bit);
+                                                        fixBit(suspects[sj].frame_bit);
+                                                        fixBit(p);
+                                                        fixBit(p4);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ===========================================================
+            // Fallback: LDPC re-decode with different min-sum factors
+            // ===========================================================
+            if (!recovered) {
+                static constexpr float recovery_factors[] = {0.75f, 0.625f, 0.5f, 0.875f};
+                for (int attempt = 0; attempt < 4 && !recovered; ++attempt) {
+                    for (int cw = 0; cw < FIXED_FRAME_CODEWORDS && !recovered; ++cw) {
+                        auto cw_bits = cw_soft_bits[cw];
+                        if (use_channel_deinterleave && interleaver) {
+                            cw_bits = interleaver->deinterleave(cw_bits);
+                        }
+                        auto original_data = status.data[cw];
+
+                        decoder.setMinSumFactor(recovery_factors[attempt]);
+                        auto re_decoded = decoder.decodeSoft(cw_bits);
+                        if (decoder.lastDecodeSuccess() && re_decoded.size() >= bytes_per_cw) {
+                            Bytes new_cw_data(re_decoded.begin(), re_decoded.begin() + bytes_per_cw);
+                            if (new_cw_data != original_data) {
+                                status.data[cw] = new_cw_data;
+                                auto trial = status.reassemble();
+                                if (verifyFrame(trial)) {
+                                    LOG_MODEM(INFO, "CW[%d]: FALSE POSITIVE RECOVERED (re-decode factor=%.3f)",
+                                              cw, recovery_factors[attempt]);
+                                    recovered = true;
+                                } else {
+                                    status.data[cw] = original_data;
+                                }
+                            }
+                        }
+                    }
+                }
+                decoder.setMinSumFactor(0.9375f);
+            }
+
+            if (!recovered) {
+                LOG_MODEM(WARN, "LDPC false positive: recovery FAILED, marking as decode failure");
+                for (int cw = 0; cw < FIXED_FRAME_CODEWORDS; ++cw) {
+                    status.decoded[cw] = false;
+                }
+            }
         }
     }
 

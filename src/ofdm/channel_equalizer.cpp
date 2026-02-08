@@ -291,12 +291,45 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     h_avg /= float(data_carrier_indices.size());
     float h_mag_avg = h_mag_sum / data_carrier_indices.size();
 
-    // Estimate SNR from channel estimate and noise
-    if (h_mag_avg > 1e-6f && noise_variance > 1e-10f) {
+    // Estimate noise variance from LTS training symbols
+    // With 2 training symbols, noise = (H1 - H2) / 2, variance = E[|H1-H2|²] / 4
+    // At 0.1 Hz Doppler, channel barely changes between training symbols (~0.001 coherence),
+    // so H1-H2 is almost entirely noise.
+    if (valid_symbols >= 2) {
+        float noise_sum = 0.0f;
+        float signal_sum = 0.0f;
+        int count = 0;
+        for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
+            Complex h0 = h_per_symbol[0][i];
+            Complex h1 = h_per_symbol[1][i];
+            if (std::abs(h0) > 1e-6f && std::abs(h1) > 1e-6f) {
+                Complex diff = h1 - h0;
+                noise_sum += std::norm(diff);  // |H1-H2|²
+                signal_sum += (std::norm(h0) + std::norm(h1)) / 2.0f;
+                count++;
+            }
+        }
+        if (count > 0) {
+            // noise_variance = |H1-H2|²/4 per carrier (each H has noise variance σ²)
+            float lts_noise_var = noise_sum / (4.0f * count);
+            float lts_signal_power = signal_sum / count;
+
+            // Clamp SNR estimate to reasonable range (5 dB to 40 dB)
+            float lts_snr = lts_signal_power / std::max(lts_noise_var, 1e-10f);
+            lts_snr = std::max(3.16f, std::min(10000.0f, lts_snr));
+
+            noise_variance = lts_noise_var;
+            estimated_snr_linear = lts_snr;
+
+            LOG_DEMOD(INFO, "LTS SNR estimate: %.1f dB (measured noise_var=%.6f, signal=%.4f)",
+                      10.0f * std::log10(estimated_snr_linear), noise_variance, lts_signal_power);
+        }
+    } else if (h_mag_avg > 1e-6f) {
+        // Fallback: only 1 training symbol, use default assumption
         float signal_power = h_mag_avg * h_mag_avg;
-        estimated_snr_linear = signal_power / noise_variance;
-        estimated_snr_linear = std::max(0.1f, std::min(10000.0f, estimated_snr_linear));
-        LOG_DEMOD(INFO, "LTS SNR estimate: %.1f dB",
+        noise_variance = signal_power / DEFAULT_SNR_LINEAR;
+        estimated_snr_linear = DEFAULT_SNR_LINEAR;
+        LOG_DEMOD(INFO, "LTS SNR estimate: %.1f dB (fallback, 1 training symbol)",
                   10.0f * std::log10(estimated_snr_linear));
     }
 
@@ -970,17 +1003,9 @@ std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>&
         float fade_threshold = FADE_THRESHOLD_RATIO * avg_h_power;
 
         // Noise variance for MMSE equalization and LLR computation
-        //
-        // noise_variance is computed in updateChannelEstimate as:
-        //   first symbol: signal_power / DEFAULT_SNR_LINEAR (assumed 15 dB SNR)
-        //   subsequent:   temporal pilot comparison (disabled for differential modes)
-        //
-        // Both signal_power and noise_variance are already in the same units (FFT-scaled),
-        // so we don't need to scale noise_variance again. The fallback uses avg_h_power
-        // only if noise_variance wasn't set properly.
+        // Uses global average from LTS (per-carrier estimates are too noisy with only 2 samples)
         float scaled_noise_var = noise_variance;
         if (scaled_noise_var < 1e-6f) {
-            // Fallback: assume 15 dB SNR if noise_variance wasn't set
             scaled_noise_var = avg_h_power / DEFAULT_SNR_LINEAR;
         }
 
@@ -996,20 +1021,11 @@ std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>&
             // MMSE equalization: conj(H) / (|H|² + σ²)
             float mmse_denom = h_power + scaled_noise_var;
             if (mmse_denom < 1e-10f) {
-                // Extremely deep fade - zero output, mark unreliable
                 equalized[i] = Complex(0, 0);
                 carrier_noise_var[i] = MAX_CARRIER_NOISE_VAR;
             } else {
-                // For differential modes (DQPSK, D8PSK, DBPSK): do NOT apply
-                // pilot_phase_correction or timing_correction. Differential decode
-                // extracts data from the phase DIFFERENCE between consecutive symbols,
-                // so absolute phase corrections cancel out. Worse, these corrections
-                // change per-symbol (via pilot tracking), so applying them ADDS
-                // phase noise to the differential: diff includes the ratio
-                // correction_k / correction_{k-1} which is non-unity.
                 equalized[i] = received * std::conj(h) / mmse_denom;
 
-                // Debug log first few carriers of first few symbols
                 if (eq_log_count < 3 && i < 3) {
                     float rx_phase = std::arg(received) * 180.0f / M_PI;
                     float h_phase = std::arg(h) * 180.0f / M_PI;
@@ -1018,8 +1034,7 @@ std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>&
                               i, std::abs(received), rx_phase, std::abs(h), h_phase,
                               std::abs(equalized[i]), eq_phase, rx_phase - h_phase);
                 }
-                // MMSE output noise variance: σ² / |H|² after equalization
-                // This represents the noise power relative to unity signal power
+                // MMSE output noise variance: σ² / (|H|² + σ²) after equalization
                 carrier_noise_var[i] = scaled_noise_var / (h_power + scaled_noise_var);
             }
 

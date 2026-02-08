@@ -28,6 +28,7 @@ inline float clipLLR(float llr) {
     return clipped;
 }
 
+
 // =============================================================================
 // COHERENT MODULATION DEMAPPERS
 // =============================================================================
@@ -193,34 +194,32 @@ inline std::array<float, 2> demapDQPSK(Complex sym, Complex prev_sym, float nois
     std::array<float, 2> llrs = {0.0f, 0.0f};
 
     Complex diff = sym * std::conj(prev_sym);
-    float phase = std::atan2(diff.imag(), diff.real());
+    float I = diff.real();
+    float Q = diff.imag();
+    float diff_mag = std::abs(diff);
 
-    float signal_power = std::abs(sym) * std::abs(prev_sym);
-    if (signal_power < 1e-6f) {
+    if (diff_mag < 1e-6f) {
         return llrs;  // Neutral LLRs for weak signal
     }
 
-    // LLR scaling for DQPSK soft demapping
-    //
-    // Theoretical optimal: scale = 2 * SNR (for pure AWGN, perfect sync)
-    // Practical choice: scale = 2 * sqrt(SNR) (conservative, robust)
-    //
-    // We use sqrt(SNR) because:
-    // 1. Accounts for unmodeled impairments (timing, CFO residual, CE errors)
-    // 2. Robust to noise_var estimation errors (noise_var is hardcoded at 0.1)
-    // 3. Prevents overconfident wrong decisions that LDPC can't correct
-    //
-    // This "LLR compression" is common in real systems with uncertain channels.
+    // LLR scaling: 2 * sqrt(SNR) — conservative but robust
+    float signal_power = std::abs(sym) * std::abs(prev_sym);
     float snr_linear = signal_power / noise_var;
     float scale = 2.0f * std::sqrt(snr_linear);
-    static const float pi = 3.14159265358979f;
 
-    // bit1 (MSB): sin(phase + π/4) - distance to boundary at 135°/-45°
-    // Magnitude at ideal DQPSK points: |sin(±π/4)| = 0.707
+    // Max-log-MAP demapping for DQPSK constellation at (1,0),(0,1),(-1,0),(0,-1):
+    //
+    // bit0 (MSB): sin(phase + π/4) = (I+Q)/(√2 * |diff|)
+    //   Positive → near 0° or 90° (bits 00,01), negative → near 180° or 270° (bits 10,11)
+    static const float pi = 3.14159265358979f;
+    float phase = std::atan2(Q, I);
     llrs[0] = clipLLR(scale * std::sin(phase + pi/4));
 
-    // bit0: use cos(2*phase) as soft metric
-    llrs[1] = clipLLR(scale * std::cos(2 * phase));
+    // bit1 (LSB): max-log-MAP uses (|I|-|Q|)/|diff| instead of cos(2*phase)
+    //   cos(2*phase) = (I²-Q²)/|diff|² overweights decisions near constellation points
+    //   (|I|-|Q|)/|diff| gives properly calibrated LLRs near 45° decision boundary
+    //   Positive → near 0° or 180° (bits 00,10), negative → near 90° or 270° (bits 01,11)
+    llrs[1] = clipLLR(scale * (std::abs(I) - std::abs(Q)) / diff_mag);
 
     return llrs;
 }
@@ -297,10 +296,12 @@ inline float getCEErrorMargin(Modulation mod) {
     switch (mod) {
         case Modulation::DBPSK:
         case Modulation::DQPSK:
+            return CE_MARGIN_BPSK_QPSK;
         case Modulation::BPSK:
         case Modulation::QPSK:
             return CE_MARGIN_BPSK_QPSK;
         case Modulation::D8PSK:
+            return CE_MARGIN_8PSK;
         case Modulation::QAM8:
             return CE_MARGIN_8PSK;
         case Modulation::QAM16:

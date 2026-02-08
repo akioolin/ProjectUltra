@@ -89,7 +89,7 @@ public:
             case CodeRate::R2_3: return 70;
             case CodeRate::R1_2: return 80;  // Fading + R1/2 needs most
             case CodeRate::R1_3: return 60;
-            case CodeRate::R1_4: return 50;  // Most redundancy, default
+            case CodeRate::R1_4: return 50;  // Standard iterations (retry with LLR scaling if needed)
             default:            return 50;
         }
     }

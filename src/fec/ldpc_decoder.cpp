@@ -41,6 +41,7 @@ struct LDPCDecoder::Impl {
     CodeRate rate;
     CodeParams params;
     int max_iterations = 50;
+    float min_sum_factor = 0.75f;
     bool last_success = false;
     int last_iters = 0;
 
@@ -197,7 +198,7 @@ struct LDPCDecoder::Impl {
                     }
 
                     // Min-sum with scaling factor (0.75 improves performance)
-                    check_to_var[i][e] = sign * min_abs * 0.75f;
+                    check_to_var[i][e] = sign * min_abs * min_sum_factor;
                 }
             }
 
@@ -347,7 +348,7 @@ Bytes LDPCDecoder::decodeSoft(std::span<const float> llrs) {
                             if (abs_msg < min_abs) min_abs = abs_msg;
                         }
                     }
-                    impl_->check_to_var[i][e] = sign * min_abs * 0.75f;
+                    impl_->check_to_var[i][e] = sign * min_abs * impl_->min_sum_factor;
                 }
             }
 
@@ -447,6 +448,10 @@ CodeRate LDPCDecoder::getRate() const {
 
 void LDPCDecoder::setMaxIterations(int max_iter) {
     impl_->max_iterations = max_iter;
+}
+
+void LDPCDecoder::setMinSumFactor(float factor) {
+    impl_->min_sum_factor = factor;
 }
 
 // ============ Interleaver ============
