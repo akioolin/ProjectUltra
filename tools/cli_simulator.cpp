@@ -250,7 +250,7 @@ public:
     void setForcedCodeRate(CodeRate rate) { protocol_.setForcedCodeRate(rate); }
     void setPreferredWaveform(WaveformMode mode) { protocol_.setPreferredMode(mode); }
 
-    // Enable channel interleaving on both TX encoder and RX decoder (for BUG-006 testing)
+    // Enable/disable channel interleaving on both TX encoder and RX decoder
     void setChannelInterleave(bool enable) {
         if (encoder_) {
             encoder_->setChannelInterleave(enable);
@@ -820,11 +820,11 @@ public:
             alpha_->setPreferredWaveform(forced_waveform_);
         }
 
-        // Apply channel interleaving to both stations (for BUG-006 testing)
-        if (use_channel_interleave_) {
-            alpha_->setChannelInterleave(true);
-            bravo_->setChannelInterleave(true);
-            std::cout << "  \033[33mChannel interleaving ENABLED (BUG-006 testing)\033[0m\n";
+        // Apply channel interleaving setting to both stations
+        alpha_->setChannelInterleave(use_channel_interleave_);
+        bravo_->setChannelInterleave(use_channel_interleave_);
+        if (!use_channel_interleave_) {
+            std::cout << "  \033[33mChannel interleaving DISABLED\033[0m\n";
         }
 
         // Setup message callback on BRAVO
@@ -874,7 +874,7 @@ private:
     bool use_fading_ = false;
     ChannelType channel_type_ = ChannelType::AWGN;
     bool test_file_transfer_ = false;
-    bool use_channel_interleave_ = false;  // For BUG-006 testing
+    bool use_channel_interleave_ = true;   // Enabled by default for OFDM fading resistance
     size_t test_file_size_ = 256;  // Default 256 bytes test file
     uint32_t seed_ = 42;
     Modulation forced_mod_ = Modulation::AUTO;
@@ -1296,6 +1296,8 @@ int main(int argc, char* argv[]) {
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 sim.setTestFileSize(std::stoul(argv[++i]));
             }
+        } else if (arg == "--no-channel-interleave" || arg == "--nci") {
+            sim.setChannelInterleave(false);
         } else if (arg == "--channel-interleave" || arg == "-ci") {
             sim.setChannelInterleave(true);
         } else if (arg == "--seed" && i + 1 < argc) {

@@ -1307,8 +1307,6 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     codec_->setRate(rate);
 
     // Channel interleaving only applies to OFDM modes, NOT MC-DPSK
-    // Disabled by default due to BUG-006 (CW1 consistently fails when enabled)
-    // Set via setChannelInterleave() to match TX encoder setting
     bool is_ofdm = (mode_ == protocol::WaveformMode::OFDM_CHIRP ||
                     mode_ == protocol::WaveformMode::OFDM_COX);
     bool apply_channel_deinterleave = use_channel_interleave_ && is_ofdm;
@@ -1339,9 +1337,11 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     // 3. If decode fails OR it's a 4-CW frame → try frame-interleaved decode
     // ========================================================================
 
-    // Step 1: Try to decode CW0 (with channel deinterleaving if OFDM)
+    // Step 1: Try to decode CW0 RAW (no channel deinterleave)
+    // Control frames (ACK etc.) are never channel-interleaved, so probe without it.
+    // If this is a 4-CW data frame (which IS interleaved), CW0 will likely fail here
+    // and we'll fall through to decodeFixedFrame() which handles deinterleaving internally.
     std::vector<float> cw0_bits(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
-    cw0_bits = deinterleave_cw(cw0_bits);
     auto [ok0, data0] = codec_->decode(cw0_bits);
 
     bool try_frame_interleave = false;

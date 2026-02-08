@@ -45,7 +45,7 @@ struct EncoderConfig {
     int bits_per_symbol = 106;      // data_carriers * bits_per_carrier (DQPSK=2)
     bool use_pilots = true;
     int pilot_spacing = 10;
-    bool use_channel_interleave = false;  // Disabled due to BUG-006
+    bool use_channel_interleave = true;   // Spreads coded bits across carriers for fading resistance
     bool use_frame_interleave = true;
 };
 
@@ -117,7 +117,6 @@ public:
     // INTERLEAVING CONTROL
     // ========================================================================
 
-    // Enable/disable channel interleaving (disabled by default due to BUG-006)
     void setChannelInterleave(bool enable) { use_channel_interleave_ = enable; }
     bool getChannelInterleave() const { return use_channel_interleave_; }
 
@@ -160,7 +159,7 @@ private:
 
     // Interleaving
     std::unique_ptr<ChannelInterleaver> channel_interleaver_;
-    bool use_channel_interleave_ = false;  // Disabled due to BUG-006
+    bool use_channel_interleave_ = true;
     bool use_frame_interleave_ = true;     // Always on for OFDM
 
     // Logging

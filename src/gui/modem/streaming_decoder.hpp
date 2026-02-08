@@ -143,8 +143,6 @@ public:
     void setCodecType(fec::CodecType type);
     fec::CodecType getCodecType() const { return codec_type_; }
 
-    // Enable channel interleaving (must match TX encoder setting)
-    // Default: disabled due to BUG-006
     void setChannelInterleave(bool enable) { use_channel_interleave_ = enable; }
     bool getChannelInterleave() const { return use_channel_interleave_; }
 
@@ -296,7 +294,7 @@ private:
 
     // Interleaver (matches TX)
     std::unique_ptr<ChannelInterleaver> interleaver_;
-    bool use_channel_interleave_ = false;  // Disabled by default due to BUG-006
+    bool use_channel_interleave_ = true;
 
     // FEC codec (uses ICodec interface)
     fec::CodecPtr codec_;
