@@ -69,43 +69,36 @@ WaveformCapabilities OFDMChirpWaveform::getCapabilities() const {
 }
 
 void OFDMChirpWaveform::configurePilotsForCodeRate(CodeRate rate) {
-    // Adaptive pilots based on code rate:
-    // - R1/4: No pilots - all carriers data, LDPC handles fading (most robust)
-    // - R1/2, R2/3: 6 pilots (every 10th carrier) for per-symbol channel tracking
-    // - R3/4: 4 pilots (every 15th carrier) for light fading/AWGN
+    // Adaptive pilots based on code rate and modulation:
     //
-    // This enables higher throughput on moderate/good fading channels by providing
-    // channel tracking while using higher code rates.
+    // Coherent modes (QPSK, BPSK) need denser pilots for phase tracking because
+    // absolute phase accuracy is critical. With spacing=5: 12 pilots (47 data carriers),
+    // the inter-pilot phase is ~95° (below 180° Nyquist limit), enabling reliable
+    // complex interpolation. With spacing=10, phase aliasing occurs (190° inter-pilot).
+    //
+    // Differential modes (DQPSK, DBPSK, D8PSK) use spacing=10: 6 pilots are sufficient
+    // because differential decoding cancels common phase errors.
 
-    // Adaptive pilots based on code rate:
-    // - R1/4: No pilots - all carriers data, LDPC handles fading (most robust)
-    // - R1/2, R2/3: 6 pilots (every 10th carrier) for per-symbol channel tracking
-    // - R3/4: 4 pilots (every 15th carrier) for light fading/AWGN
-    //
-    // NOTE: For differential modes (DQPSK), updateChannelEstimate() uses low alpha (0.1)
-    // to keep H stable between consecutive symbols, preserving the differential property.
+    bool is_coherent = (config_.modulation == Modulation::QPSK ||
+                        config_.modulation == Modulation::BPSK);
 
     switch (rate) {
         case CodeRate::R3_4:
-            // 4 pilots for light fading/AWGN
             config_.use_pilots = true;
-            config_.pilot_spacing = 15;  // ~4 pilots out of 59
+            config_.pilot_spacing = is_coherent ? 8 : 15;
             break;
 
         case CodeRate::R2_3:
         case CodeRate::R1_2:
-            // 6 pilots for moderate fading
             config_.use_pilots = true;
-            config_.pilot_spacing = 10;  // ~6 pilots out of 59
+            config_.pilot_spacing = is_coherent ? 5 : 10;
             break;
 
         case CodeRate::R1_4:
         case CodeRate::R1_3:
         default:
-            // 6 pilots for channel tracking on fading channels
-            // R1/4 needs pilots too for per-symbol tracking on fading
             config_.use_pilots = true;
-            config_.pilot_spacing = 10;  // ~6 pilots out of 59
+            config_.pilot_spacing = is_coherent ? 5 : 10;
             break;
     }
 }
@@ -347,6 +340,42 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
         }
     }
 
+    // Fine refinement: 1-sample steps around coarse peak.
+    // The 8-sample coarse search can be up to 4 samples off-peak.
+    // For QPSK, even 4-sample offset causes ~40° phase error at edge carriers.
+    // Cost: 9 evaluations × symbol_samples MACs — negligible.
+    if (best_corr > threshold) {
+        int refine_start = std::max(static_cast<int>(signal_start), best_offset - 4);
+        int refine_end = std::min(search_end, best_offset + 5);  // exclusive
+
+        for (int offset = refine_start; offset < refine_end; ++offset) {
+            if (offset == best_offset) continue;  // Skip already-evaluated
+
+            float P_real = 0.0f;
+            float energy1 = 0.0f, energy2 = 0.0f;
+
+            for (int n = 0; n < symbol_samples; ++n) {
+                int idx1 = offset + n;
+                int idx2 = offset + n + symbol_samples;
+                if (idx2 >= static_cast<int>(samples.size())) break;
+
+                float s1 = samples[idx1];
+                float s2 = samples[idx2];
+                P_real += s1 * s2;
+                energy1 += s1 * s1;
+                energy2 += s2 * s2;
+            }
+
+            float denom = std::sqrt(energy1 * energy2) + 1e-10f;
+            float corr = std::abs(P_real) / denom;
+
+            if (corr > best_corr) {
+                best_corr = corr;
+                best_offset = offset;
+            }
+        }
+    }
+
     result.correlation = best_corr;
 
     if (best_corr > threshold) {
@@ -495,19 +524,21 @@ float OFDMChirpWaveform::getThroughput(CodeRate rate) const {
     }
 
     // Calculate data carriers based on pilot configuration for the given rate
-    // Use same formula as setupCarriers() for consistency
+    // Must match configurePilotsForCodeRate() logic
+    bool is_coherent_tp = (config_.modulation == Modulation::QPSK ||
+                           config_.modulation == Modulation::BPSK);
     int pilot_count = 0;
     int pilot_spacing = 0;
     switch (rate) {
         case CodeRate::R3_4:
-            pilot_spacing = 15;
+            pilot_spacing = is_coherent_tp ? 8 : 15;
             break;
         case CodeRate::R2_3:
         case CodeRate::R1_2:
-            pilot_spacing = 10;
+            pilot_spacing = is_coherent_tp ? 5 : 10;
             break;
         default:
-            pilot_spacing = 0;  // R1/4, R1/3: no pilots
+            pilot_spacing = is_coherent_tp ? 5 : 10;
             break;
     }
     if (pilot_spacing > 0) {

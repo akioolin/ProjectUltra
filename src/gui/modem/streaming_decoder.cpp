@@ -363,7 +363,11 @@ void StreamingDecoder::searchForSync() {
     // because there is no chirp in the signal. Reject false positives where data
     // autocorrelation produces spurious peaks (observed up to 0.63). Real LTS
     // correlation is always >0.81 even on moderate fading.
-    constexpr float LIGHT_SYNC_MIN_CONFIDENCE = 0.70f;
+    // Coherent modes need higher sync quality — badly-synced frames always fail
+    // because stale LTS phases can't be recovered by DD tracking alone.
+    const bool is_coherent = (current_modulation_ == Modulation::QPSK ||
+                              current_modulation_ == Modulation::BPSK);
+    const float LIGHT_SYNC_MIN_CONFIDENCE = is_coherent ? 0.88f : 0.70f;
 
     if (connected_ && waveform_->supportsDataPreamble()) {
         float known_cfo = last_cfo_.load();

@@ -99,12 +99,14 @@
 | OFDM_CHIRP | Good fading | 15 | **100%** |
 | OFDM_CHIRP | Moderate fading | 15 | ~90% |
 
-**Current state (2026-02-06):**
+**Current state (2026-02-09):**
 - MC-DPSK: WORKING - 100% at SNR=10 with moderate fading
-- OFDM_CHIRP R1/4 AWGN: WORKING - 100% CW success at SNR=15 and SNR=20 (0 retries)
-- OFDM_CHIRP R1/4 Good fading: WORKING - 100% CW success at SNR=15 (0 retries, 0 failures)
-- OFDM_CHIRP R1/2 AWGN: WORKING - 100% CW success at SNR=20 (0 retries)
-- OFDM_CHIRP R1/2 Good fading: WORKING - at SNR=20 (some retransmissions, all delivered)
+- OFDM_CHIRP DQPSK R1/4 AWGN: WORKING - 100% CW success at SNR=15 and SNR=20 (0 retries)
+- OFDM_CHIRP DQPSK R1/4 Good fading: WORKING - 100% CW success at SNR=15 (0 retries, 0 failures)
+- OFDM_CHIRP DQPSK R1/2 AWGN: WORKING - 100% CW success at SNR=20 (0 retries)
+- OFDM_CHIRP DQPSK R1/2 Good fading: WORKING - at SNR=20 (some retransmissions, all delivered)
+- OFDM_CHIRP QPSK R1/2 AWGN: WORKING - 100% at SNR=20 (0 retries)
+- OFDM_CHIRP QPSK R1/2 Good fading: WORKING - avg 78% frame success at SNR=20 (all messages delivered via ARQ)
 - OFDM_CHIRP Moderate fading: WORKING - R1/4 89% CW success (57/64), 100% message delivery via ARQ
 - OFDM_CHIRP R3/4: Not recommended on fading (only AWGN)
 - 1-CW ACK frames: WORKING - control frames use 1 CW (3× faster ACK)

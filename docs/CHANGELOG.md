@@ -10,6 +10,66 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-02-09: Coherent QPSK channel tracking for fading channels
+
+**What was broken:**
+- Coherent QPSK on fading channels achieved only ~35% frame success (vs DQPSK ~82%).
+  Root cause: LTS-derived per-carrier phases become stale as the channel evolves.
+  Pilots only provide 6 phase measurements per symbol — insufficient for 53 data carriers
+  with independent phase drift from frequency-selective fading.
+
+**What was changed (6 improvements):**
+
+1. **Phase-slope-compensated complex interpolation** (`channel_equalizer.cpp`)
+   - Estimate linear phase gradient from LTS (typically ~19°/carrier from timing offset)
+   - Remove slope before pilot interpolation, interpolate in de-sloped domain, restore slope
+   - Prevents phase aliasing (190° between 10-spaced pilots exceeds 180° Nyquist limit)
+   - Differential modes still use magnitude-only interpolation (preserves LTS phases)
+
+2. **CPE (Common Phase Error) correction** (`channel_equalizer.cpp`)
+   - Estimate average phase drift across all pilots, apply to all carriers each symbol
+   - Replaces unreliable pilot-based CFO tracking which drifted on both AWGN and fading
+   - Standard approach used in WiFi 802.11a/g/n receivers
+
+3. **Decision-directed per-carrier phase tracking** (`channel_equalizer.cpp`)
+   - After QPSK hard-decision, measure per-carrier phase error
+   - Store snapshot corrections, apply in next symbol's updateChannelEstimate() after interpolation
+   - Blend factor 0.3 (empirically optimal: 0.15→73.1%, 0.3→74.1%, 0.5→65.6%)
+   - Single-snapshot (no accumulation) — IIR accumulation diverges due to positive feedback
+
+4. **Denser pilots for coherent modes** (`ofdm_chirp_waveform.cpp`)
+   - QPSK/BPSK: pilot_spacing=5 (12 pilots, 47 data carriers, ~95° inter-pilot phase)
+   - Differential: unchanged at spacing=10 (6 pilots, 53 data carriers)
+   - 11% throughput cost offset by dramatically better phase interpolation
+
+5. **1-sample sync refinement** (`ofdm_chirp_waveform.cpp`)
+   - detectDataSync() coarse search uses 8-sample steps → up to 4 samples off-peak
+   - Added ±4 sample refinement with 1-sample steps around coarse peak
+   - 4-sample offset causes ~40° phase error at edge carriers — critical for QPSK
+
+6. **Modulation-dependent sync confidence threshold** (`streaming_decoder.cpp`)
+   - Coherent modes: 0.88 (reject corr 0.82-0.85 frames that always fail for QPSK)
+   - Differential modes: 0.70 (unchanged)
+   - Rejected frames trigger ARQ retransmission instead of wasting time on guaranteed failures
+
+**Also fixed:**
+- `carrier_noise_var` MMSE formula: `σ²/mmse_denom` instead of `σ²/|H|²` (correct post-eq noise)
+- Pilot H uses last training symbol (not average) for phase consistency with data carriers
+- Preserved LTS noise_variance estimate (don't overwrite with temporal pilot comparison)
+- Disabled pilot-based CFO tracking for all modes (replaced by CPE for coherent)
+
+**Test results (final configuration):**
+| Test | Result |
+|------|--------|
+| DQPSK R1/4 fading SNR=15 | 100% (no regression) |
+| QPSK R1/2 AWGN SNR=20 | 100% (0 retransmissions) |
+| QPSK R1/2 fading SNR=20 (5 runs) | avg 78% (75, 69, 82, 75, 89) |
+| QPSK R1/2 fading SNR=15 | 100% |
+
+**Verification:** `./build/cli_simulator --snr 20 --fading good --rate r1_2 --mod qpsk --test`
+
+---
+
 ## 2026-02-08: Enable coherent QPSK for OFDM_CHIRP
 
 **What was broken:**

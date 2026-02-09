@@ -101,6 +101,15 @@ struct OFDMDemodulator::Impl {
     // Per-carrier phase from LTS
     std::vector<Complex> lts_carrier_phases;
 
+    // Per-carrier phase slope from timing offset (radians per carrier index)
+    // Estimated from LTS, used to de-slope pilot H before complex interpolation
+    float lts_phase_slope = 0.0f;
+
+    // Decision-directed per-carrier phase corrections from previous symbol.
+    // Stored in equalize(), applied after interpolation in next updateChannelEstimate().
+    // Each entry is the phase error (radians) measured at that data carrier.
+    std::vector<float> dd_phase_corrections;
+
     // LTS time-domain reference for fine timing (passband templates)
     std::vector<float> lts_passband_I;
     std::vector<float> lts_passband_Q;
