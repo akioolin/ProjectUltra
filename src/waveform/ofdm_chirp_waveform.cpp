@@ -21,10 +21,12 @@ OFDMChirpWaveform::OFDMChirpWaveform() {
 OFDMChirpWaveform::OFDMChirpWaveform(const ModemConfig& config)
     : config_(config)
 {
-    // Force differential modulation for chirp mode
+    // Allow differential and coherent modulations for chirp mode
     if (config_.modulation != Modulation::DBPSK &&
         config_.modulation != Modulation::DQPSK &&
-        config_.modulation != Modulation::D8PSK) {
+        config_.modulation != Modulation::D8PSK &&
+        config_.modulation != Modulation::QPSK &&
+        config_.modulation != Modulation::BPSK) {
         config_.modulation = Modulation::DQPSK;
     }
     configurePilotsForCodeRate(config_.code_rate);
@@ -109,8 +111,9 @@ void OFDMChirpWaveform::configurePilotsForCodeRate(CodeRate rate) {
 }
 
 void OFDMChirpWaveform::configure(Modulation mod, CodeRate rate) {
-    // Only differential modulations allowed for chirp mode
-    if (mod != Modulation::DBPSK && mod != Modulation::DQPSK && mod != Modulation::D8PSK) {
+    // Allow differential and coherent modulations
+    if (mod != Modulation::DBPSK && mod != Modulation::DQPSK && mod != Modulation::D8PSK &&
+        mod != Modulation::QPSK && mod != Modulation::BPSK) {
         LOG_MODEM(WARN, "OFDMChirpWaveform: Unsupported modulation %d, using DQPSK",
                   static_cast<int>(mod));
         mod = Modulation::DQPSK;
@@ -481,11 +484,12 @@ std::string OFDMChirpWaveform::getStatusString() const {
 }
 
 float OFDMChirpWaveform::getThroughput(CodeRate rate) const {
-    // Bits per symbol per carrier (differential modes)
-    int bits_per_carrier = 2;  // Default DQPSK
+    int bits_per_carrier = 2;  // Default DQPSK/QPSK
     switch (config_.modulation) {
         case Modulation::DBPSK: bits_per_carrier = 1; break;
+        case Modulation::BPSK:  bits_per_carrier = 1; break;
         case Modulation::DQPSK: bits_per_carrier = 2; break;
+        case Modulation::QPSK:  bits_per_carrier = 2; break;
         case Modulation::D8PSK: bits_per_carrier = 3; break;
         default: bits_per_carrier = 2; break;
     }
@@ -572,11 +576,12 @@ int OFDMChirpWaveform::getMinSamplesForCWCount(int num_cw) const {
 
     int frame_bits = num_cw * 648;
 
-    // For DQPSK: 2 bits per carrier
-    int bits_per_carrier = 2;  // DQPSK
+    int bits_per_carrier = 2;  // DQPSK/QPSK
     switch (config_.modulation) {
         case Modulation::DBPSK: bits_per_carrier = 1; break;
+        case Modulation::BPSK:  bits_per_carrier = 1; break;
         case Modulation::DQPSK: bits_per_carrier = 2; break;
+        case Modulation::QPSK:  bits_per_carrier = 2; break;
         case Modulation::D8PSK: bits_per_carrier = 3; break;
         default: bits_per_carrier = 2; break;
     }

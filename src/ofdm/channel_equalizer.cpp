@@ -530,7 +530,14 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     }
 
     // Carrier phase recovery: compute average phase offset on first symbol
-    if (!carrier_phase_initialized && !pilot_carrier_indices.empty()) {
+    // Skip for coherent modes (QPSK, BPSK) — the LTS provides accurate H that includes
+    // the correct channel phase. MMSE equalization (conj(H)*rx / |H|²+σ²) naturally
+    // removes the phase. Applying carrier_phase_correction removes phase from H but NOT
+    // from the received signal, leaving a residual rotation in the equalized output.
+    if (!is_differential && !carrier_phase_initialized && !pilot_carrier_indices.empty()) {
+        carrier_phase_initialized = true;  // Mark as done (identity correction)
+        LOG_DEMOD(DEBUG, "Carrier phase recovery: SKIPPED for coherent mode (LTS provides accurate H)");
+    } else if (is_differential && !carrier_phase_initialized && !pilot_carrier_indices.empty()) {
         Complex h_avg = h_sum / float(pilot_carrier_indices.size());
         float avg_mag = std::abs(h_avg);
         if (avg_mag > 0.01f) {
@@ -541,7 +548,7 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
         }
     }
 
-    // Apply carrier phase correction to all H estimates
+    // Apply carrier phase correction to all H estimates (identity for coherent modes)
     for (size_t i = 0; i < h_ls_all.size(); ++i) {
         h_ls_all[i] *= carrier_phase_correction;
     }
@@ -665,125 +672,31 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
         pilot_phase_correction = Complex(1, 0);
     }
 
-    // === Symbol timing recovery from pilot phase slope ===
-    // Skip for differential modes (same reason as CFO — fading corrupts phase slope)
-    if (!is_differential && snr_symbol_count >= 3) {
-        float sum_k = 0, sum_k2 = 0, sum_phase = 0, sum_k_phase = 0;
-        int timing_valid_count = 0;
-
-        for (size_t i = 0; i < h_ls_all.size(); ++i) {
-            if (std::norm(h_ls_all[i]) < 1e-6f) continue;
-
-            int k = pilot_carrier_indices[i];
-            if (k > (int)config.fft_size / 2) k -= config.fft_size;
-
-            float phase = std::arg(h_ls_all[i]);
-
-            sum_k += k;
-            sum_k2 += k * k;
-            sum_phase += phase;
-            sum_k_phase += k * phase;
-            timing_valid_count++;
-        }
-
-        if (timing_valid_count >= 3) {
-            float n = timing_valid_count;
-            float denom = n * sum_k2 - sum_k * sum_k;
-            if (std::abs(denom) > 1e-6f) {
-                float slope = (n * sum_k_phase - sum_k * sum_phase) / denom;
-                float instantaneous_timing = slope * config.fft_size / (2.0f * M_PI);
-
-                timing_offset_samples = TIMING_ALPHA * instantaneous_timing +
-                                       (1.0f - TIMING_ALPHA) * timing_offset_samples;
-
-                float max_timing = 50.0f * (config.fft_size / 512.0f);
-                timing_offset_samples = std::max(-max_timing, std::min(max_timing, timing_offset_samples));
-
-                LOG_DEMOD(DEBUG, "Timing recovery: instant=%.2f samp, filtered=%.2f samp (slope=%.4f rad/bin)",
-                         instantaneous_timing, timing_offset_samples, slope);
-            }
-        }
-    }
-
     // Store current pilots for next symbol
     prev_pilot_phases = h_ls_all;
 
-    // === COHERENT MODE FIX: Remove/add timing phase for correct interpolation ===
-    bool is_coherent = (config.modulation != Modulation::DBPSK &&
-                       config.modulation != Modulation::DQPSK &&
-                       config.modulation != Modulation::D8PSK);
-
-    if (is_coherent && snr_symbol_count < 3) {
-        LOG_DEMOD(INFO, "Coherent timing fix: is_coherent=%d, timing_offset=%.2f, sym=%d",
-                  is_coherent ? 1 : 0, timing_offset_samples, snr_symbol_count);
-    }
-
-    // Step 1: Remove timing phase from pilots before interpolation
-    if (is_coherent && std::abs(timing_offset_samples) > 0.1f) {
-        for (int idx : pilot_carrier_indices) {
-            int k = idx;
-            if (k > (int)config.fft_size / 2) k -= config.fft_size;
-            float timing_phase = 2.0f * M_PI * k * timing_offset_samples / config.fft_size;
-            Complex timing_removal = std::exp(Complex(0, -timing_phase));
-
-            if (snr_symbol_count == 0 && k >= -2 && k <= 3) {
-                Complex before = channel_estimate[idx];
-                Complex after = before * timing_removal;
-                LOG_DEMOD(DEBUG, "TimingFix k=%d: before=(%.2f,%.2f) phase=%.1f° "
-                          "remove=%.1f° after=(%.2f,%.2f) phase=%.1f°",
-                          k, before.real(), before.imag(),
-                          std::arg(before) * 180.0f / M_PI,
-                          -timing_phase * 180.0f / M_PI,
-                          after.real(), after.imag(),
-                          std::arg(after) * 180.0f / M_PI);
-            }
-
-            channel_estimate[idx] *= timing_removal;
-        }
-    }
-
     // Interpolate between pilots
-    if (is_differential) {
-        // For differential modes: interpolate MAGNITUDES only to data carriers,
-        // preserving existing phases. This tracks fading depth for MMSE scaling
-        // without corrupting the phase relationship that differential decoding needs.
-        // DFT interpolation would change data carrier phases (producing time-varying
-        // H that introduces artificial differential phase errors).
-        for (size_t dc = 0; dc < interp_table.size(); ++dc) {
-            const auto& info = interp_table[dc];
-            float interp_mag = 0.0f;
-            if (info.lower_pilot >= 0 && info.upper_pilot >= 0) {
-                float m1 = std::abs(channel_estimate[info.lower_pilot]);
-                float m2 = std::abs(channel_estimate[info.upper_pilot]);
-                interp_mag = (1.0f - info.alpha) * m1 + info.alpha * m2;
-            } else if (info.lower_pilot >= 0) {
-                interp_mag = std::abs(channel_estimate[info.lower_pilot]);
-            } else if (info.upper_pilot >= 0) {
-                interp_mag = std::abs(channel_estimate[info.upper_pilot]);
-            }
-            float old_phase = std::arg(channel_estimate[info.fft_idx]);
-            channel_estimate[info.fft_idx] = std::polar(interp_mag, old_phase);
+    // For both differential and coherent modes: interpolate MAGNITUDES only to
+    // data carriers, preserving existing phases. DFT interpolation from only 6
+    // pilots doesn't have enough resolution to accurately reconstruct per-carrier
+    // phase for all 53 data carriers, introducing phase errors that corrupt both
+    // differential decoding and coherent QPSK/BPSK decoding.
+    // Magnitude-only interpolation tracks fading depth for MMSE scaling while
+    // preserving the accurate LTS-derived phases.
+    for (size_t dc = 0; dc < interp_table.size(); ++dc) {
+        const auto& info = interp_table[dc];
+        float interp_mag = 0.0f;
+        if (info.lower_pilot >= 0 && info.upper_pilot >= 0) {
+            float m1 = std::abs(channel_estimate[info.lower_pilot]);
+            float m2 = std::abs(channel_estimate[info.upper_pilot]);
+            interp_mag = (1.0f - info.alpha) * m1 + info.alpha * m2;
+        } else if (info.lower_pilot >= 0) {
+            interp_mag = std::abs(channel_estimate[info.lower_pilot]);
+        } else if (info.upper_pilot >= 0) {
+            interp_mag = std::abs(channel_estimate[info.upper_pilot]);
         }
-    } else {
-        interpolateChannel();
-    }
-
-    // Step 2: Add back correct timing phase for each carrier
-    if (is_coherent && std::abs(timing_offset_samples) > 0.1f) {
-        for (int idx : pilot_carrier_indices) {
-            int k = idx;
-            if (k > (int)config.fft_size / 2) k -= config.fft_size;
-            float timing_phase = 2.0f * M_PI * k * timing_offset_samples / config.fft_size;
-            Complex timing_correction = std::exp(Complex(0, timing_phase));
-            channel_estimate[idx] *= timing_correction;
-        }
-        for (int idx : data_carrier_indices) {
-            int k = idx;
-            if (k > (int)config.fft_size / 2) k -= config.fft_size;
-            float timing_phase = 2.0f * M_PI * k * timing_offset_samples / config.fft_size;
-            Complex timing_correction = std::exp(Complex(0, timing_phase));
-            channel_estimate[idx] *= timing_correction;
-        }
+        float old_phase = std::arg(channel_estimate[info.fft_idx]);
+        channel_estimate[info.fft_idx] = std::polar(interp_mag, old_phase);
     }
 
     // Initialize adaptive equalizer weights from pilot-based estimate

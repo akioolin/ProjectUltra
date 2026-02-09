@@ -470,7 +470,7 @@ void printUsage(const char* prog) {
     printf("                  flutter  - 0.5ms delay, 10Hz Doppler\n");
     printf("  -w TYPE       Waveform: ofdm_chirp, mc_dpsk (default: ofdm_chirp)\n");
     printf("  --rate RATE   Code rate: r1_4, r1_2, r2_3, r3_4 (default: r1_2)\n");
-    printf("  --mod MOD     Modulation: dqpsk, d8psk (default: dqpsk)\n");
+    printf("  --mod MOD     Modulation: dqpsk, d8psk, dbpsk, qpsk, bpsk (default: dqpsk)\n");
     printf("  --frames N    Number of frames (default: 3)\n");
     printf("  --carriers N  MC-DPSK carriers (default: 8)\n");
     printf("  --seed N      Random seed (default: 42)\n");
@@ -524,6 +524,9 @@ int main(int argc, char** argv) {
             std::string m = argv[++i];
             if (m == "dqpsk") cfg.modulation = Modulation::DQPSK;
             else if (m == "d8psk") cfg.modulation = Modulation::D8PSK;
+            else if (m == "dbpsk") cfg.modulation = Modulation::DBPSK;
+            else if (m == "qpsk") cfg.modulation = Modulation::QPSK;
+            else if (m == "bpsk") cfg.modulation = Modulation::BPSK;
             else {
                 fprintf(stderr, "Unknown modulation: %s\n", m.c_str());
                 return 1;

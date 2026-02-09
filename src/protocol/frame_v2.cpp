@@ -1362,6 +1362,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
             llr_sum += llr;
             llr_abs_sum += std::abs(llr);
         }
+
         float llr_avg = llr_sum / cw_bits.size();
         float llr_abs_avg = llr_abs_sum / cw_bits.size();
 

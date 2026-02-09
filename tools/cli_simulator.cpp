@@ -1255,8 +1255,12 @@ int main(int argc, char* argv[]) {
                     sim.setForcedModulation(Modulation::D8PSK);
                 } else if (mod_str == "dbpsk" || mod_str == "DBPSK") {
                     sim.setForcedModulation(Modulation::DBPSK);
+                } else if (mod_str == "qpsk" || mod_str == "QPSK") {
+                    sim.setForcedModulation(Modulation::QPSK);
+                } else if (mod_str == "bpsk" || mod_str == "BPSK") {
+                    sim.setForcedModulation(Modulation::BPSK);
                 } else {
-                    std::cerr << "Unknown modulation: " << mod_str << " (use dqpsk, d8psk, dbpsk)\n";
+                    std::cerr << "Unknown modulation: " << mod_str << " (use dqpsk, d8psk, dbpsk, qpsk, bpsk)\n";
                     return 1;
                 }
             }
@@ -1315,7 +1319,7 @@ int main(int argc, char* argv[]) {
             std::cout << "                        poor     - 2.0ms delay, 1.0Hz Doppler (disturbed)\n";
             std::cout << "                        flutter  - 0.5ms delay, 10Hz Doppler (auroral)\n";
             std::cout << "  --fading, -f        Alias for --channel moderate\n";
-            std::cout << "  --mod, -m <MOD>     Force modulation: dqpsk, d8psk, dbpsk\n";
+            std::cout << "  --mod, -m <MOD>     Force modulation: dqpsk, d8psk, dbpsk, qpsk, bpsk\n";
             std::cout << "  --rate, -r <RATE>   Force code rate: r1_4, r1_2, r2_3, r3_4\n";
             std::cout << "  --waveform, -w <WF> Force waveform: mc_dpsk, ofdm_chirp, ofdm_cox\n";
             std::cout << "  --seed <N>          Random seed (default: 42)\n";

@@ -10,6 +10,55 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-02-08: Enable coherent QPSK for OFDM_CHIRP
+
+**What was broken:**
+- OFDM_CHIRP forced differential modulation (DQPSK/DBPSK/D8PSK) only. Coherent QPSK was
+  blocked despite all components (modulator, demodulator, soft demapper, equalizer) already
+  supporting it. Differential decoding wastes ~3 dB SNR due to noise doubling.
+
+**What was changed:**
+
+1. **Allow QPSK/BPSK modulations** (`src/waveform/ofdm_chirp_waveform.cpp`)
+   - Constructor and `configure()`: accept QPSK and BPSK in addition to differential modes
+   - `getThroughput()` and `getMinSamplesForCWCount()`: explicit QPSK/BPSK switch cases
+
+2. **CLI support** (`tools/cli_simulator.cpp`, `tools/test_waveform_simple.cpp`)
+   - Added `--mod qpsk` and `--mod bpsk` options
+
+3. **Skip carrier_phase_correction for coherent modes** (`src/ofdm/channel_equalizer.cpp`)
+   - carrier_phase_correction removes common phase from H but not from rx signal,
+     leaving residual e^(jθ) in equalized output — fatal for QPSK, harmless for differential
+   - Fix: identity correction for coherent modes (LTS provides accurate H)
+
+4. **Magnitude-only interpolation for all modes** (`src/ofdm/channel_equalizer.cpp`)
+   - DFT interpolation from 6 pilots corrupts per-carrier phases for both differential and
+     coherent modes. Now all modes use magnitude-only linear interpolation between pilots,
+     preserving the accurate LTS-derived phases at data carriers.
+
+5. **Remove timing recovery** (`src/ofdm/channel_equalizer.cpp`)
+   - Timing recovery estimated offset from absolute pilot LS phases, which include channel
+     phase. This produced spurious timing offsets (up to 4.6 samples on AWGN) that added
+     up to 80° phase rotation at edge carriers — fatal for QPSK equalization.
+   - Was also disabled for differential modes (fading corrupts the slope).
+   - Removed entirely since it was broken for all modes.
+
+**How it works:**
+- QPSK uses same 2 bits/carrier as DQPSK — same frame format, interleaving, throughput
+- Coherent MMSE equalization: eq = conj(H) × rx / (|H|² + σ²) with LTS-derived H
+- Phase-frozen H (magnitude-only tracking) works because LTS phases are accurate for
+  the entire frame on AWGN channels
+- On fading channels, QPSK performs worse than DQPSK (~35% vs ~82% frame success at
+  R1/2 SNR=20 good fading) because LTS phases become stale
+
+**Test verification:**
+- QPSK AWGN SNR=20: `./build/cli_simulator --snr 20 --rate r1_2 --mod qpsk --test` → PASS, 0 retransmissions
+- QPSK AWGN SNR=15: `./build/cli_simulator --snr 15 --rate r1_2 --mod qpsk --test` → PASS, 0 retransmissions
+- DQPSK regression: `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test` → PASS, 0 retransmissions
+- QPSK fading SNR=20: `./build/cli_simulator --snr 20 --fading good --rate r1_2 --mod qpsk --test` → PASS (10 retransmissions)
+
+---
+
 ## 2026-02-08: DFT-based channel interpolation + magnitude-only pilot tracking
 
 **What was broken:**
