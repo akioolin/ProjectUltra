@@ -1262,12 +1262,8 @@ CodewordInfo identifyCodeword(const Bytes& cw_data) {
 // Fixed 4-Codeword Frame Implementation
 // ============================================================================
 
-Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, bool use_channel_interleave) {
+Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, bool use_channel_interleave, size_t bits_per_symbol) {
     using namespace fec;
-
-    // Channel interleaving spreads consecutive bits across OFDM symbols for fading resistance.
-    // Uses 106 bits/symbol (53 data carriers * 2 bits for DQPSK) as the standard config.
-    static constexpr size_t BITS_PER_SYMBOL = 106;
 
     size_t bytes_per_cw = getBytesPerCodeword(rate);
     size_t total_info_bytes = FIXED_FRAME_CODEWORDS * bytes_per_cw;
@@ -1288,7 +1284,7 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, bool use_channel_
     // Create channel interleaver if enabled
     std::unique_ptr<ChannelInterleaver> interleaver;
     if (use_channel_interleave) {
-        interleaver = std::make_unique<ChannelInterleaver>(BITS_PER_SYMBOL, LDPC_CODEWORD_BITS);
+        interleaver = std::make_unique<ChannelInterleaver>(bits_per_symbol, LDPC_CODEWORD_BITS);
     }
 
     for (int cw = 0; cw < FIXED_FRAME_CODEWORDS; ++cw) {
@@ -1316,11 +1312,8 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate) {
     return encodeFixedFrame(frame_data, rate, false);
 }
 
-CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate, bool use_channel_deinterleave) {
+CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate, bool use_channel_deinterleave, size_t bits_per_symbol) {
     using namespace fec;
-
-    // Channel deinterleaving must match TX - uses same 106 bits/symbol
-    static constexpr size_t BITS_PER_SYMBOL = 106;
 
     CodewordStatus status;
     status.decoded.resize(FIXED_FRAME_CODEWORDS, false);
@@ -1337,7 +1330,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
     // Create channel interleaver for deinterleaving if enabled
     std::unique_ptr<ChannelInterleaver> interleaver;
     if (use_channel_deinterleave) {
-        interleaver = std::make_unique<ChannelInterleaver>(BITS_PER_SYMBOL, LDPC_CODEWORD_BITS);
+        interleaver = std::make_unique<ChannelInterleaver>(bits_per_symbol, LDPC_CODEWORD_BITS);
     }
 
     // Decode each codeword

@@ -695,9 +695,10 @@ inline size_t getFixedFramePayloadCapacity(CodeRate rate) {
  * @param frame_data Serialized frame data (from DataFrame::serialize())
  * @param rate Code rate for LDPC encoding
  * @param use_channel_interleave If true, apply channel interleaving within each CW
+ * @param bits_per_symbol Bits per OFDM symbol (data_carriers × bits_per_carrier) for interleaver geometry
  * @return Interleaved coded bits (4 × 648 = 2592 bits = 324 bytes)
  */
-Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, bool use_channel_interleave);
+Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, bool use_channel_interleave, size_t bits_per_symbol = 106);
 
 /**
  * Encode without channel interleaving (backward compatible).
@@ -716,9 +717,10 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate);
  * @param interleaved_soft Soft bits from demodulator (2592 floats)
  * @param rate Code rate for LDPC decoding
  * @param use_channel_deinterleave If true, apply channel deinterleaving within each CW
+ * @param bits_per_symbol Bits per OFDM symbol (data_carriers × bits_per_carrier) for interleaver geometry
  * @return CodewordStatus with decode results for all 4 CWs
  */
-CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate, bool use_channel_deinterleave);
+CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate, bool use_channel_deinterleave, size_t bits_per_symbol = 106);
 
 /**
  * Decode without channel deinterleaving (backward compatible).

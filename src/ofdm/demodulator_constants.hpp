@@ -23,9 +23,11 @@ constexpr size_t LDPC_BLOCK_SIZE = 648;
 // preventing runaway values on fading channels.
 constexpr float MAX_LLR = 20.0f;
 
-// Minimum LLR magnitude to prevent complete erasures
-// When symbol is near decision boundary, give weak opinion for LDPC
-constexpr float MIN_LLR_MAG = 0.5f;
+// Minimum LLR magnitude — keep very small to avoid numerical issues
+// but allow near-zero LLRs for faded carriers (soft erasure).
+// Previously 0.5, which forced random-sign weak decisions on faded carriers
+// instead of letting LDPC treat them as erasures.
+constexpr float MIN_LLR_MAG = 0.01f;
 
 // =============================================================================
 // PILOT SEQUENCE

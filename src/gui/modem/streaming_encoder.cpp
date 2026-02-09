@@ -486,7 +486,8 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
 
     // Data frames: 4-CW fixed frame encoding with frame interleaving
     // Channel interleaving is controlled by use_channel_interleave_ flag
-    Bytes encoded = v2::encodeFixedFrame(tx_data, code_rate_, use_channel_interleave_);
+    size_t bps = calculateDataCarriers() * getBitsPerSymbol(modulation_);
+    Bytes encoded = v2::encodeFixedFrame(tx_data, code_rate_, use_channel_interleave_, bps);
 
     LOG_MODEM(DEBUG, "[%s] OFDM data: %zu bytes -> 4 CWs (%zu coded, frame_interleave=%s, channel_interleave=%s)",
               log_prefix_.c_str(), tx_data.size(), encoded.size(),

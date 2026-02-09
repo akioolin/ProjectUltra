@@ -1388,7 +1388,8 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
         // Use v2::decodeFixedFrame which handles frame + channel deinterleaving + LDPC decode
         // Channel deinterleaving restores the original bit order within each CW
         // Only enable for OFDM modes (MC-DPSK doesn't use channel interleaving)
-        auto cw_status = v2::decodeFixedFrame(soft_bits, rate, apply_channel_deinterleave);
+        size_t bps = ofdm_data_carriers_ * getBitsPerSymbol(current_modulation_);
+        auto cw_status = v2::decodeFixedFrame(soft_bits, rate, apply_channel_deinterleave, bps);
 
         result.codewords_ok = 0;
         result.codewords_failed = 0;

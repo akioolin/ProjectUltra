@@ -762,12 +762,12 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     prev_pilot_phases = h_ls_all;
 
     // Interpolate between pilots
-    if (!is_differential && std::abs(lts_phase_slope) > 0.01f) {
+    if (!is_differential) {
         // Coherent modes: phase-slope-compensated complex interpolation.
-        // The timing offset introduces a ~19°/carrier phase gradient, causing ~190° phase
-        // jumps between 10-carrier-spaced pilots (exceeding 180° Nyquist limit).
-        // Solution: remove the known phase slope, interpolate in the de-sloped domain
-        // (where only ~8°/carrier channel variation remains), then restore the slope.
+        // The timing offset introduces a phase gradient across carriers; de-sloping before
+        // interpolation prevents phase wrapping. When slope is near zero (good timing),
+        // de-slope is identity — complex interpolation still preserves phase info that
+        // magnitude-only interpolation would discard.
         int half_fft = config.fft_size / 2;
 
         // Precompute de-sloped pilot H values
