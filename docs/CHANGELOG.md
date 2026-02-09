@@ -10,6 +10,127 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-02-08: DFT-based channel interpolation + magnitude-only pilot tracking
+
+**What was broken:**
+- Linear interpolation between 6 pilots across 59 carriers produced suboptimal H estimates
+  at data carriers far from pilots, especially on frequency-selective fading channels
+- For differential modes (DQPSK, DBPSK, D8PSK), `updateChannelEstimate()` was completely
+  skipped — H was frozen from LTS for the entire frame (~700ms). On fading channels, |H|
+  drifts, causing stale MMSE scaling and incorrect LLR confidence
+
+**What was changed:**
+
+1. **DFT-based interpolation** (`src/ofdm/channel_equalizer.cpp`)
+   - Replaced linear interpolation with IDFT→window→DFT approach
+   - Builds N-point H from pilot LS estimates + linear fill
+   - IDFT to CIR, window to L=5 taps (±1.8ms delay spread coverage), DFT back
+   - Exploits finite HF channel delay spread for noise suppression
+   - Used for coherent modes during data symbols and for all modes during LTS
+
+2. **Magnitude-only pilot tracking for differential** (`src/ofdm/channel_equalizer.cpp`)
+   - Enabled `updateChannelEstimate()` for differential modes (was skipped entirely)
+   - Pilot H: update |H| via alpha=0.5 smoothing, keep phase frozen from LTS
+   - Data carriers: linearly interpolate MAGNITUDES ONLY from pilots, preserve existing phases
+   - Skip DFT interpolation for differential (would corrupt phase relationships)
+   - Guard CFO estimation and timing recovery with `!is_differential` (fading-induced
+     phase changes get misattributed to CFO on fading channels)
+   - Guard noise_variance updates with `!is_differential` (preserve LTS-based estimate)
+
+**Why it works:**
+- DFT interpolation: noise suppression from CIR windowing produces smoother, more accurate
+  H estimates. The HF channel's finite delay spread means high-delay CIR taps are pure noise.
+- Magnitude tracking: MMSE equalization `eq = rx × conj(H) / (|H|² + σ²)` needs correct |H|
+  for amplitude scaling. Phase errors cancel in differential decoding (diff = eq[n] × conj(eq[n-1]))
+  but magnitude errors affect LLR confidence.
+- Phase must NOT be updated for differential because the decode relies on phase DIFFERENCES
+  between consecutive equalized symbols — changing H phase between symbols introduces
+  artificial differential phase errors.
+
+**Test verification:**
+- R1/4 AWGN SNR=15: 100%, 0 retx (no regression)
+- R1/4 good fading SNR=15: 100%, 0 retx (no regression)
+- R1/2 AWGN SNR=20: 100%, 0 retx (no regression)
+- R1/2 good fading SNR=20 (seeds 42-46): avg 2.0 retx (was 3.2 baseline — 37.5% reduction)
+
+## 2026-02-08: Per-carrier adaptive LLR scaling
+
+**What was broken:**
+- When fading was detected, a **global** scale factor was applied to ALL carriers equally:
+  `ce_error_margin *= (1 + 10 × fading_index²)`. This reduced LLR confidence on good carriers
+  too, wasting LDPC correction capacity. On frequency-selective fades, some carriers are fine
+  while others are deeply faded — the global scale couldn't distinguish between them.
+
+**What was changed:**
+
+1. **Per-carrier |eq| magnitude tracking** (`src/ofdm/demodulator.cpp`)
+   - Track EMA of `|equalized[i]|` per carrier across symbols within a frame
+   - Track EMA of `(|eq| - ema)²` per carrier (magnitude variance)
+   - First symbol initializes EMA; subsequent symbols update with α=0.3
+
+2. **Per-carrier noise inflation** (`src/ofdm/demodulator.cpp`)
+   - Replaced global `fading_scale` block with per-carrier scaling in the LLR loop
+   - `norm_var = carrier_eq_mag_var[i] / (carrier_eq_mag_ema[i]² + ε)`
+   - `nv *= (1 + K × norm_var)` where K=10 (CARRIER_ADAPTIVE_K constant)
+   - Applied in both `demodulateSymbol()` and `demodulateD8PSKTwoPass()` pass-2 loop
+
+3. **State management** (`src/ofdm/demodulator_impl.hpp`, `demodulator_constants.hpp`)
+   - Added `carrier_eq_mag_ema_` and `carrier_eq_mag_var_` vectors to Impl
+   - Added `CARRIER_ADAPTIVE_K = 10.0f` constant
+   - Cleared in `processPresynced()`, `reset()`, and all Schmidl-Cox state transitions
+
+**How it works:**
+- Stable carrier: low variance → `norm_var ≈ 0` → no noise inflation → full LLR confidence
+- Fading carrier: high variance → `norm_var > 0` → inflated noise → LDPC knows not to trust it
+- AWGN: all carriers stable → zero variance → no scaling whatsoever (zero regression)
+
+**Test verification:**
+- `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test` → PASS, 0 retransmissions
+- `./build/cli_simulator --snr 20 --fading good --rate r1_2 --test` → PASS, all messages delivered
+- `./build/cli_simulator --snr 15 --rate r1_4 --test` → PASS, 0 retransmissions, perfect LLRs
+
+---
+
+## 2026-02-08: Frequency-domain interleaving for OFDM
+
+**What was broken:**
+- Adjacent coded bits mapped to adjacent carriers. When a cluster of carriers fades
+  together (common on HF), all bits in that cluster are wrong. LDPC can't fix a burst
+  of confident wrong bits. This was the main cause of R1/2 retransmissions on fading channels.
+
+**What was changed:**
+
+1. **Coprime-step carrier permutation** (`src/ofdm/modulator.cpp`, `src/ofdm/demodulator.cpp`)
+   - TX: `perm[c] = (c * 23) mod N` maps logical carrier c to physical carrier perm[c]
+   - RX: `inv_perm[p] = c` where `(c * 23) mod N = p` reverses the mapping on soft bits
+   - Step=23 ensures adjacent logical carriers map ~23 physical carriers apart
+   - Applied in `modulate()` (TX) and `demodulateSymbol()` + `demodulateD8PSKTwoPass()` (RX)
+   - Permutation is fixed across all OFDM symbols — differential encoding chains are coherent
+
+2. **Public API** (`include/ultra/ofdm.hpp`, waveform files)
+   - `setFrequencyInterleave(bool)` on OFDMModulator and OFDMDemodulator
+   - Forwarded through OFDMChirpWaveform, OFDMNvisWaveform, IWaveform interface
+   - StreamingEncoder/StreamingDecoder forward setting and persist across waveform recreation
+
+3. **CLI flag** (`tools/cli_simulator.cpp`)
+   - `--no-freq-interleave` / `--nfi` to disable, `--freq-interleave` / `--fi` to enable
+   - Default: ON
+
+**How it works:**
+- Example: Physical carriers 20-25 fading → logical positions {1, 8, 17, 24, 31, 47}
+  (scattered across 53 carriers). LDPC sees scattered errors, not burst errors.
+- Works correctly with differential encoding because permutation is fixed per-symbol.
+  TX state `dbpsk_prev_symbols[c]` tracks logical carrier c; physical carrier `perm[c]`
+  always carries the same logical chain.
+
+**Test verification:**
+- `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test` → PASS, 0 retransmissions
+- `./build/cli_simulator --snr 20 --fading good --rate r1_2 --test` → PASS, all messages delivered
+- `./build/cli_simulator --snr 15 --rate r1_4 --test` → PASS, AWGN 0 retransmissions
+- `./build/cli_simulator --snr 15 --fading good --rate r1_4 --no-freq-interleave --test` → PASS
+
+---
+
 ## 2026-02-08: LDPC false positive recovery via CRC-guided bit-flip search
 
 **What was broken:**

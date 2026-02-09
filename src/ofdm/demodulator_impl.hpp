@@ -74,6 +74,12 @@ struct OFDMDemodulator::Impl {
     };
     std::vector<InterpInfo> interp_table;
 
+    // All carrier FFT indices in logical order (for DFT interpolation)
+    // Indices 0..N_carriers-1, mapping logical carrier to FFT bin
+    std::vector<int> all_carrier_fft_indices;
+    // Which logical indices are pilots (bitmask-style: pilot_logical_indices[i] = true)
+    std::vector<bool> is_pilot_logical;
+
     // Frequency offset estimation and correction
     float freq_offset_hz = 0.0f;
     float freq_offset_filtered = 0.0f;
@@ -121,6 +127,11 @@ struct OFDMDemodulator::Impl {
 
     // Per-carrier noise variance after equalization
     std::vector<float> carrier_noise_var;
+
+    // Per-carrier adaptive LLR scaling: track |equalized| stability over symbols
+    // Stable carriers keep full LLR confidence; fading carriers get inflated noise
+    std::vector<float> carrier_eq_mag_ema_;   // EMA of |equalized[i]| per carrier
+    std::vector<float> carrier_eq_mag_var_;   // EMA of (|eq| - ema)² per carrier
 
     // Two-pass D8PSK decoding (DQPSK-assisted phase correction)
     // Uses embedded DQPSK grid (45° margins) for robust phase estimation

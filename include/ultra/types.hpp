@@ -133,7 +133,6 @@ inline const char* codeRateToString(CodeRate rate) {
 struct PilotConfig {
     int num_pilots = 0;                    // Number of pilot carriers (0, 4, or 6)
     std::vector<int> pilot_indices;        // Logical carrier indices for pilots (0 to num_carriers-1)
-    bool enable_freq_interleaving = true;  // Scatter bits across carriers
 
     // Get number of data carriers for a given total carrier count
     int getDataCarriers(int total_carriers) const {

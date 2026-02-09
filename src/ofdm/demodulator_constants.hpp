@@ -85,6 +85,12 @@ constexpr float DEFAULT_SNR_LINEAR = 31.6f;
 // 0.25 = 6 dB below average = mark ~20% of carriers as faded on moderate fading
 constexpr float FADE_THRESHOLD_RATIO = 0.25f;
 
+// Per-carrier adaptive LLR scaling: variance-to-noise inflation factor
+// Higher = more aggressive noise inflation for unstable carriers
+// norm_var = carrier_eq_mag_var / carrier_eq_mag_ema² measures relative instability
+// nv *= (1 + K * norm_var): stable carriers (norm_var≈0) unchanged, fading carriers inflated
+constexpr float CARRIER_ADAPTIVE_K = 10.0f;
+
 // =============================================================================
 // SOFT DEMAPPING
 // =============================================================================

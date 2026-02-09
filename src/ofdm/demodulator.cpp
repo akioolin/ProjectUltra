@@ -47,16 +47,24 @@ void OFDMDemodulator::Impl::setupCarriers() {
     int neg_limit = config.num_carriers / 2;
     int pos_limit = (config.num_carriers + 1) / 2;
 
+    // Build all-carrier ordered list AND separate pilot/data lists
+    all_carrier_fft_indices.clear();
+    is_pilot_logical.clear();
+
     int pilot_count = 0;
     for (int i = -neg_limit; i <= pos_limit; ++i) {
         if (i == 0) continue;
 
         int fft_idx = (i + config.fft_size) % config.fft_size;
+        bool is_pilot = config.use_pilots && (pilot_count % config.pilot_spacing == 0);
+
+        all_carrier_fft_indices.push_back(fft_idx);
+        is_pilot_logical.push_back(is_pilot);
 
         if (!config.use_pilots) {
             data_carrier_indices.push_back(fft_idx);
         } else {
-            if (pilot_count % config.pilot_spacing == 0) {
+            if (is_pilot) {
                 pilot_carrier_indices.push_back(fft_idx);
             } else {
                 data_carrier_indices.push_back(fft_idx);
@@ -64,7 +72,8 @@ void OFDMDemodulator::Impl::setupCarriers() {
         }
         ++pilot_count;
     }
-}
+
+    }
 
 void OFDMDemodulator::Impl::generateSequences() {
     // Zadoff-Chu sequence for sync
@@ -224,32 +233,23 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
     // Get channel estimation error margin
     float ce_error_margin = soft_demap::getCEErrorMargin(mod);
 
-    // FADING-AWARE LLR SCALING:
-    // On fading channels, channel estimate may be significantly wrong, causing
-    // soft demapper to produce confident LLRs for wrong bits. LDPC can't recover
-    // from confident wrong bits.
-    //
-    // Solution: When fading is detected, increase noise variance (reduce LLR confidence).
-    // This tells LDPC "don't trust these soft bits as much".
-    //
-    // Scale: ce_margin × (1 + 20 × fading_index²)
-    // Note: OFDM pilots measure lower fading index than MC-DPSK (6 pilots vs 8 carriers),
-    // so we use 20× instead of 6× to compensate. At OFDM fading_index=0.15, this gives
-    // 1.45× scaling (similar to MC-DPSK fading_index=0.35 with 6×).
-    //
-    // - fading_index=0.12: ×1.29 (compensates for underestimate)
-    // - fading_index=0.20: ×1.80
-    // - fading_index=0.30: ×2.80 (significant reduction)
-    // Only apply fading scaling on moderate+ fading (index > 0.15)
-    // Good channel (index < 0.15) works fine without scaling
-    float fading_index = last_fading_index;
-    if (fading_index > 0.15f) {
-        // Scaling: 1 + 10×fading² (no cap — decoder diversity handles trapping sets)
-        // At fading=0.15: 1.23×, fading=0.3: 1.9×, fading=0.5: 3.5×, fading=0.6: 4.6×
-        float fading_scale = 1.0f + 10.0f * fading_index * fading_index;
-        ce_error_margin *= fading_scale;
-        if (snr_symbol_count < 3) {
-            LOG_DEMOD(DEBUG, "Fading LLR scaling: index=%.3f, scale=%.2f", fading_index, fading_scale);
+    // PER-CARRIER ADAPTIVE LLR SCALING (replaces old global fading_scale):
+    // Track |equalized| EMA per carrier across symbols within a frame.
+    // Carriers with high magnitude variance are fading mid-frame → inflate their noise.
+    // Stable carriers keep full LLR confidence. On AWGN, all carriers stable → no scaling.
+    constexpr float MAG_EMA_ALPHA = 0.3f;
+    if (carrier_eq_mag_ema_.size() != equalized.size()) {
+        // First symbol in frame: initialize EMA to current magnitudes, zero variance
+        carrier_eq_mag_ema_.resize(equalized.size());
+        carrier_eq_mag_var_.resize(equalized.size(), 0.0f);
+        for (size_t i = 0; i < equalized.size(); ++i)
+            carrier_eq_mag_ema_[i] = std::abs(equalized[i]);
+    } else {
+        for (size_t i = 0; i < equalized.size(); ++i) {
+            float mag = std::abs(equalized[i]);
+            float delta = mag - carrier_eq_mag_ema_[i];
+            carrier_eq_mag_ema_[i] += MAG_EMA_ALPHA * delta;
+            carrier_eq_mag_var_[i] += MAG_EMA_ALPHA * (delta * delta - carrier_eq_mag_var_[i]);
         }
     }
 
@@ -321,6 +321,13 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
         const auto& sym = equalized[i];
         float base_nv = (i < carrier_noise_var.size()) ? carrier_noise_var[i] : noise_variance;
         float nv = base_nv * ce_error_margin;
+
+        // Per-carrier adaptive: inflate noise for carriers with unstable |eq|
+        if (carrier_eq_mag_var_.size() == equalized.size()) {
+            float mean_sq = carrier_eq_mag_ema_[i] * carrier_eq_mag_ema_[i] + 1e-6f;
+            float norm_var = carrier_eq_mag_var_[i] / mean_sq;
+            nv *= (1.0f + CARRIER_ADAPTIVE_K * norm_var);
+        }
 
         switch (mod) {
             case Modulation::DBPSK: {
@@ -581,6 +588,13 @@ bool OFDMDemodulator::Impl::demodulateD8PSKTwoPass(
         Complex prev_sym = dbpsk_prev_equalized[i];
         float nv = (i < carrier_noise_var.size()) ? carrier_noise_var[i] : base_noise_variance;
         nv *= ce_margin;
+
+        // Per-carrier adaptive: inflate noise for carriers with unstable |eq|
+        if (carrier_eq_mag_var_.size() == equalized.size()) {
+            float mean_sq = carrier_eq_mag_ema_[i] * carrier_eq_mag_ema_[i] + 1e-6f;
+            float norm_var = carrier_eq_mag_var_[i] / mean_sq;
+            nv *= (1.0f + CARRIER_ADAPTIVE_K * norm_var);
+        }
 
         Complex corrected_sym = equalized[i] * phase_correction;
         auto llrs = soft_demap::demapD8PSK(corrected_sym, prev_sym, nv);
@@ -905,6 +919,8 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 std::fill(impl_->rls_P.begin(), impl_->rls_P.end(), 1.0f);
 
                 impl_->dbpsk_prev_equalized.clear();
+                impl_->carrier_eq_mag_ema_.clear();
+                impl_->carrier_eq_mag_var_.clear();
                 if (!is_differential || impl_->config.use_pilots) {
                     impl_->carrier_phase_initialized = false;
                     impl_->carrier_phase_correction = Complex(1, 0);
@@ -979,6 +995,8 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                     std::fill(impl_->rls_P.begin(), impl_->rls_P.end(), 1.0f);
 
                     impl_->dbpsk_prev_equalized.clear();
+                    impl_->carrier_eq_mag_ema_.clear();
+                    impl_->carrier_eq_mag_var_.clear();
                     impl_->carrier_phase_initialized = false;
                     impl_->carrier_phase_correction = Complex(1, 0);
 
@@ -1262,6 +1280,8 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     std::fill(impl_->rls_P.begin(), impl_->rls_P.end(), 1.0f);
 
     impl_->dbpsk_prev_equalized.clear();
+    impl_->carrier_eq_mag_ema_.clear();
+    impl_->carrier_eq_mag_var_.clear();
     impl_->carrier_phase_initialized = false;
     impl_->carrier_phase_correction = Complex(1, 0);
     impl_->lts_phase_offset = Complex(1, 0);  // Will be updated by estimateChannelFromLTS
@@ -1332,16 +1352,12 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
         auto bb = impl_->toBaseband(sym_samples);
         auto fd = impl_->extractSymbol(bb, 0);
 
-        // For coherent modes with pilots, we MUST call updateChannelEstimate for per-symbol
-        // pilot tracking. The LTS estimate is just a starting point - pilots refine it.
-        // For differential modes (DBPSK, DQPSK, D8PSK), skip pilot-based channel update.
-        // Differential decoding extracts data from phase DIFFERENCE between symbols,
-        // so channel estimate errors cancel out. Pilot-based updates actually CORRUPT
-        // the LTS-derived H by interpolating from pilot positions.
-        bool is_differential = (impl_->config.modulation == Modulation::DBPSK ||
-                               impl_->config.modulation == Modulation::DQPSK ||
-                               impl_->config.modulation == Modulation::D8PSK);
-        if (!impl_->pilot_carrier_indices.empty() && !is_differential) {
+        // Per-symbol pilot tracking: update channel estimate from pilot observations.
+        // For differential modes: update only |H| (magnitude) to track fading depth,
+        // while keeping phase frozen from LTS. This gives MMSE accurate amplitude
+        // scaling without corrupting the differential phase relationship.
+        // For coherent modes: full H update (magnitude + phase).
+        if (!impl_->pilot_carrier_indices.empty()) {
             impl_->updateChannelEstimate(fd);
         }
         auto eq = impl_->equalize(fd);
@@ -1409,6 +1425,8 @@ void OFDMDemodulator::reset() {
     // Reset mixer phase - critical for OFDM_CHIRP which calls reset() between frames
     impl_->mixer.reset();
     impl_->dbpsk_prev_equalized.clear();
+    impl_->carrier_eq_mag_ema_.clear();
+    impl_->carrier_eq_mag_var_.clear();
     impl_->carrier_phase_initialized = false;
     impl_->carrier_phase_correction = Complex(1, 0);
 
