@@ -305,19 +305,9 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
             int idx2 = offset + n + symbol_samples;
             if (idx2 >= static_cast<int>(samples.size())) break;
 
-            // Apply known CFO correction for better correlation
-            float phase = -2.0f * M_PI * known_cfo_hz * idx1 / config_.sample_rate;
-            float cos_p = std::cos(phase);
-            float sin_p = std::sin(phase);
-
             float s1 = samples[idx1];
             float s2 = samples[idx2];
-
-            // CFO-corrected correlation
-            float s1_corr = s1 * cos_p;
-            float s2_corr = s2 * std::cos(phase + 2.0f * M_PI * known_cfo_hz * symbol_samples / config_.sample_rate);
-
-            P_real += s1 * s2;  // Simplified: real-valued correlation
+            P_real += s1 * s2;
             energy1 += s1 * s1;
             energy2 += s2 * s2;
         }
@@ -374,6 +364,16 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
                 best_offset = offset;
             }
         }
+    }
+
+    // Compensate for CFO-induced correlation drop on real-valued autocorrelation.
+    // CFO causes phase rotation of 2*pi*cfo*L/fs between repeated LTS halves,
+    // reducing real autocorrelation by cos(that phase). This factor is constant
+    // across all offsets so it doesn't affect peak finding, only threshold comparison.
+    float cfo_phase = 2.0f * M_PI * known_cfo_hz * symbol_samples / config_.sample_rate;
+    float cfo_factor = std::cos(cfo_phase);
+    if (std::abs(cfo_factor) > 0.5f) {
+        best_corr = std::min(best_corr / std::abs(cfo_factor), 1.0f);
     }
 
     result.correlation = best_corr;
