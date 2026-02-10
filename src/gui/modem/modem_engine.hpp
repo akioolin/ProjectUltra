@@ -200,6 +200,12 @@ public:
     // Returns 8 for fading/low SNR, up to 13 for stable/high SNR
     static int recommendMCDPSKCarriers(float snr_db, float fading_index);
 
+    // Burst interleave control (for connected OFDM_CHIRP mode)
+    void setBurstInterleave(bool enable) {
+        if (streaming_encoder_) streaming_encoder_->setBurstInterleave(enable);
+        if (streaming_decoder_) streaming_decoder_->setBurstInterleave(enable);
+    }
+
     // FEC codec control
     void setCodecType(fec::CodecType type);
     fec::CodecType getCodecType() const { return codec_type_; }

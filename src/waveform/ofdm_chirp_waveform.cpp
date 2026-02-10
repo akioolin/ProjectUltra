@@ -378,6 +378,10 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
 
     result.correlation = best_corr;
 
+    // Reset latched marker at start of each detection attempt
+    burst_interleave_latched_ = false;
+    burst_interleaved_detected_ = false;
+
     if (best_corr > threshold) {
         result.detected = true;
         result.start_sample = best_offset;  // Training starts here
@@ -385,8 +389,22 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
         synced_ = true;
         last_cfo_ = known_cfo_hz;
 
-        LOG_MODEM(INFO, "OFDMChirpWaveform: Data sync detected at %d, corr=%.2f, using CFO=%.1f Hz",
-                  best_offset, best_corr, known_cfo_hz);
+        // Check LTS sign for burst interleave marker.
+        // Recompute raw P_real at best_offset (the coarse/fine loop used abs()).
+        // Negated first LTS symbol → negative P_real autocorrelation.
+        float raw_P_real = 0.0f;
+        for (int n = 0; n < symbol_samples; ++n) {
+            int idx1 = best_offset + n;
+            int idx2 = best_offset + n + symbol_samples;
+            if (idx2 >= static_cast<int>(samples.size())) break;
+            raw_P_real += samples[idx1] * samples[idx2];
+        }
+        burst_interleaved_detected_ = (raw_P_real < 0.0f);
+        burst_interleave_latched_ = burst_interleaved_detected_;
+
+        LOG_MODEM(INFO, "OFDMChirpWaveform: Data sync detected at %d, corr=%.2f, using CFO=%.1f Hz%s",
+                  best_offset, best_corr, known_cfo_hz,
+                  burst_interleaved_detected_ ? " [BURST-INTERLEAVED]" : "");
     }
 
     return result.detected;
@@ -416,8 +434,26 @@ bool OFDMChirpWaveform::process(SampleSpan samples) {
     // This ensures CFO correction starts from the correct accumulated phase
     demodulator_->setFrequencyOffsetWithPhase(cfo_hz_, initial_phase_rad);
 
-    // Use pre-synced processing (chirp provides timing)
-    bool ready = demodulator_->processPresynced(samples, 2);
+    // If burst interleave marker was detected, undo LTS negation before channel estimation.
+    // The TX negated the first LTS symbol as a marker. We must restore it so the
+    // demodulator sees correct training data for channel estimation.
+    // ONE-SHOT: consume the flag immediately so continuation frames aren't affected.
+    bool ready;
+    if (burst_interleaved_detected_) {
+        burst_interleaved_detected_ = false;  // One-shot: consume before continuation frames
+
+        // Create mutable copy and negate first LTS symbol
+        std::vector<float> modified(samples.begin(), samples.end());
+        size_t lts_sym_len = static_cast<size_t>(getSamplesPerSymbol());
+        for (size_t i = 0; i < lts_sym_len && i < modified.size(); i++) {
+            modified[i] = -modified[i];
+        }
+
+        ready = demodulator_->processPresynced(SampleSpan(modified), 2);
+    } else {
+        // Normal path (no burst marker)
+        ready = demodulator_->processPresynced(samples, 2);
+    }
 
     if (ready) {
         // Retrieve ALL soft bits from demodulator

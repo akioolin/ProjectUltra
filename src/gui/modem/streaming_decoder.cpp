@@ -16,6 +16,7 @@
 #include "waveform/ofdm_cox_waveform.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "fec/frame_interleaver.hpp"  // Frame-level interleaving for 4-CW frames
+#include "fec/burst_interleaver.hpp"  // Burst-level long interleaver (4-frame groups)
 #include "ultra/logging.hpp"
 #include <algorithm>
 #include <chrono>
@@ -204,6 +205,10 @@ void StreamingDecoder::processBuffer() {
 
         case DecoderState::DECODING:
             decodeCurrentFrame();
+            break;
+
+        case DecoderState::BURST_ACCUMULATING:
+            accumulateBurstFrames();
             break;
     }
 }
@@ -659,6 +664,40 @@ void StreamingDecoder::decodeCurrentFrame() {
 
     last_fading_index_.store(waveform_->getFadingIndex());
 
+    // Check for burst interleave marker (negated LTS detected by waveform)
+    // Only for connected OFDM_CHIRP when burst interleaving is enabled
+    bool burst_marker = use_burst_interleave_ && connected_ && is_ofdm
+                        && mode_ == protocol::WaveformMode::OFDM_CHIRP
+                        && waveform_->wasBurstInterleaved();
+
+    if (burst_marker) {
+        LOG_MODEM(INFO, "[%s] Burst interleave marker detected, entering accumulation",
+                  log_prefix_.c_str());
+
+        // Initialize accumulation state with first frame's soft bits
+        burst_soft_buffer_.clear();
+        burst_soft_buffer_.push_back(std::move(soft_bits));
+        burst_min_block_ = static_cast<size_t>(waveform_->getMinSamplesForFrame());
+        burst_next_pos_ = (sync_position_ + frame_len) % MAX_BUFFER_SAMPLES;
+        burst_snr_ = sync_snr_;
+        burst_cfo_ = sync_cfo_;
+        burst_start_time_ = std::chrono::steady_clock::now();
+
+        // Feed back CFO from first frame
+        float corrected_cfo = waveform_->estimatedCFO();
+        float current_cfo = last_cfo_.load();
+        constexpr float MAX_PILOT_CFO_DRIFT_HZ_B = 2.0f;
+        float drift = corrected_cfo - current_cfo;
+        if (std::abs(drift) > MAX_PILOT_CFO_DRIFT_HZ_B) {
+            corrected_cfo = current_cfo + std::copysign(MAX_PILOT_CFO_DRIFT_HZ_B, drift);
+        }
+        last_cfo_.store(corrected_cfo);
+        burst_cfo_ = corrected_cfo;
+
+        state_ = DecoderState::BURST_ACCUMULATING;
+        return;  // processBuffer() will call accumulateBurstFrames() on next iteration
+    }
+
     // Feed back pilot-corrected CFO to cached value
     float corrected_cfo = waveform_->estimatedCFO();
     float current_cfo = last_cfo_.load();
@@ -807,6 +846,8 @@ void StreamingDecoder::decodeCurrentFrame() {
     // After successful decode in connected OFDM mode, check for burst continuation
     // MC-DPSK never enters burst mode (uses window=1, full chirp preamble)
     // Skip burst continuation for non-data frames (control/connect are standalone)
+    // Note: when burst interleaving is active, interleaved groups enter BURST_ACCUMULATING
+    // above and return early. Non-interleaved bursts (< 4 frames) still need continuation.
     if (result.success && connected_ && is_ofdm && !is_non_data_frame) {
         size_t min_block = static_cast<size_t>(waveform_->getMinSamplesForFrame());
 
@@ -952,6 +993,10 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     state_ = DecoderState::SEARCHING;
     pending_total_cw_ = 0;
 
+    // Clear burst interleave state on mode change
+    burst_soft_buffer_.clear();
+    use_burst_interleave_ = false;  // Re-enabled by caller if needed
+
     // CRITICAL: Reset correlation_pos_ to current write position
     // Otherwise we'll search old data from previous mode
     correlation_pos_ = write_pos_;
@@ -1082,7 +1127,8 @@ size_t StreamingDecoder::samplesInBuffer() const {
 
 bool StreamingDecoder::isSynced() const {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
-    return state_ == DecoderState::SYNC_FOUND || state_ == DecoderState::DECODING;
+    return state_ == DecoderState::SYNC_FOUND || state_ == DecoderState::DECODING
+        || state_ == DecoderState::BURST_ACCUMULATING;
 }
 
 std::vector<std::complex<float>> StreamingDecoder::getConstellationSymbols() const {
@@ -1143,6 +1189,8 @@ void StreamingDecoder::reset() {
     state_ = DecoderState::SEARCHING;
     pending_total_cw_ = 0;
     burst_blocks_decoded_ = 0;
+    burst_soft_buffer_.clear();
+    use_burst_interleave_ = false;
     new_data_available_ = false;
     last_decoded_sync_pos_ = SIZE_MAX;
 
@@ -1474,6 +1522,178 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     }
 
     return result;
+}
+
+// ============================================================================
+// BURST INTERLEAVE ACCUMULATION
+// ============================================================================
+
+void StreamingDecoder::accumulateBurstFrames() {
+    // Timeout check
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - burst_start_time_).count();
+    if (elapsed > BURST_TIMEOUT_MS) {
+        LOG_MODEM(WARN, "[%s] Burst group timeout: got %zu/%d frames",
+                  log_prefix_.c_str(), burst_soft_buffer_.size(), BURST_GROUP_SIZE);
+        // Discard — TX used 4-frame interleaving, partial is undecodable
+        {
+            std::lock_guard<std::mutex> slock(stats_mutex_);
+            stats_.frames_failed += BURST_GROUP_SIZE;
+        }
+        burst_soft_buffer_.clear();
+        {
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            correlation_pos_ = burst_next_pos_;
+        }
+        state_ = DecoderState::SEARCHING;
+        return;
+    }
+
+    // Try to demodulate next frame
+    auto result = tryDemodulateNextBurstFrame();
+
+    if (result == BurstFrameResult::FAILED) {
+        // Hard failure (energy lost or process error) — abort immediately
+        LOG_MODEM(WARN, "[%s] Burst group aborted: hard failure at frame %zu/%d",
+                  log_prefix_.c_str(), burst_soft_buffer_.size() + 1, BURST_GROUP_SIZE);
+        {
+            std::lock_guard<std::mutex> slock(stats_mutex_);
+            stats_.frames_failed += BURST_GROUP_SIZE;
+        }
+        burst_soft_buffer_.clear();
+        {
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            correlation_pos_ = burst_next_pos_;
+        }
+        state_ = DecoderState::SEARCHING;
+        return;
+    }
+
+    if (result == BurstFrameResult::WAITING) {
+        return;  // Not enough samples yet — come back on next processBuffer() tick
+    }
+
+    // SUCCESS — check if group complete
+    if (static_cast<int>(burst_soft_buffer_.size()) == BURST_GROUP_SIZE) {
+        finalizeBurstGroup();
+        burst_soft_buffer_.clear();
+        {
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            correlation_pos_ = burst_next_pos_;
+        }
+        state_ = DecoderState::SEARCHING;
+    }
+    // else: still accumulating, return and wait for next processBuffer() call
+}
+
+StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame() {
+    // Check available samples at burst_next_pos_
+    size_t next_available;
+    {
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        if (write_pos_ >= burst_next_pos_) {
+            next_available = write_pos_ - burst_next_pos_;
+        } else {
+            next_available = MAX_BUFFER_SAMPLES - burst_next_pos_ + write_pos_;
+        }
+    }
+
+    if (next_available < burst_min_block_) {
+        return BurstFrameResult::WAITING;
+    }
+
+    // Copy samples from circular buffer
+    std::vector<float> block(burst_min_block_);
+    {
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        for (size_t i = 0; i < burst_min_block_; i++) {
+            block[i] = buffer_[(burst_next_pos_ + i) % MAX_BUFFER_SAMPLES];
+        }
+    }
+
+    // Energy check (same as existing burst loop)
+    float next_rms = 0.0f;
+    size_t check_start = std::min(size_t(1024), burst_min_block_);
+    size_t check_len = std::min(burst_min_block_ - check_start, size_t(5000));
+    if (check_len > 0) {
+        for (size_t i = 0; i < check_len; i++) {
+            next_rms += block[check_start + i] * block[check_start + i];
+        }
+        next_rms = std::sqrt(next_rms / check_len);
+    }
+    constexpr float BURST_ENERGY_THRESHOLD = 0.04f;
+    if (next_rms < BURST_ENERGY_THRESHOLD) {
+        LOG_MODEM(WARN, "[%s] Burst frame %zu/%d: energy lost (RMS=%.4f)",
+                  log_prefix_.c_str(), burst_soft_buffer_.size() + 1,
+                  BURST_GROUP_SIZE, next_rms);
+        burst_next_pos_ = (burst_next_pos_ + burst_min_block_) % MAX_BUFFER_SAMPLES;
+        return BurstFrameResult::FAILED;
+    }
+
+    // Demodulate
+    waveform_->setFrequencyOffset(burst_cfo_);
+    bool ok = waveform_->process(SampleSpan(block.data(), block.size()));
+    if (!ok) {
+        LOG_MODEM(WARN, "[%s] Burst frame %zu/%d: process() failed",
+                  log_prefix_.c_str(), burst_soft_buffer_.size() + 1, BURST_GROUP_SIZE);
+        burst_next_pos_ = (burst_next_pos_ + burst_min_block_) % MAX_BUFFER_SAMPLES;
+        return BurstFrameResult::FAILED;
+    }
+
+    auto soft = waveform_->getSoftBits();
+    if (soft.empty()) {
+        burst_next_pos_ = (burst_next_pos_ + burst_min_block_) % MAX_BUFFER_SAMPLES;
+        return BurstFrameResult::FAILED;
+    }
+
+    // Update CFO from pilot tracking (same drift-limiting as existing burst loop)
+    float corrected_cfo = waveform_->estimatedCFO();
+    float drift = corrected_cfo - burst_cfo_;
+    constexpr float MAX_BURST_CFO_DRIFT_HZ = 2.0f;
+    if (std::abs(drift) > MAX_BURST_CFO_DRIFT_HZ) {
+        corrected_cfo = burst_cfo_ + std::copysign(MAX_BURST_CFO_DRIFT_HZ, drift);
+    }
+    burst_cfo_ = corrected_cfo;
+    last_cfo_.store(corrected_cfo);
+    last_fading_index_.store(waveform_->getFadingIndex());
+
+    burst_soft_buffer_.push_back(std::move(soft));
+    burst_next_pos_ = (burst_next_pos_ + burst_min_block_) % MAX_BUFFER_SAMPLES;
+
+    LOG_MODEM(INFO, "[%s] Burst frame %zu/%d demodulated, RMS=%.4f",
+              log_prefix_.c_str(), burst_soft_buffer_.size(),
+              BURST_GROUP_SIZE, next_rms);
+    return BurstFrameResult::SUCCESS;
+}
+
+void StreamingDecoder::finalizeBurstGroup() {
+    LOG_MODEM(INFO, "[%s] Burst group complete (%d frames), deinterleaving...",
+              log_prefix_.c_str(), BURST_GROUP_SIZE);
+
+    auto logical_soft = fec::BurstInterleaver::deinterleave(burst_soft_buffer_);
+
+    for (int i = 0; i < BURST_GROUP_SIZE; i++) {
+        DecodeResult result = decodeFrame(logical_soft[i], burst_snr_, burst_cfo_);
+
+        {
+            std::lock_guard<std::mutex> slock(stats_mutex_);
+            if (result.success) stats_.frames_decoded++;
+            else stats_.frames_failed++;
+        }
+
+        if (result.success || result.codewords_ok > 0) {
+            {
+                std::lock_guard<std::mutex> qlock(queue_mutex_);
+                frame_queue_.push(result);
+            }
+            if (result.success && frame_callback_) frame_callback_(result);
+        }
+
+        LOG_MODEM(INFO, "[%s] Burst logical frame %d/%d: %s (%d/%d CWs)",
+                  log_prefix_.c_str(), i + 1, BURST_GROUP_SIZE,
+                  result.success ? "OK" : "FAIL",
+                  result.codewords_ok, result.codewords_ok + result.codewords_failed);
+    }
 }
 
 // Legacy methods - do nothing but required by header

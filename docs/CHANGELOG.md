@@ -10,6 +10,54 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-02-09: Burst-level long interleaver for OFDM_CHIRP
+
+**What was added:**
+- Burst-level long interleaver that spreads coded bytes across 4-frame groups (~2.8s).
+  Coherent QPSK R1/2 on fading channels hits ~78% frame success because deep spectral nulls
+  zero out groups of carriers, and frame interleaving only spreads bits within ONE frame (~0.7s).
+  With burst interleaving, each CW's bytes are distributed across 4 physical frames — a total
+  frame loss means each CW loses only 25% of its bits, within R1/2 LDPC capacity.
+
+**Files created:**
+- `src/fec/burst_interleaver.hpp` / `.cpp` — Byte-level row-column block interleaver
+  - TX: `interleave()` permutes coded bytes across N frames (flat_pos = N*b + f)
+  - RX: `deinterleave()` operates on 8-float byte groups of soft bits
+
+**Files modified:**
+- `src/waveform/waveform_interface.hpp` — Added `virtual bool wasBurstInterleaved() const`
+- `src/waveform/ofdm_chirp_waveform.hpp/.cpp` — LTS sign-negation marker for burst detection:
+  - TX: negate first LTS symbol for burst-interleaved group starts
+  - RX: detect via `P_real < 0` in autocorrelation, undo negation before channel estimation
+  - Two-flag design: one-shot for `process()`, latched for decoder query
+- `src/gui/modem/streaming_encoder.hpp/.cpp` — `encodeBurstLight()` groups frames into 4-frame
+  subgroups, applies burst interleaving and LTS negation for group starts
+- `src/gui/modem/streaming_decoder.hpp/.cpp` — New `BURST_ACCUMULATING` state machine:
+  - `tryDemodulateNextBurstFrame()` with tri-state result (SUCCESS/WAITING/FAILED)
+  - `finalizeBurstGroup()` deinterleaves and decodes all 4 logical frames
+  - `accumulateBurstFrames()` handles timeout and frame-by-frame accumulation
+- `src/gui/modem/modem_engine.hpp` — `setBurstInterleave(bool)` API
+- `tools/cli_simulator.cpp` — `--burst-test` mode (3x 600-byte messages), `--no-burst-interleave` flag
+- `CMakeLists.txt` — Added `burst_interleaver.cpp` to build
+
+**Design decisions:**
+- Only OFDM_CHIRP mode supports burst interleaving (OFDM_COX uses Schmidl-Cox, incompatible marker)
+- 4-frame subgroups within window-8 ARQ: 8-frame burst → 2 groups of 4, partial remainders decode individually
+- Enabled automatically in connected OFDM_CHIRP mode, disabled on disconnect
+
+**Test verification:**
+```
+# AWGN regression: 0 retransmissions
+./build/cli_simulator --snr 20 --rate r1_2 --mod qpsk --test
+# DQPSK R1/4 fading regression: 0 retransmissions
+./build/cli_simulator --snr 15 --fading good --rate r1_4 --test
+# Burst validation: all 3 large messages delivered, burst groups detected
+./build/cli_simulator --snr 20 --fading good --rate r1_2 --mod qpsk --seed 42 --burst-test
+# Multi-seed A/B: 11 total retx (burst) vs 13 (no burst) across seeds 42-46
+```
+
+---
+
 ## 2026-02-09: Coherent QPSK channel tracking for fading channels
 
 **What was broken:**

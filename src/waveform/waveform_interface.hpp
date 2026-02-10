@@ -161,6 +161,10 @@ public:
     // Check if channel appears to be fading
     virtual bool isFading() const { return getFadingIndex() > 0.65f; }
 
+    // Burst interleave marker: true if last detectDataSync() detected negated LTS
+    // Only meaningful for OFDM_CHIRP (uses LTS autocorrelation sign)
+    virtual bool wasBurstInterleaved() const { return false; }
+
     // Get constellation symbols for GUI display
     virtual std::vector<std::complex<float>> getConstellationSymbols() const = 0;
 

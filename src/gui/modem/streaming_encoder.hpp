@@ -123,6 +123,10 @@ public:
     // Frame interleaving is always enabled for OFDM
     bool getFrameInterleave() const { return use_frame_interleave_; }
 
+    // Burst-level long interleaver (spreads CW bytes across 4-frame groups)
+    void setBurstInterleave(bool enable) { use_burst_interleave_ = enable; }
+    bool getBurstInterleave() const { return use_burst_interleave_; }
+
 private:
     // ========================================================================
     // INTERNAL HELPERS
@@ -161,6 +165,7 @@ private:
     std::unique_ptr<ChannelInterleaver> channel_interleaver_;
     bool use_channel_interleave_ = true;
     bool use_frame_interleave_ = true;     // Always on for OFDM
+    bool use_burst_interleave_ = false;    // Burst-level long interleaver (4-frame groups)
 
     // Logging
     std::string log_prefix_ = "StreamingEncoder";

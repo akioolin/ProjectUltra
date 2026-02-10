@@ -7,6 +7,7 @@
 #include "waveform/ofdm_cox_waveform.hpp"
 #include "waveform/mc_dpsk_waveform.hpp"
 #include "fec/frame_interleaver.hpp"
+#include "fec/burst_interleaver.hpp"
 #include "ultra/logging.hpp"
 #include <algorithm>
 
@@ -187,25 +188,81 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
         return encodeFrameLight(frame_data_list[0]);
     }
 
-    // First frame: LTS preamble + training + data (same as encodeFrameLight)
-    std::vector<float> result = encodeFrameLight(frame_data_list[0]);
+    // Phase 1: LDPC encode all frames
+    std::vector<Bytes> encoded_frames;
+    for (const auto& fd : frame_data_list) {
+        encoded_frames.push_back(encodeFrameBytes(fd));
+    }
 
-    // Subsequent frames: training + data (no LTS detection preamble)
-    for (size_t i = 1; i < frame_data_list.size(); i++) {
-        Bytes encoded = encodeFrameBytes(frame_data_list[i]);
+    // Phase 2: Group into 4-frame subgroups, burst-interleave each group
+    // Track which groups are burst-interleaved (for LTS marker)
+    constexpr int BURST_GROUP_SIZE = 4;
+    std::vector<bool> frame_is_group_start(encoded_frames.size(), false);
 
-        // Generate inter-block training symbols (2 LTS symbols for channel re-estimation)
-        Samples training = waveform_->generateDataPreamble();
+    if (use_burst_interleave_) {
+        size_t full_groups = encoded_frames.size() / BURST_GROUP_SIZE;
+        for (size_t g = 0; g < full_groups; g++) {
+            size_t base = g * BURST_GROUP_SIZE;
+
+            // Extract the group
+            std::vector<Bytes> group(encoded_frames.begin() + base,
+                                     encoded_frames.begin() + base + BURST_GROUP_SIZE);
+
+            // Burst-interleave the coded bytes
+            auto interleaved = fec::BurstInterleaver::interleave(group);
+
+            // Replace in-place
+            for (int i = 0; i < BURST_GROUP_SIZE; i++) {
+                encoded_frames[base + i] = interleaved[i];
+            }
+            frame_is_group_start[base] = true;
+
+            LOG_MODEM(INFO, "[%s] Burst interleaved group %zu: frames %zu-%zu",
+                      log_prefix_.c_str(), g, base, base + BURST_GROUP_SIZE - 1);
+        }
+    }
+
+    // Phase 3: Modulate with preambles
+    std::vector<float> result;
+
+    for (size_t i = 0; i < encoded_frames.size(); i++) {
+        // Generate preamble (LTS training symbols)
+        Samples preamble;
+        if (i == 0) {
+            // First frame of burst: LTS data preamble
+            preamble = waveform_->supportsDataPreamble()
+                ? waveform_->generateDataPreamble()
+                : waveform_->generatePreamble();
+        } else {
+            // All subsequent frames: LTS data preamble
+            preamble = waveform_->generateDataPreamble();
+        }
+
+        // Negate first LTS symbol for burst-interleaved group starts
+        if (frame_is_group_start[i] && !preamble.empty()) {
+            // LTS preamble = 2 identical symbols. Negate the first one.
+            // detectDataSync() correlates sym[n] with sym[n+L]:
+            //   Normal: P_real > 0 (same signs multiply to positive)
+            //   Negated: P_real < 0 (opposite signs multiply to negative)
+            // abs() ensures detection still works; sign indicates burst marker.
+            size_t lts_sym_len = preamble.size() / 2;  // Half = one LTS symbol
+            for (size_t j = 0; j < lts_sym_len; j++) {
+                preamble[j] = -preamble[j];
+            }
+            LOG_MODEM(INFO, "[%s] LTS marker: negated first symbol for frame %zu (group start)",
+                      log_prefix_.c_str(), i);
+        }
 
         // Modulate data
-        Samples modulated = waveform_->modulate(encoded);
+        Samples modulated = waveform_->modulate(encoded_frames[i]);
 
-        result.insert(result.end(), training.begin(), training.end());
+        result.insert(result.end(), preamble.begin(), preamble.end());
         result.insert(result.end(), modulated.begin(), modulated.end());
     }
 
-    LOG_MODEM(INFO, "[%s] Encoded burst: %zu blocks -> %zu samples",
-              log_prefix_.c_str(), frame_data_list.size(), result.size());
+    LOG_MODEM(INFO, "[%s] Encoded burst: %zu blocks -> %zu samples (burst_interleave=%s)",
+              log_prefix_.c_str(), frame_data_list.size(), result.size(),
+              use_burst_interleave_ ? "yes" : "no");
 
     return result;
 }

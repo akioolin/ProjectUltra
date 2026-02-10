@@ -56,9 +56,10 @@ namespace v2 = protocol::v2;
 // Decoder state machine for continuous correlation
 // Real receivers run correlation continuously, not in batches
 enum class DecoderState {
-    SEARCHING,      // Running correlation on incoming samples
-    SYNC_FOUND,     // Chirp detected, collecting frame samples
-    DECODING,       // Have enough samples, decoding in progress
+    SEARCHING,              // Running correlation on incoming samples
+    SYNC_FOUND,             // Chirp detected, collecting frame samples
+    DECODING,               // Have enough samples, decoding in progress
+    BURST_ACCUMULATING,     // Burst marker detected, waiting for all 4 frames
 };
 
 // Result of decoding a frame
@@ -145,6 +146,10 @@ public:
 
     void setChannelInterleave(bool enable) { use_channel_interleave_ = enable; }
     bool getChannelInterleave() const { return use_channel_interleave_; }
+
+    // Burst-level long interleaver (4-frame groups)
+    void setBurstInterleave(bool enable) { use_burst_interleave_ = enable; }
+    bool getBurstInterleave() const { return use_burst_interleave_; }
 
     // Get current mode
     protocol::WaveformMode getMode() const { return mode_; }
@@ -248,6 +253,16 @@ private:
                                     CodeRate rate, size_t bytes_per_cw,
                                     float snr, float cfo);
 
+    // Burst interleave accumulation
+    enum class BurstFrameResult {
+        SUCCESS,    // Frame demodulated, soft bits appended to burst_soft_buffer_
+        WAITING,    // Not enough samples yet — caller should return and wait
+        FAILED,     // Hard failure (energy lost or process error) — abort group
+    };
+    void accumulateBurstFrames();
+    BurstFrameResult tryDemodulateNextBurstFrame();
+    void finalizeBurstGroup();
+
     // Legacy methods (kept for compatibility, do nothing)
     bool runCorrelationSearch(size_t new_samples);
     bool tryDecodeFrame();
@@ -330,6 +345,17 @@ private:
     // After decoding a frame in connected OFDM mode, check for next block at known position
     int burst_blocks_decoded_ = 0;     // Blocks decoded in current burst
     static constexpr int MAX_BURST_BLOCKS = 8;  // Safety limit
+
+    // Burst interleave accumulation state (valid only in BURST_ACCUMULATING)
+    bool use_burst_interleave_ = false;
+    std::vector<std::vector<float>> burst_soft_buffer_;  // collected soft bits per frame
+    size_t burst_next_pos_ = 0;          // buffer position for next continuation frame
+    size_t burst_min_block_ = 0;         // samples per frame (cached from first frame)
+    float burst_snr_ = 0.0f;             // SNR from sync detection
+    float burst_cfo_ = 0.0f;             // CFO (updated per frame from pilot tracking)
+    std::chrono::steady_clock::time_point burst_start_time_;  // timeout reference
+    static constexpr int BURST_GROUP_SIZE = 4;
+    static constexpr int BURST_TIMEOUT_MS = 8000;  // 4 frames × ~0.7s + margin
 
     // Pending frame state for multi-codeword frames
     // After reading header, if more codewords needed, wait for more samples

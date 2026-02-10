@@ -250,6 +250,9 @@ public:
     void setForcedCodeRate(CodeRate rate) { protocol_.setForcedCodeRate(rate); }
     void setPreferredWaveform(WaveformMode mode) { protocol_.setPreferredMode(mode); }
 
+    // Disable burst interleaving (for A/B testing)
+    void setNoBurstInterleave(bool v) { no_burst_interleave_ = v; }
+
     // Enable/disable channel interleaving on both TX encoder and RX decoder
     void setChannelInterleave(bool enable) {
         if (encoder_) {
@@ -312,6 +315,7 @@ private:
 
     std::atomic<uint64_t> total_samples_{0};
     float snr_db_ = 20.0f;
+    bool no_burst_interleave_ = false;  // Disable burst interleaving for A/B testing
 
     ModemConfig createOFDMConfig() {
         ModemConfig cfg;
@@ -501,6 +505,12 @@ private:
                     decoder_->setDataMode(data_modulation_, data_code_rate_);
                     decoder_->setKnownCFO(last_cfo_hz_);
                 }
+                // Enable burst interleaving for OFDM_CHIRP (not COX — no LTS marker)
+                if (negotiated_waveform_ == WaveformMode::OFDM_CHIRP && !no_burst_interleave_) {
+                    if (encoder_) encoder_->setBurstInterleave(true);
+                    if (decoder_) decoder_->setBurstInterleave(true);
+                    LOG_MODEM(INFO, "[%s] Burst interleaving ENABLED", callsign_.c_str());
+                }
                 LOG_MODEM(INFO, "[%s] Entered CONNECTED state, switched to %s, CFO=%.1f Hz",
                           callsign_.c_str(), waveformModeToString(negotiated_waveform_), last_cfo_hz_);
             } else {
@@ -518,6 +528,9 @@ private:
             if (decoder_) {
                 decoder_->setMode(WaveformMode::MC_DPSK, false);
             }
+            // Clear burst interleave state on disconnect
+            if (encoder_) encoder_->setBurstInterleave(false);
+            if (decoder_) decoder_->setBurstInterleave(false);
             // Reset TX encoder to MC-DPSK
             if (tx_waveform_mode_ != WaveformMode::MC_DPSK) {
                 tx_waveform_mode_ = WaveformMode::MC_DPSK;
@@ -791,6 +804,8 @@ public:
     void setTestFileTransfer(bool v) { test_file_transfer_ = v; }
     void setTestFileSize(size_t bytes) { test_file_size_ = bytes; }
     void setChannelInterleave(bool enable) { use_channel_interleave_ = enable; }
+    void setNoBurstInterleave(bool v) { no_burst_interleave_ = v; }
+    void setTestBurst(bool v) { test_burst_ = v; }
     void setSeed(uint32_t seed) { seed_ = seed; }
 
     bool runTest() {
@@ -827,6 +842,13 @@ public:
             std::cout << "  \033[33mChannel interleaving DISABLED\033[0m\n";
         }
 
+        // Apply burst interleave setting to both stations
+        alpha_->setNoBurstInterleave(no_burst_interleave_);
+        bravo_->setNoBurstInterleave(no_burst_interleave_);
+        if (no_burst_interleave_) {
+            std::cout << "  \033[33mBurst interleaving DISABLED\033[0m\n";
+        }
+
         // Setup message callback on BRAVO
         bravo_->setMessageCallback([this](const std::string& msg) {
             std::lock_guard<std::mutex> lock(msg_mutex_);
@@ -847,8 +869,15 @@ public:
         alpha_->start();
         bravo_->start();
 
-        // Run protocol test (message or file)
-        bool success = test_file_transfer_ ? runFileTransferTest() : runProtocolTest();
+        // Run protocol test (message, file, or burst)
+        bool success;
+        if (test_burst_) {
+            success = runBurstTest();
+        } else if (test_file_transfer_) {
+            success = runFileTransferTest();
+        } else {
+            success = runProtocolTest();
+        }
 
         // Stop
         alpha_->stop();
@@ -874,7 +903,9 @@ private:
     bool use_fading_ = false;
     ChannelType channel_type_ = ChannelType::AWGN;
     bool test_file_transfer_ = false;
+    bool test_burst_ = false;              // --burst-test mode: send large messages for burst interleaving
     bool use_channel_interleave_ = true;   // Enabled by default for OFDM fading resistance
+    bool no_burst_interleave_ = false;     // --no-burst-interleave for A/B testing
     size_t test_file_size_ = 256;  // Default 256 bytes test file
     uint32_t seed_ = 42;
     Modulation forced_mod_ = Modulation::AUTO;
@@ -1102,6 +1133,101 @@ private:
         return true;
     }
 
+    bool runBurstTest() {
+        // Phase 1: Connect
+        std::cout << "\n=== PHASE 1: CONNECTION ===\n";
+        std::cout << "  ALPHA connecting to BRAVO...\n";
+        alpha_->connect("BRAVO");
+
+        if (!waitFor([this]{ return alpha_->isConnected() && bravo_->isConnected(); }, 30)) {
+            std::cout << "  \033[31m✗ Connection timeout!\033[0m\n";
+            return false;
+        }
+        std::cout << "  \033[32m✓ Both stations connected!\033[0m\n";
+
+        // Phase 2: Mode negotiation
+        std::cout << "\n=== PHASE 2: MODE NEGOTIATION ===\n";
+        if (!waitFor([this]{ return alpha_->isHandshakeComplete(); }, 30)) {
+            std::cout << "  \033[31m✗ Mode negotiation timeout!\033[0m\n";
+            return false;
+        }
+        std::cout << "  \033[32m✓ Handshake complete!\033[0m\n";
+
+        // Phase 3: Send 3 large messages that fragment into 5+ frames each
+        // At R1/2: payload capacity = 141 bytes, so 600 bytes → ceil(600/141) = 5 frames
+        // At R1/4: payload capacity = 61 bytes, so 600 bytes → ceil(600/61) = 10 frames
+        // With 4-frame grouping: at least 1 burst-interleaved group per message
+        std::cout << "\n=== PHASE 3: BURST DATA TRANSFER (3 large messages) ===\n";
+        std::cout << "  Burst interleaving: " << (no_burst_interleave_ ? "DISABLED" : "ENABLED") << "\n";
+
+        std::vector<std::string> test_messages;
+        // Generate 3 large messages (~600 bytes each)
+        for (int i = 0; i < 3; i++) {
+            std::string msg;
+            msg.reserve(600);
+            for (int j = 0; j < 60; j++) {
+                char buf[16];
+                snprintf(buf, sizeof(buf), "BLK%d_%02d ", i + 1, j);
+                msg += buf;
+            }
+            // Trim to exactly 600 bytes
+            msg.resize(600, 'X');
+            test_messages.push_back(msg);
+        }
+
+        int total = static_cast<int>(test_messages.size());
+        for (int msg_num = 0; msg_num < total; msg_num++) {
+            const std::string& test_msg = test_messages[msg_num];
+
+            if (!waitFor([this]{ return alpha_->isReadyToSend(); }, 60)) {
+                std::cout << "  \033[31m✗ ARQ not ready for message " << (msg_num+1) << "!\033[0m\n";
+                return false;
+            }
+
+            message_received_.store(false);
+
+            std::cout << "  [" << (msg_num+1) << "/" << total << "] Sending (" << test_msg.size() << " bytes)...\n";
+            alpha_->sendMessage(test_msg);
+
+            if (!waitFor([this]{ return message_received_.load(); }, 120)) {
+                std::cout << "  \033[31m✗ Message " << (msg_num+1) << " not received (timeout)!\033[0m\n";
+                return false;
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(msg_mutex_);
+                if (received_message_ == test_msg) {
+                    std::cout << "  \033[32m✓ [" << (msg_num+1) << "/" << total << "] Received (" << received_message_.size() << " bytes) OK\033[0m\n";
+                } else {
+                    std::cout << "  \033[31m✗ Message " << (msg_num+1) << " corrupted!\033[0m\n";
+                    return false;
+                }
+            }
+        }
+
+        // Print decoder stats
+        auto stats = bravo_->getDecoderStats();
+        std::cout << "\n=== RESULTS ===\n";
+        std::cout << "  Frames decoded: " << stats.frames_decoded << "\n";
+        std::cout << "  Frames failed:  " << stats.frames_failed << "\n";
+        if (stats.frames_decoded + stats.frames_failed > 0) {
+            float success_rate = 100.0f * stats.frames_decoded / (stats.frames_decoded + stats.frames_failed);
+            std::cout << "  Success rate:   " << std::fixed << std::setprecision(1) << success_rate << "%\n";
+        }
+        std::cout << "  \033[32m✓ All " << total << " large messages transferred successfully!\033[0m\n";
+
+        // Phase 4: Disconnect
+        std::cout << "\n=== PHASE 4: DISCONNECT ===\n";
+        alpha_->disconnect();
+        if (!waitFor([this]{ return !alpha_->isConnected() && !bravo_->isConnected(); }, 15)) {
+            std::cout << "  \033[33m! Disconnect timeout (non-fatal)\033[0m\n";
+        } else {
+            std::cout << "  \033[32m✓ Disconnected!\033[0m\n";
+        }
+
+        return true;
+    }
+
     bool waitFor(std::function<bool()> condition, int timeout_seconds) {
         auto start = std::chrono::steady_clock::now();
         int last_print = -1;
@@ -1304,6 +1430,10 @@ int main(int argc, char* argv[]) {
             sim.setChannelInterleave(false);
         } else if (arg == "--channel-interleave" || arg == "-ci") {
             sim.setChannelInterleave(true);
+        } else if (arg == "--no-burst-interleave" || arg == "--nbi") {
+            sim.setNoBurstInterleave(true);
+        } else if (arg == "--burst-test") {
+            sim.setTestBurst(true);
         } else if (arg == "--seed" && i + 1 < argc) {
             sim.setSeed(static_cast<uint32_t>(std::stoul(argv[++i])));
         } else if (arg == "--help" || arg == "-h") {
@@ -1325,6 +1455,8 @@ int main(int argc, char* argv[]) {
             std::cout << "  --seed <N>          Random seed (default: 42)\n";
             std::cout << "  --file [SIZE]       Test file transfer (default: 256 bytes)\n";
             std::cout << "  --channel-interleave, -ci  Enable channel interleaving\n";
+            std::cout << "  --no-burst-interleave     Disable burst-level long interleaving\n";
+            std::cout << "  --burst-test              Send large messages to test burst interleaving\n";
             std::cout << "  --verbose, -v       Verbose output\n";
             return 0;
         }

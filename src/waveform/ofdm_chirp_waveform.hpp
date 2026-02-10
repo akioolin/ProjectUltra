@@ -96,6 +96,9 @@ public:
     // OFDM-Chirp Specific
     // ========================================================================
 
+    // Burst interleave marker: true if last detectDataSync() found negated LTS
+    bool wasBurstInterleaved() const override { return burst_interleave_latched_; }
+
     // Get internal config
     const ModemConfig& getConfig() const { return config_; }
 
@@ -122,6 +125,13 @@ private:
     // Sample position where training starts (from detectSync)
     // Used to calculate initial CFO phase for correct phase tracking
     size_t training_start_sample_ = 0;
+
+    // Burst interleave marker detection (LTS sign)
+    // Two-flag design:
+    //   burst_interleaved_detected_: consumed by process() to undo LTS negation (one-shot)
+    //   burst_interleave_latched_: readable by streaming_decoder after process() returns
+    bool burst_interleaved_detected_ = false;
+    bool burst_interleave_latched_ = false;
 };
 
 } // namespace ultra
