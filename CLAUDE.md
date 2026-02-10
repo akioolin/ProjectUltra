@@ -101,19 +101,30 @@
 
 **Current state (2026-02-10):**
 - MC-DPSK: WORKING - 100% at SNR=10 with moderate fading
-- OFDM_CHIRP DQPSK R1/4 AWGN: WORKING - 100% CW success at SNR=15 and SNR=20 (0 retries)
-- OFDM_CHIRP DQPSK R1/4 Good fading: WORKING - 100% CW success at SNR=15 (0 retries, 0 failures)
-- OFDM_CHIRP DQPSK R1/2 AWGN: WORKING - 100% CW success at SNR=20 (0 retries)
-- OFDM_CHIRP DQPSK R1/2 Good fading: WORKING - at SNR=20 (some retransmissions, all delivered)
+- OFDM_CHIRP DQPSK R1/4 AWGN: WORKING - 100% at SNR=15 and SNR=20 (0 retries)
+- OFDM_CHIRP DQPSK R1/4 Good fading: WORKING - 100% at SNR=15 (0 retries, 0 failures)
+- OFDM_CHIRP DQPSK R1/2 AWGN: WORKING - 100% at SNR=15 and SNR=20 (0 retries)
+- OFDM_CHIRP DQPSK R1/2 Good fading: WORKING - 100% at SNR=15 (5/5 seeds, 0 retries)
+- OFDM_CHIRP DQPSK R2/3 AWGN: WORKING - 100% at SNR=20 (0 retries)
+- OFDM_CHIRP DQPSK R2/3 Good fading: WORKING - 100% at SNR=20 (30/30 seeds, 0 retries)
 - OFDM_CHIRP QPSK R1/2 AWGN: WORKING - 100% at SNR=20 (0 retries)
 - OFDM_CHIRP QPSK R1/2 Good fading: WORKING - avg 95% frame success at SNR=20 (30-seed survey, all messages delivered via ARQ)
+- OFDM_CHIRP QPSK R2/3 AWGN: WORKING - 100% at SNR=20 (0 retries)
+- OFDM_CHIRP QPSK R2/3 Good fading: WORKING - 5/5 seeds PASS (2 seeds had retx, 3 clean)
 - OFDM_CHIRP Moderate fading: WORKING - R1/4 89% CW success (57/64), 100% message delivery via ARQ
-- OFDM_CHIRP R3/4: Not recommended on fading (only AWGN)
-- 1-CW ACK frames: WORKING - control frames use 1 CW (3× faster ACK)
+- OFDM_CHIRP R3/4: Broken (LDPC issue). Do not use.
+- 1-CW ACK frames: WORKING - control frames use 1 CW (3x faster ACK)
 - Variable-CW frames: WORKING - CONNECT/DISCONNECT use exact CW count (2 at R1/2, 3 at R1/4)
 - OFDM_COX: WORKING - DATA phase passes at SNR=20 dB
 - OTFS: EXPERIMENTAL - See OTFS Status section below
 - cli_simulator: FULLY WORKING - all phases pass on AWGN and fading
+
+**Auto rate selection ladder (2026-02-10):**
+| Condition | Auto rate | Payload/frame | Throughput |
+|-----------|-----------|---------------|------------|
+| SNR >= 20, fading < 0.65 (good+) | **R2/3** | 197 bytes | ~3200 bps |
+| SNR >= 15, fading < 0.65 (good+) | **R1/2** | 141 bytes | ~2300 bps |
+| Everything else | **R1/4** | 62 bytes | ~1150 bps |
 
 **Temporal fading measurement (2026-02-03):**
 - `getFadingIndex()` now combines freq_cv (multipath) + temporal_cv (Doppler spread)
@@ -164,7 +175,8 @@
 - Proper DD-domain equalization is research-level complexity (sparse channel estimation + iterative detection)
 
 **Recommendation:** Use OFDM_CHIRP with DQPSK. Rate selection is automatic via `selectOFDMCodeRate()`:
-- R1/2 for AWGN (SNR≥15) and good fading (SNR≥20) — ~2× throughput vs R1/4
+- R2/3 for good fading or better (SNR≥20) — ~2.8× throughput vs R1/4, 40% over R1/2
+- R1/2 for good fading or better (SNR≥15) — ~2× throughput vs R1/4
 - R1/4 for moderate fading or lower SNR — robust but slower
 - R3/4 is broken (LDPC issue). Do not use.
 OTFS is parked - would need significant research effort to implement proper DD-domain equalization.
