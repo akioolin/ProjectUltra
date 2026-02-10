@@ -26,19 +26,25 @@ struct WaveformRecommendation {
 // Both recommendWaveformAndRate() and recommendDataMode() use this.
 //
 // Fading index now combines freq_cv + temporal_cv (Doppler measurement).
-// Thresholds (2026-02-10) - Updated with R2/3 and R1/2 fading testing:
-//   Good fading or better (< 0.65): R2/3 @ SNR >= 20, R1/2 @ SNR >= 15
-//   AWGN only (< 0.15):             R1/2 @ SNR >= 15 (same as above, just explicit)
+// Thresholds (2026-02-10) - Full rate ladder:
+//   AWGN only (< 0.15):             R3/4 @ SNR >= 20 (10/10 seeds, 0 retx)
+//   Good fading or better (< 0.65): R2/3 @ SNR >= 20 (30/30 seeds, 0 retx)
+//   Good fading or better (< 0.65): R1/2 @ SNR >= 15 (5/5 seeds, 0 retx)
 //   Moderate+ (>= 0.65):            R1/4 only
 //
+// R3/4 verified (2026-02-10):
+//   DQPSK R3/4 AWGN SNR=20: 10/10 seeds PASS, 0 retransmissions
+//   DQPSK R3/4 Good fading: FAILS (23 retx / 5 seeds) — AWGN only!
+//   Payload: 243 bytes/frame — 23% gain over R2/3
 // R2/3 verified (2026-02-10):
-//   DQPSK R2/3 AWGN SNR=20: 100%, 0 retransmissions
 //   DQPSK R2/3 Good fading SNR=20: 30/30 seeds PASS, 0 retransmissions
-//   Payload: 197 bytes/frame (vs 141 for R1/2) — 40% throughput gain
+//   Payload: 197 bytes/frame — 40% gain over R1/2
 // R1/2 verified (2026-02-10):
 //   DQPSK R1/2 Good fading SNR=15: 5/5 seeds PASS, 0 retransmissions
-// R3/4 is still broken (LDPC issue). Do not use.
 inline CodeRate selectOFDMCodeRate(float snr_db, float fading_index) {
+    // AWGN only: R3/4 at SNR >= 20 (too many retx on fading)
+    if (fading_index < 0.15f && snr_db >= 20.0f) return CodeRate::R3_4;
+
     // Good fading or better: R2/3 at SNR >= 20
     if (fading_index < 0.65f && snr_db >= 20.0f) return CodeRate::R2_3;
 
@@ -54,10 +60,10 @@ inline CodeRate selectOFDMCodeRate(float snr_db, float fading_index) {
 // Fading index now combines freq_cv + temporal_cv (Doppler measurement).
 // Key findings from testing (2026-02-10):
 // - SNR < 10 dB: MC-DPSK is most robust (~938 bps)
-// - SNR >= 20 dB + good fading or better: OFDM_CHIRP R2/3 (~3200 bps)
-// - SNR >= 15 dB + good fading or better: OFDM_CHIRP R1/2 (~2300 bps)
+// - SNR >= 20 dB + AWGN: OFDM_CHIRP R3/4 (~3900 bps)
+// - SNR >= 20 dB + good fading: OFDM_CHIRP R2/3 (~3200 bps)
+// - SNR >= 15 dB + good fading: OFDM_CHIRP R1/2 (~2300 bps)
 // - Moderate+ fading (>= 0.65): R1/4 only (~1150 bps)
-// - R3/4: Broken (LDPC issue), do not use
 //
 // Calibrated fading thresholds:
 //   < 0.15: True AWGN, < 0.65: Good, >= 0.65: Moderate+
@@ -74,21 +80,24 @@ inline WaveformRecommendation recommendWaveformAndRate(float snr_db, float fadin
         // True AWGN (no fading)
         rec.waveform = WaveformMode::OFDM_CHIRP;
         rec.rate = selectOFDMCodeRate(snr_db, fading_index);
-        rec.estimated_throughput_bps = (rec.rate == CodeRate::R2_3) ? 3200.0f :
+        rec.estimated_throughput_bps = (rec.rate == CodeRate::R3_4) ? 3900.0f :
+                                       (rec.rate == CodeRate::R2_3) ? 3200.0f :
                                        (rec.rate == CodeRate::R1_2) ? 2300.0f : 1150.0f;
     }
     else if (fading_index < 1.10f && snr_db >= 12.0f) {
         // Good-to-moderate fading: OFDM_CHIRP
         rec.waveform = WaveformMode::OFDM_CHIRP;
         rec.rate = selectOFDMCodeRate(snr_db, fading_index);
-        rec.estimated_throughput_bps = (rec.rate == CodeRate::R2_3) ? 3200.0f :
+        rec.estimated_throughput_bps = (rec.rate == CodeRate::R3_4) ? 3900.0f :
+                                       (rec.rate == CodeRate::R2_3) ? 3200.0f :
                                        (rec.rate == CodeRate::R1_2) ? 2300.0f : 1150.0f;
     }
     else if (snr_db >= 11.0f) {
         // Heavy fading or borderline SNR: OFDM_CHIRP R1/4 still viable
         rec.waveform = WaveformMode::OFDM_CHIRP;
         rec.rate = selectOFDMCodeRate(snr_db, fading_index);
-        rec.estimated_throughput_bps = (rec.rate == CodeRate::R2_3) ? 3200.0f :
+        rec.estimated_throughput_bps = (rec.rate == CodeRate::R3_4) ? 3900.0f :
+                                       (rec.rate == CodeRate::R2_3) ? 3200.0f :
                                        (rec.rate == CodeRate::R1_2) ? 2300.0f : 1150.0f;
     }
     else {

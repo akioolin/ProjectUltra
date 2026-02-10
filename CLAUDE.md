@@ -112,7 +112,8 @@
 - OFDM_CHIRP QPSK R2/3 AWGN: WORKING - 100% at SNR=20 (0 retries)
 - OFDM_CHIRP QPSK R2/3 Good fading: WORKING - 5/5 seeds PASS (2 seeds had retx, 3 clean)
 - OFDM_CHIRP Moderate fading: WORKING - R1/4 89% CW success (57/64), 100% message delivery via ARQ
-- OFDM_CHIRP R3/4: Broken (LDPC issue). Do not use.
+- OFDM_CHIRP DQPSK R3/4 AWGN: WORKING - 100% at SNR=20 (10/10 seeds, 0 retries)
+- OFDM_CHIRP DQPSK R3/4 Good fading: NOT RECOMMENDED (23 retx / 5 seeds — AWGN only)
 - 1-CW ACK frames: WORKING - control frames use 1 CW (3x faster ACK)
 - Variable-CW frames: WORKING - CONNECT/DISCONNECT use exact CW count (2 at R1/2, 3 at R1/4)
 - OFDM_COX: WORKING - DATA phase passes at SNR=20 dB
@@ -122,8 +123,9 @@
 **Auto rate selection ladder (2026-02-10):**
 | Condition | Auto rate | Payload/frame | Throughput |
 |-----------|-----------|---------------|------------|
-| SNR >= 20, fading < 0.65 (good+) | **R2/3** | 197 bytes | ~3200 bps |
-| SNR >= 15, fading < 0.65 (good+) | **R1/2** | 141 bytes | ~2300 bps |
+| SNR >= 20, AWGN (fading < 0.15) | **R3/4** | 243 bytes | ~3900 bps |
+| SNR >= 20, good fading (< 0.65) | **R2/3** | 197 bytes | ~3200 bps |
+| SNR >= 15, good fading (< 0.65) | **R1/2** | 141 bytes | ~2300 bps |
 | Everything else | **R1/4** | 62 bytes | ~1150 bps |
 
 **Temporal fading measurement (2026-02-03):**
@@ -175,10 +177,10 @@
 - Proper DD-domain equalization is research-level complexity (sparse channel estimation + iterative detection)
 
 **Recommendation:** Use OFDM_CHIRP with DQPSK. Rate selection is automatic via `selectOFDMCodeRate()`:
-- R2/3 for good fading or better (SNR≥20) — ~2.8× throughput vs R1/4, 40% over R1/2
+- R3/4 for AWGN only (SNR≥20, fading<0.15) — ~3.4× throughput vs R1/4
+- R2/3 for good fading or better (SNR≥20) — ~2.8× throughput vs R1/4
 - R1/2 for good fading or better (SNR≥15) — ~2× throughput vs R1/4
 - R1/4 for moderate fading or lower SNR — robust but slower
-- R3/4 is broken (LDPC issue). Do not use.
 OTFS is parked - would need significant research effort to implement proper DD-domain equalization.
 
 **FFTW requirement:**
