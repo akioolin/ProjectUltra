@@ -17,6 +17,8 @@
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "fec/frame_interleaver.hpp"  // Frame-level interleaving for 4-CW frames
 #include "fec/burst_interleaver.hpp"  // Burst-level long interleaver (4-frame groups)
+#include "ultra/fec.hpp"              // LDPCDecoder for robust single-CW decode
+#include "fec/ldpc_codec.hpp"         // getRecommendedIterations
 #include "ultra/logging.hpp"
 #include <algorithm>
 #include <chrono>
@@ -518,6 +520,37 @@ void StreamingDecoder::checkIfReadyToDecode() {
     }
 }
 
+// Robust single-CW LDPC decode with Phase 0 decoder diversity (4 retry attempts)
+// Uses standalone LDPCDecoder for setMinSumFactor (not available via ICodec interface)
+// Pattern matches decodeFixedFrame() Phase 0 (frame_v2.cpp:1378-1395)
+static std::pair<bool, Bytes> robustDecodeSingleCW(
+    const float* cw_data, size_t cw_size, CodeRate rate, const char* log_prefix = nullptr)
+{
+    LDPCDecoder decoder(rate);
+    decoder.setMaxIterations(fec::LDPCCodec::getRecommendedIterations(rate));
+    decoder.setMinSumFactor(0.9375f);
+
+    auto decoded = decoder.decodeSoft(std::span<const float>(cw_data, cw_size));
+    bool ok = decoder.lastDecodeSuccess();
+
+    if (!ok) {
+        static constexpr float factors[] = {0.875f, 0.75f, 0.625f, 0.5f};
+        for (int retry = 0; retry < 4 && !ok; retry++) {
+            decoder.setMinSumFactor(factors[retry]);
+            decoded = decoder.decodeSoft(std::span<const float>(cw_data, cw_size));
+            ok = decoder.lastDecodeSuccess();
+            if (ok && log_prefix) {
+                LOG_MODEM(INFO, "[%s] Robust CW0: RETRY OK (factor=%.3f, iters=%d)",
+                          log_prefix, factors[retry], decoder.lastIterations());
+            }
+        }
+    }
+
+    Bytes data;
+    if (ok) data.assign(decoded.begin(), decoded.end());
+    return {ok, data};
+}
+
 void StreamingDecoder::decodeCurrentFrame() {
     if (!waveform_) {
         state_ = DecoderState::SEARCHING;
@@ -770,9 +803,8 @@ void StreamingDecoder::decodeCurrentFrame() {
         CodeRate peek_rate = connected_ ? code_rate_ : CodeRate::R1_4;
         size_t peek_bytes_per_cw = v2::getBytesPerCodeword(peek_rate);
 
-        std::vector<float> cw0(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
-        codec_->setRate(peek_rate);
-        auto [peek_ok, peek_data] = codec_->decode(cw0);
+        auto [peek_ok, peek_data] = robustDecodeSingleCW(
+            soft_bits.data(), LDPC_BLOCK, peek_rate, log_prefix_.c_str());
 
         if (peek_ok && peek_data.size() >= 4
             && peek_data[0] == 0x55 && peek_data[1] == 0x4C) {
@@ -816,7 +848,7 @@ void StreamingDecoder::decodeCurrentFrame() {
     // degraded LLR quality. Retry with 1-CW peek to determine actual size.
     // ========================================================================
 
-    if (!result.success && is_ofdm && connected_ && pending_total_cw_ == 0) {
+    if (!result.success && is_ofdm && connected_) {
         size_t one_cw_s = static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
         if (one_cw_s <= frame_buffer.size()) {
             waveform_->setFrequencyOffset(sync_cfo_);
@@ -824,9 +856,8 @@ void StreamingDecoder::decodeCurrentFrame() {
             auto short_bits = waveform_->getSoftBits();
 
             if (short_bits.size() >= LDPC_BLOCK) {
-                std::vector<float> cw0_short(short_bits.begin(), short_bits.begin() + LDPC_BLOCK);
-                codec_->setRate(rate);
-                auto [ok2, data2] = codec_->decode(cw0_short);
+                auto [ok2, data2] = robustDecodeSingleCW(
+                    short_bits.data(), LDPC_BLOCK, rate, log_prefix_.c_str());
 
                 if (ok2 && data2.size() >= 4 && data2[0] == 0x55 && data2[1] == 0x4C) {
                     auto hdr2 = v2::parseHeader(data2);
@@ -1448,8 +1479,8 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     // Control frames (ACK etc.) are never channel-interleaved, so probe without it.
     // If this is a 4-CW data frame (which IS interleaved), CW0 will likely fail here
     // and we'll fall through to decodeFixedFrame() which handles deinterleaving internally.
-    std::vector<float> cw0_bits(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
-    auto [ok0, data0] = codec_->decode(cw0_bits);
+    auto [ok0, data0] = robustDecodeSingleCW(
+        soft_bits.data(), LDPC_BLOCK, rate, log_prefix_.c_str());
 
     bool try_frame_interleave = false;
 
@@ -1527,6 +1558,28 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
         } else {
             LOG_MODEM(DEBUG, "[%s] Frame deinterleave decode FAILED (%d/%d CWs)",
                       log_prefix_.c_str(), result.codewords_ok, v2::FIXED_FRAME_CODEWORDS);
+
+            // Step 2b: If frame deinterleave failed, check if it's a 1-CW control frame
+            // Catches ACK frames that were escalated to 4-CW by a failed peek
+            {
+                auto [rec_ok, rec_data] = robustDecodeSingleCW(
+                    soft_bits.data(), LDPC_BLOCK, rate, log_prefix_.c_str());
+                if (rec_ok && rec_data.size() >= 2
+                    && rec_data[0] == 0x55 && rec_data[1] == 0x4C) {
+                    if (rec_data.size() > bytes_per_cw) rec_data.resize(bytes_per_cw);
+                    auto hdr = v2::parseHeader(rec_data);
+                    if (hdr.valid && hdr.total_cw == 1) {
+                        LOG_MODEM(INFO, "[%s] Salvaged 1-CW control from 4-CW path",
+                                  log_prefix_.c_str());
+                        result.success = true;
+                        result.codewords_ok = 1;
+                        result.codewords_failed = 0;
+                        result.frame_data = rec_data;
+                        result.frame_type = hdr.type;
+                        return result;
+                    }
+                }
+            }
         }
     }
 
