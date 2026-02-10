@@ -225,6 +225,7 @@ public:
     void connect(const std::string& remote) { protocol_.connect(remote); }
     void disconnect() { protocol_.disconnect(); }
     void sendMessage(const std::string& msg) { protocol_.sendMessage(msg); }
+    void sendMessages(const std::vector<std::string>& msgs) { protocol_.sendMessages(msgs); }
     bool isConnected() const { return connected_; }
     bool isHandshakeComplete() const { return handshake_complete_; }
     bool isReadyToSend() { return protocol_.isReadyToSend(); }
@@ -854,6 +855,8 @@ public:
             std::lock_guard<std::mutex> lock(msg_mutex_);
             received_message_ = msg;
             message_received_ = true;
+            received_messages_.push_back(msg);
+            messages_received_count_.store(static_cast<int>(received_messages_.size()));
         });
 
         // Setup file received callback on BRAVO
@@ -919,6 +922,8 @@ private:
     std::mutex msg_mutex_;
     std::string received_message_;
     std::atomic<bool> message_received_{false};
+    std::vector<std::string> received_messages_;  // For batch receive
+    std::atomic<int> messages_received_count_{0};
 
     // File transfer state
     std::string received_file_path_;
@@ -945,7 +950,7 @@ private:
         }
         std::cout << "  \033[32m✓ Handshake complete!\033[0m\n";
 
-        // Phase 3: Send 5 short + 2 long messages
+        // Phase 3: Send 5 short + 2 long messages as a burst
         std::cout << "\n=== PHASE 3: DATA TRANSFER (7 messages) ===\n";
 
         std::vector<std::string> test_messages;
@@ -961,34 +966,47 @@ private:
             "The quick brown fox jumps over the lazy dog. 73 de ALPHA.");
 
         int total = static_cast<int>(test_messages.size());
-        for (int msg_num = 0; msg_num < total; msg_num++) {
-            const std::string& test_msg = test_messages[msg_num];
 
-            if (!waitFor([this]{ return alpha_->isReadyToSend(); }, 30)) {
-                std::cout << "  \033[31m✗ ARQ not ready for message " << (msg_num+1) << "!\033[0m\n";
-                return false;
-            }
+        if (!waitFor([this]{ return alpha_->isReadyToSend(); }, 30)) {
+            std::cout << "  \033[31m✗ ARQ not ready!\033[0m\n";
+            return false;
+        }
 
-            // Reset received flag before sending
-            message_received_.store(false);
+        // Clear received state
+        {
+            std::lock_guard<std::mutex> lock(msg_mutex_);
+            received_messages_.clear();
+            messages_received_count_.store(0);
+        }
 
-            std::cout << "  [" << (msg_num+1) << "/" << total << "] Sending (" << test_msg.size() << "b): \"" << test_msg << "\"\n";
-            alpha_->sendMessage(test_msg);
+        // Batch-send all messages (burst-interleaved)
+        for (int i = 0; i < total; i++) {
+            std::cout << "  [" << (i+1) << "/" << total << "] Queuing (" << test_messages[i].size() << "b): \"" << test_messages[i] << "\"\n";
+        }
+        alpha_->sendMessages(test_messages);
+        std::cout << "  Sent " << total << " messages as burst\n";
 
-            if (!waitFor([this]{ return message_received_.load(); }, 60)) {
-                std::cout << "  \033[31m✗ Message " << (msg_num+1) << " not received!\033[0m\n";
-                return false;
-            }
+        // Wait for all messages to arrive
+        if (!waitFor([this, total]{ return messages_received_count_.load() >= total; }, 120)) {
+            int got = messages_received_count_.load();
+            std::cout << "  \033[31m✗ Only received " << got << "/" << total << " messages!\033[0m\n";
+            return false;
+        }
 
-            {
-                std::lock_guard<std::mutex> lock(msg_mutex_);
-                if (received_message_ == test_msg) {
-                    std::cout << "  \033[32m✓ [" << (msg_num+1) << "/" << total << "] Received (" << received_message_.size() << "b): \"" << received_message_ << "\"\033[0m\n";
+        // Verify all messages
+        {
+            std::lock_guard<std::mutex> lock(msg_mutex_);
+            bool all_ok = true;
+            for (int i = 0; i < total; i++) {
+                if (i < static_cast<int>(received_messages_.size()) && received_messages_[i] == test_messages[i]) {
+                    std::cout << "  \033[32m✓ [" << (i+1) << "/" << total << "] Received (" << received_messages_[i].size() << "b): \"" << received_messages_[i] << "\"\033[0m\n";
                 } else {
-                    std::cout << "  \033[31m✗ Message " << (msg_num+1) << " corrupted! Got: \"" << received_message_ << "\"\033[0m\n";
-                    return false;
+                    std::string got = (i < static_cast<int>(received_messages_.size())) ? received_messages_[i] : "(missing)";
+                    std::cout << "  \033[31m✗ Message " << (i+1) << " mismatch! Got: \"" << got << "\"\033[0m\n";
+                    all_ok = false;
                 }
             }
+            if (!all_ok) return false;
         }
 
         std::cout << "  \033[32m✓ All " << total << " messages transferred successfully!\033[0m\n";

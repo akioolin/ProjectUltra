@@ -118,6 +118,11 @@ bool ProtocolEngine::sendMessage(const std::string& text) {
     return connection_.sendMessage(text);
 }
 
+bool ProtocolEngine::sendMessages(const std::vector<std::string>& texts) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return connection_.sendMessages(texts);
+}
+
 bool ProtocolEngine::isReadyToSend() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return connection_.isReadyToSend();

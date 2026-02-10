@@ -100,6 +100,7 @@ public:
     // --- Data Transfer ---
 
     bool sendMessage(const std::string& text);
+    bool sendMessages(const std::vector<std::string>& texts);  // Batch: burst-interleaved
     bool isReadyToSend() const;
 
     // --- File Transfer ---
@@ -257,6 +258,7 @@ private:
 
     // Message fragmentation (TX) - splits long messages across multiple ARQ frames
     std::vector<Bytes> pending_tx_fragments_;
+    std::vector<uint8_t> pending_tx_fragment_flags_;  // Per-fragment flags (for sendMessages batch)
     size_t next_fragment_idx_ = 0;
 
     // Message reassembly (RX) - accumulates fragments into complete messages

@@ -59,6 +59,7 @@ public:
     // --- Data Transfer ---
 
     bool sendMessage(const std::string& text);
+    bool sendMessages(const std::vector<std::string>& texts);  // Batch: burst-interleaved
     bool isReadyToSend() const;
 
     // --- File Transfer ---
