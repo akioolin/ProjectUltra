@@ -673,7 +673,7 @@ ConnectFrame ConnectFrame::makeDisconnect(const std::string& src, const std::str
     ConnectFrame f;
     f.type = FrameType::DISCONNECT;
     f.flags = Flags::VERSION_V2;
-    f.seq = 0;
+    f.seq = DISCONNECT_SEQ;  // Unique seq to distinguish from data ACKs
     f.src_hash = hashCallsign(src);
     f.dst_hash = hashCallsign(dst);
 

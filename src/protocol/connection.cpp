@@ -561,8 +561,12 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                     break;
                 case v2::FrameType::ACK:
                     if (state_ == ConnectionState::DISCONNECTING) {
-                        LOG_MODEM(INFO, "Connection: Disconnect acknowledged");
-                        enterDisconnected("Disconnect complete");
+                        if (ctrl->seq == v2::DISCONNECT_SEQ) {
+                            LOG_MODEM(INFO, "Connection: Disconnect acknowledged (seq=0x%04X)", ctrl->seq);
+                            enterDisconnected("Disconnect complete");
+                        } else {
+                            LOG_MODEM(DEBUG, "Connection: Ignoring stale data ACK seq=%d while disconnecting", ctrl->seq);
+                        }
                     } else if (state_ == ConnectionState::CONNECTED) {
                         // Check if this ACK is for our pending MODE_CHANGE
                         if (mode_change_pending_ && ctrl->seq == mode_change_seq_) {

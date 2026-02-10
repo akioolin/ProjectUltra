@@ -669,6 +669,7 @@ inline uint8_t getDataCodewordIndex(const Bytes& data) {
 
 // Fixed frame constants
 constexpr int FIXED_FRAME_CODEWORDS = 4;
+constexpr uint16_t DISCONNECT_SEQ = 0xFFFF;  // Unique seq for DISCONNECT (won't collide with ARQ 0-based seqs)
 constexpr int FIXED_FRAME_OVERHEAD = DataFrame::HEADER_SIZE + DataFrame::CRC_SIZE;  // 17 + 2 = 19 bytes
 
 /**
