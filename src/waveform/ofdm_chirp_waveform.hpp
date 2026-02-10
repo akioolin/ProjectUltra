@@ -99,6 +99,9 @@ public:
     // Burst interleave marker: true if last detectDataSync() found negated LTS
     bool wasBurstInterleaved() const override { return burst_interleave_latched_; }
 
+    // Pilot spacing for interleaver geometry
+    int getPilotSpacing() const override { return config_.pilot_spacing; }
+
     // Get internal config
     const ModemConfig& getConfig() const { return config_; }
 

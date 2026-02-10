@@ -91,6 +91,9 @@ public:
     // OFDM-COX Specific
     // ========================================================================
 
+    // Pilot spacing for interleaver geometry
+    int getPilotSpacing() const override { return config_.pilot_spacing; }
+
     // Get internal config
     const ModemConfig& getConfig() const { return config_; }
 

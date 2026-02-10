@@ -10,6 +10,38 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-02-10: Fix coherent pilot/interleaver geometry mismatch
+
+**What was broken:**
+- QPSK R1/2 on good fading averaged 86.4% first-attempt frame success (30-seed survey).
+- The channel interleaver in both encoder and decoder assumed `pilot_spacing=10` (53 data carriers,
+  106 bits/symbol) regardless of modulation, but `OFDMChirpWaveform::configurePilotsForCodeRate()`
+  sets `pilot_spacing=5` (47 data carriers, 94 bits/symbol) for QPSK/BPSK coherent modes.
+- Since TX and RX were consistently wrong, data decoded — but the interleaver's symbol-boundary
+  assumptions were misaligned with physical OFDM symbols, reducing frequency diversity.
+
+**Root cause:**
+- Encoder: `createWaveform()` calls `configure(mod, rate)` which updates the waveform's internal
+  pilot_spacing, but never synced this back to `ofdm_config_.pilot_spacing`. The `setDataMode()`
+  early-return (when mod/rate unchanged) prevented the fix from running via that path.
+- Decoder: `setDataMode()` hardcoded a rate-only switch for pilot_spacing, ignoring modulation.
+
+**Files modified:**
+- `src/waveform/waveform_interface.hpp` — Added `virtual int getPilotSpacing() const { return 0; }`
+- `src/waveform/ofdm_chirp_waveform.hpp` — Override returning `config_.pilot_spacing`
+- `src/waveform/ofdm_cox_waveform.hpp` — Override returning `config_.pilot_spacing`
+- `src/gui/modem/streaming_encoder.cpp` — Sync pilot_spacing from waveform in `createWaveform()`
+  and `setDataMode()` (after `waveform_->configure()`)
+- `src/gui/modem/streaming_decoder.cpp` — Query `waveform_->getPilotSpacing()` in `setDataMode()`
+  and `getConfig()` instead of hardcoded values
+
+**Test verification:**
+- QPSK R1/2 AWGN SNR=20: PASSED (100%, 0 retransmissions)
+- DQPSK R1/4 fading SNR=15: PASSED (100%, 0 retransmissions)
+- QPSK R1/2 fading SNR=20 (5 seeds 42-46): avg 93.3% first-attempt (up from 86.4%)
+
+---
+
 ## 2026-02-09: Burst-level long interleaver for OFDM_CHIRP
 
 **What was added:**

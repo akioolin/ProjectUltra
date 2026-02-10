@@ -1052,17 +1052,15 @@ void StreamingDecoder::setDataMode(Modulation mod, CodeRate rate) {
     if (waveform_) waveform_->configure(mod, rate);
 
     // After configure(), the waveform has updated pilot config
-    // Recalculate data carriers based on new code rate's pilot requirement
+    // Query waveform for actual pilot_spacing (coherent modes use denser pilots)
     if (mode_ != protocol::WaveformMode::MC_DPSK && waveform_) {
-        // Calculate pilot count to match OFDMChirpWaveform::configurePilotsForCodeRate()
-        // ALL code rates now use pilots for per-symbol channel tracking on fading
-        int pilot_spacing = 0;
-        switch (rate) {
-            case CodeRate::R3_4: pilot_spacing = 15; break;  // ~4 pilots
-            default: pilot_spacing = 10; break;  // R2/3, R1/2, R1/4: 6 pilots
+        int pilot_spacing = waveform_->getPilotSpacing();
+        if (pilot_spacing > 0) {
+            int pilot_count = (ofdm_carriers_ + pilot_spacing - 1) / pilot_spacing;
+            ofdm_data_carriers_ = ofdm_carriers_ - pilot_count;
+        } else {
+            ofdm_data_carriers_ = ofdm_carriers_;
         }
-        int pilot_count = (ofdm_carriers_ + pilot_spacing - 1) / pilot_spacing;
-        ofdm_data_carriers_ = ofdm_carriers_ - pilot_count;
     }
 
     // Update interleaver for new modulation
@@ -1107,10 +1105,9 @@ StreamingDecoder::DecoderConfig StreamingDecoder::getConfig() const {
     cfg.data_carriers = ofdm_data_carriers_;
     cfg.bits_per_symbol = ofdm_data_carriers_ * getBitsPerSymbol(current_modulation_);
 
-    // Get pilot config from the OFDM config if we have a waveform
-    // Note: These defaults match OFDMChirpWaveform with 59 carriers, spacing 10
+    // Get pilot config from waveform (coherent modes use denser pilots)
     cfg.use_pilots = true;
-    cfg.pilot_spacing = 10;
+    cfg.pilot_spacing = waveform_ ? waveform_->getPilotSpacing() : 10;
 
     // Interleaving settings
     cfg.use_channel_interleave = use_channel_interleave_;

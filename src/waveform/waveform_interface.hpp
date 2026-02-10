@@ -175,6 +175,9 @@ public:
     // Status string for GUI (e.g., "MC-DPSK 8 carriers @ 375 bps")
     virtual std::string getStatusString() const = 0;
 
+    // Pilot spacing (0 = no pilots). Used by encoder/decoder to compute data carrier count.
+    virtual int getPilotSpacing() const { return 0; }
+
     // Number of carriers (for multi-carrier modes)
     virtual int getCarrierCount() const = 0;
 

@@ -68,6 +68,9 @@ void StreamingEncoder::setDataMode(Modulation mod, CodeRate rate) {
     // Update waveform configuration
     if (waveform_) {
         waveform_->configure(mod, rate);
+        // Sync pilot_spacing from waveform (coherent modes use denser pilots)
+        int spacing = waveform_->getPilotSpacing();
+        if (spacing > 0) ofdm_config_.pilot_spacing = spacing;
     }
 
     // Update interleaver (bits_per_symbol may change with modulation)
@@ -391,6 +394,13 @@ void StreamingEncoder::createWaveform() {
             static_cast<OFDMChirpWaveform*>(waveform_.get())->configure(
                 modulation_, code_rate_);
             break;
+    }
+
+    // Sync pilot_spacing from waveform after configure()
+    // (coherent modes like QPSK use denser pilots than the config may specify)
+    if (waveform_) {
+        int spacing = waveform_->getPilotSpacing();
+        if (spacing > 0) ofdm_config_.pilot_spacing = spacing;
     }
 
     LOG_MODEM(DEBUG, "[%s] Created waveform: %s",
