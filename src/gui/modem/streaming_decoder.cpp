@@ -228,7 +228,7 @@ void StreamingDecoder::searchForSync() {
     // - Light sync (connected, LTS): needs only ~24k samples (LTS is ~1024 samples)
     // Using a smaller buffer when connected cuts per-hop latency from ~2.8s to <1s
     constexpr size_t CHIRP_MAX_SEARCH = 120000;   // ~2.5s for dual chirp detection
-    constexpr size_t LIGHT_SEARCH_SIZE = 24000;    // ~0.5s for LTS detection
+    constexpr size_t LIGHT_SEARCH_SIZE = 12000;    // ~0.25s for LTS detection (ACK frame ~10368 samples)
 
     size_t chirp_min_search = std::min(preamble + 65000, CHIRP_MAX_SEARCH);
     bool use_light_search = connected_ && waveform_->supportsDataPreamble();
@@ -500,8 +500,14 @@ void StreamingDecoder::checkIfReadyToDecode() {
         // We know exact CW count from CW0 peek — get exact sample count
         needed = static_cast<size_t>(waveform_->getMinSamplesForCWCount(pending_total_cw_));
     } else if (is_ofdm_here && connected_) {
-        // Connected OFDM: expect full 4-CW data frames
-        needed = static_cast<size_t>(waveform_->getMinSamplesForFrame());
+        // Burst-interleaved frames MUST use full 4-CW buffer (marker is one-shot consumed by process())
+        bool burst_latched = use_burst_interleave_ && waveform_ && waveform_->wasBurstInterleaved();
+        if (!burst_latched) {
+            // 1-CW peek first — escalate to 4-CW if CW0 indicates data frame
+            needed = static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
+        } else {
+            needed = static_cast<size_t>(waveform_->getMinSamplesForFrame());
+        }
     } else {
         // MC-DPSK or disconnected: 1-CW minimum for header peek
         needed = static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
@@ -531,9 +537,13 @@ void StreamingDecoder::decodeCurrentFrame() {
     if (pending_total_cw_ > 0) {
         frame_len = static_cast<size_t>(waveform_->getMinSamplesForCWCount(pending_total_cw_));
     } else if (is_ofdm && connected_) {
-        // Connected OFDM: expect 4-CW data frames (frame-interleaved, can't peek CW0)
-        // If it turns out to be a smaller frame, we'll retry with smaller buffer
-        frame_len = static_cast<size_t>(waveform_->getMinSamplesForFrame());
+        // Burst-interleaved frames use full 4-CW buffer; otherwise 1-CW peek first
+        bool burst_latched = use_burst_interleave_ && waveform_ && waveform_->wasBurstInterleaved();
+        if (!burst_latched) {
+            frame_len = static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
+        } else {
+            frame_len = static_cast<size_t>(waveform_->getMinSamplesForFrame());
+        }
     } else {
         // MC-DPSK or disconnected: 1-CW peek
         frame_len = static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
@@ -745,6 +755,54 @@ void StreamingDecoder::decodeCurrentFrame() {
                     return;
                 }
             }
+        }
+    }
+
+    // ========================================================================
+    // CW0 peek for connected OFDM (1-CW initial buffer)
+    // Control frames (ACK/NACK) are 1-CW, non-interleaved → decode directly.
+    // Data frames are 4-CW frame-interleaved → CW0 probe fails → escalate.
+    // Skipped when burst interleave marker is latched (full buffer used instead).
+    // ========================================================================
+    if (pending_total_cw_ == 0 && is_ofdm && connected_
+        && soft_bits.size() >= LDPC_BLOCK && soft_bits.size() < 2 * LDPC_BLOCK) {
+
+        CodeRate peek_rate = connected_ ? code_rate_ : CodeRate::R1_4;
+        size_t peek_bytes_per_cw = v2::getBytesPerCodeword(peek_rate);
+
+        std::vector<float> cw0(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
+        codec_->setRate(peek_rate);
+        auto [peek_ok, peek_data] = codec_->decode(cw0);
+
+        if (peek_ok && peek_data.size() >= 4
+            && peek_data[0] == 0x55 && peek_data[1] == 0x4C) {
+            if (peek_data.size() > peek_bytes_per_cw) peek_data.resize(peek_bytes_per_cw);
+            auto hdr = v2::parseHeader(peek_data);
+            if (hdr.valid && hdr.total_cw == 1) {
+                // 1-CW control frame — fall through to decodeFrame()
+                LOG_MODEM(DEBUG, "[%s] OFDM CW0 peek: 1-CW control frame", log_prefix_.c_str());
+            } else if (hdr.valid && hdr.total_cw > 1) {
+                // Multi-CW frame — need more samples
+                pending_total_cw_ = hdr.total_cw;
+                state_ = DecoderState::SYNC_FOUND;
+                LOG_MODEM(INFO, "[%s] OFDM CW0 peek: need %d CWs, escalating",
+                          log_prefix_.c_str(), hdr.total_cw);
+                return;
+            } else {
+                // Header invalid — assume 4-CW interleaved
+                pending_total_cw_ = v2::FIXED_FRAME_CODEWORDS;
+                state_ = DecoderState::SYNC_FOUND;
+                LOG_MODEM(INFO, "[%s] OFDM CW0 peek: invalid header, escalating to 4 CWs",
+                          log_prefix_.c_str());
+                return;
+            }
+        } else {
+            // CW0 decode failed — likely frame-interleaved data
+            pending_total_cw_ = v2::FIXED_FRAME_CODEWORDS;  // 4
+            state_ = DecoderState::SYNC_FOUND;
+            LOG_MODEM(INFO, "[%s] OFDM CW0 peek: decode failed, escalating to %d CWs",
+                      log_prefix_.c_str(), pending_total_cw_);
+            return;
         }
     }
 

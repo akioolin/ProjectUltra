@@ -260,6 +260,7 @@ private:
     std::vector<Bytes> pending_tx_fragments_;
     std::vector<uint8_t> pending_tx_fragment_flags_;  // Per-fragment flags (for sendMessages batch)
     size_t next_fragment_idx_ = 0;
+    size_t acked_fragment_count_ = 0;  // Actual ACKs received (vs next_fragment_idx_ = submitted)
 
     // Message reassembly (RX) - accumulates fragments into complete messages
     Bytes rx_reassembly_buffer_;

@@ -52,21 +52,29 @@ Connection::Connection(const ConnectionConfig& config)
                 pending_tx_fragments_.clear();
                 pending_tx_fragment_flags_.clear();
                 next_fragment_idx_ = 0;
+                acked_fragment_count_ = 0;
                 if (on_message_sent_) {
                     on_message_sent_(false);
                 }
-            } else if (next_fragment_idx_ < pending_tx_fragments_.size()) {
-                // More fragments to send
-                sendNextFragment();
             } else {
-                // All fragments ACKed
-                LOG_MODEM(INFO, "Connection: All %zu fragments sent and ACKed",
-                          pending_tx_fragments_.size());
-                pending_tx_fragments_.clear();
-                pending_tx_fragment_flags_.clear();
-                next_fragment_idx_ = 0;
-                if (on_message_sent_) {
-                    on_message_sent_(true);
+                acked_fragment_count_++;
+
+                if (next_fragment_idx_ < pending_tx_fragments_.size()) {
+                    // More fragments to submit to ARQ
+                    sendNextFragment();
+                }
+
+                if (acked_fragment_count_ >= pending_tx_fragments_.size()) {
+                    // ALL fragments truly ACKed
+                    LOG_MODEM(INFO, "Connection: All %zu fragments sent and ACKed",
+                              pending_tx_fragments_.size());
+                    pending_tx_fragments_.clear();
+                    pending_tx_fragment_flags_.clear();
+                    next_fragment_idx_ = 0;
+                    acked_fragment_count_ = 0;
+                    if (on_message_sent_) {
+                        on_message_sent_(true);
+                    }
                 }
             }
         } else {
@@ -274,6 +282,7 @@ bool Connection::sendMessage(const std::string& text) {
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
     next_fragment_idx_ = 0;
+    acked_fragment_count_ = 0;
 
     for (size_t offset = 0; offset < data.size(); offset += capacity) {
         size_t chunk_size = std::min(capacity, data.size() - offset);
@@ -300,6 +309,7 @@ bool Connection::sendMessages(const std::vector<std::string>& texts) {
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
     next_fragment_idx_ = 0;
+    acked_fragment_count_ = 0;
 
     for (const auto& text : texts) {
         Bytes data(text.begin(), text.end());
@@ -817,6 +827,7 @@ void Connection::enterDisconnected(const std::string& reason) {
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
     next_fragment_idx_ = 0;
+    acked_fragment_count_ = 0;
     rx_reassembly_buffer_.clear();
 
     // Reset connect waveform to DPSK for next connection attempt
@@ -934,6 +945,7 @@ void Connection::reset() {
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
     next_fragment_idx_ = 0;
+    acked_fragment_count_ = 0;
     rx_reassembly_buffer_.clear();
     LOG_MODEM(DEBUG, "Connection: Full reset");
 }

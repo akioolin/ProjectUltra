@@ -716,6 +716,7 @@ private:
 
     // THE AUDIO LOOP - like a real sound card callback
     void audioLoop() {
+        ultra::setLogStationTag(callsign_.c_str());
         auto next_callback = std::chrono::steady_clock::now();
         int callback_count = 0;
 
@@ -777,6 +778,7 @@ private:
     // DECODE THREAD - like the real ModemEngine::rxDecodeLoop()
     // Runs independently from audio feed, just like a real sound card + decoder
     void decodeLoop() {
+        ultra::setLogStationTag(callsign_.c_str());
         while (running_) {
             if (decoder_) {
                 // processBuffer() blocks until data is available (via condition variable)

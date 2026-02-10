@@ -19,6 +19,11 @@ inline auto g_log_start_time = std::chrono::steady_clock::now();
 inline FILE* g_log_file = nullptr;
 inline std::mutex g_log_mutex;
 
+// Thread-local station tag for multi-station debug (e.g. "ALPHA" or "BRAVO")
+inline thread_local const char* g_log_station_tag = nullptr;
+
+inline void setLogStationTag(const char* tag) { g_log_station_tag = tag; }
+
 // Log levels
 enum class LogLevel {
     NONE = 0,
@@ -82,7 +87,11 @@ inline void log(LogLevel level, const char* category, const char* format, ...) {
         default: break;
     }
 
-    fprintf(out, "[%3d.%03d][%s][%s] ", secs, ms, level_str, category);
+    if (g_log_station_tag && g_log_station_tag[0]) {
+        fprintf(out, "[%3d.%03d][%s][%s] [%s] ", secs, ms, level_str, category, g_log_station_tag);
+    } else {
+        fprintf(out, "[%3d.%03d][%s][%s] ", secs, ms, level_str, category);
+    }
 
     va_list args;
     va_start(args, format);
