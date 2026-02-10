@@ -21,6 +21,7 @@
 #include "fec/ldpc_codec.hpp"         // getRecommendedIterations
 #include "ultra/logging.hpp"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <fstream>
@@ -520,6 +521,10 @@ void StreamingDecoder::checkIfReadyToDecode() {
     }
 }
 
+// Observability counters for robust decode paths (check via debugger or periodic log)
+static std::atomic<int> g_robust_retry_hits{0};   // CW0 peek: retry succeeded after initial fail
+static std::atomic<int> g_salvage_hits{0};         // 1-CW control salvaged from 4-CW path
+
 // Robust single-CW LDPC decode with Phase 0 decoder diversity (4 retry attempts)
 // Uses standalone LDPCDecoder for setMinSumFactor (not available via ICodec interface)
 // Pattern matches decodeFixedFrame() Phase 0 (frame_v2.cpp:1378-1395)
@@ -539,9 +544,13 @@ static std::pair<bool, Bytes> robustDecodeSingleCW(
             decoder.setMinSumFactor(factors[retry]);
             decoded = decoder.decodeSoft(std::span<const float>(cw_data, cw_size));
             ok = decoder.lastDecodeSuccess();
-            if (ok && log_prefix) {
-                LOG_MODEM(INFO, "[%s] Robust CW0: RETRY OK (factor=%.3f, iters=%d)",
-                          log_prefix, factors[retry], decoder.lastIterations());
+            if (ok) {
+                g_robust_retry_hits.fetch_add(1, std::memory_order_relaxed);
+                if (log_prefix) {
+                    LOG_MODEM(INFO, "[%s] Robust CW0: RETRY OK (factor=%.3f, iters=%d, total_hits=%d)",
+                              log_prefix, factors[retry], decoder.lastIterations(),
+                              g_robust_retry_hits.load(std::memory_order_relaxed));
+                }
             }
         }
     }
@@ -1479,8 +1488,8 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     // Control frames (ACK etc.) are never channel-interleaved, so probe without it.
     // If this is a 4-CW data frame (which IS interleaved), CW0 will likely fail here
     // and we'll fall through to decodeFixedFrame() which handles deinterleaving internally.
-    auto [ok0, data0] = robustDecodeSingleCW(
-        soft_bits.data(), LDPC_BLOCK, rate, log_prefix_.c_str());
+    std::vector<float> cw0_bits(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
+    auto [ok0, data0] = codec_->decode(cw0_bits);
 
     bool try_frame_interleave = false;
 
@@ -1569,8 +1578,10 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                     if (rec_data.size() > bytes_per_cw) rec_data.resize(bytes_per_cw);
                     auto hdr = v2::parseHeader(rec_data);
                     if (hdr.valid && hdr.total_cw == 1) {
-                        LOG_MODEM(INFO, "[%s] Salvaged 1-CW control from 4-CW path",
-                                  log_prefix_.c_str());
+                        g_salvage_hits.fetch_add(1, std::memory_order_relaxed);
+                        LOG_MODEM(INFO, "[%s] Salvaged 1-CW control from 4-CW path (total_hits=%d)",
+                                  log_prefix_.c_str(),
+                                  g_salvage_hits.load(std::memory_order_relaxed));
                         result.success = true;
                         result.codewords_ok = 1;
                         result.codewords_failed = 0;
