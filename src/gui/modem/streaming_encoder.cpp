@@ -515,7 +515,9 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
     if (is_variable_cw_frame) {
         // Variable-CW encoding (no frame interleaving needed)
         // Control frames = 1 CW, Connect frames = 2 CWs at R1/2
-        auto cws = v2::encodeFrameWithLDPC(tx_data, code_rate_);
+        // Control frames always use R1/4: exact fit (20 bytes = 162 info bits / 8)
+        // and maximum LDPC redundancy for fading resilience
+        auto cws = v2::encodeFrameWithLDPC(tx_data, CodeRate::R1_4);
         uint8_t actual_cw = static_cast<uint8_t>(cws.size());
 
         // Patch total_cw for ConnectFrames (CONNECT, DISCONNECT, etc.)
@@ -545,9 +547,8 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
             encoded.insert(encoded.end(), cw.begin(), cw.end());
         }
 
-        LOG_MODEM(INFO, "[%s] OFDM control/connect: %zu bytes -> %zu CW (%zu coded bytes), rate=%d",
-                  log_prefix_.c_str(), tx_data.size(), cws.size(), encoded.size(),
-                  static_cast<int>(code_rate_));
+        LOG_MODEM(INFO, "[%s] OFDM control: %zu bytes -> %zu CW (%zu coded bytes), rate=R1/4 (hardened)",
+                  log_prefix_.c_str(), tx_data.size(), cws.size(), encoded.size());
         return encoded;
     }
 

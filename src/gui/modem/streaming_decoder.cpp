@@ -809,36 +809,61 @@ void StreamingDecoder::decodeCurrentFrame() {
     if (pending_total_cw_ == 0 && is_ofdm && connected_
         && soft_bits.size() >= LDPC_BLOCK && soft_bits.size() < 2 * LDPC_BLOCK) {
 
-        CodeRate peek_rate = connected_ ? code_rate_ : CodeRate::R1_4;
-        size_t peek_bytes_per_cw = v2::getBytesPerCodeword(peek_rate);
-
-        auto [peek_ok, peek_data] = robustDecodeSingleCW(
-            soft_bits.data(), LDPC_BLOCK, peek_rate, log_prefix_.c_str());
-
-        if (peek_ok && peek_data.size() >= 4
-            && peek_data[0] == 0x55 && peek_data[1] == 0x4C) {
-            if (peek_data.size() > peek_bytes_per_cw) peek_data.resize(peek_bytes_per_cw);
-            auto hdr = v2::parseHeader(peek_data);
-            if (hdr.valid && hdr.total_cw == 1) {
-                // 1-CW control frame — fall through to decodeFrame()
-                LOG_MODEM(DEBUG, "[%s] OFDM CW0 peek: 1-CW control frame", log_prefix_.c_str());
-            } else if (hdr.valid && hdr.total_cw > 1) {
-                // Multi-CW frame — need more samples
-                pending_total_cw_ = hdr.total_cw;
-                state_ = DecoderState::SYNC_FOUND;
-                LOG_MODEM(INFO, "[%s] OFDM CW0 peek: need %d CWs, escalating",
-                          log_prefix_.c_str(), hdr.total_cw);
-                return;
-            } else {
-                // Header invalid — assume 4-CW interleaved
-                pending_total_cw_ = v2::FIXED_FRAME_CODEWORDS;
-                state_ = DecoderState::SYNC_FOUND;
-                LOG_MODEM(INFO, "[%s] OFDM CW0 peek: invalid header, escalating to 4 CWs",
-                          log_prefix_.c_str());
-                return;
+        // Try R1/4 first — control frames are always encoded at R1/4 (hardened)
+        bool peek_fell_through = false;
+        {
+            auto [ok_r14, data_r14] = robustDecodeSingleCW(
+                soft_bits.data(), LDPC_BLOCK, CodeRate::R1_4, log_prefix_.c_str());
+            size_t bpc_r14 = v2::getBytesPerCodeword(CodeRate::R1_4);
+            if (ok_r14 && data_r14.size() >= 4
+                && data_r14[0] == 0x55 && data_r14[1] == 0x4C) {
+                if (data_r14.size() > bpc_r14) data_r14.resize(bpc_r14);
+                auto hdr = v2::parseHeader(data_r14);
+                if (hdr.valid && hdr.total_cw == 1) {
+                    LOG_MODEM(DEBUG, "[%s] OFDM CW0 peek: R1/4 control fast-path OK",
+                              log_prefix_.c_str());
+                    peek_fell_through = true;
+                } else if (hdr.valid && hdr.total_cw > 1) {
+                    pending_total_cw_ = hdr.total_cw;
+                    state_ = DecoderState::SYNC_FOUND;
+                    LOG_MODEM(INFO, "[%s] OFDM CW0 peek: R1/4 shows %d CWs, escalating",
+                              log_prefix_.c_str(), hdr.total_cw);
+                    return;
+                }
+                // else: R1/4 decoded but invalid header — try code_rate_ fallback
             }
-        } else {
-            // CW0 decode failed — likely frame-interleaved data
+        }
+
+        // Fallback: try code_rate_ if different from R1/4 and R1/4 didn't resolve
+        if (!peek_fell_through && code_rate_ != CodeRate::R1_4) {
+            size_t bpc = v2::getBytesPerCodeword(code_rate_);
+            auto [ok_fb, data_fb] = robustDecodeSingleCW(
+                soft_bits.data(), LDPC_BLOCK, code_rate_, log_prefix_.c_str());
+            if (ok_fb && data_fb.size() >= 4
+                && data_fb[0] == 0x55 && data_fb[1] == 0x4C) {
+                if (data_fb.size() > bpc) data_fb.resize(bpc);
+                auto hdr = v2::parseHeader(data_fb);
+                if (hdr.valid && hdr.total_cw == 1) {
+                    LOG_MODEM(DEBUG, "[%s] OFDM CW0 peek: 1-CW control (code_rate_ fallback)",
+                              log_prefix_.c_str());
+                    peek_fell_through = true;
+                } else if (hdr.valid && hdr.total_cw > 1) {
+                    pending_total_cw_ = hdr.total_cw;
+                    state_ = DecoderState::SYNC_FOUND;
+                    LOG_MODEM(INFO, "[%s] OFDM CW0 peek: need %d CWs, escalating",
+                              log_prefix_.c_str(), hdr.total_cw);
+                    return;
+                } else {
+                    pending_total_cw_ = v2::FIXED_FRAME_CODEWORDS;
+                    state_ = DecoderState::SYNC_FOUND;
+                    LOG_MODEM(INFO, "[%s] OFDM CW0 peek: invalid header, escalating to 4 CWs",
+                              log_prefix_.c_str());
+                    return;
+                }
+            }
+        }
+
+        if (!peek_fell_through) {
             pending_total_cw_ = v2::FIXED_FRAME_CODEWORDS;  // 4
             state_ = DecoderState::SYNC_FOUND;
             LOG_MODEM(INFO, "[%s] OFDM CW0 peek: decode failed, escalating to %d CWs",
@@ -865,15 +890,18 @@ void StreamingDecoder::decodeCurrentFrame() {
             auto short_bits = waveform_->getSoftBits();
 
             if (short_bits.size() >= LDPC_BLOCK) {
-                auto [ok2, data2] = robustDecodeSingleCW(
-                    short_bits.data(), LDPC_BLOCK, rate, log_prefix_.c_str());
-
-                if (ok2 && data2.size() >= 4 && data2[0] == 0x55 && data2[1] == 0x4C) {
+                // Try R1/4 first (control frames hardened), then code_rate_ fallback
+                auto trySmallFrame = [&](CodeRate sr) -> bool {
+                    auto [ok2, data2] = robustDecodeSingleCW(
+                        short_bits.data(), LDPC_BLOCK, sr, log_prefix_.c_str());
+                    if (!ok2 || data2.size() < 4 || data2[0] != 0x55 || data2[1] != 0x4C)
+                        return false;
                     auto hdr2 = v2::parseHeader(data2);
                     if (hdr2.valid && hdr2.total_cw == 1) {
-                        // 1-CW control frame — already decoded
+                        // 1-CW control frame — decode via decodeFrame (has R1/4 fast-path)
                         result = decodeFrame(short_bits, sync_snr_, sync_cfo_);
                         frame_len = one_cw_s;
+                        return true;
                     } else if (hdr2.valid && hdr2.total_cw > 1 && hdr2.total_cw < v2::FIXED_FRAME_CODEWORDS) {
                         // Variable-CW frame (2-3 CWs) — reprocess with exact size
                         size_t exact_size = static_cast<size_t>(
@@ -887,7 +915,13 @@ void StreamingDecoder::decodeCurrentFrame() {
                         auto recovered_bits = waveform_->getSoftBits();
                         result = decodeFrame(recovered_bits, sync_snr_, sync_cfo_);
                         frame_len = exact_size;
+                        return true;
                     }
+                    return false;
+                };
+
+                if (!trySmallFrame(CodeRate::R1_4) && rate != CodeRate::R1_4) {
+                    trySmallFrame(rate);
                 }
             }
         }
@@ -1484,6 +1518,31 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     // 3. If decode fails OR it's a 4-CW frame → try frame-interleaved decode
     // ========================================================================
 
+    // R1/4 fast-path: control frames are always encoded at R1/4 (hardened)
+    // Try R1/4 first — if it's a valid 1-CW control frame, return immediately
+    if (rate != CodeRate::R1_4 && soft_bits.size() >= LDPC_BLOCK) {
+        codec_->setRate(CodeRate::R1_4);
+        std::vector<float> cw0_r14(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
+        auto [ok_r14, data_r14] = codec_->decode(cw0_r14);
+        size_t bpc_r14 = v2::getBytesPerCodeword(CodeRate::R1_4);
+
+        if (ok_r14 && data_r14.size() >= 2
+            && data_r14[0] == 0x55 && data_r14[1] == 0x4C) {
+            if (data_r14.size() > bpc_r14) data_r14.resize(bpc_r14);
+            auto hdr_r14 = v2::parseHeader(data_r14);
+            if (hdr_r14.valid && hdr_r14.total_cw == 1) {
+                LOG_MODEM(INFO, "[%s] R1/4 control fast-path OK", log_prefix_.c_str());
+                result.success = true;
+                result.codewords_ok = 1;
+                result.frame_data = data_r14;
+                result.frame_type = hdr_r14.type;
+                return result;
+            }
+        }
+        // Restore rate for remaining decode paths
+        codec_->setRate(rate);
+    }
+
     // Step 1: Try to decode CW0 RAW (no channel deinterleave)
     // Control frames (ACK etc.) are never channel-interleaved, so probe without it.
     // If this is a 4-CW data frame (which IS interleaved), CW0 will likely fail here
@@ -1570,26 +1629,36 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
 
             // Step 2b: If frame deinterleave failed, check if it's a 1-CW control frame
             // Catches ACK frames that were escalated to 4-CW by a failed peek
+            // Try R1/4 first (control frames hardened), then code_rate_ fallback
             {
-                auto [rec_ok, rec_data] = robustDecodeSingleCW(
-                    soft_bits.data(), LDPC_BLOCK, rate, log_prefix_.c_str());
-                if (rec_ok && rec_data.size() >= 2
-                    && rec_data[0] == 0x55 && rec_data[1] == 0x4C) {
-                    if (rec_data.size() > bytes_per_cw) rec_data.resize(bytes_per_cw);
-                    auto hdr = v2::parseHeader(rec_data);
-                    if (hdr.valid && hdr.total_cw == 1) {
-                        g_salvage_hits.fetch_add(1, std::memory_order_relaxed);
-                        LOG_MODEM(INFO, "[%s] Salvaged 1-CW control from 4-CW path (total_hits=%d)",
-                                  log_prefix_.c_str(),
-                                  g_salvage_hits.load(std::memory_order_relaxed));
-                        result.success = true;
-                        result.codewords_ok = 1;
-                        result.codewords_failed = 0;
-                        result.frame_data = rec_data;
-                        result.frame_type = hdr.type;
-                        return result;
+                auto trySalvage = [&](CodeRate sr) -> bool {
+                    size_t bpc = v2::getBytesPerCodeword(sr);
+                    auto [rec_ok, rec_data] = robustDecodeSingleCW(
+                        soft_bits.data(), LDPC_BLOCK, sr, log_prefix_.c_str());
+                    if (rec_ok && rec_data.size() >= 2
+                        && rec_data[0] == 0x55 && rec_data[1] == 0x4C) {
+                        if (rec_data.size() > bpc) rec_data.resize(bpc);
+                        auto hdr = v2::parseHeader(rec_data);
+                        if (hdr.valid && hdr.total_cw == 1) {
+                            g_salvage_hits.fetch_add(1, std::memory_order_relaxed);
+                            LOG_MODEM(INFO, "[%s] Salvaged 1-CW control (rate=%d, total_hits=%d)",
+                                      log_prefix_.c_str(), static_cast<int>(sr),
+                                      g_salvage_hits.load(std::memory_order_relaxed));
+                            result.success = true;
+                            result.codewords_ok = 1;
+                            result.codewords_failed = 0;
+                            result.frame_data = rec_data;
+                            result.frame_type = hdr.type;
+                            return true;
+                        }
                     }
-                }
+                    return false;
+                };
+
+                if (trySalvage(CodeRate::R1_4))
+                    return result;
+                if (rate != CodeRate::R1_4 && trySalvage(rate))
+                    return result;
             }
         }
     }
