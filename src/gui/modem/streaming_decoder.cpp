@@ -423,6 +423,21 @@ void StreamingDecoder::searchForSync() {
 
         sync_position_ = (search_start + sync_result.start_sample) % MAX_BUFFER_SAMPLES;
 
+        // Anti-replay: reject sync at same position as last decoded frame (circular distance)
+        if (last_decoded_sync_pos_ != SIZE_MAX) {
+            size_t d1 = (sync_position_ >= last_decoded_sync_pos_)
+                ? (sync_position_ - last_decoded_sync_pos_)
+                : (MAX_BUFFER_SAMPLES - last_decoded_sync_pos_ + sync_position_);
+            size_t dist = std::min(d1, MAX_BUFFER_SAMPLES - d1);
+            if (dist < 200) {
+                LOG_MODEM(INFO, "[%s] Anti-replay: duplicate sync at pos=%zu (prev=%zu), skipping",
+                          log_prefix_.c_str(), sync_position_, last_decoded_sync_pos_);
+                constexpr size_t SEARCH_BACKTRACK = 9600;
+                correlation_pos_ = (sync_position_ + SEARCH_BACKTRACK + CORRELATION_STEP) % MAX_BUFFER_SAMPLES;
+                return;
+            }
+        }
+
         // CFO handling: On fading channels, chirp-based CFO measurement can be corrupted
         // by multipath (peaks shift differently for up vs down chirp).
         // When connected, trust the established CFO and limit drift.
@@ -562,6 +577,10 @@ static std::pair<bool, Bytes> robustDecodeSingleCW(
 
 void StreamingDecoder::decodeCurrentFrame() {
     if (!waveform_) {
+        {
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            correlation_pos_ = (sync_position_ + 4800) % MAX_BUFFER_SAMPLES;
+        }
         state_ = DecoderState::SEARCHING;
         return;
     }
@@ -612,6 +631,10 @@ void StreamingDecoder::decodeCurrentFrame() {
     }
 
     if (frame_buffer.empty()) {
+        {
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            correlation_pos_ = (sync_position_ + 4800) % MAX_BUFFER_SAMPLES;
+        }
         state_ = DecoderState::SEARCHING;
         return;
     }
@@ -687,6 +710,7 @@ void StreamingDecoder::decodeCurrentFrame() {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
             size_t min_frame = static_cast<size_t>(waveform_->getMinSamplesForFrame());
             correlation_pos_ = (sync_position_ + min_frame) % MAX_BUFFER_SAMPLES;
+            last_decoded_sync_pos_ = sync_position_;
         }
 
         state_ = DecoderState::SEARCHING;
@@ -701,6 +725,10 @@ void StreamingDecoder::decodeCurrentFrame() {
 
     if (!ok) {
         LOG_MODEM(DEBUG, "[%s] process() failed", log_prefix_.c_str());
+        {
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            correlation_pos_ = (sync_position_ + frame_len) % MAX_BUFFER_SAMPLES;
+        }
         state_ = DecoderState::SEARCHING;
         return;
     }
@@ -708,6 +736,10 @@ void StreamingDecoder::decodeCurrentFrame() {
     auto soft_bits = waveform_->getSoftBits();
     if (soft_bits.empty()) {
         LOG_MODEM(DEBUG, "[%s] getSoftBits() returned empty", log_prefix_.c_str());
+        {
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            correlation_pos_ = (sync_position_ + frame_len) % MAX_BUFFER_SAMPLES;
+        }
         state_ = DecoderState::SEARCHING;
         return;
     }
@@ -1080,6 +1112,7 @@ void StreamingDecoder::decodeCurrentFrame() {
     {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
         correlation_pos_ = (next_block_pos) % MAX_BUFFER_SAMPLES;
+        last_decoded_sync_pos_ = sync_position_;
     }
 
     state_ = DecoderState::SEARCHING;
