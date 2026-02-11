@@ -64,15 +64,17 @@ ModemEngine::ModemEngine() {
 
     // Set callbacks to wire into existing ModemEngine callbacks
     streaming_decoder_->setFrameCallback([this](const DecodeResult& result) {
-        if (result.success && !result.frame_data.empty()) {
-            deliverFrame(result.frame_data);
-            notifyFrameParsed(result.frame_data, result.frame_type);
-        }
-        // Update stats
+        // Update SNR/sync stats before delivering frame so downstream callbacks
+        // (ProtocolEngine via raw_data_callback_) read fresh channel estimates.
         updateStats([&](LoopbackStats& s) {
             s.snr_db = result.snr_db;
             s.synced = result.success;
         });
+
+        if (result.success && !result.frame_data.empty()) {
+            deliverFrame(result.frame_data);
+            notifyFrameParsed(result.frame_data, result.frame_type);
+        }
         // Save peer CFO for future frames
         if (std::abs(result.cfo_hz) > 0.1f) {
             peer_cfo_hz_ = result.cfo_hz;
@@ -84,7 +86,11 @@ ModemEngine::ModemEngine() {
         if (ping_received_callback_) {
             ping_received_callback_(snr_db);
         }
-        updateStats([](LoopbackStats& s) { s.frames_received++; });
+        updateStats([&](LoopbackStats& s) {
+            s.frames_received++;
+            s.snr_db = snr_db;
+            s.synced = true;
+        });
         last_rx_complete_time_ = std::chrono::steady_clock::now();
     });
 
