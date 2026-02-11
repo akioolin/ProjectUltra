@@ -53,7 +53,7 @@
 **The modem has TWO completely different operating modes based on SNR:**
 
 ### Mode 1: MC-DPSK (SNR ≤ 10 dB)
-- **When:** SNR 10 and below, or high fading conditions
+- **When:** SNR below 10, or heavy fading conditions
 - **Waveform:** Multi-Carrier DPSK with chirp sync
 - **ARQ:** Stop-and-wait (window=1) - send ONE frame, wait for ACK
 - **Frame format:** Variable codewords, simple sequential encoding
@@ -63,8 +63,8 @@
 - **Preamble:** ALWAYS full chirp preamble (no light sync)
 - **Key files:** `decodeMCDPSKFrame()` in streaming_decoder.cpp
 
-### Mode 2: OFDM (SNR ≥ 11 dB)
-- **When:** SNR 11 and above with acceptable fading
+### Mode 2: OFDM (SNR ≥ 10 dB)
+- **When:** SNR 10 and above with acceptable fading
 - **Waveform:** OFDM with chirp or Schmidl-Cox sync
 - **ARQ:** Selective Repeat (window=8) - send up to 8 frames before waiting
 - **Frame format:** Fixed 4-codeword frames for data, 1-codeword for control
@@ -77,8 +77,8 @@
 ### Mode Selection Flow
 1. **Connection starts:** Always MC-DPSK for PING/PONG/CONNECT
 2. **After CONNECT_ACK:** SNR is measured, mode is negotiated
-   - SNR ≤ 10: Stay in MC-DPSK
-   - SNR ≥ 11: Switch to OFDM
+   - SNR < 10: Stay in MC-DPSK
+   - SNR ≥ 10: Switch to OFDM
 3. **enterConnected():** Sets ARQ window based on mode (1 vs 4)
 4. **StreamingEncoder/Decoder:** Check `mode_` to use correct path
 
@@ -99,10 +99,11 @@
 | OFDM_CHIRP | Good fading | 15 | **100%** |
 | OFDM_CHIRP | Moderate fading | 15 | ~90% |
 
-**Current state (2026-02-10):**
+**Current state (2026-02-11):**
 - MC-DPSK: WORKING - 100% at SNR=10 with moderate fading
 - OFDM_CHIRP DQPSK R1/4 AWGN: WORKING - 100% at SNR=15 and SNR=20 (0 retries)
-- OFDM_CHIRP DQPSK R1/4 Good fading: WORKING - 100% at SNR=15 (0 retries, 0 failures)
+- OFDM_CHIRP DQPSK R1/4 Good fading SNR=15: WORKING - 100% (0 retries, 0 failures)
+- OFDM_CHIRP DQPSK R1/4 Good fading SNR=10: WORKING - 30/30 seeds PASS (avg 1.5 retx, 100% delivery)
 - OFDM_CHIRP DQPSK R1/2 AWGN: WORKING - 100% at SNR=15 and SNR=20 (0 retries)
 - OFDM_CHIRP DQPSK R1/2 Good fading: WORKING - 100% at SNR=15 (5/5 seeds, 0 retries)
 - OFDM_CHIRP DQPSK R2/3 AWGN: WORKING - 100% at SNR=20 (0 retries)
@@ -111,6 +112,7 @@
 - OFDM_CHIRP QPSK R1/2 Good fading: WORKING - avg 95% frame success at SNR=20 (30-seed survey, all messages delivered via ARQ)
 - OFDM_CHIRP QPSK R2/3 AWGN: WORKING - 100% at SNR=20 (0 retries)
 - OFDM_CHIRP QPSK R2/3 Good fading: WORKING - 5/5 seeds PASS (2 seeds had retx, 3 clean)
+- OFDM_CHIRP DQPSK R1/2 Moderate fading: WORKING - 100% at SNR=15 (6/6 seeds, 0-1 retx, 100% delivery)
 - OFDM_CHIRP Moderate fading: WORKING - R1/4 89% CW success (57/64), 100% message delivery via ARQ
 - OFDM_CHIRP DQPSK R3/4 AWGN: WORKING - 100% at SNR=20 (10/10 seeds, 0 retries)
 - OFDM_CHIRP DQPSK R3/4 Good fading: NOT RECOMMENDED (23 retx / 5 seeds — AWGN only)
@@ -120,12 +122,12 @@
 - OTFS: EXPERIMENTAL - See OTFS Status section below
 - cli_simulator: FULLY WORKING - all phases pass on AWGN and fading
 
-**Auto rate selection ladder (2026-02-10):**
+**Auto rate selection ladder (2026-02-11):**
 | Condition | Auto rate | Payload/frame | Throughput |
 |-----------|-----------|---------------|------------|
 | SNR >= 20, AWGN (fading < 0.15) | **R3/4** | 243 bytes | ~3900 bps |
 | SNR >= 20, good fading (< 0.65) | **R2/3** | 197 bytes | ~3200 bps |
-| SNR >= 15, good fading (< 0.65) | **R1/2** | 141 bytes | ~2300 bps |
+| SNR >= 15, good/moderate fading (< 1.10) | **R1/2** | 141 bytes | ~2300 bps |
 | Everything else | **R1/4** | 62 bytes | ~1150 bps |
 
 **Temporal fading measurement (2026-02-03):**
@@ -179,8 +181,8 @@
 **Recommendation:** Use OFDM_CHIRP with DQPSK. Rate selection is automatic via `selectOFDMCodeRate()`:
 - R3/4 for AWGN only (SNR≥20, fading<0.15) — ~3.4× throughput vs R1/4
 - R2/3 for good fading or better (SNR≥20) — ~2.8× throughput vs R1/4
-- R1/2 for good fading or better (SNR≥15) — ~2× throughput vs R1/4
-- R1/4 for moderate fading or lower SNR — robust but slower
+- R1/2 for good/moderate fading (SNR≥15) — ~2× throughput vs R1/4
+- R1/4 for heavy fading or lower SNR — robust but slower
 OTFS is parked - would need significant research effort to implement proper DD-domain equalization.
 
 **FFTW requirement:**
