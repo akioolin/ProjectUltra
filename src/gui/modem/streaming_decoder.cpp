@@ -31,6 +31,30 @@ namespace gui {
 
 namespace v2 = protocol::v2;
 
+namespace {
+
+// Return a conservative 1-CW control-frame sample requirement for connected OFDM.
+// If data profile is high-order, the robust control profile (DQPSK R1/4) may need
+// more symbols than the current data profile.
+size_t getOFDMControlFrameSamples(IWaveform* waveform, Modulation data_mod, CodeRate data_rate) {
+    if (!waveform) {
+        return 0;
+    }
+
+    size_t default_samples = static_cast<size_t>(waveform->getMinSamplesForControlFrame());
+    if (data_mod == Modulation::DQPSK && data_rate == CodeRate::R1_4) {
+        return default_samples;
+    }
+
+    waveform->configure(Modulation::DQPSK, CodeRate::R1_4);
+    size_t robust_samples = static_cast<size_t>(waveform->getMinSamplesForControlFrame());
+    waveform->configure(data_mod, data_rate);
+
+    return std::max(default_samples, robust_samples);
+}
+
+}  // namespace
+
 // ============================================================================
 // DEBUG: Buffer snapshot for external analysis
 // ============================================================================
@@ -522,7 +546,7 @@ void StreamingDecoder::checkIfReadyToDecode() {
         bool burst_latched = use_burst_interleave_ && waveform_ && waveform_->wasBurstInterleaved();
         if (!burst_latched) {
             // 1-CW peek first — escalate to 4-CW if CW0 indicates data frame
-            needed = static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
+            needed = getOFDMControlFrameSamples(waveform_.get(), current_modulation_, code_rate_);
         } else {
             needed = static_cast<size_t>(waveform_->getMinSamplesForFrame());
         }
@@ -601,7 +625,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         // Burst-interleaved frames use full 4-CW buffer; otherwise 1-CW peek first
         bool burst_latched = use_burst_interleave_ && waveform_ && waveform_->wasBurstInterleaved();
         if (!burst_latched) {
-            frame_len = static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
+            frame_len = getOFDMControlFrameSamples(waveform_.get(), current_modulation_, code_rate_);
         } else {
             frame_len = static_cast<size_t>(waveform_->getMinSamplesForFrame());
         }
@@ -715,6 +739,83 @@ void StreamingDecoder::decodeCurrentFrame() {
 
         state_ = DecoderState::SEARCHING;
         return;
+    }
+
+    // Connected OFDM control-first hypothesis:
+    // Try demodulating as DQPSK R1/4 control before using data profile.
+    // This protects ACK/NACK decode when data modulation is higher order.
+    bool first_pass_ofdm_peek = (pending_total_cw_ == 0 && is_ofdm && connected_
+                                 && frame_len <= getOFDMControlFrameSamples(
+                                     waveform_.get(), current_modulation_, code_rate_));
+    if (first_pass_ofdm_peek) {
+        constexpr size_t CONTROL_LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;
+        Modulation saved_mod = current_modulation_;
+        CodeRate saved_rate = code_rate_;
+        bool switched_profile = (saved_mod != Modulation::DQPSK || saved_rate != CodeRate::R1_4);
+
+        if (switched_profile) {
+            waveform_->configure(Modulation::DQPSK, CodeRate::R1_4);
+        }
+
+        waveform_->setFrequencyOffset(sync_cfo_);
+        bool control_ok = waveform_->process(SampleSpan(frame_buffer.data(), frame_buffer.size()));
+        if (control_ok) {
+            auto control_soft_bits = waveform_->getSoftBits();
+            if (control_soft_bits.size() >= CONTROL_LDPC_BLOCK) {
+                auto [ok_r14, data_r14] = robustDecodeSingleCW(
+                    control_soft_bits.data(), CONTROL_LDPC_BLOCK, CodeRate::R1_4, log_prefix_.c_str());
+                size_t bpc_r14 = v2::getBytesPerCodeword(CodeRate::R1_4);
+
+                if (ok_r14 && data_r14.size() >= 4
+                    && data_r14[0] == 0x55 && data_r14[1] == 0x4C) {
+                    if (data_r14.size() > bpc_r14) data_r14.resize(bpc_r14);
+                    auto hdr = v2::parseHeader(data_r14);
+                    if (hdr.valid && hdr.total_cw == 1 && v2::isControlFrame(hdr.type)) {
+                        DecodeResult control_result;
+                        control_result.success = true;
+                        control_result.frame_data = data_r14;
+                        control_result.frame_type = hdr.type;
+                        control_result.snr_db = sync_snr_;
+                        control_result.cfo_hz = sync_cfo_;
+                        control_result.codewords_ok = 1;
+                        control_result.codewords_failed = 0;
+
+                        {
+                            std::lock_guard<std::mutex> qlock(queue_mutex_);
+                            frame_queue_.push(control_result);
+                        }
+                        if (frame_callback_) {
+                            frame_callback_(control_result);
+                        }
+                        {
+                            std::lock_guard<std::mutex> slock(stats_mutex_);
+                            stats_.frames_decoded++;
+                        }
+
+                        last_fading_index_.store(waveform_->getFadingIndex());
+
+                        if (switched_profile) {
+                            waveform_->configure(saved_mod, saved_rate);
+                        }
+
+                        {
+                            std::lock_guard<std::mutex> lock(buffer_mutex_);
+                            correlation_pos_ = (sync_position_ + frame_len) % MAX_BUFFER_SAMPLES;
+                            last_decoded_sync_pos_ = sync_position_;
+                        }
+
+                        LOG_MODEM(INFO, "[%s] OFDM control-profile decode SUCCESS (%s seq=%d)",
+                                  log_prefix_.c_str(), v2::frameTypeToString(hdr.type), hdr.seq);
+                        state_ = DecoderState::SEARCHING;
+                        return;
+                    }
+                }
+            }
+        }
+
+        if (switched_profile) {
+            waveform_->configure(saved_mod, saved_rate);
+        }
     }
 
     // Data frame - process audio to get soft bits

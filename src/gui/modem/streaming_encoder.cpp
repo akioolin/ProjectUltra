@@ -16,6 +16,18 @@ namespace gui {
 
 namespace v2 = protocol::v2;
 
+namespace {
+
+bool isControlFrameBytes(const Bytes& frame_data) {
+    if (frame_data.size() < 3) {
+        return false;
+    }
+    auto ft = static_cast<v2::FrameType>(frame_data[2]);
+    return v2::isControlFrame(ft);
+}
+
+}  // namespace
+
 // ============================================================================
 // CONSTRUCTION / DESTRUCTION
 // ============================================================================
@@ -125,6 +137,18 @@ std::vector<float> StreamingEncoder::encodeFrame(const Bytes& frame_data) {
         return {};
     }
 
+    bool is_ofdm = (mode_ == protocol::WaveformMode::OFDM_CHIRP ||
+                    mode_ == protocol::WaveformMode::OFDM_COX);
+    bool use_control_profile = is_ofdm && isControlFrameBytes(frame_data);
+    Modulation tx_mod = use_control_profile ? Modulation::DQPSK : modulation_;
+    CodeRate tx_rate = use_control_profile ? CodeRate::R1_4 : code_rate_;
+
+    if (use_control_profile) {
+        LOG_MODEM(DEBUG, "[%s] OFDM control profile TX: %s %s",
+                  log_prefix_.c_str(), modulationToString(tx_mod), codeRateToString(tx_rate));
+        waveform_->configure(tx_mod, tx_rate);
+    }
+
     // Encode frame bytes (LDPC + interleaving)
     Bytes encoded = encodeFrameBytes(frame_data);
 
@@ -140,6 +164,10 @@ std::vector<float> StreamingEncoder::encodeFrame(const Bytes& frame_data) {
     result.insert(result.end(), preamble.begin(), preamble.end());
     result.insert(result.end(), modulated.begin(), modulated.end());
 
+    if (use_control_profile && (modulation_ != tx_mod || code_rate_ != tx_rate)) {
+        waveform_->configure(modulation_, code_rate_);
+    }
+
     LOG_MODEM(INFO, "[%s] Encoded frame: %zu bytes -> %zu coded -> %zu samples",
               log_prefix_.c_str(), frame_data.size(), encoded.size(), result.size());
 
@@ -150,6 +178,18 @@ std::vector<float> StreamingEncoder::encodeFrameLight(const Bytes& frame_data) {
     if (!waveform_) {
         LOG_MODEM(ERROR, "[%s] No waveform!", log_prefix_.c_str());
         return {};
+    }
+
+    bool is_ofdm = (mode_ == protocol::WaveformMode::OFDM_CHIRP ||
+                    mode_ == protocol::WaveformMode::OFDM_COX);
+    bool use_control_profile = is_ofdm && isControlFrameBytes(frame_data);
+    Modulation tx_mod = use_control_profile ? Modulation::DQPSK : modulation_;
+    CodeRate tx_rate = use_control_profile ? CodeRate::R1_4 : code_rate_;
+
+    if (use_control_profile) {
+        LOG_MODEM(DEBUG, "[%s] OFDM control profile TX(light): %s %s",
+                  log_prefix_.c_str(), modulationToString(tx_mod), codeRateToString(tx_rate));
+        waveform_->configure(tx_mod, tx_rate);
     }
 
     // Encode frame bytes
@@ -172,6 +212,10 @@ std::vector<float> StreamingEncoder::encodeFrameLight(const Bytes& frame_data) {
     result.reserve(preamble.size() + modulated.size());
     result.insert(result.end(), preamble.begin(), preamble.end());
     result.insert(result.end(), modulated.begin(), modulated.end());
+
+    if (use_control_profile && (modulation_ != tx_mod || code_rate_ != tx_rate)) {
+        waveform_->configure(modulation_, code_rate_);
+    }
 
     LOG_MODEM(DEBUG, "[%s] Encoded frame (light): %zu bytes -> %zu samples",
               log_prefix_.c_str(), frame_data.size(), result.size());

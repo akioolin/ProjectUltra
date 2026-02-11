@@ -878,12 +878,12 @@ void Connection::enterConnected() {
         arq_.setSackDelay(120);     // Short coalescing delay for ACK/SACK control traffic
 
         int ack_repeat_count = 2;
-        uint32_t ack_repeat_delay_ms = 80;
+        uint32_t ack_repeat_delay_ms = 220;
 
         // D8PSK R1/2 in fading benefits from stronger control-frame diversity.
         if (data_modulation_ == Modulation::D8PSK && data_code_rate_ == CodeRate::R1_2) {
             ack_repeat_count = 3;
-            ack_repeat_delay_ms = 110;
+            ack_repeat_delay_ms = 250;
         }
 
         arq_.setAckRepeatCount(ack_repeat_count);

@@ -6,6 +6,7 @@
 #include <deque>
 #include <optional>
 #include <array>
+#include <cstdint>
 
 namespace ultra {
 namespace protocol {
@@ -75,7 +76,12 @@ public:
     size_t getWindowSize() const { return config_.window_size; }
 
     // Set ACK timeout (adaptive based on waveform frame duration)
-    void setAckTimeout(uint32_t timeout_ms) { config_.ack_timeout_ms = timeout_ms; }
+    void setAckTimeout(uint32_t timeout_ms) {
+        config_.ack_timeout_ms = timeout_ms;
+        if (!have_rtt_estimator_) {
+            adaptive_ack_timeout_ms_ = timeout_ms;
+        }
+    }
     uint32_t getAckTimeout() const { return config_.ack_timeout_ms; }
 
     // Set delayed SACK coalescing timer
@@ -103,6 +109,8 @@ private:
         Bytes frame_data;           // Serialized v2 frame to send/resend
         uint16_t seq = 0;           // Sequence number
         uint32_t timeout_ms = 0;    // Time until retransmit
+        uint64_t first_tx_ms = 0;   // ARQ monotonic clock when first sent
+        bool rtt_sample_eligible = false; // Karn-safe RTT sampling guard
         int retry_count = 0;        // Number of retransmits
         bool acked = false;         // ACK received (waiting for earlier frames)
         int hole_ack_count = 0;     // Consecutive ACKs showing this frame as gap
@@ -153,13 +161,20 @@ private:
     struct AckRepeatJob {
         Bytes frame_data;
         uint32_t timer_ms = 0;
-        int repeats_remaining = 0;
+        int copy_index = 0;  // 2 = first repeat copy, 3 = second repeat copy
     };
     std::deque<AckRepeatJob> ack_repeat_jobs_;
 
     // Track cumulative ACK base progress (for critical immediate duplicate)
     bool last_sack_base_valid_ = false;
     uint16_t last_sack_base_ = 0;
+
+    // Monotonic ARQ time and adaptive RTO estimator (Karn-safe)
+    uint64_t arq_time_ms_ = 0;
+    bool have_rtt_estimator_ = false;
+    float srtt_ms_ = 0.0f;
+    float rttvar_ms_ = 0.0f;
+    uint32_t adaptive_ack_timeout_ms_ = 0;
 
     // Statistics
     ARQStats stats_;
@@ -183,6 +198,10 @@ private:
     void advanceTXWindow();
     void advanceRXWindow();
     void sendSack();
+    void maybeSampleRTT(TXSlot& slot);
+    uint32_t currentAckTimeoutMs() const;
+    uint32_t ackRepeatDelayForCopy(int copy_index) const;
+    int ackRepeatJitterMs(uint16_t base_seq, uint8_t bitmap, int copy_index) const;
 
     uint8_t buildRXBitmap() const;
 };
