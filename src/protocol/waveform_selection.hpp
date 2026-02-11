@@ -30,7 +30,8 @@ struct WaveformRecommendation {
 //   AWGN only (< 0.15):             R3/4 @ SNR >= 20 (10/10 seeds, 0 retx)
 //   Good fading or better (< 0.65): R2/3 @ SNR >= 20 (30/30 seeds, 0 retx)
 //   Good fading or better (< 0.65): R1/2 @ SNR >= 15 (5/5 seeds, 0 retx)
-//   Moderate+ (>= 0.65):            R1/4 only
+//   Moderate fading (< 1.10):       R1/2 @ SNR >= 15 (6/6 seeds, 100% delivery)
+//   Heavy+ (>= 1.10):              R1/4 only
 //
 // R3/4 verified (2026-02-10):
 //   DQPSK R3/4 AWGN SNR=20: 10/10 seeds PASS, 0 retransmissions
@@ -48,8 +49,8 @@ inline CodeRate selectOFDMCodeRate(float snr_db, float fading_index) {
     // Good fading or better: R2/3 at SNR >= 20
     if (fading_index < 0.65f && snr_db >= 20.0f) return CodeRate::R2_3;
 
-    // Good fading or better: R1/2 at SNR >= 15
-    if (fading_index < 0.65f && snr_db >= 15.0f) return CodeRate::R1_2;
+    // Good-to-moderate fading: R1/2 at SNR >= 15
+    if (fading_index < 1.10f && snr_db >= 15.0f) return CodeRate::R1_2;
 
     // All other conditions: R1/4 (most robust)
     return CodeRate::R1_4;
@@ -62,8 +63,8 @@ inline CodeRate selectOFDMCodeRate(float snr_db, float fading_index) {
 // - SNR < 10 dB: MC-DPSK is most robust (~938 bps)
 // - SNR >= 20 dB + AWGN: OFDM_CHIRP R3/4 (~3900 bps)
 // - SNR >= 20 dB + good fading: OFDM_CHIRP R2/3 (~3200 bps)
-// - SNR >= 15 dB + good fading: OFDM_CHIRP R1/2 (~2300 bps)
-// - Moderate+ fading (>= 0.65): R1/4 only (~1150 bps)
+// - SNR >= 15 dB + good/moderate fading: OFDM_CHIRP R1/2 (~2300 bps)
+// - Heavy+ fading (>= 1.10): R1/4 only (~1150 bps)
 //
 // Calibrated fading thresholds:
 //   < 0.15: True AWGN, < 0.65: Good, >= 0.65: Moderate+
