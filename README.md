@@ -2,7 +2,7 @@
 
 **High-performance HF modem for amateur radio**
 
-*Last updated: 2026-01-31*
+*Last updated: 2026-02-11*
 
 > **EXPERIMENTAL SOFTWARE - WORK IN PROGRESS**
 >
@@ -32,22 +32,22 @@ ProjectUltra is a software modem that achieves reliable, high-speed data transfe
 
 ## Performance
 
-**Verified Performance (loopback + acoustic testing):**
-| SNR | Mode | Throughput | Notes |
-|-----|------|------------|-------|
-| 5+ dB | MC-DPSK (8 carriers) | 938 bps | 100% verified, ±50 Hz CFO |
-| 10+ dB | OFDM-CHIRP R1/4 | 1.8 kbps | 100% verified, ±50 Hz CFO |
-| 17+ dB | OFDM-COX R1/4 | 1.8 kbps | DATA phase verified |
-| 20+ dB | OFDM DQPSK R1/2 | 3.6 kbps | 100% verified |
-| 20+ dB | OFDM D8PSK R1/2 | 5.3 kbps | 100% AWGN, 88% fading |
-| 25+ dB | OFDM DQPSK R2/3 | 5.4 kbps | 90% verified |
+**Raw waveform throughput** (1024 FFT, 59 carriers, CP=96, 42.9 sym/s):
+| SNR | Mode | Data carriers | Throughput | Notes |
+|-----|------|---------------|------------|-------|
+| 5+ dB | MC-DPSK (8 carriers) | 8 | 938 bps | 100% verified, ±50 Hz CFO |
+| 10+ dB | OFDM DQPSK R1/4 | 59 (no pilots) | 1264 bps | 100% verified, fading OK |
+| 15+ dB | OFDM DQPSK R1/2 | 53 (6 pilots) | 2271 bps | 100% verified, good + moderate fading |
+| 20+ dB | OFDM DQPSK R2/3 | 53 (6 pilots) | 3028 bps | 100% verified, good fading |
+| 20+ dB | OFDM DQPSK R3/4 | 55 (4 pilots) | 3536 bps | 100% verified, AWGN only |
+| 20+ dB | OFDM D8PSK R1/2 | 53 (6 pilots) | 3407 bps | 100% AWGN, ~76% fading |
 
-**Theoretical (pending HF validation):**
-| SNR | Mode | Throughput | Notes |
-|-----|------|------------|-------|
-| -5 to 5 dB | MC-DPSK | 938 bps | Hard floor at -5 dB |
-| 25+ dB | OFDM 16QAM R3/4 | 5.8 kbps | Coherent mode, stable channels |
-| 30+ dB | OFDM 32QAM R3/4 | **7.2 kbps** | Maximum throughput |
+**Coherent modes (stable channels only):**
+| SNR | Mode | Data carriers | Throughput | Notes |
+|-----|------|---------------|------------|-------|
+| 20+ dB | OFDM QPSK R1/2 | 47 (12 pilots) | 2014 bps | Fading avg 78% frame success |
+| 25+ dB | OFDM 16QAM R3/4 | 44 (15 pilots) | 5657 bps | Stable paths (NVIS, ground wave) |
+| 30+ dB | OFDM 32QAM R3/4 | 44 (15 pilots) | **7071 bps** | Maximum throughput |
 
 **When to use coherent modes (16QAM/32QAM):** Stable propagation paths like
 ground wave or direct cable connection. These paths have stable phase, allowing
@@ -63,7 +63,7 @@ SNR Range           Waveform              Why
 5-10 dB             MC-DPSK (8 carriers)  Robust sync, differential encoding
 10-17 dB            OFDM-CHIRP 1024-FFT   Dual chirp sync, 59 carriers
 17+ dB              OFDM-COX 1024-FFT     Schmidl-Cox sync, max throughput
-25+ dB (NVIS)       OFDM 16QAM            Coherent mode, 7.2 kbps
+25+ dB (NVIS)       OFDM 16QAM            Coherent mode, ~5.7 kbps
 ```
 
 **MC-DPSK (Multi-Carrier DPSK)**: 8 carriers with differential encoding. Works reliably at 5+ dB SNR with ±50 Hz CFO tolerance. Uses dual chirp synchronization for robust timing recovery.
@@ -74,7 +74,7 @@ SNR Range           Waveform              Why
 - **OFDM-CHIRP**: Dual chirp preamble for robust sync, works at 10+ dB
 - **OFDM-COX**: Schmidl-Cox sync for faster acquisition, requires 17+ dB
 
-**NVIS/Local optimization**: For stable paths like NVIS (Near Vertical Incidence Skywave), 16QAM with pilots provides better performance than differential modes. The pilots track slow phase drift and frequency-selective fading.
+**NVIS/Local optimization**: For stable paths like NVIS (Near Vertical Incidence Skywave), 16QAM with pilots provides better performance than differential modes. The pilots track slow phase drift and frequency-selective fading. Maximum throughput ~7.1 kbps with 32QAM R3/4.
 
 ---
 
@@ -151,7 +151,8 @@ full CONNECT sequence. If no response after 5 PINGs (15 seconds), connection fai
 | Center Frequency | 1500 Hz | 1500 Hz |
 | Carriers | 8 | 59 |
 | FFT Size | N/A | 1024 |
-| Symbol Rate | ~94 baud | ~42 baud |
+| Symbol Rate | ~94 baud | ~42.9 baud |
+| Cyclic Prefix | N/A | 96 samples (2ms) |
 | Sync Method | Dual Chirp | Dual Chirp or Schmidl-Cox |
 | LDPC Codeword | 648 bits | 648 bits |
 
@@ -192,20 +193,15 @@ full CONNECT sequence. If no response after 5 PINGs (15 seconds), connection fai
 ```bash
 cd build
 
-# Primary test tool - continuous RX with channel simulation
-./test_iwaveform --snr 10 -w ofdm_chirp --frames 5
+# Primary test - full protocol (PING/CONNECT/MODE_CHANGE/DATA/DISCONNECT)
+./cli_simulator --snr 15 --fading good --rate r1_4 --test
 
-# Test D8PSK modulation (auto-selected at SNR >= 20 on AWGN)
-./test_iwaveform --snr 20 --channel awgn -w ofdm_chirp --mod d8psk --frames 5
+# Test specific modulation/rate combinations
+./cli_simulator --snr 20 --fading good --mod d8psk --rate r1_2 --test
+./cli_simulator --snr 20 --mod dqpsk --rate r2_3 --test
 
-# Test D8PSK on fading (requires R1/4 for robustness)
-./test_iwaveform --snr 20 --channel good -w ofdm_chirp --mod d8psk --rate r1_4 --frames 5
-
-# Full protocol test (PING/CONNECT/DATA/DISCONNECT)
-./cli_simulator --snr 20 --test
-
-# Regression matrix (all waveforms, multiple SNR levels)
-../tests/regression_matrix.sh
+# Quick single-frame sanity check (not full protocol)
+./test_waveform_simple -w ofdm_chirp --snr 15
 
 # Run unit tests
 ctest
@@ -237,9 +233,8 @@ activates to improve reliability (uses embedded DQPSK grid for phase correction)
 **Test Tools:**
 | Tool | Purpose |
 |------|---------|
-| `test_iwaveform` | Primary - continuous RX, all waveforms |
-| `cli_simulator` | Full protocol testing |
-| `regression_matrix.sh` | Automated multi-config testing |
+| `cli_simulator` | Primary - full protocol with two-station interaction |
+| `test_waveform_simple` | Quick single-frame sanity checks |
 
 ---
 
@@ -262,7 +257,7 @@ not narrow-band FT8/PSK31 areas.
 | Band | Frequency (USB) | Notes |
 |------|-----------------|-------|
 | 80m | 3.590 MHz | Above narrow digital, below voice |
-| 40m | 7.102 MHz | Common for VARA/Winlink |
+| 40m | 7.102 MHz | Common for wideband digital |
 | 30m | 10.145 MHz | Check for WSPR at 10.140 |
 | 20m | 14.108 MHz | Above FT8 crowd, wideband digital |
 | 15m | 21.110 MHz | Above narrow digital segment |
@@ -283,7 +278,7 @@ power necessary. Be ready to QSY if causing interference.
 > **Note**: Core waveforms have been verified in loopback and acoustic testing.
 > On-air HF testing is in progress.
 
-### Verified Performance (2026-01-30)
+### Verified Performance (2026-02-11)
 
 | Waveform | SNR Range | CFO Tolerance | Status |
 |----------|-----------|---------------|--------|
@@ -299,10 +294,11 @@ real-world audio chain compatibility.
 - All LDPC code rates (R1/4 through R5/6)
 - OFDM with DQPSK/D8PSK modulation (differential)
 - OFDM with QPSK/16QAM/32QAM modulation (coherent, for NVIS/local)
-- **NVIS high-speed mode**: 1024 FFT, 59 carriers, up to 7.2 kbps
+- **NVIS high-speed mode**: 1024 FFT, 59 carriers, up to ~7.1 kbps
 - Multi-carrier DPSK (8 carriers, robust sync)
 - Full protocol: PING/PONG/CONNECT/DATA/DISCONNECT
-- ARQ protocol with retransmission
+- ARQ protocol with selective repeat and retransmission
+- Automatic waveform and code rate selection based on SNR and fading
 - GUI with waterfall and constellation
 - Expert mode for forcing waveform/modulation settings
 - CLI transmit/receive tools
@@ -311,7 +307,6 @@ real-world audio chain compatibility.
 
 **In Progress:**
 - On-air HF testing
-- Automatic waveform switching based on SNR
 - File transfer optimization
 
 ---
@@ -347,8 +342,8 @@ ProjectUltra is a research platform for investigating advanced modulation and co
 
 | Mode | ProjectUltra | Industry Leader | Gap |
 |------|--------------|-----------------|-----|
-| Max throughput (verified) | 5.4 kbps | 8.5 kbps | -36% |
-| Max throughput (theoretical) | 7.2 kbps | 8.5 kbps | -15% |
+| Max throughput (verified, differential) | 3.5 kbps | 8.5 kbps | -59% |
+| Max throughput (coherent, theoretical) | 7.1 kbps | 8.5 kbps | -16% |
 | Low-SNR floor (verified) | 5 dB | ~0 dB | Needs work |
 | CFO tolerance | ±50 Hz | ±100 Hz | TBD |
 
