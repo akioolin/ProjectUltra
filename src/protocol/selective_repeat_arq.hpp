@@ -100,6 +100,7 @@ private:
     enum class RetransmitCause : uint8_t {
         TIMEOUT,
         FAST_HOLE,
+        HOLE_PROBE,
         NACK
     };
 
@@ -116,6 +117,9 @@ private:
         int hole_ack_count = 0;     // Consecutive ACKs showing this frame as gap
         int fast_retx_count = 0;    // Number of fast retransmits for current hole context
         uint32_t fast_retx_cooldown_ms = 0; // Prevent ACK-repeat storms from immediate re-retransmit
+        bool hole_probe_armed = false;      // Timer armed for progress-based probe retx
+        uint32_t hole_probe_timer_ms = 0;   // Countdown to hole probe retx
+        int hole_probe_count = 0;           // Number of hole-probe retransmits in current epoch
     };
 
     // RX state per frame in receive window
@@ -160,6 +164,8 @@ private:
     // Pending repeat state (queue avoids overwriting repeats during ACK bursts)
     struct AckRepeatJob {
         Bytes frame_data;
+        uint16_t base_seq = 0;
+        uint8_t bitmap = 0;
         uint32_t timer_ms = 0;
         int copy_index = 0;  // 2 = first repeat copy, 3 = second repeat copy
     };
@@ -168,6 +174,10 @@ private:
     // Track cumulative ACK base progress (for critical immediate duplicate)
     bool last_sack_base_valid_ = false;
     uint16_t last_sack_base_ = 0;
+    bool last_ack_signature_valid_ = false;
+    uint16_t last_ack_seq_ = 0;
+    uint8_t last_ack_bitmap_ = 0;
+    uint32_t ack_dedup_timer_ms_ = 0;
 
     // Monotonic ARQ time and adaptive RTO estimator (Karn-safe)
     uint64_t arq_time_ms_ = 0;

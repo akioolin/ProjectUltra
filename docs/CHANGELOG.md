@@ -10,6 +10,47 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-02-11: Alpha gate harness + OFDM SR-ARQ window stabilization
+
+**What was broken:**
+- Alpha-readiness was not reproducible; no single deterministic command produced a pass/fail release verdict.
+- OFDM SR-ARQ in-flight window at 8 caused higher hole pressure and retransmission tails on fading file transfer (notably DQPSK R2/3, 2048B files).
+
+**What was changed:**
+- Added deterministic release harness:
+  - `scripts/run_alpha_gate.sh`
+  - Produces per-seed logs, CSV metrics, and markdown gate summary.
+- Added and documented release gate source-of-truth:
+  - `docs/ALPHA_RELEASE_GATE.md`
+- Added ARQ cause/debug counters to simulator summary:
+  - `tools/cli_simulator.cpp`
+  - `src/protocol/arq_interface.hpp`
+  - `src/protocol/selective_repeat_arq.hpp/.cpp`
+- Reduced OFDM SR-ARQ window from 8 to 4 (aligned with 4-frame burst interleaver groups):
+  - `src/protocol/connection.cpp`
+
+**Why this works:**
+- Window 4 lowers control-path burst pressure (fewer simultaneous outstanding frames), reducing persistent base-hole amplification and timeout tail behavior on fading channels.
+- The harness makes release decisions auditable and repeatable, rather than anecdotal.
+
+**Verification:**
+```
+scripts/run_alpha_gate.sh --seed-start 42 --seed-count 30 --out-dir /tmp/alpha_gate_full_w4
+```
+
+Observed gate report:
+- `g1_r14_good`: PASS
+- `g2_r14_moderate`: PASS
+- `g3_r12_good`: PASS
+- `g4_r23_good_msg`: PASS
+- `g5_r23_good_file`: PASS (avg retransmissions 2.07, p90 3, max 4)
+
+Overall:
+- **Alpha gate status: PASS**
+- Report: `/tmp/alpha_gate_full_w4/summary.md`
+
+---
+
 ## 2026-02-11: Configurable ACK repeat with delayed copy for fading reliability
 
 **What was broken:**

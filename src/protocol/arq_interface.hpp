@@ -34,11 +34,21 @@ struct ARQStats {
     int acks_sent = 0;
     int acks_received = 0;
     int retransmissions = 0;
+    int retransmissions_timeout = 0;
+    int retransmissions_fast_hole = 0;
+    int retransmissions_hole_probe = 0;
+    int retransmissions_nack = 0;
     int timeouts = 0;
     int failed = 0;                     // Exceeded max retries
     int out_of_order = 0;               // Out-of-order frames (SR)
     int sacks_sent = 0;                 // Selective ACKs sent (SR)
     int sacks_received = 0;             // Selective ACKs received (SR)
+    int hole_events = 0;                // ACK hole indications observed
+    int stale_acks_ignored = 0;         // ACK rejected as too old
+    int future_acks_ignored = 0;        // ACK rejected as implausibly ahead
+    int duplicate_acks_ignored = 0;     // ACK suppressed by dedup window
+    int ack_repeat_jobs_coalesced = 0;  // Pending ACK repeat jobs replaced
+    int ack_repeat_jobs_dropped = 0;    // Pending ACK repeat jobs dropped on overflow
 };
 
 /**

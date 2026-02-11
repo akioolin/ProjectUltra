@@ -1325,10 +1325,20 @@ private:
                   << "  retransmissions=" << cs.arq.retransmissions
                   << "  timeouts=" << cs.arq.timeouts
                   << "  failed=" << cs.arq.failed << "\n";
+        std::cout << "  RETX: timeout=" << cs.arq.retransmissions_timeout
+                  << "  fast_hole=" << cs.arq.retransmissions_fast_hole
+                  << "  hole_probe=" << cs.arq.retransmissions_hole_probe
+                  << "  nack=" << cs.arq.retransmissions_nack
+                  << "  hole_events=" << cs.arq.hole_events << "\n";
         std::cout << "  ACK:  acks_sent=" << cs.arq.acks_sent
                   << "  acks_rcvd=" << cs.arq.acks_received
                   << "  sacks_sent=" << cs.arq.sacks_sent
                   << "  sacks_rcvd=" << cs.arq.sacks_received << "\n";
+        std::cout << "  ACKf: stale_ignored=" << cs.arq.stale_acks_ignored
+                  << "  future_ignored=" << cs.arq.future_acks_ignored
+                  << "  dup_ignored=" << cs.arq.duplicate_acks_ignored
+                  << "  repeat_coalesced=" << cs.arq.ack_repeat_jobs_coalesced
+                  << "  repeat_dropped=" << cs.arq.ack_repeat_jobs_dropped << "\n";
 
         // Decoder stats
         std::cout << "  RX:   frames_decoded=" << ds.frames_decoded

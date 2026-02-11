@@ -873,7 +873,10 @@ void Connection::enterConnected() {
         arq_.setAckRepeatCount(1);  // Single ACK (stop-and-wait, no benefit from repeat)
         LOG_MODEM(INFO, "Connection: ARQ window=1, timeout=18s, ack_repeat=1 (MC-DPSK)");
     } else {
-        arq_.setWindowSize(8);
+        // Keep OFDM in-flight burst shorter to reduce ACK-lag hole amplification
+        // on fading channels. A window of 4 matches burst-interleave grouping and
+        // has shown better control-path stability than 8 for file transfer.
+        arq_.setWindowSize(4);
         arq_.setMaxRetries(15);     // More attempts compensate for ACK loss on fading
         arq_.setSackDelay(120);     // Short coalescing delay for ACK/SACK control traffic
 
