@@ -46,9 +46,21 @@ size_t getOFDMControlFrameSamples(IWaveform* waveform, Modulation data_mod, Code
         return default_samples;
     }
 
-    waveform->configure(Modulation::DQPSK, CodeRate::R1_4);
-    size_t robust_samples = static_cast<size_t>(waveform->getMinSamplesForControlFrame());
-    waveform->configure(data_mod, data_rate);
+    // Avoid waveform reconfigure here (it recreates internal DSP state and can
+    // clear constellation history). Estimate robust control size analytically.
+    const int carriers = waveform->getCarrierCount();
+    const int samples_per_symbol = waveform->getSamplesPerSymbol();
+    if (carriers <= 0 || samples_per_symbol <= 0) {
+        return default_samples;
+    }
+
+    constexpr int pilot_spacing = 10;  // Differential DQPSK control profile
+    const int pilot_count = (carriers + pilot_spacing - 1) / pilot_spacing;
+    const int data_carriers = std::max(1, carriers - pilot_count);
+    const int bits_per_symbol = data_carriers * 2;  // DQPSK
+    const int data_symbols = (v2::LDPC_CODEWORD_BITS + bits_per_symbol - 1) / bits_per_symbol;
+    const size_t robust_samples = static_cast<size_t>(2 + data_symbols) *
+                                  static_cast<size_t>(samples_per_symbol);
 
     return std::max(default_samples, robust_samples);
 }
@@ -760,6 +772,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         waveform_->setFrequencyOffset(sync_cfo_);
         bool control_ok = waveform_->process(SampleSpan(frame_buffer.data(), frame_buffer.size()));
         if (control_ok) {
+            captureConstellationSnapshot();
             auto control_soft_bits = waveform_->getSoftBits();
             if (control_soft_bits.size() >= CONTROL_LDPC_BLOCK) {
                 auto [ok_r14, data_r14] = robustDecodeSingleCW(
@@ -833,6 +846,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         state_ = DecoderState::SEARCHING;
         return;
     }
+    captureConstellationSnapshot();
 
     auto soft_bits = waveform_->getSoftBits();
     if (soft_bits.empty()) {
@@ -1019,7 +1033,9 @@ void StreamingDecoder::decodeCurrentFrame() {
         size_t one_cw_s = static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
         if (one_cw_s <= frame_buffer.size()) {
             waveform_->setFrequencyOffset(sync_cfo_);
-            waveform_->process(SampleSpan(frame_buffer.data(), one_cw_s));
+            if (waveform_->process(SampleSpan(frame_buffer.data(), one_cw_s))) {
+                captureConstellationSnapshot();
+            }
             auto short_bits = waveform_->getSoftBits();
 
             if (short_bits.size() >= LDPC_BLOCK) {
@@ -1044,7 +1060,9 @@ void StreamingDecoder::decodeCurrentFrame() {
                         LOG_MODEM(INFO, "[%s] Small-frame recovery: reprocessing %zu samples (%d CWs)",
                                   log_prefix_.c_str(), exact_size, hdr2.total_cw);
                         waveform_->setFrequencyOffset(sync_cfo_);
-                        waveform_->process(SampleSpan(frame_buffer.data(), exact_size));
+                        if (waveform_->process(SampleSpan(frame_buffer.data(), exact_size))) {
+                            captureConstellationSnapshot();
+                        }
                         auto recovered_bits = waveform_->getSoftBits();
                         result = decodeFrame(recovered_bits, sync_snr_, sync_cfo_);
                         frame_len = exact_size;
@@ -1163,6 +1181,7 @@ void StreamingDecoder::decodeCurrentFrame() {
             bool next_ok = waveform_->process(SampleSpan(next_block.data(), next_block.size()));
 
             if (!next_ok) break;  // Process failed, burst over
+            captureConstellationSnapshot();
 
             auto next_soft_bits = waveform_->getSoftBits();
             if (next_soft_bits.empty()) break;
@@ -1258,6 +1277,8 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
 
     state_ = DecoderState::SEARCHING;
     pending_total_cw_ = 0;
+    constellation_cache_.clear();
+    constellation_cache_time_ = std::chrono::steady_clock::time_point{};
 
     // Clear burst interleave state on mode change
     burst_soft_buffer_.clear();
@@ -1394,10 +1415,29 @@ bool StreamingDecoder::isSynced() const {
         || state_ == DecoderState::BURST_ACCUMULATING;
 }
 
+void StreamingDecoder::captureConstellationSnapshot() {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    if (!waveform_) {
+        return;
+    }
+
+    auto symbols = waveform_->getConstellationSymbols();
+    if (!symbols.empty()) {
+        constellation_cache_ = std::move(symbols);
+        constellation_cache_time_ = std::chrono::steady_clock::now();
+    }
+}
+
 std::vector<std::complex<float>> StreamingDecoder::getConstellationSymbols() const {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
+    auto now = std::chrono::steady_clock::now();
+
     if (waveform_) {
         auto symbols = waveform_->getConstellationSymbols();
+        if (!symbols.empty()) {
+            constellation_cache_ = symbols;
+            constellation_cache_time_ = now;
+        }
         static int log_count = 0;
         if (log_count < 10 && !symbols.empty()) {
             // Phase histogram to diagnose constellation display
@@ -1428,7 +1468,19 @@ std::vector<std::complex<float>> StreamingDecoder::getConstellationSymbols() con
             }
             log_count++;
         }
-        return symbols;
+        if (!symbols.empty()) {
+            return symbols;
+        }
+    }
+
+    // Hold last non-empty constellation briefly so GUI doesn't flicker to empty
+    // during control-profile reconfiguration between frames.
+    if (!constellation_cache_.empty()) {
+        auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - constellation_cache_time_).count();
+        if (age_ms <= CONSTELLATION_CACHE_HOLD_MS) {
+            return constellation_cache_;
+        }
     }
     return {};
 }
@@ -1453,6 +1505,8 @@ void StreamingDecoder::reset() {
     pending_total_cw_ = 0;
     burst_blocks_decoded_ = 0;
     burst_soft_buffer_.clear();
+    constellation_cache_.clear();
+    constellation_cache_time_ = std::chrono::steady_clock::time_point{};
     use_burst_interleave_ = false;
     new_data_available_ = false;
     last_decoded_sync_pos_ = SIZE_MAX;
@@ -1961,6 +2015,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         burst_next_pos_ = (burst_next_pos_ + burst_min_block_) % MAX_BUFFER_SAMPLES;
         return BurstFrameResult::FAILED;
     }
+    captureConstellationSnapshot();
 
     auto soft = waveform_->getSoftBits();
     if (soft.empty()) {

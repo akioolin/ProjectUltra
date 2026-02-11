@@ -46,6 +46,7 @@
 #include <atomic>
 #include <memory>
 #include <functional>
+#include <chrono>
 
 namespace ultra {
 namespace gui {
@@ -248,6 +249,10 @@ private:
     // Decode soft bits into frame data
     DecodeResult decodeFrame(const std::vector<float>& soft_bits, float snr, float cfo);
 
+    // Cache latest non-empty constellation snapshot so GUI can render
+    // even when control-path profile switching temporarily clears waveform state.
+    void captureConstellationSnapshot();
+
     // MC-DPSK specific decode (simple sequential, no frame interleaving)
     DecodeResult decodeMCDPSKFrame(const std::vector<float>& soft_bits,
                                     CodeRate rate, size_t bytes_per_cw,
@@ -331,6 +336,11 @@ private:
     std::atomic<float> last_cfo_{0.0f};
     std::atomic<float> last_fading_index_{0.0f};
     float noise_floor_ = 0.001f;
+
+    // Constellation cache (protected by buffer_mutex_)
+    mutable std::vector<std::complex<float>> constellation_cache_;
+    mutable std::chrono::steady_clock::time_point constellation_cache_time_{};
+    static constexpr int CONSTELLATION_CACHE_HOLD_MS = 1500;
 
     // Lifecycle
     std::atomic<bool> shutdown_{false};
