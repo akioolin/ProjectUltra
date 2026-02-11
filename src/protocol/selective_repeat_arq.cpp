@@ -53,7 +53,8 @@ bool SelectiveRepeatARQ::sendDataWithFlags(const Bytes& data, uint8_t flags) {
     tx_window_[slot].retry_count = 0;
     tx_window_[slot].acked = false;
     tx_window_[slot].hole_ack_count = 0;
-    tx_window_[slot].fast_retransmitted = false;
+    tx_window_[slot].fast_retx_count = 0;
+    tx_window_[slot].fast_retx_cooldown_ms = 0;
 
     transmitData(tx_window_[slot].frame_data);
 
@@ -131,7 +132,10 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
     uint16_t seq = frame.seq;
 
     if (isInRXWindow(seq)) {
+        uint16_t expected_seq = rx_base_seq_;
         size_t slot = seqToSlot(seq);
+        bool new_frame = false;
+        bool out_of_order = false;
 
         if (!rx_window_[slot].received) {
             rx_window_[slot].received = true;
@@ -139,32 +143,41 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
             rx_window_[slot].payload = frame.payload;
             rx_window_[slot].flags = frame.flags;
             stats_.frames_received++;
+            new_frame = true;
 
             LOG_MODEM(DEBUG, "SR-ARQ: DATA seq=%d stored in slot %zu", seq, slot);
 
-            if (seq == rx_base_seq_) {
+            if (seq == expected_seq) {
                 advanceRXWindow();
             } else {
+                out_of_order = true;
                 stats_.out_of_order++;
                 LOG_MODEM(DEBUG, "SR-ARQ: Out-of-order seq=%d (expected %d)",
-                          seq, rx_base_seq_);
+                          seq, expected_seq);
             }
         } else {
             LOG_MODEM(DEBUG, "SR-ARQ: Duplicate DATA seq=%d", seq);
         }
 
-        // ACK strategy: immediate when burst window is full or last fragment
-        frames_since_ack_++;
-        if (!last_rx_more_data_ || frames_since_ack_ >= config_.window_size) {
-            // Window full or last fragment — ACK immediately
+        // ACK strategy for OFDM burst traffic:
+        // - Immediate ACK on hole detection (out-of-order) or full window.
+        // - Otherwise short delayed coalescing to reduce ACK storms.
+        if (new_frame) {
+            frames_since_ack_++;
+        }
+
+        if (out_of_order || frames_since_ack_ >= config_.window_size) {
             sendSack();
             sack_pending_ = false;
             sack_timer_ms_ = 0;
             frames_since_ack_ = 0;
-        } else {
-            // More fragments coming, window not full — short delay as fallback
+        } else if (new_frame) {
             sack_pending_ = true;
-            sack_timer_ms_ = config_.sack_delay_ms;
+            if (sack_timer_ms_ == 0) {
+                sack_timer_ms_ = config_.sack_delay_ms;
+            } else {
+                sack_timer_ms_ = std::min(sack_timer_ms_, config_.sack_delay_ms);
+            }
         }
 
     } else {
@@ -172,6 +185,9 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
                   seq, rx_base_seq_, (rx_base_seq_ + config_.window_size) & 0xFFFF);
         // Out-of-window: send SACK immediately to help sender recover
         sendSack();
+        sack_pending_ = false;
+        sack_timer_ms_ = 0;
+        frames_since_ack_ = 0;
     }
 }
 
@@ -221,7 +237,8 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
         for (size_t i = 0; i < config_.window_size; i++) {
             size_t slot = seqToSlot((tx_base_seq_ + i) & 0xFFFF);
             tx_window_[slot].hole_ack_count = 0;
-            tx_window_[slot].fast_retransmitted = false;
+            tx_window_[slot].fast_retx_count = 0;
+            tx_window_[slot].fast_retx_cooldown_ms = 0;
         }
     }
 
@@ -256,16 +273,24 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
         size_t base_slot = seqToSlot(tx_base_seq_);
         TXSlot& s = tx_window_[base_slot];
 
-        if (s.active && !s.acked && s.seq == tx_base_seq_ && !s.fast_retransmitted) {
+        if (s.active && !s.acked && s.seq == tx_base_seq_) {
             s.hole_ack_count++;
             LOG_MODEM(INFO, "SR-ARQ: Hole detected for base seq=%d (hole_count=%d, bitmap=0x%02X)",
                       tx_base_seq_, s.hole_ack_count, bitmap);
 
-            // Fast retransmit on first hole detection (no duplicate-ACK threshold needed:
-            // bitmap already proves receiver has later frames but not base)
-            s.fast_retransmitted = true;
-            LOG_MODEM(INFO, "SR-ARQ: Fast retransmit base seq=%d (bitmap=0x%02X)", tx_base_seq_, bitmap);
-            retransmitFrame(base_slot);
+            // Allow several paced fast retransmits for persistent base holes.
+            // ACK repeats can produce clustered duplicate ACKs, so enforce cooldown.
+            constexpr int MAX_FAST_RETX_PER_HOLE = 3;
+            uint32_t fast_retx_cooldown_ms = std::clamp(config_.ack_timeout_ms / 6, 300u, 1200u);
+            if (s.fast_retx_count < MAX_FAST_RETX_PER_HOLE && s.fast_retx_cooldown_ms == 0) {
+                s.fast_retx_count++;
+                s.fast_retx_cooldown_ms = fast_retx_cooldown_ms;
+                LOG_MODEM(INFO,
+                          "SR-ARQ: Fast retransmit base seq=%d (bitmap=0x%02X, fast=%d/%d, cooldown=%ums)",
+                          tx_base_seq_, bitmap, s.fast_retx_count, MAX_FAST_RETX_PER_HOLE,
+                          fast_retx_cooldown_ms);
+                retransmitFrame(base_slot, RetransmitCause::FAST_HOLE);
+            }
         }
     }
 }
@@ -278,28 +303,36 @@ void SelectiveRepeatARQ::handleNackFrame(const v2::ControlFrame& frame) {
     if (isInTXWindow(seq)) {
         size_t slot = seqToSlot(seq);
         if (tx_window_[slot].active && !tx_window_[slot].acked) {
-            retransmitFrame(slot);
+            retransmitFrame(slot, RetransmitCause::NACK);
         }
     }
 }
 
 void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
-    // Delayed ACK repeat (time diversity for fading channels)
-    if (ack_repeat_pending_ && ack_repeats_remaining_ > 0) {
-        if (elapsed_ms >= ack_repeat_timer_ms_) {
-            transmitData(ack_repeat_data_);
-            ack_repeats_remaining_--;
+    // Delayed ACK repeats (time diversity for fading channels).
+    // Use per-job catch-up loops so large elapsed_ms can't skip due repeats.
+    for (auto it = ack_repeat_jobs_.begin(); it != ack_repeat_jobs_.end();) {
+        AckRepeatJob& job = *it;
+        uint32_t remaining_ms = elapsed_ms;
+
+        while (job.repeats_remaining > 0 && remaining_ms >= job.timer_ms) {
+            remaining_ms -= job.timer_ms;
+            transmitData(job.frame_data);
+            job.repeats_remaining--;
             stats_.acks_sent++;
-            LOG_MODEM(INFO, "SR-ARQ: ACK_REPEAT_SENT remaining=%d", ack_repeats_remaining_);
-            if (ack_repeats_remaining_ > 0) {
-                ack_repeat_timer_ms_ = ack_repeat_delay_ms_;
-            } else {
-                ack_repeat_pending_ = false;
-                ack_repeat_data_.clear();
+            LOG_MODEM(INFO, "SR-ARQ: ACK_REPEAT_SENT remaining=%d", job.repeats_remaining);
+            if (job.repeats_remaining > 0) {
+                job.timer_ms = ack_repeat_delay_ms_;
             }
-        } else {
-            ack_repeat_timer_ms_ -= elapsed_ms;
         }
+
+        if (job.repeats_remaining == 0) {
+            it = ack_repeat_jobs_.erase(it);
+            continue;
+        }
+
+        job.timer_ms -= remaining_ms;
+        ++it;
     }
 
     // TX side: check for timeouts and retransmit
@@ -308,9 +341,17 @@ void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
         TXSlot& s = tx_window_[slot];
 
         if (s.active && !s.acked) {
+            if (s.fast_retx_cooldown_ms > 0) {
+                if (elapsed_ms >= s.fast_retx_cooldown_ms) {
+                    s.fast_retx_cooldown_ms = 0;
+                } else {
+                    s.fast_retx_cooldown_ms -= elapsed_ms;
+                }
+            }
+
             if (elapsed_ms >= s.timeout_ms) {
                 stats_.timeouts++;
-                retransmitFrame(slot);
+                retransmitFrame(slot, RetransmitCause::TIMEOUT);
             } else {
                 s.timeout_ms -= elapsed_ms;
             }
@@ -331,8 +372,15 @@ void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
     }
 }
 
-void SelectiveRepeatARQ::retransmitFrame(size_t slot) {
+void SelectiveRepeatARQ::retransmitFrame(size_t slot, RetransmitCause cause) {
     TXSlot& s = tx_window_[slot];
+
+    if (cause == RetransmitCause::TIMEOUT) {
+        // New timeout epoch: permit another cycle of hole-based fast retransmits.
+        s.fast_retx_count = 0;
+        s.fast_retx_cooldown_ms = 0;
+        s.hole_ack_count = 0;
+    }
 
     s.retry_count++;
     if (s.retry_count >= config_.max_retries) {
@@ -351,8 +399,15 @@ void SelectiveRepeatARQ::retransmitFrame(size_t slot) {
         return;
     }
 
-    LOG_MODEM(DEBUG, "SR-ARQ: Retransmitting seq=%d (attempt %d/%d)",
-              s.seq, s.retry_count + 1, config_.max_retries);
+    const char* cause_str = "unknown";
+    switch (cause) {
+        case RetransmitCause::TIMEOUT: cause_str = "timeout"; break;
+        case RetransmitCause::FAST_HOLE: cause_str = "fast-hole"; break;
+        case RetransmitCause::NACK: cause_str = "nack"; break;
+    }
+
+    LOG_MODEM(DEBUG, "SR-ARQ: Retransmitting seq=%d (attempt %d/%d, cause=%s)",
+              s.seq, s.retry_count + 1, config_.max_retries, cause_str);
 
     stats_.retransmissions++;
     s.timeout_ms = config_.ack_timeout_ms;
@@ -407,10 +462,11 @@ void SelectiveRepeatARQ::advanceRXWindow() {
 
 void SelectiveRepeatARQ::sendSack() {
     uint8_t bitmap = buildRXBitmap();
+    uint16_t base_seq = (rx_base_seq_ - 1) & 0xFFFF;
 
     // Use NACK with bitmap as SACK
     auto sack = v2::ControlFrame::makeNack(local_call_, remote_call_,
-                                            (rx_base_seq_ - 1) & 0xFFFF,
+                                            base_seq,
                                             bitmap);
     // Override type to ACK for cumulative ack behavior
     sack.type = v2::FrameType::ACK;
@@ -422,18 +478,40 @@ void SelectiveRepeatARQ::sendSack() {
     auto data = sack.serialize();
 
     LOG_MODEM(INFO, "SR-ARQ: Sent SACK base=%d bitmap=0x%02X",
-              (rx_base_seq_ - 1) & 0xFFFF, bitmap);
+              base_seq, bitmap);
 
     transmitData(data);
 
+    bool base_advanced = !last_sack_base_valid_ || base_seq != last_sack_base_;
+    last_sack_base_valid_ = true;
+    last_sack_base_ = base_seq;
+    bool critical_ack = base_advanced || bitmap != 0;
+
     // Schedule delayed repeat copies for fading reliability
-    if (ack_repeat_count_ > 1) {
-        ack_repeat_pending_ = true;
-        ack_repeat_timer_ms_ = ack_repeat_delay_ms_;
-        ack_repeats_remaining_ = ack_repeat_count_ - 1;  // Already sent 1
-        ack_repeat_data_ = data;
-        LOG_MODEM(INFO, "SR-ARQ: ACK_REPEAT scheduled=%d delay=%dms",
-                  ack_repeats_remaining_, ack_repeat_delay_ms_);
+    int repeats_remaining = ack_repeat_count_ - 1;  // Already sent one copy above
+
+    // Critical ACKs get one immediate duplicate for diversity against short deep fades.
+    if (critical_ack && repeats_remaining > 0) {
+        transmitData(data);
+        stats_.acks_sent++;
+        repeats_remaining--;
+        LOG_MODEM(INFO, "SR-ARQ: ACK_REPEAT immediate duplicate (critical, base=%d bitmap=0x%02X)",
+                  base_seq, bitmap);
+    }
+
+    if (repeats_remaining > 0) {
+        if (ack_repeat_jobs_.size() >= 16) {
+            LOG_MODEM(WARN, "SR-ARQ: ACK_REPEAT queue full, dropping oldest pending repeat");
+            ack_repeat_jobs_.pop_front();
+        }
+        AckRepeatJob job;
+        job.frame_data = data;
+        job.timer_ms = ack_repeat_delay_ms_;
+        job.repeats_remaining = repeats_remaining;
+        ack_repeat_jobs_.push_back(std::move(job));
+
+        LOG_MODEM(INFO, "SR-ARQ: ACK_REPEAT scheduled=%d delay=%dms queue=%zu",
+                  repeats_remaining, ack_repeat_delay_ms_, ack_repeat_jobs_.size());
     }
 }
 
@@ -488,7 +566,8 @@ void SelectiveRepeatARQ::reset() {
         slot.acked = false;
         slot.frame_data.clear();
         slot.hole_ack_count = 0;
-        slot.fast_retransmitted = false;
+        slot.fast_retx_count = 0;
+        slot.fast_retx_cooldown_ms = 0;
     }
     tx_base_seq_ = 0;
     tx_next_seq_ = 0;
@@ -507,10 +586,9 @@ void SelectiveRepeatARQ::reset() {
     sack_timer_ms_ = 0;
     frames_since_ack_ = 0;
 
-    ack_repeat_pending_ = false;
-    ack_repeat_timer_ms_ = 0;
-    ack_repeats_remaining_ = 0;
-    ack_repeat_data_.clear();
+    ack_repeat_jobs_.clear();
+    last_sack_base_valid_ = false;
+    last_sack_base_ = 0;
 
     LOG_MODEM(DEBUG, "SR-ARQ: Reset");
 }

@@ -1,5 +1,6 @@
 #include "file_transfer.hpp"
 #include "compression.hpp"
+#include "ultra/logging.hpp"
 #include <filesystem>
 #include <fstream>
 #include <algorithm>
@@ -378,23 +379,61 @@ bool FileTransferController::processFileData(const Bytes& payload, bool more_dat
         return true;
     }
 
+    // Parse 32-bit chunk offset (big-endian).
+    uint32_t offset = (static_cast<uint32_t>(payload[1]) << 24) |
+                      (static_cast<uint32_t>(payload[2]) << 16) |
+                      (static_cast<uint32_t>(payload[3]) << 8) |
+                      static_cast<uint32_t>(payload[4]);
+
     // Append data (skip type and offset bytes)
     const uint8_t* data = payload.data() + 5;
     size_t data_len = payload.size() - 5;
+
+    // ARQ normally delivers in-order, so offset should match current size.
+    // Be defensive against duplicate/late frames or rare header false-positives.
+    uint32_t expected_offset = static_cast<uint32_t>(rx_data_.size());
+    if (offset != expected_offset) {
+        if (offset < expected_offset) {
+            LOG_MODEM(WARN,
+                      "FileTransfer: Ignoring duplicate/overlap chunk offset=%u len=%zu (have=%zu)",
+                      offset, data_len, rx_data_.size());
+            return true;
+        }
+
+        // Gap: wait for missing data instead of appending out-of-order bytes.
+        LOG_MODEM(WARN,
+                  "FileTransfer: Gap detected offset=%u len=%zu (expected=%u), waiting for retransmit",
+                  offset, data_len, expected_offset);
+        return true;
+    }
 
     rx_data_.insert(rx_data_.end(), data, data + data_len);
 
     notifyProgress();
 
-    // Check if this is the last chunk
-    if (!more_data) {
+    const bool compressed = (rx_flags_ & FileFlags::COMPRESSED) != 0;
+    const bool size_reached = !compressed && rx_data_.size() >= rx_expected_size_;
+
+    // For uncompressed files, trust explicit expected size more than MORE_FRAG.
+    if (!compressed && !more_data && rx_data_.size() < rx_expected_size_) {
+        LOG_MODEM(WARN,
+                  "FileTransfer: Premature final chunk ignored (%zu/%u bytes)",
+                  rx_data_.size(), rx_expected_size_);
+    }
+
+    // Finalization trigger:
+    // - Compressed: still rely on MORE_FRAG (we don't know compressed size a priori)
+    // - Uncompressed: finalize once expected byte count is reached
+    if ((compressed && !more_data) || (!compressed && size_reached)) {
         Bytes final_data;
 
         // Decompress if needed
-        if (rx_flags_ & FileFlags::COMPRESSED) {
+        if (compressed) {
             auto decompressed = Compression::decompress(rx_data_, rx_expected_size_ * 2);
             if (!decompressed) {
                 state_ = FileTransferState::ERROR;
+                LOG_MODEM(ERROR, "FileTransfer: Decompression failed (%zu bytes compressed)",
+                          rx_data_.size());
                 if (on_received_) {
                     on_received_("", false);
                 }
@@ -403,6 +442,12 @@ bool FileTransferController::processFileData(const Bytes& payload, bool more_dat
             }
             final_data = std::move(*decompressed);
         } else {
+            if (rx_data_.size() > rx_expected_size_) {
+                LOG_MODEM(WARN,
+                          "FileTransfer: Truncating oversized payload (%zu -> %u bytes)",
+                          rx_data_.size(), rx_expected_size_);
+                rx_data_.resize(rx_expected_size_);
+            }
             final_data = std::move(rx_data_);
         }
 
@@ -419,9 +464,17 @@ bool FileTransferController::processFileData(const Bytes& payload, bool more_dat
             if (out.good()) {
                 out.write(reinterpret_cast<const char*>(final_data.data()), final_data.size());
                 out.close();
+                LOG_MODEM(INFO, "FileTransfer: Received OK (%zu bytes, crc=%08X) -> %s",
+                          final_data.size(), crc, rx_filepath_.c_str());
             } else {
                 success = false;
+                LOG_MODEM(ERROR, "FileTransfer: Failed to open output file: %s",
+                          rx_filepath_.c_str());
             }
+        } else {
+            LOG_MODEM(ERROR,
+                      "FileTransfer: CRC mismatch (got=%08X expected=%08X, size=%zu/%u)",
+                      crc, rx_expected_crc_, final_data.size(), rx_expected_size_);
         }
 
         state_ = success ? FileTransferState::COMPLETE : FileTransferState::ERROR;

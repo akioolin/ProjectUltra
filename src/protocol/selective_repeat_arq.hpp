@@ -2,6 +2,7 @@
 
 #include "arq_interface.hpp"
 #include "frame_v2.hpp"
+#include <algorithm>
 #include <deque>
 #include <optional>
 #include <array>
@@ -77,15 +78,25 @@ public:
     void setAckTimeout(uint32_t timeout_ms) { config_.ack_timeout_ms = timeout_ms; }
     uint32_t getAckTimeout() const { return config_.ack_timeout_ms; }
 
+    // Set delayed SACK coalescing timer
+    void setSackDelay(uint32_t ms) { config_.sack_delay_ms = std::max(1u, ms); }
+    uint32_t getSackDelay() const { return config_.sack_delay_ms; }
+
     // Set max retries before giving up on a frame
     void setMaxRetries(int retries) { config_.max_retries = std::max(1, retries); }
     int getMaxRetries() const { return config_.max_retries; }
 
     // ACK repeat: send multiple copies with delay for fading reliability
     void setAckRepeatCount(int count) { ack_repeat_count_ = std::clamp(count, 1, 3); }
-    void setAckRepeatDelay(uint32_t ms) { ack_repeat_delay_ms_ = ms; }
+    void setAckRepeatDelay(uint32_t ms) { ack_repeat_delay_ms_ = std::max(1u, ms); }
 
 private:
+    enum class RetransmitCause : uint8_t {
+        TIMEOUT,
+        FAST_HOLE,
+        NACK
+    };
+
     // TX state per frame in window
     struct TXSlot {
         bool active = false;        // Slot in use
@@ -95,7 +106,8 @@ private:
         int retry_count = 0;        // Number of retransmits
         bool acked = false;         // ACK received (waiting for earlier frames)
         int hole_ack_count = 0;     // Consecutive ACKs showing this frame as gap
-        bool fast_retransmitted = false; // Already fast-retransmitted for this gap
+        int fast_retx_count = 0;    // Number of fast retransmits for current hole context
+        uint32_t fast_retx_cooldown_ms = 0; // Prevent ACK-repeat storms from immediate re-retransmit
     };
 
     // RX state per frame in receive window
@@ -137,11 +149,17 @@ private:
     int ack_repeat_count_ = 1;         // Total copies (1=single, 2=double, 3=triple)
     uint32_t ack_repeat_delay_ms_ = 80; // Delay between copies
 
-    // Pending repeat state
-    bool ack_repeat_pending_ = false;
-    uint32_t ack_repeat_timer_ms_ = 0;
-    int ack_repeats_remaining_ = 0;
-    Bytes ack_repeat_data_;             // Serialized ACK to repeat
+    // Pending repeat state (queue avoids overwriting repeats during ACK bursts)
+    struct AckRepeatJob {
+        Bytes frame_data;
+        uint32_t timer_ms = 0;
+        int repeats_remaining = 0;
+    };
+    std::deque<AckRepeatJob> ack_repeat_jobs_;
+
+    // Track cumulative ACK base progress (for critical immediate duplicate)
+    bool last_sack_base_valid_ = false;
+    uint16_t last_sack_base_ = 0;
 
     // Statistics
     ARQStats stats_;
@@ -161,7 +179,7 @@ private:
     void handleAckFrame(const v2::ControlFrame& frame);
     void handleNackFrame(const v2::ControlFrame& frame);
 
-    void retransmitFrame(size_t slot);
+    void retransmitFrame(size_t slot, RetransmitCause cause);
     void advanceTXWindow();
     void advanceRXWindow();
     void sendSack();

@@ -4,9 +4,83 @@
 #include "connection.hpp"
 #include "waveform_selection.hpp"
 #include "ultra/logging.hpp"
+#include <algorithm>
 
 namespace ultra {
 namespace protocol {
+
+namespace {
+
+constexpr uint32_t OFDM_SAMPLE_RATE = 48000;
+constexpr uint32_t OFDM_FFT_SIZE = 1024;
+constexpr uint32_t OFDM_LONG_CP_SAMPLES = 128;  // LONG CP at 1024 FFT
+constexpr uint32_t OFDM_SYMBOL_SAMPLES = OFDM_FFT_SIZE + OFDM_LONG_CP_SAMPLES;
+constexpr uint32_t OFDM_NUM_CARRIERS = 59;
+constexpr uint32_t LDPC_BITS_PER_CODEWORD = 648;
+constexpr uint32_t FIXED_FRAME_CODEWORDS = 4;
+
+bool isCoherentModulation(Modulation mod) {
+    switch (mod) {
+        case Modulation::BPSK:
+        case Modulation::QPSK:
+        case Modulation::QAM8:
+        case Modulation::QAM16:
+        case Modulation::QAM32:
+        case Modulation::QAM64:
+        case Modulation::QAM256:
+            return true;
+        default:
+            return false;
+    }
+}
+
+int pilotSpacingForRate(Modulation mod, CodeRate rate) {
+    bool coherent = isCoherentModulation(mod);
+    switch (rate) {
+        case CodeRate::R3_4:
+            return coherent ? 8 : 15;
+        case CodeRate::R2_3:
+        case CodeRate::R1_2:
+            return coherent ? 5 : 10;
+        case CodeRate::R1_4:
+        case CodeRate::R1_3:
+        default:
+            return coherent ? 5 : 10;
+    }
+}
+
+uint32_t symbolsForCodewords(Modulation mod, CodeRate rate, int codewords) {
+    int pilot_spacing = pilotSpacingForRate(mod, rate);
+    int pilot_count = (OFDM_NUM_CARRIERS + pilot_spacing - 1) / pilot_spacing;
+    int data_carriers = std::max(1, static_cast<int>(OFDM_NUM_CARRIERS) - pilot_count);
+    uint32_t bits_per_symbol = static_cast<uint32_t>(data_carriers) * getBitsPerSymbol(mod);
+    uint32_t frame_bits = static_cast<uint32_t>(codewords) * LDPC_BITS_PER_CODEWORD;
+    uint32_t data_symbols = (frame_bits + bits_per_symbol - 1) / bits_per_symbol;
+
+    // 2 training symbols in light preamble + data symbols.
+    return 2 + data_symbols;
+}
+
+uint32_t computeOfdmAckTimeoutMs(Modulation mod, CodeRate rate, size_t window_size,
+                                 uint32_t sack_delay_ms, int ack_repeat_count) {
+    constexpr float symbol_ms = (1000.0f * OFDM_SYMBOL_SAMPLES) / OFDM_SAMPLE_RATE;  // 24ms
+
+    uint32_t data_symbols = symbolsForCodewords(mod, rate, FIXED_FRAME_CODEWORDS);
+    uint32_t ack_symbols = symbolsForCodewords(mod, rate, 1);
+    uint32_t data_frame_ms = static_cast<uint32_t>(data_symbols * symbol_ms + 0.5f);
+    uint32_t ack_frame_ms = static_cast<uint32_t>(ack_symbols * symbol_ms + 0.5f);
+
+    uint32_t ack_copies = static_cast<uint32_t>(std::clamp(ack_repeat_count, 1, 3));
+    uint32_t tx_burst_ms = static_cast<uint32_t>(window_size) * data_frame_ms;
+    uint32_t ack_path_ms = ack_copies * ack_frame_ms + sack_delay_ms;
+    uint32_t decode_jitter_margin_ms = std::max<uint32_t>(700, data_frame_ms / 2);
+
+    // Timeout should cover a full burst RTT + decode/jitter margin.
+    uint32_t timeout_ms = tx_burst_ms + ack_path_ms + decode_jitter_margin_ms;
+    return std::clamp(timeout_ms, 4500u, 14000u);
+}
+
+} // namespace
 
 const char* connectionStateToString(ConnectionState state) {
     switch (state) {
@@ -795,15 +869,49 @@ void Connection::enterConnected() {
     if (negotiated_mode_ == WaveformMode::MC_DPSK) {
         arq_.setWindowSize(1);
         arq_.setAckTimeout(18000);
+        arq_.setSackDelay(2000);
         arq_.setAckRepeatCount(1);  // Single ACK (stop-and-wait, no benefit from repeat)
         LOG_MODEM(INFO, "Connection: ARQ window=1, timeout=18s, ack_repeat=1 (MC-DPSK)");
     } else {
         arq_.setWindowSize(8);
-        arq_.setAckTimeout(9000);   // Burst of 8 ≈ 5.2s + decode + ACK ≈ 6.7s + jitter margin
         arq_.setMaxRetries(15);     // More attempts compensate for ACK loss on fading
-        arq_.setAckRepeatCount(2);  // Double ACK for fading reliability
-        arq_.setAckRepeatDelay(80); // 80ms between copies for time diversity
-        LOG_MODEM(INFO, "Connection: ARQ window=8, timeout=9s, max_retries=15, ack_repeat=2/80ms (OFDM burst)");
+        arq_.setSackDelay(120);     // Short coalescing delay for ACK/SACK control traffic
+
+        int ack_repeat_count = 2;
+        uint32_t ack_repeat_delay_ms = 80;
+
+        // D8PSK R1/2 in fading benefits from stronger control-frame diversity.
+        if (data_modulation_ == Modulation::D8PSK && data_code_rate_ == CodeRate::R1_2) {
+            ack_repeat_count = 3;
+            ack_repeat_delay_ms = 110;
+        }
+
+        arq_.setAckRepeatCount(ack_repeat_count);
+        arq_.setAckRepeatDelay(ack_repeat_delay_ms);
+
+        uint32_t ack_timeout_ms = computeOfdmAckTimeoutMs(
+            data_modulation_, data_code_rate_, arq_.getWindowSize(), arq_.getSackDelay(), ack_repeat_count);
+        arq_.setAckTimeout(ack_timeout_ms);
+
+        constexpr float symbol_ms = (1000.0f * OFDM_SYMBOL_SAMPLES) / OFDM_SAMPLE_RATE;
+        uint32_t data_symbols = symbolsForCodewords(data_modulation_, data_code_rate_, FIXED_FRAME_CODEWORDS);
+        uint32_t ack_symbols = symbolsForCodewords(data_modulation_, data_code_rate_, 1);
+        uint32_t data_ms = static_cast<uint32_t>(data_symbols * symbol_ms + 0.5f);
+        uint32_t ack_ms = static_cast<uint32_t>(ack_symbols * symbol_ms + 0.5f);
+
+        LOG_MODEM(INFO,
+                  "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, ack=%ums x%d), max_retries=%d, sack_delay=%ums, ack_repeat=%d/%ums (OFDM %s %s)",
+                  arq_.getWindowSize(),
+                  ack_timeout_ms / 1000.0f,
+                  data_ms,
+                  ack_ms,
+                  ack_repeat_count,
+                  arq_.getMaxRetries(),
+                  arq_.getSackDelay(),
+                  ack_repeat_count,
+                  ack_repeat_delay_ms,
+                  modulationToString(data_modulation_),
+                  codeRateToString(data_code_rate_));
     }
 
     LOG_MODEM(INFO, "Connection: Now CONNECTED to %s (mode=%s)",
