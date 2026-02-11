@@ -798,9 +798,9 @@ void Connection::enterConnected() {
         LOG_MODEM(INFO, "Connection: ARQ window=1, timeout=18s (MC-DPSK)");
     } else {
         arq_.setWindowSize(8);
-        arq_.setAckTimeout(12000);  // Burst of 8 blocks ≈ 5.2s + decode + ACK TX ≈ 7s
+        arq_.setAckTimeout(9000);   // Burst of 8 ≈ 5.2s + decode + ACK ≈ 6.7s + jitter margin
         arq_.setMaxRetries(15);     // More attempts compensate for ACK loss on fading
-        LOG_MODEM(INFO, "Connection: ARQ window=8, timeout=12s, max_retries=15 (OFDM burst)");
+        LOG_MODEM(INFO, "Connection: ARQ window=8, timeout=9s, max_retries=15 (OFDM burst)");
     }
 
     LOG_MODEM(INFO, "Connection: Now CONNECTED to %s (mode=%s)",

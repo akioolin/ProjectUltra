@@ -52,6 +52,8 @@ bool SelectiveRepeatARQ::sendDataWithFlags(const Bytes& data, uint8_t flags) {
     tx_window_[slot].timeout_ms = config_.ack_timeout_ms;
     tx_window_[slot].retry_count = 0;
     tx_window_[slot].acked = false;
+    tx_window_[slot].hole_ack_count = 0;
+    tx_window_[slot].fast_retransmitted = false;
 
     transmitData(tx_window_[slot].frame_data);
 
@@ -175,9 +177,30 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
 
 void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
     uint16_t seq = frame.seq;
+    uint8_t bitmap = frame.payload[2];
 
-    LOG_MODEM(DEBUG, "SR-ARQ: ACK seq=%d (base=%d)", seq, tx_base_seq_);
+    LOG_MODEM(INFO, "SR-ARQ: ACK seq=%d bitmap=0x%02X (base=%d, in_flight=%zu)",
+              seq, bitmap, tx_base_seq_, tx_in_flight_);
 
+    // Stale-ACK guard: reject ACKs strictly older than (tx_base_seq_ - 1).
+    // seq == (tx_base_seq_ - 1) is valid — it's the common "no new cumulative progress"
+    // ACK that still carries a fresh SACK bitmap for the current window.
+    uint16_t ack_base = (tx_base_seq_ - 1) & 0xFFFF;
+    uint16_t back = (ack_base - seq) & 0xFFFF;
+    if (back > 0 && back < 0x8000) {
+        LOG_MODEM(INFO, "SR-ARQ: Stale ACK seq=%d < base-1=%d, ignoring", seq, ack_base);
+        return;
+    }
+
+    // Far-future guard: reject ACKs implausibly ahead (> window_size + 1 past base)
+    uint16_t forward = (seq - ack_base) & 0xFFFF;
+    if (forward > config_.window_size + 1 && forward < 0x8000) {
+        LOG_MODEM(INFO, "SR-ARQ: Future ACK seq=%d too far ahead of base=%d, ignoring", seq, tx_base_seq_);
+        return;
+    }
+
+    // --- Cumulative ACK: advance base past all frames up to seq ---
+    uint16_t old_base = tx_base_seq_;
     while (tx_in_flight_ > 0 && tx_base_seq_ != ((seq + 1) & 0xFFFF)) {
         size_t slot = seqToSlot(tx_base_seq_);
         if (tx_window_[slot].active) {
@@ -191,6 +214,59 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
             }
         }
         tx_base_seq_ = (tx_base_seq_ + 1) & 0xFFFF;
+    }
+
+    // Reset fast-retransmit guards when base advances (new gap context)
+    if (tx_base_seq_ != old_base) {
+        for (size_t i = 0; i < config_.window_size; i++) {
+            size_t slot = seqToSlot((tx_base_seq_ + i) & 0xFFFF);
+            tx_window_[slot].hole_ack_count = 0;
+            tx_window_[slot].fast_retransmitted = false;
+        }
+    }
+
+    // --- Positive-only SACK bitmap: mark frames the receiver confirms it HAS ---
+    if (bitmap != 0) {
+        bool any_sacked = false;
+        for (int i = 0; i < 8 && i < static_cast<int>(config_.window_size); i++) {
+            if (!(bitmap & (1 << i))) continue;
+
+            uint16_t sack_seq = (tx_base_seq_ + i) & 0xFFFF;
+            size_t slot = seqToSlot(sack_seq);
+
+            if (tx_window_[slot].active && !tx_window_[slot].acked && tx_window_[slot].seq == sack_seq) {
+                tx_window_[slot].acked = true;
+                any_sacked = true;
+                LOG_MODEM(INFO, "SR-ARQ: SACK seq=%d confirmed received (bitmap=0x%02X)", sack_seq, bitmap);
+            }
+        }
+
+        if (any_sacked) {
+            advanceTXWindow();
+        }
+    }
+
+    // --- Hole-based fast retransmit for base gap frame ---
+    // Trigger: ACK aligned to base (seq == tx_base-1), bit0=0, any higher bit set.
+    // This means the receiver is missing the base frame but has later frames.
+    bool is_aligned = (seq == ((tx_base_seq_ - 1) & 0xFFFF));
+    bool has_hole = (bitmap & 0x01) == 0 && (bitmap & 0xFE) != 0;
+
+    if (is_aligned && has_hole) {
+        size_t base_slot = seqToSlot(tx_base_seq_);
+        TXSlot& s = tx_window_[base_slot];
+
+        if (s.active && !s.acked && s.seq == tx_base_seq_ && !s.fast_retransmitted) {
+            s.hole_ack_count++;
+            LOG_MODEM(INFO, "SR-ARQ: Hole detected for base seq=%d (hole_count=%d, bitmap=0x%02X)",
+                      tx_base_seq_, s.hole_ack_count, bitmap);
+
+            // Fast retransmit on first hole detection (no duplicate-ACK threshold needed:
+            // bitmap already proves receiver has later frames but not base)
+            s.fast_retransmitted = true;
+            LOG_MODEM(INFO, "SR-ARQ: Fast retransmit base seq=%d (bitmap=0x%02X)", tx_base_seq_, bitmap);
+            retransmitFrame(base_slot);
+        }
     }
 }
 
@@ -326,17 +402,20 @@ void SelectiveRepeatARQ::sendSack() {
     stats_.acks_sent++;
 
     auto data = sack.serialize();
-    LOG_MODEM(INFO, "SR-ARQ: ACK TX bytes[0-9]  = %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
-              data[0], data[1], data[2], data[3], data[4],
-              data[5], data[6], data[7], data[8], data[9]);
-    LOG_MODEM(INFO, "SR-ARQ: ACK TX bytes[10-19] = %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
-              data[10], data[11], data[12], data[13], data[14],
-              data[15], data[16], data[17], data[18], data[19]);
+
+    LOG_MODEM(INFO, "SR-ARQ: Sent SACK base=%d bitmap=0x%02X",
+              (rx_base_seq_ - 1) & 0xFFFF, bitmap);
 
     transmitData(data);
 
-    LOG_MODEM(DEBUG, "SR-ARQ: Sent SACK base=%d bitmap=0x%02X",
-              (rx_base_seq_ - 1) & 0xFFFF, bitmap);
+    // Conditional ACK repeat: send a second copy only for critical cases:
+    // - hole bitmap (bit0=0, higher bits set) → sender needs gap info urgently
+    // - out-of-window triggered ACKs are already immediate (called from handleDataFrame else branch)
+    bool has_hole = (bitmap & 0x01) == 0 && (bitmap & 0xFE) != 0;
+    if (has_hole) {
+        LOG_MODEM(INFO, "SR-ARQ: Repeating SACK (hole bitmap=0x%02X)", bitmap);
+        transmitData(data);
+    }
 }
 
 uint8_t SelectiveRepeatARQ::buildRXBitmap() const {
@@ -389,6 +468,8 @@ void SelectiveRepeatARQ::reset() {
         slot.active = false;
         slot.acked = false;
         slot.frame_data.clear();
+        slot.hole_ack_count = 0;
+        slot.fast_retransmitted = false;
     }
     tx_base_seq_ = 0;
     tx_next_seq_ = 0;

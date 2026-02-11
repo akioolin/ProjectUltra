@@ -90,6 +90,8 @@ private:
         uint32_t timeout_ms = 0;    // Time until retransmit
         int retry_count = 0;        // Number of retransmits
         bool acked = false;         // ACK received (waiting for earlier frames)
+        int hole_ack_count = 0;     // Consecutive ACKs showing this frame as gap
+        bool fast_retransmitted = false; // Already fast-retransmitted for this gap
     };
 
     // RX state per frame in receive window
