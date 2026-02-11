@@ -81,6 +81,10 @@ public:
     void setMaxRetries(int retries) { config_.max_retries = std::max(1, retries); }
     int getMaxRetries() const { return config_.max_retries; }
 
+    // ACK repeat: send multiple copies with delay for fading reliability
+    void setAckRepeatCount(int count) { ack_repeat_count_ = std::clamp(count, 1, 3); }
+    void setAckRepeatDelay(uint32_t ms) { ack_repeat_delay_ms_ = ms; }
+
 private:
     // TX state per frame in window
     struct TXSlot {
@@ -128,6 +132,16 @@ private:
     bool sack_pending_ = false;     // SACK waiting to be sent
     uint32_t sack_timer_ms_ = 0;    // Time until SACK is sent
     uint32_t frames_since_ack_ = 0; // Frames received since last ACK sent
+
+    // ACK repeat config (time-diversity for fading channels)
+    int ack_repeat_count_ = 1;         // Total copies (1=single, 2=double, 3=triple)
+    uint32_t ack_repeat_delay_ms_ = 80; // Delay between copies
+
+    // Pending repeat state
+    bool ack_repeat_pending_ = false;
+    uint32_t ack_repeat_timer_ms_ = 0;
+    int ack_repeats_remaining_ = 0;
+    Bytes ack_repeat_data_;             // Serialized ACK to repeat
 
     // Statistics
     ARQStats stats_;

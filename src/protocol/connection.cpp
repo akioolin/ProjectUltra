@@ -795,12 +795,15 @@ void Connection::enterConnected() {
     if (negotiated_mode_ == WaveformMode::MC_DPSK) {
         arq_.setWindowSize(1);
         arq_.setAckTimeout(18000);
-        LOG_MODEM(INFO, "Connection: ARQ window=1, timeout=18s (MC-DPSK)");
+        arq_.setAckRepeatCount(1);  // Single ACK (stop-and-wait, no benefit from repeat)
+        LOG_MODEM(INFO, "Connection: ARQ window=1, timeout=18s, ack_repeat=1 (MC-DPSK)");
     } else {
         arq_.setWindowSize(8);
         arq_.setAckTimeout(9000);   // Burst of 8 ≈ 5.2s + decode + ACK ≈ 6.7s + jitter margin
         arq_.setMaxRetries(15);     // More attempts compensate for ACK loss on fading
-        LOG_MODEM(INFO, "Connection: ARQ window=8, timeout=9s, max_retries=15 (OFDM burst)");
+        arq_.setAckRepeatCount(2);  // Double ACK for fading reliability
+        arq_.setAckRepeatDelay(80); // 80ms between copies for time diversity
+        LOG_MODEM(INFO, "Connection: ARQ window=8, timeout=9s, max_retries=15, ack_repeat=2/80ms (OFDM burst)");
     }
 
     LOG_MODEM(INFO, "Connection: Now CONNECTED to %s (mode=%s)",

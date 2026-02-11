@@ -284,6 +284,24 @@ void SelectiveRepeatARQ::handleNackFrame(const v2::ControlFrame& frame) {
 }
 
 void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
+    // Delayed ACK repeat (time diversity for fading channels)
+    if (ack_repeat_pending_ && ack_repeats_remaining_ > 0) {
+        if (elapsed_ms >= ack_repeat_timer_ms_) {
+            transmitData(ack_repeat_data_);
+            ack_repeats_remaining_--;
+            stats_.acks_sent++;
+            LOG_MODEM(INFO, "SR-ARQ: ACK_REPEAT_SENT remaining=%d", ack_repeats_remaining_);
+            if (ack_repeats_remaining_ > 0) {
+                ack_repeat_timer_ms_ = ack_repeat_delay_ms_;
+            } else {
+                ack_repeat_pending_ = false;
+                ack_repeat_data_.clear();
+            }
+        } else {
+            ack_repeat_timer_ms_ -= elapsed_ms;
+        }
+    }
+
     // TX side: check for timeouts and retransmit
     for (size_t i = 0; i < config_.window_size; i++) {
         size_t slot = seqToSlot((tx_base_seq_ + i) & 0xFFFF);
@@ -408,13 +426,14 @@ void SelectiveRepeatARQ::sendSack() {
 
     transmitData(data);
 
-    // Conditional ACK repeat: send a second copy only for critical cases:
-    // - hole bitmap (bit0=0, higher bits set) → sender needs gap info urgently
-    // - out-of-window triggered ACKs are already immediate (called from handleDataFrame else branch)
-    bool has_hole = (bitmap & 0x01) == 0 && (bitmap & 0xFE) != 0;
-    if (has_hole) {
-        LOG_MODEM(INFO, "SR-ARQ: Repeating SACK (hole bitmap=0x%02X)", bitmap);
-        transmitData(data);
+    // Schedule delayed repeat copies for fading reliability
+    if (ack_repeat_count_ > 1) {
+        ack_repeat_pending_ = true;
+        ack_repeat_timer_ms_ = ack_repeat_delay_ms_;
+        ack_repeats_remaining_ = ack_repeat_count_ - 1;  // Already sent 1
+        ack_repeat_data_ = data;
+        LOG_MODEM(INFO, "SR-ARQ: ACK_REPEAT scheduled=%d delay=%dms",
+                  ack_repeats_remaining_, ack_repeat_delay_ms_);
     }
 }
 
@@ -487,6 +506,11 @@ void SelectiveRepeatARQ::reset() {
     sack_pending_ = false;
     sack_timer_ms_ = 0;
     frames_since_ack_ = 0;
+
+    ack_repeat_pending_ = false;
+    ack_repeat_timer_ms_ = 0;
+    ack_repeats_remaining_ = 0;
+    ack_repeat_data_.clear();
 
     LOG_MODEM(DEBUG, "SR-ARQ: Reset");
 }

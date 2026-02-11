@@ -10,6 +10,97 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-02-11: Configurable ACK repeat with delayed copy for fading reliability
+
+**What was broken:**
+- D8PSK R1/2 on good fading at SNR=20 had ~45% ACK loss rate (BRAVO sent 11 ACKs,
+  ALPHA received 6). This caused 8 timeouts and 8 retransmissions (seed 45).
+- The old hole-only ACK repeat logic only fired when the SACK bitmap had holes
+  (bit0=0, higher bits set). Pure cumulative ACKs (bitmap=0x00) were never repeated,
+  leaving them vulnerable to single-frame loss on fading channels.
+
+**Root cause:**
+- Control frames (ACKs) use R1/4 coding but D8PSK modulation, making them fragile
+  on fading channels. A single lost ACK causes the sender to wait for a full 9s
+  timeout before retransmitting.
+
+**Files modified:**
+- `src/protocol/selective_repeat_arq.hpp` — Added ACK repeat config fields
+  (`ack_repeat_count_`, `ack_repeat_delay_ms_`) and pending repeat state
+  (`ack_repeat_pending_`, `ack_repeat_timer_ms_`, `ack_repeats_remaining_`,
+  `ack_repeat_data_`). Added public setters `setAckRepeatCount()`, `setAckRepeatDelay()`.
+- `src/protocol/selective_repeat_arq.cpp` — Replaced hole-only repeat in `sendSack()`
+  with configurable delayed repeat scheduling. Added delayed ACK repeat handling at
+  top of `tick()`. Added repeat state cleanup to `reset()`.
+- `src/protocol/connection.cpp` — In `enterConnected()`: set repeat=2/80ms for OFDM,
+  repeat=1 for MC-DPSK (stop-and-wait, no benefit from repeat).
+
+**How it works:**
+- After sending a SACK, if `ack_repeat_count_ > 1`, schedules delayed copies with
+  `ack_repeat_delay_ms_` between them (default 80ms for time diversity).
+- `tick()` fires the delayed copies via the existing `transmitData()` path.
+- 80ms delay provides time diversity against short fading nulls.
+- MC-DPSK keeps repeat=1 (stop-and-wait ACK timing is different).
+
+**Test verification:**
+```
+./build/cli_simulator --snr 15 --fading good --rate r1_4 --test     → PASS, 0 retx (no regression)
+./build/cli_simulator --snr 15 --fading moderate --rate r1_2 --test → PASS, 0 retx (no regression)
+./build/cli_simulator --snr 20 --fading good --mod d8psk --rate r1_2 --seed 45 --test
+  → PASS, timeouts=1 (was 8), retx=2 (was 8)
+./build/cli_simulator --snr 10 --fading moderate --test             → PASS, 0 retx (MC-DPSK unaffected)
+```
+
+---
+
+## 2026-02-10: SACK bitmap parsing + hole-based fast retransmit
+
+**What was broken:**
+- SACK bitmap was built and transmitted by the receiver but never parsed by the sender.
+  Lost ACKs caused a full 12s timeout stall before retransmission.
+- No fast retransmit mechanism — even when the receiver's bitmap clearly showed which
+  frames were missing, the sender waited for timeout on every lost frame.
+
+**Root cause:**
+- `handleAckFrame()` only processed the cumulative ACK sequence number, ignoring the
+  SACK bitmap byte entirely. The bitmap was dead data on the wire.
+- ACK timeout (12s) was set conservatively for worst-case but was excessive for typical
+  OFDM burst timing (~6.7s worst case for 8-frame burst + decode + ACK).
+
+**Files modified:**
+- `src/protocol/selective_repeat_arq.hpp` — Added `hole_ack_count` and `fast_retransmitted`
+  guard fields to TXSlot struct
+- `src/protocol/selective_repeat_arq.cpp` — Major rewrite of `handleAckFrame()`:
+  - Stale-ACK guard: reject ACKs with seq strictly older than tx_base_seq_ - 1
+  - Far-future guard: reject ACKs implausibly ahead of window
+  - Positive-only SACK bitmap: only mark frames receiver confirms (1-bits), never
+    interpret 0-bits as lost
+  - Hole-based fast retransmit: when bitmap shows bit0=0 and higher bits set, immediately
+    retransmit base frame (one-shot per gap, guarded by `fast_retransmitted` flag)
+  - Reset guard fields when base sequence advances
+  - Conditional ACK repeat in `sendSack()`: duplicate ACK only when hole bitmap detected
+  - INFO-level logs for bitmap parsing, guard decisions, fast-retransmit triggers
+- `src/protocol/connection.cpp` — OFDM ACK timeout reduced from 12000 → 9000ms
+
+**How it works:**
+- Positive-only SACK: only 1-bits are processed (safe — never triggers spurious retransmit
+  for in-flight frames). Selectively-acked frames allow `advanceTXWindow()` to skip past
+  contiguous acked frames when the gap is later filled.
+- Hole detection: `bitmap & 0x01 == 0` (base not received) + `bitmap & 0xFE != 0` (higher
+  frames received) → base frame is likely lost → fast retransmit immediately.
+- Per-slot `fast_retransmitted` flag prevents duplicate fast retransmits for the same gap.
+  Guards reset when tx_base_seq_ advances (new window position).
+- Conditional ACK repeat: receiver sends ACK twice only when hole bitmap is detected,
+  increasing probability the sender sees the SACK info. No blanket duplication.
+
+**Test verification:**
+- DQPSK R1/4 good fading SNR=15: PASSED (all messages delivered)
+- DQPSK R1/2 good fading SNR=15: PASSED (all messages delivered)
+- D8PSK R1/2 good fading SNR=20 (10 seeds): All 10 PASSED, fast retransmit fired on 3/10 seeds
+- MC-DPSK moderate fading SNR=10: PASSED (unaffected — window=1, no SACK)
+
+---
+
 ## 2026-02-10: Fix coherent pilot/interleaver geometry mismatch
 
 **What was broken:**
