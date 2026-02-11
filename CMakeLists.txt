@@ -7,6 +7,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # MSVC-specific settings
 if(MSVC)
+    # Ensure math constants (M_PI, etc.) are available from <cmath> in all TUs.
+    add_compile_definitions(_USE_MATH_DEFINES)
     # Enable parallel builds
     add_compile_options(/MP)
     # Suppress some common warnings
@@ -258,4 +260,3 @@ if(ULTRA_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
-

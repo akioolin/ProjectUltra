@@ -1,5 +1,6 @@
 #include "frame_interleaver.hpp"
 #include <stdexcept>
+#include <string>
 
 namespace ultra {
 namespace fec {
