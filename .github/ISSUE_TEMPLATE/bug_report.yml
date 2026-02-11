@@ -1,0 +1,109 @@
+name: Bug report
+description: Report a crash, startup problem, decode failure, or other defect.
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this issue.
+        Please provide complete logs and exact reproduction steps so we can debug quickly.
+
+  - type: input
+    id: release_tag
+    attributes:
+      label: Release or tag used
+      description: Example: 0.2.0-alpha.2
+      placeholder: 0.2.0-alpha.2
+    validations:
+      required: true
+
+  - type: input
+    id: os_version
+    attributes:
+      label: OS and version
+      description: Example: Windows 11 23H2, Ubuntu 24.04, macOS 14.7
+      placeholder: Windows 11 23H2
+    validations:
+      required: true
+
+  - type: input
+    id: binary
+    attributes:
+      label: Binary launched
+      description: Example: ultra_gui.exe, ultra_gui, cli_simulator
+      placeholder: ultra_gui.exe
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: List exact steps to reproduce the problem.
+      placeholder: |
+        1. Downloaded projectultra-windows.zip from release 0.2.0-alpha.2
+        2. Unzipped and launched ultra_gui.exe
+        3. Clicked Connect
+        4. Crash after ~3 seconds
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: Describe what should have happened.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      placeholder: Describe what happened instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Full logs and console output
+      description: |
+        Paste complete logs (not excerpts), including gui.log and terminal output if available.
+        You can also attach files directly to this issue.
+      placeholder: Paste logs here or attach files.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: audio_devices
+    attributes:
+      label: Audio device details
+      description: Input/output device names selected in app or OS.
+      placeholder: |
+        Input: USB Audio CODEC
+        Output: Speakers (Realtek)
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: Screenshot or crash dialog
+      description: Drag/drop screenshot or paste crash message text.
+      placeholder: Add screenshot and/or crash dialog text.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I used the latest available alpha build.
+          required: true
+        - label: I included complete logs or attached the log files.
+          required: true
