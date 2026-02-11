@@ -38,55 +38,145 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure CMake
+      - name: Install Linux GUI Dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsdl2-dev libgl1-mesa-dev
+
+      - name: Install macOS GUI Dependencies
+        if: runner.os == 'macOS'
+        run: brew install sdl2
+
+      - name: Install Windows GUI Dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          vcpkg install sdl2:x64-windows
+          "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Configure CMake (Linux/macOS)
+        if: runner.os != 'Windows'
         run: >
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Release
           -DULTRA_BUILD_TESTS=OFF
-          -DULTRA_BUILD_GUI=OFF
+          -DULTRA_BUILD_GUI=ON
           -DULTRA_USE_FFTW=OFF
 
-      - name: Build
+      - name: Configure CMake (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >
+          cmake -S . -B build -A x64
+          -DCMAKE_BUILD_TYPE=Release
+          -DULTRA_BUILD_TESTS=OFF
+          -DULTRA_BUILD_GUI=ON
+          -DULTRA_USE_FFTW=OFF
+          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=x64-windows
+
+      - name: Build (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: cmake --build build --parallel
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
         run: cmake --build build --config Release --parallel
 
-      - name: Collect Binaries
+      - name: Collect Bundle Files
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p dist
-          found=0
-          bins=(ultra cli_simulator threaded_simulator profile_acquisition test_waveform_simple)
+          pkg_root="package/projectultra-${{ matrix.target }}"
+          mkdir -p "$pkg_root"
+
+          bins=(ultra ultra_gui cli_simulator threaded_simulator profile_acquisition test_waveform_simple)
+          found_binary=0
 
           for b in "${bins[@]}"; do
             for p in "build/${b}" "build/Release/${b}" "build/${b}.exe" "build/Release/${b}.exe"; do
               if [[ -f "$p" ]]; then
-                f="$(basename "$p")"
-                if [[ "$f" == *.exe ]]; then
-                  base="${f%.exe}"
-                  ext=".exe"
-                else
-                  base="$f"
-                  ext=""
-                fi
-                cp "$p" "dist/${base}-${{ matrix.target }}${ext}"
-                found=1
+                cp "$p" "$pkg_root/"
+                found_binary=1
               fi
             done
           done
 
-          if [[ "$found" -eq 0 ]]; then
-            echo "No built binaries were found in expected paths."
+          if [[ "$found_binary" -eq 0 ]]; then
+            echo "No binaries found to package."
             exit 1
           fi
 
-          ls -la dist
+          if [[ "${{ matrix.target }}" == "windows" ]]; then
+            sdl_found=0
+            declare -a dll_candidates=()
 
-      - name: Upload Artifacts
+            if [[ -n "${VCPKG_ROOT:-}" ]]; then
+              vcpkg_unix="$VCPKG_ROOT"
+              if command -v cygpath >/dev/null 2>&1; then
+                vcpkg_unix="$(cygpath -u "$VCPKG_ROOT")"
+              fi
+              dll_candidates+=("${vcpkg_unix}/installed/x64-windows/bin/SDL2.dll")
+              dll_candidates+=("${vcpkg_unix}/installed/x64-windows/bin/SDL2d.dll")
+            fi
+
+            dll_candidates+=("/c/vcpkg/installed/x64-windows/bin/SDL2.dll")
+            dll_candidates+=("/c/vcpkg/installed/x64-windows/bin/SDL2d.dll")
+
+            for dll in "${dll_candidates[@]}"; do
+              if [[ -f "$dll" ]]; then
+                cp "$dll" "$pkg_root/"
+                sdl_found=1
+              fi
+            done
+
+            if [[ "$sdl_found" -eq 0 ]]; then
+              echo "SDL2 runtime DLL was not found. Expected from vcpkg install."
+              exit 1
+            fi
+          fi
+
+          cp README.md "$pkg_root/"
+
+          cat > "$pkg_root/RUNNING.md" <<'EOF'
+          ProjectUltra Bundle
+
+          Included programs:
+          - ultra
+          - ultra_gui
+          - cli_simulator
+          - threaded_simulator
+          - profile_acquisition
+          - test_waveform_simple
+
+          Notes:
+          - Windows bundle includes SDL2 runtime DLL.
+          - Linux/macOS may still require system SDL2/OpenGL runtime packages.
+          EOF
+
+          ls -la "$pkg_root"
+
+      - name: Create ZIP Bundle (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd package
+          zip -r "projectultra-${{ matrix.target }}.zip" "projectultra-${{ matrix.target }}"
+
+      - name: Create ZIP Bundle (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "package/projectultra-windows/*" -DestinationPath "package/projectultra-windows.zip" -Force
+
+      - name: Upload Bundle Artifact
         uses: actions/upload-artifact@v4
         with:
           name: projectultra-${{ matrix.target }}
-          path: dist/*
+          path: package/projectultra-${{ matrix.target }}.zip
           if-no-files-found: error
 
   release:
@@ -106,6 +196,6 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: release-artifacts/*
+          files: release-artifacts/*.zip
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
