@@ -1,5 +1,6 @@
 #include "settings.hpp"
 #include "imgui.h"
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <cstdlib>
@@ -477,7 +478,10 @@ void SettingsWindow::renderAudioTab(AppSettings& settings) {
     // TX Drive
     ImGui::Text("TX Drive Level");
     ImGui::SetNextItemWidth(200);
-    ImGui::SliderFloat("##tx_drive", &settings.tx_drive, 0.0f, 1.0f, "%.0f%%");
+    float tx_drive_pct = settings.tx_drive * 100.0f;
+    if (ImGui::SliderFloat("##tx_drive", &tx_drive_pct, 0.0f, 100.0f, "%.0f%%")) {
+        settings.tx_drive = std::clamp(tx_drive_pct / 100.0f, 0.0f, 1.0f);
+    }
     ImGui::SameLine();
     ImGui::TextDisabled("Audio output level");
 

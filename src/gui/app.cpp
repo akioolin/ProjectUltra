@@ -493,6 +493,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
 
         initAudio();
         if (audio_initialized_) {
+            audio_.setOutputGain(settings_.tx_drive);
             std::string output_dev = getOutputDeviceName();
             audio_.openOutput(output_dev);
             audio_.startPlayback();
@@ -512,6 +513,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         audio_.closeOutput();
 
         if (audio_initialized_) {
+            audio_.setOutputGain(settings_.tx_drive);
             std::string output_dev = getOutputDeviceName();
             audio_.openOutput(output_dev);
             audio_.startPlayback();
@@ -554,6 +556,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     initial_filter.bandwidth = settings_.filter_bandwidth;
     initial_filter.taps = settings_.filter_taps;
     modem_.setFilterConfig(initial_filter);
+    audio_.setOutputGain(settings_.tx_drive);
 
     // Initialize virtual station for simulation mode
     initVirtualStation();
@@ -1042,6 +1045,9 @@ void App::onDataReceived(const std::string& text) {
 }
 
 void App::render() {
+    // Keep output attenuation synchronized with the TX Drive slider.
+    audio_.setOutputGain(settings_.tx_drive);
+
     // === DEBUG: Test signal keys (F1-F7) ===
     if (ImGui::IsKeyPressed(ImGuiKey_F1)) {
         auto tone = modem_.generateTestTone(1.0f);

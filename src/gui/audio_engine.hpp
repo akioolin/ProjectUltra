@@ -74,6 +74,10 @@ public:
     void setInputGain(float gain) { input_gain_ = gain; }
     float getInputGain() const { return input_gain_; }
 
+    // Output gain control (0.0 to 1.0, default 1.0)
+    void setOutputGain(float gain);
+    float getOutputGain() const { return output_gain_; }
+
     // Callback for when RX has data ready
     using RxCallback = std::function<void(const std::vector<float>&)>;
     void setRxCallback(RxCallback callback) { rx_callback_ = callback; }
@@ -126,6 +130,9 @@ private:
 
     // Input gain (0.0 to 2.0, default 1.0)
     std::atomic<float> input_gain_{1.0f};
+
+    // Output gain (0.0 to 1.0, default 1.0)
+    std::atomic<float> output_gain_{1.0f};
 };
 
 } // namespace gui

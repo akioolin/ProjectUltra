@@ -236,6 +236,10 @@ void AudioEngine::clearRxBuffer() {
     rx_buffer_.clear();
 }
 
+void AudioEngine::setOutputGain(float gain) {
+    output_gain_ = std::clamp(gain, 0.0f, 1.0f);
+}
+
 void AudioEngine::outputCallback(void* userdata, Uint8* stream, int len) {
     AudioEngine* engine = static_cast<AudioEngine*>(userdata);
 
@@ -243,16 +247,19 @@ void AudioEngine::outputCallback(void* userdata, Uint8* stream, int len) {
     int samples = len / sizeof(float);
 
     float sum_sq = 0.0f;
+    float gain = engine->output_gain_.load();
 
     std::lock_guard<std::mutex> lock(engine->tx_mutex_);
 
     for (int i = 0; i < samples; ++i) {
+        float out = 0.0f;
         if (!engine->tx_queue_.empty()) {
-            output[i] = engine->tx_queue_.front();
+            out = engine->tx_queue_.front() * gain;
             engine->tx_queue_.pop();
         } else {
-            output[i] = 0.0f;  // Silence when no data
+            out = 0.0f;  // Silence when no data
         }
+        output[i] = std::clamp(out, -1.0f, 1.0f);
         sum_sq += output[i] * output[i];
     }
 
