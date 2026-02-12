@@ -81,6 +81,26 @@ private:
     std::string pending_incoming_call_;  // Callsign of incoming caller
     uint32_t last_tick_time_ = 0;
 
+    // Adaptive mode advisory (log-only; does not change live mode yet)
+    std::deque<float> adapt_snr_window_;
+    std::deque<float> adapt_fading_window_;
+    std::mutex adapt_mutex_;
+    bool adapt_candidate_valid_ = false;
+    Modulation adapt_candidate_mod_ = Modulation::DQPSK;
+    CodeRate adapt_candidate_rate_ = CodeRate::R1_4;
+    int adapt_candidate_hits_ = 0;
+    bool adapt_virtual_mode_valid_ = false;
+    Modulation adapt_virtual_mod_ = Modulation::DQPSK;
+    CodeRate adapt_virtual_rate_ = CodeRate::R1_4;
+    std::chrono::steady_clock::time_point adapt_last_virtual_switch_;
+    bool adapt_upgrade_hold_logged_ = false;
+    Modulation adapt_upgrade_hold_mod_ = Modulation::DQPSK;
+    CodeRate adapt_upgrade_hold_rate_ = CodeRate::R1_4;
+    static constexpr size_t ADAPT_WINDOW_FRAMES = 5;
+    static constexpr int ADAPT_DOWNGRADE_WINDOWS = 2;
+    static constexpr int ADAPT_UPGRADE_WINDOWS = 4;
+    static constexpr int ADAPT_UPGRADE_HOLD_MS = 8000;
+
     // File transfer state
     char file_path_buffer_[512] = "";
     std::string last_received_file_;  // Path of last received file
@@ -164,6 +184,8 @@ private:
     void stopTxNow(const char* reason);
     void sendMessage();
     void onDataReceived(const std::string& text);
+    void resetAdaptiveAdvisory();
+    void updateAdaptiveAdvisory(float snr_db, float fading_index);
     void startRadioRx();
     void stopRadioRx();
 

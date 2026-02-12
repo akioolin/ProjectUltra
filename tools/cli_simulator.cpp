@@ -21,6 +21,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <deque>
 #include <queue>
 #include <cmath>
 #include <functional>
@@ -34,6 +35,7 @@
 #include "gui/modem/streaming_encoder.hpp"  // TX encoding (mirrors StreamingDecoder)
 #include "protocol/protocol_engine.hpp"
 #include "protocol/frame_v2.hpp"
+#include "protocol/waveform_selection.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
 #include "ultra/fec.hpp"  // ChannelInterleaver, LDPCEncoder
@@ -55,6 +57,30 @@ enum class ChannelType {
     POOR,       // 2.0ms delay, 1.0Hz Doppler (disturbed conditions)
     FLUTTER     // 0.5ms delay, 10Hz Doppler (auroral/polar)
 };
+
+static const char* channelTypeToString(ChannelType t) {
+    switch (t) {
+        case ChannelType::AWGN:     return "AWGN (no fading)";
+        case ChannelType::GOOD:     return "Good (0.5ms, 0.1Hz)";
+        case ChannelType::MODERATE: return "Moderate (1ms, 0.5Hz)";
+        case ChannelType::POOR:     return "Poor (2ms, 1Hz)";
+        case ChannelType::FLUTTER:  return "Flutter (0.5ms, 10Hz)";
+        default:                    return "Unknown";
+    }
+}
+
+static float modeEfficiency(Modulation mod, CodeRate rate) {
+    return static_cast<float>(getBitsPerSymbol(mod)) * getCodeRateValue(rate);
+}
+
+static const char* adaptationDirection(Modulation from_mod, CodeRate from_rate,
+                                       Modulation to_mod, CodeRate to_rate) {
+    float from_eff = modeEfficiency(from_mod, from_rate);
+    float to_eff = modeEfficiency(to_mod, to_rate);
+    if (to_eff > from_eff + 0.05f) return "improving";
+    if (to_eff < from_eff - 0.05f) return "degrading";
+    return "changing";
+}
 
 /**
  * SimulatedChannel - The "air" between two stations
@@ -427,6 +453,16 @@ public:
     DecoderStats getDecoderStats() const { return decoder_ ? decoder_->getStats() : DecoderStats{}; }
     std::string getCallsign() const { return callsign_; }
 
+    void resetAdaptiveAdvisory() {
+        std::lock_guard<std::mutex> lock(adapt_mutex_);
+        adapt_snr_window_.clear();
+        adapt_fading_window_.clear();
+        adapt_candidate_valid_ = false;
+        adapt_candidate_hits_ = 0;
+        adapt_virtual_mode_valid_ = false;
+        adapt_upgrade_hold_logged_ = false;
+    }
+
 private:
     std::string callsign_;
     SimulatedChannel& channel_;
@@ -468,6 +504,26 @@ private:
     float snr_db_ = 20.0f;
     bool no_burst_interleave_ = false;  // Disable burst interleaving for A/B testing
     int burst_group_size_ = 4;
+
+    // Local adaptive advisory (log-only)
+    std::deque<float> adapt_snr_window_;
+    std::deque<float> adapt_fading_window_;
+    std::mutex adapt_mutex_;
+    bool adapt_candidate_valid_ = false;
+    Modulation adapt_candidate_mod_ = Modulation::DQPSK;
+    CodeRate adapt_candidate_rate_ = CodeRate::R1_4;
+    int adapt_candidate_hits_ = 0;
+    bool adapt_virtual_mode_valid_ = false;
+    Modulation adapt_virtual_mod_ = Modulation::DQPSK;
+    CodeRate adapt_virtual_rate_ = CodeRate::R1_4;
+    std::chrono::steady_clock::time_point adapt_last_virtual_switch_;
+    bool adapt_upgrade_hold_logged_ = false;
+    Modulation adapt_upgrade_hold_mod_ = Modulation::DQPSK;
+    CodeRate adapt_upgrade_hold_rate_ = CodeRate::R1_4;
+    static constexpr size_t ADAPT_WINDOW_FRAMES = 5;
+    static constexpr int ADAPT_DOWNGRADE_WINDOWS = 2;
+    static constexpr int ADAPT_UPGRADE_WINDOWS = 4;
+    static constexpr int ADAPT_UPGRADE_HOLD_MS = 8000;
 
     ModemConfig createOFDMConfig() {
         ModemConfig cfg;
@@ -540,6 +596,153 @@ private:
             float fading_index = decoder_ ? decoder_->getLastFadingIndex() : 0.0f;
             protocol_.setChannelQuality(snr_db_, fading_index);
             protocol_.onRxData(result.frame_data);
+            updateAdaptiveAdvisory(snr_db_, fading_index);
+        }
+    }
+
+    void updateAdaptiveAdvisory(float snr_db, float fading_index) {
+        if (!std::isfinite(snr_db) || !std::isfinite(fading_index)) {
+            return;
+        }
+        if (!connected_.load()) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(adapt_mutex_);
+
+        adapt_snr_window_.push_back(snr_db);
+        adapt_fading_window_.push_back(fading_index);
+        if (adapt_snr_window_.size() > ADAPT_WINDOW_FRAMES) {
+            adapt_snr_window_.pop_front();
+        }
+        if (adapt_fading_window_.size() > ADAPT_WINDOW_FRAMES) {
+            adapt_fading_window_.pop_front();
+        }
+        if (adapt_snr_window_.size() < ADAPT_WINDOW_FRAMES ||
+            adapt_fading_window_.size() < ADAPT_WINDOW_FRAMES) {
+            return;
+        }
+
+        float avg_snr = 0.0f;
+        for (float v : adapt_snr_window_) avg_snr += v;
+        avg_snr /= static_cast<float>(adapt_snr_window_.size());
+
+        float avg_fading = 0.0f;
+        for (float v : adapt_fading_window_) avg_fading += v;
+        avg_fading /= static_cast<float>(adapt_fading_window_.size());
+
+        WaveformMode wf = tx_waveform_mode_;
+        if (wf == WaveformMode::MC_DPSK) {
+            // During data exchange we evaluate against negotiated waveform.
+            wf = negotiated_waveform_;
+        }
+
+        Modulation current_mod = data_modulation_;
+        CodeRate current_rate = data_code_rate_;
+
+        if (!adapt_virtual_mode_valid_) {
+            adapt_virtual_mode_valid_ = true;
+            adapt_virtual_mod_ = current_mod;
+            adapt_virtual_rate_ = current_rate;
+            adapt_last_virtual_switch_ = std::chrono::steady_clock::now();
+        }
+
+        Modulation rec_mod = current_mod;
+        CodeRate rec_rate = current_rate;
+        protocol::recommendDataMode(avg_snr, wf, rec_mod, rec_rate, avg_fading);
+
+        Modulation eval_mod = adapt_virtual_mod_;
+        CodeRate eval_rate = adapt_virtual_rate_;
+
+        if (rec_mod == eval_mod && rec_rate == eval_rate) {
+            adapt_candidate_valid_ = false;
+            adapt_candidate_hits_ = 0;
+            adapt_upgrade_hold_logged_ = false;
+            return;
+        }
+
+        if (adapt_candidate_valid_ &&
+            adapt_candidate_mod_ == rec_mod &&
+            adapt_candidate_rate_ == rec_rate) {
+            ++adapt_candidate_hits_;
+        } else {
+            adapt_candidate_valid_ = true;
+            adapt_candidate_mod_ = rec_mod;
+            adapt_candidate_rate_ = rec_rate;
+            adapt_candidate_hits_ = 1;
+        }
+
+        bool is_upgrade = modeEfficiency(rec_mod, rec_rate) > modeEfficiency(eval_mod, eval_rate) + 0.05f;
+        int required_windows = is_upgrade ? ADAPT_UPGRADE_WINDOWS : ADAPT_DOWNGRADE_WINDOWS;
+        if (adapt_candidate_hits_ < required_windows) {
+            return;
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        if (is_upgrade) {
+            auto elapsed_ms = static_cast<int>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - adapt_last_virtual_switch_).count());
+            int hold_remaining_ms = ADAPT_UPGRADE_HOLD_MS - elapsed_ms;
+            if (hold_remaining_ms > 0) {
+                if (!adapt_upgrade_hold_logged_ ||
+                    adapt_upgrade_hold_mod_ != rec_mod ||
+                    adapt_upgrade_hold_rate_ != rec_rate) {
+                    LOG_MODEM(INFO,
+                              "[%s][ADPT] Local improving conditions (SNR=%.1f dB, F.I.=%.2f): "
+                              "hysteresis hold %.1fs before upgrade to %s %s",
+                              callsign_.c_str(), avg_snr, avg_fading,
+                              hold_remaining_ms / 1000.0f,
+                              modulationToString(rec_mod), codeRateToString(rec_rate));
+                    adapt_upgrade_hold_logged_ = true;
+                    adapt_upgrade_hold_mod_ = rec_mod;
+                    adapt_upgrade_hold_rate_ = rec_rate;
+                }
+                return;
+            }
+        }
+
+        adapt_upgrade_hold_logged_ = false;
+        const char* direction = adaptationDirection(eval_mod, eval_rate, rec_mod, rec_rate);
+        LOG_MODEM(INFO,
+                  "[%s][ADPT] Local %s conditions (SNR=%.1f dB, F.I.=%.2f): "
+                  "hysteresis allows switch %s %s -> %s %s",
+                  callsign_.c_str(), direction, avg_snr, avg_fading,
+                  modulationToString(eval_mod), codeRateToString(eval_rate),
+                  modulationToString(rec_mod), codeRateToString(rec_rate));
+
+        adapt_virtual_mod_ = rec_mod;
+        adapt_virtual_rate_ = rec_rate;
+        adapt_last_virtual_switch_ = now;
+        adapt_candidate_valid_ = false;
+        adapt_candidate_hits_ = 0;
+    }
+
+    void logPeerAdaptiveAdvisory(Modulation current_mod, CodeRate current_rate,
+                                 float peer_snr_db, float peer_fading) {
+        if (!std::isfinite(peer_snr_db) || !std::isfinite(peer_fading) || peer_fading < 0.0f) {
+            return;
+        }
+
+        WaveformMode wf = negotiated_waveform_;
+        if (wf == WaveformMode::AUTO) {
+            wf = tx_waveform_mode_;
+        }
+
+        Modulation peer_mod = current_mod;
+        CodeRate peer_rate = current_rate;
+        protocol::recommendDataMode(peer_snr_db, wf, peer_mod, peer_rate, peer_fading);
+
+        bool peer_change = (peer_mod != current_mod || peer_rate != current_rate);
+        if (peer_change) {
+            const char* direction = adaptationDirection(current_mod, current_rate, peer_mod, peer_rate);
+            LOG_MODEM(INFO,
+                      "[%s][ADPT] Peer reports %s conditions (SNR=%.1f dB, F.I.=%.2f): %s -> %s %s",
+                      callsign_.c_str(), direction, peer_snr_db, peer_fading,
+                      direction, modulationToString(peer_mod), codeRateToString(peer_rate));
+        } else {
+            LOG_MODEM(INFO,
+                      "[%s][ADPT] Peer reports stable conditions (SNR=%.1f dB, F.I.=%.2f): keep %s %s",
+                      callsign_.c_str(), peer_snr_db, peer_fading,
+                      modulationToString(current_mod), codeRateToString(current_rate));
         }
     }
 
@@ -605,6 +808,7 @@ private:
     void setDataMode(Modulation mod, CodeRate rate) {
         data_modulation_ = mod;
         data_code_rate_ = rate;
+        resetAdaptiveAdvisory();
 
         // Update OFDM config with pilots based on code rate
         ofdm_config_.modulation = mod;
@@ -635,6 +839,7 @@ private:
         if (connected_.load() == connected) return;
 
         connected_ = connected;
+        resetAdaptiveAdvisory();
 
         if (connected) {
             // Switch to negotiated waveform now
@@ -794,8 +999,10 @@ private:
         });
 
         // Data mode changes (modulation + code rate)
-        protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate, float, float) {
+        protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate,
+                                                    float peer_snr_db, float peer_fading) {
             setDataMode(mod, rate);
+            logPeerAdaptiveAdvisory(mod, rate, peer_snr_db, peer_fading);
         });
 
         // Waveform mode changes - store but DON'T switch yet (still need MC-DPSK for CONNECT_ACK)
@@ -962,6 +1169,9 @@ public:
     }
     void setSaveSignalsPrefix(const std::string& prefix) { save_signals_prefix_ = prefix; }
     void setSaveSignalsMaxSamples(size_t max_samples) { save_signals_max_samples_ = max_samples; }
+    void setAdaptiveTest(bool enable) { adaptive_test_ = enable; }
+    void setAdaptiveHopSNR(float snr) { adaptive_hop_snr_db_ = snr; }
+    void setAdaptiveHopChannel(ChannelType t) { adaptive_hop_channel_ = t; }
 
     bool runTest() {
         printHeader();
@@ -1060,7 +1270,9 @@ public:
 
         // Run protocol test (message, file, or burst)
         bool success;
-        if (test_burst_) {
+        if (adaptive_test_) {
+            success = runAdaptiveTest();
+        } else if (test_burst_) {
             success = runBurstTest();
         } else if (test_file_transfer_) {
             success = runFileTransferTest();
@@ -1105,6 +1317,9 @@ private:
     size_t save_signals_max_samples_ = 0;  // 0 = unlimited
     std::string save_signals_prefix_ = "/tmp/cli_signals";
     std::atomic<bool> capture_limit_hit_{false};
+    bool adaptive_test_ = false;
+    float adaptive_hop_snr_db_ = 12.0f;
+    ChannelType adaptive_hop_channel_ = ChannelType::MODERATE;
     size_t test_file_size_ = 256;  // Default 256 bytes test file
     uint32_t seed_ = 42;
     float tx_cfo_hz_ = 0.0f;
@@ -1204,6 +1419,90 @@ private:
             std::cout << "\n  \033[33m[capture] warning: failed to write one or more capture files under prefix "
                       << prefix << "\033[0m\n";
         }
+    }
+
+    bool sendAndVerifyMessage(const std::string& msg, int timeout_seconds = 90) {
+        if (!waitFor([this]{ return alpha_->isReadyToSend(); }, 30)) {
+            std::cout << "  \033[31m✗ ARQ not ready!\033[0m\n";
+            return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(msg_mutex_);
+            received_message_.clear();
+        }
+        message_received_.store(false);
+
+        std::cout << "  TX (" << msg.size() << " bytes): " << msg << "\n";
+        alpha_->sendMessage(msg);
+
+        if (!waitFor([this]{ return message_received_.load(); }, timeout_seconds)) {
+            std::cout << "  \033[31m✗ Message receive timeout!\033[0m\n";
+            return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(msg_mutex_);
+            if (received_message_ != msg) {
+                std::cout << "  \033[31m✗ Message mismatch!\033[0m\n";
+                return false;
+            }
+        }
+
+        std::cout << "  \033[32m✓ Message delivered\033[0m\n";
+        return true;
+    }
+
+    bool runAdaptiveTest() {
+        std::cout << "\n=== PHASE 1: CONNECTION ===\n";
+        std::cout << "  ALPHA connecting to BRAVO...\n";
+        alpha_->connect("BRAVO");
+
+        if (!waitFor([this]{ return alpha_->isConnected() && bravo_->isConnected(); }, 30)) {
+            std::cout << "  \033[31m✗ Connection timeout!\033[0m\n";
+            return false;
+        }
+        std::cout << "  \033[32m✓ Both stations connected!\033[0m\n";
+
+        std::cout << "\n=== PHASE 2: HANDSHAKE ===\n";
+        if (!waitFor([this]{ return alpha_->isHandshakeComplete(); }, 30)) {
+            std::cout << "  \033[31m✗ Handshake timeout!\033[0m\n";
+            return false;
+        }
+        std::cout << "  \033[32m✓ Handshake complete!\033[0m\n";
+
+        std::cout << "\n=== PHASE 3: ADAPTIVE SMOKE (2 conditions) ===\n";
+        std::cout << "  Condition A: SNR=" << snr_db_ << " dB, channel=" << channelTypeName() << "\n";
+        std::string msg_a = "[ADPT_TEST] Phase A baseline ";
+        msg_a += std::string(900, 'A');  // Force fragmentation for richer advisory samples
+        if (!sendAndVerifyMessage(msg_a)) {
+            return false;
+        }
+
+        std::cout << "  Switching to Condition B: SNR=" << adaptive_hop_snr_db_
+                  << " dB, channel=" << channelTypeToString(adaptive_hop_channel_) << "\n";
+        channel_.configure(adaptive_hop_snr_db_, adaptive_hop_channel_);
+        alpha_->setSNR(adaptive_hop_snr_db_);
+        bravo_->setSNR(adaptive_hop_snr_db_);
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+        std::string msg_b = "[ADPT_TEST] Phase B changed condition ";
+        msg_b += std::string(900, 'B');  // Force fragmentation under changed channel
+        if (!sendAndVerifyMessage(msg_b)) {
+            return false;
+        }
+
+        std::cout << "  \033[32m✓ Adaptive smoke sequence complete\033[0m\n";
+
+        std::cout << "\n=== PHASE 4: DISCONNECT ===\n";
+        alpha_->disconnect();
+        if (!waitFor([this]{ return !alpha_->isConnected() && !bravo_->isConnected(); }, 15)) {
+            std::cout << "  \033[33m! Disconnect timeout (non-fatal)\033[0m\n";
+        } else {
+            std::cout << "  \033[32m✓ Disconnected!\033[0m\n";
+        }
+
+        return true;
     }
 
     bool runProtocolTest() {
@@ -1570,6 +1869,11 @@ private:
         std::cout << "  SNR:     " << snr_db_ << " dB\n";
         std::cout << "  TX CFO:  " << tx_cfo_hz_ << " Hz\n";
         std::cout << "  Channel: " << channelTypeName() << "\n";
+        if (adaptive_test_) {
+            std::cout << "  ADPT:    enabled (hop -> "
+                      << channelTypeToString(adaptive_hop_channel_)
+                      << " @ " << adaptive_hop_snr_db_ << " dB)\n";
+        }
         std::cout << "  Model:   Real-time (48kHz, 10ms callbacks)\n";
         std::cout << "\n";
     }
@@ -1678,6 +1982,24 @@ int main(int argc, char* argv[]) {
                     return 1;
                 }
             }
+        } else if (arg == "--hop-channel") {
+            if (i + 1 < argc) {
+                std::string ch_str = argv[++i];
+                if (ch_str == "awgn" || ch_str == "AWGN") {
+                    sim.setAdaptiveHopChannel(ChannelType::AWGN);
+                } else if (ch_str == "good" || ch_str == "GOOD") {
+                    sim.setAdaptiveHopChannel(ChannelType::GOOD);
+                } else if (ch_str == "moderate" || ch_str == "MODERATE") {
+                    sim.setAdaptiveHopChannel(ChannelType::MODERATE);
+                } else if (ch_str == "poor" || ch_str == "POOR") {
+                    sim.setAdaptiveHopChannel(ChannelType::POOR);
+                } else if (ch_str == "flutter" || ch_str == "FLUTTER") {
+                    sim.setAdaptiveHopChannel(ChannelType::FLUTTER);
+                } else {
+                    std::cerr << "Unknown hop channel: " << ch_str << " (use awgn, good, moderate, poor, flutter)\n";
+                    return 1;
+                }
+            }
         } else if (arg == "--mod" || arg == "-m") {
             if (i + 1 < argc) {
                 std::string mod_str = argv[++i];
@@ -1752,6 +2074,10 @@ int main(int argc, char* argv[]) {
                 message_limit = std::stoi(argv[++i]);
             }
             sim.setSaveSignals(true, message_limit);
+        } else if (arg == "--adpt-test") {
+            sim.setAdaptiveTest(true);
+        } else if (arg == "--hop-snr" && i + 1 < argc) {
+            sim.setAdaptiveHopSNR(std::stof(argv[++i]));
         } else if (arg == "--save-prefix" && i + 1 < argc) {
             sim.setSaveSignalsPrefix(argv[++i]);
         } else if (arg == "--save-max-samples" && i + 1 < argc) {
@@ -1776,6 +2102,9 @@ int main(int argc, char* argv[]) {
             std::cout << "  --tx-cfo <Hz>       Inject TX CFO in channel model (default: 0)\n";
             std::cout << "  --cfo <Hz>          Alias for --tx-cfo\n";
             std::cout << "  --file [SIZE]       Test file transfer (default: 256 bytes)\n";
+            std::cout << "  --adpt-test         Two-message adaptive advisory smoke test\n";
+            std::cout << "  --hop-snr <dB>      Condition-B SNR for --adpt-test (default: 12)\n";
+            std::cout << "  --hop-channel <CH>  Condition-B channel for --adpt-test\n";
             std::cout << "  --channel-interleave, -ci  Enable channel interleaving\n";
             std::cout << "  --no-burst-interleave     Disable burst-level long interleaving\n";
             std::cout << "  --burst-group-size <N>    Burst interleave group size (2-8, default: 4)\n";

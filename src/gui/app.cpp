@@ -11,6 +11,7 @@
 #include <ctime>
 #include <filesystem>
 #include <limits>
+#include <deque>
 #include <sys/stat.h>
 
 #ifdef _WIN32
@@ -114,6 +115,43 @@ static uint32_t safeFileSizeBytes(const std::string& path) {
     return static_cast<uint32_t>(size);
 }
 
+static float codeRateValue(CodeRate rate) {
+    switch (rate) {
+        case CodeRate::R1_4: return 0.25f;
+        case CodeRate::R1_2: return 0.50f;
+        case CodeRate::R2_3: return 2.0f / 3.0f;
+        case CodeRate::R3_4: return 0.75f;
+        default: return 0.25f;
+    }
+}
+
+static float modulationBitsPerSymbol(Modulation mod) {
+    switch (mod) {
+        case Modulation::BPSK: return 1.0f;
+        case Modulation::QPSK:
+        case Modulation::DQPSK: return 2.0f;
+        case Modulation::D8PSK:
+        case Modulation::QAM8: return 3.0f;
+        case Modulation::QAM16: return 4.0f;
+        case Modulation::QAM32: return 5.0f;
+        case Modulation::QAM64: return 6.0f;
+        default: return 1.0f;
+    }
+}
+
+static float modeEfficiency(Modulation mod, CodeRate rate) {
+    return modulationBitsPerSymbol(mod) * codeRateValue(rate);
+}
+
+static const char* adaptationDirection(Modulation from_mod, CodeRate from_rate,
+                                       Modulation to_mod, CodeRate to_rate) {
+    float from_eff = modeEfficiency(from_mod, from_rate);
+    float to_eff = modeEfficiency(to_mod, to_rate);
+    if (to_eff > from_eff + 0.05f) return "improving";
+    if (to_eff < from_eff - 0.05f) return "degrading";
+    return "changing";
+}
+
 App::App() : App(Options{}) {}
 
 App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim) {
@@ -140,6 +178,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         protocol_.setMeasuredSNR(snr_db);
         protocol_.setChannelQuality(snr_db, fading);
         protocol_.onRxData(data);
+        updateAdaptiveAdvisory(snr_db, fading);
     });
 
     // Set up status callback to show codeword progress in RX log
@@ -240,18 +279,22 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         std::string msg;
         switch (state) {
             case protocol::ConnectionState::PROBING:
+                resetAdaptiveAdvisory();
                 msg = "[SYS] Probing " + info + "...";
                 break;
             case protocol::ConnectionState::CONNECTING:
+                resetAdaptiveAdvisory();
                 msg = "[SYS] Connecting to " + info + "...";
                 break;
             case protocol::ConnectionState::CONNECTED:
+                resetAdaptiveAdvisory();
                 msg = "[SYS] Connected to " + info;  // info contains remote callsign
                 break;
             case protocol::ConnectionState::DISCONNECTING:
                 msg = "[SYS] Disconnecting...";
                 break;
             case protocol::ConnectionState::DISCONNECTED:
+                resetAdaptiveAdvisory();
                 if (info.find("timeout") != std::string::npos) {
                     msg = "[FAILED] " + info;  // Make failures more visible
                 } else {
@@ -352,6 +395,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate, float snr_db, float peer_fading) {
         // Update modem engine with new data mode
         modem_.setDataMode(mod, rate);
+        resetAdaptiveAdvisory();
 
         // Local estimate for operator visibility/debugging.
         auto waveform = modem_.getWaveformMode();
@@ -390,6 +434,33 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         rx_log_.push_back(buf);
         if (rx_log_.size() > MAX_RX_LOG) {
             rx_log_.pop_front();
+        }
+
+        // Advisory-only peer view (does not change mode yet).
+        if (peer_fading_valid) {
+            Modulation peer_mod = mod;
+            CodeRate peer_rate = rate;
+            protocol::recommendDataMode(snr_db, waveform, peer_mod, peer_rate, peer_fading);
+            bool peer_change = (peer_mod != mod || peer_rate != rate);
+
+            char adpt_buf[220];
+            if (peer_change) {
+                const char* direction = adaptationDirection(mod, rate, peer_mod, peer_rate);
+                snprintf(adpt_buf, sizeof(adpt_buf),
+                         "[ADPT] Peer reports %s conditions (SNR=%.1f dB, F.I.=%.2f): %s -> %s %s",
+                         direction, snr_db, peer_fading,
+                         direction, modulationToString(peer_mod), codeRateToString(peer_rate));
+            } else {
+                snprintf(adpt_buf, sizeof(adpt_buf),
+                         "[ADPT] Peer reports stable conditions (SNR=%.1f dB, F.I.=%.2f): keep %s %s",
+                         snr_db, peer_fading, modulationToString(mod), codeRateToString(rate));
+            }
+
+            guiLog("%s", adpt_buf);
+            rx_log_.push_back(adpt_buf);
+            if (rx_log_.size() > MAX_RX_LOG) {
+                rx_log_.pop_front();
+            }
         }
     });
 
@@ -1113,6 +1184,140 @@ void App::onDataReceived(const std::string& text) {
             rx_log_.pop_front();
         }
     }
+}
+
+void App::resetAdaptiveAdvisory() {
+    std::lock_guard<std::mutex> lock(adapt_mutex_);
+    adapt_snr_window_.clear();
+    adapt_fading_window_.clear();
+    adapt_candidate_valid_ = false;
+    adapt_candidate_hits_ = 0;
+    adapt_virtual_mode_valid_ = false;
+    adapt_upgrade_hold_logged_ = false;
+}
+
+void App::updateAdaptiveAdvisory(float snr_db, float fading_index) {
+    if (protocol_.getState() != protocol::ConnectionState::CONNECTED) {
+        return;
+    }
+    if (!std::isfinite(snr_db) || !std::isfinite(fading_index)) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(adapt_mutex_);
+
+    adapt_snr_window_.push_back(snr_db);
+    adapt_fading_window_.push_back(fading_index);
+    if (adapt_snr_window_.size() > ADAPT_WINDOW_FRAMES) {
+        adapt_snr_window_.pop_front();
+    }
+    if (adapt_fading_window_.size() > ADAPT_WINDOW_FRAMES) {
+        adapt_fading_window_.pop_front();
+    }
+    if (adapt_snr_window_.size() < ADAPT_WINDOW_FRAMES ||
+        adapt_fading_window_.size() < ADAPT_WINDOW_FRAMES) {
+        return;
+    }
+
+    float avg_snr = 0.0f;
+    for (float v : adapt_snr_window_) avg_snr += v;
+    avg_snr /= static_cast<float>(adapt_snr_window_.size());
+
+    float avg_fading = 0.0f;
+    for (float v : adapt_fading_window_) avg_fading += v;
+    avg_fading /= static_cast<float>(adapt_fading_window_.size());
+
+    auto waveform = modem_.getWaveformMode();
+    Modulation current_mod = protocol_.getDataModulation();
+    CodeRate current_rate = protocol_.getDataCodeRate();
+
+    if (!adapt_virtual_mode_valid_) {
+        adapt_virtual_mode_valid_ = true;
+        adapt_virtual_mod_ = current_mod;
+        adapt_virtual_rate_ = current_rate;
+        adapt_last_virtual_switch_ = std::chrono::steady_clock::now();
+    }
+
+    Modulation rec_mod = current_mod;
+    CodeRate rec_rate = current_rate;
+    protocol::recommendDataMode(avg_snr, waveform, rec_mod, rec_rate, avg_fading);
+
+    Modulation eval_mod = adapt_virtual_mod_;
+    CodeRate eval_rate = adapt_virtual_rate_;
+
+    if (rec_mod == eval_mod && rec_rate == eval_rate) {
+        adapt_candidate_valid_ = false;
+        adapt_candidate_hits_ = 0;
+        adapt_upgrade_hold_logged_ = false;
+        return;
+    }
+
+    if (adapt_candidate_valid_ &&
+        adapt_candidate_mod_ == rec_mod &&
+        adapt_candidate_rate_ == rec_rate) {
+        ++adapt_candidate_hits_;
+    } else {
+        adapt_candidate_valid_ = true;
+        adapt_candidate_mod_ = rec_mod;
+        adapt_candidate_rate_ = rec_rate;
+        adapt_candidate_hits_ = 1;
+    }
+
+    bool is_upgrade = modeEfficiency(rec_mod, rec_rate) > modeEfficiency(eval_mod, eval_rate) + 0.05f;
+    int required_windows = is_upgrade ? ADAPT_UPGRADE_WINDOWS : ADAPT_DOWNGRADE_WINDOWS;
+    if (adapt_candidate_hits_ < required_windows) {
+        return;
+    }
+
+    auto now = std::chrono::steady_clock::now();
+    if (is_upgrade) {
+        auto elapsed_ms = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - adapt_last_virtual_switch_).count());
+        int hold_remaining_ms = ADAPT_UPGRADE_HOLD_MS - elapsed_ms;
+        if (hold_remaining_ms > 0) {
+            if (!adapt_upgrade_hold_logged_ ||
+                adapt_upgrade_hold_mod_ != rec_mod ||
+                adapt_upgrade_hold_rate_ != rec_rate) {
+                char hold_msg[260];
+                snprintf(hold_msg, sizeof(hold_msg),
+                         "[ADPT] Local improving conditions (SNR=%.1f dB, F.I.=%.2f): "
+                         "hysteresis hold %.1fs before upgrade to %s %s",
+                         avg_snr, avg_fading,
+                         hold_remaining_ms / 1000.0f,
+                         modulationToString(rec_mod), codeRateToString(rec_rate));
+                guiLog("%s", hold_msg);
+                rx_log_.push_back(hold_msg);
+                if (rx_log_.size() > MAX_RX_LOG) {
+                    rx_log_.pop_front();
+                }
+                adapt_upgrade_hold_logged_ = true;
+                adapt_upgrade_hold_mod_ = rec_mod;
+                adapt_upgrade_hold_rate_ = rec_rate;
+            }
+            return;
+        }
+    }
+
+    adapt_upgrade_hold_logged_ = false;
+    const char* direction = adaptationDirection(eval_mod, eval_rate, rec_mod, rec_rate);
+    char msg[240];
+    snprintf(msg, sizeof(msg),
+             "[ADPT] Local %s conditions (SNR=%.1f dB, F.I.=%.2f): "
+             "hysteresis allows switch %s %s -> %s %s",
+             direction, avg_snr, avg_fading,
+             modulationToString(eval_mod), codeRateToString(eval_rate),
+             modulationToString(rec_mod), codeRateToString(rec_rate));
+
+    guiLog("%s", msg);
+    rx_log_.push_back(msg);
+    if (rx_log_.size() > MAX_RX_LOG) {
+        rx_log_.pop_front();
+    }
+
+    adapt_virtual_mod_ = rec_mod;
+    adapt_virtual_rate_ = rec_rate;
+    adapt_last_virtual_switch_ = now;
+    adapt_candidate_valid_ = false;
+    adapt_candidate_hits_ = 0;
 }
 
 void App::render() {
