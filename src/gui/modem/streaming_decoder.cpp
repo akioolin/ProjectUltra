@@ -292,7 +292,7 @@ void StreamingDecoder::searchForSync() {
     // - Light sync (connected, LTS): needs only ~24k samples (LTS is ~1024 samples)
     // Using a smaller buffer when connected cuts per-hop latency from ~2.8s to <1s
     constexpr size_t CHIRP_MAX_SEARCH = 120000;   // ~2.5s for dual chirp detection
-    constexpr size_t LIGHT_SEARCH_SIZE = 12000;    // ~0.25s for LTS detection (ACK frame ~10368 samples)
+    constexpr size_t LIGHT_SEARCH_SIZE = 9600;    // ~0.20s for connected LTS-only detection
 
     size_t chirp_min_search = std::min(preamble + 65000, CHIRP_MAX_SEARCH);
     bool use_light_search = connected_ && waveform_->supportsDataPreamble();
@@ -349,13 +349,33 @@ void StreamingDecoder::searchForSync() {
         }
         rms = std::sqrt(rms / 1000.0f);
 
-        // Skip if clearly just noise (RMS < 0.05)
-        if (rms < CORR_NOISE_THRESHOLD) {
+        // OTA-connected mode can run at lower absolute amplitudes than simulator
+        // defaults. Use an adaptive gate so valid low-level frames are not skipped.
+        float rms_gate = CORR_NOISE_THRESHOLD;
+        if (connected_ && waveform_->supportsDataPreamble()) {
+            float noise_floor = std::max(0.001f, noise_floor_);
+            if (rms < noise_floor * 3.0f) {
+                noise_floor_ = 0.98f * noise_floor + 0.02f * rms;
+            } else {
+                noise_floor_ = 0.995f * noise_floor + 0.005f * rms;
+            }
+
+            // Typical OTA values observed around 0.02-0.04 RMS; keep floor low enough
+            // to avoid starving detectDataSync() while still skipping true silence.
+            rms_gate = std::clamp(noise_floor_ * 2.2f, 0.015f, 0.040f);
+            if (sync_reject_streak_ >= 8) {
+                float relax = std::min(0.010f,
+                                       0.001f * static_cast<float>(sync_reject_streak_ - 7));
+                rms_gate = std::max(0.012f, rms_gate - relax);
+            }
+        }
+
+        if (rms < rms_gate) {
             // No signal - advance by small step (100ms = 4800 samples)
             static int rms_skip_count = 0;
             if (++rms_skip_count % 10 == 1)
-                LOG_MODEM(INFO, "[%s] searchForSync: RMS skip, rms=%.4f < %.2f, corr_pos=%zu, total=%.2fs",
-                          log_prefix_.c_str(), rms, CORR_NOISE_THRESHOLD, correlation_pos_, audio_sec);
+                LOG_MODEM(INFO, "[%s] searchForSync: RMS skip, rms=%.4f < %.3f, corr_pos=%zu, total=%.2fs",
+                          log_prefix_.c_str(), rms, rms_gate, correlation_pos_, audio_sec);
             correlation_pos_ = (correlation_pos_ + CORRELATION_STEP) % MAX_BUFFER_SAMPLES;
             return;
         }
@@ -439,6 +459,7 @@ void StreamingDecoder::searchForSync() {
     const float fading_hint = last_fading_index_.load();
     const float snr_hint = last_snr_.load();
     float light_sync_min_confidence = is_coherent ? 0.88f : 0.70f;
+    float weak_sync_floor = is_coherent ? 0.80f : 0.30f;
     if (!is_coherent) {
         // OTA HF can produce valid LTS peaks in the 0.55-0.65 range during
         // fades. Start conservative, but avoid hard-locking to 0.70.
@@ -450,9 +471,10 @@ void StreamingDecoder::searchForSync() {
             light_sync_min_confidence = 0.62f;
         }
 
-        if (connected_ && sync_reject_streak_ >= 20) {
-            float extra_relax = std::min(0.12f, 0.02f * static_cast<float>(sync_reject_streak_ / 20));
-            light_sync_min_confidence = std::max(0.55f, light_sync_min_confidence - extra_relax);
+        if (connected_ && sync_reject_streak_ >= 8) {
+            float extra_relax = std::min(0.18f,
+                                         0.015f * static_cast<float>(sync_reject_streak_ - 7));
+            light_sync_min_confidence = std::max(0.45f, light_sync_min_confidence - extra_relax);
         }
     }
 
@@ -463,16 +485,32 @@ void StreamingDecoder::searchForSync() {
             sync_result, known_cfo, CORR_DETECT_THRESHOLD);
 
         // Reject clear false positives (noise floor is ~0.2-0.4)
+        bool weak_accept = false;
         if (found && sync_result.correlation < light_sync_min_confidence) {
-            sync_reject_streak_++;
-            LOG_MODEM(INFO, "[%s] DATA sync rejected (corr=%.2f < %.2f, streak=%llu)",
-                      log_prefix_.c_str(), sync_result.correlation, light_sync_min_confidence,
-                      static_cast<unsigned long long>(sync_reject_streak_));
-            found = false;
+            bool allow_weak_accept = !is_coherent &&
+                                     connected_ &&
+                                     sync_reject_streak_ >= 4 &&
+                                     sync_result.correlation >= weak_sync_floor;
+            if (allow_weak_accept) {
+                weak_accept = true;
+                LOG_MODEM(INFO, "[%s] DATA sync weak-accepted (corr=%.2f < %.2f, streak=%llu)",
+                          log_prefix_.c_str(), sync_result.correlation, light_sync_min_confidence,
+                          static_cast<unsigned long long>(sync_reject_streak_));
+            } else {
+                sync_reject_streak_++;
+                LOG_MODEM(INFO, "[%s] DATA sync rejected (corr=%.2f < %.2f, streak=%llu)",
+                          log_prefix_.c_str(), sync_result.correlation, light_sync_min_confidence,
+                          static_cast<unsigned long long>(sync_reject_streak_));
+                found = false;
+            }
         }
 
         if (found) {
-            sync_reject_streak_ = 0;
+            if (weak_accept) {
+                sync_reject_streak_ = std::max<uint64_t>(1, sync_reject_streak_ / 2);
+            } else {
+                sync_reject_streak_ = 0;
+            }
             LOG_MODEM(INFO, "[%s] DATA sync detected (training only, known CFO=%.1f Hz, corr=%.2f)",
                       log_prefix_.c_str(), known_cfo, sync_result.correlation);
         }
