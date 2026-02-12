@@ -705,16 +705,24 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     modem_.setFilterConfig(initial_filter);
     audio_.setOutputGain(settings_.tx_drive);
 
-    // Initialize virtual station for simulation mode
-    initVirtualStation();
+    // Initialize virtual station only when simulator UI is shown and startup is not constrained.
+    // In safe-startup mode we defer this until the user enables simulation.
+    if (sim_ui_visible_ && !options_.safe_startup) {
+        initVirtualStation();
+    }
 
-    // Auto-initialize audio on startup
-    initAudio();
-    if (audio_initialized_) {
-        std::string output_dev = getOutputDeviceName();
-        audio_.openOutput(output_dev);
-        audio_.startPlayback();
-        startRadioRx();
+    // Auto-initialize audio on startup unless safe-startup mode is requested.
+    // This avoids crashing on fragile audio stacks during process bring-up.
+    if (!options_.safe_startup) {
+        initAudio();
+        if (audio_initialized_) {
+            std::string output_dev = getOutputDeviceName();
+            audio_.openOutput(output_dev);
+            audio_.startPlayback();
+            startRadioRx();
+        }
+    } else {
+        guiLog("Safe startup enabled: deferred audio/simulator initialization");
     }
 }
 
@@ -746,6 +754,10 @@ void App::writeRecordingToFile() {
 }
 
 void App::initVirtualStation() {
+    if (virtual_modem_) {
+        return;
+    }
+
     // Create virtual station's modem
     virtual_modem_ = std::make_unique<ModemEngine>();
 
@@ -1013,6 +1025,10 @@ std::vector<float> App::applyChannelEffects(const std::vector<float>& samples, i
 
 void App::startSimulator() {
     if (sim_thread_running_) return;
+    if (!virtual_modem_) {
+        guiLog("SIM: Cannot start simulator - virtual modem is not initialized");
+        return;
+    }
 
     guiLog("SIM: Starting simulator");
 
@@ -1036,7 +1052,9 @@ void App::stopSimulator() {
 
     // Restore async decode mode for real audio operation
     modem_.setSynchronousMode(false);
-    virtual_modem_->setSynchronousMode(false);
+    if (virtual_modem_) {
+        virtual_modem_->setSynchronousMode(false);
+    }
 
     // Clear buffers
     {
@@ -1756,6 +1774,15 @@ void App::renderOperateTab() {
             if (ImGui::Checkbox("Enable", &simulation_enabled_)) {
                 guiLog("Simulation checkbox toggled: %d", simulation_enabled_);
                 if (simulation_enabled_) {
+                    if (!virtual_modem_) {
+                        initVirtualStation();
+                    }
+                    if (!virtual_modem_) {
+                        simulation_enabled_ = false;
+                        rx_log_.push_back("[SIM] Failed to initialize virtual station");
+                        if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
+                        return;
+                    }
                     if (radio_rx_enabled_) { stopRadioRx(); audio_.stopPlayback(); }
                     guiLog("Simulation ENABLED - virtual station: %s", virtual_callsign_.c_str());
                     rx_log_.push_back("[SIM] Simulation enabled - connect to '" + virtual_callsign_ + "'");

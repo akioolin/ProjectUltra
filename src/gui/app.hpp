@@ -32,6 +32,7 @@ public:
     struct Options {
         bool enable_sim = false;      // -sim: Show simulation UI
         bool record_audio = false;    // -rec: Record all audio to file
+        bool safe_startup = false;    // Defer heavyweight init (audio/sim) until needed
         std::string record_path = "sim_recording.f32";  // Recording output path
     };
 

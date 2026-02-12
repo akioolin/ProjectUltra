@@ -106,8 +106,8 @@ ModemEngine::ModemEngine() {
     LOG_MODEM(INFO, "[%s] StreamingDecoder initialized (MC-DPSK: %d carriers)",
               log_prefix_.c_str(), mc_dpsk_config_.num_carriers);
 
-    // Start RX decode thread (StreamingDecoder handles acquisition)
-    startRxDecodeThread();
+    // Defer RX decode thread startup until audio is actually fed.
+    // This reduces startup-time failure surface on low-end systems.
 }
 
 ModemEngine::~ModemEngine() {

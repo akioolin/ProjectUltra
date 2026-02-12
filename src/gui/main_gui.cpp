@@ -185,6 +185,7 @@ int main(int argc, char* argv[]) {
             }
         } else if (arg == "--software" || arg == "-sw") {
             force_software_renderer = true;
+            opts.safe_startup = true;
         }
     }
     writeStartupLog(

@@ -143,6 +143,11 @@ void ModemEngine::rxDecodeLoop() {
 void ModemEngine::feedAudio(const float* samples, size_t count) {
     if (count == 0 || samples == nullptr) return;
 
+    // Lazy-start async decode thread on first audio, instead of in constructor.
+    if (!synchronous_mode_ && !rx_decode_running_) {
+        startRxDecodeThread();
+    }
+
     // ========================================================================
     // AUDIO ROUTING - StreamingDecoder is PRIMARY
     // ========================================================================
