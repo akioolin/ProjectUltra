@@ -236,6 +236,17 @@ void Connection::acceptCall() {
     // Use centralized algorithm from waveform_selection.hpp
     recommendDataMode(measured_snr_db_, negotiated_mode_, rec_mod, rec_rate, fading_index_);
 
+    // Bootstrap safety: chirp SNR can overestimate first OFDM frame quality.
+    if (negotiated_mode_ == WaveformMode::OFDM_CHIRP ||
+        negotiated_mode_ == WaveformMode::OFDM_COX) {
+        CodeRate capped = capInitialOFDMRate(measured_snr_db_, fading_index_, rec_rate);
+        if (capped != rec_rate) {
+            LOG_MODEM(INFO, "Connection: Bootstrap cap %s -> %s for initial OFDM setup (SNR=%.1f, fading=%.2f)",
+                      codeRateToString(rec_rate), codeRateToString(capped), measured_snr_db_, fading_index_);
+            rec_rate = capped;
+        }
+    }
+
     if (pending_forced_modulation_ != Modulation::AUTO) {
         // Initiator forced a specific modulation - honor it
         rec_mod = pending_forced_modulation_;
@@ -275,6 +286,7 @@ void Connection::acceptCall() {
     // We are the responder - we received CONNECT and are sending CONNECT_ACK
     is_initiator_ = false;
     handshake_confirmed_ = false;  // Responder waits for first frame to confirm
+    responder_handshake_wait_ms_ = RESPONDER_HANDSHAKE_FAILSAFE_MS;
 
     // Notify application of initial data mode
     if (on_data_mode_changed_) {
@@ -555,17 +567,6 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
         return;
     }
 
-    // Responder handshake confirmation: when we receive first frame after CONNECT_ACK
-    // This means the initiator got our CONNECT_ACK and the handshake is complete
-    if (state_ == ConnectionState::CONNECTED && !is_initiator_ && !handshake_confirmed_) {
-        LOG_MODEM(INFO, "Connection: Handshake confirmed (received first frame from initiator)");
-        handshake_confirmed_ = true;
-        if (on_handshake_confirmed_) {
-            on_handshake_confirmed_();
-        }
-        // NOTE: Initial data mode is now carried in CONNECT_ACK, no separate MODE_CHANGE needed
-    }
-
     // Check v2 magic
     uint16_t magic = (static_cast<uint16_t>(frame_data[0]) << 8) | frame_data[1];
     if (magic != v2::MAGIC_V2) {
@@ -584,6 +585,18 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
     if (header.dst_hash != our_hash && header.dst_hash != 0xFFFFFF) {
         LOG_MODEM(TRACE, "Connection: Ignoring frame for different station");
         return;
+    }
+
+    // Responder handshake confirmation: first valid protocol frame after CONNECT_ACK
+    // means the initiator received our ACK and switched to data/control exchange.
+    if (state_ == ConnectionState::CONNECTED && !is_initiator_ && !handshake_confirmed_) {
+        LOG_MODEM(INFO, "Connection: Handshake confirmed (received first valid frame from initiator)");
+        handshake_confirmed_ = true;
+        responder_handshake_wait_ms_ = 0;
+        if (on_handshake_confirmed_) {
+            on_handshake_confirmed_();
+        }
+        // Initial data mode is already carried in CONNECT_ACK.
     }
 
     // Resolve source callsign from hash if possible
@@ -758,6 +771,22 @@ void Connection::tick(uint32_t elapsed_ms) {
             connected_time_ms_ += elapsed_ms;
             stats_.connected_time_ms = connected_time_ms_;
 
+            // Responder fail-safe: if first post-ACK frame is lost, don't stay in
+            // handshake waveform forever. After a short grace period, force
+            // handshake completion so TX uses negotiated waveform/control path.
+            if (!is_initiator_ && !handshake_confirmed_) {
+                if (elapsed_ms >= responder_handshake_wait_ms_) {
+                    responder_handshake_wait_ms_ = 0;
+                    handshake_confirmed_ = true;
+                    LOG_MODEM(WARN, "Connection: Handshake fail-safe triggered (no post-ACK frame), switching to negotiated waveform");
+                    if (on_handshake_confirmed_) {
+                        on_handshake_confirmed_();
+                    }
+                } else {
+                    responder_handshake_wait_ms_ -= elapsed_ms;
+                }
+            }
+
             // Handle MODE_CHANGE timeout
             if (mode_change_pending_) {
                 if (elapsed_ms >= mode_change_timeout_ms_) {
@@ -858,6 +887,11 @@ void Connection::transmitFrame(const Bytes& frame_data) {
 void Connection::enterConnected() {
     state_ = ConnectionState::CONNECTED;
     connected_time_ms_ = 0;
+    if (is_initiator_ || handshake_confirmed_) {
+        responder_handshake_wait_ms_ = 0;
+    } else if (responder_handshake_wait_ms_ == 0) {
+        responder_handshake_wait_ms_ = RESPONDER_HANDSHAKE_FAILSAFE_MS;
+    }
 
     arq_.setCallsigns(local_call_, remote_call_);
     arq_.reset();
@@ -931,6 +965,8 @@ void Connection::enterConnected() {
 
 void Connection::enterDisconnected(const std::string& reason) {
     state_ = ConnectionState::DISCONNECTED;
+    is_initiator_ = false;
+    handshake_confirmed_ = false;
     std::string old_remote = remote_call_;
     remote_call_.clear();
     pending_remote_call_.clear();
@@ -940,6 +976,7 @@ void Connection::enterDisconnected(const std::string& reason) {
     disconnect_ack_frame_.clear();
     burst_mode_active_ = false;
     burst_tx_buffer_.clear();
+    responder_handshake_wait_ms_ = 0;
     arq_.reset();
     file_transfer_.cancel();
     pending_tx_fragments_.clear();
@@ -1042,6 +1079,8 @@ void Connection::resetStats() {
 
 void Connection::reset() {
     state_ = ConnectionState::DISCONNECTED;
+    is_initiator_ = false;
+    handshake_confirmed_ = false;
     remote_call_.clear();
     pending_remote_call_.clear();
     timeout_remaining_ms_ = 0;
@@ -1056,6 +1095,7 @@ void Connection::reset() {
     data_modulation_ = Modulation::DQPSK;
     data_code_rate_ = CodeRate::R1_4;
     connect_waveform_ = WaveformMode::MC_DPSK;  // Reset to DPSK for next connect attempt
+    responder_handshake_wait_ms_ = 0;
     burst_mode_active_ = false;
     burst_tx_buffer_.clear();
     arq_.reset();

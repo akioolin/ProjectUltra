@@ -158,13 +158,32 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
         unsearched = MAX_BUFFER_SAMPLES - correlation_pos_ + write_pos_;
     }
 
-    // If adding these samples would overflow, advance correlation_pos_
-    // to make room (dropping oldest unsearched data)
+    // Guard against pointer drift. If correlation_pos_ gets ahead of write_pos_
+    // in wrapped space, unsearched can appear "almost full" and trigger false
+    // overflow storms. Snap search pointer to newest audio in that case.
+    if (total_fed_ >= MAX_BUFFER_SAMPLES &&
+        unsearched > (MAX_BUFFER_SAMPLES - CORR_INVARIANT_GUARD)) {
+        correlation_pos_ = write_pos_;
+        unsearched = 0;
+        LOG_MODEM(WARN, "[%s] Correlation pointer drift detected, resetting search cursor",
+                  log_prefix_.c_str());
+    }
+
+    // If adding these samples would overflow, advance correlation_pos_ to make
+    // room (dropping oldest unsearched data).
     if (unsearched + count >= MAX_BUFFER_SAMPLES) {
         size_t need_to_drop = (unsearched + count) - MAX_BUFFER_SAMPLES + 1000;  // margin
         correlation_pos_ = (correlation_pos_ + need_to_drop) % MAX_BUFFER_SAMPLES;
-        LOG_MODEM(WARN, "[%s] Buffer overflow, dropped %zu unsearched samples (corr_pos=%zu)",
-                  log_prefix_.c_str(), need_to_drop, correlation_pos_);
+        overflow_events_++;
+        {
+            std::lock_guard<std::mutex> slock(stats_mutex_);
+            stats_.buffer_overflows = overflow_events_;
+        }
+        if (overflow_events_ <= 3 || (overflow_events_ % 25) == 0) {
+            LOG_MODEM(WARN, "[%s] Buffer overflow, dropped %zu unsearched samples (corr_pos=%zu, total=%llu)",
+                      log_prefix_.c_str(), need_to_drop, correlation_pos_,
+                      static_cast<unsigned long long>(overflow_events_));
+        }
     }
 
     // Write samples to circular buffer
@@ -224,12 +243,14 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
 
 void StreamingDecoder::processBuffer() {
     // Wait for new data or timeout
+    bool woke_with_data = false;
     {
         std::unique_lock<std::mutex> lock(buffer_mutex_);
-        data_cv_.wait_for(lock, std::chrono::milliseconds(50), [this] {
+        woke_with_data = data_cv_.wait_for(lock, std::chrono::milliseconds(50), [this] {
             return shutdown_.load() || new_data_available_;
         });
         if (shutdown_.load()) return;
+        if (!woke_with_data) return;  // Timeout with no new audio; avoid stale re-search churn
         new_data_available_ = false;  // Clear flag after waking
     }
 
@@ -411,7 +432,25 @@ void StreamingDecoder::searchForSync() {
     // because stale LTS phases can't be recovered by DD tracking alone.
     const bool is_coherent = (current_modulation_ == Modulation::QPSK ||
                               current_modulation_ == Modulation::BPSK);
-    const float LIGHT_SYNC_MIN_CONFIDENCE = is_coherent ? 0.88f : 0.70f;
+    const float fading_hint = last_fading_index_.load();
+    const float snr_hint = last_snr_.load();
+    float light_sync_min_confidence = is_coherent ? 0.88f : 0.70f;
+    if (!is_coherent) {
+        // OTA HF can produce valid LTS peaks in the 0.55-0.65 range during
+        // fades. Start conservative, but avoid hard-locking to 0.70.
+        if (fading_hint >= 1.00f || snr_hint < 10.0f) {
+            light_sync_min_confidence = 0.55f;
+        } else if (fading_hint >= 0.70f || snr_hint < 14.0f) {
+            light_sync_min_confidence = 0.58f;
+        } else if (fading_hint >= 0.50f || snr_hint < 18.0f) {
+            light_sync_min_confidence = 0.62f;
+        }
+
+        if (connected_ && sync_reject_streak_ >= 20) {
+            float extra_relax = std::min(0.12f, 0.02f * static_cast<float>(sync_reject_streak_ / 20));
+            light_sync_min_confidence = std::max(0.55f, light_sync_min_confidence - extra_relax);
+        }
+    }
 
     if (connected_ && waveform_->supportsDataPreamble()) {
         float known_cfo = last_cfo_.load();
@@ -420,13 +459,16 @@ void StreamingDecoder::searchForSync() {
             sync_result, known_cfo, CORR_DETECT_THRESHOLD);
 
         // Reject clear false positives (noise floor is ~0.2-0.4)
-        if (found && sync_result.correlation < LIGHT_SYNC_MIN_CONFIDENCE) {
-            LOG_MODEM(INFO, "[%s] DATA sync rejected (corr=%.2f < %.2f)",
-                      log_prefix_.c_str(), sync_result.correlation, LIGHT_SYNC_MIN_CONFIDENCE);
+        if (found && sync_result.correlation < light_sync_min_confidence) {
+            sync_reject_streak_++;
+            LOG_MODEM(INFO, "[%s] DATA sync rejected (corr=%.2f < %.2f, streak=%llu)",
+                      log_prefix_.c_str(), sync_result.correlation, light_sync_min_confidence,
+                      static_cast<unsigned long long>(sync_reject_streak_));
             found = false;
         }
 
         if (found) {
+            sync_reject_streak_ = 0;
             LOG_MODEM(INFO, "[%s] DATA sync detected (training only, known CFO=%.1f Hz, corr=%.2f)",
                       log_prefix_.c_str(), known_cfo, sync_result.correlation);
         }
@@ -1277,6 +1319,7 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
 
     state_ = DecoderState::SEARCHING;
     pending_total_cw_ = 0;
+    sync_reject_streak_ = 0;
     constellation_cache_.clear();
     constellation_cache_time_ = std::chrono::steady_clock::time_point{};
 
@@ -1501,6 +1544,8 @@ void StreamingDecoder::reset() {
     samples_since_sync_ = 0;
     total_fed_ = 0;
     feed_iter_ = 0;
+    overflow_events_ = 0;
+    sync_reject_streak_ = 0;
     state_ = DecoderState::SEARCHING;
     pending_total_cw_ = 0;
     burst_blocks_decoded_ = 0;

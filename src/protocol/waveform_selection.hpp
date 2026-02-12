@@ -56,6 +56,27 @@ inline CodeRate selectOFDMCodeRate(float snr_db, float fading_index) {
     return CodeRate::R1_4;
 }
 
+// Cap initial OFDM rate during handshake bootstrap using only chirp-era metrics.
+// This avoids optimistic R2/3 starts when first post-connect OFDM quality is unknown.
+inline CodeRate capInitialOFDMRate(float snr_db, float fading_index, CodeRate candidate) {
+    if (candidate == CodeRate::R3_4) {
+        // Keep R3/4 for near-ideal channels only.
+        if (fading_index >= 0.05f || snr_db < 24.0f) {
+            return CodeRate::R2_3;
+        }
+        return candidate;
+    }
+
+    if (candidate == CodeRate::R2_3) {
+        // Conservative bootstrap for OTA: upgrade after channel proves itself.
+        if (fading_index >= 0.45f || snr_db < 24.0f) {
+            return CodeRate::R1_2;
+        }
+    }
+
+    return candidate;
+}
+
 // Recommend waveform and rate based on SNR and fading index
 //
 // Fading index now combines freq_cv + temporal_cv (Doppler measurement).

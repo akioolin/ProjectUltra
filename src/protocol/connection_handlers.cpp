@@ -122,6 +122,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // We are the responder - we received CONNECT and are sending CONNECT_ACK
         is_initiator_ = false;
         handshake_confirmed_ = false;  // Responder waits for first frame to confirm
+        responder_handshake_wait_ms_ = RESPONDER_HANDSHAKE_FAILSAFE_MS;
 
         // Check if initiator forced specific modes (0xFF = AUTO, else forced)
         Modulation forced_mod = static_cast<Modulation>(frame.initial_modulation);
@@ -141,6 +142,18 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // Get recommended mode based on SNR, fading AND the negotiated waveform
         // This ensures MC-DPSK uses R1/4, OFDM uses appropriate rate, etc.
         recommendDataModeForWaveform(snr_db, fading_index_, negotiated_mode_, rec_mod, rec_rate);
+
+        // Bootstrap safety: chirp SNR can overestimate first OFDM frame quality.
+        // Start one step more robust when channel is borderline.
+        if (negotiated_mode_ == WaveformMode::OFDM_CHIRP ||
+            negotiated_mode_ == WaveformMode::OFDM_COX) {
+            CodeRate capped = capInitialOFDMRate(snr_db, fading_index_, rec_rate);
+            if (capped != rec_rate) {
+                LOG_MODEM(INFO, "Connection: Bootstrap cap %s -> %s for initial OFDM setup (SNR=%.1f, fading=%.2f)",
+                          codeRateToString(rec_rate), codeRateToString(capped), snr_db, fading_index_);
+                rec_rate = capped;
+            }
+        }
 
         // Override with forced values if specified
         if (forced_mod != Modulation::AUTO) {
@@ -222,6 +235,7 @@ void Connection::handleConnectAck(const v2::ConnectFrame& frame, const std::stri
     // We are the initiator - we sent CONNECT and received CONNECT_ACK
     is_initiator_ = true;
     handshake_confirmed_ = true;  // Handshake complete for initiator
+    responder_handshake_wait_ms_ = 0;
 
     enterConnected();
 

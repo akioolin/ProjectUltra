@@ -348,19 +348,19 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
 
         const char* quality = fadingToQuality(fading);
         const char* wf_name = waveformDisplayName(waveform);
-        guiLog("MODE_CHANGE: %s %s %s (SNR=%.1f dB, %s)",
+        guiLog("MODE_CHANGE: %s %s %s (peer_snr=%.1f dB, local_fading=%.2f %s)",
                wf_name, modulationToString(mod), codeRateToString(rate),
-               snr_db, quality);
+               snr_db, fading, quality);
 
         // Format display with waveform info and channel quality
         char buf[120];
         if (waveform == protocol::WaveformMode::MC_DPSK) {
-            snprintf(buf, sizeof(buf), "[MODE] MC-DPSK 8 carriers %s (SNR=%d dB, %s fading=%.2f)",
-                     codeRateToString(rate), static_cast<int>(snr_db), quality, fading);
+            snprintf(buf, sizeof(buf), "[MODE] MC-DPSK 8 carriers %s (peer SNR=%d dB, local fading=%.2f %s)",
+                     codeRateToString(rate), static_cast<int>(snr_db), fading, quality);
         } else {
-            snprintf(buf, sizeof(buf), "[MODE] %s %s %s (SNR=%d dB, %s fading=%.2f)",
+            snprintf(buf, sizeof(buf), "[MODE] %s %s %s (peer SNR=%d dB, local fading=%.2f %s)",
                      wf_name, modulationToString(mod), codeRateToString(rate),
-                     static_cast<int>(snr_db), quality, fading);
+                     static_cast<int>(snr_db), fading, quality);
         }
         rx_log_.push_back(buf);
         if (rx_log_.size() > MAX_RX_LOG) {
@@ -691,14 +691,14 @@ void App::initVirtualStation() {
         const char* quality = fadingToQuality(fading);
         const char* wf_name = waveformDisplayName(waveform);
 
-        guiLog("SIM: Virtual MODE_CHANGE: %s %s %s (SNR=%.1f dB, %s fading=%.2f)",
+        guiLog("SIM: Virtual MODE_CHANGE: %s %s %s (peer_snr=%.1f dB, local_fading=%.2f %s)",
                wf_name, modulationToString(mod), codeRateToString(rate),
-               snr_db, quality, fading);
+               snr_db, fading, quality);
 
         char buf[120];
-        snprintf(buf, sizeof(buf), "[SIM-MODE] %s %s %s (SNR=%d dB, %s fading=%.2f)",
+        snprintf(buf, sizeof(buf), "[SIM-MODE] %s %s %s (peer SNR=%d dB, local fading=%.2f %s)",
                  wf_name, modulationToString(mod), codeRateToString(rate),
-                 static_cast<int>(snr_db), quality, fading);
+                 static_cast<int>(snr_db), fading, quality);
         rx_log_.push_back(buf);
         if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
     });

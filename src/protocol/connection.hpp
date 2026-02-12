@@ -327,6 +327,8 @@ private:
     // Handshake state - responder waits for first frame before confirming
     bool is_initiator_ = false;           // True if we initiated the connection
     bool handshake_confirmed_ = false;    // True after handshake is fully confirmed
+    uint32_t responder_handshake_wait_ms_ = 0;  // Fail-safe timer for responder handshake
+    static constexpr uint32_t RESPONDER_HANDSHAKE_FAILSAFE_MS = 2200;
 
     // Internal handlers for v2 frames
     void handleConnect(const v2::ConnectFrame& frame, const std::string& src_call);

@@ -336,6 +336,8 @@ private:
     std::atomic<float> last_cfo_{0.0f};
     std::atomic<float> last_fading_index_{0.0f};
     float noise_floor_ = 0.001f;
+    uint64_t overflow_events_ = 0;
+    uint64_t sync_reject_streak_ = 0;
 
     // Constellation cache (protected by buffer_mutex_)
     mutable std::vector<std::complex<float>> constellation_cache_;
@@ -379,6 +381,7 @@ private:
     static constexpr size_t MAX_BUFFER_SAMPLES = 480000;    // 10 seconds at 48kHz
     static constexpr size_t CHIRP_SAMPLES = 57600;          // ~1.2 second (dual chirp)
     static constexpr size_t CORRELATION_STEP = 4800;        // 100ms at 48kHz (faster search)
+    static constexpr size_t CORR_INVARIANT_GUARD = 9600;    // 200ms guard to detect pointer drift
 
     // Constants - Adaptive acquisition thresholds (disabled for now)
     static constexpr float CORR_NOISE_THRESHOLD = 0.05f;    // Below = pure noise, don't advance
