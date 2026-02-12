@@ -62,6 +62,7 @@ public:
     // ========================================================================
 
     bool detectSync(SampleSpan samples, SyncResult& result, float threshold = 0.8f) override;
+    void setAbsoluteTrainingPosition(size_t pos) override;
     bool process(SampleSpan samples) override;
     std::vector<float> getSoftBits() override;
     void reset() override;
@@ -111,6 +112,8 @@ private:
     float cfo_hz_ = 0.0f;
     std::vector<float> soft_bits_;
     size_t training_start_sample_ = 0;  // Position where LTS starts (for CFO phase calc)
+    size_t absolute_training_start_sample_ = 0;
+    bool has_absolute_training_start_sample_ = false;
     bool synced_ = false;
 };
 

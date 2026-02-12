@@ -24,6 +24,7 @@
 #include <queue>
 #include <cmath>
 #include <functional>
+#include <sstream>
 
 #include "waveform/waveform_factory.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
@@ -35,6 +36,7 @@
 #include "protocol/frame_v2.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/fec.hpp"  // ChannelInterleaver, LDPCEncoder
+#include "ultra/dsp.hpp"  // FFT for analytic-signal CFO injection
 #include "fec/frame_interleaver.hpp"  // FrameInterleaver
 #include "sim/hf_channel.hpp"
 
@@ -61,7 +63,38 @@ enum class ChannelType {
  */
 class SimulatedChannel {
 public:
+    struct CapturedSignals {
+        std::vector<float> a_tx_raw;
+        std::vector<float> b_tx_raw;
+        std::vector<float> a_rx_raw;
+        std::vector<float> b_rx_raw;
+        bool truncated = false;
+        size_t max_samples = 0;
+    };
+
     void setSeed(uint32_t seed) { seed_ = seed; }
+    void setTxCFO(float cfo_hz) { tx_cfo_hz_ = cfo_hz; }
+    float getTxCFO() const { return tx_cfo_hz_; }
+
+    void setSignalCaptureEnabled(bool enabled) {
+        capture_enabled_.store(enabled);
+    }
+
+    void setSignalCaptureMaxSamples(size_t max_samples) {
+        std::lock_guard<std::mutex> lock(capture_mutex_);
+        capture_max_samples_ = max_samples;
+    }
+
+    void clearCapturedSignals() {
+        std::lock_guard<std::mutex> lock(capture_mutex_);
+        captured_ = CapturedSignals{};
+        captured_.max_samples = capture_max_samples_;
+    }
+
+    CapturedSignals getCapturedSignals() const {
+        std::lock_guard<std::mutex> lock(capture_mutex_);
+        return captured_;
+    }
 
     void configure(float snr_db, ChannelType channel_type = ChannelType::AWGN) {
         snr_db_ = snr_db;
@@ -69,6 +102,10 @@ public:
         float signal_power = 0.01f;
         noise_stddev_ = std::sqrt(signal_power / snr_linear);
         rng_.seed(seed_);
+        channel_a_to_b_.reset();
+        channel_b_to_a_.reset();
+        cfo_phase_a_to_b_ = 0.0f;
+        cfo_phase_b_to_a_ = 0.0f;
 
         if (channel_type != ChannelType::AWGN) {
             WattersonChannel::Config cfg;
@@ -89,6 +126,8 @@ public:
                     cfg = itu_r_f1487::moderate(snr_db);
                     break;
             }
+            // Use simulator-side analytic CFO injection (below) for both AWGN and
+            // fading modes so CFO behavior is consistent and non-distorting.
             cfg.cfo_hz = 0.0f;
             channel_a_to_b_ = std::make_unique<WattersonChannel>(cfg, seed_);
             channel_b_to_a_ = std::make_unique<WattersonChannel>(cfg, seed_ + 1);
@@ -97,7 +136,9 @@ public:
 
     // Station A transmits -> goes to B's RX buffer
     void transmitFromA(const std::vector<float>& samples) {
-        auto processed = applyChannel(samples, channel_a_to_b_.get());
+        auto with_cfo = applyTxCFO(samples, cfo_phase_a_to_b_);
+        auto processed = applyChannel(with_cfo, channel_a_to_b_.get());
+        captureTxIfEnabled(samples, true);
         std::lock_guard<std::mutex> lock(mutex_b_rx_);
         for (float s : processed) {
             buffer_b_rx_.push(s);
@@ -106,7 +147,9 @@ public:
 
     // Station B transmits -> goes to A's RX buffer
     void transmitFromB(const std::vector<float>& samples) {
-        auto processed = applyChannel(samples, channel_b_to_a_.get());
+        auto with_cfo = applyTxCFO(samples, cfo_phase_b_to_a_);
+        auto processed = applyChannel(with_cfo, channel_b_to_a_.get());
+        captureTxIfEnabled(samples, false);
         std::lock_guard<std::mutex> lock(mutex_a_rx_);
         for (float s : processed) {
             buffer_a_rx_.push(s);
@@ -126,6 +169,7 @@ public:
                 result[i] = noise_dist_(rng_) * noise_stddev_;
             }
         }
+        captureRxIfEnabled(result, true);
         return result;
     }
 
@@ -141,12 +185,16 @@ public:
                 result[i] = noise_dist_(rng_) * noise_stddev_;
             }
         }
+        captureRxIfEnabled(result, false);
         return result;
     }
 
 private:
     float snr_db_ = 20.0f;
     float noise_stddev_ = 0.01f;
+    float tx_cfo_hz_ = 0.0f;
+    float cfo_phase_a_to_b_ = 0.0f;
+    float cfo_phase_b_to_a_ = 0.0f;
     uint32_t seed_ = 42;
     std::mt19937 rng_{42};
     std::normal_distribution<float> noise_dist_{0.0f, 1.0f};
@@ -156,6 +204,102 @@ private:
 
     std::mutex mutex_a_rx_, mutex_b_rx_;
     std::queue<float> buffer_a_rx_, buffer_b_rx_;
+
+    std::atomic<bool> capture_enabled_{false};
+    mutable std::mutex capture_mutex_;
+    CapturedSignals captured_;
+    size_t capture_max_samples_ = 0;  // 0 = unlimited
+
+    void appendLimited(std::vector<float>& dst, const std::vector<float>& src) {
+        if (src.empty()) return;
+
+        if (capture_max_samples_ == 0) {
+            dst.insert(dst.end(), src.begin(), src.end());
+            return;
+        }
+
+        if (dst.size() >= capture_max_samples_) {
+            captured_.truncated = true;
+            return;
+        }
+
+        size_t room = capture_max_samples_ - dst.size();
+        size_t take = std::min(room, src.size());
+        dst.insert(dst.end(), src.begin(), src.begin() + static_cast<std::ptrdiff_t>(take));
+        if (take < src.size()) {
+            captured_.truncated = true;
+        }
+    }
+
+    void captureTxIfEnabled(const std::vector<float>& tx_raw, bool from_a) {
+        if (!capture_enabled_.load()) return;
+        std::lock_guard<std::mutex> lock(capture_mutex_);
+        captured_.max_samples = capture_max_samples_;
+        if (from_a) {
+            appendLimited(captured_.a_tx_raw, tx_raw);
+        } else {
+            appendLimited(captured_.b_tx_raw, tx_raw);
+        }
+    }
+
+    void captureRxIfEnabled(const std::vector<float>& rx_raw, bool for_a) {
+        if (!capture_enabled_.load()) return;
+        std::lock_guard<std::mutex> lock(capture_mutex_);
+        captured_.max_samples = capture_max_samples_;
+        if (for_a) {
+            appendLimited(captured_.a_rx_raw, rx_raw);
+        } else {
+            appendLimited(captured_.b_rx_raw, rx_raw);
+        }
+    }
+
+    // Apply TX CFO as an analytic-signal frequency shift with phase continuity.
+    // This models radio tuning offset without the amplitude distortion seen in the
+    // Watterson helper's simplified CFO path.
+    std::vector<float> applyTxCFO(const std::vector<float>& samples, float& phase_acc) {
+        if (std::abs(tx_cfo_hz_) < 0.001f || samples.empty()) {
+            return samples;
+        }
+
+        const size_t n = samples.size();
+        size_t fft_size = 1;
+        while (fft_size < n) fft_size <<= 1;
+
+        FFT fft(fft_size);
+        std::vector<Complex> time_in(fft_size, Complex(0.0f, 0.0f));
+        std::vector<Complex> freq(fft_size, Complex(0.0f, 0.0f));
+        std::vector<Complex> analytic(fft_size, Complex(0.0f, 0.0f));
+        for (size_t i = 0; i < n; i++) {
+            time_in[i] = Complex(samples[i], 0.0f);
+        }
+
+        fft.forward(time_in.data(), freq.data());
+
+        // Hilbert transform in frequency domain to form analytic signal.
+        if (fft_size >= 2) {
+            for (size_t i = 1; i < fft_size / 2; i++) {
+                freq[i] *= 2.0f;
+            }
+            for (size_t i = fft_size / 2 + 1; i < fft_size; i++) {
+                freq[i] = Complex(0.0f, 0.0f);
+            }
+        }
+
+        fft.inverse(freq.data(), analytic.data());
+
+        std::vector<float> out(n, 0.0f);
+        const float phase_inc = 2.0f * static_cast<float>(M_PI) * tx_cfo_hz_ / 48000.0f;
+        float phase = phase_acc;
+        for (size_t i = 0; i < n; i++) {
+            Complex rot(std::cos(phase), std::sin(phase));
+            out[i] = std::real(analytic[i] * rot);
+            phase += phase_inc;
+            if (phase > static_cast<float>(M_PI)) phase -= 2.0f * static_cast<float>(M_PI);
+            else if (phase < -static_cast<float>(M_PI)) phase += 2.0f * static_cast<float>(M_PI);
+        }
+        phase_acc = phase;
+        return out;
+    }
 
     std::vector<float> applyChannel(const std::vector<float>& samples, WattersonChannel* fading) {
         if (fading) {
@@ -810,13 +954,37 @@ public:
     void setNoBurstInterleave(bool v) { no_burst_interleave_ = v; }
     void setTestBurst(bool v) { test_burst_ = v; }
     void setSeed(uint32_t seed) { seed_ = seed; }
+    void setTxCFO(float cfo_hz) { tx_cfo_hz_ = cfo_hz; }
+    void setSaveSignals(bool enable, int message_limit = 0) {
+        save_signals_ = enable;
+        save_signals_message_limit_ = std::max(0, message_limit);
+    }
+    void setSaveSignalsPrefix(const std::string& prefix) { save_signals_prefix_ = prefix; }
+    void setSaveSignalsMaxSamples(size_t max_samples) { save_signals_max_samples_ = max_samples; }
 
     bool runTest() {
         printHeader();
 
         // Setup channel
         channel_.setSeed(seed_);
+        channel_.setTxCFO(tx_cfo_hz_);
         channel_.configure(snr_db_, channel_type_);
+        channel_.setSignalCaptureEnabled(false);
+        if (save_signals_) {
+            capture_limit_hit_.store(false);
+            channel_.setSignalCaptureMaxSamples(save_signals_max_samples_);
+            channel_.clearCapturedSignals();
+            channel_.setSignalCaptureEnabled(true);
+            std::cout << "  [capture] enabled";
+            if (save_signals_message_limit_ > 0) {
+                std::cout << ", will stop after " << save_signals_message_limit_
+                          << " received app message(s)";
+            }
+            if (save_signals_max_samples_ > 0) {
+                std::cout << ", max " << save_signals_max_samples_ << " samples/stream";
+            }
+            std::cout << "\n";
+        }
 
         // Create stations
         alpha_ = std::make_unique<SimulatedStation>("ALPHA", channel_, true);
@@ -858,7 +1026,17 @@ public:
             received_message_ = msg;
             message_received_ = true;
             received_messages_.push_back(msg);
-            messages_received_count_.store(static_cast<int>(received_messages_.size()));
+            int count = static_cast<int>(received_messages_.size());
+            messages_received_count_.store(count);
+
+            if (save_signals_ &&
+                save_signals_message_limit_ > 0 &&
+                count >= save_signals_message_limit_ &&
+                !capture_limit_hit_.exchange(true)) {
+                channel_.setSignalCaptureEnabled(false);
+                LOG_MODEM(INFO, "[capture] reached message limit (%d), signal capture stopped",
+                          save_signals_message_limit_);
+            }
         });
 
         // Setup file received callback on BRAVO
@@ -887,6 +1065,10 @@ public:
         // Stop
         alpha_->stop();
         bravo_->stop();
+        channel_.setSignalCaptureEnabled(false);
+        if (save_signals_) {
+            saveCapturedSignals(success);
+        }
 
         if (success) {
             printSummary();
@@ -911,8 +1093,14 @@ private:
     bool test_burst_ = false;              // --burst-test mode: send large messages for burst interleaving
     bool use_channel_interleave_ = true;   // Enabled by default for OFDM fading resistance
     bool no_burst_interleave_ = false;     // --no-burst-interleave for A/B testing
+    bool save_signals_ = false;
+    int save_signals_message_limit_ = 0;   // 0 = full run
+    size_t save_signals_max_samples_ = 0;  // 0 = unlimited
+    std::string save_signals_prefix_ = "/tmp/cli_signals";
+    std::atomic<bool> capture_limit_hit_{false};
     size_t test_file_size_ = 256;  // Default 256 bytes test file
     uint32_t seed_ = 42;
+    float tx_cfo_hz_ = 0.0f;
     Modulation forced_mod_ = Modulation::AUTO;
     CodeRate forced_rate_ = CodeRate::AUTO;
     WaveformMode forced_waveform_ = WaveformMode::AUTO;
@@ -931,6 +1119,85 @@ private:
     std::string received_file_path_;
     bool file_transfer_success_ = false;
     std::atomic<bool> file_received_{false};
+
+    static bool writeF32File(const std::string& path, const std::vector<float>& data) {
+        std::ofstream out(path, std::ios::binary);
+        if (!out) return false;
+        out.write(reinterpret_cast<const char*>(data.data()),
+                  static_cast<std::streamsize>(data.size() * sizeof(float)));
+        return static_cast<bool>(out);
+    }
+
+    std::string capturePrefixForRun() const {
+        std::ostringstream oss;
+        oss << save_signals_prefix_ << "_seed" << seed_;
+        return oss.str();
+    }
+
+    void saveCapturedSignals(bool test_success) {
+        auto cap = channel_.getCapturedSignals();
+        std::string prefix = capturePrefixForRun();
+
+        std::string a_tx = prefix + "_a_tx_raw.f32";
+        std::string b_tx = prefix + "_b_tx_raw.f32";
+        std::string a_rx = prefix + "_a_rx_raw.f32";
+        std::string b_rx = prefix + "_b_rx_raw.f32";
+        std::string meta = prefix + "_meta.txt";
+
+        bool ok = true;
+        ok = writeF32File(a_tx, cap.a_tx_raw) && ok;
+        ok = writeF32File(b_tx, cap.b_tx_raw) && ok;
+        ok = writeF32File(a_rx, cap.a_rx_raw) && ok;
+        ok = writeF32File(b_rx, cap.b_rx_raw) && ok;
+
+        std::ofstream meta_out(meta);
+        if (meta_out) {
+            const char* mod_str =
+                (forced_mod_ == Modulation::AUTO) ? "AUTO" : modulationToString(forced_mod_);
+            const char* rate_str =
+                (forced_rate_ == CodeRate::AUTO) ? "AUTO" : codeRateToString(forced_rate_);
+            const char* wf_str =
+                (forced_waveform_ == WaveformMode::AUTO) ? "AUTO" : waveformModeToString(forced_waveform_);
+
+            meta_out << "sample_rate=48000\n";
+            meta_out << "seed=" << seed_ << "\n";
+            meta_out << "snr_db=" << snr_db_ << "\n";
+            meta_out << "tx_cfo_hz=" << tx_cfo_hz_ << "\n";
+            meta_out << "channel=" << channelTypeName() << "\n";
+            meta_out << "forced_modulation=" << mod_str << "\n";
+            meta_out << "forced_code_rate=" << rate_str << "\n";
+            meta_out << "forced_waveform=" << wf_str << "\n";
+            meta_out << "test_type="
+                     << (test_file_transfer_ ? "file_transfer" : (test_burst_ ? "burst" : "messages"))
+                     << "\n";
+            meta_out << "test_success=" << (test_success ? "1" : "0") << "\n";
+            meta_out << "capture_message_limit=" << save_signals_message_limit_ << "\n";
+            meta_out << "capture_limit_hit=" << (capture_limit_hit_.load() ? "1" : "0") << "\n";
+            meta_out << "capture_max_samples=" << cap.max_samples << "\n";
+            meta_out << "capture_truncated=" << (cap.truncated ? "1" : "0") << "\n";
+            meta_out << "a_tx_samples=" << cap.a_tx_raw.size() << "\n";
+            meta_out << "b_tx_samples=" << cap.b_tx_raw.size() << "\n";
+            meta_out << "a_rx_samples=" << cap.a_rx_raw.size() << "\n";
+            meta_out << "b_rx_samples=" << cap.b_rx_raw.size() << "\n";
+            meta_out << "files=" << a_tx << "," << b_tx << "," << a_rx << "," << b_rx << "\n";
+            meta_out << "notes=Compare TX vs RX using training/LTS CFO estimator to validate residual CFO after correction.\n";
+            meta_out.close();
+        } else {
+            ok = false;
+        }
+
+        if (ok) {
+            std::cout << "\n  [capture] wrote:\n"
+                      << "    " << a_tx << "\n"
+                      << "    " << b_tx << "\n"
+                      << "    " << a_rx << "\n"
+                      << "    " << b_rx << "\n"
+                      << "    " << meta << "\n";
+        } else {
+            std::cout << "\n  \033[33m[capture] warning: failed to write one or more capture files under prefix "
+                      << prefix << "\033[0m\n";
+        }
+    }
 
     bool runProtocolTest() {
         // Phase 1: Connect
@@ -1293,6 +1560,7 @@ private:
         std::cout << "╚══════════════════════════════════════════════════════════════╝\n";
         std::cout << "\n";
         std::cout << "  SNR:     " << snr_db_ << " dB\n";
+        std::cout << "  TX CFO:  " << tx_cfo_hz_ << " Hz\n";
         std::cout << "  Channel: " << channelTypeName() << "\n";
         std::cout << "  Model:   Real-time (48kHz, 10ms callbacks)\n";
         std::cout << "\n";
@@ -1466,6 +1734,18 @@ int main(int argc, char* argv[]) {
             sim.setTestBurst(true);
         } else if (arg == "--seed" && i + 1 < argc) {
             sim.setSeed(static_cast<uint32_t>(std::stoul(argv[++i])));
+        } else if ((arg == "--tx-cfo" || arg == "--cfo") && i + 1 < argc) {
+            sim.setTxCFO(std::stof(argv[++i]));
+        } else if (arg == "--save-signals") {
+            int message_limit = 0;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                message_limit = std::stoi(argv[++i]);
+            }
+            sim.setSaveSignals(true, message_limit);
+        } else if (arg == "--save-prefix" && i + 1 < argc) {
+            sim.setSaveSignalsPrefix(argv[++i]);
+        } else if (arg == "--save-max-samples" && i + 1 < argc) {
+            sim.setSaveSignalsMaxSamples(static_cast<size_t>(std::stoull(argv[++i])));
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "CLI Simulator - IWaveform + StreamingDecoder Model\n\n";
             std::cout << "Uses IWaveform for TX and StreamingDecoder for RX directly.\n";
@@ -1483,10 +1763,17 @@ int main(int argc, char* argv[]) {
             std::cout << "  --rate, -r <RATE>   Force code rate: r1_4, r1_2, r2_3, r3_4\n";
             std::cout << "  --waveform, -w <WF> Force waveform: mc_dpsk, ofdm_chirp, ofdm_cox\n";
             std::cout << "  --seed <N>          Random seed (default: 42)\n";
+            std::cout << "  --tx-cfo <Hz>       Inject TX CFO in channel model (default: 0)\n";
+            std::cout << "  --cfo <Hz>          Alias for --tx-cfo\n";
             std::cout << "  --file [SIZE]       Test file transfer (default: 256 bytes)\n";
             std::cout << "  --channel-interleave, -ci  Enable channel interleaving\n";
             std::cout << "  --no-burst-interleave     Disable burst-level long interleaving\n";
             std::cout << "  --burst-test              Send large messages to test burst interleaving\n";
+            std::cout << "  --save-signals [N]        Save TX/RX raw float traces (.f32)\n";
+            std::cout << "                           N = stop capture after BRAVO receives N app messages\n";
+            std::cout << "                           (default: 0 = capture full run)\n";
+            std::cout << "  --save-prefix <PATH>      Capture file prefix (default: /tmp/cli_signals)\n";
+            std::cout << "  --save-max-samples <N>    Per-stream capture cap (0 = unlimited)\n";
             std::cout << "  --verbose, -v       Verbose output\n";
             return 0;
         }

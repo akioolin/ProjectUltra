@@ -147,6 +147,11 @@ bool OFDMNvisWaveform::detectSync(SampleSpan samples, SyncResult& result, float 
     return false;
 }
 
+void OFDMNvisWaveform::setAbsoluteTrainingPosition(size_t pos) {
+    absolute_training_start_sample_ = pos;
+    has_absolute_training_start_sample_ = true;
+}
+
 bool OFDMNvisWaveform::process(SampleSpan samples) {
     if (!demodulator_) {
         return false;
@@ -161,14 +166,20 @@ bool OFDMNvisWaveform::process(SampleSpan samples) {
     // (same approach as OFDM_CHIRP)
     // The CFO has been accumulating since sample 0, so at training_start_sample_:
     //   phase = -2π × CFO × training_start_sample_ / sample_rate
-    float initial_phase_rad = -2.0f * M_PI * cfo_hz_ * training_start_sample_ / config_.sample_rate;
+    size_t phase_ref_sample = training_start_sample_;
+    if (has_absolute_training_start_sample_) {
+        phase_ref_sample = absolute_training_start_sample_;
+    }
+    float initial_phase_rad = -2.0f * M_PI * cfo_hz_ * phase_ref_sample / config_.sample_rate;
 
     // Wrap to [-π, π]
     while (initial_phase_rad > M_PI) initial_phase_rad -= 2.0f * M_PI;
     while (initial_phase_rad < -M_PI) initial_phase_rad += 2.0f * M_PI;
 
-    LOG_MODEM(INFO, "OFDMNvisWaveform::process: CFO=%.1f Hz, training_start=%zu, initial_phase=%.1f°, samples=%zu",
-              cfo_hz_, training_start_sample_, initial_phase_rad * 180.0f / M_PI, samples.size());
+    LOG_MODEM(INFO, "OFDMNvisWaveform::process: CFO=%.1f Hz, training_start=%zu, abs_start=%zu, initial_phase=%.1f°, samples=%zu",
+              cfo_hz_, training_start_sample_,
+              has_absolute_training_start_sample_ ? absolute_training_start_sample_ : 0,
+              initial_phase_rad * 180.0f / M_PI, samples.size());
 
     // Pass CFO and initial phase to demodulator (same as OFDM_CHIRP)
     demodulator_->setFrequencyOffsetWithPhase(cfo_hz_, initial_phase_rad);
@@ -201,6 +212,8 @@ void OFDMNvisWaveform::reset() {
     soft_bits_.clear();
     synced_ = false;
     training_start_sample_ = 0;
+    has_absolute_training_start_sample_ = false;
+    absolute_training_start_sample_ = 0;
     // NOTE: CFO is intentionally preserved across reset() for continuous tracking
     // Use setFrequencyOffset(0) to explicitly clear if needed
 }

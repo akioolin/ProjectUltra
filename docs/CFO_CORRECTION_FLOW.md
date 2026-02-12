@@ -1,6 +1,6 @@
 # CFO Correction Flow - Complete Reference
 
-This document describes the complete CFO (Carrier Frequency Offset) correction flow, including the fading channel correction and feedback loop added 2026-02-03.
+This document describes the complete CFO (Carrier Frequency Offset) correction flow, including the fading-channel correction loop and the 2026-02-12 verification tooling updates.
 
 **Status:** Working and verified (100% CW on AWGN, 100% CW on good fading, ~83% on moderate)
 
@@ -8,7 +8,7 @@ This document describes the complete CFO (Carrier Frequency Offset) correction f
 
 ## Overview
 
-CFO correction has THREE stages:
+CFO correction has THREE runtime stages:
 1. **Chirp-based coarse estimation** — during handshake (dual chirp preamble)
 2. **LTS-based residual correction** — per frame (training symbol phase comparison)
 3. **Pilot-based tracking** — per symbol (pilot carrier phase differences)
@@ -181,6 +181,61 @@ Frame N+1 processing:
 
 ---
 
+## Stage 5: Simulator TX CFO Injection and Internal Chain Proof
+
+The simulator now supports deterministic CFO stress testing and direct internal validation of the correction path.
+
+### TX CFO injection (simulator)
+
+**File:** `tools/cli_simulator.cpp`
+
+- `--tx-cfo <Hz>` (alias `--cfo`) injects a transmitter CFO shift in the simulator path.
+- Injection is applied with analytic-signal single-sideband shifting and per-direction phase continuity.
+- This avoids image artifacts and preserves realistic stream behavior for long transfers.
+
+Example:
+
+```bash
+./build/cli_simulator --snr 20 --channel awgn --waveform ofdm_chirp \
+  --mod dqpsk --rate r1_2 --tx-cfo 50 --seed 42 --test
+```
+
+### Internal pre/post correction dumps
+
+**File:** `src/ofdm/channel_equalizer.cpp` (inside `toBaseband()`)
+
+Set environment variables before running simulator:
+
+```bash
+ULTRA_DUMP_CFO_PREFIX=/tmp/cfo_chain_dump
+ULTRA_DUMP_CFO_CALLS=6
+```
+
+For each dump index `i`, the demod path writes:
+- `<prefix>_<i>_pre.cf32` (after mixer/downconversion, before CFO correction)
+- `<prefix>_<i>_post.cf32` (after CFO correction)
+- `<prefix>_<i>_meta.txt` (sample rate, CFO, phase info)
+
+### One-command verification harness
+
+**Files:**
+- `tests/verify_cfo_chain.sh`
+- `tools/verify_cfo_chain_dump.py`
+
+Run:
+
+```bash
+./tests/verify_cfo_chain.sh --cfo 50 --channel awgn --snr 20 --seed 42
+```
+
+The Python verifier estimates applied correction from:
+- `post * conj(pre)` phase slope
+
+Expected result:
+- Applied correction near `-expected_cfo` (within tolerance), for all dumped frames.
+
+---
+
 ## StreamingDecoder CFO Drift Limiting
 
 **File:** `src/gui/modem/streaming_decoder.cpp` (lines 425-440)
@@ -273,6 +328,9 @@ diff = eq_data × conj(ref) = TX_data × e^{-jφ} × conj(e^{-jφ}) = TX_data  �
 | `src/waveform/ofdm_chirp_waveform.cpp` | `process()` CFO feedback, initial phase calculation |
 | `src/gui/modem/streaming_decoder.cpp` | `last_cfo_` caching, drift limiting, feedback update |
 | `src/ofdm/ofdm_sync.cpp` | `estimateCFOFromTraining()` (fallback when no chirp) |
+| `tools/cli_simulator.cpp` | TX CFO injection (`--tx-cfo`) and signal capture flags |
+| `tests/verify_cfo_chain.sh` | End-to-end CFO verification gate command |
+| `tools/verify_cfo_chain_dump.py` | Numeric verification of internal pre/post CFO correction |
 
 ---
 
@@ -284,6 +342,7 @@ diff = eq_data × conj(ref) = TX_data × e^{-jφ} × conj(e^{-jφ}) = TX_data  �
 4. **Feedback loop must update cached CFO** — After demodulation, `cfo_hz_` and `last_cfo_` in the waveform AND `last_cfo_` in StreamingDecoder must be updated with the pilot-corrected value.
 5. **Drift limiting threshold: 1 Hz** — Reject chirp CFO measurements that differ by >1 Hz from cached value when connected. Real oscillator drift is slow.
 6. **Re-process training after CFO correction** — If LTS residual correction changes `freq_offset_hz`, the training symbols must be re-processed to get a clean channel estimate.
+7. **Pilot-CFO feedback is OFDM-only** — Do not apply OFDM pilot-based CFO updates to MC-DPSK frames.
 
 ---
 
@@ -301,4 +360,5 @@ diff = eq_data × conj(ref) = TX_data × e^{-jφ} × conj(e^{-jφ}) = TX_data  �
 
 *Document created: 2026-01-26*
 *Major update: 2026-02-03 — Added fading CFO correction, LTS residual estimation, feedback loop*
+*Major update: 2026-02-12 — Added simulator TX CFO injection, internal pre/post dump hooks, and one-command verification harness*
 *Verified: 100% CW on good fading (3/3 runs, 120/120 CWs), 100% on AWGN*

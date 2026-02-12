@@ -281,10 +281,19 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
     }
     // If !signal_in_noise: signal_start stays 0, search entire buffer
 
-    // Schmidl-Cox style autocorrelation for LTS detection
+    // CFO-aware Schmidl-Cox style autocorrelation for LTS detection.
+    // Use analytic signal (Hilbert) so correlation magnitude is robust to
+    // carrier/CFO phase rotation and avoids real-only sign collapse.
+    HilbertTransform hilbert(65);
+    auto analytic = hilbert.process(samples);
+    if (analytic.size() < static_cast<size_t>(symbol_samples * 3)) {
+        return false;
+    }
+
     // LTS has 2 identical symbols, so correlate with 1 symbol delay
     float best_corr = 0.0f;
     int best_offset = 0;
+    Complex best_p(0.0f, 0.0f);
 
     // When buffer starts with signal (burst continuation), use wider search window
     // to find the LTS peak anywhere in the buffer. LTS autocorrelation (~0.99) is
@@ -296,28 +305,29 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
     for (int offset = static_cast<int>(signal_start);
          offset < search_end; offset += 8) {  // Step by 8 for speed
 
-        // Correlate: P = sum(samples[n] * conj(samples[n + L]))
-        float P_real = 0.0f, P_imag = 0.0f;
+        // Correlate: P = sum(conj(s1[n]) * s2[n])
+        Complex P(0.0f, 0.0f);
         float energy1 = 0.0f, energy2 = 0.0f;
 
         for (int n = 0; n < symbol_samples; ++n) {
             int idx1 = offset + n;
             int idx2 = offset + n + symbol_samples;
-            if (idx2 >= static_cast<int>(samples.size())) break;
+            if (idx2 >= static_cast<int>(analytic.size())) break;
 
-            float s1 = samples[idx1];
-            float s2 = samples[idx2];
-            P_real += s1 * s2;
-            energy1 += s1 * s1;
-            energy2 += s2 * s2;
+            const Complex& s1 = analytic[idx1];
+            const Complex& s2 = analytic[idx2];
+            P += std::conj(s1) * s2;
+            energy1 += std::norm(s1);
+            energy2 += std::norm(s2);
         }
 
         float denom = std::sqrt(energy1 * energy2) + 1e-10f;
-        float corr = std::abs(P_real) / denom;
+        float corr = std::abs(P) / denom;
 
         if (corr > best_corr) {
             best_corr = corr;
             best_offset = offset;
+            best_p = P;
         }
 
         // Early exit on first high-confidence peak. The LTS (two identical training
@@ -341,39 +351,30 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
         for (int offset = refine_start; offset < refine_end; ++offset) {
             if (offset == best_offset) continue;  // Skip already-evaluated
 
-            float P_real = 0.0f;
+            Complex P(0.0f, 0.0f);
             float energy1 = 0.0f, energy2 = 0.0f;
 
             for (int n = 0; n < symbol_samples; ++n) {
                 int idx1 = offset + n;
                 int idx2 = offset + n + symbol_samples;
-                if (idx2 >= static_cast<int>(samples.size())) break;
+                if (idx2 >= static_cast<int>(analytic.size())) break;
 
-                float s1 = samples[idx1];
-                float s2 = samples[idx2];
-                P_real += s1 * s2;
-                energy1 += s1 * s1;
-                energy2 += s2 * s2;
+                const Complex& s1 = analytic[idx1];
+                const Complex& s2 = analytic[idx2];
+                P += std::conj(s1) * s2;
+                energy1 += std::norm(s1);
+                energy2 += std::norm(s2);
             }
 
             float denom = std::sqrt(energy1 * energy2) + 1e-10f;
-            float corr = std::abs(P_real) / denom;
+            float corr = std::abs(P) / denom;
 
             if (corr > best_corr) {
                 best_corr = corr;
                 best_offset = offset;
+                best_p = P;
             }
         }
-    }
-
-    // Compensate for CFO-induced correlation drop on real-valued autocorrelation.
-    // CFO causes phase rotation of 2*pi*cfo*L/fs between repeated LTS halves,
-    // reducing real autocorrelation by cos(that phase). This factor is constant
-    // across all offsets so it doesn't affect peak finding, only threshold comparison.
-    float cfo_phase = 2.0f * M_PI * known_cfo_hz * symbol_samples / config_.sample_rate;
-    float cfo_factor = std::cos(cfo_phase);
-    if (std::abs(cfo_factor) > 0.5f) {
-        best_corr = std::min(best_corr / std::abs(cfo_factor), 1.0f);
     }
 
     result.correlation = best_corr;
@@ -390,16 +391,12 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
         last_cfo_ = known_cfo_hz;
 
         // Check LTS sign for burst interleave marker.
-        // Recompute raw P_real at best_offset (the coarse/fine loop used abs()).
-        // Negated first LTS symbol → negative P_real autocorrelation.
-        float raw_P_real = 0.0f;
-        for (int n = 0; n < symbol_samples; ++n) {
-            int idx1 = best_offset + n;
-            int idx2 = best_offset + n + symbol_samples;
-            if (idx2 >= static_cast<int>(samples.size())) break;
-            raw_P_real += samples[idx1] * samples[idx2];
-        }
-        burst_interleaved_detected_ = (raw_P_real < 0.0f);
+        // Compensate expected CFO phase rotation between repeated halves:
+        // phase = 2*pi*CFO*L/fs. Negated first LTS then appears as negative real part.
+        float cfo_phase = 2.0f * M_PI * known_cfo_hz * symbol_samples / config_.sample_rate;
+        Complex cfo_comp(std::cos(-cfo_phase), std::sin(-cfo_phase));
+        Complex marker_metric = best_p * cfo_comp;
+        burst_interleaved_detected_ = (marker_metric.real() < 0.0f);
         burst_interleave_latched_ = burst_interleaved_detected_;
 
         LOG_MODEM(INFO, "OFDMChirpWaveform: Data sync detected at %d, corr=%.2f, using CFO=%.1f Hz%s",
@@ -408,6 +405,11 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
     }
 
     return result.detected;
+}
+
+void OFDMChirpWaveform::setAbsoluteTrainingPosition(size_t pos) {
+    absolute_training_start_sample_ = pos;
+    has_absolute_training_start_sample_ = true;
 }
 
 bool OFDMChirpWaveform::process(SampleSpan samples) {
@@ -421,14 +423,20 @@ bool OFDMChirpWaveform::process(SampleSpan samples) {
     //   phase = -2π × CFO × elapsed_samples / sample_rate
     //
     // We need to start CFO correction from this accumulated phase, not from 0.
-    float initial_phase_rad = -2.0f * M_PI * cfo_hz_ * training_start_sample_ / config_.sample_rate;
+    size_t phase_ref_sample = training_start_sample_;
+    if (has_absolute_training_start_sample_) {
+        phase_ref_sample = absolute_training_start_sample_;
+    }
+
+    float initial_phase_rad = -2.0f * M_PI * cfo_hz_ * phase_ref_sample / config_.sample_rate;
 
     // Wrap to [-π, π]
     while (initial_phase_rad > M_PI) initial_phase_rad -= 2.0f * M_PI;
     while (initial_phase_rad < -M_PI) initial_phase_rad += 2.0f * M_PI;
 
-    LOG_MODEM(INFO, "OFDMChirpWaveform::process(): samples=%zu, cfo=%.1f, training_start=%zu",
-              samples.size(), cfo_hz_, training_start_sample_);
+    LOG_MODEM(INFO, "OFDMChirpWaveform::process(): samples=%zu, cfo=%.1f, training_start=%zu, abs_start=%zu",
+              samples.size(), cfo_hz_, training_start_sample_,
+              has_absolute_training_start_sample_ ? absolute_training_start_sample_ : 0);
 
     // Pass CFO and initial phase to demodulator
     // This ensures CFO correction starts from the correct accumulated phase
@@ -493,6 +501,8 @@ void OFDMChirpWaveform::reset() {
     }
     soft_bits_.clear();
     synced_ = false;
+    has_absolute_training_start_sample_ = false;
+    absolute_training_start_sample_ = 0;
     // NOTE: CFO is intentionally preserved across reset() for continuous tracking
     // Use setFrequencyOffset(0) to explicitly clear if needed
     // TX CFO in config_ is also preserved for simulation

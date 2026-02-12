@@ -444,9 +444,12 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data) {
     // Final or single frame
     Bytes complete_payload;
     if (!rx_reassembly_buffer_.empty()) {
-        // Last fragment - combine with accumulated data
-        rx_reassembly_buffer_.insert(rx_reassembly_buffer_.end(), payload.begin(), payload.end());
-        complete_payload = std::move(rx_reassembly_buffer_);
+        // Last fragment - stitch into a fresh buffer to avoid aliasing/overflow false positives.
+        complete_payload.reserve(rx_reassembly_buffer_.size() + payload.size());
+        complete_payload.insert(complete_payload.end(),
+                                rx_reassembly_buffer_.begin(),
+                                rx_reassembly_buffer_.end());
+        complete_payload.insert(complete_payload.end(), payload.begin(), payload.end());
         rx_reassembly_buffer_.clear();
         LOG_MODEM(INFO, "Connection: Reassembled %zu-byte message from fragments",
                   complete_payload.size());

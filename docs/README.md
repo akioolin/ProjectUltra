@@ -17,6 +17,7 @@ This folder now separates **active, authoritative docs** from **historical refer
 - `docs/GUI_ARCHITECTURE.md`: GUI structure and components.
 - `docs/INVARIANTS.md`: Critical engineering invariants.
 - `docs/CFO_CORRECTION_FLOW.md`: CFO handling pipeline details.
+- `docs/CFO_PHASE_HARDENING_PLAN.md`: CFO hardening implementation and validation notes.
 - `docs/ADDING_NEW_WAVEFORM.md`: Guide for adding waveform implementations.
 - `docs/RESEARCH_DIRECTIONS.md`: Long-term R&D ideas (non-blocking).
 

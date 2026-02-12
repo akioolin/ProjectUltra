@@ -63,6 +63,7 @@ public:
     bool detectDataSync(SampleSpan samples, SyncResult& result,
                         float known_cfo_hz = 0.0f, float threshold = 0.3f) override;
     bool supportsDataPreamble() const override { return true; }
+    void setAbsoluteTrainingPosition(size_t pos) override;
     bool process(SampleSpan samples) override;
     std::vector<float> getSoftBits() override;
     void reset() override;
@@ -128,6 +129,8 @@ private:
     // Sample position where training starts (from detectSync)
     // Used to calculate initial CFO phase for correct phase tracking
     size_t training_start_sample_ = 0;
+    size_t absolute_training_start_sample_ = 0;
+    bool has_absolute_training_start_sample_ = false;
 
     // Burst interleave marker detection (LTS sign)
     // Two-flag design:

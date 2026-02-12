@@ -501,6 +501,22 @@ void StreamingDecoder::searchForSync() {
 
         sync_position_ = (search_start + sync_result.start_sample) % MAX_BUFFER_SAMPLES;
 
+        // Convert ring-buffer index to absolute sample index.
+        // Needed so waveform CFO phase starts from true stream time, not local window offset.
+        auto ringPosToAbsolute = [this](size_t ring_pos) -> size_t {
+            if (total_fed_ < MAX_BUFFER_SAMPLES) {
+                // Buffer has not wrapped yet: ring index == absolute sample index.
+                return ring_pos;
+            }
+
+            const size_t oldest_abs = total_fed_ - MAX_BUFFER_SAMPLES;
+            const size_t oldest_pos = write_pos_;  // write_pos_ points to oldest sample after wrap
+            const size_t offset = (ring_pos >= oldest_pos)
+                ? (ring_pos - oldest_pos)
+                : (MAX_BUFFER_SAMPLES - oldest_pos + ring_pos);
+            return oldest_abs + offset;
+        };
+
         // Anti-replay: reject sync at same position as last decoded frame (circular distance)
         if (last_decoded_sync_pos_ != SIZE_MAX) {
             size_t d1 = (sync_position_ >= last_decoded_sync_pos_)
@@ -514,6 +530,12 @@ void StreamingDecoder::searchForSync() {
                 correlation_pos_ = (sync_position_ + SEARCH_BACKTRACK + CORRELATION_STEP) % MAX_BUFFER_SAMPLES;
                 return;
             }
+        }
+
+        // Provide absolute training position to waveform so initial CFO phase is aligned.
+        if (waveform_) {
+            const size_t abs_training_pos = ringPosToAbsolute(sync_position_);
+            waveform_->setAbsoluteTrainingPosition(abs_training_pos);
         }
 
         // CFO handling: On fading channels, chirp-based CFO measurement can be corrupted
@@ -939,26 +961,29 @@ void StreamingDecoder::decodeCurrentFrame() {
         return;  // processBuffer() will call accumulateBurstFrames() on next iteration
     }
 
-    // Feed back pilot-corrected CFO to cached value
-    float corrected_cfo = waveform_->estimatedCFO();
-    float current_cfo = last_cfo_.load();
+    // Feed back pilot-corrected CFO to cached value (OFDM only).
+    // MC-DPSK does not have pilot-based tracking; keep chirp-derived CFO.
+    if (is_ofdm) {
+        float corrected_cfo = waveform_->estimatedCFO();
+        float current_cfo = last_cfo_.load();
 
-    if (connected_) {
-        constexpr float MAX_PILOT_CFO_DRIFT_HZ = 2.0f;
-        float drift = corrected_cfo - current_cfo;
-        if (std::abs(drift) > MAX_PILOT_CFO_DRIFT_HZ) {
-            LOG_MODEM(WARN, "[%s] Pilot CFO drift clamped: %.2f → %.2f Hz (drift=%.2f, max=%.1f)",
-                      log_prefix_.c_str(), current_cfo, corrected_cfo, drift, MAX_PILOT_CFO_DRIFT_HZ);
-            corrected_cfo = current_cfo + std::copysign(MAX_PILOT_CFO_DRIFT_HZ, drift);
+        if (connected_) {
+            constexpr float MAX_PILOT_CFO_DRIFT_HZ = 2.0f;
+            float drift = corrected_cfo - current_cfo;
+            if (std::abs(drift) > MAX_PILOT_CFO_DRIFT_HZ) {
+                LOG_MODEM(WARN, "[%s] Pilot CFO drift clamped: %.2f → %.2f Hz (drift=%.2f, max=%.1f)",
+                          log_prefix_.c_str(), current_cfo, corrected_cfo, drift, MAX_PILOT_CFO_DRIFT_HZ);
+                corrected_cfo = current_cfo + std::copysign(MAX_PILOT_CFO_DRIFT_HZ, drift);
+            }
         }
-    }
 
-    if (std::abs(corrected_cfo - current_cfo) > 0.1f) {
-        LOG_MODEM(INFO, "[%s] CFO updated: %.2f → %.2f Hz (pilot-corrected)",
-                  log_prefix_.c_str(), current_cfo, corrected_cfo);
+        if (std::abs(corrected_cfo - current_cfo) > 0.1f) {
+            LOG_MODEM(INFO, "[%s] CFO updated: %.2f → %.2f Hz (pilot-corrected)",
+                      log_prefix_.c_str(), current_cfo, corrected_cfo);
+        }
+        last_cfo_.store(corrected_cfo);
+        sync_cfo_ = corrected_cfo;
     }
-    last_cfo_.store(corrected_cfo);
-    sync_cfo_ = corrected_cfo;
 
     constexpr size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;
     CodeRate rate = connected_ ? code_rate_ : CodeRate::R1_4;

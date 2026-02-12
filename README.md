@@ -207,6 +207,23 @@ cd build
 ctest
 ```
 
+**CFO Verification (Internal Pre/Post Correction Chain):**
+
+```bash
+# From repository root (one-command gate)
+./tests/verify_cfo_chain.sh --cfo 50 --channel awgn --snr 20 --seed 42
+
+# Optional: capture raw TX/RX audio for offline analysis
+./build/cli_simulator --snr 20 --channel awgn --waveform ofdm_chirp \
+  --mod dqpsk --rate r1_2 --tx-cfo 50 \
+  --save-signals 1 --save-prefix /tmp/cfo_probe --test
+```
+
+Useful `cli_simulator` flags for CFO diagnostics:
+- `--tx-cfo` (alias `--cfo`) injects TX CFO in Hz across the full transmitted signal.
+- `--save-signals [N]` writes raw TX/RX captures for up to `N` messages.
+- `--save-prefix <path>` and `--save-max-samples <N>` control capture naming and size.
+
 **Manual Modulation Selection:**
 
 The `--mod` flag allows testing specific modulations:

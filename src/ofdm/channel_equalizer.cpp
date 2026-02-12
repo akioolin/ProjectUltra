@@ -7,10 +7,88 @@
 #include "demodulator_constants.hpp"
 #include "ultra/logging.hpp"
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
+#include <fstream>
+#include <string>
 
 namespace ultra {
 
 using namespace demod_constants;
+
+namespace {
+
+struct CFODumpConfig {
+    bool initialized = false;
+    bool enabled = false;
+    std::string prefix;
+    int max_dumps = 1;
+    std::atomic<int> dumped{0};
+};
+
+CFODumpConfig& getCFODumpConfig() {
+    static CFODumpConfig cfg;
+    if (!cfg.initialized) {
+        cfg.initialized = true;
+        const char* prefix = std::getenv("ULTRA_DUMP_CFO_PREFIX");
+        if (prefix && *prefix) {
+            cfg.enabled = true;
+            cfg.prefix = prefix;
+            if (const char* n = std::getenv("ULTRA_DUMP_CFO_CALLS")) {
+                int parsed = std::atoi(n);
+                if (parsed > 0) cfg.max_dumps = parsed;
+            }
+        }
+    }
+    return cfg;
+}
+
+bool reserveCFODumpSlot(int& out_idx) {
+    auto& cfg = getCFODumpConfig();
+    if (!cfg.enabled) return false;
+
+    int cur = cfg.dumped.load(std::memory_order_relaxed);
+    while (cur < cfg.max_dumps) {
+        if (cfg.dumped.compare_exchange_weak(cur, cur + 1, std::memory_order_relaxed)) {
+            out_idx = cur;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool writeComplexDump(const std::string& path, const std::vector<Complex>& data) {
+    std::ofstream out(path, std::ios::binary);
+    if (!out) return false;
+    out.write(reinterpret_cast<const char*>(data.data()),
+              static_cast<std::streamsize>(data.size() * sizeof(Complex)));
+    return static_cast<bool>(out);
+}
+
+void writeCFODumpMeta(const std::string& path,
+                      const std::string& pre_path,
+                      const std::string& post_path,
+                      float cfo_hz,
+                      float start_phase,
+                      float end_phase,
+                      float phase_increment,
+                      size_t sample_count,
+                      uint32_t sample_rate) {
+    std::ofstream out(path);
+    if (!out) return;
+    out << "format=complex64_interleaved\n";
+    out << "sample_rate=" << sample_rate << "\n";
+    out << "samples=" << sample_count << "\n";
+    out << "cfo_hz=" << cfo_hz << "\n";
+    out << "phase_increment_rad_per_sample=" << phase_increment << "\n";
+    out << "start_phase_rad=" << start_phase << "\n";
+    out << "end_phase_rad=" << end_phase << "\n";
+    out << "pre_file=" << pre_path << "\n";
+    out << "post_file=" << post_path << "\n";
+    out << "note=pre_file is after mixer/downconversion but before CFO correction; post_file is after CFO correction.\n";
+}
+
+}  // namespace
 
 // =============================================================================
 // BASEBAND CONVERSION
@@ -31,9 +109,22 @@ std::vector<Complex> OFDMDemodulator::Impl::toBaseband(SampleSpan samples) {
         tb_call_count++;
     }
 
+    const float start_phase = freq_correction_phase;
+    int dump_idx = -1;
+    const bool dump_this_call = (std::abs(freq_offset_hz) > 0.01f) && reserveCFODumpSlot(dump_idx);
+    std::vector<Complex> pre_cfo;
+    std::vector<Complex> post_cfo;
+    if (dump_this_call) {
+        pre_cfo.resize(samples.size());
+        post_cfo.resize(samples.size());
+    }
+
     for (size_t i = 0; i < samples.size(); ++i) {
         Complex osc = mixer.next();
         Complex mixed = samples[i] * std::conj(osc);
+        if (dump_this_call) {
+            pre_cfo[i] = mixed;
+        }
 
         // Apply frequency offset correction
         if (std::abs(freq_offset_hz) > 0.01f) {
@@ -50,7 +141,30 @@ std::vector<Complex> OFDMDemodulator::Impl::toBaseband(SampleSpan samples) {
             }
         }
 
+        if (dump_this_call) {
+            post_cfo[i] = mixed;
+        }
+
         baseband[i] = mixed;
+    }
+
+    if (dump_this_call) {
+        const auto& cfg = getCFODumpConfig();
+        std::string base = cfg.prefix + "_" + std::to_string(dump_idx);
+        std::string pre_path = base + "_pre.cf32";
+        std::string post_path = base + "_post.cf32";
+        std::string meta_path = base + "_meta.txt";
+        bool ok_pre = writeComplexDump(pre_path, pre_cfo);
+        bool ok_post = writeComplexDump(post_path, post_cfo);
+        writeCFODumpMeta(meta_path, pre_path, post_path, freq_offset_hz,
+                         start_phase, freq_correction_phase, phase_increment,
+                         samples.size(), config.sample_rate);
+
+        LOG_DEMOD(INFO, "CFO dump #%d: %s (%zu) and %s (%zu) %s",
+                  dump_idx,
+                  pre_path.c_str(), pre_cfo.size(),
+                  post_path.c_str(), post_cfo.size(),
+                  (ok_pre && ok_post) ? "[ok]" : "[write failed]");
     }
 
     return baseband;
@@ -113,6 +227,7 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     std::vector<Complex> h_sum_pilot(pilot_carrier_indices.size(), Complex(0, 0));
     std::vector<Complex> h_last_pilot(pilot_carrier_indices.size(), Complex(0, 0));
     size_t valid_symbols = 0;
+    const float phase_at_training_start = freq_correction_phase;
 
     // Process each training symbol using the main mixer (it will be advanced)
     const float* ptr = training_samples;
@@ -218,7 +333,10 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
                 // Re-process training symbols with corrected CFO for accurate channel estimate
                 // Reset mixer to start position and re-run
                 mixer.reset();
-                freq_correction_phase = 0.0f;
+                // Preserve original phase baseline at training start.
+                // Resetting to zero here breaks phase consistency when processing
+                // starts at non-zero absolute sample positions.
+                freq_correction_phase = phase_at_training_start;
 
                 // Recompute phase increment with corrected CFO
                 const float* ptr2 = training_samples;
