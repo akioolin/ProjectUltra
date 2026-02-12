@@ -908,6 +908,20 @@ void App::simulationLoop() {
     std::vector<float> virtual_channel_buffer; // Virtual TX -> channel -> our RX
 
     while (sim_thread_running_) {
+        if (sim_drop_local_tx_requested_.exchange(false)) {
+            size_t dropped_pending = 0;
+            {
+                std::lock_guard<std::mutex> lock(our_tx_pending_mutex_);
+                dropped_pending = our_tx_pending_.size();
+                our_tx_pending_.clear();
+            }
+            size_t dropped_in_flight = our_channel_buffer.size();
+            our_channel_buffer.clear();
+            tx_in_progress_ = false;
+            guiLog("SIM: STOP TX NOW dropped %zu queued + %zu in-flight TX samples",
+                   dropped_pending, dropped_in_flight);
+        }
+
         bool a_to_b_active = false;  // Track activity per direction
         bool b_to_a_active = false;
 
@@ -1224,6 +1238,43 @@ void App::stopRadioRx() {
     radio_rx_enabled_ = false;
 }
 
+void App::stopTxNow(const char* reason) {
+    size_t dropped_audio = audio_.getTxQueueSize();
+    if (dropped_audio > 0) {
+        audio_.clearTxQueue();
+    }
+
+    size_t dropped_sim_pending = 0;
+    {
+        std::lock_guard<std::mutex> lock(our_tx_pending_mutex_);
+        dropped_sim_pending = our_tx_pending_.size();
+        our_tx_pending_.clear();
+    }
+
+    if (simulation_enabled_ && sim_thread_running_) {
+        sim_drop_local_tx_requested_ = true;
+    }
+
+    tx_in_progress_ = false;
+    tx_end_time_ = std::chrono::steady_clock::time_point{};
+
+    // Return to RX immediately after aborting TX.
+    if (!simulation_enabled_ && radio_rx_enabled_ && !ptt_active_) {
+        audio_.setRxMuted(false);
+        if (!audio_.isCapturing()) {
+            audio_.startCapture();
+        }
+    }
+
+    guiLog("STOP TX NOW: reason='%s', dropped_audio=%zu, dropped_sim_pending=%zu",
+           reason, dropped_audio, dropped_sim_pending);
+
+    rx_log_.push_back("[SYS] TX stopped immediately");
+    if (rx_log_.size() > MAX_RX_LOG) {
+        rx_log_.pop_front();
+    }
+}
+
 void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data_mod, CodeRate data_rate) {
     // Compact horizontal Channel Status display
     ImGui::BeginChild("ChannelStatus", ImVec2(0, 110), false);
@@ -1516,6 +1567,15 @@ void App::renderOperateTab() {
         protocol_.disconnect();
     }
     ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.78f, 0.18f, 0.18f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.88f, 0.24f, 0.24f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.68f, 0.14f, 0.14f, 1.0f));
+    if (ImGui::Button("STOP TX", ImVec2(110, 0))) {
+        stopTxNow("operator_button");
+    }
+    ImGui::PopStyleColor(3);
 
     // Stop button for real audio
     if (!simulation_enabled_ && radio_rx_enabled_) {

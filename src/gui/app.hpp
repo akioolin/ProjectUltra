@@ -136,6 +136,7 @@ private:
     // Single simulation thread handles everything
     std::thread sim_thread_;
     std::atomic<bool> sim_thread_running_{false};
+    std::atomic<bool> sim_drop_local_tx_requested_{false};
 
     // Virtual station initialization
     void initVirtualStation();
@@ -156,6 +157,7 @@ private:
     void renderOperateTab();
     void renderCompactChannelStatus(const LoopbackStats& stats, Modulation data_mod, CodeRate data_rate);
     void initAudio();
+    void stopTxNow(const char* reason);
     void sendMessage();
     void onDataReceived(const std::string& text);
     void startRadioRx();
