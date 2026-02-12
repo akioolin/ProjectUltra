@@ -218,13 +218,46 @@ void ProtocolEngine::processRxBuffer() {
         }
 
         // Determine frame size based on type
-        size_t frame_size;
-        if (v2::isControlFrame(header.type)) {
+        size_t frame_size = 0;
+        bool frame_is_control = false;
+        bool frame_is_connect = false;
+        if (header.type == v2::FrameType::DISCONNECT) {
+            // Prefer modern control-frame DISCONNECT (20B) but accept legacy
+            // ConnectFrame DISCONNECT (44B) for compatibility.
+            constexpr size_t LEGACY_CONNECT_DISCONNECT_SIZE =
+                v2::DataFrame::HEADER_SIZE + v2::ConnectFrame::PAYLOAD_SIZE + v2::DataFrame::CRC_SIZE;
+
+            frame_size = v2::ControlFrame::SIZE;
+            frame_is_control = true;
+
+            if (rx_buffer_.size() >= frame_size) {
+                Bytes ctrl_candidate(rx_buffer_.begin(), rx_buffer_.begin() + frame_size);
+                if (!v2::ControlFrame::deserialize(ctrl_candidate)) {
+                    if (rx_buffer_.size() < LEGACY_CONNECT_DISCONNECT_SIZE) {
+                        return;  // Might be partial legacy frame, wait for more bytes.
+                    }
+
+                    Bytes conn_candidate(rx_buffer_.begin(),
+                                         rx_buffer_.begin() + LEGACY_CONNECT_DISCONNECT_SIZE);
+                    if (v2::ConnectFrame::deserialize(conn_candidate)) {
+                        frame_size = LEGACY_CONNECT_DISCONNECT_SIZE;
+                        frame_is_control = false;
+                        frame_is_connect = true;
+                    } else {
+                        LOG_MODEM(WARN, "Protocol: Invalid DISCONNECT framing, skipping 1 byte");
+                        rx_buffer_.erase(rx_buffer_.begin());
+                        continue;
+                    }
+                }
+            }
+        } else if (v2::isControlFrame(header.type)) {
             // Control frames (PROBE, ACK, etc): 20 bytes
             frame_size = v2::ControlFrame::SIZE;
+            frame_is_control = true;
         } else if (v2::isConnectFrame(header.type)) {
-            // Connect frames: header + 22B payload + 2B CRC = 41 bytes
+            // Connect frames: header + 25B payload + 2B CRC = 44 bytes
             frame_size = v2::DataFrame::HEADER_SIZE + v2::ConnectFrame::PAYLOAD_SIZE + v2::DataFrame::CRC_SIZE;
+            frame_is_connect = true;
         } else {
             // Data frame - need to read payload length from header
             // Header layout: [0-1] magic, [2] type, [3] flags, [4-5] seq,
@@ -246,10 +279,10 @@ void ProtocolEngine::processRxBuffer() {
 
         // Verify CRC
         bool crc_ok = false;
-        if (v2::isControlFrame(header.type)) {
+        if (frame_is_control) {
             auto ctrl = v2::ControlFrame::deserialize(frame_data);
             crc_ok = ctrl.has_value();
-        } else if (v2::isConnectFrame(header.type)) {
+        } else if (frame_is_connect) {
             auto conn = v2::ConnectFrame::deserialize(frame_data);
             crc_ok = conn.has_value();
         } else {

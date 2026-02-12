@@ -138,6 +138,10 @@ StreamingDecoder::~StreamingDecoder() {
     stop();
 }
 
+void StreamingDecoder::setBurstInterleaveGroupSize(int size) {
+    burst_group_size_ = std::clamp(size, 2, 8);
+}
+
 // ============================================================================
 // AUDIO THREAD - Just buffer samples, nothing else
 // ============================================================================
@@ -1975,16 +1979,20 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
 // ============================================================================
 
 void StreamingDecoder::accumulateBurstFrames() {
+    const int burst_group_size = std::max(2, burst_group_size_);
+    const int burst_timeout_ms =
+        static_cast<int>(BURST_TIMEOUT_MS_BASE * (burst_group_size / 4.0f));
+
     // Timeout check
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - burst_start_time_).count();
-    if (elapsed > BURST_TIMEOUT_MS) {
+    if (elapsed > burst_timeout_ms) {
         LOG_MODEM(WARN, "[%s] Burst group timeout: got %zu/%d frames",
-                  log_prefix_.c_str(), burst_soft_buffer_.size(), BURST_GROUP_SIZE);
+                  log_prefix_.c_str(), burst_soft_buffer_.size(), burst_group_size);
         // Discard — TX used 4-frame interleaving, partial is undecodable
         {
             std::lock_guard<std::mutex> slock(stats_mutex_);
-            stats_.frames_failed += BURST_GROUP_SIZE;
+            stats_.frames_failed += burst_group_size;
         }
         burst_soft_buffer_.clear();
         {
@@ -2001,10 +2009,10 @@ void StreamingDecoder::accumulateBurstFrames() {
     if (result == BurstFrameResult::FAILED) {
         // Hard failure (energy lost or process error) — abort immediately
         LOG_MODEM(WARN, "[%s] Burst group aborted: hard failure at frame %zu/%d",
-                  log_prefix_.c_str(), burst_soft_buffer_.size() + 1, BURST_GROUP_SIZE);
+                  log_prefix_.c_str(), burst_soft_buffer_.size() + 1, burst_group_size);
         {
             std::lock_guard<std::mutex> slock(stats_mutex_);
-            stats_.frames_failed += BURST_GROUP_SIZE;
+            stats_.frames_failed += burst_group_size;
         }
         burst_soft_buffer_.clear();
         {
@@ -2020,7 +2028,7 @@ void StreamingDecoder::accumulateBurstFrames() {
     }
 
     // SUCCESS — check if group complete
-    if (static_cast<int>(burst_soft_buffer_.size()) == BURST_GROUP_SIZE) {
+    if (static_cast<int>(burst_soft_buffer_.size()) == burst_group_size) {
         finalizeBurstGroup();
         burst_soft_buffer_.clear();
         {
@@ -2033,6 +2041,8 @@ void StreamingDecoder::accumulateBurstFrames() {
 }
 
 StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame() {
+    const int burst_group_size = std::max(2, burst_group_size_);
+
     // Check available samples at burst_next_pos_
     size_t next_available;
     {
@@ -2071,7 +2081,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     if (next_rms < BURST_ENERGY_THRESHOLD) {
         LOG_MODEM(WARN, "[%s] Burst frame %zu/%d: energy lost (RMS=%.4f)",
                   log_prefix_.c_str(), burst_soft_buffer_.size() + 1,
-                  BURST_GROUP_SIZE, next_rms);
+                  burst_group_size, next_rms);
         burst_next_pos_ = (burst_next_pos_ + burst_min_block_) % MAX_BUFFER_SAMPLES;
         return BurstFrameResult::FAILED;
     }
@@ -2081,7 +2091,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     bool ok = waveform_->process(SampleSpan(block.data(), block.size()));
     if (!ok) {
         LOG_MODEM(WARN, "[%s] Burst frame %zu/%d: process() failed",
-                  log_prefix_.c_str(), burst_soft_buffer_.size() + 1, BURST_GROUP_SIZE);
+                  log_prefix_.c_str(), burst_soft_buffer_.size() + 1, burst_group_size);
         burst_next_pos_ = (burst_next_pos_ + burst_min_block_) % MAX_BUFFER_SAMPLES;
         return BurstFrameResult::FAILED;
     }
@@ -2109,17 +2119,18 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
 
     LOG_MODEM(INFO, "[%s] Burst frame %zu/%d demodulated, RMS=%.4f",
               log_prefix_.c_str(), burst_soft_buffer_.size(),
-              BURST_GROUP_SIZE, next_rms);
+              burst_group_size, next_rms);
     return BurstFrameResult::SUCCESS;
 }
 
 void StreamingDecoder::finalizeBurstGroup() {
+    const int burst_group_size = std::max(2, burst_group_size_);
     LOG_MODEM(INFO, "[%s] Burst group complete (%d frames), deinterleaving...",
-              log_prefix_.c_str(), BURST_GROUP_SIZE);
+              log_prefix_.c_str(), burst_group_size);
 
     auto logical_soft = fec::BurstInterleaver::deinterleave(burst_soft_buffer_);
 
-    for (int i = 0; i < BURST_GROUP_SIZE; i++) {
+    for (int i = 0; i < burst_group_size; i++) {
         DecodeResult result = decodeFrame(logical_soft[i], burst_snr_, burst_cfo_);
 
         {
@@ -2137,7 +2148,7 @@ void StreamingDecoder::finalizeBurstGroup() {
         }
 
         LOG_MODEM(INFO, "[%s] Burst logical frame %d/%d: %s (%d/%d CWs)",
-                  log_prefix_.c_str(), i + 1, BURST_GROUP_SIZE,
+                  log_prefix_.c_str(), i + 1, burst_group_size,
                   result.success ? "OK" : "FAIL",
                   result.codewords_ok, result.codewords_ok + result.codewords_failed);
     }

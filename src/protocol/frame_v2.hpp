@@ -208,11 +208,13 @@ namespace Flags {
 uint32_t hashCallsign(const std::string& callsign);
 
 // Check if a type is a control frame (1 codeword = 20 bytes)
-// NOTE: CONNECT/CONNECT_ACK/CONNECT_NAK/DISCONNECT are now ConnectFrames (larger)
+// DISCONNECT is treated as a control frame so it gets the hardened 1-CW
+// control-path profile (DQPSK R1/4) like ACK/NACK.
 inline bool isControlFrame(FrameType type) {
     return type == FrameType::PROBE || type == FrameType::PROBE_ACK ||
            type == FrameType::KEEPALIVE || type == FrameType::MODE_CHANGE ||
            type == FrameType::ACK || type == FrameType::NACK ||
+           type == FrameType::DISCONNECT ||
            type == FrameType::BEACON;
 }
 
@@ -254,7 +256,7 @@ inline float decodeFadingIndex(uint8_t encoded) {
 }
 
 // Check if a type is a connect frame (carries full callsigns, ~41 bytes = 3 codewords)
-// Includes DISCONNECT for proper station identification at end of contact
+// DISCONNECT remains here for legacy ConnectFrame decode compatibility.
 inline bool isConnectFrame(FrameType type) {
     return type == FrameType::CONNECT || type == FrameType::CONNECT_ACK ||
            type == FrameType::CONNECT_NAK || type == FrameType::DISCONNECT;
@@ -329,6 +331,7 @@ struct ControlFrame {
                                   uint16_t seq, uint32_t cw_bitmap);
     static ControlFrame makeBeacon(const std::string& src);
     static ControlFrame makeKeepalive(const std::string& src, const std::string& dst);
+    static ControlFrame makeDisconnect(const std::string& src, const std::string& dst);
     static ControlFrame makeModeChange(const std::string& src, const std::string& dst,
                                         uint16_t seq, Modulation new_mod, CodeRate new_rate,
                                         float snr_db, float fading_index, uint8_t reason);

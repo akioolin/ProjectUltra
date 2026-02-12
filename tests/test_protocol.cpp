@@ -117,6 +117,7 @@ bool test_control_frame_types() {
         { v2::ControlFrame::makeProbe("A", "B"), v2::FrameType::PROBE },
         { v2::ControlFrame::makeAck("A", "B", 1), v2::FrameType::ACK },
         { v2::ControlFrame::makeNack("A", "B", 1, 0), v2::FrameType::NACK },
+        { v2::ControlFrame::makeDisconnect("A", "B"), v2::FrameType::DISCONNECT },
         { v2::ControlFrame::makeKeepalive("A", "B"), v2::FrameType::KEEPALIVE },
         { v2::ControlFrame::makeModeChange("A", "B", 1, ultra::Modulation::QAM16, ultra::CodeRate::R2_3, 20.0f, 0.50f, 0), v2::FrameType::MODE_CHANGE },
     };

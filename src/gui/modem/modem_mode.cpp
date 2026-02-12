@@ -2,6 +2,7 @@
 
 #include "modem_engine.hpp"
 #include "ultra/logging.hpp"
+#include "ultra/ofdm_link_adaptation.hpp"
 #include "protocol/frame_v2.hpp"
 #include <cstdio>
 
@@ -127,15 +128,8 @@ void ModemEngine::setConnected(bool connected) {
         config_.code_rate = data_code_rate_;
         config_.use_pilots = true;  // Always — must match OFDMChirpWaveform
 
-        // Pilot spacing based on code rate (matching OFDMChirpWaveform)
-        switch (data_code_rate_) {
-            case CodeRate::R3_4:
-                config_.pilot_spacing = 15;
-                break;
-            default:
-                config_.pilot_spacing = 10;
-                break;
-        }
+        config_.pilot_spacing =
+            ofdm_link_adaptation::recommendedPilotSpacing(data_modulation_, data_code_rate_);
 
         decoder_->setRate(data_code_rate_);
 
@@ -215,18 +209,8 @@ void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
     config_.code_rate = rate;
     config_.use_pilots = true;  // Always — must match OFDMChirpWaveform
 
-    // Configure pilot spacing based on code rate (matching OFDMChirpWaveform)
-    switch (rate) {
-        case CodeRate::R3_4:
-            config_.pilot_spacing = 15;  // ~4 pilots
-            break;
-        case CodeRate::R2_3:
-        case CodeRate::R1_2:
-        case CodeRate::R1_4:
-        default:
-            config_.pilot_spacing = 10;  // ~6 pilots
-            break;
-    }
+    config_.pilot_spacing =
+        ofdm_link_adaptation::recommendedPilotSpacing(mod, rate);
 
     // If already connected, update both TX and RX to match
     if (connected_) {

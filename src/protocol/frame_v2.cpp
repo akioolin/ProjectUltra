@@ -206,6 +206,17 @@ ControlFrame ControlFrame::makeKeepalive(const std::string& src, const std::stri
     return f;
 }
 
+ControlFrame ControlFrame::makeDisconnect(const std::string& src, const std::string& dst) {
+    ControlFrame f;
+    f.type = FrameType::DISCONNECT;
+    f.flags = Flags::VERSION_V2;
+    f.seq = DISCONNECT_SEQ;
+    f.src_hash = hashCallsign(src);
+    f.dst_hash = hashCallsign(dst);
+    std::memset(f.payload, 0, PAYLOAD_SIZE);
+    return f;
+}
+
 ControlFrame ControlFrame::makeModeChange(const std::string& src, const std::string& dst,
                                            uint16_t seq, Modulation new_mod, CodeRate new_rate,
                                            float snr_db, float fading_index, uint8_t reason) {

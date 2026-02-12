@@ -35,6 +35,7 @@
 #include "protocol/protocol_engine.hpp"
 #include "protocol/frame_v2.hpp"
 #include "ultra/logging.hpp"
+#include "ultra/ofdm_link_adaptation.hpp"
 #include "ultra/fec.hpp"  // ChannelInterleaver, LDPCEncoder
 #include "ultra/dsp.hpp"  // FFT for analytic-signal CFO injection
 #include "fec/frame_interleaver.hpp"  // FrameInterleaver
@@ -397,6 +398,11 @@ public:
 
     // Disable burst interleaving (for A/B testing)
     void setNoBurstInterleave(bool v) { no_burst_interleave_ = v; }
+    void setBurstInterleaveGroupSize(int n) {
+        burst_group_size_ = ofdm_link_adaptation::sanitizeBurstGroupSize(n);
+        if (encoder_) encoder_->setBurstInterleaveGroupSize(burst_group_size_);
+        if (decoder_) decoder_->setBurstInterleaveGroupSize(burst_group_size_);
+    }
 
     // Enable/disable channel interleaving on both TX encoder and RX decoder
     void setChannelInterleave(bool enable) {
@@ -461,6 +467,7 @@ private:
     std::atomic<uint64_t> total_samples_{0};
     float snr_db_ = 20.0f;
     bool no_burst_interleave_ = false;  // Disable burst interleaving for A/B testing
+    int burst_group_size_ = 4;
 
     ModemConfig createOFDMConfig() {
         ModemConfig cfg;
@@ -471,9 +478,9 @@ private:
         cfg.cp_mode = CyclicPrefixMode::LONG;
         cfg.modulation = Modulation::DQPSK;
         cfg.code_rate = CodeRate::R1_4;
-        // Pilots for R1/4 (6 pilots, spacing 10)
         cfg.use_pilots = true;
-        cfg.pilot_spacing = 10;
+        cfg.pilot_spacing =
+            ofdm_link_adaptation::recommendedPilotSpacing(cfg.modulation, cfg.code_rate);
         return cfg;
     }
 
@@ -486,6 +493,7 @@ private:
         encoder_->setOFDMConfig(ofdm_config_);
         encoder_->setMode(tx_waveform_mode_);
         encoder_->setDataMode(data_modulation_, data_code_rate_);
+        encoder_->setBurstInterleaveGroupSize(burst_group_size_);
         encoder_->setMCDPSKCarriers(8);
 
         LOG_MODEM(INFO, "[%s] TX encoder: mode=%s, carriers=%d, data_carriers=%d",
@@ -501,6 +509,7 @@ private:
 
         // Start in disconnected mode (MC_DPSK for PING detection)
         decoder_->setMode(WaveformMode::MC_DPSK, false);
+        decoder_->setBurstInterleaveGroupSize(burst_group_size_);
         decoder_->setMCDPSKCarriers(8);
 
         // Set frame callback
@@ -600,21 +609,8 @@ private:
         // Update OFDM config with pilots based on code rate
         ofdm_config_.modulation = mod;
         ofdm_config_.code_rate = rate;
-
-        // Configure pilots based on code rate (matching OFDMChirpWaveform)
-        switch (rate) {
-            case CodeRate::R3_4:
-                ofdm_config_.use_pilots = true;
-                ofdm_config_.pilot_spacing = 15;  // ~4 pilots
-                break;
-            case CodeRate::R2_3:
-            case CodeRate::R1_2:
-            case CodeRate::R1_4:
-            default:
-                ofdm_config_.use_pilots = true;
-                ofdm_config_.pilot_spacing = 10;  // ~6 pilots
-                break;
-        }
+        ofdm_config_.use_pilots = true;
+        ofdm_config_.pilot_spacing = ofdm_link_adaptation::recommendedPilotSpacing(mod, rate);
 
         // Recreate TX waveform if it's OFDM
         if (tx_waveform_mode_ != WaveformMode::MC_DPSK) {
@@ -648,13 +644,15 @@ private:
                     decoder_->setMode(negotiated_waveform_, true);
                     decoder_->setOFDMConfig(ofdm_config_);
                     decoder_->setDataMode(data_modulation_, data_code_rate_);
+                    decoder_->setBurstInterleaveGroupSize(burst_group_size_);
                     decoder_->setKnownCFO(last_cfo_hz_);
                 }
                 // Enable burst interleaving for OFDM_CHIRP (not COX — no LTS marker)
                 if (negotiated_waveform_ == WaveformMode::OFDM_CHIRP && !no_burst_interleave_) {
                     if (encoder_) encoder_->setBurstInterleave(true);
                     if (decoder_) decoder_->setBurstInterleave(true);
-                    LOG_MODEM(INFO, "[%s] Burst interleaving ENABLED", callsign_.c_str());
+                    LOG_MODEM(INFO, "[%s] Burst interleaving ENABLED (group=%d)",
+                              callsign_.c_str(), burst_group_size_);
                 }
                 LOG_MODEM(INFO, "[%s] Entered CONNECTED state, switched to %s, CFO=%.1f Hz",
                           callsign_.c_str(), waveformModeToString(negotiated_waveform_), last_cfo_hz_);
@@ -952,6 +950,9 @@ public:
     void setTestFileSize(size_t bytes) { test_file_size_ = bytes; }
     void setChannelInterleave(bool enable) { use_channel_interleave_ = enable; }
     void setNoBurstInterleave(bool v) { no_burst_interleave_ = v; }
+    void setBurstInterleaveGroupSize(int n) {
+        burst_group_size_ = ofdm_link_adaptation::sanitizeBurstGroupSize(n);
+    }
     void setTestBurst(bool v) { test_burst_ = v; }
     void setSeed(uint32_t seed) { seed_ = seed; }
     void setTxCFO(float cfo_hz) { tx_cfo_hz_ = cfo_hz; }
@@ -1016,8 +1017,13 @@ public:
         // Apply burst interleave setting to both stations
         alpha_->setNoBurstInterleave(no_burst_interleave_);
         bravo_->setNoBurstInterleave(no_burst_interleave_);
+        alpha_->setBurstInterleaveGroupSize(burst_group_size_);
+        bravo_->setBurstInterleaveGroupSize(burst_group_size_);
         if (no_burst_interleave_) {
             std::cout << "  \033[33mBurst interleaving DISABLED\033[0m\n";
+        }
+        if (burst_group_size_ != 4) {
+            std::cout << "  \033[36mBurst interleave group size = " << burst_group_size_ << "\033[0m\n";
         }
 
         // Setup message callback on BRAVO
@@ -1093,6 +1099,7 @@ private:
     bool test_burst_ = false;              // --burst-test mode: send large messages for burst interleaving
     bool use_channel_interleave_ = true;   // Enabled by default for OFDM fading resistance
     bool no_burst_interleave_ = false;     // --no-burst-interleave for A/B testing
+    int burst_group_size_ = 4;             // --burst-group-size N (experimental)
     bool save_signals_ = false;
     int save_signals_message_limit_ = 0;   // 0 = full run
     size_t save_signals_max_samples_ = 0;  // 0 = unlimited
@@ -1443,9 +1450,10 @@ private:
         // Phase 3: Send 3 large messages that fragment into 5+ frames each
         // At R1/2: payload capacity = 141 bytes, so 600 bytes → ceil(600/141) = 5 frames
         // At R1/4: payload capacity = 61 bytes, so 600 bytes → ceil(600/61) = 10 frames
-        // With 4-frame grouping: at least 1 burst-interleaved group per message
+        // With N-frame grouping: at least one burst-interleaved group per large message
         std::cout << "\n=== PHASE 3: BURST DATA TRANSFER (3 large messages) ===\n";
         std::cout << "  Burst interleaving: " << (no_burst_interleave_ ? "DISABLED" : "ENABLED") << "\n";
+        std::cout << "  Burst group size: " << burst_group_size_ << "\n";
 
         std::vector<std::string> test_messages;
         // Generate 3 large messages (~600 bytes each)
@@ -1730,6 +1738,8 @@ int main(int argc, char* argv[]) {
             sim.setChannelInterleave(true);
         } else if (arg == "--no-burst-interleave" || arg == "--nbi") {
             sim.setNoBurstInterleave(true);
+        } else if (arg == "--burst-group-size" && i + 1 < argc) {
+            sim.setBurstInterleaveGroupSize(std::stoi(argv[++i]));
         } else if (arg == "--burst-test") {
             sim.setTestBurst(true);
         } else if (arg == "--seed" && i + 1 < argc) {
@@ -1768,6 +1778,7 @@ int main(int argc, char* argv[]) {
             std::cout << "  --file [SIZE]       Test file transfer (default: 256 bytes)\n";
             std::cout << "  --channel-interleave, -ci  Enable channel interleaving\n";
             std::cout << "  --no-burst-interleave     Disable burst-level long interleaving\n";
+            std::cout << "  --burst-group-size <N>    Burst interleave group size (2-8, default: 4)\n";
             std::cout << "  --burst-test              Send large messages to test burst interleaving\n";
             std::cout << "  --save-signals [N]        Save TX/RX raw float traces (.f32)\n";
             std::cout << "                           N = stop capture after BRAVO receives N app messages\n";

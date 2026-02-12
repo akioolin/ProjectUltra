@@ -3,6 +3,7 @@
 
 #include "connection.hpp"
 #include "waveform_selection.hpp"
+#include "ultra/ofdm_link_adaptation.hpp"
 #include "ultra/logging.hpp"
 #include <algorithm>
 
@@ -19,34 +20,8 @@ constexpr uint32_t OFDM_NUM_CARRIERS = 59;
 constexpr uint32_t LDPC_BITS_PER_CODEWORD = 648;
 constexpr uint32_t FIXED_FRAME_CODEWORDS = 4;
 
-bool isCoherentModulation(Modulation mod) {
-    switch (mod) {
-        case Modulation::BPSK:
-        case Modulation::QPSK:
-        case Modulation::QAM8:
-        case Modulation::QAM16:
-        case Modulation::QAM32:
-        case Modulation::QAM64:
-        case Modulation::QAM256:
-            return true;
-        default:
-            return false;
-    }
-}
-
 int pilotSpacingForRate(Modulation mod, CodeRate rate) {
-    bool coherent = isCoherentModulation(mod);
-    switch (rate) {
-        case CodeRate::R3_4:
-            return coherent ? 8 : 15;
-        case CodeRate::R2_3:
-        case CodeRate::R1_2:
-            return coherent ? 5 : 10;
-        case CodeRate::R1_4:
-        case CodeRate::R1_3:
-        default:
-            return coherent ? 5 : 10;
-    }
+    return ofdm_link_adaptation::recommendedPilotSpacing(mod, rate);
 }
 
 uint32_t symbolsForCodewords(Modulation mod, CodeRate rate, int codewords) {
@@ -323,7 +298,7 @@ void Connection::disconnect() {
     if (state_ == ConnectionState::CONNECTED) {
         LOG_MODEM(INFO, "Connection: Disconnecting from %s", remote_call_.c_str());
 
-        auto disc = v2::ConnectFrame::makeDisconnect(local_call_, remote_call_);
+        auto disc = v2::ControlFrame::makeDisconnect(local_call_, remote_call_);
         disconnect_frame_ = disc.serialize();
 
         LOG_MODEM(INFO, "Connection: Sending DISCONNECT (%zu bytes)", disconnect_frame_.size());
@@ -610,6 +585,27 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
     LOG_MODEM(DEBUG, "Connection: Received %s seq=%d from hash 0x%06X",
               v2::frameTypeToString(header.type), header.seq, header.src_hash);
 
+    // DISCONNECT now uses control-frame encoding (20 bytes) for hardened
+    // 1-CW handling. Keep ConnectFrame fallback for legacy peers/log replay.
+    if (header.type == v2::FrameType::DISCONNECT) {
+        if (auto ctrl = v2::ControlFrame::deserialize(frame_data)) {
+            handleDisconnect(*ctrl, src_call);
+            return;
+        }
+
+        if (auto conn = v2::ConnectFrame::deserialize(frame_data)) {
+            std::string frame_src_call = conn->getSrcCallsign();
+            if (!frame_src_call.empty()) {
+                src_call = frame_src_call;
+            }
+            handleDisconnectFrame(*conn, src_call);
+            return;
+        }
+
+        LOG_MODEM(WARN, "Connection: Failed to parse DISCONNECT frame");
+        return;
+    }
+
     // Check frame type category and dispatch accordingly
     if (v2::isConnectFrame(header.type)) {
         // CONNECT/CONNECT_ACK/CONNECT_NAK - parse as ConnectFrame (carries full callsigns)
@@ -631,9 +627,6 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                 case v2::FrameType::CONNECT_NAK:
                     handleConnectNak(*conn, src_call);
                     break;
-                case v2::FrameType::DISCONNECT:
-                    handleDisconnectFrame(*conn, src_call);
-                    break;
                 default:
                     break;
             }
@@ -643,9 +636,6 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
         auto ctrl = v2::ControlFrame::deserialize(frame_data);
         if (ctrl) {
             switch (ctrl->type) {
-                case v2::FrameType::DISCONNECT:
-                    handleDisconnect(*ctrl, src_call);
-                    break;
                 case v2::FrameType::ACK:
                     if (state_ == ConnectionState::DISCONNECTING) {
                         if (ctrl->seq == v2::DISCONNECT_SEQ) {

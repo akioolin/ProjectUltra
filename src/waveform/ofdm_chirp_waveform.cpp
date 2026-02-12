@@ -3,6 +3,7 @@
 #include "ofdm_chirp_waveform.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/dsp.hpp"  // FFT class is in here
+#include "ultra/ofdm_link_adaptation.hpp"
 #include <sstream>
 #include <cmath>
 
@@ -69,38 +70,9 @@ WaveformCapabilities OFDMChirpWaveform::getCapabilities() const {
 }
 
 void OFDMChirpWaveform::configurePilotsForCodeRate(CodeRate rate) {
-    // Adaptive pilots based on code rate and modulation:
-    //
-    // Coherent modes (QPSK, BPSK) need denser pilots for phase tracking because
-    // absolute phase accuracy is critical. With spacing=5: 12 pilots (47 data carriers),
-    // the inter-pilot phase is ~95° (below 180° Nyquist limit), enabling reliable
-    // complex interpolation. With spacing=10, phase aliasing occurs (190° inter-pilot).
-    //
-    // Differential modes (DQPSK, DBPSK, D8PSK) use spacing=10: 6 pilots are sufficient
-    // because differential decoding cancels common phase errors.
-
-    bool is_coherent = (config_.modulation == Modulation::QPSK ||
-                        config_.modulation == Modulation::BPSK);
-
-    switch (rate) {
-        case CodeRate::R3_4:
-            config_.use_pilots = true;
-            config_.pilot_spacing = is_coherent ? 8 : 15;
-            break;
-
-        case CodeRate::R2_3:
-        case CodeRate::R1_2:
-            config_.use_pilots = true;
-            config_.pilot_spacing = is_coherent ? 5 : 10;
-            break;
-
-        case CodeRate::R1_4:
-        case CodeRate::R1_3:
-        default:
-            config_.use_pilots = true;
-            config_.pilot_spacing = is_coherent ? 5 : 10;
-            break;
-    }
+    config_.use_pilots = true;
+    config_.pilot_spacing =
+        ofdm_link_adaptation::recommendedPilotSpacing(config_.modulation, rate);
 }
 
 void OFDMChirpWaveform::configure(Modulation mod, CodeRate rate) {
@@ -569,27 +541,11 @@ float OFDMChirpWaveform::getThroughput(CodeRate rate) const {
         default: bits_per_carrier = 2; break;
     }
 
-    // Calculate data carriers based on pilot configuration for the given rate
-    // Must match configurePilotsForCodeRate() logic
-    bool is_coherent_tp = (config_.modulation == Modulation::QPSK ||
-                           config_.modulation == Modulation::BPSK);
-    int pilot_count = 0;
-    int pilot_spacing = 0;
-    switch (rate) {
-        case CodeRate::R3_4:
-            pilot_spacing = is_coherent_tp ? 8 : 15;
-            break;
-        case CodeRate::R2_3:
-        case CodeRate::R1_2:
-            pilot_spacing = is_coherent_tp ? 5 : 10;
-            break;
-        default:
-            pilot_spacing = is_coherent_tp ? 5 : 10;
-            break;
-    }
-    if (pilot_spacing > 0) {
-        pilot_count = (config_.num_carriers + pilot_spacing - 1) / pilot_spacing;
-    }
+    // Calculate data carriers based on pilot configuration for the given rate.
+    const int pilot_spacing =
+        ofdm_link_adaptation::recommendedPilotSpacing(config_.modulation, rate);
+    const int pilot_count =
+        ofdm_link_adaptation::pilotCount(static_cast<int>(config_.num_carriers), pilot_spacing);
     int data_carriers = config_.num_carriers - pilot_count;
 
     // Symbol rate

@@ -148,9 +148,11 @@ public:
     void setChannelInterleave(bool enable) { use_channel_interleave_ = enable; }
     bool getChannelInterleave() const { return use_channel_interleave_; }
 
-    // Burst-level long interleaver (4-frame groups)
+    // Burst-level long interleaver (N-frame groups)
     void setBurstInterleave(bool enable) { use_burst_interleave_ = enable; }
     bool getBurstInterleave() const { return use_burst_interleave_; }
+    void setBurstInterleaveGroupSize(int size);
+    int getBurstInterleaveGroupSize() const { return burst_group_size_; }
 
     // Get current mode
     protocol::WaveformMode getMode() const { return mode_; }
@@ -366,8 +368,8 @@ private:
     float burst_snr_ = 0.0f;             // SNR from sync detection
     float burst_cfo_ = 0.0f;             // CFO (updated per frame from pilot tracking)
     std::chrono::steady_clock::time_point burst_start_time_;  // timeout reference
-    static constexpr int BURST_GROUP_SIZE = 4;
-    static constexpr int BURST_TIMEOUT_MS = 8000;  // 4 frames × ~0.7s + margin
+    int burst_group_size_ = 4;
+    static constexpr int BURST_TIMEOUT_MS_BASE = 8000;  // 4 frames × ~0.7s + margin
 
     // Pending frame state for multi-codeword frames
     // After reading header, if more codewords needed, wait for more samples

@@ -54,6 +54,10 @@ StreamingEncoder::StreamingEncoder() {
 
 StreamingEncoder::~StreamingEncoder() = default;
 
+void StreamingEncoder::setBurstInterleaveGroupSize(int size) {
+    burst_group_size_ = std::clamp(size, 2, 8);
+}
+
 // ============================================================================
 // MODE CONTROL
 // ============================================================================
@@ -241,9 +245,9 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
         encoded_frames.push_back(encodeFrameBytes(fd));
     }
 
-    // Phase 2: Group into 4-frame subgroups, burst-interleave each group
+    // Phase 2: Group into N-frame subgroups, burst-interleave each group
     // Track which groups are burst-interleaved (for LTS marker)
-    constexpr int BURST_GROUP_SIZE = 4;
+    const int BURST_GROUP_SIZE = std::max(2, burst_group_size_);
     std::vector<bool> frame_is_group_start(encoded_frames.size(), false);
 
     if (use_burst_interleave_) {
@@ -542,9 +546,8 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
     }
 
     // OFDM: Check if this is a control frame or data/connect frame
-    // Control frames (ACK, NACK, MODE_CHANGE, etc.) are 20 bytes = 1 CW, no interleaving
-    // Connect frames (DISCONNECT) in OFDM mode use 4-CW frame interleaving for fading protection
-    //   (CONNECT/CONNECT_ACK are always MC-DPSK, so only DISCONNECT reaches here)
+    // Control frames (ACK, NACK, MODE_CHANGE, DISCONNECT, etc.) are 20 bytes = 1 CW, no interleaving
+    // Connect handshake frames are always MC-DPSK and do not reach this path.
     // Data frames use 4-CW fixed frame encoding with frame interleaving
     bool is_variable_cw_frame = false;
     if (tx_data.size() >= 3) {
@@ -553,12 +556,12 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
         if (v2::isControlFrame(ft)) {
             is_variable_cw_frame = true;
         }
-        // Connect frames (DISCONNECT) go through encodeFixedFrame() for 4-CW interleaving
+        // Non-control frames go through encodeFixedFrame() for 4-CW interleaving
     }
 
     if (is_variable_cw_frame) {
         // Variable-CW encoding (no frame interleaving needed)
-        // Control frames = 1 CW, Connect frames = 2 CWs at R1/2
+        // Control frames = 1 CW
         // Control frames always use R1/4: exact fit (20 bytes = 162 info bits / 8)
         // and maximum LDPC redundancy for fading resilience
         auto cws = v2::encodeFrameWithLDPC(tx_data, CodeRate::R1_4);
@@ -569,7 +572,9 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
         // encoding may produce fewer CWs (e.g. 2 at R1/2 for 44-byte ConnectFrame)
         // ControlFrames (20 bytes) don't have total_cw field — parseHeader() returns 1
         auto ft = static_cast<v2::FrameType>(tx_data[2]);
-        if (v2::isConnectFrame(ft) && tx_data.size() > 16 && tx_data[12] != actual_cw) {
+        if (v2::isConnectFrame(ft) &&
+            tx_data.size() > v2::ControlFrame::SIZE &&
+            tx_data[12] != actual_cw) {
             LOG_MODEM(INFO, "[%s] OFDM: Patching ConnectFrame total_cw %d -> %d",
                       log_prefix_.c_str(), tx_data[12], actual_cw);
             tx_data[12] = actual_cw;

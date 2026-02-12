@@ -139,9 +139,9 @@ int runProtocolTx(const char* message, const char* output_file,
         samples = modem.transmit(frame.serialize());
 
     } else if (strcmp(message, "disconnect") == 0) {
-        // DISCONNECT frame with full callsigns
+        // DISCONNECT control frame (hardened 1-CW profile)
         frame_type = "DISCONNECT";
-        auto frame = v2::ConnectFrame::makeDisconnect(src_call, dst_call);
+        auto frame = v2::ControlFrame::makeDisconnect(src_call, dst_call);
         samples = modem.transmit(frame.serialize());
 
     } else {

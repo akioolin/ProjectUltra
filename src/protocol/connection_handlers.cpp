@@ -281,7 +281,7 @@ void Connection::handleDisconnect(const v2::ControlFrame& frame, const std::stri
 
     LOG_MODEM(INFO, "Connection: Disconnect from %s", remote_call_.c_str());
 
-    auto ack = v2::ControlFrame::makeAck(local_call_, remote_call_, 0);
+    auto ack = v2::ControlFrame::makeAck(local_call_, remote_call_, frame.seq);
     disconnect_ack_frame_ = ack.serialize();
     transmitFrame(disconnect_ack_frame_);
 
