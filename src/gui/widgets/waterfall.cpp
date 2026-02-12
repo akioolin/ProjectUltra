@@ -3,6 +3,7 @@
 #include "waterfall.hpp"
 #include <algorithm>
 #include <cstring>
+#include "gui/startup_trace.hpp"
 
 // Silence OpenGL deprecation warnings on macOS
 #define GL_SILENCE_DEPRECATION
@@ -108,10 +109,15 @@ WaterfallPalette WaterfallPalette::createHeat() {
 // --- WaterfallWidget implementation ---
 
 WaterfallWidget::WaterfallWidget() {
+    startupTrace("WaterfallWidget", "ctor-enter");
     palette_ = WaterfallPalette::createDefault();
+    startupTrace("WaterfallWidget", "palette-created");
     setFFTSize(2048);
+    startupTrace("WaterfallWidget", "fft-size-set");
     setHistoryDepth(200);
+    startupTrace("WaterfallWidget", "history-depth-set");
     createWindow();
+    startupTrace("WaterfallWidget", "ctor-exit");
 }
 
 WaterfallWidget::~WaterfallWidget() {

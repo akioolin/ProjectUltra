@@ -13,7 +13,7 @@ public:
         None
     };
 
-    ControlsWidget() = default;
+    ControlsWidget();
 
     // Render channel status panel
     // data_mod/data_rate are the protocol's negotiated mode (displayed as current mode)

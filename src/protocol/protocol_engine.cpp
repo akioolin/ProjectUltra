@@ -1,4 +1,5 @@
 #include "protocol_engine.hpp"
+#include "gui/startup_trace.hpp"
 #include "ultra/logging.hpp"
 #include <algorithm>
 
@@ -8,6 +9,7 @@ namespace protocol {
 ProtocolEngine::ProtocolEngine(const ConnectionConfig& config)
     : connection_(config)
 {
+    ultra::gui::startupTrace("ProtocolEngine", "ctor-enter");
     // Wire up Connection callbacks
     connection_.setTransmitCallback([this](const Bytes& data) {
         handleTxFrame(data);
@@ -43,6 +45,7 @@ ProtocolEngine::ProtocolEngine(const ConnectionConfig& config)
             on_connection_changed_(state, info);
         }
     });
+    ultra::gui::startupTrace("ProtocolEngine", "ctor-exit");
 }
 
 void ProtocolEngine::setLocalCallsign(const std::string& call) {

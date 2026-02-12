@@ -2,6 +2,7 @@
 // Uses Dear ImGui with SDL2 + OpenGL 2.1 for maximum compatibility
 
 #include "app.hpp"
+#include "startup_trace.hpp"
 
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
@@ -150,6 +151,9 @@ LONG WINAPI startupUnhandledExceptionFilter(EXCEPTION_POINTERS* ex) {
 int main(int argc, char* argv[]) {
     initStartupLog();
 #ifdef _WIN32
+    if (!g_startup_log_path.empty()) {
+        _putenv_s("ULTRA_STARTUP_LOG", g_startup_log_path.c_str());
+    }
     SetUnhandledExceptionFilter(startupUnhandledExceptionFilter);
 #endif
     std::set_terminate([]() {

@@ -13,6 +13,7 @@
 // - FFT-based correlation for speed when signal present
 
 #include "streaming_decoder.hpp"
+#include "gui/startup_trace.hpp"
 #include "waveform/ofdm_cox_waveform.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "fec/frame_interleaver.hpp"  // Frame-level interleaving for 4-CW frames
@@ -126,12 +127,18 @@ static void dumpBufferSnapshot(const std::vector<float>& buffer, size_t write_po
 }
 
 StreamingDecoder::StreamingDecoder() {
+    startupTrace("StreamingDecoder", "ctor-enter");
     buffer_.resize(MAX_BUFFER_SAMPLES, 0.0f);
+    startupTrace("StreamingDecoder", "buffer-resized");
     waveform_ = WaveformFactory::create(protocol::WaveformMode::MC_DPSK);
+    startupTrace("StreamingDecoder", "waveform-created");
     interleaver_ = std::make_unique<ChannelInterleaver>(16, v2::LDPC_CODEWORD_BITS);
+    startupTrace("StreamingDecoder", "interleaver-created");
     codec_ = fec::CodecFactory::create(fec::CodecType::LDPC, CodeRate::R1_4);
+    startupTrace("StreamingDecoder", "codec-created");
 
     LOG_MODEM(INFO, "StreamingDecoder: Initialized (buffer=%zu samples)", MAX_BUFFER_SAMPLES);
+    startupTrace("StreamingDecoder", "ctor-exit");
 }
 
 StreamingDecoder::~StreamingDecoder() {

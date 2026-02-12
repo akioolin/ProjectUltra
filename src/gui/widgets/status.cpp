@@ -1,8 +1,13 @@
 #include "status.hpp"
 #include "imgui.h"
+#include "gui/startup_trace.hpp"
 
 namespace ultra {
 namespace gui {
+
+StatusWidget::StatusWidget() {
+    startupTrace("StatusWidget", "ctor");
+}
 
 void StatusWidget::render(const ModemStats& stats, const ModemConfig& config,
                           bool connected) {

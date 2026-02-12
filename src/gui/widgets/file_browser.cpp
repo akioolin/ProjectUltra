@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include "gui/startup_trace.hpp"
 
 namespace fs = std::filesystem;
 
@@ -10,7 +11,9 @@ namespace ultra {
 namespace gui {
 
 FileBrowser::FileBrowser() {
+    startupTrace("FileBrowser", "ctor-enter");
     current_path_ = getHomeDirectory();
+    startupTrace("FileBrowser", "ctor-exit");
 }
 
 std::string FileBrowser::getHomeDirectory() {

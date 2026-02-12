@@ -8,6 +8,7 @@ namespace gui {
 
 class StatusWidget {
 public:
+    StatusWidget();
     void render(const ModemStats& stats, const ModemConfig& config, bool connected);
 };
 

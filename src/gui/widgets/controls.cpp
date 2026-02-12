@@ -1,9 +1,14 @@
 #include "controls.hpp"
 #include "imgui.h"
+#include "gui/startup_trace.hpp"
 #include <cstdio>
 
 namespace ultra {
 namespace gui {
+
+ControlsWidget::ControlsWidget() {
+    startupTrace("ControlsWidget", "ctor");
+}
 
 // Helper to get modulation name
 static const char* getModulationName(Modulation mod) {

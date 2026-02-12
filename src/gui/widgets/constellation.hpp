@@ -10,6 +10,7 @@ namespace gui {
 
 class ConstellationWidget {
 public:
+    ConstellationWidget();
     void render(const std::vector<std::complex<float>>& symbols, Modulation mod);
 
 private:

@@ -1,5 +1,6 @@
 #include "settings.hpp"
 #include "imgui.h"
+#include "gui/startup_trace.hpp"
 #include <algorithm>
 #include <cstring>
 #include <fstream>
@@ -15,6 +16,10 @@
 
 namespace ultra {
 namespace gui {
+
+AppSettings::AppSettings() {
+    startupTrace("AppSettings", "ctor");
+}
 
 // Get default settings file path
 std::string AppSettings::getDefaultPath() {
@@ -201,7 +206,9 @@ bool AppSettings::load(const std::string& path) {
     return true;
 }
 
-SettingsWindow::SettingsWindow() = default;
+SettingsWindow::SettingsWindow() {
+    startupTrace("SettingsWindow", "ctor");
+}
 
 bool SettingsWindow::render(AppSettings& settings) {
     just_closed_ = false;

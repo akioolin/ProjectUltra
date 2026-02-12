@@ -2,6 +2,7 @@
 // Constructor, destructor, configuration, and TX functions
 
 #include "modem_engine.hpp"
+#include "gui/startup_trace.hpp"
 #include "ultra/logging.hpp"
 #include <cstring>
 #include <algorithm>
@@ -12,7 +13,9 @@ namespace ultra {
 namespace gui {
 
 ModemEngine::ModemEngine() {
+    startupTrace("ModemEngine", "ctor-enter");
     config_ = presets::balanced();
+    startupTrace("ModemEngine", "presets-balanced");
 
     // CRITICAL: Disable pilots for DQPSK mode - uses all 30 carriers for data
     // This doubles throughput (30 data carriers vs 15 with pilots)
@@ -36,6 +39,7 @@ ModemEngine::ModemEngine() {
     chirp_cfg.use_dual_chirp = true; // Enable dual chirp for CFO estimation
     chirp_cfg.tx_cfo_hz = config_.tx_cfo_hz;  // Pass TX CFO for simulation
     chirp_sync_ = std::make_unique<sync::ChirpSync>(chirp_cfg);
+    startupTrace("ModemEngine", "chirp-sync-created");
 
     // Multi-Carrier DPSK (for fading channels - frequency diversity)
     // Using level8: 8 carriers, 93.75 baud, DQPSK (~735 bps)
@@ -50,16 +54,20 @@ ModemEngine::ModemEngine() {
 
     // Initialize StreamingEncoder (unified TX path)
     streaming_encoder_ = std::make_unique<StreamingEncoder>();
+    startupTrace("ModemEngine", "streaming-encoder-created");
     streaming_encoder_->setOFDMConfig(config_);
     streaming_encoder_->setMCDPSKCarriers(mc_dpsk_config_.num_carriers);
+    startupTrace("ModemEngine", "streaming-encoder-configured");
 
     // Initialize audio filters
     rebuildFilters();
+    startupTrace("ModemEngine", "filters-built");
 
     // ========================================================================
     // Initialize StreamingDecoder (primary RX path)
     // ========================================================================
     streaming_decoder_ = std::make_unique<StreamingDecoder>();
+    startupTrace("ModemEngine", "streaming-decoder-created");
     streaming_decoder_->setLogPrefix(log_prefix_);
 
     // Set callbacks to wire into existing ModemEngine callbacks
@@ -99,15 +107,18 @@ ModemEngine::ModemEngine() {
     // When connected, use the negotiated waveform
     protocol::WaveformMode decoder_mode = connected_ ? waveform_mode_ : protocol::WaveformMode::MC_DPSK;
     streaming_decoder_->setMode(decoder_mode, connected_);
+    startupTrace("ModemEngine", "decoder-mode-set");
 
     // Sync MC-DPSK carrier count with ModemEngine's config
     streaming_decoder_->setMCDPSKCarriers(mc_dpsk_config_.num_carriers);
+    startupTrace("ModemEngine", "decoder-carriers-set");
 
     LOG_MODEM(INFO, "[%s] StreamingDecoder initialized (MC-DPSK: %d carriers)",
               log_prefix_.c_str(), mc_dpsk_config_.num_carriers);
 
     // Defer RX decode thread startup until audio is actually fed.
     // This reduces startup-time failure surface on low-end systems.
+    startupTrace("ModemEngine", "ctor-exit");
 }
 
 ModemEngine::~ModemEngine() {

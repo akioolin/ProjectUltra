@@ -1,6 +1,7 @@
 #define _USE_MATH_DEFINES  // For M_PI on MSVC
 #include <cmath>
 #include "audio_engine.hpp"
+#include "gui/startup_trace.hpp"
 #include "ultra/logging.hpp"
 #include <cstring>
 #include <algorithm>
@@ -8,7 +9,9 @@
 namespace ultra {
 namespace gui {
 
-AudioEngine::AudioEngine() = default;
+AudioEngine::AudioEngine() {
+    startupTrace("AudioEngine", "ctor");
+}
 
 AudioEngine::~AudioEngine() {
     shutdown();

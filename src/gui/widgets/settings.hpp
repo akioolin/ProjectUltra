@@ -10,6 +10,8 @@ namespace gui {
 
 // Settings that persist across sessions
 struct AppSettings {
+    AppSettings();
+
     // Save/load to file
     bool save(const std::string& path = "") const;
     bool load(const std::string& path = "");

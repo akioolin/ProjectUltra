@@ -2,6 +2,7 @@
 // Frame handlers are in connection_handlers.cpp
 
 #include "connection.hpp"
+#include "gui/startup_trace.hpp"
 #include "waveform_selection.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
 #include "ultra/logging.hpp"
@@ -76,6 +77,7 @@ Connection::Connection(const ConnectionConfig& config)
     : config_(config)
     , arq_(config.arq)
 {
+    ultra::gui::startupTrace("Connection", "ctor-enter");
     // Wire up ARQ callbacks
     arq_.setTransmitCallback([this](const Bytes& data) {
         transmitFrame(data);
@@ -132,6 +134,7 @@ Connection::Connection(const ConnectionConfig& config)
             }
         }
     });
+    ultra::gui::startupTrace("Connection", "ctor-exit");
 }
 
 // =============================================================================
