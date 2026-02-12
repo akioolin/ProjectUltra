@@ -9,6 +9,8 @@
 #include <cstdarg>
 #include <chrono>
 #include <ctime>
+#include <filesystem>
+#include <limits>
 #include <sys/stat.h>
 
 #ifdef _WIN32
@@ -101,6 +103,15 @@ static const char* waveformDisplayName(protocol::WaveformMode mode) {
         case protocol::WaveformMode::OFDM_COX:
         default: return "OFDM";
     }
+}
+
+static uint32_t safeFileSizeBytes(const std::string& path) {
+    std::error_code ec;
+    uintmax_t size = std::filesystem::file_size(path, ec);
+    if (ec || size > static_cast<uintmax_t>(std::numeric_limits<uint32_t>::max())) {
+        return 0;
+    }
+    return static_cast<uint32_t>(size);
 }
 
 App::App() : App(Options{}) {}
@@ -430,11 +441,21 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         last_progress_milestone_ = 0;  // Reset for next transfer
         auto duration = std::chrono::steady_clock::now() - file_transfer_start_time_;
         float seconds = std::chrono::duration<float>(duration).count();
+        uint32_t file_bytes = success ? safeFileSizeBytes(path) : 0;
 
         std::string msg;
         if (success) {
-            char buf[256];
-            snprintf(buf, sizeof(buf), "[FILE] Received: %s (%.1fs)", path.c_str(), seconds);
+            if (seconds > 0.0f && file_bytes > 0) {
+                last_effective_goodput_bps_ = (8.0f * static_cast<float>(file_bytes)) / seconds;
+                last_goodput_label_ = "RX file";
+            }
+            char buf[320];
+            if (last_goodput_label_ == "RX file" && last_effective_goodput_bps_ > 0.0f) {
+                snprintf(buf, sizeof(buf), "[FILE] Received: %s (%.1fs, %.2f kbps)",
+                         path.c_str(), seconds, last_effective_goodput_bps_ / 1000.0f);
+            } else {
+                snprintf(buf, sizeof(buf), "[FILE] Received: %s (%.1fs)", path.c_str(), seconds);
+            }
             msg = buf;
             last_received_file_ = path;
         } else {
@@ -453,12 +474,23 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
 
         std::string msg;
         if (success) {
-            char buf[128];
-            snprintf(buf, sizeof(buf), "[FILE] Transfer complete (%.1fs)", seconds);
+            if (seconds > 0.0f && pending_file_tx_payload_bytes_ > 0) {
+                last_effective_goodput_bps_ =
+                    (8.0f * static_cast<float>(pending_file_tx_payload_bytes_)) / seconds;
+                last_goodput_label_ = "TX file";
+            }
+            char buf[196];
+            if (last_goodput_label_ == "TX file" && last_effective_goodput_bps_ > 0.0f) {
+                snprintf(buf, sizeof(buf), "[FILE] Transfer complete (%.1fs, %.2f kbps)",
+                         seconds, last_effective_goodput_bps_ / 1000.0f);
+            } else {
+                snprintf(buf, sizeof(buf), "[FILE] Transfer complete (%.1fs)", seconds);
+            }
             msg = buf;
         } else {
             msg = "[FILE] Transfer failed: " + error;
         }
+        pending_file_tx_payload_bytes_ = 0;
         rx_log_.push_back(msg);
         if (rx_log_.size() > MAX_RX_LOG) {
             rx_log_.pop_front();
@@ -1154,7 +1186,8 @@ void App::render() {
     }
     auto data_mod = protocol_.getDataModulation();
     auto data_rate = protocol_.getDataCodeRate();
-    renderCompactChannelStatus(modem_stats, data_mod, data_rate);
+    auto conn_stats = protocol_.getStats();
+    renderCompactChannelStatus(modem_stats, data_mod, data_rate, conn_stats);
 
     ImGui::Separator();
 
@@ -1177,8 +1210,16 @@ void App::render() {
     ImGui::Separator();
     auto mstats = modem_.getStats();
     const char* mode_str = simulation_enabled_ ? "SIMULATION" : (ptt_active_ ? "TX" : (radio_rx_enabled_ ? "RX" : "IDLE"));
-    ImGui::Text("Mode: %s | SNR: %.1f dB | TX: %d | RX: %d | Throughput: %d bps",
-        mode_str, mstats.snr_db, mstats.frames_sent, mstats.frames_received, mstats.throughput_bps);
+    char goodput_text[96];
+    if (last_effective_goodput_bps_ > 0.0f) {
+        snprintf(goodput_text, sizeof(goodput_text), "%.2f kbps (%s)",
+                 last_effective_goodput_bps_ / 1000.0f, last_goodput_label_.c_str());
+    } else {
+        snprintf(goodput_text, sizeof(goodput_text), "n/a");
+    }
+    ImGui::Text("Mode: %s | SNR: %.1f dB | TX: %d | RX: %d | PHY: %d bps | Goodput: %s",
+                mode_str, mstats.snr_db, mstats.frames_sent, mstats.frames_received,
+                mstats.throughput_bps, goodput_text);
 
     ImGui::End();
 
@@ -1275,9 +1316,10 @@ void App::stopTxNow(const char* reason) {
     }
 }
 
-void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data_mod, CodeRate data_rate) {
+void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data_mod, CodeRate data_rate,
+                                     const protocol::ConnectionStats& conn_stats) {
     // Compact horizontal Channel Status display
-    ImGui::BeginChild("ChannelStatus", ImVec2(0, 110), false);
+    ImGui::BeginChild("ChannelStatus", ImVec2(0, 140), false);
 
     auto conn_state = protocol_.getState();
 
@@ -1355,7 +1397,7 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         }
         ImGui::SameLine();
         ImGui::TextColored(mode_quality_color, "[%s]", mode_quality);
-        ImGui::TextDisabled("~%.1f kbps", throughput_bps / 1000.0f);
+        ImGui::TextDisabled("PHY ~%.1f kbps", throughput_bps / 1000.0f);
 
         // Row 2: Our SNR measurement
         ImVec4 sync_color = stats.synced ? ImVec4(0.2f, 1.0f, 0.2f, 1.0f) : ImVec4(0.5f, 0.5f, 0.5f, 1.0f);
@@ -1402,7 +1444,7 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
     }
     // Connected state already shows mode in Row 1
 
-    // Row 3: Frame stats (only show when we have activity)
+    // Row 3: Modem frame stats
     if (stats.frames_sent > 0 || stats.frames_received > 0) {
         ImGui::Text("TX:%d RX:%d", stats.frames_sent, stats.frames_received);
         if (stats.frames_failed > 0) {
@@ -1411,6 +1453,28 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         }
     } else if (conn_state == protocol::ConnectionState::DISCONNECTED) {
         ImGui::TextDisabled("Ready to connect");
+    }
+
+    // Row 4: ARQ health (control-path reliability visibility)
+    const auto& arq = conn_stats.arq;
+    bool has_arq_activity =
+        arq.frames_sent > 0 || arq.frames_received > 0 || arq.acks_sent > 0 || arq.acks_received > 0 ||
+        arq.retransmissions > 0 || arq.timeouts > 0;
+    if (has_arq_activity) {
+        ImVec4 arq_color = (arq.failed > 0 || arq.timeouts > 0) ? ImVec4(1.0f, 0.4f, 0.4f, 1.0f) :
+                           (arq.retransmissions > 0) ? ImVec4(0.9f, 0.8f, 0.3f, 1.0f) :
+                           ImVec4(0.7f, 0.7f, 0.7f, 1.0f);
+        char arq_line[256];
+        snprintf(arq_line, sizeof(arq_line),
+                 "ARQ retx:%d to:%d fast:%d probe:%d nack:%d dupACK:%d",
+                 arq.retransmissions, arq.timeouts, arq.retransmissions_fast_hole,
+                 arq.retransmissions_hole_probe, arq.retransmissions_nack,
+                 arq.duplicate_acks_ignored);
+        ImGui::TextColored(arq_color, "%s", arq_line);
+        if (arq.failed > 0) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "fail:%d", arq.failed);
+        }
     }
 
     ImGui::EndChild();
@@ -1733,9 +1797,12 @@ void App::renderOperateTab() {
         if (ImGui::Button("Send##file", ImVec2(60, 0))) {
             last_progress_milestone_ = 0;  // Reset milestone tracker
             file_transfer_start_time_ = std::chrono::steady_clock::now();  // Start timing
+            uint32_t file_bytes = safeFileSizeBytes(file_path_buffer_);
             if (protocol_.sendFile(file_path_buffer_)) {
+                pending_file_tx_payload_bytes_ = file_bytes;
                 rx_log_.push_back("[FILE] Sending: " + std::string(file_path_buffer_));
             } else {
+                pending_file_tx_payload_bytes_ = 0;
                 rx_log_.push_back("[FILE] Failed to start transfer");
             }
             if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();

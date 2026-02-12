@@ -87,6 +87,9 @@ private:
     bool file_browser_open_ = false;
     int last_progress_milestone_ = 0;  // Last logged milestone (0, 25, 50, 75)
     std::chrono::steady_clock::time_point file_transfer_start_time_;  // For duration display
+    uint32_t pending_file_tx_payload_bytes_ = 0;  // Original file size for TX goodput
+    float last_effective_goodput_bps_ = 0.0f;  // Last completed file transfer goodput
+    std::string last_goodput_label_ = "n/a";  // Context for last goodput sample
 
     // ========================================
     // Developer Options
@@ -155,7 +158,8 @@ private:
     // UI Rendering
     // ========================================
     void renderOperateTab();
-    void renderCompactChannelStatus(const LoopbackStats& stats, Modulation data_mod, CodeRate data_rate);
+    void renderCompactChannelStatus(const LoopbackStats& stats, Modulation data_mod, CodeRate data_rate,
+                                    const protocol::ConnectionStats& conn_stats);
     void initAudio();
     void stopTxNow(const char* reason);
     void sendMessage();
