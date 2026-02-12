@@ -1937,188 +1937,195 @@ private:
 };
 
 int main(int argc, char* argv[]) {
-    CLISimulator sim;
+    try {
+        CLISimulator sim;
 
-    for (int i = 1; i < argc; i++) {
-        std::string arg = argv[i];
-        if ((arg == "--snr" || arg == "-s") && i + 1 < argc) {
-            sim.setSNR(std::stof(argv[++i]));
-        } else if (arg == "--verbose" || arg == "-v") {
-            sim.setVerbose(true);
-        } else if (arg == "--fading" || arg == "-f") {
-            // --fading alone = moderate, --fading <type> = specified type
-            if (i + 1 < argc && argv[i + 1][0] != '-') {
-                std::string ftype = argv[++i];
-                if (ftype == "good" || ftype == "GOOD") {
-                    sim.setChannelType(ChannelType::GOOD);
-                } else if (ftype == "moderate" || ftype == "MODERATE") {
-                    sim.setChannelType(ChannelType::MODERATE);
-                } else if (ftype == "poor" || ftype == "POOR") {
-                    sim.setChannelType(ChannelType::POOR);
-                } else if (ftype == "flutter" || ftype == "FLUTTER") {
-                    sim.setChannelType(ChannelType::FLUTTER);
+        for (int i = 1; i < argc; i++) {
+            std::string arg = argv[i];
+            if ((arg == "--snr" || arg == "-s") && i + 1 < argc) {
+                sim.setSNR(std::stof(argv[++i]));
+            } else if (arg == "--verbose" || arg == "-v") {
+                sim.setVerbose(true);
+            } else if (arg == "--fading" || arg == "-f") {
+                // --fading alone = moderate, --fading <type> = specified type
+                if (i + 1 < argc && argv[i + 1][0] != '-') {
+                    std::string ftype = argv[++i];
+                    if (ftype == "good" || ftype == "GOOD") {
+                        sim.setChannelType(ChannelType::GOOD);
+                    } else if (ftype == "moderate" || ftype == "MODERATE") {
+                        sim.setChannelType(ChannelType::MODERATE);
+                    } else if (ftype == "poor" || ftype == "POOR") {
+                        sim.setChannelType(ChannelType::POOR);
+                    } else if (ftype == "flutter" || ftype == "FLUTTER") {
+                        sim.setChannelType(ChannelType::FLUTTER);
+                    } else {
+                        std::cerr << "Unknown fading type: " << ftype << " (use good, moderate, poor, flutter)\n";
+                        return 1;
+                    }
                 } else {
-                    std::cerr << "Unknown fading type: " << ftype << " (use good, moderate, poor, flutter)\n";
-                    return 1;
+                    sim.setChannelType(ChannelType::MODERATE);  // Default fading = moderate
                 }
-            } else {
-                sim.setChannelType(ChannelType::MODERATE);  // Default fading = moderate
-            }
-        } else if (arg == "--channel" || arg == "-c") {
-            if (i + 1 < argc) {
-                std::string ch_str = argv[++i];
-                if (ch_str == "awgn" || ch_str == "AWGN") {
-                    sim.setChannelType(ChannelType::AWGN);
-                } else if (ch_str == "good" || ch_str == "GOOD") {
-                    sim.setChannelType(ChannelType::GOOD);
-                } else if (ch_str == "moderate" || ch_str == "MODERATE") {
-                    sim.setChannelType(ChannelType::MODERATE);
-                } else if (ch_str == "poor" || ch_str == "POOR") {
-                    sim.setChannelType(ChannelType::POOR);
-                } else if (ch_str == "flutter" || ch_str == "FLUTTER") {
-                    sim.setChannelType(ChannelType::FLUTTER);
-                } else {
-                    std::cerr << "Unknown channel: " << ch_str << " (use awgn, good, moderate, poor, flutter)\n";
-                    return 1;
+            } else if (arg == "--channel" || arg == "-c") {
+                if (i + 1 < argc) {
+                    std::string ch_str = argv[++i];
+                    if (ch_str == "awgn" || ch_str == "AWGN") {
+                        sim.setChannelType(ChannelType::AWGN);
+                    } else if (ch_str == "good" || ch_str == "GOOD") {
+                        sim.setChannelType(ChannelType::GOOD);
+                    } else if (ch_str == "moderate" || ch_str == "MODERATE") {
+                        sim.setChannelType(ChannelType::MODERATE);
+                    } else if (ch_str == "poor" || ch_str == "POOR") {
+                        sim.setChannelType(ChannelType::POOR);
+                    } else if (ch_str == "flutter" || ch_str == "FLUTTER") {
+                        sim.setChannelType(ChannelType::FLUTTER);
+                    } else {
+                        std::cerr << "Unknown channel: " << ch_str << " (use awgn, good, moderate, poor, flutter)\n";
+                        return 1;
+                    }
                 }
-            }
-        } else if (arg == "--hop-channel") {
-            if (i + 1 < argc) {
-                std::string ch_str = argv[++i];
-                if (ch_str == "awgn" || ch_str == "AWGN") {
-                    sim.setAdaptiveHopChannel(ChannelType::AWGN);
-                } else if (ch_str == "good" || ch_str == "GOOD") {
-                    sim.setAdaptiveHopChannel(ChannelType::GOOD);
-                } else if (ch_str == "moderate" || ch_str == "MODERATE") {
-                    sim.setAdaptiveHopChannel(ChannelType::MODERATE);
-                } else if (ch_str == "poor" || ch_str == "POOR") {
-                    sim.setAdaptiveHopChannel(ChannelType::POOR);
-                } else if (ch_str == "flutter" || ch_str == "FLUTTER") {
-                    sim.setAdaptiveHopChannel(ChannelType::FLUTTER);
-                } else {
-                    std::cerr << "Unknown hop channel: " << ch_str << " (use awgn, good, moderate, poor, flutter)\n";
-                    return 1;
+            } else if (arg == "--hop-channel") {
+                if (i + 1 < argc) {
+                    std::string ch_str = argv[++i];
+                    if (ch_str == "awgn" || ch_str == "AWGN") {
+                        sim.setAdaptiveHopChannel(ChannelType::AWGN);
+                    } else if (ch_str == "good" || ch_str == "GOOD") {
+                        sim.setAdaptiveHopChannel(ChannelType::GOOD);
+                    } else if (ch_str == "moderate" || ch_str == "MODERATE") {
+                        sim.setAdaptiveHopChannel(ChannelType::MODERATE);
+                    } else if (ch_str == "poor" || ch_str == "POOR") {
+                        sim.setAdaptiveHopChannel(ChannelType::POOR);
+                    } else if (ch_str == "flutter" || ch_str == "FLUTTER") {
+                        sim.setAdaptiveHopChannel(ChannelType::FLUTTER);
+                    } else {
+                        std::cerr << "Unknown hop channel: " << ch_str << " (use awgn, good, moderate, poor, flutter)\n";
+                        return 1;
+                    }
                 }
-            }
-        } else if (arg == "--mod" || arg == "-m") {
-            if (i + 1 < argc) {
-                std::string mod_str = argv[++i];
-                if (mod_str == "dqpsk" || mod_str == "DQPSK") {
-                    sim.setForcedModulation(Modulation::DQPSK);
-                } else if (mod_str == "d8psk" || mod_str == "D8PSK") {
-                    sim.setForcedModulation(Modulation::D8PSK);
-                } else if (mod_str == "dbpsk" || mod_str == "DBPSK") {
-                    sim.setForcedModulation(Modulation::DBPSK);
-                } else if (mod_str == "qpsk" || mod_str == "QPSK") {
-                    sim.setForcedModulation(Modulation::QPSK);
-                } else if (mod_str == "bpsk" || mod_str == "BPSK") {
-                    sim.setForcedModulation(Modulation::BPSK);
-                } else {
-                    std::cerr << "Unknown modulation: " << mod_str << " (use dqpsk, d8psk, dbpsk, qpsk, bpsk)\n";
-                    return 1;
+            } else if (arg == "--mod" || arg == "-m") {
+                if (i + 1 < argc) {
+                    std::string mod_str = argv[++i];
+                    if (mod_str == "dqpsk" || mod_str == "DQPSK") {
+                        sim.setForcedModulation(Modulation::DQPSK);
+                    } else if (mod_str == "d8psk" || mod_str == "D8PSK") {
+                        sim.setForcedModulation(Modulation::D8PSK);
+                    } else if (mod_str == "dbpsk" || mod_str == "DBPSK") {
+                        sim.setForcedModulation(Modulation::DBPSK);
+                    } else if (mod_str == "qpsk" || mod_str == "QPSK") {
+                        sim.setForcedModulation(Modulation::QPSK);
+                    } else if (mod_str == "bpsk" || mod_str == "BPSK") {
+                        sim.setForcedModulation(Modulation::BPSK);
+                    } else {
+                        std::cerr << "Unknown modulation: " << mod_str << " (use dqpsk, d8psk, dbpsk, qpsk, bpsk)\n";
+                        return 1;
+                    }
                 }
-            }
-        } else if (arg == "--rate" || arg == "-r") {
-            if (i + 1 < argc) {
-                std::string rate_str = argv[++i];
-                if (rate_str == "r1_4" || rate_str == "R1_4") {
-                    sim.setForcedCodeRate(CodeRate::R1_4);
-                } else if (rate_str == "r1_2" || rate_str == "R1_2") {
-                    sim.setForcedCodeRate(CodeRate::R1_2);
-                } else if (rate_str == "r2_3" || rate_str == "R2_3") {
-                    sim.setForcedCodeRate(CodeRate::R2_3);
-                } else if (rate_str == "r3_4" || rate_str == "R3_4") {
-                    sim.setForcedCodeRate(CodeRate::R3_4);
-                } else {
-                    std::cerr << "Unknown code rate: " << rate_str << " (use r1_4, r1_2, r2_3, r3_4)\n";
-                    return 1;
+            } else if (arg == "--rate" || arg == "-r") {
+                if (i + 1 < argc) {
+                    std::string rate_str = argv[++i];
+                    if (rate_str == "r1_4" || rate_str == "R1_4") {
+                        sim.setForcedCodeRate(CodeRate::R1_4);
+                    } else if (rate_str == "r1_2" || rate_str == "R1_2") {
+                        sim.setForcedCodeRate(CodeRate::R1_2);
+                    } else if (rate_str == "r2_3" || rate_str == "R2_3") {
+                        sim.setForcedCodeRate(CodeRate::R2_3);
+                    } else if (rate_str == "r3_4" || rate_str == "R3_4") {
+                        sim.setForcedCodeRate(CodeRate::R3_4);
+                    } else {
+                        std::cerr << "Unknown code rate: " << rate_str << " (use r1_4, r1_2, r2_3, r3_4)\n";
+                        return 1;
+                    }
                 }
-            }
-        } else if (arg == "--waveform" || arg == "-w") {
-            if (i + 1 < argc) {
-                std::string wf_str = argv[++i];
-                if (wf_str == "mc_dpsk" || wf_str == "dpsk") {
-                    sim.setPreferredWaveform(WaveformMode::MC_DPSK);
-                } else if (wf_str == "ofdm_chirp") {
-                    sim.setPreferredWaveform(WaveformMode::OFDM_CHIRP);
-                } else if (wf_str == "ofdm_cox" || wf_str == "ofdm") {
-                    sim.setPreferredWaveform(WaveformMode::OFDM_COX);
-                } else {
-                    std::cerr << "Unknown waveform: " << wf_str << " (use mc_dpsk, ofdm_chirp, ofdm_cox)\n";
-                    return 1;
+            } else if (arg == "--waveform" || arg == "-w") {
+                if (i + 1 < argc) {
+                    std::string wf_str = argv[++i];
+                    if (wf_str == "mc_dpsk" || wf_str == "dpsk") {
+                        sim.setPreferredWaveform(WaveformMode::MC_DPSK);
+                    } else if (wf_str == "ofdm_chirp") {
+                        sim.setPreferredWaveform(WaveformMode::OFDM_CHIRP);
+                    } else if (wf_str == "ofdm_cox" || wf_str == "ofdm") {
+                        sim.setPreferredWaveform(WaveformMode::OFDM_COX);
+                    } else {
+                        std::cerr << "Unknown waveform: " << wf_str << " (use mc_dpsk, ofdm_chirp, ofdm_cox)\n";
+                        return 1;
+                    }
                 }
+            } else if (arg == "--file" || arg == "--test-file") {
+                sim.setTestFileTransfer(true);
+                // Optional file size argument
+                if (i + 1 < argc && argv[i + 1][0] != '-') {
+                    sim.setTestFileSize(std::stoul(argv[++i]));
+                }
+            } else if (arg == "--no-channel-interleave" || arg == "--nci") {
+                sim.setChannelInterleave(false);
+            } else if (arg == "--channel-interleave" || arg == "-ci") {
+                sim.setChannelInterleave(true);
+            } else if (arg == "--no-burst-interleave" || arg == "--nbi") {
+                sim.setNoBurstInterleave(true);
+            } else if (arg == "--burst-group-size" && i + 1 < argc) {
+                sim.setBurstInterleaveGroupSize(std::stoi(argv[++i]));
+            } else if (arg == "--burst-test") {
+                sim.setTestBurst(true);
+            } else if (arg == "--seed" && i + 1 < argc) {
+                sim.setSeed(static_cast<uint32_t>(std::stoul(argv[++i])));
+            } else if ((arg == "--tx-cfo" || arg == "--cfo") && i + 1 < argc) {
+                sim.setTxCFO(std::stof(argv[++i]));
+            } else if (arg == "--save-signals") {
+                int message_limit = 0;
+                if (i + 1 < argc && argv[i + 1][0] != '-') {
+                    message_limit = std::stoi(argv[++i]);
+                }
+                sim.setSaveSignals(true, message_limit);
+            } else if (arg == "--adpt-test") {
+                sim.setAdaptiveTest(true);
+            } else if (arg == "--hop-snr" && i + 1 < argc) {
+                sim.setAdaptiveHopSNR(std::stof(argv[++i]));
+            } else if (arg == "--save-prefix" && i + 1 < argc) {
+                sim.setSaveSignalsPrefix(argv[++i]);
+            } else if (arg == "--save-max-samples" && i + 1 < argc) {
+                sim.setSaveSignalsMaxSamples(static_cast<size_t>(std::stoull(argv[++i])));
+            } else if (arg == "--help" || arg == "-h") {
+                std::cout << "CLI Simulator - IWaveform + StreamingDecoder Model\n\n";
+                std::cout << "Uses IWaveform for TX and StreamingDecoder for RX directly.\n";
+                std::cout << "Every 10ms: read RX, feed decoder, get TX, send to channel.\n\n";
+                std::cout << "Options:\n";
+                std::cout << "  --snr, -s <dB>      SNR (default: 20)\n";
+                std::cout << "  --channel, -c <CH>  Channel type: awgn, good, moderate, poor, flutter\n";
+                std::cout << "                        awgn     - No fading, no multipath\n";
+                std::cout << "                        good     - 0.5ms delay, 0.1Hz Doppler (quiet)\n";
+                std::cout << "                        moderate - 1.0ms delay, 0.5Hz Doppler (typical)\n";
+                std::cout << "                        poor     - 2.0ms delay, 1.0Hz Doppler (disturbed)\n";
+                std::cout << "                        flutter  - 0.5ms delay, 10Hz Doppler (auroral)\n";
+                std::cout << "  --fading, -f        Alias for --channel moderate\n";
+                std::cout << "  --mod, -m <MOD>     Force modulation: dqpsk, d8psk, dbpsk, qpsk, bpsk\n";
+                std::cout << "  --rate, -r <RATE>   Force code rate: r1_4, r1_2, r2_3, r3_4\n";
+                std::cout << "  --waveform, -w <WF> Force waveform: mc_dpsk, ofdm_chirp, ofdm_cox\n";
+                std::cout << "  --seed <N>          Random seed (default: 42)\n";
+                std::cout << "  --tx-cfo <Hz>       Inject TX CFO in channel model (default: 0)\n";
+                std::cout << "  --cfo <Hz>          Alias for --tx-cfo\n";
+                std::cout << "  --file [SIZE]       Test file transfer (default: 256 bytes)\n";
+                std::cout << "  --adpt-test         Two-message adaptive advisory smoke test\n";
+                std::cout << "  --hop-snr <dB>      Condition-B SNR for --adpt-test (default: 12)\n";
+                std::cout << "  --hop-channel <CH>  Condition-B channel for --adpt-test\n";
+                std::cout << "  --channel-interleave, -ci  Enable channel interleaving\n";
+                std::cout << "  --no-burst-interleave     Disable burst-level long interleaving\n";
+                std::cout << "  --burst-group-size <N>    Burst interleave group size (2-8, default: 4)\n";
+                std::cout << "  --burst-test              Send large messages to test burst interleaving\n";
+                std::cout << "  --save-signals [N]        Save TX/RX raw float traces (.f32)\n";
+                std::cout << "                           N = stop capture after BRAVO receives N app messages\n";
+                std::cout << "                           (default: 0 = capture full run)\n";
+                std::cout << "  --save-prefix <PATH>      Capture file prefix (default: /tmp/cli_signals)\n";
+                std::cout << "  --save-max-samples <N>    Per-stream capture cap (0 = unlimited)\n";
+                std::cout << "  --verbose, -v       Verbose output\n";
+                return 0;
             }
-        } else if (arg == "--file" || arg == "--test-file") {
-            sim.setTestFileTransfer(true);
-            // Optional file size argument
-            if (i + 1 < argc && argv[i + 1][0] != '-') {
-                sim.setTestFileSize(std::stoul(argv[++i]));
-            }
-        } else if (arg == "--no-channel-interleave" || arg == "--nci") {
-            sim.setChannelInterleave(false);
-        } else if (arg == "--channel-interleave" || arg == "-ci") {
-            sim.setChannelInterleave(true);
-        } else if (arg == "--no-burst-interleave" || arg == "--nbi") {
-            sim.setNoBurstInterleave(true);
-        } else if (arg == "--burst-group-size" && i + 1 < argc) {
-            sim.setBurstInterleaveGroupSize(std::stoi(argv[++i]));
-        } else if (arg == "--burst-test") {
-            sim.setTestBurst(true);
-        } else if (arg == "--seed" && i + 1 < argc) {
-            sim.setSeed(static_cast<uint32_t>(std::stoul(argv[++i])));
-        } else if ((arg == "--tx-cfo" || arg == "--cfo") && i + 1 < argc) {
-            sim.setTxCFO(std::stof(argv[++i]));
-        } else if (arg == "--save-signals") {
-            int message_limit = 0;
-            if (i + 1 < argc && argv[i + 1][0] != '-') {
-                message_limit = std::stoi(argv[++i]);
-            }
-            sim.setSaveSignals(true, message_limit);
-        } else if (arg == "--adpt-test") {
-            sim.setAdaptiveTest(true);
-        } else if (arg == "--hop-snr" && i + 1 < argc) {
-            sim.setAdaptiveHopSNR(std::stof(argv[++i]));
-        } else if (arg == "--save-prefix" && i + 1 < argc) {
-            sim.setSaveSignalsPrefix(argv[++i]);
-        } else if (arg == "--save-max-samples" && i + 1 < argc) {
-            sim.setSaveSignalsMaxSamples(static_cast<size_t>(std::stoull(argv[++i])));
-        } else if (arg == "--help" || arg == "-h") {
-            std::cout << "CLI Simulator - IWaveform + StreamingDecoder Model\n\n";
-            std::cout << "Uses IWaveform for TX and StreamingDecoder for RX directly.\n";
-            std::cout << "Every 10ms: read RX, feed decoder, get TX, send to channel.\n\n";
-            std::cout << "Options:\n";
-            std::cout << "  --snr, -s <dB>      SNR (default: 20)\n";
-            std::cout << "  --channel, -c <CH>  Channel type: awgn, good, moderate, poor, flutter\n";
-            std::cout << "                        awgn     - No fading, no multipath\n";
-            std::cout << "                        good     - 0.5ms delay, 0.1Hz Doppler (quiet)\n";
-            std::cout << "                        moderate - 1.0ms delay, 0.5Hz Doppler (typical)\n";
-            std::cout << "                        poor     - 2.0ms delay, 1.0Hz Doppler (disturbed)\n";
-            std::cout << "                        flutter  - 0.5ms delay, 10Hz Doppler (auroral)\n";
-            std::cout << "  --fading, -f        Alias for --channel moderate\n";
-            std::cout << "  --mod, -m <MOD>     Force modulation: dqpsk, d8psk, dbpsk, qpsk, bpsk\n";
-            std::cout << "  --rate, -r <RATE>   Force code rate: r1_4, r1_2, r2_3, r3_4\n";
-            std::cout << "  --waveform, -w <WF> Force waveform: mc_dpsk, ofdm_chirp, ofdm_cox\n";
-            std::cout << "  --seed <N>          Random seed (default: 42)\n";
-            std::cout << "  --tx-cfo <Hz>       Inject TX CFO in channel model (default: 0)\n";
-            std::cout << "  --cfo <Hz>          Alias for --tx-cfo\n";
-            std::cout << "  --file [SIZE]       Test file transfer (default: 256 bytes)\n";
-            std::cout << "  --adpt-test         Two-message adaptive advisory smoke test\n";
-            std::cout << "  --hop-snr <dB>      Condition-B SNR for --adpt-test (default: 12)\n";
-            std::cout << "  --hop-channel <CH>  Condition-B channel for --adpt-test\n";
-            std::cout << "  --channel-interleave, -ci  Enable channel interleaving\n";
-            std::cout << "  --no-burst-interleave     Disable burst-level long interleaving\n";
-            std::cout << "  --burst-group-size <N>    Burst interleave group size (2-8, default: 4)\n";
-            std::cout << "  --burst-test              Send large messages to test burst interleaving\n";
-            std::cout << "  --save-signals [N]        Save TX/RX raw float traces (.f32)\n";
-            std::cout << "                           N = stop capture after BRAVO receives N app messages\n";
-            std::cout << "                           (default: 0 = capture full run)\n";
-            std::cout << "  --save-prefix <PATH>      Capture file prefix (default: /tmp/cli_signals)\n";
-            std::cout << "  --save-max-samples <N>    Per-stream capture cap (0 = unlimited)\n";
-            std::cout << "  --verbose, -v       Verbose output\n";
-            return 0;
         }
+        setLogLevel(LogLevel::INFO);
+        return sim.runTest() ? 0 : 1;
+    } catch (const std::exception& e) {
+        std::cerr << "Fatal exception in cli_simulator: " << e.what() << "\n";
+        return 2;
+    } catch (...) {
+        std::cerr << "Fatal unknown exception in cli_simulator\n";
+        return 3;
     }
-
-    setLogLevel(LogLevel::INFO);
-    return sim.runTest() ? 0 : 1;
 }

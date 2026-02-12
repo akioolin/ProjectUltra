@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <limits>
 #include <deque>
+#include <vector>
 #include <sys/stat.h>
 
 #ifdef _WIN32
@@ -28,18 +29,47 @@ namespace gui {
 // ALL logging (including modem, protocol, etc.) goes to this file
 static FILE* g_gui_log_file = nullptr;
 static bool g_log_initialized = false;
+static std::string g_gui_log_path;
 
 static void initLog() {
     if (g_log_initialized) return;
     g_log_initialized = true;
 
-    // Create logs directory next to binary
-    MKDIR("logs");
-    g_gui_log_file = fopen("logs/gui.log", "w");
+    auto tryOpenLog = [](const std::filesystem::path& path) -> FILE* {
+        std::error_code ec;
+        if (!path.parent_path().empty()) {
+            std::filesystem::create_directories(path.parent_path(), ec);
+        }
+        return fopen(path.string().c_str(), "w");
+    };
+
+    std::vector<std::filesystem::path> candidates;
+    candidates.emplace_back(std::filesystem::path("logs") / "gui.log");
+    candidates.emplace_back("gui.log");
+#ifdef _WIN32
+    if (const char* temp = std::getenv("TEMP")) {
+        candidates.emplace_back(std::filesystem::path(temp) / "ProjectUltra" / "gui.log");
+    }
+#else
+    if (const char* temp = std::getenv("TMPDIR")) {
+        candidates.emplace_back(std::filesystem::path(temp) / "projectultra_gui.log");
+    }
+    candidates.emplace_back("/tmp/projectultra_gui.log");
+#endif
+
+    for (const auto& path : candidates) {
+        g_gui_log_file = tryOpenLog(path);
+        if (g_gui_log_file) {
+            g_gui_log_path = path.string();
+            break;
+        }
+    }
 
     if (g_gui_log_file) {
         // Redirect ALL logging (modem, protocol, etc.) to this file
         ultra::setLogFile(g_gui_log_file);
+        ultra::log(ultra::LogLevel::INFO, "GUI", "File logger initialized: %s",
+                   g_gui_log_path.c_str());
     }
 }
 

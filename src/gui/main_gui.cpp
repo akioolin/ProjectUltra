@@ -11,13 +11,105 @@
 #include <SDL_opengl.h>
 
 #include <cstdio>
+#include <cstdarg>
+#include <cstdlib>
+#include <filesystem>
 #include <string>
+#include <chrono>
+#include <ctime>
+#include <vector>
 #include <ultra/logging.hpp>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+namespace {
+
+FILE* g_startup_log_file = nullptr;
+std::string g_startup_log_path;
+
+void writeStartupLog(const char* fmt, ...) {
+    if (!g_startup_log_file) return;
+
+    auto now = std::chrono::system_clock::now();
+    auto t = std::chrono::system_clock::to_time_t(now);
+    std::tm tm_now{};
+#ifdef _WIN32
+    localtime_s(&tm_now, &t);
+#else
+    localtime_r(&t, &tm_now);
+#endif
+
+    char ts[32];
+    std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm_now);
+    std::fprintf(g_startup_log_file, "[%s] ", ts);
+
+    va_list args;
+    va_start(args, fmt);
+    std::vfprintf(g_startup_log_file, fmt, args);
+    va_end(args);
+    std::fprintf(g_startup_log_file, "\n");
+    std::fflush(g_startup_log_file);
+}
+
+void initStartupLog() {
+    namespace fs = std::filesystem;
+    std::vector<fs::path> candidates;
+    candidates.emplace_back(fs::path("logs") / "startup.log");
+    candidates.emplace_back("startup.log");
+
+#ifdef _WIN32
+    if (const char* temp = std::getenv("TEMP")) {
+        candidates.emplace_back(fs::path(temp) / "ProjectUltra" / "startup.log");
+    }
+#else
+    if (const char* temp = std::getenv("TMPDIR")) {
+        candidates.emplace_back(fs::path(temp) / "projectultra_startup.log");
+    }
+    candidates.emplace_back("/tmp/projectultra_startup.log");
+#endif
+
+    for (const auto& path : candidates) {
+        std::error_code ec;
+        if (!path.parent_path().empty()) {
+            fs::create_directories(path.parent_path(), ec);
+        }
+        g_startup_log_file = std::fopen(path.string().c_str(), "w");
+        if (g_startup_log_file) {
+            g_startup_log_path = path.string();
+            break;
+        }
+    }
+
+    if (g_startup_log_file) {
+        writeStartupLog("ProjectUltra GUI startup log initialized");
+    }
+}
+
+void closeStartupLog() {
+    if (g_startup_log_file) {
+        writeStartupLog("ProjectUltra GUI startup log closing");
+        std::fclose(g_startup_log_file);
+        g_startup_log_file = nullptr;
+    }
+}
+
+#ifdef _WIN32
+void showFatalStartupMessage(const std::string& msg) {
+    MessageBoxA(nullptr, msg.c_str(), "ProjectUltra Startup Error", MB_ICONERROR | MB_OK);
+}
+#endif
+
+}  // namespace
+
 int main(int argc, char* argv[]) {
+    initStartupLog();
+
     // Set log level to INFO to avoid DEBUG log spam slowing down UI
     // (DEBUG logs every frame in pollRxAudio() cause significant lag)
     ultra::setLogLevel(ultra::LogLevel::INFO);
+    writeStartupLog("Log level set to INFO");
 
     // Parse command line arguments
     ultra::gui::App::Options opts;
@@ -33,12 +125,25 @@ int main(int argc, char* argv[]) {
             }
         }
     }
+    writeStartupLog("Parsed arguments: sim=%d, rec=%d", opts.enable_sim ? 1 : 0, opts.record_audio ? 1 : 0);
 
     // Initialize SDL
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER) != 0) {
-        fprintf(stderr, "Error: SDL_Init failed: %s\n", SDL_GetError());
+        const char* sdl_err = SDL_GetError();
+        std::string msg = std::string("SDL_Init failed: ") + (sdl_err ? sdl_err : "<unknown>");
+        std::fprintf(stderr, "Error: %s\n", msg.c_str());
+        writeStartupLog("%s", msg.c_str());
+#ifdef _WIN32
+        if (!g_startup_log_path.empty()) {
+            showFatalStartupMessage(msg + "\n\nStartup log: " + g_startup_log_path);
+        } else {
+            showFatalStartupMessage(msg);
+        }
+#endif
+        closeStartupLog();
         return 1;
     }
+    writeStartupLog("SDL initialized");
 
     // Setup window with OpenGL 2.1 context (works on old hardware)
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
@@ -60,18 +165,42 @@ int main(int argc, char* argv[]) {
     );
 
     if (!window) {
-        fprintf(stderr, "Error: SDL_CreateWindow failed: %s\n", SDL_GetError());
+        const char* sdl_err = SDL_GetError();
+        std::string msg = std::string("SDL_CreateWindow failed: ") + (sdl_err ? sdl_err : "<unknown>");
+        std::fprintf(stderr, "Error: %s\n", msg.c_str());
+        writeStartupLog("%s", msg.c_str());
+#ifdef _WIN32
+        if (!g_startup_log_path.empty()) {
+            showFatalStartupMessage(msg + "\n\nStartup log: " + g_startup_log_path);
+        } else {
+            showFatalStartupMessage(msg);
+        }
+#endif
         SDL_Quit();
+        closeStartupLog();
         return 1;
     }
+    writeStartupLog("Window created");
 
     SDL_GLContext gl_context = SDL_GL_CreateContext(window);
     if (!gl_context) {
-        fprintf(stderr, "Error: SDL_GL_CreateContext failed: %s\n", SDL_GetError());
+        const char* sdl_err = SDL_GetError();
+        std::string msg = std::string("SDL_GL_CreateContext failed: ") + (sdl_err ? sdl_err : "<unknown>");
+        std::fprintf(stderr, "Error: %s\n", msg.c_str());
+        writeStartupLog("%s", msg.c_str());
+#ifdef _WIN32
+        if (!g_startup_log_path.empty()) {
+            showFatalStartupMessage(msg + "\n\nStartup log: " + g_startup_log_path);
+        } else {
+            showFatalStartupMessage(msg);
+        }
+#endif
         SDL_DestroyWindow(window);
         SDL_Quit();
+        closeStartupLog();
         return 1;
     }
+    writeStartupLog("OpenGL context created");
 
     SDL_GL_MakeCurrent(window, gl_context);
     SDL_GL_SetSwapInterval(1);  // Enable vsync
@@ -95,6 +224,7 @@ int main(int argc, char* argv[]) {
 
     // Create application with parsed options
     ultra::gui::App app(opts);
+    writeStartupLog("App initialized");
 
     // Main loop
     bool running = true;
@@ -139,6 +269,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_DeleteContext(gl_context);
     SDL_DestroyWindow(window);
     SDL_Quit();
+    closeStartupLog();
 
     return 0;
 }
