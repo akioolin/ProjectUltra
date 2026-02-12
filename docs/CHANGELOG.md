@@ -1812,9 +1812,9 @@ done
 - Created comprehensive documentation for refactoring reference
 
 **Files created:**
-- `docs/MODEM_ENGINE_ARCHITECTURE.md` - Complete ModemEngine analysis
-- `docs/DUAL_CHIRP_CFO_ANALYSIS.md` - CFO detection and position handling
-- `docs/TESTING_METHODOLOGY.md` - Test tools and requirements
+- `docs/archive/MODEM_ENGINE_ARCHITECTURE.md` - Complete ModemEngine analysis
+- `docs/archive/DUAL_CHIRP_CFO_ANALYSIS.md` - CFO detection and position handling
+- `docs/archive/TESTING_METHODOLOGY.md` - Test tools and requirements
 
 **Why it matters:**
 - ModemEngine has two parallel code paths (old direct modulators, new IWaveform)

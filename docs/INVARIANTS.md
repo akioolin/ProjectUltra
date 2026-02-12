@@ -236,24 +236,29 @@ void reset() {
 
 ## Thread Safety Invariants
 
-### INV-THREAD-001: Acquisition and Decode Threads Share Buffer
+### INV-THREAD-001: Audio Feed Thread and Decode Thread Share Decoder Buffer
 
-**Rule:** The sample buffer is written by acquisition thread and read by decode thread. Access must be synchronized.
+**Rule:** `StreamingDecoder` buffer/state is concurrently touched by:
+- audio feed path (`feedAudio()`), and
+- decode path (`processBuffer()`).
 
-**Current implementation:** Ring buffer with read/write indices.
+Access to shared decoder internals must stay synchronized through decoder-owned locks/atomics.
 
-**Hazard:** If decode thread reads while acquisition writes, data corruption occurs.
+**Current implementation:** bounded circular buffer in `StreamingDecoder` with mutex + condition variable coordination.
+
+**Hazard:** unsynchronized pointer/state updates can produce false syncs, dropped frames, or buffer corruption.
 
 ---
 
-### INV-THREAD-002: State Variables Need Atomic Access
+### INV-THREAD-002: Shared Runtime State Requires Atomic/Mutex Protection
 
-**Rule:** Variables accessed by multiple threads (e.g., `connected_`, `waveform_mode_`) need atomic operations or mutex protection.
+**Rule:** cross-thread state (connection flags, TX/RX indicators, queue contents, meters) must use atomics or mutexes.
 
 **Locations to audit:**
-- `src/gui/modem/modem_engine.hpp` - member variables
-- `src/gui/modem/modem_rx.cpp` - acquisition thread
-- `src/gui/modem/modem_rx_decode.cpp` - decode thread
+- `src/gui/modem/streaming_decoder.cpp` - shared RX decode state
+- `src/gui/modem/modem_rx.cpp` - decode-thread lifecycle and mode switching
+- `src/gui/audio_engine.cpp` - SDL callback queue access
+- `src/gui/app.cpp` - simulator thread shared buffers/flags
 
 ---
 

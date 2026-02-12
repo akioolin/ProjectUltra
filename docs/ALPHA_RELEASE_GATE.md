@@ -56,7 +56,7 @@ All gates below must pass before alpha tag:
 - `D8PSK` and coherent high-order modes remain Expert/forced until validated.
 
 5. Release hygiene (must pass):
-- `README.md` and `docs/TESTING_METHODOLOGY.md` commands match current CLI behavior.
+- `README.md`, `docs/README.md`, and gate commands/scripts match current CLI behavior.
 - `docs/KNOWN_BUGS.md` updated with open critical issues.
 - Build instructions verified on a clean clone.
 
@@ -119,6 +119,10 @@ Outputs:
 After a passing full gate run:
 
 ```bash
-git tag -a v0.2.0-alpha.1 -m "ProjectUltra v0.2.0-alpha.1"
-git push origin v0.2.0-alpha.1
+git tag -a vX.Y.Z-alpha -m "ProjectUltra vX.Y.Z-alpha"
+git push origin vX.Y.Z-alpha
+
+# Optional compatibility alias
+git tag -a X.Y.Z-alpha -m "ProjectUltra X.Y.Z-alpha"
+git push origin X.Y.Z-alpha
 ```

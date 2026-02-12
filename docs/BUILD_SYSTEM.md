@@ -92,21 +92,20 @@ make -j4
 | `ultra` | main.cpp + modem_engine | ultra_core | CLI tool |
 | `ultra_gui` | gui/*.cpp + imgui | ultra_core, SDL2, OpenGL | GUI app |
 | `cli_simulator` | cli_simulator.cpp | ultra_core | Protocol simulator |
+| `threaded_simulator` | threaded_simulator.cpp | ultra_core | Real-time simulator |
+| `profile_acquisition` | profile_acquisition.cpp | ultra_core | RX profiling tool |
+| `test_waveform_simple` | test_waveform_simple.cpp | ultra_core | Waveform smoke test |
 
-### Test Tools (23 executables)
+### Unit/Integration Test Targets (`tests/`)
 
-| Tool | Purpose |
-|------|---------|
-| `test_iwaveform` | IWaveform interface testing |
-| `test_hf_modem` | Full pipeline test (legacy) |
-| `test_mc_dpsk` | MC-DPSK mode testing |
-| `profile_acquisition` | Sync timing profiler |
-| `test_chirp_*` | Chirp detection tests |
-| ... | See CMakeLists.txt for full list |
+`tests/CMakeLists.txt` currently defines 21 test/utility executables (e.g. `test_layers`, `test_protocol_modem`, `test_mode_change`, `test_throughput`).
 
-### Unit Tests (23 tests in tests/)
+Run all registered tests:
 
-Run with: `cd build && ctest --verbose`
+```bash
+cd build
+ctest --verbose
+```
 
 ---
 
@@ -252,14 +251,12 @@ build/
 ├── ultra                 # CLI tool
 ├── ultra_gui             # GUI app (if SDL2+OpenGL)
 ├── cli_simulator         # Protocol simulator
-├── test_iwaveform        # Primary test tool
-├── test_hf_modem         # Legacy test
-├── ... (more test tools)
+├── threaded_simulator    # Real-time simulator
+├── profile_acquisition   # RX profiling utility
+├── test_waveform_simple  # Waveform smoke test
+├── tests/*               # Test executables from tests/CMakeLists.txt
 ├── compile_commands.json # IDE integration
-└── tests/
-    ├── test_layers
-    ├── test_protocol_modem
-    └── ... (unit tests)
+└── CMakeFiles/
 ```
 
 ---

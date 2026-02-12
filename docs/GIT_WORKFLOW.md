@@ -1,307 +1,95 @@
 # Git Workflow
 
-**Purpose:** Document the git commit and branching strategy for ProjectUltra.
+Last updated: 2026-02-12
 
----
+## Goal
+Keep workflow simple, safe, and aligned with how this repo is actually maintained.
 
-## Overview
+## Branching
+- Default: commit directly to `main`.
+- Optional feature branch: use only for risky multi-day work.
 
-ProjectUltra uses a **simple trunk-based workflow** suitable for a research project:
+## Commit Rules
+- Keep commits focused (one logical change per commit when possible).
+- Non-WIP commits should build locally before push.
+- Prefer imperative commit titles:
+  - `Fix ...`
+  - `Add ...`
+  - `Update ...`
+  - `Docs ...`
 
-- All development on `main` branch
-- Commit early, commit often
-- Push when stable
-- No complex branching
-
----
-
-## Branching Strategy
-
-### Main Branch (`main`)
-
-- **Primary development branch**
-- All commits go here directly
-- Should always build (no broken commits)
-- May have WIP commits (marked with `WIP:` prefix)
-
-### When to Use Feature Branches
-
-Feature branches are optional but recommended for:
-- Large refactors (multi-day work)
-- Experimental changes you might abandon
-- Changes that break tests temporarily
+## Minimal Pre-Push Check
 
 ```bash
-# Create feature branch
-git checkout -b feature/new-waveform
-
-# Work on feature...
-git commit -m "WIP: Initial AFDM implementation"
-git commit -m "Add AFDM modulator"
-
-# Merge back to main when done
-git checkout main
-git merge feature/new-waveform
-git branch -d feature/new-waveform
+cmake --build build -j4
 ```
 
----
-
-## Commit Guidelines
-
-### When to Commit
-
-| Situation | Action |
-|-----------|--------|
-| Fixed a bug | Commit immediately |
-| Completed a feature | Commit |
-| Made progress on large task | Commit with `WIP:` prefix |
-| About to try something risky | Commit first (safety checkpoint) |
-| End of work session | Commit current state |
-
-### Commit Message Format
-
-```
-<type>: <short description>
-
-<optional body>
-- What was changed
-- Why it was changed
-
-Fixes: BUG-XXX (if applicable)
-
-Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
-```
-
-### Commit Types
-
-| Type | Use For |
-|------|---------|
-| `Fix` | Bug fixes |
-| `Add` | New features |
-| `Update` | Enhancements to existing features |
-| `Refactor` | Code restructuring (no behavior change) |
-| `WIP` | Work in progress (incomplete) |
-| `Docs` | Documentation only |
-| `Test` | Test additions/changes |
-| `Chore` | Build system, dependencies, cleanup |
-
-### Examples
+For protocol/ARQ/rate-ladder changes, also run:
 
 ```bash
-# Bug fix
-git commit -m "Fix MC-DPSK CFO correction for training samples
-
-- CFO was not applied to training/reference samples
-- Added applyCFO() wrapper that preserves cfo_hz_ after correction
-- Chirp CFO is now trusted over training CFO
-
-Fixes: BUG-001
-
-Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
-
-# New feature
-git commit -m "Add OFDM_CHIRP support to test_iwaveform
-
-- Implemented decodeOFDMChirpFrame() using IWaveform directly
-- Fixed process() to loop and retrieve ALL soft bits
-- Added --waveform ofdm_chirp option
-
-Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
-
-# Work in progress
-git commit -m "WIP: Debug RxPipeline chirp detection issues
-
-- Added detailed logging
-- Issue: chirp detected but position incorrect
-- TODO: Compare with test_iwaveform path"
-
-# Documentation
-git commit -m "Docs: Add comprehensive system documentation
-
-- GUI_ARCHITECTURE.md
-- AUDIO_SYSTEM.md
-- BUILD_SYSTEM.md
-- CONFIGURATION_SYSTEM.md
-- ADDING_NEW_WAVEFORM.md"
+scripts/run_alpha_gate.sh --quick
 ```
 
----
+## Daily Commands
 
-## Pre-Commit Checklist
-
-Before committing (especially non-WIP commits):
-
-- [ ] Code compiles without errors
-- [ ] `./tests/regression_matrix.sh` passes (for significant changes)
-- [ ] If fixing a bug: entry added to `docs/CHANGELOG.md`
-- [ ] If finding a bug: entry added to `docs/KNOWN_BUGS.md`
-- [ ] If completing refactor task: `docs/REFACTOR_PROGRESS.md` updated
-
----
-
-## Push Strategy
-
-### When to Push
-
-| Situation | Push? |
-|-----------|-------|
-| Completed feature/bugfix | Yes |
-| End of work day | Yes (backup) |
-| WIP commits only | Optional |
-| Tests failing | No (fix first) |
-
-### Before Pushing
-
+### Inspect
 ```bash
-# Check status
 git status
-git log --oneline origin/main..HEAD  # See unpushed commits
+git log --oneline -n 10
+```
 
-# Run regression tests
-./tests/regression_matrix.sh
+### Commit
+```bash
+git add <files>
+git commit -m "Update <what changed>"
+```
 
-# Push if tests pass
+### Push
+```bash
 git push
 ```
 
----
+## Safe Recovery
 
-## Handling WIP Commits
-
-### Option 1: Keep WIP Commits (Recommended for Research)
-
-WIP commits provide history of thought process. Keep them as-is.
-
-### Option 2: Squash Before Push
-
-If you want clean history:
+Unstage files:
 
 ```bash
-# Squash last 3 commits into one
-git rebase -i HEAD~3
-# Change 'pick' to 'squash' for commits to combine
+git restore --staged <file>
 ```
 
-### Option 3: Amend Last Commit
-
-For small additions to most recent commit:
+Discard local edits in one file:
 
 ```bash
-git add .
-git commit --amend --no-edit
+git restore <file>
 ```
 
----
-
-## Tagging Releases
-
-When reaching a milestone:
+Revert an already pushed commit:
 
 ```bash
-# Create annotated tag
-git tag -a v1.0.0 -m "First stable release
-
-- MC-DPSK verified on fading channels
-- OFDM_CHIRP CFO correction working
-- Full protocol v2 implementation"
-
-# Push tags
-git push --tags
-```
-
-### Version Scheme
-
-`vMAJOR.MINOR.PATCH`
-
-- **MAJOR**: Breaking changes, major milestones
-- **MINOR**: New features, significant improvements
-- **PATCH**: Bug fixes, minor improvements
-
----
-
-## Undoing Mistakes
-
-### Undo Last Commit (keep changes)
-
-```bash
-git reset --soft HEAD~1
-```
-
-### Undo Last Commit (discard changes)
-
-```bash
-git reset --hard HEAD~1
-```
-
-### Revert a Pushed Commit
-
-```bash
-git revert <commit-hash>
+git revert <commit>
 git push
 ```
 
-### Discard Uncommitted Changes
+## Releases and Tags
+
+CI release workflow triggers on tags matching `v*`.
+
+Recommended alpha tagging:
 
 ```bash
-git checkout -- <file>        # Single file
-git checkout -- .             # All files
+git tag -a vX.Y.Z-alpha -m "vX.Y.Z-alpha"
+git push origin vX.Y.Z-alpha
 ```
 
----
-
-## Common Workflows
-
-### Starting New Work Session
+Optional compatibility alias tag:
 
 ```bash
-git status                    # Check state
-git log --oneline -5          # Review recent commits
-cat docs/REFACTOR_PROGRESS.md # Check what's next
+git tag -a X.Y.Z-alpha -m "X.Y.Z-alpha"
+git push origin X.Y.Z-alpha
 ```
 
-### Ending Work Session
+## Documentation Hygiene
+- Keep `docs/KNOWN_BUGS.md` short and current.
+- Put detailed fixed history in `docs/CHANGELOG.md`.
+- Remove stale procedures instead of letting them drift.
 
-```bash
-git status                    # Check uncommitted changes
-git add -A                    # Stage all changes
-git commit -m "WIP: <description of current state>"
-git push                      # Backup to remote
-```
-
-### After Fixing a Bug
-
-```bash
-# 1. Verify fix works
-./tests/regression_matrix.sh
-
-# 2. Update documentation
-# Edit docs/CHANGELOG.md - add entry
-# Edit docs/KNOWN_BUGS.md - move to Fixed section
-
-# 3. Commit
-git add -A
-git commit -m "Fix <description>
-
-<details>
-
-Fixes: BUG-XXX
-
-Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
-
-# 4. Push
-git push
-```
-
----
-
-## Summary
-
-| Aspect | Strategy |
-|--------|----------|
-| Branching | Trunk-based (main), feature branches optional |
-| Commits | Early and often, WIP allowed |
-| Messages | Type prefix, body explains why |
-| Testing | Run regression before non-WIP commits |
-| Pushing | When stable, at least daily for backup |
-| Tagging | At milestones (vX.Y.Z) |

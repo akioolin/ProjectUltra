@@ -1,6 +1,6 @@
 # Audio I/O System
 
-**Purpose:** Document audio handling for debugging and future development.
+**Purpose:** Current audio path and buffering behavior for debugging and maintenance.
 
 ---
 
@@ -8,221 +8,119 @@
 
 | Parameter | Value |
 |-----------|-------|
-| Sample Rate | 48,000 Hz (fixed) |
+| Sample Rate | 48,000 Hz |
 | Channels | 1 (mono) |
-| Format | 32-bit float |
-| Buffer Size | 1024 samples (~21ms) |
+| Format | 32-bit float (`AUDIO_F32SYS`) |
+| SDL Callback Buffer | 1024 samples (~21 ms) |
 | Backend | SDL2 |
 
 ---
 
-## AudioEngine Class
+## Core Components
 
-**Location:** `src/gui/audio_engine.hpp/cpp`
-
-### Key Methods
-
-| Method | Purpose |
-|--------|---------|
-| `getOutputDevices()` | List available speakers/outputs |
-| `getInputDevices()` | List available microphones/inputs |
-| `openOutput(device)` | Open output device |
-| `openInput(device)` | Open input device |
-| `startPlayback()` | Begin TX streaming |
-| `startCapture()` | Begin RX capture |
-| `queueTxSamples(samples)` | Add samples to TX queue |
-| `setRxCallback(fn)` | Register RX handler |
-| `setLoopbackEnabled(bool)` | Enable TX→RX simulation |
-| `setLoopbackSNR(db)` | Set simulation SNR |
-| `setInputGain(gain)` | Set RX gain (0.0-2.0) |
+| Component | Location | Responsibility |
+|-----------|----------|----------------|
+| `AudioEngine` | `src/gui/audio_engine.hpp/cpp` | Device I/O, callbacks, TX/RX sample queues |
+| `ModemEngine` | `src/gui/modem/modem_engine.*` | TX encode/modulate and RX routing |
+| `StreamingDecoder` | `src/gui/modem/streaming_decoder.*` | Primary RX decode pipeline (sync + demod + FEC) |
 
 ---
 
 ## TX Path
 
-```
-Protocol Engine
-    ↓ TxDataCallback
-ModemEngine::transmit(data)
-    ↓ LDPC encode → modulate → filter → normalize (0.8 peak)
-    ↓
-AudioEngine::queueTxSamples(samples)
-    ↓ mutex-protected queue
-    ↓
-[SDL Audio Thread]
-AudioEngine::outputCallback()
-    ↓ pop from queue, fill buffer
-    ↓
-Output Device (speaker/HF rig)
+```text
+ProtocolEngine
+  -> TxDataCallback / TransmitBurstCallback
+  -> ModemEngine::transmit(...)
+  -> AudioEngine::queueTxSamples(...)
+  -> AudioEngine::outputCallback() [SDL output thread]
+  -> speaker / rig audio output
 ```
 
-### TX Buffer
-- Type: `std::queue<float>` (FIFO)
-- Mutex-protected
-- No size limit (assumes producer matches 48kHz consumer)
-- Outputs silence (0.0f) when empty
+### TX queue behavior
+
+- Backing type: `std::queue<float>`
+- Access: mutex protected (`tx_mutex_`)
+- Empty queue outputs silence
+- No hard cap on TX queue length
 
 ---
 
 ## RX Path
 
-```
-Input Device (microphone/HF rig)
-    ↓
-[SDL Audio Thread]
-AudioEngine::inputCallback()
-    ↓ DC blocking filter: y[n] = x[n] - x[n-1] + 0.995*y[n-1]
-    ↓ Apply input gain
-    ↓ Update RMS metering
-    ↓
-User RX Callback (if set)
-    ↓
-ModemEngine::feedAudio(samples)
-    ↓
-if connected:
-    RxPipeline::feedAudio() → streaming decode
-else:
-    rx_sample_buffer_ → acquisition thread
+```text
+mic / rig audio input
+  -> AudioEngine::inputCallback() [SDL input thread]
+     - DC blocker: y[n] = x[n] - x[n-1] + 0.995*y[n-1]
+     - input gain
+     - RMS meter update
+     - append to AudioEngine rx_buffer_
+     - invoke rx_callback_ (unless muted)
+  -> App::startRadioRx callback
+  -> ModemEngine::feedAudio(...)
+  -> StreamingDecoder::feedAudio(...)
+  -> decode thread (or synchronous simulator loop) calls processBuffer()
+  -> decoded frame callback into ProtocolEngine
 ```
 
-### RX Buffer Management
+---
 
-| Buffer | Location | Max Size | Purpose |
-|--------|----------|----------|---------|
-| AudioEngine RX | audio_engine.cpp | 96,000 (2s) | Loopback mode |
-| ModemEngine RX | modem_engine.hpp | 960,000 (20s) | Disconnected acquisition |
-| RxPipeline | rx_pipeline.hpp | 960,000 (20s) | Connected streaming |
+## Buffering And Overflow
 
-**Overflow handling:** Oldest samples dropped (no error notification)
+| Buffer | Limit | Overflow policy |
+|--------|-------|-----------------|
+| AudioEngine RX buffer (`rx_buffer_`) | 96,000 samples (~2 s) | Drop oldest samples |
+| StreamingDecoder circular buffer | 480,000 samples (~10 s) | Advance read/search position and count overflow event |
+
+Notes:
+- `ModemEngine` keeps `MAX_PENDING_SAMPLES` as a guard constant, but RX decode is handled by `StreamingDecoder`.
+- Loopback TX->RX also writes through `AudioEngine::rx_buffer_` with the same 96,000-sample cap.
 
 ---
 
 ## Loopback Simulation
 
-For testing without hardware:
+Used for local testing without radio hardware.
 
 ```cpp
 audio_.setLoopbackEnabled(true);
-audio_.setLoopbackSNR(15.0f);  // 15 dB SNR
+audio_.setLoopbackSNR(15.0f);
 ```
 
-**How it works:**
-1. TX samples queued via `queueTxSamples()`
-2. AWGN noise added based on SNR setting
-3. Result injected directly into RX buffer
-4. Retrieved by next `feedAudio()` call
-
-**Noise generation:**
-```cpp
-SNR_linear = 10^(SNR_dB / 10)
-noise_stddev = sqrt(signal_power / SNR_linear)
-// Box-Muller transform for Gaussian noise
-```
-
-**Note:** Loopback doesn't use RX callback (avoids recursion).
-
----
-
-## DC Blocking Filter
-
-Applied in RX path to remove DC offset:
-
-```cpp
-y[n] = x[n] - x[n-1] + 0.995 * y[n-1]
-```
-
-- High-pass filter with ~15 Hz cutoff at 48 kHz
-- Prevents DC offset from causing false sync detection
-- Alpha coefficient (0.995) optimized for modem bandwidth
+Behavior:
+1. TX samples are queued normally.
+2. A Box-Muller AWGN stage is applied in `AudioEngine::addChannelNoise()`.
+3. Noisy samples are appended to `rx_buffer_`.
+4. Main loop / callback path consumes those samples on the next RX cycle.
 
 ---
 
 ## Threading Model
 
-```
-MAIN THREAD:
-├─ Device enumeration
-├─ Open/close devices
-└─ Configuration changes
+| Thread | Work |
+|--------|------|
+| Main/UI thread | Device open/close, settings, protocol ticking |
+| SDL output callback thread | Drain TX queue to audio device |
+| SDL input callback thread | Capture audio, filtering, callback dispatch |
+| Modem RX decode thread | `StreamingDecoder::processBuffer()` in async mode |
+| Simulator thread (`-sim`) | Optional; drives both modems in synchronous decode mode |
 
-AUDIO OUTPUT THREAD (SDL):
-├─ outputCallback() called ~47 times/sec
-├─ Pops from TX queue
-└─ Must complete in <21ms
-
-AUDIO INPUT THREAD (SDL):
-├─ inputCallback() called ~47 times/sec
-├─ Applies DC filter + gain
-├─ Calls user RX callback
-└─ Must complete in <21ms
-
-MODEM THREADS:
-├─ Acquisition: Searches for preambles
-└─ Decode: LDPC decoding
-```
-
-**Synchronization:**
-- TX/RX queues: mutex-protected
-- Status flags: `std::atomic<bool>`
-- Level meters: `std::atomic<float>`
+Synchronization:
+- TX/RX sample containers use mutexes.
+- Runtime flags and meters use atomics.
 
 ---
 
-## Level Metering
+## Latency Notes
 
-Both TX and RX have RMS level indicators:
+| Stage | Typical latency |
+|-------|-----------------|
+| SDL input/output callback cadence | ~21 ms |
+| DC filter + gain work | <1 ms per callback |
+| Sync + frame accumulation | frame dependent (hundreds of ms to a few seconds) |
+| LDPC decode | tens to hundreds of ms |
 
-```cpp
-float output_level_;  // TX RMS (0.0-1.0)
-float input_level_;   // RX RMS (0.0-1.0)
-```
-
-Calculated per callback buffer, displayed in GUI.
-
----
-
-## Configuration Options
-
-| Setting | Type | Default | Purpose |
-|---------|------|---------|---------|
-| Input device | string | "Default" | Microphone selection |
-| Output device | string | "Default" | Speaker selection |
-| Input gain | float | 1.0 | RX level adjustment (0.0-2.0) |
-| TX drive | float | 0.8 | TX output level |
-| TX delay | int | 50ms | PTT → TX delay |
-| TX tail | int | 50ms | TX → PTT release delay |
-
----
-
-## Latency Characteristics
-
-| Stage | Latency |
-|-------|---------|
-| Audio capture | ~21ms (buffer) |
-| DC filter | <1ms |
-| ModemEngine processing | 100-500ms |
-| RxPipeline accumulation | 1-5s (frame dependent) |
-| LDPC decode | 100-500ms |
-| **Total RX** | **1-6 seconds** |
-| Audio output queue | ~21-100ms |
-| ModemEngine TX | 100-500ms |
-| **Total TX** | **150-600ms** |
-
----
-
-## Error Handling
-
-**Device open failure:**
-- Returns false, logs via `SDL_GetError()`
-- Caller should fallback to default device
-
-**Buffer overflow:**
-- Silent drop of oldest samples
-- No error callback (by design)
-
-**Device disconnection:**
-- SDL may report errors in callbacks
-- Should re-enumerate and reopen
+Overall RX latency is dominated by waveform/frame duration and channel conditions, not SDL callback overhead.
 
 ---
 
@@ -230,24 +128,8 @@ Calculated per callback buffer, displayed in GUI.
 
 | File | Purpose |
 |------|---------|
-| `src/gui/audio_engine.hpp` | Interface (130 lines) |
-| `src/gui/audio_engine.cpp` | Implementation (344 lines) |
-| `src/gui/modem/modem_rx.cpp` | feedAudio() handling |
-| `src/gui/modem/rx_pipeline.hpp` | Streaming decode buffer |
-
----
-
-## Adding Audio Features
-
-1. **New audio effect (e.g., AGC):**
-   - Add to `inputCallback()` after DC filter
-   - Keep processing time <5ms
-
-2. **New device type:**
-   - Extend enumeration in `getInputDevices()`/`getOutputDevices()`
-   - May need SDL2 plugin or alternative backend
-
-3. **Sample rate change:**
-   - Currently hardcoded to 48kHz
-   - Would require changes in: AudioEngine, ModemEngine, all timing calculations
-   - Not recommended (48kHz is standard for HF modems)
+| `src/gui/audio_engine.hpp` | AudioEngine API |
+| `src/gui/audio_engine.cpp` | SDL callbacks and sample queue logic |
+| `src/gui/modem/modem_rx.cpp` | RX thread and `feedAudio` routing |
+| `src/gui/modem/streaming_decoder.hpp` | Streaming decode interfaces and limits |
+| `src/gui/modem/streaming_decoder.cpp` | Sync search and decode state machine |

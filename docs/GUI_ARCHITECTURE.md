@@ -1,248 +1,161 @@
 # GUI Architecture
 
-**Purpose:** Document the GUI structure for future development and maintenance.
+**Purpose:** Current GUI structure and runtime flow.
 
 ---
 
 ## Overview
 
-ProjectUltra uses **Dear ImGui + SDL2 + OpenGL 2.1** for cross-platform GUI.
+ProjectUltra GUI stack:
 
-| Component | Purpose |
-|-----------|---------|
-| Dear ImGui | Immediate-mode UI framework |
-| SDL2 | Platform abstraction (audio, video, input) |
-| OpenGL 2.1 | Rendering backend (chosen for hardware compatibility) |
+| Layer | Technology |
+|-------|------------|
+| UI framework | Dear ImGui |
+| Window/input/audio platform | SDL2 |
+| Renderer | OpenGL 2.1 backend (`imgui_impl_opengl2`) |
 
-**Entry Point:** `src/gui/main_gui.cpp`
-**Window Size:** 1024x600 with dark theme
-
----
-
-## Core Classes
-
-### App (`src/gui/app.hpp/cpp` - 1,473 lines)
-
-The main application class that coordinates all subsystems:
-
-```cpp
-class App {
-    // Core components
-    ModemEngine modem_;              // Our modem
-    ProtocolEngine protocol_;        // Our protocol
-    AudioEngine audio_;              // Audio I/O
-
-    // Virtual station (simulation mode)
-    ModemEngine virtual_modem_;      // Simulated remote station
-    ProtocolEngine virtual_protocol_;
-    std::thread sim_thread_;
-
-    // UI state
-    AppSettings settings_;           // Persisted settings
-    std::vector<RxLogEntry> rx_log_; // Message history (max 20)
-
-    // Widgets
-    WaterfallWidget waterfall_;
-    ConstellationWidget constellation_;
-};
-```
-
-### ModemEngine (`src/gui/modem/modem_engine.hpp`)
-
-All TX/RX audio processing:
-
-| Method | Purpose |
-|--------|---------|
-| `transmit(data)` | Encode + modulate → audio samples |
-| `feedAudio(samples)` | RX audio → decode pipeline |
-| `setWaveformMode(mode)` | Switch between OFDM/DPSK/etc |
-| `setDataMode(mod, rate)` | Change modulation + code rate |
-
-### AudioEngine (`src/gui/audio_engine.hpp`)
-
-SDL2-based audio I/O:
-
-| Method | Purpose |
-|--------|---------|
-| `queueTxSamples(samples)` | Queue for TX playback |
-| `setRxCallback(fn)` | Register RX sample handler |
-| `setLoopbackEnabled(bool)` | Enable TX→RX simulation |
-| `setLoopbackSNR(db)` | Set simulation SNR |
+Entry point: `src/gui/main_gui.cpp`
 
 ---
 
-## Widget System
+## Main Components
 
-All widgets are stateless rendering functions (ImGui pattern):
-
-### ConstellationWidget (`widgets/constellation.hpp`)
-- Displays received symbols in I/Q plane
-- Overlays ideal constellation grid
-- Supports: DBPSK, DQPSK, QPSK, D8PSK, 16QAM, 32QAM
-
-### WaterfallWidget (`widgets/waterfall.hpp`)
-- Real-time frequency-domain display
-- FFT: 2048-point
-- History: 200 lines
-- Range: 0-3000 Hz, -60 to 0 dB
-- OpenGL texture rendering
-
-### SettingsWindow (`widgets/settings.hpp`)
-- Modal window with tabs: Station | Radio | Audio | Expert
-- Persists to INI file
-- Callbacks for all setting changes
-
-### StatusWidget / ControlsWidget
-- Channel status panel
-- SNR bar with quality indicator
-- Waveform and modulation display
+| Component | Location | Role |
+|-----------|----------|------|
+| `App` | `src/gui/app.hpp/cpp` | Top-level coordinator: UI, modem, protocol, audio, simulator |
+| `ModemEngine` | `src/gui/modem/modem_engine.*` | TX generation + RX decode orchestration |
+| `ProtocolEngine` | `src/protocol/protocol_engine.*` | Link/session/file-transfer state machine |
+| `AudioEngine` | `src/gui/audio_engine.*` | SDL audio devices, callbacks, buffering |
+| Widgets | `src/gui/widgets/*` | Rendering controls/status/plots/settings |
 
 ---
 
-## Virtual Station Simulator
+## High-Level Data Flow
 
-Activated by: `./ultra_gui -sim`
-
-**Architecture:**
+```text
+User action (Send / Connect / File TX)
+  -> App callback
+  -> ProtocolEngine creates frame(s)
+  -> ModemEngine::transmit(...)
+  -> AudioEngine::queueTxSamples(...)
+  -> SDL output callback -> radio audio
 ```
-Our TX → Queue → [Channel Noise] → Virtual Modem RX → Virtual Protocol
-                                                              ↓
-Our RX ← [Channel Noise] ← Queue ← Virtual TX ← Virtual Response
+
+```text
+Incoming audio (mic / rig)
+  -> SDL input callback
+  -> App RX callback
+  -> ModemEngine::feedAudio(...)
+  -> StreamingDecoder decode
+  -> ProtocolEngine::onRxData(...)
+  -> App updates UI/log/state
 ```
 
-**Data Flow:**
-- Two independent ModemEngine + ProtocolEngine instances
-- Simulator thread handles bidirectional streaming
-- AWGN noise injection based on SNR slider
-- Chunk-based processing (480 samples = 10ms)
+---
+
+## Callback Wiring
+
+### Protocol -> App
+- `setTxDataCallback`
+- `setTransmitBurstCallback`
+- `setConnectionChangedCallback`
+- `setMessageReceivedCallback`
+- `setModeNegotiatedCallback`
+- `setDataModeChangedCallback`
+- file transfer callbacks (`setFileProgressCallback`, `setFileReceivedCallback`, `setFileSentCallback`)
+
+### Modem -> App
+- `setRawDataCallback`
+- `setStatusCallback`
+- `setPingReceivedCallback`
+
+### Audio -> App
+- `setRxCallback` (feeds modem + waterfall)
+
+This keeps the GUI layer mostly orchestration logic with minimal direct coupling between protocol/audio internals.
 
 ---
 
 ## Threading Model
 
-```
-MAIN THREAD (ImGui):
-├─ 60 FPS render loop
-├─ Protocol ticking
-├─ Widget rendering
-└─ Settings persistence
+### Normal GUI mode
 
-AUDIO THREAD (SDL):
-├─ outputCallback: TX sample streaming
-└─ inputCallback: RX capture → modem_.feedAudio()
+| Thread | Work |
+|--------|------|
+| Main/UI thread | SDL events, ImGui render, protocol tick, widget callbacks |
+| SDL output callback thread | Play TX queue |
+| SDL input callback thread | Capture RX audio and fire RX callback |
+| Modem RX decode thread | `StreamingDecoder::processBuffer()` loop |
 
-ACQUISITION THREAD:
-├─ Searches for preambles
-└─ Queues DetectedFrame
+### Simulator mode (`-sim`)
 
-RX/DECODE THREAD:
-├─ LDPC decoding
-└─ Frame delivery via callbacks
+| Thread | Work |
+|--------|------|
+| Main/UI thread | Same UI responsibilities |
+| Simulator thread | Bidirectional sample streaming + channel effects + protocol ticking |
 
-SIMULATOR THREAD (if -sim):
-├─ Bidirectional streaming
-├─ Channel effects
-└─ Virtual protocol ticking
-```
+In simulator mode, both local and virtual modems are switched to **synchronous decode mode** and driven directly by the simulator loop.
 
 ---
 
-## UI Layout
+## Virtual Station Simulator
 
+Enabled with `./ultra_gui -sim`.
+
+Architecture:
+
+```text
+Local TX -> channel(A->B) -> virtual modem RX -> virtual protocol
+Virtual TX -> channel(B->A) -> local modem RX -> local protocol
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ ProjectUltra | Settings                                     │
-├─────────────────────────────────────────────────────────────┤
-│  ┌───────────────────────┬────────────────────────────────┐ │
-│  │   LEFT (32%)          │   RIGHT (68%)                  │ │
-│  │                       │                                │ │
-│  │ ┌───────────────────┐ │ ┌────────────────────────────┐ │ │
-│  │ │ Constellation     │ │ │ Simulator [Enable] [SNR]   │ │ │
-│  │ └───────────────────┘ │ ├────────────────────────────┤ │ │
-│  │                       │ │ [Callsign] [Remote] [Conn] │ │ │
-│  │ ┌───────────────────┐ │ ├────────────────────────────┤ │ │
-│  │ │ Channel Status    │ │ │ [Message Input] [Send]     │ │ │
-│  │ │ - Waveform        │ │ ├────────────────────────────┤ │ │
-│  │ │ - SNR bar         │ │ │ RX Log (20 lines)          │ │ │
-│  │ │ - Frame stats     │ │ │ [SYS] Connected...         │ │ │
-│  │ └───────────────────┘ │ │ [RX] Hello!                │ │ │
-│  │                       │ └────────────────────────────┘ │ │
-│  │ ┌───────────────────┐ │                                │ │
-│  │ │ Waterfall         │ │                                │ │
-│  │ │ (0-3000 Hz)       │ │                                │ │
-│  │ └───────────────────┘ │                                │ │
-│  └───────────────────────┴────────────────────────────────┘ │
-├─────────────────────────────────────────────────────────────┤
-│ Status: Mode=RX | SNR=15.3dB | TX=2 | RX=5 | 2.5kbps       │
-└─────────────────────────────────────────────────────────────┘
-```
+
+Key points:
+- Two independent modem/protocol stacks (local + virtual).
+- Channel effects include AWGN and optional Watterson fading profiles.
+- Streaming cadence uses 480-sample chunks (~10 ms at 48 kHz), matching realtime flow.
 
 ---
 
-## Callback Architecture
+## UI Structure
 
-All components use callbacks for loose coupling:
+Primary UI elements:
+- Constellation panel
+- Channel status/controls
+- Waterfall display
+- Message/file controls + RX log
+- Settings window (`Station`, `Radio`, `Audio`, `Expert`)
+- Bottom status line with mode, SNR, frame counters, PHY rate, and last goodput sample
 
-**ModemEngine → App:**
-- `setRawDataCallback()` - Decoded frame bytes
-- `setStatusCallback()` - Progress messages
-- `setPingReceivedCallback()` - PING detection
-
-**ProtocolEngine → App:**
-- `setTxDataCallback()` - Transmit frame
-- `setMessageReceivedCallback()` - Decoded message
-- `setConnectionChangedCallback()` - State change
-- `setModeNegotiatedCallback()` - Waveform switch
-
-**AudioEngine → App:**
-- `setRxCallback()` - Incoming audio samples
+Recent behavior relevant to operators:
+- `STOP TX` immediate control is available from UI.
+- Goodput in status reflects completed file transfer timing, not only PHY rate.
 
 ---
 
-## Connection State Machine
+## Connection State Handling
 
-```
-DISCONNECTED → PROBING → CONNECTING → CONNECTED → DISCONNECTING
-     ↑                                      ↓
-     └──────────────────────────────────────┘
+Protocol states:
+
+```text
+DISCONNECTED -> PROBING -> CONNECTING -> CONNECTED -> DISCONNECTING -> DISCONNECTED
 ```
 
-State transitions trigger:
-1. Modem waveform mode update
-2. RX log message
-3. UI status update
-4. Protocol frame transmission
+On state changes, `App` updates:
+- modem connected/disconnected mode
+- operator log lines
+- displayed link state
+- fallback waveform state after disconnect
 
 ---
 
 ## Key Files
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `src/gui/app.cpp` | 1,473 | Main application |
-| `src/gui/main_gui.cpp` | 144 | Entry point + event loop |
-| `src/gui/audio_engine.cpp` | 344 | Audio I/O |
-| `src/gui/modem/modem_engine.cpp` | 1,000+ | Modem control |
-| `src/gui/widgets/settings.cpp` | 600 | Settings dialog |
-| `src/gui/widgets/waterfall.cpp` | 300 | Waterfall display |
-| `src/gui/widgets/constellation.cpp` | 200 | Constellation display |
-
----
-
-## Adding New GUI Features
-
-1. **New Widget:**
-   - Create `src/gui/widgets/my_widget.hpp/cpp`
-   - Add to CMakeLists.txt
-   - Call from `App::render()`
-
-2. **New Setting:**
-   - Add field to `AppSettings` struct
-   - Add to `load()` and `save()` methods
-   - Add UI in `SettingsWindow::render()`
-   - Add callback if needed
-
-3. **New Status Display:**
-   - Add state variable to `App`
-   - Update in appropriate callback
-   - Render in `renderCompactChannelStatus()`
+| File | Purpose |
+|------|---------|
+| `src/gui/main_gui.cpp` | SDL/OpenGL/ImGui bootstrap and main loop |
+| `src/gui/app.cpp` | Core app orchestration and callback wiring |
+| `src/gui/app.hpp` | App state model |
+| `src/gui/audio_engine.cpp` | Audio device and callback implementation |
+| `src/gui/modem/modem_engine.cpp` | Modem setup, TX path, configuration |
+| `src/gui/modem/modem_rx.cpp` | RX thread/synchronous decode control |
+| `src/gui/widgets/settings.cpp` | Persisted settings UI |

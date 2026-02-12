@@ -1,774 +1,363 @@
-# ULTRA Protocol v2 Specification
-
-## Overview
-
-ULTRA (Universal Lightweight Transport for Radio Amateurs) Protocol v2 is designed for reliable data transfer over HF radio channels. It supports:
-
-- Short messages (text, position reports)
-- Large file transfers (images, documents up to 16MB)
-- Adaptive modulation based on channel conditions
-- Selective Repeat ARQ for reliable delivery
-- Efficient codeword utilization
-
-## Design Constraints
-
-### LDPC Codeword Capacity (R1/4)
-- k = 162 info bits = **20.25 bytes** per codeword
-- n = 648 coded bits = 81 bytes transmitted per codeword
-- **Key insight**: Headers should fit in 1 codeword (≤20 bytes) when possible
-
-### Data Rates (Approximate)
-| Code Rate | Info bits/codeword | Effective Rate* |
-|-----------|-------------------|-----------------|
-| R1/4      | 162 bits          | ~35 bytes/sec   |
-| R1/2      | 324 bits          | ~70 bytes/sec   |
-| R2/3      | 432 bits          | ~95 bytes/sec   |
-
-*At 30 bits/symbol, ~1125 bits/sec raw OFDM rate
-
----
-
-## Layer Architecture
-
-```
-┌─────────────────────────────────────────────────────┐
-│  Application Layer (File Transfer, Messaging)       │
-├─────────────────────────────────────────────────────┤
-│  Transport Layer (Segmentation, ARQ, Flow Control)  │
-├─────────────────────────────────────────────────────┤
-│  Link Layer (Framing, Addressing, CRC)              │
-├─────────────────────────────────────────────────────┤
-│  FEC Layer (LDPC Encoding/Decoding)                 │
-├─────────────────────────────────────────────────────┤
-│  Physical Layer (OFDM/DPSK/OTFS Modulation, Sync)   │
-└─────────────────────────────────────────────────────┘
-```
-
----
-
-## Physical Layer
-
-### Waveform Modes
-
-The protocol supports multiple waveforms optimized for different channel conditions:
-
-| Mode | Value | Use Case | Min SNR | Max Throughput |
-|------|-------|----------|---------|----------------|
-| OFDM | 0x00 | Data, high SNR channels | 17 dB | 7.2 kbps |
-| OTFS_EQ | 0x01 | Data, stable channels | 20 dB | 3.4 kbps |
-| OTFS_RAW | 0x02 | Data, Doppler channels | 20 dB | 3.4 kbps |
-| MFSK | 0x03 | Very low SNR (reserved) | -17 dB | 50 bps |
-| DPSK | 0x04 | Connection, low SNR | -8 dB | 250 bps |
-| AUTO | 0xFF | Let receiver decide | - | - |
-
-**Note:** CONNECT/CONNECT_ACK always use DPSK (robust for initial handshake).
-DISCONNECT and DATA use the negotiated waveform.
-
-### Common Parameters
-
-| Parameter | Value |
-|-----------|-------|
-| Sample Rate | 48,000 Hz |
-| Center Frequency | 1,500 Hz |
-| Audio Bandwidth | ~2.8 kHz (300-3100 Hz) |
-| LDPC Codeword | 648 bits (81 bytes encoded) |
-
-### DPSK (Single-Carrier Differential PSK)
-
-Used for connection establishment and low-SNR conditions.
-
-| Parameter | Value |
-|-----------|-------|
-| Modulation | DQPSK (4-phase differential) |
-| Symbol Rate | 125 baud |
-| Samples/Symbol | 384 |
-| Preamble | Barker-13 sequence (×32 repeats) |
-| Sync Threshold | -8 dB SNR |
-
-**Frame Structure:**
-```
-┌──────────────┬─────────────────────────────────────┐
-│   Preamble   │            LDPC Codewords           │
-│  (13×32×384  │  (648 bits each, DQPSK modulated)   │
-│   samples)   │                                     │
-└──────────────┴─────────────────────────────────────┘
-```
-
-### OFDM (Orthogonal Frequency Division Multiplexing)
-
-Used for high-throughput data transfer on good channels.
-
-| Parameter | Standard Mode | NVIS Mode |
-|-----------|---------------|-----------|
-| FFT Size | 512 | 1024 |
-| Cyclic Prefix | 64 samples | 128 samples |
-| Data Carriers | 30 | 59 |
-| Symbol Duration | 12 ms | 24 ms |
-| Preamble | Schmidl-Cox (STS+LTS) | Same |
-
-**Supported Modulations:**
-- DQPSK, D8PSK (differential - no pilots needed)
-- QPSK, 16QAM, 32QAM (coherent - requires pilots)
-
-**Frame Structure:**
-```
-┌─────────┬─────────┬────────────────────────────────┐
-│   STS   │   LTS   │         OFDM Symbols           │
-│ (sync)  │ (chan)  │   (data + optional pilots)     │
-└─────────┴─────────┴────────────────────────────────┘
-```
-
-### OTFS (Orthogonal Time Frequency Space)
-
-Delay-Doppler domain modulation for channels with time-frequency dispersion.
-
-| Parameter | Value |
-|-----------|-------|
-| Delay Bins (M) | 32 |
-| Doppler Bins (N) | 16 |
-| FFT Size | 512 |
-| Cyclic Prefix | 64 samples |
-| Symbols per Frame | 512 (M × N) |
-| Bits per Frame | 648 (1 LDPC codeword) |
-| Preamble | Zadoff-Chu sequence (×4 repeats) |
-
-**OTFS Modes:**
-- **OTFS_RAW**: No TF equalization, relies on DD-domain diversity
-- **OTFS_EQ**: TF equalization from preamble, better for stable channels
-
-**Frame Structure:**
-```
-┌──────────────┬────────────────────────────────────┐
-│   Preamble   │         OTFS Data Frame            │
-│  (4× ZC sym) │  (N OFDM symbols, M subcarriers)   │
-│  2304 samp   │        9216 samples                │
-└──────────────┴────────────────────────────────────┘
-```
-
-**Multi-Codeword Messages:**
-OTFS transmits 1 LDPC codeword per frame. Multi-codeword messages use multiple frames with 10ms gaps:
-```
-┌─────────┬─────────┬─────┬─────────┬─────────┬─────┬─────────┬─────────┐
-│ Lead-in │ Preamble│Data │   Gap   │ Preamble│Data │   Gap   │  Tail   │
-│  150ms  │  (CW0)  │     │  10ms   │  (CW1)  │     │  10ms   │         │
-└─────────┴─────────┴─────┴─────────┴─────────┴─────┴─────────┴─────────┘
-```
-
-### PING/PONG Probe
-
-Fast presence detection before full connection handshake.
-
-| Parameter | Value |
-|-----------|-------|
-| Duration | ~1 second |
-| Waveform | DPSK (no FEC) |
-| Preamble | Barker-13 (×32) |
-| Payload | 4 bytes: "ULTR" magic |
-| Min SNR | -8 dB |
-
-**Probe Flow:**
-```
-Station A                          Station B
-    │                                   │
-    │──── PING "ULTR" ─────────────────►│
-    │                                   │ (detected in ~50ms)
-    │◄─── PONG "ULTR" ──────────────────│
-    │                                   │
-    │    (proceed to CONNECT if needed) │
-```
-
-### Waveform & Code Rate Negotiation
-
-#### Connection Establishment (Always MC-DPSK R1/4)
-
-**CONNECT and CONNECT_ACK frames MUST use MC-DPSK with code rate R1/4.**
-
-This ensures reliable initial contact even in poor channel conditions. The robust
-baseline allows stations to establish a connection before switching to faster modes.
-
-```
-CONNECT     → MC-DPSK, R1/4 (robust baseline for initial contact)
-CONNECT_ACK → MC-DPSK, R1/4 (contains negotiated mode for subsequent frames)
-```
-
-#### After Negotiation (All Codewords Use Negotiated Rate)
-
-Once CONNECT_ACK is received, **ALL subsequent frames use the negotiated configuration**:
-- Waveform: As specified in CONNECT_ACK `negotiated_mode`
-- Modulation: As specified in CONNECT_ACK `initial_modulation`
-- Code Rate: As specified in CONNECT_ACK `initial_code_rate`
-
-**Important:** The negotiated code rate applies to ALL codewords in a frame,
-including CW0 (the header codeword). There is no separate rate for headers
-after connection is established.
-
-#### Negotiation Flow
-
-1. **CONNECT** always uses MC-DPSK R1/4 (reliable at low SNR)
-2. **CONNECT** frame includes:
-   - MODE_CAPS bitmap of supported waveforms
-   - Optional forced mode (or 0xFF for AUTO)
-   - Optional forced modulation/rate (or 0xFF for AUTO)
-3. Responder measures channel SNR and selects best configuration from:
-   - Intersection of both stations' capabilities
-   - Channel conditions (SNR, fading)
-4. **CONNECT_ACK** includes negotiated (waveform, modulation, rate)
-5. All subsequent frames use the negotiated configuration
-
-#### Mid-Session Mode Changes
-
-If channel conditions change, either station can send a **MODE_CHANGE** frame
-to request a new configuration. MODE_CHANGE uses the current negotiated mode
-(not MC-DPSK R1/4) since the connection is already established.
-
-**MODE_CAPS Bitmap:**
-```
-Bit 0 (0x01): OFDM_COX supported
-Bit 1 (0x02): OTFS_EQ supported
-Bit 2 (0x04): OTFS_RAW supported
-Bit 3 (0x08): MFSK supported (reserved)
-Bit 4 (0x10): MC-DPSK supported
-Bit 5 (0x20): OFDM_CHIRP supported
-Bits 6-7: Reserved
-
-ALL = 0x3F (all modes supported)
-```
-
----
-
-## Frame Format v2
-
-### Design Goals
-1. **Control frames**: Fit in 1 codeword (≤20 bytes) for efficiency
-2. **Data frames**: Variable length with clear codeword count signaling
-3. **Backward compatible**: Can coexist with v1 frames
-
-### Frame Types
-
-| Type | Value | Description | Size |
-|------|-------|-------------|------|
-| PROBE | 0x10 | Channel probe request | 1 CW (control) |
-| PROBE_ACK | 0x11 | Channel probe response | 1 CW (control) |
-| CONNECT | 0x12 | Connection request | 3 CW (full callsigns) |
-| CONNECT_ACK | 0x13 | Connection accepted | 3 CW (full callsigns) |
-| CONNECT_NAK | 0x14 | Connection rejected | 3 CW (full callsigns) |
-| DISCONNECT | 0x15 | End connection | 3 CW (full callsigns) |
-| KEEPALIVE | 0x16 | Maintain connection | 1 CW (control) |
-| MODE_CHANGE | 0x17 | Request modulation/rate change | 1 CW (control) |
-| ACK | 0x20 | Acknowledge data | 1 CW (control) |
-| NACK | 0x21 | Request retransmit (bitmap) | 1 CW (control) |
-| DATA | 0x30 | Data segment | Variable |
-| DATA_START | 0x31 | First segment (with metadata) | Variable |
-| DATA_CONT | 0x32 | Continuation segment | Variable |
-| DATA_END | 0x33 | Last segment (with checksum) | Variable |
-| BEACON | 0x40 | CQ broadcast | 1 CW (control) |
-
-**Frame Categories:**
-- **Control frames** (1 CW): Use 24-bit callsign hashes for efficiency
-- **Connect frames** (3 CW): Include full callsigns for station identification
-- **Data frames** (variable): Use 24-bit hashes, payload in CW1+
-
-### Control Frame Format (20 bytes - fits in 1 codeword)
-
-```
-┌────────┬──────┬───────┬───────┬──────────┬──────────┬─────────┬───────┐
-│ MAGIC  │ TYPE │ FLAGS │ SEQ   │ SRC_HASH │ DST_HASH │ PAYLOAD │ CRC16 │
-│  2B    │  1B  │  1B   │  2B   │    3B    │    3B    │   6B    │  2B   │
-└────────┴──────┴───────┴───────┴──────────┴──────────┴─────────┴───────┘
-Total: 20 bytes = 160 bits < 162 bits (fits in 1 R1/4 codeword)
-```
-
-**Fields:**
-- **MAGIC** (2 bytes): `0x554C` ("UL") - identifies ULTRA v2 frame
-- **TYPE** (1 byte): Frame type identifier
-- **FLAGS** (1 byte): Frame flags (see below)
-- **SEQ** (2 bytes): Sequence number (0-65535)
-- **SRC_HASH** (3 bytes): 24-bit hash of source callsign
-- **DST_HASH** (3 bytes): 24-bit hash of destination callsign (0xFFFFFF = broadcast)
-- **PAYLOAD** (6 bytes): Type-specific payload data
-- **CRC16** (2 bytes): CRC-16 CCITT over all preceding bytes
-
-#### MODE_CHANGE Payload (6 bytes)
-
-```
-┌───────────┬───────────┬───────────┬───────────┬──────────────────┐
-│    MOD    │   RATE    │    SNR    │  REASON   │    Reserved      │
-│    1B     │    1B     │    1B     │    1B     │       2B         │
-└───────────┴───────────┴───────────┴───────────┴──────────────────┘
-```
-
-- **MOD** (1 byte): New modulation (see Modulation enum)
-- **RATE** (1 byte): New code rate (0=R1/4, 1=R1/2, 2=R2/3, 3=R3/4, 4=R5/6)
-- **SNR** (1 byte): Current measured SNR (encoded: `value*4 - 10 = dB`, range -10 to +53.75 dB)
-- **REASON** (1 byte): Change reason:
-  - 0x00 = CHANNEL_IMPROVED (SNR increased)
-  - 0x01 = CHANNEL_DEGRADED (SNR decreased)
-  - 0x02 = USER_REQUEST (manual selection)
-  - 0x03 = INITIAL_SETUP (first negotiation)
-- **Reserved** (2 bytes): Set to 0
-
-### Connect Frame Format (41 bytes - 3 codewords)
-
-Used for: CONNECT, CONNECT_ACK, CONNECT_NAK, DISCONNECT
-
-These frames include **full callsigns** (up to 9 characters each) for proper station identification, which is required by amateur radio regulations at the start and end of contacts.
-
-```
-┌────────┬──────┬───────┬───────┬──────────┬──────────┬──────────┬─────┬───────┐
-│ MAGIC  │ TYPE │ FLAGS │ SEQ   │ SRC_HASH │ DST_HASH │ TOTAL_CW │ LEN │ HCRC  │
-│  2B    │  1B  │  1B   │  2B   │    3B    │    3B    │    1B    │ 2B  │  2B   │
-├────────┴──────┴───────┴───────┴──────────┴──────────┴──────────┴─────┴───────┤
-│                              PAYLOAD (22 bytes)                              │
-│  ┌─────────────┬─────────────┬──────────────┬────────────────┐               │
-│  │ SRC_CALL    │ DST_CALL    │ MODE_CAPS    │ NEGOTIATED     │               │
-│  │   10B       │   10B       │     1B       │     1B         │               │
-│  └─────────────┴─────────────┴──────────────┴────────────────┘               │
-├──────────────────────────────────────────────────────────────────────────────┤
-│                              FCRC (2 bytes)                                  │
-└──────────────────────────────────────────────────────────────────────────────┘
-Header: 17 bytes, Payload: 22 bytes, CRC: 2 bytes = 41 bytes total (3 codewords)
-```
-
-**Payload Fields:**
-- **SRC_CALL** (10 bytes): Full source callsign (null-terminated, max 9 chars)
-- **DST_CALL** (10 bytes): Full destination callsign (null-terminated, max 9 chars)
-- **MODE_CAPS** (1 byte): Supported waveform modes bitmap
-- **NEGOTIATED** (1 byte): Negotiated/preferred mode
-
-**Rationale for 3 Codewords:**
-- Full callsigns ensure proper identification per amateur radio regulations
-- Used at connection start (CONNECT) and end (DISCONNECT)
-- DATA frames use efficient 24-bit hashes since callsigns already exchanged
-- Overhead: Only +2 CW per session compared to hash-only DISCONNECT
-
-### Data Frame Format (Variable length)
-
-Data frames use a 17-byte header optimized for the codeword structure:
-
-```
-┌────────┬──────┬───────┬───────┬──────────┬──────────┬──────────┬─────┬───────┬──────┬───────┐
-│ MAGIC  │ TYPE │ FLAGS │ SEQ   │ SRC_HASH │ DST_HASH │ TOTAL_CW │ LEN │ HCRC  │ DATA │ FCRC  │
-│  2B    │  1B  │  1B   │  2B   │    3B    │    3B    │    1B    │ 2B  │  2B   │  N   │  2B   │
-└────────┴──────┴───────┴───────┴──────────┴──────────┴──────────┴─────┴───────┴──────┴───────┘
-Header: 17 bytes, Trailer: 2 bytes
-```
-
-**Fields:**
-- **MAGIC** (2 bytes): `0x554C` ("UL")
-- **TYPE** (1 byte): DATA (0x30), DATA_START (0x31), etc.
-- **FLAGS** (1 byte): Frame flags
-- **SEQ** (2 bytes): Sequence number
-- **SRC_HASH** (3 bytes): 24-bit source callsign hash
-- **DST_HASH** (3 bytes): 24-bit destination callsign hash
-- **TOTAL_CW** (1 byte): Number of codewords (1-255)
-- **LEN** (2 bytes): Payload length
-- **HCRC** (2 bytes): Header CRC (covers bytes 0-14)
-- **DATA** (N bytes): Payload data
-- **FCRC** (2 bytes): Frame CRC over entire frame
-
-### Flags Byte
-
-```
-Bit 7: ENCRYPTED    - Payload is encrypted (future)
-Bit 6: COMPRESSED   - Payload is compressed
-Bit 5: FINAL        - Final frame of transfer
-Bit 4: MORE_FRAG    - More fragments follow
-Bit 3-2: CODE_RATE  - 00=R1/4, 01=R1/2, 10=R2/3, 11=R3/4
-Bit 1: URGENT       - High priority
-Bit 0: VERSION      - 0=v1 compat, 1=v2
-```
-
----
+# ULTRA Protocol v2 (Implementation-Aligned Spec)
+
+Status: aligned with `main` as of 2026-02-12.
+
+## Scope
+
+This document describes how ULTRA v2 currently behaves in code, not historical intent.
+
+Primary sources:
+- `src/protocol/frame_v2.hpp`
+- `src/protocol/frame_v2.cpp`
+- `src/protocol/connection.hpp`
+- `src/protocol/connection.cpp`
+- `src/protocol/connection_handlers.cpp`
+- `src/protocol/selective_repeat_arq.hpp`
+- `src/protocol/selective_repeat_arq.cpp`
+- `src/protocol/waveform_selection.hpp`
+- `src/protocol/file_transfer.hpp`
+- `src/protocol/file_transfer.cpp`
+- `src/protocol/compression.hpp`
+- `src/protocol/compression.cpp`
+
+## Key Constants
+
+- v2 magic: `0x554C` (`"UL"`)
+- Ping/Pong raw marker: `"ULTR"` (4 bytes)
+- Control frame size: 20 bytes
+- Data frame header: 17 bytes
+- Data frame CRC trailer: 2 bytes
+- LDPC coded block: 648 bits (81 coded bytes)
+- Callsign sanitization length: 8 chars (`sanitizeCallsign`)
+- Connect payload callsign fields: 10 bytes each (null-terminated)
+
+## Waveform Modes and Capabilities
+
+`WaveformMode` values:
+- `0x00` `OFDM_COX`
+- `0x01` `OTFS_EQ`
+- `0x02` `OTFS_RAW`
+- `0x03` `MFSK`
+- `0x04` `MC_DPSK`
+- `0x05` `OFDM_CHIRP`
+- `0xFF` `AUTO`
+
+`ModeCapabilities` bitmap:
+- `0x01` `OFDM_COX`
+- `0x02` `OTFS_EQ`
+- `0x04` `OTFS_RAW`
+- `0x08` `MFSK`
+- `0x10` `MC_DPSK`
+- `0x20` `OFDM_CHIRP`
+- `0x3F` `ALL`
+
+## Frame Families
+
+There are 4 practical families on air.
+
+1. Raw Ping/Pong (no LDPC frame container)
+2. ControlFrame (20 bytes)
+3. ConnectFrame (serialized as Data-style frame, 44 bytes)
+4. DataFrame (variable serialized size)
+
+### Raw Ping/Pong
+
+- Bytes: `55 4C 54 52` (`ULTR`)
+- Used for quick presence probe before full CONNECT
+- Not wrapped in v2 frame format
+
+### ControlFrame (20 bytes)
+
+Layout:
+- `MAGIC(2) TYPE(1) FLAGS(1) SEQ(2) SRC_HASH(3) DST_HASH(3) PAYLOAD(6) CRC16(2)`
+
+Used by frame types where `v2::isControlFrame(type)` is true:
+- `PROBE`, `PROBE_ACK`, `KEEPALIVE`, `MODE_CHANGE`, `ACK`, `NACK`, `BEACON`
+
+### DataFrame (variable)
+
+Layout:
+- `MAGIC(2) TYPE(1) FLAGS(1) SEQ(2) SRC_HASH(3) DST_HASH(3) TOTAL_CW(1) LEN(2) HCRC(2) PAYLOAD(LEN) FCRC(2)`
+
+### ConnectFrame (44 bytes serialized)
+
+ConnectFrame uses DataFrame-style header + fixed payload:
+- Header: 17 bytes
+- Payload: 25 bytes
+- Frame CRC: 2 bytes
+- Total serialized bytes: 44
+
+Payload fields:
+- `SRC_CALL[10]`
+- `DST_CALL[10]`
+- `mode_capabilities[1]`
+- `negotiated_mode[1]`
+- `initial_modulation[1]`
+- `initial_code_rate[1]`
+- `measured_snr[1]`
+
+Used for:
+- `CONNECT`, `CONNECT_ACK`, `CONNECT_NAK`, `DISCONNECT`
+
+Special value:
+- `DISCONNECT_SEQ = 0xFFFF`
+
+## Frame Types (Current Status)
+
+| Type | Value | Family | Current Runtime Usage |
+|---|---:|---|---|
+| `PING` | `0x01` | Raw | Active |
+| `PONG` | `0x02` | Raw | Active |
+| `PROBE` | `0x10` | Control | Defined, currently ignored by Connection |
+| `PROBE_ACK` | `0x11` | Control | Defined, currently ignored by Connection |
+| `CONNECT` | `0x12` | Connect | Active |
+| `CONNECT_ACK` | `0x13` | Connect | Active |
+| `CONNECT_NAK` | `0x14` | Connect | Active |
+| `DISCONNECT` | `0x15` | Connect | Active |
+| `KEEPALIVE` | `0x16` | Control | Defined, not used in current flow |
+| `MODE_CHANGE` | `0x17` | Control | Active |
+| `ACK` | `0x20` | Control | Active |
+| `NACK` | `0x21` | Control | Active |
+| `DATA` | `0x30` | Data | Active |
+| `DATA_START` | `0x31` | Data | Defined, not emitted in current app flow |
+| `DATA_CONT` | `0x32` | Data | Defined, not emitted in current app flow |
+| `DATA_END` | `0x33` | Data | Defined, not emitted in current app flow |
+| `BEACON` | `0x40` | Control | Defined, not used in current flow |
+
+## Flags
+
+`v2::Flags` bit layout:
+- Bit 0: `VERSION_V2` (`0x01`)
+- Bit 1: `URGENT` (`0x02`)
+- Bit 2: `COMPRESSED` (`0x04`)
+- Bit 3: `ENCRYPTED` (`0x08`)
+- Bit 4: `MORE_FRAG` (`0x10`)
+- Bit 5: `FINAL` (`0x20`)
+- Bits 6-7: rate markers (`RATE_1_4`, `RATE_1_2`, `RATE_2_3`, `RATE_3_4`)
+
+Current practical notes:
+- `MORE_FRAG` is actively used for message/file chunk continuation.
+- File compression signaling uses `FileFlags::COMPRESSED` in file metadata payload, not DataFrame `Flags::COMPRESSED`.
+- `FINAL` and flag-based rate bits are defined but not a primary control signal in current transport flow.
+
+## Connection Lifecycle
+
+### Initiator path
+
+1. `connect(remote)` enters `PROBING` and sends raw `PING`.
+2. On `PONG`, enters `CONNECTING` and sends `CONNECT` ConnectFrame.
+3. On `CONNECT_ACK`, applies negotiated waveform + initial data mode and enters `CONNECTED`.
+
+### Responder path
+
+1. On valid `CONNECT` in `DISCONNECTED`, negotiates waveform/mode.
+2. Sends `CONNECT_ACK` carrying:
+- negotiated waveform
+- initial modulation
+- initial code rate
+- measured SNR
+3. Enters `CONNECTED` as responder.
+
+### Handshake confirmation behavior
+
+- Initiator: handshake is confirmed immediately on `CONNECT_ACK`.
+- Responder: waits for first valid post-ACK frame from initiator.
+- Responder fail-safe: if no post-ACK frame arrives within `2200 ms`, force handshake confirmation to avoid staying on handshake TX behavior forever.
+
+### Connect waveform fallback
+
+- Default connect waveform starts at `MC_DPSK`.
+- After 5 failed connect retries (`DPSK_ATTEMPTS`), connect waveform falls back to `MFSK`.
+
+## Negotiation and Mode Selection
+
+Negotiation inputs:
+- Local capabilities
+- Remote capabilities
+- Remote preference (or `AUTO`)
+- Local preference (or `AUTO`)
+- Measured SNR
+- Fading index
+- Optional forced modulation/code rate from initiator
+
+Selection logic source:
+- `recommendWaveformAndRate(...)`
+- `recommendDataMode(...)`
+- `selectOFDMCodeRate(...)`
+- `capInitialOFDMRate(...)`
+
+Current OFDM code-rate thresholds (`selectOFDMCodeRate`):
+- `R3/4`: `fading < 0.15` and `snr >= 20`
+- `R2/3`: `fading < 0.65` and `snr >= 20`
+- `R1/2`: `fading < 1.10` and `snr >= 15`
+- otherwise `R1/4`
+
+Current data modulation policy:
+- OFDM: DQPSK by default path
+- D8PSK in `recommendDataMode` is currently disabled (commented out)
+
+## Encoding/Decoding Strategy by Waveform
+
+### MC-DPSK path
+
+- Uses variable-CW LDPC framing (`encodeFrameWithLDPC`)
+- Decoder uses sequential MC-DPSK CW decode path
+- For non-20-byte frames, encoder patches `TOTAL_CW` + CRCs to match actual encoded CW count before TX
+
+Typical handshake observation:
+- 44-byte ConnectFrame over MC-DPSK R1/4 encodes to 3 CWs on air
+
+### OFDM path
+
+Two distinct paths are used.
+
+1. Control frames (`isControlFrame == true`)
+- Encoded as 1-CW control at hardened profile: `DQPSK + R1/4`
+- Receiver first tries OFDM control-profile decode before data-profile decode
+
+2. Non-control frames (data/connect)
+- Encoded through fixed 4-CW frame path with frame-level interleaving
+- Data payload capacity depends on code rate
+
+Fixed 4-CW payload capacities (`getFixedFramePayloadCapacity`):
+- `R1/4`: 61 bytes
+- `R1/2`: 141 bytes
+- `R2/3`: 197 bytes
+- `R3/4`: 221 bytes
+
+## ARQ Semantics (Selective Repeat)
+
+ULTRA connection currently uses `SelectiveRepeatARQ`.
+
+### ACK meaning
+
+ACKs are cumulative plus selective bitmap:
+- `ACK.seq` = cumulative base (`rx_base_seq - 1`)
+- `ACK.payload[2]` = positive SACK bitmap for up to 8 frames ahead
+
+Sender behavior:
+- Advance base cumulatively through `ACK.seq`
+- Mark additional received frames from bitmap bits
+- Detect base-hole patterns and trigger fast retransmit logic
+
+### NACK meaning
+
+- `NACK.seq` references sequence
+- In SR path, NACK currently triggers retransmit of that frame sequence
+- Per-codeword bitmap exists in payload format, but SR main path is frame-oriented
+
+### Runtime ARQ configuration by mode
+
+When entering `CONNECTED`:
+
+MC-DPSK:
+- window = 1
+- ack timeout = 18000 ms
+- sack delay = 2000 ms
+- ack repeat count = 1
+
+OFDM:
+- window = 4
+- max retries = 15
+- sack delay = 120 ms
+- ack repeat default = 2 (`220 ms` spacing)
+- ack repeat for D8PSK R1/2 = 3 (`250 ms` spacing)
+- base ack timeout computed by `computeOfdmAckTimeoutMs(...)`, clamped to `4500..14000 ms`
+- adaptive RTT estimator then refines timeout (`currentAckTimeoutMs()`)
+
+Additional reliability logic present:
+- stale ACK guard
+- far-future ACK guard
+- duplicate ACK dedup window
+- hole-based fast retransmit
+- hole-probe retransmit timer
+- ACK repeat queue coalescing and jitter
+
+## Disconnect Hardening
+
+### Initiator side
+
+- Sends `DISCONNECT` ConnectFrame with `seq = 0xFFFF`
+- Enters `DISCONNECTING`
+- Retransmits DISCONNECT every 5s, up to 3 retries
+- Times out on `disconnect_timeout_ms` if no valid disconnect ACK
+
+### ACK qualification during disconnect
+
+While in `DISCONNECTING`, only ACK with `seq == DISCONNECT_SEQ (0xFFFF)` is accepted as disconnect confirmation.
+
+This prevents stale data ACKs from being misinterpreted as disconnect ACK.
+
+### Responder side grace period
+
+On DISCONNECT reception:
+- Sends ACK immediately
+- Stays connected for 5s grace period
+- Re-sends disconnect ACK every 2s during grace
+- Drops to disconnected when grace expires
+
+## Fragmentation and Reassembly
+
+### Message fragmentation
+
+- OFDM fixed-frame mode fragments application messages beyond per-frame payload capacity
+- Intermediate fragments carry `MORE_FRAG`
+- Receiver reassembles buffered fragments; final fragment clears `MORE_FRAG`
+
+### File transfer payload protocol
+
+All file transfer uses `FrameType::DATA` and a payload type byte:
+- `0x01` `FILE_START`: flags, original size, CRC32, filename
+- `0x02` `FILE_DATA`: 32-bit offset + data chunk
+
+Sender:
+- Reads full file into memory
+- Rejects files larger than `UINT32_MAX`
+- Sends one metadata chunk then data chunks
+- For OFDM, chunk payload is capped to fixed-frame capacity
+
+Receiver:
+- Validates offsets to reject duplicate/overlap/gap conditions
+- Uses `MORE_FRAG` plus size rules for finalization
+- Verifies CRC32 before declaring success
+
+### Compression
+
+File transfer compression behavior:
+- Compression algorithm: Deflate via miniz
+- Compression considered when input size >= 32 bytes
+- `shouldCompress` uses quick sample ratio threshold `< 0.9`
+- Compression flag is carried in file metadata (`FileFlags::COMPRESSED`)
 
 ## Callsign Hashing
 
-To fit callsigns in 3 bytes while maintaining collision resistance:
+Routing hash is 24-bit DJB2-style hash (`hashCallsign`) over sanitized callsign.
 
-```c
-uint32_t hashCallsign(const char* call) {
-    uint32_t hash = 5381;
-    while (*call) {
-        hash = ((hash << 5) + hash) ^ toupper(*call++);
-    }
-    return hash & 0xFFFFFF;  // 24 bits
-}
-```
+Behavior notes:
+- Runtime callsign sanitization currently truncates to 8 chars.
+- ConnectFrame still carries explicit callsign strings for station identification.
 
-- 24 bits = 16.7 million unique hashes
-- Full callsign sent in CONNECT handshake for verification
-- Hash collision probability: ~0.006% for 1000 active stations
+## Fading Index and Adaptation Inputs
 
----
+Connection-level channel quality uses:
+- SNR (dB)
+- fading index (`freq_cv + temporal_cv` concept in waveform layer)
 
-## Codeword Strategy
+Operational threshold used by connection helper:
+- `isFading()` true when `fading_index > 0.65`
 
-### Self-Identifying Codewords
+## Defined But Not Fully Active
 
-Every codeword is **self-identifying** through its first bytes. This enables robust recovery when codewords are lost or arrive out of order.
-
-#### CW0 (Header Codeword) - 20 bytes
-```
-┌───────┬──────┬───────┬───────┬──────────┬──────────┬──────────┬─────┬───────┬──────────┐
-│ MAGIC │ TYPE │ FLAGS │ SEQ   │ SRC_HASH │ DST_HASH │ TOTAL_CW │ LEN │ HCRC  │ PAYLOAD  │
-│0x554C │  1B  │  1B   │  2B   │    3B    │    3B    │    1B    │ 2B  │  2B   │   3B     │
-└───────┴──────┴───────┴───────┴──────────┴──────────┴──────────┴─────┴───────┴──────────┘
-```
-
-- **MAGIC** (0x554C = "UL"): Identifies this as a header codeword
-- **TOTAL_CW**: Total codewords in frame (1-255)
-- **LEN**: Payload length for reassembly
-- **HCRC**: Header CRC (covers bytes 0-14)
-- **PAYLOAD**: First 3 bytes of payload data
-
-#### CW1+ (Data Codewords) - 20 bytes each
-```
-┌────────┬───────┬─────────────────────────────────────────────────┐
-│ MARKER │ INDEX │                  PAYLOAD                        │
-│  0xD5  │  1B   │                   18B                           │
-└────────┴───────┴─────────────────────────────────────────────────┘
-```
-
-- **MARKER** (0xD5): Identifies this as a data codeword
-- **INDEX**: Codeword position (1-254) within the frame
-- **PAYLOAD**: 18 bytes of frame data
-
-### Codeword Identification Logic
-
-```cpp
-if (cw[0] == 0x55 && cw[1] == 0x4C) {
-    // Header codeword (CW0) - parse full header
-} else if (cw[0] == 0xD5) {
-    // Data codeword (CW1+) - extract index from cw[1]
-} else {
-    // Unknown/corrupted - discard
-}
-```
-
-### Why Self-Identifying?
-
-**Problem**: If CW0 fails LDPC decode but CW1-3 succeed, the old design would lose the entire frame because data CWs had no identification.
-
-**Solution**: With marker + index, the receiver can:
-1. Buffer data CWs by their index while waiting for CW0
-2. Send NACK requesting CW0 retransmit
-3. When CW0 arrives, merge buffered CWs and reassemble
-4. Overhead: 2 bytes per data CW (10%) - acceptable tradeoff
-
-### Codeword Count Calculation
-
-For a data frame with payload of `P` bytes:
-```
-total_frame = 17 (header) + P (payload) + 2 (frame CRC) = 19 + P bytes
-
-CW0 carries: 20 bytes (header 17B + first 3B of remaining data)
-CW1+ each carry: 18 bytes of payload (due to 2B marker+index overhead)
-
-If total_frame <= 20: need 1 codeword
-Otherwise: need 1 + ceil((total_frame - 20) / 18) codewords
-```
-
-### Transmission Structure
-
-```
-┌─────────────────┬─────────────────┬─────────────────┬─────────────────┐
-│   Preamble      │      CW0        │      CW1        │      CWn        │
-│   (Sync)        │ [0x554C header] │ [0xD5 01 data]  │ [0xD5 nn data]  │
-│                 │   (81 bytes)    │   (81 bytes)    │   (81 bytes)    │
-└─────────────────┴─────────────────┴─────────────────┴─────────────────┘
-```
-
-### Frame Size Examples
-
-| Frame Type | Payload | Frame Size | Codewords (R1/4) |
-|------------|---------|------------|------------------|
-| Control (PROBE, ACK, NACK) | 6B | 20B | 1 |
-| Connect (CONNECT, DISCONNECT) | 22B | 41B | 3 |
-| Short text (20B) | 20B | 39B | 2 |
-| Medium text (50B) | 50B | 69B | 4 |
-| Long text (100B) | 100B | 119B | 7 |
-| Large DATA (256B) | 256B | 275B | 16 |
-
----
-
-## Segmentation and Reassembly
-
-### Maximum Segment Size (MSS)
-
-Default MSS = 256 bytes payload per DATA frame
-- With 14B header + 2B CRC = 272 bytes total
-- Needs 14 codewords at R1/4
-- ~32 seconds per segment
-
-### Large File Transfer Protocol
-
-**1. Transfer Initiation (DATA_START):**
-```
-Sender → Receiver:
-  DATA_START {
-    xfer_id: random 16-bit ID,
-    total_size: 4 bytes (up to 4GB),
-    filename: up to 200 bytes,
-    checksum: 4 bytes (CRC32 of complete file)
-  }
-```
-
-**2. Data Segments (DATA):**
-```
-Sender → Receiver:
-  DATA {
-    xfer_id: matches DATA_START,
-    seq: 0, 1, 2, ... (per-transfer sequence),
-    frag_offset: byte offset in file (3 bytes = up to 16MB),
-    payload: MSS bytes of data
-  }
-```
-
-**3. Transfer Completion (DATA_END):**
-```
-Sender → Receiver:
-  DATA_END {
-    xfer_id: matches DATA_START,
-    final_checksum: CRC32 of complete file
-  }
-```
-
-### Reassembly Buffer
-
-Receiver maintains per-transfer state:
-```c
-struct Transfer {
-    uint16_t xfer_id;
-    uint32_t total_size;
-    uint32_t expected_checksum;
-    uint8_t* buffer;           // Reassembly buffer
-    uint64_t received_bitmap;  // Track received segments
-    time_t last_activity;
-    char filename[201];
-};
-```
-
----
-
-## Per-Codeword Recovery
-
-### NACK Frame for Codeword Retransmit
-
-When one or more codewords fail LDPC decode, the receiver sends a NACK control frame:
-
-```
-NACK Payload (6 bytes in control frame):
-┌───────────────┬────────────────────────────────────────┐
-│ FRAME_SEQ (2B)│ CW_BITMAP (4B = 32 bits)               │
-└───────────────┴────────────────────────────────────────┘
-```
-
-- **FRAME_SEQ**: Sequence number of the frame with errors
-- **CW_BITMAP**: Bit i = 1 means codeword i failed (supports up to 32 CWs)
-
-### Recovery Flow
-
-```
-Sender                              Receiver
-  │                                    │
-  │──── CW0 (header) ─────────────────►│  ✓ LDPC OK
-  │──── CW1 (data) ───────────────────►│  ✓ LDPC OK
-  │──── CW2 (data) ────────X (noise)   │  ✗ LDPC FAIL
-  │──── CW3 (data) ───────────────────►│  ✓ LDPC OK
-  │                                    │
-  │◄─── NACK seq=N, bitmap=0x04 ───────│  (CW2 failed)
-  │                                    │
-  │──── CW2 (retransmit) ─────────────►│  ✓ LDPC OK
-  │                                    │
-  │◄─── ACK seq=N ─────────────────────│  (frame complete)
-```
-
-### Out-of-Order Codeword Handling
-
-Because CW1+ have marker + index, the receiver can handle out-of-order arrival:
-
-1. **CW2 arrives first**: Buffer with index=2
-2. **CW1 arrives second**: Buffer with index=1
-3. **CW0 arrives last**: Parse header, learn TOTAL_CW, merge buffered CWs
-4. **Reassemble**: All codewords present, frame complete
-
-This is especially useful when CW0 fails and must be retransmitted - the data CWs are already buffered.
-
----
-
-## ARQ (Automatic Repeat reQuest)
-
-### Selective Repeat Protocol
-
-**Window Size:** 32 segments (configurable)
-**Timeout:** RTT × 2 + channel delay (typically 10-30 seconds on HF)
-
-### ACK Frame Payload (6 bytes in control frame)
-
-```
-┌──────────────┬─────────────────────────────────────────┐
-│ BASE_SEQ (2B)│ BITMAP (4B = 32 bits)                   │
-└──────────────┴─────────────────────────────────────────┘
-```
-
-- **BASE_SEQ**: All segments up to and including this are ACKed
-- **BITMAP**: Bit i = segment (BASE_SEQ + 1 + i) received
-
-### Flow Control
-
-**Sliding Window:**
-1. Sender transmits up to WINDOW_SIZE segments
-2. Receiver sends SACK every N segments (default N=4)
-3. Sender retransmits only missing segments
-4. Window advances when BASE_SEQ advances
-
-**Example Flow:**
-```
-Sender                              Receiver
-  │                                    │
-  │──── DATA seq=0 ──────────────────►│
-  │──── DATA seq=1 ──────────────────►│
-  │──── DATA seq=2 ────────X (lost)   │
-  │──── DATA seq=3 ──────────────────►│
-  │                                    │
-  │◄─── SACK base=1, bitmap=0010 ─────│ (received 0,1,3, missing 2)
-  │                                    │
-  │──── DATA seq=2 (retransmit) ─────►│
-  │──── DATA seq=4 ──────────────────►│
-  │                                    │
-  │◄─── SACK base=4, bitmap=0000 ─────│ (all through 4 received)
-```
-
----
-
-## Connection Management
-
-### Connection Establishment (3-way handshake)
-
-```
-Initiator                           Responder
-    │                                   │
-    │──── PROBE ───────────────────────►│
-    │                                   │ (measure channel)
-    │◄─── PROBE_ACK (channel report) ───│
-    │                                   │
-    │──── CONNECT (full callsigns) ────►│
-    │                                   │
-    │◄─── CONNECT_ACK ─────────────────│
-    │                                   │
-    │         CONNECTION ESTABLISHED    │
-```
-
-### Keepalive
-
-- Send KEEPALIVE every 60 seconds of inactivity
-- Disconnect after 3 missed keepalives (3 minutes)
-
-### Disconnection
-
-DISCONNECT frames include **full callsigns** (same format as CONNECT) to ensure proper station identification at the end of the contact, as required by amateur radio regulations.
-
-```
-    │──── DISCONNECT (full callsigns) ─►│
-    │◄─── DISCONNECT (optional ack) ────│
-```
-
-The DISCONNECT frame is 3 codewords (41 bytes), containing both station callsigns for clear identification of who is ending the connection.
-
----
-
-## Complete Transfer Example
-
-**Sending a 50KB image:**
-
-```
-Total: 50,000 bytes
-MSS: 256 bytes
-Segments: ceil(50000/256) = 196 segments
-
-Timeline:
-  0:00  PROBE → PROBE_ACK            (~5 sec)
-  0:05  CONNECT → CONNECT_ACK        (~5 sec)
-  0:10  DATA_START (filename, size)  (~2 sec)
-  0:12  DATA seq=0..3                (~2 min)
-  2:12  SACK base=3
-  2:14  DATA seq=4..7                (~2 min)
-  ...
-  (continues with window-based flow control)
-  ...
- ~25:00 DATA_END (final checksum)    (~2 sec)
- 25:02  ACK (transfer complete)
-
-Total time: ~25-30 minutes for 50KB
-```
-
----
-
-## Error Handling
-
-### CRC Failures
-- Frame discarded silently
-- Sender will timeout and retransmit
-
-### Sequence Gaps
-- Request retransmit via SACK bitmap
-- Or send NAK for specific sequence
-
-### Checksum Mismatch (Transfer)
-- Receiver sends NAK with error code
-- Sender can retry entire transfer or specific segments
-
-### Connection Timeout
-- No ACK for 60 seconds: retransmit
-- No response for 3 minutes: connection dropped
-
----
-
-## Compression
-
-When FLAGS.COMPRESSED is set:
-
-- Payload is compressed with zlib (DEFLATE)
-- Minimum size to compress: 100 bytes
-- If compressed size >= original, send uncompressed
-
----
-
-## Future Extensions
-
-### Encryption (FLAGS.ENCRYPTED)
-- Key exchange in CONNECT handshake
-- AES-128-GCM for authenticated encryption
-- Per-frame nonce based on sequence number
-
-### Forward Error Correction Negotiation
-- Adaptive code rate based on channel quality
-- Signaled in PROBE_ACK and CONNECT
-
-### Multi-hop Routing
-- Digipeater support via relay flags
-- Path tracking in extended header
-
----
-
-## Implementation Notes
-
-### Callsign Verification
-Full callsigns are exchanged in CONNECT frame. The 24-bit hash is only used for frame routing efficiency. Receivers MUST verify full callsign matches on CONNECT.
-
-### Codeword Boundary Handling
-The LDPC decoder MUST accumulate ALL codewords for a frame before decoding, then extract exactly k info bits per codeword and concatenate at bit level (not byte level) to avoid boundary corruption.
-
-### Rate Adaptation
-Start with R1/4 (most robust). If PROBE_ACK indicates SNR > 10dB, can negotiate R1/2 or higher in CONNECT.
-
----
+The following protocol elements are defined in enums/constructors but not primary in current live flow:
+- `PROBE`, `PROBE_ACK`, `KEEPALIVE`, `BEACON`
+- `DATA_START`, `DATA_CONT`, `DATA_END`
+- DataFrame `Flags::FINAL`
+- DataFrame `Flags::COMPRESSED` generic path
+- Flag rate bits as primary transport control signal
 
 ## Version
 
-**v2.2 (2026-01-26)** - Clarified code rate negotiation rules:
-- CONNECT/CONNECT_ACK always use MC-DPSK R1/4 (robust baseline)
-- After negotiation, ALL codewords (including CW0) use negotiated rate
-
-**v2.1 (2026-01-24)** - Added Physical Layer section with OFDM/DPSK/OTFS specs, PING/PONG probe, waveform negotiation
-
-**v2 (2026-01-18)** - Initial v2 protocol specification
+- `v2.3 (2026-02-12)`: Spec rewritten to match current implementation behavior
+- `v2.2 (2026-01-26)`: older negotiation clarification (historical)
+- `v2.1 (2026-01-24)`: earlier PHY section expansion (historical)
+- `v2 (2026-01-18)`: initial v2 draft (historical)
