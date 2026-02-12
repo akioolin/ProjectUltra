@@ -2,7 +2,7 @@
 
 **High-performance HF modem for amateur radio**
 
-*Last updated: 2026-02-11*
+*Last updated: 2026-02-12*
 
 > **EXPERIMENTAL SOFTWARE - WORK IN PROGRESS**
 >
@@ -16,6 +16,16 @@ ProjectUltra is a software modem that achieves reliable, high-speed data transfe
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Status: Experimental](https://img.shields.io/badge/Status-Experimental-orange.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)]()
+
+---
+
+## Alpha Reality Snapshot (v0.2.4-alpha)
+
+- **Stable baseline**: MC-DPSK plus OFDM DQPSK (`R1/4` to `R2/3`) are the most reliable paths in current testing.
+- **Control path hardening landed**: DISCONNECT now uses a hardened 1-codeword control profile (`R1/4`) with `seq=0xFFFF`; recent 10-seed simulator check showed 10/10 pass and 0 disconnect timeouts.
+- **File transfer gate passed**: recent 2048-byte OFDM test (`SNR=20`, good fading, `R1/2`) passed 5/5 seeds with 0 retransmissions and 0 timeouts.
+- **Still experimental**: D8PSK and coherent high-order modes can show higher run-to-run variability on fading channels; keep these as opportunistic/expert modes for now.
+- **OTA status**: on-air testing is active, but this is still alpha software and not production-ready.
 
 ---
 
@@ -40,12 +50,12 @@ ProjectUltra is a software modem that achieves reliable, high-speed data transfe
 | 15+ dB | OFDM DQPSK R1/2 | 53 (6 pilots) | 2271 bps | 100% verified, good + moderate fading |
 | 20+ dB | OFDM DQPSK R2/3 | 53 (6 pilots) | 3028 bps | 100% verified, good fading |
 | 20+ dB | OFDM DQPSK R3/4 | 55 (4 pilots) | 3536 bps | 100% verified, AWGN only |
-| 20+ dB | OFDM D8PSK R1/2 | 53 (6 pilots) | 3407 bps | 100% AWGN, ~76% fading |
+| 20+ dB | OFDM D8PSK R1/2 | 53 (6 pilots) | 3407 bps | Works in strong channels; fading reliability still being hardened |
 
 **Coherent modes (stable channels only):**
 | SNR | Mode | Data carriers | Throughput | Notes |
 |-----|------|---------------|------------|-------|
-| 20+ dB | OFDM QPSK R1/2 | 47 (12 pilots) | 2014 bps | Fading avg 78% frame success |
+| 20+ dB | OFDM QPSK R1/2 | 47 (12 pilots) | 2014 bps | Coherent path, sensitive to phase/fading |
 | 25+ dB | OFDM 16QAM R3/4 | 44 (15 pilots) | 5657 bps | Stable paths (NVIS, ground wave) |
 | 30+ dB | OFDM 32QAM R3/4 | 44 (15 pilots) | **7071 bps** | Maximum throughput |
 
@@ -68,7 +78,7 @@ SNR Range           Waveform              Why
 
 **MC-DPSK (Multi-Carrier DPSK)**: 8 carriers with differential encoding. Works reliably at 5+ dB SNR with ±50 Hz CFO tolerance. Uses dual chirp synchronization for robust timing recovery.
 
-**D8PSK (8-Phase DPSK)**: +50% throughput over DQPSK (3 bits/symbol vs 2). Auto-selected on AWGN channels at SNR >= 20 dB. For fading channels, a two-pass decoder uses the embedded DQPSK grid to estimate and correct phase drift before D8PSK decoding.
+**D8PSK (8-Phase DPSK)**: +50% throughput over DQPSK (3 bits/symbol vs 2). This mode is currently treated as opportunistic. It performs well in AWGN and some strong fading runs, but remains more variable than DQPSK in sustained HF fading. A two-pass decoder uses the embedded DQPSK grid to estimate and correct phase drift before D8PSK decoding.
 
 **Two OFDM sync modes**:
 - **OFDM-CHIRP**: Dual chirp preamble for robust sync, works at 10+ dB
@@ -224,6 +234,22 @@ Useful `cli_simulator` flags for CFO diagnostics:
 - `--save-signals [N]` writes raw TX/RX captures for up to `N` messages.
 - `--save-prefix <path>` and `--save-max-samples <N>` control capture naming and size.
 
+**Adaptive Advisory Smoke Test (log-only, no live MODE_CHANGE yet):**
+
+```bash
+./build/cli_simulator --adpt-test --snr 20 --channel good --waveform ofdm_chirp --seed 42
+```
+
+This test runs two message phases across two channel conditions and prints `[ADPT]` lines:
+- Peer-reported advisory from CONNECT/CONNECT_ACK metrics.
+- Local rolling advisory with hysteresis behavior:
+  - fast downgrade path
+  - delayed upgrade path (hold timer before promotion)
+
+Useful flags:
+- `--hop-snr <dB>` sets phase-B SNR (default: `12`)
+- `--hop-channel <awgn|good|moderate|poor|flutter>` sets phase-B channel
+
 **Manual Modulation Selection:**
 
 The `--mod` flag allows testing specific modulations:
@@ -295,36 +321,29 @@ power necessary. Be ready to QSY if causing interference.
 > **Note**: Core waveforms have been verified in loopback and acoustic testing.
 > On-air HF testing is in progress.
 
-### Verified Performance (2026-02-11)
+### What Is Solid Today
 
 | Waveform | SNR Range | CFO Tolerance | Status |
 |----------|-----------|---------------|--------|
-| **MC-DPSK** (8 carriers) | 5+ dB | ±50 Hz | 100% verified |
-| **OFDM-CHIRP** (59 carriers) | 10+ dB | ±50 Hz | 100% verified |
-| **OFDM-COX** (Schmidl-Cox sync) | 17+ dB | TBD | DATA phase working |
+| **MC-DPSK** (8 carriers) | 5+ dB | ±50 Hz | Stable baseline |
+| **OFDM-CHIRP** (59 carriers) | 10+ dB | ±50 Hz | Stable baseline |
+| **OFDM-COX** (Schmidl-Cox sync) | 17+ dB | TBD | Working, OTA characterization ongoing |
 
-**Acoustic Channel Test**: Successfully decoded CONNECT and DATA frames through
-speaker → air → microphone path at 70% volume (~22 dB SNR). This validates
-real-world audio chain compatibility.
+Recent simulator release checks (v0.2.4-alpha):
+- OFDM disconnect control path (`R1/2` data mode, `SNR=20`, good fading): 10/10 seeds pass, 0 disconnect timeouts.
+- OFDM file transfer (2048 bytes, `R1/2`, `SNR=20`, good fading): 5/5 seeds pass, 0 retransmissions, 0 timeouts.
 
-**Working:**
-- All LDPC code rates (R1/4 through R5/6)
-- OFDM with DQPSK/D8PSK modulation (differential)
-- OFDM with QPSK/16QAM/32QAM modulation (coherent, for NVIS/local)
-- **NVIS high-speed mode**: 1024 FFT, 59 carriers, up to ~7.1 kbps
-- Multi-carrier DPSK (8 carriers, robust sync)
-- Full protocol: PING/PONG/CONNECT/DATA/DISCONNECT
-- ARQ protocol with selective repeat and retransmission
-- Automatic waveform and code rate selection based on SNR and fading
-- GUI with waterfall and constellation
-- Expert mode for forcing waveform/modulation settings
-- CLI transmit/receive tools
-- HF channel simulator (ITU-R F.1487)
-- Continuous streaming RX decoder
+### Use With Caution (Experimental)
 
-**In Progress:**
-- On-air HF testing
-- File transfer optimization
+- D8PSK in fading: data decode can be strong, but end-to-end reliability remains more variable than DQPSK baseline.
+- Coherent modes (QPSK/16QAM/32QAM): suitable for stable high-SNR paths, not the default for difficult HF fading.
+- High-rate operation (`R2/3+`) still depends on channel quality and control-path stability.
+
+### Active Work
+
+- Control-path hardening under deep fades (ACK/SACK diversity and timeout tuning).
+- Advisory hysteresis is implemented and testable in simulator logs; next step is wiring controlled live `MODE_CHANGE` policy.
+- Continued OTA multi-station validation and log-driven fixes.
 
 ---
 
