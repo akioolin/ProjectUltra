@@ -17,6 +17,7 @@
 #include <string>
 #include <chrono>
 #include <ctime>
+#include <exception>
 #include <vector>
 #include <ultra/logging.hpp>
 
@@ -99,12 +100,48 @@ void closeStartupLog() {
 void showFatalStartupMessage(const std::string& msg) {
     MessageBoxA(nullptr, msg.c_str(), "ProjectUltra Startup Error", MB_ICONERROR | MB_OK);
 }
+
+LONG WINAPI startupUnhandledExceptionFilter(EXCEPTION_POINTERS* ex) {
+    unsigned long code = 0;
+    void* addr = nullptr;
+    if (ex && ex->ExceptionRecord) {
+        code = ex->ExceptionRecord->ExceptionCode;
+        addr = ex->ExceptionRecord->ExceptionAddress;
+    }
+    writeStartupLog("Unhandled exception: code=0x%08lX address=%p", code, addr);
+
+    std::string msg = "Unhandled exception in startup path.\n";
+    char details[160];
+    std::snprintf(details, sizeof(details), "code=0x%08lX address=%p", code, addr);
+    msg += details;
+    if (!g_startup_log_path.empty()) {
+        msg += "\n\nStartup log: " + g_startup_log_path;
+    }
+    showFatalStartupMessage(msg);
+    closeStartupLog();
+    return EXCEPTION_EXECUTE_HANDLER;
+}
 #endif
 
 }  // namespace
 
 int main(int argc, char* argv[]) {
     initStartupLog();
+#ifdef _WIN32
+    SetUnhandledExceptionFilter(startupUnhandledExceptionFilter);
+#endif
+    std::set_terminate([]() {
+        writeStartupLog("std::terminate invoked");
+#ifdef _WIN32
+        std::string msg = "Fatal terminate() during startup/runtime.";
+        if (!g_startup_log_path.empty()) {
+            msg += "\n\nStartup log: " + g_startup_log_path;
+        }
+        showFatalStartupMessage(msg);
+#endif
+        closeStartupLog();
+        std::_Exit(3);
+    });
 
     // Set log level to INFO to avoid DEBUG log spam slowing down UI
     // (DEBUG logs every frame in pollRxAudio() cause significant lag)
@@ -202,27 +239,65 @@ int main(int argc, char* argv[]) {
     }
     writeStartupLog("OpenGL context created");
 
-    SDL_GL_MakeCurrent(window, gl_context);
-    SDL_GL_SetSwapInterval(1);  // Enable vsync
+    writeStartupLog("Calling SDL_GL_MakeCurrent");
+    if (SDL_GL_MakeCurrent(window, gl_context) != 0) {
+        const char* sdl_err = SDL_GetError();
+        std::string msg = std::string("SDL_GL_MakeCurrent failed: ") + (sdl_err ? sdl_err : "<unknown>");
+        std::fprintf(stderr, "Error: %s\n", msg.c_str());
+        writeStartupLog("%s", msg.c_str());
+#ifdef _WIN32
+        if (!g_startup_log_path.empty()) {
+            showFatalStartupMessage(msg + "\n\nStartup log: " + g_startup_log_path);
+        } else {
+            showFatalStartupMessage(msg);
+        }
+#endif
+        SDL_GL_DeleteContext(gl_context);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        closeStartupLog();
+        return 1;
+    }
+    writeStartupLog("SDL_GL_MakeCurrent succeeded");
+
+    writeStartupLog("Calling SDL_GL_SetSwapInterval(1)");
+    if (SDL_GL_SetSwapInterval(1) != 0) {
+        // Non-fatal on some drivers; keep running but record detail.
+        writeStartupLog("SDL_GL_SetSwapInterval failed/non-vsync: %s", SDL_GetError());
+    } else {
+        writeStartupLog("SDL_GL_SetSwapInterval succeeded");
+    }
 
     // Setup Dear ImGui context
+    writeStartupLog("Calling IMGUI_CHECKVERSION");
     IMGUI_CHECKVERSION();
+    writeStartupLog("IMGUI_CHECKVERSION passed");
+    writeStartupLog("Calling ImGui::CreateContext");
     ImGui::CreateContext();
+    writeStartupLog("ImGui::CreateContext succeeded");
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    writeStartupLog("ImGui IO initialized");
 
     // Setup style - dark theme
+    writeStartupLog("Applying ImGui style");
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowRounding = 4.0f;
     style.FrameRounding = 2.0f;
     style.GrabRounding = 2.0f;
+    writeStartupLog("ImGui style applied");
 
     // Setup Platform/Renderer backends
+    writeStartupLog("Calling ImGui_ImplSDL2_InitForOpenGL");
     ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
+    writeStartupLog("ImGui_ImplSDL2_InitForOpenGL succeeded");
+    writeStartupLog("Calling ImGui_ImplOpenGL2_Init");
     ImGui_ImplOpenGL2_Init();
+    writeStartupLog("ImGui_ImplOpenGL2_Init succeeded");
 
     // Create application with parsed options
+    writeStartupLog("Constructing App");
     ultra::gui::App app(opts);
     writeStartupLog("App initialized");
 
