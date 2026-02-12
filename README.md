@@ -462,7 +462,7 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 ## Acknowledgments
 
-- Community OTA testers who shared real-station logs (including `receiver_latest_gui.log` / `init_latest_gui.log`) that helped diagnose post-handshake sync rejects and buffer-overflow edge cases.
+- Community OTA testers, especially **KC3VPB**, for sharing real-station logs (`receiver_latest_gui.log` / `init_latest_gui.log`) that helped diagnose post-handshake sync rejects and buffer-overflow edge cases.
 - [Dear ImGui](https://github.com/ocornut/imgui) - GUI framework
 - [SDL2](https://libsdl.org/) - Audio and windowing
 - [FFTW3](https://www.fftw.org/) - Fast Fourier Transform (required for chirp detection)
