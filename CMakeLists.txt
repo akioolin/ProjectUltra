@@ -214,9 +214,10 @@ if(ULTRA_BUILD_GUI)
             ${IMGUI_DIR}/imgui_draw.cpp
             ${IMGUI_DIR}/imgui_tables.cpp
             ${IMGUI_DIR}/imgui_widgets.cpp
-            # ImGui backends (SDL2 + OpenGL2 for old hardware compatibility)
+            # ImGui backends (OpenGL2 default + SDL renderer software fallback)
             ${IMGUI_DIR}/backends/imgui_impl_sdl2.cpp
             ${IMGUI_DIR}/backends/imgui_impl_opengl2.cpp
+            ${IMGUI_DIR}/backends/imgui_impl_sdlrenderer2.cpp
         )
 
         target_include_directories(ultra_gui PRIVATE

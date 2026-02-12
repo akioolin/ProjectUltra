@@ -6,6 +6,7 @@
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_opengl2.h"
+#include "imgui_impl_sdlrenderer2.h"
 
 #include <SDL.h>
 #include <SDL_opengl.h>
@@ -101,6 +102,26 @@ void showFatalStartupMessage(const std::string& msg) {
     MessageBoxA(nullptr, msg.c_str(), "ProjectUltra Startup Error", MB_ICONERROR | MB_OK);
 }
 
+std::string modulePathForAddress(void* addr) {
+    if (!addr) {
+        return "<unknown module>";
+    }
+    HMODULE mod = nullptr;
+    if (!GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(addr),
+            &mod)) {
+        return "<unknown module>";
+    }
+
+    char path[MAX_PATH] = {};
+    DWORD len = GetModuleFileNameA(mod, path, static_cast<DWORD>(sizeof(path)));
+    if (len == 0 || len >= sizeof(path)) {
+        return "<unknown module>";
+    }
+    return std::string(path, len);
+}
+
 LONG WINAPI startupUnhandledExceptionFilter(EXCEPTION_POINTERS* ex) {
     unsigned long code = 0;
     void* addr = nullptr;
@@ -108,11 +129,12 @@ LONG WINAPI startupUnhandledExceptionFilter(EXCEPTION_POINTERS* ex) {
         code = ex->ExceptionRecord->ExceptionCode;
         addr = ex->ExceptionRecord->ExceptionAddress;
     }
-    writeStartupLog("Unhandled exception: code=0x%08lX address=%p", code, addr);
+    std::string module = modulePathForAddress(addr);
+    writeStartupLog("Unhandled exception: code=0x%08lX address=%p module=%s", code, addr, module.c_str());
 
     std::string msg = "Unhandled exception in startup path.\n";
-    char details[160];
-    std::snprintf(details, sizeof(details), "code=0x%08lX address=%p", code, addr);
+    char details[512];
+    std::snprintf(details, sizeof(details), "code=0x%08lX address=%p\nmodule=%s", code, addr, module.c_str());
     msg += details;
     if (!g_startup_log_path.empty()) {
         msg += "\n\nStartup log: " + g_startup_log_path;
@@ -150,6 +172,7 @@ int main(int argc, char* argv[]) {
 
     // Parse command line arguments
     ultra::gui::App::Options opts;
+    bool force_software_renderer = false;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "-sim") {
@@ -160,9 +183,16 @@ int main(int argc, char* argv[]) {
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 opts.record_path = argv[++i];
             }
+        } else if (arg == "--software" || arg == "-sw") {
+            force_software_renderer = true;
         }
     }
-    writeStartupLog("Parsed arguments: sim=%d, rec=%d", opts.enable_sim ? 1 : 0, opts.record_audio ? 1 : 0);
+    writeStartupLog(
+        "Parsed arguments: sim=%d, rec=%d, software_renderer=%d",
+        opts.enable_sim ? 1 : 0,
+        opts.record_audio ? 1 : 0,
+        force_software_renderer ? 1 : 0
+    );
 
     // Initialize SDL
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER) != 0) {
@@ -182,18 +212,53 @@ int main(int argc, char* argv[]) {
     }
     writeStartupLog("SDL initialized");
 
-    // Setup window with OpenGL 2.1 context (works on old hardware)
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+    SDL_Window* window = nullptr;
+    SDL_GLContext gl_context = nullptr;
+    SDL_Renderer* sdl_renderer = nullptr;
+    bool using_software_renderer = force_software_renderer;
 
-    SDL_WindowFlags window_flags = (SDL_WindowFlags)(
-        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI
-    );
+    auto failStartup = [&](const std::string& msg) -> int {
+        std::fprintf(stderr, "Error: %s\n", msg.c_str());
+        writeStartupLog("%s", msg.c_str());
+#ifdef _WIN32
+        if (!g_startup_log_path.empty()) {
+            showFatalStartupMessage(msg + "\n\nStartup log: " + g_startup_log_path);
+        } else {
+            showFatalStartupMessage(msg);
+        }
+#endif
+        if (sdl_renderer) {
+            SDL_DestroyRenderer(sdl_renderer);
+            sdl_renderer = nullptr;
+        }
+        if (gl_context) {
+            SDL_GL_DeleteContext(gl_context);
+            gl_context = nullptr;
+        }
+        if (window) {
+            SDL_DestroyWindow(window);
+            window = nullptr;
+        }
+        SDL_Quit();
+        closeStartupLog();
+        return 1;
+    };
 
-    SDL_Window* window = SDL_CreateWindow(
+    SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    if (!using_software_renderer) {
+        // Setup OpenGL 2.1 context (works on old hardware if driver is stable)
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+        SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+        SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+        window_flags = (SDL_WindowFlags)(window_flags | SDL_WINDOW_OPENGL);
+        writeStartupLog("OpenGL renderer path selected");
+    } else {
+        writeStartupLog("Software renderer path selected (--software)");
+    }
+
+    window = SDL_CreateWindow(
         "ProjectUltra - High-Speed HF Modem",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
@@ -204,68 +269,58 @@ int main(int argc, char* argv[]) {
     if (!window) {
         const char* sdl_err = SDL_GetError();
         std::string msg = std::string("SDL_CreateWindow failed: ") + (sdl_err ? sdl_err : "<unknown>");
-        std::fprintf(stderr, "Error: %s\n", msg.c_str());
-        writeStartupLog("%s", msg.c_str());
-#ifdef _WIN32
-        if (!g_startup_log_path.empty()) {
-            showFatalStartupMessage(msg + "\n\nStartup log: " + g_startup_log_path);
-        } else {
-            showFatalStartupMessage(msg);
-        }
-#endif
-        SDL_Quit();
-        closeStartupLog();
-        return 1;
+        return failStartup(msg);
     }
     writeStartupLog("Window created");
 
-    SDL_GLContext gl_context = SDL_GL_CreateContext(window);
-    if (!gl_context) {
-        const char* sdl_err = SDL_GetError();
-        std::string msg = std::string("SDL_GL_CreateContext failed: ") + (sdl_err ? sdl_err : "<unknown>");
-        std::fprintf(stderr, "Error: %s\n", msg.c_str());
-        writeStartupLog("%s", msg.c_str());
-#ifdef _WIN32
-        if (!g_startup_log_path.empty()) {
-            showFatalStartupMessage(msg + "\n\nStartup log: " + g_startup_log_path);
-        } else {
-            showFatalStartupMessage(msg);
+    if (using_software_renderer) {
+        writeStartupLog("Creating SDL renderer (accelerated + vsync)");
+        sdl_renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+        if (!sdl_renderer) {
+            writeStartupLog("Accelerated SDL renderer unavailable: %s", SDL_GetError());
+            writeStartupLog("Falling back to SDL software renderer");
+            sdl_renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
         }
-#endif
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        closeStartupLog();
-        return 1;
-    }
-    writeStartupLog("OpenGL context created");
-
-    writeStartupLog("Calling SDL_GL_MakeCurrent");
-    if (SDL_GL_MakeCurrent(window, gl_context) != 0) {
-        const char* sdl_err = SDL_GetError();
-        std::string msg = std::string("SDL_GL_MakeCurrent failed: ") + (sdl_err ? sdl_err : "<unknown>");
-        std::fprintf(stderr, "Error: %s\n", msg.c_str());
-        writeStartupLog("%s", msg.c_str());
-#ifdef _WIN32
-        if (!g_startup_log_path.empty()) {
-            showFatalStartupMessage(msg + "\n\nStartup log: " + g_startup_log_path);
-        } else {
-            showFatalStartupMessage(msg);
+        if (!sdl_renderer) {
+            const char* sdl_err = SDL_GetError();
+            std::string msg = std::string("SDL_CreateRenderer failed: ") + (sdl_err ? sdl_err : "<unknown>");
+            return failStartup(msg);
         }
-#endif
-        SDL_GL_DeleteContext(gl_context);
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        closeStartupLog();
-        return 1;
-    }
-    writeStartupLog("SDL_GL_MakeCurrent succeeded");
 
-    writeStartupLog("Calling SDL_GL_SetSwapInterval(1)");
-    if (SDL_GL_SetSwapInterval(1) != 0) {
-        // Non-fatal on some drivers; keep running but record detail.
-        writeStartupLog("SDL_GL_SetSwapInterval failed/non-vsync: %s", SDL_GetError());
+        SDL_RendererInfo renderer_info{};
+        if (SDL_GetRendererInfo(sdl_renderer, &renderer_info) == 0) {
+            writeStartupLog(
+                "SDL renderer ready: name=%s flags=0x%x",
+                renderer_info.name ? renderer_info.name : "<unknown>",
+                renderer_info.flags
+            );
+        } else {
+            writeStartupLog("SDL renderer ready (SDL_GetRendererInfo failed: %s)", SDL_GetError());
+        }
     } else {
-        writeStartupLog("SDL_GL_SetSwapInterval succeeded");
+        gl_context = SDL_GL_CreateContext(window);
+        if (!gl_context) {
+            const char* sdl_err = SDL_GetError();
+            std::string msg = std::string("SDL_GL_CreateContext failed: ") + (sdl_err ? sdl_err : "<unknown>");
+            return failStartup(msg);
+        }
+        writeStartupLog("OpenGL context created");
+
+        writeStartupLog("Calling SDL_GL_MakeCurrent");
+        if (SDL_GL_MakeCurrent(window, gl_context) != 0) {
+            const char* sdl_err = SDL_GetError();
+            std::string msg = std::string("SDL_GL_MakeCurrent failed: ") + (sdl_err ? sdl_err : "<unknown>");
+            return failStartup(msg);
+        }
+        writeStartupLog("SDL_GL_MakeCurrent succeeded");
+
+        writeStartupLog("Calling SDL_GL_SetSwapInterval(1)");
+        if (SDL_GL_SetSwapInterval(1) != 0) {
+            // Non-fatal on some drivers; keep running but record detail.
+            writeStartupLog("SDL_GL_SetSwapInterval failed/non-vsync: %s", SDL_GetError());
+        } else {
+            writeStartupLog("SDL_GL_SetSwapInterval succeeded");
+        }
     }
 
     // Setup Dear ImGui context
@@ -289,12 +344,31 @@ int main(int argc, char* argv[]) {
     writeStartupLog("ImGui style applied");
 
     // Setup Platform/Renderer backends
-    writeStartupLog("Calling ImGui_ImplSDL2_InitForOpenGL");
-    ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
-    writeStartupLog("ImGui_ImplSDL2_InitForOpenGL succeeded");
-    writeStartupLog("Calling ImGui_ImplOpenGL2_Init");
-    ImGui_ImplOpenGL2_Init();
-    writeStartupLog("ImGui_ImplOpenGL2_Init succeeded");
+    if (using_software_renderer) {
+        writeStartupLog("Calling ImGui_ImplSDL2_InitForSDLRenderer");
+        if (!ImGui_ImplSDL2_InitForSDLRenderer(window, sdl_renderer)) {
+            return failStartup("ImGui_ImplSDL2_InitForSDLRenderer failed");
+        }
+        writeStartupLog("ImGui_ImplSDL2_InitForSDLRenderer succeeded");
+
+        writeStartupLog("Calling ImGui_ImplSDLRenderer2_Init");
+        if (!ImGui_ImplSDLRenderer2_Init(sdl_renderer)) {
+            return failStartup("ImGui_ImplSDLRenderer2_Init failed");
+        }
+        writeStartupLog("ImGui_ImplSDLRenderer2_Init succeeded");
+    } else {
+        writeStartupLog("Calling ImGui_ImplSDL2_InitForOpenGL");
+        if (!ImGui_ImplSDL2_InitForOpenGL(window, gl_context)) {
+            return failStartup("ImGui_ImplSDL2_InitForOpenGL failed");
+        }
+        writeStartupLog("ImGui_ImplSDL2_InitForOpenGL succeeded");
+
+        writeStartupLog("Calling ImGui_ImplOpenGL2_Init");
+        if (!ImGui_ImplOpenGL2_Init()) {
+            return failStartup("ImGui_ImplOpenGL2_Init failed");
+        }
+        writeStartupLog("ImGui_ImplOpenGL2_Init succeeded");
+    }
 
     // Create application with parsed options
     writeStartupLog("Constructing App");
@@ -320,8 +394,13 @@ int main(int argc, char* argv[]) {
         }
 
         // Start ImGui frame
-        ImGui_ImplOpenGL2_NewFrame();
-        ImGui_ImplSDL2_NewFrame();
+        if (using_software_renderer) {
+            ImGui_ImplSDLRenderer2_NewFrame();
+            ImGui_ImplSDL2_NewFrame();
+        } else {
+            ImGui_ImplOpenGL2_NewFrame();
+            ImGui_ImplSDL2_NewFrame();
+        }
         ImGui::NewFrame();
 
         // Render application UI
@@ -329,19 +408,37 @@ int main(int argc, char* argv[]) {
 
         // Rendering
         ImGui::Render();
-        glViewport(0, 0, (int)io.DisplaySize.x, (int)io.DisplaySize.y);
-        glClearColor(0.1f, 0.1f, 0.12f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
-        SDL_GL_SwapWindow(window);
+        if (using_software_renderer) {
+            SDL_SetRenderDrawColor(sdl_renderer, 26, 26, 31, 255);
+            SDL_RenderClear(sdl_renderer);
+            ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), sdl_renderer);
+            SDL_RenderPresent(sdl_renderer);
+        } else {
+            glViewport(0, 0, (int)io.DisplaySize.x, (int)io.DisplaySize.y);
+            glClearColor(0.1f, 0.1f, 0.12f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
+            SDL_GL_SwapWindow(window);
+        }
     }
 
     // Cleanup
-    ImGui_ImplOpenGL2_Shutdown();
+    if (using_software_renderer) {
+        ImGui_ImplSDLRenderer2_Shutdown();
+    } else {
+        ImGui_ImplOpenGL2_Shutdown();
+    }
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext();
 
-    SDL_GL_DeleteContext(gl_context);
+    if (sdl_renderer) {
+        SDL_DestroyRenderer(sdl_renderer);
+        sdl_renderer = nullptr;
+    }
+    if (gl_context) {
+        SDL_GL_DeleteContext(gl_context);
+        gl_context = nullptr;
+    }
     SDL_DestroyWindow(window);
     SDL_Quit();
     closeStartupLog();
