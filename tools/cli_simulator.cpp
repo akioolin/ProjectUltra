@@ -652,7 +652,7 @@ private:
         });
 
         // Data mode changes (modulation + code rate)
-        protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate, float) {
+        protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate, float, float) {
             setDataMode(mod, rate);
         });
 

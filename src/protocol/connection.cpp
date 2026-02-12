@@ -275,7 +275,7 @@ void Connection::acceptCall() {
 
     auto ack = v2::ConnectFrame::makeConnectAck(local_call_, remote_call_,
                                                  static_cast<uint8_t>(negotiated_mode_),
-                                                 rec_mod, rec_rate, measured_snr_db_);
+                                                 rec_mod, rec_rate, measured_snr_db_, fading_index_);
     Bytes ack_data = ack.serialize();
 
     LOG_MODEM(INFO, "Connection: Sending CONNECT_ACK (%zu bytes)", ack_data.size());
@@ -290,7 +290,7 @@ void Connection::acceptCall() {
 
     // Notify application of initial data mode
     if (on_data_mode_changed_) {
-        on_data_mode_changed_(data_modulation_, data_code_rate_, measured_snr_db_);
+        on_data_mode_changed_(data_modulation_, data_code_rate_, measured_snr_db_, fading_index_);
     }
 }
 
@@ -667,7 +667,8 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
 
                             // Notify application of mode change
                             if (on_data_mode_changed_) {
-                                on_data_mode_changed_(data_modulation_, data_code_rate_, pending_snr_db_);
+                                on_data_mode_changed_(data_modulation_, data_code_rate_,
+                                                      pending_snr_db_, pending_fading_index_);
                             }
                         } else {
                             // Regular data ACK
@@ -803,6 +804,7 @@ void Connection::tick(uint32_t elapsed_ms) {
                         auto frame = v2::ControlFrame::makeModeChange(local_call_, remote_call_,
                                                                        mode_change_seq_, pending_modulation_,
                                                                        pending_code_rate_, pending_snr_db_,
+                                                                       pending_fading_index_,
                                                                        pending_reason_);
                         transmitFrame(frame.serialize());
                         mode_change_timeout_ms_ = MODE_CHANGE_TIMEOUT_MS;

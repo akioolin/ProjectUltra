@@ -183,7 +183,9 @@ public:
         });
 
         // Mode changes
-        protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate, float snr) {
+        protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate, float snr, float peer_fading) {
+            (void)snr;
+            (void)peer_fading;
             modem_.setDataMode(mod, rate);
             LOG_INFO("MODEM", "[%s] MODE -> %s %s", callsign_.c_str(),
                      modulationToString(mod), codeRateToString(rate));

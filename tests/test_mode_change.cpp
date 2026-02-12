@@ -17,6 +17,7 @@
 #include <iomanip>
 #include <queue>
 #include <cstring>
+#include <cmath>
 
 using namespace ultra;
 using namespace ultra::protocol;
@@ -39,6 +40,7 @@ bool test_mode_change_frame() {
         Modulation::QAM16,           // new modulation
         CodeRate::R2_3,              // new code rate
         22.5f,                       // measured SNR
+        0.67f,                       // measured fading index
         v2::ModeChangeReason::CHANNEL_IMPROVED
     );
 
@@ -59,6 +61,7 @@ bool test_mode_change_frame() {
     if (info.modulation != Modulation::QAM16) FAIL("Wrong modulation");
     if (info.code_rate != CodeRate::R2_3) FAIL("Wrong code rate");
     if (info.reason != v2::ModeChangeReason::CHANNEL_IMPROVED) FAIL("Wrong reason");
+    if (std::abs(info.fading_index - 0.67f) > 0.02f) FAIL("Fading encoding error too large");
 
     // Check SNR encoding (0.25 dB resolution)
     float snr_diff = std::abs(info.snr_db - 22.5f);
@@ -158,13 +161,19 @@ bool test_two_station_mode_change() {
     });
 
     // Wire up mode change callbacks
-    station_a.setDataModeChangedCallback([&](Modulation mod, CodeRate rate, float snr) {
+    station_a.setDataModeChangedCallback([&](Modulation mod, CodeRate rate, float snr, float peer_fading) {
+        (void)snr;
+        (void)peer_fading;
         a_received_mode_change = true;
         a_new_mod = mod;
         a_new_rate = rate;
     });
 
-    station_b.setDataModeChangedCallback([&](Modulation mod, CodeRate rate, float snr) {
+    station_b.setDataModeChangedCallback([&](Modulation mod, CodeRate rate, float snr, float peer_fading) {
+        (void)mod;
+        (void)rate;
+        (void)snr;
+        (void)peer_fading;
         b_received_mode_change = true;
     });
 
@@ -256,7 +265,9 @@ bool test_mode_change_snr_levels() {
 
         station_a.setTransmitCallback([&](const Bytes& d) { a_to_b.push(d); });
         station_b.setTransmitCallback([&](const Bytes& d) { b_to_a.push(d); });
-        station_a.setDataModeChangedCallback([&](Modulation m, CodeRate r, float s) {
+        station_a.setDataModeChangedCallback([&](Modulation m, CodeRate r, float s, float f) {
+            (void)s;
+            (void)f;
             mode_change_received = true;
             received_mod = m;
             received_rate = r;
@@ -377,7 +388,9 @@ bool test_mid_session_mode_change() {
 
     station_a.setTransmitCallback([&](const Bytes& d) { a_to_b.push(d); });
     station_b.setTransmitCallback([&](const Bytes& d) { b_to_a.push(d); });
-    station_a.setDataModeChangedCallback([&](Modulation m, CodeRate r, float s) {
+    station_a.setDataModeChangedCallback([&](Modulation m, CodeRate r, float s, float f) {
+        (void)s;
+        (void)f;
         a_mode_changed = true;
         a_mode = m;
         a_rate = r;
@@ -433,7 +446,7 @@ bool test_mode_change_reasons() {
 
     for (uint8_t reason : reasons) {
         auto frame = v2::ControlFrame::makeModeChange(
-            "SRC", "DST", 1, Modulation::DQPSK, CodeRate::R1_2, 15.0f, reason);
+            "SRC", "DST", 1, Modulation::DQPSK, CodeRate::R1_2, 15.0f, 0.55f, reason);
 
         Bytes data = frame.serialize();
         auto parsed = v2::ControlFrame::deserialize(data);
@@ -546,7 +559,11 @@ bool test_mode_change_ack_applies() {
     bool b_mode_changed = false;
     station_a.setTransmitCallback([&](const Bytes& d) { a_to_b.push(d); });
     station_b.setTransmitCallback([&](const Bytes& d) { b_to_a.push(d); });
-    station_b.setDataModeChangedCallback([&](Modulation m, CodeRate r, float s) {
+    station_b.setDataModeChangedCallback([&](Modulation m, CodeRate r, float s, float f) {
+        (void)m;
+        (void)r;
+        (void)s;
+        (void)f;
         b_mode_changed = true;
     });
 

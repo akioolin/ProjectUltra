@@ -208,7 +208,7 @@ ControlFrame ControlFrame::makeKeepalive(const std::string& src, const std::stri
 
 ControlFrame ControlFrame::makeModeChange(const std::string& src, const std::string& dst,
                                            uint16_t seq, Modulation new_mod, CodeRate new_rate,
-                                           float snr_db, uint8_t reason) {
+                                           float snr_db, float fading_index, uint8_t reason) {
     ControlFrame f;
     f.type = FrameType::MODE_CHANGE;
     f.flags = Flags::VERSION_V2;
@@ -219,14 +219,14 @@ ControlFrame ControlFrame::makeModeChange(const std::string& src, const std::str
     f.payload[1] = static_cast<uint8_t>(new_rate);
     f.payload[2] = encodeSNR(snr_db);
     f.payload[3] = reason;
-    f.payload[4] = 0;  // Reserved
+    f.payload[4] = encodeFadingIndex(fading_index);
     f.payload[5] = 0;  // Reserved
     return f;
 }
 
 ControlFrame ControlFrame::makeModeChangeByHash(const std::string& src, uint32_t dst_hash,
                                                  uint16_t seq, Modulation new_mod, CodeRate new_rate,
-                                                 float snr_db, uint8_t reason) {
+                                                 float snr_db, float fading_index, uint8_t reason) {
     ControlFrame f;
     f.type = FrameType::MODE_CHANGE;
     f.flags = Flags::VERSION_V2;
@@ -237,7 +237,7 @@ ControlFrame ControlFrame::makeModeChangeByHash(const std::string& src, uint32_t
     f.payload[1] = static_cast<uint8_t>(new_rate);
     f.payload[2] = encodeSNR(snr_db);
     f.payload[3] = reason;
-    f.payload[4] = 0;  // Reserved
+    f.payload[4] = encodeFadingIndex(fading_index);
     f.payload[5] = 0;  // Reserved
     return f;
 }
@@ -628,7 +628,7 @@ ConnectFrame ConnectFrame::makeConnect(const std::string& src, const std::string
 
 ConnectFrame ConnectFrame::makeConnectAck(const std::string& src, const std::string& dst,
                                            uint8_t neg_mode, Modulation init_mod, CodeRate init_rate,
-                                           float snr_db) {
+                                           float snr_db, float fading_index) {
     ConnectFrame f;
     f.type = FrameType::CONNECT_ACK;
     f.flags = Flags::VERSION_V2;
@@ -641,7 +641,8 @@ ConnectFrame ConnectFrame::makeConnectAck(const std::string& src, const std::str
     std::strncpy(f.dst_callsign, dst.c_str(), MAX_CALLSIGN_LEN - 1);
     f.dst_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
 
-    f.mode_capabilities = 0;  // Not used in ACK
+    // CONNECT_ACK reuses this byte to carry responder fading index.
+    f.mode_capabilities = encodeFadingIndex(fading_index);
     f.negotiated_mode = neg_mode;
 
     // Initial data mode - eliminates separate MODE_CHANGE after connect
@@ -689,7 +690,7 @@ ConnectFrame ConnectFrame::makeDisconnect(const std::string& src, const std::str
 
 ConnectFrame ConnectFrame::makeConnectAckByHash(const std::string& src, uint32_t dst_hash,
                                                  uint8_t neg_mode, Modulation init_mod, CodeRate init_rate,
-                                                 float snr_db) {
+                                                 float snr_db, float fading_index) {
     ConnectFrame f;
     f.type = FrameType::CONNECT_ACK;
     f.flags = Flags::VERSION_V2;
@@ -702,7 +703,7 @@ ConnectFrame ConnectFrame::makeConnectAckByHash(const std::string& src, uint32_t
     // dst_callsign unknown - leave empty (will be filled from received CONNECT)
     f.dst_callsign[0] = '\0';
 
-    f.mode_capabilities = 0;
+    f.mode_capabilities = encodeFadingIndex(fading_index);
     f.negotiated_mode = neg_mode;
 
     // Initial data mode - eliminates separate MODE_CHANGE after connect

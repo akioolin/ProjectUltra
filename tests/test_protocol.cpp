@@ -118,7 +118,7 @@ bool test_control_frame_types() {
         { v2::ControlFrame::makeAck("A", "B", 1), v2::FrameType::ACK },
         { v2::ControlFrame::makeNack("A", "B", 1, 0), v2::FrameType::NACK },
         { v2::ControlFrame::makeKeepalive("A", "B"), v2::FrameType::KEEPALIVE },
-        { v2::ControlFrame::makeModeChange("A", "B", 1, ultra::Modulation::QAM16, ultra::CodeRate::R2_3, 20.0f, 0), v2::FrameType::MODE_CHANGE },
+        { v2::ControlFrame::makeModeChange("A", "B", 1, ultra::Modulation::QAM16, ultra::CodeRate::R2_3, 20.0f, 0.50f, 0), v2::FrameType::MODE_CHANGE },
     };
 
     for (const auto& [frame, expected_type] : control_cases) {
@@ -131,7 +131,7 @@ bool test_control_frame_types() {
     // Test ConnectFrames (3 codewords)
     std::vector<std::pair<v2::ConnectFrame, v2::FrameType>> connect_cases = {
         { v2::ConnectFrame::makeConnect("CALLSIGN1", "CALLSIGN2", 0x07, 0), v2::FrameType::CONNECT },
-        { v2::ConnectFrame::makeConnectAck("CALLSIGN1", "CALLSIGN2", 0, ultra::Modulation::DQPSK, ultra::CodeRate::R1_4, 15.0f), v2::FrameType::CONNECT_ACK },
+        { v2::ConnectFrame::makeConnectAck("CALLSIGN1", "CALLSIGN2", 0, ultra::Modulation::DQPSK, ultra::CodeRate::R1_4, 15.0f, 0.60f), v2::FrameType::CONNECT_ACK },
         { v2::ConnectFrame::makeConnectNak("CALLSIGN1", "CALLSIGN2"), v2::FrameType::CONNECT_NAK },
         { v2::ConnectFrame::makeDisconnect("CALLSIGN1", "CALLSIGN2"), v2::FrameType::DISCONNECT },
     };
@@ -632,7 +632,9 @@ bool test_adaptive_mode_upgrade() {
     ultra::Modulation a_new_mod = ultra::Modulation::DQPSK;
     ultra::CodeRate a_new_rate = ultra::CodeRate::R1_4;
 
-    stationA.setDataModeChangedCallback([&](ultra::Modulation mod, ultra::CodeRate rate, float snr) {
+    stationA.setDataModeChangedCallback([&](ultra::Modulation mod, ultra::CodeRate rate, float snr, float peer_fading) {
+        (void)snr;
+        (void)peer_fading;
         a_mode_changed = true;
         a_new_mod = mod;
         a_new_rate = rate;

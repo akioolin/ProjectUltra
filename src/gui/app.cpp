@@ -349,29 +349,43 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         protocol_.onPingReceived();
     });
 
-    protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate, float snr_db) {
+    protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate, float snr_db, float peer_fading) {
         // Update modem engine with new data mode
         modem_.setDataMode(mod, rate);
 
-        // Get waveform mode and fading index from modem
+        // Local estimate for operator visibility/debugging.
         auto waveform = modem_.getWaveformMode();
-        float fading = modem_.getFadingIndex();
+        float local_fading = modem_.getFadingIndex();
 
-        const char* quality = fadingToQuality(fading);
+        const char* local_quality = fadingToQuality(local_fading);
+        bool peer_fading_valid = (peer_fading >= 0.0f);
+        const char* peer_quality = peer_fading_valid ? fadingToQuality(peer_fading) : "n/a";
+        char peer_fading_text[32];
+        if (peer_fading_valid) {
+            snprintf(peer_fading_text, sizeof(peer_fading_text), "%.2f %s", peer_fading, peer_quality);
+        } else {
+            snprintf(peer_fading_text, sizeof(peer_fading_text), "n/a");
+        }
         const char* wf_name = waveformDisplayName(waveform);
-        guiLog("MODE_CHANGE: %s %s %s (peer_snr=%.1f dB, local_fading=%.2f %s)",
+        guiLog("MODE_CHANGE: %s %s %s (peer_snr=%.1f dB, peer_fading=%s, local_fading=%.2f %s)",
                wf_name, modulationToString(mod), codeRateToString(rate),
-               snr_db, fading, quality);
+               snr_db, peer_fading_text,
+               local_fading, local_quality);
 
         // Format display with waveform info and channel quality
-        char buf[120];
+        char buf[200];
         if (waveform == protocol::WaveformMode::MC_DPSK) {
-            snprintf(buf, sizeof(buf), "[MODE] MC-DPSK 8 carriers %s (peer SNR=%d dB, local fading=%.2f %s)",
-                     codeRateToString(rate), static_cast<int>(snr_db), fading, quality);
+            snprintf(buf, sizeof(buf),
+                     "[MODE] MC-DPSK 8 carriers %s (peer SNR=%d dB, peer fading=%s, local fading=%.2f %s)",
+                     codeRateToString(rate), static_cast<int>(snr_db),
+                     peer_fading_text,
+                     local_fading, local_quality);
         } else {
-            snprintf(buf, sizeof(buf), "[MODE] %s %s %s (peer SNR=%d dB, local fading=%.2f %s)",
+            snprintf(buf, sizeof(buf),
+                     "[MODE] %s %s %s (peer SNR=%d dB, peer fading=%s, local fading=%.2f %s)",
                      wf_name, modulationToString(mod), codeRateToString(rate),
-                     static_cast<int>(snr_db), fading, quality);
+                     static_cast<int>(snr_db), peer_fading_text,
+                     local_fading, local_quality);
         }
         rx_log_.push_back(buf);
         if (rx_log_.size() > MAX_RX_LOG) {
@@ -713,24 +727,35 @@ void App::initVirtualStation() {
         }
     });
 
-    virtual_protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate, float snr_db) {
+    virtual_protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate, float snr_db, float peer_fading) {
         // Update virtual modem engine with new data mode
         virtual_modem_->setDataMode(mod, rate);
 
         // Show [SIM-MODE] line so user can see what the responder actually measured
         auto waveform = virtual_modem_->getWaveformMode();
-        float fading = virtual_modem_->getFadingIndex();
-        const char* quality = fadingToQuality(fading);
+        float local_fading = virtual_modem_->getFadingIndex();
+        const char* local_quality = fadingToQuality(local_fading);
+        bool peer_fading_valid = (peer_fading >= 0.0f);
+        const char* peer_quality = peer_fading_valid ? fadingToQuality(peer_fading) : "n/a";
+        char peer_fading_text[32];
+        if (peer_fading_valid) {
+            snprintf(peer_fading_text, sizeof(peer_fading_text), "%.2f %s", peer_fading, peer_quality);
+        } else {
+            snprintf(peer_fading_text, sizeof(peer_fading_text), "n/a");
+        }
         const char* wf_name = waveformDisplayName(waveform);
 
-        guiLog("SIM: Virtual MODE_CHANGE: %s %s %s (peer_snr=%.1f dB, local_fading=%.2f %s)",
+        guiLog("SIM: Virtual MODE_CHANGE: %s %s %s (peer_snr=%.1f dB, peer_fading=%s, local_fading=%.2f %s)",
                wf_name, modulationToString(mod), codeRateToString(rate),
-               snr_db, fading, quality);
+               snr_db, peer_fading_text,
+               local_fading, local_quality);
 
-        char buf[120];
-        snprintf(buf, sizeof(buf), "[SIM-MODE] %s %s %s (peer SNR=%d dB, local fading=%.2f %s)",
+        char buf[200];
+        snprintf(buf, sizeof(buf),
+                 "[SIM-MODE] %s %s %s (peer SNR=%d dB, peer fading=%s, local fading=%.2f %s)",
                  wf_name, modulationToString(mod), codeRateToString(rate),
-                 static_cast<int>(snr_db), fading, quality);
+                 static_cast<int>(snr_db), peer_fading_text,
+                 local_fading, local_quality);
         rx_log_.push_back(buf);
         if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
     });

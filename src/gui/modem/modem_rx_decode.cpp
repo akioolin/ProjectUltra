@@ -55,8 +55,23 @@ void ModemEngine::notifyFrameParsed(const Bytes& frame_data, protocol::v2::Frame
     // Try parsing for more details
     auto connect = v2::ConnectFrame::deserialize(frame_data);
     if (connect) {
-        status_callback_("[" + type_str + "] " + connect->getSrcCallsign() +
-                        " -> " + connect->getDstCallsign());
+        std::string src = connect->getSrcCallsign();
+        std::string dst = connect->getDstCallsign();
+
+        if (src.empty()) {
+            src = "UNKNOWN";
+        }
+        if (dst.empty()) {
+            // Hash-addressed CONNECT_ACK/NAK may not carry dst callsign.
+            // Show local station prefix instead of a blank target in UI.
+            if (!log_prefix_.empty() && log_prefix_ != "MODEM") {
+                dst = log_prefix_;
+            } else {
+                dst = "UNKNOWN";
+            }
+        }
+
+        status_callback_("[" + type_str + "] " + src + " -> " + dst);
         return;
     }
 

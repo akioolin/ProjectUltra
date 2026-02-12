@@ -177,18 +177,27 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         data_code_rate_ = rec_rate;
         arq_.setCodeRate(data_code_rate_);  // Update ARQ for correct total_cw calculation
 
-        // Use hash-based method since we may not know the actual callsign
-        // CONNECT_ACK now carries the initial data mode - no separate MODE_CHANGE needed!
-        auto ack = v2::ConnectFrame::makeConnectAckByHash(local_call_, frame.src_hash,
-                                                           static_cast<uint8_t>(negotiated_mode_),
-                                                           rec_mod, rec_rate, snr_db);
-        transmitFrame(ack.serialize());
+        // Prefer full-callsign CONNECT_ACK when the initiator callsign is known,
+        // fallback to hash-only ACK when we only have src_hash.
+        Bytes ack_data;
+        if (!src_call.empty()) {
+            auto ack = v2::ConnectFrame::makeConnectAck(local_call_, src_call,
+                                                        static_cast<uint8_t>(negotiated_mode_),
+                                                        rec_mod, rec_rate, snr_db, fading_index_);
+            ack_data = ack.serialize();
+        } else {
+            auto ack = v2::ConnectFrame::makeConnectAckByHash(local_call_, frame.src_hash,
+                                                               static_cast<uint8_t>(negotiated_mode_),
+                                                               rec_mod, rec_rate, snr_db, fading_index_);
+            ack_data = ack.serialize();
+        }
+        transmitFrame(ack_data);
         enterConnected();
         // NOTE: Don't call on_handshake_confirmed_ yet - wait for first frame from initiator
 
         // Notify application of initial data mode
         if (on_data_mode_changed_) {
-            on_data_mode_changed_(data_modulation_, data_code_rate_, snr_db);
+            on_data_mode_changed_(data_modulation_, data_code_rate_, snr_db, fading_index_);
         }
     } else {
         pending_remote_call_ = src_call.empty() ? "REMOTE" : src_call;
@@ -217,6 +226,7 @@ void Connection::handleConnectAck(const v2::ConnectFrame& frame, const std::stri
     Modulation init_mod = static_cast<Modulation>(frame.initial_modulation);
     CodeRate init_rate = static_cast<CodeRate>(frame.initial_code_rate);
     float snr_db = v2::decodeSNR(frame.measured_snr);
+    float peer_fading = v2::decodeFadingIndex(frame.mode_capabilities);
 
     // Apply the initial data mode immediately
     data_modulation_ = init_mod;
@@ -228,9 +238,9 @@ void Connection::handleConnectAck(const v2::ConnectFrame& frame, const std::stri
         remote_call_ = src_call;
     }
 
-    LOG_MODEM(INFO, "Connection: Connected to %s (waveform=%s, data=%s %s, SNR=%.1f dB)",
+    LOG_MODEM(INFO, "Connection: Connected to %s (waveform=%s, data=%s %s, SNR=%.1f dB, peer_fading=%.2f)",
               remote_call_.c_str(), waveformModeToString(negotiated_mode_),
-              modulationToString(data_modulation_), codeRateToString(data_code_rate_), snr_db);
+              modulationToString(data_modulation_), codeRateToString(data_code_rate_), snr_db, peer_fading);
 
     // We are the initiator - we sent CONNECT and received CONNECT_ACK
     is_initiator_ = true;
@@ -246,7 +256,7 @@ void Connection::handleConnectAck(const v2::ConnectFrame& frame, const std::stri
 
     // Notify application of initial data mode
     if (on_data_mode_changed_) {
-        on_data_mode_changed_(data_modulation_, data_code_rate_, snr_db);
+        on_data_mode_changed_(data_modulation_, data_code_rate_, snr_db, peer_fading);
     }
 }
 
@@ -342,11 +352,12 @@ void Connection::handleModeChange(const v2::ControlFrame& frame, const std::stri
         case v2::ModeChangeReason::INITIAL_SETUP:    reason_str = "initial setup"; break;
     }
 
-    LOG_MODEM(INFO, "Connection: MODE_CHANGE from %s: %s %s (SNR=%.1f dB, reason=%s)",
+    LOG_MODEM(INFO, "Connection: MODE_CHANGE from %s: %s %s (SNR=%.1f dB, fading=%.2f, reason=%s)",
               remote_call_.c_str(),
               modulationToString(info.modulation),
               codeRateToString(info.code_rate),
               info.snr_db,
+              info.fading_index,
               reason_str);
 
     // Update local state
@@ -359,7 +370,7 @@ void Connection::handleModeChange(const v2::ControlFrame& frame, const std::stri
 
     // Notify application of mode change
     if (on_data_mode_changed_) {
-        on_data_mode_changed_(info.modulation, info.code_rate, info.snr_db);
+        on_data_mode_changed_(info.modulation, info.code_rate, info.snr_db, info.fading_index);
     }
 }
 
@@ -383,6 +394,7 @@ void Connection::requestModeChange(Modulation new_mod, CodeRate new_rate,
     pending_modulation_ = new_mod;
     pending_code_rate_ = new_rate;
     pending_snr_db_ = measured_snr;
+    pending_fading_index_ = fading_index_;
     pending_reason_ = reason;
     mode_change_pending_ = true;
     mode_change_retry_count_ = 0;
@@ -391,7 +403,7 @@ void Connection::requestModeChange(Modulation new_mod, CodeRate new_rate,
     mode_change_seq_++;
     auto frame = v2::ControlFrame::makeModeChange(local_call_, remote_call_,
                                                    mode_change_seq_, new_mod, new_rate,
-                                                   measured_snr, reason);
+                                                   measured_snr, fading_index_, reason);
     transmitFrame(frame.serialize());
 
     // NOTE: Don't update local mode until ACK is received

@@ -202,7 +202,7 @@ public:
     bool isFading() const { return fading_index_ > 0.65f; }
 
     // Callback when remote station requests mode change
-    using DataModeChangedCallback = std::function<void(Modulation mod, CodeRate rate, float snr_db)>;
+    using DataModeChangedCallback = std::function<void(Modulation mod, CodeRate rate, float snr_db, float peer_fading_index)>;
     void setDataModeChangedCallback(DataModeChangedCallback cb) { on_data_mode_changed_ = cb; }
 
     // Request mode change to remote station
@@ -246,6 +246,7 @@ private:
     Modulation pending_modulation_ = Modulation::DQPSK;
     CodeRate pending_code_rate_ = CodeRate::R1_4;
     float pending_snr_db_ = 15.0f;
+    float pending_fading_index_ = 0.0f;
     uint8_t pending_reason_ = 0;
     static constexpr uint32_t MODE_CHANGE_TIMEOUT_MS = 45000;  // 45s for DPSK round trip
     static constexpr int MODE_CHANGE_MAX_RETRIES = 2;
