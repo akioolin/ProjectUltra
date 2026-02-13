@@ -66,6 +66,7 @@ private:
     // Operate mode state
     char tx_text_buffer_[256] = "Hello from ProjectUltra!";
     std::deque<std::string> rx_log_;
+    mutable std::mutex rx_log_mutex_;
     static const size_t MAX_RX_LOG = 20;
     bool audio_initialized_ = false;
     bool deferred_audio_auto_init_pending_ = false;
@@ -186,6 +187,9 @@ private:
     void renderCompactChannelStatus(const LoopbackStats& stats, Modulation data_mod, CodeRate data_rate,
                                     const protocol::ConnectionStats& conn_stats);
     void initAudio();
+    void appendRxLogLine(const std::string& msg);
+    std::deque<std::string> snapshotRxLog() const;
+    void clearRxLog();
     void stopTxNow(const char* reason);
     void sendMessage();
     void onDataReceived(const std::string& text);

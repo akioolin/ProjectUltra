@@ -25,7 +25,7 @@ void ModemEngine::deliverFrame(const Bytes& frame_data) {
     });
 
     {
-        std::lock_guard<std::mutex> lock(stats_mutex_);
+        std::lock_guard<std::mutex> lock(rx_mutex_);
         rx_data_queue_.push(frame_data);
     }
 

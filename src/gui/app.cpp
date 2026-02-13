@@ -288,7 +288,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     // Set up status callback to show codeword progress in RX log
     ultra::gui::startupTrace("App", "set-status-callback-enter");
     modem_.setStatusCallback([this](const std::string& status) {
-        rx_log_.push_back(status);
+        appendRxLogLine(status);
     });
     ultra::gui::startupTrace("App", "set-status-callback-exit");
 
@@ -373,10 +373,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     protocol_.setMessageReceivedCallback([this](const std::string& from, const std::string& text) {
         // Received a message via ARQ
         std::string msg = "[RX " + from + "] " + text;
-        rx_log_.push_back(msg);
-        if (rx_log_.size() > MAX_RX_LOG) {
-            rx_log_.pop_front();
-        }
+        appendRxLogLine(msg);
     });
     ultra::gui::startupTrace("App", "protocol-callbacks-mid2");
 
@@ -419,20 +416,17 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                 modem_.setConnectWaveform(protocol::WaveformMode::MC_DPSK);
                 break;
         }
-        rx_log_.push_back(msg);
-        if (rx_log_.size() > MAX_RX_LOG) {
-            rx_log_.pop_front();
-        }
+        appendRxLogLine(msg);
     });
     ultra::gui::startupTrace("App", "protocol-callbacks-mid3");
 
     protocol_.setIncomingCallCallback([this](const std::string& from) {
-        pending_incoming_call_ = from;
-        std::string msg = "[SYS] Incoming call from " + from;
-        rx_log_.push_back(msg);
-        if (rx_log_.size() > MAX_RX_LOG) {
-            rx_log_.pop_front();
+        {
+            std::lock_guard<std::mutex> lock(rx_log_mutex_);
+            pending_incoming_call_ = from;
         }
+        std::string msg = "[SYS] Incoming call from " + from;
+        appendRxLogLine(msg);
     });
     ultra::gui::startupTrace("App", "protocol-callbacks-mid4");
 
@@ -504,8 +498,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
             // Add to message log so user sees it in the app
             char buf[80];
             snprintf(buf, sizeof(buf), "[PONG] Station responded (SNR=%.0f dB)", display_snr);
-            rx_log_.push_back(buf);
-            if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
+            appendRxLogLine(buf);
         } else {
             guiLog("MODEM: Detected PING/PONG (SNR=%.1f dB)", display_snr);
         }
@@ -552,10 +545,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                      static_cast<int>(snr_db), peer_fading_text,
                      local_fading, local_quality);
         }
-        rx_log_.push_back(buf);
-        if (rx_log_.size() > MAX_RX_LOG) {
-            rx_log_.pop_front();
-        }
+        appendRxLogLine(buf);
 
         // Advisory-only peer view (does not change mode yet).
         if (peer_fading_valid) {
@@ -578,10 +568,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
             }
 
             guiLog("%s", adpt_buf);
-            rx_log_.push_back(adpt_buf);
-            if (rx_log_.size() > MAX_RX_LOG) {
-                rx_log_.pop_front();
-            }
+            appendRxLogLine(adpt_buf);
         }
     });
     ultra::gui::startupTrace("App", "protocol-callbacks-mid7");
@@ -604,10 +591,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         modem_.setWaveformMode(mode);
 
         std::string msg = "[WAVEFORM] " + mode_name;
-        rx_log_.push_back(msg);
-        if (rx_log_.size() > MAX_RX_LOG) {
-            rx_log_.pop_front();
-        }
+        appendRxLogLine(msg);
     });
     ultra::gui::startupTrace("App", "protocol-callbacks-mid8");
 
@@ -642,8 +626,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                               " " + std::to_string(p.transferred_bytes) + "/" +
                               std::to_string(p.total_bytes) + " bytes (" +
                               std::to_string(milestone) + "%)";
-            rx_log_.push_back(msg);
-            if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
+            appendRxLogLine(msg);
         }
     });
     ultra::gui::startupTrace("App", "protocol-callbacks-mid11");
@@ -672,10 +655,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         } else {
             msg = "[FILE] Receive failed";
         }
-        rx_log_.push_back(msg);
-        if (rx_log_.size() > MAX_RX_LOG) {
-            rx_log_.pop_front();
-        }
+        appendRxLogLine(msg);
     });
     ultra::gui::startupTrace("App", "protocol-callbacks-mid12");
 
@@ -703,10 +683,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
             msg = "[FILE] Transfer failed: " + error;
         }
         pending_file_tx_payload_bytes_ = 0;
-        rx_log_.push_back(msg);
-        if (rx_log_.size() > MAX_RX_LOG) {
-            rx_log_.pop_front();
-        }
+        appendRxLogLine(msg);
     });
     ultra::gui::startupTrace("App", "protocol-callbacks-exit");
 
@@ -953,10 +930,7 @@ void App::initVirtualStation() {
             default:
                 return;  // Don't log intermediate states
         }
-        rx_log_.push_back(msg);
-        if (rx_log_.size() > MAX_RX_LOG) {
-            rx_log_.pop_front();
-        }
+        appendRxLogLine(msg);
     });
 
     virtual_protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate, float snr_db, float peer_fading) {
@@ -988,8 +962,7 @@ void App::initVirtualStation() {
                  wf_name, modulationToString(mod), codeRateToString(rate),
                  static_cast<int>(snr_db), peer_fading_text,
                  local_fading, local_quality);
-        rx_log_.push_back(buf);
-        if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
+        appendRxLogLine(buf);
     });
 
     virtual_protocol_.setModeNegotiatedCallback([this](protocol::WaveformMode mode) {
@@ -1027,8 +1000,7 @@ void App::initVirtualStation() {
         } else {
             msg += "File receive failed";
         }
-        rx_log_.push_back(msg);
-        if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
+        appendRxLogLine(msg);
     });
 
     virtual_protocol_.setFileSentCallback([this](bool success, const std::string& error) {
@@ -1038,8 +1010,7 @@ void App::initVirtualStation() {
         } else {
             msg += "File send failed: " + error;
         }
-        rx_log_.push_back(msg);
-        if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
+        appendRxLogLine(msg);
     });
 
     virtual_protocol_.setMessageReceivedCallback([this](const std::string& from, const std::string& text) {
@@ -1350,16 +1321,31 @@ void App::initAudio() {
     ultra::gui::startupTrace("App", "initAudio-exit");
 }
 
+void App::appendRxLogLine(const std::string& msg) {
+    std::lock_guard<std::mutex> lock(rx_log_mutex_);
+    rx_log_.push_back(msg);
+    while (rx_log_.size() > MAX_RX_LOG) {
+        rx_log_.pop_front();
+    }
+}
+
+std::deque<std::string> App::snapshotRxLog() const {
+    std::lock_guard<std::mutex> lock(rx_log_mutex_);
+    return rx_log_;
+}
+
+void App::clearRxLog() {
+    std::lock_guard<std::mutex> lock(rx_log_mutex_);
+    rx_log_.clear();
+}
+
 void App::sendMessage() {
     // Not used in current implementation - messages sent via protocol
 }
 
 void App::onDataReceived(const std::string& text) {
     if (!text.empty()) {
-        rx_log_.push_back("[RX] " + text);
-        if (rx_log_.size() > MAX_RX_LOG) {
-            rx_log_.pop_front();
-        }
+        appendRxLogLine("[RX] " + text);
     }
 }
 
@@ -1462,10 +1448,7 @@ void App::updateAdaptiveAdvisory(float snr_db, float fading_index) {
                          hold_remaining_ms / 1000.0f,
                          modulationToString(rec_mod), codeRateToString(rec_rate));
                 guiLog("%s", hold_msg);
-                rx_log_.push_back(hold_msg);
-                if (rx_log_.size() > MAX_RX_LOG) {
-                    rx_log_.pop_front();
-                }
+                appendRxLogLine(hold_msg);
                 adapt_upgrade_hold_logged_ = true;
                 adapt_upgrade_hold_mod_ = rec_mod;
                 adapt_upgrade_hold_rate_ = rec_rate;
@@ -1485,10 +1468,7 @@ void App::updateAdaptiveAdvisory(float snr_db, float fading_index) {
              modulationToString(rec_mod), codeRateToString(rec_rate));
 
     guiLog("%s", msg);
-    rx_log_.push_back(msg);
-    if (rx_log_.size() > MAX_RX_LOG) {
-        rx_log_.pop_front();
-    }
+    appendRxLogLine(msg);
 
     adapt_virtual_mod_ = rec_mod;
     adapt_virtual_rate_ = rec_rate;
@@ -1554,25 +1534,25 @@ void App::render() {
     if (ImGui::IsKeyPressed(ImGuiKey_F1)) {
         auto tone = modem_.generateTestTone(1.0f);
         audio_.queueTxSamples(tone);
-        rx_log_.push_back("[TEST] Sent 1500 Hz tone");
+        appendRxLogLine("[TEST] Sent 1500 Hz tone");
     }
     if (ImGui::IsKeyPressed(ImGuiKey_F2)) {
         auto samples = modem_.transmitTestPattern(0);
         audio_.queueTxSamples(samples);
-        rx_log_.push_back("[TEST] Sent pattern: ALL ZEROS (LDPC encoded)");
+        appendRxLogLine("[TEST] Sent pattern: ALL ZEROS (LDPC encoded)");
     }
     if (ImGui::IsKeyPressed(ImGuiKey_F3)) {
         auto samples = modem_.transmitTestPattern(1);
         audio_.queueTxSamples(samples);
-        rx_log_.push_back("[TEST] Sent pattern: DEADBEEF (LDPC encoded)");
+        appendRxLogLine("[TEST] Sent pattern: DEADBEEF (LDPC encoded)");
     }
     if (ImGui::IsKeyPressed(ImGuiKey_F7)) {
         const char* test_file = "tests/data/test_connect_data_sequence.f32";
         size_t injected = modem_.injectSignalFromFile(test_file);
         if (injected > 0) {
-            rx_log_.push_back("[TEST] Injected " + std::to_string(injected) + " samples");
+            appendRxLogLine("[TEST] Injected " + std::to_string(injected) + " samples");
         } else {
-            rx_log_.push_back("[TEST] Failed to inject signal");
+            appendRxLogLine("[TEST] Failed to inject signal");
         }
     }
 
@@ -1788,10 +1768,7 @@ void App::stopTxNow(const char* reason) {
     guiLog("STOP TX NOW: reason='%s', dropped_audio=%zu, dropped_sim_pending=%zu",
            reason, dropped_audio, dropped_sim_pending);
 
-    rx_log_.push_back("[SYS] TX stopped immediately");
-    if (rx_log_.size() > MAX_RX_LOG) {
-        rx_log_.pop_front();
-    }
+    appendRxLogLine("[SYS] TX stopped immediately");
 }
 
 void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data_mod, CodeRate data_rate,
@@ -1979,29 +1956,28 @@ void App::renderOperateTab() {
                     }
                     if (!virtual_modem_) {
                         simulation_enabled_ = false;
-                        rx_log_.push_back("[SIM] Failed to initialize virtual station");
-                        if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
+                        appendRxLogLine("[SIM] Failed to initialize virtual station");
                         return;
                     }
                     if (radio_rx_enabled_) { stopRadioRx(); audio_.stopPlayback(); }
                     guiLog("Simulation ENABLED - virtual station: %s", virtual_callsign_.c_str());
-                    rx_log_.push_back("[SIM] Simulation enabled - connect to '" + virtual_callsign_ + "'");
+                    appendRxLogLine("[SIM] Simulation enabled - connect to '" + virtual_callsign_ + "'");
                     modem_.reset(); virtual_modem_->reset(); virtual_protocol_.reset();
                     if (options_.record_audio) {
                         recording_enabled_ = true; recorded_samples_.clear();
-                        rx_log_.push_back("[REC] Recording enabled");
+                        appendRxLogLine("[REC] Recording enabled");
                     }
                     // Start simulation threads for realistic audio streaming
                     startSimulator();
                 } else {
                     // Stop simulation threads
                     stopSimulator();
-                    rx_log_.push_back("[SIM] Simulation disabled");
+                    appendRxLogLine("[SIM] Simulation disabled");
                     if (recording_enabled_) {
                         recording_enabled_ = false;
                         if (!recorded_samples_.empty()) {
                             writeRecordingToFile();
-                            rx_log_.push_back("[REC] Saved: " + options_.record_path);
+                            appendRxLogLine("[REC] Saved: " + options_.record_path);
                         }
                     }
                     modem_.reset();
@@ -2010,7 +1986,6 @@ void App::renderOperateTab() {
                         audio_.startPlayback(); startRadioRx();
                     }
                 }
-                if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
             }
             if (simulation_enabled_) {
                 ImGui::SameLine();
@@ -2147,13 +2122,26 @@ void App::renderOperateTab() {
     }
 
     // Incoming call notification
-    if (!pending_incoming_call_.empty()) {
+    std::string pending_call_snapshot;
+    {
+        std::lock_guard<std::mutex> lock(rx_log_mutex_);
+        pending_call_snapshot = pending_incoming_call_;
+    }
+    if (!pending_call_snapshot.empty()) {
         ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
-                           "Incoming from %s!", pending_incoming_call_.c_str());
+                           "Incoming from %s!", pending_call_snapshot.c_str());
         ImGui::SameLine();
-        if (ImGui::SmallButton("Accept")) { protocol_.acceptCall(); pending_incoming_call_.clear(); }
+        if (ImGui::SmallButton("Accept")) {
+            protocol_.acceptCall();
+            std::lock_guard<std::mutex> lock(rx_log_mutex_);
+            pending_incoming_call_.clear();
+        }
         ImGui::SameLine();
-        if (ImGui::SmallButton("Reject")) { protocol_.rejectCall(); pending_incoming_call_.clear(); }
+        if (ImGui::SmallButton("Reject")) {
+            protocol_.rejectCall();
+            std::lock_guard<std::mutex> lock(rx_log_mutex_);
+            pending_incoming_call_.clear();
+        }
     }
 
     // Audio level meter (compact, only when RX active)
@@ -2183,11 +2171,12 @@ void App::renderOperateTab() {
     // ========================================
     ImGui::Text("Message Log");
     ImGui::SameLine();
-    if (ImGui::SmallButton("Clear")) rx_log_.clear();
+    if (ImGui::SmallButton("Clear")) clearRxLog();
+    auto rx_log_snapshot = snapshotRxLog();
     ImGui::SameLine();
     if (ImGui::SmallButton("Copy")) {
         std::string all_log;
-        for (const auto& msg : rx_log_) all_log += msg + "\n";
+        for (const auto& msg : rx_log_snapshot) all_log += msg + "\n";
         ImGui::SetClipboardText(all_log.c_str());
     }
     ImGui::SameLine();
@@ -2200,7 +2189,7 @@ void App::renderOperateTab() {
     if (log_height < 100) log_height = 100;  // Minimum height
 
     ImGui::BeginChild("RXLogRadio", ImVec2(-1, log_height), true);
-    for (const auto& msg : rx_log_) {
+    for (const auto& msg : rx_log_snapshot) {
         ImVec4 color(0.7f, 0.7f, 0.7f, 1.0f);
         if (msg.size() >= 4 && msg.substr(0, 4) == "[TX]") {
             color = ImVec4(0.5f, 0.8f, 1.0f, 1.0f);
@@ -2217,7 +2206,7 @@ void App::renderOperateTab() {
         ImGui::TextWrapped("%s", msg.c_str());
         ImGui::PopStyleColor();
     }
-    if (!rx_log_.empty()) ImGui::SetScrollHereY(1.0f);
+    if (!rx_log_snapshot.empty()) ImGui::SetScrollHereY(1.0f);
     ImGui::EndChild();
 
     // ========================================
@@ -2248,8 +2237,7 @@ void App::renderOperateTab() {
     if (ImGui::Button("Send##msg", ImVec2(80, 0)) || (send && can_send)) {
         std::string text(tx_text_buffer_);
         if (protocol_.sendMessage(text)) {
-            rx_log_.push_back("[TX] " + text);
-            if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
+            appendRxLogLine("[TX] " + text);
             tx_text_buffer_[0] = '\0';
         }
     }
@@ -2296,12 +2284,11 @@ void App::renderOperateTab() {
             uint32_t file_bytes = safeFileSizeBytes(file_path);
             if (protocol_.sendFile(file_path)) {
                 pending_file_tx_payload_bytes_ = file_bytes;
-                rx_log_.push_back("[FILE] Sending: " + file_path);
+                appendRxLogLine("[FILE] Sending: " + file_path);
             } else {
                 pending_file_tx_payload_bytes_ = 0;
-                rx_log_.push_back("[FILE] Failed to start transfer");
+                appendRxLogLine("[FILE] Failed to start transfer");
             }
-            if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
         }
         ImGui::EndDisabled();
     }
