@@ -86,12 +86,18 @@ void initStartupLog() {
     }
 
     if (g_startup_log_file) {
+        // Route early core logs here before App() sets up gui.log.
+        ultra::setLogFile(g_startup_log_file);
         writeStartupLog("ProjectUltra GUI startup log initialized");
     }
 }
 
 void closeStartupLog() {
     if (g_startup_log_file) {
+        // Avoid dangling FILE* in global logger after startup log closes.
+        if (ultra::g_log_file == g_startup_log_file) {
+            ultra::setLogFile(nullptr);
+        }
         writeStartupLog("ProjectUltra GUI startup log closing");
         std::fclose(g_startup_log_file);
         g_startup_log_file = nullptr;

@@ -35,8 +35,9 @@ void MCDPSKWaveform::initComponents() {
 
     // Keep constructor logging allocation-light for older Windows runtimes.
     gui::startupTrace("MCDPSKWaveform", "pre-created-log");
-    LOG_MODEM(INFO, "MCDPSKWaveform: Created with %d carriers, samples_per_sym=%d",
-              config_.num_carriers, config_.samples_per_symbol);
+    // Avoid LOG_MODEM in this early constructor path on older Win10 runtimes.
+    (void)config_.num_carriers;
+    (void)config_.samples_per_symbol;
     gui::startupTrace("MCDPSKWaveform", "post-created-log");
     gui::startupTrace("MCDPSKWaveform", "init-components-exit");
 }
