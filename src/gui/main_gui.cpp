@@ -377,6 +377,7 @@ int main(int argc, char* argv[]) {
 
     // Create application with parsed options
     writeStartupLog("Constructing App");
+    ultra::gui::startupTrace("main_gui", "before-app-construction");
     ultra::gui::App app(opts);
     writeStartupLog("App initialized");
 

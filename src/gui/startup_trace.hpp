@@ -1,59 +1,50 @@
 #pragma once
 
-#include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
-#include <filesystem>
-#include <mutex>
-#include <string>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace ultra {
 namespace gui {
 
 inline void startupTrace(const char* component, const char* phase) {
 #ifdef _WIN32
-    static std::mutex trace_mutex;
-    std::lock_guard<std::mutex> lock(trace_mutex);
+    static char g_trace_path[MAX_PATH] = {0};
+    static bool g_path_initialized = false;
 
-    namespace fs = std::filesystem;
-
-    std::string line;
-    {
-        using namespace std::chrono;
-        auto now = system_clock::now();
-        auto ms = duration_cast<milliseconds>(now.time_since_epoch()).count();
-        char buf[512];
-        std::snprintf(
-            buf, sizeof(buf), "[%lld][STARTUP][%s] %s\n",
-            static_cast<long long>(ms),
-            component ? component : "<unknown>",
-            phase ? phase : "<unknown>"
-        );
-        line = buf;
+    if (!g_path_initialized) {
+        const char* env_path = std::getenv("ULTRA_STARTUP_LOG");
+        if (env_path && env_path[0] != '\0') {
+            std::snprintf(g_trace_path, sizeof(g_trace_path), "%s", env_path);
+        } else {
+            char temp_path[MAX_PATH] = {0};
+            DWORD n = GetTempPathA(static_cast<DWORD>(sizeof(temp_path)), temp_path);
+            if (n > 0 && n < sizeof(temp_path)) {
+                char dir_path[MAX_PATH] = {0};
+                std::snprintf(dir_path, sizeof(dir_path), "%sProjectUltra", temp_path);
+                CreateDirectoryA(dir_path, nullptr);
+                std::snprintf(g_trace_path, sizeof(g_trace_path), "%s\\startup.log", dir_path);
+            } else {
+                std::snprintf(g_trace_path, sizeof(g_trace_path), "startup.log");
+            }
+        }
+        g_path_initialized = true;
     }
 
-    std::string env_log;
-    if (const char* p = std::getenv("ULTRA_STARTUP_LOG")) {
-        env_log = p;
+    if (g_trace_path[0] == '\0') {
+        return;
     }
 
-    fs::path log_path;
-    if (!env_log.empty()) {
-        log_path = fs::path(env_log);
-    } else if (const char* temp = std::getenv("TEMP")) {
-        log_path = fs::path(temp) / "ProjectUltra" / "startup.log";
-    } else {
-        log_path = fs::path("startup.log");
-    }
-
-    std::error_code ec;
-    if (!log_path.parent_path().empty()) {
-        fs::create_directories(log_path.parent_path(), ec);
-    }
-
-    if (FILE* f = std::fopen(log_path.string().c_str(), "a")) {
-        std::fwrite(line.data(), 1, line.size(), f);
+    if (FILE* f = std::fopen(g_trace_path, "a")) {
+        unsigned long long t = static_cast<unsigned long long>(GetTickCount64());
+        std::fprintf(f, "[%llu][STARTUP][%s] %s\n",
+                     t,
+                     component ? component : "<unknown>",
+                     phase ? phase : "<unknown>");
         std::fflush(f);
         std::fclose(f);
     }
@@ -65,4 +56,3 @@ inline void startupTrace(const char* component, const char* phase) {
 
 }  // namespace gui
 }  // namespace ultra
-
