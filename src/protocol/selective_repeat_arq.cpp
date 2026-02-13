@@ -731,6 +731,36 @@ void SelectiveRepeatARQ::setSendCompleteCallback(SendCompleteCallback cb) {
     on_send_complete_ = std::move(cb);
 }
 
+void SelectiveRepeatARQ::abortPendingTx() {
+    for (auto& slot : tx_window_) {
+        slot.active = false;
+        slot.acked = false;
+        slot.frame_data.clear();
+        slot.timeout_ms = 0;
+        slot.first_tx_ms = 0;
+        slot.rtt_sample_eligible = false;
+        slot.retry_count = 0;
+        slot.hole_ack_count = 0;
+        slot.fast_retx_count = 0;
+        slot.fast_retx_cooldown_ms = 0;
+        slot.hole_probe_armed = false;
+        slot.hole_probe_timer_ms = 0;
+        slot.hole_probe_count = 0;
+    }
+
+    tx_base_seq_ = tx_next_seq_;
+    tx_in_flight_ = 0;
+
+    // Cancel pending control TX from ARQ side as well.
+    sack_pending_ = false;
+    sack_timer_ms_ = 0;
+    frames_since_ack_ = 0;
+    ack_repeat_jobs_.clear();
+    ack_dedup_timer_ms_ = 0;
+
+    LOG_MODEM(INFO, "SR-ARQ: Aborted pending TX state");
+}
+
 void SelectiveRepeatARQ::reset() {
     for (auto& slot : tx_window_) {
         slot.active = false;

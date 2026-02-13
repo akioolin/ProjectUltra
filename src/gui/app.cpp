@@ -1849,7 +1849,26 @@ bool App::startRadioRx() {
     }
 #endif
 
+    audio_.setInputCaptureMode(
+        radio_rx_force_queue_mode_
+            ? AudioEngine::InputCaptureMode::QUEUE
+            : AudioEngine::InputCaptureMode::AUTO);
+
     std::string input_dev = getInputDeviceName();
+    if (!input_dev.empty()) {
+        bool found = false;
+        for (const auto& dev : input_devices_) {
+            if (dev == input_dev) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            guiLog("startRadioRx: configured input device missing: '%s' (rescan audio devices in Settings)",
+                   input_dev.c_str());
+            return false;
+        }
+    }
     if (!audio_.openInput(input_dev)) {
         guiLog("startRadioRx: openInput failed for '%s'",
                input_dev.empty() ? "Default" : input_dev.c_str());
@@ -1870,8 +1889,15 @@ bool App::startRadioRx() {
     radio_rx_started_ms_ = SDL_GetTicks();
     radio_rx_warmup_logged_ = false;
     radio_rx_first_chunk_logged_ = false;
+    radio_rx_no_data_deadline_ms_ = radio_rx_started_ms_ + 1000;
+    radio_rx_rearm_attempts_ = 0;
+    radio_rx_rearm_exhausted_logged_ = false;
+    radio_rx_active_device_ = input_dev.empty() ? "Default" : input_dev;
+    radio_rx_output_prime_attempted_ = false;
     guiLog("startRadioRx: capture started on '%s'",
            input_dev.empty() ? "Default" : input_dev.c_str());
+    guiLog("startRadioRx: input capture backend=%s",
+           audio_.isInputQueueMode() ? "queue" : "callback");
     return true;
 }
 
@@ -1883,6 +1909,11 @@ void App::stopRadioRx() {
     radio_rx_started_ms_ = 0;
     radio_rx_warmup_logged_ = false;
     radio_rx_first_chunk_logged_ = false;
+    radio_rx_no_data_deadline_ms_ = 0;
+    radio_rx_rearm_attempts_ = 0;
+    radio_rx_rearm_exhausted_logged_ = false;
+    radio_rx_active_device_.clear();
+    radio_rx_output_prime_attempted_ = false;
 }
 
 void App::pollRadioRx() {
@@ -1899,6 +1930,99 @@ void App::pollRadioRx() {
         // Drain a small amount during warm-up to avoid unbounded growth.
         (void)audio_.getRxSamples(2048);
         return;
+    }
+
+    // Some Linux/USB stacks can start capture without delivering samples immediately.
+    // Rearm capture on the SAME configured device a few times before giving up.
+    if (!radio_rx_first_chunk_logged_ &&
+        radio_rx_no_data_deadline_ms_ > 0 &&
+        now_ms >= radio_rx_no_data_deadline_ms_) {
+        SDL_AudioStatus in_status = audio_.getInputStatus();
+        const char* in_status_str = (in_status == SDL_AUDIO_PLAYING) ? "playing" :
+                                    (in_status == SDL_AUDIO_PAUSED)  ? "paused"  :
+                                                                       "stopped";
+        guiLog("pollRadioRx: no RX data diagnostics: backend=%s status=%s queued=%u bytes",
+               audio_.isInputQueueMode() ? "queue" : "callback",
+               in_status_str,
+               static_cast<unsigned>(audio_.getQueuedInputBytes()));
+
+#ifndef _WIN32
+        // Some USB radio codecs require an active output stream to keep duplex
+        // clocking alive. Prime output once before escalating capture recovery.
+        if (!radio_rx_output_prime_attempted_) {
+            radio_rx_output_prime_attempted_ = true;
+            std::string output_dev = getOutputDeviceName();
+            if (!audio_.hasOutputDevice()) {
+                if (audio_.openOutput(output_dev)) {
+                    audio_.startPlayback();  // plays silence until TX queue has data
+                    guiLog("pollRadioRx: primed output '%s' to wake duplex capture",
+                           output_dev.empty() ? "Default" : output_dev.c_str());
+                } else {
+                    guiLog("pollRadioRx: output prime failed for '%s'",
+                           output_dev.empty() ? "Default" : output_dev.c_str());
+                }
+            } else {
+                audio_.startPlayback();
+                guiLog("pollRadioRx: output already open; playback started for duplex prime");
+            }
+            radio_rx_no_data_deadline_ms_ = now_ms + 1000;
+            return;
+        }
+#endif
+
+        // Linux USB edge case: callback capture can stall until mixer state changes.
+        // Fall back to queued capture on the SAME configured device.
+#ifndef _WIN32
+        if (!radio_rx_force_queue_mode_ && radio_rx_rearm_attempts_ >= 2) {
+            guiLog("pollRadioRx: no data on callback capture; switching '%s' to queued capture mode",
+                   radio_rx_active_device_.empty() ? "Default" : radio_rx_active_device_.c_str());
+            audio_.stopCapture();
+            audio_.closeInput();
+            radio_rx_enabled_ = false;
+            radio_rx_force_queue_mode_ = true;
+            if (startRadioRx()) {
+                guiLog("pollRadioRx: queued capture fallback armed on '%s'",
+                       radio_rx_active_device_.empty() ? "Default" : radio_rx_active_device_.c_str());
+                return;
+            }
+            guiLog("pollRadioRx: queued capture fallback failed on '%s'",
+                   radio_rx_active_device_.empty() ? "Default" : radio_rx_active_device_.c_str());
+        }
+#endif
+
+        if (radio_rx_rearm_attempts_ < 4) {
+            radio_rx_rearm_attempts_++;
+            guiLog("pollRadioRx: no RX chunks after %ums on '%s'; rearming capture (%d/4)",
+                   now_ms - radio_rx_started_ms_,
+                   radio_rx_active_device_.empty() ? "Default" : radio_rx_active_device_.c_str(),
+                   radio_rx_rearm_attempts_);
+            // Escalate from soft pause/unpause to hard close/open on repeated stalls.
+            bool hard_reopen = audio_.isInputQueueMode() || radio_rx_rearm_attempts_ >= 3;
+            if (hard_reopen) {
+                std::string input_dev = getInputDeviceName();
+                audio_.stopCapture();
+                audio_.closeInput();
+                if (!audio_.openInput(input_dev)) {
+                    guiLog("pollRadioRx: hard reopen failed for '%s'",
+                           input_dev.empty() ? "Default" : input_dev.c_str());
+                } else {
+                    audio_.setRxCallback(AudioEngine::RxCallback{});
+                    audio_.setLoopbackEnabled(false);
+                    audio_.startCapture();
+                    guiLog("pollRadioRx: hard reopened input '%s' (backend=%s)",
+                           input_dev.empty() ? "Default" : input_dev.c_str(),
+                           audio_.isInputQueueMode() ? "queue" : "callback");
+                }
+            } else {
+                audio_.stopCapture();
+                audio_.startCapture();
+            }
+            radio_rx_no_data_deadline_ms_ = now_ms + 1000;
+        } else if (!radio_rx_rearm_exhausted_logged_) {
+            guiLog("pollRadioRx: still no RX chunks after rearm attempts on '%s'; check OS input level/source",
+                   radio_rx_active_device_.empty() ? "Default" : radio_rx_active_device_.c_str());
+            radio_rx_rearm_exhausted_logged_ = true;
+        }
     }
 
     // Bounded drain per frame to keep UI responsive while preventing RX backlog.
@@ -1921,6 +2045,9 @@ void App::pollRadioRx() {
         if (!radio_rx_first_chunk_logged_) {
             guiLog("pollRadioRx: first RX chunk modem processing complete");
             radio_rx_first_chunk_logged_ = true;
+            radio_rx_no_data_deadline_ms_ = 0;
+            radio_rx_rearm_attempts_ = 0;
+            radio_rx_rearm_exhausted_logged_ = false;
         }
         if (waterfall_) {
             waterfall_->addSamples(samples.data(), samples.size());
@@ -1929,6 +2056,10 @@ void App::pollRadioRx() {
 }
 
 void App::stopTxNow(const char* reason) {
+    // Abort protocol-level retransmit/resend timers before clearing audio queues
+    // so no new outbound frames are scheduled after operator stop.
+    protocol_.abortTxNow();
+
     size_t dropped_audio = audio_.getTxQueueSize();
     if (dropped_audio > 0) {
         audio_.clearTxQueue();

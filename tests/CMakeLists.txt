@@ -111,4 +111,8 @@ add_test(NAME ModeChange COMMAND test_mode_change)
 add_executable(test_throughput ../tools/test_throughput.cpp)
 target_link_libraries(test_throughput PRIVATE ultra_core)
 
+# AFDM voice-band geometry and audio-path safety checks
+add_executable(test_afdm_voiceband test_afdm_voiceband.cpp)
+target_link_libraries(test_afdm_voiceband PRIVATE ultra_core)
+add_test(NAME AFDMVoiceband COMMAND test_afdm_voiceband)
 

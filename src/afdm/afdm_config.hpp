@@ -5,8 +5,10 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <cmath>
+#include <utility>
 #include <vector>
 
 namespace ultra {
@@ -25,9 +27,9 @@ namespace afdm {
  */
 struct AFDMConfig {
     // Core DAFT parameters
-    // N must be large enough that the occupied bandwidth fits in HF audio band (~2.8 kHz)
-    // With bin spacing = sample_rate/N, for 30 carriers: N >= 48000 * 30 / 2800 ≈ 514
-    // Using N=512 gives 93.75 Hz spacing, same as OFDM
+    // N must be large enough that the occupied bandwidth fits in HF audio band (~2.8 kHz).
+    // Bin spacing is sample_rate / N (not "bandwidth / N").
+    // With N=512 at 48 kHz: bin spacing = 93.75 Hz (same as OFDM).
     //
     // IMPORTANT: AFDM chirps (c1>0) are INCOMPATIBLE with narrowband audio!
     // The chirped waveform spreads energy across frequencies, overlapping with
@@ -61,7 +63,8 @@ struct AFDMConfig {
 
     // Derived parameters
     float subcarrierSpacing() const {
-        return bandwidth / N;
+        if (N == 0) return 0.0f;
+        return sample_rate / static_cast<float>(N);
     }
 
     float symbolDuration() const {
@@ -94,33 +97,88 @@ struct AFDMConfig {
         return c1 >= minC1ForDiversity(max_doppler_hz);
     }
 
-    // Get FFT indices for active carriers (centered around DC, like OFDM)
-    // Returns indices in FFT bin order: negative frequencies wrap to end of array
-    // Example: for num_carriers=30, N=512: bins -15..-1 → 497..511, bins 0..14 → 0..14
+    // Get FFT indices for active carriers (centered around DC, like OFDM).
+    // Returns exactly num_carriers bins (excluding DC).
+    // Negative frequencies wrap to end of array.
+    // Example: for num_carriers=30, N=512: bins -15..-1 and +1..+15.
     std::vector<int> getActiveCarrierIndices() const {
         std::vector<int> indices;
-        indices.reserve(num_carriers);
+        if (N <= 1 || num_carriers == 0) {
+            return indices;
+        }
 
-        int neg_limit = static_cast<int>(num_carriers) / 2;
-        int pos_limit = (static_cast<int>(num_carriers) + 1) / 2;
+        int requested = static_cast<int>(num_carriers);
+        int max_usable = static_cast<int>(N) - 1;  // Exclude DC.
+        requested = std::min(requested, max_usable);
+        indices.reserve(static_cast<size_t>(requested));
 
-        for (int i = -neg_limit; i < pos_limit; ++i) {
-            if (i == 0) continue;  // Skip DC
+        int neg_count = requested / 2;
+        int pos_count = requested - neg_count;
+
+        for (int i = -neg_count; i <= -1; ++i) {
             int idx = (i + static_cast<int>(N)) % static_cast<int>(N);
+            indices.push_back(idx);
+        }
+        for (int i = 1; i <= pos_count; ++i) {
+            int idx = i % static_cast<int>(N);
             indices.push_back(idx);
         }
         return indices;
     }
 
+    // Number of active carriers used in DAFT bins.
+    uint32_t activeCarrierCount() const {
+        return static_cast<uint32_t>(getActiveCarrierIndices().size());
+    }
+
     // Number of data subcarriers (excluding pilots and guards)
     // Only count within the num_carriers active bins
     uint32_t dataSubcarriers() const {
-        uint32_t active = num_carriers - 1;  // Exclude DC
+        uint32_t active = activeCarrierCount();
+        if (active == 0) return 0;
+        uint32_t spacing = std::max<uint32_t>(pilot_spacing, 1u);
         // Pilots at indices 0, pilot_spacing, 2*pilot_spacing, ...
         // Use ceiling division to get correct count
-        uint32_t num_pilots = (active + pilot_spacing - 1) / pilot_spacing;
+        uint32_t num_pilots = (active + spacing - 1) / spacing;
         uint32_t guard_total = num_pilots * pilot_guard * 2;
+        if (guard_total + num_pilots >= active) return 0;
         return active - num_pilots - guard_total;
+    }
+
+    // Occupied RF/audio band edges for active carriers after upmix.
+    std::pair<float, float> occupiedBandEdgesHz() const {
+        auto active = getActiveCarrierIndices();
+        if (active.empty()) {
+            return {center_freq, center_freq};
+        }
+
+        int min_bin = 0;
+        int max_bin = 0;
+        bool first = true;
+        const int half = static_cast<int>(N / 2);
+
+        for (int idx : active) {
+            int signed_bin = (idx <= half) ? idx : (idx - static_cast<int>(N));
+            if (first) {
+                min_bin = signed_bin;
+                max_bin = signed_bin;
+                first = false;
+                continue;
+            }
+            min_bin = std::min(min_bin, signed_bin);
+            max_bin = std::max(max_bin, signed_bin);
+        }
+
+        const float spacing = subcarrierSpacing();
+        return {
+            center_freq + static_cast<float>(min_bin) * spacing,
+            center_freq + static_cast<float>(max_bin) * spacing
+        };
+    }
+
+    float occupiedBandwidthHz() const {
+        auto edges = occupiedBandEdgesHz();
+        return edges.second - edges.first;
     }
 
     // Data symbols per frame

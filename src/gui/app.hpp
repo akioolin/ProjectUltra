@@ -89,6 +89,12 @@ private:
     uint32_t radio_rx_started_ms_ = 0;
     bool radio_rx_warmup_logged_ = false;
     bool radio_rx_first_chunk_logged_ = false;
+    uint32_t radio_rx_no_data_deadline_ms_ = 0;
+    int radio_rx_rearm_attempts_ = 0;
+    bool radio_rx_rearm_exhausted_logged_ = false;
+    std::string radio_rx_active_device_;
+    bool radio_rx_force_queue_mode_ = false;
+    bool radio_rx_output_prime_attempted_ = false;
 
     // ARQ Protocol state
     protocol::ProtocolEngine protocol_;

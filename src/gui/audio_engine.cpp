@@ -133,15 +133,32 @@ bool AudioEngine::openInput(const std::string& device) {
     want.callback = inputCallback;
     want.userdata = this;
 
+    bool use_queue_capture = false;
+    switch (input_capture_mode_) {
+        case InputCaptureMode::QUEUE:
+            use_queue_capture = true;
+            break;
+        case InputCaptureMode::CALLBACK:
+            use_queue_capture = false;
+            break;
+        case InputCaptureMode::AUTO:
 #ifdef _WIN32
-    // Win10 low-end stability: prefer queued capture (no SDL input callback thread).
-    // Main thread will poll/dequeue via getRxSamples().
-    want.callback = nullptr;
-    want.userdata = nullptr;
-    input_queue_mode_ = true;
+            // Win10 low-end stability: prefer queued capture by default.
+            use_queue_capture = true;
 #else
-    input_queue_mode_ = false;
+            use_queue_capture = false;
 #endif
+            break;
+    }
+
+    if (use_queue_capture) {
+        // Queued capture: no SDL callback thread; main thread dequeues samples.
+        want.callback = nullptr;
+        want.userdata = nullptr;
+        input_queue_mode_ = true;
+    } else {
+        input_queue_mode_ = false;
+    }
 
     const char* dev_name = (device.empty() || device == "Default") ? nullptr : device.c_str();
 
@@ -290,6 +307,20 @@ void AudioEngine::stopCapture() {
 void AudioEngine::clearRxBuffer() {
     std::lock_guard<AudioEngineMutex> lock(rx_mutex_);
     rx_buffer_.clear();
+}
+
+SDL_AudioStatus AudioEngine::getInputStatus() const {
+    if (input_device_ == 0) {
+        return SDL_AUDIO_STOPPED;
+    }
+    return SDL_GetAudioDeviceStatus(input_device_);
+}
+
+Uint32 AudioEngine::getQueuedInputBytes() const {
+    if (!input_queue_mode_ || input_device_ == 0) {
+        return 0;
+    }
+    return SDL_GetQueuedAudioSize(input_device_);
 }
 
 void AudioEngine::setOutputGain(float gain) {

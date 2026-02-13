@@ -124,6 +124,13 @@ void ProtocolEngine::disconnect() {
     }
 }
 
+void ProtocolEngine::abortTxNow() {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.abortTxNow();
+    tx_queue_.clear();
+    defer_tx_ = false;
+}
+
 bool ProtocolEngine::sendMessage(const std::string& text) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.sendMessage(text);

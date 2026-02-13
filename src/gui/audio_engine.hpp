@@ -40,6 +40,12 @@ using AudioEngineMutex = std::mutex;
 // Audio engine for real-time audio I/O using SDL2
 class AudioEngine {
 public:
+    enum class InputCaptureMode {
+        AUTO,
+        CALLBACK,
+        QUEUE
+    };
+
     AudioEngine();
     ~AudioEngine();
 
@@ -74,6 +80,11 @@ public:
     void setLoopbackEnabled(bool enabled) { loopback_enabled_ = enabled; }
     bool isLoopbackEnabled() const { return loopback_enabled_; }
 
+    // Input capture backend selection (for Linux USB edge cases)
+    void setInputCaptureMode(InputCaptureMode mode) { input_capture_mode_ = mode; }
+    InputCaptureMode getInputCaptureMode() const { return input_capture_mode_; }
+    bool isInputQueueMode() const { return input_queue_mode_; }
+
     // Loopback channel simulation
     void setLoopbackSNR(float snr_db) { loopback_snr_db_ = snr_db; }
     float getLoopbackSNR() const { return loopback_snr_db_; }
@@ -90,6 +101,8 @@ public:
     bool isCapturing() const { return capturing_; }
     void clearRxBuffer();  // Clear captured audio buffer
     void setRxMuted(bool muted) { rx_muted_ = muted; }  // Prevent callback from firing
+    SDL_AudioStatus getInputStatus() const;
+    Uint32 getQueuedInputBytes() const;
 
     // Audio parameters
     int getSampleRate() const { return sample_rate_; }
@@ -122,6 +135,7 @@ private:
     SDL_AudioDeviceID output_device_ = 0;
     SDL_AudioDeviceID input_device_ = 0;
     bool input_queue_mode_ = false;
+    InputCaptureMode input_capture_mode_ = InputCaptureMode::AUTO;
 
     // TX buffer (samples waiting to be played)
     std::queue<float> tx_queue_;

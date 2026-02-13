@@ -62,6 +62,7 @@ public:
     void resetStats() override { stats_ = ARQStats{}; }
 
     void reset() override;
+    void abortPendingTx();
 
     // Set the code rate for DATA frame total_cw calculation
     void setCodeRate(CodeRate rate) { code_rate_ = rate; }

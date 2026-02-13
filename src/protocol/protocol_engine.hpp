@@ -81,6 +81,7 @@ public:
     void acceptCall();
     void rejectCall();
     void disconnect();
+    void abortTxNow();
 
     // --- Data Transfer ---
 

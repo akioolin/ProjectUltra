@@ -7,9 +7,29 @@
 #include <stdexcept>
 #include <algorithm>
 #include <numeric>
+#include <string>
 
 namespace ultra {
 namespace afdm {
+
+namespace {
+
+constexpr float kAudioC1Epsilon = 1e-6f;
+
+bool usesAudioIncompatibleC1(const AFDMConfig& config) {
+    return std::abs(config.c1) > kAudioC1Epsilon;
+}
+
+void validateAudioChainConfig(const AFDMConfig& config, const char* path_name) {
+    if (usesAudioIncompatibleC1(config)) {
+        throw std::runtime_error(
+            std::string("AFDM ") + path_name +
+            " audio path requires c1=0. c1>0 needs complex I/Q baseband."
+        );
+    }
+}
+
+}  // namespace
 
 // ============================================================================
 // Symbol Mapping Utilities
@@ -281,6 +301,8 @@ Samples AFDMModulator::upmix(const std::vector<Complex>& baseband) {
 }
 
 Samples AFDMModulator::modulate(ByteSpan data, Modulation mod) {
+    validateAudioChainConfig(config_, "TX");
+
     // Map data to symbols
     auto data_symbols = mapToSymbols(data, mod);
 
@@ -607,6 +629,8 @@ std::vector<float> AFDMDemodulator::demapSoft(const std::vector<Complex>& symbol
 }
 
 std::vector<float> AFDMDemodulator::demodulate(SampleSpan samples, Modulation mod) {
+    validateAudioChainConfig(config_, "RX");
+
     // Downmix to baseband
     auto baseband = downmix(samples);
 

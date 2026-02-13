@@ -316,6 +316,58 @@ void Connection::disconnect() {
     }
 }
 
+void Connection::abortTxNow() {
+    // Cancel all outbound ARQ activity (data retransmit timers, delayed ACK repeats,
+    // delayed SACK, in-flight TX slots) while preserving RX reassembly state.
+    arq_.abortPendingTx();
+
+    // Cancel pending local TX assembly/burst state.
+    bool had_pending_message = !pending_tx_fragments_.empty();
+    pending_tx_fragments_.clear();
+    pending_tx_fragment_flags_.clear();
+    next_fragment_idx_ = 0;
+    acked_fragment_count_ = 0;
+    burst_mode_active_ = false;
+    burst_tx_buffer_.clear();
+
+    // Cancel file TX if active. Keep RX file state untouched.
+    if (file_transfer_.getState() == FileTransferState::SENDING) {
+        file_transfer_.cancel();
+    }
+
+    // Cancel pending control-path retries/timeouts.
+    mode_change_pending_ = false;
+    mode_change_timeout_ms_ = 0;
+    mode_change_retry_count_ = 0;
+    disconnect_pending_ = false;
+    disconnect_pending_ms_ = 0;
+    disconnect_ack_retransmit_ms_ = 0;
+    disconnect_ack_frame_.clear();
+    disconnect_frame_.clear();
+    disconnect_retry_count_ = 0;
+    disconnect_retransmit_ms_ = 0;
+    timeout_remaining_ms_ = 0;
+    connect_retry_count_ = 0;
+    ping_retry_count_ = 0;
+    responder_handshake_wait_ms_ = 0;
+
+    // Stop transient connection attempts immediately.
+    if (state_ == ConnectionState::PROBING ||
+        state_ == ConnectionState::CONNECTING ||
+        state_ == ConnectionState::DISCONNECTING) {
+        enterDisconnected("TX aborted");
+        return;
+    }
+
+    // Connected state remains established; only outbound transfer is aborted.
+    if (state_ == ConnectionState::CONNECTED && had_pending_message && on_message_sent_) {
+        on_message_sent_(false);
+    }
+
+    LOG_MODEM(INFO, "Connection: TX abort applied (state=%s)",
+              connectionStateToString(state_));
+}
+
 // =============================================================================
 // DATA TRANSFER
 // =============================================================================
