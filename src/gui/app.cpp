@@ -1959,7 +1959,7 @@ void App::renderOperateTab() {
     // ========================================
     // Connection Row: Callsign input + buttons
     // ========================================
-    bool has_callsign = strlen(settings_.callsign) >= 3;
+    bool has_callsign = boundedCStringLen(settings_.callsign) >= 3;
     auto conn_state = protocol_.getState();
 
     // Status line
@@ -2014,7 +2014,7 @@ void App::renderOperateTab() {
 
     float btn_w = 80;
     ImGui::BeginDisabled(conn_state != protocol::ConnectionState::DISCONNECTED ||
-                         !has_callsign || strlen(remote_callsign_) < 3);
+                         !has_callsign || boundedCStringLen(remote_callsign_) < 3);
     if (ImGui::Button("Connect", ImVec2(btn_w, 0))) {
         guiLog("Connect clicked: simulation=%d, remote='%s'", simulation_enabled_, remote_callsign_);
         if (!simulation_enabled_ && !radio_rx_enabled_) {
@@ -2143,7 +2143,7 @@ void App::renderOperateTab() {
         }
     }
 
-    bool can_send = !tx_in_progress_ && strlen(tx_text_buffer_) > 0 &&
+    bool can_send = !tx_in_progress_ && boundedCStringLen(tx_text_buffer_) > 0 &&
                     protocol_.isConnected() && protocol_.isReadyToSend();
 
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 90);
@@ -2196,7 +2196,7 @@ void App::renderOperateTab() {
         }
         ImGui::SameLine();
         bool can_send_file = protocol_.isConnected() && protocol_.isReadyToSend() &&
-                             strlen(file_path_buffer_) > 0;
+                             boundedCStringLen(file_path_buffer_) > 0;
         ImGui::BeginDisabled(!can_send_file);
         if (ImGui::Button("Send##file", ImVec2(60, 0))) {
             last_progress_milestone_ = 0;  // Reset milestone tracker

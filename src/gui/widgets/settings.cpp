@@ -89,6 +89,12 @@ static void copyBounded(char* dst, size_t dst_size, const std::string& value) {
     dst[dst_size - 1] = '\0';
 }
 
+template <size_t N>
+static size_t boundedCStringLen(const char (&buf)[N]) {
+    const void* term = std::memchr(buf, '\0', N);
+    return term ? static_cast<size_t>(static_cast<const char*>(term) - buf) : N;
+}
+
 // Save settings to INI file
 bool AppSettings::save(const std::string& path) const {
     std::string filepath = path.empty() ? getDefaultPath() : path;
@@ -280,7 +286,8 @@ void SettingsWindow::renderStationTab(AppSettings& settings) {
     ImGui::Text("Callsign");
     ImGui::SetNextItemWidth(150);
     char old_call[16];
-    strncpy(old_call, settings.callsign, sizeof(old_call));
+    std::strncpy(old_call, settings.callsign, sizeof(old_call) - 1);
+    old_call[sizeof(old_call) - 1] = '\0';
 
     if (ImGui::InputText("##callsign", settings.callsign, sizeof(settings.callsign),
                          ImGuiInputTextFlags_CharsUppercase)) {
@@ -313,7 +320,7 @@ void SettingsWindow::renderStationTab(AppSettings& settings) {
     ImGui::Spacing();
 
     // Validation indicator
-    bool valid_call = strlen(settings.callsign) >= 3;
+    bool valid_call = boundedCStringLen(settings.callsign) >= 3;
     if (valid_call) {
         ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "Station configured");
     } else {
@@ -337,7 +344,8 @@ void SettingsWindow::renderStationTab(AppSettings& settings) {
     std::string placeholder = "Default: " + default_path;
 
     char old_dir[512];
-    strncpy(old_dir, settings.receive_directory, sizeof(old_dir));
+    std::strncpy(old_dir, settings.receive_directory, sizeof(old_dir) - 1);
+    old_dir[sizeof(old_dir) - 1] = '\0';
 
     if (ImGui::InputTextWithHint("##receive_dir", placeholder.c_str(),
                                   settings.receive_directory, sizeof(settings.receive_directory))) {
