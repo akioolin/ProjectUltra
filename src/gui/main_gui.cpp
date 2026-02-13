@@ -473,11 +473,16 @@ int main(int argc, char* argv[]) {
     writeStartupLog("Constructing App");
     ultra::gui::startupTrace("main_gui", "before-app-construction");
     ultra::gui::App app(opts);
+    ultra::gui::startupTrace("main_gui", "after-app-construction");
     writeStartupLog("App initialized");
 
     // Main loop
     bool running = true;
+    bool first_frame = true;
     while (running) {
+        if (first_frame) {
+            ultra::gui::startupTrace("main_gui", "first-frame-loop-enter");
+        }
         // Poll events
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
@@ -494,6 +499,9 @@ int main(int argc, char* argv[]) {
         }
 
         // Start ImGui frame
+        if (first_frame) {
+            ultra::gui::startupTrace("main_gui", "first-frame-begin-backend");
+        }
         if (using_software_renderer) {
             ImGui_ImplSDLRenderer2_NewFrame();
             ImGui_ImplSDL2_NewFrame();
@@ -502,11 +510,23 @@ int main(int argc, char* argv[]) {
             ImGui_ImplSDL2_NewFrame();
         }
         ImGui::NewFrame();
+        if (first_frame) {
+            ultra::gui::startupTrace("main_gui", "first-frame-newframe-ok");
+        }
 
         // Render application UI
+        if (first_frame) {
+            ultra::gui::startupTrace("main_gui", "first-frame-app-render-enter");
+        }
         app.render();
+        if (first_frame) {
+            ultra::gui::startupTrace("main_gui", "first-frame-app-render-exit");
+        }
 
         // Rendering
+        if (first_frame) {
+            ultra::gui::startupTrace("main_gui", "first-frame-render-submit-enter");
+        }
         ImGui::Render();
         if (using_software_renderer) {
             SDL_SetRenderDrawColor(sdl_renderer, 26, 26, 31, 255);
@@ -519,6 +539,10 @@ int main(int argc, char* argv[]) {
             glClear(GL_COLOR_BUFFER_BIT);
             ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
             SDL_GL_SwapWindow(window);
+        }
+        if (first_frame) {
+            ultra::gui::startupTrace("main_gui", "first-frame-render-submit-exit");
+            first_frame = false;
         }
     }
 
