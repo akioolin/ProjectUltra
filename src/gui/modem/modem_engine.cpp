@@ -68,9 +68,10 @@ ModemEngine::ModemEngine() {
     // ========================================================================
     streaming_decoder_ = std::make_unique<StreamingDecoder>();
     startupTrace("ModemEngine", "streaming-decoder-created");
-    streaming_decoder_->setLogPrefix(log_prefix_);
+    startupTrace("ModemEngine", "decoder-set-log-prefix-skip");
 
     // Set callbacks to wire into existing ModemEngine callbacks
+    startupTrace("ModemEngine", "decoder-set-frame-callback-enter");
     streaming_decoder_->setFrameCallback([this](const DecodeResult& result) {
         // Update SNR/sync stats before delivering frame so downstream callbacks
         // (ProtocolEngine via raw_data_callback_) read fresh channel estimates.
@@ -89,7 +90,9 @@ ModemEngine::ModemEngine() {
         }
         last_rx_complete_time_ = std::chrono::steady_clock::now();
     });
+    startupTrace("ModemEngine", "decoder-set-frame-callback-exit");
 
+    startupTrace("ModemEngine", "decoder-set-ping-callback-enter");
     streaming_decoder_->setPingCallback([this](float snr_db, float cfo_hz) {
         if (ping_received_callback_) {
             ping_received_callback_(snr_db);
@@ -101,15 +104,18 @@ ModemEngine::ModemEngine() {
         });
         last_rx_complete_time_ = std::chrono::steady_clock::now();
     });
+    startupTrace("ModemEngine", "decoder-set-ping-callback-exit");
 
     // Sync StreamingDecoder with initial waveform mode
     // When disconnected, use MC_DPSK for PING detection (chirp-based sync)
     // When connected, use the negotiated waveform
     protocol::WaveformMode decoder_mode = connected_ ? waveform_mode_ : protocol::WaveformMode::MC_DPSK;
+    startupTrace("ModemEngine", "decoder-set-mode-enter");
     streaming_decoder_->setMode(decoder_mode, connected_);
     startupTrace("ModemEngine", "decoder-mode-set");
 
     // Sync MC-DPSK carrier count with ModemEngine's config
+    startupTrace("ModemEngine", "decoder-set-carriers-enter");
     streaming_decoder_->setMCDPSKCarriers(mc_dpsk_config_.num_carriers);
     startupTrace("ModemEngine", "decoder-carriers-set");
 
