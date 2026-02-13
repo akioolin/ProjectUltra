@@ -811,9 +811,19 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         initAudio();
         if (audio_initialized_) {
             std::string output_dev = getOutputDeviceName();
-            audio_.openOutput(output_dev);
-            audio_.startPlayback();
-            startRadioRx();
+            if (audio_.openOutput(output_dev)) {
+                audio_.startPlayback();
+                if (audio_.isPlaying()) {
+                    deferred_radio_rx_start_pending_ = true;
+                    deferred_radio_rx_start_deadline_ms_ = SDL_GetTicks() + 250;
+                    deferred_radio_rx_start_attempts_ = 0;
+                    guiLog("Startup audio stage: playback active, delaying RX capture by 250ms");
+                } else {
+                    guiLog("Startup audio stage: playback did not start, capture deferred");
+                }
+            } else {
+                guiLog("Startup audio stage: openOutput failed");
+            }
         }
         ultra::gui::startupTrace("App", "init-audio-exit");
     } else {
@@ -821,6 +831,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         deferred_audio_auto_init_pending_ = true;
         deferred_audio_auto_init_deadline_ms_ = SDL_GetTicks() + 300;
         deferred_audio_auto_init_attempts_ = 0;
+        deferred_audio_wait_logged_ = false;
         ultra::gui::startupTrace("App", "deferred-audio-scheduled");
     }
     ultra::gui::startupTrace("App", "ctor-body-exit");
@@ -1321,6 +1332,8 @@ void App::initAudio() {
     // Populate settings window device lists
     settings_window_.input_devices = input_devices_;
     settings_window_.output_devices = output_devices_;
+    guiLog("initAudio: enumerated %zu input device(s), %zu output device(s)",
+           input_devices_.size(), output_devices_.size());
 
     audio_initialized_ = true;
     ultra::gui::startupTrace("App", "initAudio-exit");
@@ -1484,6 +1497,7 @@ void App::updateAdaptiveAdvisory(float snr_db, float fading_index) {
 
 void App::render() {
     static bool first_render = true;
+    render_frames_seen_++;
     if (first_render) {
         ultra::gui::startupTrace("App", "render-enter");
     }
@@ -1500,40 +1514,82 @@ void App::render() {
     // Avoids feeding modem state directly from SDL callback threads.
     pollRadioRx();
 
-    // Safe-startup mode: auto-start audio shortly after first frame.
+    // Safe-startup mode: auto-start audio shortly after first frames.
     // Keeps process bring-up lightweight while preserving "auto-listen" behavior.
     if (deferred_audio_auto_init_pending_ &&
         !simulation_enabled_ &&
         !audio_initialized_) {
-        uint32_t now_ms = SDL_GetTicks();
-        if (now_ms >= deferred_audio_auto_init_deadline_ms_) {
-            ultra::gui::startupTrace("App", "deferred-audio-init-enter");
-            initAudio();
-            if (audio_initialized_) {
-                ultra::gui::startupTrace("App", "deferred-audio-open-output-enter");
-                std::string output_dev = getOutputDeviceName();
-                if (audio_.openOutput(output_dev)) {
-                    audio_.startPlayback();
-                    startRadioRx();
-                    guiLog("Deferred audio auto-init succeeded");
-                    ultra::gui::startupTrace("App", "deferred-audio-open-output-exit");
-                    deferred_audio_auto_init_pending_ = false;
+        if (render_frames_seen_ < 6) {
+            if (!deferred_audio_wait_logged_) {
+                guiLog("Deferred audio guard: waiting for UI warm-up frames (%u/6)",
+                       render_frames_seen_);
+                deferred_audio_wait_logged_ = true;
+            }
+        } else {
+            deferred_audio_wait_logged_ = false;
+            uint32_t now_ms = SDL_GetTicks();
+            if (now_ms >= deferred_audio_auto_init_deadline_ms_) {
+                ultra::gui::startupTrace("App", "deferred-audio-init-enter");
+                initAudio();
+                if (audio_initialized_) {
+                    ultra::gui::startupTrace("App", "deferred-audio-open-output-enter");
+                    std::string output_dev = getOutputDeviceName();
+                    if (audio_.openOutput(output_dev)) {
+                        audio_.startPlayback();
+                        if (audio_.isPlaying()) {
+                            deferred_radio_rx_start_pending_ = true;
+                            deferred_radio_rx_start_deadline_ms_ = now_ms + 250;
+                            deferred_radio_rx_start_attempts_ = 0;
+                            guiLog("Deferred audio stage 1/2 complete: playback active, waiting 250ms before capture");
+                            ultra::gui::startupTrace("App", "deferred-audio-open-output-exit");
+                            deferred_audio_auto_init_pending_ = false;
+                        } else {
+                            guiLog("Deferred audio auto-init: playback did not start");
+                            ultra::gui::startupTrace("App", "deferred-audio-open-output-fail");
+                            deferred_audio_auto_init_pending_ = false;
+                        }
+                    } else {
+                        guiLog("Deferred audio auto-init: openOutput failed");
+                        ultra::gui::startupTrace("App", "deferred-audio-open-output-fail");
+                        deferred_audio_auto_init_pending_ = false;
+                    }
                 } else {
-                    guiLog("Deferred audio auto-init: openOutput failed");
-                    ultra::gui::startupTrace("App", "deferred-audio-open-output-fail");
-                    deferred_audio_auto_init_pending_ = false;
+                    deferred_audio_auto_init_attempts_++;
+                    ultra::gui::startupTrace("App", "deferred-audio-init-fail");
+                    if (deferred_audio_auto_init_attempts_ >= 3) {
+                        guiLog("Deferred audio auto-init failed after %d attempts, manual init required",
+                               deferred_audio_auto_init_attempts_);
+                        deferred_audio_auto_init_pending_ = false;
+                    } else {
+                        deferred_audio_auto_init_deadline_ms_ = now_ms + 700;
+                        guiLog("Deferred audio auto-init retry %d/3 scheduled",
+                               deferred_audio_auto_init_attempts_ + 1);
+                    }
                 }
+            }
+        }
+    }
+
+    // Stage 2: start RX capture only after playback is confirmed and warm.
+    if (deferred_radio_rx_start_pending_ &&
+        !simulation_enabled_ &&
+        audio_initialized_) {
+        uint32_t now_ms = SDL_GetTicks();
+        if (now_ms >= deferred_radio_rx_start_deadline_ms_) {
+            if (startRadioRx()) {
+                guiLog("Deferred audio stage 2/2 complete: RX capture started");
+                deferred_radio_rx_start_pending_ = false;
+                deferred_radio_rx_start_attempts_ = 0;
             } else {
-                deferred_audio_auto_init_attempts_++;
-                ultra::gui::startupTrace("App", "deferred-audio-init-fail");
-                if (deferred_audio_auto_init_attempts_ >= 3) {
-                    guiLog("Deferred audio auto-init failed after %d attempts, manual init required",
-                           deferred_audio_auto_init_attempts_);
-                    deferred_audio_auto_init_pending_ = false;
+                deferred_radio_rx_start_attempts_++;
+                if (deferred_radio_rx_start_attempts_ >= 5) {
+                    guiLog("Deferred audio stage 2/2 failed after %d attempts; manual audio init required",
+                           deferred_radio_rx_start_attempts_);
+                    deferred_radio_rx_start_pending_ = false;
                 } else {
-                    deferred_audio_auto_init_deadline_ms_ = now_ms + 700;
-                    guiLog("Deferred audio auto-init retry %d/3 scheduled",
-                           deferred_audio_auto_init_attempts_ + 1);
+                    deferred_radio_rx_start_deadline_ms_ = now_ms + 500;
+                    guiLog("Deferred audio stage 2/2 retry %d/5 scheduled",
+                           deferred_radio_rx_start_attempts_ + 1);
                 }
             }
         }
@@ -1720,12 +1776,28 @@ std::string App::getOutputDeviceName() const {
     return settings_.output_device;
 }
 
-void App::startRadioRx() {
-    if (!audio_initialized_ || simulation_enabled_) return;
+bool App::startRadioRx() {
+    if (!audio_initialized_) {
+        guiLog("startRadioRx guard: audio not initialized");
+        return false;
+    }
+    if (simulation_enabled_) {
+        guiLog("startRadioRx guard: simulation enabled");
+        return false;
+    }
+    if (!audio_.isPlaying()) {
+        guiLog("startRadioRx guard: playback not active yet");
+        return false;
+    }
+    if (radio_rx_enabled_) {
+        return true;
+    }
 
     std::string input_dev = getInputDeviceName();
     if (!audio_.openInput(input_dev)) {
-        return;
+        guiLog("startRadioRx: openInput failed for '%s'",
+               input_dev.empty() ? "Default" : input_dev.c_str());
+        return false;
     }
 
     // Main thread polls captured samples via pollRadioRx().
@@ -1733,7 +1805,15 @@ void App::startRadioRx() {
 
     audio_.setLoopbackEnabled(false);
     audio_.startCapture();
+    if (!audio_.isCapturing()) {
+        guiLog("startRadioRx: capture did not start");
+        audio_.closeInput();
+        return false;
+    }
     radio_rx_enabled_ = true;
+    guiLog("startRadioRx: capture started on '%s'",
+           input_dev.empty() ? "Default" : input_dev.c_str());
+    return true;
 }
 
 void App::stopRadioRx() {

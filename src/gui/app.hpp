@@ -72,6 +72,11 @@ private:
     bool deferred_audio_auto_init_pending_ = false;
     uint32_t deferred_audio_auto_init_deadline_ms_ = 0;
     int deferred_audio_auto_init_attempts_ = 0;
+    bool deferred_audio_wait_logged_ = false;
+    bool deferred_radio_rx_start_pending_ = false;
+    uint32_t deferred_radio_rx_start_deadline_ms_ = 0;
+    int deferred_radio_rx_start_attempts_ = 0;
+    uint32_t render_frames_seen_ = 0;
     std::atomic<bool> tx_in_progress_{false};  // Thread-safe TX flag for waterfall control
     std::chrono::steady_clock::time_point tx_end_time_;  // When current TX finishes
 
@@ -195,7 +200,7 @@ private:
     void onDataReceived(const std::string& text);
     void resetAdaptiveAdvisory();
     void updateAdaptiveAdvisory(float snr_db, float fading_index);
-    void startRadioRx();
+    bool startRadioRx();
     void stopRadioRx();
     void pollRadioRx();
 
