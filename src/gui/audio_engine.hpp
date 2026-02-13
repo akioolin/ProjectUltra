@@ -117,9 +117,11 @@ private:
 
     // Add noise for loopback channel simulation
     void addChannelNoise(std::vector<float>& samples);
+    void appendCapturedSamples(const float* input, size_t samples, float gain);
 
     SDL_AudioDeviceID output_device_ = 0;
     SDL_AudioDeviceID input_device_ = 0;
+    bool input_queue_mode_ = false;
 
     // TX buffer (samples waiting to be played)
     std::queue<float> tx_queue_;
@@ -160,6 +162,8 @@ private:
 
     // Input gain (0.0 to 2.0, default 1.0)
     std::atomic<float> input_gain_{1.0f};
+    float input_dc_x_prev_ = 0.0f;
+    float input_dc_y_prev_ = 0.0f;
 
     // Output gain (0.0 to 1.0, default 1.0)
     std::atomic<float> output_gain_{1.0f};

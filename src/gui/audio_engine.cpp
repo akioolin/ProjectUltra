@@ -133,6 +133,16 @@ bool AudioEngine::openInput(const std::string& device) {
     want.callback = inputCallback;
     want.userdata = this;
 
+#ifdef _WIN32
+    // Win10 low-end stability: prefer queued capture (no SDL input callback thread).
+    // Main thread will poll/dequeue via getRxSamples().
+    want.callback = nullptr;
+    want.userdata = nullptr;
+    input_queue_mode_ = true;
+#else
+    input_queue_mode_ = false;
+#endif
+
     const char* dev_name = (device.empty() || device == "Default") ? nullptr : device.c_str();
 
     input_device_ = SDL_OpenAudioDevice(dev_name, 1, &want, &have, 0);
@@ -142,8 +152,11 @@ bool AudioEngine::openInput(const std::string& device) {
         return false;
     }
 
-    LOG_MODEM(INFO, "AudioEngine: Opened INPUT device: %s (id=%d, rate=%d)",
-              dev_name ? dev_name : "Default", input_device_, have.freq);
+    LOG_MODEM(INFO, "AudioEngine: Opened INPUT device: %s (id=%d, rate=%d, mode=%s)",
+              dev_name ? dev_name : "Default", input_device_, have.freq,
+              input_queue_mode_ ? "queue" : "callback");
+    input_dc_x_prev_ = 0.0f;
+    input_dc_y_prev_ = 0.0f;
     return true;
 }
 
@@ -161,6 +174,7 @@ void AudioEngine::closeInput() {
         input_device_ = 0;
     }
     capturing_ = false;
+    input_queue_mode_ = false;
 }
 
 void AudioEngine::queueTxSamples(const std::vector<float>& samples) {
@@ -212,6 +226,25 @@ size_t AudioEngine::getTxQueueSize() const {
 }
 
 std::vector<float> AudioEngine::getRxSamples(size_t max_samples) {
+    if (input_queue_mode_ && input_device_ != 0) {
+        // Dequeue capture data in main thread (no SDL callback thread).
+        Uint32 queued_bytes = SDL_GetQueuedAudioSize(input_device_);
+        if (queued_bytes > 0) {
+            size_t queued_samples = queued_bytes / sizeof(float);
+            // Drain a bounded chunk each poll to keep latency low without UI stalls.
+            size_t drain_samples = std::min(queued_samples, std::max<size_t>(max_samples * 4, max_samples));
+            if (drain_samples > 0) {
+                std::vector<float> raw(drain_samples, 0.0f);
+                Uint32 got_bytes = SDL_DequeueAudio(input_device_, raw.data(),
+                                                    static_cast<Uint32>(drain_samples * sizeof(float)));
+                size_t got_samples = got_bytes / sizeof(float);
+                if (got_samples > 0) {
+                    appendCapturedSamples(raw.data(), got_samples, input_gain_.load());
+                }
+            }
+        }
+    }
+
     std::lock_guard<AudioEngineMutex> lock(rx_mutex_);
 
     size_t count = std::min(max_samples, rx_buffer_.size());
@@ -297,44 +330,15 @@ void AudioEngine::inputCallback(void* userdata, Uint8* stream, int len) {
     const float* input = reinterpret_cast<const float*>(stream);
     int samples = len / sizeof(float);
 
-    // Apply input gain and DC blocking filter
-    // DC blocker: y[n] = x[n] - x[n-1] + alpha * y[n-1]
-    // This removes DC offset that can cause false sync detection
-    static float dc_x_prev = 0.0f;
-    static float dc_y_prev = 0.0f;
-    constexpr float DC_ALPHA = 0.995f;
+    engine->appendCapturedSamples(input, static_cast<size_t>(samples), engine->input_gain_.load());
 
-    float gain = engine->input_gain_.load();
-    std::vector<float> captured(samples);
-    for (int i = 0; i < samples; ++i) {
-        float x = input[i] * gain;
-        float y = x - dc_x_prev + DC_ALPHA * dc_y_prev;
-        dc_x_prev = x;
-        dc_y_prev = y;
-        captured[i] = y;
-    }
-
-    // Compute input level (RMS) after gain
-    float sum_sq = 0.0f;
-    for (int i = 0; i < samples; ++i) {
-        sum_sq += captured[i] * captured[i];
-    }
-    float rms = std::sqrt(sum_sq / samples);
-    engine->input_level_ = rms;
-
+    std::vector<float> captured;
     {
         std::lock_guard<AudioEngineMutex> lock(engine->rx_mutex_);
-
-        // Cap buffer size to prevent unbounded growth if main loop stalls
-        if (engine->rx_buffer_.size() + captured.size() > MAX_RX_BUFFER_SAMPLES) {
-            size_t to_remove = engine->rx_buffer_.size() + captured.size() - MAX_RX_BUFFER_SAMPLES;
-            if (to_remove >= engine->rx_buffer_.size()) {
-                engine->rx_buffer_.clear();
-            } else {
-                engine->rx_buffer_.erase(engine->rx_buffer_.begin(), engine->rx_buffer_.begin() + to_remove);
-            }
+        size_t count = std::min<size_t>(samples, engine->rx_buffer_.size());
+        if (count > 0) {
+            captured.assign(engine->rx_buffer_.end() - count, engine->rx_buffer_.end());
         }
-        engine->rx_buffer_.insert(engine->rx_buffer_.end(), captured.begin(), captured.end());
     }
 
     // Notify via callback (skip if muted during TX)
@@ -346,6 +350,44 @@ void AudioEngine::inputCallback(void* userdata, Uint8* stream, int len) {
     if (rx_cb && !engine->rx_muted_.load()) {
         rx_cb(captured);
     }
+}
+
+void AudioEngine::appendCapturedSamples(const float* input, size_t samples, float gain) {
+    if (!input || samples == 0) {
+        return;
+    }
+
+    // Apply input gain and DC blocking filter.
+    constexpr float DC_ALPHA = 0.995f;
+
+    std::vector<float> captured(samples);
+    for (size_t i = 0; i < samples; ++i) {
+        float x = input[i] * gain;
+        float y = x - input_dc_x_prev_ + DC_ALPHA * input_dc_y_prev_;
+        input_dc_x_prev_ = x;
+        input_dc_y_prev_ = y;
+        captured[i] = y;
+    }
+
+    float sum_sq = 0.0f;
+    for (float s : captured) {
+        sum_sq += s * s;
+    }
+    float rms = std::sqrt(sum_sq / static_cast<float>(samples));
+    input_level_ = rms;
+
+    std::lock_guard<AudioEngineMutex> lock(rx_mutex_);
+
+    // Cap buffer size to prevent unbounded growth if main loop stalls.
+    if (rx_buffer_.size() + captured.size() > MAX_RX_BUFFER_SAMPLES) {
+        size_t to_remove = rx_buffer_.size() + captured.size() - MAX_RX_BUFFER_SAMPLES;
+        if (to_remove >= rx_buffer_.size()) {
+            rx_buffer_.clear();
+        } else {
+            rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + to_remove);
+        }
+    }
+    rx_buffer_.insert(rx_buffer_.end(), captured.begin(), captured.end());
 }
 
 void AudioEngine::addChannelNoise(std::vector<float>& samples) {
