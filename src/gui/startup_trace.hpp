@@ -10,6 +10,10 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+// Prevent Windows ERROR macro from corrupting LOG_* macros in translation units
+#ifdef ERROR
+#undef ERROR
+#endif
 #endif
 
 namespace ultra {
