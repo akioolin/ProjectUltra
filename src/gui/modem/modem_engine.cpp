@@ -111,16 +111,22 @@ ModemEngine::ModemEngine() {
     // When connected, use the negotiated waveform
     protocol::WaveformMode decoder_mode = connected_ ? waveform_mode_ : protocol::WaveformMode::MC_DPSK;
     startupTrace("ModemEngine", "decoder-set-mode-enter");
-    streaming_decoder_->setMode(decoder_mode, connected_);
-    startupTrace("ModemEngine", "decoder-mode-set");
+    if (connected_ || decoder_mode != protocol::WaveformMode::MC_DPSK) {
+        streaming_decoder_->setMode(decoder_mode, connected_);
+        startupTrace("ModemEngine", "decoder-mode-set");
+    } else {
+        // StreamingDecoder ctor already initializes MC_DPSK disconnected defaults.
+        startupTrace("ModemEngine", "decoder-mode-skip-default");
+    }
 
     // Sync MC-DPSK carrier count with ModemEngine's config
     startupTrace("ModemEngine", "decoder-set-carriers-enter");
-    streaming_decoder_->setMCDPSKCarriers(mc_dpsk_config_.num_carriers);
-    startupTrace("ModemEngine", "decoder-carriers-set");
-
-    LOG_MODEM(INFO, "[%s] StreamingDecoder initialized (MC-DPSK: %d carriers)",
-              log_prefix_.c_str(), mc_dpsk_config_.num_carriers);
+    if (mc_dpsk_config_.num_carriers != 8) {
+        streaming_decoder_->setMCDPSKCarriers(mc_dpsk_config_.num_carriers);
+        startupTrace("ModemEngine", "decoder-carriers-set");
+    } else {
+        startupTrace("ModemEngine", "decoder-carriers-skip-default");
+    }
 
     // Defer RX decode thread startup until audio is actually fed.
     // This reduces startup-time failure surface on low-end systems.
