@@ -4,6 +4,9 @@
 #include <cstdarg>
 #include <chrono>
 #include <mutex>
+#ifdef _WIN32
+#include <io.h>
+#endif
 
 // Windows headers define ERROR as a macro - undefine it
 #ifdef ERROR
@@ -69,7 +72,16 @@ inline void log(LogLevel level, const char* category, const char* format, ...) {
     if (level > g_log_level) return;
 
     std::lock_guard<std::mutex> lock(g_log_mutex);
-    FILE* out = g_log_file ? g_log_file : stderr;
+    FILE* out = g_log_file;
+    if (!out) {
+#ifdef _WIN32
+        // GUI-subsystem processes can have an invalid stderr stream on some Win10 setups.
+        if (!stderr || _fileno(stderr) < 0) {
+            return;
+        }
+#endif
+        out = stderr;
+    }
 
     // Get elapsed time in milliseconds
     auto now = std::chrono::steady_clock::now();
