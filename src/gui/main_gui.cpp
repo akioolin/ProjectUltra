@@ -21,6 +21,7 @@
 #include <ctime>
 #include <exception>
 #include <vector>
+#include <atomic>
 #include <ultra/logging.hpp>
 
 #ifdef _WIN32
@@ -28,6 +29,9 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <DbgHelp.h>
+#include <eh.h>
+#include <signal.h>
 #ifdef ERROR
 #undef ERROR
 #endif
@@ -37,6 +41,7 @@ namespace {
 
 #ifdef _WIN32
 HANDLE g_startup_log_handle = INVALID_HANDLE_VALUE;
+PVOID g_vectored_handler = nullptr;
 #else
 FILE* g_startup_log_file = nullptr;
 #endif
@@ -182,6 +187,89 @@ void showFatalStartupMessage(const std::string& msg) {
     MessageBoxA(nullptr, msg.c_str(), "ProjectUltra Startup Error", MB_ICONERROR | MB_OK);
 }
 
+std::string buildCrashDumpPath(const char* tag) {
+    std::filesystem::path base_dir = "logs";
+    if (!g_startup_log_path.empty()) {
+        std::filesystem::path startup_path(g_startup_log_path);
+        if (!startup_path.parent_path().empty()) {
+            base_dir = startup_path.parent_path();
+        }
+    }
+
+    std::error_code ec;
+    std::filesystem::create_directories(base_dir, ec);
+
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    char name[160];
+    std::snprintf(name, sizeof(name),
+                  "crash_%04u%02u%02u_%02u%02u%02u_%s_pid%lu.dmp",
+                  static_cast<unsigned>(st.wYear),
+                  static_cast<unsigned>(st.wMonth),
+                  static_cast<unsigned>(st.wDay),
+                  static_cast<unsigned>(st.wHour),
+                  static_cast<unsigned>(st.wMinute),
+                  static_cast<unsigned>(st.wSecond),
+                  tag ? tag : "unknown",
+                  static_cast<unsigned long>(GetCurrentProcessId()));
+    return (base_dir / name).string();
+}
+
+void writeCrashDump(EXCEPTION_POINTERS* ex, const char* tag) {
+    static std::atomic<bool> dump_written{false};
+    bool expected = false;
+    if (!dump_written.compare_exchange_strong(expected, true)) {
+        return;
+    }
+
+    const std::string dump_path = buildCrashDumpPath(tag);
+    HANDLE file = CreateFileA(dump_path.c_str(),
+                              GENERIC_WRITE,
+                              FILE_SHARE_READ,
+                              nullptr,
+                              CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL,
+                              nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        writeStartupLog("Crash dump create failed: path=%s err=%lu",
+                        dump_path.c_str(), static_cast<unsigned long>(GetLastError()));
+        return;
+    }
+
+    MINIDUMP_EXCEPTION_INFORMATION exception_info{};
+    MINIDUMP_EXCEPTION_INFORMATION* exception_info_ptr = nullptr;
+    if (ex) {
+        exception_info.ThreadId = GetCurrentThreadId();
+        exception_info.ExceptionPointers = ex;
+        exception_info.ClientPointers = FALSE;
+        exception_info_ptr = &exception_info;
+    }
+
+    MINIDUMP_TYPE dump_type = static_cast<MINIDUMP_TYPE>(
+        MiniDumpWithThreadInfo |
+        MiniDumpWithDataSegs |
+        MiniDumpWithHandleData |
+        MiniDumpWithIndirectlyReferencedMemory
+    );
+
+    BOOL ok = MiniDumpWriteDump(GetCurrentProcess(),
+                                GetCurrentProcessId(),
+                                file,
+                                dump_type,
+                                exception_info_ptr,
+                                nullptr,
+                                nullptr);
+    DWORD err = ok ? 0 : GetLastError();
+    CloseHandle(file);
+
+    if (ok) {
+        writeStartupLog("Crash dump written: %s", dump_path.c_str());
+    } else {
+        writeStartupLog("Crash dump write failed: path=%s err=%lu",
+                        dump_path.c_str(), static_cast<unsigned long>(err));
+    }
+}
+
 std::string modulePathForAddress(void* addr) {
     if (!addr) {
         return "<unknown module>";
@@ -202,6 +290,59 @@ std::string modulePathForAddress(void* addr) {
     return std::string(path, len);
 }
 
+LONG CALLBACK startupVectoredExceptionHandler(EXCEPTION_POINTERS* ex) {
+    if (!ex || !ex->ExceptionRecord) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    unsigned long code = ex->ExceptionRecord->ExceptionCode;
+    void* addr = ex->ExceptionRecord->ExceptionAddress;
+
+    // Log only likely-fatal runtime faults to avoid noisy first-chance spam.
+    switch (code) {
+        case EXCEPTION_ACCESS_VIOLATION:
+        case EXCEPTION_STACK_OVERFLOW:
+        case EXCEPTION_ILLEGAL_INSTRUCTION:
+        case EXCEPTION_IN_PAGE_ERROR:
+        case EXCEPTION_INT_DIVIDE_BY_ZERO:
+        case 0xC0000409: // STATUS_STACK_BUFFER_OVERRUN / fast-fail
+        case 0xC0000374: // STATUS_HEAP_CORRUPTION
+            writeStartupLog("Vectored exception: code=0x%08lX addr=%p",
+                            code, addr);
+            writeCrashDump(ex, "veh");
+            break;
+        default:
+            break;
+    }
+
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+void startupInvalidParameterHandler(const wchar_t* expression,
+                                    const wchar_t* function,
+                                    const wchar_t* file,
+                                    unsigned int line,
+                                    uintptr_t) {
+    writeStartupLog("CRT invalid parameter: line=%u expr=%p func=%p file=%p",
+                    line,
+                    static_cast<const void*>(expression),
+                    static_cast<const void*>(function),
+                    static_cast<const void*>(file));
+    writeCrashDump(nullptr, "invalid_param");
+}
+
+int __cdecl startupPurecallHandler() {
+    writeStartupLog("CRT pure virtual call detected");
+    writeCrashDump(nullptr, "purecall");
+    return 0;
+}
+
+void startupSignalHandler(int sig) {
+    writeStartupLog("Signal raised: %d", sig);
+    writeCrashDump(nullptr, "signal");
+    std::_Exit(3);
+}
+
 LONG WINAPI startupUnhandledExceptionFilter(EXCEPTION_POINTERS* ex) {
     unsigned long code = 0;
     void* addr = nullptr;
@@ -211,6 +352,7 @@ LONG WINAPI startupUnhandledExceptionFilter(EXCEPTION_POINTERS* ex) {
     }
     std::string module = modulePathForAddress(addr);
     writeStartupLog("Unhandled exception: code=0x%08lX address=%p module=%s", code, addr, module.c_str());
+    writeCrashDump(ex, "unhandled");
 
     std::string msg = "Unhandled exception in startup path.\n";
     char details[512];
@@ -238,7 +380,20 @@ int main(int argc, char* argv[]) {
         _putenv_s("ULTRA_STARTUP_LOG", g_startup_log_path.c_str());
         writeStartupLog("Startup trace path fallback: %s", g_startup_log_path.c_str());
     }
+    SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
     SetUnhandledExceptionFilter(startupUnhandledExceptionFilter);
+    if (!g_vectored_handler) {
+        g_vectored_handler = AddVectoredExceptionHandler(1, startupVectoredExceptionHandler);
+    }
+    writeStartupLog("Vectored exception handler: %s", g_vectored_handler ? "installed" : "not installed");
+    _set_invalid_parameter_handler(startupInvalidParameterHandler);
+    _set_purecall_handler(startupPurecallHandler);
+    signal(SIGABRT, startupSignalHandler);
+    signal(SIGSEGV, startupSignalHandler);
+    signal(SIGILL, startupSignalHandler);
+    signal(SIGFPE, startupSignalHandler);
+    signal(SIGTERM, startupSignalHandler);
+    writeStartupLog("CRT crash handlers installed");
 #endif
     std::set_terminate([]() {
         writeStartupLog("std::terminate invoked");
@@ -579,6 +734,12 @@ int main(int argc, char* argv[]) {
     }
     SDL_DestroyWindow(window);
     SDL_Quit();
+#ifdef _WIN32
+    if (g_vectored_handler) {
+        RemoveVectoredExceptionHandler(g_vectored_handler);
+        g_vectored_handler = nullptr;
+    }
+#endif
     closeStartupLog();
 
     return 0;

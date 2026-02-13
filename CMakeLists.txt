@@ -244,6 +244,7 @@ if(ULTRA_BUILD_GUI)
             target_link_libraries(ultra_gui PRIVATE
                 opengl32
                 imm32
+                dbghelp
             )
         elseif(UNIX)
             target_link_libraries(ultra_gui PRIVATE dl)
