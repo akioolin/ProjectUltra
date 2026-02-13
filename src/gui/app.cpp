@@ -1155,11 +1155,19 @@ void App::stopSimulator() {
 
     if (sim_thread_.joinable()) sim_thread_.join();
 
+    // Keep synchronous decode mode on Windows for startup/runtime stability.
+#ifdef _WIN32
+    modem_.setSynchronousMode(true);
+    if (virtual_modem_) {
+        virtual_modem_->setSynchronousMode(true);
+    }
+#else
     // Restore async decode mode for real audio operation
     modem_.setSynchronousMode(false);
     if (virtual_modem_) {
         virtual_modem_->setSynchronousMode(false);
     }
+#endif
 
     // Clear buffers
     {
@@ -1509,6 +1517,14 @@ void App::render() {
         ultra::gui::startupTrace("App", "render-set-output-gain-exit");
     }
 
+#ifdef _WIN32
+    // Keep decode in synchronous mode on fragile Win10 systems.
+    if (!simulation_enabled_ && !modem_.isSynchronousMode()) {
+        guiLog("Win startup guard: forcing modem synchronous RX mode");
+        modem_.setSynchronousMode(true);
+    }
+#endif
+
     // Process captured RX audio in the main thread.
     // Avoids feeding modem state directly from SDL callback threads.
     pollRadioRx();
@@ -1793,6 +1809,13 @@ bool App::startRadioRx() {
         return true;
     }
 
+#ifdef _WIN32
+    if (!modem_.isSynchronousMode()) {
+        guiLog("startRadioRx guard: enabling synchronous modem RX mode");
+        modem_.setSynchronousMode(true);
+    }
+#endif
+
     std::string input_dev = getInputDeviceName();
     if (!audio_.openInput(input_dev)) {
         guiLog("startRadioRx: openInput failed for '%s'",
@@ -1811,6 +1834,9 @@ bool App::startRadioRx() {
         return false;
     }
     radio_rx_enabled_ = true;
+    radio_rx_started_ms_ = SDL_GetTicks();
+    radio_rx_warmup_logged_ = false;
+    radio_rx_first_chunk_logged_ = false;
     guiLog("startRadioRx: capture started on '%s'",
            input_dev.empty() ? "Default" : input_dev.c_str());
     return true;
@@ -1821,10 +1847,24 @@ void App::stopRadioRx() {
     audio_.closeInput();
     audio_.setRxCallback(AudioEngine::RxCallback{});
     radio_rx_enabled_ = false;
+    radio_rx_started_ms_ = 0;
+    radio_rx_warmup_logged_ = false;
+    radio_rx_first_chunk_logged_ = false;
 }
 
 void App::pollRadioRx() {
     if (!audio_initialized_ || simulation_enabled_ || !radio_rx_enabled_) {
+        return;
+    }
+
+    uint32_t now_ms = SDL_GetTicks();
+    if (radio_rx_started_ms_ > 0 && (now_ms - radio_rx_started_ms_) < 200) {
+        if (!radio_rx_warmup_logged_) {
+            guiLog("pollRadioRx warm-up: delaying modem feed for 200ms after capture start");
+            radio_rx_warmup_logged_ = true;
+        }
+        // Drain a small amount during warm-up to avoid unbounded growth.
+        (void)audio_.getRxSamples(2048);
         return;
     }
 
@@ -1837,8 +1877,18 @@ void App::pollRadioRx() {
             break;
         }
 
+        if (!radio_rx_first_chunk_logged_) {
+            guiLog("pollRadioRx: first RX chunk=%zu samples", samples.size());
+        }
         modem_.feedAudio(samples);
+        if (!radio_rx_first_chunk_logged_) {
+            guiLog("pollRadioRx: first RX chunk fed to modem");
+        }
         modem_.processRxBuffer();
+        if (!radio_rx_first_chunk_logged_) {
+            guiLog("pollRadioRx: first RX chunk modem processing complete");
+            radio_rx_first_chunk_logged_ = true;
+        }
         if (waterfall_) {
             waterfall_->addSamples(samples.data(), samples.size());
         }

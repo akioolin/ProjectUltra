@@ -86,6 +86,9 @@ private:
     std::vector<std::string> output_devices_;
     bool ptt_active_ = false;      // Push-to-talk state
     bool radio_rx_enabled_ = false; // RX capture running
+    uint32_t radio_rx_started_ms_ = 0;
+    bool radio_rx_warmup_logged_ = false;
+    bool radio_rx_first_chunk_logged_ = false;
 
     // ARQ Protocol state
     protocol::ProtocolEngine protocol_;
