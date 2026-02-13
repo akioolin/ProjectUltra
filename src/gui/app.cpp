@@ -341,6 +341,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                 if (waterfall_) {
                     waterfall_->addSamples(samples.data(), samples.size());
                 }
+                audio_.startPlayback();
                 audio_.queueTxSamples(samples);
             }
         }
@@ -368,6 +369,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                 if (waterfall_) {
                     waterfall_->addSamples(samples.data(), samples.size());
                 }
+                audio_.startPlayback();
                 audio_.queueTxSamples(samples);
             }
         }
@@ -456,6 +458,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                 if (waterfall_) {
                     waterfall_->addSamples(samples.data(), samples.size());
                 }
+                audio_.startPlayback();
                 audio_.queueTxSamples(samples);
             }
         }
@@ -483,6 +486,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                 if (waterfall_) {
                     waterfall_->addSamples(samples.data(), samples.size());
                 }
+                audio_.startPlayback();
                 audio_.queueTxSamples(samples);
             }
         }
@@ -729,7 +733,6 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
             audio_.setOutputGain(settings_.tx_drive);
             std::string output_dev = getOutputDeviceName();
             audio_.openOutput(output_dev);
-            audio_.startPlayback();
             startRadioRx();
         }
     });
@@ -749,7 +752,6 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
             audio_.setOutputGain(settings_.tx_drive);
             std::string output_dev = getOutputDeviceName();
             audio_.openOutput(output_dev);
-            audio_.startPlayback();
             startRadioRx();
         }
     });
@@ -812,15 +814,10 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         if (audio_initialized_) {
             std::string output_dev = getOutputDeviceName();
             if (audio_.openOutput(output_dev)) {
-                audio_.startPlayback();
-                if (audio_.isPlaying()) {
-                    deferred_radio_rx_start_pending_ = true;
-                    deferred_radio_rx_start_deadline_ms_ = SDL_GetTicks() + 250;
-                    deferred_radio_rx_start_attempts_ = 0;
-                    guiLog("Startup audio stage: playback active, delaying RX capture by 250ms");
-                } else {
-                    guiLog("Startup audio stage: playback did not start, capture deferred");
-                }
+                deferred_radio_rx_start_pending_ = true;
+                deferred_radio_rx_start_deadline_ms_ = SDL_GetTicks() + 250;
+                deferred_radio_rx_start_attempts_ = 0;
+                guiLog("Startup audio stage 1/2 complete: output ready, delaying RX capture by 250ms");
             } else {
                 guiLog("Startup audio stage: openOutput failed");
             }
@@ -1535,19 +1532,12 @@ void App::render() {
                     ultra::gui::startupTrace("App", "deferred-audio-open-output-enter");
                     std::string output_dev = getOutputDeviceName();
                     if (audio_.openOutput(output_dev)) {
-                        audio_.startPlayback();
-                        if (audio_.isPlaying()) {
-                            deferred_radio_rx_start_pending_ = true;
-                            deferred_radio_rx_start_deadline_ms_ = now_ms + 250;
-                            deferred_radio_rx_start_attempts_ = 0;
-                            guiLog("Deferred audio stage 1/2 complete: playback active, waiting 250ms before capture");
-                            ultra::gui::startupTrace("App", "deferred-audio-open-output-exit");
-                            deferred_audio_auto_init_pending_ = false;
-                        } else {
-                            guiLog("Deferred audio auto-init: playback did not start");
-                            ultra::gui::startupTrace("App", "deferred-audio-open-output-fail");
-                            deferred_audio_auto_init_pending_ = false;
-                        }
+                        deferred_radio_rx_start_pending_ = true;
+                        deferred_radio_rx_start_deadline_ms_ = now_ms + 250;
+                        deferred_radio_rx_start_attempts_ = 0;
+                        guiLog("Deferred audio stage 1/2 complete: output ready, waiting 250ms before capture");
+                        ultra::gui::startupTrace("App", "deferred-audio-open-output-exit");
+                        deferred_audio_auto_init_pending_ = false;
                     } else {
                         guiLog("Deferred audio auto-init: openOutput failed");
                         ultra::gui::startupTrace("App", "deferred-audio-open-output-fail");
@@ -1598,16 +1588,19 @@ void App::render() {
     // === DEBUG: Test signal keys (F1-F7) ===
     if (ImGui::IsKeyPressed(ImGuiKey_F1)) {
         auto tone = modem_.generateTestTone(1.0f);
+        audio_.startPlayback();
         audio_.queueTxSamples(tone);
         appendRxLogLine("[TEST] Sent 1500 Hz tone");
     }
     if (ImGui::IsKeyPressed(ImGuiKey_F2)) {
         auto samples = modem_.transmitTestPattern(0);
+        audio_.startPlayback();
         audio_.queueTxSamples(samples);
         appendRxLogLine("[TEST] Sent pattern: ALL ZEROS (LDPC encoded)");
     }
     if (ImGui::IsKeyPressed(ImGuiKey_F3)) {
         auto samples = modem_.transmitTestPattern(1);
+        audio_.startPlayback();
         audio_.queueTxSamples(samples);
         appendRxLogLine("[TEST] Sent pattern: DEADBEEF (LDPC encoded)");
     }
@@ -1785,8 +1778,8 @@ bool App::startRadioRx() {
         guiLog("startRadioRx guard: simulation enabled");
         return false;
     }
-    if (!audio_.isPlaying()) {
-        guiLog("startRadioRx guard: playback not active yet");
+    if (!audio_.hasOutputDevice()) {
+        guiLog("startRadioRx guard: output device not open");
         return false;
     }
     if (radio_rx_enabled_) {
@@ -2091,7 +2084,7 @@ void App::renderOperateTab() {
                     modem_.reset();
                     if (audio_initialized_) {
                         audio_.openOutput(getOutputDeviceName());
-                        audio_.startPlayback(); startRadioRx();
+                        startRadioRx();
                     }
                 }
             }
@@ -2142,7 +2135,6 @@ void App::renderOperateTab() {
         if (ImGui::SmallButton("Start RX")) {
             if (!audio_initialized_) initAudio();
             audio_.openOutput(getOutputDeviceName());
-            audio_.startPlayback();
             startRadioRx();
         }
     } else {
@@ -2193,7 +2185,6 @@ void App::renderOperateTab() {
         if (!simulation_enabled_ && !radio_rx_enabled_) {
             if (!audio_initialized_) initAudio();
             audio_.openOutput(getOutputDeviceName());
-            audio_.startPlayback();
             startRadioRx();
         }
         std::string remote_call(remote_callsign_, boundedCStringLen(remote_callsign_));

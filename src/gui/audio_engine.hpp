@@ -57,6 +57,8 @@ public:
     bool openInput(const std::string& device = "");
     void closeOutput();
     void closeInput();
+    bool hasOutputDevice() const { return output_device_ != 0; }
+    bool hasInputDevice() const { return input_device_ != 0; }
 
     // TX: Queue samples to play
     void queueTxSamples(const std::vector<float>& samples);
