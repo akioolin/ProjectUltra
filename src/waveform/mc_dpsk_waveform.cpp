@@ -1,6 +1,7 @@
 // MCDPSKWaveform - Implementation
 
 #include "mc_dpsk_waveform.hpp"
+#include "gui/startup_trace.hpp"
 #include "ultra/logging.hpp"
 #include <cmath>
 #include <sstream>
@@ -25,19 +26,26 @@ MCDPSKWaveform::MCDPSKWaveform(const MultiCarrierDPSKConfig& config)
 }
 
 void MCDPSKWaveform::initComponents() {
+    gui::startupTrace("MCDPSKWaveform", "init-components-enter");
     modulator_ = std::make_unique<MultiCarrierDPSKModulator>(config_);
+    gui::startupTrace("MCDPSKWaveform", "modulator-created");
     demodulator_ = std::make_unique<MultiCarrierDPSKDemodulator>(config_);
+    gui::startupTrace("MCDPSKWaveform", "demodulator-created");
     chirp_sync_ = std::make_unique<sync::ChirpSync>(config_.getChirpConfig());
+    gui::startupTrace("MCDPSKWaveform", "chirp-sync-created");
 
     // Debug: print config
     auto freqs = config_.getCarrierFreqs();
-    char freq_buf[128] = "";
-    int pos = 0;
+    std::ostringstream freq_preview;
     for (int i = 0; i < std::min(4, config_.num_carriers); i++) {
-        pos += snprintf(freq_buf + pos, sizeof(freq_buf) - pos, "%.0f ", freqs[i]);
+        if (i > 0) {
+            freq_preview << ' ';
+        }
+        freq_preview << static_cast<int>(std::lround(freqs[i]));
     }
     LOG_MODEM(INFO, "MCDPSKWaveform: Created with %d carriers, samples_per_sym=%d, freqs: %s...",
-              config_.num_carriers, config_.samples_per_symbol, freq_buf);
+              config_.num_carriers, config_.samples_per_symbol, freq_preview.str().c_str());
+    gui::startupTrace("MCDPSKWaveform", "init-components-exit");
 }
 
 WaveformCapabilities MCDPSKWaveform::getCapabilities() const {

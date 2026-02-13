@@ -8,6 +8,7 @@
 #include "waveform/mc_dpsk_waveform.hpp"
 #include "fec/frame_interleaver.hpp"
 #include "fec/burst_interleaver.hpp"
+#include "gui/startup_trace.hpp"
 #include "ultra/logging.hpp"
 #include <algorithm>
 
@@ -33,6 +34,8 @@ bool isControlFrameBytes(const Bytes& frame_data) {
 // ============================================================================
 
 StreamingEncoder::StreamingEncoder() {
+    startupTrace("StreamingEncoder", "ctor-enter");
+
     // Initialize with default OFDM config (NVIS mode)
     ofdm_config_.fft_size = 1024;
     ofdm_config_.num_carriers = 59;
@@ -43,13 +46,19 @@ StreamingEncoder::StreamingEncoder() {
     ofdm_config_.code_rate = CodeRate::R1_4;
     ofdm_config_.use_pilots = true;
     ofdm_config_.pilot_spacing = 10;
+    startupTrace("StreamingEncoder", "defaults-set");
 
     // Create default MC-DPSK waveform
+    startupTrace("StreamingEncoder", "create-waveform-enter");
     createWaveform();
+    startupTrace("StreamingEncoder", "create-waveform-exit");
+    startupTrace("StreamingEncoder", "update-interleaver-enter");
     updateInterleaver();
+    startupTrace("StreamingEncoder", "update-interleaver-exit");
 
     LOG_MODEM(INFO, "StreamingEncoder: Initialized (mode=%s, carriers=%d)",
               protocol::waveformModeToString(mode_), ofdm_config_.num_carriers);
+    startupTrace("StreamingEncoder", "ctor-exit");
 }
 
 StreamingEncoder::~StreamingEncoder() = default;
@@ -420,27 +429,37 @@ std::string StreamingEncoder::verifyConfigMatch(const EncoderConfig& other) cons
 // ============================================================================
 
 void StreamingEncoder::createWaveform() {
+    startupTrace("StreamingEncoder", "create-waveform-internal-enter");
+
     // Always have MC-DPSK ready for control frames
     if (!control_waveform_) {
+        startupTrace("StreamingEncoder", "create-control-waveform-enter");
         control_waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_carriers_);
+        startupTrace("StreamingEncoder", "create-control-waveform-exit");
     }
 
     switch (mode_) {
         case protocol::WaveformMode::MC_DPSK:
+            startupTrace("StreamingEncoder", "create-main-waveform-mcdpsk-enter");
             waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_carriers_);
+            startupTrace("StreamingEncoder", "create-main-waveform-mcdpsk-exit");
             break;
 
         case protocol::WaveformMode::OFDM_COX:
+            startupTrace("StreamingEncoder", "create-main-waveform-ofdm-cox-enter");
             waveform_ = std::make_unique<OFDMNvisWaveform>(ofdm_config_);
             static_cast<OFDMNvisWaveform*>(waveform_.get())->configure(
                 modulation_, code_rate_);
+            startupTrace("StreamingEncoder", "create-main-waveform-ofdm-cox-exit");
             break;
 
         case protocol::WaveformMode::OFDM_CHIRP:
         default:
+            startupTrace("StreamingEncoder", "create-main-waveform-ofdm-chirp-enter");
             waveform_ = std::make_unique<OFDMChirpWaveform>(ofdm_config_);
             static_cast<OFDMChirpWaveform*>(waveform_.get())->configure(
                 modulation_, code_rate_);
+            startupTrace("StreamingEncoder", "create-main-waveform-ofdm-chirp-exit");
             break;
     }
 
@@ -453,6 +472,7 @@ void StreamingEncoder::createWaveform() {
 
     LOG_MODEM(DEBUG, "[%s] Created waveform: %s",
               log_prefix_.c_str(), protocol::waveformModeToString(mode_));
+    startupTrace("StreamingEncoder", "create-waveform-internal-exit");
 }
 
 void StreamingEncoder::updateInterleaver() {
