@@ -331,10 +331,9 @@ void startupInvalidParameterHandler(const wchar_t* expression,
     writeCrashDump(nullptr, "invalid_param");
 }
 
-int __cdecl startupPurecallHandler() {
+void __cdecl startupPurecallHandler() {
     writeStartupLog("CRT pure virtual call detected");
     writeCrashDump(nullptr, "purecall");
-    return 0;
 }
 
 void startupSignalHandler(int sig) {
