@@ -1851,8 +1851,8 @@ bool App::startRadioRx() {
 
     audio_.setInputCaptureMode(
         radio_rx_force_queue_mode_
-            ? AudioEngine::InputCaptureMode::QUEUE
-            : AudioEngine::InputCaptureMode::AUTO);
+            ? AudioEngine::InputCaptureMode::Queue
+            : AudioEngine::InputCaptureMode::Auto);
 
     std::string input_dev = getInputDeviceName();
     if (!input_dev.empty()) {

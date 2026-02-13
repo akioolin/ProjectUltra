@@ -41,9 +41,9 @@ using AudioEngineMutex = std::mutex;
 class AudioEngine {
 public:
     enum class InputCaptureMode {
-        AUTO,
-        CALLBACK,
-        QUEUE
+        Auto,
+        Callback,
+        Queue
     };
 
     AudioEngine();
@@ -135,7 +135,7 @@ private:
     SDL_AudioDeviceID output_device_ = 0;
     SDL_AudioDeviceID input_device_ = 0;
     bool input_queue_mode_ = false;
-    InputCaptureMode input_capture_mode_ = InputCaptureMode::AUTO;
+    InputCaptureMode input_capture_mode_ = InputCaptureMode::Auto;
 
     // TX buffer (samples waiting to be played)
     std::queue<float> tx_queue_;

@@ -135,13 +135,13 @@ bool AudioEngine::openInput(const std::string& device) {
 
     bool use_queue_capture = false;
     switch (input_capture_mode_) {
-        case InputCaptureMode::QUEUE:
+        case InputCaptureMode::Queue:
             use_queue_capture = true;
             break;
-        case InputCaptureMode::CALLBACK:
+        case InputCaptureMode::Callback:
             use_queue_capture = false;
             break;
-        case InputCaptureMode::AUTO:
+        case InputCaptureMode::Auto:
 #ifdef _WIN32
             // Win10 low-end stability: prefer queued capture by default.
             use_queue_capture = true;
