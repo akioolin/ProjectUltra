@@ -247,6 +247,10 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     config_ = presets::balanced();
     ultra::gui::startupTrace("App", "presets-balanced-exit");
 
+    // Run modem decode synchronously in GUI thread to avoid startup-time
+    // worker-thread races on fragile Windows systems.
+    modem_.setSynchronousMode(true);
+
     if (!options_.disable_waterfall) {
         ultra::gui::startupTrace("App", "waterfall-create-begin");
         waterfall_ = std::make_unique<WaterfallWidget>();
@@ -856,6 +860,7 @@ void App::initVirtualStation() {
 
     // Create virtual station's modem
     virtual_modem_ = std::make_unique<ModemEngine>();
+    virtual_modem_->setSynchronousMode(true);
 
     // Set up virtual station's protocol
     virtual_protocol_.setLocalCallsign(virtual_callsign_);
@@ -1753,6 +1758,7 @@ void App::pollRadioRx() {
         }
 
         modem_.feedAudio(samples);
+        modem_.processRxBuffer();
         if (waterfall_) {
             waterfall_->addSamples(samples.data(), samples.size());
         }
