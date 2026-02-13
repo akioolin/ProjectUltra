@@ -837,6 +837,10 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         ultra::gui::startupTrace("App", "init-audio-exit");
     } else {
         guiLog("Safe startup enabled: deferred audio/simulator initialization");
+        deferred_audio_auto_init_pending_ = true;
+        deferred_audio_auto_init_deadline_ms_ = SDL_GetTicks() + 300;
+        deferred_audio_auto_init_attempts_ = 0;
+        ultra::gui::startupTrace("App", "deferred-audio-scheduled");
     }
     ultra::gui::startupTrace("App", "ctor-body-exit");
 }
@@ -1323,19 +1327,27 @@ void App::simulationLoop() {
 void App::initAudio() {
     if (audio_initialized_) return;
 
+    ultra::gui::startupTrace("App", "initAudio-enter");
     if (!audio_.initialize()) {
+        ultra::gui::startupTrace("App", "initAudio-audio-initialize-fail");
         return;
     }
+    ultra::gui::startupTrace("App", "initAudio-audio-initialize-ok");
 
     // Enumerate devices
+    ultra::gui::startupTrace("App", "initAudio-enum-input-enter");
     input_devices_ = audio_.getInputDevices();
+    ultra::gui::startupTrace("App", "initAudio-enum-input-exit");
+    ultra::gui::startupTrace("App", "initAudio-enum-output-enter");
     output_devices_ = audio_.getOutputDevices();
+    ultra::gui::startupTrace("App", "initAudio-enum-output-exit");
 
     // Populate settings window device lists
     settings_window_.input_devices = input_devices_;
     settings_window_.output_devices = output_devices_;
 
     audio_initialized_ = true;
+    ultra::gui::startupTrace("App", "initAudio-exit");
 }
 
 void App::sendMessage() {
@@ -1497,6 +1509,45 @@ void App::render() {
     audio_.setOutputGain(settings_.tx_drive);
     if (first_render) {
         ultra::gui::startupTrace("App", "render-set-output-gain-exit");
+    }
+
+    // Safe-startup mode: auto-start audio shortly after first frame.
+    // Keeps process bring-up lightweight while preserving "auto-listen" behavior.
+    if (deferred_audio_auto_init_pending_ &&
+        !simulation_enabled_ &&
+        !audio_initialized_) {
+        uint32_t now_ms = SDL_GetTicks();
+        if (now_ms >= deferred_audio_auto_init_deadline_ms_) {
+            ultra::gui::startupTrace("App", "deferred-audio-init-enter");
+            initAudio();
+            if (audio_initialized_) {
+                ultra::gui::startupTrace("App", "deferred-audio-open-output-enter");
+                std::string output_dev = getOutputDeviceName();
+                if (audio_.openOutput(output_dev)) {
+                    audio_.startPlayback();
+                    startRadioRx();
+                    guiLog("Deferred audio auto-init succeeded");
+                    ultra::gui::startupTrace("App", "deferred-audio-open-output-exit");
+                    deferred_audio_auto_init_pending_ = false;
+                } else {
+                    guiLog("Deferred audio auto-init: openOutput failed");
+                    ultra::gui::startupTrace("App", "deferred-audio-open-output-fail");
+                    deferred_audio_auto_init_pending_ = false;
+                }
+            } else {
+                deferred_audio_auto_init_attempts_++;
+                ultra::gui::startupTrace("App", "deferred-audio-init-fail");
+                if (deferred_audio_auto_init_attempts_ >= 3) {
+                    guiLog("Deferred audio auto-init failed after %d attempts, manual init required",
+                           deferred_audio_auto_init_attempts_);
+                    deferred_audio_auto_init_pending_ = false;
+                } else {
+                    deferred_audio_auto_init_deadline_ms_ = now_ms + 700;
+                    guiLog("Deferred audio auto-init retry %d/3 scheduled",
+                           deferred_audio_auto_init_attempts_ + 1);
+                }
+            }
+        }
     }
 
     // === DEBUG: Test signal keys (F1-F7) ===
@@ -1982,8 +2033,15 @@ void App::renderOperateTab() {
 
     // Audio initialization (only when not in simulation)
     if (!simulation_enabled_ && !audio_initialized_) {
-        if (ImGui::Button("Initialize Audio", ImVec2(-1, 28))) {
-            initAudio();
+        if (deferred_audio_auto_init_pending_) {
+            ImGui::TextDisabled("Starting audio...");
+            if (ImGui::Button("Start Audio Now", ImVec2(-1, 28))) {
+                deferred_audio_auto_init_deadline_ms_ = 0;
+            }
+        } else {
+            if (ImGui::Button("Initialize Audio", ImVec2(-1, 28))) {
+                initAudio();
+            }
         }
         return;
     }

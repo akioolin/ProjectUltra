@@ -110,6 +110,7 @@ private:
     std::atomic<bool> capturing_{false};
     std::atomic<bool> rx_muted_{false};  // Prevent RX callback from firing during TX
     bool initialized_ = false;
+    bool owns_audio_subsystem_ = false;
 
     // Audio parameters
     int sample_rate_ = 48000;

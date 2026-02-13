@@ -260,7 +260,11 @@ int main(int argc, char* argv[]) {
 
     // Parse command line arguments
     ultra::gui::App::Options opts;
+#ifdef _WIN32
+    bool force_software_renderer = true;   // Win10/older GPUs: prefer SDL renderer path by default
+#else
     bool force_software_renderer = false;
+#endif
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "-sim") {
@@ -275,11 +279,21 @@ int main(int argc, char* argv[]) {
             force_software_renderer = true;
             opts.safe_startup = true;
             opts.disable_waterfall = true;
+        } else if (arg == "--opengl" || arg == "--gl") {
+            force_software_renderer = false;
+            opts.safe_startup = false;
+            opts.disable_waterfall = false;
         } else if (arg == "--no-waterfall") {
             opts.disable_waterfall = true;
         } else if (arg == "--waterfall") {
             opts.disable_waterfall = false;
         }
+    }
+
+    // Software path implies safer startup defaults (deferred audio + no waterfall)
+    if (force_software_renderer) {
+        opts.safe_startup = true;
+        opts.disable_waterfall = true;
     }
     writeStartupLog(
         "Parsed arguments: sim=%d, rec=%d, software_renderer=%d, disable_waterfall=%d",

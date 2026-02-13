@@ -20,22 +20,37 @@ AudioEngine::~AudioEngine() {
 bool AudioEngine::initialize() {
     if (initialized_) return true;
 
+    startupTrace("AudioEngine", "initialize-enter");
+
+    if (SDL_WasInit(SDL_INIT_AUDIO) & SDL_INIT_AUDIO) {
+        initialized_ = true;
+        owns_audio_subsystem_ = false;
+        startupTrace("AudioEngine", "initialize-already-initialized");
+        return true;
+    }
+
     if (SDL_InitSubSystem(SDL_INIT_AUDIO) < 0) {
+        startupTrace("AudioEngine", "initialize-fail");
         return false;
     }
 
     initialized_ = true;
+    owns_audio_subsystem_ = true;
+    startupTrace("AudioEngine", "initialize-exit");
     return true;
 }
 
 void AudioEngine::shutdown() {
+    startupTrace("AudioEngine", "shutdown-enter");
     closeOutput();
     closeInput();
 
-    if (initialized_) {
+    if (initialized_ && owns_audio_subsystem_) {
         SDL_QuitSubSystem(SDL_INIT_AUDIO);
-        initialized_ = false;
     }
+    initialized_ = false;
+    owns_audio_subsystem_ = false;
+    startupTrace("AudioEngine", "shutdown-exit");
 }
 
 std::vector<std::string> AudioEngine::getOutputDevices() {

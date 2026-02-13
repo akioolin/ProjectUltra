@@ -68,6 +68,9 @@ private:
     std::deque<std::string> rx_log_;
     static const size_t MAX_RX_LOG = 20;
     bool audio_initialized_ = false;
+    bool deferred_audio_auto_init_pending_ = false;
+    uint32_t deferred_audio_auto_init_deadline_ms_ = 0;
+    int deferred_audio_auto_init_attempts_ = 0;
     std::atomic<bool> tx_in_progress_{false};  // Thread-safe TX flag for waterfall control
     std::chrono::steady_clock::time_point tx_end_time_;  // When current TX finishes
 
