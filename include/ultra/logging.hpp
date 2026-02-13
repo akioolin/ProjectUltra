@@ -71,17 +71,19 @@ inline void setLogFile(FILE* file) {
 inline void log(LogLevel level, const char* category, const char* format, ...) {
     if (level > g_log_level) return;
 
-    std::lock_guard<std::mutex> lock(g_log_mutex);
+#ifdef _WIN32
+    // During early GUI startup on some Win10 systems, touching the shared
+    // logging mutex/CRT stream path can crash. If no explicit file sink is set,
+    // skip logging entirely.
     FILE* out = g_log_file;
     if (!out) {
-#ifdef _WIN32
-        // GUI-subsystem processes can have an invalid stderr stream on Win10.
-        // Avoid using stderr entirely on Windows unless an explicit log file is set.
         return;
-#else
-        out = stderr;
-#endif
     }
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+#else
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    FILE* out = g_log_file ? g_log_file : stderr;
+#endif
 
     // Get elapsed time in milliseconds
     auto now = std::chrono::steady_clock::now();
