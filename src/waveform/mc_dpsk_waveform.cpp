@@ -4,7 +4,6 @@
 #include "gui/startup_trace.hpp"
 #include "ultra/logging.hpp"
 #include <cmath>
-#include <sstream>
 
 namespace ultra {
 
@@ -34,17 +33,11 @@ void MCDPSKWaveform::initComponents() {
     chirp_sync_ = std::make_unique<sync::ChirpSync>(config_.getChirpConfig());
     gui::startupTrace("MCDPSKWaveform", "chirp-sync-created");
 
-    // Debug: print config
-    auto freqs = config_.getCarrierFreqs();
-    std::ostringstream freq_preview;
-    for (int i = 0; i < std::min(4, config_.num_carriers); i++) {
-        if (i > 0) {
-            freq_preview << ' ';
-        }
-        freq_preview << static_cast<int>(std::lround(freqs[i]));
-    }
-    LOG_MODEM(INFO, "MCDPSKWaveform: Created with %d carriers, samples_per_sym=%d, freqs: %s...",
-              config_.num_carriers, config_.samples_per_symbol, freq_preview.str().c_str());
+    // Keep constructor logging allocation-light for older Windows runtimes.
+    gui::startupTrace("MCDPSKWaveform", "pre-created-log");
+    LOG_MODEM(INFO, "MCDPSKWaveform: Created with %d carriers, samples_per_sym=%d",
+              config_.num_carriers, config_.samples_per_symbol);
+    gui::startupTrace("MCDPSKWaveform", "post-created-log");
     gui::startupTrace("MCDPSKWaveform", "init-components-exit");
 }
 
