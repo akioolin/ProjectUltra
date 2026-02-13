@@ -86,12 +86,17 @@ void initStartupLog() {
     }
 
     if (g_startup_log_file) {
+        // Ensure early LOG_* calls during App/Modem construction have a valid sink.
+        ultra::setLogFile(g_startup_log_file);
         writeStartupLog("ProjectUltra GUI startup log initialized");
     }
 }
 
 void closeStartupLog() {
     if (g_startup_log_file) {
+        if (ultra::g_log_file == g_startup_log_file) {
+            ultra::setLogFile(nullptr);
+        }
         writeStartupLog("ProjectUltra GUI startup log closing");
         std::fclose(g_startup_log_file);
         g_startup_log_file = nullptr;

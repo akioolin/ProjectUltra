@@ -75,12 +75,12 @@ inline void log(LogLevel level, const char* category, const char* format, ...) {
     FILE* out = g_log_file;
     if (!out) {
 #ifdef _WIN32
-        // GUI-subsystem processes can have an invalid stderr stream on some Win10 setups.
-        if (!stderr || _fileno(stderr) < 0) {
-            return;
-        }
-#endif
+        // GUI-subsystem processes can have an invalid stderr stream on Win10.
+        // Avoid using stderr entirely on Windows unless an explicit log file is set.
+        return;
+#else
         out = stderr;
+#endif
     }
 
     // Get elapsed time in milliseconds

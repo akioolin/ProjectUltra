@@ -56,8 +56,10 @@ StreamingEncoder::StreamingEncoder() {
     updateInterleaver();
     startupTrace("StreamingEncoder", "update-interleaver-exit");
 
+    startupTrace("StreamingEncoder", "ctor-log-enter");
     LOG_MODEM(INFO, "StreamingEncoder: Initialized (mode=%s, carriers=%d)",
               protocol::waveformModeToString(mode_), ofdm_config_.num_carriers);
+    startupTrace("StreamingEncoder", "ctor-log-exit");
     startupTrace("StreamingEncoder", "ctor-exit");
 }
 
