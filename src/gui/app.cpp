@@ -188,6 +188,12 @@ static uint32_t safeFileSizeBytes(const std::string& path) {
     return static_cast<uint32_t>(size);
 }
 
+template <size_t N>
+static size_t boundedCStringLen(const char (&buf)[N]) {
+    const void* term = std::memchr(buf, '\0', N);
+    return term ? static_cast<size_t>(static_cast<const char*>(term) - buf) : N;
+}
+
 static float codeRateValue(CodeRate rate) {
     switch (rate) {
         case CodeRate::R1_4: return 0.25f;
@@ -250,12 +256,15 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     }
 
     // Initialize protocol with saved callsign
-    if (strlen(settings_.callsign) > 0) {
+    ultra::gui::startupTrace("App", "callsign-init-enter");
+    if (boundedCStringLen(settings_.callsign) > 0) {
         protocol_.setLocalCallsign(settings_.callsign);
         modem_.setLogPrefix(settings_.callsign);
     }
+    ultra::gui::startupTrace("App", "callsign-init-exit");
 
     // Set up raw data callback for protocol layer
+    ultra::gui::startupTrace("App", "set-raw-callback-enter");
     modem_.setRawDataCallback([this](const Bytes& data) {
         guiLog("Our modem decoded %zu bytes", data.size());
         // Update protocol layer with current SNR and fading before processing frame
@@ -268,13 +277,17 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         protocol_.onRxData(data);
         updateAdaptiveAdvisory(snr_db, fading);
     });
+    ultra::gui::startupTrace("App", "set-raw-callback-exit");
 
     // Set up status callback to show codeword progress in RX log
+    ultra::gui::startupTrace("App", "set-status-callback-enter");
     modem_.setStatusCallback([this](const std::string& status) {
         rx_log_.push_back(status);
     });
+    ultra::gui::startupTrace("App", "set-status-callback-exit");
 
     // Set up protocol engine callbacks
+    ultra::gui::startupTrace("App", "protocol-callbacks-enter");
     protocol_.setTxDataCallback([this](const Bytes& data) {
         // When protocol layer wants to transmit, convert to audio
         auto samples = modem_.transmit(data);
@@ -349,6 +362,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
             }
         }
     });
+    ultra::gui::startupTrace("App", "protocol-callbacks-mid1");
 
     protocol_.setMessageReceivedCallback([this](const std::string& from, const std::string& text) {
         // Received a message via ARQ
@@ -358,6 +372,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
             rx_log_.pop_front();
         }
     });
+    ultra::gui::startupTrace("App", "protocol-callbacks-mid2");
 
     protocol_.setConnectionChangedCallback([this](protocol::ConnectionState state, const std::string& info) {
         guiLog("Connection state changed: %d (%s)", static_cast<int>(state), info.c_str());
@@ -403,6 +418,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
             rx_log_.pop_front();
         }
     });
+    ultra::gui::startupTrace("App", "protocol-callbacks-mid3");
 
     protocol_.setIncomingCallCallback([this](const std::string& from) {
         pending_incoming_call_ = from;
@@ -412,6 +428,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
             rx_log_.pop_front();
         }
     });
+    ultra::gui::startupTrace("App", "protocol-callbacks-mid4");
 
     // PING TX callback - protocol wants to send a fast presence probe
     protocol_.setPingTxCallback([this]() {
@@ -466,6 +483,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
             }
         }
     });
+    ultra::gui::startupTrace("App", "protocol-callbacks-mid5");
 
     // Wire up modem ping detection to protocol
     modem_.setPingReceivedCallback([this](float snr) {
@@ -487,6 +505,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         }
         protocol_.onPingReceived();
     });
+    ultra::gui::startupTrace("App", "protocol-callbacks-mid6");
 
     protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate, float snr_db, float peer_fading) {
         // Update modem engine with new data mode
@@ -559,6 +578,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
             }
         }
     });
+    ultra::gui::startupTrace("App", "protocol-callbacks-mid7");
 
     // Waveform mode negotiation callback (OFDM, DPSK, MFSK switching)
     protocol_.setModeNegotiatedCallback([this](protocol::WaveformMode mode) {
@@ -583,6 +603,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
             rx_log_.pop_front();
         }
     });
+    ultra::gui::startupTrace("App", "protocol-callbacks-mid8");
 
     // Connect waveform fallback callback (DPSK -> MFSK when connection attempts fail)
     protocol_.setConnectWaveformChangedCallback([this](protocol::WaveformMode mode) {
@@ -590,12 +611,14 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         guiLog("CONNECT_WAVEFORM: Switching to %s for connection attempts", mode_name);
         modem_.setConnectWaveform(mode);
     });
+    ultra::gui::startupTrace("App", "protocol-callbacks-mid9");
 
     // Handshake confirmed callback - now safe to use negotiated waveform
     protocol_.setHandshakeConfirmedCallback([this]() {
         guiLog("HANDSHAKE: Confirmed, switching to negotiated waveform");
         modem_.setHandshakeComplete(true);
     });
+    ultra::gui::startupTrace("App", "protocol-callbacks-mid10");
 
     // File transfer callbacks
     protocol_.setFileProgressCallback([this](const protocol::FileTransferProgress& p) {
@@ -617,6 +640,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
             if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
         }
     });
+    ultra::gui::startupTrace("App", "protocol-callbacks-mid11");
 
     protocol_.setFileReceivedCallback([this](const std::string& path, bool success) {
         last_progress_milestone_ = 0;  // Reset for next transfer
@@ -647,6 +671,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
             rx_log_.pop_front();
         }
     });
+    ultra::gui::startupTrace("App", "protocol-callbacks-mid12");
 
     protocol_.setFileSentCallback([this](bool success, const std::string& error) {
         last_progress_milestone_ = 0;  // Reset for next transfer
@@ -677,18 +702,24 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
             rx_log_.pop_front();
         }
     });
+    ultra::gui::startupTrace("App", "protocol-callbacks-exit");
 
     // Set receive directory from settings (defaults to Downloads folder)
+    ultra::gui::startupTrace("App", "set-rx-dir-enter");
     protocol_.setReceiveDirectory(settings_.getReceiveDirectory());
+    ultra::gui::startupTrace("App", "set-rx-dir-exit");
 
     // Configure waterfall display
+    ultra::gui::startupTrace("App", "waterfall-config-enter");
     if (waterfall_) {
         waterfall_->setSampleRate(48000.0f);
         waterfall_->setFrequencyRange(0.0f, 3000.0f);
         waterfall_->setDynamicRange(-60.0f, 0.0f);
     }
+    ultra::gui::startupTrace("App", "waterfall-config-exit");
 
     // Settings window callbacks
+    ultra::gui::startupTrace("App", "settings-callbacks-enter");
     settings_window_.setCallsignChangedCallback([this](const std::string& call) {
         protocol_.setLocalCallsign(call);
         modem_.setLogPrefix(call);
@@ -758,13 +789,17 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         protocol_.setForcedCodeRate(static_cast<CodeRate>(code_rate));
         settings_.save();
     });
+    ultra::gui::startupTrace("App", "settings-callbacks-exit");
 
     // Apply initial expert settings from loaded config
+    ultra::gui::startupTrace("App", "apply-expert-enter");
     protocol_.setPreferredMode(static_cast<protocol::WaveformMode>(settings_.forced_waveform));
     protocol_.setForcedModulation(static_cast<Modulation>(settings_.forced_modulation));
     protocol_.setForcedCodeRate(static_cast<CodeRate>(settings_.forced_code_rate));
+    ultra::gui::startupTrace("App", "apply-expert-exit");
 
     // Apply initial filter settings from loaded config
+    ultra::gui::startupTrace("App", "apply-filter-enter");
     FilterConfig initial_filter;
     initial_filter.enabled = settings_.filter_enabled;
     initial_filter.center_freq = settings_.filter_center;
@@ -772,16 +807,20 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     initial_filter.taps = settings_.filter_taps;
     modem_.setFilterConfig(initial_filter);
     audio_.setOutputGain(settings_.tx_drive);
+    ultra::gui::startupTrace("App", "apply-filter-exit");
 
     // Initialize virtual station only when simulator UI is shown and startup is not constrained.
     // In safe-startup mode we defer this until the user enables simulation.
     if (sim_ui_visible_ && !options_.safe_startup) {
+        ultra::gui::startupTrace("App", "init-virtual-enter");
         initVirtualStation();
+        ultra::gui::startupTrace("App", "init-virtual-exit");
     }
 
     // Auto-initialize audio on startup unless safe-startup mode is requested.
     // This avoids crashing on fragile audio stacks during process bring-up.
     if (!options_.safe_startup) {
+        ultra::gui::startupTrace("App", "init-audio-enter");
         initAudio();
         if (audio_initialized_) {
             std::string output_dev = getOutputDeviceName();
@@ -789,9 +828,11 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
             audio_.startPlayback();
             startRadioRx();
         }
+        ultra::gui::startupTrace("App", "init-audio-exit");
     } else {
         guiLog("Safe startup enabled: deferred audio/simulator initialization");
     }
+    ultra::gui::startupTrace("App", "ctor-body-exit");
 }
 
 App::~App() {

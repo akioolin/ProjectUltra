@@ -81,6 +81,14 @@ static void ensureDirectory(const std::string& path) {
     }
 }
 
+static void copyBounded(char* dst, size_t dst_size, const std::string& value) {
+    if (!dst || dst_size == 0) {
+        return;
+    }
+    std::strncpy(dst, value.c_str(), dst_size - 1);
+    dst[dst_size - 1] = '\0';
+}
+
 // Save settings to INI file
 bool AppSettings::save(const std::string& path) const {
     std::string filepath = path.empty() ? getDefaultPath() : path;
@@ -150,17 +158,17 @@ bool AppSettings::load(const std::string& path) {
 
         // Station settings
         if (key == "callsign") {
-            strncpy(callsign, value.c_str(), sizeof(callsign) - 1);
+            copyBounded(callsign, sizeof(callsign), value);
         } else if (key == "grid_square") {
-            strncpy(grid_square, value.c_str(), sizeof(grid_square) - 1);
+            copyBounded(grid_square, sizeof(grid_square), value);
         } else if (key == "name") {
-            strncpy(name, value.c_str(), sizeof(name) - 1);
+            copyBounded(name, sizeof(name), value);
         }
         // Radio settings
         else if (key == "rig_model") {
-            strncpy(rig_model, value.c_str(), sizeof(rig_model) - 1);
+            copyBounded(rig_model, sizeof(rig_model), value);
         } else if (key == "rig_port") {
-            strncpy(rig_port, value.c_str(), sizeof(rig_port) - 1);
+            copyBounded(rig_port, sizeof(rig_port), value);
         } else if (key == "rig_baud") {
             rig_baud = std::atoi(value.c_str());
         } else if (key == "use_cat_ptt") {
@@ -168,9 +176,9 @@ bool AppSettings::load(const std::string& path) {
         }
         // Audio settings
         else if (key == "input_device") {
-            strncpy(input_device, value.c_str(), sizeof(input_device) - 1);
+            copyBounded(input_device, sizeof(input_device), value);
         } else if (key == "output_device") {
-            strncpy(output_device, value.c_str(), sizeof(output_device) - 1);
+            copyBounded(output_device, sizeof(output_device), value);
         } else if (key == "tx_delay_ms") {
             tx_delay_ms = std::atoi(value.c_str());
         } else if (key == "tx_tail_ms") {
@@ -190,8 +198,7 @@ bool AppSettings::load(const std::string& path) {
         }
         // File transfer settings
         else if (key == "receive_directory") {
-            strncpy(receive_directory, value.c_str(), sizeof(receive_directory) - 1);
-            receive_directory[sizeof(receive_directory) - 1] = '\0';
+            copyBounded(receive_directory, sizeof(receive_directory), value);
         }
         // Expert settings
         else if (key == "forced_waveform") {
