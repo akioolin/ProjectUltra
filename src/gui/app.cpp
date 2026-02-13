@@ -815,9 +815,11 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
             std::string output_dev = getOutputDeviceName();
             if (audio_.openOutput(output_dev)) {
                 deferred_radio_rx_start_pending_ = true;
-                deferred_radio_rx_start_deadline_ms_ = SDL_GetTicks() + 250;
+                uint32_t now_ms = SDL_GetTicks();
+                deferred_radio_rx_start_deadline_ms_ = now_ms;
+                deferred_radio_rx_start_timeout_ms_ = now_ms + 3000;
                 deferred_radio_rx_start_attempts_ = 0;
-                guiLog("Startup audio stage 1/2 complete: output ready, delaying RX capture by 250ms");
+                guiLog("Startup audio stage 1/2 complete: output ready, starting RX capture ASAP (timeout=3000ms)");
             } else {
                 guiLog("Startup audio stage: openOutput failed");
             }
@@ -1533,9 +1535,10 @@ void App::render() {
                     std::string output_dev = getOutputDeviceName();
                     if (audio_.openOutput(output_dev)) {
                         deferred_radio_rx_start_pending_ = true;
-                        deferred_radio_rx_start_deadline_ms_ = now_ms + 250;
+                        deferred_radio_rx_start_deadline_ms_ = now_ms;
+                        deferred_radio_rx_start_timeout_ms_ = now_ms + 3000;
                         deferred_radio_rx_start_attempts_ = 0;
-                        guiLog("Deferred audio stage 1/2 complete: output ready, waiting 250ms before capture");
+                        guiLog("Deferred audio stage 1/2 complete: output ready, starting RX capture ASAP (timeout=3000ms)");
                         ultra::gui::startupTrace("App", "deferred-audio-open-output-exit");
                         deferred_audio_auto_init_pending_ = false;
                     } else {
@@ -1572,14 +1575,18 @@ void App::render() {
                 deferred_radio_rx_start_attempts_ = 0;
             } else {
                 deferred_radio_rx_start_attempts_++;
-                if (deferred_radio_rx_start_attempts_ >= 5) {
-                    guiLog("Deferred audio stage 2/2 failed after %d attempts; manual audio init required",
-                           deferred_radio_rx_start_attempts_);
+                if (now_ms >= deferred_radio_rx_start_timeout_ms_) {
+                    guiLog("Deferred audio stage 2/2 timeout after %d attempts (%ums); manual audio init required",
+                           deferred_radio_rx_start_attempts_, 3000u);
                     deferred_radio_rx_start_pending_ = false;
                 } else {
-                    deferred_radio_rx_start_deadline_ms_ = now_ms + 500;
-                    guiLog("Deferred audio stage 2/2 retry %d/5 scheduled",
-                           deferred_radio_rx_start_attempts_ + 1);
+                    deferred_radio_rx_start_deadline_ms_ = now_ms + 100;
+                    if (deferred_radio_rx_start_attempts_ == 1 ||
+                        (deferred_radio_rx_start_attempts_ % 10) == 0) {
+                        uint32_t remaining_ms = deferred_radio_rx_start_timeout_ms_ - now_ms;
+                        guiLog("Deferred audio stage 2/2 waiting for RX readiness (attempt=%d, remaining=%ums)",
+                               deferred_radio_rx_start_attempts_, remaining_ms);
+                    }
                 }
             }
         }

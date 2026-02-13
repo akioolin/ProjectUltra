@@ -75,6 +75,7 @@ private:
     bool deferred_audio_wait_logged_ = false;
     bool deferred_radio_rx_start_pending_ = false;
     uint32_t deferred_radio_rx_start_deadline_ms_ = 0;
+    uint32_t deferred_radio_rx_start_timeout_ms_ = 0;
     int deferred_radio_rx_start_attempts_ = 0;
     uint32_t render_frames_seen_ = 0;
     std::atomic<bool> tx_in_progress_{false};  // Thread-safe TX flag for waterfall control
