@@ -297,6 +297,8 @@ LONG CALLBACK startupVectoredExceptionHandler(EXCEPTION_POINTERS* ex) {
 
     unsigned long code = ex->ExceptionRecord->ExceptionCode;
     void* addr = ex->ExceptionRecord->ExceptionAddress;
+    std::string module = modulePathForAddress(addr);
+    unsigned long tid = static_cast<unsigned long>(GetCurrentThreadId());
 
     // Log only likely-fatal runtime faults to avoid noisy first-chance spam.
     switch (code) {
@@ -307,8 +309,8 @@ LONG CALLBACK startupVectoredExceptionHandler(EXCEPTION_POINTERS* ex) {
         case EXCEPTION_INT_DIVIDE_BY_ZERO:
         case 0xC0000409: // STATUS_STACK_BUFFER_OVERRUN / fast-fail
         case 0xC0000374: // STATUS_HEAP_CORRUPTION
-            writeStartupLog("Vectored exception: code=0x%08lX addr=%p",
-                            code, addr);
+            writeStartupLog("Vectored exception: code=0x%08lX addr=%p module=%s tid=%lu",
+                            code, addr, module.c_str(), tid);
             writeCrashDump(ex, "veh");
             break;
         default:
