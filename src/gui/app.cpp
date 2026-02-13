@@ -1491,6 +1491,10 @@ void App::render() {
         ultra::gui::startupTrace("App", "render-set-output-gain-exit");
     }
 
+    // Process captured RX audio in the main thread.
+    // Avoids feeding modem state directly from SDL callback threads.
+    pollRadioRx();
+
     // Safe-startup mode: auto-start audio shortly after first frame.
     // Keeps process bring-up lightweight while preserving "auto-listen" behavior.
     if (deferred_audio_auto_init_pending_ &&
@@ -1719,12 +1723,8 @@ void App::startRadioRx() {
         return;
     }
 
-    audio_.setRxCallback([this](const std::vector<float>& samples) {
-        modem_.feedAudio(samples);
-        if (waterfall_) {
-            waterfall_->addSamples(samples.data(), samples.size());
-        }
-    });
+    // Main thread polls captured samples via pollRadioRx().
+    audio_.setRxCallback(AudioEngine::RxCallback{});
 
     audio_.setLoopbackEnabled(false);
     audio_.startCapture();
@@ -1734,7 +1734,29 @@ void App::startRadioRx() {
 void App::stopRadioRx() {
     audio_.stopCapture();
     audio_.closeInput();
+    audio_.setRxCallback(AudioEngine::RxCallback{});
     radio_rx_enabled_ = false;
+}
+
+void App::pollRadioRx() {
+    if (!audio_initialized_ || simulation_enabled_ || !radio_rx_enabled_) {
+        return;
+    }
+
+    // Bounded drain per frame to keep UI responsive while preventing RX backlog.
+    constexpr size_t kChunkSamples = 2048;
+    constexpr int kMaxChunksPerFrame = 8;
+    for (int i = 0; i < kMaxChunksPerFrame; ++i) {
+        auto samples = audio_.getRxSamples(kChunkSamples);
+        if (samples.empty()) {
+            break;
+        }
+
+        modem_.feedAudio(samples);
+        if (waterfall_) {
+            waterfall_->addSamples(samples.data(), samples.size());
+        }
+    }
 }
 
 void App::stopTxNow(const char* reason) {

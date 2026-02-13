@@ -81,6 +81,11 @@ std::vector<std::string> AudioEngine::getInputDevices() {
     return devices;
 }
 
+void AudioEngine::setRxCallback(RxCallback callback) {
+    std::lock_guard<AudioEngineMutex> lock(rx_callback_mutex_);
+    rx_callback_ = std::move(callback);
+}
+
 bool AudioEngine::openOutput(const std::string& device) {
     if (!initialized_) {
         if (!initialize()) return false;
@@ -159,7 +164,7 @@ void AudioEngine::closeInput() {
 }
 
 void AudioEngine::queueTxSamples(const std::vector<float>& samples) {
-    std::lock_guard<std::mutex> lock(tx_mutex_);
+    std::lock_guard<AudioEngineMutex> lock(tx_mutex_);
     for (float s : samples) {
         tx_queue_.push(s);
     }
@@ -170,7 +175,7 @@ void AudioEngine::queueTxSamples(const std::vector<float>& samples) {
         std::vector<float> loopback_samples = samples;
         addChannelNoise(loopback_samples);
 
-        std::lock_guard<std::mutex> rx_lock(rx_mutex_);
+        std::lock_guard<AudioEngineMutex> rx_lock(rx_mutex_);
 
         // Cap buffer size to prevent unbounded growth
         if (rx_buffer_.size() + loopback_samples.size() > MAX_RX_BUFFER_SAMPLES) {
@@ -191,23 +196,23 @@ void AudioEngine::queueTxSamples(const std::vector<float>& samples) {
 }
 
 void AudioEngine::clearTxQueue() {
-    std::lock_guard<std::mutex> lock(tx_mutex_);
+    std::lock_guard<AudioEngineMutex> lock(tx_mutex_);
     std::queue<float> empty;
     std::swap(tx_queue_, empty);
 }
 
 bool AudioEngine::isTxQueueEmpty() const {
-    std::lock_guard<std::mutex> lock(tx_mutex_);
+    std::lock_guard<AudioEngineMutex> lock(tx_mutex_);
     return tx_queue_.empty();
 }
 
 size_t AudioEngine::getTxQueueSize() const {
-    std::lock_guard<std::mutex> lock(tx_mutex_);
+    std::lock_guard<AudioEngineMutex> lock(tx_mutex_);
     return tx_queue_.size();
 }
 
 std::vector<float> AudioEngine::getRxSamples(size_t max_samples) {
-    std::lock_guard<std::mutex> lock(rx_mutex_);
+    std::lock_guard<AudioEngineMutex> lock(rx_mutex_);
 
     size_t count = std::min(max_samples, rx_buffer_.size());
     std::vector<float> samples(rx_buffer_.begin(), rx_buffer_.begin() + count);
@@ -217,7 +222,7 @@ std::vector<float> AudioEngine::getRxSamples(size_t max_samples) {
 }
 
 size_t AudioEngine::getRxBufferSize() const {
-    std::lock_guard<std::mutex> lock(rx_mutex_);
+    std::lock_guard<AudioEngineMutex> lock(rx_mutex_);
     return rx_buffer_.size();
 }
 
@@ -250,7 +255,7 @@ void AudioEngine::stopCapture() {
 }
 
 void AudioEngine::clearRxBuffer() {
-    std::lock_guard<std::mutex> lock(rx_mutex_);
+    std::lock_guard<AudioEngineMutex> lock(rx_mutex_);
     rx_buffer_.clear();
 }
 
@@ -267,7 +272,7 @@ void AudioEngine::outputCallback(void* userdata, Uint8* stream, int len) {
     float sum_sq = 0.0f;
     float gain = engine->output_gain_.load();
 
-    std::lock_guard<std::mutex> lock(engine->tx_mutex_);
+    std::lock_guard<AudioEngineMutex> lock(engine->tx_mutex_);
 
     for (int i = 0; i < samples; ++i) {
         float out = 0.0f;
@@ -318,7 +323,7 @@ void AudioEngine::inputCallback(void* userdata, Uint8* stream, int len) {
     engine->input_level_ = rms;
 
     {
-        std::lock_guard<std::mutex> lock(engine->rx_mutex_);
+        std::lock_guard<AudioEngineMutex> lock(engine->rx_mutex_);
 
         // Cap buffer size to prevent unbounded growth if main loop stalls
         if (engine->rx_buffer_.size() + captured.size() > MAX_RX_BUFFER_SAMPLES) {
@@ -333,8 +338,13 @@ void AudioEngine::inputCallback(void* userdata, Uint8* stream, int len) {
     }
 
     // Notify via callback (skip if muted during TX)
-    if (engine->rx_callback_ && !engine->rx_muted_.load()) {
-        engine->rx_callback_(captured);
+    AudioEngine::RxCallback rx_cb;
+    {
+        std::lock_guard<AudioEngineMutex> cb_lock(engine->rx_callback_mutex_);
+        rx_cb = engine->rx_callback_;
+    }
+    if (rx_cb && !engine->rx_muted_.load()) {
+        rx_cb(captured);
     }
 }
 

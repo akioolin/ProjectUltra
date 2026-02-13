@@ -7,9 +7,35 @@
 #include <atomic>
 #include <string>
 #include <functional>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#ifdef ERROR
+#undef ERROR
+#endif
+#endif
 
 namespace ultra {
 namespace gui {
+
+#ifdef _WIN32
+class AudioEngineMutex {
+public:
+    AudioEngineMutex() noexcept = default;
+    AudioEngineMutex(const AudioEngineMutex&) = delete;
+    AudioEngineMutex& operator=(const AudioEngineMutex&) = delete;
+
+    void lock() noexcept { AcquireSRWLockExclusive(&lock_); }
+    void unlock() noexcept { ReleaseSRWLockExclusive(&lock_); }
+
+private:
+    SRWLOCK lock_ = SRWLOCK_INIT;
+};
+#else
+using AudioEngineMutex = std::mutex;
+#endif
 
 // Audio engine for real-time audio I/O using SDL2
 class AudioEngine {
@@ -80,7 +106,7 @@ public:
 
     // Callback for when RX has data ready
     using RxCallback = std::function<void(const std::vector<float>&)>;
-    void setRxCallback(RxCallback callback) { rx_callback_ = callback; }
+    void setRxCallback(RxCallback callback);
 
 private:
     // SDL audio callbacks
@@ -95,11 +121,11 @@ private:
 
     // TX buffer (samples waiting to be played)
     std::queue<float> tx_queue_;
-    mutable std::mutex tx_mutex_;
+    mutable AudioEngineMutex tx_mutex_;
 
     // RX buffer (captured samples)
     std::vector<float> rx_buffer_;
-    mutable std::mutex rx_mutex_;
+    mutable AudioEngineMutex rx_mutex_;
 
     // Loopback settings
     std::atomic<bool> loopback_enabled_{false};
@@ -121,6 +147,7 @@ private:
 
     // RX callback
     RxCallback rx_callback_;
+    mutable AudioEngineMutex rx_callback_mutex_;
 
     // Random generator for noise
     uint32_t noise_seed_ = 12345;

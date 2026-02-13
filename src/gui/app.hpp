@@ -197,6 +197,7 @@ private:
     void updateAdaptiveAdvisory(float snr_db, float fading_index);
     void startRadioRx();
     void stopRadioRx();
+    void pollRadioRx();
 
     // Helper to get device name from settings (returns empty string for "Default")
     std::string getInputDeviceName() const;
