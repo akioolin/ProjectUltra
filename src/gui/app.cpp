@@ -257,9 +257,15 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
 
     // Initialize protocol with saved callsign
     ultra::gui::startupTrace("App", "callsign-init-enter");
-    if (boundedCStringLen(settings_.callsign) > 0) {
-        protocol_.setLocalCallsign(settings_.callsign);
-        modem_.setLogPrefix(settings_.callsign);
+    size_t local_call_len = boundedCStringLen(settings_.callsign);
+    if (local_call_len > 0) {
+        std::string local_call(settings_.callsign, local_call_len);
+        ultra::gui::startupTrace("App", "callsign-set-protocol-enter");
+        protocol_.setLocalCallsign(local_call);
+        ultra::gui::startupTrace("App", "callsign-set-protocol-exit");
+        ultra::gui::startupTrace("App", "callsign-set-modem-enter");
+        modem_.setLogPrefix(local_call);
+        ultra::gui::startupTrace("App", "callsign-set-modem-exit");
     }
     ultra::gui::startupTrace("App", "callsign-init-exit");
 
@@ -2023,7 +2029,8 @@ void App::renderOperateTab() {
             audio_.startPlayback();
             startRadioRx();
         }
-        protocol_.connect(remote_callsign_);
+        std::string remote_call(remote_callsign_, boundedCStringLen(remote_callsign_));
+        protocol_.connect(remote_call);
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
@@ -2201,10 +2208,11 @@ void App::renderOperateTab() {
         if (ImGui::Button("Send##file", ImVec2(60, 0))) {
             last_progress_milestone_ = 0;  // Reset milestone tracker
             file_transfer_start_time_ = std::chrono::steady_clock::now();  // Start timing
-            uint32_t file_bytes = safeFileSizeBytes(file_path_buffer_);
-            if (protocol_.sendFile(file_path_buffer_)) {
+            std::string file_path(file_path_buffer_, boundedCStringLen(file_path_buffer_));
+            uint32_t file_bytes = safeFileSizeBytes(file_path);
+            if (protocol_.sendFile(file_path)) {
                 pending_file_tx_payload_bytes_ = file_bytes;
-                rx_log_.push_back("[FILE] Sending: " + std::string(file_path_buffer_));
+                rx_log_.push_back("[FILE] Sending: " + file_path);
             } else {
                 pending_file_tx_payload_bytes_ = 0;
                 rx_log_.push_back("[FILE] Failed to start transfer");

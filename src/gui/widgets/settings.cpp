@@ -434,8 +434,7 @@ void SettingsWindow::renderAudioTab(AppSettings& settings) {
         for (const auto& dev : output_devices) {
             bool selected = (strcmp(settings.output_device, dev.c_str()) == 0);
             if (ImGui::Selectable(dev.c_str(), selected)) {
-                strncpy(settings.output_device, dev.c_str(), sizeof(settings.output_device) - 1);
-                settings.output_device[sizeof(settings.output_device) - 1] = '\0';
+                copyBounded(settings.output_device, sizeof(settings.output_device), dev);
             }
             if (selected) {
                 ImGui::SetItemDefaultFocus();
@@ -453,8 +452,7 @@ void SettingsWindow::renderAudioTab(AppSettings& settings) {
         for (const auto& dev : input_devices) {
             bool selected = (strcmp(settings.input_device, dev.c_str()) == 0);
             if (ImGui::Selectable(dev.c_str(), selected)) {
-                strncpy(settings.input_device, dev.c_str(), sizeof(settings.input_device) - 1);
-                settings.input_device[sizeof(settings.input_device) - 1] = '\0';
+                copyBounded(settings.input_device, sizeof(settings.input_device), dev);
             }
             if (selected) {
                 ImGui::SetItemDefaultFocus();
