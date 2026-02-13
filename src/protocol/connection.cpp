@@ -142,8 +142,9 @@ Connection::Connection(const ConnectionConfig& config)
 // =============================================================================
 
 void Connection::setLocalCallsign(const std::string& call) {
+    ultra::gui::startupTrace("Connection", "setLocalCallsign-enter");
     local_call_ = sanitizeCallsign(call);
-    LOG_MODEM(INFO, "Connection: Local callsign set to %s", local_call_.c_str());
+    ultra::gui::startupTrace("Connection", "setLocalCallsign-exit");
 }
 
 // =============================================================================

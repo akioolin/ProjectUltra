@@ -49,8 +49,16 @@ ProtocolEngine::ProtocolEngine(const ConnectionConfig& config)
 }
 
 void ProtocolEngine::setLocalCallsign(const std::string& call) {
+#ifdef _WIN32
+    ultra::gui::startupTrace("ProtocolEngine", "setLocalCallsign-enter");
+    // Win10 startup hardening: avoid std::mutex path in early GUI bring-up.
+    // Called from UI thread during app construction.
+    connection_.setLocalCallsign(call);
+    ultra::gui::startupTrace("ProtocolEngine", "setLocalCallsign-exit");
+#else
     std::lock_guard<std::mutex> lock(mutex_);
     connection_.setLocalCallsign(call);
+#endif
 }
 
 std::string ProtocolEngine::getLocalCallsign() const {
