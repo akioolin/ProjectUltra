@@ -56,48 +56,48 @@ void ProtocolEngine::setLocalCallsign(const std::string& call) {
     connection_.setLocalCallsign(call);
     ultra::gui::startupTrace("ProtocolEngine", "setLocalCallsign-exit");
 #else
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setLocalCallsign(call);
 #endif
 }
 
 std::string ProtocolEngine::getLocalCallsign() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.getLocalCallsign();
 }
 
 void ProtocolEngine::setAutoAccept(bool auto_accept) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setAutoAccept(auto_accept);
 }
 
 bool ProtocolEngine::getAutoAccept() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.getAutoAccept();
 }
 
 void ProtocolEngine::setTxDataCallback(TxDataCallback cb) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     on_tx_data_ = std::move(cb);
 }
 
 void ProtocolEngine::setMessageReceivedCallback(MessageReceivedCallback cb) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     on_message_received_ = std::move(cb);
 }
 
 void ProtocolEngine::setConnectionChangedCallback(ConnectionChangedCallback cb) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     on_connection_changed_ = std::move(cb);
 }
 
 void ProtocolEngine::setIncomingCallCallback(IncomingCallCallback cb) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     on_incoming_call_ = std::move(cb);
 }
 
 bool ProtocolEngine::connect(const std::string& remote_call) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     bool result = connection_.connect(remote_call);
     if (result && on_connection_changed_) {
         // Connection now starts with PROBING state (fast presence check)
@@ -107,17 +107,17 @@ bool ProtocolEngine::connect(const std::string& remote_call) {
 }
 
 void ProtocolEngine::acceptCall() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.acceptCall();
 }
 
 void ProtocolEngine::rejectCall() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.rejectCall();
 }
 
 void ProtocolEngine::disconnect() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.disconnect();
     if (on_connection_changed_) {
         on_connection_changed_(ConnectionState::DISCONNECTING, "");
@@ -125,64 +125,64 @@ void ProtocolEngine::disconnect() {
 }
 
 bool ProtocolEngine::sendMessage(const std::string& text) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.sendMessage(text);
 }
 
 bool ProtocolEngine::sendMessages(const std::vector<std::string>& texts) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.sendMessages(texts);
 }
 
 bool ProtocolEngine::isReadyToSend() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.isReadyToSend();
 }
 
 // --- File Transfer ---
 
 bool ProtocolEngine::sendFile(const std::string& filepath) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.sendFile(filepath);
 }
 
 void ProtocolEngine::setReceiveDirectory(const std::string& dir) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setReceiveDirectory(dir);
 }
 
 void ProtocolEngine::cancelFileTransfer() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.cancelFileTransfer();
 }
 
 bool ProtocolEngine::isFileTransferInProgress() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.isFileTransferInProgress();
 }
 
 FileTransferProgress ProtocolEngine::getFileProgress() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.getFileProgress();
 }
 
 void ProtocolEngine::setFileProgressCallback(FileProgressCallback cb) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setFileProgressCallback(std::move(cb));
 }
 
 void ProtocolEngine::setFileReceivedCallback(FileReceivedCallback cb) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setFileReceivedCallback(std::move(cb));
 }
 
 void ProtocolEngine::setFileSentCallback(FileSentCallback cb) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setFileSentCallback(std::move(cb));
 }
 
 void ProtocolEngine::onRxData(const Bytes& data) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
 
     LOG_MODEM(INFO, "[%s] Protocol RX: %zu bytes from modem (buffer now %zu)",
               connection_.getLocalCallsign().c_str(), data.size(), rx_buffer_.size() + data.size());
@@ -317,7 +317,7 @@ void ProtocolEngine::processRxBuffer() {
 void ProtocolEngine::tick(uint32_t elapsed_ms) {
     std::vector<Bytes> to_send;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<ProtocolEngineMutex> lock(mutex_);
         to_send = std::move(tx_queue_);
         tx_queue_.clear();
     }
@@ -328,37 +328,37 @@ void ProtocolEngine::tick(uint32_t elapsed_ms) {
         }
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.tick(elapsed_ms);
 }
 
 ConnectionState ProtocolEngine::getState() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.getState();
 }
 
 std::string ProtocolEngine::getRemoteCallsign() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.getRemoteCallsign();
 }
 
 bool ProtocolEngine::isConnected() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.isConnected();
 }
 
 ConnectionStats ProtocolEngine::getStats() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.getStats();
 }
 
 void ProtocolEngine::resetStats() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.resetStats();
 }
 
 void ProtocolEngine::reset() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.reset();
     rx_buffer_.clear();
     tx_queue_.clear();
@@ -380,119 +380,119 @@ void ProtocolEngine::handleTxFrame(const Bytes& frame_data) {
 // --- Waveform Mode ---
 
 WaveformMode ProtocolEngine::getNegotiatedMode() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.getNegotiatedMode();
 }
 
 void ProtocolEngine::setPreferredMode(WaveformMode mode) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setPreferredMode(mode);
 }
 
 void ProtocolEngine::setModeCapabilities(uint8_t caps) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setModeCapabilities(caps);
 }
 
 void ProtocolEngine::setForcedModulation(Modulation mod) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setForcedModulation(mod);
 }
 
 void ProtocolEngine::setForcedCodeRate(CodeRate rate) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setForcedCodeRate(rate);
 }
 
 Modulation ProtocolEngine::getForcedModulation() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.getForcedModulation();
 }
 
 CodeRate ProtocolEngine::getForcedCodeRate() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.getForcedCodeRate();
 }
 
 void ProtocolEngine::setModeNegotiatedCallback(ModeNegotiatedCallback cb) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setModeNegotiatedCallback(std::move(cb));
 }
 
 void ProtocolEngine::setConnectWaveformChangedCallback(ConnectWaveformChangedCallback cb) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setConnectWaveformChangedCallback(std::move(cb));
 }
 
 void ProtocolEngine::setHandshakeConfirmedCallback(HandshakeConfirmedCallback cb) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setHandshakeConfirmedCallback(std::move(cb));
 }
 
 WaveformMode ProtocolEngine::getConnectWaveform() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.getConnectWaveform();
 }
 
 void ProtocolEngine::setInitialConnectWaveform(WaveformMode mode) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setInitialConnectWaveform(mode);
 }
 
 // --- Adaptive Data Mode ---
 
 void ProtocolEngine::setMeasuredSNR(float snr_db) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setMeasuredSNR(snr_db);
 }
 
 float ProtocolEngine::getMeasuredSNR() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.getMeasuredSNR();
 }
 
 void ProtocolEngine::setChannelQuality(float snr_db, float fading_index) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setChannelQuality(snr_db, fading_index);
 }
 
 float ProtocolEngine::getFadingIndex() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.getFadingIndex();
 }
 
 Modulation ProtocolEngine::getDataModulation() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.getDataModulation();
 }
 
 CodeRate ProtocolEngine::getDataCodeRate() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.getDataCodeRate();
 }
 
 void ProtocolEngine::setDataModeChangedCallback(DataModeChangedCallback cb) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setDataModeChangedCallback(std::move(cb));
 }
 
 void ProtocolEngine::setTransmitBurstCallback(TransmitBurstCallback cb) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setTransmitBurstCallback(std::move(cb));
 }
 
 void ProtocolEngine::setPingTxCallback(PingTxCallback cb) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setPingTxCallback(std::move(cb));
 }
 
 void ProtocolEngine::setPingReceivedCallback(PingReceivedCallback cb) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setPingReceivedCallback(std::move(cb));
 }
 
 void ProtocolEngine::onPingReceived() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.onPongReceived();
 }
 

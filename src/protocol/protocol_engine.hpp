@@ -4,9 +4,35 @@
 #include "frame_v2.hpp"
 #include <functional>
 #include <mutex>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#ifdef ERROR
+#undef ERROR
+#endif
+#endif
 
 namespace ultra {
 namespace protocol {
+
+#ifdef _WIN32
+class ProtocolEngineMutex {
+public:
+    ProtocolEngineMutex() noexcept = default;
+    ProtocolEngineMutex(const ProtocolEngineMutex&) = delete;
+    ProtocolEngineMutex& operator=(const ProtocolEngineMutex&) = delete;
+
+    void lock() noexcept { AcquireSRWLockExclusive(&lock_); }
+    void unlock() noexcept { ReleaseSRWLockExclusive(&lock_); }
+
+private:
+    SRWLOCK lock_ = SRWLOCK_INIT;
+};
+#else
+using ProtocolEngineMutex = std::mutex;
+#endif
 
 /**
  * Protocol Engine
@@ -155,7 +181,7 @@ private:
     ConnectionChangedCallback on_connection_changed_;
     IncomingCallCallback on_incoming_call_;
 
-    mutable std::mutex mutex_;
+    mutable ProtocolEngineMutex mutex_;
 
     Bytes rx_buffer_;
 
