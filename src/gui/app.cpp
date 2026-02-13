@@ -1486,8 +1486,18 @@ void App::updateAdaptiveAdvisory(float snr_db, float fading_index) {
 }
 
 void App::render() {
+    static bool first_render = true;
+    if (first_render) {
+        ultra::gui::startupTrace("App", "render-enter");
+    }
     // Keep output attenuation synchronized with the TX Drive slider.
+    if (first_render) {
+        ultra::gui::startupTrace("App", "render-set-output-gain-enter");
+    }
     audio_.setOutputGain(settings_.tx_drive);
+    if (first_render) {
+        ultra::gui::startupTrace("App", "render-set-output-gain-exit");
+    }
 
     // === DEBUG: Test signal keys (F1-F7) ===
     if (ImGui::IsKeyPressed(ImGuiKey_F1)) {
@@ -1526,6 +1536,9 @@ void App::render() {
     }
 
     // Create main window
+    if (first_render) {
+        ultra::gui::startupTrace("App", "render-main-window-enter");
+    }
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
     ImGui::SetNextWindowSize(viewport->WorkSize);
@@ -1554,6 +1567,7 @@ void App::render() {
 
     // Main content area - Two column layout
     float content_height = ImGui::GetContentRegionAvail().y - 30;
+    bool defer_monitoring = options_.safe_startup && !audio_initialized_;
 
     ImGui::BeginChild("ContentArea", ImVec2(0, content_height), false);
 
@@ -1565,32 +1579,37 @@ void App::render() {
     // ========================================
     ImGui::BeginChild("LeftPanel", ImVec2(left_width, 0), true);
 
-    // Constellation diagram
-    ImGui::BeginChild("ConstellationArea", ImVec2(0, 180), false);
-    auto symbols = modem_.getConstellationSymbols();
-    constellation_.render(symbols, config_.modulation);
-    ImGui::EndChild();
-
-    ImGui::Separator();
-
-    // Compact Channel Status (horizontal layout)
-    auto modem_stats = modem_.getStats();
-    // In simulation mode, use the slider SNR (that's the actual channel quality)
-    if (simulation_enabled_) {
-        modem_stats.snr_db = simulation_snr_db_;
-    }
-    auto data_mod = protocol_.getDataModulation();
-    auto data_rate = protocol_.getDataCodeRate();
-    auto conn_stats = protocol_.getStats();
-    renderCompactChannelStatus(modem_stats, data_mod, data_rate, conn_stats);
-
-    ImGui::Separator();
-
-    // Waterfall (uses remaining space)
-    if (waterfall_) {
-        waterfall_->render();
+    if (defer_monitoring) {
+        ImGui::TextDisabled("Startup safety mode active");
+        ImGui::TextDisabled("Monitoring widgets enabled after audio init");
     } else {
-        ImGui::TextDisabled("Waterfall disabled");
+        // Constellation diagram
+        ImGui::BeginChild("ConstellationArea", ImVec2(0, 180), false);
+        auto symbols = modem_.getConstellationSymbols();
+        constellation_.render(symbols, config_.modulation);
+        ImGui::EndChild();
+
+        ImGui::Separator();
+
+        // Compact Channel Status (horizontal layout)
+        auto modem_stats = modem_.getStats();
+        // In simulation mode, use the slider SNR (that's the actual channel quality)
+        if (simulation_enabled_) {
+            modem_stats.snr_db = simulation_snr_db_;
+        }
+        auto data_mod = protocol_.getDataModulation();
+        auto data_rate = protocol_.getDataCodeRate();
+        auto conn_stats = protocol_.getStats();
+        renderCompactChannelStatus(modem_stats, data_mod, data_rate, conn_stats);
+
+        ImGui::Separator();
+
+        // Waterfall (uses remaining space)
+        if (waterfall_) {
+            waterfall_->render();
+        } else {
+            ImGui::TextDisabled("Waterfall disabled");
+        }
     }
 
     ImGui::EndChild();
@@ -1607,7 +1626,7 @@ void App::render() {
 
     // Status bar
     ImGui::Separator();
-    auto mstats = modem_.getStats();
+    auto mstats = defer_monitoring ? LoopbackStats{} : modem_.getStats();
     const char* mode_str = simulation_enabled_ ? "SIMULATION" : (ptt_active_ ? "TX" : (radio_rx_enabled_ ? "RX" : "IDLE"));
     char goodput_text[96];
     if (last_effective_goodput_bps_ > 0.0f) {
@@ -1621,6 +1640,9 @@ void App::render() {
                 mstats.throughput_bps, goodput_text);
 
     ImGui::End();
+    if (first_render) {
+        ultra::gui::startupTrace("App", "render-main-window-exit");
+    }
 
     // Render settings window
     if (settings_window_.isVisible() && settings_window_.input_devices.empty()) {
@@ -1637,6 +1659,10 @@ void App::render() {
         const std::string& path = file_browser_.getSelectedPath();
         strncpy(file_path_buffer_, path.c_str(), sizeof(file_path_buffer_) - 1);
         file_path_buffer_[sizeof(file_path_buffer_) - 1] = '\0';
+    }
+    if (first_render) {
+        ultra::gui::startupTrace("App", "render-exit");
+        first_render = false;
     }
 }
 
