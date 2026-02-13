@@ -31,6 +31,7 @@ namespace {
 
 FILE* g_startup_log_file = nullptr;
 std::string g_startup_log_path;
+std::string g_startup_trace_path;
 
 void writeStartupLog(const char* fmt, ...) {
     if (!g_startup_log_file) return;
@@ -89,6 +90,15 @@ void initStartupLog() {
         // Ensure early LOG_* calls during App/Modem construction have a valid sink.
         ultra::setLogFile(g_startup_log_file);
         writeStartupLog("ProjectUltra GUI startup log initialized");
+
+        // Keep startup trace on a separate file to avoid mixed FILE* writers.
+        std::filesystem::path trace_path = std::filesystem::path(g_startup_log_path).parent_path() / "startup_trace.log";
+        if (FILE* tf = std::fopen(trace_path.string().c_str(), "w")) {
+            std::fclose(tf);  // Truncate for fresh run
+            g_startup_trace_path = trace_path.string();
+        } else {
+            g_startup_trace_path.clear();
+        }
     }
 }
 
@@ -156,8 +166,13 @@ LONG WINAPI startupUnhandledExceptionFilter(EXCEPTION_POINTERS* ex) {
 int main(int argc, char* argv[]) {
     initStartupLog();
 #ifdef _WIN32
-    if (!g_startup_log_path.empty()) {
+    if (!g_startup_trace_path.empty()) {
+        _putenv_s("ULTRA_STARTUP_LOG", g_startup_trace_path.c_str());
+        writeStartupLog("Startup trace path: %s", g_startup_trace_path.c_str());
+    } else if (!g_startup_log_path.empty()) {
+        // Fallback only if dedicated trace path couldn't be created.
         _putenv_s("ULTRA_STARTUP_LOG", g_startup_log_path.c_str());
+        writeStartupLog("Startup trace path fallback: %s", g_startup_log_path.c_str());
     }
     SetUnhandledExceptionFilter(startupUnhandledExceptionFilter);
 #endif
