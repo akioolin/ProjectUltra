@@ -112,6 +112,15 @@ jobs:
           fi
 
           if [[ "${{ matrix.target }}" == "windows" ]]; then
+            # Include MSVC debug symbols when available so crash dumps can be symbolized.
+            for b in "${bins[@]}"; do
+              for p in "build/${b}.pdb" "build/Release/${b}.pdb"; do
+                if [[ -f "$p" ]]; then
+                  cp "$p" "$pkg_root/"
+                fi
+              done
+            done
+
             sdl_found=0
             declare -a dll_candidates=()
 
@@ -154,7 +163,7 @@ jobs:
           - test_waveform_simple
 
           Notes:
-          - Windows bundle includes SDL2 runtime DLL.
+          - Windows bundle includes SDL2 runtime DLL and .pdb symbols (when available).
           - Linux/macOS may still require system SDL2/OpenGL runtime packages.
           EOF
 
