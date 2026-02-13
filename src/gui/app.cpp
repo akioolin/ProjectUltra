@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include "startup_trace.hpp"
 #include "imgui.h"
 #include "ultra/logging.hpp"
 #include "sim/hf_channel.hpp"
@@ -191,6 +192,14 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
 
     config_ = presets::balanced();
 
+    if (!options_.disable_waterfall) {
+        ultra::gui::startupTrace("App", "waterfall-create-begin");
+        waterfall_ = std::make_unique<WaterfallWidget>();
+        ultra::gui::startupTrace("App", "waterfall-create-end");
+    } else {
+        guiLog("Waterfall disabled by startup option");
+    }
+
     // Initialize protocol with saved callsign
     if (strlen(settings_.callsign) > 0) {
         protocol_.setLocalCallsign(settings_.callsign);
@@ -257,7 +266,9 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                 size_t tx_duration_ms = (samples.size() * 1000) / 48000;
                 tx_in_progress_ = true;
                 tx_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(tx_duration_ms + 100);
-                waterfall_.addSamples(samples.data(), samples.size());
+                if (waterfall_) {
+                    waterfall_->addSamples(samples.data(), samples.size());
+                }
                 audio_.queueTxSamples(samples);
             }
         }
@@ -282,7 +293,9 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                 size_t tx_duration_ms = (samples.size() * 1000) / 48000;
                 tx_in_progress_ = true;
                 tx_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(tx_duration_ms + 100);
-                waterfall_.addSamples(samples.data(), samples.size());
+                if (waterfall_) {
+                    waterfall_->addSamples(samples.data(), samples.size());
+                }
                 audio_.queueTxSamples(samples);
             }
         }
@@ -370,7 +383,9 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                 size_t tx_duration_ms = (samples.size() * 1000) / 48000;
                 tx_in_progress_ = true;
                 tx_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(tx_duration_ms + 100);
-                waterfall_.addSamples(samples.data(), samples.size());
+                if (waterfall_) {
+                    waterfall_->addSamples(samples.data(), samples.size());
+                }
                 audio_.queueTxSamples(samples);
             }
         }
@@ -395,7 +410,9 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                 size_t tx_duration_ms = (samples.size() * 1000) / 48000;
                 tx_in_progress_ = true;
                 tx_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(tx_duration_ms + 100);
-                waterfall_.addSamples(samples.data(), samples.size());
+                if (waterfall_) {
+                    waterfall_->addSamples(samples.data(), samples.size());
+                }
                 audio_.queueTxSamples(samples);
             }
         }
@@ -616,9 +633,11 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     protocol_.setReceiveDirectory(settings_.getReceiveDirectory());
 
     // Configure waterfall display
-    waterfall_.setSampleRate(48000.0f);
-    waterfall_.setFrequencyRange(0.0f, 3000.0f);
-    waterfall_.setDynamicRange(-60.0f, 0.0f);
+    if (waterfall_) {
+        waterfall_->setSampleRate(48000.0f);
+        waterfall_->setFrequencyRange(0.0f, 3000.0f);
+        waterfall_->setDynamicRange(-60.0f, 0.0f);
+    }
 
     // Settings window callbacks
     settings_window_.setCallsignChangedCallback([this](const std::string& call) {
@@ -1113,7 +1132,9 @@ void App::simulationLoop() {
                 // Show on waterfall
                 for (size_t i = 0; i < our_tx_pending_.size(); i += CHUNK_SIZE) {
                     size_t chunk_size = std::min(CHUNK_SIZE, our_tx_pending_.size() - i);
-                    waterfall_.addSamples(our_tx_pending_.data() + i, chunk_size);
+                    if (waterfall_) {
+                        waterfall_->addSamples(our_tx_pending_.data() + i, chunk_size);
+                    }
                 }
                 // Record if enabled
                 if (recording_enabled_) {
@@ -1470,7 +1491,11 @@ void App::render() {
     ImGui::Separator();
 
     // Waterfall (uses remaining space)
-    waterfall_.render();
+    if (waterfall_) {
+        waterfall_->render();
+    } else {
+        ImGui::TextDisabled("Waterfall disabled");
+    }
 
     ImGui::EndChild();
     ImGui::SameLine();
@@ -1543,7 +1568,9 @@ void App::startRadioRx() {
 
     audio_.setRxCallback([this](const std::vector<float>& samples) {
         modem_.feedAudio(samples);
-        waterfall_.addSamples(samples.data(), samples.size());
+        if (waterfall_) {
+            waterfall_->addSamples(samples.data(), samples.size());
+        }
     });
 
     audio_.setLoopbackEnabled(false);

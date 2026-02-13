@@ -190,13 +190,19 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--software" || arg == "-sw") {
             force_software_renderer = true;
             opts.safe_startup = true;
+            opts.disable_waterfall = true;
+        } else if (arg == "--no-waterfall") {
+            opts.disable_waterfall = true;
+        } else if (arg == "--waterfall") {
+            opts.disable_waterfall = false;
         }
     }
     writeStartupLog(
-        "Parsed arguments: sim=%d, rec=%d, software_renderer=%d",
+        "Parsed arguments: sim=%d, rec=%d, software_renderer=%d, disable_waterfall=%d",
         opts.enable_sim ? 1 : 0,
         opts.record_audio ? 1 : 0,
-        force_software_renderer ? 1 : 0
+        force_software_renderer ? 1 : 0,
+        opts.disable_waterfall ? 1 : 0
     );
 
     // Initialize SDL

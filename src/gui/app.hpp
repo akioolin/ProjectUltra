@@ -33,6 +33,7 @@ public:
         bool enable_sim = false;      // -sim: Show simulation UI
         bool record_audio = false;    // -rec: Record all audio to file
         bool safe_startup = false;    // Defer heavyweight init (audio/sim) until needed
+        bool disable_waterfall = false; // Skip waterfall construction (startup safety)
         std::string record_path = "sim_recording.f32";  // Recording output path
     };
 
@@ -48,7 +49,7 @@ private:
     ControlsWidget controls_;
     StatusWidget status_;
     SettingsWindow settings_window_;
-    WaterfallWidget waterfall_;
+    std::unique_ptr<WaterfallWidget> waterfall_;
     FileBrowser file_browser_;
 
     // Persistent settings
