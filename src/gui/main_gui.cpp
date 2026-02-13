@@ -24,16 +24,52 @@
 #include <ultra/logging.hpp>
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #endif
 
 namespace {
 
+#ifdef _WIN32
+HANDLE g_startup_log_handle = INVALID_HANDLE_VALUE;
+#else
 FILE* g_startup_log_file = nullptr;
+#endif
 std::string g_startup_log_path;
 std::string g_startup_trace_path;
 
 void writeStartupLog(const char* fmt, ...) {
+#ifdef _WIN32
+    if (g_startup_log_handle == INVALID_HANDLE_VALUE) return;
+
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    char ts[48];
+    std::snprintf(ts, sizeof(ts), "%04u-%02u-%02u %02u:%02u:%02u",
+                  static_cast<unsigned>(st.wYear),
+                  static_cast<unsigned>(st.wMonth),
+                  static_cast<unsigned>(st.wDay),
+                  static_cast<unsigned>(st.wHour),
+                  static_cast<unsigned>(st.wMinute),
+                  static_cast<unsigned>(st.wSecond));
+
+    char msg[1536];
+    va_list args;
+    va_start(args, fmt);
+    std::vsnprintf(msg, sizeof(msg), fmt, args);
+    va_end(args);
+
+    char line[1664];
+    int len = std::snprintf(line, sizeof(line), "[%s] %s\r\n", ts, msg);
+    if (len <= 0) return;
+    if (len > static_cast<int>(sizeof(line))) len = static_cast<int>(sizeof(line));
+
+    DWORD written = 0;
+    WriteFile(g_startup_log_handle, line, static_cast<DWORD>(len), &written, nullptr);
+    FlushFileBuffers(g_startup_log_handle);
+#else
     if (!g_startup_log_file) return;
 
     auto now = std::chrono::system_clock::now();
@@ -55,6 +91,7 @@ void writeStartupLog(const char* fmt, ...) {
     va_end(args);
     std::fprintf(g_startup_log_file, "\n");
     std::fflush(g_startup_log_file);
+#endif
 }
 
 void initStartupLog() {
@@ -79,16 +116,35 @@ void initStartupLog() {
         if (!path.parent_path().empty()) {
             fs::create_directories(path.parent_path(), ec);
         }
+#ifdef _WIN32
+        HANDLE h = CreateFileA(path.string().c_str(),
+                               FILE_APPEND_DATA,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               nullptr,
+                               CREATE_ALWAYS,
+                               FILE_ATTRIBUTE_NORMAL,
+                               nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+            g_startup_log_handle = h;
+            g_startup_log_path = path.string();
+            break;
+        }
+#else
         g_startup_log_file = std::fopen(path.string().c_str(), "w");
         if (g_startup_log_file) {
             g_startup_log_path = path.string();
             break;
         }
+#endif
     }
 
-    if (g_startup_log_file) {
-        // Ensure early LOG_* calls during App/Modem construction have a valid sink.
-        ultra::setLogFile(g_startup_log_file);
+    if (
+#ifdef _WIN32
+        g_startup_log_handle != INVALID_HANDLE_VALUE
+#else
+        g_startup_log_file
+#endif
+    ) {
         writeStartupLog("ProjectUltra GUI startup log initialized");
 
         // Keep startup trace on a separate file to avoid mixed FILE* writers.
@@ -103,14 +159,19 @@ void initStartupLog() {
 }
 
 void closeStartupLog() {
+#ifdef _WIN32
+    if (g_startup_log_handle != INVALID_HANDLE_VALUE) {
+        writeStartupLog("ProjectUltra GUI startup log closing");
+        CloseHandle(g_startup_log_handle);
+        g_startup_log_handle = INVALID_HANDLE_VALUE;
+    }
+#else
     if (g_startup_log_file) {
-        if (ultra::g_log_file == g_startup_log_file) {
-            ultra::setLogFile(nullptr);
-        }
         writeStartupLog("ProjectUltra GUI startup log closing");
         std::fclose(g_startup_log_file);
         g_startup_log_file = nullptr;
     }
+#endif
 }
 
 #ifdef _WIN32
@@ -229,7 +290,9 @@ int main(int argc, char* argv[]) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER) != 0) {
         const char* sdl_err = SDL_GetError();
         std::string msg = std::string("SDL_Init failed: ") + (sdl_err ? sdl_err : "<unknown>");
+#ifndef _WIN32
         std::fprintf(stderr, "Error: %s\n", msg.c_str());
+#endif
         writeStartupLog("%s", msg.c_str());
 #ifdef _WIN32
         if (!g_startup_log_path.empty()) {
@@ -249,7 +312,9 @@ int main(int argc, char* argv[]) {
     bool using_software_renderer = force_software_renderer;
 
     auto failStartup = [&](const std::string& msg) -> int {
+#ifndef _WIN32
         std::fprintf(stderr, "Error: %s\n", msg.c_str());
+#endif
         writeStartupLog("%s", msg.c_str());
 #ifdef _WIN32
         if (!g_startup_log_path.empty()) {
