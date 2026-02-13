@@ -3,9 +3,14 @@
 #include <cstdio>
 #include <cstdarg>
 #include <chrono>
-#include <mutex>
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <io.h>
+#include <windows.h>
+#else
+#include <mutex>
 #endif
 
 // Windows headers define ERROR as a macro - undefine it
@@ -20,7 +25,11 @@ inline auto g_log_start_time = std::chrono::steady_clock::now();
 
 // Log output file (nullptr = stderr)
 inline FILE* g_log_file = nullptr;
+#ifdef _WIN32
+inline SRWLOCK g_log_lock = SRWLOCK_INIT;
+#else
 inline std::mutex g_log_mutex;
+#endif
 
 // Thread-local station tag for multi-station debug (e.g. "ALPHA" or "BRAVO")
 inline thread_local const char* g_log_station_tag = nullptr;
@@ -63,8 +72,14 @@ inline void setLogLevel(LogLevel level) {
 
 // Set log output file (call with nullptr to use stderr)
 inline void setLogFile(FILE* file) {
+#ifdef _WIN32
+    AcquireSRWLockExclusive(&g_log_lock);
+    g_log_file = file;
+    ReleaseSRWLockExclusive(&g_log_lock);
+#else
     std::lock_guard<std::mutex> lock(g_log_mutex);
     g_log_file = file;
+#endif
 }
 
 // Core logging function
@@ -72,14 +87,12 @@ inline void log(LogLevel level, const char* category, const char* format, ...) {
     if (level > g_log_level) return;
 
 #ifdef _WIN32
-    // During early GUI startup on some Win10 systems, touching the shared
-    // logging mutex/CRT stream path can crash. If no explicit file sink is set,
-    // skip logging entirely.
-    FILE* out = g_log_file;
+    AcquireSRWLockShared(&g_log_lock);
+    FILE* out = g_log_file;  // No stderr fallback on GUI subsystem builds.
     if (!out) {
+        ReleaseSRWLockShared(&g_log_lock);
         return;
     }
-    std::lock_guard<std::mutex> lock(g_log_mutex);
 #else
     std::lock_guard<std::mutex> lock(g_log_mutex);
     FILE* out = g_log_file ? g_log_file : stderr;
@@ -114,6 +127,9 @@ inline void log(LogLevel level, const char* category, const char* format, ...) {
 
     fprintf(out, "\n");
     fflush(out);
+#ifdef _WIN32
+    ReleaseSRWLockShared(&g_log_lock);
+#endif
 }
 
 // Convenience macros - these compile to nothing when ULTRA_LOG_DISABLE is defined

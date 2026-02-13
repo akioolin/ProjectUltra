@@ -36,6 +36,53 @@ static void initLog() {
     if (g_log_initialized) return;
     g_log_initialized = true;
 
+#ifdef _WIN32
+    auto tryOpenLog = [](const char* path) -> FILE* {
+        if (!path || path[0] == '\0') {
+            return nullptr;
+        }
+
+        const char* slash_back = std::strrchr(path, '\\');
+        const char* slash_fwd = std::strrchr(path, '/');
+        const char* sep = slash_back;
+        if (!sep || (slash_fwd && slash_fwd > sep)) {
+            sep = slash_fwd;
+        }
+        if (sep) {
+            std::string dir(path, static_cast<size_t>(sep - path));
+            if (!dir.empty()) {
+                MKDIR(dir.c_str());
+            }
+        }
+
+        return std::fopen(path, "w");
+    };
+
+    if (!g_gui_log_file) {
+        g_gui_log_file = tryOpenLog("logs\\gui.log");
+        if (g_gui_log_file) {
+            g_gui_log_path = "logs\\gui.log";
+        }
+    }
+
+    if (!g_gui_log_file) {
+        g_gui_log_file = tryOpenLog("gui.log");
+        if (g_gui_log_file) {
+            g_gui_log_path = "gui.log";
+        }
+    }
+
+    if (!g_gui_log_file) {
+        const char* temp = std::getenv("TEMP");
+        if (temp && temp[0] != '\0') {
+            std::string temp_path = std::string(temp) + "\\ProjectUltra\\gui.log";
+            g_gui_log_file = tryOpenLog(temp_path.c_str());
+            if (g_gui_log_file) {
+                g_gui_log_path = temp_path;
+            }
+        }
+    }
+#else
     auto tryOpenLog = [](const std::filesystem::path& path) -> FILE* {
         std::error_code ec;
         if (!path.parent_path().empty()) {
@@ -47,16 +94,10 @@ static void initLog() {
     std::vector<std::filesystem::path> candidates;
     candidates.emplace_back(std::filesystem::path("logs") / "gui.log");
     candidates.emplace_back("gui.log");
-#ifdef _WIN32
-    if (const char* temp = std::getenv("TEMP")) {
-        candidates.emplace_back(std::filesystem::path(temp) / "ProjectUltra" / "gui.log");
-    }
-#else
     if (const char* temp = std::getenv("TMPDIR")) {
         candidates.emplace_back(std::filesystem::path(temp) / "projectultra_gui.log");
     }
     candidates.emplace_back("/tmp/projectultra_gui.log");
-#endif
 
     for (const auto& path : candidates) {
         g_gui_log_file = tryOpenLog(path);
@@ -65,6 +106,7 @@ static void initLog() {
             break;
         }
     }
+#endif
 
     if (g_gui_log_file) {
         // Redirect ALL logging (modem, protocol, etc.) to this file
@@ -186,11 +228,18 @@ static const char* adaptationDirection(Modulation from_mod, CodeRate from_rate,
 App::App() : App(Options{}) {}
 
 App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim) {
+    ultra::gui::startupTrace("App", "ctor-body-enter");
+    ultra::gui::startupTrace("App", "gui-log-enter");
     guiLog("=== GUI Started ===");
+    ultra::gui::startupTrace("App", "gui-log-exit");
     // Load persistent settings
+    ultra::gui::startupTrace("App", "settings-load-enter");
     settings_.load();
+    ultra::gui::startupTrace("App", "settings-load-exit");
 
+    ultra::gui::startupTrace("App", "presets-balanced-enter");
     config_ = presets::balanced();
+    ultra::gui::startupTrace("App", "presets-balanced-exit");
 
     if (!options_.disable_waterfall) {
         ultra::gui::startupTrace("App", "waterfall-create-begin");
