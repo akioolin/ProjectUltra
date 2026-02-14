@@ -328,29 +328,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                 our_tx_pending_.insert(our_tx_pending_.end(), samples.begin(), samples.end());
                 guiLog("SIM: Queued %zu TX samples (+ %zu PTT noise) for streaming", samples.size(), ptt_samples);
             } else {
-                // Normal mode: send to real audio device (it streams at 48kHz)
-                // Mute RX, stop capture, and clear all buffers to prevent acoustic feedback
-                // (speaker → microphone would cause us to decode our own TX)
-                audio_.setRxMuted(true);   // Prevent callback from feeding modem
-                audio_.stopCapture();       // Stop SDL audio capture
-                audio_.clearRxBuffer();     // Clear audio engine buffer
-                modem_.clearRxBuffer();     // Clear modem decoder buffer
-                size_t tx_duration_ms = (samples.size() * 1000) / 48000;
-                tx_in_progress_ = true;
-                tx_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(tx_duration_ms + 100);
-                if (waterfall_) {
-                    waterfall_->addSamples(samples.data(), samples.size());
-                }
-                if (!audio_.hasOutputDevice()) {
-                    std::string output_dev = getOutputDeviceName();
-                    if (!audio_.openOutput(output_dev)) {
-                        guiLog("TX audio: openOutput failed for '%s'",
-                               output_dev.empty() ? "Default" : output_dev.c_str());
-                        return;
-                    }
-                }
-                audio_.startPlayback();
-                audio_.queueTxSamples(samples);
+                queueRealTxSamples(samples, "TX audio");
             }
         }
     });
@@ -367,26 +345,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                 our_tx_pending_.insert(our_tx_pending_.end(), samples.begin(), samples.end());
                 guiLog("SIM: Queued burst of %zu frames (%zu samples)", frames.size(), samples.size());
             } else {
-                audio_.setRxMuted(true);
-                audio_.stopCapture();
-                audio_.clearRxBuffer();
-                modem_.clearRxBuffer();
-                size_t tx_duration_ms = (samples.size() * 1000) / 48000;
-                tx_in_progress_ = true;
-                tx_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(tx_duration_ms + 100);
-                if (waterfall_) {
-                    waterfall_->addSamples(samples.data(), samples.size());
-                }
-                if (!audio_.hasOutputDevice()) {
-                    std::string output_dev = getOutputDeviceName();
-                    if (!audio_.openOutput(output_dev)) {
-                        guiLog("TX burst audio: openOutput failed for '%s'",
-                               output_dev.empty() ? "Default" : output_dev.c_str());
-                        return;
-                    }
-                }
-                audio_.startPlayback();
-                audio_.queueTxSamples(samples);
+                queueRealTxSamples(samples, "TX burst audio");
             }
         }
     });
@@ -463,27 +422,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                 our_tx_pending_.insert(our_tx_pending_.end(), samples.begin(), samples.end());
                 guiLog("SIM: Queued %zu PING samples", samples.size());
             } else {
-                // Send to real audio - mute RX to prevent acoustic feedback
-                audio_.setRxMuted(true);
-                audio_.stopCapture();
-                audio_.clearRxBuffer();
-                modem_.clearRxBuffer();
-                size_t tx_duration_ms = (samples.size() * 1000) / 48000;
-                tx_in_progress_ = true;
-                tx_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(tx_duration_ms + 100);
-                if (waterfall_) {
-                    waterfall_->addSamples(samples.data(), samples.size());
-                }
-                if (!audio_.hasOutputDevice()) {
-                    std::string output_dev = getOutputDeviceName();
-                    if (!audio_.openOutput(output_dev)) {
-                        guiLog("PING audio: openOutput failed for '%s'",
-                               output_dev.empty() ? "Default" : output_dev.c_str());
-                        return;
-                    }
-                }
-                audio_.startPlayback();
-                audio_.queueTxSamples(samples);
+                queueRealTxSamples(samples, "PING audio");
             }
         }
     });
@@ -499,27 +438,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                 our_tx_pending_.insert(our_tx_pending_.end(), samples.begin(), samples.end());
                 guiLog("SIM: Queued %zu PONG samples", samples.size());
             } else {
-                // Send to real audio - mute RX to prevent acoustic feedback
-                audio_.setRxMuted(true);
-                audio_.stopCapture();
-                audio_.clearRxBuffer();
-                modem_.clearRxBuffer();
-                size_t tx_duration_ms = (samples.size() * 1000) / 48000;
-                tx_in_progress_ = true;
-                tx_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(tx_duration_ms + 100);
-                if (waterfall_) {
-                    waterfall_->addSamples(samples.data(), samples.size());
-                }
-                if (!audio_.hasOutputDevice()) {
-                    std::string output_dev = getOutputDeviceName();
-                    if (!audio_.openOutput(output_dev)) {
-                        guiLog("PONG audio: openOutput failed for '%s'",
-                               output_dev.empty() ? "Default" : output_dev.c_str());
-                        return;
-                    }
-                }
-                audio_.startPlayback();
-                audio_.queueTxSamples(samples);
+                queueRealTxSamples(samples, "PONG audio");
             }
         }
     });
@@ -750,6 +669,8 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     });
 
     settings_window_.setAudioResetCallback([this]() {
+        releaseSerialPtt("audio_reset");
+        closeSerialPtt();
         if (radio_rx_enabled_) {
             stopRadioRx();
         }
@@ -769,6 +690,8 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
 
     settings_window_.setClosedCallback([this]() {
         settings_.save();
+        releaseSerialPtt("settings_closed");
+        closeSerialPtt();
 
         if (radio_rx_enabled_) {
             stopRadioRx();
@@ -860,6 +783,9 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
 }
 
 App::~App() {
+    releaseSerialPtt("app_shutdown");
+    closeSerialPtt();
+
     // Stop simulator threads first
     stopSimulator();
 
@@ -1627,42 +1553,27 @@ void App::render() {
     // === DEBUG: Test signal keys (F1-F7) ===
     if (ImGui::IsKeyPressed(ImGuiKey_F1)) {
         auto tone = modem_.generateTestTone(1.0f);
-        if (!audio_.hasOutputDevice()) {
-            std::string output_dev = getOutputDeviceName();
-            if (!audio_.openOutput(output_dev)) {
-                appendRxLogLine("[TEST] Failed to open output device for tone");
-                return;
-            }
+        if (!queueRealTxSamples(tone, "TEST tone")) {
+            appendRxLogLine("[TEST] Failed to queue tone TX");
+        } else {
+            appendRxLogLine("[TEST] Sent 1500 Hz tone");
         }
-        audio_.startPlayback();
-        audio_.queueTxSamples(tone);
-        appendRxLogLine("[TEST] Sent 1500 Hz tone");
     }
     if (ImGui::IsKeyPressed(ImGuiKey_F2)) {
         auto samples = modem_.transmitTestPattern(0);
-        if (!audio_.hasOutputDevice()) {
-            std::string output_dev = getOutputDeviceName();
-            if (!audio_.openOutput(output_dev)) {
-                appendRxLogLine("[TEST] Failed to open output device for pattern");
-                return;
-            }
+        if (!queueRealTxSamples(samples, "TEST pattern0")) {
+            appendRxLogLine("[TEST] Failed to queue pattern TX");
+        } else {
+            appendRxLogLine("[TEST] Sent pattern: ALL ZEROS (LDPC encoded)");
         }
-        audio_.startPlayback();
-        audio_.queueTxSamples(samples);
-        appendRxLogLine("[TEST] Sent pattern: ALL ZEROS (LDPC encoded)");
     }
     if (ImGui::IsKeyPressed(ImGuiKey_F3)) {
         auto samples = modem_.transmitTestPattern(1);
-        if (!audio_.hasOutputDevice()) {
-            std::string output_dev = getOutputDeviceName();
-            if (!audio_.openOutput(output_dev)) {
-                appendRxLogLine("[TEST] Failed to open output device for pattern");
-                return;
-            }
+        if (!queueRealTxSamples(samples, "TEST pattern1")) {
+            appendRxLogLine("[TEST] Failed to queue pattern TX");
+        } else {
+            appendRxLogLine("[TEST] Sent pattern: DEADBEEF (LDPC encoded)");
         }
-        audio_.startPlayback();
-        audio_.queueTxSamples(samples);
-        appendRxLogLine("[TEST] Sent pattern: DEADBEEF (LDPC encoded)");
     }
     if (ImGui::IsKeyPressed(ImGuiKey_F7)) {
         const char* test_file = "tests/data/test_connect_data_sequence.f32";
@@ -1827,6 +1738,178 @@ std::string App::getOutputDeviceName() const {
         return "";
     }
     return settings_.output_device;
+}
+
+static SerialPttLine serialPttLineFromSettings(const AppSettings& settings) {
+    return (settings.ptt_serial_line == 1) ? SerialPttLine::RTS : SerialPttLine::DTR;
+}
+
+bool App::ensureSerialPttReady() {
+    if (!settings_.use_cat_ptt) {
+        return true;
+    }
+
+    size_t port_len = boundedCStringLen(settings_.rig_port);
+    if (port_len == 0) {
+        guiLog("PTT: enabled but serial port is empty");
+        appendRxLogLine("[PTT] Serial PTT enabled but no serial port configured");
+        return false;
+    }
+
+    std::string port(settings_.rig_port, port_len);
+    int baud = (settings_.rig_baud > 0) ? settings_.rig_baud : 9600;
+
+    if (serial_ptt_.matches(port, baud)) {
+        return true;
+    }
+
+    closeSerialPtt();
+    if (!serial_ptt_.open(port, baud)) {
+        char buf[200];
+        snprintf(buf, sizeof(buf), "[PTT] Failed to open %s @ %d", port.c_str(), baud);
+        appendRxLogLine(buf);
+        return false;
+    }
+
+    // Force selected line into known inactive state immediately after opening.
+    // This avoids relying on platform/driver defaults.
+    bool active_high = !settings_.ptt_invert;
+    bool inactive_state = active_high ? false : true;
+    SerialPttLine line = serialPttLineFromSettings(settings_);
+    if (!serial_ptt_.setLine(line, inactive_state)) {
+        char buf[220];
+        snprintf(buf, sizeof(buf), "[PTT] Failed to initialize %s line state",
+                 line == SerialPttLine::DTR ? "DTR" : "RTS");
+        appendRxLogLine(buf);
+        guiLog("PTT: failed to set initial inactive state on %s",
+               line == SerialPttLine::DTR ? "DTR" : "RTS");
+        closeSerialPtt();
+        return false;
+    }
+
+    ptt_active_ = false;
+    guiLog("PTT: serial line ready on %s @ %d", port.c_str(), baud);
+    return true;
+}
+
+bool App::setSerialPtt(bool asserted, const char* reason) {
+    if (!settings_.use_cat_ptt) {
+        ptt_active_ = false;
+        return true;
+    }
+
+    if (!ensureSerialPttReady()) {
+        ptt_active_ = false;
+        return false;
+    }
+
+    bool active_high = !settings_.ptt_invert;
+    bool line_state = active_high ? asserted : !asserted;
+    SerialPttLine line = serialPttLineFromSettings(settings_);
+    if (!serial_ptt_.setLine(line, line_state)) {
+        guiLog("PTT: failed to set %s=%d (%s)",
+               line == SerialPttLine::DTR ? "DTR" : "RTS",
+               static_cast<int>(line_state),
+               reason ? reason : "n/a");
+        if (asserted) {
+            appendRxLogLine("[PTT] Failed to key serial PTT line");
+        }
+        ptt_active_ = false;
+        return false;
+    }
+
+    ptt_active_ = asserted;
+    guiLog("PTT: %s via %s (%s, invert=%d)",
+           asserted ? "ASSERT" : "RELEASE",
+           line == SerialPttLine::DTR ? "DTR" : "RTS",
+           reason ? reason : "n/a",
+           settings_.ptt_invert ? 1 : 0);
+    return true;
+}
+
+void App::releaseSerialPtt(const char* reason) {
+    ptt_release_pending_ = false;
+    ptt_release_deadline_ms_ = 0;
+    if (!serial_ptt_.isOpen()) {
+        ptt_active_ = false;
+        return;
+    }
+
+    bool active_high = !settings_.ptt_invert;
+    bool line_state = active_high ? false : true;
+    SerialPttLine line = serialPttLineFromSettings(settings_);
+    if (!serial_ptt_.setLine(line, line_state)) {
+        guiLog("PTT: failed to release line (%s)", reason ? reason : "n/a");
+    } else {
+        guiLog("PTT: RELEASE via %s (%s)",
+               line == SerialPttLine::DTR ? "DTR" : "RTS",
+               reason ? reason : "n/a");
+    }
+    ptt_active_ = false;
+}
+
+void App::closeSerialPtt() {
+    ptt_active_ = false;
+    ptt_release_pending_ = false;
+    ptt_release_deadline_ms_ = 0;
+    serial_ptt_.close();
+}
+
+bool App::queueRealTxSamples(const std::vector<float>& samples, const char* context) {
+    if (samples.empty()) {
+        return false;
+    }
+
+    // Abort pending release if a new TX starts quickly after previous frame.
+    ptt_release_pending_ = false;
+    ptt_release_deadline_ms_ = 0;
+
+    // Mute RX and clear buffers to avoid local feedback decode.
+    audio_.setRxMuted(true);
+    audio_.stopCapture();
+    audio_.clearRxBuffer();
+    modem_.clearRxBuffer();
+
+    if (!audio_.hasOutputDevice()) {
+        std::string output_dev = getOutputDeviceName();
+        if (!audio_.openOutput(output_dev)) {
+            guiLog("%s: openOutput failed for '%s'",
+                   context ? context : "TX audio",
+                   output_dev.empty() ? "Default" : output_dev.c_str());
+            audio_.setRxMuted(false);
+            if (radio_rx_enabled_ && !audio_.isCapturing()) {
+                audio_.startCapture();
+            }
+            return false;
+        }
+    }
+
+    if (settings_.use_cat_ptt) {
+        if (!setSerialPtt(true, context ? context : "tx_start")) {
+            audio_.setRxMuted(false);
+            if (radio_rx_enabled_ && !audio_.isCapturing()) {
+                audio_.startCapture();
+            }
+            return false;
+        }
+        if (settings_.tx_delay_ms > 0) {
+            SDL_Delay(static_cast<Uint32>(settings_.tx_delay_ms));
+        }
+    } else {
+        ptt_active_ = false;
+    }
+
+    size_t tx_duration_ms = (samples.size() * 1000) / 48000;
+    tx_in_progress_ = true;
+    tx_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(tx_duration_ms + 100);
+
+    if (waterfall_) {
+        waterfall_->addSamples(samples.data(), samples.size());
+    }
+
+    audio_.startPlayback();
+    audio_.queueTxSamples(samples);
+    return true;
 }
 
 bool App::startRadioRx() {
@@ -2078,6 +2161,7 @@ void App::stopTxNow(const char* reason) {
 
     tx_in_progress_ = false;
     tx_end_time_ = std::chrono::steady_clock::time_point{};
+    releaseSerialPtt(reason ? reason : "stop_tx_now");
 
     // Return to RX immediately after aborting TX.
     if (!simulation_enabled_ && radio_rx_enabled_ && !ptt_active_) {
@@ -2534,9 +2618,25 @@ void App::renderOperateTab() {
     // TX Message Input
     if (tx_in_progress_ && audio_.isTxQueueEmpty()) {
         tx_in_progress_ = false;
-        if (!ptt_active_ && !simulation_enabled_) {
-            audio_.setRxMuted(false);  // Re-enable RX callback
-            audio_.startCapture();
+        if (ptt_active_) {
+            ptt_release_pending_ = true;
+            ptt_release_deadline_ms_ = SDL_GetTicks() + static_cast<uint32_t>(std::max(0, settings_.tx_tail_ms));
+        } else if (!simulation_enabled_) {
+            audio_.setRxMuted(false);
+            if (!audio_.isCapturing()) {
+                audio_.startCapture();
+            }
+        }
+    }
+
+    if (ptt_release_pending_ && !simulation_enabled_ &&
+        SDL_TICKS_PASSED(SDL_GetTicks(), ptt_release_deadline_ms_)) {
+        releaseSerialPtt("tx_tail_elapsed");
+        if (radio_rx_enabled_) {
+            audio_.setRxMuted(false);
+            if (!audio_.isCapturing()) {
+                audio_.startCapture();
+            }
         }
     }
 

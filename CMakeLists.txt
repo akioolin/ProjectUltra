@@ -195,6 +195,7 @@ if(ULTRA_BUILD_GUI)
             src/gui/main_gui.cpp
             src/gui/app.cpp
             src/gui/audio_engine.cpp
+            src/gui/serial_ptt.cpp
             src/gui/modem/modem_engine.cpp
             src/gui/modem/modem_rx.cpp
             src/gui/modem/modem_rx_decode.cpp

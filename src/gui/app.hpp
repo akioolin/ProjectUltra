@@ -8,6 +8,7 @@
 #include "widgets/waterfall.hpp"
 #include "widgets/file_browser.hpp"
 #include "audio_engine.hpp"
+#include "serial_ptt.hpp"
 #include "modem/modem_engine.hpp"
 #include "protocol/protocol_engine.hpp"
 #include "sim/hf_channel.hpp"
@@ -85,6 +86,8 @@ private:
     std::vector<std::string> input_devices_;
     std::vector<std::string> output_devices_;
     bool ptt_active_ = false;      // Push-to-talk state
+    bool ptt_release_pending_ = false;
+    uint32_t ptt_release_deadline_ms_ = 0;
     bool radio_rx_enabled_ = false; // RX capture running
     uint32_t radio_rx_started_ms_ = 0;
     bool radio_rx_warmup_logged_ = false;
@@ -98,6 +101,7 @@ private:
 
     // ARQ Protocol state
     protocol::ProtocolEngine protocol_;
+    SerialPttController serial_ptt_;
     char remote_callsign_[16] = "";
     std::string pending_incoming_call_;  // Callsign of incoming caller
     uint32_t last_tick_time_ = 0;
@@ -206,6 +210,11 @@ private:
     std::deque<std::string> snapshotRxLog() const;
     void clearRxLog();
     void stopTxNow(const char* reason);
+    bool queueRealTxSamples(const std::vector<float>& samples, const char* context);
+    bool ensureSerialPttReady();
+    bool setSerialPtt(bool asserted, const char* reason);
+    void releaseSerialPtt(const char* reason);
+    void closeSerialPtt();
     void sendMessage();
     void onDataReceived(const std::string& text);
     void resetAdaptiveAdvisory();

@@ -115,6 +115,8 @@ bool AppSettings::save(const std::string& path) const {
     file << "rig_port=" << rig_port << "\n";
     file << "rig_baud=" << rig_baud << "\n";
     file << "use_cat_ptt=" << (use_cat_ptt ? "1" : "0") << "\n";
+    file << "ptt_serial_line=" << ptt_serial_line << "\n";
+    file << "ptt_invert=" << (ptt_invert ? "1" : "0") << "\n";
 
     file << "\n[Audio]\n";
     file << "input_device=" << input_device << "\n";
@@ -179,6 +181,13 @@ bool AppSettings::load(const std::string& path) {
             rig_baud = std::atoi(value.c_str());
         } else if (key == "use_cat_ptt") {
             use_cat_ptt = (value == "1" || value == "true");
+        } else if (key == "ptt_serial_line") {
+            ptt_serial_line = std::atoi(value.c_str());
+            if (ptt_serial_line < 0 || ptt_serial_line > 1) {
+                ptt_serial_line = 0;
+            }
+        } else if (key == "ptt_invert") {
+            ptt_invert = (value == "1" || value == "true");
         }
         // Audio settings
         else if (key == "input_device") {
@@ -374,51 +383,48 @@ void SettingsWindow::renderStationTab(AppSettings& settings) {
 
 void SettingsWindow::renderRadioTab(AppSettings& settings) {
     ImGui::Spacing();
-    ImGui::Text("Radio Control (Hamlib)");
+    ImGui::Text("Radio PTT");
     ImGui::Separator();
     ImGui::Spacing();
 
-    ImGui::TextDisabled("Radio control via Hamlib - Coming soon!");
+    ImGui::Checkbox("Enable Serial PTT (DTR/RTS)", &settings.use_cat_ptt);
+    ImGui::TextDisabled("Keys TX from serial control line; no CAT command protocol needed.");
+
     ImGui::Spacing();
-
-    // Rig model (placeholder)
-    ImGui::Text("Rig Model");
-    ImGui::SetNextItemWidth(200);
-    ImGui::BeginDisabled();
-    ImGui::InputText("##rig_model", settings.rig_model, sizeof(settings.rig_model));
-    ImGui::EndDisabled();
-
-    // Port
     ImGui::Text("Serial Port");
-    ImGui::SetNextItemWidth(200);
-    ImGui::BeginDisabled();
+    ImGui::SetNextItemWidth(240);
     ImGui::InputText("##rig_port", settings.rig_port, sizeof(settings.rig_port));
-    ImGui::EndDisabled();
+    ImGui::TextDisabled("Examples: /dev/ttyUSB0, /dev/ttyACM0, COM3");
 
-    // Baud
+    ImGui::Spacing();
     ImGui::Text("Baud Rate");
-    ImGui::SetNextItemWidth(100);
-    ImGui::BeginDisabled();
-    const char* bauds[] = { "4800", "9600", "19200", "38400", "57600", "115200" };
-    int baud_idx = 1;  // Default 9600
-    ImGui::Combo("##baud", &baud_idx, bauds, 6);
-    ImGui::EndDisabled();
+    ImGui::SetNextItemWidth(120);
+    const char* bauds[] = { "1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200" };
+    int baud_values[] = { 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200 };
+    int baud_idx = 3;  // 9600 default
+    for (int i = 0; i < 8; ++i) {
+        if (settings.rig_baud == baud_values[i]) {
+            baud_idx = i;
+            break;
+        }
+    }
+    if (ImGui::Combo("##baud", &baud_idx, bauds, 8)) {
+        settings.rig_baud = baud_values[baud_idx];
+    }
 
     ImGui::Spacing();
+    ImGui::Text("PTT Line");
+    ImGui::SetNextItemWidth(120);
+    const char* ptt_lines[] = {"DTR", "RTS"};
+    int line_idx = (settings.ptt_serial_line == 1) ? 1 : 0;
+    if (ImGui::Combo("##ptt_line", &line_idx, ptt_lines, 2)) {
+        settings.ptt_serial_line = line_idx;
+    }
 
-    // CAT PTT
-    ImGui::BeginDisabled();
-    ImGui::Checkbox("Use CAT for PTT", &settings.use_cat_ptt);
-    ImGui::EndDisabled();
-    ImGui::TextDisabled("(Otherwise uses VOX or manual PTT)");
+    ImGui::Checkbox("Invert PTT polarity", &settings.ptt_invert);
 
     ImGui::Spacing();
-    ImGui::Spacing();
-    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
-        "Hamlib integration will enable:\n"
-        "- Automatic frequency/mode setting\n"
-        "- CAT PTT control\n"
-        "- Rig status display");
+    ImGui::TextDisabled("Rig side: set USB SEND to matching line (DTR or RTS).");
 }
 
 void SettingsWindow::renderAudioTab(AppSettings& settings) {

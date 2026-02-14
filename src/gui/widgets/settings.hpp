@@ -28,7 +28,9 @@ struct AppSettings {
     char rig_model[32] = "None";
     char rig_port[64] = "";
     int rig_baud = 9600;
-    bool use_cat_ptt = false;  // Use CAT for PTT vs VOX
+    bool use_cat_ptt = false;  // Enable serial PTT (DTR/RTS)
+    int ptt_serial_line = 0;   // 0=DTR, 1=RTS
+    bool ptt_invert = false;   // Invert line polarity
 
     // Audio Settings
     char input_device[128] = "Default";   // Selected input device name
