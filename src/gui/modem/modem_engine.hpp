@@ -104,6 +104,7 @@ public:
     // STATUS & CALLBACKS
     // ========================================================================
     LoopbackStats getStats() const;
+    DecoderStats getDecoderStats() const;
     bool isSynced() const;
     float getCurrentSNR() const;
     float getFadingIndex() const;  // Fading index from per-carrier variance (0-1)

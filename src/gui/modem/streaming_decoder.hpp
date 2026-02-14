@@ -81,6 +81,13 @@ struct DecoderStats {
     uint64_t frames_failed = 0;
     uint64_t pings_received = 0;
     uint64_t buffer_overflows = 0;
+    uint64_t overflow_samples_dropped = 0;
+    uint64_t overflow_state_resets = 0;
+    uint64_t current_unsearched_samples = 0;
+    uint64_t peak_unsearched_samples = 0;
+    float backlog_ms = 0.0f;
+    float peak_backlog_ms = 0.0f;
+    float buffer_fill_percent = 0.0f;
     float avg_decode_time_ms = 0.0f;
 };
 
@@ -384,6 +391,7 @@ private:
     static constexpr size_t CHIRP_SAMPLES = 57600;          // ~1.2 second (dual chirp)
     static constexpr size_t CORRELATION_STEP = 4800;        // 100ms at 48kHz (faster search)
     static constexpr size_t CORR_INVARIANT_GUARD = 9600;    // 200ms guard to detect pointer drift
+    static constexpr size_t OVERFLOW_RECOVERY_KEEP = 120000; // Keep ~2.5s newest audio when overloaded
 
     // Constants - Adaptive acquisition thresholds (disabled for now)
     static constexpr float CORR_NOISE_THRESHOLD = 0.05f;    // Below = pure noise, don't advance

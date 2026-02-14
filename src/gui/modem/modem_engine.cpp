@@ -563,6 +563,13 @@ LoopbackStats ModemEngine::getStats() const {
     return stats_;
 }
 
+DecoderStats ModemEngine::getDecoderStats() const {
+    if (streaming_decoder_) {
+        return streaming_decoder_->getStats();
+    }
+    return DecoderStats{};
+}
+
 bool ModemEngine::isSynced() const {
     if (streaming_decoder_) {
         return streaming_decoder_->isSynced();

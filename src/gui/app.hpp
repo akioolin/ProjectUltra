@@ -35,7 +35,7 @@ public:
         bool record_audio = false;    // -rec: Record all audio to file
         bool safe_startup = false;    // Defer heavyweight init (audio/sim) until needed
         bool disable_waterfall = false; // Skip waterfall construction (startup safety)
-        std::string record_path = "sim_recording.f32";  // Recording output path
+        std::string record_path = "sim_recording.f32";  // Recording output base path
     };
 
     App();  // Default constructor
@@ -155,8 +155,10 @@ private:
 
     // Audio recording (requires -rec flag)
     bool recording_enabled_ = false;            // Currently recording
-    std::vector<float> recorded_samples_;       // Accumulated samples
-    void writeRecordingToFile();                // Save recording to disk
+    std::vector<float> recorded_samples_;       // Legacy sim capture (post-channel)
+    std::vector<float> recorded_rx_samples_;    // Real RX audio fed to modem
+    std::vector<float> recorded_tx_samples_;    // Real TX audio queued to output
+    void writeRecordingToFile();                // Save recording buffers to disk
     std::string virtual_callsign_ = "SIM";      // Virtual station's callsign
 
     // Virtual station's protocol and modem

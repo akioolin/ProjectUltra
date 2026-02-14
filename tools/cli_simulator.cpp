@@ -23,6 +23,7 @@
 #include <mutex>
 #include <deque>
 #include <queue>
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <sstream>
@@ -429,6 +430,9 @@ public:
         if (encoder_) encoder_->setBurstInterleaveGroupSize(burst_group_size_);
         if (decoder_) decoder_->setBurstInterleaveGroupSize(burst_group_size_);
     }
+    void setRxOverfeedFactor(int n) { rx_overfeed_factor_ = std::clamp(n, 1, 200); }
+    void setDecodeDelayMs(int ms) { decode_delay_ms_ = std::clamp(ms, 0, 500); }
+    void setRxBatchCallbacks(int n) { rx_batch_callbacks_ = std::clamp(n, 1, 1000); }
 
     // Enable/disable channel interleaving on both TX encoder and RX decoder
     void setChannelInterleave(bool enable) {
@@ -504,6 +508,11 @@ private:
     float snr_db_ = 20.0f;
     bool no_burst_interleave_ = false;  // Disable burst interleaving for A/B testing
     int burst_group_size_ = 4;
+    int rx_overfeed_factor_ = 1;
+    int decode_delay_ms_ = 0;
+    int rx_batch_callbacks_ = 1;
+    int rx_batch_counter_ = 0;
+    std::vector<float> rx_batch_buffer_;
 
     // Local adaptive advisory (log-only)
     std::deque<float> adapt_snr_window_;
@@ -1082,7 +1091,18 @@ private:
 
             // 2. FEED TO DECODER (audio thread only buffers - decode thread processes)
             if (decoder_) {
-                decoder_->feedAudio(rx_samples.data(), rx_samples.size());
+                if (rx_batch_callbacks_ <= 1) {
+                    decoder_->feedAudio(rx_samples.data(), rx_samples.size());
+                } else {
+                    rx_batch_buffer_.insert(rx_batch_buffer_.end(),
+                                            rx_samples.begin(), rx_samples.end());
+                    rx_batch_counter_++;
+                    if (rx_batch_counter_ >= rx_batch_callbacks_) {
+                        decoder_->feedAudio(rx_batch_buffer_.data(), rx_batch_buffer_.size());
+                        rx_batch_buffer_.clear();
+                        rx_batch_counter_ = 0;
+                    }
+                }
             }
 
             // 3. GET TX SAMPLES - check if we have anything to transmit
@@ -1114,12 +1134,15 @@ private:
                 float rx_rms = 0.0f;
                 for (float s : rx_samples) rx_rms += s * s;
                 rx_rms = std::sqrt(rx_rms / rx_samples.size());
-                printf("[%s] Audio loop: %.1fs, RX_RMS=%.4f, TX_pending=%zu\n",
-                       callsign_.c_str(), getSimTime(), rx_rms, tx_pending);
+                printf("[%s] Audio loop: %.1fs, RX_RMS=%.4f, TX_pending=%zu, pace=%dx, batch=%d\n",
+                       callsign_.c_str(), getSimTime(), rx_rms, tx_pending,
+                       rx_overfeed_factor_, rx_batch_callbacks_);
             }
 
             // Wait for next callback (real-time pacing)
-            next_callback += std::chrono::milliseconds(CALLBACK_INTERVAL_MS);
+            int callback_us = (CALLBACK_INTERVAL_MS * 1000) / std::max(1, rx_overfeed_factor_);
+            callback_us = std::max(100, callback_us);  // allow aggressive stress pacing
+            next_callback += std::chrono::microseconds(callback_us);
             std::this_thread::sleep_until(next_callback);
         }
     }
@@ -1133,6 +1156,9 @@ private:
                 // processBuffer() blocks until data is available (via condition variable)
                 // or until stop() is called
                 decoder_->processBuffer();
+                if (decode_delay_ms_ > 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(decode_delay_ms_));
+                }
             } else {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
@@ -1172,6 +1198,9 @@ public:
     void setAdaptiveTest(bool enable) { adaptive_test_ = enable; }
     void setAdaptiveHopSNR(float snr) { adaptive_hop_snr_db_ = snr; }
     void setAdaptiveHopChannel(ChannelType t) { adaptive_hop_channel_ = t; }
+    void setRxOverfeedFactor(int factor) { rx_overfeed_factor_ = std::clamp(factor, 1, 200); }
+    void setDecodeDelayMs(int ms) { decode_delay_ms_ = std::clamp(ms, 0, 500); }
+    void setRxBatchCallbacks(int n) { rx_batch_callbacks_ = std::clamp(n, 1, 1000); }
 
     bool runTest() {
         printHeader();
@@ -1200,6 +1229,12 @@ public:
         // Create stations
         alpha_ = std::make_unique<SimulatedStation>("ALPHA", channel_, true);
         bravo_ = std::make_unique<SimulatedStation>("BRAVO", channel_, false);
+        alpha_->setRxOverfeedFactor(rx_overfeed_factor_);
+        bravo_->setRxOverfeedFactor(rx_overfeed_factor_);
+        alpha_->setDecodeDelayMs(decode_delay_ms_);
+        bravo_->setDecodeDelayMs(decode_delay_ms_);
+        alpha_->setRxBatchCallbacks(rx_batch_callbacks_);
+        bravo_->setRxBatchCallbacks(rx_batch_callbacks_);
 
         // Set channel SNR for mode negotiation
         alpha_->setSNR(snr_db_);
@@ -1312,6 +1347,9 @@ private:
     bool use_channel_interleave_ = true;   // Enabled by default for OFDM fading resistance
     bool no_burst_interleave_ = false;     // --no-burst-interleave for A/B testing
     int burst_group_size_ = 4;             // --burst-group-size N (experimental)
+    int rx_overfeed_factor_ = 1;           // --rx-overfeed-factor N (decoder overload stress)
+    int decode_delay_ms_ = 0;              // --decode-delay-ms N (simulated slow decoder)
+    int rx_batch_callbacks_ = 1;           // --rx-batch-callbacks N (batched decoder feed)
     bool save_signals_ = false;
     int save_signals_message_limit_ = 0;   // 0 = full run
     size_t save_signals_max_samples_ = 0;  // 0 = unlimited
@@ -1875,6 +1913,15 @@ private:
                       << " @ " << adaptive_hop_snr_db_ << " dB)\n";
         }
         std::cout << "  Model:   Real-time (48kHz, 10ms callbacks)\n";
+        if (rx_overfeed_factor_ > 1) {
+            std::cout << "  Stress:  RX overfeed x" << rx_overfeed_factor_ << "\n";
+        }
+        if (decode_delay_ms_ > 0) {
+            std::cout << "  Stress:  Decode delay " << decode_delay_ms_ << " ms\n";
+        }
+        if (rx_batch_callbacks_ > 1) {
+            std::cout << "  Stress:  RX batch " << rx_batch_callbacks_ << " callbacks/feed\n";
+        }
         std::cout << "\n";
     }
 
@@ -1924,7 +1971,13 @@ private:
         std::cout << "  RX:   frames_decoded=" << ds.frames_decoded
                   << "  frames_failed=" << ds.frames_failed
                   << "  pings=" << ds.pings_received
-                  << "  overflows=" << ds.buffer_overflows << "\n";
+                  << "  overflows=" << ds.buffer_overflows
+                  << "  drop_samples=" << ds.overflow_samples_dropped
+                  << "  resets=" << ds.overflow_state_resets
+                  << "  unsearched=" << ds.current_unsearched_samples
+                  << "  backlog_ms=" << std::fixed << std::setprecision(1) << ds.backlog_ms
+                  << "  peak_backlog_ms=" << ds.peak_backlog_ms
+                  << std::defaultfloat << "\n";
 
         // CW success rate (from log grep is imprecise, this is the real number)
         uint64_t total_frames = ds.frames_decoded + ds.frames_failed;
@@ -2063,6 +2116,12 @@ int main(int argc, char* argv[]) {
                 sim.setNoBurstInterleave(true);
             } else if (arg == "--burst-group-size" && i + 1 < argc) {
                 sim.setBurstInterleaveGroupSize(std::stoi(argv[++i]));
+            } else if (arg == "--rx-overfeed-factor" && i + 1 < argc) {
+                sim.setRxOverfeedFactor(std::stoi(argv[++i]));
+            } else if (arg == "--decode-delay-ms" && i + 1 < argc) {
+                sim.setDecodeDelayMs(std::stoi(argv[++i]));
+            } else if (arg == "--rx-batch-callbacks" && i + 1 < argc) {
+                sim.setRxBatchCallbacks(std::stoi(argv[++i]));
             } else if (arg == "--burst-test") {
                 sim.setTestBurst(true);
             } else if (arg == "--seed" && i + 1 < argc) {
@@ -2109,6 +2168,9 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --channel-interleave, -ci  Enable channel interleaving\n";
                 std::cout << "  --no-burst-interleave     Disable burst-level long interleaving\n";
                 std::cout << "  --burst-group-size <N>    Burst interleave group size (2-8, default: 4)\n";
+                std::cout << "  --rx-overfeed-factor <N>  Run audio callbacks N× faster wall-clock (stress, default: 1)\n";
+                std::cout << "  --decode-delay-ms <N>     Add decode-thread delay (0-500 ms, stress)\n";
+                std::cout << "  --rx-batch-callbacks <N>  Batch N callbacks per decoder feed (stress)\n";
                 std::cout << "  --burst-test              Send large messages to test burst interleaving\n";
                 std::cout << "  --save-signals [N]        Save TX/RX raw float traces (.f32)\n";
                 std::cout << "                           N = stop capture after BRAVO receives N app messages\n";

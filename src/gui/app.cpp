@@ -138,6 +138,25 @@ static void guiLog(const char* fmt, ...) {
     fflush(g_gui_log_file);
 }
 
+static std::string trimF32Extension(const std::string& path) {
+    if (path.size() >= 4 && path.substr(path.size() - 4) == ".f32") {
+        return path.substr(0, path.size() - 4);
+    }
+    return path;
+}
+
+static bool writeF32File(const std::string& path, const std::vector<float>& samples) {
+    if (samples.empty()) {
+        return false;
+    }
+    std::ofstream file(path, std::ios::binary);
+    if (!file.is_open()) {
+        return false;
+    }
+    file.write(reinterpret_cast<const char*>(samples.data()), samples.size() * sizeof(float));
+    return file.good();
+}
+
 // Convert fading index to channel quality string
 // Thresholds aligned with waveform_selection.hpp (2026-02-03)
 // Combined index = freq_cv + temporal_cv (includes Doppler spread measurement)
@@ -238,6 +257,10 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     ultra::gui::startupTrace("App", "gui-log-enter");
     guiLog("=== GUI Started ===");
     ultra::gui::startupTrace("App", "gui-log-exit");
+    if (options_.record_audio) {
+        recording_enabled_ = true;
+        guiLog("Recording enabled (-rec): base path '%s'", options_.record_path.c_str());
+    }
     // Load persistent settings
     ultra::gui::startupTrace("App", "settings-load-enter");
     settings_.load();
@@ -247,9 +270,8 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     config_ = presets::balanced();
     ultra::gui::startupTrace("App", "presets-balanced-exit");
 
-    // Run modem decode synchronously in GUI thread to avoid startup-time
-    // worker-thread races on fragile Windows systems.
-    modem_.setSynchronousMode(true);
+    // Use dedicated RX decode thread by default.
+    modem_.setSynchronousMode(false);
 
     if (!options_.disable_waterfall) {
         ultra::gui::startupTrace("App", "waterfall-create-begin");
@@ -793,22 +815,57 @@ App::~App() {
     audio_.shutdown();
 
     // Write recording to file if -rec was enabled
-    if (options_.record_audio && !recorded_samples_.empty()) {
+    if (options_.record_audio) {
         writeRecordingToFile();
     }
 }
 
 void App::writeRecordingToFile() {
-    std::ofstream file(options_.record_path, std::ios::binary);
-    if (file.is_open()) {
-        file.write(reinterpret_cast<const char*>(recorded_samples_.data()),
-                   recorded_samples_.size() * sizeof(float));
-        guiLog("Recording saved: %s (%zu samples, %.1f seconds)",
-               options_.record_path.c_str(),
-               recorded_samples_.size(),
-               recorded_samples_.size() / 48000.0f);
-    } else {
-        guiLog("ERROR: Failed to save recording to %s", options_.record_path.c_str());
+    const std::string base = trimF32Extension(options_.record_path);
+    bool wrote_any = false;
+
+    if (!recorded_tx_samples_.empty()) {
+        const std::string path = base + "_tx.f32";
+        if (writeF32File(path, recorded_tx_samples_)) {
+            guiLog("Recording saved: %s (%zu samples, %.1f seconds)",
+                   path.c_str(),
+                   recorded_tx_samples_.size(),
+                   recorded_tx_samples_.size() / 48000.0f);
+            wrote_any = true;
+        } else {
+            guiLog("ERROR: Failed to save TX recording to %s", path.c_str());
+        }
+    }
+
+    if (!recorded_rx_samples_.empty()) {
+        const std::string path = base + "_rx.f32";
+        if (writeF32File(path, recorded_rx_samples_)) {
+            guiLog("Recording saved: %s (%zu samples, %.1f seconds)",
+                   path.c_str(),
+                   recorded_rx_samples_.size(),
+                   recorded_rx_samples_.size() / 48000.0f);
+            wrote_any = true;
+        } else {
+            guiLog("ERROR: Failed to save RX recording to %s", path.c_str());
+        }
+    }
+
+    // Backward-compatible simulation capture file.
+    if (!recorded_samples_.empty()) {
+        const std::string path = base + "_sim.f32";
+        if (writeF32File(path, recorded_samples_)) {
+            guiLog("Recording saved: %s (%zu samples, %.1f seconds)",
+                   path.c_str(),
+                   recorded_samples_.size(),
+                   recorded_samples_.size() / 48000.0f);
+            wrote_any = true;
+        } else {
+            guiLog("ERROR: Failed to save simulation recording to %s", path.c_str());
+        }
+    }
+
+    if (!wrote_any) {
+        guiLog("Recording skipped: no captured samples");
     }
 }
 
@@ -819,7 +876,7 @@ void App::initVirtualStation() {
 
     // Create virtual station's modem
     virtual_modem_ = std::make_unique<ModemEngine>();
-    virtual_modem_->setSynchronousMode(true);
+    virtual_modem_->setSynchronousMode(false);
 
     // Set up virtual station's protocol
     virtual_protocol_.setLocalCallsign(virtual_callsign_);
@@ -1086,11 +1143,9 @@ void App::startSimulator() {
 
     guiLog("SIM: Starting simulator");
 
-    // Switch both modems to synchronous mode — sim loop drives decode directly,
-    // no separate decode thread. This prevents buffer overflows during LDPC decode
-    // (same model as cli_simulator: feed + process in lockstep).
-    modem_.setSynchronousMode(true);
-    virtual_modem_->setSynchronousMode(true);
+    // Keep both modems in asynchronous mode for consistent threaded behavior.
+    modem_.setSynchronousMode(false);
+    virtual_modem_->setSynchronousMode(false);
 
     sim_thread_running_ = true;
     sim_thread_ = std::thread(&App::simulationLoop, this);
@@ -1104,19 +1159,11 @@ void App::stopSimulator() {
 
     if (sim_thread_.joinable()) sim_thread_.join();
 
-    // Keep synchronous decode mode on Windows for startup/runtime stability.
-#ifdef _WIN32
-    modem_.setSynchronousMode(true);
-    if (virtual_modem_) {
-        virtual_modem_->setSynchronousMode(true);
-    }
-#else
-    // Restore async decode mode for real audio operation
+    // Restore async decode mode for real audio operation.
     modem_.setSynchronousMode(false);
     if (virtual_modem_) {
         virtual_modem_->setSynchronousMode(false);
     }
-#endif
 
     // Clear buffers
     {
@@ -1192,7 +1239,9 @@ void App::simulationLoop() {
             a_to_b_active = true;
             size_t to_feed = std::min(SAMPLES_PER_TICK, our_channel_buffer.size());
             virtual_modem_->feedAudio(our_channel_buffer.data(), to_feed);
-            virtual_modem_->processRxBuffer();
+            if (virtual_modem_->isSynchronousMode()) {
+                virtual_modem_->processRxBuffer();
+            }
             our_channel_buffer.erase(our_channel_buffer.begin(), our_channel_buffer.begin() + to_feed);
         }
 
@@ -1218,7 +1267,9 @@ void App::simulationLoop() {
             b_to_a_active = true;
             size_t to_feed = std::min(SAMPLES_PER_TICK, virtual_channel_buffer.size());
             modem_.feedAudio(virtual_channel_buffer.data(), to_feed);
-            modem_.processRxBuffer();
+            if (modem_.isSynchronousMode()) {
+                modem_.processRxBuffer();
+            }
             virtual_channel_buffer.erase(virtual_channel_buffer.begin(), virtual_channel_buffer.begin() + to_feed);
         }
 
@@ -1249,14 +1300,18 @@ void App::simulationLoop() {
                 std::vector<float> silence(IDLE_SAMPLES_PER_TICK, 0.0f);
                 auto noise = applyChannelEffects(silence, 0);
                 virtual_modem_->feedAudio(noise);
-                virtual_modem_->processRxBuffer();
+                if (virtual_modem_->isSynchronousMode()) {
+                    virtual_modem_->processRxBuffer();
+                }
             }
             if (!b_to_a_active) {
                 // B→A channel idle: evolve fading and feed noise to our modem
                 std::vector<float> silence(IDLE_SAMPLES_PER_TICK, 0.0f);
                 auto noise = applyChannelEffects(silence, 1);
                 modem_.feedAudio(noise);
-                modem_.processRxBuffer();
+                if (modem_.isSynchronousMode()) {
+                    modem_.processRxBuffer();
+                }
             }
         }
 
@@ -1465,14 +1520,6 @@ void App::render() {
     if (first_render) {
         ultra::gui::startupTrace("App", "render-set-output-gain-exit");
     }
-
-#ifdef _WIN32
-    // Keep decode in synchronous mode on fragile Win10 systems.
-    if (!simulation_enabled_ && !modem_.isSynchronousMode()) {
-        guiLog("Win startup guard: forcing modem synchronous RX mode");
-        modem_.setSynchronousMode(true);
-    }
-#endif
 
     // Process captured RX audio in the main thread.
     // Avoids feeding modem state directly from SDL callback threads.
@@ -1687,6 +1734,7 @@ void App::render() {
     // Status bar
     ImGui::Separator();
     auto mstats = defer_monitoring ? LoopbackStats{} : modem_.getStats();
+    auto dstats = defer_monitoring ? DecoderStats{} : modem_.getDecoderStats();
     const char* mode_str = simulation_enabled_ ? "SIMULATION" : (ptt_active_ ? "TX" : (radio_rx_enabled_ ? "RX" : "IDLE"));
     char goodput_text[96];
     if (last_effective_goodput_bps_ > 0.0f) {
@@ -1695,9 +1743,12 @@ void App::render() {
     } else {
         snprintf(goodput_text, sizeof(goodput_text), "n/a");
     }
-    ImGui::Text("Mode: %s | SNR: %.1f dB | TX: %d | RX: %d | PHY: %d bps | Goodput: %s",
+    ImGui::Text("Mode: %s | SNR: %.1f dB | TX: %d | RX: %d | PHY: %d bps | Goodput: %s | RXQ: %.0f ms (pk %.0f) | OF: %llu/%llu",
                 mode_str, mstats.snr_db, mstats.frames_sent, mstats.frames_received,
-                mstats.throughput_bps, goodput_text);
+                mstats.throughput_bps, goodput_text,
+                dstats.backlog_ms, dstats.peak_backlog_ms,
+                static_cast<unsigned long long>(dstats.buffer_overflows),
+                static_cast<unsigned long long>(dstats.overflow_samples_dropped));
 
     ImGui::End();
     if (first_render) {
@@ -1907,6 +1958,10 @@ bool App::queueRealTxSamples(const std::vector<float>& samples, const char* cont
         waterfall_->addSamples(samples.data(), samples.size());
     }
 
+    if (recording_enabled_) {
+        recorded_tx_samples_.insert(recorded_tx_samples_.end(), samples.begin(), samples.end());
+    }
+
     audio_.startPlayback();
     audio_.queueTxSamples(samples);
     return true;
@@ -1925,13 +1980,6 @@ bool App::startRadioRx() {
         return true;
     }
 
-#ifdef _WIN32
-    if (!modem_.isSynchronousMode()) {
-        guiLog("startRadioRx guard: enabling synchronous modem RX mode");
-        modem_.setSynchronousMode(true);
-    }
-#endif
-
     audio_.setInputCaptureMode(
         radio_rx_force_queue_mode_
             ? AudioEngine::InputCaptureMode::Queue
@@ -1947,9 +1995,9 @@ bool App::startRadioRx() {
             }
         }
         if (!found) {
-            guiLog("startRadioRx: configured input device missing: '%s' (rescan audio devices in Settings)",
+            guiLog("startRadioRx: configured input device missing: '%s', falling back to Default",
                    input_dev.c_str());
-            return false;
+            input_dev.clear();
         }
     }
     if (!audio_.openInput(input_dev)) {
@@ -2120,11 +2168,16 @@ void App::pollRadioRx() {
         if (!radio_rx_first_chunk_logged_) {
             guiLog("pollRadioRx: first RX chunk=%zu samples", samples.size());
         }
+        if (recording_enabled_) {
+            recorded_rx_samples_.insert(recorded_rx_samples_.end(), samples.begin(), samples.end());
+        }
         modem_.feedAudio(samples);
         if (!radio_rx_first_chunk_logged_) {
             guiLog("pollRadioRx: first RX chunk fed to modem");
         }
-        modem_.processRxBuffer();
+        if (modem_.isSynchronousMode()) {
+            modem_.processRxBuffer();
+        }
         if (!radio_rx_first_chunk_logged_) {
             guiLog("pollRadioRx: first RX chunk modem processing complete");
             radio_rx_first_chunk_logged_ = true;
@@ -2370,8 +2423,8 @@ void App::renderOperateTab() {
                     appendRxLogLine("[SIM] Simulation enabled - connect to '" + virtual_callsign_ + "'");
                     modem_.reset(); virtual_modem_->reset(); virtual_protocol_.reset();
                     if (options_.record_audio) {
-                        recording_enabled_ = true; recorded_samples_.clear();
-                        appendRxLogLine("[REC] Recording enabled");
+                        recording_enabled_ = true;
+                        appendRxLogLine("[REC] Recording active");
                     }
                     // Start simulation threads for realistic audio streaming
                     startSimulator();
@@ -2379,12 +2432,9 @@ void App::renderOperateTab() {
                     // Stop simulation threads
                     stopSimulator();
                     appendRxLogLine("[SIM] Simulation disabled");
-                    if (recording_enabled_) {
-                        recording_enabled_ = false;
-                        if (!recorded_samples_.empty()) {
-                            writeRecordingToFile();
-                            appendRxLogLine("[REC] Saved: " + options_.record_path);
-                        }
+                    if (options_.record_audio) {
+                        recording_enabled_ = true;
+                        appendRxLogLine("[REC] Recording continues");
                     }
                     modem_.reset();
                     if (audio_initialized_) {
@@ -2397,7 +2447,10 @@ void App::renderOperateTab() {
                 ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "'%s' active", virtual_callsign_.c_str());
                 if (recording_enabled_) {
                     ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "[REC %.1fs]", recorded_samples_.size() / 48000.0f);
+                    const size_t total_rec = recorded_samples_.size() +
+                                             recorded_rx_samples_.size() +
+                                             recorded_tx_samples_.size();
+                    ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "[REC %.1fs]", total_rec / 48000.0f);
                 }
                 ImGui::SetNextItemWidth(100);
                 ImGui::SliderFloat("SNR", &simulation_snr_db_, 0.0f, 40.0f, "%.0f dB");
