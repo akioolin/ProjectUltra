@@ -143,6 +143,13 @@ public:
     // Use this for NVIS mode (1024 FFT, 59 carriers) or custom OFDM settings
     void setOFDMConfig(const ModemConfig& config);
 
+    // Atomically apply OFDM connected-mode settings to avoid transient
+    // mode/config mismatches during handshake transitions.
+    void setConnectedOFDMMode(protocol::WaveformMode mode,
+                              const ModemConfig& config,
+                              Modulation mod,
+                              CodeRate rate);
+
     // Set data mode (modulation and code rate) for the waveform
     // Called when connection is established with negotiated settings
     void setDataMode(Modulation mod, CodeRate rate);

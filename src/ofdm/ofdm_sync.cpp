@@ -410,11 +410,13 @@ size_t OFDMDemodulator::Impl::refineLTSTiming(size_t coarse_sts_start) {
     }
     energy_ref *= 0.5f;
 
-    size_t expected_lts = 4 * preamble_sym_len;
+    size_t expected_lts = coarse_lts_start;
     float corr_at_expected = 0.0f;
 
-    for (int delta = -SEARCH_BACK; delta <= SEARCH_FWD; ++delta) {
-        size_t offset = coarse_lts_start + delta;
+    auto compute_lts_corr = [&](size_t offset) -> float {
+        if (offset + lts_passband_I.size() > rx_buffer.size()) {
+            return 0.0f;
+        }
 
         float corr_I = 0.0f;
         float corr_Q = 0.0f;
@@ -429,7 +431,12 @@ size_t OFDMDemodulator::Impl::refineLTSTiming(size_t coarse_sts_start) {
 
         float corr_mag = std::sqrt(corr_I * corr_I + corr_Q * corr_Q);
         float norm = std::sqrt(energy_rx * energy_ref);
-        float corr = (norm > 1e-6f) ? corr_mag / norm : 0.0f;
+        return (norm > 1e-6f) ? corr_mag / norm : 0.0f;
+    };
+
+    for (int delta = -SEARCH_BACK; delta <= SEARCH_FWD; ++delta) {
+        size_t offset = coarse_lts_start + delta;
+        float corr = compute_lts_corr(offset);
 
         if (corr > best_corr) {
             best_corr = corr;
@@ -444,6 +451,22 @@ size_t OFDMDemodulator::Impl::refineLTSTiming(size_t coarse_sts_start) {
     LOG_SYNC(DEBUG, "LTS search: expected=%zu (corr=%.3f), found=%zu (corr=%.3f), diff=%d",
              expected_lts, corr_at_expected, best_offset, best_corr,
              (int)best_offset - (int)expected_lts);
+
+    // LTS appears twice with near-identical correlation. If we lock onto the second
+    // one, data extraction starts one symbol late and decode reliability drops sharply.
+    // Prefer the previous-symbol candidate when it's close in correlation.
+    if (best_offset >= preamble_sym_len) {
+        size_t prev_lts = best_offset - preamble_sym_len;
+        if (prev_lts >= coarse_lts_start - SEARCH_BACK) {
+            float prev_corr = compute_lts_corr(prev_lts);
+            if (prev_corr >= best_corr * 0.92f) {
+                LOG_SYNC(DEBUG, "LTS ambiguity: prefer earlier LTS %zu (corr=%.3f) over %zu (corr=%.3f)",
+                         prev_lts, prev_corr, best_offset, best_corr);
+                best_offset = prev_lts;
+                best_corr = prev_corr;
+            }
+        }
+    }
 
     int timing_correction = (int)best_offset - (int)coarse_lts_start;
     LOG_SYNC(DEBUG, "LTS fine timing: coarse=%zu, refined=%zu, correction=%+d samples, corr=%.3f",

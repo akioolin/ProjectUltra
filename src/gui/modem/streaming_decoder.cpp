@@ -509,23 +509,23 @@ void StreamingDecoder::searchForSync() {
                               current_modulation_ == Modulation::BPSK);
     const float fading_hint = last_fading_index_.load();
     const float snr_hint = last_snr_.load();
-    float light_sync_min_confidence = is_coherent ? 0.88f : 0.70f;
-    float weak_sync_floor = is_coherent ? 0.80f : 0.30f;
+    float light_sync_min_confidence = is_coherent ? 0.90f : 0.72f;
+    float weak_sync_floor = is_coherent ? 0.85f : 0.55f;
     if (!is_coherent) {
         // OTA HF can produce valid LTS peaks in the 0.55-0.65 range during
         // fades. Start conservative, but avoid hard-locking to 0.70.
         if (fading_hint >= 1.00f || snr_hint < 10.0f) {
-            light_sync_min_confidence = 0.55f;
-        } else if (fading_hint >= 0.70f || snr_hint < 14.0f) {
-            light_sync_min_confidence = 0.58f;
-        } else if (fading_hint >= 0.50f || snr_hint < 18.0f) {
             light_sync_min_confidence = 0.62f;
+        } else if (fading_hint >= 0.70f || snr_hint < 14.0f) {
+            light_sync_min_confidence = 0.65f;
+        } else if (fading_hint >= 0.50f || snr_hint < 18.0f) {
+            light_sync_min_confidence = 0.68f;
         }
 
         if (connected_ && sync_reject_streak_ >= 8) {
-            float extra_relax = std::min(0.18f,
+            float extra_relax = std::min(0.12f,
                                          0.015f * static_cast<float>(sync_reject_streak_ - 7));
-            light_sync_min_confidence = std::max(0.45f, light_sync_min_confidence - extra_relax);
+            light_sync_min_confidence = std::max(0.56f, light_sync_min_confidence - extra_relax);
         }
     }
 
@@ -540,8 +540,9 @@ void StreamingDecoder::searchForSync() {
         if (found && sync_result.correlation < light_sync_min_confidence) {
             bool allow_weak_accept = !is_coherent &&
                                      connected_ &&
-                                     sync_reject_streak_ >= 4 &&
-                                     sync_result.correlation >= weak_sync_floor;
+                                     sync_reject_streak_ >= 3 &&
+                                     sync_result.correlation >= std::max(weak_sync_floor,
+                                                                          light_sync_min_confidence - 0.08f);
             if (allow_weak_accept) {
                 weak_accept = true;
                 LOG_MODEM(INFO, "[%s] DATA sync weak-accepted (corr=%.2f < %.2f, streak=%llu)",
@@ -839,8 +840,10 @@ void StreamingDecoder::decodeCurrentFrame() {
     if (mode_ == protocol::WaveformMode::MC_DPSK) {
         training_skip = 4608;  // training + ref samples
     } else {
-        // OFDM: check after preamble (2 LTS = ~1024 samples)
-        training_skip = 1024;
+        // OFDM: check after light preamble (training symbols)
+        // Must be waveform/config dependent (FFT/CP/carriers).
+        int data_preamble = waveform_->getDataPreambleSamples();
+        training_skip = (data_preamble > 0) ? static_cast<size_t>(data_preamble) : size_t(1024);
     }
 
     // Compute training region RMS (signal + noise)
@@ -1491,6 +1494,55 @@ void StreamingDecoder::setOFDMConfig(const ModemConfig& config) {
     // Update interleaver for new carrier count (using current modulation)
     size_t bps = ofdm_data_carriers_ * getBitsPerSymbol(current_modulation_);
     interleaver_ = std::make_unique<ChannelInterleaver>(bps, v2::LDPC_CODEWORD_BITS);
+}
+
+void StreamingDecoder::setConnectedOFDMMode(protocol::WaveformMode mode,
+                                            const ModemConfig& config,
+                                            Modulation mod,
+                                            CodeRate rate) {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+
+    mode_ = mode;
+    connected_ = true;
+    code_rate_ = rate;
+    current_modulation_ = mod;
+    ofdm_carriers_ = config.num_carriers;
+    ofdm_data_carriers_ = config.getDataCarriers();
+
+    if (mode_ == protocol::WaveformMode::OFDM_CHIRP) {
+        waveform_ = std::make_unique<OFDMChirpWaveform>(config);
+    } else {
+        waveform_ = std::make_unique<OFDMNvisWaveform>(config);
+    }
+
+    if (waveform_) {
+        waveform_->configure(mod, rate);
+    }
+
+    // Query waveform for effective pilot layout after configure().
+    int pilot_spacing = waveform_ ? waveform_->getPilotSpacing() : 0;
+    if (pilot_spacing > 0) {
+        int pilot_count = (ofdm_carriers_ + pilot_spacing - 1) / pilot_spacing;
+        ofdm_data_carriers_ = ofdm_carriers_ - pilot_count;
+    } else {
+        ofdm_data_carriers_ = ofdm_carriers_;
+    }
+
+    size_t bps = ofdm_data_carriers_ * getBitsPerSymbol(mod);
+    interleaver_ = std::make_unique<ChannelInterleaver>(bps, v2::LDPC_CODEWORD_BITS);
+
+    state_ = DecoderState::SEARCHING;
+    pending_total_cw_ = 0;
+    sync_reject_streak_ = 0;
+    constellation_cache_.clear();
+    constellation_cache_time_ = std::chrono::steady_clock::time_point{};
+    burst_soft_buffer_.clear();
+    correlation_pos_ = write_pos_;
+
+    LOG_MODEM(INFO, "StreamingDecoder: connected OFDM mode=%s, mod=%s, rate=%s, carriers=%d data=%d bps=%zu",
+              protocol::waveformModeToString(mode_),
+              modulationToString(mod), codeRateToString(rate),
+              ofdm_carriers_, ofdm_data_carriers_, bps);
 }
 
 void StreamingDecoder::setDataMode(Modulation mod, CodeRate rate) {

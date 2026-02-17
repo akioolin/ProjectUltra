@@ -865,8 +865,6 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             LOG_SYNC(INFO, "SYNC: offset=%zu, corr=%.3f, CFO=%.1f Hz, buffer=%zu",
                      sync_offset, sync_corr, coarse_cfo, impl_->rx_buffer.size());
 
-            impl_->last_sync_offset = sync_offset;
-
             // LTS fine timing
             size_t sts_start = sync_offset;
             size_t refined_lts_start = impl_->refineLTSTiming(sts_start);
@@ -886,6 +884,16 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 LOG_SYNC(INFO, "LTS fine timing: coarse_lts=%zu, refined=%zu, delta=%+d samples",
                          coarse_lts_pos, refined_lts_start, timing_refinement);
 
+                // Report true preamble start for diagnostics/tests.
+                // In practice the Schmidl-Cox coarse peak tends to land one symbol late,
+                // so refined_lts_start is commonly the SECOND LTS symbol.
+                // Preamble layout: 4 STS + 2 LTS.
+                if (refined_lts_start >= 5 * preamble_symbol_len) {
+                    impl_->last_sync_offset = refined_lts_start - 5 * preamble_symbol_len;
+                } else {
+                    impl_->last_sync_offset = 0;
+                }
+
                 // Check if differential mode for LTS phase extraction
                 bool is_differential = (impl_->config.modulation == Modulation::DQPSK ||
                                         impl_->config.modulation == Modulation::D8PSK ||
@@ -893,11 +901,11 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 LOG_SYNC(DEBUG, "LTS phase check: is_differential=%d, use_pilots=%d",
                         is_differential, impl_->config.use_pilots);
 
-                // Consume preamble: from start up through LTS
-                // Data starts after: refined_lts_start + 2 LTS symbols
-                size_t consume = refined_lts_start + 2 * preamble_symbol_len + impl_->manual_timing_offset;
-                LOG_SYNC(DEBUG, "Consume calc: refined_lts=%zu + 2*preamble_sym=%zu + offset=%d = %zu",
-                        refined_lts_start, 2 * preamble_symbol_len, impl_->manual_timing_offset, consume);
+                // Consume preamble up through last LTS. With second-LTS lock, data starts
+                // one symbol after refined_lts_start.
+                size_t consume = refined_lts_start + preamble_symbol_len + impl_->manual_timing_offset;
+                LOG_SYNC(DEBUG, "Consume calc: refined_lts=%zu + preamble_sym=%zu + offset=%d = %zu",
+                        refined_lts_start, preamble_symbol_len, impl_->manual_timing_offset, consume);
                 impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
                                        impl_->rx_buffer.begin() + consume);
 
@@ -945,7 +953,8 @@ bool OFDMDemodulator::process(SampleSpan samples) {
     if (impl_->state.load() == Impl::State::SYNCED) {
         // Check for new preamble (mid-frame detection)
         bool should_check_preamble = impl_->synced_symbol_count.load() > 0 &&
-                                      impl_->idle_call_count.load() >= 2;
+                                      impl_->idle_call_count.load() >= 2 &&
+                                      impl_->soft_bits.empty();
 
         if (should_check_preamble && impl_->rx_buffer.size() >= preamble_total_len) {
             size_t search_limit = std::min(impl_->rx_buffer.size() - preamble_total_len,
@@ -953,6 +962,10 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             constexpr size_t STEP = 8;
 
             for (size_t offset = 0; offset <= search_limit; offset += STEP) {
+                if (!impl_->hasMinimumEnergy(offset, correlation_window)) {
+                    continue;
+                }
+
                 float corr = impl_->measureCorrelation(offset);
                 if (corr > impl_->sync_threshold) {
                     size_t sts_start = offset;
@@ -963,7 +976,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                         continue;
                     }
 
-                    size_t consume = refined_lts_start + 2 * preamble_symbol_len;
+                    size_t consume = refined_lts_start + preamble_symbol_len;
 
                     LOG_SYNC(INFO, "SYNCED preamble: sts=%zu, refined_lts=%zu, consume=%zu",
                              sts_start, refined_lts_start, consume);
@@ -1462,6 +1475,7 @@ bool OFDMDemodulator::searchForSync(SampleSpan samples, size_t& out_position, fl
     // Search for preamble
     bool found_sync = false;
     size_t sync_offset = 0;
+    size_t refined_lts_offset = 0;
     float sync_cfo = 0.0f;
 
     size_t search_end = impl_->rx_buffer.size() - preamble_total_len - correlation_window;
@@ -1501,10 +1515,11 @@ bool OFDMDemodulator::searchForSync(SampleSpan samples, size_t& out_position, fl
                 if (refined_lts != SIZE_MAX) {
                     found_sync = true;
                     sync_offset = peak_pos;
+                    refined_lts_offset = refined_lts;
                     sync_cfo = impl_->estimateCoarseCFO(peak_pos);
 
-                    LOG_SYNC(INFO, "searchForSync: found at %zu, corr=%.3f, CFO=%.1f Hz",
-                             sync_offset, peak_corr, sync_cfo);
+                    LOG_SYNC(INFO, "searchForSync: found at %zu (LTS=%zu), corr=%.3f, CFO=%.1f Hz",
+                             sync_offset, refined_lts_offset, peak_corr, sync_cfo);
                     break;
                 }
             }
@@ -1517,12 +1532,10 @@ bool OFDMDemodulator::searchForSync(SampleSpan samples, size_t& out_position, fl
     if (found_sync) {
         out_cfo_hz = sync_cfo;
 
-        // Calculate where LTS (training) starts
-        // Preamble: 4 STS + 2 LTS = 6 symbols
-        // processPresynced expects samples starting at LTS (it needs training for channel est)
-        // So we return position of LTS start (after 4 STS symbols)
-        size_t sts_symbols = 4;
-        out_position = sync_offset + sts_symbols * preamble_symbol_len;
+        // processPresynced expects samples starting at FIRST LTS.
+        out_position = (refined_lts_offset >= preamble_symbol_len)
+            ? (refined_lts_offset - preamble_symbol_len)
+            : refined_lts_offset;
     }
 
     return found_sync;

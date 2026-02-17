@@ -763,9 +763,6 @@ private:
 
         LOG_MODEM(INFO, "[%s] Switched to waveform: %s",
                   callsign_.c_str(), waveformModeToString(mode));
-
-        // Verify TX/RX configs match
-        verifyTxRxConfig();
     }
 
     // Verify TX encoder and RX decoder have matching configs
@@ -851,13 +848,19 @@ private:
         resetAdaptiveAdvisory();
 
         if (connected) {
+            // Keep OFDM config in sync with negotiated data mode before switching RX/TX.
+            ofdm_config_.modulation = data_modulation_;
+            ofdm_config_.code_rate = data_code_rate_;
+            ofdm_config_.use_pilots = true;
+            ofdm_config_.pilot_spacing =
+                ofdm_link_adaptation::recommendedPilotSpacing(data_modulation_, data_code_rate_);
+
             // Switch to negotiated waveform now
             if (negotiated_waveform_ != WaveformMode::MC_DPSK) {
                 setWaveformMode(negotiated_waveform_);
                 if (decoder_) {
-                    decoder_->setMode(negotiated_waveform_, true);
-                    decoder_->setOFDMConfig(ofdm_config_);
-                    decoder_->setDataMode(data_modulation_, data_code_rate_);
+                    decoder_->setConnectedOFDMMode(negotiated_waveform_, ofdm_config_,
+                                                   data_modulation_, data_code_rate_);
                     decoder_->setBurstInterleaveGroupSize(burst_group_size_);
                     decoder_->setKnownCFO(last_cfo_hz_);
                 }
@@ -870,6 +873,7 @@ private:
                 }
                 LOG_MODEM(INFO, "[%s] Entered CONNECTED state, switched to %s, CFO=%.1f Hz",
                           callsign_.c_str(), waveformModeToString(negotiated_waveform_), last_cfo_hz_);
+                verifyTxRxConfig();
             } else {
                 // MC-DPSK: Still need to update decoder's connected state and CFO
                 if (decoder_) {
@@ -879,6 +883,7 @@ private:
                 }
                 LOG_MODEM(INFO, "[%s] Entered CONNECTED state (MC-DPSK), CFO=%.1f Hz",
                           callsign_.c_str(), last_cfo_hz_);
+                verifyTxRxConfig();
             }
         } else {
             // Switch back to disconnected mode (MC_DPSK for PING detection)

@@ -267,10 +267,10 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
     int best_offset = 0;
     Complex best_p(0.0f, 0.0f);
 
-    // When buffer starts with signal (burst continuation), use wider search window
-    // to find the LTS peak anywhere in the buffer. LTS autocorrelation (~0.99) is
-    // much higher than random data autocorrelation (~0.2-0.4).
-    int actual_search_window = signal_in_noise ? search_window : static_cast<int>(samples.size());
+    // Keep search local to expected frame start. Scanning the full buffer makes
+    // payload autocorrelation peaks compete with LTS and increases false locks.
+    int max_connected_search = std::max(search_window, symbol_samples * 8);
+    int actual_search_window = signal_in_noise ? search_window : max_connected_search;
     int search_end = std::min(static_cast<int>(signal_start) + actual_search_window,
                               static_cast<int>(samples.size()) - symbol_samples * 2);
 
