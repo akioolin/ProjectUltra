@@ -89,6 +89,16 @@ struct DecoderStats {
     float peak_backlog_ms = 0.0f;
     float buffer_fill_percent = 0.0f;
     float avg_decode_time_ms = 0.0f;
+    uint64_t sync_recovery_attempts = 0;
+    uint64_t sync_recovery_successes = 0;
+    uint64_t sync_recovery_delta_p8 = 0;
+    uint64_t sync_recovery_delta_m8 = 0;
+    uint64_t sync_recovery_delta_p16 = 0;
+    uint64_t sync_recovery_delta_m16 = 0;
+    uint64_t sync_recovery_delta_p24 = 0;
+    uint64_t sync_recovery_delta_m24 = 0;
+    uint64_t sync_recovery_delta_p32 = 0;
+    uint64_t sync_recovery_delta_m32 = 0;
 };
 
 // Callbacks for frame delivery

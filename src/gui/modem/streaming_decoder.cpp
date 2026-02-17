@@ -1241,6 +1241,118 @@ void StreamingDecoder::decodeCurrentFrame() {
         }
     }
 
+    // Multi-candidate light-sync recovery (connected OFDM):
+    // If decode fails at the detected sync point, retry nearby timing candidates.
+    // detectDataSync() scans with coarse steps, and fading can shift the best
+    // decode point by a few samples even when correlation looks valid.
+    if (!result.success && result.codewords_ok == 0 && is_ofdm && connected_) {
+        const int retry_deltas[] = {8, -8, 16, -16, 24, -24, 32, -32};
+        bool recovered = false;
+        int recovered_delta = 0;
+        uint64_t recovery_attempts = 0;
+
+        auto ringPosToAbsolute = [this](size_t ring_pos) -> size_t {
+            if (total_fed_ < MAX_BUFFER_SAMPLES) {
+                return ring_pos;
+            }
+            const size_t oldest_abs = total_fed_ - MAX_BUFFER_SAMPLES;
+            const size_t oldest_pos = write_pos_;
+            const size_t offset = (ring_pos >= oldest_pos)
+                ? (ring_pos - oldest_pos)
+                : (MAX_BUFFER_SAMPLES - oldest_pos + ring_pos);
+            return oldest_abs + offset;
+        };
+
+        for (int delta : retry_deltas) {
+            recovery_attempts++;
+            size_t retry_sync = (sync_position_ + MAX_BUFFER_SAMPLES + delta) % MAX_BUFFER_SAMPLES;
+
+            std::vector<float> retry_buffer;
+            size_t retry_len = frame_len;
+            {
+                std::lock_guard<std::mutex> lock(buffer_mutex_);
+                size_t available;
+                if (write_pos_ >= retry_sync) {
+                    available = write_pos_ - retry_sync;
+                } else {
+                    available = MAX_BUFFER_SAMPLES - retry_sync + write_pos_;
+                }
+                retry_len = std::min(retry_len, available);
+                if (retry_len == 0) {
+                    continue;
+                }
+                retry_buffer.resize(retry_len);
+                for (size_t i = 0; i < retry_len; ++i) {
+                    retry_buffer[i] = buffer_[(retry_sync + i) % MAX_BUFFER_SAMPLES];
+                }
+            }
+
+            waveform_->reset();
+            waveform_->setAbsoluteTrainingPosition(ringPosToAbsolute(retry_sync));
+            waveform_->setFrequencyOffset(sync_cfo_);
+            bool retry_ok = waveform_->process(SampleSpan(retry_buffer.data(), retry_buffer.size()));
+            if (!retry_ok) {
+                continue;
+            }
+            captureConstellationSnapshot();
+            auto retry_bits = waveform_->getSoftBits();
+            if (retry_bits.empty()) {
+                continue;
+            }
+
+            auto retry_result = decodeFrame(retry_bits, sync_snr_, sync_cfo_);
+            if (!(retry_result.success || retry_result.codewords_ok > 0)) {
+                continue;
+            }
+
+            LOG_MODEM(INFO, "[%s] Multi-candidate sync recovery: delta=%+d samples succeeded",
+                      log_prefix_.c_str(), delta);
+
+            // Keep CFO tracking consistent with the accepted retry candidate.
+            float corrected_cfo = waveform_->estimatedCFO();
+            float current_cfo = last_cfo_.load();
+            constexpr float MAX_PILOT_CFO_DRIFT_HZ = 2.0f;
+            float drift = corrected_cfo - current_cfo;
+            if (std::abs(drift) > MAX_PILOT_CFO_DRIFT_HZ) {
+                corrected_cfo = current_cfo + std::copysign(MAX_PILOT_CFO_DRIFT_HZ, drift);
+            }
+            last_cfo_.store(corrected_cfo);
+            sync_cfo_ = corrected_cfo;
+            last_fading_index_.store(waveform_->getFadingIndex());
+
+            sync_position_ = retry_sync;
+            frame_len = retry_len;
+            result = std::move(retry_result);
+            recovered_delta = delta;
+            recovered = true;
+            break;
+        }
+
+        if (recovery_attempts > 0) {
+            std::lock_guard<std::mutex> slock(stats_mutex_);
+            stats_.sync_recovery_attempts += recovery_attempts;
+            if (recovered) {
+                stats_.sync_recovery_successes++;
+                switch (recovered_delta) {
+                    case 8: stats_.sync_recovery_delta_p8++; break;
+                    case -8: stats_.sync_recovery_delta_m8++; break;
+                    case 16: stats_.sync_recovery_delta_p16++; break;
+                    case -16: stats_.sync_recovery_delta_m16++; break;
+                    case 24: stats_.sync_recovery_delta_p24++; break;
+                    case -24: stats_.sync_recovery_delta_m24++; break;
+                    case 32: stats_.sync_recovery_delta_p32++; break;
+                    case -32: stats_.sync_recovery_delta_m32++; break;
+                    default: break;
+                }
+            }
+        }
+
+        if (!recovered) {
+            LOG_MODEM(DEBUG, "[%s] Multi-candidate sync recovery: no nearby offset decoded",
+                      log_prefix_.c_str());
+        }
+    }
+
     auto decode_end = std::chrono::steady_clock::now();
     float ms = std::chrono::duration<float, std::milli>(decode_end - decode_start).count();
 

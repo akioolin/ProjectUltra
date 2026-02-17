@@ -1983,6 +1983,17 @@ private:
                   << "  backlog_ms=" << std::fixed << std::setprecision(1) << ds.backlog_ms
                   << "  peak_backlog_ms=" << ds.peak_backlog_ms
                   << std::defaultfloat << "\n";
+        std::cout << "  SyncR: attempts=" << ds.sync_recovery_attempts
+                  << "  success=" << ds.sync_recovery_successes
+                  << "  d(+8/-8/+16/-16/+24/-24/+32/-32)="
+                  << ds.sync_recovery_delta_p8 << "/"
+                  << ds.sync_recovery_delta_m8 << "/"
+                  << ds.sync_recovery_delta_p16 << "/"
+                  << ds.sync_recovery_delta_m16 << "/"
+                  << ds.sync_recovery_delta_p24 << "/"
+                  << ds.sync_recovery_delta_m24 << "/"
+                  << ds.sync_recovery_delta_p32 << "/"
+                  << ds.sync_recovery_delta_m32 << "\n";
 
         // CW success rate (from log grep is imprecise, this is the real number)
         uint64_t total_frames = ds.frames_decoded + ds.frames_failed;
