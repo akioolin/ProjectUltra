@@ -609,8 +609,8 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
             uint16_t fcrc = v2::ControlFrame::calculateCRC(tx_data.data(), fcrc_offset);
             tx_data[fcrc_offset] = (fcrc >> 8) & 0xFF;
             tx_data[fcrc_offset + 1] = fcrc & 0xFF;
-            // Re-encode with patched header
-            cws = v2::encodeFrameWithLDPC(tx_data, code_rate_);
+            // Re-encode with patched header (always R1/4 for control frames)
+            cws = v2::encodeFrameWithLDPC(tx_data, CodeRate::R1_4);
         }
 
         Bytes encoded;

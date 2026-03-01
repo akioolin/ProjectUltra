@@ -1174,10 +1174,35 @@ void StreamingDecoder::decodeCurrentFrame() {
         }
 
         if (!peek_fell_through) {
+            // Check LLR quality before expensive 4-CW escalation.
+            // False syncs (e.g. from fading-corrupted LTS) produce low |llr|_avg (~1.0),
+            // while legitimate interleaved data frames have |llr|_avg > 3.0.
+            // Escalating on garbage wastes ~1.5s on 4x failed LDPC (50 iters each),
+            // blocking the decoder from processing real frames arriving in the buffer.
+            float llr_abs_sum = 0.0f;
+            size_t llr_count = std::min(soft_bits.size(), LDPC_BLOCK);
+            for (size_t i = 0; i < llr_count; ++i) {
+                llr_abs_sum += std::abs(soft_bits[i]);
+            }
+            float llr_abs_avg = llr_abs_sum / static_cast<float>(llr_count);
+
+            constexpr float MIN_LLR_FOR_ESCALATION = 3.0f;
+            if (llr_abs_avg < MIN_LLR_FOR_ESCALATION) {
+                LOG_MODEM(INFO, "[%s] OFDM CW0 peek: decode failed, |llr|_avg=%.1f too low — skipping 4-CW escalation (likely false sync)",
+                          log_prefix_.c_str(), llr_abs_avg);
+                {
+                    std::lock_guard<std::mutex> lock(buffer_mutex_);
+                    correlation_pos_ = (sync_position_ + frame_len) % MAX_BUFFER_SAMPLES;
+                    last_decoded_sync_pos_ = sync_position_;
+                }
+                state_ = DecoderState::SEARCHING;
+                return;
+            }
+
             pending_total_cw_ = v2::FIXED_FRAME_CODEWORDS;  // 4
             state_ = DecoderState::SYNC_FOUND;
-            LOG_MODEM(INFO, "[%s] OFDM CW0 peek: decode failed, escalating to %d CWs",
-                      log_prefix_.c_str(), pending_total_cw_);
+            LOG_MODEM(INFO, "[%s] OFDM CW0 peek: decode failed (|llr|_avg=%.1f), escalating to %d CWs",
+                      log_prefix_.c_str(), llr_abs_avg, pending_total_cw_);
             return;
         }
     }

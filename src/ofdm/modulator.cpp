@@ -3,6 +3,7 @@
 #include "ultra/ofdm.hpp"
 #include "ultra/dsp.hpp"
 #include "ultra/logging.hpp"
+#include "demodulator_constants.hpp"
 #include <random>
 
 namespace ultra {
@@ -33,10 +34,6 @@ Complex qam16_point(int bits) {
     int q_bits = bits & 0x3;
     return Complex(levels[i_bits] * QAM16_SCALE, levels[q_bits] * QAM16_SCALE);
 }
-
-// Pilot sequence RNG seed - must match between modulator and demodulator
-// Using a fixed seed ensures TX/RX pilot sequences are identical
-constexpr uint32_t PILOT_RNG_SEED = 0x50494C54;  // "PILT" in ASCII
 
 // 32-QAM rectangular constellation (5 bits per symbol)
 // Uses 8×4 grid: 8 Q levels × 4 I levels = 32 points
@@ -194,7 +191,7 @@ struct OFDMModulator::Impl {
 
         // Pilot sequence: known BPSK pattern (pseudo-random but deterministic)
         pilot_sequence.resize(pilot_carrier_indices.size());
-        std::mt19937 rng(PILOT_RNG_SEED);
+        std::mt19937 rng(demod_constants::PILOT_RNG_SEED);
         for (size_t i = 0; i < pilot_sequence.size(); ++i) {
             pilot_sequence[i] = (rng() & 1) ? Complex(1, 0) : Complex(-1, 0);
         }
