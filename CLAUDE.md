@@ -74,13 +74,25 @@
 - **Preamble:** Light preamble (LTS only) for data after handshake
 - **Key files:** `decodeFixedFrame()` in frame_v2.cpp
 
+### Mode 3: OFDM_NARROW (SNR 5-10 dB, 500 Hz bandwidth)
+- **When:** Narrowband chirp detected (1250-1750 Hz), low SNR where wideband fails
+- **Waveform:** OFDM with narrowband chirp sync, FFT=2048, 21 carriers, 492 Hz BW
+- **ARQ:** Stop-and-wait (window=1) - same as MC-DPSK due to long frame times (~3s)
+- **Frame format:** Same as wideband OFDM (4 CW data, 1 CW control)
+- **Interleaving:** Frame-level + optional channel interleaving (same as OFDM)
+- **Preamble:** Light preamble (LTS only) for data after handshake
+- **Dual-listen:** RX listens for both wideband AND narrowband chirps when idle
+- **Throughput:** ~103 bps (R1/4) to ~230 bps (R1/2) — 10× slower than wideband but works at 7.5 dB lower SNR
+
 ### Mode Selection Flow
-1. **Connection starts:** Always MC-DPSK for PING/PONG/CONNECT
-2. **After CONNECT_ACK:** SNR is measured, mode is negotiated
-   - SNR < 10: Stay in MC-DPSK
-   - SNR ≥ 10: Switch to OFDM
-3. **enterConnected():** Sets ARQ window based on mode (1 vs 4)
-4. **StreamingEncoder/Decoder:** Check `mode_` to use correct path
+1. **Connection starts:** MC-DPSK for PING/PONG/CONNECT (wideband or narrowband chirp)
+2. **Dual-listen:** RX detects chirp type → sets BandwidthMode (WIDE or NARROW)
+3. **After CONNECT_ACK:** SNR is measured, mode is negotiated
+   - SNR < 10 + wideband: Stay in MC-DPSK
+   - SNR ≥ 10 + wideband: Switch to OFDM_CHIRP
+   - Narrowband detected: Switch to OFDM_NARROW
+4. **enterConnected():** Sets ARQ window based on mode (1 for MC-DPSK/NARROW, 4 for wideband OFDM)
+5. **StreamingEncoder/Decoder:** Check `mode_` to use correct path, `isOFDMMode()` for OFDM family
 
 ### NEVER MIX THESE:
 - MC-DPSK frames through OFDM encoder (corrupts control frames)
@@ -98,8 +110,10 @@
 | OFDM_CHIRP | AWGN | 15+ | 100% |
 | OFDM_CHIRP | Good fading | 15 | **100%** |
 | OFDM_CHIRP | Moderate fading | 15 | ~90% |
+| OFDM_NARROW | AWGN | 8+ | 100% |
+| OFDM_NARROW | Good fading | 8 | 100% data, 90%+ ACK |
 
-**Current state (2026-02-11):**
+**Current state (2026-03-01):**
 - MC-DPSK: WORKING - 100% at SNR=10 with moderate fading
 - OFDM_CHIRP DQPSK R1/4 AWGN: WORKING - 100% at SNR=15 and SNR=20 (0 retries)
 - OFDM_CHIRP DQPSK R1/4 Good fading SNR=15: WORKING - 100% (0 retries, 0 failures)
@@ -118,6 +132,8 @@
 - OFDM_CHIRP DQPSK R3/4 Good fading: NOT RECOMMENDED (23 retx / 5 seeds — AWGN only)
 - 1-CW ACK frames: WORKING - control frames use 1 CW (3x faster ACK)
 - Variable-CW frames: WORKING - CONNECT/DISCONNECT use exact CW count (2 at R1/2, 3 at R1/4)
+- OFDM_NARROW DQPSK R1/4 AWGN: WORKING - 100% at SNR=8 (0 retransmissions)
+- OFDM_NARROW DQPSK R1/4 Good fading SNR=8: WORKING - 100% data decode, 93% ACK, all messages delivered via ARQ
 - OFDM_COX: WORKING - DATA phase passes at SNR=20 dB
 - OTFS: EXPERIMENTAL - See OTFS Status section below
 - cli_simulator: FULLY WORKING - all phases pass on AWGN and fading
@@ -300,6 +316,7 @@ make -j4
 | Mode | Sync Method | SNR Range | Max Throughput | CFO Tolerance | Fading |
 |------|-------------|-----------|----------------|---------------|--------|
 | **MC-DPSK** | Dual Chirp | -3 to 10 dB | 938 bps | ±50 Hz | Good |
+| **OFDM_NARROW** | NB Chirp + LTS | 5-10 dB | ~230 bps | ±50 Hz | Good (R1/4) |
 | **OFDM_CHIRP** | Dual Chirp + LTS | 10-17 dB | 3.4 kbps | ±50 Hz | Good (R1/4) |
 | **OFDM_COX** | Schmidl-Cox | 17+ dB | 7.9 kbps | Needs testing | Poor |
 | **OTFS** | Dual Chirp | 15+ dB | ~2 kbps | ±50 Hz | **Poor** (experimental) |
@@ -307,6 +324,7 @@ make -j4
 
 **Waveform Selection:**
 - Poor HF channels (2ms delay): Use MC-DPSK
+- Low SNR (5-10 dB) with good/moderate fading: Use OFDM_NARROW (~103 bps R1/4, ~230 bps R1/2)
 - Moderate/Good HF: Use OFDM_CHIRP (10-17 dB) or OFDM_COX (17+ dB)
 - Very low SNR: Use SC-DPSK or MC-DPSK
 - **DO NOT use OTFS on fading channels** - it's experimental and underperforms OFDM_CHIRP

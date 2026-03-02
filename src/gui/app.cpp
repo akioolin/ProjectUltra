@@ -192,6 +192,7 @@ static const char* waveformDisplayName(protocol::WaveformMode mode) {
         case protocol::WaveformMode::MFSK: return "MFSK";
         case protocol::WaveformMode::OTFS_EQ:
         case protocol::WaveformMode::OTFS_RAW: return "OTFS";
+        case protocol::WaveformMode::OFDM_NARROW: return "OFDM Narrow";
         case protocol::WaveformMode::OFDM_CHIRP:
         case protocol::WaveformMode::OFDM_COX:
         default: return "OFDM";
@@ -563,6 +564,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
             case protocol::WaveformMode::OTFS_EQ: mode_name = "OTFS"; break;
             case protocol::WaveformMode::OTFS_RAW: mode_name = "OTFS"; break;
             case protocol::WaveformMode::OFDM_CHIRP: mode_name = "OFDM"; break;
+            case protocol::WaveformMode::OFDM_NARROW: mode_name = "OFDM Narrow"; break;
             case protocol::WaveformMode::OFDM_COX: mode_name = "OFDM"; break;
             default: mode_name = "OFDM"; break;
         }

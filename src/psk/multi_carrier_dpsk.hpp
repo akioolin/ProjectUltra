@@ -950,6 +950,21 @@ inline MultiCarrierDPSKConfig level12_ultra() {
     return cfg;
 }
 
+// Narrowband preset: 4 carriers in 500 Hz band (1300-1700 Hz)
+// Uses narrowband chirp (1250-1750 Hz, 1000ms) for dual-listen compatibility
+inline MultiCarrierDPSKConfig narrowband() {
+    MultiCarrierDPSKConfig cfg;
+    cfg.num_carriers = 4;
+    cfg.freq_low = 1300.0f;
+    cfg.freq_high = 1700.0f;
+    cfg.samples_per_symbol = 512;
+    cfg.bits_per_symbol = 2;       // DQPSK
+    cfg.chirp_f_start = 1250.0f;
+    cfg.chirp_f_end = 1750.0f;
+    cfg.chirp_duration_ms = 1000.0f;
+    return cfg;
+}
+
 } // namespace mc_dpsk_presets
 
 } // namespace ultra

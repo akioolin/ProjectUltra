@@ -34,6 +34,21 @@ OFDMChirpWaveform::OFDMChirpWaveform(const ModemConfig& config)
     initComponents();
 }
 
+OFDMChirpWaveform::OFDMChirpWaveform(const ModemConfig& config, protocol::WaveformMode mode)
+    : mode_(mode), config_(config)
+{
+    // Allow differential and coherent modulations for chirp mode
+    if (config_.modulation != Modulation::DBPSK &&
+        config_.modulation != Modulation::DQPSK &&
+        config_.modulation != Modulation::D8PSK &&
+        config_.modulation != Modulation::QPSK &&
+        config_.modulation != Modulation::BPSK) {
+        config_.modulation = Modulation::DQPSK;
+    }
+    configurePilotsForCodeRate(config_.code_rate);
+    initComponents();
+}
+
 void OFDMChirpWaveform::initComponents() {
     modulator_ = std::make_unique<OFDMModulator>(config_);
     demodulator_ = std::make_unique<OFDMDemodulator>(config_);
@@ -43,9 +58,9 @@ void OFDMChirpWaveform::initComponents() {
 sync::ChirpConfig OFDMChirpWaveform::getChirpConfig() const {
     sync::ChirpConfig cfg;
     cfg.sample_rate = static_cast<float>(config_.sample_rate);
-    cfg.f_start = 300.0f;
-    cfg.f_end = 2700.0f;
-    cfg.duration_ms = 500.0f;
+    cfg.f_start = config_.chirp_f_start;      // 300 Hz (wide) or 1250 Hz (narrow)
+    cfg.f_end = config_.chirp_f_end;          // 2700 Hz (wide) or 1750 Hz (narrow)
+    cfg.duration_ms = config_.chirp_duration_ms; // 500ms (wide) or 1000ms (narrow)
     cfg.gap_ms = 100.0f;
     cfg.use_dual_chirp = true;  // For CFO estimation
     cfg.tx_cfo_hz = config_.tx_cfo_hz;  // Pass TX CFO for simulation

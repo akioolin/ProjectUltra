@@ -20,11 +20,15 @@ namespace ultra {
 
 class OFDMChirpWaveform : public IWaveform {
 public:
-    // Create with default configuration
+    // Create with default configuration (wideband OFDM_CHIRP)
     OFDMChirpWaveform();
 
-    // Create with specific config
+    // Create with specific config (defaults to OFDM_CHIRP mode)
     explicit OFDMChirpWaveform(const ModemConfig& config);
+
+    // Create with specific config and explicit waveform mode
+    // Use OFDM_NARROW for narrowband operation
+    OFDMChirpWaveform(const ModemConfig& config, protocol::WaveformMode mode);
 
     ~OFDMChirpWaveform() override = default;
 
@@ -32,8 +36,10 @@ public:
     // IWaveform - Identity
     // ========================================================================
 
-    std::string getName() const override { return "OFDM-Chirp"; }
-    protocol::WaveformMode getMode() const override { return protocol::WaveformMode::OFDM_CHIRP; }
+    std::string getName() const override {
+        return mode_ == protocol::WaveformMode::OFDM_NARROW ? "OFDM-Narrow" : "OFDM-Chirp";
+    }
+    protocol::WaveformMode getMode() const override { return mode_; }
     WaveformCapabilities getCapabilities() const override;
 
     // ========================================================================
@@ -114,6 +120,7 @@ private:
     sync::ChirpConfig getChirpConfig() const;
     void configurePilotsForCodeRate(CodeRate rate);
 
+    protocol::WaveformMode mode_ = protocol::WaveformMode::OFDM_CHIRP;
     ModemConfig config_;
     std::unique_ptr<OFDMModulator> modulator_;
     std::unique_ptr<OFDMDemodulator> demodulator_;

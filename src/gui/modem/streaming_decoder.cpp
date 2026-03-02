@@ -509,8 +509,10 @@ void StreamingDecoder::searchForSync() {
                               current_modulation_ == Modulation::BPSK);
     const float fading_hint = last_fading_index_.load();
     const float snr_hint = last_snr_.load();
-    float light_sync_min_confidence = is_coherent ? 0.90f : 0.72f;
-    float weak_sync_floor = is_coherent ? 0.85f : 0.55f;
+    // Narrowband LTS has ~35% of wideband energy (21 vs 59 carriers) → lower correlation peak
+    bool is_narrowband = (mode_ == protocol::WaveformMode::OFDM_NARROW);
+    float light_sync_min_confidence = is_coherent ? 0.90f : (is_narrowband ? 0.50f : 0.72f);
+    float weak_sync_floor = is_coherent ? 0.85f : (is_narrowband ? 0.40f : 0.55f);
     if (!is_coherent) {
         // OTA HF can produce valid LTS peaks in the 0.55-0.65 range during
         // fades. Start conservative, but avoid hard-locking to 0.70.
@@ -568,10 +570,45 @@ void StreamingDecoder::searchForSync() {
         }
         // No chirp fallback — TX sends LTS only when connected, chirp won't be found
     } else {
-        // Use full sync detection with chirp
+        // Use full sync detection with chirp (wideband)
         found = waveform_->detectSync(
             SampleSpan(search_buffer.data(), search_buffer.size()),
             sync_result, CORR_DETECT_THRESHOLD);
+
+        // Dual-listen: if wideband didn't find anything, try narrowband chirp
+        if (!found && !connected_) {
+            // Lazy-init narrowband waveform on first use
+            if (!narrow_waveform_initialized_) {
+                // Create narrowband MC-DPSK waveform for chirp detection
+                // Uses 1250-1750 Hz chirp, 4 carriers @ 1300-1700 Hz
+                narrow_waveform_ = WaveformFactory::createNarrowbandMCDPSK();
+                narrow_waveform_initialized_ = true;
+                LOG_MODEM(INFO, "[%s] Dual-listen: narrowband MC-DPSK waveform initialized",
+                          log_prefix_.c_str());
+            }
+
+            if (narrow_waveform_) {
+                SyncResult narrow_result;
+                bool narrow_found = narrow_waveform_->detectSync(
+                    SampleSpan(search_buffer.data(), search_buffer.size()),
+                    narrow_result, CORR_DETECT_THRESHOLD);
+
+                if (narrow_found) {
+                    found = true;
+                    sync_result = narrow_result;
+                    detected_bandwidth_ = BandwidthMode::NARROW;
+                    // Switch main waveform to narrowband MC-DPSK so CONNECT frames decode correctly
+                    waveform_ = WaveformFactory::createNarrowbandMCDPSK();
+                    LOG_MODEM(INFO, "[%s] Dual-listen: NARROWBAND chirp detected! corr=%.3f, CFO=%.1f Hz, switched to narrowband MC-DPSK",
+                              log_prefix_.c_str(), narrow_result.correlation, narrow_result.cfo_hz);
+                }
+            }
+        }
+
+        // If wideband found something, mark as wide
+        if (found && detected_bandwidth_ != BandwidthMode::NARROW) {
+            detected_bandwidth_ = BandwidthMode::WIDE;
+        }
     }
 
     auto search_end_time = std::chrono::steady_clock::now();
@@ -705,8 +742,7 @@ void StreamingDecoder::checkIfReadyToDecode() {
     }
 
     // Calculate how much we need — must match decodeCurrentFrame() buffer sizing
-    bool is_ofdm_here = (mode_ == protocol::WaveformMode::OFDM_CHIRP ||
-                         mode_ == protocol::WaveformMode::OFDM_COX);
+    bool is_ofdm_here = protocol::isOFDMMode(mode_);
     size_t needed;
     if (pending_total_cw_ > 0) {
         // We know exact CW count from CW0 peek — get exact sample count
@@ -779,8 +815,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         return;
     }
 
-    bool is_ofdm = (mode_ == protocol::WaveformMode::OFDM_CHIRP ||
-                    mode_ == protocol::WaveformMode::OFDM_COX);
+    bool is_ofdm = protocol::isOFDMMode(mode_);
 
     // Determine how many samples to copy from buffer
     // Strategy depends on mode and state:
@@ -1570,7 +1605,7 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     }
 
     size_t bps = mc_dpsk_carriers_ * 2;
-    if (mode == protocol::WaveformMode::OFDM_CHIRP || mode == protocol::WaveformMode::OFDM_COX) {
+    if (protocol::isOFDMMode(mode)) {
         bps = 60;
     }
     interleaver_ = std::make_unique<ChannelInterleaver>(bps, v2::LDPC_CODEWORD_BITS);
@@ -1622,6 +1657,10 @@ void StreamingDecoder::setOFDMConfig(const ModemConfig& config) {
         waveform_ = std::make_unique<OFDMChirpWaveform>(config);
         LOG_MODEM(INFO, "StreamingDecoder: OFDM_CHIRP config set (FFT=%d, carriers=%d)",
                   config.fft_size, config.num_carriers);
+    } else if (mode_ == protocol::WaveformMode::OFDM_NARROW) {
+        waveform_ = std::make_unique<OFDMChirpWaveform>(config, protocol::WaveformMode::OFDM_NARROW);
+        LOG_MODEM(INFO, "StreamingDecoder: OFDM_NARROW config set (FFT=%d, carriers=%d)",
+                  config.fft_size, config.num_carriers);
     } else {
         waveform_ = std::make_unique<OFDMNvisWaveform>(config);
         LOG_MODEM(INFO, "StreamingDecoder: OFDM_COX config set (FFT=%d, carriers=%d)",
@@ -1648,6 +1687,8 @@ void StreamingDecoder::setConnectedOFDMMode(protocol::WaveformMode mode,
 
     if (mode_ == protocol::WaveformMode::OFDM_CHIRP) {
         waveform_ = std::make_unique<OFDMChirpWaveform>(config);
+    } else if (mode_ == protocol::WaveformMode::OFDM_NARROW) {
+        waveform_ = std::make_unique<OFDMChirpWaveform>(config, protocol::WaveformMode::OFDM_NARROW);
     } else {
         waveform_ = std::make_unique<OFDMNvisWaveform>(config);
     }
@@ -1748,8 +1789,7 @@ StreamingDecoder::DecoderConfig StreamingDecoder::getConfig() const {
 
     // Interleaving settings
     cfg.use_channel_interleave = use_channel_interleave_;
-    cfg.use_frame_interleave = (mode_ == protocol::WaveformMode::OFDM_CHIRP ||
-                                 mode_ == protocol::WaveformMode::OFDM_COX);
+    cfg.use_frame_interleave = protocol::isOFDMMode(mode_);
 
     return cfg;
 }
@@ -2028,8 +2068,7 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     codec_->setRate(rate);
 
     // Channel interleaving only applies to OFDM modes, NOT MC-DPSK
-    bool is_ofdm = (mode_ == protocol::WaveformMode::OFDM_CHIRP ||
-                    mode_ == protocol::WaveformMode::OFDM_COX);
+    bool is_ofdm = protocol::isOFDMMode(mode_);
     bool apply_channel_deinterleave = use_channel_interleave_ && is_ofdm;
 
     // Helper to deinterleave a codeword if needed

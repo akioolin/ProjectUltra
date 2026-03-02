@@ -83,12 +83,13 @@ void printInfo() {
 }
 
 // Waveform type
-enum class WaveformType { OFDM_COX, OFDM_CHIRP, DPSK };
+enum class WaveformType { OFDM_COX, OFDM_CHIRP, OFDM_NARROW, DPSK };
 
 WaveformType parseWaveform(const char* s) {
     if (strcmp(s, "mcdpsk") == 0 || strcmp(s, "dpsk") == 0) return WaveformType::DPSK;
     if (strcmp(s, "ofdm") == 0 || strcmp(s, "chirp") == 0) return WaveformType::OFDM_CHIRP;
     if (strcmp(s, "cox") == 0) return WaveformType::OFDM_COX;
+    if (strcmp(s, "narrow") == 0 || strcmp(s, "ofdm_narrow") == 0) return WaveformType::OFDM_NARROW;
     // Default to OFDM (chirp-based, more robust on fading)
     return WaveformType::OFDM_CHIRP;
 }
@@ -97,6 +98,7 @@ protocol::WaveformMode toWaveformMode(WaveformType w) {
     switch (w) {
         case WaveformType::DPSK: return protocol::WaveformMode::MC_DPSK;
         case WaveformType::OFDM_CHIRP: return protocol::WaveformMode::OFDM_CHIRP;
+        case WaveformType::OFDM_NARROW: return protocol::WaveformMode::OFDM_NARROW;
         default: return protocol::WaveformMode::OFDM_COX;
     }
 }
@@ -206,7 +208,7 @@ int runProtocolRx(const char* input_file, WaveformType waveform, CodeRate rate) 
     modem.setLogPrefix("RX");
 
     // For OFDM waveforms, set connected mode so decoder uses OFDM path
-    if (waveform == WaveformType::OFDM_CHIRP || waveform == WaveformType::OFDM_COX) {
+    if (waveform == WaveformType::OFDM_CHIRP || waveform == WaveformType::OFDM_COX || waveform == WaveformType::OFDM_NARROW) {
         modem.setConnected(true);
         modem.setHandshakeComplete(true);
     }

@@ -10,6 +10,64 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-03-01: Add OFDM_NARROW 500 Hz narrowband mode
+
+**What was added:**
+New 500 Hz narrowband OFDM mode (OFDM_NARROW) for reliable operation at much lower SNR than wideband.
+Provides ~7.5 dB noise bandwidth advantage, enabling communication at SNR 5-10 dB where wideband fails.
+
+**Key parameters:**
+- FFT=2048, 21 carriers, 23.4 Hz bin spacing, 492 Hz occupied bandwidth
+- Narrowband chirp: 1250-1750 Hz sweep, 1000ms duration
+- Narrowband MC-DPSK handshake: 4 carriers @ 1300-1700 Hz
+- Symbol duration: 46.7ms (2240 samples), CP=192 samples (MEDIUM)
+- ARQ: window=1 (stop-and-wait), timeout ~7.16s
+- Pilots: 0 for R1/4 (21 data carriers), 3 for R1/2+ (18 data carriers)
+
+**Files changed:**
+- `include/ultra/types.hpp` - BandwidthMode enum, chirp fields in ModemConfig, narrowband presets
+- `src/protocol/frame_v2.hpp/.cpp` - WaveformMode::OFDM_NARROW (0x06), isOFDMMode() helper
+- `src/psk/multi_carrier_dpsk.hpp` - mc_dpsk_presets::narrowband() (4 carriers, 1300-1700 Hz)
+- `src/waveform/ofdm_chirp_waveform.hpp/.cpp` - Config-driven chirp parameters, mode_ field
+- `src/waveform/waveform_factory.hpp/.cpp` - OFDM_NARROW creation, createNarrowbandMCDPSK()
+- `src/protocol/waveform_selection.hpp` - SNR 5-10 recommends OFDM_NARROW
+- `src/gui/modem/streaming_decoder.cpp` - Dual-listen (wideband + narrowband chirps), narrowband LTS thresholds
+- `src/gui/modem/streaming_encoder.hpp/.cpp` - narrowband_control_ flag, narrowband MC-DPSK persistence
+- `src/gui/modem/modem_engine.cpp` - bandwidth_mode_ propagation, OFDM_NARROW in mode checks
+- `src/protocol/connection.cpp/.cpp` - isOFDMMode() throughout, OFDM_NARROW timing
+- `tools/cli_simulator.cpp` - --waveform ofdm_narrow, dual-listen, extended narrowband timeouts
+- `src/main.cpp`, `src/gui/app.cpp` - CLI and GUI support
+
+**Key design decisions:**
+1. Dual-listen: RX always listens for both wideband and narrowband chirps when idle
+2. Narrowband chirp auto-identifies the mode — no manual pre-agreement needed
+3. narrowband_control_ flag persists across encoder mode switches during handshake
+4. LTS threshold lowered to 0.50 for narrowband (21 carriers produce ~0.71 correlation vs 59-carrier ~0.95)
+5. Legacy (wide-only) stations won't detect narrowband chirps → caller sees normal PING timeout
+
+**Verification:**
+```
+# AWGN
+./build/cli_simulator --snr 8 --waveform ofdm_narrow --rate r1_4 --test
+# → TEST PASSED: 100% frame success, 0 retransmissions
+
+# Good fading
+./build/cli_simulator --snr 8 --fading good --waveform ofdm_narrow --rate r1_4 --test
+# → TEST PASSED: 100% RX frame success, 92.9% TX (ACK loss), all 7 messages delivered via ARQ
+
+# Wideband regression
+./build/cli_simulator --snr 15 --fading good --rate r1_4 --test
+# → TEST PASSED: 100% frame success, 0 retransmissions (no regression)
+```
+
+**Performance:**
+| Condition | Rate | Frame Success | Throughput |
+|-----------|------|--------------|------------|
+| AWGN SNR=8 | R1/4 | 100% | ~103 bps |
+| Good fading SNR=8 | R1/4 | 100% (data), 93% (ACK) | ~60 bps (with retx) |
+
+---
+
 ## 2026-02-11: Alpha gate harness + OFDM SR-ARQ window stabilization
 
 **What was broken:**

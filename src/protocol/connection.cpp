@@ -216,8 +216,7 @@ void Connection::acceptCall() {
     recommendDataMode(measured_snr_db_, negotiated_mode_, rec_mod, rec_rate, fading_index_);
 
     // Bootstrap safety: chirp SNR can overestimate first OFDM frame quality.
-    if (negotiated_mode_ == WaveformMode::OFDM_CHIRP ||
-        negotiated_mode_ == WaveformMode::OFDM_COX) {
+    if (isOFDMMode(negotiated_mode_)) {
         CodeRate capped = capInitialOFDMRate(measured_snr_db_, fading_index_, rec_rate);
         if (capped != rec_rate) {
             LOG_MODEM(INFO, "Connection: Bootstrap cap %s -> %s for initial OFDM setup (SNR=%.1f, fading=%.2f)",
@@ -380,8 +379,7 @@ bool Connection::sendMessage(const std::string& text) {
 
     // MC-DPSK uses variable-length codewords (no fixed frame limit), so no fragmentation needed.
     // OFDM uses fixed 4-CW frames with a hard capacity limit that requires fragmentation.
-    bool is_ofdm = (negotiated_mode_ == WaveformMode::OFDM_CHIRP ||
-                    negotiated_mode_ == WaveformMode::OFDM_COX);
+    bool is_ofdm = isOFDMMode(negotiated_mode_);
 
     Bytes data(text.begin(), text.end());
 
@@ -418,8 +416,7 @@ bool Connection::sendMessages(const std::vector<std::string>& texts) {
         return false;
     }
 
-    bool is_ofdm = (negotiated_mode_ == WaveformMode::OFDM_CHIRP ||
-                    negotiated_mode_ == WaveformMode::OFDM_COX);
+    bool is_ofdm = isOFDMMode(negotiated_mode_);
     size_t capacity = is_ofdm ? v2::getFixedFramePayloadCapacity(data_code_rate_) : SIZE_MAX;
 
     // Pre-fragment all messages into a flat list of frame payloads with flags
@@ -482,8 +479,7 @@ bool Connection::sendFile(const std::string& filepath) {
     }
 
     // Set chunk size to match frame capacity for current mode
-    bool is_ofdm = (negotiated_mode_ == WaveformMode::OFDM_CHIRP ||
-                    negotiated_mode_ == WaveformMode::OFDM_COX);
+    bool is_ofdm = isOFDMMode(negotiated_mode_);
     if (is_ofdm) {
         size_t capacity = v2::getFixedFramePayloadCapacity(data_code_rate_);
         file_transfer_.setMaxChunkPayload(capacity);
@@ -523,8 +519,7 @@ void Connection::sendNextFileChunk() {
         return;
     }
 
-    bool is_ofdm = (negotiated_mode_ == WaveformMode::OFDM_CHIRP ||
-                    negotiated_mode_ == WaveformMode::OFDM_COX);
+    bool is_ofdm = isOFDMMode(negotiated_mode_);
 
     // Enable burst buffering for OFDM mode
     if (is_ofdm && on_transmit_burst_) {
@@ -553,8 +548,7 @@ void Connection::sendNextFileChunk() {
 }
 
 void Connection::sendNextFragment() {
-    bool is_ofdm = (negotiated_mode_ == WaveformMode::OFDM_CHIRP ||
-                    negotiated_mode_ == WaveformMode::OFDM_COX);
+    bool is_ofdm = isOFDMMode(negotiated_mode_);
 
     // Enable burst buffering for OFDM mode
     if (is_ofdm && on_transmit_burst_) {
@@ -945,15 +939,47 @@ void Connection::enterConnected() {
     arq_.reset();
 
     // MC-DPSK uses stop-and-wait (window=1), OFDM uses sliding window (window=4)
+    // OFDM_NARROW uses stop-and-wait (window=1) like MC-DPSK due to long frame times
     // Timeout must exceed round-trip time: TX frame + RX decode + ACK TX + ACK decode
     //   MC-DPSK: full chirp preamble (1.3s) + data (~0.6s) + search buffer (~2.5s) each way → RTT ~13s
     //   OFDM:    light preamble + data (~1.2s) + LTS search (~0.5s) each way → RTT ~3.5s
+    //   OFDM_NARROW: light preamble (93ms) + data (~3.1s) + ACK (~0.9s) + margin → RTT ~4.4s
     if (negotiated_mode_ == WaveformMode::MC_DPSK) {
         arq_.setWindowSize(1);
         arq_.setAckTimeout(18000);
         arq_.setSackDelay(2000);
         arq_.setAckRepeatCount(1);  // Single ACK (stop-and-wait, no benefit from repeat)
         LOG_MODEM(INFO, "Connection: ARQ window=1, timeout=18s, ack_repeat=1 (MC-DPSK)");
+    } else if (negotiated_mode_ == WaveformMode::OFDM_NARROW) {
+        // Narrowband OFDM: stop-and-wait (window=1)
+        // Long symbols (46.7ms) mean frames take ~3s. RTT ~4.4s for R1/4.
+        // Timeout: data(3175ms) + 2*ACK(933ms) + sack(120ms) + margin(1588ms) ≈ 6749ms
+        arq_.setWindowSize(1);
+        arq_.setMaxRetries(15);
+        arq_.setSackDelay(120);
+        arq_.setAckRepeatCount(1);
+
+        // Compute narrowband timeout from frame timing
+        // Symbol: (2048 + 192) / 48000 = 46.67ms
+        constexpr float narrow_symbol_ms = (1000.0f * 2240) / 48000;  // 46.67ms
+        constexpr uint32_t NARROW_NUM_CARRIERS = 21;
+        constexpr uint32_t NARROW_PILOT_SPACING = 10;
+        uint32_t narrow_pilot_count = (NARROW_NUM_CARRIERS + NARROW_PILOT_SPACING - 1) / NARROW_PILOT_SPACING;
+        uint32_t narrow_data_carriers = NARROW_NUM_CARRIERS - narrow_pilot_count;
+        uint32_t narrow_bps = narrow_data_carriers * getBitsPerSymbol(data_modulation_);
+        uint32_t data_cw_symbols = (4 * LDPC_BITS_PER_CODEWORD + narrow_bps - 1) / narrow_bps;
+        uint32_t ack_cw_symbols = (LDPC_BITS_PER_CODEWORD + narrow_bps - 1) / narrow_bps;
+        uint32_t data_frame_ms = static_cast<uint32_t>((2 + data_cw_symbols) * narrow_symbol_ms + 0.5f);
+        uint32_t ack_frame_ms = static_cast<uint32_t>((2 + ack_cw_symbols) * narrow_symbol_ms + 0.5f);
+
+        uint32_t timeout_ms = data_frame_ms + 2 * ack_frame_ms + 120 +
+                               std::max<uint32_t>(700, data_frame_ms / 2);
+        timeout_ms = std::clamp(timeout_ms, 4500u, 14000u);
+        arq_.setAckTimeout(timeout_ms);
+
+        LOG_MODEM(INFO, "Connection: ARQ window=1, timeout=%.2fs (data=%ums, ack=%ums), ack_repeat=1 (OFDM_NARROW %s %s)",
+                  timeout_ms / 1000.0f, data_frame_ms, ack_frame_ms,
+                  modulationToString(data_modulation_), codeRateToString(data_code_rate_));
     } else {
         // Keep OFDM in-flight burst shorter to reduce ACK-lag hole amplification
         // on fading channels. A window of 4 matches burst-interleave grouping and

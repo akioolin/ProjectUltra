@@ -151,6 +151,17 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
         return;
     }
 
+    // OFDM_NARROW: DQPSK only, R1/4 default, R1/2 for good conditions
+    if (waveform == WaveformMode::OFDM_NARROW) {
+        mod = Modulation::DQPSK;
+        if (fading_index < 0.15f && snr_db >= 8.0f) {
+            rate = CodeRate::R1_2;
+        } else {
+            rate = CodeRate::R1_4;
+        }
+        return;
+    }
+
     // OFDM modes: use shared rate selection helper
     mod = Modulation::DQPSK;  // Always differential for HF phase stability
 

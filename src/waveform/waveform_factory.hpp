@@ -27,6 +27,9 @@ public:
     // Create MC-DPSK with specific carrier count
     static WaveformPtr createMCDPSK(int num_carriers);
 
+    // Create narrowband MC-DPSK (4 carriers, 500 Hz band, narrowband chirp)
+    static WaveformPtr createNarrowbandMCDPSK();
+
     // Get list of all available waveform modes
     static std::vector<protocol::WaveformMode> getAvailableModes();
 

@@ -32,6 +32,7 @@ enum class WaveformMode : uint8_t {
     MFSK       = 0x03,  // MFSK for very low SNR (-17 dB to +3 dB)
     MC_DPSK    = 0x04,  // Multi-Carrier DPSK for low SNR with fading (0-10 dB)
     OFDM_CHIRP = 0x05,  // OFDM with chirp sync + DQPSK (low SNR fading channels)
+    OFDM_NARROW = 0x06, // Narrowband OFDM (500 Hz, 21 carriers) for very low SNR (3-10 dB)
     AUTO       = 0xFF,  // Automatic selection (let receiver decide)
 };
 
@@ -43,10 +44,18 @@ namespace ModeCapabilities {
     constexpr uint8_t MFSK       = 0x08;  // MFSK for very low SNR (-17 to +3 dB)
     constexpr uint8_t MC_DPSK    = 0x10;  // Multi-Carrier DPSK for low SNR with fading (0-10 dB)
     constexpr uint8_t OFDM_CHIRP = 0x20;  // OFDM with chirp sync + DQPSK (fading)
-    constexpr uint8_t ALL        = OFDM_COX | OTFS_EQ | OTFS_RAW | MFSK | MC_DPSK | OFDM_CHIRP;
+    constexpr uint8_t OFDM_NARROW = 0x40; // Narrowband OFDM (500 Hz, 3-10 dB)
+    constexpr uint8_t ALL        = OFDM_COX | OTFS_EQ | OTFS_RAW | MFSK | MC_DPSK | OFDM_CHIRP | OFDM_NARROW;
 }
 
 const char* waveformModeToString(WaveformMode mode);
+
+// Helper: check if a WaveformMode is any OFDM variant (CHIRP, COX, or NARROW)
+inline bool isOFDMMode(WaveformMode mode) {
+    return mode == WaveformMode::OFDM_CHIRP ||
+           mode == WaveformMode::OFDM_COX ||
+           mode == WaveformMode::OFDM_NARROW;
+}
 
 // Channel report from PROBE_ACK (link establishment)
 // Contains measured channel parameters for mode selection

@@ -182,6 +182,10 @@ public:
     protocol::WaveformMode getMode() const { return mode_; }
     bool isConnected() const { return connected_; }
 
+    // Get detected bandwidth from dual-listen (valid after sync detection when disconnected)
+    BandwidthMode getDetectedBandwidth() const { return detected_bandwidth_; }
+    void resetDetectedBandwidth() { detected_bandwidth_ = BandwidthMode::WIDE; }
+
     // Get current configuration (for comparison with encoder)
     // Returns: mode, modulation, code_rate, carriers, interleaving settings
     struct DecoderConfig {
@@ -330,6 +334,12 @@ private:
     std::unique_ptr<IWaveform> waveform_;
     protocol::WaveformMode mode_ = protocol::WaveformMode::MC_DPSK;
     bool connected_ = false;
+
+    // Dual-listen: narrowband waveform for detecting narrowband chirps when disconnected
+    // Lazy-initialized on first search to avoid startup cost
+    std::unique_ptr<IWaveform> narrow_waveform_;
+    bool narrow_waveform_initialized_ = false;
+    BandwidthMode detected_bandwidth_ = BandwidthMode::WIDE;
     int mc_dpsk_carriers_ = 8;  // MC-DPSK carrier count (default 8)
     int ofdm_carriers_ = 30;    // OFDM carrier count (default 30 for standard mode)
     int ofdm_data_carriers_ = 30;  // Data carriers after pilot allocation (for interleaver)

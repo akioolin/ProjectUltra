@@ -145,8 +145,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
 
         // Bootstrap safety: chirp SNR can overestimate first OFDM frame quality.
         // Start one step more robust when channel is borderline.
-        if (negotiated_mode_ == WaveformMode::OFDM_CHIRP ||
-            negotiated_mode_ == WaveformMode::OFDM_COX) {
+        if (isOFDMMode(negotiated_mode_)) {
             CodeRate capped = capInitialOFDMRate(snr_db, fading_index_, rec_rate);
             if (capped != rec_rate) {
                 LOG_MODEM(INFO, "Connection: Bootstrap cap %s -> %s for initial OFDM setup (SNR=%.1f, fading=%.2f)",
@@ -490,12 +489,13 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
     // Helper to convert WaveformMode to capability bit
     auto modeToBit = [](WaveformMode mode) -> uint8_t {
         switch (mode) {
-            case WaveformMode::OFDM_COX:   return ModeCapabilities::OFDM_COX;
-            case WaveformMode::OFDM_CHIRP: return ModeCapabilities::OFDM_CHIRP;
-            case WaveformMode::OTFS_EQ:    return ModeCapabilities::OTFS_EQ;
-            case WaveformMode::OTFS_RAW:   return ModeCapabilities::OTFS_RAW;
-            case WaveformMode::MFSK:       return ModeCapabilities::MFSK;
-            case WaveformMode::MC_DPSK:    return ModeCapabilities::MC_DPSK;
+            case WaveformMode::OFDM_COX:    return ModeCapabilities::OFDM_COX;
+            case WaveformMode::OFDM_CHIRP:  return ModeCapabilities::OFDM_CHIRP;
+            case WaveformMode::OFDM_NARROW: return ModeCapabilities::OFDM_NARROW;
+            case WaveformMode::OTFS_EQ:     return ModeCapabilities::OTFS_EQ;
+            case WaveformMode::OTFS_RAW:    return ModeCapabilities::OTFS_RAW;
+            case WaveformMode::MFSK:        return ModeCapabilities::MFSK;
+            case WaveformMode::MC_DPSK:     return ModeCapabilities::MC_DPSK;
             default: return 0;
         }
     };
@@ -538,9 +538,10 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
 
     // Fallback if selected mode not supported
 
-    // Fallback priority: OFDM_COX > OFDM_CHIRP > OTFS > MC_DPSK > MFSK
+    // Fallback priority: OFDM_COX > OFDM_CHIRP > OFDM_NARROW > OTFS > MC_DPSK > MFSK
     if (common & ModeCapabilities::OFDM_COX) return WaveformMode::OFDM_COX;
     if (common & ModeCapabilities::OFDM_CHIRP) return WaveformMode::OFDM_CHIRP;
+    if (common & ModeCapabilities::OFDM_NARROW) return WaveformMode::OFDM_NARROW;
     if (common & ModeCapabilities::OTFS_EQ) return WaveformMode::OTFS_EQ;
     if (common & ModeCapabilities::OTFS_RAW) return WaveformMode::OTFS_RAW;
     if (common & ModeCapabilities::MC_DPSK) return WaveformMode::MC_DPSK;

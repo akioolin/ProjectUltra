@@ -50,9 +50,7 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
     // When disconnected, always use MC_DPSK for PING detection (chirp-based sync)
     if (streaming_decoder_) {
         protocol::WaveformMode decoder_mode = connected_ ? mode : protocol::WaveformMode::MC_DPSK;
-        if (connected_ &&
-            (mode == protocol::WaveformMode::OFDM_COX ||
-             mode == protocol::WaveformMode::OFDM_CHIRP)) {
+        if (connected_ && protocol::isOFDMMode(mode)) {
             streaming_decoder_->setConnectedOFDMMode(mode, config_, data_modulation_, data_code_rate_);
             LOG_MODEM(INFO, "setWaveformMode: StreamingDecoder connected OFDM config set (FFT=%d, carriers=%d)",
                       config_.fft_size, config_.num_carriers);
@@ -60,8 +58,7 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
             streaming_decoder_->setMode(decoder_mode, connected_);
 
             // For OFDM modes, propagate the current config (for custom FFT/carriers like NVIS mode)
-            if (mode == protocol::WaveformMode::OFDM_COX ||
-                mode == protocol::WaveformMode::OFDM_CHIRP) {
+            if (protocol::isOFDMMode(mode)) {
                 streaming_decoder_->setOFDMConfig(config_);
                 LOG_MODEM(INFO, "setWaveformMode: StreamingDecoder OFDM config set (FFT=%d, carriers=%d)",
                           config_.fft_size, config_.num_carriers);
@@ -72,8 +69,7 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
     // Update StreamingEncoder to match
     if (streaming_encoder_) {
         streaming_encoder_->setMode(mode);
-        if (mode == protocol::WaveformMode::OFDM_COX ||
-            mode == protocol::WaveformMode::OFDM_CHIRP) {
+        if (protocol::isOFDMMode(mode)) {
             streaming_encoder_->setOFDMConfig(config_);
         }
     }
@@ -88,6 +84,11 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
 
         case protocol::WaveformMode::OFDM_CHIRP:
             LOG_MODEM(INFO, "OFDM_CHIRP mode active: %d carriers, DQPSK (differential)",
+                      config_.num_carriers);
+            break;
+
+        case protocol::WaveformMode::OFDM_NARROW:
+            LOG_MODEM(INFO, "OFDM_NARROW mode active: %d carriers, 500 Hz narrowband",
                       config_.num_carriers);
             break;
 
@@ -147,8 +148,7 @@ void ModemEngine::setConnected(bool connected) {
             streaming_decoder_->setMode(waveform_mode_, true);  // true = connected
 
             // For OFDM modes, propagate the correct config (with proper pilot settings)
-            if (waveform_mode_ == protocol::WaveformMode::OFDM_COX ||
-                waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP) {
+            if (protocol::isOFDMMode(waveform_mode_)) {
                 streaming_decoder_->setConnectedOFDMMode(
                     waveform_mode_, config_, data_modulation_, data_code_rate_);
             }
@@ -164,8 +164,7 @@ void ModemEngine::setConnected(bool connected) {
         // Update StreamingEncoder for connected state
         if (streaming_encoder_) {
             streaming_encoder_->setMode(waveform_mode_);
-            if (waveform_mode_ == protocol::WaveformMode::OFDM_COX ||
-                waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP) {
+            if (protocol::isOFDMMode(waveform_mode_)) {
                 streaming_encoder_->setOFDMConfig(config_);
                 streaming_encoder_->setDataMode(data_modulation_, data_code_rate_);
             }
@@ -232,9 +231,7 @@ void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
     // Update StreamingDecoder's waveform configuration
     // CRITICAL: Set OFDM config BEFORE setDataMode so decoder has correct pilot layout
     if (streaming_decoder_) {
-        if (connected_ &&
-            (waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP ||
-             waveform_mode_ == protocol::WaveformMode::OFDM_COX)) {
+        if (connected_ && protocol::isOFDMMode(waveform_mode_)) {
             streaming_decoder_->setConnectedOFDMMode(
                 waveform_mode_, config_, mod, rate);
         } else {
@@ -350,6 +347,7 @@ fec::CodecType ModemEngine::getCodecForWaveform(protocol::WaveformMode mode) {
             return fec::CodecType::LDPC;
 
         case protocol::WaveformMode::OFDM_CHIRP:
+        case protocol::WaveformMode::OFDM_NARROW:
         case protocol::WaveformMode::OFDM_COX:
         default:
             return fec::CodecType::LDPC;

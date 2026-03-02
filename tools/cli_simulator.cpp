@@ -421,7 +421,13 @@ public:
     void setSNR(float snr) { snr_db_ = snr; }
     void setForcedModulation(Modulation mod) { protocol_.setForcedModulation(mod); }
     void setForcedCodeRate(CodeRate rate) { protocol_.setForcedCodeRate(rate); }
-    void setPreferredWaveform(WaveformMode mode) { protocol_.setPreferredMode(mode); }
+    void setPreferredWaveform(WaveformMode mode) {
+        protocol_.setPreferredMode(mode);
+        // For narrowband, use narrowband chirp for PING/PONG/CONNECT control frames
+        if (mode == WaveformMode::OFDM_NARROW && encoder_) {
+            encoder_->setNarrowbandControl(true);
+        }
+    }
 
     // Disable burst interleaving (for A/B testing)
     void setNoBurstInterleave(bool v) { no_burst_interleave_ = v; }
@@ -585,6 +591,13 @@ private:
         // Set ping callback
         decoder_->setPingCallback([this](float snr_db, float cfo_hz) {
             last_cfo_hz_ = cfo_hz;
+            // If narrowband chirp was detected, switch control waveform to narrowband
+            if (decoder_->getDetectedBandwidth() == BandwidthMode::NARROW) {
+                if (encoder_) {
+                    encoder_->setNarrowbandControl(true);
+                }
+                LOG_MODEM(INFO, "[%s] Narrowband chirp detected, switching control waveform", callsign_.c_str());
+            }
             protocol_.onPingReceived();
         });
     }
@@ -848,6 +861,11 @@ private:
         resetAdaptiveAdvisory();
 
         if (connected) {
+            // For OFDM_NARROW, switch to narrowband OFDM config
+            if (negotiated_waveform_ == WaveformMode::OFDM_NARROW) {
+                ofdm_config_ = presets::narrowbandOFDM();
+            }
+
             // Keep OFDM config in sync with negotiated data mode before switching RX/TX.
             ofdm_config_.modulation = data_modulation_;
             ofdm_config_.code_rate = data_code_rate_;
@@ -1605,7 +1623,9 @@ private:
         std::cout << "  Sent " << total << " messages as burst\n";
 
         // Wait for all messages to arrive
-        if (!waitFor([this, total]{ return messages_received_count_.load() >= total; }, 120)) {
+        // Narrowband needs much longer: ~4.4s/frame RTT with window=1, plus retransmissions
+        int burst_timeout = (forced_waveform_ == WaveformMode::OFDM_NARROW) ? 300 : 120;
+        if (!waitFor([this, total]{ return messages_received_count_.load() >= total; }, burst_timeout)) {
             int got = messages_received_count_.load();
             std::cout << "  \033[31m✗ Only received " << got << "/" << total << " messages!\033[0m\n";
             return false;
@@ -2113,8 +2133,10 @@ int main(int argc, char* argv[]) {
                         sim.setPreferredWaveform(WaveformMode::OFDM_CHIRP);
                     } else if (wf_str == "ofdm_cox" || wf_str == "ofdm") {
                         sim.setPreferredWaveform(WaveformMode::OFDM_COX);
+                    } else if (wf_str == "ofdm_narrow" || wf_str == "narrow") {
+                        sim.setPreferredWaveform(WaveformMode::OFDM_NARROW);
                     } else {
-                        std::cerr << "Unknown waveform: " << wf_str << " (use mc_dpsk, ofdm_chirp, ofdm_cox)\n";
+                        std::cerr << "Unknown waveform: " << wf_str << " (use mc_dpsk, ofdm_chirp, ofdm_cox, ofdm_narrow)\n";
                         return 1;
                     }
                 }
@@ -2173,7 +2195,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --fading, -f        Alias for --channel moderate\n";
                 std::cout << "  --mod, -m <MOD>     Force modulation: dqpsk, d8psk, dbpsk, qpsk, bpsk\n";
                 std::cout << "  --rate, -r <RATE>   Force code rate: r1_4, r1_2, r2_3, r3_4\n";
-                std::cout << "  --waveform, -w <WF> Force waveform: mc_dpsk, ofdm_chirp, ofdm_cox\n";
+                std::cout << "  --waveform, -w <WF> Force waveform: mc_dpsk, ofdm_chirp, ofdm_cox, ofdm_narrow\n";
                 std::cout << "  --seed <N>          Random seed (default: 42)\n";
                 std::cout << "  --tx-cfo <Hz>       Inject TX CFO in channel model (default: 0)\n";
                 std::cout << "  --cfo <Hz>          Alias for --tx-cfo\n";

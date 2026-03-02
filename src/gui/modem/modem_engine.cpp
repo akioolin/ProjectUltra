@@ -94,6 +94,13 @@ ModemEngine::ModemEngine() {
 
     startupTrace("ModemEngine", "decoder-set-ping-callback-enter");
     streaming_decoder_->setPingCallback([this](float snr_db, float cfo_hz) {
+        // If narrowband chirp detected, switch control waveform for PONG/CONNECT_ACK
+        if (streaming_decoder_->getDetectedBandwidth() == BandwidthMode::NARROW) {
+            if (streaming_encoder_) {
+                streaming_encoder_->setNarrowbandControl(true);
+            }
+            LOG_MODEM(INFO, "Narrowband chirp detected, switching control waveform");
+        }
         if (ping_received_callback_) {
             ping_received_callback_(snr_db);
         }
@@ -165,9 +172,7 @@ void ModemEngine::setConfig(const ModemConfig& config) {
 
     // Propagate OFDM config to StreamingDecoder for OFDM modes
     // This allows custom FFT/carrier settings (like NVIS mode with 1024 FFT)
-    if (streaming_decoder_ &&
-        (waveform_mode_ == protocol::WaveformMode::OFDM_COX ||
-         waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP)) {
+    if (streaming_decoder_ && protocol::isOFDMMode(waveform_mode_)) {
         streaming_decoder_->setOFDMConfig(config_);
         LOG_MODEM(INFO, "setConfig: StreamingDecoder OFDM config updated (FFT=%d, carriers=%d)",
                   config_.fft_size, config_.num_carriers);
@@ -268,8 +273,7 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         LOG_MODEM(INFO, "[%s] TX: Connected+handshake -> waveform_mode_=%d",
                   log_prefix_.c_str(), static_cast<int>(tx_waveform_mode));
     }
-    bool is_ofdm = (tx_waveform_mode == protocol::WaveformMode::OFDM_CHIRP ||
-                    tx_waveform_mode == protocol::WaveformMode::OFDM_COX);
+    bool is_ofdm = protocol::isOFDMMode(tx_waveform_mode);
 
     // ========================================================================
     // 2. Determine modulation and code rate

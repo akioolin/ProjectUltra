@@ -20,6 +20,10 @@ WaveformPtr WaveformFactory::create(protocol::WaveformMode mode) {
         case protocol::WaveformMode::OFDM_CHIRP:
             return std::make_unique<OFDMChirpWaveform>();
 
+        case protocol::WaveformMode::OFDM_NARROW:
+            return std::make_unique<OFDMChirpWaveform>(
+                presets::narrowbandOFDM(), protocol::WaveformMode::OFDM_NARROW);
+
         case protocol::WaveformMode::AUTO:
             // Default to MC-DPSK for AUTO (most robust for connection)
             return std::make_unique<MCDPSKWaveform>();
@@ -54,6 +58,9 @@ WaveformPtr WaveformFactory::create(protocol::WaveformMode mode, const ModemConf
         case protocol::WaveformMode::OFDM_CHIRP:
             return std::make_unique<OFDMChirpWaveform>(config);
 
+        case protocol::WaveformMode::OFDM_NARROW:
+            return std::make_unique<OFDMChirpWaveform>(config, protocol::WaveformMode::OFDM_NARROW);
+
         default:
             return create(mode);
     }
@@ -63,11 +70,16 @@ WaveformPtr WaveformFactory::createMCDPSK(int num_carriers) {
     return std::make_unique<MCDPSKWaveform>(num_carriers);
 }
 
+WaveformPtr WaveformFactory::createNarrowbandMCDPSK() {
+    return std::make_unique<MCDPSKWaveform>(mc_dpsk_presets::narrowband());
+}
+
 std::vector<protocol::WaveformMode> WaveformFactory::getAvailableModes() {
     return {
         protocol::WaveformMode::MC_DPSK,
         protocol::WaveformMode::OFDM_CHIRP,
         protocol::WaveformMode::OFDM_COX,
+        protocol::WaveformMode::OFDM_NARROW,
     };
 }
 
@@ -76,6 +88,7 @@ bool WaveformFactory::isSupported(protocol::WaveformMode mode) {
         case protocol::WaveformMode::MC_DPSK:
         case protocol::WaveformMode::OFDM_COX:
         case protocol::WaveformMode::OFDM_CHIRP:
+        case protocol::WaveformMode::OFDM_NARROW:
         case protocol::WaveformMode::AUTO:
             return true;
 
@@ -96,6 +109,7 @@ std::string WaveformFactory::getModeName(protocol::WaveformMode mode) {
         case protocol::WaveformMode::MC_DPSK:    return "MC-DPSK";
         case protocol::WaveformMode::OFDM_COX:  return "OFDM-COX";
         case protocol::WaveformMode::OFDM_CHIRP: return "OFDM-Chirp";
+        case protocol::WaveformMode::OFDM_NARROW: return "OFDM-Narrow";
         case protocol::WaveformMode::OTFS_EQ:    return "OTFS-EQ";
         case protocol::WaveformMode::OTFS_RAW:   return "OTFS-Raw";
         case protocol::WaveformMode::MFSK:       return "MFSK";
@@ -129,6 +143,7 @@ float WaveformFactory::getMinSNR(protocol::WaveformMode mode) {
     switch (mode) {
         case protocol::WaveformMode::MC_DPSK:    return -3.0f;
         case protocol::WaveformMode::OFDM_CHIRP: return 10.0f;
+        case protocol::WaveformMode::OFDM_NARROW: return 3.0f;
         case protocol::WaveformMode::OFDM_COX:  return 17.0f;
         case protocol::WaveformMode::OTFS_EQ:    return 15.0f;
         case protocol::WaveformMode::OTFS_RAW:   return 10.0f;
@@ -142,6 +157,7 @@ float WaveformFactory::getMaxThroughput(protocol::WaveformMode mode) {
     switch (mode) {
         case protocol::WaveformMode::MC_DPSK:    return 1500.0f;   // 20 carriers, DQPSK R3/4
         case protocol::WaveformMode::OFDM_CHIRP: return 4000.0f;   // 30 carriers, D8PSK R2/3
+        case protocol::WaveformMode::OFDM_NARROW: return 230.0f;  // 21 carriers, DQPSK R1/2
         case protocol::WaveformMode::OFDM_COX:  return 8000.0f;   // 30 carriers, 32QAM R3/4
         case protocol::WaveformMode::OTFS_EQ:    return 6000.0f;
         case protocol::WaveformMode::OTFS_RAW:   return 4000.0f;

@@ -139,13 +139,40 @@ struct PilotConfig {
         return total_carriers - num_pilots;
     }
 
-    // Create pilot config for a given code rate (59 carriers)
-    // R1/4: 0 pilots, max data, LDPC handles fading
-    // R1/2, R2/3: 6 pilots every ~10 carriers for per-symbol tracking
-    // R3/4: 4 pilots every ~15 carriers for light fading/AWGN
+    // Create pilot config for a given code rate
+    // For wideband (59 carriers):
+    //   R1/4: 0 pilots, max data, LDPC handles fading
+    //   R1/2, R2/3: 6 pilots every ~10 carriers for per-symbol tracking
+    //   R3/4: 4 pilots every ~15 carriers for light fading/AWGN
+    // For narrowband (≤25 carriers):
+    //   R1/4: 0 pilots (all 21 carriers are data)
+    //   R1/2+: 3 pilots at {0, N/3, 2N/3} (18 data carriers)
     static PilotConfig forCodeRate(CodeRate rate, int num_carriers = 59) {
         PilotConfig cfg;
 
+        // Narrowband: fewer carriers need different pilot layout
+        if (num_carriers <= 25) {
+            switch (rate) {
+                case CodeRate::R1_4:
+                case CodeRate::R1_3:
+                default:
+                    // 0 pilots - all carriers data, LDPC handles fading
+                    cfg.num_pilots = 0;
+                    cfg.pilot_indices.clear();
+                    break;
+
+                case CodeRate::R1_2:
+                case CodeRate::R2_3:
+                case CodeRate::R3_4:
+                    // 3 pilots evenly spaced across narrowband carriers
+                    cfg.num_pilots = 3;
+                    cfg.pilot_indices = {0, num_carriers / 3, 2 * num_carriers / 3};
+                    break;
+            }
+            return cfg;
+        }
+
+        // Wideband (59 carriers)
         switch (rate) {
             case CodeRate::R3_4:
                 // 4 pilots for light fading/AWGN - every 15th carrier
@@ -179,6 +206,12 @@ struct PilotConfig {
         }
         return false;
     }
+};
+
+// Bandwidth mode for narrowband vs wideband operation
+enum class BandwidthMode : uint8_t {
+    WIDE = 0,    // Standard 2.8 kHz bandwidth (59 carriers)
+    NARROW = 1,  // 500 Hz narrowband (21 carriers, FFT=2048)
 };
 
 // Channel quality estimate
@@ -233,6 +266,12 @@ struct ModemConfig {
     // Scale up to match chirp/preamble levels for consistent audio output
     // Default 40x gives RMS ~0.4, matching chirp amplitude ~0.5
     float output_scale = 40.0f;
+
+    // Chirp sync parameters (wideband defaults, backward compatible)
+    // Narrowband mode overrides these to 1250-1750 Hz @ 1000ms
+    float chirp_f_start = 300.0f;       // Chirp start frequency (Hz)
+    float chirp_f_end = 2700.0f;        // Chirp end frequency (Hz)
+    float chirp_duration_ms = 500.0f;   // Chirp duration (ms)
 
     // Simulation: TX carrier frequency offset (Hz)
     // Simulates radio tuning error - shifts ALL frequencies by this amount
@@ -381,6 +420,39 @@ inline ModemConfig high_speed() {
     cfg.modulation = Modulation::DQPSK;
     cfg.code_rate = CodeRate::R3_4;            // R3/4 for good conditions
     cfg.speed_profile = SpeedProfile::TURBO;
+    return cfg;
+}
+
+// Narrowband OFDM: 500 Hz bandwidth, FFT=2048, 21 carriers
+// 7.5 dB noise bandwidth advantage over wideband (2.8 kHz)
+// For low-SNR conditions (3-10 dB) where wideband doesn't work
+inline ModemConfig narrowbandOFDM() {
+    ModemConfig cfg;
+    cfg.fft_size = 2048;                    // 23.4 Hz bin spacing
+    cfg.num_carriers = 21;                  // 492 Hz occupied bandwidth
+    cfg.sample_rate = 48000;
+    cfg.center_freq = 1500;
+    cfg.cp_mode = CyclicPrefixMode::MEDIUM; // 192 samples = 4.0ms at 2048 FFT
+    cfg.modulation = Modulation::DQPSK;     // Differential for fading
+    cfg.code_rate = CodeRate::R1_4;         // Most robust
+    cfg.use_pilots = true;
+    cfg.pilot_spacing = 10;                 // Will be adjusted by PilotConfig
+    cfg.chirp_f_start = 1250.0f;            // Narrowband chirp: 1250-1750 Hz
+    cfg.chirp_f_end = 1750.0f;
+    cfg.chirp_duration_ms = 1000.0f;        // 1000ms for processing gain
+    cfg.speed_profile = SpeedProfile::CONSERVATIVE;
+    return cfg;
+}
+
+// Narrowband MC-DPSK: 4 carriers @ 1300-1700 Hz
+// Used for PING/PONG/CONNECT handshake in narrowband sessions
+inline ModemConfig narrowbandMCDPSK() {
+    ModemConfig cfg;
+    cfg.sample_rate = 48000;
+    cfg.center_freq = 1500;
+    cfg.chirp_f_start = 1250.0f;            // Narrowband chirp
+    cfg.chirp_f_end = 1750.0f;
+    cfg.chirp_duration_ms = 1000.0f;
     return cfg;
 }
 

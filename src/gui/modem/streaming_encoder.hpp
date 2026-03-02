@@ -70,6 +70,9 @@ public:
     // Set MC-DPSK carrier count
     void setMCDPSKCarriers(int num_carriers);
 
+    // Switch control waveform to narrowband MC-DPSK (for narrowband sessions)
+    void setNarrowbandControl(bool narrowband);
+
     // ========================================================================
     // ENCODING
     // ========================================================================
@@ -162,6 +165,7 @@ private:
     // OFDM config
     ModemConfig ofdm_config_;
     int mc_dpsk_carriers_ = 8;
+    bool narrowband_control_ = false;  // Use narrowband MC-DPSK for control/handshake
 
     // Interleaving
     std::unique_ptr<ChannelInterleaver> channel_interleaver_;

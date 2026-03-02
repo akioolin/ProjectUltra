@@ -142,6 +142,25 @@ void StreamingEncoder::setMCDPSKCarriers(int num_carriers) {
     LOG_MODEM(INFO, "[%s] MC-DPSK carriers: %d", log_prefix_.c_str(), num_carriers);
 }
 
+void StreamingEncoder::setNarrowbandControl(bool narrowband) {
+    narrowband_control_ = narrowband;
+    if (narrowband) {
+        control_waveform_ = WaveformFactory::createNarrowbandMCDPSK();
+        // When in MC-DPSK mode (handshake), also switch main waveform to narrowband
+        // so CONNECT/CONNECT_ACK frames use narrowband chirp + carriers
+        if (mode_ == protocol::WaveformMode::MC_DPSK) {
+            waveform_ = WaveformFactory::createNarrowbandMCDPSK();
+        }
+        LOG_MODEM(INFO, "[%s] Control waveform: narrowband MC-DPSK (500 Hz)", log_prefix_.c_str());
+    } else {
+        control_waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_carriers_);
+        if (mode_ == protocol::WaveformMode::MC_DPSK) {
+            waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_carriers_);
+        }
+        LOG_MODEM(INFO, "[%s] Control waveform: wideband MC-DPSK (%d carriers)", log_prefix_.c_str(), mc_dpsk_carriers_);
+    }
+}
+
 // ============================================================================
 // ENCODING
 // ============================================================================
@@ -152,8 +171,7 @@ std::vector<float> StreamingEncoder::encodeFrame(const Bytes& frame_data) {
         return {};
     }
 
-    bool is_ofdm = (mode_ == protocol::WaveformMode::OFDM_CHIRP ||
-                    mode_ == protocol::WaveformMode::OFDM_COX);
+    bool is_ofdm = protocol::isOFDMMode(mode_);
     bool use_control_profile = is_ofdm && isControlFrameBytes(frame_data);
     Modulation tx_mod = use_control_profile ? Modulation::DQPSK : modulation_;
     CodeRate tx_rate = use_control_profile ? CodeRate::R1_4 : code_rate_;
@@ -195,8 +213,7 @@ std::vector<float> StreamingEncoder::encodeFrameLight(const Bytes& frame_data) {
         return {};
     }
 
-    bool is_ofdm = (mode_ == protocol::WaveformMode::OFDM_CHIRP ||
-                    mode_ == protocol::WaveformMode::OFDM_COX);
+    bool is_ofdm = protocol::isOFDMMode(mode_);
     bool use_control_profile = is_ofdm && isControlFrameBytes(frame_data);
     Modulation tx_mod = use_control_profile ? Modulation::DQPSK : modulation_;
     CodeRate tx_rate = use_control_profile ? CodeRate::R1_4 : code_rate_;
@@ -443,7 +460,11 @@ void StreamingEncoder::createWaveform() {
     switch (mode_) {
         case protocol::WaveformMode::MC_DPSK:
             startupTrace("StreamingEncoder", "create-main-waveform-mcdpsk-enter");
-            waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_carriers_);
+            if (narrowband_control_) {
+                waveform_ = WaveformFactory::createNarrowbandMCDPSK();
+            } else {
+                waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_carriers_);
+            }
             startupTrace("StreamingEncoder", "create-main-waveform-mcdpsk-exit");
             break;
 
@@ -453,6 +474,14 @@ void StreamingEncoder::createWaveform() {
             static_cast<OFDMNvisWaveform*>(waveform_.get())->configure(
                 modulation_, code_rate_);
             startupTrace("StreamingEncoder", "create-main-waveform-ofdm-cox-exit");
+            break;
+
+        case protocol::WaveformMode::OFDM_NARROW:
+            startupTrace("StreamingEncoder", "create-main-waveform-ofdm-narrow-enter");
+            waveform_ = std::make_unique<OFDMChirpWaveform>(ofdm_config_, protocol::WaveformMode::OFDM_NARROW);
+            static_cast<OFDMChirpWaveform*>(waveform_.get())->configure(
+                modulation_, code_rate_);
+            startupTrace("StreamingEncoder", "create-main-waveform-ofdm-narrow-exit");
             break;
 
         case protocol::WaveformMode::OFDM_CHIRP:
@@ -511,8 +540,7 @@ int StreamingEncoder::calculateDataCarriers() const {
 Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
     Bytes tx_data = frame_data;  // Mutable copy for header patching
 
-    bool is_ofdm = (mode_ == protocol::WaveformMode::OFDM_CHIRP ||
-                    mode_ == protocol::WaveformMode::OFDM_COX);
+    bool is_ofdm = protocol::isOFDMMode(mode_);
 
     if (!is_ofdm) {
         // MC-DPSK: Simple variable CW encoding (no frame interleaving)
