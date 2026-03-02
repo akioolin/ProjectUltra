@@ -122,6 +122,9 @@ public:
     void setPreferredMode(WaveformMode mode);
     void setModeCapabilities(uint8_t caps);
 
+    // Session-scoped narrowband override (cleared on disconnect/reset)
+    void setNarrowbandOverride(WaveformMode mode);
+
     // Forced data mode - operator can override SNR-based selection
     // Set before calling connect(). Values are sent in CONNECT frame.
     // 0xFF (AUTO) = let responder decide based on SNR

@@ -510,6 +510,16 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
         }
     }
 
+    // If narrowband chirp was detected this session, override for this connection
+    if (narrowband_override_ != WaveformMode::AUTO) {
+        uint8_t pref_bit = modeToBit(narrowband_override_);
+        if (common & pref_bit) {
+            LOG_MODEM(INFO, "Connection: Using narrowband override: %s",
+                      waveformModeToString(narrowband_override_));
+            return narrowband_override_;
+        }
+    }
+
     // If we have explicit preference, use it if remote supports it
     if (config_.preferred_mode != WaveformMode::AUTO) {
         uint8_t pref_bit = modeToBit(config_.preferred_mode);

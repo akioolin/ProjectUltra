@@ -401,6 +401,11 @@ void ProtocolEngine::setModeCapabilities(uint8_t caps) {
     connection_.setModeCapabilities(caps);
 }
 
+void ProtocolEngine::setNarrowbandOverride(WaveformMode mode) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.setNarrowbandOverride(mode);
+}
+
 void ProtocolEngine::setForcedModulation(Modulation mod) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setForcedModulation(mod);

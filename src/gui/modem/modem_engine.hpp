@@ -129,6 +129,12 @@ public:
     using PingReceivedCallback = std::function<void(float measured_snr)>;
     void setPingReceivedCallback(PingReceivedCallback callback) { ping_received_callback_ = callback; }
 
+    // Check if last detected chirp was narrowband (valid after ping callback)
+    bool isNarrowbandDetected() const;
+
+    // Switch encoder to narrowband control chirps (for initiator forcing OFDM_NARROW)
+    void setNarrowbandControl(bool narrowband);
+
     void reset();
     void clearRxBuffer();  // Clear RX audio buffer (use before TX to prevent echo)
 

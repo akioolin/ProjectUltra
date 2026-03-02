@@ -159,6 +159,10 @@ public:
     void setPreferredMode(WaveformMode mode) { config_.preferred_mode = mode; }
     void setModeCapabilities(uint8_t caps) { config_.mode_capabilities = caps; }
 
+    // Session-scoped narrowband override (cleared on disconnect/reset)
+    // Set when responder detects narrowband chirp — overrides config_.preferred_mode for this session only
+    void setNarrowbandOverride(WaveformMode mode) { narrowband_override_ = mode; }
+
     // Forced data mode - operator can override SNR-based selection
     void setForcedModulation(Modulation mod) { config_.forced_modulation = mod; }
     void setForcedCodeRate(CodeRate rate) { config_.forced_code_rate = rate; }
@@ -229,6 +233,7 @@ private:
     CodeRate pending_forced_code_rate_ = CodeRate::AUTO;
 
     // Waveform mode
+    WaveformMode narrowband_override_ = WaveformMode::AUTO;  // Session-scoped, cleared on disconnect/reset
     WaveformMode negotiated_mode_ = WaveformMode::OFDM_COX;
     uint8_t remote_capabilities_ = ModeCapabilities::OFDM_COX;
     WaveformMode remote_preferred_ = WaveformMode::OFDM_COX;

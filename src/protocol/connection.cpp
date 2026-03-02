@@ -1041,6 +1041,7 @@ void Connection::enterDisconnected(const std::string& reason) {
     state_ = ConnectionState::DISCONNECTED;
     is_initiator_ = false;
     handshake_confirmed_ = false;
+    narrowband_override_ = WaveformMode::AUTO;  // Clear session-scoped narrowband override
     std::string old_remote = remote_call_;
     remote_call_.clear();
     pending_remote_call_.clear();
@@ -1160,6 +1161,7 @@ void Connection::reset() {
     timeout_remaining_ms_ = 0;
     connect_retry_count_ = 0;
     connected_time_ms_ = 0;
+    narrowband_override_ = WaveformMode::AUTO;  // Clear session-scoped narrowband override
     negotiated_mode_ = WaveformMode::OFDM_COX;
     remote_capabilities_ = ModeCapabilities::OFDM_COX;
     remote_preferred_ = WaveformMode::OFDM_COX;

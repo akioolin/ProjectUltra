@@ -616,6 +616,19 @@ std::vector<std::complex<float>> ModemEngine::getConstellationSymbols() const {
     return {};
 }
 
+bool ModemEngine::isNarrowbandDetected() const {
+    if (streaming_decoder_) {
+        return streaming_decoder_->getDetectedBandwidth() == BandwidthMode::NARROW;
+    }
+    return false;
+}
+
+void ModemEngine::setNarrowbandControl(bool narrowband) {
+    if (streaming_encoder_) {
+        streaming_encoder_->setNarrowbandControl(narrowband);
+    }
+}
+
 void ModemEngine::reset() {
     std::lock_guard<std::mutex> lock(rx_mutex_);
     std::queue<Bytes> empty;

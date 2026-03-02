@@ -592,11 +592,13 @@ private:
         decoder_->setPingCallback([this](float snr_db, float cfo_hz) {
             last_cfo_hz_ = cfo_hz;
             // If narrowband chirp was detected, switch control waveform to narrowband
+            // and set session-scoped override so negotiateMode() picks OFDM_NARROW
             if (decoder_->getDetectedBandwidth() == BandwidthMode::NARROW) {
                 if (encoder_) {
                     encoder_->setNarrowbandControl(true);
                 }
-                LOG_MODEM(INFO, "[%s] Narrowband chirp detected, switching control waveform", callsign_.c_str());
+                protocol_.setNarrowbandOverride(WaveformMode::OFDM_NARROW);
+                LOG_MODEM(INFO, "[%s] Narrowband chirp detected, switching control waveform + narrowband override", callsign_.c_str());
             }
             protocol_.onPingReceived();
         });

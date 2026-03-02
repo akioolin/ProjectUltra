@@ -484,6 +484,10 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         } else {
             guiLog("MODEM: Detected PING/PONG (SNR=%.1f dB)", display_snr);
         }
+        // If narrowband chirp detected, set session-scoped override so negotiateMode() picks OFDM_NARROW
+        if (modem_.isNarrowbandDetected()) {
+            protocol_.setNarrowbandOverride(protocol::WaveformMode::OFDM_NARROW);
+        }
         protocol_.onPingReceived();
     });
     ultra::gui::startupTrace("App", "protocol-callbacks-mid6");
@@ -751,6 +755,8 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         protocol_.setPreferredMode(static_cast<protocol::WaveformMode>(waveform));
         protocol_.setForcedModulation(static_cast<Modulation>(modulation));
         protocol_.setForcedCodeRate(static_cast<CodeRate>(code_rate));
+        // Switch encoder chirps to narrowband when OFDM_NARROW is forced
+        modem_.setNarrowbandControl(waveform == static_cast<uint8_t>(protocol::WaveformMode::OFDM_NARROW));
         settings_.save();
     });
     ultra::gui::startupTrace("App", "settings-callbacks-exit");
@@ -760,6 +766,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     protocol_.setPreferredMode(static_cast<protocol::WaveformMode>(settings_.forced_waveform));
     protocol_.setForcedModulation(static_cast<Modulation>(settings_.forced_modulation));
     protocol_.setForcedCodeRate(static_cast<CodeRate>(settings_.forced_code_rate));
+    modem_.setNarrowbandControl(settings_.forced_waveform == static_cast<uint8_t>(protocol::WaveformMode::OFDM_NARROW));
     ultra::gui::startupTrace("App", "apply-expert-exit");
 
     // Apply initial filter settings from loaded config
@@ -1065,6 +1072,9 @@ void App::initVirtualStation() {
     // Wire up virtual modem ping detection to virtual protocol
     virtual_modem_->setPingReceivedCallback([this](float snr) {
         guiLog("SIM: Virtual modem detected PING/PONG (SNR=%.1f dB)", snr);
+        if (virtual_modem_->isNarrowbandDetected()) {
+            virtual_protocol_.setNarrowbandOverride(protocol::WaveformMode::OFDM_NARROW);
+        }
         virtual_protocol_.onPingReceived();
     });
 
