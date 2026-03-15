@@ -113,21 +113,22 @@
 | OFDM_NARROW | AWGN | 8+ | 100% |
 | OFDM_NARROW | Good fading | 8 | 100% data, 90%+ ACK |
 
-**Current state (2026-03-01):**
+**Current state (2026-03-15):**
 - MC-DPSK: WORKING - 100% at SNR=10 with moderate fading
 - OFDM_CHIRP DQPSK R1/4 AWGN: WORKING - 100% at SNR=15 and SNR=20 (0 retries)
 - OFDM_CHIRP DQPSK R1/4 Good fading SNR=15: WORKING - 100% (0 retries, 0 failures)
 - OFDM_CHIRP DQPSK R1/4 Good fading SNR=10: WORKING - 30/30 seeds PASS (avg 1.5 retx, 100% delivery)
+- OFDM_CHIRP DQPSK R1/4 Moderate fading SNR=15: WORKING - 5/5 seeds PASS (avg 1.4 retx, 100% delivery)
 - OFDM_CHIRP DQPSK R1/2 AWGN: WORKING - 100% at SNR=15 and SNR=20 (0 retries)
 - OFDM_CHIRP DQPSK R1/2 Good fading: WORKING - 100% at SNR=15 (5/5 seeds, 0 retries)
+- OFDM_CHIRP DQPSK R1/2 Moderate fading SNR=15: WORKING - 5/5 seeds PASS (avg 2.4 retx, 100% delivery)
 - OFDM_CHIRP DQPSK R2/3 AWGN: WORKING - 100% at SNR=20 (0 retries)
-- OFDM_CHIRP DQPSK R2/3 Good fading: WORKING - 100% at SNR=20 (30/30 seeds, 0 retries)
+- OFDM_CHIRP DQPSK R2/3 Good fading SNR=20: WORKING - 30/30 seeds PASS, 0 retransmissions
+- OFDM_CHIRP DQPSK R2/3 Good fading SNR=15: WORKING - 10/10 seeds PASS (avg 1.5 retx, 100% delivery)
 - OFDM_CHIRP QPSK R1/2 AWGN: WORKING - 100% at SNR=20 (0 retries)
 - OFDM_CHIRP QPSK R1/2 Good fading: WORKING - avg 95% frame success at SNR=20 (30-seed survey, all messages delivered via ARQ)
 - OFDM_CHIRP QPSK R2/3 AWGN: WORKING - 100% at SNR=20 (0 retries)
 - OFDM_CHIRP QPSK R2/3 Good fading: WORKING - 5/5 seeds PASS (2 seeds had retx, 3 clean)
-- OFDM_CHIRP DQPSK R1/2 Moderate fading: WORKING - 100% at SNR=15 (6/6 seeds, 0-1 retx, 100% delivery)
-- OFDM_CHIRP Moderate fading: WORKING - R1/4 89% CW success (57/64), 100% message delivery via ARQ
 - OFDM_CHIRP DQPSK R3/4 AWGN: WORKING - 100% at SNR=20 (10/10 seeds, 0 retries)
 - OFDM_CHIRP DQPSK R3/4 Good fading: NOT RECOMMENDED (23 retx / 5 seeds — AWGN only)
 - 1-CW ACK frames: WORKING - control frames use 1 CW (3x faster ACK)
@@ -138,11 +139,11 @@
 - OTFS: EXPERIMENTAL - See OTFS Status section below
 - cli_simulator: FULLY WORKING - all phases pass on AWGN and fading
 
-**Auto rate selection ladder (2026-02-11):**
+**Auto rate selection ladder (2026-03-15, updated with CPE for differential):**
 | Condition | Auto rate | Payload/frame | Throughput |
 |-----------|-----------|---------------|------------|
 | SNR >= 20, AWGN (fading < 0.15) | **R3/4** | 243 bytes | ~3900 bps |
-| SNR >= 20, good fading (< 0.65) | **R2/3** | 197 bytes | ~3200 bps |
+| SNR >= 15, good fading (< 0.65) | **R2/3** | 197 bytes | ~3200 bps |
 | SNR >= 15, good/moderate fading (< 1.10) | **R1/2** | 141 bytes | ~2300 bps |
 | Everything else | **R1/4** | 62 bytes | ~1150 bps |
 
@@ -164,7 +165,7 @@
 - OFDM internal fading thresholds (LLR scaling, two-pass) NOT changed — they use
   pilot-variance-based `last_fading_index` on a separate scale
 
-**Fading channel notes (2026-02-03):**
+**Fading channel notes (2026-03-15):**
 - Fading index now combines freq_cv + temporal_cv for better Good vs Moderate separation
 - OFDM internal uses separate `last_fading_index` from pilot variance (~0.15-0.50)
 - LLR scaling (1 + 10×fading²) applied when OFDM fading_index > 0.15 to prevent overconfident wrong bits
@@ -174,8 +175,13 @@
 - CFO drift limited to ±1 Hz per frame when connected (multipath can cause false CFO readings)
 - **CFO feedback loop** (2026-02-03): Pilot-corrected CFO propagates back to StreamingDecoder's cached value
 - **LTS residual CFO** (2026-02-03): Detects and corrects chirp CFO errors >0.3 Hz from training symbols
-- Good fading: **100% CW success** (fixed from ~88% by CFO feedback + LTS residual correction)
-- Moderate fading: ~89% CW success (up from ~83%), 100% message delivery via ARQ
+- **CPE correction for differential modes** (2026-03-15): Per-symbol common phase error tracking
+  now enabled for DQPSK/D8PSK (was coherent-only). Estimates phase drift from pilots each symbol,
+  clamps to ±15° for differential (prevents overcorrection from noisy fading pilots).
+  This keeps channel_estimate phase tracking the actual channel, improving MMSE equalization.
+  Safe for DQPSK: CPE cancels in diff = eq[n] × conj(eq[n-1]) since both use same corrected H.
+- Good fading: **100% CW success** at R2/3 SNR=15 (10/10 seeds, enabled by CPE correction)
+- Moderate fading: R1/4 avg 1.4 retx (5/5 seeds), R1/2 avg 2.4 retx (5/5 seeds) — up from ~89% CW
 
 **OTFS Status (2026-01-31) - EXPERIMENTAL:**
 - **AWGN:** 100% at SNR=20 with QPSK R1/2 - WORKS
@@ -196,7 +202,7 @@
 
 **Recommendation:** Use OFDM_CHIRP with DQPSK. Rate selection is automatic via `selectOFDMCodeRate()`:
 - R3/4 for AWGN only (SNR≥20, fading<0.15) — ~3.4× throughput vs R1/4
-- R2/3 for good fading or better (SNR≥20) — ~2.8× throughput vs R1/4
+- R2/3 for good fading or better (SNR≥15) — ~2.8× throughput vs R1/4
 - R1/2 for good/moderate fading (SNR≥15) — ~2× throughput vs R1/4
 - R1/4 for heavy fading or lower SNR — robust but slower
 OTFS is parked - would need significant research effort to implement proper DD-domain equalization.

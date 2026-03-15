@@ -711,11 +711,17 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     }
     h_sum *= carrier_phase_correction;
 
-    // CPE (Common Phase Error) correction for coherent modes.
+    // CPE (Common Phase Error) correction for ALL modes (coherent and differential).
     // Estimate average phase drift from pilot LS vs current H, apply to all carriers.
     // This tracks residual CFO and slow oscillator drift without modifying freq_offset_hz.
     // Standard approach used in WiFi 802.11a/g/n receivers.
-    if (!is_differential) {
+    //
+    // For differential modes (DQPSK/D8PSK): CPE keeps channel_estimate phase tracking
+    // the actual channel, improving MMSE equalization quality. The differential decoding
+    // is unaffected because both eq[n] and eq[n-1] use CPE-corrected H, so the common
+    // phase cancels in diff = eq[n] * conj(eq[n-1]). The residual (CPE change between
+    // consecutive symbols) is small (~5° at 0.5 Hz Doppler) — well within DQPSK's 45° margin.
+    {
         Complex cpe_sum(0, 0);
         float cpe_weight_sum = 0.0f;
         for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
@@ -734,6 +740,17 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
         }
         if (cpe_weight_sum > 0.01f) {
             float cpe_phase = std::arg(cpe_sum);
+
+            // For differential modes, clamp CPE to ±15° per symbol to prevent
+            // overcorrection from noisy pilot estimates on deep fading.
+            // At 6 pilots, phase estimation noise is ~4° at SNR=15; 15° gives ~3.5σ margin.
+            // This still tracks up to ~560°/s of phase drift (15° × 37.5 sym/s),
+            // covering Doppler up to ~1.5 Hz.
+            if (is_differential) {
+                constexpr float MAX_DIFF_CPE_RAD = 0.262f;  // ~15 degrees
+                cpe_phase = std::max(-MAX_DIFF_CPE_RAD, std::min(MAX_DIFF_CPE_RAD, cpe_phase));
+            }
+
             if (std::abs(cpe_phase) > 0.001f) {  // Skip if negligible
                 Complex cpe_correction = std::exp(Complex(0.0f, cpe_phase));
                 // Apply CPE to ALL carrier H estimates (pilot + data)
@@ -745,7 +762,8 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
                 }
                 static int cpe_log_count = 0;
                 if (cpe_log_count < 10) {
-                    LOG_DEMOD(DEBUG, "CPE correction: %.2f° (from %zu pilots)",
+                    LOG_DEMOD(DEBUG, "CPE correction%s: %.2f° (from %zu pilots)",
+                              is_differential ? " [diff]" : "",
                               cpe_phase * 180.0f / M_PI, pilot_carrier_indices.size());
                     cpe_log_count++;
                 }

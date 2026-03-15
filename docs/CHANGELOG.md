@@ -10,6 +10,39 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-03-15: CPE correction for differential modes — higher throughput on fading
+
+**What was broken:**
+DQPSK/D8PSK modes had no per-symbol phase tracking. Channel estimate phase was frozen from
+LTS training symbols. On fading channels, channel phase drifts mid-frame (~5°/symbol at 0.5 Hz
+Doppler), degrading MMSE equalization quality and causing ~89% CW success on moderate fading.
+R2/3 required SNR≥20 even on good fading because the stale phase caused too many CW failures.
+
+**What was changed:**
+- `src/ofdm/channel_equalizer.cpp`: Removed `if (!is_differential)` gate on CPE correction block.
+  Now estimates Common Phase Error from pilot LS vs channel_estimate per symbol for ALL modes.
+  For differential modes, CPE is clamped to ±15° per symbol to prevent overcorrection from noisy
+  fading pilots (6 pilots, ~4° estimation noise at SNR=15).
+- `src/protocol/waveform_selection.hpp`: Lowered R2/3 SNR threshold from 20→15 for good fading.
+  Updated bootstrap cap from SNR≥24 to SNR≥18 for R2/3.
+
+**Why it works:**
+CPE correction rotates the entire channel_estimate by the common phase drift estimated from pilots
+each symbol. DQPSK differential decoding is unaffected because both eq[n] and eq[n-1] use the
+same CPE-corrected H — the common phase cancels in diff = eq[n] × conj(eq[n-1]). The residual
+(CPE change between consecutive symbols) is ~5° at 0.5 Hz Doppler, well within DQPSK's 45° margin.
+The real benefit is better MMSE equalization (H tracks actual channel phase → less noise amplification).
+
+**Test verification:**
+- `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test` → PASS, 0 retx
+- `./build/cli_simulator --snr 15 --fading good --rate r2_3 --test` → 10/10 seeds PASS, avg 1.5 retx
+- `./build/cli_simulator --snr 15 --fading moderate --rate r1_4 --test` → 5/5 seeds PASS, avg 1.4 retx
+- `./build/cli_simulator --snr 15 --fading moderate --rate r1_2 --test` → 5/5 seeds PASS, avg 2.4 retx
+- `./build/cli_simulator --snr 20 --fading good --rate r2_3 --test` → PASS, 0 retx (no regression)
+- `./build/cli_simulator --snr 15 --rate r1_4 --test` → PASS, 0 retx (AWGN no regression)
+
+---
+
 ## 2026-03-01: Add OFDM_NARROW 500 Hz narrowband mode
 
 **What was added:**
