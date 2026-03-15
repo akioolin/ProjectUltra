@@ -1,33 +1,31 @@
 #include "ultra/fec.hpp"
+#include "ldpc_802_11n.hpp"
 #include <stdexcept>
 #include <bitset>
 #include <random>
-#include <algorithm>  // For std::copy, std::swap
+#include <algorithm>
 
 namespace ultra {
 
 /**
- * LDPC Code Implementation
+ * LDPC Encoder
  *
- * Using quasi-cyclic LDPC codes similar to those in IEEE 802.11n/ac
- * These have efficient encoder/decoder implementations and excellent performance.
+ * For R1/2, R2/3, R3/4, R5/6: uses IEEE 802.11n standard base matrices (Z=27, n=648).
+ * These have optimized cycle structure (girth >= 6) for excellent BP decoding.
  *
- * Code structure:
- * - Block length: 648 bits (81 bytes) - good for HF frame sizes
- * - Code rates: 1/2, 2/3, 3/4, 5/6
- * - Designed for iterative belief-propagation decoding
+ * For R1/4: uses a random PRNG-based construction (no 802.11n matrix exists for this rate).
+ * R1/4 has enough redundancy that the random code works adequately.
  *
- * H matrix structure: H = [H_data | I]
- * - H_data: m x k sparse matrix with irregular LDPC structure
- * - I: m x m identity matrix for easy systematic encoding
- * - This allows: parity = H_data * info_bits (mod 2)
+ * Code structure: H = [A | B], systematic encoding: parity = B^{-1} * A * info (mod 2)
+ * For standard rates, B^{-1}*A is precomputed at construction via Gaussian elimination.
+ * For R1/4 (H = [H_data | I]), parity = H_data * info directly.
  */
 
 namespace {
 
-constexpr int SUBBLOCK_SIZE = 27;  // Circulant size
-constexpr int BLOCK_COLS = 24;     // Number of column blocks
-constexpr int BLOCK_LENGTH = SUBBLOCK_SIZE * BLOCK_COLS;  // 648 bits
+constexpr int SUBBLOCK_SIZE = 27;
+constexpr int BLOCK_COLS = 24;
+constexpr int BLOCK_LENGTH = SUBBLOCK_SIZE * BLOCK_COLS;
 
 struct CodeParams {
     int info_bits;
@@ -38,7 +36,7 @@ struct CodeParams {
 CodeParams getCodeParams(CodeRate rate) {
     switch (rate) {
         case CodeRate::R1_4:
-            return {162, 486, 486};  // Most robust - for very poor conditions
+            return {162, 486, 486};
         case CodeRate::R1_2:
             return {324, 324, 324};
         case CodeRate::R2_3:
@@ -58,42 +56,45 @@ struct LDPCEncoder::Impl {
     CodeRate rate;
     CodeParams params;
 
-    // Sparse parity check matrix representation
-    // For each check node: list of connected variable nodes (info bits only)
-    // H = [H_data | I], so we only store H_data connections
-    std::vector<std::vector<int>> H_data_rows;
+    // Encoding matrix: for each parity bit i, encoding_rows[i] lists which
+    // info bit indices to XOR together to produce parity bit i.
+    //
+    // For 802.11n codes: derived from B^{-1} * A via Gaussian elimination
+    // For random codes (R1/4): same as H_data rows (since H = [H_data | I])
+    std::vector<std::vector<int>> encoding_rows;
 
     Impl(CodeRate r) : rate(r), params(getCodeParams(r)) {
         buildMatrix();
     }
 
     void buildMatrix() {
-        // Build H_data: m x k sparse matrix
-        // Using PEG-like construction for good distance properties
-
         int k = params.info_bits;
         int m = params.parity_bits;
 
+        // Try 802.11n standard matrix first
+        const int* base_data = ldpc_802_11n::getBaseData(rate);
+        if (base_data) {
+            // Use IEEE 802.11n standard code
+            auto expanded = ldpc_802_11n::expand(rate);
+            encoding_rows = std::move(expanded.enc_rows);
+            return;
+        }
+
+        // Fallback: random PRNG-based construction for R1/4
+        // This produces H = [H_data | I] where encoding_rows = H_data rows
+        encoding_rows.clear();
+        encoding_rows.resize(m);
+
         std::mt19937 rng(0x12345678 + static_cast<int>(rate));
 
-        H_data_rows.clear();
-        H_data_rows.resize(m);
-
-        // For low-rate codes (k < m), we need higher variable degree
-        // to ensure each check has enough connections for good decoding
-        // Target check degree ~3-4 for all rates
         int target_check_degree = 4;
         int target_var_degree = std::max(3, (target_check_degree * m) / k);
-
-        // Cap variable degree to avoid overly dense matrix
         target_var_degree = std::min(target_var_degree, m / 2);
 
-        // Track how many connections each check has
         std::vector<int> check_degrees(m, 0);
         int max_check_degree = target_check_degree + 2;
 
         for (int j = 0; j < k; ++j) {
-            // Find checks with room for more connections
             std::vector<int> available_checks;
             for (int i = 0; i < m; ++i) {
                 if (check_degrees[i] < max_check_degree) {
@@ -101,10 +102,7 @@ struct LDPCEncoder::Impl {
                 }
             }
 
-            // Connect this info bit to target_var_degree checks
-            // NOTE: Using Fisher-Yates shuffle with direct RNG calls instead of std::shuffle
-            // because std::shuffle is implementation-defined and produces different results
-            // on different compilers (GCC vs Apple Clang), breaking cross-platform compatibility
+            // Fisher-Yates shuffle (deterministic across platforms)
             for (size_t i = available_checks.size(); i > 1; --i) {
                 size_t j = rng() % i;
                 std::swap(available_checks[i - 1], available_checks[j]);
@@ -113,75 +111,18 @@ struct LDPCEncoder::Impl {
 
             for (int d = 0; d < connections; ++d) {
                 int check = available_checks[d];
-                H_data_rows[check].push_back(j);
+                encoding_rows[check].push_back(j);
                 check_degrees[check]++;
             }
         }
 
         // Ensure every check has at least one connection
         for (int i = 0; i < m; ++i) {
-            if (H_data_rows[i].empty()) {
-                // Connect to a random info bit
+            if (encoding_rows[i].empty()) {
                 int j = rng() % k;
-                H_data_rows[i].push_back(j);
+                encoding_rows[i].push_back(j);
             }
         }
-    }
-
-    Bytes encodeSystematic(ByteSpan data) {
-        // Systematic encoding: output = [info | parity]
-        // With H = [H_data | I], we have:
-        // H * [info | parity]^T = 0
-        // H_data * info + I * parity = 0
-        // parity = H_data * info (mod 2)
-
-        int k = params.info_bits;
-        int m = params.parity_bits;
-        int n = k + m;
-
-        // Convert input bytes to bits
-        std::vector<uint8_t> info_bits(k, 0);
-        size_t bit_idx = 0;
-        for (size_t i = 0; i < data.size() && bit_idx < static_cast<size_t>(k); ++i) {
-            for (int b = 7; b >= 0 && bit_idx < static_cast<size_t>(k); --b) {
-                info_bits[bit_idx++] = (data[i] >> b) & 1;
-            }
-        }
-
-        // Calculate parity bits: parity[i] = XOR of info bits connected to check i
-        std::vector<uint8_t> parity(m, 0);
-        for (int i = 0; i < m; ++i) {
-            uint8_t sum = 0;
-            for (int j : H_data_rows[i]) {
-                sum ^= info_bits[j];
-            }
-            parity[i] = sum;
-        }
-
-        // Combine info + parity into codeword
-        std::vector<uint8_t> codeword(n);
-        std::copy(info_bits.begin(), info_bits.end(), codeword.begin());
-        std::copy(parity.begin(), parity.end(), codeword.begin() + k);
-
-        // Convert bits to bytes
-        Bytes output;
-        output.reserve((n + 7) / 8);
-        uint8_t byte = 0;
-        int bit_count = 0;
-        for (uint8_t bit : codeword) {
-            byte = (byte << 1) | bit;
-            ++bit_count;
-            if (bit_count == 8) {
-                output.push_back(byte);
-                byte = 0;
-                bit_count = 0;
-            }
-        }
-        if (bit_count > 0) {
-            output.push_back(byte << (8 - bit_count));
-        }
-
-        return output;
     }
 };
 
@@ -218,12 +159,12 @@ Bytes LDPCEncoder::encode(ByteSpan data) {
             info_bits[j] = all_bits[bit_offset + j];
         }
 
-        // Calculate parity bits: parity[i] = XOR of info bits connected to check i
+        // Calculate parity bits using the encoding matrix
         int m = impl_->params.parity_bits;
         std::vector<uint8_t> parity(m, 0);
         for (int i = 0; i < m; ++i) {
             uint8_t sum = 0;
-            for (int j : impl_->H_data_rows[i]) {
+            for (int j : impl_->encoding_rows[i]) {
                 sum ^= info_bits[j];
             }
             parity[i] = sum;

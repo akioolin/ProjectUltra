@@ -1,4 +1,5 @@
 #include "ultra/fec.hpp"
+#include "ldpc_802_11n.hpp"
 #include <cmath>
 #include <algorithm>
 #include <limits>
@@ -21,7 +22,7 @@ struct CodeParams {
 CodeParams getCodeParams(CodeRate rate) {
     switch (rate) {
         case CodeRate::R1_4:
-            return {162, 486, 486};  // Most robust - for very poor conditions
+            return {162, 486, 486};
         case CodeRate::R1_2:
             return {324, 324, 324};
         case CodeRate::R2_3:
@@ -45,7 +46,7 @@ struct LDPCDecoder::Impl {
     bool last_success = false;
     int last_iters = 0;
 
-    // Full H matrix representation: H = [H_data | I]
+    // Full H matrix representation
     // H_rows[i] contains all variable node indices connected to check i
     std::vector<std::vector<int>> H_rows;
 
@@ -53,82 +54,87 @@ struct LDPCDecoder::Impl {
     std::vector<std::vector<int>> H_cols;
 
     // Message passing buffers
-    std::vector<std::vector<float>> var_to_check;  // var_to_check[i][e] = message from var H_rows[i][e] to check i
-    std::vector<std::vector<float>> check_to_var;  // check_to_var[i][e] = message from check i to var H_rows[i][e]
-    std::vector<float> llr_in;        // Channel LLRs
-    std::vector<float> llr_total;     // Total LLRs
+    std::vector<std::vector<float>> var_to_check;
+    std::vector<std::vector<float>> check_to_var;
+    std::vector<float> llr_in;
+    std::vector<float> llr_total;
 
     Impl(CodeRate r) : rate(r), params(getCodeParams(r)) {
         buildMatrix();
     }
 
     void buildMatrix() {
-        // Build H = [H_data | I]
-        // Must match encoder exactly!
-
         int k = params.info_bits;
         int m = params.parity_bits;
         int n = k + m;
 
-        std::mt19937 rng(0x12345678 + static_cast<int>(rate));
+        // Try 802.11n standard matrix first
+        const int* base_data = ldpc_802_11n::getBaseData(rate);
+        if (base_data) {
+            // Use IEEE 802.11n standard code
+            // The expanded H matrix has optimized cycle structure (girth >= 6)
+            // which dramatically reduces false convergence in BP decoding
+            auto expanded = ldpc_802_11n::expand(rate);
+            H_rows = std::move(expanded.H_rows);
+            H_cols = std::move(expanded.H_cols);
+        } else {
+            // Fallback: random PRNG-based construction for R1/4
+            // Produces H = [H_data | I]
+            std::mt19937 rng(0x12345678 + static_cast<int>(rate));
 
-        H_rows.clear();
-        H_rows.resize(m);
-        H_cols.clear();
-        H_cols.resize(n);
+            H_rows.clear();
+            H_rows.resize(m);
+            H_cols.clear();
+            H_cols.resize(n);
 
-        // Build H_data part (same algorithm as encoder)
-        // For low-rate codes (k < m), we need higher variable degree
-        // to ensure each check has enough connections for good decoding
-        int target_check_degree = 4;
-        int target_var_degree = std::max(3, (target_check_degree * m) / k);
-        target_var_degree = std::min(target_var_degree, m / 2);
+            int target_check_degree = 4;
+            int target_var_degree = std::max(3, (target_check_degree * m) / k);
+            target_var_degree = std::min(target_var_degree, m / 2);
 
-        std::vector<int> check_degrees(m, 0);
-        int max_check_degree = target_check_degree + 2;
+            std::vector<int> check_degrees(m, 0);
+            int max_check_degree = target_check_degree + 2;
 
-        for (int j = 0; j < k; ++j) {
-            std::vector<int> available_checks;
-            for (int i = 0; i < m; ++i) {
-                if (check_degrees[i] < max_check_degree) {
-                    available_checks.push_back(i);
+            for (int j = 0; j < k; ++j) {
+                std::vector<int> available_checks;
+                for (int i = 0; i < m; ++i) {
+                    if (check_degrees[i] < max_check_degree) {
+                        available_checks.push_back(i);
+                    }
+                }
+
+                // Fisher-Yates shuffle (deterministic across platforms)
+                for (size_t i = available_checks.size(); i > 1; --i) {
+                    size_t j = rng() % i;
+                    std::swap(available_checks[i - 1], available_checks[j]);
+                }
+                int connections = std::min(target_var_degree, static_cast<int>(available_checks.size()));
+
+                for (int d = 0; d < connections; ++d) {
+                    int check = available_checks[d];
+                    H_rows[check].push_back(j);
+                    H_cols[j].push_back(check);
+                    check_degrees[check]++;
                 }
             }
 
-            // NOTE: Using Fisher-Yates shuffle with direct RNG calls instead of std::shuffle
-            // because std::shuffle is implementation-defined and produces different results
-            // on different compilers (GCC vs Apple Clang), breaking cross-platform compatibility
-            for (size_t i = available_checks.size(); i > 1; --i) {
-                size_t j = rng() % i;
-                std::swap(available_checks[i - 1], available_checks[j]);
+            // Ensure every check has at least one info bit connection
+            for (int i = 0; i < m; ++i) {
+                if (H_rows[i].empty()) {
+                    int j = rng() % k;
+                    H_rows[i].push_back(j);
+                    H_cols[j].push_back(i);
+                }
             }
-            int connections = std::min(target_var_degree, static_cast<int>(available_checks.size()));
 
-            for (int d = 0; d < connections; ++d) {
-                int check = available_checks[d];
-                H_rows[check].push_back(j);
-                H_cols[j].push_back(check);
-                check_degrees[check]++;
-            }
-        }
-
-        // Ensure every check has at least one info bit connection
-        for (int i = 0; i < m; ++i) {
-            if (H_rows[i].empty()) {
-                int j = rng() % k;
-                H_rows[i].push_back(j);
-                H_cols[j].push_back(i);
+            // Add identity matrix part: parity bit (k+i) connects to check i
+            for (int i = 0; i < m; ++i) {
+                int parity_idx = k + i;
+                H_rows[i].push_back(parity_idx);
+                H_cols[parity_idx].push_back(i);
             }
         }
 
-        // Add identity matrix part: parity bit (k+i) connects to check i
-        for (int i = 0; i < m; ++i) {
-            int parity_idx = k + i;
-            H_rows[i].push_back(parity_idx);
-            H_cols[parity_idx].push_back(i);
-        }
-
-        // Allocate message buffers
+        // Allocate message buffers (works for both code types)
         var_to_check.resize(m);
         check_to_var.resize(m);
         for (int i = 0; i < m; ++i) {
@@ -138,7 +144,6 @@ struct LDPCDecoder::Impl {
     }
 
     bool checkParity(const std::vector<uint8_t>& bits) {
-        // Check if H * bits = 0
         for (size_t i = 0; i < H_rows.size(); ++i) {
             uint8_t sum = 0;
             for (int j : H_rows[i]) {
@@ -152,7 +157,6 @@ struct LDPCDecoder::Impl {
     }
 
     Bytes decodeBP(std::span<const float> llrs) {
-        // Belief Propagation (Min-Sum) decoding
         int n = params.info_bits + params.parity_bits;
         int k = params.info_bits;
         int m = params.parity_bits;
@@ -184,7 +188,6 @@ struct LDPCDecoder::Impl {
                 size_t degree = row.size();
 
                 for (size_t e = 0; e < degree; ++e) {
-                    // Compute product of signs and minimum of magnitudes, excluding edge e
                     float sign = 1.0f;
                     float min_abs = std::numeric_limits<float>::max();
 
@@ -197,14 +200,12 @@ struct LDPCDecoder::Impl {
                         }
                     }
 
-                    // Min-sum with scaling factor (0.75 improves performance)
                     check_to_var[i][e] = sign * min_abs * min_sum_factor;
                 }
             }
 
             // Variable-to-check messages and total LLRs
-            // First, compute total LLR at each variable node
-            llr_total = llr_in;  // Start with channel LLR
+            llr_total = llr_in;
 
             for (int i = 0; i < m; ++i) {
                 for (size_t e = 0; e < H_rows[i].size(); ++e) {
@@ -213,13 +214,11 @@ struct LDPCDecoder::Impl {
                 }
             }
 
-            // Update var-to-check messages (total LLR minus incoming from that check)
+            // Update var-to-check messages
             for (int i = 0; i < m; ++i) {
                 for (size_t e = 0; e < H_rows[i].size(); ++e) {
                     int j = H_rows[i][e];
                     var_to_check[i][e] = llr_total[j] - check_to_var[i][e];
-
-                    // Clamp to avoid numerical issues
                     var_to_check[i][e] = std::max(-50.0f, std::min(50.0f, var_to_check[i][e]));
                 }
             }
@@ -266,14 +265,12 @@ LDPCDecoder::LDPCDecoder(CodeRate rate)
 LDPCDecoder::~LDPCDecoder() = default;
 
 Bytes LDPCDecoder::decode(ByteSpan coded_data) {
-    // Convert bytes to LLRs (+value for 0, -value for 1)
     std::vector<float> llrs;
     llrs.reserve(coded_data.size() * 8);
 
     for (uint8_t byte : coded_data) {
         for (int b = 7; b >= 0; --b) {
             uint8_t bit = (byte >> b) & 1;
-            // Use moderate LLR magnitude for hard decisions
             llrs.push_back(bit ? -6.0f : 6.0f);
         }
     }
@@ -282,34 +279,29 @@ Bytes LDPCDecoder::decode(ByteSpan coded_data) {
 }
 
 Bytes LDPCDecoder::decodeSoft(std::span<const float> llrs) {
-    // Safety check for empty input
     if (llrs.empty()) {
         impl_->last_success = false;
         return {};
     }
 
-    // Handle multi-block decoding
-    // IMPORTANT: We work at bit-level to avoid padding errors at block boundaries
-    // when k is not a multiple of 8 (e.g., k=486 bits = 60.75 bytes)
-    int n = impl_->params.info_bits + impl_->params.parity_bits;  // bits per codeword
-    int k = impl_->params.info_bits;  // info bits per block
+    int n = impl_->params.info_bits + impl_->params.parity_bits;
+    int k = impl_->params.info_bits;
 
     if (llrs.size() <= static_cast<size_t>(n)) {
-        // Single block - use existing function
         return impl_->decodeBP(llrs);
     }
 
     // Multi-block: decode each n-bit codeword and collect decoded BITS (not bytes)
-    // This avoids introducing padding zeros at each block boundary
     std::vector<uint8_t> all_decoded_bits;
     size_t offset = 0;
-    impl_->last_success = true;  // Will be set false if any block fails
+    impl_->last_success = true;
 
     while (offset + n <= llrs.size()) {
         std::span<const float> block_llrs(llrs.data() + offset, n);
 
-        // Decode this block using BP algorithm
-        // But instead of converting to bytes, we extract the k decoded bits directly
+        int m = impl_->params.parity_bits;
+
+        // Initialize channel LLRs
         impl_->llr_in.assign(n, 0);
         impl_->llr_total.assign(n, 0);
 
@@ -319,7 +311,6 @@ Bytes LDPCDecoder::decodeSoft(std::span<const float> llrs) {
         }
 
         // Initialize variable-to-check messages
-        int m = impl_->params.parity_bits;
         for (int i = 0; i < m; ++i) {
             for (size_t e = 0; e < impl_->H_rows[i].size(); ++e) {
                 int j = impl_->H_rows[i][e];
@@ -384,7 +375,7 @@ Bytes LDPCDecoder::decodeSoft(std::span<const float> llrs) {
             impl_->last_success = false;
         }
 
-        // Extract exactly k info BITS (not bytes) from this block
+        // Extract exactly k info BITS from this block
         for (int j = 0; j < k; ++j) {
             uint8_t bit = (impl_->llr_total[j] < 0) ? 1 : 0;
             all_decoded_bits.push_back(bit);
@@ -398,16 +389,14 @@ Bytes LDPCDecoder::decodeSoft(std::span<const float> llrs) {
         std::span<const float> remaining(llrs.data() + offset, llrs.size() - offset);
         std::vector<float> padded(n, 0.0f);
         std::copy(remaining.begin(), remaining.end(), padded.begin());
-        Bytes decoded_block = impl_->decodeBP(padded);
-        // For partial blocks, we can just append the bytes since it's the last block
-        // Actually, let's extract bits here too for consistency
+        impl_->decodeBP(padded);
         for (int j = 0; j < k; ++j) {
             uint8_t bit = (impl_->llr_total[j] < 0) ? 1 : 0;
             all_decoded_bits.push_back(bit);
         }
     }
 
-    // NOW convert all decoded bits to bytes (padding only happens once at the very end)
+    // Convert all decoded bits to bytes
     Bytes output;
     output.reserve((all_decoded_bits.size() + 7) / 8);
     uint8_t byte = 0;
@@ -458,7 +447,6 @@ void LDPCDecoder::setMinSumFactor(float factor) {
 
 Interleaver::Interleaver(size_t rows, size_t cols)
     : rows_(rows), cols_(cols) {
-    // Create interleaving permutation (row-column transpose)
     size_t n = rows * cols;
     permutation_.resize(n);
     for (size_t i = 0; i < n; ++i) {
@@ -472,7 +460,6 @@ Bytes Interleaver::interleave(ByteSpan data) {
     size_t n = rows_ * cols_;
     size_t byte_size = (n + 7) / 8;
 
-    // Convert to bits
     std::vector<uint8_t> bits(n, 0);
     for (size_t i = 0; i < data.size() && i * 8 < n; ++i) {
         for (int b = 0; b < 8 && i * 8 + b < n; ++b) {
@@ -480,13 +467,11 @@ Bytes Interleaver::interleave(ByteSpan data) {
         }
     }
 
-    // Apply permutation
     std::vector<uint8_t> interleaved(n);
     for (size_t i = 0; i < n; ++i) {
         interleaved[permutation_[i]] = bits[i];
     }
 
-    // Convert back to bytes
     Bytes output(byte_size, 0);
     for (size_t i = 0; i < n; ++i) {
         if (interleaved[i]) {
@@ -501,7 +486,6 @@ Bytes Interleaver::deinterleave(ByteSpan data) {
     size_t n = rows_ * cols_;
     size_t byte_size = (n + 7) / 8;
 
-    // Convert to bits
     std::vector<uint8_t> bits(n, 0);
     for (size_t i = 0; i < data.size() && i * 8 < n; ++i) {
         for (int b = 0; b < 8 && i * 8 + b < n; ++b) {
@@ -509,13 +493,11 @@ Bytes Interleaver::deinterleave(ByteSpan data) {
         }
     }
 
-    // Apply inverse permutation
     std::vector<uint8_t> deinterleaved(n);
     for (size_t i = 0; i < n; ++i) {
         deinterleaved[i] = bits[permutation_[i]];
     }
 
-    // Convert back to bytes
     Bytes output(byte_size, 0);
     for (size_t i = 0; i < n; ++i) {
         if (deinterleaved[i]) {
@@ -545,10 +527,7 @@ std::vector<float> Interleaver::deinterleave(std::span<const float> soft_bits) {
 }
 
 // ============ ChannelInterleaver ============
-// 2D time-frequency interleaver for OFDM on fading channels
 
-// Find a number coprime with total that gives good symbol separation
-// For fading channels, we want consecutive bits spread across many symbols
 static size_t findCoprimeStep(size_t n, size_t total) {
     auto gcd = [](size_t a, size_t b) {
         while (b != 0) {
@@ -559,17 +538,13 @@ static size_t findCoprimeStep(size_t n, size_t total) {
         return a;
     };
 
-    // Target: spread across at least 3 symbols (step >= 3 * bits_per_symbol)
-    // This gives consecutive bits landing in symbols that are 3+ apart
     size_t target_step = n * 3;
-    if (target_step >= total) target_step = total / 2;  // Fallback for small totals
+    if (target_step >= total) target_step = total / 2;
 
-    // Find coprime step starting near target
     for (size_t step = target_step; step < total; step++) {
         if (gcd(step, total) == 1) return step;
     }
 
-    // Fallback: search from n+1 (original behavior)
     for (size_t step = n + 1; step < total; step++) {
         if (gcd(step, total) == 1) return step;
     }
@@ -582,18 +557,11 @@ ChannelInterleaver::ChannelInterleaver(size_t bits_per_symbol, size_t total_bits
 {
     num_symbols_ = (total_bits + bits_per_symbol - 1) / bits_per_symbol;
 
-    // The key insight: we want consecutive input bits to land in DIFFERENT symbols.
-    // Use a step size that's coprime with total_bits to create a pseudo-random permutation.
-    // The step should be roughly equal to bits_per_symbol to spread across symbols.
     size_t step = findCoprimeStep(bits_per_symbol, total_bits);
 
-    // Calculate actual symbol separation achieved
-    // Consecutive bits i and i+1 go to positions p and (p+step)%total
-    // Their symbols are p/bits_per_symbol and (p+step)/bits_per_symbol
     symbol_separation_ = step / bits_per_symbol;
     if (symbol_separation_ < 1) symbol_separation_ = 1;
 
-    // Build permutation: output[i] = input[(i * step) % total]
     permutation_.resize(total_bits);
     inverse_permutation_.resize(total_bits);
 
@@ -625,7 +593,6 @@ std::vector<float> ChannelInterleaver::deinterleave(std::span<const float> soft_
 }
 
 Bytes ChannelInterleaver::interleave(ByteSpan data) {
-    // Convert to bits
     std::vector<uint8_t> bits(total_bits_, 0);
     for (size_t i = 0; i < data.size() && i * 8 < total_bits_; ++i) {
         for (int b = 0; b < 8 && i * 8 + b < total_bits_; ++b) {
@@ -633,13 +600,11 @@ Bytes ChannelInterleaver::interleave(ByteSpan data) {
         }
     }
 
-    // Apply permutation
     std::vector<uint8_t> interleaved(total_bits_);
     for (size_t i = 0; i < total_bits_; ++i) {
         interleaved[permutation_[i]] = bits[i];
     }
 
-    // Convert back to bytes
     size_t byte_size = (total_bits_ + 7) / 8;
     Bytes output(byte_size, 0);
     for (size_t i = 0; i < total_bits_; ++i) {
@@ -651,7 +616,6 @@ Bytes ChannelInterleaver::interleave(ByteSpan data) {
 }
 
 Bytes ChannelInterleaver::deinterleave(ByteSpan data) {
-    // Convert to bits
     std::vector<uint8_t> bits(total_bits_, 0);
     for (size_t i = 0; i < data.size() && i * 8 < total_bits_; ++i) {
         for (int b = 0; b < 8 && i * 8 + b < total_bits_; ++b) {
@@ -659,13 +623,11 @@ Bytes ChannelInterleaver::deinterleave(ByteSpan data) {
         }
     }
 
-    // Apply inverse permutation
     std::vector<uint8_t> deinterleaved(total_bits_);
     for (size_t i = 0; i < total_bits_; ++i) {
         deinterleaved[inverse_permutation_[i]] = bits[i];
     }
 
-    // Convert back to bytes
     size_t byte_size = (total_bits_ + 7) / 8;
     Bytes output(byte_size, 0);
     for (size_t i = 0; i < total_bits_; ++i) {
