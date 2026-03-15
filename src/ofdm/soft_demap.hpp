@@ -234,30 +234,63 @@ inline std::array<float, 2> demapDQPSK(Complex sym, Complex prev_sym, float nois
     return llrs;
 }
 
-// D8PSK soft demapping - compares current symbol to previous symbol
-// Returns 3 LLRs based on phase difference (8 phases at 45° increments)
+// D8PSK soft demapping with Gray code - max-log-MAP approach
+// Compares differential detection output to 8 Gray-coded constellation points
+// Returns 3 LLRs (MSB first) with proper bit-to-phase mapping
+//
+// Gray code mapping (phase_index → data_bits = index ^ (index >> 1)):
+//   idx 0 (22.5°)→000  idx 1 (67.5°)→001  idx 2 (112.5°)→011  idx 3 (157.5°)→010
+//   idx 4 (202.5°)→110  idx 5 (247.5°)→111  idx 6 (292.5°)→101  idx 7 (337.5°)→100
+// Adjacent phases differ by exactly 1 bit → single phase error flips only 1 bit
 inline std::array<float, 3> demapD8PSK(Complex sym, Complex prev_sym, float noise_var) {
     std::array<float, 3> llrs = {0.0f, 0.0f, 0.0f};
 
     Complex diff = sym * std::conj(prev_sym);
-    float phase_diff = std::atan2(diff.imag(), diff.real());
 
     float signal_power = std::abs(sym) * std::abs(prev_sym);
     if (signal_power < 1e-6f) {
         return llrs;  // Neutral LLRs for weak signal
     }
 
-    // Differential detection doubles noise: diff = sym*conj(prev) combines noise from both symbols
+    // Differential detection doubles noise
     float diff_noise_var = 2.0f * noise_var;
 
-    // D8PSK: 8 phases at 45° increments (natural binary, no Gray code)
-    // No fixed cap — noise_var includes per-carrier quality and fading scaling.
-    float confidence = signal_power / diff_noise_var;
+    // Scale: converts squared Euclidean distance difference to LLR
+    // Factor 1/(2σ²_diff) where σ²_diff is per-real-dimension noise of diff output
+    float scale = 1.0f / (2.0f * diff_noise_var);
 
-    // Use sin-based formulas (matches working single-carrier DPSK)
-    llrs[0] = clipLLR(confidence * std::sin(phase_diff));
-    llrs[1] = clipLLR(confidence * std::sin(2.0f * phase_diff));
-    llrs[2] = clipLLR(confidence * std::sin(4.0f * phase_diff));
+    // Gray code: phase_index → data_bits
+    static constexpr int gray_bits[8] = {0, 1, 3, 2, 6, 7, 5, 4};
+
+    // Compute squared distance to each constellation point
+    // Constellation at amplitude = signal_power (since diff ≈ |sym|*|prev| * e^{jΔφ})
+    static const float pi = 3.14159265358979f;
+    float dist_sq[8];
+    for (int i = 0; i < 8; i++) {
+        float angle = i * (pi / 4.0f) + pi / 8.0f;  // 22.5° offset
+        float ref_r = signal_power * std::cos(angle);
+        float ref_i = signal_power * std::sin(angle);
+        float dr = diff.real() - ref_r;
+        float di = diff.imag() - ref_i;
+        dist_sq[i] = dr * dr + di * di;
+    }
+
+    // Max-log-MAP: for each bit, find closest point with bit=0 vs bit=1
+    for (int bit = 0; bit < 3; bit++) {
+        int mask = 1 << (2 - bit);  // bit 0 → MSB (mask=4), bit 2 → LSB (mask=1)
+        float min_d0 = 1e30f;
+        float min_d1 = 1e30f;
+
+        for (int i = 0; i < 8; i++) {
+            if (gray_bits[i] & mask) {
+                if (dist_sq[i] < min_d1) min_d1 = dist_sq[i];
+            } else {
+                if (dist_sq[i] < min_d0) min_d0 = dist_sq[i];
+            }
+        }
+
+        llrs[bit] = clipLLR(scale * (min_d1 - min_d0));
+    }
 
     return llrs;
 }

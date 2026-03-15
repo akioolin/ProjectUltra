@@ -431,11 +431,14 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod) {
                 impl_->dbpsk_prev_symbols[c] = new_symbol;
                 symbol_data.push_back(new_symbol);
             } else if (mod == Modulation::D8PSK) {
-                // 3 bits: phase changes in 45° increments with 22.5° offset
-                // Offset ensures sin()-based LLR formulas work (sin(0°)=0 is bad)
-                // 000→22.5°, 001→67.5°, 010→112.5°, 011→157.5°, etc.
+                // 3 bits: Gray-coded phase changes in 45° increments with 22.5° offset
+                // Gray code: adjacent phases differ by exactly 1 bit (critical for soft decoding)
+                // data_to_phase maps 3-bit data → phase index via gray_to_binary conversion
+                //   000→idx0(22.5°) 001→idx1(67.5°) 010→idx3(157.5°) 011→idx2(112.5°)
+                //   100→idx7(337.5°) 101→idx6(292.5°) 110→idx4(202.5°) 111→idx5(247.5°)
+                static const int data_to_phase[8] = {0, 1, 3, 2, 7, 6, 4, 5};
                 static const float pi = 3.14159265358979f;
-                float angle = (bits & 7) * (pi / 4.0f) + pi / 8.0f;  // 45° steps + 22.5° offset
+                float angle = data_to_phase[bits & 7] * (pi / 4.0f) + pi / 8.0f;
                 Complex phase_change(std::cos(angle), std::sin(angle));
                 Complex new_symbol = impl_->dbpsk_prev_symbols[c] * phase_change;
                 impl_->dbpsk_prev_symbols[c] = new_symbol;
