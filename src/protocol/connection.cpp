@@ -981,10 +981,11 @@ void Connection::enterConnected() {
                   timeout_ms / 1000.0f, data_frame_ms, ack_frame_ms,
                   modulationToString(data_modulation_), codeRateToString(data_code_rate_));
     } else {
-        // Keep OFDM in-flight burst shorter to reduce ACK-lag hole amplification
-        // on fading channels. A window of 4 matches burst-interleave grouping and
-        // has shown better control-path stability than 8 for file transfer.
-        arq_.setWindowSize(4);
+        // Window=8 keeps pipeline full during retransmissions. Previously window=4
+        // caused stalls when a base frame failed — the pipeline blocked for 4.5s timeout.
+        // With CPE correction and pre-CFO correction, frame loss rate is low enough
+        // that the larger window improves throughput without overwhelming the RX.
+        arq_.setWindowSize(8);
         arq_.setMaxRetries(15);     // More attempts compensate for ACK loss on fading
         arq_.setSackDelay(120);     // Short coalescing delay for ACK/SACK control traffic
 

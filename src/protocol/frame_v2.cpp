@@ -1354,6 +1354,8 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
     decoder.setMinSumFactor(0.9375f);
     size_t bytes_per_cw = getBytesPerCodeword(rate);
 
+    int perturbation_cw_count = 0;  // How many CWs needed perturbation retry
+
     for (int cw = 0; cw < FIXED_FRAME_CODEWORDS; ++cw) {
         auto cw_bits = cw_soft_bits[cw];
 
@@ -1375,6 +1377,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
         auto decoded = decoder.decodeSoft(cw_bits);
         bool success = decoder.lastDecodeSuccess();
         int iterations = decoder.lastIterations();
+        bool used_perturbation = false;  // Track if this CW needed perturbation retry
 
         // Multi-strategy LDPC retry when decode fails:
         // Uses decoder diversity (varying min-sum factor) + LLR perturbation
@@ -1407,19 +1410,17 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                 decoder.setMinSumFactor(0.9375f);  // restore default
             }
 
-            // Phase 1: Perturbation with decoder diversity (15 attempts)
-            // Alternate min-sum factor between attempts for maximum diversity.
-            // Different seeds × different factors explore the solution space broadly.
+            // Phase 1: Perturbation with decoder diversity (5 attempts)
+            // With ARQ, fast failure + retransmit beats slow recovery.
+            // Excessive perturbation (was 44 attempts across 6 phases) caused:
+            //   - 200ms per failed frame → decoder falls behind real-time
+            //   - High LDPC false positive rate (random noise → wrong codewords)
+            //   - 5-10s audio backlog → sync detection degradation
+            // Reduced to 5 perturbation attempts (was 34) + 4 factor retries = 9 total.
             if (!success) {
-                static constexpr float sigmas1[] = {
-                    0.3f, 0.7f, 0.3f, 1.0f, 0.5f, 1.5f, 0.3f, 2.0f,
-                    0.5f, 0.7f, 1.0f, 2.5f, 0.3f, 1.5f, 0.5f
-                };
-                static constexpr float factors1[] = {
-                    0.75f, 0.625f, 0.875f, 0.75f, 0.625f, 0.75f, 0.5f, 0.625f,
-                    0.875f, 0.75f, 0.625f, 0.875f, 0.75f, 0.5f, 0.625f
-                };
-                for (int retry = 0; retry < 15 && !success; retry++) {
+                static constexpr float sigmas1[] = {0.3f, 0.7f, 1.0f, 1.5f, 2.0f};
+                static constexpr float factors1[] = {0.75f, 0.625f, 0.875f, 0.75f, 0.625f};
+                for (int retry = 0; retry < 5 && !success; retry++) {
                     decoder.setMinSumFactor(factors1[retry]);
                     std::mt19937 rng(data_hash + retry * 997 + retry * 31);
                     std::normal_distribution<float> noise(0.0f, sigmas1[retry]);
@@ -1431,112 +1432,17 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                     if (decoder.lastDecodeSuccess()) {
                         success = true;
                         iterations = decoder.lastIterations();
+                        used_perturbation = true;
                         LOG_MODEM(INFO, "CW[%d]: RETRY OK (perturb σ=%.1f f=%.3f, iters=%d)", cw, sigmas1[retry], factors1[retry], iterations);
                     }
                 }
                 decoder.setMinSumFactor(0.875f);
             }
-
-            // Phase 2: Clip ±10 + perturbation (5 attempts)
-            if (!success) {
-                static constexpr float sigmas2[] = {0.3f, 0.8f, 1.5f, 2.5f, 4.0f};
-                for (int retry = 0; retry < 5 && !success; retry++) {
-                    decoder.setMinSumFactor(retry % 2 == 0 ? 0.625f : 0.875f);
-                    std::mt19937 rng(data_hash + (retry + 15) * 997 + 12345);
-                    std::normal_distribution<float> noise(0.0f, sigmas2[retry]);
-                    auto clipped = cw_bits;
-                    for (float& llr : clipped) {
-                        llr = std::max(-10.0f, std::min(10.0f, llr));
-                        llr += noise(rng);
-                    }
-                    decoded = decoder.decodeSoft(clipped);
-                    if (decoder.lastDecodeSuccess()) {
-                        success = true;
-                        iterations = decoder.lastIterations();
-                        LOG_MODEM(INFO, "CW[%d]: RETRY OK (clip10+perturb σ=%.1f, iters=%d)", cw, sigmas2[retry], iterations);
-                    }
-                }
-                decoder.setMinSumFactor(0.875f);
-            }
-
-            // Phase 3: Scale 0.5× + perturbation (3 attempts)
-            if (!success) {
-                static constexpr float sigmas3[] = {0.5f, 1.5f, 3.0f};
-                for (int retry = 0; retry < 3 && !success; retry++) {
-                    std::mt19937 rng(data_hash + (retry + 20) * 997 + 54321);
-                    std::normal_distribution<float> noise(0.0f, sigmas3[retry]);
-                    auto scaled = cw_bits;
-                    for (float& llr : scaled) {
-                        llr = llr * 0.5f + noise(rng);
-                    }
-                    decoded = decoder.decodeSoft(scaled);
-                    if (decoder.lastDecodeSuccess()) {
-                        success = true;
-                        iterations = decoder.lastIterations();
-                        LOG_MODEM(INFO, "CW[%d]: RETRY OK (scale50+perturb σ=%.1f, iters=%d)", cw, sigmas3[retry], iterations);
-                    }
-                }
-            }
-
-            // Phase 4: Clip ±6 + perturbation (3 attempts)
-            if (!success) {
-                static constexpr float sigmas4[] = {0.5f, 1.5f, 3.0f};
-                for (int retry = 0; retry < 3 && !success; retry++) {
-                    std::mt19937 rng(data_hash + (retry + 23) * 997 + 99999);
-                    std::normal_distribution<float> noise(0.0f, sigmas4[retry]);
-                    auto clipped = cw_bits;
-                    for (float& llr : clipped) {
-                        llr = std::max(-6.0f, std::min(6.0f, llr));
-                        llr += noise(rng);
-                    }
-                    decoded = decoder.decodeSoft(clipped);
-                    if (decoder.lastDecodeSuccess()) {
-                        success = true;
-                        iterations = decoder.lastIterations();
-                        LOG_MODEM(INFO, "CW[%d]: RETRY OK (clip6+perturb σ=%.1f, iters=%d)", cw, sigmas4[retry], iterations);
-                    }
-                }
-            }
-
-            // Phase 5: Hard decision + perturbation (5 attempts)
-            if (!success) {
-                static constexpr float sigmas5[] = {0.0f, 0.2f, 0.5f, 1.0f, 1.5f};
-                for (int retry = 0; retry < 5 && !success; retry++) {
-                    std::mt19937 rng(data_hash + (retry + 26) * 997 + 33333);
-                    std::normal_distribution<float> noise(0.0f, sigmas5[retry]);
-                    auto hard = cw_bits;
-                    for (float& llr : hard) {
-                        llr = (llr >= 0) ? 1.0f : -1.0f;
-                        llr += noise(rng);
-                    }
-                    decoded = decoder.decodeSoft(hard);
-                    if (decoder.lastDecodeSuccess()) {
-                        success = true;
-                        iterations = decoder.lastIterations();
-                        LOG_MODEM(INFO, "CW[%d]: RETRY OK (hard+perturb σ=%.1f, iters=%d)", cw, sigmas5[retry], iterations);
-                    }
-                }
-            }
-
-            // Phase 6: Scale 0.25× + perturbation (3 attempts)
-            if (!success) {
-                static constexpr float sigmas6[] = {0.3f, 1.0f, 2.0f};
-                for (int retry = 0; retry < 3 && !success; retry++) {
-                    std::mt19937 rng(data_hash + (retry + 31) * 997 + 77777);
-                    std::normal_distribution<float> noise(0.0f, sigmas6[retry]);
-                    auto scaled = cw_bits;
-                    for (float& llr : scaled) {
-                        llr = llr * 0.25f + noise(rng);
-                    }
-                    decoded = decoder.decodeSoft(scaled);
-                    if (decoder.lastDecodeSuccess()) {
-                        success = true;
-                        iterations = decoder.lastIterations();
-                        LOG_MODEM(INFO, "CW[%d]: RETRY OK (scale25+perturb σ=%.1f, iters=%d)", cw, sigmas6[retry], iterations);
-                    }
-                }
-            }
+            // Phases 2-6 REMOVED (2026-03-15): excessive perturbation caused false
+            // positives and decoder backlog. ARQ handles frame loss more efficiently.
         }
+
+        if (used_perturbation && success) perturbation_cw_count++;
 
         LOG_MODEM(INFO, "CW[%d]: %s (iters=%d, llr_avg=%.2f, |llr|_avg=%.2f)",
                   cw, success ? "OK" : "FAIL", iterations, llr_avg, llr_abs_avg);
@@ -1569,8 +1475,22 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
         }
 
         if (!frame_valid) {
-            LOG_MODEM(WARN, "LDPC false positive detected: all CWs decoded but frame invalid");
+            LOG_MODEM(WARN, "LDPC false positive detected: all CWs decoded but frame invalid (perturbed_cws=%d)",
+                      perturbation_cw_count);
             bool recovered = false;
+
+            // If any CW used perturbation retry, the false positive is almost certainly
+            // from the random noise injection finding a wrong-but-valid LDPC codeword.
+            // Skip expensive bit-flip recovery — it can't fix random garbage and risks
+            // producing wrong "recovered" data that passes CRC by coincidence.
+            if (perturbation_cw_count > 0) {
+                LOG_MODEM(WARN, "LDPC false positive: %d CWs used perturbation, skipping recovery",
+                          perturbation_cw_count);
+                for (int cw = 0; cw < FIXED_FRAME_CODEWORDS; ++cw) {
+                    status.decoded[cw] = false;
+                }
+                return status;
+            }
 
             // Helper: verify assembled frame without logging
             auto verifyFrame = [](const Bytes& assembled) -> bool {

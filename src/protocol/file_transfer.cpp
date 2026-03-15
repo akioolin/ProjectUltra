@@ -389,25 +389,38 @@ bool FileTransferController::processFileData(const Bytes& payload, bool more_dat
     const uint8_t* data = payload.data() + 5;
     size_t data_len = payload.size() - 5;
 
-    // ARQ normally delivers in-order, so offset should match current size.
-    // Be defensive against duplicate/late frames or rare header false-positives.
+    // With Selective Repeat ARQ (window > 1), chunks can arrive out of order.
+    // Buffer out-of-order chunks and insert them when the gap is filled.
     uint32_t expected_offset = static_cast<uint32_t>(rx_data_.size());
-    if (offset != expected_offset) {
-        if (offset < expected_offset) {
-            LOG_MODEM(WARN,
-                      "FileTransfer: Ignoring duplicate/overlap chunk offset=%u len=%zu (have=%zu)",
-                      offset, data_len, rx_data_.size());
-            return true;
-        }
-
-        // Gap: wait for missing data instead of appending out-of-order bytes.
-        LOG_MODEM(WARN,
-                  "FileTransfer: Gap detected offset=%u len=%zu (expected=%u), waiting for retransmit",
-                  offset, data_len, expected_offset);
+    if (offset < expected_offset) {
+        LOG_MODEM(DEBUG,
+                  "FileTransfer: Ignoring duplicate/overlap chunk offset=%u len=%zu (have=%zu)",
+                  offset, data_len, rx_data_.size());
         return true;
     }
 
+    if (offset > expected_offset) {
+        // Out-of-order: buffer for later insertion
+        rx_pending_chunks_[offset] = Bytes(data, data + data_len);
+        LOG_MODEM(INFO,
+                  "FileTransfer: Buffered out-of-order chunk offset=%u len=%zu (expected=%u, pending=%zu)",
+                  offset, data_len, expected_offset, rx_pending_chunks_.size());
+        return true;
+    }
+
+    // In-order: append directly
     rx_data_.insert(rx_data_.end(), data, data + data_len);
+
+    // Drain any buffered chunks that are now in sequence
+    while (!rx_pending_chunks_.empty()) {
+        uint32_t next_expected = static_cast<uint32_t>(rx_data_.size());
+        auto it = rx_pending_chunks_.find(next_expected);
+        if (it == rx_pending_chunks_.end()) break;
+        rx_data_.insert(rx_data_.end(), it->second.begin(), it->second.end());
+        LOG_MODEM(INFO, "FileTransfer: Drained buffered chunk offset=%u len=%zu (total=%zu)",
+                  next_expected, it->second.size(), rx_data_.size());
+        rx_pending_chunks_.erase(it);
+    }
 
     notifyProgress();
 
@@ -526,6 +539,7 @@ void FileTransferController::resetRxState() {
     rx_filepath_.clear();
     rx_filename_.clear();
     rx_data_.clear();
+    rx_pending_chunks_.clear();
     rx_expected_size_ = 0;
     rx_expected_crc_ = 0;
     rx_flags_ = 0;

@@ -549,24 +549,30 @@ void StreamingDecoder::searchForSync() {
     const float snr_hint = last_snr_.load();
     // Narrowband LTS has ~35% of wideband energy (21 vs 59 carriers) → lower correlation peak
     bool is_narrowband = (mode_ == protocol::WaveformMode::OFDM_NARROW);
-    float light_sync_min_confidence = is_coherent ? 0.90f : (is_narrowband ? 0.50f : 0.72f);
-    float weak_sync_floor = is_coherent ? 0.85f : (is_narrowband ? 0.40f : 0.55f);
-    if (!is_coherent) {
-        // OTA HF can produce valid LTS peaks in the 0.55-0.65 range during
-        // fades. Start conservative, but avoid hard-locking to 0.70.
-        if (fading_hint >= 1.00f || snr_hint < 10.0f) {
-            light_sync_min_confidence = 0.62f;
-        } else if (fading_hint >= 0.70f || snr_hint < 14.0f) {
-            light_sync_min_confidence = 0.65f;
-        } else if (fading_hint >= 0.50f || snr_hint < 18.0f) {
-            light_sync_min_confidence = 0.68f;
-        }
+    // LTS sync thresholds.
+    // True LTS peaks: 0.85-0.99 (clean). Data autocorrelation noise: 0.20-0.55.
+    // Threshold 0.55 for connected wideband rejects most noise while catching real LTS.
+    // Testing showed 0.45 accepted too many false syncs → LDPC false positives.
+    float light_sync_min_confidence;
+    float weak_sync_floor;
+    if (is_coherent) {
+        light_sync_min_confidence = 0.90f;
+        weak_sync_floor = 0.85f;
+    } else if (is_narrowband) {
+        light_sync_min_confidence = 0.50f;
+        weak_sync_floor = 0.40f;
+    } else if (connected_) {
+        light_sync_min_confidence = 0.55f;
+        weak_sync_floor = 0.45f;
+    } else {
+        light_sync_min_confidence = 0.65f;
+        weak_sync_floor = 0.55f;
+    }
 
-        if (connected_ && sync_reject_streak_ >= 8) {
-            float extra_relax = std::min(0.12f,
-                                         0.015f * static_cast<float>(sync_reject_streak_ - 7));
-            light_sync_min_confidence = std::max(0.56f, light_sync_min_confidence - extra_relax);
-        }
+    if (!is_coherent && connected_ && sync_reject_streak_ >= 5) {
+        float extra_relax = std::min(0.10f,
+                                     0.02f * static_cast<float>(sync_reject_streak_ - 4));
+        light_sync_min_confidence = std::max(0.45f, light_sync_min_confidence - extra_relax);
     }
 
     if (connected_ && waveform_->supportsDataPreamble()) {
