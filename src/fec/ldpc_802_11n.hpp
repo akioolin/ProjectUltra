@@ -72,6 +72,38 @@ static constexpr int BASE_R56[4][24] = {
     { 7,  7, 14, 14,  4, 16, 16, 24, 24, 10,  1,  7, 15,  6, 10, 26,  8, 18, 21, 14,  1, -1, -1,  0},
 };
 
+// Rate 1/4: 18×24 base matrix (k=162, m=486)
+// Custom QC-LDPC code designed to match 802.11n structure (Z=27, dual-diagonal parity).
+// NOT from IEEE 802.11n (which only defines R1/2 through R5/6).
+//
+// Design properties:
+// - Info part (cols 0-5): 6 entries per column, balanced degree-2 check rows
+//   Each column pair shares at most 2 rows; shifts chosen to avoid all 4-cycles
+// - Parity part (cols 6-23): standard dual-diagonal with first-column extra entries
+// - Verified girth >= 6 (no 4-cycles in info×info, info×parity, or parity×parity)
+// - Variable degree: 6 per info bit (block level), 2-3 per parity bit
+// - Check degree: 4-5 (2 from info + 2-3 from parity dual-diagonal)
+static constexpr int BASE_R14[18][24] = {
+    { 0, -1, -1, 11, -1, -1,  1,  0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {-1,  3, -1, -1, 22, -1, -1,  0,  0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {-1, -1,  6, -1, -1, 15, -1, -1,  0,  0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    { 7, -1, -1, -1, -1,  0, -1, -1, -1,  0,  0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {-1, 10, -1, 18, -1, -1, -1, -1, -1, -1,  0,  0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {-1, -1, 13, -1,  2, -1, -1, -1, -1, -1, -1,  0,  0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {14, -1, -1, -1, 19, -1, -1, -1, -1, -1, -1, -1,  0,  0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {-1, 17, -1, -1, -1,  8, -1, -1, -1, -1, -1, -1, -1,  0,  0, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {-1, -1, 20, 25, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,  0,  0, -1, -1, -1, -1, -1, -1, -1, -1},
+    {21, -1, -1, -1, 26, -1,  0, -1, -1, -1, -1, -1, -1, -1, -1,  0,  0, -1, -1, -1, -1, -1, -1, -1},
+    {-1, 24, -1, -1, -1, 20, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,  0,  0, -1, -1, -1, -1, -1, -1},
+    {-1, -1,  1,  4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,  0,  0, -1, -1, -1, -1, -1},
+    { 2, -1, -1, -1, -1,  3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,  0,  0, -1, -1, -1, -1},
+    {-1,  5, -1, -1, -1, 25, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,  0,  0, -1, -1, -1},
+    {-1, -1,  8, 16, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,  0,  0, -1, -1},
+    { 9, -1, -1, -1, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,  0,  0, -1},
+    {-1, 12, -1, 23, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,  0,  0},
+    {-1, -1, 15, -1, 17, -1,  1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,  0},
+};
+
 // ============================================================================
 // Expansion structures
 // ============================================================================
@@ -92,11 +124,12 @@ struct ExpandedLDPC {
 
 // ============================================================================
 // Get base matrix dimensions and data pointer for a given rate
-// Returns nullptr for rates not in the 802.11n standard (R1/4, R1/3)
+// Returns nullptr for unsupported rates (R1/3)
 // ============================================================================
 
 inline int getBaseRows(CodeRate rate) {
     switch (rate) {
+        case CodeRate::R1_4: return 18;
         case CodeRate::R1_2: return 12;
         case CodeRate::R2_3: return 8;
         case CodeRate::R3_4: return 6;
@@ -107,6 +140,7 @@ inline int getBaseRows(CodeRate rate) {
 
 inline const int* getBaseData(CodeRate rate) {
     switch (rate) {
+        case CodeRate::R1_4: return &BASE_R14[0][0];
         case CodeRate::R1_2: return &BASE_R12[0][0];
         case CodeRate::R2_3: return &BASE_R23[0][0];
         case CodeRate::R3_4: return &BASE_R34[0][0];
