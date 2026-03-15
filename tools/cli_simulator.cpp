@@ -1741,6 +1741,12 @@ private:
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
+        // Measure transfer time (from sendFile to file_received)
+        auto transfer_end = std::chrono::steady_clock::now();
+        float transfer_sec = std::chrono::duration<float>(transfer_end - start).count();
+        float throughput_bps = (transfer_sec > 0.01f)
+            ? (test_file_size_ * 8.0f / transfer_sec) : 0.0f;
+
         // Verify received file
         {
             std::lock_guard<std::mutex> lock(msg_mutex_);
@@ -1749,6 +1755,9 @@ private:
                 return false;
             }
             std::cout << "  \033[32m✓ File received: " << received_file_path_ << "\033[0m\n";
+            std::cout << "  Transfer: " << test_file_size_ << " bytes in "
+                      << std::fixed << std::setprecision(1) << transfer_sec << "s = "
+                      << std::setprecision(0) << throughput_bps << " bps\n";
 
             // Verify contents
             std::ifstream ifs(received_file_path_, std::ios::binary);

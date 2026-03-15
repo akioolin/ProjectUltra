@@ -328,6 +328,44 @@ void StreamingDecoder::processBuffer() {
     }
 }
 
+float StreamingDecoder::applyCFOPreCorrection(std::vector<float>& samples, float cfo_hz,
+                                                size_t absolute_start_sample) {
+    if (std::abs(cfo_hz) < 0.05f || samples.empty()) {
+        pre_correction_cfo_ = 0.0f;
+        return 0.0f;  // Skip if negligible
+    }
+
+    // Convert to analytic signal (real + j*Hilbert) for proper frequency shift
+    HilbertTransform hilbert(65);
+    auto analytic = hilbert.process(SampleSpan(samples.data(), samples.size()));
+
+    // Apply CFO correction: multiply analytic signal by exp(-j*2π*CFO*t)
+    // Phase formula matches toBaseband(): phase_inc = -2π × CFO / fs per sample
+    const float fs = 48000.0f;
+    float phase_inc = -2.0f * static_cast<float>(M_PI) * cfo_hz / fs;
+    float phase = -2.0f * static_cast<float>(M_PI) * cfo_hz *
+                  static_cast<float>(absolute_start_sample) / fs;
+    // Wrap to [-π, π]
+    phase = std::fmod(phase, 2.0f * static_cast<float>(M_PI));
+    if (phase > static_cast<float>(M_PI)) phase -= 2.0f * static_cast<float>(M_PI);
+    if (phase < -static_cast<float>(M_PI)) phase += 2.0f * static_cast<float>(M_PI);
+
+    // Apply rotation and take real part
+    size_t len = std::min(samples.size(), analytic.size());
+    for (size_t i = 0; i < len; i++) {
+        Complex correction(std::cos(phase), std::sin(phase));
+        samples[i] = (analytic[i] * correction).real();
+        phase += phase_inc;
+        if (phase > static_cast<float>(M_PI)) phase -= 2.0f * static_cast<float>(M_PI);
+        else if (phase < -static_cast<float>(M_PI)) phase += 2.0f * static_cast<float>(M_PI);
+    }
+
+    pre_correction_cfo_ = cfo_hz;
+    LOG_MODEM(DEBUG, "[%s] CFO pre-correction: %.2f Hz, abs_start=%zu, %zu samples",
+              log_prefix_.c_str(), cfo_hz, absolute_start_sample, len);
+    return cfo_hz;
+}
+
 void StreamingDecoder::searchForSync() {
     if (!waveform_) return;
 
@@ -859,6 +897,27 @@ void StreamingDecoder::decodeCurrentFrame() {
         }
     }
 
+    // CFO pre-correction: remove known CFO from raw samples so the entire
+    // demodulation chain sees a clean, CFO-free signal.  The waveform/demodulator
+    // is then told CFO=0 and only needs to handle small residuals.
+    if (is_ofdm && !frame_buffer.empty()) {
+        size_t abs_sync = sync_position_;  // absolute sample position
+        if (total_fed_ >= MAX_BUFFER_SAMPLES) {
+            const size_t oldest_abs = total_fed_ - MAX_BUFFER_SAMPLES;
+            const size_t oldest_pos = write_pos_;
+            const size_t offset = (sync_position_ >= oldest_pos)
+                ? (sync_position_ - oldest_pos)
+                : (MAX_BUFFER_SAMPLES - oldest_pos + sync_position_);
+            abs_sync = oldest_abs + offset;
+        }
+        applyCFOPreCorrection(frame_buffer, sync_cfo_, abs_sync);
+    }
+
+    // After pre-correction, tell waveform CFO=0 (already removed from samples).
+    // For non-OFDM (MC-DPSK), no pre-correction — pass original sync_cfo_.
+    const float decode_cfo = (is_ofdm && std::abs(pre_correction_cfo_) > 0.01f)
+                              ? 0.0f : sync_cfo_;
+
     if (frame_buffer.empty()) {
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
@@ -964,7 +1023,7 @@ void StreamingDecoder::decodeCurrentFrame() {
             waveform_->configure(Modulation::DQPSK, CodeRate::R1_4);
         }
 
-        waveform_->setFrequencyOffset(sync_cfo_);
+        waveform_->setFrequencyOffset(decode_cfo);
         bool control_ok = waveform_->process(SampleSpan(frame_buffer.data(), frame_buffer.size()));
         if (control_ok) {
             captureConstellationSnapshot();
@@ -1027,7 +1086,7 @@ void StreamingDecoder::decodeCurrentFrame() {
     }
 
     // Data frame - process audio to get soft bits
-    waveform_->setFrequencyOffset(sync_cfo_);
+    waveform_->setFrequencyOffset(decode_cfo);
 
     auto decode_start = std::chrono::steady_clock::now();
     bool ok = waveform_->process(SampleSpan(frame_buffer.data(), frame_buffer.size()));
@@ -1077,8 +1136,9 @@ void StreamingDecoder::decodeCurrentFrame() {
         burst_cfo_ = sync_cfo_;
         burst_start_time_ = std::chrono::steady_clock::now();
 
-        // Feed back CFO from first frame
-        float corrected_cfo = waveform_->estimatedCFO();
+        // Feed back CFO from first frame (add pre-correction amount back)
+        float residual_cfo = waveform_->estimatedCFO();
+        float corrected_cfo = pre_correction_cfo_ + residual_cfo;
         float current_cfo = last_cfo_.load();
         constexpr float MAX_PILOT_CFO_DRIFT_HZ_B = 2.0f;
         float drift = corrected_cfo - current_cfo;
@@ -1095,7 +1155,11 @@ void StreamingDecoder::decodeCurrentFrame() {
     // Feed back pilot-corrected CFO to cached value (OFDM only).
     // MC-DPSK does not have pilot-based tracking; keep chirp-derived CFO.
     if (is_ofdm) {
-        float corrected_cfo = waveform_->estimatedCFO();
+        // After pre-correction, the demodulator sees near-zero CFO.
+        // waveform_->estimatedCFO() returns the RESIDUAL (pre-correction error).
+        // Add back the pre-correction amount to get the true total CFO.
+        float residual_cfo = waveform_->estimatedCFO();
+        float corrected_cfo = pre_correction_cfo_ + residual_cfo;
         float current_cfo = last_cfo_.load();
 
         if (connected_) {
@@ -1109,8 +1173,9 @@ void StreamingDecoder::decodeCurrentFrame() {
         }
 
         if (std::abs(corrected_cfo - current_cfo) > 0.1f) {
-            LOG_MODEM(INFO, "[%s] CFO updated: %.2f → %.2f Hz (pilot-corrected)",
-                      log_prefix_.c_str(), current_cfo, corrected_cfo);
+            LOG_MODEM(INFO, "[%s] CFO updated: %.2f → %.2f Hz (pre_corr=%.2f + residual=%.2f)",
+                      log_prefix_.c_str(), current_cfo, corrected_cfo,
+                      pre_correction_cfo_, residual_cfo);
         }
         last_cfo_.store(corrected_cfo);
         sync_cfo_ = corrected_cfo;
@@ -1255,7 +1320,7 @@ void StreamingDecoder::decodeCurrentFrame() {
     if (!result.success && is_ofdm && connected_) {
         size_t one_cw_s = static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
         if (one_cw_s <= frame_buffer.size()) {
-            waveform_->setFrequencyOffset(sync_cfo_);
+            waveform_->setFrequencyOffset(decode_cfo);
             if (waveform_->process(SampleSpan(frame_buffer.data(), one_cw_s))) {
                 captureConstellationSnapshot();
             }
@@ -1282,7 +1347,7 @@ void StreamingDecoder::decodeCurrentFrame() {
 
                         LOG_MODEM(INFO, "[%s] Small-frame recovery: reprocessing %zu samples (%d CWs)",
                                   log_prefix_.c_str(), exact_size, hdr2.total_cw);
-                        waveform_->setFrequencyOffset(sync_cfo_);
+                        waveform_->setFrequencyOffset(decode_cfo);
                         if (waveform_->process(SampleSpan(frame_buffer.data(), exact_size))) {
                             captureConstellationSnapshot();
                         }
@@ -1347,9 +1412,14 @@ void StreamingDecoder::decodeCurrentFrame() {
                 }
             }
 
+            // Pre-correct CFO on retry buffer too
+            if (is_ofdm && std::abs(pre_correction_cfo_) > 0.01f) {
+                applyCFOPreCorrection(retry_buffer, sync_cfo_, ringPosToAbsolute(retry_sync));
+            }
+
             waveform_->reset();
             waveform_->setAbsoluteTrainingPosition(ringPosToAbsolute(retry_sync));
-            waveform_->setFrequencyOffset(sync_cfo_);
+            waveform_->setFrequencyOffset(decode_cfo);
             bool retry_ok = waveform_->process(SampleSpan(retry_buffer.data(), retry_buffer.size()));
             if (!retry_ok) {
                 continue;
@@ -1512,7 +1582,7 @@ void StreamingDecoder::decodeCurrentFrame() {
             LOG_MODEM(INFO, "[%s] Burst continuation: block %d, RMS=%.4f, pos=%zu",
                       log_prefix_.c_str(), burst_blocks_decoded_, next_rms, next_block_pos);
 
-            waveform_->setFrequencyOffset(sync_cfo_);
+            waveform_->setFrequencyOffset(decode_cfo);
             bool next_ok = waveform_->process(SampleSpan(next_block.data(), next_block.size()));
 
             if (!next_ok) break;  // Process failed, burst over
@@ -2403,8 +2473,25 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         return BurstFrameResult::FAILED;
     }
 
-    // Demodulate
-    waveform_->setFrequencyOffset(burst_cfo_);
+    // Pre-correct CFO on burst block
+    bool is_ofdm_burst = protocol::isOFDMMode(mode_);
+    float burst_pre_cfo = 0.0f;
+    if (is_ofdm_burst) {
+        size_t abs_burst = burst_next_pos_;
+        if (total_fed_ >= MAX_BUFFER_SAMPLES) {
+            const size_t oldest_abs = total_fed_ - MAX_BUFFER_SAMPLES;
+            const size_t oldest_pos = write_pos_;
+            const size_t offset = (burst_next_pos_ >= oldest_pos)
+                ? (burst_next_pos_ - oldest_pos)
+                : (MAX_BUFFER_SAMPLES - oldest_pos + burst_next_pos_);
+            abs_burst = oldest_abs + offset;
+        }
+        burst_pre_cfo = applyCFOPreCorrection(block, burst_cfo_, abs_burst);
+    }
+
+    // Demodulate (CFO=0 after pre-correction, or original burst_cfo_ if no pre-correction)
+    float burst_decode_cfo = (std::abs(burst_pre_cfo) > 0.01f) ? 0.0f : burst_cfo_;
+    waveform_->setFrequencyOffset(burst_decode_cfo);
     bool ok = waveform_->process(SampleSpan(block.data(), block.size()));
     if (!ok) {
         LOG_MODEM(WARN, "[%s] Burst frame %zu/%d: process() failed",
@@ -2420,8 +2507,9 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         return BurstFrameResult::FAILED;
     }
 
-    // Update CFO from pilot tracking (same drift-limiting as existing burst loop)
-    float corrected_cfo = waveform_->estimatedCFO();
+    // Update CFO from pilot tracking (add pre-correction amount back)
+    float residual_cfo = waveform_->estimatedCFO();
+    float corrected_cfo = burst_pre_cfo + residual_cfo;
     float drift = corrected_cfo - burst_cfo_;
     constexpr float MAX_BURST_CFO_DRIFT_HZ = 2.0f;
     if (std::abs(drift) > MAX_BURST_CFO_DRIFT_HZ) {

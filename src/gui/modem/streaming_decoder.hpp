@@ -35,6 +35,7 @@
 //   decoder.stop();  // Wakes decode thread to exit
 
 #include "waveform/waveform_interface.hpp"
+#include "ultra/dsp.hpp"
 #include "waveform/waveform_factory.hpp"
 #include "protocol/frame_v2.hpp"
 #include "ultra/fec.hpp"
@@ -288,6 +289,13 @@ private:
                                     CodeRate rate, size_t bytes_per_cw,
                                     float snr, float cfo);
 
+    // CFO pre-correction: remove CFO from real passband samples before demodulation.
+    // Uses Hilbert transform → analytic signal → complex rotation → real part.
+    // After pre-correction, waveform should be told CFO=0.
+    // Returns the CFO value used for pre-correction (for feedback adjustment).
+    float applyCFOPreCorrection(std::vector<float>& samples, float cfo_hz,
+                                 size_t absolute_start_sample);
+
     // Burst interleave accumulation
     enum class BurstFrameResult {
         SUCCESS,    // Frame demodulated, soft bits appended to burst_soft_buffer_
@@ -372,6 +380,7 @@ private:
     std::atomic<float> last_cfo_{0.0f};
     std::atomic<float> last_fading_index_{0.0f};
     float noise_floor_ = 0.001f;
+    float pre_correction_cfo_ = 0.0f;  // CFO used for last pre-correction (for feedback adjustment)
     uint64_t overflow_events_ = 0;
     uint64_t sync_reject_streak_ = 0;
 

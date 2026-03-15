@@ -1762,69 +1762,12 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                             }
                         }
 
-                        // 3-bit among suspects: C(30,3) = 4060 — acceptable
-                        if (!recovered) {
-                            for (int a = 0; a < ns && !recovered; ++a) {
-                                uint16_t da = sd[a];
-                                for (int b = a + 1; b < ns && !recovered; ++b) {
-                                    uint16_t dab = da ^ sd[b];
-                                    for (int c2 = b + 1; c2 < ns && !recovered; ++c2) {
-                                        if ((dab ^ sd[c2]) == syndrome) {
-                                            fixBit(suspects[a].frame_bit);
-                                            fixBit(suspects[b].frame_bit);
-                                            fixBit(suspects[c2].frame_bit);
-                                            auto trial = status.reassemble();
-                                            if (verifyFrame(trial)) {
-                                                LOG_MODEM(INFO, "FALSE POSITIVE RECOVERED (3-bit suspects, bits %zu,%zu,%zu)",
-                                                          suspects[a].frame_bit, suspects[b].frame_bit, suspects[c2].frame_bit);
-                                                recovered = true;
-                                            } else {
-                                                fixBit(suspects[a].frame_bit);
-                                                fixBit(suspects[b].frame_bit);
-                                                fixBit(suspects[c2].frame_bit);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // 4-bit among weak suspects: hard limit to 15 suspects max
-                        // C(15,4)/65536 = 0.021 expected false CRC matches — safe
-                        // C(30,4)/65536 = 0.418 — too dangerous (MIN_LLR_MAG creates many 0.50 suspects)
-                        // NOTE: 5-bit, 6-bit, and hybrid searches REMOVED (all >1.0 expected false matches)
-                        if (!recovered) {
-                            constexpr int MAX_S_4BIT = 15;
-                            int ns4 = std::min(ns, MAX_S_4BIT);
-                            for (int a = 0; a < ns4 && !recovered; ++a) {
-                                uint16_t da = sd[a];
-                                for (int b = a + 1; b < ns4 && !recovered; ++b) {
-                                    uint16_t dab = da ^ sd[b];
-                                    for (int c2 = b + 1; c2 < ns4 && !recovered; ++c2) {
-                                        uint16_t dabc = dab ^ sd[c2];
-                                        for (int d = c2 + 1; d < ns4 && !recovered; ++d) {
-                                            if ((dabc ^ sd[d]) == syndrome) {
-                                                fixBit(suspects[a].frame_bit);
-                                                fixBit(suspects[b].frame_bit);
-                                                fixBit(suspects[c2].frame_bit);
-                                                fixBit(suspects[d].frame_bit);
-                                                auto trial = status.reassemble();
-                                                if (verifyFrame(trial)) {
-                                                    LOG_MODEM(INFO, "FALSE POSITIVE RECOVERED (4-bit suspects, |LLR|=%.2f,%.2f,%.2f,%.2f)",
-                                                              suspects[a].abs_llr, suspects[b].abs_llr, suspects[c2].abs_llr, suspects[d].abs_llr);
-                                                    recovered = true;
-                                                } else {
-                                                    fixBit(suspects[a].frame_bit);
-                                                    fixBit(suspects[b].frame_bit);
-                                                    fixBit(suspects[c2].frame_bit);
-                                                    fixBit(suspects[d].frame_bit);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        // 3-bit and 4-bit suspect searches REMOVED (2026-03-15).
+                        // With 16-bit CRC, higher-order searches have unacceptable
+                        // false match rates that produce corrupted "recovered" frames:
+                        //   C(30,3)/65536 ≈ 6.2%  — caused file transfer corruption
+                        //   C(15,4)/65536 ≈ 2.1%  — also unsafe
+                        // Only 1-bit (exact) and 2-bit (C(30,2)/65536 ≈ 0.7%) are safe.
                     }
                 }
             }
