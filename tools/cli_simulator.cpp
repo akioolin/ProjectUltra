@@ -1722,7 +1722,7 @@ private:
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start).count();
 
-            if (elapsed >= 120) {  // 2 minute timeout for file transfer
+            if (elapsed >= 300) {  // 5 minute timeout for file transfer (R1/4 needs ~2min for 10KB)
                 std::cout << "  \033[31m✗ File transfer timeout!\033[0m\n";
                 return false;
             }
