@@ -139,11 +139,11 @@
 - OTFS: EXPERIMENTAL - See OTFS Status section below
 - cli_simulator: FULLY WORKING - all phases pass on AWGN and fading
 
-**Auto rate selection ladder (2026-03-15, updated with CPE for differential):**
+**Auto rate selection ladder (2026-03-15, updated with 802.11n LDPC):**
 | Condition | Auto rate | Payload/frame | Throughput |
 |-----------|-----------|---------------|------------|
 | SNR >= 20, AWGN (fading < 0.15) | **R3/4** | 243 bytes | ~3900 bps |
-| SNR >= 15, good fading (< 0.65) | **R2/3** | 197 bytes | ~3200 bps |
+| SNR >= 15, near-AWGN (fading < 0.15) | **R2/3** | 197 bytes | ~3200 bps |
 | SNR >= 15, good/moderate fading (< 1.10) | **R1/2** | 141 bytes | ~2300 bps |
 | Everything else | **R1/4** | 62 bytes | ~1150 bps |
 

@@ -26,31 +26,31 @@ struct WaveformRecommendation {
 // Both recommendWaveformAndRate() and recommendDataMode() use this.
 //
 // Fading index now combines freq_cv + temporal_cv (Doppler measurement).
-// Thresholds (2026-02-10) - Full rate ladder:
+// Thresholds (2026-03-15) - Full rate ladder:
 //   AWGN only (< 0.15):             R3/4 @ SNR >= 20 (10/10 seeds, 0 retx)
-//   Good fading or better (< 0.65): R2/3 @ SNR >= 20 (30/30 seeds, 0 retx)
-//   Good fading or better (< 0.65): R1/2 @ SNR >= 15 (5/5 seeds, 0 retx)
-//   Moderate fading (< 1.10):       R1/2 @ SNR >= 15 (6/6 seeds, 100% delivery)
+//   Near-AWGN (< 0.15):             R2/3 @ SNR >= 15
+//   Good fading (< 0.65):           R1/2 @ SNR >= 15 (5/5 seeds, 14% retx)
+//   Moderate fading (< 1.10):       R1/2 @ SNR >= 15 (100% delivery, 52% retx)
 //   Heavy+ (>= 1.10):              R1/4 only
 //
 // R3/4 verified (2026-02-10):
 //   DQPSK R3/4 AWGN SNR=20: 10/10 seeds PASS, 0 retransmissions
 //   DQPSK R3/4 Good fading: FAILS (23 retx / 5 seeds) — AWGN only!
-//   Payload: 243 bytes/frame — 23% gain over R2/3
-// R2/3 verified (2026-03-15, CPE correction for differential modes):
-//   DQPSK R2/3 Good fading SNR=15: 10/10 seeds PASS, avg 1.5 retx
-//   DQPSK R2/3 Good fading SNR=20: 30/30 seeds PASS, 0 retransmissions
-//   Payload: 197 bytes/frame — 40% gain over R1/2
-// R1/2 verified (2026-03-15):
-//   DQPSK R1/2 Moderate fading SNR=15: 5/5 seeds PASS, avg 2.4 retx
-//   DQPSK R1/2 Good fading SNR=15: 5/5 seeds PASS, 0 retransmissions
+// R2/3 verified (2026-03-15, 802.11n LDPC + CPE correction):
+//   10KB file transfer good fading SNR=15: 1485 bps, 33% retx
+//   10KB file transfer AWGN SNR=15: near-ideal (low retx)
+//   Demoted from good fading: R1/2 gives similar throughput (1418 bps)
+//   with half the retransmissions (14% vs 33%) — more reliable.
+// R1/2 verified (2026-03-15, 802.11n LDPC):
+//   10KB file transfer good fading SNR=15: 1418 bps, 14% retx, 100% frame success
+//   10KB file transfer moderate fading SNR=15: 1055 bps, 52% retx, 99% frame success
+//   10KB file transfer AWGN SNR=15: 1636 bps, 3% retx, 100% frame success
 inline CodeRate selectOFDMCodeRate(float snr_db, float fading_index) {
     // AWGN only: R3/4 at SNR >= 20 (too many retx on fading)
     if (fading_index < 0.15f && snr_db >= 20.0f) return CodeRate::R3_4;
 
-    // Good fading or better: R2/3 at SNR >= 15
-    // CPE correction for differential modes enables this (was SNR >= 20 before 2026-03-15)
-    if (fading_index < 0.65f && snr_db >= 15.0f) return CodeRate::R2_3;
+    // Near-AWGN: R2/3 at SNR >= 15 (too many retx on real fading channels)
+    if (fading_index < 0.15f && snr_db >= 15.0f) return CodeRate::R2_3;
 
     // Good-to-moderate fading: R1/2 at SNR >= 15
     if (fading_index < 1.10f && snr_db >= 15.0f) return CodeRate::R1_2;
@@ -71,11 +71,9 @@ inline CodeRate capInitialOFDMRate(float snr_db, float fading_index, CodeRate ca
     }
 
     if (candidate == CodeRate::R2_3) {
-        // Conservative bootstrap: cap to R1/2 on moderate+ fading or low SNR.
-        // R2/3 verified at SNR=15 good fading (10/10 seeds PASS, avg 1.5 retx).
-        // Good fading measures ~0.49-0.62, so use 0.60 as bootstrap gate
-        // (slightly below steady-state 0.65 for margin on first post-connect frame).
-        if (fading_index >= 0.60f || snr_db < 15.0f) {
+        // R2/3 is now AWGN-only (fading < 0.15). At bootstrap, chirp-era fading
+        // can read slightly high, so cap to R1/2 if any fading detected.
+        if (fading_index >= 0.10f || snr_db < 15.0f) {
             return CodeRate::R1_2;
         }
     }
