@@ -22,6 +22,7 @@
 #include <atomic>
 #include <mutex>
 #include <deque>
+#include <unistd.h>
 #include <queue>
 #include <algorithm>
 #include <cmath>
@@ -1666,7 +1667,7 @@ private:
 
     bool runFileTransferTest() {
         // Create test file
-        std::string test_file = "/tmp/cli_sim_test_file.bin";
+        std::string test_file = "/tmp/cli_sim_test_file_" + std::to_string(::getpid()) + ".bin";
         {
             std::ofstream ofs(test_file, std::ios::binary);
             if (!ofs) {
