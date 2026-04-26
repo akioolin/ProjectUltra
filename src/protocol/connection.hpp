@@ -349,8 +349,13 @@ private:
     // First retx fires AFTER the OFDM round-trip window so the success path
     // (ALPHA decoded the original ACK and started sending) clears retx state
     // before any retx is sent — keeping the retx pure overhead-on-failure only.
+    // Capped at 1 retx because additional retx fire uselessly when BRAVO's PHY
+    // is stuck decoding (e.g. burst of false syncs at the LTS): the original
+    // ACK either reached ALPHA or didn't, and the 1st retx is the only second
+    // chance worth paying for. Each unsent-but-queued retx is ~5s of MC-DPSK
+    // audio that delays BRAVO's real ACK traffic.
     static constexpr uint32_t CONNECT_ACK_RETRANSMIT_MS = 6000;
-    static constexpr int CONNECT_ACK_MAX_RETX = 2;               // total retx after first send
+    static constexpr int CONNECT_ACK_MAX_RETX = 1;
 
     // Internal handlers for v2 frames
     void handleConnect(const v2::ConnectFrame& frame, const std::string& src_call);

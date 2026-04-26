@@ -30,8 +30,8 @@ the handshake state by then.
 **What was changed:**
 - `src/protocol/connection.hpp`: added `connect_ack_frame_`, `connect_ack_retransmit_ms_`,
   `connect_ack_retx_remaining_` member state + `CONNECT_ACK_RETRANSMIT_MS = 6000`,
-  `CONNECT_ACK_MAX_RETX = 2` constants. Public `isInitiator()` and `isHandshakeConfirmed()`
-  accessors for modem-layer use.
+  `CONNECT_ACK_MAX_RETX = 1` constants. Public `isInitiator()` and `isHandshakeConfirmed()`
+  accessors for modem-layer use. (Cap is 1 — see "Why 1 retx, not 2" below.)
 - `src/protocol/connection_handlers.cpp`: in `handleConnect()`, after `transmitFrame(ack_data)`,
   cache `connect_ack_frame_ = ack_data` and arm the retx interval/counter.
 - `src/protocol/connection.cpp`:
@@ -74,6 +74,16 @@ Auto-mode baseline (5 seeds msg + 3 seeds file across 6 SNR×channel cells, 48 r
   5/5 and 3/3. Remaining 1 failure is f_snr05_good seed 1 — MC-DPSK file mode where retx
   is intentionally not enabled; this seed is unstable across re-runs (cli_simulator's
   wall-clock-driven pacing introduces nondeterminism), not caused by this fix.
+
+**Why 1 retx, not 2:**
+File-transfer timing analysis on a PHY-stress seed (SNR=15 good seed 7) showed BRAVO's
+LDPC decode chain stuck in false-sync rejections for ~13s after ALPHA's first burst.
+During that window neither retx fired the `clear-on-onFrameReceived` hook, so both
+retx attempts went out — each an extra ~5s of MC-DPSK audio in BRAVO's TX queue,
+delaying real ACK traffic and triggering ARQ timeout cascades. The targeted bug
+(m_snr15_moderate seed 5) recovered with the 1st retx in v6 testing — the 2nd was
+already redundant. 1-retx version validated: m_snr15_moderate stayed 5/5, no
+regressions on OFDM cells.
 
 **Invariants:**
 - Retx only fires when `negotiated_mode_ == WaveformMode::OFDM_CHIRP`. Do not extend
