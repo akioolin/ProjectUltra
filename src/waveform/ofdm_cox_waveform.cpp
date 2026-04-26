@@ -8,6 +8,10 @@
 
 namespace ultra {
 
+namespace {
+constexpr size_t LDPC_CODEWORD_BITS = 648;
+}
+
 OFDMNvisWaveform::OFDMNvisWaveform() {
     // Default OFDM_COX configuration
     config_.fft_size = 512;
@@ -193,7 +197,7 @@ bool OFDMNvisWaveform::process(SampleSpan samples) {
         soft_bits_.clear();
         while (demodulator_->hasPendingData()) {
             auto chunk = demodulator_->getSoftBits();
-            if (chunk.empty()) break;
+            if (chunk.size() != LDPC_CODEWORD_BITS) break;
             soft_bits_.insert(soft_bits_.end(), chunk.begin(), chunk.end());
         }
     }

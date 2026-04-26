@@ -45,16 +45,16 @@ struct LDPCParams {
     CodeRate rate;
     int k;  // info bits
     int n;  // codeword bits
-    int k_bytes;  // ceil(k/8)
+    int k_bytes;  // floor(k/8): full payload bytes that fit in one codeword
     const char* name;
 };
 
 static const LDPCParams LDPC_RATES[] = {
-    { CodeRate::R1_4, 162, 648, 21, "R1/4" },
-    { CodeRate::R1_2, 324, 648, 41, "R1/2" },
+    { CodeRate::R1_4, 162, 648, 20, "R1/4" },
+    { CodeRate::R1_2, 324, 648, 40, "R1/2" },
     { CodeRate::R2_3, 432, 648, 54, "R2/3" },
-    { CodeRate::R3_4, 486, 648, 61, "R3/4" },  // 486 bits = 60.75 bytes - problematic!
-    { CodeRate::R5_6, 540, 648, 68, "R5/6" },
+    { CodeRate::R3_4, 486, 648, 60, "R3/4" },  // 486 bits = 60.75 bytes
+    { CodeRate::R5_6, 540, 648, 67, "R5/6" },
 };
 
 // Generate deterministic test data
@@ -97,6 +97,18 @@ void printHexContext(const Bytes& data, size_t pos, const char* label) {
     std::cout << std::dec << "\n";
 }
 
+std::vector<float> bytesToSoftBits(const Bytes& data) {
+    std::vector<float> soft_bits;
+    soft_bits.reserve(data.size() * 8);
+    for (uint8_t byte : data) {
+        for (int b = 7; b >= 0; --b) {
+            uint8_t bit = (byte >> b) & 1;
+            soft_bits.push_back(bit ? -6.0f : 6.0f);
+        }
+    }
+    return soft_bits;
+}
+
 // ============================================================================
 // LDPC Encoder/Decoder Direct Tests
 // ============================================================================
@@ -109,26 +121,24 @@ bool test_ldpc_single_block(CodeRate rate, const char* rate_name) {
     LDPCDecoder decoder(rate);
 
     // Get params for this rate
-    int k = 0;
+    int k = 0, n = 0;
     for (const auto& p : LDPC_RATES) {
-        if (p.rate == rate) { k = p.k; break; }
+        if (p.rate == rate) { k = p.k; n = p.n; break; }
     }
-    size_t data_bytes = (k + 7) / 8;  // Max bytes that fit in one block
+    size_t data_bytes = k / 8;  // Max full bytes that fit in one block
 
     // Generate test data
     Bytes tx_data = generateTestData(data_bytes);
 
     // Encode
     Bytes encoded = encoder.encode(tx_data);
+    size_t expected_encoded_bytes = (n + 7) / 8;
+    if (encoded.size() != expected_encoded_bytes) {
+        FAIL("Single-block input produced wrong encoded size");
+    }
 
     // Convert to soft bits (simulate perfect reception)
-    std::vector<float> soft_bits;
-    for (uint8_t byte : encoded) {
-        for (int b = 7; b >= 0; --b) {
-            uint8_t bit = (byte >> b) & 1;
-            soft_bits.push_back(bit ? -6.0f : 6.0f);  // LLR: positive for 0, negative for 1
-        }
-    }
+    std::vector<float> soft_bits = bytesToSoftBits(encoded);
 
     // Decode
     Bytes rx_data = decoder.decodeSoft(soft_bits);
@@ -170,7 +180,7 @@ bool test_ldpc_multi_block(CodeRate rate, const char* rate_name, size_t num_bloc
     // Calculate data size that requires exactly num_blocks codewords
     // Each block encodes k bits = k/8 bytes (with potential fractional byte)
     size_t data_bits = k * num_blocks;
-    size_t data_bytes = (data_bits + 7) / 8;
+    size_t data_bytes = data_bits / 8;
 
     // Generate test data
     Bytes tx_data = generateTestData(data_bytes);
@@ -181,15 +191,14 @@ bool test_ldpc_multi_block(CodeRate rate, const char* rate_name, size_t num_bloc
     // Verify encoded size
     size_t expected_encoded_bits = n * num_blocks;
     size_t expected_encoded_bytes = (expected_encoded_bits + 7) / 8;
+    if (encoded.size() != expected_encoded_bytes) {
+        std::cout << "\n      Expected " << expected_encoded_bytes
+                  << " encoded bytes, got " << encoded.size() << "\n";
+        FAIL("Encoded size does not match requested block count");
+    }
 
     // Convert to soft bits
-    std::vector<float> soft_bits;
-    for (uint8_t byte : encoded) {
-        for (int b = 7; b >= 0; --b) {
-            uint8_t bit = (byte >> b) & 1;
-            soft_bits.push_back(bit ? -6.0f : 6.0f);
-        }
-    }
+    std::vector<float> soft_bits = bytesToSoftBits(encoded);
 
     // Decode
     Bytes rx_data = decoder.decodeSoft(soft_bits);
@@ -258,7 +267,7 @@ bool test_ldpc_boundary_bytes(CodeRate rate, const char* rate_name) {
     // Create data with specific pattern at boundary
     // Use 5 blocks to thoroughly test
     size_t num_blocks = 5;
-    size_t data_size = (k * num_blocks + 7) / 8;
+    size_t data_size = (k * num_blocks) / 8;
     Bytes tx_data = generateTestData(data_size);
 
     // Make boundary bytes distinctive
@@ -275,18 +284,17 @@ bool test_ldpc_boundary_bytes(CodeRate rate, const char* rate_name) {
 
     // Encode
     Bytes encoded = encoder.encode(tx_data);
+    size_t expected_encoded_bytes = (static_cast<size_t>(648) * num_blocks + 7) / 8;
+    if (encoded.size() != expected_encoded_bytes) {
+        FAIL("Boundary test input did not encode to expected number of codewords");
+    }
 
     // Convert to soft bits
-    std::vector<float> soft_bits;
-    for (uint8_t byte : encoded) {
-        for (int b = 7; b >= 0; --b) {
-            uint8_t bit = (byte >> b) & 1;
-            soft_bits.push_back(bit ? -6.0f : 6.0f);
-        }
-    }
+    std::vector<float> soft_bits = bytesToSoftBits(encoded);
 
     // Decode
     Bytes rx_data = decoder.decodeSoft(soft_bits);
+    if (!decoder.lastDecodeSuccess()) FAIL("Decode reported failure");
 
     if (rx_data.size() > tx_data.size()) {
         rx_data.resize(tx_data.size());
@@ -310,6 +318,44 @@ bool test_ldpc_boundary_bytes(CodeRate rate, const char* rate_name) {
 
     if (!all_ok) {
         FAIL("Boundary byte corruption detected");
+    }
+
+    PASS();
+    return true;
+}
+
+bool test_ldpc_reject_partial_llrs(CodeRate rate, const char* rate_name) {
+    std::string test_name = std::string("Reject partial LLR input LDPC ") + rate_name;
+    TEST(test_name.c_str());
+
+    LDPCEncoder encoder(rate);
+    LDPCDecoder decoder(rate);
+
+    int k = 0, n = 0;
+    for (const auto& p : LDPC_RATES) {
+        if (p.rate == rate) { k = p.k; n = p.n; break; }
+    }
+
+    Bytes tx_data = generateTestData(k / 8);
+    Bytes encoded = encoder.encode(tx_data);
+    std::vector<float> soft_bits = bytesToSoftBits(encoded);
+
+    if (soft_bits.size() != static_cast<size_t>(n)) {
+        FAIL("Test setup did not produce one exact codeword");
+    }
+
+    soft_bits.pop_back();
+    Bytes decoded = decoder.decodeSoft(soft_bits);
+    if (decoder.lastDecodeSuccess() || !decoded.empty()) {
+        FAIL("Decoder accepted a truncated codeword");
+    }
+
+    Bytes multi = encoder.encode(generateTestData((k * 2) / 8));
+    std::vector<float> multi_soft = bytesToSoftBits(multi);
+    multi_soft.push_back(0.0f);
+    decoded = decoder.decodeSoft(multi_soft);
+    if (decoder.lastDecodeSuccess() || !decoded.empty()) {
+        FAIL("Decoder accepted non-codeword-aligned multi-block input");
     }
 
     PASS();
@@ -456,18 +502,19 @@ bool test_protocol_frame_sizes() {
 
         // Encode
         Bytes encoded = encoder.encode(tx_data);
+        size_t expected_encoded_bytes = ((num_codewords * 648) + 7) / 8;
+        if (encoded.size() != expected_encoded_bytes) {
+            FAIL("Encoded size mismatch for protocol frame");
+        }
 
         // Convert to soft bits
-        std::vector<float> soft_bits;
-        for (uint8_t byte : encoded) {
-            for (int b = 7; b >= 0; --b) {
-                uint8_t bit = (byte >> b) & 1;
-                soft_bits.push_back(bit ? -6.0f : 6.0f);
-            }
-        }
+        std::vector<float> soft_bits = bytesToSoftBits(encoded);
 
         // Decode
         Bytes rx_data = decoder.decodeSoft(soft_bits);
+        if (!decoder.lastDecodeSuccess()) {
+            FAIL("Decode reported failure for protocol frame");
+        }
 
         if (rx_data.size() > tx_data.size()) {
             rx_data.resize(tx_data.size());
@@ -514,6 +561,11 @@ int main() {
     std::cout << "\nBoundary Byte Tests (codeword boundaries):\n";
     for (const auto& p : LDPC_RATES) {
         test_ldpc_boundary_bytes(p.rate, p.name);
+    }
+
+    std::cout << "\nPartial LLR Rejection Tests:\n";
+    for (const auto& p : LDPC_RATES) {
+        test_ldpc_reject_partial_llrs(p.rate, p.name);
     }
 
     std::cout << "\nProtocol Frame Size Tests:\n";

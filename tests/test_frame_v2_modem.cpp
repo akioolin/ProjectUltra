@@ -116,8 +116,11 @@ void test_control_frame_through_modem() {
             return;
         }
 
-        // LDPC decode
-        auto decoded_data = decoder.decodeSoft(all_soft_bits);
+        // LDPC decode exactly one codeword; any remaining soft bits are OFDM
+        // symbol padding and must not be passed to the LDPC decoder.
+        std::vector<float> cw_bits(all_soft_bits.begin(),
+                                   all_soft_bits.begin() + v2::LDPC_CODEWORD_BITS);
+        auto decoded_data = decoder.decodeSoft(cw_bits);
         if (!decoder.lastDecodeSuccess()) {
             FAIL("LDPC decode failed");
             return;

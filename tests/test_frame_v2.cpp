@@ -130,20 +130,20 @@ void test_data_frame_codeword_count() {
         // 3 bytes payload: 17 + 3 + 2 = 22 bytes = 2 codewords
         assert(DataFrame::calculateCodewords(3) == 2);
 
-        // 20 bytes payload: 17 + 20 + 2 = 39 bytes = 2 codewords
-        assert(DataFrame::calculateCodewords(20) == 2);
+        // 20 bytes payload: 39 bytes total = CW0(20) + 19 bytes in CW1+ = 3 codewords
+        assert(DataFrame::calculateCodewords(20) == 3);
 
-        // 21 bytes payload: 17 + 21 + 2 = 40 bytes = 2 codewords
-        assert(DataFrame::calculateCodewords(21) == 2);
+        // 21 bytes payload: 40 bytes total = CW0(20) + 20 bytes in CW1+ = 3 codewords
+        assert(DataFrame::calculateCodewords(21) == 3);
 
-        // 23 bytes payload: 17 + 23 + 2 = 42 bytes = 3 codewords
+        // 23 bytes payload: 42 bytes total = CW0(20) + 22 bytes in CW1+ = 3 codewords
         assert(DataFrame::calculateCodewords(23) == 3);
 
-        // 100 bytes payload: 17 + 100 + 2 = 119 bytes = 6 codewords
-        assert(DataFrame::calculateCodewords(100) == 6);
+        // 100 bytes payload: 119 bytes total = CW0(20) + 99 bytes in CW1+ = 7 codewords
+        assert(DataFrame::calculateCodewords(100) == 7);
 
-        // 256 bytes payload: 17 + 256 + 2 = 275 bytes = 14 codewords
-        assert(DataFrame::calculateCodewords(256) == 14);
+        // 256 bytes payload: 275 bytes total = CW0(20) + 255 bytes in CW1+ = 16 codewords
+        assert(DataFrame::calculateCodewords(256) == 16);
 
         PASS();
     } catch (const std::exception& e) {

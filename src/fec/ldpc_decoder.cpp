@@ -281,13 +281,20 @@ Bytes LDPCDecoder::decode(ByteSpan coded_data) {
 Bytes LDPCDecoder::decodeSoft(std::span<const float> llrs) {
     if (llrs.empty()) {
         impl_->last_success = false;
+        impl_->last_iters = 0;
         return {};
     }
 
     int n = impl_->params.info_bits + impl_->params.parity_bits;
     int k = impl_->params.info_bits;
 
-    if (llrs.size() <= static_cast<size_t>(n)) {
+    if (llrs.size() % static_cast<size_t>(n) != 0) {
+        impl_->last_success = false;
+        impl_->last_iters = 0;
+        return {};
+    }
+
+    if (llrs.size() == static_cast<size_t>(n)) {
         return impl_->decodeBP(llrs);
     }
 
@@ -382,18 +389,6 @@ Bytes LDPCDecoder::decodeSoft(std::span<const float> llrs) {
         }
 
         offset += n;
-    }
-
-    // Handle any remaining partial block
-    if (offset < llrs.size()) {
-        std::span<const float> remaining(llrs.data() + offset, llrs.size() - offset);
-        std::vector<float> padded(n, 0.0f);
-        std::copy(remaining.begin(), remaining.end(), padded.begin());
-        impl_->decodeBP(padded);
-        for (int j = 0; j < k; ++j) {
-            uint8_t bit = (impl_->llr_total[j] < 0) ? 1 : 0;
-            all_decoded_bits.push_back(bit);
-        }
     }
 
     // Convert all decoded bits to bytes

@@ -9,6 +9,10 @@
 
 namespace ultra {
 
+namespace {
+constexpr size_t LDPC_CODEWORD_BITS = 648;
+}
+
 OFDMChirpWaveform::OFDMChirpWaveform() {
     // Default OFDM_CHIRP configuration
     config_.fft_size = 512;
@@ -457,7 +461,7 @@ bool OFDMChirpWaveform::process(SampleSpan samples) {
         soft_bits_.clear();
         while (demodulator_->hasPendingData()) {
             auto chunk = demodulator_->getSoftBits();
-            if (chunk.empty()) break;
+            if (chunk.size() != LDPC_CODEWORD_BITS) break;
             soft_bits_.insert(soft_bits_.end(), chunk.begin(), chunk.end());
         }
         last_snr_ = demodulator_->getEstimatedSNR();

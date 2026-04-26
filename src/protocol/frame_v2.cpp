@@ -435,27 +435,23 @@ std::optional<ControlFrame> ControlFrame::deserialize(ByteSpan data) {
 // ============================================================================
 
 uint8_t DataFrame::calculateCodewords(size_t payload_size) {
-    // Total frame size = header (17) + payload + frame_CRC (2)
-    size_t total = HEADER_SIZE + payload_size + CRC_SIZE;
-
-    // Calculate based on bit-level encoding (matches ldpc_encoder.cpp)
-    // For R1/4: 162 info bits per codeword
-    size_t total_bits = total * 8;
-    constexpr size_t info_bits = 162;  // R1/4
-
-    return static_cast<uint8_t>((total_bits + info_bits - 1) / info_bits);
+    return calculateCodewords(payload_size, CodeRate::R1_4);
 }
 
 uint8_t DataFrame::calculateCodewords(size_t payload_size, CodeRate rate) {
     // Total frame size = header (17) + payload + frame_CRC (2)
     size_t total = HEADER_SIZE + payload_size + CRC_SIZE;
 
-    // Calculate based on bit-level encoding (matches ldpc_encoder.cpp)
-    // Encoder packs total*8 bits into codewords of info_bits each
-    size_t total_bits = total * 8;
-    size_t info_bits = getInfoBitsForRate(rate);
+    size_t bytes_per_cw = getBytesPerCodeword(rate);
+    if (total <= bytes_per_cw) {
+        return 1;
+    }
 
-    return static_cast<uint8_t>((total_bits + info_bits - 1) / info_bits);
+    size_t data_payload_size = bytes_per_cw - DATA_CW_HEADER_SIZE;
+    size_t continuation_bytes = total - bytes_per_cw;
+    size_t continuation_cw = (continuation_bytes + data_payload_size - 1) / data_payload_size;
+
+    return static_cast<uint8_t>(1 + continuation_cw);
 }
 
 DataFrame DataFrame::makeData(const std::string& src, const std::string& dst,
