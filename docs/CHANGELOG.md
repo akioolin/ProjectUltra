@@ -10,6 +10,83 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-04-26: Proactive CONNECT_ACK retransmission — handshake recovery on faded seeds
+
+**What was broken:**
+Auto-mode baseline (cli_simulator, no `--mod`/`--rate` forcing) at DQPSK R1/2 SNR=15
+moderate fading showed 4/5 message tests and 2/3 file 2048 tests passing. The single
+failure was always the same fingerprint: ALPHA never received CONNECT_ACK, sat in
+CONNECTING state until cli_simulator's 30s PHASE 1 timeout cut the test off. The
+protocol's `connect_timeout_ms = 60000` would have triggered a CONNECT retry
+eventually, but only well after the harness gave up — and in production, real users
+would just see a "connection timeout" with no recovery in 30s.
+
+Root cause: BRAVO (responder) sends a single CONNECT_ACK and then waits. If ALPHA's
+LDPC decode of that one MC-DPSK ACK fails on a faded seed, there's no retry. The
+existing 2.2s "responder fail-safe" only forced internal handshake completion on
+BRAVO — it didn't re-send the ACK, and BRAVO's encoder/decoder were already past
+the handshake state by then.
+
+**What was changed:**
+- `src/protocol/connection.hpp`: added `connect_ack_frame_`, `connect_ack_retransmit_ms_`,
+  `connect_ack_retx_remaining_` member state + `CONNECT_ACK_RETRANSMIT_MS = 6000`,
+  `CONNECT_ACK_MAX_RETX = 2` constants. Public `isInitiator()` and `isHandshakeConfirmed()`
+  accessors for modem-layer use.
+- `src/protocol/connection_handlers.cpp`: in `handleConnect()`, after `transmitFrame(ack_data)`,
+  cache `connect_ack_frame_ = ack_data` and arm the retx interval/counter.
+- `src/protocol/connection.cpp`:
+  - Tick CONNECTED state: when `negotiated_mode_ == OFDM_CHIRP` and retx_remaining > 0,
+    re-send the cached ACK every `CONNECT_ACK_RETRANSMIT_MS`. Decoupled from
+    `handshake_confirmed_` so it survives the 2.2s fail-safe.
+  - In `onFrameReceived()`: any frame from initiator clears retx state immediately —
+    "ALPHA spoke" is sufficient signal that the original ACK got through.
+  - `enterDisconnected()` and the `cancelTx()` reset path also clear retx state.
+
+**How it's properly fixed:**
+- First retx fires 6s after the original CONNECT_ACK send. That's *after* the OFDM
+  round-trip (~5s for ALPHA to decode + send first DATA), so the success case clears
+  retx state via `onFrameReceived()` before any retx fires. Verified in v6 baseline:
+  retx mean dropped from 1 → 0 at the targeted cell.
+- The retx is gated to OFDM_CHIRP only. MC-DPSK and OFDM_NARROW have ~12-16s round
+  trips — retx at 6s would clog the channel ahead of the first ACK and hurt more
+  than help. Empirically confirmed in v3/v4 attempts where ungated retx regressed
+  SNR=5 MC-DPSK from 5/5 → 3/5.
+- `transmitFrame()` in cli_simulator (and modem_engine.cpp's symmetric path) already
+  special-cases CONNECT/CONNECT_ACK frame types (0x12/0x13) to encode in MC-DPSK
+  regardless of negotiated waveform — so the cached bytes go out in MC-DPSK on each
+  retx even though BRAVO's encoder mode is OFDM_CHIRP by then. No modem-layer changes
+  required.
+- Fail-safe (RESPONDER_HANDSHAKE_FAILSAFE_MS = 2200) unchanged — preserves the existing
+  "first OFDM data frame lost" recovery path.
+
+**Test verification:**
+```
+./build/cli_simulator --snr 15 --channel moderate --seed 5
+```
+Pre-fix: TEST FAILED at PHASE 1 timeout (30s wall, ALPHA never decoded ACK).
+Post-fix: TEST PASSED. Log shows `Re-sending CONNECT_ACK (proactive, 1 retx remaining)`
+at ~14.5s, ALPHA decodes retx by ~17s, full handshake + 7-message data exchange
+completes by 30s.
+
+Auto-mode baseline (5 seeds msg + 3 seeds file across 6 SNR×channel cells, 48 runs total):
+- Pre-fix: 46/48 pass. 2 failures, both DQPSK R1/2 moderate SNR=15 handshake.
+- Post-fix: 47/48 pass. The targeted cells (m_snr15_moderate, f_snr15_moderate) are now
+  5/5 and 3/3. Remaining 1 failure is f_snr05_good seed 1 — MC-DPSK file mode where retx
+  is intentionally not enabled; this seed is unstable across re-runs (cli_simulator's
+  wall-clock-driven pacing introduces nondeterminism), not caused by this fix.
+
+**Invariants:**
+- Retx only fires when `negotiated_mode_ == WaveformMode::OFDM_CHIRP`. Do not extend
+  to MC-DPSK or OFDM_NARROW without re-validating round-trip timing — those modes'
+  RTT is longer than the retx interval and would cause channel congestion.
+- The retx of a cached ACK is fire-and-forget — `transmitFrame()` overrides the
+  encoder mode for type 0x13 frames. If you ever rip out that override, this fix
+  silently goes out in OFDM and ALPHA (still in MC-DPSK CONNECTING) won't decode it.
+- `connect_ack_frame_` must be cleared on disconnect/reset paths to avoid stale
+  retx after a subsequent connection.
+
+---
+
 ## 2026-03-15: CPE correction for differential modes — higher throughput on fading
 
 **What was broken:**

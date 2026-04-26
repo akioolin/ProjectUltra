@@ -156,6 +156,8 @@ public:
     // --- Waveform Mode ---
 
     WaveformMode getNegotiatedMode() const { return negotiated_mode_; }
+    bool isInitiator() const { return is_initiator_; }
+    bool isHandshakeConfirmed() const { return handshake_confirmed_; }
     void setPreferredMode(WaveformMode mode) { config_.preferred_mode = mode; }
     void setModeCapabilities(uint8_t caps) { config_.mode_capabilities = caps; }
 
@@ -336,6 +338,19 @@ private:
     bool handshake_confirmed_ = false;    // True after handshake is fully confirmed
     uint32_t responder_handshake_wait_ms_ = 0;  // Fail-safe timer for responder handshake
     static constexpr uint32_t RESPONDER_HANDSHAKE_FAILSAFE_MS = 2200;
+
+    // CONNECT_ACK retransmission (responder side, BUG-CTRL-001)
+    // ALPHA can fail to decode the single MC-DPSK CONNECT_ACK on faded seeds.
+    // We proactively re-send it from BRAVO until the handshake is confirmed by
+    // a first frame from the initiator, mirroring the disconnect-ACK pattern.
+    Bytes connect_ack_frame_;                  // Cached CONNECT_ACK for re-sending
+    uint32_t connect_ack_retransmit_ms_ = 0;   // Time until next retransmit
+    int connect_ack_retx_remaining_ = 0;       // Retries left (counts down to 0)
+    // First retx fires AFTER the OFDM round-trip window so the success path
+    // (ALPHA decoded the original ACK and started sending) clears retx state
+    // before any retx is sent — keeping the retx pure overhead-on-failure only.
+    static constexpr uint32_t CONNECT_ACK_RETRANSMIT_MS = 6000;
+    static constexpr int CONNECT_ACK_MAX_RETX = 2;               // total retx after first send
 
     // Internal handlers for v2 frames
     void handleConnect(const v2::ConnectFrame& frame, const std::string& src_call);

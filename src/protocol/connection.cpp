@@ -349,6 +349,9 @@ void Connection::abortTxNow() {
     connect_retry_count_ = 0;
     ping_retry_count_ = 0;
     responder_handshake_wait_ms_ = 0;
+    connect_ack_frame_.clear();
+    connect_ack_retransmit_ms_ = 0;
+    connect_ack_retx_remaining_ = 0;
 
     // Stop transient connection attempts immediately.
     if (state_ == ConnectionState::PROBING ||
@@ -612,6 +615,17 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
         return;
     }
 
+    // Any frame from the initiator means our CONNECT_ACK got through — stop
+    // proactive ACK retx regardless of whether the formal handshake-confirmed
+    // bit has flipped (the 2.2s fail-safe sets that bit before first DATA
+    // arrives, so without this clear, retx fires uselessly during early data
+    // phase and clogs the channel).
+    if (state_ == ConnectionState::CONNECTED && !is_initiator_ &&
+        !connect_ack_frame_.empty()) {
+        connect_ack_frame_.clear();
+        connect_ack_retx_remaining_ = 0;
+    }
+
     // Responder handshake confirmation: first valid protocol frame after CONNECT_ACK
     // means the initiator received our ACK and switched to data/control exchange.
     if (state_ == ConnectionState::CONNECTED && !is_initiator_ && !handshake_confirmed_) {
@@ -811,6 +825,27 @@ void Connection::tick(uint32_t elapsed_ms) {
         case ConnectionState::CONNECTED:
             connected_time_ms_ += elapsed_ms;
             stats_.connected_time_ms = connected_time_ms_;
+
+            // Proactive CONNECT_ACK retransmission (responder side, BUG-CTRL-001).
+            // ALPHA can miss the single MC-DPSK ACK on faded seeds — without retx
+            // the only recovery is the 60s connect_timeout, which is too slow.
+            // Gated to OFDM_CHIRP data mode: when MC-DPSK is the negotiated data
+            // mode, the round-trip is ~12-16s and retx clogs ALPHA's RX buffer
+            // ahead of the first ACK, hurting more than it helps. Decoupled from
+            // handshake_confirmed_ so retx continues across the 2.2s fail-safe.
+            if (!is_initiator_ &&
+                negotiated_mode_ == WaveformMode::OFDM_CHIRP &&
+                !connect_ack_frame_.empty() && connect_ack_retx_remaining_ > 0) {
+                if (elapsed_ms >= connect_ack_retransmit_ms_) {
+                    connect_ack_retransmit_ms_ = CONNECT_ACK_RETRANSMIT_MS;
+                    connect_ack_retx_remaining_--;
+                    LOG_MODEM(INFO, "Connection: Re-sending CONNECT_ACK (proactive, %d retx remaining)",
+                              connect_ack_retx_remaining_);
+                    transmitFrame(connect_ack_frame_);
+                } else {
+                    connect_ack_retransmit_ms_ -= elapsed_ms;
+                }
+            }
 
             // Responder fail-safe: if first post-ACK frame is lost, don't stay in
             // handshake waveform forever. After a short grace period, force
@@ -1053,6 +1088,9 @@ void Connection::enterDisconnected(const std::string& reason) {
     burst_mode_active_ = false;
     burst_tx_buffer_.clear();
     responder_handshake_wait_ms_ = 0;
+    connect_ack_frame_.clear();
+    connect_ack_retransmit_ms_ = 0;
+    connect_ack_retx_remaining_ = 0;
     arq_.reset();
     file_transfer_.cancel();
     pending_tx_fragments_.clear();

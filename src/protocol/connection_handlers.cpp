@@ -191,6 +191,14 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             ack_data = ack.serialize();
         }
         transmitFrame(ack_data);
+
+        // Cache the ACK for proactive retransmission. ALPHA can fail to decode
+        // the single MC-DPSK CONNECT_ACK on faded seeds, leaving handshake stuck.
+        // We re-send periodically until handshake is confirmed by first frame.
+        connect_ack_frame_ = ack_data;
+        connect_ack_retransmit_ms_ = CONNECT_ACK_RETRANSMIT_MS;
+        connect_ack_retx_remaining_ = CONNECT_ACK_MAX_RETX;
+
         enterConnected();
         // NOTE: Don't call on_handshake_confirmed_ yet - wait for first frame from initiator
 

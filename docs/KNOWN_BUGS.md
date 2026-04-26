@@ -1,6 +1,6 @@
 # Known Bugs
 
-Last updated: 2026-02-12
+Last updated: 2026-04-26
 
 ## Purpose
 Track only currently relevant issues that can affect reliability, throughput, or release quality.
@@ -9,7 +9,7 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 ## Active Issues
 
 ### BUG-CTRL-001: Control path is still the bottleneck in aggressive fading profiles
-- Status: IN_PROGRESS
+- Status: IN_PROGRESS (handshake leg fixed 2026-04-26)
 - Area: OFDM connected mode (ACK/SACK/control reliability)
 - Symptoms:
   - Data codewords decode but ACK reception misses trigger avoidable retransmits/timeouts.
@@ -21,9 +21,18 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   - R1/4 control profile for OFDM control frames.
   - ACK repeat/coalescing and improved ARQ observability.
   - `DISCONNECT_SEQ` protection against stale data ACK being mistaken as disconnect ACK.
-- Next steps:
-  - Continue tuning ACK repeat/window/timeout under 30-seed gates.
-  - Prioritize fixes that reduce timeout tails over peak speed gains.
+  - **Proactive CONNECT_ACK retransmission (responder side)** — covers handshake-leg
+    losses at OFDM data modes. Auto-mode baseline at SNR=15 moderate (DQPSK R1/2)
+    went from 4/5 → 5/5 message tests and 2/3 → 3/3 file 2048 tests on 5/3-seed
+    samples. See CHANGELOG 2026-04-26.
+- Remaining work:
+  - Connected-mode tail variance under aggressive forced profiles (D8PSK R1/2,
+    DQPSK R3/4) when channel falls outside auto-selector envelope — these aren't
+    auto-selected, so they bite only operators forcing modes manually.
+  - BRAVO missing the initiator's CONNECT (opposite leg of the same race) is rare
+    on the production envelope but lacks a comparable fast retry — initiator's
+    `connect_timeout_ms = 60000` is far longer than the cli_simulator harness's
+    30s PHASE 1 budget, so harness exposure of this case looks like seed noise.
 
 ### BUG-CFO-001: OFDM two-stage CFO refinement remains incomplete
 - Status: OPEN
