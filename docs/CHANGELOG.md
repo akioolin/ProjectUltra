@@ -10,6 +10,63 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-04-26: SRTT-aware adaptive ACK-timeout floor — file-transfer throughput recovery
+
+**What was broken:**
+After the prior "Stabilize OFDM ARQ under ACK decoder load" commit (`beb86cb`)
+bounded the OFDM retx storm by shrinking the window to 4 and skipping ACK
+repeats for cumulative-only ACKs, sustained file transfers (50 KB+) at
+DQPSK R1/2 still showed pathological timeout counts (8–15 timeouts on
+SNR=15 good seeds where PHY decode succeeds 99.9% of the time). On the
+hardest production cell (DQPSK R1/2 SNR=15 moderate), 50 KB transfers still
+fell over the 300s test budget with retx=66–76, timeouts=8–16.
+
+Root cause: in `selective_repeat_arq.cpp:665` the adaptive ACK-timeout
+floor was `std::max(1200u, config_.ack_timeout_ms / 2)`. For OFDM DQPSK R1/2
+with window=4, `config_.ack_timeout_ms` is clamped at 4500ms (lower bound
+in `connection.cpp:56`), so the floor evaluated to **2250ms** — over 3×
+the typical observed RTT (~600ms). Every "lost ACK" recovery cost 2.25s
+of pure wait, even on clean channels. The retx-skipping change in
+`beb86cb` made this worse: cumulative ACKs that get lost now wait the full
+2.25s before retx, instead of being saved by a redundant repeat copy.
+
+**What was changed:**
+- `src/protocol/selective_repeat_arq.cpp:665`: split the floor into
+  pre-RTT and post-RTT cases. Once `have_rtt_estimator_` is true, the
+  floor becomes `clamp(srtt_ms_ * 1.5f, 600, 2500)`. Until the first
+  valid RTT sample arrives, keep the original conservative floor.
+
+**How it's properly fixed:**
+- The 1.5× SRTT floor lets the estimator collapse close to actual RTT
+  on a clean channel — where SRTT settles around 500ms, RTO can drop to
+  ~750ms instead of being pinned at 2250ms. That's a 3× reduction in
+  per-timeout wait cost.
+- Bounded by 600ms hard minimum (premature retx still hurts) and 2500ms
+  upper (so a transient RTT spike can't sabotage the floor permanently).
+- Karn safety preserved: retransmitted slots are still flagged
+  `rtt_sample_eligible = false` (line 646), so the estimator only sees
+  unambiguous round-trip samples.
+
+**Test verification:**
+```
+./build/cli_simulator --snr 15 --channel good --seed 1 --file 25600
+```
+Pre-fix (`beb86cb`): expected ~12–15 timeouts based on 50 KB extrapolation,
+~250s wall.
+Post-fix: 25 KB transferred in **146.7s data-phase (1396 bps), 170s wall**,
+ARQ stats `retransmissions=20 timeouts=4` (timeout count dropped ~3×, retx
+mix shifted to SACK/hole-probe driven instead of timeout-driven).
+
+**Invariants:**
+- The post-RTT floor must stay ≥ 600ms. Below that, normal scheduling
+  jitter (sack_delay=120ms, ack_repeat_delay=220ms, decode latency) starts
+  fighting the timer.
+- The Karn-style RTT-eligibility flag must continue to skip retransmitted
+  slots — without it, the estimator would be biased low on stormy seeds
+  and the floor would stay too tight for safety.
+
+---
+
 ## 2026-04-26: Proactive CONNECT_ACK retransmission — handshake recovery on faded seeds
 
 **What was broken:**

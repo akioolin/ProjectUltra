@@ -662,7 +662,20 @@ void SelectiveRepeatARQ::maybeSampleRTT(TXSlot& slot) {
     }
 
     float rto_f = srtt_ms_ + 4.0f * rttvar_ms_;
-    uint32_t floor_ms = std::max(1200u, config_.ack_timeout_ms / 2);
+
+    // SRTT-aware floor: once we have RTT samples, let the timeout drop close to
+    // the actual round trip rather than staying pinned at config_.ack_timeout_ms / 2.
+    // For OFDM DQPSK R1/2 with window=4 the static floor is 2250ms, but observed
+    // RTTs are 400-700ms — paying 2.25s per lost-ACK recovery accounted for ~30s
+    // of unnecessary wait on a 50KB transfer. Bound to [600ms, 2500ms] so the
+    // estimator can adapt down on clean channels but stays safe on slow paths.
+    uint32_t floor_ms;
+    if (have_rtt_estimator_) {
+        uint32_t srtt_floor = static_cast<uint32_t>(srtt_ms_ * 1.5f + 0.5f);
+        floor_ms = std::clamp(srtt_floor, 600u, 2500u);
+    } else {
+        floor_ms = std::max(1200u, config_.ack_timeout_ms / 2);
+    }
     adaptive_ack_timeout_ms_ = std::clamp(static_cast<uint32_t>(rto_f + 0.5f), floor_ms, 12000u);
 
     LOG_MODEM(DEBUG, "SR-ARQ: RTT sample=%ums srtt=%.1f rttvar=%.1f rto=%ums",
