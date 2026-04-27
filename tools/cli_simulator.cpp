@@ -51,6 +51,10 @@
 #include "fec/frame_interleaver.hpp"  // FrameInterleaver
 #include "sim/hf_channel.hpp"
 
+#ifdef ULTRA_HAVE_SDL2
+#include "gui/audio_engine.hpp"  // Real SDL2 audio I/O for --role A|B
+#endif
+
 using namespace ultra;
 using namespace ultra::gui;
 using namespace ultra::protocol;
@@ -351,6 +355,118 @@ private:
 };
 
 /**
+ * AudioPort - Pluggable audio backend for a SimulatedStation.
+ *
+ * Two implementations:
+ *   VirtualAudioPort  - Wraps SimulatedChannel for in-process two-station
+ *                       tests (--role both). Audio flows in-memory between
+ *                       stations through the channel sim.
+ *   HardwareAudioPort - Wraps gui::AudioEngine (SDL2) for real-soundcard
+ *                       I/O (--role A or --role B). One station per process,
+ *                       audio flows out through speaker/cable to the peer.
+ *
+ * The SimulatedStation itself doesn't care which backend is used.
+ */
+class AudioPort {
+public:
+    virtual ~AudioPort() = default;
+    // Pull up to `count` RX samples; pads with noise/zero if buffer underruns.
+    virtual std::vector<float> pullRx(size_t count) = 0;
+    // Push TX samples for transmission.
+    virtual void queueTx(const std::vector<float>& samples) = 0;
+    // Optional lifecycle hooks; default no-op.
+    virtual bool start() { return true; }
+    virtual void stop() {}
+};
+
+/**
+ * VirtualAudioPort - In-process audio path through SimulatedChannel.
+ * Preserves exact behavior of the original simulator pipe.
+ */
+class VirtualAudioPort : public AudioPort {
+public:
+    VirtualAudioPort(SimulatedChannel& channel, bool is_station_a)
+        : channel_(channel), is_station_a_(is_station_a) {}
+
+    std::vector<float> pullRx(size_t count) override {
+        return is_station_a_ ? channel_.receiveForA(count)
+                             : channel_.receiveForB(count);
+    }
+
+    void queueTx(const std::vector<float>& samples) override {
+        if (is_station_a_) channel_.transmitFromA(samples);
+        else               channel_.transmitFromB(samples);
+    }
+
+private:
+    SimulatedChannel& channel_;
+    bool is_station_a_;
+};
+
+#ifdef ULTRA_HAVE_SDL2
+/**
+ * HardwareAudioPort - Real soundcard I/O via SDL2 (gui::AudioEngine).
+ * Used for --role A|B mode when running across two physical machines
+ * connected by an audio cable (or speaker/mic).
+ *
+ * On RX underrun (no captured audio yet), returns zeros — silence on the
+ * wire is the correct interpretation for between-frame gaps.
+ */
+class HardwareAudioPort : public AudioPort {
+public:
+    HardwareAudioPort(const std::string& output_device,
+                      const std::string& input_device)
+        : output_device_(output_device), input_device_(input_device) {}
+
+    bool start() override {
+        if (!engine_.initialize()) {
+            std::cerr << "AudioEngine init failed\n";
+            return false;
+        }
+        if (!engine_.openOutput(output_device_)) {
+            std::cerr << "Failed to open output device '" << output_device_ << "'\n";
+            return false;
+        }
+        if (!engine_.openInput(input_device_)) {
+            std::cerr << "Failed to open input device '" << input_device_ << "'\n";
+            return false;
+        }
+        engine_.startPlayback();
+        engine_.startCapture();
+        return true;
+    }
+
+    void stop() override {
+        engine_.stopCapture();
+        engine_.stopPlayback();
+        engine_.closeInput();
+        engine_.closeOutput();
+        engine_.shutdown();
+    }
+
+    std::vector<float> pullRx(size_t count) override {
+        auto got = engine_.getRxSamples(count);
+        if (got.size() < count) {
+            // RX underrun (no audio captured yet for this 10ms window) —
+            // pad with zeros. Real soundcard silence is the right answer
+            // here, not synthetic noise.
+            got.resize(count, 0.0f);
+        }
+        return got;
+    }
+
+    void queueTx(const std::vector<float>& samples) override {
+        engine_.queueTxSamples(samples);
+    }
+
+private:
+    gui::AudioEngine engine_;
+    std::string output_device_;
+    std::string input_device_;
+};
+#endif  // ULTRA_HAVE_SDL2
+
+/**
  * SimulatedStation - One station with single audio I/O thread
  *
  * Uses IWaveform for TX and StreamingDecoder for RX (NOT ModemEngine).
@@ -362,8 +478,8 @@ public:
     static constexpr int SAMPLES_PER_CALLBACK = 480;  // 10ms
     static constexpr int CALLBACK_INTERVAL_MS = 10;
 
-    SimulatedStation(const std::string& callsign, SimulatedChannel& channel, bool is_station_a)
-        : callsign_(callsign), channel_(channel), is_station_a_(is_station_a) {
+    SimulatedStation(const std::string& callsign, std::unique_ptr<AudioPort> port)
+        : callsign_(callsign), port_(std::move(port)) {
 
         protocol_.setLocalCallsign(callsign);
         protocol_.setAutoAccept(true);
@@ -384,6 +500,10 @@ public:
 
     void start() {
         if (running_) return;
+        if (port_ && !port_->start()) {
+            LOG_MODEM(ERROR, "[%s] AudioPort start failed", callsign_.c_str());
+            return;
+        }
         running_ = true;
         audio_thread_ = std::thread(&SimulatedStation::audioLoop, this);
         decode_thread_ = std::thread(&SimulatedStation::decodeLoop, this);
@@ -398,6 +518,7 @@ public:
         if (decode_thread_.joinable()) {
             decode_thread_.join();
         }
+        if (port_) port_->stop();
     }
 
     // Protocol interface
@@ -482,8 +603,7 @@ public:
 
 private:
     std::string callsign_;
-    SimulatedChannel& channel_;
-    bool is_station_a_;
+    std::unique_ptr<AudioPort> port_;
 
     // TX: StreamingEncoder (unified TX encoding, mirrors StreamingDecoder)
     std::unique_ptr<StreamingEncoder> encoder_;
@@ -1113,13 +1233,10 @@ private:
         while (running_) {
             // ===== AUDIO CALLBACK START =====
 
-            // 1. READ RX - get samples from channel (what the other station transmitted)
-            std::vector<float> rx_samples;
-            if (is_station_a_) {
-                rx_samples = channel_.receiveForA(SAMPLES_PER_CALLBACK);
-            } else {
-                rx_samples = channel_.receiveForB(SAMPLES_PER_CALLBACK);
-            }
+            // 1. READ RX - get samples from audio port (virtual channel or soundcard)
+            std::vector<float> rx_samples = port_
+                ? port_->pullRx(SAMPLES_PER_CALLBACK)
+                : std::vector<float>(SAMPLES_PER_CALLBACK, 0.0f);
 
             // 2. FEED TO DECODER (audio thread only buffers - decode thread processes)
             if (decoder_) {
@@ -1149,12 +1266,8 @@ private:
                 }
             }
 
-            // 4. SEND TX TO CHANNEL
-            if (is_station_a_) {
-                channel_.transmitFromA(tx_samples);
-            } else {
-                channel_.transmitFromB(tx_samples);
-            }
+            // 4. SEND TX TO AUDIO PORT (virtual channel or soundcard)
+            if (port_) port_->queueTx(tx_samples);
 
             // ===== AUDIO CALLBACK END =====
 
@@ -1234,7 +1347,25 @@ public:
     void setDecodeDelayMs(int ms) { decode_delay_ms_ = std::clamp(ms, 0, 500); }
     void setRxBatchCallbacks(int n) { rx_batch_callbacks_ = std::clamp(n, 1, 1000); }
 
+    // Hardware-audio mode (real soundcard I/O across two physical machines)
+    void setRoleBoth() { role_ = Role::Both; }
+    void setRoleA() { role_ = Role::A; }
+    void setRoleB() { role_ = Role::B; }
+    void setSelfCallsign(const std::string& c) { self_callsign_ = c; }
+    void setPeerCallsign(const std::string& c) { peer_callsign_ = c; }
+    void setAudioOutputDevice(const std::string& d) { audio_output_device_ = d; }
+    void setAudioInputDevice(const std::string& d) { audio_input_device_ = d; }
+    void setListAudioDevices(bool v) { list_audio_devices_ = v; }
+    void setRoleBIdleSeconds(int s) { role_b_idle_seconds_ = std::max(0, s); }
+
     bool runTest() {
+        // Hardware-audio mode (real soundcard, single station per process).
+        // Dispatched here so we don't spin up the in-process SimulatedChannel
+        // or two-station orchestration.
+        if (role_ != Role::Both) {
+            return runHardwareTest();
+        }
+
         printHeader();
 
         // Setup channel
@@ -1258,9 +1389,11 @@ public:
             std::cout << "\n";
         }
 
-        // Create stations
-        alpha_ = std::make_unique<SimulatedStation>("ALPHA", channel_, true);
-        bravo_ = std::make_unique<SimulatedStation>("BRAVO", channel_, false);
+        // Create stations with virtual audio ports (in-process channel sim)
+        alpha_ = std::make_unique<SimulatedStation>(
+            "ALPHA", std::make_unique<VirtualAudioPort>(channel_, /*is_station_a=*/true));
+        bravo_ = std::make_unique<SimulatedStation>(
+            "BRAVO", std::make_unique<VirtualAudioPort>(channel_, /*is_station_a=*/false));
         alpha_->setRxOverfeedFactor(rx_overfeed_factor_);
         bravo_->setRxOverfeedFactor(rx_overfeed_factor_);
         alpha_->setDecodeDelayMs(decode_delay_ms_);
@@ -1397,6 +1530,16 @@ private:
     Modulation forced_mod_ = Modulation::AUTO;
     CodeRate forced_rate_ = CodeRate::AUTO;
     WaveformMode forced_waveform_ = WaveformMode::AUTO;
+
+    // Hardware-audio role (--role A|B|both, default both = current sim behavior)
+    enum class Role { Both, A, B };
+    Role role_ = Role::Both;
+    std::string self_callsign_;        // empty -> default per role
+    std::string peer_callsign_;        // empty -> default per role (only used by role A)
+    std::string audio_output_device_;  // empty -> SDL default device
+    std::string audio_input_device_;   // empty -> SDL default device
+    bool list_audio_devices_ = false;
+    int role_b_idle_seconds_ = 0;      // 0 = run until peer disconnects (no idle cap)
 
     SimulatedChannel channel_;
     std::unique_ptr<SimulatedStation> alpha_;
@@ -1949,6 +2092,266 @@ private:
         }
     }
 
+    // ======================================================================
+    // Hardware-audio mode (--role A|B): single station per process, real
+    // soundcard I/O, peer is on another machine connected by audio cable.
+    // ======================================================================
+
+    bool runHardwareTest() {
+#ifndef ULTRA_HAVE_SDL2
+        std::cerr << "Hardware audio (--role A|B) requires SDL2. "
+                     "This build was compiled without SDL2 support.\n";
+        return false;
+#else
+        // Pick callsigns based on role unless overridden on the CLI.
+        const std::string self = !self_callsign_.empty()
+            ? self_callsign_
+            : (role_ == Role::A ? std::string("ALPHA") : std::string("BRAVO"));
+        const std::string peer = !peer_callsign_.empty()
+            ? peer_callsign_
+            : (role_ == Role::A ? std::string("BRAVO") : std::string("ALPHA"));
+
+        std::cout << "\n";
+        std::cout << "╔══════════════════════════════════════════════════════════════╗\n";
+        std::cout << "║   CLI Simulator - HARDWARE AUDIO MODE                        ║\n";
+        std::cout << "╚══════════════════════════════════════════════════════════════╝\n";
+        std::cout << "  Role:     " << (role_ == Role::A ? "A (initiator)" : "B (responder)") << "\n";
+        std::cout << "  Self:     " << self << "\n";
+        if (role_ == Role::A) std::cout << "  Peer:     " << peer << "\n";
+        std::cout << "  Output:   " << (audio_output_device_.empty() ? "(default)" : audio_output_device_) << "\n";
+        std::cout << "  Input:    " << (audio_input_device_.empty() ? "(default)" : audio_input_device_) << "\n";
+
+        if (list_audio_devices_) {
+            gui::AudioEngine probe;
+            if (!probe.initialize()) {
+                std::cerr << "Failed to init SDL audio for device listing\n";
+                return false;
+            }
+            std::cout << "\n  Output devices:\n";
+            for (const auto& d : probe.getOutputDevices()) std::cout << "    " << d << "\n";
+            std::cout << "\n  Input devices:\n";
+            for (const auto& d : probe.getInputDevices()) std::cout << "    " << d << "\n";
+            probe.shutdown();
+            return true;
+        }
+
+        // Build the single station with hardware I/O
+        auto port = std::make_unique<HardwareAudioPort>(
+            audio_output_device_, audio_input_device_);
+        auto station = std::make_unique<SimulatedStation>(self, std::move(port));
+
+        // Forced settings (only meaningful on initiator A — responder B picks
+        // them up from the CONNECT frame):
+        if (role_ == Role::A) {
+            if (forced_mod_ != Modulation::AUTO) station->setForcedModulation(forced_mod_);
+            if (forced_rate_ != CodeRate::AUTO) station->setForcedCodeRate(forced_rate_);
+            if (forced_waveform_ != WaveformMode::AUTO) station->setPreferredWaveform(forced_waveform_);
+        }
+
+        // Pretend SNR for adaptive-mode logic. With real audio this is just
+        // a hint to the link-adaptation layer; the real channel is whatever
+        // the soundcard cable + --inject-channel produces.
+        station->setSNR(snr_db_);
+        station->setChannelInterleave(use_channel_interleave_);
+        station->setNoBurstInterleave(no_burst_interleave_);
+        station->setBurstInterleaveGroupSize(burst_group_size_);
+
+        // Role-B receive callbacks
+        std::atomic<bool> peer_connected{false};
+        std::atomic<bool> peer_disconnected{false};
+        std::atomic<int> rx_message_count{0};
+        std::atomic<bool> rx_file_done{false};
+
+        if (role_ == Role::B) {
+            station->setReceiveDirectory("/tmp");
+            station->setMessageCallback([&](const std::string& msg) {
+                int n = rx_message_count.fetch_add(1) + 1;
+                std::cout << "  [RX MSG #" << n << " (" << msg.size() << "b)]: " << msg << "\n";
+            });
+            station->setFileReceivedCallback([&](const std::string& path, bool ok) {
+                std::cout << "  [RX FILE] " << path
+                          << (ok ? "  ✓" : "  ✗") << "\n";
+                rx_file_done.store(true);
+            });
+        }
+
+        std::cout << "\n  Starting station...\n";
+        station->start();
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));  // let audio open
+
+        bool ok = false;
+        if (role_ == Role::A) {
+            ok = runRoleA_initiator(*station, peer);
+        } else {
+            ok = runRoleB_responder(*station, peer_connected, peer_disconnected,
+                                    rx_message_count, rx_file_done);
+        }
+
+        std::cout << "\n  Stopping station...\n";
+        station->stop();
+
+        // Print stats from the local station (peer's stats live in its own log)
+        std::cout << "\n";
+        std::cout << "╔══════════════════════════════════════════════════════════════╗\n";
+        std::cout << (ok ? "║                     TEST PASSED                              ║\n"
+                         : "║                     TEST FAILED                              ║\n");
+        std::cout << "╚══════════════════════════════════════════════════════════════╝\n";
+        printStationStats(self.c_str(), station.get());
+        printDecoderPhaseBreakdown();
+
+        return ok;
+#endif
+    }
+
+#ifdef ULTRA_HAVE_SDL2
+    // Block while ticking only one station (no peer in this process).
+    bool waitForRole(SimulatedStation& s,
+                     std::function<bool()> cond,
+                     int timeout_seconds,
+                     const char* label) {
+        auto start = std::chrono::steady_clock::now();
+        int last_print = -1;
+        while (!cond()) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - start).count();
+            if (elapsed >= timeout_seconds) return false;
+            s.tick();
+            if (elapsed != last_print && elapsed % 5 == 0) {
+                std::cout << "  [" << s.getSimTime() << "s] " << label << " ...\n";
+                last_print = static_cast<int>(elapsed);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return true;
+    }
+
+    bool runRoleA_initiator(SimulatedStation& station, const std::string& peer) {
+        // 1. Connect
+        std::cout << "\n=== PHASE 1: CONNECT ===\n";
+        std::cout << "  Connecting to " << peer << "...\n";
+        station.connect(peer);
+        if (!waitForRole(station, [&]{ return station.isConnected(); }, 60, "waiting for connect")) {
+            std::cout << "  \033[31m✗ Connect timeout (60s)\033[0m\n";
+            return false;
+        }
+        std::cout << "  \033[32m✓ Connected\033[0m\n";
+
+        // 2. Mode negotiation / handshake
+        std::cout << "\n=== PHASE 2: MODE NEGOTIATION ===\n";
+        if (!waitForRole(station, [&]{ return station.isHandshakeComplete(); }, 30, "handshake")) {
+            std::cout << "  \033[31m✗ Handshake timeout\033[0m\n";
+            return false;
+        }
+        std::cout << "  \033[32m✓ Handshake complete\033[0m\n";
+
+        if (!waitForRole(station, [&]{ return station.isReadyToSend(); }, 10, "ARQ ready")) {
+            std::cout << "  \033[31m✗ ARQ not ready\033[0m\n";
+            return false;
+        }
+
+        // 3. Send file or message
+        bool data_ok = false;
+        if (test_file_transfer_) {
+            std::string test_file = "/tmp/cli_sim_role_a_" + std::to_string(::getpid()) + ".bin";
+            {
+                std::ofstream ofs(test_file, std::ios::binary);
+                if (!ofs) { std::cout << "  ✗ create file failed\n"; return false; }
+                for (size_t i = 0; i < test_file_size_; i++) ofs.put(static_cast<char>(i & 0xFF));
+            }
+            std::cout << "\n=== PHASE 3: FILE TRANSFER ===\n";
+            std::cout << "  Sending " << test_file << " (" << test_file_size_ << " bytes)\n";
+            ultra::timing::globalDecoderProfile().reset();
+            if (!station.sendFile(test_file)) {
+                std::cout << "  ✗ sendFile failed\n";
+                return false;
+            }
+            const long timeout_s = 60 + static_cast<long>(test_file_size_) / 60;
+            data_ok = waitForRole(station,
+                [&]{ return !station.isFileTransferInProgress(); },
+                static_cast<int>(timeout_s), "file transfer");
+            if (!data_ok) {
+                std::cout << "  \033[31m✗ File transfer timeout (budget=" << timeout_s << "s)\033[0m\n";
+            } else {
+                auto p = station.getFileProgress();
+                std::cout << "  Transferred " << p.transferred_bytes << "/" << p.total_bytes
+                          << " bytes (" << static_cast<int>(p.percentage()) << "%)\n";
+                data_ok = (p.transferred_bytes == p.total_bytes);
+                if (data_ok) std::cout << "  \033[32m✓ File transfer complete\033[0m\n";
+            }
+        } else {
+            std::cout << "\n=== PHASE 3: MESSAGE TEST ===\n";
+            const std::string msg = "Hello from station A (hw test, pid=" +
+                                    std::to_string(::getpid()) + ")";
+            station.sendMessage(msg);
+            // Wait for ARQ idle (no pending TX) as a proxy for ack received.
+            data_ok = waitForRole(station, [&]{ return station.isReadyToSend(); },
+                                  90, "message ack");
+            std::cout << (data_ok ? "  \033[32m✓ Message sent\033[0m\n"
+                                  : "  \033[31m✗ Message timeout\033[0m\n");
+        }
+
+        // 4. Disconnect (best-effort)
+        std::cout << "\n=== PHASE 4: DISCONNECT ===\n";
+        station.disconnect();
+        if (!waitForRole(station, [&]{ return !station.isConnected(); }, 15, "disconnect")) {
+            std::cout << "  \033[33m! Disconnect timeout (non-fatal)\033[0m\n";
+        } else {
+            std::cout << "  \033[32m✓ Disconnected\033[0m\n";
+        }
+        return data_ok;
+    }
+
+    bool runRoleB_responder(SimulatedStation& station,
+                            std::atomic<bool>& peer_connected,
+                            std::atomic<bool>& peer_disconnected,
+                            std::atomic<int>& rx_message_count,
+                            std::atomic<bool>& rx_file_done) {
+        std::cout << "\n  Listening for incoming connections...\n";
+        std::cout << "  (Ctrl-C or peer disconnect to exit";
+        if (role_b_idle_seconds_ > 0) std::cout << ", idle cap=" << role_b_idle_seconds_ << "s";
+        std::cout << ")\n";
+
+        auto start = std::chrono::steady_clock::now();
+        bool was_connected = false;
+        int last_print = -1;
+        ultra::timing::globalDecoderProfile().reset();
+
+        while (true) {
+            station.tick();
+
+            const bool connected = station.isConnected();
+            if (connected && !was_connected) {
+                std::cout << "  \033[32m✓ Peer connected\033[0m\n";
+                peer_connected.store(true);
+                was_connected = true;
+            } else if (!connected && was_connected) {
+                std::cout << "  Peer disconnected — exiting\n";
+                peer_disconnected.store(true);
+                return true;
+            }
+
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - start).count();
+
+            if (role_b_idle_seconds_ > 0 && elapsed >= role_b_idle_seconds_) {
+                std::cout << "  Idle cap reached (" << role_b_idle_seconds_
+                          << "s), exiting\n";
+                return rx_message_count.load() > 0 || rx_file_done.load();
+            }
+
+            if (elapsed != last_print && elapsed % 5 == 0) {
+                std::cout << "  [" << station.getSimTime() << "s] connected="
+                          << (connected ? "yes" : "no")
+                          << "  rx_msgs=" << rx_message_count.load()
+                          << "  rx_file=" << (rx_file_done.load() ? "yes" : "no")
+                          << "\n";
+                last_print = static_cast<int>(elapsed);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    }
+#endif  // ULTRA_HAVE_SDL2
+
     void printHeader() {
         std::cout << "\n";
         std::cout << "╔══════════════════════════════════════════════════════════════╗\n";
@@ -2332,6 +2735,27 @@ int main(int argc, char* argv[]) {
                 sim.setSaveSignalsPrefix(argv[++i]);
             } else if (arg == "--save-max-samples" && i + 1 < argc) {
                 sim.setSaveSignalsMaxSamples(static_cast<size_t>(std::stoull(argv[++i])));
+            } else if (arg == "--role" && i + 1 < argc) {
+                std::string r = argv[++i];
+                if (r == "A" || r == "a")          sim.setRoleA();
+                else if (r == "B" || r == "b")     sim.setRoleB();
+                else if (r == "both" || r == "BOTH") sim.setRoleBoth();
+                else {
+                    std::cerr << "Unknown --role: " << r << " (use A, B, or both)\n";
+                    return 1;
+                }
+            } else if (arg == "--peer" && i + 1 < argc) {
+                sim.setPeerCallsign(argv[++i]);
+            } else if (arg == "--callsign" && i + 1 < argc) {
+                sim.setSelfCallsign(argv[++i]);
+            } else if (arg == "--audio-output" && i + 1 < argc) {
+                sim.setAudioOutputDevice(argv[++i]);
+            } else if (arg == "--audio-input" && i + 1 < argc) {
+                sim.setAudioInputDevice(argv[++i]);
+            } else if (arg == "--list-audio-devices") {
+                sim.setListAudioDevices(true);
+            } else if (arg == "--idle-seconds" && i + 1 < argc) {
+                sim.setRoleBIdleSeconds(std::stoi(argv[++i]));
             } else if (arg == "--help" || arg == "-h") {
                 std::cout << "CLI Simulator - IWaveform + StreamingDecoder Model\n\n";
                 std::cout << "Uses IWaveform for TX and StreamingDecoder for RX directly.\n";
@@ -2368,6 +2792,14 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --save-prefix <PATH>      Capture file prefix (default: /tmp/cli_signals)\n";
                 std::cout << "  --save-max-samples <N>    Per-stream capture cap (0 = unlimited)\n";
                 std::cout << "  --verbose, -v       Verbose output\n";
+                std::cout << "\nHardware audio mode (real soundcard, two-machine setup):\n";
+                std::cout << "  --role A|B|both     A=initiator, B=responder, both=in-process sim (default)\n";
+                std::cout << "  --callsign <NAME>   Local callsign (default: ALPHA for A, BRAVO for B)\n";
+                std::cout << "  --peer <NAME>       Peer callsign for --role A (default: BRAVO)\n";
+                std::cout << "  --audio-output <D>  SDL2 output device name (empty = default)\n";
+                std::cout << "  --audio-input <D>   SDL2 input device name (empty = default)\n";
+                std::cout << "  --list-audio-devices  List available audio devices and exit\n";
+                std::cout << "  --idle-seconds <N>  Role B: max idle seconds before giving up (0 = forever)\n";
                 return 0;
             }
         }

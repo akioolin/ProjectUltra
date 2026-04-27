@@ -43,6 +43,22 @@ if(ULTRA_USE_FFTW)
     endif()
 endif()
 
+# SDL2 detection — used by both ultra_gui (always required) and cli_simulator
+# (optional, for hardware audio I/O in --role A|B mode). Detect once at the
+# top level so both targets share the same libs.
+find_package(SDL2 QUIET)
+if(NOT SDL2_FOUND)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(SDL2 sdl2)
+    endif()
+endif()
+if(SDL2_FOUND)
+    message(STATUS "Found SDL2: cli_simulator hardware audio enabled")
+else()
+    message(STATUS "SDL2 not found: cli_simulator --role A|B will be unavailable")
+endif()
+
 # Core library
 add_library(ultra_core STATIC
     src/ofdm/modulator.cpp
@@ -132,6 +148,21 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_link_libraries(cli_simulator PRIVATE ultra_core)
 
+    # Optional hardware-audio support (--role A|B). Reuses the GUI's
+    # AudioEngine class; SDL2 is detected at top level above.
+    if(SDL2_FOUND)
+        target_sources(cli_simulator PRIVATE
+            src/gui/audio_engine.cpp
+        )
+        target_compile_definitions(cli_simulator PRIVATE ULTRA_HAVE_SDL2)
+        if(TARGET SDL2::SDL2)
+            target_link_libraries(cli_simulator PRIVATE SDL2::SDL2)
+        else()
+            target_include_directories(cli_simulator PRIVATE ${SDL2_INCLUDE_DIRS})
+            target_link_libraries(cli_simulator PRIVATE ${SDL2_LIBRARIES})
+        endif()
+    endif()
+
     # Threaded simulator - proper real-time audio simulation
     add_executable(threaded_simulator
         tools/threaded_simulator.cpp
@@ -175,15 +206,7 @@ endif()
 
 # GUI Application
 if(ULTRA_BUILD_GUI)
-    # Find SDL2
-    find_package(SDL2 QUIET)
-    if(NOT SDL2_FOUND)
-        # Try pkg-config as fallback
-        find_package(PkgConfig QUIET)
-        if(PkgConfig_FOUND)
-            pkg_check_modules(SDL2 sdl2)
-        endif()
-    endif()
+    # SDL2 detection is done at top level (shared with cli_simulator).
 
     find_package(OpenGL QUIET)
 
