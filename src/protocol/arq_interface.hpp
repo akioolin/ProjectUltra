@@ -51,6 +51,13 @@ struct ARQStats {
     int stale_acks_ignored = 0;         // ACK rejected as too old
     int future_acks_ignored = 0;        // ACK rejected as implausibly ahead
     int duplicate_acks_ignored = 0;     // ACK suppressed by dedup window
+    // SACK trigger-reason counters (Phase 2 instrumentation, exclusive bumps —
+    // each SACK send increments exactly one of these so the four sum equals
+    // sacks_sent). Used to identify the dominant trigger before tuning.
+    int sack_trigger_threshold = 0;     // frames_since_ack reached batch limit
+    int sack_trigger_out_of_order = 0;  // hole detected (immediate, safety valve)
+    int sack_trigger_timer = 0;         // sack_delay_ms timer flushed pending
+    int sack_trigger_out_of_window = 0; // DATA arrived outside RX window
     int ack_repeat_jobs_coalesced = 0;  // Pending ACK repeat jobs replaced
     int ack_repeat_jobs_dropped = 0;    // Pending ACK repeat jobs dropped on overflow
 };

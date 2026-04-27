@@ -181,6 +181,14 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
                                        ? config_.ack_batch_size
                                        : static_cast<uint32_t>(config_.window_size);
         if (out_of_order || frames_since_ack_ >= batch_threshold) {
+            // Bump the trigger-reason counter BEFORE sendSack — out_of_order
+            // takes priority because it's the immediate safety valve. Each
+            // SACK send increments exactly one trigger counter.
+            if (out_of_order) {
+                stats_.sack_trigger_out_of_order++;
+            } else {
+                stats_.sack_trigger_threshold++;
+            }
             sendSack();
             sack_pending_ = false;
             sack_timer_ms_ = 0;
@@ -198,6 +206,7 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
         LOG_MODEM(WARN, "SR-ARQ: DATA seq=%d outside window [%d, %d)",
                   seq, rx_base_seq_, (rx_base_seq_ + config_.window_size) & 0xFFFF);
         // Out-of-window: send SACK immediately to help sender recover
+        stats_.sack_trigger_out_of_window++;
         sendSack();
         sack_pending_ = false;
         sack_timer_ms_ = 0;
@@ -433,6 +442,7 @@ void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
     if (sack_pending_) {
         if (elapsed_ms >= sack_timer_ms_) {
             LOG_MODEM(DEBUG, "SR-ARQ: SACK timer expired, sending SACK");
+            stats_.sack_trigger_timer++;
             sendSack();
             sack_pending_ = false;
             sack_timer_ms_ = 0;

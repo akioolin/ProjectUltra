@@ -2017,6 +2017,14 @@ private:
             std::cout << "  AckR: acks_sent/frames_received=" << std::fixed
                       << std::setprecision(2) << ack_ratio
                       << std::defaultfloat << "\n";
+
+            // SACK trigger-reason breakdown (Phase 2). Each SACK send bumps
+            // exactly one counter, so these four sum to sacks_sent.
+            std::cout << "  SACKw: threshold=" << cs.arq.sack_trigger_threshold
+                      << "  out_of_order=" << cs.arq.sack_trigger_out_of_order
+                      << "  timer=" << cs.arq.sack_trigger_timer
+                      << "  out_of_window=" << cs.arq.sack_trigger_out_of_window
+                      << "\n";
         }
 
         // Decoder stats
