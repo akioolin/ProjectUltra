@@ -40,7 +40,9 @@ set -euo pipefail
 
 # ─── Defaults (override via env or CLI) ─────────────────────────────────
 PI=${PI:-math@pi5tester}
-PI_REPO=${PI_REPO:-~/ProjectUltra}
+# Absolute path on the Pi — keeping ~ here would let the Mac shell expand it
+# to /Users/<me>/ProjectUltra before the SSH command was even sent.
+PI_REPO=${PI_REPO:-/home/math/ProjectUltra}
 # Optional: SSH_KEY=~/.ssh/id_pi5 to use a specific key
 SSH_OPTS=${SSH_KEY:+-i "$SSH_KEY"}
 PI_AUDIO_OUT=${PI_AUDIO_OUT:-}        # empty = SDL default device
@@ -125,19 +127,19 @@ echo "Test: SNR=$SNR  channel=$CHANNEL  rate=$RATE  inject=$INJECT_CHANNEL  file
 echo
 
 # ─── 1. Start station B on Pi (background, via SSH) ─────────────────────
+# We build a single-string command so ~ expands on the Pi (not on the Mac).
+# All other vars (PI_DEVS, SNR, etc.) are intentionally pre-expanded here.
 echo "[1/3] Starting station B on $PI..."
-ssh $SSH_OPTS "$PI" bash -s <<EOF > "$LOG_DIR/B_pid.txt"
-  set -e
-  cd $PI_REPO
-  pkill -9 cli_simulator 2>/dev/null || true
-  rm -f /tmp/ultra_B.log
-  nohup ./build/cli_simulator --role B \\
-    $PI_DEVS \\
-    --snr $SNR --rate $RATE $CHANNEL_FLAG $INJECT_FLAG \\
-    --idle-seconds $B_IDLE_SECONDS \\
-    > /tmp/ultra_B.log 2>&1 &
-  echo \$!
-EOF
+PI_CMD="cd $PI_REPO && \
+  pkill -9 cli_simulator 2>/dev/null || true; \
+  rm -f /tmp/ultra_B.log; \
+  nohup ./build/cli_simulator --role B \
+    $PI_DEVS \
+    --snr $SNR --rate $RATE $CHANNEL_FLAG $INJECT_FLAG \
+    --idle-seconds $B_IDLE_SECONDS \
+    > /tmp/ultra_B.log 2>&1 & \
+  echo \$!"
+ssh $SSH_OPTS "$PI" "$PI_CMD" > "$LOG_DIR/B_pid.txt"
 B_PID=$(tr -d '\n' < "$LOG_DIR/B_pid.txt")
 echo "    B running on $PI, PID=$B_PID"
 sleep 3   # let B open its audio devices before A starts
