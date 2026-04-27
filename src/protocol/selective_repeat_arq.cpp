@@ -136,6 +136,13 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
     last_rx_flags_ = frame.flags;
     last_rx_more_data_ = (frame.flags & v2::Flags::MORE_FRAG) != 0;
 
+    // Capture the just-arrived frame's MORE_FRAG locally — the member
+    // last_rx_more_data_ above will be overwritten by advanceRXWindow()
+    // when it delivers buffered frames (line 552 area). The timer-arm
+    // logic below needs the value of THIS frame, not whichever frame
+    // advanceRXWindow happened to deliver last.
+    const bool frame_more_frag = (frame.flags & v2::Flags::MORE_FRAG) != 0;
+
     uint16_t seq = frame.seq;
 
     if (isInRXWindow(seq)) {
@@ -195,10 +202,24 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
             frames_since_ack_ = 0;
         } else if (new_frame) {
             sack_pending_ = true;
-            if (sack_timer_ms_ == 0) {
-                sack_timer_ms_ = config_.sack_delay_ms;
+            // Stream-aware timer: in-burst frames (MORE_FRAG=1) get the
+            // long delay (sack_delay_ms); end-of-burst (MORE_FRAG=0) gets
+            // the short delay so the sender's window advances promptly.
+            // Sentinel sack_delay_short_ms_ = 0 → use sack_delay_ms for
+            // both legs (legacy behavior bit-for-bit).
+            uint32_t pick_ms;
+            if (sack_delay_short_ms_ == 0) {
+                pick_ms = config_.sack_delay_ms;
+            } else if (frame_more_frag) {
+                pick_ms = config_.sack_delay_ms;
             } else {
-                sack_timer_ms_ = std::min(sack_timer_ms_, config_.sack_delay_ms);
+                pick_ms = sack_delay_short_ms_;
+            }
+
+            if (sack_timer_ms_ == 0) {
+                sack_timer_ms_ = pick_ms;
+            } else {
+                sack_timer_ms_ = std::min(sack_timer_ms_, pick_ms);
             }
         }
 

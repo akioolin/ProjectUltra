@@ -110,6 +110,13 @@ public:
     void setSackDelay(uint32_t ms) { config_.sack_delay_ms = std::max(1u, ms); }
     uint32_t getSackDelay() const { return config_.sack_delay_ms; }
 
+    // Stream-aware tail-of-burst override: when set to nonzero, end-of-burst
+    // frames (MORE_FRAG=0) arm the SACK timer at this shorter delay instead of
+    // sack_delay_ms. In-burst frames (MORE_FRAG=1) keep using sack_delay_ms.
+    // Sentinel 0 (default) preserves prior behavior bit-for-bit.
+    void setSackDelayShort(uint32_t ms) { sack_delay_short_ms_ = ms; }
+    uint32_t getSackDelayShort() const { return sack_delay_short_ms_; }
+
     // Set max retries before giving up on a frame
     void setMaxRetries(int retries) { config_.max_retries = std::max(1, retries); }
     int getMaxRetries() const { return config_.max_retries; }
@@ -177,6 +184,8 @@ private:
     // Delayed SACK for half-duplex (wait for burst to complete)
     bool sack_pending_ = false;     // SACK waiting to be sent
     uint32_t sack_timer_ms_ = 0;    // Time until SACK is sent
+    // Stream-aware tail override (0 = "use sack_delay_ms for both legs").
+    uint32_t sack_delay_short_ms_ = 0;
     uint32_t frames_since_ack_ = 0; // Frames received since last ACK sent
 
     // ACK repeat config (time-diversity for fading channels)

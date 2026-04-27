@@ -547,20 +547,121 @@ bool test_ack_batch_default_matches_window() {
 }
 
 // ============================================================================
+// Stream-aware SACK timer tests (post-Phase 3 plan)
+// ============================================================================
+
+bool test_sack_timer_more_frag_short_collapses_long() {
+    TEST("MORE_FRAG=0 frame collapses long timer to short via std::min");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.sack_delay_ms = 500;
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+    rx.setSackDelayShort(50);
+
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    // Frame 0 with MORE_FRAG=1 → timer arms at 500ms
+    auto f0 = v2::DataFrame::makeData("TX1", "RX1", 0, Bytes{0});
+    f0.flags |= v2::Flags::MORE_FRAG;
+    rx.onFrameReceived(f0.serialize());
+    rx.tick(60);  // 440ms remaining
+    if (channel.size() != 0)
+        FAIL("Long timer fired prematurely after 60ms");
+
+    // Frame 1 with MORE_FRAG=0 → pick_ms=50, std::min(440, 50) = 50
+    auto f1 = v2::DataFrame::makeData("TX1", "RX1", 1, Bytes{1});
+    // (no MORE_FRAG flag = end-of-burst)
+    rx.onFrameReceived(f1.serialize());
+    rx.tick(60);  // 50 - 60 ≤ 0 → fires
+    if (channel.size() != 1)
+        FAIL("Short-collapsed timer did not fire after 60ms tick (got " +
+             std::to_string(channel.size()) + " SACKs)");
+
+    PASS();
+    return true;
+}
+
+bool test_sack_timer_more_frag_does_not_extend() {
+    TEST("MORE_FRAG=1 subsequent frames do not extend long timer");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.sack_delay_ms = 500;
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+    rx.setSackDelayShort(50);
+
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    auto f0 = v2::DataFrame::makeData("TX1", "RX1", 0, Bytes{0});
+    f0.flags |= v2::Flags::MORE_FRAG;
+    rx.onFrameReceived(f0.serialize());
+    rx.tick(450);  // ~50ms remaining
+
+    auto f1 = v2::DataFrame::makeData("TX1", "RX1", 1, Bytes{1});
+    f1.flags |= v2::Flags::MORE_FRAG;
+    rx.onFrameReceived(f1.serialize());
+    // pick_ms = 500, but std::min(50, 500) keeps 50 — does NOT extend
+    rx.tick(60);
+    if (channel.size() != 1)
+        FAIL("Timer did not fire on schedule with subsequent MORE_FRAG=1 frame (extended unexpectedly?)");
+
+    PASS();
+    return true;
+}
+
+bool test_sack_delay_short_zero_sentinel_preserves_legacy() {
+    TEST("sack_delay_short=0 sentinel uses sack_delay_ms regardless of MORE_FRAG");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.sack_delay_ms = 120;
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+    // Do NOT call setSackDelayShort — sack_delay_short_ms_ stays 0 (sentinel)
+
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    // MORE_FRAG=0 frame — under sentinel should arm at 120ms (sack_delay_ms),
+    // not at 0 or any short-override value.
+    auto f0 = v2::DataFrame::makeData("TX1", "RX1", 0, Bytes{0});
+    rx.onFrameReceived(f0.serialize());
+    rx.tick(50);
+    if (channel.size() != 0)
+        FAIL("Timer fired too early under sentinel (50ms < 120ms expected)");
+    rx.tick(80);
+    if (channel.size() != 1)
+        FAIL("Timer did not fire after 130ms total under sentinel");
+
+    PASS();
+    return true;
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
 int main() {
     std::cout << "=== Selective Repeat ARQ Test Suite (v2) ===\n\n";
 
-    // Run Phase 1b decoupling tests FIRST so they're observable even if a
-    // later existing test hangs (test_full_exchange has a known hang issue
-    // at the time of writing, unrelated to ack_batch_size).
+    // Run new Phase 1b + stream-aware tests FIRST so they're observable even
+    // if a later existing test hangs (test_full_exchange has a known hang
+    // issue, unrelated to these changes).
     std::cout << "ack_batch_size Decoupling Tests (Phase 1b):\n";
     test_ack_batch_threshold_independent();
     test_ack_batch_out_of_order_safety_valve();
     test_ack_batch_setter_clamping();
     test_ack_batch_default_matches_window();
+
+    std::cout << "\nStream-Aware SACK Timer Tests:\n";
+    test_sack_timer_more_frag_short_collapses_long();
+    test_sack_timer_more_frag_does_not_extend();
+    test_sack_delay_short_zero_sentinel_preserves_legacy();
 
     std::cout << "\nBasic Tests:\n";
     test_create_sr_arq();

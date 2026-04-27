@@ -1021,6 +1021,14 @@ void Connection::enterConnected() {
         arq_.setWindowSize(4);
         arq_.setMaxRetries(15);     // More attempts compensate for ACK loss on fading
         arq_.setSackDelay(120);     // Short coalescing delay for ACK/SACK control traffic
+        // NOTE: stream-aware SACK timer (setSackDelayShort) infrastructure is
+        // available but NOT enabled here — 25 KB canary at SNR=15 good with
+        // setSackDelay(700) reproduced the prior stale-repair-storm failure
+        // mode (out_of_window count went 0 → 14, retx 20 → 32, timeouts 4 → 22,
+        // wall 170s → 175s). The 700ms long delay starves ALPHA's window=4
+        // and causes ARQ thrashing — exactly what the reviewer warned about
+        // with "hold cumulative ACKs longer" approaches.
+        // See .claude/plans/imperative-napping-conway.md for canary findings.
 
         int ack_repeat_count = 2;
         uint32_t ack_repeat_delay_ms = 220;
