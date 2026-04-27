@@ -1265,6 +1265,36 @@ void StreamingDecoder::decodeCurrentFrame() {
         state_ = DecoderState::SEARCHING;
         return;
     }
+
+    // Reject false chirp locks before paying for full LDPC decode.
+    // Real syncs at usable SNR produce |LLR|_avg ~ 18+ for the first CW worth
+    // of soft bits. False locks (e.g. chirp landing on a sample-drop boundary,
+    // mis-aligned at ~440-sample timing offset) produce |LLR|_avg < 1 — pure
+    // noise. Rejecting here skips ~600ms of futile retry sweeps and lets
+    // chirp-search find the next real frame promptly. See real-hardware
+    // analysis: USB audio chains drop ~1 callback (480 samples) occasionally,
+    // misaligning chirps that detect at corr=0.6-0.8 instead of the typical
+    // 0.9+ for clean locks.
+    constexpr float MIN_PRESYNC_LLR = 2.0f;
+    {
+        const size_t llr_n = std::min(soft_bits.size(), size_t(648));
+        float llr_sum = 0.0f;
+        for (size_t i = 0; i < llr_n; ++i) llr_sum += std::abs(soft_bits[i]);
+        const float llr_avg = llr_n > 0 ? llr_sum / static_cast<float>(llr_n) : 0.0f;
+        if (llr_avg < MIN_PRESYNC_LLR) {
+            LOG_MODEM(INFO, "[%s] False chirp lock rejected: |llr|_avg=%.2f "
+                      "(timing-mis-aligned sync, %zu soft bits) — re-searching",
+                      log_prefix_.c_str(), llr_avg, soft_bits.size());
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            // Step past the chirp area so we don't re-trigger immediately;
+            // a frame_len-sized advance is conservative.
+            correlation_pos_ = (sync_position_ + frame_len) % MAX_BUFFER_SAMPLES;
+            setSearchFloorLocked(frame_sync_abs + frame_len);
+            state_ = DecoderState::SEARCHING;
+            return;
+        }
+    }
+
     LOG_MODEM(INFO, "[%s] Got %zu soft bits (%zu samples), proceeding to decode",
               log_prefix_.c_str(), soft_bits.size(), frame_buffer.size());
 
