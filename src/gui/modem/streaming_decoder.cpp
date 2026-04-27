@@ -1640,11 +1640,18 @@ void StreamingDecoder::decodeCurrentFrame() {
     size_t next_search_abs = frame_sync_abs + consumed;
 
     // After successful decode in connected OFDM mode, check for burst continuation
-    // MC-DPSK never enters burst mode (uses window=1, full chirp preamble)
-    // Skip burst continuation for non-data frames (control/connect are standalone)
-    // Note: when burst interleaving is active, interleaved groups enter BURST_ACCUMULATING
-    // above and return early. Non-interleaved bursts (< 4 frames) still need continuation.
-    if (result.success && connected_ && is_ofdm && !is_non_data_frame) {
+    // MC-DPSK never enters burst mode (uses window=1, full chirp preamble).
+    // Skip burst continuation for non-data frames (control/connect are standalone).
+    //
+    // CRITICAL: only attempt continuation when burst-interleave is enabled.
+    // Without it the encoder emits a fresh chirp+training prefix on every
+    // frame, so the "next_block" position points at a chirp the decoder
+    // would mis-demodulate as data symbols (LLRs collapse to ~0). Real
+    // hardware tests (Mac<->Pi) showed this attempting decode of chirp
+    // pulses as payload, dropping ~10% of frames before fast-retransmit
+    // recovered them. Re-acquiring chirp sync is much more reliable.
+    if (result.success && connected_ && is_ofdm && !is_non_data_frame
+        && use_burst_interleave_) {
         size_t min_block = static_cast<size_t>(waveform_->getMinSamplesForFrame());
 
         // Loop to decode multiple burst continuation blocks
