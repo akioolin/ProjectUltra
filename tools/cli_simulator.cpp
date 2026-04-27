@@ -405,18 +405,55 @@ private:
 
 #ifdef ULTRA_HAVE_SDL2
 /**
+ * ChannelInjector - Streaming TX-side channel emulator. Applies CFO +
+ * Watterson fading + AWGN to each 480-sample audio chunk before it
+ * reaches the soundcard.
+ *
+ * Wraps SimulatedChannel and uses only its A→B direction:
+ *   transmitFromA(tx)     -> processed samples land in buffer_b_rx_
+ *   receiveForB(tx.size())-> drains them back as the channel-degraded TX
+ *
+ * Buffer never underflows because we push and drain in lockstep, so the
+ * "noise on underflow" path in receiveForB doesn't fire.
+ */
+class ChannelInjector {
+public:
+    ChannelInjector(float snr_db, ChannelType ch_type,
+                    uint32_t seed, float tx_cfo_hz) {
+        sim_channel_.setSeed(seed);
+        sim_channel_.setTxCFO(tx_cfo_hz);
+        sim_channel_.configure(snr_db, ch_type);
+    }
+
+    std::vector<float> process(const std::vector<float>& tx) {
+        sim_channel_.transmitFromA(tx);
+        return sim_channel_.receiveForB(tx.size());
+    }
+
+private:
+    SimulatedChannel sim_channel_;
+};
+
+/**
  * HardwareAudioPort - Real soundcard I/O via SDL2 (gui::AudioEngine).
  * Used for --role A|B mode when running across two physical machines
  * connected by an audio cable (or speaker/mic).
  *
  * On RX underrun (no captured audio yet), returns zeros — silence on the
  * wire is the correct interpretation for between-frame gaps.
+ *
+ * If a ChannelInjector is supplied, TX samples pass through it before
+ * hitting the soundcard, so the receiving station sees a realistic
+ * channel-degraded signal even on a clean audio cable.
  */
 class HardwareAudioPort : public AudioPort {
 public:
     HardwareAudioPort(const std::string& output_device,
-                      const std::string& input_device)
-        : output_device_(output_device), input_device_(input_device) {}
+                      const std::string& input_device,
+                      std::unique_ptr<ChannelInjector> injector = nullptr)
+        : output_device_(output_device),
+          input_device_(input_device),
+          injector_(std::move(injector)) {}
 
     bool start() override {
         if (!engine_.initialize()) {
@@ -456,13 +493,18 @@ public:
     }
 
     void queueTx(const std::vector<float>& samples) override {
-        engine_.queueTxSamples(samples);
+        if (injector_) {
+            engine_.queueTxSamples(injector_->process(samples));
+        } else {
+            engine_.queueTxSamples(samples);
+        }
     }
 
 private:
     gui::AudioEngine engine_;
     std::string output_device_;
     std::string input_device_;
+    std::unique_ptr<ChannelInjector> injector_;
 };
 #endif  // ULTRA_HAVE_SDL2
 
@@ -1357,6 +1399,7 @@ public:
     void setAudioInputDevice(const std::string& d) { audio_input_device_ = d; }
     void setListAudioDevices(bool v) { list_audio_devices_ = v; }
     void setRoleBIdleSeconds(int s) { role_b_idle_seconds_ = std::max(0, s); }
+    void setInjectChannel(bool v) { inject_channel_ = v; }
 
     bool runTest() {
         // Hardware-audio mode (real soundcard, single station per process).
@@ -1540,6 +1583,8 @@ private:
     std::string audio_input_device_;   // empty -> SDL default device
     bool list_audio_devices_ = false;
     int role_b_idle_seconds_ = 0;      // 0 = run until peer disconnects (no idle cap)
+    bool inject_channel_ = false;       // --inject-channel: apply TX-side channel sim
+                                        // to real-audio output (uses snr_db_/channel_type_)
 
     SimulatedChannel channel_;
     std::unique_ptr<SimulatedStation> alpha_;
@@ -2135,9 +2180,23 @@ private:
             return true;
         }
 
+        // Optional TX-side channel injection (CFO + Watterson + AWGN
+        // applied to outgoing audio before the soundcard). Each side runs
+        // its own injector so both directions get realistic channel.
+        std::unique_ptr<ChannelInjector> injector;
+        if (inject_channel_) {
+            const uint32_t injector_seed = (role_ == Role::A)
+                ? seed_                  // ALPHA's TX uses base seed
+                : seed_ + 0x9E3779B9u;   // BRAVO's TX uses a decorrelated seed
+            injector = std::make_unique<ChannelInjector>(
+                snr_db_, channel_type_, injector_seed, tx_cfo_hz_);
+            std::cout << "  Inject:   " << channelTypeName()
+                      << " @ " << snr_db_ << " dB SNR (TX-side)\n";
+        }
+
         // Build the single station with hardware I/O
         auto port = std::make_unique<HardwareAudioPort>(
-            audio_output_device_, audio_input_device_);
+            audio_output_device_, audio_input_device_, std::move(injector));
         auto station = std::make_unique<SimulatedStation>(self, std::move(port));
 
         // Forced settings (only meaningful on initiator A — responder B picks
@@ -2756,6 +2815,8 @@ int main(int argc, char* argv[]) {
                 sim.setListAudioDevices(true);
             } else if (arg == "--idle-seconds" && i + 1 < argc) {
                 sim.setRoleBIdleSeconds(std::stoi(argv[++i]));
+            } else if (arg == "--inject-channel") {
+                sim.setInjectChannel(true);
             } else if (arg == "--help" || arg == "-h") {
                 std::cout << "CLI Simulator - IWaveform + StreamingDecoder Model\n\n";
                 std::cout << "Uses IWaveform for TX and StreamingDecoder for RX directly.\n";
@@ -2800,6 +2861,8 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --audio-input <D>   SDL2 input device name (empty = default)\n";
                 std::cout << "  --list-audio-devices  List available audio devices and exit\n";
                 std::cout << "  --idle-seconds <N>  Role B: max idle seconds before giving up (0 = forever)\n";
+                std::cout << "  --inject-channel    Apply --snr/--channel/--cfo to outgoing audio\n";
+                std::cout << "                      (lets Mac-to-Pi cable carry a synthetic HF channel)\n";
                 return 0;
             }
         }
