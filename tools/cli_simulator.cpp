@@ -1732,8 +1732,13 @@ private:
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start).count();
 
-            if (elapsed >= 300) {  // 5 minute timeout for file transfer (R1/4 needs ~2min for 10KB)
-                std::cout << "  \033[31m✗ File transfer timeout!\033[0m\n";
+            // File-size-aware budget. R1/4 measured throughput on SNR=15
+            // good degrades from ~180 B/s on small files to ~80 B/s sustained
+            // on 50 KB+ (ARQ window fills, retx overhead grows). Budget at
+            // ~60 B/s gives ~30% headroom over worst observed.
+            const long timeout_s = 60 + static_cast<long>(test_file_size_) / 60;
+            if (elapsed >= timeout_s) {
+                std::cout << "  \033[31m✗ File transfer timeout (budget=" << timeout_s << "s)!\033[0m\n";
                 return false;
             }
 
