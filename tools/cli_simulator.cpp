@@ -2142,23 +2142,36 @@ private:
     }
 
     // Channel-aware file-transfer timeout. Sizes for worst-case sustained
-    // throughput at R1/4 OFDM (the slowest rate), then adds 60s of base
-    // headroom for handshake + disconnect overhead. Values are floors
-    // observed empirically — measured numbers are typically 1.5-3x faster.
-    //   AWGN:     ~60 B/s sustained at R1/4 (with ARQ overhead)
-    //   Good:     ~20 B/s — retx eats throughput
-    //   Moderate: ~12 B/s
-    //   Poor/Flutter: ~8 B/s
-    // Hardware mode adds soundcard jitter -> bump base from 60s to 90s.
+    // throughput at R1/4 OFDM (the slowest rate), then adds base-overhead
+    // seconds for handshake + disconnect. Values are floors observed
+    // empirically — measured numbers are typically 1.5-3x faster.
+    //   AWGN:     ~60 B/s in-process sim, ~30 B/s on real-audio hardware
+    //   Good:     ~20 B/s sim, ~12 B/s hardware
+    //   Moderate: ~12 B/s sim, ~8 B/s hardware
+    //   Poor/Flutter: ~8 B/s sim, ~6 B/s hardware
+    // Hardware mode is slower: soundcard jitter, ACK turnaround latency,
+    // and ~5-15% retx overhead from USB-1.1 audio devices. Hardware also
+    // gets 90s base (vs 60s sim) for two-machine handshake setup time.
     long fileTransferTimeoutSeconds(size_t bytes, bool hardware_mode = false) const {
         long bps_floor;
-        switch (channel_type_) {
-            case ChannelType::AWGN:     bps_floor = 60; break;
-            case ChannelType::GOOD:     bps_floor = 20; break;
-            case ChannelType::MODERATE: bps_floor = 12; break;
-            case ChannelType::POOR:     // fall through
-            case ChannelType::FLUTTER:  bps_floor = 8;  break;
-            default:                    bps_floor = 60; break;
+        if (hardware_mode) {
+            switch (channel_type_) {
+                case ChannelType::AWGN:     bps_floor = 30; break;
+                case ChannelType::GOOD:     bps_floor = 12; break;
+                case ChannelType::MODERATE: bps_floor = 8;  break;
+                case ChannelType::POOR:     // fall through
+                case ChannelType::FLUTTER:  bps_floor = 6;  break;
+                default:                    bps_floor = 30; break;
+            }
+        } else {
+            switch (channel_type_) {
+                case ChannelType::AWGN:     bps_floor = 60; break;
+                case ChannelType::GOOD:     bps_floor = 20; break;
+                case ChannelType::MODERATE: bps_floor = 12; break;
+                case ChannelType::POOR:     // fall through
+                case ChannelType::FLUTTER:  bps_floor = 8;  break;
+                default:                    bps_floor = 60; break;
+            }
         }
         const long base_overhead_s = hardware_mode ? 90 : 60;
         return base_overhead_s + static_cast<long>(bytes) / bps_floor;
