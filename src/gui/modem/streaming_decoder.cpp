@@ -1365,122 +1365,53 @@ void StreamingDecoder::decodeCurrentFrame() {
 
     // ========================================================================
     // CW0 peek for connected OFDM (1-CW initial buffer)
-    // Control frames (ACK/NACK) are 1-CW, non-interleaved → decode directly.
-    // Data frames are 4-CW frame-interleaved → CW0 probe fails → escalate.
-    // Skipped when burst interleave marker is latched (full buffer used instead).
+    // Was: try a 1-CW R1/4 decode + code_rate_ fallback to short-circuit
+    //      control frames or read the multi-CW total_cw from the header.
+    // Now: removed the decode attempts. Profiling (LLR distribution histogram,
+    //      see plan v5) showed the R1/4 1-CW decode at this site succeeds 0
+    //      times in 1300+ calls across multiple seeds, even at |LLR|>=6.
+    //      Real 1-CW control frames are always R1/4 (hardened) and are
+    //      caught upstream by the control-first hypothesis at line ~1136.
+    //      Cost of the dead branch: ~36 s of decode CPU per 50 KB transfer.
+    // Kept: LLR pre-empt at threshold 3.0 (false-sync gate) and the
+    //       4-CW escalation that drives the actual data-frame decode.
     // ========================================================================
     if (pending_total_cw_ == 0 && is_ofdm && connected_
         && soft_bits.size() >= LDPC_BLOCK && soft_bits.size() < 2 * LDPC_BLOCK) {
 
-        // Try R1/4 first — control frames are always encoded at R1/4 (hardened)
-        bool peek_fell_through = false;
-        {
-            // LLR pre-screen: skip the 1-CW peek (~85ms incl. retries) when
-            // the soft bits look like noise. Profiling histogram showed this
-            // path exhausts the retry budget on ~99% of calls (n=202, only 1
-            // first-try success). The vast majority are false syncs.
-            std::pair<bool, Bytes> peek_decode = {false, {}};
-            const float llr_avg = computeLLRAbsAvg(soft_bits.data(), LDPC_BLOCK);
-            if (llr_avg < MIN_LLR_FOR_1CW_DECODE) {
-                ultra::timing::globalDecoderProfile()
-                    .low_llr_1cw_skipped_cw0_peek
-                    .fetch_add(1, std::memory_order_relaxed);
-                ultra::timing::globalDecoderProfile()
-                    .llr_dist_cw0_peek.record(llr_avg, false);
-            } else {
-                ultra::timing::ScopedTimer _profile_(
-                    ultra::timing::globalDecoderProfile().cw0_peek_1cw);
-                peek_decode = robustDecodeSingleCW(
-                    soft_bits.data(), LDPC_BLOCK, CodeRate::R1_4, log_prefix_.c_str(),
-                    ultra::timing::SingleCWCallSite::Cw0Peek);
-                ultra::timing::globalDecoderProfile()
-                    .llr_dist_cw0_peek.record(llr_avg, peek_decode.first);
-            }
-            auto [ok_r14, data_r14] = peek_decode;
-            size_t bpc_r14 = v2::getBytesPerCodeword(CodeRate::R1_4);
-            if (ok_r14 && data_r14.size() >= 4
-                && data_r14[0] == 0x55 && data_r14[1] == 0x4C) {
-                if (data_r14.size() > bpc_r14) data_r14.resize(bpc_r14);
-                auto hdr = v2::parseHeader(data_r14);
-                if (hdr.valid && hdr.total_cw == 1) {
-                    LOG_MODEM(DEBUG, "[%s] OFDM CW0 peek: R1/4 control fast-path OK",
-                              log_prefix_.c_str());
-                    peek_fell_through = true;
-                } else if (hdr.valid && hdr.total_cw > 1) {
-                    pending_total_cw_ = hdr.total_cw;
-                    state_ = DecoderState::SYNC_FOUND;
-                    LOG_MODEM(INFO, "[%s] OFDM CW0 peek: R1/4 shows %d CWs, escalating",
-                              log_prefix_.c_str(), hdr.total_cw);
-                    return;
-                }
-                // else: R1/4 decoded but invalid header — try code_rate_ fallback
-            }
+        // Check LLR quality before expensive 4-CW escalation.
+        // False syncs (e.g. from fading-corrupted LTS) produce low |llr|_avg (~1.0),
+        // while legitimate interleaved data frames have |llr|_avg > 3.0.
+        // Escalating on garbage wastes ~1.5s on 4x failed LDPC (50 iters each),
+        // blocking the decoder from processing real frames arriving in the buffer.
+        float llr_abs_sum = 0.0f;
+        size_t llr_count = std::min(soft_bits.size(), LDPC_BLOCK);
+        for (size_t i = 0; i < llr_count; ++i) {
+            llr_abs_sum += std::abs(soft_bits[i]);
         }
+        float llr_abs_avg = llr_abs_sum / static_cast<float>(llr_count);
 
-        // Fallback: try code_rate_ if different from R1/4 and R1/4 didn't resolve
-        if (!peek_fell_through && code_rate_ != CodeRate::R1_4) {
-            size_t bpc = v2::getBytesPerCodeword(code_rate_);
-            auto [ok_fb, data_fb] = robustDecodeSingleCW(
-                soft_bits.data(), LDPC_BLOCK, code_rate_, log_prefix_.c_str());
-            if (ok_fb && data_fb.size() >= 4
-                && data_fb[0] == 0x55 && data_fb[1] == 0x4C) {
-                if (data_fb.size() > bpc) data_fb.resize(bpc);
-                auto hdr = v2::parseHeader(data_fb);
-                if (hdr.valid && hdr.total_cw == 1) {
-                    LOG_MODEM(DEBUG, "[%s] OFDM CW0 peek: 1-CW control (code_rate_ fallback)",
-                              log_prefix_.c_str());
-                    peek_fell_through = true;
-                } else if (hdr.valid && hdr.total_cw > 1) {
-                    pending_total_cw_ = hdr.total_cw;
-                    state_ = DecoderState::SYNC_FOUND;
-                    LOG_MODEM(INFO, "[%s] OFDM CW0 peek: need %d CWs, escalating",
-                              log_prefix_.c_str(), hdr.total_cw);
-                    return;
-                } else {
-                    pending_total_cw_ = v2::FIXED_FRAME_CODEWORDS;
-                    state_ = DecoderState::SYNC_FOUND;
-                    LOG_MODEM(INFO, "[%s] OFDM CW0 peek: invalid header, escalating to 4 CWs",
-                              log_prefix_.c_str());
-                    return;
-                }
+        constexpr float MIN_LLR_FOR_ESCALATION = 3.0f;
+        if (llr_abs_avg < MIN_LLR_FOR_ESCALATION) {
+            ultra::timing::globalDecoderProfile()
+                .low_llr_escalation_skipped.fetch_add(1, std::memory_order_relaxed);
+            LOG_MODEM(INFO, "[%s] OFDM CW0 peek: |llr|_avg=%.1f too low — skipping 4-CW escalation (likely false sync)",
+                      log_prefix_.c_str(), llr_abs_avg);
+            {
+                std::lock_guard<std::mutex> lock(buffer_mutex_);
+                correlation_pos_ = (sync_position_ + frame_len) % MAX_BUFFER_SAMPLES;
+                setSearchFloorLocked(frame_sync_abs + frame_len);
+                last_decoded_sync_pos_ = sync_position_;
             }
-        }
-
-        if (!peek_fell_through) {
-            // Check LLR quality before expensive 4-CW escalation.
-            // False syncs (e.g. from fading-corrupted LTS) produce low |llr|_avg (~1.0),
-            // while legitimate interleaved data frames have |llr|_avg > 3.0.
-            // Escalating on garbage wastes ~1.5s on 4x failed LDPC (50 iters each),
-            // blocking the decoder from processing real frames arriving in the buffer.
-            float llr_abs_sum = 0.0f;
-            size_t llr_count = std::min(soft_bits.size(), LDPC_BLOCK);
-            for (size_t i = 0; i < llr_count; ++i) {
-                llr_abs_sum += std::abs(soft_bits[i]);
-            }
-            float llr_abs_avg = llr_abs_sum / static_cast<float>(llr_count);
-
-            constexpr float MIN_LLR_FOR_ESCALATION = 3.0f;
-            if (llr_abs_avg < MIN_LLR_FOR_ESCALATION) {
-                ultra::timing::globalDecoderProfile()
-                    .low_llr_escalation_skipped.fetch_add(1, std::memory_order_relaxed);
-                LOG_MODEM(INFO, "[%s] OFDM CW0 peek: decode failed, |llr|_avg=%.1f too low — skipping 4-CW escalation (likely false sync)",
-                          log_prefix_.c_str(), llr_abs_avg);
-                {
-                    std::lock_guard<std::mutex> lock(buffer_mutex_);
-                    correlation_pos_ = (sync_position_ + frame_len) % MAX_BUFFER_SAMPLES;
-                    setSearchFloorLocked(frame_sync_abs + frame_len);
-                    last_decoded_sync_pos_ = sync_position_;
-                }
-                state_ = DecoderState::SEARCHING;
-                return;
-            }
-
-            pending_total_cw_ = v2::FIXED_FRAME_CODEWORDS;  // 4
-            state_ = DecoderState::SYNC_FOUND;
-            LOG_MODEM(INFO, "[%s] OFDM CW0 peek: decode failed (|llr|_avg=%.1f), escalating to %d CWs",
-                      log_prefix_.c_str(), llr_abs_avg, pending_total_cw_);
+            state_ = DecoderState::SEARCHING;
             return;
         }
+
+        pending_total_cw_ = v2::FIXED_FRAME_CODEWORDS;  // 4
+        state_ = DecoderState::SYNC_FOUND;
+        LOG_MODEM(INFO, "[%s] OFDM CW0 peek: |llr|_avg=%.1f, escalating to %d CWs",
+                  log_prefix_.c_str(), llr_abs_avg, pending_total_cw_);
+        return;
     }
 
     // Decode the frame using the soft bits
