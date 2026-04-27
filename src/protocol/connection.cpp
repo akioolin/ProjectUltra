@@ -1016,11 +1016,9 @@ void Connection::enterConnected() {
                   timeout_ms / 1000.0f, data_frame_ms, ack_frame_ms,
                   modulationToString(data_modulation_), codeRateToString(data_code_rate_));
     } else {
-        // Window=8 keeps pipeline full during retransmissions. Previously window=4
-        // caused stalls when a base frame failed — the pipeline blocked for 4.5s timeout.
-        // With CPE correction and pre-CFO correction, frame loss rate is low enough
-        // that the larger window improves throughput without overwhelming the RX.
-        arq_.setWindowSize(8);
+        // Keep OFDM receive pressure bounded. Larger windows can overrun the ACK
+        // decode path and amplify a single base hole into timeout retransmit storms.
+        arq_.setWindowSize(4);
         arq_.setMaxRetries(15);     // More attempts compensate for ACK loss on fading
         arq_.setSackDelay(120);     // Short coalescing delay for ACK/SACK control traffic
 

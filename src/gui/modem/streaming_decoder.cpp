@@ -175,6 +175,7 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
     if (total_fed_ >= MAX_BUFFER_SAMPLES &&
         unsearched > (MAX_BUFFER_SAMPLES - CORR_INVARIANT_GUARD)) {
         correlation_pos_ = write_pos_;
+        setSearchFloorLocked(total_fed_);
         unsearched = 0;
         LOG_MODEM(WARN, "[%s] Correlation pointer drift detected, resetting search cursor",
                   log_prefix_.c_str());
@@ -191,6 +192,7 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
         }
 
         correlation_pos_ = (correlation_pos_ + need_to_drop) % MAX_BUFFER_SAMPLES;
+        setSearchFloorLocked(ringPosToAbsoluteLocked(correlation_pos_));
 
         // Once overloaded, any in-flight frame context is stale. Force a clean
         // resync from current audio instead of chasing old sync positions.
@@ -329,7 +331,7 @@ void StreamingDecoder::processBuffer() {
 }
 
 float StreamingDecoder::applyCFOPreCorrection(std::vector<float>& samples, float cfo_hz,
-                                                size_t absolute_start_sample) {
+                                               size_t absolute_start_sample) {
     if (std::abs(cfo_hz) < 0.05f || samples.empty()) {
         pre_correction_cfo_ = 0.0f;
         return 0.0f;  // Skip if negligible
@@ -364,6 +366,37 @@ float StreamingDecoder::applyCFOPreCorrection(std::vector<float>& samples, float
     LOG_MODEM(DEBUG, "[%s] CFO pre-correction: %.2f Hz, abs_start=%zu, %zu samples",
               log_prefix_.c_str(), cfo_hz, absolute_start_sample, len);
     return cfo_hz;
+}
+
+size_t StreamingDecoder::ringPosToAbsoluteLocked(size_t ring_pos) const {
+    if (total_fed_ < MAX_BUFFER_SAMPLES) {
+        return ring_pos;
+    }
+
+    const size_t oldest_abs = total_fed_ - MAX_BUFFER_SAMPLES;
+    const size_t oldest_pos = write_pos_;
+    const size_t offset = (ring_pos >= oldest_pos)
+        ? (ring_pos - oldest_pos)
+        : (MAX_BUFFER_SAMPLES - oldest_pos + ring_pos);
+    return oldest_abs + offset;
+}
+
+size_t StreamingDecoder::absoluteToRingLocked(size_t abs_pos) const {
+    if (total_fed_ < MAX_BUFFER_SAMPLES) {
+        return std::min(abs_pos, total_fed_) % MAX_BUFFER_SAMPLES;
+    }
+
+    const size_t oldest_abs = total_fed_ - MAX_BUFFER_SAMPLES;
+    abs_pos = std::clamp(abs_pos, oldest_abs, total_fed_);
+    return (write_pos_ + (abs_pos - oldest_abs)) % MAX_BUFFER_SAMPLES;
+}
+
+void StreamingDecoder::setSearchFloorLocked(size_t abs_pos) {
+    const size_t oldest_abs = (total_fed_ > MAX_BUFFER_SAMPLES)
+        ? (total_fed_ - MAX_BUFFER_SAMPLES)
+        : 0;
+    search_floor_abs_ = std::clamp(abs_pos, oldest_abs, total_fed_);
+    search_floor_abs_valid_ = true;
 }
 
 void StreamingDecoder::searchForSync() {
@@ -491,6 +524,38 @@ void StreamingDecoder::searchForSync() {
             // Buffer wrapped, handle underflow
             search_start = (MAX_BUFFER_SAMPLES + correlation_pos_ - SEARCH_BACKTRACK) % MAX_BUFFER_SAMPLES;
         }
+
+        // Do not let the backtrack window re-enter audio that a previous decode
+        // already consumed. On sustained OFDM ACK traffic, searching the tail of a
+        // just-decoded 1-CW control frame can find false LTS-like peaks; those
+        // false locks then escalate into expensive 4-CW LDPC attempts and delay
+        // real ACKs long enough to trigger ARQ retransmission storms.
+        if (search_floor_abs_valid_) {
+            const size_t oldest_abs = (total_fed_ > MAX_BUFFER_SAMPLES)
+                ? (total_fed_ - MAX_BUFFER_SAMPLES)
+                : 0;
+            if (search_floor_abs_ < oldest_abs) {
+                search_floor_abs_ = oldest_abs;
+            }
+            if (search_floor_abs_ > total_fed_) {
+                search_floor_abs_ = total_fed_;
+            }
+
+            size_t search_start_abs = ringPosToAbsoluteLocked(search_start);
+            if (search_start_abs < search_floor_abs_) {
+                if (total_fed_ - search_floor_abs_ < min_search) {
+                    static int floor_wait_count = 0;
+                    if (++floor_wait_count % 50 == 1) {
+                        LOG_MODEM(INFO,
+                                  "[%s] searchForSync: SKIP post-frame floor, available=%zu < min=%zu",
+                                  log_prefix_.c_str(), total_fed_ - search_floor_abs_, min_search);
+                    }
+                    return;
+                }
+                search_start = absoluteToRingLocked(search_floor_abs_);
+            }
+        }
+
         search_buffer.resize(min_search);
         for (size_t i = 0; i < min_search; i++) {
             search_buffer[i] = buffer_[(search_start + i) % MAX_BUFFER_SAMPLES];
@@ -885,8 +950,10 @@ void StreamingDecoder::decodeCurrentFrame() {
 
     // Copy frame samples from buffer
     std::vector<float> frame_buffer;
+    size_t frame_sync_abs = 0;
     {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
+        frame_sync_abs = ringPosToAbsoluteLocked(sync_position_);
 
         size_t available;
         if (write_pos_ >= sync_position_) {
@@ -907,16 +974,7 @@ void StreamingDecoder::decodeCurrentFrame() {
     // demodulation chain sees a clean, CFO-free signal.  The waveform/demodulator
     // is then told CFO=0 and only needs to handle small residuals.
     if (is_ofdm && !frame_buffer.empty()) {
-        size_t abs_sync = sync_position_;  // absolute sample position
-        if (total_fed_ >= MAX_BUFFER_SAMPLES) {
-            const size_t oldest_abs = total_fed_ - MAX_BUFFER_SAMPLES;
-            const size_t oldest_pos = write_pos_;
-            const size_t offset = (sync_position_ >= oldest_pos)
-                ? (sync_position_ - oldest_pos)
-                : (MAX_BUFFER_SAMPLES - oldest_pos + sync_position_);
-            abs_sync = oldest_abs + offset;
-        }
-        applyCFOPreCorrection(frame_buffer, sync_cfo_, abs_sync);
+        applyCFOPreCorrection(frame_buffer, sync_cfo_, frame_sync_abs);
     }
 
     // After pre-correction, tell waveform CFO=0 (already removed from samples).
@@ -928,6 +986,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
             correlation_pos_ = (sync_position_ + 4800) % MAX_BUFFER_SAMPLES;
+            setSearchFloorLocked(frame_sync_abs + 4800);
         }
         state_ = DecoderState::SEARCHING;
         return;
@@ -1006,6 +1065,7 @@ void StreamingDecoder::decodeCurrentFrame() {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
             size_t min_frame = static_cast<size_t>(waveform_->getMinSamplesForFrame());
             correlation_pos_ = (sync_position_ + min_frame) % MAX_BUFFER_SAMPLES;
+            setSearchFloorLocked(frame_sync_abs + min_frame);
             last_decoded_sync_pos_ = sync_position_;
         }
 
@@ -1074,6 +1134,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                         {
                             std::lock_guard<std::mutex> lock(buffer_mutex_);
                             correlation_pos_ = (sync_position_ + frame_len) % MAX_BUFFER_SAMPLES;
+                            setSearchFloorLocked(frame_sync_abs + frame_len);
                             last_decoded_sync_pos_ = sync_position_;
                         }
 
@@ -1102,6 +1163,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
             correlation_pos_ = (sync_position_ + frame_len) % MAX_BUFFER_SAMPLES;
+            setSearchFloorLocked(frame_sync_abs + frame_len);
         }
         state_ = DecoderState::SEARCHING;
         return;
@@ -1114,6 +1176,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
             correlation_pos_ = (sync_position_ + frame_len) % MAX_BUFFER_SAMPLES;
+            setSearchFloorLocked(frame_sync_abs + frame_len);
         }
         state_ = DecoderState::SEARCHING;
         return;
@@ -1299,6 +1362,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                 {
                     std::lock_guard<std::mutex> lock(buffer_mutex_);
                     correlation_pos_ = (sync_position_ + frame_len) % MAX_BUFFER_SAMPLES;
+                    setSearchFloorLocked(frame_sync_abs + frame_len);
                     last_decoded_sync_pos_ = sync_position_;
                 }
                 state_ = DecoderState::SEARCHING;
@@ -1536,6 +1600,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         }
     }
     size_t next_block_pos = (sync_position_ + consumed) % MAX_BUFFER_SAMPLES;
+    size_t next_search_abs = frame_sync_abs + consumed;
 
     // After successful decode in connected OFDM mode, check for burst continuation
     // MC-DPSK never enters burst mode (uses window=1, full chirp preamble)
@@ -1632,6 +1697,7 @@ void StreamingDecoder::decodeCurrentFrame() {
             // Advance position for next iteration (or final correlation_pos_)
             sync_position_ = next_block_pos;
             next_block_pos = (next_block_pos + min_block) % MAX_BUFFER_SAMPLES;
+            next_search_abs += min_block;
 
             // If decode failed completely, stop the burst
             if (!next_result.success && next_result.codewords_ok == 0) break;
@@ -1643,6 +1709,7 @@ void StreamingDecoder::decodeCurrentFrame() {
     {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
         correlation_pos_ = (next_block_pos) % MAX_BUFFER_SAMPLES;
+        setSearchFloorLocked(next_search_abs);
         last_decoded_sync_pos_ = sync_position_;
     }
 
@@ -1699,6 +1766,7 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     // CRITICAL: Reset correlation_pos_ to current write position
     // Otherwise we'll search old data from previous mode
     correlation_pos_ = write_pos_;
+    setSearchFloorLocked(total_fed_);
 
     LOG_MODEM(INFO, "StreamingDecoder: Mode=%s (%s), reset corr_pos=%zu",
               protocol::waveformModeToString(mode), connected ? "connected" : "disconnected", correlation_pos_);
@@ -1792,6 +1860,7 @@ void StreamingDecoder::setConnectedOFDMMode(protocol::WaveformMode mode,
     constellation_cache_time_ = std::chrono::steady_clock::time_point{};
     burst_soft_buffer_.clear();
     correlation_pos_ = write_pos_;
+    setSearchFloorLocked(total_fed_);
 
     LOG_MODEM(INFO, "StreamingDecoder: connected OFDM mode=%s, mod=%s, rate=%s, carriers=%d data=%d bps=%zu",
               protocol::waveformModeToString(mode_),
@@ -1978,6 +2047,8 @@ void StreamingDecoder::reset() {
     use_burst_interleave_ = false;
     new_data_available_ = false;
     last_decoded_sync_pos_ = SIZE_MAX;
+    search_floor_abs_ = 0;
+    search_floor_abs_valid_ = false;
 
     std::fill(buffer_.begin(), buffer_.end(), 0.0f);
     if (waveform_) waveform_->reset();

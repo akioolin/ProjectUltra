@@ -296,6 +296,11 @@ private:
     float applyCFOPreCorrection(std::vector<float>& samples, float cfo_hz,
                                  size_t absolute_start_sample);
 
+    // Ring/absolute sample helpers. Call only while buffer_mutex_ is held.
+    size_t ringPosToAbsoluteLocked(size_t ring_pos) const;
+    size_t absoluteToRingLocked(size_t abs_pos) const;
+    void setSearchFloorLocked(size_t abs_pos);
+
     // Burst interleave accumulation
     enum class BurstFrameResult {
         SUCCESS,    // Frame demodulated, soft bits appended to burst_soft_buffer_
@@ -332,6 +337,8 @@ private:
     float sync_snr_ = 0.0f;           // SNR estimate from sync detection
     size_t correlation_pos_ = 0;      // Current position for correlation search
     size_t last_decoded_sync_pos_ = SIZE_MAX;  // Last successfully decoded sync position (to prevent duplicates)
+    size_t search_floor_abs_ = 0;     // Earliest absolute sample search may inspect
+    bool search_floor_abs_valid_ = false;
 
     // Reset generation counter - incremented on reset(), checked after slow operations
     // to detect if state was reset mid-operation (e.g., during correlation)

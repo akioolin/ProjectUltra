@@ -304,14 +304,15 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
             if (!s.hole_probe_armed) {
                 s.hole_probe_armed = true;
                 s.hole_probe_count = 0;
-                s.hole_probe_timer_ms = std::clamp(currentAckTimeoutMs() / 3, 450u, 1800u);
+                s.hole_probe_timer_ms = std::clamp(currentAckTimeoutMs() / 2, 1200u, 2500u);
                 LOG_MODEM(INFO, "SR-ARQ: Armed hole-probe timer for seq=%d (%ums)",
                           s.seq, s.hole_probe_timer_ms);
             }
 
-            // Allow several paced fast retransmits for persistent base holes.
-            // ACK repeats can produce clustered duplicate ACKs, so enforce cooldown.
-            constexpr int MAX_FAST_RETX_PER_HOLE = 3;
+            // Send one fast repair for a base hole. Additional SACK bitmap updates
+            // often arrive before the repair ACK catches up, so repeated fast
+            // retransmits mostly create stale out-of-window duplicates.
+            constexpr int MAX_FAST_RETX_PER_HOLE = 1;
             uint32_t fast_retx_cooldown_ms = std::clamp(config_.ack_timeout_ms / 6, 300u, 1200u);
             if (s.fast_retx_count < MAX_FAST_RETX_PER_HOLE && s.fast_retx_cooldown_ms == 0) {
                 s.fast_retx_count++;
@@ -395,10 +396,10 @@ void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
 
             if (s.hole_probe_armed) {
                 if (elapsed_ms >= s.hole_probe_timer_ms) {
-                    constexpr int MAX_HOLE_PROBE_RETX = 2;
+                    constexpr int MAX_HOLE_PROBE_RETX = 1;
                     if (s.hole_probe_count < MAX_HOLE_PROBE_RETX) {
                         s.hole_probe_count++;
-                        s.hole_probe_timer_ms = std::clamp(currentAckTimeoutMs() / 2, 700u, 2200u);
+                        s.hole_probe_timer_ms = std::clamp((currentAckTimeoutMs() * 2) / 3, 1800u, 3000u);
                         LOG_MODEM(INFO,
                                   "SR-ARQ: Hole-probe retransmit seq=%d (%d/%d)",
                                   s.seq, s.hole_probe_count, MAX_HOLE_PROBE_RETX);
@@ -565,10 +566,9 @@ void SelectiveRepeatARQ::sendSack() {
 
     transmitData(data);
 
-    bool base_advanced = !last_sack_base_valid_ || base_seq != last_sack_base_;
     last_sack_base_valid_ = true;
     last_sack_base_ = base_seq;
-    bool critical_ack = base_advanced || bitmap != 0;
+    bool repeat_ack = bitmap != 0;
 
     // Coalesce pending repeats:
     // - Keep queued repeats matching current ACK state (base+bitmap).
@@ -591,9 +591,9 @@ void SelectiveRepeatARQ::sendSack() {
         LOG_MODEM(INFO, "SR-ARQ: ACK_REPEAT coalesced %zu queued jobs", removed_jobs);
     }
 
-    // Schedule delayed repeat copies for fading reliability.
-    // Use wider spacing (and deterministic jitter) to decorrelate deep fades.
-    for (int copy_index = 2; copy_index <= ack_repeat_count_; ++copy_index) {
+    // Schedule delayed repeats only for selective SACK state. Plain cumulative
+    // ACKs are superseded by the next ACK and their repeats can become stale.
+    for (int copy_index = 2; repeat_ack && copy_index <= ack_repeat_count_; ++copy_index) {
         if (copy_index < 4 && have_copy_queued[copy_index]) {
             continue;
         }
@@ -620,8 +620,8 @@ void SelectiveRepeatARQ::sendSack() {
         job.copy_index = copy_index;
         ack_repeat_jobs_.push_back(std::move(job));
 
-        LOG_MODEM(INFO, "SR-ARQ: ACK_REPEAT scheduled copy=%d delay=%ums jitter=%dms critical=%d queue=%zu",
-                  copy_index, static_cast<uint32_t>(scheduled), jitter_ms, critical_ack ? 1 : 0,
+        LOG_MODEM(INFO, "SR-ARQ: ACK_REPEAT scheduled copy=%d delay=%ums jitter=%dms selective=%d queue=%zu",
+                  copy_index, static_cast<uint32_t>(scheduled), jitter_ms, repeat_ack ? 1 : 0,
                   ack_repeat_jobs_.size());
     }
 }
