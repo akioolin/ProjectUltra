@@ -93,6 +93,45 @@ struct SingleCWHistogram {
     }
 };
 
+// Identifies which call site invoked robustDecodeSingleCW() so the
+// per-site retry histogram is correctly attributed.
+enum class SingleCWCallSite {
+    Default,        // code-rate fallback, small-frame recovery, salvage
+    ControlFirst,   // control-first ACK path (streaming_decoder.cpp:1098)
+    Cw0Peek,        // CW0 peek path (streaming_decoder.cpp:1294)
+};
+
+// |LLR|_avg distribution for 1-CW probes, split by decode outcome.
+// Used to pick the right pre-screen threshold from data: if the success
+// and fail clouds separate at LLR=X, gate the decode at X. If they overlap
+// across all bins, mean |LLR| isn't the right discriminator.
+//
+// Bins: 13 buckets of 0.5-width — [0,0.5), [0.5,1.0), ..., [5.5,6.0), [6.0,inf).
+// Skipped calls (gated by MIN_LLR_FOR_1CW_DECODE) record under fail since
+// they would have decoded-and-failed.
+struct LLRHistogram {
+    static constexpr size_t kBins = 13;
+    static constexpr float kBinWidth = 0.5f;
+
+    std::atomic<uint64_t> success[kBins] {};
+    std::atomic<uint64_t> fail[kBins] {};
+
+    void reset() {
+        for (auto& b : success) b.store(0);
+        for (auto& b : fail) b.store(0);
+    }
+
+    void record(float llr_abs_avg, bool decode_ok) {
+        size_t idx = static_cast<size_t>(llr_abs_avg / kBinWidth);
+        if (idx >= kBins) idx = kBins - 1;
+        if (decode_ok) {
+            success[idx].fetch_add(1, std::memory_order_relaxed);
+        } else {
+            fail[idx].fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+};
+
 // All decode-thread profiling buckets. See plan v5 for the design.
 struct DecoderProfile {
     PhaseStats detect_data_sync;
@@ -125,6 +164,11 @@ struct DecoderProfile {
     std::atomic<uint64_t> low_llr_1cw_skipped_control_first{0};
     std::atomic<uint64_t> low_llr_1cw_skipped_cw0_peek{0};
 
+    // |LLR|_avg distribution split by decode outcome — for picking the
+    // pre-screen threshold from data instead of guessing.
+    LLRHistogram llr_dist_control_first;
+    LLRHistogram llr_dist_cw0_peek;
+
     void reset() {
         detect_data_sync.reset();
         ofdm_process_total.reset();
@@ -144,6 +188,8 @@ struct DecoderProfile {
         raw_cw0_probe_skipped.store(0);
         low_llr_1cw_skipped_control_first.store(0);
         low_llr_1cw_skipped_cw0_peek.store(0);
+        llr_dist_control_first.reset();
+        llr_dist_cw0_peek.reset();
     }
 };
 
@@ -152,13 +198,5 @@ inline DecoderProfile& globalDecoderProfile() {
     static DecoderProfile p;
     return p;
 }
-
-// Identifies which call site invoked robustDecodeSingleCW() so the
-// per-site retry histogram is correctly attributed.
-enum class SingleCWCallSite {
-    Default,        // code-rate fallback, small-frame recovery, salvage
-    ControlFirst,   // control-first ACK path (streaming_decoder.cpp:1098)
-    Cw0Peek,        // CW0 peek path (streaming_decoder.cpp:1294)
-};
 
 }  // namespace ultra::timing

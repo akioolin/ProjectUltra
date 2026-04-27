@@ -1162,6 +1162,9 @@ void StreamingDecoder::decodeCurrentFrame() {
                     ultra::timing::globalDecoderProfile()
                         .low_llr_1cw_skipped_control_first
                         .fetch_add(1, std::memory_order_relaxed);
+                    // Skipped calls would have decoded-and-failed — record under fail.
+                    ultra::timing::globalDecoderProfile()
+                        .llr_dist_control_first.record(llr_avg, false);
                 } else {
                     ultra::timing::ScopedTimer _profile_(
                         ultra::timing::globalDecoderProfile().control_first_1cw);
@@ -1174,6 +1177,8 @@ void StreamingDecoder::decodeCurrentFrame() {
                         CodeRate::R1_4, log_prefix_.c_str(),
                         ultra::timing::SingleCWCallSite::ControlFirst,
                         /*max_retries=*/2);
+                    ultra::timing::globalDecoderProfile()
+                        .llr_dist_control_first.record(llr_avg, control_decode.first);
                 }
                 auto [ok_r14, data_r14] = control_decode;
                 size_t bpc_r14 = v2::getBytesPerCodeword(CodeRate::R1_4);
@@ -1380,12 +1385,16 @@ void StreamingDecoder::decodeCurrentFrame() {
                 ultra::timing::globalDecoderProfile()
                     .low_llr_1cw_skipped_cw0_peek
                     .fetch_add(1, std::memory_order_relaxed);
+                ultra::timing::globalDecoderProfile()
+                    .llr_dist_cw0_peek.record(llr_avg, false);
             } else {
                 ultra::timing::ScopedTimer _profile_(
                     ultra::timing::globalDecoderProfile().cw0_peek_1cw);
                 peek_decode = robustDecodeSingleCW(
                     soft_bits.data(), LDPC_BLOCK, CodeRate::R1_4, log_prefix_.c_str(),
                     ultra::timing::SingleCWCallSite::Cw0Peek);
+                ultra::timing::globalDecoderProfile()
+                    .llr_dist_cw0_peek.record(llr_avg, peek_decode.first);
             }
             auto [ok_r14, data_r14] = peek_decode;
             size_t bpc_r14 = v2::getBytesPerCodeword(CodeRate::R1_4);

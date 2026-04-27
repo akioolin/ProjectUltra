@@ -2048,6 +2048,48 @@ private:
         std::cout << "    control_first  " << fmt_hist(dp.robust_cw_control_first) << "\n";
         std::cout << "    cw0_peek       " << fmt_hist(dp.robust_cw_cw0_peek) << "\n";
         std::cout << "    default        " << fmt_hist(dp.robust_cw_default) << "\n";
+
+        // |LLR|_avg distribution split by decode outcome — for picking the
+        // pre-screen threshold from data. Bins of 0.5 width; last bin is 6.0+.
+        auto print_llr_dist = [](const char* label,
+                                 const ultra::timing::LLRHistogram& h) {
+            using LH = ultra::timing::LLRHistogram;
+            uint64_t s_total = 0, f_total = 0;
+            for (size_t i = 0; i < LH::kBins; ++i) {
+                s_total += h.success[i].load();
+                f_total += h.fail[i].load();
+            }
+            std::cout << "    " << label << "  (n=" << (s_total + f_total)
+                      << ", success=" << s_total << ", fail=" << f_total << ")\n";
+            if (s_total + f_total == 0) return;
+            for (size_t i = 0; i < LH::kBins; ++i) {
+                const uint64_t s = h.success[i].load();
+                const uint64_t f = h.fail[i].load();
+                if (s + f == 0) continue;
+                char range[32];
+                if (i + 1 == LH::kBins) {
+                    snprintf(range, sizeof(range), "[%.1f,inf)",
+                             i * LH::kBinWidth);
+                } else {
+                    snprintf(range, sizeof(range), "[%.1f,%.1f)",
+                             i * LH::kBinWidth,
+                             (i + 1) * LH::kBinWidth);
+                }
+                const double p_succ = static_cast<double>(s)
+                                    / static_cast<double>(s + f);
+                char buf[160];
+                snprintf(buf, sizeof(buf),
+                         "      %-12s success=%-5llu fail=%-5llu  P(ok)=%.2f",
+                         range,
+                         static_cast<unsigned long long>(s),
+                         static_cast<unsigned long long>(f),
+                         p_succ);
+                std::cout << buf << "\n";
+            }
+        };
+        std::cout << "  |LLR|_avg distribution (1-CW pre-screen tuning):\n";
+        print_llr_dist("control_first", dp.llr_dist_control_first);
+        print_llr_dist("cw0_peek     ", dp.llr_dist_cw0_peek);
     }
 
     void printStationStats(const char* label, SimulatedStation* station) {
