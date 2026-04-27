@@ -1706,6 +1706,30 @@ void StreamingDecoder::decodeCurrentFrame() {
             auto next_soft_bits = waveform_->getSoftBits();
             if (next_soft_bits.empty()) break;
 
+            // LLR sanity check: if the soft bits look like noise (typical
+            // sign of demodulating into the next frame's chirp/training
+            // area, or into silence between frames), bail before paying
+            // ~600ms of LDPC retry attempts that all fail. Real data
+            // frames at usable SNR show |LLR|_avg >> 2; lost-frame attempts
+            // collapse to |LLR|_avg < 1. See hardware-test analysis in
+            // commit message — saves ~600ms per lost frame which lets
+            // chirp-search lock on to the next real frame promptly.
+            constexpr float MIN_BURST_CONT_LLR = 2.0f;
+            float burst_llr_sum = 0.0f;
+            const size_t burst_llr_n = std::min(next_soft_bits.size(), size_t(648));
+            for (size_t i = 0; i < burst_llr_n; ++i) {
+                burst_llr_sum += std::abs(next_soft_bits[i]);
+            }
+            const float burst_llr_avg = burst_llr_n > 0
+                ? burst_llr_sum / static_cast<float>(burst_llr_n) : 0.0f;
+            if (burst_llr_avg < MIN_BURST_CONT_LLR) {
+                LOG_MODEM(INFO, "[%s] Burst continuation: bail at block %d "
+                          "(|llr|_avg=%.2f < %.2f, no real frame here)",
+                          log_prefix_.c_str(), burst_blocks_decoded_,
+                          burst_llr_avg, MIN_BURST_CONT_LLR);
+                break;
+            }
+
             // Update CFO from pilot tracking
             float next_corrected_cfo = waveform_->estimatedCFO();
             float cfo_drift = next_corrected_cfo - sync_cfo_;
