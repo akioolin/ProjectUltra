@@ -54,7 +54,7 @@ CHANNEL=${CHANNEL:-awgn}              # awgn|good|moderate|poor|flutter
 RATE=${RATE:-r1_4}                    # r1_4|r1_2|r2_3|r3_4
 FILE_SIZE=${FILE_SIZE:-}              # empty = message test
 INJECT_CHANNEL=${INJECT_CHANNEL:-0}   # 1 = synthetic HF channel on each TX
-B_IDLE_SECONDS=${B_IDLE_SECONDS:-600} # how long B waits before giving up
+B_IDLE_SECONDS=${B_IDLE_SECONDS:-0}   # how long B waits before giving up (0 = until peer disconnects)
 
 # ─── CLI parsing ────────────────────────────────────────────────────────
 LIST_DEVICES=0
