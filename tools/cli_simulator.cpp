@@ -450,16 +450,19 @@ class HardwareAudioPort : public AudioPort {
 public:
     HardwareAudioPort(const std::string& output_device,
                       const std::string& input_device,
-                      std::unique_ptr<ChannelInjector> injector = nullptr)
+                      std::unique_ptr<ChannelInjector> injector = nullptr,
+                      int buffer_size = 0)
         : output_device_(output_device),
           input_device_(input_device),
-          injector_(std::move(injector)) {}
+          injector_(std::move(injector)),
+          buffer_size_(buffer_size) {}
 
     bool start() override {
         if (!engine_.initialize()) {
             std::cerr << "AudioEngine init failed\n";
             return false;
         }
+        if (buffer_size_ > 0) engine_.setBufferSize(buffer_size_);
         if (!engine_.openOutput(output_device_)) {
             std::cerr << "Failed to open output device '" << output_device_ << "'\n";
             return false;
@@ -505,6 +508,7 @@ private:
     std::string output_device_;
     std::string input_device_;
     std::unique_ptr<ChannelInjector> injector_;
+    int buffer_size_ = 0;  // 0 = engine default
 };
 #endif  // ULTRA_HAVE_SDL2
 
@@ -1400,6 +1404,7 @@ public:
     void setListAudioDevices(bool v) { list_audio_devices_ = v; }
     void setRoleBIdleSeconds(int s) { role_b_idle_seconds_ = std::max(0, s); }
     void setInjectChannel(bool v) { inject_channel_ = v; }
+    void setAudioBufferSize(int n) { audio_buffer_size_ = n; }
 
     bool runTest() {
         // Hardware-audio mode (real soundcard, single station per process).
@@ -1585,6 +1590,7 @@ private:
     int role_b_idle_seconds_ = 0;      // 0 = run until peer disconnects (no idle cap)
     bool inject_channel_ = false;       // --inject-channel: apply TX-side channel sim
                                         // to real-audio output (uses snr_db_/channel_type_)
+    int audio_buffer_size_ = 0;         // 0 = AudioEngine default (4096)
 
     SimulatedChannel channel_;
     std::unique_ptr<SimulatedStation> alpha_;
@@ -2217,7 +2223,8 @@ private:
 
         // Build the single station with hardware I/O
         auto port = std::make_unique<HardwareAudioPort>(
-            audio_output_device_, audio_input_device_, std::move(injector));
+            audio_output_device_, audio_input_device_, std::move(injector),
+            audio_buffer_size_);
         auto station = std::make_unique<SimulatedStation>(self, std::move(port));
 
         // Forced settings (only meaningful on initiator A — responder B picks
@@ -2842,6 +2849,8 @@ int main(int argc, char* argv[]) {
                 sim.setRoleBIdleSeconds(std::stoi(argv[++i]));
             } else if (arg == "--inject-channel") {
                 sim.setInjectChannel(true);
+            } else if (arg == "--audio-buffer-size" && i + 1 < argc) {
+                sim.setAudioBufferSize(std::stoi(argv[++i]));
             } else if (arg == "--help" || arg == "-h") {
                 std::cout << "CLI Simulator - IWaveform + StreamingDecoder Model\n\n";
                 std::cout << "Uses IWaveform for TX and StreamingDecoder for RX directly.\n";
@@ -2888,6 +2897,8 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --idle-seconds <N>  Role B: max idle seconds before giving up (0 = forever)\n";
                 std::cout << "  --inject-channel    Apply --snr/--channel/--cfo to outgoing audio\n";
                 std::cout << "                      (lets Mac-to-Pi cable carry a synthetic HF channel)\n";
+                std::cout << "  --audio-buffer-size <N>  SDL2 period size, samples (default 4096)\n";
+                std::cout << "                      Smaller = lower latency. Larger = more XRUN headroom.\n";
                 return 0;
             }
         }

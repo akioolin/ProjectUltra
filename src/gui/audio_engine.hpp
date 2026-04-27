@@ -106,6 +106,10 @@ public:
 
     // Audio parameters
     int getSampleRate() const { return sample_rate_; }
+    // Override the SDL2 period size (samples per callback). Must be called
+    // before openInput/openOutput. Larger = more jitter cushion, more latency.
+    void setBufferSize(int n) { if (n >= 64 && n <= 16384) buffer_size_ = n; }
+    int getBufferSize() const { return buffer_size_; }
 
     // Audio level metering
     float getInputLevel() const { return input_level_; }
@@ -158,7 +162,12 @@ private:
 
     // Audio parameters
     int sample_rate_ = 48000;
-    int buffer_size_ = 1024;
+    // Period size requested from SDL2 (samples per callback). SDL2 uses a
+    // 2-period buffer internally, so total ALSA buffer = 2 × buffer_size_.
+    // 4096 → 85 ms period → 170 ms total: enough cushion for normal Linux
+    // scheduling jitter. Smaller (e.g. 1024) is fine on macOS but causes
+    // XRUNs on Pi/USB-1.1 audio devices when the decode thread is loaded.
+    int buffer_size_ = 4096;
 
     // Buffer limits (prevent unbounded growth if main loop stalls)
     static constexpr size_t MAX_RX_BUFFER_SAMPLES = 96000;  // 2 seconds at 48kHz
