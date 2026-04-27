@@ -164,10 +164,13 @@ private:
     int sample_rate_ = 48000;
     // Period size requested from SDL2 (samples per callback). SDL2 uses a
     // 2-period buffer internally, so total ALSA buffer = 2 × buffer_size_.
-    // 4096 → 85 ms period → 170 ms total: enough cushion for normal Linux
-    // scheduling jitter. Smaller (e.g. 1024) is fine on macOS but causes
-    // XRUNs on Pi/USB-1.1 audio devices when the decode thread is loaded.
-    int buffer_size_ = 4096;
+    // 8192 → 170 ms period → 340 ms total: comfortable cushion even on
+    // USB-1.1 audio dongles and Linux scheduler jitter. Latency cost is
+    // negligible for an HF modem — a single OFDM data frame is 660 ms+ of
+    // audio anyway. Smaller buffers (1024-4096) work on macOS/CoreAudio
+    // but were causing XRUNs on the Pi 5 + C-Media USB-1.1 dongle test rig
+    // (avail_max running at 96% of buffer capacity → drops on any jitter).
+    int buffer_size_ = 8192;
 
     // Buffer limits (prevent unbounded growth if main loop stalls)
     static constexpr size_t MAX_RX_BUFFER_SAMPLES = 96000;  // 2 seconds at 48kHz
