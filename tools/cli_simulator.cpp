@@ -22,7 +22,12 @@
 #include <atomic>
 #include <mutex>
 #include <deque>
+#ifdef _WIN32
+#include <process.h>
+#define getpid _getpid
+#else
 #include <unistd.h>
+#endif
 #include <queue>
 #include <algorithm>
 #include <cmath>
