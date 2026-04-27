@@ -73,8 +73,29 @@ public:
         if (size < 1) size = 1;
         if (size > MAX_WINDOW) size = MAX_WINDOW;
         config_.window_size = size;
+        // Clamp ack_batch_size if it would exceed the new window — protects
+        // against setter ordering where Connection::enterConnected() shrinks
+        // the window after a wider batch was previously configured.
+        if (config_.ack_batch_size > 0 &&
+            config_.ack_batch_size > static_cast<uint32_t>(size)) {
+            config_.ack_batch_size = static_cast<uint32_t>(size);
+        }
     }
     size_t getWindowSize() const { return config_.window_size; }
+
+    // ACK batch size: send SACK after this many in-order data frames received.
+    // 0 (default) means "track window_size" — preserves prior behavior bit
+    // for bit. Nonzero values must be <= window_size; otherwise ALPHA can
+    // saturate the window before BRAVO ACKs and stall on the sack_delay
+    // fallback timer.
+    void setAckBatchSize(uint32_t n) {
+        if (n > MAX_WINDOW) n = MAX_WINDOW;
+        if (n > 0 && n > static_cast<uint32_t>(config_.window_size)) {
+            n = static_cast<uint32_t>(config_.window_size);
+        }
+        config_.ack_batch_size = n;
+    }
+    uint32_t getAckBatchSize() const { return config_.ack_batch_size; }
 
     // Set ACK timeout (adaptive based on waveform frame duration)
     void setAckTimeout(uint32_t timeout_ms) {

@@ -25,6 +25,10 @@ struct ARQConfig {
     size_t window_size = 4;             // TX window size (SR only)
     size_t rx_buffer_size = 8;          // RX reorder buffer size (SR only)
     uint32_t sack_delay_ms = 2000;      // Delay before sending SACK (wait for burst to complete)
+    // ACK batch size: send SACK after this many in-order data frames received.
+    // 0 = "track window_size" (preserves prior behavior). Must be <= window_size
+    // when nonzero; setWindowSize() clamps it down on shrink.
+    uint32_t ack_batch_size = 0;
 };
 
 // ARQ statistics (shared across modes)

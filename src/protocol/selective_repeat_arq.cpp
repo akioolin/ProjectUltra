@@ -167,13 +167,20 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
         }
 
         // ACK strategy for OFDM burst traffic:
-        // - Immediate ACK on hole detection (out-of-order) or full window.
-        // - Otherwise short delayed coalescing to reduce ACK storms.
+        // - Immediate ACK on hole detection (out-of-order) — safety valve, MUST
+        //   stay first in the condition.
+        // - Otherwise threshold-driven coalescing using ack_batch_size; falls
+        //   back to window_size when ack_batch_size = 0 (default), preserving
+        //   prior behavior bit for bit.
+        // - Short delayed timer (sack_delay_ms) covers tail of stream.
         if (new_frame) {
             frames_since_ack_++;
         }
 
-        if (out_of_order || frames_since_ack_ >= config_.window_size) {
+        const uint32_t batch_threshold = config_.ack_batch_size > 0
+                                       ? config_.ack_batch_size
+                                       : static_cast<uint32_t>(config_.window_size);
+        if (out_of_order || frames_since_ack_ >= batch_threshold) {
             sendSack();
             sack_pending_ = false;
             sack_timer_ms_ = 0;

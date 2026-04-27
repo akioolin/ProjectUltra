@@ -427,13 +427,142 @@ bool test_full_exchange() {
 }
 
 // ============================================================================
+// ack_batch_size decoupling tests (Phase 1b)
+// ============================================================================
+
+bool test_ack_batch_threshold_independent() {
+    TEST("ack_batch_size threshold fires independently of window_size");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.sack_delay_ms = 10000;  // Large so timer doesn't interfere
+
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+    rx.setAckBatchSize(2);  // ACK every 2 frames, not every 4
+
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    // Feed 4 in-order frames; expect SACK after frames 2 and 4 = 2 SACKs total.
+    // Without the decoupling (or with ack_batch_size=0), we'd get either zero
+    // (timer didn't fire) or one (after frame 4).
+    for (int i = 0; i < 4; i++) {
+        auto frame = v2::DataFrame::makeData("TX1", "RX1", i, Bytes{static_cast<uint8_t>(i)});
+        rx.onFrameReceived(frame.serialize());
+    }
+
+    if (channel.size() != 2)
+        FAIL("Expected 2 SACKs at batch=2 over 4 frames, got " + std::to_string(channel.size()));
+
+    PASS();
+    return true;
+}
+
+bool test_ack_batch_out_of_order_safety_valve() {
+    TEST("Out-of-order frame triggers immediate SACK regardless of batch state");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.sack_delay_ms = 10000;
+
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+    rx.setAckBatchSize(4);  // High batch — without safety valve, no SACK until 4 frames
+
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    // Feed seq=0 (in order, frames_since_ack=1), then seq=2 (hole at seq=1 →
+    // out-of-order). Out-of-order MUST short-circuit the batch threshold and
+    // fire SACK immediately.
+    auto f0 = v2::DataFrame::makeData("TX1", "RX1", 0, Bytes{0});
+    rx.onFrameReceived(f0.serialize());
+    if (channel.size() != 0)
+        FAIL("Did not expect SACK after 1st in-order frame at batch=4, got " + std::to_string(channel.size()));
+
+    auto f2 = v2::DataFrame::makeData("TX1", "RX1", 2, Bytes{2});
+    rx.onFrameReceived(f2.serialize());
+    if (channel.size() != 1)
+        FAIL("Expected immediate SACK on out-of-order seq=2, got " + std::to_string(channel.size()));
+
+    PASS();
+    return true;
+}
+
+bool test_ack_batch_setter_clamping() {
+    TEST("setWindowSize() clamps ack_batch_size when shrinking below");
+
+    ARQConfig config;
+    config.window_size = 8;
+
+    SelectiveRepeatARQ rx(config);
+    rx.setAckBatchSize(6);
+
+    if (rx.getAckBatchSize() != 6)
+        FAIL("Expected ack_batch_size=6 after setAckBatchSize(6), got " + std::to_string(rx.getAckBatchSize()));
+
+    // Shrink window below batch_size. Batch should clamp down.
+    rx.setWindowSize(4);
+
+    if (rx.getAckBatchSize() != 4)
+        FAIL("Expected ack_batch_size clamped to 4 after window shrink, got " + std::to_string(rx.getAckBatchSize()));
+
+    // Default (batch_size = 0) should NOT be touched by setWindowSize — sentinel
+    // 0 means "track window_size implicitly".
+    rx.setAckBatchSize(0);
+    rx.setWindowSize(2);
+    if (rx.getAckBatchSize() != 0)
+        FAIL("Expected ack_batch_size=0 sentinel preserved after window change");
+
+    PASS();
+    return true;
+}
+
+bool test_ack_batch_default_matches_window() {
+    TEST("ack_batch_size=0 (default) tracks window_size — bit-identical to prior code");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.sack_delay_ms = 10000;
+    // ack_batch_size = 0 by default
+
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    // Feed exactly window_size=4 in-order frames. Threshold path should fire 1 SACK.
+    for (int i = 0; i < 4; i++) {
+        auto frame = v2::DataFrame::makeData("TX1", "RX1", i, Bytes{static_cast<uint8_t>(i)});
+        rx.onFrameReceived(frame.serialize());
+    }
+
+    if (channel.size() != 1)
+        FAIL("Expected 1 SACK at threshold (default = window_size = 4), got " + std::to_string(channel.size()));
+
+    PASS();
+    return true;
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
 int main() {
     std::cout << "=== Selective Repeat ARQ Test Suite (v2) ===\n\n";
 
-    std::cout << "Basic Tests:\n";
+    // Run Phase 1b decoupling tests FIRST so they're observable even if a
+    // later existing test hangs (test_full_exchange has a known hang issue
+    // at the time of writing, unrelated to ack_batch_size).
+    std::cout << "ack_batch_size Decoupling Tests (Phase 1b):\n";
+    test_ack_batch_threshold_independent();
+    test_ack_batch_out_of_order_safety_valve();
+    test_ack_batch_setter_clamping();
+    test_ack_batch_default_matches_window();
+
+    std::cout << "\nBasic Tests:\n";
     test_create_sr_arq();
     test_send_single_frame();
     test_send_window_full();
