@@ -1030,6 +1030,16 @@ void Connection::enterConnected() {
             ack_repeat_count = 3;
             ack_repeat_delay_ms = 250;
         }
+        // Near-AWGN at decent SNR: drop SACK repeat to 1 copy. Single-shot
+        // SACKs are reliably decoded here, the duplicate copies were just
+        // eating channel time. SRTT-aware ACK timeout (~750ms) recovers
+        // any lost SACK quickly. Tested expanding to good fading (< 0.65)
+        // and observed regressions at SNR=20 good (seed 1: r=33/t=17 → r=81/t=60),
+        // so the threshold stays at near-AWGN where SACKs are reliably
+        // single-shot deliverable.
+        else if (fading_index_ < 0.30f && measured_snr_db_ >= 15.0f) {
+            ack_repeat_count = 1;
+        }
 
         arq_.setAckRepeatCount(ack_repeat_count);
         arq_.setAckRepeatDelay(ack_repeat_delay_ms);

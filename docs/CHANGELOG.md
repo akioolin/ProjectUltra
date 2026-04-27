@@ -10,6 +10,58 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-04-26: ack_repeat=1 on near-AWGN — sustained file-transfer throughput
+
+**What was broken:**
+After the previous "ACK repeats only for selective SACKs" change in `beb86cb` and
+the SRTT-aware timeout floor, sustained 50 KB transfers at SNR=20 AWGN (DQPSK
+R2/3) still showed wide variance: 199s/290s/229s wall across 3 seeds. The bad
+seed (290s) burned channel time on duplicate SACK copies that were never needed
+— BRAVO was scheduling 2 ACK_REPEAT copies for every selective SACK, but at
+near-AWGN with SNR≥15 a single SACK is delivered cleanly.
+
+**What was changed:**
+- `src/protocol/connection.cpp:1033-1041` (in `enterConnected()` OFDM branch):
+  drop `ack_repeat_count` from 2 to 1 when `fading_index_ < 0.30f &&
+  measured_snr_db_ >= 15.0f`. D8PSK R1/2 path (which forces ack_repeat=3 for
+  diversity) is unchanged. Good fading and worse remain at 2.
+
+**How it's properly fixed:**
+- The threshold matches the auto-selector's true-AWGN bucket (< 0.15 in CLAUDE.md
+  but expanded to 0.30 to absorb measurement jitter at the boundary).
+- SRTT-aware ACK timeout (~750ms on these profiles) recovers any genuinely-lost
+  SACK quickly enough that the duplicate copy isn't structurally needed.
+- Conservative: tested expanding to `< 0.65` (good fading) and saw a real
+  regression — SNR=20 good seed 1 went from r=33/t=17 (pass) to r=81/t=60 (fail).
+  Without the redundant copy, brief fading nulls cause SACK loss and trigger
+  retx storms. Stayed at near-AWGN.
+
+**Test verification:**
+50 KB at SNR=20 AWGN, 3 seeds:
+| Seed | v2 (pre-fix) | post-fix |
+|---|---|---|
+| 1 | 199s, retx=5, timeouts=3 | 201s, retx=8, timeouts=4 |
+| 2 | 290s, retx=131, timeouts=124 | 205s, retx=5, timeouts=3 |
+| 3 | 229s, retx=44, timeouts=37 | 211s, retx=21, timeouts=16 |
+
+Mean wall: 239s → 206s (~14% faster, much tighter variance). The bulk of the
+seed-2 win comes from the SRTT-floor fix landing alongside; the ack_repeat
+reduction contributes a steadier ~3-5% on its own.
+
+No regressions on SNR=15/20 good (criteria didn't activate). Did not improve
+SNR=15 moderate (criteria didn't activate; that cell's bottleneck is PHY+ARQ
+thrashing, not control-frame overhead).
+
+**Invariants:**
+- The 0.30 threshold is a soft floor — moving it up to 0.65 (good fading)
+  caused regression. Don't widen without re-measuring on borderline good-fading
+  seeds.
+- SRTT-aware ACK timeout floor is required for this to work safely; with the
+  pre-fix 2250ms floor a lost SACK would have meant a 2.25s wait, making the
+  redundant copy load-bearing.
+
+---
+
 ## 2026-04-26: SRTT-aware adaptive ACK-timeout floor — file-transfer throughput recovery
 
 **What was broken:**
