@@ -39,8 +39,10 @@
 set -euo pipefail
 
 # ─── Defaults (override via env or CLI) ─────────────────────────────────
-PI=${PI:-ubuntu@pi5.local}
+PI=${PI:-math@pi5tester}
 PI_REPO=${PI_REPO:-~/ProjectUltra}
+# Optional: SSH_KEY=~/.ssh/id_pi5 to use a specific key
+SSH_OPTS=${SSH_KEY:+-i "$SSH_KEY"}
 PI_AUDIO_OUT=${PI_AUDIO_OUT:-}        # empty = SDL default device
 PI_AUDIO_IN=${PI_AUDIO_IN:-}
 MAC_AUDIO_OUT=${MAC_AUDIO_OUT:-}
@@ -87,7 +89,7 @@ if [[ "$LIST_DEVICES" == "1" ]]; then
   "$MAC_BIN" --list-audio-devices --role A 2>/dev/null | sed -n '/Output/,/Input/p; /Input/,$p'
   echo
   echo "=== Pi devices ($PI) ==="
-  ssh "$PI" "cd $PI_REPO && ./build/cli_simulator --list-audio-devices --role B" \
+  ssh $SSH_OPTS "$PI" "cd $PI_REPO && ./build/cli_simulator --list-audio-devices --role B" \
     2>/dev/null | sed -n '/Output/,/Input/p; /Input/,$p'
   exit 0
 fi
@@ -124,7 +126,7 @@ echo
 
 # ─── 1. Start station B on Pi (background, via SSH) ─────────────────────
 echo "[1/3] Starting station B on $PI..."
-ssh "$PI" bash -s <<EOF > "$LOG_DIR/B_pid.txt"
+ssh $SSH_OPTS "$PI" bash -s <<EOF > "$LOG_DIR/B_pid.txt"
   set -e
   cd $PI_REPO
   pkill -9 cli_simulator 2>/dev/null || true
@@ -152,8 +154,8 @@ set -e
 
 # ─── 3. Stop B, pull its log ────────────────────────────────────────────
 echo "[3/3] Stopping B and collecting log..."
-ssh "$PI" "kill $B_PID 2>/dev/null; sleep 1; pkill -9 cli_simulator 2>/dev/null; true" >/dev/null
-ssh "$PI" "cat /tmp/ultra_B.log" > "$LOG_DIR/B.log"
+ssh $SSH_OPTS "$PI" "kill $B_PID 2>/dev/null; sleep 1; pkill -9 cli_simulator 2>/dev/null; true" >/dev/null
+ssh $SSH_OPTS "$PI" "cat /tmp/ultra_B.log" > "$LOG_DIR/B.log"
 
 # ─── Summary ────────────────────────────────────────────────────────────
 echo
