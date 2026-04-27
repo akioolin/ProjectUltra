@@ -1920,13 +1920,11 @@ private:
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start).count();
 
-            // File-size-aware budget. R1/4 measured throughput on SNR=15
-            // good degrades from ~180 B/s on small files to ~80 B/s sustained
-            // on 50 KB+ (ARQ window fills, retx overhead grows). Budget at
-            // ~60 B/s gives ~30% headroom over worst observed.
-            const long timeout_s = 60 + static_cast<long>(test_file_size_) / 60;
+            // Channel-aware file-transfer budget; see fileTransferTimeoutSeconds().
+            const long timeout_s = fileTransferTimeoutSeconds(test_file_size_, false);
             if (elapsed >= timeout_s) {
-                std::cout << "  \033[31m✗ File transfer timeout (budget=" << timeout_s << "s)!\033[0m\n";
+                std::cout << "  \033[31m✗ File transfer timeout (budget=" << timeout_s
+                          << "s, channel=" << channelTypeName() << ")!\033[0m\n";
                 return false;
             }
 
@@ -2137,6 +2135,29 @@ private:
         }
     }
 
+    // Channel-aware file-transfer timeout. Sizes for worst-case sustained
+    // throughput at R1/4 OFDM (the slowest rate), then adds 60s of base
+    // headroom for handshake + disconnect overhead. Values are floors
+    // observed empirically — measured numbers are typically 1.5-3x faster.
+    //   AWGN:     ~60 B/s sustained at R1/4 (with ARQ overhead)
+    //   Good:     ~20 B/s — retx eats throughput
+    //   Moderate: ~12 B/s
+    //   Poor/Flutter: ~8 B/s
+    // Hardware mode adds soundcard jitter -> bump base from 60s to 90s.
+    long fileTransferTimeoutSeconds(size_t bytes, bool hardware_mode = false) const {
+        long bps_floor;
+        switch (channel_type_) {
+            case ChannelType::AWGN:     bps_floor = 60; break;
+            case ChannelType::GOOD:     bps_floor = 20; break;
+            case ChannelType::MODERATE: bps_floor = 12; break;
+            case ChannelType::POOR:     // fall through
+            case ChannelType::FLUTTER:  bps_floor = 8;  break;
+            default:                    bps_floor = 60; break;
+        }
+        const long base_overhead_s = hardware_mode ? 90 : 60;
+        return base_overhead_s + static_cast<long>(bytes) / bps_floor;
+    }
+
     // ======================================================================
     // Hardware-audio mode (--role A|B): single station per process, real
     // soundcard I/O, peer is on another machine connected by audio cable.
@@ -2324,12 +2345,16 @@ private:
                 std::cout << "  ✗ sendFile failed\n";
                 return false;
             }
-            const long timeout_s = 60 + static_cast<long>(test_file_size_) / 60;
+            // Hardware-mode budget: channel-aware floor + 90s base for
+            // soundcard jitter. See fileTransferTimeoutSeconds().
+            const long timeout_s = fileTransferTimeoutSeconds(test_file_size_, true);
+            std::cout << "  Budget: " << timeout_s << "s (channel=" << channelTypeName() << ")\n";
             data_ok = waitForRole(station,
                 [&]{ return !station.isFileTransferInProgress(); },
                 static_cast<int>(timeout_s), "file transfer");
             if (!data_ok) {
-                std::cout << "  \033[31m✗ File transfer timeout (budget=" << timeout_s << "s)\033[0m\n";
+                std::cout << "  \033[31m✗ File transfer timeout (budget=" << timeout_s
+                          << "s, channel=" << channelTypeName() << ")\033[0m\n";
             } else {
                 auto p = station.getFileProgress();
                 std::cout << "  Transferred " << p.transferred_bytes << "/" << p.total_bytes
