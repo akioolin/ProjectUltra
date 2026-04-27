@@ -21,6 +21,7 @@
 #include "ultra/fec.hpp"              // LDPCDecoder for robust single-CW decode
 #include "fec/ldpc_codec.hpp"         // getRecommendedIterations
 #include "ultra/logging.hpp"
+#include "ultra/timing_profiler.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -885,6 +886,8 @@ static std::atomic<int> g_salvage_hits{0};         // 1-CW control salvaged from
 static std::pair<bool, Bytes> robustDecodeSingleCW(
     const float* cw_data, size_t cw_size, CodeRate rate, const char* log_prefix = nullptr)
 {
+    ultra::timing::ScopedTimer _profile_(
+        ultra::timing::globalDecoderProfile().single_cw_decode_total);
     LDPCDecoder decoder(rate);
     decoder.setMaxIterations(fec::LDPCCodec::getRecommendedIterations(rate));
     decoder.setMinSumFactor(0.9375f);
@@ -1095,8 +1098,15 @@ void StreamingDecoder::decodeCurrentFrame() {
             captureConstellationSnapshot();
             auto control_soft_bits = waveform_->getSoftBits();
             if (control_soft_bits.size() >= CONTROL_LDPC_BLOCK) {
-                auto [ok_r14, data_r14] = robustDecodeSingleCW(
-                    control_soft_bits.data(), CONTROL_LDPC_BLOCK, CodeRate::R1_4, log_prefix_.c_str());
+                std::pair<bool, Bytes> control_decode;
+                {
+                    ultra::timing::ScopedTimer _profile_(
+                        ultra::timing::globalDecoderProfile().control_first_1cw);
+                    control_decode = robustDecodeSingleCW(
+                        control_soft_bits.data(), CONTROL_LDPC_BLOCK,
+                        CodeRate::R1_4, log_prefix_.c_str());
+                }
+                auto [ok_r14, data_r14] = control_decode;
                 size_t bpc_r14 = v2::getBytesPerCodeword(CodeRate::R1_4);
 
                 if (ok_r14 && data_r14.size() >= 4
@@ -1291,8 +1301,14 @@ void StreamingDecoder::decodeCurrentFrame() {
         // Try R1/4 first — control frames are always encoded at R1/4 (hardened)
         bool peek_fell_through = false;
         {
-            auto [ok_r14, data_r14] = robustDecodeSingleCW(
-                soft_bits.data(), LDPC_BLOCK, CodeRate::R1_4, log_prefix_.c_str());
+            std::pair<bool, Bytes> peek_decode;
+            {
+                ultra::timing::ScopedTimer _profile_(
+                    ultra::timing::globalDecoderProfile().cw0_peek_1cw);
+                peek_decode = robustDecodeSingleCW(
+                    soft_bits.data(), LDPC_BLOCK, CodeRate::R1_4, log_prefix_.c_str());
+            }
+            auto [ok_r14, data_r14] = peek_decode;
             size_t bpc_r14 = v2::getBytesPerCodeword(CodeRate::R1_4);
             if (ok_r14 && data_r14.size() >= 4
                 && data_r14[0] == 0x55 && data_r14[1] == 0x4C) {
@@ -1357,6 +1373,8 @@ void StreamingDecoder::decodeCurrentFrame() {
 
             constexpr float MIN_LLR_FOR_ESCALATION = 3.0f;
             if (llr_abs_avg < MIN_LLR_FOR_ESCALATION) {
+                ultra::timing::globalDecoderProfile()
+                    .low_llr_escalation_skipped.fetch_add(1, std::memory_order_relaxed);
                 LOG_MODEM(INFO, "[%s] OFDM CW0 peek: decode failed, |llr|_avg=%.1f too low — skipping 4-CW escalation (likely false sync)",
                           log_prefix_.c_str(), llr_abs_avg);
                 {
@@ -2249,7 +2267,13 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     if (rate != CodeRate::R1_4 && soft_bits.size() >= LDPC_BLOCK) {
         codec_->setRate(CodeRate::R1_4);
         std::vector<float> cw0_r14(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
-        auto [ok_r14, data_r14] = codec_->decode(cw0_r14);
+        std::pair<bool, Bytes> probe;
+        {
+            ultra::timing::ScopedTimer _profile_(
+                ultra::timing::globalDecoderProfile().ofdm_cw0_probe_decode);
+            probe = codec_->decode(cw0_r14);
+        }
+        auto [ok_r14, data_r14] = probe;
         size_t bpc_r14 = v2::getBytesPerCodeword(CodeRate::R1_4);
 
         if (ok_r14 && data_r14.size() >= 2
@@ -2274,7 +2298,13 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     // If this is a 4-CW data frame (which IS interleaved), CW0 will likely fail here
     // and we'll fall through to decodeFixedFrame() which handles deinterleaving internally.
     std::vector<float> cw0_bits(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
-    auto [ok0, data0] = codec_->decode(cw0_bits);
+    std::pair<bool, Bytes> raw_probe;
+    {
+        ultra::timing::ScopedTimer _profile_(
+            ultra::timing::globalDecoderProfile().ofdm_cw0_probe_decode);
+        raw_probe = codec_->decode(cw0_bits);
+    }
+    auto [ok0, data0] = raw_probe;
 
     bool try_frame_interleave = false;
 
@@ -2317,7 +2347,18 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
         // Channel deinterleaving restores the original bit order within each CW
         // Only enable for OFDM modes (MC-DPSK doesn't use channel interleaving)
         size_t bps = ofdm_data_carriers_ * getBitsPerSymbol(current_modulation_);
+        const auto _profile_fs_start_ = std::chrono::steady_clock::now();
         auto cw_status = v2::decodeFixedFrame(soft_bits, rate, apply_channel_deinterleave, bps);
+        // Record duration into failed_4cw_after_peek if this attempt failed.
+        // Note: this duration also counts inside decode_fixed_frame_total
+        // (and ldpc_cw_total inside that) — it's an approximate subset.
+        if (!cw_status.allSuccess()) {
+            const uint64_t _profile_fs_us_ = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - _profile_fs_start_).count());
+            ultra::timing::globalDecoderProfile()
+                .failed_4cw_after_peek.addSample(_profile_fs_us_);
+        }
 
         result.codewords_ok = 0;
         result.codewords_failed = 0;

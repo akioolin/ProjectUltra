@@ -3,6 +3,7 @@
 #include "../fec/frame_interleaver.hpp"  // Frame-level interleaving
 #include "../fec/ldpc_codec.hpp"  // For getRecommendedIterations
 #include "ultra/logging.hpp"  // LOG_MODEM
+#include "ultra/timing_profiler.hpp"
 #include <cstring>
 #include <algorithm>
 #include <cctype>
@@ -1323,6 +1324,8 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate) {
 
 CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate, bool use_channel_deinterleave, size_t bits_per_symbol) {
     using namespace fec;
+    ultra::timing::ScopedTimer _profile_(
+        ultra::timing::globalDecoderProfile().decode_fixed_frame_total);
 
     CodewordStatus status;
     status.decoded.resize(FIXED_FRAME_CODEWORDS, false);
@@ -1370,7 +1373,12 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
         float llr_avg = llr_sum / cw_bits.size();
         float llr_abs_avg = llr_abs_sum / cw_bits.size();
 
-        auto decoded = decoder.decodeSoft(cw_bits);
+        std::vector<uint8_t> decoded;
+        {
+            ultra::timing::ScopedTimer _ldpc_(
+                ultra::timing::globalDecoderProfile().ldpc_cw_total);
+            decoded = decoder.decodeSoft(cw_bits);
+        }
         bool success = decoder.lastDecodeSuccess();
         int iterations = decoder.lastIterations();
         bool used_perturbation = false;  // Track if this CW needed perturbation retry
@@ -1396,7 +1404,11 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                 static constexpr float factors[] = {0.875f, 0.75f, 0.625f, 0.5f};
                 for (int retry = 0; retry < 4 && !success; retry++) {
                     decoder.setMinSumFactor(factors[retry]);
-                    decoded = decoder.decodeSoft(cw_bits);
+                    {
+                        ultra::timing::ScopedTimer _ldpc_(
+                            ultra::timing::globalDecoderProfile().ldpc_cw_total);
+                        decoded = decoder.decodeSoft(cw_bits);
+                    }
                     if (decoder.lastDecodeSuccess()) {
                         success = true;
                         iterations = decoder.lastIterations();
@@ -1424,7 +1436,11 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                     for (float& llr : perturbed) {
                         llr += noise(rng);
                     }
-                    decoded = decoder.decodeSoft(perturbed);
+                    {
+                        ultra::timing::ScopedTimer _ldpc_(
+                            ultra::timing::globalDecoderProfile().ldpc_cw_total);
+                        decoded = decoder.decodeSoft(perturbed);
+                    }
                     if (decoder.lastDecodeSuccess()) {
                         success = true;
                         iterations = decoder.lastIterations();
@@ -1702,7 +1718,12 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                         auto original_data = status.data[cw];
 
                         decoder.setMinSumFactor(recovery_factors[attempt]);
-                        auto re_decoded = decoder.decodeSoft(cw_bits);
+                        std::vector<uint8_t> re_decoded;
+                        {
+                            ultra::timing::ScopedTimer _ldpc_(
+                                ultra::timing::globalDecoderProfile().ldpc_cw_total);
+                            re_decoded = decoder.decodeSoft(cw_bits);
+                        }
                         if (decoder.lastDecodeSuccess() && re_decoded.size() >= bytes_per_cw) {
                             Bytes new_cw_data(re_decoded.begin(), re_decoded.begin() + bytes_per_cw);
                             if (new_cw_data != original_data) {

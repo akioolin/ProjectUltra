@@ -8,6 +8,7 @@
 #include "ultra/ofdm.hpp"
 #include "ultra/dsp.hpp"
 #include "ultra/logging.hpp"
+#include "ultra/timing_profiler.hpp"
 #include "demodulator_impl.hpp"
 #include "demodulator_constants.hpp"
 #include "soft_demap.hpp"
@@ -1341,7 +1342,10 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
         size_t training_samples_count = training_symbols * impl_->symbol_samples;
 
         // Use training symbols for channel estimation (this advances the mixer)
-        impl_->estimateChannelFromLTS(ptr, training_symbols);
+        {
+            timing::ScopedTimer _profile_(timing::globalDecoderProfile().lts_channel_estimate);
+            impl_->estimateChannelFromLTS(ptr, training_symbols);
+        }
 
         ptr += training_samples_count;
         remaining -= training_samples_count;
@@ -1360,6 +1364,7 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     impl_->rx_buffer.insert(impl_->rx_buffer.end(), ptr, ptr + remaining);
 
     while (impl_->rx_buffer.size() >= impl_->symbol_samples) {
+        timing::ScopedTimer _profile_(timing::globalDecoderProfile().data_symbol_loop);
 
         SampleSpan sym_samples(impl_->rx_buffer.data(), impl_->symbol_samples);
         auto bb = impl_->toBaseband(sym_samples);

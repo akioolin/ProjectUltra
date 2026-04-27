@@ -4,6 +4,7 @@
 #include "ultra/logging.hpp"
 #include "ultra/dsp.hpp"  // FFT class is in here
 #include "ultra/ofdm_link_adaptation.hpp"
+#include "ultra/timing_profiler.hpp"
 #include <sstream>
 #include <cmath>
 
@@ -221,6 +222,7 @@ bool OFDMChirpWaveform::detectSync(SampleSpan samples, SyncResult& result, float
 
 bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
                                         float known_cfo_hz, float threshold) {
+    timing::ScopedTimer _profile_(timing::globalDecoderProfile().detect_data_sync);
     // Detect training-only preamble (no chirp) for DATA frames
     // Uses Schmidl-Cox style detection: LTS has two identical symbols,
     // so we correlate sample[n] with sample[n + symbol_length]
@@ -404,6 +406,7 @@ void OFDMChirpWaveform::setAbsoluteTrainingPosition(size_t pos) {
 }
 
 bool OFDMChirpWaveform::process(SampleSpan samples) {
+    timing::ScopedTimer _profile_(timing::globalDecoderProfile().ofdm_process_total);
     if (!demodulator_) {
         return false;
     }

@@ -28,6 +28,7 @@
 #else
 #include <unistd.h>
 #endif
+#include "ultra/timing_profiler.hpp"
 #include <queue>
 #include <algorithm>
 #include <cmath>
@@ -1363,6 +1364,7 @@ public:
             std::cout << "╚══════════════════════════════════════════════════════════════╝\n";
             printStationStats("ALPHA (TX)", alpha_.get());
             printStationStats("BRAVO (RX)", bravo_.get());
+            printDecoderPhaseBreakdown();
             std::cout << "\n";
         }
         return success;
@@ -1627,6 +1629,7 @@ private:
         for (int i = 0; i < total; i++) {
             std::cout << "  [" << (i+1) << "/" << total << "] Queuing (" << test_messages[i].size() << "b): \"" << test_messages[i] << "\"\n";
         }
+        ultra::timing::globalDecoderProfile().reset();
         alpha_->sendMessages(test_messages);
         std::cout << "  Sent " << total << " messages as burst\n";
 
@@ -1714,6 +1717,7 @@ private:
         }
 
         file_received_.store(false);
+        ultra::timing::globalDecoderProfile().reset();
         std::cout << "  Sending file: " << test_file << " (" << test_file_size_ << " bytes)\n";
 
         if (!alpha_->sendFile(test_file)) {
@@ -1976,8 +1980,49 @@ private:
         // Print detailed stats from both stations
         printStationStats("ALPHA (TX)", alpha_.get());
         printStationStats("BRAVO (RX)", bravo_.get());
+        printDecoderPhaseBreakdown();
 
         std::cout << "\n";
+    }
+
+    void printDecoderPhaseBreakdown() {
+        auto& dp = ultra::timing::globalDecoderProfile();
+        auto fmt = [](const ultra::timing::PhaseStats& s) -> std::string {
+            const uint64_t cnt = s.count.load();
+            const uint64_t tot = s.total_us.load();
+            const uint64_t mx  = s.max_us.load();
+            if (cnt == 0) return "(0 calls)";
+            char buf[160];
+            snprintf(buf, sizeof(buf),
+                     "n=%llu  total=%.1fms  mean=%.1fus  max=%lluus",
+                     static_cast<unsigned long long>(cnt),
+                     tot / 1000.0,
+                     static_cast<double>(tot) / static_cast<double>(cnt),
+                     static_cast<unsigned long long>(mx));
+            return std::string(buf);
+        };
+
+        std::cout << "\n  --- Decoder phase breakdown (decode thread, this transfer) ---\n";
+        std::cout << "  detect_data_sync          " << fmt(dp.detect_data_sync) << "\n";
+        std::cout << "  ofdm_process_total        " << fmt(dp.ofdm_process_total) << "\n";
+        std::cout << "  lts_channel_estimate      " << fmt(dp.lts_channel_estimate) << "\n";
+        std::cout << "  data_symbol_loop          " << fmt(dp.data_symbol_loop)
+                  << "  (full per-symbol loop incl. erase/updateQuality)\n";
+        std::cout << "  decode_fixed_frame_total  " << fmt(dp.decode_fixed_frame_total) << "\n";
+        std::cout << "  ldpc_cw_total             " << fmt(dp.ldpc_cw_total)
+                  << "  (subset of decode_fixed_frame_total)\n";
+        std::cout << "  single_cw_decode_total    " << fmt(dp.single_cw_decode_total) << "\n";
+        std::cout << "  control_first_1cw         " << fmt(dp.control_first_1cw)
+                  << "  (subset of single_cw_decode_total - ACK decode path)\n";
+        std::cout << "  cw0_peek_1cw              " << fmt(dp.cw0_peek_1cw)
+                  << "  (subset of single_cw_decode_total)\n";
+        std::cout << "  ofdm_cw0_probe_decode     " << fmt(dp.ofdm_cw0_probe_decode)
+                  << "  (codec_->decode probes in decodeFrame)\n";
+        std::cout << "  failed_4cw_after_peek     " << fmt(dp.failed_4cw_after_peek)
+                  << "  (subset of decode_fixed_frame_total - incl. real-channel failures)\n";
+        std::cout << "  low_llr_escalation_skipped count="
+                  << dp.low_llr_escalation_skipped.load()
+                  << "  (counter only)\n";
     }
 
     void printStationStats(const char* label, SimulatedStation* station) {
