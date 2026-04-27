@@ -2026,6 +2026,11 @@ private:
         std::cout << "  raw_cw0_probe_skipped     count="
                   << dp.raw_cw0_probe_skipped.load()
                   << "  (gated when known-4-CW data frame)\n";
+        std::cout << "  low_llr_1cw_skipped       control_first="
+                  << dp.low_llr_1cw_skipped_control_first.load()
+                  << "  cw0_peek="
+                  << dp.low_llr_1cw_skipped_cw0_peek.load()
+                  << "  (LLR pre-screen avoided the ~85ms decode-and-fail)\n";
 
         auto fmt_hist = [](const ultra::timing::SingleCWHistogram& h) -> std::string {
             char buf[160];

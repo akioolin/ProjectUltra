@@ -880,6 +880,30 @@ void StreamingDecoder::checkIfReadyToDecode() {
 static std::atomic<int> g_robust_retry_hits{0};   // CW0 peek: retry succeeded after initial fail
 static std::atomic<int> g_salvage_hits{0};         // 1-CW control salvaged from 4-CW path
 
+// LLR pre-screen for 1-CW decode probes. Returns the mean |LLR| across the
+// first cw_size soft bits. Real ACK frames have |llr|_avg ≥ ~3 (matching the
+// existing 4-CW escalation calibration). False-sync attempts produce avg
+// near 1. A pre-screen gate at 2.0 catches obvious garbage without losing
+// weak-but-real fading frames.
+//
+// Used at the control-first ACK path and CW0 peek call sites — see
+// streaming_decoder.cpp:1130-area and :1294-area. Skipping the LDPC call
+// when avg < threshold saves ~85ms per false sync (the decoder's 1 +
+// max_retries iteration sweep).
+static float computeLLRAbsAvg(const float* bits, size_t count) {
+    if (count == 0) return 0.0f;
+    float sum = 0.0f;
+    for (size_t i = 0; i < count; ++i) sum += std::abs(bits[i]);
+    return sum / static_cast<float>(count);
+}
+
+// Threshold tuned conservatively: the existing 4-CW escalation gate is 3.0
+// (for the more expensive 4×LDPC+deinterleave path); 1-CW gating is cheaper
+// per-skip so we afford to be slightly more permissive at 2.0. Profiling
+// histogram showed real first-try ACKs cluster well above this; false-sync
+// attempts cluster near 1.
+static constexpr float MIN_LLR_FOR_1CW_DECODE = 2.0f;
+
 // Robust single-CW LDPC decode with Phase 0 decoder diversity (up to 4 retries)
 // Uses standalone LDPCDecoder for setMinSumFactor (not available via ICodec interface)
 // Pattern matches decodeFixedFrame() Phase 0 (frame_v2.cpp:1378-1395)
@@ -1128,8 +1152,17 @@ void StreamingDecoder::decodeCurrentFrame() {
             captureConstellationSnapshot();
             auto control_soft_bits = waveform_->getSoftBits();
             if (control_soft_bits.size() >= CONTROL_LDPC_BLOCK) {
-                std::pair<bool, Bytes> control_decode;
-                {
+                // LLR pre-screen: skip the 1-CW decode (~85ms incl. retries)
+                // when the soft bits look like noise. Real ACKs cluster well
+                // above this threshold; false-sync attempts cluster near 1.
+                std::pair<bool, Bytes> control_decode = {false, {}};
+                const float llr_avg = computeLLRAbsAvg(
+                    control_soft_bits.data(), CONTROL_LDPC_BLOCK);
+                if (llr_avg < MIN_LLR_FOR_1CW_DECODE) {
+                    ultra::timing::globalDecoderProfile()
+                        .low_llr_1cw_skipped_control_first
+                        .fetch_add(1, std::memory_order_relaxed);
+                } else {
                     ultra::timing::ScopedTimer _profile_(
                         ultra::timing::globalDecoderProfile().control_first_1cw);
                     // Reduced retry budget (2 instead of 4) for ACK decode path:
@@ -1337,8 +1370,17 @@ void StreamingDecoder::decodeCurrentFrame() {
         // Try R1/4 first — control frames are always encoded at R1/4 (hardened)
         bool peek_fell_through = false;
         {
-            std::pair<bool, Bytes> peek_decode;
-            {
+            // LLR pre-screen: skip the 1-CW peek (~85ms incl. retries) when
+            // the soft bits look like noise. Profiling histogram showed this
+            // path exhausts the retry budget on ~99% of calls (n=202, only 1
+            // first-try success). The vast majority are false syncs.
+            std::pair<bool, Bytes> peek_decode = {false, {}};
+            const float llr_avg = computeLLRAbsAvg(soft_bits.data(), LDPC_BLOCK);
+            if (llr_avg < MIN_LLR_FOR_1CW_DECODE) {
+                ultra::timing::globalDecoderProfile()
+                    .low_llr_1cw_skipped_cw0_peek
+                    .fetch_add(1, std::memory_order_relaxed);
+            } else {
                 ultra::timing::ScopedTimer _profile_(
                     ultra::timing::globalDecoderProfile().cw0_peek_1cw);
                 peek_decode = robustDecodeSingleCW(

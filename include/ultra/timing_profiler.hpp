@@ -120,6 +120,11 @@ struct DecoderProfile {
     // Probe-skip counter (Step 3: skip raw CW0 probe on known-4-CW data frames).
     std::atomic<uint64_t> raw_cw0_probe_skipped{0};
 
+    // LLR pre-screen counters (skip robustDecodeSingleCW when LLRs look like
+    // noise — saves the ~85ms decode-and-fail cost on false-sync attempts).
+    std::atomic<uint64_t> low_llr_1cw_skipped_control_first{0};
+    std::atomic<uint64_t> low_llr_1cw_skipped_cw0_peek{0};
+
     void reset() {
         detect_data_sync.reset();
         ofdm_process_total.reset();
@@ -137,6 +142,8 @@ struct DecoderProfile {
         robust_cw_cw0_peek.reset();
         robust_cw_default.reset();
         raw_cw0_probe_skipped.store(0);
+        low_llr_1cw_skipped_control_first.store(0);
+        low_llr_1cw_skipped_cw0_peek.store(0);
     }
 };
 
