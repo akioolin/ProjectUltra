@@ -154,7 +154,14 @@ if(ULTRA_BUILD_TOOLS)
         target_sources(cli_simulator PRIVATE
             src/gui/audio_engine.cpp
         )
-        target_compile_definitions(cli_simulator PRIVATE ULTRA_HAVE_SDL2)
+        # SDL_MAIN_HANDLED tells SDL.h not to rename our int main() to
+        # SDL_main. Required for CLI tools on Windows; otherwise the linker
+        # can't find main() and reports LNK2019 / LNK1120. ultra_gui keeps
+        # SDL's main wrapping because it's a windowed SDL app.
+        target_compile_definitions(cli_simulator PRIVATE
+            ULTRA_HAVE_SDL2
+            SDL_MAIN_HANDLED
+        )
         if(TARGET SDL2::SDL2)
             target_link_libraries(cli_simulator PRIVATE SDL2::SDL2)
         else()
