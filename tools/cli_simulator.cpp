@@ -2009,6 +2009,16 @@ private:
                   << "  repeat_coalesced=" << cs.arq.ack_repeat_jobs_coalesced
                   << "  repeat_dropped=" << cs.arq.ack_repeat_jobs_dropped << "\n";
 
+        // Effective ACK rate: how many ACK frames BRAVO sent per data frame
+        // received. Baseline reference today on 50 KB OFDM ~1.1.
+        if (cs.arq.frames_received > 0) {
+            float ack_ratio = static_cast<float>(cs.arq.acks_sent) /
+                              static_cast<float>(cs.arq.frames_received);
+            std::cout << "  AckR: acks_sent/frames_received=" << std::fixed
+                      << std::setprecision(2) << ack_ratio
+                      << std::defaultfloat << "\n";
+        }
+
         // Decoder stats
         std::cout << "  RX:   frames_decoded=" << ds.frames_decoded
                   << "  frames_failed=" << ds.frames_failed
