@@ -880,11 +880,19 @@ void StreamingDecoder::checkIfReadyToDecode() {
 static std::atomic<int> g_robust_retry_hits{0};   // CW0 peek: retry succeeded after initial fail
 static std::atomic<int> g_salvage_hits{0};         // 1-CW control salvaged from 4-CW path
 
-// Robust single-CW LDPC decode with Phase 0 decoder diversity (4 retry attempts)
+// Robust single-CW LDPC decode with Phase 0 decoder diversity (up to 4 retries)
 // Uses standalone LDPCDecoder for setMinSumFactor (not available via ICodec interface)
 // Pattern matches decodeFixedFrame() Phase 0 (frame_v2.cpp:1378-1395)
+//
+// max_retries: caps the retry budget (0..4). Default 4 = full diversity sweep.
+//   ControlFirst (ACK decode) calls this with max_retries=2 — ACK loss is
+//   recoverable via ARQ, but ACK decode CPU isn't. See profiling plan v5.
+//
+// call_site: routes per-call-site retry-attempt histogram. See timing_profiler.hpp.
 static std::pair<bool, Bytes> robustDecodeSingleCW(
-    const float* cw_data, size_t cw_size, CodeRate rate, const char* log_prefix = nullptr)
+    const float* cw_data, size_t cw_size, CodeRate rate, const char* log_prefix = nullptr,
+    ultra::timing::SingleCWCallSite call_site = ultra::timing::SingleCWCallSite::Default,
+    int max_retries = 4)
 {
     ultra::timing::ScopedTimer _profile_(
         ultra::timing::globalDecoderProfile().single_cw_decode_total);
@@ -895,13 +903,18 @@ static std::pair<bool, Bytes> robustDecodeSingleCW(
     auto decoded = decoder.decodeSoft(std::span<const float>(cw_data, cw_size));
     bool ok = decoder.lastDecodeSuccess();
 
+    int attempts_used = 0;  // 0 = first try; 1..max_retries = retry idx; -1 = exhausted
+
     if (!ok) {
         static constexpr float factors[] = {0.875f, 0.75f, 0.625f, 0.5f};
-        for (int retry = 0; retry < 4 && !ok; retry++) {
+        if (max_retries < 0) max_retries = 0;
+        if (max_retries > 4) max_retries = 4;
+        for (int retry = 0; retry < max_retries && !ok; retry++) {
             decoder.setMinSumFactor(factors[retry]);
             decoded = decoder.decodeSoft(std::span<const float>(cw_data, cw_size));
             ok = decoder.lastDecodeSuccess();
             if (ok) {
+                attempts_used = retry + 1;
                 g_robust_retry_hits.fetch_add(1, std::memory_order_relaxed);
                 if (log_prefix) {
                     LOG_MODEM(INFO, "[%s] Robust CW0: RETRY OK (factor=%.3f, iters=%d, total_hits=%d)",
@@ -910,6 +923,23 @@ static std::pair<bool, Bytes> robustDecodeSingleCW(
                 }
             }
         }
+        if (!ok) attempts_used = -1;  // exhausted budget
+    }
+
+    // Bump per-call-site retry histogram
+    {
+        auto& dp = ultra::timing::globalDecoderProfile();
+        ultra::timing::SingleCWHistogram* hist = nullptr;
+        switch (call_site) {
+            case ultra::timing::SingleCWCallSite::ControlFirst:
+                hist = &dp.robust_cw_control_first; break;
+            case ultra::timing::SingleCWCallSite::Cw0Peek:
+                hist = &dp.robust_cw_cw0_peek; break;
+            case ultra::timing::SingleCWCallSite::Default:
+            default:
+                hist = &dp.robust_cw_default; break;
+        }
+        hist->record(attempts_used);
     }
 
     Bytes data;
@@ -1102,9 +1132,15 @@ void StreamingDecoder::decodeCurrentFrame() {
                 {
                     ultra::timing::ScopedTimer _profile_(
                         ultra::timing::globalDecoderProfile().control_first_1cw);
+                    // Reduced retry budget (2 instead of 4) for ACK decode path:
+                    // ACK loss is recoverable via ARQ, but the 4-retry sweep was
+                    // costing ~22ms × 2 extra attempts × hundreds of ACKs per
+                    // transfer. Profiling plan v5 + ChatGPT 5.5 review.
                     control_decode = robustDecodeSingleCW(
                         control_soft_bits.data(), CONTROL_LDPC_BLOCK,
-                        CodeRate::R1_4, log_prefix_.c_str());
+                        CodeRate::R1_4, log_prefix_.c_str(),
+                        ultra::timing::SingleCWCallSite::ControlFirst,
+                        /*max_retries=*/2);
                 }
                 auto [ok_r14, data_r14] = control_decode;
                 size_t bpc_r14 = v2::getBytesPerCodeword(CodeRate::R1_4);
@@ -1306,7 +1342,8 @@ void StreamingDecoder::decodeCurrentFrame() {
                 ultra::timing::ScopedTimer _profile_(
                     ultra::timing::globalDecoderProfile().cw0_peek_1cw);
                 peek_decode = robustDecodeSingleCW(
-                    soft_bits.data(), LDPC_BLOCK, CodeRate::R1_4, log_prefix_.c_str());
+                    soft_bits.data(), LDPC_BLOCK, CodeRate::R1_4, log_prefix_.c_str(),
+                    ultra::timing::SingleCWCallSite::Cw0Peek);
             }
             auto [ok_r14, data_r14] = peek_decode;
             size_t bpc_r14 = v2::getBytesPerCodeword(CodeRate::R1_4);
@@ -2297,16 +2334,35 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     // Control frames (ACK etc.) are never channel-interleaved, so probe without it.
     // If this is a 4-CW data frame (which IS interleaved), CW0 will likely fail here
     // and we'll fall through to decodeFixedFrame() which handles deinterleaving internally.
-    std::vector<float> cw0_bits(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
-    std::pair<bool, Bytes> raw_probe;
-    {
-        ultra::timing::ScopedTimer _profile_(
-            ultra::timing::globalDecoderProfile().ofdm_cw0_probe_decode);
-        raw_probe = codec_->decode(cw0_bits);
-    }
-    auto [ok0, data0] = raw_probe;
+    //
+    // Skip the probe entirely when we already know it's a 4-CW interleaved data frame:
+    //   (a) prior CW0 peek set pending_total_cw_ to FIXED_FRAME_CODEWORDS, or
+    //   (b) burst-interleave marker was latched (frame is part of a burst-interleaved
+    //       group, definitely 4-CW data, never a control frame).
+    // This was identified as redundant work in profiling plan v5 + ChatGPT review.
+    const bool known_4cw =
+        (pending_total_cw_ == v2::FIXED_FRAME_CODEWORDS) ||
+        (use_burst_interleave_ && waveform_ && waveform_->wasBurstInterleaved());
 
-    bool try_frame_interleave = false;
+    std::pair<bool, Bytes> raw_probe;
+    bool ok0 = false;
+    Bytes data0;
+    if (known_4cw) {
+        ultra::timing::globalDecoderProfile()
+            .raw_cw0_probe_skipped.fetch_add(1, std::memory_order_relaxed);
+        // Fall through directly to frame-interleaved decode below.
+    } else {
+        std::vector<float> cw0_bits(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
+        {
+            ultra::timing::ScopedTimer _profile_(
+                ultra::timing::globalDecoderProfile().ofdm_cw0_probe_decode);
+            raw_probe = codec_->decode(cw0_bits);
+        }
+        ok0 = raw_probe.first;
+        data0 = std::move(raw_probe.second);
+    }
+
+    bool try_frame_interleave = known_4cw;  // skip probe → go straight to interleaved decode
 
     if (ok0 && data0.size() >= 2 && data0[0] == 0x55 && data0[1] == 0x4C) {
         // CW0 decoded and has valid magic - check if it's a control frame

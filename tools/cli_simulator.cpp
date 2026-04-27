@@ -2023,6 +2023,26 @@ private:
         std::cout << "  low_llr_escalation_skipped count="
                   << dp.low_llr_escalation_skipped.load()
                   << "  (counter only)\n";
+        std::cout << "  raw_cw0_probe_skipped     count="
+                  << dp.raw_cw0_probe_skipped.load()
+                  << "  (gated when known-4-CW data frame)\n";
+
+        auto fmt_hist = [](const ultra::timing::SingleCWHistogram& h) -> std::string {
+            char buf[160];
+            snprintf(buf, sizeof(buf),
+                     "first=%llu  retry1=%llu  retry2=%llu  retry3=%llu  retry4=%llu  exhausted=%llu",
+                     static_cast<unsigned long long>(h.first_try.load()),
+                     static_cast<unsigned long long>(h.retry[0].load()),
+                     static_cast<unsigned long long>(h.retry[1].load()),
+                     static_cast<unsigned long long>(h.retry[2].load()),
+                     static_cast<unsigned long long>(h.retry[3].load()),
+                     static_cast<unsigned long long>(h.exhausted.load()));
+            return std::string(buf);
+        };
+        std::cout << "  robustDecodeSingleCW retry histogram (per call site):\n";
+        std::cout << "    control_first  " << fmt_hist(dp.robust_cw_control_first) << "\n";
+        std::cout << "    cw0_peek       " << fmt_hist(dp.robust_cw_cw0_peek) << "\n";
+        std::cout << "    default        " << fmt_hist(dp.robust_cw_default) << "\n";
     }
 
     void printStationStats(const char* label, SimulatedStation* station) {

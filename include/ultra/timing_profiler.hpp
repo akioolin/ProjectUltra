@@ -63,6 +63,36 @@ private:
     std::chrono::steady_clock::time_point start_;
 };
 
+// Per-call-site histogram of which retry attempt of robustDecodeSingleCW()
+// succeeded (or whether all failed). Index 0 = success on initial decode (no
+// retries). Index 1..MAX = success on retry N. Index MAX+1 = exhausted all
+// retries without success. Sized for 4 retries (the default budget) — sites
+// using a smaller budget simply leave higher slots at 0.
+struct SingleCWHistogram {
+    static constexpr size_t kMaxRetries = 4;
+    std::atomic<uint64_t> first_try{0};                  // succeeded with no retries
+    std::atomic<uint64_t> retry[kMaxRetries] {};         // succeeded on retry N (1..4)
+    std::atomic<uint64_t> exhausted{0};                  // failed after all attempts
+
+    void reset() {
+        first_try.store(0);
+        for (auto& r : retry) r.store(0);
+        exhausted.store(0);
+    }
+
+    // attempts_used: 0 = first try; 1..kMaxRetries = retry index that succeeded;
+    // -1 = all attempts failed.
+    void record(int attempts_used) {
+        if (attempts_used < 0) {
+            exhausted.fetch_add(1, std::memory_order_relaxed);
+        } else if (attempts_used == 0) {
+            first_try.fetch_add(1, std::memory_order_relaxed);
+        } else if (attempts_used >= 1 && attempts_used <= static_cast<int>(kMaxRetries)) {
+            retry[attempts_used - 1].fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+};
+
 // All decode-thread profiling buckets. See plan v5 for the design.
 struct DecoderProfile {
     PhaseStats detect_data_sync;
@@ -78,6 +108,18 @@ struct DecoderProfile {
     PhaseStats failed_4cw_after_peek;
     std::atomic<uint64_t> low_llr_escalation_skipped{0};
 
+    // Per-call-site retry-attempt histograms for robustDecodeSingleCW().
+    // Three sites of interest (rest grouped under "default"):
+    //   control_first — ACK decode path at streaming_decoder.cpp:1098
+    //   cw0_peek      — CW0 peek path at streaming_decoder.cpp:1294
+    //   default       — code-rate fallback, small-frame recovery, salvage
+    SingleCWHistogram robust_cw_control_first;
+    SingleCWHistogram robust_cw_cw0_peek;
+    SingleCWHistogram robust_cw_default;
+
+    // Probe-skip counter (Step 3: skip raw CW0 probe on known-4-CW data frames).
+    std::atomic<uint64_t> raw_cw0_probe_skipped{0};
+
     void reset() {
         detect_data_sync.reset();
         ofdm_process_total.reset();
@@ -91,6 +133,10 @@ struct DecoderProfile {
         ofdm_cw0_probe_decode.reset();
         failed_4cw_after_peek.reset();
         low_llr_escalation_skipped.store(0);
+        robust_cw_control_first.reset();
+        robust_cw_cw0_peek.reset();
+        robust_cw_default.reset();
+        raw_cw0_probe_skipped.store(0);
     }
 };
 
@@ -99,5 +145,13 @@ inline DecoderProfile& globalDecoderProfile() {
     static DecoderProfile p;
     return p;
 }
+
+// Identifies which call site invoked robustDecodeSingleCW() so the
+// per-site retry histogram is correctly attributed.
+enum class SingleCWCallSite {
+    Default,        // code-rate fallback, small-frame recovery, salvage
+    ControlFirst,   // control-first ACK path (streaming_decoder.cpp:1098)
+    Cw0Peek,        // CW0 peek path (streaming_decoder.cpp:1294)
+};
 
 }  // namespace ultra::timing

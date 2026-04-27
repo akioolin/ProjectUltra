@@ -233,6 +233,8 @@ OTFS is parked - would need significant research effort to implement proper DD-d
 
 ## Important Rules
 
+- **No guessing.** If you don't know an answer, say "I don't know" or "I need to verify X" — don't fabricate. Read the code, run the test, or ask the user. Be direct. Short answers > long ones with hedging. Length is not a proxy for quality.
+
 - **Never mention specific competing products by name** (e.g., no "VARA", "ARDOP", "Winlink" etc.). Always refer to "industry leaders", "commercial HF modems", or "existing systems" instead.
 
 - **MANDATORY: Document ALL fixes and changes** in `docs/CHANGELOG.md` with what was broken, what changed, how it's fixed, and test verification.
