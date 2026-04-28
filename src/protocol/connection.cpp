@@ -1028,9 +1028,21 @@ void Connection::enterConnected() {
                   timeout_ms / 1000.0f, data_frame_ms, ack_frame_ms,
                   modulationToString(data_modulation_), codeRateToString(data_code_rate_));
     } else {
-        // Keep OFDM receive pressure bounded. Larger windows can overrun the ACK
-        // decode path and amplify a single base hole into timeout retransmit storms.
-        arq_.setWindowSize(4);
+        // OFDM window canary: trying 8 now that the prior failure mode has been
+        // structurally addressed. The previous window=8 attempt failed because:
+        //   1. ACK decode (LDPCDecoder construction per call) was ~78ms each →
+        //      8 in-flight = 624ms of decode CPU; couldn't keep up.
+        //      Fixed by thread_local LDPCDecoder cache (af7b26b) — now <4ms each.
+        //   2. tick() ran ARQ at half wall-clock speed → spurious timer-storms.
+        //      Fixed by real-time tick (e2fc230).
+        //   3. ACK timeout / adaptive floor were sized for sim, not hardware.
+        //      Fixed by floor 6500ms + adaptive >= static (6e06e49 + d648a0a).
+        //   4. fast_hole + hole_probe + timeout could all fire for the same seq.
+        //      Fixed by 2-confirm hole + mutual reset (8808bf2 + 49fceb0).
+        // computeOfdmAckTimeoutMs scales the ACK timeout with window_size, so
+        // window=8 automatically gets a longer timeout to absorb the doubled
+        // burst RTT.
+        arq_.setWindowSize(8);
         arq_.setMaxRetries(15);     // More attempts compensate for ACK loss on fading
         arq_.setSackDelay(120);     // Short coalescing delay for ACK/SACK control traffic
         // NOTE: stream-aware SACK timer (setSackDelayShort) infrastructure is
