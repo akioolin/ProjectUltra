@@ -111,8 +111,8 @@ bool AudioEngine::openOutput(const std::string& device) {
         return false;
     }
 
-    LOG_MODEM(INFO, "AudioEngine: Opened OUTPUT device: %s (id=%d, rate=%d)",
-              dev_name ? dev_name : "Default", output_device_, have.freq);
+    LOG_MODEM(INFO, "AudioEngine: Opened OUTPUT device: %s (id=%d, rate=%d, period=%d)",
+              dev_name ? dev_name : "Default", output_device_, have.freq, have.samples);
     sample_rate_ = have.freq;
     return true;
 }
@@ -169,9 +169,9 @@ bool AudioEngine::openInput(const std::string& device) {
         return false;
     }
 
-    LOG_MODEM(INFO, "AudioEngine: Opened INPUT device: %s (id=%d, rate=%d, mode=%s)",
+    LOG_MODEM(INFO, "AudioEngine: Opened INPUT device: %s (id=%d, rate=%d, period=%d, mode=%s)",
               dev_name ? dev_name : "Default", input_device_, have.freq,
-              input_queue_mode_ ? "queue" : "callback");
+              have.samples, input_queue_mode_ ? "queue" : "callback");
     input_dc_x_prev_ = 0.0f;
     input_dc_y_prev_ = 0.0f;
     return true;

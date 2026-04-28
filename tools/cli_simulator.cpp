@@ -374,6 +374,11 @@ public:
     virtual std::vector<float> pullRx(size_t count) = 0;
     // Push TX samples for transmission.
     virtual void queueTx(const std::vector<float>& samples) = 0;
+    // VirtualAudioPort needs the simulator's 10 ms loop to pace samples into
+    // the in-memory channel. HardwareAudioPort is already paced by SDL's real
+    // device callback, so feeding it through a second 10 ms pacer can create
+    // callback-phase underflows and synthetic gaps in the transmitted waveform.
+    virtual bool shouldPaceTxInStationLoop() const { return true; }
     // Optional lifecycle hooks; default no-op.
     virtual bool start() { return true; }
     virtual void stop() {}
@@ -405,9 +410,9 @@ private:
 
 #ifdef ULTRA_HAVE_SDL2
 /**
- * ChannelInjector - Streaming TX-side channel emulator. Applies CFO +
- * Watterson fading + AWGN to each 480-sample audio chunk before it
- * reaches the soundcard.
+     * ChannelInjector - Streaming TX-side channel emulator. Applies CFO +
+     * Watterson fading + AWGN to each transmitted audio buffer before it
+     * reaches the soundcard.
  *
  * Wraps SimulatedChannel and uses only its A→B direction:
  *   transmitFromA(tx)     -> processed samples land in buffer_b_rx_
@@ -439,8 +444,8 @@ private:
  * Used for --role A|B mode when running across two physical machines
  * connected by an audio cable (or speaker/mic).
  *
- * On RX underrun (no captured audio yet), returns zeros — silence on the
- * wire is the correct interpretation for between-frame gaps.
+     * On RX short read, waits for the SDL capture period to finish before
+     * padding. Padding immediately would synthesize callback-sized sample gaps.
  *
  * If a ChannelInjector is supplied, TX samples pass through it before
  * hitting the soundcard, so the receiving station sees a realistic
@@ -485,17 +490,38 @@ public:
     }
 
     std::vector<float> pullRx(size_t count) override {
+        const int sample_rate = std::max(1, engine_.getSampleRate());
+        const int period_ms = std::max(1, (engine_.getBufferSize() * 1000 + sample_rate - 1) / sample_rate);
+        const int wait_ms = std::clamp(period_ms * 2 + 20, 50, 1000);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
+
+        while (engine_.getRxBufferSize() < count &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
         auto got = engine_.getRxSamples(count);
         if (got.size() < count) {
-            // RX underrun (no audio captured yet for this 10ms window) —
-            // pad with zeros. Real soundcard silence is the right answer
-            // here, not synthetic noise.
+            rx_short_reads_++;
+            rx_padded_samples_ += (count - got.size());
+            if (rx_short_reads_ <= 4 || (rx_short_reads_ % 16) == 0) {
+                LOG_MODEM(WARN,
+                          "HardwareAudioPort: RX short read after %dms wait "
+                          "(got=%zu need=%zu, padded_total=%llu, events=%llu)",
+                          wait_ms, got.size(), count,
+                          static_cast<unsigned long long>(rx_padded_samples_),
+                          static_cast<unsigned long long>(rx_short_reads_));
+            }
+            // Only pad after waiting for real captured samples. Padding before
+            // the SDL capture period completes creates artificial 400-500 sample
+            // discontinuities when the hardware callback size is not 480.
             got.resize(count, 0.0f);
         }
         return got;
     }
 
     void queueTx(const std::vector<float>& samples) override {
+        std::lock_guard<std::mutex> lock(tx_mutex_);
         if (injector_) {
             engine_.queueTxSamples(injector_->process(samples));
         } else {
@@ -503,12 +529,17 @@ public:
         }
     }
 
+    bool shouldPaceTxInStationLoop() const override { return false; }
+
 private:
     gui::AudioEngine engine_;
     std::string output_device_;
     std::string input_device_;
     std::unique_ptr<ChannelInjector> injector_;
     int buffer_size_ = 0;  // 0 = engine default
+    std::mutex tx_mutex_;
+    uint64_t rx_short_reads_ = 0;
+    uint64_t rx_padded_samples_ = 0;
 };
 #endif  // ULTRA_HAVE_SDL2
 
@@ -1287,6 +1318,11 @@ private:
     }
 
     void queueTx(const std::vector<float>& samples) {
+        if (port_ && !port_->shouldPaceTxInStationLoop()) {
+            port_->queueTx(samples);
+            return;
+        }
+
         std::lock_guard<std::mutex> lock(tx_mutex_);
         for (float s : samples) {
             tx_queue_.push(s);
@@ -1323,20 +1359,26 @@ private:
                 }
             }
 
-            // 3. GET TX SAMPLES - check if we have anything to transmit
+            // 3. GET TX SAMPLES - check if we have anything to transmit.
+            // HardwareAudioPort bypasses this simulated pacer because SDL's
+            // output callback is already the hardware clock.
             std::vector<float> tx_samples(SAMPLES_PER_CALLBACK, 0.0f);
             size_t tx_pending = 0;
-            {
-                std::lock_guard<std::mutex> lock(tx_mutex_);
-                tx_pending = tx_queue_.size();
-                for (int i = 0; i < SAMPLES_PER_CALLBACK && !tx_queue_.empty(); i++) {
-                    tx_samples[i] = tx_queue_.front();
-                    tx_queue_.pop();
+            const bool pace_tx = !port_ || port_->shouldPaceTxInStationLoop();
+            if (pace_tx) {
+                {
+                    std::lock_guard<std::mutex> lock(tx_mutex_);
+                    tx_pending = tx_queue_.size();
+                    for (int i = 0; i < SAMPLES_PER_CALLBACK && !tx_queue_.empty(); i++) {
+                        tx_samples[i] = tx_queue_.front();
+                        tx_queue_.pop();
+                    }
                 }
-            }
 
-            // 4. SEND TX TO AUDIO PORT (virtual channel or soundcard)
-            if (port_) port_->queueTx(tx_samples);
+                // 4. SEND TX TO AUDIO PORT (virtual channel only; hardware TX
+                // is queued directly in queueTx() above)
+                if (port_) port_->queueTx(tx_samples);
+            }
 
             // ===== AUDIO CALLBACK END =====
 
@@ -2933,7 +2975,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --idle-seconds <N>  Role B: max idle seconds before giving up (0 = forever)\n";
                 std::cout << "  --inject-channel    Apply --snr/--channel/--cfo to outgoing audio\n";
                 std::cout << "                      (lets Mac-to-Pi cable carry a synthetic HF channel)\n";
-                std::cout << "  --audio-buffer-size <N>  SDL2 period size, samples (default 4096)\n";
+                std::cout << "  --audio-buffer-size <N>  SDL2 period size, samples (default 8192)\n";
                 std::cout << "                      Smaller = lower latency. Larger = more XRUN headroom.\n";
                 return 0;
             }
