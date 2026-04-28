@@ -1341,6 +1341,19 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     if (training_symbols > 0) {
         size_t training_samples_count = training_symbols * impl_->symbol_samples;
 
+        // Bounds check: a too-short input would underflow `remaining` (size_t)
+        // when we subtract training_samples_count below, leading to a billion-
+        // sample vector::insert and a std::length_error crash. Seen on real
+        // hardware with small SDL2 audio buffers when a partial chirp lock
+        // produced LTS estimates with NaN/inf values and a 1509-sample input.
+        if (training_samples_count > remaining) {
+            LOG_DEMOD(WARN,
+                "processPresynced: short input — got %zu samples but training "
+                "alone needs %zu; aborting",
+                remaining, training_samples_count);
+            return false;
+        }
+
         // Use training symbols for channel estimation (this advances the mixer)
         {
             timing::ScopedTimer _profile_(timing::globalDecoderProfile().lts_channel_estimate);
