@@ -714,6 +714,14 @@ void SelectiveRepeatARQ::maybeSampleRTT(TXSlot& slot) {
     } else {
         floor_ms = std::max(1200u, config_.ack_timeout_ms / 2);
     }
+    // Never let the adaptive timeout drop below the static configured value.
+    // The static value is sized for the *worst-case burst RTT* including
+    // soundcard chain latency (see computeOfdmAckTimeoutMs). Adaptive RTT
+    // sampling sees per-frame RTT in the steady state which can be much
+    // shorter than the burst-end RTT, so without this clamp the timer fires
+    // before the last frame's ACK can return — causing spurious retx storms
+    // observed on real Mac<->Pi hardware after the tick-rate fix.
+    floor_ms = std::max(floor_ms, config_.ack_timeout_ms);
     adaptive_ack_timeout_ms_ = std::clamp(static_cast<uint32_t>(rto_f + 0.5f), floor_ms, 12000u);
 
     LOG_MODEM(DEBUG, "SR-ARQ: RTT sample=%ums srtt=%.1f rttvar=%.1f rto=%ums",
