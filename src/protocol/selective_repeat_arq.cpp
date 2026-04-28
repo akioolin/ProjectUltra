@@ -366,6 +366,14 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
                 s.fast_retx_cooldown_ms == 0) {
                 s.fast_retx_count++;
                 s.fast_retx_cooldown_ms = fast_retx_cooldown_ms;
+                // Reset the timeout timer too — we just retx'd, give the new
+                // ACK a fresh round-trip window before timer-firing again.
+                // Without this, fast_hole + timeout both fire for the same
+                // seq, doubling the duplicate count. Likewise disarm the
+                // hole_probe — fast_hole already serves that purpose.
+                s.timeout_ms = currentAckTimeoutMs();
+                s.hole_probe_armed = false;
+                s.hole_probe_timer_ms = 0;
                 LOG_MODEM(INFO,
                           "SR-ARQ: Fast retransmit base seq=%d (bitmap=0x%02X, fast=%d/%d, cooldown=%ums, confirms=%d)",
                           tx_base_seq_, bitmap, s.fast_retx_count, MAX_FAST_RETX_PER_HOLE,
