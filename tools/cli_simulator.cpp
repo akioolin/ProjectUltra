@@ -627,7 +627,28 @@ public:
     }
 
     void tick() {
-        protocol_.tick(CALLBACK_INTERVAL_MS);
+        // Measure real wall-clock elapsed time since the previous tick, then
+        // advance the protocol timers by that amount. Hard-coding
+        // CALLBACK_INTERVAL_MS (10ms) caused a critical timing skew on the
+        // hardware path: waitForRole sleeps 20ms between ticks, so ARQ timers
+        // ran at HALF wall-clock speed — a configured 4.5s ACK timeout
+        // actually fired at ~9s, causing 14-second "frame gaps" during file
+        // transfer when ACKs were lost. Real-time tick advances fixes this
+        // without requiring all callers to pass exact intervals.
+        auto now = std::chrono::steady_clock::now();
+        if (last_tick_time_.time_since_epoch().count() == 0) {
+            last_tick_time_ = now;
+            protocol_.tick(CALLBACK_INTERVAL_MS);
+            return;
+        }
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - last_tick_time_).count();
+        // Clamp to a sane range — ticks longer than 1s probably mean the
+        // process was suspended; clamp to 1s to avoid huge timer jumps.
+        uint32_t elapsed_ms = static_cast<uint32_t>(
+            std::clamp<int64_t>(elapsed, 1, 1000));
+        last_tick_time_ = now;
+        protocol_.tick(elapsed_ms);
     }
 
     float getSimTime() const { return total_samples_ / (float)SAMPLE_RATE; }
@@ -670,6 +691,8 @@ private:
     std::atomic<bool> running_{false};
     std::thread audio_thread_;
     std::thread decode_thread_;
+    // Real-time tick accounting (see tick() above).
+    std::chrono::steady_clock::time_point last_tick_time_{};
 
     // TX queue - samples waiting to be transmitted
     std::mutex tx_mutex_;
