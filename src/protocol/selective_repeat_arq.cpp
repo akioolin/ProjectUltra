@@ -349,15 +349,27 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
             // Send one fast repair for a base hole. Additional SACK bitmap updates
             // often arrive before the repair ACK catches up, so repeated fast
             // retransmits mostly create stale out-of-window duplicates.
+            //
+            // Require TWO hole-confirmation SACKs before retx — protects against
+            // false-loss inferences when the original ACK is just delayed in the
+            // audio buffer chain. Real-hardware tests showed fast_hole firing
+            // before the original ACK had time to traverse the 340ms-each-way
+            // soundcard buffers, creating ~25% wasted duplicate retx. With
+            // window=4 and ACKs arriving every ~700ms, requiring 2 SACKs adds
+            // ~700ms of latency to genuine-loss recovery — acceptable cost for
+            // eliminating the spurious retx storm.
             constexpr int MAX_FAST_RETX_PER_HOLE = 1;
+            constexpr int MIN_HOLE_CONFIRMATIONS = 2;
             uint32_t fast_retx_cooldown_ms = std::clamp(config_.ack_timeout_ms / 6, 300u, 1200u);
-            if (s.fast_retx_count < MAX_FAST_RETX_PER_HOLE && s.fast_retx_cooldown_ms == 0) {
+            if (s.hole_ack_count >= MIN_HOLE_CONFIRMATIONS &&
+                s.fast_retx_count < MAX_FAST_RETX_PER_HOLE &&
+                s.fast_retx_cooldown_ms == 0) {
                 s.fast_retx_count++;
                 s.fast_retx_cooldown_ms = fast_retx_cooldown_ms;
                 LOG_MODEM(INFO,
-                          "SR-ARQ: Fast retransmit base seq=%d (bitmap=0x%02X, fast=%d/%d, cooldown=%ums)",
+                          "SR-ARQ: Fast retransmit base seq=%d (bitmap=0x%02X, fast=%d/%d, cooldown=%ums, confirms=%d)",
                           tx_base_seq_, bitmap, s.fast_retx_count, MAX_FAST_RETX_PER_HOLE,
-                          fast_retx_cooldown_ms);
+                          fast_retx_cooldown_ms, s.hole_ack_count);
                 retransmitFrame(base_slot, RetransmitCause::FAST_HOLE);
             }
         }
