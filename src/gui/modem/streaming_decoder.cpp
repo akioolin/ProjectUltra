@@ -1095,85 +1095,77 @@ void StreamingDecoder::decodeCurrentFrame() {
         return;
     }
 
-    // Check for PING (low energy after sync = chirp only, no data)
-    // For MC-DPSK: training=4096, ref=512, so data starts at 4608
-    // We need to check AFTER training region to detect PING correctly
-    size_t training_skip = 0;
-    if (mode_ == protocol::WaveformMode::MC_DPSK) {
-        training_skip = 4608;  // training + ref samples
-    } else {
-        // OFDM: check after light preamble (training symbols)
-        // Must be waveform/config dependent (FFT/CP/carriers).
-        int data_preamble = waveform_->getDataPreambleSamples();
-        training_skip = (data_preamble > 0) ? static_cast<size_t>(data_preamble) : size_t(1024);
-    }
+    // PING is a disconnected MC-DPSK chirp-only presence probe. Do not run this
+    // RMS heuristic for connected OFDM light-preamble frames: valid data/control
+    // frames must be accepted or rejected by the demodulator + CRC/FEC path.
+    const bool allow_ping_detection = !connected_ && mode_ == protocol::WaveformMode::MC_DPSK;
+    if (allow_ping_detection) {
+        // For MC-DPSK: training=4096, ref=512, so data starts at 4608.
+        // Check after training to distinguish chirp-only PING from real frames.
+        constexpr size_t training_skip = 4608;
 
-    // Compute training region RMS (signal + noise)
-    float training_rms = 0.0f;
-    size_t train_len = std::min(training_skip, frame_buffer.size());
-    if (train_len > 0) {
-        for (size_t i = 0; i < train_len; i++) {
-            training_rms += frame_buffer[i] * frame_buffer[i];
-        }
-        training_rms = std::sqrt(training_rms / train_len);
-    }
-
-    // Compute data region RMS
-    float rms = 0.0f;
-    size_t check_start = std::min(training_skip, frame_buffer.size());
-    size_t check_len = std::min(frame_buffer.size() - check_start, size_t(5000));
-    if (check_len > 0) {
-        for (size_t i = 0; i < check_len; i++) {
-            rms += frame_buffer[check_start + i] * frame_buffer[check_start + i];
-        }
-        rms = std::sqrt(rms / check_len);
-    }
-
-    // PING detection: use ratio of data RMS to training RMS
-    // PING (chirp only): data region is noise-only, ratio << 1 (typically 0.15-0.45)
-    // DATA frame: data region has signal, ratio ~0.5-1.0
-    // Ratio threshold 0.5 works across all SNR levels since it's relative
-    float rms_ratio = (training_rms > 0.001f) ? rms / training_rms : 0.0f;
-    bool is_ping = rms_ratio < 0.5f;
-
-    LOG_MODEM(INFO, "[%s] PING check: RMS=%.4f, train_RMS=%.4f, ratio=%.3f (threshold=0.5), sync_pos=%zu",
-              log_prefix_.c_str(), rms, training_rms, rms_ratio, sync_position_);
-
-    if (is_ping) {
-        // PING detected
-        LOG_MODEM(INFO, "[%s] PING detected (RMS=%.4f), SNR=%.1f dB, CFO=%.1f Hz",
-                  log_prefix_.c_str(), rms, sync_snr_, sync_cfo_);
-
-        DecodeResult ping;
-        ping.success = true;
-        ping.is_ping = true;
-        ping.frame_type = v2::FrameType::PING;
-        ping.snr_db = sync_snr_;
-        ping.cfo_hz = sync_cfo_;
-
-        {
-            std::lock_guard<std::mutex> qlock(queue_mutex_);
-            frame_queue_.push(ping);
+        float training_rms = 0.0f;
+        size_t train_len = std::min(training_skip, frame_buffer.size());
+        if (train_len > 0) {
+            for (size_t i = 0; i < train_len; i++) {
+                training_rms += frame_buffer[i] * frame_buffer[i];
+            }
+            training_rms = std::sqrt(training_rms / train_len);
         }
 
-        if (ping_callback_) ping_callback_(sync_snr_, sync_cfo_);
-
-        {
-            std::lock_guard<std::mutex> slock(stats_mutex_);
-            stats_.pings_received++;
+        float rms = 0.0f;
+        size_t check_start = std::min(training_skip, frame_buffer.size());
+        size_t check_len = std::min(frame_buffer.size() - check_start, size_t(5000));
+        if (check_len > 0) {
+            for (size_t i = 0; i < check_len; i++) {
+                rms += frame_buffer[check_start + i] * frame_buffer[check_start + i];
+            }
+            rms = std::sqrt(rms / check_len);
         }
 
-        // Skip past the PING
-        {
-            std::lock_guard<std::mutex> lock(buffer_mutex_);
-            size_t min_frame = static_cast<size_t>(waveform_->getMinSamplesForFrame());
-            correlation_pos_ = (sync_position_ + min_frame) % MAX_BUFFER_SAMPLES;
-            setSearchFloorLocked(frame_sync_abs + min_frame);
-            last_decoded_sync_pos_ = sync_position_;
-        }
+        // PING detection: use ratio of data RMS to training RMS.
+        // PING (chirp only): data region is noise-only; data frames carry energy.
+        float rms_ratio = (training_rms > 0.001f) ? rms / training_rms : 0.0f;
+        bool is_ping = rms_ratio < 0.5f;
 
-        state_ = DecoderState::SEARCHING;
-        return;
+        LOG_MODEM(INFO, "[%s] PING check: RMS=%.4f, train_RMS=%.4f, ratio=%.3f (threshold=0.5), sync_pos=%zu",
+                  log_prefix_.c_str(), rms, training_rms, rms_ratio, sync_position_);
+
+        if (is_ping) {
+            LOG_MODEM(INFO, "[%s] PING detected (RMS=%.4f), SNR=%.1f dB, CFO=%.1f Hz",
+                      log_prefix_.c_str(), rms, sync_snr_, sync_cfo_);
+
+            DecodeResult ping;
+            ping.success = true;
+            ping.is_ping = true;
+            ping.frame_type = v2::FrameType::PING;
+            ping.snr_db = sync_snr_;
+            ping.cfo_hz = sync_cfo_;
+
+            {
+                std::lock_guard<std::mutex> qlock(queue_mutex_);
+                frame_queue_.push(ping);
+            }
+
+            if (ping_callback_) ping_callback_(sync_snr_, sync_cfo_);
+
+            {
+                std::lock_guard<std::mutex> slock(stats_mutex_);
+                stats_.pings_received++;
+            }
+
+            // Skip past the PING.
+            {
+                std::lock_guard<std::mutex> lock(buffer_mutex_);
+                size_t min_frame = static_cast<size_t>(waveform_->getMinSamplesForFrame());
+                correlation_pos_ = (sync_position_ + min_frame) % MAX_BUFFER_SAMPLES;
+                setSearchFloorLocked(frame_sync_abs + min_frame);
+                last_decoded_sync_pos_ = sync_position_;
+            }
+
+            state_ = DecoderState::SEARCHING;
+            return;
+        }
     }
 
     // Connected OFDM control-first hypothesis:
