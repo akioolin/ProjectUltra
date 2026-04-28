@@ -1199,6 +1199,14 @@ float OFDMDemodulator::getFadingIndex() const {
     return std_dev / mean;
 }
 
+float OFDMDemodulator::getLastLTSSignalPower() const {
+    return impl_->last_lts_signal_power;
+}
+
+float OFDMDemodulator::getLastLTSChannelMagnitude() const {
+    return impl_->last_lts_channel_magnitude;
+}
+
 void OFDMDemodulator::setFrequencyOffset(float cfo_hz) {
     LOG_DEMOD(INFO, "setFrequencyOffset: CFO=%.2f Hz (was %.2f Hz)", cfo_hz, impl_->freq_offset_hz);
     impl_->freq_offset_hz = cfo_hz;
@@ -1443,6 +1451,8 @@ void OFDMDemodulator::reset() {
     impl_->snr_symbol_count = 0;
     impl_->estimated_snr_linear = 1.0f;
     impl_->noise_variance = 0.1f;
+    impl_->last_lts_signal_power = 1.0f;
+    impl_->last_lts_channel_magnitude = 1.0f;
 
     impl_->freq_offset_hz = 0.0f;
     impl_->freq_offset_filtered = 0.0f;

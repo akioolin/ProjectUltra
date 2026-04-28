@@ -158,6 +158,10 @@ public:
     // Returns 0 for single-carrier modes or modes without fading detection
     virtual float getFadingIndex() const { return 0.0f; }
 
+    // Last OFDM LTS channel metrics. Non-OFDM waveforms return safe defaults.
+    virtual float getLastLTSSignalPower() const { return 1.0f; }
+    virtual float getLastLTSChannelMagnitude() const { return 1.0f; }
+
     // Check if channel appears to be fading
     virtual bool isFading() const { return getFadingIndex() > 0.65f; }
 

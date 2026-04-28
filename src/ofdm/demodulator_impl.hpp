@@ -44,6 +44,11 @@ struct OFDMDemodulator::Impl {
     float snr_alpha = 0.3f;
     int snr_symbol_count = 0;
 
+    // Last LTS estimate quality. False training locks on silence/noise have
+    // near-zero values here even when the clipped LLR stream looks plausible.
+    float last_lts_signal_power = 1.0f;
+    float last_lts_channel_magnitude = 1.0f;
+
     // Fading index (from pilot magnitude variance)
     // 0 = flat channel, > 0.15 = significant fading
     float last_fading_index = 0.0f;

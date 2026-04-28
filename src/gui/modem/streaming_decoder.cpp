@@ -931,6 +931,29 @@ static float computeLLRAbsAvg(const float* bits, size_t count) {
 // attempts cluster near 1.
 static constexpr float MIN_LLR_FOR_1CW_DECODE = 2.0f;
 
+static bool hasInvalidOFDMTraining(IWaveform* waveform, bool is_ofdm, bool connected,
+                                   float& lts_signal_power, float& lts_channel_mag) {
+    lts_signal_power = 1.0f;
+    lts_channel_mag = 1.0f;
+    if (!waveform || !is_ofdm || !connected) {
+        return false;
+    }
+
+    lts_signal_power = waveform->getLastLTSSignalPower();
+    lts_channel_mag = waveform->getLastLTSChannelMagnitude();
+    if (!std::isfinite(lts_signal_power) || !std::isfinite(lts_channel_mag)) {
+        return true;
+    }
+
+    // Real hardware ACK/DATA frames show LTS signal power orders of magnitude
+    // above this. False locks on silence/noise report signal≈0 and |H|≈0, but
+    // can still produce clipped soft bits that pass LLR-only gates.
+    constexpr float MIN_LTS_SIGNAL_POWER = 1.0e-3f;
+    constexpr float MIN_LTS_CHANNEL_MAG = 5.0e-2f;
+    return lts_signal_power < MIN_LTS_SIGNAL_POWER &&
+           lts_channel_mag < MIN_LTS_CHANNEL_MAG;
+}
+
 // Robust single-CW LDPC decode with Phase 0 decoder diversity (up to 4 retries)
 // Uses standalone LDPCDecoder for setMinSumFactor (not available via ICodec interface)
 // Pattern matches decodeFixedFrame() Phase 0 (frame_v2.cpp:1378-1395)
@@ -1095,6 +1118,24 @@ void StreamingDecoder::decodeCurrentFrame() {
         return;
     }
 
+    // Invalid connected-OFDM LTS locks are often silence/payload autocorr peaks
+    // just before the next real LTS. Advancing by a whole frame can skip the real
+    // frame; advance only far enough to avoid re-locking the same false peak.
+    auto advancePastFalseOFDMLock = [&]() {
+        size_t advance = 1024;
+        if (waveform_) {
+            const int data_preamble = waveform_->getDataPreambleSamples();
+            if (data_preamble > 0) {
+                advance = std::max<size_t>(512, static_cast<size_t>(data_preamble) / 2);
+            }
+        }
+        advance = std::min(advance, frame_len);
+
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        correlation_pos_ = (sync_position_ + advance) % MAX_BUFFER_SAMPLES;
+        setSearchFloorLocked(frame_sync_abs + advance);
+    };
+
     // PING is a disconnected MC-DPSK chirp-only presence probe. Do not run this
     // RMS heuristic for connected OFDM light-preamble frames: valid data/control
     // frames must be accepted or rejected by the demodulator + CRC/FEC path.
@@ -1187,6 +1228,21 @@ void StreamingDecoder::decodeCurrentFrame() {
         waveform_->setFrequencyOffset(decode_cfo);
         bool control_ok = waveform_->process(SampleSpan(frame_buffer.data(), frame_buffer.size()));
         if (control_ok) {
+            float lts_signal_power = 1.0f;
+            float lts_channel_mag = 1.0f;
+            if (hasInvalidOFDMTraining(waveform_.get(), is_ofdm, connected_,
+                                       lts_signal_power, lts_channel_mag)) {
+                LOG_MODEM(INFO, "[%s] False control chirp lock rejected: "
+                          "lts_signal=%.6f, |H|_avg=%.4f — re-searching",
+                          log_prefix_.c_str(), lts_signal_power, lts_channel_mag);
+                if (switched_profile) {
+                    waveform_->configure(saved_mod, saved_rate);
+                }
+                advancePastFalseOFDMLock();
+                state_ = DecoderState::SEARCHING;
+                return;
+            }
+
             captureConstellationSnapshot();
             auto control_soft_bits = waveform_->getSoftBits();
             if (control_soft_bits.size() >= CONTROL_LDPC_BLOCK) {
@@ -1290,6 +1346,19 @@ void StreamingDecoder::decodeCurrentFrame() {
         state_ = DecoderState::SEARCHING;
         return;
     }
+
+    float lts_signal_power = 1.0f;
+    float lts_channel_mag = 1.0f;
+    if (hasInvalidOFDMTraining(waveform_.get(), is_ofdm, connected_,
+                               lts_signal_power, lts_channel_mag)) {
+        LOG_MODEM(INFO, "[%s] False chirp lock rejected: "
+                  "lts_signal=%.6f, |H|_avg=%.4f — re-searching",
+                  log_prefix_.c_str(), lts_signal_power, lts_channel_mag);
+        advancePastFalseOFDMLock();
+        state_ = DecoderState::SEARCHING;
+        return;
+    }
+
     captureConstellationSnapshot();
 
     auto soft_bits = waveform_->getSoftBits();
@@ -1304,30 +1373,34 @@ void StreamingDecoder::decodeCurrentFrame() {
         return;
     }
 
-    // Reject false chirp locks before paying for full LDPC decode.
-    // Real syncs at usable SNR produce |LLR|_avg ~ 18+ for the first CW worth
-    // of soft bits. False locks (e.g. chirp landing on a sample-drop boundary,
-    // mis-aligned at ~440-sample timing offset) produce |LLR|_avg < 1 — pure
-    // noise. Rejecting here skips ~600ms of futile retry sweeps and lets
-    // chirp-search find the next real frame promptly. See real-hardware
-    // analysis: USB audio chains drop ~1 callback (480 samples) occasionally,
-    // misaligning chirps that detect at corr=0.6-0.8 instead of the typical
-    // 0.9+ for clean locks.
+    // Reject false chirp locks before paying for full LDPC decode. Some false
+    // locks produce low average confidence; others look high-confidence after
+    // clipping but contain a large erasure-like population near zero. Both
+    // patterns are unrecoverable and otherwise burn full LDPC retry sweeps.
     constexpr float MIN_PRESYNC_LLR = 2.0f;
+    constexpr float NEAR_ZERO_LLR = 0.1f;
+    constexpr float MAX_NEAR_ZERO_FRACTION = 0.12f;
     {
         const size_t llr_n = std::min(soft_bits.size(), size_t(648));
         float llr_sum = 0.0f;
-        for (size_t i = 0; i < llr_n; ++i) llr_sum += std::abs(soft_bits[i]);
+        size_t near_zero_count = 0;
+        for (size_t i = 0; i < llr_n; ++i) {
+            const float llr_abs = std::abs(soft_bits[i]);
+            llr_sum += llr_abs;
+            if (llr_abs <= NEAR_ZERO_LLR) {
+                ++near_zero_count;
+            }
+        }
         const float llr_avg = llr_n > 0 ? llr_sum / static_cast<float>(llr_n) : 0.0f;
-        if (llr_avg < MIN_PRESYNC_LLR) {
-            LOG_MODEM(INFO, "[%s] False chirp lock rejected: |llr|_avg=%.2f "
-                      "(timing-mis-aligned sync, %zu soft bits) — re-searching",
-                      log_prefix_.c_str(), llr_avg, soft_bits.size());
-            std::lock_guard<std::mutex> lock(buffer_mutex_);
-            // Step past the chirp area so we don't re-trigger immediately;
-            // a frame_len-sized advance is conservative.
-            correlation_pos_ = (sync_position_ + frame_len) % MAX_BUFFER_SAMPLES;
-            setSearchFloorLocked(frame_sync_abs + frame_len);
+        const float near_zero_fraction = llr_n > 0
+            ? static_cast<float>(near_zero_count) / static_cast<float>(llr_n)
+            : 1.0f;
+        if (llr_avg < MIN_PRESYNC_LLR || near_zero_fraction > MAX_NEAR_ZERO_FRACTION) {
+            LOG_MODEM(INFO, "[%s] False chirp lock rejected: |llr|_avg=%.2f, "
+                      "near_zero=%zu/%zu (%.1f%%), soft_bits=%zu — re-searching",
+                      log_prefix_.c_str(), llr_avg, near_zero_count, llr_n,
+                      near_zero_fraction * 100.0f, soft_bits.size());
+            advancePastFalseOFDMLock();
             state_ = DecoderState::SEARCHING;
             return;
         }
@@ -1465,12 +1538,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                 .low_llr_escalation_skipped.fetch_add(1, std::memory_order_relaxed);
             LOG_MODEM(INFO, "[%s] OFDM CW0 peek: |llr|_avg=%.1f too low — skipping 4-CW escalation (likely false sync)",
                       log_prefix_.c_str(), llr_abs_avg);
-            {
-                std::lock_guard<std::mutex> lock(buffer_mutex_);
-                correlation_pos_ = (sync_position_ + frame_len) % MAX_BUFFER_SAMPLES;
-                setSearchFloorLocked(frame_sync_abs + frame_len);
-                last_decoded_sync_pos_ = sync_position_;
-            }
+            advancePastFalseOFDMLock();
             state_ = DecoderState::SEARCHING;
             return;
         }

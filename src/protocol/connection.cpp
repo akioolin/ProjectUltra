@@ -61,11 +61,11 @@ uint32_t computeOfdmAckTimeoutMs(Modulation mod, CodeRate rate, size_t window_si
 
     // Timeout should cover a full burst RTT + decode/jitter + audio chain.
     uint32_t timeout_ms = tx_burst_ms + ack_path_ms + decode_jitter_margin_ms;
-    // Floor lifted from 4500ms to 6500ms to absorb hardware audio latency
-    // without depending on every caller passing exact buffer sizes. With
-    // smaller buffers (sim mode), the clamp clips back to 6500 — a small
-    // CPU efficiency hit on sim but no correctness change.
-    return std::clamp(timeout_ms, 6500u, 14000u);
+    // Floor lifted to 8000ms for real soundcard paths. ARQ timers start when
+    // samples are queued, not when the SDL output callback actually drains
+    // them. Mac<->Pi hardware traces showed the 6500ms floor firing 67ms
+    // before a valid ACK for the last frame of the initial window arrived.
+    return std::clamp(timeout_ms, 8000u, 14000u);
 }
 
 } // namespace

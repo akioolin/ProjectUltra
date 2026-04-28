@@ -535,7 +535,7 @@ void SelectiveRepeatARQ::retransmitFrame(size_t slot, RetransmitCause cause) {
         case RetransmitCause::NACK: cause_str = "nack"; break;
     }
 
-    LOG_MODEM(DEBUG, "SR-ARQ: Retransmitting seq=%d (attempt %d/%d, cause=%s)",
+    LOG_MODEM(INFO, "SR-ARQ: Retransmitting seq=%d (attempt %d/%d, cause=%s)",
               s.seq, s.retry_count + 1, config_.max_retries, cause_str);
 
     stats_.retransmissions++;

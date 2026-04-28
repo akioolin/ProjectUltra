@@ -83,6 +83,8 @@ public:
     float estimatedSNR() const override;
     float estimatedCFO() const override;
     float getFadingIndex() const override;  // From demodulator pilot variance
+    float getLastLTSSignalPower() const override;
+    float getLastLTSChannelMagnitude() const override;
     std::vector<std::complex<float>> getConstellationSymbols() const override;
 
     // ========================================================================

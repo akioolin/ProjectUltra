@@ -534,6 +534,20 @@ float OFDMChirpWaveform::getFadingIndex() const {
     return 0.0f;
 }
 
+float OFDMChirpWaveform::getLastLTSSignalPower() const {
+    if (demodulator_) {
+        return demodulator_->getLastLTSSignalPower();
+    }
+    return 1.0f;
+}
+
+float OFDMChirpWaveform::getLastLTSChannelMagnitude() const {
+    if (demodulator_) {
+        return demodulator_->getLastLTSChannelMagnitude();
+    }
+    return 1.0f;
+}
+
 std::vector<std::complex<float>> OFDMChirpWaveform::getConstellationSymbols() const {
     if (demodulator_) {
         return demodulator_->getConstellationSymbols();

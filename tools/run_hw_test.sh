@@ -45,10 +45,10 @@ PI=${PI:-math@pi5tester}
 PI_REPO=${PI_REPO:-/home/math/ProjectUltra}
 # Optional: SSH_KEY=~/.ssh/id_pi5 to use a specific key
 SSH_OPTS=${SSH_KEY:+-i "$SSH_KEY"}
-PI_AUDIO_OUT=${PI_AUDIO_OUT:-}        # empty = SDL default device
-PI_AUDIO_IN=${PI_AUDIO_IN:-}
-MAC_AUDIO_OUT=${MAC_AUDIO_OUT:-}
-MAC_AUDIO_IN=${MAC_AUDIO_IN:-}
+PI_AUDIO_OUT=${PI_AUDIO_OUT:-USB Audio Device, USB Audio}
+PI_AUDIO_IN=${PI_AUDIO_IN:-USB Audio Device, USB Audio}
+MAC_AUDIO_OUT=${MAC_AUDIO_OUT:-Sound Blaster Play! 3}
+MAC_AUDIO_IN=${MAC_AUDIO_IN:-Sound Blaster Play! 3}
 SNR=${SNR:-20}
 CHANNEL=${CHANNEL:-awgn}              # awgn|good|moderate|poor|flutter
 RATE=${RATE:-r1_4}                    # r1_4|r1_2|r2_3|r3_4
@@ -124,6 +124,7 @@ LOG_DIR=/tmp/ultra_hw_$(date +%Y%m%d_%H%M%S)
 mkdir -p "$LOG_DIR"
 echo "Logs: $LOG_DIR"
 echo "Test: SNR=$SNR  channel=$CHANNEL  rate=$RATE  inject=$INJECT_CHANNEL  file=${FILE_SIZE:-(message)}"
+echo "Audio: Mac out='$MAC_AUDIO_OUT' in='$MAC_AUDIO_IN'  Pi out='$PI_AUDIO_OUT' in='$PI_AUDIO_IN'"
 echo
 
 # ─── 1. Start station B on Pi (background, via SSH) ─────────────────────
@@ -148,7 +149,7 @@ sleep 3   # let B open its audio devices before A starts
 echo "[2/3] Running station A locally..."
 set +e
 "$MAC_BIN" --role A \
-  "${MAC_DEVS_ARR[@]}" \
+  ${MAC_DEVS_ARR[@]+"${MAC_DEVS_ARR[@]}"} \
   --snr "$SNR" --rate "$RATE" $CHANNEL_FLAG $INJECT_FLAG $FILE_FLAG \
   > "$LOG_DIR/A.log" 2>&1
 A_EXIT=$?

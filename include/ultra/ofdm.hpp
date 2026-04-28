@@ -133,6 +133,10 @@ public:
     // Note: OFDM internal thresholds use this directly; MC-DPSK adds temporal CV on top
     float getFadingIndex() const;
 
+    // Last LTS channel-estimation metrics from processPresynced().
+    float getLastLTSSignalPower() const;
+    float getLastLTSChannelMagnitude() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

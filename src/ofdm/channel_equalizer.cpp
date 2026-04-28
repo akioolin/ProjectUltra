@@ -447,6 +447,8 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     }
     h_avg /= float(data_carrier_indices.size());
     float h_mag_avg = h_mag_sum / data_carrier_indices.size();
+    last_lts_channel_magnitude = h_mag_avg;
+    last_lts_signal_power = h_mag_avg * h_mag_avg;
 
     // Estimate noise variance from LTS training symbols
     // With 2 training symbols, noise = (H1 - H2) / 2, variance = E[|H1-H2|²] / 4
@@ -470,6 +472,7 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
             // noise_variance = |H1-H2|²/4 per carrier (each H has noise variance σ²)
             float lts_noise_var = noise_sum / (4.0f * count);
             float lts_signal_power = signal_sum / count;
+            last_lts_signal_power = lts_signal_power;
 
             // Clamp SNR estimate to reasonable range (5 dB to 40 dB)
             float lts_snr = lts_signal_power / std::max(lts_noise_var, 1e-10f);
@@ -484,6 +487,7 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     } else if (h_mag_avg > 1e-6f) {
         // Fallback: only 1 training symbol, use default assumption
         float signal_power = h_mag_avg * h_mag_avg;
+        last_lts_signal_power = signal_power;
         noise_variance = signal_power / DEFAULT_SNR_LINEAR;
         estimated_snr_linear = DEFAULT_SNR_LINEAR;
         LOG_DEMOD(INFO, "LTS SNR estimate: %.1f dB (fallback, 1 training symbol)",
