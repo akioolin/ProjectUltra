@@ -49,11 +49,23 @@ uint32_t computeOfdmAckTimeoutMs(Modulation mod, CodeRate rate, size_t window_si
     uint32_t ack_copies = static_cast<uint32_t>(std::clamp(ack_repeat_count, 1, 3));
     uint32_t tx_burst_ms = static_cast<uint32_t>(window_size) * data_frame_ms;
     uint32_t ack_path_ms = ack_copies * ack_frame_ms + sack_delay_ms;
-    uint32_t decode_jitter_margin_ms = std::max<uint32_t>(700, data_frame_ms / 2);
 
-    // Timeout should cover a full burst RTT + decode/jitter margin.
+    // Soundcard chain adds round-trip latency on real audio: SDL2 default
+    // period_size is now 8192 samples (170ms each direction). Both sides
+    // contribute, so 4×170 ≈ 680ms is added to the RTT vs the in-process
+    // sim. We charge it as part of decode-jitter margin so the floor stays
+    // sane for sim mode (which still hits the 4500ms clamp).
+    constexpr uint32_t AUDIO_CHAIN_RTT_MARGIN_MS = 700;  // 4 × 170ms buffer-fill edge
+    uint32_t decode_jitter_margin_ms = std::max<uint32_t>(700, data_frame_ms / 2)
+                                       + AUDIO_CHAIN_RTT_MARGIN_MS;
+
+    // Timeout should cover a full burst RTT + decode/jitter + audio chain.
     uint32_t timeout_ms = tx_burst_ms + ack_path_ms + decode_jitter_margin_ms;
-    return std::clamp(timeout_ms, 4500u, 14000u);
+    // Floor lifted from 4500ms to 6500ms to absorb hardware audio latency
+    // without depending on every caller passing exact buffer sizes. With
+    // smaller buffers (sim mode), the clamp clips back to 6500 — a small
+    // CPU efficiency hit on sim but no correctness change.
+    return std::clamp(timeout_ms, 6500u, 14000u);
 }
 
 } // namespace
