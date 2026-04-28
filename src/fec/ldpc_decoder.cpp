@@ -421,6 +421,13 @@ int LDPCDecoder::lastIterations() const {
 }
 
 void LDPCDecoder::setRate(CodeRate rate) {
+    // Skip the expensive matrix rebuild if rate didn't change. Decode hot
+    // paths (e.g. streaming_decoder.cpp:2359 in decodeFrame) call setRate()
+    // on every frame regardless. buildMatrix() expands the IEEE 802.11n
+    // parity-check matrix and allocates fresh H_rows/H_cols vectors with
+    // thousands of entries — ~75ms each on Pi 5. For a 50 KB transfer at
+    // a fixed rate that's ~69 seconds of pure no-op matrix rebuilding.
+    if (impl_->rate == rate) return;
     impl_->rate = rate;
     impl_->params = getCodeParams(rate);
     impl_->buildMatrix();

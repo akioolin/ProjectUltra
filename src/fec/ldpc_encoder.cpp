@@ -213,6 +213,9 @@ CodeRate LDPCEncoder::getRate() const {
 }
 
 void LDPCEncoder::setRate(CodeRate rate) {
+    // Skip rebuild if rate hasn't changed. See LDPCDecoder::setRate for
+    // why this matters — same hot-path issue on the encoder side.
+    if (impl_->rate == rate) return;
     impl_->rate = rate;
     impl_->params = getCodeParams(rate);
     impl_->buildMatrix();
