@@ -159,8 +159,10 @@ private:
         uint8_t flags = 0;          // Frame flags
     };
 
-    // Maximum window size
-    static constexpr size_t MAX_WINDOW = 8;
+    // Maximum window size. Control frames already carry a 32-bit SACK bitmap;
+    // keep the production cap at 16 for bounded memory/latency while allowing
+    // clean OFDM audio chains to cover real soundcard buffering.
+    static constexpr size_t MAX_WINDOW = 16;
 
     ARQConfig config_;
     CodeRate code_rate_ = CodeRate::R1_4;  // Default R1/4, updated when connected
@@ -196,7 +198,7 @@ private:
     struct AckRepeatJob {
         Bytes frame_data;
         uint16_t base_seq = 0;
-        uint8_t bitmap = 0;
+        uint32_t bitmap = 0;
         uint32_t timer_ms = 0;
         int copy_index = 0;  // 2 = first repeat copy, 3 = second repeat copy
     };
@@ -207,7 +209,7 @@ private:
     uint16_t last_sack_base_ = 0;
     bool last_ack_signature_valid_ = false;
     uint16_t last_ack_seq_ = 0;
-    uint8_t last_ack_bitmap_ = 0;
+    uint32_t last_ack_bitmap_ = 0;
     uint32_t ack_dedup_timer_ms_ = 0;
 
     // Monotonic ARQ time and adaptive RTO estimator (Karn-safe)
@@ -242,9 +244,9 @@ private:
     void maybeSampleRTT(TXSlot& slot);
     uint32_t currentAckTimeoutMs() const;
     uint32_t ackRepeatDelayForCopy(int copy_index) const;
-    int ackRepeatJitterMs(uint16_t base_seq, uint8_t bitmap, int copy_index) const;
+    int ackRepeatJitterMs(uint16_t base_seq, uint32_t bitmap, int copy_index) const;
 
-    uint8_t buildRXBitmap() const;
+    uint32_t buildRXBitmap() const;
 };
 
 } // namespace protocol

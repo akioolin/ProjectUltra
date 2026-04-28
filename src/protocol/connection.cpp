@@ -20,6 +20,8 @@ constexpr uint32_t OFDM_SYMBOL_SAMPLES = OFDM_FFT_SIZE + OFDM_LONG_CP_SAMPLES;
 constexpr uint32_t OFDM_NUM_CARRIERS = 59;
 constexpr uint32_t LDPC_BITS_PER_CODEWORD = 648;
 constexpr uint32_t FIXED_FRAME_CODEWORDS = 4;
+constexpr uint32_t OFDM_BURST_ACK_BATCH_FRAMES = 4;
+constexpr size_t OFDM_NEAR_AWGN_WINDOW_FRAMES = 12;
 
 int pilotSpacingForRate(Modulation mod, CodeRate rate) {
     return ofdm_link_adaptation::recommendedPilotSpacing(mod, rate);
@@ -60,12 +62,24 @@ uint32_t computeOfdmAckTimeoutMs(Modulation mod, CodeRate rate, size_t window_si
                                        + AUDIO_CHAIN_RTT_MARGIN_MS;
 
     // Timeout should cover a full burst RTT + decode/jitter + audio chain.
-    uint32_t timeout_ms = tx_burst_ms + ack_path_ms + decode_jitter_margin_ms;
+    uint32_t queued_tail_margin_ms = 0;
+    if (window_size > 4) {
+        // With real soundcards ARQ timers start when samples are queued, not
+        // when the last queued frame is played and decoded. The wider AWGN
+        // window intentionally queues more audio, so charge extra tail margin
+        // rather than declaring the later slots lost just before their ACKs
+        // arrive.
+        queued_tail_margin_ms =
+            static_cast<uint32_t>(window_size - 4) * data_frame_ms + AUDIO_CHAIN_RTT_MARGIN_MS;
+    }
+
+    uint32_t timeout_ms = tx_burst_ms + ack_path_ms + decode_jitter_margin_ms
+                        + queued_tail_margin_ms;
     // Floor lifted to 8000ms for real soundcard paths. ARQ timers start when
     // samples are queued, not when the SDL output callback actually drains
     // them. Mac<->Pi hardware traces showed the 6500ms floor firing 67ms
     // before a valid ACK for the last frame of the initial window arrived.
-    return std::clamp(timeout_ms, 8000u, 14000u);
+    return std::clamp(timeout_ms, 8000u, 16000u);
 }
 
 } // namespace
@@ -103,7 +117,11 @@ Connection::Connection(const ConnectionConfig& config)
         if (file_transfer_.getState() == FileTransferState::SENDING) {
             if (success) {
                 file_transfer_.onChunkAcked();
-                sendNextFileChunk();
+                if (arq_callback_defer_refill_) {
+                    deferred_file_refill_ = true;
+                } else {
+                    sendNextFileChunk();
+                }
             } else {
                 file_transfer_.onSendFailed();
             }
@@ -124,7 +142,11 @@ Connection::Connection(const ConnectionConfig& config)
 
                 if (next_fragment_idx_ < pending_tx_fragments_.size()) {
                     // More fragments to submit to ARQ
-                    sendNextFragment();
+                    if (arq_callback_defer_refill_) {
+                        deferred_fragment_refill_ = true;
+                    } else {
+                        sendNextFragment();
+                    }
                 }
 
                 if (acked_fragment_count_ >= pending_tx_fragments_.size()) {
@@ -340,6 +362,9 @@ void Connection::abortTxNow() {
     acked_fragment_count_ = 0;
     burst_mode_active_ = false;
     burst_tx_buffer_.clear();
+    arq_callback_defer_refill_ = false;
+    deferred_file_refill_ = false;
+    deferred_fragment_refill_ = false;
 
     // Cancel file TX if active. Keep RX file state untouched.
     if (file_transfer_.getState() == FileTransferState::SENDING) {
@@ -738,13 +763,13 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                             }
                         } else {
                             // Regular data ACK
-                            arq_.onFrameReceived(frame_data);
+                            processArqFrame(frame_data);
                         }
                     }
                     break;
                 case v2::FrameType::NACK:
                     if (state_ == ConnectionState::CONNECTED) {
-                        arq_.onFrameReceived(frame_data);
+                        processArqFrame(frame_data);
                     }
                     break;
                 case v2::FrameType::MODE_CHANGE:
@@ -762,8 +787,47 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
     } else {
         // Data frame - pass to ARQ
         if (state_ == ConnectionState::CONNECTED) {
-            arq_.onFrameReceived(frame_data);
+            processArqFrame(frame_data);
         }
+    }
+}
+
+void Connection::processArqFrame(const Bytes& frame_data) {
+    const bool outermost = !arq_callback_defer_refill_;
+    if (outermost) {
+        arq_callback_defer_refill_ = true;
+    }
+
+    arq_.onFrameReceived(frame_data);
+
+    if (outermost) {
+        arq_callback_defer_refill_ = false;
+        runDeferredArqRefill();
+    }
+}
+
+void Connection::runDeferredArqRefill() {
+    if (arq_callback_defer_refill_) {
+        return;
+    }
+
+    const bool refill_file = deferred_file_refill_;
+    const bool refill_fragments = deferred_fragment_refill_;
+    deferred_file_refill_ = false;
+    deferred_fragment_refill_ = false;
+
+    if (state_ != ConnectionState::CONNECTED) {
+        return;
+    }
+
+    if (refill_file && file_transfer_.getState() == FileTransferState::SENDING) {
+        sendNextFileChunk();
+    }
+
+    if (refill_fragments &&
+        !pending_tx_fragments_.empty() &&
+        next_fragment_idx_ < pending_tx_fragments_.size()) {
+        sendNextFragment();
     }
 }
 
@@ -995,6 +1059,7 @@ void Connection::enterConnected() {
         arq_.setWindowSize(1);
         arq_.setAckTimeout(18000);
         arq_.setSackDelay(2000);
+        arq_.setSackDelayShort(0);
         arq_.setAckRepeatCount(1);  // Single ACK (stop-and-wait, no benefit from repeat)
         LOG_MODEM(INFO, "Connection: ARQ window=1, timeout=18s, ack_repeat=1 (MC-DPSK)");
     } else if (negotiated_mode_ == WaveformMode::OFDM_NARROW) {
@@ -1004,6 +1069,7 @@ void Connection::enterConnected() {
         arq_.setWindowSize(1);
         arq_.setMaxRetries(15);
         arq_.setSackDelay(120);
+        arq_.setSackDelayShort(0);
         arq_.setAckRepeatCount(1);
 
         // Compute narrowband timeout from frame timing
@@ -1028,19 +1094,38 @@ void Connection::enterConnected() {
                   timeout_ms / 1000.0f, data_frame_ms, ack_frame_ms,
                   modulationToString(data_modulation_), codeRateToString(data_code_rate_));
     } else {
-        // Keep OFDM receive pressure bounded. Larger windows can overrun the ACK
-        // decode path and amplify a single base hole into timeout retransmit storms.
-        arq_.setWindowSize(4);
+        // Keep OFDM receive pressure bounded on fading channels. Near-AWGN
+        // hardware paths need a larger flight window to cover soundcard RTT;
+        // otherwise the sender drains its 4-frame window and waits idle for
+        // ACKs even though the PHY is clean.
+        const bool near_awgn_ofdm = fading_index_ < 0.30f && measured_snr_db_ >= 15.0f;
+        arq_.setWindowSize(near_awgn_ofdm ? OFDM_NEAR_AWGN_WINDOW_FRAMES : 4);
         arq_.setMaxRetries(15);     // More attempts compensate for ACK loss on fading
-        arq_.setSackDelay(120);     // Short coalescing delay for ACK/SACK control traffic
-        // NOTE: stream-aware SACK timer (setSackDelayShort) infrastructure is
-        // available but NOT enabled here — 25 KB canary at SNR=15 good with
-        // setSackDelay(700) reproduced the prior stale-repair-storm failure
-        // mode (out_of_window count went 0 → 14, retx 20 → 32, timeouts 4 → 22,
-        // wall 170s → 175s). The 700ms long delay starves ALPHA's window=4
-        // and causes ARQ thrashing — exactly what the reviewer warned about
-        // with "hold cumulative ACKs longer" approaches.
+        // Window=8 keeps the pipe full, but the physical OFDM burst/interleave
+        // group is 4 frames. ACK at the burst boundary so the sender can refill
+        // immediately; the delayed SACK timer is only a tail fallback.
+        arq_.setAckBatchSize(near_awgn_ofdm ? OFDM_BURST_ACK_BATCH_FRAMES : 0);
+        // Keep the failed window=4 SACK-delay canary rolled back. Burst-sized
+        // SACK coalescing is enabled only for the near-AWGN window=8 path,
+        // where the sender has enough flight depth and a longer timeout.
         // See .claude/plans/imperative-napping-conway.md for canary findings.
+
+        constexpr float symbol_ms = (1000.0f * OFDM_SYMBOL_SAMPLES) / OFDM_SAMPLE_RATE;
+        uint32_t data_symbols = symbolsForCodewords(data_modulation_, data_code_rate_, FIXED_FRAME_CODEWORDS);
+        uint32_t ack_symbols = symbolsForCodewords(data_modulation_, data_code_rate_, 1);
+        uint32_t data_ms = static_cast<uint32_t>(data_symbols * symbol_ms + 0.5f);
+        uint32_t ack_ms = static_cast<uint32_t>(ack_symbols * symbol_ms + 0.5f);
+
+        uint32_t sack_delay_ms = 120;
+        uint32_t sack_delay_short_ms = 0;
+        if (near_awgn_ofdm && arq_.getWindowSize() >= 8) {
+            // Full 4-frame bursts ACK via ack_batch_size above. This timer is
+            // for partial/tail windows and should not govern steady-state flow.
+            sack_delay_ms = std::clamp<uint32_t>(data_ms + 120, 700, 1000);
+            sack_delay_short_ms = 120;
+        }
+        arq_.setSackDelay(sack_delay_ms);
+        arq_.setSackDelayShort(sack_delay_short_ms);
 
         int ack_repeat_count = 2;
         uint32_t ack_repeat_delay_ms = 220;
@@ -1052,12 +1137,11 @@ void Connection::enterConnected() {
         }
         // Near-AWGN at decent SNR: drop SACK repeat to 1 copy. Single-shot
         // SACKs are reliably decoded here, the duplicate copies were just
-        // eating channel time. SRTT-aware ACK timeout (~750ms) recovers
-        // any lost SACK quickly. Tested expanding to good fading (< 0.65)
+        // eating channel time. Tested expanding to good fading (< 0.65)
         // and observed regressions at SNR=20 good (seed 1: r=33/t=17 → r=81/t=60),
         // so the threshold stays at near-AWGN where SACKs are reliably
         // single-shot deliverable.
-        else if (fading_index_ < 0.30f && measured_snr_db_ >= 15.0f) {
+        else if (near_awgn_ofdm) {
             ack_repeat_count = 1;
         }
 
@@ -1068,21 +1152,17 @@ void Connection::enterConnected() {
             data_modulation_, data_code_rate_, arq_.getWindowSize(), arq_.getSackDelay(), ack_repeat_count);
         arq_.setAckTimeout(ack_timeout_ms);
 
-        constexpr float symbol_ms = (1000.0f * OFDM_SYMBOL_SAMPLES) / OFDM_SAMPLE_RATE;
-        uint32_t data_symbols = symbolsForCodewords(data_modulation_, data_code_rate_, FIXED_FRAME_CODEWORDS);
-        uint32_t ack_symbols = symbolsForCodewords(data_modulation_, data_code_rate_, 1);
-        uint32_t data_ms = static_cast<uint32_t>(data_symbols * symbol_ms + 0.5f);
-        uint32_t ack_ms = static_cast<uint32_t>(ack_symbols * symbol_ms + 0.5f);
-
         LOG_MODEM(INFO,
-                  "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, ack=%ums x%d), max_retries=%d, sack_delay=%ums, ack_repeat=%d/%ums (OFDM %s %s)",
+                  "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, ack=%ums x%d), max_retries=%d, ack_batch=%u, sack_delay=%ums/%ums, ack_repeat=%d/%ums (OFDM %s %s)",
                   arq_.getWindowSize(),
                   ack_timeout_ms / 1000.0f,
                   data_ms,
                   ack_ms,
                   ack_repeat_count,
                   arq_.getMaxRetries(),
+                  arq_.getAckBatchSize(),
                   arq_.getSackDelay(),
+                  arq_.getSackDelayShort(),
                   ack_repeat_count,
                   ack_repeat_delay_ms,
                   modulationToString(data_modulation_),
@@ -1119,6 +1199,9 @@ void Connection::enterDisconnected(const std::string& reason) {
     connect_ack_frame_.clear();
     connect_ack_retransmit_ms_ = 0;
     connect_ack_retx_remaining_ = 0;
+    arq_callback_defer_refill_ = false;
+    deferred_file_refill_ = false;
+    deferred_fragment_refill_ = false;
     arq_.reset();
     file_transfer_.cancel();
     pending_tx_fragments_.clear();
@@ -1241,6 +1324,9 @@ void Connection::reset() {
     responder_handshake_wait_ms_ = 0;
     burst_mode_active_ = false;
     burst_tx_buffer_.clear();
+    arq_callback_defer_refill_ = false;
+    deferred_file_refill_ = false;
+    deferred_fragment_refill_ = false;
     arq_.reset();
     file_transfer_.cancel();
     pending_tx_fragments_.clear();

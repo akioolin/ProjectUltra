@@ -236,9 +236,10 @@ bool test_rx_in_order() {
             FAIL("Wrong payload for frame " + std::to_string(i));
     }
 
-    // Check SACKs were sent
-    if (channel.size() != 3)
-        FAIL("Expected 3 SACKs");
+    // Default ACK batching sends a SACK at window threshold (4 frames), not
+    // after every in-order frame. Three frames should only arm the tail timer.
+    if (channel.size() != 0)
+        FAIL("Expected no immediate SACK before default batch threshold");
 
     PASS();
     return true;
@@ -411,10 +412,11 @@ bool test_full_exchange() {
     if (received.size() != 10)
         FAIL("Expected 10 received, got " + std::to_string(received.size()));
 
-    // Completions should match sends (last completion may be delayed)
-    // Accept 9 or 10 due to synchronous callback timing
-    if (completions < 9)
-        FAIL("Expected at least 9 completions, got " + std::to_string(completions));
+    // The last partial batch is intentionally ACKed by the delayed SACK timer.
+    rx.tick(config.sack_delay_ms);
+
+    if (completions != 10)
+        FAIL("Expected 10 completions, got " + std::to_string(completions));
 
     // Verify payload integrity
     for (int i = 0; i < 10; i++) {
@@ -546,6 +548,41 @@ bool test_ack_batch_default_matches_window() {
     return true;
 }
 
+bool test_wide_sack_bitmap_serializes_beyond_8_frames() {
+    TEST("SACK bitmap preserves bits beyond 8-frame legacy window");
+
+    ARQConfig config;
+    config.window_size = 12;
+    config.sack_delay_ms = 10000;
+
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    // An out-of-order frame at seq=10 must be represented as bit 10 in the
+    // SACK bitmap. The old 8-bit path truncated this information.
+    auto f10 = v2::DataFrame::makeData("TX1", "RX1", 10, Bytes{10});
+    rx.onFrameReceived(f10.serialize());
+
+    if (channel.size() != 1)
+        FAIL("Expected one immediate SACK for out-of-order seq=10");
+
+    auto ctrl = v2::ControlFrame::deserialize(channel.receive());
+    if (!ctrl)
+        FAIL("Serialized SACK did not parse as a control frame");
+
+    auto np = v2::NackPayload::decode(ctrl->payload);
+    const uint32_t expected = 1u << 10;
+    if (np.cw_bitmap != expected)
+        FAIL("Expected SACK bitmap 0x" + std::to_string(expected) +
+             ", got " + std::to_string(np.cw_bitmap));
+
+    PASS();
+    return true;
+}
+
 // ============================================================================
 // Stream-aware SACK timer tests (post-Phase 3 plan)
 // ============================================================================
@@ -657,6 +694,7 @@ int main() {
     test_ack_batch_out_of_order_safety_valve();
     test_ack_batch_setter_clamping();
     test_ack_batch_default_matches_window();
+    test_wide_sack_bitmap_serializes_beyond_8_frames();
 
     std::cout << "\nStream-Aware SACK Timer Tests:\n";
     test_sack_timer_more_frag_short_collapses_long();

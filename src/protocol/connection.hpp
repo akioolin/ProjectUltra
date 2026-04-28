@@ -310,7 +310,16 @@ private:
     bool burst_mode_active_ = false;
     TransmitBurstCallback on_transmit_burst_;
 
+    // ARQ ACK callbacks can acknowledge several slots from one cumulative ACK.
+    // Defer window refill until ARQ finishes freeing all slots so OFDM stays
+    // burst-oriented instead of collapsing into one-frame steady-state TX.
+    bool arq_callback_defer_refill_ = false;
+    bool deferred_file_refill_ = false;
+    bool deferred_fragment_refill_ = false;
+
     void flushBurstBuffer();
+    void processArqFrame(const Bytes& frame_data);
+    void runDeferredArqRefill();
 
     // Callbacks
     TransmitCallback on_transmit_;

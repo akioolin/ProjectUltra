@@ -63,6 +63,45 @@ struct LDPCDecoder::Impl {
         buildMatrix();
     }
 
+    void updateCheckToVar(int m) {
+        for (int i = 0; i < m; ++i) {
+            const auto& row = H_rows[i];
+            const size_t degree = row.size();
+            if (degree <= 1) {
+                std::fill(check_to_var[i].begin(), check_to_var[i].end(), 0.0f);
+                continue;
+            }
+
+            float sign_product = 1.0f;
+            float min1 = std::numeric_limits<float>::max();
+            float min2 = std::numeric_limits<float>::max();
+            size_t min1_index = 0;
+
+            for (size_t e = 0; e < degree; ++e) {
+                float msg = var_to_check[i][e];
+                if (msg < 0.0f) {
+                    sign_product = -sign_product;
+                }
+
+                float abs_msg = std::abs(msg);
+                if (abs_msg < min1) {
+                    min2 = min1;
+                    min1 = abs_msg;
+                    min1_index = e;
+                } else if (abs_msg < min2) {
+                    min2 = abs_msg;
+                }
+            }
+
+            for (size_t e = 0; e < degree; ++e) {
+                const float msg = var_to_check[i][e];
+                const float sign = sign_product * (msg < 0.0f ? -1.0f : 1.0f);
+                const float min_abs = (e == min1_index) ? min2 : min1;
+                check_to_var[i][e] = sign * min_abs * min_sum_factor;
+            }
+        }
+    }
+
     void buildMatrix() {
         int k = params.info_bits;
         int m = params.parity_bits;
@@ -179,30 +218,13 @@ struct LDPCDecoder::Impl {
             std::fill(check_to_var[i].begin(), check_to_var[i].end(), 0);
         }
 
+        std::vector<uint8_t> hard_bits(n);
+
         // Iterative decoding
         last_success = false;
         for (last_iters = 0; last_iters < max_iterations; ++last_iters) {
             // Check-to-variable messages (min-sum approximation)
-            for (int i = 0; i < m; ++i) {
-                const auto& row = H_rows[i];
-                size_t degree = row.size();
-
-                for (size_t e = 0; e < degree; ++e) {
-                    float sign = 1.0f;
-                    float min_abs = std::numeric_limits<float>::max();
-
-                    for (size_t e2 = 0; e2 < degree; ++e2) {
-                        if (e2 != e) {
-                            float msg = var_to_check[i][e2];
-                            if (msg < 0) sign = -sign;
-                            float abs_msg = std::abs(msg);
-                            if (abs_msg < min_abs) min_abs = abs_msg;
-                        }
-                    }
-
-                    check_to_var[i][e] = sign * min_abs * min_sum_factor;
-                }
-            }
+            updateCheckToVar(m);
 
             // Variable-to-check messages and total LLRs
             llr_total = llr_in;
@@ -224,7 +246,6 @@ struct LDPCDecoder::Impl {
             }
 
             // Make hard decisions and check parity
-            std::vector<uint8_t> hard_bits(n);
             for (int j = 0; j < n; ++j) {
                 hard_bits[j] = (llr_total[j] < 0) ? 1 : 0;
             }
@@ -298,6 +319,8 @@ Bytes LDPCDecoder::decodeSoft(std::span<const float> llrs) {
         return impl_->decodeBP(llrs);
     }
 
+    std::vector<uint8_t> hard_bits(n);
+
     // Multi-block: decode each n-bit codeword and collect decoded BITS (not bytes)
     std::vector<uint8_t> all_decoded_bits;
     size_t offset = 0;
@@ -330,25 +353,7 @@ Bytes LDPCDecoder::decodeSoft(std::span<const float> llrs) {
         bool block_success = false;
         for (impl_->last_iters = 0; impl_->last_iters < impl_->max_iterations; ++impl_->last_iters) {
             // Check-to-variable messages (min-sum)
-            for (int i = 0; i < m; ++i) {
-                const auto& row = impl_->H_rows[i];
-                size_t degree = row.size();
-
-                for (size_t e = 0; e < degree; ++e) {
-                    float sign = 1.0f;
-                    float min_abs = std::numeric_limits<float>::max();
-
-                    for (size_t e2 = 0; e2 < degree; ++e2) {
-                        if (e2 != e) {
-                            float msg = impl_->var_to_check[i][e2];
-                            if (msg < 0) sign = -sign;
-                            float abs_msg = std::abs(msg);
-                            if (abs_msg < min_abs) min_abs = abs_msg;
-                        }
-                    }
-                    impl_->check_to_var[i][e] = sign * min_abs * impl_->min_sum_factor;
-                }
-            }
+            impl_->updateCheckToVar(m);
 
             // Variable-to-check messages and total LLRs
             impl_->llr_total = impl_->llr_in;
@@ -368,7 +373,6 @@ Bytes LDPCDecoder::decodeSoft(std::span<const float> llrs) {
             }
 
             // Check parity
-            std::vector<uint8_t> hard_bits(n);
             for (int j = 0; j < n; ++j) {
                 hard_bits[j] = (impl_->llr_total[j] < 0) ? 1 : 0;
             }

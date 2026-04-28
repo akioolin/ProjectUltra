@@ -6,12 +6,51 @@
 #include "ultra/timing_profiler.hpp"
 #include <cstring>
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
+#include <memory>
 #include <random>
 
 namespace ultra {
 namespace protocol {
+
+namespace {
+
+int codeRateCacheIndex(CodeRate rate) {
+    switch (rate) {
+        case CodeRate::R1_4: return 0;
+        case CodeRate::R1_3: return 1;
+        case CodeRate::R1_2: return 2;
+        case CodeRate::R2_3: return 3;
+        case CodeRate::R3_4: return 4;
+        case CodeRate::R5_6: return 5;
+        case CodeRate::R7_8: return 6;
+        default: return 2;
+    }
+}
+
+LDPCDecoder& fixedFrameDecoderForRate(CodeRate rate) {
+    struct DecoderCacheEntry {
+        CodeRate rate = CodeRate::AUTO;
+        std::unique_ptr<LDPCDecoder> decoder;
+    };
+
+    thread_local std::array<DecoderCacheEntry, 7> cache;
+    DecoderCacheEntry& entry = cache[codeRateCacheIndex(rate)];
+    if (!entry.decoder || entry.rate != rate) {
+        entry.decoder = std::make_unique<LDPCDecoder>(rate);
+        entry.rate = rate;
+    }
+
+    LDPCDecoder& decoder = *entry.decoder;
+    decoder.setRate(rate);
+    decoder.setMaxIterations(fec::LDPCCodec::getRecommendedIterations(rate));
+    decoder.setMinSumFactor(0.9375f);
+    return decoder;
+}
+
+} // namespace
 
 // ============================================================================
 // Shared Protocol Types Implementation
@@ -1348,9 +1387,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
     // Decode each codeword
     // Use min-sum factor 0.9375 (closer to BP) as default — empirically best
     // for DQPSK differential LLRs on fading channels.
-    LDPCDecoder decoder(rate);
-    decoder.setMaxIterations(fec::LDPCCodec::getRecommendedIterations(rate));
-    decoder.setMinSumFactor(0.9375f);
+    LDPCDecoder& decoder = fixedFrameDecoderForRate(rate);
     size_t bytes_per_cw = getBytesPerCodeword(rate);
 
     int perturbation_cw_count = 0;  // How many CWs needed perturbation retry

@@ -1775,19 +1775,14 @@ void StreamingDecoder::decodeCurrentFrame() {
     size_t next_block_pos = (sync_position_ + consumed) % MAX_BUFFER_SAMPLES;
     size_t next_search_abs = frame_sync_abs + consumed;
 
-    // After successful decode in connected OFDM mode, check for burst continuation
-    // MC-DPSK never enters burst mode (uses window=1, full chirp preamble).
-    // Skip burst continuation for non-data frames (control/connect are standalone).
-    //
-    // CRITICAL: only attempt continuation when burst-interleave is enabled.
-    // Without it the encoder emits a fresh chirp+training prefix on every
-    // frame, so the "next_block" position points at a chirp the decoder
-    // would mis-demodulate as data symbols (LLRs collapse to ~0). Real
-    // hardware tests (Mac<->Pi) showed this attempting decode of chirp
-    // pulses as payload, dropping ~10% of frames before fast-retransmit
-    // recovered them. Re-acquiring chirp sync is much more reliable.
+    // Legacy fixed-offset continuation is only safe for a physical burst.
+    // Marker-based bursts are handled earlier by BURST_ACCUMULATING; ordinary
+    // ARQ-refilled frames must re-acquire sync because hardware audio latency
+    // can insert gaps between frames. Treating those gaps as contiguous burst
+    // payload decodes the wrong samples, wastes LDPC time, and misses the real
+    // next frame.
     if (result.success && connected_ && is_ofdm && !is_non_data_frame
-        && use_burst_interleave_) {
+        && use_burst_interleave_ && waveform_ && waveform_->wasBurstInterleaved()) {
         size_t min_block = static_cast<size_t>(waveform_->getMinSamplesForFrame());
 
         // Loop to decode multiple burst continuation blocks
@@ -2448,9 +2443,17 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     // 3. If decode fails OR it's a 4-CW frame → try frame-interleaved decode
     // ========================================================================
 
+    // Skip single-CW control probes when we already know this is a 4-CW data
+    // frame. Burst-interleaved logical frames and frames latched by CW0 peek
+    // are data-only; probing them as R1/4 control burns LDPC time on the Pi
+    // before the real fixed-frame decode starts.
+    const bool known_4cw =
+        (pending_total_cw_ == v2::FIXED_FRAME_CODEWORDS) ||
+        (use_burst_interleave_ && waveform_ && waveform_->wasBurstInterleaved());
+
     // R1/4 fast-path: control frames are always encoded at R1/4 (hardened)
-    // Try R1/4 first — if it's a valid 1-CW control frame, return immediately
-    if (rate != CodeRate::R1_4 && soft_bits.size() >= LDPC_BLOCK) {
+    // Try R1/4 first — if it's a valid 1-CW control frame, return immediately.
+    if (!known_4cw && rate != CodeRate::R1_4 && soft_bits.size() >= LDPC_BLOCK) {
         codec_->setRate(CodeRate::R1_4);
         std::vector<float> cw0_r14(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
         std::pair<bool, Bytes> probe;
@@ -2489,10 +2492,6 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     //   (b) burst-interleave marker was latched (frame is part of a burst-interleaved
     //       group, definitely 4-CW data, never a control frame).
     // This was identified as redundant work in profiling plan v5 + ChatGPT review.
-    const bool known_4cw =
-        (pending_total_cw_ == v2::FIXED_FRAME_CODEWORDS) ||
-        (use_burst_interleave_ && waveform_ && waveform_->wasBurstInterleaved());
-
     std::pair<bool, Bytes> raw_probe;
     bool ok0 = false;
     Bytes data0;
@@ -2859,7 +2858,10 @@ void StreamingDecoder::finalizeBurstGroup() {
     auto logical_soft = fec::BurstInterleaver::deinterleave(burst_soft_buffer_);
 
     for (int i = 0; i < burst_group_size; i++) {
+        const int saved_pending_total_cw = pending_total_cw_;
+        pending_total_cw_ = v2::FIXED_FRAME_CODEWORDS;
         DecodeResult result = decodeFrame(logical_soft[i], burst_snr_, burst_cfo_);
+        pending_total_cw_ = saved_pending_total_cw;
 
         {
             std::lock_guard<std::mutex> slock(stats_mutex_);
