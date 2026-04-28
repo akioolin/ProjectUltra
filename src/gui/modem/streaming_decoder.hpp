@@ -344,6 +344,12 @@ private:
     // to detect if state was reset mid-operation (e.g., during correlation)
     std::atomic<uint32_t> reset_generation_{0};
 
+    // Audio-activity instrumentation: independent of chirp-search, observes
+    // RMS transitions in the incoming sample stream. Each high-RMS arrival is
+    // logged so post-run analysis can compare audio events to sync events.
+    std::atomic<bool> audio_activity_{false};
+    std::atomic<uint64_t> audio_activity_events_{0};
+
     // Active waveform for demodulation (handles its own sync internally)
     WaveformFactory waveform_factory_;
     std::unique_ptr<IWaveform> waveform_;

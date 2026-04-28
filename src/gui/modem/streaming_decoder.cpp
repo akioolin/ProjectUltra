@@ -157,6 +157,33 @@ void StreamingDecoder::setBurstInterleaveGroupSize(int size) {
 void StreamingDecoder::feedAudio(const float* samples, size_t count) {
     if (!samples || count == 0) return;
 
+    // Audio-activity instrumentation: detect "transmission arrived" events
+    // independent of the chirp-search path. We measure RMS over each incoming
+    // chunk and log low->high and high->low transitions. Each transmission
+    // (chirp + data) should produce one low->high then one high->low. Compare
+    // these to successful sync events to know if frames are arriving at the
+    // soundcard but the chirp-search isn't catching them.
+    {
+        float sum_sq = 0.0f;
+        for (size_t i = 0; i < count; ++i) sum_sq += samples[i] * samples[i];
+        const float chunk_rms = std::sqrt(sum_sq / static_cast<float>(count));
+        constexpr float ACTIVITY_GATE_HIGH = 0.030f;  // signal threshold
+        constexpr float ACTIVITY_GATE_LOW  = 0.010f;  // silence threshold
+        bool was_active = audio_activity_.load(std::memory_order_relaxed);
+        if (!was_active && chunk_rms >= ACTIVITY_GATE_HIGH) {
+            audio_activity_.store(true, std::memory_order_relaxed);
+            uint64_t evt = audio_activity_events_.fetch_add(1, std::memory_order_relaxed) + 1;
+            LOG_MODEM(INFO, "[%s] AudioActivity #%llu: ARRIVED rms=%.3f total_fed=%.2fs",
+                      log_prefix_.c_str(),
+                      static_cast<unsigned long long>(evt),
+                      chunk_rms,
+                      total_fed_ / 48000.0f);
+        } else if (was_active && chunk_rms < ACTIVITY_GATE_LOW) {
+            audio_activity_.store(false, std::memory_order_relaxed);
+            // No log on departure to keep noise down — "arrived" events are enough.
+        }
+    }
+
     std::lock_guard<std::mutex> lock(buffer_mutex_);
 
     size_t prev_total = total_fed_;
