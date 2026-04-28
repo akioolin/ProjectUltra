@@ -1373,13 +1373,13 @@ void StreamingDecoder::decodeCurrentFrame() {
         return;
     }
 
-    // Reject false chirp locks before paying for full LDPC decode. Some false
-    // locks produce low average confidence; others look high-confidence after
-    // clipping but contain a large erasure-like population near zero. Both
-    // patterns are unrecoverable and otherwise burn full LDPC retry sweeps.
+    // Reject false chirp locks before paying for full LDPC decode. Low average
+    // confidence is a reliable false-lock signature. A near-zero population is
+    // only decisive when it dominates the CW; valid short/tail DATA frames can
+    // show a modest near-zero tail after a strong LTS and still decode cleanly.
     constexpr float MIN_PRESYNC_LLR = 2.0f;
     constexpr float NEAR_ZERO_LLR = 0.1f;
-    constexpr float MAX_NEAR_ZERO_FRACTION = 0.12f;
+    constexpr float MAX_ERASURE_LIKE_FRACTION = 0.30f;
     {
         const size_t llr_n = std::min(soft_bits.size(), size_t(648));
         float llr_sum = 0.0f;
@@ -1395,7 +1395,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         const float near_zero_fraction = llr_n > 0
             ? static_cast<float>(near_zero_count) / static_cast<float>(llr_n)
             : 1.0f;
-        if (llr_avg < MIN_PRESYNC_LLR || near_zero_fraction > MAX_NEAR_ZERO_FRACTION) {
+        if (llr_avg < MIN_PRESYNC_LLR || near_zero_fraction > MAX_ERASURE_LIKE_FRACTION) {
             LOG_MODEM(INFO, "[%s] False chirp lock rejected: |llr|_avg=%.2f, "
                       "near_zero=%zu/%zu (%.1f%%), soft_bits=%zu — re-searching",
                       log_prefix_.c_str(), llr_avg, near_zero_count, llr_n,
