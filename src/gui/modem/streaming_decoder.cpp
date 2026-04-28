@@ -920,7 +920,26 @@ static std::pair<bool, Bytes> robustDecodeSingleCW(
 {
     ultra::timing::ScopedTimer _profile_(
         ultra::timing::globalDecoderProfile().single_cw_decode_total);
-    LDPCDecoder decoder(rate);
+
+    // Reuse one LDPCDecoder instance per code rate per thread. Constructing
+    // an LDPCDecoder calls buildMatrix() which expands the IEEE 802.11n
+    // parity-check matrix — that's expensive (~50ms+ on Pi 5). For ACK-heavy
+    // workloads (~1000 ACK decodes per 50 KB transfer at hardware speeds)
+    // the construction cost dominates the actual decode work.
+    //
+    // thread_local is safe here because the decode thread is the only caller
+    // of this function. The cache is keyed by rate — if a future caller
+    // ever uses a different rate from the same thread, we re-construct.
+    struct CachedDecoder {
+        std::unique_ptr<LDPCDecoder> decoder;
+        CodeRate rate = static_cast<CodeRate>(-1);
+    };
+    static thread_local CachedDecoder cache;
+    if (!cache.decoder || cache.rate != rate) {
+        cache.decoder = std::make_unique<LDPCDecoder>(rate);
+        cache.rate = rate;
+    }
+    LDPCDecoder& decoder = *cache.decoder;
     decoder.setMaxIterations(fec::LDPCCodec::getRecommendedIterations(rate));
     decoder.setMinSumFactor(0.9375f);
 

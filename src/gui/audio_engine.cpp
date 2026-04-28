@@ -410,8 +410,25 @@ void AudioEngine::appendCapturedSamples(const float* input, size_t samples, floa
     std::lock_guard<AudioEngineMutex> lock(rx_mutex_);
 
     // Cap buffer size to prevent unbounded growth if main loop stalls.
+    // When this fires we silently drop OLD samples — log it so we know
+    // when the consumer is starving and which frames were lost. Without
+    // this log, audio drops are invisible above the modem layer.
     if (rx_buffer_.size() + captured.size() > MAX_RX_BUFFER_SAMPLES) {
         size_t to_remove = rx_buffer_.size() + captured.size() - MAX_RX_BUFFER_SAMPLES;
+        // Throttle the log so a sustained stall doesn't spam the log.
+        // We log every 1 second of dropped audio (48000 samples).
+        static thread_local size_t s_dropped_since_log = 0;
+        static thread_local int s_drop_event_count = 0;
+        s_dropped_since_log += to_remove;
+        if (s_dropped_since_log >= 48000) {
+            s_drop_event_count++;
+            LOG_MODEM(WARN,
+                "AudioEngine: RX buffer overrun — dropped %.1fs of audio "
+                "(%zu samples this batch, event #%d). Consumer can't keep up.",
+                static_cast<double>(s_dropped_since_log) / 48000.0,
+                to_remove, s_drop_event_count);
+            s_dropped_since_log = 0;
+        }
         if (to_remove >= rx_buffer_.size()) {
             rx_buffer_.clear();
         } else {
