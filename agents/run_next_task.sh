@@ -134,6 +134,8 @@ fi
 git status --short > "$report_dir/git_status.txt"
 git diff --stat > "$report_dir/git_diff_stat.txt"
 
+task_archived=0
+
 if [[ "$AUTO_COMMIT" == "1" ]]; then
   if ! git diff --quiet || ! git diff --cached --quiet || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
     git add -A
@@ -144,6 +146,7 @@ if [[ "$AUTO_COMMIT" == "1" ]]; then
 
   if [[ "$ARCHIVE_TASK" == "1" ]]; then
     mv "$task_file" "$ARCHIVE_DIR/${timestamp}-${task_base}.md"
+    task_archived=1
     git add -A "$QUEUE_DIR" "$ARCHIVE_DIR"
     git commit -m "Archive agent task: $task_base" || true
   fi
@@ -151,6 +154,11 @@ if [[ "$AUTO_COMMIT" == "1" ]]; then
   if [[ "$PUSH_BRANCH" == "1" ]]; then
     git push -u origin "$branch"
   fi
+fi
+
+if [[ "$ARCHIVE_TASK" == "1" && "$task_archived" == "0" ]]; then
+  mv "$task_file" "$ARCHIVE_DIR/${timestamp}-${task_base}.md"
+  task_archived=1
 fi
 
 if [[ "$CREATE_PR" == "1" ]]; then
@@ -200,6 +208,7 @@ hardware_gate=$RUN_HARDWARE
 auto_commit=$AUTO_COMMIT
 push=$PUSH_BRANCH
 create_pr=$CREATE_PR
+archive_task=$task_archived
 EOF
 
 echo "Agent task completed. Report: $report_dir"
