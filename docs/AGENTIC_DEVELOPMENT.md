@@ -197,6 +197,10 @@ human checks the diff, evidence, and CI result.
 Report-only tasks, such as hardware sentinel runs, may produce no tracked
 commits. In that case the runner skips PR creation and comments the result back
 to the approved planner issue instead.
+Hardware sentinel commands are runner-owned gates. Codex and Claude stay in
+their normal code sandbox; the runner executes the maintained hardware script
+outside the model sandbox and writes the hardware report into the task report
+directory.
 `AGENT_TIMEOUT_SECONDS` requires `timeout(1)` on the agent host. Leave it unset
 on hosts without that command, or install GNU coreutils.
 

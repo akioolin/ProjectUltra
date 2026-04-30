@@ -10,6 +10,9 @@ The model is intentionally conservative:
 - Reports and prompts are written under `agents/reports/` and `agents/tmp/`.
 - Hardware tests are serialized with a lock so two agents cannot use the Mac/Pi audio path at the same time.
 - Hardware sentinel runs write structured report-only evidence for the planner.
+- Hardware proposal tasks are executed as runner-owned gates outside the model
+  sandbox; the agent inspects/logs, while the maintained runner script owns
+  SSH/audio access.
 - Planner runs write proposed task files for human review; they do not edit
   modem source or auto-merge PRs.
 - Planner proposal files are regenerated each planner pass, and publishing
@@ -90,6 +93,10 @@ AGENT_PROMPT_MODE=file AGENT_CMD='your-agent --prompt-file' ./agents/run_next_ta
 - `AGENT_RUN_LOCAL_GATE`: set `0` to skip the local gate, default `1`.
 - `AGENT_RUN_HARDWARE`: set `1` to run hardware smoke after local gates.
 - `AGENT_HARDWARE_CMD`: hardware gate command, default `./agents/run_hardware_smoke.sh`.
+- `AGENT_AUTO_HARDWARE_GATE`: set `1` to let tasks mentioning the maintained
+  hardware sentinel command trigger a runner-owned hardware gate, default `1`.
+- `AGENT_AUTO_HARDWARE_CMD`: command used for auto hardware gates, default
+  `SSH_KEY="$HOME/.ssh/id_pi5" ./agents/run_hardware_sentinel.sh`.
 - `AGENT_AUTO_COMMIT`: set `1` to commit successful changes.
 - `AGENT_PUSH`: set `1` to push the branch after an auto-commit.
 - `AGENT_CREATE_PR`: set `1` to create a GitHub PR with `gh`; requires `AGENT_PUSH=1`.

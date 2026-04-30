@@ -22,6 +22,9 @@ RUN_LOCAL_GATE=${AGENT_RUN_LOCAL_GATE:-1}
 LOCAL_GATE=${AGENT_LOCAL_GATE:-./agents/run_local_gate.sh}
 RUN_HARDWARE=${AGENT_RUN_HARDWARE:-0}
 HARDWARE_CMD=${AGENT_HARDWARE_CMD:-./agents/run_hardware_smoke.sh}
+AUTO_HARDWARE_GATE=${AGENT_AUTO_HARDWARE_GATE:-1}
+AUTO_HARDWARE_PATTERN=${AGENT_AUTO_HARDWARE_PATTERN:-./agents/run_hardware_sentinel.sh}
+AUTO_HARDWARE_CMD=${AGENT_AUTO_HARDWARE_CMD:-SSH_KEY="$HOME/.ssh/id_pi5" ./agents/run_hardware_sentinel.sh}
 AUTO_COMMIT=${AGENT_AUTO_COMMIT:-0}
 PUSH_BRANCH=${AGENT_PUSH:-0}
 ARCHIVE_TASK=${AGENT_ARCHIVE_TASK:-0}
@@ -106,6 +109,15 @@ source_issue_number=""
 if [[ "$source_issue_url" =~ /issues/([0-9]+)$ ]]; then
   source_issue_number="${BASH_REMATCH[1]}"
 fi
+hardware_gate_requested="$RUN_HARDWARE"
+hardware_gate_cmd="$HARDWARE_CMD"
+hardware_gate_auto=0
+if [[ "$hardware_gate_requested" != "1" && "$AUTO_HARDWARE_GATE" == "1" ]] \
+  && grep -F -q "$AUTO_HARDWARE_PATTERN" "$task_file"; then
+  hardware_gate_requested=1
+  hardware_gate_cmd="$AUTO_HARDWARE_CMD"
+  hardware_gate_auto=1
+fi
 
 mkdir -p "$report_dir"
 
@@ -120,7 +132,8 @@ Hard rules:
 - Do not run destructive git commands.
 - Do not run git add, git commit, git push, or gh pr create; the runner handles version control and PR creation after gates pass.
 - Do not push directly to main.
-- If hardware tests are needed, use the maintained scripts and respect the hardware lock.
+- If hardware tests are needed, do not run SSH/audio hardware commands from inside the agent sandbox.
+  Inspect existing logs and state the required command; the runner will execute the hardware gate outside the sandbox after the agent step.
 - End with changed files, commands run, results, and residual risks.
 
 Task file: $task_file
@@ -191,8 +204,17 @@ if [[ "$RUN_LOCAL_GATE" == "1" ]]; then
   AGENT_REPORT_DIR="$report_dir/local_gate" "$LOCAL_GATE" > "$report_dir/local_gate.log" 2>&1
 fi
 
-if [[ "$RUN_HARDWARE" == "1" ]]; then
-  AGENT_REPORT_DIR="$report_dir/hardware_gate" "$HARDWARE_CMD" > "$report_dir/hardware_gate.log" 2>&1
+hardware_gate_rc=0
+hardware_gate_ran=0
+if [[ "$hardware_gate_requested" == "1" ]]; then
+  hardware_gate_ran=1
+  mkdir -p "$report_dir/hardware_gate"
+  set +e
+  AGENT_REPORT_DIR="$report_dir/hardware_gate" \
+    AGENT_HW_SENTINEL_REPORT_DIR="$report_dir/hardware_gate" \
+    bash -lc "$hardware_gate_cmd" > "$report_dir/hardware_gate.log" 2>&1
+  hardware_gate_rc=$?
+  set -e
 fi
 
 git status --short > "$report_dir/git_status.txt"
@@ -309,12 +331,34 @@ if [[ "$COMMENT_ISSUE_RESULTS" == "1" && -n "$source_issue_number" && "$DRY_RUN"
       else
         echo "- Draft PR: not created because there are no commits beyond \`$PR_BASE\`."
       fi
+      if [[ "$hardware_gate_ran" == "1" ]]; then
+        echo "- Hardware gate: ran with rc=\`$hardware_gate_rc\`."
+        echo "- Hardware gate report: \`$report_dir/hardware_gate\`."
+      fi
       echo
       echo "## Agent Log Tail"
       echo
       echo '```text'
       tail -80 "$report_dir/agent.log" || true
       echo '```'
+      if [[ "$hardware_gate_ran" == "1" ]]; then
+        echo
+        echo "## Hardware Gate Summary"
+        echo
+        echo '```text'
+        if [[ -f "$report_dir/hardware_gate/summary.txt" ]]; then
+          sed -n '1,80p' "$report_dir/hardware_gate/summary.txt"
+        else
+          echo "No hardware summary found."
+        fi
+        echo '```'
+        echo
+        echo "## Hardware Gate Log Tail"
+        echo
+        echo '```text'
+        tail -80 "$report_dir/hardware_gate.log" || true
+        echo '```'
+      fi
     } > "$issue_body"
 
     if gh issue comment "$source_issue_number" --body-file "$issue_body" > "$report_dir/issue_comment.log" 2>&1; then
@@ -337,7 +381,11 @@ allow_base_ahead=$ALLOW_BASE_AHEAD
 start_branch=$current_branch
 worker_branch=$branch
 local_gate=$RUN_LOCAL_GATE
-hardware_gate=$RUN_HARDWARE
+hardware_gate=$hardware_gate_requested
+hardware_gate_auto=$hardware_gate_auto
+hardware_gate_ran=$hardware_gate_ran
+hardware_gate_rc=$hardware_gate_rc
+hardware_gate_cmd=$hardware_gate_cmd
 auto_commit=$AUTO_COMMIT
 committed=$committed
 commits_ahead=$commits_ahead
