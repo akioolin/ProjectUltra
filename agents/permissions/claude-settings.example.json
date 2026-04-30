@@ -1,0 +1,41 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pwd)",
+      "Bash(ls:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git switch -c:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push -u origin agent/*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr status:*)",
+      "Bash(cmake --build build:*)",
+      "Bash(cmake -S . -B build:*)",
+      "Bash(ctest --test-dir build:*)",
+      "Bash(./tests/regression_matrix.sh:*)",
+      "Bash(./scripts/coverage_report.sh:*)",
+      "Bash(./scripts/run_alpha_gate.sh:*)",
+      "Bash(./agents/run_local_gate.sh:*)",
+      "Bash(./agents/run_hardware_smoke.sh:*)",
+      "Bash(./agents/run_next_task.sh:*)",
+      "Bash(./tools/check_hw_audio_path.sh:*)",
+      "Bash(./tools/run_hw_test.sh:*)",
+      "Bash(SSH_KEY=$HOME/.ssh/id_pi5 ./tools/check_hw_audio_path.sh:*)",
+      "Bash(SSH_KEY=$HOME/.ssh/id_pi5 ./tools/run_hw_test.sh:*)"
+    ],
+    "deny": [
+      "Bash(git reset --hard:*)",
+      "Bash(git checkout --:*)",
+      "Bash(rm -rf:*)",
+      "Bash(sudo:*)",
+      "Bash(curl:*)",
+      "Bash(wget:*)"
+    ]
+  }
+}

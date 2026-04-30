@@ -1,0 +1,84 @@
+# ProjectUltra Agent Runner
+
+This directory contains the repo-owned automation used to run Claude Code,
+Codex, or another CLI agent on bounded engineering tasks.
+
+The model is intentionally conservative:
+
+- One task file in `agents/queue/` defines one unit of work.
+- One worker creates one branch, runs one agent session, then runs gates.
+- Reports and prompts are written under `agents/reports/` and `agents/tmp/`.
+- Hardware tests are serialized with a lock so two agents cannot use the Mac/Pi audio path at the same time.
+- Auto-commit and push are opt-in. Human review remains the merge gate.
+- Queued and archived task files are ignored by default so prompts/log excerpts
+  are not accidentally committed.
+
+This is not meant to be an unrestricted shell daemon. Long-running agents are
+useful only if the work is decomposed, reproducible, and measurable.
+
+## Quick Start
+
+Create a task:
+
+```bash
+cp agents/task_template.md agents/queue/001-my-task.md
+```
+
+Run one task with Claude Code or Codex in dry-run mode first:
+
+```bash
+AGENT_DRY_RUN=1 AGENT_CMD='claude -p' ./agents/run_next_task.sh
+```
+
+Run for real:
+
+```bash
+AGENT_CMD='claude -p' ./agents/run_next_task.sh
+```
+
+Run continuously from `tmux`:
+
+```bash
+AGENT_CMD='claude -p' ./agents/watchdog.sh
+```
+
+After `tmux` is stable, see `agents/launchd/` for a macOS LaunchAgent example.
+
+If your CLI accepts a prompt file instead of stdin:
+
+```bash
+AGENT_PROMPT_MODE=file AGENT_CMD='your-agent --prompt-file' ./agents/run_next_task.sh
+```
+
+## Useful Environment
+
+- `AGENT_CMD`: required command used to run the agent.
+- `AGENT_NAME`: label for reports and branch names, default `agent`.
+- `AGENT_PROMPT_MODE`: `stdin` or `file`, default `stdin`.
+- `AGENT_LOCAL_GATE`: local gate command, default `./agents/run_local_gate.sh`.
+- `AGENT_RUN_LOCAL_GATE`: set `0` to skip the local gate, default `1`.
+- `AGENT_RUN_HARDWARE`: set `1` to run hardware smoke after local gates.
+- `AGENT_HARDWARE_CMD`: hardware gate command, default `./agents/run_hardware_smoke.sh`.
+- `AGENT_AUTO_COMMIT`: set `1` to commit successful changes.
+- `AGENT_PUSH`: set `1` to push the branch after an auto-commit.
+- `AGENT_CREATE_PR`: set `1` to create a GitHub PR with `gh`; requires `AGENT_PUSH=1`.
+- `AGENT_PR_DRAFT`: set `0` for ready-for-review PRs, default `1`.
+- `AGENT_ALLOW_DIRTY`: set `1` to allow starting from a dirty worktree.
+- `AGENT_SLEEP_SECONDS`: watchdog sleep between attempts, default `300`.
+
+The runner allows pending files under `agents/queue/`, `agents/reports/`, and
+`agents/tmp/`. Other dirty files are rejected unless `AGENT_ALLOW_DIRTY=1`.
+
+## Permission Policy
+
+Relax permissions by command prefix, not by granting all shell access. The
+recommended pattern is:
+
+- allow read-only discovery commands,
+- allow `cmake`, `ctest`, maintained regression scripts, and maintained hardware scripts,
+- allow branch creation and commits,
+- allow PR creation only through `gh pr create` and only for feature branches,
+- keep `sudo`, destructive git reset/checkout, and arbitrary network downloads blocked.
+
+See `agents/permissions/claude-settings.example.json` for a repo-scoped Claude
+Code example.

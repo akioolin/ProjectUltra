@@ -19,6 +19,7 @@
 #include <fstream>
 #include <cstdio>
 #include <filesystem>
+#include <system_error>
 
 using namespace ultra::protocol;
 using ultra::Bytes;
@@ -781,8 +782,24 @@ bool test_adaptive_bidirectional() {
 // File Transfer Tests
 // ============================================================================
 
-std::string createTestFile(const std::string& name, size_t size) {
-    std::string path = "/tmp/" + name;
+std::filesystem::path makeTempTestDir(const std::string& prefix) {
+    std::error_code ec;
+    auto base = std::filesystem::temp_directory_path(ec);
+    if (ec) return {};
+
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    auto dir = base / (prefix + "_" + std::to_string(stamp));
+    std::filesystem::create_directories(dir, ec);
+    if (ec) return {};
+    return dir;
+}
+
+std::string createTestFile(const std::filesystem::path& dir, const std::string& name, size_t size) {
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec) return "";
+
+    std::string path = (dir / name).string();
     std::ofstream f(path, std::ios::binary);
     if (!f) return "";
 
@@ -826,10 +843,13 @@ bool test_file_transfer_small() {
     stationB.setLocalCallsign("K2DEF");
 
     const size_t FILE_SIZE = 100;
-    std::string src_path = createTestFile("test_small.bin", FILE_SIZE);
+    auto test_dir = makeTempTestDir("ultra_protocol_test");
+    if (test_dir.empty()) FAIL("Could not create temp test directory");
+
+    std::string src_path = createTestFile(test_dir, "test_small.bin", FILE_SIZE);
     if (src_path.empty()) FAIL("Could not create test file");
 
-    std::string rx_dir = "/tmp/ultra_rx_test";
+    std::string rx_dir = (test_dir / "rx").string();
     std::filesystem::create_directories(rx_dir);
     stationB.setReceiveDirectory(rx_dir);
 
@@ -871,8 +891,7 @@ bool test_file_transfer_small() {
 
     if (!verifyFileContent(received_path, FILE_SIZE)) FAIL("File content mismatch");
 
-    std::remove(src_path.c_str());
-    std::remove(received_path.c_str());
+    std::filesystem::remove_all(test_dir);
 
     PASS();
     return true;

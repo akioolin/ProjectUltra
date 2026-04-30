@@ -1,0 +1,169 @@
+# Agent System Current State
+
+Last updated: 2026-04-30.
+
+This file is a compact handoff for future Claude/Codex sessions if context is
+compacted or lost.
+
+## Objective
+
+Use Claude Code, Codex/GPT-5.5, and GitHub CI to continuously improve
+ProjectUltra, with the main technical goal of maximizing reliable HF modem
+throughput across AWGN, Good, Moderate, and Poor fading while maintaining
+critical-software engineering discipline.
+
+## Operating Decision
+
+Use a bounded autonomous PR factory:
+
+```text
+task backlog -> agents/queue/*.md -> agent branch -> local gates -> commit
+-> push agent/* branch -> draft PR -> CI -> human review -> merge
+```
+
+Do not run open-ended overnight prompts. Every agent run must have a task file,
+acceptance criteria, reject conditions, and required gates.
+
+## Implemented Locally
+
+Agent infrastructure added:
+
+- `agents/run_next_task.sh`
+- `agents/watchdog.sh`
+- `agents/run_local_gate.sh`
+- `agents/run_hardware_smoke.sh`
+- `agents/task_template.md`
+- `agents/queue/`
+- `agents/archive/`
+- `agents/reports/`
+- `agents/tmp/`
+- `agents/permissions/claude-settings.example.json`
+- `agents/permissions/codex-policy.md`
+- `agents/launchd/`
+- `docs/AGENTIC_DEVELOPMENT.md`
+- `docs/AGENT_TASK_BACKLOG.md`
+- `docs/AGENT_DEDICATED_ENV_MACOS.md`
+
+Security hardening added:
+
+- `agents/queue/`, `agents/archive/`, `agents/reports/`, and `agents/tmp/`
+  ignore local task/report/prompt contents by default.
+- `.claude/settings.local.json` remains ignored by repo `.gitignore`.
+- Claude/Codex permission examples allow build/test/branch/PR commands but deny
+  destructive git, `sudo`, broad network tools, `gh auth token`, and broad
+  GitHub API access.
+- GitHub Actions workflow changed to `contents: read` globally and
+  `contents: write` only for release publishing.
+- `actions/checkout` uses `persist-credentials: false` in normal jobs.
+
+CI portability fix added:
+
+- `tests/test_protocol.cpp` no longer writes fixed `/tmp` test files.
+- `tests/test_wav_loopback.cpp` no longer writes fixed `/tmp/test_loopback.wav`.
+- Both now use `std::filesystem::temp_directory_path()` with unique directories.
+
+## Current Validation
+
+Passed locally after changes:
+
+```bash
+bash -n agents/run_local_gate.sh agents/run_hardware_smoke.sh agents/run_next_task.sh agents/watchdog.sh
+python3 -m json.tool agents/permissions/claude-settings.example.json
+python3 -m json.tool .claude/settings.local.json
+ruby -e 'require "yaml"; YAML.load_file(".github/workflows/build-matrix.yml")'
+AGENT_QUEUE_DIR=agents AGENT_DRY_RUN=1 AGENT_CMD='claude -p' ./agents/run_next_task.sh
+git diff --check
+ctest --test-dir build -R '^(Protocol|WavLoopback)$' --output-on-failure -j2
+ctest --test-dir build --output-on-failure -j4
+```
+
+The full local CTest result was `29/29` passed.
+
+GitHub CLI auth:
+
+- `gh auth status` inside the restricted sandbox reported a misleading invalid
+  token.
+- With network/keyring access, `gh auth status -h github.com` succeeds for
+  account `secup`.
+- Do not allow agents to run `gh auth token`.
+
+## Known GitHub CI Failure Addressed
+
+Failed run:
+
+- workflow: `Build Matrix`
+- commit: `d2bed4ee3d15f26d00fca91ced7e37d1d9378875`
+- failure: Windows `Run CTest`
+- failing tests: `Protocol`, `WavLoopback`
+- cause: hardcoded `/tmp` paths do not exist on the Windows runner.
+
+Local fix:
+
+- changed tests to use portable temp directories.
+
+## Recommended Dedicated Runtime
+
+Run overnight agents from a dedicated macOS standard user named `ultra-agent`,
+not from the owner's normal account.
+
+See `docs/AGENT_DEDICATED_ENV_MACOS.md`.
+
+Minimum runtime:
+
+```bash
+cd ~/Projects/ProjectUltra
+export AGENT_CMD='claude -p'
+export AGENT_AUTO_COMMIT=1
+export AGENT_PUSH=1
+export AGENT_CREATE_PR=1
+export AGENT_PR_DRAFT=1
+export AGENT_RUN_HARDWARE=0
+./agents/watchdog.sh
+```
+
+Hardware lane:
+
+```bash
+export AGENT_RUN_HARDWARE=1
+export AGENT_HW_LONG=1
+./agents/watchdog.sh
+```
+
+Only one hardware lane may run at a time.
+
+## GitHub Requirements Before Sleep-Safe Mode
+
+Protect `main`:
+
+- require pull requests before merging,
+- require at least one approval,
+- require status checks to pass,
+- require branches to be up to date,
+- block force pushes,
+- block branch deletion,
+- do not allow agents to bypass protection.
+
+Agents create draft PRs only. Humans merge.
+
+## Main Agent Backlog
+
+Use `docs/AGENT_TASK_BACKLOG.md`.
+
+Highest-value lanes:
+
+- Lane A: critical tests and quality infrastructure.
+- Lane B: reproducible channel benchmark matrix.
+- Lane C: throughput improvements with before/after evidence.
+- Lane D: fading robustness.
+- Lane E: security and agent governance.
+
+## Current Local Worktree Caveat
+
+At the time this handoff was written, the agent infrastructure and CI fixes were
+local changes. Commit them before expecting GitHub CI to rerun.
+
+Suggested commit message:
+
+```text
+Add bounded agent PR workflow and fix Windows temp paths
+```

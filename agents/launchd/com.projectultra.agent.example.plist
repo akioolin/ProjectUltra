@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.projectultra.agent</string>
+
+  <key>WorkingDirectory</key>
+  <string>__PROJECT_ROOT__</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>AGENT_CMD='claude -p' AGENT_AUTO_COMMIT=0 AGENT_RUN_HARDWARE=0 AGENT_SLEEP_SECONDS=300 ./agents/watchdog.sh</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/projectultra-agent.out</string>
+
+  <key>StandardErrorPath</key>
+  <string>/tmp/projectultra-agent.err</string>
+</dict>
+</plist>

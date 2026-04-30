@@ -11,6 +11,15 @@
 **Before modifying ANY code, read:**
 - `docs/INVARIANTS.md` - Critical rules that MUST NOT be violated (causes subtle bugs if ignored)
 
+**Autonomous agent work:**
+- Use `docs/AGENTIC_DEVELOPMENT.md` and one task file in `agents/queue/`; do not work from an open-ended prompt.
+- Use `docs/AGENT_TASK_BACKLOG.md` for approved task candidates and acceptance criteria.
+- Use `docs/AGENT_DEDICATED_ENV_MACOS.md` for MacBook dedicated-agent setup.
+- Use `docs/AGENT_CURRENT_STATE.md` to recover compacted/lost agent-system context.
+- Run `./agents/run_local_gate.sh` before claiming a task is done.
+- Use `./agents/run_hardware_smoke.sh` for PHY/ARQ/audio-path changes and respect the hardware lock.
+- Do not grant agents unrestricted shell access; use repo-scoped allowlists from `agents/permissions/`.
+
 **This project has 16 documentation files.** They exist because context was lost repeatedly, causing rework. USE THEM.
 
 ---
