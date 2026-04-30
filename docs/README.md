@@ -20,6 +20,7 @@ cites an archived file.
 - `docs/AGENT_DEDICATED_ENV_MACOS.md`: Dedicated-user isolation setup for macOS agent hosts.
 - `docs/QUALITY_STRATEGY.md`: Critical-software test, coverage, CI, and refactor policy.
 - `docs/QUALITY_AUDIT.md`: Current quality baseline, coverage gaps, and hardening backlog.
+- `docs/COVERAGE_MAP.md`: Module-specific critical coverage expectations and test priorities.
 - `docs/GIT_WORKFLOW.md`: Commit/push/release workflow used in this repo.
 - `docs/ALPHA_RELEASE_GATE.md`: Alpha readiness criteria and gate commands.
 
