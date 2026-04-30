@@ -825,6 +825,47 @@ bool test_ack_batch_default_matches_window() {
     return true;
 }
 
+bool test_ack_batch_defers_more_frag_until_tail() {
+    TEST("ack_batch_size threshold defers MORE_FRAG frames until stream tail");
+
+    ARQConfig config;
+    config.window_size = 8;
+    config.sack_delay_ms = 5000;
+
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+    rx.setAckBatchSize(4);
+    rx.setSackDelayShort(50);
+
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    for (int i = 0; i < 4; i++) {
+        auto frame = v2::DataFrame::makeData("TX1", "RX1", i, Bytes{static_cast<uint8_t>(i)});
+        frame.flags |= v2::Flags::MORE_FRAG;
+        rx.onFrameReceived(frame.serialize());
+    }
+
+    if (channel.size() != 0)
+        FAIL("MORE_FRAG batch threshold sent a mid-stream SACK");
+
+    rx.tick(1000);
+    if (channel.size() != 0)
+        FAIL("Long in-stream SACK timer fired too early");
+
+    auto tail = v2::DataFrame::makeData("TX1", "RX1", 4, Bytes{4});
+    rx.onFrameReceived(tail.serialize());
+    if (channel.size() != 1)
+        FAIL("Stream-tail threshold did not send immediate SACK");
+
+    auto ack = v2::ControlFrame::deserialize(channel.receive());
+    if (!ack || ack->type != v2::FrameType::ACK || ack->seq != 4)
+        FAIL("Tail SACK did not cumulatively acknowledge seq=4");
+
+    PASS();
+    return true;
+}
+
 bool test_wide_sack_bitmap_serializes_beyond_8_frames() {
     TEST("SACK bitmap preserves bits beyond 8-frame legacy window");
 
@@ -1075,6 +1116,7 @@ int main() {
     test_ack_batch_out_of_order_safety_valve();
     test_ack_batch_setter_clamping();
     test_ack_batch_default_matches_window();
+    test_ack_batch_defers_more_frag_until_tail();
     test_wide_sack_bitmap_serializes_beyond_8_frames();
     test_cumulative_ack_repeats_when_enabled();
     test_cumulative_ack_repeat_coalesces_superseded_state();

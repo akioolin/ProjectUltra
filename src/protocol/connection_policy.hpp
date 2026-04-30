@@ -110,7 +110,14 @@ inline SackDelayProfile ofdmSackDelays(bool near_awgn_ofdm,
                                        uint32_t data_frame_ms) {
     SackDelayProfile profile;
     if (near_awgn_ofdm && window_size >= 8) {
-        profile.delay_ms = std::clamp<uint32_t>(data_frame_ms + 120, 700, 1000);
+        const size_t deferred_frames =
+            window_size > kOFDMBurstAckBatchFrames
+                ? window_size - kOFDMBurstAckBatchFrames
+                : 1;
+        const uint64_t burst_tail_ms =
+            static_cast<uint64_t>(deferred_frames) * data_frame_ms + 120u;
+        profile.delay_ms = static_cast<uint32_t>(
+            std::clamp<uint64_t>(burst_tail_ms, 700ULL, 12000ULL));
         profile.short_delay_ms = 120;
     }
     return profile;
