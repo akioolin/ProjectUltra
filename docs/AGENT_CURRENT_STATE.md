@@ -32,11 +32,16 @@ Agent infrastructure added:
 - `agents/watchdog.sh`
 - `agents/run_local_gate.sh`
 - `agents/run_hardware_smoke.sh`
+- `agents/run_hardware_sentinel.sh`
+- `agents/hardware_watchdog.sh`
+- `agents/run_planner.sh`
+- `agents/planner_watchdog.sh`
 - `agents/task_template.md`
 - `agents/queue/`
 - `agents/archive/`
 - `agents/reports/`
 - `agents/tmp/`
+- `agents/planner/`
 - `agents/permissions/claude-settings.example.json`
 - `agents/permissions/codex-policy.md`
 - `agents/launchd/`
@@ -68,6 +73,7 @@ Passed locally after agent-infrastructure changes:
 
 ```bash
 bash -n agents/run_local_gate.sh agents/run_hardware_smoke.sh agents/run_next_task.sh agents/watchdog.sh
+bash -n agents/run_hardware_sentinel.sh agents/hardware_watchdog.sh agents/run_planner.sh agents/planner_watchdog.sh
 python3 -m json.tool agents/permissions/claude-settings.example.json
 python3 -m json.tool .claude/settings.local.json
 ruby -e 'require "yaml"; YAML.load_file(".github/workflows/build-matrix.yml")'
@@ -78,6 +84,14 @@ ctest --test-dir build --output-on-failure -j4
 ```
 
 The full local CTest result was `29/29` passed.
+
+Planner/hardware sentinel validation:
+
+```bash
+AGENT_HW_SENTINEL_DRY_RUN=1 AGENT_HW_SENTINEL_MODE=quick AGENT_HW_SENTINEL_AUDIO_CHECK=0 ./agents/run_hardware_sentinel.sh
+AGENT_PLANNER_REPORT_DIR=/tmp/projectultra_planner_report AGENT_PLANNER_PROPOSAL_DIR=/tmp/projectultra_planner_proposals ./agents/run_planner.sh
+./agents/run_local_gate.sh
+```
 
 ## Dedicated Agent Laptop
 
@@ -96,6 +110,13 @@ The tmux watchdog sessions are:
 
 - `ultra-claude-watch`
 - `ultra-codex-watch`
+
+Optional additional sessions:
+
+- `ultra-hardware-watch`: runs `agents/hardware_watchdog.sh` for periodic
+  report-only hardware sentinel checks.
+- `ultra-planner-watch`: runs `agents/planner_watchdog.sh` for periodic
+  report/proposal generation.
 
 Both agents are configured to create draft PRs from `agent/*` branches, not push
 directly to `main`. The runner owns `git add`, `git commit`, `git push`, and
@@ -161,6 +182,18 @@ export AGENT_HW_LONG=1
 
 Only one hardware lane may run at a time.
 
+Hardware sentinel lane:
+
+```bash
+AGENT_HW_SENTINEL_SLEEP_SECONDS=14400 SSH_KEY="$HOME/.ssh/id_pi5" ./agents/hardware_watchdog.sh
+```
+
+Planner lane:
+
+```bash
+AGENT_PLANNER_SLEEP_SECONDS=1800 ./agents/planner_watchdog.sh
+```
+
 ## GitHub Requirements Before Sleep-Safe Mode
 
 Protect `main`:
@@ -189,7 +222,11 @@ Highest-value lanes:
 
 ## Sleep-Safe Caveat
 
-The watchdogs can run continuously, but they do not invent work from broad
-goals. They process bounded task files in `agents/queue/`. If the queues are
-empty, they stay alive and idle. Do not enable open-ended planner loops until
-their output is limited to draft task files or draft PRs with human review.
+The worker watchdogs can run continuously, but they do not invent work from
+broad goals. They process bounded task files in `agents/queue/`. If the queues
+are empty, they stay alive and idle.
+
+The planner loop is allowed to run continuously because it is proposal-only by
+default. Its output is local and ignored under `agents/planner/proposals/`.
+Humans must promote proposals into `agents/queue/` before coding agents execute
+them.

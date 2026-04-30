@@ -9,6 +9,9 @@ The model is intentionally conservative:
 - One worker creates one branch, runs one agent session, then runs gates.
 - Reports and prompts are written under `agents/reports/` and `agents/tmp/`.
 - Hardware tests are serialized with a lock so two agents cannot use the Mac/Pi audio path at the same time.
+- Hardware sentinel runs write structured report-only evidence for the planner.
+- Planner runs write proposed task files for human review; they do not edit
+  modem source or auto-merge PRs.
 - Auto-commit and push are opt-in. Human review remains the merge gate.
 - Queued and archived task files are ignored by default so prompts/log excerpts
   are not accidentally committed.
@@ -42,6 +45,18 @@ Run continuously from `tmux`:
 AGENT_CMD='claude -p' ./agents/watchdog.sh
 ```
 
+Run the planner once:
+
+```bash
+./agents/run_planner.sh
+```
+
+Run a hardware sentinel once:
+
+```bash
+SSH_KEY="$HOME/.ssh/id_pi5" ./agents/run_hardware_sentinel.sh
+```
+
 After `tmux` is stable, see `agents/launchd/` for a macOS LaunchAgent example.
 
 If your CLI accepts a prompt file instead of stdin:
@@ -65,6 +80,8 @@ AGENT_PROMPT_MODE=file AGENT_CMD='your-agent --prompt-file' ./agents/run_next_ta
 - `AGENT_PR_DRAFT`: set `0` for ready-for-review PRs, default `1`.
 - `AGENT_ALLOW_DIRTY`: set `1` to allow starting from a dirty worktree.
 - `AGENT_SLEEP_SECONDS`: watchdog sleep between attempts, default `300`.
+- `AGENT_HW_SENTINEL_MODE`: hardware sentinel mode, `quick`, `nightly`, or `full`.
+- `AGENT_PLANNER_SLEEP_SECONDS`: planner watchdog sleep interval.
 
 The runner allows pending files under `agents/queue/`, `agents/reports/`, and
 `agents/tmp/`. Other dirty files are rejected unless `AGENT_ALLOW_DIRTY=1`.

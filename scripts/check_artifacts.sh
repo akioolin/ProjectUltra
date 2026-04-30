@@ -32,6 +32,12 @@ is_allowed_agent_path() {
     agents/tmp/.gitignore|agents/tmp/.gitkeep)
       return 0
       ;;
+    agents/planner/proposals/.gitignore|agents/planner/proposals/.gitkeep)
+      return 0
+      ;;
+    agents/planner/reports/.gitignore|agents/planner/reports/.gitkeep)
+      return 0
+      ;;
   esac
 
   return 1
@@ -41,7 +47,7 @@ is_agent_artifact_path() {
   local path="$1"
 
   case "$path" in
-    agents/queue/*|agents/archive/*|agents/reports/*|agents/tmp/*)
+    agents/queue/*|agents/archive/*|agents/reports/*|agents/tmp/*|agents/planner/proposals/*|agents/planner/reports/*)
       ! is_allowed_agent_path "$path"
       return
       ;;

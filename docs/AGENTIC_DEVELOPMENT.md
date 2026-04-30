@@ -36,6 +36,29 @@ For the recommended MacBook M4 Pro isolation setup, read
 For the project mission, priorities, and current milestone filter, read
 `docs/PROJECT_GOALS.md`.
 
+## Planner Lane
+
+The planner lane is a chief-engineer triage loop, not a coding agent. It reads
+open PRs, queue state, recent commits, and hardware sentinel reports, then writes
+local proposals under `agents/planner/proposals/`.
+
+Run once:
+
+```bash
+./agents/run_planner.sh
+```
+
+Run continuously:
+
+```bash
+./agents/planner_watchdog.sh
+```
+
+Planner proposals are ignored by git. A human must review and promote a proposal
+into `agents/queue/claude/` or `agents/queue/codex/` before worker agents run it.
+Keep auto-queueing disabled until several planner reports have shown good
+judgment.
+
 ## Permissions
 
 Use relaxed permissions for maintained commands only. Do not grant blanket
@@ -172,6 +195,34 @@ The smoke script uses the current known-good calibration from `CLAUDE.md`:
 
 Do not run multiple hardware agents at once. The audio path is a single shared
 physical resource.
+
+## Hardware Sentinel
+
+Hardware sentinel runs are periodic report-only health checks for the planner.
+They are separate from per-PR hardware gates. A sentinel failure should produce
+logs and a planner proposal; it should not trigger blind autonomous tuning.
+
+Quick sentinel:
+
+```bash
+SSH_KEY="$HOME/.ssh/id_pi5" ./agents/run_hardware_sentinel.sh
+```
+
+Nightly 20 KB sentinel:
+
+```bash
+AGENT_HW_SENTINEL_MODE=nightly SSH_KEY="$HOME/.ssh/id_pi5" ./agents/run_hardware_sentinel.sh
+```
+
+Continuous sentinel loop:
+
+```bash
+AGENT_HW_SENTINEL_SLEEP_SECONDS=14400 SSH_KEY="$HOME/.ssh/id_pi5" ./agents/hardware_watchdog.sh
+```
+
+The sentinel writes `summary.txt` and `metrics.tsv` under
+`agents/reports/hardware_sentinel_*`. The planner reads those reports and may
+propose follow-up triage tasks for failures or warnings.
 
 ## Task Quality Bar
 
