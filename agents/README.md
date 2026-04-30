@@ -90,6 +90,8 @@ AGENT_PROMPT_MODE=file AGENT_CMD='your-agent --prompt-file' ./agents/run_next_ta
 - `AGENT_PUSH`: set `1` to push the branch after an auto-commit.
 - `AGENT_CREATE_PR`: set `1` to create a GitHub PR with `gh`; requires `AGENT_PUSH=1`.
 - `AGENT_PR_DRAFT`: set `0` for ready-for-review PRs, default `1`.
+- `AGENT_COMMENT_ISSUE_RESULTS`: comment completion output back to the source
+  GitHub issue for approved planner tasks, default `1`.
 - `AGENT_ALLOW_DIRTY`: set `1` to allow starting from a dirty worktree.
 - `AGENT_SLEEP_SECONDS`: watchdog sleep between attempts, default `300`.
 - `AGENT_HW_SENTINEL_MODE`: hardware sentinel mode, `quick`, `nightly`, or `full`.
@@ -100,6 +102,8 @@ AGENT_PROMPT_MODE=file AGENT_CMD='your-agent --prompt-file' ./agents/run_next_ta
 
 The runner allows pending files under `agents/queue/`, `agents/reports/`, and
 `agents/tmp/`. Other dirty files are rejected unless `AGENT_ALLOW_DIRTY=1`.
+If a task produces no tracked commits, the runner skips push/PR creation and
+posts the report summary back to the source issue when available.
 
 ## Permission Policy
 

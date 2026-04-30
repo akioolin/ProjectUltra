@@ -194,6 +194,9 @@ export AGENT_TIMEOUT_SECONDS=7200
 
 Keep PRs as drafts overnight. Promote them to ready-for-review only after a
 human checks the diff, evidence, and CI result.
+Report-only tasks, such as hardware sentinel runs, may produce no tracked
+commits. In that case the runner skips PR creation and comments the result back
+to the approved planner issue instead.
 `AGENT_TIMEOUT_SECONDS` requires `timeout(1)` on the agent host. Leave it unset
 on hosts without that command, or install GNU coreutils.
 

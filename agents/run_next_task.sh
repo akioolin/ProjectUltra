@@ -31,6 +31,7 @@ PR_BASE=${AGENT_PR_BASE:-$BASE_BRANCH}
 RETURN_TO_BASE=${AGENT_RETURN_TO_BASE:-1}
 ALLOW_AGENT_COMMITS=${AGENT_ALLOW_AGENT_COMMITS:-0}
 TIMEOUT_SECONDS=${AGENT_TIMEOUT_SECONDS:-0}
+COMMENT_ISSUE_RESULTS=${AGENT_COMMENT_ISSUE_RESULTS:-1}
 
 mkdir -p "$QUEUE_DIR" "$ARCHIVE_DIR" "$REPORT_ROOT" "$TMP_DIR"
 
@@ -100,6 +101,11 @@ timestamp=$(date +%Y%m%d_%H%M%S)
 branch="agent/${timestamp}-${slug}"
 report_dir="$REPORT_ROOT/${timestamp}-${slug}"
 prompt_file="$TMP_DIR/${timestamp}-${slug}.prompt.md"
+source_issue_url=$(sed -n 's/^Source issue: //p' "$task_file" | head -n 1)
+source_issue_number=""
+if [[ "$source_issue_url" =~ /issues/([0-9]+)$ ]]; then
+  source_issue_number="${BASH_REMATCH[1]}"
+fi
 
 mkdir -p "$report_dir"
 
@@ -193,11 +199,16 @@ git status --short > "$report_dir/git_status.txt"
 git diff --stat > "$report_dir/git_diff_stat.txt"
 
 task_archived=0
+committed=0
+pushed=0
+pr_created=0
+pr_url=""
 
 if [[ "$AUTO_COMMIT" == "1" ]]; then
   if ! git diff --quiet || ! git diff --cached --quiet || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
     git add -A
     git commit -m "Agent task: $task_base"
+    committed=1
   else
     echo "No changes to commit."
   fi
@@ -207,14 +218,22 @@ if [[ "$AUTO_COMMIT" == "1" ]]; then
     task_archived=1
   fi
 
-  if [[ "$PUSH_BRANCH" == "1" ]]; then
-    git push -u origin "$branch"
-  fi
 fi
 
 if [[ "$ARCHIVE_TASK" == "1" && "$task_archived" == "0" ]]; then
   mv "$task_file" "$ARCHIVE_DIR/${timestamp}-${task_base}.md"
   task_archived=1
+fi
+
+commits_ahead=$(git rev-list --count "$PR_BASE..HEAD")
+
+if [[ "$PUSH_BRANCH" == "1" ]]; then
+  if [[ "$commits_ahead" != "0" ]]; then
+    git push -u origin "$branch"
+    pushed=1
+  else
+    echo "No commits ahead of $PR_BASE; skipping push."
+  fi
 fi
 
 if [[ "$CREATE_PR" == "1" ]]; then
@@ -246,11 +265,17 @@ Base: \`$PR_BASE\`
 See local report directory: \`$report_dir\`
 EOF
 
-  pr_args=(pr create --base "$PR_BASE" --head "$branch" --title "Agent task: $task_base" --body-file "$pr_body")
-  if [[ "$PR_DRAFT" == "1" ]]; then
-    pr_args+=(--draft)
+  if [[ "$commits_ahead" == "0" ]]; then
+    echo "No PR created: no commits between $PR_BASE and $branch." > "$report_dir/pr_create.log"
+  else
+    pr_args=(pr create --base "$PR_BASE" --head "$branch" --title "Agent task: $task_base" --body-file "$pr_body")
+    if [[ "$PR_DRAFT" == "1" ]]; then
+      pr_args+=(--draft)
+    fi
+    gh "${pr_args[@]}" > "$report_dir/pr_create.log" 2>&1
+    pr_created=1
+    pr_url=$(tail -n 1 "$report_dir/pr_create.log")
   fi
-  gh "${pr_args[@]}" > "$report_dir/pr_create.log" 2>&1
 fi
 
 returned_to_base=0
@@ -268,6 +293,40 @@ if [[ "$RETURN_TO_BASE" == "1" ]]; then
   fi
 fi
 
+issue_comment_posted=0
+if [[ "$COMMENT_ISSUE_RESULTS" == "1" && -n "$source_issue_number" && "$DRY_RUN" != "1" ]]; then
+  if command -v gh >/dev/null 2>&1; then
+    issue_body="$report_dir/issue_result.md"
+    {
+      echo "Agent task completed for \`$AGENT_NAME\`."
+      echo
+      echo "- Task: \`$task_file\`"
+      echo "- Report: \`$report_dir\`"
+      echo "- Branch: \`$branch\`"
+      echo "- Commits ahead of \`$PR_BASE\`: \`$commits_ahead\`"
+      if [[ "$pr_created" == "1" ]]; then
+        echo "- Draft PR: $pr_url"
+      else
+        echo "- Draft PR: not created because there are no commits beyond \`$PR_BASE\`."
+      fi
+      echo
+      echo "## Agent Log Tail"
+      echo
+      echo '```text'
+      tail -80 "$report_dir/agent.log" || true
+      echo '```'
+    } > "$issue_body"
+
+    if gh issue comment "$source_issue_number" --body-file "$issue_body" > "$report_dir/issue_comment.log" 2>&1; then
+      issue_comment_posted=1
+    else
+      echo "Failed to comment on issue #$source_issue_number. Log: $report_dir/issue_comment.log" >&2
+    fi
+  else
+    echo "AGENT_COMMENT_ISSUE_RESULTS=1 but gh is not installed; skipping issue comment." >&2
+  fi
+fi
+
 cat > "$report_dir/summary.txt" <<EOF
 task=$task_file
 agent=$AGENT_NAME
@@ -280,12 +339,18 @@ worker_branch=$branch
 local_gate=$RUN_LOCAL_GATE
 hardware_gate=$RUN_HARDWARE
 auto_commit=$AUTO_COMMIT
+committed=$committed
+commits_ahead=$commits_ahead
 push=$PUSH_BRANCH
+pushed=$pushed
 create_pr=$CREATE_PR
+pr_created=$pr_created
 archive_task=$task_archived
 return_to_base=$returned_to_base
 allow_agent_commits=$ALLOW_AGENT_COMMITS
 timeout_seconds=$TIMEOUT_SECONDS
+source_issue=$source_issue_url
+issue_comment_posted=$issue_comment_posted
 EOF
 
 echo "Agent task completed. Report: $report_dir"

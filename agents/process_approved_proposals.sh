@@ -132,7 +132,7 @@ queue_issue() {
   fi
 
   edit_issue_labels "$number" "approved,queued,agent-$agent" "needs-approval"
-  comment_issue "$number" "Queued for \`$agent\` as \`$queue_file\` after approval by \`$approver\`. The worker will create a draft PR if it makes changes."
+  comment_issue "$number" "Queued for \`$agent\` as \`$queue_file\` after approval by \`$approver\`. The worker will create a draft PR if it makes tracked changes; report-only tasks will comment their result back here."
 }
 
 issues_json=$(mktemp)
