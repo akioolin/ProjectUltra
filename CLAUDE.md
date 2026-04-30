@@ -4,15 +4,18 @@
 
 **If this is a new/fresh session, do this FIRST before any work:**
 
-1. **Read current state:** `cat docs/REFACTOR_PROGRESS.md` - Shows what's done, what's in progress, blocking issues
-2. **Check known bugs:** `cat docs/KNOWN_BUGS.md` - Active bugs you must not re-discover
-3. **Check recent changes:** `git log --oneline -10` - See recent commits
+1. **Read project goals:** `cat docs/PROJECT_GOALS.md` - Mission, priorities, and task filter
+2. **Read current agent/project state:** `cat docs/AGENT_CURRENT_STATE.md` - Current automation and handoff context
+3. **Check known bugs:** `cat docs/KNOWN_BUGS.md` - Active bugs you must not re-discover
+4. **Check recent changes:** `git log --oneline -10` - See recent commits
 
 **Before modifying ANY code, read:**
+- `docs/PROJECT_GOALS.md` - Mission, priorities, throughput/reliability targets, and agent task rule
 - `docs/INVARIANTS.md` - Critical rules that MUST NOT be violated (causes subtle bugs if ignored)
 
 **Autonomous agent work:**
 - Use `docs/AGENTIC_DEVELOPMENT.md` and one task file in `agents/queue/`; do not work from an open-ended prompt.
+- Use `docs/PROJECT_GOALS.md` to keep work aligned with the modem mission and current priorities.
 - Use `docs/AGENT_TASK_BACKLOG.md` for approved task candidates and acceptance criteria.
 - Use `docs/AGENT_DEDICATED_ENV_MACOS.md` for MacBook dedicated-agent setup.
 - Use `docs/AGENT_CURRENT_STATE.md` to recover compacted/lost agent-system context.
@@ -20,7 +23,7 @@
 - Use `./agents/run_hardware_smoke.sh` for PHY/ARQ/audio-path changes and respect the hardware lock.
 - Do not grant agents unrestricted shell access; use repo-scoped allowlists from `agents/permissions/`.
 
-**This project has 16 documentation files.** They exist because context was lost repeatedly, causing rework. USE THEM.
+**This project has durable documentation files.** They exist because context was lost repeatedly, causing rework. USE THEM.
 
 ---
 
@@ -320,6 +323,8 @@ Interpretation of the 2026-04-29 robustness work:
 ### Priority 1: Always Read First
 | Document | Purpose |
 |----------|---------|
+| `docs/PROJECT_GOALS.md` | Mission, priorities, throughput/reliability targets, and agent task filter |
+| `docs/AGENT_CURRENT_STATE.md` | Current agent-system state and compact handoff |
 | `docs/QUALITY_STRATEGY.md` | Critical-software testing, coverage, CI, and refactor policy |
 | `docs/QUALITY_AUDIT.md` | Current quality baseline, coverage gaps, and hardening backlog |
 | `docs/KNOWN_BUGS.md` | Active bugs - DON'T rediscover these |
@@ -336,6 +341,7 @@ Interpretation of the 2026-04-29 robustness work:
 | `docs/AUDIO_SYSTEM.md` | SDL2 audio I/O, buffers, latency |
 | `docs/CONFIGURATION_SYSTEM.md` | AppSettings, ModemConfig, presets |
 | `docs/BUILD_SYSTEM.md` | CMake, dependencies, tests, coverage script |
+| `docs/AGENTIC_DEVELOPMENT.md` | Bounded agent workflow, permissions, gates, and review process |
 
 ### Priority 3: Reference
 | Document | Purpose |
@@ -343,7 +349,7 @@ Interpretation of the 2026-04-29 robustness work:
 | `docs/BUILD_SYSTEM.md` | CMake, dependencies, adding components |
 | `docs/ADDING_NEW_WAVEFORM.md` | Step-by-step guide for adding future waveform implementations |
 | `docs/GIT_WORKFLOW.md` | Commit strategy, branching, push policy |
-| `docs/RESEARCH_DIRECTIONS.md` | Long-term research goals, novel techniques |
+| `docs/README.md` | Documentation map; archive docs are historical only |
 
 ---
 
@@ -478,15 +484,16 @@ Station A                          Station B
 ## Development Workflow
 
 ### Before Making Changes
-1. Read `docs/INVARIANTS.md` for the subsystem you're touching
-2. Check `docs/KNOWN_BUGS.md` for related issues
-3. Check `docs/REFACTOR_PROGRESS.md` for current status
+1. Read `docs/PROJECT_GOALS.md` and confirm the task aligns with the mission
+2. Read `docs/INVARIANTS.md` for the subsystem you're touching
+3. Check `docs/KNOWN_BUGS.md` for related issues
+4. For agent work, use `docs/AGENT_TASK_BACKLOG.md` and one queued task file
 
 ### After Making Changes
 1. Run `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test 2>&1 | tee /tmp/test_output.log`
 2. If you fixed a bug: Add entry to `docs/CHANGELOG.md`
 3. If you discovered a bug: Add entry to `docs/KNOWN_BUGS.md`
-4. If you completed a refactor task: Update `docs/REFACTOR_PROGRESS.md`
+4. If project/agent state changed materially: Update `docs/AGENT_CURRENT_STATE.md`, `docs/QUALITY_AUDIT.md`, or `docs/AGENT_TASK_BACKLOG.md` as appropriate
 
 ### Commit Message Format
 ```

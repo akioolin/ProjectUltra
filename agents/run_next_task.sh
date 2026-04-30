@@ -73,7 +73,8 @@ cat > "$prompt_file" <<EOF
 You are working in ProjectUltra, a critical HF modem codebase.
 
 Hard rules:
-- Read CLAUDE.md, docs/INVARIANTS.md, and the task below before editing.
+- Read CLAUDE.md, docs/PROJECT_GOALS.md, docs/INVARIANTS.md, and the task below before editing.
+- Treat docs/archive/ as historical context only unless this task explicitly cites an archived file.
 - Make the smallest production-quality change that satisfies the task.
 - Do not weaken LDPC, ARQ, synchronization, or hardware calibration invariants.
 - Do not run destructive git commands.

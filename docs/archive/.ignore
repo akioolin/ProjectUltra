@@ -1,0 +1,4 @@
+# Keep historical notes out of default ripgrep/agent searches.
+# Use `rg -u docs/archive` only when a task explicitly requires archaeology.
+*.md
+!README.md

@@ -5,6 +5,8 @@
 State the production outcome in one paragraph. Prefer measurable behavior over
 implementation preference.
 
+Name the relevant project goal from `docs/PROJECT_GOALS.md`.
+
 ## Context
 
 List the files, logs, commits, or benchmark results that matter. Include exact
@@ -22,6 +24,7 @@ If the task is exploratory only, say `No code changes`.
 
 - Do not rewrite unrelated subsystems.
 - Do not change hardware calibration unless the task explicitly asks for it.
+- Do not work on goals that are not tied to `docs/PROJECT_GOALS.md`.
 - Do not weaken production invariants in `docs/INVARIANTS.md`.
 
 ## Required Local Gate

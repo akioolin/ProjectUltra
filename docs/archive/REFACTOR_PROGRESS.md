@@ -46,7 +46,7 @@ Phase 8: Throughput          [##########] 100%  (1-CW ACK + R1/2 rate selection)
 ### Blocking Issue
 **BUG-005** blocks cli_simulator and gui_simulator from working with continuous audio.
 - test_iwaveform still works (batch file injection)
-- See `docs/STREAMING_DECODER_REDESIGN.md` for fix plan
+- See `docs/archive/STREAMING_DECODER_REDESIGN.md` for fix plan
 
 ---
 

@@ -349,50 +349,20 @@ Recent simulator release checks (v0.2.4-alpha):
 
 ## Research Roadmap
 
-**Goal: Exceed industry-leading HF modem speeds (currently ~8.5 kbps in 2.8 kHz bandwidth)**
+The active engineering goal is documented in `docs/PROJECT_GOALS.md`: maximize
+reliable throughput first on the maintained OFDM/MC-DPSK paths, then add more
+advanced techniques only behind reproducible simulator and hardware gates.
 
-ProjectUltra is a research platform for investigating advanced modulation and coding techniques for HF channels. Our target is **10+ kbps** throughput while maintaining robustness.
+Speculative modulation research is not part of the production build. Historical
+notes for removed or deferred ideas live under `docs/archive/`; use them as
+background only.
 
-### Techniques Under Investigation
-
-| Technique | Expected Gain | Status | References |
-|-----------|---------------|--------|------------|
-| **OTFS** | 20% SE over OFDM, full diversity | Implemented, needs HF testing | [arxiv.org/pdf/2302.14224](https://arxiv.org/pdf/2302.14224) |
-| **AFDM** | >1 dB over OTFS, lower pilots | Not yet implemented | [arxiv.org/html/2507.21704v3](https://arxiv.org/html/2507.21704v3) |
-| **Turbo DPSK** | 4.65 dB on Rayleigh fading | Planned | [Turbo DPSK paper](https://www.academia.edu/81703561/Turbo_DPSK_iterative_differential_PSK_demodulation_and_channel_decoding) |
-| **Faster-than-Nyquist** | 25% more bits (Mazo limit) | Planned | [IEEE ComSoc overview](https://www.comsoc.org/publications/ctn/running-faster-nyquist-idea-whose-time-may-have-come) |
-| **SC-LDPC** | 0.07 dB from capacity | Planned | [SC-LDPC tutorial](https://www.itsoc.org/sites/default/files/2021-03/laurent.schmalen@kit.edu%20-%20ESIT_20_Schmalen.pdf) |
-| **OFDM-IM** | 2x SE via index modulation | Planned | [arxiv.org/html/2501.15437v1](https://arxiv.org/html/2501.15437v1) |
-
-### Why These Techniques?
-
-**OTFS/AFDM**: Traditional OFDM suffers from inter-carrier interference (ICI) when Doppler spread is high. OTFS and AFDM work in the delay-Doppler domain, achieving full diversity over doubly-selective channels. Literature shows AFDM outperforms OTFS by >1 dB with simpler channel estimation.
-
-**Turbo DPSK**: Our single-carrier DPSK already works to -11 dB SNR. Adding iterative (turbo) processing between the DPSK demodulator and LDPC decoder could push this to -15 dB or improve throughput at higher SNR.
-
-**Faster-than-Nyquist**: By accepting controlled intersymbol interference and using iterative detection, FTN can transmit 25% more symbols in the same bandwidth (Mazo limit: τ=0.8).
-
-**Spatially-Coupled LDPC**: Our current LDPC codes are from IEEE 802.11n. SC-LDPC codes achieve threshold saturation, approaching capacity within 0.07 dB on fading channels.
-
-### Current Benchmarks
-
-| Mode | ProjectUltra | Industry Leader | Gap |
-|------|--------------|-----------------|-----|
-| Max throughput (verified, differential) | 3.5 kbps | 8.5 kbps | -59% |
-| Max throughput (coherent, theoretical) | 7.1 kbps | 8.5 kbps | -16% |
-| Low-SNR floor (verified) | 5 dB | ~0 dB | Needs work |
-| CFO tolerance | ±50 Hz | ±100 Hz | TBD |
-
-### How to Contribute
-
-We're looking for collaborators interested in:
-- Implementing AFDM modulation
-- Adding turbo processing to DPSK
-- Testing OTFS on real HF recordings
-- SC-LDPC code design and optimization
-- FTN with iterative ISI cancellation
-
-If you have expertise in these areas, please open an issue or reach out!
+Near-term contributions should focus on:
+- improving measured AWGN/Good/Moderate/Poor transfer reliability,
+- reducing ACK/control overhead without timeout storms,
+- improving simulator and hardware-injection reproducibility,
+- adding meaningful tests for modem-critical code,
+- optimizing LDPC/DSP paths only when profiling proves leverage.
 
 ---
 

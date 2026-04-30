@@ -5,6 +5,11 @@ improvement work, but the process must stay bounded. The goal is not to keep a
 chat window alive forever. The goal is to keep a queue of reproducible tasks
 flowing through build, regression, coverage, and hardware gates.
 
+All agent work must align with `docs/PROJECT_GOALS.md`. If a proposed task does
+not improve reliability, throughput, channel robustness, hardware diagnostics,
+software quality, community reproducibility, or the agentic workflow itself, it
+should not enter the queue.
+
 ## Operating Model
 
 1. Write one task in `agents/queue/`.
@@ -19,6 +24,8 @@ unreviewed edits, and benchmark regressions that are discovered days later.
 For the recommended MacBook M4 Pro isolation setup, read
 `docs/AGENT_DEDICATED_ENV_MACOS.md`. For compacted-session handoff state, read
 `docs/AGENT_CURRENT_STATE.md`.
+For the project mission, priorities, and current milestone filter, read
+`docs/PROJECT_GOALS.md`.
 
 ## Permissions
 
