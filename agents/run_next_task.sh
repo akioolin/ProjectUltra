@@ -335,12 +335,6 @@ if [[ "$COMMENT_ISSUE_RESULTS" == "1" && -n "$source_issue_number" && "$DRY_RUN"
         echo "- Hardware gate: ran with rc=\`$hardware_gate_rc\`."
         echo "- Hardware gate report: \`$report_dir/hardware_gate\`."
       fi
-      echo
-      echo "## Agent Log Tail"
-      echo
-      echo '```text'
-      tail -80 "$report_dir/agent.log" || true
-      echo '```'
       if [[ "$hardware_gate_ran" == "1" ]]; then
         echo
         echo "## Hardware Gate Summary"
@@ -353,12 +347,28 @@ if [[ "$COMMENT_ISSUE_RESULTS" == "1" && -n "$source_issue_number" && "$DRY_RUN"
         fi
         echo '```'
         echo
+        echo "## Hardware Gate Metrics"
+        echo
+        echo '```text'
+        if [[ -f "$report_dir/hardware_gate/metrics.tsv" ]]; then
+          sed -n '1,80p' "$report_dir/hardware_gate/metrics.tsv"
+        else
+          echo "No hardware metrics found."
+        fi
+        echo '```'
+        echo
         echo "## Hardware Gate Log Tail"
         echo
         echo '```text'
         tail -80 "$report_dir/hardware_gate.log" || true
         echo '```'
       fi
+      echo
+      echo "## Agent Log Tail"
+      echo
+      echo '```text'
+      tail -80 "$report_dir/agent.log" || true
+      echo '```'
     } > "$issue_body"
 
     if gh issue comment "$source_issue_number" --body-file "$issue_body" > "$report_dir/issue_comment.log" 2>&1; then
