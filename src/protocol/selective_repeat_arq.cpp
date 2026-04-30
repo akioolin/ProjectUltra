@@ -1,45 +1,19 @@
 #include "selective_repeat_arq.hpp"
+#include "selective_repeat_arq_policy.hpp"
 #include "ultra/logging.hpp"
 #include <cmath>
 
 namespace ultra {
 namespace protocol {
 
-namespace {
-
-uint32_t decodeSackBitmap(const uint8_t* payload) {
-    const uint32_t bitmap = v2::NackPayload::decode(payload).cw_bitmap;
-
-    // Compatibility with the legacy 8-bit SACK encoding used before the
-    // wider-window path: makeNack() placed the bitmap in payload[5], then the
-    // ARQ code also copied it into payload[2] and read only payload[2].
-    const uint8_t legacy = payload[2];
-    const uint32_t legacy_shape = (static_cast<uint32_t>(legacy) << 24) | legacy;
-    if (legacy != 0 && bitmap == legacy_shape) {
-        return legacy;
-    }
-
-    return bitmap;
-}
-
-} // namespace
+namespace arq_policy = selective_repeat_arq_policy;
 
 SelectiveRepeatARQ::SelectiveRepeatARQ(const ARQConfig& config)
     : config_(config)
 {
-    if (config_.window_size > MAX_WINDOW) {
-        config_.window_size = MAX_WINDOW;
-    }
-    if (config_.window_size < 1) {
-        config_.window_size = 1;
-    }
-    if (config_.ack_batch_size > MAX_WINDOW) {
-        config_.ack_batch_size = MAX_WINDOW;
-    }
-    if (config_.ack_batch_size > 0 &&
-        config_.ack_batch_size > static_cast<uint32_t>(config_.window_size)) {
-        config_.ack_batch_size = static_cast<uint32_t>(config_.window_size);
-    }
+    config_.window_size = arq_policy::clampWindowSize(config_.window_size, MAX_WINDOW);
+    config_.ack_batch_size = arq_policy::clampAckBatchSize(
+        config_.ack_batch_size, config_.window_size, MAX_WINDOW);
     adaptive_ack_timeout_ms_ = config_.ack_timeout_ms;
 }
 
@@ -214,9 +188,8 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
             frames_since_ack_++;
         }
 
-        const uint32_t batch_threshold = config_.ack_batch_size > 0
-                                       ? config_.ack_batch_size
-                                       : static_cast<uint32_t>(config_.window_size);
+        const uint32_t batch_threshold = arq_policy::effectiveAckBatchThreshold(
+            config_.ack_batch_size, config_.window_size);
         if (out_of_order || frames_since_ack_ >= batch_threshold) {
             // Bump the trigger-reason counter BEFORE sendSack — out_of_order
             // takes priority because it's the immediate safety valve. Each
@@ -237,20 +210,9 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
             // the short delay so the sender's window advances promptly.
             // Sentinel sack_delay_short_ms_ = 0 → use sack_delay_ms for
             // both legs (legacy behavior bit-for-bit).
-            uint32_t pick_ms;
-            if (sack_delay_short_ms_ == 0) {
-                pick_ms = config_.sack_delay_ms;
-            } else if (frame_more_frag) {
-                pick_ms = config_.sack_delay_ms;
-            } else {
-                pick_ms = sack_delay_short_ms_;
-            }
-
-            if (sack_timer_ms_ == 0) {
-                sack_timer_ms_ = pick_ms;
-            } else {
-                sack_timer_ms_ = std::min(sack_timer_ms_, pick_ms);
-            }
+            sack_timer_ms_ = arq_policy::sackTimerForFrame(
+                sack_timer_ms_, config_.sack_delay_ms, sack_delay_short_ms_,
+                frame_more_frag);
         }
 
     } else {
@@ -267,7 +229,7 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
 
 void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
     uint16_t seq = frame.seq;
-    uint32_t bitmap = decodeSackBitmap(frame.payload);
+    uint32_t bitmap = arq_policy::decodeSackBitmap(frame.payload);
 
     LOG_MODEM(INFO, "SR-ARQ: ACK seq=%d bitmap=0x%08X (base=%d, in_flight=%zu)",
               seq, bitmap, tx_base_seq_, tx_in_flight_);
@@ -276,17 +238,17 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
     // Stale-ACK guard: reject ACKs strictly older than (tx_base_seq_ - 1).
     // seq == (tx_base_seq_ - 1) is valid — it's the common "no new cumulative progress"
     // ACK that still carries a fresh SACK bitmap for the current window.
-    uint16_t ack_base = (tx_base_seq_ - 1) & 0xFFFF;
-    uint16_t back = (ack_base - seq) & 0xFFFF;
-    if (back > 0 && back < 0x8000) {
+    const auto ack_freshness = arq_policy::classifyAckFreshness(
+        seq, tx_base_seq_, config_.window_size);
+    const uint16_t ack_base = (tx_base_seq_ - 1) & 0xFFFF;
+    if (ack_freshness == arq_policy::AckFreshness::Stale) {
         stats_.stale_acks_ignored++;
         LOG_MODEM(INFO, "SR-ARQ: Stale ACK seq=%d < base-1=%d, ignoring", seq, ack_base);
         return;
     }
 
     // Far-future guard: reject ACKs implausibly ahead (> window_size + 1 past base)
-    uint16_t forward = (seq - ack_base) & 0xFFFF;
-    if (forward > config_.window_size + 1 && forward < 0x8000) {
+    if (ack_freshness == arq_policy::AckFreshness::Future) {
         stats_.future_acks_ignored++;
         LOG_MODEM(INFO, "SR-ARQ: Future ACK seq=%d too far ahead of base=%d, ignoring", seq, tx_base_seq_);
         return;
@@ -294,10 +256,9 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
 
     // ACK-repeat dedup guard: suppress clustered duplicate ACKs carrying
     // identical cumulative+bitmap information.
-    if (last_ack_signature_valid_ &&
-        ack_dedup_timer_ms_ > 0 &&
-        last_ack_seq_ == seq &&
-        last_ack_bitmap_ == bitmap) {
+    if (arq_policy::shouldSuppressDuplicateAck(
+            last_ack_signature_valid_, ack_dedup_timer_ms_, last_ack_seq_,
+            last_ack_bitmap_, seq, bitmap)) {
         stats_.duplicate_acks_ignored++;
         LOG_MODEM(INFO, "SR-ARQ: Duplicate ACK seq=%d bitmap=0x%08X suppressed", seq, bitmap);
         return;
@@ -305,7 +266,7 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
     last_ack_signature_valid_ = true;
     last_ack_seq_ = seq;
     last_ack_bitmap_ = bitmap;
-    ack_dedup_timer_ms_ = std::clamp(ack_repeat_delay_ms_ + 40u, 80u, 500u);
+    ack_dedup_timer_ms_ = arq_policy::ackDedupWindowMs(ack_repeat_delay_ms_);
 
     // --- Cumulative ACK: advance base past all frames up to seq ---
     uint16_t base_before_ack = tx_base_seq_;
@@ -355,10 +316,7 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
     // --- Hole-based fast retransmit for base gap frame ---
     // Trigger: ACK aligned to base (seq == tx_base-1), bit0=0, any higher bit set.
     // This means the receiver is missing the base frame but has later frames.
-    bool is_aligned = (seq == ((tx_base_seq_ - 1) & 0xFFFF));
-    bool has_hole = (bitmap & 0x01u) == 0 && (bitmap & ~0x01u) != 0;
-
-    if (is_aligned && has_hole) {
+    if (arq_policy::isAlignedBaseHoleAck(seq, tx_base_seq_, bitmap)) {
         size_t base_slot = seqToSlot(tx_base_seq_);
         TXSlot& s = tx_window_[base_slot];
 
@@ -371,7 +329,8 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
             if (!s.hole_probe_armed) {
                 s.hole_probe_armed = true;
                 s.hole_probe_count = 0;
-                s.hole_probe_timer_ms = std::clamp(currentAckTimeoutMs() / 2, 1200u, 2500u);
+                s.hole_probe_timer_ms = arq_policy::holeProbeInitialTimerMs(
+                    currentAckTimeoutMs());
                 LOG_MODEM(INFO, "SR-ARQ: Armed hole-probe timer for seq=%d (%ums)",
                           s.seq, s.hole_probe_timer_ms);
             }
@@ -388,12 +347,10 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
             // window=4 and ACKs arriving every ~700ms, requiring 2 SACKs adds
             // ~700ms of latency to genuine-loss recovery — acceptable cost for
             // eliminating the spurious retx storm.
-            constexpr int MAX_FAST_RETX_PER_HOLE = 1;
-            constexpr int MIN_HOLE_CONFIRMATIONS = 2;
-            uint32_t fast_retx_cooldown_ms = std::clamp(config_.ack_timeout_ms / 6, 300u, 1200u);
-            if (s.hole_ack_count >= MIN_HOLE_CONFIRMATIONS &&
-                s.fast_retx_count < MAX_FAST_RETX_PER_HOLE &&
-                s.fast_retx_cooldown_ms == 0) {
+            uint32_t fast_retx_cooldown_ms = arq_policy::fastRetransmitCooldownMs(
+                config_.ack_timeout_ms);
+            if (arq_policy::shouldFastRetransmitHole(
+                    s.hole_ack_count, s.fast_retx_count, s.fast_retx_cooldown_ms)) {
                 s.fast_retx_count++;
                 s.fast_retx_cooldown_ms = fast_retx_cooldown_ms;
                 // Reset the timeout timer too — we just retx'd, give the new
@@ -406,7 +363,8 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
                 s.hole_probe_timer_ms = 0;
                 LOG_MODEM(INFO,
                           "SR-ARQ: Fast retransmit base seq=%d (bitmap=0x%08X, fast=%d/%d, cooldown=%ums, confirms=%d)",
-                          tx_base_seq_, bitmap, s.fast_retx_count, MAX_FAST_RETX_PER_HOLE,
+                          tx_base_seq_, bitmap, s.fast_retx_count,
+                          arq_policy::kMaxFastRetransmitsPerHole,
                           fast_retx_cooldown_ms, s.hole_ack_count);
                 retransmitFrame(base_slot, RetransmitCause::FAST_HOLE);
             }
@@ -483,13 +441,14 @@ void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
 
             if (s.hole_probe_armed) {
                 if (elapsed_ms >= s.hole_probe_timer_ms) {
-                    constexpr int MAX_HOLE_PROBE_RETX = 1;
-                    if (s.hole_probe_count < MAX_HOLE_PROBE_RETX) {
+                    if (s.hole_probe_count < arq_policy::kMaxHoleProbeRetransmits) {
                         s.hole_probe_count++;
-                        s.hole_probe_timer_ms = std::clamp((currentAckTimeoutMs() * 2) / 3, 1800u, 3000u);
+                        s.hole_probe_timer_ms = arq_policy::holeProbeNextTimerMs(
+                            currentAckTimeoutMs());
                         LOG_MODEM(INFO,
                                   "SR-ARQ: Hole-probe retransmit seq=%d (%d/%d)",
-                                  s.seq, s.hole_probe_count, MAX_HOLE_PROBE_RETX);
+                                  s.seq, s.hole_probe_count,
+                                  arq_policy::kMaxHoleProbeRetransmits);
                         retransmitFrame(slot, RetransmitCause::HOLE_PROBE);
                     } else {
                         s.hole_probe_armed = false;
@@ -784,20 +743,11 @@ void SelectiveRepeatARQ::maybeSampleRTT(TXSlot& slot) {
 }
 
 uint32_t SelectiveRepeatARQ::ackRepeatDelayForCopy(int copy_index) const {
-    // copy_index 2 = first delayed repeat.
-    if (copy_index <= 2) {
-        return ack_repeat_delay_ms_;
-    }
-    // Wider spacing for later copies improves time diversity in fading.
-    return ack_repeat_delay_ms_ * 3;
+    return arq_policy::ackRepeatDelayForCopy(ack_repeat_delay_ms_, copy_index);
 }
 
 int SelectiveRepeatARQ::ackRepeatJitterMs(uint16_t base_seq, uint32_t bitmap, int copy_index) const {
-    uint32_t h = static_cast<uint32_t>(base_seq);
-    h = (h * 1103515245u + 12345u) ^ (bitmap << 8) ^ (bitmap >> 16)
-        ^ static_cast<uint32_t>(copy_index * 7919);
-    int jitter = static_cast<int>(h % 61u) - 30;  // [-30, +30] ms
-    return jitter;
+    return arq_policy::ackRepeatJitterMs(base_seq, bitmap, copy_index);
 }
 
 uint32_t SelectiveRepeatARQ::buildRXBitmap() const {
@@ -818,13 +768,11 @@ size_t SelectiveRepeatARQ::seqToSlot(uint16_t seq) const {
 }
 
 bool SelectiveRepeatARQ::isInTXWindow(uint16_t seq) const {
-    uint16_t diff = (seq - tx_base_seq_) & 0xFFFF;
-    return diff < config_.window_size;
+    return arq_policy::seqInWindow(seq, tx_base_seq_, config_.window_size);
 }
 
 bool SelectiveRepeatARQ::isInRXWindow(uint16_t seq) const {
-    uint16_t diff = (seq - rx_base_seq_) & 0xFFFF;
-    return diff < config_.window_size;
+    return arq_policy::seqInWindow(seq, rx_base_seq_, config_.window_size);
 }
 
 void SelectiveRepeatARQ::transmitData(const Bytes& data) {

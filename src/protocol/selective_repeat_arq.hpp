@@ -2,6 +2,7 @@
 
 #include "arq_interface.hpp"
 #include "frame_v2.hpp"
+#include "selective_repeat_arq_policy.hpp"
 #include <algorithm>
 #include <deque>
 #include <optional>
@@ -70,16 +71,13 @@ public:
 
     // Set window size (1 = stop-and-wait behavior for MC-DPSK)
     void setWindowSize(size_t size) {
-        if (size < 1) size = 1;
-        if (size > MAX_WINDOW) size = MAX_WINDOW;
+        size = selective_repeat_arq_policy::clampWindowSize(size, MAX_WINDOW);
         config_.window_size = size;
         // Clamp ack_batch_size if it would exceed the new window — protects
         // against setter ordering where Connection::enterConnected() shrinks
         // the window after a wider batch was previously configured.
-        if (config_.ack_batch_size > 0 &&
-            config_.ack_batch_size > static_cast<uint32_t>(size)) {
-            config_.ack_batch_size = static_cast<uint32_t>(size);
-        }
+        config_.ack_batch_size = selective_repeat_arq_policy::clampAckBatchSize(
+            config_.ack_batch_size, config_.window_size, MAX_WINDOW);
     }
     size_t getWindowSize() const { return config_.window_size; }
 
@@ -89,11 +87,8 @@ public:
     // saturate the window before BRAVO ACKs and stall on the sack_delay
     // fallback timer.
     void setAckBatchSize(uint32_t n) {
-        if (n > MAX_WINDOW) n = MAX_WINDOW;
-        if (n > 0 && n > static_cast<uint32_t>(config_.window_size)) {
-            n = static_cast<uint32_t>(config_.window_size);
-        }
-        config_.ack_batch_size = n;
+        config_.ack_batch_size = selective_repeat_arq_policy::clampAckBatchSize(
+            n, config_.window_size, MAX_WINDOW);
     }
     uint32_t getAckBatchSize() const { return config_.ack_batch_size; }
 

@@ -55,6 +55,10 @@ add_executable(test_selective_repeat test_selective_repeat.cpp)
 target_link_libraries(test_selective_repeat PRIVATE ultra_core)
 add_test(NAME SelectiveRepeatARQ COMMAND test_selective_repeat)
 
+add_executable(test_selective_repeat_policy test_selective_repeat_policy.cpp)
+target_link_libraries(test_selective_repeat_policy PRIVATE ultra_core)
+add_test(NAME SelectiveRepeatPolicy COMMAND test_selective_repeat_policy)
+
 # Sync Detection Accuracy Test
 # Tests fine-grained sync peak refinement (fixes ~118 sample offset issue)
 add_executable(test_sync_detection test_sync_detection.cpp)
