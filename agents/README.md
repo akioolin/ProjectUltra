@@ -97,8 +97,12 @@ AGENT_PROMPT_MODE=file AGENT_CMD='your-agent --prompt-file' ./agents/run_next_ta
 - `AGENT_HW_SENTINEL_MODE`: hardware sentinel mode, `quick`, `nightly`, or `full`.
 - `AGENT_PLANNER_SLEEP_SECONDS`: planner watchdog sleep interval.
 - `AGENT_PLANNER_PUBLISH_ISSUES`: set `1` to publish planner proposals as GitHub Issues after each planner run.
+- `AGENT_PLANNER_LOCK_DIR`: planner singleton lock directory, default
+  `/tmp/projectultra_planner.lock`.
 - `AGENT_APPROVERS`: comma-separated GitHub usernames allowed to approve planner issues.
 - `AGENT_APPROVAL_SLEEP_SECONDS`: approval watchdog sleep interval.
+- `AGENT_APPROVAL_LOCK_DIR`: approval singleton lock directory, default
+  `/tmp/projectultra_approval.lock`.
 
 The runner allows pending files under `agents/queue/`, `agents/reports/`, and
 `agents/tmp/`. Other dirty files are rejected unless `AGENT_ALLOW_DIRTY=1`.

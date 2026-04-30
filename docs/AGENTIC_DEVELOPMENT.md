@@ -200,6 +200,16 @@ to the approved planner issue instead.
 `AGENT_TIMEOUT_SECONDS` requires `timeout(1)` on the agent host. Leave it unset
 on hosts without that command, or install GNU coreutils.
 
+Recommended dedicated-laptop loop intervals:
+
+- Planner proposal loop: `AGENT_PLANNER_SLEEP_SECONDS=300`.
+- GitHub approval loop: `AGENT_APPROVAL_SLEEP_SECONDS=60`.
+- Coding worker loops: `AGENT_SLEEP_SECONDS=60`.
+
+Planner and approval watchdogs use singleton lock directories by default, so a
+second accidentally-started loop exits instead of publishing or queueing in
+parallel.
+
 GitHub auto-loads `.github/PULL_REQUEST_TEMPLATE.md` into the PR body. Fill the
 risk category, gates, evidence, security, and automated-agent sections from the
 local-gate report and the task file before requesting review.
