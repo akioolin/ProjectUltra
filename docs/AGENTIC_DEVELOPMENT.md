@@ -41,6 +41,10 @@ For the project mission, priorities, and current milestone filter, read
 The planner lane is a chief-engineer triage loop, not a coding agent. It reads
 open PRs, queue state, recent commits, and hardware sentinel reports, then writes
 local proposals under `agents/planner/proposals/`.
+Valid hardware sentinel warnings are not supposed to loop forever as "rerun
+sentinel" tasks. The planner reads the latest `metrics.tsv` row and promotes a
+warning case into a bounded repair proposal with the specific case, log
+directory, and reject conditions.
 
 Run once:
 
