@@ -15,6 +15,7 @@
 #include "streaming_decoder.hpp"
 #include "streaming_buffer_policy.hpp"
 #include "streaming_decode_policy.hpp"
+#include "streaming_frame_policy.hpp"
 #include "streaming_signal_policy.hpp"
 #include "gui/startup_trace.hpp"
 #include "waveform/ofdm_cox_waveform.hpp"
@@ -38,6 +39,7 @@ namespace gui {
 namespace v2 = protocol::v2;
 namespace buffer_policy = streaming_buffer_policy;
 namespace decode_policy = streaming_decode_policy;
+namespace frame_policy = streaming_frame_policy;
 namespace signal_policy = streaming_signal_policy;
 
 namespace {
@@ -1050,14 +1052,9 @@ void StreamingDecoder::decodeCurrentFrame() {
     // just before the next real LTS. Advancing by a whole frame can skip the real
     // frame; advance only far enough to avoid re-locking the same false peak.
     auto advancePastFalseOFDMLock = [&]() {
-        size_t advance = 1024;
-        if (waveform_) {
-            const int data_preamble = waveform_->getDataPreambleSamples();
-            if (data_preamble > 0) {
-                advance = std::max<size_t>(512, static_cast<size_t>(data_preamble) / 2);
-            }
-        }
-        advance = std::min(advance, frame_len);
+        const int data_preamble = waveform_ ? waveform_->getDataPreambleSamples() : 0;
+        const size_t advance = frame_policy::falseOFDMLockAdvanceSamples(
+            frame_len, data_preamble);
 
         std::lock_guard<std::mutex> lock(buffer_mutex_);
         correlation_pos_ = (sync_position_ + advance) % MAX_BUFFER_SAMPLES;
@@ -1069,40 +1066,19 @@ void StreamingDecoder::decodeCurrentFrame() {
     // frames must be accepted or rejected by the demodulator + CRC/FEC path.
     const bool allow_ping_detection = !connected_ && mode_ == protocol::WaveformMode::MC_DPSK;
     if (allow_ping_detection) {
-        // For MC-DPSK: training=4096, ref=512, so data starts at 4608.
-        // Check after training to distinguish chirp-only PING from real frames.
-        constexpr size_t training_skip = 4608;
-
-        float training_rms = 0.0f;
-        size_t train_len = std::min(training_skip, frame_buffer.size());
-        if (train_len > 0) {
-            for (size_t i = 0; i < train_len; i++) {
-                training_rms += frame_buffer[i] * frame_buffer[i];
-            }
-            training_rms = std::sqrt(training_rms / train_len);
-        }
-
-        float rms = 0.0f;
-        size_t check_start = std::min(training_skip, frame_buffer.size());
-        size_t check_len = std::min(frame_buffer.size() - check_start, size_t(5000));
-        if (check_len > 0) {
-            for (size_t i = 0; i < check_len; i++) {
-                rms += frame_buffer[check_start + i] * frame_buffer[check_start + i];
-            }
-            rms = std::sqrt(rms / check_len);
-        }
-
         // PING detection: use ratio of data RMS to training RMS.
         // PING (chirp only): data region is noise-only; data frames carry energy.
-        float rms_ratio = (training_rms > 0.001f) ? rms / training_rms : 0.0f;
-        bool is_ping = rms_ratio < 0.5f;
+        const auto ping_decision = frame_policy::evaluatePingRMS(
+            frame_buffer.data(), frame_buffer.size());
 
-        LOG_MODEM(INFO, "[%s] PING check: RMS=%.4f, train_RMS=%.4f, ratio=%.3f (threshold=0.5), sync_pos=%zu",
-                  log_prefix_.c_str(), rms, training_rms, rms_ratio, sync_position_);
+        LOG_MODEM(INFO, "[%s] PING check: RMS=%.4f, train_RMS=%.4f, ratio=%.3f (threshold=%.1f), sync_pos=%zu",
+                  log_prefix_.c_str(), ping_decision.data_rms,
+                  ping_decision.training_rms, ping_decision.ratio,
+                  frame_policy::kPingMaxDataToTrainingRMSRatio, sync_position_);
 
-        if (is_ping) {
+        if (ping_decision.is_ping) {
             LOG_MODEM(INFO, "[%s] PING detected (RMS=%.4f), SNR=%.1f dB, CFO=%.1f Hz",
-                      log_prefix_.c_str(), rms, sync_snr_, sync_cfo_);
+                      log_prefix_.c_str(), ping_decision.data_rms, sync_snr_, sync_cfo_);
 
             DecodeResult ping;
             ping.success = true;
@@ -1140,9 +1116,9 @@ void StreamingDecoder::decodeCurrentFrame() {
     // Connected OFDM control-first hypothesis:
     // Try demodulating as DQPSK R1/4 control before using data profile.
     // This protects ACK/NACK decode when data modulation is higher order.
-    bool first_pass_ofdm_peek = (pending_total_cw_ == 0 && is_ofdm && connected_
-                                 && frame_len <= getOFDMControlFrameSamples(
-                                     waveform_.get(), current_modulation_, code_rate_));
+    const bool first_pass_ofdm_peek = frame_policy::shouldRunControlFirstOFDMPeek(
+        pending_total_cw_, is_ofdm, connected_, frame_len,
+        getOFDMControlFrameSamples(waveform_.get(), current_modulation_, code_rate_));
     if (first_pass_ofdm_peek) {
         constexpr size_t CONTROL_LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;
         Modulation saved_mod = current_modulation_;
@@ -1520,16 +1496,16 @@ void StreamingDecoder::decodeCurrentFrame() {
         // retries burn several seconds with zero recoveries and trigger ARQ
         // timeouts. Nearby timing retry is still useful for clean, high-corr
         // locks, but beyond +/-8 samples the candidate is usually a bad lock.
-        constexpr float MIN_CORR_FOR_SYNC_RECOVERY = 0.80f;
         const int retry_deltas[] = {8, -8};
         bool recovered = false;
         int recovered_delta = 0;
         uint64_t recovery_attempts = 0;
 
-        const bool allow_sync_recovery = sync_correlation_ >= MIN_CORR_FOR_SYNC_RECOVERY;
+        const bool allow_sync_recovery = frame_policy::allowSyncRecovery(sync_correlation_);
         if (!allow_sync_recovery) {
             LOG_MODEM(INFO, "[%s] Multi-candidate sync recovery skipped: corr=%.2f < %.2f",
-                      log_prefix_.c_str(), sync_correlation_, MIN_CORR_FOR_SYNC_RECOVERY);
+                      log_prefix_.c_str(), sync_correlation_,
+                      frame_policy::kMinSyncRecoveryCorrelation);
         }
 
         auto ringPosToAbsolute = [this](size_t ring_pos) -> size_t {
@@ -1665,22 +1641,22 @@ void StreamingDecoder::decodeCurrentFrame() {
 
     // Calculate consumed samples based on actual frame content
     // For non-data frames (control/connect), use exact sample count to avoid eating into next frame
-    bool is_non_data_frame = false;
-    if (result.success && result.frame_data.size() >= 3) {
-        auto ft = static_cast<v2::FrameType>(result.frame_data[2]);
-        is_non_data_frame = v2::isControlFrame(ft) || v2::isConnectFrame(ft);
-    }
+    const bool is_non_data_frame = frame_policy::isNonDataFrame(
+        result.success, result.frame_data.data(), result.frame_data.size());
 
     size_t consumed = frame_len;
-    if (result.success && is_non_data_frame && is_ofdm) {
+    if (result.success && is_non_data_frame && is_ofdm && waveform_) {
         // Use exact sample count for the actual CW count
-        int actual_cw = result.codewords_ok + result.codewords_failed;
+        const int actual_cw = result.codewords_ok + result.codewords_failed;
         if (actual_cw > 0) {
-            size_t exact_consumed = static_cast<size_t>(waveform_->getMinSamplesForCWCount(actual_cw));
-            if (exact_consumed < consumed) {
+            const size_t exact_consumed =
+                static_cast<size_t>(waveform_->getMinSamplesForCWCount(actual_cw));
+            const size_t adjusted_consumed = frame_policy::consumedSamplesForDecodedFrame(
+                result.success, is_ofdm, is_non_data_frame, actual_cw, consumed, exact_consumed);
+            if (adjusted_consumed < consumed) {
                 LOG_MODEM(INFO, "[%s] Non-data frame (%d CWs): advancing %zu samples (not %zu)",
-                          log_prefix_.c_str(), actual_cw, exact_consumed, consumed);
-                consumed = exact_consumed;
+                          log_prefix_.c_str(), actual_cw, adjusted_consumed, consumed);
+                consumed = adjusted_consumed;
             }
         }
     }
