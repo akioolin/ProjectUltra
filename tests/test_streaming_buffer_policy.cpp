@@ -1,0 +1,114 @@
+#include "gui/modem/streaming_buffer_policy.hpp"
+
+#include <cmath>
+#include <iostream>
+
+using namespace ultra::gui::streaming_buffer_policy;
+
+namespace {
+
+int tests_run = 0;
+int tests_failed = 0;
+
+#define CHECK(cond, msg) \
+    do { \
+        ++tests_run; \
+        if (!(cond)) { \
+            ++tests_failed; \
+            std::cout << "FAIL: " << msg << "\n"; \
+            return; \
+        } \
+    } while (0)
+
+void test_ring_distance() {
+    CHECK(ringDistance(10, 40, 100) == 30, "ring distance without wrap");
+    CHECK(ringDistance(90, 10, 100) == 20, "ring distance with wrap");
+    CHECK(ringDistance(10, 10, 100) == 0, "ring distance same position");
+    CHECK(ringDistance(110, 240, 100) == 30, "ring distance should normalize inputs");
+    CHECK(ringDistance(10, 40, 0) == 0, "zero-capacity ring should be safe");
+}
+
+void test_no_overflow() {
+    auto d = planOverflowRecovery(
+        4000, 1000, 4000, 1000,
+        10000, 1000, 2500);
+
+    CHECK(!d.pointer_drift_detected, "normal buffer should not detect drift");
+    CHECK(!d.overflow, "normal buffer should not overflow");
+    CHECK(d.initial_unsearched == 3000, "normal unsearched count");
+    CHECK(d.final_unsearched == 3000, "normal final unsearched count");
+    CHECK(d.samples_to_drop == 0, "normal path should not drop");
+    CHECK(d.new_correlation_pos == 1000, "normal path should keep correlation position");
+}
+
+void test_overflow_drop_without_wrap() {
+    auto d = planOverflowRecovery(
+        8000, 1000, 8000, 3000,
+        10000, 1000, 2500);
+
+    CHECK(d.overflow, "overflow should be detected");
+    CHECK(!d.pointer_drift_detected, "ordinary overflow is not pointer drift");
+    CHECK(d.initial_unsearched == 7000, "overflow initial unsearched");
+    CHECK(d.samples_to_drop == 7000, "overflow should drop available backlog when target needs more");
+    CHECK(d.final_unsearched == 0, "helper reports post-drop unsearched before write");
+    CHECK(d.new_correlation_pos == 8000, "correlation position should advance by dropped samples");
+    CHECK(d.target_after_write == 2500, "recovery target should respect configured keep size");
+}
+
+void test_overflow_drop_with_wrap() {
+    auto d = planOverflowRecovery(
+        6000, 8000, 16000, 2500,
+        10000, 1000, 3000);
+
+    CHECK(d.overflow, "wrapped overflow should be detected");
+    CHECK(d.initial_unsearched == 8000, "wrapped unsearched count");
+    CHECK(d.samples_to_drop == 7500, "wrapped overflow drop count");
+    CHECK(d.new_correlation_pos == 5500, "wrapped correlation position should wrap");
+}
+
+void test_pointer_drift_guard() {
+    auto d = planOverflowRecovery(
+        1000, 1100, 12000, 100,
+        10000, 1000, 3000);
+
+    CHECK(d.pointer_drift_detected, "near-full unsearched after wrap should be treated as pointer drift");
+    CHECK(!d.overflow, "small incoming chunk after drift reset should not overflow");
+    CHECK(d.initial_unsearched == 9900, "drift initial unsearched count");
+    CHECK(d.final_unsearched == 0, "drift reset should clear unsearched backlog");
+    CHECK(d.new_correlation_pos == 1000, "drift reset should snap to write position");
+}
+
+void test_backlog_snapshot() {
+    auto b = computeBacklog(9600, 0, 9600, 480000, 48000.0f);
+    CHECK(b.unsearched_samples == 9600, "backlog unsearched samples");
+    CHECK(b.used_samples == 9600, "backlog used samples before buffer fills");
+    CHECK(std::abs(b.backlog_ms - 200.0f) < 0.001f, "backlog milliseconds");
+    CHECK(std::abs(b.fill_percent - 2.0f) < 0.001f, "buffer fill percent");
+
+    auto wrapped = computeBacklog(1000, 470000, 481000, 480000, 48000.0f);
+    CHECK(wrapped.unsearched_samples == 11000, "wrapped backlog unsearched samples");
+    CHECK(wrapped.used_samples == 480000, "used samples should clamp at capacity");
+
+    auto invalid = computeBacklog(1000, 0, 1000, 0, 48000.0f);
+    CHECK(invalid.unsearched_samples == 0, "invalid capacity should be safe");
+}
+
+}  // namespace
+
+int main() {
+    test_ring_distance();
+    test_no_overflow();
+    test_overflow_drop_without_wrap();
+    test_overflow_drop_with_wrap();
+    test_pointer_drift_guard();
+    test_backlog_snapshot();
+
+    if (tests_failed != 0) {
+        std::cout << "StreamingBufferPolicy: " << (tests_run - tests_failed)
+                  << "/" << tests_run << " passed\n";
+        return 1;
+    }
+
+    std::cout << "StreamingBufferPolicy: " << tests_run << "/" << tests_run << " passed\n";
+    return 0;
+}

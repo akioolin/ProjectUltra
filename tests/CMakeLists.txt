@@ -102,6 +102,13 @@ target_include_directories(test_streaming_config PRIVATE
 target_link_libraries(test_streaming_config PRIVATE ultra_core)
 add_test(NAME StreamingConfig COMMAND test_streaming_config)
 
+add_executable(test_streaming_buffer_policy test_streaming_buffer_policy.cpp)
+target_include_directories(test_streaming_buffer_policy PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+target_link_libraries(test_streaming_buffer_policy PRIVATE ultra_core)
+add_test(NAME StreamingBufferPolicy COMMAND test_streaming_buffer_policy)
+
 # Current streaming MC-DPSK encode/decode loopback.
 add_executable(test_streaming_mc_dpsk
     test_streaming_mc_dpsk.cpp

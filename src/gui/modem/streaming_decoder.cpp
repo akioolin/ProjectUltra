@@ -13,6 +13,7 @@
 // - FFT-based correlation for speed when signal present
 
 #include "streaming_decoder.hpp"
+#include "streaming_buffer_policy.hpp"
 #include "gui/startup_trace.hpp"
 #include "waveform/ofdm_cox_waveform.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
@@ -33,6 +34,7 @@ namespace ultra {
 namespace gui {
 
 namespace v2 = protocol::v2;
+namespace buffer_policy = streaming_buffer_policy;
 
 namespace {
 
@@ -191,38 +193,21 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
 
     size_t prev_total = total_fed_;
 
-    // Check for buffer overflow - would we overwrite unsearched data?
-    // Calculate how much unsearched data we have
-    size_t unsearched;
-    if (write_pos_ >= correlation_pos_) {
-        unsearched = write_pos_ - correlation_pos_;
-    } else {
-        unsearched = MAX_BUFFER_SAMPLES - correlation_pos_ + write_pos_;
-    }
+    auto overflow = buffer_policy::planOverflowRecovery(
+        write_pos_, correlation_pos_, total_fed_, count, MAX_BUFFER_SAMPLES,
+        CORR_INVARIANT_GUARD, OVERFLOW_RECOVERY_KEEP);
 
-    // Guard against pointer drift. If correlation_pos_ gets ahead of write_pos_
-    // in wrapped space, unsearched can appear "almost full" and trigger false
-    // overflow storms. Snap search pointer to newest audio in that case.
-    if (total_fed_ >= MAX_BUFFER_SAMPLES &&
-        unsearched > (MAX_BUFFER_SAMPLES - CORR_INVARIANT_GUARD)) {
+    if (overflow.pointer_drift_detected) {
         correlation_pos_ = write_pos_;
         setSearchFloorLocked(total_fed_);
-        unsearched = 0;
         LOG_MODEM(WARN, "[%s] Correlation pointer drift detected, resetting search cursor",
                   log_prefix_.c_str());
     }
 
     // If adding these samples would overflow, drop backlog aggressively enough
     // to recover in one step. Small drops (~1k) cause repeated overflow storms.
-    if (unsearched + count >= MAX_BUFFER_SAMPLES) {
-        const size_t incoming_total = unsearched + count;
-        const size_t target_after_write = std::min(OVERFLOW_RECOVERY_KEEP, MAX_BUFFER_SAMPLES - 1);
-        size_t need_to_drop = 0;
-        if (incoming_total > target_after_write) {
-            need_to_drop = std::min(unsearched, incoming_total - target_after_write);
-        }
-
-        correlation_pos_ = (correlation_pos_ + need_to_drop) % MAX_BUFFER_SAMPLES;
+    if (overflow.overflow) {
+        correlation_pos_ = overflow.new_correlation_pos;
         setSearchFloorLocked(ringPosToAbsoluteLocked(correlation_pos_));
 
         // Once overloaded, any in-flight frame context is stale. Force a clean
@@ -240,14 +225,15 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
         {
             std::lock_guard<std::mutex> slock(stats_mutex_);
             stats_.buffer_overflows = overflow_events_;
-            stats_.overflow_samples_dropped += need_to_drop;
+            stats_.overflow_samples_dropped += overflow.samples_to_drop;
             if (reset_decode_state) {
                 stats_.overflow_state_resets++;
             }
         }
         if (overflow_events_ <= 3 || (overflow_events_ % 25) == 0) {
             LOG_MODEM(WARN, "[%s] Buffer overflow, dropped %zu unsearched samples (corr_pos=%zu, keep=%zu, state_reset=%d, total=%llu)",
-                      log_prefix_.c_str(), need_to_drop, correlation_pos_, target_after_write,
+                      log_prefix_.c_str(), overflow.samples_to_drop, correlation_pos_,
+                      overflow.target_after_write,
                       reset_decode_state ? 1 : 0,
                       static_cast<unsigned long long>(overflow_events_));
         }
@@ -262,24 +248,16 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
     total_fed_ += count;
 
     // Update backlog telemetry for UI/CLI diagnostics.
-    size_t unsearched_after;
-    if (write_pos_ >= correlation_pos_) {
-        unsearched_after = write_pos_ - correlation_pos_;
-    } else {
-        unsearched_after = MAX_BUFFER_SAMPLES - correlation_pos_ + write_pos_;
-    }
-    float backlog_ms = (static_cast<float>(unsearched_after) * 1000.0f) / 48000.0f;
-    size_t used_samples = std::min(total_fed_, MAX_BUFFER_SAMPLES);
-    float fill_pct = 100.0f * static_cast<float>(used_samples) /
-                     static_cast<float>(MAX_BUFFER_SAMPLES);
+    const auto backlog = buffer_policy::computeBacklog(
+        write_pos_, correlation_pos_, total_fed_, MAX_BUFFER_SAMPLES, 48000.0f);
     {
         std::lock_guard<std::mutex> slock(stats_mutex_);
-        stats_.current_unsearched_samples = unsearched_after;
+        stats_.current_unsearched_samples = backlog.unsearched_samples;
         stats_.peak_unsearched_samples = std::max<uint64_t>(stats_.peak_unsearched_samples,
-                                                            static_cast<uint64_t>(unsearched_after));
-        stats_.backlog_ms = backlog_ms;
-        stats_.peak_backlog_ms = std::max(stats_.peak_backlog_ms, backlog_ms);
-        stats_.buffer_fill_percent = fill_pct;
+                                                            static_cast<uint64_t>(backlog.unsearched_samples));
+        stats_.backlog_ms = backlog.backlog_ms;
+        stats_.peak_backlog_ms = std::max(stats_.peak_backlog_ms, backlog.backlog_ms);
+        stats_.buffer_fill_percent = backlog.fill_percent;
     }
 
     // DEBUG: Dump buffer snapshots at key sample counts
