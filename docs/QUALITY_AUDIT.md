@@ -9,7 +9,7 @@ defines the policy; this file tracks where the codebase stands against it.
 
 ## Current Test Baseline
 
-Registered CTest targets: 22
+Registered CTest targets: 23
 
 Current maintained local gates:
 
@@ -23,9 +23,9 @@ git diff --check
 ```
 
 Latest measured coverage after the current hardening pass:
-- Line: 52.68%
-- Function: 57.34%
-- Branch: 41.87%
+- Line: 52.93%
+- Function: 57.42%
+- Branch: 42.04%
 
 This is a baseline, not an acceptable final state for critical modem code.
 
@@ -45,7 +45,8 @@ Measured from `build-coverage/coverage.txt`.
 | `src/sync` | 37.61% | 42.31% | 48.56% | Needs chirp false-lock/CFO/timing tests |
 | `src/dsp` | 91.23% | 92.68% | 85.85% | Strong direct primitive coverage; FFT/resampler edge cases remain |
 | `src/gui/modem/streaming_buffer_policy.hpp` | 95.92% | 100.00% | 83.33% | Extracted and tested from `feedAudio()` backlog/overflow policy |
-| `src/gui/modem/streaming_decoder.cpp` | 29.50% | 57.14% | 19.18% | Geometry/config and buffer policy covered; decode state machine still needs extraction |
+| `src/gui/modem/streaming_decode_policy.hpp` | 93.55% | 100.00% | 90.00% | Extracted and tested from decode sample-sizing policy |
+| `src/gui/modem/streaming_decoder.cpp` | 30.78% | 57.14% | 19.46% | Geometry/config and sample policies covered; decode state machine still needs extraction |
 | `src/gui/modem/streaming_encoder.cpp` | 35.75% | 65.00% | 18.06% | Geometry/config covered; frame encoding branches still need extraction |
 
 ## Highest-Risk Files
@@ -115,6 +116,9 @@ smaller units with direct tests around their real invariants.
 - Streaming RX ring-buffer overflow/backlog policy is extracted into
   `streaming_buffer_policy.hpp` with wraparound, pointer-drift, overflow, and
   telemetry tests.
+- Streaming RX decode sample-sizing policy is extracted into
+  `streaming_decode_policy.hpp` with robust OFDM control-frame sizing and
+  pending-CW/burst/control-peek selection tests.
 
 ## Definition Of Progress
 

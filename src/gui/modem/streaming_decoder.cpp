@@ -14,6 +14,7 @@
 
 #include "streaming_decoder.hpp"
 #include "streaming_buffer_policy.hpp"
+#include "streaming_decode_policy.hpp"
 #include "gui/startup_trace.hpp"
 #include "waveform/ofdm_cox_waveform.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
@@ -35,6 +36,7 @@ namespace gui {
 
 namespace v2 = protocol::v2;
 namespace buffer_policy = streaming_buffer_policy;
+namespace decode_policy = streaming_decode_policy;
 
 namespace {
 
@@ -59,17 +61,8 @@ size_t getOFDMControlFrameSamples(IWaveform* waveform, Modulation data_mod, Code
         return default_samples;
     }
 
-    constexpr int pilot_spacing = 10;  // Differential DQPSK control profile
-    const int bits_per_symbol = ofdm_link_adaptation::bitsPerOFDMSymbol(
-        carriers, true, pilot_spacing, Modulation::DQPSK);
-    if (bits_per_symbol <= 0) {
-        return default_samples;
-    }
-    const int data_symbols = (v2::LDPC_CODEWORD_BITS + bits_per_symbol - 1) / bits_per_symbol;
-    const size_t robust_samples = static_cast<size_t>(2 + data_symbols) *
-                                  static_cast<size_t>(samples_per_symbol);
-
-    return std::max(default_samples, robust_samples);
+    return decode_policy::estimateRobustOFDMControlSamples(
+        default_samples, data_mod, data_rate, carriers, samples_per_symbol);
 }
 
 }  // namespace
@@ -861,27 +854,32 @@ void StreamingDecoder::checkIfReadyToDecode() {
         return;
     }
 
-    // Calculate how much we need — must match decodeCurrentFrame() buffer sizing
+    // Calculate how much we need — must match decodeCurrentFrame() buffer sizing.
     bool is_ofdm_here = protocol::isOFDMMode(mode_);
-    size_t needed;
-    if (pending_total_cw_ > 0) {
-        // We know exact CW count from CW0 peek — get exact sample count
-        needed = static_cast<size_t>(waveform_->getMinSamplesForCWCount(pending_total_cw_));
-    } else if (is_ofdm_here && connected_) {
-        // Burst-interleaved frames MUST use full 4-CW buffer (marker is one-shot consumed by process())
-        bool burst_latched = use_burst_interleave_ && waveform_ && waveform_->wasBurstInterleaved();
-        if (!burst_latched) {
-            // 1-CW peek first — escalate to 4-CW if CW0 indicates data frame
-            needed = getOFDMControlFrameSamples(waveform_.get(), current_modulation_, code_rate_);
-        } else {
-            needed = static_cast<size_t>(waveform_->getMinSamplesForFrame());
-        }
-    } else {
-        // MC-DPSK or disconnected: 1-CW minimum for header peek
-        needed = static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
-    }
+    bool burst_latched = use_burst_interleave_ && waveform_ && waveform_->wasBurstInterleaved();
+    const size_t pending_samples = pending_total_cw_ > 0
+        ? static_cast<size_t>(waveform_->getMinSamplesForCWCount(pending_total_cw_))
+        : 0;
+    const size_t ofdm_control_samples = (is_ofdm_here && connected_)
+        ? getOFDMControlFrameSamples(waveform_.get(), current_modulation_, code_rate_)
+        : 0;
+    const size_t full_frame_samples = (is_ofdm_here && connected_)
+        ? static_cast<size_t>(waveform_->getMinSamplesForFrame())
+        : 0;
+    const size_t control_frame_samples =
+        static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
+    auto requirement = decode_policy::selectDecodeSampleRequirement(
+        pending_total_cw_,
+        is_ofdm_here,
+        connected_,
+        use_burst_interleave_,
+        burst_latched,
+        pending_samples,
+        ofdm_control_samples,
+        full_frame_samples,
+        control_frame_samples);
 
-    if (available >= needed) {
+    if (available >= requirement.samples) {
         state_ = DecoderState::DECODING;
     }
 }
@@ -1039,21 +1037,29 @@ void StreamingDecoder::decodeCurrentFrame() {
     // - Connected OFDM, first pass: full 4-CW buffer (most frames are data, frame-interleaved)
     // - MC-DPSK: 1-CW for peek (MC-DPSK getMinSamplesForFrame() == 1 CW by design)
     // - Disconnected: full frame (always MC-DPSK for handshake)
-    size_t frame_len;
-    if (pending_total_cw_ > 0) {
-        frame_len = static_cast<size_t>(waveform_->getMinSamplesForCWCount(pending_total_cw_));
-    } else if (is_ofdm && connected_) {
-        // Burst-interleaved frames use full 4-CW buffer; otherwise 1-CW peek first
-        bool burst_latched = use_burst_interleave_ && waveform_ && waveform_->wasBurstInterleaved();
-        if (!burst_latched) {
-            frame_len = getOFDMControlFrameSamples(waveform_.get(), current_modulation_, code_rate_);
-        } else {
-            frame_len = static_cast<size_t>(waveform_->getMinSamplesForFrame());
-        }
-    } else {
-        // MC-DPSK or disconnected: 1-CW peek
-        frame_len = static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
-    }
+    const bool burst_latched = use_burst_interleave_ && waveform_ && waveform_->wasBurstInterleaved();
+    const size_t pending_samples = pending_total_cw_ > 0
+        ? static_cast<size_t>(waveform_->getMinSamplesForCWCount(pending_total_cw_))
+        : 0;
+    const size_t ofdm_control_samples = (is_ofdm && connected_)
+        ? getOFDMControlFrameSamples(waveform_.get(), current_modulation_, code_rate_)
+        : 0;
+    const size_t full_frame_samples = (is_ofdm && connected_)
+        ? static_cast<size_t>(waveform_->getMinSamplesForFrame())
+        : 0;
+    const size_t control_frame_samples =
+        static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
+    auto requirement = decode_policy::selectDecodeSampleRequirement(
+        pending_total_cw_,
+        is_ofdm,
+        connected_,
+        use_burst_interleave_,
+        burst_latched,
+        pending_samples,
+        ofdm_control_samples,
+        full_frame_samples,
+        control_frame_samples);
+    size_t frame_len = requirement.samples;
 
     // Copy frame samples from buffer
     std::vector<float> frame_buffer;
