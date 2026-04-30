@@ -23,9 +23,9 @@ git diff --check
 ```
 
 Latest measured coverage after the current hardening pass:
-- Line: 53.91%
-- Function: 58.75%
-- Branch: 43.28%
+- Line: 53.97%
+- Function: 58.86%
+- Branch: 43.33%
 
 This is a baseline, not an acceptable final state for critical modem code.
 
@@ -39,8 +39,8 @@ Measured from `build-coverage/coverage.txt`.
 | `src/ofdm` | 57.74% | 56.57% | 49.72% | Improved by waveform loopback; sync/equalizer branches still weak |
 | `src/protocol/frame_v2.cpp` | 53.77% | 68.92% | 32.85% | Edge cases improved; fixed-frame recovery paths still weak |
 | `src/protocol/frame_v2.hpp` | 89.29% | 95.24% | 76.42% | Strong helper coverage; keep malformed-frame tests growing |
-| `src/protocol/selective_repeat_arq.cpp` | 69.18% | 86.67% | 45.96% | Strong behavior tests; branch coverage now needs loss-pattern edge cases |
-| `src/protocol/selective_repeat_arq_policy.hpp` | 100.00% | 100.00% | 96.00% | Extracted and tested from ACK/SACK, timer, fast-hole, and ACK-repeat policy |
+| `src/protocol/selective_repeat_arq.cpp` | 68.72% | 86.67% | 45.63% | Strong behavior tests; branch coverage now needs loss-pattern edge cases |
+| `src/protocol/selective_repeat_arq_policy.hpp` | 100.00% | 100.00% | 96.67% | Extracted and tested from ACK/SACK, timer, fast-hole, ACK-repeat, and RTT/RTO policy |
 | `src/protocol/connection.cpp` | 50.30% | 65.22% | 34.14% | Needs state-machine extraction and direct transition tests |
 | `src/waveform` | 54.06% | 46.21% | 35.30% | Loopback coverage added; wrapper edge cases remain |
 | `src/psk` | 63.56% | 42.55% | 53.57% | Needs direct DPSK edge/vector tests |
@@ -138,6 +138,10 @@ smaller units with direct tests around their real invariants.
   decoding, sequence wraparound, stale/future ACK rejection, duplicate-ACK
   suppression, delayed SACK timers, fast-hole admission, hole-probe timers, and
   ACK-repeat timing jitter.
+- Selective Repeat ARQ RTT/RTO estimator math is also covered in
+  `selective_repeat_arq_policy.hpp`, including Karn-safe eligibility,
+  sample clamping, SRTT/RTTVAR EWMA updates, and configured timeout floor/ceiling
+  behavior.
 
 ## Definition Of Progress
 

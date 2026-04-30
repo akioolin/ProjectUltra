@@ -147,6 +147,41 @@ void test_ack_repeat_policy() {
           "ACK repeat jitter should be deterministic");
 }
 
+void test_rtt_rto_policy() {
+    CHECK(rttSampleMs(1000, 900) == 100, "RTT sample should be elapsed time");
+    CHECK(rttSampleMs(900, 1000) == 0, "RTT sample should reject time reversal");
+    CHECK(rttSampleMs(70000, 0) == 60000, "RTT sample should clamp very large values");
+
+    CHECK(!shouldUseRTTSample(false, 1000, 900),
+          "ineligible slot should not update RTT estimator");
+    CHECK(!shouldUseRTTSample(true, 900, 1000),
+          "time reversal should not update RTT estimator");
+    CHECK(!shouldUseRTTSample(true, 1049, 1000),
+          "tiny RTT sample should not update estimator");
+    CHECK(shouldUseRTTSample(true, 1050, 1000),
+          "minimum RTT sample should update estimator");
+
+    auto first = updateRTO(false, 0.0f, 0.0f, 600, 8000);
+    CHECK(std::abs(first.srtt_ms - 600.0f) < 0.001f, "first SRTT sample");
+    CHECK(std::abs(first.rttvar_ms - 300.0f) < 0.001f, "first RTTVAR sample");
+    CHECK(first.floor_ms == 8000, "configured ACK timeout should floor RTO");
+    CHECK(first.ceiling_ms == 12000, "RTO ceiling should use minimum ceiling");
+    CHECK(first.rto_ms == 8000, "RTO should clamp up to configured floor");
+
+    auto next = updateRTO(true, 600.0f, 300.0f, 1000, 8000);
+    CHECK(std::abs(next.srtt_ms - 650.0f) < 0.001f, "subsequent SRTT EWMA");
+    CHECK(std::abs(next.rttvar_ms - 325.0f) < 0.001f, "subsequent RTTVAR EWMA");
+    CHECK(next.rto_ms == 8000, "configured ACK timeout should still floor low RTO");
+
+    auto high_config = updateRTO(false, 0.0f, 0.0f, 2000, 15000);
+    CHECK(high_config.floor_ms == 15000, "high configured timeout should floor RTO");
+    CHECK(high_config.ceiling_ms == 15000, "high configured timeout should also raise ceiling");
+    CHECK(high_config.rto_ms == 15000, "high configured timeout should dominate RTO");
+
+    auto ceiling = updateRTO(true, 1000.0f, 10000.0f, 1000, 8000);
+    CHECK(ceiling.rto_ms == 12000, "large RTTVAR should clamp to RTO ceiling");
+}
+
 }  // namespace
 
 int main() {
@@ -158,6 +193,7 @@ int main() {
     test_sack_timer_policy();
     test_hole_and_repeat_policy();
     test_ack_repeat_policy();
+    test_rtt_rto_policy();
 
     if (tests_failed != 0) {
         std::cout << "SelectiveRepeatPolicy: " << (tests_run - tests_failed)

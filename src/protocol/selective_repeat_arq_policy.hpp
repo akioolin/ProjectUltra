@@ -3,6 +3,7 @@
 #include "frame_v2.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 
@@ -151,6 +152,57 @@ inline int ackRepeatJitterMs(uint16_t base_seq, uint32_t bitmap, int copy_index)
     h = (h * 1103515245u + 12345u) ^ (bitmap << 8) ^ (bitmap >> 16)
         ^ static_cast<uint32_t>(copy_index * 7919);
     return static_cast<int>(h % 61u) - 30;
+}
+
+inline uint32_t rttSampleMs(uint64_t now_ms, uint64_t first_tx_ms) {
+    if (now_ms < first_tx_ms) {
+        return 0;
+    }
+    return static_cast<uint32_t>(std::min<uint64_t>(now_ms - first_tx_ms, 60000ULL));
+}
+
+inline bool shouldUseRTTSample(bool rtt_sample_eligible,
+                               uint64_t now_ms,
+                               uint64_t first_tx_ms,
+                               uint32_t min_sample_ms = 50) {
+    return rtt_sample_eligible &&
+           now_ms >= first_tx_ms &&
+           rttSampleMs(now_ms, first_tx_ms) >= min_sample_ms;
+}
+
+struct RTOUpdate {
+    float srtt_ms = 0.0f;
+    float rttvar_ms = 0.0f;
+    uint32_t rto_ms = 0;
+    uint32_t floor_ms = 0;
+    uint32_t ceiling_ms = 0;
+};
+
+inline RTOUpdate updateRTO(bool have_estimator,
+                           float previous_srtt_ms,
+                           float previous_rttvar_ms,
+                           uint32_t sample_ms,
+                           uint32_t configured_ack_timeout_ms) {
+    RTOUpdate update;
+    if (!have_estimator) {
+        update.srtt_ms = static_cast<float>(sample_ms);
+        update.rttvar_ms = static_cast<float>(sample_ms) * 0.5f;
+    } else {
+        const float sample_f = static_cast<float>(sample_ms);
+        const float err = std::fabs(previous_srtt_ms - sample_f);
+        update.rttvar_ms = 0.75f * previous_rttvar_ms + 0.25f * err;
+        update.srtt_ms = 0.875f * previous_srtt_ms + 0.125f * sample_f;
+    }
+
+    const float rto_f = update.srtt_ms + 4.0f * update.rttvar_ms;
+
+    const uint32_t srtt_floor = static_cast<uint32_t>(update.srtt_ms * 1.5f + 0.5f);
+    update.floor_ms = std::clamp(srtt_floor, 600u, 2500u);
+    update.floor_ms = std::max(update.floor_ms, configured_ack_timeout_ms);
+    update.ceiling_ms = std::max<uint32_t>(12000u, configured_ack_timeout_ms);
+    update.rto_ms = std::clamp(static_cast<uint32_t>(rto_f + 0.5f),
+                               update.floor_ms, update.ceiling_ms);
+    return update;
 }
 
 }  // namespace selective_repeat_arq_policy

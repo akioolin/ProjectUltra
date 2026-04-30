@@ -1,7 +1,6 @@
 #include "selective_repeat_arq.hpp"
 #include "selective_repeat_arq_policy.hpp"
 #include "ultra/logging.hpp"
-#include <cmath>
 
 namespace ultra {
 namespace protocol {
@@ -691,52 +690,20 @@ void SelectiveRepeatARQ::maybeSampleRTT(TXSlot& slot) {
         return;
     }
 
-    uint32_t sample_ms = static_cast<uint32_t>(
-        std::min<uint64_t>(arq_time_ms_ - slot.first_tx_ms, 60000ULL));
+    uint32_t sample_ms = arq_policy::rttSampleMs(arq_time_ms_, slot.first_tx_ms);
     slot.rtt_sample_eligible = false;
-
-    if (sample_ms < 50) {
+    if (!arq_policy::shouldUseRTTSample(
+            true, arq_time_ms_, slot.first_tx_ms)) {
         return;
     }
 
     // RFC6298-style estimator (Karn-safe: retransmitted slots are marked ineligible).
-    if (!have_rtt_estimator_) {
-        srtt_ms_ = static_cast<float>(sample_ms);
-        rttvar_ms_ = static_cast<float>(sample_ms) * 0.5f;
-        have_rtt_estimator_ = true;
-    } else {
-        float sample_f = static_cast<float>(sample_ms);
-        float err = std::fabs(srtt_ms_ - sample_f);
-        rttvar_ms_ = 0.75f * rttvar_ms_ + 0.25f * err;
-        srtt_ms_ = 0.875f * srtt_ms_ + 0.125f * sample_f;
-    }
-
-    float rto_f = srtt_ms_ + 4.0f * rttvar_ms_;
-
-    // SRTT-aware floor: once we have RTT samples, let the timeout drop close to
-    // the actual round trip rather than staying pinned at config_.ack_timeout_ms / 2.
-    // For OFDM DQPSK R1/2 with window=4 the static floor is 2250ms, but observed
-    // RTTs are 400-700ms — paying 2.25s per lost-ACK recovery accounted for ~30s
-    // of unnecessary wait on a 50KB transfer. Bound to [600ms, 2500ms] so the
-    // estimator can adapt down on clean channels but stays safe on slow paths.
-    uint32_t floor_ms;
-    if (have_rtt_estimator_) {
-        uint32_t srtt_floor = static_cast<uint32_t>(srtt_ms_ * 1.5f + 0.5f);
-        floor_ms = std::clamp(srtt_floor, 600u, 2500u);
-    } else {
-        floor_ms = std::max(1200u, config_.ack_timeout_ms / 2);
-    }
-    // Never let the adaptive timeout drop below the static configured value.
-    // The static value is sized for the *worst-case burst RTT* including
-    // soundcard chain latency (see computeOfdmAckTimeoutMs). Adaptive RTT
-    // sampling sees per-frame RTT in the steady state which can be much
-    // shorter than the burst-end RTT, so without this clamp the timer fires
-    // before the last frame's ACK can return — causing spurious retx storms
-    // observed on real Mac<->Pi hardware after the tick-rate fix.
-    floor_ms = std::max(floor_ms, config_.ack_timeout_ms);
-    const uint32_t ceiling_ms = std::max<uint32_t>(12000u, config_.ack_timeout_ms);
-    adaptive_ack_timeout_ms_ = std::clamp(static_cast<uint32_t>(rto_f + 0.5f),
-                                          floor_ms, ceiling_ms);
+    const auto rto = arq_policy::updateRTO(
+        have_rtt_estimator_, srtt_ms_, rttvar_ms_, sample_ms, config_.ack_timeout_ms);
+    srtt_ms_ = rto.srtt_ms;
+    rttvar_ms_ = rto.rttvar_ms;
+    adaptive_ack_timeout_ms_ = rto.rto_ms;
+    have_rtt_estimator_ = true;
 
     LOG_MODEM(DEBUG, "SR-ARQ: RTT sample=%ums srtt=%.1f rttvar=%.1f rto=%ums",
               sample_ms, srtt_ms_, rttvar_ms_, adaptive_ack_timeout_ms_);
