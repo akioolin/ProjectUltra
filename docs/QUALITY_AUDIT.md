@@ -6,6 +6,7 @@ Last updated: 2026-04-30
 
 This is the current quality baseline and hardening backlog. `QUALITY_STRATEGY.md`
 defines the policy; this file tracks where the codebase stands against it.
+For module-specific behavior expectations, see `docs/COVERAGE_MAP.md`.
 
 ## Current Test Baseline
 
