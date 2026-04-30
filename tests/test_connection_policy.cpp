@@ -81,10 +81,10 @@ void test_ofdm_profile_selection() {
     CHECK(default_sack.delay_ms == 120 && default_sack.short_delay_ms == 0,
           "default OFDM SACK delay profile");
     auto near_sack = ofdmSackDelays(true, 12, 648);
-    CHECK(near_sack.delay_ms == 768 && near_sack.short_delay_ms == 120,
+    CHECK(near_sack.delay_ms == 5304 && near_sack.short_delay_ms == 120,
           "near-AWGN OFDM SACK delay profile");
     auto clamped_sack = ofdmSackDelays(true, 12, 2000);
-    CHECK(clamped_sack.delay_ms == 1000, "near-AWGN SACK delay high clamp");
+    CHECK(clamped_sack.delay_ms == 12000, "near-AWGN SACK delay high clamp");
 
     auto default_ack = ofdmAckRepeatProfile(Modulation::DQPSK, CodeRate::R1_2, false);
     CHECK(default_ack.count == 2 && default_ack.delay_ms == 220,

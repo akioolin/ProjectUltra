@@ -1004,9 +1004,9 @@ void Connection::enterConnected() {
             connection_policy::isNearAwgnOFDM(fading_index_, measured_snr_db_);
         arq_.setWindowSize(connection_policy::ofdmWindowSize(near_awgn_ofdm));
         arq_.setMaxRetries(15);     // More attempts compensate for ACK loss on fading
-        // The near-AWGN window keeps the pipe full, but the physical OFDM burst/interleave
-        // group is 4 frames. ACK at the burst boundary so the sender can refill
-        // immediately; the delayed SACK timer is only a tail fallback.
+        // The near-AWGN window keeps the pipe full. Keep in-stream ACKs on the
+        // delayed half-duplex path so hardware does not transmit SACKs into the
+        // sender's still-arriving widened burst; stream-tail ACKs stay fast.
         arq_.setAckBatchSize(connection_policy::ofdmAckBatchSize(near_awgn_ofdm));
         // Keep the failed window=4 SACK-delay canary rolled back. Burst-sized
         // SACK coalescing is enabled only for the widened near-AWGN path,

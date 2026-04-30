@@ -179,17 +179,19 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
         // ACK strategy for OFDM burst traffic:
         // - Immediate ACK on hole detection (out-of-order) — safety valve, MUST
         //   stay first in the condition.
-        // - Otherwise threshold-driven coalescing using ack_batch_size; falls
-        //   back to window_size when ack_batch_size = 0 (default), preserving
-        //   prior behavior bit for bit.
-        // - Short delayed timer (sack_delay_ms) covers tail of stream.
+        // - While MORE_FRAG is set, threshold ACKs stay on the delayed path so
+        //   a receiver does not transmit a control frame into the sender's
+        //   still-arriving physical burst.
+        // - At stream tail, threshold ACKs fire immediately; otherwise the
+        //   short delayed timer covers the final partial batch.
         if (new_frame) {
             frames_since_ack_++;
         }
 
         const uint32_t batch_threshold = arq_policy::effectiveAckBatchThreshold(
             config_.ack_batch_size, config_.window_size);
-        if (out_of_order || frames_since_ack_ >= batch_threshold) {
+        const bool batch_threshold_reached = frames_since_ack_ >= batch_threshold;
+        if (out_of_order || (batch_threshold_reached && !frame_more_frag)) {
             // Bump the trigger-reason counter BEFORE sendSack — out_of_order
             // takes priority because it's the immediate safety valve. Each
             // SACK send increments exactly one trigger counter.
