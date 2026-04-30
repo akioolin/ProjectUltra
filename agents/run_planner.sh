@@ -281,6 +281,7 @@ EOF
 
 open_prs_json="$REPORT_DIR/open_prs.json"
 open_prs_table="$REPORT_DIR/open_prs.tsv"
+open_hardware_issues_json="$REPORT_DIR/open_hardware_issues.json"
 queue_file="$REPORT_DIR/queues.txt"
 proposals_file="$REPORT_DIR/proposals.txt"
 
@@ -299,6 +300,16 @@ else
   echo "gh not found" > "$REPORT_DIR/gh_pr_list.err"
 fi
 
+if command -v gh >/dev/null 2>&1; then
+  if gh issue list --state open --label planner-proposal --label hardware --json number,title,url,labels --limit 50 > "$open_hardware_issues_json" 2>"$REPORT_DIR/gh_hardware_issue_list.err"; then
+    :
+  else
+    echo "[]" > "$open_hardware_issues_json"
+  fi
+else
+  echo "[]" > "$open_hardware_issues_json"
+fi
+
 if command -v jq >/dev/null 2>&1; then
   jq -r '
     .[] |
@@ -314,6 +325,11 @@ if command -v jq >/dev/null 2>&1; then
   ' "$open_prs_json" > "$open_prs_table"
 else
   : > "$open_prs_table"
+fi
+
+open_hardware_issue_count=0
+if command -v jq >/dev/null 2>&1; then
+  open_hardware_issue_count=$(jq 'length' "$open_hardware_issues_json")
 fi
 
 : > "$proposals_file"
@@ -337,13 +353,17 @@ latest_hw_summary=$(find agents/reports -maxdepth 2 -type f -path '*/summary.txt
   | tail -1 || true)
 
 latest_hw_state=""
-if [[ -z "$latest_hw_summary" ]]; then
-  write_hardware_due_proposal >> "$proposals_file"
-else
-  latest_hw_state=$(awk -F= '/^hardware_sentinel=/ {print $2}' "$latest_hw_summary" | tail -1)
-  if [[ "$latest_hw_state" != "pass" ]]; then
-    write_hardware_failure_proposal "$latest_hw_summary" "${latest_hw_state:-unknown}" >> "$proposals_file"
+if [[ "$open_hardware_issue_count" == "0" ]]; then
+  if [[ -z "$latest_hw_summary" ]]; then
+    write_hardware_due_proposal >> "$proposals_file"
+  else
+    latest_hw_state=$(awk -F= '/^hardware_sentinel=/ {print $2}' "$latest_hw_summary" | tail -1)
+    if [[ "$latest_hw_state" != "pass" ]]; then
+      write_hardware_failure_proposal "$latest_hw_summary" "${latest_hw_state:-unknown}" >> "$proposals_file"
+    fi
   fi
+elif [[ -n "$latest_hw_summary" ]]; then
+  latest_hw_state=$(awk -F= '/^hardware_sentinel=/ {print $2}' "$latest_hw_summary" | tail -1)
 fi
 
 queue_count=$(wc -l < "$queue_file" | tr -d ' ')
@@ -381,6 +401,7 @@ fi
   else
     echo "- no hardware sentinel report found"
   fi
+  echo "- open hardware planner issues: $open_hardware_issue_count"
   echo
   echo "## Proposals"
   echo
@@ -399,6 +420,7 @@ queue_count=$queue_count
 proposal_count=$proposal_count
 latest_hw_summary=$latest_hw_summary
 latest_hw_state=$latest_hw_state
+open_hardware_issue_count=$open_hardware_issue_count
 report=$report
 EOF
 

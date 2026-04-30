@@ -14,6 +14,8 @@ The model is intentionally conservative:
   modem source or auto-merge PRs.
 - Planner proposal files are regenerated each planner pass, and publishing
   deduplicates against existing open planner issues by title.
+- The planner suppresses new hardware proposals while any open hardware planner
+  issue exists, so hardware work stays single-threaded at the issue level.
 - Auto-commit and push are opt-in. Human review remains the merge gate.
 - Queued and archived task files are ignored by default so prompts/log excerpts
   are not accidentally committed.
