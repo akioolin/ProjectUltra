@@ -118,6 +118,8 @@ AGENT_PROMPT_MODE=file AGENT_CMD='your-agent --prompt-file' ./agents/run_next_ta
 - `AGENT_PR_DRAFT`: set `0` for ready-for-review PRs, default `1`.
 - `AGENT_COMMENT_ISSUE_RESULTS`: comment completion output back to the source
   GitHub issue for approved planner tasks, default `1`.
+- `AGENT_COMMENT_ISSUE_START`: comment immediately when a queued issue task
+  starts, including branch/report details, default `1`.
 - `AGENT_ALLOW_DIRTY`: set `1` to allow starting from a dirty worktree.
 - `AGENT_SLEEP_SECONDS`: watchdog sleep between attempts, default `300`.
 - `AGENT_HW_SENTINEL_MODE`: hardware sentinel mode, `quick`, `nightly`, or `full`.

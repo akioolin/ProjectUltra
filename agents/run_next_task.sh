@@ -35,6 +35,7 @@ RETURN_TO_BASE=${AGENT_RETURN_TO_BASE:-1}
 ALLOW_AGENT_COMMITS=${AGENT_ALLOW_AGENT_COMMITS:-0}
 TIMEOUT_SECONDS=${AGENT_TIMEOUT_SECONDS:-0}
 COMMENT_ISSUE_RESULTS=${AGENT_COMMENT_ISSUE_RESULTS:-1}
+COMMENT_ISSUE_START=${AGENT_COMMENT_ISSUE_START:-1}
 
 mkdir -p "$QUEUE_DIR" "$ARCHIVE_DIR" "$REPORT_ROOT" "$TMP_DIR"
 
@@ -156,6 +157,34 @@ fi
 git switch -c "$branch"
 
 pre_agent_head=$(git rev-parse HEAD)
+
+issue_start_comment_posted=0
+if [[ "$COMMENT_ISSUE_START" == "1" && -n "$source_issue_number" && "$DRY_RUN" != "1" ]]; then
+  if command -v gh >/dev/null 2>&1; then
+    start_body="$report_dir/issue_start.md"
+    {
+      echo "Agent task started for \`$AGENT_NAME\`."
+      echo
+      echo "- Task: \`$task_file\`"
+      echo "- Branch: \`$branch\`"
+      echo "- Report: \`$report_dir\`"
+      echo "- Base: \`$BASE_BRANCH\` at \`$pre_agent_head\`"
+      echo "- Hardware gate requested: \`$hardware_gate_requested\`"
+      if [[ "$hardware_gate_requested" == "1" ]]; then
+        echo "- Hardware gate command: \`$hardware_gate_cmd\`"
+      fi
+      echo "- Timeout seconds: \`$TIMEOUT_SECONDS\`"
+    } > "$start_body"
+
+    if gh issue comment "$source_issue_number" --body-file "$start_body" > "$report_dir/issue_start_comment.log" 2>&1; then
+      issue_start_comment_posted=1
+    else
+      echo "Failed to post start comment on issue #$source_issue_number. Log: $report_dir/issue_start_comment.log" >&2
+    fi
+  else
+    echo "AGENT_COMMENT_ISSUE_START=1 but gh is not installed; skipping start comment." >&2
+  fi
+fi
 
 set +e
 case "$AGENT_PROMPT_MODE" in
@@ -408,6 +437,7 @@ return_to_base=$returned_to_base
 allow_agent_commits=$ALLOW_AGENT_COMMITS
 timeout_seconds=$TIMEOUT_SECONDS
 source_issue=$source_issue_url
+issue_start_comment_posted=$issue_start_comment_posted
 issue_comment_posted=$issue_comment_posted
 EOF
 

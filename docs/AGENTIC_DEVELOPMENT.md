@@ -110,6 +110,10 @@ AGENT_APPROVERS=secup AGENT_APPROVAL_SLEEP_SECONDS=300 ./agents/approval_watchdo
 
 The approval watcher only writes local ignored task files into `agents/queue/`.
 It cannot merge PRs, push to `main`, or run shell commands from issue comments.
+When a worker picks up a queued issue, it posts a start comment with the branch
+and report directory before invoking the model. This makes it visible from
+GitHub that the task is actively running; completion comments still include the
+PR/report/gate results.
 
 ## Permissions
 
