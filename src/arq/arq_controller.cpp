@@ -71,6 +71,9 @@ void ARQController::sendData(ByteSpan data) {
     std::lock_guard<std::mutex> lock(impl_->mtx);
 
     size_t max_payload = impl_->builder.maxPayloadSize();
+    if (max_payload == 0) {
+        return;
+    }
     size_t offset = 0;
 
     while (offset < data.size()) {

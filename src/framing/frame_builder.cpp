@@ -1,6 +1,5 @@
 #include "ultra/arq.hpp"
 #include "ultra/modem.hpp"
-#include <cstring>
 #include <cmath>
 
 namespace ultra {
@@ -36,11 +35,37 @@ uint16_t crc16(ByteSpan data) {
 constexpr size_t HEADER_SIZE = 8;
 constexpr size_t CRC_SIZE = 2;
 
+Bytes buildEmptyFrame(FrameType type, uint16_t seq_num = 0, uint8_t mod_code = 0) {
+    Bytes frame;
+    frame.reserve(HEADER_SIZE + CRC_SIZE);
+
+    frame.push_back(static_cast<uint8_t>(type));
+    frame.push_back((seq_num >> 8) & 0xFF);
+    frame.push_back(seq_num & 0xFF);
+    frame.push_back(0);
+    frame.push_back(0);
+    frame.push_back(mod_code);
+
+    uint16_t hdr_crc = crc16(ByteSpan(frame.data(), 6));
+    frame.push_back((hdr_crc >> 8) & 0xFF);
+    frame.push_back(hdr_crc & 0xFF);
+
+    // Empty payload. The parser ignores payload CRC for zero-length payloads,
+    // but keep the frame layout uniform.
+    frame.push_back(0);
+    frame.push_back(0);
+
+    return frame;
+}
+
 } // anonymous namespace
 
 FrameBuilder::FrameBuilder(const ModemConfig& config) : config_(config) {}
 
 size_t FrameBuilder::maxPayloadSize() const {
+    if (config_.frame_size <= HEADER_SIZE + CRC_SIZE) {
+        return 0;
+    }
     return config_.frame_size - HEADER_SIZE - CRC_SIZE;
 }
 
@@ -138,40 +163,15 @@ Bytes FrameBuilder::buildAckFrame(uint16_t ack_seq, const ChannelQuality& qualit
 }
 
 Bytes FrameBuilder::buildNackFrame(uint16_t nack_seq) {
-    Bytes frame;
-    frame.reserve(HEADER_SIZE + CRC_SIZE);
-
-    frame.push_back(static_cast<uint8_t>(FrameType::NACK));
-    frame.push_back((nack_seq >> 8) & 0xFF);
-    frame.push_back(nack_seq & 0xFF);
-    frame.push_back(0);
-    frame.push_back(0);
-    frame.push_back(0);
-
-    uint16_t hdr_crc = crc16(ByteSpan(frame.data(), 6));
-    frame.push_back((hdr_crc >> 8) & 0xFF);
-    frame.push_back(hdr_crc & 0xFF);
-
-    // Empty payload, just CRC
-    frame.push_back(0);
-    frame.push_back(0);
-
-    return frame;
+    return buildEmptyFrame(FrameType::NACK, nack_seq);
 }
 
 Bytes FrameBuilder::buildSyncFrame() {
-    Bytes frame;
-    frame.push_back(static_cast<uint8_t>(FrameType::SYNC));
-    // Sync frame is mostly handled by preamble, this is just a marker
-    for (int i = 0; i < 7; ++i) frame.push_back(0);
-    return frame;
+    return buildEmptyFrame(FrameType::SYNC);
 }
 
 Bytes FrameBuilder::buildProbeFrame() {
-    Bytes frame;
-    frame.push_back(static_cast<uint8_t>(FrameType::PROBE));
-    for (int i = 0; i < 7; ++i) frame.push_back(0);
-    return frame;
+    return buildEmptyFrame(FrameType::PROBE);
 }
 
 Bytes FrameBuilder::buildConnectFrame() {
@@ -207,10 +207,7 @@ Bytes FrameBuilder::buildConnectFrame() {
 }
 
 Bytes FrameBuilder::buildDisconnectFrame() {
-    Bytes frame;
-    frame.push_back(static_cast<uint8_t>(FrameType::DISCONNECT));
-    for (int i = 0; i < 7; ++i) frame.push_back(0);
-    return frame;
+    return buildEmptyFrame(FrameType::DISCONNECT);
 }
 
 // ============ Frame Parser ============

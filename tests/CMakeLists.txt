@@ -39,6 +39,10 @@ add_executable(test_file_transfer_controller test_file_transfer_controller.cpp)
 target_link_libraries(test_file_transfer_controller PRIVATE ultra_core)
 add_test(NAME FileTransferController COMMAND test_file_transfer_controller)
 
+add_executable(test_legacy_frame_builder test_legacy_frame_builder.cpp)
+target_link_libraries(test_legacy_frame_builder PRIVATE ultra_core)
+add_test(NAME LegacyFrameBuilder COMMAND test_legacy_frame_builder)
+
 add_executable(test_interleaver test_interleaver.cpp)
 target_link_libraries(test_interleaver PRIVATE ultra_core)
 add_test(NAME Interleaver COMMAND test_interleaver)
