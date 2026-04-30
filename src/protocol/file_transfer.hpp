@@ -154,6 +154,7 @@ private:
     uint32_t rx_expected_size_ = 0;  // Original uncompressed size
     uint32_t rx_expected_crc_ = 0;
     uint8_t rx_flags_ = 0;     // FileFlags from FILE_START
+    bool rx_final_chunk_seen_ = false;
     std::map<uint32_t, Bytes> rx_pending_chunks_;  // Out-of-order chunks buffered by offset
 
     // Callbacks

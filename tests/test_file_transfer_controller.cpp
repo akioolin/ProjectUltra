@@ -1,0 +1,149 @@
+#include "protocol/file_transfer.hpp"
+
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <utility>
+#include <vector>
+
+using namespace ultra;
+using namespace ultra::protocol;
+
+namespace {
+
+int tests_run = 0;
+int tests_failed = 0;
+
+#define CHECK(cond, msg) \
+    do { \
+        ++tests_run; \
+        if (!(cond)) { \
+            ++tests_failed; \
+            std::cout << "FAIL: " << msg << "\n"; \
+            return; \
+        } \
+    } while (0)
+
+struct TxChunk {
+    Bytes payload;
+    bool more_data = false;
+};
+
+Bytes makeCompressiblePayload() {
+    Bytes data;
+    const std::string phrase =
+        "ProjectUltra HF modem file-transfer compressed reorder regression.\n";
+    for (int i = 0; i < 512; ++i) {
+        data.insert(data.end(), phrase.begin(), phrase.end());
+        data.push_back(static_cast<uint8_t>('A' + (i % 4)));
+    }
+    return data;
+}
+
+bool writeFile(const std::filesystem::path& path, const Bytes& data) {
+    std::ofstream out(path, std::ios::binary);
+    if (!out.good()) {
+        return false;
+    }
+    out.write(reinterpret_cast<const char*>(data.data()), data.size());
+    return out.good();
+}
+
+Bytes readFile(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in.good()) {
+        return {};
+    }
+
+    const std::streamsize size = in.tellg();
+    in.seekg(0, std::ios::beg);
+
+    Bytes data(static_cast<size_t>(size));
+    in.read(reinterpret_cast<char*>(data.data()), size);
+    return data;
+}
+
+std::vector<TxChunk> collectChunks(FileTransferController& tx) {
+    std::vector<TxChunk> chunks;
+    while (tx.hasMoreChunks()) {
+        Bytes payload = tx.getNextChunk();
+        if (!payload.empty()) {
+            chunks.push_back({std::move(payload), tx.hasMoreChunks()});
+        }
+    }
+    return chunks;
+}
+
+void test_compressed_final_chunk_out_of_order_finalizes() {
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() /
+        "ultra_file_transfer_controller_test";
+    const std::filesystem::path tx_dir = root / "tx";
+    const std::filesystem::path rx_dir = root / "rx";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(tx_dir);
+    std::filesystem::create_directories(rx_dir);
+
+    const Bytes original = makeCompressiblePayload();
+    const std::filesystem::path src_path = tx_dir / "compressed_reorder.txt";
+    CHECK(writeFile(src_path, original), "write source file");
+
+    FileTransferController tx;
+    tx.setMaxChunkPayload(37);  // 32 compressed data bytes per FILE_DATA chunk.
+    CHECK(tx.startSend(src_path.string()), "start compressed send");
+
+    std::vector<TxChunk> chunks = collectChunks(tx);
+    CHECK(chunks.size() >= 4, "compressed transfer should span metadata plus multiple data chunks");
+    CHECK(chunks.front().payload[0] == static_cast<uint8_t>(PayloadType::FILE_START),
+          "first chunk is metadata");
+    CHECK(chunks.back().payload[0] == static_cast<uint8_t>(PayloadType::FILE_DATA),
+          "last chunk is file data");
+    CHECK(!chunks.back().more_data, "last chunk carries final marker");
+
+    FileTransferController rx;
+    rx.setReceiveDirectory(rx_dir.string());
+
+    bool callback_called = false;
+    bool callback_success = false;
+    std::string received_path;
+    rx.setReceivedCallback([&](const std::string& path, bool success) {
+        callback_called = true;
+        callback_success = success;
+        received_path = path;
+    });
+
+    CHECK(rx.processPayload(chunks.front().payload, chunks.front().more_data),
+          "metadata accepted");
+
+    const size_t last = chunks.size() - 1;
+    CHECK(rx.processPayload(chunks[last].payload, chunks[last].more_data),
+          "out-of-order final chunk accepted");
+    CHECK(!callback_called, "out-of-order final chunk should not finalize before gaps close");
+
+    for (size_t i = 1; i < last; ++i) {
+        CHECK(rx.processPayload(chunks[i].payload, chunks[i].more_data),
+              "gap-filling chunk accepted");
+    }
+
+    CHECK(callback_called, "receiver callback fired after final buffered chunk drained");
+    CHECK(callback_success, "receiver reported success");
+    CHECK(readFile(received_path) == original, "received file matches original payload");
+
+    std::filesystem::remove_all(root);
+}
+
+}  // namespace
+
+int main() {
+    test_compressed_final_chunk_out_of_order_finalizes();
+
+    if (tests_failed != 0) {
+        std::cout << "FileTransferController: " << (tests_run - tests_failed)
+                  << "/" << tests_run << " passed\n";
+        return 1;
+    }
+
+    std::cout << "FileTransferController: " << tests_run << "/" << tests_run << " passed\n";
+    return 0;
+}

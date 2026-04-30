@@ -363,6 +363,8 @@ bool FileTransferController::processFileStart(const Bytes& payload) {
     }
 
     rx_data_.clear();
+    rx_pending_chunks_.clear();
+    rx_final_chunk_seen_ = false;
     rx_data_.reserve(rx_expected_size_);  // Reserve for decompressed size as estimate
     state_ = FileTransferState::RECEIVING;
 
@@ -388,6 +390,9 @@ bool FileTransferController::processFileData(const Bytes& payload, bool more_dat
     // Append data (skip type and offset bytes)
     const uint8_t* data = payload.data() + 5;
     size_t data_len = payload.size() - 5;
+    if (!more_data) {
+        rx_final_chunk_seen_ = true;
+    }
 
     // With Selective Repeat ARQ (window > 1), chunks can arrive out of order.
     // Buffer out-of-order chunks and insert them when the gap is filled.
@@ -426,6 +431,7 @@ bool FileTransferController::processFileData(const Bytes& payload, bool more_dat
 
     const bool compressed = (rx_flags_ & FileFlags::COMPRESSED) != 0;
     const bool size_reached = !compressed && rx_data_.size() >= rx_expected_size_;
+    const bool compressed_complete = compressed && rx_final_chunk_seen_ && rx_pending_chunks_.empty();
 
     // For uncompressed files, trust explicit expected size more than MORE_FRAG.
     if (!compressed && !more_data && rx_data_.size() < rx_expected_size_) {
@@ -437,7 +443,7 @@ bool FileTransferController::processFileData(const Bytes& payload, bool more_dat
     // Finalization trigger:
     // - Compressed: still rely on MORE_FRAG (we don't know compressed size a priori)
     // - Uncompressed: finalize once expected byte count is reached
-    if ((compressed && !more_data) || (!compressed && size_reached)) {
+    if (compressed_complete || (!compressed && size_reached)) {
         Bytes final_data;
 
         // Decompress if needed
@@ -543,6 +549,7 @@ void FileTransferController::resetRxState() {
     rx_expected_size_ = 0;
     rx_expected_crc_ = 0;
     rx_flags_ = 0;
+    rx_final_chunk_seen_ = false;
     state_ = FileTransferState::IDLE;
 }
 
