@@ -36,6 +36,9 @@ Agent infrastructure added:
 - `agents/hardware_watchdog.sh`
 - `agents/run_planner.sh`
 - `agents/planner_watchdog.sh`
+- `agents/publish_planner_proposals.sh`
+- `agents/process_approved_proposals.sh`
+- `agents/approval_watchdog.sh`
 - `agents/task_template.md`
 - `agents/queue/`
 - `agents/archive/`
@@ -73,7 +76,7 @@ Passed locally after agent-infrastructure changes:
 
 ```bash
 bash -n agents/run_local_gate.sh agents/run_hardware_smoke.sh agents/run_next_task.sh agents/watchdog.sh
-bash -n agents/run_hardware_sentinel.sh agents/hardware_watchdog.sh agents/run_planner.sh agents/planner_watchdog.sh
+bash -n agents/run_hardware_sentinel.sh agents/hardware_watchdog.sh agents/run_planner.sh agents/planner_watchdog.sh agents/publish_planner_proposals.sh agents/process_approved_proposals.sh agents/approval_watchdog.sh
 python3 -m json.tool agents/permissions/claude-settings.example.json
 python3 -m json.tool .claude/settings.local.json
 ruby -e 'require "yaml"; YAML.load_file(".github/workflows/build-matrix.yml")'
@@ -90,6 +93,8 @@ Planner/hardware sentinel validation:
 ```bash
 AGENT_HW_SENTINEL_DRY_RUN=1 AGENT_HW_SENTINEL_MODE=quick AGENT_HW_SENTINEL_AUDIO_CHECK=0 ./agents/run_hardware_sentinel.sh
 AGENT_PLANNER_REPORT_DIR=/tmp/projectultra_planner_report AGENT_PLANNER_PROPOSAL_DIR=/tmp/projectultra_planner_proposals ./agents/run_planner.sh
+AGENT_PUBLISH_DRY_RUN=1 AGENT_PLANNER_PROPOSAL_DIR=/tmp/projectultra_planner_proposals ./agents/publish_planner_proposals.sh
+AGENT_APPROVAL_DRY_RUN=1 AGENT_APPROVERS=secup ./agents/process_approved_proposals.sh
 ./agents/run_local_gate.sh
 ```
 
@@ -116,7 +121,9 @@ Optional additional sessions:
 - `ultra-hardware-watch`: runs `agents/hardware_watchdog.sh` for periodic
   report-only hardware sentinel checks.
 - `ultra-planner-watch`: runs `agents/planner_watchdog.sh` for periodic
-  report/proposal generation.
+  report/proposal generation and, when enabled, GitHub Issue publication.
+- `ultra-approval-watch`: runs `agents/approval_watchdog.sh` to turn
+  allowlisted GitHub approvals into local queue files.
 
 Both agents are configured to create draft PRs from `agent/*` branches, not push
 directly to `main`. The runner owns `git add`, `git commit`, `git push`, and
@@ -194,6 +201,12 @@ Planner lane:
 AGENT_PLANNER_SLEEP_SECONDS=1800 ./agents/planner_watchdog.sh
 ```
 
+Remote approval lane:
+
+```bash
+AGENT_APPROVERS=secup AGENT_APPROVAL_SLEEP_SECONDS=300 ./agents/approval_watchdog.sh
+```
+
 ## GitHub Requirements Before Sleep-Safe Mode
 
 Protect `main`:
@@ -230,3 +243,7 @@ The planner loop is allowed to run continuously because it is proposal-only by
 default. Its output is local and ignored under `agents/planner/proposals/`.
 Humans must promote proposals into `agents/queue/` before coding agents execute
 them.
+
+Remote approvals are GitHub Issue comments. Only exact usernames listed in
+`AGENT_APPROVERS` are honored. The approval watcher queues tasks locally only;
+it does not merge PRs or push to `main`.

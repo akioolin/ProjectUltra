@@ -51,6 +51,18 @@ Run the planner once:
 ./agents/run_planner.sh
 ```
 
+Publish planner proposals as GitHub Issues:
+
+```bash
+./agents/publish_planner_proposals.sh
+```
+
+Process allowlisted GitHub approvals:
+
+```bash
+AGENT_APPROVERS=secup ./agents/process_approved_proposals.sh
+```
+
 Run a hardware sentinel once:
 
 ```bash
@@ -82,6 +94,9 @@ AGENT_PROMPT_MODE=file AGENT_CMD='your-agent --prompt-file' ./agents/run_next_ta
 - `AGENT_SLEEP_SECONDS`: watchdog sleep between attempts, default `300`.
 - `AGENT_HW_SENTINEL_MODE`: hardware sentinel mode, `quick`, `nightly`, or `full`.
 - `AGENT_PLANNER_SLEEP_SECONDS`: planner watchdog sleep interval.
+- `AGENT_PLANNER_PUBLISH_ISSUES`: set `1` to publish planner proposals as GitHub Issues after each planner run.
+- `AGENT_APPROVERS`: comma-separated GitHub usernames allowed to approve planner issues.
+- `AGENT_APPROVAL_SLEEP_SECONDS`: approval watchdog sleep interval.
 
 The runner allows pending files under `agents/queue/`, `agents/reports/`, and
 `agents/tmp/`. Other dirty files are rejected unless `AGENT_ALLOW_DIRTY=1`.

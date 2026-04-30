@@ -11,6 +11,9 @@ Approved categories:
 - Hardware gates: `./tools/check_hw_audio_path.sh`, `./tools/run_hw_test.sh`, `./agents/run_hardware_smoke.sh`.
 - Safe branch workflow: `git switch -c`, `git add`, `git commit`.
 - PR workflow: `git push -u origin agent/*`, `gh pr create`, `gh pr view`, `gh pr status`.
+- Agent control plane, when running trusted watchdogs only, not worker agents:
+  `./agents/publish_planner_proposals.sh`,
+  `./agents/process_approved_proposals.sh`, `./agents/approval_watchdog.sh`.
 
 Require human approval:
 
@@ -19,6 +22,7 @@ Require human approval:
 - network access
 - edits outside this repository
 - hardware tests longer than the default smoke
+- direct `gh issue` commands outside the maintained approval scripts
 
 Never pre-approve:
 

@@ -19,6 +19,14 @@ while true; do
 
   if [[ "$rc" -ne 0 ]]; then
     echo "run_planner exited with rc=$rc" >&2
+  elif [[ "${AGENT_PLANNER_PUBLISH_ISSUES:-0}" == "1" ]]; then
+    set +e
+    ./agents/publish_planner_proposals.sh
+    publish_rc=$?
+    set -e
+    if [[ "$publish_rc" -ne 0 ]]; then
+      echo "publish_planner_proposals exited with rc=$publish_rc" >&2
+    fi
   fi
 
   if [[ "$MAX_ITERATIONS" != "0" && "$iteration" -ge "$MAX_ITERATIONS" ]]; then

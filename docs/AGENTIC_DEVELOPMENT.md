@@ -59,6 +59,40 @@ into `agents/queue/claude/` or `agents/queue/codex/` before worker agents run it
 Keep auto-queueing disabled until several planner reports have shown good
 judgment.
 
+For remote review, publish proposals as GitHub Issues:
+
+```bash
+./agents/publish_planner_proposals.sh
+```
+
+Approve from GitHub by commenting exactly one of:
+
+```text
+/approve codex
+/approve claude
+/hold
+/reject
+```
+
+Only usernames listed in `AGENT_APPROVERS` on the agentic laptop are honored.
+This is an explicit allowlist, not "any commenter" and not merely GitHub's
+author association. Public comments from other users are ignored.
+
+Process approvals once:
+
+```bash
+AGENT_APPROVERS=secup ./agents/process_approved_proposals.sh
+```
+
+Run the approval loop:
+
+```bash
+AGENT_APPROVERS=secup AGENT_APPROVAL_SLEEP_SECONDS=300 ./agents/approval_watchdog.sh
+```
+
+The approval watcher only writes local ignored task files into `agents/queue/`.
+It cannot merge PRs, push to `main`, or run shell commands from issue comments.
+
 ## Permissions
 
 Use relaxed permissions for maintained commands only. Do not grant blanket
