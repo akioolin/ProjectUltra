@@ -117,12 +117,22 @@ ensure_label test-only "bfd4f2" "Test-only or coverage-related"
 
 published=0
 skipped=0
+seen_titles=$(mktemp)
+trap 'rm -f "$seen_titles"' EXIT
 
 shopt -s nullglob
 for proposal in "$PROPOSAL_DIR"/*.md; do
   [[ -f "$proposal" ]] || continue
   title=$(proposal_title "$proposal")
   labels=$(proposal_labels "$proposal" "$title")
+
+  if grep -Fx -q "$title" "$seen_titles"; then
+    echo "skip duplicate proposal in this publish pass: $title"
+    skipped=$((skipped + 1))
+    continue
+  fi
+  printf '%s\n' "$title" >> "$seen_titles"
+
   existing=$(existing_open_issue_number "$title")
 
   if [[ -n "$existing" ]]; then
