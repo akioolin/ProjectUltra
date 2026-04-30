@@ -9,7 +9,7 @@ defines the policy; this file tracks where the codebase stands against it.
 
 ## Current Test Baseline
 
-Registered CTest targets: 23
+Registered CTest targets: 24
 
 Current maintained local gates:
 
@@ -23,9 +23,9 @@ git diff --check
 ```
 
 Latest measured coverage after the current hardening pass:
-- Line: 52.93%
-- Function: 57.42%
-- Branch: 42.04%
+- Line: 53.31%
+- Function: 57.73%
+- Branch: 42.54%
 
 This is a baseline, not an acceptable final state for critical modem code.
 
@@ -46,7 +46,8 @@ Measured from `build-coverage/coverage.txt`.
 | `src/dsp` | 91.23% | 92.68% | 85.85% | Strong direct primitive coverage; FFT/resampler edge cases remain |
 | `src/gui/modem/streaming_buffer_policy.hpp` | 95.92% | 100.00% | 83.33% | Extracted and tested from `feedAudio()` backlog/overflow policy |
 | `src/gui/modem/streaming_decode_policy.hpp` | 93.55% | 100.00% | 90.00% | Extracted and tested from decode sample-sizing policy |
-| `src/gui/modem/streaming_decoder.cpp` | 30.78% | 57.14% | 19.46% | Geometry/config and sample policies covered; decode state machine still needs extraction |
+| `src/gui/modem/streaming_signal_policy.hpp` | 100.00% | 100.00% | 91.94% | Extracted and tested from LLR, LTS, light-sync, and CFO sanity policies |
+| `src/gui/modem/streaming_decoder.cpp` | 30.73% | 58.33% | 19.17% | Geometry/config, buffer, sample, and signal policies covered; decode state machine still needs extraction |
 | `src/gui/modem/streaming_encoder.cpp` | 35.75% | 65.00% | 18.06% | Geometry/config covered; frame encoding branches still need extraction |
 
 ## Highest-Risk Files
@@ -93,7 +94,7 @@ smaller units with direct tests around their real invariants.
 - Extract and test frame candidate selection.
 - Extract and test 1-CW control decode retry policy.
 - Extract and test multi-CW decode/deinterleave decisions.
-- Buffer overflow/backlog accounting tests.
+- Add deterministic streaming false-lock/ACK-loss regression traces from hardware logs.
 
 6. CI and tooling:
 - Keep CTest, sanitizer, and coverage gates mandatory.
@@ -119,6 +120,9 @@ smaller units with direct tests around their real invariants.
 - Streaming RX decode sample-sizing policy is extracted into
   `streaming_decode_policy.hpp` with robust OFDM control-frame sizing and
   pending-CW/burst/control-peek selection tests.
+- Streaming RX signal-decision policy is extracted into
+  `streaming_signal_policy.hpp` with direct tests for LLR quality gates, invalid
+  OFDM LTS training rejection, light-sync weak acceptance, and sync CFO clamping.
 
 ## Definition Of Progress
 

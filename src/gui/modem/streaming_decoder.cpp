@@ -15,6 +15,7 @@
 #include "streaming_decoder.hpp"
 #include "streaming_buffer_policy.hpp"
 #include "streaming_decode_policy.hpp"
+#include "streaming_signal_policy.hpp"
 #include "gui/startup_trace.hpp"
 #include "waveform/ofdm_cox_waveform.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
@@ -37,6 +38,7 @@ namespace gui {
 namespace v2 = protocol::v2;
 namespace buffer_policy = streaming_buffer_policy;
 namespace decode_policy = streaming_decode_policy;
+namespace signal_policy = streaming_signal_policy;
 
 namespace {
 
@@ -612,36 +614,15 @@ void StreamingDecoder::searchForSync() {
     // because stale LTS phases can't be recovered by DD tracking alone.
     const bool is_coherent = (current_modulation_ == Modulation::QPSK ||
                               current_modulation_ == Modulation::BPSK);
-    const float fading_hint = last_fading_index_.load();
-    const float snr_hint = last_snr_.load();
     // Narrowband LTS has ~35% of wideband energy (21 vs 59 carriers) → lower correlation peak
-    bool is_narrowband = (mode_ == protocol::WaveformMode::OFDM_NARROW);
+    const bool is_narrowband = (mode_ == protocol::WaveformMode::OFDM_NARROW);
     // LTS sync thresholds.
     // True LTS peaks: 0.85-0.99 (clean), but Moderate SNR12 hardware traces
     // show real tail DATA can dip to ~0.52-0.56. Data autocorrelation noise is
     // usually 0.20-0.45; candidates admitted near the low end still pass the
     // downstream LLR/LDPC gates before they can be accepted as frames.
-    float light_sync_min_confidence;
-    float weak_sync_floor;
-    if (is_coherent) {
-        light_sync_min_confidence = 0.90f;
-        weak_sync_floor = 0.85f;
-    } else if (is_narrowband) {
-        light_sync_min_confidence = 0.50f;
-        weak_sync_floor = 0.40f;
-    } else if (connected_) {
-        light_sync_min_confidence = 0.52f;
-        weak_sync_floor = 0.45f;
-    } else {
-        light_sync_min_confidence = 0.65f;
-        weak_sync_floor = 0.55f;
-    }
-
-    if (!is_coherent && connected_ && sync_reject_streak_ >= 5) {
-        float extra_relax = std::min(0.10f,
-                                     0.02f * static_cast<float>(sync_reject_streak_ - 4));
-        light_sync_min_confidence = std::max(0.45f, light_sync_min_confidence - extra_relax);
-    }
+    const auto light_sync_thresholds = signal_policy::lightSyncThresholds(
+        is_coherent, is_narrowband, connected_, sync_reject_streak_);
 
     if (connected_ && waveform_->supportsDataPreamble()) {
         float known_cfo = last_cfo_.load();
@@ -650,33 +631,26 @@ void StreamingDecoder::searchForSync() {
             sync_result, known_cfo, CORR_DETECT_THRESHOLD);
 
         // Reject clear false positives (noise floor is ~0.2-0.4)
-        bool weak_accept = false;
-        if (found && sync_result.correlation < light_sync_min_confidence) {
-            bool allow_weak_accept = !is_coherent &&
-                                     connected_ &&
-                                     sync_reject_streak_ >= 3 &&
-                                     sync_result.correlation >= std::max(weak_sync_floor,
-                                                                          light_sync_min_confidence - 0.08f);
-            if (allow_weak_accept) {
-                weak_accept = true;
+        auto sync_decision = signal_policy::evaluateLightSyncCandidate(
+            found, sync_result.correlation, is_coherent, connected_,
+            sync_reject_streak_, light_sync_thresholds);
+        if (found && sync_result.correlation < light_sync_thresholds.min_confidence) {
+            if (sync_decision.weak_accept) {
                 LOG_MODEM(INFO, "[%s] DATA sync weak-accepted (corr=%.2f < %.2f, streak=%llu)",
-                          log_prefix_.c_str(), sync_result.correlation, light_sync_min_confidence,
+                          log_prefix_.c_str(), sync_result.correlation,
+                          light_sync_thresholds.min_confidence,
                           static_cast<unsigned long long>(sync_reject_streak_));
-            } else {
-                sync_reject_streak_++;
+            } else if (sync_decision.rejected) {
                 LOG_MODEM(INFO, "[%s] DATA sync rejected (corr=%.2f < %.2f, streak=%llu)",
-                          log_prefix_.c_str(), sync_result.correlation, light_sync_min_confidence,
-                          static_cast<unsigned long long>(sync_reject_streak_));
-                found = false;
+                          log_prefix_.c_str(), sync_result.correlation,
+                          light_sync_thresholds.min_confidence,
+                          static_cast<unsigned long long>(sync_decision.next_reject_streak));
             }
         }
+        found = sync_decision.found;
+        sync_reject_streak_ = sync_decision.next_reject_streak;
 
         if (found) {
-            if (weak_accept) {
-                sync_reject_streak_ = std::max<uint64_t>(1, sync_reject_streak_ / 2);
-            } else {
-                sync_reject_streak_ = 0;
-            }
             LOG_MODEM(INFO, "[%s] DATA sync detected (training only, known CFO=%.1f Hz, corr=%.2f)",
                       log_prefix_.c_str(), known_cfo, sync_result.correlation);
         }
@@ -787,15 +761,13 @@ void StreamingDecoder::searchForSync() {
         float new_cfo = sync_result.cfo_hz;
         float known_cfo = last_cfo_.load();
 
-        if (connected_ && std::abs(known_cfo) > 0.01f) {
-            // Limit CFO change to ±1 Hz per frame (oscillator drift is slow)
-            constexpr float MAX_CFO_DRIFT_HZ = 1.0f;
-            float cfo_diff = new_cfo - known_cfo;
-            if (std::abs(cfo_diff) > MAX_CFO_DRIFT_HZ) {
-                LOG_MODEM(INFO, "[%s] CFO sanity: measured=%.1f, known=%.1f, diff=%.1f > %.1f, using known",
-                          log_prefix_.c_str(), new_cfo, known_cfo, cfo_diff, MAX_CFO_DRIFT_HZ);
-                new_cfo = known_cfo;  // Trust established CFO over noisy measurement
-            }
+        const auto cfo_decision = signal_policy::limitConnectedCFODrift(
+            connected_, new_cfo, known_cfo);
+        if (cfo_decision.clamped) {
+            LOG_MODEM(INFO, "[%s] CFO sanity: measured=%.1f, known=%.1f, diff=%.1f > %.1f, using known",
+                      log_prefix_.c_str(), new_cfo, known_cfo, cfo_decision.diff_hz,
+                      signal_policy::kMaxSyncCFODriftHz);
+            new_cfo = cfo_decision.accepted_cfo;  // Trust established CFO over noisy measurement
         }
 
         sync_cfo_ = new_cfo;
@@ -888,28 +860,6 @@ void StreamingDecoder::checkIfReadyToDecode() {
 static std::atomic<int> g_robust_retry_hits{0};   // CW0 peek: retry succeeded after initial fail
 static std::atomic<int> g_salvage_hits{0};         // 1-CW control salvaged from 4-CW path
 
-// LLR pre-screen for 1-CW decode probes. Returns the mean |LLR| across the
-// first cw_size soft bits. Hardware Good-fading traces showed real ACKs can
-// dip to |llr|_avg ~= 1.8, while obvious false locks cluster around <= 1.0.
-// Keep this gate looser than the 4-CW data escalation gate so control frames
-// get a chance to use their R1/4 LDPC protection under fades.
-//
-// Used at the control-first ACK path and CW0 peek call sites — see
-// streaming_decoder.cpp:1130-area and :1294-area. Skipping the LDPC call
-// when avg < threshold saves ~85ms per false sync (the decoder's 1 +
-// max_retries iteration sweep).
-static float computeLLRAbsAvg(const float* bits, size_t count) {
-    if (count == 0) return 0.0f;
-    float sum = 0.0f;
-    for (size_t i = 0; i < count; ++i) sum += std::abs(bits[i]);
-    return sum / static_cast<float>(count);
-}
-
-// Threshold tuned from Mac<->Pi hardware Good-fading traces: 2.0 skipped real
-// tail ACKs at |LLR|~=1.8 and caused deterministic ARQ timeouts. 1.5 still
-// avoids the very low-confidence false locks that caused decode backlog.
-static constexpr float MIN_LLR_FOR_1CW_DECODE = 1.5f;
-
 static bool hasInvalidOFDMTraining(IWaveform* waveform, bool is_ofdm, bool connected,
                                    float& lts_signal_power, float& lts_channel_mag) {
     lts_signal_power = 1.0f;
@@ -920,17 +870,8 @@ static bool hasInvalidOFDMTraining(IWaveform* waveform, bool is_ofdm, bool conne
 
     lts_signal_power = waveform->getLastLTSSignalPower();
     lts_channel_mag = waveform->getLastLTSChannelMagnitude();
-    if (!std::isfinite(lts_signal_power) || !std::isfinite(lts_channel_mag)) {
-        return true;
-    }
-
-    // Real hardware ACK/DATA frames show LTS signal power orders of magnitude
-    // above this. False locks on silence/noise report signal≈0 and |H|≈0, but
-    // can still produce clipped soft bits that pass LLR-only gates.
-    constexpr float MIN_LTS_SIGNAL_POWER = 1.0e-3f;
-    constexpr float MIN_LTS_CHANNEL_MAG = 5.0e-2f;
-    return lts_signal_power < MIN_LTS_SIGNAL_POWER &&
-           lts_channel_mag < MIN_LTS_CHANNEL_MAG;
+    return signal_policy::invalidOFDMLTSTraining(
+        is_ofdm, connected, lts_signal_power, lts_channel_mag);
 }
 
 // Robust single-CW LDPC decode with Phase 0 decoder diversity (up to 4 retries)
@@ -1237,9 +1178,9 @@ void StreamingDecoder::decodeCurrentFrame() {
                 // when the soft bits look like noise. Real ACKs cluster well
                 // above this threshold; false-sync attempts cluster near 1.
                 std::pair<bool, Bytes> control_decode = {false, {}};
-                const float llr_avg = computeLLRAbsAvg(
+                const float llr_avg = signal_policy::meanAbsLLR(
                     control_soft_bits.data(), CONTROL_LDPC_BLOCK);
-                if (llr_avg < MIN_LLR_FOR_1CW_DECODE) {
+                if (llr_avg < signal_policy::kMinLLRForSingleCWDecode) {
                     ultra::timing::globalDecoderProfile()
                         .low_llr_1cw_skipped_control_first
                         .fetch_add(1, std::memory_order_relaxed);
@@ -1364,29 +1305,15 @@ void StreamingDecoder::decodeCurrentFrame() {
     // confidence is a reliable false-lock signature. A near-zero population is
     // only decisive when it dominates the CW; valid short/tail DATA frames can
     // show a modest near-zero tail after a strong LTS and still decode cleanly.
-    constexpr float MIN_PRESYNC_LLR = 1.5f;
-    constexpr float NEAR_ZERO_LLR = 0.1f;
-    constexpr float MAX_ERASURE_LIKE_FRACTION = 0.30f;
     {
-        const size_t llr_n = std::min(soft_bits.size(), size_t(648));
-        float llr_sum = 0.0f;
-        size_t near_zero_count = 0;
-        for (size_t i = 0; i < llr_n; ++i) {
-            const float llr_abs = std::abs(soft_bits[i]);
-            llr_sum += llr_abs;
-            if (llr_abs <= NEAR_ZERO_LLR) {
-                ++near_zero_count;
-            }
-        }
-        const float llr_avg = llr_n > 0 ? llr_sum / static_cast<float>(llr_n) : 0.0f;
-        const float near_zero_fraction = llr_n > 0
-            ? static_cast<float>(near_zero_count) / static_cast<float>(llr_n)
-            : 1.0f;
-        if (llr_avg < MIN_PRESYNC_LLR || near_zero_fraction > MAX_ERASURE_LIKE_FRACTION) {
+        const auto llr_quality = signal_policy::evaluatePreSyncLLR(
+            soft_bits.data(), soft_bits.size(), v2::LDPC_CODEWORD_BITS);
+        if (llr_quality.reject_as_false_lock) {
             LOG_MODEM(INFO, "[%s] False chirp lock rejected: |llr|_avg=%.2f, "
                       "near_zero=%zu/%zu (%.1f%%), soft_bits=%zu — re-searching",
-                      log_prefix_.c_str(), llr_avg, near_zero_count, llr_n,
-                      near_zero_fraction * 100.0f, soft_bits.size());
+                      log_prefix_.c_str(), llr_quality.mean_abs,
+                      llr_quality.near_zero_count, llr_quality.count,
+                      llr_quality.near_zero_fraction * 100.0f, soft_bits.size());
             advancePastFalseOFDMLock();
             state_ = DecoderState::SEARCHING;
             return;
@@ -1513,15 +1440,9 @@ void StreamingDecoder::decodeCurrentFrame() {
         // so this gate stays permissive and lets LDPC be the final arbiter.
         // Escalating on garbage wastes ~1.5s on 4x failed LDPC (50 iters each),
         // blocking the decoder from processing real frames arriving in the buffer.
-        float llr_abs_sum = 0.0f;
-        size_t llr_count = std::min(soft_bits.size(), LDPC_BLOCK);
-        for (size_t i = 0; i < llr_count; ++i) {
-            llr_abs_sum += std::abs(soft_bits[i]);
-        }
-        float llr_abs_avg = llr_abs_sum / static_cast<float>(llr_count);
-
-        constexpr float MIN_LLR_FOR_ESCALATION = 1.5f;
-        if (llr_abs_avg < MIN_LLR_FOR_ESCALATION) {
+        const size_t llr_count = std::min(soft_bits.size(), LDPC_BLOCK);
+        const float llr_abs_avg = signal_policy::meanAbsLLR(soft_bits.data(), llr_count);
+        if (llr_abs_avg < signal_policy::kMinLLRForEscalation) {
             ultra::timing::globalDecoderProfile()
                 .low_llr_escalation_skipped.fetch_add(1, std::memory_order_relaxed);
             LOG_MODEM(INFO, "[%s] OFDM CW0 peek: |llr|_avg=%.1f too low — skipping 4-CW escalation (likely false sync)",
