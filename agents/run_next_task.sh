@@ -25,6 +25,7 @@ ARCHIVE_TASK=${AGENT_ARCHIVE_TASK:-0}
 CREATE_PR=${AGENT_CREATE_PR:-0}
 PR_DRAFT=${AGENT_PR_DRAFT:-1}
 PR_BASE=${AGENT_PR_BASE:-$BASE_BRANCH}
+RETURN_TO_BASE=${AGENT_RETURN_TO_BASE:-1}
 
 mkdir -p "$QUEUE_DIR" "$ARCHIVE_DIR" "$REPORT_ROOT" "$TMP_DIR"
 
@@ -55,6 +56,19 @@ if [[ "$ALLOW_DIRTY" != "1" && "$DRY_RUN" != "1" ]]; then
   fi
 fi
 
+current_branch=$(git branch --show-current)
+if [[ -z "$current_branch" ]]; then
+  current_branch="detached"
+fi
+
+if [[ "$DRY_RUN" != "1" && "$current_branch" != "$BASE_BRANCH" ]]; then
+  if [[ "$current_branch" == "detached" ]]; then
+    echo "Refusing to start from detached HEAD; switch to $BASE_BRANCH first." >&2
+    exit 2
+  fi
+  git switch "$BASE_BRANCH"
+fi
+
 task_base=$(basename "$task_file" .md)
 slug=$(printf '%s' "$task_base" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]' '-' | sed 's/^-//; s/-$//')
 timestamp=$(date +%Y%m%d_%H%M%S)
@@ -63,11 +77,6 @@ report_dir="$REPORT_ROOT/${timestamp}-${slug}"
 prompt_file="$TMP_DIR/${timestamp}-${slug}.prompt.md"
 
 mkdir -p "$report_dir"
-
-current_branch=$(git branch --show-current)
-if [[ -z "$current_branch" ]]; then
-  current_branch="detached"
-fi
 
 cat > "$prompt_file" <<EOF
 You are working in ProjectUltra, a critical HF modem codebase.
@@ -197,6 +206,21 @@ EOF
   gh "${pr_args[@]}" > "$report_dir/pr_create.log" 2>&1
 fi
 
+returned_to_base=0
+if [[ "$RETURN_TO_BASE" == "1" ]]; then
+  post_status=$(git status --porcelain --untracked-files=all)
+  non_queue_post_status=$(printf '%s\n' "$post_status" | grep -vE '^[ MARC?D]{2} agents/(queue|archive|reports|tmp)/' || true)
+  if [[ -z "$non_queue_post_status" ]]; then
+    git switch "$BASE_BRANCH" > "$report_dir/return_to_base.log" 2>&1
+    returned_to_base=1
+  else
+    {
+      echo "Not returning to $BASE_BRANCH because worktree has non-queue changes:"
+      printf '%s\n' "$non_queue_post_status"
+    } > "$report_dir/return_to_base.log"
+  fi
+fi
+
 cat > "$report_dir/summary.txt" <<EOF
 task=$task_file
 agent=$AGENT_NAME
@@ -209,6 +233,7 @@ auto_commit=$AUTO_COMMIT
 push=$PUSH_BRANCH
 create_pr=$CREATE_PR
 archive_task=$task_archived
+return_to_base=$returned_to_base
 EOF
 
 echo "Agent task completed. Report: $report_dir"
