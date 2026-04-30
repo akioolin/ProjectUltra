@@ -54,7 +54,9 @@ CHANNEL=${CHANNEL:-awgn}              # awgn|good|moderate|poor|flutter
 RATE=${RATE:-r1_4}                    # r1_4|r1_2|r2_3|r3_4
 FILE_SIZE=${FILE_SIZE:-}              # empty = message test
 INJECT_CHANNEL=${INJECT_CHANNEL:-0}   # 1 = synthetic HF channel on each TX
+INJECT_GAIN=${INJECT_GAIN:-}          # optional post-injection gain/headroom
 B_IDLE_SECONDS=${B_IDLE_SECONDS:-0}   # how long B waits before giving up (0 = until peer disconnects)
+EXTRA_CLI_ARGS=${EXTRA_CLI_ARGS:-}     # optional raw cli_simulator args for both A and B
 
 # ─── CLI parsing ────────────────────────────────────────────────────────
 LIST_DEVICES=0
@@ -67,6 +69,8 @@ while [[ $# -gt 0 ]]; do
     --file)           FILE_SIZE="$2"; shift 2;;
     --inject)         INJECT_CHANNEL=1; shift;;
     --no-inject)      INJECT_CHANNEL=0; shift;;
+    --inject-gain)    INJECT_GAIN="$2"; shift 2;;
+    --extra-args)     EXTRA_CLI_ARGS="$2"; shift 2;;
     --list-devices)   LIST_DEVICES=1; shift;;
     --idle-seconds)   B_IDLE_SECONDS="$2"; shift 2;;
     -h|--help)
@@ -100,6 +104,9 @@ fi
 INJECT_FLAG=""
 [[ "$INJECT_CHANNEL" == "1" ]] && INJECT_FLAG="--inject-channel"
 
+INJECT_GAIN_FLAG=""
+[[ -n "$INJECT_GAIN" ]] && INJECT_GAIN_FLAG="--inject-gain $INJECT_GAIN"
+
 FILE_FLAG=""
 [[ -n "$FILE_SIZE" ]] && FILE_FLAG="--file $FILE_SIZE"
 
@@ -124,7 +131,9 @@ LOG_DIR=/tmp/ultra_hw_$(date +%Y%m%d_%H%M%S)
 mkdir -p "$LOG_DIR"
 echo "Logs: $LOG_DIR"
 echo "Test: SNR=$SNR  channel=$CHANNEL  rate=$RATE  inject=$INJECT_CHANNEL  file=${FILE_SIZE:-(message)}"
+[[ -n "$INJECT_GAIN" ]] && echo "Inject gain: $INJECT_GAIN"
 echo "Audio: Mac out='$MAC_AUDIO_OUT' in='$MAC_AUDIO_IN'  Pi out='$PI_AUDIO_OUT' in='$PI_AUDIO_IN'"
+[[ -n "$EXTRA_CLI_ARGS" ]] && echo "Extra cli_simulator args: $EXTRA_CLI_ARGS"
 echo
 
 # ─── 1. Start station B on Pi (background, via SSH) ─────────────────────
@@ -136,8 +145,9 @@ PI_CMD="cd $PI_REPO && \
   rm -f /tmp/ultra_B.log; \
   nohup ./build/cli_simulator --role B \
     $PI_DEVS \
-    --snr $SNR --rate $RATE $CHANNEL_FLAG $INJECT_FLAG \
+    --snr $SNR --rate $RATE $CHANNEL_FLAG $INJECT_FLAG $INJECT_GAIN_FLAG \
     --idle-seconds $B_IDLE_SECONDS \
+    $EXTRA_CLI_ARGS \
     > /tmp/ultra_B.log 2>&1 & \
   echo \$!"
 ssh $SSH_OPTS "$PI" "$PI_CMD" > "$LOG_DIR/B_pid.txt"
@@ -150,7 +160,8 @@ echo "[2/3] Running station A locally..."
 set +e
 "$MAC_BIN" --role A \
   ${MAC_DEVS_ARR[@]+"${MAC_DEVS_ARR[@]}"} \
-  --snr "$SNR" --rate "$RATE" $CHANNEL_FLAG $INJECT_FLAG $FILE_FLAG \
+  --snr "$SNR" --rate "$RATE" $CHANNEL_FLAG $INJECT_FLAG $INJECT_GAIN_FLAG $FILE_FLAG \
+  $EXTRA_CLI_ARGS \
   > "$LOG_DIR/A.log" 2>&1
 A_EXIT=$?
 set -e

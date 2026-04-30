@@ -15,6 +15,55 @@
 
 ---
 
+## Hardware Audio Calibration - Mac <-> Pi 5 Test Rig
+
+**Current known-good calibration (2026-04-29):**
+- Mac USB soundcard: `Sound Blaster Play! 3`
+- Pi USB soundcard: ALSA card 0, `USB Audio Device`
+- Mac volume: output `71`, input `60`
+- Pi mixer: `Speaker` 65% (`-13.00 dB`), `Mic Capture` 57% (`+8.00 dB`), `Auto Gain Control` off
+- Synthetic channel hardware tests: use `--inject --inject-gain 0.70`
+
+**Apply calibration before hardware tests:**
+```bash
+osascript -e 'set volume input volume 60' -e 'set volume output volume 70'
+ssh -i "$HOME/.ssh/id_pi5" math@pi5tester \
+  "amixer -D default sset 'Auto Gain Control' off && \
+   amixer -D default sset 'Speaker' 65% && \
+   amixer -D default sset 'Mic' capture 57%"
+```
+
+**Verify raw audio before modem tests:**
+```bash
+SSH_KEY="$HOME/.ssh/id_pi5" ./tools/check_hw_audio_path.sh
+```
+
+Expected calibrated raw levels:
+- Pi -> Mac: RMS about `0.124`, peak about `0.303`, per-channel rough frequency near `1 kHz`
+- Mac -> Pi: RMS about `0.249`, peak about `0.408`, per-channel rough frequency near `1 kHz`
+- Acceptable target: RMS `0.05-0.25`, peak `0.15-0.80`
+- Too hot: peak above `0.90`; this risks ADC/DAC clipping and invalid fading-test results
+- Too low/silent: RMS near `0.0003` or below; check cable/device selection
+
+Last verified captures:
+- `/tmp/ultra_audio_path_20260429_220218/pi_to_mac_capture.wav`
+- `/tmp/ultra_audio_path_20260429_220218/mac_to_pi_capture.wav`
+
+Last post-calibration modem sweep:
+- Good injected, 1 KB, R1/2, SNR 20/15/12: pass, `0` retx, `/tmp/ultra_hw_20260429_220250`, `/tmp/ultra_hw_20260429_220341`, `/tmp/ultra_hw_20260429_220445`
+- Moderate injected, 1 KB, R1/2, SNR 20/15/12: pass with `4/7/8` retx, `/tmp/ultra_hw_20260429_220538`, `/tmp/ultra_hw_20260429_220717`, `/tmp/ultra_hw_20260429_220828`
+- Moderate injected, 1 KB, R1/4, SNR 15/12: pass with `8/8` retx, `/tmp/ultra_hw_20260429_221117`, `/tmp/ultra_hw_20260429_221240`
+- Good injected, 5 KB, R1/2, SNR 15: pass with `13` timeout retx, `/tmp/ultra_hw_20260429_221423`
+
+Interpretation of the 2026-04-29 sweep:
+- 1 KB Good is clean at R1/2 down to SNR 12 after calibration.
+- Moderate is not clean at either R1/2 or R1/4; R1/4 reduces data risk but ACK/control misses still drive retransmissions.
+- The 5 KB Good run shows sustained-transfer retransmissions from delayed/missed ACKs, not LDPC data failure (`frame_success=100%`, BRAVO receives the data before ALPHA times out).
+
+**Important distinction:** hardware gain staging does not replace injected-channel headroom. The Watterson injector can generate samples above full scale before the soundcard. Keep `--inject-gain 0.70` unless a new calibration sweep proves a different value.
+
+---
+
 ## CRITICAL RULES (Never Violate)
 
 **Test binaries:**

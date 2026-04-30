@@ -81,6 +81,31 @@ static const char* channelTypeToString(ChannelType t) {
     }
 }
 
+static float sampleRms(const std::vector<float>& samples) {
+    if (samples.empty()) return 0.0f;
+    double sum_sq = 0.0;
+    for (float s : samples) {
+        sum_sq += static_cast<double>(s) * static_cast<double>(s);
+    }
+    return static_cast<float>(std::sqrt(sum_sq / static_cast<double>(samples.size())));
+}
+
+static float samplePeak(const std::vector<float>& samples) {
+    float peak = 0.0f;
+    for (float s : samples) {
+        peak = std::max(peak, std::fabs(s));
+    }
+    return peak;
+}
+
+static size_t countFullScaleSamples(const std::vector<float>& samples) {
+    size_t count = 0;
+    for (float s : samples) {
+        if (std::fabs(s) > 1.0f) count++;
+    }
+    return count;
+}
+
 static float modeEfficiency(Modulation mod, CodeRate rate) {
     return static_cast<float>(getBitsPerSymbol(mod)) * getCodeRateValue(rate);
 }
@@ -424,7 +449,9 @@ private:
 class ChannelInjector {
 public:
     ChannelInjector(float snr_db, ChannelType ch_type,
-                    uint32_t seed, float tx_cfo_hz) {
+                    uint32_t seed, float tx_cfo_hz,
+                    float output_gain = 0.70f)
+        : output_gain_(std::clamp(output_gain, 0.05f, 1.0f)) {
         sim_channel_.setSeed(seed);
         sim_channel_.setTxCFO(tx_cfo_hz);
         sim_channel_.configure(snr_db, ch_type);
@@ -432,11 +459,34 @@ public:
 
     std::vector<float> process(const std::vector<float>& tx) {
         sim_channel_.transmitFromA(tx);
-        return sim_channel_.receiveForB(tx.size());
+        auto out = sim_channel_.receiveForB(tx.size());
+        const float rms_before_gain = sampleRms(out);
+        const float peak_before_gain = samplePeak(out);
+        const size_t clipped_before_gain = countFullScaleSamples(out);
+        if (output_gain_ != 1.0f) {
+            for (float& sample : out) {
+                sample *= output_gain_;
+            }
+        }
+        process_count_++;
+        if (process_count_ <= 8 || (process_count_ % 32) == 0) {
+            LOG_MODEM(INFO,
+                      "ChannelInjector: process #%llu samples=%zu "
+                      "gain=%.3f rms_in=%.4f peak_in=%.4f "
+                      "rms_ch=%.4f peak_ch=%.4f clip_ch=%zu "
+                      "rms_out=%.4f peak_out=%.4f clip_out=%zu",
+                      static_cast<unsigned long long>(process_count_),
+                      tx.size(), output_gain_, sampleRms(tx), samplePeak(tx),
+                      rms_before_gain, peak_before_gain, clipped_before_gain,
+                      sampleRms(out), samplePeak(out), countFullScaleSamples(out));
+        }
+        return out;
     }
 
 private:
     SimulatedChannel sim_channel_;
+    float output_gain_ = 0.70f;
+    uint64_t process_count_ = 0;
 };
 
 /**
@@ -522,10 +572,25 @@ public:
 
     void queueTx(const std::vector<float>& samples) override {
         std::lock_guard<std::mutex> lock(tx_mutex_);
+        std::vector<float> queued_samples;
         if (injector_) {
-            engine_.queueTxSamples(injector_->process(samples));
+            queued_samples = injector_->process(samples);
         } else {
-            engine_.queueTxSamples(samples);
+            queued_samples = samples;
+        }
+        engine_.queueTxSamples(queued_samples);
+
+        tx_queue_events_++;
+        if (tx_queue_events_ <= 8 || (tx_queue_events_ % 32) == 0) {
+            LOG_MODEM(INFO,
+                      "HardwareAudioPort: TX queue #%llu inject=%s "
+                      "in=%zu rms=%.4f peak=%.4f out=%zu rms=%.4f peak=%.4f "
+                      "device='%s'",
+                      static_cast<unsigned long long>(tx_queue_events_),
+                      injector_ ? "yes" : "no",
+                      samples.size(), sampleRms(samples), samplePeak(samples),
+                      queued_samples.size(), sampleRms(queued_samples),
+                      samplePeak(queued_samples), output_device_.c_str());
         }
     }
 
@@ -540,6 +605,7 @@ private:
     std::mutex tx_mutex_;
     uint64_t rx_short_reads_ = 0;
     uint64_t rx_padded_samples_ = 0;
+    uint64_t tx_queue_events_ = 0;
 };
 #endif  // ULTRA_HAVE_SDL2
 
@@ -1236,11 +1302,20 @@ private:
 
     std::vector<float> transmitPing() {
         if (!encoder_) return {};
-        return encoder_->encodePing();
+        auto samples = encoder_->encodePing();
+        LOG_MODEM(INFO, "[%s] TX PING waveform: samples=%zu rms=%.4f peak=%.4f",
+                  callsign_.c_str(), samples.size(), sampleRms(samples),
+                  samplePeak(samples));
+        return samples;
     }
 
     std::vector<float> transmitPong() {
-        return transmitPing();
+        if (!encoder_) return {};
+        auto samples = encoder_->encodePing();
+        LOG_MODEM(INFO, "[%s] TX PONG waveform: samples=%zu rms=%.4f peak=%.4f",
+                  callsign_.c_str(), samples.size(), sampleRms(samples),
+                  samplePeak(samples));
+        return samples;
     }
 
     void setupCallbacks() {
@@ -1469,6 +1544,7 @@ public:
     void setListAudioDevices(bool v) { list_audio_devices_ = v; }
     void setRoleBIdleSeconds(int s) { role_b_idle_seconds_ = std::max(0, s); }
     void setInjectChannel(bool v) { inject_channel_ = v; }
+    void setInjectGain(float gain) { inject_gain_ = std::clamp(gain, 0.05f, 1.0f); }
     void setAudioBufferSize(int n) { audio_buffer_size_ = n; }
 
     bool runTest() {
@@ -1655,6 +1731,7 @@ private:
     int role_b_idle_seconds_ = 0;      // 0 = run until peer disconnects (no idle cap)
     bool inject_channel_ = false;       // --inject-channel: apply TX-side channel sim
                                         // to real-audio output (uses snr_db_/channel_type_)
+    float inject_gain_ = 0.70f;         // Post-injection headroom before DAC full scale
     int audio_buffer_size_ = 0;         // 0 = AudioEngine default (4096)
 
     SimulatedChannel channel_;
@@ -2294,9 +2371,10 @@ private:
                 ? seed_                  // ALPHA's TX uses base seed
                 : seed_ + 0x9E3779B9u;   // BRAVO's TX uses a decorrelated seed
             injector = std::make_unique<ChannelInjector>(
-                snr_db_, channel_type_, injector_seed, tx_cfo_hz_);
+                snr_db_, channel_type_, injector_seed, tx_cfo_hz_, inject_gain_);
             std::cout << "  Inject:   " << channelTypeName()
-                      << " @ " << snr_db_ << " dB SNR (TX-side)\n";
+                      << " @ " << snr_db_ << " dB SNR (TX-side), gain="
+                      << inject_gain_ << "\n";
         }
 
         // Build the single station with hardware I/O
@@ -2927,6 +3005,8 @@ int main(int argc, char* argv[]) {
                 sim.setRoleBIdleSeconds(std::stoi(argv[++i]));
             } else if (arg == "--inject-channel") {
                 sim.setInjectChannel(true);
+            } else if (arg == "--inject-gain" && i + 1 < argc) {
+                sim.setInjectGain(std::stof(argv[++i]));
             } else if (arg == "--audio-buffer-size" && i + 1 < argc) {
                 sim.setAudioBufferSize(std::stoi(argv[++i]));
             } else if (arg == "--help" || arg == "-h") {
@@ -2975,6 +3055,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --idle-seconds <N>  Role B: max idle seconds before giving up (0 = forever)\n";
                 std::cout << "  --inject-channel    Apply --snr/--channel/--cfo to outgoing audio\n";
                 std::cout << "                      (lets Mac-to-Pi cable carry a synthetic HF channel)\n";
+                std::cout << "  --inject-gain <G>   Post-injection output gain/headroom (0.05-1.0, default 0.70)\n";
                 std::cout << "  --audio-buffer-size <N>  SDL2 period size, samples (default 8192)\n";
                 std::cout << "                      Smaller = lower latency. Larger = more XRUN headroom.\n";
                 return 0;
