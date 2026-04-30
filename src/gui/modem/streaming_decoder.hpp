@@ -2,10 +2,9 @@
 
 // StreamingDecoder - Unified RX decoder for all waveform types
 //
-// Replaces the buggy RxPipeline with a clean sliding-window design.
-// Key differences from RxPipeline:
+// Clean sliding-window receiver design:
 //   1. Circular buffer (bounded) vs growing vector (unbounded)
-//   2. Sliding window search (like test_iwaveform) vs periodic full search
+//   2. Sliding window search vs periodic full search
 //   3. Correct IWaveform call sequence: reset(), detectSync(), setFrequencyOffset(), process()
 //   4. Thread-safe with condition variable for blocking wait
 //   5. PING detection via energy ratio after chirp
@@ -310,14 +309,6 @@ private:
     void accumulateBurstFrames();
     BurstFrameResult tryDemodulateNextBurstFrame();
     void finalizeBurstGroup();
-
-    // Legacy methods (kept for compatibility, do nothing)
-    bool runCorrelationSearch(size_t new_samples);
-    bool tryDecodeFrame();
-    std::vector<float> copySamplesFrom(size_t start_pos, size_t count);
-    size_t samplesAvailableFrom(size_t pos) const;
-    bool isPingOnly(const std::vector<float>& samples, size_t chirp_end);
-    void updateNoiseFloor(const float* samples, size_t count);
 
     // ========================================================================
     // STATE

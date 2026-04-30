@@ -1,6 +1,6 @@
 # Adding a New Waveform
 
-**Purpose:** Step-by-step guide for implementing new waveforms (e.g., OTFS, AFDM).
+**Purpose:** Step-by-step guide for implementing new waveform modules.
 
 ---
 
@@ -284,12 +284,13 @@ std::unique_ptr<IWaveform> WaveformFactory::create(protocol::WaveformMode mode) 
 ```cpp
 enum class WaveformMode : uint8_t {
     OFDM_COX = 0x00,
-    OTFS_EQ = 0x01,
-    OTFS_RAW = 0x02,
-    MFSK = 0x03,
+    OTFS_EQ = 0x01,     // Reserved legacy value
+    OTFS_RAW = 0x02,    // Reserved legacy value
+    MFSK = 0x03,        // Reserved legacy value
     MC_DPSK = 0x04,
     OFDM_CHIRP = 0x05,
-    MY_WAVEFORM = 0x06,  // ADD THIS (use next available ID)
+    OFDM_NARROW = 0x06,
+    MY_WAVEFORM = 0x07,  // ADD THIS (use next available ID)
     AUTO = 0xFF,
 };
 ```
@@ -309,9 +310,9 @@ add_library(ultra_core STATIC
 
 ---
 
-## Step 6: Add to Test Tools
+## Step 6: Add to Test Coverage
 
-### Add to test_iwaveform.cpp
+### Add to `tools/test_waveform_simple.cpp`
 
 ```cpp
 // In waveform selection logic:
@@ -323,10 +324,8 @@ if (waveform_name == "my_waveform") {
 ### Add to regression_matrix.sh
 
 ```bash
-# My Waveform tests
-run_test "MY_WAVEFORM AWGN SNR=10 CFO=0" \
-    "$BUILD_DIR/test_iwaveform --snr 10 --cfo 0 --channel awgn -w my_waveform --frames 5" \
-    100
+# Keep default CTest green, then add longer waveform sweeps under --full if needed.
+ctest --test-dir "$BUILD_DIR" --output-on-failure
 ```
 
 ---
@@ -372,20 +371,20 @@ See `docs/INVARIANTS.md` for complete list. Key points:
 
 ### Basic Functionality
 ```bash
-./test_iwaveform --snr 10 --cfo 0 --channel awgn -w my_waveform --frames 10
+./build/test_waveform_simple --snr 10 --cfo 0 --channel awgn -w my_waveform --frames 10
 # Expected: 100% decode rate
 ```
 
 ### CFO Tolerance
 ```bash
-./test_iwaveform --snr 10 --cfo 30 --channel awgn -w my_waveform --frames 10
-./test_iwaveform --snr 10 --cfo -50 --channel awgn -w my_waveform --frames 10
+./build/test_waveform_simple --snr 10 --cfo 30 --channel awgn -w my_waveform --frames 10
+./build/test_waveform_simple --snr 10 --cfo -50 --channel awgn -w my_waveform --frames 10
 # Expected: 90%+ decode rate
 ```
 
 ### Fading Channels
 ```bash
-./test_iwaveform --snr 10 --cfo 30 --channel moderate -w my_waveform --frames 10
+./build/test_waveform_simple --snr 10 --cfo 30 --channel moderate -w my_waveform --frames 10
 # Expected: 80%+ decode rate (depends on waveform design)
 ```
 
@@ -418,7 +417,7 @@ Reference these existing implementations:
 - [ ] Register in WaveformFactory
 - [ ] Add WaveformMode enum value
 - [ ] Add to CMakeLists.txt
-- [ ] Add to test_iwaveform
+- [ ] Add to maintained CTest coverage or `test_waveform_simple`
 - [ ] Add to regression_matrix.sh
 - [ ] Test with CFO = 0, ±30, ±50 Hz
 - [ ] Test on AWGN and fading channels

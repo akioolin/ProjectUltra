@@ -42,6 +42,7 @@ void StatusWidget::render(const ModemStats& stats, const ModemConfig& config,
         case CodeRate::R3_4: rate_name = "3/4"; break;
         case CodeRate::R5_6: rate_name = "5/6"; break;
         case CodeRate::R7_8: rate_name = "7/8"; break;
+        case CodeRate::AUTO: rate_name = "AUTO"; break;
     }
 
     ImGui::Text("Mode: %s R%s", mod_name, rate_name);

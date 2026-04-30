@@ -1,19 +1,9 @@
 # Test suite for ProjectUltra
 
-# For now, we rely on the built-in self-test in main.cpp
-# Future: Add Google Test or Catch2 based unit tests
-
-# CRITICAL: Layer-by-layer OFDM verification tests
-# These tests MUST pass 100% before trusting any higher-level functionality
+# Layer-by-layer OFDM primitive verification.
 add_executable(test_layers test_layers.cpp)
 target_link_libraries(test_layers PRIVATE ultra_core)
 add_test(NAME Layers COMMAND test_layers)
-
-# Basic OFDM test - stripped down, no LDPC, no heuristics
-# Use this to verify the core OFDM path before adding complexity
-add_executable(test_basic_ofdm test_basic_ofdm.cpp)
-target_link_libraries(test_basic_ofdm PRIVATE ultra_core)
-add_test(NAME BasicOFDM COMMAND test_basic_ofdm --loopback)
 
 add_executable(test_fft test_fft.cpp)
 target_link_libraries(test_fft PRIVATE ultra_core)
@@ -22,12 +12,6 @@ add_test(NAME FFT COMMAND test_fft)
 add_executable(test_ofdm test_ofdm.cpp)
 target_link_libraries(test_ofdm PRIVATE ultra_core)
 add_test(NAME OFDM COMMAND test_ofdm)
-
-# Modem loopback test (comprehensive pipeline verification)
-# Tests FFT roundtrip, carrier mapping, modulate->demodulate loopback
-add_executable(test_modem_loopback test_modem_loopback.cpp)
-target_link_libraries(test_modem_loopback PRIVATE ultra_core)
-add_test(NAME ModemLoopback COMMAND test_modem_loopback)
 
 # Basic audio path test (no OFDM/LDPC - just raw samples)
 # Use this to verify audio path between laptops
@@ -52,30 +36,10 @@ add_executable(test_multiblock_ldpc test_multiblock_ldpc.cpp)
 target_link_libraries(test_multiblock_ldpc PRIVATE ultra_core)
 add_test(NAME MultiblockLDPC COMMAND test_multiblock_ldpc)
 
-# Protocol + Modem integration test (two-modem architecture - CRITICAL)
-# Tests protocol through full modem pipeline, same as GUI Test Mode
-add_executable(test_protocol_modem test_protocol_modem.cpp)
-target_link_libraries(test_protocol_modem PRIVATE ultra_core)
-add_test(NAME ProtocolModem COMMAND test_protocol_modem)
-
 # Selective Repeat ARQ tests
 add_executable(test_selective_repeat test_selective_repeat.cpp)
 target_link_libraries(test_selective_repeat PRIVATE ultra_core)
 add_test(NAME SelectiveRepeatARQ COMMAND test_selective_repeat)
-
-# Adaptive Mode Selection Tests
-add_executable(test_adaptive_mode test_adaptive_mode.cpp)
-target_include_directories(test_adaptive_mode PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src/sim
-)
-target_link_libraries(test_adaptive_mode PRIVATE ultra_core)
-add_test(NAME AdaptiveMode COMMAND test_adaptive_mode)
-
-# Adaptive Link Establishment Test (PROBE/CONNECT through full modem - CRITICAL)
-# Tests adaptive modulation selection and link establishment at various SNR levels
-add_executable(test_adaptive_link test_adaptive_link.cpp)
-target_link_libraries(test_adaptive_link PRIVATE ultra_core)
-add_test(NAME AdaptiveLink COMMAND test_adaptive_link)
 
 # Sync Detection Accuracy Test
 # Tests fine-grained sync peak refinement (fixes ~118 sample offset issue)
@@ -83,36 +47,37 @@ add_executable(test_sync_detection test_sync_detection.cpp)
 target_link_libraries(test_sync_detection PRIVATE ultra_core)
 add_test(NAME SyncDetection COMMAND test_sync_detection)
 
-# Comprehensive modem unit tests (LDPC, LLR, DQPSK, full chain)
-# CRITICAL: All these tests must pass for reliable modem operation
+# Comprehensive modem unit tests for LDPC, LLR, full-chain noise, and CFO.
 add_executable(test_comprehensive_modem test_comprehensive_modem.cpp)
 target_link_libraries(test_comprehensive_modem PRIVATE ultra_core)
 add_test(NAME ComprehensiveModem COMMAND test_comprehensive_modem)
 
 # RNG consistency test for cross-platform LDPC debugging
 add_executable(test_rng test_rng.cpp)
+add_test(NAME RNG COMMAND test_rng)
 
 # Protocol v2 frame format tests
 add_executable(test_frame_v2 test_frame_v2.cpp)
 target_link_libraries(test_frame_v2 PRIVATE ultra_core)
 add_test(NAME FrameV2 COMMAND test_frame_v2)
 
-# Protocol v2 + Modem integration test (full LDPC+OFDM loopback)
-add_executable(test_frame_v2_modem test_frame_v2_modem.cpp)
-target_link_libraries(test_frame_v2_modem PRIVATE ultra_core)
-add_test(NAME FrameV2Modem COMMAND test_frame_v2_modem)
+# Current waveform/rate policy and factory coverage
+add_executable(test_waveform_policy test_waveform_policy.cpp)
+target_link_libraries(test_waveform_policy PRIVATE ultra_core)
+add_test(NAME WaveformPolicy COMMAND test_waveform_policy)
 
-# MODE_CHANGE protocol tests (adaptive mode selection)
-add_executable(test_mode_change test_mode_change.cpp)
-target_link_libraries(test_mode_change PRIVATE ultra_core)
-add_test(NAME ModeChange COMMAND test_mode_change)
+# Current streaming MC-DPSK encode/decode loopback.
+add_executable(test_streaming_mc_dpsk
+    test_streaming_mc_dpsk.cpp
+    ../src/gui/modem/streaming_decoder.cpp
+    ../src/gui/modem/streaming_encoder.cpp
+)
+target_include_directories(test_streaming_mc_dpsk PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+target_link_libraries(test_streaming_mc_dpsk PRIVATE ultra_core)
+add_test(NAME StreamingMCDPSK COMMAND test_streaming_mc_dpsk)
 
 # Throughput measurement tool
 add_executable(test_throughput ../tools/test_throughput.cpp)
 target_link_libraries(test_throughput PRIVATE ultra_core)
-
-# AFDM voice-band geometry and audio-path safety checks
-add_executable(test_afdm_voiceband test_afdm_voiceband.cpp)
-target_link_libraries(test_afdm_voiceband PRIVATE ultra_core)
-add_test(NAME AFDMVoiceband COMMAND test_afdm_voiceband)
-

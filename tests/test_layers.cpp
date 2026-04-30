@@ -1,5 +1,5 @@
 /**
- * CRITICAL: Layer-by-Layer OFDM Verification Tests
+ * Layer-by-Layer OFDM Primitive Verification Tests
  *
  * This is CRITICAL software for emergency communications.
  * EVERY layer MUST be proven to work with 100% reliability.
@@ -20,7 +20,10 @@
  * 6. Multi-Symbol - Multiple symbols in sequence
  * 7. Preamble & Sync - Detection and timing
  * 8. Channel Estimation - Pilot-based equalization
- * 9. Full Modem - Complete TX/RX pipeline
+ *
+ * The old direct full-modem loopback used coherent QPSK assumptions that are
+ * no longer representative of the production StreamingEncoder/StreamingDecoder
+ * path. Keep this file focused on deterministic OFDM primitives.
  */
 
 #include <iostream>
@@ -769,159 +772,15 @@ bool test_layer7_pilot_estimation() {
 }
 
 // ============================================================================
-// LAYER 8: Full Modulator -> Demodulator (The Critical Test!)
-// ============================================================================
-
-bool test_layer8_full_modem_loopback() {
-    std::cout << "\n--- Layer 8: Full Modem Loopback (CRITICAL!) ---\n";
-
-    ModemConfig config;
-    config.sample_rate = 48000;
-    config.center_freq = 1500;
-    config.fft_size = 512;
-    config.num_carriers = 30;
-    config.pilot_spacing = 2;
-    config.modulation = Modulation::QPSK;
-    config.cp_mode = CyclicPrefixMode::MEDIUM;
-
-    OFDMModulator mod(config);
-    OFDMDemodulator demod(config);
-
-    // Test data: DEADBEEF pattern repeated to generate enough bits for LDPC
-    // LDPC_BLOCK_SIZE = 648 bits. With QPSK (2 bits/symbol) and 15 data carriers,
-    // each OFDM symbol gives 30 soft bits. Need 648/30 ≈ 22 symbols.
-    // Each symbol carries 30 bits = 3.75 bytes, so need ~100 bytes.
-    std::vector<uint8_t> pattern = {0xDE, 0xAD, 0xBE, 0xEF};
-    std::vector<uint8_t> test_data;
-    for (int i = 0; i < 25; ++i) {  // 100 bytes of DEADBEEF
-        test_data.insert(test_data.end(), pattern.begin(), pattern.end());
-    }
-    std::cout << "  Test data: " << test_data.size() << " bytes (DEADBEEF x25)\n";
-
-    // TX
-    Samples preamble = mod.generatePreamble();
-    Samples data = mod.modulate(test_data, config.modulation);
-
-    std::cout << "  Preamble: " << preamble.size() << " samples\n";
-    std::cout << "  Data: " << data.size() << " samples\n";
-
-    // Combine preamble and data (NO lead-in silence - see test_modem_loopback)
-    // Lead-in silence causes NCO phase mismatch between TX and RX
-    Samples tx_signal;
-    tx_signal.insert(tx_signal.end(), preamble.begin(), preamble.end());
-    tx_signal.insert(tx_signal.end(), data.begin(), data.end());
-
-    // CRITICAL: Normalize signal to audio level (0.5 peak)
-    float max_amp = 0;
-    for (float s : tx_signal) max_amp = std::max(max_amp, std::abs(s));
-    if (max_amp > 0) {
-        float scale = 0.5f / max_amp;
-        for (float& s : tx_signal) s *= scale;
-    }
-    std::cout << "  Normalized to 0.5 peak (was " << max_amp << ")\n";
-    std::cout << "  Total TX: " << tx_signal.size() << " samples\n";
-
-    // Feed data to demodulator in chunks and extract soft bits AS WE GO
-    // This is the correct flow: process() then getSoftBits() while synced
-    size_t chunk_size = 960;  // 20ms chunks
-    bool synced = false;
-    std::vector<float> all_soft;
-
-    for (size_t i = 0; i < tx_signal.size(); i += chunk_size) {
-        size_t len = std::min(chunk_size, tx_signal.size() - i);
-        SampleSpan span(tx_signal.data() + i, len);
-        bool got_codeword = demod.process(span);
-
-        if (!synced && demod.isSynced()) {
-            std::cout << "  Synced at sample " << i << "\n";
-            synced = true;
-        }
-
-        // Extract soft bits while synced (before frame complete clears them)
-        if (demod.isSynced() || got_codeword) {
-            auto soft = demod.getSoftBits();
-            if (!soft.empty()) {
-                all_soft.insert(all_soft.end(), soft.begin(), soft.end());
-            }
-        }
-    }
-
-    // One more extraction attempt for any remaining bits
-    {
-        auto soft = demod.getSoftBits();
-        if (!soft.empty()) {
-            all_soft.insert(all_soft.end(), soft.begin(), soft.end());
-        }
-    }
-
-    std::cout << "  Extracted " << all_soft.size() << " soft bits total\n";
-
-    if (!synced) {
-        std::cout << "  [FAIL] Demodulator never synced!\n";
-        tests_failed++;
-        return false;
-    }
-
-    if (all_soft.empty()) {
-        std::cout << "  [FAIL] No soft bits extracted!\n";
-        tests_failed++;
-        return false;
-    }
-
-    // Convert to bytes
-    std::vector<uint8_t> decoded;
-    uint8_t byte = 0;
-    int bit_count = 0;
-    for (float llr : all_soft) {
-        uint8_t bit = (llr < 0) ? 1 : 0;
-        byte = (byte << 1) | bit;
-        if (++bit_count == 8) {
-            decoded.push_back(byte);
-            byte = 0;
-            bit_count = 0;
-        }
-    }
-
-    std::cout << "  Decoded " << decoded.size() << " bytes\n";
-
-    // Compare first portion of data
-    std::cout << "  TX: ";
-    for (size_t i = 0; i < std::min(test_data.size(), (size_t)16); ++i) {
-        printf("%02X ", test_data[i]);
-    }
-    std::cout << "...\n  RX: ";
-    for (size_t i = 0; i < std::min(decoded.size(), (size_t)16); ++i) {
-        printf("%02X ", decoded[i]);
-    }
-    std::cout << "...\n";
-
-    // Count matches for first portion (avoiding padding issues)
-    size_t check_len = std::min({decoded.size(), test_data.size(), (size_t)80});
-    int matches = 0;
-    for (size_t i = 0; i < check_len; ++i) {
-        if (decoded[i] == test_data[i]) matches++;
-    }
-
-    float match_pct = (check_len > 0) ? (100.0f * matches / check_len) : 0;
-    std::cout << "  Match: " << matches << "/" << check_len << " (" << match_pct << "%)\n";
-
-    TEST_ASSERT(match_pct >= 90.0f, "Data match < 90%");
-
-    TEST_PASS("Full modem loopback");
-    return true;
-}
-
-// ============================================================================
 // MAIN
 // ============================================================================
 
 int main() {
     std::cout << "============================================================\n";
-    std::cout << "   CRITICAL: LAYER-BY-LAYER OFDM VERIFICATION TESTS\n";
+    std::cout << "   LAYER-BY-LAYER OFDM PRIMITIVE VERIFICATION TESTS\n";
     std::cout << "============================================================\n";
     std::cout << "\n";
-    std::cout << "This is CRITICAL software for emergency communications.\n";
-    std::cout << "EVERY layer MUST pass 100%. NO exceptions.\n";
+    std::cout << "Deterministic OFDM primitives must pass 100%.\n";
     std::cout << "\n";
 
     bool stop_on_fail = true;  // Stop at first failure to identify root cause
@@ -960,10 +819,6 @@ int main() {
     // Layer 7: Channel Estimation
     std::cout << "\n========== LAYER 7: CHANNEL ESTIMATION ==========\n";
     if (!test_layer7_pilot_estimation() && stop_on_fail) goto done;
-
-    // Layer 8: Full Modem (THE CRITICAL TEST!)
-    std::cout << "\n========== LAYER 8: FULL MODEM LOOPBACK ==========\n";
-    if (!test_layer8_full_modem_loopback() && stop_on_fail) goto done;
 
 done:
     std::cout << "\n============================================================\n";

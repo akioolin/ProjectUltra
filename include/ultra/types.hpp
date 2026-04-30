@@ -216,10 +216,10 @@ enum class BandwidthMode : uint8_t {
 
 // Channel quality estimate
 struct ChannelQuality {
-    float snr_db;           // Estimated SNR in dB
-    float doppler_hz;       // Estimated Doppler spread
-    float delay_spread_ms;  // Estimated multipath delay spread
-    float ber_estimate;     // Estimated bit error rate
+    float snr_db = 0.0f;           // Estimated SNR in dB
+    float doppler_hz = 0.0f;       // Estimated Doppler spread
+    float delay_spread_ms = 0.0f;  // Estimated multipath delay spread
+    float ber_estimate = 0.0f;     // Estimated bit error rate
 };
 
 // Modem configuration

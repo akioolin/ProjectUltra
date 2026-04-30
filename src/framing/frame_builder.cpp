@@ -219,7 +219,6 @@ FrameParser::FrameParser(const ModemConfig& config) : config_(config) {}
 
 FrameParser::ParsedFrame FrameParser::parse(ByteSpan frame_data) {
     ParsedFrame result;
-    result.valid = false;
 
     if (frame_data.size() < HEADER_SIZE) {
         return result;

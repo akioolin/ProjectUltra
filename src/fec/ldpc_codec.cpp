@@ -6,7 +6,7 @@ namespace fec {
 
 // ============================================================================
 // LDPC Performance with MC-DPSK (8 carriers, R1/4)
-// Tested: 2026-01-29 with test_iwaveform
+// Tested: 2026-01-29 with the maintained waveform/CLI simulators
 // ============================================================================
 //
 // AWGN Channel:

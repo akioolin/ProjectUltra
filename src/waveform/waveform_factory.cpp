@@ -4,7 +4,6 @@
 #include "mc_dpsk_waveform.hpp"
 #include "ofdm_cox_waveform.hpp"
 #include "ofdm_chirp_waveform.hpp"
-#include "otfs_waveform.hpp"
 #include "ultra/logging.hpp"
 
 namespace ultra {
@@ -30,12 +29,12 @@ WaveformPtr WaveformFactory::create(protocol::WaveformMode mode) {
 
         case protocol::WaveformMode::OTFS_EQ:
         case protocol::WaveformMode::OTFS_RAW:
-            return std::make_unique<OTFSWaveform>();
+            LOG_MODEM(WARN, "WaveformFactory: OTFS is not part of the production build");
+            return nullptr;
 
         case protocol::WaveformMode::MFSK:
-            // MFSK deprecated - use MC-DPSK instead
-            LOG_MODEM(WARN, "WaveformFactory: MFSK deprecated, using MC-DPSK");
-            return std::make_unique<MCDPSKWaveform>();
+            LOG_MODEM(WARN, "WaveformFactory: MFSK is reserved but not implemented");
+            return nullptr;
 
         default:
             LOG_MODEM(ERROR, "WaveformFactory: Unknown mode %d", static_cast<int>(mode));
@@ -94,10 +93,8 @@ bool WaveformFactory::isSupported(protocol::WaveformMode mode) {
 
         case protocol::WaveformMode::OTFS_EQ:
         case protocol::WaveformMode::OTFS_RAW:
-            return true;  // Now supported
-
         case protocol::WaveformMode::MFSK:
-            return false;  // Deprecated
+            return false;
 
         default:
             return false;
@@ -145,9 +142,9 @@ float WaveformFactory::getMinSNR(protocol::WaveformMode mode) {
         case protocol::WaveformMode::OFDM_CHIRP: return 10.0f;
         case protocol::WaveformMode::OFDM_NARROW: return 3.0f;
         case protocol::WaveformMode::OFDM_COX:  return 17.0f;
-        case protocol::WaveformMode::OTFS_EQ:    return 15.0f;
-        case protocol::WaveformMode::OTFS_RAW:   return 10.0f;
-        case protocol::WaveformMode::MFSK:       return -17.0f;
+        case protocol::WaveformMode::OTFS_EQ:
+        case protocol::WaveformMode::OTFS_RAW:
+        case protocol::WaveformMode::MFSK:       return 0.0f;
         default:                                 return 0.0f;
     }
 }
@@ -159,9 +156,9 @@ float WaveformFactory::getMaxThroughput(protocol::WaveformMode mode) {
         case protocol::WaveformMode::OFDM_CHIRP: return 4000.0f;   // 30 carriers, D8PSK R2/3
         case protocol::WaveformMode::OFDM_NARROW: return 230.0f;  // 21 carriers, DQPSK R1/2
         case protocol::WaveformMode::OFDM_COX:  return 8000.0f;   // 30 carriers, 32QAM R3/4
-        case protocol::WaveformMode::OTFS_EQ:    return 6000.0f;
-        case protocol::WaveformMode::OTFS_RAW:   return 4000.0f;
-        case protocol::WaveformMode::MFSK:       return 200.0f;
+        case protocol::WaveformMode::OTFS_EQ:
+        case protocol::WaveformMode::OTFS_RAW:
+        case protocol::WaveformMode::MFSK:       return 0.0f;
         default:                                 return 1000.0f;
     }
 }

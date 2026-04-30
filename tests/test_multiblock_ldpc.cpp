@@ -2,7 +2,7 @@
  * Multi-Codeword LDPC Test Suite
  *
  * These tests verify that data requiring multiple LDPC codewords is encoded
- * and decoded correctly through the full modem pipeline.
+ * and decoded correctly by the LDPC/framing layer.
  *
  * Protocol Context:
  * - ARQ protocol chunks files into 250-byte pieces
@@ -17,7 +17,6 @@
  */
 
 #include "ultra/fec.hpp"
-#include "ultra/ofdm.hpp"
 #include "ultra/types.hpp"
 #include <iostream>
 #include <iomanip>
@@ -363,124 +362,6 @@ bool test_ldpc_reject_partial_llrs(CodeRate rate, const char* rate_name) {
 }
 
 // ============================================================================
-// Full Modem Pipeline Tests
-// ============================================================================
-
-bool test_modem_pipeline_multiblock(size_t data_size) {
-    std::string test_name = "Full modem pipeline with " + std::to_string(data_size) + " bytes";
-    TEST(test_name.c_str());
-
-    // Use balanced config (QPSK R3/4 - the problematic rate)
-    ModemConfig config;
-    config.code_rate = CodeRate::R3_4;
-    config.modulation = Modulation::QPSK;
-
-    OFDMModulator modulator(config);
-    OFDMDemodulator demodulator(config);
-    LDPCEncoder encoder(config.code_rate);
-    LDPCDecoder decoder(config.code_rate);
-    Interleaver interleaver(24, 27);
-
-    // Generate test data
-    Bytes tx_data = generateTestData(data_size);
-
-    // === TX Chain ===
-    Bytes encoded = encoder.encode(tx_data);
-
-    std::cout << "\n      TX: " << tx_data.size() << " bytes -> " << encoded.size()
-              << " encoded bytes (" << encoded.size() * 8 << " bits)";
-
-    // Don't interleave in this test - it's configured for single codeword
-    // For multi-codeword, we'd need per-codeword interleaving (handled by modem_engine)
-    Bytes& to_modulate = encoded;  // Skip interleaving for this test
-
-    Samples preamble = modulator.generatePreamble();
-    Samples data_audio = modulator.modulate(to_modulate, config.modulation);
-
-    Samples tx_audio;
-    tx_audio.reserve(preamble.size() + data_audio.size());
-    tx_audio.insert(tx_audio.end(), preamble.begin(), preamble.end());
-    tx_audio.insert(tx_audio.end(), data_audio.begin(), data_audio.end());
-
-    // Scale
-    float max_val = 0;
-    for (float s : tx_audio) max_val = std::max(max_val, std::abs(s));
-    if (max_val > 0) {
-        float scale = 0.5f / max_val;
-        for (float& s : tx_audio) s *= scale;
-    }
-
-    // === RX Chain (perfect channel) ===
-    // Debug: check audio length
-    size_t symbol_samples = config.getSymbolDuration();
-    std::cout << "\n      Config: fft=" << config.fft_size << " cp=" << config.getCyclicPrefix()
-              << " carriers=" << config.num_carriers << " sym_dur=" << symbol_samples;
-    std::cout << "\n      Audio: " << tx_audio.size() << " samples ("
-              << tx_audio.size() / symbol_samples << " symbols, "
-              << preamble.size() / symbol_samples << " preamble, "
-              << data_audio.size() / symbol_samples << " data)";
-
-    // Feed ALL samples to demodulator first
-    SampleSpan full_span(tx_audio.data(), tx_audio.size());
-    bool frame_ready = demodulator.process(full_span);
-
-    std::cout << ", demod returned " << (frame_ready ? "true" : "false");
-
-    // Now collect ALL soft bits from ALL codewords
-    std::vector<float> all_soft_bits;
-    int codewords_received = 0;
-
-    while (frame_ready) {
-        auto soft_bits = demodulator.getSoftBits();
-        if (!soft_bits.empty()) {
-            codewords_received++;
-            // Skip deinterleaving (matches TX side)
-            all_soft_bits.insert(all_soft_bits.end(),
-                                 soft_bits.begin(), soft_bits.end());
-        }
-        // Continue processing to get next codeword
-        SampleSpan empty;
-        frame_ready = demodulator.process(empty);
-    }
-
-    if (all_soft_bits.empty()) FAIL("No soft bits received");
-
-    // Verify we got expected number of codewords
-    int k = 486;  // R3/4 info bits
-    int n = 648;  // R3/4 codeword bits
-    int expected_codewords = (data_size * 8 + k - 1) / k;
-
-    if (codewords_received != expected_codewords) {
-        std::cout << "\n      WARNING: Got " << codewords_received << " codewords, expected "
-                  << expected_codewords << "\n";
-        std::cout << "      Total soft bits: " << all_soft_bits.size()
-                  << ", expected: " << (expected_codewords * n) << "\n";
-    }
-
-    // Decode all at once
-    Bytes rx_data = decoder.decodeSoft(all_soft_bits);
-
-    if (!decoder.lastDecodeSuccess()) FAIL("Decode reported failure");
-
-    // Truncate to original size
-    if (rx_data.size() > tx_data.size()) {
-        rx_data.resize(tx_data.size());
-    }
-
-    // Compare
-    size_t diff_pos;
-    if (!compareData(tx_data, rx_data, diff_pos)) {
-        std::cout << "\n      First difference at byte " << diff_pos << "\n";
-        printHexContext(tx_data, diff_pos, "TX");
-        printHexContext(rx_data, diff_pos, "RX");
-        FAIL("Data mismatch through full pipeline");
-    }
-
-    PASS();
-    return true;
-}
-
-// ============================================================================
 // Protocol Frame Size Tests
 // ============================================================================
 
@@ -570,15 +451,6 @@ int main() {
 
     std::cout << "\nProtocol Frame Size Tests:\n";
     test_protocol_frame_sizes();
-
-    // Note: The ARQ protocol chunks files into 250-byte pieces, so the maximum
-    // single frame through the modem is ~279 bytes (DATA frame with headers).
-    // We test up to 279 bytes which covers all realistic scenarios.
-    std::cout << "\nFull Modem Pipeline Tests:\n";
-    test_modem_pipeline_multiblock(60);   // Single block (~1 codeword)
-    test_modem_pipeline_multiblock(100);  // ~2 codewords
-    test_modem_pipeline_multiblock(200);  // ~4 codewords
-    test_modem_pipeline_multiblock(279);  // Max DATA frame size (~5 codewords)
 
     std::cout << "\n═══════════════════════════════════════════════════════════════════════\n";
     std::cout << "Results: " << tests_passed << "/" << tests_run << " passed";

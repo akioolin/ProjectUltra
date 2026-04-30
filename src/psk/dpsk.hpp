@@ -12,7 +12,7 @@ namespace ultra {
 /**
  * Single-Carrier Differential PSK Modulator/Demodulator
  *
- * Fills the SNR gap between MFSK (< 0 dB) and OFDM (> 15 dB)
+ * Legacy single-carrier DPSK helper. Production control traffic uses MC-DPSK.
  * Target range: 0 to 15 dB (matching VARA HF performance)
  *
  * Key advantage over OFDM at low SNR:

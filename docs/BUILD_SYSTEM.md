@@ -76,7 +76,6 @@ make -j4
 
 **Source directories:**
 - `src/ofdm/` - OFDM modulation
-- `src/otfs/` - OTFS modulation
 - `src/fec/` - LDPC encoding/decoding
 - `src/dsp/` - FFT, filters, resampling
 - `src/protocol/` - Protocol v2
@@ -98,7 +97,7 @@ make -j4
 
 ### Unit/Integration Test Targets (`tests/`)
 
-`tests/CMakeLists.txt` currently defines 21 test/utility executables (e.g. `test_layers`, `test_protocol_modem`, `test_mode_change`, `test_throughput`).
+`tests/CMakeLists.txt` defines the maintained CTest targets plus the unregistered `test_throughput` utility.
 
 Run all registered tests:
 
@@ -119,7 +118,6 @@ include/ultra/
 ├── dsp.hpp            - DSP utilities
 ├── fec.hpp            - FEC interface
 ├── arq.hpp            - ARQ types
-├── otfs.hpp           - OTFS API
 ├── modem.hpp          - Top-level modem
 └── logging.hpp        - Logging
 ```
@@ -279,7 +277,7 @@ ultra_gui
 ├── OpenGL::GL
 └── ImGui (vendored)
 
-test_iwaveform
+test_waveform_simple
 └── ultra_core
 ```
 

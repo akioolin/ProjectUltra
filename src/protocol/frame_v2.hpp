@@ -27,9 +27,9 @@ namespace FrameFlags {
 // Modulation modes for adaptive selection (negotiated in CONNECT)
 enum class WaveformMode : uint8_t {
     OFDM_COX  = 0x00,  // High-speed OFDM with Schmidl-Cox sync (17+ dB, good conditions)
-    OTFS_EQ    = 0x01,  // OTFS with TF equalization (best for Good channels)
-    OTFS_RAW   = 0x02,  // OTFS without TF eq (best for Poor channels)
-    MFSK       = 0x03,  // MFSK for very low SNR (-17 dB to +3 dB)
+    OTFS_EQ    = 0x01,  // Reserved legacy value; not advertised by production builds
+    OTFS_RAW   = 0x02,  // Reserved legacy value; not advertised by production builds
+    MFSK       = 0x03,  // Reserved legacy value; not implemented
     MC_DPSK    = 0x04,  // Multi-Carrier DPSK for low SNR with fading (0-10 dB)
     OFDM_CHIRP = 0x05,  // OFDM with chirp sync + DQPSK (low SNR fading channels)
     OFDM_NARROW = 0x06, // Narrowband OFDM (500 Hz, 21 carriers) for very low SNR (3-10 dB)
@@ -39,13 +39,13 @@ enum class WaveformMode : uint8_t {
 // Mode capabilities bitmap (for CONNECT payload)
 namespace ModeCapabilities {
     constexpr uint8_t OFDM_COX  = 0x01;
-    constexpr uint8_t OTFS_EQ    = 0x02;
-    constexpr uint8_t OTFS_RAW   = 0x04;
-    constexpr uint8_t MFSK       = 0x08;  // MFSK for very low SNR (-17 to +3 dB)
+    constexpr uint8_t OTFS_EQ    = 0x02;  // Reserved; not in ALL
+    constexpr uint8_t OTFS_RAW   = 0x04;  // Reserved; not in ALL
+    constexpr uint8_t MFSK       = 0x08;  // Reserved; not in ALL
     constexpr uint8_t MC_DPSK    = 0x10;  // Multi-Carrier DPSK for low SNR with fading (0-10 dB)
     constexpr uint8_t OFDM_CHIRP = 0x20;  // OFDM with chirp sync + DQPSK (fading)
     constexpr uint8_t OFDM_NARROW = 0x40; // Narrowband OFDM (500 Hz, 3-10 dB)
-    constexpr uint8_t ALL        = OFDM_COX | OTFS_EQ | OTFS_RAW | MFSK | MC_DPSK | OFDM_CHIRP | OFDM_NARROW;
+    constexpr uint8_t ALL        = OFDM_COX | MC_DPSK | OFDM_CHIRP | OFDM_NARROW;
 }
 
 const char* waveformModeToString(WaveformMode mode);

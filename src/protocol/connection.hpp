@@ -27,7 +27,7 @@ struct ConnectionConfig {
     ARQConfig arq;
     uint32_t connect_timeout_ms = 60000;  // 60s for DPSK (16s TX + 16s RX + margin)
     uint32_t disconnect_timeout_ms = 30000;
-    int connect_retries = 10;  // 5 DPSK attempts + 5 MFSK attempts (DPSK_ATTEMPTS = 5)
+    int connect_retries = 10;  // Robust MC-DPSK control attempts
     bool auto_accept = true;
 
     uint8_t mode_capabilities = ModeCapabilities::ALL;
@@ -180,14 +180,14 @@ public:
     using HandshakeConfirmedCallback = std::function<void()>;
     void setHandshakeConfirmedCallback(HandshakeConfirmedCallback cb) { on_handshake_confirmed_ = cb; }
 
-    // Callback when connection attempt waveform changes (DPSK -> MFSK fallback)
+    // Callback when the connection-attempt waveform changes.
     using ConnectWaveformChangedCallback = std::function<void(WaveformMode mode)>;
     void setConnectWaveformChangedCallback(ConnectWaveformChangedCallback cb) { on_connect_waveform_changed_ = cb; }
 
     // Get current waveform being used for connection attempts
     WaveformMode getConnectWaveform() const { return connect_waveform_; }
 
-    // Set initial waveform for next connection (for testing MFSK directly)
+    // Set initial waveform for next connection tests.
     void setInitialConnectWaveform(WaveformMode mode) { connect_waveform_ = mode; }
 
     // --- Data Mode (modulation + code rate) ---
@@ -296,11 +296,8 @@ private:
     static constexpr uint32_t DISCONNECT_GRACE_MS = 5000;            // 5s total grace period
     static constexpr uint32_t DISCONNECT_ACK_RETRANSMIT_MS = 2000;   // Re-send ACK every 2s
 
-    // Adaptive calling waveform (DPSK first, fallback to MFSK)
-    // Start with DPSK medium (DQPSK 62b R1/4), switch to MFSK after 5 attempts
+    // Calling waveform for PING/CONNECT control frames.
     WaveformMode connect_waveform_ = WaveformMode::MC_DPSK;
-    static constexpr int DPSK_ATTEMPTS = 5;  // Attempts 1-5 use DPSK
-    // Attempts 6-10 use MFSK (config_.connect_retries = 10)
 
     // Statistics
     ConnectionStats stats_;

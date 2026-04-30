@@ -6,7 +6,6 @@
 #include "modem_types.hpp"
 #include "ultra/types.hpp"
 #include "ultra/ofdm.hpp"
-#include "ultra/otfs.hpp"
 #include "ultra/fec.hpp"  // Interleaver, ChannelInterleaver
 #include "fec/codec_factory.hpp"  // ICodec, CodecFactory
 #include "ultra/dsp.hpp"  // FIRFilter

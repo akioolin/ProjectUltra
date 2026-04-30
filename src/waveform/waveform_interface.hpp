@@ -3,7 +3,7 @@
 // IWaveform - Abstract interface for all waveform types
 //
 // This interface enables plugin-style architecture where adding a new waveform
-// (e.g., OTFS, AFDM) only requires implementing this interface.
+// only requires implementing this interface.
 //
 // Design principles:
 // 1. Waveform owns its sync method (ChirpSync, Schmidl-Cox, etc.)
@@ -200,7 +200,7 @@ public:
 
     // Get minimum samples needed AFTER sync detection for one complete frame
     // This includes training, reference, and data for at least one codeword
-    // Used by RxPipeline to know when enough samples are available
+    // Used by streaming receivers to know when enough samples are available
     virtual int getMinSamplesForFrame() const = 0;
 
     // Get minimum samples for a 1-CW control frame (ACK, NACK, etc.)

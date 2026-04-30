@@ -590,18 +590,7 @@ float OFDMChirpWaveform::getThroughput(CodeRate rate) const {
     // Raw bit rate
     float raw_bps = symbol_rate * data_carriers * bits_per_carrier;
 
-    // Apply code rate
-    float code_ratio = 0.5f;
-    switch (rate) {
-        case CodeRate::R1_4: code_ratio = 0.25f; break;
-        case CodeRate::R1_3: code_ratio = 0.333f; break;
-        case CodeRate::R1_2: code_ratio = 0.5f; break;
-        case CodeRate::R2_3: code_ratio = 0.667f; break;
-        case CodeRate::R3_4: code_ratio = 0.75f; break;
-        case CodeRate::R5_6: code_ratio = 0.833f; break;
-    }
-
-    return raw_bps * code_ratio;
+    return raw_bps * getCodeRateValue(rate);
 }
 
 int OFDMChirpWaveform::getSamplesPerSymbol() const {

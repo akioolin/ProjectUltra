@@ -122,11 +122,11 @@ private:
 class FrameParser {
 public:
     struct ParsedFrame {
-        FrameType type;
-        uint16_t seq_num;
+        FrameType type = FrameType::DATA;
+        uint16_t seq_num = 0;
         Bytes payload;
         ChannelQuality remote_quality;  // For ACK frames
-        bool valid;                      // CRC check passed
+        bool valid = false;              // CRC check passed
     };
 
     explicit FrameParser(const ModemConfig& config);

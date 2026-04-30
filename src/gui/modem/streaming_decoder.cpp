@@ -2909,13 +2909,5 @@ void StreamingDecoder::finalizeBurstGroup() {
     }
 }
 
-// Legacy methods - do nothing but required by header
-bool StreamingDecoder::runCorrelationSearch(size_t) { return false; }
-bool StreamingDecoder::tryDecodeFrame() { return false; }
-std::vector<float> StreamingDecoder::copySamplesFrom(size_t, size_t) { return {}; }
-size_t StreamingDecoder::samplesAvailableFrom(size_t) const { return 0; }
-bool StreamingDecoder::isPingOnly(const std::vector<float>&, size_t) { return false; }
-void StreamingDecoder::updateNoiseFloor(const float*, size_t) {}
-
 } // namespace gui
 } // namespace ultra

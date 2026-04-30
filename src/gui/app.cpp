@@ -559,7 +559,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     });
     ultra::gui::startupTrace("App", "protocol-callbacks-mid7");
 
-    // Waveform mode negotiation callback (OFDM, DPSK, MFSK switching)
+    // Waveform mode negotiation callback.
     protocol_.setModeNegotiatedCallback([this](protocol::WaveformMode mode) {
         std::string mode_name;
         switch (mode) {
@@ -582,7 +582,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     });
     ultra::gui::startupTrace("App", "protocol-callbacks-mid8");
 
-    // Connect waveform fallback callback (DPSK -> MFSK when connection attempts fail)
+    // Connect waveform callback.
     protocol_.setConnectWaveformChangedCallback([this](protocol::WaveformMode mode) {
         const char* mode_name = (mode == protocol::WaveformMode::MFSK) ? "MFSK" : "DPSK";
         guiLog("CONNECT_WAVEFORM: Switching to %s for connection attempts", mode_name);
@@ -1009,7 +1009,7 @@ void App::initVirtualStation() {
         virtual_modem_->setWaveformMode(mode);
     });
 
-    // Connect waveform fallback for virtual station
+    // Connect waveform callback for virtual station.
     virtual_protocol_.setConnectWaveformChangedCallback([this](protocol::WaveformMode mode) {
         const char* mode_name = (mode == protocol::WaveformMode::MFSK) ? "MFSK" : "DPSK";
         guiLog("SIM: Virtual CONNECT_WAVEFORM: Switching to %s", mode_name);

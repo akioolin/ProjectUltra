@@ -65,11 +65,6 @@ add_library(ultra_core STATIC
     src/ofdm/demodulator.cpp
     src/ofdm/ofdm_sync.cpp
     src/ofdm/channel_equalizer.cpp
-    src/ofdm/adaptive_modem.cpp
-    src/otfs/otfs.cpp
-    # AFDM - Affine Frequency Division Multiplexing (for fading channels)
-    src/afdm/daft.cpp
-    src/afdm/afdm.cpp
     src/fec/ldpc_encoder.cpp
     src/fec/ldpc_decoder.cpp
     src/fec/ldpc_codec.cpp
@@ -96,7 +91,6 @@ add_library(ultra_core STATIC
     src/waveform/mc_dpsk_waveform.cpp
     src/waveform/ofdm_cox_waveform.cpp
     src/waveform/ofdm_chirp_waveform.cpp
-    src/waveform/otfs_waveform.cpp
     src/waveform/waveform_factory.cpp
     # miniz compression library (public domain)
     thirdparty/miniz/miniz.c

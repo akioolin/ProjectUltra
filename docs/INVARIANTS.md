@@ -65,7 +65,7 @@ waveform->setFrequencyOffset(cfo);  // TOO LATE!
 
 **Why:** Real frequency shift is `e^{j·2π·CFO·t}` multiplication on complex signal. For real signals, we need Hilbert transform to get the analytic signal first.
 
-**Correct implementation (test_iwaveform.cpp:76-101):**
+**Correct implementation:** see the FFT/Hilbert CFO injection used by the maintained simulator/test tools.
 ```cpp
 // 1. Compute Hilbert transform (imaginary part)
 std::vector<float> hilbert = computeHilbert(signal);

@@ -1983,10 +1983,11 @@ private:
             std::lock_guard<std::mutex> lock(msg_mutex_);
             bool all_ok = true;
             for (int i = 0; i < total; i++) {
-                if (i < static_cast<int>(received_messages_.size()) && received_messages_[i] == test_messages[i]) {
-                    std::cout << "  \033[32m✓ [" << (i+1) << "/" << total << "] Received (" << received_messages_[i].size() << "b): \"" << received_messages_[i] << "\"\033[0m\n";
+                const auto idx = static_cast<size_t>(i);
+                if (idx < received_messages_.size() && received_messages_[idx] == test_messages[idx]) {
+                    std::cout << "  \033[32m✓ [" << (i+1) << "/" << total << "] Received (" << received_messages_[idx].size() << "b): \"" << received_messages_[idx] << "\"\033[0m\n";
                 } else {
-                    std::string got = (i < static_cast<int>(received_messages_.size())) ? received_messages_[i] : "(missing)";
+                    std::string got = (idx < received_messages_.size()) ? received_messages_[idx] : "(missing)";
                     std::cout << "  \033[31m✗ Message " << (i+1) << " mismatch! Got: \"" << got << "\"\033[0m\n";
                     all_ok = false;
                 }

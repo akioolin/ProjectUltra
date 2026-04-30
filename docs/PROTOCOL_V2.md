@@ -35,21 +35,23 @@ Primary sources:
 
 `WaveformMode` values:
 - `0x00` `OFDM_COX`
-- `0x01` `OTFS_EQ`
-- `0x02` `OTFS_RAW`
-- `0x03` `MFSK`
+- `0x01` `OTFS_EQ` (reserved; not advertised by production builds)
+- `0x02` `OTFS_RAW` (reserved; not advertised by production builds)
+- `0x03` `MFSK` (reserved; not implemented)
 - `0x04` `MC_DPSK`
 - `0x05` `OFDM_CHIRP`
+- `0x06` `OFDM_NARROW`
 - `0xFF` `AUTO`
 
 `ModeCapabilities` bitmap:
 - `0x01` `OFDM_COX`
-- `0x02` `OTFS_EQ`
-- `0x04` `OTFS_RAW`
-- `0x08` `MFSK`
+- `0x02` `OTFS_EQ` (reserved; not in `ALL`)
+- `0x04` `OTFS_RAW` (reserved; not in `ALL`)
+- `0x08` `MFSK` (reserved; not in `ALL`)
 - `0x10` `MC_DPSK`
 - `0x20` `OFDM_CHIRP`
-- `0x3F` `ALL`
+- `0x40` `OFDM_NARROW`
+- `0x71` `ALL` production-supported modes
 
 ## Frame Families
 
@@ -166,8 +168,8 @@ Current practical notes:
 
 ### Connect waveform fallback
 
-- Default connect waveform starts at `MC_DPSK`.
-- After 5 failed connect retries (`DPSK_ATTEMPTS`), connect waveform falls back to `MFSK`.
+- Default connect waveform is `MC_DPSK`.
+- MFSK fallback is disabled because MFSK is reserved but not implemented.
 
 ## Negotiation and Mode Selection
 

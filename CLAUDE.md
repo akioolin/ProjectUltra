@@ -92,8 +92,9 @@ Interpretation of the 2026-04-29 robustness work:
   - Tests: PING/PONG → CONNECT → MODE_CHANGE → DATA (4CW frame interleaved) → DISCONNECT
   - Command: `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test 2>&1 | tee /tmp/test_output.log`
 - `test_waveform_simple` - Quick single-frame sanity checks (NOT for connected mode testing)
-- `test_iwaveform` - REMOVED (was renamed to `test_iwaveform_DO_NOT_USE.cpp`, no longer builds)
-- `test_hf_modem` is LEGACY - do not use
+- `ctest --test-dir build` - default maintained unit/regression gate
+- `tests/regression_matrix.sh` - wrapper for default CTest; `--full` also runs maintained light-sync sweep when `cli_simulator` exists
+- Obsolete direct-modem/QPSK harnesses were removed from `tests/`; use Git history for archaeology
 
 **MC-DPSK invariants:**
 - ALWAYS call `mc_dpsk_demodulator_->reset()` at start of `rxDecodeDPSK()`
@@ -110,9 +111,9 @@ Interpretation of the 2026-04-29 robustness work:
 **Testing invariants:**
 - Use SINGLE ModemEngine instance for entire audio stream (continuous RX)
 - Buffer limit: MAX_PENDING_SAMPLES = 960000 (20 seconds at 48kHz)
+- **DEFAULT unit/regression gate:** `ctest --test-dir build --output-on-failure -j4`
 - **PRIMARY regression test:** `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test 2>&1 | tee /tmp/test_output.log`
 - `cli_simulator` is the ONLY tool that tests the full protocol with light preamble, two-station interaction, and proper connected-mode configuration. `test_waveform_simple` is for quick single-frame sanity checks only.
-- `regression_matrix.sh` is OUTDATED — it uses `test_iwaveform` which no longer exists. Do NOT run it.
 - **ALWAYS use `| tee /tmp/test_output.log`** when running tests - tests take minutes and we need full output for debugging
 
 ---
@@ -205,7 +206,7 @@ Interpretation of the 2026-04-29 robustness work:
 - OFDM_NARROW DQPSK R1/4 AWGN: WORKING - 100% at SNR=8 (0 retransmissions)
 - OFDM_NARROW DQPSK R1/4 Good fading SNR=8: WORKING - 100% data decode, 93% ACK, all messages delivered via ARQ
 - OFDM_COX: WORKING - DATA phase passes at SNR=20 dB
-- OTFS: EXPERIMENTAL - See OTFS Status section below
+- OTFS/MFSK: RESERVED ONLY - not in the production build or default capabilities
 - cli_simulator: FULLY WORKING - all phases pass on AWGN and fading
 
 **Auto rate selection ladder (2026-03-15, updated with 802.11n LDPC):**
@@ -252,29 +253,16 @@ Interpretation of the 2026-04-29 robustness work:
 - Good fading: **100% CW success** at R2/3 SNR=15 (10/10 seeds, enabled by CPE correction)
 - Moderate fading: R1/4 avg 1.4 retx (5/5 seeds), R1/2 avg 2.4 retx (5/5 seeds) — up from ~89% CW
 
-**OTFS Status (2026-01-31) - EXPERIMENTAL:**
-- **AWGN:** 100% at SNR=20 with QPSK R1/2 - WORKS
-- **Good fading:** ~52% average (vs OFDM DQPSK ~56%) - NOT COMPETITIVE
-- **Integration:** Fully integrated with chirp sync, IWaveform interface, test_iwaveform
-- **Files:** `src/otfs/otfs.cpp`, `src/waveform/otfs_waveform.cpp`, `include/ultra/otfs.hpp`
-
-**What we tried:**
-1. TF-domain equalization (preamble-based) - insufficient for fading
-2. DD-domain differential encoding - doesn't help (adjacent DD symbols don't see similar channels)
-3. DD-domain pilot with matched-filter equalization - marginal improvement (~52% vs ~28% baseline)
-4. Combined TF + DD equalization - still not competitive with OFDM DQPSK
-
-**Why OTFS doesn't outperform OFDM in our implementation:**
-- OTFS's theoretical advantage requires DD-domain MMSE equalization exploiting channel sparsity
-- Our simplified approaches (TF eq, single-tap DD eq, matched-filter) are insufficient
-- Proper DD-domain equalization is research-level complexity (sparse channel estimation + iterative detection)
+**OTFS/MFSK production status (2026-04-30):**
+- OTFS prototype code was removed from the production build. The tested implementation was not competitive with OFDM_CHIRP on fading and required research-grade DD-domain equalization to justify keeping it.
+- MFSK enum/capability values are reserved for wire compatibility, but there is no maintained production implementation. Do not advertise or negotiate MFSK.
+- Default `ModeCapabilities::ALL` includes only production-supported modes: OFDM_COX, MC_DPSK, OFDM_CHIRP, and OFDM_NARROW.
 
 **Recommendation:** Use OFDM_CHIRP with DQPSK. Rate selection is automatic via `selectOFDMCodeRate()`:
 - R3/4 for AWGN only (SNR≥20, fading<0.15) — ~3.4× throughput vs R1/4
 - R2/3 for good fading or better (SNR≥15) — ~2.8× throughput vs R1/4
 - R1/2 for good/moderate fading (SNR≥15) — ~2× throughput vs R1/4
 - R1/4 for heavy fading or lower SNR — robust but slower
-OTFS is parked - would need significant research effort to implement proper DD-domain equalization.
 
 **FFTW requirement:**
 - FFTW3 is REQUIRED for fast chirp detection (apt install libfftw3-dev)
@@ -343,7 +331,7 @@ OTFS is parked - would need significant research effort to implement proper DD-d
 | Document | Purpose |
 |----------|---------|
 | `docs/BUILD_SYSTEM.md` | CMake, dependencies, adding components |
-| `docs/ADDING_NEW_WAVEFORM.md` | Step-by-step guide for OTFS, AFDM, etc. |
+| `docs/ADDING_NEW_WAVEFORM.md` | Step-by-step guide for adding future waveform implementations |
 | `docs/GIT_WORKFLOW.md` | Commit strategy, branching, push policy |
 | `docs/RESEARCH_DIRECTIONS.md` | Long-term research goals, novel techniques |
 
@@ -370,8 +358,9 @@ make -j4
 |------|---------|---------|
 | `cli_simulator` | **PRIMARY** - Full protocol with two-station interaction | `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test` |
 | `test_waveform_simple` | Quick single-frame sanity check | `./build/test_waveform_simple -w ofdm_chirp --snr 15` |
+| `tests/regression_matrix.sh` | Maintained CTest wrapper | `./tests/regression_matrix.sh --quick` |
 
-**Testing priority:** Use `cli_simulator` for all real testing (handshake, light preamble, data transfer, ARQ). Use `test_waveform_simple` only for quick single-frame sanity checks. `regression_matrix.sh` is outdated and will not run.
+**Testing priority:** Use CTest for unit/regression gates and `cli_simulator` for full real testing (handshake, light preamble, data transfer, ARQ). Use `test_waveform_simple` only for quick single-frame sanity checks.
 
 ### CLI Commands
 ```bash
@@ -396,7 +385,6 @@ make -j4
 | **OFDM_NARROW** | NB Chirp + LTS | 5-10 dB | ~230 bps | ±50 Hz | Good (R1/4) |
 | **OFDM_CHIRP** | Dual Chirp + LTS | 10-17 dB | 3.4 kbps | ±50 Hz | Good (R1/4) |
 | **OFDM_COX** | Schmidl-Cox | 17+ dB | 7.9 kbps | Needs testing | Poor |
-| **OTFS** | Dual Chirp | 15+ dB | ~2 kbps | ±50 Hz | **Poor** (experimental) |
 | **SC-DPSK** | Barker-13 | -8 to -3 dB | 125 bps | N/A | Good |
 
 **Waveform Selection:**
@@ -404,7 +392,7 @@ make -j4
 - Low SNR (5-10 dB) with good/moderate fading: Use OFDM_NARROW (~103 bps R1/4, ~230 bps R1/2)
 - Moderate/Good HF: Use OFDM_CHIRP (10-17 dB) or OFDM_COX (17+ dB)
 - Very low SNR: Use SC-DPSK or MC-DPSK
-- **DO NOT use OTFS on fading channels** - it's experimental and underperforms OFDM_CHIRP
+- OTFS/MFSK values are reserved only and are not production-supported
 
 ---
 
@@ -421,17 +409,14 @@ src/
 └── waveform/           # IWaveform interface and implementations
 
 tools/
-├── test_iwaveform.cpp  # PRIMARY test tool
 ├── cli_simulator.cpp   # Full protocol test
-└── test_hf_modem.cpp   # LEGACY - reference only
+└── test_waveform_simple.cpp # Quick waveform sanity checks
 ```
 
 **Key Files:**
 - `src/sync/chirp_sync.hpp` - Dual chirp detection + CFO estimation
 - `src/gui/modem/modem_rx_decode.cpp` - RX decode logic
 - `src/psk/multi_carrier_dpsk.hpp` - MC-DPSK modulator/demodulator
-- `src/otfs/otfs.cpp` - OTFS modulator/demodulator (experimental)
-- `src/waveform/otfs_waveform.cpp` - OTFS IWaveform wrapper with chirp sync
 
 ---
 

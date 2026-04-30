@@ -377,115 +377,6 @@ bool test_llr_dqpsk_phase_transitions() {
 }
 
 // ============================================================================
-// SECTION 3: DQPSK MODULATION/DEMODULATION TESTS
-// ============================================================================
-
-bool test_dqpsk_encode_decode() {
-    std::cout << "\n=== DQPSK: Encode/Decode Roundtrip ===\n";
-
-    // Use the actual modulator/demodulator
-    ModemConfig config;
-    config.sample_rate = 48000;
-    config.center_freq = 1500;
-    config.fft_size = 512;
-    config.num_carriers = 30;
-    config.pilot_spacing = 2;
-    config.modulation = Modulation::DQPSK;
-    config.code_rate = CodeRate::R1_4;
-
-    OFDMModulator mod(config);
-    OFDMDemodulator demod(config);
-
-    // Test data: DEADBEEF pattern
-    Bytes data = {0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF,
-                  0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF,
-                  0xDE, 0xAD, 0xBE, 0xEF, 0xDE};  // 21 bytes for R1/4
-
-    // Encode with LDPC
-    LDPCEncoder encoder(config.code_rate);
-    Bytes encoded = encoder.encode(data);
-
-    // Modulate
-    Samples preamble = mod.generatePreamble();
-    Samples modulated = mod.modulate(encoded, config.modulation);
-
-    // Combine
-    Samples signal;
-    signal.insert(signal.end(), preamble.begin(), preamble.end());
-    signal.insert(signal.end(), modulated.begin(), modulated.end());
-
-    // Normalize
-    float max_val = 0;
-    for (float s : signal) max_val = std::max(max_val, std::abs(s));
-    if (max_val > 0) {
-        float scale = 0.5f / max_val;
-        for (float& s : signal) s *= scale;
-    }
-
-    std::cout << "    Signal: " << signal.size() << " samples\n";
-
-    // Demodulate
-    std::vector<float> soft_bits;
-    size_t chunk_size = 960;
-
-    for (size_t i = 0; i < signal.size(); i += chunk_size) {
-        size_t len = std::min(chunk_size, signal.size() - i);
-        SampleSpan span(signal.data() + i, len);
-        demod.process(span);
-
-        if (demod.isSynced()) {
-            auto bits = demod.getSoftBits();
-            soft_bits.insert(soft_bits.end(), bits.begin(), bits.end());
-        }
-    }
-
-    CHECK(demod.isSynced(), "Demodulator should sync");
-    CHECK(soft_bits.size() >= 648, "Should have at least 648 soft bits");
-
-    std::cout << "    Soft bits: " << soft_bits.size() << "\n";
-
-    // Debug: Show first 32 LLRs
-    std::cout << "    First 32 LLRs: ";
-    for (int i = 0; i < 32 && i < (int)soft_bits.size(); i++) {
-        printf("%.1f ", soft_bits[i]);
-    }
-    std::cout << "\n";
-
-    // Decode - calculate exact number of bits needed
-    // R1/4 has k=162 info bits, n=648 codeword bits
-    // 21 bytes = 168 bits needs ceil(168/162) = 2 codewords = 1296 bits
-    LDPCDecoder decoder(config.code_rate);
-    size_t k = 162;  // R1/4 info bits
-    size_t n = 648;  // R1/4 codeword bits
-    size_t num_codewords = (data.size() * 8 + k - 1) / k;
-    size_t needed_bits = num_codewords * n;
-    size_t use_bits = std::min(soft_bits.size(), needed_bits);
-
-    std::vector<float> cw(soft_bits.begin(), soft_bits.begin() + use_bits);
-    Bytes decoded = decoder.decodeSoft(std::span<const float>(cw));
-
-    CHECK(decoder.lastDecodeSuccess(), "LDPC decode should succeed");
-
-    // Verify DEADBEEF
-    if (decoded.size() > data.size()) decoded.resize(data.size());
-
-    bool match = true;
-    for (size_t i = 0; i < std::min(decoded.size(), (size_t)20); i++) {
-        if (decoded[i] != data[i]) { match = false; break; }
-    }
-
-    std::cout << "    Decoded: ";
-    for (size_t i = 0; i < std::min(decoded.size(), (size_t)8); i++) {
-        printf("%02X ", decoded[i]);
-    }
-    std::cout << "\n";
-
-    CHECK(match, "DEADBEEF should decode correctly");
-    PASS("DQPSK encode/decode roundtrip");
-    return true;
-}
-
-// ============================================================================
 // SECTION 4: FULL CHAIN WITH NOISE INJECTION
 // ============================================================================
 
@@ -778,9 +669,8 @@ int main() {
     std::cout << "\nThis tests ALL critical modem components:\n";
     std::cout << "  1. LDPC encoder/decoder\n";
     std::cout << "  2. LLR/soft demapper\n";
-    std::cout << "  3. DQPSK modulation/demodulation\n";
-    std::cout << "  4. Full chain with noise\n";
-    std::cout << "  5. CFO estimation and correction\n";
+    std::cout << "  3. Full chain with noise\n";
+    std::cout << "  4. CFO estimation and correction\n";
 
     // SECTION 1: LDPC
     std::cout << "\n============== SECTION 1: LDPC ==============\n";
@@ -796,16 +686,12 @@ int main() {
     test_llr_qpsk();
     test_llr_dqpsk_phase_transitions();
 
-    // SECTION 3: DQPSK
-    std::cout << "\n============== SECTION 3: DQPSK ==============\n";
-    test_dqpsk_encode_decode();
-
-    // SECTION 4: Full chain with noise
-    std::cout << "\n============== SECTION 4: FULL CHAIN + NOISE ==============\n";
+    // SECTION 3: Full chain with noise
+    std::cout << "\n============== SECTION 3: FULL CHAIN + NOISE ==============\n";
     test_full_chain_various_snr();
 
-    // SECTION 5: CFO
-    std::cout << "\n============== SECTION 5: CFO ESTIMATION ==============\n";
+    // SECTION 4: CFO
+    std::cout << "\n============== SECTION 4: CFO ESTIMATION ==============\n";
     test_cfo_various_offsets();
 
     // Summary

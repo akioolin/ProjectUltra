@@ -471,7 +471,11 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data) {
         start = 1;
     }
 
-    std::string text(complete_payload.begin() + start, complete_payload.end());
+    std::string text;
+    if (start < complete_payload.size()) {
+        text.assign(complete_payload.begin() + static_cast<std::ptrdiff_t>(start),
+                    complete_payload.end());
+    }
 
     if (on_message_received_) {
         on_message_received_(text);
@@ -554,16 +558,12 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
         return selected;
     }
 
-    // Fallback if selected mode not supported
-
-    // Fallback priority: OFDM_COX > OFDM_CHIRP > OFDM_NARROW > OTFS > MC_DPSK > MFSK
+    // Fallback if selected mode is not supported by both peers.
+    // Production priority excludes reserved OTFS/MFSK values.
     if (common & ModeCapabilities::OFDM_COX) return WaveformMode::OFDM_COX;
     if (common & ModeCapabilities::OFDM_CHIRP) return WaveformMode::OFDM_CHIRP;
     if (common & ModeCapabilities::OFDM_NARROW) return WaveformMode::OFDM_NARROW;
-    if (common & ModeCapabilities::OTFS_EQ) return WaveformMode::OTFS_EQ;
-    if (common & ModeCapabilities::OTFS_RAW) return WaveformMode::OTFS_RAW;
     if (common & ModeCapabilities::MC_DPSK) return WaveformMode::MC_DPSK;
-    if (common & ModeCapabilities::MFSK) return WaveformMode::MFSK;
 
     return WaveformMode::OFDM_COX;
 }

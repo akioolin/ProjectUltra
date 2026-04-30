@@ -289,109 +289,6 @@ bool test_correlation_profile() {
 }
 
 /**
- * Test 5: Full decode accuracy after sync
- *
- * Verifies that after sync detection, data can be correctly decoded.
- * This is the ultimate test - correct sync should enable correct decode.
- */
-bool test_decode_after_sync() {
-    TEST("Decode Accuracy After Sync Detection");
-
-    ModemConfig config;
-    config.modulation = Modulation::DQPSK;
-    config.code_rate = CodeRate::R1_2;
-
-    OFDMModulator mod(config);
-    OFDMDemodulator demod(config);
-    LDPCEncoder encoder(config.code_rate);
-    LDPCDecoder decoder(config.code_rate);
-
-    // Test pattern: known bytes
-    Bytes test_data = {0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE};
-
-    std::cout << "  Test pattern: ";
-    for (uint8_t b : test_data) printf("%02X ", b);
-    std::cout << std::endl;
-
-    // Encode and modulate
-    Bytes encoded = encoder.encode(test_data);
-    Samples preamble = mod.generatePreamble();
-    Samples data = mod.modulate(encoded, config.modulation);
-
-    // Add leading silence
-    const size_t LATENCY = 1500;
-    std::vector<float> rx_signal(LATENCY, 0.0f);
-    rx_signal.insert(rx_signal.end(), preamble.begin(), preamble.end());
-    rx_signal.insert(rx_signal.end(), data.begin(), data.end());
-
-    // Scale
-    float max_val = 0;
-    for (float s : rx_signal) max_val = std::max(max_val, std::abs(s));
-    if (max_val > 0) {
-        for (float& s : rx_signal) s *= 0.5f / max_val;
-    }
-
-    // Process
-    SampleSpan span(rx_signal.data(), rx_signal.size());
-    demod.process(span);
-
-    if (!demod.isSynced()) {
-        FAIL("Demodulator did not sync");
-        return false;
-    }
-
-    // Check sync accuracy
-    size_t detected = demod.getLastSyncOffset();
-    int sync_error = static_cast<int>(detected) - static_cast<int>(LATENCY);
-    std::cout << "  Sync error: " << sync_error << " samples" << std::endl;
-
-    // Get soft bits
-    std::vector<float> all_soft_bits;
-    auto bits = demod.getSoftBits();
-    all_soft_bits.insert(all_soft_bits.end(), bits.begin(), bits.end());
-
-    while (all_soft_bits.size() < 648) {
-        demod.process({});
-        bits = demod.getSoftBits();
-        if (bits.empty()) break;
-        all_soft_bits.insert(all_soft_bits.end(), bits.begin(), bits.end());
-    }
-
-    if (all_soft_bits.size() < 648) {
-        FAIL("Not enough soft bits: " + std::to_string(all_soft_bits.size()));
-        return false;
-    }
-
-    // LDPC decode
-    std::vector<float> codeword(all_soft_bits.begin(), all_soft_bits.begin() + 648);
-    Bytes decoded = decoder.decodeSoft(codeword);
-
-    if (decoded.empty() || !decoder.lastDecodeSuccess()) {
-        FAIL("LDPC decode failed");
-        return false;
-    }
-
-    // Check decoded data
-    std::cout << "  Decoded: ";
-    for (size_t i = 0; i < std::min(decoded.size(), test_data.size()); ++i) {
-        printf("%02X ", decoded[i]);
-    }
-    std::cout << std::endl;
-
-    int matches = 0;
-    for (size_t i = 0; i < std::min(decoded.size(), test_data.size()); ++i) {
-        if (decoded[i] == test_data[i]) matches++;
-    }
-
-    float match_rate = 100.0f * matches / test_data.size();
-    std::cout << "  Match rate: " << matches << "/" << test_data.size()
-              << " (" << match_rate << "%)" << std::endl;
-
-    CHECK(match_rate == 100.0f, "All bytes decoded correctly");
-    return match_rate == 100.0f;
-}
-
-/**
  * Test 6: Sync refinement improvement
  *
  * Diagnostic: verifies the fine-grained refinement actually improves
@@ -458,7 +355,6 @@ int main() {
     test_sync_accuracy_various_latencies();
     test_sync_with_noise();
     test_correlation_profile();
-    test_decode_after_sync();
     test_refinement_runs();
 
     std::cout << "\n========================================" << std::endl;

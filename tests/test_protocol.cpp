@@ -475,6 +475,11 @@ bool test_disconnect() {
     stationA.disconnect();
     channel.run(20, 100);
 
+    // The responder intentionally stays connected during a disconnect grace
+    // period so it can re-send the final ACK if the initiator retransmits the
+    // DISCONNECT. Advance beyond that production grace window before asserting.
+    channel.run(60, 100);
+
     if (!a_disconnected && stationA.isConnected()) FAIL("A not disconnected");
     if (!b_disconnected && stationB.isConnected()) FAIL("B not disconnected");
 
@@ -611,10 +616,10 @@ bool test_quick_brown_fox() {
 }
 
 // ============================================================================
-// Adaptive Mode Tests
+// Protocol Rate Adaptation Tests
 // ============================================================================
 
-bool test_adaptive_mode_upgrade() {
+bool test_protocol_rate_upgrade() {
     TEST("Automatic MODE_CHANGE on good channel");
 
     ConnectionConfig config;
@@ -675,8 +680,9 @@ bool test_adaptive_data_transfer() {
     stationA.setLocalCallsign("W1ABC");
     stationB.setLocalCallsign("K2DEF");
 
-    // Good SNR triggers upgrade to DQPSK R1/2
-    stationB.setMeasuredSNR(18.0f);
+    // Good fading at SNR 18 should choose DQPSK R1/2. With default fading=0
+    // this is classified as near-AWGN and can safely use R2/3.
+    stationB.setChannelQuality(18.0f, 0.30f);
 
     std::vector<std::string> received_at_b;
     stationB.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
@@ -722,7 +728,8 @@ bool test_adaptive_bidirectional() {
     stationA.setLocalCallsign("W1ABC");
     stationB.setLocalCallsign("K2DEF");
 
-    // Excellent SNR - should upgrade to QAM16
+    // Excellent near-AWGN SNR should use high-rate DQPSK. Coherent QAM is no
+    // longer the automatic HF default.
     stationB.setMeasuredSNR(27.0f);
 
     std::vector<std::string> received_at_a;
@@ -742,10 +749,14 @@ bool test_adaptive_bidirectional() {
 
     if (!stationA.isConnected()) FAIL("Not connected");
 
-    // Verify QAM16 mode
-    if (stationA.getDataModulation() != ultra::Modulation::QAM16) {
+    // Verify high-rate differential mode
+    if (stationA.getDataModulation() != ultra::Modulation::DQPSK) {
         std::cout << "(got " << ultra::modulationToString(stationA.getDataModulation()) << ") ";
-        FAIL("Expected QAM16 at 27 dB SNR");
+        FAIL("Expected DQPSK at 27 dB SNR");
+    }
+    if (stationA.getDataCodeRate() != ultra::CodeRate::R3_4) {
+        std::cout << "(got " << ultra::codeRateToString(stationA.getDataCodeRate()) << ") ";
+        FAIL("Expected R3/4 at 27 dB SNR");
     }
 
     // Bidirectional transfer
@@ -919,8 +930,8 @@ int main() {
     std::cout << "\nRadio Test Messages:\n";
     test_quick_brown_fox();
 
-    std::cout << "\nAdaptive Mode Tests:\n";
-    test_adaptive_mode_upgrade();
+    std::cout << "\nProtocol Rate Adaptation Tests:\n";
+    test_protocol_rate_upgrade();
     test_adaptive_data_transfer();
     test_adaptive_bidirectional();
 

@@ -871,17 +871,6 @@ void Connection::tick(uint32_t elapsed_ms) {
                     snprintf(reason, sizeof(reason), "Connection timeout after %d attempts", config_.connect_retries);
                     enterDisconnected(reason);
                 } else {
-                    // Check if we need to fall back to MFSK after DPSK_ATTEMPTS
-                    if (connect_retry_count_ == DPSK_ATTEMPTS &&
-                        connect_waveform_ == WaveformMode::MC_DPSK) {
-                        connect_waveform_ = WaveformMode::MFSK;
-                        LOG_MODEM(WARN, "Connection: Falling back to MFSK after %d DPSK attempts",
-                                  DPSK_ATTEMPTS);
-                        if (on_connect_waveform_changed_) {
-                            on_connect_waveform_changed_(connect_waveform_);
-                        }
-                    }
-
                     LOG_MODEM(WARN, "Connection: Connect timeout, retrying via %s (%d/%d)",
                               waveformModeToString(connect_waveform_),
                               connect_retry_count_ + 1, config_.connect_retries);

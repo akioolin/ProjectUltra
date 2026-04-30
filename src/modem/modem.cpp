@@ -55,20 +55,8 @@ float calculateMaxDataRate(const ModemConfig& config, Modulation mod, CodeRate r
     // Raw bit rate
     float raw_bps = bits_per_symbol / symbol_duration;
 
-    // Apply code rate
-    float code_rate_val = 0.5f;
-    switch (rate) {
-        case CodeRate::R1_4: code_rate_val = 0.25f; break;
-        case CodeRate::R1_3: code_rate_val = 0.333f; break;
-        case CodeRate::R1_2: code_rate_val = 0.5f; break;
-        case CodeRate::R2_3: code_rate_val = 0.667f; break;
-        case CodeRate::R3_4: code_rate_val = 0.75f; break;
-        case CodeRate::R5_6: code_rate_val = 0.833f; break;
-        case CodeRate::R7_8: code_rate_val = 0.875f; break;
-    }
-
     // Account for framing overhead (~10%)
-    return raw_bps * code_rate_val * 0.9f;
+    return raw_bps * getCodeRateValue(rate) * 0.9f;
 }
 
 struct Modem::Impl {

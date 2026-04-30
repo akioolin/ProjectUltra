@@ -165,7 +165,7 @@ void ARQController::setDeliveryCallback(DeliveryCallback cb) {
 Bytes ARQController::generateAck() {
     std::lock_guard<std::mutex> lock(impl_->mtx);
     // ACK the last successfully received in-order frame
-    ChannelQuality local_quality;  // Would get from demodulator
+    ChannelQuality local_quality{};  // Would get from demodulator
     return impl_->builder.buildAckFrame(impl_->last_acked, local_quality);
 }
 
