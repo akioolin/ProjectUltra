@@ -15,6 +15,7 @@ cmake-build-*/
 .claude/
 
 # Codex CLI workspace metadata
+.codex
 .codex/
 
 # Cache
