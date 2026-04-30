@@ -4,7 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <algorithm>
-#include <cstring>
+#include <system_error>
 
 namespace ultra {
 namespace protocol {
@@ -63,6 +63,47 @@ uint32_t updateCRC32(uint32_t crc, const uint8_t* data, size_t len) {
         crc = CRC32_TABLE[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
     }
     return crc;
+}
+
+std::string sanitizeReceivedFilename(std::string filename) {
+    for (char& c : filename) {
+        unsigned char ch = static_cast<unsigned char>(c);
+        if (c == '/' || c == '\\' || c == ':' || ch < 0x20) {
+            c = '_';
+        }
+    }
+
+    if (filename.empty() || filename == "." || filename == "..") {
+        return "received_file";
+    }
+
+    return filename;
+}
+
+std::string uniqueReceivePath(const std::string& directory, const std::string& filename) {
+    const std::filesystem::path dir(directory);
+    const std::filesystem::path name(filename);
+    std::filesystem::path candidate = dir / name;
+
+    std::error_code ec;
+    if (!std::filesystem::exists(candidate, ec)) {
+        return candidate.string();
+    }
+
+    const std::string stem = name.stem().string().empty()
+                                 ? std::string("received_file")
+                                 : name.stem().string();
+    const std::string extension = name.extension().string();
+
+    for (int suffix = 1; suffix < 100000; ++suffix) {
+        candidate = dir / (stem + "_" + std::to_string(suffix) + extension);
+        ec.clear();
+        if (!std::filesystem::exists(candidate, ec)) {
+            return candidate.string();
+        }
+    }
+
+    return (dir / (stem + "_overflow" + extension)).string();
 }
 
 } // anonymous namespace
@@ -337,35 +378,13 @@ bool FileTransferController::processFileStart(const Bytes& payload) {
                        (static_cast<uint32_t>(payload[8]) << 8) |
                        static_cast<uint32_t>(payload[9]);
 
-    // Parse filename
-    rx_filename_ = std::string(payload.begin() + 10, payload.end());
-
-    // Sanitize filename
-    std::replace(rx_filename_.begin(), rx_filename_.end(), '/', '_');
-    std::replace(rx_filename_.begin(), rx_filename_.end(), '\\', '_');
-    std::replace(rx_filename_.begin(), rx_filename_.end(), ':', '_');
-
-    // Create output path
-    rx_filepath_ = rx_dir_ + "/" + rx_filename_;
-
-    // Handle duplicate filenames
-    int suffix = 1;
-    std::string base_path = rx_filepath_;
-    while (std::filesystem::exists(rx_filepath_)) {
-        size_t dot_pos = base_path.rfind('.');
-        if (dot_pos != std::string::npos) {
-            rx_filepath_ = base_path.substr(0, dot_pos) + "_" +
-                          std::to_string(suffix) + base_path.substr(dot_pos);
-        } else {
-            rx_filepath_ = base_path + "_" + std::to_string(suffix);
-        }
-        suffix++;
-    }
+    rx_filename_ = sanitizeReceivedFilename(std::string(payload.begin() + 10, payload.end()));
+    rx_filepath_ = uniqueReceivePath(rx_dir_, rx_filename_);
 
     rx_data_.clear();
     rx_pending_chunks_.clear();
     rx_final_chunk_seen_ = false;
-    rx_data_.reserve(rx_expected_size_);  // Reserve for decompressed size as estimate
+    rx_data_.reserve(std::min<uint32_t>(rx_expected_size_, 1024u * 1024u));
     state_ = FileTransferState::RECEIVING;
 
     notifyProgress();

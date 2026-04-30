@@ -133,10 +133,64 @@ void test_compressed_final_chunk_out_of_order_finalizes() {
     std::filesystem::remove_all(root);
 }
 
+void test_duplicate_filename_in_dotted_receive_directory() {
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() /
+        "ultra_file_transfer_duplicate_test";
+    const std::filesystem::path tx_dir = root / "tx";
+    const std::filesystem::path rx_dir = root / "rx.with.dot";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(tx_dir);
+    std::filesystem::create_directories(rx_dir);
+
+    const Bytes original = {'P', 'r', 'o', 'j', 'e', 'c', 't',
+                            'U', 'l', 't', 'r', 'a'};
+    const std::filesystem::path src_path = tx_dir / "payload";
+    CHECK(writeFile(src_path, original), "write duplicate source file");
+    CHECK(writeFile(rx_dir / "payload", Bytes{'o', 'l', 'd'}),
+          "write existing receive file");
+
+    FileTransferController tx;
+    CHECK(tx.startSend(src_path.string()), "start duplicate-name send");
+    std::vector<TxChunk> chunks = collectChunks(tx);
+    CHECK(chunks.size() >= 2, "duplicate-name transfer has metadata and data");
+
+    FileTransferController rx;
+    rx.setReceiveDirectory(rx_dir.string());
+
+    bool callback_called = false;
+    bool callback_success = false;
+    std::string received_path;
+    rx.setReceivedCallback([&](const std::string& path, bool success) {
+        callback_called = true;
+        callback_success = success;
+        received_path = path;
+    });
+
+    for (const auto& chunk : chunks) {
+        CHECK(rx.processPayload(chunk.payload, chunk.more_data),
+              "duplicate-name chunk accepted");
+    }
+
+    const std::filesystem::path received(received_path);
+    CHECK(callback_called, "duplicate-name receiver callback fired");
+    CHECK(callback_success, "duplicate-name transfer succeeded");
+    CHECK(received.parent_path() == rx_dir,
+          "duplicate-name uniquing stays inside dotted receive directory");
+    CHECK(received.filename() == "payload_1",
+          "duplicate-name uniquing appends suffix to filename without extension");
+    CHECK(readFile(received) == original, "duplicate-name received content matches");
+    CHECK(readFile(rx_dir / "payload") == Bytes({'o', 'l', 'd'}),
+          "duplicate-name original file preserved");
+
+    std::filesystem::remove_all(root);
+}
+
 }  // namespace
 
 int main() {
     test_compressed_final_chunk_out_of_order_finalizes();
+    test_duplicate_filename_in_dotted_receive_directory();
 
     if (tests_failed != 0) {
         std::cout << "FileTransferController: " << (tests_run - tests_failed)

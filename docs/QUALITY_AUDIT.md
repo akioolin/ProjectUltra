@@ -23,9 +23,9 @@ git diff --check
 ```
 
 Latest measured coverage after the current hardening pass:
-- Line: 54.50%
-- Function: 59.21%
-- Branch: 43.89%
+- Line: 54.59%
+- Function: 59.29%
+- Branch: 43.95%
 
 This is a baseline, not an acceptable final state for critical modem code.
 
@@ -44,7 +44,7 @@ Measured from `build-coverage/coverage.txt`.
 | `src/protocol/connection.cpp` | 49.16% | 62.79% | 32.68% | Timing policy extracted; remaining state-machine transitions still need direct tests |
 | `src/protocol/connection_handlers.cpp` | 50.00% | 58.33% | 28.15% | Negotiation helpers extracted; frame handler branches still need transition tests |
 | `src/protocol/connection_policy.hpp` | 97.06% | 100.00% | 81.82% | Extracted and tested from OFDM timing, ACK timeout, ACK repeat, SACK delay, fading label, and negotiation policy |
-| `src/protocol/file_transfer.cpp` | 69.68% | 81.82% | 51.19% | Compressed out-of-order final-chunk regression covered; malformed/error paths still need direct tests |
+| `src/protocol/file_transfer.cpp` | 72.08% | 83.33% | 52.66% | Compressed final-chunk and duplicate-name regressions covered; malformed/error paths still need direct tests |
 | `src/waveform` | 54.06% | 46.21% | 35.30% | Loopback coverage added; wrapper edge cases remain |
 | `src/psk` | 63.56% | 42.55% | 53.57% | Needs direct DPSK edge/vector tests |
 | `src/sync` | 37.61% | 42.31% | 48.56% | Needs chirp false-lock/CFO/timing tests |
@@ -153,6 +153,10 @@ smaller units with direct tests around their real invariants.
   chunk marker across out-of-order buffering. `test_file_transfer_controller`
   covers the regression where the final compressed chunk arrives before the
   gap-filling chunks and must still finalize once the buffer drains.
+- File-transfer receive-path naming now uses path-aware duplicate suffixing and
+  bounded receive-buffer preallocation. This fixes duplicate extensionless
+  filenames inside dotted receive directories and avoids unbounded reserve from
+  unauthenticated metadata.
 
 ## Definition Of Progress
 
