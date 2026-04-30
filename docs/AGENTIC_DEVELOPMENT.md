@@ -140,6 +140,10 @@ human checks the diff, evidence, and CI result.
 `AGENT_TIMEOUT_SECONDS` requires `timeout(1)` on the agent host. Leave it unset
 on hosts without that command, or install GNU coreutils.
 
+GitHub auto-loads `.github/PULL_REQUEST_TEMPLATE.md` into the PR body. Fill the
+risk category, gates, evidence, security, and automated-agent sections from the
+local-gate report and the task file before requesting review.
+
 After that, install the macOS LaunchAgent example from `agents/launchd/`.
 Keep it in no-auto-commit mode until you have reviewed several successful
 worker branches.
@@ -206,4 +210,6 @@ For PHY/ARQ changes, also run:
 SSH_KEY="$HOME/.ssh/id_pi5" ./agents/run_hardware_smoke.sh
 ```
 
-Merge only when the benchmark evidence matches the task goal.
+Merge only when the benchmark evidence matches the task goal and the PR body
+(filled from `.github/PULL_REQUEST_TEMPLATE.md`) shows the required gates,
+risk category, evidence, and rollback notes.
