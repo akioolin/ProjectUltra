@@ -1,5 +1,6 @@
 #include "ultra/arq.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <vector>
@@ -108,12 +109,92 @@ void test_tiny_frame_size_does_not_underflow_or_send() {
     CHECK(arq.framesInFlight() == 0, "ARQ keeps no in-flight frames with zero payload capacity");
 }
 
+void test_legacy_arq_tx_ack_nack_and_timeout_paths() {
+    ModemConfig config;
+    config.frame_size = 14;  // 4 data bytes per frame after legacy header/CRC.
+    config.arq_timeout_ms = 100;
+
+    FrameParser parser(config);
+    ARQController arq(config);
+
+    std::vector<Bytes> sent;
+    arq.setSendCallback([&](ByteSpan frame) {
+        sent.emplace_back(frame.begin(), frame.end());
+    });
+
+    const Bytes payload = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+    arq.sendData(payload);
+
+    CHECK(sent.size() == 3, "ARQ splits payload into three legacy frames");
+    CHECK(arq.framesInFlight() == 3, "ARQ tracks three frames in flight");
+
+    auto f0 = parser.parse(sent[0]);
+    auto f1 = parser.parse(sent[1]);
+    auto f2 = parser.parse(sent[2]);
+    CHECK(f0.valid && f0.seq_num == 0 && f0.payload == Bytes({0, 1, 2, 3}),
+          "ARQ first split frame");
+    CHECK(f1.valid && f1.seq_num == 1 && f1.payload == Bytes({4, 5, 6, 7}),
+          "ARQ second split frame");
+    CHECK(f2.valid && f2.seq_num == 2 && f2.payload == Bytes({8, 9}),
+          "ARQ third split frame");
+
+    ChannelQuality remote_quality;
+    arq.onAckReceived(1, false, remote_quality);
+    CHECK(arq.framesInFlight() == 1, "cumulative ACK removes frames through seq1");
+
+    const size_t before_nack = sent.size();
+    arq.onAckReceived(2, true, remote_quality);
+    CHECK(sent.size() == before_nack + 1, "NACK retransmits requested frame");
+    CHECK(arq.framesPendingRetry() == 1, "NACK increments retry accounting");
+    CHECK(parser.parse(sent.back()).seq_num == 2, "NACK retransmits seq2");
+
+    arq.onFrameSent(2);
+    const size_t before_timeout = sent.size();
+    arq.tick(std::chrono::steady_clock::now() + std::chrono::milliseconds(5000));
+    CHECK(sent.size() == before_timeout + 1, "timeout retransmits timed frame");
+    CHECK(parser.parse(sent.back()).seq_num == 2, "timeout retransmits seq2");
+
+    arq.reset();
+    CHECK(arq.framesInFlight() == 0, "reset clears in-flight frames");
+    CHECK(arq.framesPendingRetry() == 0, "reset clears retry accounting");
+}
+
+void test_legacy_arq_rx_reorders_and_acks_drained_frames() {
+    ModemConfig config;
+    FrameParser parser(config);
+    ARQController arq(config);
+
+    std::vector<Bytes> delivered;
+    arq.setDeliveryCallback([&](Bytes data) {
+        delivered.push_back(std::move(data));
+    });
+
+    const Bytes second = {'B'};
+    const Bytes first = {'A'};
+    arq.onDataReceived(1, second);
+    CHECK(delivered.empty(), "out-of-order RX frame is buffered");
+
+    arq.onDataReceived(0, first);
+    CHECK(delivered.size() == 2, "gap close drains buffered RX frame");
+    CHECK(delivered[0] == first, "RX delivers first frame first");
+    CHECK(delivered[1] == second, "RX drains buffered second frame");
+
+    auto ack = parser.parse(arq.generateAck());
+    CHECK(ack.valid && ack.type == FrameType::ACK && ack.seq_num == 1,
+          "ACK advances to last drained in-order frame");
+
+    arq.onDataReceived(0, first);
+    CHECK(delivered.size() == 2, "duplicate old RX frame is ignored");
+}
+
 }  // namespace
 
 int main() {
     test_data_frame_round_trip_and_crc_rejection();
     test_ack_quality_and_empty_control_frames_parse();
     test_tiny_frame_size_does_not_underflow_or_send();
+    test_legacy_arq_tx_ack_nack_and_timeout_paths();
+    test_legacy_arq_rx_reorders_and_acks_drained_frames();
 
     if (tests_failed != 0) {
         std::cout << "LegacyFrameBuilder: " << (tests_run - tests_failed)

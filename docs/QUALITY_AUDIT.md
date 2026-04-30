@@ -23,9 +23,9 @@ git diff --check
 ```
 
 Latest measured coverage after the current hardening pass:
-- Line: 55.66%
-- Function: 61.01%
-- Branch: 44.33%
+- Line: 56.44%
+- Function: 62.04%
+- Branch: 44.74%
 
 This is a baseline, not an acceptable final state for critical modem code.
 
@@ -37,8 +37,8 @@ Measured from `build-coverage/coverage.txt`.
 |------|---------------|-------------------|-----------------|------------|
 | `src/fec` | 81.09% | 86.42% | 76.20% | Stronger after codec wrapper/factory tests; LDPC internals still need edge cases |
 | `src/ofdm` | 57.74% | 56.57% | 49.72% | Improved by waveform loopback; sync/equalizer branches still weak |
-| `src/arq/arq_controller.cpp` | 13.87% | 33.33% | 2.78% | Legacy ARQ zero-capacity guard covered; broader legacy ARQ behavior still weak |
-| `src/framing/frame_builder.cpp` | 82.63% | 92.31% | 84.62% | Legacy public frame builder/parser now covered, including CRC rejection and empty control frames |
+| `src/arq/arq_controller.cpp` | 97.84% | 94.44% | 77.78% | Legacy ARQ TX split, ACK/NACK, timeout, RX reorder, stale-ACK, and zero-capacity paths covered |
+| `src/framing/frame_builder.cpp` | 82.63% | 92.31% | 88.46% | Legacy public frame builder/parser now covered, including CRC rejection and empty control frames |
 | `src/protocol/frame_v2.cpp` | 53.77% | 68.92% | 32.85% | Edge cases improved; fixed-frame recovery paths still weak |
 | `src/protocol/frame_v2.hpp` | 89.29% | 95.24% | 76.42% | Strong helper coverage; keep malformed-frame tests growing |
 | `src/protocol/selective_repeat_arq.cpp` | 68.72% | 86.67% | 45.63% | Strong behavior tests; branch coverage now needs loss-pattern edge cases |
@@ -163,6 +163,9 @@ smaller units with direct tests around their real invariants.
   dead code. Empty SYNC/PROBE/DISCONNECT frames now use the same CRC-bearing
   layout the parser requires, and legacy ARQ now refuses zero-capacity frame
   configs instead of looping forever.
+- Legacy `ARQController` now has direct tests for TX chunk splitting,
+  cumulative ACK removal, NACK/timeout retransmission, reset behavior, RX
+  out-of-order buffering, and ACK advancement after buffered frames drain.
 
 ## Definition Of Progress
 

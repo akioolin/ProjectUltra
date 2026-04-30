@@ -54,9 +54,11 @@ struct ARQController::Impl {
     void tryDeliverInOrder() {
         // Deliver any frames that are now in order
         while (rx_buffer.count(rx_expected)) {
+            uint16_t delivered_seq = rx_expected;
             auto it = rx_buffer.find(rx_expected);
             deliverData(it->second);
             rx_buffer.erase(it);
+            last_acked = delivered_seq;
             ++rx_expected;
         }
     }
