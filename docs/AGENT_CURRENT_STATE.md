@@ -64,7 +64,7 @@ CI portability fix added:
 
 ## Current Validation
 
-Passed locally after changes:
+Passed locally after agent-infrastructure changes:
 
 ```bash
 bash -n agents/run_local_gate.sh agents/run_hardware_smoke.sh agents/run_next_task.sh agents/watchdog.sh
@@ -78,6 +78,36 @@ ctest --test-dir build --output-on-failure -j4
 ```
 
 The full local CTest result was `29/29` passed.
+
+## Dedicated Agent Laptop
+
+The Linux Mint `agentic` laptop is the current dedicated runtime. SSH access is:
+
+```bash
+ssh -i "$HOME/.ssh/id_pi5" ultra-agent@agentic
+```
+
+Active clones:
+
+- `~/Projects/ProjectUltra-claude`
+- `~/Projects/ProjectUltra-codex`
+
+The tmux watchdog sessions are:
+
+- `ultra-claude-watch`
+- `ultra-codex-watch`
+
+Both agents are configured to create draft PRs from `agent/*` branches, not push
+directly to `main`. The runner owns `git add`, `git commit`, `git push`, and
+`gh pr create`; coding agents should only edit files and report evidence.
+
+Observed supervised PRs:
+
+- PR #3 `001-coverage-map`: CI passed.
+- PR #4 `001-bench-matrix`: useful draft PR; one Windows build failed because
+  vcpkg hit an external GitHub 502 while downloading SDL, not because of code.
+- PR #5 `001-leak-gate`: local gate passed; CI was still running when this note
+  was updated.
 
 GitHub CLI auth:
 
@@ -157,13 +187,9 @@ Highest-value lanes:
 - Lane D: fading robustness.
 - Lane E: security and agent governance.
 
-## Current Local Worktree Caveat
+## Sleep-Safe Caveat
 
-At the time this handoff was written, the agent infrastructure and CI fixes were
-local changes. Commit them before expecting GitHub CI to rerun.
-
-Suggested commit message:
-
-```text
-Add bounded agent PR workflow and fix Windows temp paths
-```
+The watchdogs can run continuously, but they do not invent work from broad
+goals. They process bounded task files in `agents/queue/`. If the queues are
+empty, they stay alive and idle. Do not enable open-ended planner loops until
+their output is limited to draft task files or draft PRs with human review.

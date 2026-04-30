@@ -26,6 +26,8 @@ CREATE_PR=${AGENT_CREATE_PR:-0}
 PR_DRAFT=${AGENT_PR_DRAFT:-1}
 PR_BASE=${AGENT_PR_BASE:-$BASE_BRANCH}
 RETURN_TO_BASE=${AGENT_RETURN_TO_BASE:-1}
+ALLOW_AGENT_COMMITS=${AGENT_ALLOW_AGENT_COMMITS:-0}
+TIMEOUT_SECONDS=${AGENT_TIMEOUT_SECONDS:-0}
 
 mkdir -p "$QUEUE_DIR" "$ARCHIVE_DIR" "$REPORT_ROOT" "$TMP_DIR"
 
@@ -43,6 +45,11 @@ fi
 
 if [[ -z "$AGENT_CMD" && "$DRY_RUN" != "1" ]]; then
   echo "AGENT_CMD is required unless AGENT_DRY_RUN=1" >&2
+  exit 2
+fi
+
+if [[ "$TIMEOUT_SECONDS" != "0" && "$DRY_RUN" != "1" ]] && ! command -v timeout >/dev/null 2>&1; then
+  echo "AGENT_TIMEOUT_SECONDS requires timeout(1), which is not available on this host." >&2
   exit 2
 fi
 
@@ -87,6 +94,7 @@ Hard rules:
 - Make the smallest production-quality change that satisfies the task.
 - Do not weaken LDPC, ARQ, synchronization, or hardware calibration invariants.
 - Do not run destructive git commands.
+- Do not run git add, git commit, git push, or gh pr create; the runner handles version control and PR creation after gates pass.
 - Do not push directly to main.
 - If hardware tests are needed, use the maintained scripts and respect the hardware lock.
 - End with changed files, commands run, results, and residual risks.
@@ -110,14 +118,24 @@ fi
 
 git switch -c "$branch"
 
+pre_agent_head=$(git rev-parse HEAD)
+
 set +e
 case "$AGENT_PROMPT_MODE" in
   stdin)
-    bash -lc "$AGENT_CMD" < "$prompt_file" > "$report_dir/agent.log" 2>&1
+    if [[ "$TIMEOUT_SECONDS" != "0" ]]; then
+      timeout "$TIMEOUT_SECONDS" bash -lc "$AGENT_CMD" < "$prompt_file" > "$report_dir/agent.log" 2>&1
+    else
+      bash -lc "$AGENT_CMD" < "$prompt_file" > "$report_dir/agent.log" 2>&1
+    fi
     agent_rc=$?
     ;;
   file)
-    bash -lc "$AGENT_CMD '$prompt_file'" > "$report_dir/agent.log" 2>&1
+    if [[ "$TIMEOUT_SECONDS" != "0" ]]; then
+      timeout "$TIMEOUT_SECONDS" bash -lc "$AGENT_CMD '$prompt_file'" > "$report_dir/agent.log" 2>&1
+    else
+      bash -lc "$AGENT_CMD '$prompt_file'" > "$report_dir/agent.log" 2>&1
+    fi
     agent_rc=$?
     ;;
   *)
@@ -130,6 +148,19 @@ set -e
 if [[ "$agent_rc" -ne 0 ]]; then
   echo "Agent failed with rc=$agent_rc. Log: $report_dir/agent.log" >&2
   exit "$agent_rc"
+fi
+
+post_agent_head=$(git rev-parse HEAD)
+if [[ "$ALLOW_AGENT_COMMITS" != "1" && "$post_agent_head" != "$pre_agent_head" ]]; then
+  {
+    echo "Agent created commits before the runner gate."
+    echo "pre_agent_head=$pre_agent_head"
+    echo "post_agent_head=$post_agent_head"
+    echo
+    git log --oneline "$pre_agent_head..$post_agent_head"
+  } > "$report_dir/agent_commit_violation.log"
+  echo "Agent created commits before gates/runner commit. Log: $report_dir/agent_commit_violation.log" >&2
+  exit 2
 fi
 
 if [[ "$RUN_LOCAL_GATE" == "1" ]]; then
@@ -232,6 +263,8 @@ push=$PUSH_BRANCH
 create_pr=$CREATE_PR
 archive_task=$task_archived
 return_to_base=$returned_to_base
+allow_agent_commits=$ALLOW_AGENT_COMMITS
+timeout_seconds=$TIMEOUT_SECONDS
 EOF
 
 echo "Agent task completed. Report: $report_dir"

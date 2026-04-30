@@ -20,6 +20,9 @@ should not enter the queue.
 
 This prevents the usual failure mode of 24/7 agents: broad goals, stale context,
 unreviewed edits, and benchmark regressions that are discovered days later.
+The runner owns commits, pushes, and PR creation. The coding agent must edit
+files only; if it creates commits itself, the runner rejects the task unless
+`AGENT_ALLOW_AGENT_COMMITS=1` is explicitly set.
 
 For the recommended MacBook M4 Pro isolation setup, read
 `docs/AGENT_DEDICATED_ENV_MACOS.md`. For compacted-session handoff state, read
@@ -122,11 +125,14 @@ export AGENT_AUTO_COMMIT=1
 export AGENT_PUSH=1
 export AGENT_CREATE_PR=1
 export AGENT_PR_DRAFT=1
+export AGENT_TIMEOUT_SECONDS=7200
 ./agents/watchdog.sh
 ```
 
 Keep PRs as drafts overnight. Promote them to ready-for-review only after a
 human checks the diff, evidence, and CI result.
+`AGENT_TIMEOUT_SECONDS` requires `timeout(1)` on the agent host. Leave it unset
+on hosts without that command, or install GNU coreutils.
 
 After that, install the macOS LaunchAgent example from `agents/launchd/`.
 Keep it in no-auto-commit mode until you have reviewed several successful
