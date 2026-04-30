@@ -150,6 +150,32 @@ void test_cfo_drift_limit() {
     CHECK_CLOSE(large_drift.diff_hz, 2.0f, 0.0001f, "CFO diff telemetry");
 }
 
+void test_pilot_cfo_update() {
+    auto residual_only = combinePilotCFO(0.0f, 0.25f, 0.0f, false);
+    CHECK_CLOSE(residual_only.unclamped_cfo, 0.25f, 0.0001f,
+                "pilot CFO should use residual when no pre-correction was applied");
+    CHECK_CLOSE(residual_only.accepted_cfo, 0.25f, 0.0001f, "unclamped residual accepted");
+    CHECK(!residual_only.clamped, "unclamped update should not clamp");
+
+    auto corrected = combinePilotCFO(9.5f, 0.4f, 9.0f, true);
+    CHECK_CLOSE(corrected.unclamped_cfo, 9.9f, 0.0001f,
+                "pilot CFO should add pre-correction and residual");
+    CHECK_CLOSE(corrected.accepted_cfo, 9.9f, 0.0001f, "small pilot CFO drift accepted");
+    CHECK(!corrected.clamped, "small pilot CFO drift should not clamp");
+
+    auto positive_clamp = combinePilotCFO(9.5f, 4.0f, 10.0f, true);
+    CHECK(positive_clamp.clamped, "large positive pilot CFO drift should clamp");
+    CHECK_CLOSE(positive_clamp.unclamped_cfo, 13.5f, 0.0001f,
+                "pilot CFO unclamped telemetry");
+    CHECK_CLOSE(positive_clamp.accepted_cfo, 12.0f, 0.0001f,
+                "positive pilot CFO clamp should step from reference");
+
+    auto negative_clamp = combinePilotCFO(9.5f, -4.0f, 10.0f, true);
+    CHECK(negative_clamp.clamped, "large negative pilot CFO drift should clamp");
+    CHECK_CLOSE(negative_clamp.accepted_cfo, 8.0f, 0.0001f,
+                "negative pilot CFO clamp should step from reference");
+}
+
 }  // namespace
 
 int main() {
@@ -159,6 +185,7 @@ int main() {
     test_light_sync_thresholds();
     test_light_sync_decision();
     test_cfo_drift_limit();
+    test_pilot_cfo_update();
 
     if (tests_failed != 0) {
         std::cout << "StreamingSignalPolicy: " << (tests_run - tests_failed)

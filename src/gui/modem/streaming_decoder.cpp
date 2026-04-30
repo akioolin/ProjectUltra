@@ -1345,16 +1345,12 @@ void StreamingDecoder::decodeCurrentFrame() {
         burst_start_time_ = std::chrono::steady_clock::now();
 
         // Feed back CFO from first frame (add pre-correction amount back)
-        float residual_cfo = waveform_->estimatedCFO();
-        float corrected_cfo = pre_correction_cfo_ + residual_cfo;
-        float current_cfo = last_cfo_.load();
-        constexpr float MAX_PILOT_CFO_DRIFT_HZ_B = 2.0f;
-        float drift = corrected_cfo - current_cfo;
-        if (std::abs(drift) > MAX_PILOT_CFO_DRIFT_HZ_B) {
-            corrected_cfo = current_cfo + std::copysign(MAX_PILOT_CFO_DRIFT_HZ_B, drift);
-        }
-        last_cfo_.store(corrected_cfo);
-        burst_cfo_ = corrected_cfo;
+        const float residual_cfo = waveform_->estimatedCFO();
+        const float current_cfo = last_cfo_.load();
+        const auto cfo_update = signal_policy::combinePilotCFO(
+            pre_correction_cfo_, residual_cfo, current_cfo, /*clamp_drift=*/true);
+        last_cfo_.store(cfo_update.accepted_cfo);
+        burst_cfo_ = cfo_update.accepted_cfo;
 
         state_ = DecoderState::BURST_ACCUMULATING;
         return;  // processBuffer() will call accumulateBurstFrames() on next iteration
@@ -1366,27 +1362,23 @@ void StreamingDecoder::decodeCurrentFrame() {
         // After pre-correction, the demodulator sees near-zero CFO.
         // waveform_->estimatedCFO() returns the RESIDUAL (pre-correction error).
         // Add back the pre-correction amount to get the true total CFO.
-        float residual_cfo = waveform_->estimatedCFO();
-        float corrected_cfo = pre_correction_cfo_ + residual_cfo;
-        float current_cfo = last_cfo_.load();
-
-        if (connected_) {
-            constexpr float MAX_PILOT_CFO_DRIFT_HZ = 2.0f;
-            float drift = corrected_cfo - current_cfo;
-            if (std::abs(drift) > MAX_PILOT_CFO_DRIFT_HZ) {
-                LOG_MODEM(WARN, "[%s] Pilot CFO drift clamped: %.2f → %.2f Hz (drift=%.2f, max=%.1f)",
-                          log_prefix_.c_str(), current_cfo, corrected_cfo, drift, MAX_PILOT_CFO_DRIFT_HZ);
-                corrected_cfo = current_cfo + std::copysign(MAX_PILOT_CFO_DRIFT_HZ, drift);
-            }
+        const float residual_cfo = waveform_->estimatedCFO();
+        const float current_cfo = last_cfo_.load();
+        const auto cfo_update = signal_policy::combinePilotCFO(
+            pre_correction_cfo_, residual_cfo, current_cfo, connected_);
+        if (cfo_update.clamped) {
+            LOG_MODEM(WARN, "[%s] Pilot CFO drift clamped: %.2f → %.2f Hz (drift=%.2f, max=%.1f)",
+                      log_prefix_.c_str(), current_cfo, cfo_update.unclamped_cfo,
+                      cfo_update.drift_hz, signal_policy::kMaxPilotCFODriftHz);
         }
 
-        if (std::abs(corrected_cfo - current_cfo) > 0.1f) {
+        if (std::abs(cfo_update.accepted_cfo - current_cfo) > 0.1f) {
             LOG_MODEM(INFO, "[%s] CFO updated: %.2f → %.2f Hz (pre_corr=%.2f + residual=%.2f)",
-                      log_prefix_.c_str(), current_cfo, corrected_cfo,
+                      log_prefix_.c_str(), current_cfo, cfo_update.accepted_cfo,
                       pre_correction_cfo_, residual_cfo);
         }
-        last_cfo_.store(corrected_cfo);
-        sync_cfo_ = corrected_cfo;
+        last_cfo_.store(cfo_update.accepted_cfo);
+        sync_cfo_ = cfo_update.accepted_cfo;
     }
 
     constexpr size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;
@@ -1604,15 +1596,12 @@ void StreamingDecoder::decodeCurrentFrame() {
                           log_prefix_.c_str(), delta);
 
                 // Keep CFO tracking consistent with the accepted retry candidate.
-                float corrected_cfo = waveform_->estimatedCFO();
-                float current_cfo = last_cfo_.load();
-                constexpr float MAX_PILOT_CFO_DRIFT_HZ = 2.0f;
-                float drift = corrected_cfo - current_cfo;
-                if (std::abs(drift) > MAX_PILOT_CFO_DRIFT_HZ) {
-                    corrected_cfo = current_cfo + std::copysign(MAX_PILOT_CFO_DRIFT_HZ, drift);
-                }
-                last_cfo_.store(corrected_cfo);
-                sync_cfo_ = corrected_cfo;
+                const float residual_cfo = waveform_->estimatedCFO();
+                const float current_cfo = last_cfo_.load();
+                const auto cfo_update = signal_policy::combinePilotCFO(
+                    pre_correction_cfo_, residual_cfo, current_cfo, connected_);
+                last_cfo_.store(cfo_update.accepted_cfo);
+                sync_cfo_ = cfo_update.accepted_cfo;
                 last_fading_index_.store(waveform_->getFadingIndex());
 
                 sync_position_ = retry_sync;
@@ -1768,31 +1757,23 @@ void StreamingDecoder::decodeCurrentFrame() {
             // collapse to |LLR|_avg < 1. See hardware-test analysis in
             // commit message — saves ~600ms per lost frame which lets
             // chirp-search lock on to the next real frame promptly.
-            constexpr float MIN_BURST_CONT_LLR = 2.0f;
-            float burst_llr_sum = 0.0f;
             const size_t burst_llr_n = std::min(next_soft_bits.size(), size_t(648));
-            for (size_t i = 0; i < burst_llr_n; ++i) {
-                burst_llr_sum += std::abs(next_soft_bits[i]);
-            }
-            const float burst_llr_avg = burst_llr_n > 0
-                ? burst_llr_sum / static_cast<float>(burst_llr_n) : 0.0f;
-            if (burst_llr_avg < MIN_BURST_CONT_LLR) {
+            const float burst_llr_avg = signal_policy::meanAbsLLR(
+                next_soft_bits.data(), burst_llr_n);
+            if (burst_llr_avg < signal_policy::kMinBurstContinuationLLR) {
                 LOG_MODEM(INFO, "[%s] Burst continuation: bail at block %d "
                           "(|llr|_avg=%.2f < %.2f, no real frame here)",
                           log_prefix_.c_str(), burst_blocks_decoded_,
-                          burst_llr_avg, MIN_BURST_CONT_LLR);
+                          burst_llr_avg, signal_policy::kMinBurstContinuationLLR);
                 break;
             }
 
             // Update CFO from pilot tracking
-            float next_corrected_cfo = waveform_->estimatedCFO();
-            float cfo_drift = next_corrected_cfo - sync_cfo_;
-            constexpr float MAX_BURST_CFO_DRIFT_HZ = 2.0f;
-            if (std::abs(cfo_drift) > MAX_BURST_CFO_DRIFT_HZ) {
-                next_corrected_cfo = sync_cfo_ + std::copysign(MAX_BURST_CFO_DRIFT_HZ, cfo_drift);
-            }
-            sync_cfo_ = next_corrected_cfo;
-            last_cfo_.store(next_corrected_cfo);
+            const float residual_cfo = waveform_->estimatedCFO();
+            const auto cfo_update = signal_policy::combinePilotCFO(
+                0.0f, residual_cfo, sync_cfo_, /*clamp_drift=*/true);
+            sync_cfo_ = cfo_update.accepted_cfo;
+            last_cfo_.store(cfo_update.accepted_cfo);
             last_fading_index_.store(waveform_->getFadingIndex());
 
             // Decode the continuation block
@@ -2762,15 +2743,11 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     }
 
     // Update CFO from pilot tracking (add pre-correction amount back)
-    float residual_cfo = waveform_->estimatedCFO();
-    float corrected_cfo = burst_pre_cfo + residual_cfo;
-    float drift = corrected_cfo - burst_cfo_;
-    constexpr float MAX_BURST_CFO_DRIFT_HZ = 2.0f;
-    if (std::abs(drift) > MAX_BURST_CFO_DRIFT_HZ) {
-        corrected_cfo = burst_cfo_ + std::copysign(MAX_BURST_CFO_DRIFT_HZ, drift);
-    }
-    burst_cfo_ = corrected_cfo;
-    last_cfo_.store(corrected_cfo);
+    const float residual_cfo = waveform_->estimatedCFO();
+    const auto cfo_update = signal_policy::combinePilotCFO(
+        burst_pre_cfo, residual_cfo, burst_cfo_, /*clamp_drift=*/true);
+    burst_cfo_ = cfo_update.accepted_cfo;
+    last_cfo_.store(cfo_update.accepted_cfo);
     last_fading_index_.store(waveform_->getFadingIndex());
 
     burst_soft_buffer_.push_back(std::move(soft));

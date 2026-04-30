@@ -23,9 +23,9 @@ git diff --check
 ```
 
 Latest measured coverage after the current hardening pass:
-- Line: 53.31%
-- Function: 57.73%
-- Branch: 42.54%
+- Line: 53.42%
+- Function: 57.77%
+- Branch: 42.65%
 
 This is a baseline, not an acceptable final state for critical modem code.
 
@@ -46,8 +46,8 @@ Measured from `build-coverage/coverage.txt`.
 | `src/dsp` | 91.23% | 92.68% | 85.85% | Strong direct primitive coverage; FFT/resampler edge cases remain |
 | `src/gui/modem/streaming_buffer_policy.hpp` | 95.92% | 100.00% | 83.33% | Extracted and tested from `feedAudio()` backlog/overflow policy |
 | `src/gui/modem/streaming_decode_policy.hpp` | 93.55% | 100.00% | 90.00% | Extracted and tested from decode sample-sizing policy |
-| `src/gui/modem/streaming_signal_policy.hpp` | 100.00% | 100.00% | 91.94% | Extracted and tested from LLR, LTS, light-sync, and CFO sanity policies |
-| `src/gui/modem/streaming_decoder.cpp` | 30.73% | 58.33% | 19.17% | Geometry/config, buffer, sample, and signal policies covered; decode state machine still needs extraction |
+| `src/gui/modem/streaming_signal_policy.hpp` | 100.00% | 100.00% | 92.42% | Extracted and tested from LLR, LTS, light-sync, sync CFO, and pilot CFO policies |
+| `src/gui/modem/streaming_decoder.cpp` | 31.05% | 58.33% | 19.38% | Geometry/config, buffer, sample, and signal policies covered; decode state machine still needs extraction |
 | `src/gui/modem/streaming_encoder.cpp` | 35.75% | 65.00% | 18.06% | Geometry/config covered; frame encoding branches still need extraction |
 
 ## Highest-Risk Files
@@ -123,6 +123,9 @@ smaller units with direct tests around their real invariants.
 - Streaming RX signal-decision policy is extracted into
   `streaming_signal_policy.hpp` with direct tests for LLR quality gates, invalid
   OFDM LTS training rejection, light-sync weak acceptance, and sync CFO clamping.
+- Pilot-CFO feedback now goes through the same tested policy in normal decode,
+  sync-recovery, and burst paths. The sync-recovery path now adds pre-correction
+  CFO back to the residual pilot estimate instead of storing the residual alone.
 
 ## Definition Of Progress
 

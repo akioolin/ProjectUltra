@@ -12,11 +12,13 @@ namespace streaming_signal_policy {
 inline constexpr float kMinLLRForSingleCWDecode = 1.5f;
 inline constexpr float kMinLLRForEscalation = 1.5f;
 inline constexpr float kMinPreSyncLLR = 1.5f;
+inline constexpr float kMinBurstContinuationLLR = 2.0f;
 inline constexpr float kNearZeroLLR = 0.1f;
 inline constexpr float kMaxErasureLikeFraction = 0.30f;
 inline constexpr float kMinLTSSignalPower = 1.0e-3f;
 inline constexpr float kMinLTSChannelMagnitude = 5.0e-2f;
 inline constexpr float kMaxSyncCFODriftHz = 1.0f;
+inline constexpr float kMaxPilotCFODriftHz = 2.0f;
 inline constexpr float kKnownCFOEpsilonHz = 0.01f;
 
 inline float meanAbsLLR(const float* bits, size_t count) {
@@ -182,6 +184,33 @@ inline CFODriftDecision limitConnectedCFODrift(bool connected,
     }
 
     return decision;
+}
+
+struct PilotCFOUpdate {
+    float residual_cfo = 0.0f;
+    float unclamped_cfo = 0.0f;
+    float accepted_cfo = 0.0f;
+    float drift_hz = 0.0f;
+    bool clamped = false;
+};
+
+inline PilotCFOUpdate combinePilotCFO(float pre_correction_cfo,
+                                      float residual_cfo,
+                                      float reference_cfo,
+                                      bool clamp_drift,
+                                      float max_drift_hz = kMaxPilotCFODriftHz) {
+    PilotCFOUpdate update;
+    update.residual_cfo = residual_cfo;
+    update.unclamped_cfo = pre_correction_cfo + residual_cfo;
+    update.accepted_cfo = update.unclamped_cfo;
+    update.drift_hz = update.unclamped_cfo - reference_cfo;
+
+    if (clamp_drift && std::abs(update.drift_hz) > max_drift_hz) {
+        update.accepted_cfo = reference_cfo + std::copysign(max_drift_hz, update.drift_hz);
+        update.clamped = true;
+    }
+
+    return update;
 }
 
 }  // namespace streaming_signal_policy
