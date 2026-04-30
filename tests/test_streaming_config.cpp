@@ -1,0 +1,118 @@
+#include "gui/modem/streaming_decoder.hpp"
+#include "gui/modem/streaming_encoder.hpp"
+#include "ultra/logging.hpp"
+
+#include <iostream>
+
+using namespace ultra;
+using namespace ultra::gui;
+
+namespace {
+
+int tests_run = 0;
+int tests_failed = 0;
+
+#define CHECK(cond, msg) \
+    do { \
+        ++tests_run; \
+        if (!(cond)) { \
+            ++tests_failed; \
+            std::cout << "FAIL: " << msg << "\n"; \
+            return; \
+        } \
+    } while (0)
+
+ModemConfig makeOFDMConfig(Modulation mod, CodeRate rate) {
+    ModemConfig cfg;
+    cfg.fft_size = 1024;
+    cfg.num_carriers = 59;
+    cfg.sample_rate = 48000;
+    cfg.center_freq = 1500.0f;
+    cfg.cp_mode = CyclicPrefixMode::LONG;
+    cfg.modulation = mod;
+    cfg.code_rate = rate;
+    cfg.use_pilots = true;
+    cfg.pilot_spacing = 10;
+    return cfg;
+}
+
+void checkMatchingOFDMGeometry(Modulation mod,
+                               CodeRate rate,
+                               int expected_spacing,
+                               int expected_data_carriers,
+                               int expected_bits_per_symbol) {
+    auto cfg = makeOFDMConfig(mod, rate);
+
+    StreamingEncoder encoder;
+    encoder.setMode(protocol::WaveformMode::OFDM_CHIRP);
+    encoder.setOFDMConfig(cfg);
+    encoder.setDataMode(mod, rate);
+
+    StreamingDecoder decoder;
+    decoder.setConnectedOFDMMode(protocol::WaveformMode::OFDM_CHIRP, cfg, mod, rate);
+
+    auto tx = encoder.getConfig();
+    auto rx = decoder.getConfig();
+
+    CHECK(tx.mode == protocol::WaveformMode::OFDM_CHIRP, "encoder should report OFDM_CHIRP mode");
+    CHECK(rx.mode == protocol::WaveformMode::OFDM_CHIRP, "decoder should report OFDM_CHIRP mode");
+    CHECK(tx.modulation == mod && rx.modulation == mod, "TX/RX modulation should match requested mode");
+    CHECK(tx.code_rate == rate && rx.code_rate == rate, "TX/RX code rate should match requested mode");
+    CHECK(tx.num_carriers == 59 && rx.num_carriers == 59, "TX/RX total carrier count should match");
+    CHECK(tx.pilot_spacing == expected_spacing, "encoder pilot spacing should follow waveform policy");
+    CHECK(rx.pilot_spacing == expected_spacing, "decoder pilot spacing should follow waveform policy");
+    CHECK(tx.data_carriers == expected_data_carriers, "encoder data carriers should match pilot geometry");
+    CHECK(rx.data_carriers == expected_data_carriers, "decoder data carriers should match pilot geometry");
+    CHECK(tx.bits_per_symbol == expected_bits_per_symbol, "encoder bits/symbol should match geometry");
+    CHECK(rx.bits_per_symbol == expected_bits_per_symbol, "decoder bits/symbol should match geometry");
+}
+
+void test_differential_ofdm_config_match() {
+    checkMatchingOFDMGeometry(Modulation::DQPSK, CodeRate::R1_2, 10, 53, 106);
+    checkMatchingOFDMGeometry(Modulation::DQPSK, CodeRate::R3_4, 15, 55, 110);
+    checkMatchingOFDMGeometry(Modulation::D8PSK, CodeRate::R2_3, 8, 51, 153);
+}
+
+void test_coherent_ofdm_config_match() {
+    checkMatchingOFDMGeometry(Modulation::QPSK, CodeRate::R1_2, 5, 47, 94);
+    checkMatchingOFDMGeometry(Modulation::QPSK, CodeRate::R3_4, 8, 51, 102);
+}
+
+void test_burst_group_clamps_match() {
+    StreamingEncoder encoder;
+    StreamingDecoder decoder;
+
+    encoder.setBurstInterleaveGroupSize(1);
+    decoder.setBurstInterleaveGroupSize(1);
+    CHECK(encoder.getBurstInterleaveGroupSize() == 2, "encoder burst group should clamp low values");
+    CHECK(decoder.getBurstInterleaveGroupSize() == 2, "decoder burst group should clamp low values");
+
+    encoder.setBurstInterleaveGroupSize(99);
+    decoder.setBurstInterleaveGroupSize(99);
+    CHECK(encoder.getBurstInterleaveGroupSize() == 8, "encoder burst group should clamp high values");
+    CHECK(decoder.getBurstInterleaveGroupSize() == 8, "decoder burst group should clamp high values");
+
+    encoder.setBurstInterleaveGroupSize(6);
+    decoder.setBurstInterleaveGroupSize(6);
+    CHECK(encoder.getBurstInterleaveGroupSize() == 6, "encoder burst group should preserve valid values");
+    CHECK(decoder.getBurstInterleaveGroupSize() == 6, "decoder burst group should preserve valid values");
+}
+
+}  // namespace
+
+int main() {
+    setLogLevel(LogLevel::ERROR);
+
+    test_differential_ofdm_config_match();
+    test_coherent_ofdm_config_match();
+    test_burst_group_clamps_match();
+
+    if (tests_failed != 0) {
+        std::cout << "StreamingConfig: " << (tests_run - tests_failed)
+                  << "/" << tests_run << " passed\n";
+        return 1;
+    }
+
+    std::cout << "StreamingConfig: " << tests_run << "/" << tests_run << " passed\n";
+    return 0;
+}

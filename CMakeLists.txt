@@ -109,7 +109,7 @@ target_link_libraries(ultra_core PUBLIC
     Threads::Threads
 )
 
-if(FFTW3_FOUND)
+if(ULTRA_USE_FFTW AND FFTW3_FOUND)
     target_link_libraries(ultra_core PUBLIC PkgConfig::FFTW3)
 endif()
 

@@ -9,6 +9,8 @@ This folder now separates **active, authoritative docs** from **historical refer
 - `docs/PROTOCOL_V2.md`: Current protocol behavior/spec aligned to implementation.
 - `docs/KNOWN_BUGS.md`: Current open issues only.
 - `docs/ALPHA_RELEASE_GATE.md`: Alpha readiness criteria and gate commands.
+- `docs/QUALITY_STRATEGY.md`: Critical-software test, coverage, CI, and refactor policy.
+- `docs/QUALITY_AUDIT.md`: Current quality baseline, coverage gaps, and hardening backlog.
 - `docs/GIT_WORKFLOW.md`: Commit/push/release workflow used in this repo.
 - `docs/CHANGELOG.md`: Historical fixes and behavior changes.
 - `docs/BUILD_SYSTEM.md`: Build instructions and targets.

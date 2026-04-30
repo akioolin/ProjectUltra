@@ -1,6 +1,6 @@
 # Alpha Release Gate
 
-Last updated: 2026-02-11
+Last updated: 2026-04-30
 
 ## Purpose
 This file is the source of truth for alpha readiness.
@@ -12,6 +12,7 @@ ProjectUltra alpha means:
 - No known critical data-loss bugs in connection/ARQ/control path.
 - Default mode ladder only uses modes that pass reliability gates.
 - A user can build and run test/transfer flows from docs without hidden steps.
+- Critical modem code follows `docs/QUALITY_STRATEGY.md` gates.
 
 ## Current Status (Summary)
 - Core protocol works end-to-end in simulator.
@@ -59,6 +60,12 @@ All gates below must pass before alpha tag:
 - `README.md`, `docs/README.md`, and gate commands/scripts match current CLI behavior.
 - `docs/KNOWN_BUGS.md` updated with open critical issues.
 - Build instructions verified on a clean clone.
+
+6. Critical-software quality gate (must pass):
+- Registered CTest suite passes locally and in CI.
+- Coverage gate passes with no unexplained Tier 0 regression.
+- Sanitizer CI passes for test targets.
+- New Tier 0 bugs have deterministic regression tests or documented replay fixtures.
 
 ## Work Plan
 1. Add deterministic gate harness script

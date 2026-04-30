@@ -106,6 +106,16 @@ cd build
 ctest --verbose
 ```
 
+For the maintained quality gate, prefer:
+
+```bash
+ctest --test-dir build --output-on-failure -j4
+./scripts/coverage_report.sh
+```
+
+See `docs/QUALITY_STRATEGY.md` for critical-code coverage scope and required
+extra gates for protocol, ARQ, CFO, sync, and hardware-facing changes.
+
 ---
 
 ## Header Organization

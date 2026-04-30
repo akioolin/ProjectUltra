@@ -29,9 +29,9 @@ int pilotSpacingForRate(Modulation mod, CodeRate rate) {
 
 uint32_t symbolsForCodewords(Modulation mod, CodeRate rate, int codewords) {
     int pilot_spacing = pilotSpacingForRate(mod, rate);
-    int pilot_count = (OFDM_NUM_CARRIERS + pilot_spacing - 1) / pilot_spacing;
-    int data_carriers = std::max(1, static_cast<int>(OFDM_NUM_CARRIERS) - pilot_count);
-    uint32_t bits_per_symbol = static_cast<uint32_t>(data_carriers) * getBitsPerSymbol(mod);
+    uint32_t bits_per_symbol = static_cast<uint32_t>(
+        ofdm_link_adaptation::bitsPerOFDMSymbol(
+            static_cast<int>(OFDM_NUM_CARRIERS), true, pilot_spacing, mod));
     uint32_t frame_bits = static_cast<uint32_t>(codewords) * LDPC_BITS_PER_CODEWORD;
     uint32_t data_symbols = (frame_bits + bits_per_symbol - 1) / bits_per_symbol;
 
@@ -1066,9 +1066,12 @@ void Connection::enterConnected() {
         constexpr float narrow_symbol_ms = (1000.0f * 2240) / 48000;  // 46.67ms
         constexpr uint32_t NARROW_NUM_CARRIERS = 21;
         constexpr uint32_t NARROW_PILOT_SPACING = 10;
-        uint32_t narrow_pilot_count = (NARROW_NUM_CARRIERS + NARROW_PILOT_SPACING - 1) / NARROW_PILOT_SPACING;
-        uint32_t narrow_data_carriers = NARROW_NUM_CARRIERS - narrow_pilot_count;
-        uint32_t narrow_bps = narrow_data_carriers * getBitsPerSymbol(data_modulation_);
+        uint32_t narrow_bps = static_cast<uint32_t>(
+            ofdm_link_adaptation::bitsPerOFDMSymbol(
+                static_cast<int>(NARROW_NUM_CARRIERS),
+                true,
+                static_cast<int>(NARROW_PILOT_SPACING),
+                data_modulation_));
         uint32_t data_cw_symbols = (4 * LDPC_BITS_PER_CODEWORD + narrow_bps - 1) / narrow_bps;
         uint32_t ack_cw_symbols = (LDPC_BITS_PER_CODEWORD + narrow_bps - 1) / narrow_bps;
         uint32_t data_frame_ms = static_cast<uint32_t>((2 + data_cw_symbols) * narrow_symbol_ms + 0.5f);

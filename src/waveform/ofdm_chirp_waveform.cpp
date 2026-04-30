@@ -111,11 +111,14 @@ void OFDMChirpWaveform::configure(Modulation mod, CodeRate rate) {
     // Reinitialize with new config
     initComponents();
 
-    int pilot_count = 0;
-    if (config_.use_pilots) {
-        pilot_count = (config_.num_carriers + config_.pilot_spacing - 1) / config_.pilot_spacing;
-    }
-    int data_carriers = config_.num_carriers - pilot_count;
+    const int pilot_count = config_.use_pilots
+        ? ofdm_link_adaptation::pilotCount(static_cast<int>(config_.num_carriers),
+                                           static_cast<int>(config_.pilot_spacing))
+        : 0;
+    const int data_carriers = ofdm_link_adaptation::dataCarrierCount(
+        static_cast<int>(config_.num_carriers),
+        config_.use_pilots,
+        static_cast<int>(config_.pilot_spacing));
 
     LOG_MODEM(INFO, "OFDMChirpWaveform: configured for %s %s (%d data, %d pilots)",
               modulationToString(mod), codeRateToString(rate),
@@ -567,22 +570,12 @@ std::string OFDMChirpWaveform::getStatusString() const {
 }
 
 float OFDMChirpWaveform::getThroughput(CodeRate rate) const {
-    int bits_per_carrier = 2;  // Default DQPSK/QPSK
-    switch (config_.modulation) {
-        case Modulation::DBPSK: bits_per_carrier = 1; break;
-        case Modulation::BPSK:  bits_per_carrier = 1; break;
-        case Modulation::DQPSK: bits_per_carrier = 2; break;
-        case Modulation::QPSK:  bits_per_carrier = 2; break;
-        case Modulation::D8PSK: bits_per_carrier = 3; break;
-        default: bits_per_carrier = 2; break;
-    }
-
     // Calculate data carriers based on pilot configuration for the given rate.
     const int pilot_spacing =
         ofdm_link_adaptation::recommendedPilotSpacing(config_.modulation, rate);
-    const int pilot_count =
-        ofdm_link_adaptation::pilotCount(static_cast<int>(config_.num_carriers), pilot_spacing);
-    int data_carriers = config_.num_carriers - pilot_count;
+    const int data_carriers = ofdm_link_adaptation::dataCarrierCount(
+        static_cast<int>(config_.num_carriers), true, pilot_spacing);
+    const int bits_per_carrier = static_cast<int>(getBitsPerSymbol(config_.modulation));
 
     // Symbol rate
     float symbol_rate = static_cast<float>(config_.sample_rate) / getSamplesPerSymbol();
@@ -634,24 +627,14 @@ int OFDMChirpWaveform::getMinSamplesForCWCount(int num_cw) const {
 
     int frame_bits = num_cw * 648;
 
-    int bits_per_carrier = 2;  // DQPSK/QPSK
-    switch (config_.modulation) {
-        case Modulation::DBPSK: bits_per_carrier = 1; break;
-        case Modulation::BPSK:  bits_per_carrier = 1; break;
-        case Modulation::DQPSK: bits_per_carrier = 2; break;
-        case Modulation::QPSK:  bits_per_carrier = 2; break;
-        case Modulation::D8PSK: bits_per_carrier = 3; break;
-        default: bits_per_carrier = 2; break;
+    const int bits_per_symbol = ofdm_link_adaptation::bitsPerOFDMSymbol(
+        static_cast<int>(config_.num_carriers),
+        config_.use_pilots,
+        static_cast<int>(config_.pilot_spacing),
+        config_.modulation);
+    if (bits_per_symbol <= 0) {
+        return training_samples;
     }
-
-    // Account for pilots reducing available data carriers
-    int pilot_count = 0;
-    if (config_.use_pilots) {
-        pilot_count = (config_.num_carriers + config_.pilot_spacing - 1) / config_.pilot_spacing;
-    }
-    int data_carriers = static_cast<int>(config_.num_carriers) - pilot_count;
-
-    int bits_per_symbol = data_carriers * bits_per_carrier;
     int data_symbols = (frame_bits + bits_per_symbol - 1) / bits_per_symbol;
     int data_samples = data_symbols * getSamplesPerSymbol();
 

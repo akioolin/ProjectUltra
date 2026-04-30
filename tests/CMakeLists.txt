@@ -9,6 +9,10 @@ add_executable(test_fft test_fft.cpp)
 target_link_libraries(test_fft PRIVATE ultra_core)
 add_test(NAME FFT COMMAND test_fft)
 
+add_executable(test_dsp_primitives test_dsp_primitives.cpp)
+target_link_libraries(test_dsp_primitives PRIVATE ultra_core)
+add_test(NAME DSPPrimitives COMMAND test_dsp_primitives)
+
 add_executable(test_ofdm test_ofdm.cpp)
 target_link_libraries(test_ofdm PRIVATE ultra_core)
 add_test(NAME OFDM COMMAND test_ofdm)
@@ -30,6 +34,16 @@ add_test(NAME Protocol COMMAND test_protocol)
 add_executable(test_interleaver test_interleaver.cpp)
 target_link_libraries(test_interleaver PRIVATE ultra_core)
 add_test(NAME Interleaver COMMAND test_interleaver)
+
+add_executable(test_codec_factory test_codec_factory.cpp)
+target_link_libraries(test_codec_factory PRIVATE ultra_core)
+add_test(NAME CodecFactory COMMAND test_codec_factory)
+
+# Stop-and-wait ARQ remains available through the ARQ factory. Keep direct
+# coverage so this lower-throughput compatibility path cannot silently regress.
+add_executable(test_stop_wait_arq test_stop_wait_arq.cpp)
+target_link_libraries(test_stop_wait_arq PRIVATE ultra_core)
+add_test(NAME StopWaitARQ COMMAND test_stop_wait_arq)
 
 # Multi-codeword LDPC test (file transfer reliability)
 add_executable(test_multiblock_ldpc test_multiblock_ldpc.cpp)
@@ -65,6 +79,28 @@ add_test(NAME FrameV2 COMMAND test_frame_v2)
 add_executable(test_waveform_policy test_waveform_policy.cpp)
 target_link_libraries(test_waveform_policy PRIVATE ultra_core)
 add_test(NAME WaveformPolicy COMMAND test_waveform_policy)
+
+add_executable(test_ofdm_link_adaptation test_ofdm_link_adaptation.cpp)
+target_link_libraries(test_ofdm_link_adaptation PRIVATE ultra_core)
+add_test(NAME OFDMLinkAdaptation COMMAND test_ofdm_link_adaptation)
+
+# Clean baseband loopback for maintained OFDM waveform wrappers. This verifies
+# sync detection, training handoff, demodulation, and soft-bit extraction without
+# involving ARQ or hardware audio.
+add_executable(test_waveform_loopback test_waveform_loopback.cpp)
+target_link_libraries(test_waveform_loopback PRIVATE ultra_core)
+add_test(NAME WaveformLoopback COMMAND test_waveform_loopback)
+
+add_executable(test_streaming_config
+    test_streaming_config.cpp
+    ../src/gui/modem/streaming_decoder.cpp
+    ../src/gui/modem/streaming_encoder.cpp
+)
+target_include_directories(test_streaming_config PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+target_link_libraries(test_streaming_config PRIVATE ultra_core)
+add_test(NAME StreamingConfig COMMAND test_streaming_config)
 
 # Current streaming MC-DPSK encode/decode loopback.
 add_executable(test_streaming_mc_dpsk

@@ -313,10 +313,16 @@ struct ModemConfig {
 
     // Estimate data carriers (excludes pilots if use_pilots=true)
     uint32_t getDataCarriers() const {
-        if (!use_pilots) {
+        if (num_carriers == 0) {
+            return 0;
+        }
+        if (!use_pilots || pilot_spacing == 0) {
             return num_carriers;  // All carriers are data (for DQPSK)
         }
-        uint32_t pilots = (num_carriers + pilot_spacing - 1) / pilot_spacing;
+        const uint32_t pilots = (num_carriers + pilot_spacing - 1) / pilot_spacing;
+        if (pilots >= num_carriers) {
+            return 1;  // Keep a positive geometry valid for tiny custom configs.
+        }
         return num_carriers - pilots;
     }
 

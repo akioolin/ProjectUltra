@@ -20,8 +20,122 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  test:
+    name: Test (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux
+          - os: macos-latest
+            target: macos
+          - os: windows-latest
+            target: windows
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure CMake (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Debug
+          -DULTRA_BUILD_TESTS=ON
+          -DULTRA_BUILD_TOOLS=OFF
+          -DULTRA_BUILD_GUI=OFF
+          -DULTRA_USE_FFTW=OFF
+
+      - name: Configure CMake (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >
+          cmake -S . -B build -A x64
+          -DULTRA_BUILD_TESTS=ON
+          -DULTRA_BUILD_TOOLS=OFF
+          -DULTRA_BUILD_GUI=OFF
+          -DULTRA_USE_FFTW=OFF
+
+      - name: Build Tests (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: cmake --build build --parallel
+
+      - name: Build Tests (Windows)
+        if: runner.os == 'Windows'
+        run: cmake --build build --config Debug --parallel
+
+      - name: Run CTest (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: ctest --test-dir build --output-on-failure --parallel 4
+
+      - name: Run CTest (Windows)
+        if: runner.os == 'Windows'
+        run: ctest --test-dir build -C Debug --output-on-failure --parallel 4
+
+  sanitizer:
+    name: Sanitizer (linux)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure ASAN/UBSAN
+        run: >
+          cmake -S . -B build-sanitizer
+          -DCMAKE_BUILD_TYPE=Debug
+          -DULTRA_BUILD_TESTS=ON
+          -DULTRA_BUILD_TOOLS=OFF
+          -DULTRA_BUILD_GUI=OFF
+          -DULTRA_USE_FFTW=OFF
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Build ASAN/UBSAN Tests
+        run: cmake --build build-sanitizer --parallel
+
+      - name: Run ASAN/UBSAN CTest
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ctest --test-dir build-sanitizer --output-on-failure --parallel 4
+
+  coverage:
+    name: Coverage (linux)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Coverage Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm
+
+      - name: Run Coverage Gate
+        env:
+          CC: clang
+          CXX: clang++
+          LLVM_COV: llvm-cov
+          LLVM_PROFDATA: llvm-profdata
+        run: ./scripts/coverage_report.sh
+
   build:
     name: Build (${{ matrix.target }})
+    needs:
+      - test
+      - sanitizer
+      - coverage
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

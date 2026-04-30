@@ -10,6 +10,7 @@
 #include "fec/burst_interleaver.hpp"
 #include "gui/startup_trace.hpp"
 #include "ultra/logging.hpp"
+#include "ultra/ofdm_link_adaptation.hpp"
 #include <algorithm>
 
 namespace ultra {
@@ -66,7 +67,7 @@ StreamingEncoder::StreamingEncoder() {
 StreamingEncoder::~StreamingEncoder() = default;
 
 void StreamingEncoder::setBurstInterleaveGroupSize(int size) {
-    burst_group_size_ = std::clamp(size, 2, 8);
+    burst_group_size_ = ofdm_link_adaptation::sanitizeBurstGroupSize(size);
 }
 
 // ============================================================================
@@ -381,7 +382,11 @@ EncoderConfig StreamingEncoder::getConfig() const {
     cfg.code_rate = code_rate_;
     cfg.num_carriers = ofdm_config_.num_carriers;
     cfg.data_carriers = calculateDataCarriers();
-    cfg.bits_per_symbol = cfg.data_carriers * getBitsPerSymbol(modulation_);
+    cfg.bits_per_symbol = ofdm_link_adaptation::bitsPerOFDMSymbol(
+        static_cast<int>(ofdm_config_.num_carriers),
+        ofdm_config_.use_pilots,
+        static_cast<int>(ofdm_config_.pilot_spacing),
+        modulation_);
     cfg.use_pilots = ofdm_config_.use_pilots;
     cfg.pilot_spacing = ofdm_config_.pilot_spacing;
     cfg.use_channel_interleave = use_channel_interleave_;
@@ -515,8 +520,12 @@ void StreamingEncoder::updateInterleaver() {
 
     // Calculate bits per OFDM symbol
     int data_carriers = calculateDataCarriers();
-    int bits_per_carrier = getBitsPerSymbol(modulation_);
-    int bits_per_symbol = data_carriers * bits_per_carrier;
+    int bits_per_carrier = static_cast<int>(getBitsPerSymbol(modulation_));
+    int bits_per_symbol = ofdm_link_adaptation::bitsPerOFDMSymbol(
+        static_cast<int>(ofdm_config_.num_carriers),
+        ofdm_config_.use_pilots,
+        static_cast<int>(ofdm_config_.pilot_spacing),
+        modulation_);
 
     // Create channel interleaver
     channel_interleaver_ = std::make_unique<ChannelInterleaver>(
@@ -527,14 +536,10 @@ void StreamingEncoder::updateInterleaver() {
 }
 
 int StreamingEncoder::calculateDataCarriers() const {
-    if (!ofdm_config_.use_pilots) {
-        return ofdm_config_.num_carriers;
-    }
-
-    // Calculate pilot count (same formula as modulator/demodulator)
-    int pilot_count = (ofdm_config_.num_carriers + ofdm_config_.pilot_spacing - 1)
-                      / ofdm_config_.pilot_spacing;
-    return ofdm_config_.num_carriers - pilot_count;
+    return ofdm_link_adaptation::dataCarrierCount(
+        static_cast<int>(ofdm_config_.num_carriers),
+        ofdm_config_.use_pilots,
+        static_cast<int>(ofdm_config_.pilot_spacing));
 }
 
 Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
@@ -653,7 +658,11 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
 
     // Data frames: 4-CW fixed frame encoding with frame interleaving
     // Channel interleaving is controlled by use_channel_interleave_ flag
-    size_t bps = calculateDataCarriers() * getBitsPerSymbol(modulation_);
+    size_t bps = static_cast<size_t>(ofdm_link_adaptation::bitsPerOFDMSymbol(
+        static_cast<int>(ofdm_config_.num_carriers),
+        ofdm_config_.use_pilots,
+        static_cast<int>(ofdm_config_.pilot_spacing),
+        modulation_));
     Bytes encoded = v2::encodeFixedFrame(tx_data, code_rate_, use_channel_interleave_, bps);
 
     LOG_MODEM(DEBUG, "[%s] OFDM data: %zu bytes -> 4 CWs (%zu coded, frame_interleave=%s, channel_interleave=%s)",

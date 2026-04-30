@@ -42,8 +42,8 @@ float calculateMaxDataRate(const ModemConfig& config, Modulation mod, CodeRate r
     // Bits per carrier (use proper function, not enum cast!)
     size_t bits_per_carrier = getBitsPerSymbol(mod);
 
-    // Assume ~36 data carriers (out of 48, rest are pilots)
-    size_t data_carriers = config.num_carriers - config.num_carriers / config.pilot_spacing;
+    // Use the same pilot geometry as the waveform path.
+    size_t data_carriers = config.getDataCarriers();
 
     // Bits per OFDM symbol
     size_t bits_per_symbol = data_carriers * bits_per_carrier;

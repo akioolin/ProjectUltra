@@ -67,6 +67,23 @@ inline int pilotCount(int total_carriers, int pilot_spacing) {
     return (total_carriers + pilot_spacing - 1) / pilot_spacing;
 }
 
+inline int dataCarrierCount(int total_carriers, bool use_pilots, int pilot_spacing) {
+    if (total_carriers <= 0) return 0;
+    if (!use_pilots) return total_carriers;
+
+    const int pilots = pilotCount(total_carriers, pilot_spacing);
+    return std::max(1, total_carriers - pilots);
+}
+
+inline int bitsPerOFDMSymbol(int total_carriers,
+                             bool use_pilots,
+                             int pilot_spacing,
+                             Modulation mod) {
+    const int data_carriers = dataCarrierCount(total_carriers, use_pilots, pilot_spacing);
+    if (data_carriers <= 0) return 0;
+    return data_carriers * static_cast<int>(getBitsPerSymbol(mod));
+}
+
 // Experimental burst interleaver group sizing helper.
 inline int recommendedBurstGroupSize(Modulation mod, CodeRate rate, float fading_index = 0.0f) {
     if (mod == Modulation::D8PSK &&
@@ -83,4 +100,3 @@ inline int sanitizeBurstGroupSize(int value) {
 
 } // namespace ofdm_link_adaptation
 } // namespace ultra
-

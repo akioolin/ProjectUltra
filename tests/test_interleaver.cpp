@@ -1,8 +1,11 @@
 #include "ultra/fec.hpp"
+#include "fec/burst_interleaver.hpp"
+#include "fec/frame_interleaver.hpp"
 #include <iostream>
 #include <vector>
 #include <cmath>
 #include <random>
+#include <stdexcept>
 
 using namespace ultra;
 
@@ -181,6 +184,171 @@ bool testDifferentSizes() {
     return true;
 }
 
+bool testFrameInterleaverSoftRoundTrip() {
+    std::cout << "Test 5: Frame interleaver soft-bit round-trip..." << std::flush;
+
+    std::vector<std::vector<float>> original(
+        ultra::fec::FrameInterleaver::NUM_CODEWORDS,
+        std::vector<float>(ultra::fec::FrameInterleaver::BITS_PER_CODEWORD));
+
+    for (int cw = 0; cw < ultra::fec::FrameInterleaver::NUM_CODEWORDS; ++cw) {
+        for (int bit = 0; bit < ultra::fec::FrameInterleaver::BITS_PER_CODEWORD; ++bit) {
+            original[cw][bit] = static_cast<float>(cw * 1000 + bit) * 0.125f;
+        }
+    }
+
+    auto interleaved = ultra::fec::FrameInterleaver::interleaveSoft(original);
+    auto recovered = ultra::fec::FrameInterleaver::deinterleave(interleaved);
+
+    if (recovered.size() != original.size()) {
+        std::cout << " FAILED (wrong codeword count)\n";
+        return false;
+    }
+
+    for (size_t cw = 0; cw < original.size(); ++cw) {
+        if (recovered[cw].size() != original[cw].size()) {
+            std::cout << " FAILED (wrong CW size)\n";
+            return false;
+        }
+        for (size_t bit = 0; bit < original[cw].size(); ++bit) {
+            if (std::abs(recovered[cw][bit] - original[cw][bit]) > 1e-6f) {
+                std::cout << " FAILED at cw=" << cw << " bit=" << bit << "\n";
+                return false;
+            }
+        }
+    }
+
+    std::cout << " OK\n";
+    return true;
+}
+
+bool testFrameInterleaverByteMapping() {
+    std::cout << "Test 6: Frame interleaver byte-to-soft inverse..." << std::flush;
+
+    std::vector<std::vector<uint8_t>> codewords(
+        ultra::fec::FrameInterleaver::NUM_CODEWORDS,
+        std::vector<uint8_t>(ultra::fec::FrameInterleaver::BITS_PER_CODEWORD / 8));
+
+    for (size_t cw = 0; cw < codewords.size(); ++cw) {
+        for (size_t byte = 0; byte < codewords[cw].size(); ++byte) {
+            codewords[cw][byte] = static_cast<uint8_t>((cw * 53 + byte * 17 + 0x39) & 0xFF);
+        }
+    }
+
+    auto interleaved_bytes = ultra::fec::FrameInterleaver::interleave(codewords);
+    if (interleaved_bytes.size() != ultra::fec::FrameInterleaver::TOTAL_FRAME_BITS / 8) {
+        std::cout << " FAILED (wrong interleaved byte count)\n";
+        return false;
+    }
+
+    std::vector<float> interleaved_soft;
+    interleaved_soft.reserve(ultra::fec::FrameInterleaver::TOTAL_FRAME_BITS);
+    for (uint8_t byte : interleaved_bytes) {
+        for (int bit = 7; bit >= 0; --bit) {
+            interleaved_soft.push_back(static_cast<float>((byte >> bit) & 1));
+        }
+    }
+
+    auto recovered = ultra::fec::FrameInterleaver::deinterleave(interleaved_soft);
+    for (size_t cw = 0; cw < codewords.size(); ++cw) {
+        for (size_t byte = 0; byte < codewords[cw].size(); ++byte) {
+            for (int bit = 0; bit < 8; ++bit) {
+                bool expected = ((codewords[cw][byte] >> (7 - bit)) & 1) != 0;
+                bool actual = recovered[cw][byte * 8 + bit] > 0.5f;
+                if (actual != expected) {
+                    std::cout << " FAILED at cw=" << cw
+                              << " byte=" << byte << " bit=" << bit << "\n";
+                    return false;
+                }
+            }
+        }
+    }
+
+    std::cout << " OK\n";
+    return true;
+}
+
+bool testBurstInterleaverRoundTrip() {
+    std::cout << "Test 7: Burst interleaver byte-to-soft inverse..." << std::flush;
+
+    constexpr int frame_count = 4;
+    std::vector<std::vector<uint8_t>> logical(
+        frame_count,
+        std::vector<uint8_t>(ultra::fec::BurstInterleaver::BYTES_PER_FRAME));
+
+    for (int frame = 0; frame < frame_count; ++frame) {
+        for (int byte = 0; byte < ultra::fec::BurstInterleaver::BYTES_PER_FRAME; ++byte) {
+            logical[frame][byte] = static_cast<uint8_t>((frame * 71 + byte * 29 + 0x11) & 0xFF);
+        }
+    }
+
+    auto physical = ultra::fec::BurstInterleaver::interleave(logical);
+    if (physical.size() != logical.size()) {
+        std::cout << " FAILED (wrong physical frame count)\n";
+        return false;
+    }
+
+    std::vector<std::vector<float>> physical_soft(
+        frame_count,
+        std::vector<float>(ultra::fec::BurstInterleaver::BITS_PER_FRAME));
+
+    for (int frame = 0; frame < frame_count; ++frame) {
+        for (int byte = 0; byte < ultra::fec::BurstInterleaver::BYTES_PER_FRAME; ++byte) {
+            for (int bit = 0; bit < 8; ++bit) {
+                physical_soft[frame][byte * 8 + bit] =
+                    static_cast<float>((physical[frame][byte] >> (7 - bit)) & 1);
+            }
+        }
+    }
+
+    auto recovered = ultra::fec::BurstInterleaver::deinterleave(physical_soft);
+    for (int frame = 0; frame < frame_count; ++frame) {
+        for (int byte = 0; byte < ultra::fec::BurstInterleaver::BYTES_PER_FRAME; ++byte) {
+            for (int bit = 0; bit < 8; ++bit) {
+                bool expected = ((logical[frame][byte] >> (7 - bit)) & 1) != 0;
+                bool actual = recovered[frame][byte * 8 + bit] > 0.5f;
+                if (actual != expected) {
+                    std::cout << " FAILED at frame=" << frame
+                              << " byte=" << byte << " bit=" << bit << "\n";
+                    return false;
+                }
+            }
+        }
+    }
+
+    std::cout << " OK\n";
+    return true;
+}
+
+bool testFrameAndBurstInterleaverValidation() {
+    std::cout << "Test 8: Frame/burst interleaver validation..." << std::flush;
+
+    bool frame_threw = false;
+    try {
+        ultra::fec::FrameInterleaver::interleave({std::vector<uint8_t>(81)});
+    } catch (const std::invalid_argument&) {
+        frame_threw = true;
+    }
+
+    bool burst_threw = false;
+    try {
+        ultra::fec::BurstInterleaver::interleave({
+            std::vector<uint8_t>(ultra::fec::BurstInterleaver::BYTES_PER_FRAME),
+            std::vector<uint8_t>(ultra::fec::BurstInterleaver::BYTES_PER_FRAME - 1),
+        });
+    } catch (const std::invalid_argument&) {
+        burst_threw = true;
+    }
+
+    if (!frame_threw || !burst_threw) {
+        std::cout << " FAILED (expected invalid_argument)\n";
+        return false;
+    }
+
+    std::cout << " OK\n";
+    return true;
+}
+
 int main() {
     std::cout << "\nTesting Interleaver implementation...\n\n";
 
@@ -190,6 +358,10 @@ int main() {
     if (!testSoftBitsRoundTrip()) failures++;
     if (!testBurstErrorSpreading()) failures++;
     if (!testDifferentSizes()) failures++;
+    if (!testFrameInterleaverSoftRoundTrip()) failures++;
+    if (!testFrameInterleaverByteMapping()) failures++;
+    if (!testBurstInterleaverRoundTrip()) failures++;
+    if (!testFrameAndBurstInterleaverValidation()) failures++;
 
     std::cout << "\n";
     if (failures == 0) {

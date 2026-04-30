@@ -300,32 +300,33 @@ Interpretation of the 2026-04-29 robustness work:
 
 - **Read INVARIANTS.md before changing critical code.** Violating these causes subtle bugs.
 
-- **Run regression test before committing:** `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test 2>&1 | tee /tmp/test_output.log`
+- **Follow `docs/QUALITY_STRATEGY.md` for Tier 0/Tier 1 changes.** Do not chase fake coverage. Add meaningful tests for modem-critical behavior, remove stale code, and keep coverage gates reproducible.
+
+- **Run the local quality gate before committing critical code:** `cmake --build build -j4 && ctest --test-dir build --output-on-failure -j4 && ./tests/regression_matrix.sh --quick && ./scripts/coverage_report.sh`
 
 ---
 
-## Essential Documentation (16 files)
+## Essential Documentation
 
 ### Priority 1: Always Read First
 | Document | Purpose |
 |----------|---------|
-| `docs/REFACTOR_PROGRESS.md` | Current state, what's done, what's blocked |
+| `docs/QUALITY_STRATEGY.md` | Critical-software testing, coverage, CI, and refactor policy |
+| `docs/QUALITY_AUDIT.md` | Current quality baseline, coverage gaps, and hardening backlog |
 | `docs/KNOWN_BUGS.md` | Active bugs - DON'T rediscover these |
 | `docs/INVARIANTS.md` | 25 critical rules that MUST NOT be violated |
+| `docs/ALPHA_RELEASE_GATE.md` | Release criteria and seeded gate commands |
 | `docs/CHANGELOG.md` | History of all fixes - DON'T redo this work |
 
 ### Priority 2: Read When Working on Subsystem
 | Document | Purpose |
 |----------|---------|
-| `docs/STREAMING_DECODER_REDESIGN.md` | **ACTIVE** - Fix for BUG-005, continuous audio |
-| `docs/MODEM_ENGINE_ARCHITECTURE.md` | Thread model, TX/RX paths, state machine |
-| `docs/DUAL_CHIRP_CFO_ANALYSIS.md` | CFO detection, position handling, IWaveform |
 | `docs/CFO_CORRECTION_FLOW.md` | **CRITICAL** - 4-stage CFO flow, fading fix, feedback loop |
-| `docs/TESTING_METHODOLOGY.md` | Test tools, CFO simulation, streaming RX |
 | `docs/PROTOCOL_V2.md` | Frame formats, protocol flow |
 | `docs/GUI_ARCHITECTURE.md` | ImGui widgets, threading, virtual station |
 | `docs/AUDIO_SYSTEM.md` | SDL2 audio I/O, buffers, latency |
 | `docs/CONFIGURATION_SYSTEM.md` | AppSettings, ModemConfig, presets |
+| `docs/BUILD_SYSTEM.md` | CMake, dependencies, tests, coverage script |
 
 ### Priority 3: Reference
 | Document | Purpose |

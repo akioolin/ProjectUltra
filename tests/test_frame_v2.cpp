@@ -1,10 +1,14 @@
 #include <iostream>
 #include <cassert>
 #include <cstring>
+#include <cmath>
 #include "../src/protocol/frame_v2.hpp"
 
+using namespace ultra::protocol;
 using namespace ultra::protocol::v2;
 using ultra::Bytes;
+using ultra::CodeRate;
+using ultra::Modulation;
 
 int tests_passed = 0;
 int tests_failed = 0;
@@ -43,6 +47,80 @@ void test_callsign_hashing() {
         // Test broadcast hash
         uint32_t hb = hashCallsign("CQ");
         assert(hb <= 0xFFFFFF);
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
+void test_callsign_validation_and_ping() {
+    TEST("callsign validation and ping frame") {
+        assert(sanitizeCallsign("va2mvr/p!?") == "VA2MVR/P");
+        assert(sanitizeCallsign("w1aw") == "W1AW");
+        assert(isValidCallsign("W1AW"));
+        assert(isValidCallsign("VA2MVR/P"));
+        assert(!isValidCallsign("AB"));
+        assert(!isValidCallsign("TOO-LONG-CALL"));
+        assert(!isValidCallsign("BAD?"));
+
+        auto ping = PingFrame::serialize();
+        assert(ping.size() == PingFrame::SIZE);
+        assert(PingFrame::isPing(ping));
+        assert(PingFrame::isPing(ping.data(), ping.size()));
+
+        Bytes short_ping = {0x55, 0x4C, 0x54};
+        assert(!PingFrame::isPing(short_ping));
+
+        auto corrupt_ping = ping;
+        corrupt_ping[3] ^= 0x01;
+        assert(!PingFrame::isPing(corrupt_ping));
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
+void test_channel_report_and_quantizers() {
+    TEST("channel report and scalar quantizers") {
+        ChannelReport report;
+        report.snr_db = 12.3f;
+        report.delay_spread_ms = 2.4f;
+        report.doppler_spread_hz = 1.2f;
+        report.recommended_mode = WaveformMode::OFDM_CHIRP;
+        report.capabilities = ModeCapabilities::OFDM_CHIRP | ModeCapabilities::MC_DPSK;
+
+        auto encoded = report.encode();
+        assert(encoded.size() == 5);
+        auto decoded = ChannelReport::decode(encoded);
+        assert(std::abs(decoded.snr_db - 12.2f) < 0.001f);
+        assert(std::abs(decoded.delay_spread_ms - 2.4f) < 0.001f);
+        assert(std::abs(decoded.doppler_spread_hz - 1.2f) < 0.001f);
+        assert(decoded.recommended_mode == WaveformMode::OFDM_CHIRP);
+        assert(decoded.capabilities == report.capabilities);
+
+        ChannelReport excellent{30.0f, 0.5f, 0.5f, WaveformMode::OFDM_COX, ModeCapabilities::ALL};
+        ChannelReport good{20.0f, 1.5f, 1.5f, WaveformMode::OFDM_CHIRP, ModeCapabilities::ALL};
+        ChannelReport moderate{12.0f, 5.0f, 5.0f, WaveformMode::OFDM_CHIRP, ModeCapabilities::ALL};
+        ChannelReport poor{4.0f, 5.0f, 5.0f, WaveformMode::MC_DPSK, ModeCapabilities::ALL};
+        ChannelReport flutter{0.0f, 5.0f, 5.0f, WaveformMode::MC_DPSK, ModeCapabilities::ALL};
+        assert(std::strcmp(excellent.getConditionName(), "Excellent") == 0);
+        assert(std::strcmp(good.getConditionName(), "Good") == 0);
+        assert(std::strcmp(moderate.getConditionName(), "Moderate") == 0);
+        assert(std::strcmp(poor.getConditionName(), "Poor") == 0);
+        assert(std::strcmp(flutter.getConditionName(), "Flutter") == 0);
+
+        assert(encodeSNR(-99.0f) == 0);
+        assert(std::abs(decodeSNR(0) + 10.0f) < 0.001f);
+        assert(encodeSNR(99.0f) == 255);
+        assert(std::abs(decodeSNR(encodeSNR(15.25f)) - 15.25f) < 0.001f);
+
+        assert(encodeFadingIndex(-0.1f) == 0);
+        assert(decodeFadingIndex(0) < 0.0f);
+        assert(std::abs(decodeFadingIndex(encodeFadingIndex(0.62f)) - 0.62f) < 0.001f);
+        assert(encodeFadingIndex(99.0f) == 255);
+        assert(std::abs(decodeFadingIndex(255) - 2.54f) < 0.001f);
 
         PASS();
     } catch (const std::exception& e) {
@@ -115,6 +193,56 @@ void test_control_frame_magic() {
         // First two bytes should be "UL"
         assert(serialized[0] == 0x55);  // 'U'
         assert(serialized[1] == 0x4C);  // 'L'
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
+void test_connect_frame_roundtrip_and_crc() {
+    TEST("connect frame roundtrip and CRC validation") {
+        auto connect = ConnectFrame::makeConnect(
+            "VA2MVR/P", "W1AW", ModeCapabilities::ALL,
+            static_cast<uint8_t>(WaveformMode::OFDM_CHIRP),
+            static_cast<uint8_t>(Modulation::DQPSK),
+            static_cast<uint8_t>(CodeRate::R1_2));
+
+        auto serialized = connect.serialize();
+        assert(serialized.size() == DataFrame::HEADER_SIZE + ConnectFrame::PAYLOAD_SIZE + DataFrame::CRC_SIZE);
+        assert(serialized[12] == FIXED_FRAME_CODEWORDS);
+
+        auto parsed = ConnectFrame::deserialize(serialized);
+        assert(parsed.has_value());
+        assert(parsed->type == FrameType::CONNECT);
+        assert(parsed->getSrcCallsign() == "VA2MVR/P");
+        assert(parsed->getDstCallsign() == "W1AW");
+        assert(parsed->mode_capabilities == ModeCapabilities::ALL);
+        assert(parsed->negotiated_mode == static_cast<uint8_t>(WaveformMode::OFDM_CHIRP));
+        assert(parsed->initial_modulation == static_cast<uint8_t>(Modulation::DQPSK));
+        assert(parsed->initial_code_rate == static_cast<uint8_t>(CodeRate::R1_2));
+
+        auto ack = ConnectFrame::makeConnectAck("W1AW", "VA2MVR/P",
+                                                static_cast<uint8_t>(WaveformMode::OFDM_CHIRP),
+                                                Modulation::DQPSK, CodeRate::R1_2,
+                                                15.25f, 0.62f);
+        auto ack_bytes = ack.serialize();
+        auto ack_parsed = ConnectFrame::deserialize(ack_bytes);
+        assert(ack_parsed.has_value());
+        assert(ack_parsed->type == FrameType::CONNECT_ACK);
+        assert(std::abs(decodeSNR(ack_parsed->measured_snr) - 15.25f) < 0.001f);
+        assert(std::abs(decodeFadingIndex(ack_parsed->mode_capabilities) - 0.62f) < 0.001f);
+
+        auto corrupt_header = serialized;
+        corrupt_header[5] ^= 0x01;
+        assert(!ConnectFrame::deserialize(corrupt_header).has_value());
+
+        auto corrupt_payload = serialized;
+        corrupt_payload[DataFrame::HEADER_SIZE] ^= 0x01;
+        assert(!ConnectFrame::deserialize(corrupt_payload).has_value());
+
+        auto wrong_type = DataFrame::makeData("VA2MVR", "W1AW", 1, "not a connect").serialize();
+        assert(!ConnectFrame::deserialize(wrong_type).has_value());
 
         PASS();
     } catch (const std::exception& e) {
@@ -243,6 +371,54 @@ void test_reassemble_codewords() {
     }
 }
 
+void test_malformed_headers_and_status_edges() {
+    TEST("malformed headers and CodewordStatus edge cases") {
+        assert(!parseHeader(Bytes{}).valid);
+        assert(!parseHeader(Bytes{0x55}).valid);
+
+        auto probe = ControlFrame::makeProbe("VA2MVR", "W1AW").serialize();
+        auto bad_magic = probe;
+        bad_magic[0] = 0x00;
+        assert(!parseHeader(bad_magic).valid);
+
+        auto bad_control_crc = probe;
+        bad_control_crc[17] ^= 0x01;
+        assert(!parseHeader(bad_control_crc).valid);
+
+        auto data = DataFrame::makeData("VA2MVR", "W1AW", 7, "payload").serialize();
+        auto bad_header_crc = data;
+        bad_header_crc[14] ^= 0x01;
+        auto bad_chunks = splitIntoCodewords(bad_header_crc);
+        assert(!parseHeader(bad_chunks[0]).valid);
+
+        CodewordStatus empty;
+        assert(empty.getExpectedCodewords() == 0);
+        assert(empty.reassemble().empty());
+
+        CodewordStatus status;
+        status.initForFrame(3);
+        assert(status.decoded.size() == 3);
+        assert(!status.allSuccess());
+        assert(status.countFailures() == 3);
+        assert(status.getNackBitmap() == 0b111);
+        assert(!status.mergeCodeword(99, Bytes{1, 2, 3}));
+
+        status.decoded[1] = true;
+        assert(!status.mergeCodeword(1, Bytes{1, 2, 3}));
+        assert(status.mergeCodeword(2, Bytes{4, 5, 6}));
+        assert(status.decoded[2]);
+
+        status.initForFrame(2);
+        assert(status.decoded.size() == 2);
+        assert(!status.decoded[0]);
+        assert(!status.decoded[1]);
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
 void test_nack_payload() {
     TEST("NACK payload encode/decode") {
         NackPayload original;
@@ -286,6 +462,31 @@ void test_nack_frame() {
         assert(np.isFailed(0));
         assert(!np.isFailed(1));
         assert(np.isFailed(2));
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
+void test_fixed_frame_helpers() {
+    TEST("fixed frame helper policy") {
+        assert(getFixedFramePayloadCapacity(CodeRate::R1_4) == 61);
+        assert(getFixedFramePayloadCapacity(CodeRate::R1_2) == 141);
+        assert(getFixedFramePayloadCapacity(CodeRate::R2_3) == 197);
+        assert(getFixedFramePayloadCapacity(CodeRate::R3_4) == 221);
+
+        Bytes oversized(300, 0xA5);
+        auto frame = makeFixedDataFrame("VA2MVR", "W1AW", 42, oversized, CodeRate::R1_2);
+        assert(frame.total_cw == FIXED_FRAME_CODEWORDS);
+        assert(frame.payload.size() == getFixedFramePayloadCapacity(CodeRate::R1_2));
+        assert(frame.payload_len == getFixedFramePayloadCapacity(CodeRate::R1_2));
+
+        auto serialized = frame.serialize();
+        auto parsed = DataFrame::deserialize(serialized);
+        assert(parsed.has_value());
+        assert(parsed->total_cw == FIXED_FRAME_CODEWORDS);
+        assert(parsed->payload.size() == getFixedFramePayloadCapacity(CodeRate::R1_2));
 
         PASS();
     } catch (const std::exception& e) {
@@ -779,17 +980,22 @@ int main() {
     std::cout << "=== ULTRA Protocol v2 Frame Tests ===\n\n";
 
     test_callsign_hashing();
+    test_callsign_validation_and_ping();
+    test_channel_report_and_quantizers();
     test_control_frame_size();
     test_control_frame_roundtrip();
     test_control_frame_crc();
     test_control_frame_magic();
+    test_connect_frame_roundtrip_and_crc();
     test_data_frame_codeword_count();
     test_data_frame_roundtrip();
     test_data_frame_crc();
     test_split_into_codewords();
     test_reassemble_codewords();
+    test_malformed_headers_and_status_edges();
     test_nack_payload();
     test_nack_frame();
+    test_fixed_frame_helpers();
     test_codeword_status();
     test_frame_type_helpers();
     test_large_text_message();

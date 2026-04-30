@@ -21,6 +21,7 @@
 #include "ultra/fec.hpp"              // LDPCDecoder for robust single-CW decode
 #include "fec/ldpc_codec.hpp"         // getRecommendedIterations
 #include "ultra/logging.hpp"
+#include "ultra/ofdm_link_adaptation.hpp"
 #include "ultra/timing_profiler.hpp"
 #include <algorithm>
 #include <atomic>
@@ -57,9 +58,11 @@ size_t getOFDMControlFrameSamples(IWaveform* waveform, Modulation data_mod, Code
     }
 
     constexpr int pilot_spacing = 10;  // Differential DQPSK control profile
-    const int pilot_count = (carriers + pilot_spacing - 1) / pilot_spacing;
-    const int data_carriers = std::max(1, carriers - pilot_count);
-    const int bits_per_symbol = data_carriers * 2;  // DQPSK
+    const int bits_per_symbol = ofdm_link_adaptation::bitsPerOFDMSymbol(
+        carriers, true, pilot_spacing, Modulation::DQPSK);
+    if (bits_per_symbol <= 0) {
+        return default_samples;
+    }
     const int data_symbols = (v2::LDPC_CODEWORD_BITS + bits_per_symbol - 1) / bits_per_symbol;
     const size_t robust_samples = static_cast<size_t>(2 + data_symbols) *
                                   static_cast<size_t>(samples_per_symbol);
@@ -147,7 +150,7 @@ StreamingDecoder::~StreamingDecoder() {
 }
 
 void StreamingDecoder::setBurstInterleaveGroupSize(int size) {
-    burst_group_size_ = std::clamp(size, 2, 8);
+    burst_group_size_ = ofdm_link_adaptation::sanitizeBurstGroupSize(size);
 }
 
 // ============================================================================
@@ -2001,7 +2004,10 @@ void StreamingDecoder::setOFDMConfig(const ModemConfig& config) {
 
     // Store carrier counts regardless of current mode (used when switching to OFDM later)
     ofdm_carriers_ = config.num_carriers;
-    ofdm_data_carriers_ = config.getDataCarriers();
+    ofdm_data_carriers_ = ofdm_link_adaptation::dataCarrierCount(
+        static_cast<int>(config.num_carriers),
+        config.use_pilots,
+        static_cast<int>(config.pilot_spacing));
 
     // Only recreate waveform if currently in an OFDM mode.
     // When in MC-DPSK mode (e.g., disconnected waiting for PINGs), do NOT replace
@@ -2026,7 +2032,7 @@ void StreamingDecoder::setOFDMConfig(const ModemConfig& config) {
     }
 
     // Update interleaver for new carrier count (using current modulation)
-    size_t bps = ofdm_data_carriers_ * getBitsPerSymbol(current_modulation_);
+    size_t bps = static_cast<size_t>(ofdm_data_carriers_) * getBitsPerSymbol(current_modulation_);
     interleaver_ = std::make_unique<ChannelInterleaver>(bps, v2::LDPC_CODEWORD_BITS);
 }
 
@@ -2041,7 +2047,10 @@ void StreamingDecoder::setConnectedOFDMMode(protocol::WaveformMode mode,
     code_rate_ = rate;
     current_modulation_ = mod;
     ofdm_carriers_ = config.num_carriers;
-    ofdm_data_carriers_ = config.getDataCarriers();
+    ofdm_data_carriers_ = ofdm_link_adaptation::dataCarrierCount(
+        static_cast<int>(config.num_carriers),
+        config.use_pilots,
+        static_cast<int>(config.pilot_spacing));
 
     if (mode_ == protocol::WaveformMode::OFDM_CHIRP) {
         waveform_ = std::make_unique<OFDMChirpWaveform>(config);
@@ -2057,14 +2066,11 @@ void StreamingDecoder::setConnectedOFDMMode(protocol::WaveformMode mode,
 
     // Query waveform for effective pilot layout after configure().
     int pilot_spacing = waveform_ ? waveform_->getPilotSpacing() : 0;
-    if (pilot_spacing > 0) {
-        int pilot_count = (ofdm_carriers_ + pilot_spacing - 1) / pilot_spacing;
-        ofdm_data_carriers_ = ofdm_carriers_ - pilot_count;
-    } else {
-        ofdm_data_carriers_ = ofdm_carriers_;
-    }
+    ofdm_data_carriers_ = ofdm_link_adaptation::dataCarrierCount(
+        ofdm_carriers_, pilot_spacing > 0, pilot_spacing);
 
-    size_t bps = ofdm_data_carriers_ * getBitsPerSymbol(mod);
+    size_t bps = static_cast<size_t>(ofdm_link_adaptation::bitsPerOFDMSymbol(
+        ofdm_carriers_, pilot_spacing > 0, pilot_spacing, mod));
     interleaver_ = std::make_unique<ChannelInterleaver>(bps, v2::LDPC_CODEWORD_BITS);
 
     state_ = DecoderState::SEARCHING;
@@ -2092,18 +2098,14 @@ void StreamingDecoder::setDataMode(Modulation mod, CodeRate rate) {
     // Query waveform for actual pilot_spacing (coherent modes use denser pilots)
     if (mode_ != protocol::WaveformMode::MC_DPSK && waveform_) {
         int pilot_spacing = waveform_->getPilotSpacing();
-        if (pilot_spacing > 0) {
-            int pilot_count = (ofdm_carriers_ + pilot_spacing - 1) / pilot_spacing;
-            ofdm_data_carriers_ = ofdm_carriers_ - pilot_count;
-        } else {
-            ofdm_data_carriers_ = ofdm_carriers_;
-        }
+        ofdm_data_carriers_ = ofdm_link_adaptation::dataCarrierCount(
+            ofdm_carriers_, pilot_spacing > 0, pilot_spacing);
     }
 
     // Update interleaver for new modulation
     // Use data carriers (not total) to account for pilot overhead
     int carriers = (mode_ == protocol::WaveformMode::MC_DPSK) ? mc_dpsk_carriers_ : ofdm_data_carriers_;
-    size_t bps = carriers * getBitsPerSymbol(mod);
+    size_t bps = static_cast<size_t>(carriers) * getBitsPerSymbol(mod);
     interleaver_ = std::make_unique<ChannelInterleaver>(bps, v2::LDPC_CODEWORD_BITS);
     LOG_MODEM(INFO, "StreamingDecoder: interleaver updated for %s (%zu bits/symbol)",
               modulationToString(mod), bps);
@@ -2140,7 +2142,7 @@ StreamingDecoder::DecoderConfig StreamingDecoder::getConfig() const {
     cfg.code_rate = code_rate_;
     cfg.num_carriers = ofdm_carriers_;
     cfg.data_carriers = ofdm_data_carriers_;
-    cfg.bits_per_symbol = ofdm_data_carriers_ * getBitsPerSymbol(current_modulation_);
+    cfg.bits_per_symbol = ofdm_data_carriers_ * static_cast<int>(getBitsPerSymbol(current_modulation_));
 
     // Get pilot config from waveform (coherent modes use denser pilots)
     cfg.use_pilots = true;
@@ -2566,7 +2568,7 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
         // Use v2::decodeFixedFrame which handles frame + channel deinterleaving + LDPC decode
         // Channel deinterleaving restores the original bit order within each CW
         // Only enable for OFDM modes (MC-DPSK doesn't use channel interleaving)
-        size_t bps = ofdm_data_carriers_ * getBitsPerSymbol(current_modulation_);
+        size_t bps = static_cast<size_t>(ofdm_data_carriers_) * getBitsPerSymbol(current_modulation_);
         const auto _profile_fs_start_ = std::chrono::steady_clock::now();
         auto cw_status = v2::decodeFixedFrame(soft_bits, rate, apply_channel_deinterleave, bps);
         // Record duration into failed_4cw_after_peek if this attempt failed.

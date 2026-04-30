@@ -4,6 +4,7 @@
 #include <cmath>
 #include "ofdm_cox_waveform.hpp"
 #include "ultra/logging.hpp"
+#include "ultra/ofdm_link_adaptation.hpp"
 #include <sstream>
 
 namespace ultra {
@@ -279,10 +280,10 @@ float OFDMNvisWaveform::getThroughput(CodeRate rate) const {
     }
 
     // Number of data carriers
-    int data_carriers = config_.num_carriers;
-    if (config_.use_pilots && config_.pilot_spacing > 0) {
-        data_carriers = config_.num_carriers - config_.num_carriers / config_.pilot_spacing;
-    }
+    int data_carriers = ofdm_link_adaptation::dataCarrierCount(
+        static_cast<int>(config_.num_carriers),
+        config_.use_pilots,
+        static_cast<int>(config_.pilot_spacing));
 
     // Symbol rate
     float symbol_rate = static_cast<float>(config_.sample_rate) / getSamplesPerSymbol();
@@ -331,12 +332,15 @@ int OFDMNvisWaveform::getMinSamplesForFrame() const {
     }
 
     // Number of data carriers
-    int data_carriers = static_cast<int>(config_.num_carriers);
-    if (config_.use_pilots && config_.pilot_spacing > 0) {
-        data_carriers = config_.num_carriers - config_.num_carriers / config_.pilot_spacing;
-    }
+    int data_carriers = ofdm_link_adaptation::dataCarrierCount(
+        static_cast<int>(config_.num_carriers),
+        config_.use_pilots,
+        static_cast<int>(config_.pilot_spacing));
 
     int bits_per_symbol = data_carriers * bits_per_carrier;
+    if (bits_per_symbol <= 0) {
+        return training_samples;
+    }
     int data_symbols = (648 + bits_per_symbol - 1) / bits_per_symbol;
     int data_samples = data_symbols * getSamplesPerSymbol();
 
