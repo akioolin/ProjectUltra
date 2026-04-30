@@ -67,6 +67,18 @@ Publish planner proposals as GitHub Issues:
 ./agents/publish_planner_proposals.sh
 ```
 
+Create a human-authored follow-up from a terminal:
+
+```bash
+cp agents/manual_followup_template.md /tmp/followup.md
+$EDITOR /tmp/followup.md
+./agents/create_followup_issue.sh --title "Eliminate residual AWGN retx" --body-file /tmp/followup.md --hardware
+```
+
+From GitHub, use the "Agent follow-up proposal" or "Hardware follow-up
+proposal" issue template. These issues use the same `/approve codex` and
+`/approve claude` approval flow as planner-generated proposals.
+
 Process allowlisted GitHub approvals:
 
 ```bash

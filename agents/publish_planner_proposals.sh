@@ -114,6 +114,7 @@ ensure_label agent-claude "5319e7" "Approved for Claude"
 ensure_label hardware "c2e0c6" "Hardware or audio-rig related"
 ensure_label failed-pr "d93f0b" "Failed PR triage"
 ensure_label test-only "bfd4f2" "Test-only or coverage-related"
+ensure_label manual-followup "fef2c0" "Human-authored agent follow-up proposal"
 
 published=0
 skipped=0

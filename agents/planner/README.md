@@ -27,6 +27,17 @@ Publish proposals to GitHub Issues for remote review:
 ./agents/publish_planner_proposals.sh
 ```
 
+Humans can create follow-up proposals without waiting for the planner:
+
+- From GitHub, open a new issue using "Agent follow-up proposal" or
+  "Hardware follow-up proposal".
+- From a terminal, fill `agents/manual_followup_template.md` and run
+  `agents/create_followup_issue.sh --title "..." --body-file /tmp/followup.md`.
+
+Manual follow-up issues must still be approved explicitly before they are
+queued. If the task is blocked by an unmerged PR, leave it unapproved or put it
+on hold until the base branch is ready.
+
 Approve from GitHub by commenting one of:
 
 ```text

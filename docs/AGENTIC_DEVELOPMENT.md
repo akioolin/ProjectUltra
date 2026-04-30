@@ -69,6 +69,20 @@ For remote review, publish proposals as GitHub Issues:
 ./agents/publish_planner_proposals.sh
 ```
 
+Humans can also create follow-up tasks directly when they know the next bounded
+step. Use the GitHub "Agent follow-up proposal" or "Hardware follow-up
+proposal" issue template, or create one from a terminal:
+
+```bash
+cp agents/manual_followup_template.md /tmp/followup.md
+$EDITOR /tmp/followup.md
+./agents/create_followup_issue.sh --title "Short task title" --body-file /tmp/followup.md --hardware
+```
+
+Manual follow-ups use the same labels and approval watcher as planner-generated
+issues. If a follow-up depends on an unmerged PR, leave it unapproved or put it
+on hold; approve only after the dependency is on `main`.
+
 Approve from GitHub by commenting exactly one of:
 
 ```text
