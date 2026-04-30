@@ -583,6 +583,110 @@ bool test_wide_sack_bitmap_serializes_beyond_8_frames() {
     return true;
 }
 
+bool test_cumulative_ack_repeats_when_enabled() {
+    TEST("cumulative ACK repeats when ack_repeat_count > 1");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.sack_delay_ms = 10000;
+
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+    rx.setAckRepeatCount(2);
+    rx.setAckRepeatDelay(100);
+
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    for (int i = 0; i < 4; i++) {
+        auto frame = v2::DataFrame::makeData("TX1", "RX1", i, Bytes{static_cast<uint8_t>(i)});
+        rx.onFrameReceived(frame.serialize());
+    }
+
+    if (channel.size() != 1)
+        FAIL("Expected primary cumulative ACK only before repeat timer");
+
+    auto primary = v2::ControlFrame::deserialize(channel.receive());
+    if (!primary || primary->seq != 3)
+        FAIL("Primary cumulative ACK did not acknowledge seq=3");
+    if (v2::NackPayload::decode(primary->payload).cw_bitmap != 0)
+        FAIL("Expected primary cumulative ACK bitmap=0");
+
+    rx.tick(99);
+    if (channel.size() != 0)
+        FAIL("Cumulative ACK repeat fired before configured delay");
+
+    rx.tick(40);
+    if (channel.size() != 1)
+        FAIL("Expected one delayed cumulative ACK repeat");
+
+    auto repeat = v2::ControlFrame::deserialize(channel.receive());
+    if (!repeat || repeat->seq != 3)
+        FAIL("Delayed cumulative ACK repeat did not acknowledge seq=3");
+    if (v2::NackPayload::decode(repeat->payload).cw_bitmap != 0)
+        FAIL("Expected delayed cumulative ACK repeat bitmap=0");
+
+    auto stats = rx.getStats();
+    if (stats.sacks_sent != 1)
+        FAIL("ACK repeat should not increment sacks_sent");
+    if (stats.acks_sent != 2)
+        FAIL("Expected acks_sent=2 including repeat, got " + std::to_string(stats.acks_sent));
+
+    PASS();
+    return true;
+}
+
+bool test_cumulative_ack_repeat_coalesces_superseded_state() {
+    TEST("new cumulative ACK coalesces superseded pending repeat");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.sack_delay_ms = 10000;
+
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+    rx.setAckRepeatCount(2);
+    rx.setAckRepeatDelay(100);
+
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    for (int i = 0; i < 4; i++) {
+        auto frame = v2::DataFrame::makeData("TX1", "RX1", i, Bytes{static_cast<uint8_t>(i)});
+        rx.onFrameReceived(frame.serialize());
+    }
+    if (channel.size() != 1)
+        FAIL("Expected first primary ACK");
+
+    for (int i = 4; i < 8; i++) {
+        auto frame = v2::DataFrame::makeData("TX1", "RX1", i, Bytes{static_cast<uint8_t>(i)});
+        rx.onFrameReceived(frame.serialize());
+    }
+    if (channel.size() != 2)
+        FAIL("Expected second primary ACK before repeat timers");
+
+    auto first = v2::ControlFrame::deserialize(channel.receive());
+    auto second = v2::ControlFrame::deserialize(channel.receive());
+    if (!first || first->seq != 3 || !second || second->seq != 7)
+        FAIL("Expected primary ACK sequence 3 then 7");
+
+    rx.tick(120);
+    if (channel.size() != 1)
+        FAIL("Expected only the latest cumulative ACK repeat after coalescing");
+
+    auto repeat = v2::ControlFrame::deserialize(channel.receive());
+    if (!repeat || repeat->seq != 7)
+        FAIL("Expected repeated ACK for latest seq=7, not superseded seq=3");
+
+    auto stats = rx.getStats();
+    if (stats.ack_repeat_jobs_coalesced != 1)
+        FAIL("Expected one superseded repeat coalesced, got " +
+             std::to_string(stats.ack_repeat_jobs_coalesced));
+
+    PASS();
+    return true;
+}
+
 // ============================================================================
 // Stream-aware SACK timer tests (post-Phase 3 plan)
 // ============================================================================
@@ -695,6 +799,8 @@ int main() {
     test_ack_batch_setter_clamping();
     test_ack_batch_default_matches_window();
     test_wide_sack_bitmap_serializes_beyond_8_frames();
+    test_cumulative_ack_repeats_when_enabled();
+    test_cumulative_ack_repeat_coalesces_superseded_state();
 
     std::cout << "\nStream-Aware SACK Timer Tests:\n";
     test_sack_timer_more_frag_short_collapses_long();

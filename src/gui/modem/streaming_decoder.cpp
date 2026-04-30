@@ -643,9 +643,10 @@ void StreamingDecoder::searchForSync() {
     // Narrowband LTS has ~35% of wideband energy (21 vs 59 carriers) → lower correlation peak
     bool is_narrowband = (mode_ == protocol::WaveformMode::OFDM_NARROW);
     // LTS sync thresholds.
-    // True LTS peaks: 0.85-0.99 (clean). Data autocorrelation noise: 0.20-0.55.
-    // Threshold 0.55 for connected wideband rejects most noise while catching real LTS.
-    // Testing showed 0.45 accepted too many false syncs → LDPC false positives.
+    // True LTS peaks: 0.85-0.99 (clean), but Moderate SNR12 hardware traces
+    // show real tail DATA can dip to ~0.52-0.56. Data autocorrelation noise is
+    // usually 0.20-0.45; candidates admitted near the low end still pass the
+    // downstream LLR/LDPC gates before they can be accepted as frames.
     float light_sync_min_confidence;
     float weak_sync_floor;
     if (is_coherent) {
@@ -655,7 +656,7 @@ void StreamingDecoder::searchForSync() {
         light_sync_min_confidence = 0.50f;
         weak_sync_floor = 0.40f;
     } else if (connected_) {
-        light_sync_min_confidence = 0.55f;
+        light_sync_min_confidence = 0.52f;
         weak_sync_floor = 0.45f;
     } else {
         light_sync_min_confidence = 0.65f;
@@ -825,6 +826,7 @@ void StreamingDecoder::searchForSync() {
 
         sync_cfo_ = new_cfo;
         sync_snr_ = estimateSNRFromChirp(sync_result.correlation, noise_floor_);
+        sync_correlation_ = sync_result.correlation;
         sync_start_time_ = std::chrono::steady_clock::now();
         pending_total_cw_ = 0;
 
@@ -908,10 +910,10 @@ static std::atomic<int> g_robust_retry_hits{0};   // CW0 peek: retry succeeded a
 static std::atomic<int> g_salvage_hits{0};         // 1-CW control salvaged from 4-CW path
 
 // LLR pre-screen for 1-CW decode probes. Returns the mean |LLR| across the
-// first cw_size soft bits. Real ACK frames have |llr|_avg ≥ ~3 (matching the
-// existing 4-CW escalation calibration). False-sync attempts produce avg
-// near 1. A pre-screen gate at 2.0 catches obvious garbage without losing
-// weak-but-real fading frames.
+// first cw_size soft bits. Hardware Good-fading traces showed real ACKs can
+// dip to |llr|_avg ~= 1.8, while obvious false locks cluster around <= 1.0.
+// Keep this gate looser than the 4-CW data escalation gate so control frames
+// get a chance to use their R1/4 LDPC protection under fades.
 //
 // Used at the control-first ACK path and CW0 peek call sites — see
 // streaming_decoder.cpp:1130-area and :1294-area. Skipping the LDPC call
@@ -924,12 +926,10 @@ static float computeLLRAbsAvg(const float* bits, size_t count) {
     return sum / static_cast<float>(count);
 }
 
-// Threshold tuned conservatively: the existing 4-CW escalation gate is 3.0
-// (for the more expensive 4×LDPC+deinterleave path); 1-CW gating is cheaper
-// per-skip so we afford to be slightly more permissive at 2.0. Profiling
-// histogram showed real first-try ACKs cluster well above this; false-sync
-// attempts cluster near 1.
-static constexpr float MIN_LLR_FOR_1CW_DECODE = 2.0f;
+// Threshold tuned from Mac<->Pi hardware Good-fading traces: 2.0 skipped real
+// tail ACKs at |LLR|~=1.8 and caused deterministic ARQ timeouts. 1.5 still
+// avoids the very low-confidence false locks that caused decode backlog.
+static constexpr float MIN_LLR_FOR_1CW_DECODE = 1.5f;
 
 static bool hasInvalidOFDMTraining(IWaveform* waveform, bool is_ofdm, bool connected,
                                    float& lts_signal_power, float& lts_channel_mag) {
@@ -1256,7 +1256,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                     ultra::timing::globalDecoderProfile()
                         .low_llr_1cw_skipped_control_first
                         .fetch_add(1, std::memory_order_relaxed);
-                    // Skipped calls would have decoded-and-failed — record under fail.
+                    // Record skipped calls under fail for threshold telemetry.
                     ultra::timing::globalDecoderProfile()
                         .llr_dist_control_first.record(llr_avg, false);
                 } else {
@@ -1377,7 +1377,7 @@ void StreamingDecoder::decodeCurrentFrame() {
     // confidence is a reliable false-lock signature. A near-zero population is
     // only decisive when it dominates the CW; valid short/tail DATA frames can
     // show a modest near-zero tail after a strong LTS and still decode cleanly.
-    constexpr float MIN_PRESYNC_LLR = 2.0f;
+    constexpr float MIN_PRESYNC_LLR = 1.5f;
     constexpr float NEAR_ZERO_LLR = 0.1f;
     constexpr float MAX_ERASURE_LIKE_FRACTION = 0.30f;
     {
@@ -1514,15 +1514,16 @@ void StreamingDecoder::decodeCurrentFrame() {
     //      Real 1-CW control frames are always R1/4 (hardened) and are
     //      caught upstream by the control-first hypothesis at line ~1136.
     //      Cost of the dead branch: ~36 s of decode CPU per 50 KB transfer.
-    // Kept: LLR pre-empt at threshold 3.0 (false-sync gate) and the
-    //       4-CW escalation that drives the actual data-frame decode.
+    // Kept: LLR pre-empt as a coarse false-sync gate and the 4-CW escalation
+    //       that drives the actual data-frame decode.
     // ========================================================================
     if (pending_total_cw_ == 0 && is_ofdm && connected_
         && soft_bits.size() >= LDPC_BLOCK && soft_bits.size() < 2 * LDPC_BLOCK) {
 
         // Check LLR quality before expensive 4-CW escalation.
-        // False syncs (e.g. from fading-corrupted LTS) produce low |llr|_avg (~1.0),
-        // while legitimate interleaved data frames have |llr|_avg > 3.0.
+        // False syncs (e.g. from fading-corrupted LTS) cluster near
+        // |llr|_avg <= 1.0. Moderate SNR12 tail frames can be real at ~1.7,
+        // so this gate stays permissive and lets LDPC be the final arbiter.
         // Escalating on garbage wastes ~1.5s on 4x failed LDPC (50 iters each),
         // blocking the decoder from processing real frames arriving in the buffer.
         float llr_abs_sum = 0.0f;
@@ -1532,7 +1533,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         }
         float llr_abs_avg = llr_abs_sum / static_cast<float>(llr_count);
 
-        constexpr float MIN_LLR_FOR_ESCALATION = 3.0f;
+        constexpr float MIN_LLR_FOR_ESCALATION = 1.5f;
         if (llr_abs_avg < MIN_LLR_FOR_ESCALATION) {
             ultra::timing::globalDecoderProfile()
                 .low_llr_escalation_skipped.fetch_add(1, std::memory_order_relaxed);
@@ -1614,10 +1615,22 @@ void StreamingDecoder::decodeCurrentFrame() {
     // detectDataSync() scans with coarse steps, and fading can shift the best
     // decode point by a few samples even when correlation looks valid.
     if (!result.success && result.codewords_ok == 0 && is_ofdm && connected_) {
-        const int retry_deltas[] = {8, -8, 16, -16, 24, -24, 32, -32};
+        // Keep this recovery path tight. Moderate-fading hardware traces showed
+        // low-confidence syncs can pass the LLR gate, then eight full 4-CW LDPC
+        // retries burn several seconds with zero recoveries and trigger ARQ
+        // timeouts. Nearby timing retry is still useful for clean, high-corr
+        // locks, but beyond +/-8 samples the candidate is usually a bad lock.
+        constexpr float MIN_CORR_FOR_SYNC_RECOVERY = 0.80f;
+        const int retry_deltas[] = {8, -8};
         bool recovered = false;
         int recovered_delta = 0;
         uint64_t recovery_attempts = 0;
+
+        const bool allow_sync_recovery = sync_correlation_ >= MIN_CORR_FOR_SYNC_RECOVERY;
+        if (!allow_sync_recovery) {
+            LOG_MODEM(INFO, "[%s] Multi-candidate sync recovery skipped: corr=%.2f < %.2f",
+                      log_prefix_.c_str(), sync_correlation_, MIN_CORR_FOR_SYNC_RECOVERY);
+        }
 
         auto ringPosToAbsolute = [this](size_t ring_pos) -> size_t {
             if (total_fed_ < MAX_BUFFER_SAMPLES) {
@@ -1631,74 +1644,76 @@ void StreamingDecoder::decodeCurrentFrame() {
             return oldest_abs + offset;
         };
 
-        for (int delta : retry_deltas) {
-            recovery_attempts++;
-            size_t retry_sync = (sync_position_ + MAX_BUFFER_SAMPLES + delta) % MAX_BUFFER_SAMPLES;
+        if (allow_sync_recovery) {
+            for (int delta : retry_deltas) {
+                recovery_attempts++;
+                size_t retry_sync = (sync_position_ + MAX_BUFFER_SAMPLES + delta) % MAX_BUFFER_SAMPLES;
 
-            std::vector<float> retry_buffer;
-            size_t retry_len = frame_len;
-            {
-                std::lock_guard<std::mutex> lock(buffer_mutex_);
-                size_t available;
-                if (write_pos_ >= retry_sync) {
-                    available = write_pos_ - retry_sync;
-                } else {
-                    available = MAX_BUFFER_SAMPLES - retry_sync + write_pos_;
+                std::vector<float> retry_buffer;
+                size_t retry_len = frame_len;
+                {
+                    std::lock_guard<std::mutex> lock(buffer_mutex_);
+                    size_t available;
+                    if (write_pos_ >= retry_sync) {
+                        available = write_pos_ - retry_sync;
+                    } else {
+                        available = MAX_BUFFER_SAMPLES - retry_sync + write_pos_;
+                    }
+                    retry_len = std::min(retry_len, available);
+                    if (retry_len == 0) {
+                        continue;
+                    }
+                    retry_buffer.resize(retry_len);
+                    for (size_t i = 0; i < retry_len; ++i) {
+                        retry_buffer[i] = buffer_[(retry_sync + i) % MAX_BUFFER_SAMPLES];
+                    }
                 }
-                retry_len = std::min(retry_len, available);
-                if (retry_len == 0) {
+
+                // Pre-correct CFO on retry buffer too
+                if (is_ofdm && std::abs(pre_correction_cfo_) > 0.01f) {
+                    applyCFOPreCorrection(retry_buffer, sync_cfo_, ringPosToAbsolute(retry_sync));
+                }
+
+                waveform_->reset();
+                waveform_->setAbsoluteTrainingPosition(ringPosToAbsolute(retry_sync));
+                waveform_->setFrequencyOffset(decode_cfo);
+                bool retry_ok = waveform_->process(SampleSpan(retry_buffer.data(), retry_buffer.size()));
+                if (!retry_ok) {
                     continue;
                 }
-                retry_buffer.resize(retry_len);
-                for (size_t i = 0; i < retry_len; ++i) {
-                    retry_buffer[i] = buffer_[(retry_sync + i) % MAX_BUFFER_SAMPLES];
+                captureConstellationSnapshot();
+                auto retry_bits = waveform_->getSoftBits();
+                if (retry_bits.empty()) {
+                    continue;
                 }
-            }
 
-            // Pre-correct CFO on retry buffer too
-            if (is_ofdm && std::abs(pre_correction_cfo_) > 0.01f) {
-                applyCFOPreCorrection(retry_buffer, sync_cfo_, ringPosToAbsolute(retry_sync));
-            }
+                auto retry_result = decodeFrame(retry_bits, sync_snr_, sync_cfo_);
+                if (!(retry_result.success || retry_result.codewords_ok > 0)) {
+                    continue;
+                }
 
-            waveform_->reset();
-            waveform_->setAbsoluteTrainingPosition(ringPosToAbsolute(retry_sync));
-            waveform_->setFrequencyOffset(decode_cfo);
-            bool retry_ok = waveform_->process(SampleSpan(retry_buffer.data(), retry_buffer.size()));
-            if (!retry_ok) {
-                continue;
-            }
-            captureConstellationSnapshot();
-            auto retry_bits = waveform_->getSoftBits();
-            if (retry_bits.empty()) {
-                continue;
-            }
+                LOG_MODEM(INFO, "[%s] Multi-candidate sync recovery: delta=%+d samples succeeded",
+                          log_prefix_.c_str(), delta);
 
-            auto retry_result = decodeFrame(retry_bits, sync_snr_, sync_cfo_);
-            if (!(retry_result.success || retry_result.codewords_ok > 0)) {
-                continue;
+                // Keep CFO tracking consistent with the accepted retry candidate.
+                float corrected_cfo = waveform_->estimatedCFO();
+                float current_cfo = last_cfo_.load();
+                constexpr float MAX_PILOT_CFO_DRIFT_HZ = 2.0f;
+                float drift = corrected_cfo - current_cfo;
+                if (std::abs(drift) > MAX_PILOT_CFO_DRIFT_HZ) {
+                    corrected_cfo = current_cfo + std::copysign(MAX_PILOT_CFO_DRIFT_HZ, drift);
+                }
+                last_cfo_.store(corrected_cfo);
+                sync_cfo_ = corrected_cfo;
+                last_fading_index_.store(waveform_->getFadingIndex());
+
+                sync_position_ = retry_sync;
+                frame_len = retry_len;
+                result = std::move(retry_result);
+                recovered_delta = delta;
+                recovered = true;
+                break;
             }
-
-            LOG_MODEM(INFO, "[%s] Multi-candidate sync recovery: delta=%+d samples succeeded",
-                      log_prefix_.c_str(), delta);
-
-            // Keep CFO tracking consistent with the accepted retry candidate.
-            float corrected_cfo = waveform_->estimatedCFO();
-            float current_cfo = last_cfo_.load();
-            constexpr float MAX_PILOT_CFO_DRIFT_HZ = 2.0f;
-            float drift = corrected_cfo - current_cfo;
-            if (std::abs(drift) > MAX_PILOT_CFO_DRIFT_HZ) {
-                corrected_cfo = current_cfo + std::copysign(MAX_PILOT_CFO_DRIFT_HZ, drift);
-            }
-            last_cfo_.store(corrected_cfo);
-            sync_cfo_ = corrected_cfo;
-            last_fading_index_.store(waveform_->getFadingIndex());
-
-            sync_position_ = retry_sync;
-            frame_len = retry_len;
-            result = std::move(retry_result);
-            recovered_delta = delta;
-            recovered = true;
-            break;
         }
 
         if (recovery_attempts > 0) {
@@ -2232,6 +2247,7 @@ void StreamingDecoder::reset() {
     write_pos_ = 0;
     correlation_pos_ = 0;
     sync_position_ = 0;
+    sync_correlation_ = 0.0f;
     samples_since_sync_ = 0;
     total_fed_ = 0;
     feed_iter_ = 0;
@@ -2776,7 +2792,11 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         }
     }
 
-    // Energy check (same as existing burst loop)
+    // Energy check. In a marked burst-interleaved group, a weak/missing
+    // physical frame is exactly what the burst interleaver is meant to absorb:
+    // represent it as zero-confidence LLR erasures and keep collecting the
+    // rest of the group. Aborting here converts one faded physical block into
+    // four lost ARQ frames.
     float next_rms = 0.0f;
     size_t check_start = std::min(size_t(1024), burst_min_block_);
     size_t check_len = std::min(burst_min_block_ - check_start, size_t(5000));
@@ -2786,13 +2806,14 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         }
         next_rms = std::sqrt(next_rms / check_len);
     }
-    constexpr float BURST_ENERGY_THRESHOLD = 0.04f;
-    if (next_rms < BURST_ENERGY_THRESHOLD) {
-        LOG_MODEM(WARN, "[%s] Burst frame %zu/%d: energy lost (RMS=%.4f)",
+    constexpr float BURST_ERASURE_RMS_THRESHOLD = 0.015f;
+    if (next_rms < BURST_ERASURE_RMS_THRESHOLD) {
+        LOG_MODEM(WARN, "[%s] Burst frame %zu/%d: energy lost (RMS=%.4f), inserting erasure",
                   log_prefix_.c_str(), burst_soft_buffer_.size() + 1,
                   burst_group_size, next_rms);
+        burst_soft_buffer_.emplace_back(fec::BurstInterleaver::BITS_PER_FRAME, 0.0f);
         burst_next_pos_ = (burst_next_pos_ + burst_min_block_) % MAX_BUFFER_SAMPLES;
-        return BurstFrameResult::FAILED;
+        return BurstFrameResult::SUCCESS;
     }
 
     // Pre-correct CFO on burst block
@@ -2816,17 +2837,21 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     waveform_->setFrequencyOffset(burst_decode_cfo);
     bool ok = waveform_->process(SampleSpan(block.data(), block.size()));
     if (!ok) {
-        LOG_MODEM(WARN, "[%s] Burst frame %zu/%d: process() failed",
+        LOG_MODEM(WARN, "[%s] Burst frame %zu/%d: process() failed, inserting erasure",
                   log_prefix_.c_str(), burst_soft_buffer_.size() + 1, burst_group_size);
+        burst_soft_buffer_.emplace_back(fec::BurstInterleaver::BITS_PER_FRAME, 0.0f);
         burst_next_pos_ = (burst_next_pos_ + burst_min_block_) % MAX_BUFFER_SAMPLES;
-        return BurstFrameResult::FAILED;
+        return BurstFrameResult::SUCCESS;
     }
     captureConstellationSnapshot();
 
     auto soft = waveform_->getSoftBits();
     if (soft.empty()) {
+        LOG_MODEM(WARN, "[%s] Burst frame %zu/%d: empty soft bits, inserting erasure",
+                  log_prefix_.c_str(), burst_soft_buffer_.size() + 1, burst_group_size);
+        burst_soft_buffer_.emplace_back(fec::BurstInterleaver::BITS_PER_FRAME, 0.0f);
         burst_next_pos_ = (burst_next_pos_ + burst_min_block_) % MAX_BUFFER_SAMPLES;
-        return BurstFrameResult::FAILED;
+        return BurstFrameResult::SUCCESS;
     }
 
     // Update CFO from pilot tracking (add pre-correction amount back)

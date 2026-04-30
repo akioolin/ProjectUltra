@@ -303,9 +303,9 @@ private:
 
     // Burst interleave accumulation
     enum class BurstFrameResult {
-        SUCCESS,    // Frame demodulated, soft bits appended to burst_soft_buffer_
+        SUCCESS,    // Soft bits appended; may be demodulated data or an erasure block
         WAITING,    // Not enough samples yet — caller should return and wait
-        FAILED,     // Hard failure (energy lost or process error) — abort group
+        FAILED,     // Unrecoverable alignment/state failure — abort group
     };
     void accumulateBurstFrames();
     BurstFrameResult tryDemodulateNextBurstFrame();
@@ -335,6 +335,7 @@ private:
     size_t samples_since_sync_ = 0;   // How many samples collected since sync
     float sync_cfo_ = 0.0f;           // CFO from sync detection
     float sync_snr_ = 0.0f;           // SNR estimate from sync detection
+    float sync_correlation_ = 0.0f;   // LTS/light-sync confidence for current frame
     size_t correlation_pos_ = 0;      // Current position for correlation search
     size_t last_decoded_sync_pos_ = SIZE_MAX;  // Last successfully decoded sync position (to prevent duplicates)
     size_t search_floor_abs_ = 0;     // Earliest absolute sample search may inspect

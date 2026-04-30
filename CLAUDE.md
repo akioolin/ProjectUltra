@@ -55,10 +55,30 @@ Last post-calibration modem sweep:
 - Moderate injected, 1 KB, R1/4, SNR 15/12: pass with `8/8` retx, `/tmp/ultra_hw_20260429_221117`, `/tmp/ultra_hw_20260429_221240`
 - Good injected, 5 KB, R1/2, SNR 15: pass with `13` timeout retx, `/tmp/ultra_hw_20260429_221423`
 
-Interpretation of the 2026-04-29 sweep:
-- 1 KB Good is clean at R1/2 down to SNR 12 after calibration.
-- Moderate is not clean at either R1/2 or R1/4; R1/4 reduces data risk but ACK/control misses still drive retransmissions.
-- The 5 KB Good run shows sustained-transfer retransmissions from delayed/missed ACKs, not LDPC data failure (`frame_success=100%`, BRAVO receives the data before ALPHA times out).
+Post ACK/control robustness patch checks:
+- AWGN injected, 1 KB, R1/2, SNR 15: pass, `0` retx, `/tmp/ultra_hw_20260429_222350`
+- Good injected, 1 KB, R1/2, SNR 15: pass, `0` retx, `/tmp/ultra_hw_20260429_222920`
+- Moderate injected, 1 KB, R1/2, SNR 15: pass, `0` retx, `/tmp/ultra_hw_20260429_223017`
+- Moderate injected, 1 KB, R1/4, SNR 15: pass, `0` retx, `/tmp/ultra_hw_20260429_223253`
+- Moderate injected, 1 KB, R1/2, SNR 12: pass with `7` retx, `/tmp/ultra_hw_20260429_223113`
+- Moderate injected, 1 KB, R1/4, SNR 12: pass with `5` retx, `/tmp/ultra_hw_20260429_223754`
+- Good injected, 5 KB, R1/2, SNR 15: pass with `4` retx, `/tmp/ultra_hw_20260429_223926`
+
+Corrected two-sided Pi/Mac rebuild checks:
+- Good injected, 1 KB, R1/2, SNR 15: pass, `0` retx, `/tmp/ultra_hw_20260429_224520`
+- Moderate injected, 1 KB, R1/2, SNR 15: pass, `0` retx, `/tmp/ultra_hw_20260429_224612`
+- Good injected, 5 KB, R1/2, SNR 15: pass with `4` timeout retx, `/tmp/ultra_hw_20260429_224658`; BRAVO failed the original seq32-35 data burst (`CW[0..3]: FAIL`) and decoded the retransmissions, so this is data-side loss, not ACK/control loss.
+
+Final ACK/control + burst/data-acquisition checks:
+- AWGN injected, 1 KB, R1/2, SNR 15: pass, `0` retx, `/tmp/ultra_hw_20260429_230135`
+- Good injected, 5 KB, R1/2, SNR 15: pass, `0` retx, `/tmp/ultra_hw_20260429_225150`
+- Moderate injected, 5 KB, R1/2, SNR 15: pass, `0` retx, `/tmp/ultra_hw_20260429_225916`
+- Moderate injected, 1 KB, R1/2, SNR 12: pass, `0` retx, `/tmp/ultra_hw_20260429_225822`
+
+Interpretation of the 2026-04-29 robustness work:
+- ACK/control decode is healthy in AWGN, Good SNR15, Moderate SNR15, and the SNR12 Moderate canary: cumulative ACKs repeat when profile ACK diversity is enabled, and the 1-CW control LLR gate admits real fading ACKs down to `|LLR|_avg ~= 1.5`.
+- The 5 KB Good residual was a burst-interleaver receiver bug, not LDPC weakness: a physical burst block at `RMS=0.0390` was below the old hard `0.0400` gate, aborting the whole 4-frame group. The decoder now demodulates weak blocks down to `0.015` and only inserts zero-LLR erasures below that, so one weak physical block does not become four ARQ retransmissions.
+- The SNR12 Moderate tail retry was a data acquisition gate issue: real tail DATA can arrive around `corr ~= 0.52-0.56` and `|LLR|_avg ~= 1.7`. Connected DQPSK data sync and 4-CW escalation now admit those candidates while the false-lock LLR/near-zero gates still reject obvious noise.
 
 **Important distinction:** hardware gain staging does not replace injected-channel headroom. The Watterson injector can generate samples above full scale before the soundcard. Keep `--inject-gain 0.70` unless a new calibration sweep proves a different value.
 

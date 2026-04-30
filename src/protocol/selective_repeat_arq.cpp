@@ -655,7 +655,7 @@ void SelectiveRepeatARQ::sendSack() {
 
     last_sack_base_valid_ = true;
     last_sack_base_ = base_seq;
-    bool repeat_ack = bitmap != 0;
+    bool repeat_ack = ack_repeat_count_ > 1;
 
     // Coalesce pending repeats:
     // - Keep queued repeats matching current ACK state (base+bitmap).
@@ -678,8 +678,12 @@ void SelectiveRepeatARQ::sendSack() {
         LOG_MODEM(INFO, "SR-ARQ: ACK_REPEAT coalesced %zu queued jobs", removed_jobs);
     }
 
-    // Schedule delayed repeats only for selective SACK state. Plain cumulative
-    // ACKs are superseded by the next ACK and their repeats can become stale.
+    // Schedule delayed repeats for any ACK state when the connection profile
+    // requests ACK diversity. Fading tests showed the dominant loss is often a
+    // plain cumulative ACK (bitmap=0), especially tail ACKs; repeating only
+    // selective SACKs leaves those losses unprotected. Superseded ACK states
+    // were coalesced above, and the sender-side stale/duplicate guards make
+    // late repeats benign.
     for (int copy_index = 2; repeat_ack && copy_index <= ack_repeat_count_; ++copy_index) {
         if (copy_index < 4 && have_copy_queued[copy_index]) {
             continue;
@@ -707,7 +711,7 @@ void SelectiveRepeatARQ::sendSack() {
         job.copy_index = copy_index;
         ack_repeat_jobs_.push_back(std::move(job));
 
-        LOG_MODEM(INFO, "SR-ARQ: ACK_REPEAT scheduled copy=%d delay=%ums jitter=%dms selective=%d queue=%zu",
+        LOG_MODEM(INFO, "SR-ARQ: ACK_REPEAT scheduled copy=%d delay=%ums jitter=%dms enabled=%d queue=%zu",
                   copy_index, static_cast<uint32_t>(scheduled), jitter_ms, repeat_ack ? 1 : 0,
                   ack_repeat_jobs_.size());
     }
