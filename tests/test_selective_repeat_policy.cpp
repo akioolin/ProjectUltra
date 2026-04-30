@@ -73,6 +73,12 @@ void test_ack_freshness() {
           "wrapped base-1 ACK should be accepted");
     CHECK(classifyAckFreshness(65534, 0, 4) == AckFreshness::Stale,
           "wrapped stale ACK should be rejected");
+    CHECK(classifyAckFreshness(1, 65534, 4) == AckFreshness::Accept,
+          "near-wrap ACK through the wrapped TX window should be accepted");
+    CHECK(classifyAckFreshness(3, 65534, 4) == AckFreshness::Future,
+          "near-wrap ACK beyond window+1 should be future");
+    CHECK(classifyAckFreshness(65532, 65534, 4) == AckFreshness::Stale,
+          "near-wrap ACK older than base-1 should be stale");
 }
 
 void test_ack_dedup_policy() {
