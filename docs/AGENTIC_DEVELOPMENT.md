@@ -14,7 +14,8 @@ should not enter the queue.
 
 1. Write one task in `agents/queue/`.
 2. Start one worker with `agents/run_next_task.sh` or `agents/watchdog.sh`.
-3. The worker creates an `agent/...` branch and feeds the task to the selected CLI agent.
+3. The worker switches to `main`, fetches `origin/main`, fast-forwards only,
+   creates an `agent/...` branch, and feeds the task to the selected CLI agent.
 4. The worker runs local gates and optional hardware gates.
 5. A human reviews the branch before merge.
 
@@ -23,6 +24,11 @@ unreviewed edits, and benchmark regressions that are discovered days later.
 The runner owns commits, pushes, and PR creation. The coding agent must edit
 files only; if it creates commits itself, the runner rejects the task unless
 `AGENT_ALLOW_AGENT_COMMITS=1` is explicitly set.
+If `main` cannot be fast-forwarded cleanly, the runner stops instead of letting
+an agent work from stale code. Set `AGENT_UPDATE_BASE=0` only for deliberate
+offline experiments. If local `main` has unpublished commits, the runner also
+stops by default; set `AGENT_ALLOW_BASE_AHEAD=1` only when intentionally testing
+from local-only base commits.
 
 For the recommended MacBook M4 Pro isolation setup, read
 `docs/AGENT_DEDICATED_ENV_MACOS.md`. For compacted-session handoff state, read

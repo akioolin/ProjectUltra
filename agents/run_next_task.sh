@@ -13,6 +13,9 @@ AGENT_NAME=${AGENT_NAME:-agent}
 AGENT_CMD=${AGENT_CMD:-}
 AGENT_PROMPT_MODE=${AGENT_PROMPT_MODE:-stdin}
 BASE_BRANCH=${AGENT_BASE:-main}
+REMOTE_NAME=${AGENT_REMOTE:-origin}
+UPDATE_BASE=${AGENT_UPDATE_BASE:-1}
+ALLOW_BASE_AHEAD=${AGENT_ALLOW_BASE_AHEAD:-0}
 ALLOW_DIRTY=${AGENT_ALLOW_DIRTY:-0}
 DRY_RUN=${AGENT_DRY_RUN:-0}
 RUN_LOCAL_GATE=${AGENT_RUN_LOCAL_GATE:-1}
@@ -74,6 +77,21 @@ if [[ "$DRY_RUN" != "1" && "$current_branch" != "$BASE_BRANCH" ]]; then
     exit 2
   fi
   git switch "$BASE_BRANCH"
+fi
+
+if [[ "$DRY_RUN" != "1" && "$UPDATE_BASE" == "1" ]]; then
+  git fetch "$REMOTE_NAME" "$BASE_BRANCH"
+  git merge --ff-only "$REMOTE_NAME/$BASE_BRANCH"
+  read -r remote_ahead local_ahead < <(git rev-list --left-right --count "$REMOTE_NAME/$BASE_BRANCH...HEAD")
+  if [[ "$remote_ahead" != "0" ]]; then
+    echo "$BASE_BRANCH is behind $REMOTE_NAME/$BASE_BRANCH after fast-forward attempt." >&2
+    exit 2
+  fi
+  if [[ "$local_ahead" != "0" && "$ALLOW_BASE_AHEAD" != "1" ]]; then
+    echo "$BASE_BRANCH has $local_ahead local commit(s) not on $REMOTE_NAME/$BASE_BRANCH." >&2
+    echo "Push/rebase them first, or set AGENT_ALLOW_BASE_AHEAD=1 for a deliberate local experiment." >&2
+    exit 2
+  fi
 fi
 
 task_base=$(basename "$task_file" .md)
@@ -254,6 +272,9 @@ cat > "$report_dir/summary.txt" <<EOF
 task=$task_file
 agent=$AGENT_NAME
 base_branch=$BASE_BRANCH
+remote=$REMOTE_NAME
+update_base=$UPDATE_BASE
+allow_base_ahead=$ALLOW_BASE_AHEAD
 start_branch=$current_branch
 worker_branch=$branch
 local_gate=$RUN_LOCAL_GATE
