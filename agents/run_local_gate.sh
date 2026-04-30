@@ -31,6 +31,7 @@ run_step() {
   fi
 }
 
+run_step artifact_check ./scripts/check_artifacts.sh
 run_step cmake_configure cmake -S . -B "$BUILD_DIR"
 run_step build cmake --build "$BUILD_DIR" -j "$BUILD_JOBS"
 run_step ctest ctest --test-dir "$BUILD_DIR" --output-on-failure -j "$CTEST_JOBS"
@@ -47,6 +48,7 @@ run_step diff_check git diff --check
 
 cat > "$REPORT_DIR/summary.txt" <<EOF
 local_gate=pass
+artifact_check=pass
 build_dir=$BUILD_DIR
 run_regression=$RUN_REGRESSION
 skip_coverage=$SKIP_COVERAGE
