@@ -156,8 +156,6 @@ if [[ "$AUTO_COMMIT" == "1" ]]; then
   if [[ "$ARCHIVE_TASK" == "1" ]]; then
     mv "$task_file" "$ARCHIVE_DIR/${timestamp}-${task_base}.md"
     task_archived=1
-    git add -A "$QUEUE_DIR" "$ARCHIVE_DIR"
-    git commit -m "Archive agent task: $task_base" || true
   fi
 
   if [[ "$PUSH_BRANCH" == "1" ]]; then
