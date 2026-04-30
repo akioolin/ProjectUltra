@@ -2,20 +2,12 @@
 // Split from connection.cpp for maintainability
 
 #include "connection.hpp"
+#include "connection_policy.hpp"
 #include "waveform_selection.hpp"  // Shared waveform/rate selection algorithm
 #include "ultra/logging.hpp"
 
 namespace ultra {
 namespace protocol {
-
-// Classify combined fading index into channel quality label
-// Thresholds match app.cpp fadingToQuality() (2026-02-03)
-static const char* fadingLabel(float fading) {
-    if (fading < 0.15f) return "AWGN";
-    if (fading < 0.65f) return "Good";
-    if (fading < 1.10f) return "Moderate";
-    return "Poor";
-}
 
 // Recommend data mode based on SNR, fading, and the NEGOTIATED waveform
 // Uses shared recommendDataMode() algorithm from waveform_selection.hpp
@@ -492,80 +484,72 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data) {
 
 WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_pref) {
     uint8_t common = config_.mode_capabilities & remote_caps;
+    float snr = measured_snr_db_;
+    WaveformMode selected = connection_policy::selectNegotiatedMode(
+        config_.mode_capabilities,
+        remote_caps,
+        remote_pref,
+        narrowband_override_,
+        config_.preferred_mode,
+        snr,
+        fading_index_);
 
     if (common == 0) {
         LOG_MODEM(WARN, "Connection: No common waveform modes! Falling back to OFDM");
-        return WaveformMode::OFDM_COX;
+        return selected;
     }
-
-    // Helper to convert WaveformMode to capability bit
-    auto modeToBit = [](WaveformMode mode) -> uint8_t {
-        switch (mode) {
-            case WaveformMode::OFDM_COX:    return ModeCapabilities::OFDM_COX;
-            case WaveformMode::OFDM_CHIRP:  return ModeCapabilities::OFDM_CHIRP;
-            case WaveformMode::OFDM_NARROW: return ModeCapabilities::OFDM_NARROW;
-            case WaveformMode::OTFS_EQ:     return ModeCapabilities::OTFS_EQ;
-            case WaveformMode::OTFS_RAW:    return ModeCapabilities::OTFS_RAW;
-            case WaveformMode::MFSK:        return ModeCapabilities::MFSK;
-            case WaveformMode::MC_DPSK:     return ModeCapabilities::MC_DPSK;
-            default: return 0;
-        }
-    };
 
     // If remote has explicit preference, honor it if we support it
     if (remote_pref != WaveformMode::AUTO) {
-        uint8_t pref_bit = modeToBit(remote_pref);
-        if (common & pref_bit) {
+        uint8_t pref_bit = connection_policy::modeToCapabilityBit(remote_pref);
+        if ((common & pref_bit) && selected == remote_pref) {
             LOG_MODEM(INFO, "Connection: Using remote preferred mode: %s",
                       waveformModeToString(remote_pref));
-            return remote_pref;
+            return selected;
         }
     }
 
     // If narrowband chirp was detected this session, override for this connection
     if (narrowband_override_ != WaveformMode::AUTO) {
-        uint8_t pref_bit = modeToBit(narrowband_override_);
-        if (common & pref_bit) {
+        uint8_t pref_bit = connection_policy::modeToCapabilityBit(narrowband_override_);
+        if ((common & pref_bit) && selected == narrowband_override_) {
             LOG_MODEM(INFO, "Connection: Using narrowband override: %s",
                       waveformModeToString(narrowband_override_));
-            return narrowband_override_;
+            return selected;
         }
     }
 
     // If we have explicit preference, use it if remote supports it
     if (config_.preferred_mode != WaveformMode::AUTO) {
-        uint8_t pref_bit = modeToBit(config_.preferred_mode);
-        if (common & pref_bit) {
+        uint8_t pref_bit = connection_policy::modeToCapabilityBit(config_.preferred_mode);
+        if ((common & pref_bit) && selected == config_.preferred_mode) {
             LOG_MODEM(INFO, "Connection: Using local preferred mode: %s",
                       waveformModeToString(config_.preferred_mode));
-            return config_.preferred_mode;
+            return selected;
         }
     }
 
     // AUTO mode: Use shared algorithm from waveform_selection.hpp
     // This ensures negotiateMode and recommendDataModeWithFading use same logic
-    float snr = measured_snr_db_;
     LOG_MODEM(INFO, "Connection: AUTO mode selection, SNR=%.1f dB, fading_index=%.2f (%s)",
-              snr, fading_index_, fadingLabel(fading_index_));
+              snr, fading_index_, connection_policy::fadingLabel(fading_index_));
 
     auto rec = recommendWaveformAndRate(snr, fading_index_);
-    WaveformMode selected = rec.waveform;
 
     // Check if selected mode is supported by both sides
-    if (common & modeToBit(selected)) {
+    if (selected == rec.waveform &&
+        (common & connection_policy::modeToCapabilityBit(selected))) {
         LOG_MODEM(INFO, "Connection: Selected %s (SNR=%.1f, fading=%.2f %s)",
-                  waveformModeToString(selected), snr, fading_index_, fadingLabel(fading_index_));
+                  waveformModeToString(selected),
+                  snr,
+                  fading_index_,
+                  connection_policy::fadingLabel(fading_index_));
         return selected;
     }
 
     // Fallback if selected mode is not supported by both peers.
     // Production priority excludes reserved OTFS/MFSK values.
-    if (common & ModeCapabilities::OFDM_COX) return WaveformMode::OFDM_COX;
-    if (common & ModeCapabilities::OFDM_CHIRP) return WaveformMode::OFDM_CHIRP;
-    if (common & ModeCapabilities::OFDM_NARROW) return WaveformMode::OFDM_NARROW;
-    if (common & ModeCapabilities::MC_DPSK) return WaveformMode::MC_DPSK;
-
-    return WaveformMode::OFDM_COX;
+    return selected;
 }
 
 } // namespace protocol

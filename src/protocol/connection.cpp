@@ -2,87 +2,14 @@
 // Frame handlers are in connection_handlers.cpp
 
 #include "connection.hpp"
+#include "connection_policy.hpp"
 #include "gui/startup_trace.hpp"
 #include "waveform_selection.hpp"
-#include "ultra/ofdm_link_adaptation.hpp"
 #include "ultra/logging.hpp"
 #include <algorithm>
 
 namespace ultra {
 namespace protocol {
-
-namespace {
-
-constexpr uint32_t OFDM_SAMPLE_RATE = 48000;
-constexpr uint32_t OFDM_FFT_SIZE = 1024;
-constexpr uint32_t OFDM_LONG_CP_SAMPLES = 128;  // LONG CP at 1024 FFT
-constexpr uint32_t OFDM_SYMBOL_SAMPLES = OFDM_FFT_SIZE + OFDM_LONG_CP_SAMPLES;
-constexpr uint32_t OFDM_NUM_CARRIERS = 59;
-constexpr uint32_t LDPC_BITS_PER_CODEWORD = 648;
-constexpr uint32_t FIXED_FRAME_CODEWORDS = 4;
-constexpr uint32_t OFDM_BURST_ACK_BATCH_FRAMES = 4;
-constexpr size_t OFDM_NEAR_AWGN_WINDOW_FRAMES = 12;
-
-int pilotSpacingForRate(Modulation mod, CodeRate rate) {
-    return ofdm_link_adaptation::recommendedPilotSpacing(mod, rate);
-}
-
-uint32_t symbolsForCodewords(Modulation mod, CodeRate rate, int codewords) {
-    int pilot_spacing = pilotSpacingForRate(mod, rate);
-    uint32_t bits_per_symbol = static_cast<uint32_t>(
-        ofdm_link_adaptation::bitsPerOFDMSymbol(
-            static_cast<int>(OFDM_NUM_CARRIERS), true, pilot_spacing, mod));
-    uint32_t frame_bits = static_cast<uint32_t>(codewords) * LDPC_BITS_PER_CODEWORD;
-    uint32_t data_symbols = (frame_bits + bits_per_symbol - 1) / bits_per_symbol;
-
-    // 2 training symbols in light preamble + data symbols.
-    return 2 + data_symbols;
-}
-
-uint32_t computeOfdmAckTimeoutMs(Modulation mod, CodeRate rate, size_t window_size,
-                                 uint32_t sack_delay_ms, int ack_repeat_count) {
-    constexpr float symbol_ms = (1000.0f * OFDM_SYMBOL_SAMPLES) / OFDM_SAMPLE_RATE;  // 24ms
-
-    uint32_t data_symbols = symbolsForCodewords(mod, rate, FIXED_FRAME_CODEWORDS);
-    uint32_t ack_symbols = symbolsForCodewords(mod, rate, 1);
-    uint32_t data_frame_ms = static_cast<uint32_t>(data_symbols * symbol_ms + 0.5f);
-    uint32_t ack_frame_ms = static_cast<uint32_t>(ack_symbols * symbol_ms + 0.5f);
-
-    uint32_t ack_copies = static_cast<uint32_t>(std::clamp(ack_repeat_count, 1, 3));
-    uint32_t tx_burst_ms = static_cast<uint32_t>(window_size) * data_frame_ms;
-    uint32_t ack_path_ms = ack_copies * ack_frame_ms + sack_delay_ms;
-
-    // Soundcard chain adds round-trip latency on real audio: SDL2 default
-    // period_size is now 8192 samples (170ms each direction). Both sides
-    // contribute, so 4×170 ≈ 680ms is added to the RTT vs the in-process
-    // sim. We charge it as part of decode-jitter margin so the floor stays
-    // sane for sim mode (which still hits the 4500ms clamp).
-    constexpr uint32_t AUDIO_CHAIN_RTT_MARGIN_MS = 700;  // 4 × 170ms buffer-fill edge
-    uint32_t decode_jitter_margin_ms = std::max<uint32_t>(700, data_frame_ms / 2)
-                                       + AUDIO_CHAIN_RTT_MARGIN_MS;
-
-    // Timeout should cover a full burst RTT + decode/jitter + audio chain.
-    uint32_t queued_tail_margin_ms = 0;
-    if (window_size > 4) {
-        // With real soundcards ARQ timers start when samples are queued, not
-        // when the last queued frame is played and decoded. The wider AWGN
-        // window intentionally queues more audio, so charge extra tail margin
-        // rather than declaring the later slots lost just before their ACKs
-        // arrive.
-        queued_tail_margin_ms =
-            static_cast<uint32_t>(window_size - 4) * data_frame_ms + AUDIO_CHAIN_RTT_MARGIN_MS;
-    }
-
-    uint32_t timeout_ms = tx_burst_ms + ack_path_ms + decode_jitter_margin_ms
-                        + queued_tail_margin_ms;
-    // Floor lifted to 8000ms for real soundcard paths. ARQ timers start when
-    // samples are queued, not when the SDL output callback actually drains
-    // them. Mac<->Pi hardware traces showed the 6500ms floor firing 67ms
-    // before a valid ACK for the last frame of the initial window arrived.
-    return std::clamp(timeout_ms, 8000u, 16000u);
-}
-
-} // namespace
 
 const char* connectionStateToString(ConnectionState state) {
     switch (state) {
@@ -1061,102 +988,64 @@ void Connection::enterConnected() {
         arq_.setSackDelayShort(0);
         arq_.setAckRepeatCount(1);
 
-        // Compute narrowband timeout from frame timing
-        // Symbol: (2048 + 192) / 48000 = 46.67ms
-        constexpr float narrow_symbol_ms = (1000.0f * 2240) / 48000;  // 46.67ms
-        constexpr uint32_t NARROW_NUM_CARRIERS = 21;
-        constexpr uint32_t NARROW_PILOT_SPACING = 10;
-        uint32_t narrow_bps = static_cast<uint32_t>(
-            ofdm_link_adaptation::bitsPerOFDMSymbol(
-                static_cast<int>(NARROW_NUM_CARRIERS),
-                true,
-                static_cast<int>(NARROW_PILOT_SPACING),
-                data_modulation_));
-        uint32_t data_cw_symbols = (4 * LDPC_BITS_PER_CODEWORD + narrow_bps - 1) / narrow_bps;
-        uint32_t ack_cw_symbols = (LDPC_BITS_PER_CODEWORD + narrow_bps - 1) / narrow_bps;
-        uint32_t data_frame_ms = static_cast<uint32_t>((2 + data_cw_symbols) * narrow_symbol_ms + 0.5f);
-        uint32_t ack_frame_ms = static_cast<uint32_t>((2 + ack_cw_symbols) * narrow_symbol_ms + 0.5f);
-
-        uint32_t timeout_ms = data_frame_ms + 2 * ack_frame_ms + 120 +
-                               std::max<uint32_t>(700, data_frame_ms / 2);
-        timeout_ms = std::clamp(timeout_ms, 4500u, 14000u);
+        const auto timing = connection_policy::narrowOFDMFrameTiming(data_modulation_);
+        uint32_t timeout_ms = connection_policy::computeNarrowOFDMAckTimeoutMs(data_modulation_);
         arq_.setAckTimeout(timeout_ms);
 
         LOG_MODEM(INFO, "Connection: ARQ window=1, timeout=%.2fs (data=%ums, ack=%ums), ack_repeat=1 (OFDM_NARROW %s %s)",
-                  timeout_ms / 1000.0f, data_frame_ms, ack_frame_ms,
+                  timeout_ms / 1000.0f, timing.data_ms, timing.ack_ms,
                   modulationToString(data_modulation_), codeRateToString(data_code_rate_));
     } else {
         // Keep OFDM receive pressure bounded on fading channels. Near-AWGN
         // hardware paths need a larger flight window to cover soundcard RTT;
         // otherwise the sender drains its 4-frame window and waits idle for
         // ACKs even though the PHY is clean.
-        const bool near_awgn_ofdm = fading_index_ < 0.30f && measured_snr_db_ >= 15.0f;
-        arq_.setWindowSize(near_awgn_ofdm ? OFDM_NEAR_AWGN_WINDOW_FRAMES : 4);
+        const bool near_awgn_ofdm =
+            connection_policy::isNearAwgnOFDM(fading_index_, measured_snr_db_);
+        arq_.setWindowSize(connection_policy::ofdmWindowSize(near_awgn_ofdm));
         arq_.setMaxRetries(15);     // More attempts compensate for ACK loss on fading
-        // Window=8 keeps the pipe full, but the physical OFDM burst/interleave
+        // The near-AWGN window keeps the pipe full, but the physical OFDM burst/interleave
         // group is 4 frames. ACK at the burst boundary so the sender can refill
         // immediately; the delayed SACK timer is only a tail fallback.
-        arq_.setAckBatchSize(near_awgn_ofdm ? OFDM_BURST_ACK_BATCH_FRAMES : 0);
+        arq_.setAckBatchSize(connection_policy::ofdmAckBatchSize(near_awgn_ofdm));
         // Keep the failed window=4 SACK-delay canary rolled back. Burst-sized
-        // SACK coalescing is enabled only for the near-AWGN window=8 path,
+        // SACK coalescing is enabled only for the widened near-AWGN path,
         // where the sender has enough flight depth and a longer timeout.
         // See .claude/plans/imperative-napping-conway.md for canary findings.
 
-        constexpr float symbol_ms = (1000.0f * OFDM_SYMBOL_SAMPLES) / OFDM_SAMPLE_RATE;
-        uint32_t data_symbols = symbolsForCodewords(data_modulation_, data_code_rate_, FIXED_FRAME_CODEWORDS);
-        uint32_t ack_symbols = symbolsForCodewords(data_modulation_, data_code_rate_, 1);
-        uint32_t data_ms = static_cast<uint32_t>(data_symbols * symbol_ms + 0.5f);
-        uint32_t ack_ms = static_cast<uint32_t>(ack_symbols * symbol_ms + 0.5f);
+        const auto timing = connection_policy::wideOFDMFrameTiming(
+            data_modulation_, data_code_rate_);
+        const auto sack = connection_policy::ofdmSackDelays(
+            near_awgn_ofdm, arq_.getWindowSize(), timing.data_ms);
+        arq_.setSackDelay(sack.delay_ms);
+        arq_.setSackDelayShort(sack.short_delay_ms);
 
-        uint32_t sack_delay_ms = 120;
-        uint32_t sack_delay_short_ms = 0;
-        if (near_awgn_ofdm && arq_.getWindowSize() >= 8) {
-            // Full 4-frame bursts ACK via ack_batch_size above. This timer is
-            // for partial/tail windows and should not govern steady-state flow.
-            sack_delay_ms = std::clamp<uint32_t>(data_ms + 120, 700, 1000);
-            sack_delay_short_ms = 120;
-        }
-        arq_.setSackDelay(sack_delay_ms);
-        arq_.setSackDelayShort(sack_delay_short_ms);
+        const auto ack_repeat = connection_policy::ofdmAckRepeatProfile(
+            data_modulation_, data_code_rate_, near_awgn_ofdm);
+        arq_.setAckRepeatCount(ack_repeat.count);
+        arq_.setAckRepeatDelay(ack_repeat.delay_ms);
 
-        int ack_repeat_count = 2;
-        uint32_t ack_repeat_delay_ms = 220;
-
-        // D8PSK R1/2 in fading benefits from stronger control-frame diversity.
-        if (data_modulation_ == Modulation::D8PSK && data_code_rate_ == CodeRate::R1_2) {
-            ack_repeat_count = 3;
-            ack_repeat_delay_ms = 250;
-        }
-        // Near-AWGN at decent SNR: drop SACK repeat to 1 copy. Single-shot
-        // SACKs are reliably decoded here, the duplicate copies were just
-        // eating channel time. Tested expanding to good fading (< 0.65)
-        // and observed regressions at SNR=20 good (seed 1: r=33/t=17 → r=81/t=60),
-        // so the threshold stays at near-AWGN where SACKs are reliably
-        // single-shot deliverable.
-        else if (near_awgn_ofdm) {
-            ack_repeat_count = 1;
-        }
-
-        arq_.setAckRepeatCount(ack_repeat_count);
-        arq_.setAckRepeatDelay(ack_repeat_delay_ms);
-
-        uint32_t ack_timeout_ms = computeOfdmAckTimeoutMs(
-            data_modulation_, data_code_rate_, arq_.getWindowSize(), arq_.getSackDelay(), ack_repeat_count);
+        uint32_t ack_timeout_ms = connection_policy::computeWideOFDMAckTimeoutMs(
+            data_modulation_,
+            data_code_rate_,
+            arq_.getWindowSize(),
+            arq_.getSackDelay(),
+            ack_repeat.count);
         arq_.setAckTimeout(ack_timeout_ms);
 
         LOG_MODEM(INFO,
                   "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, ack=%ums x%d), max_retries=%d, ack_batch=%u, sack_delay=%ums/%ums, ack_repeat=%d/%ums (OFDM %s %s)",
                   arq_.getWindowSize(),
                   ack_timeout_ms / 1000.0f,
-                  data_ms,
-                  ack_ms,
-                  ack_repeat_count,
+                  timing.data_ms,
+                  timing.ack_ms,
+                  ack_repeat.count,
                   arq_.getMaxRetries(),
                   arq_.getAckBatchSize(),
                   arq_.getSackDelay(),
                   arq_.getSackDelayShort(),
-                  ack_repeat_count,
-                  ack_repeat_delay_ms,
+                  ack_repeat.count,
+                  ack_repeat.delay_ms,
                   modulationToString(data_modulation_),
                   codeRateToString(data_code_rate_));
     }

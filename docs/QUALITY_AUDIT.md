@@ -9,7 +9,7 @@ defines the policy; this file tracks where the codebase stands against it.
 
 ## Current Test Baseline
 
-Registered CTest targets: 26
+Registered CTest targets: 27
 
 Current maintained local gates:
 
@@ -23,9 +23,9 @@ git diff --check
 ```
 
 Latest measured coverage after the current hardening pass:
-- Line: 53.97%
-- Function: 58.86%
-- Branch: 43.33%
+- Line: 54.32%
+- Function: 59.21%
+- Branch: 43.58%
 
 This is a baseline, not an acceptable final state for critical modem code.
 
@@ -41,7 +41,9 @@ Measured from `build-coverage/coverage.txt`.
 | `src/protocol/frame_v2.hpp` | 89.29% | 95.24% | 76.42% | Strong helper coverage; keep malformed-frame tests growing |
 | `src/protocol/selective_repeat_arq.cpp` | 68.72% | 86.67% | 45.63% | Strong behavior tests; branch coverage now needs loss-pattern edge cases |
 | `src/protocol/selective_repeat_arq_policy.hpp` | 100.00% | 100.00% | 96.67% | Extracted and tested from ACK/SACK, timer, fast-hole, ACK-repeat, and RTT/RTO policy |
-| `src/protocol/connection.cpp` | 50.30% | 65.22% | 34.14% | Needs state-machine extraction and direct transition tests |
+| `src/protocol/connection.cpp` | 49.16% | 62.79% | 32.68% | Timing policy extracted; remaining state-machine transitions still need direct tests |
+| `src/protocol/connection_handlers.cpp` | 50.00% | 58.33% | 28.15% | Negotiation helpers extracted; frame handler branches still need transition tests |
+| `src/protocol/connection_policy.hpp` | 97.06% | 100.00% | 81.82% | Extracted and tested from OFDM timing, ACK timeout, ACK repeat, SACK delay, fading label, and negotiation policy |
 | `src/waveform` | 54.06% | 46.21% | 35.30% | Loopback coverage added; wrapper edge cases remain |
 | `src/psk` | 63.56% | 42.55% | 53.57% | Needs direct DPSK edge/vector tests |
 | `src/sync` | 37.61% | 42.31% | 48.56% | Needs chirp false-lock/CFO/timing tests |
@@ -142,6 +144,10 @@ smaller units with direct tests around their real invariants.
   `selective_repeat_arq_policy.hpp`, including Karn-safe eligibility,
   sample clamping, SRTT/RTTVAR EWMA updates, and configured timeout floor/ceiling
   behavior.
+- Connection timing and negotiation decisions are extracted into
+  `connection_policy.hpp`, including wide/narrow OFDM frame timing, hardware-safe
+  ACK timeout floors/ceilings, near-AWGN window/batch policy, ACK repeat policy,
+  SACK-delay policy, fading labels, and waveform capability selection.
 
 ## Definition Of Progress
 
