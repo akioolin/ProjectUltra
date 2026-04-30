@@ -12,6 +12,8 @@ The model is intentionally conservative:
 - Hardware sentinel runs write structured report-only evidence for the planner.
 - Planner runs write proposed task files for human review; they do not edit
   modem source or auto-merge PRs.
+- Planner proposal files are regenerated each planner pass, and publishing
+  deduplicates against existing open planner issues by title.
 - Auto-commit and push are opt-in. Human review remains the merge gate.
 - Queued and archived task files are ignored by default so prompts/log excerpts
   are not accidentally committed.

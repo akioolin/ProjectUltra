@@ -12,6 +12,10 @@ MAX_PROPOSALS=${AGENT_PLANNER_MAX_PROPOSALS:-5}
 
 mkdir -p "$REPORT_DIR" "$PROPOSAL_DIR"
 
+# Proposals are generated artifacts for the current planner pass. Rebuild them
+# every cycle so stale files cannot be published after their issue was handled.
+find "$PROPOSAL_DIR" -maxdepth 1 -type f -name '*.md' -exec rm -f {} +
+
 proposal_count=0
 report="$REPORT_DIR/report.md"
 
