@@ -15,6 +15,7 @@
 #include <iostream>
 #include <cassert>
 #include <queue>
+#include <string>
 #include <vector>
 
 using namespace ultra;
@@ -59,6 +60,25 @@ public:
 private:
     std::queue<Bytes> queue_;
 };
+
+static v2::ControlFrame makeSackAck(uint16_t seq, uint32_t bitmap) {
+    auto sack = v2::ControlFrame::makeNack("RX1", "TX1", seq, bitmap);
+    sack.type = v2::FrameType::ACK;
+    return sack;
+}
+
+static bool expectDataSeq(const Bytes& frame_data, uint16_t expected_seq,
+                          const std::string& context) {
+    auto parsed = v2::DataFrame::deserialize(frame_data);
+    if (!parsed)
+        FAIL(context + ": retransmitted frame did not parse as DATA");
+    if (parsed->type != v2::FrameType::DATA)
+        FAIL(context + ": retransmitted frame was not DATA");
+    if (parsed->seq != expected_seq)
+        FAIL(context + ": expected DATA seq=" + std::to_string(expected_seq) +
+             ", got seq=" + std::to_string(parsed->seq));
+    return true;
+}
 
 // ============================================================================
 // Basic Tests
@@ -203,6 +223,154 @@ bool test_receive_ack() {
     return true;
 }
 
+bool test_stale_ack_older_than_base_minus_one_is_ignored() {
+    TEST("Stale ACK older than base-1 is ignored without freeing TX slots");
+
+    ARQConfig config;
+    config.window_size = 4;
+
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+
+    std::vector<Bytes> transmitted;
+    tx.setTransmitCallback([&](const Bytes& data) { transmitted.push_back(data); });
+
+    int completions = 0;
+    tx.setSendCompleteCallback([&](bool success) {
+        if (success) completions++;
+    });
+
+    for (int i = 0; i < 4; i++) {
+        if (!tx.sendData(Bytes{static_cast<uint8_t>(i)}))
+            FAIL("Failed to fill TX window at seq=" + std::to_string(i));
+    }
+    if (tx.getAvailableSlots() != 0)
+        FAIL("Expected full TX window before ACK setup");
+
+    auto ack1 = v2::ControlFrame::makeAck("RX1", "TX1", 1);
+    tx.onFrameReceived(ack1.serialize());
+    if (completions != 2)
+        FAIL("Setup ACK should complete seq=0..1, got completions=" +
+             std::to_string(completions));
+    if (tx.getAvailableSlots() != 2)
+        FAIL("Setup ACK should free exactly 2 TX slots");
+
+    const size_t slots_before = tx.getAvailableSlots();
+    const int completions_before = completions;
+
+    auto stale = makeSackAck(0, 0x0Cu);
+    tx.onFrameReceived(stale.serialize());
+
+    if (tx.getAvailableSlots() != slots_before)
+        FAIL("Stale ACK advanced/free'd TX window slots");
+    if (completions != completions_before)
+        FAIL("Stale ACK caused duplicate send-complete callbacks");
+    if (transmitted.size() != 4)
+        FAIL("Stale ACK unexpectedly triggered a retransmission");
+
+    auto stats = tx.getStats();
+    if (stats.stale_acks_ignored != 1)
+        FAIL("Expected stale_acks_ignored=1, got " +
+             std::to_string(stats.stale_acks_ignored));
+
+    PASS();
+    return true;
+}
+
+bool test_future_ack_too_far_ahead_is_ignored() {
+    TEST("Future ACK too far ahead is ignored without freeing TX slots");
+
+    ARQConfig config;
+    config.window_size = 4;
+
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+
+    std::vector<Bytes> transmitted;
+    tx.setTransmitCallback([&](const Bytes& data) { transmitted.push_back(data); });
+
+    int completions = 0;
+    tx.setSendCompleteCallback([&](bool success) {
+        if (success) completions++;
+    });
+
+    for (int i = 0; i < 4; i++) {
+        if (!tx.sendData(Bytes{static_cast<uint8_t>(i)}))
+            FAIL("Failed to fill TX window at seq=" + std::to_string(i));
+    }
+
+    auto future = makeSackAck(6, 0x0Fu);
+    tx.onFrameReceived(future.serialize());
+
+    if (tx.getAvailableSlots() != 0)
+        FAIL("Future ACK advanced/free'd TX window slots");
+    if (completions != 0)
+        FAIL("Future ACK caused send-complete callbacks");
+    if (transmitted.size() != 4)
+        FAIL("Future ACK unexpectedly triggered a retransmission");
+
+    auto stats = tx.getStats();
+    if (stats.future_acks_ignored != 1)
+        FAIL("Expected future_acks_ignored=1, got " +
+             std::to_string(stats.future_acks_ignored));
+    if (stats.acks_received != 0)
+        FAIL("Future ACK should not count as a received cumulative ACK");
+
+    PASS();
+    return true;
+}
+
+bool test_duplicate_sack_hole_is_suppressed_without_duplicate_retx_accounting() {
+    TEST("Duplicate SACK hole is suppressed without duplicate retransmission accounting");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.ack_timeout_ms = 1000;
+
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+
+    std::vector<Bytes> transmitted;
+    tx.setTransmitCallback([&](const Bytes& data) { transmitted.push_back(data); });
+
+    for (int i = 0; i < 3; i++) {
+        if (!tx.sendData(Bytes{static_cast<uint8_t>(i)}))
+            FAIL("Failed to send DATA seq=" + std::to_string(i));
+    }
+    if (tx.getAvailableSlots() != 1)
+        FAIL("Expected one free slot before SACK-hole test setup");
+
+    // ACK base-1 with bit1 set: receiver is missing seq=0 but has seq=1.
+    auto base_hole = makeSackAck(0xFFFF, 0x02u);
+    tx.onFrameReceived(base_hole.serialize());
+
+    auto after_first = tx.getStats();
+    if (after_first.hole_events != 1)
+        FAIL("First base-hole SACK should record one hole event");
+    if (after_first.retransmissions != 0)
+        FAIL("First hole indication should not retransmit before two confirmations");
+    if (tx.getAvailableSlots() != 1)
+        FAIL("Base-hole SACK should not free the missing base slot");
+
+    tx.onFrameReceived(base_hole.serialize());
+
+    auto stats = tx.getStats();
+    if (stats.duplicate_acks_ignored != 1)
+        FAIL("Expected duplicate_acks_ignored=1, got " +
+             std::to_string(stats.duplicate_acks_ignored));
+    if (stats.hole_events != 1)
+        FAIL("Duplicate SACK should not double-count hole events");
+    if (stats.retransmissions != 0 ||
+        stats.retransmissions_fast_hole != 0 ||
+        stats.retransmissions_timeout != 0)
+        FAIL("Duplicate SACK caused retransmission accounting");
+    if (transmitted.size() != 3)
+        FAIL("Duplicate SACK unexpectedly transmitted a repair frame");
+
+    PASS();
+    return true;
+}
+
 bool test_rx_in_order() {
     TEST("RX delivers in-order frames");
 
@@ -240,6 +408,60 @@ bool test_rx_in_order() {
     // after every in-order frame. Three frames should only arm the tail timer.
     if (channel.size() != 0)
         FAIL("Expected no immediate SACK before default batch threshold");
+
+    PASS();
+    return true;
+}
+
+bool test_duplicate_data_is_not_delivered_twice_and_sends_recovery_sack() {
+    TEST("Duplicate DATA is ignored without duplicate delivery and keeps SACK recovery sane");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.sack_delay_ms = 10000;
+
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    std::vector<Bytes> received;
+    rx.setDataReceivedCallback([&](const Bytes& data) {
+        received.push_back(data);
+    });
+
+    auto f0 = v2::DataFrame::makeData("TX1", "RX1", 0, Bytes{0x42});
+    rx.onFrameReceived(f0.serialize());
+
+    if (received.size() != 1)
+        FAIL("Initial DATA seq=0 should be delivered once");
+    if (channel.size() != 0)
+        FAIL("Initial in-order frame should only arm delayed SACK at this batch size");
+
+    rx.onFrameReceived(f0.serialize());
+
+    if (received.size() != 1)
+        FAIL("Duplicate DATA seq=0 was delivered twice");
+    if (channel.size() != 1)
+        FAIL("Duplicate delivered DATA should send one recovery SACK, got " +
+             std::to_string(channel.size()));
+
+    auto ack = v2::ControlFrame::deserialize(channel.receive());
+    if (!ack || ack->type != v2::FrameType::ACK || ack->seq != 0)
+        FAIL("Duplicate DATA recovery SACK should cumulatively ACK seq=0");
+    if (v2::NackPayload::decode(ack->payload).cw_bitmap != 0)
+        FAIL("Duplicate DATA recovery SACK should have empty current-window bitmap");
+
+    rx.tick(config.sack_delay_ms);
+    if (channel.size() != 0)
+        FAIL("Duplicate DATA left a stale delayed SACK pending");
+
+    auto stats = rx.getStats();
+    if (stats.frames_received != 1)
+        FAIL("Duplicate DATA should not increment frames_received twice");
+    if (stats.sack_trigger_out_of_window != 1)
+        FAIL("Expected duplicate delivered DATA to use out-of-window SACK trigger");
 
     PASS();
     return true;
@@ -327,6 +549,61 @@ bool test_timeout_retransmit() {
     auto stats = tx.getStats();
     if (stats.retransmissions != 1)
         FAIL("Expected 1 retransmission in stats");
+
+    PASS();
+    return true;
+}
+
+bool test_timeout_repair_retransmits_only_missing_slot_and_resets_timer() {
+    TEST("Timeout repair retransmits only missing slot and resets its timer");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.ack_timeout_ms = 100;
+    config.max_retries = 4;
+
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+
+    std::vector<Bytes> transmitted;
+    tx.setTransmitCallback([&](const Bytes& data) { transmitted.push_back(data); });
+
+    for (int i = 0; i < 3; i++) {
+        if (!tx.sendData(Bytes{static_cast<uint8_t>(i)}))
+            FAIL("Failed to send DATA seq=" + std::to_string(i));
+    }
+    if (transmitted.size() != 3)
+        FAIL("Expected three initial DATA transmissions");
+
+    // Cumulatively ACK seq=0 and SACK seq=2, leaving only seq=1 as a hole.
+    auto sack_seq2 = makeSackAck(0, 0x02u);
+    tx.onFrameReceived(sack_seq2.serialize());
+
+    const size_t before_timeout_tx = transmitted.size();
+    tx.tick(101);
+
+    if (transmitted.size() != before_timeout_tx + 1)
+        FAIL("Timeout should retransmit exactly one missing DATA frame");
+    if (!expectDataSeq(transmitted.back(), 1, "timeout repair"))
+        return false;
+
+    auto stats = tx.getStats();
+    if (stats.timeouts != 1 || stats.retransmissions != 1 ||
+        stats.retransmissions_timeout != 1)
+        FAIL("Expected one timeout retransmission, got timeouts=" +
+             std::to_string(stats.timeouts) + " retransmissions=" +
+             std::to_string(stats.retransmissions) + " timeout_retx=" +
+             std::to_string(stats.retransmissions_timeout));
+
+    tx.tick(99);
+    if (transmitted.size() != before_timeout_tx + 1)
+        FAIL("Timeout repair did not reset the slot timer to a full ACK timeout");
+
+    tx.tick(1);
+    if (transmitted.size() != before_timeout_tx + 2)
+        FAIL("Slot did not retransmit again after the full reset timeout elapsed");
+    if (!expectDataSeq(transmitted.back(), 1, "second timeout repair"))
+        return false;
 
     PASS();
     return true;
@@ -806,6 +1083,13 @@ int main() {
     test_sack_timer_more_frag_short_collapses_long();
     test_sack_timer_more_frag_does_not_extend();
     test_sack_delay_short_zero_sentinel_preserves_legacy();
+
+    std::cout << "\nARQ Boundary/Property Tests:\n";
+    test_stale_ack_older_than_base_minus_one_is_ignored();
+    test_future_ack_too_far_ahead_is_ignored();
+    test_duplicate_sack_hole_is_suppressed_without_duplicate_retx_accounting();
+    test_duplicate_data_is_not_delivered_twice_and_sends_recovery_sack();
+    test_timeout_repair_retransmits_only_missing_slot_and_resets_timer();
 
     std::cout << "\nBasic Tests:\n";
     test_create_sr_arq();
