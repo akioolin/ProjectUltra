@@ -1166,6 +1166,10 @@ float OFDMDemodulator::getFrequencyOffset() const {
     return impl_->freq_offset_hz;
 }
 
+float OFDMDemodulator::getLastTimingOffsetSamples() const {
+    return impl_->timing_offset_samples;
+}
+
 float OFDMDemodulator::getFadingIndex() const {
     // Compute coefficient of variation of per-carrier channel estimate magnitudes
     // Uses data_carrier_indices to get magnitudes of active carriers only

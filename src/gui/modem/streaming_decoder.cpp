@@ -817,16 +817,11 @@ void StreamingDecoder::checkIfReadyToDecode() {
         }
     }
 
-    // Check timeout
+    // Check elapsed time after selecting the sample requirement. Large variable
+    // OFDM frames can be longer than the legacy 5s fixed-frame wait.
     auto now = std::chrono::steady_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         now - sync_start_time_).count();
-
-    if (elapsed > FRAME_TIMEOUT_MS) {
-        LOG_MODEM(WARN, "[%s] Frame timeout after %lld ms", log_prefix_.c_str(), (long long)elapsed);
-        state_ = DecoderState::SEARCHING;
-        return;
-    }
 
     // Calculate how much we need — must match decodeCurrentFrame() buffer sizing.
     bool is_ofdm_here = protocol::isOFDMMode(mode_);
@@ -852,6 +847,17 @@ void StreamingDecoder::checkIfReadyToDecode() {
         ofdm_control_samples,
         full_frame_samples,
         control_frame_samples);
+
+    static constexpr int kAudioSampleRateHz = 48000;
+    const int required_audio_ms = static_cast<int>(
+        (requirement.samples * 1000 + kAudioSampleRateHz - 1) / kAudioSampleRateHz);
+    const int frame_timeout_ms = std::max(FRAME_TIMEOUT_MS, required_audio_ms + 2000);
+    if (elapsed > frame_timeout_ms) {
+        LOG_MODEM(WARN, "[%s] Frame timeout after %lld ms (need=%zu samples, timeout=%d ms)",
+                  log_prefix_.c_str(), (long long)elapsed, requirement.samples, frame_timeout_ms);
+        state_ = DecoderState::SEARCHING;
+        return;
+    }
 
     if (available >= requirement.samples) {
         state_ = DecoderState::DECODING;
@@ -1251,6 +1257,76 @@ void StreamingDecoder::decodeCurrentFrame() {
         return;
     }
 
+    // If the LTS detector locked early on a marked burst group, the first
+    // physical block is the one most likely to poison the deinterleaver. Retry
+    // that block from the timing-slope-corrected origin before collecting LLRs.
+    bool burst_marker = use_burst_interleave_ && connected_ && is_ofdm
+                        && mode_ == protocol::WaveformMode::OFDM_CHIRP
+                        && waveform_->wasBurstInterleaved();
+    if (burst_marker) {
+        const float burst_timing_offset = waveform_->getLastTimingOffsetSamples();
+        constexpr float kBurstFrameRetryThreshold = 64.0f;
+        constexpr float kBurstFrameRetryMax = 320.0f;
+        if (std::abs(burst_timing_offset) >= kBurstFrameRetryThreshold &&
+            std::abs(burst_timing_offset) <= kBurstFrameRetryMax) {
+            const int sample_correction = static_cast<int>(std::lround(burst_timing_offset));
+            const size_t corrected_sync_pos =
+                (sync_position_ + MAX_BUFFER_SAMPLES + sample_correction) % MAX_BUFFER_SAMPLES;
+            const size_t corrected_sync_abs =
+                (sample_correction >= 0)
+                    ? frame_sync_abs + static_cast<size_t>(sample_correction)
+                    : (frame_sync_abs > static_cast<size_t>(-sample_correction)
+                           ? frame_sync_abs - static_cast<size_t>(-sample_correction)
+                           : 0);
+
+            bool have_corrected_frame = false;
+            {
+                std::lock_guard<std::mutex> lock(buffer_mutex_);
+                size_t corrected_available;
+                if (write_pos_ >= corrected_sync_pos) {
+                    corrected_available = write_pos_ - corrected_sync_pos;
+                } else {
+                    corrected_available = MAX_BUFFER_SAMPLES - corrected_sync_pos + write_pos_;
+                }
+                have_corrected_frame = corrected_available >= frame_len;
+                if (have_corrected_frame) {
+                    frame_buffer.assign(frame_len, 0.0f);
+                    for (size_t i = 0; i < frame_len; i++) {
+                        frame_buffer[i] = buffer_[(corrected_sync_pos + i) % MAX_BUFFER_SAMPLES];
+                    }
+                }
+            }
+
+            if (have_corrected_frame) {
+                applyCFOPreCorrection(frame_buffer, sync_cfo_, corrected_sync_abs);
+
+                // The marker flag was consumed by the first process() call.
+                // Normalize the first LTS symbol manually for this retry so
+                // channel estimation sees two same-polarity training symbols.
+                const size_t lts_sym_len = static_cast<size_t>(waveform_->getSamplesPerSymbol());
+                for (size_t i = 0; i < lts_sym_len && i < frame_buffer.size(); ++i) {
+                    frame_buffer[i] = -frame_buffer[i];
+                }
+
+                waveform_->setAbsoluteTrainingPosition(corrected_sync_abs);
+                waveform_->setFrequencyOffset(decode_cfo);
+                bool retry_ok = waveform_->process(SampleSpan(frame_buffer.data(), frame_buffer.size()));
+                if (retry_ok) {
+                    sync_position_ = corrected_sync_pos;
+                    frame_sync_abs = corrected_sync_abs;
+                    LOG_MODEM(WARN, "[%s] Burst marker frame timing retry: %.1f samples, sync_pos=%zu",
+                              log_prefix_.c_str(), burst_timing_offset, sync_position_);
+                } else {
+                    LOG_MODEM(WARN, "[%s] Burst marker frame timing retry failed: %.1f samples",
+                              log_prefix_.c_str(), burst_timing_offset);
+                }
+            } else {
+                LOG_MODEM(INFO, "[%s] Burst marker frame timing retry deferred: %.1f samples, need %zu",
+                          log_prefix_.c_str(), burst_timing_offset, frame_len);
+            }
+        }
+    }
+
     float lts_signal_power = 1.0f;
     float lts_channel_mag = 1.0f;
     if (hasInvalidOFDMTraining(waveform_.get(), is_ofdm, connected_,
@@ -1301,12 +1377,6 @@ void StreamingDecoder::decodeCurrentFrame() {
 
     last_fading_index_.store(waveform_->getFadingIndex());
 
-    // Check for burst interleave marker (negated LTS detected by waveform)
-    // Only for connected OFDM_CHIRP when burst interleaving is enabled
-    bool burst_marker = use_burst_interleave_ && connected_ && is_ofdm
-                        && mode_ == protocol::WaveformMode::OFDM_CHIRP
-                        && waveform_->wasBurstInterleaved();
-
     if (burst_marker) {
         LOG_MODEM(INFO, "[%s] Burst interleave marker detected, entering accumulation",
                   log_prefix_.c_str());
@@ -1327,6 +1397,21 @@ void StreamingDecoder::decodeCurrentFrame() {
             pre_correction_cfo_, residual_cfo, current_cfo, /*clamp_drift=*/true);
         last_cfo_.store(cfo_update.accepted_cfo);
         burst_cfo_ = cfo_update.accepted_cfo;
+
+        // LTS autocorrelation can lock early on later marked groups inside a
+        // long burst. The marker frame is retried above; keep this as a guard
+        // for continuation slicing if residual timing is still large.
+        const float burst_timing_offset = waveform_->getLastTimingOffsetSamples();
+        constexpr float kBurstTimingCorrectionThreshold = 80.0f;
+        constexpr float kBurstMaxTimingCorrection = 320.0f;
+        if (std::abs(burst_timing_offset) >= kBurstTimingCorrectionThreshold &&
+            std::abs(burst_timing_offset) <= kBurstMaxTimingCorrection) {
+            const int sample_correction = static_cast<int>(std::lround(burst_timing_offset));
+            burst_next_pos_ = (burst_next_pos_ + MAX_BUFFER_SAMPLES + sample_correction)
+                % MAX_BUFFER_SAMPLES;
+            LOG_MODEM(WARN, "[%s] Burst group timing correction: %.1f samples, next_pos=%zu",
+                      log_prefix_.c_str(), burst_timing_offset, burst_next_pos_);
+        }
 
         state_ = DecoderState::BURST_ACCUMULATING;
         return;  // processBuffer() will call accumulateBurstFrames() on next iteration
@@ -1402,6 +1487,33 @@ void StreamingDecoder::decodeCurrentFrame() {
     if (pending_total_cw_ == 0 && is_ofdm && connected_
         && soft_bits.size() >= LDPC_BLOCK && soft_bits.size() < 2 * LDPC_BLOCK) {
 
+        // Large OFDM FILE_BLOCK frames use variable-CW encoding without the
+        // fixed 4-CW frame interleaver. Give raw CW0 one chance to declare the
+        // true frame length before defaulting to the fixed-frame path.
+        codec_->setRate(rate);
+        {
+            ultra::timing::ScopedTimer _profile_(
+                ultra::timing::globalDecoderProfile().ofdm_cw0_probe_decode);
+            auto [peek_ok, peek_data] = codec_->decode(
+                std::vector<float>(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK));
+            const size_t bytes_per_cw = v2::getBytesPerCodeword(rate);
+            if (peek_ok && peek_data.size() >= bytes_per_cw) {
+                if (peek_data.size() > bytes_per_cw) {
+                    peek_data.resize(bytes_per_cw);
+                }
+                auto hdr = v2::parseHeader(peek_data);
+                if (hdr.valid && !hdr.is_control &&
+                    hdr.total_cw > v2::FIXED_FRAME_CODEWORDS) {
+                    pending_total_cw_ = hdr.total_cw;
+                    state_ = DecoderState::SYNC_FOUND;
+                    LOG_MODEM(INFO, "[%s] OFDM variable CW0: need %d CWs, waiting for %d samples",
+                              log_prefix_.c_str(), pending_total_cw_,
+                              waveform_->getMinSamplesForCWCount(pending_total_cw_));
+                    return;
+                }
+            }
+        }
+
         // Check LLR quality before expensive 4-CW escalation.
         // False syncs (e.g. from fading-corrupted LTS) cluster near
         // |llr|_avg <= 1.0. Moderate SNR12 tail frames can be real at ~1.7,
@@ -1429,6 +1541,20 @@ void StreamingDecoder::decodeCurrentFrame() {
 
     // Decode the frame using the soft bits
     DecodeResult result = decodeFrame(soft_bits, sync_snr_, sync_cfo_);
+
+    if (!result.success && result.codewords_ok == 1 && is_ofdm && connected_
+        && !result.frame_data.empty()) {
+        auto partial_hdr = v2::parseHeader(result.frame_data);
+        if (partial_hdr.valid && !partial_hdr.is_control &&
+            partial_hdr.total_cw > v2::FIXED_FRAME_CODEWORDS) {
+            pending_total_cw_ = partial_hdr.total_cw;
+            state_ = DecoderState::SYNC_FOUND;
+            LOG_MODEM(INFO, "[%s] OFDM variable frame: need %d CWs, waiting for %d samples",
+                      log_prefix_.c_str(), pending_total_cw_,
+                      waveform_->getMinSamplesForCWCount(pending_total_cw_));
+            return;
+        }
+    }
 
     // ========================================================================
     // Small-frame recovery for OFDM connected mode:
@@ -2526,6 +2652,8 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
         result.frame_type = hdr.type;
         int total_cw = hdr.total_cw;
         int avail_cw = static_cast<int>(soft_bits.size() / LDPC_BLOCK);
+        const bool variable_ofdm_frame =
+            is_ofdm && total_cw != v2::FIXED_FRAME_CODEWORDS;
 
         if (avail_cw < total_cw) {
             result.frame_data = data0;
@@ -2541,7 +2669,9 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
         for (int i = 1; i < total_cw; i++) {
             size_t off = i * LDPC_BLOCK;
             std::vector<float> bits(soft_bits.begin() + off, soft_bits.begin() + off + LDPC_BLOCK);
-            bits = deinterleave_cw(bits);
+            if (!variable_ofdm_frame) {
+                bits = deinterleave_cw(bits);
+            }
 
             auto [ok, data] = codec_->decode(bits);
             if (ok && data.size() >= bytes_per_cw) {
@@ -2649,6 +2779,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
 
     // Copy samples from circular buffer
     std::vector<float> block(burst_min_block_);
+    size_t block_start_pos = burst_next_pos_;
     {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
         for (size_t i = 0; i < burst_min_block_; i++) {
@@ -2683,8 +2814,8 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     // Pre-correct CFO on burst block
     bool is_ofdm_burst = protocol::isOFDMMode(mode_);
     float burst_pre_cfo = 0.0f;
+    size_t abs_burst = burst_next_pos_;
     if (is_ofdm_burst) {
-        size_t abs_burst = burst_next_pos_;
         if (total_fed_ >= MAX_BUFFER_SAMPLES) {
             const size_t oldest_abs = total_fed_ - MAX_BUFFER_SAMPLES;
             const size_t oldest_pos = write_pos_;
@@ -2709,6 +2840,60 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     }
     captureConstellationSnapshot();
 
+    const float timing_offset = waveform_->getLastTimingOffsetSamples();
+    constexpr float kBurstContinuationRetryThreshold = 48.0f;
+    constexpr float kBurstContinuationRetryMax = 320.0f;
+    if (std::abs(timing_offset) >= kBurstContinuationRetryThreshold &&
+        std::abs(timing_offset) <= kBurstContinuationRetryMax) {
+        const int sample_correction = static_cast<int>(std::lround(timing_offset));
+        const size_t corrected_pos =
+            (block_start_pos + MAX_BUFFER_SAMPLES + sample_correction) % MAX_BUFFER_SAMPLES;
+        const size_t corrected_abs =
+            (sample_correction >= 0)
+                ? abs_burst + static_cast<size_t>(sample_correction)
+                : (abs_burst > static_cast<size_t>(-sample_correction)
+                       ? abs_burst - static_cast<size_t>(-sample_correction)
+                       : 0);
+
+        bool have_corrected_block = false;
+        {
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            size_t corrected_available;
+            if (write_pos_ >= corrected_pos) {
+                corrected_available = write_pos_ - corrected_pos;
+            } else {
+                corrected_available = MAX_BUFFER_SAMPLES - corrected_pos + write_pos_;
+            }
+            have_corrected_block = corrected_available >= burst_min_block_;
+            if (have_corrected_block) {
+                block.assign(burst_min_block_, 0.0f);
+                for (size_t i = 0; i < burst_min_block_; i++) {
+                    block[i] = buffer_[(corrected_pos + i) % MAX_BUFFER_SAMPLES];
+                }
+            }
+        }
+
+        if (have_corrected_block) {
+            burst_pre_cfo = is_ofdm_burst ? applyCFOPreCorrection(block, burst_cfo_, corrected_abs) : 0.0f;
+            burst_decode_cfo = (std::abs(burst_pre_cfo) > 0.01f) ? 0.0f : burst_cfo_;
+            waveform_->setAbsoluteTrainingPosition(corrected_abs);
+            waveform_->setFrequencyOffset(burst_decode_cfo);
+            bool retry_ok = waveform_->process(SampleSpan(block.data(), block.size()));
+            if (retry_ok) {
+                block_start_pos = corrected_pos;
+                abs_burst = corrected_abs;
+                LOG_MODEM(WARN, "[%s] Burst continuation timing retry frame %zu/%d: %.1f samples",
+                          log_prefix_.c_str(), burst_soft_buffer_.size() + 1,
+                          burst_group_size, timing_offset);
+                captureConstellationSnapshot();
+            } else {
+                LOG_MODEM(WARN, "[%s] Burst continuation timing retry failed frame %zu/%d: %.1f samples",
+                          log_prefix_.c_str(), burst_soft_buffer_.size() + 1,
+                          burst_group_size, timing_offset);
+            }
+        }
+    }
+
     auto soft = waveform_->getSoftBits();
     if (soft.empty()) {
         LOG_MODEM(WARN, "[%s] Burst frame %zu/%d: empty soft bits, inserting erasure",
@@ -2727,7 +2912,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     last_fading_index_.store(waveform_->getFadingIndex());
 
     burst_soft_buffer_.push_back(std::move(soft));
-    burst_next_pos_ = (burst_next_pos_ + burst_min_block_) % MAX_BUFFER_SAMPLES;
+    burst_next_pos_ = (block_start_pos + burst_min_block_) % MAX_BUFFER_SAMPLES;
 
     LOG_MODEM(INFO, "[%s] Burst frame %zu/%d demodulated, RMS=%.4f",
               log_prefix_.c_str(), burst_soft_buffer_.size(),

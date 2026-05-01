@@ -25,6 +25,8 @@ inline constexpr uint32_t kLDPCBitsPerCodeword = 648;
 inline constexpr uint32_t kFixedFrameCodewords = 4;
 inline constexpr uint32_t kOFDMBurstAckBatchFrames = 4;
 inline constexpr size_t kWideOFDMWindowFrames = 8;
+inline constexpr size_t kHighThroughputOFDMWindowFrames = 16;
+inline constexpr size_t kBurstInterleaveGroupFrames = 8;
 
 struct OFDMFrameTiming {
     uint32_t data_symbols = 0;
@@ -67,9 +69,22 @@ inline bool isNearAwgnOFDM(float fading_index, float snr_db) {
     return fading_index < 0.30f && snr_db >= 15.0f;
 }
 
-inline size_t ofdmWindowSize(bool near_awgn_ofdm) {
-    (void)near_awgn_ofdm;
-    return kWideOFDMWindowFrames;
+inline bool isHighThroughputOFDM(float fading_index, float snr_db) {
+    return fading_index < 0.65f && snr_db >= 15.0f;
+}
+
+inline bool isHighThroughputOFDMMode(Modulation mod, CodeRate rate) {
+    if (mod != Modulation::DQPSK) {
+        return false;
+    }
+    return rate == CodeRate::R1_2 ||
+           rate == CodeRate::R2_3 ||
+           rate == CodeRate::R3_4;
+}
+
+inline size_t ofdmWindowSize(Modulation mod, CodeRate rate) {
+    return isHighThroughputOFDMMode(mod, rate) ? kHighThroughputOFDMWindowFrames
+                                               : kWideOFDMWindowFrames;
 }
 
 inline uint32_t ofdmAckBatchSize(bool near_awgn_ofdm) {
@@ -112,14 +127,13 @@ inline SackDelayProfile ofdmSackDelays(bool near_awgn_ofdm,
                                        uint32_t data_frame_ms) {
     SackDelayProfile profile;
     if (near_awgn_ofdm && window_size >= 8) {
-        const size_t deferred_frames =
-            window_size > kOFDMBurstAckBatchFrames
-                ? window_size - kOFDMBurstAckBatchFrames
-                : 1;
+        const size_t deferred_frames = window_size > kBurstInterleaveGroupFrames
+            ? window_size - kBurstInterleaveGroupFrames
+            : 0;
         const uint64_t burst_tail_ms =
             static_cast<uint64_t>(deferred_frames) * data_frame_ms + 120u;
         profile.delay_ms = static_cast<uint32_t>(
-            std::clamp<uint64_t>(burst_tail_ms, 700ULL, 12000ULL));
+            std::clamp<uint64_t>(burst_tail_ms, 120ULL, 12000ULL));
         profile.short_delay_ms = 120;
     }
     return profile;
@@ -130,8 +144,10 @@ inline AckRepeatProfile ofdmAckRepeatProfile(Modulation mod,
                                              bool near_awgn_ofdm) {
     (void)mod;
     (void)rate;
-    (void)near_awgn_ofdm;
     AckRepeatProfile profile;
+    if (near_awgn_ofdm) {
+        profile.count = 1;
+    }
     return profile;
 }
 

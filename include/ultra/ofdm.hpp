@@ -78,6 +78,10 @@ public:
     // Get estimated frequency offset in Hz (from pilot phase tracking)
     float getFrequencyOffset() const;
 
+    // Get the last LTS-derived timing offset in samples.
+    // Positive means the FFT window should start later.
+    float getLastTimingOffsetSamples() const;
+
     // Set frequency offset for CFO correction (call before processPresynced)
     // Use when CFO is estimated externally (e.g., from chirp preamble)
     void setFrequencyOffset(float cfo_hz);

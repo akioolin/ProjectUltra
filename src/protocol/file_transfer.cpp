@@ -246,6 +246,9 @@ bool FileTransferController::processPayload(const Bytes& payload, bool more_data
         case PayloadType::FILE_DATA:
             return processFileData(payload, more_data);
 
+        case PayloadType::FILE_BLOCK:
+            return processFileBlock(payload);
+
         case PayloadType::TEXT_MESSAGE:
         default:
             return false;
@@ -355,6 +358,60 @@ Bytes FileTransferController::buildDataPayload() {
 
     tx_offset_ += static_cast<uint32_t>(chunk_size);
 
+    return payload;
+}
+
+Bytes FileTransferController::getSingleBlockPayload(size_t max_payload) {
+    if (state_ != FileTransferState::SENDING || tx_metadata_sent_ || tx_offset_ != 0) {
+        return {};
+    }
+
+    Bytes payload = buildSingleBlockPayload(max_payload);
+    if (payload.empty()) {
+        return {};
+    }
+
+    tx_metadata_sent_ = true;
+    tx_offset_ = static_cast<uint32_t>(tx_data_.size());
+    chunks_sent_++;
+    notifyProgress();
+    return payload;
+}
+
+Bytes FileTransferController::buildSingleBlockPayload(size_t max_payload) {
+    if (tx_filename_.size() > 255) {
+        return {};
+    }
+
+    const size_t needed = FILE_BLOCK_FIXED_OVERHEAD + tx_filename_.size() + tx_data_.size();
+    if (needed > max_payload) {
+        return {};
+    }
+
+    Bytes payload;
+    payload.reserve(needed);
+    payload.push_back(static_cast<uint8_t>(PayloadType::FILE_BLOCK));
+    payload.push_back(tx_flags_);
+
+    payload.push_back((tx_original_size_ >> 24) & 0xFF);
+    payload.push_back((tx_original_size_ >> 16) & 0xFF);
+    payload.push_back((tx_original_size_ >> 8) & 0xFF);
+    payload.push_back(tx_original_size_ & 0xFF);
+
+    const uint32_t transmitted_size = static_cast<uint32_t>(tx_data_.size());
+    payload.push_back((transmitted_size >> 24) & 0xFF);
+    payload.push_back((transmitted_size >> 16) & 0xFF);
+    payload.push_back((transmitted_size >> 8) & 0xFF);
+    payload.push_back(transmitted_size & 0xFF);
+
+    payload.push_back((tx_crc_ >> 24) & 0xFF);
+    payload.push_back((tx_crc_ >> 16) & 0xFF);
+    payload.push_back((tx_crc_ >> 8) & 0xFF);
+    payload.push_back(tx_crc_ & 0xFF);
+
+    payload.push_back(static_cast<uint8_t>(tx_filename_.size()));
+    payload.insert(payload.end(), tx_filename_.begin(), tx_filename_.end());
+    payload.insert(payload.end(), tx_data_.begin(), tx_data_.end());
     return payload;
 }
 
@@ -524,6 +581,93 @@ bool FileTransferController::processFileData(const Bytes& payload, bool more_dat
         resetRxState();
     }
 
+    return true;
+}
+
+bool FileTransferController::processFileBlock(const Bytes& payload) {
+    if (payload.size() < FILE_BLOCK_FIXED_OVERHEAD) {
+        return true;
+    }
+
+    const uint8_t flags = payload[1];
+    const uint32_t original_size = (static_cast<uint32_t>(payload[2]) << 24) |
+                                   (static_cast<uint32_t>(payload[3]) << 16) |
+                                   (static_cast<uint32_t>(payload[4]) << 8) |
+                                   static_cast<uint32_t>(payload[5]);
+    const uint32_t transmitted_size = (static_cast<uint32_t>(payload[6]) << 24) |
+                                      (static_cast<uint32_t>(payload[7]) << 16) |
+                                      (static_cast<uint32_t>(payload[8]) << 8) |
+                                      static_cast<uint32_t>(payload[9]);
+    const uint32_t expected_crc = (static_cast<uint32_t>(payload[10]) << 24) |
+                                  (static_cast<uint32_t>(payload[11]) << 16) |
+                                  (static_cast<uint32_t>(payload[12]) << 8) |
+                                  static_cast<uint32_t>(payload[13]);
+    const size_t name_len = payload[14];
+    const size_t data_offset = FILE_BLOCK_FIXED_OVERHEAD + name_len;
+    if (data_offset > payload.size() || payload.size() - data_offset != transmitted_size) {
+        LOG_MODEM(ERROR, "FileTransfer: Malformed FILE_BLOCK (name=%zu, tx=%u, payload=%zu)",
+                  name_len, transmitted_size, payload.size());
+        return true;
+    }
+
+    const std::string filename(payload.begin() + FILE_BLOCK_FIXED_OVERHEAD,
+                               payload.begin() + FILE_BLOCK_FIXED_OVERHEAD + name_len);
+    const std::string clean_filename = sanitizeReceivedFilename(filename);
+    const std::string filepath = uniqueReceivePath(rx_dir_, clean_filename);
+    Bytes data(payload.begin() + data_offset, payload.end());
+
+    Bytes final_data;
+    if ((flags & FileFlags::COMPRESSED) != 0) {
+        auto decompressed = Compression::decompress(data, original_size * 2);
+        if (!decompressed) {
+            LOG_MODEM(ERROR, "FileTransfer: FILE_BLOCK decompression failed (%zu bytes)",
+                      data.size());
+            if (on_received_) {
+                on_received_("", false);
+            }
+            return true;
+        }
+        final_data = std::move(*decompressed);
+    } else {
+        final_data = std::move(data);
+    }
+
+    if (final_data.size() != original_size) {
+        LOG_MODEM(ERROR, "FileTransfer: FILE_BLOCK size mismatch (%zu/%u bytes)",
+                  final_data.size(), original_size);
+        if (on_received_) {
+            on_received_("", false);
+        }
+        return true;
+    }
+
+    uint32_t crc = 0xFFFFFFFF;
+    crc = updateCRC32(crc, final_data.data(), final_data.size());
+    crc ^= 0xFFFFFFFF;
+    bool success = (crc == expected_crc);
+
+    if (success) {
+        std::ofstream out(filepath, std::ios::binary);
+        if (out.good()) {
+            out.write(reinterpret_cast<const char*>(final_data.data()), final_data.size());
+            out.close();
+            LOG_MODEM(INFO, "FileTransfer: Received block OK (%zu bytes, crc=%08X) -> %s",
+                      final_data.size(), crc, filepath.c_str());
+        } else {
+            success = false;
+            LOG_MODEM(ERROR, "FileTransfer: Failed to open block output file: %s",
+                      filepath.c_str());
+        }
+    } else {
+        LOG_MODEM(ERROR, "FileTransfer: FILE_BLOCK CRC mismatch (got=%08X expected=%08X)",
+                  crc, expected_crc);
+    }
+
+    state_ = success ? FileTransferState::COMPLETE : FileTransferState::ERROR;
+    if (on_received_) {
+        on_received_(success ? filepath : "", success);
+    }
+    resetRxState();
     return true;
 }
 

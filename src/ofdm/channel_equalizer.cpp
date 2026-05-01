@@ -428,9 +428,10 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
         }
         if (slope_count > 0) {
             lts_phase_slope = std::arg(slope_sum / static_cast<float>(slope_count));
+            timing_offset_samples = -lts_phase_slope * config.fft_size / (2.0f * M_PI);
             LOG_DEMOD(INFO, "LTS phase slope: %.2f°/carrier (timing offset ~%.1f samples)",
                       lts_phase_slope * 180.0f / M_PI,
-                      -lts_phase_slope * config.fft_size / (2.0f * M_PI));
+                      timing_offset_samples);
         }
     }
 

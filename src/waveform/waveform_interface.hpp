@@ -169,6 +169,9 @@ public:
     // Only meaningful for OFDM_CHIRP (uses LTS autocorrelation sign)
     virtual bool wasBurstInterleaved() const { return false; }
 
+    // Last LTS-derived timing offset in samples. Positive means start later.
+    virtual float getLastTimingOffsetSamples() const { return 0.0f; }
+
     // Get constellation symbols for GUI display
     virtual std::vector<std::complex<float>> getConstellationSymbols() const = 0;
 

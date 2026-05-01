@@ -186,11 +186,53 @@ void test_duplicate_filename_in_dotted_receive_directory() {
     std::filesystem::remove_all(root);
 }
 
+void test_single_block_payload_round_trip() {
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() /
+        "ultra_file_transfer_block_test";
+    const std::filesystem::path tx_dir = root / "tx";
+    const std::filesystem::path rx_dir = root / "rx";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(tx_dir);
+    std::filesystem::create_directories(rx_dir);
+
+    const Bytes original = {'b', 'l', 'o', 'c', 'k', 0, 1, 2, 3, 4};
+    const std::filesystem::path src_path = tx_dir / "block.bin";
+    CHECK(writeFile(src_path, original), "write block source file");
+
+    FileTransferController tx;
+    CHECK(tx.startSend(src_path.string()), "start block send");
+    Bytes block = tx.getSingleBlockPayload(1024);
+    CHECK(!block.empty(), "single block payload fits");
+    CHECK(block[0] == static_cast<uint8_t>(PayloadType::FILE_BLOCK),
+          "single block uses FILE_BLOCK type");
+    CHECK(!tx.hasMoreChunks(), "single block consumes tx chunks");
+
+    FileTransferController rx;
+    rx.setReceiveDirectory(rx_dir.string());
+    bool callback_called = false;
+    bool callback_success = false;
+    std::string received_path;
+    rx.setReceivedCallback([&](const std::string& path, bool success) {
+        callback_called = true;
+        callback_success = success;
+        received_path = path;
+    });
+
+    CHECK(rx.processPayload(block, false), "block payload accepted");
+    CHECK(callback_called, "block receiver callback fired");
+    CHECK(callback_success, "block transfer succeeded");
+    CHECK(readFile(received_path) == original, "block received content matches");
+
+    std::filesystem::remove_all(root);
+}
+
 }  // namespace
 
 int main() {
     test_compressed_final_chunk_out_of_order_finalizes();
     test_duplicate_filename_in_dotted_receive_directory();
+    test_single_block_payload_round_trip();
 
     if (tests_failed != 0) {
         std::cout << "FileTransferController: " << (tests_run - tests_failed)
