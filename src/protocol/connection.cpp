@@ -13,10 +13,29 @@ namespace protocol {
 
 namespace {
 constexpr size_t kOFDMFileBlockPayloadLimit = 2300;
+constexpr const char* kOFDMBurstPadCallsign = "ULPAD";
+constexpr uint16_t kOFDMBurstPadSeq = 0xFFFE;
 
 bool shouldUseSingleOFDMFileBlock(float fading_index, float snr_db, CodeRate rate) {
     return connection_policy::isNearAwgnOFDM(fading_index, snr_db) &&
            getCodeRateValue(rate) >= getCodeRateValue(CodeRate::R2_3);
+}
+
+bool shouldPadPartialOFDMFileBurst(WaveformMode mode,
+                                   Modulation modulation,
+                                   CodeRate rate,
+                                   float fading_index,
+                                   float snr_db,
+                                   FileTransferState file_state,
+                                   size_t burst_frames) {
+    if (!isOFDMMode(mode) || file_state != FileTransferState::SENDING) {
+        return false;
+    }
+    return connection_policy::shouldPadHighRateFadingBurst(
+        modulation,
+        rate,
+        connection_policy::isNearAwgnOFDM(fading_index, snr_db),
+        burst_frames);
 }
 }
 
@@ -1045,8 +1064,10 @@ void Connection::enterConnected() {
 
         const auto timing = connection_policy::wideOFDMFrameTiming(
             data_modulation_, data_code_rate_);
+        const bool defer_sack_to_burst_tail =
+            arq_.getWindowSize() > connection_policy::kWideOFDMWindowFrames;
         const auto sack = connection_policy::ofdmSackDelays(
-            arq_.getWindowSize() > connection_policy::kWideOFDMWindowFrames,
+            defer_sack_to_burst_tail,
             arq_.getWindowSize(),
             timing.data_ms);
         arq_.setSackDelay(sack.delay_ms);
@@ -1148,6 +1169,32 @@ void Connection::setTransmitBurstCallback(TransmitBurstCallback cb) {
 
 void Connection::flushBurstBuffer() {
     if (burst_tx_buffer_.empty()) return;
+
+    const size_t real_frame_count = burst_tx_buffer_.size();
+    if (shouldPadPartialOFDMFileBurst(negotiated_mode_,
+                                      data_modulation_,
+                                      data_code_rate_,
+                                      fading_index_,
+                                      measured_snr_db_,
+                                      file_transfer_.getState(),
+                                      real_frame_count)) {
+        const size_t remainder =
+            real_frame_count % connection_policy::kBurstInterleaveGroupFrames;
+        const size_t pad_count =
+            connection_policy::kBurstInterleaveGroupFrames - remainder;
+        auto pad_frame = v2::makeFixedDataFrame(local_call_,
+                                                kOFDMBurstPadCallsign,
+                                                kOFDMBurstPadSeq,
+                                                Bytes{},
+                                                data_code_rate_).serialize();
+        for (size_t i = 0; i < pad_count; ++i) {
+            burst_tx_buffer_.push_back(pad_frame);
+        }
+        LOG_MODEM(INFO,
+                  "Connection: Padded OFDM high-rate file burst %zu -> %zu frames for burst interleaver",
+                  real_frame_count,
+                  burst_tx_buffer_.size());
+    }
 
     if (burst_tx_buffer_.size() == 1 && on_transmit_) {
         // Single frame, no burst needed

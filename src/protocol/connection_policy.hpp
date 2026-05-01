@@ -103,6 +103,20 @@ inline size_t ofdmWindowSize(Modulation mod, CodeRate rate) {
     return ofdmWindowSize(mod, rate, true);
 }
 
+inline bool shouldPadHighRateFadingBurst(Modulation mod,
+                                         CodeRate rate,
+                                         bool near_awgn_ofdm,
+                                         size_t burst_frames) {
+    if (!isSpeculativeHighRateOFDM(mod, rate) || near_awgn_ofdm) {
+        return false;
+    }
+    if (burst_frames <= 1) {
+        return false;
+    }
+
+    return (burst_frames % kBurstInterleaveGroupFrames) != 0;
+}
+
 inline uint32_t ofdmAckBatchSize(bool near_awgn_ofdm) {
     (void)near_awgn_ofdm;
     return 0;
@@ -138,11 +152,11 @@ inline OFDMFrameTiming wideOFDMFrameTiming(Modulation mod, CodeRate rate) {
     return timing;
 }
 
-inline SackDelayProfile ofdmSackDelays(bool near_awgn_ofdm,
+inline SackDelayProfile ofdmSackDelays(bool defer_to_burst_tail,
                                        size_t window_size,
                                        uint32_t data_frame_ms) {
     SackDelayProfile profile;
-    if (near_awgn_ofdm && window_size >= 8) {
+    if (defer_to_burst_tail && window_size >= 8) {
         const size_t deferred_frames = window_size > kBurstInterleaveGroupFrames
             ? window_size - kBurstInterleaveGroupFrames
             : 0;

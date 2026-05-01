@@ -17,6 +17,8 @@ namespace protocol {
 
 namespace {
 
+constexpr float kFixedFrameDefaultMinSumFactor = 0.9375f;
+
 int codeRateCacheIndex(CodeRate rate) {
     switch (rate) {
         case CodeRate::R1_4: return 0;
@@ -46,7 +48,7 @@ LDPCDecoder& fixedFrameDecoderForRate(CodeRate rate) {
     LDPCDecoder& decoder = *entry.decoder;
     decoder.setRate(rate);
     decoder.setMaxIterations(fec::LDPCCodec::getRecommendedIterations(rate));
-    decoder.setMinSumFactor(0.9375f);
+    decoder.setMinSumFactor(kFixedFrameDefaultMinSumFactor);
     return decoder;
 }
 
@@ -1423,6 +1425,11 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
             cw_bits = interleaver->deinterleave(cw_bits);
         }
 
+        // The decoder is cached per thread/rate and retry paths mutate this
+        // factor. Reset before every CW so one marginal CW cannot bias the
+        // next CW in the same fixed frame.
+        decoder.setMinSumFactor(kFixedFrameDefaultMinSumFactor);
+
         // Debug: check LLR statistics for this CW
         float llr_sum = 0, llr_abs_sum = 0;
         for (float llr : cw_bits) {
@@ -1475,7 +1482,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                         LOG_MODEM(INFO, "CW[%d]: RETRY OK (factor=%.4f, iters=%d)", cw, factors[retry], iterations);
                     }
                 }
-                decoder.setMinSumFactor(0.9375f);  // restore default
+                decoder.setMinSumFactor(kFixedFrameDefaultMinSumFactor);  // restore default
             }
 
             // Phase 1: Perturbation with decoder diversity (5 attempts)
@@ -1508,7 +1515,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                         LOG_MODEM(INFO, "CW[%d]: RETRY OK (perturb σ=%.1f f=%.3f, iters=%d)", cw, sigmas1[retry], factors1[retry], iterations);
                     }
                 }
-                decoder.setMinSumFactor(0.875f);
+                decoder.setMinSumFactor(kFixedFrameDefaultMinSumFactor);
             }
             // Phases 2-6 REMOVED (2026-03-15): excessive perturbation caused false
             // positives and decoder backlog. ARQ handles frame loss more efficiently.
@@ -1805,7 +1812,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                         }
                     }
                 }
-                decoder.setMinSumFactor(0.9375f);
+                decoder.setMinSumFactor(kFixedFrameDefaultMinSumFactor);
             }
 
             if (!recovered) {

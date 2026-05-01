@@ -93,6 +93,22 @@ void test_ofdm_profile_selection() {
           "R2/3 should avoid two burst groups on fading channels");
     CHECK(ofdmWindowSize(Modulation::DQPSK, CodeRate::R1_2, false) == kHighThroughputOFDMWindowFrames,
           "R1/2 keeps the high-throughput OFDM window in fading");
+    CHECK(!shouldPadHighRateFadingBurst(Modulation::DQPSK, CodeRate::R2_3, false, 1),
+          "single high-rate fading frame should not be padded");
+    CHECK(shouldPadHighRateFadingBurst(Modulation::DQPSK, CodeRate::R2_3, false, 2),
+          "partial high-rate fading burst should be padded");
+    CHECK(shouldPadHighRateFadingBurst(Modulation::DQPSK, CodeRate::R2_3, false, 7),
+          "short high-rate fading burst should fill the interleaver group");
+    CHECK(!shouldPadHighRateFadingBurst(Modulation::DQPSK, CodeRate::R2_3, false, 8),
+          "full high-rate fading burst should not be padded");
+    CHECK(shouldPadHighRateFadingBurst(Modulation::DQPSK, CodeRate::R2_3, false, 9),
+          "multi-group high-rate fading tail should be padded");
+    CHECK(!shouldPadHighRateFadingBurst(Modulation::DQPSK, CodeRate::R2_3, true, 7),
+          "near-AWGN high-rate burst should not be padded");
+    CHECK(!shouldPadHighRateFadingBurst(Modulation::DQPSK, CodeRate::R1_2, false, 7),
+          "R1/2 fading burst should not use speculative high-rate padding");
+    CHECK(!shouldPadHighRateFadingBurst(Modulation::D8PSK, CodeRate::R2_3, false, 7),
+          "non-DQPSK high-rate burst should not use padding policy");
     CHECK(ofdmAckBatchSize(true) == 0, "near-AWGN ACK batch disabled");
     CHECK(ofdmAckBatchSize(false) == 0, "fading ACK batch sentinel");
 
