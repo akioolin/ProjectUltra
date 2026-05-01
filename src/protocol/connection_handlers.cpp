@@ -190,7 +190,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         connect_ack_frame_ = ack_data;
         connect_ack_retransmit_interval_ms_ =
             connection_policy::connectAckRetransmitDelayMs(
-                negotiated_mode_, rec_mod, rec_rate);
+                negotiated_mode_, rec_mod, rec_rate, data_frame_cw_count_);
         connect_ack_retransmit_ms_ = connect_ack_retransmit_interval_ms_;
         connect_ack_retx_remaining_ = CONNECT_ACK_MAX_RETX;
         LOG_MODEM(INFO, "Connection: CONNECT_ACK rescue retry armed in %.2fs (%d remaining)",

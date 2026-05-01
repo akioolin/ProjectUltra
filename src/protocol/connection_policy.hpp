@@ -22,7 +22,7 @@ inline constexpr uint32_t kNarrowOFDMSymbolSamples = 2240;
 inline constexpr uint32_t kNarrowOFDMCarriers = 21;
 inline constexpr uint32_t kNarrowOFDMPilotSpacing = 10;
 inline constexpr uint32_t kLDPCBitsPerCodeword = 648;
-inline constexpr uint32_t kFixedFrameCodewords = 4;
+inline constexpr uint32_t kFixedFrameCodewords = v2::kDefaultFixedFrameCodewords;
 inline constexpr uint32_t kOFDMBurstAckBatchFrames = 4;
 inline constexpr size_t kWideOFDMWindowFrames = 8;
 inline constexpr size_t kHighThroughputOFDMWindowFrames = 16;
@@ -148,13 +148,16 @@ inline uint32_t wideOFDMSymbolsForCodewords(Modulation mod, CodeRate rate, int c
     return 2 + data_symbols;
 }
 
-inline OFDMFrameTiming wideOFDMFrameTiming(Modulation mod, CodeRate rate) {
+inline OFDMFrameTiming wideOFDMFrameTiming(Modulation mod,
+                                           CodeRate rate,
+                                           int cw_count = v2::kDefaultFixedFrameCodewords) {
+    cw_count = v2::sanitizeFixedFrameCodewords(cw_count);
     constexpr float symbol_ms =
         (1000.0f * static_cast<float>(kWideOFDMSymbolSamples)) /
         static_cast<float>(kOFDMSampleRate);
 
     OFDMFrameTiming timing;
-    timing.data_symbols = wideOFDMSymbolsForCodewords(mod, rate, kFixedFrameCodewords);
+    timing.data_symbols = wideOFDMSymbolsForCodewords(mod, rate, cw_count);
     timing.ack_symbols = wideOFDMSymbolsForCodewords(mod, rate, 1);
     timing.data_ms = static_cast<uint32_t>(timing.data_symbols * symbol_ms + 0.5f);
     timing.ack_ms = static_cast<uint32_t>(timing.ack_symbols * symbol_ms + 0.5f);
@@ -194,8 +197,10 @@ inline uint32_t computeWideOFDMAckTimeoutMs(Modulation mod,
                                             CodeRate rate,
                                             size_t window_size,
                                             uint32_t sack_delay_ms,
-                                            int ack_repeat_count) {
-    const OFDMFrameTiming timing = wideOFDMFrameTiming(mod, rate);
+                                            int ack_repeat_count,
+                                            int cw_count = v2::kDefaultFixedFrameCodewords) {
+    const int sanitized_cw_count = v2::sanitizeFixedFrameCodewords(cw_count);
+    const OFDMFrameTiming timing = wideOFDMFrameTiming(mod, rate, sanitized_cw_count);
 
     const uint32_t ack_copies = static_cast<uint32_t>(std::clamp(ack_repeat_count, 1, 3));
     const uint32_t tx_burst_ms = static_cast<uint32_t>(window_size) * timing.data_ms;
@@ -205,21 +210,22 @@ inline uint32_t computeWideOFDMAckTimeoutMs(Modulation mod,
     const uint32_t decode_jitter_margin_ms = std::max<uint32_t>(700, timing.data_ms / 2)
                                              + audio_chain_rtt_margin_ms;
 
-    uint32_t queued_tail_margin_ms = 0;
-    if (window_size > 4) {
-        queued_tail_margin_ms =
-            static_cast<uint32_t>(window_size - 4) * timing.data_ms +
-            audio_chain_rtt_margin_ms;
-    }
+    // tx_burst_ms already spans every frame in the sender window, and
+    // sack_delay_ms already includes receiver-side burst-tail ACK deferral.
+    const uint32_t timeout_ms = tx_burst_ms + ack_path_ms + decode_jitter_margin_ms;
 
-    const uint32_t timeout_ms = tx_burst_ms + ack_path_ms +
-                                decode_jitter_margin_ms + queued_tail_margin_ms;
-    return std::clamp(timeout_ms, 8000u, 16000u);
+    uint32_t ceiling_ms = 16000;
+    if (sanitized_cw_count > v2::kDefaultFixedFrameCodewords) {
+        ceiling_ms = static_cast<uint32_t>(
+            std::max<uint64_t>(16000ULL, 3ULL * tx_burst_ms));
+    }
+    return std::clamp(timeout_ms, 8000u, ceiling_ms);
 }
 
 inline uint32_t connectAckRetransmitDelayMs(WaveformMode mode,
                                             Modulation mod,
-                                            CodeRate rate) {
+                                            CodeRate rate,
+                                            int cw_count = v2::kDefaultFixedFrameCodewords) {
     if (!isOFDMMode(mode)) {
         return kConnectAckLegacyRetransmitMs;
     }
@@ -229,7 +235,7 @@ inline uint32_t connectAckRetransmitDelayMs(WaveformMode mode,
     // valid DATA frame until the first burst-interleaver group has been
     // collected and deinterleaved. Delay the rescue retransmit until after that
     // success path has had time to clear the cached ACK.
-    const OFDMFrameTiming timing = wideOFDMFrameTiming(mod, rate);
+    const OFDMFrameTiming timing = wideOFDMFrameTiming(mod, rate, cw_count);
     const uint64_t first_group_ms =
         static_cast<uint64_t>(timing.data_ms) * kBurstInterleaveGroupFrames;
     const uint64_t delay_ms =
@@ -239,7 +245,9 @@ inline uint32_t connectAckRetransmitDelayMs(WaveformMode mode,
         std::clamp<uint64_t>(delay_ms, kConnectAckLegacyRetransmitMs, 12000ULL));
 }
 
-inline OFDMFrameTiming narrowOFDMFrameTiming(Modulation mod) {
+inline OFDMFrameTiming narrowOFDMFrameTiming(Modulation mod,
+                                             int cw_count = v2::kDefaultFixedFrameCodewords) {
+    cw_count = v2::sanitizeFixedFrameCodewords(cw_count);
     constexpr float symbol_ms =
         (1000.0f * static_cast<float>(kNarrowOFDMSymbolSamples)) /
         static_cast<float>(kOFDMSampleRate);
@@ -248,7 +256,7 @@ inline OFDMFrameTiming narrowOFDMFrameTiming(Modulation mod) {
         kNarrowOFDMCarriers, true, static_cast<int>(kNarrowOFDMPilotSpacing), mod);
 
     const uint32_t data_cw_symbols =
-        (kFixedFrameCodewords * kLDPCBitsPerCodeword + bits_per_symbol - 1) / bits_per_symbol;
+        (static_cast<uint32_t>(cw_count) * kLDPCBitsPerCodeword + bits_per_symbol - 1) / bits_per_symbol;
     const uint32_t ack_cw_symbols =
         (kLDPCBitsPerCodeword + bits_per_symbol - 1) / bits_per_symbol;
 
@@ -260,8 +268,9 @@ inline OFDMFrameTiming narrowOFDMFrameTiming(Modulation mod) {
     return timing;
 }
 
-inline uint32_t computeNarrowOFDMAckTimeoutMs(Modulation mod) {
-    const OFDMFrameTiming timing = narrowOFDMFrameTiming(mod);
+inline uint32_t computeNarrowOFDMAckTimeoutMs(Modulation mod,
+                                              int cw_count = v2::kDefaultFixedFrameCodewords) {
+    const OFDMFrameTiming timing = narrowOFDMFrameTiming(mod, cw_count);
     const uint32_t timeout_ms = timing.data_ms + 2 * timing.ack_ms + 120 +
                                 std::max<uint32_t>(700, timing.data_ms / 2);
     return std::clamp(timeout_ms, 4500u, 14000u);

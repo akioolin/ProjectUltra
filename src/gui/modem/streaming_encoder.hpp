@@ -126,6 +126,11 @@ public:
     // Frame interleaving is always enabled for OFDM
     bool getFrameInterleave() const { return use_frame_interleave_; }
 
+    void setFixedFrameCodewords(int cw_count) {
+        fixed_frame_codewords_ = v2::sanitizeFixedFrameCodewords(cw_count);
+    }
+    int getFixedFrameCodewords() const { return fixed_frame_codewords_; }
+
     // Burst-level long interleaver (spreads CW bytes across N-frame groups)
     void setBurstInterleave(bool enable) { use_burst_interleave_ = enable; }
     bool getBurstInterleave() const { return use_burst_interleave_; }
@@ -171,6 +176,7 @@ private:
     std::unique_ptr<ChannelInterleaver> channel_interleaver_;
     bool use_channel_interleave_ = true;
     bool use_frame_interleave_ = true;     // Always on for OFDM
+    int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
     bool use_burst_interleave_ = false;    // Burst-level long interleaver (N-frame groups)
     int burst_group_size_ = 8;
 

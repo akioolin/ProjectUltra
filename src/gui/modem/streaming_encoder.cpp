@@ -289,7 +289,8 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
                                      encoded_frames.begin() + base + BURST_GROUP_SIZE);
 
             // Burst-interleave the coded bytes
-            auto interleaved = fec::BurstInterleaver::interleave(group);
+            auto interleaved = fec::BurstInterleaver::interleave(
+                group, fixed_frame_codewords_);
 
             // Replace in-place
             for (int i = 0; i < BURST_GROUP_SIZE; i++) {
@@ -603,7 +604,7 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
     // OFDM: Check if this is a control frame or data/connect frame
     // Control frames (ACK, NACK, MODE_CHANGE, DISCONNECT, etc.) are 20 bytes = 1 CW, no interleaving
     // Connect handshake frames are always MC-DPSK and do not reach this path.
-    // Data frames use 4-CW fixed frame encoding with frame interleaving
+    // Data frames use fixed-CW frame encoding with frame interleaving
     bool is_variable_cw_frame = false;
     if (tx_data.size() >= 3) {
         uint8_t frame_type = tx_data[2];
@@ -611,7 +612,7 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
         if (v2::isControlFrame(ft)) {
             is_variable_cw_frame = true;
         }
-        // Non-control frames go through encodeFixedFrame() for 4-CW interleaving
+        // Non-control frames go through encodeFixedFrame() for fixed-CW interleaving
     }
 
     if (is_variable_cw_frame) {
@@ -656,11 +657,12 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
         return encoded;
     }
 
-    // Large OFDM block frames explicitly advertise a non-4-CW size and use
-    // variable-CW encoding. The fixed 4-CW path remains the default for normal
+    // Large OFDM block frames explicitly advertise a size beyond the fixed
+    // aggregation range and use
+    // variable-CW encoding. The fixed-frame path remains the default for normal
     // ARQ chunks so they keep frame-level interleaving.
     if (tx_data.size() >= v2::DataFrame::HEADER_SIZE &&
-        tx_data[12] != v2::FIXED_FRAME_CODEWORDS) {
+        tx_data[12] > v2::kMaxFixedFrameCodewords) {
         auto cws = v2::encodeFrameWithLDPC(tx_data, code_rate_);
         Bytes encoded;
         for (const auto& cw : cws) {
@@ -672,17 +674,25 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
         return encoded;
     }
 
-    // Data frames: 4-CW fixed frame encoding with frame interleaving
+    int frame_cw_count = fixed_frame_codewords_;
+    if (tx_data.size() >= v2::DataFrame::HEADER_SIZE &&
+        tx_data[12] >= v2::kMinFixedFrameCodewords &&
+        tx_data[12] <= v2::kMaxFixedFrameCodewords) {
+        frame_cw_count = tx_data[12];
+    }
+
+    // Data frames: fixed-CW frame encoding with frame interleaving
     // Channel interleaving is controlled by use_channel_interleave_ flag
     size_t bps = static_cast<size_t>(ofdm_link_adaptation::bitsPerOFDMSymbol(
         static_cast<int>(ofdm_config_.num_carriers),
         ofdm_config_.use_pilots,
         static_cast<int>(ofdm_config_.pilot_spacing),
         modulation_));
-    Bytes encoded = v2::encodeFixedFrame(tx_data, code_rate_, use_channel_interleave_, bps);
+    Bytes encoded = v2::encodeFixedFrame(tx_data, code_rate_, frame_cw_count,
+                                         use_channel_interleave_, bps);
 
-    LOG_MODEM(DEBUG, "[%s] OFDM data: %zu bytes -> 4 CWs (%zu coded, frame_interleave=%s, channel_interleave=%s)",
-              log_prefix_.c_str(), tx_data.size(), encoded.size(),
+    LOG_MODEM(DEBUG, "[%s] OFDM data: %zu bytes -> %d CWs (%zu coded, frame_interleave=%s, channel_interleave=%s)",
+              log_prefix_.c_str(), tx_data.size(), frame_cw_count, encoded.size(),
               use_frame_interleave_ ? "yes" : "no",
               use_channel_interleave_ ? "yes" : "no");
 

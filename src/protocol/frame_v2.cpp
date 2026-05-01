@@ -804,8 +804,8 @@ Bytes ConnectFrame::serialize() const {
     out.push_back((dst_hash >> 8) & 0xFF);
     out.push_back(dst_hash & 0xFF);
 
-    // Total codewords (1 byte) - Always 4 for frame interleaving
-    out.push_back(FIXED_FRAME_CODEWORDS);
+    // Total codewords (1 byte) - default fixed-frame count for compatibility
+    out.push_back(kDefaultFixedFrameCodewords);
 
     // Payload length (2 bytes)
     out.push_back((PAYLOAD_SIZE >> 8) & 0xFF);
@@ -1104,10 +1104,12 @@ Bytes CodewordStatus::reassemble() const {
         expected_size = DataFrame::HEADER_SIZE + info.payload_len + DataFrame::CRC_SIZE;
     }
 
-    // Fixed OFDM frames pack raw info bytes contiguously across all four CWs.
+    // Fixed OFDM frames pack raw info bytes contiguously across all fixed CWs.
     // Do not run them through the marker-aware variable-CW reassembler: a real
     // payload byte of 0xD5 at a CW boundary would be mistaken for a marker.
-    if (!info.is_control && fixed_frame && info.total_cw == FIXED_FRAME_CODEWORDS) {
+    if (!info.is_control && fixed_frame &&
+        info.total_cw >= kMinFixedFrameCodewords &&
+        info.total_cw <= kMaxFixedFrameCodewords) {
         return reassembleFixedCodewords(data, expected_size);
     }
 
@@ -1332,16 +1334,18 @@ CodewordInfo identifyCodeword(const Bytes& cw_data) {
 }
 
 // ============================================================================
-// Fixed 4-Codeword Frame Implementation
+// Fixed-Codeword Frame Implementation
 // ============================================================================
 
-Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, bool use_channel_interleave, size_t bits_per_symbol) {
+Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, int cw_count,
+                       bool use_channel_interleave, size_t bits_per_symbol) {
     using namespace fec;
 
+    cw_count = sanitizeFixedFrameCodewords(cw_count);
     size_t bytes_per_cw = getBytesPerCodeword(rate);
-    size_t total_info_bytes = FIXED_FRAME_CODEWORDS * bytes_per_cw;
+    size_t total_info_bytes = static_cast<size_t>(cw_count) * bytes_per_cw;
 
-    // Pad frame data to exactly 4 CWs worth of info bytes
+    // Pad frame data to exactly N CWs worth of info bytes
     Bytes padded = frame_data;
     if (padded.size() < total_info_bytes) {
         padded.resize(total_info_bytes, 0);
@@ -1349,10 +1353,10 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, bool use_channel_
         padded.resize(total_info_bytes);  // Truncate (caller should have chunked)
     }
 
-    // Split into 4 info chunks and LDPC encode each
+    // Split into fixed-size info chunks and LDPC encode each
     LDPCEncoder encoder(rate);
     std::vector<std::vector<uint8_t>> coded_codewords;
-    coded_codewords.reserve(FIXED_FRAME_CODEWORDS);
+    coded_codewords.reserve(static_cast<size_t>(cw_count));
 
     // Create channel interleaver if enabled
     std::unique_ptr<ChannelInterleaver> interleaver;
@@ -1360,7 +1364,7 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, bool use_channel_
         interleaver = std::make_unique<ChannelInterleaver>(bits_per_symbol, LDPC_CODEWORD_BITS);
     }
 
-    for (int cw = 0; cw < FIXED_FRAME_CODEWORDS; ++cw) {
+    for (int cw = 0; cw < cw_count; ++cw) {
         // Extract info bytes for this CW
         Bytes info_chunk(padded.begin() + cw * bytes_per_cw,
                          padded.begin() + (cw + 1) * bytes_per_cw);
@@ -1377,7 +1381,16 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, bool use_channel_
     }
 
     // Apply frame-level interleaving
-    return FrameInterleaver::interleave(coded_codewords);
+    return FrameInterleaver::interleave(coded_codewords, cw_count);
+}
+
+Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, bool use_channel_interleave, size_t bits_per_symbol) {
+    return encodeFixedFrame(frame_data, rate, kDefaultFixedFrameCodewords,
+                            use_channel_interleave, bits_per_symbol);
+}
+
+Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, int cw_count) {
+    return encodeFixedFrame(frame_data, rate, cw_count, false);
 }
 
 // Default: no channel interleaving (backward compatible)
@@ -1385,23 +1398,27 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate) {
     return encodeFixedFrame(frame_data, rate, false);
 }
 
-CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate, bool use_channel_deinterleave, size_t bits_per_symbol) {
+CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate, int cw_count,
+                                bool use_channel_deinterleave, size_t bits_per_symbol) {
     using namespace fec;
     ultra::timing::ScopedTimer _profile_(
         ultra::timing::globalDecoderProfile().decode_fixed_frame_total);
 
+    cw_count = sanitizeFixedFrameCodewords(cw_count);
+    const size_t total_frame_bits = static_cast<size_t>(FrameInterleaver::totalFrameBits(cw_count));
+
     CodewordStatus status;
     status.fixed_frame = true;
-    status.decoded.resize(FIXED_FRAME_CODEWORDS, false);
-    status.data.resize(FIXED_FRAME_CODEWORDS);
+    status.decoded.resize(static_cast<size_t>(cw_count), false);
+    status.data.resize(static_cast<size_t>(cw_count));
 
     // Check we have enough soft bits
-    if (interleaved_soft.size() < FrameInterleaver::TOTAL_FRAME_BITS) {
+    if (interleaved_soft.size() < total_frame_bits) {
         return status;  // All failed - not enough data
     }
 
     // Deinterleave to restore original CW order (frame-level)
-    auto cw_soft_bits = FrameInterleaver::deinterleave(interleaved_soft);
+    auto cw_soft_bits = FrameInterleaver::deinterleave(interleaved_soft, cw_count);
 
     // Create channel interleaver for deinterleaving if enabled
     std::unique_ptr<ChannelInterleaver> interleaver;
@@ -1417,7 +1434,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
 
     int perturbation_cw_count = 0;  // How many CWs needed perturbation retry
 
-    for (int cw = 0; cw < FIXED_FRAME_CODEWORDS; ++cw) {
+    for (int cw = 0; cw < cw_count; ++cw) {
         auto cw_bits = cw_soft_bits[cw];
 
         // Apply channel deinterleaving if enabled
@@ -1565,7 +1582,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
             if (perturbation_cw_count > 0) {
                 LOG_MODEM(WARN, "LDPC false positive: %d CWs used perturbation, skipping recovery",
                           perturbation_cw_count);
-                for (int cw = 0; cw < FIXED_FRAME_CODEWORDS; ++cw) {
+                for (int cw = 0; cw < cw_count; ++cw) {
                     status.decoded[cw] = false;
                 }
                 return status;
@@ -1663,7 +1680,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                                 int bit = p % 8;
                                 int cw_idx = static_cast<int>(frame_byte / bytes_per_cw);
                                 size_t cw_byte = frame_byte % bytes_per_cw;
-                                if (cw_idx < FIXED_FRAME_CODEWORDS) {
+                                if (cw_idx < cw_count) {
                                     status.data[cw_idx][cw_byte] ^= (1 << bit);
                                     LOG_MODEM(INFO, "CW[%d]: FALSE POSITIVE RECOVERED (1-bit flip frame byte %zu bit %d)",
                                               cw_idx, frame_byte, bit);
@@ -1681,7 +1698,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                                     int actual_bit = bit % 8;
                                     int cw_idx = static_cast<int>(frame_byte / bytes_per_cw);
                                     size_t cw_byte = frame_byte % bytes_per_cw;
-                                    if (cw_idx < FIXED_FRAME_CODEWORDS) {
+                                    if (cw_idx < cw_count) {
                                         status.data[cw_idx][cw_byte] ^= (1 << actual_bit);
                                         LOG_MODEM(INFO, "CW[%d]: FALSE POSITIVE RECOVERED (CRC bit %d)", cw_idx, bit);
                                         recovered = true;
@@ -1697,7 +1714,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                             size_t fb = p / 8;
                             int cw = static_cast<int>(fb / bytes_per_cw);
                             size_t cb = fb % bytes_per_cw;
-                            if (cw < FIXED_FRAME_CODEWORDS)
+                            if (cw < cw_count)
                                 status.data[cw][cb] ^= (1 << (p % 8));
                         };
 
@@ -1716,7 +1733,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                         struct SuspectBit { size_t crc_bit; float abs_llr; };
                         std::vector<SuspectBit> suspects;
 
-                        for (int c = 0; c < FIXED_FRAME_CODEWORDS; ++c) {
+                        for (int c = 0; c < cw_count; ++c) {
                             auto soft = cw_soft_bits[c];
                             if (use_channel_deinterleave && interleaver) {
                                 soft = interleaver->deinterleave(soft);
@@ -1782,7 +1799,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
             if (!recovered) {
                 static constexpr float recovery_factors[] = {0.75f, 0.625f, 0.5f, 0.875f};
                 for (int attempt = 0; attempt < 4 && !recovered; ++attempt) {
-                    for (int cw = 0; cw < FIXED_FRAME_CODEWORDS && !recovered; ++cw) {
+                    for (int cw = 0; cw < cw_count && !recovered; ++cw) {
                         auto cw_bits = cw_soft_bits[cw];
                         if (use_channel_deinterleave && interleaver) {
                             cw_bits = interleaver->deinterleave(cw_bits);
@@ -1817,7 +1834,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
 
             if (!recovered) {
                 LOG_MODEM(WARN, "LDPC false positive: recovery FAILED, marking as decode failure");
-                for (int cw = 0; cw < FIXED_FRAME_CODEWORDS; ++cw) {
+                for (int cw = 0; cw < cw_count; ++cw) {
                     status.decoded[cw] = false;
                 }
             }
@@ -1827,14 +1844,26 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
     return status;
 }
 
+CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate,
+                                bool use_channel_deinterleave, size_t bits_per_symbol) {
+    return decodeFixedFrame(interleaved_soft, rate, kDefaultFixedFrameCodewords,
+                            use_channel_deinterleave, bits_per_symbol);
+}
+
+CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate, int cw_count) {
+    return decodeFixedFrame(interleaved_soft, rate, cw_count, false);
+}
+
 // Default: no channel deinterleaving (backward compatible)
 CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate) {
     return decodeFixedFrame(interleaved_soft, rate, false);
 }
 
 DataFrame makeFixedDataFrame(const std::string& src, const std::string& dst,
-                              uint16_t seq, const Bytes& payload, CodeRate rate) {
-    size_t capacity = getFixedFramePayloadCapacity(rate);
+                              uint16_t seq, const Bytes& payload, CodeRate rate,
+                              int cw_count) {
+    cw_count = sanitizeFixedFrameCodewords(cw_count);
+    size_t capacity = getFixedFramePayloadCapacity(rate, cw_count);
 
     // Truncate or use as-is
     Bytes actual_payload = payload;
@@ -1842,7 +1871,7 @@ DataFrame makeFixedDataFrame(const std::string& src, const std::string& dst,
         actual_payload.resize(capacity);
     }
 
-    // Create frame with explicit total_cw = 4
+    // Create frame with explicit fixed-frame total_cw
     DataFrame frame;
     frame.type = FrameType::DATA;
     frame.flags = Flags::VERSION_V2;
@@ -1851,7 +1880,7 @@ DataFrame makeFixedDataFrame(const std::string& src, const std::string& dst,
     frame.dst_hash = hashCallsign(dst);
     frame.payload = actual_payload;
     frame.payload_len = static_cast<uint16_t>(actual_payload.size());
-    frame.total_cw = FIXED_FRAME_CODEWORDS;  // Always 4
+    frame.total_cw = static_cast<uint8_t>(cw_count);
 
     return frame;
 }

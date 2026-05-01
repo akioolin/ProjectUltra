@@ -10,6 +10,105 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-01: Adaptive CWs-per-frame aggregation — +15-22% throughput
+
+**What was broken:**
+Fixed-frame data carried exactly 4 LDPC codewords. Per-frame ACK
+overhead capped throughput at ~1280 bps for 5 KB R1/2 transfers
+across all SNR/fading conditions where retx≈0. Commercial HF modems
+amortize over larger aggregates (e.g. 802.11n A-MPDU). Codex review
+of throughput plan recommended adaptive CWs-per-frame as round 1
+(vs blind switch to 8) — measure 4/6/8 across channels.
+
+Three sub-bugs surfaced during the work:
+1. Solo-frame RX path used stale CW count — every solo frame retx'd
+   once before the receiver could decode.
+2. ACK timeout formula clamped at 16 s. CW=6 needs ~24 s, CW=8 ~31 s.
+   With clamp, A timed out before B could SACK, all frames retx'd.
+3. `queued_tail_margin_ms` in the timeout formula double-counted
+   `tx_burst_ms` — added an extra `(window-4) * data_ms` of margin.
+
+**What was changed:**
+Round 1 — variable CWs per fixed data frame (default 4, selectable
+1–8):
+- `src/protocol/frame_v2.{cpp,hpp}` — `FIXED_FRAME_CODEWORDS` lifted
+  from constexpr to a runtime parameter. `getFixedFramePayloadCapacity()`
+  + `makeFixedDataFrame()` + `decodeFixedFrame()` now take a
+  `cw_count`. Receiver validation relaxed from `== 4` to
+  `1..kMaxFixedFrameCodewords`. The wire format already carried
+  `TOTAL_CW` in the header.
+- `src/fec/{frame,burst}_interleaver.{cpp,hpp}` — interleavers
+  parametric on CW count.
+- `src/protocol/selective_repeat_arq.{cpp,hpp}` — TXSlot tracks
+  CW count; `sendFixedDataWithFlags()` accepts it.
+- `src/protocol/connection.{cpp,hpp}` — `data_frame_cw_count_`
+  member + `setForcedFrameCodewords()` setter, propagated through
+  `applyDataMode()`.
+- `src/protocol/connection_policy.hpp` — `wideOFDMFrameTiming()`
+  scales `data_ms` with CW count.
+- `src/gui/modem/streaming_{encoder,decoder}.{cpp,hpp}` — encoder
+  + decoder pick up the configured count.
+- `tools/cli_simulator.cpp` — `--cw-count <N>` CLI flag.
+
+Round 1.5 — fix solo-frame RX path:
+- `src/gui/modem/streaming_decoder.cpp` — RX peek-and-probe now
+  reads `TOTAL_CW` from the decoded CW0 header and re-issues
+  `decodeFixedFrame()` with the header-derived count if it
+  differs from the initially-tried count. Frame interleaver gate
+  also sized by header count.
+
+Round 1.6 — ACK timeout formula:
+- `src/protocol/connection_policy.hpp` `computeWideOFDMAckTimeoutMs()`:
+  removed the `queued_tail_margin_ms` double-count; clamp ceiling
+  is now `max(16000u, 3 * tx_burst_ms)` for `cw_count > 4`, kept
+  at strict 16 s for default 4-CW behavior.
+
+**How it's properly fixed:**
+- The wire format already supported variable counts (TOTAL_CW byte
+  in the header). The work was uniformly threading `cw_count`
+  through every encode/decode/interleave site.
+- Receiver header-driven retry handles edge cases where the
+  initial guess was wrong (stale config, mode change races).
+- The expanded ACK timeout means SACK-round-trip airtime fits
+  within the timeout budget for CW=6/8 windows.
+
+**Test verification:**
+- `cmake --build build -j4 && ctest --test-dir build --output-on-failure`
+  → 30/30 pass, plus `FrameV2: 29/29` (added 12 roundtrips for
+  `4/6/8 CW × 4 rates`) and `ConnectionPolicy: 74/74` (added
+  CW-count-scaling tests for the timeout formula).
+- 9-cell hardware sweep (3 channels × 3 CW counts × forced R1/2,
+  Mac↔Pi cable + `--inject-channel`):
+
+  | Channel | CW=4 | CW=6 | CW=8 |
+  |---|---|---|---|
+  | AWGN20 | 1286 (0r) | **1476** (0r) | **1477** (0r) |
+  | GOOD15 | 1280 (0r) | **1477** (0r) | 713 (1r) ⚠ |
+  | MOD15 | 1274 (0r) | **1477** (0r) | **1469** (0r) |
+
+- 50 KB GOOD15 CW=6: **1560 bps**, 0 retx, 100% success — confirms
+  the gain scales modestly with file size.
+- Pre-fix CW=6/8 sweep showed 25/25 retx on AWGN/Good/Moderate
+  (channel-independent, identical numbers — proved structural bug).
+  Logs: `/tmp/ultra_hw_20260501_185153` etc.
+
+**Adopt CW=6 as default OFDM data-frame size for OFDM_CHIRP.** It's a
++15-22% throughput win, channel-robust (0 retx across AWGN/Good/Moderate),
+and ctest green. CW=8 still has a Good-fading edge case (one bad cell
+showed 1 retx + 30 s recovery) — not yet recommended for default.
+
+**Known limitations:**
+- CW=8 on Good fading: long frame TX (~1.2 s) at 0.1 Hz Doppler can
+  span a coherence dip; one fade ≈ 30 s recovery. Don't ship CW=8
+  default until per-CW partial recovery (round 2a) lands.
+- The 1477 bps "ceiling" on 5 KB R1/2 CW=6 is bounded by ARQ
+  inter-burst SACK round-trip gap, not channel quality. Larger
+  files do better (50 KB → 1560 bps).
+- Default for now stays at CW=4 to avoid regressing existing tests
+  + workflows; opt-in via `--cw-count 6` until promoted.
+
+---
+
 ## 2026-05-01: Adaptive code-rate selection — full end-to-end working
 
 **What was broken:**

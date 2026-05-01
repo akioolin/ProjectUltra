@@ -547,6 +547,66 @@ void test_fixed_frame_reassemble_preserves_marker_boundary_byte() {
     }
 }
 
+void test_fixed_frame_variable_cw_roundtrip_per_rate() {
+    TEST("fixed frame 4/6/8 CW roundtrip per rate") {
+        const CodeRate rates[] = {
+            CodeRate::R1_4,
+            CodeRate::R1_2,
+            CodeRate::R2_3,
+            CodeRate::R3_4,
+        };
+        const int cw_counts[] = {4, 6, 8};
+
+        for (CodeRate rate : rates) {
+            const size_t bytes_per_cw = getBytesPerCodeword(rate);
+            for (int cw_count : cw_counts) {
+                const size_t capacity = getFixedFramePayloadCapacity(rate, cw_count);
+                Bytes payload(capacity);
+                for (size_t i = 0; i < payload.size(); ++i) {
+                    payload[i] = static_cast<uint8_t>((i * 37 + cw_count) & 0xFF);
+                }
+
+                auto frame = makeFixedDataFrame("VA2MVR", "W1AW",
+                                                static_cast<uint16_t>(100 + cw_count),
+                                                payload, rate, cw_count);
+                assert(frame.total_cw == cw_count);
+                assert(frame.payload_len == capacity);
+
+                auto serialized = frame.serialize();
+                assert(serialized[12] == cw_count);
+                assert(serialized.size() == static_cast<size_t>(cw_count) * bytes_per_cw);
+
+                auto header = parseHeader(serialized);
+                assert(header.valid);
+                assert(header.total_cw == cw_count);
+
+                auto encoded = encodeFixedFrame(serialized, rate, cw_count, false);
+                assert(encoded.size() == static_cast<size_t>(cw_count) * LDPC_CODEWORD_BYTES);
+
+                auto soft_bits = bytesToSoftBits(encoded);
+                assert(soft_bits.size() == static_cast<size_t>(cw_count) * LDPC_CODEWORD_BITS);
+
+                auto status = decodeFixedFrame(soft_bits, rate, cw_count, false);
+                assert(status.fixed_frame);
+                assert(status.decoded.size() == static_cast<size_t>(cw_count));
+                assert(status.allSuccess());
+
+                auto reassembled = status.reassemble();
+                assert(reassembled == serialized);
+
+                auto parsed = DataFrame::deserialize(reassembled);
+                assert(parsed.has_value());
+                assert(parsed->total_cw == cw_count);
+                assert(parsed->payload == payload);
+            }
+        }
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
 void test_codeword_status() {
     TEST("codeword status tracking") {
         CodewordStatus status;
@@ -1050,6 +1110,7 @@ int main() {
     test_nack_frame();
     test_fixed_frame_helpers();
     test_fixed_frame_reassemble_preserves_marker_boundary_byte();
+    test_fixed_frame_variable_cw_roundtrip_per_rate();
     test_codeword_status();
     test_frame_type_helpers();
     test_large_text_message();

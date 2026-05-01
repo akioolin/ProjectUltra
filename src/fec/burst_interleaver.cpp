@@ -1,17 +1,31 @@
 #include "burst_interleaver.hpp"
 #include <cassert>
+#include <algorithm>
 #include <stdexcept>
 
 namespace ultra {
 namespace fec {
 
+int BurstInterleaver::sanitizeCodewordCount(int codeword_count) {
+    return std::clamp(codeword_count, 1, 8);
+}
+
+int BurstInterleaver::bytesPerFrame(int codeword_count) {
+    return sanitizeCodewordCount(codeword_count) * CODEWORD_BYTES;
+}
+
+int BurstInterleaver::bitsPerFrame(int codeword_count) {
+    return sanitizeCodewordCount(codeword_count) * CODEWORD_BITS;
+}
+
 std::vector<std::vector<uint8_t>> BurstInterleaver::interleave(
-    const std::vector<std::vector<uint8_t>>& logical_frames)
+    const std::vector<std::vector<uint8_t>>& logical_frames,
+    int codeword_count)
 {
     const int N = static_cast<int>(logical_frames.size());
     if (N < 2) return logical_frames;  // Nothing to interleave
 
-    const int B = BYTES_PER_FRAME;
+    const int B = bytesPerFrame(codeword_count);
 
     // Validate input sizes
     for (int f = 0; f < N; f++) {
@@ -36,14 +50,21 @@ std::vector<std::vector<uint8_t>> BurstInterleaver::interleave(
     return physical;
 }
 
+std::vector<std::vector<uint8_t>> BurstInterleaver::interleave(
+    const std::vector<std::vector<uint8_t>>& logical_frames)
+{
+    return interleave(logical_frames, DEFAULT_CODEWORDS_PER_FRAME);
+}
+
 std::vector<std::vector<float>> BurstInterleaver::deinterleave(
-    const std::vector<std::vector<float>>& physical_soft)
+    const std::vector<std::vector<float>>& physical_soft,
+    int codeword_count)
 {
     const int N = static_cast<int>(physical_soft.size());
     if (N < 2) return physical_soft;  // Nothing to deinterleave
 
-    const int B = BYTES_PER_FRAME;
-    const int BITS = BITS_PER_FRAME;
+    const int B = bytesPerFrame(codeword_count);
+    const int BITS = bitsPerFrame(codeword_count);
 
     // Validate input sizes
     for (int pf = 0; pf < N; pf++) {
@@ -75,6 +96,12 @@ std::vector<std::vector<float>> BurstInterleaver::deinterleave(
     }
 
     return logical;
+}
+
+std::vector<std::vector<float>> BurstInterleaver::deinterleave(
+    const std::vector<std::vector<float>>& physical_soft)
+{
+    return deinterleave(physical_soft, DEFAULT_CODEWORDS_PER_FRAME);
 }
 
 }  // namespace fec

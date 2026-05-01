@@ -20,8 +20,8 @@
 #include "gui/startup_trace.hpp"
 #include "waveform/ofdm_cox_waveform.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
-#include "fec/frame_interleaver.hpp"  // Frame-level interleaving for 4-CW frames
-#include "fec/burst_interleaver.hpp"  // Burst-level long interleaver (4-frame groups)
+#include "fec/frame_interleaver.hpp"  // Frame-level interleaving for fixed-CW frames
+#include "fec/burst_interleaver.hpp"  // Burst-level long interleaver
 #include "ultra/fec.hpp"              // LDPCDecoder for robust single-CW decode
 #include "fec/ldpc_codec.hpp"         // getRecommendedIterations
 #include "ultra/logging.hpp"
@@ -43,6 +43,11 @@ namespace frame_policy = streaming_frame_policy;
 namespace signal_policy = streaming_signal_policy;
 
 namespace {
+
+bool isFixedFrameCwCount(int cw_count) {
+    return cw_count >= v2::kMinFixedFrameCodewords &&
+           cw_count <= v2::kMaxFixedFrameCodewords;
+}
 
 // Return a conservative 1-CW control-frame sample requirement for connected OFDM.
 // If data profile is high-order, the robust control profile (DQPSK R1/4) may need
@@ -534,7 +539,7 @@ void StreamingDecoder::searchForSync() {
         // Do not let the backtrack window re-enter audio that a previous decode
         // already consumed. On sustained OFDM ACK traffic, searching the tail of a
         // just-decoded 1-CW control frame can find false LTS-like peaks; those
-        // false locks then escalate into expensive 4-CW LDPC attempts and delay
+        // false locks then escalate into expensive fixed-frame LDPC attempts and delay
         // real ACKs long enough to trigger ARQ retransmission storms.
         if (search_floor_abs_valid_) {
             const size_t oldest_abs = (total_fed_ > MAX_BUFFER_SAMPLES)
@@ -833,7 +838,7 @@ void StreamingDecoder::checkIfReadyToDecode() {
         ? getOFDMControlFrameSamples(waveform_.get(), current_modulation_, code_rate_)
         : 0;
     const size_t full_frame_samples = (is_ofdm_here && connected_)
-        ? static_cast<size_t>(waveform_->getMinSamplesForFrame())
+        ? static_cast<size_t>(waveform_->getMinSamplesForCWCount(fixed_frame_codewords_))
         : 0;
     const size_t control_frame_samples =
         static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
@@ -866,7 +871,7 @@ void StreamingDecoder::checkIfReadyToDecode() {
 
 // Observability counters for robust decode paths (check via debugger or periodic log)
 static std::atomic<int> g_robust_retry_hits{0};   // CW0 peek: retry succeeded after initial fail
-static std::atomic<int> g_salvage_hits{0};         // 1-CW control salvaged from 4-CW path
+static std::atomic<int> g_salvage_hits{0};         // 1-CW control salvaged from fixed-frame path
 
 static bool hasInvalidOFDMTraining(IWaveform* waveform, bool is_ofdm, bool connected,
                                    float& lts_signal_power, float& lts_channel_mag) {
@@ -983,7 +988,7 @@ void StreamingDecoder::decodeCurrentFrame() {
     // Determine how many samples to copy from buffer
     // Strategy depends on mode and state:
     // - pending_total_cw_ > 0: exact size from prior CW0 peek
-    // - Connected OFDM, first pass: full 4-CW buffer (most frames are data, frame-interleaved)
+    // - Connected OFDM, first pass: control-sized peek, then configured fixed-CW data buffer
     // - MC-DPSK: 1-CW for peek (MC-DPSK getMinSamplesForFrame() == 1 CW by design)
     // - Disconnected: full frame (always MC-DPSK for handshake)
     const bool burst_latched = use_burst_interleave_ && waveform_ && waveform_->wasBurstInterleaved();
@@ -994,7 +999,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         ? getOFDMControlFrameSamples(waveform_.get(), current_modulation_, code_rate_)
         : 0;
     const size_t full_frame_samples = (is_ofdm && connected_)
-        ? static_cast<size_t>(waveform_->getMinSamplesForFrame())
+        ? static_cast<size_t>(waveform_->getMinSamplesForCWCount(fixed_frame_codewords_))
         : 0;
     const size_t control_frame_samples =
         static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
@@ -1384,7 +1389,8 @@ void StreamingDecoder::decodeCurrentFrame() {
         // Initialize accumulation state with first frame's soft bits
         burst_soft_buffer_.clear();
         burst_soft_buffer_.push_back(std::move(soft_bits));
-        burst_min_block_ = static_cast<size_t>(waveform_->getMinSamplesForFrame());
+        burst_min_block_ = static_cast<size_t>(
+            waveform_->getMinSamplesForCWCount(fixed_frame_codewords_));
         burst_next_pos_ = (sync_position_ + frame_len) % MAX_BUFFER_SAMPLES;
         burst_snr_ = sync_snr_;
         burst_cfo_ = sync_cfo_;
@@ -1481,14 +1487,14 @@ void StreamingDecoder::decodeCurrentFrame() {
     //      Real 1-CW control frames are always R1/4 (hardened) and are
     //      caught upstream by the control-first hypothesis at line ~1136.
     //      Cost of the dead branch: ~36 s of decode CPU per 50 KB transfer.
-    // Kept: LLR pre-empt as a coarse false-sync gate and the 4-CW escalation
+    // Kept: LLR pre-empt as a coarse false-sync gate and the fixed-frame escalation
     //       that drives the actual data-frame decode.
     // ========================================================================
     if (pending_total_cw_ == 0 && is_ofdm && connected_
         && soft_bits.size() >= LDPC_BLOCK && soft_bits.size() < 2 * LDPC_BLOCK) {
 
         // Large OFDM FILE_BLOCK frames use variable-CW encoding without the
-        // fixed 4-CW frame interleaver. Give raw CW0 one chance to declare the
+        // fixed-frame interleaver. Give raw CW0 one chance to declare the
         // true frame length before defaulting to the fixed-frame path.
         codec_->setRate(rate);
         {
@@ -1503,7 +1509,16 @@ void StreamingDecoder::decodeCurrentFrame() {
                 }
                 auto hdr = v2::parseHeader(peek_data);
                 if (hdr.valid && !hdr.is_control &&
-                    hdr.total_cw > v2::FIXED_FRAME_CODEWORDS) {
+                    isFixedFrameCwCount(hdr.total_cw)) {
+                    pending_total_cw_ = hdr.total_cw;
+                    state_ = DecoderState::SYNC_FOUND;
+                    LOG_MODEM(INFO, "[%s] OFDM fixed CW0: need %d CWs, waiting for %d samples",
+                              log_prefix_.c_str(), pending_total_cw_,
+                              waveform_->getMinSamplesForCWCount(pending_total_cw_));
+                    return;
+                }
+                if (hdr.valid && !hdr.is_control &&
+                    hdr.total_cw > v2::kMaxFixedFrameCodewords) {
                     pending_total_cw_ = hdr.total_cw;
                     state_ = DecoderState::SYNC_FOUND;
                     LOG_MODEM(INFO, "[%s] OFDM variable CW0: need %d CWs, waiting for %d samples",
@@ -1514,25 +1529,25 @@ void StreamingDecoder::decodeCurrentFrame() {
             }
         }
 
-        // Check LLR quality before expensive 4-CW escalation.
+        // Check LLR quality before expensive fixed-frame escalation.
         // False syncs (e.g. from fading-corrupted LTS) cluster near
         // |llr|_avg <= 1.0. Moderate SNR12 tail frames can be real at ~1.7,
         // so this gate stays permissive and lets LDPC be the final arbiter.
-        // Escalating on garbage wastes ~1.5s on 4x failed LDPC (50 iters each),
+        // Escalating on garbage wastes seconds on failed LDPC attempts,
         // blocking the decoder from processing real frames arriving in the buffer.
         const size_t llr_count = std::min(soft_bits.size(), LDPC_BLOCK);
         const float llr_abs_avg = signal_policy::meanAbsLLR(soft_bits.data(), llr_count);
         if (llr_abs_avg < signal_policy::kMinLLRForEscalation) {
             ultra::timing::globalDecoderProfile()
                 .low_llr_escalation_skipped.fetch_add(1, std::memory_order_relaxed);
-            LOG_MODEM(INFO, "[%s] OFDM CW0 peek: |llr|_avg=%.1f too low — skipping 4-CW escalation (likely false sync)",
+            LOG_MODEM(INFO, "[%s] OFDM CW0 peek: |llr|_avg=%.1f too low — skipping fixed-frame escalation (likely false sync)",
                       log_prefix_.c_str(), llr_abs_avg);
             advancePastFalseOFDMLock();
             state_ = DecoderState::SEARCHING;
             return;
         }
 
-        pending_total_cw_ = v2::FIXED_FRAME_CODEWORDS;  // 4
+        pending_total_cw_ = fixed_frame_codewords_;
         state_ = DecoderState::SYNC_FOUND;
         LOG_MODEM(INFO, "[%s] OFDM CW0 peek: |llr|_avg=%.1f, escalating to %d CWs",
                   log_prefix_.c_str(), llr_abs_avg, pending_total_cw_);
@@ -1546,7 +1561,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         && !result.frame_data.empty()) {
         auto partial_hdr = v2::parseHeader(result.frame_data);
         if (partial_hdr.valid && !partial_hdr.is_control &&
-            partial_hdr.total_cw > v2::FIXED_FRAME_CODEWORDS) {
+            partial_hdr.total_cw > v2::kMaxFixedFrameCodewords) {
             pending_total_cw_ = partial_hdr.total_cw;
             state_ = DecoderState::SYNC_FOUND;
             LOG_MODEM(INFO, "[%s] OFDM variable frame: need %d CWs, waiting for %d samples",
@@ -1558,7 +1573,7 @@ void StreamingDecoder::decodeCurrentFrame() {
 
     // ========================================================================
     // Small-frame recovery for OFDM connected mode:
-    // If full 4-CW buffer decode failed, the frame might be a small non-data
+    // If full fixed-frame buffer decode failed, the frame might be a small non-data
     // frame (e.g. DISCONNECT = 2 CWs at R1/2) where trailing noise symbols
     // degraded LLR quality. Retry with 1-CW peek to determine actual size.
     // ========================================================================
@@ -1585,7 +1600,9 @@ void StreamingDecoder::decodeCurrentFrame() {
                         result = decodeFrame(short_bits, sync_snr_, sync_cfo_);
                         frame_len = one_cw_s;
                         return true;
-                    } else if (hdr2.valid && hdr2.total_cw > 1 && hdr2.total_cw < v2::FIXED_FRAME_CODEWORDS) {
+                    } else if (hdr2.valid && hdr2.total_cw > 1 &&
+                               isFixedFrameCwCount(hdr2.total_cw) &&
+                               hdr2.total_cw < fixed_frame_codewords_) {
                         // Variable-CW frame (2-3 CWs) — reprocess with exact size
                         size_t exact_size = static_cast<size_t>(
                             waveform_->getMinSamplesForCWCount(hdr2.total_cw));
@@ -1618,7 +1635,7 @@ void StreamingDecoder::decodeCurrentFrame() {
     // decode point by a few samples even when correlation looks valid.
     if (!result.success && result.codewords_ok == 0 && is_ofdm && connected_) {
         // Keep this recovery path tight. Moderate-fading hardware traces showed
-        // low-confidence syncs can pass the LLR gate, then eight full 4-CW LDPC
+        // low-confidence syncs can pass the LLR gate, then repeated full fixed-frame LDPC
         // retries burn several seconds with zero recoveries and trigger ARQ
         // timeouts. Nearby timing retry is still useful for clean, high-corr
         // locks, but beyond +/-8 samples the candidate is usually a bad lock.
@@ -1771,18 +1788,26 @@ void StreamingDecoder::decodeCurrentFrame() {
         result.success, result.frame_data.data(), result.frame_data.size());
 
     size_t consumed = frame_len;
-    if (result.success && is_non_data_frame && is_ofdm && waveform_) {
-        // Use exact sample count for the actual CW count
+    if (result.success && is_ofdm && waveform_) {
+        // Use exact sample count for decoded OFDM frames when the copied buffer
+        // was larger than the frame. This matters when a header-derived CW count
+        // is smaller than a configured/probe-sized buffer.
         const int actual_cw = result.codewords_ok + result.codewords_failed;
         if (actual_cw > 0) {
             const size_t exact_consumed =
                 static_cast<size_t>(waveform_->getMinSamplesForCWCount(actual_cw));
-            const size_t adjusted_consumed = frame_policy::consumedSamplesForDecodedFrame(
-                result.success, is_ofdm, is_non_data_frame, actual_cw, consumed, exact_consumed);
-            if (adjusted_consumed < consumed) {
-                LOG_MODEM(INFO, "[%s] Non-data frame (%d CWs): advancing %zu samples (not %zu)",
-                          log_prefix_.c_str(), actual_cw, adjusted_consumed, consumed);
-                consumed = adjusted_consumed;
+            if (is_non_data_frame) {
+                const size_t adjusted_consumed = frame_policy::consumedSamplesForDecodedFrame(
+                    result.success, is_ofdm, is_non_data_frame, actual_cw, consumed, exact_consumed);
+                if (adjusted_consumed < consumed) {
+                    LOG_MODEM(INFO, "[%s] Non-data frame (%d CWs): advancing %zu samples (not %zu)",
+                              log_prefix_.c_str(), actual_cw, adjusted_consumed, consumed);
+                    consumed = adjusted_consumed;
+                }
+            } else if (exact_consumed < consumed) {
+                LOG_MODEM(INFO, "[%s] DATA frame (%d CWs): advancing %zu samples (not %zu)",
+                          log_prefix_.c_str(), actual_cw, exact_consumed, consumed);
+                consumed = exact_consumed;
             }
         }
     }
@@ -1797,7 +1822,8 @@ void StreamingDecoder::decodeCurrentFrame() {
     // next frame.
     if (result.success && connected_ && is_ofdm && !is_non_data_frame
         && use_burst_interleave_ && waveform_ && waveform_->wasBurstInterleaved()) {
-        size_t min_block = static_cast<size_t>(waveform_->getMinSamplesForFrame());
+        size_t min_block = static_cast<size_t>(
+            waveform_->getMinSamplesForCWCount(fixed_frame_codewords_));
 
         // Loop to decode multiple burst continuation blocks
         while (burst_blocks_decoded_ < MAX_BURST_BLOCKS) {
@@ -2411,7 +2437,6 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     result.cfo_hz = cfo;
 
     constexpr size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;
-    constexpr size_t FRAME_INTERLEAVE_BITS = fec::FrameInterleaver::TOTAL_FRAME_BITS;  // 2592
 
     if (soft_bits.size() < LDPC_BLOCK) return result;
 
@@ -2433,7 +2458,7 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
 
     // ========================================================================
     // MC-DPSK: Simple sequential decode (no frame interleaving ever)
-    // OFDM: "Try Both" strategy with frame interleaving for 4-CW frames
+    // OFDM: "Try Both" strategy with frame interleaving for fixed-CW frames
     // ========================================================================
 
     // For MC-DPSK, ALWAYS use simple sequential decode - skip all frame interleaving logic
@@ -2446,20 +2471,21 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     // ========================================================================
     // 1. First, try to decode first 648 bits as non-interleaved CW0
     // 2. If it's a valid 1-CW control frame → done
-    // 3. If decode fails OR it's a 4-CW frame → try frame-interleaved decode
+    // 3. If decode fails OR it's a fixed-CW frame → try frame-interleaved decode
     // ========================================================================
 
-    // Skip single-CW control probes when we already know this is a 4-CW data
+    // Skip single-CW control probes when we already know this is a fixed-CW data
     // frame. Burst-interleaved logical frames and frames latched by CW0 peek
     // are data-only; probing them as R1/4 control burns LDPC time on the Pi
     // before the real fixed-frame decode starts.
-    const bool known_4cw =
-        (pending_total_cw_ == v2::FIXED_FRAME_CODEWORDS) ||
+    const bool pending_fixed_cw = isFixedFrameCwCount(pending_total_cw_);
+    const bool known_fixed_cw =
+        pending_fixed_cw ||
         (use_burst_interleave_ && waveform_ && waveform_->wasBurstInterleaved());
 
     // R1/4 fast-path: control frames are always encoded at R1/4 (hardened)
     // Try R1/4 first — if it's a valid 1-CW control frame, return immediately.
-    if (!known_4cw && rate != CodeRate::R1_4 && soft_bits.size() >= LDPC_BLOCK) {
+    if (!known_fixed_cw && rate != CodeRate::R1_4 && soft_bits.size() >= LDPC_BLOCK) {
         codec_->setRate(CodeRate::R1_4);
         std::vector<float> cw0_r14(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
         std::pair<bool, Bytes> probe;
@@ -2490,18 +2516,18 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
 
     // Step 1: Try to decode CW0 RAW (no channel deinterleave)
     // Control frames (ACK etc.) are never channel-interleaved, so probe without it.
-    // If this is a 4-CW data frame (which IS interleaved), CW0 will likely fail here
+    // If this is a fixed-CW data frame (which IS interleaved), CW0 will likely fail here
     // and we'll fall through to decodeFixedFrame() which handles deinterleaving internally.
     //
-    // Skip the probe entirely when we already know it's a 4-CW interleaved data frame:
-    //   (a) prior CW0 peek set pending_total_cw_ to FIXED_FRAME_CODEWORDS, or
+    // Skip the probe entirely when we already know it's a fixed-CW interleaved data frame:
+    //   (a) prior CW0 peek set pending_total_cw_ to a fixed-frame CW count, or
     //   (b) burst-interleave marker was latched (frame is part of a burst-interleaved
-    //       group, definitely 4-CW data, never a control frame).
+    //       group, definitely fixed-CW data, never a control frame).
     // This was identified as redundant work in profiling plan v5 + ChatGPT review.
     std::pair<bool, Bytes> raw_probe;
     bool ok0 = false;
     Bytes data0;
-    if (known_4cw) {
+    if (known_fixed_cw) {
         ultra::timing::globalDecoderProfile()
             .raw_cw0_probe_skipped.fetch_add(1, std::memory_order_relaxed);
         // Fall through directly to frame-interleaved decode below.
@@ -2516,7 +2542,8 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
         data0 = std::move(raw_probe.second);
     }
 
-    bool try_frame_interleave = known_4cw;  // skip probe → go straight to interleaved decode
+    bool try_frame_interleave = known_fixed_cw;  // skip probe → go straight to interleaved decode
+    int probed_fixed_cw_count = 0;
 
     if (ok0 && data0.size() >= 2 && data0[0] == 0x55 && data0[1] == 0x4C) {
         // CW0 decoded and has valid magic - check if it's a control frame
@@ -2533,12 +2560,14 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 result.codewords_ok = 1;
                 result.frame_data = data0;
                 return result;
-            } else if (hdr.total_cw == v2::FIXED_FRAME_CODEWORDS) {
-                // === Multi-CW frame with 4 CWs - try frame interleaving ===
-                LOG_MODEM(DEBUG, "[%s] Header shows 4 CWs - trying frame deinterleave", log_prefix_.c_str());
+            } else if (isFixedFrameCwCount(hdr.total_cw)) {
+                // === Fixed-CW frame - try frame interleaving ===
+                LOG_MODEM(DEBUG, "[%s] Header shows %d fixed CWs - trying frame deinterleave",
+                          log_prefix_.c_str(), hdr.total_cw);
+                probed_fixed_cw_count = hdr.total_cw;
                 try_frame_interleave = true;
             } else {
-                // === Multi-CW frame with != 4 CWs - old format, no frame interleaving ===
+                // === Larger multi-CW frame - old/variable format, no frame interleaving ===
                 // Fall through to legacy decode path
                 LOG_MODEM(DEBUG, "[%s] Multi-CW frame (%d CWs) - legacy decode", log_prefix_.c_str(), hdr.total_cw);
             }
@@ -2550,15 +2579,56 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     }
 
     // Step 2: Try frame-interleaved decode if needed
-    if (try_frame_interleave && soft_bits.size() >= FRAME_INTERLEAVE_BITS) {
-        LOG_MODEM(DEBUG, "[%s] Attempting 4-CW frame deinterleave decode", log_prefix_.c_str());
+    if (try_frame_interleave) {
+        int decode_cw_count = pending_fixed_cw
+            ? pending_total_cw_
+            : (probed_fixed_cw_count > 0)
+                ? probed_fixed_cw_count
+            : fixed_frame_codewords_;
+        size_t frame_interleave_bits =
+            static_cast<size_t>(fec::FrameInterleaver::totalFrameBits(decode_cw_count));
+        if (soft_bits.size() < frame_interleave_bits) {
+            return result;
+        }
+        LOG_MODEM(DEBUG, "[%s] Attempting %d-CW frame deinterleave decode",
+                  log_prefix_.c_str(), decode_cw_count);
 
         // Use v2::decodeFixedFrame which handles frame + channel deinterleaving + LDPC decode
         // Channel deinterleaving restores the original bit order within each CW
         // Only enable for OFDM modes (MC-DPSK doesn't use channel interleaving)
         size_t bps = static_cast<size_t>(ofdm_data_carriers_) * getBitsPerSymbol(current_modulation_);
         const auto _profile_fs_start_ = std::chrono::steady_clock::now();
-        auto cw_status = v2::decodeFixedFrame(soft_bits, rate, apply_channel_deinterleave, bps);
+        auto decodeFixed = [&](int cw_count) {
+            return v2::decodeFixedFrame(soft_bits, rate, cw_count,
+                                        apply_channel_deinterleave, bps);
+        };
+        auto cw_status = decodeFixed(decode_cw_count);
+
+        auto headerCwCount = [](const v2::CodewordStatus& status) -> int {
+            if (status.decoded.empty() || status.data.empty() ||
+                !status.decoded[0] || status.data[0].empty()) {
+                return 0;
+            }
+
+            auto hdr = v2::parseHeader(status.data[0]);
+            if (hdr.valid && !hdr.is_control && isFixedFrameCwCount(hdr.total_cw)) {
+                return hdr.total_cw;
+            }
+            return 0;
+        };
+
+        const int header_cw_count = headerCwCount(cw_status);
+        if (header_cw_count > 0 && header_cw_count != decode_cw_count) {
+            const size_t header_frame_bits =
+                static_cast<size_t>(fec::FrameInterleaver::totalFrameBits(header_cw_count));
+            if (soft_bits.size() >= header_frame_bits) {
+                LOG_MODEM(INFO, "[%s] Fixed-frame header says %d CWs; retrying decode (was %d)",
+                          log_prefix_.c_str(), header_cw_count, decode_cw_count);
+                decode_cw_count = header_cw_count;
+                cw_status = decodeFixed(decode_cw_count);
+            }
+        }
+
         // Record duration into failed_4cw_after_peek if this attempt failed.
         // Note: this duration also counts inside decode_fixed_frame_total
         // (and ldpc_cw_total inside that) — it's an approximate subset.
@@ -2572,7 +2642,7 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
 
         result.codewords_ok = 0;
         result.codewords_failed = 0;
-        for (int i = 0; i < v2::FIXED_FRAME_CODEWORDS; ++i) {
+        for (size_t i = 0; i < cw_status.decoded.size(); ++i) {
             if (cw_status.decoded[i]) {
                 result.codewords_ok++;
             } else {
@@ -2585,10 +2655,10 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
             result.frame_data = cw_status.reassemble();
 
             if (result.frame_data.empty()) {
-                // LDPC said 4/4 OK but reassemble failed — likely LDPC false positive
+                // LDPC said all CWs were OK but reassemble failed — likely LDPC false positive
                 result.success = false;
-                LOG_MODEM(WARN, "[%s] Frame deinterleave: 4/4 CWs OK but reassemble FAILED (LDPC false positive?)",
-                          log_prefix_.c_str());
+                LOG_MODEM(WARN, "[%s] Frame deinterleave: %d/%zu CWs OK but reassemble FAILED (LDPC false positive?)",
+                          log_prefix_.c_str(), result.codewords_ok, cw_status.decoded.size());
             } else {
                 // Parse header to get frame type
                 if (result.frame_data.size() >= 3) {
@@ -2596,16 +2666,16 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 }
             }
 
-            LOG_MODEM(INFO, "[%s] Frame deinterleave decode SUCCESS (%d/%d CWs, data=%zu bytes)",
-                      log_prefix_.c_str(), result.codewords_ok, v2::FIXED_FRAME_CODEWORDS,
+            LOG_MODEM(INFO, "[%s] Frame deinterleave decode SUCCESS (%d/%zu CWs, data=%zu bytes)",
+                      log_prefix_.c_str(), result.codewords_ok, cw_status.decoded.size(),
                       result.frame_data.size());
             return result;
         } else {
-            LOG_MODEM(DEBUG, "[%s] Frame deinterleave decode FAILED (%d/%d CWs)",
-                      log_prefix_.c_str(), result.codewords_ok, v2::FIXED_FRAME_CODEWORDS);
+            LOG_MODEM(DEBUG, "[%s] Frame deinterleave decode FAILED (%d/%zu CWs)",
+                      log_prefix_.c_str(), result.codewords_ok, cw_status.decoded.size());
 
             // Step 2b: If frame deinterleave failed, check if it's a 1-CW control frame
-            // Catches ACK frames that were escalated to 4-CW by a failed peek
+            // Catches ACK frames that were escalated to fixed-frame decode by a failed peek
             // Try R1/4 first (control frames hardened), then code_rate_ fallback
             {
                 auto trySalvage = [&](CodeRate sr) -> bool {
@@ -2653,7 +2723,7 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
         int total_cw = hdr.total_cw;
         int avail_cw = static_cast<int>(soft_bits.size() / LDPC_BLOCK);
         const bool variable_ofdm_frame =
-            is_ofdm && total_cw != v2::FIXED_FRAME_CODEWORDS;
+            is_ofdm && total_cw > v2::kMaxFixedFrameCodewords;
 
         if (avail_cw < total_cw) {
             result.frame_data = data0;
@@ -2806,7 +2876,9 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         LOG_MODEM(WARN, "[%s] Burst frame %zu/%d: energy lost (RMS=%.4f), inserting erasure",
                   log_prefix_.c_str(), burst_soft_buffer_.size() + 1,
                   burst_group_size, next_rms);
-        burst_soft_buffer_.emplace_back(fec::BurstInterleaver::BITS_PER_FRAME, 0.0f);
+        burst_soft_buffer_.emplace_back(
+            static_cast<size_t>(fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
+            0.0f);
         burst_next_pos_ = (burst_next_pos_ + burst_min_block_) % MAX_BUFFER_SAMPLES;
         return BurstFrameResult::SUCCESS;
     }
@@ -2834,7 +2906,9 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     if (!ok) {
         LOG_MODEM(WARN, "[%s] Burst frame %zu/%d: process() failed, inserting erasure",
                   log_prefix_.c_str(), burst_soft_buffer_.size() + 1, burst_group_size);
-        burst_soft_buffer_.emplace_back(fec::BurstInterleaver::BITS_PER_FRAME, 0.0f);
+        burst_soft_buffer_.emplace_back(
+            static_cast<size_t>(fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
+            0.0f);
         burst_next_pos_ = (burst_next_pos_ + burst_min_block_) % MAX_BUFFER_SAMPLES;
         return BurstFrameResult::SUCCESS;
     }
@@ -2898,7 +2972,9 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     if (soft.empty()) {
         LOG_MODEM(WARN, "[%s] Burst frame %zu/%d: empty soft bits, inserting erasure",
                   log_prefix_.c_str(), burst_soft_buffer_.size() + 1, burst_group_size);
-        burst_soft_buffer_.emplace_back(fec::BurstInterleaver::BITS_PER_FRAME, 0.0f);
+        burst_soft_buffer_.emplace_back(
+            static_cast<size_t>(fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
+            0.0f);
         burst_next_pos_ = (burst_next_pos_ + burst_min_block_) % MAX_BUFFER_SAMPLES;
         return BurstFrameResult::SUCCESS;
     }
@@ -2925,11 +3001,12 @@ void StreamingDecoder::finalizeBurstGroup() {
     LOG_MODEM(INFO, "[%s] Burst group complete (%d frames), deinterleaving...",
               log_prefix_.c_str(), burst_group_size);
 
-    auto logical_soft = fec::BurstInterleaver::deinterleave(burst_soft_buffer_);
+    auto logical_soft = fec::BurstInterleaver::deinterleave(
+        burst_soft_buffer_, fixed_frame_codewords_);
 
     for (int i = 0; i < burst_group_size; i++) {
         const int saved_pending_total_cw = pending_total_cw_;
-        pending_total_cw_ = v2::FIXED_FRAME_CODEWORDS;
+        pending_total_cw_ = fixed_frame_codewords_;
         DecodeResult result = decodeFrame(logical_soft[i], burst_snr_, burst_cfo_);
         pending_total_cw_ = saved_pending_total_cw;
 

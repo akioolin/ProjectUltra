@@ -46,13 +46,49 @@ void test_wide_ofdm_timing_and_timeout() {
     CHECK(dqpsk.data_ms == 648, "DQPSK R1/2 wide OFDM data frame ms");
     CHECK(dqpsk.ack_ms == 216, "DQPSK R1/2 wide OFDM ACK frame ms");
 
+    auto dqpsk_6cw = wideOFDMFrameTiming(Modulation::DQPSK, CodeRate::R1_2, 6);
+    auto dqpsk_8cw = wideOFDMFrameTiming(Modulation::DQPSK, CodeRate::R1_2, 8);
+    CHECK(dqpsk_6cw.data_symbols == 39, "DQPSK R1/2 6-CW wide OFDM data symbols");
+    CHECK(dqpsk_8cw.data_symbols == 51, "DQPSK R1/2 8-CW wide OFDM data symbols");
+    CHECK(dqpsk_6cw.data_ms > dqpsk.data_ms && dqpsk_8cw.data_ms > dqpsk_6cw.data_ms,
+          "wide OFDM data duration should scale with fixed-frame CW count");
+
     CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 4, 120, 2) == 8000,
           "wide OFDM window=4 timeout should clamp to hardware-safe floor");
 
-    CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 8, 120, 1) == 10212,
-          "wide OFDM window=8 timeout should cover the full burst and ACK path");
-    CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 16, 5304, 1) == 16000,
-          "wide OFDM window=16 timeout should clamp to hardware-safe ceiling");
+    CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 8, 120, 1) == 8000,
+          "wide OFDM window=8 timeout should keep default-CW floor after burst accounting");
+    CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 8, 120, 1, 6) == 9224,
+          "wide OFDM 6-CW ACK timeout should cover the longer burst");
+    CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 8, 120, 1, 8) == 11528,
+          "wide OFDM 8-CW ACK timeout should cover the longer burst");
+
+    const auto sack_4cw = ofdmSackDelays(true, kHighThroughputOFDMWindowFrames, dqpsk.data_ms);
+    const uint32_t timeout_4cw = computeWideOFDMAckTimeoutMs(
+        Modulation::DQPSK, CodeRate::R1_2, kHighThroughputOFDMWindowFrames,
+        sack_4cw.delay_ms, 1);
+    CHECK(timeout_4cw == 16000,
+          "wide OFDM window=16 4-CW timeout should preserve the current ceiling");
+
+    const auto sack_6cw = ofdmSackDelays(true, kHighThroughputOFDMWindowFrames, dqpsk_6cw.data_ms);
+    const uint32_t timeout_6cw = computeWideOFDMAckTimeoutMs(
+        Modulation::DQPSK, CodeRate::R1_2, kHighThroughputOFDMWindowFrames,
+        sack_6cw.delay_ms, 1, 6);
+    const uint32_t min_6cw_ack_path =
+        static_cast<uint32_t>(kHighThroughputOFDMWindowFrames) * dqpsk_6cw.data_ms +
+        sack_6cw.delay_ms + dqpsk_6cw.ack_ms;
+    CHECK(timeout_6cw >= min_6cw_ack_path,
+          "wide OFDM window=16 6-CW timeout should cover burst plus ACK path");
+
+    const auto sack_8cw = ofdmSackDelays(true, kHighThroughputOFDMWindowFrames, dqpsk_8cw.data_ms);
+    const uint32_t timeout_8cw = computeWideOFDMAckTimeoutMs(
+        Modulation::DQPSK, CodeRate::R1_2, kHighThroughputOFDMWindowFrames,
+        sack_8cw.delay_ms, 1, 8);
+    const uint32_t min_8cw_ack_path =
+        static_cast<uint32_t>(kHighThroughputOFDMWindowFrames) * dqpsk_8cw.data_ms +
+        sack_8cw.delay_ms + dqpsk_8cw.ack_ms;
+    CHECK(timeout_8cw >= min_8cw_ack_path,
+          "wide OFDM window=16 8-CW timeout should cover burst plus ACK path");
 
     const auto connect_ack_r23 =
         connectAckRetransmitDelayMs(WaveformMode::OFDM_CHIRP,
@@ -80,8 +116,14 @@ void test_narrow_ofdm_timing_and_timeout() {
     CHECK(narrow.ack_symbols == 20, "narrow OFDM DQPSK ACK symbols");
     CHECK(narrow.data_ms == 3453, "narrow OFDM DQPSK data frame ms");
     CHECK(narrow.ack_ms == 933, "narrow OFDM DQPSK ACK frame ms");
+    auto narrow_8cw = narrowOFDMFrameTiming(Modulation::DQPSK, 8);
+    CHECK(narrow_8cw.data_ms > narrow.data_ms,
+          "narrow OFDM data duration should scale with fixed-frame CW count");
     CHECK(computeNarrowOFDMAckTimeoutMs(Modulation::DQPSK) == 7165,
           "narrow OFDM DQPSK ACK timeout");
+    CHECK(computeNarrowOFDMAckTimeoutMs(Modulation::DQPSK, 8) >
+              computeNarrowOFDMAckTimeoutMs(Modulation::DQPSK),
+          "narrow OFDM ACK timeout should scale with fixed-frame CW count");
 }
 
 void test_ofdm_profile_selection() {

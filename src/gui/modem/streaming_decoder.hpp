@@ -172,6 +172,11 @@ public:
     void setChannelInterleave(bool enable) { use_channel_interleave_ = enable; }
     bool getChannelInterleave() const { return use_channel_interleave_; }
 
+    void setFixedFrameCodewords(int cw_count) {
+        fixed_frame_codewords_ = v2::sanitizeFixedFrameCodewords(cw_count);
+    }
+    int getFixedFrameCodewords() const { return fixed_frame_codewords_; }
+
     // Burst-level long interleaver (N-frame groups)
     void setBurstInterleave(bool enable) { use_burst_interleave_ = enable; }
     bool getBurstInterleave() const { return use_burst_interleave_; }
@@ -364,6 +369,7 @@ private:
     // Interleaver (matches TX)
     std::unique_ptr<ChannelInterleaver> interleaver_;
     bool use_channel_interleave_ = true;
+    int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
 
     // FEC codec (uses ICodec interface)
     fec::CodecPtr codec_;

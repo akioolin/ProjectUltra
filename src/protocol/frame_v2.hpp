@@ -547,7 +547,7 @@ Bytes reassembleCodewords(const std::vector<Bytes>& codewords, size_t expected_s
 struct CodewordStatus {
     std::vector<bool> decoded;  // true = LDPC succeeded for this CW
     std::vector<Bytes> data;    // Decoded data for each CW (20 bytes each)
-    bool fixed_frame = false;   // true for OFDM fixed 4-CW frames without CW1+ markers
+    bool fixed_frame = false;   // true for OFDM fixed-CW frames without CW1+ markers
 
     // Build NACK bitmap from decode status
     uint32_t getNackBitmap() const;
@@ -685,64 +685,88 @@ inline uint8_t getDataCodewordIndex(const Bytes& data) {
 }
 
 // ============================================================================
-// Fixed 4-Codeword Frame with Frame-Level Interleaving
+// Fixed-Codeword Frame with Frame-Level Interleaving
 // ============================================================================
 //
-// For data frames, use a fixed 4-codeword structure with interleaving across
-// all codewords. This provides:
+// For OFDM data frames, use a fixed-size codeword structure with interleaving
+// across all codewords. The default remains 4 codewords for compatibility, but
+// the count is runtime-selectable for aggregation experiments. This provides:
 //
-// 1. FADING RESISTANCE: Burst errors spread across all 4 CWs, so each sees only
-//    ~25% errors instead of 100% on one CW. R1/4 LDPC can correct ~37%.
+// 1. FADING RESISTANCE: Burst errors spread across all CWs, so each sees only
+//    a fraction of the errors instead of one CW being completely corrupted.
 //
-// 2. SIMPLE RECEIVER: Always knows to collect exactly 4 CWs before decoding.
-//    No chicken-and-egg problem with header containing total_cw.
+// 2. SIMPLE RECEIVER: Peers carry the configured fixed-frame CW count in
+//    connection state while the frame header still advertises TOTAL_CW.
 //
-// 3. PREDICTABLE TIMING: Frame duration is always the same (~30ms for data).
+// 3. PREDICTABLE TIMING: Frame duration is derived from the configured count.
 //
-// Payload capacity varies by code rate (all with 4 CWs):
+// Payload capacity varies by code rate and CW count. With the default 4 CWs:
 //   R1/4: 4 × 20 bytes = 80 bytes - 19 overhead = 61 bytes usable
 //   R1/2: 4 × 40 bytes = 160 bytes - 19 overhead = 141 bytes usable
 //   R2/3: 4 × 54 bytes = 216 bytes - 19 overhead = 197 bytes usable
 //   R3/4: 4 × 60 bytes = 240 bytes - 19 overhead = 221 bytes usable
 //
-// Frame structure (same as DataFrame but always exactly 4 CWs):
-//   [HEADER 17B][PAYLOAD][CRC 2B] → LDPC encode → 4 CWs → Interleave → TX
+// Frame structure (same as DataFrame but with a fixed configured CW count):
+//   [HEADER 17B][PAYLOAD][CRC 2B] → LDPC encode → N CWs → Interleave → TX
 //
 // ============================================================================
 
 // Fixed frame constants
-constexpr int FIXED_FRAME_CODEWORDS = 4;
+inline constexpr int kMinFixedFrameCodewords = 1;
+inline constexpr int kMaxFixedFrameCodewords = 8;
+inline constexpr int kDefaultFixedFrameCodewords = 4;
+inline constexpr int FIXED_FRAME_CODEWORDS = kDefaultFixedFrameCodewords;  // source compatibility
 constexpr uint16_t DISCONNECT_SEQ = 0xFFFF;  // Unique seq for DISCONNECT (won't collide with ARQ 0-based seqs)
 constexpr int FIXED_FRAME_OVERHEAD = DataFrame::HEADER_SIZE + DataFrame::CRC_SIZE;  // 17 + 2 = 19 bytes
 
+inline int sanitizeFixedFrameCodewords(int cw_count) {
+    return std::clamp(cw_count, kMinFixedFrameCodewords, kMaxFixedFrameCodewords);
+}
+
 /**
- * Get payload capacity for fixed 4-CW frame at given code rate.
+ * Get payload capacity for fixed frame at given code rate and CW count.
  *
  * @param rate Code rate (determines info bytes per codeword)
+ * @param cw_count Codewords per frame, clamped to supported fixed-frame range
  * @return Maximum payload bytes that fit in a fixed frame
  */
-inline size_t getFixedFramePayloadCapacity(CodeRate rate) {
-    size_t total_info_bytes = FIXED_FRAME_CODEWORDS * getBytesPerCodeword(rate);
+inline size_t getFixedFramePayloadCapacity(CodeRate rate, int cw_count) {
+    cw_count = sanitizeFixedFrameCodewords(cw_count);
+    size_t total_info_bytes = static_cast<size_t>(cw_count) * getBytesPerCodeword(rate);
     return total_info_bytes - FIXED_FRAME_OVERHEAD;
 }
 
 /**
- * Encode a data frame with fixed 4-CW structure and frame-level interleaving.
+ * Backward-compatible default fixed-frame capacity (4 CWs).
+ */
+inline size_t getFixedFramePayloadCapacity(CodeRate rate) {
+    return getFixedFramePayloadCapacity(rate, kDefaultFixedFrameCodewords);
+}
+
+/**
+ * Encode a data frame with fixed-CW structure and frame-level interleaving.
  *
  * Steps:
  * 1. Serialize frame (header + payload + CRC)
- * 2. Pad to exactly 4 codewords worth of info bytes
+ * 2. Pad to exactly N codewords worth of info bytes
  * 3. LDPC encode each codeword
  * 4. Optionally channel interleave each codeword (for fading resistance)
- * 5. Interleave coded bits across all 4 CWs
+ * 5. Interleave coded bits across all N CWs
  *
  * @param frame_data Serialized frame data (from DataFrame::serialize())
  * @param rate Code rate for LDPC encoding
  * @param use_channel_interleave If true, apply channel interleaving within each CW
  * @param bits_per_symbol Bits per OFDM symbol (data_carriers × bits_per_carrier) for interleaver geometry
- * @return Interleaved coded bits (4 × 648 = 2592 bits = 324 bytes)
+ * @return Interleaved coded bits (N × 648 bits)
  */
+Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, int cw_count,
+                       bool use_channel_interleave, size_t bits_per_symbol = 106);
 Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, bool use_channel_interleave, size_t bits_per_symbol = 106);
+
+/**
+ * Encode without channel interleaving for an explicit CW count.
+ */
+Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, int cw_count);
 
 /**
  * Encode without channel interleaving (backward compatible).
@@ -750,7 +774,7 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, bool use_channel_
 Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate);
 
 /**
- * Decode a fixed 4-CW frame with frame-level deinterleaving.
+ * Decode a fixed-CW frame with frame-level deinterleaving.
  *
  * Steps:
  * 1. Deinterleave soft bits to restore original CW order (frame-level)
@@ -762,9 +786,16 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate);
  * @param rate Code rate for LDPC decoding
  * @param use_channel_deinterleave If true, apply channel deinterleaving within each CW
  * @param bits_per_symbol Bits per OFDM symbol (data_carriers × bits_per_carrier) for interleaver geometry
- * @return CodewordStatus with decode results for all 4 CWs
+ * @return CodewordStatus with decode results for all configured CWs
  */
+CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate, int cw_count,
+                                bool use_channel_deinterleave, size_t bits_per_symbol = 106);
 CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate, bool use_channel_deinterleave, size_t bits_per_symbol = 106);
+
+/**
+ * Decode without channel deinterleaving for an explicit CW count.
+ */
+CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate, int cw_count);
 
 /**
  * Decode without channel deinterleaving (backward compatible).
@@ -782,10 +813,12 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
  * @param seq Sequence number
  * @param payload Payload bytes
  * @param rate Code rate (determines capacity)
- * @return DataFrame with total_cw set to 4
+ * @param cw_count Codewords per fixed frame (default 4)
+ * @return DataFrame with total_cw set to the fixed-frame CW count
  */
 DataFrame makeFixedDataFrame(const std::string& src, const std::string& dst,
-                              uint16_t seq, const Bytes& payload, CodeRate rate);
+                              uint16_t seq, const Bytes& payload, CodeRate rate,
+                              int cw_count = kDefaultFixedFrameCodewords);
 
 } // namespace v2
 

@@ -427,6 +427,11 @@ void ProtocolEngine::setForcedCodeRate(CodeRate rate) {
     connection_.setForcedCodeRate(rate);
 }
 
+void ProtocolEngine::setForcedFrameCodewords(int cw_count) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.setForcedFrameCodewords(cw_count);
+}
+
 Modulation ProtocolEngine::getForcedModulation() const {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.getForcedModulation();
@@ -435,6 +440,11 @@ Modulation ProtocolEngine::getForcedModulation() const {
 CodeRate ProtocolEngine::getForcedCodeRate() const {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.getForcedCodeRate();
+}
+
+int ProtocolEngine::getForcedFrameCodewords() const {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    return connection_.getForcedFrameCodewords();
 }
 
 void ProtocolEngine::setModeNegotiatedCallback(ModeNegotiatedCallback cb) {

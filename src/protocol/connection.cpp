@@ -16,8 +16,8 @@ constexpr size_t kOFDMFileBlockPayloadLimit = 2300;
 constexpr const char* kOFDMBurstPadCallsign = "ULPAD";
 constexpr uint16_t kOFDMBurstPadSeq = 0xFFFE;
 
-Bytes makeOFDMBurstPadPayload(CodeRate rate, size_t pad_index) {
-    const size_t capacity = v2::getFixedFramePayloadCapacity(rate);
+Bytes makeOFDMBurstPadPayload(CodeRate rate, int cw_count, size_t pad_index) {
+    const size_t capacity = v2::getFixedFramePayloadCapacity(rate, cw_count);
     Bytes payload(capacity);
     if (payload.empty()) {
         return payload;
@@ -128,6 +128,10 @@ Connection::Connection(const ConnectionConfig& config)
     , arq_(config.arq)
 {
     ultra::gui::startupTrace("Connection", "ctor-enter");
+    data_frame_cw_count_ = v2::sanitizeFixedFrameCodewords(config_.fixed_frame_codewords);
+    config_.fixed_frame_codewords = data_frame_cw_count_;
+    arq_.setFixedFrameCodewords(data_frame_cw_count_);
+
     // Wire up ARQ callbacks
     arq_.setTransmitCallback([this](const Bytes& data) {
         transmitFrame(data);
@@ -433,6 +437,25 @@ void Connection::abortTxNow() {
               connectionStateToString(state_));
 }
 
+void Connection::setForcedFrameCodewords(int cw_count) {
+    cw_count = v2::sanitizeFixedFrameCodewords(cw_count);
+    if (cw_count == data_frame_cw_count_) {
+        return;
+    }
+
+    data_frame_cw_count_ = cw_count;
+    config_.fixed_frame_codewords = cw_count;
+    arq_.setFixedFrameCodewords(cw_count);
+
+    if (isOFDMMode(negotiated_mode_)) {
+        file_transfer_.setMaxChunkPayload(
+            v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_));
+        configureArqForCurrentDataMode();
+    }
+
+    LOG_MODEM(INFO, "Connection: Fixed data frame CW count set to %d", data_frame_cw_count_);
+}
+
 // =============================================================================
 // DATA TRANSFER
 // =============================================================================
@@ -453,12 +476,12 @@ bool Connection::sendMessage(const std::string& text) {
         return arq_.sendData(data);
     }
 
-    if (data.size() <= v2::getFixedFramePayloadCapacity(data_code_rate_)) {
+    if (data.size() <= v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_)) {
         // Single frame - MC-DPSK can handle any size, OFDM fits in one frame
         return arq_.sendFixedDataWithFlags(data, v2::Flags::NONE);
     }
 
-    size_t capacity = v2::getFixedFramePayloadCapacity(data_code_rate_);
+    size_t capacity = v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
 
     // Fragment the message into chunks that fit in one frame each
     LOG_MODEM(INFO, "Connection: Fragmenting %zu byte message into %zu-byte chunks",
@@ -487,7 +510,7 @@ bool Connection::sendMessages(const std::vector<std::string>& texts) {
     }
 
     bool is_ofdm = isOFDMMode(negotiated_mode_);
-    size_t capacity = is_ofdm ? v2::getFixedFramePayloadCapacity(data_code_rate_) : SIZE_MAX;
+    size_t capacity = is_ofdm ? v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_) : SIZE_MAX;
 
     // Pre-fragment all messages into a flat list of frame payloads with flags
     pending_tx_fragments_.clear();
@@ -551,7 +574,7 @@ bool Connection::sendFile(const std::string& filepath) {
     // Set chunk size to match frame capacity for current mode
     bool is_ofdm = isOFDMMode(negotiated_mode_);
     if (is_ofdm) {
-        size_t capacity = v2::getFixedFramePayloadCapacity(data_code_rate_);
+        size_t capacity = v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
         file_transfer_.setMaxChunkPayload(capacity);
         LOG_MODEM(INFO, "Connection: File chunk payload limited to %zu bytes (OFDM %s)",
                   capacity, codeRateToString(data_code_rate_));
@@ -946,7 +969,7 @@ bool Connection::canIssueAdaptiveModeChange(bool is_downgrade) const {
 
 size_t Connection::adaptiveBacklogFrames(CodeRate rate) const {
     size_t frames = 0;
-    const size_t capacity = v2::getFixedFramePayloadCapacity(rate);
+    const size_t capacity = v2::getFixedFramePayloadCapacity(rate, data_frame_cw_count_);
     const size_t file_data_payload =
         capacity > FileTransferController::FILE_DATA_OVERHEAD
             ? capacity - FileTransferController::FILE_DATA_OVERHEAD
@@ -1364,10 +1387,11 @@ void Connection::transmitFrame(const Bytes& frame_data) {
 
 void Connection::configureArqForCurrentDataMode() {
     arq_.setCodeRate(data_code_rate_);
+    arq_.setFixedFrameCodewords(data_frame_cw_count_);
 
     if (isOFDMMode(negotiated_mode_)) {
         file_transfer_.setMaxChunkPayload(
-            v2::getFixedFramePayloadCapacity(data_code_rate_));
+            v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_));
     }
 
     if (negotiated_mode_ == WaveformMode::MC_DPSK) {
@@ -1384,12 +1408,15 @@ void Connection::configureArqForCurrentDataMode() {
         arq_.setSackDelayShort(0);
         arq_.setAckRepeatCount(1);
 
-        const auto timing = connection_policy::narrowOFDMFrameTiming(data_modulation_);
-        uint32_t timeout_ms = connection_policy::computeNarrowOFDMAckTimeoutMs(data_modulation_);
+        const auto timing = connection_policy::narrowOFDMFrameTiming(
+            data_modulation_, data_frame_cw_count_);
+        uint32_t timeout_ms = connection_policy::computeNarrowOFDMAckTimeoutMs(
+            data_modulation_, data_frame_cw_count_);
         arq_.setAckTimeout(timeout_ms);
 
-        LOG_MODEM(INFO, "Connection: ARQ window=1, timeout=%.2fs (data=%ums, ack=%ums), ack_repeat=1 (OFDM_NARROW %s %s)",
+        LOG_MODEM(INFO, "Connection: ARQ window=1, timeout=%.2fs (data=%ums, ack=%ums), ack_repeat=1, cw=%d (OFDM_NARROW %s %s)",
                   timeout_ms / 1000.0f, timing.data_ms, timing.ack_ms,
+                  data_frame_cw_count_,
                   modulationToString(data_modulation_), codeRateToString(data_code_rate_));
     } else {
         const bool near_awgn_ofdm =
@@ -1400,7 +1427,7 @@ void Connection::configureArqForCurrentDataMode() {
         arq_.setAckBatchSize(connection_policy::ofdmAckBatchSize(near_awgn_ofdm));
 
         const auto timing = connection_policy::wideOFDMFrameTiming(
-            data_modulation_, data_code_rate_);
+            data_modulation_, data_code_rate_, data_frame_cw_count_);
         const bool defer_sack_to_burst_tail =
             arq_.getWindowSize() > connection_policy::kWideOFDMWindowFrames;
         const auto sack = connection_policy::ofdmSackDelays(
@@ -1420,11 +1447,12 @@ void Connection::configureArqForCurrentDataMode() {
             data_code_rate_,
             arq_.getWindowSize(),
             arq_.getSackDelay(),
-            ack_repeat.count);
+            ack_repeat.count,
+            data_frame_cw_count_);
         arq_.setAckTimeout(ack_timeout_ms);
 
         LOG_MODEM(INFO,
-                  "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, ack=%ums x%d), max_retries=%d, ack_batch=%u, sack_delay=%ums/%ums, ack_repeat=%d/%ums (OFDM %s %s)",
+                  "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, ack=%ums x%d), max_retries=%d, ack_batch=%u, sack_delay=%ums/%ums, ack_repeat=%d/%ums, cw=%d (OFDM %s %s)",
                   arq_.getWindowSize(),
                   ack_timeout_ms / 1000.0f,
                   timing.data_ms,
@@ -1436,6 +1464,7 @@ void Connection::configureArqForCurrentDataMode() {
                   arq_.getSackDelayShort(),
                   ack_repeat.count,
                   ack_repeat.delay_ms,
+                  data_frame_cw_count_,
                   modulationToString(data_modulation_),
                   codeRateToString(data_code_rate_));
     }
@@ -1564,8 +1593,9 @@ void Connection::flushBurstBuffer() {
                 local_call_,
                 kOFDMBurstPadCallsign,
                 static_cast<uint16_t>(kOFDMBurstPadSeq - i),
-                makeOFDMBurstPadPayload(data_code_rate_, i),
-                data_code_rate_).serialize();
+                makeOFDMBurstPadPayload(data_code_rate_, data_frame_cw_count_, i),
+                data_code_rate_,
+                data_frame_cw_count_).serialize();
             burst_tx_buffer_.push_back(pad_frame);
         }
         LOG_MODEM(INFO,

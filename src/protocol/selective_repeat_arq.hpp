@@ -71,6 +71,10 @@ public:
     void setCodeRate(CodeRate rate);
     CodeRate getCodeRate() const { return code_rate_; }
 
+    // Set codewords per fixed OFDM data frame (default 4).
+    void setFixedFrameCodewords(int cw_count);
+    int getFixedFrameCodewords() const { return fixed_frame_codewords_; }
+
     // Set window size (1 = stop-and-wait behavior for MC-DPSK)
     void setWindowSize(size_t size) {
         size = selective_repeat_arq_policy::clampWindowSize(size, MAX_WINDOW);
@@ -135,6 +139,7 @@ private:
         bool active = false;        // Slot in use
         Bytes frame_data;           // Serialized v2 frame to send/resend
         uint16_t seq = 0;           // Sequence number
+        int fixed_frame_codewords = v2::kDefaultFixedFrameCodewords;
         uint32_t timeout_ms = 0;    // Time until retransmit
         uint64_t first_tx_ms = 0;   // ARQ monotonic clock when first sent
         bool rtt_sample_eligible = false; // Karn-safe RTT sampling guard
@@ -163,6 +168,7 @@ private:
 
     ARQConfig config_;
     CodeRate code_rate_ = CodeRate::R1_4;  // Default R1/4, updated when connected
+    int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
 
     // Callsigns
     std::string local_call_;

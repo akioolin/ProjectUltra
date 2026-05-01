@@ -38,6 +38,7 @@ struct ConnectionConfig {
     // Any other value = force that specific mode
     Modulation forced_modulation = Modulation::AUTO;
     CodeRate forced_code_rate = CodeRate::AUTO;
+    int fixed_frame_codewords = v2::kDefaultFixedFrameCodewords;
 };
 
 // Connection statistics
@@ -169,8 +170,10 @@ public:
     // Forced data mode - operator can override SNR-based selection
     void setForcedModulation(Modulation mod) { config_.forced_modulation = mod; }
     void setForcedCodeRate(CodeRate rate) { config_.forced_code_rate = rate; }
+    void setForcedFrameCodewords(int cw_count);
     Modulation getForcedModulation() const { return config_.forced_modulation; }
     CodeRate getForcedCodeRate() const { return config_.forced_code_rate; }
+    int getForcedFrameCodewords() const { return data_frame_cw_count_; }
 
     using ModeNegotiatedCallback = std::function<void(WaveformMode mode)>;
     void setModeNegotiatedCallback(ModeNegotiatedCallback cb) { on_mode_negotiated_ = cb; }
@@ -244,6 +247,7 @@ private:
     // Data modulation and code rate (adaptive)
     Modulation data_modulation_ = Modulation::DQPSK;
     CodeRate data_code_rate_ = CodeRate::R1_4;
+    int data_frame_cw_count_ = v2::kDefaultFixedFrameCodewords;
     uint16_t mode_change_seq_ = 0;  // Sequence number for MODE_CHANGE frames
     float measured_snr_db_ = 15.0f;  // SNR measured by modem (updated via setMeasuredSNR)
     float fading_index_ = 0.0f;      // Fading index (0-2, > 0.65 = significant fading)

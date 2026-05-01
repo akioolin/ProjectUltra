@@ -1,4 +1,5 @@
 #include "frame_interleaver.hpp"
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 
@@ -9,6 +10,38 @@ namespace fec {
 std::vector<int> FrameInterleaver::interleave_table_;
 std::vector<int> FrameInterleaver::deinterleave_table_;
 bool FrameInterleaver::tables_initialized_ = false;
+
+int FrameInterleaver::sanitizeCodewordCount(int codeword_count) {
+    return std::clamp(codeword_count, 1, 8);
+}
+
+int FrameInterleaver::totalFrameBits(int codeword_count) {
+    return sanitizeCodewordCount(codeword_count) * BITS_PER_CODEWORD;
+}
+
+int FrameInterleaver::totalFrameBytes(int codeword_count) {
+    return (totalFrameBits(codeword_count) + 7) / 8;
+}
+
+void FrameInterleaver::buildTables(int codeword_count,
+                                   std::vector<int>& interleave_table,
+                                   std::vector<int>& deinterleave_table) {
+    codeword_count = sanitizeCodewordCount(codeword_count);
+    const int total_bits = totalFrameBits(codeword_count);
+
+    interleave_table.resize(total_bits);
+    deinterleave_table.resize(total_bits);
+
+    for (int cw = 0; cw < codeword_count; ++cw) {
+        for (int bit = 0; bit < BITS_PER_CODEWORD; ++bit) {
+            int original_idx = cw * BITS_PER_CODEWORD + bit;
+            int interleaved_idx = bit * codeword_count + (cw + bit) % codeword_count;
+
+            interleave_table[original_idx] = interleaved_idx;
+            deinterleave_table[interleaved_idx] = original_idx;
+        }
+    }
+}
 
 void FrameInterleaver::ensureTablesInitialized() {
     if (tables_initialized_) return;
@@ -31,40 +64,44 @@ void FrameInterleaver::ensureTablesInitialized() {
     // interleave_table_[original_idx] = interleaved_idx
     // deinterleave_table_[interleaved_idx] = original_idx
 
-    interleave_table_.resize(TOTAL_FRAME_BITS);
-    deinterleave_table_.resize(TOTAL_FRAME_BITS);
-
-    for (int cw = 0; cw < NUM_CODEWORDS; ++cw) {
-        for (int bit = 0; bit < BITS_PER_CODEWORD; ++bit) {
-            int original_idx = cw * BITS_PER_CODEWORD + bit;
-            int interleaved_idx = bit * NUM_CODEWORDS + (cw + bit) % NUM_CODEWORDS;
-
-            interleave_table_[original_idx] = interleaved_idx;
-            deinterleave_table_[interleaved_idx] = original_idx;
-        }
-    }
+    buildTables(NUM_CODEWORDS, interleave_table_, deinterleave_table_);
 
     tables_initialized_ = true;
 }
 
 std::vector<uint8_t> FrameInterleaver::interleave(
-    const std::vector<std::vector<uint8_t>>& coded_codewords) {
+    const std::vector<std::vector<uint8_t>>& coded_codewords,
+    int codeword_count) {
 
-    if (coded_codewords.size() != NUM_CODEWORDS) {
-        throw std::invalid_argument("FrameInterleaver: expected 4 codewords, got " +
+    codeword_count = sanitizeCodewordCount(codeword_count);
+    if (coded_codewords.size() != static_cast<size_t>(codeword_count)) {
+        throw std::invalid_argument("FrameInterleaver: expected " +
+                                    std::to_string(codeword_count) +
+                                    " codewords, got " +
                                     std::to_string(coded_codewords.size()));
     }
 
-    ensureTablesInitialized();
+    std::vector<int> interleave_table;
+    std::vector<int> deinterleave_table;
+    const std::vector<int>* table = nullptr;
+    if (codeword_count == NUM_CODEWORDS) {
+        ensureTablesInitialized();
+        table = &interleave_table_;
+    } else {
+        buildTables(codeword_count, interleave_table, deinterleave_table);
+        table = &interleave_table;
+    }
+
+    const int total_bits = totalFrameBits(codeword_count);
 
     // Convert all codewords to a single bit vector
-    std::vector<uint8_t> original_bits(TOTAL_FRAME_BITS);
+    std::vector<uint8_t> original_bits(total_bits);
     size_t bit_idx = 0;
 
-    for (int cw = 0; cw < NUM_CODEWORDS; ++cw) {
+    for (int cw = 0; cw < codeword_count; ++cw) {
         const auto& cw_bytes = coded_codewords[cw];
         // Each coded codeword should be 81 bytes (648 bits)
-        for (size_t byte_idx = 0; byte_idx < cw_bytes.size() && bit_idx < TOTAL_FRAME_BITS; ++byte_idx) {
+        for (size_t byte_idx = 0; byte_idx < cw_bytes.size() && bit_idx < static_cast<size_t>(total_bits); ++byte_idx) {
             uint8_t byte = cw_bytes[byte_idx];
             for (int b = 7; b >= 0 && bit_idx < static_cast<size_t>((cw + 1) * BITS_PER_CODEWORD); --b) {
                 original_bits[bit_idx++] = (byte >> b) & 1;
@@ -77,14 +114,14 @@ std::vector<uint8_t> FrameInterleaver::interleave(
     }
 
     // Apply interleaving permutation
-    std::vector<uint8_t> interleaved_bits(TOTAL_FRAME_BITS);
-    for (int i = 0; i < TOTAL_FRAME_BITS; ++i) {
-        interleaved_bits[interleave_table_[i]] = original_bits[i];
+    std::vector<uint8_t> interleaved_bits(total_bits);
+    for (int i = 0; i < total_bits; ++i) {
+        interleaved_bits[(*table)[i]] = original_bits[i];
     }
 
     // Convert back to bytes
-    std::vector<uint8_t> output((TOTAL_FRAME_BITS + 7) / 8);
-    for (int i = 0; i < TOTAL_FRAME_BITS; ++i) {
+    std::vector<uint8_t> output((total_bits + 7) / 8);
+    for (int i = 0; i < total_bits; ++i) {
         if (interleaved_bits[i]) {
             output[i / 8] |= (1 << (7 - (i % 8)));
         }
@@ -93,27 +130,44 @@ std::vector<uint8_t> FrameInterleaver::interleave(
     return output;
 }
 
-std::vector<std::vector<float>> FrameInterleaver::deinterleave(
-    const std::vector<float>& interleaved_soft) {
+std::vector<uint8_t> FrameInterleaver::interleave(
+    const std::vector<std::vector<uint8_t>>& coded_codewords) {
+    return interleave(coded_codewords, NUM_CODEWORDS);
+}
 
-    if (interleaved_soft.size() < TOTAL_FRAME_BITS) {
+std::vector<std::vector<float>> FrameInterleaver::deinterleave(
+    const std::vector<float>& interleaved_soft,
+    int codeword_count) {
+
+    codeword_count = sanitizeCodewordCount(codeword_count);
+    const int total_bits = totalFrameBits(codeword_count);
+    if (interleaved_soft.size() < static_cast<size_t>(total_bits)) {
         throw std::invalid_argument("FrameInterleaver: expected " +
-                                    std::to_string(TOTAL_FRAME_BITS) +
+                                    std::to_string(total_bits) +
                                     " soft bits, got " +
                                     std::to_string(interleaved_soft.size()));
     }
 
-    ensureTablesInitialized();
-
-    // Apply deinterleaving permutation
-    std::vector<float> original_soft(TOTAL_FRAME_BITS);
-    for (int i = 0; i < TOTAL_FRAME_BITS; ++i) {
-        original_soft[deinterleave_table_[i]] = interleaved_soft[i];
+    std::vector<int> interleave_table;
+    std::vector<int> deinterleave_table;
+    const std::vector<int>* table = nullptr;
+    if (codeword_count == NUM_CODEWORDS) {
+        ensureTablesInitialized();
+        table = &deinterleave_table_;
+    } else {
+        buildTables(codeword_count, interleave_table, deinterleave_table);
+        table = &deinterleave_table;
     }
 
-    // Split into 4 codewords
-    std::vector<std::vector<float>> result(NUM_CODEWORDS);
-    for (int cw = 0; cw < NUM_CODEWORDS; ++cw) {
+    // Apply deinterleaving permutation
+    std::vector<float> original_soft(total_bits);
+    for (int i = 0; i < total_bits; ++i) {
+        original_soft[(*table)[i]] = interleaved_soft[i];
+    }
+
+    // Split into codewords
+    std::vector<std::vector<float>> result(codeword_count);
+    for (int cw = 0; cw < codeword_count; ++cw) {
         result[cw].resize(BITS_PER_CODEWORD);
         for (int bit = 0; bit < BITS_PER_CODEWORD; ++bit) {
             result[cw][bit] = original_soft[cw * BITS_PER_CODEWORD + bit];
@@ -123,30 +177,54 @@ std::vector<std::vector<float>> FrameInterleaver::deinterleave(
     return result;
 }
 
-std::vector<float> FrameInterleaver::interleaveSoft(
-    const std::vector<std::vector<float>>& soft_codewords) {
+std::vector<std::vector<float>> FrameInterleaver::deinterleave(
+    const std::vector<float>& interleaved_soft) {
+    return deinterleave(interleaved_soft, NUM_CODEWORDS);
+}
 
-    if (soft_codewords.size() != NUM_CODEWORDS) {
-        throw std::invalid_argument("FrameInterleaver: expected 4 codewords");
+std::vector<float> FrameInterleaver::interleaveSoft(
+    const std::vector<std::vector<float>>& soft_codewords,
+    int codeword_count) {
+
+    codeword_count = sanitizeCodewordCount(codeword_count);
+    if (soft_codewords.size() != static_cast<size_t>(codeword_count)) {
+        throw std::invalid_argument("FrameInterleaver: expected " +
+                                    std::to_string(codeword_count) + " codewords");
     }
 
-    ensureTablesInitialized();
+    std::vector<int> interleave_table;
+    std::vector<int> deinterleave_table;
+    const std::vector<int>* table = nullptr;
+    if (codeword_count == NUM_CODEWORDS) {
+        ensureTablesInitialized();
+        table = &interleave_table_;
+    } else {
+        buildTables(codeword_count, interleave_table, deinterleave_table);
+        table = &interleave_table;
+    }
+
+    const int total_bits = totalFrameBits(codeword_count);
 
     // Flatten to single vector
-    std::vector<float> original_soft(TOTAL_FRAME_BITS);
-    for (int cw = 0; cw < NUM_CODEWORDS; ++cw) {
+    std::vector<float> original_soft(total_bits);
+    for (int cw = 0; cw < codeword_count; ++cw) {
         for (int bit = 0; bit < BITS_PER_CODEWORD && bit < static_cast<int>(soft_codewords[cw].size()); ++bit) {
             original_soft[cw * BITS_PER_CODEWORD + bit] = soft_codewords[cw][bit];
         }
     }
 
     // Apply interleaving
-    std::vector<float> interleaved(TOTAL_FRAME_BITS);
-    for (int i = 0; i < TOTAL_FRAME_BITS; ++i) {
-        interleaved[interleave_table_[i]] = original_soft[i];
+    std::vector<float> interleaved(total_bits);
+    for (int i = 0; i < total_bits; ++i) {
+        interleaved[(*table)[i]] = original_soft[i];
     }
 
     return interleaved;
+}
+
+std::vector<float> FrameInterleaver::interleaveSoft(
+    const std::vector<std::vector<float>>& soft_codewords) {
+    return interleaveSoft(soft_codewords, NUM_CODEWORDS);
 }
 
 }  // namespace fec

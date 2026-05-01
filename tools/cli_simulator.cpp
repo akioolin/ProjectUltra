@@ -695,6 +695,12 @@ public:
     void setSNR(float snr) { snr_db_ = snr; }
     void setForcedModulation(Modulation mod) { protocol_.setForcedModulation(mod); }
     void setForcedCodeRate(CodeRate rate) { protocol_.setForcedCodeRate(rate); }
+    void setFixedFrameCodewords(int cw_count) {
+        fixed_frame_codewords_ = v2::sanitizeFixedFrameCodewords(cw_count);
+        protocol_.setForcedFrameCodewords(fixed_frame_codewords_);
+        if (encoder_) encoder_->setFixedFrameCodewords(fixed_frame_codewords_);
+        if (decoder_) decoder_->setFixedFrameCodewords(fixed_frame_codewords_);
+    }
     void setPreferredWaveform(WaveformMode mode) {
         protocol_.setPreferredMode(mode);
         // For narrowband, use narrowband chirp for PING/PONG/CONNECT control frames
@@ -810,6 +816,7 @@ private:
     float snr_db_ = 20.0f;
     bool no_burst_interleave_ = false;  // Disable burst interleaving for A/B testing
     int burst_group_size_ = 8;
+    int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
     int rx_overfeed_factor_ = 1;
     int decode_delay_ms_ = 0;
     int rx_batch_callbacks_ = 1;
@@ -860,6 +867,7 @@ private:
         encoder_->setOFDMConfig(ofdm_config_);
         encoder_->setMode(tx_waveform_mode_);
         encoder_->setDataMode(data_modulation_, data_code_rate_);
+        encoder_->setFixedFrameCodewords(fixed_frame_codewords_);
         encoder_->setBurstInterleaveGroupSize(burst_group_size_);
         encoder_->setMCDPSKCarriers(8);
 
@@ -877,6 +885,7 @@ private:
         // Start in disconnected mode (MC_DPSK for PING detection)
         decoder_->setMode(WaveformMode::MC_DPSK, false);
         decoder_->setBurstInterleaveGroupSize(burst_group_size_);
+        decoder_->setFixedFrameCodewords(fixed_frame_codewords_);
         decoder_->setMCDPSKCarriers(8);
 
         // Set frame callback
@@ -1517,6 +1526,9 @@ public:
     void setChannelType(ChannelType t) { channel_type_ = t; use_fading_ = (t != ChannelType::AWGN); }
     void setForcedModulation(Modulation mod) { forced_mod_ = mod; }
     void setForcedCodeRate(CodeRate rate) { forced_rate_ = rate; }
+    void setFixedFrameCodewords(int cw_count) {
+        fixed_frame_codewords_ = v2::sanitizeFixedFrameCodewords(cw_count);
+    }
     void setPreferredWaveform(WaveformMode mode) { forced_waveform_ = mode; }
     void setTestFileTransfer(bool v) { test_file_transfer_ = v; }
     void setTestFileSize(size_t bytes) { test_file_size_ = bytes; }
@@ -1597,6 +1609,8 @@ public:
         bravo_->setDecodeDelayMs(decode_delay_ms_);
         alpha_->setRxBatchCallbacks(rx_batch_callbacks_);
         bravo_->setRxBatchCallbacks(rx_batch_callbacks_);
+        alpha_->setFixedFrameCodewords(fixed_frame_codewords_);
+        bravo_->setFixedFrameCodewords(fixed_frame_codewords_);
 
         // Set channel SNR for mode negotiation
         alpha_->setSNR(snr_db_);
@@ -1631,6 +1645,9 @@ public:
         }
         if (burst_group_size_ != 8) {
             std::cout << "  \033[36mBurst interleave group size = " << burst_group_size_ << "\033[0m\n";
+        }
+        if (fixed_frame_codewords_ != v2::kDefaultFixedFrameCodewords) {
+            std::cout << "  \033[36mFixed frame CW count = " << fixed_frame_codewords_ << "\033[0m\n";
         }
 
         // Setup message callback on BRAVO
@@ -1713,6 +1730,7 @@ private:
     int rx_overfeed_factor_ = 1;           // --rx-overfeed-factor N (decoder overload stress)
     int decode_delay_ms_ = 0;              // --decode-delay-ms N (simulated slow decoder)
     int rx_batch_callbacks_ = 1;           // --rx-batch-callbacks N (batched decoder feed)
+    int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
     bool save_signals_ = false;
     int save_signals_message_limit_ = 0;   // 0 = full run
     size_t save_signals_max_samples_ = 0;  // 0 = unlimited
@@ -2407,6 +2425,7 @@ private:
         station->setChannelInterleave(use_channel_interleave_);
         station->setNoBurstInterleave(no_burst_interleave_);
         station->setBurstInterleaveGroupSize(burst_group_size_);
+        station->setFixedFrameCodewords(fixed_frame_codewords_);
 
         // Role-B receive callbacks
         std::atomic<bool> peer_connected{false};
@@ -2655,6 +2674,9 @@ private:
         }
         if (rx_batch_callbacks_ > 1) {
             std::cout << "  Stress:  RX batch " << rx_batch_callbacks_ << " callbacks/feed\n";
+        }
+        if (fixed_frame_codewords_ != v2::kDefaultFixedFrameCodewords) {
+            std::cout << "  CW/frame: " << fixed_frame_codewords_ << "\n";
         }
         std::cout << "\n";
     }
@@ -2961,6 +2983,16 @@ int main(int argc, char* argv[]) {
                         return 1;
                     }
                 }
+            } else if (arg == "--cw-count" && i + 1 < argc) {
+                int cw_count = std::stoi(argv[++i]);
+                if (cw_count < v2::kMinFixedFrameCodewords ||
+                    cw_count > v2::kMaxFixedFrameCodewords) {
+                    std::cerr << "Invalid --cw-count: " << cw_count
+                              << " (use " << v2::kMinFixedFrameCodewords
+                              << ".." << v2::kMaxFixedFrameCodewords << ")\n";
+                    return 1;
+                }
+                sim.setFixedFrameCodewords(cw_count);
             } else if (arg == "--waveform" || arg == "-w") {
                 if (i + 1 < argc) {
                     std::string wf_str = argv[++i];
@@ -3059,6 +3091,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --fading, -f        Alias for --channel moderate\n";
                 std::cout << "  --mod, -m <MOD>     Force modulation: dqpsk, d8psk, dbpsk, qpsk, bpsk\n";
                 std::cout << "  --rate, -r <RATE>   Force code rate: auto, r1_4, r1_2, r2_3, r3_4\n";
+                std::cout << "  --cw-count <N>      Fixed OFDM data-frame codewords (1-8, default: 4)\n";
                 std::cout << "  --waveform, -w <WF> Force waveform: mc_dpsk, ofdm_chirp, ofdm_cox, ofdm_narrow\n";
                 std::cout << "  --seed <N>          Random seed (default: 42)\n";
                 std::cout << "  --tx-cfo <Hz>       Inject TX CFO in channel model (default: 0)\n";

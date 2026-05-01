@@ -52,6 +52,7 @@ void SelectiveRepeatARQ::setCodeRate(CodeRate rate) {
         slot.active = false;
         slot.acked = false;
         slot.frame_data.clear();
+        slot.fixed_frame_codewords = fixed_frame_codewords_;
         slot.timeout_ms = 0;
         slot.first_tx_ms = 0;
         slot.rtt_sample_eligible = false;
@@ -104,6 +105,17 @@ void SelectiveRepeatARQ::setCodeRate(CodeRate rate) {
     }
 }
 
+void SelectiveRepeatARQ::setFixedFrameCodewords(int cw_count) {
+    cw_count = v2::sanitizeFixedFrameCodewords(cw_count);
+    if (cw_count == fixed_frame_codewords_) {
+        return;
+    }
+
+    fixed_frame_codewords_ = cw_count;
+    abortPendingTx();
+    LOG_MODEM(INFO, "SR-ARQ: Fixed frame CW count set to %d", fixed_frame_codewords_);
+}
+
 bool SelectiveRepeatARQ::sendData(const Bytes& data) {
     return sendDataWithFlags(data, v2::Flags::NONE);
 }
@@ -133,6 +145,7 @@ bool SelectiveRepeatARQ::sendDataWithFlags(const Bytes& data, uint8_t flags) {
     tx_window_[slot].active = true;
     tx_window_[slot].frame_data = frame.serialize();
     tx_window_[slot].seq = seq;
+    tx_window_[slot].fixed_frame_codewords = fixed_frame_codewords_;
     tx_window_[slot].timeout_ms = currentAckTimeoutMs();
     tx_window_[slot].first_tx_ms = arq_time_ms_;
     tx_window_[slot].rtt_sample_eligible = true;
@@ -174,12 +187,14 @@ bool SelectiveRepeatARQ::sendFixedDataWithFlags(const Bytes& data, uint8_t flags
     const uint16_t seq = tx_next_seq_;
     size_t slot = seqToSlot(seq);
 
-    auto frame = v2::makeFixedDataFrame(local_call_, remote_call_, seq, data, code_rate_);
+    auto frame = v2::makeFixedDataFrame(local_call_, remote_call_, seq, data,
+                                        code_rate_, fixed_frame_codewords_);
     frame.flags = dataFrameFlags(flags);
 
     tx_window_[slot].active = true;
     tx_window_[slot].frame_data = frame.serialize();
     tx_window_[slot].seq = seq;
+    tx_window_[slot].fixed_frame_codewords = fixed_frame_codewords_;
     tx_window_[slot].timeout_ms = currentAckTimeoutMs();
     tx_window_[slot].first_tx_ms = arq_time_ms_;
     tx_window_[slot].rtt_sample_eligible = true;
@@ -196,8 +211,8 @@ bool SelectiveRepeatARQ::sendFixedDataWithFlags(const Bytes& data, uint8_t flags
     tx_next_seq_ = (tx_next_seq_ + 1) & 0xFFFF;
     tx_in_flight_++;
 
-    LOG_MODEM(DEBUG, "SR-ARQ: Sent fixed DATA seq=%d slot=%zu, window=[%d,%d)",
-              seq, slot, tx_base_seq_, tx_next_seq_);
+    LOG_MODEM(DEBUG, "SR-ARQ: Sent fixed DATA seq=%d slot=%zu cw=%d, window=[%d,%d)",
+              seq, slot, fixed_frame_codewords_, tx_base_seq_, tx_next_seq_);
 
     transmitData(tx_window_[slot].frame_data);
     return true;
@@ -693,8 +708,9 @@ void SelectiveRepeatARQ::retransmitFrame(size_t slot, RetransmitCause cause) {
         case RetransmitCause::NACK: cause_str = "nack"; break;
     }
 
-    LOG_MODEM(INFO, "SR-ARQ: Retransmitting seq=%d (attempt %d/%d, cause=%s)",
-              s.seq, s.retry_count + 1, config_.max_retries, cause_str);
+    LOG_MODEM(INFO, "SR-ARQ: Retransmitting seq=%d (attempt %d/%d, cause=%s, cw=%d)",
+              s.seq, s.retry_count + 1, config_.max_retries, cause_str,
+              s.fixed_frame_codewords);
 
     stats_.retransmissions++;
     switch (cause) {
@@ -935,6 +951,7 @@ void SelectiveRepeatARQ::abortPendingTx() {
         slot.active = false;
         slot.acked = false;
         slot.frame_data.clear();
+        slot.fixed_frame_codewords = fixed_frame_codewords_;
         slot.timeout_ms = 0;
         slot.first_tx_ms = 0;
         slot.rtt_sample_eligible = false;
@@ -965,6 +982,7 @@ void SelectiveRepeatARQ::reset() {
         slot.active = false;
         slot.acked = false;
         slot.frame_data.clear();
+        slot.fixed_frame_codewords = fixed_frame_codewords_;
         slot.first_tx_ms = 0;
         slot.rtt_sample_eligible = false;
         slot.hole_ack_count = 0;

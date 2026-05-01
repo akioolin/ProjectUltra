@@ -20,15 +20,22 @@ namespace fec {
  *   physical_frame = flat_pos / B
  *   physical_byte  = flat_pos % B
  *
- * where B = BYTES_PER_FRAME (coded bytes per OFDM frame = 4 CWs × 81 bytes = 324).
+ * where B = coded bytes per OFDM frame (CW count × 81 bytes).
  *
  * TX: interleave coded bytes across N frames
  * RX: deinterleave soft bits (operates on byte-groups of 8 floats)
  */
 class BurstInterleaver {
 public:
-    static constexpr int BYTES_PER_FRAME = 324;   // 4 CWs × 81 bytes
-    static constexpr int BITS_PER_FRAME = 2592;   // 4 CWs × 648 bits
+    static constexpr int DEFAULT_CODEWORDS_PER_FRAME = 4;
+    static constexpr int CODEWORD_BYTES = 81;
+    static constexpr int CODEWORD_BITS = 648;
+    static constexpr int BYTES_PER_FRAME = DEFAULT_CODEWORDS_PER_FRAME * CODEWORD_BYTES;
+    static constexpr int BITS_PER_FRAME = DEFAULT_CODEWORDS_PER_FRAME * CODEWORD_BITS;
+
+    static int sanitizeCodewordCount(int codeword_count);
+    static int bytesPerFrame(int codeword_count);
+    static int bitsPerFrame(int codeword_count);
 
     /**
      * TX: Interleave coded bytes across N physical frames.
@@ -37,6 +44,9 @@ public:
      * Output: N physical frames, each BYTES_PER_FRAME bytes
      * N is determined from input.size().
      */
+    static std::vector<std::vector<uint8_t>> interleave(
+        const std::vector<std::vector<uint8_t>>& logical_frames,
+        int codeword_count);
     static std::vector<std::vector<uint8_t>> interleave(
         const std::vector<std::vector<uint8_t>>& logical_frames);
 
@@ -47,6 +57,9 @@ public:
      * Output: N logical frames of soft bits, each BITS_PER_FRAME floats
      * Operates on byte-groups of 8 soft bits to match byte-level TX interleaving.
      */
+    static std::vector<std::vector<float>> deinterleave(
+        const std::vector<std::vector<float>>& physical_soft,
+        int codeword_count);
     static std::vector<std::vector<float>> deinterleave(
         const std::vector<std::vector<float>>& physical_soft);
 };
