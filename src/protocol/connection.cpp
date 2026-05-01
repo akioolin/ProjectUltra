@@ -1039,7 +1039,7 @@ void Connection::enterConnected() {
         const bool near_awgn_ofdm =
             connection_policy::isNearAwgnOFDM(fading_index_, measured_snr_db_);
         arq_.setWindowSize(connection_policy::ofdmWindowSize(
-            data_modulation_, data_code_rate_));
+            data_modulation_, data_code_rate_, near_awgn_ofdm));
         arq_.setMaxRetries(15);     // More attempts compensate for ACK loss on fading
         arq_.setAckBatchSize(connection_policy::ofdmAckBatchSize(near_awgn_ofdm));
 

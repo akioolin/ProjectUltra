@@ -318,6 +318,13 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
                   equalized.size(), snr_symbol_count);
     }
 
+    std::vector<Complex> differential_symbols;
+    std::vector<float> differential_signal_power;
+    if (mod == Modulation::DQPSK || mod == Modulation::D8PSK) {
+        differential_symbols.assign(equalized.size(), Complex(0, 0));
+        differential_signal_power.assign(equalized.size(), 0.0f);
+    }
+
     for (size_t i = 0; i < equalized.size(); ++i) {
         const auto& sym = equalized[i];
         float base_nv = (i < carrier_noise_var.size()) ? carrier_noise_var[i] : noise_variance;
@@ -349,6 +356,8 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
             case Modulation::DQPSK: {
                 Complex prev_sym = dbpsk_prev_equalized[i];
                 Complex diff = sym * std::conj(prev_sym);
+                differential_symbols[i] = diff;
+                differential_signal_power[i] = std::abs(sym) * std::abs(prev_sym);
                 auto llrs = soft_demap::demapDQPSK(sym, prev_sym, nv);
                 soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
 
@@ -360,10 +369,12 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
             }
             case Modulation::D8PSK: {
                 Complex prev_sym = dbpsk_prev_equalized[i];
+                Complex diff = sym * std::conj(prev_sym);
+                differential_symbols[i] = diff;
+                differential_signal_power[i] = std::abs(sym) * std::abs(prev_sym);
                 auto llrs = soft_demap::demapD8PSK(sym, prev_sym, nv);
                 soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
                 if (!dqpsk_skip_first_symbol) {
-                    Complex diff = sym * std::conj(prev_sym);
                     constellation_update.push_back(diff);
                 }
                 dbpsk_prev_equalized[i] = sym;
@@ -416,7 +427,8 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
     // Two-stage tracking:
     // 1. Per-carrier channel tracking: update channel_estimate[] for frequency-selective fading
     // 2. Common phase tracking: update pilot_phase_correction for overall drift
-    if ((mod == Modulation::DQPSK || mod == Modulation::D8PSK) && !dbpsk_prev_equalized.empty()) {
+    if ((mod == Modulation::DQPSK || mod == Modulation::D8PSK) &&
+        differential_symbols.size() == equalized.size()) {
         // Skip first symbol to let differential decoding establish reference
         if (snr_symbol_count >= 1) {
             Complex phase_error_sum(0, 0);
@@ -428,12 +440,11 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
 
             for (size_t i = 0; i < equalized.size(); ++i) {
                 int idx = data_carrier_indices[i];
-                Complex prev_sym = (i < dbpsk_prev_equalized.size()) ? dbpsk_prev_equalized[i] : Complex(1, 0);
-                float signal_power = std::abs(equalized[i]) * std::abs(prev_sym);
+                float signal_power = differential_signal_power[i];
 
                 // Only track strong carriers
                 if (signal_power > 0.1f) {
-                    Complex diff = equalized[i] * std::conj(prev_sym);
+                    Complex diff = differential_symbols[i];
                     float phase = std::atan2(diff.imag(), diff.real());
 
                     // Map to nearest constellation point
@@ -460,8 +471,8 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
                     // Only update if error is small (likely correct decoding)
                     float max_error_rad = (mod == Modulation::DQPSK) ? 0.7f : 0.35f;  // ~40° for DQPSK
                     if (std::abs(phase_error) < max_error_rad) {
-                        Complex phase_correction = Complex(std::cos(-phase_error * dd_alpha),
-                                                           std::sin(-phase_error * dd_alpha));
+                        Complex phase_correction = Complex(std::cos(phase_error * dd_alpha),
+                                                           std::sin(phase_error * dd_alpha));
                         channel_estimate[idx] *= phase_correction;
                     }
 

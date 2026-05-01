@@ -66,7 +66,7 @@ inline uint8_t modeToCapabilityBit(WaveformMode mode) {
 }
 
 inline bool isNearAwgnOFDM(float fading_index, float snr_db) {
-    return fading_index < 0.30f && snr_db >= 15.0f;
+    return fading_index < 0.15f && snr_db >= 15.0f;
 }
 
 inline bool isHighThroughputOFDM(float fading_index, float snr_db) {
@@ -82,9 +82,25 @@ inline bool isHighThroughputOFDMMode(Modulation mod, CodeRate rate) {
            rate == CodeRate::R3_4;
 }
 
+inline bool isSpeculativeHighRateOFDM(Modulation mod, CodeRate rate) {
+    return mod == Modulation::DQPSK &&
+           (rate == CodeRate::R2_3 || rate == CodeRate::R3_4);
+}
+
+inline size_t ofdmWindowSize(Modulation mod, CodeRate rate, bool near_awgn_ofdm) {
+    if (!isHighThroughputOFDMMode(mod, rate)) {
+        return kWideOFDMWindowFrames;
+    }
+
+    if (isSpeculativeHighRateOFDM(mod, rate) && !near_awgn_ofdm) {
+        return kWideOFDMWindowFrames;
+    }
+
+    return kHighThroughputOFDMWindowFrames;
+}
+
 inline size_t ofdmWindowSize(Modulation mod, CodeRate rate) {
-    return isHighThroughputOFDMMode(mod, rate) ? kHighThroughputOFDMWindowFrames
-                                               : kWideOFDMWindowFrames;
+    return ofdmWindowSize(mod, rate, true);
 }
 
 inline uint32_t ofdmAckBatchSize(bool near_awgn_ofdm) {

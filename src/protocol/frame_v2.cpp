@@ -1017,6 +1017,21 @@ Bytes reassembleCodewords(const std::vector<Bytes>& codewords, size_t expected_s
     return result;
 }
 
+Bytes reassembleFixedCodewords(const std::vector<Bytes>& codewords, size_t expected_size) {
+    Bytes result;
+    result.reserve(expected_size);
+
+    for (const auto& cw : codewords) {
+        size_t remaining = expected_size - result.size();
+        if (remaining == 0) break;
+
+        size_t to_copy = std::min(remaining, cw.size());
+        result.insert(result.end(), cw.begin(), cw.begin() + to_copy);
+    }
+
+    return result;
+}
+
 uint32_t CodewordStatus::getNackBitmap() const {
     uint32_t bitmap = 0;
     for (size_t i = 0; i < decoded.size() && i < 32; i++) {
@@ -1087,7 +1102,13 @@ Bytes CodewordStatus::reassemble() const {
         expected_size = DataFrame::HEADER_SIZE + info.payload_len + DataFrame::CRC_SIZE;
     }
 
-    // Reassemble from decoded codewords
+    // Fixed OFDM frames pack raw info bytes contiguously across all four CWs.
+    // Do not run them through the marker-aware variable-CW reassembler: a real
+    // payload byte of 0xD5 at a CW boundary would be mistaken for a marker.
+    if (!info.is_control && fixed_frame && info.total_cw == FIXED_FRAME_CODEWORDS) {
+        return reassembleFixedCodewords(data, expected_size);
+    }
+
     return reassembleCodewords(data, expected_size);
 }
 
@@ -1109,6 +1130,7 @@ bool CodewordStatus::mergeCodeword(size_t index, const Bytes& cw_data) {
 void CodewordStatus::initForFrame(uint8_t total_cw) {
     // Must clear first! resize() preserves existing elements when shrinking,
     // which would leave stale 'true' values from previous frame
+    fixed_frame = false;
     decoded.clear();
     decoded.resize(total_cw, false);
     data.clear();
@@ -1367,6 +1389,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
         ultra::timing::globalDecoderProfile().decode_fixed_frame_total);
 
     CodewordStatus status;
+    status.fixed_frame = true;
     status.decoded.resize(FIXED_FRAME_CODEWORDS, false);
     status.data.resize(FIXED_FRAME_CODEWORDS);
 
@@ -1660,7 +1683,9 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                             }
                         }
 
-                        // Helper to apply/undo bit fix in status.data
+                        // Helper to apply/undo a byte-order bit fix in status.data.
+                        // The CRC delta table indexes bits as byte bit positions
+                        // (bit 0 = LSB), while LDPC soft bits are MSB-first.
                         auto fixBit = [&](size_t p) {
                             size_t fb = p / 8;
                             int cw = static_cast<int>(fb / bytes_per_cw);
@@ -1681,7 +1706,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                         //   C(30,3)/65536 ≈ 0.062 — acceptable
                         //   C(15,4)/65536 ≈ 0.021 — safe (with LLR threshold)
                         // -------------------------------------------------------
-                        struct SuspectBit { size_t frame_bit; float abs_llr; };
+                        struct SuspectBit { size_t crc_bit; float abs_llr; };
                         std::vector<SuspectBit> suspects;
 
                         for (int c = 0; c < FIXED_FRAME_CODEWORDS; ++c) {
@@ -1690,12 +1715,15 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                                 soft = interleaver->deinterleave(soft);
                             }
                             for (size_t i = 0; i < bytes_per_cw * 8 && i < soft.size(); ++i) {
-                                size_t frame_bit = c * bytes_per_cw * 8 + i;
-                                if (frame_bit / 8 >= data_bytes) continue;
+                                size_t cw_byte = i / 8;
+                                int byte_bit = 7 - static_cast<int>(i % 8);
+                                size_t frame_byte = c * bytes_per_cw + cw_byte;
+                                if (frame_byte >= data_bytes) continue;
+                                size_t crc_bit = frame_byte * 8 + static_cast<size_t>(byte_bit);
                                 int ch_bit = (soft[i] < 0) ? 1 : 0;
-                                int dec_bit = (status.data[c][i / 8] >> (i % 8)) & 1;
+                                int dec_bit = (status.data[c][cw_byte] >> byte_bit) & 1;
                                 if (ch_bit != dec_bit) {
-                                    suspects.push_back({frame_bit, std::abs(soft[i])});
+                                    suspects.push_back({crc_bit, std::abs(soft[i])});
                                 }
                             }
                         }
@@ -1707,24 +1735,24 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
 
                         std::vector<uint16_t> sd(ns);
                         for (int i = 0; i < ns; ++i)
-                            sd[i] = deltas[suspects[i].frame_bit];
+                            sd[i] = deltas[suspects[i].crc_bit];
 
                         // 2-bit among suspects: C(30,2) = 435 — safe
                         if (!recovered) {
                             for (int a = 0; a < ns && !recovered; ++a) {
                                 for (int b = a + 1; b < ns && !recovered; ++b) {
                                     if ((sd[a] ^ sd[b]) == syndrome) {
-                                        fixBit(suspects[a].frame_bit);
-                                        fixBit(suspects[b].frame_bit);
+                                        fixBit(suspects[a].crc_bit);
+                                        fixBit(suspects[b].crc_bit);
                                         auto trial = status.reassemble();
                                         if (verifyFrame(trial)) {
                                             LOG_MODEM(INFO, "FALSE POSITIVE RECOVERED (2-bit suspects, bits %zu,%zu, |LLR|=%.2f,%.2f)",
-                                                      suspects[a].frame_bit, suspects[b].frame_bit,
+                                                      suspects[a].crc_bit, suspects[b].crc_bit,
                                                       suspects[a].abs_llr, suspects[b].abs_llr);
                                             recovered = true;
                                         } else {
-                                            fixBit(suspects[a].frame_bit);
-                                            fixBit(suspects[b].frame_bit);
+                                            fixBit(suspects[a].crc_bit);
+                                            fixBit(suspects[b].crc_bit);
                                         }
                                     }
                                 }

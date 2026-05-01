@@ -71,6 +71,8 @@ void test_narrow_ofdm_timing_and_timeout() {
 
 void test_ofdm_profile_selection() {
     CHECK(isNearAwgnOFDM(0.00f, 15.0f), "near-AWGN threshold should include SNR15");
+    CHECK(isNearAwgnOFDM(0.14f, 15.0f), "near-AWGN fading threshold should allow R2/3 cutoff margin");
+    CHECK(!isNearAwgnOFDM(0.15f, 15.0f), "near-AWGN fading threshold should match R2/3 cutoff");
     CHECK(!isNearAwgnOFDM(0.30f, 15.0f), "near-AWGN fading threshold is strict");
     CHECK(!isNearAwgnOFDM(0.00f, 14.9f), "near-AWGN SNR threshold is strict");
     CHECK(isHighThroughputOFDM(0.30f, 15.0f), "Good fading SNR15 should use high-throughput OFDM window");
@@ -85,6 +87,12 @@ void test_ofdm_profile_selection() {
           "high-throughput OFDM window size");
     CHECK(ofdmWindowSize(Modulation::DQPSK, CodeRate::R1_4) == kWideOFDMWindowFrames,
           "default OFDM window size");
+    CHECK(ofdmWindowSize(Modulation::DQPSK, CodeRate::R2_3, true) == kHighThroughputOFDMWindowFrames,
+          "R2/3 can use two burst groups only near AWGN");
+    CHECK(ofdmWindowSize(Modulation::DQPSK, CodeRate::R2_3, false) == kWideOFDMWindowFrames,
+          "R2/3 should avoid two burst groups on fading channels");
+    CHECK(ofdmWindowSize(Modulation::DQPSK, CodeRate::R1_2, false) == kHighThroughputOFDMWindowFrames,
+          "R1/2 keeps the high-throughput OFDM window in fading");
     CHECK(ofdmAckBatchSize(true) == 0, "near-AWGN ACK batch disabled");
     CHECK(ofdmAckBatchSize(false) == 0, "fading ACK batch sentinel");
 

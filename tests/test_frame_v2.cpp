@@ -25,6 +25,18 @@ int tests_failed = 0;
     std::cout << "FAIL: " << msg << "\n"; \
     tests_failed++;
 
+static std::vector<float> bytesToSoftBits(const Bytes& encoded) {
+    std::vector<float> soft_bits;
+    soft_bits.reserve(encoded.size() * 8);
+    for (uint8_t byte : encoded) {
+        for (int b = 7; b >= 0; --b) {
+            int bit = (byte >> b) & 1;
+            soft_bits.push_back(bit ? -5.0f : 5.0f);
+        }
+    }
+    return soft_bits;
+}
+
 void test_callsign_hashing() {
     TEST("callsign hashing") {
         // Hash should be deterministic
@@ -487,6 +499,47 @@ void test_fixed_frame_helpers() {
         assert(parsed.has_value());
         assert(parsed->total_cw == FIXED_FRAME_CODEWORDS);
         assert(parsed->payload.size() == getFixedFramePayloadCapacity(CodeRate::R1_2));
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
+void test_fixed_frame_reassemble_preserves_marker_boundary_byte() {
+    TEST("fixed frame reassembly preserves 0xD5 at CW boundary") {
+        constexpr CodeRate rate = CodeRate::R2_3;
+        const size_t capacity = getFixedFramePayloadCapacity(rate);
+        const size_t bytes_per_cw = getBytesPerCodeword(rate);
+        const size_t payload_boundary_offset = bytes_per_cw - DataFrame::HEADER_SIZE;
+
+        Bytes payload(capacity, 0x41);
+        payload[payload_boundary_offset] = DATA_CW_MARKER;
+        payload[payload_boundary_offset + 1] = 0x99;
+
+        auto frame = makeFixedDataFrame("VA2MVR", "W1AW", 77, payload, rate);
+        auto serialized = frame.serialize();
+
+        assert(serialized.size() == FIXED_FRAME_CODEWORDS * bytes_per_cw);
+        assert(serialized[bytes_per_cw] == DATA_CW_MARKER);
+        assert(serialized[bytes_per_cw + 1] == 0x99);
+
+        auto encoded = encodeFixedFrame(serialized, rate, false);
+        auto soft_bits = bytesToSoftBits(encoded);
+        assert(soft_bits.size() == FIXED_FRAME_CODEWORDS * LDPC_CODEWORD_BITS);
+
+        auto status = decodeFixedFrame(soft_bits, rate, false);
+        assert(status.fixed_frame);
+        assert(status.allSuccess());
+
+        auto reassembled = status.reassemble();
+        assert(reassembled == serialized);
+        assert(reassembled[bytes_per_cw] == DATA_CW_MARKER);
+        assert(reassembled[bytes_per_cw + 1] == 0x99);
+
+        auto parsed = DataFrame::deserialize(reassembled);
+        assert(parsed.has_value());
+        assert(parsed->payload == payload);
 
         PASS();
     } catch (const std::exception& e) {
@@ -996,6 +1049,7 @@ int main() {
     test_nack_payload();
     test_nack_frame();
     test_fixed_frame_helpers();
+    test_fixed_frame_reassemble_preserves_marker_boundary_byte();
     test_codeword_status();
     test_frame_type_helpers();
     test_large_text_message();

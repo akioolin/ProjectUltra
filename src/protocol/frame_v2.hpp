@@ -547,6 +547,7 @@ Bytes reassembleCodewords(const std::vector<Bytes>& codewords, size_t expected_s
 struct CodewordStatus {
     std::vector<bool> decoded;  // true = LDPC succeeded for this CW
     std::vector<Bytes> data;    // Decoded data for each CW (20 bytes each)
+    bool fixed_frame = false;   // true for OFDM fixed 4-CW frames without CW1+ markers
 
     // Build NACK bitmap from decode status
     uint32_t getNackBitmap() const;
