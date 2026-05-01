@@ -4,12 +4,14 @@
 
 **If this is a new/fresh session, do this FIRST before any work:**
 
-1. **Read project goals:** `cat docs/PROJECT_GOALS.md` - Mission, priorities, and task filter
-2. **Read current agent/project state:** `cat docs/AGENT_CURRENT_STATE.md` - Current automation and handoff context
-3. **Check known bugs:** `cat docs/KNOWN_BUGS.md` - Active bugs you must not re-discover
-4. **Check recent changes:** `git log --oneline -10` - See recent commits
+1. **Read AI collaboration playbook:** `cat docs/AI_COLLABORATION.md` - **MANDATORY** - How to work with Codex (the other AI on this project), when to involve it, brief format, verification gates, autonomous-mode rules
+2. **Read project goals:** `cat docs/PROJECT_GOALS.md` - Mission, priorities, and task filter
+3. **Read current agent/project state:** `cat docs/AGENT_CURRENT_STATE.md` - Current automation and handoff context
+4. **Check known bugs:** `cat docs/KNOWN_BUGS.md` - Active bugs you must not re-discover
+5. **Check recent changes:** `git log --oneline -10` - See recent commits
 
 **Before modifying ANY code, read:**
+- `docs/AI_COLLABORATION.md` - Required workflow with Codex for non-trivial changes
 - `docs/PROJECT_GOALS.md` - Mission, priorities, throughput/reliability targets, and agent task rule
 - `docs/INVARIANTS.md` - Critical rules that MUST NOT be violated (causes subtle bugs if ignored)
 
