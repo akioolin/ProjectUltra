@@ -68,7 +68,7 @@ public:
     void abortPendingTx();
 
     // Set the code rate for DATA frame total_cw calculation
-    void setCodeRate(CodeRate rate) { code_rate_ = rate; }
+    void setCodeRate(CodeRate rate);
     CodeRate getCodeRate() const { return code_rate_; }
 
     // Set window size (1 = stop-and-wait behavior for MC-DPSK)

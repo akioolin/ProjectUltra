@@ -144,6 +144,84 @@ bool test_send_single_frame() {
     return true;
 }
 
+bool test_data_flags_preserve_version_bit() {
+    TEST("DATA flags preserve v2 version bit");
+
+    ARQConfig config;
+    config.window_size = 4;
+
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+    tx.setCodeRate(CodeRate::R1_2);
+
+    ByteChannel channel;
+    tx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    if (!tx.sendDataWithFlags(Bytes{0x01}, v2::Flags::MORE_FRAG))
+        FAIL("sendDataWithFlags failed");
+    if (!tx.sendFixedDataWithFlags(Bytes{0x02}, v2::Flags::MORE_FRAG))
+        FAIL("sendFixedDataWithFlags failed");
+    if (!tx.sendVariableDataWithFlags(Bytes{0x03}, v2::Flags::MORE_FRAG))
+        FAIL("sendVariableDataWithFlags failed");
+
+    while (channel.hasData()) {
+        auto parsed = v2::DataFrame::deserialize(channel.receive());
+        if (!parsed)
+            FAIL("transmitted DATA frame did not parse");
+        if ((parsed->flags & v2::Flags::VERSION_V2) == 0)
+            FAIL("VERSION_V2 bit was not preserved");
+        if ((parsed->flags & v2::Flags::MORE_FRAG) == 0)
+            FAIL("MORE_FRAG bit was not preserved");
+    }
+
+    PASS();
+    return true;
+}
+
+bool test_code_rate_change_aborts_in_flight_fixed_frames() {
+    TEST("Code rate change aborts in-flight fixed frames");
+
+    ARQConfig config;
+    config.window_size = 3;
+    config.ack_timeout_ms = 1000;
+
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+    tx.setCodeRate(CodeRate::R1_2);
+
+    ByteChannel channel;
+    tx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    int completions = 0;
+    tx.setSendCompleteCallback([&](bool) { completions++; });
+
+    for (int i = 0; i < 3; i++) {
+        Bytes data = {static_cast<uint8_t>(0xA0 + i)};
+        if (!tx.sendFixedDataWithFlags(data, v2::Flags::MORE_FRAG))
+            FAIL("Failed to send fixed DATA frame " + std::to_string(i));
+    }
+
+    if (tx.getAvailableSlots() != 0)
+        FAIL("Window should be full before code-rate change");
+
+    channel.clear();
+    tx.setCodeRate(CodeRate::R1_4);
+
+    if (tx.getCodeRate() != CodeRate::R1_4)
+        FAIL("Code rate was not updated");
+    if (tx.getAvailableSlots() != 3)
+        FAIL("Window was not fully available after code-rate change");
+    if (completions != 0)
+        FAIL("Abort should not report ACK/failure completion");
+
+    tx.tick(2000);
+    if (channel.size() != 0)
+        FAIL("Aborted in-flight frames were retransmitted after code-rate change");
+
+    PASS();
+    return true;
+}
+
 bool test_send_window_full() {
     TEST("Send until window full");
 
@@ -1136,6 +1214,8 @@ int main() {
     std::cout << "\nBasic Tests:\n";
     test_create_sr_arq();
     test_send_single_frame();
+    test_data_flags_preserve_version_bit();
+    test_code_rate_change_aborts_in_flight_fixed_frames();
     test_send_window_full();
     test_receive_ack();
 

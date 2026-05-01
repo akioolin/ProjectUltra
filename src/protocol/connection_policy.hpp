@@ -27,6 +27,8 @@ inline constexpr uint32_t kOFDMBurstAckBatchFrames = 4;
 inline constexpr size_t kWideOFDMWindowFrames = 8;
 inline constexpr size_t kHighThroughputOFDMWindowFrames = 16;
 inline constexpr size_t kBurstInterleaveGroupFrames = 8;
+inline constexpr uint32_t kResponderHandshakeFailSafeMs = 2200;
+inline constexpr uint32_t kConnectAckLegacyRetransmitMs = 6000;
 
 struct OFDMFrameTiming {
     uint32_t data_symbols = 0;
@@ -101,6 +103,13 @@ inline size_t ofdmWindowSize(Modulation mod, CodeRate rate, bool near_awgn_ofdm)
 
 inline size_t ofdmWindowSize(Modulation mod, CodeRate rate) {
     return ofdmWindowSize(mod, rate, true);
+}
+
+inline size_t ofdmWindowSizeForChannel(Modulation mod,
+                                       CodeRate rate,
+                                       float fading_index,
+                                       float snr_db) {
+    return ofdmWindowSize(mod, rate, isNearAwgnOFDM(fading_index, snr_db));
 }
 
 inline bool shouldPadHighRateFadingBurst(Modulation mod,
@@ -206,6 +215,28 @@ inline uint32_t computeWideOFDMAckTimeoutMs(Modulation mod,
     const uint32_t timeout_ms = tx_burst_ms + ack_path_ms +
                                 decode_jitter_margin_ms + queued_tail_margin_ms;
     return std::clamp(timeout_ms, 8000u, 16000u);
+}
+
+inline uint32_t connectAckRetransmitDelayMs(WaveformMode mode,
+                                            Modulation mod,
+                                            CodeRate rate) {
+    if (!isOFDMMode(mode)) {
+        return kConnectAckLegacyRetransmitMs;
+    }
+
+    // CONNECT_ACK is an MC-DPSK full-preamble frame. If the initiator receives
+    // it and immediately starts an OFDM burst, the responder cannot deliver a
+    // valid DATA frame until the first burst-interleaver group has been
+    // collected and deinterleaved. Delay the rescue retransmit until after that
+    // success path has had time to clear the cached ACK.
+    const OFDMFrameTiming timing = wideOFDMFrameTiming(mod, rate);
+    const uint64_t first_group_ms =
+        static_cast<uint64_t>(timing.data_ms) * kBurstInterleaveGroupFrames;
+    const uint64_t delay_ms =
+        kResponderHandshakeFailSafeMs + first_group_ms + 3500u;
+
+    return static_cast<uint32_t>(
+        std::clamp<uint64_t>(delay_ms, kConnectAckLegacyRetransmitMs, 12000ULL));
 }
 
 inline OFDMFrameTiming narrowOFDMFrameTiming(Modulation mod) {

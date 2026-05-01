@@ -35,6 +35,10 @@ add_executable(test_connection_policy test_connection_policy.cpp)
 target_link_libraries(test_connection_policy PRIVATE ultra_core)
 add_test(NAME ConnectionPolicy COMMAND test_connection_policy)
 
+add_executable(test_connection_adaptive test_connection_adaptive.cpp)
+target_link_libraries(test_connection_adaptive PRIVATE ultra_core)
+add_test(NAME ConnectionAdaptive COMMAND test_connection_adaptive)
+
 add_executable(test_file_transfer_controller test_file_transfer_controller.cpp)
 target_link_libraries(test_file_transfer_controller PRIVATE ultra_core)
 add_test(NAME FileTransferController COMMAND test_file_transfer_controller)

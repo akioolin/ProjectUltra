@@ -309,8 +309,19 @@ void ProtocolEngine::processRxBuffer() {
         }
 
         if (crc_ok) {
+            const std::string local_call = connection_.getLocalCallsign();
+            if (!v2::isAddressedToCallsign(header, local_call)) {
+                LOG_MODEM(TRACE,
+                          "[%s] RX << %s seq=%d for different station, dropping",
+                          local_call.c_str(),
+                          v2::frameTypeToString(header.type),
+                          header.seq);
+                rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + frame_size);
+                continue;
+            }
+
             LOG_MODEM(INFO, "[%s] RX << %s seq=%d (%zu bytes)",
-                      connection_.getLocalCallsign().c_str(),
+                      local_call.c_str(),
                       v2::frameTypeToString(header.type), header.seq, frame_size);
             rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + frame_size);
             connection_.onFrameReceived(frame_data);

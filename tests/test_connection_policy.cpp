@@ -54,6 +54,21 @@ void test_wide_ofdm_timing_and_timeout() {
     CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 16, 5304, 1) == 16000,
           "wide OFDM window=16 timeout should clamp to hardware-safe ceiling");
 
+    const auto connect_ack_r23 =
+        connectAckRetransmitDelayMs(WaveformMode::OFDM_CHIRP,
+                                    Modulation::DQPSK,
+                                    CodeRate::R2_3);
+    const auto dqpsk_r23 = wideOFDMFrameTiming(Modulation::DQPSK, CodeRate::R2_3);
+    const uint32_t first_group_r23_ms =
+        kResponderHandshakeFailSafeMs +
+        kBurstInterleaveGroupFrames * dqpsk_r23.data_ms;
+    CHECK(connect_ack_r23 > first_group_r23_ms,
+          "OFDM CONNECT_ACK rescue retry should wait for first burst group");
+    CHECK(connectAckRetransmitDelayMs(WaveformMode::MC_DPSK,
+                                      Modulation::DQPSK,
+                                      CodeRate::R1_4) == kConnectAckLegacyRetransmitMs,
+          "non-OFDM CONNECT_ACK retry should keep legacy delay");
+
     auto d8psk = wideOFDMFrameTiming(Modulation::D8PSK, CodeRate::R1_2);
     CHECK(d8psk.data_symbols == 19, "D8PSK R1/2 wide OFDM data symbols");
     CHECK(d8psk.ack_symbols == 7, "D8PSK R1/2 wide OFDM ACK symbols");
@@ -90,7 +105,19 @@ void test_ofdm_profile_selection() {
     CHECK(ofdmWindowSize(Modulation::DQPSK, CodeRate::R2_3, true) == kHighThroughputOFDMWindowFrames,
           "R2/3 can use two burst groups only near AWGN");
     CHECK(ofdmWindowSize(Modulation::DQPSK, CodeRate::R2_3, false) == kWideOFDMWindowFrames,
-          "R2/3 should avoid two burst groups on fading channels");
+          "legacy R2/3 window helper should stay conservative on fading channels");
+    CHECK(ofdmWindowSizeForChannel(Modulation::DQPSK, CodeRate::R2_3, 0.30f, 15.0f)
+              == kWideOFDMWindowFrames,
+          "R2/3 should keep one burst group on good fading at SNR15");
+    CHECK(ofdmWindowSizeForChannel(Modulation::DQPSK, CodeRate::R2_3, 0.05f, 15.0f)
+              == kHighThroughputOFDMWindowFrames,
+          "R2/3 can use two burst groups only on near-AWGN channels");
+    CHECK(ofdmWindowSizeForChannel(Modulation::DQPSK, CodeRate::R2_3, 0.80f, 15.0f)
+              == kWideOFDMWindowFrames,
+          "R2/3 should keep one burst group on moderate fading");
+    CHECK(ofdmWindowSizeForChannel(Modulation::DQPSK, CodeRate::R3_4, 0.30f, 15.0f)
+              == kWideOFDMWindowFrames,
+          "R3/4 remains near-AWGN only for two burst groups");
     CHECK(ofdmWindowSize(Modulation::DQPSK, CodeRate::R1_2, false) == kHighThroughputOFDMWindowFrames,
           "R1/2 keeps the high-throughput OFDM window in fading");
     CHECK(!shouldPadHighRateFadingBurst(Modulation::DQPSK, CodeRate::R2_3, false, 1),

@@ -10,6 +10,132 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-01: Adaptive code-rate selection — full end-to-end working
+
+**What was broken:**
+The adaptive mode controller (introduced earlier in the session) shipped with
+the right shape but the wrong lifetime. On hardware tests it manifested in
+four layers, each surfaced only after the previous was fixed:
+
+1. **Stuck downgrade under retry pressure.** `tryIssueAdaptiveModeChangeAtBoundary()`
+   required `availableSlots == windowSize` (full window drain) before any
+   MODE_CHANGE could fire. Retx storms keep the window populated — exactly
+   the case where a downgrade is needed — so the queued downgrade got stuck
+   indefinitely.
+
+2. **Thrashing after recoverable downgrade.** Once the boundary check was
+   relaxed, downgrades fired correctly, but the controller would re-upgrade
+   immediately because the next 3 evaluation windows looked "clean" — they
+   only looked clean because the rate was just lowered. Hardware test
+   showed 7 mode changes in 200 s and final failure at max retries.
+
+3. **Stuck downgrade under severe pressure.** With the half-window relaxation,
+   sustained timeouts kept `availableSlots * 2 < windowSize`. The downgrade
+   queued every 1 s for >150 s without firing; first frame never delivered.
+
+4. **In-flight retx ignored rate change.** Even after the controller fired
+   correctly, ARQ retransmits the **cached** `tx_window_[slot].frame_data`
+   bytes — encoded at the OLD rate. After MODE_CHANGE, those bytes are
+   payload-too-large for the new rate's fixed-frame; receiver can't decode.
+   ARQ retries 15× → max retries → fail.
+
+**What was changed:**
+Four-round patch series, all on top of the existing controller:
+
+- `src/protocol/connection.cpp,hpp`:
+  - **Round 1:** `canIssueAdaptiveModeChange(bool is_downgrade)` accepts
+    `available_slots * 2 >= window_size` for downgrades only. Upgrades keep
+    strict `==` to avoid losing in-flight DATA on the more-robust rate.
+  - **Round 2:** `ADAPTIVE_POST_DOWNGRADE_LOCKOUT_MS = 15000` blocks
+    upgrades for 15 s after a downgrade fires. Re-armed after each
+    `applyDataMode()` resets state.
+  - **Round 3:** `ADAPTIVE_DOWNGRADE_FORCE_MS = 6000` — when a downgrade
+    has been queued >6 s without firing because of the boundary check,
+    force the MODE_CHANGE regardless of window state. WARN-logged.
+- `src/protocol/selective_repeat_arq.cpp,hpp` (Round 4):
+  - `setCodeRate()` moved out-of-line; on rate change, walks `tx_window_`,
+    aborts active+un-ACK'd slots, resets in-flight bookkeeping, rewinds
+    TX seq to the current ACK base. Logs WARN with abort count.
+- `src/protocol/file_transfer.cpp,hpp` (Round 4): adds requeue path so the
+  chunker rewinds the file offset when ARQ aborts the in-flight slots,
+  letting the next pull regenerate the right chunks at the new rate.
+
+Also added in this session by ChatGPT 5.5 (Codex):
+- `dataFrameFlags()` helper preserves `VERSION_V2` bit on data frames
+  (was being clobbered by `frame.flags = flags`). Regression test in
+  `tests/test_selective_repeat.cpp`.
+- `connectAckRetransmitDelayMs()` adapts CONNECT_ACK rescue retransmit
+  timing so the retx doesn't fire into the responder's first OFDM
+  burst-interleaver group on the success path.
+- `isAddressedToCallsign()` filter drops cross-talk frames at
+  `deliverFrame`, `processRxBuffer`, and the cli_simulator RX path.
+- `makeOFDMBurstPadPayload()` uses xorshift32 + 0x7F discriminator
+  instead of all-zero pad, reducing fading-tail "4/4 CWs OK but frame
+  invalid" artifacts.
+- `ofdmWindowSizeForChannel()` channel-aware window size wrapper.
+- `applyDataMode()` / `configureArqForCurrentDataMode()` refactor pulls
+  shared logic out of `enterConnected()` and `handleModeChange()`.
+
+Tests added:
+- `tests/test_connection_adaptive.cpp` — new file, 28 tests covering:
+  initial-mode pick, bootstrap cap, upgrade backlog gate, downgrade
+  retry-pressure trigger, half-window boundary, post-downgrade lockout
+  arming + expiry, stuck-downgrade force-after-timeout, upgrade NOT
+  forced after timeout, forced-rate disables controller.
+- `tests/test_selective_repeat.cpp` — `test_data_flags_preserve_version_bit`
+  and `test_code_rate_change_aborts_in_flight_fixed_frames`.
+- `tests/test_connection_policy.cpp` — `connectAckRetransmitDelayMs()`
+  expectations.
+
+**How it's properly fixed:**
+- Asymmetric boundary check matches asymmetric semantics. Downgrades are
+  recovery (in-flight frames at the failing rate are doomed anyway);
+  upgrades risk losing good progress (in-flight frames at the safer
+  rate need to clear cleanly first).
+- Lockout prevents the controller from interpreting "no retx after
+  downgrade" as channel improvement.
+- Force-after-timeout is the escape hatch when even half-window can't
+  drain — at that point the in-flight frames will fail anyway, so
+  switching to a safer rate is strictly better than waiting.
+- ARQ abort + file-transfer rewind keeps the frame-encoding rate
+  consistent with the ARQ window contents. The cost is a few seconds
+  of duplicated TX work; the alternative is the frame-encoding rate
+  drift bug (frames pre-encoded at old rate sent forever after rate
+  change).
+
+**Test verification:**
+- `cmake --build build -j4 && ctest --test-dir build --output-on-failure`
+  → 30/30 pass, including 28 new ConnectionAdaptive tests.
+- Hardware test (Mac↔Pi USB cable, channel injection):
+  `SSH_KEY=$HOME/.ssh/id_pi5 ./tools/run_hw_test.sh --file 51200 \
+   --rate auto --snr 20 --channel awgn --inject`
+  → 50 KB delivered, 0 frames failed, 478 frames sent, 84 retx,
+  4 forced downgrades + 4 normal MODE_CHANGEs, 986 bps throughput.
+  Logs at `/tmp/ultra_hw_20260501_173642`.
+- Pre-patch result on the same workload: failed at max retries
+  (`/tmp/ultra_hw_20260501_170101` — 6 frames failed at seq=25-31
+  because retx kept transmitting old-rate-encoded payloads).
+
+**Auto rate ladder honored:**
+`recommendDataModeForWaveform(snr, fading)` (the existing ladder in
+`waveform_selection.hpp`) is the source of truth. Bootstrap cap drops
+the initial pick one notch on borderline OFDM channels. Adaptive
+controller can move freely up/down within that ladder during a file
+transfer based on observed retx pressure and clean-window count.
+
+**Known limitations:**
+- Auto on the 50 KB AWGN-injected test runs ~58% of forced-R1/2
+  throughput (986 vs 1692 bps). The auto path pays time at every
+  rate including R1/4 transitions; if SNR is *known* to support R1/2,
+  forcing it is faster. Auto is the right call when channel is unknown
+  or varying.
+- Non-file in-flight DATA (single messages) doesn't have an equivalent
+  rewind path. If MODE_CHANGE fires while a non-file payload is
+  in-flight, that payload is dropped. Acceptable for now: messages
+  are short and unlikely to overlap with adaptive transitions.
+
+---
+
 ## 2026-04-26: ack_repeat=1 on near-AWGN — sustained file-transfer throughput
 
 **What was broken:**

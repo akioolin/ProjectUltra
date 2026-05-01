@@ -7,6 +7,14 @@ namespace protocol {
 
 namespace arq_policy = selective_repeat_arq_policy;
 
+namespace {
+
+uint8_t dataFrameFlags(uint8_t flags) {
+    return static_cast<uint8_t>(v2::Flags::VERSION_V2 | flags);
+}
+
+}  // namespace
+
 SelectiveRepeatARQ::SelectiveRepeatARQ(const ARQConfig& config)
     : config_(config)
 {
@@ -19,6 +27,81 @@ SelectiveRepeatARQ::SelectiveRepeatARQ(const ARQConfig& config)
 void SelectiveRepeatARQ::setCallsigns(const std::string& local, const std::string& remote) {
     local_call_ = sanitizeCallsign(local);
     remote_call_ = sanitizeCallsign(remote);
+}
+
+void SelectiveRepeatARQ::setCodeRate(CodeRate rate) {
+    if (rate == code_rate_) {
+        return;
+    }
+
+    code_rate_ = rate;
+
+    size_t aborted_unacked = 0;
+    size_t cleared_acked = 0;
+    for (auto& slot : tx_window_) {
+        if (!slot.active) {
+            continue;
+        }
+
+        if (slot.acked) {
+            cleared_acked++;
+        } else {
+            aborted_unacked++;
+        }
+
+        slot.active = false;
+        slot.acked = false;
+        slot.frame_data.clear();
+        slot.timeout_ms = 0;
+        slot.first_tx_ms = 0;
+        slot.rtt_sample_eligible = false;
+        slot.retry_count = 0;
+        slot.hole_ack_count = 0;
+        slot.fast_retx_count = 0;
+        slot.fast_retx_cooldown_ms = 0;
+        slot.hole_probe_armed = false;
+        slot.hole_probe_timer_ms = 0;
+        slot.hole_probe_count = 0;
+    }
+
+    if (aborted_unacked > 0 || cleared_acked > 0 || tx_in_flight_ > 0) {
+        tx_next_seq_ = tx_base_seq_;
+        tx_in_flight_ = 0;
+        last_ack_signature_valid_ = false;
+        last_ack_seq_ = 0;
+        last_ack_bitmap_ = 0;
+        ack_dedup_timer_ms_ = 0;
+
+        LOG_MODEM(WARN,
+                  "SR-ARQ: Code rate changed, aborted %zu unACKed in-flight TX slots "
+                  "(cleared %zu SACKed); rewound TX seq to %u",
+                  aborted_unacked, cleared_acked, tx_next_seq_);
+    }
+
+    size_t discarded_rx = 0;
+    for (auto& slot : rx_window_) {
+        if (!slot.received) {
+            continue;
+        }
+
+        slot.received = false;
+        slot.payload.clear();
+        slot.flags = 0;
+        discarded_rx++;
+    }
+
+    if (discarded_rx > 0) {
+        sack_pending_ = false;
+        sack_timer_ms_ = 0;
+        frames_since_ack_ = 0;
+        ack_repeat_jobs_.clear();
+        last_sack_base_valid_ = false;
+        last_sack_base_ = 0;
+
+        LOG_MODEM(WARN,
+                  "SR-ARQ: Code rate changed, discarded %zu buffered RX slots at seq base %u",
+                  discarded_rx, rx_base_seq_);
+    }
 }
 
 bool SelectiveRepeatARQ::sendData(const Bytes& data) {
@@ -45,7 +128,7 @@ bool SelectiveRepeatARQ::sendDataWithFlags(const Bytes& data, uint8_t flags) {
     size_t slot = seqToSlot(seq);
 
     auto frame = v2::DataFrame::makeData(local_call_, remote_call_, seq, data, code_rate_);
-    frame.flags = flags;
+    frame.flags = dataFrameFlags(flags);
 
     tx_window_[slot].active = true;
     tx_window_[slot].frame_data = frame.serialize();
@@ -92,7 +175,7 @@ bool SelectiveRepeatARQ::sendFixedDataWithFlags(const Bytes& data, uint8_t flags
     size_t slot = seqToSlot(seq);
 
     auto frame = v2::makeFixedDataFrame(local_call_, remote_call_, seq, data, code_rate_);
-    frame.flags = flags;
+    frame.flags = dataFrameFlags(flags);
 
     tx_window_[slot].active = true;
     tx_window_[slot].frame_data = frame.serialize();
@@ -135,7 +218,7 @@ bool SelectiveRepeatARQ::sendVariableDataWithFlags(const Bytes& data, uint8_t fl
     size_t slot = seqToSlot(seq);
 
     auto frame = v2::DataFrame::makeData(local_call_, remote_call_, seq, data, code_rate_);
-    frame.flags = flags;
+    frame.flags = dataFrameFlags(flags);
 
     tx_window_[slot].active = true;
     tx_window_[slot].frame_data = frame.serialize();

@@ -43,15 +43,16 @@ PI=${PI:-math@pi5tester}
 # Absolute path on the Pi — keeping ~ here would let the Mac shell expand it
 # to /Users/<me>/ProjectUltra before the SSH command was even sent.
 PI_REPO=${PI_REPO:-/home/math/ProjectUltra}
-# Optional: SSH_KEY=~/.ssh/id_pi5 to use a specific key
-SSH_OPTS=${SSH_KEY:+-i "$SSH_KEY"}
+# Optional: SSH_KEY=~/.ssh/id_pi5 to use a specific key.
+# SSH_EXTRA_OPTS can carry options such as -o HostKeyAlias=pi5tester.
+SSH_OPTS="${SSH_KEY:+-i "$SSH_KEY"} ${SSH_EXTRA_OPTS:-}"
 PI_AUDIO_OUT=${PI_AUDIO_OUT:-USB Audio Device, USB Audio}
 PI_AUDIO_IN=${PI_AUDIO_IN:-USB Audio Device, USB Audio}
 MAC_AUDIO_OUT=${MAC_AUDIO_OUT:-Sound Blaster Play! 3}
 MAC_AUDIO_IN=${MAC_AUDIO_IN:-Sound Blaster Play! 3}
 SNR=${SNR:-20}
 CHANNEL=${CHANNEL:-awgn}              # awgn|good|moderate|poor|flutter
-RATE=${RATE:-r1_4}                    # r1_4|r1_2|r2_3|r3_4
+RATE=${RATE:-r1_4}                    # auto|r1_4|r1_2|r2_3|r3_4
 FILE_SIZE=${FILE_SIZE:-}              # empty = message test
 INJECT_CHANNEL=${INJECT_CHANNEL:-0}   # 1 = synthetic HF channel on each TX
 INJECT_GAIN=${INJECT_GAIN:-}          # optional post-injection gain/headroom
@@ -110,6 +111,9 @@ INJECT_GAIN_FLAG=""
 FILE_FLAG=""
 [[ -n "$FILE_SIZE" ]] && FILE_FLAG="--file $FILE_SIZE"
 
+RATE_FLAG=""
+[[ "$RATE" != "auto" && "$RATE" != "AUTO" ]] && RATE_FLAG="--rate $RATE"
+
 CHANNEL_FLAG=""
 [[ "$CHANNEL" != "awgn" ]] && CHANNEL_FLAG="--channel $CHANNEL"
 
@@ -145,7 +149,7 @@ PI_CMD="cd $PI_REPO && \
   rm -f /tmp/ultra_B.log; \
   nohup ./build/cli_simulator --role B \
     $PI_DEVS \
-    --snr $SNR --rate $RATE $CHANNEL_FLAG $INJECT_FLAG $INJECT_GAIN_FLAG \
+    --snr $SNR $RATE_FLAG $CHANNEL_FLAG $INJECT_FLAG $INJECT_GAIN_FLAG \
     --idle-seconds $B_IDLE_SECONDS \
     $EXTRA_CLI_ARGS \
     > /tmp/ultra_B.log 2>&1 & \
@@ -160,7 +164,7 @@ echo "[2/3] Running station A locally..."
 set +e
 "$MAC_BIN" --role A \
   ${MAC_DEVS_ARR[@]+"${MAC_DEVS_ARR[@]}"} \
-  --snr "$SNR" --rate "$RATE" $CHANNEL_FLAG $INJECT_FLAG $INJECT_GAIN_FLAG $FILE_FLAG \
+  --snr "$SNR" $RATE_FLAG $CHANNEL_FLAG $INJECT_FLAG $INJECT_GAIN_FLAG $FILE_FLAG \
   $EXTRA_CLI_ARGS \
   > "$LOG_DIR/A.log" 2>&1
 A_EXIT=$?
@@ -171,12 +175,88 @@ echo "[3/3] Stopping B and collecting log..."
 ssh $SSH_OPTS "$PI" "kill $B_PID 2>/dev/null; sleep 1; pkill -9 cli_simulator 2>/dev/null; true" >/dev/null
 ssh $SSH_OPTS "$PI" "cat /tmp/ultra_B.log" > "$LOG_DIR/B.log"
 
+# ─── Metric extraction ─────────────────────────────────────────────────
+print_file_metrics() {
+  [[ -n "$FILE_SIZE" ]] || return 0
+
+  local start_ts frames_sent final_seq ack_ts duration_s throughput_bps retx_line
+  start_ts=$(awk '
+    function ts(line, value) {
+      if (match(line, /\[[[:space:]]*[0-9]+\.[0-9]+\]/)) {
+        value = substr(line, RSTART, RLENGTH)
+        gsub(/\[/, "", value); gsub(/\]/, "", value); gsub(/[[:space:]]/, "", value)
+        return value
+      }
+      return ""
+    }
+    /Connection: Starting file transfer/ {
+      print ts($0); exit
+    }' "$LOG_DIR/A.log")
+  frames_sent=$(sed -n 's/.*ARQ:  frames_sent=\([0-9][0-9]*\).*/\1/p' "$LOG_DIR/A.log" | head -1)
+
+  if [[ -n "$frames_sent" && "$frames_sent" -gt 0 ]]; then
+    final_seq=$((frames_sent - 1))
+    ack_ts=$(awk -v seq="$final_seq" '
+      function ts(line, value) {
+        if (match(line, /\[[[:space:]]*[0-9]+\.[0-9]+\]/)) {
+          value = substr(line, RSTART, RLENGTH)
+          gsub(/\[/, "", value); gsub(/\]/, "", value); gsub(/[[:space:]]/, "", value)
+          return value
+        }
+        return ""
+      }
+      $0 ~ "RX << ACK seq=" seq " \\(20 bytes\\)" {
+        print ts($0); exit
+      }' "$LOG_DIR/A.log")
+  fi
+
+  if [[ -z "${ack_ts:-}" ]]; then
+    ack_ts=$(awk '
+      function line_ts(line, value) {
+        if (match(line, /\[[[:space:]]*[0-9]+\.[0-9]+\]/)) {
+          value = substr(line, RSTART, RLENGTH)
+          gsub(/\[/, "", value); gsub(/\]/, "", value); gsub(/[[:space:]]/, "", value)
+          return value
+        }
+        return ""
+      }
+      /RX << ACK seq=/ && $0 !~ /seq=65535/ {
+        ts = line_ts($0)
+      }
+      END { if (ts != "") print ts }' "$LOG_DIR/A.log")
+  fi
+
+  if [[ -n "$start_ts" && -n "${ack_ts:-}" ]]; then
+    duration_s=$(awk -v start="$start_ts" -v finish="$ack_ts" 'BEGIN {
+        dt = finish - start
+        if (dt > 0) printf "%.3f", dt
+      }')
+    throughput_bps=$(awk -v bytes="$FILE_SIZE" -v duration="$duration_s" 'BEGIN {
+        if (duration > 0) printf "%.1f", (bytes * 8.0) / duration
+      }')
+  fi
+
+  retx_line=$(grep -E "  ARQ:  frames_sent=" "$LOG_DIR/A.log" | head -1 || true)
+
+  echo "── Data phase ──"
+  if [[ -n "${throughput_bps:-}" ]]; then
+    echo "Payload throughput: ${throughput_bps} bps (${FILE_SIZE} bytes / ${duration_s}s)"
+    [[ -n "${frames_sent:-}" ]] && echo "Final ACK seq: ${final_seq:-?}  frames_sent=${frames_sent}"
+  else
+    echo "Payload throughput: unavailable (missing start or final ACK timestamp)"
+  fi
+  [[ -n "$retx_line" ]] && echo "${retx_line#  }"
+  grep -E "  RETX:" "$LOG_DIR/A.log" | head -1 | sed 's/^  //' || true
+  echo
+}
+
 # ─── Summary ────────────────────────────────────────────────────────────
 echo
 echo "================================================================"
 echo "  Summary"
 echo "================================================================"
 echo
+print_file_metrics
 echo "── A (this Mac) ──"
 grep -E "TEST (PASSED|FAILED)|frame_success|retransmissions=|✓|✗ " \
   "$LOG_DIR/A.log" 2>/dev/null | head -10 || true

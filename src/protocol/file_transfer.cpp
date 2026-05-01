@@ -197,6 +197,35 @@ bool FileTransferController::hasMoreChunks() const {
     return !tx_metadata_sent_ || tx_offset_ < tx_data_.size();
 }
 
+void FileTransferController::requeuePendingChunks() {
+    if (state_ != FileTransferState::SENDING) {
+        return;
+    }
+
+    if (chunks_sent_ <= chunks_acked_) {
+        return;
+    }
+
+    const uint32_t pending = chunks_sent_ - chunks_acked_;
+    if (chunks_acked_ == 0) {
+        tx_metadata_sent_ = false;
+        tx_offset_ = 0;
+    } else {
+        tx_metadata_sent_ = true;
+        const uint64_t acked_data_chunks = static_cast<uint64_t>(chunks_acked_ - 1);
+        const uint64_t first_unacked_offset = acked_data_chunks * static_cast<uint64_t>(chunk_size_);
+        const uint64_t data_size = static_cast<uint64_t>(tx_data_.size());
+        tx_offset_ = static_cast<uint32_t>(std::min(first_unacked_offset, data_size));
+    }
+
+    chunks_sent_ = chunks_acked_;
+
+    LOG_MODEM(WARN,
+              "FileTransfer: Re-queued %u pending chunks after ARQ abort (acked=%u, offset=%u)",
+              pending, chunks_acked_, tx_offset_);
+    notifyProgress();
+}
+
 void FileTransferController::onChunkAcked() {
     if (state_ != FileTransferState::SENDING) {
         return;

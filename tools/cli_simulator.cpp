@@ -688,6 +688,9 @@ public:
     void setFileReceivedCallback(std::function<void(const std::string&, bool)> cb) {
         file_received_callback_ = cb;
     }
+    void setFileSentCallback(std::function<void(bool, const std::string&)> cb) {
+        protocol_.setFileSentCallback(std::move(cb));
+    }
 
     void setSNR(float snr) { snr_db_ = snr; }
     void setForcedModulation(Modulation mod) { protocol_.setForcedModulation(mod); }
@@ -910,6 +913,11 @@ private:
 
         // Pass frame data to protocol
         if (!result.frame_data.empty()) {
+            auto header = v2::parseHeader(result.frame_data);
+            if (header.valid && !v2::isAddressedToCallsign(header, callsign_)) {
+                return;
+            }
+
             float fading_index = decoder_ ? decoder_->getLastFadingIndex() : 0.0f;
             protocol_.setChannelQuality(snr_db_, fading_index);
             protocol_.onRxData(result.frame_data);
@@ -2496,6 +2504,19 @@ private:
         // 3. Send file or message
         bool data_ok = false;
         if (test_file_transfer_) {
+            std::atomic<bool> file_sent_done{false};
+            std::atomic<bool> file_sent_success{false};
+            std::mutex file_sent_mutex;
+            std::string file_sent_error;
+            station.setFileSentCallback([&](bool success, const std::string& error) {
+                {
+                    std::lock_guard<std::mutex> lock(file_sent_mutex);
+                    file_sent_error = error;
+                }
+                file_sent_success.store(success);
+                file_sent_done.store(true);
+            });
+
             std::string test_file = "/tmp/cli_sim_role_a_" + std::to_string(::getpid()) + ".bin";
             {
                 std::ofstream ofs(test_file, std::ios::binary);
@@ -2514,18 +2535,29 @@ private:
             const long timeout_s = fileTransferTimeoutSeconds(test_file_size_, true);
             std::cout << "  Budget: " << timeout_s << "s (channel=" << channelTypeName() << ")\n";
             data_ok = waitForRole(station,
-                [&]{ return !station.isFileTransferInProgress(); },
+                [&]{ return file_sent_done.load() || !station.isFileTransferInProgress(); },
                 static_cast<int>(timeout_s), "file transfer");
             if (!data_ok) {
                 std::cout << "  \033[31m✗ File transfer timeout (budget=" << timeout_s
                           << "s, channel=" << channelTypeName() << ")\033[0m\n";
+            } else if (!file_sent_done.load()) {
+                std::cout << "  \033[31m✗ File transfer ended without completion callback\033[0m\n";
+                data_ok = false;
+            } else if (!file_sent_success.load()) {
+                std::lock_guard<std::mutex> lock(file_sent_mutex);
+                std::cout << "  \033[31m✗ File transfer failed";
+                if (!file_sent_error.empty()) {
+                    std::cout << ": " << file_sent_error;
+                }
+                std::cout << "\033[0m\n";
+                data_ok = false;
             } else {
-                auto p = station.getFileProgress();
-                std::cout << "  Transferred " << p.transferred_bytes << "/" << p.total_bytes
-                          << " bytes (" << static_cast<int>(p.percentage()) << "%)\n";
-                data_ok = (p.transferred_bytes == p.total_bytes);
-                if (data_ok) std::cout << "  \033[32m✓ File transfer complete\033[0m\n";
+                std::cout << "  Transferred " << test_file_size_ << "/" << test_file_size_
+                          << " bytes (100%)\n";
+                std::cout << "  \033[32m✓ File transfer complete\033[0m\n";
+                data_ok = true;
             }
+            station.setFileSentCallback({});
         } else {
             std::cout << "\n=== PHASE 3: MESSAGE TEST ===\n";
             const std::string msg = "Hello from station A (hw test, pid=" +
@@ -2922,8 +2954,10 @@ int main(int argc, char* argv[]) {
                         sim.setForcedCodeRate(CodeRate::R2_3);
                     } else if (rate_str == "r3_4" || rate_str == "R3_4") {
                         sim.setForcedCodeRate(CodeRate::R3_4);
+                    } else if (rate_str == "auto" || rate_str == "AUTO") {
+                        sim.setForcedCodeRate(CodeRate::AUTO);
                     } else {
-                        std::cerr << "Unknown code rate: " << rate_str << " (use r1_4, r1_2, r2_3, r3_4)\n";
+                        std::cerr << "Unknown code rate: " << rate_str << " (use auto, r1_4, r1_2, r2_3, r3_4)\n";
                         return 1;
                     }
                 }
@@ -3024,7 +3058,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "                        flutter  - 0.5ms delay, 10Hz Doppler (auroral)\n";
                 std::cout << "  --fading, -f        Alias for --channel moderate\n";
                 std::cout << "  --mod, -m <MOD>     Force modulation: dqpsk, d8psk, dbpsk, qpsk, bpsk\n";
-                std::cout << "  --rate, -r <RATE>   Force code rate: r1_4, r1_2, r2_3, r3_4\n";
+                std::cout << "  --rate, -r <RATE>   Force code rate: auto, r1_4, r1_2, r2_3, r3_4\n";
                 std::cout << "  --waveform, -w <WF> Force waveform: mc_dpsk, ofdm_chirp, ofdm_cox, ofdm_narrow\n";
                 std::cout << "  --seed <N>          Random seed (default: 42)\n";
                 std::cout << "  --tx-cfo <Hz>       Inject TX CFO in channel model (default: 0)\n";

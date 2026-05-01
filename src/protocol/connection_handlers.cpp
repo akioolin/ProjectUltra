@@ -188,8 +188,14 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // the single MC-DPSK CONNECT_ACK on faded seeds, leaving handshake stuck.
         // We re-send periodically until handshake is confirmed by first frame.
         connect_ack_frame_ = ack_data;
-        connect_ack_retransmit_ms_ = CONNECT_ACK_RETRANSMIT_MS;
+        connect_ack_retransmit_interval_ms_ =
+            connection_policy::connectAckRetransmitDelayMs(
+                negotiated_mode_, rec_mod, rec_rate);
+        connect_ack_retransmit_ms_ = connect_ack_retransmit_interval_ms_;
         connect_ack_retx_remaining_ = CONNECT_ACK_MAX_RETX;
+        LOG_MODEM(INFO, "Connection: CONNECT_ACK rescue retry armed in %.2fs (%d remaining)",
+                  connect_ack_retransmit_interval_ms_ / 1000.0f,
+                  connect_ack_retx_remaining_);
 
         enterConnected();
         // NOTE: Don't call on_handshake_confirmed_ yet - wait for first frame from initiator
@@ -359,9 +365,10 @@ void Connection::handleModeChange(const v2::ControlFrame& frame, const std::stri
               info.fading_index,
               reason_str);
 
-    // Update local state
-    data_modulation_ = info.modulation;
-    data_code_rate_ = info.code_rate;
+    // Update local state and refresh the ARQ profile for the new fixed-frame
+    // capacity/window/timing. The requester waits for this ACK before sending
+    // more DATA in the new mode.
+    applyDataMode(info.modulation, info.code_rate);
 
     // Send ACK for the MODE_CHANGE
     auto ack = v2::ControlFrame::makeAck(local_call_, remote_call_, frame.seq);
@@ -371,6 +378,8 @@ void Connection::handleModeChange(const v2::ControlFrame& frame, const std::stri
     if (on_data_mode_changed_) {
         on_data_mode_changed_(info.modulation, info.code_rate, info.snr_db, info.fading_index);
     }
+
+    runDeferredArqRefill();
 }
 
 void Connection::requestModeChange(Modulation new_mod, CodeRate new_rate,

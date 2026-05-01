@@ -15,6 +15,15 @@ namespace v2 = protocol::v2;
 // ============================================================================
 
 void ModemEngine::deliverFrame(const Bytes& frame_data) {
+    const std::string local_call =
+        (log_prefix_.empty() || log_prefix_ == "MODEM") ? std::string{} : log_prefix_;
+    auto header = v2::parseHeader(frame_data);
+    if (header.valid && !v2::isAddressedToCallsign(header, local_call)) {
+        LOG_MODEM(TRACE, "[%s] deliverFrame: dropping frame for different station",
+                  log_prefix_.c_str());
+        return;
+    }
+
     LOG_MODEM(INFO, "[%s] deliverFrame: %zu bytes, callback=%s",
               log_prefix_.c_str(), frame_data.size(),
               raw_data_callback_ ? "set" : "NOT SET");

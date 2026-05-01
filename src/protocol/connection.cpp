@@ -16,6 +16,29 @@ constexpr size_t kOFDMFileBlockPayloadLimit = 2300;
 constexpr const char* kOFDMBurstPadCallsign = "ULPAD";
 constexpr uint16_t kOFDMBurstPadSeq = 0xFFFE;
 
+Bytes makeOFDMBurstPadPayload(CodeRate rate, size_t pad_index) {
+    const size_t capacity = v2::getFixedFramePayloadCapacity(rate);
+    Bytes payload(capacity);
+    if (payload.empty()) {
+        return payload;
+    }
+
+    // Fill the dummy frame instead of sending an empty DATA payload. Empty pad
+    // frames leave most fixed-frame info bits as all-zero LDPC codewords, which
+    // are prone to ugly "4/4 CWs OK but frame invalid" tail artifacts in fading.
+    uint32_t x = 0xA5C35A7Du ^
+                 (static_cast<uint32_t>(rate) << 24) ^
+                 static_cast<uint32_t>(pad_index * 0x9E3779B1u);
+    for (size_t i = 0; i < payload.size(); ++i) {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        payload[i] = static_cast<uint8_t>(x & 0xFF);
+    }
+    payload[0] = 0x7F;  // reserved dummy discriminator if a hash collision ever delivers it
+    return payload;
+}
+
 bool shouldUseSingleOFDMFileBlock(float fading_index, float snr_db, CodeRate rate) {
     return connection_policy::isNearAwgnOFDM(fading_index, snr_db) &&
            getCodeRateValue(rate) >= getCodeRateValue(CodeRate::R2_3);
@@ -36,6 +59,52 @@ bool shouldPadPartialOFDMFileBurst(WaveformMode mode,
         rate,
         connection_policy::isNearAwgnOFDM(fading_index, snr_db),
         burst_frames);
+}
+
+int statDelta(int now, int before) {
+    return std::max(0, now - before);
+}
+
+bool hasAdaptiveRetryPressure(const ARQStats& now, const ARQStats& before) {
+    const int retransmissions =
+        statDelta(now.retransmissions, before.retransmissions);
+    const int timeouts = statDelta(now.timeouts, before.timeouts);
+    const int failed = statDelta(now.failed, before.failed);
+    const int holes = statDelta(now.hole_events, before.hole_events);
+
+    return timeouts > 0 || failed > 0 || retransmissions >= 2 || holes >= 2;
+}
+
+bool hasCleanAdaptiveWindow(const ARQStats& now, const ARQStats& before) {
+    return statDelta(now.retransmissions, before.retransmissions) == 0 &&
+           statDelta(now.timeouts, before.timeouts) == 0 &&
+           statDelta(now.failed, before.failed) == 0 &&
+           statDelta(now.hole_events, before.hole_events) == 0;
+}
+
+bool isFasterRate(CodeRate candidate, CodeRate current) {
+    return getCodeRateValue(candidate) > getCodeRateValue(current);
+}
+
+bool isMoreRobustRate(CodeRate candidate, CodeRate current) {
+    return getCodeRateValue(candidate) < getCodeRateValue(current);
+}
+
+CodeRate oneStepMoreRobust(CodeRate rate) {
+    switch (rate) {
+        case CodeRate::R3_4: return CodeRate::R2_3;
+        case CodeRate::R2_3: return CodeRate::R1_2;
+        case CodeRate::R1_2: return CodeRate::R1_4;
+        default: return CodeRate::R1_4;
+    }
+}
+
+CodeRate adaptiveDowngradeTarget(CodeRate current, CodeRate recommended) {
+    CodeRate one_step = oneStepMoreRobust(current);
+    if (isMoreRobustRate(recommended, one_step)) {
+        return recommended;
+    }
+    return one_step;
 }
 }
 
@@ -343,7 +412,9 @@ void Connection::abortTxNow() {
     responder_handshake_wait_ms_ = 0;
     connect_ack_frame_.clear();
     connect_ack_retransmit_ms_ = 0;
+    connect_ack_retransmit_interval_ms_ = CONNECT_ACK_RETRANSMIT_MS;
     connect_ack_retx_remaining_ = 0;
+    resetAdaptiveModeController();
 
     // Stop transient connection attempts immediately.
     if (state_ == ConnectionState::PROBING ||
@@ -731,12 +802,17 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                     } else if (state_ == ConnectionState::CONNECTED) {
                         // Check if this ACK is for our pending MODE_CHANGE
                         if (mode_change_pending_ && ctrl->seq == mode_change_seq_) {
+                            const bool was_downgrade =
+                                isMoreRobustRate(pending_code_rate_, data_code_rate_);
                             LOG_MODEM(INFO, "Connection: MODE_CHANGE acknowledged, applying %s %s",
                                       modulationToString(pending_modulation_),
                                       codeRateToString(pending_code_rate_));
-                            data_modulation_ = pending_modulation_;
-                            data_code_rate_ = pending_code_rate_;
-                            arq_.setCodeRate(data_code_rate_);  // Update ARQ for correct total_cw
+                            applyDataMode(pending_modulation_, pending_code_rate_);
+                            if (was_downgrade) {
+                                adaptive_post_downgrade_lockout_ms_ =
+                                    ADAPTIVE_POST_DOWNGRADE_LOCKOUT_MS;
+                                adaptive_clean_windows_ = 0;
+                            }
                             mode_change_pending_ = false;
 
                             // Notify application of mode change
@@ -744,6 +820,7 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                                 on_data_mode_changed_(data_modulation_, data_code_rate_,
                                                       pending_snr_db_, pending_fading_index_);
                             }
+                            runDeferredArqRefill();
                         } else {
                             // Regular data ACK
                             processArqFrame(frame_data);
@@ -794,6 +871,14 @@ void Connection::runDeferredArqRefill() {
         return;
     }
 
+    if (mode_change_pending_) {
+        return;
+    }
+
+    if (tryIssueAdaptiveModeChangeAtBoundary()) {
+        return;
+    }
+
     const bool refill_file = deferred_file_refill_;
     const bool refill_fragments = deferred_fragment_refill_;
     deferred_file_refill_ = false;
@@ -811,6 +896,270 @@ void Connection::runDeferredArqRefill() {
         !pending_tx_fragments_.empty() &&
         next_fragment_idx_ < pending_tx_fragments_.size()) {
         sendNextFragment();
+    }
+}
+
+void Connection::resetAdaptiveModeController() {
+    adaptive_target_ = AdaptiveModeTarget{};
+    adaptive_last_stats_ = arq_.getStats();
+    adaptive_eval_elapsed_ms_ = 0;
+    adaptive_cooldown_ms_ = ADAPTIVE_MODE_CHANGE_COOLDOWN_MS;
+    adaptive_post_downgrade_lockout_ms_ = 0;
+    adaptive_downgrade_queue_age_ms_ = 0;
+    adaptive_clean_windows_ = 0;
+}
+
+bool Connection::canIssueAdaptiveModeChange(bool is_downgrade) const {
+    if (state_ != ConnectionState::CONNECTED || !isOFDMMode(negotiated_mode_)) {
+        return false;
+    }
+    if (config_.forced_modulation != Modulation::AUTO ||
+        config_.forced_code_rate != CodeRate::AUTO) {
+        return false;
+    }
+    if (mode_change_pending_ || disconnect_pending_) {
+        return false;
+    }
+    if (file_transfer_.getState() != FileTransferState::SENDING) {
+        return false;
+    }
+    if (!is_initiator_ && !handshake_confirmed_) {
+        return false;
+    }
+    if (!pending_tx_fragments_.empty()) {
+        return false;
+    }
+
+    const size_t available_slots = arq_.getAvailableSlots();
+    const size_t window_size = arq_.getWindowSize();
+    if (is_downgrade) {
+        // Downgrades are recovery-oriented. Waiting for a fully drained window
+        // can keep us transmitting into the rate that is already failing, so
+        // allow the MODE_CHANGE once at least half of the ARQ window is free.
+        return available_slots * 2 >= window_size;
+    }
+
+    // Upgrades keep the strict boundary so in-flight DATA at the old, more
+    // robust rate clears before switching to a faster rate.
+    return available_slots == window_size;
+}
+
+size_t Connection::adaptiveBacklogFrames(CodeRate rate) const {
+    size_t frames = 0;
+    const size_t capacity = v2::getFixedFramePayloadCapacity(rate);
+    const size_t file_data_payload =
+        capacity > FileTransferController::FILE_DATA_OVERHEAD
+            ? capacity - FileTransferController::FILE_DATA_OVERHEAD
+            : capacity;
+
+    if (file_transfer_.getState() == FileTransferState::SENDING) {
+        frames += file_transfer_.pendingChunkCount();
+
+        const size_t remaining = file_transfer_.remainingTxBytes();
+        if (remaining > 0 && file_data_payload > 0) {
+            frames += (remaining + file_data_payload - 1) / file_data_payload;
+        } else if (file_transfer_.hasMoreChunks()) {
+            frames += 1;
+        }
+    }
+
+    if (!pending_tx_fragments_.empty() &&
+        acked_fragment_count_ < pending_tx_fragments_.size()) {
+        frames += pending_tx_fragments_.size() - acked_fragment_count_;
+    }
+
+    return frames;
+}
+
+bool Connection::hasAdaptiveUpgradeBacklog(CodeRate target_rate) const {
+    if (file_transfer_.getState() != FileTransferState::SENDING) {
+        return false;
+    }
+    return adaptiveBacklogFrames(target_rate) >= arq_.getWindowSize();
+}
+
+bool Connection::tryIssueAdaptiveModeChangeAtBoundary() {
+    if (!adaptive_target_.pending) {
+        return false;
+    }
+
+    const bool is_downgrade =
+        isMoreRobustRate(adaptive_target_.rate, data_code_rate_);
+    const bool downgrade_stuck =
+        is_downgrade &&
+        adaptive_downgrade_queue_age_ms_ >= ADAPTIVE_DOWNGRADE_FORCE_MS;
+    const bool boundary_ready = canIssueAdaptiveModeChange(is_downgrade);
+    const bool force_downgrade =
+        downgrade_stuck &&
+        !boundary_ready &&
+        state_ == ConnectionState::CONNECTED &&
+        isOFDMMode(negotiated_mode_) &&
+        config_.forced_modulation == Modulation::AUTO &&
+        config_.forced_code_rate == CodeRate::AUTO &&
+        !mode_change_pending_ &&
+        !disconnect_pending_ &&
+        file_transfer_.getState() == FileTransferState::SENDING &&
+        (is_initiator_ || handshake_confirmed_) &&
+        pending_tx_fragments_.empty();
+    if (!boundary_ready && !force_downgrade) {
+        return false;
+    }
+
+    const size_t backlog_frames = adaptiveBacklogFrames(adaptive_target_.rate);
+    if (backlog_frames == 0) {
+        adaptive_target_ = AdaptiveModeTarget{};
+        adaptive_downgrade_queue_age_ms_ = 0;
+        return false;
+    }
+
+    const bool is_upgrade = isFasterRate(adaptive_target_.rate, data_code_rate_);
+    if (is_upgrade && !hasAdaptiveUpgradeBacklog(adaptive_target_.rate)) {
+        adaptive_target_ = AdaptiveModeTarget{};
+        adaptive_downgrade_queue_age_ms_ = 0;
+        return false;
+    }
+
+    if (adaptive_target_.modulation == data_modulation_ &&
+        adaptive_target_.rate == data_code_rate_) {
+        adaptive_target_ = AdaptiveModeTarget{};
+        adaptive_downgrade_queue_age_ms_ = 0;
+        return false;
+    }
+
+    if (force_downgrade) {
+        LOG_MODEM(WARN,
+                  "Connection: Forced downgrade after %ums queue age (window state ignored): %s -> %s",
+                  adaptive_downgrade_queue_age_ms_,
+                  codeRateToString(data_code_rate_),
+                  codeRateToString(adaptive_target_.rate));
+    }
+
+    LOG_MODEM(INFO, "Connection: Adaptive MODE_CHANGE at TX boundary: %s %s -> %s %s (SNR=%.1f, fading=%.2f, backlog=%zu frames)",
+              modulationToString(data_modulation_), codeRateToString(data_code_rate_),
+              modulationToString(adaptive_target_.modulation),
+              codeRateToString(adaptive_target_.rate),
+              measured_snr_db_, fading_index_,
+              backlog_frames);
+
+    requestModeChange(adaptive_target_.modulation,
+                      adaptive_target_.rate,
+                      measured_snr_db_,
+                      adaptive_target_.reason);
+    adaptive_target_ = AdaptiveModeTarget{};
+    adaptive_downgrade_queue_age_ms_ = 0;
+    adaptive_cooldown_ms_ = ADAPTIVE_MODE_CHANGE_COOLDOWN_MS;
+    adaptive_clean_windows_ = 0;
+    if (is_downgrade && mode_change_pending_) {
+        adaptive_post_downgrade_lockout_ms_ = ADAPTIVE_POST_DOWNGRADE_LOCKOUT_MS;
+    }
+    return mode_change_pending_;
+}
+
+void Connection::updateAdaptiveModeController(uint32_t elapsed_ms) {
+    if (adaptive_cooldown_ms_ > 0) {
+        if (elapsed_ms >= adaptive_cooldown_ms_) {
+            adaptive_cooldown_ms_ = 0;
+        } else {
+            adaptive_cooldown_ms_ -= elapsed_ms;
+        }
+    }
+    if (adaptive_post_downgrade_lockout_ms_ > 0) {
+        if (elapsed_ms >= adaptive_post_downgrade_lockout_ms_) {
+            adaptive_post_downgrade_lockout_ms_ = 0;
+        } else {
+            adaptive_post_downgrade_lockout_ms_ -= elapsed_ms;
+        }
+    }
+
+    if (state_ != ConnectionState::CONNECTED || !isOFDMMode(negotiated_mode_)) {
+        resetAdaptiveModeController();
+        return;
+    }
+    if (config_.forced_modulation != Modulation::AUTO ||
+        config_.forced_code_rate != CodeRate::AUTO) {
+        adaptive_last_stats_ = arq_.getStats();
+        adaptive_target_ = AdaptiveModeTarget{};
+        adaptive_post_downgrade_lockout_ms_ = 0;
+        adaptive_downgrade_queue_age_ms_ = 0;
+        adaptive_clean_windows_ = 0;
+        return;
+    }
+    if (file_transfer_.getState() != FileTransferState::SENDING) {
+        adaptive_last_stats_ = arq_.getStats();
+        adaptive_target_ = AdaptiveModeTarget{};
+        adaptive_post_downgrade_lockout_ms_ = 0;
+        adaptive_downgrade_queue_age_ms_ = 0;
+        adaptive_clean_windows_ = 0;
+        return;
+    }
+
+    if (adaptive_target_.pending &&
+        isMoreRobustRate(adaptive_target_.rate, data_code_rate_)) {
+        adaptive_downgrade_queue_age_ms_ += elapsed_ms;
+        if (adaptive_downgrade_queue_age_ms_ >= ADAPTIVE_DOWNGRADE_FORCE_MS &&
+            tryIssueAdaptiveModeChangeAtBoundary()) {
+            return;
+        }
+    } else {
+        adaptive_downgrade_queue_age_ms_ = 0;
+    }
+
+    adaptive_eval_elapsed_ms_ += elapsed_ms;
+    if (adaptive_eval_elapsed_ms_ < ADAPTIVE_EVAL_INTERVAL_MS) {
+        return;
+    }
+    adaptive_eval_elapsed_ms_ = 0;
+
+    const ARQStats current_stats = arq_.getStats();
+    const bool retry_pressure =
+        hasAdaptiveRetryPressure(current_stats, adaptive_last_stats_);
+    const bool clean_window =
+        hasCleanAdaptiveWindow(current_stats, adaptive_last_stats_);
+    adaptive_last_stats_ = current_stats;
+
+    Modulation recommended_mod = data_modulation_;
+    CodeRate recommended_rate = data_code_rate_;
+    recommendDataMode(measured_snr_db_, negotiated_mode_,
+                      recommended_mod, recommended_rate, fading_index_);
+
+    if (retry_pressure && isFasterRate(data_code_rate_, CodeRate::R1_4)) {
+        adaptive_clean_windows_ = 0;
+        adaptive_target_.pending = true;
+        adaptive_target_.modulation = recommended_mod;
+        adaptive_target_.rate = adaptiveDowngradeTarget(data_code_rate_, recommended_rate);
+        adaptive_target_.reason = v2::ModeChangeReason::CHANNEL_DEGRADED;
+        LOG_MODEM(INFO, "Connection: Adaptive downgrade queued: %s -> %s (recommended=%s, SNR=%.1f, fading=%.2f)",
+                  codeRateToString(data_code_rate_),
+                  codeRateToString(adaptive_target_.rate),
+                  codeRateToString(recommended_rate),
+                  measured_snr_db_, fading_index_);
+        tryIssueAdaptiveModeChangeAtBoundary();
+        return;
+    }
+
+    if (clean_window) {
+        adaptive_clean_windows_++;
+    } else {
+        adaptive_clean_windows_ = 0;
+    }
+
+    if (adaptive_cooldown_ms_ == 0 &&
+        adaptive_post_downgrade_lockout_ms_ == 0 &&
+        !adaptive_target_.pending &&
+        adaptive_clean_windows_ >= ADAPTIVE_CLEAN_WINDOWS_FOR_UPGRADE &&
+        isFasterRate(recommended_rate, data_code_rate_) &&
+        hasAdaptiveUpgradeBacklog(recommended_rate)) {
+        adaptive_target_.pending = true;
+        adaptive_target_.modulation = recommended_mod;
+        adaptive_target_.rate = recommended_rate;
+        adaptive_target_.reason = v2::ModeChangeReason::CHANNEL_IMPROVED;
+        LOG_MODEM(INFO, "Connection: Adaptive upgrade queued: %s -> %s (SNR=%.1f, fading=%.2f, clean=%d, backlog=%zu frames)",
+                  codeRateToString(data_code_rate_),
+                  codeRateToString(adaptive_target_.rate),
+                  measured_snr_db_, fading_index_,
+                  adaptive_clean_windows_,
+                  adaptiveBacklogFrames(recommended_rate));
+        tryIssueAdaptiveModeChangeAtBoundary();
     }
 }
 
@@ -879,13 +1228,14 @@ void Connection::tick(uint32_t elapsed_ms) {
             // the only recovery is the 60s connect_timeout, which is too slow.
             // Gated to OFDM_CHIRP data mode: when MC-DPSK is the negotiated data
             // mode, the round-trip is ~12-16s and retx clogs ALPHA's RX buffer
-            // ahead of the first ACK, hurting more than it helps. Decoupled from
-            // handshake_confirmed_ so retx continues across the 2.2s fail-safe.
+            // ahead of the first ACK, hurting more than it helps. The interval is
+            // set long enough for the first OFDM burst-interleaver group to decode
+            // and clear this cached ACK on the success path.
             if (!is_initiator_ &&
                 negotiated_mode_ == WaveformMode::OFDM_CHIRP &&
                 !connect_ack_frame_.empty() && connect_ack_retx_remaining_ > 0) {
                 if (elapsed_ms >= connect_ack_retransmit_ms_) {
-                    connect_ack_retransmit_ms_ = CONNECT_ACK_RETRANSMIT_MS;
+                    connect_ack_retransmit_ms_ = connect_ack_retransmit_interval_ms_;
                     connect_ack_retx_remaining_--;
                     LOG_MODEM(INFO, "Connection: Re-sending CONNECT_ACK (proactive, %d retx remaining)",
                               connect_ack_retx_remaining_);
@@ -919,6 +1269,8 @@ void Connection::tick(uint32_t elapsed_ms) {
                         LOG_MODEM(WARN, "Connection: MODE_CHANGE failed after %d attempts, keeping current mode",
                                   MODE_CHANGE_MAX_RETRIES);
                         mode_change_pending_ = false;
+                        resetAdaptiveModeController();
+                        runDeferredArqRefill();
                         // Stay at current mode - don't change anything
                     } else {
                         LOG_MODEM(WARN, "Connection: MODE_CHANGE timeout, retrying (%d/%d)",
@@ -962,6 +1314,7 @@ void Connection::tick(uint32_t elapsed_ms) {
             }
 
             arq_.tick(elapsed_ms);
+            updateAdaptiveModeController(elapsed_ms);
             break;
 
         case ConnectionState::DISCONNECTING:
@@ -1009,35 +1362,22 @@ void Connection::transmitFrame(const Bytes& frame_data) {
     }
 }
 
-void Connection::enterConnected() {
-    state_ = ConnectionState::CONNECTED;
-    connected_time_ms_ = 0;
-    if (is_initiator_ || handshake_confirmed_) {
-        responder_handshake_wait_ms_ = 0;
-    } else if (responder_handshake_wait_ms_ == 0) {
-        responder_handshake_wait_ms_ = RESPONDER_HANDSHAKE_FAILSAFE_MS;
+void Connection::configureArqForCurrentDataMode() {
+    arq_.setCodeRate(data_code_rate_);
+
+    if (isOFDMMode(negotiated_mode_)) {
+        file_transfer_.setMaxChunkPayload(
+            v2::getFixedFramePayloadCapacity(data_code_rate_));
     }
 
-    arq_.setCallsigns(local_call_, remote_call_);
-    arq_.reset();
-
-    // MC-DPSK uses stop-and-wait (window=1), OFDM uses sliding window (window=4)
-    // OFDM_NARROW uses stop-and-wait (window=1) like MC-DPSK due to long frame times
-    // Timeout must exceed round-trip time: TX frame + RX decode + ACK TX + ACK decode
-    //   MC-DPSK: full chirp preamble (1.3s) + data (~0.6s) + search buffer (~2.5s) each way → RTT ~13s
-    //   OFDM:    light preamble + data (~1.2s) + LTS search (~0.5s) each way → RTT ~3.5s
-    //   OFDM_NARROW: light preamble (93ms) + data (~3.1s) + ACK (~0.9s) + margin → RTT ~4.4s
     if (negotiated_mode_ == WaveformMode::MC_DPSK) {
         arq_.setWindowSize(1);
         arq_.setAckTimeout(18000);
         arq_.setSackDelay(2000);
         arq_.setSackDelayShort(0);
-        arq_.setAckRepeatCount(1);  // Single ACK (stop-and-wait, no benefit from repeat)
+        arq_.setAckRepeatCount(1);
         LOG_MODEM(INFO, "Connection: ARQ window=1, timeout=18s, ack_repeat=1 (MC-DPSK)");
     } else if (negotiated_mode_ == WaveformMode::OFDM_NARROW) {
-        // Narrowband OFDM: stop-and-wait (window=1)
-        // Long symbols (46.7ms) mean frames take ~3s. RTT ~4.4s for R1/4.
-        // Timeout: data(3175ms) + 2*ACK(933ms) + sack(120ms) + margin(1588ms) ≈ 6749ms
         arq_.setWindowSize(1);
         arq_.setMaxRetries(15);
         arq_.setSackDelay(120);
@@ -1052,14 +1392,11 @@ void Connection::enterConnected() {
                   timeout_ms / 1000.0f, timing.data_ms, timing.ack_ms,
                   modulationToString(data_modulation_), codeRateToString(data_code_rate_));
     } else {
-        // Keep OFDM receive pressure bounded on hardware paths. The widened
-        // window must stay aligned with the burst interleaver group size;
-        // otherwise mid-burst group resync can create false base holes.
         const bool near_awgn_ofdm =
             connection_policy::isNearAwgnOFDM(fading_index_, measured_snr_db_);
-        arq_.setWindowSize(connection_policy::ofdmWindowSize(
-            data_modulation_, data_code_rate_, near_awgn_ofdm));
-        arq_.setMaxRetries(15);     // More attempts compensate for ACK loss on fading
+        arq_.setWindowSize(connection_policy::ofdmWindowSizeForChannel(
+            data_modulation_, data_code_rate_, fading_index_, measured_snr_db_));
+        arq_.setMaxRetries(15);
         arq_.setAckBatchSize(connection_policy::ofdmAckBatchSize(near_awgn_ofdm));
 
         const auto timing = connection_policy::wideOFDMFrameTiming(
@@ -1102,6 +1439,44 @@ void Connection::enterConnected() {
                   modulationToString(data_modulation_),
                   codeRateToString(data_code_rate_));
     }
+}
+
+void Connection::applyDataMode(Modulation mod, CodeRate rate) {
+    const bool rate_changed = rate != data_code_rate_;
+    const bool requeue_file =
+        rate_changed &&
+        file_transfer_.getState() == FileTransferState::SENDING &&
+        file_transfer_.hasPendingChunks();
+    const bool refill_file =
+        rate_changed &&
+        file_transfer_.getState() == FileTransferState::SENDING;
+    if (requeue_file) {
+        file_transfer_.requeuePendingChunks();
+    }
+
+    data_modulation_ = mod;
+    data_code_rate_ = rate;
+    configureArqForCurrentDataMode();
+    resetAdaptiveModeController();
+
+    if (refill_file) {
+        deferred_file_refill_ = true;
+    }
+}
+
+void Connection::enterConnected() {
+    state_ = ConnectionState::CONNECTED;
+    connected_time_ms_ = 0;
+    if (is_initiator_ || handshake_confirmed_) {
+        responder_handshake_wait_ms_ = 0;
+    } else if (responder_handshake_wait_ms_ == 0) {
+        responder_handshake_wait_ms_ = RESPONDER_HANDSHAKE_FAILSAFE_MS;
+    }
+
+    arq_.setCallsigns(local_call_, remote_call_);
+    arq_.reset();
+    configureArqForCurrentDataMode();
+    resetAdaptiveModeController();
 
     LOG_MODEM(INFO, "Connection: Now CONNECTED to %s (mode=%s)",
               remote_call_.c_str(), waveformModeToString(negotiated_mode_));
@@ -1132,11 +1507,13 @@ void Connection::enterDisconnected(const std::string& reason) {
     responder_handshake_wait_ms_ = 0;
     connect_ack_frame_.clear();
     connect_ack_retransmit_ms_ = 0;
+    connect_ack_retransmit_interval_ms_ = CONNECT_ACK_RETRANSMIT_MS;
     connect_ack_retx_remaining_ = 0;
     arq_callback_defer_refill_ = false;
     deferred_file_refill_ = false;
     deferred_fragment_refill_ = false;
     arq_.reset();
+    resetAdaptiveModeController();
     file_transfer_.cancel();
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
@@ -1182,12 +1559,13 @@ void Connection::flushBurstBuffer() {
             real_frame_count % connection_policy::kBurstInterleaveGroupFrames;
         const size_t pad_count =
             connection_policy::kBurstInterleaveGroupFrames - remainder;
-        auto pad_frame = v2::makeFixedDataFrame(local_call_,
-                                                kOFDMBurstPadCallsign,
-                                                kOFDMBurstPadSeq,
-                                                Bytes{},
-                                                data_code_rate_).serialize();
         for (size_t i = 0; i < pad_count; ++i) {
+            auto pad_frame = v2::makeFixedDataFrame(
+                local_call_,
+                kOFDMBurstPadCallsign,
+                static_cast<uint16_t>(kOFDMBurstPadSeq - i),
+                makeOFDMBurstPadPayload(data_code_rate_, i),
+                data_code_rate_).serialize();
             burst_tx_buffer_.push_back(pad_frame);
         }
         LOG_MODEM(INFO,
@@ -1260,6 +1638,7 @@ ConnectionStats Connection::getStats() const {
 void Connection::resetStats() {
     stats_ = ConnectionStats{};
     arq_.resetStats();
+    resetAdaptiveModeController();
 }
 
 void Connection::reset() {
@@ -1282,12 +1661,17 @@ void Connection::reset() {
     data_code_rate_ = CodeRate::R1_4;
     connect_waveform_ = WaveformMode::MC_DPSK;  // Reset to DPSK for next connect attempt
     responder_handshake_wait_ms_ = 0;
+    connect_ack_frame_.clear();
+    connect_ack_retransmit_ms_ = 0;
+    connect_ack_retransmit_interval_ms_ = CONNECT_ACK_RETRANSMIT_MS;
+    connect_ack_retx_remaining_ = 0;
     burst_mode_active_ = false;
     burst_tx_buffer_.clear();
     arq_callback_defer_refill_ = false;
     deferred_file_refill_ = false;
     deferred_fragment_refill_ = false;
     arq_.reset();
+    resetAdaptiveModeController();
     file_transfer_.cancel();
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();

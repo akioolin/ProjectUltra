@@ -104,6 +104,21 @@ public:
 
     // Check if there are chunks sent but not yet ACKed
     bool hasPendingChunks() const { return chunks_sent_ > chunks_acked_; }
+    uint32_t pendingChunkCount() const {
+        return chunks_sent_ > chunks_acked_ ? chunks_sent_ - chunks_acked_ : 0;
+    }
+    size_t remainingTxBytes() const {
+        if (state_ != FileTransferState::SENDING || tx_offset_ >= tx_data_.size()) {
+            return 0;
+        }
+        return tx_data_.size() - tx_offset_;
+    }
+
+    // Rewind queued-but-unACKed chunks so ARQ can re-emit them after it drops
+    // in-flight frames, for example across a fixed-frame code-rate change.
+    // Call before changing max chunk payload so the old chunk size is used to
+    // find the first unACKed byte offset.
+    void requeuePendingChunks();
 
     // Called when the current chunk is ACKed
     void onChunkAcked();

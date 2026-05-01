@@ -58,6 +58,7 @@ struct ConnectionStats {
  * Uses v2 frame format exclusively.
  */
 class Connection {
+    friend struct ConnectionAdaptiveTestAccess;
 public:
     // Callback types - all use serialized Bytes (v2 frames)
     using TransmitCallback = std::function<void(const Bytes&)>;
@@ -317,6 +318,33 @@ private:
     void flushBurstBuffer();
     void processArqFrame(const Bytes& frame_data);
     void runDeferredArqRefill();
+    void configureArqForCurrentDataMode();
+    void applyDataMode(Modulation mod, CodeRate rate);
+    void resetAdaptiveModeController();
+    void updateAdaptiveModeController(uint32_t elapsed_ms);
+    bool tryIssueAdaptiveModeChangeAtBoundary();
+    bool canIssueAdaptiveModeChange(bool is_downgrade) const;
+    bool hasAdaptiveUpgradeBacklog(CodeRate target_rate) const;
+    size_t adaptiveBacklogFrames(CodeRate rate) const;
+
+    struct AdaptiveModeTarget {
+        bool pending = false;
+        Modulation modulation = Modulation::DQPSK;
+        CodeRate rate = CodeRate::R1_4;
+        uint8_t reason = v2::ModeChangeReason::CHANNEL_IMPROVED;
+    };
+    AdaptiveModeTarget adaptive_target_;
+    ARQStats adaptive_last_stats_;
+    uint32_t adaptive_eval_elapsed_ms_ = 0;
+    uint32_t adaptive_cooldown_ms_ = 0;
+    uint32_t adaptive_post_downgrade_lockout_ms_ = 0;
+    uint32_t adaptive_downgrade_queue_age_ms_ = 0;
+    int adaptive_clean_windows_ = 0;
+    static constexpr uint32_t ADAPTIVE_EVAL_INTERVAL_MS = 1000;
+    static constexpr uint32_t ADAPTIVE_MODE_CHANGE_COOLDOWN_MS = 3000;
+    static constexpr uint32_t ADAPTIVE_POST_DOWNGRADE_LOCKOUT_MS = 15000;
+    static constexpr uint32_t ADAPTIVE_DOWNGRADE_FORCE_MS = 6000;
+    static constexpr int ADAPTIVE_CLEAN_WINDOWS_FOR_UPGRADE = 3;
 
     // Callbacks
     TransmitCallback on_transmit_;
@@ -351,6 +379,7 @@ private:
     // a first frame from the initiator, mirroring the disconnect-ACK pattern.
     Bytes connect_ack_frame_;                  // Cached CONNECT_ACK for re-sending
     uint32_t connect_ack_retransmit_ms_ = 0;   // Time until next retransmit
+    uint32_t connect_ack_retransmit_interval_ms_ = 6000;
     int connect_ack_retx_remaining_ = 0;       // Retries left (counts down to 0)
     // First retx fires AFTER the OFDM round-trip window so the success path
     // (ALPHA decoded the original ACK and started sending) clears retx state
@@ -358,8 +387,8 @@ private:
     // Capped at 1 retx because additional retx fire uselessly when BRAVO's PHY
     // is stuck decoding (e.g. burst of false syncs at the LTS): the original
     // ACK either reached ALPHA or didn't, and the 1st retx is the only second
-    // chance worth paying for. Each unsent-but-queued retx is ~5s of MC-DPSK
-    // audio that delays BRAVO's real ACK traffic.
+    // chance worth paying for. The runtime interval is lengthened for OFDM so
+    // the retry does not transmit into the first burst-interleaver group.
     static constexpr uint32_t CONNECT_ACK_RETRANSMIT_MS = 6000;
     static constexpr int CONNECT_ACK_MAX_RETX = 1;
 

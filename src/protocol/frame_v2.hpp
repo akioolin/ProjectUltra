@@ -639,6 +639,14 @@ struct HeaderInfo {
 };
 HeaderInfo parseHeader(const Bytes& first_codeword_data);
 
+inline bool isAddressedToCallsign(const HeaderInfo& header, const std::string& local_call) {
+    if (local_call.empty()) {
+        return true;
+    }
+    const uint32_t our_hash = hashCallsign(local_call);
+    return header.dst_hash == our_hash || header.dst_hash == 0xFFFFFF;
+}
+
 // ============================================================================
 // Codeword Identification Helpers
 // ============================================================================
