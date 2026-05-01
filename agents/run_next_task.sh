@@ -27,6 +27,7 @@ AUTO_HARDWARE_PATTERN=${AGENT_AUTO_HARDWARE_PATTERN:-./agents/run_hardware_senti
 AUTO_HARDWARE_CMD=${AGENT_AUTO_HARDWARE_CMD:-SSH_KEY="$HOME/.ssh/id_pi5" ./agents/run_hardware_sentinel.sh}
 AUTO_COMMIT=${AGENT_AUTO_COMMIT:-0}
 PUSH_BRANCH=${AGENT_PUSH:-0}
+PUBLISH_FAILED_GATES=${AGENT_PUBLISH_FAILED_GATES:-0}
 ARCHIVE_TASK=${AGENT_ARCHIVE_TASK:-0}
 CREATE_PR=${AGENT_CREATE_PR:-0}
 PR_DRAFT=${AGENT_PR_DRAFT:-1}
@@ -229,21 +230,43 @@ if [[ "$ALLOW_AGENT_COMMITS" != "1" && "$post_agent_head" != "$pre_agent_head" ]
   exit 2
 fi
 
+local_gate_rc=0
+local_gate_ran=0
 if [[ "$RUN_LOCAL_GATE" == "1" ]]; then
+  local_gate_ran=1
+  set +e
   AGENT_REPORT_DIR="$report_dir/local_gate" "$LOCAL_GATE" > "$report_dir/local_gate.log" 2>&1
+  local_gate_rc=$?
+  set -e
 fi
 
 hardware_gate_rc=0
 hardware_gate_ran=0
+hardware_gate_skipped=0
 if [[ "$hardware_gate_requested" == "1" ]]; then
-  hardware_gate_ran=1
-  mkdir -p "$report_dir/hardware_gate"
-  set +e
-  AGENT_REPORT_DIR="$report_dir/hardware_gate" \
-    AGENT_HW_SENTINEL_REPORT_DIR="$report_dir/hardware_gate" \
-    bash -lc "$hardware_gate_cmd" > "$report_dir/hardware_gate.log" 2>&1
-  hardware_gate_rc=$?
-  set -e
+  if [[ "$local_gate_rc" == "0" ]]; then
+    hardware_gate_ran=1
+    mkdir -p "$report_dir/hardware_gate"
+    set +e
+    AGENT_REPORT_DIR="$report_dir/hardware_gate" \
+      AGENT_HW_SENTINEL_REPORT_DIR="$report_dir/hardware_gate" \
+      bash -lc "$hardware_gate_cmd" > "$report_dir/hardware_gate.log" 2>&1
+    hardware_gate_rc=$?
+    set -e
+  else
+    hardware_gate_skipped=1
+    echo "Skipped hardware gate because local gate failed with rc=$local_gate_rc." > "$report_dir/hardware_gate.log"
+  fi
+fi
+
+gate_failed=0
+if [[ "$local_gate_rc" != "0" || "$hardware_gate_rc" != "0" ]]; then
+  gate_failed=1
+fi
+
+publish_blocked_by_gate=0
+if [[ "$gate_failed" == "1" && "$PUBLISH_FAILED_GATES" != "1" ]]; then
+  publish_blocked_by_gate=1
 fi
 
 git status --short > "$report_dir/git_status.txt"
@@ -279,7 +302,9 @@ fi
 commits_ahead=$(git rev-list --count "$PR_BASE..HEAD")
 
 if [[ "$PUSH_BRANCH" == "1" ]]; then
-  if [[ "$commits_ahead" != "0" ]]; then
+  if [[ "$publish_blocked_by_gate" == "1" ]]; then
+    echo "No push: required gate failed and AGENT_PUBLISH_FAILED_GATES=$PUBLISH_FAILED_GATES." > "$report_dir/push_blocked.log"
+  elif [[ "$commits_ahead" != "0" ]]; then
     git push -u origin "$branch"
     pushed=1
   else
@@ -316,7 +341,9 @@ Base: \`$PR_BASE\`
 See local report directory: \`$report_dir\`
 EOF
 
-  if [[ "$commits_ahead" == "0" ]]; then
+  if [[ "$publish_blocked_by_gate" == "1" ]]; then
+    echo "No PR created: required gate failed and AGENT_PUBLISH_FAILED_GATES=$PUBLISH_FAILED_GATES." > "$report_dir/pr_create.log"
+  elif [[ "$commits_ahead" == "0" ]]; then
     echo "No PR created: no commits between $PR_BASE and $branch." > "$report_dir/pr_create.log"
   else
     pr_args=(pr create --base "$PR_BASE" --head "$branch" --title "Agent task: $task_base" --body-file "$pr_body")
@@ -357,12 +384,22 @@ if [[ "$COMMENT_ISSUE_RESULTS" == "1" && -n "$source_issue_number" && "$DRY_RUN"
       echo "- Commits ahead of \`$PR_BASE\`: \`$commits_ahead\`"
       if [[ "$pr_created" == "1" ]]; then
         echo "- Draft PR: $pr_url"
+      elif [[ "$publish_blocked_by_gate" == "1" ]]; then
+        echo "- Draft PR: not created because a required gate failed."
       else
         echo "- Draft PR: not created because there are no commits beyond \`$PR_BASE\`."
+      fi
+      if [[ "$publish_blocked_by_gate" == "1" ]]; then
+        echo "- Publish blocked: required gate failed; no branch push or PR was created."
+      fi
+      if [[ "$local_gate_ran" == "1" ]]; then
+        echo "- Local gate: ran with rc=\`$local_gate_rc\`."
       fi
       if [[ "$hardware_gate_ran" == "1" ]]; then
         echo "- Hardware gate: ran with rc=\`$hardware_gate_rc\`."
         echo "- Hardware gate report: \`$report_dir/hardware_gate\`."
+      elif [[ "$hardware_gate_skipped" == "1" ]]; then
+        echo "- Hardware gate: skipped because local gate failed."
       fi
       if [[ "$hardware_gate_ran" == "1" ]]; then
         echo
@@ -420,11 +457,17 @@ allow_base_ahead=$ALLOW_BASE_AHEAD
 start_branch=$current_branch
 worker_branch=$branch
 local_gate=$RUN_LOCAL_GATE
+local_gate_ran=$local_gate_ran
+local_gate_rc=$local_gate_rc
 hardware_gate=$hardware_gate_requested
 hardware_gate_auto=$hardware_gate_auto
 hardware_gate_ran=$hardware_gate_ran
+hardware_gate_skipped=$hardware_gate_skipped
 hardware_gate_rc=$hardware_gate_rc
 hardware_gate_cmd=$hardware_gate_cmd
+gate_failed=$gate_failed
+publish_failed_gates=$PUBLISH_FAILED_GATES
+publish_blocked_by_gate=$publish_blocked_by_gate
 auto_commit=$AUTO_COMMIT
 committed=$committed
 commits_ahead=$commits_ahead

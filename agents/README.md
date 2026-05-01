@@ -115,6 +115,8 @@ AGENT_PROMPT_MODE=file AGENT_CMD='your-agent --prompt-file' ./agents/run_next_ta
 - `AGENT_AUTO_COMMIT`: set `1` to commit successful changes.
 - `AGENT_PUSH`: set `1` to push the branch after an auto-commit.
 - `AGENT_CREATE_PR`: set `1` to create a GitHub PR with `gh`; requires `AGENT_PUSH=1`.
+- `AGENT_PUBLISH_FAILED_GATES`: set `1` to push/create PRs even when a
+  required local or hardware gate fails, default `0`.
 - `AGENT_PR_DRAFT`: set `0` for ready-for-review PRs, default `1`.
 - `AGENT_COMMENT_ISSUE_RESULTS`: comment completion output back to the source
   GitHub issue for approved planner tasks, default `1`.

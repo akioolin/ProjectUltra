@@ -24,6 +24,10 @@ unreviewed edits, and benchmark regressions that are discovered days later.
 The runner owns commits, pushes, and PR creation. The coding agent must edit
 files only; if it creates commits itself, the runner rejects the task unless
 `AGENT_ALLOW_AGENT_COMMITS=1` is explicitly set.
+By default, the runner does not push or create a PR when a required local or
+hardware gate fails. It preserves the branch/commit locally and comments the
+failure back to the issue instead. Set `AGENT_PUBLISH_FAILED_GATES=1` only for
+deliberate review of failed-gate work.
 If `main` cannot be fast-forwarded cleanly, the runner stops instead of letting
 an agent work from stale code. Set `AGENT_UPDATE_BASE=0` only for deliberate
 offline experiments. If local `main` has unpublished commits, the runner also
