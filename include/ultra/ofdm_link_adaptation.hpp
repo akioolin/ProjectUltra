@@ -88,10 +88,10 @@ inline int bitsPerOFDMSymbol(int total_carriers,
 inline int recommendedBurstGroupSize(Modulation mod, CodeRate rate, float fading_index = 0.0f) {
     if (mod == Modulation::D8PSK &&
         (rate == CodeRate::R1_2 || rate == CodeRate::R2_3 || rate == CodeRate::R3_4)) {
-        if (fading_index >= 0.45f) return 6;
-        return 4;
+        if (fading_index >= 0.45f) return 8;
+        return 8;
     }
-    return 4;
+    return 8;
 }
 
 inline int sanitizeBurstGroupSize(int value) {
