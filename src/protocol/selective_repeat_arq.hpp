@@ -44,6 +44,8 @@ public:
     bool sendData(const Bytes& data) override;
     bool sendData(const std::string& text) override;
     bool sendDataWithFlags(const Bytes& data, uint8_t flags) override;
+    bool sendFixedDataWithFlags(const Bytes& data, uint8_t flags);
+    bool sendVariableDataWithFlags(const Bytes& data, uint8_t flags);
 
     bool isReadyToSend() const override;
     size_t getAvailableSlots() const override;

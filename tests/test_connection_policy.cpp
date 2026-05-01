@@ -49,8 +49,10 @@ void test_wide_ofdm_timing_and_timeout() {
     CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 4, 120, 2) == 8000,
           "wide OFDM window=4 timeout should clamp to hardware-safe floor");
 
-    CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 8, 2712, 2) == 13020,
+    CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 8, 120, 1) == 10212,
           "wide OFDM window=8 timeout should cover the full burst and ACK path");
+    CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 16, 5304, 1) == 16000,
+          "wide OFDM window=16 timeout should clamp to hardware-safe ceiling");
 
     auto d8psk = wideOFDMFrameTiming(Modulation::D8PSK, CodeRate::R1_2);
     CHECK(d8psk.data_symbols == 19, "D8PSK R1/2 wide OFDM data symbols");
@@ -71,9 +73,18 @@ void test_ofdm_profile_selection() {
     CHECK(isNearAwgnOFDM(0.00f, 15.0f), "near-AWGN threshold should include SNR15");
     CHECK(!isNearAwgnOFDM(0.30f, 15.0f), "near-AWGN fading threshold is strict");
     CHECK(!isNearAwgnOFDM(0.00f, 14.9f), "near-AWGN SNR threshold is strict");
+    CHECK(isHighThroughputOFDM(0.30f, 15.0f), "Good fading SNR15 should use high-throughput OFDM window");
+    CHECK(!isHighThroughputOFDM(0.65f, 15.0f), "Moderate fading should not use high-throughput OFDM window yet");
+    CHECK(!isHighThroughputOFDM(0.30f, 14.9f), "high-throughput OFDM SNR threshold is strict");
 
-    CHECK(ofdmWindowSize(true) == kWideOFDMWindowFrames, "near-AWGN OFDM window size");
-    CHECK(ofdmWindowSize(false) == kWideOFDMWindowFrames, "fading OFDM window size");
+    CHECK(isHighThroughputOFDMMode(Modulation::DQPSK, CodeRate::R1_2),
+          "DQPSK R1/2 should use high-throughput OFDM mode");
+    CHECK(!isHighThroughputOFDMMode(Modulation::DQPSK, CodeRate::R1_4),
+          "DQPSK R1/4 should keep default OFDM mode");
+    CHECK(ofdmWindowSize(Modulation::DQPSK, CodeRate::R1_2) == kHighThroughputOFDMWindowFrames,
+          "high-throughput OFDM window size");
+    CHECK(ofdmWindowSize(Modulation::DQPSK, CodeRate::R1_4) == kWideOFDMWindowFrames,
+          "default OFDM window size");
     CHECK(ofdmAckBatchSize(true) == 0, "near-AWGN ACK batch disabled");
     CHECK(ofdmAckBatchSize(false) == 0, "fading ACK batch sentinel");
 
@@ -81,18 +92,21 @@ void test_ofdm_profile_selection() {
     CHECK(default_sack.delay_ms == 120 && default_sack.short_delay_ms == 0,
           "default OFDM SACK delay profile");
     auto near_sack = ofdmSackDelays(true, kWideOFDMWindowFrames, 648);
-    CHECK(near_sack.delay_ms == 2712 && near_sack.short_delay_ms == 120,
-          "near-AWGN OFDM uses burst-tail SACK delay profile");
+    CHECK(near_sack.delay_ms == 120 && near_sack.short_delay_ms == 120,
+          "single-group high-throughput OFDM can ACK at burst tail");
+    auto wide_sack = ofdmSackDelays(true, kHighThroughputOFDMWindowFrames, 648);
+    CHECK(wide_sack.delay_ms == 5304 && wide_sack.short_delay_ms == 120,
+          "two-group high-throughput OFDM defers SACK until burst tail");
 
     auto default_ack = ofdmAckRepeatProfile(Modulation::DQPSK, CodeRate::R1_2, false);
     CHECK(default_ack.count == 2 && default_ack.delay_ms == 220,
           "default OFDM ACK repeat profile");
     auto near_ack = ofdmAckRepeatProfile(Modulation::DQPSK, CodeRate::R1_2, true);
-    CHECK(near_ack.count == 2 && near_ack.delay_ms == 220,
+    CHECK(near_ack.count == 1 && near_ack.delay_ms == 220,
           "near-AWGN ACK repeat profile");
     auto d8psk_ack = ofdmAckRepeatProfile(Modulation::D8PSK, CodeRate::R1_2, true);
-    CHECK(d8psk_ack.count == 2 && d8psk_ack.delay_ms == 220,
-          "D8PSK ACK repeat profile should use conservative default");
+    CHECK(d8psk_ack.count == 1 && d8psk_ack.delay_ms == 220,
+          "near-AWGN D8PSK ACK repeat profile");
 }
 
 void test_negotiated_mode_selection() {

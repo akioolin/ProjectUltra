@@ -15,6 +15,7 @@ enum class PayloadType : uint8_t {
     TEXT_MESSAGE = 0x00,  // Regular text message (backward compatible)
     FILE_START   = 0x01,  // File metadata: flags, size, crc32, filename
     FILE_DATA    = 0x02,  // File chunk: offset + data
+    FILE_BLOCK   = 0x03,  // Single-frame file block: metadata + full payload
 };
 
 // File transfer flags (in FILE_START payload)
@@ -67,6 +68,7 @@ public:
     // For OFDM fixed frames, call setMaxChunkPayload() to match frame capacity
     static constexpr size_t DEFAULT_CHUNK_SIZE = 250;
     static constexpr size_t FILE_DATA_OVERHEAD = 5;  // TYPE(1) + OFFSET(4)
+    static constexpr size_t FILE_BLOCK_FIXED_OVERHEAD = 15;  // TYPE+FLAGS+SIZE+TX_SIZE+CRC+NAME_LEN
 
     // Callbacks
     using ProgressCallback = std::function<void(const FileTransferProgress&)>;
@@ -92,6 +94,10 @@ public:
     // Get the next chunk payload (includes type byte).
     // Returns empty if nothing to send.
     Bytes getNextChunk();
+
+    // Build a complete single-frame file payload if it fits max_payload.
+    // Returns empty when the file must use the chunked FILE_START/FILE_DATA path.
+    Bytes getSingleBlockPayload(size_t max_payload);
 
     // Check if there are more chunks to send
     bool hasMoreChunks() const;
@@ -165,8 +171,10 @@ private:
     // Helpers
     Bytes buildMetadataPayload();
     Bytes buildDataPayload();
+    Bytes buildSingleBlockPayload(size_t max_payload);
     bool processFileStart(const Bytes& payload);
     bool processFileData(const Bytes& payload, bool more_data);
+    bool processFileBlock(const Bytes& payload);
     uint32_t calculateCRC32(std::istream& stream);
     uint32_t calculateCRC32File(const std::string& filepath);
     void resetTxState();

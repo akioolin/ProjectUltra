@@ -44,8 +44,7 @@ bool SelectiveRepeatARQ::sendDataWithFlags(const Bytes& data, uint8_t flags) {
     const uint16_t seq = tx_next_seq_;
     size_t slot = seqToSlot(seq);
 
-    // Create and serialize v2 frame
-    auto frame = v2::DataFrame::makeData(local_call_, remote_call_, seq, data);
+    auto frame = v2::DataFrame::makeData(local_call_, remote_call_, seq, data, code_rate_);
     frame.flags = flags;
 
     tx_window_[slot].active = true;
@@ -75,6 +74,92 @@ bool SelectiveRepeatARQ::sendDataWithFlags(const Bytes& data, uint8_t flags) {
 
     transmitData(tx_window_[slot].frame_data);
 
+    return true;
+}
+
+bool SelectiveRepeatARQ::sendFixedDataWithFlags(const Bytes& data, uint8_t flags) {
+    if (!isReadyToSend()) {
+        LOG_MODEM(WARN, "SR-ARQ: Window full, cannot send fixed frame");
+        return false;
+    }
+
+    if (local_call_.empty() || remote_call_.empty()) {
+        LOG_MODEM(ERROR, "SR-ARQ: Callsigns not set");
+        return false;
+    }
+
+    const uint16_t seq = tx_next_seq_;
+    size_t slot = seqToSlot(seq);
+
+    auto frame = v2::makeFixedDataFrame(local_call_, remote_call_, seq, data, code_rate_);
+    frame.flags = flags;
+
+    tx_window_[slot].active = true;
+    tx_window_[slot].frame_data = frame.serialize();
+    tx_window_[slot].seq = seq;
+    tx_window_[slot].timeout_ms = currentAckTimeoutMs();
+    tx_window_[slot].first_tx_ms = arq_time_ms_;
+    tx_window_[slot].rtt_sample_eligible = true;
+    tx_window_[slot].retry_count = 0;
+    tx_window_[slot].acked = false;
+    tx_window_[slot].hole_ack_count = 0;
+    tx_window_[slot].fast_retx_count = 0;
+    tx_window_[slot].fast_retx_cooldown_ms = 0;
+    tx_window_[slot].hole_probe_armed = false;
+    tx_window_[slot].hole_probe_timer_ms = 0;
+    tx_window_[slot].hole_probe_count = 0;
+
+    stats_.frames_sent++;
+    tx_next_seq_ = (tx_next_seq_ + 1) & 0xFFFF;
+    tx_in_flight_++;
+
+    LOG_MODEM(DEBUG, "SR-ARQ: Sent fixed DATA seq=%d slot=%zu, window=[%d,%d)",
+              seq, slot, tx_base_seq_, tx_next_seq_);
+
+    transmitData(tx_window_[slot].frame_data);
+    return true;
+}
+
+bool SelectiveRepeatARQ::sendVariableDataWithFlags(const Bytes& data, uint8_t flags) {
+    if (!isReadyToSend()) {
+        LOG_MODEM(WARN, "SR-ARQ: Window full, cannot send variable frame");
+        return false;
+    }
+
+    if (local_call_.empty() || remote_call_.empty()) {
+        LOG_MODEM(ERROR, "SR-ARQ: Callsigns not set");
+        return false;
+    }
+
+    const uint16_t seq = tx_next_seq_;
+    size_t slot = seqToSlot(seq);
+
+    auto frame = v2::DataFrame::makeData(local_call_, remote_call_, seq, data, code_rate_);
+    frame.flags = flags;
+
+    tx_window_[slot].active = true;
+    tx_window_[slot].frame_data = frame.serialize();
+    tx_window_[slot].seq = seq;
+    tx_window_[slot].timeout_ms = currentAckTimeoutMs();
+    tx_window_[slot].first_tx_ms = arq_time_ms_;
+    tx_window_[slot].rtt_sample_eligible = true;
+    tx_window_[slot].retry_count = 0;
+    tx_window_[slot].acked = false;
+    tx_window_[slot].hole_ack_count = 0;
+    tx_window_[slot].fast_retx_count = 0;
+    tx_window_[slot].fast_retx_cooldown_ms = 0;
+    tx_window_[slot].hole_probe_armed = false;
+    tx_window_[slot].hole_probe_timer_ms = 0;
+    tx_window_[slot].hole_probe_count = 0;
+
+    stats_.frames_sent++;
+    tx_next_seq_ = (tx_next_seq_ + 1) & 0xFFFF;
+    tx_in_flight_++;
+
+    LOG_MODEM(INFO, "SR-ARQ: Sent variable DATA seq=%d slot=%zu total_cw=%d",
+              seq, slot, static_cast<int>(frame.total_cw));
+
+    transmitData(tx_window_[slot].frame_data);
     return true;
 }
 

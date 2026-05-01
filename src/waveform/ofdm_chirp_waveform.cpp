@@ -537,6 +537,13 @@ float OFDMChirpWaveform::getFadingIndex() const {
     return 0.0f;
 }
 
+float OFDMChirpWaveform::getLastTimingOffsetSamples() const {
+    if (demodulator_) {
+        return demodulator_->getLastTimingOffsetSamples();
+    }
+    return 0.0f;
+}
+
 float OFDMChirpWaveform::getLastLTSSignalPower() const {
     if (demodulator_) {
         return demodulator_->getLastLTSSignalPower();

@@ -107,6 +107,7 @@ public:
 
     // Burst interleave marker: true if last detectDataSync() found negated LTS
     bool wasBurstInterleaved() const override { return burst_interleave_latched_; }
+    float getLastTimingOffsetSamples() const override;
 
     // Pilot spacing for interleaver geometry
     int getPilotSpacing() const override { return config_.pilot_spacing; }

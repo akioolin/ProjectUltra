@@ -11,6 +11,15 @@
 namespace ultra {
 namespace protocol {
 
+namespace {
+constexpr size_t kOFDMFileBlockPayloadLimit = 2300;
+
+bool shouldUseSingleOFDMFileBlock(float fading_index, float snr_db, CodeRate rate) {
+    return connection_policy::isNearAwgnOFDM(fading_index, snr_db) &&
+           getCodeRateValue(rate) >= getCodeRateValue(CodeRate::R2_3);
+}
+}
+
 const char* connectionStateToString(ConnectionState state) {
     switch (state) {
         case ConnectionState::DISCONNECTED:  return "DISCONNECTED";
@@ -350,9 +359,13 @@ bool Connection::sendMessage(const std::string& text) {
 
     Bytes data(text.begin(), text.end());
 
-    if (!is_ofdm || data.size() <= v2::getFixedFramePayloadCapacity(data_code_rate_)) {
-        // Single frame - MC-DPSK can handle any size, OFDM fits in one frame
+    if (!is_ofdm) {
         return arq_.sendData(data);
+    }
+
+    if (data.size() <= v2::getFixedFramePayloadCapacity(data_code_rate_)) {
+        // Single frame - MC-DPSK can handle any size, OFDM fits in one frame
+        return arq_.sendFixedDataWithFlags(data, v2::Flags::NONE);
     }
 
     size_t capacity = v2::getFixedFramePayloadCapacity(data_code_rate_);
@@ -461,6 +474,22 @@ bool Connection::sendFile(const std::string& filepath) {
         return false;
     }
 
+    if (is_ofdm && shouldUseSingleOFDMFileBlock(fading_index_, measured_snr_db_, data_code_rate_)) {
+        Bytes block = file_transfer_.getSingleBlockPayload(kOFDMFileBlockPayloadLimit);
+        if (!block.empty()) {
+            LOG_MODEM(INFO, "Connection: Sending file as single OFDM block (%zu bytes payload)",
+                      block.size());
+            if (!arq_.sendVariableDataWithFlags(block, v2::Flags::NONE)) {
+                file_transfer_.onSendFailed();
+                return false;
+            }
+            return true;
+        }
+    } else if (is_ofdm) {
+        LOG_MODEM(INFO, "Connection: Using interleaved OFDM chunks for file (SNR=%.1f, fading=%.2f, rate=%s)",
+                  measured_snr_db_, fading_index_, codeRateToString(data_code_rate_));
+    }
+
     sendNextFileChunk();
     return true;
 }
@@ -504,7 +533,11 @@ void Connection::sendNextFileChunk() {
 
         // MORE_FRAG indicates more data remaining in file (not burst)
         uint8_t flags = file_transfer_.hasMoreChunks() ? v2::Flags::MORE_FRAG : v2::Flags::NONE;
-        arq_.sendDataWithFlags(chunk, flags);
+        if (is_ofdm) {
+            arq_.sendFixedDataWithFlags(chunk, flags);
+        } else {
+            arq_.sendDataWithFlags(chunk, flags);
+        }
     }
 
     // Flush burst buffer
@@ -539,7 +572,11 @@ void Connection::sendNextFragment() {
         LOG_MODEM(DEBUG, "Connection: Sending fragment %zu/%zu (%zu bytes, flags=0x%02X)",
                   next_fragment_idx_ + 1, pending_tx_fragments_.size(), chunk.size(), flags);
 
-        arq_.sendDataWithFlags(chunk, flags);
+        if (is_ofdm) {
+            arq_.sendFixedDataWithFlags(chunk, flags);
+        } else {
+            arq_.sendDataWithFlags(chunk, flags);
+        }
         next_fragment_idx_++;
     }
 
@@ -1001,14 +1038,17 @@ void Connection::enterConnected() {
         // otherwise mid-burst group resync can create false base holes.
         const bool near_awgn_ofdm =
             connection_policy::isNearAwgnOFDM(fading_index_, measured_snr_db_);
-        arq_.setWindowSize(connection_policy::ofdmWindowSize(near_awgn_ofdm));
+        arq_.setWindowSize(connection_policy::ofdmWindowSize(
+            data_modulation_, data_code_rate_));
         arq_.setMaxRetries(15);     // More attempts compensate for ACK loss on fading
         arq_.setAckBatchSize(connection_policy::ofdmAckBatchSize(near_awgn_ofdm));
 
         const auto timing = connection_policy::wideOFDMFrameTiming(
             data_modulation_, data_code_rate_);
         const auto sack = connection_policy::ofdmSackDelays(
-            near_awgn_ofdm, arq_.getWindowSize(), timing.data_ms);
+            arq_.getWindowSize() > connection_policy::kWideOFDMWindowFrames,
+            arq_.getWindowSize(),
+            timing.data_ms);
         arq_.setSackDelay(sack.delay_ms);
         arq_.setSackDelayShort(sack.short_delay_ms);
 

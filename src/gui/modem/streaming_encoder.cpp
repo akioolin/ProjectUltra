@@ -656,6 +656,22 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
         return encoded;
     }
 
+    // Large OFDM block frames explicitly advertise a non-4-CW size and use
+    // variable-CW encoding. The fixed 4-CW path remains the default for normal
+    // ARQ chunks so they keep frame-level interleaving.
+    if (tx_data.size() >= v2::DataFrame::HEADER_SIZE &&
+        tx_data[12] != v2::FIXED_FRAME_CODEWORDS) {
+        auto cws = v2::encodeFrameWithLDPC(tx_data, code_rate_);
+        Bytes encoded;
+        for (const auto& cw : cws) {
+            encoded.insert(encoded.end(), cw.begin(), cw.end());
+        }
+
+        LOG_MODEM(INFO, "[%s] OFDM variable data: %zu bytes -> %zu CWs (%zu coded)",
+                  log_prefix_.c_str(), tx_data.size(), cws.size(), encoded.size());
+        return encoded;
+    }
+
     // Data frames: 4-CW fixed frame encoding with frame interleaving
     // Channel interleaving is controlled by use_channel_interleave_ flag
     size_t bps = static_cast<size_t>(ofdm_link_adaptation::bitsPerOFDMSymbol(
