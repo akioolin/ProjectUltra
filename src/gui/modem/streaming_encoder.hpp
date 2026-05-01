@@ -172,7 +172,7 @@ private:
     bool use_channel_interleave_ = true;
     bool use_frame_interleave_ = true;     // Always on for OFDM
     bool use_burst_interleave_ = false;    // Burst-level long interleaver (N-frame groups)
-    int burst_group_size_ = 4;
+    int burst_group_size_ = 8;
 
     // Logging
     std::string log_prefix_ = "StreamingEncoder";

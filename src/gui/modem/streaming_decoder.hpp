@@ -416,7 +416,7 @@ private:
     float burst_snr_ = 0.0f;             // SNR from sync detection
     float burst_cfo_ = 0.0f;             // CFO (updated per frame from pilot tracking)
     std::chrono::steady_clock::time_point burst_start_time_;  // timeout reference
-    int burst_group_size_ = 4;
+    int burst_group_size_ = 8;
     static constexpr int BURST_TIMEOUT_MS_BASE = 8000;  // 4 frames × ~0.7s + margin
 
     // Pending frame state for multi-codeword frames
@@ -435,7 +435,10 @@ private:
     static constexpr size_t OVERFLOW_RECOVERY_KEEP = 120000; // Keep ~2.5s newest audio when overloaded
 
     // Constants - Adaptive acquisition thresholds (disabled for now)
-    static constexpr float CORR_NOISE_THRESHOLD = 0.05f;    // Below = pure noise, don't advance
+    // Disconnected MC-DPSK acquisition must tolerate deep fades on the control
+    // chirp. Hardware Good-fading traces showed valid CONNECT energy around
+    // 0.04 RMS; the old 0.05 gate skipped it before correlation could run.
+    static constexpr float CORR_NOISE_THRESHOLD = 0.025f;   // Below = pure noise, don't advance
     static constexpr float CORR_WEAK_THRESHOLD = 0.10f;     // Below = weak, advance slowly
     static constexpr float CORR_DETECT_THRESHOLD = 0.15f;   // At/above = detected
     static constexpr float ENERGY_GATE_MULTIPLIER = 0.0f;   // Disabled - noise floor estimation is inaccurate

@@ -996,22 +996,14 @@ void Connection::enterConnected() {
                   timeout_ms / 1000.0f, timing.data_ms, timing.ack_ms,
                   modulationToString(data_modulation_), codeRateToString(data_code_rate_));
     } else {
-        // Keep OFDM receive pressure bounded on fading channels. Near-AWGN
-        // hardware paths need a larger flight window to cover soundcard RTT;
-        // otherwise the sender drains its 4-frame window and waits idle for
-        // ACKs even though the PHY is clean.
+        // Keep OFDM receive pressure bounded on hardware paths. The widened
+        // window must stay aligned with the burst interleaver group size;
+        // otherwise mid-burst group resync can create false base holes.
         const bool near_awgn_ofdm =
             connection_policy::isNearAwgnOFDM(fading_index_, measured_snr_db_);
         arq_.setWindowSize(connection_policy::ofdmWindowSize(near_awgn_ofdm));
         arq_.setMaxRetries(15);     // More attempts compensate for ACK loss on fading
-        // The near-AWGN window keeps the pipe full. Keep in-stream ACKs on the
-        // delayed half-duplex path so hardware does not transmit SACKs into the
-        // sender's still-arriving widened burst; stream-tail ACKs stay fast.
         arq_.setAckBatchSize(connection_policy::ofdmAckBatchSize(near_awgn_ofdm));
-        // Keep the failed window=4 SACK-delay canary rolled back. Burst-sized
-        // SACK coalescing is enabled only for the widened near-AWGN path,
-        // where the sender has enough flight depth and a longer timeout.
-        // See .claude/plans/imperative-napping-conway.md for canary findings.
 
         const auto timing = connection_policy::wideOFDMFrameTiming(
             data_modulation_, data_code_rate_);

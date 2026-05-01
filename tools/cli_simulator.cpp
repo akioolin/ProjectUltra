@@ -806,7 +806,7 @@ private:
     std::atomic<uint64_t> total_samples_{0};
     float snr_db_ = 20.0f;
     bool no_burst_interleave_ = false;  // Disable burst interleaving for A/B testing
-    int burst_group_size_ = 4;
+    int burst_group_size_ = 8;
     int rx_overfeed_factor_ = 1;
     int decode_delay_ms_ = 0;
     int rx_batch_callbacks_ = 1;
@@ -1621,7 +1621,7 @@ public:
         if (no_burst_interleave_) {
             std::cout << "  \033[33mBurst interleaving DISABLED\033[0m\n";
         }
-        if (burst_group_size_ != 4) {
+        if (burst_group_size_ != 8) {
             std::cout << "  \033[36mBurst interleave group size = " << burst_group_size_ << "\033[0m\n";
         }
 
@@ -1701,7 +1701,7 @@ private:
     bool test_burst_ = false;              // --burst-test mode: send large messages for burst interleaving
     bool use_channel_interleave_ = true;   // Enabled by default for OFDM fading resistance
     bool no_burst_interleave_ = false;     // --no-burst-interleave for A/B testing
-    int burst_group_size_ = 4;             // --burst-group-size N (experimental)
+    int burst_group_size_ = 8;             // --burst-group-size N (experimental)
     int rx_overfeed_factor_ = 1;           // --rx-overfeed-factor N (decoder overload stress)
     int decode_delay_ms_ = 0;              // --decode-delay-ms N (simulated slow decoder)
     int rx_batch_callbacks_ = 1;           // --rx-batch-callbacks N (batched decoder feed)
@@ -3035,7 +3035,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --hop-channel <CH>  Condition-B channel for --adpt-test\n";
                 std::cout << "  --channel-interleave, -ci  Enable channel interleaving\n";
                 std::cout << "  --no-burst-interleave     Disable burst-level long interleaving\n";
-                std::cout << "  --burst-group-size <N>    Burst interleave group size (2-8, default: 4)\n";
+                std::cout << "  --burst-group-size <N>    Burst interleave group size (2-8, default: 8)\n";
                 std::cout << "  --rx-overfeed-factor <N>  Run audio callbacks N× faster wall-clock (stress, default: 1)\n";
                 std::cout << "  --decode-delay-ms <N>     Add decode-thread delay (0-500 ms, stress)\n";
                 std::cout << "  --rx-batch-callbacks <N>  Batch N callbacks per decoder feed (stress)\n";

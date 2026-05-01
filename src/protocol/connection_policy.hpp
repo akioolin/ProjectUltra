@@ -24,7 +24,7 @@ inline constexpr uint32_t kNarrowOFDMPilotSpacing = 10;
 inline constexpr uint32_t kLDPCBitsPerCodeword = 648;
 inline constexpr uint32_t kFixedFrameCodewords = 4;
 inline constexpr uint32_t kOFDMBurstAckBatchFrames = 4;
-inline constexpr size_t kNearAwgnWindowFrames = 12;
+inline constexpr size_t kWideOFDMWindowFrames = 8;
 
 struct OFDMFrameTiming {
     uint32_t data_symbols = 0;
@@ -68,11 +68,13 @@ inline bool isNearAwgnOFDM(float fading_index, float snr_db) {
 }
 
 inline size_t ofdmWindowSize(bool near_awgn_ofdm) {
-    return near_awgn_ofdm ? kNearAwgnWindowFrames : 4;
+    (void)near_awgn_ofdm;
+    return kWideOFDMWindowFrames;
 }
 
 inline uint32_t ofdmAckBatchSize(bool near_awgn_ofdm) {
-    return near_awgn_ofdm ? kOFDMBurstAckBatchFrames : 0;
+    (void)near_awgn_ofdm;
+    return 0;
 }
 
 inline uint32_t bitsPerOFDMSymbol(uint32_t carriers,
@@ -126,13 +128,10 @@ inline SackDelayProfile ofdmSackDelays(bool near_awgn_ofdm,
 inline AckRepeatProfile ofdmAckRepeatProfile(Modulation mod,
                                              CodeRate rate,
                                              bool near_awgn_ofdm) {
+    (void)mod;
+    (void)rate;
+    (void)near_awgn_ofdm;
     AckRepeatProfile profile;
-    if (mod == Modulation::D8PSK && rate == CodeRate::R1_2) {
-        profile.count = 3;
-        profile.delay_ms = 250;
-    } else if (near_awgn_ofdm) {
-        profile.count = 1;
-    }
     return profile;
 }
 
