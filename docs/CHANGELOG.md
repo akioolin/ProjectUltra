@@ -10,6 +10,50 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-02: TNC Phase 4 — hardware loopback test script
+
+**What was added:**
+`tools/tnc_loopback_test.sh` — a shell-driven end-to-end test that
+runs two `ultra_tnc` instances (Mac local + Pi via SSH, mirroring
+`run_hw_test.sh`'s pattern) and validates a binary file transfer
+between them via the VARA TNC interface.
+
+Flow:
+1. Starts ultra_tnc on Pi via SSH (audio device, callsign, port)
+2. Starts ultra_tnc on Mac (audio device, callsign, port)
+3. Waits 5s for socket binding, then polls up to 20s
+4. Opens persistent cmd-port TCP connection to each side
+5. Drives via VARA commands: MYCALL, BW2300, COMPRESSION TEXT,
+   LISTEN ON (Pi), CONNECT (Mac initiates)
+6. Waits up to 60s for CONNECTED event on both sides
+7. Streams a generated payload (default 5 KB) into Mac's data port
+8. Pi-side data port captured to file via parallel `nc`
+9. Sends DISCONNECT after backlog drains
+10. Compares source vs received via cksum + cmp; reports throughput
+
+Tooling: pure bash + ssh + nc + dd + cksum + cmp + awk + grep + sed
++ mkfifo. No python, no `timeout`/`gtimeout`, no extra deps.
+
+**Important VARA quirk handled:**
+Closing/reopening the cmd-port TCP connection mid-session would
+evict the active TNCSession (single-client semantics from Phase 2).
+The script keeps cmd sockets persistently open via FIFO-backed nc
+processes; commands are written to FIFO, output is tailed.
+
+**Verification:**
+- `bash -n tools/tnc_loopback_test.sh`: passed (syntax clean)
+- ctest: 34/34 (no source code modified)
+- The actual hardware run is gated on the soundcard being free — the
+  500 KB sweep is still using it. Will run after sweep completes.
+
+**Acceptance:**
+Once executed and passing, this is the proof-of-life that the TNC
+bridge works against real audio + real ProtocolEngine + real ARQ +
+real soundcard. Currently Phase 1+2+3a+3b are validated by ctest +
+the manual `VERSION` smoke. Phase 4 is the integration validation.
+
+---
+
 ## 2026-05-02: TNC Phase 3b — TNCBridge + ultra_tnc binary (working VARA TNC)
 
 **Goal:**
