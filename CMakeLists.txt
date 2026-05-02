@@ -119,6 +119,11 @@ target_link_libraries(ultra_core PUBLIC
 
 if(WIN32)
     target_link_libraries(ultra_core PRIVATE ws2_32)
+    # Ensure <windows.h> never pulls in the legacy winsock1 headers project-
+    # wide. tnc_bridge.cpp includes audio_engine.hpp (SDL.h → windows.h),
+    # then later tnc_server.hpp (→ winsock2.h). Without this, both winsock
+    # versions get included in the same TU and redefine sockaddr/fd_set/etc.
+    target_compile_definitions(ultra_core PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX)
 endif()
 
 if(SDL2_FOUND)
