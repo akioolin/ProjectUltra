@@ -72,11 +72,42 @@ void test_decode_sample_requirement_selection() {
     CHECK(disconnected_ofdm.samples == 9000, "disconnected path should use control/header peek samples");
 }
 
+void test_qam16_control_peek_is_subfixed() {
+    constexpr size_t LDPC_BLOCK = 648;
+    constexpr int CARRIERS = 59;
+    constexpr int SAMPLES_PER_SYMBOL = 1152;
+    constexpr int FIXED_CW = 4;
+
+    const int qam16_bits_per_symbol =
+        ofdm_link_adaptation::bitsPerOFDMSymbol(CARRIERS, true, 5, Modulation::QAM16);
+    const size_t qam16_control_symbols =
+        2 + ((LDPC_BLOCK + qam16_bits_per_symbol - 1) / qam16_bits_per_symbol);
+    const size_t qam16_control_default = qam16_control_symbols * SAMPLES_PER_SYMBOL;
+    const size_t robust_samples = estimateRobustOFDMControlSamples(
+        qam16_control_default, Modulation::QAM16, CodeRate::R1_2,
+        CARRIERS, SAMPLES_PER_SYMBOL);
+    CHECK(robust_samples == 10368,
+          "QAM16 data mode should use the robust DQPSK control-sized peek");
+
+    const size_t data_symbols =
+        robust_samples / static_cast<size_t>(SAMPLES_PER_SYMBOL) - 2;
+    const size_t rounded_soft_bits =
+        (data_symbols * static_cast<size_t>(qam16_bits_per_symbol) / LDPC_BLOCK) * LDPC_BLOCK;
+
+    CHECK(rounded_soft_bits == 2 * LDPC_BLOCK,
+          "QAM16 control-sized peek should yield exactly two complete CWs");
+    CHECK(hasSubFixedFrameSoftBits(rounded_soft_bits, FIXED_CW, LDPC_BLOCK),
+          "two complete CWs should still escalate for a 4-CW fixed frame");
+    CHECK(!hasSubFixedFrameSoftBits(FIXED_CW * LDPC_BLOCK, FIXED_CW, LDPC_BLOCK),
+          "a full fixed-frame soft-bit buffer should not be treated as a peek");
+}
+
 }  // namespace
 
 int main() {
     test_robust_ofdm_control_samples();
     test_decode_sample_requirement_selection();
+    test_qam16_control_peek_is_subfixed();
 
     if (tests_failed != 0) {
         std::cout << "StreamingDecodePolicy: " << (tests_run - tests_failed)

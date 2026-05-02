@@ -10,6 +10,70 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-02: QAM16/32/64 modes (round 5a + 5b)
+
+**What was added:**
+QAM16, QAM32, QAM64 modulation now wired through OFDM_COX end-to-end.
+The modulator + demodulator + soft-demap for these constellations
+already existed in the codebase (`src/ofdm/modulator.cpp`,
+`soft_demap.hpp`); this work adds the integration so they're
+actually selectable and decode on hardware.
+
+**What was changed:**
+- Round 5a — CLI exposure (`tools/cli_simulator.cpp`): `--mod`
+  flag now accepts `qam16`/`qam32`/`qam64`. Help text updated.
+  Unit-test additions in `tests/test_waveform_loopback.cpp` (333/333
+  WaveformLoopback): roundtrip tests for QAM16/32/64 × R1/2 + R3/4
+  via OFDM_COX, plus a deterministic AWGN-margin test
+  (QAM16 R1/2 at 17 dB clean loopback).
+- Round 5b — streaming integration fix (`src/gui/modem/streaming_decoder.cpp`,
+  `src/gui/modem/streaming_decode_policy.hpp`): the connected-OFDM
+  peek-escalation check was `soft_bits.size() < 2 * LDPC_BLOCK`.
+  QAM16's robust control-sized peek produces *exactly* 2 complete CWs
+  (1296 bits), which slipped through that test, so the receiver
+  skipped escalation to a 4-CW fixed-frame decode and returned
+  `cw_ok=0 cw_fail=0`. Added a sub-fixed-frame check
+  (`hasSubFixedFrameSoftBits()` in the policy header) that also
+  fires when 1–3 CWs of soft bits are present but a full fixed
+  frame requires more — gated to OFDM_COX so the existing
+  OFDM_CHIRP behavior is unchanged.
+- Test in `tests/test_streaming_decode_policy.cpp`:
+  `test_qam16_control_peek_is_subfixed` — verifies the 1296-bit
+  QAM16 peek correctly triggers escalation.
+
+**Hardware verification (Mac↔Pi cable + injected AWGN):**
+
+Working ladder (5 KB R1/2 + R3/4 forced via `--mod` CLI):
+
+| Mode  | Rate | SNR | Result | Throughput |
+|-------|------|-----|--------|-----------|
+| QPSK  | R1/2 | 20  | PASS   | 1011 bps (baseline) |
+| QAM16 | R1/2 | 20  | PASS   | 1399 bps (+38%) |
+| QAM16 | R3/4 | 22  | PASS   | **2007 bps** (+98% — top working) |
+| QAM32 | R1/2 | 22  | PASS   | 1383 bps |
+| QAM64 | R1/2 | 25  | PASS   | 1359 bps |
+
+**Known limitations (R3/4 cliff for QAM32+):**
+- QAM32 R3/4 fails at SNR=25 and SNR=28 (16 retx, 1 frame at max retries)
+- QAM64 R3/4 fails at SNR=28 and SNR=30 (same pattern)
+- QAM16 R3/4 works cleanly through SNR=22+
+
+The cliff suggests phase-noise / channel-tracking limits at the
+combination of dense constellation + low FEC redundancy. This is
+under investigation as a follow-up round.
+
+**Throughput plateau on R1/2:**
+QAM16/32/64 R1/2 all cluster around ~1400 bps (data_phase ≈ 29 s
+for 5 KB). At R1/2 the modulation gain is masked by the
+inter-burst SACK round-trip ceiling. R3/4 has fewer round-trips
+per file → real throughput reveal (QAM16 R3/4 = 2007 bps).
+Larger files would amortize this further.
+
+**ctest:** 31/31 + WaveformLoopback 339/339 + StreamingDecodePolicy
+new test passes.
+
+---
+
 ## 2026-05-02: Fix OFDM_COX end-to-end on hardware (round 4)
 
 **What was broken:**

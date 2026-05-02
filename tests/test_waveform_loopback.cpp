@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -42,7 +43,14 @@ Bytes makePayload(size_t size, uint8_t seed) {
     return payload;
 }
 
-ModemConfig makeCoxConfig() {
+bool isDifferential(Modulation mod) {
+    return mod == Modulation::DBPSK ||
+           mod == Modulation::DQPSK ||
+           mod == Modulation::D8PSK;
+}
+
+ModemConfig makeCoxConfig(Modulation mod = Modulation::DQPSK,
+                          CodeRate rate = CodeRate::R1_2) {
     ModemConfig cfg;
     cfg.sample_rate = 48000;
     cfg.fft_size = 1024;
@@ -50,10 +58,10 @@ ModemConfig makeCoxConfig() {
     cfg.cp_mode = CyclicPrefixMode::SHORT;
     cfg.symbol_guard = 0;
     cfg.center_freq = 1500.0f;
-    cfg.modulation = Modulation::DQPSK;
-    cfg.code_rate = CodeRate::R1_2;
-    cfg.use_pilots = false;
-    cfg.pilot_spacing = 10;
+    cfg.modulation = mod;
+    cfg.code_rate = rate;
+    cfg.use_pilots = !isDifferential(mod);
+    cfg.pilot_spacing = ofdm_link_adaptation::recommendedPilotSpacing(mod, rate);
     return cfg;
 }
 
@@ -71,6 +79,30 @@ void append(Samples& dst, const Samples& src) {
 
 void appendTailMargin(Samples& dst, int samples) {
     dst.insert(dst.end(), static_cast<size_t>(samples), 0.0f);
+}
+
+void addAwgn(Samples& samples, float snr_db, uint32_t seed) {
+    float signal_power = 0.0f;
+    size_t signal_samples = 0;
+    for (float sample : samples) {
+        if (std::abs(sample) > 1e-6f) {
+            signal_power += sample * sample;
+            ++signal_samples;
+        }
+    }
+    if (signal_samples == 0) {
+        return;
+    }
+
+    signal_power /= static_cast<float>(signal_samples);
+    const float snr_linear = std::pow(10.0f, snr_db / 10.0f);
+    const float noise_std = std::sqrt(signal_power / snr_linear);
+
+    std::mt19937 rng(seed);
+    std::normal_distribution<float> noise(0.0f, noise_std);
+    for (float& sample : samples) {
+        sample += noise(rng);
+    }
 }
 
 bool processFromSync(IWaveform& waveform, const Samples& audio, const SyncResult& sync,
@@ -154,10 +186,53 @@ bool decodeCoxFixedFrameAt(OFDMNvisWaveform& waveform, const Samples& audio,
 
     auto parsed = protocol::v2::DataFrame::deserialize(decoded);
     CHECK(parsed.has_value(), label + ": decoded frame should parse as DATA");
+    CHECK(parsed->total_cw == static_cast<uint8_t>(cw_count),
+          label + ": decoded frame should preserve fixed CW count");
 
     next_offset = abs_sync + frame_samples;
     waveform.reset();
     return true;
+}
+
+bool qamCoxFixedFrameRoundtrip(Modulation mod, CodeRate rate,
+                               bool use_awgn, float snr_db,
+                               uint32_t noise_seed) {
+    const ModemConfig cfg = makeCoxConfig(mod, rate);
+    constexpr int CW_COUNT = 4;
+
+    const std::string label = std::string("OFDM-COX ") +
+                              modulationToString(mod) + " " +
+                              codeRateToString(rate) +
+                              (use_awgn ? " AWGN" : " clean");
+
+    CHECK(cfg.use_pilots, label + ": coherent QAM should enable pilots");
+    CHECK(cfg.pilot_spacing ==
+              static_cast<uint32_t>(ofdm_link_adaptation::recommendedPilotSpacing(mod, rate)),
+          label + ": pilot spacing should follow coherent QAM policy");
+
+    OFDMNvisWaveform tx(cfg);
+    tx.configure(cfg.modulation, cfg.code_rate);
+    OFDMNvisWaveform rx(cfg);
+    rx.configure(cfg.modulation, cfg.code_rate);
+
+    CHECK(rx.getMinSamplesForCWCount(CW_COUNT) > rx.getMinSamplesForControlFrame(),
+          label + ": 4-CW sample requirement should not collapse to 1 CW");
+
+    auto frame = protocol::v2::makeFixedDataFrame(
+        "ALPHA", "BRAVO", static_cast<uint16_t>(200 + getBitsPerSymbol(mod) * 10 +
+                                                 static_cast<uint8_t>(rate)),
+        makePayload(96, static_cast<uint8_t>(0x50 + getBitsPerSymbol(mod) * 3)),
+        cfg.code_rate, CW_COUNT).serialize();
+    Samples audio = encodeCoxFixedFrame(tx, frame, cfg, CW_COUNT);
+    appendTailMargin(audio, rx.getSamplesPerSymbol());
+
+    if (use_awgn) {
+        addAwgn(audio, snr_db, noise_seed);
+    }
+
+    size_t next_offset = 0;
+    return decodeCoxFixedFrameAt(
+        rx, audio, 0, frame, cfg, CW_COUNT, next_offset, label);
 }
 
 bool test_ofdm_cox_clean_loopback() {
@@ -259,6 +334,33 @@ bool test_ofdm_cox_fixed_frame_roundtrip() {
         "OFDM-COX fixed frame");
 }
 
+bool test_ofdm_cox_qam_fixed_frame_roundtrip() {
+    const struct {
+        Modulation mod;
+        CodeRate rate;
+    } cases[] = {
+        {Modulation::QAM16, CodeRate::R1_2},
+        {Modulation::QAM16, CodeRate::R3_4},
+        {Modulation::QAM32, CodeRate::R1_2},
+        {Modulation::QAM32, CodeRate::R3_4},
+        {Modulation::QAM64, CodeRate::R1_2},
+        {Modulation::QAM64, CodeRate::R3_4},
+    };
+
+    for (const auto& tc : cases) {
+        if (!qamCoxFixedFrameRoundtrip(tc.mod, tc.rate, false, 0.0f, 0)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool test_ofdm_cox_qam_awgn_margin() {
+    return qamCoxFixedFrameRoundtrip(
+        Modulation::QAM16, CodeRate::R1_2, true, 17.0f, 0xC0517u);
+}
+
 bool test_ofdm_cox_16_frame_burst_roundtrip() {
     const ModemConfig cfg = makeCoxConfig();
     constexpr int CW_COUNT = 4;
@@ -304,6 +406,8 @@ int main() {
     test_ofdm_chirp_full_preamble_loopback();
     test_ofdm_chirp_data_preamble_loopback();
     test_ofdm_cox_fixed_frame_roundtrip();
+    test_ofdm_cox_qam_fixed_frame_roundtrip();
+    test_ofdm_cox_qam_awgn_margin();
     test_ofdm_cox_16_frame_burst_roundtrip();
 
     if (tests_failed != 0) {

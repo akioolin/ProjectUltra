@@ -1478,7 +1478,7 @@ void StreamingDecoder::decodeCurrentFrame() {
     }
 
     // ========================================================================
-    // CW0 peek for connected OFDM (1-CW initial buffer)
+    // CW0 peek for connected OFDM (control-sized initial buffer)
     // Was: try a 1-CW R1/4 decode + code_rate_ fallback to short-circuit
     //      control frames or read the multi-CW total_cw from the header.
     // Now: removed the decode attempts. Profiling (LLR distribution histogram,
@@ -1489,9 +1489,21 @@ void StreamingDecoder::decodeCurrentFrame() {
     //      Cost of the dead branch: ~36 s of decode CPU per 50 KB transfer.
     // Kept: LLR pre-empt as a coarse false-sync gate and the fixed-frame escalation
     //       that drives the actual data-frame decode.
+    //
+    // For high-order OFDM_COX data modes, the robust control-sized window can
+    // demap more than one full LDPC block while still being short of the fixed
+    // frame. QAM16 R1/2 on 59 carriers produces exactly two CWs from the first
+    // 10368-sample peek, so the old "< 2 CW" guard skipped escalation and the
+    // fixed-frame decoder returned cw_ok=0/cw_fail=0 with insufficient bits.
     // ========================================================================
+    const bool legacy_single_cw_peek =
+        soft_bits.size() >= LDPC_BLOCK && soft_bits.size() < 2 * LDPC_BLOCK;
+    const bool cox_subfixed_peek =
+        mode_ == protocol::WaveformMode::OFDM_COX &&
+        decode_policy::hasSubFixedFrameSoftBits(
+            soft_bits.size(), fixed_frame_codewords_, LDPC_BLOCK);
     if (pending_total_cw_ == 0 && is_ofdm && connected_
-        && soft_bits.size() >= LDPC_BLOCK && soft_bits.size() < 2 * LDPC_BLOCK) {
+        && (legacy_single_cw_peek || cox_subfixed_peek)) {
 
         // Large OFDM FILE_BLOCK frames use variable-CW encoding without the
         // fixed-frame interleaver. Give raw CW0 one chance to declare the
@@ -1549,8 +1561,8 @@ void StreamingDecoder::decodeCurrentFrame() {
 
         pending_total_cw_ = fixed_frame_codewords_;
         state_ = DecoderState::SYNC_FOUND;
-        LOG_MODEM(INFO, "[%s] OFDM CW0 peek: |llr|_avg=%.1f, escalating to %d CWs",
-                  log_prefix_.c_str(), llr_abs_avg, pending_total_cw_);
+        LOG_MODEM(INFO, "[%s] OFDM CW0 peek: |llr|_avg=%.1f, soft_bits=%zu, escalating to %d CWs",
+                  log_prefix_.c_str(), llr_abs_avg, soft_bits.size(), pending_total_cw_);
         return;
     }
 

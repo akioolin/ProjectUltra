@@ -2976,8 +2976,15 @@ int main(int argc, char* argv[]) {
                         sim.setForcedModulation(Modulation::QPSK);
                     } else if (mod_str == "bpsk" || mod_str == "BPSK") {
                         sim.setForcedModulation(Modulation::BPSK);
+                    } else if (mod_str == "qam16" || mod_str == "QAM16") {
+                        sim.setForcedModulation(Modulation::QAM16);
+                    } else if (mod_str == "qam32" || mod_str == "QAM32") {
+                        sim.setForcedModulation(Modulation::QAM32);
+                    } else if (mod_str == "qam64" || mod_str == "QAM64") {
+                        sim.setForcedModulation(Modulation::QAM64);
                     } else {
-                        std::cerr << "Unknown modulation: " << mod_str << " (use dqpsk, d8psk, dbpsk, qpsk, bpsk)\n";
+                        std::cerr << "Unknown modulation: " << mod_str
+                                  << " (use dqpsk, d8psk, dbpsk, qpsk, bpsk, qam16, qam32, qam64)\n";
                         return 1;
                     }
                 }
@@ -3107,7 +3114,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "                        poor     - 2.0ms delay, 1.0Hz Doppler (disturbed)\n";
                 std::cout << "                        flutter  - 0.5ms delay, 10Hz Doppler (auroral)\n";
                 std::cout << "  --fading, -f        Alias for --channel moderate\n";
-                std::cout << "  --mod, -m <MOD>     Force modulation: dqpsk, d8psk, dbpsk, qpsk, bpsk\n";
+                std::cout << "  --mod, -m <MOD>     Force modulation: dqpsk, d8psk, dbpsk, qpsk, bpsk, qam16, qam32, qam64\n";
                 std::cout << "  --rate, -r <RATE>   Force code rate: auto, r1_4, r1_2, r2_3, r3_4\n";
                 std::cout << "  --cw-count <N>      Fixed OFDM data-frame codewords (1-8, default: 4)\n";
                 std::cout << "  --waveform, -w <WF> Force waveform: mc_dpsk, ofdm_chirp, ofdm_cox, ofdm_narrow\n";

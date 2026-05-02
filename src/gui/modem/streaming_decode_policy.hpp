@@ -48,6 +48,18 @@ struct DecodeSampleRequirement {
     DecodeSampleMode mode = DecodeSampleMode::ControlPeek;
 };
 
+inline bool hasSubFixedFrameSoftBits(size_t soft_bits,
+                                     int fixed_frame_codewords,
+                                     size_t ldpc_block_bits) {
+    if (fixed_frame_codewords <= 0 || ldpc_block_bits == 0) {
+        return false;
+    }
+
+    const size_t fixed_frame_bits =
+        static_cast<size_t>(fixed_frame_codewords) * ldpc_block_bits;
+    return soft_bits >= ldpc_block_bits && soft_bits < fixed_frame_bits;
+}
+
 inline DecodeSampleRequirement selectDecodeSampleRequirement(int pending_total_cw,
                                                              bool is_ofdm,
                                                              bool connected,
