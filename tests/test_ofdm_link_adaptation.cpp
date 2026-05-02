@@ -42,12 +42,14 @@ void test_pilot_spacing_policy() {
 void test_carrier_geometry() {
     CHECK(pilotCount(59, 10) == 6, "59 carriers with spacing 10 should reserve 6 pilots");
     CHECK(pilotCount(59, 15) == 4, "59 carriers with spacing 15 should reserve 4 pilots");
+    CHECK(pilotCount(59, 5) == 12, "59 carriers with spacing 5 should reserve 12 pilots");
     CHECK(pilotCount(59, 0) == 0, "invalid pilot spacing should not divide by zero");
     CHECK(pilotCount(0, 10) == 0, "zero carriers should have zero pilots");
 
     CHECK(dataCarrierCount(59, false, 10) == 59, "disabled pilots should leave all carriers for data");
     CHECK(dataCarrierCount(59, true, 10) == 53, "59/10 pilot geometry should leave 53 data carriers");
     CHECK(dataCarrierCount(59, true, 15) == 55, "59/15 pilot geometry should leave 55 data carriers");
+    CHECK(dataCarrierCount(59, true, 5) == 47, "59/5 pilot geometry should leave 47 data carriers");
     CHECK(dataCarrierCount(59, true, 0) == 59, "invalid pilot spacing should behave like no pilots");
     CHECK(dataCarrierCount(1, true, 1) == 1, "positive carrier plans should keep at least one data carrier");
     CHECK(dataCarrierCount(0, true, 1) == 0, "invalid carrier plans should remain invalid");

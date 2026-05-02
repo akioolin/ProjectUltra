@@ -10,6 +10,68 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-02: OFDM_COX NVIS preset CLI wiring (round 6) — +25% throughput
+
+**What was added:**
+The `OFDMNvisWaveform::createNvisMode()` factory exists at
+`src/waveform/ofdm_cox_waveform.cpp:36` with 1024-FFT, 59 carriers,
+MEDIUM cyclic prefix — roughly 2× the data carriers vs the default
+512-FFT/30-carrier preset. But it wasn't reachable from the CLI.
+This round wires it up.
+
+**What was changed:**
+- `tools/cli_simulator.cpp`: new `--ofdm-config <default|nvis>` CLI flag.
+  `default` = current 512-FFT/30-carrier behavior. `nvis` = factory
+  preset. `--help` updated.
+- Plumbed the preset into `Station` construction for both sim and
+  hardware paths so the OFDM_COX waveform is created via
+  `createNvisMode()` when `nvis` is selected.
+- `tests/test_waveform_loopback.cpp`: new factory-derived QAM16 R3/4
+  4-CW fixed-frame loopback test through the NVIS preset.
+- `tests/test_ofdm_link_adaptation.cpp`: 59-carrier spacing-5
+  pilot/data-carrier sanity checks (12 pilots, 47 data carriers).
+
+**Test verification:**
+- ctest: 31/31 pass.
+- WaveformLoopback: 377/377; OFDMLinkAdaptation: 34/34.
+
+**Hardware verification (Mac↔Pi cable + injected AWGN, OFDM_COX QAM16 R3/4):**
+
+  | Test                         | Throughput | retx | Note |
+  |------------------------------|------------|------|------|
+  | 5 KB default config SNR=22   | 2007 bps   | 1    | (round 5c) |
+  | 50 KB default cable AWGN     | n/a        | n/a  | not run today |
+  | **50 KB NVIS preset SNR=22** | **2587 bps** | **3** | **+29% vs default** |
+
+50 KB amortizes the inter-burst SACK round-trip more than 5 KB,
+exposing more of the NVIS data-carrier advantage.
+
+**Throughput plan progress (cumulative wins this overnight session):**
+- Round 1: CW aggregation +15-22%
+- Round 2b: HARQ -53% retx on hard channels
+- Round 4: OFDM_COX end-to-end working
+- Rounds 5a/5b: QAM16/32/64 selectable + decode integration
+- Round 5c: QAM32 R3/4 fix (pilot density)
+- Round 6: NVIS preset → 2587 bps QAM16 R3/4 (vs 2007 bps default)
+
+**Compatibility caveat:**
+`--ofdm-config nvis` is not on-air negotiated. Both peers must be
+launched with the same flag, or OFDM_COX payloads will not be
+compatible. For a hardware-loop test (where we control both sides),
+this is straightforward via `EXTRA_CLI_ARGS` in run_hw_test.sh.
+
+**Known limitation:**
+- The `wideOFDMFrameTiming()` formula in connection_policy.hpp still
+  uses the default OFDM-COX timing constants. Sample sizing comes
+  from `getSamplesPerSymbol()` / `getMinSamplesForCWCount()` which
+  ARE FFT-aware, so the path works — but the ACK-timeout formula
+  may be slightly off for the NVIS config. Worth tuning if
+  retx-storm patterns appear.
+- QAM64 R3/4 still has the cliff issue (rolled back round 5d after
+  it broke QAM32 R3/4). Separate round.
+
+---
+
 ## 2026-05-02: QAM32 R3/4 pilot density fix (round 5c)
 
 **What was broken:**

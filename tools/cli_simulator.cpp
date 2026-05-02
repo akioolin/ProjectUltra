@@ -70,6 +70,11 @@ enum class ChannelType {
     FLUTTER     // 0.5ms delay, 10Hz Doppler (auroral/polar)
 };
 
+enum class OFDMConfigPreset {
+    Default,  // OFDM_COX default constructor: 512 FFT, 30 carriers
+    Nvis      // OFDMNvisWaveform::createNvisMode(): 1024 FFT, 59 carriers
+};
+
 static const char* channelTypeToString(ChannelType t) {
     switch (t) {
         case ChannelType::AWGN:     return "AWGN (no fading)";
@@ -78,6 +83,14 @@ static const char* channelTypeToString(ChannelType t) {
         case ChannelType::POOR:     return "Poor (2ms, 1Hz)";
         case ChannelType::FLUTTER:  return "Flutter (0.5ms, 10Hz)";
         default:                    return "Unknown";
+    }
+}
+
+static const char* ofdmConfigPresetToString(OFDMConfigPreset preset) {
+    switch (preset) {
+        case OFDMConfigPreset::Default: return "default";
+        case OFDMConfigPreset::Nvis:    return "nvis";
+        default:                        return "unknown";
     }
 }
 
@@ -621,13 +634,16 @@ public:
     static constexpr int SAMPLES_PER_CALLBACK = 480;  // 10ms
     static constexpr int CALLBACK_INTERVAL_MS = 10;
 
-    SimulatedStation(const std::string& callsign, std::unique_ptr<AudioPort> port)
-        : callsign_(callsign), port_(std::move(port)) {
+    SimulatedStation(const std::string& callsign, std::unique_ptr<AudioPort> port,
+                     OFDMConfigPreset ofdm_config_preset = OFDMConfigPreset::Default)
+        : callsign_(callsign),
+          port_(std::move(port)),
+          ofdm_config_preset_(ofdm_config_preset) {
 
         protocol_.setLocalCallsign(callsign);
         protocol_.setAutoAccept(true);
 
-        // Initialize with default OFDM config (NVIS mode)
+        // Initialize OFDM_COX from the selected CLI preset.
         ofdm_config_ = createOFDMConfig();
 
         // Create TX encoder and RX decoder (both use same config)
@@ -846,19 +862,31 @@ private:
     static constexpr int ADAPT_DOWNGRADE_WINDOWS = 2;
     static constexpr int ADAPT_UPGRADE_WINDOWS = 4;
     static constexpr int ADAPT_UPGRADE_HOLD_MS = 8000;
+    OFDMConfigPreset ofdm_config_preset_ = OFDMConfigPreset::Default;
 
     ModemConfig createOFDMConfig() {
         ModemConfig cfg;
-        cfg.fft_size = 1024;       // NVIS mode
-        cfg.num_carriers = 59;     // NVIS mode
+        if (ofdm_config_preset_ == OFDMConfigPreset::Nvis) {
+            auto nvis = OFDMNvisWaveform::createNvisMode();
+            cfg = nvis->getConfig();
+        } else {
+            OFDMNvisWaveform default_cox;
+            cfg = default_cox.getConfig();
+        }
+
         cfg.sample_rate = SAMPLE_RATE;
         cfg.center_freq = 1500.0f;
-        cfg.cp_mode = CyclicPrefixMode::LONG;
-        cfg.modulation = Modulation::DQPSK;
-        cfg.code_rate = CodeRate::R1_4;
+        cfg.modulation = data_modulation_;
+        cfg.code_rate = data_code_rate_;
         cfg.use_pilots = true;
         cfg.pilot_spacing =
             ofdm_link_adaptation::recommendedPilotSpacing(cfg.modulation, cfg.code_rate);
+
+        LOG_MODEM(INFO, "[%s] OFDM_COX config preset=%s FFT=%d carriers=%d CP=%d pilots=%d spacing=%d",
+                  callsign_.c_str(), ofdmConfigPresetToString(ofdm_config_preset_),
+                  static_cast<int>(cfg.fft_size), static_cast<int>(cfg.num_carriers),
+                  static_cast<int>(cfg.getCyclicPrefix()),
+                  cfg.use_pilots ? 1 : 0, static_cast<int>(cfg.pilot_spacing));
         return cfg;
     }
 
@@ -1531,6 +1559,7 @@ public:
     void setChannelType(ChannelType t) { channel_type_ = t; use_fading_ = (t != ChannelType::AWGN); }
     void setForcedModulation(Modulation mod) { forced_mod_ = mod; }
     void setForcedCodeRate(CodeRate rate) { forced_rate_ = rate; }
+    void setOFDMConfigPreset(OFDMConfigPreset preset) { ofdm_config_preset_ = preset; }
     void setFixedFrameCodewords(int cw_count) {
         fixed_frame_codewords_ = v2::sanitizeFixedFrameCodewords(cw_count);
     }
@@ -1606,9 +1635,11 @@ public:
 
         // Create stations with virtual audio ports (in-process channel sim)
         alpha_ = std::make_unique<SimulatedStation>(
-            "ALPHA", std::make_unique<VirtualAudioPort>(channel_, /*is_station_a=*/true));
+            "ALPHA", std::make_unique<VirtualAudioPort>(channel_, /*is_station_a=*/true),
+            ofdm_config_preset_);
         bravo_ = std::make_unique<SimulatedStation>(
-            "BRAVO", std::make_unique<VirtualAudioPort>(channel_, /*is_station_a=*/false));
+            "BRAVO", std::make_unique<VirtualAudioPort>(channel_, /*is_station_a=*/false),
+            ofdm_config_preset_);
         alpha_->setRxOverfeedFactor(rx_overfeed_factor_);
         bravo_->setRxOverfeedFactor(rx_overfeed_factor_);
         alpha_->setDecodeDelayMs(decode_delay_ms_);
@@ -1757,6 +1788,7 @@ private:
     Modulation forced_mod_ = Modulation::AUTO;
     CodeRate forced_rate_ = CodeRate::AUTO;
     WaveformMode forced_waveform_ = WaveformMode::AUTO;
+    OFDMConfigPreset ofdm_config_preset_ = OFDMConfigPreset::Default;
 
     // Hardware-audio role (--role A|B|both, default both = current sim behavior)
     enum class Role { Both, A, B };
@@ -1834,6 +1866,7 @@ private:
             meta_out << "forced_modulation=" << mod_str << "\n";
             meta_out << "forced_code_rate=" << rate_str << "\n";
             meta_out << "forced_waveform=" << wf_str << "\n";
+            meta_out << "ofdm_config=" << ofdmConfigPresetToString(ofdm_config_preset_) << "\n";
             meta_out << "test_type="
                      << (test_file_transfer_ ? "file_transfer" : (test_burst_ ? "burst" : "messages"))
                      << "\n";
@@ -2386,6 +2419,7 @@ private:
         if (role_ == Role::A) std::cout << "  Peer:     " << peer << "\n";
         std::cout << "  Output:   " << (audio_output_device_.empty() ? "(default)" : audio_output_device_) << "\n";
         std::cout << "  Input:    " << (audio_input_device_.empty() ? "(default)" : audio_input_device_) << "\n";
+        std::cout << "  OFDM cfg: " << ofdmConfigPresetToString(ofdm_config_preset_) << "\n";
 
         if (list_audio_devices_) {
             gui::AudioEngine probe;
@@ -2420,7 +2454,8 @@ private:
         auto port = std::make_unique<HardwareAudioPort>(
             audio_output_device_, audio_input_device_, std::move(injector),
             audio_buffer_size_);
-        auto station = std::make_unique<SimulatedStation>(self, std::move(port));
+        auto station = std::make_unique<SimulatedStation>(
+            self, std::move(port), ofdm_config_preset_);
 
         // Forced settings (only meaningful on initiator A — responder B picks
         // them up from the CONNECT frame):
@@ -2676,6 +2711,7 @@ private:
         std::cout << "  SNR:     " << snr_db_ << " dB\n";
         std::cout << "  TX CFO:  " << tx_cfo_hz_ << " Hz\n";
         std::cout << "  Channel: " << channelTypeName() << "\n";
+        std::cout << "  OFDM cfg: " << ofdmConfigPresetToString(ofdm_config_preset_) << "\n";
         if (adaptive_test_) {
             std::cout << "  ADPT:    enabled (hop -> "
                       << channelTypeToString(adaptive_hop_channel_)
@@ -3032,6 +3068,21 @@ int main(int argc, char* argv[]) {
                         return 1;
                     }
                 }
+            } else if (arg == "--ofdm-config") {
+                if (i + 1 >= argc) {
+                    std::cerr << "Missing value for --ofdm-config (use default or nvis)\n";
+                    return 1;
+                }
+                std::string cfg_str = argv[++i];
+                if (cfg_str == "default" || cfg_str == "DEFAULT") {
+                    sim.setOFDMConfigPreset(OFDMConfigPreset::Default);
+                } else if (cfg_str == "nvis" || cfg_str == "NVIS") {
+                    sim.setOFDMConfigPreset(OFDMConfigPreset::Nvis);
+                } else {
+                    std::cerr << "Unknown OFDM config: " << cfg_str
+                              << " (use default or nvis)\n";
+                    return 1;
+                }
             } else if (arg == "--file" || arg == "--test-file") {
                 sim.setTestFileTransfer(true);
                 // Optional file size argument
@@ -3118,6 +3169,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --rate, -r <RATE>   Force code rate: auto, r1_4, r1_2, r2_3, r3_4\n";
                 std::cout << "  --cw-count <N>      Fixed OFDM data-frame codewords (1-8, default: 4)\n";
                 std::cout << "  --waveform, -w <WF> Force waveform: mc_dpsk, ofdm_chirp, ofdm_cox, ofdm_narrow\n";
+                std::cout << "  --ofdm-config <CFG> OFDM_COX config: default (512/30) or nvis (1024/59)\n";
                 std::cout << "  --seed <N>          Random seed (default: 42)\n";
                 std::cout << "  --tx-cfo <Hz>       Inject TX CFO in channel model (default: 0)\n";
                 std::cout << "  --cfo <Hz>          Alias for --tx-cfo\n";

@@ -365,6 +365,44 @@ bool test_ofdm_cox_qam_awgn_margin() {
                Modulation::QAM64, CodeRate::R3_4, true, 28.0f, 0xC0564u);
 }
 
+bool test_ofdm_cox_nvis_preset_qam16_r34_roundtrip() {
+    auto nvis = OFDMNvisWaveform::createNvisMode();
+    ModemConfig cfg = nvis->getConfig();
+    constexpr int CW_COUNT = 4;
+
+    cfg.modulation = Modulation::QAM16;
+    cfg.code_rate = CodeRate::R3_4;
+    cfg.use_pilots = true;
+    cfg.pilot_spacing =
+        ofdm_link_adaptation::recommendedPilotSpacing(cfg.modulation, cfg.code_rate);
+
+    CHECK(cfg.fft_size == 1024, "OFDM-COX NVIS preset: FFT should be 1024");
+    CHECK(cfg.num_carriers == 59, "OFDM-COX NVIS preset: carrier count should be 59");
+    CHECK(cfg.cp_mode == CyclicPrefixMode::MEDIUM,
+          "OFDM-COX NVIS preset: cyclic prefix should be MEDIUM");
+
+    OFDMNvisWaveform tx(cfg);
+    tx.configure(cfg.modulation, cfg.code_rate);
+    OFDMNvisWaveform rx(cfg);
+    rx.configure(cfg.modulation, cfg.code_rate);
+
+    CHECK(rx.getSamplesPerSymbol() == static_cast<int>(cfg.getSymbolDuration()),
+          "OFDM-COX NVIS preset: samples per symbol should follow config");
+    CHECK(rx.getMinSamplesForCWCount(CW_COUNT) > rx.getMinSamplesForControlFrame(),
+          "OFDM-COX NVIS preset: 4-CW sample requirement should not collapse to 1 CW");
+
+    auto frame = protocol::v2::makeFixedDataFrame(
+        "ALPHA", "BRAVO", 501, makePayload(96, 0x73),
+        cfg.code_rate, CW_COUNT).serialize();
+    Samples audio = encodeCoxFixedFrame(tx, frame, cfg, CW_COUNT);
+    appendTailMargin(audio, rx.getSamplesPerSymbol());
+
+    size_t next_offset = 0;
+    return decodeCoxFixedFrameAt(
+        rx, audio, 0, frame, cfg, CW_COUNT, next_offset,
+        "OFDM-COX NVIS preset QAM16 R3/4 fixed frame");
+}
+
 bool test_ofdm_cox_16_frame_burst_roundtrip() {
     const ModemConfig cfg = makeCoxConfig();
     constexpr int CW_COUNT = 4;
@@ -412,6 +450,7 @@ int main() {
     test_ofdm_cox_fixed_frame_roundtrip();
     test_ofdm_cox_qam_fixed_frame_roundtrip();
     test_ofdm_cox_qam_awgn_margin();
+    test_ofdm_cox_nvis_preset_qam16_r34_roundtrip();
     test_ofdm_cox_16_frame_burst_roundtrip();
 
     if (tests_failed != 0) {
