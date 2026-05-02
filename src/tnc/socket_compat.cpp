@@ -69,7 +69,62 @@ int shutdownSocket(socket_t socket) {
 
 int pollSockets(pollfd* fds, poll_count_t count, int timeout_ms) {
 #ifdef _WIN32
-    return WSAPoll(fds, count, timeout_ms);
+    // WSAPoll on Windows Server SKUs (including GitHub Actions windows-latest)
+    // does not reliably fire POLLIN on freshly-accepted non-blocking sockets,
+    // even when the peer has queued data. select() works correctly. We only
+    // poll a handful of fds (≤ 5: two listeners, two clients, wakeup pipe),
+    // far below FD_SETSIZE (64), so the select translation is safe here.
+    if (count == 0) {
+        if (timeout_ms > 0) {
+            ::Sleep(static_cast<DWORD>(timeout_ms));
+        }
+        return 0;
+    }
+
+    fd_set rfds;
+    fd_set wfds;
+    fd_set efds;
+    FD_ZERO(&rfds);
+    FD_ZERO(&wfds);
+    FD_ZERO(&efds);
+
+    for (poll_count_t i = 0; i < count; ++i) {
+        fds[i].revents = 0;
+        if (fds[i].events & POLLIN) {
+            FD_SET(fds[i].fd, &rfds);
+        }
+        if (fds[i].events & POLLOUT) {
+            FD_SET(fds[i].fd, &wfds);
+        }
+        FD_SET(fds[i].fd, &efds);
+    }
+
+    timeval tv {};
+    timeval* ptv = nullptr;
+    if (timeout_ms >= 0) {
+        tv.tv_sec = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        ptv = &tv;
+    }
+
+    // First arg is ignored on Windows; pass 0.
+    const int rc = ::select(0, &rfds, &wfds, &efds, ptv);
+    if (rc <= 0) {
+        return rc;
+    }
+
+    for (poll_count_t i = 0; i < count; ++i) {
+        if (FD_ISSET(fds[i].fd, &rfds)) {
+            fds[i].revents |= POLLIN;
+        }
+        if (FD_ISSET(fds[i].fd, &wfds)) {
+            fds[i].revents |= POLLOUT;
+        }
+        if (FD_ISSET(fds[i].fd, &efds)) {
+            fds[i].revents |= POLLERR;
+        }
+    }
+    return rc;
 #else
     return ::poll(fds, count, timeout_ms);
 #endif
