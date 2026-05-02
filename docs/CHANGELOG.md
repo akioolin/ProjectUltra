@@ -10,6 +10,67 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-02: TNC Phase 1 — VARA-compatible TNC scaffold
+
+**Goal:**
+Add a VARA-HF-compatible TCP TNC interface to ProjectUltra so existing
+HF software (Winlink Express, Pat, BPQ32, ARDOPCF) can use this modem
+as a drop-in VARA replacement. This is Phase 1 of a 5-phase project
+documented in `/tmp/tnc_architecture_plan.md` (private brief; will
+be promoted to `docs/TNC_INTERFACE.md` when public-facing).
+
+Phase 1 scope: standalone protocol module, no sockets, no real modem
+hookup, no threading. Just the parser + state machine + a
+`ModemAdapter` abstraction that Phase 3 will implement against the
+real `ProtocolEngine`.
+
+**What was added:**
+- `src/tnc/tnc_events.hpp` (51 lines) — `TNCEvent` types + state enum
+- `src/tnc/modem_adapter.hpp` (29 lines) — `ModemAdapter` abstract
+  interface (setMyCall, setBandwidth, setListen, startConnect,
+  disconnect, abort, sendBinary + snapshot accessors)
+- `src/tnc/tnc_session.{hpp,cpp}` (806 lines) — `TNCSession` parser,
+  FSM dispatcher, command handlers, event emitters. Implements 13
+  VARA core commands (MYCALL, BW2300/500/2750, LISTEN, CONNECT,
+  DISCONNECT, ABORT, COMPRESSION, CHAT, VERSION, BUFFER, SN, BITRATE,
+  CWID) + 7 Mercury-extension no-ops (P2P SESSION, WINLINK SESSION,
+  PUBLIC, IGNOREKISSDCD, RETRIES, CALLINT, CQFRAME) for client
+  compatibility. Async event helpers for CONNECTED, DISCONNECTED,
+  PTT, BUFFER (rate-limited 1/sec), SN, IAMALIVE (60s timer).
+- `tests/test_tnc_session.cpp` (748 lines, 88 unit cases) — covers:
+  parser (10 cases), MYCALL (8), state transitions (18), modem
+  events (17), data flow (6), tick/IAMALIVE (4), bandwidth (7),
+  queries + no-ops (18). Includes `FakeModemAdapter` for tests.
+- CMakeLists.txt + tests/CMakeLists.txt wiring.
+
+**ctest:** 31/31 → **32/32** with new TNCSession test target.
+
+**Architecture decisions (per Codex review of plan):**
+- TNCSession lives outside ProtocolEngine (boundary preserved)
+- Mercury-extension no-ops accepted silently (clients probe these)
+- BW2750 accepted (not WRONG) — clients probe all bandwidths
+- VERSION emits exact string `VARA version 4.9.0 registered\r` for
+  Pat-Vara regex compatibility
+- BUFFER events rate-limited (1 emit per second + on change) per
+  Mercury reference
+- IAMALIVE every 60s (Pat enforces 2-min read deadline)
+- LISTEN OFF mid-session emits WRONG (per VARA quirk; would tear
+  link otherwise)
+
+**Phase 2 next:** TCP reactor (single-thread `poll`-based, mirroring
+Mercury), localhost integration tests, single-client eviction
+semantics. Reactor will own both ports + IAMALIVE timer; no
+per-client threads (Codex flagged reentrancy risk in ProtocolEngine
+if multi-threaded).
+
+**Phase 3 next-next:** wire to ProtocolEngine. Will require fixing
+the duplicate-data callback in `connection_handlers.cpp:425-488`
+(currently emits both fragment + reassembled payload — would
+duplicate bytes on the VARA data stream), adding a binary-bytes
+send API, and adding a byte-level TX backlog snapshot.
+
+---
+
 ## 2026-05-02: Promote NVIS config to OFDM_COX default (round 7)
 
 **What was changed:**

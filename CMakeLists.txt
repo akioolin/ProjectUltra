@@ -88,6 +88,8 @@ add_library(ultra_core STATIC
     src/protocol/protocol_engine.cpp
     src/protocol/file_transfer.cpp
     src/protocol/compression.cpp
+    # VARA-compatible TNC protocol shell
+    src/tnc/tnc_session.cpp
     # Waveform abstraction layer
     src/waveform/mc_dpsk_waveform.cpp
     src/waveform/ofdm_cox_waveform.cpp

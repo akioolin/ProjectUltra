@@ -1,0 +1,748 @@
+#include "tnc/tnc_session.hpp"
+
+#include <functional>
+#include <iostream>
+#include <initializer_list>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <vector>
+
+using ultra::tnc::ModemAdapter;
+using ultra::tnc::State;
+using ultra::tnc::TNCSession;
+
+namespace {
+
+struct FakeModemAdapter : ModemAdapter {
+    struct ConnectCall {
+        std::string src;
+        std::string dst;
+    };
+
+    std::vector<std::vector<std::string>> set_mycall_calls;
+    std::vector<int> set_bandwidth_calls;
+    std::vector<bool> set_listen_calls;
+    std::vector<ConnectCall> start_connect_calls;
+    int disconnect_calls = 0;
+    int abort_calls = 0;
+    std::vector<std::vector<uint8_t>> send_binary_calls;
+
+    int backlog_bytes = 0;
+    int snr_db = 0;
+    int bitrate_bps = 0;
+    State state = State::IDLE;
+
+    void setMyCall(const std::vector<std::string>& calls) override {
+        set_mycall_calls.push_back(calls);
+    }
+
+    void setBandwidth(int hz) override {
+        set_bandwidth_calls.push_back(hz);
+    }
+
+    void setListen(bool on) override {
+        set_listen_calls.push_back(on);
+    }
+
+    void startConnect(const std::string& src, const std::string& dst) override {
+        start_connect_calls.push_back({src, dst});
+    }
+
+    void disconnect() override {
+        ++disconnect_calls;
+    }
+
+    void abort() override {
+        ++abort_calls;
+    }
+
+    void sendBinary(const std::vector<uint8_t>& bytes) override {
+        send_binary_calls.push_back(bytes);
+    }
+
+    int getTxBackloggBytes() const override {
+        return backlog_bytes;
+    }
+
+    int getCurrentSNR_db() const override {
+        return snr_db;
+    }
+
+    int getCurrentBitrate_bps() const override {
+        return bitrate_bps;
+    }
+
+    State getState() const override {
+        return state;
+    }
+};
+
+struct Harness {
+    FakeModemAdapter modem;
+    std::vector<std::string> lines;
+    std::vector<std::vector<uint8_t>> data_out;
+    TNCSession session;
+
+    Harness()
+        : session(
+              modem,
+              [this](std::string_view line) { lines.emplace_back(line); },
+              [this](const std::vector<uint8_t>& bytes) { data_out.push_back(bytes); }) {}
+
+    void clear() {
+        lines.clear();
+        data_out.clear();
+    }
+};
+
+struct Runner {
+    int tests_run = 0;
+    int tests_failed = 0;
+    std::string current_group;
+
+    void group(const std::string& name) {
+        current_group = name;
+        std::cout << "\n[" << name << "]\n";
+    }
+
+    void run(const std::string& name, const std::function<void()>& body) {
+        ++tests_run;
+        try {
+            body();
+            std::cout << "  PASS " << name << "\n";
+        } catch (const std::exception& ex) {
+            ++tests_failed;
+            std::cout << "  FAIL " << name << ": " << ex.what() << "\n";
+        }
+    }
+};
+
+void expect(bool condition, const std::string& message) {
+    if (!condition) {
+        throw std::runtime_error(message);
+    }
+}
+
+void expectState(State actual, State expected, const std::string& message) {
+    if (actual != expected) {
+        throw std::runtime_error(message);
+    }
+}
+
+void expectLines(const Harness& h, std::initializer_list<std::string> expected) {
+    std::vector<std::string> want(expected);
+    if (h.lines != want) {
+        std::string msg = "line mismatch: got [";
+        for (const auto& line : h.lines) {
+            msg += line;
+            msg += ",";
+        }
+        msg += "] expected [";
+        for (const auto& line : want) {
+            msg += line;
+            msg += ",";
+        }
+        msg += "]";
+        throw std::runtime_error(msg);
+    }
+}
+
+void expectNoLines(const Harness& h) {
+    expect(h.lines.empty(), "expected no emitted control lines");
+}
+
+void enterReady(Harness& h) {
+    h.session.handleControlLine("MYCALL VK2XYZ");
+    h.clear();
+}
+
+void enterListening(Harness& h) {
+    enterReady(h);
+    h.session.handleControlLine("LISTEN ON");
+    h.clear();
+}
+
+void enterConnecting(Harness& h) {
+    enterReady(h);
+    h.session.handleControlLine("CONNECT VK2XYZ VK2ABC");
+    h.clear();
+}
+
+void enterConnected(Harness& h) {
+    enterConnecting(h);
+    h.session.onModemConnected("VK2XYZ", "VK2ABC", 2300);
+    h.clear();
+}
+
+} // namespace
+
+int main() {
+    Runner runner;
+
+    runner.group("Parser");
+    runner.run("empty line emits nothing", [] {
+        Harness h;
+        expect(!h.session.handleControlLine(""), "empty line should return false");
+        expectNoLines(h);
+    });
+    runner.run("whitespace line emits nothing", [] {
+        Harness h;
+        expect(!h.session.handleControlLine("   \t  "), "whitespace line should return false");
+        expectNoLines(h);
+    });
+    runner.run("CRLF residue emits WRONG once", [] {
+        Harness h;
+        expect(!h.session.handleControlLine("\r\n"), "CRLF residue should be invalid");
+        expectLines(h, {"WRONG\r"});
+    });
+    runner.run("trailing whitespace is trimmed", [] {
+        Harness h;
+        h.session.handleControlLine("VERSION   ");
+        expectLines(h, {"VARA version 4.9.0 registered\r"});
+    });
+    runner.run("unknown command emits WRONG", [] {
+        Harness h;
+        h.session.handleControlLine("BOGUS");
+        expectLines(h, {"WRONG\r"});
+    });
+    runner.run("lowercase command parses", [] {
+        Harness h;
+        h.session.handleControlLine("version");
+        expectLines(h, {"VARA version 4.9.0 registered\r"});
+    });
+    runner.run("leading whitespace is trimmed", [] {
+        Harness h;
+        h.session.handleControlLine("   VERSION");
+        expectLines(h, {"VARA version 4.9.0 registered\r"});
+    });
+    runner.run("extra space between command and args is accepted", [] {
+        Harness h;
+        h.session.handleControlLine("MYCALL    VK2XYZ");
+        expectLines(h, {"OK\r"});
+        expectState(h.session.getState(), State::READY, "MYCALL should enter READY");
+    });
+    runner.run("trailing comment is not supported", [] {
+        Harness h;
+        h.session.handleControlLine("VERSION # comment");
+        expectLines(h, {"WRONG\r"});
+    });
+    runner.run("embedded newline is invalid", [] {
+        Harness h;
+        h.session.handleControlLine("VERSION\n");
+        expectLines(h, {"WRONG\r"});
+    });
+
+    runner.group("MYCALL");
+    runner.run("MYCALL from IDLE enters READY", [] {
+        Harness h;
+        h.session.handleControlLine("MYCALL VK2XYZ");
+        expectState(h.session.getState(), State::READY, "state should be READY");
+        expect(h.session.getMyCall() == "VK2XYZ", "primary callsign should be stored");
+        expectLines(h, {"OK\r"});
+        expect(h.modem.set_mycall_calls.size() == 1, "modem setMyCall should be called");
+        expect(h.modem.set_mycall_calls[0] == std::vector<std::string>{"VK2XYZ"}, "setMyCall args mismatch");
+    });
+    runner.run("MYCALL normalizes lowercase callsigns", [] {
+        Harness h;
+        h.session.handleControlLine("MYCALL vk2xyz");
+        expect(h.session.getMyCall() == "VK2XYZ", "callsign should be uppercased");
+        expect(h.modem.set_mycall_calls[0][0] == "VK2XYZ", "modem callsign should be uppercased");
+    });
+    runner.run("MYCALL accepts primary plus four secondaries", [] {
+        Harness h;
+        h.session.handleControlLine("MYCALL VK2XYZ VK2-1 VK2-2 VK2-3 VK2-4");
+        expectLines(h, {"OK\r"});
+        expect(h.modem.set_mycall_calls[0].size() == 5, "expected five calls");
+        expect(h.modem.set_mycall_calls[0][4] == "VK2-4", "secondary callsign missing");
+    });
+    runner.run("MYCALL without args is WRONG", [] {
+        Harness h;
+        h.session.handleControlLine("MYCALL");
+        expectLines(h, {"WRONG\r"});
+        expectState(h.session.getState(), State::IDLE, "state should remain IDLE");
+    });
+    runner.run("MYCALL rejects six calls", [] {
+        Harness h;
+        h.session.handleControlLine("MYCALL VK2XYZ VK2-1 VK2-2 VK2-3 VK2-4 VK2-5");
+        expectLines(h, {"WRONG\r"});
+        expect(h.modem.set_mycall_calls.empty(), "modem should not be called");
+    });
+    runner.run("MYCALL rejects invalid punctuation", [] {
+        Harness h;
+        h.session.handleControlLine("MYCALL invalid_call");
+        expectLines(h, {"WRONG\r"});
+    });
+    runner.run("MYCALL rejects invalid SSID", [] {
+        Harness h;
+        h.session.handleControlLine("MYCALL VK2XYZ-99");
+        expectLines(h, {"WRONG\r"});
+    });
+    runner.run("MYCALL while connected is WRONG", [] {
+        Harness h;
+        enterConnected(h);
+        h.session.handleControlLine("MYCALL VK2NEW");
+        expectLines(h, {"WRONG\r"});
+        expectState(h.session.getState(), State::CONNECTED, "state should remain CONNECTED");
+    });
+
+    runner.group("State Transitions");
+    runner.run("LISTEN ON from IDLE is WRONG", [] {
+        Harness h;
+        h.session.handleControlLine("LISTEN ON");
+        expectLines(h, {"WRONG\r"});
+        expectState(h.session.getState(), State::IDLE, "state should remain IDLE");
+    });
+    runner.run("LISTEN ON from READY enters LISTENING", [] {
+        Harness h;
+        enterReady(h);
+        h.session.handleControlLine("LISTEN ON");
+        expectLines(h, {"OK\r"});
+        expectState(h.session.getState(), State::LISTENING, "state should be LISTENING");
+        expect(h.modem.set_listen_calls == std::vector<bool>{true}, "listen true not sent");
+    });
+    runner.run("LISTEN CQ behaves like LISTEN ON", [] {
+        Harness h;
+        enterReady(h);
+        h.session.handleControlLine("LISTEN CQ");
+        expectLines(h, {"OK\r"});
+        expectState(h.session.getState(), State::LISTENING, "state should be LISTENING");
+    });
+    runner.run("LISTEN OFF from LISTENING returns READY", [] {
+        Harness h;
+        enterListening(h);
+        h.session.handleControlLine("LISTEN OFF");
+        expectLines(h, {"OK\r"});
+        expectState(h.session.getState(), State::READY, "state should be READY");
+        expect(h.modem.set_listen_calls == std::vector<bool>{true, false}, "listen false not sent");
+    });
+    runner.run("LISTEN OFF from READY is an OK no-op", [] {
+        Harness h;
+        enterReady(h);
+        h.session.handleControlLine("LISTEN OFF");
+        expectLines(h, {"OK\r"});
+        expectState(h.session.getState(), State::READY, "state should stay READY");
+        expect(h.modem.set_listen_calls.empty(), "READY LISTEN OFF should not call modem");
+    });
+    runner.run("LISTEN OFF while CONNECTED is WRONG", [] {
+        Harness h;
+        enterConnected(h);
+        h.session.handleControlLine("LISTEN OFF");
+        expectLines(h, {"WRONG\r"});
+        expectState(h.session.getState(), State::CONNECTED, "state should remain CONNECTED");
+    });
+    runner.run("CONNECT from READY starts CONNECTING", [] {
+        Harness h;
+        enterReady(h);
+        h.session.handleControlLine("CONNECT VK2XYZ VK2ABC");
+        expectLines(h, {"OK\r"});
+        expectState(h.session.getState(), State::CONNECTING, "state should be CONNECTING");
+        expect(h.modem.start_connect_calls.size() == 1, "startConnect should be called");
+        expect(h.modem.start_connect_calls[0].src == "VK2XYZ", "source call mismatch");
+        expect(h.modem.start_connect_calls[0].dst == "VK2ABC", "dest call mismatch");
+    });
+    runner.run("CONNECT from IDLE is WRONG", [] {
+        Harness h;
+        h.session.handleControlLine("CONNECT VK2XYZ VK2ABC");
+        expectLines(h, {"WRONG\r"});
+    });
+    runner.run("CONNECT while CONNECTED is WRONG", [] {
+        Harness h;
+        enterConnected(h);
+        h.session.handleControlLine("CONNECT VK2XYZ VK2ABC");
+        expectLines(h, {"WRONG\r"});
+    });
+    runner.run("CONNECT from LISTENING disables listen and starts CONNECTING", [] {
+        Harness h;
+        enterListening(h);
+        h.session.handleControlLine("CONNECT VK2XYZ VK2ABC");
+        expectLines(h, {"OK\r"});
+        expectState(h.session.getState(), State::CONNECTING, "state should be CONNECTING");
+        expect(h.modem.set_listen_calls == std::vector<bool>{true, false}, "listen should be disabled");
+    });
+    runner.run("CONNECT without args is WRONG", [] {
+        Harness h;
+        enterReady(h);
+        h.session.handleControlLine("CONNECT");
+        expectLines(h, {"WRONG\r"});
+    });
+    runner.run("CONNECT rejects invalid callsigns", [] {
+        Harness h;
+        enterReady(h);
+        h.session.handleControlLine("CONNECT VK2XYZ bad_call");
+        expectLines(h, {"WRONG\r"});
+    });
+    runner.run("DISCONNECT from CONNECTED enters DISCONNECTING", [] {
+        Harness h;
+        enterConnected(h);
+        h.session.handleControlLine("DISCONNECT");
+        expectLines(h, {"OK\r"});
+        expectState(h.session.getState(), State::DISCONNECTING, "state should be DISCONNECTING");
+        expect(h.modem.disconnect_calls == 1, "disconnect should be called");
+    });
+    runner.run("DISCONNECT from READY is WRONG", [] {
+        Harness h;
+        enterReady(h);
+        h.session.handleControlLine("DISCONNECT");
+        expectLines(h, {"WRONG\r"});
+    });
+    runner.run("repeated DISCONNECT while DISCONNECTING is OK no-op", [] {
+        Harness h;
+        enterConnected(h);
+        h.session.handleControlLine("DISCONNECT");
+        h.clear();
+        h.session.handleControlLine("DISCONNECT");
+        expectLines(h, {"OK\r"});
+        expect(h.modem.disconnect_calls == 1, "disconnect should not be called twice");
+    });
+    runner.run("ABORT from CONNECTING returns READY", [] {
+        Harness h;
+        enterConnecting(h);
+        h.session.handleControlLine("ABORT");
+        expectLines(h, {"OK\r"});
+        expectState(h.session.getState(), State::READY, "state should be READY");
+        expect(h.modem.abort_calls == 1, "abort should be called");
+    });
+    runner.run("ABORT from CONNECTED returns READY", [] {
+        Harness h;
+        enterConnected(h);
+        h.session.handleControlLine("ABORT");
+        expectLines(h, {"OK\r"});
+        expectState(h.session.getState(), State::READY, "state should be READY");
+        expect(h.modem.abort_calls == 1, "abort should be called");
+    });
+    runner.run("ABORT from READY is WRONG", [] {
+        Harness h;
+        enterReady(h);
+        h.session.handleControlLine("ABORT");
+        expectLines(h, {"WRONG\r"});
+    });
+
+    runner.group("Modem Events");
+    runner.run("connected event from CONNECTING emits CONNECTED", [] {
+        Harness h;
+        enterConnecting(h);
+        h.session.onModemConnected("VK2XYZ", "VK2ABC", 2300);
+        expectLines(h, {"CONNECTED VK2XYZ VK2ABC 2300\r"});
+        expectState(h.session.getState(), State::CONNECTED, "state should be CONNECTED");
+    });
+    runner.run("connected event from LISTENING emits PENDING then CONNECTED", [] {
+        Harness h;
+        enterListening(h);
+        h.session.onModemConnected("VK2A", "VK2B", 2300);
+        expectLines(h, {"PENDING\r", "CONNECTED VK2A VK2B 2300\r"});
+        expectState(h.session.getState(), State::CONNECTED, "state should be CONNECTED");
+    });
+    runner.run("incoming call while LISTENING emits PENDING", [] {
+        Harness h;
+        enterListening(h);
+        h.session.onModemIncomingCall("VK2ABC");
+        expectLines(h, {"PENDING\r"});
+    });
+    runner.run("pending incoming disconnect emits CANCELPENDING", [] {
+        Harness h;
+        enterListening(h);
+        h.session.onModemIncomingCall("VK2ABC");
+        h.clear();
+        h.session.onModemDisconnected();
+        expectLines(h, {"CANCELPENDING\r"});
+        expectState(h.session.getState(), State::LISTENING, "state should remain LISTENING");
+    });
+    runner.run("incoming call then connected does not duplicate PENDING", [] {
+        Harness h;
+        enterListening(h);
+        h.session.onModemIncomingCall("VK2ABC");
+        h.session.onModemConnected("VK2ABC", "VK2XYZ", 500);
+        expectLines(h, {"PENDING\r", "CONNECTED VK2ABC VK2XYZ 500\r"});
+    });
+    runner.run("disconnect event from CONNECTED emits DISCONNECTED", [] {
+        Harness h;
+        enterConnected(h);
+        h.session.onModemDisconnected();
+        expectLines(h, {"DISCONNECTED\r"});
+        expectState(h.session.getState(), State::READY, "state should be READY");
+    });
+    runner.run("disconnect event from DISCONNECTING emits DISCONNECTED", [] {
+        Harness h;
+        enterConnected(h);
+        h.session.handleControlLine("DISCONNECT");
+        h.clear();
+        h.session.onModemDisconnected();
+        expectLines(h, {"DISCONNECTED\r"});
+        expectState(h.session.getState(), State::READY, "state should be READY");
+    });
+    runner.run("disconnect event from READY is ignored", [] {
+        Harness h;
+        enterReady(h);
+        h.session.onModemDisconnected();
+        expectNoLines(h);
+    });
+    runner.run("PTT ON event emits exact line", [] {
+        Harness h;
+        h.session.onModemPTT(true);
+        expectLines(h, {"PTT ON\r"});
+    });
+    runner.run("PTT OFF event emits exact line", [] {
+        Harness h;
+        h.session.onModemPTT(false);
+        expectLines(h, {"PTT OFF\r"});
+    });
+    runner.run("buffer level emits on first change", [] {
+        Harness h;
+        h.session.onModemBufferLevel(1024);
+        expectLines(h, {"BUFFER 1024\r"});
+    });
+    runner.run("same buffer level is suppressed", [] {
+        Harness h;
+        h.session.onModemBufferLevel(1024);
+        h.clear();
+        h.session.onModemBufferLevel(1024);
+        expectNoLines(h);
+    });
+    runner.run("changed buffer level is rate limited to one second", [] {
+        Harness h;
+        h.session.onModemBufferLevel(1024);
+        h.clear();
+        h.session.onModemBufferLevel(2048);
+        expectNoLines(h);
+        h.session.tick(999);
+        expectNoLines(h);
+        h.session.tick(1);
+        expectLines(h, {"BUFFER 2048\r"});
+    });
+    runner.run("negative buffer level is clamped to zero", [] {
+        Harness h;
+        h.session.onModemBufferLevel(-4);
+        expectLines(h, {"BUFFER 0\r"});
+    });
+    runner.run("SNR event is ignored until CHAT ON and CONNECTED", [] {
+        Harness h;
+        enterConnected(h);
+        h.session.onModemSNR(7.5f);
+        expectNoLines(h);
+    });
+    runner.run("SNR event emits with CHAT ON while CONNECTED", [] {
+        Harness h;
+        enterConnected(h);
+        h.session.handleControlLine("CHAT ON");
+        h.clear();
+        h.session.onModemSNR(7.5f);
+        expectLines(h, {"SN 7.5\r"});
+    });
+    runner.run("bitrate event emits VARA-style line", [] {
+        Harness h;
+        h.session.onModemBitrate(1200);
+        expectLines(h, {"BITRATE (0) 1200 BPS\r"});
+    });
+
+    runner.group("Data Flow");
+    runner.run("data input while CONNECTED calls modem sendBinary", [] {
+        Harness h;
+        enterConnected(h);
+        h.session.handleDataBytes({1, 2, 3});
+        expect(h.modem.send_binary_calls == std::vector<std::vector<uint8_t>>{{1, 2, 3}},
+               "sendBinary bytes mismatch");
+    });
+    runner.run("data input while READY is discarded", [] {
+        Harness h;
+        enterReady(h);
+        h.session.handleDataBytes({1, 2, 3});
+        expect(h.modem.send_binary_calls.empty(), "sendBinary should not be called");
+    });
+    runner.run("empty data input while CONNECTED is ignored", [] {
+        Harness h;
+        enterConnected(h);
+        h.session.handleDataBytes({});
+        expect(h.modem.send_binary_calls.empty(), "empty send should not call modem");
+    });
+    runner.run("modem data while CONNECTED goes to data_out", [] {
+        Harness h;
+        enterConnected(h);
+        h.session.onModemDataReceived({9, 8, 7});
+        expect(h.data_out == std::vector<std::vector<uint8_t>>{{9, 8, 7}}, "data_out mismatch");
+    });
+    runner.run("modem data while READY is discarded", [] {
+        Harness h;
+        enterReady(h);
+        h.session.onModemDataReceived({9, 8, 7});
+        expect(h.data_out.empty(), "data_out should not be called");
+    });
+    runner.run("empty modem data while CONNECTED is ignored", [] {
+        Harness h;
+        enterConnected(h);
+        h.session.onModemDataReceived({});
+        expect(h.data_out.empty(), "empty data_out should not be called");
+    });
+
+    runner.group("Tick");
+    runner.run("30 seconds does not emit IAMALIVE", [] {
+        Harness h;
+        h.session.tick(30000);
+        expectNoLines(h);
+    });
+    runner.run("60 seconds emits IAMALIVE", [] {
+        Harness h;
+        h.session.tick(60000);
+        expectLines(h, {"IAMALIVE\r"});
+    });
+    runner.run("two 30 second ticks emit once", [] {
+        Harness h;
+        h.session.tick(30000);
+        h.session.tick(30000);
+        expectLines(h, {"IAMALIVE\r"});
+    });
+    runner.run("120 seconds emits two keepalives", [] {
+        Harness h;
+        h.session.tick(120000);
+        expectLines(h, {"IAMALIVE\r", "IAMALIVE\r"});
+    });
+
+    runner.group("Bandwidth");
+    runner.run("BW2300 is accepted", [] {
+        Harness h;
+        h.session.handleControlLine("BW2300");
+        expectLines(h, {"OK\r"});
+        expect(h.modem.set_bandwidth_calls == std::vector<int>{2300}, "BW2300 not sent");
+    });
+    runner.run("BW500 is accepted", [] {
+        Harness h;
+        h.session.handleControlLine("BW500");
+        expectLines(h, {"OK\r"});
+        expect(h.modem.set_bandwidth_calls == std::vector<int>{500}, "BW500 not sent");
+    });
+    runner.run("BW2750 is accepted", [] {
+        Harness h;
+        h.session.handleControlLine("BW2750");
+        expectLines(h, {"OK\r"});
+        expect(h.modem.set_bandwidth_calls == std::vector<int>{2750}, "BW2750 not sent");
+    });
+    runner.run("BW1234 is WRONG", [] {
+        Harness h;
+        h.session.handleControlLine("BW1234");
+        expectLines(h, {"WRONG\r"});
+    });
+    runner.run("BW with args is WRONG", [] {
+        Harness h;
+        h.session.handleControlLine("BW2300 EXTRA");
+        expectLines(h, {"WRONG\r"});
+    });
+    runner.run("lowercase bandwidth command parses", [] {
+        Harness h;
+        h.session.handleControlLine("bw2300");
+        expectLines(h, {"OK\r"});
+    });
+    runner.run("bandwidth while CONNECTED is WRONG", [] {
+        Harness h;
+        enterConnected(h);
+        h.session.handleControlLine("BW500");
+        expectLines(h, {"WRONG\r"});
+    });
+
+    runner.group("Queries And No-Ops");
+    runner.run("VERSION emits exact Pat-compatible string", [] {
+        Harness h;
+        h.session.handleControlLine("VERSION");
+        expectLines(h, {"VARA version 4.9.0 registered\r"});
+    });
+    runner.run("BUFFER command emits snapshot", [] {
+        Harness h;
+        h.modem.backlog_bytes = 321;
+        h.session.handleControlLine("BUFFER");
+        expectLines(h, {"BUFFER 321\r"});
+    });
+    runner.run("SN command emits snapshot with one decimal", [] {
+        Harness h;
+        h.modem.snr_db = 8;
+        h.session.handleControlLine("SN");
+        expectLines(h, {"SN 8.0\r"});
+    });
+    runner.run("BITRATE command emits snapshot", [] {
+        Harness h;
+        h.modem.bitrate_bps = 1800;
+        h.session.handleControlLine("BITRATE");
+        expectLines(h, {"BITRATE (0) 1800 BPS\r"});
+    });
+    runner.run("COMPRESSION TEXT is OK", [] {
+        Harness h;
+        h.session.handleControlLine("COMPRESSION TEXT");
+        expectLines(h, {"OK\r"});
+    });
+    runner.run("COMPRESSION invalid mode is WRONG", [] {
+        Harness h;
+        h.session.handleControlLine("COMPRESSION BAD");
+        expectLines(h, {"WRONG\r"});
+    });
+    runner.run("CHAT ON is OK", [] {
+        Harness h;
+        h.session.handleControlLine("CHAT ON");
+        expectLines(h, {"OK\r"});
+    });
+    runner.run("CHAT OFF suppresses later SNR events", [] {
+        Harness h;
+        enterConnected(h);
+        h.session.handleControlLine("CHAT ON");
+        h.session.handleControlLine("CHAT OFF");
+        h.clear();
+        h.session.onModemSNR(9.5f);
+        expectNoLines(h);
+    });
+    runner.run("P2P SESSION is OK", [] {
+        Harness h;
+        h.session.handleControlLine("P2P SESSION");
+        expectLines(h, {"OK\r"});
+    });
+    runner.run("P2P without args is OK", [] {
+        Harness h;
+        h.session.handleControlLine("P2P");
+        expectLines(h, {"OK\r"});
+    });
+    runner.run("WINLINK SESSION is OK", [] {
+        Harness h;
+        h.session.handleControlLine("WINLINK SESSION");
+        expectLines(h, {"OK\r"});
+    });
+    runner.run("PUBLIC ON is OK", [] {
+        Harness h;
+        h.session.handleControlLine("PUBLIC ON");
+        expectLines(h, {"OK\r"});
+    });
+    runner.run("IGNOREKISSDCD accepts any args", [] {
+        Harness h;
+        h.session.handleControlLine("IGNOREKISSDCD ANYTHING HERE");
+        expectLines(h, {"OK\r"});
+    });
+    runner.run("RETRIES accepts non-negative integer", [] {
+        Harness h;
+        h.session.handleControlLine("RETRIES 10");
+        expectLines(h, {"OK\r"});
+    });
+    runner.run("RETRIES rejects invalid integer", [] {
+        Harness h;
+        h.session.handleControlLine("RETRIES nope");
+        expectLines(h, {"WRONG\r"});
+    });
+    runner.run("CALLINT accepts zero", [] {
+        Harness h;
+        h.session.handleControlLine("CALLINT 0");
+        expectLines(h, {"OK\r"});
+    });
+    runner.run("CWID ON is OK", [] {
+        Harness h;
+        h.session.handleControlLine("CWID ON");
+        expectLines(h, {"OK\r"});
+    });
+    runner.run("CWID invalid mode is WRONG", [] {
+        Harness h;
+        h.session.handleControlLine("CWID MAYBE");
+        expectLines(h, {"WRONG\r"});
+    });
+
+    std::cout << "\nTNCSession unit cases run: " << runner.tests_run << "\n";
+    if (runner.tests_failed != 0) {
+        std::cout << "TNCSession unit cases failed: " << runner.tests_failed << "\n";
+        return 1;
+    }
+
+    std::cout << "All TNCSession unit cases passed\n";
+    return 0;
+}
