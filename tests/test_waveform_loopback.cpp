@@ -358,7 +358,11 @@ bool test_ofdm_cox_qam_fixed_frame_roundtrip() {
 
 bool test_ofdm_cox_qam_awgn_margin() {
     return qamCoxFixedFrameRoundtrip(
-        Modulation::QAM16, CodeRate::R1_2, true, 17.0f, 0xC0517u);
+               Modulation::QAM16, CodeRate::R1_2, true, 17.0f, 0xC0517u) &&
+           qamCoxFixedFrameRoundtrip(
+               Modulation::QAM32, CodeRate::R3_4, true, 25.0f, 0xC0532u) &&
+           qamCoxFixedFrameRoundtrip(
+               Modulation::QAM64, CodeRate::R3_4, true, 28.0f, 0xC0564u);
 }
 
 bool test_ofdm_cox_16_frame_burst_roundtrip() {

@@ -10,6 +10,72 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-02: QAM32 R3/4 pilot density fix (round 5c)
+
+**What was broken:**
+After rounds 5a+5b QAM16/32/64 were selectable on the CLI and decoded
+correctly through the OFDM_COX path. But QAM32 R3/4 + QAM64 R3/4
+both failed reliably on hardware at all tested SNRs (25, 28, 30 dB)
+with the same pattern: 15-16 retx, 1 frame at max retries. QAM16 R3/4
+worked fine at SNR=22+. R1/2 paths for all QAM modes worked.
+
+**Root cause:**
+`recommendedPilotSpacing()` in `include/ultra/ofdm_link_adaptation.hpp`
+returned spacing=8 for **all** coherent R3/4 modes (QAM16/32/64).
+That's fine for QAM16 — the constellation has enough min-distance
+margin that loose pilot tracking still decodes. For QAM32/QAM64 at
+R3/4 (low FEC redundancy + denser constellation), channel-estimate
+drift between distant pilots accumulates phase error that exceeds
+the constellation's decision regions before the next pilot arrives.
+
+**What was changed:**
+- `include/ultra/ofdm_link_adaptation.hpp`: when modulation is
+  QAM32 or QAM64 AND code rate is R3/4, return pilot spacing=5
+  (one pilot every 5 carriers) instead of 8.
+  QAM16 R3/4 stays at spacing=8 (works fine, no need to pay the
+  extra pilot overhead).
+- `tests/test_ofdm_link_adaptation.cpp`: assertions for the new
+  policy.
+- `tests/test_waveform_loopback.cpp`: AWGN-margin loopback tests
+  for QAM32 R3/4 at 25 dB and QAM64 R3/4 at 28 dB.
+
+**Cost:**
+Spacing 5 vs 8 means 1 pilot every 5 carriers vs every 8. On
+59-carrier OFDM_COX, that's 12 pilots vs 7 → 47 data carriers vs 51
+(8% reduction in data carriers). Modest cost in exchange for
+unlocking QAM32 R3/4 throughput.
+
+**Test verification:**
+- ctest: 31/31 + WaveformLoopback 361/361 + OFDMLinkAdaptation 32/32
+- Hardware test (Mac↔Pi cable + injected AWGN, 5 KB):
+
+  | Mode  | Rate | SNR | Pre-fix     | Post-fix      |
+  |-------|------|-----|-------------|---------------|
+  | QAM16 | R3/4 | 22  | PASS (2007) | PASS (2058)   |
+  | QAM32 | R3/4 | 25  | **FAIL**    | **PASS (2058)** |
+  | QAM32 | R3/4 | 28  | **FAIL**    | **PASS (1959)** |
+  | QAM64 | R3/4 | 28  | FAIL        | still FAIL    |
+  | QAM64 | R3/4 | 30  | FAIL        | still FAIL    |
+
+QAM32 R3/4 is now working.
+
+**QAM64 R3/4 still failing — known limitation:**
+Even with spacing=5 pilots, QAM64 R3/4 fails at SNR up to 30 dB.
+The 64-point constellation has half the min-distance of 32-QAM, so
+the same pilot density that works for QAM32 isn't enough. Likely
+needs additional work (spacing=4 or even 3, decision-directed
+channel tracking, or per-symbol equalizer changes). Out of scope
+for this round.
+
+**Throughput note:**
+QAM32 R3/4 at 2058 bps matches QAM16 R3/4 in this test — both are
+hitting the ARQ inter-burst SACK-round-trip ceiling on the 5 KB
+test, not the modulation ceiling. Larger files would amortize the
+gap further. The throughput "ladder" effect of higher QAM only
+manifests on sustained transfers where the ARQ loop is amortized.
+
+---
+
 ## 2026-05-02: QAM16/32/64 modes (round 5a + 5b)
 
 **What was added:**

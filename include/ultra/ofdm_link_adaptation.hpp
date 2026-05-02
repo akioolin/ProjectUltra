@@ -28,7 +28,11 @@ inline int recommendedPilotSpacing(Modulation mod, CodeRate rate) {
 
     if (coherent) {
         switch (rate) {
-            case CodeRate::R3_4: return 8;
+            case CodeRate::R3_4:
+                if (mod == Modulation::QAM32 || mod == Modulation::QAM64) {
+                    return 5;
+                }
+                return 8;
             case CodeRate::R2_3:
             case CodeRate::R1_2:
             case CodeRate::R1_4:

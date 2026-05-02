@@ -33,6 +33,10 @@ void test_pilot_spacing_policy() {
           "Coherent QPSK should use dense pilots");
     CHECK(recommendedPilotSpacing(Modulation::QAM16, CodeRate::R3_4) == 8,
           "High-rate coherent modes should reduce pilot overhead");
+    CHECK(recommendedPilotSpacing(Modulation::QAM32, CodeRate::R3_4) == 5,
+          "QAM32 R3/4 should keep dense pilots for hardware channel tracking");
+    CHECK(recommendedPilotSpacing(Modulation::QAM64, CodeRate::R3_4) == 5,
+          "QAM64 R3/4 should keep dense pilots for hardware channel tracking");
 }
 
 void test_carrier_geometry() {
