@@ -1,5 +1,6 @@
 #pragma once
 
+#include "socket_compat.hpp"
 #include "tnc_session.hpp"
 
 #include <atomic>
@@ -82,7 +83,7 @@ private:
 
     void processControlBytes(const uint8_t* bytes, size_t size);
     void flushAllOutputs();
-    bool flushClientOutput(int fd, std::vector<uint8_t>& buffer);
+    bool flushClientOutput(socket_t fd, std::vector<uint8_t>& buffer);
 
     ModemAdapter& modem_;
     TNCServerConfig config_;
@@ -95,12 +96,12 @@ private:
     std::atomic<uint16_t> bound_data_port_{0};
     std::mutex lifecycle_mutex_;
 
-    int cmd_listener_fd_ = -1;
-    int data_listener_fd_ = -1;
-    int cmd_client_fd_ = -1;
-    int data_client_fd_ = -1;
-    int wakeup_read_fd_ = -1;
-    int wakeup_write_fd_ = -1;
+    socket_t cmd_listener_fd_ = kInvalidSocket;
+    socket_t data_listener_fd_ = kInvalidSocket;
+    socket_t cmd_client_fd_ = kInvalidSocket;
+    socket_t data_client_fd_ = kInvalidSocket;
+    socket_t wakeup_read_fd_ = kInvalidSocket;
+    socket_t wakeup_write_fd_ = kInvalidSocket;
 
     std::string cmd_line_buffer_;
     std::vector<uint8_t> cmd_tx_buffer_;

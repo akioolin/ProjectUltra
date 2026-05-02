@@ -1,22 +1,16 @@
 #include "tnc/tnc_server.hpp"
 
 #include <algorithm>
-#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstring>
-#include <fcntl.h>
 #include <limits>
-#include <poll.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <unistd.h>
-
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
 
 #include <utility>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#endif
 
 namespace ultra::tnc {
 namespace {
@@ -38,51 +32,49 @@ int sendFlags() {
 }
 
 bool isWouldBlock() {
-    return errno == EAGAIN || errno == EWOULDBLOCK;
+    return isWouldBlockSocketError();
 }
 
-void closeFd(int& fd) {
-    if (fd >= 0) {
-        close(fd);
-        fd = -1;
+void closeFd(socket_t& fd) {
+    if (!isInvalidSocket(fd)) {
+        closeSocket(fd);
+        fd = kInvalidSocket;
     }
 }
 
-void closeClientFd(int& fd) {
-    if (fd >= 0) {
-        shutdown(fd, SHUT_RDWR);
-        close(fd);
-        fd = -1;
+void closeClientFd(socket_t& fd) {
+    if (!isInvalidSocket(fd)) {
+        shutdownSocket(fd);
+        closeSocket(fd);
+        fd = kInvalidSocket;
     }
 }
 
-bool setNonBlocking(int fd) {
-    const int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0) {
-        return false;
-    }
-    return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
-}
-
-void setCloseOnExec(int fd) {
+void setCloseOnExec(socket_t fd) {
+#ifndef _WIN32
     const int flags = fcntl(fd, F_GETFD, 0);
     if (flags >= 0) {
         (void)fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
     }
-}
-
-void applySocketOptions(int fd) {
-    const int one = 1;
-    (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-    (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-#ifdef SO_NOSIGPIPE
-    (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#else
+    (void)fd;
 #endif
 }
 
-uint16_t getBoundPort(int fd) {
+void applySocketOptions(socket_t fd) {
+    const int one = 1;
+    const auto* optval = reinterpret_cast<const char*>(&one);
+    const socket_len_t optlen = static_cast<socket_len_t>(sizeof(one));
+    (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, optval, optlen);
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, optval, optlen);
+#ifdef SO_NOSIGPIPE
+    (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, optval, optlen);
+#endif
+}
+
+uint16_t getBoundPort(socket_t fd) {
     sockaddr_in addr {};
-    socklen_t len = sizeof(addr);
+    socket_len_t len = static_cast<socket_len_t>(sizeof(addr));
     if (getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
         return 0;
     }
@@ -103,15 +95,15 @@ bool parseBindAddress(const std::string& bind_address, in_addr& out) {
     return false;
 }
 
-int openListenerSocket(const std::string& bind_address, uint16_t port) {
+socket_t openListenerSocket(const std::string& bind_address, uint16_t port) {
     in_addr parsed_addr {};
     if (!parseBindAddress(bind_address, parsed_addr)) {
-        return -1;
+        return kInvalidSocket;
     }
 
-    const int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        return -1;
+    socket_t fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (isInvalidSocket(fd)) {
+        return kInvalidSocket;
     }
 
     setCloseOnExec(fd);
@@ -124,19 +116,18 @@ int openListenerSocket(const std::string& bind_address, uint16_t port) {
 
     if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
         listen(fd, kBacklog) != 0 ||
-        !setNonBlocking(fd)) {
-        int close_fd = fd;
-        closeFd(close_fd);
-        return -1;
+        !setNonblocking(fd)) {
+        closeFd(fd);
+        return kInvalidSocket;
     }
 
     return fd;
 }
 
-bool prepareAcceptedSocket(int fd) {
+bool prepareAcceptedSocket(socket_t fd) {
     setCloseOnExec(fd);
     applySocketOptions(fd);
-    return setNonBlocking(fd);
+    return setNonblocking(fd);
 }
 
 std::chrono::steady_clock::duration nextTimerDelay(uint32_t accum_ms, uint32_t interval_ms) {
@@ -151,6 +142,8 @@ std::chrono::steady_clock::duration nextTimerDelay(uint32_t accum_ms, uint32_t i
 TNCServer::TNCServer(ModemAdapter& modem, TNCServerConfig config)
     : modem_(modem),
       config_(std::move(config)) {
+    static WinsockInit winsock;
+    (void)winsock;
     resetSession();
 }
 
@@ -164,7 +157,9 @@ bool TNCServer::start() {
         return false;
     }
 
+#ifndef _WIN32
     signal(SIGPIPE, SIG_IGN);
+#endif
     stop_requested_.store(false);
     real_tick_accum_ms_ = 0;
     iamalive_override_accum_ms_ = 0;
@@ -294,8 +289,8 @@ void TNCServer::reactorLoop() {
         std::vector<pollfd> poll_fds;
         std::vector<PollTarget> poll_targets;
 
-        auto add_fd = [&](int fd, short events, PollTarget target) {
-            if (fd >= 0) {
+        auto add_fd = [&](socket_t fd, short events, PollTarget target) {
+            if (!isInvalidSocket(fd)) {
                 poll_fds.push_back({fd, events, 0});
                 poll_targets.push_back(target);
             }
@@ -325,8 +320,8 @@ void TNCServer::reactorLoop() {
                                                   std::chrono::duration_cast<std::chrono::milliseconds>(delay).count()));
         }
 
-        const int poll_rc = poll(poll_fds.data(), static_cast<nfds_t>(poll_fds.size()), timeout_ms);
-        if (poll_rc < 0 && errno != EINTR) {
+        const int poll_rc = pollSockets(poll_fds.data(), static_cast<poll_count_t>(poll_fds.size()), timeout_ms);
+        if (poll_rc < 0 && !isInterruptedSocketError()) {
             break;
         }
 
@@ -407,16 +402,16 @@ void TNCServer::reactorLoop() {
 
 void TNCServer::onCmdListenerReady() {
     while (true) {
-        const int fd = accept(cmd_listener_fd_, nullptr, nullptr);
-        if (fd < 0) {
-            if (errno == EINTR) {
+        const socket_t fd = accept(cmd_listener_fd_, nullptr, nullptr);
+        if (isInvalidSocket(fd)) {
+            if (isInterruptedSocketError()) {
                 continue;
             }
             return;
         }
 
         if (!prepareAcceptedSocket(fd)) {
-            int close_fd = fd;
+            socket_t close_fd = fd;
             closeClientFd(close_fd);
             continue;
         }
@@ -433,16 +428,16 @@ void TNCServer::onCmdListenerReady() {
 
 void TNCServer::onDataListenerReady() {
     while (true) {
-        const int fd = accept(data_listener_fd_, nullptr, nullptr);
-        if (fd < 0) {
-            if (errno == EINTR) {
+        const socket_t fd = accept(data_listener_fd_, nullptr, nullptr);
+        if (isInvalidSocket(fd)) {
+            if (isInterruptedSocketError()) {
                 continue;
             }
             return;
         }
 
         if (!prepareAcceptedSocket(fd)) {
-            int close_fd = fd;
+            socket_t close_fd = fd;
             closeClientFd(close_fd);
             continue;
         }
@@ -454,8 +449,8 @@ void TNCServer::onDataListenerReady() {
 
 void TNCServer::onCmdClientReady() {
     uint8_t buffer[kReadBufferSize];
-    while (cmd_client_fd_ >= 0) {
-        const ssize_t n = recv(cmd_client_fd_, buffer, sizeof(buffer), 0);
+    while (!isInvalidSocket(cmd_client_fd_)) {
+        const socket_io_result_t n = recvSocket(cmd_client_fd_, buffer, sizeof(buffer), 0);
         if (n > 0) {
             processControlBytes(buffer, static_cast<size_t>(n));
             continue;
@@ -464,7 +459,7 @@ void TNCServer::onCmdClientReady() {
             evictCmdClient();
             return;
         }
-        if (errno == EINTR) {
+        if (isInterruptedSocketError()) {
             continue;
         }
         if (isWouldBlock()) {
@@ -477,17 +472,17 @@ void TNCServer::onCmdClientReady() {
 
 void TNCServer::onDataClientReady() {
     uint8_t buffer[kReadBufferSize];
-    while (data_client_fd_ >= 0) {
-        const ssize_t n = recv(data_client_fd_, buffer, sizeof(buffer), 0);
+    while (!isInvalidSocket(data_client_fd_)) {
+        const socket_io_result_t n = recvSocket(data_client_fd_, buffer, sizeof(buffer), 0);
         if (n > 0) {
-            session_->handleDataBytes(std::vector<uint8_t>(buffer, buffer + n));
+            session_->handleDataBytes(std::vector<uint8_t>(buffer, buffer + static_cast<std::ptrdiff_t>(n)));
             continue;
         }
         if (n == 0) {
             evictDataClient();
             return;
         }
-        if (errno == EINTR) {
+        if (isInterruptedSocketError()) {
             continue;
         }
         if (isWouldBlock()) {
@@ -546,14 +541,14 @@ void TNCServer::evictDataClient() {
 }
 
 void TNCServer::emitToCmdClient(std::string_view line) {
-    if (cmd_client_fd_ < 0 || line.empty()) {
+    if (isInvalidSocket(cmd_client_fd_) || line.empty()) {
         return;
     }
     cmd_tx_buffer_.insert(cmd_tx_buffer_.end(), line.begin(), line.end());
 }
 
 void TNCServer::emitToDataClient(const std::vector<uint8_t>& bytes) {
-    if (data_client_fd_ < 0 || bytes.empty()) {
+    if (isInvalidSocket(data_client_fd_) || bytes.empty()) {
         return;
     }
     data_tx_buffer_.insert(data_tx_buffer_.end(), bytes.begin(), bytes.end());
@@ -597,7 +592,7 @@ bool TNCServer::openListeners() {
         }
 
         cmd_listener_fd_ = openListenerSocket(config_.bind_address, requested_cmd);
-        if (cmd_listener_fd_ < 0) {
+        if (isInvalidSocket(cmd_listener_fd_)) {
             if (config_.cmd_port == 0 && adjacent_ports) {
                 continue;
             }
@@ -607,7 +602,7 @@ bool TNCServer::openListeners() {
         const uint16_t actual_cmd = getBoundPort(cmd_listener_fd_);
         const uint16_t requested_data = adjacent_ports ? nextPort(actual_cmd) : config_.data_port;
         data_listener_fd_ = openListenerSocket(config_.bind_address, requested_data);
-        if (data_listener_fd_ >= 0) {
+        if (!isInvalidSocket(data_listener_fd_)) {
             bound_cmd_port_.store(actual_cmd);
             bound_data_port_.store(getBoundPort(data_listener_fd_));
             return true;
@@ -623,8 +618,8 @@ bool TNCServer::openWakeupPipe() {
     closeFd(wakeup_read_fd_);
     closeFd(wakeup_write_fd_);
 
-    int fds[2] = {-1, -1};
-    if (pipe(fds) != 0) {
+    socket_t fds[2] = {kInvalidSocket, kInvalidSocket};
+    if (!socketPair(fds)) {
         return false;
     }
 
@@ -632,7 +627,7 @@ bool TNCServer::openWakeupPipe() {
     wakeup_write_fd_ = fds[1];
     setCloseOnExec(wakeup_read_fd_);
     setCloseOnExec(wakeup_write_fd_);
-    if (!setNonBlocking(wakeup_read_fd_) || !setNonBlocking(wakeup_write_fd_)) {
+    if (!setNonblocking(wakeup_read_fd_) || !setNonblocking(wakeup_write_fd_)) {
         closeFd(wakeup_read_fd_);
         closeFd(wakeup_write_fd_);
         return false;
@@ -670,17 +665,17 @@ void TNCServer::enqueueModemEvent(TNCEvent event) {
 }
 
 void TNCServer::wakeReactor() {
-    if (wakeup_write_fd_ < 0) {
+    if (isInvalidSocket(wakeup_write_fd_)) {
         return;
     }
 
     const uint8_t byte = 0;
     while (true) {
-        const ssize_t n = write(wakeup_write_fd_, &byte, sizeof(byte));
+        const socket_io_result_t n = writeSocketPair(wakeup_write_fd_, &byte, sizeof(byte));
         if (n == 1) {
             return;
         }
-        if (n < 0 && errno == EINTR) {
+        if (n < 0 && isInterruptedSocketError()) {
             continue;
         }
         return;
@@ -689,12 +684,12 @@ void TNCServer::wakeReactor() {
 
 void TNCServer::drainWakeupPipe() {
     uint8_t buffer[128];
-    while (wakeup_read_fd_ >= 0) {
-        const ssize_t n = read(wakeup_read_fd_, buffer, sizeof(buffer));
+    while (!isInvalidSocket(wakeup_read_fd_)) {
+        const socket_io_result_t n = readSocketPair(wakeup_read_fd_, buffer, sizeof(buffer));
         if (n > 0) {
             continue;
         }
-        if (n < 0 && errno == EINTR) {
+        if (n < 0 && isInterruptedSocketError()) {
             continue;
         }
         return;
@@ -767,24 +762,24 @@ void TNCServer::processControlBytes(const uint8_t* bytes, size_t size) {
 }
 
 void TNCServer::flushAllOutputs() {
-    if (cmd_client_fd_ >= 0 && !cmd_tx_buffer_.empty() &&
+    if (!isInvalidSocket(cmd_client_fd_) && !cmd_tx_buffer_.empty() &&
         !flushClientOutput(cmd_client_fd_, cmd_tx_buffer_)) {
         evictCmdClient();
     }
-    if (data_client_fd_ >= 0 && !data_tx_buffer_.empty() &&
+    if (!isInvalidSocket(data_client_fd_) && !data_tx_buffer_.empty() &&
         !flushClientOutput(data_client_fd_, data_tx_buffer_)) {
         evictDataClient();
     }
 }
 
-bool TNCServer::flushClientOutput(int fd, std::vector<uint8_t>& buffer) {
+bool TNCServer::flushClientOutput(socket_t fd, std::vector<uint8_t>& buffer) {
     while (!buffer.empty()) {
-        const ssize_t n = send(fd, buffer.data(), buffer.size(), sendFlags());
+        const socket_io_result_t n = sendSocket(fd, buffer.data(), buffer.size(), sendFlags());
         if (n > 0) {
-            buffer.erase(buffer.begin(), buffer.begin() + n);
+            buffer.erase(buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(n));
             continue;
         }
-        if (n < 0 && errno == EINTR) {
+        if (n < 0 && isInterruptedSocketError()) {
             continue;
         }
         if (n < 0 && isWouldBlock()) {

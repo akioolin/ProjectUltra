@@ -10,6 +10,71 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-02: TNC Phase 5 — Windows cross-platform support
+
+**Goal:**
+Make the TNC server build and run on Windows (CI's `windows-latest`
+target) without breaking POSIX behavior. The TNC was the only
+POSIX-only piece in tonight's new code; everything else (modem core,
+GUI, audio) already had Windows guards.
+
+**What was added:**
+- `src/tnc/socket_compat.{hpp,cpp}` — cross-platform abstraction:
+  - `socket_t` type alias (int on POSIX, `SOCKET` on Windows)
+  - `kInvalidSocket`, `closeSocket()`, `shutdownSocket()`
+  - `pollSockets()` (wraps `poll` / `WSAPoll`)
+  - `setNonblocking()` (wraps `fcntl(O_NONBLOCK)` / `ioctlsocket(FIONBIO)`)
+  - `socketPair()` — POSIX uses `pipe()`; Windows uses standard
+    bind+listen+connect+accept loopback pattern (listener active
+    before connect → no race)
+  - `WinsockInit` RAII for `WSAStartup`/`WSACleanup` lifecycle
+
+**What was changed:**
+- `src/tnc/tnc_server.{cpp,hpp}` — refactored to use the new
+  abstractions. All `int` socket fds → `socket_t`. `close()` for
+  sockets → `closeSocket()`. `poll()` → `pollSockets()`.
+  `fcntl()` → `setNonblocking()`. `pipe()` → `socketPair()`.
+  `signal(SIGPIPE, SIG_IGN)` guarded with `#ifndef _WIN32`.
+  Early `WinsockInit` construction.
+- `CMakeLists.txt` — adds `socket_compat.cpp` to `ultra_core`;
+  links `ws2_32` on Windows.
+- `tests/test_tnc_server.cpp` — adds a `socketPair()` smoke test
+  that runs on both platforms and verifies the loopback pair is
+  bidirectional. CTest target count unchanged at 34 (test runs
+  inside the existing `TNCServer` test).
+
+**Verification (macOS):**
+- `cmake --build build -j4` passed
+- `ctest --test-dir build --output-on-failure` passed: 34/34
+- The new socketPair smoke runs and passes
+- Sandbox-blocked localhost bind still gets the existing graceful
+  preflight skip
+
+**Verification (Windows):**
+- Will be validated automatically by CI's `windows-latest` build job
+  on push. Existing CI matrix covers it; no new vcpkg / toolchain
+  dependency beyond the system `ws2_32` library.
+
+**WSAPoll caveat:**
+`POLLHUP`/`POLLERR` semantics can differ from POSIX `poll()`. The
+reactor handles this by polling `POLLIN|POLLERR|POLLHUP|POLLNVAL`,
+reading on readiness, and evicting on `recv()==0` or hard errors.
+Worst case some close detection may wait one extra poll cycle —
+acceptable.
+
+**Path to ultra_tnc.exe:**
+After this commit reaches origin/main, CI's `windows-latest` build
+job should produce `ultra_tnc.exe` automatically. Manual smoke can
+then be done from a Windows host:
+```
+.\ultra_tnc.exe --audio-output none --audio-input none --port 18300
+echo VERSION | nc 127.0.0.1 18300  # or PowerShell equivalent
+```
+Should return `VARA version 4.9.0 registered\r` exactly as on
+POSIX.
+
+---
+
 ## 2026-05-02: TNC Phase 4 — hardware loopback test script
 
 **What was added:**

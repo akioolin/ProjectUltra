@@ -90,6 +90,7 @@ add_library(ultra_core STATIC
     src/protocol/compression.cpp
     # VARA-compatible TNC protocol shell
     src/tnc/tnc_session.cpp
+    src/tnc/socket_compat.cpp
     src/tnc/tnc_server.cpp
     src/tnc/tnc_bridge.cpp
     # Waveform abstraction layer
@@ -113,6 +114,10 @@ target_include_directories(ultra_core PUBLIC
 target_link_libraries(ultra_core PUBLIC
     Threads::Threads
 )
+
+if(WIN32)
+    target_link_libraries(ultra_core PRIVATE ws2_32)
+endif()
 
 if(SDL2_FOUND)
     if(TARGET SDL2::SDL2)

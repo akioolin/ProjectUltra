@@ -1,11 +1,5 @@
+#include "tnc/socket_compat.hpp"
 #include "tnc/tnc_server.hpp"
-
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include <chrono>
 #include <csignal>
@@ -23,6 +17,20 @@ using ultra::tnc::ModemAdapter;
 using ultra::tnc::State;
 using ultra::tnc::TNCServer;
 using ultra::tnc::TNCServerConfig;
+using ultra::tnc::WinsockInit;
+using ultra::tnc::closeSocket;
+using ultra::tnc::isInterruptedSocketError;
+using ultra::tnc::isInvalidSocket;
+using ultra::tnc::kInvalidSocket;
+using ultra::tnc::pollSockets;
+using ultra::tnc::readSocketPair;
+using ultra::tnc::recvSocket;
+using ultra::tnc::sendSocket;
+using ultra::tnc::socketPair;
+using ultra::tnc::socket_io_result_t;
+using ultra::tnc::socket_len_t;
+using ultra::tnc::socket_t;
+using ultra::tnc::writeSocketPair;
 
 namespace {
 
@@ -170,13 +178,13 @@ public:
     TestClient& operator=(const TestClient&) = delete;
 
     TestClient(TestClient&& other) noexcept
-        : fd_(std::exchange(other.fd_, -1)),
+        : fd_(std::exchange(other.fd_, kInvalidSocket)),
           rx_(std::move(other.rx_)) {}
 
     TestClient& operator=(TestClient&& other) noexcept {
         if (this != &other) {
             close();
-            fd_ = std::exchange(other.fd_, -1);
+            fd_ = std::exchange(other.fd_, kInvalidSocket);
             rx_ = std::move(other.rx_);
         }
         return *this;
@@ -185,12 +193,14 @@ public:
     void connectTo(uint16_t port) {
         close();
         fd_ = socket(AF_INET, SOCK_STREAM, 0);
-        expect(fd_ >= 0, "socket() failed");
+        expect(!isInvalidSocket(fd_), "socket() failed");
 
         const int one = 1;
-        (void)setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+        const auto* optval = reinterpret_cast<const char*>(&one);
+        const socket_len_t optlen = static_cast<socket_len_t>(sizeof(one));
+        (void)setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, optval, optlen);
 #ifdef SO_NOSIGPIPE
-        (void)setsockopt(fd_, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+        (void)setsockopt(fd_, SOL_SOCKET, SO_NOSIGPIPE, optval, optlen);
 #endif
 
         sockaddr_in addr {};
@@ -202,9 +212,9 @@ public:
     }
 
     void close() {
-        if (fd_ >= 0) {
-            ::close(fd_);
-            fd_ = -1;
+        if (!isInvalidSocket(fd_)) {
+            closeSocket(fd_);
+            fd_ = kInvalidSocket;
         }
         rx_.clear();
     }
@@ -216,12 +226,12 @@ public:
     void writeBytes(const std::vector<uint8_t>& bytes) {
         size_t sent = 0;
         while (sent < bytes.size()) {
-            const ssize_t n = send(fd_, bytes.data() + sent, bytes.size() - sent, sendFlags());
+            const socket_io_result_t n = sendSocket(fd_, bytes.data() + sent, bytes.size() - sent, sendFlags());
             if (n > 0) {
                 sent += static_cast<size_t>(n);
                 continue;
             }
-            if (n < 0 && errno == EINTR) {
+            if (n < 0 && isInterruptedSocketError()) {
                 continue;
             }
             throw std::runtime_error("send() failed");
@@ -230,8 +240,8 @@ public:
 
     bool waitReadable(int timeout_ms) {
         pollfd pfd {fd_, static_cast<short>(POLLIN | POLLERR | POLLHUP | POLLNVAL), 0};
-        const int rc = poll(&pfd, 1, timeout_ms);
-        if (rc < 0 && errno == EINTR) {
+        const int rc = pollSockets(&pfd, 1, timeout_ms);
+        if (rc < 0 && isInterruptedSocketError()) {
             return false;
         }
         return rc > 0 && pfd.revents != 0;
@@ -273,15 +283,15 @@ public:
         char byte = 0;
         while (std::chrono::steady_clock::now() < deadline) {
             pollfd pfd {fd_, static_cast<short>(POLLIN | POLLERR | POLLHUP | POLLNVAL), 0};
-            const int rc = poll(&pfd, 1, 20);
+            const int rc = pollSockets(&pfd, 1, 20);
             if (rc <= 0) {
                 continue;
             }
-            const ssize_t n = recv(fd_, &byte, sizeof(byte), 0);
+            const socket_io_result_t n = recvSocket(fd_, &byte, sizeof(byte), 0);
             if (n == 0) {
                 return true;
             }
-            if (n < 0 && errno == EINTR) {
+            if (n < 0 && isInterruptedSocketError()) {
                 continue;
             }
             if (n < 0) {
@@ -302,7 +312,7 @@ private:
 
     void readSome() {
         char buffer[512];
-        const ssize_t n = recv(fd_, buffer, sizeof(buffer), 0);
+        const socket_io_result_t n = recvSocket(fd_, buffer, sizeof(buffer), 0);
         if (n > 0) {
             rx_.append(buffer, static_cast<size_t>(n));
             return;
@@ -310,13 +320,13 @@ private:
         if (n == 0) {
             throw std::runtime_error("socket closed");
         }
-        if (errno == EINTR) {
+        if (isInterruptedSocketError()) {
             return;
         }
         throw std::runtime_error("recv() failed");
     }
 
-    int fd_ = -1;
+    socket_t fd_ = kInvalidSocket;
     std::string rx_;
 };
 
@@ -370,26 +380,54 @@ std::string command(TestClient& client, const std::string& line) {
 }
 
 bool localhostTcpBindAvailable() {
-    const int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
+    const socket_t fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (isInvalidSocket(fd)) {
         return false;
     }
 
     const int one = 1;
-    (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    const auto* optval = reinterpret_cast<const char*>(&one);
+    const socket_len_t optlen = static_cast<socket_len_t>(sizeof(one));
+    (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, optval, optlen);
 
     sockaddr_in addr {};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(0);
     if (inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) != 1) {
-        ::close(fd);
+        closeSocket(fd);
         return false;
     }
 
     const bool available =
         bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0 && listen(fd, 1) == 0;
-    ::close(fd);
+    closeSocket(fd);
     return available;
+}
+
+void closeSocketPair(socket_t pair[2]) {
+    if (!isInvalidSocket(pair[0])) {
+        closeSocket(pair[0]);
+        pair[0] = kInvalidSocket;
+    }
+    if (!isInvalidSocket(pair[1])) {
+        closeSocket(pair[1]);
+        pair[1] = kInvalidSocket;
+    }
+}
+
+void runSocketCompatibilityTests(Runner& runner) {
+    runner.group("Socket Compatibility");
+    runner.run("socketPair passes bytes between paired endpoints", [] {
+        socket_t pair[2] = {kInvalidSocket, kInvalidSocket};
+        expect(socketPair(pair), "socketPair failed");
+
+        const uint8_t outgoing = 0x42;
+        uint8_t incoming = 0;
+        expect(writeSocketPair(pair[1], &outgoing, sizeof(outgoing)) == 1, "socketPair write failed");
+        expect(readSocketPair(pair[0], &incoming, sizeof(incoming)) == 1, "socketPair read failed");
+        expect(incoming == outgoing, "socketPair payload mismatch");
+        closeSocketPair(pair);
+    });
 }
 
 void expectLine(TestClient& client, const std::string& expected) {
@@ -412,13 +450,28 @@ void enterConnected(ServerHarness& harness, TestClient& cmd) {
 } // namespace
 
 int main() {
-    signal(SIGPIPE, SIG_IGN);
-    if (!localhostTcpBindAvailable()) {
-        std::cout << "TNCServer integration tests skipped: localhost TCP bind is not permitted in this environment\n";
+    WinsockInit winsock;
+    if (!winsock.ok()) {
+        std::cout << "TNCServer integration tests skipped: Winsock initialization failed\n";
         return 0;
     }
+#ifndef _WIN32
+    signal(SIGPIPE, SIG_IGN);
+#endif
 
     Runner runner;
+#ifndef _WIN32
+    runSocketCompatibilityTests(runner);
+#endif
+
+    if (!localhostTcpBindAvailable()) {
+        std::cout << "TNCServer integration tests skipped: localhost TCP bind is not permitted in this environment\n";
+        return runner.tests_failed == 0 ? 0 : 1;
+    }
+
+#ifdef _WIN32
+    runSocketCompatibilityTests(runner);
+#endif
 
     runner.group("Listeners");
     runner.run("binds cmd and data listeners on ephemeral adjacent ports", [] {
