@@ -2,16 +2,23 @@
 
 **High-performance HF modem for amateur radio**
 
-*Last updated: 2026-02-12*
+*Last updated: 2026-05-02*
 
-> **EXPERIMENTAL SOFTWARE - WORK IN PROGRESS**
+> **EXPERIMENTAL SOFTWARE — WORK IN PROGRESS**
 >
-> This project is under active development and is **not ready for production use**.
-> Features may be incomplete, untested, or broken. APIs and protocols may change
-> without notice. Performance numbers are from simulation only - real-world HF
-> testing is ongoing. **Use at your own risk for experimentation and development only.**
+> Active development. Not production-ready. APIs and protocols may change.
+> Use at your own risk for experimentation and amateur-radio research.
 
-ProjectUltra is a software modem that achieves reliable, high-speed data transfer over HF radio. It uses adaptive waveform selection to maintain communication across varying ionospheric conditions - from quiet bands to disturbed polar paths.
+ProjectUltra is a software modem for reliable HF data transfer. It ships
+three things in one repo:
+
+- **Modem core** — adaptive OFDM + MC-DPSK waveforms with LDPC FEC and
+  Selective-Repeat ARQ.
+- **GUI application** — real-time waterfall, constellation, and message
+  log (ImGui + SDL2).
+- **VARA-compatible TCP TNC** — `ultra_tnc` exposes the modem via the
+  same TCP command/data API used by Pat, Winlink Express, BPQ32, and
+  other clients. Drop-in alternative on Linux, macOS, and Windows.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Status: Experimental](https://img.shields.io/badge/Status-Experimental-orange.svg)]()
@@ -19,72 +26,123 @@ ProjectUltra is a software modem that achieves reliable, high-speed data transfe
 
 ---
 
-## Alpha Reality Snapshot (v0.2.4-alpha)
-
-- **Stable baseline**: MC-DPSK plus OFDM DQPSK (`R1/4` to `R2/3`) are the most reliable paths in current testing.
-- **Control path hardening landed**: DISCONNECT now uses a hardened 1-codeword control profile (`R1/4`) with `seq=0xFFFF`; recent 10-seed simulator check showed 10/10 pass and 0 disconnect timeouts.
-- **File transfer gate passed**: recent 2048-byte OFDM test (`SNR=20`, good fading, `R1/2`) passed 5/5 seeds with 0 retransmissions and 0 timeouts.
-- **Still experimental**: D8PSK and coherent high-order modes can show higher run-to-run variability on fading channels; keep these as opportunistic/expert modes for now.
-- **OTA status**: on-air testing is active, but this is still alpha software and not production-ready.
-
----
-
-## Features
-
-- **Adaptive Waveforms**: Automatically selects optimal waveform based on channel conditions
-- **Wide SNR Range**: Operates from -11 dB to 30+ dB (DPSK tested at -11 dB)
-- **Strong FEC**: LDPC codes with rates from R1/4 to R5/6
-- **ARQ Protocol**: Reliable delivery with automatic retransmission
-- **GUI Application**: Real-time waterfall, constellation display, and message log
-- **CLI Tools**: Frame-level transmit/receive for testing and debugging
-
----
-
 ## Performance
 
-**Raw waveform throughput** (1024 FFT, 59 carriers, CP=96, 42.9 sym/s):
-| SNR | Mode | Data carriers | Throughput | Notes |
-|-----|------|---------------|------------|-------|
-| 5+ dB | MC-DPSK (8 carriers) | 8 | 938 bps | 100% verified, ±50 Hz CFO |
-| 10+ dB | OFDM DQPSK R1/4 | 59 (no pilots) | 1264 bps | 100% verified, fading OK |
-| 15+ dB | OFDM DQPSK R1/2 | 53 (6 pilots) | 2271 bps | 100% verified, good + moderate fading |
-| 20+ dB | OFDM DQPSK R2/3 | 53 (6 pilots) | 3028 bps | 100% verified, good fading |
-| 20+ dB | OFDM DQPSK R3/4 | 55 (4 pilots) | 3536 bps | 100% verified, AWGN only |
-| 20+ dB | OFDM D8PSK R1/2 | 53 (6 pilots) | 3407 bps | Works in strong channels; fading reliability still being hardened |
+ProjectUltra exposes throughput at two layers. Both matter; they answer
+different questions.
 
-**Coherent modes (stable channels only):**
-| SNR | Mode | Data carriers | Throughput | Notes |
-|-----|------|---------------|------------|-------|
-| 20+ dB | OFDM QPSK R1/2 | 47 (12 pilots) | 2014 bps | Coherent path, sensitive to phase/fading |
-| 25+ dB | OFDM 16QAM R3/4 | 44 (15 pilots) | 5657 bps | Stable paths (NVIS, ground wave) |
-| 30+ dB | OFDM 32QAM R3/4 | 44 (15 pilots) | **7071 bps** | Maximum throughput |
+### Raw PHY (theoretical maximum)
 
-**When to use coherent modes (16QAM/32QAM):** Stable propagation paths like
-ground wave or direct cable connection. These paths have stable phase, allowing
-coherent demodulation with pilot-assisted channel estimation.
+Useful payload bits / second over the air, ignoring ARQ overhead and
+auto-rate adaptation. This is what one bulk frame delivers in steady
+state on a stable channel.
 
-### Waveform Strategy
+OFDM 1024-FFT, 59 carriers, CP=96, ~42.9 sym/s:
 
-ProjectUltra uses adaptive waveform selection based on channel conditions:
+| SNR  | Mode             | Throughput | Notes |
+|------|------------------|-----------:|-------|
+| 5+   | MC-DPSK (8 car)  |    938 bps | ±50 Hz CFO, robust sync |
+| 8+   | OFDM-NARROW R1/4 |    103 bps | 500 Hz BW for crowded bands |
+| 8+   | OFDM-NARROW R1/2 |    230 bps | 500 Hz BW |
+| 10+  | OFDM DQPSK R1/4  |   1264 bps | Fading-tolerant baseline |
+| 15+  | OFDM DQPSK R1/2  |   2271 bps | Good + moderate fading |
+| 20+  | OFDM DQPSK R2/3  |   3028 bps | Good fading only |
+| 20+  | OFDM DQPSK R3/4  |   3536 bps | AWGN only |
+| 25+  | OFDM 16QAM R3/4  |   5657 bps | Stable paths (NVIS, ground wave) |
+| 30+  | OFDM 32QAM R3/4  |   7071 bps | Stable paths only |
+
+### End-to-end measured (real hardware)
+
+What a user actually sees over the cable / air, including handshake,
+ACK roundtrips, retransmissions, and auto-rate downgrades. Auto-rate
+ladder is on; Connection picks among R1/4 / R1/2 / R2/3 / R3/4 based
+on measured SNR and fading.
+
+| Test                       | Channel              | Wall  | Throughput | Notes |
+|----------------------------|----------------------|------:|-----------:|-------|
+| 50 KB Mac↔Pi5 cable        | Clean USB cable      | 174 s |  2354 bps  | Auto picked DQPSK R3/4 @ SNR=28 |
+| 500 KB Mac↔Pi5 injected    | Watterson Good, SNR=15 | 3780 s | 1083 bps  | 930 retx, 0 failed, byte-exact |
+| 5 KB Mac↔Pi5 injected      | Watterson Good, SNR=15 |       |            | 0 retx, byte-exact |
+
+End-to-end results match or exceed real-world numbers reported for
+existing commercial HF data modems in equivalent conditions. The 500 KB
+Good15 result is the realistic-HF baseline; 50 KB cable is the upper
+bound given a clean channel.
+
+### Waveform selection (automatic)
 
 ```
-SNR Range           Waveform              Why
-─────────────────────────────────────────────────────────────
-5-10 dB             MC-DPSK (8 carriers)  Robust sync, differential encoding
-10-17 dB            OFDM-CHIRP 1024-FFT   Dual chirp sync, 59 carriers
-17+ dB              OFDM-COX 1024-FFT     Schmidl-Cox sync, max throughput
-25+ dB (NVIS)       OFDM 16QAM            Coherent mode, ~5.7 kbps
+SNR         Waveform              Reason
+─────────────────────────────────────────────────────────────────────
+5–10 dB     MC-DPSK (8 carriers)  Differential encoding, dual-chirp sync
+5–10 dB     OFDM-NARROW (500 Hz)  Crowded bands, low SNR
+10–17 dB    OFDM-CHIRP (1024)     Dual-chirp sync, 59 carriers
+17+ dB      OFDM-COX (1024)       Schmidl-Cox sync, faster acquisition
+25+ dB NVIS OFDM 16QAM            Coherent + pilot tracking
 ```
 
-**MC-DPSK (Multi-Carrier DPSK)**: 8 carriers with differential encoding. Works reliably at 5+ dB SNR with ±50 Hz CFO tolerance. Uses dual chirp synchronization for robust timing recovery.
+Selection happens during CONNECT (peer-advertised SNR + fading index)
+and continues adapting during the session. See `docs/PROJECT_GOALS.md`
+for the throughput/reliability targets driving this work.
 
-**D8PSK (8-Phase DPSK)**: +50% throughput over DQPSK (3 bits/symbol vs 2). This mode is currently treated as opportunistic. It performs well in AWGN and some strong fading runs, but remains more variable than DQPSK in sustained HF fading. A two-pass decoder uses the embedded DQPSK grid to estimate and correct phase drift before D8PSK decoding.
+---
 
-**Two OFDM sync modes**:
-- **OFDM-CHIRP**: Dual chirp preamble for robust sync, works at 10+ dB
-- **OFDM-COX**: Schmidl-Cox sync for faster acquisition, requires 17+ dB
+## TNC integration (Pat, Winlink Express, BPQ32)
 
-**NVIS/Local optimization**: For stable paths like NVIS (Near Vertical Incidence Skywave), 16QAM with pilots provides better performance than differential modes. The pilots track slow phase drift and frequency-selective fading. Maximum throughput ~7.1 kbps with 32QAM R3/4.
+`ultra_tnc` is a daemon that exposes ProjectUltra's modem through the
+VARA HF TCP TNC protocol. Existing clients can connect to it the same
+way they connect to a commercial HF data modem — no protocol changes
+on the client side.
+
+```
+┌──────────────┐  TCP 8300 (cmd)   ┌──────────────┐
+│  Pat /       │  TCP 8301 (data)  │  ultra_tnc   │  Audio   ┌─────────┐
+│  Winlink /   │ ◄──────────────► │  (modem +    │ ◄──────► │  HF     │
+│  BPQ32 / ... │                   │   TCP shell) │          │  Radio  │
+└──────────────┘                   └──────────────┘          └─────────┘
+```
+
+### Quick start
+
+```bash
+# Build (see Getting Started below)
+cmake -S . -B build && cmake --build build -j 4
+
+# Listen on default ports 8300/8301
+./build/ultra_tnc --audio-output "USB Audio Device" \
+                  --audio-input  "USB Audio Device" \
+                  --callsign     N0CALL
+
+# Smoke test from another terminal
+printf 'VERSION\r' | nc 127.0.0.1 8300
+# → VARA version 4.9.0 registered
+```
+
+Full command reference: [`docs/TNC_INTERFACE.md`](docs/TNC_INTERFACE.md).
+
+### Supported commands
+
+Standard VARA: `VERSION`, `MYCALL`, `LISTEN`, `CONNECT`, `DISCONNECT`,
+`ABORT`, `BW500` / `BW2300` / `BW2750`, `BUFFER`, `SN`, `BITRATE`,
+`COMPRESSION`, `CHAT`, `CWID`, plus Mercury / Pat-Vara compatibility
+no-ops (`PUBLIC`, `P2P`, `WINLINK`, `IGNOREKISSDCD`, `RETRIES`,
+`CALLINT`).
+
+ProjectUltra extension:
+
+- **`STATS`** — single-line ARQ + PHY snapshot for debugging stalled
+  sessions: `frames_sent`, `frames_recv`, `retx`, `timeouts`, `failed`,
+  `out_of_order`, current `rate` / `mod` / `mode`, `snr`, `bps`,
+  `backlog`. Pat ignores unknown commands, so this is safe to leave on.
+
+### Status
+
+- Cross-platform: Linux + macOS + Windows. CI matrix all green.
+- ctest: 34/34 (88 TNC parser tests, 19 TCP integration tests, 16
+  bridge tests, plus modem regressions).
+- End-to-end: 50 KB Mac↔Pi5 over real audio cable, byte-exact, 2354 bps.
+- Pat / Winlink Express integration: API-compatible by spec, manual
+  client testing pending.
 
 ---
 
@@ -94,346 +152,262 @@ SNR Range           Waveform              Why
 
 - Linux, macOS, or Windows
 - CMake 3.16+
-- SDL2 (for GUI)
-- **FFTW3** (required for fast chirp detection)
 - C++20 compiler (GCC 10+, Clang 12+, MSVC 2019+)
+- SDL2 (GUI + audio I/O for `cli_simulator` / `ultra_tnc`)
+- FFTW3 (required for fast chirp detection — Cooley-Tukey fallback is
+  unusable for real-time)
 
 ### Building
 
 ```bash
-# Install dependencies
-# Ubuntu/Debian: sudo apt install libsdl2-dev libfftw3-dev cmake build-essential
-# macOS: brew install sdl2 fftw cmake
-# Windows: vcpkg install sdl2 fftw3
+# Ubuntu/Debian
+sudo apt install libsdl2-dev libfftw3-dev cmake build-essential pkg-config
 
-git clone https://github.com/mfrigerio/ProjectUltra.git
+# macOS
+brew install sdl2 fftw cmake pkg-config
+
+# Windows (vcpkg)
+vcpkg install sdl2 fftw3
+
+git clone https://github.com/secup/ProjectUltra.git
 cd ProjectUltra
-mkdir build && cd build
-cmake ..
-make -j4
+cmake -S . -B build
+cmake --build build -j 4
 ```
 
 ### Running
 
-**GUI Application:**
+**GUI** (operator UI with waterfall and constellation):
+
 ```bash
-./ultra_gui              # Normal mode
-./ultra_gui -sim         # Simulator mode (no radio needed)
+./build/ultra_gui          # Normal mode
+./build/ultra_gui -sim     # Developer / simulator mode (no radio needed)
 ```
 
-**CLI Tools** (individual frames, not full protocol):
+**TNC** (VARA-compatible TCP shell, see TNC section above):
+
 ```bash
-# Transmit single frame
-./ultra ptx "Hello World" -s MYCALL -d THEIRCALL | aplay -f FLOAT_LE -r 48000
-
-# Decode frames from audio
-arecord -f FLOAT_LE -r 48000 | ./ultra prx
-
-# Loopback test
-./ultra ptx "Test message" -s A -d B | ./ultra prx
+./build/ultra_tnc --audio-output "USB Audio" --audio-input "USB Audio"
 ```
 
-> **Note**: The CLI generates/decodes individual frames. It does not support
-> full protocol sessions (PING→CONNECT→DATA→DISCONNECT). For interactive
-> operation, use the GUI application.
+**CLI simulator** (full protocol, two-station, channel injection):
+
+```bash
+./build/cli_simulator --snr 15 --channel good --rate auto --test
+```
+
+**CLI tools** (single-frame transmit/decode, for offline analysis):
+
+```bash
+./build/ultra ptx "Hello" -s MYCALL -d THEIRCALL | aplay -f FLOAT_LE -r 48000
+arecord -f FLOAT_LE -r 48000 | ./build/ultra prx
+```
 
 ---
 
 ## How It Works
 
-### Protocol
-
-1. **PING/PONG** - Fast presence probe (~1 sec each) to check if remote station is listening
-2. **CONNECT** - Full callsign exchange after successful probe (FCC Part 97.119 compliance)
-3. **MODE_CHANGE** - Negotiates optimal modulation/coding based on measured SNR
-4. **DATA** - Transfers payload with per-frame acknowledgment
-5. **DISCONNECT** - Graceful termination with callsign ID (regulatory compliance)
-
-The PING/PONG probe allows quick "anyone home?" detection before committing to the
-full CONNECT sequence. If no response after 5 PINGs (15 seconds), connection fails fast.
-
-### Signal Parameters
-
-| Parameter | MC-DPSK | OFDM |
-|-----------|---------|------|
-| Sample Rate | 48 kHz | 48 kHz |
-| Bandwidth | ~2.4 kHz | ~2.8 kHz |
-| Center Frequency | 1500 Hz | 1500 Hz |
-| Carriers | 8 | 59 |
-| FFT Size | N/A | 1024 |
-| Symbol Rate | ~94 baud | ~42.9 baud |
-| Cyclic Prefix | N/A | 96 samples (2ms) |
-| Sync Method | Dual Chirp | Dual Chirp or Schmidl-Cox |
-| LDPC Codeword | 648 bits | 648 bits |
-
-### LDPC Codes
-
-| Rate | Info Bytes | Use Case |
-|------|------------|----------|
-| R1/4 | 20 | Low SNR, maximum reliability |
-| R1/2 | 40 | Moderate SNR, good balance |
-| R2/3 | 54 | Good SNR, higher throughput |
-| R3/4 | 60 | Very good SNR |
-| R5/6 | 67 | Excellent SNR, maximum throughput |
-
----
-
-## Architecture
+### Protocol stack
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│              GUI Application (ImGui + SDL2)             │
-├─────────────────────────────────────────────────────────┤
-│     Protocol Engine (Connection, ARQ, File Transfer)    │
-├─────────────────────────────────────────────────────────┤
-│        Modem Engine (TX/RX coordination, SNR est)       │
-├──────────────────────────┬────────────────────────────┤
-│       OFDM Mod/Dem       │       DPSK Mod/Dem        │
-├──────────────────────────┴────────────────────────────┤
-│  LDPC Encoder/Decoder  │  Interleaver  │  Sync/CFO     │
-├─────────────────────────────────────────────────────────┤
-│                    Audio I/O (SDL2)                     │
-└─────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────┐
+│  Pat / Winlink Express / BPQ32 / your own client       │
+├────────────────────────────────────────────────────────┤
+│  ultra_tnc      (TCP cmd 8300, data 8301)              │
+│  TNCSession     (VARA command parser + state machine)  │
+│  TNCBridge      (ModemAdapter ↔ ProtocolEngine)        │
+├────────────────────────────────────────────────────────┤
+│  Connection     (PING/CONNECT/MODE_CHANGE/DATA/DISC)   │
+│  ARQ            (Selective-Repeat, window=16, SACKs)   │
+│  Frame v2       (4-CW fixed frames + 1-CW control)     │
+├────────────────────────────────────────────────────────┤
+│  Waveforms      (OFDM-CHIRP, OFDM-NARROW, OFDM-COX,    │
+│                  MC-DPSK + adaptive selection)         │
+│  LDPC           (IEEE 802.11n, R1/4 to R5/6)           │
+│  Sync / CFO     (dual chirp + Schmidl-Cox + LTS)       │
+├────────────────────────────────────────────────────────┤
+│  Audio I/O      (SDL2 — Linux ALSA, macOS CoreAudio,   │
+│                  Windows WASAPI)                       │
+└────────────────────────────────────────────────────────┘
 ```
+
+### Connection flow
+
+1. **PING/PONG** — fast presence probe (~1 s each) before committing
+   to a full CONNECT.
+2. **CONNECT** — callsign exchange (FCC Part 97.119 compliant) over
+   MC-DPSK.
+3. **MODE_CHANGE** — picks data waveform/rate from peer-advertised SNR
+   and fading.
+4. **DATA** — Selective-Repeat ARQ with cumulative SACKs.
+5. **DISCONNECT** — graceful with callsign ID.
+
+If no PONG after 5 PINGs (~15 s), connection fails fast.
+
+### Signal parameters
+
+| Parameter        | MC-DPSK    | OFDM       |
+|------------------|-----------:|-----------:|
+| Sample rate      | 48 kHz     | 48 kHz     |
+| Bandwidth        | ~2.4 kHz   | ~2.8 kHz   |
+| Center freq.     | 1500 Hz    | 1500 Hz    |
+| Carriers         | 8          | 59         |
+| FFT size         | n/a        | 1024       |
+| Symbol rate      | ~94 baud   | ~42.9 baud |
+| Cyclic prefix    | n/a        | 96 (~2 ms) |
+| Sync             | Dual chirp | Dual chirp / Schmidl-Cox |
+| LDPC codeword    | 648 bits   | 648 bits   |
 
 ---
 
 ## Testing
 
+### Unit + regression gate
+
 ```bash
-cd build
-
-# Primary test - full protocol (PING/CONNECT/MODE_CHANGE/DATA/DISCONNECT)
-./cli_simulator --snr 15 --fading good --rate r1_4 --test
-
-# Test specific modulation/rate combinations
-./cli_simulator --snr 20 --fading good --mod d8psk --rate r1_2 --test
-./cli_simulator --snr 20 --mod dqpsk --rate r2_3 --test
-
-# Quick single-frame sanity check (not full protocol)
-./test_waveform_simple -w ofdm_chirp --snr 15
-
-# Run unit tests
-ctest
+cmake --build build -j 4
+ctest --test-dir build --output-on-failure -j 4
 ```
 
-**CFO Verification (Internal Pre/Post Correction Chain):**
+34 tests covering modem primitives, protocol/ARQ, TNC parser, TNC TCP
+reactor, and TNC bridge. CI runs the full matrix on Linux + macOS +
+Windows with ASAN/UBSAN and coverage gates.
+
+### Full-protocol simulator
 
 ```bash
-# From repository root (one-command gate)
+# Default regression (full handshake + ARQ data + disconnect)
+./build/cli_simulator --snr 15 --channel good --rate auto --test
+
+# Force specific PHY config
+./build/cli_simulator --snr 20 --channel awgn --mod dqpsk --rate r2_3 --test
+
+# CFO chain verification
 ./tests/verify_cfo_chain.sh --cfo 50 --channel awgn --snr 20 --seed 42
-
-# Optional: capture raw TX/RX audio for offline analysis
-./build/cli_simulator --snr 20 --channel awgn --waveform ofdm_chirp \
-  --mod dqpsk --rate r1_2 --tx-cfo 50 \
-  --save-signals 1 --save-prefix /tmp/cfo_probe --test
 ```
 
-Useful `cli_simulator` flags for CFO diagnostics:
-- `--tx-cfo` (alias `--cfo`) injects TX CFO in Hz across the full transmitted signal.
-- `--save-signals [N]` writes raw TX/RX captures for up to `N` messages.
-- `--save-prefix <path>` and `--save-max-samples <N>` control capture naming and size.
-
-**Adaptive Advisory Smoke Test (log-only, no live MODE_CHANGE yet):**
+### Hardware loopback (two stations)
 
 ```bash
-./build/cli_simulator --adpt-test --snr 20 --channel good --waveform ofdm_chirp --seed 42
+# 50 KB Mac↔Pi over real audio cable
+SSH_KEY=$HOME/.ssh/id_pi5 PAYLOAD_SIZE=51200 \
+  ./tools/tnc_loopback_test.sh
 ```
 
-This test runs two message phases across two channel conditions and prints `[ADPT]` lines:
-- Peer-reported advisory from CONNECT/CONNECT_ACK metrics.
-- Local rolling advisory with hysteresis behavior:
-  - fast downgrade path
-  - delayed upgrade path (hold timer before promotion)
+`tnc_loopback_test.sh` orchestrates two `ultra_tnc` instances (one
+local, one over SSH), pushes a binary payload through the TCP data
+port, and CRC-checks delivery.
 
-Useful flags:
-- `--hop-snr <dB>` sets phase-B SNR (default: `12`)
-- `--hop-channel <awgn|good|moderate|poor|flutter>` sets phase-B channel
+### Manual modulation / rate selection
 
-**Manual Modulation Selection:**
+`--mod`: `dqpsk` (default, 2 bits/sym), `d8psk` (3 bits/sym), `dbpsk`
+(1 bit/sym, most robust), `qam16`/`qam32`/`qam64` (coherent, stable
+paths only).
 
-The `--mod` flag allows testing specific modulations:
-- `dqpsk` - 4-phase differential (default, 2 bits/symbol)
-- `d8psk` - 8-phase differential (+50% throughput, 3 bits/symbol)
-- `dbpsk` - 2-phase differential (most robust, 1 bit/symbol)
-
-The `--rate` flag selects LDPC code rate:
-- `r1_4` - Most robust (required for fading channels)
-- `r1_2` - Balanced (default for AWGN)
-- `r2_3`, `r3_4`, `r5_6` - Higher throughput, needs better SNR
-
-**GUI Expert Settings:**
-
-To force specific modulation in the GUI application:
-1. Open **Settings** (gear icon)
-2. Go to **Expert** tab
-3. Set **Forced Modulation** to desired mode (D8PSK, DQPSK, etc.)
-4. Optionally set **Forced Code Rate** (R1/4 recommended for fading)
-
-When D8PSK is forced on a fading channel, the two-pass decoder automatically
-activates to improve reliability (uses embedded DQPSK grid for phase correction).
-
-**Test Tools:**
-| Tool | Purpose |
-|------|---------|
-| `cli_simulator` | Primary - full protocol with two-station interaction |
-| `test_waveform_simple` | Quick single-frame sanity checks |
+`--rate`: `r1_4`, `r1_2`, `r2_3`, `r3_4`, `r5_6`, `auto` (default;
+adaptive ladder).
 
 ---
 
 ## Radio Setup
 
 ### Requirements
-- SSB transceiver with 2.8+ kHz filter bandwidth
-- Audio interface (SignaLink, RigBlaster, or direct soundcard connection)
+
+- SSB transceiver with 2.8+ kHz filter bandwidth (or 500 Hz for
+  OFDM-NARROW)
+- Audio interface (SignaLink, RigBlaster, USB soundcard, or direct
+  cable)
 - PTT control (VOX, CAT, or hardware)
 
-### Audio Levels
-- TX: Adjust for clean signal without ALC compression
-- RX: Set for comfortable listening level (avoid clipping)
+### Audio levels
 
-### Recommended Operating Frequencies
+- TX: clean signal without ALC compression
+- RX: comfortable listening level, avoid clipping (peak < 0.9)
 
-ProjectUltra uses **~2.8 kHz bandwidth**. Operate in wideband digital segments,
-not narrow-band FT8/PSK31 areas.
+### Recommended frequencies (2.8 kHz BW, USB)
 
-| Band | Frequency (USB) | Notes |
-|------|-----------------|-------|
-| 80m | 3.590 MHz | Above narrow digital, below voice |
-| 40m | 7.102 MHz | Common for wideband digital |
-| 30m | 10.145 MHz | Check for WSPR at 10.140 |
-| 20m | 14.108 MHz | Above FT8 crowd, wideband digital |
-| 15m | 21.110 MHz | Above narrow digital segment |
-| 10m | 28.120 MHz | Plenty of room |
+| Band | Frequency  | Notes |
+|------|-----------:|-------|
+| 80m  | 3.590 MHz  | Above narrow digital, below voice |
+| 40m  | 7.102 MHz  | Common for wideband digital |
+| 30m  | 10.145 MHz | Check for WSPR at 10.140 |
+| 20m  | 14.108 MHz | Above FT8 crowd |
+| 15m  | 21.110 MHz | Above narrow digital segment |
+| 10m  | 28.120 MHz | Plenty of room |
 
-**Avoid:**
-- 14.070-14.095 MHz (FT8/PSK31)
-- Any .074 MHz frequencies (FT8)
-- 14.100 MHz (NCDXF beacons)
-
-**Best practice:** Listen for 10-15 seconds before transmitting. Use minimum
-power necessary. Be ready to QSY if causing interference.
+**Avoid:** 14.070–14.095 MHz (FT8/PSK31), any .074 MHz (FT8), 14.100
+MHz (NCDXF beacons). Listen 10–15 s before TX. Use minimum power
+necessary. Be ready to QSY.
 
 ---
 
-## Current Status
+## Status & Roadmap
 
-> **Note**: Core waveforms have been verified in loopback and acoustic testing.
-> On-air HF testing is in progress.
+### Solid today
 
-### What Is Solid Today
+- MC-DPSK baseline (5+ dB, ±50 Hz CFO).
+- OFDM-CHIRP DQPSK R1/4 → R3/4 with adaptive ladder.
+- OFDM-NARROW (500 Hz) for crowded bands or low-SNR conditions.
+- TNC subsystem: cross-platform, byte-exact end-to-end.
+- ARQ control path: hardened DISCONNECT, cumulative SACKs, no
+  timeout storms.
 
-| Waveform | SNR Range | CFO Tolerance | Status |
-|----------|-----------|---------------|--------|
-| **MC-DPSK** (8 carriers) | 5+ dB | ±50 Hz | Stable baseline |
-| **OFDM-CHIRP** (59 carriers) | 10+ dB | ±50 Hz | Stable baseline |
-| **OFDM-COX** (Schmidl-Cox sync) | 17+ dB | TBD | Working, OTA characterization ongoing |
+### Experimental / opportunistic
 
-Recent simulator release checks (v0.2.4-alpha):
-- OFDM disconnect control path (`R1/2` data mode, `SNR=20`, good fading): 10/10 seeds pass, 0 disconnect timeouts.
-- OFDM file transfer (2048 bytes, `R1/2`, `SNR=20`, good fading): 5/5 seeds pass, 0 retransmissions, 0 timeouts.
+- D8PSK on fading channels (variable run-to-run).
+- Coherent QPSK / 16QAM / 32QAM (stable-path only — NVIS, ground
+  wave, cable).
+- Higher rates (R2/3+) under deep fades.
 
-### Use With Caution (Experimental)
+### Active work
 
-- D8PSK in fading: data decode can be strong, but end-to-end reliability remains more variable than DQPSK baseline.
-- Coherent modes (QPSK/16QAM/32QAM): suitable for stable high-SNR paths, not the default for difficult HF fading.
-- High-rate operation (`R2/3+`) still depends on channel quality and control-path stability.
+- Pat / Winlink Express integration: client-side validation pending.
+- Long-running stability soak (multi-hour `ultra_tnc` uptime).
+- Continued OTA validation; expanding hardware-injection seed coverage.
 
-### Active Work
-
-- Control-path hardening under deep fades (ACK/SACK diversity and timeout tuning).
-- Advisory hysteresis is implemented and testable in simulator logs; next step is wiring controlled live `MODE_CHANGE` policy.
-- Continued OTA multi-station validation and log-driven fixes.
-
----
-
-## Research Roadmap
-
-The active engineering goal is documented in `docs/PROJECT_GOALS.md`: maximize
-reliable throughput first on the maintained OFDM/MC-DPSK paths, then add more
-advanced techniques only behind reproducible simulator and hardware gates.
-
-Speculative modulation research is not part of the production build. Historical
-notes for removed or deferred ideas live under `docs/archive/`; use them as
-background only.
-
-Near-term contributions should focus on:
-- improving measured AWGN/Good/Moderate/Poor transfer reliability,
-- reducing ACK/control overhead without timeout storms,
-- improving simulator and hardware-injection reproducibility,
-- adding meaningful tests for modem-critical code,
-- optimizing LDPC/DSP paths only when profiling proves leverage.
+The active engineering goal lives in `docs/PROJECT_GOALS.md`. Speculative
+research (removed waveforms, archived ideas) lives under
+`docs/archive/` — historical only, not part of the production build.
 
 ---
 
 ## Contributing
 
-Contributions welcome! Areas of interest:
+Contributions welcome. Easiest entry points:
 
-- On-air testing and performance reports
-- Documentation and tutorials
-- Bug fixes and optimizations
+- On-air testing reports (especially with `STATS` output included).
+- Pat / Winlink Express interop reports — what worked, what didn't.
+- Bug fixes and DSP optimizations (profile first; see
+  `docs/QUALITY_STRATEGY.md`).
+- Documentation.
 
 Please open an issue before submitting large PRs.
 
-### Help Wanted: Real HF Recordings
+### Help wanted: real HF recordings
 
-**We need real-world HF recordings to validate the modem beyond simulation.**
+Real ionospheric propagation has characteristics simulation can't
+capture. Even "failed" recordings are valuable.
 
-If you're a licensed amateur radio operator, you can help by recording your own
-transmissions via WebSDR. This is legitimate amateur experimentation under
-FCC Part 97 (advancement of the radio art).
-
-**How to record your own signal:**
-
-1. Pick a frequency from the recommended list above (e.g., 14.108 MHz USB)
-2. Open a WebSDR receiver (websdr.org or kiwisdr.com) and tune to that frequency
-3. Start recording on the WebSDR (or use Audacity to capture system audio)
-4. Transmit using ProjectUltra (see options below)
-5. Stop recording and save the file
-
-**What to transmit:**
-
-| Frame Type | Duration | Best For |
-|------------|----------|----------|
-| **PING probe** | ~1 second | Quick propagation test |
-| **Full CONNECT** | ~8 seconds | Complete handshake test |
-
-- **PING probe**: Short DPSK burst with "ULTR" marker. Fast way to check if your
-  signal is reaching the WebSDR. In GUI: click Connect, recording starts immediately
-  with the PING. Cancel after 2-3 seconds if you just want the probe.
-
-- **Full CONNECT**: Complete connection attempt with callsign exchange (3 codewords).
-  More comprehensive test of sync, LDPC decode, and protocol parsing.
-
-**What to submit:**
-- Recording file (48kHz mono WAV or F32 preferred)
-- Your callsign and transmit location
-- Band/frequency and time (UTC)
-- WebSDR location used (e.g., "Twente WebSDR, Netherlands")
-- Approximate path distance
-- Band conditions if known (S-meter readings)
-- Frame type transmitted (PING or CONNECT)
-
-**Why this helps:**
-Real ionospheric propagation has characteristics that simulation can't capture.
-Even "failed" recordings where the signal didn't decode are valuable - they
-help us improve sync detection and weak-signal performance.
-
-**How to submit:** Open a GitHub issue with the "Recording" label.
+To record your own signal: tune a WebSDR (websdr.org or kiwisdr.com)
+to your TX frequency, start recording, transmit using ProjectUltra,
+stop and save the file. Submit via GitHub issue with the "Recording"
+label, including: callsign, location, band/freq/UTC, WebSDR used, path
+distance, and S-meter readings if known.
 
 ---
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+MIT License. See [LICENSE](LICENSE).
 
 ---
 
 ## Acknowledgments
 
-- Community OTA testers, especially **KC3VPB**, for sharing real-station logs (`receiver_latest_gui.log` / `init_latest_gui.log`) that helped diagnose post-handshake sync rejects and buffer-overflow edge cases.
-- [Dear ImGui](https://github.com/ocornut/imgui) - GUI framework
-- [SDL2](https://libsdl.org/) - Audio and windowing
-- [FFTW3](https://www.fftw.org/) - Fast Fourier Transform (required for chirp detection)
-- [miniz](https://github.com/richgel999/miniz) - Compression
+- Community OTA testers, especially **KC3VPB**, for sharing real-station
+  logs that helped diagnose post-handshake sync rejects and buffer-
+  overflow edge cases.
+- [Dear ImGui](https://github.com/ocornut/imgui) — GUI framework.
+- [SDL2](https://libsdl.org/) — audio and windowing.
+- [FFTW3](https://www.fftw.org/) — Fast Fourier Transform.
+- [miniz](https://github.com/richgel999/miniz) — compression.
