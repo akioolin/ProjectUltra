@@ -10,6 +10,44 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-02: Promote NVIS config to OFDM_COX default (round 7)
+
+**What was changed:**
+The `OFDMNvisWaveform()` default constructor now uses 1024-FFT, 59
+carriers, MEDIUM CP — what used to be the explicit `createNvisMode()`
+"NVIS preset". The old 512-FFT/30-carrier default is gone.
+
+**Why:**
+The 1024/59 config is strictly better in every measurement:
+- Aligns with OFDM_CHIRP's geometry (which is also 1024/59 since
+  commit `549349f` "Make 1024 FFT / 59 carriers the default OFDM
+  config")
+- More data carriers → higher gross throughput
+- Narrower carrier spacing (46.875 vs 93.75 Hz) → measurable
+  frequency-selective fading robustness (per tonight's QAM fading
+  sweep, only the 1024/59 config decoded QAM16 R3/4 on Good fading
+  at SNR=25; 512/30 default failed at every SNR)
+- No backward-compat user — OFDM_COX was experimental and not
+  yet wired into the auto-rate ladder
+
+**Hardware verification:**
+5 KB OFDM_COX QAM16 R3/4 SNR=22 AWGN with no `--ofdm-config` flag:
+**2005 bps, 2 retx, 0 failed**. Matches the prior NVIS-preset numbers.
+
+**ctest:** 31/31 still passing.
+
+**File:** `src/waveform/ofdm_cox_waveform.cpp::OFDMNvisWaveform()`
+constructor — replaced the 512/30 init with the 1024/59 init.
+`createNvisMode()` factory still exists (now equivalent to default
+construction) for backward compat with any caller still using it.
+
+**The `--ofdm-config nvis` flag (round 6) is now a no-op** — both
+"default" and "nvis" produce the same 1024/59 config. The flag is
+kept for compatibility with existing test scripts; can be retired
+later.
+
+---
+
 ## 2026-05-02: OFDM_COX NVIS preset CLI wiring (round 6) — +25% throughput
 
 **What was added:**

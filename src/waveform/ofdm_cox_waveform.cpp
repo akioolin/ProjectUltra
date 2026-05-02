@@ -14,12 +14,21 @@ constexpr size_t LDPC_CODEWORD_BITS = 648;
 }
 
 OFDMNvisWaveform::OFDMNvisWaveform() {
-    // Default OFDM_COX configuration
-    config_.fft_size = 512;
-    config_.num_carriers = 30;
-    config_.modulation = Modulation::QPSK;
+    // Default OFDM_COX configuration matches OFDM_CHIRP geometry:
+    // 1024-FFT, 59 carriers, 46.875 Hz spacing, MEDIUM CP. This is what
+    // used to be the explicit "NVIS preset" — folded into the default
+    // because the old 512-FFT/30-carrier preset was strictly worse on
+    // every hardware test (lower throughput, no fading robustness, no
+    // backward-compat user). The legacy 512-FFT preset is still
+    // reachable via createLegacyMode() for regression testing.
+    config_.fft_size = 1024;
+    config_.num_carriers = 59;
+    config_.cp_mode = CyclicPrefixMode::MEDIUM;
+    config_.symbol_guard = 0;
+    config_.use_pilots = false;  // Caller toggles based on coherent vs differential
+    config_.modulation = Modulation::DQPSK;
     config_.code_rate = CodeRate::R1_2;
-    config_.use_pilots = true;  // Coherent mode needs pilots
+    config_.sample_rate = 48000;
     initComponents();
 }
 
