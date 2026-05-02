@@ -617,6 +617,179 @@ bool test_quick_brown_fox() {
 }
 
 // ============================================================================
+// Binary stream / TNC-facing API Tests
+// ============================================================================
+
+bool test_binary_fragment_reassembly_single_callback() {
+    TEST("Binary fragment reassembly emits one data callback");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+    config.mode_capabilities = ModeCapabilities::OFDM_COX;
+    config.preferred_mode = WaveformMode::OFDM_COX;
+
+    ProtocolEngine stationA(config);
+    ProtocolEngine stationB(config);
+
+    stationA.setLocalCallsign("W1ABC");
+    stationB.setLocalCallsign("K2DEF");
+
+    int data_callbacks = 0;
+    int message_callbacks = 0;
+    bool saw_more_data = false;
+    Bytes received;
+
+    stationB.setDataReceivedCallback([&](const Bytes& data, bool more_data) {
+        data_callbacks++;
+        saw_more_data = saw_more_data || more_data;
+        received = data;
+    });
+    stationB.setMessageReceivedCallback([&](const std::string&, const std::string&) {
+        message_callbacks++;
+    });
+
+    SimulatedChannel channel(stationA, stationB);
+
+    stationA.connect("K2DEF");
+    channel.run(50, 100);
+
+    if (!stationA.isConnected() || !stationB.isConnected()) FAIL("Connection not established");
+
+    Bytes payload(1024);
+    payload[0] = static_cast<uint8_t>(PayloadType::FILE_START);
+    payload[1] = static_cast<uint8_t>(PayloadType::FILE_DATA);
+    payload[2] = static_cast<uint8_t>(PayloadType::FILE_BLOCK);
+    for (size_t i = 3; i < payload.size(); ++i) {
+        payload[i] = static_cast<uint8_t>((i * 37 + 11) & 0xFF);
+    }
+
+    if (!stationA.sendBinary(payload)) FAIL("sendBinary() returned false");
+
+    for (int i = 0; i < 300 && data_callbacks == 0; ++i) {
+        channel.run(1, 50);
+    }
+    channel.run(60, 50);
+
+    if (data_callbacks != 1) {
+        std::cout << "(callbacks " << data_callbacks << ") ";
+        FAIL("Expected exactly one reassembled data callback");
+    }
+    if (saw_more_data) FAIL("Data callback should only receive complete payloads");
+    if (message_callbacks != 0) FAIL("Binary payload should not be delivered as text");
+    if (received != payload) FAIL("Reassembled binary payload mismatch");
+
+    PASS();
+    return true;
+}
+
+bool test_send_binary_roundtrip_arbitrary_bytes() {
+    TEST("sendBinary roundtrip preserves arbitrary bytes");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+
+    ProtocolEngine stationA(config);
+    ProtocolEngine stationB(config);
+
+    stationA.setLocalCallsign("W1ABC");
+    stationB.setLocalCallsign("K2DEF");
+
+    Bytes received;
+    stationB.setDataReceivedCallback([&](const Bytes& data, bool more_data) {
+        if (!more_data) {
+            received = data;
+        }
+    });
+
+    SimulatedChannel channel(stationA, stationB);
+
+    stationA.connect("K2DEF");
+    channel.run(50, 100);
+
+    if (!stationA.isConnected() || !stationB.isConnected()) FAIL("Connection not established");
+
+    Bytes payload;
+    payload.reserve(260);
+    payload.push_back(static_cast<uint8_t>(PayloadType::FILE_START));
+    payload.push_back(0x00);
+    payload.push_back(0xFF);
+    payload.push_back(static_cast<uint8_t>(PayloadType::FILE_DATA));
+    payload.push_back(static_cast<uint8_t>(PayloadType::FILE_BLOCK));
+    for (int i = 0; i < 255; ++i) {
+        payload.push_back(static_cast<uint8_t>(i));
+    }
+
+    if (!stationA.sendBinary(payload)) FAIL("sendBinary() returned false");
+
+    for (int i = 0; i < 240 && received.empty(); ++i) {
+        channel.run(1, 50);
+    }
+
+    if (received != payload) FAIL("Binary roundtrip payload mismatch");
+
+    PASS();
+    return true;
+}
+
+bool test_tx_backlog_bytes_snapshot() {
+    TEST("TX backlog byte snapshot");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+    config.mode_capabilities = ModeCapabilities::OFDM_COX;
+    config.preferred_mode = WaveformMode::OFDM_COX;
+
+    ProtocolEngine stationA(config);
+    ProtocolEngine stationB(config);
+
+    stationA.setLocalCallsign("W1ABC");
+    stationB.setLocalCallsign("K2DEF");
+
+    Bytes received;
+    stationB.setDataReceivedCallback([&](const Bytes& data, bool more_data) {
+        if (!more_data) {
+            received = data;
+        }
+    });
+
+    SimulatedChannel channel(stationA, stationB);
+
+    stationA.connect("K2DEF");
+    channel.run(50, 100);
+
+    if (!stationA.isConnected() || !stationB.isConnected()) FAIL("Connection not established");
+    if (stationA.getTxBacklogBytes() != 0) FAIL("Idle backlog should be zero");
+
+    const size_t capacity = v2::getFixedFramePayloadCapacity(
+        stationA.getDataCodeRate(), stationA.getForcedFrameCodewords());
+    if (capacity == 0) FAIL("Invalid fixed-frame capacity");
+
+    Bytes payload(capacity * 5 + 13);
+    for (size_t i = 0; i < payload.size(); ++i) {
+        payload[i] = static_cast<uint8_t>((i * 19 + 7) & 0xFF);
+    }
+
+    if (!stationA.sendBinary(payload)) FAIL("sendBinary() returned false");
+
+    const size_t backlog_after_queue = stationA.getTxBacklogBytes();
+    if (backlog_after_queue != payload.size()) {
+        std::cout << "(expected " << payload.size()
+                  << ", got " << backlog_after_queue << ") ";
+        FAIL("Queued backlog should match payload bytes");
+    }
+
+    for (int i = 0; i < 360 && (received.empty() || stationA.getTxBacklogBytes() != 0); ++i) {
+        channel.run(1, 50);
+    }
+
+    if (received != payload) FAIL("Backlog test payload not received");
+    if (stationA.getTxBacklogBytes() != 0) FAIL("Backlog should return to zero after ACK drain");
+
+    PASS();
+    return true;
+}
+
+// ============================================================================
 // Protocol Rate Adaptation Tests
 // ============================================================================
 
@@ -948,6 +1121,11 @@ int main() {
 
     std::cout << "\nRadio Test Messages:\n";
     test_quick_brown_fox();
+
+    std::cout << "\nBinary Stream / TNC API Tests:\n";
+    test_binary_fragment_reassembly_single_callback();
+    test_send_binary_roundtrip_arbitrary_bytes();
+    test_tx_backlog_bytes_snapshot();
 
     std::cout << "\nProtocol Rate Adaptation Tests:\n";
     test_protocol_rate_upgrade();

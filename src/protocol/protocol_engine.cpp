@@ -33,6 +33,12 @@ ProtocolEngine::ProtocolEngine(const ConnectionConfig& config)
         }
     });
 
+    connection_.setDataReceivedCallback([this](const Bytes& data, bool more_data) {
+        if (on_data_received_) {
+            on_data_received_(data, more_data);
+        }
+    });
+
     connection_.setIncomingCallCallback([this](const std::string& from) {
         if (on_incoming_call_) {
             on_incoming_call_(from);
@@ -96,6 +102,11 @@ void ProtocolEngine::setIncomingCallCallback(IncomingCallCallback cb) {
     on_incoming_call_ = std::move(cb);
 }
 
+void ProtocolEngine::setDataReceivedCallback(DataReceivedCallback cb) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    on_data_received_ = std::move(cb);
+}
+
 bool ProtocolEngine::connect(const std::string& remote_call) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     bool result = connection_.connect(remote_call);
@@ -136,6 +147,11 @@ bool ProtocolEngine::sendMessage(const std::string& text) {
     return connection_.sendMessage(text);
 }
 
+bool ProtocolEngine::sendBinary(const Bytes& data) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    return connection_.sendBinary(data);
+}
+
 bool ProtocolEngine::sendMessages(const std::vector<std::string>& texts) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.sendMessages(texts);
@@ -144,6 +160,11 @@ bool ProtocolEngine::sendMessages(const std::vector<std::string>& texts) {
 bool ProtocolEngine::isReadyToSend() const {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.isReadyToSend();
+}
+
+size_t ProtocolEngine::getTxBacklogBytes() const {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    return connection_.getTxBacklogBytes();
 }
 
 // --- File Transfer ---

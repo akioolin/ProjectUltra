@@ -10,6 +10,87 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-02: TNC Phase 3a — ProtocolEngine surgery for TNC bridge
+
+**What was added/fixed:**
+Four protocol-layer changes to enable a future `ModemAdapter` bridge
+(Phase 3b) to drive `ProtocolEngine` from the TNC reactor without
+needing further surgery:
+
+1. **Duplicate-data-callback fix** (real bug for raw-binary consumers):
+   `connection_handlers.cpp:425+` previously fired
+   `DataReceivedCallback` once per fragment AND once for the
+   reassembled payload — would duplicate bytes on a TCP data stream.
+   Fixed: intermediate fragments accumulate, callback fires once with
+   complete payload. Codex repo-grepped for existing consumers and
+   found none (`cli_simulator`, GUI, `modem_engine` use
+   message/file/raw-modem-frame callbacks, not the
+   `Connection::DataReceivedCallback`).
+
+2. **`sendBinary(Bytes)` API**:
+   - `Connection::sendBinary(Bytes)` — same SR-ARQ path as
+     `sendMessage`, but emits v2 `DATA_START/CONT/END` frame types
+     for unframed binary payloads (vs the text-marked DATA frames
+     used by `sendMessage`).
+   - `ProtocolEngine::sendBinary(Bytes)` proxy.
+   - Refactored `Connection::sendMessage` through a shared
+     `sendPayload()` helper. Existing message + file paths
+     unchanged.
+
+3. **`getTxBacklogBytes()` snapshot API**:
+   - `Connection::getTxBacklogBytes()` returns total un-ACKed
+     payload bytes (in-flight frames + pending fragments).
+   - `SelectiveRepeatARQ::getTxInFlightPayloadBytes()` for the
+     ARQ-window contribution.
+   - `ProtocolEngine::getTxBacklogBytes()` proxy with mutex.
+
+4. **`ProtocolEngine` data-received-callback proxy**:
+   - `setDataReceivedCallback(...)` — wraps
+     `Connection::setDataReceivedCallback`. Stored under the engine
+     mutex; invoked from inside `onRxData()` while the engine mutex
+     is held (matches existing callback patterns; no re-lock inside
+     the lambda).
+
+**Tests added:**
+- `tests/test_protocol.cpp`: 3 new cases — binary fragment reassembly
+  with single callback, arbitrary binary roundtrip via `sendBinary`,
+  TX backlog snapshot accuracy. `test_protocol` internal count went
+  19 → 22; CTest target count unchanged at 33.
+
+**ctest:** 33/33 still pass.
+
+**File summary:**
+- `src/protocol/connection.{cpp,hpp}` — `sendBinary`,
+  `getTxBacklogBytes`, refactored `sendMessage`
+- `src/protocol/connection_handlers.cpp` — duplicate-callback fix
+- `src/protocol/selective_repeat_arq.{cpp,hpp}` — typed DATA send
+  helpers + RX frame-type tracking + payload-bytes snapshot
+- `src/protocol/protocol_engine.{cpp,hpp}` — proxy methods
+- `tests/test_protocol.cpp` — 3 new cases
+
+**Wire format:** unchanged. Binary payloads use existing v2
+`DATA_START/CONT/END` frame types. Pi side doesn't need a rebuild
+to receive binary from a Mac running Phase 3a. (Concretely: the
+500KB auto-rate sweep currently mid-flight on the cable continues
+unaffected; Mac side is running the new binary, Pi side the old —
+they interop because the wire is unchanged.)
+
+**Known regressions risks (all assessed by Codex):**
+- The duplicate-callback fix is the highest-risk change, but no
+  existing consumer of `setDataReceivedCallback` was found. File
+  transfer uses `FileTransferController` callbacks (different
+  surface). Message TX uses `MessageReceivedCallback` (different
+  surface). Codex marked this as the rollback candidate if hardware
+  regression is observed.
+- `sendBinary` and `getTxBacklogBytes` are additive — no
+  behavioral change unless called.
+
+**Next phase 3b:** create the `TNCBridge` that implements `ModemAdapter`
+on top of the new ProtocolEngine APIs, plus the `ultra_tnc` binary
+(audio + ProtocolEngine + bridge + TNCServer in one process).
+
+---
+
 ## 2026-05-02: TNC Phase 2 — TCP reactor + integration tests
 
 **Goal:**

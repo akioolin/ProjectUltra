@@ -88,6 +88,7 @@ void SelectiveRepeatARQ::setCodeRate(CodeRate rate) {
         slot.received = false;
         slot.payload.clear();
         slot.flags = 0;
+        slot.type = v2::FrameType::DATA;
         discarded_rx++;
     }
 
@@ -126,6 +127,12 @@ bool SelectiveRepeatARQ::sendData(const std::string& text) {
 }
 
 bool SelectiveRepeatARQ::sendDataWithFlags(const Bytes& data, uint8_t flags) {
+    return sendDataWithTypeAndFlags(data, v2::FrameType::DATA, flags);
+}
+
+bool SelectiveRepeatARQ::sendDataWithTypeAndFlags(const Bytes& data,
+                                                  v2::FrameType frame_type,
+                                                  uint8_t flags) {
     if (!isReadyToSend()) {
         LOG_MODEM(WARN, "SR-ARQ: Window full, cannot send");
         return false;
@@ -140,6 +147,7 @@ bool SelectiveRepeatARQ::sendDataWithFlags(const Bytes& data, uint8_t flags) {
     size_t slot = seqToSlot(seq);
 
     auto frame = v2::DataFrame::makeData(local_call_, remote_call_, seq, data, code_rate_);
+    frame.type = frame_type;
     frame.flags = dataFrameFlags(flags);
 
     tx_window_[slot].active = true;
@@ -165,8 +173,8 @@ bool SelectiveRepeatARQ::sendDataWithFlags(const Bytes& data, uint8_t flags) {
     tx_next_seq_ = (tx_next_seq_ + 1) & 0xFFFF;
     tx_in_flight_++;
 
-    LOG_MODEM(DEBUG, "SR-ARQ: Sent DATA seq=%d slot=%zu, window=[%d,%d)",
-              seq, slot, tx_base_seq_, tx_next_seq_);
+    LOG_MODEM(DEBUG, "SR-ARQ: Sent %s seq=%d slot=%zu, window=[%d,%d)",
+              v2::frameTypeToString(frame_type), seq, slot, tx_base_seq_, tx_next_seq_);
 
     transmitData(tx_window_[slot].frame_data);
 
@@ -174,6 +182,12 @@ bool SelectiveRepeatARQ::sendDataWithFlags(const Bytes& data, uint8_t flags) {
 }
 
 bool SelectiveRepeatARQ::sendFixedDataWithFlags(const Bytes& data, uint8_t flags) {
+    return sendFixedDataWithTypeAndFlags(data, v2::FrameType::DATA, flags);
+}
+
+bool SelectiveRepeatARQ::sendFixedDataWithTypeAndFlags(const Bytes& data,
+                                                       v2::FrameType frame_type,
+                                                       uint8_t flags) {
     if (!isReadyToSend()) {
         LOG_MODEM(WARN, "SR-ARQ: Window full, cannot send fixed frame");
         return false;
@@ -189,6 +203,7 @@ bool SelectiveRepeatARQ::sendFixedDataWithFlags(const Bytes& data, uint8_t flags
 
     auto frame = v2::makeFixedDataFrame(local_call_, remote_call_, seq, data,
                                         code_rate_, fixed_frame_codewords_);
+    frame.type = frame_type;
     frame.flags = dataFrameFlags(flags);
 
     tx_window_[slot].active = true;
@@ -211,8 +226,9 @@ bool SelectiveRepeatARQ::sendFixedDataWithFlags(const Bytes& data, uint8_t flags
     tx_next_seq_ = (tx_next_seq_ + 1) & 0xFFFF;
     tx_in_flight_++;
 
-    LOG_MODEM(DEBUG, "SR-ARQ: Sent fixed DATA seq=%d slot=%zu cw=%d, window=[%d,%d)",
-              seq, slot, fixed_frame_codewords_, tx_base_seq_, tx_next_seq_);
+    LOG_MODEM(DEBUG, "SR-ARQ: Sent fixed %s seq=%d slot=%zu cw=%d, window=[%d,%d)",
+              v2::frameTypeToString(frame_type), seq, slot, fixed_frame_codewords_,
+              tx_base_seq_, tx_next_seq_);
 
     transmitData(tx_window_[slot].frame_data);
     return true;
@@ -268,6 +284,21 @@ bool SelectiveRepeatARQ::isReadyToSend() const {
 size_t SelectiveRepeatARQ::getAvailableSlots() const {
     size_t window = config_.window_size;
     return (tx_in_flight_ < window) ? (window - tx_in_flight_) : 0;
+}
+
+size_t SelectiveRepeatARQ::getTxInFlightBytes() const {
+    size_t bytes = 0;
+    for (const auto& slot : tx_window_) {
+        if (!slot.active || slot.acked) {
+            continue;
+        }
+
+        auto frame = v2::DataFrame::deserialize(slot.frame_data);
+        if (frame) {
+            bytes += frame->payload.size();
+        }
+    }
+    return bytes;
 }
 
 void SelectiveRepeatARQ::onFrameReceived(const Bytes& frame_data) {
@@ -342,6 +373,7 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
             rx_window_[slot].seq = seq;
             rx_window_[slot].payload = frame.payload;
             rx_window_[slot].flags = frame.flags;
+            rx_window_[slot].type = frame.type;
             stats_.frames_received++;
             new_frame = true;
 
@@ -765,6 +797,7 @@ void SelectiveRepeatARQ::advanceRXWindow() {
         // call, which is the gap-filling frame — not the frame being delivered.
         last_rx_flags_ = rx_window_[slot].flags;
         last_rx_more_data_ = (rx_window_[slot].flags & v2::Flags::MORE_FRAG) != 0;
+        last_rx_frame_type_ = rx_window_[slot].type;
 
         if (on_data_received_) {
             on_data_received_(rx_window_[slot].payload);
@@ -772,6 +805,8 @@ void SelectiveRepeatARQ::advanceRXWindow() {
 
         rx_window_[slot].received = false;
         rx_window_[slot].payload.clear();
+        rx_window_[slot].flags = 0;
+        rx_window_[slot].type = v2::FrameType::DATA;
         rx_base_seq_ = (rx_base_seq_ + 1) & 0xFFFF;
     }
 }
@@ -999,11 +1034,14 @@ void SelectiveRepeatARQ::reset() {
     for (auto& slot : rx_window_) {
         slot.received = false;
         slot.payload.clear();
+        slot.flags = 0;
+        slot.type = v2::FrameType::DATA;
     }
     rx_base_seq_ = 0;
 
     last_rx_more_data_ = false;
     last_rx_flags_ = 0;
+    last_rx_frame_type_ = v2::FrameType::DATA;
 
     sack_pending_ = false;
     sack_timer_ms_ = 0;

@@ -422,18 +422,19 @@ void Connection::requestModeChange(Modulation new_mod, CodeRate new_rate,
 // DATA PAYLOAD HANDLING
 // =============================================================================
 
-void Connection::handleDataPayload(const Bytes& payload, bool more_data) {
+void Connection::handleDataPayload(const Bytes& payload, bool more_data, v2::FrameType frame_type) {
     if (payload.empty()) {
         return;
     }
 
-    if (file_transfer_.processPayload(payload, more_data)) {
+    const bool binary_payload =
+        frame_type == v2::FrameType::DATA_START ||
+        frame_type == v2::FrameType::DATA_CONT ||
+        frame_type == v2::FrameType::DATA_END;
+
+    if (!binary_payload && file_transfer_.processPayload(payload, more_data)) {
         LOG_MODEM(DEBUG, "Connection: Processed file transfer payload (%zu bytes)",
                   payload.size());
-
-        if (on_data_received_) {
-            on_data_received_(payload, more_data);
-        }
         return;
     }
 
@@ -442,10 +443,6 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data) {
         rx_reassembly_buffer_.insert(rx_reassembly_buffer_.end(), payload.begin(), payload.end());
         LOG_MODEM(DEBUG, "Connection: Accumulated fragment (%zu bytes, buffer now %zu bytes)",
                   payload.size(), rx_reassembly_buffer_.size());
-
-        if (on_data_received_) {
-            on_data_received_(payload, true);
-        }
         return;
     }
 
@@ -459,8 +456,8 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data) {
                                 rx_reassembly_buffer_.end());
         complete_payload.insert(complete_payload.end(), payload.begin(), payload.end());
         rx_reassembly_buffer_.clear();
-        LOG_MODEM(INFO, "Connection: Reassembled %zu-byte message from fragments",
-                  complete_payload.size());
+        LOG_MODEM(INFO, "Connection: Reassembled %zu-byte %s from fragments",
+                  complete_payload.size(), binary_payload ? "binary payload" : "message");
     } else {
         // Single-frame message (backwards compatible)
         complete_payload = payload;
@@ -468,8 +465,17 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data) {
 
     // Strip TEXT_MESSAGE type prefix if present
     size_t start = 0;
-    if (!complete_payload.empty() && complete_payload[0] == static_cast<uint8_t>(PayloadType::TEXT_MESSAGE)) {
+    if (!binary_payload &&
+        !complete_payload.empty() &&
+        complete_payload[0] == static_cast<uint8_t>(PayloadType::TEXT_MESSAGE)) {
         start = 1;
+    }
+
+    if (binary_payload) {
+        if (on_data_received_) {
+            on_data_received_(complete_payload, false);
+        }
+        return;
     }
 
     std::string text;

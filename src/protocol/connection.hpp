@@ -104,8 +104,10 @@ public:
     // --- Data Transfer ---
 
     bool sendMessage(const std::string& text);
+    bool sendBinary(const Bytes& data);
     bool sendMessages(const std::vector<std::string>& texts);  // Batch: burst-interleaved
     bool isReadyToSend() const;
+    size_t getTxBacklogBytes() const;
 
     // --- File Transfer ---
 
@@ -279,6 +281,7 @@ private:
     // Message fragmentation (TX) - splits long messages across multiple ARQ frames
     std::vector<Bytes> pending_tx_fragments_;
     std::vector<uint8_t> pending_tx_fragment_flags_;  // Per-fragment flags (for sendMessages batch)
+    std::vector<v2::FrameType> pending_tx_fragment_types_;  // DATA_START/CONT/END for binary streams
     size_t next_fragment_idx_ = 0;
     size_t acked_fragment_count_ = 0;  // Actual ACKs received (vs next_fragment_idx_ = submitted)
 
@@ -409,7 +412,8 @@ private:
     void handleDisconnect(const v2::ControlFrame& frame, const std::string& src_call);
     void handleDisconnectFrame(const v2::ConnectFrame& frame, const std::string& src_call);
     void handleModeChange(const v2::ControlFrame& frame, const std::string& src_call);
-    void handleDataPayload(const Bytes& payload, bool more_data);
+    bool sendPayload(const Bytes& data, bool binary_payload);
+    void handleDataPayload(const Bytes& payload, bool more_data, v2::FrameType frame_type);
 
     void transmitFrame(const Bytes& frame_data);
     void enterConnected();

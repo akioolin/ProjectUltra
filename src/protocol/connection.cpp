@@ -138,7 +138,7 @@ Connection::Connection(const ConnectionConfig& config)
     });
 
     arq_.setDataReceivedCallback([this](const Bytes& data) {
-        handleDataPayload(data, arq_.lastRxHadMoreData());
+        handleDataPayload(data, arq_.lastRxHadMoreData(), arq_.lastRxFrameType());
     });
 
     arq_.setSendCompleteCallback([this](bool success) {
@@ -160,6 +160,7 @@ Connection::Connection(const ConnectionConfig& config)
                           pending_tx_fragments_.size() - next_fragment_idx_);
                 pending_tx_fragments_.clear();
                 pending_tx_fragment_flags_.clear();
+                pending_tx_fragment_types_.clear();
                 next_fragment_idx_ = 0;
                 acked_fragment_count_ = 0;
                 if (on_message_sent_) {
@@ -183,6 +184,7 @@ Connection::Connection(const ConnectionConfig& config)
                               pending_tx_fragments_.size());
                     pending_tx_fragments_.clear();
                     pending_tx_fragment_flags_.clear();
+                    pending_tx_fragment_types_.clear();
                     next_fragment_idx_ = 0;
                     acked_fragment_count_ = 0;
                     if (on_message_sent_) {
@@ -386,6 +388,7 @@ void Connection::abortTxNow() {
     bool had_pending_message = !pending_tx_fragments_.empty();
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
+    pending_tx_fragment_types_.clear();
     next_fragment_idx_ = 0;
     acked_fragment_count_ = 0;
     burst_mode_active_ = false;
@@ -461,6 +464,15 @@ void Connection::setForcedFrameCodewords(int cw_count) {
 // =============================================================================
 
 bool Connection::sendMessage(const std::string& text) {
+    Bytes data(text.begin(), text.end());
+    return sendPayload(data, false);
+}
+
+bool Connection::sendBinary(const Bytes& data) {
+    return sendPayload(data, true);
+}
+
+bool Connection::sendPayload(const Bytes& data, bool binary_payload) {
     if (state_ != ConnectionState::CONNECTED) {
         LOG_MODEM(WARN, "Connection: Cannot send, not connected");
         return false;
@@ -470,31 +482,43 @@ bool Connection::sendMessage(const std::string& text) {
     // OFDM uses fixed 4-CW frames with a hard capacity limit that requires fragmentation.
     bool is_ofdm = isOFDMMode(negotiated_mode_);
 
-    Bytes data(text.begin(), text.end());
-
     if (!is_ofdm) {
+        if (binary_payload) {
+            return arq_.sendDataWithTypeAndFlags(data, v2::FrameType::DATA_END, v2::Flags::NONE);
+        }
         return arq_.sendData(data);
     }
 
     if (data.size() <= v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_)) {
         // Single frame - MC-DPSK can handle any size, OFDM fits in one frame
+        if (binary_payload) {
+            return arq_.sendFixedDataWithTypeAndFlags(data, v2::FrameType::DATA_END, v2::Flags::NONE);
+        }
         return arq_.sendFixedDataWithFlags(data, v2::Flags::NONE);
     }
 
     size_t capacity = v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
 
     // Fragment the message into chunks that fit in one frame each
-    LOG_MODEM(INFO, "Connection: Fragmenting %zu byte message into %zu-byte chunks",
-              data.size(), capacity);
+    LOG_MODEM(INFO, "Connection: Fragmenting %zu byte %s into %zu-byte chunks",
+              data.size(), binary_payload ? "binary payload" : "message", capacity);
 
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
+    pending_tx_fragment_types_.clear();
     next_fragment_idx_ = 0;
     acked_fragment_count_ = 0;
 
     for (size_t offset = 0; offset < data.size(); offset += capacity) {
         size_t chunk_size = std::min(capacity, data.size() - offset);
         pending_tx_fragments_.emplace_back(data.begin() + offset, data.begin() + offset + chunk_size);
+        if (binary_payload) {
+            const bool first = (offset == 0);
+            const bool last = (offset + chunk_size >= data.size());
+            pending_tx_fragment_types_.push_back(
+                first ? v2::FrameType::DATA_START :
+                (last ? v2::FrameType::DATA_END : v2::FrameType::DATA_CONT));
+        }
     }
 
     LOG_MODEM(INFO, "Connection: Split into %zu fragments", pending_tx_fragments_.size());
@@ -515,6 +539,7 @@ bool Connection::sendMessages(const std::vector<std::string>& texts) {
     // Pre-fragment all messages into a flat list of frame payloads with flags
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
+    pending_tx_fragment_types_.clear();
     next_fragment_idx_ = 0;
     acked_fragment_count_ = 0;
 
@@ -549,6 +574,22 @@ bool Connection::sendMessages(const std::vector<std::string>& texts) {
 bool Connection::isReadyToSend() const {
     return state_ == ConnectionState::CONNECTED && arq_.isReadyToSend() &&
            !file_transfer_.isBusy();
+}
+
+size_t Connection::getTxBacklogBytes() const {
+    size_t bytes = arq_.getTxInFlightBytes();
+
+    if (next_fragment_idx_ < pending_tx_fragments_.size()) {
+        for (size_t i = next_fragment_idx_; i < pending_tx_fragments_.size(); ++i) {
+            bytes += pending_tx_fragments_[i].size();
+        }
+    }
+
+    if (file_transfer_.getState() == FileTransferState::SENDING) {
+        bytes += file_transfer_.remainingTxBytes();
+    }
+
+    return bytes;
 }
 
 // =============================================================================
@@ -681,14 +722,19 @@ void Connection::sendNextFragment() {
             bool is_last = (next_fragment_idx_ + 1 == pending_tx_fragments_.size());
             flags = is_last ? v2::Flags::NONE : v2::Flags::MORE_FRAG;
         }
+        v2::FrameType frame_type = v2::FrameType::DATA;
+        if (next_fragment_idx_ < pending_tx_fragment_types_.size()) {
+            frame_type = pending_tx_fragment_types_[next_fragment_idx_];
+        }
 
-        LOG_MODEM(DEBUG, "Connection: Sending fragment %zu/%zu (%zu bytes, flags=0x%02X)",
-                  next_fragment_idx_ + 1, pending_tx_fragments_.size(), chunk.size(), flags);
+        LOG_MODEM(DEBUG, "Connection: Sending fragment %zu/%zu (%zu bytes, type=%s, flags=0x%02X)",
+                  next_fragment_idx_ + 1, pending_tx_fragments_.size(), chunk.size(),
+                  v2::frameTypeToString(frame_type), flags);
 
         if (is_ofdm) {
-            arq_.sendFixedDataWithFlags(chunk, flags);
+            arq_.sendFixedDataWithTypeAndFlags(chunk, frame_type, flags);
         } else {
-            arq_.sendDataWithFlags(chunk, flags);
+            arq_.sendDataWithTypeAndFlags(chunk, frame_type, flags);
         }
         next_fragment_idx_++;
     }
@@ -1549,6 +1595,7 @@ void Connection::enterDisconnected(const std::string& reason) {
     file_transfer_.cancel();
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
+    pending_tx_fragment_types_.clear();
     next_fragment_idx_ = 0;
     acked_fragment_count_ = 0;
     rx_reassembly_buffer_.clear();
@@ -1715,6 +1762,7 @@ void Connection::reset() {
     file_transfer_.cancel();
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
+    pending_tx_fragment_types_.clear();
     next_fragment_idx_ = 0;
     acked_fragment_count_ = 0;
     rx_reassembly_buffer_.clear();

@@ -50,6 +50,7 @@ public:
     using MessageReceivedCallback = std::function<void(const std::string& from, const std::string& text)>;
     using ConnectionChangedCallback = std::function<void(ConnectionState state, const std::string& remote)>;
     using IncomingCallCallback = std::function<void(const std::string& from)>;
+    using DataReceivedCallback = Connection::DataReceivedCallback;
 
     using FileProgressCallback = Connection::FileProgressCallback;
     using FileReceivedCallback = Connection::FileReceivedCallback;
@@ -74,6 +75,7 @@ public:
     void setMessageReceivedCallback(MessageReceivedCallback cb);
     void setConnectionChangedCallback(ConnectionChangedCallback cb);
     void setIncomingCallCallback(IncomingCallCallback cb);
+    void setDataReceivedCallback(DataReceivedCallback cb);
 
     // --- Connection Control ---
 
@@ -86,8 +88,10 @@ public:
     // --- Data Transfer ---
 
     bool sendMessage(const std::string& text);
+    bool sendBinary(const Bytes& data);
     bool sendMessages(const std::vector<std::string>& texts);  // Batch: burst-interleaved
     bool isReadyToSend() const;
+    size_t getTxBacklogBytes() const;
 
     // --- File Transfer ---
 
@@ -188,6 +192,7 @@ private:
     MessageReceivedCallback on_message_received_;
     ConnectionChangedCallback on_connection_changed_;
     IncomingCallCallback on_incoming_call_;
+    DataReceivedCallback on_data_received_;
 
     mutable ProtocolEngineMutex mutex_;
 

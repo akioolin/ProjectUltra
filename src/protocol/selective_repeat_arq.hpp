@@ -44,14 +44,18 @@ public:
     bool sendData(const Bytes& data) override;
     bool sendData(const std::string& text) override;
     bool sendDataWithFlags(const Bytes& data, uint8_t flags) override;
+    bool sendDataWithTypeAndFlags(const Bytes& data, v2::FrameType frame_type, uint8_t flags);
     bool sendFixedDataWithFlags(const Bytes& data, uint8_t flags);
+    bool sendFixedDataWithTypeAndFlags(const Bytes& data, v2::FrameType frame_type, uint8_t flags);
     bool sendVariableDataWithFlags(const Bytes& data, uint8_t flags);
 
     bool isReadyToSend() const override;
     size_t getAvailableSlots() const override;
+    size_t getTxInFlightBytes() const;
 
     bool lastRxHadMoreData() const override { return last_rx_more_data_; }
     uint8_t lastRxFlags() const override { return last_rx_flags_; }
+    v2::FrameType lastRxFrameType() const { return last_rx_frame_type_; }
 
     void onFrameReceived(const Bytes& frame_data) override;
 
@@ -159,6 +163,7 @@ private:
         uint16_t seq = 0;           // Sequence number
         Bytes payload;              // Received payload
         uint8_t flags = 0;          // Frame flags
+        v2::FrameType type = v2::FrameType::DATA;
     };
 
     // Maximum window size. Control frames already carry a 32-bit SACK bitmap;
@@ -185,6 +190,7 @@ private:
     uint16_t rx_base_seq_ = 0;      // Next expected sequence
     bool last_rx_more_data_ = false;
     uint8_t last_rx_flags_ = 0;
+    v2::FrameType last_rx_frame_type_ = v2::FrameType::DATA;
 
     // Delayed SACK for half-duplex (wait for burst to complete)
     bool sack_pending_ = false;     // SACK waiting to be sent
