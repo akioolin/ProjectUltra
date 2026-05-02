@@ -542,12 +542,32 @@ int main() {
     });
 
     runner.group("Data Flow");
-    runner.run("data input while CONNECTED calls modem sendBinary", [] {
+    runner.run("data input while CONNECTED calls modem sendBinary after quiet timer", [] {
         Harness h;
         enterConnected(h);
         h.session.handleDataBytes({1, 2, 3});
+        expect(h.modem.send_binary_calls.empty(), "sendBinary should not fire immediately");
+        h.session.tick(250);  // exceed kDataTxFlushQuietMs (200)
         expect(h.modem.send_binary_calls == std::vector<std::vector<uint8_t>>{{1, 2, 3}},
-               "sendBinary bytes mismatch");
+               "sendBinary bytes mismatch after flush");
+    });
+    runner.run("multiple TCP chunks coalesce into one sendBinary", [] {
+        Harness h;
+        enterConnected(h);
+        // TCP delivers 50KB in many chunks; TNC must batch into one
+        // sendBinary call so Connection::sendPayload doesn't strand
+        // mid-transfer fragments.
+        h.session.handleDataBytes({1, 2, 3});
+        h.session.tick(50);
+        h.session.handleDataBytes({4, 5, 6});
+        h.session.tick(50);
+        h.session.handleDataBytes({7, 8, 9});
+        expect(h.modem.send_binary_calls.empty(), "should batch, not fire per chunk");
+        h.session.tick(250);
+        expect(h.modem.send_binary_calls.size() == 1, "expected exactly one batched sendBinary");
+        expect(h.modem.send_binary_calls.front() ==
+                   std::vector<uint8_t>{1, 2, 3, 4, 5, 6, 7, 8, 9},
+               "batched bytes mismatch");
     });
     runner.run("data input while READY is discarded", [] {
         Harness h;

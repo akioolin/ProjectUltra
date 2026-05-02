@@ -241,8 +241,14 @@ bool TNCSession::handleControlLine(std::string_view line) {
 }
 
 void TNCSession::handleDataBytes(const std::vector<uint8_t>& bytes) {
-    if (state_ == State::CONNECTED && !bytes.empty()) {
-        modem_.sendBinary(bytes);
+    if (state_ != State::CONNECTED || bytes.empty()) {
+        return;
+    }
+    data_tx_buffer_.insert(data_tx_buffer_.end(), bytes.begin(), bytes.end());
+    data_tx_quiet_ms_ = 0;
+    if (data_tx_buffer_.size() >= kDataTxFlushSizeBytes) {
+        modem_.sendBinary(data_tx_buffer_);
+        data_tx_buffer_.clear();
     }
 }
 
@@ -276,6 +282,8 @@ void TNCSession::onModemDisconnected() {
     if (state_ == State::CONNECTED || state_ == State::CONNECTING || state_ == State::DISCONNECTING) {
         pending_inbound_ = false;
         state_ = isReadyAfterDisconnect(mycall_) ? State::READY : State::IDLE;
+        data_tx_buffer_.clear();
+        data_tx_quiet_ms_ = 0;
         emitDisconnected();
     }
 }
@@ -346,6 +354,15 @@ void TNCSession::tick(uint32_t elapsed_ms) {
         const int bytes = pending_buffer_level_;
         pending_buffer_level_ = -1;
         emitBuffer(bytes);
+    }
+
+    if (state_ == State::CONNECTED && !data_tx_buffer_.empty()) {
+        data_tx_quiet_ms_ += elapsed_ms;
+        if (data_tx_quiet_ms_ >= kDataTxFlushQuietMs) {
+            modem_.sendBinary(data_tx_buffer_);
+            data_tx_buffer_.clear();
+            data_tx_quiet_ms_ = 0;
+        }
     }
 }
 

@@ -55,6 +55,18 @@ private:
     float last_snr_db_ = 0.0f;
     int last_bitrate_bps_ = 0;
 
+    // TCP→modem batching: TCP delivers user data in many small chunks,
+    // but Connection::sendPayload() replaces (not appends to) its pending
+    // fragment queue on every call. Calling sendBinary() per TCP chunk
+    // therefore strands fragments mid-transfer. Accumulate bytes in a
+    // local buffer and flush via one sendBinary() call after a brief
+    // quiet period — same shape cli_simulator uses, which Connection
+    // handles correctly.
+    std::vector<uint8_t> data_tx_buffer_;
+    uint32_t data_tx_quiet_ms_ = 0;
+    static constexpr uint32_t kDataTxFlushQuietMs = 200;
+    static constexpr size_t kDataTxFlushSizeBytes = 64 * 1024;
+
     static std::pair<std::string, std::string> parseCommand(std::string_view line);
 
     void emitOK();
