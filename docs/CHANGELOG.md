@@ -10,6 +10,65 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-02: TNC Phase 2 — TCP reactor + integration tests
+
+**Goal:**
+Add the TCP socket layer for the VARA TNC interface. Single-thread
+`poll()` reactor pattern (matching Mercury's `tcp_interfaces.c`) so
+all socket I/O + TNCSession dispatch + timers run on one thread,
+avoiding ProtocolEngine reentrancy risk.
+
+**What was added:**
+- `src/tnc/tnc_server.{cpp,hpp}` — `TNCServer` with `TNCServerConfig`.
+  Single poll() reactor thread that owns:
+  - cmd port listener (default 8300, configurable; ephemeral 0 for tests)
+  - data port listener (cmd_port+1)
+  - the active client cmd + data fds (single client per port)
+  - timer cadence (100ms tick → drives IAMALIVE, BUFFER rate-limit)
+  - wakeup pipe + thread-safe queue for cross-thread modem events
+- Single-client eviction: new cmd connection closes prior fds,
+  resets TNCSession to IDLE, accepts the new client.
+- Modem-side push API (`postModemConnected/Disconnected/PTT/...`)
+  marshals events via the wakeup pipe; reactor drains queue and
+  invokes TNCSession callbacks on its own thread.
+- Reactor uses `signal(SIGPIPE, SIG_IGN)` and `SO_NOSIGPIPE` (macOS)
+  + `TCP_NODELAY` on the cmd socket.
+
+- `tests/test_tnc_server.cpp` — 18 integration cases: bind/ports,
+  cmd/data clients, split-line input, eviction/reset, IAMALIVE
+  override (test fast clock), modem post marshalling, buffer pacing
+  override, data in/out, disconnect, stop/restart.
+
+**ctest:** 32/32 → **33/33** (added `test_tnc_server`).
+
+**Threading model:**
+- Reactor thread is the ONLY thread that calls `TNCSession`. Modem
+  callbacks marshal events; reactor drains and dispatches.
+- Stop is cooperative: `stop_requested_` set, wakeup pipe written,
+  thread joins cleanly, sockets closed.
+- Restart is supported: `start()` after `stop()` re-binds. Tests
+  cover this.
+
+**Sandbox quirk:**
+Codex flagged that the codex sandbox blocks localhost `bind()` with
+EPERM, so the test binary has a preflight skip in that environment.
+On the dev Mac (and the Pi when we deploy there) the tests run for
+real. `ctest` passes either way.
+
+**Phase 3 next:** wire the `ModemAdapter` interface to a real bridge
+class that:
+- Drives `ProtocolEngine` (CONNECT, DISCONNECT, sendBinary)
+- Subscribes to ProtocolEngine state callbacks
+- Fixes the duplicate-data callback in `connection_handlers.cpp:425-488`
+- Adds a binary-bytes send API to `ProtocolEngine` (current
+  `sendMessage(string)` is wrong abstraction for unframed TCP bytes)
+- Adds a byte-level TX backlog snapshot to `Connection`/`ProtocolEngine`
+- Infers PTT from `AudioEngine` queue state (not ARQ queue depth)
+- Creates the `ultra_tnc` binary (audio + ProtocolEngine + bridge +
+  TNCServer, all in one process)
+
+---
+
 ## 2026-05-02: TNC Phase 1 — VARA-compatible TNC scaffold
 
 **Goal:**

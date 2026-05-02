@@ -35,6 +35,10 @@ add_executable(test_tnc_session test_tnc_session.cpp)
 target_link_libraries(test_tnc_session PRIVATE ultra_core)
 add_test(NAME TNCSession COMMAND test_tnc_session)
 
+add_executable(test_tnc_server test_tnc_server.cpp)
+target_link_libraries(test_tnc_server PRIVATE ultra_core)
+add_test(NAME TNCServer COMMAND test_tnc_server)
+
 add_executable(test_connection_policy test_connection_policy.cpp)
 target_link_libraries(test_connection_policy PRIVATE ultra_core)
 add_test(NAME ConnectionPolicy COMMAND test_connection_policy)
