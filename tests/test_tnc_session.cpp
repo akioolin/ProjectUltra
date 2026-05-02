@@ -1,5 +1,7 @@
 #include "tnc/tnc_session.hpp"
 
+#include "protocol/compression.hpp"
+
 #include <functional>
 #include <iostream>
 #include <initializer_list>
@@ -548,7 +550,9 @@ int main() {
         h.session.handleDataBytes({1, 2, 3});
         expect(h.modem.send_binary_calls.empty(), "sendBinary should not fire immediately");
         h.session.tick(250);  // exceed kDataTxFlushQuietMs (200)
-        expect(h.modem.send_binary_calls == std::vector<std::vector<uint8_t>>{{1, 2, 3}},
+        // 0x00 prefix = raw payload (compression OFF by default).
+        expect(h.modem.send_binary_calls ==
+                   std::vector<std::vector<uint8_t>>{{0x00, 1, 2, 3}},
                "sendBinary bytes mismatch after flush");
     });
     runner.run("multiple TCP chunks coalesce into one sendBinary", [] {
@@ -566,7 +570,7 @@ int main() {
         h.session.tick(250);
         expect(h.modem.send_binary_calls.size() == 1, "expected exactly one batched sendBinary");
         expect(h.modem.send_binary_calls.front() ==
-                   std::vector<uint8_t>{1, 2, 3, 4, 5, 6, 7, 8, 9},
+                   std::vector<uint8_t>{0x00, 1, 2, 3, 4, 5, 6, 7, 8, 9},
                "batched bytes mismatch");
     });
     runner.run("data input while READY is discarded", [] {
@@ -584,13 +588,14 @@ int main() {
     runner.run("modem data while CONNECTED goes to data_out", [] {
         Harness h;
         enterConnected(h);
-        h.session.onModemDataReceived({9, 8, 7});
+        // 0x00 prefix = raw payload — receiver strips marker, forwards rest.
+        h.session.onModemDataReceived({0x00, 9, 8, 7});
         expect(h.data_out == std::vector<std::vector<uint8_t>>{{9, 8, 7}}, "data_out mismatch");
     });
     runner.run("modem data while READY is discarded", [] {
         Harness h;
         enterReady(h);
-        h.session.onModemDataReceived({9, 8, 7});
+        h.session.onModemDataReceived({0x00, 9, 8, 7});
         expect(h.data_out.empty(), "data_out should not be called");
     });
     runner.run("empty modem data while CONNECTED is ignored", [] {
@@ -598,6 +603,90 @@ int main() {
         enterConnected(h);
         h.session.onModemDataReceived({});
         expect(h.data_out.empty(), "empty data_out should not be called");
+    });
+    runner.run("modem data with unknown marker passes through unchanged", [] {
+        Harness h;
+        enterConnected(h);
+        // Pre-compression peers send raw bytes with no marker. Pass them
+        // through so old/new combinations stay roughly compatible.
+        h.session.onModemDataReceived({0x42, 9, 8, 7});
+        expect(h.data_out == std::vector<std::vector<uint8_t>>{{0x42, 9, 8, 7}},
+               "unknown-marker passthrough mismatch");
+    });
+
+    runner.group("Compression");
+    runner.run("COMPRESSION OFF sends raw with 0x00 marker", [] {
+        Harness h;
+        enterConnected(h);
+        h.session.handleControlLine("COMPRESSION OFF");
+        h.clear();
+        // Highly compressible payload (long run of repeated bytes)
+        std::vector<uint8_t> payload(256, 'A');
+        h.session.handleDataBytes(payload);
+        h.session.tick(250);
+        expect(h.modem.send_binary_calls.size() == 1, "expected one sendBinary");
+        expect(h.modem.send_binary_calls.front().front() == 0x00,
+               "expected raw marker when compression disabled");
+        expect(h.modem.send_binary_calls.front().size() == payload.size() + 1,
+               "raw payload should be uncompressed plus marker");
+    });
+    runner.run("COMPRESSION ON shrinks compressible payload", [] {
+        Harness h;
+        enterConnected(h);
+        h.session.handleControlLine("COMPRESSION TEXT");
+        h.clear();
+        std::vector<uint8_t> payload(1024, 'A');  // 1KB of repeated 'A'
+        h.session.handleDataBytes(payload);
+        h.session.tick(250);
+        expect(h.modem.send_binary_calls.size() == 1, "expected one sendBinary");
+        const auto& wire = h.modem.send_binary_calls.front();
+        expect(wire.front() == 0x01, "expected deflate marker");
+        expect(wire.size() < payload.size() / 4,
+               "deflated 1KB of repeated bytes should shrink to <256 bytes");
+    });
+    runner.run("COMPRESSION ON keeps small payloads raw", [] {
+        Harness h;
+        enterConnected(h);
+        h.session.handleControlLine("COMPRESSION TEXT");
+        h.clear();
+        // Below MIN_COMPRESS_SIZE — marker stays 0x00.
+        h.session.handleDataBytes({1, 2, 3, 4, 5});
+        h.session.tick(250);
+        expect(h.modem.send_binary_calls.size() == 1, "expected one sendBinary");
+        expect(h.modem.send_binary_calls.front().front() == 0x00,
+               "small payloads should stay raw");
+    });
+    runner.run("COMPRESSION ON falls back to raw if compress doesn't help", [] {
+        Harness h;
+        enterConnected(h);
+        h.session.handleControlLine("COMPRESSION TEXT");
+        h.clear();
+        // Pseudo-random bytes — deflate adds overhead, can't shrink.
+        std::vector<uint8_t> payload;
+        payload.reserve(256);
+        for (int i = 0; i < 256; ++i) {
+            payload.push_back(static_cast<uint8_t>((i * 31 + 7) & 0xFF));
+        }
+        h.session.handleDataBytes(payload);
+        h.session.tick(250);
+        expect(h.modem.send_binary_calls.size() == 1, "expected one sendBinary");
+        // Uncompressible input should ship raw, not as inflated deflate.
+        expect(h.modem.send_binary_calls.front().front() == 0x00,
+               "uncompressible input should fall back to raw marker");
+    });
+    runner.run("RX deflate marker is decompressed", [] {
+        Harness h;
+        enterConnected(h);
+        // Encode a known plaintext via the same path the peer would use.
+        const std::vector<uint8_t> plaintext(512, 'Z');
+        auto compressed = ultra::protocol::Compression::compress(plaintext);
+        expect(static_cast<bool>(compressed), "compression helper should succeed");
+        std::vector<uint8_t> wire;
+        wire.push_back(0x01);
+        wire.insert(wire.end(), compressed->begin(), compressed->end());
+        h.session.onModemDataReceived(wire);
+        expect(h.data_out.size() == 1, "expected one data_out call");
+        expect(h.data_out.front() == plaintext, "decompressed bytes mismatch");
     });
 
     runner.group("Tick");

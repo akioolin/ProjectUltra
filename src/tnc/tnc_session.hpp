@@ -101,6 +101,8 @@ private:
     void cmdIgnoreKissDcd(std::string_view args);
     void cmdIntegerNoop(std::string_view args);
     void cmdStats(std::string_view args);
+
+    void flushDataTxBuffer();
 };
 
 } // namespace ultra::tnc

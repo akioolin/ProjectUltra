@@ -604,7 +604,9 @@ int main() {
         enterConnected(harness, cmd);
         data.writeBytes({4, 5, 6});
         waitUntil([&] { return harness.modem.sendBinaryCount() == 1; }, 500, "sendBinary not called");
-        expect(harness.modem.lastBinary() == std::vector<uint8_t>({4, 5, 6}), "sendBinary payload mismatch");
+        // 0x00 = raw payload marker (compression is OFF by default).
+        expect(harness.modem.lastBinary() == std::vector<uint8_t>({0x00, 4, 5, 6}),
+               "sendBinary payload mismatch");
     });
 
     runner.run("modem data post reaches data socket while connected", [] {
@@ -613,7 +615,8 @@ int main() {
         TestClient data(harness.server.getDataPort());
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
         enterConnected(harness, cmd);
-        harness.server.postModemDataReceived({9, 8, 7, 0});
+        // 0x00 marker prefix = raw payload from peer; receiver strips it.
+        harness.server.postModemDataReceived({0x00, 9, 8, 7, 0});
         expect(data.readBytes(4) == std::vector<uint8_t>({9, 8, 7, 0}), "data socket payload mismatch");
     });
 

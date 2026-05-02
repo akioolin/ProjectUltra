@@ -297,7 +297,29 @@ mkdir -p "$LOG_DIR"
 PAYLOAD=$LOG_DIR/payload.bin
 RX_LOCAL=$LOG_DIR/rx_from_pi.bin
 
-dd if=/dev/urandom of="$PAYLOAD" bs="$PAYLOAD_SIZE" count=1 >/dev/null 2>&1
+# PAYLOAD_FILL controls payload content. RANDOM (default) tests raw
+# byte-exactness. TEXT exercises the compression path with highly
+# repetitive ASCII (well-formed prose-shaped pseudo-text).
+case "${PAYLOAD_FILL:-RANDOM}" in
+  RANDOM|random)
+    dd if=/dev/urandom of="$PAYLOAD" bs="$PAYLOAD_SIZE" count=1 >/dev/null 2>&1
+    ;;
+  TEXT|text)
+    # Repeat a fixed phrase up to PAYLOAD_SIZE. deflate ratio ~50x on
+    # this kind of input. awk avoids SIGPIPE issues that bite a
+    # `yes | tr | head -c` pipeline under `set -o pipefail`.
+    awk -v n="$PAYLOAD_SIZE" 'BEGIN {
+      s = "The quick brown fox jumps over the lazy dog. Pack my box now!";
+      l = length(s);
+      out = "";
+      while (length(out) < n) out = out s;
+      printf "%s", substr(out, 1, n);
+    }' > "$PAYLOAD"
+    ;;
+  *)
+    die "PAYLOAD_FILL must be RANDOM or TEXT, got: $PAYLOAD_FILL"
+    ;;
+esac
 
 info "Logs: $LOG_DIR"
 info "Mac: $MAC_CALLSIGN port=$TNC_PORT data=$DATA_PORT audio out='$MAC_AUDIO_OUT' in='$MAC_AUDIO_IN'"

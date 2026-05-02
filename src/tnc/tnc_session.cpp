@@ -1,5 +1,7 @@
 #include "tnc/tnc_session.hpp"
 
+#include "protocol/compression.hpp"
+
 #include <algorithm>
 #include <charconv>
 #include <cctype>
@@ -14,6 +16,13 @@ namespace {
 
 constexpr uint32_t kIAmAliveIntervalMs = 60000;
 constexpr uint32_t kBufferEmitIntervalMs = 1000;
+
+// Single-byte wire-format header on the modem-side payload to signal
+// compression. Stripped on RX, transparent to the data-port client.
+// Both peers must run a compression-aware ultra_tnc; pre-compression
+// builds will see the marker as part of the data (incompatible).
+constexpr uint8_t kPayloadMarkerRaw = 0x00;
+constexpr uint8_t kPayloadMarkerDeflate = 0x01;
 
 std::string toUpper(std::string_view value) {
     std::string out;
@@ -247,8 +256,7 @@ void TNCSession::handleDataBytes(const std::vector<uint8_t>& bytes) {
     data_tx_buffer_.insert(data_tx_buffer_.end(), bytes.begin(), bytes.end());
     data_tx_quiet_ms_ = 0;
     if (data_tx_buffer_.size() >= kDataTxFlushSizeBytes) {
-        modem_.sendBinary(data_tx_buffer_);
-        data_tx_buffer_.clear();
+        flushDataTxBuffer();
     }
 }
 
@@ -293,9 +301,32 @@ void TNCSession::onModemPTT(bool on) {
 }
 
 void TNCSession::onModemDataReceived(const std::vector<uint8_t>& bytes) {
-    if (state_ == State::CONNECTED && !bytes.empty() && data_out_) {
-        data_out_(bytes);
+    if (state_ != State::CONNECTED || bytes.empty() || !data_out_) {
+        return;
     }
+
+    const uint8_t marker = bytes.front();
+    if (marker == kPayloadMarkerDeflate) {
+        std::vector<uint8_t> compressed(bytes.begin() + 1, bytes.end());
+        if (auto decompressed = ultra::protocol::Compression::decompress(compressed)) {
+            data_out_(*decompressed);
+        }
+        // Decompression failure is silently dropped — the peer claimed
+        // deflate but produced bytes we can't decode. Don't forward
+        // garbage to the data-port client.
+        return;
+    }
+    if (marker == kPayloadMarkerRaw) {
+        std::vector<uint8_t> payload(bytes.begin() + 1, bytes.end());
+        data_out_(payload);
+        return;
+    }
+
+    // Unknown marker — most likely a peer running a pre-compression build
+    // of ultra_tnc that doesn't prepend a header. Pass the bytes through
+    // unchanged so old/new combinations still mostly work, accepting that
+    // the first byte will look anomalous to the data-port client.
+    data_out_(bytes);
 }
 
 void TNCSession::onModemBufferLevel(int bytes) {
@@ -359,11 +390,37 @@ void TNCSession::tick(uint32_t elapsed_ms) {
     if (state_ == State::CONNECTED && !data_tx_buffer_.empty()) {
         data_tx_quiet_ms_ += elapsed_ms;
         if (data_tx_quiet_ms_ >= kDataTxFlushQuietMs) {
-            modem_.sendBinary(data_tx_buffer_);
-            data_tx_buffer_.clear();
-            data_tx_quiet_ms_ = 0;
+            flushDataTxBuffer();
         }
     }
+}
+
+void TNCSession::flushDataTxBuffer() {
+    std::vector<uint8_t> wire;
+    wire.reserve(data_tx_buffer_.size() + 1);
+
+    bool sent_compressed = false;
+    if (compression_enabled_ &&
+        data_tx_buffer_.size() >= ultra::protocol::Compression::MIN_COMPRESS_SIZE) {
+        if (auto compressed = ultra::protocol::Compression::compress(data_tx_buffer_)) {
+            // Only ship the compressed copy if it actually pays for the
+            // 1-byte marker overhead. On already-compressed or random
+            // input, deflate often expands; fall back to raw.
+            if (compressed->size() + 1 < data_tx_buffer_.size()) {
+                wire.push_back(kPayloadMarkerDeflate);
+                wire.insert(wire.end(), compressed->begin(), compressed->end());
+                sent_compressed = true;
+            }
+        }
+    }
+    if (!sent_compressed) {
+        wire.push_back(kPayloadMarkerRaw);
+        wire.insert(wire.end(), data_tx_buffer_.begin(), data_tx_buffer_.end());
+    }
+
+    modem_.sendBinary(wire);
+    data_tx_buffer_.clear();
+    data_tx_quiet_ms_ = 0;
 }
 
 std::pair<std::string, std::string> TNCSession::parseCommand(std::string_view line) {
