@@ -39,6 +39,7 @@
 #include "protocol/frame_v2.hpp"
 #include "ultra/fec.hpp"
 #include "fec/codec_factory.hpp"  // ICodec for FEC decoding
+#include "fec/soft_combine.hpp"
 #include <vector>
 #include <queue>
 #include <mutex>
@@ -176,6 +177,8 @@ public:
         fixed_frame_codewords_ = v2::sanitizeFixedFrameCodewords(cw_count);
     }
     int getFixedFrameCodewords() const { return fixed_frame_codewords_; }
+
+    void setSoftCombineBuffer(fec::SoftCombineBuffer* buffer) { harq_buffer_ = buffer; }
 
     // Burst-level long interleaver (N-frame groups)
     void setBurstInterleave(bool enable) { use_burst_interleave_ = enable; }
@@ -373,6 +376,7 @@ private:
 
     // FEC codec (uses ICodec interface)
     fec::CodecPtr codec_;
+    fec::SoftCombineBuffer* harq_buffer_ = nullptr;  // Non-owning; Connection owns lifecycle.
 
     // Decoded frame queue
     std::queue<DecodeResult> frame_queue_;

@@ -1399,7 +1399,9 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate) {
 }
 
 CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate, int cw_count,
-                                bool use_channel_deinterleave, size_t bits_per_symbol) {
+                                bool use_channel_deinterleave, size_t bits_per_symbol,
+                                fec::SoftCombineBuffer* harq_buffer,
+                                const fec::SoftCombineBuffer::Key* harq_key) {
     using namespace fec;
     ultra::timing::ScopedTimer _profile_(
         ultra::timing::globalDecoderProfile().decode_fixed_frame_total);
@@ -1417,8 +1419,36 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
         return status;  // All failed - not enough data
     }
 
+    std::vector<float> combined_llrs;
+    const std::vector<float>* llrs_to_decode = &interleaved_soft;
+    const bool harq_has_key =
+        harq_buffer && harq_key && harq_key->sender_hash != 0;
+    const bool harq_active = harq_has_key && harq_buffer->enabled();
+    if (harq_active) {
+        combined_llrs.resize(interleaved_soft.size());
+        const int attempts = harq_buffer->combine(*harq_key, interleaved_soft, combined_llrs);
+        llrs_to_decode = &combined_llrs;
+        if (attempts > 1) {
+            LOG_MODEM(INFO, "HARQ: combining attempt %d for seq=%u (sender_hash=0x%06X, cw=%u)",
+                      attempts, harq_key->seq, harq_key->sender_hash, harq_key->cw_count);
+        }
+    }
+
+    auto finalize_harq = [&](const CodewordStatus& final_status) {
+        if (!harq_has_key) {
+            return;
+        }
+        if (final_status.allSuccess()) {
+            harq_buffer->drop(*harq_key);
+        } else if (harq_active) {
+            harq_buffer->retain(*harq_key, combined_llrs.empty()
+                                               ? interleaved_soft
+                                               : std::move(combined_llrs));
+        }
+    };
+
     // Deinterleave to restore original CW order (frame-level)
-    auto cw_soft_bits = FrameInterleaver::deinterleave(interleaved_soft, cw_count);
+    auto cw_soft_bits = FrameInterleaver::deinterleave(*llrs_to_decode, cw_count);
 
     // Create channel interleaver for deinterleaving if enabled
     std::unique_ptr<ChannelInterleaver> interleaver;
@@ -1585,6 +1615,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                 for (int cw = 0; cw < cw_count; ++cw) {
                     status.decoded[cw] = false;
                 }
+                finalize_harq(status);
                 return status;
             }
 
@@ -1841,6 +1872,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
         }
     }
 
+    finalize_harq(status);
     return status;
 }
 

@@ -5,6 +5,7 @@
 #include "selective_repeat_arq.hpp"
 #include "file_transfer.hpp"
 #include "ultra/types.hpp"
+#include "fec/soft_combine.hpp"
 #include <functional>
 #include <string>
 
@@ -175,6 +176,10 @@ public:
     CodeRate getForcedCodeRate() const { return config_.forced_code_rate; }
     int getForcedFrameCodewords() const { return data_frame_cw_count_; }
 
+    void setSoftCombiningHARQ(bool enable);
+    bool getSoftCombiningHARQ() const { return soft_combine_harq_.enabled(); }
+    fec::SoftCombineBuffer* softCombineBuffer() { return &soft_combine_harq_; }
+
     using ModeNegotiatedCallback = std::function<void(WaveformMode mode)>;
     void setModeNegotiatedCallback(ModeNegotiatedCallback cb) { on_mode_negotiated_ = cb; }
 
@@ -266,6 +271,7 @@ private:
 
     // ARQ for reliable data transfer (Selective Repeat for higher throughput)
     SelectiveRepeatARQ arq_;
+    fec::SoftCombineBuffer soft_combine_harq_;
 
     // File transfer controller
     FileTransferController file_transfer_;

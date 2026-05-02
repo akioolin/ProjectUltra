@@ -134,6 +134,8 @@ public:
     Modulation getForcedModulation() const;
     CodeRate getForcedCodeRate() const;
     int getForcedFrameCodewords() const;
+    void setSoftCombiningHARQ(bool enable);
+    fec::SoftCombineBuffer* softCombineBuffer();
 
     void setModeNegotiatedCallback(ModeNegotiatedCallback cb);
     void setConnectWaveformChangedCallback(ConnectWaveformChangedCallback cb);

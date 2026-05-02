@@ -701,6 +701,10 @@ public:
         if (encoder_) encoder_->setFixedFrameCodewords(fixed_frame_codewords_);
         if (decoder_) decoder_->setFixedFrameCodewords(fixed_frame_codewords_);
     }
+    void setSoftCombiningHARQ(bool enable) {
+        protocol_.setSoftCombiningHARQ(enable);
+        if (decoder_) decoder_->setSoftCombineBuffer(protocol_.softCombineBuffer());
+    }
     void setPreferredWaveform(WaveformMode mode) {
         protocol_.setPreferredMode(mode);
         // For narrowband, use narrowband chirp for PING/PONG/CONNECT control frames
@@ -886,6 +890,7 @@ private:
         decoder_->setMode(WaveformMode::MC_DPSK, false);
         decoder_->setBurstInterleaveGroupSize(burst_group_size_);
         decoder_->setFixedFrameCodewords(fixed_frame_codewords_);
+        decoder_->setSoftCombineBuffer(protocol_.softCombineBuffer());
         decoder_->setMCDPSKCarriers(8);
 
         // Set frame callback
@@ -1552,6 +1557,7 @@ public:
     void setRxOverfeedFactor(int factor) { rx_overfeed_factor_ = std::clamp(factor, 1, 200); }
     void setDecodeDelayMs(int ms) { decode_delay_ms_ = std::clamp(ms, 0, 500); }
     void setRxBatchCallbacks(int n) { rx_batch_callbacks_ = std::clamp(n, 1, 1000); }
+    void setSoftCombiningHARQ(bool enable) { soft_combining_harq_ = enable; }
 
     // Hardware-audio mode (real soundcard I/O across two physical machines)
     void setRoleBoth() { role_ = Role::Both; }
@@ -1611,6 +1617,8 @@ public:
         bravo_->setRxBatchCallbacks(rx_batch_callbacks_);
         alpha_->setFixedFrameCodewords(fixed_frame_codewords_);
         bravo_->setFixedFrameCodewords(fixed_frame_codewords_);
+        alpha_->setSoftCombiningHARQ(soft_combining_harq_);
+        bravo_->setSoftCombiningHARQ(soft_combining_harq_);
 
         // Set channel SNR for mode negotiation
         alpha_->setSNR(snr_db_);
@@ -1648,6 +1656,9 @@ public:
         }
         if (fixed_frame_codewords_ != v2::kDefaultFixedFrameCodewords) {
             std::cout << "  \033[36mFixed frame CW count = " << fixed_frame_codewords_ << "\033[0m\n";
+        }
+        if (soft_combining_harq_) {
+            std::cout << "  \033[36mRX soft-combining HARQ ENABLED\033[0m\n";
         }
 
         // Setup message callback on BRAVO
@@ -1731,6 +1742,7 @@ private:
     int decode_delay_ms_ = 0;              // --decode-delay-ms N (simulated slow decoder)
     int rx_batch_callbacks_ = 1;           // --rx-batch-callbacks N (batched decoder feed)
     int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
+    bool soft_combining_harq_ = false;
     bool save_signals_ = false;
     int save_signals_message_limit_ = 0;   // 0 = full run
     size_t save_signals_max_samples_ = 0;  // 0 = unlimited
@@ -2426,6 +2438,10 @@ private:
         station->setNoBurstInterleave(no_burst_interleave_);
         station->setBurstInterleaveGroupSize(burst_group_size_);
         station->setFixedFrameCodewords(fixed_frame_codewords_);
+        station->setSoftCombiningHARQ(soft_combining_harq_);
+        if (soft_combining_harq_) {
+            std::cout << "  HARQ:     RX soft-combining enabled\n";
+        }
 
         // Role-B receive callbacks
         std::atomic<bool> peer_connected{false};
@@ -3023,6 +3039,8 @@ int main(int argc, char* argv[]) {
                 sim.setNoBurstInterleave(true);
             } else if (arg == "--burst-group-size" && i + 1 < argc) {
                 sim.setBurstInterleaveGroupSize(std::stoi(argv[++i]));
+            } else if (arg == "--harq") {
+                sim.setSoftCombiningHARQ(true);
             } else if (arg == "--rx-overfeed-factor" && i + 1 < argc) {
                 sim.setRxOverfeedFactor(std::stoi(argv[++i]));
             } else if (arg == "--decode-delay-ms" && i + 1 < argc) {
@@ -3103,6 +3121,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --channel-interleave, -ci  Enable channel interleaving\n";
                 std::cout << "  --no-burst-interleave     Disable burst-level long interleaving\n";
                 std::cout << "  --burst-group-size <N>    Burst interleave group size (2-8, default: 8)\n";
+                std::cout << "  --harq                    Enable RX soft-combining HARQ (default: off)\n";
                 std::cout << "  --rx-overfeed-factor <N>  Run audio callbacks N× faster wall-clock (stress, default: 1)\n";
                 std::cout << "  --decode-delay-ms <N>     Add decode-thread delay (0-500 ms, stress)\n";
                 std::cout << "  --rx-batch-callbacks <N>  Batch N callbacks per decoder feed (stress)\n";

@@ -10,6 +10,94 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-01: RX-side soft-combining HARQ (Chase combining) — round 2b
+
+**What was missing:**
+On retx-heavy channels (Moderate/Poor/Flutter fading, low SNR),
+every retransmitted frame was wasted airtime — receiver would
+discard the failed soft bits, demand a fresh copy, decode that
+in isolation. Commercial modems (LTE/HSDPA HARQ pattern) accumulate
+soft LLRs across attempts so each retx delivers coding gain
+(~3 dB per doubling of attempts).
+
+**What was added:**
+Receiver-side **Chase combining**. When a fixed-frame fails LDPC
+decode, the receiver retains the soft LLRs keyed by (sender_hash,
+seq, rate, cw_count). On the next retransmission, new LLRs are
+arithmetic-averaged with the stored ones, then LDPC runs on the
+combined buffer. After N attempts the effective SNR margin is
+~10·log10(N) dB. Default OFF — opt-in via `Connection::setSoftCombiningHARQ(true)`
+or `cli_simulator --harq`.
+
+TX path unchanged: Chase combining only requires identical retx
+bits, which we already have. (Incremental Redundancy would need
+TX-side surgery; out of scope for this round.)
+
+**Files added/changed:**
+- `src/fec/soft_combine.{cpp,hpp}` — new `SoftCombineBuffer` class
+  with TTL eviction (default 30 s), LRU at max_entries (default 32),
+  arithmetic-average LLR accumulation, drop on success.
+- `src/protocol/frame_v2.{cpp,hpp}` — `decodeFixedFrame()` accepts
+  optional `harq_buffer*` and `key`. When non-null, combines LLRs
+  before LDPC and stores combined output if decode fails.
+- `src/gui/modem/streaming_decoder.{cpp,hpp}` — owns the buffer,
+  builds the key from decoded CW0 header (peek-and-probe path),
+  passes both into `decodeFixedFrame()`.
+- `src/protocol/connection.{cpp,hpp}` — manages buffer lifecycle:
+  `setSoftCombiningHARQ(bool)` API, `tick()` evicts old entries,
+  `enterDisconnected()` clears.
+- `tools/cli_simulator.cpp` — `--harq` CLI flag.
+- `tests/test_soft_combine.cpp` — 7 unit tests covering no-op when
+  disabled, identity on first attempt, averaging math, drop on
+  success, TTL eviction, max-entries LRU eviction, key
+  disambiguation.
+
+**Memory bound:**
+LLR vector at CW=6 R1/2 = 6 × 324 bits = 1944 floats = ~7.6 KB/entry.
+At CW=8 R1/4 = 8 × 486 = ~15 KB/entry (worst case). Default 32-entry
+buffer ≈ 250–500 KB peak.
+
+**Test verification:**
+- ctest: 31/31 pass (added SoftCombine 7/7).
+- Hardware sweep, 5 KB R1/2 forced, 4 channels × HARQ on/off:
+
+  | Channel | HARQ=off | HARQ=on | Δ |
+  |---------|----------|---------|---|
+  | GOOD15 CW=6 R1/2 | 1451 bps, 0 retx | 1443 bps, 0 retx | -0.6% (within noise; no regression on clean) |
+  | MOD12 CW=6 R1/2  | 1468 bps, 0 retx | 1460 bps, 0 retx | within noise; channel too clean |
+  | POOR15 CW=6 R1/4 | 244 bps, **55 retx, 44 to** | 257 bps, **26 retx, 19 to** | **+5% throughput, −53% retx, −57% timeouts** |
+  | FLUTTER15 CW=4 R1/4 | TEST FAILED (channel limit) | TEST FAILED | 10 Hz Doppler exceeds R1/4 even with HARQ |
+
+  Hardware logs: `/tmp/ultra_hw_20260501_2025*` and `/tmp/harq_sweep_summary.txt`.
+
+**Adopted policy: opt-in default OFF.** Hardware confirms HARQ engages
+correctly on retx-heavy channels (Poor fading) and is a no-op on clean
+channels. The retx reduction is the headline win — the modem stops
+burning airtime on duplicate-without-progress retransmissions. Default
+stays off until we collect more field data; promote when ready.
+
+**Known limitations:**
+- Flutter (10 Hz Doppler) still exceeds R1/4 PHY decode capability
+  even with HARQ — this is a frame-length-vs-coherence-time mismatch,
+  not a HARQ bug. Round 3 (longer LDPC codewords) might help; round
+  3a (per-CW partial recovery) almost certainly will.
+- Key includes (sender_hash, seq, rate, cw_count) but not modulation
+  or session epoch. A same-rate/same-CW modulation change before TTL
+  could combine wrong frames; mitigated by 30 s TTL and
+  enterDisconnected() clear.
+- Default OFF; not yet wired to auto-enable based on observed retx
+  rate. Add later if the use case warrants.
+
+**Throughput plan progress (cumulative):**
+Round 1 (CW aggregation): +15-22% on every channel — DONE.
+Round 2b (RX HARQ): -53% retx on retx-heavy channels — DONE.
+Round 2a (per-CW partial recovery / block-ACK): pending — would
+help Flutter and Poor R1/4 cliff cases.
+Round 3 (longer LDPC, 1944-bit): pending.
+Round 4 (D8PSK R3/4 hw validation): pending.
+
+---
+
 ## 2026-05-01: Adaptive CWs-per-frame aggregation — +15-22% throughput
 
 **What was broken:**

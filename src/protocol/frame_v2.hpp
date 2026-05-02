@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ultra/types.hpp"
+#include "fec/soft_combine.hpp"
 #include <string>
 #include <optional>
 #include <cstdint>
@@ -789,7 +790,9 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate);
  * @return CodewordStatus with decode results for all configured CWs
  */
 CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate, int cw_count,
-                                bool use_channel_deinterleave, size_t bits_per_symbol = 106);
+                                bool use_channel_deinterleave, size_t bits_per_symbol = 106,
+                                fec::SoftCombineBuffer* harq_buffer = nullptr,
+                                const fec::SoftCombineBuffer::Key* harq_key = nullptr);
 CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate, bool use_channel_deinterleave, size_t bits_per_symbol = 106);
 
 /**

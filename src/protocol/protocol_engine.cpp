@@ -447,6 +447,15 @@ int ProtocolEngine::getForcedFrameCodewords() const {
     return connection_.getForcedFrameCodewords();
 }
 
+void ProtocolEngine::setSoftCombiningHARQ(bool enable) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.setSoftCombiningHARQ(enable);
+}
+
+fec::SoftCombineBuffer* ProtocolEngine::softCombineBuffer() {
+    return connection_.softCombineBuffer();
+}
+
 void ProtocolEngine::setModeNegotiatedCallback(ModeNegotiatedCallback cb) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setModeNegotiatedCallback(std::move(cb));

@@ -1191,6 +1191,8 @@ void Connection::updateAdaptiveModeController(uint32_t elapsed_ms) {
 // =============================================================================
 
 void Connection::tick(uint32_t elapsed_ms) {
+    soft_combine_harq_.tick(elapsed_ms);
+
     switch (state_) {
         case ConnectionState::PROBING:
             // Fast presence check via PING/PONG
@@ -1542,6 +1544,7 @@ void Connection::enterDisconnected(const std::string& reason) {
     deferred_file_refill_ = false;
     deferred_fragment_refill_ = false;
     arq_.reset();
+    soft_combine_harq_.clear();
     resetAdaptiveModeController();
     file_transfer_.cancel();
     pending_tx_fragments_.clear();
@@ -1671,6 +1674,12 @@ void Connection::resetStats() {
     resetAdaptiveModeController();
 }
 
+void Connection::setSoftCombiningHARQ(bool enable) {
+    soft_combine_harq_.setEnabled(enable);
+    LOG_MODEM(INFO, "Connection: soft-combining HARQ %s",
+              enable ? "ENABLED" : "disabled");
+}
+
 void Connection::reset() {
     state_ = ConnectionState::DISCONNECTED;
     is_initiator_ = false;
@@ -1701,6 +1710,7 @@ void Connection::reset() {
     deferred_file_refill_ = false;
     deferred_fragment_refill_ = false;
     arq_.reset();
+    soft_combine_harq_.clear();
     resetAdaptiveModeController();
     file_transfer_.cancel();
     pending_tx_fragments_.clear();

@@ -55,6 +55,10 @@ add_executable(test_codec_factory test_codec_factory.cpp)
 target_link_libraries(test_codec_factory PRIVATE ultra_core)
 add_test(NAME CodecFactory COMMAND test_codec_factory)
 
+add_executable(test_soft_combine test_soft_combine.cpp)
+target_link_libraries(test_soft_combine PRIVATE ultra_core)
+add_test(NAME SoftCombine COMMAND test_soft_combine)
+
 # Stop-and-wait ARQ remains available through the ARQ factory. Keep direct
 # coverage so this lower-throughput compatibility path cannot silently regress.
 add_executable(test_stop_wait_arq test_stop_wait_arq.cpp)

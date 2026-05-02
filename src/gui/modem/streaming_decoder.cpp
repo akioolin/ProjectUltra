@@ -2597,10 +2597,63 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
         // Channel deinterleaving restores the original bit order within each CW
         // Only enable for OFDM modes (MC-DPSK doesn't use channel interleaving)
         size_t bps = static_cast<size_t>(ofdm_data_carriers_) * getBitsPerSymbol(current_modulation_);
+        auto buildHarqKey = [&](int cw_count, fec::SoftCombineBuffer::Key& out_key) -> bool {
+            if (!harq_buffer_ || !harq_buffer_->enabled()) {
+                return false;
+            }
+
+            cw_count = v2::sanitizeFixedFrameCodewords(cw_count);
+            const size_t frame_bits =
+                static_cast<size_t>(fec::FrameInterleaver::totalFrameBits(cw_count));
+            if (soft_bits.size() < frame_bits) {
+                return false;
+            }
+
+            auto cw_soft = fec::FrameInterleaver::deinterleave(soft_bits, cw_count);
+            if (cw_soft.empty() || cw_soft[0].size() < LDPC_BLOCK) {
+                return false;
+            }
+
+            std::vector<float> cw0_bits = std::move(cw_soft[0]);
+            if (apply_channel_deinterleave) {
+                ChannelInterleaver channel_deinterleaver(bps, v2::LDPC_CODEWORD_BITS);
+                cw0_bits = channel_deinterleaver.deinterleave(cw0_bits);
+            }
+
+            auto [peek_ok, peek_data] = robustDecodeSingleCW(
+                cw0_bits.data(), cw0_bits.size(), rate, log_prefix_.c_str(),
+                ultra::timing::SingleCWCallSite::Cw0Peek);
+            const size_t bytes_per_fixed_cw = v2::getBytesPerCodeword(rate);
+            if (!peek_ok || peek_data.size() < bytes_per_fixed_cw) {
+                return false;
+            }
+            if (peek_data.size() > bytes_per_fixed_cw) {
+                peek_data.resize(bytes_per_fixed_cw);
+            }
+
+            auto hdr = v2::parseHeader(peek_data);
+            if (!hdr.valid || hdr.is_control || !isFixedFrameCwCount(hdr.total_cw)) {
+                return false;
+            }
+
+            out_key.sender_hash = hdr.src_hash;
+            out_key.seq = hdr.seq;
+            out_key.rate = rate;
+            out_key.cw_count = hdr.total_cw;
+            return out_key.sender_hash != 0;
+        };
         const auto _profile_fs_start_ = std::chrono::steady_clock::now();
         auto decodeFixed = [&](int cw_count) {
+            fec::SoftCombineBuffer::Key harq_key;
+            fec::SoftCombineBuffer::Key* harq_key_ptr = nullptr;
+            fec::SoftCombineBuffer* harq_buffer = nullptr;
+            if (buildHarqKey(cw_count, harq_key)) {
+                harq_key_ptr = &harq_key;
+                harq_buffer = harq_buffer_;
+            }
             return v2::decodeFixedFrame(soft_bits, rate, cw_count,
-                                        apply_channel_deinterleave, bps);
+                                        apply_channel_deinterleave, bps,
+                                        harq_buffer, harq_key_ptr);
         };
         auto cw_status = decodeFixed(decode_cw_count);
 
