@@ -296,14 +296,19 @@ void TNCServer::reactorLoop() {
             }
         };
 
+        // Windows WSAPoll only accepts POLLIN/POLLOUT/POLLPRI/POLLRDBAND/
+        // POLLRDNORM/POLLWRNORM in `events`. POLLERR/POLLHUP/POLLNVAL are
+        // output-only and are returned in `revents` regardless of what
+        // we request. Putting them in `events` is harmless on POSIX but
+        // some Windows builds reject the call with WSAEINVAL.
         add_fd(cmd_listener_fd_, POLLIN, PollTarget::CmdListener);
         add_fd(data_listener_fd_, POLLIN, PollTarget::DataListener);
         add_fd(cmd_client_fd_,
-               static_cast<short>(POLLIN | POLLERR | POLLHUP | POLLNVAL |
+               static_cast<short>(POLLIN |
                                   (cmd_tx_buffer_.empty() ? 0 : POLLOUT)),
                PollTarget::CmdClient);
         add_fd(data_client_fd_,
-               static_cast<short>(POLLIN | POLLERR | POLLHUP | POLLNVAL |
+               static_cast<short>(POLLIN |
                                   (data_tx_buffer_.empty() ? 0 : POLLOUT)),
                PollTarget::DataClient);
         add_fd(wakeup_read_fd_, POLLIN, PollTarget::Wakeup);
@@ -344,7 +349,12 @@ void TNCServer::reactorLoop() {
                 break;
             case PollTarget::CmdClient:
                 if (poll_fds[i].fd == cmd_client_fd_) {
-                    if (events & POLLIN) {
+                    // Treat POLLHUP as a hint to drain via recv(); if the
+                    // peer truly closed, recv() returns 0 and onCmdClientReady
+                    // evicts. Windows WSAPoll can transiently set POLLHUP on
+                    // healthy connections, so evicting on POLLHUP alone drops
+                    // valid clients before we read their data.
+                    if (events & (POLLIN | POLLHUP)) {
                         onCmdClientReady();
                     }
                     if (poll_fds[i].fd == cmd_client_fd_ && (events & POLLOUT)) {
@@ -352,14 +362,14 @@ void TNCServer::reactorLoop() {
                             evictCmdClient();
                         }
                     }
-                    if (poll_fds[i].fd == cmd_client_fd_ && (events & (POLLERR | POLLHUP | POLLNVAL))) {
+                    if (poll_fds[i].fd == cmd_client_fd_ && (events & (POLLERR | POLLNVAL))) {
                         evictCmdClient();
                     }
                 }
                 break;
             case PollTarget::DataClient:
                 if (poll_fds[i].fd == data_client_fd_) {
-                    if (events & POLLIN) {
+                    if (events & (POLLIN | POLLHUP)) {
                         onDataClientReady();
                     }
                     if (poll_fds[i].fd == data_client_fd_ && (events & POLLOUT)) {
@@ -367,7 +377,7 @@ void TNCServer::reactorLoop() {
                             evictDataClient();
                         }
                     }
-                    if (poll_fds[i].fd == data_client_fd_ && (events & (POLLERR | POLLHUP | POLLNVAL))) {
+                    if (poll_fds[i].fd == data_client_fd_ && (events & (POLLERR | POLLNVAL))) {
                         evictDataClient();
                     }
                 }
