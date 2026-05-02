@@ -1569,17 +1569,26 @@ bool OFDMDemodulator::searchForSync(SampleSpan samples, size_t& out_position, fl
         }
     }
 
-    // Restore original buffer (do NOT modify state)
-    impl_->rx_buffer = std::move(saved_buffer);
-
     if (found_sync) {
         out_cfo_hz = sync_cfo;
 
-        // processPresynced expects samples starting at FIRST LTS.
-        out_position = (refined_lts_offset >= preamble_symbol_len)
-            ? (refined_lts_offset - preamble_symbol_len)
-            : refined_lts_offset;
+        // processPresynced expects samples starting at the FIRST LTS. The LTS
+        // template search can peak on either repeated LTS symbol; choose the
+        // earlier position only when the preceding two symbols are themselves
+        // an LTS pair. Otherwise, subtracting one symbol lands on the final STS
+        // and shifts all payload bits by one OFDM symbol.
+        out_position = refined_lts_offset;
+        if (refined_lts_offset >= preamble_symbol_len) {
+            const size_t previous_symbol = refined_lts_offset - preamble_symbol_len;
+            const float pair_corr = impl_->measureAnalyticCorrelation(previous_symbol);
+            if (pair_corr > 0.85f) {
+                out_position = previous_symbol;
+            }
+        }
     }
+
+    // Restore original buffer (do NOT modify state)
+    impl_->rx_buffer = std::move(saved_buffer);
 
     return found_sync;
 }

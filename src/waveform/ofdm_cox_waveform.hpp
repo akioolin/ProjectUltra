@@ -87,6 +87,8 @@ public:
     int getSamplesPerSymbol() const override;
     int getPreambleSamples() const override;
     int getMinSamplesForFrame() const override;
+    int getMinSamplesForControlFrame() const override;
+    int getMinSamplesForCWCount(int num_cw) const override;
 
     // ========================================================================
     // OFDM-COX Specific

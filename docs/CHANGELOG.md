@@ -10,6 +10,108 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-02: Fix OFDM_COX end-to-end on hardware (round 4)
+
+**What was broken:**
+OFDM_COX was failing on hardware with `frames_sent=16, retx=224, failed=15` —
+TEST FAILED on the simplest cable smoke test (5KB R1/2 AWGN SNR=20). The
+mode worked enough to handshake and detect Schmidl-Cox sync, but data
+frames never decoded. Per CLAUDE.md OFDM_COX was supposed to be working
+at SNR=20+, but no recent hardware verification confirmed that.
+
+**Root cause (real, not the brief's hypotheses):**
+Two distinct bugs:
+
+1. **Sample-sizing contract.** RX path's CW0 peek would escalate to a
+   4-CW frame after reading TOTAL_CW from the header, but
+   `OFDMNvisWaveform::getMinSamplesForFrame()` was still returning a
+   1-CW-sized slice (~9216 samples ≈ 8 OFDM symbols). The decoder then
+   fed only ~708 soft bits to LDPC — not enough to form even one
+   648-bit codeword — and bailed with `cw_ok=0 cw_fail=0`. This
+   matched the 16-retx pattern: every burst frame failed at the
+   sample-sizing step.
+2. **Schmidl-Cox sync alignment.** `OFDMDemodulator::searchForSync()`
+   was returning the LTS position one OFDM symbol too early, landing
+   on the final STS symbol instead of the first LTS pair. Subsequent
+   frame demod started from a bad anchor.
+
+The OFDM_COX path had drifted away from the multi-CW fixed-frame
+geometry that round 1 (CW aggregation) introduced.
+
+**What was changed:**
+- `src/waveform/ofdm_cox_waveform.cpp`:
+  - Corrected COX full preamble length to 7 OFDM symbols (was 6).
+  - `getMinSamplesForFrame()` now reflects the default 4-CW fixed
+    frame, not 1 CW.
+  - Added 1-CW control sizing helper.
+  - Added exact `getMinSamplesForCWCount()` so the consumer can
+    request the correct sample count based on the actual CW count
+    after CW0 peek.
+- `src/ofdm/demodulator.cpp::searchForSync()`: external Schmidl-Cox
+  LTS-start selection now subtracts an OFDM symbol only when the
+  previous position is actually an LTS pair (verified via
+  correlation magnitude check, threshold 0.85). Avoids the
+  off-by-one that was landing on the trailing STS.
+- `tests/test_waveform_loopback.cpp`:
+  - `test_ofdm_cox_fixed_frame_roundtrip` — encode/decode a 4-CW R1/2
+    OFDM_COX fixed frame, verify payload roundtrip
+  - `test_ofdm_cox_16_frame_burst_roundtrip` — encode 16 frames in
+    a burst, decode all 16, verify each.
+
+These tests would have caught the bug before hardware time.
+
+**How it's properly fixed:**
+- The sample-sizing contract is now consistent across CW0 peek and
+  the full-frame decode: both ask `getMinSamplesForCWCount(N)` for
+  the right N CWs at the current rate.
+- The sync alignment fix is gated on a magnitude check, so it only
+  fires when the previous position is plausibly an LTS pair —
+  doesn't introduce false alignments at low SNR.
+- No shared-state changes, no mutex changes, no thread handoffs
+  affected. Round 3's mutex-crash failure mode does not apply here.
+
+**Test verification:**
+- `cmake --build build -j4`: passed.
+- `ctest --test-dir build --output-on-failure`: 31/31 pass.
+- Internal `WaveformLoopback` count went from 216 → 218 (the 2 new
+  COX tests).
+- Hardware test (Mac↔Pi cable + injected AWGN SNR=20):
+  ```
+  EXTRA_CLI_ARGS="--waveform ofdm_cox" ./tools/run_hw_test.sh \
+    --file 5120 --rate r1_2 --snr 20 --channel awgn --inject
+  ```
+  Result: PASS, 39 frames sent, 16 retx, 0 failed, 1093 bps.
+  Pre-fix: 16 frames sent, 224 retx, 15 failed, transfer FAILED.
+- Logs: `/tmp/ultra_hw_20260501_223533`.
+
+**Throughput note:**
+1093 bps OFDM_COX QPSK is slightly below 1280 bps OFDM_CHIRP DQPSK at
+the same R1/2 — because the 16 retx ate airtime. The lighter Schmidl-Cox
+preamble gives a per-frame airtime advantage that this run didn't
+realize because of the retx storm. Unlocking COX's actual throughput
+advantage requires either tuning sync stability further, OR — much
+bigger leverage — wiring QAM16/32/64 modulation through the COX path
+(round 5+). At QAM16 R1/2 the theoretical rate is roughly 2x QPSK; at
+QAM64 R3/4 around 6x.
+
+**Known limitations:**
+- 40% retx rate on this run is high. The sync detection still has
+  some marginal positions that fail to decode cleanly even at SNR=20
+  AWGN. Worth investigating if retx rate stays high on QAM tests.
+- Default OFDM_COX config is 512-FFT/30-carrier QPSK. The NVIS-style
+  1024-FFT/59-carrier preset (`createNvisMode()`) is not yet wired
+  through the cli_simulator path.
+- Auto-rate ladder still doesn't promote to OFDM_COX or to QAM modes.
+  This round only validates the path works; promotion is a separate
+  round.
+
+**Path forward:**
+Round 5a: wire QAM16 modulator + demodulator + soft-bit demap.
+Round 5b: hardware-validate QAM16 R1/2 + R3/4 at SNR=20+.
+Round 6: QAM32. Then auto-rate ladder integration.
+
+---
+
 ## 2026-05-01: RX-side soft-combining HARQ (Chase combining) — round 2b
 
 **What was missing:**

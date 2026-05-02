@@ -1,6 +1,9 @@
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "waveform/ofdm_cox_waveform.hpp"
+#include "protocol/frame_v2.hpp"
+#include "ultra/ofdm_link_adaptation.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <string>
@@ -29,6 +32,37 @@ Bytes makeEncodedCodeword() {
         encoded[i] = static_cast<uint8_t>((i * 37u + 0x5Au) & 0xFFu);
     }
     return encoded;
+}
+
+Bytes makePayload(size_t size, uint8_t seed) {
+    Bytes payload(size);
+    for (size_t i = 0; i < payload.size(); ++i) {
+        payload[i] = static_cast<uint8_t>((seed + i * 17u + (i >> 1)) & 0xFFu);
+    }
+    return payload;
+}
+
+ModemConfig makeCoxConfig() {
+    ModemConfig cfg;
+    cfg.sample_rate = 48000;
+    cfg.fft_size = 1024;
+    cfg.num_carriers = 59;
+    cfg.cp_mode = CyclicPrefixMode::SHORT;
+    cfg.symbol_guard = 0;
+    cfg.center_freq = 1500.0f;
+    cfg.modulation = Modulation::DQPSK;
+    cfg.code_rate = CodeRate::R1_2;
+    cfg.use_pilots = false;
+    cfg.pilot_spacing = 10;
+    return cfg;
+}
+
+int bitsPerOFDMSymbol(const ModemConfig& cfg) {
+    return ofdm_link_adaptation::bitsPerOFDMSymbol(
+        static_cast<int>(cfg.num_carriers),
+        cfg.use_pilots,
+        static_cast<int>(cfg.pilot_spacing),
+        cfg.modulation);
 }
 
 void append(Samples& dst, const Samples& src) {
@@ -66,6 +100,62 @@ bool processFromSync(IWaveform& waveform, const Samples& audio, const SyncResult
     CHECK(has_finite_llr, label + ": demodulated LLRs should contain finite non-zero values");
     CHECK(waveform.estimatedSNR() > -20.0f, label + ": SNR estimate should be sane");
 
+    waveform.reset();
+    return true;
+}
+
+Samples encodeCoxFixedFrame(OFDMNvisWaveform& waveform, const Bytes& frame_data,
+                            const ModemConfig& cfg, int cw_count) {
+    const int bps = bitsPerOFDMSymbol(cfg);
+    Bytes encoded = protocol::v2::encodeFixedFrame(
+        frame_data, cfg.code_rate, cw_count, true, static_cast<size_t>(bps));
+
+    Samples audio;
+    append(audio, waveform.generatePreamble());
+    append(audio, waveform.modulate(encoded));
+    return audio;
+}
+
+bool decodeCoxFixedFrameAt(OFDMNvisWaveform& waveform, const Samples& audio,
+                           size_t search_offset, const Bytes& expected_frame,
+                           const ModemConfig& cfg, int cw_count,
+                           size_t& next_offset, const std::string& label) {
+    CHECK(search_offset < audio.size(), label + ": search offset should be in audio");
+
+    SampleSpan search(audio.data() + search_offset, audio.size() - search_offset);
+    SyncResult sync;
+    CHECK(waveform.detectSync(search, sync, 0.50f), label + ": sync should be detected");
+    CHECK(sync.start_sample >= 0, label + ": sync start should be non-negative");
+
+    const size_t abs_sync = search_offset + static_cast<size_t>(sync.start_sample);
+    const size_t frame_samples = static_cast<size_t>(waveform.getMinSamplesForCWCount(cw_count));
+    CHECK(frame_samples > static_cast<size_t>(waveform.getMinSamplesForControlFrame()),
+          label + ": 4-CW sample requirement should exceed 1-CW control size");
+    CHECK(abs_sync + frame_samples <= audio.size(),
+          label + ": audio should contain the full fixed-CW frame after sync");
+
+    waveform.setFrequencyOffset(sync.cfo_hz);
+    waveform.setAbsoluteTrainingPosition(abs_sync);
+    CHECK(waveform.process(SampleSpan(audio.data() + abs_sync, frame_samples)),
+          label + ": waveform should process full fixed-CW slice");
+
+    auto soft_bits = waveform.getSoftBits();
+    const size_t expected_bits = static_cast<size_t>(cw_count) * protocol::v2::LDPC_CODEWORD_BITS;
+    CHECK(soft_bits.size() >= expected_bits,
+          label + ": fixed-CW slice should yield all LDPC codewords");
+
+    auto status = protocol::v2::decodeFixedFrame(
+        soft_bits, cfg.code_rate, cw_count, true,
+        static_cast<size_t>(bitsPerOFDMSymbol(cfg)));
+    CHECK(status.allSuccess(), label + ": LDPC fixed-frame decode should succeed");
+
+    auto decoded = status.reassemble();
+    CHECK(decoded == expected_frame, label + ": decoded frame should match TX frame");
+
+    auto parsed = protocol::v2::DataFrame::deserialize(decoded);
+    CHECK(parsed.has_value(), label + ": decoded frame should parse as DATA");
+
+    next_offset = abs_sync + frame_samples;
     waveform.reset();
     return true;
 }
@@ -146,12 +236,75 @@ bool test_ofdm_chirp_data_preamble_loopback() {
     return processFromSync(waveform, audio, sync, "OFDM-CHIRP data");
 }
 
+bool test_ofdm_cox_fixed_frame_roundtrip() {
+    const ModemConfig cfg = makeCoxConfig();
+    constexpr int CW_COUNT = 4;
+
+    OFDMNvisWaveform tx(cfg);
+    tx.configure(cfg.modulation, cfg.code_rate);
+    OFDMNvisWaveform rx(cfg);
+    rx.configure(cfg.modulation, cfg.code_rate);
+
+    CHECK(rx.getMinSamplesForCWCount(CW_COUNT) > rx.getMinSamplesForControlFrame(),
+          "OFDM-COX fixed frame: 4-CW sample requirement should not collapse to 1 CW");
+
+    auto frame = protocol::v2::makeFixedDataFrame(
+        "ALPHA", "BRAVO", 42, makePayload(96, 0x31), cfg.code_rate, CW_COUNT).serialize();
+    Samples audio = encodeCoxFixedFrame(tx, frame, cfg, CW_COUNT);
+    appendTailMargin(audio, rx.getSamplesPerSymbol());
+
+    size_t next_offset = 0;
+    return decodeCoxFixedFrameAt(
+        rx, audio, 0, frame, cfg, CW_COUNT, next_offset,
+        "OFDM-COX fixed frame");
+}
+
+bool test_ofdm_cox_16_frame_burst_roundtrip() {
+    const ModemConfig cfg = makeCoxConfig();
+    constexpr int CW_COUNT = 4;
+    constexpr int FRAME_COUNT = 16;
+
+    OFDMNvisWaveform tx(cfg);
+    tx.configure(cfg.modulation, cfg.code_rate);
+    OFDMNvisWaveform rx(cfg);
+    rx.configure(cfg.modulation, cfg.code_rate);
+
+    Samples burst;
+    std::vector<Bytes> frames;
+    frames.reserve(FRAME_COUNT);
+    for (int i = 0; i < FRAME_COUNT; ++i) {
+        auto frame = protocol::v2::makeFixedDataFrame(
+            "ALPHA", "BRAVO", static_cast<uint16_t>(100 + i),
+            makePayload(80 + static_cast<size_t>(i % 7), static_cast<uint8_t>(0x40 + i)),
+            cfg.code_rate, CW_COUNT).serialize();
+        auto one = encodeCoxFixedFrame(tx, frame, cfg, CW_COUNT);
+        append(burst, one);
+        frames.push_back(std::move(frame));
+    }
+    appendTailMargin(burst, rx.getSamplesPerSymbol());
+
+    size_t search_offset = 0;
+    for (int i = 0; i < FRAME_COUNT; ++i) {
+        size_t next_offset = 0;
+        CHECK(decodeCoxFixedFrameAt(
+                  rx, burst, search_offset, frames[static_cast<size_t>(i)],
+                  cfg, CW_COUNT, next_offset,
+                  "OFDM-COX 16-frame burst frame " + std::to_string(i)),
+              "OFDM-COX 16-frame burst: frame should decode");
+        search_offset = next_offset;
+    }
+
+    return true;
+}
+
 }  // namespace
 
 int main() {
     test_ofdm_cox_clean_loopback();
     test_ofdm_chirp_full_preamble_loopback();
     test_ofdm_chirp_data_preamble_loopback();
+    test_ofdm_cox_fixed_frame_roundtrip();
+    test_ofdm_cox_16_frame_burst_roundtrip();
 
     if (tests_failed != 0) {
         std::cout << "WaveformLoopback: " << (tests_run - tests_failed)
