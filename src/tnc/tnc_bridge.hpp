@@ -55,6 +55,9 @@ public:
     virtual float getMeasuredSNR() const = 0;
     virtual protocol::WaveformMode getNegotiatedMode() const = 0;
     virtual void setPreferredMode(protocol::WaveformMode mode) = 0;
+    virtual protocol::ConnectionStats getStats() const = 0;
+    virtual Modulation getDataModulation() const = 0;
+    virtual CodeRate getDataCodeRate() const = 0;
 
     virtual void setConnectionChangedCallback(ConnectionChangedCallback cb) = 0;
     virtual void setIncomingCallCallback(IncomingCallCallback cb) = 0;
@@ -89,6 +92,7 @@ public:
     int getCurrentSNR_db() const override;
     int getCurrentBitrate_bps() const override;
     State getState() const override;
+    ModemStats getStats() const override;
 
     void start();
     void stop();

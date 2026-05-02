@@ -1,7 +1,9 @@
 #include "tnc_bridge.hpp"
 
 #include "gui/audio_engine.hpp"
+#include "protocol/frame_v2.hpp"
 #include "tnc_server.hpp"
+#include "ultra/types.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -67,6 +69,18 @@ public:
 
     void setPreferredMode(protocol::WaveformMode mode) override {
         engine_.setPreferredMode(mode);
+    }
+
+    protocol::ConnectionStats getStats() const override {
+        return engine_.getStats();
+    }
+
+    Modulation getDataModulation() const override {
+        return engine_.getDataModulation();
+    }
+
+    CodeRate getDataCodeRate() const override {
+        return engine_.getDataCodeRate();
     }
 
     void setConnectionChangedCallback(ConnectionChangedCallback cb) override {
@@ -286,6 +300,24 @@ int TNCBridge::getCurrentBitrate_bps() const {
 
 State TNCBridge::getState() const {
     return state_.load(std::memory_order_acquire);
+}
+
+ModemStats TNCBridge::getStats() const {
+    ModemStats out;
+    const protocol::ConnectionStats stats = engine_.getStats();
+    out.frames_sent = stats.arq.frames_sent;
+    out.frames_received = stats.arq.frames_received;
+    out.retransmissions = stats.arq.retransmissions;
+    out.timeouts = stats.arq.timeouts;
+    out.failed = stats.arq.failed;
+    out.out_of_order = stats.arq.out_of_order;
+    out.code_rate = codeRateToString(engine_.getDataCodeRate());
+    out.modulation = modulationToString(engine_.getDataModulation());
+    out.waveform = protocol::waveformModeToString(engine_.getNegotiatedMode());
+    out.snr_db = getCurrentSNR_db();
+    out.bitrate_bps = getCurrentBitrate_bps();
+    out.tx_backlog_bytes = getTxBacklogBytes();
+    return out;
 }
 
 void TNCBridge::start() {

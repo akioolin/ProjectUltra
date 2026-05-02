@@ -218,6 +218,8 @@ bool TNCSession::handleControlLine(std::string_view line) {
         cmdIgnoreKissDcd(args);
     } else if (command == "RETRIES" || command == "CALLINT") {
         cmdIntegerNoop(args);
+    } else if (command == "STATS") {
+        cmdStats(args);
     } else if (command.rfind("BW", 0) == 0) {
         if (!trimView(args).empty()) {
             emitWrong();
@@ -708,6 +710,27 @@ void TNCSession::cmdIntegerNoop(std::string_view args) {
     } else {
         emitWrong();
     }
+}
+
+void TNCSession::cmdStats(std::string_view args) {
+    if (!trimView(args).empty()) {
+        emitWrong();
+        return;
+    }
+
+    const ModemStats s = modem_.getStats();
+    char buf[256];
+    std::snprintf(buf, sizeof(buf),
+                  "STATS frames_sent=%d frames_recv=%d retx=%d timeouts=%d "
+                  "failed=%d out_of_order=%d rate=%s mod=%s mode=%s snr=%d "
+                  "bps=%d backlog=%d\r",
+                  s.frames_sent, s.frames_received, s.retransmissions,
+                  s.timeouts, s.failed, s.out_of_order,
+                  s.code_rate.empty() ? "?" : s.code_rate.c_str(),
+                  s.modulation.empty() ? "?" : s.modulation.c_str(),
+                  s.waveform.empty() ? "?" : s.waveform.c_str(),
+                  s.snr_db, s.bitrate_bps, s.tx_backlog_bytes);
+    cmd_emit_(buf);
 }
 
 } // namespace ultra::tnc

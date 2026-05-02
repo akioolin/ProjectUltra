@@ -88,6 +88,7 @@ private:
     void cmdWinlink(std::string_view args);
     void cmdIgnoreKissDcd(std::string_view args);
     void cmdIntegerNoop(std::string_view args);
+    void cmdStats(std::string_view args);
 };
 
 } // namespace ultra::tnc

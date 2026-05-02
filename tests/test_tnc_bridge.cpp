@@ -108,6 +108,22 @@ struct FakeProtocolEngine : ProtocolEnginePort {
         preferred_mode = mode;
     }
 
+    ultra::protocol::ConnectionStats stats {};
+    Modulation data_modulation = Modulation::DQPSK;
+    CodeRate data_code_rate = CodeRate::R1_2;
+
+    ultra::protocol::ConnectionStats getStats() const override {
+        return stats;
+    }
+
+    Modulation getDataModulation() const override {
+        return data_modulation;
+    }
+
+    CodeRate getDataCodeRate() const override {
+        return data_code_rate;
+    }
+
     void setConnectionChangedCallback(ConnectionChangedCallback cb) override {
         connection_cb = std::move(cb);
     }

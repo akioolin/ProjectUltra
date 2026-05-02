@@ -50,8 +50,26 @@ The TNC shell accepts the Phase 1/2 command set:
 - `BUFFER`
 - `SN`
 - `BITRATE`
+- `STATS` (ProjectUltra extension — not in VARA. See below.)
 - `COMPRESSION`, `CHAT`, `CWID`
 - `PUBLIC`, `P2P`, `WINLINK`, `IGNOREKISSDCD`, `RETRIES`, `CALLINT`
+
+### STATS
+
+`STATS\r` returns a single-line snapshot of ARQ counters and the current
+PHY configuration:
+
+```text
+STATS frames_sent=42 frames_recv=38 retx=5 timeouts=2 failed=0 \
+  out_of_order=1 rate=R1_2 mod=DQPSK mode=OFDM_CHIRP snr=15 bps=2300 \
+  backlog=128
+```
+
+Fields are space-separated `key=value` pairs. Counters are session-
+scoped (cleared on disconnect/reset). `rate`, `mod`, `mode` track the
+current adaptive selection; `snr`/`bps` mirror the existing `SN`/`BITRATE`
+events; `backlog` mirrors `BUFFER`. Pat clients ignore unknown commands,
+so this is safe to leave on.
 
 Bandwidth mapping:
 

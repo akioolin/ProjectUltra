@@ -9,6 +9,7 @@
 #include <vector>
 
 using ultra::tnc::ModemAdapter;
+using ultra::tnc::ModemStats;
 using ultra::tnc::State;
 using ultra::tnc::TNCSession;
 
@@ -32,6 +33,7 @@ struct FakeModemAdapter : ModemAdapter {
     int snr_db = 0;
     int bitrate_bps = 0;
     State state = State::IDLE;
+    ModemStats stats {};
 
     void setMyCall(const std::vector<std::string>& calls) override {
         set_mycall_calls.push_back(calls);
@@ -75,6 +77,10 @@ struct FakeModemAdapter : ModemAdapter {
 
     State getState() const override {
         return state;
+    }
+
+    ModemStats getStats() const override {
+        return stats;
     }
 };
 
@@ -661,6 +667,37 @@ int main() {
         h.modem.bitrate_bps = 1800;
         h.session.handleControlLine("BITRATE");
         expectLines(h, {"BITRATE (0) 1800 BPS\r"});
+    });
+    runner.run("STATS command emits ARQ + PHY snapshot", [] {
+        Harness h;
+        h.modem.stats.frames_sent = 42;
+        h.modem.stats.frames_received = 38;
+        h.modem.stats.retransmissions = 5;
+        h.modem.stats.timeouts = 2;
+        h.modem.stats.failed = 0;
+        h.modem.stats.out_of_order = 1;
+        h.modem.stats.code_rate = "R1_2";
+        h.modem.stats.modulation = "DQPSK";
+        h.modem.stats.waveform = "OFDM_CHIRP";
+        h.modem.stats.snr_db = 15;
+        h.modem.stats.bitrate_bps = 2300;
+        h.modem.stats.tx_backlog_bytes = 128;
+        h.session.handleControlLine("STATS");
+        expectLines(h, {"STATS frames_sent=42 frames_recv=38 retx=5 timeouts=2 "
+                        "failed=0 out_of_order=1 rate=R1_2 mod=DQPSK "
+                        "mode=OFDM_CHIRP snr=15 bps=2300 backlog=128\r"});
+    });
+    runner.run("STATS with arguments is WRONG", [] {
+        Harness h;
+        h.session.handleControlLine("STATS extra");
+        expectLines(h, {"WRONG\r"});
+    });
+    runner.run("STATS on unconfigured modem returns placeholders", [] {
+        Harness h;
+        h.session.handleControlLine("STATS");
+        expectLines(h, {"STATS frames_sent=0 frames_recv=0 retx=0 timeouts=0 "
+                        "failed=0 out_of_order=0 rate=? mod=? mode=? snr=0 "
+                        "bps=0 backlog=0\r"});
     });
     runner.run("COMPRESSION TEXT is OK", [] {
         Harness h;
