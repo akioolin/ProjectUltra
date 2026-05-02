@@ -89,10 +89,12 @@ add_library(ultra_core STATIC
     src/protocol/file_transfer.cpp
     src/protocol/compression.cpp
     # VARA-compatible TNC protocol shell
+    # (tnc_bridge.cpp is added conditionally below — depends on SDL2 via
+    #  AudioEngine, so it cannot live in the unconditional ultra_core
+    #  sources. Builds without SDL2 still get session + server.)
     src/tnc/tnc_session.cpp
     src/tnc/socket_compat.cpp
     src/tnc/tnc_server.cpp
-    src/tnc/tnc_bridge.cpp
     # Waveform abstraction layer
     src/waveform/mc_dpsk_waveform.cpp
     src/waveform/ofdm_cox_waveform.cpp
@@ -126,6 +128,10 @@ if(SDL2_FOUND)
         target_include_directories(ultra_core PUBLIC ${SDL2_INCLUDE_DIRS})
         target_link_libraries(ultra_core PUBLIC ${SDL2_LIBRARIES})
     endif()
+    # TNCBridge wraps AudioEngine (SDL2-only). Add to ultra_core only when
+    # SDL2 is available; otherwise CI's Test/Sanitizer/Coverage steps that
+    # build without SDL2 fail to compile the unconditional core.
+    target_sources(ultra_core PRIVATE src/tnc/tnc_bridge.cpp)
 endif()
 
 if(ULTRA_USE_FFTW AND FFTW3_FOUND)
