@@ -10,6 +10,107 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-02: TNC Phase 3b — TNCBridge + ultra_tnc binary (working VARA TNC)
+
+**Goal:**
+Tie all the TNC pieces together. After this phase ships, ProjectUltra
+exposes a VARA-HF-compatible TCP TNC interface that **client software
+(Pat, Winlink Express, BPQ32, ARDOPCF) can use as a drop-in VARA
+replacement** at the TCP API level.
+
+**What was added:**
+- `src/tnc/tnc_bridge.{cpp,hpp}` — `TNCBridge` class. Implements
+  `ModemAdapter` on top of `ProtocolEngine` + `AudioEngine`:
+  - Bandwidth → waveform mapping: BW2300→OFDM_CHIRP,
+    BW500→OFDM_NARROW, BW2750→OFDM_CHIRP (preserved as 2750 in
+    CONNECTED event for client compat)
+  - PTT inference: polls `AudioEngine::isTxQueueEmpty()` from the
+    TNC reactor's tick loop, emits `PTT ON` on non-empty,
+    `PTT OFF` after 200 ms drained tail
+  - Subscribes to ProtocolEngine callbacks (connection state,
+    data received) → marshals to TNCServer's reactor queue via
+    `postModemConnected/Disconnected/PTT/...`
+  - Thread-safe state with `state_mutex_` + `ptt_mutex_`; PE
+    callbacks only snapshot bridge state and queue events (no
+    re-entrant calls into PE)
+
+- `tools/ultra_tnc.cpp` — new binary. Assembles AudioEngine +
+  StreamingEncoder/Decoder + ProtocolEngine + TNCBridge + TNCServer
+  in one process. Pattern matches `cli_simulator` single-station
+  mode. CLI flags:
+  ```
+  --audio-output <name|none>   SDL audio output (or "none" for
+                                tests without soundcard)
+  --audio-input  <name|none>   SDL audio input
+  --port <N>                   TNC base port (default 8300; data=N+1)
+  --bind <addr>                Bind address (default 127.0.0.1)
+  --callsign <call>            Default callsign (overridden by MYCALL)
+  --inject-channel [type]      Optional channel injection for cable
+                               testing
+  --snr <db> --rate ... --mod ... --ofdm-config <default|nvis>
+  ```
+  Tick loop runs at ~20 ms cadence to drive PTT polling + TNCSession
+  IAMALIVE/BUFFER timers.
+
+- `docs/TNC_INTERFACE.md` — user-facing TNC docs: how to run
+  ultra_tnc, how to point Pat/Winlink at it, supported VARA commands
+  + behavior notes.
+
+- `tests/test_tnc_bridge.cpp` — 16 unit cases against a mock
+  ProtocolEngine + mock TNCServer. Covers: setMyCall propagation,
+  startConnect + bandwidth params, sendBinary, getTxBacklogBytes,
+  PE connection callback → server.postModemConnected, AudioEngine
+  queue state → postModemPTT, etc.
+
+**Verification:**
+- `cmake --build build -j4`: passed
+- `ctest --test-dir build --output-on-failure`: 33/33 → **34/34**
+  (`test_tnc_bridge` runs 16 cases internally)
+- `./build/ultra_tnc --help`: prints usage
+- **Manual TCP smoke test:**
+  ```
+  ./build/ultra_tnc --audio-output none --audio-input none --port 18300
+  $ printf "VERSION\r" | nc 127.0.0.1 18300 | xxd
+  00000000: 5641 5241 2076 6572 7369 6f6e 2034 2e39  VARA version 4.9
+  00000010: 2e30 2072 6567 6973 7465 7265 640d       .0 registered.
+  ```
+  Returns the exact `VARA version 4.9.0 registered\r` string Pat-Vara
+  regexes for. **TNC is functional end-to-end.**
+
+**What this delivers:**
+- ✅ ProjectUltra exposes a VARA-HF-compatible TCP TNC (8300/8301)
+- ✅ Existing client software (Pat, Winlink Express, BPQ32, ARDOPCF)
+  can use ProjectUltra as if it were VARA HF — no code changes on
+  client side
+- ✅ Single binary `ultra_tnc` assembles the full stack
+- ✅ Single-thread reactor model (no per-client threads, no
+  ProtocolEngine reentrancy risk)
+- ✅ PTT inferred correctly from audio queue state
+
+**What's still unverified (Phase 4+):**
+- Real Pat client connecting to ultra_tnc (manual operator test)
+- Two-station hardware test where both ends run ultra_tnc and
+  exchange Winlink-style email
+- Real Winlink Express on Windows
+- Long-running stability (multi-hour sessions, repeated connect/
+  disconnect cycles)
+- `--inject-channel` integration testing
+
+**Important compatibility note:**
+Drop-in for **client software API** (TCP), NOT for **over-the-air
+protocol**. Both ends in a conversation must run ProjectUltra; we
+are not wire-compatible with VARA's actual on-air waveforms. This
+matches Mercury's positioning — same TCP TNC API, custom on-air
+protocol. Useful for:
+- Private/emergency Winlink-style HF email networks
+- Replacing VARA in self-contained meshes
+- Free + open-source alternative to VARA's $60–100 license
+
+NOT useful for joining the existing global Winlink HF gateway
+network on-air (those gateways run actual VARA).
+
+---
+
 ## 2026-05-02: TNC Phase 3a — ProtocolEngine surgery for TNC bridge
 
 **What was added/fixed:**

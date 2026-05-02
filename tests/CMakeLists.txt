@@ -39,6 +39,21 @@ add_executable(test_tnc_server test_tnc_server.cpp)
 target_link_libraries(test_tnc_server PRIVATE ultra_core)
 add_test(NAME TNCServer COMMAND test_tnc_server)
 
+if(SDL2_FOUND)
+    add_executable(test_tnc_bridge
+        test_tnc_bridge.cpp
+        ../src/gui/audio_engine.cpp
+    )
+    target_include_directories(test_tnc_bridge PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    )
+    target_compile_definitions(test_tnc_bridge PRIVATE SDL_MAIN_HANDLED)
+    target_link_libraries(test_tnc_bridge PRIVATE ultra_core)
+    add_test(NAME TNCBridge COMMAND test_tnc_bridge)
+else()
+    message(STATUS "test_tnc_bridge disabled: SDL2 not found")
+endif()
+
 add_executable(test_connection_policy test_connection_policy.cpp)
 target_link_libraries(test_connection_policy PRIVATE ultra_core)
 add_test(NAME ConnectionPolicy COMMAND test_connection_policy)

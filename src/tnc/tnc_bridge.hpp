@@ -1,0 +1,135 @@
+#pragma once
+
+#include "modem_adapter.hpp"
+#include "protocol/protocol_engine.hpp"
+
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
+
+namespace ultra::gui {
+class AudioEngine;
+}
+
+namespace ultra::tnc {
+
+class TNCServer;
+
+class TNCBridgeEventSink {
+public:
+    virtual ~TNCBridgeEventSink() = default;
+
+    virtual void postModemConnected(const std::string& src, const std::string& dst, int bw) = 0;
+    virtual void postModemDisconnected() = 0;
+    virtual void postModemPTT(bool on) = 0;
+    virtual void postModemDataReceived(std::vector<uint8_t> bytes) = 0;
+    virtual void postModemBufferLevel(int bytes) = 0;
+    virtual void postModemSNR(float db) = 0;
+    virtual void postModemBitrate(int bps) = 0;
+    virtual void postModemIncomingCall(std::string peer) = 0;
+};
+
+class ProtocolEnginePort {
+public:
+    using ConnectionChangedCallback = protocol::ProtocolEngine::ConnectionChangedCallback;
+    using IncomingCallCallback = protocol::ProtocolEngine::IncomingCallCallback;
+    using DataReceivedCallback = protocol::ProtocolEngine::DataReceivedCallback;
+
+    virtual ~ProtocolEnginePort() = default;
+
+    virtual void setLocalCallsign(const std::string& call) = 0;
+    virtual std::string getLocalCallsign() const = 0;
+    virtual void setAutoAccept(bool auto_accept) = 0;
+    virtual bool connect(const std::string& remote_call) = 0;
+    virtual void disconnect() = 0;
+    virtual void abortTxNow() = 0;
+    virtual bool sendBinary(const ultra::Bytes& data) = 0;
+    virtual size_t getTxBacklogBytes() const = 0;
+    virtual protocol::ConnectionState getState() const = 0;
+    virtual std::string getRemoteCallsign() const = 0;
+    virtual float getMeasuredSNR() const = 0;
+    virtual protocol::WaveformMode getNegotiatedMode() const = 0;
+    virtual void setPreferredMode(protocol::WaveformMode mode) = 0;
+
+    virtual void setConnectionChangedCallback(ConnectionChangedCallback cb) = 0;
+    virtual void setIncomingCallCallback(IncomingCallCallback cb) = 0;
+    virtual void setDataReceivedCallback(DataReceivedCallback cb) = 0;
+};
+
+class TNCBridge : public ModemAdapter {
+public:
+    using ConnectionChangedCallback = protocol::ProtocolEngine::ConnectionChangedCallback;
+    using PreferredWaveformChangedCallback = std::function<void(protocol::WaveformMode mode)>;
+
+    TNCBridge(protocol::ProtocolEngine& engine, gui::AudioEngine& audio);
+    TNCBridge(ProtocolEnginePort& engine, gui::AudioEngine& audio);
+    ~TNCBridge() override;
+
+    void attachServer(TNCServer* server);
+    void attachEventSink(TNCBridgeEventSink* sink);
+
+    void setConnectionChangedCallback(ConnectionChangedCallback cb);
+    void setPreferredWaveformChangedCallback(PreferredWaveformChangedCallback cb);
+
+    void setMyCall(const std::vector<std::string>& calls) override;
+    void setBandwidth(int hz) override;
+    void setListen(bool on) override;
+    void startConnect(const std::string& src, const std::string& dst) override;
+    void disconnect() override;
+    void abort() override;
+    void sendBinary(const std::vector<uint8_t>& bytes) override;
+
+    int getTxBackloggBytes() const override;
+    int getTxBacklogBytes() const;
+    int getCurrentSNR_db() const override;
+    int getCurrentBitrate_bps() const override;
+    State getState() const override;
+
+    void start();
+    void stop();
+    void tick(uint32_t elapsed_ms);
+
+private:
+    void wirePECallbacks();
+    void clearPECallbacks();
+    void onConnectionChanged(protocol::ConnectionState state, const std::string& info);
+    void onDataReceived(const ultra::Bytes& bytes, bool more_data);
+    void onIncomingCall(const std::string& peer);
+    void onAudioQueueState(bool active, uint32_t elapsed_ms);
+
+    static protocol::WaveformMode waveformForBandwidth(int hz);
+    static int bitrateEstimate(protocol::WaveformMode mode);
+    static State toTNCState(protocol::ConnectionState state);
+    void postPTT(bool on);
+
+    std::unique_ptr<ProtocolEnginePort> owned_engine_;
+    ProtocolEnginePort& engine_;
+    gui::AudioEngine& audio_;
+
+    std::unique_ptr<TNCBridgeEventSink> owned_event_sink_;
+    std::atomic<TNCBridgeEventSink*> event_sink_{nullptr};
+
+    mutable std::mutex state_mutex_;
+    std::string local_call_;
+    std::string remote_call_;
+    int requested_bw_ = 2300;
+
+    std::atomic<State> state_{State::IDLE};
+    std::atomic<bool> started_{false};
+    std::atomic<bool> ptt_active_{false};
+    std::mutex ptt_mutex_;
+    uint32_t ptt_tail_ms_ = 0;
+
+    mutable std::mutex callback_mutex_;
+    ConnectionChangedCallback connection_changed_cb_;
+    PreferredWaveformChangedCallback preferred_waveform_changed_cb_;
+
+    static constexpr uint32_t kPttTailMs = 200;
+};
+
+} // namespace ultra::tnc

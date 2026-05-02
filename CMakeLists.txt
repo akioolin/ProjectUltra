@@ -91,6 +91,7 @@ add_library(ultra_core STATIC
     # VARA-compatible TNC protocol shell
     src/tnc/tnc_session.cpp
     src/tnc/tnc_server.cpp
+    src/tnc/tnc_bridge.cpp
     # Waveform abstraction layer
     src/waveform/mc_dpsk_waveform.cpp
     src/waveform/ofdm_cox_waveform.cpp
@@ -112,6 +113,15 @@ target_include_directories(ultra_core PUBLIC
 target_link_libraries(ultra_core PUBLIC
     Threads::Threads
 )
+
+if(SDL2_FOUND)
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(ultra_core PUBLIC SDL2::SDL2)
+    else()
+        target_include_directories(ultra_core PUBLIC ${SDL2_INCLUDE_DIRS})
+        target_link_libraries(ultra_core PUBLIC ${SDL2_LIBRARIES})
+    endif()
+endif()
 
 if(ULTRA_USE_FFTW AND FFTW3_FOUND)
     target_link_libraries(ultra_core PUBLIC PkgConfig::FFTW3)
@@ -166,6 +176,25 @@ if(ULTRA_BUILD_TOOLS)
             target_include_directories(cli_simulator PRIVATE ${SDL2_INCLUDE_DIRS})
             target_link_libraries(cli_simulator PRIVATE ${SDL2_LIBRARIES})
         endif()
+    endif()
+
+    if(SDL2_FOUND)
+        add_executable(ultra_tnc
+            tools/ultra_tnc.cpp
+            src/gui/audio_engine.cpp
+            src/gui/modem/streaming_decoder.cpp
+            src/gui/modem/streaming_encoder.cpp
+        )
+        target_include_directories(ultra_tnc PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+        )
+        target_compile_definitions(ultra_tnc PRIVATE
+            ULTRA_HAVE_SDL2
+            SDL_MAIN_HANDLED
+        )
+        target_link_libraries(ultra_tnc PRIVATE ultra_core)
+    else()
+        message(STATUS "ultra_tnc disabled: SDL2 not found")
     endif()
 
     # Threaded simulator - proper real-time audio simulation
