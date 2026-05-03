@@ -1450,15 +1450,21 @@ void Connection::configureArqForCurrentDataMode() {
         arq_.setAckRepeatCount(1);
         LOG_MODEM(INFO, "Connection: ARQ window=1, timeout=18s, ack_repeat=1 (MC-DPSK)");
     } else if (negotiated_mode_ == WaveformMode::OFDM_NARROW) {
-        // Selective-repeat window=2 lets us overlap TX of frame N+1 with
-        // the receiver's decode of frame N, ~doubling effective TX duty
-        // cycle. Per Codex audit: keep window small (=2) on narrow because
-        // 30m fading correlates across frames at ~0.5-1 Hz Doppler; a
-        // bigger window risks losing both frames to the same fade. Worth
-        // ~+14-46 bps depending on rate. Stop-and-wait (=1) is the
-        // fallback if real-OTA testing shows fade correlation is worse
-        // than expected.
-        constexpr size_t kNarrowWindow = 2;
+        // Selective-repeat window=3 — chosen after A/B in cli_simulator
+        // SNR=8 good fading R1/4 7-message test:
+        //   window=1 (was): 180 s wall-clock
+        //   window=2:        116 s (-36 %)
+        //   window=3:         92 s (-49 %, +96 % throughput)
+        //   window=4:         69 s (-62 %)
+        //   window=8:         87 s (diminishing returns)
+        // Settled on 3 because Codex audit explicitly capped at "2, maybe
+        // 3 after tests"; window=4 hasn't been audited even though it
+        // also passes every documented baseline. 30 m fading coherence
+        // on real channels could correlate across a 4-frame burst (each
+        // frame ~3.4 s) and turn one fade into 4 retransmits. If real-
+        // OTA testing later shows we have headroom, bump to 4 after a
+        // fresh audit. If correlated fades chew throughput, drop to 2.
+        constexpr size_t kNarrowWindow = 3;
         arq_.setWindowSize(kNarrowWindow);
         arq_.setMaxRetries(15);
         arq_.setSackDelay(120);

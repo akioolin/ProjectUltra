@@ -166,8 +166,8 @@ Interpretation of the 2026-04-29 robustness work:
 - **Interleaving:** Frame-level + optional channel interleaving (same as OFDM)
 - **Preamble:** Light preamble (LTS only) for data after handshake
 - **Dual-listen:** RX listens for both wideband AND narrowband chirps when idle
-- **ARQ:** Selective-repeat **window=2** (changed 2026-05-03 from stop-and-wait); ~55% wall-clock throughput improvement on the documented R1/4 baseline. ACK timeout scaled to cover the 2-frame burst.
-- **Throughput:** ~160 bps (R1/4) to ~360 bps (R1/2) — ~6× slower than wideband but works at 7.5 dB lower SNR
+- **ARQ:** Selective-repeat **window=3** (changed 2026-05-03 from stop-and-wait, then bumped from 2→3 after wall-clock A/B); ~96% throughput improvement on the documented R1/4 baseline. ACK timeout scaled to cover the 3-frame burst (~14 s).
+- **Throughput:** ~200 bps (R1/4) to ~450 bps (R1/2) — ~5× slower than wideband but works at 7.5 dB lower SNR
 
 ### Mode Selection Flow
 1. **Connection starts:** MC-DPSK for PING/PONG/CONNECT (wideband or narrowband chirp)
@@ -401,14 +401,14 @@ make -j4
 | Mode | Sync Method | SNR Range | Max Throughput | CFO Tolerance | Fading |
 |------|-------------|-----------|----------------|---------------|--------|
 | **MC-DPSK** | Dual Chirp | -3 to 10 dB | 938 bps | ±50 Hz | Good |
-| **OFDM_NARROW** | NB Chirp + LTS | 5-10 dB | ~360 bps (R1/2, window=2) | ±50 Hz | Good (R1/4) |
+| **OFDM_NARROW** | NB Chirp + LTS | 5-10 dB | ~450 bps (R1/2, window=3) | ±50 Hz | Good (R1/4) |
 | **OFDM_CHIRP** | Dual Chirp + LTS | 10-17 dB | 3.4 kbps | ±50 Hz | Good (R1/4) |
 | **OFDM_COX** | Schmidl-Cox | 17+ dB | 7.9 kbps | Needs testing | Poor |
 | **SC-DPSK** | Barker-13 | -8 to -3 dB | 125 bps | N/A | Good |
 
 **Waveform Selection:**
 - Poor HF channels (2ms delay): Use MC-DPSK
-- Low SNR (5-10 dB) with good/moderate fading: Use OFDM_NARROW (~160 bps R1/4, ~360 bps R1/2 — selective-repeat window=2)
+- Low SNR (5-10 dB) with good/moderate fading: Use OFDM_NARROW (~200 bps R1/4, ~450 bps R1/2 — selective-repeat window=3)
 - Moderate/Good HF: Use OFDM_CHIRP (10-17 dB) or OFDM_COX (17+ dB)
 - Very low SNR: Use SC-DPSK or MC-DPSK
 - OTFS/MFSK values are reserved only and are not production-supported

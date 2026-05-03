@@ -125,19 +125,23 @@ void test_narrow_ofdm_timing_and_timeout() {
               computeNarrowOFDMAckTimeoutMs(Modulation::DQPSK),
           "narrow OFDM ACK timeout should scale with fixed-frame CW count");
 
-    // Selective-repeat window=2 added 2026-05-03 per Codex audit. The
-    // timeout has to cover the full 2-frame TX burst plus ACK turnaround
-    // — without scaling, the ARQ would fire before the second frame
-    // finishes transmitting and trigger a phantom timeout retry.
+    // Selective-repeat window=2/3 added 2026-05-03 per Codex audit. The
+    // timeout has to cover the full multi-frame TX burst plus ACK
+    // turnaround — without scaling, the ARQ would fire while later
+    // frames are still on-air and trigger a phantom timeout retry.
     const uint32_t w1 = computeNarrowOFDMAckTimeoutMs(Modulation::DQPSK, 4, 1);
     const uint32_t w2 = computeNarrowOFDMAckTimeoutMs(Modulation::DQPSK, 4, 2);
+    const uint32_t w3 = computeNarrowOFDMAckTimeoutMs(Modulation::DQPSK, 4, 3);
     CHECK(w1 == 7165, "window=1 timeout matches default behavior");
     CHECK(w2 > w1, "window=2 timeout scales above window=1");
+    CHECK(w3 > w2, "window=3 timeout scales above window=2");
     // For 4-CW DQPSK narrow, data_ms=3453, ack_ms=933, so:
-    //   tx_burst_ms = 2 * 3453 = 6906
-    //   timeout_ms = 6906 + 2*933 + 120 + max(700, 1726) = 10618
-    CHECK(w2 >= 10000 && w2 <= 11000,
-          "window=2 timeout should be ~10.6 s (matches connection.cpp log)");
+    //   window=2: tx_burst_ms = 2*3453 = 6906; timeout = 6906 + 2*933
+    //             + 120 + max(700, 1726) = 10618 ms
+    //   window=3: tx_burst_ms = 3*3453 = 10359; timeout = 10359 + 2*933
+    //             + 120 + max(700, 1726) = 14071 ms (current narrow default)
+    CHECK(w2 >= 10000 && w2 <= 11000, "window=2 timeout ~10.6 s");
+    CHECK(w3 >= 13500 && w3 <= 14500, "window=3 timeout ~14.0 s (current narrow default)");
 }
 
 void test_ofdm_profile_selection() {
