@@ -188,6 +188,11 @@ void TNCBridge::setPreferredWaveformChangedCallback(PreferredWaveformChangedCall
     preferred_waveform_changed_cb_ = std::move(cb);
 }
 
+void TNCBridge::setPttChangedCallback(PttChangedCallback cb) {
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    ptt_changed_cb_ = std::move(cb);
+}
+
 void TNCBridge::setMyCall(const std::vector<std::string>& calls) {
     if (calls.empty()) {
         return;
@@ -539,6 +544,15 @@ void TNCBridge::postPTT(bool on) {
 
     if (auto* sink = event_sink_.load(std::memory_order_acquire)) {
         sink->postModemPTT(on);
+    }
+
+    PttChangedCallback ptt_cb;
+    {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        ptt_cb = ptt_changed_cb_;
+    }
+    if (ptt_cb) {
+        ptt_cb(on);
     }
 }
 

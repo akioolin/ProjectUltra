@@ -1,0 +1,36 @@
+# ultra_tnc — sample config file
+#
+# Copy this file to one of:
+#   ./ultra_tnc.conf                       (cwd of where ultra_tnc runs)
+#   $XDG_CONFIG_HOME/ultra_tnc/config      (Linux)
+#   ~/.config/ultra_tnc/config             (Linux/macOS)
+#
+# Or pass --config /path/to/file on the command line.
+# Lines are key = value. Anything after '#' is a comment.
+# CLI flags override config-file values.
+
+# --- Identity ---
+callsign     = N0CALL          # Your amateur radio callsign
+
+# --- Audio devices ---
+# Use the names that ./ultra_tnc --help (or your OS) reports. "none"
+# disables that direction (useful for testing without a soundcard).
+audio_output = USB Audio CODEC
+audio_input  = USB Audio CODEC
+
+# --- TCP TNC API (where Pat / Winlink Express connect) ---
+port         = 8300            # cmd port; data port = port + 1
+bind         = 127.0.0.1       # 0.0.0.0 to accept LAN clients
+
+# --- Hardware PTT (optional; otherwise use VOX or rigctl on the client) ---
+# ptt_serial_port  = /dev/cu.usbserial-FT001   # Mac
+# ptt_serial_port  = /dev/ttyUSB0              # Linux / Pi
+# ptt_serial_port  = COM3                      # Windows
+# ptt_serial_baud  = 9600
+# ptt_serial_line  = rts                       # rts (default) or dtr
+# ptt_inactive_high = false                    # invert if your radio needs it
+
+# --- Modem PHY tuning (advanced; defaults are good for most users) ---
+# rate        = auto                            # auto | r1_4 | r1_2 | r2_3 | r3_4
+# mod         = auto                            # auto | dqpsk | d8psk | qpsk | qam16
+# ofdm_config = default                         # default | nvis

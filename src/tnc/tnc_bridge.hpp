@@ -68,6 +68,10 @@ class TNCBridge : public ModemAdapter {
 public:
     using ConnectionChangedCallback = protocol::ProtocolEngine::ConnectionChangedCallback;
     using PreferredWaveformChangedCallback = std::function<void(protocol::WaveformMode mode)>;
+    // Fires alongside the existing PTT event-sink notification so a host
+    // binary (e.g. ultra_tnc) can drive a hardware PTT line without
+    // routing through the TCP cmd port.
+    using PttChangedCallback = std::function<void(bool on)>;
 
     TNCBridge(protocol::ProtocolEngine& engine, gui::AudioEngine& audio);
     TNCBridge(ProtocolEnginePort& engine, gui::AudioEngine& audio);
@@ -78,6 +82,7 @@ public:
 
     void setConnectionChangedCallback(ConnectionChangedCallback cb);
     void setPreferredWaveformChangedCallback(PreferredWaveformChangedCallback cb);
+    void setPttChangedCallback(PttChangedCallback cb);
 
     void setMyCall(const std::vector<std::string>& calls) override;
     void setBandwidth(int hz) override;
@@ -144,6 +149,7 @@ private:
     mutable std::mutex callback_mutex_;
     ConnectionChangedCallback connection_changed_cb_;
     PreferredWaveformChangedCallback preferred_waveform_changed_cb_;
+    PttChangedCallback ptt_changed_cb_;
 
     static constexpr uint32_t kPttTailMs = 200;
 };

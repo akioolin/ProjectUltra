@@ -198,6 +198,7 @@ if(ULTRA_BUILD_TOOLS)
         add_executable(ultra_tnc
             tools/ultra_tnc.cpp
             src/gui/audio_engine.cpp
+            src/gui/serial_ptt.cpp
             src/gui/modem/streaming_decoder.cpp
             src/gui/modem/streaming_encoder.cpp
         )

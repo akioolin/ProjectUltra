@@ -1,6 +1,7 @@
 #include "gui/audio_engine.hpp"
 #include "gui/modem/streaming_decoder.hpp"
 #include "gui/modem/streaming_encoder.hpp"
+#include "gui/serial_ptt.hpp"
 #include "protocol/frame_v2.hpp"
 #include "protocol/protocol_engine.hpp"
 #include "protocol/waveform_selection.hpp"
@@ -15,8 +16,10 @@
 #include <chrono>
 #include <csignal>
 #include <cstdint>
+#include <cstdlib>
 #include <cctype>
 #include <cmath>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <optional>
@@ -61,6 +64,13 @@ struct Config {
     CodeRate forced_rate = CodeRate::AUTO;
     Modulation forced_mod = Modulation::AUTO;
     OFDMConfigPreset ofdm_config = OFDMConfigPreset::Default;
+    // Hardware PTT via serial line. Empty port = disabled (rely on VOX
+    // or an external CAT controller). When set, ultra_tnc opens the
+    // serial device and toggles RTS/DTR on each PTT transition.
+    std::string ptt_serial_port;
+    int ptt_serial_baud = 9600;
+    std::string ptt_serial_line = "rts";    // "rts" or "dtr"
+    bool ptt_inactive_high = false;          // true = inverted (some radios)
     bool help = false;
 };
 
@@ -128,6 +138,9 @@ std::optional<Modulation> parseModulation(const std::string& value) {
 
 void printUsage(std::ostream& out) {
     out << "ultra_tnc [options]\n"
+        << "  --config <path>             Read options from a config file\n"
+        << "                              (key = value, # comments). CLI\n"
+        << "                              flags override config-file values.\n"
         << "  --audio-output <name>       SDL audio output device, or none\n"
         << "  --audio-input <name>        SDL audio input device, or none\n"
         << "  --port <N>                  TNC command port (default: 8300; data=N+1)\n"
@@ -138,10 +151,162 @@ void printUsage(std::ostream& out) {
         << "  --rate <auto|r1_4|r1_2|r2_3|r3_4>\n"
         << "  --mod <auto|dqpsk|d8psk|dbpsk|qpsk|bpsk|qam16|qam32|qam64>\n"
         << "  --ofdm-config <default|nvis>\n"
-        << "  --help\n";
+        << "  --ptt-serial-port <path>    Serial device for hardware PTT\n"
+        << "                              (e.g. /dev/cu.usbserial or COM3)\n"
+        << "  --ptt-serial-baud <N>       Serial baud (default: 9600; line\n"
+        << "                              toggling works at any baud)\n"
+        << "  --ptt-serial-line <rts|dtr> Which line keys TX (default: rts)\n"
+        << "  --ptt-inactive-high         Some radios invert; default is\n"
+        << "                              inactive=low / asserted=high\n"
+        << "  --help\n"
+        << "\n"
+        << "Config file format (key=value, one per line, # comments):\n"
+        << "  audio_output = USB Audio CODEC\n"
+        << "  audio_input  = USB Audio CODEC\n"
+        << "  callsign     = N0CALL\n"
+        << "  port         = 8300\n"
+        << "  ptt_serial_port = /dev/cu.usbserial-FT001\n"
+        << "  ptt_serial_line = rts\n"
+        << "\n"
+        << "Default config search path: ./ultra_tnc.conf, then\n"
+        << "  $XDG_CONFIG_HOME/ultra_tnc/config (or ~/.config/ultra_tnc/config).\n";
+}
+
+// Apply one "key = value" pair from a config file or env. Mirrors the
+// CLI flag set so a user can point ultra_tnc at a config file and never
+// touch the command line again.
+bool applyConfigKey(const std::string& key, const std::string& value, Config& cfg) {
+    if (key == "audio_output" || key == "audio-output") {
+        cfg.audio_output = value;
+    } else if (key == "audio_input" || key == "audio-input") {
+        cfg.audio_input = value;
+    } else if (key == "port") {
+        if (!parseUint16(value, cfg.port) ||
+            cfg.port == std::numeric_limits<uint16_t>::max()) return false;
+    } else if (key == "bind" || key == "bind_address") {
+        cfg.bind_address = value;
+    } else if (key == "callsign") {
+        cfg.callsign = ultra::protocol::sanitizeCallsign(value);
+        if (cfg.callsign.empty()) return false;
+    } else if (key == "inject_channel" || key == "inject-channel") {
+        cfg.inject_channel = (value == "true" || value == "1" || value == "yes");
+        if (!cfg.inject_channel && !value.empty() && value != "false" &&
+            value != "0" && value != "no") {
+            cfg.inject_channel = true;
+            cfg.inject_channel_type = lower(value);
+        }
+    } else if (key == "snr" || key == "snr_db") {
+        auto parsed = parseFloat(value);
+        if (!parsed) return false;
+        cfg.snr_db = *parsed;
+    } else if (key == "rate") {
+        auto parsed = parseCodeRate(value);
+        if (!parsed) return false;
+        cfg.forced_rate = *parsed;
+    } else if (key == "mod" || key == "modulation") {
+        auto parsed = parseModulation(value);
+        if (!parsed) return false;
+        cfg.forced_mod = *parsed;
+    } else if (key == "ofdm_config" || key == "ofdm-config") {
+        const std::string preset = lower(value);
+        if (preset == "default") cfg.ofdm_config = OFDMConfigPreset::Default;
+        else if (preset == "nvis") cfg.ofdm_config = OFDMConfigPreset::Nvis;
+        else return false;
+    } else if (key == "ptt_serial_port" || key == "ptt-serial-port") {
+        cfg.ptt_serial_port = value;
+    } else if (key == "ptt_serial_baud" || key == "ptt-serial-baud") {
+        try { cfg.ptt_serial_baud = std::stoi(value); } catch (...) { return false; }
+    } else if (key == "ptt_serial_line" || key == "ptt-serial-line") {
+        const std::string line = lower(value);
+        if (line != "rts" && line != "dtr") return false;
+        cfg.ptt_serial_line = line;
+    } else if (key == "ptt_inactive_high" || key == "ptt-inactive-high") {
+        cfg.ptt_inactive_high = (value == "true" || value == "1" || value == "yes");
+    } else {
+        std::cerr << "Unknown config key: " << key << "\n";
+        return false;
+    }
+    return true;
+}
+
+bool loadConfigFile(const std::string& path, Config& cfg) {
+    std::ifstream in(path);
+    if (!in) return false;
+    std::string line;
+    int line_no = 0;
+    while (std::getline(in, line)) {
+        ++line_no;
+        // Strip comments + trim
+        const auto hash = line.find('#');
+        if (hash != std::string::npos) line.resize(hash);
+        auto trim = [](std::string& s) {
+            while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(0, 1);
+            while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
+        };
+        trim(line);
+        if (line.empty()) continue;
+        const auto eq = line.find('=');
+        if (eq == std::string::npos) {
+            std::cerr << "Config " << path << ":" << line_no << ": missing '='\n";
+            return false;
+        }
+        std::string key = line.substr(0, eq);
+        std::string value = line.substr(eq + 1);
+        trim(key); trim(value);
+        if (key.empty()) continue;
+        if (!applyConfigKey(key, value, cfg)) {
+            std::cerr << "Config " << path << ":" << line_no << ": bad value for '"
+                      << key << "': " << value << "\n";
+            return false;
+        }
+    }
+    return true;
+}
+
+// Search for a default config file in conventional locations. Returns
+// empty string if none found. Order: ./ultra_tnc.conf, then
+// $XDG_CONFIG_HOME/ultra_tnc/config, then ~/.config/ultra_tnc/config.
+std::string findDefaultConfigFile() {
+    std::vector<std::string> candidates = {"ultra_tnc.conf"};
+    if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
+        candidates.push_back(std::string(xdg) + "/ultra_tnc/config");
+    }
+    if (const char* home = std::getenv("HOME")) {
+        candidates.push_back(std::string(home) + "/.config/ultra_tnc/config");
+    }
+    for (const auto& path : candidates) {
+        std::ifstream in(path);
+        if (in) return path;
+    }
+    return {};
 }
 
 bool parseArgs(int argc, char** argv, Config& cfg) {
+    // First pass: scan for --config explicitly. Apply it before CLI flags
+    // so flags override file values.
+    std::string explicit_config;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--config" && i + 1 < argc) {
+            explicit_config = argv[i + 1];
+            break;
+        }
+    }
+    if (!explicit_config.empty()) {
+        if (!loadConfigFile(explicit_config, cfg)) {
+            std::cerr << "Failed to load --config " << explicit_config << "\n";
+            return false;
+        }
+    } else {
+        const std::string default_path = findDefaultConfigFile();
+        if (!default_path.empty()) {
+            if (!loadConfigFile(default_path, cfg)) {
+                std::cerr << "Failed to load default config " << default_path << "\n";
+                return false;
+            }
+            std::cout << "Loaded config: " << default_path << "\n";
+        }
+    }
+
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         auto requireValue = [&](const char* name) -> std::optional<std::string> {
@@ -154,6 +319,13 @@ bool parseArgs(int argc, char** argv, Config& cfg) {
 
         if (arg == "--help" || arg == "-h") {
             cfg.help = true;
+        } else if (arg == "--config") {
+            // Already consumed in the first pass, just skip its value.
+            if (i + 1 >= argc) {
+                std::cerr << "Missing value for --config\n";
+                return false;
+            }
+            ++i;
         } else if (arg == "--audio-output") {
             auto value = requireValue("--audio-output");
             if (!value) return false;
@@ -222,6 +394,30 @@ bool parseArgs(int argc, char** argv, Config& cfg) {
                 std::cerr << "Unknown OFDM config (use default or nvis)\n";
                 return false;
             }
+        } else if (arg == "--ptt-serial-port") {
+            auto value = requireValue("--ptt-serial-port");
+            if (!value) return false;
+            cfg.ptt_serial_port = *value;
+        } else if (arg == "--ptt-serial-baud") {
+            auto value = requireValue("--ptt-serial-baud");
+            if (!value) return false;
+            try {
+                cfg.ptt_serial_baud = std::stoi(*value);
+            } catch (...) {
+                std::cerr << "Invalid --ptt-serial-baud value\n";
+                return false;
+            }
+        } else if (arg == "--ptt-serial-line") {
+            auto value = requireValue("--ptt-serial-line");
+            if (!value) return false;
+            const std::string line = lower(*value);
+            if (line != "rts" && line != "dtr") {
+                std::cerr << "--ptt-serial-line must be rts or dtr\n";
+                return false;
+            }
+            cfg.ptt_serial_line = line;
+        } else if (arg == "--ptt-inactive-high") {
+            cfg.ptt_inactive_high = true;
         } else {
             std::cerr << "Unknown option: " << arg << "\n";
             return false;
@@ -655,6 +851,32 @@ int main(int argc, char** argv) {
 
     bridge.setMyCall({cfg.callsign});
     bridge.setBandwidth(2300);
+
+    // Hardware PTT via serial line. When the user supplies --ptt-serial-port,
+    // open the serial controller and toggle RTS/DTR on each PTT transition.
+    // No-op if the port is empty (relies on VOX or external CAT).
+    ultra::gui::SerialPttController serial_ptt;
+    if (!cfg.ptt_serial_port.empty()) {
+        if (!serial_ptt.open(cfg.ptt_serial_port, cfg.ptt_serial_baud)) {
+            std::cerr << "Failed to open serial PTT port: " << cfg.ptt_serial_port << "\n";
+            return 1;
+        }
+        const ultra::gui::SerialPttLine line =
+            (lower(cfg.ptt_serial_line) == "dtr")
+                ? ultra::gui::SerialPttLine::DTR
+                : ultra::gui::SerialPttLine::RTS;
+        // Initialize line to inactive state so we don't accidentally key
+        // the radio at startup.
+        serial_ptt.setLine(line, cfg.ptt_inactive_high);
+        const bool active_state = !cfg.ptt_inactive_high;
+        bridge.setPttChangedCallback([&serial_ptt, line, active_state](bool on) {
+            serial_ptt.setLine(line, on ? active_state : !active_state);
+        });
+        std::cout << "Hardware PTT enabled on " << cfg.ptt_serial_port
+                  << " @ " << cfg.ptt_serial_baud << " baud, line="
+                  << cfg.ptt_serial_line
+                  << (cfg.ptt_inactive_high ? " (inverted)" : "") << "\n";
+    }
 
     ultra::tnc::TNCServerConfig server_cfg;
     server_cfg.cmd_port = cfg.port;
