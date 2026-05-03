@@ -35,6 +35,37 @@ void test_ofdm_rate_thresholds() {
           "heavy fading should fall back to R1/4");
 }
 
+void test_narrow_data_mode() {
+    // OFDM_NARROW: DQPSK only. R1/2 promoted in clean-enough conditions
+    // (relaxed 2026-05-03 after cli_simulator sweeps); R1/4 elsewhere.
+    Modulation mod;
+    CodeRate rate;
+
+    // Hard floor: SNR=8 good fading must stay at R1/4 (CLAUDE.md baseline).
+    recommendDataMode(8.0f, WaveformMode::OFDM_NARROW, mod, rate, 0.40f);
+    CHECK(mod == Modulation::DQPSK, "narrow forces DQPSK");
+    CHECK(rate == CodeRate::R1_4, "narrow SNR=8 good fading must stay R1/4 (baseline)");
+
+    // AWGN path: SNR>=8 + fading<0.15 → R1/2
+    recommendDataMode(8.0f, WaveformMode::OFDM_NARROW, mod, rate, 0.05f);
+    CHECK(rate == CodeRate::R1_2, "narrow SNR=8 AWGN should allow R1/2");
+
+    // Good-fading path: SNR>=10 + fading<0.65 → R1/2
+    recommendDataMode(10.0f, WaveformMode::OFDM_NARROW, mod, rate, 0.40f);
+    CHECK(rate == CodeRate::R1_2, "narrow SNR=10 good fading should allow R1/2");
+
+    recommendDataMode(15.0f, WaveformMode::OFDM_NARROW, mod, rate, 0.40f);
+    CHECK(rate == CodeRate::R1_2, "narrow SNR=15 good fading should allow R1/2");
+
+    // Just under SNR threshold should drop to R1/4
+    recommendDataMode(9.9f, WaveformMode::OFDM_NARROW, mod, rate, 0.40f);
+    CHECK(rate == CodeRate::R1_4, "narrow SNR=9.9 good fading should drop to R1/4");
+
+    // Moderate fading should always stay R1/4
+    recommendDataMode(15.0f, WaveformMode::OFDM_NARROW, mod, rate, 0.90f);
+    CHECK(rate == CodeRate::R1_4, "narrow moderate fading should stay R1/4");
+}
+
 void test_bootstrap_caps() {
     CHECK(capInitialOFDMRate(22.0f, 0.00f, CodeRate::R3_4) == CodeRate::R2_3,
           "initial R3/4 should cap to R2/3 below 24 dB");
@@ -103,6 +134,7 @@ void test_waveform_factory() {
 
 int main() {
     test_ofdm_rate_thresholds();
+    test_narrow_data_mode();
     test_bootstrap_caps();
     test_waveform_recommendations();
     test_data_mode_policy();

@@ -155,10 +155,24 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
         return;
     }
 
-    // OFDM_NARROW: DQPSK only, R1/4 default, R1/2 for good conditions
+    // OFDM_NARROW: DQPSK only, R1/4 default, R1/2 for clean-enough
+    // conditions. Sweeps in cli_simulator (2026-05-03) verified R1/2
+    // narrow + window=3 passes 7-message test at:
+    //   SNR=8  AWGN          (PASS)
+    //   SNR=10 good fading   (PASS)
+    //   SNR=12 good fading   (PASS)
+    //   SNR=15 good fading   (PASS)
+    // and R1/4 narrow + window=3 passes:
+    //   SNR=8  good fading   (PASS — documented baseline)
+    //   SNR=8  moderate      (PASS, slow but recovers)
+    // The hard floor (SNR=8 good fading R1/4) is preserved by the
+    // SNR>=10 gate on good fading. AWGN keeps the SNR>=8 trigger
+    // because near-AWGN is a much easier channel.
     if (waveform == WaveformMode::OFDM_NARROW) {
         mod = Modulation::DQPSK;
-        if (fading_index < 0.15f && snr_db >= 8.0f) {
+        const bool awgn_path = fading_index < 0.15f && snr_db >= 8.0f;
+        const bool good_path = fading_index < 0.65f && snr_db >= 10.0f;
+        if (awgn_path || good_path) {
             rate = CodeRate::R1_2;
         } else {
             rate = CodeRate::R1_4;
