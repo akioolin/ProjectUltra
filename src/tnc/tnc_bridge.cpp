@@ -163,19 +163,30 @@ TNCBridge::~TNCBridge() {
 }
 
 void TNCBridge::attachServer(TNCServer* server) {
-    if (!server) {
-        owned_event_sink_.reset();
-        event_sink_.store(nullptr, std::memory_order_release);
-        return;
+    std::shared_ptr<TNCBridgeEventSink> next;
+    if (server) {
+        next = std::make_shared<TNCServerEventSink>(*server);
     }
-
-    owned_event_sink_ = std::make_unique<TNCServerEventSink>(*server);
-    event_sink_.store(owned_event_sink_.get(), std::memory_order_release);
+    std::lock_guard<std::mutex> lock(event_sink_mutex_);
+    event_sink_ = std::move(next);
 }
 
 void TNCBridge::attachEventSink(TNCBridgeEventSink* sink) {
-    owned_event_sink_.reset();
-    event_sink_.store(sink, std::memory_order_release);
+    // External ownership: wrap in shared_ptr with a no-op deleter so
+    // the bridge doesn't destroy state it doesn't own. Concurrent
+    // readers that copied the previous shared_ptr keep that sink
+    // alive (or the no-op-deleter wrapper) until they're done.
+    std::shared_ptr<TNCBridgeEventSink> next;
+    if (sink) {
+        next = std::shared_ptr<TNCBridgeEventSink>(sink, [](TNCBridgeEventSink*) {});
+    }
+    std::lock_guard<std::mutex> lock(event_sink_mutex_);
+    event_sink_ = std::move(next);
+}
+
+std::shared_ptr<TNCBridgeEventSink> TNCBridge::snapshotEventSink() const {
+    std::lock_guard<std::mutex> lock(event_sink_mutex_);
+    return event_sink_;
 }
 
 void TNCBridge::setConnectionChangedCallback(ConnectionChangedCallback cb) {
@@ -254,7 +265,7 @@ void TNCBridge::startConnect(const std::string& src, const std::string& dst) {
     state_.store(State::CONNECTING, std::memory_order_release);
     if (!engine_.connect(remote)) {
         state_.store(State::READY, std::memory_order_release);
-        if (auto* sink = event_sink_.load(std::memory_order_acquire)) {
+        if (auto sink = snapshotEventSink()) {
             sink->postModemDisconnected();
         }
     }
@@ -371,7 +382,7 @@ void TNCBridge::tick(uint32_t elapsed_ms) {
     const int backlog = clampSizeToInt(engine_.getTxBacklogBytes());
     if (backlog != last_reported_backlog_) {
         last_reported_backlog_ = backlog;
-        if (auto* sink = event_sink_.load(std::memory_order_acquire)) {
+        if (auto sink = snapshotEventSink()) {
             sink->postModemBufferLevel(backlog);
         }
     }
@@ -434,13 +445,13 @@ void TNCBridge::onConnectionChanged(protocol::ConnectionState state, const std::
         // Otherwise we initiated, so we are first.
         const std::string& initiator = inbound ? remote : local;
         const std::string& responder = inbound ? local : remote;
-        if (auto* sink = event_sink_.load(std::memory_order_acquire)) {
+        if (auto sink = snapshotEventSink()) {
             sink->postModemConnected(initiator, responder, bw);
             sink->postModemBitrate(bitrateEstimate(waveformForBandwidth(bw)));
         }
     } else if (state == protocol::ConnectionState::DISCONNECTED && previous != State::IDLE &&
                previous != State::READY && previous != State::LISTENING) {
-        if (auto* sink = event_sink_.load(std::memory_order_acquire)) {
+        if (auto sink = snapshotEventSink()) {
             sink->postModemDisconnected();
         }
     }
@@ -461,7 +472,7 @@ void TNCBridge::onDataReceived(const ultra::Bytes& bytes, bool more_data) {
         return;
     }
 
-    if (auto* sink = event_sink_.load(std::memory_order_acquire)) {
+    if (auto sink = snapshotEventSink()) {
         sink->postModemDataReceived(bytes);
     }
 }
@@ -473,7 +484,7 @@ void TNCBridge::onIncomingCall(const std::string& peer) {
         inbound_pending_ = true;
     }
 
-    if (auto* sink = event_sink_.load(std::memory_order_acquire)) {
+    if (auto sink = snapshotEventSink()) {
         sink->postModemIncomingCall(peer);
     }
 }
@@ -554,7 +565,7 @@ void TNCBridge::postPTT(bool on) {
         return;
     }
 
-    if (auto* sink = event_sink_.load(std::memory_order_acquire)) {
+    if (auto sink = snapshotEventSink()) {
         sink->postModemPTT(on);
     }
 

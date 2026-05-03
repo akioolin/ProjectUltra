@@ -115,12 +115,24 @@ private:
     static State toTNCState(protocol::ConnectionState state);
     void postPTT(bool on);
 
+    // Mutex-guarded snapshot. Returns a copy of the shared_ptr so
+    // the caller can drop the lock before invoking sink methods.
+    std::shared_ptr<TNCBridgeEventSink> snapshotEventSink() const;
+
     std::unique_ptr<ProtocolEnginePort> owned_engine_;
     ProtocolEnginePort& engine_;
     gui::AudioEngine& audio_;
 
-    std::unique_ptr<TNCBridgeEventSink> owned_event_sink_;
-    std::atomic<TNCBridgeEventSink*> event_sink_{nullptr};
+    // Shared-ptr ownership so a concurrent reader that's already
+    // copied the sink keeps it alive across an attachServer() /
+    // attachEventSink() teardown. Mutex protects only the swap, not
+    // the sink method calls — readers copy the shared_ptr, drop the
+    // mutex, then invoke methods without holding a lock through
+    // potentially slow TCP I/O. External raw-pointer sinks are
+    // wrapped with a no-op deleter so the bridge doesn't destroy
+    // state it doesn't own.
+    mutable std::mutex event_sink_mutex_;
+    std::shared_ptr<TNCBridgeEventSink> event_sink_;
 
     mutable std::mutex state_mutex_;
     std::string local_call_;
