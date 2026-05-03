@@ -64,9 +64,18 @@ with a true VARA peer):
 
 - **Back-to-back session recovery (T8 finding)**: First session
   works; second within ~30 s of teardown either hangs or times out.
-  Suspect: ARQ state, listener-side TNC state, or audio buffer not
-  fully reset between sessions. Single-session tests (T1–T7) all
-  pass cleanly, so this is specifically a *re-entry* issue.
+  Root cause traced to Pat-Vara's listener: when our TNC's
+  CONNECTED event arrives faster than `pat http` can re-arm
+  `Accept()`, pat-vara silently drops the inbound connection (file
+  `/tmp/patvara_src/vara.go:344-349` — falls through to the
+  `default` arm of `select`, logs only when `VARA_DEBUG=true`, and
+  immediately sends `DISCONNECT`).
+  - Single-session flows (T1–T7) all pass cleanly because Pat is
+    primed for one Accept().
+  - Workarounds: longer inter-session gap (>30 s seems to help),
+    or running `pat interactive` instead of `pat http`. Real fix
+    would be an upstream Pat patch to use a buffered `inboundConns`
+    channel.
 - **OTA / real radio path**: all tests above are over a USB cable.
   Need a real ionospheric channel test before declaring "production
   ready".

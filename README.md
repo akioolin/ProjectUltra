@@ -154,8 +154,11 @@ ProjectUltra extension:
   - Bidirectional in single session — 57 s, both inboxes updated
   - 12.5 KB Lorem ipsum Mac→Pi — 50 s, gzipped to 448 B (28× ratio)
   - Known limitation: back-to-back sessions within ~30 s of teardown
-    don't always recover cleanly (1/3 retry success). Single-session
-    flows are reliable. Investigation pending.
+    don't always recover cleanly (1/3 retry success). Root cause
+    traced upstream: pat-vara silently drops inbound connections if
+    `Accept()` hasn't re-armed (pat-vara `vara.go:344-349`, falls
+    through to `select` default + sends `DISCONNECT`). Single-session
+    flows are reliable.
 - Five real bugs found + fixed during the integration: VERSION
   response format, CONNECTED line initiator/responder ordering,
   missing `BUFFER N` event emission, BUFFER staging accounting, and
