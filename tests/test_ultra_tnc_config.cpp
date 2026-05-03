@@ -5,16 +5,17 @@
 
 #include "ultra_tnc_config.hpp"
 
+#include <atomic>
+#include <chrono>
 #include <cmath>
-#include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <initializer_list>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include <unistd.h>
 
 using namespace ultra::tnc::config;
 
@@ -53,18 +54,26 @@ struct Argv {
 };
 
 // Temp-file RAII for loadConfigFile / parseArgs --config tests.
+// Cross-platform: uses std::filesystem::temp_directory_path() so the
+// Windows CI runner doesn't need unistd.h / mkstemp.
 struct TempFile {
-    std::string path;
+    std::filesystem::path path;
     explicit TempFile(const std::string& contents) {
-        char tmpl[] = "/tmp/ultra_tnc_cfg_XXXXXX";
-        int fd = ::mkstemp(tmpl);
-        if (fd < 0) throw std::runtime_error("mkstemp failed");
-        ::close(fd);
-        path = tmpl;
+        static std::atomic<uint64_t> seq{0};
+        const auto ns = std::chrono::steady_clock::now().time_since_epoch().count();
+        const auto id = seq.fetch_add(1, std::memory_order_relaxed);
+        const std::string name =
+            "ultra_tnc_cfg_" + std::to_string(ns) + "_" + std::to_string(id) + ".tmp";
+        path = std::filesystem::temp_directory_path() / name;
         std::ofstream out(path);
+        if (!out) throw std::runtime_error("temp file open failed");
         out << contents;
     }
-    ~TempFile() { ::remove(path.c_str()); }
+    ~TempFile() {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+    }
+    std::string str() const { return path.string(); }
 };
 
 // ---------------- Strict parsers ----------------
@@ -280,7 +289,7 @@ void test_loadConfigFile_basic() {
         "ptt_serial_line = dtr\n"
     );
     Config cfg;
-    CHECK(loadConfigFile(cfg_file.path, cfg), "valid config loads");
+    CHECK(loadConfigFile(cfg_file.str(), cfg), "valid config loads");
     CHECK(cfg.audio_output == "USB Audio CODEC", "audio_output");
     CHECK(cfg.callsign == "N0CALL", "callsign");
     CHECK(cfg.port == 8400, "port");
@@ -292,21 +301,21 @@ void test_loadConfigFile_basic() {
 void test_loadConfigFile_missing_equals() {
     TempFile cfg_file("audio_output USB Audio\n");  // no '='
     Config cfg;
-    CHECK(!loadConfigFile(cfg_file.path, cfg), "missing '=' must reject");
+    CHECK(!loadConfigFile(cfg_file.str(), cfg), "missing '=' must reject");
     pass("loadConfigFile: missing '=' rejected");
 }
 
 void test_loadConfigFile_unknown_key() {
     TempFile cfg_file("nonsense = x\n");
     Config cfg;
-    CHECK(!loadConfigFile(cfg_file.path, cfg), "unknown key must reject");
+    CHECK(!loadConfigFile(cfg_file.str(), cfg), "unknown key must reject");
     pass("loadConfigFile: unknown key rejected");
 }
 
 void test_loadConfigFile_bad_value() {
     TempFile cfg_file("ptt_serial_baud = abc\n");
     Config cfg;
-    CHECK(!loadConfigFile(cfg_file.path, cfg), "bad value must reject");
+    CHECK(!loadConfigFile(cfg_file.str(), cfg), "bad value must reject");
     pass("loadConfigFile: bad value rejected");
 }
 
@@ -325,7 +334,7 @@ void test_loadConfigFile_comments_and_blank_lines() {
         "\n"
     );
     Config cfg;
-    CHECK(loadConfigFile(cfg_file.path, cfg), "comments + blanks ok");
+    CHECK(loadConfigFile(cfg_file.str(), cfg), "comments + blanks ok");
     CHECK(cfg.callsign == "N0CALL", "trailing comment stripped");
     pass("loadConfigFile: comments and blank lines tolerated");
 }
@@ -344,7 +353,7 @@ void test_parseArgs_help_skips_bad_config() {
     // Operator must be able to recover from a malformed config via
     // --help without the parser bailing out on config load.
     TempFile bad_cfg("totally not valid syntax\n");
-    Argv argv({"ultra_tnc", "--config", bad_cfg.path.c_str(), "--help"});
+    Argv argv({"ultra_tnc", "--config", bad_cfg.str().c_str(), "--help"});
     Config cfg;
     CHECK(parseArgs(argv.argc(), argv.data(), cfg),
           "--help must not fail on bad config");
@@ -354,7 +363,7 @@ void test_parseArgs_help_skips_bad_config() {
 
 void test_parseArgs_list_audio_skips_bad_config() {
     TempFile bad_cfg("totally not valid syntax\n");
-    Argv argv({"ultra_tnc", "--config", bad_cfg.path.c_str(), "--list-audio-devices"});
+    Argv argv({"ultra_tnc", "--config", bad_cfg.str().c_str(), "--list-audio-devices"});
     Config cfg;
     CHECK(parseArgs(argv.argc(), argv.data(), cfg),
           "--list-audio-devices must bypass config load failure");
@@ -365,7 +374,7 @@ void test_parseArgs_list_audio_skips_bad_config() {
 void test_parseArgs_cli_overrides_config() {
     // Config sets baud=19200; CLI flag should override to 4800.
     TempFile good_cfg("ptt_serial_baud = 19200\n");
-    Argv argv({"ultra_tnc", "--config", good_cfg.path.c_str(),
+    Argv argv({"ultra_tnc", "--config", good_cfg.str().c_str(),
                "--ptt-serial-baud", "4800"});
     Config cfg;
     CHECK(parseArgs(argv.argc(), argv.data(), cfg), "parse ok");
@@ -377,7 +386,7 @@ void test_parseArgs_no_inject_channel_overrides_config_true() {
     // Codex review #5: config-set inject_channel=true must be
     // overridable from CLI back to false via --no-inject-channel.
     TempFile cfg_file("inject_channel = true\n");
-    Argv argv({"ultra_tnc", "--config", cfg_file.path.c_str(),
+    Argv argv({"ultra_tnc", "--config", cfg_file.str().c_str(),
                "--no-inject-channel"});
     Config cfg;
     CHECK(parseArgs(argv.argc(), argv.data(), cfg), "parse ok");
@@ -387,7 +396,7 @@ void test_parseArgs_no_inject_channel_overrides_config_true() {
 
 void test_parseArgs_ptt_active_high_overrides_config_true() {
     TempFile cfg_file("ptt_inactive_high = true\n");
-    Argv argv({"ultra_tnc", "--config", cfg_file.path.c_str(),
+    Argv argv({"ultra_tnc", "--config", cfg_file.str().c_str(),
                "--ptt-active-high"});
     Config cfg;
     CHECK(parseArgs(argv.argc(), argv.data(), cfg), "parse ok");
@@ -397,7 +406,7 @@ void test_parseArgs_ptt_active_high_overrides_config_true() {
 
 void test_parseArgs_no_ptt_inactive_high_alias() {
     TempFile cfg_file("ptt_inactive_high = true\n");
-    Argv argv({"ultra_tnc", "--config", cfg_file.path.c_str(),
+    Argv argv({"ultra_tnc", "--config", cfg_file.str().c_str(),
                "--no-ptt-inactive-high"});
     Config cfg;
     CHECK(parseArgs(argv.argc(), argv.data(), cfg), "parse ok");
@@ -423,7 +432,7 @@ void test_parseArgs_missing_value_rejected() {
 void test_parseArgs_config_load_failure_propagates() {
     // No --help / --list-audio: a bad explicit --config must fail.
     TempFile bad_cfg("nonsense_field = x\n");
-    Argv argv({"ultra_tnc", "--config", bad_cfg.path.c_str()});
+    Argv argv({"ultra_tnc", "--config", bad_cfg.str().c_str()});
     Config cfg;
     CHECK(!parseArgs(argv.argc(), argv.data(), cfg),
           "bad explicit --config must fail when not --help/--list-audio");
