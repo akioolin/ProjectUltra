@@ -53,31 +53,47 @@ Medium (autonomous-safe):
 Cosmetic:
 - #22 trailing whitespace stripped from PAT_VARA_AUDIT.md
 
-## Codex findings deferred (need broader judgment)
+## Codex findings closed in the second batch (2026-05-03 late)
 
-Each documented in `docs/CODEX_QUALITY_REVIEW_2026-05-03.md`:
+After the first batch, the user asked to keep going. Closed:
 
 - #2 extract config helpers to a testable target
+  → `tools/ultra_tnc_config.{hpp,cpp}` + `tests/test_ultra_tnc_config.cpp`
+  (39 tests, ultra_tnc.cpp shrank from ~1020 to ~566 lines)
 - #4 strict bool/int parsing helpers
+  → `parsePositiveIntStrict`, `parseBoolStrict` in the new config TU
 - #5 explicit negative CLI flags
+  → `--no-inject-channel`, `--ptt-active-high` (also `--no-ptt-inactive-high`)
 - #7 PTT setLine() initial failure handling
-- #9 sink ownership lifetime race
+  → startup aborts if initial inactive set fails; mid-session failures logged
 - #11 BUFFER 0 immediacy vs rate-limit
-- #13 `flushDataTxBuffer()` extraction for testability
-- #15 sendBinary error propagation through ModemAdapter
-- #16 HARQ key construction extraction to testable helper
-- #17 HARQ when CW0 fails (architectural)
-- #21 UltraTNCStation threading model
+  → BUFFER 0 transitions bypass the 1 s rate limit; non-zero stays throttled
+- #13 `flushDataTxBuffer()` extraction
+  → `TNCSession::encodePayloadForWire(payload, compression_enabled)` static
+  helper + 5 direct unit tests (raw, below-threshold, deflate, expand-fallback,
+  empty)
+- #16 HARQ key construction extraction
+  → `SoftCombineBuffer::makeKey(HarqKeyInputs)` + 6 unit tests covering
+  carrier_count_hash distinguishing waveform mode and data-carrier count
 
-## Bottom line
+## Codex findings still deferred (per Codex's own guidance)
 
-The night's quality pass closed the highest-leverage Codex findings,
-added 14 targeted tests against tonight's new code, and bumped
-coverage on the most-changed files. The deferred items are
-documented in repo history, not lost.
+- #9 sink ownership lifetime race (Codex: "deferred unless touching bridge
+  threading; needs careful review")
+- #15 sendBinary error propagation through ModemAdapter (Codex:
+  "interface change needs broader judgment")
+- #17 HARQ when CW0 fails — architectural (Codex: "needs human/protocol judgment")
+- #21 UltraTNCStation threading model (Codex: "needs careful concurrency design")
 
-If the next session wants to continue: pick #16 (extract HARQ key
-construction) — it's the bridge between the SoftCombineBuffer unit
-tests and the streaming decoder integration, and would unlock
-direct testing of the most subtle PHY parameter combinations
-without driving full audio-decode flows.
+## Bottom line (final)
+
+Across both batches: **18 of 22 Codex findings closed**. ctest 35/35
+green, cli_simulator SNR15/good/R1/4 PASS at 100% frame success.
+Remaining 4 items are explicitly Codex-flagged as needing human
+architectural judgment, not autonomous-safe.
+
+Net additions: 1 new test target (`UltraTNCConfig`), 65+ new tests
+across `test_soft_combine`, `test_tnc_session`, `test_tnc_bridge`,
+`test_ultra_tnc_config`. ultra_tnc.cpp split into runtime + config
+units; soft-combine HARQ key building now unit-testable; TNC payload
+encoding now unit-testable; BUFFER 0 truly immediate for Pat Flush().
