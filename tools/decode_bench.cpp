@@ -244,13 +244,32 @@ void applyAWGN(std::vector<float>& samples, float snr_db, uint32_t seed) {
 
 // -------- gen mode --------------------------------------------------------
 
+// Build the OFDM config the encoder uses by default. The encoder's
+// constructor seeds these (cp=LONG, pilots=true, spacing=10) but a
+// caller-side default-constructed ModemConfig has different values
+// (cp=MEDIUM, pilots=false, spacing=2). We need both ends to agree
+// or the decoder's LTS template won't match the encoder's preamble.
+ultra::ModemConfig benchOFDMConfig() {
+    ultra::ModemConfig c;
+    c.fft_size = 1024;
+    c.num_carriers = 59;
+    c.sample_rate = 48000;
+    c.center_freq = 1500;
+    c.cp_mode = ultra::CyclicPrefixMode::LONG;
+    c.use_pilots = true;
+    c.pilot_spacing = 10;
+    return c;
+}
+
 int runGen(const Args& a) {
     StreamingEncoder enc;
     enc.setMode(parseWaveform(a.waveform));
+    enc.setOFDMConfig(benchOFDMConfig());
     enc.setDataMode(parseModulation(a.modulation), parseCodeRate(a.code_rate));
     // Bench targets the connected-mode 4-CW fixed-frame data path —
     // that's the throughput hot path agents will be optimizing.
     enc.setFixedFrameCodewords(4);
+    enc.setChannelInterleave(false);  // Match decoder; bench keeps simple bit ordering.
 
     // Cap payload to fixed-frame capacity so the encoder doesn't spill
     // into multi-frame fragmentation. We want a deterministic single-
@@ -278,21 +297,41 @@ int runGen(const Args& a) {
         Bytes payload(payload_bytes);
         for (auto& b : payload) b = static_cast<uint8_t>(byte_dist(rng));
 
-        // Build a v2::DataFrame so we exercise the same encode path the
-        // protocol uses in production. Sender/dest are deterministic.
-        auto frame = v2::DataFrame::makeData(
+        // Use v2::makeFixedDataFrame so total_cw is explicitly set to
+        // 4. DataFrame::makeData() calls calculateCodewords() which for
+        // a 60-byte payload at R1/4 returns 5 CWs (continuation CWs
+        // reserve DATA_CW_HEADER_SIZE bytes). The OFDM encoder trusts
+        // byte 12 of the serialized frame and frame-interleaves over
+        // that count — if it's 5 while the decoder expects 4, the
+        // de-interleave permutation is wrong and LDPC fails on every
+        // CW with saturated-but-wrong-position bits. (Codex review.)
+        auto frame = v2::makeFixedDataFrame(
             "BENCH1", "BENCH2", static_cast<uint16_t>(f), payload,
-            parseCodeRate(a.code_rate));
+            parseCodeRate(a.code_rate), /*cw_count=*/4);
         Bytes serialized = frame.serialize();
 
-        // Always full chirp preamble per frame so each fixture is
-        // self-contained — the bench decoder doesn't carry sync state
-        // across frames. Slower than light-preamble, but reproducible.
-        auto frame_samples = enc.encodeFrame(serialized);
+        // Light preamble (LTS only) — matches connected mode's data
+        // path. With encoder + decoder OFDM configs aligned this gives
+        // the decoder a clean LTS to lock on. The chirp variant of the
+        // preamble would require disconnected-mode sync followed by a
+        // mode flip, which is harder to drive deterministically here.
+        auto frame_samples = enc.encodeFrameLight(serialized);
         all_samples.insert(all_samples.end(), frame_samples.begin(), frame_samples.end());
 
         // ~50 ms gap between frames so the decoder sees clean boundaries.
         all_samples.insert(all_samples.end(), 2400, 0.0f);
+    }
+
+    // Decoder needs ≥2.5 s of buffered audio before it begins LTS
+    // correlation search. Pad with silence so a small payload doesn't
+    // get stuck in "not enough samples" forever.
+    constexpr size_t kMinTrailingSilenceSamples = 48000 * 3;
+    if (all_samples.size() < kMinTrailingSilenceSamples) {
+        all_samples.insert(all_samples.end(),
+                           kMinTrailingSilenceSamples - all_samples.size(),
+                           0.0f);
+    } else {
+        all_samples.insert(all_samples.end(), 24000, 0.0f);  // 0.5 s tail
     }
 
     std::cout << "[gen] synthesized " << all_samples.size() << " samples ("
@@ -334,15 +373,23 @@ int runBench(const Args& a) {
               << a.wav_path << "\n";
 
     StreamingDecoder dec;
-    // Configure connected-mode OFDM so the decoder runs the fixed-
-    // frame data path (the production throughput hot path). The
-    // initial chirp preamble in the fixture provides sync; from that
-    // point the decoder treats subsequent frames as connected data.
-    ultra::ModemConfig ofdm_cfg;  // default config matches encoder defaults
-    dec.setConnectedOFDMMode(parseWaveform(a.waveform), ofdm_cfg,
+    // Configure connected-mode OFDM with the SAME ModemConfig the
+    // encoder used. A mismatched cp_mode / pilot layout makes the
+    // decoder's LTS template diverge from the encoder's preamble and
+    // correlation collapses (saw 0.24 on default ModemConfig). With
+    // matching configs the LTS template + data demod line up and the
+    // fixed-frame data path actually fires.
+    //
+    // Each fixture frame has a full chirp preamble. Connected mode
+    // ordinarily uses LTS-only sync, but the chirp preamble in our
+    // fixture also embeds the same LTS the data preamble uses, so
+    // connected-mode LTS sync still locks on each frame.
+    dec.setConnectedOFDMMode(parseWaveform(a.waveform), benchOFDMConfig(),
                              parseModulation(a.modulation),
                              parseCodeRate(a.code_rate));
     dec.setFixedFrameCodewords(4);
+    dec.setChannelInterleave(false);
+    dec.setKnownCFO(0.0f);
     dec.clearShutdown();
 
     int frames_decoded = 0;
@@ -371,13 +418,25 @@ int runBench(const Args& a) {
     // Feed in small chunks so each chunk re-arms new_data_available_,
     // matching how the audio thread feeds in production. processBuffer
     // is a single-step state machine that consumes one wakeup per call;
-    // dumping all audio at once would only fire SEARCHING, then time out.
-    constexpr size_t kChunkSamples = 4096;  // ~85 ms at 48 kHz
+    // dumping all audio at once would only fire SEARCHING, then time
+    // out. We pace at faster-than-realtime (~10× audio rate) so the
+    // decoder thread has room to advance through SEARCHING→SYNC_FOUND→
+    // DECODING between chunks but the bench still finishes quickly.
+    constexpr size_t kChunkSamples = 4096;     // ~85 ms at 48 kHz
+    constexpr int kInterChunkSleepMs = 8;      // ~10× realtime feed
     for (size_t off = 0; off < samples.size(); off += kChunkSamples) {
         const size_t chunk = std::min(kChunkSamples, samples.size() - off);
         dec.feedAudio(samples.data() + off, chunk);
-        // Tiny yield so the worker thread can drain before we fill more.
-        std::this_thread::sleep_for(std::chrono::microseconds(500));
+        std::this_thread::sleep_for(std::chrono::milliseconds(kInterChunkSleepMs));
+    }
+    // Drip silence after the real audio so the decoder's state machine
+    // gets new_data_available_ wakeups to advance from SYNC_FOUND →
+    // DECODING after the last frame arrives. Without this the worker
+    // sits in its 50 ms timeout loop and never finishes the last frame.
+    std::vector<float> tail_silence(kChunkSamples, 0.0f);
+    for (int i = 0; i < 25; ++i) {  // ~2 s of silence wakeups
+        dec.feedAudio(tail_silence);
+        std::this_thread::sleep_for(std::chrono::milliseconds(kInterChunkSleepMs));
     }
 
     // Wait until decode quiesces. "Quiet" = no new frame for 200 ms
