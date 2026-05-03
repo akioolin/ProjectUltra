@@ -376,6 +376,90 @@ void test_empty_llrs_retain_is_noop() {
     pass("empty retain is no-op");
 }
 
+void test_makeKey_basic_field_propagation() {
+    SoftCombineBuffer::HarqKeyInputs in;
+    in.sender_hash = 0xCAFEBABE;
+    in.seq = 0x1234;
+    in.rate = CodeRate::R2_3;
+    in.cw_count = 4;
+    in.modulation = ultra::Modulation::QPSK;
+    in.channel_interleave = true;
+    in.waveform_mode = 0x05;       // OFDM_CHIRP
+    in.ofdm_data_carriers = 30;
+    auto k = SoftCombineBuffer::makeKey(in);
+    CHECK(k.sender_hash == 0xCAFEBABE, "sender_hash");
+    CHECK(k.seq == 0x1234, "seq");
+    CHECK(k.rate == CodeRate::R2_3, "rate");
+    CHECK(k.cw_count == 4, "cw_count");
+    CHECK(k.modulation == ultra::Modulation::QPSK, "modulation");
+    CHECK(k.channel_interleave == 1, "channel_interleave true → 1");
+    CHECK(k.carrier_count_hash != 0, "carrier_count_hash nonzero");
+    pass("makeKey populates all fields and channel_interleave bool→byte");
+}
+
+void test_makeKey_carrier_hash_distinguishes_waveform_mode() {
+    SoftCombineBuffer::HarqKeyInputs a;
+    a.sender_hash = 1;
+    a.ofdm_data_carriers = 30;
+    a.waveform_mode = 0x05;       // OFDM_CHIRP
+    auto ka = SoftCombineBuffer::makeKey(a);
+    auto b = a;
+    b.waveform_mode = 0x06;       // OFDM_NARROW
+    auto kb = SoftCombineBuffer::makeKey(b);
+    CHECK(ka.carrier_count_hash != kb.carrier_count_hash,
+          "different waveform_mode must produce different carrier_count_hash");
+    pass("carrier_count_hash distinguishes waveform mode (CHIRP vs NARROW)");
+}
+
+void test_makeKey_carrier_hash_distinguishes_data_carriers() {
+    SoftCombineBuffer::HarqKeyInputs a;
+    a.sender_hash = 1;
+    a.waveform_mode = 0x05;
+    a.ofdm_data_carriers = 30;       // wideband
+    auto ka = SoftCombineBuffer::makeKey(a);
+    auto b = a;
+    b.ofdm_data_carriers = 21;       // narrowband
+    auto kb = SoftCombineBuffer::makeKey(b);
+    CHECK(ka.carrier_count_hash != kb.carrier_count_hash,
+          "different data carrier counts must produce different hash");
+    pass("carrier_count_hash distinguishes data-carrier count");
+}
+
+void test_makeKey_carrier_hash_stable_for_same_inputs() {
+    SoftCombineBuffer::HarqKeyInputs a;
+    a.sender_hash = 1;
+    a.waveform_mode = 0x05;
+    a.ofdm_data_carriers = 30;
+    auto k1 = SoftCombineBuffer::makeKey(a);
+    auto k2 = SoftCombineBuffer::makeKey(a);
+    CHECK(k1 == k2, "identical inputs must yield equal keys");
+    pass("makeKey is deterministic for identical inputs");
+}
+
+void test_makeKey_zero_sender_hash_preserved() {
+    // Zero sender_hash is the "HARQ disabled for this frame" sentinel
+    // (see combine() / streaming_decoder buildHarqKey return value).
+    // makeKey must not synthesize a nonzero hash from other fields.
+    SoftCombineBuffer::HarqKeyInputs in;
+    in.sender_hash = 0;
+    in.seq = 99;
+    in.cw_count = 4;
+    in.waveform_mode = 0x05;
+    in.ofdm_data_carriers = 30;
+    auto k = SoftCombineBuffer::makeKey(in);
+    CHECK(k.sender_hash == 0, "sender_hash zero must propagate (HARQ-disabled sentinel)");
+    pass("makeKey preserves zero sender_hash sentinel");
+}
+
+void test_makeKey_channel_interleave_false_is_zero() {
+    SoftCombineBuffer::HarqKeyInputs in;
+    in.sender_hash = 1;
+    in.channel_interleave = false;
+    auto k = SoftCombineBuffer::makeKey(in);
+    CHECK(k.channel_interleave == 0, "channel_interleave false → 0");
+    pass("channel_interleave false maps to 0");
+}
+
 int main() {
     test_disabled_noop();
     test_first_attempt_identity();
@@ -393,6 +477,12 @@ int main() {
     test_max_entries_lru_eviction();
     test_key_disambiguation();
     test_phy_field_disambiguation();
+    test_makeKey_basic_field_propagation();
+    test_makeKey_carrier_hash_distinguishes_waveform_mode();
+    test_makeKey_carrier_hash_distinguishes_data_carriers();
+    test_makeKey_carrier_hash_stable_for_same_inputs();
+    test_makeKey_zero_sender_hash_preserved();
+    test_makeKey_channel_interleave_false_is_zero();
 
     std::cout << "\nSoftCombineBuffer tests: " << tests_passed << " passed, "
               << tests_failed << " failed\n";

@@ -47,6 +47,25 @@ public:
         size_t operator()(const Key& key) const;
     };
 
+    // Inputs that determine a HARQ key. Pulled out of the streaming
+    // decoder so the carrier_count_hash construction and field
+    // population can be unit tested without standing up the whole
+    // decode pipeline. waveform_mode is the underlying byte value of
+    // protocol::WaveformMode (kept as int here to avoid a circular
+    // include with the protocol layer).
+    struct HarqKeyInputs {
+        uint32_t sender_hash = 0;
+        uint16_t seq = 0;
+        CodeRate rate = CodeRate::R1_4;
+        uint8_t cw_count = 0;
+        Modulation modulation = Modulation::DQPSK;
+        bool channel_interleave = false;
+        int waveform_mode = 0;          // protocol::WaveformMode underlying byte
+        int ofdm_data_carriers = 0;
+    };
+
+    static Key makeKey(const HarqKeyInputs& in);
+
     int combine(const Key& key, const std::vector<float>& incoming_llrs,
                 std::vector<float>& out_llrs);
     void retain(const Key& key, std::vector<float> combined_llrs);

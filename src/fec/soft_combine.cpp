@@ -4,6 +4,25 @@
 
 namespace ultra::fec {
 
+SoftCombineBuffer::Key SoftCombineBuffer::makeKey(const HarqKeyInputs& in) {
+    Key k;
+    k.sender_hash = in.sender_hash;
+    k.seq = in.seq;
+    k.rate = in.rate;
+    k.cw_count = in.cw_count;
+    k.modulation = in.modulation;
+    k.channel_interleave = static_cast<uint8_t>(in.channel_interleave ? 1 : 0);
+    // Hash OFDM geometry into 16 bits. Two attempts with the same
+    // (sender, seq, rate, modulation, interleave) but different
+    // waveform modes (CHIRP vs COX vs NARROW) or different data-
+    // carrier counts produce different LLR bit positions and must
+    // not combine — a hash mismatch forces a fresh entry.
+    uint32_t carrier_h = static_cast<uint32_t>(in.ofdm_data_carriers) << 8;
+    carrier_h ^= static_cast<uint32_t>(in.waveform_mode);
+    k.carrier_count_hash = static_cast<uint16_t>((carrier_h >> 8) ^ carrier_h);
+    return k;
+}
+
 size_t SoftCombineBuffer::KeyHash::operator()(const Key& key) const {
     size_t h = static_cast<size_t>(key.sender_hash);
     h ^= static_cast<size_t>(key.seq) + 0x9e3779b9u + (h << 6) + (h >> 2);

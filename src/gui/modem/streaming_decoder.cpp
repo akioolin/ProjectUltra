@@ -2648,21 +2648,16 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 return false;
             }
 
-            out_key.sender_hash = hdr.src_hash;
-            out_key.seq = hdr.seq;
-            out_key.rate = rate;
-            out_key.cw_count = hdr.total_cw;
-            out_key.modulation = current_modulation_;
-            out_key.channel_interleave =
-                static_cast<uint8_t>(apply_channel_deinterleave ? 1 : 0);
-            // Hash the OFDM geometry that affects bit ordering. Two
-            // attempts with the same (rate, modulation, interleave)
-            // but different waveform modes (CHIRP vs COX vs NARROW)
-            // produce different bit positions and must not combine.
-            uint32_t carrier_h = static_cast<uint32_t>(ofdm_data_carriers_) << 8;
-            carrier_h ^= static_cast<uint32_t>(mode_);
-            out_key.carrier_count_hash =
-                static_cast<uint16_t>((carrier_h >> 8) ^ carrier_h);
+            fec::SoftCombineBuffer::HarqKeyInputs ki;
+            ki.sender_hash = hdr.src_hash;
+            ki.seq = hdr.seq;
+            ki.rate = rate;
+            ki.cw_count = hdr.total_cw;
+            ki.modulation = current_modulation_;
+            ki.channel_interleave = apply_channel_deinterleave;
+            ki.waveform_mode = static_cast<int>(mode_);
+            ki.ofdm_data_carriers = ofdm_data_carriers_;
+            out_key = fec::SoftCombineBuffer::makeKey(ki);
             return out_key.sender_hash != 0;
         };
         const auto _profile_fs_start_ = std::chrono::steady_clock::now();
