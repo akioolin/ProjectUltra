@@ -2,6 +2,7 @@
 
 #include "protocol/compression.hpp"
 
+#include <algorithm>
 #include <functional>
 #include <iostream>
 #include <initializer_list>
@@ -697,6 +698,50 @@ int main() {
         h.session.onModemDataReceived(wire);
         expect(h.data_out.empty(),
                "corrupt deflate must NOT forward to data port");
+    });
+    runner.run("encodePayloadForWire: raw marker when compression disabled", [] {
+        std::vector<uint8_t> payload(512, 'Z');
+        auto wire = TNCSession::encodePayloadForWire(payload, /*compression*/ false);
+        expect(wire.size() == payload.size() + 1, "wire is payload + 1-byte marker");
+        expect(wire.front() == 0x00, "raw marker when compression disabled");
+        expect(std::equal(payload.begin(), payload.end(), wire.begin() + 1),
+               "payload bytes must be preserved verbatim");
+    });
+    runner.run("encodePayloadForWire: raw marker below MIN_COMPRESS_SIZE", [] {
+        // 8 bytes < MIN_COMPRESS_SIZE (32) — even with compression on,
+        // we must skip deflate and stay raw to avoid the marker overhead.
+        std::vector<uint8_t> payload = {'h','e','l','l','o','!','!','!'};
+        auto wire = TNCSession::encodePayloadForWire(payload, /*compression*/ true);
+        expect(wire.front() == 0x00, "small payload stays raw");
+        expect(wire.size() == payload.size() + 1, "no compression for small payload");
+    });
+    runner.run("encodePayloadForWire: deflate marker when compression saves bytes", [] {
+        // 1024 'Z' bytes is highly compressible — deflate should
+        // beat raw-plus-marker easily.
+        std::vector<uint8_t> payload(1024, 'Z');
+        auto wire = TNCSession::encodePayloadForWire(payload, /*compression*/ true);
+        expect(wire.front() == 0x01, "compressible payload gets deflate marker");
+        expect(wire.size() < payload.size() + 1,
+               "deflate output must be smaller than raw+marker");
+    });
+    runner.run("encodePayloadForWire: falls back to raw when deflate would expand", [] {
+        // Pseudo-random uncompressible payload above MIN_COMPRESS_SIZE.
+        // Compression should be attempted but rejected, falling back
+        // to raw so we never ship MORE bytes than the input.
+        std::vector<uint8_t> payload;
+        for (int i = 0; i < 256; ++i) {
+            payload.push_back(static_cast<uint8_t>((i * 31 + 7) & 0xFF));
+        }
+        auto wire = TNCSession::encodePayloadForWire(payload, /*compression*/ true);
+        expect(wire.front() == 0x00, "uncompressible payload falls back to raw");
+        expect(wire.size() == payload.size() + 1,
+               "raw fallback is payload + 1-byte marker");
+    });
+    runner.run("encodePayloadForWire: empty payload produces single marker byte", [] {
+        std::vector<uint8_t> payload;
+        auto wire = TNCSession::encodePayloadForWire(payload, /*compression*/ true);
+        expect(wire.size() == 1, "empty payload encodes as just the marker");
+        expect(wire.front() == 0x00, "empty payload uses raw marker");
     });
     runner.run("RX deflate marker is decompressed", [] {
         Harness h;

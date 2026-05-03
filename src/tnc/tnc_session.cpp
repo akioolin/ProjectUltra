@@ -408,18 +408,19 @@ void TNCSession::tick(uint32_t elapsed_ms) {
     }
 }
 
-void TNCSession::flushDataTxBuffer() {
+std::vector<uint8_t> TNCSession::encodePayloadForWire(
+    const std::vector<uint8_t>& payload, bool compression_enabled) {
     std::vector<uint8_t> wire;
-    wire.reserve(data_tx_buffer_.size() + 1);
+    wire.reserve(payload.size() + 1);
 
     bool sent_compressed = false;
-    if (compression_enabled_ &&
-        data_tx_buffer_.size() >= ultra::protocol::Compression::MIN_COMPRESS_SIZE) {
-        if (auto compressed = ultra::protocol::Compression::compress(data_tx_buffer_)) {
+    if (compression_enabled &&
+        payload.size() >= ultra::protocol::Compression::MIN_COMPRESS_SIZE) {
+        if (auto compressed = ultra::protocol::Compression::compress(payload)) {
             // Only ship the compressed copy if it actually pays for the
             // 1-byte marker overhead. On already-compressed or random
             // input, deflate often expands; fall back to raw.
-            if (compressed->size() + 1 < data_tx_buffer_.size()) {
+            if (compressed->size() + 1 < payload.size()) {
                 wire.push_back(kPayloadMarkerDeflate);
                 wire.insert(wire.end(), compressed->begin(), compressed->end());
                 sent_compressed = true;
@@ -428,9 +429,13 @@ void TNCSession::flushDataTxBuffer() {
     }
     if (!sent_compressed) {
         wire.push_back(kPayloadMarkerRaw);
-        wire.insert(wire.end(), data_tx_buffer_.begin(), data_tx_buffer_.end());
+        wire.insert(wire.end(), payload.begin(), payload.end());
     }
+    return wire;
+}
 
+void TNCSession::flushDataTxBuffer() {
+    auto wire = encodePayloadForWire(data_tx_buffer_, compression_enabled_);
     modem_.sendBinary(wire);
     data_tx_buffer_.clear();
     data_tx_quiet_ms_ = 0;

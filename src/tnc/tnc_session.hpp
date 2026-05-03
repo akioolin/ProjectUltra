@@ -35,6 +35,15 @@ public:
     State getState() const { return state_; }
     const std::string& getMyCall() const { return mycall_; }
 
+    // Pure encoder for the on-wire payload framing. Picks compression
+    // when it actually saves bytes after the 1-byte marker overhead
+    // and falls back to raw otherwise. Static and side-effect free so
+    // tests can probe each branch (raw, compressible, uncompressible,
+    // below-threshold, compression-disabled) without spinning up a
+    // full session. Returns wire bytes ready for ModemAdapter::sendBinary.
+    static std::vector<uint8_t> encodePayloadForWire(
+        const std::vector<uint8_t>& payload, bool compression_enabled);
+
 private:
     ModemAdapter& modem_;
     EmitFn cmd_emit_;
