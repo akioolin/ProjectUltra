@@ -269,11 +269,23 @@ inline OFDMFrameTiming narrowOFDMFrameTiming(Modulation mod,
 }
 
 inline uint32_t computeNarrowOFDMAckTimeoutMs(Modulation mod,
-                                              int cw_count = v2::kDefaultFixedFrameCodewords) {
+                                              int cw_count = v2::kDefaultFixedFrameCodewords,
+                                              size_t window_size = 1) {
     const OFDMFrameTiming timing = narrowOFDMFrameTiming(mod, cw_count);
-    const uint32_t timeout_ms = timing.data_ms + 2 * timing.ack_ms + 120 +
+    // For window>1 selective-repeat, we hold the ARQ window full during
+    // the burst, so the ACK timeout has to cover the full TX burst plus
+    // ACK turnaround plus a generous decode margin. Without this scale
+    // the timer fires while later frames are still on the wire.
+    const uint32_t tx_burst_ms = timing.data_ms *
+                                 static_cast<uint32_t>(std::max<size_t>(1, window_size));
+    const uint32_t timeout_ms = tx_burst_ms + 2 * timing.ack_ms + 120 +
                                 std::max<uint32_t>(700, timing.data_ms / 2);
-    return std::clamp(timeout_ms, 4500u, 14000u);
+    // Cap scales with window: 4.5s..14s for window=1, 4.5s..22s for window=2,
+    // 4.5s..30s for window=3 etc. Avoids pathologically long single-window
+    // values while letting large windows actually wait for their bursts.
+    const uint32_t upper = 14000u + 8000u * static_cast<uint32_t>(
+                               std::max<size_t>(1, window_size) - 1);
+    return std::clamp(timeout_ms, 4500u, upper);
 }
 
 inline WaveformMode selectNegotiatedMode(uint8_t local_caps,

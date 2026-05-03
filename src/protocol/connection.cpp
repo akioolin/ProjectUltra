@@ -1450,7 +1450,16 @@ void Connection::configureArqForCurrentDataMode() {
         arq_.setAckRepeatCount(1);
         LOG_MODEM(INFO, "Connection: ARQ window=1, timeout=18s, ack_repeat=1 (MC-DPSK)");
     } else if (negotiated_mode_ == WaveformMode::OFDM_NARROW) {
-        arq_.setWindowSize(1);
+        // Selective-repeat window=2 lets us overlap TX of frame N+1 with
+        // the receiver's decode of frame N, ~doubling effective TX duty
+        // cycle. Per Codex audit: keep window small (=2) on narrow because
+        // 30m fading correlates across frames at ~0.5-1 Hz Doppler; a
+        // bigger window risks losing both frames to the same fade. Worth
+        // ~+14-46 bps depending on rate. Stop-and-wait (=1) is the
+        // fallback if real-OTA testing shows fade correlation is worse
+        // than expected.
+        constexpr size_t kNarrowWindow = 2;
+        arq_.setWindowSize(kNarrowWindow);
         arq_.setMaxRetries(15);
         arq_.setSackDelay(120);
         arq_.setSackDelayShort(0);
@@ -1459,11 +1468,11 @@ void Connection::configureArqForCurrentDataMode() {
         const auto timing = connection_policy::narrowOFDMFrameTiming(
             data_modulation_, data_frame_cw_count_);
         uint32_t timeout_ms = connection_policy::computeNarrowOFDMAckTimeoutMs(
-            data_modulation_, data_frame_cw_count_);
+            data_modulation_, data_frame_cw_count_, kNarrowWindow);
         arq_.setAckTimeout(timeout_ms);
 
-        LOG_MODEM(INFO, "Connection: ARQ window=1, timeout=%.2fs (data=%ums, ack=%ums), ack_repeat=1, cw=%d (OFDM_NARROW %s %s)",
-                  timeout_ms / 1000.0f, timing.data_ms, timing.ack_ms,
+        LOG_MODEM(INFO, "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, ack=%ums), ack_repeat=1, cw=%d (OFDM_NARROW %s %s)",
+                  kNarrowWindow, timeout_ms / 1000.0f, timing.data_ms, timing.ack_ms,
                   data_frame_cw_count_,
                   modulationToString(data_modulation_), codeRateToString(data_code_rate_));
     } else {
