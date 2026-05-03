@@ -1,0 +1,486 @@
+// Unit tests for ultra_tnc config plumbing. Exercises the strict
+// parsers, applyConfigKey branches, loadConfigFile error paths, and
+// parseArgs (CLI-overrides-config, --help skips bad config, etc.)
+// without needing audio, PTT, or the protocol engine.
+
+#include "ultra_tnc_config.hpp"
+
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <initializer_list>
+#include <iostream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+#include <unistd.h>
+
+using namespace ultra::tnc::config;
+
+namespace {
+
+int passed = 0;
+int failed = 0;
+
+#define CHECK(cond, msg)                              \
+    do {                                              \
+        if (!(cond)) {                                \
+            std::cout << "FAIL: " << msg << "\n";     \
+            ++failed;                                 \
+            return;                                   \
+        }                                             \
+    } while (0)
+
+void pass(const char* name) {
+    ++passed;
+    std::cout << "PASS: " << name << "\n";
+}
+
+// argv builder for parseArgs tests. parseArgs takes char**, so we
+// keep the strings alive in a vector.
+struct Argv {
+    std::vector<std::string> storage;
+    std::vector<char*> argv;
+    Argv(std::initializer_list<const char*> tokens) {
+        storage.reserve(tokens.size());
+        for (const char* t : tokens) storage.emplace_back(t);
+        argv.reserve(storage.size());
+        for (auto& s : storage) argv.push_back(s.data());
+    }
+    int argc() const { return static_cast<int>(argv.size()); }
+    char** data() { return argv.data(); }
+};
+
+// Temp-file RAII for loadConfigFile / parseArgs --config tests.
+struct TempFile {
+    std::string path;
+    explicit TempFile(const std::string& contents) {
+        char tmpl[] = "/tmp/ultra_tnc_cfg_XXXXXX";
+        int fd = ::mkstemp(tmpl);
+        if (fd < 0) throw std::runtime_error("mkstemp failed");
+        ::close(fd);
+        path = tmpl;
+        std::ofstream out(path);
+        out << contents;
+    }
+    ~TempFile() { ::remove(path.c_str()); }
+};
+
+// ---------------- Strict parsers ----------------
+
+void test_parsePositiveIntStrict_basic() {
+    int v = -1;
+    CHECK(parsePositiveIntStrict("9600", v), "9600 must parse");
+    CHECK(v == 9600, "9600 value");
+    pass("parsePositiveIntStrict: 9600 → 9600");
+}
+
+void test_parsePositiveIntStrict_rejects_trailing_garbage() {
+    int v = -1;
+    CHECK(!parsePositiveIntStrict("9600abc", v), "9600abc must reject");
+    pass("parsePositiveIntStrict: '9600abc' rejected (was loose-stoi accepting it)");
+}
+
+void test_parsePositiveIntStrict_rejects_negative() {
+    int v = -1;
+    CHECK(!parsePositiveIntStrict("-50", v), "-50 must reject");
+    pass("parsePositiveIntStrict: negative rejected");
+}
+
+void test_parsePositiveIntStrict_rejects_plus_sign() {
+    int v = -1;
+    CHECK(!parsePositiveIntStrict("+50", v), "+50 must reject");
+    pass("parsePositiveIntStrict: leading '+' rejected");
+}
+
+void test_parsePositiveIntStrict_range_check() {
+    int v = -1;
+    CHECK(!parsePositiveIntStrict("49", v, 50, 4000000), "49 below min must reject");
+    CHECK(!parsePositiveIntStrict("4000001", v, 50, 4000000), "above max must reject");
+    CHECK(parsePositiveIntStrict("50", v, 50, 4000000), "50 at min ok");
+    CHECK(parsePositiveIntStrict("4000000", v, 50, 4000000), "max ok");
+    pass("parsePositiveIntStrict: range bounds enforced");
+}
+
+void test_parsePositiveIntStrict_empty_rejected() {
+    int v = -1;
+    CHECK(!parsePositiveIntStrict("", v), "empty must reject");
+    pass("parsePositiveIntStrict: empty string rejected");
+}
+
+void test_parseBoolStrict_truthy_forms() {
+    bool b = false;
+    CHECK(parseBoolStrict("true", b) && b == true, "true");
+    CHECK(parseBoolStrict("TRUE", b) && b == true, "TRUE (case-insensitive)");
+    CHECK(parseBoolStrict("1", b) && b == true, "1");
+    CHECK(parseBoolStrict("yes", b) && b == true, "yes");
+    CHECK(parseBoolStrict("on", b) && b == true, "on");
+    pass("parseBoolStrict: truthy forms (true/TRUE/1/yes/on)");
+}
+
+void test_parseBoolStrict_falsy_forms() {
+    bool b = true;
+    CHECK(parseBoolStrict("false", b) && b == false, "false");
+    CHECK(parseBoolStrict("0", b) && b == false, "0");
+    CHECK(parseBoolStrict("no", b) && b == false, "no");
+    CHECK(parseBoolStrict("off", b) && b == false, "off");
+    pass("parseBoolStrict: falsy forms (false/0/no/off)");
+}
+
+void test_parseBoolStrict_unknown_rejected() {
+    bool b = false;
+    CHECK(!parseBoolStrict("maybe", b), "maybe must reject (was silently → false)");
+    CHECK(!parseBoolStrict("", b), "empty must reject");
+    pass("parseBoolStrict: 'maybe' / empty rejected");
+}
+
+void test_parseUint16_bounds() {
+    uint16_t v = 0;
+    CHECK(parseUint16("0", v) && v == 0, "0");
+    CHECK(parseUint16("65535", v) && v == 65535, "65535");
+    CHECK(!parseUint16("65536", v), ">65535 rejected");
+    CHECK(!parseUint16("-1", v), "negative rejected");
+    CHECK(!parseUint16("8300abc", v), "trailing garbage rejected");
+    pass("parseUint16: range + garbage rejection");
+}
+
+void test_parseFloat_strict() {
+    auto a = parseFloat("3.14");
+    CHECK(a && std::abs(*a - 3.14f) < 1e-5f, "3.14 ok");
+    auto b = parseFloat("3.14abc");
+    CHECK(!b, "trailing garbage rejected");
+    pass("parseFloat: 3.14 ok, '3.14abc' rejected");
+}
+
+void test_parseCodeRate() {
+    CHECK(parseCodeRate("auto") && *parseCodeRate("auto") == ultra::CodeRate::AUTO, "auto");
+    CHECK(parseCodeRate("R1_2") && *parseCodeRate("R1_2") == ultra::CodeRate::R1_2, "R1_2 case-insensitive");
+    CHECK(!parseCodeRate("r5_8"), "unknown rate rejected");
+    pass("parseCodeRate: known rates accepted, unknown rejected");
+}
+
+void test_parseModulation() {
+    CHECK(parseModulation("dqpsk") && *parseModulation("dqpsk") == ultra::Modulation::DQPSK, "dqpsk");
+    CHECK(parseModulation("QAM64") && *parseModulation("QAM64") == ultra::Modulation::QAM64, "QAM64");
+    CHECK(!parseModulation("nonsense"), "unknown rejected");
+    pass("parseModulation: known mods accepted, unknown rejected");
+}
+
+void test_isNoneDevice() {
+    CHECK(isNoneDevice("none"), "lowercase none");
+    CHECK(isNoneDevice("NONE"), "uppercase NONE");
+    CHECK(isNoneDevice("None"), "mixed case None");
+    CHECK(!isNoneDevice("USB Audio"), "real device name");
+    pass("isNoneDevice: case-insensitive 'none' detection");
+}
+
+// ---------------- applyConfigKey ----------------
+
+void test_applyConfigKey_audio_devices() {
+    Config cfg;
+    CHECK(applyConfigKey("audio_output", "USB Audio CODEC", cfg), "audio_output ok");
+    CHECK(cfg.audio_output == "USB Audio CODEC", "value stored");
+    CHECK(applyConfigKey("audio-input", "USB Audio CODEC", cfg), "audio-input alias ok");
+    CHECK(cfg.audio_input == "USB Audio CODEC", "input value stored");
+    pass("applyConfigKey: audio_output/audio-input both spellings");
+}
+
+void test_applyConfigKey_port_bounds() {
+    Config cfg;
+    CHECK(applyConfigKey("port", "8300", cfg), "8300 ok");
+    CHECK(cfg.port == 8300, "port stored");
+    CHECK(!applyConfigKey("port", "65535", cfg), "65535 leaves no room for data port");
+    CHECK(!applyConfigKey("port", "-1", cfg), "negative port rejected");
+    pass("applyConfigKey: port bounded to leave room for N+1 data port");
+}
+
+void test_applyConfigKey_callsign_sanitized() {
+    Config cfg;
+    CHECK(applyConfigKey("callsign", "n0call", cfg), "n0call ok");
+    CHECK(cfg.callsign == "N0CALL", "sanitized to uppercase");
+    CHECK(!applyConfigKey("callsign", "", cfg), "empty rejected");
+    pass("applyConfigKey: callsign sanitized + empty rejected");
+}
+
+void test_applyConfigKey_inject_channel_modes() {
+    Config cfg;
+    CHECK(applyConfigKey("inject_channel", "true", cfg) && cfg.inject_channel,
+          "inject_channel=true");
+    CHECK(applyConfigKey("inject_channel", "false", cfg) && !cfg.inject_channel,
+          "inject_channel=false");
+    CHECK(applyConfigKey("inject_channel", "awgn", cfg) && cfg.inject_channel,
+          "awgn synonym for true");
+    CHECK(cfg.inject_channel_type == "awgn", "channel type recorded");
+    CHECK(!applyConfigKey("inject_channel", "rayleigh", cfg),
+          "non-AWGN channel rejected (only AWGN implemented)");
+    pass("applyConfigKey: inject_channel accepts bool + 'awgn', rejects others");
+}
+
+void test_applyConfigKey_ptt_baud_strict() {
+    Config cfg;
+    CHECK(applyConfigKey("ptt_serial_baud", "9600", cfg) && cfg.ptt_serial_baud == 9600,
+          "9600 baud ok");
+    CHECK(!applyConfigKey("ptt_serial_baud", "9600abc", cfg),
+          "trailing garbage rejected (was silently → 9600)");
+    CHECK(!applyConfigKey("ptt_serial_baud", "-50", cfg),
+          "negative baud rejected (was silently → -50)");
+    CHECK(!applyConfigKey("ptt_serial_baud", "49", cfg), "below min rejected");
+    pass("applyConfigKey: ptt_serial_baud strict-parsed");
+}
+
+void test_applyConfigKey_ptt_inactive_high_strict() {
+    Config cfg;
+    CHECK(applyConfigKey("ptt_inactive_high", "true", cfg) && cfg.ptt_inactive_high,
+          "true ok");
+    CHECK(applyConfigKey("ptt_inactive_high", "false", cfg) && !cfg.ptt_inactive_high,
+          "false ok");
+    CHECK(!applyConfigKey("ptt_inactive_high", "maybe", cfg),
+          "maybe rejected (was silently → false)");
+    pass("applyConfigKey: ptt_inactive_high strict-parsed");
+}
+
+void test_applyConfigKey_ptt_serial_line() {
+    Config cfg;
+    CHECK(applyConfigKey("ptt_serial_line", "rts", cfg), "rts ok");
+    CHECK(cfg.ptt_serial_line == "rts", "rts stored");
+    CHECK(applyConfigKey("ptt_serial_line", "DTR", cfg), "DTR (mixed case) ok");
+    CHECK(cfg.ptt_serial_line == "dtr", "normalized to lowercase");
+    CHECK(!applyConfigKey("ptt_serial_line", "tx", cfg), "unknown line rejected");
+    pass("applyConfigKey: ptt_serial_line rts/dtr only");
+}
+
+void test_applyConfigKey_unknown_key_rejected() {
+    Config cfg;
+    CHECK(!applyConfigKey("nonsense_field", "x", cfg), "unknown key rejected");
+    pass("applyConfigKey: unknown key rejected");
+}
+
+void test_applyConfigKey_ofdm_config() {
+    Config cfg;
+    CHECK(applyConfigKey("ofdm_config", "default", cfg) &&
+          cfg.ofdm_config == OFDMConfigPreset::Default, "default");
+    CHECK(applyConfigKey("ofdm_config", "nvis", cfg) &&
+          cfg.ofdm_config == OFDMConfigPreset::Nvis, "nvis");
+    CHECK(!applyConfigKey("ofdm_config", "wide", cfg), "unknown preset rejected");
+    pass("applyConfigKey: ofdm_config default/nvis only");
+}
+
+// ---------------- loadConfigFile ----------------
+
+void test_loadConfigFile_basic() {
+    TempFile cfg_file(
+        "# header comment\n"
+        "audio_output = USB Audio CODEC\n"
+        "audio_input  = USB Audio CODEC\n"
+        "callsign     = N0CALL\n"
+        "port         = 8400\n"
+        "\n"
+        "ptt_serial_port = /dev/cu.usbserial-FT001\n"
+        "ptt_serial_line = dtr\n"
+    );
+    Config cfg;
+    CHECK(loadConfigFile(cfg_file.path, cfg), "valid config loads");
+    CHECK(cfg.audio_output == "USB Audio CODEC", "audio_output");
+    CHECK(cfg.callsign == "N0CALL", "callsign");
+    CHECK(cfg.port == 8400, "port");
+    CHECK(cfg.ptt_serial_port == "/dev/cu.usbserial-FT001", "ptt_serial_port");
+    CHECK(cfg.ptt_serial_line == "dtr", "ptt_serial_line");
+    pass("loadConfigFile: full valid file populates Config");
+}
+
+void test_loadConfigFile_missing_equals() {
+    TempFile cfg_file("audio_output USB Audio\n");  // no '='
+    Config cfg;
+    CHECK(!loadConfigFile(cfg_file.path, cfg), "missing '=' must reject");
+    pass("loadConfigFile: missing '=' rejected");
+}
+
+void test_loadConfigFile_unknown_key() {
+    TempFile cfg_file("nonsense = x\n");
+    Config cfg;
+    CHECK(!loadConfigFile(cfg_file.path, cfg), "unknown key must reject");
+    pass("loadConfigFile: unknown key rejected");
+}
+
+void test_loadConfigFile_bad_value() {
+    TempFile cfg_file("ptt_serial_baud = abc\n");
+    Config cfg;
+    CHECK(!loadConfigFile(cfg_file.path, cfg), "bad value must reject");
+    pass("loadConfigFile: bad value rejected");
+}
+
+void test_loadConfigFile_missing_file() {
+    Config cfg;
+    CHECK(!loadConfigFile("/tmp/does_not_exist_ultra_tnc_cfg_zzzz.conf", cfg),
+          "missing file must return false");
+    pass("loadConfigFile: missing file rejected");
+}
+
+void test_loadConfigFile_comments_and_blank_lines() {
+    TempFile cfg_file(
+        "# comment-only line\n"
+        "\n"
+        "callsign = N0CALL  # trailing comment\n"
+        "\n"
+    );
+    Config cfg;
+    CHECK(loadConfigFile(cfg_file.path, cfg), "comments + blanks ok");
+    CHECK(cfg.callsign == "N0CALL", "trailing comment stripped");
+    pass("loadConfigFile: comments and blank lines tolerated");
+}
+
+// ---------------- parseArgs ----------------
+
+void test_parseArgs_help_flag() {
+    Argv argv({"ultra_tnc", "--help"});
+    Config cfg;
+    CHECK(parseArgs(argv.argc(), argv.data(), cfg), "--help parses");
+    CHECK(cfg.help, "help flag set");
+    pass("parseArgs: --help sets cfg.help");
+}
+
+void test_parseArgs_help_skips_bad_config() {
+    // Operator must be able to recover from a malformed config via
+    // --help without the parser bailing out on config load.
+    TempFile bad_cfg("totally not valid syntax\n");
+    Argv argv({"ultra_tnc", "--config", bad_cfg.path.c_str(), "--help"});
+    Config cfg;
+    CHECK(parseArgs(argv.argc(), argv.data(), cfg),
+          "--help must not fail on bad config");
+    CHECK(cfg.help, "help still set");
+    pass("parseArgs: --help bypasses config loading");
+}
+
+void test_parseArgs_list_audio_skips_bad_config() {
+    TempFile bad_cfg("totally not valid syntax\n");
+    Argv argv({"ultra_tnc", "--config", bad_cfg.path.c_str(), "--list-audio-devices"});
+    Config cfg;
+    CHECK(parseArgs(argv.argc(), argv.data(), cfg),
+          "--list-audio-devices must bypass config load failure");
+    CHECK(cfg.list_audio, "list_audio set");
+    pass("parseArgs: --list-audio-devices bypasses config loading");
+}
+
+void test_parseArgs_cli_overrides_config() {
+    // Config sets baud=19200; CLI flag should override to 4800.
+    TempFile good_cfg("ptt_serial_baud = 19200\n");
+    Argv argv({"ultra_tnc", "--config", good_cfg.path.c_str(),
+               "--ptt-serial-baud", "4800"});
+    Config cfg;
+    CHECK(parseArgs(argv.argc(), argv.data(), cfg), "parse ok");
+    CHECK(cfg.ptt_serial_baud == 4800, "CLI must override config");
+    pass("parseArgs: CLI flags override config values");
+}
+
+void test_parseArgs_no_inject_channel_overrides_config_true() {
+    // Codex review #5: config-set inject_channel=true must be
+    // overridable from CLI back to false via --no-inject-channel.
+    TempFile cfg_file("inject_channel = true\n");
+    Argv argv({"ultra_tnc", "--config", cfg_file.path.c_str(),
+               "--no-inject-channel"});
+    Config cfg;
+    CHECK(parseArgs(argv.argc(), argv.data(), cfg), "parse ok");
+    CHECK(!cfg.inject_channel, "--no-inject-channel must override config true");
+    pass("parseArgs: --no-inject-channel overrides config inject_channel=true");
+}
+
+void test_parseArgs_ptt_active_high_overrides_config_true() {
+    TempFile cfg_file("ptt_inactive_high = true\n");
+    Argv argv({"ultra_tnc", "--config", cfg_file.path.c_str(),
+               "--ptt-active-high"});
+    Config cfg;
+    CHECK(parseArgs(argv.argc(), argv.data(), cfg), "parse ok");
+    CHECK(!cfg.ptt_inactive_high, "--ptt-active-high must override config true");
+    pass("parseArgs: --ptt-active-high overrides config ptt_inactive_high=true");
+}
+
+void test_parseArgs_no_ptt_inactive_high_alias() {
+    TempFile cfg_file("ptt_inactive_high = true\n");
+    Argv argv({"ultra_tnc", "--config", cfg_file.path.c_str(),
+               "--no-ptt-inactive-high"});
+    Config cfg;
+    CHECK(parseArgs(argv.argc(), argv.data(), cfg), "parse ok");
+    CHECK(!cfg.ptt_inactive_high, "alias must also work");
+    pass("parseArgs: --no-ptt-inactive-high alias works");
+}
+
+void test_parseArgs_unknown_flag_rejected() {
+    Argv argv({"ultra_tnc", "--this-does-not-exist"});
+    Config cfg;
+    CHECK(!parseArgs(argv.argc(), argv.data(), cfg), "unknown flag must reject");
+    pass("parseArgs: unknown flag rejected");
+}
+
+void test_parseArgs_missing_value_rejected() {
+    Argv argv({"ultra_tnc", "--callsign"});
+    Config cfg;
+    CHECK(!parseArgs(argv.argc(), argv.data(), cfg),
+          "--callsign without value must reject");
+    pass("parseArgs: missing value for --callsign rejected");
+}
+
+void test_parseArgs_config_load_failure_propagates() {
+    // No --help / --list-audio: a bad explicit --config must fail.
+    TempFile bad_cfg("nonsense_field = x\n");
+    Argv argv({"ultra_tnc", "--config", bad_cfg.path.c_str()});
+    Config cfg;
+    CHECK(!parseArgs(argv.argc(), argv.data(), cfg),
+          "bad explicit --config must fail when not --help/--list-audio");
+    pass("parseArgs: bad --config fails parse (without --help)");
+}
+
+}  // namespace
+
+int main() {
+    // Strict parsers
+    test_parsePositiveIntStrict_basic();
+    test_parsePositiveIntStrict_rejects_trailing_garbage();
+    test_parsePositiveIntStrict_rejects_negative();
+    test_parsePositiveIntStrict_rejects_plus_sign();
+    test_parsePositiveIntStrict_range_check();
+    test_parsePositiveIntStrict_empty_rejected();
+    test_parseBoolStrict_truthy_forms();
+    test_parseBoolStrict_falsy_forms();
+    test_parseBoolStrict_unknown_rejected();
+    test_parseUint16_bounds();
+    test_parseFloat_strict();
+    test_parseCodeRate();
+    test_parseModulation();
+    test_isNoneDevice();
+
+    // applyConfigKey
+    test_applyConfigKey_audio_devices();
+    test_applyConfigKey_port_bounds();
+    test_applyConfigKey_callsign_sanitized();
+    test_applyConfigKey_inject_channel_modes();
+    test_applyConfigKey_ptt_baud_strict();
+    test_applyConfigKey_ptt_inactive_high_strict();
+    test_applyConfigKey_ptt_serial_line();
+    test_applyConfigKey_unknown_key_rejected();
+    test_applyConfigKey_ofdm_config();
+
+    // loadConfigFile
+    test_loadConfigFile_basic();
+    test_loadConfigFile_missing_equals();
+    test_loadConfigFile_unknown_key();
+    test_loadConfigFile_bad_value();
+    test_loadConfigFile_missing_file();
+    test_loadConfigFile_comments_and_blank_lines();
+
+    // parseArgs
+    test_parseArgs_help_flag();
+    test_parseArgs_help_skips_bad_config();
+    test_parseArgs_list_audio_skips_bad_config();
+    test_parseArgs_cli_overrides_config();
+    test_parseArgs_no_inject_channel_overrides_config_true();
+    test_parseArgs_ptt_active_high_overrides_config_true();
+    test_parseArgs_no_ptt_inactive_high_alias();
+    test_parseArgs_unknown_flag_rejected();
+    test_parseArgs_missing_value_rejected();
+    test_parseArgs_config_load_failure_propagates();
+
+    std::cout << "\nUltraTNCConfig tests: " << passed << " passed, "
+              << failed << " failed\n";
+    return failed == 0 ? 0 : 1;
+}

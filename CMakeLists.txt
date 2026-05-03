@@ -197,6 +197,7 @@ if(ULTRA_BUILD_TOOLS)
     if(SDL2_FOUND)
         add_executable(ultra_tnc
             tools/ultra_tnc.cpp
+            tools/ultra_tnc_config.cpp
             src/gui/audio_engine.cpp
             src/gui/serial_ptt.cpp
             src/gui/modem/streaming_decoder.cpp
@@ -204,6 +205,7 @@ if(ULTRA_BUILD_TOOLS)
         )
         target_include_directories(ultra_tnc PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools
         )
         target_compile_definitions(ultra_tnc PRIVATE
             ULTRA_HAVE_SDL2
