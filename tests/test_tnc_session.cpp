@@ -207,7 +207,7 @@ int main() {
     runner.run("trailing whitespace is trimmed", [] {
         Harness h;
         h.session.handleControlLine("VERSION   ");
-        expectLines(h, {"VARA version 4.9.0 registered\r"});
+        expectLines(h, {"VERSION 4.9.0\r"});
     });
     runner.run("unknown command emits WRONG", [] {
         Harness h;
@@ -217,12 +217,12 @@ int main() {
     runner.run("lowercase command parses", [] {
         Harness h;
         h.session.handleControlLine("version");
-        expectLines(h, {"VARA version 4.9.0 registered\r"});
+        expectLines(h, {"VERSION 4.9.0\r"});
     });
     runner.run("leading whitespace is trimmed", [] {
         Harness h;
         h.session.handleControlLine("   VERSION");
-        expectLines(h, {"VARA version 4.9.0 registered\r"});
+        expectLines(h, {"VERSION 4.9.0\r"});
     });
     runner.run("extra space between command and args is accepted", [] {
         Harness h;
@@ -757,7 +757,7 @@ int main() {
     runner.run("VERSION emits exact Pat-compatible string", [] {
         Harness h;
         h.session.handleControlLine("VERSION");
-        expectLines(h, {"VARA version 4.9.0 registered\r"});
+        expectLines(h, {"VERSION 4.9.0\r"});
     });
     runner.run("BUFFER command emits snapshot", [] {
         Harness h;
