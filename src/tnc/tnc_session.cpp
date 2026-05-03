@@ -333,6 +333,12 @@ void TNCSession::onModemBufferLevel(int bytes) {
     if (bytes < 0) {
         bytes = 0;
     }
+    // Pat's Flush() trusts BUFFER 0 to mean "every byte I wrote has
+    // been transmitted". Our 200 ms TX staging buffer is invisible to
+    // the engine's backlog count, so we add it here. Without this,
+    // BUFFER 0 can fire while data_tx_buffer_ still has unsent bytes,
+    // letting Pat close the session before transmission completes.
+    bytes += static_cast<int>(data_tx_buffer_.size());
 
     if (bytes == last_buffer_level_ && pending_buffer_level_ < 0) {
         return;
@@ -391,6 +397,19 @@ void TNCSession::tick(uint32_t elapsed_ms) {
         data_tx_quiet_ms_ += elapsed_ms;
         if (data_tx_quiet_ms_ >= kDataTxFlushQuietMs) {
             flushDataTxBuffer();
+        }
+    }
+
+    // Pat's Flush() blocks on BUFFER 0. The engine-backlog poll in
+    // TNCBridge only sees engine bytes, not our staging buffer. When
+    // the staging size changes (e.g. user write between engine polls),
+    // re-emit BUFFER so Pat's accounting stays in sync.
+    if (state_ == State::CONNECTED) {
+        const int total = modem_.getTxBackloggBytes() +
+                          static_cast<int>(data_tx_buffer_.size());
+        if (total != last_buffer_level_ && pending_buffer_level_ < 0 &&
+            last_buffer_emit_ms_ >= kBufferEmitIntervalMs) {
+            emitBuffer(total);
         }
     }
 }
@@ -725,7 +744,10 @@ void TNCSession::cmdBuffer(std::string_view args) {
         emitWrong();
         return;
     }
-    emitBuffer(modem_.getTxBackloggBytes());
+    // Match the same accounting as the unsolicited BUFFER N event:
+    // include both engine backlog and our local TX staging buffer.
+    emitBuffer(modem_.getTxBackloggBytes() +
+               static_cast<int>(data_tx_buffer_.size()));
 }
 
 void TNCSession::cmdSn(std::string_view args) {
