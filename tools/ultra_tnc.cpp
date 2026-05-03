@@ -174,6 +174,7 @@ void printUsage(std::ostream& out) {
         << "  --callsign <call>           Default callsign (default: NOCALL)\n"
         << "  --inject-channel [awgn]     Apply simple TX-side AWGN before audio output\n"
         << "                              (only awgn is implemented; other types rejected)\n"
+        << "  --no-inject-channel         Override config inject_channel=true back to false\n"
         << "  --snr <db>                  SNR for channel injection and mode reports\n"
         << "  --rate <auto|r1_4|r1_2|r2_3|r3_4>\n"
         << "  --mod <auto|dqpsk|d8psk|dbpsk|qpsk|bpsk|qam16|qam32|qam64>\n"
@@ -185,6 +186,8 @@ void printUsage(std::ostream& out) {
         << "  --ptt-serial-line <rts|dtr> Which line keys TX (default: rts)\n"
         << "  --ptt-inactive-high         Some radios invert; default is\n"
         << "                              inactive=low / asserted=high\n"
+        << "  --ptt-active-high           Override config ptt_inactive_high=true\n"
+        << "                              back to default polarity (also: --no-ptt-inactive-high)\n"
         << "  --list-audio-devices        Print available SDL audio devices and exit\n"
         << "  --help\n"
         << "\n"
@@ -417,6 +420,10 @@ bool parseArgs(int argc, char** argv, Config& cfg) {
                 }
                 cfg.inject_channel_type = type;
             }
+        } else if (arg == "--no-inject-channel") {
+            // Explicit negation so config-set inject_channel=true can
+            // be turned back off from the CLI without editing the file.
+            cfg.inject_channel = false;
         } else if (arg == "--snr") {
             auto value = requireValue("--snr");
             auto parsed = value ? parseFloat(*value) : std::nullopt;
@@ -475,6 +482,11 @@ bool parseArgs(int argc, char** argv, Config& cfg) {
             cfg.ptt_serial_line = line;
         } else if (arg == "--ptt-inactive-high") {
             cfg.ptt_inactive_high = true;
+        } else if (arg == "--ptt-active-high" || arg == "--no-ptt-inactive-high") {
+            // Explicit negation so config-set ptt_inactive_high=true
+            // can be overridden back to the default polarity from the
+            // CLI without editing the file. Both spellings accepted.
+            cfg.ptt_inactive_high = false;
         } else {
             std::cerr << "Unknown option: " << arg << "\n";
             return false;

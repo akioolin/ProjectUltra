@@ -344,7 +344,14 @@ void TNCSession::onModemBufferLevel(int bytes) {
         return;
     }
 
-    if (last_buffer_level_ < 0 || last_buffer_emit_ms_ >= kBufferEmitIntervalMs) {
+    // Pat's Flush() blocks on BUFFER 0; any delay there directly
+    // delays the application releasing the connection. Zero-going
+    // transitions skip the rate limit so Flush() unblocks ASAP.
+    // Non-zero updates stay rate-limited so a long send doesn't
+    // flood the cmd port with intermediate BUFFER N values.
+    const bool first_emit = (last_buffer_level_ < 0);
+    const bool cooldown_elapsed = (last_buffer_emit_ms_ >= kBufferEmitIntervalMs);
+    if (first_emit || cooldown_elapsed || bytes == 0) {
         pending_buffer_level_ = -1;
         emitBuffer(bytes);
         return;

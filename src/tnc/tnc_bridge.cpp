@@ -361,9 +361,10 @@ void TNCBridge::tick(uint32_t elapsed_ms) {
 
     // Pat / Winlink need periodic BUFFER N updates to know when their
     // outbound data has finished transmitting. Poll the engine's TX
-    // backlog and forward any change. TNCSession rate-limits emission
-    // to once per kBufferEmitIntervalMs (1 s) but we always feed it the
-    // latest value so transitions to BUFFER 0 are immediate.
+    // backlog and forward any change. TNCSession rate-limits non-zero
+    // BUFFER N emissions to once per kBufferEmitIntervalMs (1 s) so a
+    // long send doesn't flood the cmd port; BUFFER 0 transitions
+    // bypass the rate limit so Pat's Flush() unblocks immediately.
     const int backlog = clampSizeToInt(engine_.getTxBacklogBytes());
     if (backlog != last_reported_backlog_) {
         last_reported_backlog_ = backlog;

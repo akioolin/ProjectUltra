@@ -523,6 +523,19 @@ int main() {
         h.session.onModemBufferLevel(-4);
         expectLines(h, {"BUFFER 0\r"});
     });
+    runner.run("BUFFER 0 transition bypasses rate limit", [] {
+        // Pat's Flush() blocks on BUFFER 0. If we let the 1 s rate
+        // limit hold the zero transition, Flush() stalls for up to
+        // a second after the modem is genuinely idle.
+        Harness h;
+        h.session.onModemBufferLevel(1024);
+        h.clear();
+        // Backlog drains immediately on the same tick — must emit
+        // BUFFER 0 right away even though only milliseconds have
+        // elapsed since the previous emission.
+        h.session.onModemBufferLevel(0);
+        expectLines(h, {"BUFFER 0\r"});
+    });
     runner.run("SNR event is ignored until CHAT ON and CONNECTED", [] {
         Harness h;
         enterConnected(h);
