@@ -72,6 +72,7 @@ struct Config {
     std::string ptt_serial_line = "rts";    // "rts" or "dtr"
     bool ptt_inactive_high = false;          // true = inverted (some radios)
     bool help = false;
+    bool list_audio = false;
 };
 
 std::string lower(std::string s) {
@@ -158,6 +159,7 @@ void printUsage(std::ostream& out) {
         << "  --ptt-serial-line <rts|dtr> Which line keys TX (default: rts)\n"
         << "  --ptt-inactive-high         Some radios invert; default is\n"
         << "                              inactive=low / asserted=high\n"
+        << "  --list-audio-devices        Print available SDL audio devices and exit\n"
         << "  --help\n"
         << "\n"
         << "Config file format (key=value, one per line, # comments):\n"
@@ -319,6 +321,8 @@ bool parseArgs(int argc, char** argv, Config& cfg) {
 
         if (arg == "--help" || arg == "-h") {
             cfg.help = true;
+        } else if (arg == "--list-audio-devices") {
+            cfg.list_audio = true;
         } else if (arg == "--config") {
             // Already consumed in the first pass, just skip its value.
             if (i + 1 >= argc) {
@@ -838,6 +842,22 @@ int main(int argc, char** argv) {
 
     if (cfg.help) {
         printUsage(std::cout);
+        return 0;
+    }
+
+    if (cfg.list_audio) {
+        ultra::gui::AudioEngine probe;
+        if (!probe.initialize()) {
+            std::cerr << "Failed to initialize SDL audio for device listing\n";
+            return 1;
+        }
+        std::cout << "\n  Output devices:\n";
+        for (const auto& d : probe.getOutputDevices()) std::cout << "    " << d << "\n";
+        std::cout << "\n  Input devices:\n";
+        for (const auto& d : probe.getInputDevices()) std::cout << "    " << d << "\n";
+        std::cout << "\nUse a device's exact name in --audio-output / --audio-input\n"
+                  << "or the equivalent config-file keys (audio_output / audio_input).\n";
+        probe.shutdown();
         return 0;
     }
 
