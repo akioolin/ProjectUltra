@@ -2793,6 +2793,25 @@ private:
                   << "  cw0_peek="
                   << dp.low_llr_1cw_skipped_cw0_peek.load()
                   << "  (LLR pre-screen avoided the ~85ms decode-and-fail)\n";
+        // Codex review #17 instrumentation: HARQ requires CW0 to peek-
+        // decode for the chase key. Failures here mean the failed-frame
+        // LLRs are NOT retained for combining; HARQ silently provides
+        // no benefit on first-attempt header damage.
+        {
+            const auto succ = dp.harq_key_build_success.load();
+            const auto fail = dp.harq_key_build_failed.load();
+            const auto total = succ + fail;
+            std::cout << "  harq_key_build            success=" << succ
+                      << "  failed=" << fail;
+            if (total > 0) {
+                const double pct = 100.0 * static_cast<double>(fail) /
+                                   static_cast<double>(total);
+                char buf[64];
+                snprintf(buf, sizeof(buf), "  (%.1f%% miss rate)", pct);
+                std::cout << buf;
+            }
+            std::cout << "\n";
+        }
 
         auto fmt_hist = [](const ultra::timing::SingleCWHistogram& h) -> std::string {
             char buf[160];

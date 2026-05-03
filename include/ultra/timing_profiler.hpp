@@ -169,6 +169,15 @@ struct DecoderProfile {
     LLRHistogram llr_dist_control_first;
     LLRHistogram llr_dist_cw0_peek;
 
+    // HARQ key-build outcomes (Codex review #17). HARQ chase combining
+    // requires CW0 to peek-decode so we can construct a stable
+    // (sender, seq) key. If the FIRST attempt's CW0 fails, the LLRs
+    // are not retained and HARQ provides zero benefit on header-
+    // damaged frames. Track the gap so we can quantify whether a
+    // provisional key (from session/ARQ context) is worth wiring.
+    std::atomic<uint64_t> harq_key_build_success{0};
+    std::atomic<uint64_t> harq_key_build_failed{0};
+
     void reset() {
         detect_data_sync.reset();
         ofdm_process_total.reset();
@@ -190,6 +199,8 @@ struct DecoderProfile {
         low_llr_1cw_skipped_cw0_peek.store(0);
         llr_dist_control_first.reset();
         llr_dist_cw0_peek.reset();
+        harq_key_build_success.store(0);
+        harq_key_build_failed.store(0);
     }
 };
 

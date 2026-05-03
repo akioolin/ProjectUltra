@@ -2665,9 +2665,27 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
             fec::SoftCombineBuffer::Key harq_key;
             fec::SoftCombineBuffer::Key* harq_key_ptr = nullptr;
             fec::SoftCombineBuffer* harq_buffer = nullptr;
+            // Only count when HARQ is actually wanted (buffer enabled).
+            // A "failed key build" only matters if HARQ would otherwise
+            // have engaged — counting when HARQ is off would make every
+            // MC-DPSK or non-fixed-frame decode look like a HARQ miss.
+            const bool harq_active = harq_buffer_ && harq_buffer_->enabled();
             if (buildHarqKey(cw_count, harq_key)) {
                 harq_key_ptr = &harq_key;
                 harq_buffer = harq_buffer_;
+                if (harq_active) {
+                    ultra::timing::globalDecoderProfile()
+                        .harq_key_build_success.fetch_add(
+                            1, std::memory_order_relaxed);
+                }
+            } else if (harq_active) {
+                // Codex review #17: HARQ misses every frame whose
+                // first-attempt CW0 fails. Count these so we can
+                // measure whether a session-context fallback key
+                // would actually move the needle.
+                ultra::timing::globalDecoderProfile()
+                    .harq_key_build_failed.fetch_add(
+                        1, std::memory_order_relaxed);
             }
             return v2::decodeFixedFrame(soft_bits, rate, cw_count,
                                         apply_channel_deinterleave, bps,
