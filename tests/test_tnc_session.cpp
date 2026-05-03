@@ -524,6 +524,22 @@ int main() {
         h.session.onModemBufferLevel(-4);
         expectLines(h, {"BUFFER 0\r"});
     });
+    runner.run("onModemBufferLevel(0) reports staging bytes when present", [] {
+        // Codex review #10: when the modem engine drains to 0 but
+        // local TCP staging (data_tx_buffer_) still holds bytes,
+        // BUFFER 0 must NOT fire — Pat would believe transmission
+        // completed and close the session before staged bytes go
+        // out. The level reported must include staging.
+        Harness h;
+        enterConnected(h);
+        h.modem.backlog_bytes = 0;       // engine has nothing
+        std::vector<uint8_t> staging(50, 'A');
+        h.session.handleDataBytes(staging);  // stages locally, not yet flushed
+        h.clear();
+        // Engine reports zero; staging holds 50. Level must be 50.
+        h.session.onModemBufferLevel(0);
+        expectLines(h, {"BUFFER 50\r"});
+    });
     runner.run("BUFFER 0 transition bypasses rate limit", [] {
         // Pat's Flush() blocks on BUFFER 0. If we let the 1 s rate
         // limit hold the zero transition, Flush() stalls for up to
