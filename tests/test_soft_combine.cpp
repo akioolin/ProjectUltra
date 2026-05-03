@@ -73,7 +73,11 @@ void test_first_attempt_identity() {
     pass("first attempt identity");
 }
 
-void test_average_across_attempts() {
+void test_sum_across_attempts() {
+    // Chase combining stores accumulated LLRs and sums new ones in.
+    // Joint LLR for independent observations is the sum, NOT the
+    // average — magnitude must grow with attempts so the LDPC decoder
+    // gets stronger evidence on each retransmission.
     SoftCombineBuffer buffer;
     buffer.setEnabled(true);
     const auto k = key(0x010203, 9);
@@ -84,13 +88,60 @@ void test_average_across_attempts() {
 
     int attempts = buffer.combine(k, {3.0f, 5.0f, 2.0f}, out);
     CHECK(attempts == 2, "second attempt should report two combined attempts");
-    CHECK(vecNear(out, {2.0f, 4.0f, 0.0f}), "second attempt should average two vectors");
+    CHECK(vecNear(out, {4.0f, 8.0f, 0.0f}), "second attempt should sum two vectors");
     buffer.retain(k, out);
 
     attempts = buffer.combine(k, {5.0f, 1.0f, 3.0f}, out);
     CHECK(attempts == 3, "third attempt should report three combined attempts");
-    CHECK(vecNear(out, {3.0f, 3.0f, 1.0f}), "third attempt should average all attempts");
-    pass("average across attempts");
+    CHECK(vecNear(out, {9.0f, 9.0f, 3.0f}), "third attempt should sum all three vectors");
+    pass("sum across attempts");
+}
+
+void test_llr_magnitude_grows_with_attempts() {
+    // The point of chase combining: |LLR| should grow with each
+    // independent observation so the LDPC decoder sees stronger
+    // confidence. If combining ever stops increasing magnitude
+    // (e.g. averaging), HARQ is disabled in practice.
+    SoftCombineBuffer buffer;
+    buffer.setEnabled(true);
+    const auto k = key(0x010203, 31);
+    std::vector<float> out;
+    constexpr float kSingle = 4.0f;
+
+    buffer.combine(k, {kSingle, -kSingle}, out);
+    buffer.retain(k, out);
+
+    for (int i = 2; i <= 5; ++i) {
+        const int attempts = buffer.combine(k, {kSingle, -kSingle}, out);
+        CHECK(attempts == i, "attempt count should advance");
+        const float expected = static_cast<float>(i) * kSingle;
+        CHECK(vecNear(out, {expected, -expected}),
+              "magnitude must grow linearly with independent attempts");
+        buffer.retain(k, out);
+    }
+    pass("llr magnitude grows with attempts");
+}
+
+void test_llr_saturation() {
+    // Many retransmissions of a strong observation must not produce
+    // unbounded LLR magnitudes that destabilize the LDPC decoder's
+    // float math. Cap at the implementation-defined ceiling (currently
+    // 60.0). The exact threshold is internal; the contract is "stays
+    // bounded".
+    SoftCombineBuffer buffer;
+    buffer.setEnabled(true);
+    const auto k = key(0x010203, 32);
+    std::vector<float> out;
+
+    for (int i = 0; i < 50; ++i) {
+        buffer.combine(k, {10.0f}, out);
+        buffer.retain(k, out);
+    }
+    int attempts = buffer.combine(k, {10.0f}, out);
+    CHECK(attempts == 51, "attempt count keeps advancing");
+    CHECK(out[0] <= 100.0f, "saturation must keep |LLR| bounded");
+    CHECK(out[0] > 0.0f, "saturation must preserve sign and magnitude");
+    pass("llr saturation");
 }
 
 void test_drop_on_success() {
@@ -160,20 +211,22 @@ void test_key_disambiguation() {
     const auto other_rate = key(0x010203, 42, CodeRate::R3_4, 6);
     const auto other_cw = key(0x010203, 42, CodeRate::R1_2, 8);
 
+    // Use small LLR magnitudes so the test is about key disambiguation,
+    // not the saturation cap.
     buffer.combine(base, {1.0f}, out); buffer.retain(base, out);
-    buffer.combine(other_sender, {10.0f}, out); buffer.retain(other_sender, out);
-    buffer.combine(other_rate, {20.0f}, out); buffer.retain(other_rate, out);
-    buffer.combine(other_cw, {30.0f}, out); buffer.retain(other_cw, out);
+    buffer.combine(other_sender, {2.0f}, out); buffer.retain(other_sender, out);
+    buffer.combine(other_rate, {4.0f}, out); buffer.retain(other_rate, out);
+    buffer.combine(other_cw, {8.0f}, out); buffer.retain(other_cw, out);
 
     CHECK(buffer.size() == 4, "distinct keys should occupy distinct entries");
-    CHECK(buffer.combine(base, {3.0f}, out) == 2 && vecNear(out, {2.0f}),
-          "base key should combine only with base entry");
-    CHECK(buffer.combine(other_sender, {14.0f}, out) == 2 && vecNear(out, {12.0f}),
-          "sender hash should disambiguate same seq");
-    CHECK(buffer.combine(other_rate, {24.0f}, out) == 2 && vecNear(out, {22.0f}),
-          "code rate should disambiguate same sender/seq");
-    CHECK(buffer.combine(other_cw, {34.0f}, out) == 2 && vecNear(out, {32.0f}),
-          "cw count should disambiguate same sender/seq/rate");
+    CHECK(buffer.combine(base, {3.0f}, out) == 2 && vecNear(out, {4.0f}),
+          "base key should combine only with base entry (sum: 1+3)");
+    CHECK(buffer.combine(other_sender, {3.0f}, out) == 2 && vecNear(out, {5.0f}),
+          "sender hash should disambiguate same seq (sum: 2+3)");
+    CHECK(buffer.combine(other_rate, {3.0f}, out) == 2 && vecNear(out, {7.0f}),
+          "code rate should disambiguate same sender/seq (sum: 4+3)");
+    CHECK(buffer.combine(other_cw, {3.0f}, out) == 2 && vecNear(out, {11.0f}),
+          "cw count should disambiguate same sender/seq/rate (sum: 8+3)");
     pass("key disambiguation");
 }
 
@@ -182,7 +235,9 @@ void test_key_disambiguation() {
 int main() {
     test_disabled_noop();
     test_first_attempt_identity();
-    test_average_across_attempts();
+    test_sum_across_attempts();
+    test_llr_magnitude_grows_with_attempts();
+    test_llr_saturation();
     test_drop_on_success();
     test_ttl_eviction();
     test_max_entries_lru_eviction();

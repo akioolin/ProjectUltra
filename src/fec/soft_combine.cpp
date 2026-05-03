@@ -32,10 +32,22 @@ int SoftCombineBuffer::combine(const Key& key, const std::vector<float>& incomin
         return 1;
     }
 
+    // Chase combining: for independent observations of the same coded
+    // bit, the joint LLR is the SUM, not the average. Two observations
+    // give twice the |LLR| magnitude — that's exactly the SNR gain we
+    // want from retransmission. Averaging would leave the magnitude
+    // unchanged and effectively disable HARQ at the LDPC decoder.
+    //
+    // Saturation: cap |LLR| at kMaxAccumulatedLLR to keep the LDPC
+    // decoder's float math well-conditioned across many retransmissions
+    // (10+ attempts × |LLR|=8 = 80 is fine; 50+ attempts could approach
+    // float-precision concerns and likely indicates a stuck retx loop
+    // that should be killed at the ARQ layer).
+    constexpr float kMaxAccumulatedLLR = 60.0f;
     const int next_attempts = std::max(1, entry.attempts) + 1;
-    const float denom = static_cast<float>(next_attempts);
     for (size_t i = 0; i < incoming_llrs.size(); ++i) {
-        out_llrs[i] = entry.llrs[i] + (incoming_llrs[i] - entry.llrs[i]) / denom;
+        const float sum = entry.llrs[i] + incoming_llrs[i];
+        out_llrs[i] = std::clamp(sum, -kMaxAccumulatedLLR, kMaxAccumulatedLLR);
     }
 
     touchLocked(entry);
