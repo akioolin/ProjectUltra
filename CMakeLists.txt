@@ -216,6 +216,19 @@ if(ULTRA_BUILD_TOOLS)
         message(STATUS "ultra_tnc disabled: SDL2 not found")
     endif()
 
+    # Decode bench - generate + decode deterministic WAV fixtures so
+    # AI agents and humans can A/B decoder changes against bit-identical
+    # input. No SDL, no real-time pacing, runs as fast as possible.
+    add_executable(decode_bench
+        tools/decode_bench.cpp
+        src/gui/modem/streaming_decoder.cpp
+        src/gui/modem/streaming_encoder.cpp
+    )
+    target_include_directories(decode_bench PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(decode_bench PRIVATE ultra_core)
+
     # Threaded simulator - proper real-time audio simulation
     add_executable(threaded_simulator
         tools/threaded_simulator.cpp
