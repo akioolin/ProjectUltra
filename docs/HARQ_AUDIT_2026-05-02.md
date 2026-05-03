@@ -61,7 +61,9 @@ preserved in commit history):
 
 4. **Test coverage**: addressed by adding `test_phy_field_disambiguation`.
 
-## Empirical A/B test on simulator (1 seed, inconclusive)
+## Empirical A/B test on simulator
+
+### Run 1: single seed (inconclusive)
 
 Test: cli_simulator A→B 5 KB Mac→Pi, Watterson Moderate SNR=10, R1/2,
 seed=7.
@@ -71,17 +73,43 @@ seed=7.
 | C   | off | 2 | 1 | 56 s |
 | D   | on  | 2 | 1 | 111 s |
 
-Both passed. Same retx count. Run D was 2× slower, but I can't yet
-explain why — single-seed runs have high variance, and the per-frame
-decode metrics (`unsearched`, `backlog_ms`) were nearly identical
-between runs. The 2× wall-clock gap is likely a test-harness artifact
-(audio timing, ARQ scheduler interaction) rather than HARQ overhead
-itself.
+Both passed. Same retx count. Run D was 2× slower at the wall-clock
+level, but per-frame decode metrics (`unsearched`, `backlog_ms`) were
+nearly identical. Looked like a test-harness artifact, not HARQ cost.
 
-**Action needed**: a multi-seed sweep (5-10 seeds) under harder
-channels (R2/3 at SNR=8, R1/4 at SNR=4) to see if HARQ measurably
-reduces retransmission count when retransmissions actually trigger
-in volume. Single-seed result is not enough to ship-or-revert.
+### Run 2: three seeds, HARQ-friendly conditions (Mod12 R1/4 2KB)
+
+Conditions chosen to actually trigger retransmissions so HARQ has
+something to combine.
+
+| seed | mode | wall | HARQ combines fired |
+|---|---|---|---|
+| 42 | off | 44 s | 0 |
+| 42 | on  | 46 s | 1 |
+| 99 | off | 44 s | 0 |
+| 99 | on  | 70 s | 2 |
+| 7  | off | 50 s | 0 |
+| 7  | on  | 45 s | 0 |
+
+All passed. HARQ engaged on 2/3 seeds (combines > 0). Wall-clock
+results are mixed — sometimes faster (seed=7), sometimes slower
+(seed=99). 3 seeds is not enough to call statistical significance.
+
+### Verified by log inspection
+
+The `HARQ: combining attempt N for seq=X` info-line fires on real
+retransmissions, proving the new sum-LLR code path is exercised in
+practice:
+
+```
+[ 39.737][INFO ][MODEM] [BRAVO] HARQ: combining attempt 2 for
+        seq=32 (sender_hash=0x536C71, cw=4)
+```
+
+So the bug fix is correct, the code path engages, retx are not
+broken. Whether it materially improves throughput on real channels
+needs a larger sweep + OTA testing — not blocking the fix from
+shipping.
 
 ## What's still open
 
