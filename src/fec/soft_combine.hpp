@@ -21,13 +21,16 @@ public:
         // any of these differ between attempts, stored LLRs aren't
         // comparable and combining would corrupt the decode. Including
         // them in the key forces a fresh entry instead of mis-combining.
-        // Note: carrier_count_hash captures bits-per-symbol, OFDM mode
-        // (CHIRP/COX/NARROW), and pilot layout in one stable hash —
-        // see PAT_VARA_AUDIT.md finding context (Codex review of
-        // commit 1f18683 flagged this).
         Modulation modulation = Modulation::DQPSK;
         uint8_t channel_interleave = 0;  // 0 = off, 1 = on
-        uint16_t carrier_count_hash = 0;  // hash of (bps, mode, pilots)
+        // Hash of (waveform_mode, ofdm_data_carriers). Bits-per-symbol
+        // is implied by the modulation field above; pilot spacing
+        // changes within the same waveform mode are NOT distinguished
+        // here — that's a known gap (Codex review of commit 1f18683).
+        // Today's modes (CHIRP/COX/NARROW) each have a fixed pilot
+        // layout, so this is sufficient in practice; revisit if a
+        // dynamic-pilot mode is added later.
+        uint16_t carrier_count_hash = 0;
 
         bool operator==(const Key& other) const {
             return sender_hash == other.sender_hash &&

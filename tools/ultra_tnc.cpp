@@ -285,25 +285,38 @@ bool parseArgs(int argc, char** argv, Config& cfg) {
     // First pass: scan for --config explicitly. Apply it before CLI flags
     // so flags override file values.
     std::string explicit_config;
+    // Pre-scan: don't fail --help / --list-audio-devices on a malformed
+    // config file. Operators need those modes to recover from a bad
+    // config; coupling them to config parsing is bad UX.
+    bool needs_config = true;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg(argv[i]);
+        if (arg == "--help" || arg == "-h" || arg == "--list-audio-devices") {
+            needs_config = false;
+            break;
+        }
+    }
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--config" && i + 1 < argc) {
             explicit_config = argv[i + 1];
             break;
         }
     }
-    if (!explicit_config.empty()) {
-        if (!loadConfigFile(explicit_config, cfg)) {
-            std::cerr << "Failed to load --config " << explicit_config << "\n";
-            return false;
-        }
-    } else {
-        const std::string default_path = findDefaultConfigFile();
-        if (!default_path.empty()) {
-            if (!loadConfigFile(default_path, cfg)) {
-                std::cerr << "Failed to load default config " << default_path << "\n";
+    if (needs_config) {
+        if (!explicit_config.empty()) {
+            if (!loadConfigFile(explicit_config, cfg)) {
+                std::cerr << "Failed to load --config " << explicit_config << "\n";
                 return false;
             }
-            std::cout << "Loaded config: " << default_path << "\n";
+        } else {
+            const std::string default_path = findDefaultConfigFile();
+            if (!default_path.empty()) {
+                if (!loadConfigFile(default_path, cfg)) {
+                    std::cerr << "Failed to load default config " << default_path << "\n";
+                    return false;
+                }
+                std::cout << "Loaded config: " << default_path << "\n";
+            }
         }
     }
 

@@ -125,22 +125,35 @@ void test_llr_magnitude_grows_with_attempts() {
 void test_llr_saturation() {
     // Many retransmissions of a strong observation must not produce
     // unbounded LLR magnitudes that destabilize the LDPC decoder's
-    // float math. Cap at the implementation-defined ceiling (currently
-    // 60.0). The exact threshold is internal; the contract is "stays
-    // bounded".
+    // float math. The implementation caps |LLR| at 60.0 (see
+    // src/fec/soft_combine.cpp's kMaxAccumulatedLLR).
+    constexpr float kImplementationCap = 60.0f;
     SoftCombineBuffer buffer;
     buffer.setEnabled(true);
     const auto k = key(0x010203, 32);
     std::vector<float> out;
 
+    // Positive saturation: 50 attempts of |10| → uncapped sum=500,
+    // capped at 60. Sign preserved.
     for (int i = 0; i < 50; ++i) {
         buffer.combine(k, {10.0f}, out);
         buffer.retain(k, out);
     }
     int attempts = buffer.combine(k, {10.0f}, out);
     CHECK(attempts == 51, "attempt count keeps advancing");
-    CHECK(out[0] <= 100.0f, "saturation must keep |LLR| bounded");
-    CHECK(out[0] > 0.0f, "saturation must preserve sign and magnitude");
+    CHECK(out[0] == kImplementationCap,
+          "+ saturation pins to implementation cap exactly");
+
+    // Negative saturation symmetric: same magnitude, opposite sign.
+    const auto k2 = key(0x010203, 33);
+    std::vector<float> out2;
+    for (int i = 0; i < 50; ++i) {
+        buffer.combine(k2, {-10.0f}, out2);
+        buffer.retain(k2, out2);
+    }
+    buffer.combine(k2, {-10.0f}, out2);
+    CHECK(out2[0] == -kImplementationCap,
+          "- saturation pins to negative implementation cap");
     pass("llr saturation");
 }
 
@@ -303,6 +316,66 @@ void test_enabled_accessor() {
     pass("enabled accessor");
 }
 
+void test_setEnabled_false_clears_entries() {
+    // Disabling the buffer must drop all retained entries — leaving
+    // them around would leak across sessions if HARQ is later
+    // re-enabled with a different connection.
+    SoftCombineBuffer buffer;
+    buffer.setEnabled(true);
+    std::vector<float> out;
+    buffer.combine(key(0x010203, 1), {1.0f}, out); buffer.retain(key(0x010203, 1), out);
+    buffer.combine(key(0x010203, 2), {2.0f}, out); buffer.retain(key(0x010203, 2), out);
+    CHECK(buffer.size() == 2, "two entries before disable");
+    buffer.setEnabled(false);
+    CHECK(buffer.size() == 0, "setEnabled(false) must clear all entries");
+    pass("setEnabled(false) clears entries");
+}
+
+void test_zero_sender_hash_is_noop() {
+    // sender_hash=0 is the sentinel for "no peer identity yet"
+    // (e.g. before CONNECT settles). Storing under that key would
+    // pollute future sessions; combine should treat it as never-
+    // retained, retain should refuse to store.
+    SoftCombineBuffer buffer;
+    buffer.setEnabled(true);
+    std::vector<float> out;
+    SoftCombineBuffer::Key zero_key;
+    zero_key.sender_hash = 0;
+    zero_key.seq = 1;
+    int attempts = buffer.combine(zero_key, {1.0f}, out);
+    CHECK(attempts == 1, "zero sender_hash must always report fresh");
+    buffer.retain(zero_key, {1.0f});
+    CHECK(buffer.size() == 0, "zero sender_hash must not be retained");
+    pass("zero sender_hash is no-op");
+}
+
+void test_max_entries_zero_disables_retention() {
+    // setMaxEntries(0) is operator-style "disable retention without
+    // disabling the buffer entirely". Must clear and prevent re-add.
+    SoftCombineBuffer buffer;
+    buffer.setEnabled(true);
+    std::vector<float> out;
+    buffer.combine(key(0x010203, 5), {3.0f}, out);
+    buffer.retain(key(0x010203, 5), out);
+    CHECK(buffer.size() == 1, "retained while max>0");
+    buffer.setMaxEntries(0);
+    CHECK(buffer.size() == 0, "setMaxEntries(0) must clear");
+    buffer.combine(key(0x010203, 6), {4.0f}, out);
+    buffer.retain(key(0x010203, 6), out);
+    CHECK(buffer.size() == 0, "setMaxEntries(0) must prevent retention");
+    pass("max entries zero disables retention");
+}
+
+void test_empty_llrs_retain_is_noop() {
+    // retain() with empty LLRs would create a useless entry that
+    // could cause size-mismatch errors later.
+    SoftCombineBuffer buffer;
+    buffer.setEnabled(true);
+    buffer.retain(key(0x010203, 7), {});
+    CHECK(buffer.size() == 0, "empty retain must not store anything");
+    pass("empty retain is no-op");
+}
+
 int main() {
     test_disabled_noop();
     test_first_attempt_identity();
@@ -311,6 +384,10 @@ int main() {
     test_llr_saturation();
     test_size_mismatch_drops_entry();
     test_enabled_accessor();
+    test_setEnabled_false_clears_entries();
+    test_zero_sender_hash_is_noop();
+    test_max_entries_zero_disables_retention();
+    test_empty_llrs_retain_is_noop();
     test_drop_on_success();
     test_ttl_eviction();
     test_max_entries_lru_eviction();

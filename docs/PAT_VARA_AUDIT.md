@@ -156,13 +156,13 @@ Relevant Pat/wl2k behavior:
 
 Specific answers:
 
-- Does Pat-Mac need `BUFFER 0` before it sends `DISCONNECT`?  
+- Does Pat-Mac need `BUFFER 0` before it sends `DISCONNECT`?
   Not in the no-proposal `FF`/`FQ` path. `Exchange` ends and `conn.Close()` sends `DISCONNECT` after a two-second last-write guard, then waits for `DISCONNECTED`: `/tmp/patvara_src/conn.go:106-127`. For actual compressed message transfers, `writeCompressed` calls `Flush()` after EOT, and `Flush()` waits for `BUFFER 0`: `/Users/mathieuvachon/go/pkg/mod/github.com/la5nta/wl2k-go@v1.0.1/fbb/b2f.go:517-521`, `/tmp/patvara_src/conn.go:30-63`.
 
-- Does Pat-Pi need any TNC event before writing its own response after receiving `FF`?  
+- Does Pat-Pi need any TNC event before writing its own response after receiving `FF`?
   No. It only needs the data-port read to return the CR-terminated B2F line. If it has no outbound messages and has already received remote `FF`, the expected wire response is `FQ\r`, not `FF\r`.
 
-- Is there an `IDLE` or end-of-frame event?  
+- Is there an `IDLE` or end-of-frame event?
   No. Pat-vara does not parse one. `BUFFER 0` is the TX-drain signal; inbound data completion is just the B2F CR line or B2F binary block framing on the data stream.
 
 ## 6. Pat Startup Ritual

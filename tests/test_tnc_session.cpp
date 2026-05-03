@@ -674,6 +674,17 @@ int main() {
         expect(h.modem.send_binary_calls.front().front() == 0x00,
                "uncompressible input should fall back to raw marker");
     });
+    runner.run("RX corrupt deflate payload is silently dropped", [] {
+        // 0x01 marker says "deflate-compressed payload follows" but
+        // garbage bytes follow. The RX path must drop instead of
+        // forwarding garbage to the data port.
+        Harness h;
+        enterConnected(h);
+        std::vector<uint8_t> wire = {0x01, 0xFF, 0xFE, 0xFD, 0xFC, 0xFB};
+        h.session.onModemDataReceived(wire);
+        expect(h.data_out.empty(),
+               "corrupt deflate must NOT forward to data port");
+    });
     runner.run("RX deflate marker is decompressed", [] {
         Harness h;
         enterConnected(h);

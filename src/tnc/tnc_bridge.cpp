@@ -475,23 +475,31 @@ void TNCBridge::onIncomingCall(const std::string& peer) {
 }
 
 void TNCBridge::onAudioQueueState(bool active, uint32_t elapsed_ms) {
-    std::lock_guard<std::mutex> lock(ptt_mutex_);
-
-    if (active) {
-        ptt_tail_ms_ = 0;
+    // Compute the PTT transition decision under the tail-tracking mutex,
+    // then release before invoking postPTT() — postPTT calls user
+    // callbacks (hardware PTT serial I/O), which could be slow or
+    // re-enter bridge state and deadlock if held under ptt_mutex_.
+    enum class Action { None, On, Off };
+    Action action = Action::None;
+    {
+        std::lock_guard<std::mutex> lock(ptt_mutex_);
+        if (active) {
+            ptt_tail_ms_ = 0;
+            action = Action::On;
+        } else if (!ptt_active_.load(std::memory_order_acquire)) {
+            ptt_tail_ms_ = 0;
+        } else {
+            ptt_tail_ms_ = std::min<uint32_t>(ptt_tail_ms_ + elapsed_ms, kPttTailMs);
+            if (ptt_tail_ms_ >= kPttTailMs) {
+                ptt_tail_ms_ = 0;
+                action = Action::Off;
+            }
+        }
+    }
+    if (action == Action::On) {
         postPTT(true);
-        return;
-    }
-
-    if (!ptt_active_.load(std::memory_order_acquire)) {
-        ptt_tail_ms_ = 0;
-        return;
-    }
-
-    ptt_tail_ms_ = std::min<uint32_t>(ptt_tail_ms_ + elapsed_ms, kPttTailMs);
-    if (ptt_tail_ms_ >= kPttTailMs) {
+    } else if (action == Action::Off) {
         postPTT(false);
-        ptt_tail_ms_ = 0;
     }
 }
 

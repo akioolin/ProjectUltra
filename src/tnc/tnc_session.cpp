@@ -820,7 +820,9 @@ void TNCSession::cmdStats(std::string_view args) {
                   s.modulation.empty() ? "?" : s.modulation.c_str(),
                   s.waveform.empty() ? "?" : s.waveform.c_str(),
                   s.snr_db, s.bitrate_bps, s.tx_backlog_bytes);
-    cmd_emit_(buf);
+    if (cmd_emit_) {
+        cmd_emit_(buf);
+    }
 }
 
 } // namespace ultra::tnc
