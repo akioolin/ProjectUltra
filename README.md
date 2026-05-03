@@ -143,11 +143,24 @@ ProjectUltra extension:
 - End-to-end byte-exact transfers: 50 KB Mac↔Pi5 over real audio
   cable, 2354 bps random / 102400 bps with compression on prose-shaped
   text (deflate ratio 222×).
-- **Real Pat client validated**: Pat 1.0.0 (Mac) ↔ Pat 0.15.1 (Pi5)
-  drove a full B2F session through two `ultra_tnc` instances over
-  real audio. Banner exchange, gzip negotiation, "no proposals"
-  handshake all completed. First time a real Winlink client has
-  driven `ultra_tnc` to a working session.
+- **Real Pat client validated end-to-end**: Pat 1.0.0 (Mac) ↔ Pat
+  0.15.1 (Pi5) drove a full battery of B2F sessions through two
+  `ultra_tnc` instances over real audio cable:
+  - Empty CONNECT/DISCONNECT cycle — 13 s, clean
+  - 41 B text Mac→Pi — 21 s, byte-exact
+  - 2.6 KB text Mac→Pi — 50 s, gzipped to 357 B, byte-exact
+  - 1 KB binary attachment Mac→Pi — 56 s, byte-exact
+  - 47 B text Pi→Mac (reverse direction) — 37 s, byte-exact
+  - Bidirectional in single session — 57 s, both inboxes updated
+  - 12.5 KB Lorem ipsum Mac→Pi — 50 s, gzipped to 448 B (28× ratio)
+  - Known limitation: back-to-back sessions within ~30 s of teardown
+    don't always recover cleanly (1/3 retry success). Single-session
+    flows are reliable. Investigation pending.
+- Five real bugs found + fixed during the integration: VERSION
+  response format, CONNECTED line initiator/responder ordering,
+  missing `BUFFER N` event emission, BUFFER staging accounting, and
+  the audit document `docs/PAT_VARA_AUDIT.md` (Codex-generated, full
+  pat-vara expectations spec) for future reference.
 - Winlink Express on Windows: spec-compatible, not yet manually tested.
 
 ---
