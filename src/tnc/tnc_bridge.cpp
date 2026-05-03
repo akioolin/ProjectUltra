@@ -353,6 +353,19 @@ void TNCBridge::tick(uint32_t elapsed_ms) {
         return;
     }
     onAudioQueueState(!audio_.isTxQueueEmpty(), elapsed_ms);
+
+    // Pat / Winlink need periodic BUFFER N updates to know when their
+    // outbound data has finished transmitting. Poll the engine's TX
+    // backlog and forward any change. TNCSession rate-limits emission
+    // to once per kBufferEmitIntervalMs (1 s) but we always feed it the
+    // latest value so transitions to BUFFER 0 are immediate.
+    const int backlog = clampSizeToInt(engine_.getTxBacklogBytes());
+    if (backlog != last_reported_backlog_) {
+        last_reported_backlog_ = backlog;
+        if (auto* sink = event_sink_.load(std::memory_order_acquire)) {
+            sink->postModemBufferLevel(backlog);
+        }
+    }
 }
 
 void TNCBridge::wirePECallbacks() {

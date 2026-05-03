@@ -369,7 +369,25 @@ int main() {
         h.engine.emitData({9, 8, 7});
         expect(h.sink.data.size() == 1, "data event not posted");
         expect(h.sink.data[0] == Bytes({9, 8, 7}), "data payload mismatch");
-        expect(h.sink.buffer_levels.empty(), "data callback should not re-query engine backlog");
+        // tick() polls TX backlog and emits BUFFER events; start() runs
+        // an initial tick so the first reading goes out. We assert the
+        // shape rather than emptiness now.
+        expect(h.sink.buffer_levels == std::vector<int>({77}),
+               "expected initial BUFFER 77 from start()'s tick");
+    });
+    runner.run("Backlog change emits BUFFER event on tick", [] {
+        Harness h;
+        h.engine.backlog_bytes = 100;
+        h.bridge.start();
+        h.sink.buffer_levels.clear();  // discard the start() tick reading
+        h.engine.backlog_bytes = 0;
+        h.bridge.tick(50);
+        expect(h.sink.buffer_levels == std::vector<int>({0}),
+               "expected BUFFER 0 after backlog drained");
+        // No further emit if backlog stays the same
+        h.bridge.tick(50);
+        expect(h.sink.buffer_levels == std::vector<int>({0}),
+               "no duplicate BUFFER emit when value unchanged");
     });
 
     runner.run("ProtocolEngine incoming call callback posts incoming call", [] {

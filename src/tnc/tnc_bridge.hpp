@@ -135,6 +135,12 @@ private:
     std::mutex ptt_mutex_;
     uint32_t ptt_tail_ms_ = 0;
 
+    // BUFFER event tracking. Pat / Winlink rely on BUFFER N updates from
+    // the modem to know when their outgoing data has actually finished
+    // transmitting (BUFFER 0 = TX queue drained). Without this, Pat hangs
+    // after each write waiting for a confirmation we never send.
+    int last_reported_backlog_ = -1;
+
     mutable std::mutex callback_mutex_;
     ConnectionChangedCallback connection_changed_cb_;
     PreferredWaveformChangedCallback preferred_waveform_changed_cb_;
