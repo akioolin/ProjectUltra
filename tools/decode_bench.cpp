@@ -134,6 +134,7 @@ struct Args {
     uint32_t seed = 1;
     int payload_bytes = 256;   // info payload per frame
     int num_frames = 4;        // burst size
+    std::string text;          // optional readable payload (gen mode)
 };
 
 WaveformMode parseWaveform(const std::string& s) {
@@ -174,6 +175,8 @@ void printUsage() {
         "  --seed <N>            RNG seed for both payload + AWGN (default: 1)\n"
         "  --payload <N>         Bytes of info per frame (default: 256)\n"
         "  --frames <N>          Number of frames in the burst (default: 4)\n"
+        "  --text <string>       Use string as payload (repeats to fill); makes\n"
+        "                        the decoded bytes human-readable. Overrides RNG payload.\n"
         "\n"
         "Examples:\n"
         "  decode_bench --mode gen --wav fixtures/ofdm_chirp_r14_snr15_awgn.wav \\\n"
@@ -202,6 +205,7 @@ bool parseArgs(int argc, char** argv, Args& a) {
         else if (arg == "--seed")     { auto v = need(i); if (!v) return false; a.seed = static_cast<uint32_t>(std::stoul(*v)); }
         else if (arg == "--payload")  { auto v = need(i); if (!v) return false; a.payload_bytes = std::stoi(*v); }
         else if (arg == "--frames")   { auto v = need(i); if (!v) return false; a.num_frames = std::stoi(*v); }
+        else if (arg == "--text")     { auto v = need(i); if (!v) return false; a.text = *v; }
         else { std::cerr << "Unknown option: " << arg << "\n"; return false; }
     }
     if (a.mode != "gen" && a.mode != "bench") {
@@ -295,7 +299,16 @@ int runGen(const Args& a) {
 
     for (int f = 0; f < a.num_frames; ++f) {
         Bytes payload(payload_bytes);
-        for (auto& b : payload) b = static_cast<uint8_t>(byte_dist(rng));
+        if (!a.text.empty()) {
+            // Repeat the supplied text across the payload so the decoded
+            // bytes spell out a human-readable message. Easier to verify
+            // an OTA test by eye than diffing pseudo-random bytes.
+            for (size_t i = 0; i < payload.size(); ++i) {
+                payload[i] = static_cast<uint8_t>(a.text[i % a.text.size()]);
+            }
+        } else {
+            for (auto& b : payload) b = static_cast<uint8_t>(byte_dist(rng));
+        }
 
         // Use v2::makeFixedDataFrame so total_cw is explicitly set to
         // 4. DataFrame::makeData() calls calculateCodewords() which for
@@ -394,9 +407,20 @@ int runBench(const Args& a) {
 
     int frames_decoded = 0;
     int frames_failed = 0;
+    std::vector<std::string> decoded_payloads;
     dec.setFrameCallback([&](const DecodeResult& r) {
-        if (r.success) ++frames_decoded;
-        else ++frames_failed;
+        if (r.success) {
+            ++frames_decoded;
+            // Try to extract the readable payload from a v2::DataFrame.
+            // For text fixtures this gives an immediate eyeball check
+            // that decode actually produced the right bytes.
+            if (auto df = v2::DataFrame::deserialize(r.frame_data)) {
+                std::string text(df->payload.begin(), df->payload.end());
+                decoded_payloads.push_back(std::move(text));
+            }
+        } else {
+            ++frames_failed;
+        }
     });
 
     // Reset profiling counters so we measure only this decode.
@@ -491,6 +515,18 @@ int runBench(const Args& a) {
     std::cout << "wall_clock_ms             " << wall_ms << "\n";
     std::cout << "frames_decoded            " << frames_decoded << "\n";
     std::cout << "frames_failed             " << frames_failed << "\n";
+
+    if (!decoded_payloads.empty()) {
+        // Print the first decoded payload verbatim — eyeball check
+        // for text fixtures. Drop non-printable bytes so a mangled
+        // payload doesn't garble the terminal.
+        std::cout << "first_decoded_payload     \"";
+        for (char c : decoded_payloads.front()) {
+            if (c >= 0x20 && c < 0x7F) std::cout << c;
+            else std::cout << '.';
+        }
+        std::cout << "\"\n";
+    }
     std::cout << "\n--- DecoderProfile (this decode) ---\n";
     std::cout << "  detect_data_sync          " << fmt(dp.detect_data_sync) << "\n";
     std::cout << "  ofdm_process_total        " << fmt(dp.ofdm_process_total) << "\n";
