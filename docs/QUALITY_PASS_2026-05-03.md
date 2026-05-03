@@ -66,34 +66,61 @@ After the first batch, the user asked to keep going. Closed:
   → `--no-inject-channel`, `--ptt-active-high` (also `--no-ptt-inactive-high`)
 - #7 PTT setLine() initial failure handling
   → startup aborts if initial inactive set fails; mid-session failures logged
+- #9 sink ownership lifetime race
+  → `event_sink_` switched from (atomic raw pointer + unique_ptr) to a
+  mutex-guarded `shared_ptr`. Readers snapshot a copy and drop the lock
+  before invoking sink methods, so a concurrent attachServer/attachEventSink
+  cannot pull the rug. External raw-pointer sinks wrapped with no-op
+  deleter to preserve external ownership semantics.
+- #10 BUFFER staging accounting test
+  → Added `onModemBufferLevel(0)` test asserting staging bytes are still
+  reported (BUFFER N stays nonzero until staging actually flushes).
 - #11 BUFFER 0 immediacy vs rate-limit
   → BUFFER 0 transitions bypass the 1 s rate limit; non-zero stays throttled
 - #13 `flushDataTxBuffer()` extraction
   → `TNCSession::encodePayloadForWire(payload, compression_enabled)` static
   helper + 5 direct unit tests (raw, below-threshold, deflate, expand-fallback,
   empty)
+- #15 sendBinary error propagation
+  → `ModemAdapter::sendBinary()` now returns bool; `TNCBridge::sendBinary()`
+  propagates engine result; `flushDataTxBuffer()` only clears staging on
+  success so engine refusals don't silently drop bytes Pat counted.
 - #16 HARQ key construction extraction
   → `SoftCombineBuffer::makeKey(HarqKeyInputs)` + 6 unit tests covering
   carrier_count_hash distinguishing waveform mode and data-carrier count
+- #17 HARQ key-build instrumentation (instrumentation phase)
+  → `harq_key_build_success` / `harq_key_build_failed` counters in
+  `DecoderProfile`. Surfaces in cli_simulator end-of-test summary with
+  miss-rate %. Provides the data needed to decide whether a session-
+  context fallback key is worth designing.
 
-## Codex findings still deferred (per Codex's own guidance)
+## Codex finding still deferred (per Codex's own guidance)
 
-- #9 sink ownership lifetime race (Codex: "deferred unless touching bridge
-  threading; needs careful review")
-- #15 sendBinary error propagation through ModemAdapter (Codex:
-  "interface change needs broader judgment")
-- #17 HARQ when CW0 fails — architectural (Codex: "needs human/protocol judgment")
-- #21 UltraTNCStation threading model (Codex: "needs careful concurrency design")
+- #21 UltraTNCStation threading model — Codex: "needs careful concurrency
+  design." Decoder-thread vs main-loop racing on `encoder_`, `decoder_`,
+  `connected_`, `handshake_complete_`, `negotiated_waveform_`,
+  `last_cfo_hz_`, AWGN RNG. Pick one model (queue everything onto main
+  tick, or guard with a station mutex); both choices have non-trivial
+  ripple effects through the existing callback paths.
 
 ## Bottom line (final)
 
-Across both batches: **18 of 22 Codex findings closed**. ctest 35/35
-green, cli_simulator SNR15/good/R1/4 PASS at 100% frame success.
-Remaining 4 items are explicitly Codex-flagged as needing human
-architectural judgment, not autonomous-safe.
+**21 of 22 Codex findings closed across two batches.** Only the
+UltraTNCStation threading-model rework is left, and Codex itself
+flagged that one as needing human concurrency design — not
+autonomous-safe.
 
-Net additions: 1 new test target (`UltraTNCConfig`), 65+ new tests
-across `test_soft_combine`, `test_tnc_session`, `test_tnc_bridge`,
-`test_ultra_tnc_config`. ultra_tnc.cpp split into runtime + config
-units; soft-combine HARQ key building now unit-testable; TNC payload
-encoding now unit-testable; BUFFER 0 truly immediate for Pat Flush().
+ctest 35/35 green throughout. cli_simulator SNR15/good/R1/4 PASS
+at 100% frame success after every commit.
+
+Net additions across both batches:
+- 1 new test target (`UltraTNCConfig` — 39 tests)
+- ~70 new tests across `test_soft_combine`, `test_tnc_session`,
+  `test_tnc_bridge`, `test_ultra_tnc_config`
+- ultra_tnc.cpp split into runtime + config units (~455 lines moved)
+- Soft-combine HARQ key construction now unit-testable
+- TNC payload encoding now unit-testable
+- BUFFER 0 truly immediate for Pat Flush() unblock
+- `sendBinary` failure path no longer silently drops staged bytes
+- `event_sink_` lifetime race closed
+- HARQ key-build success/fail counters wired for next-session analysis
