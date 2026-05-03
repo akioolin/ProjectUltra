@@ -232,6 +232,44 @@ void test_key_disambiguation() {
 
 } // namespace
 
+void test_phy_field_disambiguation() {
+    // PHY parameters that change LLR scaling/ordering must produce
+    // distinct keys. Otherwise stored LLRs from one PHY config could
+    // be summed with new LLRs from another, corrupting the decode.
+    SoftCombineBuffer buffer;
+    buffer.setEnabled(true);
+    std::vector<float> out;
+
+    SoftCombineBuffer::Key base;
+    base.sender_hash = 0x010203;
+    base.seq = 99;
+    base.rate = CodeRate::R1_2;
+    base.cw_count = 4;
+    base.modulation = ultra::Modulation::DQPSK;
+    base.channel_interleave = 0;
+    base.carrier_count_hash = 0xAA;
+
+    auto with_mod = base; with_mod.modulation = ultra::Modulation::QAM16;
+    auto with_il = base;  with_il.channel_interleave = 1;
+    auto with_cc = base;  with_cc.carrier_count_hash = 0xBB;
+
+    buffer.combine(base, {2.0f}, out); buffer.retain(base, out);
+    buffer.combine(with_mod, {3.0f}, out); buffer.retain(with_mod, out);
+    buffer.combine(with_il,  {4.0f}, out); buffer.retain(with_il, out);
+    buffer.combine(with_cc,  {5.0f}, out); buffer.retain(with_cc, out);
+
+    CHECK(buffer.size() == 4, "modulation/interleave/carrier_count must each disambiguate");
+    CHECK(buffer.combine(base, {1.0f}, out) == 2 && vecNear(out, {3.0f}),
+          "base entry stays isolated from PHY-variant siblings");
+    CHECK(buffer.combine(with_mod, {1.0f}, out) == 2 && vecNear(out, {4.0f}),
+          "different modulation must not cross-pollinate");
+    CHECK(buffer.combine(with_il,  {1.0f}, out) == 2 && vecNear(out, {5.0f}),
+          "different channel_interleave must not cross-pollinate");
+    CHECK(buffer.combine(with_cc,  {1.0f}, out) == 2 && vecNear(out, {6.0f}),
+          "different carrier_count_hash must not cross-pollinate");
+    pass("phy field disambiguation");
+}
+
 int main() {
     test_disabled_noop();
     test_first_attempt_identity();
@@ -242,6 +280,7 @@ int main() {
     test_ttl_eviction();
     test_max_entries_lru_eviction();
     test_key_disambiguation();
+    test_phy_field_disambiguation();
 
     std::cout << "\nSoftCombineBuffer tests: " << tests_passed << " passed, "
               << tests_failed << " failed\n";

@@ -2655,6 +2655,14 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
             out_key.modulation = current_modulation_;
             out_key.channel_interleave =
                 static_cast<uint8_t>(apply_channel_deinterleave ? 1 : 0);
+            // Hash the OFDM geometry that affects bit ordering. Two
+            // attempts with the same (rate, modulation, interleave)
+            // but different waveform modes (CHIRP vs COX vs NARROW)
+            // produce different bit positions and must not combine.
+            uint32_t carrier_h = static_cast<uint32_t>(ofdm_data_carriers_) << 8;
+            carrier_h ^= static_cast<uint32_t>(mode_);
+            out_key.carrier_count_hash =
+                static_cast<uint16_t>((carrier_h >> 8) ^ carrier_h);
             return out_key.sender_hash != 0;
         };
         const auto _profile_fs_start_ = std::chrono::steady_clock::now();
