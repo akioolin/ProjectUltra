@@ -212,6 +212,65 @@ combining; meaningful retransmission savings near threshold.
 
 ---
 
+## 8. Pre-sync AGC / level normalization for compressed-audio inputs
+
+**The idea.** Add an explicit RMS-based audio level normalizer at the
+top of the decode pipeline (before chirp correlation, before LTS
+search, before LDPC LLR generation). Either a fast peak-tracking
+gain control or an RMS-window normalizer that keeps signal RMS in a
+known range regardless of how aggressively the upstream radio /
+SDR / web tool has compressed the audio.
+
+**Why it matters on HF.** Today our pilot-based LLR scaling
+compensates for level variations *after* sync is established. The
+chirp correlation itself has no AGC compensation — it assumes the
+audio level is roughly what the encoder produced. Most real radios
+in data mode have a benign IF AGC and we're fine. But:
+
+- WebSDR audio AGC (KiwiSDR, OpenWebRX) flattens dynamic range by
+  10-20 dB and squashes our chirp into the noise floor. Verified
+  2026-05-03 OTA test: friend transmitted, signal was clearly
+  visible in waterfall (~+15 dB SNR), but the AGC-on web record
+  produced audio with only +2-3 dB SNR — chirp correlation 0.20-
+  0.43 instead of the 0.94 we got with AGC off.
+- Casual operators with mis-configured radio AGC (long time
+  constants, hang AGC, "noise reduction" features) can produce
+  similar artifacts even without an SDR in the loop.
+- Even modern radios in data mode often default to AGC=SLOW which
+  pumps on burst signals.
+
+**Current state.** No pre-sync level control. Chirp correlation
+threshold is fixed at 0.45-0.52. Signals that survive everything
+*except* aggressive AGC fail at sync, never reaching the parts of
+the decoder that actually have level adaptation.
+
+**Approach.**
+- Track audio RMS over a 200-500 ms sliding window.
+- Apply a slow gain to bring RMS to a reference (e.g. 0.15 RMS).
+- Cap the per-step gain change so impulsive noise can't drive the
+  AGC into oscillation.
+- Run BEFORE chirp correlation. The waveform's downstream pilot
+  tracking still handles fine-grained level changes.
+
+**Effort.** 1-2 days for the AGC, the threshold tuning, and a
+regression fixture set generated with sox `compand` to simulate
+known AGC compression ratios.
+
+**Risk.** A hot AGC could amplify noise enough to create false
+chirp matches. Threshold + min-SNR gate at the chirp output should
+mitigate. Validate on the existing OTA fixture (the AGC-on
+recording from 2026-05-03 is now committed test material).
+
+**Estimated gain.** Decoders WebSDR-recorded audio without manual
+AGC-off configuration. Improves robustness with real radios whose
+operators don't perfectly tune AGC for data. No expected gain in
+already-clean conditions.
+
+**Validation.** The 2026-05-03 OTA recording is the canonical test
+case: same audio, AGC-on version should now decode like AGC-off.
+
+---
+
 ## Out of scope (intentionally)
 
 - **New waveform architecture (single-carrier with adaptive
@@ -236,6 +295,7 @@ When real-radio testing surfaces a specific failure mode:
 - "Decoding fails near band-edge with adjacent QRM" → #2 (notch)
 - "Throughput poor on disturbed-path runs" → #1 (chase audit) then #5 (bit loading) or #6 (training)
 - "Mode oscillates" → #4 (per-burst adaptation tuning)
+- "Sync fails on WebSDR / aggressive-AGC inputs even though waterfall shows clean signal" → #8 (pre-sync AGC)
 
 Don't start anything from this list speculatively. Each item has
 real implementation cost and will displace other work. Validate
