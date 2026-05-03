@@ -443,6 +443,23 @@ int main(int argc, char* argv[]) {
             opts.disable_waterfall = true;
         } else if (arg == "--waterfall") {
             opts.disable_waterfall = false;
+        } else if (arg == "--monitor-ofdm") {
+            opts.monitor_mode = "ofdm_chirp";
+            // Optional next arg: rate. Default r1_4.
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                opts.monitor_rate = argv[++i];
+            }
+        } else if (arg == "--monitor-ofdm-narrow") {
+            opts.monitor_mode = "ofdm_narrow";
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                opts.monitor_rate = argv[++i];
+            }
+        } else if (arg == "--monitor-mcdpsk") {
+            opts.monitor_mode = "mc_dpsk";
+        } else if (arg == "--monitor-mod") {
+            if (i + 1 < argc) {
+                opts.monitor_modulation = argv[++i];
+            }
         }
     }
 

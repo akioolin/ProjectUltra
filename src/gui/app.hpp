@@ -36,6 +36,18 @@ public:
         bool safe_startup = false;    // Defer heavyweight init (audio/sim) until needed
         bool disable_waterfall = false; // Skip waterfall construction (startup safety)
         std::string record_path = "sim_recording.f32";  // Recording output base path
+
+        // Monitor mode: skip the full PING/CONNECT handshake and force
+        // the decoder into a specific waveform/rate. Useful for OTA
+        // monitoring (e.g. recording a friend's transmission via
+        // WebSDR + replaying through a virtual audio cable into the
+        // GUI to see live waterfall + decoded frames).
+        // - monitor_mode = "" (default): normal operation
+        // - monitor_mode = "ofdm_chirp" / "ofdm_narrow": force connected OFDM
+        // - monitor_mode = "mc_dpsk": force MC-DPSK
+        std::string monitor_mode;
+        std::string monitor_rate = "r1_4";   // Used when monitor_mode is OFDM
+        std::string monitor_modulation = "dqpsk";
     };
 
     App();  // Default constructor

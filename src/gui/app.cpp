@@ -300,6 +300,33 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     ultra::gui::startupTrace("App", "set-raw-callback-enter");
     modem_.setRawDataCallback([this](const Bytes& data) {
         guiLog("Our modem decoded %zu bytes", data.size());
+        // Monitor mode: surface every decoded frame's payload in the
+        // RX log regardless of addressing. The protocol layer would
+        // otherwise drop frames whose dst hash doesn't match local
+        // call, which makes the GUI silent on OTA captures from
+        // peers we have no relationship with.
+        if (!options_.monitor_mode.empty()) {
+            if (auto df = protocol::v2::DataFrame::deserialize(data)) {
+                std::string text;
+                text.reserve(df->payload.size());
+                for (uint8_t b : df->payload) {
+                    text.push_back((b >= 0x20 && b < 0x7F)
+                                   ? static_cast<char>(b) : '.');
+                }
+                char buf[256];
+                std::snprintf(buf, sizeof(buf),
+                              "[monitor] frame seq=%u src=0x%06X dst=0x%06X "
+                              "len=%u: \"%.180s\"",
+                              df->seq, df->src_hash, df->dst_hash,
+                              df->payload_len, text.c_str());
+                appendRxLogLine(buf);
+            } else {
+                char buf[96];
+                std::snprintf(buf, sizeof(buf),
+                              "[monitor] non-data frame, %zu bytes", data.size());
+                appendRxLogLine(buf);
+            }
+        }
         // Update protocol layer with current SNR and fading before processing frame
         // In simulation mode, use the known simulation SNR (DPSK doesn't measure SNR)
         // In real mode, use measured SNR from OFDM demodulator
@@ -318,6 +345,52 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         appendRxLogLine(status);
     });
     ultra::gui::startupTrace("App", "set-status-callback-exit");
+
+    // Monitor-mode override: if --monitor-ofdm / --monitor-mcdpsk was
+    // passed on the CLI, skip the normal PING/CONNECT handshake and
+    // force the decoder into the requested waveform/rate immediately.
+    // Useful for observing OTA recordings via a virtual audio cable
+    // (e.g. WebSDR → BlackHole → GUI) without needing a peer to
+    // handshake with. We pretend the modem is already CONNECTED so
+    // the OFDM data path activates and the waterfall + frame log
+    // light up on incoming OTA frames.
+    if (!options_.monitor_mode.empty()) {
+        auto parseRate = [](const std::string& s) -> CodeRate {
+            if (s == "r1_4") return CodeRate::R1_4;
+            if (s == "r1_2") return CodeRate::R1_2;
+            if (s == "r2_3") return CodeRate::R2_3;
+            if (s == "r3_4") return CodeRate::R3_4;
+            return CodeRate::R1_4;
+        };
+        auto parseMod = [](const std::string& s) -> Modulation {
+            if (s == "dqpsk") return Modulation::DQPSK;
+            if (s == "qpsk") return Modulation::QPSK;
+            if (s == "d8psk") return Modulation::D8PSK;
+            if (s == "dbpsk") return Modulation::DBPSK;
+            return Modulation::DQPSK;
+        };
+        if (options_.monitor_mode == "mc_dpsk") {
+            modem_.setWaveformMode(protocol::WaveformMode::MC_DPSK);
+            appendRxLogLine("[monitor] MC-DPSK mode forced; handshake skipped");
+        } else {
+            const auto wf = (options_.monitor_mode == "ofdm_narrow")
+                ? protocol::WaveformMode::OFDM_NARROW
+                : protocol::WaveformMode::OFDM_CHIRP;
+            const auto rate = parseRate(options_.monitor_rate);
+            const auto mod = parseMod(options_.monitor_modulation);
+            modem_.setDataMode(mod, rate);
+            modem_.setWaveformMode(wf);
+            modem_.setConnected(true);  // forces decoder into connected OFDM data path
+            // Match what cli_simulator + decode_bench do post-handshake:
+            // OFDM data frames are fixed 4-CW. Without this the decoder
+            // treats incoming as 1-CW control frames and falsely rejects
+            // the data symbols past the first ~9 OFDM symbols as noise.
+            modem_.setFixedFrameCodewords(4);
+            appendRxLogLine("[monitor] " + options_.monitor_mode + " forced; "
+                            + options_.monitor_modulation + " "
+                            + options_.monitor_rate + "; 4-CW fixed; handshake skipped");
+        }
+    }
 
     // Set up protocol engine callbacks
     ultra::gui::startupTrace("App", "protocol-callbacks-enter");

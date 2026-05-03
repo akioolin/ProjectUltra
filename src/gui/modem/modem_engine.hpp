@@ -212,6 +212,14 @@ public:
         if (streaming_decoder_) streaming_decoder_->setBurstInterleave(enable);
     }
 
+    // Force fixed-frame codeword count on encoder + decoder. Used by
+    // the GUI's monitor-mode override so the decoder doesn't default
+    // to 1-CW control-frame demod on incoming OFDM data frames.
+    void setFixedFrameCodewords(int cw_count) {
+        if (streaming_encoder_) streaming_encoder_->setFixedFrameCodewords(cw_count);
+        if (streaming_decoder_) streaming_decoder_->setFixedFrameCodewords(cw_count);
+    }
+
     // FEC codec control
     void setCodecType(fec::CodecType type);
     fec::CodecType getCodecType() const { return codec_type_; }
