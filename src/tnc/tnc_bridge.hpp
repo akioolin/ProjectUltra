@@ -122,6 +122,12 @@ private:
     std::string local_call_;
     std::string remote_call_;
     int requested_bw_ = 2300;
+    // True when the upcoming CONNECTED transition is from a peer-initiated
+    // call (we received a CONNECT). Used to emit CONNECTED with the
+    // correct initiator/responder order. pat-vara dispatches by which
+    // callsign sits in parts[1] vs parts[2]: matching local_call in
+    // parts[1] is the outbound case, parts[2] is the inbound case.
+    bool inbound_pending_ = false;
 
     std::atomic<State> state_{State::IDLE};
     std::atomic<bool> started_{false};

@@ -327,16 +327,30 @@ int main() {
         expect(h.engine.abort_calls == 1, "abortTxNow not called");
     });
 
-    runner.run("ProtocolEngine connected callback posts modem connected", [] {
+    runner.run("Outbound CONNECTED line lists us first (initiator)", [] {
         Harness h;
         h.bridge.setMyCall({"VK2A"});
         h.bridge.start();
+        // Drive startConnect first so previous state is CONNECTING.
+        h.bridge.startConnect("VK2A", "VK2B");
         h.engine.emitConnection(ConnectionState::CONNECTED, "VK2B");
         expect(h.sink.connected.size() == 1, "connected event not posted");
-        expect(h.sink.connected[0].src == "VK2A", "connected source mismatch");
-        expect(h.sink.connected[0].dst == "VK2B", "connected destination mismatch");
+        expect(h.sink.connected[0].src == "VK2A", "outbound: src should be us (initiator)");
+        expect(h.sink.connected[0].dst == "VK2B", "outbound: dst should be peer (responder)");
         expect(h.sink.connected[0].bw == 2300, "connected bandwidth mismatch");
         expect(h.sink.bitrate == std::vector<int>({2300}), "bitrate event mismatch");
+    });
+    runner.run("Inbound CONNECTED line lists peer first (initiator)", [] {
+        Harness h;
+        h.bridge.setMyCall({"VK2A"});
+        h.bridge.start();
+        // No startConnect — peer dialed us. State stays READY → CONNECTED.
+        // pat-vara dispatches CONNECTED by parts[2] == myCall to detect
+        // inbound, so the line must read "<peer> <us> <bw>".
+        h.engine.emitConnection(ConnectionState::CONNECTED, "VK2B");
+        expect(h.sink.connected.size() == 1, "connected event not posted");
+        expect(h.sink.connected[0].src == "VK2B", "inbound: src should be peer (initiator)");
+        expect(h.sink.connected[0].dst == "VK2A", "inbound: dst should be us (responder)");
     });
 
     runner.run("ProtocolEngine disconnected callback posts modem disconnected", [] {

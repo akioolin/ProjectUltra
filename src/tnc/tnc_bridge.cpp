@@ -391,14 +391,29 @@ void TNCBridge::onConnectionChanged(protocol::ConnectionState state, const std::
         }
         remote = remote_call_;
         bw = requested_bw_;
+        if (state == protocol::ConnectionState::DISCONNECTED) {
+            inbound_pending_ = false;
+        }
     }
+    // Inbound = we didn't initiate. Detect this from the prior TNC state:
+    // a CONNECTING previous means we issued startConnect (outbound). Anything
+    // else (LISTENING / READY / IDLE) is the peer dialing us. The
+    // on_incoming_call_ callback only fires when auto_accept is OFF, but
+    // pat-vara always sets auto_accept=true and fields the inbound case
+    // via the CONNECTED line itself, so we can't rely on that signal.
+    const bool inbound = (previous != State::CONNECTING);
 
     if (state == protocol::ConnectionState::CONNECTED && previous != State::CONNECTED) {
         if (remote.empty()) {
             remote = info;
         }
+        // CONNECTED line must always be "<initiator> <responder> <bw>".
+        // When the peer called us (inbound), they are the initiator.
+        // Otherwise we initiated, so we are first.
+        const std::string& initiator = inbound ? remote : local;
+        const std::string& responder = inbound ? local : remote;
         if (auto* sink = event_sink_.load(std::memory_order_acquire)) {
-            sink->postModemConnected(local, remote, bw);
+            sink->postModemConnected(initiator, responder, bw);
             sink->postModemBitrate(bitrateEstimate(waveformForBandwidth(bw)));
         }
     } else if (state == protocol::ConnectionState::DISCONNECTED && previous != State::IDLE &&
@@ -433,6 +448,7 @@ void TNCBridge::onIncomingCall(const std::string& peer) {
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         remote_call_ = peer;
+        inbound_pending_ = true;
     }
 
     if (auto* sink = event_sink_.load(std::memory_order_acquire)) {
