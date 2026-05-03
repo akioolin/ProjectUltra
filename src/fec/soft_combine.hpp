@@ -17,12 +17,20 @@ public:
         uint16_t seq = 0;
         CodeRate rate = CodeRate::R1_4;
         uint8_t cw_count = 0;
+        // PHY parameters that change LLR scaling and ordering. If these
+        // differ between attempts, the stored LLRs aren't comparable
+        // and combining would corrupt the decode. Including them in
+        // the key forces a fresh entry instead of mis-combining.
+        Modulation modulation = Modulation::DQPSK;
+        uint8_t channel_interleave = 0;  // 0 = off, 1 = on
 
         bool operator==(const Key& other) const {
             return sender_hash == other.sender_hash &&
                    seq == other.seq &&
                    rate == other.rate &&
-                   cw_count == other.cw_count;
+                   cw_count == other.cw_count &&
+                   modulation == other.modulation &&
+                   channel_interleave == other.channel_interleave;
         }
     };
 

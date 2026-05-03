@@ -2652,6 +2652,9 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
             out_key.seq = hdr.seq;
             out_key.rate = rate;
             out_key.cw_count = hdr.total_cw;
+            out_key.modulation = current_modulation_;
+            out_key.channel_interleave =
+                static_cast<uint8_t>(apply_channel_deinterleave ? 1 : 0);
             return out_key.sender_hash != 0;
         };
         const auto _profile_fs_start_ = std::chrono::steady_clock::now();

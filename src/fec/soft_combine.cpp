@@ -9,6 +9,8 @@ size_t SoftCombineBuffer::KeyHash::operator()(const Key& key) const {
     h ^= static_cast<size_t>(key.seq) + 0x9e3779b9u + (h << 6) + (h >> 2);
     h ^= static_cast<size_t>(key.cw_count) + 0x9e3779b9u + (h << 6) + (h >> 2);
     h ^= static_cast<size_t>(key.rate) + 0x9e3779b9u + (h << 6) + (h >> 2);
+    h ^= static_cast<size_t>(key.modulation) + 0x9e3779b9u + (h << 6) + (h >> 2);
+    h ^= static_cast<size_t>(key.channel_interleave) + 0x9e3779b9u + (h << 6) + (h >> 2);
     return h;
 }
 

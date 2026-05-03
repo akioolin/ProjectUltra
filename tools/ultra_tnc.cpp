@@ -582,6 +582,13 @@ private:
         if (cfg_.forced_rate != CodeRate::AUTO) {
             engine_.setForcedCodeRate(cfg_.forced_rate);
         }
+        // Chase-combining HARQ: stores soft LLRs from failed decodes
+        // and sums them into subsequent retransmission attempts. The
+        // per-frame buffer overhead is small; the decode-success
+        // payoff on retransmissions is measurable. Defaults to ON
+        // because retx are rare on a clean channel (zero overhead)
+        // and welcome on a noisy one (faster recovery).
+        engine_.setSoftCombiningHARQ(true);
 
         base_ofdm_config_ = createOFDMConfig();
         ofdm_config_ = base_ofdm_config_;
