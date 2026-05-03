@@ -4,12 +4,10 @@
 #include "gui/serial_ptt.hpp"
 #include "protocol/frame_v2.hpp"
 #include "protocol/protocol_engine.hpp"
-#include "protocol/waveform_selection.hpp"
 #include "tnc/tnc_bridge.hpp"
 #include "tnc/tnc_server.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
 #include "waveform/ofdm_cox_waveform.hpp"
-#include "waveform/waveform_factory.hpp"
 
 #include <algorithm>
 #include <atomic>

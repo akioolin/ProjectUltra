@@ -270,12 +270,47 @@ void test_phy_field_disambiguation() {
     pass("phy field disambiguation");
 }
 
+void test_size_mismatch_drops_entry() {
+    // If a retransmission's LLR vector is a different size from the
+    // retained entry, combining is impossible (different code rates,
+    // different cw_count). The buffer should silently drop the stale
+    // entry and treat the new attempt as the first.
+    SoftCombineBuffer buffer;
+    buffer.setEnabled(true);
+    const auto k = key(0x010203, 50);
+    std::vector<float> out;
+
+    buffer.combine(k, {1.0f, 2.0f, 3.0f}, out);
+    buffer.retain(k, out);
+    CHECK(buffer.size() == 1, "first attempt retained");
+
+    // Same key, different size — must drop and restart fresh
+    int attempts = buffer.combine(k, {5.0f}, out);
+    CHECK(attempts == 1, "size mismatch should reset attempts to 1");
+    CHECK(vecNear(out, {5.0f}), "size mismatch should be identity (no combining)");
+    CHECK(buffer.size() == 0, "size-mismatched entry should be dropped");
+    pass("size mismatch drops entry");
+}
+
+void test_enabled_accessor() {
+    // Public accessor; verify it tracks setEnabled state.
+    SoftCombineBuffer buffer;
+    CHECK(!buffer.enabled(), "default state should be disabled");
+    buffer.setEnabled(true);
+    CHECK(buffer.enabled(), "after setEnabled(true)");
+    buffer.setEnabled(false);
+    CHECK(!buffer.enabled(), "after setEnabled(false)");
+    pass("enabled accessor");
+}
+
 int main() {
     test_disabled_noop();
     test_first_attempt_identity();
     test_sum_across_attempts();
     test_llr_magnitude_grows_with_attempts();
     test_llr_saturation();
+    test_size_mismatch_drops_entry();
+    test_enabled_accessor();
     test_drop_on_success();
     test_ttl_eviction();
     test_max_entries_lru_eviction();

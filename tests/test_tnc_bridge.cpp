@@ -3,6 +3,7 @@
 
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -408,6 +409,71 @@ int main() {
         expect(h.sink.ptt == std::vector<bool>({true}), "PTT OFF emitted too early");
         h.bridge.tick(1);
         expect(h.sink.ptt == std::vector<bool>({true, false}), "PTT OFF missing after tail");
+    });
+
+    runner.run("setPttChangedCallback fires alongside event sink", [] {
+        // Hardware-PTT hook in ultra_tnc relies on this callback. The
+        // cmd-port PTT events still fire via the sink; the callback is
+        // an additional path for driving a serial RTS/DTR line.
+        Harness h;
+        std::vector<bool> hardware_ptt;
+        h.bridge.setPttChangedCallback([&](bool on) { hardware_ptt.push_back(on); });
+        h.bridge.start();
+        h.audio.queueTxSamples({0.1f});
+        h.bridge.tick(0);
+        expect(hardware_ptt == std::vector<bool>({true}),
+               "hardware-PTT callback should fire on PTT ON transition");
+        h.audio.clearTxQueue();
+        h.bridge.tick(250);
+        expect(hardware_ptt == std::vector<bool>({true, false}),
+               "hardware-PTT callback should fire on PTT OFF after tail");
+    });
+
+    runner.run("setPttChangedCallback can be cleared safely", [] {
+        Harness h;
+        h.bridge.setPttChangedCallback([](bool) {});
+        h.bridge.setPttChangedCallback({});  // clear
+        h.bridge.start();
+        h.audio.queueTxSamples({0.1f});
+        h.bridge.tick(0);  // would have called the cleared cb
+        // No assertion needed — surviving the tick without crash is the
+        // assertion. Sink-side PTT still fires:
+        expect(h.sink.ptt == std::vector<bool>({true}), "sink PTT still fires");
+    });
+
+    runner.run("setConnectionChangedCallback proxies to engine", [] {
+        Harness h;
+        bool fired = false;
+        h.bridge.setConnectionChangedCallback(
+            [&](ConnectionState, const std::string&) { fired = true; });
+        // Bridge's wirePECallbacks() runs in start() and registers an
+        // engine callback that in turn invokes the user callback.
+        h.bridge.start();
+        h.engine.emitConnection(ConnectionState::PROBING, "VK2B");
+        expect(fired, "user callback should be invoked when engine emits");
+    });
+
+    runner.run("getCurrentSNR_db rounds to nearest int", [] {
+        Harness h;
+        h.engine.measured_snr = 12.4f;
+        expect(h.bridge.getCurrentSNR_db() == 12, "12.4 → 12");
+        h.engine.measured_snr = 12.6f;
+        expect(h.bridge.getCurrentSNR_db() == 13, "12.6 → 13");
+        h.engine.measured_snr = std::numeric_limits<float>::quiet_NaN();
+        expect(h.bridge.getCurrentSNR_db() == 0, "NaN should map to 0");
+    });
+
+    runner.run("getStats fills snapshot from engine + bridge", [] {
+        Harness h;
+        h.engine.backlog_bytes = 256;
+        h.engine.measured_snr = 18.2f;
+        h.engine.data_modulation = ultra::Modulation::DQPSK;
+        h.engine.data_code_rate = ultra::CodeRate::R1_2;
+        ultra::tnc::ModemStats s = h.bridge.getStats();
+        expect(s.tx_backlog_bytes == 256, "tx_backlog_bytes mismatch");
+        expect(s.snr_db == 18, "snr_db should be rounded engine value");
+        expect(s.modulation == "DQPSK", "modulation string");
+        expect(s.code_rate == "R1/2", "code_rate string");
     });
 
     std::cout << "\nTNCBridge tests run: " << runner.tests_run
