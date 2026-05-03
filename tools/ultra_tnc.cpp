@@ -84,6 +84,33 @@ bool isNoneDevice(const std::string& device) {
     return lower(device) == "none";
 }
 
+// Strict positive-int parser: full string consumed, no leading +/-,
+// must fit in [min,max]. Used wherever loose stoi could silently
+// accept "9600abc" or negatives where they don't belong.
+bool parsePositiveIntStrict(const std::string& text, int& out, int min_v = 0, int max_v = INT_MAX) {
+    if (text.empty()) return false;
+    if (text[0] == '-' || text[0] == '+') return false;  // strict: no sign chars
+    try {
+        size_t parsed = 0;
+        long long value = std::stoll(text, &parsed, 10);
+        if (parsed != text.size()) return false;          // strict: no trailing garbage
+        if (value < min_v || value > max_v) return false;
+        out = static_cast<int>(value);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+// Strict bool parser: case-insensitive {true,1,yes,on} → true,
+// {false,0,no,off} → false, anything else → error.
+bool parseBoolStrict(const std::string& text, bool& out) {
+    std::string lc = lower(text);
+    if (lc == "true" || lc == "1" || lc == "yes" || lc == "on") { out = true; return true; }
+    if (lc == "false" || lc == "0" || lc == "no" || lc == "off") { out = false; return true; }
+    return false;
+}
+
 bool parseUint16(const std::string& text, uint16_t& out) {
     try {
         size_t parsed = 0;
@@ -190,9 +217,9 @@ bool applyConfigKey(const std::string& key, const std::string& value, Config& cf
         cfg.callsign = ultra::protocol::sanitizeCallsign(value);
         if (cfg.callsign.empty()) return false;
     } else if (key == "inject_channel" || key == "inject-channel") {
-        cfg.inject_channel = (value == "true" || value == "1" || value == "yes");
-        if (!cfg.inject_channel && !value.empty() && value != "false" &&
-            value != "0" && value != "no") {
+        if (parseBoolStrict(value, cfg.inject_channel)) {
+            // Plain boolean, done.
+        } else {
             // Channel-type values are accepted as a synonym for "true"
             // for forward-compat with cli_simulator's spelling, but
             // only AWGN is actually implemented here. Reject anything
@@ -226,13 +253,13 @@ bool applyConfigKey(const std::string& key, const std::string& value, Config& cf
     } else if (key == "ptt_serial_port" || key == "ptt-serial-port") {
         cfg.ptt_serial_port = value;
     } else if (key == "ptt_serial_baud" || key == "ptt-serial-baud") {
-        try { cfg.ptt_serial_baud = std::stoi(value); } catch (...) { return false; }
+        if (!parsePositiveIntStrict(value, cfg.ptt_serial_baud, 50, 4000000)) return false;
     } else if (key == "ptt_serial_line" || key == "ptt-serial-line") {
         const std::string line = lower(value);
         if (line != "rts" && line != "dtr") return false;
         cfg.ptt_serial_line = line;
     } else if (key == "ptt_inactive_high" || key == "ptt-inactive-high") {
-        cfg.ptt_inactive_high = (value == "true" || value == "1" || value == "yes");
+        if (!parseBoolStrict(value, cfg.ptt_inactive_high)) return false;
     } else {
         std::cerr << "Unknown config key: " << key << "\n";
         return false;
@@ -433,10 +460,8 @@ bool parseArgs(int argc, char** argv, Config& cfg) {
         } else if (arg == "--ptt-serial-baud") {
             auto value = requireValue("--ptt-serial-baud");
             if (!value) return false;
-            try {
-                cfg.ptt_serial_baud = std::stoi(*value);
-            } catch (...) {
-                std::cerr << "Invalid --ptt-serial-baud value\n";
+            if (!parsePositiveIntStrict(*value, cfg.ptt_serial_baud, 50, 4000000)) {
+                std::cerr << "Invalid --ptt-serial-baud value (must be 50..4000000)\n";
                 return false;
             }
         } else if (arg == "--ptt-serial-line") {
@@ -920,12 +945,23 @@ int main(int argc, char** argv) {
             (lower(cfg.ptt_serial_line) == "dtr")
                 ? ultra::gui::SerialPttLine::DTR
                 : ultra::gui::SerialPttLine::RTS;
-        // Initialize line to inactive state so we don't accidentally key
-        // the radio at startup.
-        serial_ptt.setLine(line, cfg.ptt_inactive_high);
+        // Initialize line to inactive state. If this fails, abort
+        // startup — running with PTT in an unknown state risks
+        // accidentally keying the radio (the line state on serial
+        // open is implementation-defined).
+        if (!serial_ptt.setLine(line, cfg.ptt_inactive_high)) {
+            std::cerr << "Failed to set initial PTT line state on "
+                      << cfg.ptt_serial_port << "; refusing to start\n";
+            return 1;
+        }
         const bool active_state = !cfg.ptt_inactive_high;
         bridge.setPttChangedCallback([&serial_ptt, line, active_state](bool on) {
-            serial_ptt.setLine(line, on ? active_state : !active_state);
+            // setLine() returning false here means a USB unplug or
+            // OS-level serial error mid-session — log it but don't
+            // crash the modem; the next CLI/CAT command can recover.
+            if (!serial_ptt.setLine(line, on ? active_state : !active_state)) {
+                std::cerr << "[ptt] setLine() failed mid-session\n";
+            }
         });
         std::cout << "Hardware PTT enabled on " << cfg.ptt_serial_port
                   << " @ " << cfg.ptt_serial_baud << " baud, line="
