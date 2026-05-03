@@ -399,19 +399,6 @@ void TNCSession::tick(uint32_t elapsed_ms) {
             flushDataTxBuffer();
         }
     }
-
-    // Pat's Flush() blocks on BUFFER 0. The engine-backlog poll in
-    // TNCBridge only sees engine bytes, not our staging buffer. When
-    // the staging size changes (e.g. user write between engine polls),
-    // re-emit BUFFER so Pat's accounting stays in sync.
-    if (state_ == State::CONNECTED) {
-        const int total = modem_.getTxBackloggBytes() +
-                          static_cast<int>(data_tx_buffer_.size());
-        if (total != last_buffer_level_ && pending_buffer_level_ < 0 &&
-            last_buffer_emit_ms_ >= kBufferEmitIntervalMs) {
-            emitBuffer(total);
-        }
-    }
 }
 
 void TNCSession::flushDataTxBuffer() {

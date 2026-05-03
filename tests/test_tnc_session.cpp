@@ -765,6 +765,21 @@ int main() {
         h.session.handleControlLine("BUFFER");
         expectLines(h, {"BUFFER 321\r"});
     });
+    runner.run("BUFFER includes data_tx_buffer staging bytes", [] {
+        // Pat's Flush() blocks on BUFFER 0. If our 200 ms staging
+        // buffer (data_tx_buffer_) is invisible to BUFFER reports,
+        // Pat can see "all done" while bytes are still in staging.
+        // Regression guard for commit 6679641.
+        Harness h;
+        enterConnected(h);
+        h.modem.backlog_bytes = 100;
+        // Push bytes into the session's TX staging buffer (handleDataBytes
+        // accumulates without flushing until tick).
+        h.session.handleDataBytes({1, 2, 3, 4, 5, 6, 7, 8, 9, 10});
+        h.clear();
+        h.session.handleControlLine("BUFFER");
+        expectLines(h, {"BUFFER 110\r"});  // 100 engine + 10 staging
+    });
     runner.run("SN command emits snapshot with one decimal", [] {
         Harness h;
         h.modem.snr_db = 8;
