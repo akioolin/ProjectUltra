@@ -145,7 +145,8 @@ void printUsage(std::ostream& out) {
         << "  --port <N>                  TNC command port (default: 8300; data=N+1)\n"
         << "  --bind <addr>               Bind address (default: 127.0.0.1)\n"
         << "  --callsign <call>           Default callsign (default: NOCALL)\n"
-        << "  --inject-channel [type]     Apply simple TX-side AWGN before audio output\n"
+        << "  --inject-channel [awgn]     Apply simple TX-side AWGN before audio output\n"
+        << "                              (only awgn is implemented; other types rejected)\n"
         << "  --snr <db>                  SNR for channel injection and mode reports\n"
         << "  --rate <auto|r1_4|r1_2|r2_3|r3_4>\n"
         << "  --mod <auto|dqpsk|d8psk|dbpsk|qpsk|bpsk|qam16|qam32|qam64>\n"
@@ -192,8 +193,18 @@ bool applyConfigKey(const std::string& key, const std::string& value, Config& cf
         cfg.inject_channel = (value == "true" || value == "1" || value == "yes");
         if (!cfg.inject_channel && !value.empty() && value != "false" &&
             value != "0" && value != "no") {
+            // Channel-type values are accepted as a synonym for "true"
+            // for forward-compat with cli_simulator's spelling, but
+            // only AWGN is actually implemented here. Reject anything
+            // else loudly rather than silently using AWGN.
+            const std::string lc = lower(value);
+            if (lc != "awgn") {
+                std::cerr << "ultra_tnc only supports inject_channel=awgn|true|false; "
+                             "got '" << value << "'\n";
+                return false;
+            }
             cfg.inject_channel = true;
-            cfg.inject_channel_type = lower(value);
+            cfg.inject_channel_type = lc;
         }
     } else if (key == "snr" || key == "snr_db") {
         auto parsed = parseFloat(value);
@@ -371,7 +382,13 @@ bool parseArgs(int argc, char** argv, Config& cfg) {
         } else if (arg == "--inject-channel") {
             cfg.inject_channel = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') {
-                cfg.inject_channel_type = lower(argv[++i]);
+                const std::string type = lower(argv[++i]);
+                if (type != "awgn") {
+                    std::cerr << "ultra_tnc --inject-channel only supports awgn; "
+                                 "got '" << type << "'\n";
+                    return false;
+                }
+                cfg.inject_channel_type = type;
             }
         } else if (arg == "--snr") {
             auto value = requireValue("--snr");
