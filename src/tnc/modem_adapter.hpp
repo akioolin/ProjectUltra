@@ -37,7 +37,11 @@ public:
     virtual void startConnect(const std::string& src, const std::string& dst) = 0;
     virtual void disconnect() = 0;
     virtual void abort() = 0;
-    virtual void sendBinary(const std::vector<uint8_t>& bytes) = 0;
+    // Returns true if the bytes were accepted into the engine's TX
+    // pipeline. False means the engine refused (queue full, not in
+    // CONNECTED, etc.); the caller should keep its staging buffer and
+    // retry on the next quiet period rather than dropping the bytes.
+    virtual bool sendBinary(const std::vector<uint8_t>& bytes) = 0;
 
     virtual int getTxBackloggBytes() const = 0;
     virtual int getCurrentSNR_db() const = 0;

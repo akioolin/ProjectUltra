@@ -277,10 +277,13 @@ void TNCBridge::abort() {
     engine_.disconnect();
 }
 
-void TNCBridge::sendBinary(const std::vector<uint8_t>& bytes) {
-    if (!bytes.empty()) {
-        engine_.sendBinary(bytes);
+bool TNCBridge::sendBinary(const std::vector<uint8_t>& bytes) {
+    if (bytes.empty()) {
+        // Nothing to send is a no-op success — the caller has nothing
+        // to retry. Distinguishes from engine refusal of real bytes.
+        return true;
     }
+    return engine_.sendBinary(bytes);
 }
 
 int TNCBridge::getTxBackloggBytes() const {

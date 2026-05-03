@@ -436,8 +436,12 @@ std::vector<uint8_t> TNCSession::encodePayloadForWire(
 
 void TNCSession::flushDataTxBuffer() {
     auto wire = encodePayloadForWire(data_tx_buffer_, compression_enabled_);
-    modem_.sendBinary(wire);
-    data_tx_buffer_.clear();
+    if (modem_.sendBinary(wire)) {
+        data_tx_buffer_.clear();
+    }
+    // On engine refusal (queue full / not CONNECTED) we keep
+    // data_tx_buffer_ intact so the next quiet-period flush retries.
+    // Pat will see BUFFER N stay nonzero and back off accordingly.
     data_tx_quiet_ms_ = 0;
 }
 

@@ -62,8 +62,10 @@ struct FakeModemAdapter : ModemAdapter {
         ++abort_calls;
     }
 
-    void sendBinary(const std::vector<uint8_t>& bytes) override {
+    bool send_binary_should_fail = false;
+    bool sendBinary(const std::vector<uint8_t>& bytes) override {
         send_binary_calls.push_back(bytes);
+        return !send_binary_should_fail;
     }
 
     int getTxBackloggBytes() const override {
@@ -752,6 +754,33 @@ int main() {
         expect(wire.front() == 0x00, "uncompressible payload falls back to raw");
         expect(wire.size() == payload.size() + 1,
                "raw fallback is payload + 1-byte marker");
+    });
+    runner.run("flushDataTxBuffer keeps staging on engine reject", [] {
+        // Codex review #15: ModemAdapter::sendBinary now returns bool.
+        // When the engine refuses (queue full, not CONNECTED, etc.)
+        // staged TCP bytes must NOT be silently dropped — Pat trusts
+        // BUFFER N to count them. The session keeps data_tx_buffer_
+        // intact so the next quiet-period flush retries.
+        Harness h;
+        enterConnected(h);
+        h.modem.send_binary_should_fail = true;
+        std::vector<uint8_t> staged(64, 'X');
+        h.session.handleDataBytes(staged);
+        h.session.tick(250);  // pushes past kDataTxFlushQuietMs
+        expect(h.modem.send_binary_calls.size() == 1,
+               "flush attempt was made");
+        // BUFFER snapshot should still report the staged bytes.
+        h.clear();
+        h.session.handleControlLine("BUFFER");
+        expectLines(h, {"BUFFER 64\r"});
+        // Now allow success on retry.
+        h.modem.send_binary_should_fail = false;
+        h.session.tick(250);
+        expect(h.modem.send_binary_calls.size() == 2,
+               "retry attempt should fire after next quiet period");
+        h.clear();
+        h.session.handleControlLine("BUFFER");
+        expectLines(h, {"BUFFER 0\r"});
     });
     runner.run("encodePayloadForWire: empty payload produces single marker byte", [] {
         std::vector<uint8_t> payload;

@@ -109,9 +109,10 @@ struct FakeModemAdapter : ModemAdapter {
         ++abort_calls;
     }
 
-    void sendBinary(const std::vector<uint8_t>& bytes) override {
+    bool sendBinary(const std::vector<uint8_t>& bytes) override {
         std::lock_guard<std::mutex> lock(mutex);
         send_binary_calls.push_back(bytes);
+        return true;
     }
 
     int getTxBackloggBytes() const override {

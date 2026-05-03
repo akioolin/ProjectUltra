@@ -89,7 +89,7 @@ public:
     void startConnect(const std::string& src, const std::string& dst) override;
     void disconnect() override;
     void abort() override;
-    void sendBinary(const std::vector<uint8_t>& bytes) override;
+    bool sendBinary(const std::vector<uint8_t>& bytes) override;
 
     int getTxBackloggBytes() const override;
     int getTxBacklogBytes() const;
