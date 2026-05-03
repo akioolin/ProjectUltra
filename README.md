@@ -115,7 +115,7 @@ cmake -S . -B build && cmake --build build -j 4
 
 # Smoke test from another terminal
 printf 'VERSION\r' | nc 127.0.0.1 8300
-# → VARA version 4.9.0 registered
+# → VERSION 4.9.0
 ```
 
 Full command reference: [`docs/TNC_INTERFACE.md`](docs/TNC_INTERFACE.md).
@@ -138,11 +138,17 @@ ProjectUltra extension:
 ### Status
 
 - Cross-platform: Linux + macOS + Windows. CI matrix all green.
-- ctest: 34/34 (88 TNC parser tests, 19 TCP integration tests, 16
+- ctest: 34/34 (98 TNC parser tests, 19 TCP integration tests, 17
   bridge tests, plus modem regressions).
-- End-to-end: 50 KB Mac↔Pi5 over real audio cable, byte-exact, 2354 bps.
-- Pat / Winlink Express integration: API-compatible by spec, manual
-  client testing pending.
+- End-to-end byte-exact transfers: 50 KB Mac↔Pi5 over real audio
+  cable, 2354 bps random / 102400 bps with compression on prose-shaped
+  text (deflate ratio 222×).
+- **Real Pat client validated**: Pat 1.0.0 (Mac) ↔ Pat 0.15.1 (Pi5)
+  drove a full B2F session through two `ultra_tnc` instances over
+  real audio. Banner exchange, gzip negotiation, "no proposals"
+  handshake all completed. First time a real Winlink client has
+  driven `ultra_tnc` to a working session.
+- Winlink Express on Windows: spec-compatible, not yet manually tested.
 
 ---
 
