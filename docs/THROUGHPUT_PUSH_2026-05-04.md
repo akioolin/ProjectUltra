@@ -103,6 +103,53 @@ Tonight-deferred (need multi-day work):
   encoder/decoder bit-mapping.
 - **Continuous pilots** — Backlog #6. 1-2 dB on faster fading.
 
+## Hardware validation (Mac↔Pi5 audio loopback) — 2026-05-04 15:00
+
+Sweep done after the simulator-only commits. Mac (Sound Blaster
+Play! 3 USB) ↔ Pi5 (USB Audio Device, calibrated per CLAUDE.md)
+with synthetic-channel injection at the documented gain (0.70).
+
+**Forced-mod 5KB file transfer payload throughput, good fading:**
+
+| SNR | DQPSK R1/2 | D8PSK R1/2 | Winner |
+|---:|---:|---:|---|
+| 15 | 1078 bps (2 retx) | 728 bps (5-40 retx) | **DQPSK** |
+| 18 | 1234 bps (0 retx) | 641 bps (38 retx) | **DQPSK** |
+| 20 | 1247 bps (0 retx) | **1595 bps (0 retx)** | **D8PSK +28 %** |
+
+The hardware cliff is **between SNR=18 and SNR=20**, even though the
+simulator's Watterson-based sweep showed D8PSK working cleanly at
+SNR=10. The 10 dB sim-vs-hardware gap comes from soundcard
+quantization, AGC residual, and audio-chain phase noise that
+Watterson doesn't model. D8PSK's 8-phase decision is dramatically
+more sensitive to phase noise than DQPSK's 4-phase.
+
+**Gate tightening that followed the hardware measurements** (commit
+96bb2b7):
+- D8PSK R1/2: simulator floor SNR=10 → hardware floor SNR=20
+- D8PSK R2/3: was multi-tier good-fading; now AWGN-only
+- DQPSK keeps everything below
+
+After tightening, auto-rate at SNR=20 good correctly picks D8PSK
+R1/2 and delivers 1130 bps with one adaptive downgrade event over
+the 36-second test (vs forced D8PSK R1/2 at 1595 bps without the
+adaptive jitter). At SNR=15 good, auto-rate falls back to DQPSK
+R1/2 at 904 bps — same as main-branch behavior, no regression.
+
+**Honest 10 kbps comparison:**
+
+| Goal | Reachable? |
+|---|---|
+| 10 kbps in good fading SNR=15 | No. Ceiling ~1.0 kbps payload on hardware. |
+| 10 kbps in good fading SNR=20 | No. Ceiling ~1.6 kbps payload on hardware. |
+| 10 kbps in clean AWGN | No. Theoretical max ~6 kbps (D8PSK R3/4); hardware cliff probably ~3-4 kbps. |
+
+Production HF data modems (VARA / Pactor) advertise 8.5-10.5 kbps
+"theoretical max" but real-world median per published user logs is
+0.9-2 kbps — same neighborhood ProjectUltra lives in today. The
++28 % hardware win at SNR=20 is meaningful but doesn't change the
+order-of-magnitude story.
+
 ## Reviewer notes
 
 - Branch protects main: experimental gate changes are isolated.
