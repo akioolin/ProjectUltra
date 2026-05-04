@@ -439,9 +439,14 @@ void Connection::requestModeChange(Modulation new_mod, CodeRate new_rate,
     mode_change_retry_count_ = 0;
     mode_change_timeout_ms_ = MODE_CHANGE_TIMEOUT_MS;
 
-    // Pick the CW count for the new rate (rate-only — both peers will agree
-    // because both run recommendCWCount(rate) on the same rate).
-    pending_cw_count_ = static_cast<uint8_t>(connection_policy::recommendCWCount(new_rate));
+    // Pick the CW count for the new rate. If the operator forced a CW
+    // count via --cw-count (config_.forced_cw_count != 0), preserve that
+    // override across mode changes — otherwise auto-pick from rate.
+    // Without this, a later MODE_CHANGE would silently drop the user's
+    // override (caught by Codex, 2026-05-04).
+    pending_cw_count_ = static_cast<uint8_t>((config_.forced_cw_count != 0)
+        ? v2::sanitizeFixedFrameCodewords(config_.forced_cw_count)
+        : connection_policy::recommendCWCount(new_rate));
 
     mode_change_seq_++;
     auto frame = v2::ControlFrame::makeModeChange(local_call_, remote_call_,

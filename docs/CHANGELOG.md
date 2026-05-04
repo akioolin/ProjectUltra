@@ -10,6 +10,106 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-04: Wire-level negotiation of fixed-frame CW count
+
+**What was broken:**
+Throughput on DQPSK R1/2 SNR=15 good fading was bottlenecked at
+~1077 bps because every data frame carried only 4 codewords (the
+`kDefaultFixedFrameCodewords` default). Mac↔Pi5 hardware A/B with
+manual `--cw-count 8` on both peers showed 1615 bps (+50 %, with
+**fewer** retx because larger frames amortize the 5.3 s SACK-defer
+overhead across twice the payload). The frame format already supported
+1–8 CW (`kMaxFixedFrameCodewords = 8`, count in the frame header at
+`frame_v2.cpp:808`) — the dial just wasn't being turned for everyday
+auto-rate connections.
+
+A first attempt set CW from a host-side data-mode-changed callback
+that called `protocol_.setForcedFrameCodewords()`. That re-entered
+`ProtocolEngine::mutex_` (a non-recursive `std::mutex` — see
+`protocol_engine.hpp:34`), deadlocking the responder's protocol
+thread. Symptom: BRAVO logged "Adaptive CW count 4 -> 8", then went
+silent forever; CONNECT_ACK was queued in `tx_queue_` but
+`defer_tx_` never reset (line 222 of `protocol_engine.cpp:onRxData`
+unreachable past the deadlock); ALPHA timed out waiting at 120 s.
+Reproduced 100 % with `--seed 1`.
+
+Codex (gpt-5.5 xhigh) review of the redesign also surfaced three
+hazards I'd missed: stale CONNECT_ACK retry timer (computed before
+CW finalized), decoder fallback to configured `fixed_frame_codewords_`
+when the header read fails (so the wire-byte alone doesn't save us
+when peers disagree on configured CW), and the general "callbacks
+fire under the protocol mutex — host code must not call back in".
+Codex's bottom line: don't ship "both sides recompute" as the
+agreement mechanism — make CW an explicit negotiated parameter on
+the wire.
+
+**What was changed:**
+- **Wire format** (`src/protocol/frame_v2.{hpp,cpp}`):
+  - `ConnectFrame::PAYLOAD_SIZE` 25 → 26 B; new `data_frame_cw_count`
+    byte appended after `measured_snr`. Frame total 44 → 45 B.
+  - `CONNECT` carries initiator's forced CW (0 = AUTO);
+    `CONNECT_ACK` carries responder's chosen value (1..8). Initiator
+    applies the echoed value via `frame.data_frame_cw_count`.
+  - `ControlFrame::ModeChangeInfo` gains `data_frame_cw_count` via
+    `payload[5]` (was a reserved byte — no size change).
+- **Policy** (`src/protocol/connection_policy.hpp`):
+  - `recommendCWCount(rate)` is rate-only: R1/2, R2/3, R3/4 → 8;
+    R1/4 → 4. No SNR/fading dependency, so cross-peer agreement
+    collapses to "both peers ran the same rate negotiation".
+- **Connection** (`src/protocol/connection.{hpp,cpp,_handlers.cpp}`):
+  - `applyDataMode(mod, rate, cw_count = 0)`: explicit CW from
+    MODE_CHANGE wire byte, else auto via `recommendCWCount(rate)`.
+    Triggers `requeuePendingChunks` on rate-changed OR cw-changed
+    (was rate-changed only).
+  - `setForcedFrameCodewords(cw, forced = true)`: `forced = true`
+    marks `config_.forced_cw_count` for one-sided wire propagation
+    (initiator embeds in CONNECT, responder honors and echoes).
+    `forced = false` is the boot-time path (host wiring up
+    encoder/decoder before connection) — does NOT mark forced and
+    so does not bypass the responder's auto-pick.
+  - Responder picks negotiated CW BEFORE building CONNECT_ACK and
+    BEFORE computing the retry timer (closes the stale-timer hazard).
+- **Callback** (`src/protocol/connection.hpp`):
+  - `DataModeChangedCallback` signature now
+    `(mod, rate, cw_count, snr_db, peer_fading)`. Hosts (cli_simulator,
+    ultra_gui real + virtual, ultra_tnc, threaded_simulator) update
+    encoder + decoder directly from the param. **No** call to
+    `protocol_.setForcedFrameCodewords()` inside the callback — the
+    rule is now spelled out in a comment on the typedef.
+- **CLI** (`tools/cli_simulator.cpp`):
+  - `cw_count_forced_` flag: only `--cw-count N` flips it to true.
+    Boot init at `SimController::initStation` passes `forced=false`
+    so the default 4 doesn't bypass auto-pick.
+
+**How it's properly fixed:**
+Both peers see the negotiated CW count on the wire (CONNECT_ACK byte
+for initial, MODE_CHANGE byte for mid-transfer). They set their local
+`data_frame_cw_count_` from the wire, never from independent
+re-derivation, so peers cannot disagree even if their channel
+measurements drift. The `recommendCWCount` function is rate-only so
+even in fallback paths there's no SNR/fading-driven divergence. The
+encoder/decoder are updated directly from the callback param, which
+removes the protocol-mutex re-entry that caused the deadlock.
+
+**Test verification:**
+- Sim regression: `./build/cli_simulator --snr 15 --fading good
+  --rate auto --file 5120 --max-time 200 --seed 1` → both peers log
+  "Negotiated CW count: 8 for DQPSK R1/2", handshake at 10.5/11.0 s,
+  transfer done by 36 s.
+- `--cw-count 4` override: ALPHA logs `forced_cw=4`, both peers
+  configure cw=4. Wire negotiation honors the override one-sided.
+- ctest: 35/35 green (incl. `ConnectionPolicy`, `ConnectionAdaptive`,
+  `FrameV2` — the suites that broke on the prior abandoned attempt).
+- Hardware A/B (Mac↔Pi5 audio loopback, `--inject good --snr 15`,
+  DQPSK R1/2 5KB, no `--cw-count`):
+  - Run 1 (boot-init bug had forced=true): 1233 bps, 39 frames, 0 retx
+  - Run 2 (bug fixed): **1448 bps, 19 frames, 0 retx** (+17 %
+    in-session, frames halved 39→19 confirms CW=8 in effect).
+
+**Commit:** `1a98b4d`.
+
+---
+
 ## 2026-05-02: TNC Phase 5 — Windows cross-platform support
 
 **Goal:**
