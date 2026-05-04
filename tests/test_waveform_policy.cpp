@@ -95,13 +95,36 @@ void test_data_mode_policy() {
     Modulation mod = Modulation::AUTO;
     CodeRate rate = CodeRate::AUTO;
 
+    // D8PSK gate re-enabled 2026-05-04 (see waveform_selection.hpp).
+    // High-SNR AWGN now picks D8PSK R3/4 (was DQPSK R3/4) — same code
+    // rate but 1.5× bits/symbol. Throughput jumps from ~3.4 to ~5 kbps.
     recommendDataMode(27.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.00f);
-    CHECK(mod == Modulation::DQPSK, "OFDM data mode should remain DQPSK at high SNR");
+    CHECK(mod == Modulation::D8PSK, "high-SNR AWGN should promote to D8PSK");
     CHECK(rate == CodeRate::R3_4, "near-AWGN SNR27 should use R3/4");
 
+    // Good-fading SNR>=15: D8PSK R2/3 (was DQPSK R1/2). 1.5× bits per
+    // symbol AND 1.33× code rate = ~2× throughput on this channel.
+    // Sweep showed 0 retx at SNR=15 good fading.
     recommendDataMode(18.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
-    CHECK(mod == Modulation::DQPSK, "fading OFDM data mode should remain DQPSK");
-    CHECK(rate == CodeRate::R1_2, "good fading SNR18 should use R1/2");
+    CHECK(mod == Modulation::D8PSK, "good-fading SNR18 should promote to D8PSK");
+    CHECK(rate == CodeRate::R2_3, "good-fading SNR18 should use R2/3 with D8PSK");
+
+    // SNR=12 good fading: D8PSK R1/2 (was DQPSK R1/2).
+    // 1.5× throughput at the same rate.
+    recommendDataMode(12.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
+    CHECK(mod == Modulation::D8PSK, "good-fading SNR12 should promote to D8PSK");
+    CHECK(rate == CodeRate::R1_2, "good-fading SNR12 D8PSK should use R1/2 (cliff at SNR=8)");
+
+    // SNR=9 good fading: below D8PSK floor (cliff at SNR=8 from sweeps),
+    // falls back to DQPSK rate ladder.
+    recommendDataMode(9.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
+    CHECK(mod == Modulation::DQPSK, "below-floor SNR=9 falls back to DQPSK");
+    CHECK(rate == CodeRate::R1_4, "DQPSK fallback at SNR=9 uses R1/4");
+
+    // Heavy fading: D8PSK rejected even at high SNR — falls back to DQPSK.
+    recommendDataMode(20.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.90f);
+    CHECK(mod == Modulation::DQPSK, "moderate fading should reject D8PSK");
+    CHECK(rate == CodeRate::R1_2, "DQPSK moderate fading uses R1/2");
 
     recommendDataMode(12.0f, WaveformMode::MC_DPSK, mod, rate, 0.90f);
     CHECK(mod == Modulation::DQPSK, "MC-DPSK should use DQPSK");

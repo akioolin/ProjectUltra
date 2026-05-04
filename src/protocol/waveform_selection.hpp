@@ -180,19 +180,57 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
         return;
     }
 
-    // OFDM modes: use shared rate selection helper
+    // OFDM modes: D8PSK gated on conditions, otherwise DQPSK.
+    //
+    // D8PSK ladder (re-enabled 2026-05-04 after wide cli_simulator
+    // sweeps showed it works in fading with the post-2026-03-15 CPE
+    // correction + per-symbol pilot tracking already in the demod):
+    //   sweep results for D8PSK on good fading (cli_simulator 7-msg):
+    //     R1/2 SNR=8:   FAIL (cliff)
+    //     R1/2 SNR=10:  PASS, 4 retx
+    //     R1/2 SNR=12:  PASS, 2 retx
+    //     R1/2 SNR=15:  PASS, 0 retx
+    //     R2/3 SNR=10:  PASS, 28 retx (high)
+    //     R2/3 SNR=12:  PASS, 45 retx (very high)
+    //     R2/3 SNR=15:  PASS, 0 retx
+    //     R2/3 SNR=20:  PASS, 1 retx
+    //     R3/4 SNR=20:  PASS, 6 retx (border, AWGN-only)
+    //   Moderate fading: R1/2 SNR>=15 also stable (3-6 retx).
+    //
+    // The throughput case: D8PSK R2/3 at SNR=15 good fading carries
+    // 1.5× the bits/symbol of DQPSK R2/3 at the same conditions, so
+    // the throughput jumps from ~3.4 kbps to ~5 kbps with zero retx.
+    //
+    // Conservative thresholds — D8PSK only triggers when sweeps showed
+    // 0 or near-0 retx. Anything below the cliff falls back to DQPSK.
+    const bool d8psk_awgn_ok =
+        (fading_index < 0.15f && snr_db >= 18.0f);
+    const bool d8psk_good_ok =
+        (fading_index < 0.65f && snr_db >= 15.0f);
+    if (d8psk_awgn_ok || d8psk_good_ok) {
+        mod = Modulation::D8PSK;
+        // R2/3 is the throughput sweet spot at these SNRs (zero retx
+        // in sweeps). R3/4 was borderline (6 retx at SNR=20 good) so
+        // restrict to AWGN at SNR>=22.
+        if (fading_index < 0.15f && snr_db >= 22.0f) {
+            rate = CodeRate::R3_4;
+        } else {
+            rate = CodeRate::R2_3;
+        }
+        return;
+    }
+
+    // Slightly relaxed D8PSK R1/2 gate for less-than-clean conditions
+    // — gives ~3.4 kbps at SNR=10-12 good fading (vs DQPSK R1/4 at
+    // ~1.15 kbps). Cliff is at SNR=8 (FAIL), so floor is SNR=10.
+    if (fading_index < 0.65f && snr_db >= 10.0f) {
+        mod = Modulation::D8PSK;
+        rate = CodeRate::R1_2;
+        return;
+    }
+
+    // Default: DQPSK with the existing wide ladder.
     mod = Modulation::DQPSK;  // Always differential for HF phase stability
-
-    // TEMPORARY: D8PSK disabled until R1/2+ rates are verified
-    // D8PSK only on TRUE AWGN (fading_index < 0.15) + very high SNR
-    // Testing showed D8PSK fails on any fading - too sensitive to phase errors
-    // if (fading_index < 0.15f && snr_db >= 25.0f) {
-    //     mod = Modulation::D8PSK;
-    //     rate = CodeRate::R1_2;
-    //     return;
-    // }
-
-    // Use shared helper for rate selection (SINGLE SOURCE OF TRUTH)
     rate = selectOFDMCodeRate(snr_db, fading_index);
 }
 

@@ -805,8 +805,11 @@ bool test_protocol_rate_upgrade() {
     stationA.setLocalCallsign("W1ABC");
     stationB.setLocalCallsign("K2DEF");
 
-    // Station B measures good SNR - should trigger MODE_CHANGE
-    stationB.setMeasuredSNR(22.0f);  // Should recommend DQPSK R2/3
+    // Station B measures good SNR - should trigger MODE_CHANGE.
+    // SNR=22 + AWGN now promotes to D8PSK R3/4 (1.5× bits/symbol vs
+    // the previous DQPSK R2/3 expectation, after the 2026-05-04
+    // D8PSK ladder re-enable).
+    stationB.setMeasuredSNR(22.0f);
 
     bool a_mode_changed = false;
     ultra::Modulation a_new_mod = ultra::Modulation::DQPSK;
@@ -831,8 +834,18 @@ bool test_protocol_rate_upgrade() {
 
     // Verify MODE_CHANGE was received
     if (!a_mode_changed) FAIL("No MODE_CHANGE received at A");
-    if (a_new_mod != ultra::Modulation::DQPSK) FAIL("Wrong modulation");
-    if (a_new_rate != ultra::CodeRate::R2_3) FAIL("Expected R2/3 at 22 dB SNR");
+    if (a_new_mod != ultra::Modulation::D8PSK) {
+        std::cout << "(got " << ultra::modulationToString(a_new_mod) << ") ";
+        FAIL("Expected D8PSK at 22 dB SNR after D8PSK ladder re-enable");
+    }
+    // Bootstrap rate cap: capInitialOFDMRate keeps R3/4 only at SNR>=24
+    // AND fading<0.05. At SNR=22 the cap returns R2/3, so the expected
+    // outcome is D8PSK R2/3 not D8PSK R3/4. (See waveform_selection.hpp
+    // line 64.)
+    if (a_new_rate != ultra::CodeRate::R2_3) {
+        std::cout << "(got " << ultra::codeRateToString(a_new_rate) << ") ";
+        FAIL("Expected R2/3 at 22 dB SNR (D8PSK R3/4 capped to R2/3 at bootstrap)");
+    }
 
     // Verify both stations report same mode
     if (stationA.getDataCodeRate() != ultra::CodeRate::R2_3) FAIL("A has wrong code rate");
@@ -923,10 +936,13 @@ bool test_adaptive_bidirectional() {
 
     if (!stationA.isConnected()) FAIL("Not connected");
 
-    // Verify high-rate differential mode
-    if (stationA.getDataModulation() != ultra::Modulation::DQPSK) {
+    // Verify high-rate mode. D8PSK ladder re-enabled 2026-05-04
+    // (see waveform_selection.hpp): high-SNR AWGN now picks D8PSK R3/4
+    // — same code rate but 1.5× bits/symbol = ~5 kbps usable instead
+    // of ~3.4 kbps. Fall-back to DQPSK is the heavy-fading branch.
+    if (stationA.getDataModulation() != ultra::Modulation::D8PSK) {
         std::cout << "(got " << ultra::modulationToString(stationA.getDataModulation()) << ") ";
-        FAIL("Expected DQPSK at 27 dB SNR");
+        FAIL("Expected D8PSK at 27 dB SNR (post-D8PSK-gate)");
     }
     if (stationA.getDataCodeRate() != ultra::CodeRate::R3_4) {
         std::cout << "(got " << ultra::codeRateToString(stationA.getDataCodeRate()) << ") ";
