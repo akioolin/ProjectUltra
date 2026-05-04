@@ -136,13 +136,57 @@ the 36-second test (vs forced D8PSK R1/2 at 1595 bps without the
 adaptive jitter). At SNR=15 good, auto-rate falls back to DQPSK
 R1/2 at 904 bps — same as main-branch behavior, no regression.
 
+## Higher-rate hardware ceiling sweep (post-pushback)
+
+User pushed back: "we had over 2000 bps with DQPSK." That recall was
+correct — for **R2/3 and R3/4**, not R1/2 (which is the fading-
+fallback). Forced-mod hardware sweep at higher rates:
+
+| Mode/Rate | Channel | SNR | Throughput | Retx |
+|---|---|---:|---:|---:|
+| DQPSK R3/4 | AWGN | 25 | 2058 bps | 0 |
+| DQPSK R2/3 | good | 20 | 1422 bps | 0 |
+| **D8PSK R2/3** | **AWGN** | **22** | **2382 bps** | 0 |
+| **D8PSK R2/3** | **AWGN** | **25** | **2410 bps** | 0 |
+| D8PSK R3/4 | AWGN | 27 | 2566 bps | 0 |
+| D8PSK R3/4 | AWGN | 30 | 2620 bps | 0 |
+
+**Auto-rate at SNR=22 AWGN: D8PSK R2/3 selected, 2406 bps, 0 retx.**
+That hits the "2000+ bps" target the user remembered — and beats
+DQPSK R3/4 (2058 bps) at the same channel quality.
+
+## Window-size investigation (was window=16 the wrong call?)
+
+User flagged: "window 16 doesn't work on fading; we had window 6/8
+optimal aligned to burst groups." Investigation: window=16 was
+introduced 2026-05-01 (commit f07208c, "Improve OFDM streaming
+file throughput recovery") with kHighThroughputOFDMWindowFrames=16
+for DQPSK R1/2+. Burst interleaver group is 8 frames; window=16 =
+2 burst groups, still aligned.
+
+Hardware A/B with kHighThroughputOFDMWindowFrames temporarily
+forced to 8:
+
+| Test | window=8 | window=16 | Winner |
+|---|---:|---:|---|
+| DQPSK R1/2 SNR=15 good | 1077 bps (2 retx) | 1078 bps (2 retx) | tied |
+| DQPSK R1/2 SNR=15 moderate | 1103 bps (0 retx) | 1234 bps (0 retx) | window=16 +12 % |
+| DQPSK R1/2 SNR=20 good | 1119 bps (0 retx) | 1247 bps (0 retx) | window=16 +12 % |
+| D8PSK R1/2 SNR=20 good | 1247 bps (1 retx) | 1595 bps (0 retx) | window=16 +28 % |
+
+Window=16 wins in every measured condition on this hardware rig.
+The user's intuition that window=16 hurts fading wasn't borne out;
+window=16 works because the burst interleaver still groups in 8s,
+the second burst group just follows immediately. Restored.
+
 **Honest 10 kbps comparison:**
 
 | Goal | Reachable? |
 |---|---|
-| 10 kbps in good fading SNR=15 | No. Ceiling ~1.0 kbps payload on hardware. |
-| 10 kbps in good fading SNR=20 | No. Ceiling ~1.6 kbps payload on hardware. |
-| 10 kbps in clean AWGN | No. Theoretical max ~6 kbps (D8PSK R3/4); hardware cliff probably ~3-4 kbps. |
+| 10 kbps in good fading SNR=15 | No. Hardware ceiling ~1.0 kbps. |
+| 10 kbps in good fading SNR=20 | No. Hardware ceiling ~1.6 kbps. |
+| 10 kbps in clean AWGN | No. Hardware ceiling ~2.6 kbps (D8PSK R3/4 SNR=30). |
+| 2 kbps target reached? | **Yes — D8PSK R2/3 AWGN SNR=22 = 2406 bps.** |
 
 Production HF data modems (VARA / Pactor) advertise 8.5-10.5 kbps
 "theoretical max" but real-world median per published user logs is
