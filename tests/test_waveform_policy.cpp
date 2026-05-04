@@ -96,21 +96,27 @@ void test_data_mode_policy() {
     CodeRate rate = CodeRate::AUTO;
 
     // D8PSK gate re-enabled 2026-05-04 (see waveform_selection.hpp).
-    // High-SNR AWGN now picks D8PSK R3/4 (was DQPSK R3/4) — same code
-    // rate but 1.5× bits/symbol. Throughput jumps from ~3.4 to ~5 kbps.
+    // After file-transfer stress sweeps, R3/4 only fires on AWGN with
+    // SNR>=24, R2/3 needs SNR>=20 in fading or SNR>=18 in AWGN, R1/2
+    // is the dependable D8PSK win for SNR=10-19 good fading.
+
+    // High-SNR AWGN: D8PSK R3/4
     recommendDataMode(27.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.00f);
     CHECK(mod == Modulation::D8PSK, "high-SNR AWGN should promote to D8PSK");
     CHECK(rate == CodeRate::R3_4, "near-AWGN SNR27 should use R3/4");
 
-    // Good-fading SNR>=15: D8PSK R2/3 (was DQPSK R1/2). 1.5× bits per
-    // symbol AND 1.33× code rate = ~2× throughput on this channel.
-    // Sweep showed 0 retx at SNR=15 good fading.
-    recommendDataMode(18.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
-    CHECK(mod == Modulation::D8PSK, "good-fading SNR18 should promote to D8PSK");
-    CHECK(rate == CodeRate::R2_3, "good-fading SNR18 should use R2/3 with D8PSK");
+    // SNR=20 good fading: D8PSK R2/3 — the throughput sweet spot
+    recommendDataMode(20.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
+    CHECK(mod == Modulation::D8PSK, "good-fading SNR20 should be D8PSK");
+    CHECK(rate == CodeRate::R2_3, "good-fading SNR20 D8PSK uses R2/3");
 
-    // SNR=12 good fading: D8PSK R1/2 (was DQPSK R1/2).
-    // 1.5× throughput at the same rate.
+    // SNR=18 good fading: file-transfer sweep showed R2/3 has too many
+    // retx here, so this drops to D8PSK R1/2 (still 1.5× DQPSK R1/2)
+    recommendDataMode(18.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
+    CHECK(mod == Modulation::D8PSK, "good-fading SNR18 should be D8PSK");
+    CHECK(rate == CodeRate::R1_2, "good-fading SNR18 D8PSK uses R1/2 (R2/3 needs SNR>=20)");
+
+    // SNR=12 good fading: D8PSK R1/2
     recommendDataMode(12.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
     CHECK(mod == Modulation::D8PSK, "good-fading SNR12 should promote to D8PSK");
     CHECK(rate == CodeRate::R1_2, "good-fading SNR12 D8PSK should use R1/2 (cliff at SNR=8)");

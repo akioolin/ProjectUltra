@@ -937,9 +937,10 @@ bool test_adaptive_bidirectional() {
     if (!stationA.isConnected()) FAIL("Not connected");
 
     // Verify high-rate mode. D8PSK ladder re-enabled 2026-05-04
-    // (see waveform_selection.hpp): high-SNR AWGN now picks D8PSK R3/4
-    // — same code rate but 1.5× bits/symbol = ~5 kbps usable instead
-    // of ~3.4 kbps. Fall-back to DQPSK is the heavy-fading branch.
+    // (see waveform_selection.hpp): high-SNR AWGN picks D8PSK R3/4
+    // (recommendDataMode result), but bootstrap cap (capInitialOFDMRate)
+    // requires SNR>=24 to keep R3/4. SNR=27 with fading=0 satisfies
+    // both, so the expected outcome is D8PSK R3/4.
     if (stationA.getDataModulation() != ultra::Modulation::D8PSK) {
         std::cout << "(got " << ultra::modulationToString(stationA.getDataModulation()) << ") ";
         FAIL("Expected D8PSK at 27 dB SNR (post-D8PSK-gate)");

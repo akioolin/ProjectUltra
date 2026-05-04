@@ -201,28 +201,35 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
     // 1.5× the bits/symbol of DQPSK R2/3 at the same conditions, so
     // the throughput jumps from ~3.4 kbps to ~5 kbps with zero retx.
     //
-    // Conservative thresholds — D8PSK only triggers when sweeps showed
-    // 0 or near-0 retx. Anything below the cliff falls back to DQPSK.
-    const bool d8psk_awgn_ok =
-        (fading_index < 0.15f && snr_db >= 18.0f);
-    const bool d8psk_good_ok =
-        (fading_index < 0.65f && snr_db >= 15.0f);
-    if (d8psk_awgn_ok || d8psk_good_ok) {
+    // D8PSK R3/4 — only on near-AWGN with very high SNR. Sweep showed
+    // 6 retx at SNR=20 good fading (borderline) so reserve for AWGN.
+    if (fading_index < 0.15f && snr_db >= 24.0f) {
         mod = Modulation::D8PSK;
-        // R2/3 is the throughput sweet spot at these SNRs (zero retx
-        // in sweeps). R3/4 was borderline (6 retx at SNR=20 good) so
-        // restrict to AWGN at SNR>=22.
-        if (fading_index < 0.15f && snr_db >= 22.0f) {
-            rate = CodeRate::R3_4;
-        } else {
-            rate = CodeRate::R2_3;
-        }
+        rate = CodeRate::R3_4;
         return;
     }
 
-    // Slightly relaxed D8PSK R1/2 gate for less-than-clean conditions
-    // — gives ~3.4 kbps at SNR=10-12 good fading (vs DQPSK R1/4 at
-    // ~1.15 kbps). Cliff is at SNR=8 (FAIL), so floor is SNR=10.
+    // D8PSK R2/3 — needs more margin than the 7-message sweep suggested.
+    // 5KB file-transfer test at SNR=18 good fading (~0.32) showed 31 retx
+    // for 28 frames (excessive). Three tiers based on channel quality:
+    //   - Clean AWGN (fading<0.10) at SNR>=15: R2/3 works (sweeps clean,
+    //     adaptive_upgrade tests verify this is reachable)
+    //   - Slight residual fading (<0.15) at SNR>=18: R2/3 ok
+    //   - Real good fading (<0.65) at SNR>=20: tight but reliable per
+    //     the file-transfer stress test
+    const bool d8psk_r23_clean = (fading_index < 0.10f && snr_db >= 15.0f);
+    const bool d8psk_r23_awgn = (fading_index < 0.15f && snr_db >= 18.0f);
+    const bool d8psk_r23_fading = (fading_index < 0.65f && snr_db >= 20.0f);
+    if (d8psk_r23_clean || d8psk_r23_awgn || d8psk_r23_fading) {
+        mod = Modulation::D8PSK;
+        rate = CodeRate::R2_3;
+        return;
+    }
+
+    // D8PSK R1/2 — the dependable D8PSK win. Cliff at SNR=8 (sweep
+    // FAIL); 0 retx at SNR=15 good fading. Gives ~3.4 kbps usable
+    // (vs DQPSK R1/2 ~2.3 kbps at the same conditions, +47%) without
+    // the file-transfer-stress retx storm that R2/3 hits below SNR=20.
     if (fading_index < 0.65f && snr_db >= 10.0f) {
         mod = Modulation::D8PSK;
         rate = CodeRate::R1_2;
