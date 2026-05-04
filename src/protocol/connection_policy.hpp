@@ -76,17 +76,27 @@ inline bool isHighThroughputOFDM(float fading_index, float snr_db) {
 }
 
 inline bool isHighThroughputOFDMMode(Modulation mod, CodeRate rate) {
-    if (mod != Modulation::DQPSK) {
-        return false;
+    // High-throughput predicate gates window=16 selective-repeat
+    // (vs window=8 default). DQPSK at R1/2+ uses bigger window because
+    // fading correlation across an 8-frame burst is tolerable; D8PSK
+    // gets the same treatment because the 2026-05-04 D8PSK gate only
+    // fires when the channel is good enough to support it (SNR>=10
+    // fading<0.65 minimum), which is the same precondition the larger
+    // window assumes.
+    if (mod == Modulation::DQPSK || mod == Modulation::D8PSK) {
+        return rate == CodeRate::R1_2 ||
+               rate == CodeRate::R2_3 ||
+               rate == CodeRate::R3_4;
     }
-    return rate == CodeRate::R1_2 ||
-           rate == CodeRate::R2_3 ||
-           rate == CodeRate::R3_4;
+    return false;
 }
 
 inline bool isSpeculativeHighRateOFDM(Modulation mod, CodeRate rate) {
-    return mod == Modulation::DQPSK &&
-           (rate == CodeRate::R2_3 || rate == CodeRate::R3_4);
+    // R2/3 and R3/4 are speculative (window=16 only on near-AWGN);
+    // R1/2 is non-speculative (window=16 always when fading channel
+    // is good). Both DQPSK and D8PSK follow the same logic.
+    const bool risky_rate = (rate == CodeRate::R2_3 || rate == CodeRate::R3_4);
+    return risky_rate && (mod == Modulation::DQPSK || mod == Modulation::D8PSK);
 }
 
 inline size_t ofdmWindowSize(Modulation mod, CodeRate rate, bool near_awgn_ofdm) {

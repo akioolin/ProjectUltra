@@ -194,8 +194,15 @@ void test_ofdm_profile_selection() {
           "near-AWGN high-rate burst should not be padded");
     CHECK(!shouldPadHighRateFadingBurst(Modulation::DQPSK, CodeRate::R1_2, false, 7),
           "R1/2 fading burst should not use speculative high-rate padding");
-    CHECK(!shouldPadHighRateFadingBurst(Modulation::D8PSK, CodeRate::R2_3, false, 7),
-          "non-DQPSK high-rate burst should not use padding policy");
+    // After 2026-05-04 D8PSK ladder re-enable, D8PSK R2/3 is now a
+    // speculative high-rate OFDM mode (same window/padding policy as
+    // DQPSK R2/3). Padding fires for partial high-rate fading bursts.
+    CHECK(shouldPadHighRateFadingBurst(Modulation::D8PSK, CodeRate::R2_3, false, 7),
+          "D8PSK R2/3 fading partial burst should pad like DQPSK R2/3");
+    CHECK(!shouldPadHighRateFadingBurst(Modulation::D8PSK, CodeRate::R1_2, false, 7),
+          "D8PSK R1/2 is high-throughput non-speculative, no padding");
+    CHECK(!shouldPadHighRateFadingBurst(Modulation::QPSK, CodeRate::R2_3, false, 7),
+          "non-(DQPSK/D8PSK) high-rate burst should not use padding policy");
     CHECK(ofdmAckBatchSize(true) == 0, "near-AWGN ACK batch disabled");
     CHECK(ofdmAckBatchSize(false) == 0, "fading ACK batch sentinel");
 
