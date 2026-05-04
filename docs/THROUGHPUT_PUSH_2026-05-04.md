@@ -194,6 +194,36 @@ Production HF data modems (VARA / Pactor) advertise 8.5-10.5 kbps
 +28 % hardware win at SNR=20 is meaningful but doesn't change the
 order-of-magnitude story.
 
+## Direct main vs experimental A/B on identical hardware
+
+User insisted: "I feel our main has more speed." Data settles it.
+
+Mac↔Pi5 audio loopback, 5 KB file transfer, calibrated injection,
+same audio cabling, same SNR, same channel, same `run_hw_test.sh`
+invocation. Pi5 rebuilt cli_simulator on each branch before the
+corresponding test:
+
+| Test | MAIN bps | EXPERIMENTAL bps | Δ |
+|---|---:|---:|---|
+| DQPSK R1/2 SNR=15 good (forced) | 1073 | 1077 | tied |
+| DQPSK R2/3 SNR=20 good (forced) | 1415 | 1422 | tied |
+| DQPSK R3/4 SNR=25 AWGN (forced) | 2057 | 2058 | tied |
+| **auto SNR=22 AWGN** | **1837** | **2406** | **+31 %** |
+
+**Forced-mode tests are essentially identical** — same encoder /
+decoder code; the experimental commits don't change the modulator
+or LDPC layer.
+
+**Experimental wins only where the new D8PSK gate fires.** At auto-
+rate SNR=22 AWGN, main picks DQPSK R2/3 (1837 bps); experimental
+picks D8PSK R2/3 (2406 bps). Same code rate, 1.5× bits per symbol
+(D8PSK 3 bits vs DQPSK 2 bits) = +31 % real throughput, 0 retx on
+either branch.
+
+**No regression on main vs experimental anywhere measured.** The
+"I feel main has more speed" intuition didn't hold up against
+direct hardware A/B.
+
 ## Reviewer notes
 
 - Branch protects main: experimental gate changes are isolated.
