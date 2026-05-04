@@ -224,6 +224,54 @@ either branch.
 "I feel main has more speed" intuition didn't hold up against
 direct hardware A/B.
 
+## CW=8 aggregation — the missing lever (post-pushback)
+
+User: "1077 bps DQPSK R1/2 SNR=15 good is too low — why are we so
+low?" Investigation found that `--cw-count 8` (an existing CLI opt-
+in from commit `6cc77ea`, "+15-22 % throughput") is genuinely the
+biggest single throughput lever and it isn't on by default.
+
+Hardware sweep on Mac↔Pi5 with `--cw-count 8`:
+
+| Mode/Rate | Channel | SNR | cw=4 | cw=8 | Δ |
+|---|---|---:|---:|---:|---|
+| DQPSK R1/2 | good | 12 | ~1100 bps | **1594 bps** | +45 % |
+| DQPSK R1/2 | good | 15 | 1077 bps | **1615 bps** | **+50 %** |
+| DQPSK R1/2 | moderate | 15 | 1234 bps | 1594 bps | +29 % |
+| DQPSK R3/4 | AWGN | 25 | 2057 bps | 2360 bps | +14 % |
+| D8PSK R2/3 | AWGN | 22 | 2406 bps | **2906 bps** | +21 % |
+| D8PSK R3/4 | AWGN | 27 | 2620 bps | **3127 bps** | +19 % |
+
+The math: per-window overhead (5.3 s SACK deferral, ACK TX, decode
+margin) is FIXED. CW=8 doubles bytes-per-frame, so it amortizes
+that fixed cost over twice the payload. Per-frame retransmits
+don't increase proportionally for R1/2 (it's robust enough), so
+the win is clean.
+
+Caveat: CW=8 with R2/3 in fading hits 14 retx (was 0) because
+longer frames have more fade exposure. R2/3 fading should keep
+CW=4. R1/2 (the dominant operating mode) and R3/4 (AWGN-only) get
+the win cleanly.
+
+Tried to auto-promote CW=8 in the connection enter-connected path,
+but it broke the `test_connection_adaptive` clean-window accumulator
+timing model (longer frames need more ticks before 3 clean windows
+accumulate, and the synthetic test only has 3000 ms of budget).
+Reverted the auto-promote; CW=8 remains a CLI opt-in via
+`--cw-count 8` (in cli_simulator) or via `setFixedFrameCodewords(8)`
+on `Connection`.
+
+**For the user's "1077 bps is too low" pushback**: with
+`--cw-count 8` the same DQPSK R1/2 SNR=15 good test goes to
+**1615 bps** = +50 %. Absolute hardware ceiling on this rig is
+**3.1 kbps** (D8PSK R3/4 AWGN SNR=27 + CW=8). 10 kbps is still
+unreachable.
+
+Open follow-up: make CW count adaptive (e.g. `recommendCWCount(rate,
+fading)`) AND update `test_connection_adaptive` to be CW-aware so
+the auto-promote can ship as a default. That's a multi-hour task
+needing care; deferred to a focused session.
+
 ## Reviewer notes
 
 - Branch protects main: experimental gate changes are isolated.
