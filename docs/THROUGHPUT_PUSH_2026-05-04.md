@@ -272,6 +272,44 @@ fading)`) AND update `test_connection_adaptive` to be CW-aware so
 the auto-promote can ship as a default. That's a multi-hour task
 needing care; deferred to a focused session.
 
+## Auto-CW-bump implementation attempt (rolled back)
+
+Tried to ship CW=8 as the default for R1/2 / R3/4 / R2/3-AWGN (the
+hardware-validated +50 % win) via `recommendCWCount(mod, rate,
+fading, snr)` in `connection_policy.hpp` + auto-application inside
+`Connection::configureArqForCurrentDataMode()`. Two blockers landed:
+
+1. **Encoder/decoder don't see protocol-side CW changes.** When the
+   protocol bumped CW=4→8 on connect, `StreamingEncoder` /
+   `StreamingDecoder` still had CW=4. Mid-handshake mismatch caused
+   `mutex lock failed: Invalid argument` during the first burst-flush
+   on hardware (Mac↔Pi5). Encoder/decoder need a notification path
+   from `Connection::configureArqForCurrentDataMode()` — there isn't
+   one today, the modem layer is set up upstream by `ProtocolEngine` /
+   `cli_simulator` before the connection knows the data rate.
+2. **Global `kDefaultFixedFrameCodewords = 4 → 8`** as a quick
+   alternative broke 3 ctest suites (`ConnectionPolicy`,
+   `ConnectionAdaptive`, `FrameV2 — subprocess aborted`). The
+   constant feeds into frame-format math, fixed-buffer allocations,
+   and adaptive timing models that all assume CW=4 baseline.
+
+Both attempts reverted; experimental branch remains at the prior
+commit `9008011` documenting CW=8 as a CLI-opt-in win.
+
+**What it'd take to ship CW=8 as the auto-default**: a refactor
+that puts CW-count change on a callback path:
+
+  Connection::configureArqForCurrentDataMode()
+    → fires cw_count_changed_callback_(int new_cw_count)
+    → ProtocolEngine routes to ModemAdapter
+    → ModemAdapter notifies StreamingEncoder + StreamingDecoder
+    → file_transfer_.setMaxChunkPayload(...)
+    → adaptive timing model gets CW-aware tick budget
+
+Roughly 1–2 days of careful work. Tracked as backlog — the +50 %
+hardware win is real and worth doing, just not safe as a one-session
+change.
+
 ## Reviewer notes
 
 - Branch protects main: experimental gate changes are isolated.
