@@ -53,6 +53,7 @@ MAC_AUDIO_IN=${MAC_AUDIO_IN:-Sound Blaster Play! 3}
 SNR=${SNR:-20}
 CHANNEL=${CHANNEL:-awgn}              # awgn|good|moderate|poor|flutter
 RATE=${RATE:-r1_4}                    # auto|r1_4|r1_2|r2_3|r3_4
+MOD=${MOD:-auto}                      # auto|dqpsk|qpsk|d8psk|dbpsk|bpsk|qam16|qam32|qam64
 FILE_SIZE=${FILE_SIZE:-}              # empty = message test
 INJECT_CHANNEL=${INJECT_CHANNEL:-0}   # 1 = synthetic HF channel on each TX
 INJECT_GAIN=${INJECT_GAIN:-}          # optional post-injection gain/headroom
@@ -67,6 +68,7 @@ while [[ $# -gt 0 ]]; do
     --snr)            SNR="$2"; shift 2;;
     --channel)        CHANNEL="$2"; shift 2;;
     --rate)           RATE="$2"; shift 2;;
+    --mod)            MOD="$2"; shift 2;;
     --file)           FILE_SIZE="$2"; shift 2;;
     --inject)         INJECT_CHANNEL=1; shift;;
     --no-inject)      INJECT_CHANNEL=0; shift;;
@@ -113,6 +115,8 @@ FILE_FLAG=""
 
 RATE_FLAG=""
 [[ "$RATE" != "auto" && "$RATE" != "AUTO" ]] && RATE_FLAG="--rate $RATE"
+MOD_FLAG=""
+[[ "$MOD" != "auto" && "$MOD" != "AUTO" ]] && MOD_FLAG="--mod $MOD"
 
 CHANNEL_FLAG=""
 [[ "$CHANNEL" != "awgn" ]] && CHANNEL_FLAG="--channel $CHANNEL"
@@ -149,7 +153,7 @@ PI_CMD="cd $PI_REPO && \
   rm -f /tmp/ultra_B.log; \
   nohup ./build/cli_simulator --role B \
     $PI_DEVS \
-    --snr $SNR $RATE_FLAG $CHANNEL_FLAG $INJECT_FLAG $INJECT_GAIN_FLAG \
+    --snr $SNR $RATE_FLAG $MOD_FLAG $CHANNEL_FLAG $INJECT_FLAG $INJECT_GAIN_FLAG \
     --idle-seconds $B_IDLE_SECONDS \
     $EXTRA_CLI_ARGS \
     > /tmp/ultra_B.log 2>&1 & \
@@ -164,7 +168,7 @@ echo "[2/3] Running station A locally..."
 set +e
 "$MAC_BIN" --role A \
   ${MAC_DEVS_ARR[@]+"${MAC_DEVS_ARR[@]}"} \
-  --snr "$SNR" $RATE_FLAG $CHANNEL_FLAG $INJECT_FLAG $INJECT_GAIN_FLAG $FILE_FLAG \
+  --snr "$SNR" $RATE_FLAG $MOD_FLAG $CHANNEL_FLAG $INJECT_FLAG $INJECT_GAIN_FLAG $FILE_FLAG \
   $EXTRA_CLI_ARGS \
   > "$LOG_DIR/A.log" 2>&1
 A_EXIT=$?

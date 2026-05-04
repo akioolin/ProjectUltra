@@ -105,24 +105,27 @@ void test_data_mode_policy() {
     CHECK(mod == Modulation::D8PSK, "high-SNR AWGN should promote to D8PSK");
     CHECK(rate == CodeRate::R3_4, "near-AWGN SNR27 should use R3/4");
 
-    // SNR=20 good fading: D8PSK R2/3 — the throughput sweet spot
+    // SNR=20 good fading: hardware A/B forced D8PSK R2/3 → adaptive
+    // promotion path collapsed. R2/3 is now AWGN-only (fading<0.15);
+    // good fading SNR=20 stays D8PSK R1/2.
     recommendDataMode(20.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
     CHECK(mod == Modulation::D8PSK, "good-fading SNR20 should be D8PSK");
-    CHECK(rate == CodeRate::R2_3, "good-fading SNR20 D8PSK uses R2/3");
+    CHECK(rate == CodeRate::R1_2, "good-fading SNR20 D8PSK uses R1/2 (R2/3 is AWGN-only on hw)");
 
-    // SNR=18 good fading: file-transfer sweep showed R2/3 has too many
-    // retx here, so this drops to D8PSK R1/2 (still 1.5× DQPSK R1/2)
+    // SNR=18 good fading: hardware A/B (Mac↔Pi5 5KB R1/2 inject good)
+    // showed D8PSK 641 bps with 38 retx vs DQPSK 1234 bps 0 retx.
+    // D8PSK R1/2 is now gated at SNR>=20 in fading, so SNR=18 good
+    // falls back to DQPSK R1/2.
     recommendDataMode(18.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
-    CHECK(mod == Modulation::D8PSK, "good-fading SNR18 should be D8PSK");
-    CHECK(rate == CodeRate::R1_2, "good-fading SNR18 D8PSK uses R1/2 (R2/3 needs SNR>=20)");
+    CHECK(mod == Modulation::DQPSK, "good-fading SNR18 stays DQPSK (D8PSK cliff at SNR=20 on hw)");
+    CHECK(rate == CodeRate::R1_2, "good-fading SNR18 should use R1/2 with DQPSK");
 
-    // SNR=12 good fading: D8PSK R1/2
+    // SNR=12 good fading: well below the D8PSK hardware cliff
     recommendDataMode(12.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
-    CHECK(mod == Modulation::D8PSK, "good-fading SNR12 should promote to D8PSK");
-    CHECK(rate == CodeRate::R1_2, "good-fading SNR12 D8PSK should use R1/2 (cliff at SNR=8)");
+    CHECK(mod == Modulation::DQPSK, "good-fading SNR12 stays DQPSK");
+    CHECK(rate == CodeRate::R1_4, "DQPSK fallback at SNR=12 uses R1/4 (selectOFDMCodeRate)");
 
-    // SNR=9 good fading: below D8PSK floor (cliff at SNR=8 from sweeps),
-    // falls back to DQPSK rate ladder.
+    // SNR=9 good fading: also below floor.
     recommendDataMode(9.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
     CHECK(mod == Modulation::DQPSK, "below-floor SNR=9 falls back to DQPSK");
     CHECK(rate == CodeRate::R1_4, "DQPSK fallback at SNR=9 uses R1/4");

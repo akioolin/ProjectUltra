@@ -209,28 +209,32 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
         return;
     }
 
-    // D8PSK R2/3 — needs more margin than the 7-message sweep suggested.
-    // 5KB file-transfer test at SNR=18 good fading (~0.32) showed 31 retx
-    // for 28 frames (excessive). Three tiers based on channel quality:
-    //   - Clean AWGN (fading<0.10) at SNR>=15: R2/3 works (sweeps clean,
-    //     adaptive_upgrade tests verify this is reachable)
-    //   - Slight residual fading (<0.15) at SNR>=18: R2/3 ok
-    //   - Real good fading (<0.65) at SNR>=20: tight but reliable per
-    //     the file-transfer stress test
-    const bool d8psk_r23_clean = (fading_index < 0.10f && snr_db >= 15.0f);
-    const bool d8psk_r23_awgn = (fading_index < 0.15f && snr_db >= 18.0f);
-    const bool d8psk_r23_fading = (fading_index < 0.65f && snr_db >= 20.0f);
-    if (d8psk_r23_clean || d8psk_r23_awgn || d8psk_r23_fading) {
+    // D8PSK R2/3 — gated to AWGN-only after Mac↔Pi5 hardware A/B
+    // showed the simulator's "good fading" promotion path destabilizes
+    // on real audio. SNR=20 good fading auto-rate: adaptive promoted
+    // to D8PSK R2/3, hit 15 retx, dropped throughput from 1595 bps
+    // (forced R1/2) down to 486 bps (auto with R2/3 promotion attempt).
+    // Restricting R2/3 to fading<0.15 keeps the adaptive ladder from
+    // chasing R2/3 on the rougher channels where it reliably fails.
+    const bool d8psk_r23_clean = (fading_index < 0.10f && snr_db >= 18.0f);
+    const bool d8psk_r23_awgn  = (fading_index < 0.15f && snr_db >= 22.0f);
+    if (d8psk_r23_clean || d8psk_r23_awgn) {
         mod = Modulation::D8PSK;
         rate = CodeRate::R2_3;
         return;
     }
 
-    // D8PSK R1/2 — the dependable D8PSK win. Cliff at SNR=8 (sweep
-    // FAIL); 0 retx at SNR=15 good fading. Gives ~3.4 kbps usable
-    // (vs DQPSK R1/2 ~2.3 kbps at the same conditions, +47%) without
-    // the file-transfer-stress retx storm that R2/3 hits below SNR=20.
-    if (fading_index < 0.65f && snr_db >= 10.0f) {
+    // D8PSK R1/2 — gated on the hardware-measured cliff, not the
+    // simulator one. Mac↔Pi5 audio loopback A/B with synthetic-channel
+    // injection (5 KB file, R1/2, good fading) showed:
+    //   SNR=15 good: DQPSK 1078 bps (2 retx) > D8PSK  728 bps (5-40 retx)
+    //   SNR=18 good: DQPSK 1234 bps (0 retx) > D8PSK  641 bps (38 retx)
+    //   SNR=20 good: DQPSK 1247 bps (0 retx) < D8PSK 1595 bps (0 retx)  ← +28%
+    // The simulator's "SNR>=10 works" came from Watterson without
+    // soundcard quantization / AGC residual / audio chain phase noise
+    // — D8PSK's 8-phase decision is far more sensitive to those than
+    // DQPSK's 4-phase. Real cliff is SNR=20 in good fading.
+    if (fading_index < 0.65f && snr_db >= 20.0f) {
         mod = Modulation::D8PSK;
         rate = CodeRate::R1_2;
         return;
