@@ -191,6 +191,31 @@ inline SackDelayProfile ofdmSackDelays(bool defer_to_burst_tail,
     return profile;
 }
 
+// Recommend fixed-frame CW count for a given OFDM data rate.
+// Rate-only (no SNR/fading dependency) so both peers always agree
+// on the CW count from the negotiated rate alone — no risk of one
+// peer reading a different SNR than the other and picking a
+// different CW geometry.
+//
+// Hardware A/B (Mac↔Pi5 5KB transfer):
+//   DQPSK R1/2 SNR=15 good fading: CW=4 → 1077 bps (2 retx)
+//                                  CW=8 → 1615 bps (0 retx)  +50%
+//   D8PSK R3/4 SNR=27 AWGN:        CW=8 → 3127 bps  (ceiling)
+//
+// R1/4 stays at the default 4 — small frames, low-SNR robustness,
+// no measured win from going wider.
+inline int recommendCWCount(CodeRate rate) {
+    switch (rate) {
+        case CodeRate::R1_2:
+        case CodeRate::R2_3:
+        case CodeRate::R3_4:
+            return 8;
+        case CodeRate::R1_4:
+        default:
+            return v2::kDefaultFixedFrameCodewords;  // 4
+    }
+}
+
 inline AckRepeatProfile ofdmAckRepeatProfile(Modulation mod,
                                              CodeRate rate,
                                              bool near_awgn_ofdm) {

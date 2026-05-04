@@ -58,12 +58,14 @@ void Connection::sendFullConnect() {
                                                         config_.mode_capabilities,
                                                         static_cast<uint8_t>(config_.preferred_mode),
                                                         static_cast<uint8_t>(config_.forced_modulation),
-                                                        static_cast<uint8_t>(config_.forced_code_rate));
+                                                        static_cast<uint8_t>(config_.forced_code_rate),
+                                                        config_.forced_cw_count);
     Bytes connect_data = connect_frame.serialize();
 
-    LOG_MODEM(INFO, "Connection: Sending CONNECT via %s (%zu bytes, forced_mod=%d, forced_rate=%d)",
+    LOG_MODEM(INFO, "Connection: Sending CONNECT via %s (%zu bytes, forced_mod=%d, forced_rate=%d, forced_cw=%d)",
               waveformModeToString(connect_waveform_), connect_data.size(),
-              static_cast<int>(config_.forced_modulation), static_cast<int>(config_.forced_code_rate));
+              static_cast<int>(config_.forced_modulation), static_cast<int>(config_.forced_code_rate),
+              static_cast<int>(config_.forced_cw_count));
     transmitFrame(connect_data);
 }
 
@@ -168,18 +170,32 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         data_code_rate_ = rec_rate;
         arq_.setCodeRate(data_code_rate_);  // Update ARQ for correct total_cw calculation
 
+        // Pick negotiated CW count. Honor initiator's forced value if it sent
+        // one (frame.data_frame_cw_count != 0), else auto-pick from rate.
+        // We store the result in data_frame_cw_count_ here BEFORE building
+        // the CONNECT_ACK and before computing the retry delay so both reflect
+        // the value the initiator will see on the wire — Codex finding 4.
+        int negotiated_cw = (frame.data_frame_cw_count != 0)
+            ? v2::sanitizeFixedFrameCodewords(frame.data_frame_cw_count)
+            : connection_policy::recommendCWCount(rec_rate);
+        data_frame_cw_count_ = negotiated_cw;
+        config_.fixed_frame_codewords = negotiated_cw;
+        const uint8_t cw_byte = static_cast<uint8_t>(negotiated_cw);
+
         // Prefer full-callsign CONNECT_ACK when the initiator callsign is known,
         // fallback to hash-only ACK when we only have src_hash.
         Bytes ack_data;
         if (!src_call.empty()) {
             auto ack = v2::ConnectFrame::makeConnectAck(local_call_, src_call,
                                                         static_cast<uint8_t>(negotiated_mode_),
-                                                        rec_mod, rec_rate, snr_db, fading_index_);
+                                                        rec_mod, rec_rate, snr_db, fading_index_,
+                                                        cw_byte);
             ack_data = ack.serialize();
         } else {
             auto ack = v2::ConnectFrame::makeConnectAckByHash(local_call_, frame.src_hash,
                                                                static_cast<uint8_t>(negotiated_mode_),
-                                                               rec_mod, rec_rate, snr_db, fading_index_);
+                                                               rec_mod, rec_rate, snr_db, fading_index_,
+                                                               cw_byte);
             ack_data = ack.serialize();
         }
         transmitFrame(ack_data);
@@ -202,7 +218,8 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
 
         // Notify application of initial data mode
         if (on_data_mode_changed_) {
-            on_data_mode_changed_(data_modulation_, data_code_rate_, snr_db, fading_index_);
+            on_data_mode_changed_(data_modulation_, data_code_rate_, data_frame_cw_count_,
+                                  snr_db, fading_index_);
         }
     } else {
         pending_remote_call_ = src_call.empty() ? "REMOTE" : src_call;
@@ -210,6 +227,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // Store forced modes from initiator for later use in acceptCall()
         pending_forced_modulation_ = static_cast<Modulation>(frame.initial_modulation);
         pending_forced_code_rate_ = static_cast<CodeRate>(frame.initial_code_rate);
+        pending_forced_cw_count_ = frame.data_frame_cw_count;  // 0 = AUTO
         if (on_incoming_call_) {
             on_incoming_call_(pending_remote_call_);
         }
@@ -233,9 +251,18 @@ void Connection::handleConnectAck(const v2::ConnectFrame& frame, const std::stri
     float snr_db = v2::decodeSNR(frame.measured_snr);
     float peer_fading = v2::decodeFadingIndex(frame.mode_capabilities);
 
+    // Negotiated CW count from responder. Falls back to recommendCWCount(rate)
+    // if responder advertised 0 (interoperability with un-upgraded peer that
+    // hasn't been built since the protocol change — defensive only).
+    int negotiated_cw = (frame.data_frame_cw_count != 0)
+        ? v2::sanitizeFixedFrameCodewords(frame.data_frame_cw_count)
+        : connection_policy::recommendCWCount(init_rate);
+
     // Apply the initial data mode immediately
     data_modulation_ = init_mod;
     data_code_rate_ = init_rate;
+    data_frame_cw_count_ = negotiated_cw;
+    config_.fixed_frame_codewords = negotiated_cw;
     arq_.setCodeRate(data_code_rate_);  // Update ARQ for correct total_cw calculation
 
     // Update remote callsign if we got it from the frame
@@ -261,7 +288,8 @@ void Connection::handleConnectAck(const v2::ConnectFrame& frame, const std::stri
 
     // Notify application of initial data mode
     if (on_data_mode_changed_) {
-        on_data_mode_changed_(data_modulation_, data_code_rate_, snr_db, peer_fading);
+        on_data_mode_changed_(data_modulation_, data_code_rate_, data_frame_cw_count_,
+                              snr_db, peer_fading);
     }
 }
 
@@ -367,8 +395,10 @@ void Connection::handleModeChange(const v2::ControlFrame& frame, const std::stri
 
     // Update local state and refresh the ARQ profile for the new fixed-frame
     // capacity/window/timing. The requester waits for this ACK before sending
-    // more DATA in the new mode.
-    applyDataMode(info.modulation, info.code_rate);
+    // more DATA in the new mode. The cw_count field in MODE_CHANGE is the
+    // requester's chosen value — receiver applies it directly so both peers
+    // stay in lockstep on frame geometry.
+    applyDataMode(info.modulation, info.code_rate, info.data_frame_cw_count);
 
     // Send ACK for the MODE_CHANGE
     auto ack = v2::ControlFrame::makeAck(local_call_, remote_call_, frame.seq);
@@ -376,7 +406,8 @@ void Connection::handleModeChange(const v2::ControlFrame& frame, const std::stri
 
     // Notify application of mode change
     if (on_data_mode_changed_) {
-        on_data_mode_changed_(info.modulation, info.code_rate, info.snr_db, info.fading_index);
+        on_data_mode_changed_(info.modulation, info.code_rate, data_frame_cw_count_,
+                              info.snr_db, info.fading_index);
     }
 
     runDeferredArqRefill();
@@ -408,10 +439,15 @@ void Connection::requestModeChange(Modulation new_mod, CodeRate new_rate,
     mode_change_retry_count_ = 0;
     mode_change_timeout_ms_ = MODE_CHANGE_TIMEOUT_MS;
 
+    // Pick the CW count for the new rate (rate-only — both peers will agree
+    // because both run recommendCWCount(rate) on the same rate).
+    pending_cw_count_ = static_cast<uint8_t>(connection_policy::recommendCWCount(new_rate));
+
     mode_change_seq_++;
     auto frame = v2::ControlFrame::makeModeChange(local_call_, remote_call_,
                                                    mode_change_seq_, new_mod, new_rate,
-                                                   measured_snr, fading_index_, reason);
+                                                   measured_snr, fading_index_, reason,
+                                                   pending_cw_count_);
     transmitFrame(frame.serialize());
 
     // NOTE: Don't update local mode until ACK is received

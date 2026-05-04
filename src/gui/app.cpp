@@ -565,9 +565,16 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     });
     ultra::gui::startupTrace("App", "protocol-callbacks-mid6");
 
-    protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate, float snr_db, float peer_fading) {
+    protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate,
+                                                 int cw_count,
+                                                 float snr_db, float peer_fading) {
         // Update modem engine with new data mode
         modem_.setDataMode(mod, rate);
+        // Sync ModemEngine encoder/decoder to negotiated CW count from the
+        // wire. DO NOT call protocol_.setForcedFrameCodewords here — the
+        // engine mutex is held while this callback runs and re-entry will
+        // deadlock (caught 2026-05-04 in cli_simulator A/B with seed=1).
+        modem_.setFixedFrameCodewords(cw_count);
         resetAdaptiveAdvisory();
 
         // Local estimate for operator visibility/debugging.
@@ -1036,9 +1043,13 @@ void App::initVirtualStation() {
         appendRxLogLine(msg);
     });
 
-    virtual_protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate, float snr_db, float peer_fading) {
+    virtual_protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate,
+                                                         int cw_count,
+                                                         float snr_db, float peer_fading) {
         // Update virtual modem engine with new data mode
         virtual_modem_->setDataMode(mod, rate);
+        // Same direct-update path as the real modem — no protocol re-entry.
+        virtual_modem_->setFixedFrameCodewords(cw_count);
 
         // Show [SIM-MODE] line so user can see what the responder actually measured
         auto waveform = virtual_modem_->getWaveformMode();

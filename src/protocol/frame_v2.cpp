@@ -262,7 +262,8 @@ ControlFrame ControlFrame::makeDisconnect(const std::string& src, const std::str
 
 ControlFrame ControlFrame::makeModeChange(const std::string& src, const std::string& dst,
                                            uint16_t seq, Modulation new_mod, CodeRate new_rate,
-                                           float snr_db, float fading_index, uint8_t reason) {
+                                           float snr_db, float fading_index, uint8_t reason,
+                                           uint8_t cw_count) {
     ControlFrame f;
     f.type = FrameType::MODE_CHANGE;
     f.flags = Flags::VERSION_V2;
@@ -274,13 +275,14 @@ ControlFrame ControlFrame::makeModeChange(const std::string& src, const std::str
     f.payload[2] = encodeSNR(snr_db);
     f.payload[3] = reason;
     f.payload[4] = encodeFadingIndex(fading_index);
-    f.payload[5] = 0;  // Reserved
+    f.payload[5] = cw_count;  // Negotiated CW count (0=AUTO/unspecified)
     return f;
 }
 
 ControlFrame ControlFrame::makeModeChangeByHash(const std::string& src, uint32_t dst_hash,
                                                  uint16_t seq, Modulation new_mod, CodeRate new_rate,
-                                                 float snr_db, float fading_index, uint8_t reason) {
+                                                 float snr_db, float fading_index, uint8_t reason,
+                                                 uint8_t cw_count) {
     ControlFrame f;
     f.type = FrameType::MODE_CHANGE;
     f.flags = Flags::VERSION_V2;
@@ -292,7 +294,7 @@ ControlFrame ControlFrame::makeModeChangeByHash(const std::string& src, uint32_t
     f.payload[2] = encodeSNR(snr_db);
     f.payload[3] = reason;
     f.payload[4] = encodeFadingIndex(fading_index);
-    f.payload[5] = 0;  // Reserved
+    f.payload[5] = cw_count;
     return f;
 }
 
@@ -654,7 +656,8 @@ std::string DataFrame::payloadAsText() const {
 
 ConnectFrame ConnectFrame::makeConnect(const std::string& src, const std::string& dst,
                                         uint8_t mode_caps, uint8_t forced_waveform,
-                                        uint8_t forced_modulation, uint8_t forced_code_rate) {
+                                        uint8_t forced_modulation, uint8_t forced_code_rate,
+                                        uint8_t forced_cw_count) {
     ConnectFrame f;
     f.type = FrameType::CONNECT;
     f.flags = Flags::VERSION_V2;
@@ -673,12 +676,14 @@ ConnectFrame ConnectFrame::makeConnect(const std::string& src, const std::string
     f.initial_modulation = forced_modulation;   // 0xFF = AUTO, else forced
     f.initial_code_rate = forced_code_rate;     // 0xFF = AUTO, else forced
     f.measured_snr = 0;                         // Not used in CONNECT
+    f.data_frame_cw_count = forced_cw_count;    // 0=AUTO, else 1..8 forced
     return f;
 }
 
 ConnectFrame ConnectFrame::makeConnectAck(const std::string& src, const std::string& dst,
                                            uint8_t neg_mode, Modulation init_mod, CodeRate init_rate,
-                                           float snr_db, float fading_index) {
+                                           float snr_db, float fading_index,
+                                           uint8_t cw_count) {
     ConnectFrame f;
     f.type = FrameType::CONNECT_ACK;
     f.flags = Flags::VERSION_V2;
@@ -699,6 +704,7 @@ ConnectFrame ConnectFrame::makeConnectAck(const std::string& src, const std::str
     f.initial_modulation = static_cast<uint8_t>(init_mod);
     f.initial_code_rate = static_cast<uint8_t>(init_rate);
     f.measured_snr = encodeSNR(snr_db);
+    f.data_frame_cw_count = cw_count;  // Final negotiated CW count (1..8)
     return f;
 }
 
@@ -740,7 +746,8 @@ ConnectFrame ConnectFrame::makeDisconnect(const std::string& src, const std::str
 
 ConnectFrame ConnectFrame::makeConnectAckByHash(const std::string& src, uint32_t dst_hash,
                                                  uint8_t neg_mode, Modulation init_mod, CodeRate init_rate,
-                                                 float snr_db, float fading_index) {
+                                                 float snr_db, float fading_index,
+                                                 uint8_t cw_count) {
     ConnectFrame f;
     f.type = FrameType::CONNECT_ACK;
     f.flags = Flags::VERSION_V2;
@@ -760,6 +767,7 @@ ConnectFrame ConnectFrame::makeConnectAckByHash(const std::string& src, uint32_t
     f.initial_modulation = static_cast<uint8_t>(init_mod);
     f.initial_code_rate = static_cast<uint8_t>(init_rate);
     f.measured_snr = encodeSNR(snr_db);
+    f.data_frame_cw_count = cw_count;  // Final negotiated CW count (1..8)
     return f;
 }
 
@@ -816,7 +824,8 @@ Bytes ConnectFrame::serialize() const {
     out.push_back((hcrc >> 8) & 0xFF);
     out.push_back(hcrc & 0xFF);
 
-    // Payload: src_callsign (10B) + dst_callsign (10B) + caps (1B) + wfmode (1B) + mod (1B) + rate (1B) + snr (1B)
+    // Payload: src_callsign (10B) + dst_callsign (10B) + caps (1B) + wfmode (1B)
+    //          + mod (1B) + rate (1B) + snr (1B) + cw_count (1B) = 26B
     for (int i = 0; i < MAX_CALLSIGN_LEN; i++) {
         out.push_back(static_cast<uint8_t>(src_callsign[i]));
     }
@@ -828,6 +837,7 @@ Bytes ConnectFrame::serialize() const {
     out.push_back(initial_modulation);
     out.push_back(initial_code_rate);
     out.push_back(measured_snr);
+    out.push_back(data_frame_cw_count);
 
     // Frame CRC (2 bytes)
     uint16_t fcrc = ControlFrame::calculateCRC(out.data(), out.size());
@@ -899,6 +909,7 @@ std::optional<ConnectFrame> ConnectFrame::deserialize(ByteSpan data) {
     f.initial_modulation = data[field_offset + 2];
     f.initial_code_rate = data[field_offset + 3];
     f.measured_snr = data[field_offset + 4];
+    f.data_frame_cw_count = data[field_offset + 5];
 
     return f;
 }

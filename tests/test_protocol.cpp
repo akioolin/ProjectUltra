@@ -133,7 +133,7 @@ bool test_control_frame_types() {
     // Test ConnectFrames (3 codewords)
     std::vector<std::pair<v2::ConnectFrame, v2::FrameType>> connect_cases = {
         { v2::ConnectFrame::makeConnect("CALLSIGN1", "CALLSIGN2", 0x07, 0), v2::FrameType::CONNECT },
-        { v2::ConnectFrame::makeConnectAck("CALLSIGN1", "CALLSIGN2", 0, ultra::Modulation::DQPSK, ultra::CodeRate::R1_4, 15.0f, 0.60f), v2::FrameType::CONNECT_ACK },
+        { v2::ConnectFrame::makeConnectAck("CALLSIGN1", "CALLSIGN2", 0, ultra::Modulation::DQPSK, ultra::CodeRate::R1_4, 15.0f, 0.60f, 4), v2::FrameType::CONNECT_ACK },
         { v2::ConnectFrame::makeConnectNak("CALLSIGN1", "CALLSIGN2"), v2::FrameType::CONNECT_NAK },
         { v2::ConnectFrame::makeDisconnect("CALLSIGN1", "CALLSIGN2"), v2::FrameType::DISCONNECT },
     };
@@ -815,7 +815,9 @@ bool test_protocol_rate_upgrade() {
     ultra::Modulation a_new_mod = ultra::Modulation::DQPSK;
     ultra::CodeRate a_new_rate = ultra::CodeRate::R1_4;
 
-    stationA.setDataModeChangedCallback([&](ultra::Modulation mod, ultra::CodeRate rate, float snr, float peer_fading) {
+    stationA.setDataModeChangedCallback([&](ultra::Modulation mod, ultra::CodeRate rate,
+                                             int cw_count, float snr, float peer_fading) {
+        (void)cw_count;
         (void)snr;
         (void)peer_fading;
         a_mode_changed = true;

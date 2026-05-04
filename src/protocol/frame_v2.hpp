@@ -344,10 +344,12 @@ struct ControlFrame {
     static ControlFrame makeDisconnect(const std::string& src, const std::string& dst);
     static ControlFrame makeModeChange(const std::string& src, const std::string& dst,
                                         uint16_t seq, Modulation new_mod, CodeRate new_rate,
-                                        float snr_db, float fading_index, uint8_t reason);
+                                        float snr_db, float fading_index, uint8_t reason,
+                                        uint8_t cw_count = 0);
     static ControlFrame makeModeChangeByHash(const std::string& src, uint32_t dst_hash,
                                               uint16_t seq, Modulation new_mod, CodeRate new_rate,
-                                              float snr_db, float fading_index, uint8_t reason);
+                                              float snr_db, float fading_index, uint8_t reason,
+                                              uint8_t cw_count = 0);
     static ControlFrame makeConnect(const std::string& src, const std::string& dst,
                                      uint8_t mode_capabilities, uint8_t preferred_mode);
     static ControlFrame makeConnectAck(const std::string& src, const std::string& dst,
@@ -380,6 +382,10 @@ struct ControlFrame {
         float snr_db;
         float fading_index;
         uint8_t reason;
+        // Negotiated fixed-frame CW count for the new rate. 0 means "old peer
+        // / unspecified — receiver picks via recommendCWCount(rate)". Wire
+        // byte: payload[5] (was reserved).
+        uint8_t data_frame_cw_count;
     };
 
     // Parse MODE_CHANGE payload from a ControlFrame
@@ -390,6 +396,7 @@ struct ControlFrame {
         info.snr_db = decodeSNR(payload[2]);
         info.reason = payload[3];
         info.fading_index = decodeFadingIndex(payload[4]);
+        info.data_frame_cw_count = payload[5];
         return info;
     }
 };
@@ -468,7 +475,7 @@ struct DataFrame {
 // Always uses 4 codewords with frame-level interleaving for fading resistance.
 struct ConnectFrame {
     static constexpr size_t MAX_CALLSIGN_LEN = 10;  // 9 chars + null terminator
-    static constexpr size_t PAYLOAD_SIZE = 25;       // 10 + 10 + 1 + 1 + 1 + 1 + 1
+    static constexpr size_t PAYLOAD_SIZE = 26;       // 10 + 10 + 1 + 1 + 1 + 1 + 1 + 1 (cw_count)
 
     FrameType type = FrameType::CONNECT;
     uint8_t flags = Flags::VERSION_V2;
@@ -485,22 +492,29 @@ struct ConnectFrame {
     uint8_t initial_modulation = 0;              // Forced/agreed Modulation (0xFF=AUTO)
     uint8_t initial_code_rate = 0;               // Forced/agreed CodeRate (0xFF=AUTO)
     uint8_t measured_snr = 0;                    // CONNECT_ACK: measured SNR
+    // Negotiated fixed-frame CW count.
+    //   CONNECT:     initiator's forced CW count (0=AUTO, else 1..8)
+    //   CONNECT_ACK: responder's chosen CW count (final agreed value, 1..8)
+    uint8_t data_frame_cw_count = 0;
 
     // Factory methods
     static ConnectFrame makeConnect(const std::string& src, const std::string& dst,
                                      uint8_t mode_caps, uint8_t forced_waveform,
                                      uint8_t forced_modulation = 0xFF,
-                                     uint8_t forced_code_rate = 0xFF);
+                                     uint8_t forced_code_rate = 0xFF,
+                                     uint8_t forced_cw_count = 0);
     static ConnectFrame makeConnectAck(const std::string& src, const std::string& dst,
                                         uint8_t neg_mode, Modulation init_mod, CodeRate init_rate,
-                                        float snr_db, float fading_index);
+                                        float snr_db, float fading_index,
+                                        uint8_t cw_count);
     static ConnectFrame makeConnectNak(const std::string& src, const std::string& dst);
     static ConnectFrame makeDisconnect(const std::string& src, const std::string& dst);
 
     // Hash-based factory (for responding when only hash is known, fills in our callsign)
     static ConnectFrame makeConnectAckByHash(const std::string& src, uint32_t dst_hash,
                                               uint8_t neg_mode, Modulation init_mod, CodeRate init_rate,
-                                              float snr_db, float fading_index);
+                                              float snr_db, float fading_index,
+                                              uint8_t cw_count);
     static ConnectFrame makeConnectNakByHash(const std::string& src, uint32_t dst_hash);
 
     // Serialize to bytes (uses DATA frame format)

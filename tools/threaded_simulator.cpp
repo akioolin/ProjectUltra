@@ -182,13 +182,16 @@ public:
             }
         });
 
-        // Mode changes
-        protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate, float snr, float peer_fading) {
+        // Mode changes (incl. negotiated CW count from wire)
+        protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate,
+                                                    int cw_count,
+                                                    float snr, float peer_fading) {
             (void)snr;
             (void)peer_fading;
             modem_.setDataMode(mod, rate);
-            LOG_INFO("MODEM", "[%s] MODE -> %s %s", callsign_.c_str(),
-                     modulationToString(mod), codeRateToString(rate));
+            modem_.setFixedFrameCodewords(cw_count);
+            LOG_INFO("MODEM", "[%s] MODE -> %s %s cw=%d", callsign_.c_str(),
+                     modulationToString(mod), codeRateToString(rate), cw_count);
         });
 
         protocol_.setModeNegotiatedCallback([this](WaveformMode mode) {

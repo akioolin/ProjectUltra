@@ -711,9 +711,11 @@ public:
     void setSNR(float snr) { snr_db_ = snr; }
     void setForcedModulation(Modulation mod) { protocol_.setForcedModulation(mod); }
     void setForcedCodeRate(CodeRate rate) { protocol_.setForcedCodeRate(rate); }
-    void setFixedFrameCodewords(int cw_count) {
+    // forced=true → operator override, propagates via wire.
+    // forced=false → boot-time default (encoder/decoder bootstrap only).
+    void setFixedFrameCodewords(int cw_count, bool forced = true) {
         fixed_frame_codewords_ = v2::sanitizeFixedFrameCodewords(cw_count);
-        protocol_.setForcedFrameCodewords(fixed_frame_codewords_);
+        protocol_.setForcedFrameCodewords(fixed_frame_codewords_, forced);
         if (encoder_) encoder_->setFixedFrameCodewords(fixed_frame_codewords_);
         if (decoder_) decoder_->setFixedFrameCodewords(fixed_frame_codewords_);
     }
@@ -1384,10 +1386,26 @@ private:
             }
         });
 
-        // Data mode changes (modulation + code rate)
+        // Data mode changes (modulation + code rate + CW count). The CW
+        // count comes from the wire (CONNECT_ACK / MODE_CHANGE) — protocol
+        // layer has already set its own data_frame_cw_count_, this just
+        // syncs the encoder + decoder. NO re-entry into protocol_ here:
+        // the engine mutex is held while the callback fires (the deadlock
+        // we caught on 2026-05-04).
         protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate,
+                                                    int cw_count,
                                                     float peer_snr_db, float peer_fading) {
             setDataMode(mod, rate);
+            if (cw_count > 0 && cw_count != fixed_frame_codewords_) {
+                fixed_frame_codewords_ = v2::sanitizeFixedFrameCodewords(cw_count);
+                if (encoder_) encoder_->setFixedFrameCodewords(fixed_frame_codewords_);
+                if (decoder_) decoder_->setFixedFrameCodewords(fixed_frame_codewords_);
+                LOG_MODEM(INFO, "[%s] Negotiated CW count: %d for %s %s "
+                                 "(peer SNR=%.1f, fading=%.2f)",
+                          callsign_.c_str(), fixed_frame_codewords_,
+                          modulationToString(mod), codeRateToString(rate),
+                          peer_snr_db, peer_fading);
+            }
             logPeerAdaptiveAdvisory(mod, rate, peer_snr_db, peer_fading);
         });
 
@@ -1560,8 +1578,12 @@ public:
     void setForcedModulation(Modulation mod) { forced_mod_ = mod; }
     void setForcedCodeRate(CodeRate rate) { forced_rate_ = rate; }
     void setOFDMConfigPreset(OFDMConfigPreset preset) { ofdm_config_preset_ = preset; }
+    // Marks an operator-forced override; remembered so initStation()
+    // pushes it into the protocol layer with forced=true (which makes
+    // the initiator embed it in CONNECT and the responder honor it).
     void setFixedFrameCodewords(int cw_count) {
         fixed_frame_codewords_ = v2::sanitizeFixedFrameCodewords(cw_count);
+        cw_count_forced_ = true;
     }
     void setPreferredWaveform(WaveformMode mode) { forced_waveform_ = mode; }
     void setTestFileTransfer(bool v) { test_file_transfer_ = v; }
@@ -1646,8 +1668,8 @@ public:
         bravo_->setDecodeDelayMs(decode_delay_ms_);
         alpha_->setRxBatchCallbacks(rx_batch_callbacks_);
         bravo_->setRxBatchCallbacks(rx_batch_callbacks_);
-        alpha_->setFixedFrameCodewords(fixed_frame_codewords_);
-        bravo_->setFixedFrameCodewords(fixed_frame_codewords_);
+        alpha_->setFixedFrameCodewords(fixed_frame_codewords_, cw_count_forced_);
+        bravo_->setFixedFrameCodewords(fixed_frame_codewords_, cw_count_forced_);
         alpha_->setSoftCombiningHARQ(soft_combining_harq_);
         bravo_->setSoftCombiningHARQ(soft_combining_harq_);
 
@@ -1773,6 +1795,7 @@ private:
     int decode_delay_ms_ = 0;              // --decode-delay-ms N (simulated slow decoder)
     int rx_batch_callbacks_ = 1;           // --rx-batch-callbacks N (batched decoder feed)
     int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
+    bool cw_count_forced_ = false;  // true iff --cw-count was passed
     bool soft_combining_harq_ = false;
     bool save_signals_ = false;
     int save_signals_message_limit_ = 0;   // 0 = full run
@@ -2472,7 +2495,10 @@ private:
         station->setChannelInterleave(use_channel_interleave_);
         station->setNoBurstInterleave(no_burst_interleave_);
         station->setBurstInterleaveGroupSize(burst_group_size_);
-        station->setFixedFrameCodewords(fixed_frame_codewords_);
+        // forced=true only if user passed --cw-count; otherwise this is
+        // boot-time init that should leave protocol-level forced_cw_count=0
+        // so the responder gets to auto-pick via recommendCWCount(rate).
+        station->setFixedFrameCodewords(fixed_frame_codewords_, cw_count_forced_);
         station->setSoftCombiningHARQ(soft_combining_harq_);
         if (soft_combining_harq_) {
             std::cout << "  HARQ:     RX soft-combining enabled\n";

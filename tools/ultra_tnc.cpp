@@ -246,10 +246,17 @@ private:
         });
 
         engine_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate,
+                                                  int cw_count,
                                                   float peer_snr_db, float peer_fading) {
             (void)peer_snr_db;
             (void)peer_fading;
             setDataMode(mod, rate);
+            // Sync encoder/decoder to the negotiated CW count (set by the
+            // protocol layer from CONNECT_ACK / MODE_CHANGE wire bytes).
+            // Direct calls only — DO NOT re-enter ProtocolEngine here, the
+            // engine mutex is held while this callback fires.
+            encoder_.setFixedFrameCodewords(cw_count);
+            decoder_.setFixedFrameCodewords(cw_count);
         });
 
         engine_.setModeNegotiatedCallback([this](WaveformMode mode) {
