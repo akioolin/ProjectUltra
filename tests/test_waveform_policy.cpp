@@ -105,19 +105,25 @@ void test_data_mode_policy() {
     CHECK(mod == Modulation::D8PSK, "high-SNR AWGN should promote to D8PSK");
     CHECK(rate == CodeRate::R3_4, "near-AWGN SNR27 should use R3/4");
 
-    // SNR=20 good fading: hardware A/B forced D8PSK R2/3 → adaptive
-    // promotion path collapsed. R2/3 is now AWGN-only (fading<0.15);
-    // good fading SNR=20 stays D8PSK R1/2.
-    recommendDataMode(20.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
-    CHECK(mod == Modulation::D8PSK, "good-fading SNR20 should be D8PSK");
-    CHECK(rate == CodeRate::R1_2, "good-fading SNR20 D8PSK uses R1/2 (R2/3 is AWGN-only on hw)");
+    // SNR=22 good fading: 10-seed hardware sweep (Mac↔Pi5, 2026-05-04)
+    // showed D8PSK retx-hit 17% (1/6 single retx, no storms), mean
+    // 1783 bps vs DQPSK 1450 bps — +23% real win. This is the floor
+    // where D8PSK is net-positive on hardware.
+    recommendDataMode(22.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
+    CHECK(mod == Modulation::D8PSK, "good-fading SNR22 should be D8PSK (hardware sweet spot)");
+    CHECK(rate == CodeRate::R1_2, "good-fading SNR22 D8PSK uses R1/2");
 
-    // SNR=18 good fading: hardware A/B (Mac↔Pi5 5KB R1/2 inject good)
-    // showed D8PSK 641 bps with 38 retx vs DQPSK 1234 bps 0 retx.
-    // D8PSK R1/2 is now gated at SNR>=20 in fading, so SNR=18 good
-    // falls back to DQPSK R1/2.
+    // SNR=20 good fading: same sweep showed D8PSK retx-hit 38%
+    // (3/8 storms incl. 270 bps catastrophic), mean 1448 bps ≈ DQPSK
+    // 1444 — wash with high variance. D8PSK gate now SNR>=22 so
+    // SNR=20 stays DQPSK R1/2.
+    recommendDataMode(20.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
+    CHECK(mod == Modulation::DQPSK, "good-fading SNR20 stays DQPSK (D8PSK gate raised to SNR>=22)");
+    CHECK(rate == CodeRate::R1_2, "good-fading SNR20 should use R1/2 with DQPSK");
+
+    // SNR=18 good fading: well below the D8PSK floor.
     recommendDataMode(18.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
-    CHECK(mod == Modulation::DQPSK, "good-fading SNR18 stays DQPSK (D8PSK cliff at SNR=20 on hw)");
+    CHECK(mod == Modulation::DQPSK, "good-fading SNR18 stays DQPSK");
     CHECK(rate == CodeRate::R1_2, "good-fading SNR18 should use R1/2 with DQPSK");
 
     // SNR=12 good fading: well below the D8PSK hardware cliff

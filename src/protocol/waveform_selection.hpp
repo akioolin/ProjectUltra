@@ -224,17 +224,25 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
         return;
     }
 
-    // D8PSK R1/2 — gated on the hardware-measured cliff, not the
-    // simulator one. Mac↔Pi5 audio loopback A/B with synthetic-channel
-    // injection (5 KB file, R1/2, good fading) showed:
-    //   SNR=15 good: DQPSK 1078 bps (2 retx) > D8PSK  728 bps (5-40 retx)
-    //   SNR=18 good: DQPSK 1234 bps (0 retx) > D8PSK  641 bps (38 retx)
-    //   SNR=20 good: DQPSK 1247 bps (0 retx) < D8PSK 1595 bps (0 retx)  ← +28%
-    // The simulator's "SNR>=10 works" came from Watterson without
-    // soundcard quantization / AGC residual / audio chain phase noise
-    // — D8PSK's 8-phase decision is far more sensitive to those than
-    // DQPSK's 4-phase. Real cliff is SNR=20 in good fading.
-    if (fading_index < 0.65f && snr_db >= 20.0f) {
+    // D8PSK R1/2 — gated on the hardware-measured cliff. Mac↔Pi5 audio
+    // loopback 10-seed sweep at SNR=20/22/24 good fading injected
+    // (2026-05-04, post-CW=8 wire negotiation) showed:
+    //   SNR=20 good: D8PSK retx-hit 38 % (3/8 storms incl. 270 bps)
+    //                mean 1448 bps ≈ DQPSK alt 1444 bps — wash with
+    //                catastrophic tail.
+    //   SNR=22 good: D8PSK retx-hit 17 % (1/6 single retx, no storms)
+    //                mean 1783 bps vs DQPSK 1450 bps — +23 % real win.
+    //   SNR=24 good: D8PSK retx-hit 43 % (3/7 incl. 2 FAILs at 320-374 bps,
+    //                17-78 retx). Counterintuitively WORSE than 22:
+    //                higher SNR doesn't fix the soundcard/Doppler-induced
+    //                phase glitches that cliff D8PSK; it just promotes
+    //                D8PSK in more conditions where those glitches hit.
+    // The single-seed CLAUDE.md datapoint (SNR=20 D8PSK 1595 bps clean)
+    // was unrepresentative — variance hidden in single-seed measurements.
+    // Conclusion: SNR=22 is the floor where D8PSK is net-positive.
+    // Storms aren't predictable from bulk fading_index, so tightening
+    // fading further doesn't help.
+    if (fading_index < 0.65f && snr_db >= 22.0f) {
         mod = Modulation::D8PSK;
         rate = CodeRate::R1_2;
         return;
