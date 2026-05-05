@@ -191,20 +191,28 @@ inline SackDelayProfile ofdmSackDelays(bool defer_to_burst_tail,
     return profile;
 }
 
-// Recommend fixed-frame CW count for a given OFDM data rate.
-// Rate-only (no SNR/fading dependency) so both peers always agree
-// on the CW count from the negotiated rate alone — no risk of one
-// peer reading a different SNR than the other and picking a
+// Recommend fixed-frame CW count for a given OFDM data rate + waveform.
+// Inputs are deterministic and shared by both peers (rate is negotiated;
+// waveform is negotiated too) so both peers compute the same CW count
+// without risk of one reading a different SNR/fading and picking a
 // different CW geometry.
 //
-// Hardware A/B (Mac↔Pi5 5KB transfer):
-//   DQPSK R1/2 SNR=15 good fading: CW=4 → 1077 bps (2 retx)
-//                                  CW=8 → 1615 bps (0 retx)  +50%
-//   D8PSK R3/4 SNR=27 AWGN:        CW=8 → 3127 bps  (ceiling)
+// Wide OFDM (OFDM_CHIRP / OFDM_COX):
+//   R1/2, R2/3, R3/4 → 8 (hardware A/B Mac↔Pi5 5KB DQPSK R1/2 SNR=15
+//   good fading: CW=4 → 1077 bps 2 retx; CW=8 → 1615 bps 0 retx, +50%.
+//   D8PSK R3/4 SNR=27 AWGN ceiling: CW=8 → 3127 bps.)
+//   R1/4 stays at default 4 (low-SNR robustness, no measured win wider).
 //
-// R1/4 stays at the default 4 — small frames, low-SNR robustness,
-// no measured win from going wider.
-inline int recommendCWCount(CodeRate rate) {
+// Narrow OFDM (OFDM_NARROW): always 4. Narrow R1/2 frames are already
+// ~6 s at CW=8 with the 21-carrier geometry; window=3 burst would be
+// ~18 s — longer than typical narrow good-fading coherence (~10 s).
+// 3-seed sim A/B at SNR=8 good fading R1/2 (2 KB): CW=8 1/3 FAIL with
+// 240 s timeout, 2/3 PASS at 124-172 bps; CW=4 baseline 3/3 PASS at
+// 116-149 bps. The bigger frame becomes a single fade event's victim.
+inline int recommendCWCount(CodeRate rate, WaveformMode waveform) {
+    if (waveform == WaveformMode::OFDM_NARROW) {
+        return v2::kDefaultFixedFrameCodewords;  // 4 — fade-coherence cap
+    }
     switch (rate) {
         case CodeRate::R1_2:
         case CodeRate::R2_3:

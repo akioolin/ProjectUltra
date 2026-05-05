@@ -177,7 +177,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // the value the initiator will see on the wire — Codex finding 4.
         int negotiated_cw = (frame.data_frame_cw_count != 0)
             ? v2::sanitizeFixedFrameCodewords(frame.data_frame_cw_count)
-            : connection_policy::recommendCWCount(rec_rate);
+            : connection_policy::recommendCWCount(rec_rate, negotiated_mode_);
         data_frame_cw_count_ = negotiated_cw;
         config_.fixed_frame_codewords = negotiated_cw;
         const uint8_t cw_byte = static_cast<uint8_t>(negotiated_cw);
@@ -256,7 +256,7 @@ void Connection::handleConnectAck(const v2::ConnectFrame& frame, const std::stri
     // hasn't been built since the protocol change — defensive only).
     int negotiated_cw = (frame.data_frame_cw_count != 0)
         ? v2::sanitizeFixedFrameCodewords(frame.data_frame_cw_count)
-        : connection_policy::recommendCWCount(init_rate);
+        : connection_policy::recommendCWCount(init_rate, negotiated_mode_);
 
     // Apply the initial data mode immediately
     data_modulation_ = init_mod;
@@ -446,7 +446,7 @@ void Connection::requestModeChange(Modulation new_mod, CodeRate new_rate,
     // override (caught by Codex, 2026-05-04).
     pending_cw_count_ = static_cast<uint8_t>((config_.forced_cw_count != 0)
         ? v2::sanitizeFixedFrameCodewords(config_.forced_cw_count)
-        : connection_policy::recommendCWCount(new_rate));
+        : connection_policy::recommendCWCount(new_rate, negotiated_mode_));
 
     mode_change_seq_++;
     auto frame = v2::ControlFrame::makeModeChange(local_call_, remote_call_,

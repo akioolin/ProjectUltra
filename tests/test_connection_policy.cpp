@@ -252,6 +252,33 @@ void test_negotiated_mode_selection() {
           "no common modes should preserve OFDM_COX fallback");
 }
 
+void test_recommend_cw_count() {
+    // Wide OFDM: rate-based promotion (R1/2, R2/3, R3/4 → 8; R1/4 → 4).
+    CHECK(recommendCWCount(CodeRate::R1_2, WaveformMode::OFDM_CHIRP) == 8,
+          "wide R1/2 → 8 (the +50% throughput win)");
+    CHECK(recommendCWCount(CodeRate::R2_3, WaveformMode::OFDM_CHIRP) == 8,
+          "wide R2/3 → 8");
+    CHECK(recommendCWCount(CodeRate::R3_4, WaveformMode::OFDM_CHIRP) == 8,
+          "wide R3/4 → 8");
+    CHECK(recommendCWCount(CodeRate::R1_4, WaveformMode::OFDM_CHIRP) ==
+              v2::kDefaultFixedFrameCodewords,
+          "wide R1/4 stays at default 4 (low-SNR robustness)");
+
+    // OFDM_COX shares the wide policy.
+    CHECK(recommendCWCount(CodeRate::R1_2, WaveformMode::OFDM_COX) == 8,
+          "OFDM_COX R1/2 follows the wide policy");
+
+    // OFDM_NARROW: always default 4. Narrow R1/2 frames are ~6 s at CW=8;
+    // window=3 burst would be ~18 s, exceeding typical narrow good-fading
+    // coherence (~10 s). 3-seed sim A/B at SNR=8 R1/2 confirmed CW=8
+    // hit 1/3 catastrophic FAIL (240 s timeout) while CW=4 was 3/3 PASS.
+    for (auto rate : {CodeRate::R1_4, CodeRate::R1_2, CodeRate::R2_3, CodeRate::R3_4}) {
+        CHECK(recommendCWCount(rate, WaveformMode::OFDM_NARROW) ==
+                  v2::kDefaultFixedFrameCodewords,
+              "narrow always caps at default 4 (fade-coherence limit)");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -260,6 +287,7 @@ int main() {
     test_narrow_ofdm_timing_and_timeout();
     test_ofdm_profile_selection();
     test_negotiated_mode_selection();
+    test_recommend_cw_count();
 
     if (tests_failed != 0) {
         std::cout << "ConnectionPolicy: " << (tests_run - tests_failed)

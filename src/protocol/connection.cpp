@@ -308,7 +308,7 @@ void Connection::acceptCall() {
     // initiator's view match what we'll actually use locally.
     int negotiated_cw = (pending_forced_cw_count_ != 0)
         ? v2::sanitizeFixedFrameCodewords(pending_forced_cw_count_)
-        : connection_policy::recommendCWCount(rec_rate);
+        : connection_policy::recommendCWCount(rec_rate, negotiated_mode_);
 
     // Clear pending forced modes
     pending_forced_modulation_ = Modulation::AUTO;
@@ -1566,7 +1566,7 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count) {
     // MODE_CHANGE wire byte), else auto-pick from rate.
     const int new_cw = (cw_count > 0)
         ? v2::sanitizeFixedFrameCodewords(cw_count)
-        : connection_policy::recommendCWCount(rate);
+        : connection_policy::recommendCWCount(rate, negotiated_mode_);
     const bool rate_changed = rate != data_code_rate_;
     const bool cw_changed = new_cw != data_frame_cw_count_;
     // Pending chunks must be re-encoded if rate OR CW changed: the ARQ payload
