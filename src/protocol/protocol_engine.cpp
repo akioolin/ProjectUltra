@@ -448,9 +448,9 @@ void ProtocolEngine::setForcedCodeRate(CodeRate rate) {
     connection_.setForcedCodeRate(rate);
 }
 
-void ProtocolEngine::setForcedFrameCodewords(int cw_count) {
+void ProtocolEngine::setForcedFrameCodewords(int cw_count, bool forced) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
-    connection_.setForcedFrameCodewords(cw_count);
+    connection_.setForcedFrameCodewords(cw_count, forced);
 }
 
 Modulation ProtocolEngine::getForcedModulation() const {

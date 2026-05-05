@@ -40,6 +40,11 @@ struct ConnectionConfig {
     Modulation forced_modulation = Modulation::AUTO;
     CodeRate forced_code_rate = CodeRate::AUTO;
     int fixed_frame_codewords = v2::kDefaultFixedFrameCodewords;
+    // Initiator-side forced CW override (0 = AUTO, responder picks via
+    // recommendCWCount(rate)). When non-zero, the initiator embeds this
+    // value in CONNECT.data_frame_cw_count and the responder honors it
+    // in CONNECT_ACK + applyDataMode. Set via setForcedFrameCodewords().
+    uint8_t forced_cw_count = 0;
 };
 
 // Connection statistics
@@ -173,7 +178,12 @@ public:
     // Forced data mode - operator can override SNR-based selection
     void setForcedModulation(Modulation mod) { config_.forced_modulation = mod; }
     void setForcedCodeRate(CodeRate rate) { config_.forced_code_rate = rate; }
-    void setForcedFrameCodewords(int cw_count);
+    // forced=true marks this as an operator override: the initiator will
+    // embed it in CONNECT.data_frame_cw_count and the responder will
+    // honor + echo it. forced=false is the boot-time default path used
+    // by host wiring (encoder/decoder bootstrap) — does NOT mark forced,
+    // so the responder still gets to auto-pick via recommendCWCount(rate).
+    void setForcedFrameCodewords(int cw_count, bool forced = true);
     Modulation getForcedModulation() const { return config_.forced_modulation; }
     CodeRate getForcedCodeRate() const { return config_.forced_code_rate; }
     int getForcedFrameCodewords() const { return data_frame_cw_count_; }
@@ -220,7 +230,13 @@ public:
     bool isFading() const { return fading_index_ > 0.65f; }
 
     // Callback when remote station requests mode change
-    using DataModeChangedCallback = std::function<void(Modulation mod, CodeRate rate, float snr_db, float peer_fading_index)>;
+    // Data-mode-changed callback. cw_count is the negotiated fixed-frame CW
+    // count for the new rate (1..8) — host updates encoder/decoder from this
+    // value directly. Host MUST NOT call back into ProtocolEngine from this
+    // callback (mutex held; re-entry will deadlock).
+    using DataModeChangedCallback = std::function<void(Modulation mod, CodeRate rate,
+                                                        int cw_count,
+                                                        float snr_db, float peer_fading_index)>;
     void setDataModeChangedCallback(DataModeChangedCallback cb) { on_data_mode_changed_ = cb; }
 
     // Request mode change to remote station
@@ -244,6 +260,7 @@ private:
     // Pending forced modes from incoming CONNECT (for manual accept flow)
     Modulation pending_forced_modulation_ = Modulation::AUTO;
     CodeRate pending_forced_code_rate_ = CodeRate::AUTO;
+    uint8_t pending_forced_cw_count_ = 0;  // 0 = AUTO (responder chooses)
 
     // Waveform mode
     WaveformMode narrowband_override_ = WaveformMode::AUTO;  // Session-scoped, cleared on disconnect/reset
@@ -265,6 +282,7 @@ private:
     int mode_change_retry_count_ = 0;
     Modulation pending_modulation_ = Modulation::DQPSK;
     CodeRate pending_code_rate_ = CodeRate::R1_4;
+    uint8_t pending_cw_count_ = 0;  // 0 = use applyDataMode's default
     float pending_snr_db_ = 15.0f;
     float pending_fading_index_ = 0.0f;
     uint8_t pending_reason_ = 0;
@@ -332,7 +350,9 @@ private:
     void processArqFrame(const Bytes& frame_data);
     void runDeferredArqRefill();
     void configureArqForCurrentDataMode();
-    void applyDataMode(Modulation mod, CodeRate rate);
+    // Apply a new data mode. cw_count: 0 = compute via recommendCWCount(rate),
+    // 1..8 = explicit (used when MODE_CHANGE wire byte specifies a value).
+    void applyDataMode(Modulation mod, CodeRate rate, int cw_count = 0);
     void resetAdaptiveModeController();
     void updateAdaptiveModeController(uint32_t elapsed_ms);
     bool tryIssueAdaptiveModeChangeAtBoundary();

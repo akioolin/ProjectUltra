@@ -303,21 +303,33 @@ void Connection::acceptCall() {
                   codeRateToString(rec_rate));
     }
 
+    // Pick negotiated CW count (honor initiator's forced value, else auto).
+    // Computed BEFORE building CONNECT_ACK so the embedded byte and the
+    // initiator's view match what we'll actually use locally.
+    int negotiated_cw = (pending_forced_cw_count_ != 0)
+        ? v2::sanitizeFixedFrameCodewords(pending_forced_cw_count_)
+        : connection_policy::recommendCWCount(rec_rate);
+
     // Clear pending forced modes
     pending_forced_modulation_ = Modulation::AUTO;
     pending_forced_code_rate_ = CodeRate::AUTO;
+    pending_forced_cw_count_ = 0;
 
     // Set our local data mode immediately
     data_modulation_ = rec_mod;
     data_code_rate_ = rec_rate;
+    data_frame_cw_count_ = negotiated_cw;
+    config_.fixed_frame_codewords = negotiated_cw;
 
-    LOG_MODEM(INFO, "Connection: Accepting call from %s (waveform=%s, data=%s %s)",
+    LOG_MODEM(INFO, "Connection: Accepting call from %s (waveform=%s, data=%s %s, cw=%d)",
               remote_call_.c_str(), waveformModeToString(negotiated_mode_),
-              modulationToString(data_modulation_), codeRateToString(data_code_rate_));
+              modulationToString(data_modulation_), codeRateToString(data_code_rate_),
+              data_frame_cw_count_);
 
     auto ack = v2::ConnectFrame::makeConnectAck(local_call_, remote_call_,
                                                  static_cast<uint8_t>(negotiated_mode_),
-                                                 rec_mod, rec_rate, measured_snr_db_, fading_index_);
+                                                 rec_mod, rec_rate, measured_snr_db_, fading_index_,
+                                                 static_cast<uint8_t>(negotiated_cw));
     Bytes ack_data = ack.serialize();
 
     LOG_MODEM(INFO, "Connection: Sending CONNECT_ACK (%zu bytes)", ack_data.size());
@@ -332,7 +344,8 @@ void Connection::acceptCall() {
 
     // Notify application of initial data mode
     if (on_data_mode_changed_) {
-        on_data_mode_changed_(data_modulation_, data_code_rate_, measured_snr_db_, fading_index_);
+        on_data_mode_changed_(data_modulation_, data_code_rate_, data_frame_cw_count_,
+                              measured_snr_db_, fading_index_);
     }
 }
 
@@ -440,8 +453,19 @@ void Connection::abortTxNow() {
               connectionStateToString(state_));
 }
 
-void Connection::setForcedFrameCodewords(int cw_count) {
+void Connection::setForcedFrameCodewords(int cw_count, bool forced) {
     cw_count = v2::sanitizeFixedFrameCodewords(cw_count);
+    if (forced) {
+        // Operator override: initiator embeds in CONNECT.data_frame_cw_count
+        // so responder honors and echoes via CONNECT_ACK. One-sided
+        // propagation — caller only needs to set this on one peer.
+        config_.forced_cw_count = static_cast<uint8_t>(cw_count);
+    }
+    // Note: !forced is the boot-time default path (host wiring up encoder/
+    // decoder before connection). It MUST NOT touch config_.forced_cw_count
+    // or every connect would advertise the default as a forced override
+    // and bypass auto-pick on the responder.
+
     if (cw_count == data_frame_cw_count_) {
         return;
     }
@@ -876,7 +900,8 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                             LOG_MODEM(INFO, "Connection: MODE_CHANGE acknowledged, applying %s %s",
                                       modulationToString(pending_modulation_),
                                       codeRateToString(pending_code_rate_));
-                            applyDataMode(pending_modulation_, pending_code_rate_);
+                            applyDataMode(pending_modulation_, pending_code_rate_,
+                                          pending_cw_count_);
                             if (was_downgrade) {
                                 adaptive_post_downgrade_lockout_ms_ =
                                     ADAPTIVE_POST_DOWNGRADE_LOCKOUT_MS;
@@ -887,6 +912,7 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                             // Notify application of mode change
                             if (on_data_mode_changed_) {
                                 on_data_mode_changed_(data_modulation_, data_code_rate_,
+                                                      data_frame_cw_count_,
                                                       pending_snr_db_, pending_fading_index_);
                             }
                             runDeferredArqRefill();
@@ -1281,7 +1307,8 @@ void Connection::tick(uint32_t elapsed_ms) {
                                                                         config_.mode_capabilities,
                                                                         static_cast<uint8_t>(config_.preferred_mode),
                                                                         static_cast<uint8_t>(config_.forced_modulation),
-                                                                        static_cast<uint8_t>(config_.forced_code_rate));
+                                                                        static_cast<uint8_t>(config_.forced_code_rate),
+                                                                        config_.forced_cw_count);
                     transmitFrame(connect_frame.serialize());
                     timeout_remaining_ms_ = config_.connect_timeout_ms;
                 }
@@ -1346,12 +1373,13 @@ void Connection::tick(uint32_t elapsed_ms) {
                     } else {
                         LOG_MODEM(WARN, "Connection: MODE_CHANGE timeout, retrying (%d/%d)",
                                   mode_change_retry_count_, MODE_CHANGE_MAX_RETRIES);
-                        // Resend MODE_CHANGE with same parameters
+                        // Resend MODE_CHANGE with same parameters (incl. CW)
                         auto frame = v2::ControlFrame::makeModeChange(local_call_, remote_call_,
                                                                        mode_change_seq_, pending_modulation_,
                                                                        pending_code_rate_, pending_snr_db_,
                                                                        pending_fading_index_,
-                                                                       pending_reason_);
+                                                                       pending_reason_,
+                                                                       pending_cw_count_);
                         transmitFrame(frame.serialize());
                         mode_change_timeout_ms_ = MODE_CHANGE_TIMEOUT_MS;
                     }
@@ -1533,14 +1561,23 @@ void Connection::configureArqForCurrentDataMode() {
     }
 }
 
-void Connection::applyDataMode(Modulation mod, CodeRate rate) {
+void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count) {
+    // Resolve final CW count: explicit value if specified (e.g. from
+    // MODE_CHANGE wire byte), else auto-pick from rate.
+    const int new_cw = (cw_count > 0)
+        ? v2::sanitizeFixedFrameCodewords(cw_count)
+        : connection_policy::recommendCWCount(rate);
     const bool rate_changed = rate != data_code_rate_;
+    const bool cw_changed = new_cw != data_frame_cw_count_;
+    // Pending chunks must be re-encoded if rate OR CW changed: the ARQ payload
+    // capacity depends on both, and chunks queued under the old geometry will
+    // overflow / mis-align under the new one.
     const bool requeue_file =
-        rate_changed &&
+        (rate_changed || cw_changed) &&
         file_transfer_.getState() == FileTransferState::SENDING &&
         file_transfer_.hasPendingChunks();
     const bool refill_file =
-        rate_changed &&
+        (rate_changed || cw_changed) &&
         file_transfer_.getState() == FileTransferState::SENDING;
     if (requeue_file) {
         file_transfer_.requeuePendingChunks();
@@ -1548,6 +1585,8 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate) {
 
     data_modulation_ = mod;
     data_code_rate_ = rate;
+    data_frame_cw_count_ = new_cw;
+    config_.fixed_frame_codewords = new_cw;
     configureArqForCurrentDataMode();
     resetAdaptiveModeController();
 

@@ -237,13 +237,14 @@ void test_connect_frame_roundtrip_and_crc() {
         auto ack = ConnectFrame::makeConnectAck("W1AW", "VA2MVR/P",
                                                 static_cast<uint8_t>(WaveformMode::OFDM_CHIRP),
                                                 Modulation::DQPSK, CodeRate::R1_2,
-                                                15.25f, 0.62f);
+                                                15.25f, 0.62f, 8);
         auto ack_bytes = ack.serialize();
         auto ack_parsed = ConnectFrame::deserialize(ack_bytes);
         assert(ack_parsed.has_value());
         assert(ack_parsed->type == FrameType::CONNECT_ACK);
         assert(std::abs(decodeSNR(ack_parsed->measured_snr) - 15.25f) < 0.001f);
         assert(std::abs(decodeFadingIndex(ack_parsed->mode_capabilities) - 0.62f) < 0.001f);
+        assert(ack_parsed->data_frame_cw_count == 8);
 
         auto corrupt_header = serialized;
         corrupt_header[5] ^= 0x01;

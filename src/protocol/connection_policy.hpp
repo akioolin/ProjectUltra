@@ -76,17 +76,27 @@ inline bool isHighThroughputOFDM(float fading_index, float snr_db) {
 }
 
 inline bool isHighThroughputOFDMMode(Modulation mod, CodeRate rate) {
-    if (mod != Modulation::DQPSK) {
-        return false;
+    // High-throughput predicate gates window=16 selective-repeat
+    // (vs window=8 default). DQPSK at R1/2+ uses bigger window because
+    // fading correlation across an 8-frame burst is tolerable; D8PSK
+    // gets the same treatment because the 2026-05-04 D8PSK gate only
+    // fires when the channel is good enough to support it (SNR>=10
+    // fading<0.65 minimum), which is the same precondition the larger
+    // window assumes.
+    if (mod == Modulation::DQPSK || mod == Modulation::D8PSK) {
+        return rate == CodeRate::R1_2 ||
+               rate == CodeRate::R2_3 ||
+               rate == CodeRate::R3_4;
     }
-    return rate == CodeRate::R1_2 ||
-           rate == CodeRate::R2_3 ||
-           rate == CodeRate::R3_4;
+    return false;
 }
 
 inline bool isSpeculativeHighRateOFDM(Modulation mod, CodeRate rate) {
-    return mod == Modulation::DQPSK &&
-           (rate == CodeRate::R2_3 || rate == CodeRate::R3_4);
+    // R2/3 and R3/4 are speculative (window=16 only on near-AWGN);
+    // R1/2 is non-speculative (window=16 always when fading channel
+    // is good). Both DQPSK and D8PSK follow the same logic.
+    const bool risky_rate = (rate == CodeRate::R2_3 || rate == CodeRate::R3_4);
+    return risky_rate && (mod == Modulation::DQPSK || mod == Modulation::D8PSK);
 }
 
 inline size_t ofdmWindowSize(Modulation mod, CodeRate rate, bool near_awgn_ofdm) {
@@ -179,6 +189,31 @@ inline SackDelayProfile ofdmSackDelays(bool defer_to_burst_tail,
         profile.short_delay_ms = 120;
     }
     return profile;
+}
+
+// Recommend fixed-frame CW count for a given OFDM data rate.
+// Rate-only (no SNR/fading dependency) so both peers always agree
+// on the CW count from the negotiated rate alone — no risk of one
+// peer reading a different SNR than the other and picking a
+// different CW geometry.
+//
+// Hardware A/B (Mac↔Pi5 5KB transfer):
+//   DQPSK R1/2 SNR=15 good fading: CW=4 → 1077 bps (2 retx)
+//                                  CW=8 → 1615 bps (0 retx)  +50%
+//   D8PSK R3/4 SNR=27 AWGN:        CW=8 → 3127 bps  (ceiling)
+//
+// R1/4 stays at the default 4 — small frames, low-SNR robustness,
+// no measured win from going wider.
+inline int recommendCWCount(CodeRate rate) {
+    switch (rate) {
+        case CodeRate::R1_2:
+        case CodeRate::R2_3:
+        case CodeRate::R3_4:
+            return 8;
+        case CodeRate::R1_4:
+        default:
+            return v2::kDefaultFixedFrameCodewords;  // 4
+    }
 }
 
 inline AckRepeatProfile ofdmAckRepeatProfile(Modulation mod,

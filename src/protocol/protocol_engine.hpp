@@ -134,7 +134,7 @@ public:
     // 0xFF (AUTO) = let responder decide based on SNR
     void setForcedModulation(Modulation mod);
     void setForcedCodeRate(CodeRate rate);
-    void setForcedFrameCodewords(int cw_count);
+    void setForcedFrameCodewords(int cw_count, bool forced = true);
     Modulation getForcedModulation() const;
     CodeRate getForcedCodeRate() const;
     int getForcedFrameCodewords() const;
