@@ -719,6 +719,11 @@ public:
         if (encoder_) encoder_->setFixedFrameCodewords(fixed_frame_codewords_);
         if (decoder_) decoder_->setFixedFrameCodewords(fixed_frame_codewords_);
     }
+    void setCarrierMask(uint64_t active_mask) {
+        carrier_mask_ = active_mask;
+        if (encoder_) encoder_->setCarrierMask(active_mask);
+        if (decoder_) decoder_->setCarrierMask(active_mask);
+    }
     void setSoftCombiningHARQ(bool enable) {
         protocol_.setSoftCombiningHARQ(enable);
         if (decoder_) decoder_->setSoftCombineBuffer(protocol_.softCombineBuffer());
@@ -839,6 +844,7 @@ private:
     bool no_burst_interleave_ = false;  // Disable burst interleaving for A/B testing
     int burst_group_size_ = 8;
     int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
+    uint64_t carrier_mask_ = UINT64_MAX;
     int rx_overfeed_factor_ = 1;
     int decode_delay_ms_ = 0;
     int rx_batch_callbacks_ = 1;
@@ -902,6 +908,7 @@ private:
         encoder_->setMode(tx_waveform_mode_);
         encoder_->setDataMode(data_modulation_, data_code_rate_);
         encoder_->setFixedFrameCodewords(fixed_frame_codewords_);
+        encoder_->setCarrierMask(carrier_mask_);
         encoder_->setBurstInterleaveGroupSize(burst_group_size_);
         encoder_->setMCDPSKCarriers(8);
 
@@ -920,6 +927,7 @@ private:
         decoder_->setMode(WaveformMode::MC_DPSK, false);
         decoder_->setBurstInterleaveGroupSize(burst_group_size_);
         decoder_->setFixedFrameCodewords(fixed_frame_codewords_);
+        decoder_->setCarrierMask(carrier_mask_);
         decoder_->setSoftCombineBuffer(protocol_.softCombineBuffer());
         decoder_->setMCDPSKCarriers(8);
 
@@ -1585,6 +1593,7 @@ public:
         fixed_frame_codewords_ = v2::sanitizeFixedFrameCodewords(cw_count);
         cw_count_forced_ = true;
     }
+    void setCarrierMask(uint64_t active_mask) { carrier_mask_ = active_mask; }
     void setPreferredWaveform(WaveformMode mode) { forced_waveform_ = mode; }
     void setTestFileTransfer(bool v) { test_file_transfer_ = v; }
     void setTestFileSize(size_t bytes) { test_file_size_ = bytes; }
@@ -1670,6 +1679,8 @@ public:
         bravo_->setRxBatchCallbacks(rx_batch_callbacks_);
         alpha_->setFixedFrameCodewords(fixed_frame_codewords_, cw_count_forced_);
         bravo_->setFixedFrameCodewords(fixed_frame_codewords_, cw_count_forced_);
+        alpha_->setCarrierMask(carrier_mask_);
+        bravo_->setCarrierMask(carrier_mask_);
         alpha_->setSoftCombiningHARQ(soft_combining_harq_);
         bravo_->setSoftCombiningHARQ(soft_combining_harq_);
 
@@ -1709,6 +1720,10 @@ public:
         }
         if (fixed_frame_codewords_ != v2::kDefaultFixedFrameCodewords) {
             std::cout << "  \033[36mFixed frame CW count = " << fixed_frame_codewords_ << "\033[0m\n";
+        }
+        if (carrier_mask_ != UINT64_MAX) {
+            std::cout << "  \033[36mCarrier mask = 0x" << std::hex << carrier_mask_
+                      << std::dec << "\033[0m\n";
         }
         if (soft_combining_harq_) {
             std::cout << "  \033[36mRX soft-combining HARQ ENABLED\033[0m\n";
@@ -1796,6 +1811,7 @@ private:
     int rx_batch_callbacks_ = 1;           // --rx-batch-callbacks N (batched decoder feed)
     int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
     bool cw_count_forced_ = false;  // true iff --cw-count was passed
+    uint64_t carrier_mask_ = UINT64_MAX;
     bool soft_combining_harq_ = false;
     bool save_signals_ = false;
     int save_signals_message_limit_ = 0;   // 0 = full run
@@ -2495,6 +2511,7 @@ private:
         station->setChannelInterleave(use_channel_interleave_);
         station->setNoBurstInterleave(no_burst_interleave_);
         station->setBurstInterleaveGroupSize(burst_group_size_);
+        station->setCarrierMask(carrier_mask_);
         // forced=true only if user passed --cw-count; otherwise this is
         // boot-time init that should leave protocol-level forced_cw_count=0
         // so the responder gets to auto-pick via recommendCWCount(rate).
@@ -3097,6 +3114,16 @@ int main(int argc, char* argv[]) {
                     return 1;
                 }
                 sim.setFixedFrameCodewords(cw_count);
+            } else if (arg == "--carrier-mask" && i + 1 < argc) {
+                sim.setCarrierMask(static_cast<uint64_t>(std::stoull(argv[++i], nullptr, 0)));
+            } else if (arg == "--mask-clear-carrier" && i + 1 < argc) {
+                const int carrier = std::stoi(argv[++i]);
+                if (carrier < 0 || carrier >= 59) {
+                    std::cerr << "Invalid --mask-clear-carrier: " << carrier
+                              << " (use 0..58)\n";
+                    return 1;
+                }
+                sim.setCarrierMask(UINT64_MAX & ~(uint64_t{1} << carrier));
             } else if (arg == "--waveform" || arg == "-w") {
                 if (i + 1 < argc) {
                     std::string wf_str = argv[++i];
@@ -3213,6 +3240,8 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --mod, -m <MOD>     Force modulation: dqpsk, d8psk, dbpsk, qpsk, bpsk, qam16, qam32, qam64\n";
                 std::cout << "  --rate, -r <RATE>   Force code rate: auto, r1_4, r1_2, r2_3, r3_4\n";
                 std::cout << "  --cw-count <N>      Fixed OFDM data-frame codewords (1-8, default: 4)\n";
+                std::cout << "  --carrier-mask <M>  OFDM_CHIRP active-carrier mask (default: all-on)\n";
+                std::cout << "  --mask-clear-carrier <N>  Clear one carrier bit (0-58)\n";
                 std::cout << "  --waveform, -w <WF> Force waveform: mc_dpsk, ofdm_chirp, ofdm_cox, ofdm_narrow\n";
                 std::cout << "  --ofdm-config <CFG> OFDM_COX config: default (512/30) or nvis (1024/59)\n";
                 std::cout << "  --seed <N>          Random seed (default: 42)\n";

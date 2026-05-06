@@ -24,8 +24,11 @@ public:
     explicit OFDMModulator(const ModemConfig& config);
     ~OFDMModulator();
 
-    // Modulate data bytes into audio samples
-    Samples modulate(ByteSpan data, Modulation mod);
+    // Modulate data bytes into audio samples.
+    // carrier_mask_enabled is used by OFDM_CHIRP CarrierLDPC plumbing only.
+    Samples modulate(ByteSpan data, Modulation mod,
+                     uint64_t active_carrier_mask = UINT64_MAX,
+                     bool carrier_mask_enabled = false);
 
     // Generate a sync/preamble sequence (Schmidl-Cox: STS + LTS)
     Samples generatePreamble();
@@ -43,6 +46,10 @@ public:
 
     // Get data bits per symbol at given modulation
     size_t bitsPerSymbol(Modulation mod) const;
+
+    // Test/debug: flattened data-carrier symbols from the last modulate() call,
+    // after carrier masking and before IFFT.
+    Symbol getLastDataCarrierSymbolsForTesting() const;
 
 private:
     struct Impl;

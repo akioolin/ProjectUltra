@@ -138,6 +138,10 @@ add_executable(test_carrier_ldpc_interleaver test_carrier_ldpc_interleaver.cpp)
 target_link_libraries(test_carrier_ldpc_interleaver PRIVATE ultra_core)
 add_test(NAME CarrierLDPCInterleaver COMMAND test_carrier_ldpc_interleaver)
 
+add_executable(test_ofdm_carrier_mask_plumbing test_ofdm_carrier_mask_plumbing.cpp)
+target_link_libraries(test_ofdm_carrier_mask_plumbing PRIVATE ultra_core)
+add_test(NAME OFDMCarrierMaskPlumbing COMMAND test_ofdm_carrier_mask_plumbing)
+
 # Current waveform/rate policy and factory coverage
 add_executable(test_waveform_policy test_waveform_policy.cpp)
 target_link_libraries(test_waveform_policy PRIVATE ultra_core)

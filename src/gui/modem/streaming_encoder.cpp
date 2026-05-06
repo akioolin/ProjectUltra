@@ -70,6 +70,13 @@ void StreamingEncoder::setBurstInterleaveGroupSize(int size) {
     burst_group_size_ = ofdm_link_adaptation::sanitizeBurstGroupSize(size);
 }
 
+void StreamingEncoder::setCarrierMask(uint64_t active_mask) {
+    carrier_mask_ = active_mask;
+    if (waveform_) {
+        waveform_->setCarrierMask(active_mask);
+    }
+}
+
 // ============================================================================
 // MODE CONTROL
 // ============================================================================
@@ -505,6 +512,7 @@ void StreamingEncoder::createWaveform() {
     if (waveform_) {
         int spacing = waveform_->getPilotSpacing();
         if (spacing > 0) ofdm_config_.pilot_spacing = spacing;
+        waveform_->setCarrierMask(carrier_mask_);
     }
 
     LOG_MODEM(DEBUG, "[%s] Created waveform: %s",

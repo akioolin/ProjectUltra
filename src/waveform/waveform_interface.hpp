@@ -98,6 +98,11 @@ public:
     // Returns audio samples ready for transmission
     virtual Samples modulate(const Bytes& encoded_data) = 0;
 
+    // Optional OFDM_CHIRP carrier mask. Default is all-on and preserves legacy
+    // behavior; non-OFDM waveforms ignore it.
+    virtual void setCarrierMask(uint64_t active_mask) { (void)active_mask; }
+    virtual uint64_t getCarrierMask() const { return UINT64_MAX; }
+
     // ========================================================================
     // RX PATH
     // ========================================================================

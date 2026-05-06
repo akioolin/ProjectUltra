@@ -173,6 +173,9 @@ public:
     void setChannelInterleave(bool enable) { use_channel_interleave_ = enable; }
     bool getChannelInterleave() const { return use_channel_interleave_; }
 
+    void setCarrierMask(uint64_t active_mask);
+    uint64_t getCarrierMask() const { return carrier_mask_; }
+
     void setFixedFrameCodewords(int cw_count) {
         fixed_frame_codewords_ = v2::sanitizeFixedFrameCodewords(cw_count);
     }
@@ -372,6 +375,7 @@ private:
     // Interleaver (matches TX)
     std::unique_ptr<ChannelInterleaver> interleaver_;
     bool use_channel_interleave_ = true;
+    uint64_t carrier_mask_ = UINT64_MAX;
     int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
 
     // FEC codec (uses ICodec interface)

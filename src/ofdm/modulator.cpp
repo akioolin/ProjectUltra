@@ -119,6 +119,9 @@ struct OFDMModulator::Impl {
     // Carrier mapping
     std::vector<int> data_carrier_indices;
     std::vector<int> pilot_carrier_indices;
+    std::vector<size_t> data_logical_carrier_indices;
+    std::vector<size_t> pilot_logical_carrier_indices;
+    Symbol last_data_carrier_symbols_for_testing;
 
     // DBPSK state: previous symbol per data carrier for differential encoding
     std::vector<Complex> dbpsk_prev_symbols;
@@ -154,8 +157,11 @@ struct OFDMModulator::Impl {
 
         data_carrier_indices.clear();
         pilot_carrier_indices.clear();
+        data_logical_carrier_indices.clear();
+        pilot_logical_carrier_indices.clear();
 
         int pilot_count = 0;
+        size_t logical_carrier = 0;
         for (int i = -neg_limit; i <= pos_limit; ++i) {
             if (i == 0) continue;  // Skip DC
 
@@ -164,15 +170,19 @@ struct OFDMModulator::Impl {
             // If use_pilots=false (e.g., DQPSK), all carriers are data
             if (!config.use_pilots) {
                 data_carrier_indices.push_back(fft_idx);
+                data_logical_carrier_indices.push_back(logical_carrier);
             } else {
                 // Every pilot_spacing carrier is a pilot
                 if (pilot_count % config.pilot_spacing == 0) {
                     pilot_carrier_indices.push_back(fft_idx);
+                    pilot_logical_carrier_indices.push_back(logical_carrier);
                 } else {
                     data_carrier_indices.push_back(fft_idx);
+                    data_logical_carrier_indices.push_back(logical_carrier);
                 }
             }
             ++pilot_count;
+            ++logical_carrier;
         }
 
     }
@@ -211,19 +221,32 @@ struct OFDMModulator::Impl {
         }
     }
 
+    static bool carrierMaskActive(uint64_t active_carrier_mask, size_t logical_carrier) {
+        if (logical_carrier >= 64) {
+            return true;
+        }
+        return (active_carrier_mask & (uint64_t{1} << logical_carrier)) != 0;
+    }
+
     std::vector<Complex> createOFDMSymbol(const std::vector<Complex>& data_symbols,
-                                          bool include_pilots = true) {
+                                          bool include_pilots = true,
+                                          uint64_t active_carrier_mask = UINT64_MAX,
+                                          bool carrier_mask_enabled = false) {
         std::vector<Complex> freq_domain(config.fft_size, Complex(0, 0));
 
         // Map data to carriers
         for (size_t i = 0; i < data_carrier_indices.size() && i < data_symbols.size(); ++i) {
-            freq_domain[data_carrier_indices[i]] = data_symbols[i];
+            const bool active = !carrier_mask_enabled ||
+                carrierMaskActive(active_carrier_mask, data_logical_carrier_indices[i]);
+            freq_domain[data_carrier_indices[i]] = active ? data_symbols[i] : Complex(0, 0);
         }
 
         // Add pilots
         if (include_pilots) {
             for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
-                freq_domain[pilot_carrier_indices[i]] = pilot_sequence[i];
+                const bool active = !carrier_mask_enabled ||
+                    carrierMaskActive(active_carrier_mask, pilot_logical_carrier_indices[i]);
+                freq_domain[pilot_carrier_indices[i]] = active ? pilot_sequence[i] : Complex(0, 0);
             }
 
             // DEBUG: Log first data symbol's TX pilot values (only once per transmission)
@@ -342,7 +365,9 @@ size_t OFDMModulator::bitsPerSymbol(Modulation mod) const {
     return impl_->data_carrier_indices.size() * bits_per_carrier;
 }
 
-Samples OFDMModulator::modulate(ByteSpan data, Modulation mod) {
+Samples OFDMModulator::modulate(ByteSpan data, Modulation mod,
+                                 uint64_t active_carrier_mask,
+                                 bool carrier_mask_enabled) {
     // Note: mixer phase continues from preamble for phase coherence
 
     // Use the proper function to get bits per symbol, NOT the enum value!
@@ -363,6 +388,7 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod) {
     }
 
     Samples output;
+    impl_->last_data_carrier_symbols_for_testing.clear();
 
     // Process data in symbol-sized chunks
     size_t data_idx = 0;
@@ -455,8 +481,19 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod) {
             symbol_data.push_back(Complex(0, 0));
         }
 
+        for (size_t c = 0; c < symbol_data.size() &&
+                           c < impl_->data_logical_carrier_indices.size(); ++c) {
+            const bool active = !carrier_mask_enabled ||
+                OFDMModulator::Impl::carrierMaskActive(
+                    active_carrier_mask, impl_->data_logical_carrier_indices[c]);
+            impl_->last_data_carrier_symbols_for_testing.push_back(
+                active ? symbol_data[c] : Complex(0, 0));
+        }
+
         // Create OFDM symbol
-        auto complex_symbol = impl_->createOFDMSymbol(symbol_data);
+        auto complex_symbol = impl_->createOFDMSymbol(symbol_data, true,
+                                                      active_carrier_mask,
+                                                      carrier_mask_enabled);
 
         // Convert to real signal
         auto real_symbol = impl_->complexToReal(complex_symbol);
@@ -474,6 +511,10 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod) {
     }
 
     return output;
+}
+
+Symbol OFDMModulator::getLastDataCarrierSymbolsForTesting() const {
+    return impl_->last_data_carrier_symbols_for_testing;
 }
 
 Samples OFDMModulator::generatePreamble() {

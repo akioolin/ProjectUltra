@@ -1989,6 +1989,9 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     } else {
         waveform_ = WaveformFactory::create(mode);
     }
+    if (waveform_) {
+        waveform_->setCarrierMask(carrier_mask_);
+    }
 
     size_t bps = mc_dpsk_carriers_ * 2;
     if (protocol::isOFDMMode(mode)) {
@@ -2013,6 +2016,14 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
 
     LOG_MODEM(INFO, "StreamingDecoder: Mode=%s (%s), reset corr_pos=%zu",
               protocol::waveformModeToString(mode), connected ? "connected" : "disconnected", correlation_pos_);
+}
+
+void StreamingDecoder::setCarrierMask(uint64_t active_mask) {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    carrier_mask_ = active_mask;
+    if (waveform_) {
+        waveform_->setCarrierMask(active_mask);
+    }
 }
 
 void StreamingDecoder::setMCDPSKCarriers(int n) {
@@ -2056,6 +2067,9 @@ void StreamingDecoder::setOFDMConfig(const ModemConfig& config) {
         LOG_MODEM(INFO, "StreamingDecoder: OFDM_COX config set (FFT=%d, carriers=%d)",
                   config.fft_size, config.num_carriers);
     }
+    if (waveform_) {
+        waveform_->setCarrierMask(carrier_mask_);
+    }
 
     // Update interleaver for new carrier count (using current modulation)
     size_t bps = static_cast<size_t>(ofdm_data_carriers_) * getBitsPerSymbol(current_modulation_);
@@ -2088,6 +2102,7 @@ void StreamingDecoder::setConnectedOFDMMode(protocol::WaveformMode mode,
 
     if (waveform_) {
         waveform_->configure(mod, rate);
+        waveform_->setCarrierMask(carrier_mask_);
     }
 
     // Query waveform for effective pilot layout after configure().

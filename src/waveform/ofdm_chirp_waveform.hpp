@@ -60,6 +60,8 @@ public:
     Samples generatePreamble() override;
     Samples generateDataPreamble() override;  // Training only, no chirp
     Samples modulate(const Bytes& encoded_data) override;
+    void setCarrierMask(uint64_t active_mask) override;
+    uint64_t getCarrierMask() const override { return carrier_mask_; }
 
     // ========================================================================
     // IWaveform - RX
@@ -118,10 +120,13 @@ public:
     // Get chirp sync for direct access
     sync::ChirpSync* getChirpSync() { return chirp_sync_.get(); }
 
+    Symbol getLastDataCarrierSymbolsForTesting() const;
+
 private:
     void initComponents();
     sync::ChirpConfig getChirpConfig() const;
     void configurePilotsForCodeRate(CodeRate rate);
+    bool carrierLdpcPlumbingEligible() const;
 
     protocol::WaveformMode mode_ = protocol::WaveformMode::OFDM_CHIRP;
     ModemConfig config_;
@@ -133,6 +138,7 @@ private:
     float cfo_hz_ = 0.0f;
     float last_snr_ = 0.0f;
     float last_cfo_ = 0.0f;
+    uint64_t carrier_mask_ = UINT64_MAX;
     bool synced_ = false;
     std::vector<float> soft_bits_;
 

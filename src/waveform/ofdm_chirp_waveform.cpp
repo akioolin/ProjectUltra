@@ -1,10 +1,12 @@
 // OFDMChirpWaveform - Implementation
 
 #include "ofdm_chirp_waveform.hpp"
+#include "fec/carrier_ldpc_interleaver.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/dsp.hpp"  // FFT class is in here
 #include "ultra/ofdm_link_adaptation.hpp"
 #include "ultra/timing_profiler.hpp"
+#include <algorithm>
 #include <sstream>
 #include <cmath>
 
@@ -12,6 +14,110 @@ namespace ultra {
 
 namespace {
 constexpr size_t LDPC_CODEWORD_BITS = 648;
+constexpr size_t LDPC_CODEWORD_BYTES = LDPC_CODEWORD_BITS / 8;
+constexpr size_t CARRIER_LDPC_MASK_CARRIERS = 59;
+constexpr uint64_t ALL_ON_CARRIER_MASK = UINT64_MAX;
+
+uint64_t activeBitsMask(size_t carriers) {
+    return carriers >= 64 ? UINT64_MAX : ((uint64_t{1} << carriers) - 1);
+}
+
+bool isAllOnMask(uint64_t mask, size_t carriers) {
+    const uint64_t active = activeBitsMask(carriers);
+    return (mask & active) == active;
+}
+
+std::vector<size_t> buildDataLogicalCarrierIndices(const ModemConfig& config) {
+    std::vector<size_t> logical_indices;
+    logical_indices.reserve(config.num_carriers);
+
+    const int neg_limit = static_cast<int>(config.num_carriers / 2);
+    const int pos_limit = static_cast<int>((config.num_carriers + 1) / 2);
+
+    int pilot_count = 0;
+    size_t logical_carrier = 0;
+    for (int i = -neg_limit; i <= pos_limit; ++i) {
+        if (i == 0) {
+            continue;
+        }
+
+        const bool is_pilot = config.use_pilots &&
+            config.pilot_spacing != 0 &&
+            (pilot_count % static_cast<int>(config.pilot_spacing) == 0);
+        if (!is_pilot) {
+            logical_indices.push_back(logical_carrier);
+        }
+
+        ++pilot_count;
+        ++logical_carrier;
+    }
+
+    return logical_indices;
+}
+
+Bytes applyCarrierLdpcForward(const Bytes& encoded, size_t codeword_count) {
+    const size_t total_bits = codeword_count * LDPC_CODEWORD_BITS;
+    std::vector<uint8_t> in_bits(total_bits, 0);
+    for (size_t i = 0; i < encoded.size() && i * 8 < total_bits; ++i) {
+        for (int b = 0; b < 8 && i * 8 + static_cast<size_t>(b) < total_bits; ++b) {
+            in_bits[i * 8 + static_cast<size_t>(b)] =
+                static_cast<uint8_t>((encoded[i] >> (7 - b)) & 1u);
+        }
+    }
+
+    const auto interleaver = fec::buildCarrierInterleaverV1(codeword_count);
+    std::vector<uint8_t> out_bits(total_bits, 0);
+    for (size_t i = 0; i < total_bits; ++i) {
+        out_bits[interleaver[i]] = in_bits[i];
+    }
+
+    Bytes out((total_bits + 7) / 8, 0);
+    for (size_t i = 0; i < total_bits; ++i) {
+        if (out_bits[i]) {
+            out[i / 8] |= static_cast<uint8_t>(1u << (7 - (i % 8)));
+        }
+    }
+    return out;
+}
+
+std::vector<float> eraseMaskedCarrierLLRs(std::vector<float> air_llrs,
+                                          const ModemConfig& config,
+                                          uint64_t carrier_mask) {
+    const std::vector<size_t> data_logical = buildDataLogicalCarrierIndices(config);
+    if (data_logical.empty()) {
+        return air_llrs;
+    }
+
+    const size_t bits_per_carrier = getBitsPerSymbol(config.modulation);
+    for (size_t a = 0; a < air_llrs.size(); ++a) {
+        const fec::AirGridIndex grid =
+            fec::decomposeAirIndex(a, data_logical.size(), bits_per_carrier);
+        if (grid.carrier >= data_logical.size()) {
+            continue;
+        }
+        const size_t logical_carrier = data_logical[grid.carrier];
+        if (logical_carrier < 64 &&
+            (carrier_mask & (uint64_t{1} << logical_carrier)) == 0) {
+            air_llrs[a] = 0.0f;
+        }
+    }
+    return air_llrs;
+}
+
+std::vector<float> applyCarrierLdpcInverse(std::vector<float> air_llrs,
+                                           size_t codeword_count) {
+    const size_t total_bits = codeword_count * LDPC_CODEWORD_BITS;
+    if (air_llrs.size() < total_bits) {
+        return air_llrs;
+    }
+
+    const auto deinterleaver = fec::buildCarrierDeinterleaverV1(codeword_count);
+    std::vector<float> out(total_bits, 0.0f);
+    for (size_t air = 0; air < total_bits; ++air) {
+        out[deinterleaver[air]] = air_llrs[air];
+    }
+    return out;
+}
 }
 
 OFDMChirpWaveform::OFDMChirpWaveform() {
@@ -95,6 +201,12 @@ void OFDMChirpWaveform::configurePilotsForCodeRate(CodeRate rate) {
         ofdm_link_adaptation::recommendedPilotSpacing(config_.modulation, rate);
 }
 
+bool OFDMChirpWaveform::carrierLdpcPlumbingEligible() const {
+    return mode_ == protocol::WaveformMode::OFDM_CHIRP &&
+           config_.num_carriers == CARRIER_LDPC_MASK_CARRIERS &&
+           (config_.fft_size == 512 || config_.fft_size == 1024);
+}
+
 void OFDMChirpWaveform::configure(Modulation mod, CodeRate rate) {
     // Allow differential and coherent modulations
     if (mod != Modulation::DBPSK && mod != Modulation::DQPSK && mod != Modulation::D8PSK &&
@@ -174,8 +286,37 @@ Samples OFDMChirpWaveform::modulate(const Bytes& encoded_data) {
     if (!modulator_) {
         return Samples();
     }
-    ByteSpan span(encoded_data.data(), encoded_data.size());
-    return modulator_->modulate(span, config_.modulation);
+
+    Bytes tx_data = encoded_data;
+    uint64_t effective_mask = ALL_ON_CARRIER_MASK;
+    bool mask_enabled = false;
+
+    const size_t codeword_count = encoded_data.size() / LDPC_CODEWORD_BYTES;
+    const bool full_codewords =
+        !encoded_data.empty() && (encoded_data.size() % LDPC_CODEWORD_BYTES == 0);
+    const bool eligible = carrierLdpcPlumbingEligible() && full_codewords;
+
+    if (eligible && codeword_count == 1) {
+        // Ncw=1 DQPSK can put a one-carrier erasure into only 5 LDPC base
+        // columns; sub-phase 3 therefore forces all-on and keeps 1-CW PHY
+        // headers/control frames bit-identical to the legacy ordering.
+        effective_mask = ALL_ON_CARRIER_MASK;
+    } else if (eligible && codeword_count >= 2 &&
+               !isAllOnMask(carrier_mask_, CARRIER_LDPC_MASK_CARRIERS)) {
+        // Policy B: all-on is a strict AWGN no-op. CarrierLDPC is only active
+        // when a non-default mask is supplied, so default samples remain
+        // byte-for-byte comparable to HEAD.
+        tx_data = applyCarrierLdpcForward(encoded_data, codeword_count);
+        effective_mask = carrier_mask_;
+        mask_enabled = true;
+    }
+
+    ByteSpan span(tx_data.data(), tx_data.size());
+    return modulator_->modulate(span, config_.modulation, effective_mask, mask_enabled);
+}
+
+void OFDMChirpWaveform::setCarrierMask(uint64_t active_mask) {
+    carrier_mask_ = active_mask;
 }
 
 bool OFDMChirpWaveform::detectSync(SampleSpan samples, SyncResult& result, float threshold) {
@@ -470,6 +611,21 @@ bool OFDMChirpWaveform::process(SampleSpan samples) {
             if (chunk.size() != LDPC_CODEWORD_BITS) break;
             soft_bits_.insert(soft_bits_.end(), chunk.begin(), chunk.end());
         }
+
+        const size_t codeword_count = soft_bits_.size() / LDPC_CODEWORD_BITS;
+        const bool eligible = carrierLdpcPlumbingEligible() &&
+            !soft_bits_.empty() &&
+            (soft_bits_.size() % LDPC_CODEWORD_BITS == 0);
+        if (eligible && codeword_count == 1) {
+            // Ncw=1 remains legacy ordered; this includes the future 1-CW
+            // R1/4 PHY mask header, which must stay bit-identical.
+        } else if (eligible && codeword_count >= 2 &&
+                   !isAllOnMask(carrier_mask_, CARRIER_LDPC_MASK_CARRIERS)) {
+            auto erased = eraseMaskedCarrierLLRs(std::move(soft_bits_),
+                                                 config_, carrier_mask_);
+            soft_bits_ = applyCarrierLdpcInverse(std::move(erased), codeword_count);
+        }
+
         last_snr_ = demodulator_->getEstimatedSNR();
 
         // Feed back pilot-corrected CFO from demodulator
@@ -486,6 +642,10 @@ bool OFDMChirpWaveform::process(SampleSpan samples) {
     }
 
     return ready;
+}
+
+Symbol OFDMChirpWaveform::getLastDataCarrierSymbolsForTesting() const {
+    return modulator_ ? modulator_->getLastDataCarrierSymbolsForTesting() : Symbol{};
 }
 
 std::vector<float> OFDMChirpWaveform::getSoftBits() {
