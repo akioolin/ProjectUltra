@@ -166,32 +166,77 @@ full evidence.
    active, bit positions misalign, LDPC fails, ARQ pile-up, rate
    adapter panics. 3/5 seeds catastrophic, no seed beat baseline.
 
-The viable architecture is **frame-local mask derivation, no
-wire signaling**: both peers derive identical masks from each
-frame's own LTS preamble using a deterministic rule. Requires:
-- Reciprocity assumption between TX and RX channels (must be
-  measured first on the actual hardware harness — half-duplex HF
-  is generally close but not exactly reciprocal at the per-carrier
-  level).
-- Bit-exact identical mask-derivation rule on both sides.
-- LDPC-side handling of per-frame-variable puncturing pattern (not
-  a code-rate change; the codeword length stays fixed, but
-  punctured bit positions vary per frame).
+The viable architecture (per Codex expert review 2026-05-06):
+**robust per-frame PHY header carrying a mask / codebook ID for
+the payload.** Each frame self-describes its mask in-band; RX
+decodes the mask from the frame header before LDPC. Zero RTT, no
+reciprocity assumption, no connection-layer MODE_CHANGE involved.
 
-This is non-trivial. Probably 2–3 weeks of careful design and
-testing, not a single Codex round.
+This supersedes the earlier "frame-local mask, no signaling"
+proposal (rejected by Codex review: "Pure no-signaling
+reciprocity should be a measurement experiment, not the
+production path"). The reciprocity-driven approach is also
+fragile in the half-duplex injected-Watterson rig — separate
+forward/reverse channels by construction may not be exactly
+reciprocal even when over-the-air HF nominally is.
 
-**Effort.** 3-6 weeks (frame-local approach). Reciprocity
-measurement (half-duplex calibration), per-carrier SNR estimation
-(we already have most of this from the channel equalizer),
-deterministic mask-derivation rule, modulator/demodulator wiring,
-LDPC-side per-frame puncturing awareness, and tests.
+**Hard engineering gate (the LDPC/interleaver constraint):**
 
-**Risk.** Reciprocity violations cause TX and RX to derive
-different masks → silent decode failures (worse than current,
-because there's no feedback channel to detect the mismatch).
-Mitigation: include a mask CRC or count in the next ACK so a
-mismatch is at least observable.
+A carrier mask is **not harmless puncturing**. If faded carriers
+map into clustered LDPC variable nodes, the decoder sees
+structured erasures and stopping-set failures even when TX/RX
+agree perfectly on the mask. Any phase-2 design must do one of:
+
+A. Add a carrier-to-codeword interleaver that spreads every
+   allowed mask across LDPC parity checks (bit positions on a
+   single carrier are guaranteed to land on diverse check nodes).
+B. Restrict masks to a small vetted codebook with proven erasure
+   tolerance for our specific LDPC code (offline analysis of
+   stopping-set distance for each allowed mask pattern).
+
+Option B is much smaller scope. Option A is more flexible but
+requires interleaver design + verification.
+
+This must be a design-stage gate, not an "discover during
+hardware testing" hazard.
+
+**Required scope for phase-2:**
+
+1. PHY-header mask field with strong protection (the mask itself
+   must decode robustly even when payload doesn't — small CRC,
+   high-rate FEC over the header, or fixed-position pilots).
+2. Vetted mask codebook (option B above) OR carrier-to-CW
+   interleaver (option A) — pick one, document the design choice.
+3. Per-carrier SNR estimator on RX (γ_k = |Ĥ_k|² / σ̂²_k) — already
+   most of the way there from the channel equalizer.
+4. Mask-selection heuristic on TX (pick from codebook based on
+   most recent observed channel quality, e.g. from the previous
+   reverse-direction frame's pilots).
+5. RX inserts LLR=0 erasures at masked-carrier bit positions
+   AFTER de-interleaving (so the interleaver in step 2 is
+   actually doing its job).
+6. AWGN must be a strict no-op (default mask = all-ones; selector
+   never triggers a non-default mask on flat channels).
+7. Hardware acceptance: 5/5 seeds at ≥ 1631 bps baseline on
+   Watterson Good SNR=15, no catastrophic seeds.
+
+**Out of scope (do not bundle):**
+- Levin-Campello mixed-modulation bit allocation (a separate,
+  larger feature).
+- Closed-loop adaptation via MODE_CHANGE (rejected, see above).
+- Reciprocity-based silent-mask schemes (rejected, see above).
+
+**Effort.** 3-6 weeks. PHY-header mask field + protection,
+vetted mask codebook OR interleaver, RX SNR estimator, TX
+selector, RX LLR-erasure insertion, all with tests including
+synthetic-notch integration tests and hardware acceptance.
+
+**Risk.** Header decode failure on bad channels — if the mask
+field itself doesn't decode, the entire frame is undecodable.
+Mitigation: keep the header on a fixed never-masked subset of
+"protected" carriers, or use a small codebook with a 4-6 bit
+codebook ID instead of a full 64-bit mask (header overhead drops
+from 64 b to 4-6 b).
 
 **Estimated gain.** 30-50% on fading channels with strong
 frequency-selective notches. Smaller on flat fading or AWGN.
