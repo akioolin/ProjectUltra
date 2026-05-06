@@ -130,13 +130,57 @@ Report: (a) patch summary with file:line, (b) test results,
 
 ### Step 3 — Invoke Codex
 
+**Default for multi-round work: use `codex exec resume` to maintain
+conversation context across rounds.** This is a major workflow
+improvement — Codex remembers what it already tried, what files it
+read, and what tradeoffs it considered. No more re-feeding the
+entire repo every round.
+
+**Round 1 (initial brief):**
+
 ```bash
-codex exec - < /tmp/codex_<topic>_prompt.txt 2>&1 | tee /tmp/codex_<topic>.log | tail -50
+codex exec - < /tmp/codex_<topic>_prompt.txt 2>&1 \
+  | tee /tmp/codex_<topic>_round1.log | tail -50
 ```
 
-The `2>&1 | tee | tail` pattern captures the full transcript while
-keeping your context window light. Codex reports the patch summary
-on stderr at the end.
+This automatically records a session under
+`~/.codex/sessions/<year>/<month>/<day>/rollout-<uuid>.jsonl`.
+
+**Round 2+ (continuation, same context):**
+
+```bash
+codex exec resume --last - < /tmp/codex_<topic>_round2.txt 2>&1 \
+  | tee /tmp/codex_<topic>_round2.log | tail -50
+```
+
+`--last` resumes the most recent session for the current cwd.
+For parallel sessions, capture the UUID from the round-1 JSON
+output (`codex exec --json -`) and use
+`codex exec resume <uuid> -` instead.
+
+**Why this matters:**
+
+- Codex spends roughly 100K tokens per round re-loading codebase
+  context. Resume mode skips that — round 2 typically uses 10-30K
+  tokens vs 100-200K for a fresh `exec`.
+- Round-N briefs become much shorter — instead of restating the
+  full design and prior rounds, you can write things like
+  *"AWGN still regresses 22 %, bisection points to Mac TX side,
+  find a different angle."* Codex remembers everything else.
+- Cuts wall-clock per round from 15-30 min down to 5-15 min.
+
+**When NOT to use resume:**
+
+- One-shot reviews (`codex review --uncommitted`) — they're already
+  stateless by design.
+- When you want a deliberately fresh perspective (e.g., asking a
+  second time after Codex has been chasing the wrong angle).
+- Cross-topic work — keep one session per topic.
+
+**Round-1 brief still gets the full context** (status of prior
+rounds if any, finding, root cause, suggested fix, tests, repro,
+out of scope, files-to-touch). Round-2+ briefs build on that;
+they don't restate it.
 
 ### Step 4 — Verify before trusting
 
@@ -199,13 +243,21 @@ read every one.
 When the user explicitly says "fix it autonomously" / "keep iterating"
 / "just go":
 
+- **Use `codex exec resume --last` for round 2+.** This is the new
+  default for autonomous-mode multi-round work (see Step 3 above).
+  Each round's brief becomes 50-200 lines instead of 500-1500
+  because Codex remembers context.
 - **No pausing for permission between rounds.** Each round = brief,
-  codex, build, ctest, hardware test, decision.
+  codex (resume), build, ctest, hardware test, decision.
 - **Stop only when:**
   - Test passes end-to-end (success — write CHANGELOG, ask permission
     to commit)
   - 4+ rounds without convergence (something is fundamentally wrong;
-    write a status report and stop, ask user)
+    write a status report and stop, ask user). **Exception:** for
+    optimizations the user has flagged as critical (e.g. backlog #5
+    per-carrier bit loading), the user may explicitly override the
+    4-round cap. When that happens, still write a status report at
+    round 4 so the user can intervene, but keep iterating.
   - A round introduces a *worse* failure than the previous (rollback
     candidate; report)
 - **Always write a CHANGELOG entry summarizing the rounds.** Even if
