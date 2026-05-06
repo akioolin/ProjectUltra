@@ -46,10 +46,19 @@ namespace ModeCapabilities {
     constexpr uint8_t MC_DPSK    = 0x10;  // Multi-Carrier DPSK for low SNR with fading (0-10 dB)
     constexpr uint8_t OFDM_CHIRP = 0x20;  // OFDM with chirp sync + DQPSK (fading)
     constexpr uint8_t OFDM_NARROW = 0x40; // Narrowband OFDM (500 Hz, 3-10 dB)
+    constexpr uint8_t PHY_MASK_V1 = 0x80; // Optional per-frame PHY carrier mask header
     constexpr uint8_t ALL        = OFDM_COX | MC_DPSK | OFDM_CHIRP | OFDM_NARROW;
 }
 
 const char* waveformModeToString(WaveformMode mode);
+
+inline bool hasPhyMaskV1Capability(uint8_t capabilities) {
+    return (capabilities & ModeCapabilities::PHY_MASK_V1) != 0;
+}
+
+inline uint8_t setPhyMaskV1Capability(uint8_t capabilities) {
+    return capabilities | ModeCapabilities::PHY_MASK_V1;
+}
 
 // Helper: check if a WaveformMode is any OFDM variant (CHIRP, COX, or NARROW)
 inline bool isOFDMMode(WaveformMode mode) {
@@ -319,6 +328,53 @@ struct PingFrame {
 };
 
 // ============================================================================
+// PHY Mask Header (20 bytes - phase-2 carrier-mask control word)
+// ============================================================================
+struct PHYMaskHeader {
+    static constexpr size_t SIZE = 20;
+    static constexpr uint8_t MAGIC0 = 0x50;  // 'P'
+    static constexpr uint8_t MAGIC1 = 0x4D;  // 'M'
+    static constexpr uint8_t VERSION_V1 = 1;
+    static constexpr uint8_t SCHEME_BITMAP_INTERLEAVER_V1 = 1;
+    static constexpr uint8_t INTERLEAVER_CARRIER_LDPC_V1 = 0;
+    static constexpr uint8_t MIN_MASK_COUNT = 1;
+    static constexpr uint8_t MAX_MASK_COUNT = 8;
+    static constexpr uint8_t DATA_CARRIER_COUNT = 59;
+    static constexpr uint64_t ACTIVE_CARRIER_MASK = (uint64_t{1} << DATA_CARRIER_COUNT) - 1;
+
+    uint8_t version = VERSION_V1;
+    uint8_t scheme = SCHEME_BITMAP_INTERLEAVER_V1;
+    uint8_t flags = 0;
+    uint8_t payload_profile = 0;
+    uint8_t interleaver_id = INTERLEAVER_CARRIER_LDPC_V1;
+    uint8_t mask_count = MIN_MASK_COUNT;
+    uint8_t reserved = 0;
+    uint64_t active_mask = ACTIVE_CARRIER_MASK & ~uint64_t{1};
+    uint16_t crc16 = 0;
+    uint16_t inverted_crc16 = 0;
+
+    static uint8_t packVersionScheme(uint8_t header_version, uint8_t header_scheme) {
+        return static_cast<uint8_t>(((header_version & 0x0F) << 4) | (header_scheme & 0x0F));
+    }
+
+    static uint8_t packPayloadProfile(uint8_t cw_count, uint8_t mod_id, uint8_t rate_id) {
+        return static_cast<uint8_t>((((cw_count - 1) & 0x07) << 5) |
+                                    ((mod_id & 0x07) << 2) |
+                                    (rate_id & 0x03));
+    }
+
+    uint8_t payloadCWCount() const { return static_cast<uint8_t>((payload_profile >> 5) + 1); }
+    uint8_t payloadModId() const { return static_cast<uint8_t>((payload_profile >> 2) & 0x07); }
+    uint8_t payloadRateId() const { return static_cast<uint8_t>(payload_profile & 0x03); }
+
+    Bytes serialize() const;
+    bool validateFields() const;
+
+    static bool validate(ByteSpan data);
+    static std::optional<PHYMaskHeader> deserialize(ByteSpan data);
+};
+
+// ============================================================================
 // Control Frame (20 bytes - fits in 1 codeword)
 // ============================================================================
 struct ControlFrame {
@@ -495,7 +551,10 @@ struct ConnectFrame {
     // Negotiated fixed-frame CW count.
     //   CONNECT:     initiator's forced CW count (0=AUTO, else 1..8)
     //   CONNECT_ACK: responder's chosen CW count (final agreed value, 1..8)
+    // CONNECT_ACK cannot reuse mode_capabilities for PHY_MASK_V1 because that
+    // byte carries the responder fading index. Its wire flag is bit 7 here.
     uint8_t data_frame_cw_count = 0;
+    bool phy_mask_v1_capability = false;
 
     // Factory methods
     static ConnectFrame makeConnect(const std::string& src, const std::string& dst,
@@ -527,6 +586,9 @@ struct ConnectFrame {
     std::string getSrcCallsign() const;
     std::string getDstCallsign() const;
 };
+
+bool hasPhyMaskV1Capability(const ConnectFrame& frame);
+void setPhyMaskV1Capability(ConnectFrame& frame);
 
 // ============================================================================
 // NACK payload structure (for per-codeword recovery)

@@ -2,6 +2,9 @@
 #include <cassert>
 #include <cstring>
 #include <cmath>
+#include <initializer_list>
+#include <utility>
+#include <vector>
 #include "../src/protocol/frame_v2.hpp"
 
 using namespace ultra::protocol;
@@ -35,6 +38,22 @@ static std::vector<float> bytesToSoftBits(const Bytes& encoded) {
         }
     }
     return soft_bits;
+}
+
+static uint64_t activeMaskWithErased(std::initializer_list<uint8_t> erased_carriers) {
+    uint64_t active = PHYMaskHeader::ACTIVE_CARRIER_MASK;
+    for (uint8_t carrier : erased_carriers) {
+        active &= ~(uint64_t{1} << carrier);
+    }
+    return active;
+}
+
+static PHYMaskHeader makeValidPHYMaskHeader(uint64_t active_mask, uint8_t mask_count) {
+    PHYMaskHeader h;
+    h.payload_profile = PHYMaskHeader::packPayloadProfile(4, 1, 1);
+    h.mask_count = mask_count;
+    h.active_mask = active_mask;
+    return h;
 }
 
 void test_callsign_hashing() {
@@ -205,6 +224,186 @@ void test_control_frame_magic() {
         // First two bytes should be "UL"
         assert(serialized[0] == 0x55);  // 'U'
         assert(serialized[1] == 0x4C);  // 'L'
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
+void test_phy_mask_header_roundtrip_patterns() {
+    TEST("PHY mask header roundtrip patterns and byte layout") {
+        const std::vector<std::pair<uint64_t, uint8_t>> cases = {
+            {activeMaskWithErased({17}), 1},
+            {activeMaskWithErased({0, 1, 2, 3, 4, 5, 6, 7}), 8},
+            {activeMaskWithErased({0, 58}), 2},
+        };
+
+        for (const auto& [active_mask, mask_count] : cases) {
+            PHYMaskHeader original = makeValidPHYMaskHeader(active_mask, mask_count);
+            Bytes encoded = original.serialize();
+
+            assert(encoded.size() == PHYMaskHeader::SIZE);
+            assert(encoded[0] == 0x50);
+            assert(encoded[1] == 0x4D);
+            assert(encoded[2] == 0x11);
+            assert(encoded[3] == 0);
+            assert(encoded[4] == PHYMaskHeader::packPayloadProfile(4, 1, 1));
+            assert(encoded[5] == PHYMaskHeader::INTERLEAVER_CARRIER_LDPC_V1);
+            assert(encoded[6] == mask_count);
+            assert(encoded[7] == 0);
+            for (size_t i = 0; i < sizeof(active_mask); ++i) {
+                assert(encoded[8 + i] == static_cast<uint8_t>((active_mask >> (8 * i)) & 0xFF));
+            }
+
+            uint16_t crc = ControlFrame::calculateCRC(encoded.data(), 16);
+            uint16_t inv_crc = static_cast<uint16_t>(crc ^ 0xFFFF);
+            assert(encoded[16] == static_cast<uint8_t>((crc >> 8) & 0xFF));
+            assert(encoded[17] == static_cast<uint8_t>(crc & 0xFF));
+            assert(encoded[18] == static_cast<uint8_t>((inv_crc >> 8) & 0xFF));
+            assert(encoded[19] == static_cast<uint8_t>(inv_crc & 0xFF));
+            assert(PHYMaskHeader::validate(encoded));
+
+            auto decoded = PHYMaskHeader::deserialize(encoded);
+            assert(decoded.has_value());
+            assert(decoded->version == original.version);
+            assert(decoded->scheme == original.scheme);
+            assert(decoded->flags == original.flags);
+            assert(decoded->payload_profile == original.payload_profile);
+            assert(decoded->payloadCWCount() == 4);
+            assert(decoded->payloadModId() == 1);
+            assert(decoded->payloadRateId() == 1);
+            assert(decoded->interleaver_id == original.interleaver_id);
+            assert(decoded->mask_count == original.mask_count);
+            assert(decoded->reserved == original.reserved);
+            assert(decoded->active_mask == original.active_mask);
+            assert(decoded->crc16 == crc);
+            assert(decoded->inverted_crc16 == inv_crc);
+        }
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
+void test_phy_mask_header_crc_tampering() {
+    TEST("PHY mask header CRC tampering rejection") {
+        PHYMaskHeader h = makeValidPHYMaskHeader(activeMaskWithErased({17}), 1);
+        Bytes encoded = h.serialize();
+        encoded[8] ^= 0x01;
+        assert(!PHYMaskHeader::deserialize(encoded).has_value());
+        assert(!PHYMaskHeader::validate(encoded));
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
+void test_phy_mask_header_inverted_crc_tampering() {
+    TEST("PHY mask header inverted CRC tampering rejection") {
+        PHYMaskHeader h = makeValidPHYMaskHeader(activeMaskWithErased({17}), 1);
+        Bytes encoded = h.serialize();
+        encoded[18] ^= 0x01;
+        assert(!PHYMaskHeader::deserialize(encoded).has_value());
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
+void test_phy_mask_header_unknown_version_scheme() {
+    TEST("PHY mask header unknown version, scheme, and interleaver rejection") {
+        PHYMaskHeader bad_version = makeValidPHYMaskHeader(activeMaskWithErased({17}), 1);
+        bad_version.version = 2;
+        assert(!PHYMaskHeader::deserialize(bad_version.serialize()).has_value());
+
+        PHYMaskHeader bad_scheme = makeValidPHYMaskHeader(activeMaskWithErased({17}), 1);
+        bad_scheme.scheme = 2;
+        assert(!PHYMaskHeader::deserialize(bad_scheme.serialize()).has_value());
+
+        PHYMaskHeader bad_interleaver = makeValidPHYMaskHeader(activeMaskWithErased({17}), 1);
+        bad_interleaver.interleaver_id = 1;
+        assert(!PHYMaskHeader::deserialize(bad_interleaver.serialize()).has_value());
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
+void test_phy_mask_header_reserved_rejection() {
+    TEST("PHY mask header flags and reserved-field rejection") {
+        PHYMaskHeader bad_flags = makeValidPHYMaskHeader(activeMaskWithErased({17}), 1);
+        bad_flags.flags = 1;
+        assert(!PHYMaskHeader::deserialize(bad_flags.serialize()).has_value());
+
+        PHYMaskHeader bad_reserved = makeValidPHYMaskHeader(activeMaskWithErased({17}), 1);
+        bad_reserved.reserved = 1;
+        assert(!PHYMaskHeader::deserialize(bad_reserved.serialize()).has_value());
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
+void test_phy_mask_header_mask_count_mismatch() {
+    TEST("PHY mask header mask-count mismatch rejection") {
+        PHYMaskHeader h = makeValidPHYMaskHeader(activeMaskWithErased({3, 9}), 3);
+        assert(!PHYMaskHeader::deserialize(h.serialize()).has_value());
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
+void test_phy_mask_header_out_of_range_bits() {
+    TEST("PHY mask header out-of-range carrier bit rejection") {
+        PHYMaskHeader h = makeValidPHYMaskHeader(activeMaskWithErased({17}), 1);
+        h.active_mask |= (uint64_t{1} << 59);
+        assert(!PHYMaskHeader::deserialize(h.serialize()).has_value());
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
+void test_phy_mask_capability_roundtrip() {
+    TEST("PHY mask capability flag roundtrip in CONNECT and CONNECT_ACK") {
+        auto connect = ConnectFrame::makeConnect(
+            "VA2MVR/P", "W1AW", ModeCapabilities::ALL,
+            static_cast<uint8_t>(WaveformMode::OFDM_CHIRP),
+            static_cast<uint8_t>(Modulation::DQPSK),
+            static_cast<uint8_t>(CodeRate::R1_2));
+
+        assert(!hasPhyMaskV1Capability(connect));
+        setPhyMaskV1Capability(connect);
+        assert(hasPhyMaskV1Capability(connect));
+
+        auto parsed = ConnectFrame::deserialize(connect.serialize());
+        assert(parsed.has_value());
+        assert(parsed->type == FrameType::CONNECT);
+        assert(hasPhyMaskV1Capability(*parsed));
+        assert(ultra::protocol::hasPhyMaskV1Capability(parsed->mode_capabilities));
+        assert((parsed->mode_capabilities & ModeCapabilities::ALL) == ModeCapabilities::ALL);
+
+        auto ack = ConnectFrame::makeConnectAck("W1AW", "VA2MVR/P",
+                                                static_cast<uint8_t>(WaveformMode::OFDM_CHIRP),
+                                                Modulation::DQPSK, CodeRate::R1_2,
+                                                15.25f, 0.62f, 4);
+        setPhyMaskV1Capability(ack);
+
+        auto ack_parsed = ConnectFrame::deserialize(ack.serialize());
+        assert(ack_parsed.has_value());
+        assert(ack_parsed->type == FrameType::CONNECT_ACK);
+        assert(hasPhyMaskV1Capability(*ack_parsed));
+        assert(ack_parsed->data_frame_cw_count == 4);
+        assert(std::abs(decodeFadingIndex(ack_parsed->mode_capabilities) - 0.62f) < 0.001f);
 
         PASS();
     } catch (const std::exception& e) {
@@ -1100,6 +1299,14 @@ int main() {
     test_control_frame_roundtrip();
     test_control_frame_crc();
     test_control_frame_magic();
+    test_phy_mask_header_roundtrip_patterns();
+    test_phy_mask_header_crc_tampering();
+    test_phy_mask_header_inverted_crc_tampering();
+    test_phy_mask_header_unknown_version_scheme();
+    test_phy_mask_header_reserved_rejection();
+    test_phy_mask_header_mask_count_mismatch();
+    test_phy_mask_header_out_of_range_bits();
+    test_phy_mask_capability_roundtrip();
     test_connect_frame_roundtrip_and_crc();
     test_data_frame_codeword_count();
     test_data_frame_roundtrip();

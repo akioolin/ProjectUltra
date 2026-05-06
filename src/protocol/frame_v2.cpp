@@ -7,6 +7,7 @@
 #include <cstring>
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cctype>
 #include <cmath>
 #include <memory>
@@ -168,6 +169,100 @@ uint16_t ControlFrame::calculateCRC(const uint8_t* data, size_t len) {
         }
     }
     return crc;
+}
+
+// ============================================================================
+// PHYMaskHeader implementation
+// ============================================================================
+
+Bytes PHYMaskHeader::serialize() const {
+    Bytes out(SIZE, 0);
+
+    out[0] = MAGIC0;
+    out[1] = MAGIC1;
+    out[2] = packVersionScheme(version, scheme);
+    out[3] = flags;
+    out[4] = payload_profile;
+    out[5] = interleaver_id;
+    out[6] = mask_count;
+    out[7] = reserved;
+
+    for (size_t i = 0; i < sizeof(active_mask); ++i) {
+        out[8 + i] = static_cast<uint8_t>((active_mask >> (8 * i)) & 0xFF);
+    }
+
+    const uint16_t crc = ControlFrame::calculateCRC(out.data(), 16);
+    const uint16_t inverted_crc = static_cast<uint16_t>(crc ^ 0xFFFF);
+    out[16] = static_cast<uint8_t>((crc >> 8) & 0xFF);
+    out[17] = static_cast<uint8_t>(crc & 0xFF);
+    out[18] = static_cast<uint8_t>((inverted_crc >> 8) & 0xFF);
+    out[19] = static_cast<uint8_t>(inverted_crc & 0xFF);
+
+    return out;
+}
+
+bool PHYMaskHeader::validateFields() const {
+    if (version != VERSION_V1 || scheme != SCHEME_BITMAP_INTERLEAVER_V1) {
+        return false;
+    }
+    if (flags != 0 || reserved != 0) {
+        return false;
+    }
+    if (interleaver_id != INTERLEAVER_CARRIER_LDPC_V1) {
+        return false;
+    }
+    if (mask_count < MIN_MASK_COUNT || mask_count > MAX_MASK_COUNT) {
+        return false;
+    }
+    if ((active_mask & ~ACTIVE_CARRIER_MASK) != 0) {
+        return false;
+    }
+    return std::popcount(active_mask) == DATA_CARRIER_COUNT - mask_count;
+}
+
+bool PHYMaskHeader::validate(ByteSpan data) {
+    return deserialize(data).has_value();
+}
+
+std::optional<PHYMaskHeader> PHYMaskHeader::deserialize(ByteSpan data) {
+    if (data.size() < SIZE) {
+        return std::nullopt;
+    }
+
+    if (data[0] != MAGIC0 || data[1] != MAGIC1) {
+        return std::nullopt;
+    }
+
+    const uint16_t received_crc = (static_cast<uint16_t>(data[16]) << 8) | data[17];
+    const uint16_t calculated_crc = ControlFrame::calculateCRC(data.data(), 16);
+    if (received_crc != calculated_crc) {
+        return std::nullopt;
+    }
+
+    const uint16_t received_inverted_crc = (static_cast<uint16_t>(data[18]) << 8) | data[19];
+    if (received_inverted_crc != static_cast<uint16_t>(received_crc ^ 0xFFFF)) {
+        return std::nullopt;
+    }
+
+    PHYMaskHeader h;
+    h.version = static_cast<uint8_t>((data[2] >> 4) & 0x0F);
+    h.scheme = static_cast<uint8_t>(data[2] & 0x0F);
+    h.flags = data[3];
+    h.payload_profile = data[4];
+    h.interleaver_id = data[5];
+    h.mask_count = data[6];
+    h.reserved = data[7];
+    h.active_mask = 0;
+    for (size_t i = 0; i < sizeof(h.active_mask); ++i) {
+        h.active_mask |= static_cast<uint64_t>(data[8 + i]) << (8 * i);
+    }
+    h.crc16 = received_crc;
+    h.inverted_crc16 = received_inverted_crc;
+
+    if (!h.validateFields()) {
+        return std::nullopt;
+    }
+    return h;
 }
 
 // ============================================================================
@@ -677,6 +772,7 @@ ConnectFrame ConnectFrame::makeConnect(const std::string& src, const std::string
     f.initial_code_rate = forced_code_rate;     // 0xFF = AUTO, else forced
     f.measured_snr = 0;                         // Not used in CONNECT
     f.data_frame_cw_count = forced_cw_count;    // 0=AUTO, else 1..8 forced
+    f.phy_mask_v1_capability = ultra::protocol::hasPhyMaskV1Capability(f.mode_capabilities);
     return f;
 }
 
@@ -705,6 +801,7 @@ ConnectFrame ConnectFrame::makeConnectAck(const std::string& src, const std::str
     f.initial_code_rate = static_cast<uint8_t>(init_rate);
     f.measured_snr = encodeSNR(snr_db);
     f.data_frame_cw_count = cw_count;  // Final negotiated CW count (1..8)
+    f.phy_mask_v1_capability = false;
     return f;
 }
 
@@ -723,6 +820,7 @@ ConnectFrame ConnectFrame::makeConnectNak(const std::string& src, const std::str
 
     f.mode_capabilities = 0;
     f.negotiated_mode = 0;
+    f.phy_mask_v1_capability = false;
     return f;
 }
 
@@ -741,6 +839,7 @@ ConnectFrame ConnectFrame::makeDisconnect(const std::string& src, const std::str
 
     f.mode_capabilities = 0;
     f.negotiated_mode = 0;
+    f.phy_mask_v1_capability = false;
     return f;
 }
 
@@ -768,6 +867,7 @@ ConnectFrame ConnectFrame::makeConnectAckByHash(const std::string& src, uint32_t
     f.initial_code_rate = static_cast<uint8_t>(init_rate);
     f.measured_snr = encodeSNR(snr_db);
     f.data_frame_cw_count = cw_count;  // Final negotiated CW count (1..8)
+    f.phy_mask_v1_capability = false;
     return f;
 }
 
@@ -785,6 +885,7 @@ ConnectFrame ConnectFrame::makeConnectNakByHash(const std::string& src, uint32_t
 
     f.mode_capabilities = 0;
     f.negotiated_mode = 0;
+    f.phy_mask_v1_capability = false;
     return f;
 }
 
@@ -837,7 +938,11 @@ Bytes ConnectFrame::serialize() const {
     out.push_back(initial_modulation);
     out.push_back(initial_code_rate);
     out.push_back(measured_snr);
-    out.push_back(data_frame_cw_count);
+    uint8_t cw_count_wire = data_frame_cw_count;
+    if (type == FrameType::CONNECT_ACK && phy_mask_v1_capability) {
+        cw_count_wire |= ModeCapabilities::PHY_MASK_V1;
+    }
+    out.push_back(cw_count_wire);
 
     // Frame CRC (2 bytes)
     uint16_t fcrc = ControlFrame::calculateCRC(out.data(), out.size());
@@ -909,7 +1014,14 @@ std::optional<ConnectFrame> ConnectFrame::deserialize(ByteSpan data) {
     f.initial_modulation = data[field_offset + 2];
     f.initial_code_rate = data[field_offset + 3];
     f.measured_snr = data[field_offset + 4];
-    f.data_frame_cw_count = data[field_offset + 5];
+    const uint8_t cw_count_wire = data[field_offset + 5];
+    if (f.type == FrameType::CONNECT_ACK) {
+        f.phy_mask_v1_capability = (cw_count_wire & ModeCapabilities::PHY_MASK_V1) != 0;
+        f.data_frame_cw_count = static_cast<uint8_t>(cw_count_wire & 0x0F);
+    } else {
+        f.data_frame_cw_count = cw_count_wire;
+        f.phy_mask_v1_capability = ultra::protocol::hasPhyMaskV1Capability(f.mode_capabilities);
+    }
 
     return f;
 }
@@ -920,6 +1032,22 @@ std::string ConnectFrame::getSrcCallsign() const {
 
 std::string ConnectFrame::getDstCallsign() const {
     return std::string(dst_callsign);
+}
+
+bool hasPhyMaskV1Capability(const ConnectFrame& frame) {
+    if (frame.type == FrameType::CONNECT_ACK) {
+        return frame.phy_mask_v1_capability;
+    }
+    return ultra::protocol::hasPhyMaskV1Capability(frame.mode_capabilities);
+}
+
+void setPhyMaskV1Capability(ConnectFrame& frame) {
+    if (frame.type == FrameType::CONNECT_ACK) {
+        frame.phy_mask_v1_capability = true;
+        return;
+    }
+    frame.mode_capabilities = ultra::protocol::setPhyMaskV1Capability(frame.mode_capabilities);
+    frame.phy_mask_v1_capability = true;
 }
 
 // ============================================================================
