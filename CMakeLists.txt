@@ -71,6 +71,7 @@ add_library(ultra_core STATIC
     src/fec/codec_factory.cpp
     src/fec/frame_interleaver.cpp
     src/fec/burst_interleaver.cpp
+    src/fec/carrier_ldpc_interleaver.cpp
     src/fec/soft_combine.cpp
     src/framing/frame_builder.cpp
     src/arq/arq_controller.cpp
