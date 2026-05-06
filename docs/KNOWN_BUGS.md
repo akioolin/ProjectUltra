@@ -56,6 +56,7 @@ Current blockers:
 
 ## Recently Fixed (Short List)
 
+- 2026-05-05: BUG-RATE-001 fixed — adaptive MODE_CHANGE panic-downshift on short Watterson-Good transfers. Hysteresis (`ADAPTIVE_PRESSURE_WINDOWS_FOR_DOWNGRADE = 2`) + lockout reduction (`ADAPTIVE_POST_DOWNGRADE_LOCKOUT_MS` 15 s → 5 s). 5-seed reproducer now 5/5 PASS with worst-case throughput improved 444 → 684 bps (no panic downgrade). See CHANGELOG 2026-05-05.
 - 2026-02-12: GUI immediate TX abort control (`STOP TX`) added.
 - 2026-02-12: GUI telemetry split into PHY vs effective goodput, plus ARQ health view.
 - 2026-02-11: OTA control-path hardening and bootstrap safety updates.

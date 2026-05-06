@@ -102,6 +102,10 @@ struct ConnectionAdaptiveTestAccess {
     static void createRetransmissionPressure(Connection& c, size_t in_flight_frames) {
         c.arq_.setAckTimeout(100);
         fillArqWindow(c, in_flight_frames);
+        advanceRetransmissionPressure(c);
+    }
+
+    static void advanceRetransmissionPressure(Connection& c) {
         c.arq_.tick(150);
     }
 
@@ -131,6 +135,10 @@ struct ConnectionAdaptiveTestAccess {
 
     static uint32_t postDowngradeLockoutMs() {
         return Connection::ADAPTIVE_POST_DOWNGRADE_LOCKOUT_MS;
+    }
+
+    static int cleanWindowsForUpgrade() {
+        return Connection::ADAPTIVE_CLEAN_WINDOWS_FOR_UPGRADE;
     }
 
     static uint32_t downgradeForceMs() {
@@ -244,6 +252,50 @@ void test_adaptive_upgrade_skips_small_backlog() {
     std::filesystem::remove_all(dir);
 }
 
+void test_adaptive_downgrade_hysteresis_and_short_lockout_upgrade() {
+    auto dir = makeTempDir("ultra_adapt_hysteresis");
+    CHECK(!dir.empty(), "temp dir");
+    auto path = createFile(dir, 5000);
+    CHECK(!path.empty(), "large test file");
+
+    Connection c;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 15.0f, 0.05f);
+    ConnectionAdaptiveTestAccess::startFile(c, path);
+    ConnectionAdaptiveTestAccess::createRetransmissionPressure(
+        c, ConnectionAdaptiveTestAccess::arqWindow(c) / 2);
+    ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
+
+    CHECK(!ConnectionAdaptiveTestAccess::adaptiveTargetPending(c),
+          "single retry-pressure window should not queue downgrade target");
+    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
+          "single retry-pressure window should not issue downgrade MODE_CHANGE");
+
+    ConnectionAdaptiveTestAccess::advanceRetransmissionPressure(c);
+    ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
+
+    CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c),
+          "two consecutive retry-pressure windows should issue downgrade");
+    CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R1_4,
+          "R1/2 retry pressure should step down to R1/4");
+    ConnectionAdaptiveTestAccess::acknowledgeModeChange(c);
+    CHECK(c.getDataCodeRate() == CodeRate::R1_4,
+          "acknowledged downgrade should apply R1/4");
+    CHECK(ConnectionAdaptiveTestAccess::postDowngradeLockoutMs() == 5000,
+          "post-downgrade lockout should be 5000ms");
+
+    ConnectionAdaptiveTestAccess::updateAdaptive(
+        c, ConnectionAdaptiveTestAccess::postDowngradeLockoutMs());
+    for (int i = 0; i < ConnectionAdaptiveTestAccess::cleanWindowsForUpgrade(); ++i) {
+        ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
+    }
+
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetPending(c),
+          "clean windows after short lockout should queue upgrade");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(c) == CodeRate::R2_3,
+          "short-lockout upgrade should target recommended R2/3");
+    std::filesystem::remove_all(dir);
+}
+
 void test_adaptive_downgrade_waits_when_more_than_half_full() {
     auto dir = makeTempDir("ultra_adapt_down");
     CHECK(!dir.empty(), "temp dir");
@@ -255,6 +307,8 @@ void test_adaptive_downgrade_waits_when_more_than_half_full() {
     ConnectionAdaptiveTestAccess::startFile(c, path);
     const size_t window = ConnectionAdaptiveTestAccess::arqWindow(c);
     ConnectionAdaptiveTestAccess::createRetransmissionPressure(c, (window / 2) + 1);
+    ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
+    ConnectionAdaptiveTestAccess::advanceRetransmissionPressure(c);
     ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
 
     CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetPending(c),
@@ -282,6 +336,8 @@ void test_adaptive_downgrade_fires_when_window_half_full() {
     CHECK(ConnectionAdaptiveTestAccess::arqAvailableSlots(c) * 2 == window,
           "test setup should leave exactly half the ARQ window free");
     ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
+    ConnectionAdaptiveTestAccess::advanceRetransmissionPressure(c);
+    ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
 
     CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c),
           "half-free downgrade should issue MODE_CHANGE immediately");
@@ -306,6 +362,8 @@ void test_adaptive_stuck_downgrade_forces_after_timeout() {
 
     CHECK(ConnectionAdaptiveTestAccess::arqAvailableSlots(c) == 0,
           "test setup should leave no ARQ slots free");
+    ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
+    ConnectionAdaptiveTestAccess::advanceRetransmissionPressure(c);
     ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
 
     CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetPending(c),
@@ -376,6 +434,8 @@ void test_adaptive_post_downgrade_lockout_blocks_upgrade() {
     ConnectionAdaptiveTestAccess::createRetransmissionPressure(
         c, ConnectionAdaptiveTestAccess::arqWindow(c) / 2);
     ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
+    ConnectionAdaptiveTestAccess::advanceRetransmissionPressure(c);
+    ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
     ConnectionAdaptiveTestAccess::acknowledgeModeChange(c);
 
     CHECK(ConnectionAdaptiveTestAccess::postDowngradeLockoutRemaining(c) ==
@@ -403,6 +463,8 @@ void test_adaptive_post_downgrade_lockout_expires() {
     ConnectionAdaptiveTestAccess::startFile(c, path);
     ConnectionAdaptiveTestAccess::createRetransmissionPressure(
         c, ConnectionAdaptiveTestAccess::arqWindow(c) / 2);
+    ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
+    ConnectionAdaptiveTestAccess::advanceRetransmissionPressure(c);
     ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
     ConnectionAdaptiveTestAccess::acknowledgeModeChange(c);
 
@@ -446,6 +508,7 @@ int main() {
     test_remote_mode_change_reconfigures_arq();
     test_adaptive_upgrade_requires_backlog_and_clean_windows();
     test_adaptive_upgrade_skips_small_backlog();
+    test_adaptive_downgrade_hysteresis_and_short_lockout_upgrade();
     test_adaptive_downgrade_waits_when_more_than_half_full();
     test_adaptive_downgrade_fires_when_window_half_full();
     test_adaptive_stuck_downgrade_forces_after_timeout();

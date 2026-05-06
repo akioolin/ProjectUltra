@@ -373,11 +373,13 @@ private:
     uint32_t adaptive_post_downgrade_lockout_ms_ = 0;
     uint32_t adaptive_downgrade_queue_age_ms_ = 0;
     int adaptive_clean_windows_ = 0;
+    int adaptive_pressure_windows_ = 0;
     static constexpr uint32_t ADAPTIVE_EVAL_INTERVAL_MS = 1000;
     static constexpr uint32_t ADAPTIVE_MODE_CHANGE_COOLDOWN_MS = 3000;
-    static constexpr uint32_t ADAPTIVE_POST_DOWNGRADE_LOCKOUT_MS = 15000;
+    static constexpr uint32_t ADAPTIVE_POST_DOWNGRADE_LOCKOUT_MS = 5000;
     static constexpr uint32_t ADAPTIVE_DOWNGRADE_FORCE_MS = 6000;
     static constexpr int ADAPTIVE_CLEAN_WINDOWS_FOR_UPGRADE = 3;
+    static constexpr int ADAPTIVE_PRESSURE_WINDOWS_FOR_DOWNGRADE = 2;
 
     // Callbacks
     TransmitCallback on_transmit_;

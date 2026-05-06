@@ -906,6 +906,7 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                                 adaptive_post_downgrade_lockout_ms_ =
                                     ADAPTIVE_POST_DOWNGRADE_LOCKOUT_MS;
                                 adaptive_clean_windows_ = 0;
+                                adaptive_pressure_windows_ = 0;
                             }
                             mode_change_pending_ = false;
 
@@ -1002,6 +1003,7 @@ void Connection::resetAdaptiveModeController() {
     adaptive_post_downgrade_lockout_ms_ = 0;
     adaptive_downgrade_queue_age_ms_ = 0;
     adaptive_clean_windows_ = 0;
+    adaptive_pressure_windows_ = 0;
 }
 
 bool Connection::canIssueAdaptiveModeChange(bool is_downgrade) const {
@@ -1144,6 +1146,7 @@ bool Connection::tryIssueAdaptiveModeChangeAtBoundary() {
     adaptive_downgrade_queue_age_ms_ = 0;
     adaptive_cooldown_ms_ = ADAPTIVE_MODE_CHANGE_COOLDOWN_MS;
     adaptive_clean_windows_ = 0;
+    adaptive_pressure_windows_ = 0;
     if (is_downgrade && mode_change_pending_) {
         adaptive_post_downgrade_lockout_ms_ = ADAPTIVE_POST_DOWNGRADE_LOCKOUT_MS;
     }
@@ -1177,6 +1180,7 @@ void Connection::updateAdaptiveModeController(uint32_t elapsed_ms) {
         adaptive_post_downgrade_lockout_ms_ = 0;
         adaptive_downgrade_queue_age_ms_ = 0;
         adaptive_clean_windows_ = 0;
+        adaptive_pressure_windows_ = 0;
         return;
     }
     if (file_transfer_.getState() != FileTransferState::SENDING) {
@@ -1185,6 +1189,7 @@ void Connection::updateAdaptiveModeController(uint32_t elapsed_ms) {
         adaptive_post_downgrade_lockout_ms_ = 0;
         adaptive_downgrade_queue_age_ms_ = 0;
         adaptive_clean_windows_ = 0;
+        adaptive_pressure_windows_ = 0;
         return;
     }
 
@@ -1211,13 +1216,20 @@ void Connection::updateAdaptiveModeController(uint32_t elapsed_ms) {
     const bool clean_window =
         hasCleanAdaptiveWindow(current_stats, adaptive_last_stats_);
     adaptive_last_stats_ = current_stats;
+    if (retry_pressure) {
+        adaptive_pressure_windows_++;
+    } else {
+        adaptive_pressure_windows_ = 0;
+    }
 
     Modulation recommended_mod = data_modulation_;
     CodeRate recommended_rate = data_code_rate_;
     recommendDataMode(measured_snr_db_, negotiated_mode_,
                       recommended_mod, recommended_rate, fading_index_);
 
-    if (retry_pressure && isFasterRate(data_code_rate_, CodeRate::R1_4)) {
+    if (retry_pressure &&
+        adaptive_pressure_windows_ >= ADAPTIVE_PRESSURE_WINDOWS_FOR_DOWNGRADE &&
+        isFasterRate(data_code_rate_, CodeRate::R1_4)) {
         adaptive_clean_windows_ = 0;
         adaptive_target_.pending = true;
         adaptive_target_.modulation = recommended_mod;

@@ -10,6 +10,100 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-05: BUG-RATE-001 — adaptive MODE_CHANGE panic-downshift hardened
+
+**What was broken:**
+On short Watterson-Good SNR=15 transfers (5 KB), the connection-layer
+adaptive rate controller would panic-downshift R1/2 → R1/4 on the
+first fade-induced retransmit and never re-evaluate upward inside the
+session. 5-seed sweep on Mac↔Pi5 hardware showed 1/5 seeds at 444 bps
+end-to-end (vs 1,440 bps median — a 3.2× tail loss). The remaining
+4/5 seeds completed cleanly at the auto-rate target, so the bug only
+bites when a fade burst happens early in a short transfer.
+
+Root cause was three combining factors in
+`updateAdaptiveModeController` (`src/protocol/connection.cpp:1153`):
+
+1. `hasAdaptiveRetryPressure` (line 68) returned true on a *single*
+   1-second eval window with `retransmissions >= 2`. No requirement
+   that pressure persist across multiple windows. A single fade burst
+   that produced 2-3 retx in the same 1 s window met the threshold
+   for queueing a downgrade.
+2. `ADAPTIVE_POST_DOWNGRADE_LOCKOUT_MS = 15000` — sized for long-haul
+   transfers. On a 5 KB file that takes 28-45 s end-to-end, downgrading
+   at t ≈ 44 s locks out upgrade until t ≈ 59 s; the file is already
+   done.
+3. `ADAPTIVE_CLEAN_WINDOWS_FOR_UPGRADE = 3` requires 3 s of clean
+   windows. Combined with (2), short transfers literally cannot
+   upshift in time.
+
+Filed as `KNOWN_BUGS.md:BUG-RATE-001`.
+
+**What was changed:**
+- **`src/protocol/connection.hpp`**:
+  - `ADAPTIVE_POST_DOWNGRADE_LOCKOUT_MS`: `15000` → `5000` ms.
+  - New `ADAPTIVE_PRESSURE_WINDOWS_FOR_DOWNGRADE = 2`.
+  - New `Connection::adaptive_pressure_windows_` member.
+- **`src/protocol/connection.cpp`**:
+  - `updateAdaptiveModeController` now increments
+    `adaptive_pressure_windows_` when retry-pressure is true,
+    resets on clean windows, and gates downgrade-queueing at
+    `>= ADAPTIVE_PRESSURE_WINDOWS_FOR_DOWNGRADE`.
+  - Counter reset on acknowledged downgrade, controller reset, file
+    transfer stop, and forced-mode override (matching existing
+    `adaptive_clean_windows_` reset sites).
+- **`tests/test_connection_adaptive.cpp`**:
+  - New regression `test_adaptive_downgrade_hysteresis_and_short_lockout_upgrade`
+    asserting (a) single retry-pressure window does NOT queue a
+    downgrade, (b) two consecutive windows DO queue, (c) post-5 s
+    lockout + 3 clean windows queues an upgrade.
+  - Existing tests updated to inject a second window of retx pressure
+    so they continue to test the downgrade path correctly.
+
+Total diff: +79 / -2 across 3 files. `ADAPTIVE_DOWNGRADE_FORCE_MS = 6000`
+left unchanged — the forced-downgrade escape valve is preserved for
+genuinely sustained channel collapse.
+
+**Why it's properly fixed:**
+The trigger now reflects *consecutive* observation rather than a
+single-window snapshot, which is the standard hysteresis pattern for
+control loops with noisy measurements. Lockout reduction matches the
+duration of a typical short-transfer session, so upshift is reachable
+within the same session if the channel recovers. The forced-downgrade
+path stays in place so a genuinely collapsed channel still gets a
+fast rate cut (`ADAPTIVE_DOWNGRADE_FORCE_MS = 6000` ≥
+2 × `ADAPTIVE_EVAL_INTERVAL_MS`, so any sustained pressure still
+triggers a forced downgrade after 6 s).
+
+**Test verification:**
+- `cmake --build build -j4`: success (with `-DULTRA_BUILD_GUI=OFF`).
+- `ctest --test-dir build --output-on-failure -j4`: 35/35 passed,
+  including the new `test_adaptive_downgrade_hysteresis_and_short_lockout_upgrade`.
+- 5-seed Mac↔Pi5 hardware test, 5 KB Watterson Good SNR=15
+  (BUG-RATE-001 reproducer):
+  ```
+  Seed 1: 1,449 bps  0 retx 0 timeouts  PASS
+  Seed 2: 1,440 bps  0 retx 0 timeouts  PASS
+  Seed 3: 1,440 bps  0 retx 0 timeouts  PASS
+  Seed 4:   684 bps 11 retx 7 timeouts  PASS (no MODE_CHANGE)
+  Seed 5: 1,459 bps  0 retx 0 timeouts  PASS
+  ```
+  vs pre-fix:
+  ```
+  Seed 1: 1,440 bps  0 retx 0 timeouts  PASS
+  Seed 2: 1,440 bps  0 retx 0 timeouts  PASS
+  Seed 3: 1,439 bps  0 retx 0 timeouts  PASS
+  Seed 4:   444 bps 12 retx 7 timeouts  PASS (panic R1/2→R1/4)
+  Seed 5: 1,440 bps  0 retx 0 timeouts  PASS
+  ```
+  Worst-case throughput on the panic seed improved 444 → 684 bps
+  (+54 %), with rate held at R1/2 throughout (no MODE_CHANGE
+  downgrade). The remaining loss on seed 4 is genuine bad-channel
+  time on R1/2 — addressing that residual is the work for backlog
+  #5 phase-2a (TX-aware carrier mask).
+
+---
+
 ## 2026-05-04: Wire-level negotiation of fixed-frame CW count
 
 **What was broken:**
