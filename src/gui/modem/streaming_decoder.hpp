@@ -284,6 +284,9 @@ private:
     // Decode the current frame
     void decodeCurrentFrame();
 
+    int expectedOFDMCodewordsForSamples(size_t sample_count) const;
+    bool processWaveformForCodewords(SampleSpan samples, int expected_codewords);
+
     // Estimate SNR from chirp correlation strength
     float estimateSNRFromChirp(float correlation, float noise_floor);
 

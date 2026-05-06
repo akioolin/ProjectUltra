@@ -142,6 +142,13 @@ struct OFDMDemodulator::Impl {
     // Per-carrier noise variance after equalization
     std::vector<float> carrier_noise_var;
 
+    // RX-local hard-erasure decisions for the current data symbol.
+    // Set by equalize() from gamma_k = |H_k|^2 / sigma^2, consumed by
+    // demodulateSymbol() to write exact zero LLRs.
+    bool rx_carrier_erasure_enabled_ = false;
+    std::vector<uint8_t> carrier_erasure_flags_;
+    std::vector<uint8_t> differential_prev_erased_;
+
     // Per-carrier adaptive LLR scaling: track |equalized| stability over symbols
     // Stable carriers keep full LLR confidence; fading carriers get inflated noise
     std::vector<float> carrier_eq_mag_ema_;   // EMA of |equalized[i]| per carrier

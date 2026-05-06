@@ -652,6 +652,12 @@ std::vector<float> OFDMChirpWaveform::getSoftBits() {
     return std::move(soft_bits_);
 }
 
+void OFDMChirpWaveform::setRXCarrierErasureEnabled(bool enabled) {
+    if (demodulator_) {
+        demodulator_->setRXCarrierErasureEnabled(enabled);
+    }
+}
+
 void OFDMChirpWaveform::reset() {
     if (demodulator_) {
         demodulator_->reset();

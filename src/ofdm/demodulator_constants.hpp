@@ -82,10 +82,12 @@ constexpr float PHASE_INTERPOLATION_THRESHOLD = 1.5708f;  // π/2 = 90°
 // Default SNR assumption for first symbol (15 dB = 31.6 linear)
 constexpr float DEFAULT_SNR_LINEAR = 31.6f;
 
-// Fade detection threshold - carriers below this ratio of average power get soft erasure
-// Higher value = more aggressive erasure (helps fading but hurts AWGN)
-// 0.25 = 6 dB below average = mark ~20% of carriers as faded on moderate fading
-constexpr float FADE_THRESHOLD_RATIO = 0.25f;
+// RX-local hard-erasure floor. gamma_k = |H_k|^2 / sigma^2 is measured from
+// the current frame's LTS and per-symbol pilot tracking. Below 0 dB the
+// carrier has less signal than noise; for BPSK/QPSK-like LDPC bit channels the
+// mutual information is below the useful R1/2 operating point, and DPSK pays
+// additional differential loss. Treat it as an erasure instead of weak evidence.
+constexpr float RX_ERASURE_GAMMA_FLOOR_LINEAR = 1.0f;  // 0 dB
 
 // Per-carrier adaptive LLR scaling: variance-to-noise inflation factor
 // Higher = more aggressive noise inflation for unstable carriers

@@ -148,6 +148,11 @@ public:
     float getLastLTSSignalPower() const;
     float getLastLTSChannelMagnitude() const;
 
+    // RX-local carrier erasure is only LDPC-safe for multi-codeword OFDM
+    // frames. Callers that know they are decoding a 1-CW control frame must
+    // leave this disabled.
+    void setRXCarrierErasureEnabled(bool enabled);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

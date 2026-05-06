@@ -1280,6 +1280,7 @@ void OFDMDemodulator::Impl::rlsUpdate(int idx, Complex received, Complex referen
 std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>& freq_domain, Modulation mod) {
     std::vector<Complex> equalized(data_carrier_indices.size());
     carrier_noise_var.resize(data_carrier_indices.size());
+    carrier_erasure_flags_.assign(data_carrier_indices.size(), 0);
 
     // For differential modulation: apply pilot_phase_correction to track common phase drift
     // This is updated after each symbol via decision-directed tracking
@@ -1305,14 +1306,13 @@ std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>&
             avg_h_power += std::norm(channel_estimate[idx]);
         }
         avg_h_power /= data_carrier_indices.size();
-        float fade_threshold = FADE_THRESHOLD_RATIO * avg_h_power;
-
         // Noise variance for MMSE equalization and LLR computation
         // Uses global average from LTS (per-carrier estimates are too noisy with only 2 samples)
         float scaled_noise_var = noise_variance;
         if (scaled_noise_var < 1e-6f) {
             scaled_noise_var = avg_h_power / DEFAULT_SNR_LINEAR;
         }
+        scaled_noise_var = std::max(scaled_noise_var, MIN_CARRIER_NOISE_VAR);
 
         // Debug: log first symbol equalization details
         static int eq_log_count = 0;
@@ -1343,9 +1343,11 @@ std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>&
                 carrier_noise_var[i] = scaled_noise_var / (h_power + scaled_noise_var);
             }
 
-            // Soft erasure for deeply faded carriers
-            // This tells LDPC "don't trust this carrier" by increasing noise variance
-            if (h_power < fade_threshold) {
+            // RX-local hard erasure: below 0 dB per-carrier gamma, the
+            // demapper must contribute no evidence to LDPC.
+            if (rx_carrier_erasure_enabled_ &&
+                h_power < RX_ERASURE_GAMMA_FLOOR_LINEAR * scaled_noise_var) {
+                carrier_erasure_flags_[i] = 1;
                 carrier_noise_var[i] = MAX_CARRIER_NOISE_VAR;
             }
 
@@ -1356,6 +1358,7 @@ std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>&
     }
 
     bool use_adaptive = config.adaptive_eq_enabled;
+    const float reliability_noise_var = std::max(noise_variance, MIN_CARRIER_NOISE_VAR);
 
     for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
         int idx = data_carrier_indices[i];
@@ -1404,22 +1407,12 @@ std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>&
                 carrier_noise_var[i] = std::max(MIN_CARRIER_NOISE_VAR, std::min(MAX_CARRIER_NOISE_VAR, carrier_noise_var[i]));
             }
         }
-    }
 
-    // Detect deep fades and apply soft erasure
-    float avg_h_power = 0.0f;
-    for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
-        int idx = data_carrier_indices[i];
-        avg_h_power += std::norm(channel_estimate[idx]);
-    }
-    avg_h_power /= data_carrier_indices.size();
-
-    float fade_threshold = FADE_THRESHOLD_RATIO * avg_h_power;
-    for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
-        int idx = data_carrier_indices[i];
         float h_power = std::norm(channel_estimate[idx]);
-        if (h_power < fade_threshold) {
-            carrier_noise_var[i] = MAX_CARRIER_NOISE_VAR;  // Soft erasure
+        if (rx_carrier_erasure_enabled_ &&
+            h_power < RX_ERASURE_GAMMA_FLOOR_LINEAR * reliability_noise_var) {
+            carrier_erasure_flags_[i] = 1;
+            carrier_noise_var[i] = MAX_CARRIER_NOISE_VAR;
         }
     }
 

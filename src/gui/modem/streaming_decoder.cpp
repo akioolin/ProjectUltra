@@ -973,6 +973,37 @@ static std::pair<bool, Bytes> robustDecodeSingleCW(
     return {ok, data};
 }
 
+int StreamingDecoder::expectedOFDMCodewordsForSamples(size_t sample_count) const {
+    if (!waveform_ || !connected_ || !protocol::isOFDMMode(mode_)) {
+        return 1;
+    }
+
+    if (pending_total_cw_ > 0) {
+        return pending_total_cw_;
+    }
+
+    const int max_cw = v2::sanitizeFixedFrameCodewords(fixed_frame_codewords_);
+    for (int cw = max_cw; cw >= 2; --cw) {
+        if (sample_count >= static_cast<size_t>(waveform_->getMinSamplesForCWCount(cw))) {
+            return cw;
+        }
+    }
+
+    return 1;
+}
+
+bool StreamingDecoder::processWaveformForCodewords(SampleSpan samples,
+                                                   int expected_codewords) {
+    if (!waveform_) {
+        return false;
+    }
+
+    const bool allow_rx_erasure =
+        connected_ && protocol::isOFDMMode(mode_) && expected_codewords >= 2;
+    waveform_->setRXCarrierErasureEnabled(allow_rx_erasure);
+    return waveform_->process(samples);
+}
+
 void StreamingDecoder::decodeCurrentFrame() {
     if (!waveform_) {
         {
@@ -1141,7 +1172,8 @@ void StreamingDecoder::decodeCurrentFrame() {
         }
 
         waveform_->setFrequencyOffset(decode_cfo);
-        bool control_ok = waveform_->process(SampleSpan(frame_buffer.data(), frame_buffer.size()));
+        bool control_ok = processWaveformForCodewords(
+            SampleSpan(frame_buffer.data(), frame_buffer.size()), 1);
         if (control_ok) {
             float lts_signal_power = 1.0f;
             float lts_channel_mag = 1.0f;
@@ -1249,7 +1281,9 @@ void StreamingDecoder::decodeCurrentFrame() {
     waveform_->setFrequencyOffset(decode_cfo);
 
     auto decode_start = std::chrono::steady_clock::now();
-    bool ok = waveform_->process(SampleSpan(frame_buffer.data(), frame_buffer.size()));
+    const int expected_codewords = expectedOFDMCodewordsForSamples(frame_buffer.size());
+    bool ok = processWaveformForCodewords(
+        SampleSpan(frame_buffer.data(), frame_buffer.size()), expected_codewords);
 
     if (!ok) {
         LOG_MODEM(DEBUG, "[%s] process() failed", log_prefix_.c_str());
@@ -1315,7 +1349,8 @@ void StreamingDecoder::decodeCurrentFrame() {
 
                 waveform_->setAbsoluteTrainingPosition(corrected_sync_abs);
                 waveform_->setFrequencyOffset(decode_cfo);
-                bool retry_ok = waveform_->process(SampleSpan(frame_buffer.data(), frame_buffer.size()));
+                bool retry_ok = processWaveformForCodewords(
+                    SampleSpan(frame_buffer.data(), frame_buffer.size()), expected_codewords);
                 if (retry_ok) {
                     sync_position_ = corrected_sync_pos;
                     frame_sync_abs = corrected_sync_abs;
@@ -1594,7 +1629,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         size_t one_cw_s = static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
         if (one_cw_s <= frame_buffer.size()) {
             waveform_->setFrequencyOffset(decode_cfo);
-            if (waveform_->process(SampleSpan(frame_buffer.data(), one_cw_s))) {
+            if (processWaveformForCodewords(SampleSpan(frame_buffer.data(), one_cw_s), 1)) {
                 captureConstellationSnapshot();
             }
             auto short_bits = waveform_->getSoftBits();
@@ -1623,7 +1658,8 @@ void StreamingDecoder::decodeCurrentFrame() {
                         LOG_MODEM(INFO, "[%s] Small-frame recovery: reprocessing %zu samples (%d CWs)",
                                   log_prefix_.c_str(), exact_size, hdr2.total_cw);
                         waveform_->setFrequencyOffset(decode_cfo);
-                        if (waveform_->process(SampleSpan(frame_buffer.data(), exact_size))) {
+                        if (processWaveformForCodewords(
+                                SampleSpan(frame_buffer.data(), exact_size), hdr2.total_cw)) {
                             captureConstellationSnapshot();
                         }
                         auto recovered_bits = waveform_->getSoftBits();
@@ -1708,7 +1744,10 @@ void StreamingDecoder::decodeCurrentFrame() {
                 waveform_->reset();
                 waveform_->setAbsoluteTrainingPosition(ringPosToAbsolute(retry_sync));
                 waveform_->setFrequencyOffset(decode_cfo);
-                bool retry_ok = waveform_->process(SampleSpan(retry_buffer.data(), retry_buffer.size()));
+                const int retry_expected_codewords =
+                    expectedOFDMCodewordsForSamples(retry_buffer.size());
+                bool retry_ok = processWaveformForCodewords(
+                    SampleSpan(retry_buffer.data(), retry_buffer.size()), retry_expected_codewords);
                 if (!retry_ok) {
                     continue;
                 }
@@ -1881,7 +1920,8 @@ void StreamingDecoder::decodeCurrentFrame() {
                       log_prefix_.c_str(), burst_blocks_decoded_, next_rms, next_block_pos);
 
             waveform_->setFrequencyOffset(decode_cfo);
-            bool next_ok = waveform_->process(SampleSpan(next_block.data(), next_block.size()));
+            bool next_ok = processWaveformForCodewords(
+                SampleSpan(next_block.data(), next_block.size()), fixed_frame_codewords_);
 
             if (!next_ok) break;  // Process failed, burst over
             captureConstellationSnapshot();
@@ -3006,7 +3046,8 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     // Demodulate (CFO=0 after pre-correction, or original burst_cfo_ if no pre-correction)
     float burst_decode_cfo = (std::abs(burst_pre_cfo) > 0.01f) ? 0.0f : burst_cfo_;
     waveform_->setFrequencyOffset(burst_decode_cfo);
-    bool ok = waveform_->process(SampleSpan(block.data(), block.size()));
+    bool ok = processWaveformForCodewords(
+        SampleSpan(block.data(), block.size()), fixed_frame_codewords_);
     if (!ok) {
         LOG_MODEM(WARN, "[%s] Burst frame %zu/%d: process() failed, inserting erasure",
                   log_prefix_.c_str(), burst_soft_buffer_.size() + 1, burst_group_size);
@@ -3056,7 +3097,8 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
             burst_decode_cfo = (std::abs(burst_pre_cfo) > 0.01f) ? 0.0f : burst_cfo_;
             waveform_->setAbsoluteTrainingPosition(corrected_abs);
             waveform_->setFrequencyOffset(burst_decode_cfo);
-            bool retry_ok = waveform_->process(SampleSpan(block.data(), block.size()));
+            bool retry_ok = processWaveformForCodewords(
+                SampleSpan(block.data(), block.size()), fixed_frame_codewords_);
             if (retry_ok) {
                 block_start_pos = corrected_pos;
                 abs_burst = corrected_abs;

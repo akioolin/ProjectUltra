@@ -139,6 +139,10 @@ public:
     // Returns LLR values for LDPC decoder
     virtual std::vector<float> getSoftBits() = 0;
 
+    // RX-local carrier erasure is waveform-specific and must be enabled only
+    // by callers that know the current frame has safe multi-CW LDPC geometry.
+    virtual void setRXCarrierErasureEnabled(bool enabled) { (void)enabled; }
+
     // Reset internal state (call between frames)
     virtual void reset() = 0;
 

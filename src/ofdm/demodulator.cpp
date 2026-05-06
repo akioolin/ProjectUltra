@@ -20,6 +20,43 @@ namespace ultra {
 
 using namespace demod_constants;
 
+namespace {
+
+size_t bitsPerCarrier(Modulation mod) {
+    switch (mod) {
+        case Modulation::DBPSK:
+        case Modulation::BPSK:
+            return 1;
+        case Modulation::DQPSK:
+        case Modulation::QPSK:
+            return 2;
+        case Modulation::D8PSK:
+            return 3;
+        case Modulation::QAM16:
+            return 4;
+        case Modulation::QAM32:
+            return 5;
+        case Modulation::QAM64:
+            return 6;
+        case Modulation::QAM256:
+            return 8;
+        default:
+            return 2;
+    }
+}
+
+void appendErasureLLRs(std::vector<float>& soft_bits, Modulation mod) {
+    soft_bits.insert(soft_bits.end(), bitsPerCarrier(mod), 0.0f);
+}
+
+bool isDifferentialModulation(Modulation mod) {
+    return mod == Modulation::DBPSK ||
+           mod == Modulation::DQPSK ||
+           mod == Modulation::D8PSK;
+}
+
+} // namespace
+
 // =============================================================================
 // IMPL CONSTRUCTOR AND INITIALIZATION
 // =============================================================================
@@ -274,10 +311,14 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
     // equalization (eq = rx/H = TX × e^{-jφ}). With MMSE, equalization already removes
     // the channel phase, so adding conj(H)/|H| re-introduces arg(H) into the differential,
     // causing the constellation to show a circle instead of DQPSK clusters.
-    if ((mod == Modulation::DQPSK || mod == Modulation::D8PSK) && dbpsk_prev_equalized.empty()) {
+    const bool is_differential = isDifferentialModulation(mod);
+    if (is_differential && dbpsk_prev_equalized.empty()) {
         dbpsk_prev_equalized.assign(equalized.size(), Complex(1, 0));
+        differential_prev_erased_.assign(equalized.size(), 0);
         dqpsk_skip_first_symbol = true;  // First diff uses synthetic ref → skip constellation
-        LOG_DEMOD(DEBUG, "DQPSK: Reference initialized to (1,0) for %zu carriers", equalized.size());
+        LOG_DEMOD(DEBUG, "DPSK: Reference initialized to (1,0) for %zu carriers", equalized.size());
+    } else if (is_differential && differential_prev_erased_.size() != equalized.size()) {
+        differential_prev_erased_.assign(equalized.size(), 0);
     }
 
     // Two-pass D8PSK decoding: use embedded DQPSK grid to estimate common phase error
@@ -329,6 +370,13 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
         const auto& sym = equalized[i];
         float base_nv = (i < carrier_noise_var.size()) ? carrier_noise_var[i] : noise_variance;
         float nv = base_nv * ce_error_margin;
+        const bool carrier_erased =
+            i < carrier_erasure_flags_.size() && carrier_erasure_flags_[i] != 0;
+        const bool prev_erased =
+            is_differential &&
+            i < differential_prev_erased_.size() &&
+            differential_prev_erased_[i] != 0;
+        const bool erase_llrs = carrier_erased || prev_erased;
 
         // Per-carrier adaptive: inflate noise for carriers with unstable |eq|
         if (carrier_eq_mag_var_.size() == equalized.size()) {
@@ -337,10 +385,20 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
             nv *= (1.0f + CARRIER_ADAPTIVE_K * norm_var);
         }
 
+        if (erase_llrs) {
+            appendErasureLLRs(soft_bits, mod);
+            if (is_differential) {
+                dbpsk_prev_equalized[i] = sym;
+                differential_prev_erased_[i] = carrier_erased ? 1 : 0;
+            }
+            continue;
+        }
+
         switch (mod) {
             case Modulation::DBPSK: {
                 if (dbpsk_prev_equalized.empty()) {
                     dbpsk_prev_equalized.assign(equalized.size(), Complex(1, 0));
+                    differential_prev_erased_.assign(equalized.size(), 0);
                     dqpsk_skip_first_symbol = true;
                 }
                 Complex prev_sym = dbpsk_prev_equalized[i];
@@ -351,6 +409,7 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
                     constellation_update.push_back(diff);
                 }
                 dbpsk_prev_equalized[i] = sym;
+                differential_prev_erased_[i] = 0;
                 break;
             }
             case Modulation::DQPSK: {
@@ -365,6 +424,7 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
                     constellation_update.push_back(diff);
                 }
                 dbpsk_prev_equalized[i] = sym;
+                differential_prev_erased_[i] = 0;
                 break;
             }
             case Modulation::D8PSK: {
@@ -378,6 +438,7 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
                     constellation_update.push_back(diff);
                 }
                 dbpsk_prev_equalized[i] = sym;
+                differential_prev_erased_[i] = 0;
                 break;
             }
             case Modulation::BPSK:
@@ -556,6 +617,14 @@ bool OFDMDemodulator::Impl::demodulateD8PSKTwoPass(
     float sin_sum = 0.0f, cos_sum = 0.0f, weight_sum = 0.0f;
 
     for (size_t i = 0; i < equalized.size(); ++i) {
+        const bool carrier_erased =
+            i < carrier_erasure_flags_.size() && carrier_erasure_flags_[i] != 0;
+        const bool prev_erased =
+            i < differential_prev_erased_.size() && differential_prev_erased_[i] != 0;
+        if (carrier_erased || prev_erased) {
+            continue;
+        }
+
         Complex prev_sym = dbpsk_prev_equalized[i];
         float signal_power = std::abs(equalized[i]) * std::abs(prev_sym);
 
@@ -596,7 +665,20 @@ bool OFDMDemodulator::Impl::demodulateD8PSKTwoPass(
 
     // PASS 2: Apply correction and decode
     std::vector<Complex> constellation_update;
+    if (differential_prev_erased_.size() != equalized.size()) {
+        differential_prev_erased_.assign(equalized.size(), 0);
+    }
     for (size_t i = 0; i < equalized.size(); ++i) {
+        const bool carrier_erased =
+            i < carrier_erasure_flags_.size() && carrier_erasure_flags_[i] != 0;
+        const bool prev_erased = differential_prev_erased_[i] != 0;
+        if (carrier_erased || prev_erased) {
+            appendErasureLLRs(soft_bits, Modulation::D8PSK);
+            dbpsk_prev_equalized[i] = equalized[i] * phase_correction;
+            differential_prev_erased_[i] = carrier_erased ? 1 : 0;
+            continue;
+        }
+
         Complex prev_sym = dbpsk_prev_equalized[i];
         float nv = (i < carrier_noise_var.size()) ? carrier_noise_var[i] : base_noise_variance;
         nv *= ce_margin;
@@ -619,6 +701,7 @@ bool OFDMDemodulator::Impl::demodulateD8PSKTwoPass(
 
         // Update reference with corrected symbol
         dbpsk_prev_equalized[i] = corrected_sym;
+        differential_prev_erased_[i] = 0;
     }
 
     // Store differential symbols for constellation display
@@ -939,6 +1022,8 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 std::fill(impl_->rls_P.begin(), impl_->rls_P.end(), 1.0f);
 
                 impl_->dbpsk_prev_equalized.clear();
+                impl_->carrier_erasure_flags_.clear();
+                impl_->differential_prev_erased_.clear();
                 impl_->carrier_eq_mag_ema_.clear();
                 impl_->carrier_eq_mag_var_.clear();
                 if (!is_differential || impl_->config.use_pilots) {
@@ -1020,6 +1105,8 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                     std::fill(impl_->rls_P.begin(), impl_->rls_P.end(), 1.0f);
 
                     impl_->dbpsk_prev_equalized.clear();
+                    impl_->carrier_erasure_flags_.clear();
+                    impl_->differential_prev_erased_.clear();
                     impl_->carrier_eq_mag_ema_.clear();
                     impl_->carrier_eq_mag_var_.clear();
                     impl_->carrier_phase_initialized = false;
@@ -1222,6 +1309,10 @@ float OFDMDemodulator::getLastLTSChannelMagnitude() const {
     return impl_->last_lts_channel_magnitude;
 }
 
+void OFDMDemodulator::setRXCarrierErasureEnabled(bool enabled) {
+    impl_->rx_carrier_erasure_enabled_ = enabled;
+}
+
 void OFDMDemodulator::setFrequencyOffset(float cfo_hz) {
     LOG_DEMOD(INFO, "setFrequencyOffset: CFO=%.2f Hz (was %.2f Hz)", cfo_hz, impl_->freq_offset_hz);
     impl_->freq_offset_hz = cfo_hz;
@@ -1317,6 +1408,8 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     std::fill(impl_->rls_P.begin(), impl_->rls_P.end(), 1.0f);
 
     impl_->dbpsk_prev_equalized.clear();
+    impl_->carrier_erasure_flags_.clear();
+    impl_->differential_prev_erased_.clear();
     impl_->carrier_eq_mag_ema_.clear();
     impl_->carrier_eq_mag_var_.clear();
     impl_->carrier_phase_initialized = false;
@@ -1391,6 +1484,7 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     // Initialize reference for differential demodulation to (1,0)
     // Same as Schmidl-Cox path does
     impl_->dbpsk_prev_equalized.clear();  // Will be initialized in demodulateSymbol
+    impl_->differential_prev_erased_.clear();
 
     LOG_SYNC(INFO, "processPresynced: skipped %d training symbols, %zu samples remaining",
              training_symbols, remaining);
@@ -1481,6 +1575,8 @@ void OFDMDemodulator::reset() {
     // Reset mixer phase - critical for OFDM_CHIRP which calls reset() between frames
     impl_->mixer.reset();
     impl_->dbpsk_prev_equalized.clear();
+    impl_->carrier_erasure_flags_.clear();
+    impl_->differential_prev_erased_.clear();
     impl_->carrier_eq_mag_ema_.clear();
     impl_->carrier_eq_mag_var_.clear();
     impl_->carrier_phase_initialized = false;

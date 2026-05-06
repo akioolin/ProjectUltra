@@ -74,6 +74,7 @@ public:
     void setAbsoluteTrainingPosition(size_t pos) override;
     bool process(SampleSpan samples) override;
     std::vector<float> getSoftBits() override;
+    void setRXCarrierErasureEnabled(bool enabled) override;
     void reset() override;
 
     // ========================================================================
