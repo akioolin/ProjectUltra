@@ -144,17 +144,57 @@ the worst carrier the equalizer can still handle.
 
 **Current state.** Uniform modulation across all data carriers.
 
-**Effort.** 3-6 weeks. Per-carrier SNR estimation (we have most
-of this from the channel equalizer), bit-allocation table, TX/RX
-signaling for which-bits-on-which-carrier, mixed-mod LDPC LLR
-scaling, and tests.
+**Architectural constraint surfaced 2026-05-05 (do not retry these
+approaches without addressing the constraint):**
 
-**Risk.** Stale channel estimates erase the gain. Signaling
-overhead can eat the margin if not done carefully. LDPC LLR
-scaling across mixed modulations is subtle.
+Three approaches were attempted and all failed hardware validation
+on Watterson Good SNR=15. See `docs/SESSION_2026-05-05_NIGHT.md`
+and tag `experimental/per-carrier-attempt-1-failed-2026-05-05` for
+full evidence.
 
-**Estimated gain.** 30-50% on fading channels with notches.
-Smaller on flat AWGN.
+1. **RX-only LLR rescaling** (multiply LLRs by `[0.1..1.0]` based
+   on `|H_k| / median(|H|)`). Failed in 2 rounds: double-counts
+   fade penalty (the soft demap already weights by `|H_k|² / σ²_k`),
+   and median-of-|H| is not a physically meaningful threshold.
+   Caused 1/5 → 4/5 catastrophic regressions across rounds.
+2. **TX-aware closed-loop carrier mask via MODE_CHANGE wire field.**
+   Failed because MODE_CHANGE round-trip (5–15 s for the 28-byte
+   2-CW frame) is **slower than the channel coherence time on
+   Watterson Good** (~10 s with ±5 dB per-carrier γ_k swings on
+   sub-second timescales). The mask flaps every 5–15 s; during
+   each transition TX and RX disagree on which carriers are
+   active, bit positions misalign, LDPC fails, ARQ pile-up, rate
+   adapter panics. 3/5 seeds catastrophic, no seed beat baseline.
+
+The viable architecture is **frame-local mask derivation, no
+wire signaling**: both peers derive identical masks from each
+frame's own LTS preamble using a deterministic rule. Requires:
+- Reciprocity assumption between TX and RX channels (must be
+  measured first on the actual hardware harness — half-duplex HF
+  is generally close but not exactly reciprocal at the per-carrier
+  level).
+- Bit-exact identical mask-derivation rule on both sides.
+- LDPC-side handling of per-frame-variable puncturing pattern (not
+  a code-rate change; the codeword length stays fixed, but
+  punctured bit positions vary per frame).
+
+This is non-trivial. Probably 2–3 weeks of careful design and
+testing, not a single Codex round.
+
+**Effort.** 3-6 weeks (frame-local approach). Reciprocity
+measurement (half-duplex calibration), per-carrier SNR estimation
+(we already have most of this from the channel equalizer),
+deterministic mask-derivation rule, modulator/demodulator wiring,
+LDPC-side per-frame puncturing awareness, and tests.
+
+**Risk.** Reciprocity violations cause TX and RX to derive
+different masks → silent decode failures (worse than current,
+because there's no feedback channel to detect the mismatch).
+Mitigation: include a mask CRC or count in the next ACK so a
+mismatch is at least observable.
+
+**Estimated gain.** 30-50% on fading channels with strong
+frequency-selective notches. Smaller on flat fading or AWGN.
 
 ---
 

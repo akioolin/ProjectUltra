@@ -59,11 +59,12 @@ ACK roundtrips, retransmissions, and auto-rate downgrades. Auto-rate
 ladder is on; Connection picks among R1/4 / R1/2 / R2/3 / R3/4 based
 on measured SNR and fading.
 
-| Test                       | Channel              | Wall  | Throughput | Notes |
-|----------------------------|----------------------|------:|-----------:|-------|
-| 50 KB Mac↔Pi5 cable        | Clean USB cable      | 174 s |  2354 bps  | Auto picked DQPSK R3/4 @ SNR=28 |
-| 500 KB Mac↔Pi5 injected    | Watterson Good, SNR=15 | 3780 s | 1083 bps  | 930 retx, 0 failed, byte-exact |
-| 5 KB Mac↔Pi5 injected      | Watterson Good, SNR=15 |       |            | 0 retx, byte-exact |
+| Test                          | Channel                | Wall  | Throughput | Notes |
+|-------------------------------|------------------------|------:|-----------:|-------|
+| 50 KB Mac↔Pi5 cable           | Clean USB cable        | 174 s |  2354 bps  | Auto DQPSK R3/4 @ SNR=28 |
+| 20 KB Mac↔Pi5 injected        | AWGN, SNR=15           |  72 s |  2266 bps  | Auto DQPSK R2/3, 0 retx, byte-exact |
+| 20 KB Mac↔Pi5 injected        | Watterson Good, SNR=15 | 100 s |  1631 bps  | Auto DQPSK R1/2, 0 retx, byte-exact |
+| 5 KB Mac↔Pi5 injected ×5      | Watterson Good, SNR=15 |  28 s |  1440 bps  | Median of 5 seeds, R1/2; 5/5 PASS post-BUG-RATE-001 fix (worst-case 684 bps; was 444 bps pre-fix with R1/2→R1/4 panic) |
 
 End-to-end results match or exceed real-world numbers reported for
 existing commercial HF data modems in equivalent conditions. The 500 KB
