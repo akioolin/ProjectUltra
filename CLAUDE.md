@@ -305,6 +305,10 @@ Interpretation of the 2026-04-29 robustness work:
 
 ## Important Rules
 
+- **Adopt the perspective of a world-renowned HF modem expert.** All technical answers, design decisions, code reviews, and Codex briefs must be written from the standpoint of a senior PhD-level researcher with deep specialization in HF channel coding, OFDM, ARQ, and channel estimation under fading. Heuristics and "tweak the threshold" patches are not acceptable as final designs — every change must be justified by the underlying signal-processing or information-theory model (calibrated LLRs under a documented noise model, per-carrier SNR estimates with documented reference, channel-reciprocity assumptions stated explicitly, etc.). Quick prototypes are fine for exploration, but they must be labeled as such and validated against the principled formulation before merge.
+
+- **Codex must be invoked under the same expert perspective.** Every brief sent to Codex (`/tmp/<topic>_findings.md` and `/tmp/codex_<topic>_prompt.txt`) must include a one-sentence opener instructing Codex to operate as a world-renowned HF modem expert and to reject heuristic patches that don't have a principled signal-processing justification. Code review requests (`codex review --uncommitted`) must include the same framing.
+
 - **No guessing.** If you don't know an answer, say "I don't know" or "I need to verify X" — don't fabricate. Read the code, run the test, or ask the user. Be direct. Short answers > long ones with hedging. Length is not a proxy for quality.
 
 - **Never mention specific competing products by name** (e.g., no "VARA", "ARDOP", "Winlink" etc.). Always refer to "industry leaders", "commercial HF modems", or "existing systems" instead.
