@@ -272,6 +272,21 @@ cmake --build build -j 4
 ./build/ultra_gui -sim     # Developer / simulator mode (no radio needed)
 ```
 
+> **macOS Gatekeeper note (downloaded prebuilt binaries only).**
+> macOS quarantines anything downloaded from the internet. If you
+> grabbed a release bundle and macOS shows *"cannot be verified"*
+> when you try to launch it, run this once per binary to remove
+> the quarantine flag:
+>
+> ```bash
+> xattr -d com.apple.quarantine /path/to/ultra_gui
+> ```
+>
+> Or right-click the binary in Finder → **Open** → confirm
+> *Open* in the warning dialog (one-time exception). Binaries
+> built locally from source are not affected. Proper code-sign
+> + notarization is on the post-alpha release roadmap.
+
 **TNC** (VARA-compatible TCP shell, see TNC section above):
 
 ```bash
