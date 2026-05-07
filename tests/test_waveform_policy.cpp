@@ -25,8 +25,14 @@ int tests_failed = 0;
 void test_ofdm_rate_thresholds() {
     CHECK(selectOFDMCodeRate(20.0f, 0.00f) == CodeRate::R3_4,
           "AWGN SNR20 should allow R3/4");
-    CHECK(selectOFDMCodeRate(15.0f, 0.00f) == CodeRate::R2_3,
-          "near-AWGN SNR15 should allow R2/3");
+    // R3/4 gate widened 2026-05-07 after Item 3 hw calibration:
+    // 5/5 seeds 20KB AWGN SNR=15 forced R3/4 = 2670-2691 bps, 0 retx
+    // (+18% over auto-R2/3). Tighter fading bound (< 0.10) keeps R3/4
+    // out of even slight fading where it's documented to fail.
+    CHECK(selectOFDMCodeRate(15.0f, 0.00f) == CodeRate::R3_4,
+          "AWGN SNR15 fading=0 should now allow R3/4");
+    CHECK(selectOFDMCodeRate(15.0f, 0.12f) == CodeRate::R2_3,
+          "near-AWGN SNR15 with slight fading should fall back to R2/3");
     CHECK(selectOFDMCodeRate(15.0f, 0.30f) == CodeRate::R1_2,
           "good fading SNR15 should use R1/2");
     CHECK(selectOFDMCodeRate(15.0f, 0.90f) == CodeRate::R1_2,

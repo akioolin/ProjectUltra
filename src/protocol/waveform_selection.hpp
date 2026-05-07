@@ -46,8 +46,12 @@ struct WaveformRecommendation {
 //   10KB file transfer moderate fading SNR=15: 1055 bps, 52% retx, 99% frame success
 //   10KB file transfer AWGN SNR=15: 1636 bps, 3% retx, 100% frame success
 inline CodeRate selectOFDMCodeRate(float snr_db, float fading_index) {
-    // AWGN only: R3/4 at SNR >= 20 (too many retx on fading)
-    if (fading_index < 0.15f && snr_db >= 20.0f) return CodeRate::R3_4;
+    // AWGN only: R3/4 at SNR >= 15 (Item 3 hw calibration 2026-05-07:
+    //   5/5 seeds 20KB AWGN SNR=15 forced R3/4: 2670-2691 bps, 0 retx,
+    //   +18% vs auto-R2/3. Tighter fading gate (< 0.10) protects against
+    //   borderline-fading misclassifications since R3/4 is documented to
+    //   FAIL on Good fading.) Previous gate was SNR >= 20 + fading < 0.15.
+    if (fading_index < 0.10f && snr_db >= 15.0f) return CodeRate::R3_4;
 
     // Near-AWGN: R2/3 at SNR >= 15 (too many retx on real fading channels)
     if (fading_index < 0.15f && snr_db >= 15.0f) return CodeRate::R2_3;

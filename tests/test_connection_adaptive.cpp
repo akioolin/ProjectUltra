@@ -228,8 +228,8 @@ void test_adaptive_upgrade_requires_backlog_and_clean_windows() {
 
     CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c),
           "clean AWGN backlog should request adaptive upgrade");
-    CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R2_3,
-          "adaptive upgrade should target recommended R2/3");
+    CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R3_4,
+          "adaptive upgrade should target recommended R3/4 (post-Item-3-calibration)");
     std::filesystem::remove_all(dir);
 }
 
@@ -291,8 +291,8 @@ void test_adaptive_downgrade_hysteresis_and_short_lockout_upgrade() {
 
     CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetPending(c),
           "clean windows after short lockout should queue upgrade");
-    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(c) == CodeRate::R2_3,
-          "short-lockout upgrade should target recommended R2/3");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(c) == CodeRate::R3_4,
+          "short-lockout upgrade should target recommended R3/4");
     std::filesystem::remove_all(dir);
 }
 
@@ -405,8 +405,8 @@ void test_adaptive_upgrade_not_forced_after_timeout() {
 
     CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetPending(c),
           "clean backlog should queue an adaptive upgrade");
-    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(c) == CodeRate::R2_3,
-          "queued upgrade should target R2/3");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(c) == CodeRate::R3_4,
+          "queued upgrade should target R3/4");
     CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
           "full ARQ window should block normal upgrade boundary");
 
@@ -417,7 +417,7 @@ void test_adaptive_upgrade_not_forced_after_timeout() {
           "upgrade should not force MODE_CHANGE after downgrade timeout");
     CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetPending(c),
           "blocked upgrade should remain queued");
-    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(c) == CodeRate::R2_3,
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(c) == CodeRate::R3_4,
           "blocked upgrade should keep its target rate");
     std::filesystem::remove_all(dir);
 }
@@ -476,8 +476,8 @@ void test_adaptive_post_downgrade_lockout_expires() {
 
     CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetPending(c),
           "upgrade should queue once post-downgrade lockout expires");
-    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(c) == CodeRate::R2_3,
-          "expired post-downgrade lockout should allow recommended R2/3 upgrade");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(c) == CodeRate::R3_4,
+          "expired post-downgrade lockout should allow recommended R3/4 upgrade");
     std::filesystem::remove_all(dir);
 }
 
