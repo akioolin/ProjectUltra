@@ -219,6 +219,9 @@ public:
         if (streaming_encoder_) streaming_encoder_->setFixedFrameCodewords(cw_count);
         if (streaming_decoder_) streaming_decoder_->setFixedFrameCodewords(cw_count);
     }
+    void setFixedFrameHeaderDiscovery(bool enable) {
+        if (streaming_decoder_) streaming_decoder_->setFixedFrameHeaderDiscovery(enable);
+    }
 
     // FEC codec control
     void setCodecType(fec::CodecType type);

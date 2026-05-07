@@ -180,6 +180,7 @@ public:
         fixed_frame_codewords_ = v2::sanitizeFixedFrameCodewords(cw_count);
     }
     int getFixedFrameCodewords() const { return fixed_frame_codewords_; }
+    void setFixedFrameHeaderDiscovery(bool enable) { fixed_frame_header_discovery_ = enable; }
 
     void setSoftCombineBuffer(fec::SoftCombineBuffer* buffer) { harq_buffer_ = buffer; }
 
@@ -380,6 +381,7 @@ private:
     bool use_channel_interleave_ = true;
     uint64_t carrier_mask_ = UINT64_MAX;
     int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
+    bool fixed_frame_header_discovery_ = false;
 
     // FEC codec (uses ICodec interface)
     fec::CodecPtr codec_;

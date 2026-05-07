@@ -31,6 +31,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <exception>
 #include <fstream>
 
 namespace ultra {
@@ -1624,6 +1625,82 @@ void StreamingDecoder::decodeCurrentFrame() {
         }
     }
 
+    if (!result.success && fixed_frame_header_discovery_ && is_ofdm && connected_
+        && pending_total_cw_ > v2::kMinFixedFrameCodewords && waveform_) {
+        const int saved_pending_total_cw = pending_total_cw_;
+        const CodeRate saved_code_rate = code_rate_;
+        const Modulation saved_modulation = current_modulation_;
+
+        std::vector<CodeRate> candidate_rates;
+        auto addRate = [&](CodeRate candidate_rate) {
+            if (std::find(candidate_rates.begin(), candidate_rates.end(), candidate_rate) ==
+                candidate_rates.end()) {
+                candidate_rates.push_back(candidate_rate);
+            }
+        };
+        addRate(saved_code_rate);
+        addRate(CodeRate::R1_4);
+        addRate(CodeRate::R1_2);
+        addRate(CodeRate::R2_3);
+        addRate(CodeRate::R3_4);
+
+        for (CodeRate candidate_rate : candidate_rates) {
+            if (code_rate_ != candidate_rate || current_modulation_ != saved_modulation) {
+                setDataMode(saved_modulation, candidate_rate);
+            }
+
+            for (int candidate_cw = saved_pending_total_cw - 1;
+                 candidate_cw >= v2::kMinFixedFrameCodewords; --candidate_cw) {
+                const size_t exact_size =
+                    static_cast<size_t>(waveform_->getMinSamplesForCWCount(candidate_cw));
+                if (exact_size == 0 || exact_size >= frame_buffer.size()) {
+                    continue;
+                }
+
+                std::vector<float> exact_buffer(frame_buffer.begin(),
+                                                frame_buffer.begin() + exact_size);
+                waveform_->reset();
+                waveform_->setAbsoluteTrainingPosition(frame_sync_abs);
+                waveform_->setFrequencyOffset(decode_cfo);
+                pending_total_cw_ = candidate_cw;
+
+                LOG_MODEM(INFO, "[%s] Fixed-frame CW discovery: reprocessing %d-CW audio at %s (%zu samples)",
+                          log_prefix_.c_str(), candidate_cw, codeRateToString(candidate_rate), exact_size);
+
+                if (!processWaveformForCodewords(
+                        SampleSpan(exact_buffer.data(), exact_buffer.size()), candidate_cw)) {
+                    continue;
+                }
+
+                captureConstellationSnapshot();
+                auto candidate_bits = waveform_->getSoftBits();
+                if (candidate_bits.empty()) {
+                    continue;
+                }
+
+                auto candidate_result = decodeFrame(candidate_bits, sync_snr_, sync_cfo_);
+                if (candidate_result.success) {
+                    result = std::move(candidate_result);
+                    frame_len = exact_size;
+                    LOG_MODEM(INFO, "[%s] Fixed-frame CW discovery decoded %d-CW %s frame",
+                              log_prefix_.c_str(), candidate_cw, codeRateToString(candidate_rate));
+                    break;
+                }
+            }
+
+            if (result.success) {
+                break;
+            }
+        }
+
+        if (!result.success) {
+            pending_total_cw_ = saved_pending_total_cw;
+            if (code_rate_ != saved_code_rate || current_modulation_ != saved_modulation) {
+                setDataMode(saved_modulation, saved_code_rate);
+            }
+        }
+    }
+
     // ========================================================================
     // Small-frame recovery for OFDM connected mode:
     // If full fixed-frame buffer decode failed, the frame might be a small non-data
@@ -2658,6 +2735,90 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
             : (probed_fixed_cw_count > 0)
                 ? probed_fixed_cw_count
             : fixed_frame_codewords_;
+        size_t bps = static_cast<size_t>(ofdm_data_carriers_) * getBitsPerSymbol(current_modulation_);
+
+        auto discoverFixedFrameCwCount = [&](int preferred_cw) -> int {
+            std::vector<int> candidates;
+            auto addCandidate = [&](int cw) {
+                if (!isFixedFrameCwCount(cw)) {
+                    return;
+                }
+                if (std::find(candidates.begin(), candidates.end(), cw) == candidates.end()) {
+                    candidates.push_back(cw);
+                }
+            };
+
+            addCandidate(preferred_cw);
+            for (int cw = preferred_cw - 1; cw >= v2::kMinFixedFrameCodewords; --cw) {
+                addCandidate(cw);
+            }
+            for (int cw = preferred_cw + 1; cw <= v2::kMaxFixedFrameCodewords; ++cw) {
+                addCandidate(cw);
+            }
+
+            const size_t bytes_per_fixed_cw = v2::getBytesPerCodeword(rate);
+            for (int candidate_cw : candidates) {
+                const size_t frame_bits =
+                    static_cast<size_t>(fec::FrameInterleaver::totalFrameBits(candidate_cw));
+                if (soft_bits.size() < frame_bits) {
+                    continue;
+                }
+
+                std::vector<float> cw0_bits;
+                try {
+                    auto cw_soft = fec::FrameInterleaver::deinterleave(soft_bits, candidate_cw);
+                    if (cw_soft.empty() || cw_soft[0].size() < LDPC_BLOCK) {
+                        continue;
+                    }
+                    cw0_bits = std::move(cw_soft[0]);
+                } catch (const std::exception&) {
+                    continue;
+                }
+
+                if (apply_channel_deinterleave) {
+                    ChannelInterleaver channel_deinterleaver(bps, v2::LDPC_CODEWORD_BITS);
+                    cw0_bits = channel_deinterleaver.deinterleave(cw0_bits);
+                }
+
+                auto [peek_ok, peek_data] = robustDecodeSingleCW(
+                    cw0_bits.data(), cw0_bits.size(), rate, log_prefix_.c_str(),
+                    ultra::timing::SingleCWCallSite::Cw0Peek);
+                if (!peek_ok || peek_data.size() < bytes_per_fixed_cw) {
+                    continue;
+                }
+                if (peek_data.size() > bytes_per_fixed_cw) {
+                    peek_data.resize(bytes_per_fixed_cw);
+                }
+
+                auto hdr = v2::parseHeader(peek_data);
+                if (!hdr.valid || hdr.is_control || !isFixedFrameCwCount(hdr.total_cw)) {
+                    continue;
+                }
+
+                if (hdr.total_cw != candidate_cw) {
+                    LOG_MODEM(WARN, "[%s] Fixed-frame CW discovery rejected mismatch: candidate=%d header=%d",
+                              log_prefix_.c_str(), candidate_cw, hdr.total_cw);
+                    continue;
+                }
+
+                LOG_MODEM(INFO, "[%s] Fixed-frame CW discovery: header total_cw=%d",
+                          log_prefix_.c_str(), hdr.total_cw);
+                return hdr.total_cw;
+            }
+
+            return 0;
+        };
+
+        if (fixed_frame_header_discovery_ && probed_fixed_cw_count == 0) {
+            const int header_cw_count = discoverFixedFrameCwCount(decode_cw_count);
+            if (header_cw_count > 0 && header_cw_count != decode_cw_count) {
+                LOG_MODEM(INFO, "[%s] Fixed-frame CW discovery selected %d CWs (was %d)",
+                          log_prefix_.c_str(), header_cw_count, decode_cw_count);
+                decode_cw_count = header_cw_count;
+                pending_total_cw_ = header_cw_count;
+            }
+        }
+
         size_t frame_interleave_bits =
             static_cast<size_t>(fec::FrameInterleaver::totalFrameBits(decode_cw_count));
         if (soft_bits.size() < frame_interleave_bits) {
@@ -2669,7 +2830,6 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
         // Use v2::decodeFixedFrame which handles frame + channel deinterleaving + LDPC decode
         // Channel deinterleaving restores the original bit order within each CW
         // Only enable for OFDM modes (MC-DPSK doesn't use channel interleaving)
-        size_t bps = static_cast<size_t>(ofdm_data_carriers_) * getBitsPerSymbol(current_modulation_);
         auto buildHarqKey = [&](int cw_count, fec::SoftCombineBuffer::Key& out_key) -> bool {
             if (!harq_buffer_ || !harq_buffer_->enabled()) {
                 return false;

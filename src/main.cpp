@@ -13,6 +13,7 @@
 
 #include <iostream>
 #include <fstream>
+#include <iomanip>
 #include <cstring>
 #include <csignal>
 #include <atomic>
@@ -205,12 +206,13 @@ int runProtocolRx(const char* input_file, WaveformType waveform, CodeRate rate) 
 
     // Create modem engine
     ModemEngine modem;
-    modem.setLogPrefix("RX");
+    modem.setLogPrefix("MODEM");
 
     // For OFDM waveforms, set connected mode so decoder uses OFDM path
     if (waveform == WaveformType::OFDM_CHIRP || waveform == WaveformType::OFDM_COX || waveform == WaveformType::OFDM_NARROW) {
         modem.setConnected(true);
         modem.setHandshakeComplete(true);
+        modem.setFixedFrameHeaderDiscovery(true);
     }
     modem.setWaveformMode(toWaveformMode(waveform));
     modem.setDataMode(Modulation::DQPSK, rate);
@@ -262,7 +264,12 @@ int runProtocolRx(const char* input_file, WaveformType waveform, CodeRate rate) 
         // Try parsing as DataFrame
         auto df = v2::DataFrame::deserialize(data);
         if (df) {
-            std::cerr << "    Message: \"" << df->payloadAsText() << "\"\n";
+            std::cerr << "    Frame: " << v2::frameTypeToString(df->type) << "\n";
+            std::cerr << "    Source: 0x" << std::hex << std::uppercase
+                      << std::setw(6) << std::setfill('0') << df->src_hash
+                      << std::dec << std::nouppercase << std::setfill(' ') << "\n";
+            std::cerr << "    Length: " << df->payload.size()
+                      << " bytes, Message: \"" << df->payloadAsText() << "\"\n";
             return;
         }
     });
