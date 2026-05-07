@@ -446,31 +446,66 @@ necessary. Be ready to QSY.
 
 ## Status & Roadmap
 
-### Solid today
+### Solid (hardware-validated)
 
-- MC-DPSK baseline (5+ dB, ±50 Hz CFO).
-- OFDM-CHIRP DQPSK R1/4 → R3/4 with adaptive ladder.
+- MC-DPSK baseline (5+ dB SNR, ±50 Hz CFO tolerance).
+- OFDM-CHIRP DQPSK R1/4 → R3/4 with adaptive ladder
+  (R3/4 hardware-calibrated at SNR ≥ 15 + fading < 0.10).
 - OFDM-NARROW (500 Hz) for crowded bands or low-SNR conditions.
-- TNC subsystem: cross-platform, byte-exact end-to-end.
-- ARQ control path: hardened DISCONNECT, cumulative SACKs, no
-  timeout storms.
+- Per-carrier RX erasure with CarrierLDPC v1 interleaver
+  (deep notch / QRM survival on OFDM-CHIRP).
+- Adaptive MODE_CHANGE with hysteresis (BUG-RATE-001 fixed:
+  no panic-downshift on short fading transfers).
+- Selective-repeat ARQ with cumulative + selective ACKs,
+  hardened DISCONNECT, no timeout storms.
+- TNC subsystem: cross-platform Linux / macOS / Windows,
+  byte-exact end-to-end, validated with real Pat sessions.
+- Hardware-in-the-loop test rig (Mac ↔ Pi5 with Watterson
+  injection) with byte-exact file-transfer validation.
 
-### Experimental / opportunistic
+### Experimental (in tree, not on by default)
 
-- D8PSK on fading channels (variable run-to-run).
-- Coherent QPSK / 16QAM / 32QAM (stable-path only — NVIS, ground
-  wave, cable).
-- Higher rates (R2/3+) under deep fades.
+- HARQ Chase soft-combining: math validated, infrastructure
+  in place; broader CW0-fail integration is on
+  `experimental/harq-audit-2026-05-06` pending further
+  hardware validation.
+- D8PSK on fading channels: variable run-to-run, gated to
+  high SNR + AWGN-class fading only.
+- Coherent QPSK / 16QAM / 32QAM: stable-path only (NVIS,
+  ground wave, clean cable).
 
 ### Active work
 
-- Pat / Winlink Express integration: client-side validation pending.
 - Long-running stability soak (multi-hour `ultra_tnc` uptime).
-- Continued OTA validation; expanding hardware-injection seed coverage.
+- Bootstrap-rate cap relaxation: short transfers can't yet
+  reach R3/4 even on clean AWGN because the initial-rate
+  cap requires SNR ≥ 24; hardware validation needed before
+  lowering.
+- Real over-the-air validation infrastructure: currently
+  limited to the synthetic Watterson hardware harness;
+  KiwiSDR-based remote-receiver TX validation is the
+  near-term plan for solo operators.
 
-The active engineering goal lives in `docs/PROJECT_GOALS.md`. Speculative
-research (removed waveforms, archived ideas) lives under
-`docs/archive/` — historical only, not part of the production build.
+### Deliberately deferred
+
+- Higher-order constellations (16/32/64-QAM) as production
+  ladder rungs: enum reserved, no production code. Real
+  capacity headroom (~2× peak throughput) but needs proper
+  EVM gating, coherent phase tracking, IQ-imbalance
+  handling, and a new auto-rate policy layer — multi-week
+  scope, not autonomous-friendly.
+- Iterative LDPC ↔ equalizer (turbo) loops.
+- OTFS / MFSK: enum reserved for wire compatibility, no
+  production implementation.
+- Code-sign + notarization for prebuilt macOS binaries
+  (Apple Developer ID needed; on the post-alpha roadmap).
+
+Active engineering goal lives in `docs/PROJECT_GOALS.md`.
+Recent design + audit notes are in `docs/CHANGELOG.md`,
+`docs/PHASE2_CARRIER_MASK_DESIGN.md`, and the
+`docs/SESSION_*.md` series. Speculative / archived research
+lives under `docs/archive/` — historical only, not part of
+the production build.
 
 ---
 
