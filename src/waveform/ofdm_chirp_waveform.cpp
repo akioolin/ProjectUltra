@@ -16,6 +16,8 @@ namespace {
 constexpr size_t LDPC_CODEWORD_BITS = 648;
 constexpr size_t LDPC_CODEWORD_BYTES = LDPC_CODEWORD_BITS / 8;
 constexpr size_t CARRIER_LDPC_MASK_CARRIERS = 59;
+constexpr size_t CARRIER_LDPC_MIN_CODEWORDS = 2;
+constexpr size_t CARRIER_LDPC_MAX_CODEWORDS = 8;
 constexpr uint64_t ALL_ON_CARRIER_MASK = UINT64_MAX;
 
 uint64_t activeBitsMask(size_t carriers) {
@@ -163,6 +165,7 @@ OFDMChirpWaveform::OFDMChirpWaveform(const ModemConfig& config, protocol::Wavefo
 void OFDMChirpWaveform::initComponents() {
     modulator_ = std::make_unique<OFDMModulator>(config_);
     demodulator_ = std::make_unique<OFDMDemodulator>(config_);
+    demodulator_->setRXCarrierErasureEnabled(rx_carrier_erasure_enabled_);
     chirp_sync_ = std::make_unique<sync::ChirpSync>(getChirpConfig());
 }
 
@@ -205,6 +208,11 @@ bool OFDMChirpWaveform::carrierLdpcPlumbingEligible() const {
     return mode_ == protocol::WaveformMode::OFDM_CHIRP &&
            config_.num_carriers == CARRIER_LDPC_MASK_CARRIERS &&
            (config_.fft_size == 512 || config_.fft_size == 1024);
+}
+
+bool OFDMChirpWaveform::carrierLdpcCodewordCountSupported(size_t codeword_count) const {
+    return codeword_count >= CARRIER_LDPC_MIN_CODEWORDS &&
+           codeword_count <= CARRIER_LDPC_MAX_CODEWORDS;
 }
 
 void OFDMChirpWaveform::configure(Modulation mod, CodeRate rate) {
@@ -295,20 +303,26 @@ Samples OFDMChirpWaveform::modulate(const Bytes& encoded_data) {
     const bool full_codewords =
         !encoded_data.empty() && (encoded_data.size() % LDPC_CODEWORD_BYTES == 0);
     const bool eligible = carrierLdpcPlumbingEligible() && full_codewords;
+    const bool masked_carriers =
+        !isAllOnMask(carrier_mask_, CARRIER_LDPC_MASK_CARRIERS);
 
     if (eligible && codeword_count == 1) {
         // Ncw=1 DQPSK can put a one-carrier erasure into only 5 LDPC base
         // columns; sub-phase 3 therefore forces all-on and keeps 1-CW PHY
         // headers/control frames bit-identical to the legacy ordering.
         effective_mask = ALL_ON_CARRIER_MASK;
-    } else if (eligible && codeword_count >= 2 &&
-               !isAllOnMask(carrier_mask_, CARRIER_LDPC_MASK_CARRIERS)) {
-        // Policy B: all-on is a strict AWGN no-op. CarrierLDPC is only active
-        // when a non-default mask is supplied, so default samples remain
-        // byte-for-byte comparable to HEAD.
+    } else if (eligible &&
+               carrierLdpcCodewordCountSupported(codeword_count) &&
+               (carrier_ldpc_interleaver_enabled_ || masked_carriers)) {
+        // CarrierLDPC is the final TX bit permutation before the air grid.
+        // It is mandatory when RX may insert carrier erasures, and remains
+        // enabled for legacy explicit mask tests. Direct waveform callers keep
+        // the default false flag, preserving deterministic all-on byte identity.
         tx_data = applyCarrierLdpcForward(encoded_data, codeword_count);
-        effective_mask = carrier_mask_;
-        mask_enabled = true;
+        if (masked_carriers) {
+            effective_mask = carrier_mask_;
+            mask_enabled = true;
+        }
     }
 
     ByteSpan span(tx_data.data(), tx_data.size());
@@ -317,6 +331,10 @@ Samples OFDMChirpWaveform::modulate(const Bytes& encoded_data) {
 
 void OFDMChirpWaveform::setCarrierMask(uint64_t active_mask) {
     carrier_mask_ = active_mask;
+}
+
+void OFDMChirpWaveform::setCarrierLdpcInterleaverEnabled(bool enabled) {
+    carrier_ldpc_interleaver_enabled_ = enabled;
 }
 
 bool OFDMChirpWaveform::detectSync(SampleSpan samples, SyncResult& result, float threshold) {
@@ -616,14 +634,20 @@ bool OFDMChirpWaveform::process(SampleSpan samples) {
         const bool eligible = carrierLdpcPlumbingEligible() &&
             !soft_bits_.empty() &&
             (soft_bits_.size() % LDPC_CODEWORD_BITS == 0);
+        const bool masked_carriers =
+            !isAllOnMask(carrier_mask_, CARRIER_LDPC_MASK_CARRIERS);
         if (eligible && codeword_count == 1) {
             // Ncw=1 remains legacy ordered; this includes the future 1-CW
             // R1/4 PHY mask header, which must stay bit-identical.
-        } else if (eligible && codeword_count >= 2 &&
-                   !isAllOnMask(carrier_mask_, CARRIER_LDPC_MASK_CARRIERS)) {
-            auto erased = eraseMaskedCarrierLLRs(std::move(soft_bits_),
-                                                 config_, carrier_mask_);
-            soft_bits_ = applyCarrierLdpcInverse(std::move(erased), codeword_count);
+        } else if (eligible &&
+                   carrierLdpcCodewordCountSupported(codeword_count) &&
+                   (carrier_ldpc_interleaver_enabled_ || masked_carriers)) {
+            std::vector<float> air_llrs = std::move(soft_bits_);
+            if (masked_carriers) {
+                air_llrs = eraseMaskedCarrierLLRs(std::move(air_llrs),
+                                                  config_, carrier_mask_);
+            }
+            soft_bits_ = applyCarrierLdpcInverse(std::move(air_llrs), codeword_count);
         }
 
         last_snr_ = demodulator_->getEstimatedSNR();
@@ -653,6 +677,7 @@ std::vector<float> OFDMChirpWaveform::getSoftBits() {
 }
 
 void OFDMChirpWaveform::setRXCarrierErasureEnabled(bool enabled) {
+    rx_carrier_erasure_enabled_ = enabled;
     if (demodulator_) {
         demodulator_->setRXCarrierErasureEnabled(enabled);
     }

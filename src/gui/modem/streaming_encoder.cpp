@@ -77,6 +77,13 @@ void StreamingEncoder::setCarrierMask(uint64_t active_mask) {
     }
 }
 
+void StreamingEncoder::setCarrierLdpcInterleaver(bool enable) {
+    use_carrier_ldpc_interleaver_ = enable;
+    if (waveform_) {
+        waveform_->setCarrierLdpcInterleaverEnabled(enable);
+    }
+}
+
 // ============================================================================
 // MODE CONTROL
 // ============================================================================
@@ -513,6 +520,7 @@ void StreamingEncoder::createWaveform() {
         int spacing = waveform_->getPilotSpacing();
         if (spacing > 0) ofdm_config_.pilot_spacing = spacing;
         waveform_->setCarrierMask(carrier_mask_);
+        waveform_->setCarrierLdpcInterleaverEnabled(use_carrier_ldpc_interleaver_);
     }
 
     LOG_MODEM(DEBUG, "[%s] Created waveform: %s",

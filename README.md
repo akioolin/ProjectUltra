@@ -72,6 +72,35 @@ existing commercial HF data modems in equivalent conditions. The 500 KB
 Good15 result is the realistic-HF baseline; 50 KB cable is the upper
 bound given a clean channel.
 
+### Per-carrier RX erasure (deep notch / QRM survival)
+
+OFDM-CHIRP wideband data frames apply **per-carrier reliability
+erasure at the receiver**. Each frame's own LTS + pilot tracking
+gives a per-carrier `γ_k = |H_k|² / σ²_k`. Carriers below -6 dB
+emit `LLR = 0` to LDPC instead of being demapped as overconfident
+bits. Multi-codeword data frames use the CarrierLDPC v1 bit
+permutation so carrier erasures spread across LDPC base columns;
+1-CW control/ACK frames bypass both erasure and permutation for
+stopping-set safety.
+
+Concrete A/B: Mac TX with carrier 31 deliberately notched (zero
+amplitude), 20 KB AWGN SNR=15:
+
+| RX side | Throughput | Retx | Failed |
+|---------|-----------:|-----:|-------:|
+| With erasure (this build) | 2,271 bps | 0 | 0 |
+| Without erasure (baseline) | — | 224 | **15 (TEST FAILED)** |
+
+The feature is silent on benign channels (AWGN, light fading)
+because no carrier crosses the −6 dB threshold. It earns its
+keep on the channels that actually break HF links in the field —
+co-channel interference, broadcast skip, narrow-band jammers,
+and deep multipath nulls. There is a measured ~25 % throughput
+cost on synthetic Watterson Moderate (0.5 Hz Doppler / 1 ms
+delay), where natural per-carrier fading occasionally crosses
+the floor; we accept that cost because real-HF QRM and stationary
+notches are the more common link-killer in practice.
+
 ### Waveform selection (automatic)
 
 ```

@@ -83,11 +83,12 @@ constexpr float PHASE_INTERPOLATION_THRESHOLD = 1.5708f;  // π/2 = 90°
 constexpr float DEFAULT_SNR_LINEAR = 31.6f;
 
 // RX-local hard-erasure floor. gamma_k = |H_k|^2 / sigma^2 is measured from
-// the current frame's LTS and per-symbol pilot tracking. Below 0 dB the
-// carrier has less signal than noise; for BPSK/QPSK-like LDPC bit channels the
-// mutual information is below the useful R1/2 operating point, and DPSK pays
-// additional differential loss. Treat it as an erasure instead of weak evidence.
-constexpr float RX_ERASURE_GAMMA_FLOOR_LINEAR = 1.0f;  // 0 dB
+// the current frame's LTS and per-symbol pilot tracking. Hardware Watterson
+// Good/Moderate showed -3 dB still carries useful LDPC soft information; hard
+// erasure is justified only when the bit channel is effectively noise. Below
+// -6 dB, DQPSK differential evidence is dominated by reference noise, so LLR=0
+// is safer than signed but misleading evidence.
+constexpr float RX_ERASURE_GAMMA_FLOOR_LINEAR = 0.25f;  // -6.02 dB
 
 // Per-carrier adaptive LLR scaling: variance-to-noise inflation factor
 // Higher = more aggressive noise inflation for unstable carriers

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <iostream>
 #include <algorithm>
+#include <array>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -163,52 +164,94 @@ void test_single_masked_carrier_zeros_tx_and_rx_slots() {
     TEST("single masked carrier zeros TX grid and exact RX CarrierLDPC slots") {
         const ModemConfig cfg = makeWideChirpConfig();
         const uint64_t mask = UINT64_MAX & ~(uint64_t{1} << kMaskCarrier);
-        const Bytes encoded = randomEncodedCodewords(4);
         const std::vector<size_t> data_logical = dataLogicalCarrierIndices(cfg);
         const auto it = std::find(data_logical.begin(), data_logical.end(),
                                   static_cast<size_t>(kMaskCarrier));
         require(it != data_logical.end(), "chosen mask carrier is not a data carrier");
         const size_t masked_data_ordinal =
             static_cast<size_t>(std::distance(data_logical.begin(), it));
+        constexpr std::array<size_t, 3> kCases = {{2, 4, 8}};
 
-        OFDMChirpWaveform tx(cfg);
-        tx.configure(cfg.modulation, cfg.code_rate);
-        tx.setCarrierMask(mask);
-        const Samples audio = transmitDataPreambleFrame(tx, encoded);
+        for (size_t codewords : kCases) {
+            const Bytes encoded = randomEncodedCodewords(codewords);
 
-        const Symbol tx_grid = tx.getLastDataCarrierSymbolsForTesting();
-        require(!tx_grid.empty(), "TX debug grid is empty");
-        require(tx_grid.size() % data_logical.size() == 0,
-                "TX debug grid is not symbol-aligned");
-        for (size_t pos = masked_data_ordinal; pos < tx_grid.size();
-             pos += data_logical.size()) {
-            require(tx_grid[pos] == Complex(0, 0),
-                    "masked carrier emitted a non-zero TX symbol");
-        }
+            OFDMChirpWaveform tx(cfg);
+            tx.configure(cfg.modulation, cfg.code_rate);
+            tx.setCarrierMask(mask);
+            const Samples audio = transmitDataPreambleFrame(tx, encoded);
 
-        OFDMChirpWaveform rx(cfg);
-        rx.configure(cfg.modulation, cfg.code_rate);
-        rx.setCarrierMask(mask);
-        const std::vector<float> llrs = processFrame(rx, audio);
-        require(llrs.size() == 4 * kLdpcBits,
-                "unexpected RX LLR count");
-
-        const std::vector<bool> expected = expectedErasedSlots(4, cfg, kMaskCarrier);
-        size_t expected_zero = 0;
-        size_t observed_zero = 0;
-        for (size_t i = 0; i < expected.size(); ++i) {
-            if (expected[i]) {
-                ++expected_zero;
-                require(llrs[i] == 0.0f,
-                        "expected erasure slot is not literal zero");
+            const Symbol tx_grid = tx.getLastDataCarrierSymbolsForTesting();
+            require(!tx_grid.empty(), "TX debug grid is empty");
+            require(tx_grid.size() % data_logical.size() == 0,
+                    "TX debug grid is not symbol-aligned");
+            for (size_t pos = masked_data_ordinal; pos < tx_grid.size();
+                 pos += data_logical.size()) {
+                require(tx_grid[pos] == Complex(0, 0),
+                        "masked carrier emitted a non-zero TX symbol");
             }
-            if (llrs[i] == 0.0f) {
-                ++observed_zero;
+
+            OFDMChirpWaveform rx(cfg);
+            rx.configure(cfg.modulation, cfg.code_rate);
+            rx.setCarrierMask(mask);
+            const std::vector<float> llrs = processFrame(rx, audio);
+            require(llrs.size() == codewords * kLdpcBits,
+                    "unexpected RX LLR count");
+
+            const std::vector<bool> expected =
+                expectedErasedSlots(codewords, cfg, kMaskCarrier);
+            size_t expected_zero = 0;
+            size_t observed_zero = 0;
+            for (size_t i = 0; i < expected.size(); ++i) {
+                if (expected[i]) {
+                    ++expected_zero;
+                    require(llrs[i] == 0.0f,
+                            "expected erasure slot is not literal zero");
+                }
+                if (llrs[i] == 0.0f) {
+                    ++observed_zero;
+                }
             }
+            require(expected_zero > 0, "mask did not touch any coded slots");
+            require(observed_zero == expected_zero,
+                    "RX zero LLR count does not match CarrierLDPC geometry");
         }
-        require(expected_zero > 0, "mask did not touch any coded slots");
-        require(observed_zero == expected_zero,
-                "RX zero LLR count does not match CarrierLDPC geometry");
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
+void test_carrier_ldpc_all_on_roundtrip() {
+    TEST("CarrierLDPC enabled all-on round-trips hard decisions") {
+        const ModemConfig cfg = makeWideChirpConfig();
+        const Bytes encoded = randomEncodedCodewords(4);
+
+        OFDMChirpWaveform baseline_tx(cfg);
+        baseline_tx.configure(cfg.modulation, cfg.code_rate);
+        const Samples baseline_audio = transmitDataPreambleFrame(baseline_tx, encoded);
+
+        OFDMChirpWaveform baseline_rx(cfg);
+        baseline_rx.configure(cfg.modulation, cfg.code_rate);
+        const std::vector<float> baseline_llrs = processFrame(baseline_rx, baseline_audio);
+
+        OFDMChirpWaveform interleaved_tx(cfg);
+        interleaved_tx.configure(cfg.modulation, cfg.code_rate);
+        interleaved_tx.setCarrierLdpcInterleaverEnabled(true);
+        const Samples interleaved_audio = transmitDataPreambleFrame(interleaved_tx, encoded);
+
+        OFDMChirpWaveform interleaved_rx(cfg);
+        interleaved_rx.configure(cfg.modulation, cfg.code_rate);
+        interleaved_rx.setCarrierLdpcInterleaverEnabled(true);
+        const std::vector<float> interleaved_llrs = processFrame(interleaved_rx, interleaved_audio);
+
+        require(interleaved_llrs.size() == baseline_llrs.size(),
+                "CarrierLDPC changed LLR count");
+        for (size_t i = 0; i < baseline_llrs.size(); ++i) {
+            require(baseline_llrs[i] != 0.0f && interleaved_llrs[i] != 0.0f,
+                    "clean all-on CarrierLDPC path produced an erasure");
+            require((baseline_llrs[i] > 0.0f) == (interleaved_llrs[i] > 0.0f),
+                    "CarrierLDPC forward/inverse hard decision mismatch");
+        }
         PASS();
     } catch (const std::exception& e) {
         FAIL(e.what());
@@ -263,6 +306,7 @@ int main() {
 
     test_all_on_mask_is_exact_noop();
     test_single_masked_carrier_zeros_tx_and_rx_slots();
+    test_carrier_ldpc_all_on_roundtrip();
     test_ncw1_mask_bypass();
 
     std::cout << "\n=== Results ===\n";

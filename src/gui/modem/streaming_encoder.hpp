@@ -126,6 +126,9 @@ public:
     void setCarrierMask(uint64_t active_mask);
     uint64_t getCarrierMask() const { return carrier_mask_; }
 
+    void setCarrierLdpcInterleaver(bool enable);
+    bool getCarrierLdpcInterleaver() const { return use_carrier_ldpc_interleaver_; }
+
     // Frame interleaving is always enabled for OFDM
     bool getFrameInterleave() const { return use_frame_interleave_; }
 
@@ -180,6 +183,7 @@ private:
     bool use_channel_interleave_ = true;
     bool use_frame_interleave_ = true;     // Always on for OFDM
     uint64_t carrier_mask_ = UINT64_MAX;
+    bool use_carrier_ldpc_interleaver_ = true;
     int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
     bool use_burst_interleave_ = false;    // Burst-level long interleaver (N-frame groups)
     int burst_group_size_ = 8;

@@ -1343,8 +1343,8 @@ std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>&
                 carrier_noise_var[i] = scaled_noise_var / (h_power + scaled_noise_var);
             }
 
-            // RX-local hard erasure: below 0 dB per-carrier gamma, the
-            // demapper must contribute no evidence to LDPC.
+            // RX-local hard erasure: below the configured per-carrier gamma
+            // floor, the demapper must contribute no evidence to LDPC.
             if (rx_carrier_erasure_enabled_ &&
                 h_power < RX_ERASURE_GAMMA_FLOOR_LINEAR * scaled_noise_var) {
                 carrier_erasure_flags_[i] = 1;

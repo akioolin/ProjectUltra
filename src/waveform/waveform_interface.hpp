@@ -103,6 +103,11 @@ public:
     virtual void setCarrierMask(uint64_t active_mask) { (void)active_mask; }
     virtual uint64_t getCarrierMask() const { return UINT64_MAX; }
 
+    // Optional OFDM_CHIRP CarrierLDPC v1 bit permutation. TX applies the
+    // forward permutation before carrier mapping; RX applies the inverse before
+    // LDPC decode. Non-OFDM waveforms ignore it.
+    virtual void setCarrierLdpcInterleaverEnabled(bool enabled) { (void)enabled; }
+
     // ========================================================================
     // RX PATH
     // ========================================================================

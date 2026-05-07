@@ -998,8 +998,14 @@ bool StreamingDecoder::processWaveformForCodewords(SampleSpan samples,
         return false;
     }
 
+    const bool allow_carrier_ldpc =
+        connected_ &&
+        protocol::isOFDMMode(mode_);
     const bool allow_rx_erasure =
-        connected_ && protocol::isOFDMMode(mode_) && expected_codewords >= 2;
+        allow_carrier_ldpc &&
+        expected_codewords >= 2 &&
+        expected_codewords <= v2::kMaxFixedFrameCodewords;
+    waveform_->setCarrierLdpcInterleaverEnabled(allow_carrier_ldpc);
     waveform_->setRXCarrierErasureEnabled(allow_rx_erasure);
     return waveform_->process(samples);
 }

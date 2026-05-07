@@ -62,6 +62,7 @@ public:
     Samples modulate(const Bytes& encoded_data) override;
     void setCarrierMask(uint64_t active_mask) override;
     uint64_t getCarrierMask() const override { return carrier_mask_; }
+    void setCarrierLdpcInterleaverEnabled(bool enabled) override;
 
     // ========================================================================
     // IWaveform - RX
@@ -128,6 +129,7 @@ private:
     sync::ChirpConfig getChirpConfig() const;
     void configurePilotsForCodeRate(CodeRate rate);
     bool carrierLdpcPlumbingEligible() const;
+    bool carrierLdpcCodewordCountSupported(size_t codeword_count) const;
 
     protocol::WaveformMode mode_ = protocol::WaveformMode::OFDM_CHIRP;
     ModemConfig config_;
@@ -140,6 +142,8 @@ private:
     float last_snr_ = 0.0f;
     float last_cfo_ = 0.0f;
     uint64_t carrier_mask_ = UINT64_MAX;
+    bool carrier_ldpc_interleaver_enabled_ = false;
+    bool rx_carrier_erasure_enabled_ = false;
     bool synced_ = false;
     std::vector<float> soft_bits_;
 
