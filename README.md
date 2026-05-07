@@ -72,34 +72,68 @@ existing commercial HF data modems in equivalent conditions. The 500 KB
 Good15 result is the realistic-HF baseline; 50 KB cable is the upper
 bound given a clean channel.
 
-### Per-carrier RX erasure (deep notch / QRM survival)
+### Features
 
-OFDM-CHIRP wideband data frames apply **per-carrier reliability
-erasure at the receiver**. Each frame's own LTS + pilot tracking
-gives a per-carrier `γ_k = |H_k|² / σ²_k`. Carriers below -6 dB
-emit `LLR = 0` to LDPC instead of being demapped as overconfident
-bits. Multi-codeword data frames use the CarrierLDPC v1 bit
-permutation so carrier erasures spread across LDPC base columns;
-1-CW control/ACK frames bypass both erasure and permutation for
-stopping-set safety.
+**Waveforms.** MC-DPSK (chirp sync, low-SNR robust), OFDM-CHIRP
+(wideband 2.8 kHz, 59 carriers), OFDM-NARROW (500 Hz crowded-band
+mode), OFDM-COX (Schmidl-Cox sync), SC-DPSK (very low SNR).
 
-Concrete A/B: Mac TX with carrier 31 deliberately notched (zero
-amplitude), 20 KB AWGN SNR=15:
+**Modulation + FEC.** DBPSK / DQPSK / D8PSK / BPSK / QPSK with
+802.11n LDPC at four code rates (R1/4, R1/2, R2/3, R3/4).
+Min-sum belief-propagation decoder.
 
-| RX side | Throughput | Retx | Failed |
-|---------|-----------:|-----:|-------:|
-| With erasure (this build) | 2,271 bps | 0 | 0 |
-| Without erasure (baseline) | — | 224 | **15 (TEST FAILED)** |
+**Synchronization.** Dual-chirp detection with FFTW-accelerated
+correlation, Schmidl-Cox training, light-preamble (LTS-only) for
+in-session frames, LTS-residual CFO refinement, per-symbol pilot
+tracking with common-phase-error correction.
 
-The feature is silent on benign channels (AWGN, light fading)
-because no carrier crosses the −6 dB threshold. It earns its
-keep on the channels that actually break HF links in the field —
-co-channel interference, broadcast skip, narrow-band jammers,
-and deep multipath nulls. There is a measured ~25 % throughput
-cost on synthetic Watterson Moderate (0.5 Hz Doppler / 1 ms
-delay), where natural per-carrier fading occasionally crosses
-the floor; we accept that cost because real-HF QRM and stationary
-notches are the more common link-killer in practice.
+**ARQ.** Selective-repeat with cumulative + selective ACKs,
+window 1 (DPSK / narrowband) or 8–16 (wideband OFDM), variable
+1–8 codeword frames, wire-negotiated CW count, frame +
+optional channel + burst interleavers.
+
+**Adaptive rate.** SNR + fading-index ladder (R3/4 / R2/3 /
+R1/2 / R1/4) with bootstrap cap, per-burst clean-window upgrade,
+two-window hysteresis on downshift to prevent panic-downshift on
+short fading transfers.
+
+**Per-carrier RX erasure.** Each OFDM-CHIRP frame computes
+`γ_k = |H_k|² / σ²_k` from its own LTS + pilots; carriers below
+-6 dB emit `LLR = 0` to LDPC after a persistence gate (3
+consecutive symbols or 2 consecutive multi-CW frames). Bits are
+spread across LDPC base columns by the CarrierLDPC v1
+interleaver `a = (307·i) mod (648·Ncw)`. Silent on AWGN /
+light fading; converts deep stationary notches and in-band QRM
+from a TEST FAILED into a clean decode (validated A/B on a
+fixed -25 dB notched carrier: 2,271 bps vs 15-frame loss
+baseline).
+
+**HARQ Chase soft-combining.** LLR-accumulating buffer keyed by
+full PHY digest (rate, modulation, interleaver, carrier mask,
+erasure-policy epoch). Currently active only when the frame's
+header CW decodes; broader CW0-fail integration is in
+experimental branches awaiting further hardware validation.
+
+**Channel testing.** Built-in Watterson HF channel injector
+(ITU-R F.1487) with AWGN, Good (0.1 Hz / 0.5 ms), Moderate
+(0.5 Hz / 1 ms), Poor (1 Hz / 2 ms) presets. Two-machine hardware
+harness (Mac ↔ Pi5 over USB sound cards) with byte-exact
+end-to-end validation.
+
+**Protocol v2.** PING / PONG, CONNECT / CONNECT_ACK,
+MODE_CHANGE, DATA, ACK / SACK, DISCONNECT. Wire-level CRC-16
+on every frame, capability flags, measured-SNR + fading-index
+exchange.
+
+**TNC integration.** `ultra_tnc` daemon exposes the modem over
+the same TCP command/data API used by Pat, Winlink Express,
+BPQ32, and similar clients (cmd port 8300 / data port 8301);
+verified end-to-end with real Pat sessions across all major
+B2F message types.
+
+**GUI application.** `ultra_gui` with real-time waterfall,
+constellation, message log, and ARQ health view (ImGui +
+SDL2). Virtual-station / simulator mode for development.
 
 ### Waveform selection (automatic)
 
