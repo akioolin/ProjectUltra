@@ -456,6 +456,11 @@ necessary. Be ready to QSY.
   byte-exact end-to-end, validated with real Pat sessions.
 - Hardware-in-the-loop test rig (Mac ↔ Pi5 with Watterson
   injection) with byte-exact file-transfer validation.
+- **First real OTA validation (2026-05-03):** ProjectUltra
+  audio played over the air by KC3VPB (US, 40m band,
+  7.102 / 7.113 MHz USB), captured via the NA5B KiwiSDR in
+  Maryland, decoded byte-exact offline. Recordings in
+  `recordings/`.
 
 ### Experimental (in tree, not on by default)
 
