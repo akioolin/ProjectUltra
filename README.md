@@ -204,33 +204,27 @@ ProjectUltra extension:
 ### Status
 
 - Cross-platform: Linux + macOS + Windows. CI matrix all green.
-- ctest: 34/34 (98 TNC parser tests, 19 TCP integration tests, 17
-  bridge tests, plus modem regressions).
-- End-to-end byte-exact transfers: 50 KB Mac↔Pi5 over real audio
-  cable, 2354 bps random / 102400 bps with compression on prose-shaped
-  text (deflate ratio 222×).
-- **Real Pat client validated end-to-end**: Pat 1.0.0 (Mac) ↔ Pat
-  0.15.1 (Pi5) drove a full battery of B2F sessions through two
-  `ultra_tnc` instances over real audio cable:
-  - Empty CONNECT/DISCONNECT cycle — 13 s, clean
-  - 41 B text Mac→Pi — 21 s, byte-exact
-  - 2.6 KB text Mac→Pi — 50 s, gzipped to 357 B, byte-exact
-  - 1 KB binary attachment Mac→Pi — 56 s, byte-exact
-  - 47 B text Pi→Mac (reverse direction) — 37 s, byte-exact
-  - Bidirectional in single session — 57 s, both inboxes updated
-  - 12.5 KB Lorem ipsum Mac→Pi — 50 s, gzipped to 448 B (28× ratio)
-  - Known limitation: back-to-back sessions within ~30 s of teardown
-    don't always recover cleanly (1/3 retry success). Root cause
-    traced upstream: pat-vara silently drops inbound connections if
-    `Accept()` hasn't re-armed (pat-vara `vara.go:344-349`, falls
-    through to `select` default + sends `DISCONNECT`). Single-session
-    flows are reliable.
-- Five real bugs found + fixed during the integration: VERSION
-  response format, CONNECTED line initiator/responder ordering,
-  missing `BUFFER N` event emission, BUFFER staging accounting, and
-  the audit document `docs/PAT_VARA_AUDIT.md` (Codex-generated, full
-  pat-vara expectations spec) for future reference.
-- Winlink Express on Windows: spec-compatible, not yet manually tested.
+- ctest: **37/37** (TNC parser, TCP integration, bridge tests, plus
+  modem regressions including the new `CarrierLDPC v1` math gate
+  and per-carrier mask plumbing).
+- End-to-end byte-exact transfers (hardware harness, Mac ↔ Pi5
+  over USB sound cards): see throughput table at the top of this
+  README. 50 KB cable run hits 2,354 bps; injected Watterson
+  Good at SNR=15 holds 1,631 bps clean; forced R3/4 at SNR=15
+  AWGN delivers 2,676 bps clean (2026-05-07 calibration).
+- **Real Pat client validated end-to-end** with Pat 1.0.0 (Mac)
+  ↔ Pat 0.15.1 (Pi5) over real audio cable: full B2F session
+  matrix passes byte-exact (empty connect/disconnect, text up
+  to 12.5 KB, binary attachments, bidirectional, both
+  directions). Five real bugs found + fixed during integration;
+  full audit at `docs/PAT_VARA_AUDIT.md`.
+- Known TNC limitation: back-to-back sessions within ~30 s of
+  teardown don't always recover cleanly (~1/3 retry success).
+  Root cause traced upstream to pat-vara
+  (`vara.go:344-349` drops inbound connection if `Accept()`
+  hasn't re-armed). Single-session flows are reliable.
+- Winlink Express on Windows: spec-compatible, not yet manually
+  tested.
 
 ---
 
