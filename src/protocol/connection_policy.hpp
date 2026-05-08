@@ -136,6 +136,13 @@ inline bool shouldPadHighRateFadingBurst(Modulation mod,
     return (burst_frames % kBurstInterleaveGroupFrames) != 0;
 }
 
+inline bool shouldPadBurstInterleaveGroup(size_t burst_frames) {
+    if (burst_frames <= 1) {
+        return false;
+    }
+    return (burst_frames % kBurstInterleaveGroupFrames) != 0;
+}
+
 inline uint32_t ofdmAckBatchSize(bool near_awgn_ofdm) {
     (void)near_awgn_ofdm;
     return 0;

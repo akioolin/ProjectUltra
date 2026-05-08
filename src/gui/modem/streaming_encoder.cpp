@@ -292,6 +292,7 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
     // Track which groups are burst-interleaved (for LTS marker)
     const int BURST_GROUP_SIZE = std::max(2, burst_group_size_);
     std::vector<bool> frame_is_group_start(encoded_frames.size(), false);
+    size_t interleaved_groups = 0;
 
     if (use_burst_interleave_) {
         size_t full_groups = encoded_frames.size() / BURST_GROUP_SIZE;
@@ -311,6 +312,7 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
                 encoded_frames[base + i] = interleaved[i];
             }
             frame_is_group_start[base] = true;
+            interleaved_groups++;
 
             LOG_MODEM(INFO, "[%s] Burst interleaved group %zu: frames %zu-%zu",
                       log_prefix_.c_str(), g, base, base + BURST_GROUP_SIZE - 1);
@@ -355,9 +357,9 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
         result.insert(result.end(), modulated.begin(), modulated.end());
     }
 
-    LOG_MODEM(INFO, "[%s] Encoded burst: %zu blocks -> %zu samples (burst_interleave=%s)",
+    LOG_MODEM(INFO, "[%s] Encoded burst: %zu blocks -> %zu samples (burst_interleave=%s groups=%zu)",
               log_prefix_.c_str(), frame_data_list.size(), result.size(),
-              use_burst_interleave_ ? "yes" : "no");
+              interleaved_groups > 0 ? "yes" : "no", interleaved_groups);
 
     return result;
 }
