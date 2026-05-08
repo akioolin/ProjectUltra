@@ -218,6 +218,15 @@ else()
     message(STATUS "DecodeBenchReplay disabled: decode_bench target is not built")
 endif()
 
+if(TARGET cli_simulator)
+    add_test(NAME CLISyntheticNotch
+        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_cli_synthetic_notch.sh
+                     $<TARGET_FILE:cli_simulator>)
+    set_tests_properties(CLISyntheticNotch PROPERTIES
+        TIMEOUT 180
+        LABELS regression)
+endif()
+
 if(ULTRA_BUILD_HARDWARE_TESTS)
     add_test(NAME HardwareSmoke
         COMMAND ${CMAKE_SOURCE_DIR}/agents/run_hardware_smoke.sh)

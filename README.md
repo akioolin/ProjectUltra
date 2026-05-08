@@ -41,7 +41,10 @@ Useful payload bits / second over the air, ignoring ARQ overhead and
 auto-rate adaptation. This is what one bulk frame delivers in steady
 state on a stable channel.
 
-OFDM 1024-FFT, 59 carriers, CP=96, ~42.9 sym/s:
+Wide OFDM uses a 1024-FFT with LONG CP=128: 1152 samples/symbol
+at 48 kHz, or 41.667 sym/s. The 59 carriers are total occupied
+carriers; DQPSK R1/2 uses pilot spacing 10, so 6 pilots leave 53
+data carriers.
 
 | SNR  | Mode             | Throughput | Notes |
 |------|------------------|-----------:|-------|
@@ -49,7 +52,7 @@ OFDM 1024-FFT, 59 carriers, CP=96, ~42.9 sym/s:
 | 8+   | OFDM-NARROW R1/4 |    103 bps | 500 Hz BW for crowded bands |
 | 8+   | OFDM-NARROW R1/2 |    230 bps | 500 Hz BW |
 | 10+  | OFDM DQPSK R1/4  |   1264 bps | Fading-tolerant baseline |
-| 15+  | OFDM DQPSK R1/2  |   2271 bps | Good + moderate fading |
+| 15+  | OFDM DQPSK R1/2  |   1967 bps | Pre-ACK fixed-frame payload rate; Good + moderate fading |
 | 15+  | OFDM DQPSK R2/3  |   3028 bps | Near-AWGN only |
 | 15+  | OFDM DQPSK R3/4  |   3536 bps | AWGN-class channel only |
 | 25+  | OFDM 16QAM R3/4  |   5657 bps | Stable paths (NVIS, ground wave) |
@@ -70,7 +73,7 @@ on measured SNR and fading.
 | 5 KB Mac↔Pi5 injected ×5      | Watterson Good, SNR=15 |  ~27 s | **1540.6 bps**  | Median of 5; range [1540.3, 1550.0]; R1/2; 0 retx all 5; handshake ≈ 19% (fixed ~5 s overhead dominates short transfers) |
 | 500 KB Mac↔Pi5 injected       | Watterson Good, SNR=15 | 3742 s |      1094 bps   | R1/2; 1346 retx, 0 failed, byte-exact; handshake negligible — slowdown vs 20 KB is from retransmissions on a long fading run |
 
-Throughput rises with payload size as the fixed ~5 s handshake (PING/PONG → CONNECT → MODE_CHANGE) amortizes. The R1/2 SNR=15 asymptote on this harness is ≈ 1850 bps; beyond ~50 KB throughput is bounded by per-frame airtime + ACK roundtrip, not handshake.
+Throughput rises with payload size as the fixed ~5 s handshake (PING/PONG → CONNECT → MODE_CHANGE) amortizes. For R1/2, the 8-CW frame carries 301 payload bytes in 51 OFDM symbols (`2 + ceil(8*648/(53*2))`) = 1.224 s, so the pre-ACK payload rate is 1967 bps. The R1/2 SNR=15 wall-clock asymptote on this harness remains about 1.83-1.90 kbps after ACK turnaround; beyond ~50 KB throughput is bounded by per-frame airtime + ACK roundtrip, not handshake.
 
 End-to-end throughput is wall-clock measured by `tools/run_hw_test.sh`
 between A's `Connection: Starting file transfer` and the final ACK
@@ -387,8 +390,8 @@ If no PONG after 5 PINGs (~15 s), connection fails fast.
 | Center freq.     | 1500 Hz    | 1500 Hz    |
 | Carriers         | 8          | 59         |
 | FFT size         | n/a        | 1024       |
-| Symbol rate      | ~94 baud   | ~42.9 baud |
-| Cyclic prefix    | n/a        | 96 (~2 ms) |
+| Symbol rate      | ~94 baud   | 41.667 baud |
+| Cyclic prefix    | n/a        | 128 (2.667 ms) |
 | Sync             | Dual chirp | Dual chirp / Schmidl-Cox |
 | LDPC codeword    | 648 bits   | 648 bits   |
 

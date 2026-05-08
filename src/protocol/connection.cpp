@@ -44,16 +44,20 @@ bool shouldUseSingleOFDMFileBlock(float fading_index, float snr_db, CodeRate rat
            getCodeRateValue(rate) >= getCodeRateValue(CodeRate::R2_3);
 }
 
-bool shouldPadPartialOFDMFileBurst(WaveformMode mode,
-                                   Modulation modulation,
-                                   CodeRate rate,
-                                   float fading_index,
-                                   float snr_db,
-                                   FileTransferState file_state,
-                                   size_t burst_frames) {
-    if (!isOFDMMode(mode) || file_state != FileTransferState::SENDING) {
+bool shouldPadPartialOFDMBurst(WaveformMode mode,
+                               Modulation modulation,
+                               CodeRate rate,
+                               float fading_index,
+                               float snr_db,
+                               FileTransferState file_state,
+                               size_t burst_frames) {
+    if (!isOFDMMode(mode)) {
         return false;
     }
+    if (file_state != FileTransferState::SENDING) {
+        return connection_policy::shouldPadBurstInterleaveGroup(burst_frames);
+    }
+
     return connection_policy::shouldPadHighRateFadingBurst(
         modulation,
         rate,
@@ -1706,13 +1710,13 @@ void Connection::flushBurstBuffer() {
     if (burst_tx_buffer_.empty()) return;
 
     const size_t real_frame_count = burst_tx_buffer_.size();
-    if (shouldPadPartialOFDMFileBurst(negotiated_mode_,
-                                      data_modulation_,
-                                      data_code_rate_,
-                                      fading_index_,
-                                      measured_snr_db_,
-                                      file_transfer_.getState(),
-                                      real_frame_count)) {
+    if (shouldPadPartialOFDMBurst(negotiated_mode_,
+                                  data_modulation_,
+                                  data_code_rate_,
+                                  fading_index_,
+                                  measured_snr_db_,
+                                  file_transfer_.getState(),
+                                  real_frame_count)) {
         const size_t remainder =
             real_frame_count % connection_policy::kBurstInterleaveGroupFrames;
         const size_t pad_count =
@@ -1728,7 +1732,7 @@ void Connection::flushBurstBuffer() {
             burst_tx_buffer_.push_back(pad_frame);
         }
         LOG_MODEM(INFO,
-                  "Connection: Padded OFDM high-rate file burst %zu -> %zu frames for burst interleaver",
+                  "Connection: Padded OFDM burst %zu -> %zu frames for burst interleaver",
                   real_frame_count,
                   burst_tx_buffer_.size());
     }
