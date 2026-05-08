@@ -65,10 +65,17 @@ on measured SNR and fading.
 | Test                          | Channel                | Wall  | Throughput | Notes |
 |-------------------------------|------------------------|------:|-----------:|-------|
 | 50 KB Mac↔Pi5 cable           | Clean USB cable        | 174 s |  2354 bps  | Auto DQPSK R3/4 @ SNR=28 |
-| 20 KB Mac↔Pi5 injected        | AWGN, SNR=15           |  72 s |  2266 bps  | Auto DQPSK R2/3, 0 retx, byte-exact |
-| 20 KB Mac↔Pi5 injected        | Watterson Good, SNR=15 |  96 s |  1705 bps  | Auto DQPSK R1/2, 0 retx, byte-exact (post F#3/F#4 hot-path fixes 2026-05-08) |
+| 20 KB Mac↔Pi5 injected ×5     | AWGN, SNR=15           |  ~94 s | **1736.5 bps** (median) | Forced R1/2, 5-run sweep range [1730.1, 1739.8], 0 retx all 5, byte-exact (2026-05-08) |
+| 20 KB Mac↔Pi5 injected ×5     | Watterson Good, SNR=15 |  ~94 s | **1733.1 bps** (median) | Forced R1/2, 5-run sweep range [1726.8, 1739.6], 0 retx all 5, byte-exact (2026-05-08) |
 | 5 KB Mac↔Pi5 injected ×5      | Watterson Good, SNR=15 |  28 s |  1440 bps  | Median of 5 seeds, R1/2; 5/5 PASS post-BUG-RATE-001 fix (worst-case 684 bps; was 444 bps pre-fix with R1/2→R1/4 panic) |
 | 500 KB Mac↔Pi5 injected       | Watterson Good, SNR=15 | 3742 s |  1094 bps | Long-haul, 1346 retx, 0 failed, byte-exact |
+
+End-to-end throughput is wall-clock measured by `tools/run_hw_test.sh`
+between A's `Connection: Starting file transfer` and the final ACK
+received at A. Includes handshake + ACK turnaround latency (what an
+operator actually waits for). The Mac↔Pi5 hardware harness is the
+two-machine synthetic-channel test rig described in
+`docs/AGENT_DEDICATED_ENV_MACOS.md`.
 
 End-to-end results match or exceed real-world numbers reported for
 existing commercial HF data modems in equivalent conditions. The 500 KB
