@@ -1,101 +1,34 @@
-#!/bin/bash
-# Package ProjectUltra for macOS as a .app bundle
+#!/usr/bin/env bash
+# Build the macOS alpha operator bundle and separate developer-tools bundle.
 
-set -e
+set -euo pipefail
 
-APP_NAME="ProjectUltra"
-VERSION="0.1.0"
-BUILD_DIR="../build"
-OUTPUT_DIR="dist/macos"
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
+BUILD_DIR="$REPO_ROOT/build-release"
+OUTPUT_DIR="$REPO_ROOT/dist/macos"
 
-echo "=== Packaging ProjectUltra for macOS ==="
+echo "=== Packaging ProjectUltra operator bundle for macOS ==="
 
-# Build release version
-echo "Building release..."
-cd ..
-mkdir -p build-release
-cd build-release
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(sysctl -n hw.ncpu) ultra_gui
-cd ../packaging
+cmake -S "$REPO_ROOT" -B "$BUILD_DIR" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DULTRA_BUILD_TESTS=OFF \
+  -DULTRA_BUILD_GUI=ON
 
-# Create app bundle structure
-echo "Creating app bundle..."
-rm -rf "$OUTPUT_DIR"
-mkdir -p "$OUTPUT_DIR/${APP_NAME}.app/Contents/MacOS"
-mkdir -p "$OUTPUT_DIR/${APP_NAME}.app/Contents/Resources"
-mkdir -p "$OUTPUT_DIR/${APP_NAME}.app/Contents/Frameworks"
+cmake --build "$BUILD_DIR" --parallel "$(sysctl -n hw.ncpu)" --target \
+  ultra ultra_tnc ultra_gui \
+  cli_simulator threaded_simulator test_waveform_simple decode_bench session_decode
 
-# Copy executable
-cp "../build-release/ultra_gui" "$OUTPUT_DIR/${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
+"$SCRIPT_DIR/package_operator_bundle.sh" "$BUILD_DIR" macos "dist/macos"
 
-# Create Info.plist
-cat > "$OUTPUT_DIR/${APP_NAME}.app/Contents/Info.plist" << EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleExecutable</key>
-    <string>${APP_NAME}</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.projectultra.modem</string>
-    <key>CFBundleName</key>
-    <string>${APP_NAME}</string>
-    <key>CFBundleVersion</key>
-    <string>${VERSION}</string>
-    <key>CFBundleShortVersionString</key>
-    <string>${VERSION}</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleSignature</key>
-    <string>????</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>ProjectUltra needs microphone access for receiving audio from your radio.</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>10.13</string>
-</dict>
-</plist>
-EOF
-
-# Copy SDL2 framework (if using framework version)
-if [ -d "/opt/homebrew/opt/sdl2/lib" ]; then
-    echo "Bundling SDL2..."
-    cp -R /opt/homebrew/opt/sdl2/lib/libSDL2*.dylib "$OUTPUT_DIR/${APP_NAME}.app/Contents/Frameworks/" 2>/dev/null || true
-
-    # Fix library paths
-    EXECUTABLE="$OUTPUT_DIR/${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
-    for lib in "$OUTPUT_DIR/${APP_NAME}.app/Contents/Frameworks/"*.dylib; do
-        if [ -f "$lib" ]; then
-            libname=$(basename "$lib")
-            install_name_tool -change "/opt/homebrew/opt/sdl2/lib/$libname" "@executable_path/../Frameworks/$libname" "$EXECUTABLE" 2>/dev/null || true
-        fi
-    done
-fi
-
-# Create DMG
-echo "Creating DMG..."
-DMG_NAME="${APP_NAME}-${VERSION}-macOS.dmg"
-rm -f "$OUTPUT_DIR/$DMG_NAME"
-
-# Create a temporary directory for DMG contents
-DMG_TEMP="$OUTPUT_DIR/dmg_temp"
-rm -rf "$DMG_TEMP"
-mkdir -p "$DMG_TEMP"
-cp -R "$OUTPUT_DIR/${APP_NAME}.app" "$DMG_TEMP/"
-ln -s /Applications "$DMG_TEMP/Applications"
-
-# Create DMG
-hdiutil create -volname "$APP_NAME" -srcfolder "$DMG_TEMP" -ov -format UDZO "$OUTPUT_DIR/$DMG_NAME"
-rm -rf "$DMG_TEMP"
+(
+  cd "$OUTPUT_DIR"
+  rm -f projectultra-macos.zip dev-tools-macos.zip
+  zip -r projectultra-macos.zip projectultra-macos
+  zip -r dev-tools-macos.zip dev-tools-macos
+)
 
 echo ""
-echo "=== macOS Package Complete ==="
-echo "App Bundle: $OUTPUT_DIR/${APP_NAME}.app"
-echo "DMG: $OUTPUT_DIR/$DMG_NAME"
-echo ""
-echo "To distribute:"
-echo "1. Test the .app on a clean Mac"
-echo "2. For wider distribution, consider code signing with:"
-echo "   codesign --deep --force --sign \"Developer ID\" ${APP_NAME}.app"
+echo "=== macOS Bundles Complete ==="
+echo "Operator bundle: $OUTPUT_DIR/projectultra-macos.zip"
+echo "Developer tools: $OUTPUT_DIR/dev-tools-macos.zip"

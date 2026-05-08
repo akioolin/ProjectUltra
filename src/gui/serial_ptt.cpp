@@ -79,7 +79,7 @@ bool SerialPttController::matches(const std::string& port_name, int baud_rate) c
 
 bool SerialPttController::open(const std::string& port_name, int baud_rate) {
     if (port_name.empty()) {
-        LOG_MODEM(ERROR, "PTT: serial port is empty");
+        LOG_ERROR("OPERATOR", "PTT: serial port is empty");
         return false;
     }
 
@@ -100,14 +100,14 @@ bool SerialPttController::open(const std::string& port_name, int baud_rate) {
                           FILE_ATTRIBUTE_NORMAL,
                           nullptr);
     if (handle_ == INVALID_HANDLE_VALUE) {
-        LOG_MODEM(ERROR, "PTT: failed to open '%s' (err=%lu)", port_path.c_str(), GetLastError());
+        LOG_ERROR("OPERATOR", "PTT: failed to open '%s' (err=%lu)", port_path.c_str(), GetLastError());
         return false;
     }
 
     DCB dcb{};
     dcb.DCBlength = sizeof(dcb);
     if (!GetCommState(handle_, &dcb)) {
-        LOG_MODEM(ERROR, "PTT: GetCommState failed (err=%lu)", GetLastError());
+        LOG_ERROR("OPERATOR", "PTT: GetCommState failed (err=%lu)", GetLastError());
         close();
         return false;
     }
@@ -120,7 +120,7 @@ bool SerialPttController::open(const std::string& port_name, int baud_rate) {
     dcb.fRtsControl = RTS_CONTROL_DISABLE;
 
     if (!SetCommState(handle_, &dcb)) {
-        LOG_MODEM(ERROR, "PTT: SetCommState failed (err=%lu)", GetLastError());
+        LOG_ERROR("OPERATOR", "PTT: SetCommState failed (err=%lu)", GetLastError());
         close();
         return false;
     }
@@ -130,12 +130,12 @@ bool SerialPttController::open(const std::string& port_name, int baud_rate) {
 
     port_name_ = port_name;
     baud_rate_ = safe_baud;
-    LOG_MODEM(INFO, "PTT: opened serial port '%s' @ %d", port_name_.c_str(), baud_rate_);
+    LOG_INFO("OPERATOR", "PTT: opened serial port '%s' @ %d", port_name_.c_str(), baud_rate_);
     return true;
 #else
     fd_ = ::open(port_name.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (fd_ < 0) {
-        LOG_MODEM(ERROR, "PTT: failed to open '%s' (%s)", port_name.c_str(), std::strerror(errno));
+        LOG_ERROR("OPERATOR", "PTT: failed to open '%s' (%s)", port_name.c_str(), std::strerror(errno));
         return false;
     }
 
@@ -156,7 +156,7 @@ bool SerialPttController::open(const std::string& port_name, int baud_rate) {
 
     port_name_ = port_name;
     baud_rate_ = safe_baud;
-    LOG_MODEM(INFO, "PTT: opened serial port '%s' @ %d", port_name_.c_str(), baud_rate_);
+    LOG_INFO("OPERATOR", "PTT: opened serial port '%s' @ %d", port_name_.c_str(), baud_rate_);
     return true;
 #endif
 }
@@ -191,14 +191,14 @@ bool SerialPttController::setLine(SerialPttLine line, bool asserted) {
     }
 
     if (!EscapeCommFunction(handle_, fn)) {
-        LOG_MODEM(ERROR, "PTT: EscapeCommFunction failed (err=%lu)", GetLastError());
+        LOG_ERROR("OPERATOR", "PTT: EscapeCommFunction failed (err=%lu)", GetLastError());
         return false;
     }
     return true;
 #else
     int status = 0;
     if (ioctl(fd_, TIOCMGET, &status) != 0) {
-        LOG_MODEM(ERROR, "PTT: ioctl(TIOCMGET) failed (%s)", std::strerror(errno));
+        LOG_ERROR("OPERATOR", "PTT: ioctl(TIOCMGET) failed (%s)", std::strerror(errno));
         return false;
     }
 
@@ -210,7 +210,7 @@ bool SerialPttController::setLine(SerialPttLine line, bool asserted) {
     }
 
     if (ioctl(fd_, TIOCMSET, &status) != 0) {
-        LOG_MODEM(ERROR, "PTT: ioctl(TIOCMSET) failed (%s)", std::strerror(errno));
+        LOG_ERROR("OPERATOR", "PTT: ioctl(TIOCMSET) failed (%s)", std::strerror(errno));
         return false;
     }
     return true;

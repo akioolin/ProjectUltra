@@ -20,6 +20,7 @@
 #include <chrono>
 #include <ctime>
 #include <exception>
+#include <memory>
 #include <vector>
 #include <atomic>
 #include <ultra/logging.hpp>
@@ -180,6 +181,28 @@ void closeStartupLog() {
         g_startup_log_file = nullptr;
     }
 #endif
+}
+
+void printGuiUsage(const char* prog) {
+    std::printf("ProjectUltra GUI\n\n");
+    std::printf("Usage: %s [options]\n\n", prog ? prog : "ultra_gui");
+    std::printf("Options:\n");
+    std::printf("  -sim                         Enable developer simulator UI\n");
+    std::printf("  -rec [path]                   Record received audio\n");
+    std::printf("  --software, -sw               Use software renderer and safe startup\n");
+    std::printf("  --opengl, --gl                Use OpenGL renderer\n");
+    std::printf("  --no-waterfall                Disable waterfall on startup\n");
+    std::printf("  --waterfall                   Enable waterfall on startup\n");
+    std::printf("  --monitor-ofdm [rate]         Monitor OFDM_CHIRP\n");
+    std::printf("  --monitor-ofdm-narrow [rate]  Monitor OFDM_NARROW\n");
+    std::printf("  --monitor-mcdpsk              Monitor MC-DPSK\n");
+    std::printf("  --monitor-mod <mod>           Monitor modulation\n");
+    std::printf("  --log-level <error|warn|info|debug|trace>\n");
+    std::printf("                               Console verbosity (default: info)\n");
+    std::printf("  --log-category <list>         Comma list: operator,audio,tnc,modem,\n");
+    std::printf("                               demod,sync,ldpc,channel,all\n");
+    std::printf("  --log-file <path>             Write logs to file instead of stderr\n");
+    std::printf("  --help, -h                    Show this help\n");
 }
 
 #ifdef _WIN32
@@ -409,13 +432,25 @@ int main(int argc, char* argv[]) {
         std::_Exit(3);
     });
 
-    // Set log level to INFO to avoid DEBUG log spam slowing down UI
-    // (DEBUG logs every frame in pollRxAudio() cause significant lag)
+    // Keep the default console profile operator-facing; debug/trace
+    // modem internals are opt-in through the CLI flags below.
+    ultra::setOperatorLogProfile();
     ultra::setLogLevel(ultra::LogLevel::INFO);
-    writeStartupLog("Log level set to INFO");
+    writeStartupLog("Log level set to INFO, operator profile active");
 
     // Parse command line arguments
     ultra::gui::App::Options opts;
+    struct LogFileCloser {
+        void operator()(std::FILE* file) const {
+            if (file) std::fclose(file);
+        }
+    };
+    std::unique_ptr<std::FILE, LogFileCloser> log_file(nullptr);
+    ultra::LogLevel log_level = ultra::LogLevel::INFO;
+    bool log_level_set = false;
+    bool log_categories_set = false;
+    std::string log_categories;
+    std::string log_file_path;
 #ifdef _WIN32
     bool force_software_renderer = true;   // Win10/older GPUs: prefer SDL renderer path by default
 #else
@@ -425,6 +460,10 @@ int main(int argc, char* argv[]) {
         std::string arg = argv[i];
         if (arg == "-sim") {
             opts.enable_sim = true;
+        } else if (arg == "--help" || arg == "-h") {
+            printGuiUsage(argv[0]);
+            closeStartupLog();
+            return 0;
         } else if (arg == "-rec") {
             opts.record_audio = true;
             // Check if next arg is a path (doesn't start with -)
@@ -460,8 +499,56 @@ int main(int argc, char* argv[]) {
             if (i + 1 < argc) {
                 opts.monitor_modulation = argv[++i];
             }
+        } else if (arg == "--log-level") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Missing value for --log-level\n");
+                closeStartupLog();
+                return 1;
+            }
+            const std::string value = argv[++i];
+            if (!ultra::parseLogLevel(value, log_level)) {
+                std::fprintf(stderr, "Invalid --log-level: %s\n", value.c_str());
+                closeStartupLog();
+                return 1;
+            }
+            log_level_set = true;
+        } else if (arg == "--log-category" || arg == "--log-categories") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Missing value for %s\n", arg.c_str());
+                closeStartupLog();
+                return 1;
+            }
+            log_categories = argv[++i];
+            log_categories_set = true;
+        } else if (arg == "--log-file") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Missing value for --log-file\n");
+                closeStartupLog();
+                return 1;
+            }
+            log_file_path = argv[++i];
         }
     }
+
+    ultra::setLogLevel(log_level);
+    if (log_level_set && log_level >= ultra::LogLevel::DEBUG && !log_categories_set) {
+        ultra::setDeveloperLogProfile();
+    }
+    if (log_categories_set && !ultra::setLogCategories(log_categories)) {
+        std::fprintf(stderr, "Invalid --log-category list: %s\n", log_categories.c_str());
+        closeStartupLog();
+        return 1;
+    }
+    if (!log_file_path.empty()) {
+        log_file.reset(std::fopen(log_file_path.c_str(), "a"));
+        if (!log_file) {
+            std::fprintf(stderr, "Failed to open --log-file %s\n", log_file_path.c_str());
+            closeStartupLog();
+            return 1;
+        }
+        ultra::setLogFile(log_file.get());
+    }
+    LOG_INFO("OPERATOR", "ultra_gui starting: log=%s", ultra::logLevelName(log_level));
 
     // Software path implies safer startup defaults (deferred audio + no waterfall)
     if (force_software_renderer) {

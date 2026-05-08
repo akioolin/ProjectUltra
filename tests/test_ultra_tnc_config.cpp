@@ -275,6 +275,19 @@ void test_applyConfigKey_ofdm_config() {
     pass("applyConfigKey: ofdm_config default/nvis only");
 }
 
+void test_applyConfigKey_log_settings() {
+    Config cfg;
+    CHECK(applyConfigKey("log_level", "debug", cfg), "debug log level ok");
+    CHECK(cfg.log_level == ultra::LogLevel::DEBUG && cfg.log_level_set, "debug stored");
+    CHECK(!applyConfigKey("log_level", "chatty", cfg), "unknown log level rejected");
+    CHECK(applyConfigKey("log_category", "operator,audio,demod", cfg), "log categories ok");
+    CHECK(cfg.log_categories == "operator,audio,demod" && cfg.log_categories_set,
+          "categories stored");
+    CHECK(applyConfigKey("log_file", "/tmp/ultra.log", cfg), "log file ok");
+    CHECK(cfg.log_file == "/tmp/ultra.log", "log file stored");
+    pass("applyConfigKey: log_level/log_category/log_file");
+}
+
 // ---------------- loadConfigFile ----------------
 
 void test_loadConfigFile_basic() {
@@ -414,6 +427,19 @@ void test_parseArgs_no_ptt_inactive_high_alias() {
     pass("parseArgs: --no-ptt-inactive-high alias works");
 }
 
+void test_parseArgs_log_flags() {
+    Argv argv({"ultra_tnc", "--log-level", "trace",
+               "--log-category", "operator,demod",
+               "--log-file", "/tmp/ultra_tnc.log"});
+    Config cfg;
+    CHECK(parseArgs(argv.argc(), argv.data(), cfg), "parse ok");
+    CHECK(cfg.log_level == ultra::LogLevel::TRACE && cfg.log_level_set, "trace stored");
+    CHECK(cfg.log_categories == "operator,demod" && cfg.log_categories_set,
+          "categories stored");
+    CHECK(cfg.log_file == "/tmp/ultra_tnc.log", "log file stored");
+    pass("parseArgs: log flags stored");
+}
+
 void test_parseArgs_unknown_flag_rejected() {
     Argv argv({"ultra_tnc", "--this-does-not-exist"});
     Config cfg;
@@ -468,6 +494,7 @@ int main() {
     test_applyConfigKey_ptt_serial_line();
     test_applyConfigKey_unknown_key_rejected();
     test_applyConfigKey_ofdm_config();
+    test_applyConfigKey_log_settings();
 
     // loadConfigFile
     test_loadConfigFile_basic();
@@ -485,6 +512,7 @@ int main() {
     test_parseArgs_no_inject_channel_overrides_config_true();
     test_parseArgs_ptt_active_high_overrides_config_true();
     test_parseArgs_no_ptt_inactive_high_alias();
+    test_parseArgs_log_flags();
     test_parseArgs_unknown_flag_rejected();
     test_parseArgs_missing_value_rejected();
     test_parseArgs_config_load_failure_propagates();

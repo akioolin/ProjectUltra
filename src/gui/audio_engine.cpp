@@ -107,13 +107,13 @@ bool AudioEngine::openOutput(const std::string& device) {
 
     output_device_ = SDL_OpenAudioDevice(dev_name, 0, &want, &have, 0);
     if (output_device_ == 0) {
-        LOG_MODEM(ERROR, "AudioEngine: Failed to open OUTPUT device: %s (error: %s)",
+        LOG_ERROR("AUDIO", "AudioEngine: Failed to open OUTPUT device: %s (error: %s)",
                   dev_name ? dev_name : "Default", SDL_GetError());
         return false;
     }
 
-    LOG_MODEM(INFO, "AudioEngine: Opened OUTPUT device: %s (id=%d, rate=%d, period=%d)",
-              dev_name ? dev_name : "Default", output_device_, have.freq, have.samples);
+    LOG_INFO("AUDIO", "AudioEngine: Opened OUTPUT device: %s (id=%d, rate=%d, period=%d)",
+             dev_name ? dev_name : "Default", output_device_, have.freq, have.samples);
     sample_rate_ = have.freq;
     return true;
 }
@@ -165,14 +165,14 @@ bool AudioEngine::openInput(const std::string& device) {
 
     input_device_ = SDL_OpenAudioDevice(dev_name, 1, &want, &have, 0);
     if (input_device_ == 0) {
-        LOG_MODEM(ERROR, "AudioEngine: Failed to open INPUT device: %s (error: %s)",
+        LOG_ERROR("AUDIO", "AudioEngine: Failed to open INPUT device: %s (error: %s)",
                   dev_name ? dev_name : "Default", SDL_GetError());
         return false;
     }
 
-    LOG_MODEM(INFO, "AudioEngine: Opened INPUT device: %s (id=%d, rate=%d, period=%d, mode=%s)",
-              dev_name ? dev_name : "Default", input_device_, have.freq,
-              have.samples, input_queue_mode_ ? "queue" : "callback");
+    LOG_INFO("AUDIO", "AudioEngine: Opened INPUT device: %s (id=%d, rate=%d, period=%d, mode=%s)",
+             dev_name ? dev_name : "Default", input_device_, have.freq,
+             have.samples, input_queue_mode_ ? "queue" : "callback");
     input_dc_x_prev_ = 0.0f;
     input_dc_y_prev_ = 0.0f;
     return true;

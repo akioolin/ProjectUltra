@@ -10,16 +10,19 @@
 #include "gui/modem/modem_engine.hpp"
 #include "protocol/frame_v2.hpp"
 #include "sim/cli_enums.hpp"
+#include "ultra/logging.hpp"
 #include "ultra/types.hpp"
 
 #include <iostream>
 #include <fstream>
 #include <iomanip>
 #include <cstring>
+#include <cstdio>
 #include <csignal>
 #include <atomic>
 #include <thread>
 #include <chrono>
+#include <memory>
 #include <optional>
 
 using namespace ultra;
@@ -50,6 +53,12 @@ void printUsage(const char* prog) {
     std::cerr << "  -o <file>       Output to file instead of stdout\n";
     std::cerr << "  -w <waveform>   Waveform: ofdm, mcdpsk (default: ofdm)\n";
     std::cerr << "  -r <rate>       Code rate: r1_4, r1_2, r2_3, r3_4 (default: r1_4)\n";
+    std::cerr << "  --log-level <error|warn|info|debug|trace>\n";
+    std::cerr << "                  Console verbosity (default: info)\n";
+    std::cerr << "  --log-category <list>\n";
+    std::cerr << "                  Comma list: operator,audio,tnc,modem,demod,sync,ldpc,channel,all\n";
+    std::cerr << "  --log-file <path>\n";
+    std::cerr << "                  Write logs to file instead of stderr\n";
     std::cerr << "\nExamples:\n";
     std::cerr << "  # Send PING probe and play audio\n";
     std::cerr << "  " << prog << " ptx ping -s MYCALL | aplay -f FLOAT_LE -r 48000\n\n";
@@ -332,6 +341,18 @@ int runProtocolRx(const char* input_file, WaveformType waveform, CodeRate rate) 
 int main(int argc, char* argv[]) {
     signal(SIGINT, signalHandler);
 
+    struct LogFileCloser {
+        void operator()(std::FILE* file) const {
+            if (file) std::fclose(file);
+        }
+    };
+    std::unique_ptr<std::FILE, LogFileCloser> log_file(nullptr);
+    LogLevel log_level = LogLevel::INFO;
+    bool log_level_set = false;
+    bool log_categories_set = false;
+    std::string log_categories;
+    std::string log_file_path;
+
     const char* output_file = nullptr;
     const char* command = nullptr;
     const char* input_file = nullptr;
@@ -339,6 +360,8 @@ int main(int argc, char* argv[]) {
     std::string dst_call = "CQ";
     WaveformType waveform = WaveformType::OFDM_CHIRP;
     CodeRate rate = CodeRate::R1_4;
+
+    setOperatorLogProfile();
 
     // Parse arguments
     for (int i = 1; i < argc; ++i) {
@@ -366,6 +389,20 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             rate = *parsed;
+        } else if (strcmp(argv[i], "--log-level") == 0 && i + 1 < argc) {
+            const char* value = argv[++i];
+            if (!parseLogLevel(value, log_level)) {
+                std::cerr << "Invalid --log-level: " << value
+                          << " (use error, warn, info, debug, or trace)\n";
+                return 1;
+            }
+            log_level_set = true;
+        } else if ((strcmp(argv[i], "--log-category") == 0 ||
+                    strcmp(argv[i], "--log-categories") == 0) && i + 1 < argc) {
+            log_categories = argv[++i];
+            log_categories_set = true;
+        } else if (strcmp(argv[i], "--log-file") == 0 && i + 1 < argc) {
+            log_file_path = argv[++i];
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             printUsage(argv[0]);
             return 0;
@@ -376,6 +413,23 @@ int main(int argc, char* argv[]) {
                 input_file = argv[i];
             }
         }
+    }
+
+    setLogLevel(log_level);
+    if (log_level_set && log_level >= LogLevel::DEBUG && !log_categories_set) {
+        setDeveloperLogProfile();
+    }
+    if (log_categories_set && !setLogCategories(log_categories)) {
+        std::cerr << "Invalid --log-category list: " << log_categories << "\n";
+        return 1;
+    }
+    if (!log_file_path.empty()) {
+        log_file.reset(std::fopen(log_file_path.c_str(), "a"));
+        if (!log_file) {
+            std::cerr << "Failed to open --log-file " << log_file_path << "\n";
+            return 1;
+        }
+        setLogFile(log_file.get());
     }
 
     if (!command) {

@@ -1,64 +1,64 @@
 @echo off
-REM Package ProjectUltra for Windows
-REM Run this from a Visual Studio Developer Command Prompt
+REM Build the Windows alpha operator bundle and separate developer-tools bundle.
+REM Run this from a Visual Studio Developer Command Prompt.
 
-set APP_NAME=ProjectUltra
-set VERSION=0.1.0
+set TARGET=windows
 set OUTPUT_DIR=dist\windows
+set OPERATOR_DIR=%OUTPUT_DIR%\projectultra-%TARGET%
+set DEV_DIR=%OUTPUT_DIR%\dev-tools-%TARGET%
 
-echo === Packaging ProjectUltra for Windows ===
+echo === Packaging ProjectUltra operator bundle for Windows ===
 
-REM Build release version
-echo Building release...
 cd ..
 if not exist build-release mkdir build-release
 cd build-release
-cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build . --config Release --target ultra_gui
+cmake .. -DCMAKE_BUILD_TYPE=Release -DULTRA_BUILD_TESTS=OFF -DULTRA_BUILD_GUI=ON
+cmake --build . --config Release --target ultra ultra_tnc ultra_gui cli_simulator threaded_simulator test_waveform_simple decode_bench session_decode
 cd ..\packaging
 
-REM Create output directory
-echo Creating package...
 if exist "%OUTPUT_DIR%" rmdir /s /q "%OUTPUT_DIR%"
-mkdir "%OUTPUT_DIR%\%APP_NAME%"
+mkdir "%OPERATOR_DIR%"
+mkdir "%OPERATOR_DIR%\tools"
+mkdir "%OPERATOR_DIR%\docs"
+mkdir "%DEV_DIR%"
 
-REM Copy executable
-copy "..\build-release\Release\ultra_gui.exe" "%OUTPUT_DIR%\%APP_NAME%\%APP_NAME%.exe"
+copy "..\build-release\Release\ultra.exe" "%OPERATOR_DIR%\"
+copy "..\build-release\Release\ultra_tnc.exe" "%OPERATOR_DIR%\"
+copy "..\build-release\Release\ultra_gui.exe" "%OPERATOR_DIR%\"
+copy "..\tools\ultra_tnc.conf.example" "%OPERATOR_DIR%\tools\"
+copy "..\README.md" "%OPERATOR_DIR%\"
+copy "..\docs\TNC_INTERFACE.md" "%OPERATOR_DIR%\docs\"
+copy "..\docs\README.md" "%OPERATOR_DIR%\docs\"
+if exist "..\docs\RUNNING.md" copy "..\docs\RUNNING.md" "%OPERATOR_DIR%\RUNNING.md"
 
-REM Copy SDL2 DLL (adjust path as needed)
-if exist "C:\SDL2\lib\x64\SDL2.dll" (
-    copy "C:\SDL2\lib\x64\SDL2.dll" "%OUTPUT_DIR%\%APP_NAME%\"
-) else if exist "%VCPKG_ROOT%\installed\x64-windows\bin\SDL2.dll" (
-    copy "%VCPKG_ROOT%\installed\x64-windows\bin\SDL2.dll" "%OUTPUT_DIR%\%APP_NAME%\"
+copy "..\build-release\Release\cli_simulator.exe" "%DEV_DIR%\" 2>nul
+copy "..\build-release\Release\threaded_simulator.exe" "%DEV_DIR%\" 2>nul
+copy "..\build-release\Release\test_waveform_simple.exe" "%DEV_DIR%\" 2>nul
+copy "..\build-release\Release\decode_bench.exe" "%DEV_DIR%\" 2>nul
+copy "..\build-release\Release\session_decode.exe" "%DEV_DIR%\" 2>nul
+
+if exist "%VCPKG_ROOT%\installed\x64-windows\bin\SDL2.dll" (
+    copy "%VCPKG_ROOT%\installed\x64-windows\bin\SDL2.dll" "%OPERATOR_DIR%\"
+    copy "%VCPKG_ROOT%\installed\x64-windows\bin\SDL2.dll" "%DEV_DIR%\"
+) else if exist "C:\SDL2\lib\x64\SDL2.dll" (
+    copy "C:\SDL2\lib\x64\SDL2.dll" "%OPERATOR_DIR%\"
+    copy "C:\SDL2\lib\x64\SDL2.dll" "%DEV_DIR%\"
 ) else (
-    echo WARNING: SDL2.dll not found - you need to copy it manually
+    echo ERROR: SDL2.dll not found in VCPKG_ROOT or C:\SDL2\lib\x64
+    exit /b 1
 )
 
-REM Copy Visual C++ Runtime (if not using static linking)
-REM Users may need to install VC++ Redistributable
+echo ProjectUltra alpha operator bundle > "%OPERATOR_DIR%\BUNDLE.txt"
+echo Includes ultra_tnc, ultra_gui, ultra, sample config, and operator docs. >> "%OPERATOR_DIR%\BUNDLE.txt"
+echo Developer simulators and bench tools are packaged separately. >> "%OPERATOR_DIR%\BUNDLE.txt"
 
-REM Create README
-echo ProjectUltra v%VERSION% > "%OUTPUT_DIR%\%APP_NAME%\README.txt"
-echo. >> "%OUTPUT_DIR%\%APP_NAME%\README.txt"
-echo High-Speed HF Modem - Open Source >> "%OUTPUT_DIR%\%APP_NAME%\README.txt"
-echo. >> "%OUTPUT_DIR%\%APP_NAME%\README.txt"
-echo To run: Double-click %APP_NAME%.exe >> "%OUTPUT_DIR%\%APP_NAME%\README.txt"
-echo. >> "%OUTPUT_DIR%\%APP_NAME%\README.txt"
-echo Requirements: >> "%OUTPUT_DIR%\%APP_NAME%\README.txt"
-echo - Windows 7 or later >> "%OUTPUT_DIR%\%APP_NAME%\README.txt"
-echo - Visual C++ Redistributable 2019 or later >> "%OUTPUT_DIR%\%APP_NAME%\README.txt"
+echo ProjectUltra developer tools > "%DEV_DIR%\BUNDLE.txt"
+echo This artifact is not the default operator download. >> "%DEV_DIR%\BUNDLE.txt"
 
-REM Create ZIP
-echo Creating ZIP archive...
-cd "%OUTPUT_DIR%"
-powershell -Command "Compress-Archive -Path '%APP_NAME%' -DestinationPath '%APP_NAME%-%VERSION%-Windows.zip' -Force"
-cd ..\..
+powershell -Command "Compress-Archive -Path '%OPERATOR_DIR%\*' -DestinationPath '%OUTPUT_DIR%\projectultra-windows.zip' -Force"
+powershell -Command "Compress-Archive -Path '%DEV_DIR%\*' -DestinationPath '%OUTPUT_DIR%\dev-tools-windows.zip' -Force"
 
 echo.
-echo === Windows Package Complete ===
-echo Folder: %OUTPUT_DIR%\%APP_NAME%
-echo ZIP: %OUTPUT_DIR%\%APP_NAME%-%VERSION%-Windows.zip
-echo.
-echo To distribute:
-echo 1. Test on a clean Windows machine
-echo 2. Include VC++ Redistributable or link statically
+echo === Windows Bundles Complete ===
+echo Operator bundle: %OUTPUT_DIR%\projectultra-windows.zip
+echo Developer tools: %OUTPUT_DIR%\dev-tools-windows.zip

@@ -232,6 +232,15 @@ ProjectUltra extension:
 
 ## Getting Started
 
+### Alpha operator bundle
+
+For a release build, download `projectultra-<platform>.zip` from the
+GitHub release assets. That is the operator bundle: `ultra_tnc`,
+`ultra_gui`, `ultra`, `tools/ultra_tnc.conf.example`, and operator
+docs. Do not use the source-code archive as the operator download.
+Simulator and bench binaries are published separately as
+`dev-tools-<platform>.zip`.
+
 ### Requirements
 
 - Linux, macOS, or Windows

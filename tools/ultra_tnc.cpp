@@ -16,11 +16,13 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <cctype>
 #include <cmath>
 #include <iostream>
+#include <memory>
 #include <random>
 #include <string>
 #include <thread>
@@ -52,6 +54,39 @@ using OFDMConfigPreset = ultra::tnc::config::OFDMConfigPreset;
 using Config = ultra::tnc::config::Config;
 using ultra::tnc::config::isNoneDevice;
 using ultra::tnc::config::lower;
+
+struct LogFileCloser {
+    void operator()(std::FILE* file) const {
+        if (file) std::fclose(file);
+    }
+};
+
+using LogFileHandle = std::unique_ptr<std::FILE, LogFileCloser>;
+
+bool configureLogging(const Config& cfg, LogFileHandle& log_file) {
+    ultra::setOperatorLogProfile();
+    ultra::setLogLevel(cfg.log_level);
+
+    if (cfg.log_level_set && cfg.log_level >= ultra::LogLevel::DEBUG &&
+        !cfg.log_categories_set) {
+        ultra::setDeveloperLogProfile();
+    }
+
+    if (cfg.log_categories_set && !ultra::setLogCategories(cfg.log_categories)) {
+        std::cerr << "Invalid --log-category list: " << cfg.log_categories << "\n";
+        return false;
+    }
+
+    if (!cfg.log_file.empty()) {
+        log_file.reset(std::fopen(cfg.log_file.c_str(), "a"));
+        if (!log_file) {
+            std::cerr << "Failed to open --log-file " << cfg.log_file << "\n";
+            return false;
+        }
+        ultra::setLogFile(log_file.get());
+    }
+    return true;
+}
 
 class UltraTNCStation {
 public:
@@ -94,6 +129,8 @@ public:
             }
             audio_.startPlayback();
             output_enabled_ = true;
+        } else {
+            LOG_INFO("AUDIO", "Audio output disabled");
         }
 
         if (use_input) {
@@ -104,6 +141,8 @@ public:
             }
             audio_.startCapture();
             input_enabled_ = true;
+        } else {
+            LOG_INFO("AUDIO", "Audio input disabled");
         }
 
         running_.store(true);
@@ -250,6 +289,8 @@ private:
             (void)peer_snr_db;
             (void)peer_fading;
             setDataMode(mod, rate);
+            LOG_INFO("OPERATOR", "Mode: %s %s cw=%d",
+                     ultra::modulationToString(mod), ultra::codeRateToString(rate), cw_count);
             // Sync encoder/decoder to the negotiated CW count (set by the
             // protocol layer from CONNECT_ACK / MODE_CHANGE wire bytes).
             // Direct calls only — DO NOT re-enter ProtocolEngine here, the
@@ -275,8 +316,13 @@ private:
         bridge_.setConnectionChangedCallback([this](ConnectionState state, const std::string&) {
             if (state == ConnectionState::CONNECTED) {
                 setConnected(true);
+                LOG_INFO("OPERATOR", "Connected: waveform=%s mode=%s %s",
+                         ultra::protocol::waveformModeToString(negotiated_waveform_),
+                         ultra::modulationToString(data_modulation_),
+                         ultra::codeRateToString(data_code_rate_));
             } else if (state == ConnectionState::DISCONNECTED) {
                 setConnected(false);
+                LOG_INFO("OPERATOR", "Disconnected");
             }
         });
 
@@ -466,6 +512,11 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    LogFileHandle log_file(nullptr);
+    if (!configureLogging(cfg, log_file)) {
+        return 1;
+    }
+
     if (cfg.help) {
         ultra::tnc::config::printUsage(std::cout);
         return 0;
@@ -497,6 +548,11 @@ int main(int argc, char** argv) {
 
     bridge.setMyCall({cfg.callsign});
     bridge.setBandwidth(2300);
+
+    LOG_INFO("OPERATOR", "ultra_tnc starting: callsign=%s cmd=%s:%u data=%u log=%s",
+             cfg.callsign.c_str(), cfg.bind_address.c_str(),
+             static_cast<unsigned>(cfg.port), static_cast<unsigned>(cfg.port + 1),
+             ultra::logLevelName(cfg.log_level));
 
     // Hardware PTT via serial line. When the user supplies --ptt-serial-port,
     // open the serial controller and toggle RTS/DTR on each PTT transition.
@@ -533,6 +589,12 @@ int main(int argc, char** argv) {
                   << " @ " << cfg.ptt_serial_baud << " baud, line="
                   << cfg.ptt_serial_line
                   << (cfg.ptt_inactive_high ? " (inverted)" : "") << "\n";
+        LOG_INFO("OPERATOR", "PTT: serial %s @ %d baud line=%s%s",
+                 cfg.ptt_serial_port.c_str(), cfg.ptt_serial_baud,
+                 cfg.ptt_serial_line.c_str(),
+                 cfg.ptt_inactive_high ? " inverted" : "");
+    } else {
+        LOG_INFO("OPERATOR", "PTT: serial disabled; use VOX or external/CAT PTT");
     }
 
     ultra::tnc::TNCServerConfig server_cfg;
@@ -558,6 +620,9 @@ int main(int argc, char** argv) {
 
     std::cout << "ultra_tnc listening on " << cfg.bind_address << ":" << server.getCmdPort()
               << " (data " << server.getDataPort() << ")\n";
+    LOG_INFO("OPERATOR", "Listening: cmd=%s:%u data=%u",
+             cfg.bind_address.c_str(), static_cast<unsigned>(server.getCmdPort()),
+             static_cast<unsigned>(server.getDataPort()));
 
     auto last_tick = std::chrono::steady_clock::now();
     while (!g_stop_requested.load(std::memory_order_acquire)) {

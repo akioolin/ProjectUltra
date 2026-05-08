@@ -7,6 +7,7 @@
 // declarations to keep the runtime path identical.
 
 #include "ultra/types.hpp"
+#include "ultra/logging.hpp"
 
 #include <climits>
 #include <cstdint>
@@ -37,6 +38,11 @@ struct Config {
     int ptt_serial_baud = 9600;
     std::string ptt_serial_line = "rts";
     bool ptt_inactive_high = false;
+    ultra::LogLevel log_level = ultra::LogLevel::INFO;
+    bool log_level_set = false;
+    std::string log_categories;
+    bool log_categories_set = false;
+    std::string log_file;
     bool help = false;
     bool list_audio = false;
 };

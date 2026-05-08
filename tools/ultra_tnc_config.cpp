@@ -107,6 +107,11 @@ void printUsage(std::ostream& out) {
         << "                              inactive=low / asserted=high\n"
         << "  --ptt-active-high           Override config ptt_inactive_high=true\n"
         << "                              back to default polarity (also: --no-ptt-inactive-high)\n"
+        << "  --log-level <error|warn|info|debug|trace>\n"
+        << "                              Console verbosity (default: info)\n"
+        << "  --log-category <list>       Comma list: operator,audio,tnc,modem,\n"
+        << "                              demod,sync,ldpc,channel,all\n"
+        << "  --log-file <path>           Write logs to file instead of stderr\n"
         << "  --list-audio-devices        Print available SDL audio devices and exit\n"
         << "  --help\n"
         << "\n"
@@ -117,6 +122,7 @@ void printUsage(std::ostream& out) {
         << "  port         = 8300\n"
         << "  ptt_serial_port = /dev/cu.usbserial-FT001\n"
         << "  ptt_serial_line = rts\n"
+        << "  log_level   = info\n"
         << "\n"
         << "Default config search path: ./ultra_tnc.conf, then\n"
         << "  $XDG_CONFIG_HOME/ultra_tnc/config (or ~/.config/ultra_tnc/config).\n";
@@ -179,6 +185,16 @@ bool applyConfigKey(const std::string& key, const std::string& value, Config& cf
         cfg.ptt_serial_line = line;
     } else if (key == "ptt_inactive_high" || key == "ptt-inactive-high") {
         if (!parseBoolStrict(value, cfg.ptt_inactive_high)) return false;
+    } else if (key == "log_level" || key == "log-level") {
+        if (!ultra::parseLogLevel(value, cfg.log_level)) return false;
+        cfg.log_level_set = true;
+    } else if (key == "log_category" || key == "log-category" ||
+               key == "log_categories" || key == "log-categories") {
+        if (value.empty()) return false;
+        cfg.log_categories = value;
+        cfg.log_categories_set = true;
+    } else if (key == "log_file" || key == "log-file") {
+        cfg.log_file = value;
     } else {
         std::cerr << "Unknown config key: " << key << "\n";
         return false;
@@ -388,6 +404,28 @@ bool parseArgs(int argc, char** argv, Config& cfg) {
             cfg.ptt_inactive_high = true;
         } else if (arg == "--ptt-active-high" || arg == "--no-ptt-inactive-high") {
             cfg.ptt_inactive_high = false;
+        } else if (arg == "--log-level") {
+            auto value = requireValue("--log-level");
+            if (!value || !ultra::parseLogLevel(*value, cfg.log_level)) {
+                std::cerr << "Invalid --log-level (use error, warn, info, debug, or trace)\n";
+                return false;
+            }
+            cfg.log_level_set = true;
+        } else if (arg == "--log-category" || arg == "--log-categories") {
+            auto value = requireValue(arg.c_str());
+            if (!value || value->empty()) {
+                std::cerr << "Invalid --log-category value\n";
+                return false;
+            }
+            cfg.log_categories = *value;
+            cfg.log_categories_set = true;
+        } else if (arg == "--log-file") {
+            auto value = requireValue("--log-file");
+            if (!value || value->empty()) {
+                std::cerr << "Invalid --log-file value\n";
+                return false;
+            }
+            cfg.log_file = *value;
         } else {
             std::cerr << "Unknown option: " << arg << "\n";
             return false;

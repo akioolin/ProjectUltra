@@ -2,26 +2,31 @@
 
 ## Quick Package Commands
 
+The alpha release download is the operator bundle: `projectultra-<platform>.zip`.
+It contains `ultra_tnc`, `ultra_gui`, `ultra`, `tools/ultra_tnc.conf.example`,
+and operator docs. Simulator and bench binaries are built into a separate
+`dev-tools-<platform>.zip` artifact.
+
 ### macOS
 ```bash
 cd packaging
 ./package_macos.sh
 ```
-Output: `dist/macos/ProjectUltra.app` and `ProjectUltra-0.1.0-macOS.dmg`
+Output: `dist/macos/projectultra-macos.zip` and `dist/macos/dev-tools-macos.zip`
 
 ### Windows
 ```batch
 cd packaging
 package_windows.bat
 ```
-Output: `dist/windows/ProjectUltra/` folder and `.zip`
+Output: `dist/windows/projectultra-windows.zip` and `dist/windows/dev-tools-windows.zip`
 
 ### Linux
 ```bash
 cd packaging
 ./package_linux.sh
 ```
-Output: `dist/linux/ProjectUltra-0.1.0-x86_64.AppImage`
+Output: `dist/linux/projectultra-linux.zip` and `dist/linux/dev-tools-linux.zip`
 
 ---
 
@@ -44,7 +49,7 @@ Output: `dist/linux/ProjectUltra-0.1.0-x86_64.AppImage`
 - GCC/G++
 - CMake
 - SDL2: `sudo apt install libsdl2-dev`
-- For AppImage: wget
+- zip
 
 ---
 
@@ -67,7 +72,7 @@ Output: `dist/linux/ProjectUltra-0.1.0-x86_64.AppImage`
 - [ ] Test with Windows Defender
 
 ### Linux
-- [ ] Test AppImage on Ubuntu, Fedora, Debian
+- [ ] Test operator bundle on Ubuntu, Fedora, Debian
 - [ ] Verify audio device detection
 - [ ] Check OpenGL compatibility
 
@@ -84,9 +89,9 @@ Output: `dist/linux/ProjectUltra-0.1.0-x86_64.AppImage`
 2. Build packages on each platform
 
 3. Upload to GitHub Releases:
-   - ProjectUltra-0.1.0-macOS.dmg
-   - ProjectUltra-0.1.0-Windows.zip
-   - ProjectUltra-0.1.0-x86_64.AppImage
+   - projectultra-macos.zip
+   - projectultra-windows.zip
+   - projectultra-linux.zip
 
 ---
 
@@ -94,7 +99,6 @@ Output: `dist/linux/ProjectUltra-0.1.0-x86_64.AppImage`
 
 | Platform | Size |
 |----------|------|
-| macOS .app | ~5 MB |
-| macOS .dmg | ~3 MB |
-| Windows .zip | ~4 MB |
-| Linux AppImage | ~8 MB |
+| macOS operator zip | TBD |
+| Windows operator zip | TBD |
+| Linux operator zip | TBD |

@@ -22,6 +22,8 @@
 #include <atomic>
 #include <mutex>
 #include <deque>
+#include <cstdio>
+#include <memory>
 #ifdef _WIN32
 #include <process.h>
 #define getpid _getpid
@@ -1671,6 +1673,19 @@ private:
 
 int main(int argc, char* argv[]) {
     try {
+        struct LogFileCloser {
+            void operator()(std::FILE* file) const {
+                if (file) std::fclose(file);
+            }
+        };
+        std::unique_ptr<std::FILE, LogFileCloser> log_file(nullptr);
+        LogLevel log_level = LogLevel::INFO;
+        bool log_level_set = false;
+        bool log_categories_set = false;
+        std::string log_categories;
+        std::string log_file_path;
+
+        setOperatorLogProfile();
         CLISimulator sim;
 
         for (int i = 1; i < argc; i++) {
@@ -1852,6 +1867,19 @@ int main(int argc, char* argv[]) {
                 sim.setInjectGain(std::stof(argv[++i]));
             } else if (arg == "--audio-buffer-size" && i + 1 < argc) {
                 sim.setAudioBufferSize(std::stoi(argv[++i]));
+            } else if (arg == "--log-level" && i + 1 < argc) {
+                const std::string value = argv[++i];
+                if (!parseLogLevel(value, log_level)) {
+                    std::cerr << "Invalid --log-level: " << value
+                              << " (use error, warn, info, debug, or trace)\n";
+                    return 1;
+                }
+                log_level_set = true;
+            } else if ((arg == "--log-category" || arg == "--log-categories") && i + 1 < argc) {
+                log_categories = argv[++i];
+                log_categories_set = true;
+            } else if (arg == "--log-file" && i + 1 < argc) {
+                log_file_path = argv[++i];
             } else if (arg == "--help" || arg == "-h") {
                 std::cout << "CLI Simulator - IWaveform + StreamingDecoder Model\n\n";
                 std::cout << "Uses IWaveform for TX and StreamingDecoder for RX directly.\n";
@@ -1893,6 +1921,10 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --save-prefix <PATH>      Capture file prefix (default: /tmp/cli_signals)\n";
                 std::cout << "  --save-max-samples <N>    Per-stream capture cap (0 = unlimited)\n";
                 std::cout << "  --verbose, -v       Verbose output\n";
+                std::cout << "  --log-level <error|warn|info|debug|trace>\n";
+                std::cout << "                      Console verbosity (default: info)\n";
+                std::cout << "  --log-category <list>  Comma list: operator,audio,tnc,modem,demod,sync,ldpc,channel,all\n";
+                std::cout << "  --log-file <PATH>      Write logs to file instead of stderr\n";
                 std::cout << "\nHardware audio mode (real soundcard, two-machine setup):\n";
                 std::cout << "  --role A|B|both     A=initiator, B=responder, both=in-process sim (default)\n";
                 std::cout << "  --callsign <NAME>   Local callsign (default: ALPHA for A, BRAVO for B)\n";
@@ -1909,7 +1941,22 @@ int main(int argc, char* argv[]) {
                 return 0;
             }
         }
-        setLogLevel(LogLevel::INFO);
+        setLogLevel(log_level);
+        if (log_level_set && log_level >= LogLevel::DEBUG && !log_categories_set) {
+            setDeveloperLogProfile();
+        }
+        if (log_categories_set && !setLogCategories(log_categories)) {
+            std::cerr << "Invalid --log-category list: " << log_categories << "\n";
+            return 1;
+        }
+        if (!log_file_path.empty()) {
+            log_file.reset(std::fopen(log_file_path.c_str(), "a"));
+            if (!log_file) {
+                std::cerr << "Failed to open --log-file " << log_file_path << "\n";
+                return 1;
+            }
+            setLogFile(log_file.get());
+        }
         return sim.runTest() ? 0 : 1;
     } catch (const std::exception& e) {
         std::cerr << "Fatal exception in cli_simulator: " << e.what() << "\n";
