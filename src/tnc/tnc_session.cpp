@@ -1,6 +1,7 @@
 #include "tnc/tnc_session.hpp"
 
 #include "protocol/compression.hpp"
+#include "ultra/version.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -477,12 +478,11 @@ void TNCSession::emitVersion() {
     if (cmd_emit_) {
         // pat-vara's pubsub dispatches incoming lines by prefix, and its
         // Version() subscribes to lines starting with "VERSION" or "WRONG".
-        // The legacy "VARA version 4.9.0 registered" string Mercury sends
+        // The legacy Mercury-style "VARA version ... registered" banner
         // matches neither, so Pat hangs (or logs "got a vara command I
         // wasn't expecting"). Lead with "VERSION " so pat-vara's
-        // strings.TrimPrefix(str, "VERSION ") yields the version. Append
-        // the Mercury-style banner for any client that scans for it.
-        cmd_emit_("VERSION 4.9.0\r");
+        // strings.TrimPrefix(str, "VERSION ") yields the version.
+        cmd_emit_(std::string("VERSION ") + kProjectUltraVersion + "\r");
     }
 }
 

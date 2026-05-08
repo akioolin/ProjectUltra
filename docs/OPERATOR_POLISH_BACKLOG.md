@@ -84,7 +84,7 @@ loud forced-mode warning. Prevents self-inflicted bad reports.
 **Wrong now:**
 * The exact stale references Codex flagged on 2026-05-08 morning have
   partly been fixed by the overnight cleanup batch (CTest count, OFDM_COX
-  status, FFTW fallback type, README update date).
+  status, FFT backend, README update date).
 * Remaining: cross-check rate docs vs the operator parsers (e.g., the
   rate ladder mentions or implies modes the parsers reject).
 
@@ -113,7 +113,7 @@ construction.
 
 * CTest count refs corrected.
 * OFDM_COX default/forced status reconciled across docs.
-* `BUILD_SYSTEM.md` FFTW fallback corrected to Cooley-Tukey.
+* `BUILD_SYSTEM.md` FFT backend corrected.
 * README OTA status refreshed.
 * Historical session reports moved to `docs/archive/`.
 * Naming-policy compliance pass on TNC docs.

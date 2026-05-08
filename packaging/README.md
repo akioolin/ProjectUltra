@@ -82,8 +82,8 @@ Output: `dist/linux/projectultra-linux.zip` and `dist/linux/dev-tools-linux.zip`
 
 1. Create a new release tag:
    ```bash
-   git tag -a v0.1.0 -m "Release 0.1.0"
-   git push origin v0.1.0
+   git tag -a v0.3.1-alpha -m "Release 0.3.1 alpha"
+   git push origin v0.3.1-alpha
    ```
 
 2. Build packages on each platform

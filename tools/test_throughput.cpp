@@ -7,7 +7,7 @@
  *   3. Measuring audio duration
  *   4. Calculating: payload_bytes / audio_duration
  *
- * Compile: g++ -O2 -std=c++20 -I../src -I../include -o test_throughput ../tools/test_throughput.cpp -L. -lultra_core -lfftw3f -lm
+ * Compile through CMake: cmake --build build --target test_throughput
  * Run: ./test_throughput
  */
 

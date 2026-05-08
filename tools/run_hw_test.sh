@@ -13,7 +13,7 @@
 # On the Pi 5 (Ubuntu Server, headless):
 #   sudo apt update
 #   sudo apt install -y build-essential cmake git pkg-config \
-#                       libsdl2-dev libfftw3-dev
+#                       libsdl2-dev
 #   git clone <repo-url> ~/ProjectUltra && cd ~/ProjectUltra
 #   mkdir build && cd build
 #   cmake -DULTRA_BUILD_GUI=OFF ..

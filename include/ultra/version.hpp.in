@@ -1,0 +1,7 @@
+#pragma once
+
+namespace ultra {
+
+inline constexpr const char* kProjectUltraVersion = "@PROJECT_VERSION@";
+
+} // namespace ultra

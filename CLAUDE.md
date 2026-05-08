@@ -281,11 +281,10 @@ automatic via `selectOFDMCodeRate()`; keep the exact thresholds in
 `src/protocol/waveform_selection.hpp` and the boundary tests in
 `tests/test_waveform_policy.cpp`.
 
-**FFTW requirement:**
-- FFTW3 is REQUIRED for fast chirp detection (apt install libfftw3-dev)
-- Without FFTW: Cooley-Tukey fallback takes ~1 second per correlation (unusable)
-- With FFTW: Detection takes ~0.5s after frame TX ends (correct)
-- FFTW planner is NOT thread-safe - protected by global mutex in fft.cpp
+**FFT note:**
+- PocketFFT is vendored in `thirdparty/pocketfft/`.
+- It is header-only and BSD-3 licensed; no external FFT runtime or package is required.
+- Chirp detection remains FFT-accelerated for the small 512/1024-point modem transforms.
 
 **StreamingDecoder design:**
 - Expects audio fed at real-time rate (or close to it)

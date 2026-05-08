@@ -1,5 +1,6 @@
 #include "tnc/socket_compat.hpp"
 #include "tnc/tnc_server.hpp"
+#include "ultra/version.hpp"
 
 #include <chrono>
 #include <csignal>
@@ -33,6 +34,10 @@ using ultra::tnc::socket_t;
 using ultra::tnc::writeSocketPair;
 
 namespace {
+
+std::string versionLine() {
+    return std::string("VERSION ") + ultra::kProjectUltraVersion + "\r";
+}
 
 int sendFlags() {
 #ifdef MSG_NOSIGNAL
@@ -487,7 +492,7 @@ int main() {
     runner.run("accepts command client and answers VERSION", [] {
         ServerHarness harness;
         TestClient cmd(harness.server.getCmdPort());
-        expect(command(cmd, "VERSION") == "VERSION 4.9.0\r", "VERSION response mismatch");
+        expect(command(cmd, "VERSION") == versionLine(), "VERSION response mismatch");
     });
 
     runner.run("accepts data client without unsolicited output", [] {
@@ -503,7 +508,7 @@ int main() {
         cmd.writeString("VER");
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         cmd.writeString("SION\r");
-        expectLine(cmd, "VERSION 4.9.0\r");
+        expectLine(cmd, versionLine());
     });
 
     runner.run("MYCALL reaches modem adapter through reactor", [] {
@@ -520,7 +525,7 @@ int main() {
         expect(command(first, "MYCALL VK2XYZ") == "OK\r", "initial MYCALL failed");
         TestClient second(harness.server.getCmdPort());
         expect(first.waitForClosed(), "first command client was not closed");
-        expect(command(second, "VERSION") == "VERSION 4.9.0\r", "second client VERSION failed");
+        expect(command(second, "VERSION") == versionLine(), "second client VERSION failed");
     });
 
     runner.run("command eviction resets session state", [] {
@@ -544,12 +549,12 @@ int main() {
         ServerHarness harness;
         TestClient first_cmd(harness.server.getCmdPort());
         TestClient first_data(harness.server.getDataPort());
-        expect(command(first_cmd, "VERSION") == "VERSION 4.9.0\r", "first VERSION failed");
+        expect(command(first_cmd, "VERSION") == versionLine(), "first VERSION failed");
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
         TestClient second_cmd(harness.server.getCmdPort());
         expect(first_cmd.waitForClosed(), "first command client was not closed");
         expect(first_data.waitForClosed(), "paired data client was not closed");
-        expect(command(second_cmd, "VERSION") == "VERSION 4.9.0\r", "second VERSION failed");
+        expect(command(second_cmd, "VERSION") == versionLine(), "second VERSION failed");
     });
 
     runner.group("Timers And Posts");
@@ -575,7 +580,7 @@ int main() {
     runner.run("PTT and bitrate modem posts are marshalled", [] {
         ServerHarness harness;
         TestClient cmd(harness.server.getCmdPort());
-        expect(command(cmd, "VERSION") == "VERSION 4.9.0\r", "VERSION failed");
+        expect(command(cmd, "VERSION") == versionLine(), "VERSION failed");
         harness.server.postModemPTT(true);
         harness.server.postModemBitrate(1200);
         expectLine(cmd, "PTT ON\r");
@@ -587,7 +592,7 @@ int main() {
         config.buffer_rate_limit_ms = 40;
         ServerHarness harness(config);
         TestClient cmd(harness.server.getCmdPort());
-        expect(command(cmd, "VERSION") == "VERSION 4.9.0\r", "VERSION failed");
+        expect(command(cmd, "VERSION") == versionLine(), "VERSION failed");
         harness.server.postModemBufferLevel(10);
         expectLine(cmd, "BUFFER 10\r");
         harness.server.postModemBufferLevel(20);
@@ -639,7 +644,7 @@ int main() {
         expect(server.start(), "server failed to start");
         TestClient cmd(server.getCmdPort());
         TestClient data(server.getDataPort());
-        expect(command(cmd, "VERSION") == "VERSION 4.9.0\r", "VERSION failed");
+        expect(command(cmd, "VERSION") == versionLine(), "VERSION failed");
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
         server.stop();
         expect(cmd.waitForClosed(), "command client was not closed on stop");
@@ -654,14 +659,14 @@ int main() {
         expect(server.start(), "first start failed");
         {
             TestClient cmd(server.getCmdPort());
-            expect(command(cmd, "VERSION") == "VERSION 4.9.0\r", "first VERSION failed");
+            expect(command(cmd, "VERSION") == versionLine(), "first VERSION failed");
             server.stop();
             expect(cmd.waitForClosed(), "client was not closed after first stop");
         }
         expect(server.start(), "second start failed");
         {
             TestClient cmd(server.getCmdPort());
-            expect(command(cmd, "VERSION") == "VERSION 4.9.0\r", "second VERSION failed");
+            expect(command(cmd, "VERSION") == versionLine(), "second VERSION failed");
         }
         server.stop();
     });

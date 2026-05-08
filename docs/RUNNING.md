@@ -7,8 +7,8 @@ it. Use that operator bundle, not the source-code archive. It contains
 `ultra_tnc`, `ultra_gui`, `ultra`, `tools/ultra_tnc.conf.example`, and these
 operator docs. Install the platform audio/runtime prerequisites:
 
-- macOS: SDL2 runtime if not bundled by the release.
-- Linux: SDL2 and FFTW packages from your distro.
+- macOS: bundled SDL2 runtime, or system SDL2 when running a local build.
+- Linux: bundled SDL2 runtime, or distro SDL2 when running a local build.
 - Windows: the bundled `SDL2.dll` plus the Visual C++ runtime if Windows asks.
 
 ## 2. Audio Device Discovery
@@ -77,7 +77,7 @@ Terminal 2:
 { printf 'VERSION\r'; sleep 0.2; printf 'STATS\r'; sleep 0.2; } | nc 127.0.0.1 18300
 ```
 
-Expected replies include `VERSION 4.9.0` and one `STATS ... backlog=0` line.
+Expected replies include `VERSION 0.3.1` and one `STATS ... backlog=0` line.
 For an on-radio smoke test, run the same `ultra_tnc` command with real audio
 devices, connect Pat to `127.0.0.1:8300`, and send a short local/P2P message to
 the peer station.

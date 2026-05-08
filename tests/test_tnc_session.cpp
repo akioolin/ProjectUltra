@@ -1,6 +1,7 @@
 #include "tnc/tnc_session.hpp"
 
 #include "protocol/compression.hpp"
+#include "ultra/version.hpp"
 
 #include <algorithm>
 #include <functional>
@@ -17,6 +18,10 @@ using ultra::tnc::State;
 using ultra::tnc::TNCSession;
 
 namespace {
+
+std::string versionLine() {
+    return std::string("VERSION ") + ultra::kProjectUltraVersion + "\r";
+}
 
 struct FakeModemAdapter : ModemAdapter {
     struct ConnectCall {
@@ -210,7 +215,7 @@ int main() {
     runner.run("trailing whitespace is trimmed", [] {
         Harness h;
         h.session.handleControlLine("VERSION   ");
-        expectLines(h, {"VERSION 4.9.0\r"});
+        expectLines(h, {versionLine()});
     });
     runner.run("unknown command emits WRONG", [] {
         Harness h;
@@ -220,12 +225,12 @@ int main() {
     runner.run("lowercase command parses", [] {
         Harness h;
         h.session.handleControlLine("version");
-        expectLines(h, {"VERSION 4.9.0\r"});
+        expectLines(h, {versionLine()});
     });
     runner.run("leading whitespace is trimmed", [] {
         Harness h;
         h.session.handleControlLine("   VERSION");
-        expectLines(h, {"VERSION 4.9.0\r"});
+        expectLines(h, {versionLine()});
     });
     runner.run("extra space between command and args is accepted", [] {
         Harness h;
@@ -868,10 +873,10 @@ int main() {
     });
 
     runner.group("Queries And No-Ops");
-    runner.run("VERSION emits exact Pat-compatible string", [] {
+    runner.run("VERSION emits project version string", [] {
         Harness h;
         h.session.handleControlLine("VERSION");
-        expectLines(h, {"VERSION 4.9.0\r"});
+        expectLines(h, {versionLine()});
     });
     runner.run("BUFFER command emits snapshot", [] {
         Harness h;

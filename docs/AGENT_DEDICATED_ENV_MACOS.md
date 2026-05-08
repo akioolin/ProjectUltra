@@ -68,7 +68,7 @@ mkdir -p ~/Projects
 cd ~/Projects
 git clone https://github.com/secup/ProjectUltra.git
 cd ProjectUltra
-cmake -S . -B build -DULTRA_BUILD_TESTS=ON -DULTRA_BUILD_GUI=OFF -DULTRA_USE_FFTW=OFF
+cmake -S . -B build -DULTRA_BUILD_TESTS=ON -DULTRA_BUILD_GUI=OFF
 cmake --build build -j4
 ctest --test-dir build --output-on-failure -j4
 ```

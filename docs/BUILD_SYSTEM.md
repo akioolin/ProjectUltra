@@ -15,10 +15,6 @@ make -j4
 # With GUI
 sudo apt install libsdl2-dev libgl1-mesa-dev  # Linux
 brew install sdl2                              # macOS
-
-# With FFTW optimization
-sudo apt install libfftw3-dev                  # Linux
-brew install fftw                              # macOS
 ```
 
 ---
@@ -35,7 +31,6 @@ brew install fftw                              # macOS
 | `ULTRA_BUILD_TESTS` | ON | Enable unit tests |
 | `ULTRA_BUILD_TOOLS` | ON | Enable CLI tools |
 | `ULTRA_BUILD_GUI` | ON | Enable GUI (needs SDL2+OpenGL) |
-| `ULTRA_USE_FFTW` | ON | Use FFTW3 for FFT (if found) |
 
 ### Example Custom Build
 ```bash
@@ -57,7 +52,6 @@ make -j4
 ### Optional
 | Dependency | Purpose | Detection | Fallback |
 |------------|---------|-----------|----------|
-| FFTW3 | FFT acceleration | PkgConfig | Built-in Cooley-Tukey FFT |
 | SDL2 | Audio/video | CMake or PkgConfig | GUI disabled |
 | OpenGL | Rendering | CMake | GUI disabled |
 
@@ -66,6 +60,7 @@ make -j4
 |---------|---------|
 | Dear ImGui | GUI framework |
 | Miniz | ZIP compression |
+| PocketFFT | Header-only FFT, BSD-3 license |
 
 ---
 
@@ -170,13 +165,12 @@ target_include_directories(ultra_core PUBLIC
 ### Linux
 ```bash
 sudo apt install build-essential cmake
-sudo apt install libfftw3-dev           # Optional FFT
 sudo apt install libsdl2-dev libgl1-mesa-dev  # For GUI
 ```
 
 ### macOS
 ```bash
-brew install cmake fftw sdl2
+brew install cmake sdl2
 # OpenGL is built-in
 ```
 
@@ -187,7 +181,7 @@ brew install cmake fftw sdl2
 
 ### Raspberry Pi
 ```bash
-sudo apt install build-essential cmake libfftw3-dev
+sudo apt install build-essential cmake
 # For GUI:
 sudo apt install libsdl2-dev libgl1-mesa-dev
 make -j3  # Use -j3 to avoid memory pressure
@@ -283,7 +277,7 @@ build/
 ```
 ultra_core
 ├── Threads::Threads
-├── PkgConfig::FFTW3 (optional)
+├── PocketFFT (vendored header-only)
 └── miniz (vendored)
 
 ultra
@@ -327,12 +321,6 @@ brew install sdl2
 
 # Or disable GUI
 cmake .. -DULTRA_BUILD_GUI=OFF
-```
-
-### "FFTW not found"
-Not critical - falls back to built-in FFT. For optimization:
-```bash
-sudo apt install libfftw3-dev
 ```
 
 ### "C++20 required"

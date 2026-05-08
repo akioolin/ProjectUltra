@@ -8,7 +8,7 @@ namespace ultra {
 /**
  * FFT wrapper
  *
- * Abstracts FFTW3 (if available) or fallback implementation.
+ * Uses the vendored PocketFFT backend.
  * Provides both complex and real FFTs.
  */
 class FFT {

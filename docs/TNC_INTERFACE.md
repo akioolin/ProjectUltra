@@ -90,5 +90,5 @@ printf 'VERSION\r' | nc 127.0.0.1 18300
 Expected reply:
 
 ```text
-VERSION 4.9.0
+VERSION 0.3.1
 ```

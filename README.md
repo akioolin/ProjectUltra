@@ -86,7 +86,7 @@ SC-DPSK (very low SNR).
 802.11n LDPC at four code rates (R1/4, R1/2, R2/3, R3/4).
 Min-sum belief-propagation decoder.
 
-**Synchronization.** Dual-chirp detection with FFTW-accelerated
+**Synchronization.** Dual-chirp detection with PocketFFT-accelerated
 correlation, Schmidl-Cox training, light-preamble (LTS-only) for
 in-session frames, LTS-residual CFO refinement, per-symbol pilot
 tracking with common-phase-error correction.
@@ -185,7 +185,7 @@ cmake -S . -B build && cmake --build build -j 4
 
 # Smoke test from another terminal
 printf 'VERSION\r' | nc 127.0.0.1 8300
-# → VERSION 4.9.0
+# -> VERSION 0.3.1
 ```
 
 Full command reference: [`docs/TNC_INTERFACE.md`](docs/TNC_INTERFACE.md).
@@ -251,20 +251,18 @@ Simulator and bench binaries are published separately as
 - CMake 3.16+
 - C++20 compiler (GCC 10+, Clang 12+, MSVC 2019+)
 - SDL2 (GUI + audio I/O for `cli_simulator` / `ultra_tnc`)
-- FFTW3 (required for fast chirp detection — Cooley-Tukey fallback is
-  unusable for real-time)
 
 ### Building
 
 ```bash
 # Ubuntu/Debian
-sudo apt install libsdl2-dev libfftw3-dev cmake build-essential pkg-config
+sudo apt install libsdl2-dev cmake build-essential pkg-config
 
 # macOS
-brew install sdl2 fftw cmake pkg-config
+brew install sdl2 cmake pkg-config
 
 # Windows (vcpkg)
-vcpkg install sdl2 fftw3
+vcpkg install sdl2
 
 git clone https://github.com/secup/ProjectUltra.git
 cd ProjectUltra
@@ -589,5 +587,5 @@ MIT License. See [LICENSE](LICENSE).
   overflow edge cases.
 - [Dear ImGui](https://github.com/ocornut/imgui) — GUI framework.
 - [SDL2](https://libsdl.org/) — audio and windowing.
-- [FFTW3](https://www.fftw.org/) — Fast Fourier Transform.
+- [PocketFFT](https://github.com/mreineck/pocketfft) — Fast Fourier Transform.
 - [miniz](https://github.com/richgel999/miniz) — compression.

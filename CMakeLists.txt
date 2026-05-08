@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(ProjectUltra VERSION 0.1.0 LANGUAGES C CXX)
+project(ProjectUltra VERSION 0.3.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,7 +22,6 @@ endif()
 option(ULTRA_BUILD_TESTS "Build test suite" ON)
 option(ULTRA_BUILD_TOOLS "Build command-line tools" ON)
 option(ULTRA_BUILD_GUI "Build GUI application" ON)
-option(ULTRA_USE_FFTW "Use FFTW3 for FFT (faster)" ON)
 option(ULTRA_BUILD_HARDWARE_TESTS "Register opt-in hardware smoke CTest target" OFF)
 
 if(DEFINED ENV{ULTRA_HARDWARE_TESTS} AND "$ENV{ULTRA_HARDWARE_TESTS}" STREQUAL "1")
@@ -57,21 +56,11 @@ endfunction()
 # Find dependencies
 find_package(Threads REQUIRED)
 
-if(ULTRA_USE_FFTW)
-    find_package(PkgConfig QUIET)
-    if(PkgConfig_FOUND)
-        # Use fftw3f (single-precision float) since code uses fftwf_* functions
-        pkg_check_modules(FFTW3 IMPORTED_TARGET fftw3f)
-        if(FFTW3_FOUND)
-            add_compile_definitions(ULTRA_HAS_FFTW)
-            message(STATUS "Found FFTW3 (float): ${FFTW3_LIBRARIES}")
-        else()
-            message(STATUS "FFTW3 float library not found - using built-in FFT")
-        endif()
-    else()
-        message(STATUS "PkgConfig not found - FFTW3 detection skipped (will use built-in FFT)")
-    endif()
-endif()
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/ultra/version.hpp.in
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/include/ultra/version.hpp
+    @ONLY
+)
 
 # SDL2 detection — used by both ultra_gui (always required) and cli_simulator
 # (optional, for hardware audio I/O in --role A|B mode). Detect once at the
@@ -143,6 +132,7 @@ add_library(ultra_core STATIC
 
 target_include_directories(ultra_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src  # For protocol headers
     ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty  # For miniz
 )
@@ -171,10 +161,6 @@ if(SDL2_FOUND)
     # SDL2 is available; otherwise CI's Test/Sanitizer/Coverage steps that
     # build without SDL2 fail to compile the unconditional core.
     target_sources(ultra_core PRIVATE src/tnc/tnc_bridge.cpp)
-endif()
-
-if(ULTRA_USE_FFTW AND FFTW3_FOUND)
-    target_link_libraries(ultra_core PUBLIC PkgConfig::FFTW3)
 endif()
 
 # Shared GUI/modem runtime source lists. Keep these centralized so CLI tools,
