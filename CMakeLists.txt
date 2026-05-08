@@ -146,6 +146,17 @@ endif()
 
 # Command-line modem tool
 if(ULTRA_BUILD_TOOLS)
+    add_library(ultra_sim_station STATIC
+        tools/sim/simulated_station.cpp
+        src/gui/modem/streaming_decoder.cpp
+        src/gui/modem/streaming_encoder.cpp
+    )
+    target_include_directories(ultra_sim_station PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
+    )
+    target_link_libraries(ultra_sim_station PUBLIC ultra_core)
+
     add_executable(ultra
         src/main.cpp
         src/gui/modem/modem_engine.cpp
@@ -165,13 +176,21 @@ if(ULTRA_BUILD_TOOLS)
     # CLI Simulator - Uses IWaveform + StreamingDecoder/Encoder directly (NOT ModemEngine)
     add_executable(cli_simulator
         tools/cli_simulator.cpp
-        src/gui/modem/streaming_decoder.cpp
-        src/gui/modem/streaming_encoder.cpp
     )
     target_include_directories(cli_simulator PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
     )
-    target_link_libraries(cli_simulator PRIVATE ultra_core)
+    target_link_libraries(cli_simulator PRIVATE ultra_sim_station)
+
+    add_executable(session_decode
+        tools/session_decode.cpp
+    )
+    target_include_directories(session_decode PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
+    )
+    target_link_libraries(session_decode PRIVATE ultra_sim_station)
 
     # Optional hardware-audio support (--role A|B). Reuses the GUI's
     # AudioEngine class; SDL2 is detected at top level above.

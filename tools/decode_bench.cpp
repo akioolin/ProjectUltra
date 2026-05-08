@@ -13,6 +13,7 @@
 
 #include "gui/modem/streaming_decoder.hpp"
 #include "gui/modem/streaming_encoder.hpp"
+#include "protocol/connection_policy.hpp"
 #include "protocol/frame_v2.hpp"
 #include "ultra/timing_profiler.hpp"
 #include "ultra/types.hpp"
@@ -26,6 +27,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <string>
@@ -136,6 +138,10 @@ struct Args {
     int num_frames = 4;        // burst size
     std::string text;          // optional readable payload (gen mode)
     std::string preamble = "chirp";  // "chirp" (full chirp+LTS) or "light" (LTS only)
+    bool connected = false;    // bench mode: start decoder post-CONNECT_ACK
+    bool burst_interleave = true;
+    int burst_group_size = 8;
+    int cw_count = 0;          // 0 = connected policy default, otherwise explicit
 };
 
 WaveformMode parseWaveform(const std::string& s) {
@@ -170,6 +176,11 @@ void printUsage() {
         "  --waveform <ofdm_chirp|ofdm_cox|ofdm_narrow|mc_dpsk>  default: ofdm_chirp\n"
         "  --rate <r1_4|r1_2|r2_3|r3_4>                          default: r1_4\n"
         "  --mod <dqpsk|qpsk|d8psk|dbpsk>                        default: dqpsk\n"
+        "  --connected           Bench post-CONNECT_ACK OFDM audio: light preamble,\n"
+        "                        negotiated --rate/--mod, no startup chirp required.\n"
+        "  --cw-count <N>        Fixed OFDM frame codewords (connected default follows policy)\n"
+        "  --no-burst-interleave Disable connected OFDM_CHIRP burst deinterleaving.\n"
+        "  --burst-group-size <N> Connected burst group size (default: 8)\n"
         "\n"
         "gen options:\n"
         "  --snr <db>            AWGN target SNR (default: 100 = no noise)\n"
@@ -183,7 +194,9 @@ void printUsage() {
         "  decode_bench --mode gen --wav fixtures/ofdm_chirp_r14_snr15_awgn.wav \\\n"
         "               --rate r1_4 --snr 15 --frames 4 --seed 1\n"
         "  decode_bench --mode bench --wav fixtures/ofdm_chirp_r14_snr15_awgn.wav \\\n"
-        "               --rate r1_4\n";
+        "               --rate r1_4\n"
+        "  decode_bench --mode bench --connected --wav /tmp/post_connect_r1_2.wav \\\n"
+        "               --waveform ofdm_chirp --rate r1_2 --mod dqpsk\n";
 }
 
 bool parseArgs(int argc, char** argv, Args& a) {
@@ -208,6 +221,11 @@ bool parseArgs(int argc, char** argv, Args& a) {
         else if (arg == "--frames")   { auto v = need(i); if (!v) return false; a.num_frames = std::stoi(*v); }
         else if (arg == "--text")     { auto v = need(i); if (!v) return false; a.text = *v; }
         else if (arg == "--preamble") { auto v = need(i); if (!v) return false; a.preamble = *v; }
+        else if (arg == "--connected") { a.connected = true; }
+        else if (arg == "--cw-count") { auto v = need(i); if (!v) return false; a.cw_count = std::stoi(*v); }
+        else if (arg == "--burst-interleave") { a.burst_interleave = true; }
+        else if (arg == "--no-burst-interleave") { a.burst_interleave = false; }
+        else if (arg == "--burst-group-size") { auto v = need(i); if (!v) return false; a.burst_group_size = std::stoi(*v); }
         else { std::cerr << "Unknown option: " << arg << "\n"; return false; }
     }
     if (a.mode != "gen" && a.mode != "bench") {
@@ -217,6 +235,15 @@ bool parseArgs(int argc, char** argv, Args& a) {
         std::cerr << "Need --wav <path>\n"; return false;
     }
     return true;
+}
+
+std::string printableBytes(const Bytes& bytes, size_t start = 0) {
+    std::string out;
+    for (size_t i = start; i < bytes.size(); ++i) {
+        char c = static_cast<char>(bytes[i]);
+        out.push_back((c >= 0x20 && c < 0x7F) ? c : '.');
+    }
+    return out;
 }
 
 // -------- Channel: AWGN at target SNR -------------------------------------
@@ -408,22 +435,40 @@ int runBench(const Args& a) {
               << static_cast<double>(samples.size()) / 48000.0 << " s) from "
               << a.wav_path << "\n";
 
+    const WaveformMode waveform = parseWaveform(a.waveform);
+    if (a.connected && !ultra::protocol::isOFDMMode(waveform)) {
+        std::cerr << "--connected requires an OFDM waveform\n";
+        return 1;
+    }
+
+    const CodeRate code_rate = parseCodeRate(a.code_rate);
+    const Modulation modulation = parseModulation(a.modulation);
+    const int fixed_cw = (a.cw_count > 0)
+        ? v2::sanitizeFixedFrameCodewords(a.cw_count)
+        : (a.connected ? ultra::protocol::connection_policy::recommendCWCount(code_rate, waveform)
+                       : v2::kDefaultFixedFrameCodewords);
+
+    std::cout << "[bench] connected=" << (a.connected ? "yes" : "no")
+              << " waveform=" << a.waveform
+              << " rate=" << a.code_rate
+              << " mod=" << a.modulation
+              << " fixed_cw=" << fixed_cw << "\n";
+
     StreamingDecoder dec;
-    // Configure connected-mode OFDM with the SAME ModemConfig the
-    // encoder used. A mismatched cp_mode / pilot layout makes the
-    // decoder's LTS template diverge from the encoder's preamble and
-    // correlation collapses (saw 0.24 on default ModemConfig). With
-    // matching configs the LTS template + data demod line up and the
-    // fixed-frame data path actually fires.
-    //
-    // Each fixture frame has a full chirp preamble. Connected mode
-    // ordinarily uses LTS-only sync, but the chirp preamble in our
-    // fixture also embeds the same LTS the data preamble uses, so
-    // connected-mode LTS sync still locks on each frame.
-    dec.setConnectedOFDMMode(parseWaveform(a.waveform), benchOFDMConfig(),
-                             parseModulation(a.modulation),
-                             parseCodeRate(a.code_rate));
-    dec.setFixedFrameCodewords(4);
+    if (a.connected) {
+        // Post-CONNECT_ACK capture: receiver is already in negotiated OFDM data
+        // mode and must search for LTS/light preambles, not startup chirps.
+        dec.setConnectedOFDMMode(waveform, benchOFDMConfig(),
+                                 modulation, code_rate);
+        dec.setBurstInterleave(a.burst_interleave && waveform == WaveformMode::OFDM_CHIRP);
+        dec.setBurstInterleaveGroupSize(a.burst_group_size);
+    } else {
+        // Standalone fixture mode: acquire a full preamble from idle.
+        dec.setMode(waveform, false);
+        dec.setOFDMConfig(benchOFDMConfig());
+        dec.setDataMode(modulation, code_rate);
+    }
+    dec.setFixedFrameCodewords(fixed_cw);
     // Match encoder default (channel_interleave=true) so the bench
     // self-test agrees with how production receivers interpret the
     // fixture. Forcing false here would diverge from the GUI/TNC
@@ -431,19 +476,54 @@ int runBench(const Args& a) {
     dec.setKnownCFO(0.0f);
     dec.clearShutdown();
 
+    std::mutex results_mutex;
     int frames_decoded = 0;
     int frames_failed = 0;
+    int data_frames_decoded = 0;
+    int ack_frames_decoded = 0;
+    int control_frames_decoded = 0;
+    int other_frames_decoded = 0;
+    int byte_exact_ok = 0;
+    int byte_exact_bad = 0;
     std::vector<std::string> decoded_payloads;
+    std::vector<std::string> reassembled_texts;
+    Bytes reassembly;
     dec.setFrameCallback([&](const DecodeResult& r) {
+        std::lock_guard<std::mutex> lock(results_mutex);
         if (r.success) {
             ++frames_decoded;
-            // Try to extract the readable payload from a v2::DataFrame.
-            // For text fixtures this gives an immediate eyeball check
-            // that decode actually produced the right bytes.
-            if (auto df = v2::DataFrame::deserialize(r.frame_data)) {
-                std::string text(df->payload.begin(), df->payload.end());
-                decoded_payloads.push_back(std::move(text));
+            auto hdr = v2::parseHeader(r.frame_data);
+            const char* type_name = hdr.valid ? v2::frameTypeToString(hdr.type) : "UNKNOWN";
+            bool exact = hdr.valid;
+
+            if (hdr.valid && v2::isDataFrame(hdr.type)) {
+                ++data_frames_decoded;
+                auto df = v2::DataFrame::deserialize(r.frame_data);
+                exact = df.has_value();
+                if (df) {
+                    decoded_payloads.push_back(printableBytes(df->payload));
+                    reassembly.insert(reassembly.end(), df->payload.begin(), df->payload.end());
+                    if ((df->flags & v2::Flags::MORE_FRAG) == 0) {
+                        size_t start = (!reassembly.empty() && reassembly[0] == 0x00) ? 1 : 0;
+                        reassembled_texts.push_back(printableBytes(reassembly, start));
+                        reassembly.clear();
+                    }
+                }
+            } else if (hdr.valid && hdr.type == v2::FrameType::ACK) {
+                ++ack_frames_decoded;
+            } else if (hdr.valid && hdr.is_control) {
+                ++control_frames_decoded;
+            } else {
+                ++other_frames_decoded;
             }
+            if (exact) ++byte_exact_ok;
+            else ++byte_exact_bad;
+
+            std::cout << "[frame] idx=" << frames_decoded
+                      << " type=" << type_name
+                      << " seq=" << (hdr.valid ? hdr.seq : 0)
+                      << " bytes=" << r.frame_data.size()
+                      << " byte_exact=" << (exact ? "OK" : "BAD") << "\n";
         } else {
             ++frames_failed;
         }
@@ -497,7 +577,11 @@ int runBench(const Args& a) {
     auto last_change = poll_start;
     while (true) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        const int total = frames_decoded + frames_failed;
+        int total = 0;
+        {
+            std::lock_guard<std::mutex> lock(results_mutex);
+            total = frames_decoded + frames_failed;
+        }
         const auto now = std::chrono::steady_clock::now();
         if (total != last_total) {
             last_total = total;
@@ -541,6 +625,12 @@ int runBench(const Args& a) {
     std::cout << "wall_clock_ms             " << wall_ms << "\n";
     std::cout << "frames_decoded            " << frames_decoded << "\n";
     std::cout << "frames_failed             " << frames_failed << "\n";
+    std::cout << "data_frames_decoded       " << data_frames_decoded << "\n";
+    std::cout << "ack_frames_decoded        " << ack_frames_decoded << "\n";
+    std::cout << "control_frames_decoded    " << control_frames_decoded << "\n";
+    std::cout << "other_frames_decoded      " << other_frames_decoded << "\n";
+    std::cout << "byte_exact_ok             " << byte_exact_ok << "\n";
+    std::cout << "byte_exact_bad            " << byte_exact_bad << "\n";
 
     if (!decoded_payloads.empty()) {
         // Print the first decoded payload verbatim — eyeball check
@@ -552,6 +642,10 @@ int runBench(const Args& a) {
             else std::cout << '.';
         }
         std::cout << "\"\n";
+    }
+    if (!reassembled_texts.empty()) {
+        std::cout << "reassembled_text_count    " << reassembled_texts.size() << "\n";
+        std::cout << "first_reassembled_text    \"" << reassembled_texts.front() << "\"\n";
     }
     std::cout << "\n--- DecoderProfile (this decode) ---\n";
     std::cout << "  detect_data_sync          " << fmt(dp.detect_data_sync) << "\n";

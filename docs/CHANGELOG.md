@@ -10,6 +10,73 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-07: First successful OTA full-session decode + session_decode tool
+
+**What was missing:**
+End-to-end OTA validation of the modem at multiple code rates with full
+session artefacts (chirp + handshake + light-preamble data + DISCONNECT).
+Earlier OTA tests captured only synthetic-fixture or post-CONNECT_ACK
+audio that the existing decoders could not consume as a real session.
+
+**What was added:**
+1. `tools/sim/simulated_station.{hpp,cpp}` — extracted `SimulatedStation`,
+   `VirtualAudioPort`, and `SimulatedChannel` from `cli_simulator.cpp`
+   into a shared static library `ultra_sim_station`. Pure mechanical
+   move; observation accessors and a `decoded_frame_callback_` were
+   added so external tools can read negotiated state without
+   re-implementing the protocol layer.
+2. `tools/session_decode.cpp` — new standalone OTA decoder. Loads any
+   WAV (PCM s16, PCM s24, IEEE float32, mono/stereo, any sample rate),
+   auto-resamples to 48 kHz via the repo `Resampler`, and runs a real
+   `ModemEngine` against it through a new `WavReplayAudioPort`. Prints
+   a single summary block with chirp correlation + CFO + frame counts +
+   per-DATA-frame bytes + decoded message text + ARQ/LDPC stats.
+3. `recordings/ota_full_session_2026-05-07/full_session_{r1_4,r1_2,r3_4}.wav` —
+   25 s OTA-replayable source WAVs containing chirp + CONNECT
+   handshake + 7 messages + DISCONNECT. RMS −16 dBFS, peak 1.0
+   (minor PAPR clipping; decoder validates byte-exact end to end).
+4. `recordings/ota_capture_2026-05-07_k1vl/` — KC3VPB (PA, 100 W)
+   played the three WAVs into his rig, recorded at sdr.k1vl.com
+   (Vermont KiwiSDR, 7121 kHz USB, AGC off, 12 kHz PCM16). Three
+   `ota_*_kc3vpb_to_k1vl.wav` captures plus `RESULTS.md` documenting
+   the decode pipeline (sox +30..+36 dB pre-conditioning →
+   session_decode) and the per-rate verdict.
+
+**OTA results (first full-session decode):**
+| Rate | Chirp | Handshake | Negotiated | DATA byte-exact | LDPC fail | DISCONNECT |
+|------|------:|----------:|------------|----------------:|----------:|-----------:|
+| r1_4 | 0.857 | ✓ | OFDM-CHIRP DQPSK R1/4 4-CW | 1/1 (4 B)   | 6 | ✓ |
+| r1_2 | 0.763 | ✓ | OFDM-CHIRP DQPSK R1/2 8-CW | 1/1 (126 B) | 5 | ✓ |
+| r3_4 | 0.781 | ✗ | (lost CONNECT_ACK)         | 0/0         | 1 | ✗ |
+
+The chirp + LTS feedback path delivered clean coarse CFO at all three
+rates (~0.85 Hz, consistent across captures); wire-side rate/CW-count
+negotiation completed cleanly OTA at r1_4 and r1_2; r3_4 confirmed the
+auto-rate gate (`fading_index<0.10`) is correctly excluding it from
+fading channels. LDPC failures on most DATA frames are honest baseline
+data — Vermont KiwiSDR with AGC off delivers ~−50 dBFS audio, so the
+receive SNR is well below the modem's SNR≥15 design target.
+
+**Discarded as part of this round:**
+- `tools/capture_session_audio.sh` — generated post-CONNECT_ACK-only
+  WAVs that cannot be decoded over the air without prior chirp lock.
+  The light preamble (LTS, ~80 samples) does not survive the cumulative
+  CFO of a TX → radio → KiwiSDR → ADC clock chain.
+- `recordings/ota_session_2026-05-07/post_connect_*.wav` — the WAVs
+  the script produced. Replaced by `ota_full_session_2026-05-07/`.
+- `.gitignore` `ota_session_*` exception (no longer needed).
+
+**Verification:**
+- `cmake --build build -j4` clean.
+- `ctest --test-dir build --output-on-failure -j4` 37/37.
+- `./build/session_decode --wav recordings/ota_full_session_2026-05-07/full_session_r1_2.wav`
+  → CONNECTED, 7 DATA byte-exact 7/7, 7 messages, DISCONNECT, 0 LDPC
+  fails, 0 ARQ retx (self-loopback floor).
+- `./build/session_decode --wav <kiwisdr.wav>` after `sox … gain +30dB`
+  → reproduces the OTA verdicts in the table above.
+
+---
+
 ## 2026-05-05: BUG-RATE-001 — adaptive MODE_CHANGE panic-downshift hardened
 
 **What was broken:**

@@ -50,4 +50,6 @@ packaging/dist/
 imgui.ini
 CLAUDE.md
 CTestTestfile.cmake
-recordings/
+recordings/*
+!recordings/ota_capture_*/
+!recordings/ota_full_session_*/
