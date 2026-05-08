@@ -16,11 +16,13 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cerrno>
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <cctype>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <random>
@@ -55,6 +57,16 @@ using Config = ultra::tnc::config::Config;
 using ultra::tnc::config::isNoneDevice;
 using ultra::tnc::config::lower;
 
+std::string audioDeviceLabel(const std::string& device) {
+    return (device.empty() || lower(device) == "default") ? "Default" : device;
+}
+
+void printTncAudioDeviceHint() {
+    std::cerr << "Next step: run: ultra_tnc --list-audio-devices\n"
+              << "Then copy the exact device name into --audio-output/--audio-input "
+                 "or ultra_tnc.conf.\n";
+}
+
 struct LogFileCloser {
     void operator()(std::FILE* file) const {
         if (file) std::fclose(file);
@@ -78,9 +90,14 @@ bool configureLogging(const Config& cfg, LogFileHandle& log_file) {
     }
 
     if (!cfg.log_file.empty()) {
+        errno = 0;
         log_file.reset(std::fopen(cfg.log_file.c_str(), "a"));
         if (!log_file) {
-            std::cerr << "Failed to open --log-file " << cfg.log_file << "\n";
+            std::cerr << "Failed to open --log-file '" << cfg.log_file << "'";
+            if (errno != 0) {
+                std::cerr << ": " << std::strerror(errno);
+            }
+            std::cerr << "\nNext step: choose a writable path or fix directory permissions.\n";
             return false;
         }
         ultra::setLogFile(log_file.get());
@@ -124,7 +141,9 @@ public:
 
         if (use_output) {
             if (!audio_.openOutput(cfg_.audio_output)) {
-                std::cerr << "Failed to open audio output '" << cfg_.audio_output << "'\n";
+                std::cerr << "Failed to open audio output device '"
+                          << audioDeviceLabel(cfg_.audio_output) << "'\n";
+                printTncAudioDeviceHint();
                 return false;
             }
             audio_.startPlayback();
@@ -136,7 +155,9 @@ public:
         if (use_input) {
             audio_.setInputCaptureMode(ultra::gui::AudioEngine::InputCaptureMode::Queue);
             if (!audio_.openInput(cfg_.audio_input)) {
-                std::cerr << "Failed to open audio input '" << cfg_.audio_input << "'\n";
+                std::cerr << "Failed to open audio input device '"
+                          << audioDeviceLabel(cfg_.audio_input) << "'\n";
+                printTncAudioDeviceHint();
                 return false;
             }
             audio_.startCapture();
@@ -525,7 +546,9 @@ int main(int argc, char** argv) {
     if (cfg.list_audio) {
         ultra::gui::AudioEngine probe;
         if (!probe.initialize()) {
-            std::cerr << "Failed to initialize SDL audio for device listing\n";
+            std::cerr << "Failed to initialize SDL audio for device listing\n"
+                      << "Next step: confirm OS audio permissions and that no other "
+                         "process has exclusive control of the sound device.\n";
             return 1;
         }
         std::cout << "\n  Output devices:\n";
@@ -560,7 +583,9 @@ int main(int argc, char** argv) {
     ultra::gui::SerialPttController serial_ptt;
     if (!cfg.ptt_serial_port.empty()) {
         if (!serial_ptt.open(cfg.ptt_serial_port, cfg.ptt_serial_baud)) {
-            std::cerr << "Failed to open serial PTT port: " << cfg.ptt_serial_port << "\n";
+            std::cerr << "Failed to open serial PTT port '" << cfg.ptt_serial_port << "'\n"
+                      << "Next step: verify the port name and permissions, or omit "
+                         "--ptt-serial-port to use VOX/external PTT.\n";
             return 1;
         }
         const ultra::gui::SerialPttLine line =
@@ -573,7 +598,10 @@ int main(int argc, char** argv) {
         // open is implementation-defined).
         if (!serial_ptt.setLine(line, cfg.ptt_inactive_high)) {
             std::cerr << "Failed to set initial PTT line state on "
-                      << cfg.ptt_serial_port << "; refusing to start\n";
+                      << cfg.ptt_serial_port << "; refusing to start\n"
+                      << "Next step: check --ptt-serial-line "
+                      << cfg.ptt_serial_line
+                      << " against the interface wiring, or omit --ptt-serial-port.\n";
             return 1;
         }
         const bool active_state = !cfg.ptt_inactive_high;

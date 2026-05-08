@@ -3,11 +3,13 @@
 Deterministic, listenable WAV files used by `decode_bench` so AI agents
 and humans can A/B decoder changes against bit-identical input.
 
-Format: 32-bit float mono, 48 kHz. Open in Audacity / VLC / `sox`.
+Replay-gate fixtures are either 32-bit float mono at 48 kHz or 16-bit PCM
+mono at 24 kHz. `decode_bench` resamples WAV input to 48 kHz before decode.
+Open them in Audacity / VLC / `sox`.
 
 ## Generating
 
-Each fixture is reproducible from its name + seed=1:
+The historical R1/4 fixtures are reproducible from seed=1:
 
 ```bash
 ./build/decode_bench --mode gen \
@@ -16,13 +18,24 @@ Each fixture is reproducible from its name + seed=1:
   --snr 100 --frames 4 --payload 60 --seed 1
 ```
 
+Small replay-gate fixtures use one fixed 4-CW DATA frame, deterministic
+channel seeds, and PCM16/24 kHz output to keep each file under 200 KB:
+
+```bash
+./build/decode_bench --mode gen \
+  --wav fixtures/ofdm_chirp_r12_dqpsk_snr15_awgn.wav \
+  --rate r1_2 --mod dqpsk --waveform ofdm_chirp \
+  --channel awgn --snr 15 --frames 1 --payload 60 --seed 12 \
+  --wav-format pcm16 --sample-rate 24000
+```
+
 ## Benching
 
 ```bash
 ./build/decode_bench --mode bench \
   --connected \
   --wav fixtures/ofdm_chirp_r14_dqpsk_clean.wav \
-  --rate r1_4 --mod dqpsk --waveform ofdm_chirp
+  --rate r1_4 --mod dqpsk --waveform ofdm_chirp --cw-count 4
 ```
 
 Output prints `frames_decoded` / `frames_failed` and the full
@@ -35,16 +48,21 @@ frames. Running without `--connected` starts the decoder in disconnected
 control-search mode and produces `0` decoded frames; that is an invocation
 mismatch, not a stale fixture.
 
+The maintained CTest gate is `DecodeBenchReplay`; it asserts
+`frames_failed=0`, byte-exact DATA decode, and the expected frame count for
+every replay fixture below.
+
 ## Available fixtures
 
-| File | Rate | Mod | SNR | Description |
-|------|------|-----|-----|-------------|
-| `ofdm_chirp_r14_dqpsk_clean.wav` | R1/4 | DQPSK | ∞ | Noiseless baseline; LDPC should converge in 0 iters |
-| `ofdm_chirp_r14_dqpsk_snr15_awgn.wav` | R1/4 | DQPSK | 15 dB | AWGN at typical operating SNR |
-| `ota_test_r14_15s.wav` | R1/4 | DQPSK | ∞ | 21-frame, 15.16 s OTA fixture with readable payload `"PROJECTULTRA OTA TEST 2026 R1/4 DQPSK 73 ..."` — play through a real radio, record on the receive side, decode locally |
-
-The OFDM bench fixtures are retained as historical inputs, not as a
-passing regression contract. R1/2 and R2/3 fixtures remain TBD.
+| File | Rate | Channel | SNR | Frames | Expected result |
+|------|------|---------|-----|-------:|-----------------|
+| `ofdm_chirp_r14_dqpsk_clean.wav` | R1/4 | clean | ∞ | 4 | 4 byte-exact DATA frames |
+| `ofdm_chirp_r14_dqpsk_snr15_awgn.wav` | R1/4 | AWGN | 15 dB | 4 | 4 byte-exact DATA frames |
+| `ofdm_chirp_r12_dqpsk_snr15_awgn.wav` | R1/2 | AWGN | 15 dB | 1 | 1 byte-exact DATA frame |
+| `ofdm_chirp_r34_dqpsk_snr15_awgn.wav` | R3/4 | AWGN | 15 dB | 1 | 1 byte-exact DATA frame |
+| `ofdm_chirp_r14_dqpsk_snr15_good.wav` | R1/4 | Good fading | 15 dB | 1 | 1 byte-exact DATA frame |
+| `ofdm_chirp_r12_dqpsk_snr15_good.wav` | R1/2 | Good fading | 15 dB | 1 | 1 byte-exact DATA frame |
+| `ota_test_r14_15s.wav` | R1/4 | clean | ∞ | 21 | OTA/manual fixture with readable payload `"PROJECTULTRA OTA TEST 2026 R1/4 DQPSK 73 ..."` |
 
 ## OTA test workflow (no peer needed)
 

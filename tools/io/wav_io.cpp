@@ -2,6 +2,7 @@
 
 #include "ultra/dsp.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -221,6 +222,45 @@ bool writeWavF32Mono(const std::string& path,
     if (!samples.empty()) {
         out.write(reinterpret_cast<const char*>(samples.data()),
                   static_cast<std::streamsize>(data_bytes));
+    }
+    return out.good();
+}
+
+bool writeWavPCM16Mono(const std::string& path,
+                       const std::vector<float>& samples,
+                       uint32_t sample_rate) {
+    std::ofstream out(path, std::ios::binary);
+    if (!out) return false;
+
+    const uint32_t data_bytes = static_cast<uint32_t>(samples.size() * sizeof(int16_t));
+    const uint16_t audio_format = kFormatPcm;
+    const uint16_t channels = 1;
+    const uint16_t bits = 16;
+    const uint16_t block_align = static_cast<uint16_t>(channels * bits / 8);
+    const uint32_t byte_rate = sample_rate * block_align;
+    const uint32_t riff_size = 36 + data_bytes;
+
+    out.write("RIFF", 4);
+    writeLe32(out, riff_size);
+    out.write("WAVE", 4);
+    out.write("fmt ", 4);
+    writeLe32(out, 16);
+    writeLe16(out, audio_format);
+    writeLe16(out, channels);
+    writeLe32(out, sample_rate);
+    writeLe32(out, byte_rate);
+    writeLe16(out, block_align);
+    writeLe16(out, bits);
+    out.write("data", 4);
+    writeLe32(out, data_bytes);
+
+    for (float sample : samples) {
+        const float clamped = std::clamp(sample, -1.0f, 1.0f);
+        const int32_t scaled = static_cast<int32_t>((clamped >= 0.0f)
+            ? clamped * 32767.0f + 0.5f
+            : clamped * 32768.0f - 0.5f);
+        const int32_t pcm = std::clamp(scaled, -32768, 32767);
+        writeLe16(out, static_cast<uint16_t>(static_cast<int16_t>(pcm)));
     }
     return out.good();
 }

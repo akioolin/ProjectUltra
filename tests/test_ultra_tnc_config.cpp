@@ -171,9 +171,11 @@ void test_parseCodeRate() {
 
 void test_parseModulation() {
     CHECK(parseModulation("dqpsk") && *parseModulation("dqpsk") == ultra::Modulation::DQPSK, "dqpsk");
-    CHECK(parseModulation("QAM64") && *parseModulation("QAM64") == ultra::Modulation::QAM64, "QAM64");
+    CHECK(!parseModulation("QAM64"), "QAM64 requires expert mode");
+    CHECK(parseModulation("QAM64", true) && *parseModulation("QAM64", true) == ultra::Modulation::QAM64,
+          "QAM64 accepted in expert mode");
     CHECK(!parseModulation("nonsense"), "unknown rejected");
-    pass("parseModulation: known mods accepted, unknown rejected");
+    pass("parseModulation: operator mods accepted, expert-only modes guarded");
 }
 
 void test_isNoneDevice() {
@@ -440,6 +442,24 @@ void test_parseArgs_log_flags() {
     pass("parseArgs: log flags stored");
 }
 
+void test_parseArgs_mod_qam16_requires_expert() {
+    Argv argv({"ultra_tnc", "--mod", "qam16"});
+    Config cfg;
+    CHECK(!parseArgs(argv.argc(), argv.data(), cfg),
+          "--mod qam16 must reject without --expert");
+    pass("parseArgs: --mod qam16 rejected without --expert");
+}
+
+void test_parseArgs_mod_qam16_with_expert() {
+    Argv argv({"ultra_tnc", "--expert", "--mod", "qam16"});
+    Config cfg;
+    CHECK(parseArgs(argv.argc(), argv.data(), cfg),
+          "--mod qam16 should parse with --expert");
+    CHECK(cfg.expert_phy, "--expert flag stored");
+    CHECK(cfg.forced_mod == ultra::Modulation::QAM16, "QAM16 forced in expert mode");
+    pass("parseArgs: --expert permits --mod qam16");
+}
+
 void test_parseArgs_unknown_flag_rejected() {
     Argv argv({"ultra_tnc", "--this-does-not-exist"});
     Config cfg;
@@ -513,6 +533,8 @@ int main() {
     test_parseArgs_ptt_active_high_overrides_config_true();
     test_parseArgs_no_ptt_inactive_high_alias();
     test_parseArgs_log_flags();
+    test_parseArgs_mod_qam16_requires_expert();
+    test_parseArgs_mod_qam16_with_expert();
     test_parseArgs_unknown_flag_rejected();
     test_parseArgs_missing_value_rejected();
     test_parseArgs_config_load_failure_propagates();

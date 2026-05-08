@@ -18,6 +18,8 @@
 #include "protocol/frame_v2.hpp"
 #include "sim/awgn.hpp"
 #include "sim/cli_enums.hpp"
+#include "sim/hf_channel.hpp"
+#include "ultra/dsp.hpp"
 #include "ultra/timing_profiler.hpp"
 #include "ultra/types.hpp"
 
@@ -27,6 +29,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <fstream>
 #include <iostream>
@@ -56,6 +59,9 @@ struct Args {
     std::string waveform = "ofdm_chirp";
     std::string code_rate = "r1_4";
     std::string modulation = "dqpsk";
+    std::string channel = "awgn";
+    std::string wav_format = "f32";
+    uint32_t output_sample_rate = 48000;
     float snr_db = 100.0f;     // 100 = effectively no noise
     uint32_t seed = 1;
     int payload_bytes = 256;   // info payload per frame
@@ -66,6 +72,7 @@ struct Args {
     bool burst_interleave = true;
     int burst_group_size = 8;
     int cw_count = 0;          // 0 = connected policy default, otherwise explicit
+    bool expert_phy = false;
 };
 
 void printUsage() {
@@ -75,7 +82,8 @@ void printUsage() {
         "Common:\n"
         "  --waveform <ofdm_chirp|ofdm_cox|ofdm_narrow|mc_dpsk>  default: ofdm_chirp\n"
         "  --rate <r1_4|r1_2|r2_3|r3_4>                          default: r1_4\n"
-        "  --mod <dqpsk|qpsk|d8psk|dbpsk>                        default: dqpsk\n"
+        "  --mod <dqpsk>                                           default: dqpsk\n"
+        "  --expert                                                Allow lab-only forced PHY modes in --mod\n"
         "  --connected           Bench post-CONNECT_ACK OFDM audio: light preamble,\n"
         "                        negotiated --rate/--mod, no startup chirp required.\n"
         "  --cw-count <N>        Fixed OFDM frame codewords (connected default follows policy)\n"
@@ -83,8 +91,11 @@ void printUsage() {
         "  --burst-group-size <N> Connected burst group size (default: 8)\n"
         "\n"
         "gen options:\n"
-        "  --snr <db>            AWGN target SNR (default: 100 = no noise)\n"
-        "  --seed <N>            RNG seed for both payload + AWGN (default: 1)\n"
+        "  --channel <awgn|good|moderate|poor|flutter>  default: awgn\n"
+        "  --snr <db>            Channel SNR (default: 100 = no noise)\n"
+        "  --wav-format <f32|pcm16>                      default: f32\n"
+        "  --sample-rate <Hz>    Output WAV rate; resampled from 48 kHz (default: 48000)\n"
+        "  --seed <N>            RNG seed for payload + channel (default: 1)\n"
         "  --payload <N>         Bytes of info per frame (default: 256)\n"
         "  --frames <N>          Number of frames in the burst (default: 4)\n"
         "  --text <string>       Use string as payload (repeats to fill); makes\n"
@@ -99,7 +110,50 @@ void printUsage() {
         "               --waveform ofdm_chirp --rate r1_2 --mod dqpsk\n";
 }
 
+bool envFlagEnabled(const char* name) {
+    if (const char* value = std::getenv(name)) {
+        const std::string v = ultra::tools::cli::normalizedToken(value);
+        return v == "1" || v == "true" || v == "yes" || v == "on";
+    }
+    return false;
+}
+
+std::optional<Modulation> parseFixtureModulation(const Args& a) {
+    const auto parsed_any = ultra::tools::cli::parseModulation(
+        a.modulation,
+        ultra::tools::cli::AllowAuto::No,
+        ultra::tools::cli::AllowExperimentalModulation::Yes);
+    if (!parsed_any) {
+        std::cerr << "Unknown modulation: " << a.modulation
+                  << " (use "
+                  << ultra::tools::cli::modulationChoices(
+                         ultra::tools::cli::AllowAuto::No,
+                         a.expert_phy ? ultra::tools::cli::AllowExperimentalModulation::Yes
+                                      : ultra::tools::cli::AllowExperimentalModulation::No)
+                  << ")\n";
+        return std::nullopt;
+    }
+    if (ultra::tools::cli::isExpertOnlyModulation(*parsed_any)) {
+        if (!a.expert_phy) {
+            std::cerr << "EXPERT PHY MODE BLOCKED: --mod " << a.modulation
+                      << " is outside the replay ladder. Re-run with --expert "
+                         "only for controlled lab fixtures.\n";
+            return std::nullopt;
+        }
+        std::cerr << "EXPERT PHY MODE: forcing --mod " << a.modulation
+                  << " outside the replay ladder; fixture results are lab-only.\n";
+    }
+    return parsed_any;
+}
+
 bool parseArgs(int argc, char** argv, Args& a) {
+    a.expert_phy = envFlagEnabled("ULTRA_EXPERT_PHY");
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--expert") {
+            a.expert_phy = true;
+            break;
+        }
+    }
     auto need = [&](int& i) -> std::optional<std::string> {
         if (i + 1 >= argc) {
             std::cerr << "Missing value for " << argv[i] << "\n";
@@ -115,6 +169,9 @@ bool parseArgs(int argc, char** argv, Args& a) {
         else if (arg == "--waveform") { auto v = need(i); if (!v) return false; a.waveform = *v; }
         else if (arg == "--rate")     { auto v = need(i); if (!v) return false; a.code_rate = *v; }
         else if (arg == "--mod")      { auto v = need(i); if (!v) return false; a.modulation = *v; }
+        else if (arg == "--channel")  { auto v = need(i); if (!v) return false; a.channel = *v; }
+        else if (arg == "--wav-format") { auto v = need(i); if (!v) return false; a.wav_format = *v; }
+        else if (arg == "--sample-rate") { auto v = need(i); if (!v) return false; a.output_sample_rate = static_cast<uint32_t>(std::stoul(*v)); }
         else if (arg == "--snr")      { auto v = need(i); if (!v) return false; a.snr_db = std::stof(*v); }
         else if (arg == "--seed")     { auto v = need(i); if (!v) return false; a.seed = static_cast<uint32_t>(std::stoul(*v)); }
         else if (arg == "--payload")  { auto v = need(i); if (!v) return false; a.payload_bytes = std::stoi(*v); }
@@ -126,6 +183,7 @@ bool parseArgs(int argc, char** argv, Args& a) {
         else if (arg == "--burst-interleave") { a.burst_interleave = true; }
         else if (arg == "--no-burst-interleave") { a.burst_interleave = false; }
         else if (arg == "--burst-group-size") { auto v = need(i); if (!v) return false; a.burst_group_size = std::stoi(*v); }
+        else if (arg == "--expert") { a.expert_phy = true; }
         else { std::cerr << "Unknown option: " << arg << "\n"; return false; }
     }
     if (a.mode != "gen" && a.mode != "bench") {
@@ -146,11 +204,64 @@ std::string printableBytes(const Bytes& bytes, size_t start = 0) {
     return out;
 }
 
-// -------- Channel: AWGN at target SNR -------------------------------------
+// -------- Channel models at target SNR -------------------------------------
 
 void applyAWGN(std::vector<float>& samples, float snr_db, uint32_t seed) {
     std::mt19937 rng(seed);
     ultra::sim::awgn::addAWGN(samples, snr_db, rng);
+}
+
+ultra::sim::WattersonChannel::Config channelConfig(ChannelType type, float snr_db) {
+    switch (type) {
+        case ChannelType::AWGN:     return ultra::sim::itu_r_f1487::awgn(snr_db);
+        case ChannelType::GOOD:     return ultra::sim::itu_r_f1487::good(snr_db);
+        case ChannelType::MODERATE: return ultra::sim::itu_r_f1487::moderate(snr_db);
+        case ChannelType::POOR:     return ultra::sim::itu_r_f1487::poor(snr_db);
+        case ChannelType::FLUTTER:  return ultra::sim::itu_r_f1487::flutter(snr_db);
+    }
+    return ultra::sim::itu_r_f1487::awgn(snr_db);
+}
+
+std::vector<float> applyFadingChannel(const std::vector<float>& samples,
+                                      ChannelType type,
+                                      float snr_db,
+                                      uint32_t seed) {
+    ultra::sim::WattersonChannel channel(channelConfig(type, snr_db), seed);
+    return channel.process(ultra::SampleSpan(samples.data(), samples.size()));
+}
+
+std::string channelName(ChannelType type) {
+    switch (type) {
+        case ChannelType::AWGN:     return "awgn";
+        case ChannelType::GOOD:     return "good";
+        case ChannelType::MODERATE: return "moderate";
+        case ChannelType::POOR:     return "poor";
+        case ChannelType::FLUTTER:  return "flutter";
+    }
+    return "unknown";
+}
+
+bool writeFixtureWav(const Args& a, const std::vector<float>& samples) {
+    std::vector<float> output;
+    const std::vector<float>* to_write = &samples;
+    if (a.output_sample_rate != ultra::tools::io::kWavTargetSampleRate) {
+        ultra::Resampler resampler(ultra::tools::io::kWavTargetSampleRate,
+                                   a.output_sample_rate);
+        output = resampler.process(ultra::SampleSpan(samples.data(), samples.size()));
+        to_write = &output;
+    }
+
+    const std::string format = ultra::tools::cli::normalizedToken(a.wav_format);
+    if (format == "f32" || format == "float32") {
+        return ultra::tools::io::writeWavF32Mono(a.wav_path, *to_write,
+                                                 a.output_sample_rate);
+    }
+    if (format == "pcm16" || format == "s16") {
+        return ultra::tools::io::writeWavPCM16Mono(a.wav_path, *to_write,
+                                                   a.output_sample_rate);
+    }
+    std::cerr << "Unknown WAV format: " << a.wav_format << " (use f32 or pcm16)\n";
+    return false;
 }
 
 // -------- gen mode --------------------------------------------------------
@@ -183,11 +294,19 @@ ultra::ModemConfig benchOFDMConfig() {
 }
 
 int runGen(const Args& a) {
+    const auto modulation = parseFixtureModulation(a);
+    if (!modulation) return 1;
+    const CodeRate code_rate = ultra::tools::cli::requireCodeRate(a.code_rate);
+    const ChannelType channel_type = ultra::tools::cli::requireChannelType(a.channel);
+    if (a.output_sample_rate == 0) {
+        std::cerr << "--sample-rate must be > 0\n";
+        return 1;
+    }
+
     StreamingEncoder enc;
     enc.setMode(ultra::tools::cli::requireWaveformMode(a.waveform));
     enc.setOFDMConfig(benchOFDMConfig());
-    enc.setDataMode(ultra::tools::cli::requireModulation(a.modulation),
-                    ultra::tools::cli::requireCodeRate(a.code_rate));
+    enc.setDataMode(*modulation, code_rate);
     // Bench targets the connected-mode 4-CW fixed-frame data path —
     // that's the throughput hot path agents will be optimizing.
     enc.setFixedFrameCodewords(4);
@@ -200,13 +319,16 @@ int runGen(const Args& a) {
     // into multi-frame fragmentation. We want a deterministic single-
     // frame burst per iteration.
     const size_t cap = v2::getFixedFramePayloadCapacity(
-        ultra::tools::cli::requireCodeRate(a.code_rate), 4);
+        code_rate, 4);
     const size_t payload_bytes = std::min(static_cast<size_t>(a.payload_bytes), cap);
 
     std::cout << "[gen] waveform=" << a.waveform
               << " rate=" << a.code_rate
               << " mod=" << a.modulation
+              << " channel=" << channelName(channel_type)
               << " snr=" << a.snr_db
+              << " wav_format=" << a.wav_format
+              << " sample_rate=" << a.output_sample_rate
               << " frames=" << a.num_frames
               << " payload=" << payload_bytes << " bytes/frame (capacity=" << cap << ")"
               << " seed=" << a.seed << "\n";
@@ -242,7 +364,7 @@ int runGen(const Args& a) {
         // CW with saturated-but-wrong-position bits. (Codex review.)
         auto frame = v2::makeFixedDataFrame(
             "BENCH1", "BENCH2", static_cast<uint16_t>(f), payload,
-            ultra::tools::cli::requireCodeRate(a.code_rate), /*cw_count=*/4);
+            code_rate, /*cw_count=*/4);
         Bytes serialized = frame.serialize();
 
         // Preamble selection:
@@ -282,15 +404,21 @@ int runGen(const Args& a) {
               << " s)\n";
 
     if (a.snr_db < 80.0f) {
-        // Apply AWGN with a deterministic offset of the seed so two
-        // fixtures at different SNR but same seed don't share noise.
-        applyAWGN(all_samples, a.snr_db, a.seed ^ 0xA5A5A5A5u);
-        std::cout << "[gen] applied AWGN at " << a.snr_db << " dB\n";
+        // Apply the channel with a deterministic offset of the seed so two
+        // fixtures at different SNR but same seed don't share noise/fades.
+        if (channel_type == ChannelType::AWGN) {
+            applyAWGN(all_samples, a.snr_db, a.seed ^ 0xA5A5A5A5u);
+        } else {
+            all_samples = applyFadingChannel(all_samples, channel_type, a.snr_db,
+                                             a.seed ^ 0xA5A5A5A5u);
+        }
+        std::cout << "[gen] applied " << channelName(channel_type)
+                  << " channel at " << a.snr_db << " dB\n";
     } else {
         std::cout << "[gen] noiseless (SNR>=80)\n";
     }
 
-    if (!ultra::tools::io::writeWavF32Mono(a.wav_path, all_samples)) {
+    if (!writeFixtureWav(a, all_samples)) {
         std::cerr << "Failed to write " << a.wav_path << "\n";
         return 1;
     }
@@ -322,7 +450,8 @@ int runBench(const Args& a) {
     }
 
     const CodeRate code_rate = ultra::tools::cli::requireCodeRate(a.code_rate);
-    const Modulation modulation = ultra::tools::cli::requireModulation(a.modulation);
+    const auto modulation = parseFixtureModulation(a);
+    if (!modulation) return 1;
     const int fixed_cw = (a.cw_count > 0)
         ? v2::sanitizeFixedFrameCodewords(a.cw_count)
         : (a.connected ? ultra::protocol::connection_policy::recommendCWCount(code_rate, waveform)
@@ -339,14 +468,14 @@ int runBench(const Args& a) {
         // Post-CONNECT_ACK capture: receiver is already in negotiated OFDM data
         // mode and must search for LTS/light preambles, not startup chirps.
         dec.setConnectedOFDMMode(waveform, benchOFDMConfig(),
-                                 modulation, code_rate);
+                                 *modulation, code_rate);
         dec.setBurstInterleave(a.burst_interleave && waveform == WaveformMode::OFDM_CHIRP);
         dec.setBurstInterleaveGroupSize(a.burst_group_size);
     } else {
         // Standalone fixture mode: acquire a full preamble from idle.
         dec.setMode(waveform, false);
         dec.setOFDMConfig(benchOFDMConfig());
-        dec.setDataMode(modulation, code_rate);
+        dec.setDataMode(*modulation, code_rate);
     }
     dec.setFixedFrameCodewords(fixed_cw);
     // Match encoder default (channel_interleave=true) so the bench

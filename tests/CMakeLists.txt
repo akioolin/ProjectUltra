@@ -210,6 +210,22 @@ add_executable(test_throughput ../tools/test_throughput.cpp)
 target_link_libraries(test_throughput PRIVATE ultra_core)
 add_test(NAME Throughput COMMAND test_throughput)
 
+if(TARGET decode_bench)
+    add_executable(test_decode_bench_replay test_decode_bench_replay.cpp)
+    add_test(NAME DecodeBenchReplay
+        COMMAND test_decode_bench_replay $<TARGET_FILE:decode_bench> ${CMAKE_SOURCE_DIR})
+else()
+    message(STATUS "DecodeBenchReplay disabled: decode_bench target is not built")
+endif()
+
+if(ULTRA_BUILD_HARDWARE_TESTS)
+    add_test(NAME HardwareSmoke
+        COMMAND ${CMAKE_SOURCE_DIR}/agents/run_hardware_smoke.sh)
+    set_tests_properties(HardwareSmoke PROPERTIES
+        LABELS hardware
+        TIMEOUT 900)
+endif()
+
 ultra_enable_test_warnings(
     test_layers.cpp
     test_fft.cpp
@@ -249,4 +265,5 @@ ultra_enable_test_warnings(
     test_streaming_signal_policy.cpp
     test_streaming_mc_dpsk.cpp
     ../tools/test_throughput.cpp
+    test_decode_bench_replay.cpp
 )

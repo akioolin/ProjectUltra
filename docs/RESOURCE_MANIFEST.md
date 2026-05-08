@@ -1,6 +1,6 @@
 # Resource Manifest
 
-Last updated: 2026-05-07
+Last updated: 2026-05-08
 
 Scope: binary resources under `recordings/`, `fixtures/`, and `tests/data/`.
 Reference checks used basenames against source/header files, CMake files,
@@ -11,9 +11,13 @@ were deleted in this pass.
 
 | File | Size | Where referenced |
 |------|-----:|------------------|
-| `fixtures/ofdm_chirp_r14_dqpsk_clean.wav` | 564K | `fixtures/README.md:14`, `fixtures/README.md:23`, `fixtures/README.md:41`, `docs/KNOWN_BUGS.md:79` |
-| `fixtures/ofdm_chirp_r14_dqpsk_snr15_awgn.wav` | 564K | `fixtures/README.md:42` |
-| `fixtures/ota_test_r14_15s.wav` | 2.7M | `fixtures/README.md:43`, `fixtures/README.md:50` |
+| `fixtures/ofdm_chirp_r14_dqpsk_clean.wav` | 576044 B | `fixtures/README.md`, `tests/test_decode_bench_replay.cpp`, `docs/KNOWN_BUGS.md` |
+| `fixtures/ofdm_chirp_r14_dqpsk_snr15_awgn.wav` | 576044 B | `fixtures/README.md`, `tests/test_decode_bench_replay.cpp` |
+| `fixtures/ofdm_chirp_r12_dqpsk_snr15_awgn.wav` | 144044 B | `fixtures/README.md`, `tests/test_decode_bench_replay.cpp` |
+| `fixtures/ofdm_chirp_r34_dqpsk_snr15_awgn.wav` | 144044 B | `fixtures/README.md`, `tests/test_decode_bench_replay.cpp` |
+| `fixtures/ofdm_chirp_r14_dqpsk_snr15_good.wav` | 144044 B | `fixtures/README.md`, `tests/test_decode_bench_replay.cpp` |
+| `fixtures/ofdm_chirp_r12_dqpsk_snr15_good.wav` | 144044 B | `fixtures/README.md`, `tests/test_decode_bench_replay.cpp` |
+| `fixtures/ota_test_r14_15s.wav` | 2837804 B | `fixtures/README.md` |
 | `recordings/ota_capture_2026-05-07_k1vl/ota_r1_2_kc3vpb_to_k1vl.wav` | 1.2M | `recordings/ota_capture_2026-05-07_k1vl/RESULTS.md:33`, folder referenced by `README.md:463` |
 | `recordings/ota_capture_2026-05-07_k1vl/ota_r1_4_kc3vpb_to_k1vl.wav` | 964K | `recordings/ota_capture_2026-05-07_k1vl/RESULTS.md:34`, folder referenced by `README.md:463` |
 | `recordings/ota_capture_2026-05-07_k1vl/ota_r3_4_kc3vpb_to_k1vl.wav` | 836K | `recordings/ota_capture_2026-05-07_k1vl/RESULTS.md:35`, folder referenced by `README.md:463` |

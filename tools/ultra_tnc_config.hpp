@@ -43,6 +43,7 @@ struct Config {
     std::string log_categories;
     bool log_categories_set = false;
     std::string log_file;
+    bool expert_phy = false;
     bool help = false;
     bool list_audio = false;
 };
@@ -54,7 +55,8 @@ bool parseBoolStrict(const std::string& text, bool& out);
 bool parseUint16(const std::string& text, uint16_t& out);
 std::optional<float> parseFloat(const std::string& text);
 std::optional<ultra::CodeRate> parseCodeRate(const std::string& value);
-std::optional<ultra::Modulation> parseModulation(const std::string& value);
+std::optional<ultra::Modulation> parseModulation(const std::string& value,
+                                                 bool expert_phy = false);
 
 // ASCII lower-case (no locale). Exposed alongside the parsers
 // because ultra_tnc.cpp uses it on the runtime PTT path too.

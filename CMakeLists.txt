@@ -23,6 +23,12 @@ option(ULTRA_BUILD_TESTS "Build test suite" ON)
 option(ULTRA_BUILD_TOOLS "Build command-line tools" ON)
 option(ULTRA_BUILD_GUI "Build GUI application" ON)
 option(ULTRA_USE_FFTW "Use FFTW3 for FFT (faster)" ON)
+option(ULTRA_BUILD_HARDWARE_TESTS "Register opt-in hardware smoke CTest target" OFF)
+
+if(DEFINED ENV{ULTRA_HARDWARE_TESTS} AND "$ENV{ULTRA_HARDWARE_TESTS}" STREQUAL "1")
+    set(ULTRA_BUILD_HARDWARE_TESTS ON CACHE BOOL
+        "Register opt-in hardware smoke CTest target" FORCE)
+endif()
 
 if(MSVC)
     set(ULTRA_TOOL_TEST_WARNINGS /W4)

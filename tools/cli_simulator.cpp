@@ -22,7 +22,10 @@
 #include <atomic>
 #include <mutex>
 #include <deque>
+#include <cerrno>
 #include <cstdio>
+#include <cstring>
+#include <cstdlib>
 #include <memory>
 #ifdef _WIN32
 #include <process.h>
@@ -64,6 +67,54 @@ using namespace ultra::gui;
 using namespace ultra::protocol;
 using namespace ultra::sim;
 namespace cli = ultra::tools::cli;
+
+namespace {
+
+std::string audioDeviceLabel(const std::string& device) {
+    return (device.empty() || cli::normalizedToken(device) == "default") ? "Default" : device;
+}
+
+void printCliAudioDeviceHint() {
+    std::cerr << "Next step: run: cli_simulator --list-audio-devices --role A\n"
+              << "Then pass the exact names with --audio-output and --audio-input.\n";
+}
+
+bool envFlagEnabled(const char* name) {
+    if (const char* value = std::getenv(name)) {
+        const std::string v = cli::normalizedToken(value);
+        return v == "1" || v == "true" || v == "yes" || v == "on";
+    }
+    return false;
+}
+
+bool parseForcedModulation(const std::string& value, bool expert_phy, Modulation& out) {
+    const auto parsed_any = cli::parseModulation(
+        value, cli::AllowAuto::No, cli::AllowExperimentalModulation::Yes);
+    if (!parsed_any) {
+        std::cerr << "Unknown modulation: " << value
+                  << " (use "
+                  << cli::modulationChoices(
+                         cli::AllowAuto::No,
+                         expert_phy ? cli::AllowExperimentalModulation::Yes
+                                    : cli::AllowExperimentalModulation::No)
+                  << ")\n";
+        return false;
+    }
+    if (cli::isExpertOnlyModulation(*parsed_any)) {
+        if (!expert_phy) {
+            std::cerr << "EXPERT PHY MODE BLOCKED: --mod " << value
+                      << " is outside the operator ladder. Re-run with --expert "
+                         "only for controlled lab testing.\n";
+            return false;
+        }
+        std::cerr << "EXPERT PHY MODE: forcing --mod " << value
+                  << " outside the operator ladder; results are lab-only.\n";
+    }
+    out = *parsed_any;
+    return true;
+}
+
+}  // namespace
 
 // Channel condition types (ITU-R F.1487)
 #ifdef ULTRA_HAVE_SDL2
@@ -148,15 +199,20 @@ public:
     bool start() override {
         if (!engine_.initialize()) {
             std::cerr << "AudioEngine init failed\n";
+            printCliAudioDeviceHint();
             return false;
         }
         if (buffer_size_ > 0) engine_.setBufferSize(buffer_size_);
         if (!engine_.openOutput(output_device_)) {
-            std::cerr << "Failed to open output device '" << output_device_ << "'\n";
+            std::cerr << "Failed to open output device '"
+                      << audioDeviceLabel(output_device_) << "'\n";
+            printCliAudioDeviceHint();
             return false;
         }
         if (!engine_.openInput(input_device_)) {
-            std::cerr << "Failed to open input device '" << input_device_ << "'\n";
+            std::cerr << "Failed to open input device '"
+                      << audioDeviceLabel(input_device_) << "'\n";
+            printCliAudioDeviceHint();
             return false;
         }
         engine_.startPlayback();
@@ -1138,7 +1194,9 @@ private:
         if (list_audio_devices_) {
             gui::AudioEngine probe;
             if (!probe.initialize()) {
-                std::cerr << "Failed to init SDL audio for device listing\n";
+                std::cerr << "Failed to init SDL audio for device listing\n"
+                          << "Next step: confirm OS audio permissions and that no other "
+                             "process has exclusive control of the sound device.\n";
                 return false;
             }
             std::cout << "\n  Output devices:\n";
@@ -1684,6 +1742,13 @@ int main(int argc, char* argv[]) {
         bool log_categories_set = false;
         std::string log_categories;
         std::string log_file_path;
+        bool expert_phy = envFlagEnabled("ULTRA_EXPERT_PHY");
+        for (int i = 1; i < argc; ++i) {
+            if (std::string(argv[i]) == "--expert") {
+                expert_phy = true;
+                break;
+            }
+        }
 
         setOperatorLogProfile();
         CLISimulator sim;
@@ -1733,14 +1798,14 @@ int main(int argc, char* argv[]) {
             } else if (arg == "--mod" || arg == "-m") {
                 if (i + 1 < argc) {
                     std::string mod_str = argv[++i];
-                    auto mod = cli::parseModulation(mod_str);
-                    if (!mod) {
-                        std::cerr << "Unknown modulation: " << mod_str
-                                  << " (use " << cli::modulationChoices() << ")\n";
+                    Modulation mod = Modulation::AUTO;
+                    if (!parseForcedModulation(mod_str, expert_phy, mod)) {
                         return 1;
                     }
-                    sim.setForcedModulation(*mod);
+                    sim.setForcedModulation(mod);
                 }
+            } else if (arg == "--expert") {
+                expert_phy = true;
             } else if (arg == "--rate" || arg == "-r") {
                 if (i + 1 < argc) {
                     std::string rate_str = argv[++i];
@@ -1893,7 +1958,8 @@ int main(int argc, char* argv[]) {
                 std::cout << "                        poor     - 2.0ms delay, 1.0Hz Doppler (disturbed)\n";
                 std::cout << "                        flutter  - 0.5ms delay, 10Hz Doppler (auroral)\n";
                 std::cout << "  --fading, -f        Alias for --channel moderate\n";
-                std::cout << "  --mod, -m <MOD>     Force modulation: dqpsk, d8psk, dbpsk, qpsk, bpsk, qam16, qam32, qam64\n";
+                std::cout << "  --mod, -m <MOD>     Force modulation: dqpsk\n";
+                std::cout << "  --expert            Allow lab-only forced PHY modes in --mod\n";
                 std::cout << "  --rate, -r <RATE>   Force code rate: auto, r1_4, r1_2, r2_3, r3_4\n";
                 std::cout << "  --cw-count <N>      Fixed OFDM data-frame codewords (1-8, default: 4)\n";
                 std::cout << "  --carrier-mask <M>  OFDM_CHIRP active-carrier mask (default: all-on)\n";
@@ -1950,9 +2016,14 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         if (!log_file_path.empty()) {
+            errno = 0;
             log_file.reset(std::fopen(log_file_path.c_str(), "a"));
             if (!log_file) {
-                std::cerr << "Failed to open --log-file " << log_file_path << "\n";
+                std::cerr << "Failed to open --log-file '" << log_file_path << "'";
+                if (errno != 0) {
+                    std::cerr << ": " << std::strerror(errno);
+                }
+                std::cerr << "\nNext step: choose a writable path or fix directory permissions.\n";
                 return 1;
             }
             setLogFile(log_file.get());

@@ -8,7 +8,7 @@ Status legend: 🔴 not started · 🟡 partial · ✅ done
 
 ## Ranked list
 
-### 1. 🔴 Operator-clean logging by default
+### 1. ✅ Operator-clean logging by default
 **Wrong now:**
 * Source builds default to `DEBUG` unless `NDEBUG` is set
   (`include/ultra/logging.hpp:51`).
@@ -26,7 +26,7 @@ DSP/ARQ internals require `--log-level debug --log-category demod
 **Why it ranks #1:** first-run trust killer — users cannot distinguish
 healthy operation from a debug stack trace.
 
-### 2. 🔴 Ship the actual operator artifact
+### 2. ✅ Ship the actual operator artifact
 **Wrong now:**
 * Release-bundle list in `.github/workflows/build-matrix.yml:215`
   *excludes* `ultra_tnc` and *includes* lab tools instead.
@@ -41,7 +41,7 @@ and bench tools become separate developer artifacts.
 **Why it ranks #2:** the headless-TNC + Pat/Winlink path is the main
 value to operators. Shipping it broken is the main blocker.
 
-### 3. 🔴 One-page operator runbook
+### 3. ✅ One-page operator runbook
 **Wrong now:**
 * `docs/README.md` opens with project goals and agent docs, not
   "how to operate".
@@ -55,7 +55,7 @@ lines of engineering docs.
 
 **Effort:** 1 day.
 
-### 4. 🔴 Fix setup error messages
+### 4. ✅ Fix setup error messages
 **Wrong now:**
 * `tools/ultra_tnc.cpp:91` says only `"Failed to open audio output/input"`
   on audio failure — no device name, no next-step hint.
@@ -68,7 +68,7 @@ expected value when parsing fails.
 
 **Effort:** 0.5–1 day.
 
-### 5. 🔴 Guard expert PHY knobs
+### 5. ✅ Guard expert PHY knobs
 **Wrong now:**
 * `ultra_tnc --mod` exposes `qam16` / `qam32` / `qam64`
   (`tools/ultra_tnc_config.cpp:93`) even though the README says high-order
@@ -80,7 +80,7 @@ loud forced-mode warning. Prevents self-inflicted bad reports.
 
 **Effort:** 0.5–1 day.
 
-### 6. 🟡 Purge stale public facts
+### 6. ✅ Purge stale public facts
 **Wrong now:**
 * The exact stale references Codex flagged on 2026-05-08 morning have
   partly been fixed by the overnight cleanup batch (CTest count, OFDM_COX
@@ -90,7 +90,7 @@ loud forced-mode warning. Prevents self-inflicted bad reports.
 
 **Effort:** 0.5 day for the residual sweep.
 
-### 7. 🔴 Split operator tools from lab tools
+### 7. ✅ Split operator tools from lab tools
 **Wrong now:** README presents `ultra_tnc`, GUI, simulator, and the raw
 frame CLI at the same level — readers don't know which is for them.
 

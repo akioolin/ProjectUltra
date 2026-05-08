@@ -9,16 +9,19 @@
 > Active development. Not production-ready. APIs and protocols may change.
 > Use at your own risk for experimentation and amateur-radio research.
 
-ProjectUltra is a software modem for reliable HF data transfer. It ships
-three things in one repo:
+ProjectUltra is a software modem for reliable HF data transfer. The normal
+operator path is:
 
-- **Modem core** — adaptive OFDM + MC-DPSK waveforms with LDPC FEC and
-  Selective-Repeat ARQ.
-- **GUI application** — real-time waterfall, constellation, and message
-  log (ImGui + SDL2).
-- **Legacy-compatible TCP TNC** — `ultra_tnc` exposes the modem via
-  the same TCP command/data API used by existing HF data clients.
-  Drop-in operation is supported on Linux, macOS, and Windows.
+- **Headless TCP TNC** — `ultra_tnc` exposes the modem via the same TCP
+  command/data API used by existing HF data clients. This is the primary
+  on-air integration path on Linux, macOS, and Windows.
+- **GUI application** — `ultra_gui` provides a local operator UI with
+  waterfall, constellation, message log, and ARQ health view.
+
+The same repo also contains the modem core and diagnostic / lab tools
+(`cli_simulator`, `decode_bench`, `session_decode`, raw frame CLI). Those are
+for validation, profiling, replay, and development; they are not the first-run
+operator path.
 
 [![Build Matrix](https://github.com/secup/ProjectUltra/actions/workflows/build-matrix.yml/badge.svg?branch=main)](https://github.com/secup/ProjectUltra/actions/workflows/build-matrix.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -206,7 +209,8 @@ ProjectUltra extension:
 ### Status
 
 - Cross-platform: Linux + macOS + Windows. CI matrix all green.
-- ctest: **37/37** (TNC parser, TCP integration, bridge tests, throughput utility, plus
+- ctest: **38/38** (TNC parser, TCP integration, bridge tests, throughput utility,
+  decode-bench replay fixtures, plus
   modem regressions including the new `CarrierLDPC v1` math gate
   and per-carrier mask plumbing).
 - End-to-end byte-exact transfers (hardware harness, Mac ↔ Pi5
@@ -270,6 +274,14 @@ cmake --build build -j 4
 
 ### Running
 
+#### Operator path
+
+**TNC** (headless TCP shell for existing HF data clients):
+
+```bash
+./build/ultra_tnc --audio-output "USB Audio" --audio-input "USB Audio"
+```
+
 **GUI** (operator UI with waterfall and constellation):
 
 ```bash
@@ -292,19 +304,26 @@ cmake --build build -j 4
 > built locally from source are not affected. Proper code-sign
 > + notarization is on the post-alpha release roadmap.
 
-**TNC** (legacy-compatible TCP shell, see TNC section above):
+#### Diagnostic / lab tools
 
-```bash
-./build/ultra_tnc --audio-output "USB Audio" --audio-input "USB Audio"
-```
-
-**CLI simulator** (full protocol, two-station, channel injection):
+**CLI simulator** (full protocol, two-station, channel injection; not the
+operator TNC):
 
 ```bash
 ./build/cli_simulator --snr 15 --channel good --rate auto --test
 ```
 
-**CLI tools** (single-frame transmit/decode, for offline analysis):
+**Replay and capture analysis** (deterministic decode fixtures and recorded
+sessions):
+
+```bash
+./build/decode_bench --mode bench --connected \
+  --wav fixtures/ofdm_chirp_r14_dqpsk_clean.wav --rate r1_4
+./build/session_decode --wav \
+  recordings/ota_full_session_2026-05-07/full_session_r1_2.wav
+```
+
+**Raw frame CLI** (single-frame transmit/decode, for offline analysis):
 
 ```bash
 ./build/ultra ptx "Hello" -s MYCALL -d THEIRCALL | aplay -f FLOAT_LE -r 48000
@@ -331,7 +350,7 @@ arecord -f FLOAT_LE -r 48000 | ./build/ultra prx
 ├────────────────────────────────────────────────────────┤
 │  Waveforms      (OFDM-CHIRP, OFDM-NARROW, OFDM-COX,    │
 │                  MC-DPSK + adaptive selection)         │
-│  LDPC           (IEEE 802.11n, R1/4 to R5/6)           │
+│  LDPC           (IEEE 802.11n; data CLI R1/4 to R3/4)  │
 │  Sync / CFO     (dual chirp + Schmidl-Cox + LTS)       │
 ├────────────────────────────────────────────────────────┤
 │  Audio I/O      (SDL2 — Linux ALSA, macOS CoreAudio,   │
@@ -377,9 +396,18 @@ cmake --build build -j 4
 ctest --test-dir build --output-on-failure -j 4
 ```
 
-34 tests covering modem primitives, protocol/ARQ, TNC parser, TNC TCP
-reactor, and TNC bridge. CI runs the full matrix on Linux + macOS +
-Windows with ASAN/UBSAN and coverage gates.
+38 tests covering modem primitives, protocol/ARQ, TNC parser, TNC TCP
+reactor, TNC bridge, and deterministic `decode_bench` replay fixtures.
+CI runs the full matrix on Linux + macOS + Windows with ASAN/UBSAN and
+coverage gates.
+
+Hardware smoke remains opt-in. Configure with either
+`ULTRA_HARDWARE_TESTS=1 cmake -S . -B build-hw` or
+`cmake -S . -B build-hw -DULTRA_BUILD_HARDWARE_TESTS=ON`, then run:
+
+```bash
+ctest --test-dir build-hw -R HardwareSmoke --output-on-failure
+```
 
 ### Full-protocol simulator
 
@@ -408,12 +436,14 @@ port, and CRC-checks delivery.
 
 ### Manual modulation / rate selection
 
-`--mod`: `dqpsk` (default, 2 bits/sym), `d8psk` (3 bits/sym), `dbpsk`
-(1 bit/sym, most robust), `qam16`/`qam32`/`qam64` (coherent, stable
-paths only).
+`--mod`: operator tools expose `auto` / `dqpsk` by default. Lab-only
+forced modes (`d8psk`, `dbpsk`, `qpsk`, `bpsk`, `qam16`, `qam32`,
+`qam64`) require `--expert` or `ULTRA_EXPERT_PHY=1` and are not
+production ladder rungs.
 
-`--rate`: `r1_4`, `r1_2`, `r2_3`, `r3_4`, `r5_6`, `auto` (default;
-adaptive ladder).
+`--rate`: `auto` (default), `r1_4`, `r1_2`, `r2_3`, `r3_4`. The
+operator parsers intentionally reject higher LDPC rates until they are
+part of the maintained on-air ladder.
 
 ---
 

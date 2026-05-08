@@ -200,8 +200,12 @@ Current waveform auto-selection:
   auto ladder
 
 Current data modulation policy:
-- OFDM: DQPSK by default path
-- D8PSK in `recommendDataMode` is currently disabled (commented out)
+- OFDM: DQPSK default path
+- D8PSK is selected only by the guarded `recommendDataMode(...)` high-SNR /
+  low-fading policy. Exact gates live in
+  `src/protocol/waveform_selection.hpp` and `tests/test_waveform_policy.cpp`.
+- Manual non-DQPSK forcing is a lab-only tool path behind `--expert`; it is
+  not part of the operator auto-rate ladder.
 
 ## Encoding/Decoding Strategy by Waveform
 

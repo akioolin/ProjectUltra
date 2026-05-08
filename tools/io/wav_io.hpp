@@ -23,4 +23,8 @@ bool writeWavF32Mono(const std::string& path,
                      const std::vector<float>& samples,
                      uint32_t sample_rate = kWavTargetSampleRate);
 
+bool writeWavPCM16Mono(const std::string& path,
+                       const std::vector<float>& samples,
+                       uint32_t sample_rate = kWavTargetSampleRate);
+
 }  // namespace ultra::tools::io

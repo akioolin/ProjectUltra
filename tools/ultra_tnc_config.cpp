@@ -77,8 +77,44 @@ std::optional<ultra::CodeRate> parseCodeRate(const std::string& value) {
     return ultra::tools::cli::parseCodeRate(value, ultra::tools::cli::AllowAuto::Yes);
 }
 
-std::optional<ultra::Modulation> parseModulation(const std::string& value) {
-    return ultra::tools::cli::parseModulation(value, ultra::tools::cli::AllowAuto::Yes);
+std::optional<ultra::Modulation> parseModulation(const std::string& value, bool expert_phy) {
+    const auto allow_experimental = expert_phy
+        ? ultra::tools::cli::AllowExperimentalModulation::Yes
+        : ultra::tools::cli::AllowExperimentalModulation::No;
+    return ultra::tools::cli::parseModulation(
+        value, ultra::tools::cli::AllowAuto::Yes, allow_experimental);
+}
+
+bool envFlagEnabled(const char* name) {
+    if (const char* value = std::getenv(name)) {
+        const std::string v = lower(value);
+        return v == "1" || v == "true" || v == "yes" || v == "on";
+    }
+    return false;
+}
+
+bool parseForcedModulation(const std::string& value,
+                           bool expert_phy,
+                           ultra::Modulation& out) {
+    const auto parsed_any = ultra::tools::cli::parseModulation(
+        value,
+        ultra::tools::cli::AllowAuto::Yes,
+        ultra::tools::cli::AllowExperimentalModulation::Yes);
+    if (!parsed_any) {
+        return false;
+    }
+    if (ultra::tools::cli::isExpertOnlyModulation(*parsed_any)) {
+        if (!expert_phy) {
+            std::cerr << "EXPERT PHY MODE BLOCKED: --mod " << value
+                      << " is outside the operator ladder. Re-run with --expert "
+                         "only for controlled lab testing.\n";
+            return false;
+        }
+        std::cerr << "EXPERT PHY MODE: forcing --mod " << value
+                  << " outside the operator ladder; results are lab-only.\n";
+    }
+    out = *parsed_any;
+    return true;
 }
 
 void printUsage(std::ostream& out) {
@@ -96,7 +132,8 @@ void printUsage(std::ostream& out) {
         << "  --no-inject-channel         Override config inject_channel=true back to false\n"
         << "  --snr <db>                  SNR for channel injection and mode reports\n"
         << "  --rate <auto|r1_4|r1_2|r2_3|r3_4>\n"
-        << "  --mod <auto|dqpsk|d8psk|dbpsk|qpsk|bpsk|qam16|qam32|qam64>\n"
+        << "  --mod <auto|dqpsk>\n"
+        << "  --expert                    Allow lab-only forced PHY modes in --mod\n"
         << "  --ofdm-config <default|nvis>\n"
         << "  --ptt-serial-port <path>    Serial device for hardware PTT\n"
         << "                              (e.g. /dev/cu.usbserial or COM3)\n"
@@ -167,9 +204,7 @@ bool applyConfigKey(const std::string& key, const std::string& value, Config& cf
         if (!parsed) return false;
         cfg.forced_rate = *parsed;
     } else if (key == "mod" || key == "modulation") {
-        auto parsed = parseModulation(value);
-        if (!parsed) return false;
-        cfg.forced_mod = *parsed;
+        if (!parseForcedModulation(value, cfg.expert_phy, cfg.forced_mod)) return false;
     } else if (key == "ofdm_config" || key == "ofdm-config") {
         const std::string preset = lower(value);
         if (preset == "default") cfg.ofdm_config = OFDMConfigPreset::Default;
@@ -253,8 +288,14 @@ std::string findDefaultConfigFile() {
 bool parseArgs(int argc, char** argv, Config& cfg) {
     std::string explicit_config;
     bool needs_config = true;
+    if (envFlagEnabled("ULTRA_EXPERT_PHY")) {
+        cfg.expert_phy = true;
+    }
     for (int i = 1; i < argc; ++i) {
         const std::string arg(argv[i]);
+        if (arg == "--expert") {
+            cfg.expert_phy = true;
+        }
         if (arg == "--help" || arg == "-h" || arg == "--list-audio-devices") {
             needs_config = false;
             break;
@@ -362,12 +403,20 @@ bool parseArgs(int argc, char** argv, Config& cfg) {
             cfg.forced_rate = *parsed;
         } else if (arg == "--mod") {
             auto value = requireValue("--mod");
-            auto parsed = value ? parseModulation(*value) : std::nullopt;
-            if (!parsed) {
-                std::cerr << "Unknown modulation\n";
+            if (!value || !parseForcedModulation(*value, cfg.expert_phy, cfg.forced_mod)) {
+                if (value) {
+                    std::cerr << "Allowed --mod values here: "
+                              << ultra::tools::cli::modulationChoices(
+                                     ultra::tools::cli::AllowAuto::Yes,
+                                     cfg.expert_phy
+                                         ? ultra::tools::cli::AllowExperimentalModulation::Yes
+                                         : ultra::tools::cli::AllowExperimentalModulation::No)
+                              << "\n";
+                }
                 return false;
             }
-            cfg.forced_mod = *parsed;
+        } else if (arg == "--expert") {
+            cfg.expert_phy = true;
         } else if (arg == "--ofdm-config") {
             auto value = requireValue("--ofdm-config");
             if (!value) return false;

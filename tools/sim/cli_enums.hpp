@@ -31,6 +31,11 @@ enum class AllowAwgn {
     Yes
 };
 
+enum class AllowExperimentalModulation {
+    No,
+    Yes
+};
+
 enum class BareOFDMMode {
     Reject,
     Chirp,
@@ -51,7 +56,12 @@ inline const char* codeRateChoices(AllowAuto allow_auto = AllowAuto::No) {
         : "r1_4, r1_2, r2_3, r3_4";
 }
 
-inline const char* modulationChoices(AllowAuto allow_auto = AllowAuto::No) {
+inline const char* modulationChoices(
+    AllowAuto allow_auto = AllowAuto::No,
+    AllowExperimentalModulation allow_experimental = AllowExperimentalModulation::Yes) {
+    if (allow_experimental == AllowExperimentalModulation::No) {
+        return allow_auto == AllowAuto::Yes ? "auto, dqpsk" : "dqpsk";
+    }
     return allow_auto == AllowAuto::Yes
         ? "auto, dqpsk, d8psk, dbpsk, qpsk, bpsk, qam16, qam32, qam64"
         : "dqpsk, d8psk, dbpsk, qpsk, bpsk, qam16, qam32, qam64";
@@ -86,10 +96,13 @@ inline CodeRate requireCodeRate(const std::string& value,
 }
 
 inline std::optional<Modulation> parseModulation(const std::string& value,
-                                                 AllowAuto allow_auto = AllowAuto::No) {
+                                                 AllowAuto allow_auto = AllowAuto::No,
+                                                 AllowExperimentalModulation allow_experimental =
+                                                     AllowExperimentalModulation::Yes) {
     const std::string v = normalizedToken(value);
     if (allow_auto == AllowAuto::Yes && v == "auto") return Modulation::AUTO;
     if (v == "dqpsk") return Modulation::DQPSK;
+    if (allow_experimental == AllowExperimentalModulation::No) return std::nullopt;
     if (v == "d8psk") return Modulation::D8PSK;
     if (v == "dbpsk") return Modulation::DBPSK;
     if (v == "qpsk") return Modulation::QPSK;
@@ -101,10 +114,16 @@ inline std::optional<Modulation> parseModulation(const std::string& value,
 }
 
 inline Modulation requireModulation(const std::string& value,
-                                    AllowAuto allow_auto = AllowAuto::No) {
-    if (auto parsed = parseModulation(value, allow_auto)) return *parsed;
+                                    AllowAuto allow_auto = AllowAuto::No,
+                                    AllowExperimentalModulation allow_experimental =
+                                        AllowExperimentalModulation::Yes) {
+    if (auto parsed = parseModulation(value, allow_auto, allow_experimental)) return *parsed;
     throw std::invalid_argument("Unknown modulation: " + value +
-                                " (use " + modulationChoices(allow_auto) + ")");
+                                " (use " + modulationChoices(allow_auto, allow_experimental) + ")");
+}
+
+inline bool isExpertOnlyModulation(Modulation mod) {
+    return mod != Modulation::AUTO && mod != Modulation::DQPSK;
 }
 
 inline std::optional<protocol::WaveformMode> parseWaveformMode(

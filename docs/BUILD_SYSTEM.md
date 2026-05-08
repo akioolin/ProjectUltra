@@ -97,7 +97,8 @@ make -j4
 ### Unit/Integration Test Targets (`tests/`)
 
 `tests/CMakeLists.txt` defines the maintained CTest targets, including
-the `Throughput` target backed by `tools/test_throughput.cpp`.
+the `Throughput` target backed by `tools/test_throughput.cpp` and
+`DecodeBenchReplay` for committed `decode_bench` WAV fixtures.
 
 Run all registered tests:
 
@@ -111,6 +112,15 @@ For the maintained quality gate, prefer:
 ```bash
 ctest --test-dir build --output-on-failure -j4
 ./scripts/coverage_report.sh
+```
+
+Hardware smoke is discoverable but off by default. Register it only on a
+machine wired for the hardware bench:
+
+```bash
+ULTRA_HARDWARE_TESTS=1 cmake -S . -B build-hw
+# or: cmake -S . -B build-hw -DULTRA_BUILD_HARDWARE_TESTS=ON
+ctest --test-dir build-hw -R HardwareSmoke --output-on-failure
 ```
 
 See `docs/QUALITY_STRATEGY.md` for critical-code coverage scope and required

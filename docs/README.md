@@ -13,6 +13,19 @@ cites an archived file.
 - `docs/INVARIANTS.md`: Critical modem invariants that must not be weakened.
 - `docs/KNOWN_BUGS.md`: Current open reliability/throughput issues only.
 
+## Operator Path
+
+- `docs/RUNNING.md`: One-page runbook for the normal `ultra_tnc` operator flow.
+- `docs/TNC_INTERFACE.md`: TCP command/data interface exposed by `ultra_tnc`.
+- `README.md`: Top-level operator overview, build instructions, and status.
+
+## Diagnostic / Lab Tools
+
+- `tools/cli_simulator.cpp`: Full-protocol simulator and hardware-audio test harness.
+- `tools/decode_bench.cpp`: Deterministic fixture generation/replay for decoder regressions.
+- `tools/session_decode.cpp`: Offline decode of recorded full sessions.
+- `tools/test_waveform_simple.cpp` and `ultra ptx/prx`: raw waveform/frame diagnostics.
+
 ## Agent And Quality Workflow
 
 - `docs/AGENTIC_DEVELOPMENT.md`: Bounded agent workflow, permissions, gates, and review process.

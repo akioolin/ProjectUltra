@@ -13,7 +13,7 @@
 callsign     = N0CALL          # Your amateur radio callsign
 
 # --- Audio devices ---
-# Use the names that ./ultra_tnc --help (or your OS) reports. "none"
+# Use names from ./ultra_tnc --list-audio-devices (or your OS). "none"
 # disables that direction (useful for testing without a soundcard).
 audio_output = USB Audio CODEC
 audio_input  = USB Audio CODEC
