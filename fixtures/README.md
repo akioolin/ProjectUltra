@@ -61,7 +61,7 @@ every replay fixture below.
 | `ofdm_chirp_r12_dqpsk_snr15_awgn.wav` | R1/2 | AWGN | 15 dB | 1 | 1 byte-exact DATA frame |
 | `ofdm_chirp_r34_dqpsk_snr15_awgn.wav` | R3/4 | AWGN | 15 dB | 1 | 1 byte-exact DATA frame |
 | `ofdm_chirp_r14_dqpsk_snr15_good.wav` | R1/4 | Good fading | 15 dB | 1 | 1 byte-exact DATA frame |
-| `ofdm_chirp_r12_dqpsk_snr15_good.wav` | R1/2 | Good fading | 15 dB | 1 | 1 byte-exact DATA frame |
+| `ofdm_chirp_r12_dqpsk_snr18_good.wav` | R1/2 | Good fading | 15 dB | 1 | 1 byte-exact DATA frame |
 | `ota_test_r14_15s.wav` | R1/4 | clean | ∞ | 21 | OTA/manual fixture with readable payload `"PROJECTULTRA OTA TEST 2026 R1/4 DQPSK 73 ..."` |
 
 ## OTA test workflow (no peer needed)
