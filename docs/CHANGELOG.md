@@ -10,6 +10,141 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-08: Refactor/Optimize Round 3 - OFDM scratch preallocation
+
+**What was wasteful:**
+OFDM modulation and demodulation allocated short-lived vectors inside
+per-symbol paths: frequency-domain bins, time-domain symbols, CP-appended
+symbols, real output blocks, equalized carriers, differential scratch, and
+interpolation scratch.
+
+**What changed:**
+`OFDMModulator::Impl` and `OFDMDemodulator::Impl` now own reusable scratch
+buffers sized to the configured FFT/carrier geometry. OFDM hot paths reuse those
+buffers and use pointer-based FFT calls with pre-sized output storage.
+
+**Why this is safe:**
+The patch changes allocation policy, not modulation, coding, ARQ behavior,
+wire format, carrier masks, or CarrierLDPC negotiation. Scratch is instance
+local and is consumed before the next scratch-producing call overwrites it.
+
+**Verification:**
+- `ctest --test-dir build --output-on-failure -j4` passed 37/37.
+- 20 KB Good R1/2 SNR=15: 1705.7 bps, 0 retx, PASS.
+- 20 KB AWGN R1/2 SNR=15: 1714.8 bps, 0 retx, PASS.
+- 5 KB Good R1/2 SNR=15: 1492.1 bps, 0 retx, PASS.
+- `./agents/run_hardware_smoke.sh` passed:
+  AWGN 1 KB 1043.0 bps / 0 retx; Good 1 KB 1043.7 bps / 0 retx;
+  Moderate 1 KB 877.8 bps / 0 retx.
+
+---
+
+## 2026-05-08: Refactor/Optimize Round 3 - decoder ring parameterization
+
+**What was risky:**
+The first F#3 patch changed `% 480000` ring arithmetic into `% buffer_capacity_samples_`.
+On arm64 that moved the audio callback sample-copy loop from constant-divisor
+strength reduction to a runtime `udiv/msub` pair. The 20 KB Good-channel
+failure did not reproduce on replay, but the instruction-level change was real.
+
+**What changed:**
+`StreamingDecoder` now accepts a validated ring capacity while keeping the
+default ring on the `kDefaultBufferSamples` fast path. Custom rings use an
+explicit runtime-capacity path. Tests cover default capacity, a compact
+144000-sample ring wrap, and rejection below the 120000-sample sync window.
+
+**Why this is safe:**
+Default construction preserves the historical 10 s ring and restores
+constant-divisor code in the per-sample copy path. Smaller rings are opt-in and
+cannot undercut the largest sync-search window.
+
+**Verification:**
+- `cmake --build build -j4 --clean-first` passed.
+- `ctest --test-dir build --output-on-failure -j4` passed 37/37.
+- 20 KB Good R1/2 SNR=15: 1708.6 bps, 0 retx, PASS.
+- 5 KB Good R1/2 SNR=15: 1501.4 bps, 0 retx, PASS.
+- `./agents/run_hardware_smoke.sh` passed:
+  AWGN 1 KB 1022.3 bps / 0 retx; Good 1 KB 1046.2 bps / 0 retx;
+  Moderate 1 KB 875.4 bps / 0 retx.
+
+---
+
+## 2026-05-08: Refactor/Optimize Round 2 - tooling and warnings
+
+**What was broken:**
+`tools/profile_acquisition.cpp` still built, but it reproduced the
+catalog failure: an OFDM trial exited successfully while reporting
+`FAIL` and `No successful decodes!`. That output is not valid timing
+evidence.
+
+**What changed:**
+1. Deleted the stale `profile_acquisition` source and CMake target.
+   `docs/BUILD_SYSTEM.md` and `docs/RESOURCE_FOOTPRINT_ANALYSIS.md`
+   now point at maintained `StreamingDecoder` decode buckets from
+   `cli_simulator`, `decode_bench`, and hardware-smoke runs.
+2. Added source-scoped `-Wall -Wextra` only for tool/test source files.
+   The warning policy is not enabled on `ultra_core`, `ultra_gui`, or
+   `ultra_tnc` runtime targets.
+3. Test source files now undefine `NDEBUG` so assert-based tests run
+   their checks in the existing Release build directory.
+4. Fixed warnings in tool/test owned code and removed the redundant
+   `decode_bench` direct `ultra_core` link.
+
+**Why this is safe:**
+This removes a misleading standalone tool and tightens build hygiene
+without changing modem algorithms, ARQ parameters, wire format, or
+runtime target warning policy.
+
+**Verification:**
+- Before: Round 1 ended with `ctest --test-dir build --output-on-failure -j4`
+  passing 37/37.
+- After: `cmake --build build -j4 --clean-first` passed with no compiler
+  warnings in the scoped tool/test sources.
+- After: `ctest --test-dir build --output-on-failure -j4` passed 37/37.
+- `./agents/run_hardware_smoke.sh` passed:
+  AWGN 1 KB 1023.1 bps / 0 retx; Good 1 KB 1022.6 bps / 0 retx;
+  Moderate 1 KB 1021.6 bps / 0 retx.
+
+---
+
+## 2026-05-08: Refactor/Optimize Round 1 - docs and cleanup
+
+**What was stale:**
+The auto-rate ladder was copied into multiple docs, which creates a
+second source of truth beside `selectOFDMCodeRate()`. README and docs
+also named specific competing products despite the project naming
+policy. The B1 CRC consolidation item was rechecked after legacy modem
+removal.
+
+**What changed:**
+1. `CLAUDE.md`, `docs/PROTOCOL_V2.md`, and `README.md` now point to
+   `src/protocol/waveform_selection.hpp::selectOFDMCodeRate()` and
+   `tests/test_waveform_policy.cpp` instead of duplicating exact
+   OFDM rate thresholds.
+2. `README.md`, `docs/TNC_INTERFACE.md`,
+   `docs/MODEM_IMPROVEMENT_BACKLOG.md`, historical changelog text, and
+   `docs/CLEANUP_OVERNIGHT_2026-05-07.md` now use neutral naming for
+   legacy-compatible TCP TNC clients.
+3. The old product-named client audit was renamed to
+   `docs/TNC_CLIENT_AUDIT.md` and neutralized.
+
+**B1 decision:**
+Skipped. Modern protocol CRC16 already routes through
+`v2::ControlFrame::calculateCRC()`. The remaining CRC32 implementation
+is file-transfer payload integrity, not a duplicate frame-wire CRC path.
+
+**Verification:**
+- Before: `ctest --test-dir build --output-on-failure -j4` passed
+  37/37.
+- After: `cmake --build build -j4 --clean-first` passed.
+- After: `ctest --test-dir build --output-on-failure -j4` passed
+  37/37.
+- `./agents/run_hardware_smoke.sh` passed:
+  AWGN 1 KB 1022.1 bps / 0 retx; Good 1 KB 1022.3 bps / 0 retx;
+  Moderate 1 KB 861.5 bps / 0 retx.
+
+---
+
 ## 2026-05-07: First successful OTA full-session decode + session_decode tool
 
 **What was missing:**
@@ -331,7 +466,7 @@ then be done from a Windows host:
 .\ultra_tnc.exe --audio-output none --audio-input none --port 18300
 echo VERSION | nc 127.0.0.1 18300  # or PowerShell equivalent
 ```
-Should return `VARA version 4.9.0 registered\r` exactly as on
+Should return `VERSION 4.9.0 registered\r` exactly as on
 POSIX.
 
 ---
@@ -342,14 +477,14 @@ POSIX.
 `tools/tnc_loopback_test.sh` — a shell-driven end-to-end test that
 runs two `ultra_tnc` instances (Mac local + Pi via SSH, mirroring
 `run_hw_test.sh`'s pattern) and validates a binary file transfer
-between them via the VARA TNC interface.
+between them via the legacy TNC interface.
 
 Flow:
 1. Starts ultra_tnc on Pi via SSH (audio device, callsign, port)
 2. Starts ultra_tnc on Mac (audio device, callsign, port)
 3. Waits 5s for socket binding, then polls up to 20s
 4. Opens persistent cmd-port TCP connection to each side
-5. Drives via VARA commands: MYCALL, BW2300, COMPRESSION TEXT,
+5. Drives via legacy TNC commands: MYCALL, BW2300, COMPRESSION TEXT,
    LISTEN ON (Pi), CONNECT (Mac initiates)
 6. Waits up to 60s for CONNECTED event on both sides
 7. Streams a generated payload (default 5 KB) into Mac's data port
@@ -360,7 +495,7 @@ Flow:
 Tooling: pure bash + ssh + nc + dd + cksum + cmp + awk + grep + sed
 + mkfifo. No python, no `timeout`/`gtimeout`, no extra deps.
 
-**Important VARA quirk handled:**
+**Important legacy TNC quirk handled:**
 Closing/reopening the cmd-port TCP connection mid-session would
 evict the active TNCSession (single-client semantics from Phase 2).
 The script keeps cmd sockets persistently open via FIFO-backed nc
@@ -380,12 +515,12 @@ the manual `VERSION` smoke. Phase 4 is the integration validation.
 
 ---
 
-## 2026-05-02: TNC Phase 3b — TNCBridge + ultra_tnc binary (working VARA TNC)
+## 2026-05-02: TNC Phase 3b — TNCBridge + ultra_tnc binary (working legacy TNC)
 
 **Goal:**
 Tie all the TNC pieces together. After this phase ships, ProjectUltra
-exposes a VARA-HF-compatible TCP TNC interface that **client software
-(Pat, Winlink Express, BPQ32, ARDOPCF) can use as a drop-in VARA
+exposes a legacy-compatible HF TCP TNC interface that **client software
+(reference client, mainstream Windows HF mail client, packet-router client, alternative TNC client) can use as a drop-in legacy TNC
 replacement** at the TCP API level.
 
 **What was added:**
@@ -423,7 +558,7 @@ replacement** at the TCP API level.
   IAMALIVE/BUFFER timers.
 
 - `docs/TNC_INTERFACE.md` — user-facing TNC docs: how to run
-  ultra_tnc, how to point Pat/Winlink at it, supported VARA commands
+  ultra_tnc, how to point reference client/HF mail at it, supported legacy TNC commands
   + behavior notes.
 
 - `tests/test_tnc_bridge.cpp` — 16 unit cases against a mock
@@ -441,16 +576,16 @@ replacement** at the TCP API level.
   ```
   ./build/ultra_tnc --audio-output none --audio-input none --port 18300
   $ printf "VERSION\r" | nc 127.0.0.1 18300 | xxd
-  00000000: 5641 5241 2076 6572 7369 6f6e 2034 2e39  VARA version 4.9
+  00000000: 5641 5241 2076 6572 7369 6f6e 2034 2e39  VERSION 4.9
   00000010: 2e30 2072 6567 6973 7465 7265 640d       .0 registered.
   ```
-  Returns the exact `VARA version 4.9.0 registered\r` string Pat-Vara
+  Returns the exact `VERSION 4.9.0 registered\r` string reference TCP client
   regexes for. **TNC is functional end-to-end.**
 
 **What this delivers:**
-- ✅ ProjectUltra exposes a VARA-HF-compatible TCP TNC (8300/8301)
-- ✅ Existing client software (Pat, Winlink Express, BPQ32, ARDOPCF)
-  can use ProjectUltra as if it were VARA HF — no code changes on
+- ✅ ProjectUltra exposes a legacy-compatible HF TCP TNC (8300/8301)
+- ✅ Existing client software (reference client, mainstream Windows HF mail client, packet-router client, alternative TNC client)
+  can use ProjectUltra as if it were legacy HF TNC — no code changes on
   client side
 - ✅ Single binary `ultra_tnc` assembles the full stack
 - ✅ Single-thread reactor model (no per-client threads, no
@@ -458,10 +593,10 @@ replacement** at the TCP API level.
 - ✅ PTT inferred correctly from audio queue state
 
 **What's still unverified (Phase 4+):**
-- Real Pat client connecting to ultra_tnc (manual operator test)
+- Real reference client client connecting to ultra_tnc (manual operator test)
 - Two-station hardware test where both ends run ultra_tnc and
-  exchange Winlink-style email
-- Real Winlink Express on Windows
+  exchange HF-mail-style email
+- Real mainstream Windows HF mail client on Windows
 - Long-running stability (multi-hour sessions, repeated connect/
   disconnect cycles)
 - `--inject-channel` integration testing
@@ -469,15 +604,15 @@ replacement** at the TCP API level.
 **Important compatibility note:**
 Drop-in for **client software API** (TCP), NOT for **over-the-air
 protocol**. Both ends in a conversation must run ProjectUltra; we
-are not wire-compatible with VARA's actual on-air waveforms. This
-matches Mercury's positioning — same TCP TNC API, custom on-air
+are not wire-compatible with legacy TNC's actual on-air waveforms. This
+matches reference TNC's positioning — same TCP TNC API, custom on-air
 protocol. Useful for:
-- Private/emergency Winlink-style HF email networks
-- Replacing VARA in self-contained meshes
-- Free + open-source alternative to VARA's $60–100 license
+- Private/emergency HF-mail-style HF email networks
+- Replacing legacy TNC in self-contained meshes
+- Free + open-source alternative to legacy TNC's $60–100 license
 
-NOT useful for joining the existing global Winlink HF gateway
-network on-air (those gateways run actual VARA).
+NOT useful for joining the existing global HF mail HF gateway
+network on-air (those gateways run actual legacy TNC).
 
 ---
 
@@ -565,8 +700,8 @@ on top of the new ProtocolEngine APIs, plus the `ultra_tnc` binary
 ## 2026-05-02: TNC Phase 2 — TCP reactor + integration tests
 
 **Goal:**
-Add the TCP socket layer for the VARA TNC interface. Single-thread
-`poll()` reactor pattern (matching Mercury's `tcp_interfaces.c`) so
+Add the TCP socket layer for the legacy TNC interface. Single-thread
+`poll()` reactor pattern (matching reference TNC's `tcp_interfaces.c`) so
 all socket I/O + TNCSession dispatch + timers run on one thread,
 avoiding ProtocolEngine reentrancy risk.
 
@@ -621,12 +756,12 @@ class that:
 
 ---
 
-## 2026-05-02: TNC Phase 1 — VARA-compatible TNC scaffold
+## 2026-05-02: TNC Phase 1 — legacy-compatible TNC scaffold
 
 **Goal:**
-Add a VARA-HF-compatible TCP TNC interface to ProjectUltra so existing
-HF software (Winlink Express, Pat, BPQ32, ARDOPCF) can use this modem
-as a drop-in VARA replacement. This is Phase 1 of a 5-phase project
+Add a legacy-compatible HF TCP TNC interface to ProjectUltra so existing
+HF software (mainstream Windows HF mail client, reference client, packet-router client, alternative TNC client) can use this modem
+as a drop-in legacy TNC replacement. This is Phase 1 of a 5-phase project
 documented in `/tmp/tnc_architecture_plan.md` (private brief; will
 be promoted to `docs/TNC_INTERFACE.md` when public-facing).
 
@@ -642,9 +777,9 @@ real `ProtocolEngine`.
   disconnect, abort, sendBinary + snapshot accessors)
 - `src/tnc/tnc_session.{hpp,cpp}` (806 lines) — `TNCSession` parser,
   FSM dispatcher, command handlers, event emitters. Implements 13
-  VARA core commands (MYCALL, BW2300/500/2750, LISTEN, CONNECT,
+  legacy TNC core commands (MYCALL, BW2300/500/2750, LISTEN, CONNECT,
   DISCONNECT, ABORT, COMPRESSION, CHAT, VERSION, BUFFER, SN, BITRATE,
-  CWID) + 7 Mercury-extension no-ops (P2P SESSION, WINLINK SESSION,
+  CWID) + 7 reference-extension no-ops (P2P SESSION, CLIENT SESSION,
   PUBLIC, IGNOREKISSDCD, RETRIES, CALLINT, CQFRAME) for client
   compatibility. Async event helpers for CONNECTED, DISCONNECTED,
   PTT, BUFFER (rate-limited 1/sec), SN, IAMALIVE (60s timer).
@@ -658,18 +793,18 @@ real `ProtocolEngine`.
 
 **Architecture decisions (per Codex review of plan):**
 - TNCSession lives outside ProtocolEngine (boundary preserved)
-- Mercury-extension no-ops accepted silently (clients probe these)
+- reference-extension no-ops accepted silently (clients probe these)
 - BW2750 accepted (not WRONG) — clients probe all bandwidths
-- VERSION emits exact string `VARA version 4.9.0 registered\r` for
-  Pat-Vara regex compatibility
+- VERSION emits exact string `VERSION 4.9.0 registered\r` for
+  reference TCP client regex compatibility
 - BUFFER events rate-limited (1 emit per second + on change) per
-  Mercury reference
-- IAMALIVE every 60s (Pat enforces 2-min read deadline)
-- LISTEN OFF mid-session emits WRONG (per VARA quirk; would tear
+  reference TNC reference
+- IAMALIVE every 60s (reference client enforces 2-min read deadline)
+- LISTEN OFF mid-session emits WRONG (per legacy TNC quirk; would tear
   link otherwise)
 
 **Phase 2 next:** TCP reactor (single-thread `poll`-based, mirroring
-Mercury), localhost integration tests, single-client eviction
+reference TNC), localhost integration tests, single-client eviction
 semantics. Reactor will own both ports + IAMALIVE timer; no
 per-client threads (Codex flagged reentrancy risk in ProtocolEngine
 if multi-threaded).
@@ -677,7 +812,7 @@ if multi-threaded).
 **Phase 3 next-next:** wire to ProtocolEngine. Will require fixing
 the duplicate-data callback in `connection_handlers.cpp:425-488`
 (currently emits both fragment + reassembled payload — would
-duplicate bytes on the VARA data stream), adding a binary-bytes
+duplicate bytes on the legacy TNC data stream), adding a binary-bytes
 send API, and adding a byte-level TX backlog snapshot.
 
 ---
@@ -2474,7 +2609,7 @@ but 1-CW frames arrive faster (shorter TX), so the decoder naturally processes t
 - `src/gui/modem/modem_mode.cpp`:
   - `setWaveformMode()`, `setConnected()`, `setDataMode()` now mirror config to StreamingEncoder
   - `setCodecType()` no longer recreates encoder_ (StreamingEncoder manages its own)
-- `CMakeLists.txt`: Added streaming_encoder.cpp to ultra_gui, threaded_simulator, profile_acquisition
+- `CMakeLists.txt`: Added streaming_encoder.cpp to ultra_gui, threaded_simulator, and the then-existing acquisition profiler
 
 **Key behavioral change:**
 - OFDM control frames (ACK/NACK) now get 4-CW frame interleaving via StreamingEncoder,

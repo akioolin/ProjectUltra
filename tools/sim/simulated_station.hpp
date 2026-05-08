@@ -73,7 +73,7 @@ enum class OFDMConfigPreset {
     Nvis      // OFDMNvisWaveform::createNvisMode(): 1024 FFT, 59 carriers
 };
 
-static const char* channelTypeToString(ChannelType t) {
+[[maybe_unused]] static const char* channelTypeToString(ChannelType t) {
     switch (t) {
         case ChannelType::AWGN:     return "AWGN (no fading)";
         case ChannelType::GOOD:     return "Good (0.5ms, 0.1Hz)";
@@ -109,7 +109,7 @@ static float samplePeak(const std::vector<float>& samples) {
     return peak;
 }
 
-static size_t countFullScaleSamples(const std::vector<float>& samples) {
+[[maybe_unused]] static size_t countFullScaleSamples(const std::vector<float>& samples) {
     size_t count = 0;
     for (float s : samples) {
         if (std::fabs(s) > 1.0f) count++;
@@ -774,7 +774,7 @@ private:
         });
 
         // Set ping callback
-        decoder_->setPingCallback([this](float snr_db, float cfo_hz) {
+        decoder_->setPingCallback([this](float, float cfo_hz) {
             last_cfo_hz_ = cfo_hz;
             // If narrowband chirp was detected, switch control waveform to narrowband
             // and set session-scoped override so negotiateMode() picks OFDM_NARROW
@@ -1181,10 +1181,6 @@ private:
 
     std::vector<float> transmitBurst(const std::vector<Bytes>& frame_data_list) {
         if (!encoder_ || frame_data_list.empty()) return {};
-
-        // All burst frames use connected OFDM mode
-        auto saved_mode = encoder_->getMode();
-        auto saved_rate = encoder_->getCodeRate();
 
         // Ensure encoder is in connected OFDM mode
         if (tx_waveform_mode_ != WaveformMode::MC_DPSK) {

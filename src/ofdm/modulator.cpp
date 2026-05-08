@@ -4,6 +4,7 @@
 #include "ultra/dsp.hpp"
 #include "ultra/logging.hpp"
 #include "demodulator_constants.hpp"
+#include <algorithm>
 #include <random>
 
 namespace ultra {
@@ -126,6 +127,17 @@ struct OFDMModulator::Impl {
     // DBPSK state: previous symbol per data carrier for differential encoding
     std::vector<Complex> dbpsk_prev_symbols;
 
+    // Reused OFDM hot-path scratch. The modulator is used serially by one
+    // waveform instance, so member scratch removes per-symbol heap churn
+    // without changing the transmitted samples.
+    std::vector<Complex> freq_domain_scratch;
+    std::vector<Complex> time_domain_scratch;
+    std::vector<Complex> symbol_with_cp_scratch;
+    std::vector<Complex> symbol_data_scratch;
+    std::vector<Complex> lts_data_scratch;
+    std::vector<Complex> probe_data_scratch;
+    Samples real_signal_scratch;
+
     Impl(const ModemConfig& cfg)
         : config(cfg)
         , fft(cfg.fft_size)
@@ -138,6 +150,18 @@ struct OFDMModulator::Impl {
         }
         setupCarriers();
         generateSequences();
+        prepareScratch();
+    }
+
+    void prepareScratch() {
+        const size_t cp_len = config.getCyclicPrefix();
+        freq_domain_scratch.resize(config.fft_size);
+        time_domain_scratch.resize(config.fft_size);
+        symbol_with_cp_scratch.resize(config.fft_size + cp_len);
+        symbol_data_scratch.reserve(data_carrier_indices.size());
+        lts_data_scratch.resize(data_carrier_indices.size());
+        probe_data_scratch.resize(data_carrier_indices.size());
+        real_signal_scratch.reserve(config.fft_size + cp_len);
     }
 
     void setupCarriers() {
@@ -228,11 +252,13 @@ struct OFDMModulator::Impl {
         return (active_carrier_mask & (uint64_t{1} << logical_carrier)) != 0;
     }
 
-    std::vector<Complex> createOFDMSymbol(const std::vector<Complex>& data_symbols,
-                                          bool include_pilots = true,
-                                          uint64_t active_carrier_mask = UINT64_MAX,
-                                          bool carrier_mask_enabled = false) {
-        std::vector<Complex> freq_domain(config.fft_size, Complex(0, 0));
+    const std::vector<Complex>& createOFDMSymbol(const std::vector<Complex>& data_symbols,
+                                                bool include_pilots = true,
+                                                uint64_t active_carrier_mask = UINT64_MAX,
+                                                bool carrier_mask_enabled = false) {
+        auto& freq_domain = freq_domain_scratch;
+        freq_domain.resize(config.fft_size);
+        std::fill(freq_domain.begin(), freq_domain.end(), Complex(0, 0));
 
         // Map data to carriers
         for (size_t i = 0; i < data_carrier_indices.size() && i < data_symbols.size(); ++i) {
@@ -270,30 +296,30 @@ struct OFDMModulator::Impl {
         }
 
         // IFFT to time domain
-        std::vector<Complex> time_domain;
-        fft.inverse(freq_domain, time_domain);
+        auto& time_domain = time_domain_scratch;
+        time_domain.resize(config.fft_size);
+        fft.inverse(freq_domain.data(), time_domain.data());
 
         // Add cyclic prefix
-        std::vector<Complex> symbol_with_cp;
         uint32_t cp_len = config.getCyclicPrefix();
-        symbol_with_cp.reserve(config.fft_size + cp_len);
+        auto& symbol_with_cp = symbol_with_cp_scratch;
+        symbol_with_cp.resize(config.fft_size + cp_len);
 
         // CP is copy of end of symbol
         for (size_t i = config.fft_size - cp_len; i < config.fft_size; ++i) {
-            symbol_with_cp.push_back(time_domain[i]);
+            symbol_with_cp[i - (config.fft_size - cp_len)] = time_domain[i];
         }
-        for (const auto& s : time_domain) {
-            symbol_with_cp.push_back(s);
-        }
+        std::copy(time_domain.begin(), time_domain.end(), symbol_with_cp.begin() + cp_len);
 
         return symbol_with_cp;
     }
 
-    Samples complexToReal(const std::vector<Complex>& complex_signal) {
+    const Samples& complexToReal(const std::vector<Complex>& complex_signal) {
         // Mix up to center frequency, take real part, and apply output scaling
         // OFDM raw output has very low RMS due to FFT spreading (num_carriers/fft_size)
         // Scale up to match chirp/preamble levels for consistent audio
-        Samples real_signal(complex_signal.size());
+        auto& real_signal = real_signal_scratch;
+        real_signal.resize(complex_signal.size());
         float scale = config.output_scale;
         for (size_t i = 0; i < complex_signal.size(); ++i) {
             Complex mixed = complex_signal[i] * mixer.next();
@@ -315,8 +341,10 @@ struct OFDMModulator::Impl {
     // - Schmidl-Cox timing metric: M(d) = |P(d)|² / R(d)²
     // - More robust plateau-shaped timing metric
     //
-    std::vector<Complex> createSchmidlCoxSTS() {
-        std::vector<Complex> freq_domain(config.fft_size, Complex(0, 0));
+    const std::vector<Complex>& createSchmidlCoxSTS() {
+        auto& freq_domain = freq_domain_scratch;
+        freq_domain.resize(config.fft_size);
+        std::fill(freq_domain.begin(), freq_domain.end(), Complex(0, 0));
 
         // Place sync sequence on EVEN FFT bins only
         // This creates two identical halves in time domain
@@ -330,21 +358,20 @@ struct OFDMModulator::Impl {
         }
 
         // IFFT to time domain
-        std::vector<Complex> time_domain;
-        fft.inverse(freq_domain, time_domain);
+        auto& time_domain = time_domain_scratch;
+        time_domain.resize(config.fft_size);
+        fft.inverse(freq_domain.data(), time_domain.data());
 
         // Add cyclic prefix
-        std::vector<Complex> symbol_with_cp;
         uint32_t cp_len = config.getCyclicPrefix();
-        symbol_with_cp.reserve(config.fft_size + cp_len);
+        auto& symbol_with_cp = symbol_with_cp_scratch;
+        symbol_with_cp.resize(config.fft_size + cp_len);
 
         // CP is copy of end of symbol
         for (size_t i = config.fft_size - cp_len; i < config.fft_size; ++i) {
-            symbol_with_cp.push_back(time_domain[i]);
+            symbol_with_cp[i - (config.fft_size - cp_len)] = time_domain[i];
         }
-        for (const auto& s : time_domain) {
-            symbol_with_cp.push_back(s);
-        }
+        std::copy(time_domain.begin(), time_domain.end(), symbol_with_cp.begin() + cp_len);
 
         return symbol_with_cp;
     }
@@ -388,6 +415,12 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod,
     }
 
     Samples output;
+    const size_t bits_per_symbol = carriers_per_symbol * bits_per_carrier;
+    if (bits_per_symbol > 0) {
+        const size_t symbol_count = (data.size() * 8 + bits_per_symbol - 1) / bits_per_symbol;
+        output.reserve(symbol_count * impl_->config.getSymbolDuration());
+        impl_->last_data_carrier_symbols_for_testing.reserve(symbol_count * carriers_per_symbol);
+    }
     impl_->last_data_carrier_symbols_for_testing.clear();
 
     // Process data in symbol-sized chunks
@@ -395,8 +428,8 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod,
     size_t bit_idx = 0;
 
     while (data_idx < data.size()) {
-        std::vector<Complex> symbol_data;
-        symbol_data.reserve(carriers_per_symbol);
+        auto& symbol_data = impl_->symbol_data_scratch;
+        symbol_data.clear();
 
         // Extract bits for each carrier
         for (size_t c = 0; c < carriers_per_symbol && data_idx < data.size(); ++c) {
@@ -491,23 +524,22 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod,
         }
 
         // Create OFDM symbol
-        auto complex_symbol = impl_->createOFDMSymbol(symbol_data, true,
-                                                      active_carrier_mask,
-                                                      carrier_mask_enabled);
+        const auto& complex_symbol = impl_->createOFDMSymbol(symbol_data, true,
+                                                            active_carrier_mask,
+                                                            carrier_mask_enabled);
 
         // Convert to real signal
-        auto real_symbol = impl_->complexToReal(complex_symbol);
+        const auto& real_symbol = impl_->complexToReal(complex_symbol);
+        output.insert(output.end(), real_symbol.begin(), real_symbol.end());
 
         // Add guard interval (zeros)
         // IMPORTANT: Also advance mixer phase to match RX processing
         // RX's toBaseband() processes symbol_samples which includes guard,
         // so TX mixer must advance the same amount for phase coherence
         for (uint32_t i = 0; i < impl_->config.symbol_guard; ++i) {
-            real_symbol.push_back(0);
+            output.push_back(0);
             impl_->mixer.next();  // Keep mixer in sync with RX
         }
-
-        output.insert(output.end(), real_symbol.begin(), real_symbol.end());
     }
 
     return output;
@@ -536,33 +568,34 @@ Samples OFDMModulator::generatePreamble() {
     // 2. Long training sequence (LTS) - for fine timing, channel estimation
     //    Uses all subcarriers for proper channel estimation
 
-    Samples preamble;
-
     // Guard prefix: 1 OFDM symbol worth of silence (~12ms at 48kHz)
     // This ensures sync detector always has "before" samples to correlate against
     // In real HF, radio PTT delay provides this naturally (50-300ms)
     // We add minimal guard so TX works even in direct loopback tests
     // Guard scales with FFT size: 512 FFT → 560 samples, 1024 FFT → 1120 samples
     size_t guard_samples = impl_->config.fft_size + impl_->config.getCyclicPrefix();
+    Samples preamble;
+    preamble.reserve(guard_samples * 7);
     preamble.resize(guard_samples, 0.0f);
 
     // Generate Schmidl-Cox STS: only even subcarriers
     // Time-domain: x[n] = x[n + N/2], enabling half-symbol correlation
-    auto short_sym = impl_->createSchmidlCoxSTS();
+    const auto& short_sym = impl_->createSchmidlCoxSTS();
 
     // Repeat STS 4 times for robust sync
-    auto sts_real = impl_->complexToReal(short_sym);
+    const auto& sts_real = impl_->complexToReal(short_sym);
     for (int i = 0; i < 4; ++i) {
         preamble.insert(preamble.end(), sts_real.begin(), sts_real.end());
     }
 
     // Generate LTS: full sync symbol with pilots
-    std::vector<Complex> lts_data(impl_->data_carrier_indices.size());
+    auto& lts_data = impl_->lts_data_scratch;
+    lts_data.resize(impl_->data_carrier_indices.size());
     for (size_t i = 0; i < lts_data.size(); ++i) {
         lts_data[i] = impl_->sync_sequence[i % impl_->sync_sequence.size()];
     }
-    auto long_sym = impl_->createOFDMSymbol(lts_data, true);
-    auto lts_real = impl_->complexToReal(long_sym);
+    const auto& long_sym = impl_->createOFDMSymbol(lts_data, true);
+    const auto& lts_real = impl_->complexToReal(long_sym);
 
     // Repeat LTS 2 times
     for (int i = 0; i < 2; ++i) {
@@ -597,9 +630,11 @@ Samples OFDMModulator::generateTrainingSymbols(int count) {
     }
 
     Samples training;
+    training.reserve(static_cast<size_t>(std::max(count, 0)) * impl_->config.getSymbolDuration());
 
     // Generate LTS: known sequence on all carriers
-    std::vector<Complex> lts_data(impl_->data_carrier_indices.size());
+    auto& lts_data = impl_->lts_data_scratch;
+    lts_data.resize(impl_->data_carrier_indices.size());
     for (size_t i = 0; i < lts_data.size(); ++i) {
         lts_data[i] = impl_->sync_sequence[i % impl_->sync_sequence.size()];
     }
@@ -608,8 +643,8 @@ Samples OFDMModulator::generateTrainingSymbols(int count) {
     // (complexToReal advances the mixer, so we can't reuse the same samples)
     // Note: createOFDMSymbol already adds the cyclic prefix
     for (int i = 0; i < count; ++i) {
-        auto long_sym = impl_->createOFDMSymbol(lts_data, true);  // Returns CP + FFT samples
-        auto lts_real = impl_->complexToReal(long_sym);
+        const auto& long_sym = impl_->createOFDMSymbol(lts_data, true);  // Returns CP + FFT samples
+        const auto& lts_real = impl_->complexToReal(long_sym);
         training.insert(training.end(), lts_real.begin(), lts_real.end());
 
         // Add guard interval to match modulate() symbol structure
@@ -627,14 +662,15 @@ Samples OFDMModulator::generateProbe() {
     // Channel probe: known sequence across all carriers
     // Used for channel quality measurement
 
-    std::vector<Complex> probe_data(impl_->data_carrier_indices.size());
+    auto& probe_data = impl_->probe_data_scratch;
+    probe_data.resize(impl_->data_carrier_indices.size());
     for (size_t i = 0; i < probe_data.size(); ++i) {
         // Chirp-like pattern for good correlation
         float phase = M_PI * i * i / probe_data.size();
         probe_data[i] = Complex(std::cos(phase), std::sin(phase));
     }
 
-    auto complex_probe = impl_->createOFDMSymbol(probe_data, true);
+    const auto& complex_probe = impl_->createOFDMSymbol(probe_data, true);
     return impl_->complexToReal(complex_probe);
 }
 

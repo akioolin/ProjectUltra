@@ -68,6 +68,20 @@ OFDMDemodulator::Impl::Impl(const ModemConfig& cfg)
     , sync_threshold(cfg.sync_threshold)
 {
     symbol_samples = cfg.getSymbolDuration();
+    baseband_scratch.resize(symbol_samples);
+    symbol_scratch.resize(cfg.fft_size);
+    freq_domain_scratch.resize(cfg.fft_size);
+    equalized_scratch.resize(static_cast<size_t>(cfg.num_carriers));
+    constellation_update_scratch.reserve(static_cast<size_t>(cfg.num_carriers));
+    differential_symbols_scratch.resize(static_cast<size_t>(cfg.num_carriers));
+    differential_signal_power_scratch.resize(static_cast<size_t>(cfg.num_carriers));
+    d8psk_constellation_update_scratch.reserve(static_cast<size_t>(cfg.num_carriers));
+    dqpsk_constellation_update_scratch.reserve(static_cast<size_t>(cfg.num_carriers));
+    dqpsk_valid_errors_scratch.reserve(static_cast<size_t>(cfg.num_carriers));
+    interp_h_full_scratch.resize(static_cast<size_t>(cfg.num_carriers));
+    interp_h_cir_scratch.resize(static_cast<size_t>(cfg.num_carriers));
+    interp_h_clean_scratch.resize(static_cast<size_t>(cfg.num_carriers));
+    interp_pilot_logical_pos_scratch.reserve(static_cast<size_t>(cfg.num_carriers));
     channel_estimate.resize(cfg.fft_size, Complex(1, 0));
 
     // Initialize adaptive equalizer state
@@ -245,7 +259,8 @@ void OFDMDemodulator::Impl::buildInterpTable() {
 
 void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equalized, Modulation mod) {
     // Constellation symbols collected during demodulation (differential decoded for DPSK modes)
-    std::vector<Complex> constellation_update;
+    auto& constellation_update = constellation_update_scratch;
+    constellation_update.clear();
 
     // Phase inversion detection (disabled - raw data can have extreme bias)
     if (soft_bits.empty() && !equalized.empty()) {
@@ -359,11 +374,13 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
                   equalized.size(), snr_symbol_count);
     }
 
-    std::vector<Complex> differential_symbols;
-    std::vector<float> differential_signal_power;
+    auto& differential_symbols = differential_symbols_scratch;
+    auto& differential_signal_power = differential_signal_power_scratch;
     if (mod == Modulation::DQPSK || mod == Modulation::D8PSK) {
-        differential_symbols.assign(equalized.size(), Complex(0, 0));
-        differential_signal_power.assign(equalized.size(), 0.0f);
+        differential_symbols.resize(equalized.size());
+        differential_signal_power.resize(equalized.size());
+        std::fill(differential_symbols.begin(), differential_symbols.end(), Complex(0, 0));
+        std::fill(differential_signal_power.begin(), differential_signal_power.end(), 0.0f);
     }
 
     for (size_t i = 0; i < equalized.size(); ++i) {
@@ -664,7 +681,8 @@ bool OFDMDemodulator::Impl::demodulateD8PSKTwoPass(
     }
 
     // PASS 2: Apply correction and decode
-    std::vector<Complex> constellation_update;
+    auto& constellation_update = d8psk_constellation_update_scratch;
+    constellation_update.clear();
     if (differential_prev_erased_.size() != equalized.size()) {
         differential_prev_erased_.assign(equalized.size(), 0);
     }
@@ -742,8 +760,8 @@ void OFDMDemodulator::Impl::demodulateDQPSKTwoPass(
     static const float PI = 3.14159265358979f;
 
     // PASS 1: Estimate per-carrier phase errors using hard decisions
-    std::vector<float> valid_errors;
-    valid_errors.reserve(equalized.size());
+    auto& valid_errors = dqpsk_valid_errors_scratch;
+    valid_errors.clear();
 
     for (size_t i = 0; i < equalized.size(); ++i) {
         Complex prev_sym = dbpsk_prev_equalized[i];
@@ -797,7 +815,8 @@ void OFDMDemodulator::Impl::demodulateDQPSKTwoPass(
 
     Complex phase_corr(std::cos(correction), std::sin(correction));
 
-    std::vector<Complex> constellation_update;
+    auto& constellation_update = dqpsk_constellation_update_scratch;
+    constellation_update.clear();
     for (size_t i = 0; i < equalized.size(); ++i) {
         Complex prev_sym = dbpsk_prev_equalized[i];
         float sp = std::abs(equalized[i]) * std::abs(prev_sym);
@@ -1125,12 +1144,12 @@ bool OFDMDemodulator::process(SampleSpan samples) {
         size_t symbols_processed = 0;
         while (impl_->rx_buffer.size() >= impl_->symbol_samples) {
             SampleSpan sym_samples(impl_->rx_buffer.data(), impl_->symbol_samples);
-            auto baseband = impl_->toBaseband(sym_samples);
-            auto freq_domain = impl_->extractSymbol(baseband, 0);
+            const auto& baseband = impl_->toBaseband(sym_samples);
+            const auto& freq_domain = impl_->extractSymbol(baseband, 0);
 
             impl_->updateChannelEstimate(freq_domain);
 
-            auto equalized = impl_->equalize(freq_domain);
+            const auto& equalized = impl_->equalize(freq_domain);
             impl_->demodulateSymbol(equalized, impl_->config.modulation);
 
             impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
@@ -1501,8 +1520,8 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
         timing::ScopedTimer _profile_(timing::globalDecoderProfile().data_symbol_loop);
 
         SampleSpan sym_samples(impl_->rx_buffer.data(), impl_->symbol_samples);
-        auto bb = impl_->toBaseband(sym_samples);
-        auto fd = impl_->extractSymbol(bb, 0);
+        const auto& bb = impl_->toBaseband(sym_samples);
+        const auto& fd = impl_->extractSymbol(bb, 0);
 
         // Per-symbol pilot tracking: update channel estimate from pilot observations.
         // For differential modes: update only |H| (magnitude) to track fading depth,
@@ -1512,7 +1531,7 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
         if (!impl_->pilot_carrier_indices.empty()) {
             impl_->updateChannelEstimate(fd);
         }
-        auto eq = impl_->equalize(fd);
+        const auto& eq = impl_->equalize(fd);
         impl_->demodulateSymbol(eq, impl_->config.modulation);
 
         impl_->rx_buffer.erase(impl_->rx_buffer.begin(),

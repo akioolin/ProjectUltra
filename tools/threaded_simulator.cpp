@@ -338,6 +338,8 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    (void)verbose;
+
     printHeader(snr_db);
 
     // Create bidirectional channels

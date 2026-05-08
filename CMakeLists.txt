@@ -24,6 +24,30 @@ option(ULTRA_BUILD_TOOLS "Build command-line tools" ON)
 option(ULTRA_BUILD_GUI "Build GUI application" ON)
 option(ULTRA_USE_FFTW "Use FFTW3 for FFT (faster)" ON)
 
+if(MSVC)
+    set(ULTRA_TOOL_TEST_WARNINGS /W4)
+    set(ULTRA_TOOL_WARNING_SUPPRESSIONS /wd4100)
+    set(ULTRA_TEST_ASSERT_OPTION /UNDEBUG)
+else()
+    set(ULTRA_TOOL_TEST_WARNINGS -Wall -Wextra)
+    set(ULTRA_TOOL_WARNING_SUPPRESSIONS -Wno-unused-parameter -Wno-unused-private-field)
+    set(ULTRA_TEST_ASSERT_OPTION -UNDEBUG)
+endif()
+
+function(ultra_enable_tool_test_warnings)
+    foreach(src IN LISTS ARGN)
+        set_property(SOURCE "${src}" APPEND PROPERTY COMPILE_OPTIONS
+            ${ULTRA_TOOL_TEST_WARNINGS} ${ULTRA_TOOL_WARNING_SUPPRESSIONS})
+    endforeach()
+endfunction()
+
+function(ultra_enable_test_warnings)
+    foreach(src IN LISTS ARGN)
+        set_property(SOURCE "${src}" APPEND PROPERTY COMPILE_OPTIONS
+            ${ULTRA_TEST_ASSERT_OPTION} ${ULTRA_TOOL_TEST_WARNINGS})
+    endforeach()
+endfunction()
+
 # Find dependencies
 find_package(Threads REQUIRED)
 
@@ -167,6 +191,7 @@ if(ULTRA_BUILD_TOOLS)
     add_library(ultra_tool_wav_io STATIC
         tools/io/wav_io.cpp
     )
+    ultra_enable_tool_test_warnings(tools/io/wav_io.cpp)
     target_include_directories(ultra_tool_wav_io PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
@@ -177,6 +202,7 @@ if(ULTRA_BUILD_TOOLS)
         tools/sim/simulated_station.cpp
         ${ULTRA_STREAMING_MODEM_SOURCES}
     )
+    ultra_enable_tool_test_warnings(tools/sim/simulated_station.cpp)
     target_include_directories(ultra_sim_station PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
@@ -197,6 +223,7 @@ if(ULTRA_BUILD_TOOLS)
     add_executable(cli_simulator
         tools/cli_simulator.cpp
     )
+    ultra_enable_tool_test_warnings(tools/cli_simulator.cpp)
     target_include_directories(cli_simulator PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
@@ -206,6 +233,7 @@ if(ULTRA_BUILD_TOOLS)
     add_executable(session_decode
         tools/session_decode.cpp
     )
+    ultra_enable_tool_test_warnings(tools/session_decode.cpp)
     target_include_directories(session_decode PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
@@ -262,29 +290,23 @@ if(ULTRA_BUILD_TOOLS)
         tools/decode_bench.cpp
         ${ULTRA_STREAMING_MODEM_SOURCES}
     )
+    ultra_enable_tool_test_warnings(tools/decode_bench.cpp)
     target_include_directories(decode_bench PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
     )
-    target_link_libraries(decode_bench PRIVATE ultra_core ultra_tool_wav_io)
+    target_link_libraries(decode_bench PRIVATE ultra_tool_wav_io)
 
     # Threaded simulator - proper real-time audio simulation
     add_executable(threaded_simulator
         tools/threaded_simulator.cpp
         ${ULTRA_MODEM_ENGINE_SOURCES}
     )
+    ultra_enable_tool_test_warnings(tools/threaded_simulator.cpp)
     target_include_directories(threaded_simulator PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
     target_link_libraries(threaded_simulator PRIVATE ultra_core)
-
-    # Acquisition profiling
-    add_executable(profile_acquisition
-        tools/profile_acquisition.cpp
-        ${ULTRA_MODEM_ENGINE_SOURCES}
-    )
-    target_include_directories(profile_acquisition PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(profile_acquisition PRIVATE ultra_core)
 
     # Simple waveform test (clean TX/RX with consistent config)
     # Decoder-only by design; do not pull in the encoder runtime here.
@@ -292,6 +314,7 @@ if(ULTRA_BUILD_TOOLS)
         tools/test_waveform_simple.cpp
         src/gui/modem/streaming_decoder.cpp
     )
+    ultra_enable_tool_test_warnings(tools/test_waveform_simple.cpp)
     target_include_directories(test_waveform_simple PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/tools

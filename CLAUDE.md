@@ -226,13 +226,10 @@ Interpretation of the 2026-04-29 robustness work:
 - OTFS/MFSK: RESERVED ONLY - not in the production build or default capabilities
 - cli_simulator: FULLY WORKING - all phases pass on AWGN and fading
 
-**Auto rate selection ladder (2026-05-07, from `selectOFDMCodeRate()`):**
-| Condition | Auto rate | Payload/frame | Throughput |
-|-----------|-----------|---------------|------------|
-| SNR >= 15, AWGN (fading < 0.10) | **R3/4** | 243 bytes | ~3900 bps |
-| SNR >= 15, near-AWGN (fading < 0.15) | **R2/3** | 197 bytes | ~3200 bps |
-| SNR >= 15, good/moderate fading (< 1.10) | **R1/2** | 141 bytes | ~2300 bps |
-| Everything else | **R1/4** | 62 bytes | ~1150 bps |
+**Auto rate selection ladder (2026-05-07):**
+`src/protocol/waveform_selection.hpp::selectOFDMCodeRate()` is the
+single source of truth. `tests/test_waveform_policy.cpp` locks the
+boundary behavior; do not duplicate the threshold table here.
 
 **Temporal fading measurement (2026-02-03):**
 - `getFadingIndex()` now combines freq_cv (multipath) + temporal_cv (Doppler spread)
@@ -279,11 +276,10 @@ Interpretation of the 2026-04-29 robustness work:
   MC_DPSK below SNR 10 and OFDM_CHIRP at SNR 10+; it does not auto-select
   OFDM_COX.
 
-**Recommendation:** Use OFDM_CHIRP with DQPSK. Rate selection is automatic via `selectOFDMCodeRate()`:
-- R3/4 for AWGN only (SNR≥15, fading<0.10) — ~3.4× throughput vs R1/4
-- R2/3 for near-AWGN only (SNR≥15, fading<0.15) — ~2.8× throughput vs R1/4
-- R1/2 for good/moderate fading (SNR≥15) — ~2× throughput vs R1/4
-- R1/4 for heavy fading or lower SNR — robust but slower
+**Recommendation:** Use OFDM_CHIRP with DQPSK. Rate selection is
+automatic via `selectOFDMCodeRate()`; keep the exact thresholds in
+`src/protocol/waveform_selection.hpp` and the boundary tests in
+`tests/test_waveform_policy.cpp`.
 
 **FFTW requirement:**
 - FFTW3 is REQUIRED for fast chirp detection (apt install libfftw3-dev)

@@ -94,8 +94,9 @@ void writeCFODumpMeta(const std::string& path,
 // BASEBAND CONVERSION
 // =============================================================================
 
-std::vector<Complex> OFDMDemodulator::Impl::toBaseband(SampleSpan samples) {
-    std::vector<Complex> baseband(samples.size());
+const std::vector<Complex>& OFDMDemodulator::Impl::toBaseband(SampleSpan samples) {
+    auto& baseband = baseband_scratch;
+    baseband.resize(samples.size());
 
     // Phase increment per sample for frequency correction
     float phase_increment = -2.0f * M_PI * freq_offset_hz / config.sample_rate;
@@ -170,16 +171,19 @@ std::vector<Complex> OFDMDemodulator::Impl::toBaseband(SampleSpan samples) {
     return baseband;
 }
 
-std::vector<Complex> OFDMDemodulator::Impl::extractSymbol(const std::vector<Complex>& baseband, size_t offset) {
+const std::vector<Complex>& OFDMDemodulator::Impl::extractSymbol(const std::vector<Complex>& baseband, size_t offset) {
     size_t start = offset + config.getCyclicPrefix();
 
-    std::vector<Complex> symbol(config.fft_size);
+    auto& symbol = symbol_scratch;
+    symbol.resize(config.fft_size);
+    std::fill(symbol.begin(), symbol.end(), Complex(0, 0));
     for (size_t i = 0; i < config.fft_size && (start + i) < baseband.size(); ++i) {
         symbol[i] = baseband[start + i];
     }
 
-    std::vector<Complex> freq;
-    fft.forward(symbol, freq);
+    auto& freq = freq_domain_scratch;
+    freq.resize(config.fft_size);
+    fft.forward(symbol.data(), freq.data());
 
     return freq;
 }
@@ -234,8 +238,8 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     for (size_t sym = 0; sym < num_symbols; ++sym) {
         // Use toBaseband and extractSymbol like normal demodulation
         SampleSpan sym_span(ptr, symbol_samples);
-        auto baseband = toBaseband(sym_span);
-        auto freq = extractSymbol(baseband, 0);
+        const auto& baseband = toBaseband(sym_span);
+        const auto& freq = extractSymbol(baseband, 0);
 
         // DEBUG: Print first few freq domain values on first training symbol
         if (sym == 0) {
@@ -348,8 +352,8 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
 
                 for (size_t sym = 0; sym < num_symbols; ++sym) {
                     SampleSpan sym_span(ptr2, symbol_samples);
-                    auto baseband = toBaseband(sym_span);
-                    auto freq = extractSymbol(baseband, 0);
+                    const auto& baseband = toBaseband(sym_span);
+                    const auto& freq = extractSymbol(baseband, 0);
 
                     for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
                         int idx = data_carrier_indices[i];
@@ -1108,11 +1112,14 @@ void OFDMDemodulator::Impl::interpolateChannel() {
 
     // Step 1: Build N-point H vector with pilot values and linear interp between them
     // This gives IDFT a good starting point (better than zeros at non-pilot positions)
-    std::vector<Complex> H_full(N);
+    auto& H_full = interp_h_full_scratch;
+    H_full.resize(N);
+    std::fill(H_full.begin(), H_full.end(), Complex(0, 0));
 
     // First, place pilot H values at their logical positions
     // and track pilot logical indices for interpolation
-    std::vector<int> pilot_logical_pos;
+    auto& pilot_logical_pos = interp_pilot_logical_pos_scratch;
+    pilot_logical_pos.clear();
     for (size_t i = 0; i < N; ++i) {
         if (is_pilot_logical[i]) {
             H_full[i] = channel_estimate[all_carrier_fft_indices[i]];
@@ -1143,7 +1150,8 @@ void OFDMDemodulator::Impl::interpolateChannel() {
     }
 
     // Step 2: IDFT → CIR (N-point, small enough for direct computation)
-    std::vector<Complex> h_cir(N);
+    auto& h_cir = interp_h_cir_scratch;
+    h_cir.resize(N);
     float inv_N = 1.0f / static_cast<float>(N);
     for (size_t n = 0; n < N; ++n) {
         Complex sum(0, 0);
@@ -1165,7 +1173,8 @@ void OFDMDemodulator::Impl::interpolateChannel() {
     }
 
     // Step 4: DFT → clean interpolated H at all carriers
-    std::vector<Complex> H_clean(N);
+    auto& H_clean = interp_h_clean_scratch;
+    H_clean.resize(N);
     for (size_t k = 0; k < N; ++k) {
         Complex sum(0, 0);
         for (size_t n = 0; n < N; ++n) {
@@ -1279,8 +1288,9 @@ void OFDMDemodulator::Impl::rlsUpdate(int idx, Complex received, Complex referen
 // EQUALIZATION
 // =============================================================================
 
-std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>& freq_domain, Modulation mod) {
-    std::vector<Complex> equalized(data_carrier_indices.size());
+const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Complex>& freq_domain, Modulation mod) {
+    auto& equalized = equalized_scratch;
+    equalized.resize(data_carrier_indices.size());
     carrier_noise_var.resize(data_carrier_indices.size());
     carrier_erasure_flags_.assign(data_carrier_indices.size(), 0);
 
@@ -1448,8 +1458,8 @@ std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>&
     return equalized;
 }
 
-std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>& freq_domain) {
-    auto result = equalize(freq_domain, config.modulation);
+const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Complex>& freq_domain) {
+    const auto& result = equalize(freq_domain, config.modulation);
 
     // DEBUG: Print first few equalized symbols on first data symbol
     if (soft_bits.empty() && !result.empty()) {

@@ -16,9 +16,9 @@ three things in one repo:
   Selective-Repeat ARQ.
 - **GUI application** — real-time waterfall, constellation, and message
   log (ImGui + SDL2).
-- **VARA-compatible TCP TNC** — `ultra_tnc` exposes the modem via the
-  same TCP command/data API used by Pat, Winlink Express, BPQ32, and
-  other clients. Drop-in alternative on Linux, macOS, and Windows.
+- **Legacy-compatible TCP TNC** — `ultra_tnc` exposes the modem via
+  the same TCP command/data API used by existing HF data clients.
+  Drop-in operation is supported on Linux, macOS, and Windows.
 
 [![Build Matrix](https://github.com/secup/ProjectUltra/actions/workflows/build-matrix.yml/badge.svg?branch=main)](https://github.com/secup/ProjectUltra/actions/workflows/build-matrix.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -48,7 +48,7 @@ OFDM 1024-FFT, 59 carriers, CP=96, ~42.9 sym/s:
 | 10+  | OFDM DQPSK R1/4  |   1264 bps | Fading-tolerant baseline |
 | 15+  | OFDM DQPSK R1/2  |   2271 bps | Good + moderate fading |
 | 15+  | OFDM DQPSK R2/3  |   3028 bps | Near-AWGN only |
-| 15+  | OFDM DQPSK R3/4  |   3536 bps | AWGN only, fading < 0.10 |
+| 15+  | OFDM DQPSK R3/4  |   3536 bps | AWGN-class channel only |
 | 25+  | OFDM 16QAM R3/4  |   5657 bps | Stable paths (NVIS, ground wave) |
 | 30+  | OFDM 32QAM R3/4  |   7071 bps | Stable paths only |
 
@@ -96,7 +96,8 @@ optional channel + burst interleavers.
 **Adaptive rate.** SNR + fading-index ladder (R3/4 / R2/3 /
 R1/2 / R1/4) with bootstrap cap, per-burst clean-window upgrade,
 two-window hysteresis on downshift to prevent panic-downshift on
-short fading transfers.
+short fading transfers. Exact thresholds live in
+`src/protocol/waveform_selection.hpp::selectOFDMCodeRate()`.
 
 **Per-carrier RX erasure.** Each OFDM-CHIRP frame computes
 `γ_k = |H_k|² / σ²_k` from its own LTS + pilots; carriers below
@@ -127,10 +128,9 @@ on every frame, capability flags, measured-SNR + fading-index
 exchange.
 
 **TNC integration.** `ultra_tnc` daemon exposes the modem over
-the same TCP command/data API used by Pat, Winlink Express,
-BPQ32, and similar clients (cmd port 8300 / data port 8301);
-verified end-to-end with real Pat sessions across all major
-B2F message types.
+the same TCP command/data API used by existing HF data clients
+(cmd port 8300 / data port 8301); verified end-to-end with
+real client sessions across all major B2F message types.
 
 **GUI application.** `ultra_gui` with real-time waterfall,
 constellation, message log, and ARQ health view (ImGui +
@@ -154,18 +154,18 @@ for the throughput/reliability targets driving this work.
 
 ---
 
-## TNC integration (Pat, Winlink Express, BPQ32)
+## TNC Integration
 
-`ultra_tnc` is a daemon that exposes ProjectUltra's modem through the
-VARA HF TCP TNC protocol. Existing clients can connect to it the same
-way they connect to a commercial HF data modem — no protocol changes
-on the client side.
+`ultra_tnc` is a daemon that exposes ProjectUltra's modem through a
+legacy-compatible HF TCP TNC command/data interface. Existing clients
+can connect to it the same way they connect to a commercial HF data
+modem, with no protocol changes on the client side.
 
 ```
 ┌──────────────┐  TCP 8300 (cmd)   ┌──────────────┐
-│  Pat /       │  TCP 8301 (data)  │  ultra_tnc   │  Audio   ┌─────────┐
-│  Winlink /   │ ◄──────────────► │  (modem +    │ ◄──────► │  HF     │
-│  BPQ32 / ... │                   │   TCP shell) │          │  Radio  │
+│  HF data     │  TCP 8301 (data)  │  ultra_tnc   │  Audio   ┌─────────┐
+│  client /    │ ◄──────────────► │  (modem +    │ ◄──────► │  HF     │
+│  app         │                   │   TCP shell) │          │  Radio  │
 └──────────────┘                   └──────────────┘          └─────────┘
 ```
 
@@ -189,18 +189,19 @@ Full command reference: [`docs/TNC_INTERFACE.md`](docs/TNC_INTERFACE.md).
 
 ### Supported commands
 
-Standard VARA: `VERSION`, `MYCALL`, `LISTEN`, `CONNECT`, `DISCONNECT`,
+Standard TNC shell: `VERSION`, `MYCALL`, `LISTEN`, `CONNECT`, `DISCONNECT`,
 `ABORT`, `BW500` / `BW2300` / `BW2750`, `BUFFER`, `SN`, `BITRATE`,
-`COMPRESSION`, `CHAT`, `CWID`, plus Mercury / Pat-Vara compatibility
-no-ops (`PUBLIC`, `P2P`, `WINLINK`, `IGNOREKISSDCD`, `RETRIES`,
-`CALLINT`).
+`COMPRESSION`, `CHAT`, `CWID`, plus legacy-client compatibility
+no-ops (`PUBLIC`, `P2P`, client-mode probes, `IGNOREKISSDCD`,
+`RETRIES`, `CALLINT`).
 
 ProjectUltra extension:
 
 - **`STATS`** — single-line ARQ + PHY snapshot for debugging stalled
   sessions: `frames_sent`, `frames_recv`, `retx`, `timeouts`, `failed`,
   `out_of_order`, current `rate` / `mod` / `mode`, `snr`, `bps`,
-  `backlog`. Pat ignores unknown commands, so this is safe to leave on.
+  `backlog`. Existing clients ignore unknown commands, so this is safe
+  to leave on.
 
 ### Status
 
@@ -213,19 +214,19 @@ ProjectUltra extension:
   README. 50 KB cable run hits 2,354 bps; injected Watterson
   Good at SNR=15 holds 1,631 bps clean; forced R3/4 at SNR=15
   AWGN delivers 2,676 bps clean (2026-05-07 calibration).
-- **Real Pat client validated end-to-end** with Pat 1.0.0 (Mac)
-  ↔ Pat 0.15.1 (Pi5) over real audio cable: full B2F session
+- **Real HF data client validated end-to-end** across Mac and Pi5
+  over real audio cable: full B2F session
   matrix passes byte-exact (empty connect/disconnect, text up
   to 12.5 KB, binary attachments, bidirectional, both
   directions). Five real bugs found + fixed during integration;
-  full audit at `docs/PAT_VARA_AUDIT.md`.
+  full audit at `docs/TNC_CLIENT_AUDIT.md`.
 - Known TNC limitation: back-to-back sessions within ~30 s of
   teardown don't always recover cleanly (~1/3 retry success).
-  Root cause traced upstream to pat-vara
-  (`vara.go:344-349` drops inbound connection if `Accept()`
-  hasn't re-armed). Single-session flows are reliable.
-- Winlink Express on Windows: spec-compatible, not yet manually
-  tested.
+  Root cause traced to a reference-client listener race where
+  inbound connections can arrive before `Accept()` has re-armed.
+  Single-session flows are reliable.
+- Mainstream Windows HF mail client: spec-compatible, not yet
+  manually tested.
 
 ---
 
@@ -282,7 +283,7 @@ cmake --build build -j 4
 > built locally from source are not affected. Proper code-sign
 > + notarization is on the post-alpha release roadmap.
 
-**TNC** (VARA-compatible TCP shell, see TNC section above):
+**TNC** (legacy-compatible TCP shell, see TNC section above):
 
 ```bash
 ./build/ultra_tnc --audio-output "USB Audio" --audio-input "USB Audio"
@@ -309,10 +310,10 @@ arecord -f FLOAT_LE -r 48000 | ./build/ultra prx
 
 ```
 ┌────────────────────────────────────────────────────────┐
-│  Pat / Winlink Express / BPQ32 / your own client       │
+│  HF data client / mail app / your own client           │
 ├────────────────────────────────────────────────────────┤
 │  ultra_tnc      (TCP cmd 8300, data 8301)              │
-│  TNCSession     (VARA command parser + state machine)  │
+│  TNCSession     (TNC command parser + state machine)   │
 │  TNCBridge      (ModemAdapter ↔ ProtocolEngine)        │
 ├────────────────────────────────────────────────────────┤
 │  Connection     (PING/CONNECT/MODE_CHANGE/DATA/DISC)   │
@@ -444,8 +445,8 @@ necessary. Be ready to QSY.
 ### Solid (hardware-validated)
 
 - MC-DPSK baseline (5+ dB SNR, ±50 Hz CFO tolerance).
-- OFDM-CHIRP DQPSK R1/4 → R3/4 with adaptive ladder
-  (R3/4 hardware-calibrated at SNR ≥ 15 + fading < 0.10).
+- OFDM-CHIRP DQPSK R1/4 -> R3/4 with adaptive ladder
+  (`selectOFDMCodeRate()` is the exact threshold source).
 - OFDM-NARROW (500 Hz) for crowded bands or low-SNR conditions.
 - Per-carrier RX erasure with CarrierLDPC v1 interleaver
   (deep notch / QRM survival on OFDM-CHIRP).
@@ -454,7 +455,7 @@ necessary. Be ready to QSY.
 - Selective-repeat ARQ with cumulative + selective ACKs,
   hardened DISCONNECT, no timeout storms.
 - TNC subsystem: cross-platform Linux / macOS / Windows,
-  byte-exact end-to-end, validated with real Pat sessions.
+  byte-exact end-to-end, validated with real HF data client sessions.
 - Hardware-in-the-loop test rig (Mac ↔ Pi5 with Watterson
   injection) with byte-exact file-transfer validation.
 - **First OTA full-session decode (2026-05-07):** full
@@ -516,7 +517,7 @@ production build.
 Contributions welcome. Easiest entry points:
 
 - On-air testing reports (especially with `STATS` output included).
-- Pat / Winlink Express interop reports — what worked, what didn't.
+- HF data client interop reports - what worked, what did not.
 - Bug fixes and DSP optimizations (profile first; see
   `docs/QUALITY_STRATEGY.md`).
 - Documentation.

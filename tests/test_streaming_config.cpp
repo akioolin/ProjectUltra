@@ -3,6 +3,8 @@
 #include "ultra/logging.hpp"
 
 #include <iostream>
+#include <stdexcept>
+#include <vector>
 
 using namespace ultra;
 using namespace ultra::gui;
@@ -98,6 +100,30 @@ void test_burst_group_clamps_match() {
     CHECK(decoder.getBurstInterleaveGroupSize() == 6, "decoder burst group should preserve valid values");
 }
 
+void test_decoder_buffer_capacity_policy() {
+    StreamingDecoder default_decoder;
+    CHECK(default_decoder.bufferCapacitySamples() == StreamingDecoder::kDefaultBufferSamples,
+          "default decoder ring capacity should preserve historical size");
+
+    constexpr size_t smaller_real_radio_ring = 144000;  // 3 seconds at 48 kHz
+    StreamingDecoder compact_decoder(smaller_real_radio_ring);
+    CHECK(compact_decoder.bufferCapacitySamples() == smaller_real_radio_ring,
+          "constructor should preserve caller-provided valid ring capacity");
+    std::vector<float> compact_samples(smaller_real_radio_ring + 8, 0.001f);
+    compact_decoder.feedAudio(compact_samples.data(), compact_samples.size());
+    CHECK(compact_decoder.samplesInBuffer() == smaller_real_radio_ring,
+          "custom ring should wrap at the caller-provided capacity");
+
+    bool rejected = false;
+    try {
+        StreamingDecoder invalid_decoder(StreamingDecoder::kMinimumBufferSamples - 1);
+        (void)invalid_decoder;
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    CHECK(rejected, "decoder should reject rings smaller than the sync search window");
+}
+
 }  // namespace
 
 int main() {
@@ -106,6 +132,7 @@ int main() {
     test_differential_ofdm_config_match();
     test_coherent_ofdm_config_match();
     test_burst_group_clamps_match();
+    test_decoder_buffer_capacity_policy();
 
     if (tests_failed != 0) {
         std::cout << "StreamingConfig: " << (tests_run - tests_failed)

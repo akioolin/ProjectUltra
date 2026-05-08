@@ -209,3 +209,44 @@ add_test(NAME StreamingMCDPSK COMMAND test_streaming_mc_dpsk)
 add_executable(test_throughput ../tools/test_throughput.cpp)
 target_link_libraries(test_throughput PRIVATE ultra_core)
 add_test(NAME Throughput COMMAND test_throughput)
+
+ultra_enable_test_warnings(
+    test_layers.cpp
+    test_fft.cpp
+    test_dsp_primitives.cpp
+    test_ofdm.cpp
+    test_audio_basic.cpp
+    test_wav_loopback.cpp
+    test_protocol.cpp
+    test_tnc_session.cpp
+    test_ultra_tnc_config.cpp
+    ../tools/ultra_tnc_config.cpp
+    test_tnc_server.cpp
+    test_tnc_bridge.cpp
+    test_connection_policy.cpp
+    test_connection_adaptive.cpp
+    test_file_transfer_controller.cpp
+    test_interleaver.cpp
+    test_codec_factory.cpp
+    test_soft_combine.cpp
+    test_stop_wait_arq.cpp
+    test_multiblock_ldpc.cpp
+    test_selective_repeat.cpp
+    test_selective_repeat_policy.cpp
+    test_sync_detection.cpp
+    test_comprehensive_modem.cpp
+    test_rng.cpp
+    test_frame_v2.cpp
+    test_carrier_ldpc_interleaver.cpp
+    test_ofdm_carrier_mask_plumbing.cpp
+    test_waveform_policy.cpp
+    test_ofdm_link_adaptation.cpp
+    test_waveform_loopback.cpp
+    test_streaming_config.cpp
+    test_streaming_buffer_policy.cpp
+    test_streaming_decode_policy.cpp
+    test_streaming_frame_policy.cpp
+    test_streaming_signal_policy.cpp
+    test_streaming_mc_dpsk.cpp
+    ../tools/test_throughput.cpp
+)

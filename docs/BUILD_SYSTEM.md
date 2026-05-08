@@ -92,7 +92,6 @@ make -j4
 | `ultra_gui` | gui/*.cpp + imgui | ultra_core, SDL2, OpenGL | GUI app |
 | `cli_simulator` | cli_simulator.cpp | ultra_core | Protocol simulator |
 | `threaded_simulator` | threaded_simulator.cpp | ultra_core | Real-time simulator |
-| `profile_acquisition` | profile_acquisition.cpp | ultra_core | RX profiling tool |
 | `test_waveform_simple` | test_waveform_simple.cpp | ultra_core | Waveform smoke test |
 
 ### Unit/Integration Test Targets (`tests/`)
@@ -261,7 +260,6 @@ build/
 ├── ultra_gui             # GUI app (if SDL2+OpenGL)
 ├── cli_simulator         # Protocol simulator
 ├── threaded_simulator    # Real-time simulator
-├── profile_acquisition   # RX profiling utility
 ├── test_waveform_simple  # Waveform smoke test
 ├── tests/*               # Test executables from tests/CMakeLists.txt
 ├── compile_commands.json # IDE integration

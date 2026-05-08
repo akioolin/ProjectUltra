@@ -188,11 +188,10 @@ Selection logic source:
 - `selectOFDMCodeRate(...)`
 - `capInitialOFDMRate(...)`
 
-Current OFDM code-rate thresholds (`selectOFDMCodeRate`):
-- `R3/4`: `fading < 0.10` and `snr >= 15`
-- `R2/3`: `fading < 0.15` and `snr >= 15`
-- `R1/2`: `fading < 1.10` and `snr >= 15`
-- otherwise `R1/4`
+OFDM code-rate thresholds live in
+`src/protocol/waveform_selection.hpp::selectOFDMCodeRate()`. Keep
+`tests/test_waveform_policy.cpp` as the regenerable boundary record
+instead of copying the ladder into this protocol overview.
 
 Current waveform auto-selection:
 - `MC_DPSK`: `snr < 10`

@@ -229,7 +229,8 @@ bool test_ldpc_noisy_llrs() {
             if (decoded[i] != data[i]) post_errors++;
         }
         float post_ber = (float)post_errors / data.size();
-        std::cout << "    Post-FEC byte errors: " << post_errors << "/" << data.size() << "\n";
+        std::cout << "    Post-FEC byte errors: " << post_errors << "/" << data.size()
+                  << " (" << (post_ber * 100.0f) << "%)\n";
         CHECK(post_errors == 0, "R1/4 should correct these errors");
         PASS("R1/4 corrects noisy channel");
     } else {

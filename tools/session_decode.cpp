@@ -453,8 +453,7 @@ void recordFrame(const ultra::gui::DecodeResult& result, FrameSummary& summary) 
     }
 }
 
-void printSummary(const Args& args,
-                  const LoadedWav& wav,
+void printSummary(const LoadedWav& wav,
                   const ChirpObservation& chirp,
                   const SimulatedStation& station,
                   ultra::protocol::WaveformMode observed_waveform,
@@ -607,7 +606,7 @@ int main(int argc, char** argv) {
 
         {
             std::lock_guard<std::mutex> lock(summary_mutex);
-            printSummary(args, replay->wav(), chirp, station, observed_waveform,
+            printSummary(replay->wav(), chirp, station, observed_waveform,
                          observed_modulation, observed_code_rate, observed_cw_count, ever_connected,
                          ever_handshake_complete, frames, messages);
         }

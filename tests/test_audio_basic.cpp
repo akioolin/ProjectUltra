@@ -272,7 +272,7 @@ void printTestSignalInfo() {
 // Main
 // ============================================================================
 
-int main(int argc, char* argv[]) {
+int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "      BASIC AUDIO PATH TEST             " << std::endl;
     std::cout << "========================================" << std::endl;

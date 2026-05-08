@@ -35,6 +35,23 @@ struct OFDMDemodulator::Impl {
     Samples rx_buffer;
     size_t symbol_samples;
 
+    // Reused OFDM hot-path scratch. These buffers are single-thread owned by
+    // the demodulator instance and avoid heap churn in per-symbol processing.
+    std::vector<Complex> baseband_scratch;
+    std::vector<Complex> symbol_scratch;
+    std::vector<Complex> freq_domain_scratch;
+    std::vector<Complex> equalized_scratch;
+    std::vector<Complex> constellation_update_scratch;
+    std::vector<Complex> differential_symbols_scratch;
+    std::vector<float> differential_signal_power_scratch;
+    std::vector<Complex> d8psk_constellation_update_scratch;
+    std::vector<Complex> dqpsk_constellation_update_scratch;
+    std::vector<float> dqpsk_valid_errors_scratch;
+    std::vector<Complex> interp_h_full_scratch;
+    std::vector<Complex> interp_h_cir_scratch;
+    std::vector<Complex> interp_h_clean_scratch;
+    std::vector<int> interp_pilot_logical_pos_scratch;
+
     // Channel estimate (per carrier)
     std::vector<Complex> channel_estimate;
     float noise_variance = 0.1f;
@@ -195,16 +212,16 @@ struct OFDMDemodulator::Impl {
     // ==========================================================================
     // CHANNEL ESTIMATION & EQUALIZATION (channel_equalizer.cpp)
     // ==========================================================================
-    std::vector<Complex> toBaseband(SampleSpan samples);
-    std::vector<Complex> extractSymbol(const std::vector<Complex>& baseband, size_t offset);
+    const std::vector<Complex>& toBaseband(SampleSpan samples);
+    const std::vector<Complex>& extractSymbol(const std::vector<Complex>& baseband, size_t offset);
     void updateChannelEstimate(const std::vector<Complex>& freq_domain);
     void estimateChannelFromLTS(const float* training_samples, size_t num_symbols);
     void interpolateChannel();
     Complex hardDecision(Complex sym, Modulation mod) const;
     void lmsUpdate(int idx, Complex received, Complex reference);
     void rlsUpdate(int idx, Complex received, Complex reference);
-    std::vector<Complex> equalize(const std::vector<Complex>& freq_domain, Modulation mod);
-    std::vector<Complex> equalize(const std::vector<Complex>& freq_domain);
+    const std::vector<Complex>& equalize(const std::vector<Complex>& freq_domain, Modulation mod);
+    const std::vector<Complex>& equalize(const std::vector<Complex>& freq_domain);
 
     // ==========================================================================
     // DEMODULATION (demodulator.cpp)

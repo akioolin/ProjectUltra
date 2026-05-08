@@ -13,7 +13,6 @@ round has a specific hardware-validated reason.
 - `/usr/bin/time -l ./build/cli_simulator --snr 15 --channel awgn --rate r1_2 --file 1024 --save-signals --save-prefix /tmp/round7_awgn`
 - `ps -o pid,rss,etime,command -p <cli_simulator_pid>`
 - `vmmap -summary <cli_simulator_pid>`
-- `./build/profile_acquisition --trials 3 --snr-ofdm 25 --snr-dpsk 10 --snr-ping 10`
 - `pmap` is not available on this macOS host; `vmmap -summary` is the local equivalent used here.
 
 No `/tmp/*.profile` files were present during this pass.
@@ -22,15 +21,15 @@ No `/tmp/*.profile` files were present during this pass.
 
 | Component | Evidence | Budget today | Runtime count | Footprint read |
 | --- | --- | ---: | ---: | --- |
-| `StreamingDecoder` audio ring | `src/gui/modem/streaming_decoder.cpp:138-149`, `src/gui/modem/streaming_decoder.hpp:338-342`, `src/gui/modem/streaming_decoder.hpp:454-461` | `480000` floats = 1.92 MB per instance | 1 per `ModemEngine`; 2 in `cli_simulator`; GUI can have real + virtual modem | This is the largest intentional per-instance fixed heap block. It is sized for 10 s of audio, not for the 10 ms callback. |
+| `StreamingDecoder` audio ring | `src/gui/modem/streaming_decoder.hpp`, `src/gui/modem/streaming_decoder.cpp` | Default `480000` floats = 1.92 MB per instance; constructor accepts smaller rings down to `120000` samples | 1 per `ModemEngine`; 2 in `cli_simulator`; GUI can have real + virtual modem | The default preserves 10 s of backlog for simulator scenarios. A 3 s ring (`144000` floats) uses 0.576 MB per decoder but has less tolerance for sustained decode backlog. |
 | `StreamingDecoder` waveform/FEC state | `src/gui/modem/streaming_decoder.hpp:366-393`, `src/gui/modem/streaming_decoder.hpp:431-445` | small fixed objects plus burst vectors; burst buffers scale with group size and soft-bit count | same as decoder count | Fine on Linux SBCs; not microcontroller-compatible without redesign. |
 | `AudioEngine` TX queue | `src/gui/audio_engine.hpp:144-150`, `src/gui/audio_engine.cpp:198-221`, `src/gui/audio_engine.cpp:331-357` | unbounded `std::queue<float>` samples | GUI/TNC/hardware CLI audio path | Wasteful: per-sample node/deque traffic instead of block ring writes. Runtime risk is latency/jitter, not raw MB at steady state. |
 | `AudioEngine` RX queue | `src/gui/audio_engine.hpp:148-176`, `src/gui/audio_engine.cpp:387-438` | capped at `96000` floats = 384 KB; callback allocates `std::vector<float>` per input block | GUI/TNC/hardware CLI audio path | The cap is sane; per-callback allocation and `erase(begin, ...)` are avoidable. |
 | LDPC decoder matrices | `src/fec/ldpc_decoder.cpp:22-36`, `src/fec/ldpc_decoder.cpp:41-63`, `src/fec/ldpc_decoder.cpp:105-183` | sparse rows/cols plus message buffers; per decoder instance per current rate | one codec in each decoder plus encoder-side codec state | Small on SBCs. The expensive transient is encoder matrix derivation. |
 | LDPC 802.11n expanded matrices | `src/fec/ldpc_802_11n.hpp:21-24`, `src/fec/ldpc_802_11n.hpp:111-123`, `src/fec/ldpc_802_11n.hpp:156-195` | N=648. Expanded edges: R1/4 1971, R1/2/R2/3/R3/4/R5/6 2376. Encoder Gaussian-elim temp is documented as about 420 KB max | built when codec/matrix is constructed | Acceptable on Pi-class RAM; not acceptable for RP2040/ESP32 without static compact tables. |
-| FFT state | `src/dsp/fft.cpp:13-36`, `src/dsp/fft.cpp:42-89`, `src/dsp/fft.cpp:94-128`, `src/dsp/fft.cpp:142-169` | FFTW: plans + 1024 complex + 1024 real buffers. Fallback: 512 twiddles + 1024 work complex = about 12 KB for 1024 FFT | modulator/demodulator/waveforms | Memory is modest; fallback CPU is the concern. Vector overloads resize outputs in hot paths. |
-| OFDM modulator state | `include/ultra/types.hpp:226-241`, `src/ofdm/modulator.cpp:110-127`, `src/ofdm/modulator.cpp:143-207`, `src/ofdm/modulator.cpp:231-302` | carrier/pilot/sync vectors plus FFT; allocates `freq_domain`, `time_domain`, CP vector, and real vector per symbol/path | one per active waveform/encoder | The repeated vectors are a CPU/cache allocation hotspot. |
-| OFDM demod/equalizer state | `src/ofdm/demodulator.cpp:64-81`, `src/ofdm/demodulator.cpp:116-181`, `src/ofdm/channel_equalizer.cpp:1282-1420` | several `fft_size` vectors: channel estimate, LMS weights, last decisions, RLS P, LTS templates | one per active waveform/decoder | Memory is fine on SBCs. Equalizer work and sync search are the CPU budget items. |
+| FFT state | `src/dsp/fft.cpp:13-36`, `src/dsp/fft.cpp:42-89`, `src/dsp/fft.cpp:94-128`, `src/dsp/fft.cpp:142-169` | FFTW: plans + 1024 complex + 1024 real buffers. Fallback: 512 twiddles + 1024 work complex = about 12 KB for 1024 FFT | modulator/demodulator/waveforms | Memory is modest; fallback CPU is the concern. OFDM hot paths now use pre-sized pointer FFT calls instead of vector-overload resize. |
+| OFDM modulator state | `include/ultra/types.hpp:226-241`, `src/ofdm/modulator.cpp` | carrier/pilot/sync vectors plus FFT plus member scratch for frequency domain, time domain, CP symbol, data/training/probe symbols, and real output | one per active waveform/encoder | F#4 moved per-symbol heap churn into reusable per-modulator scratch. Steady scratch grows by tens of KB; transmit samples are unchanged. |
+| OFDM demod/equalizer state | `src/ofdm/demodulator.cpp`, `src/ofdm/demodulator_impl.hpp`, `src/ofdm/channel_equalizer.cpp` | several `fft_size` vectors: channel estimate, LMS weights, last decisions, RLS P, LTS templates, plus reusable baseband/symbol/frequency/equalizer/interpolation scratch | one per active waveform/decoder | F#4 moved per-symbol demod/equalizer temporaries into reusable per-demodulator scratch. Memory is still fine on SBCs; the win is allocator/cache stability. |
 | Protocol/ARQ buffers | `src/protocol/selective_repeat_arq.hpp:141-172`, `src/protocol/selective_repeat_arq.hpp:182-214`, `src/protocol/protocol_engine.hpp:197-202`, `src/protocol/file_transfer.hpp:155-179`, `src/protocol/connection.hpp:292-307`, `src/fec/soft_combine.hpp:96-101` | ARQ window cap 16 TX/RX slots; file transfer stores whole TX/RX file; HARQ soft-combine disabled by default, max 32 entries | one `Connection` per station | Protocol memory is bounded except file-transfer payload size. This is fine for SBCs, not for small MCUs. |
 | Two-station simulator heap | `tools/sim/simulated_station.hpp:447-485`, `tools/sim/simulated_station.hpp:632-679`, `tools/sim/simulated_station.hpp:1366-1438` | two decoders = 3.84 MB rings, two TX sample queues, two protocol stacks, channel queues | 2 stations | Measured RSS 40.2 MB at 8 s, 42.1 MB at 14 s; `/usr/bin/time -l` peak RSS 108.5 MB with signal capture enabled. |
 
@@ -62,11 +61,11 @@ must stay boring.
 
 ## 3. CPU Hot-Path Budget
 
-`tools/profile_acquisition.cpp` defines profile result fields and 480-sample
-chunk feeding at `tools/profile_acquisition.cpp:25-31`,
-`tools/profile_acquisition.cpp:99-130`, and CLI options at
-`tools/profile_acquisition.cpp:414-424`. Current run result: all 3 OFDM,
-3 DPSK, and 3 PING trials failed, so this tool is stale as a decode benchmark.
+The removed acquisition profiler fed synthetic chunks but produced no
+successful decodes, so it was not a trustworthy benchmark. Maintained
+timing evidence now comes from the decode buckets printed by
+`StreamingDecoder` during real `cli_simulator`, `decode_bench`, and
+hardware-smoke paths.
 
 Maintained evidence comes from `cli_simulator --snr 15 --channel awgn --rate r1_2 --file 1024`.
 It passed byte-exact file transfer. `/usr/bin/time -l` with signal capture:
@@ -117,22 +116,25 @@ control-frame 1-CW retry/probe decode, and per-symbol OFDM allocation/cache chur
    Good: a minimal SBC daemon without ImGui/OpenGL/virtual simulator.
    Effort: hours to 1 day. Risk: low if target-only.
 
-3. Make `StreamingDecoder` ring size target-configurable.
-   Evidence: 10 s ring at `src/gui/modem/streaming_decoder.hpp:454-461`;
-   allocation at `src/gui/modem/streaming_decoder.cpp:138-149`.
-   Good: headless/SBC profile uses 3-5 s unless acquisition tests prove 10 s is needed.
-   Effort: 1 day. Risk: medium; sync/acquisition/hardware smoke required.
+3. Choose a smaller `StreamingDecoder` ring in a target-specific profile.
+   Evidence: the decoder constructor now owns the ring capacity, defaulting to
+   10 s and rejecting capacities below the largest sync search window.
+   Good: a headless/SBC profile can use 3-5 s once acquisition tests prove it
+   does not overflow under load.
+   Effort: target profile plus hardware run. Risk: medium; sync/acquisition
+   hardware smoke required.
 
-4. Preallocate OFDM symbol and FFT vectors.
-   Evidence: per-symbol vectors in `src/ofdm/modulator.cpp:231-302`; FFT vector
-   overload resizes at `src/dsp/fft.cpp:142-169`.
-   Good: no allocation in OFDM hot loops; reuse scratch buffers per modulator/demodulator.
-   Effort: 1-2 days. Risk: medium; modem core, so only with focused justification.
+4. Keep OFDM symbol and FFT scratch preallocated.
+   Evidence: member scratch in `src/ofdm/modulator.cpp`,
+   `src/ofdm/demodulator_impl.hpp`, and `src/ofdm/channel_equalizer.cpp`.
+   Good: OFDM hot loops reuse per-instance buffers and call pointer FFT APIs with
+   pre-sized storage.
+   Status: landed in F#4; remaining allocation-policy work should target
+   `rx_buffer.erase(begin, ...)` and audio queue structure separately.
 
-5. Replace stale `profile_acquisition` with a maintained profile gate.
-   Evidence: current profile run failed every mode; source still feeds 480-sample
-   chunks in `tools/profile_acquisition.cpp:99-130` and reports result fields at
-   `tools/profile_acquisition.cpp:25-31`.
+5. Add a maintained profile gate around existing decode buckets.
+   Evidence: the stale standalone acquisition profiler failed every
+   mode and has been removed.
    Good: non-CTest or nightly budget gate around the actual `cli_simulator` /
    `session_decode` profile buckets.
    Effort: hours to 1 day. Risk: low-medium; tool-only if it reuses existing profile output.

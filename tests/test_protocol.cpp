@@ -322,7 +322,7 @@ bool test_data_transfer() {
 
     std::vector<std::string> received_at_b;
 
-    stationB.setMessageReceivedCallback([&](const std::string& from, const std::string& text) {
+    stationB.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
         received_at_b.push_back(text);
     });
 
@@ -590,7 +590,7 @@ bool test_quick_brown_fox() {
 
     std::string received_msg;
 
-    stationB.setMessageReceivedCallback([&](const std::string& from, const std::string& text) {
+    stationB.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
         received_msg = text;
     });
 

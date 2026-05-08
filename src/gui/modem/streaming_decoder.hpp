@@ -113,7 +113,10 @@ using StreamingPingCallback = std::function<void(float snr_db, float cfo_hz)>;
 // StreamingDecoder - Unified RX decoder for all waveform types
 class StreamingDecoder {
 public:
-    StreamingDecoder();
+    static constexpr size_t kDefaultBufferSamples = 480000;  // 10 seconds at 48 kHz
+    static constexpr size_t kMinimumBufferSamples = 120000;  // Must cover largest sync search window
+
+    explicit StreamingDecoder(size_t buffer_capacity_samples = kDefaultBufferSamples);
     ~StreamingDecoder();
 
     // ========================================================================
@@ -253,6 +256,7 @@ public:
 
     // Get number of samples in buffer
     size_t samplesInBuffer() const;
+    size_t bufferCapacitySamples() const { return buffer_capacity_samples_; }
 
     // Check if waveform is synchronized
     bool isSynced() const;
@@ -319,6 +323,14 @@ private:
                                float residual_cfo_hz) const;
 
     // Ring/absolute sample helpers. Call only while buffer_mutex_ is held.
+    size_t wrapCustomRingIndexLocked(size_t value) const;
+    size_t wrapRingIndexLocked(size_t value) const {
+        if (uses_default_buffer_capacity_) {
+            return value % kDefaultBufferSamples;
+        }
+        return wrapCustomRingIndexLocked(value);
+    }
+    void writeSamplesToRingLocked(const float* samples, size_t count);
     size_t ringPosToAbsoluteLocked(size_t ring_pos) const;
     size_t absoluteToRingLocked(size_t abs_pos) const;
     void setSearchFloorLocked(size_t abs_pos);
@@ -339,6 +351,8 @@ private:
 
     // Circular buffer for audio samples
     std::vector<float> buffer_;
+    const size_t buffer_capacity_samples_ = kDefaultBufferSamples;
+    const bool uses_default_buffer_capacity_ = true;
     size_t write_pos_ = 0;          // Next position to write (only pointer we need)
     mutable std::mutex buffer_mutex_;
     std::condition_variable data_cv_;
@@ -455,9 +469,10 @@ private:
     static constexpr int FRAME_TIMEOUT_MS = 5000;  // Give up after 5 seconds
 
     // Constants - Buffer sizes
-    // Need enough for chirp (~1.2s) + frame (~1s) + search margin
-    // Larger buffer to avoid wraparound issues during testing
-    static constexpr size_t MAX_BUFFER_SAMPLES = 480000;    // 10 seconds at 48kHz
+    // Need enough for chirp (~1.2s) + frame (~1s) + search margin.
+    // Smaller constructor-supplied rings reduce RAM but raise overflow risk
+    // under sustained decode backlog; the default preserves the historical
+    // 10-second ring used by simulator backlog scenarios.
     static constexpr size_t CHIRP_SAMPLES = 57600;          // ~1.2 second (dual chirp)
     static constexpr size_t CORRELATION_STEP = 4800;        // 100ms at 48kHz (faster search)
     static constexpr size_t CORR_INVARIANT_GUARD = 9600;    // 200ms guard to detect pointer drift

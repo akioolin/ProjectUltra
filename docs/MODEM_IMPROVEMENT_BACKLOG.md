@@ -363,11 +363,11 @@ case: same audio, AGC-on version should now decode like AGC-off.
   top of an already-working OFDM stack. Defer indefinitely
   unless OTA testing shows OFDM is fundamentally inadequate for
   our target channels.
-- **More text compression (Huffman/PMC) at modem layer:** Pat's
-  B2F already does gzip on application payloads. Adding another
+- **More text compression (Huffman/PMC) at modem layer:** the
+  target B2F client already does gzip on application payloads. Adding another
   compression layer below it gives near-zero benefit on
   already-compressed B2F messages and adds latency.
-- **VARA / Pactor wire-protocol compatibility:** would require
+- **Closed wire-protocol compatibility:** would require
   reverse-engineering closed protocols. Stay open and let our
   TCP API compatibility (validated tonight) carry interop.
 

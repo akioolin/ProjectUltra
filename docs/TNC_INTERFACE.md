@@ -1,6 +1,6 @@
 # Ultra TNC Interface
 
-`ultra_tnc` exposes a VARA-compatible TCP TNC shell backed by ProjectUltra's
+`ultra_tnc` exposes a legacy-compatible TCP TNC shell backed by ProjectUltra's
 ProtocolEngine, StreamingEncoder/StreamingDecoder, and SDL audio I/O.
 
 ## Run
@@ -19,24 +19,24 @@ Use `--bind 0.0.0.0` only when you intentionally want LAN access.
 
 For TCP-only smoke tests, use `--audio-output none --audio-input none`.
 
-## Pat Configuration
+## Client Configuration
 
-Point Pat at the command port:
+Point the client at the command port:
 
 ```toml
 [[ax25]]
   port = "ultra"
 
-[[transport.vara]]
+[[transport.legacy_tnc]]
   address = "127.0.0.1:8300"
 ```
 
-If your Pat build separates command and data ports, use:
+If your client separates command and data ports, use:
 
 - Command: `127.0.0.1:8300`
 - Data: `127.0.0.1:8301`
 
-## Supported VARA Commands
+## Supported TNC Commands
 
 The TNC shell accepts the Phase 1/2 command set:
 
@@ -50,9 +50,9 @@ The TNC shell accepts the Phase 1/2 command set:
 - `BUFFER`
 - `SN`
 - `BITRATE`
-- `STATS` (ProjectUltra extension — not in VARA. See below.)
+- `STATS` (ProjectUltra extension; see below.)
 - `COMPRESSION`, `CHAT`, `CWID`
-- `PUBLIC`, `P2P`, `WINLINK`, `IGNOREKISSDCD`, `RETRIES`, `CALLINT`
+- `PUBLIC`, `P2P`, client-mode probes, `IGNOREKISSDCD`, `RETRIES`, `CALLINT`
 
 ### STATS
 
@@ -68,14 +68,14 @@ STATS frames_sent=42 frames_recv=38 retx=5 timeouts=2 failed=0 \
 Fields are space-separated `key=value` pairs. Counters are session-
 scoped (cleared on disconnect/reset). `rate`, `mod`, `mode` track the
 current adaptive selection; `snr`/`bps` mirror the existing `SN`/`BITRATE`
-events; `backlog` mirrors `BUFFER`. Pat clients ignore unknown commands,
-so this is safe to leave on.
+events; `backlog` mirrors `BUFFER`. Existing clients ignore unknown
+commands, so this is safe to leave on.
 
 Bandwidth mapping:
 
 - `BW500` selects `OFDM_NARROW`
 - `BW2300` selects `OFDM_CHIRP`
-- `BW2750` is accepted for VARA compatibility and maps to `OFDM_CHIRP`
+- `BW2750` is accepted for legacy compatibility and maps to `OFDM_CHIRP`
 
 Binary payload bytes are sent on the data port while connected. Received
 ProtocolEngine binary payloads are emitted on the data port.
@@ -90,5 +90,5 @@ printf 'VERSION\r' | nc 127.0.0.1 18300
 Expected reply:
 
 ```text
-VARA version 4.9.0 registered
+VERSION 4.9.0 registered
 ```

@@ -28,7 +28,7 @@ that would let the modem run on cheaper hardware than a Pi 5.
 * Status: DONE
 * Output: `/tmp/cleanup_audit_catalog.md` (306 lines, 7 sections,
   ~25 actionable items)
-* Top findings: local gate broken, decode_bench/profile_acquisition
+* Top findings: local gate broken, decode_bench/acquisition profiling
   decode 0 frames on clean fixtures, doc contradictions, ~60 hours
   of SAFE+MEDIUM cleanup work available.
 
@@ -44,7 +44,7 @@ that would let the modem run on cheaper hardware than a Pi 5.
 * Done:
   * A1: deleted unreferenced `tools/audio_loopback_test`
   * A2: deleted stale `scripts/test_multi_cw.sh`
-  * A3: retired private `tools/pat_overnight_test.sh`
+  * A3: retired private client overnight test script
   * A5: documented `session_decode --auto-accept` as backward-compat no-op
   * D1: fixed CTest count refs across docs
   * D2: refreshed README OTA status to 2026-05-07 reality
@@ -138,7 +138,7 @@ that would let the modem run on cheaper hardware than a Pi 5.
   2. Headless modem target separate from GUI/TNC
   3. Configurable StreamingDecoder ring size
   4. Preallocated OFDM/FFT scratch buffers
-  5. Replace stale profile_acquisition with maintained profile gate
+  5. Replace stale acquisition profiling with maintained profile gate
 * Item 2: B4 done. AWGN injection unified at `src/sim/awgn.hpp`
   (active-sample signal power + `noise = signal/10^(SNR/10)`).
   Inconsistencies found and fixed across cli_simulator, GUI sim,
@@ -197,7 +197,7 @@ Branch ready for review. Pushed to `origin/experimental/cleanup-overnight-2026-0
 * Tests + tooling: consolidated, deduped, doc-fact-checked.
 * Repo hygiene: 15M of artifacts archived, 11 dead tools/scripts
   removed (e.g. `scripts/test_multi_cw.sh`, `tools/audio_loopback_test`,
-  `tools/pat_overnight_test.sh`).
+  and the private client overnight test script).
 * New deliverables: `docs/RESOURCE_FOOTPRINT_ANALYSIS.md`,
   `docs/RESOURCE_MANIFEST.md`, `tools/io/wav_io.{hpp,cpp}`,
   `tools/sim/cli_enums.hpp`, `tests/helpers/temp_dir.hpp`,

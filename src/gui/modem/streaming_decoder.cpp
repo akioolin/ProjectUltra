@@ -33,6 +33,7 @@
 #include <cmath>
 #include <exception>
 #include <fstream>
+#include <stdexcept>
 
 namespace ultra {
 namespace gui {
@@ -48,6 +49,13 @@ namespace {
 bool isFixedFrameCwCount(int cw_count) {
     return cw_count >= v2::kMinFixedFrameCodewords &&
            cw_count <= v2::kMaxFixedFrameCodewords;
+}
+
+size_t validateBufferCapacity(size_t capacity) {
+    if (capacity < StreamingDecoder::kMinimumBufferSamples) {
+        throw std::invalid_argument("StreamingDecoder buffer capacity is smaller than the sync search window");
+    }
+    return capacity;
 }
 
 // Return a conservative 1-CW control-frame sample requirement for connected OFDM.
@@ -135,9 +143,11 @@ static void dumpBufferSnapshot(const std::vector<float>& buffer, size_t write_po
               label.c_str(), valid_samples, filename, rms, max_val);
 }
 
-StreamingDecoder::StreamingDecoder() {
+StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
+    : buffer_capacity_samples_(validateBufferCapacity(buffer_capacity_samples)),
+      uses_default_buffer_capacity_(buffer_capacity_samples_ == kDefaultBufferSamples) {
     startupTrace("StreamingDecoder", "ctor-enter");
-    buffer_.resize(MAX_BUFFER_SAMPLES, 0.0f);
+    buffer_.resize(buffer_capacity_samples_, 0.0f);
     startupTrace("StreamingDecoder", "buffer-resized");
     waveform_ = WaveformFactory::create(protocol::WaveformMode::MC_DPSK);
     startupTrace("StreamingDecoder", "waveform-created");
@@ -146,7 +156,7 @@ StreamingDecoder::StreamingDecoder() {
     codec_ = fec::CodecFactory::create(fec::CodecType::LDPC, CodeRate::R1_4);
     startupTrace("StreamingDecoder", "codec-created");
 
-    LOG_MODEM(INFO, "StreamingDecoder: Initialized (buffer=%zu samples)", MAX_BUFFER_SAMPLES);
+    LOG_MODEM(INFO, "StreamingDecoder: Initialized (buffer=%zu samples)", buffer_capacity_samples_);
     startupTrace("StreamingDecoder", "ctor-exit");
 }
 
@@ -156,6 +166,29 @@ StreamingDecoder::~StreamingDecoder() {
 
 void StreamingDecoder::setBurstInterleaveGroupSize(int size) {
     burst_group_size_ = ofdm_link_adaptation::sanitizeBurstGroupSize(size);
+}
+
+void StreamingDecoder::writeSamplesToRingLocked(const float* samples, size_t count) {
+    if (uses_default_buffer_capacity_) {
+        for (size_t i = 0; i < count; i++) {
+            buffer_[write_pos_] = samples[i];
+            write_pos_ = (write_pos_ + 1) % kDefaultBufferSamples;
+        }
+        return;
+    }
+
+    const size_t capacity = buffer_capacity_samples_;
+    for (size_t i = 0; i < count; i++) {
+        buffer_[write_pos_] = samples[i];
+        write_pos_ = (write_pos_ + 1) % capacity;
+    }
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
+size_t StreamingDecoder::wrapCustomRingIndexLocked(size_t value) const {
+    return value % buffer_capacity_samples_;
 }
 
 // ============================================================================
@@ -197,7 +230,7 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
     size_t prev_total = total_fed_;
 
     auto overflow = buffer_policy::planOverflowRecovery(
-        write_pos_, correlation_pos_, total_fed_, count, MAX_BUFFER_SAMPLES,
+        write_pos_, correlation_pos_, total_fed_, count, buffer_capacity_samples_,
         CORR_INVARIANT_GUARD, OVERFLOW_RECOVERY_KEEP);
 
     if (overflow.pointer_drift_detected) {
@@ -243,17 +276,13 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
         }
     }
 
-    // Write samples to circular buffer
-    for (size_t i = 0; i < count; i++) {
-        buffer_[write_pos_] = samples[i];
-        write_pos_ = (write_pos_ + 1) % MAX_BUFFER_SAMPLES;
-    }
+    writeSamplesToRingLocked(samples, count);
 
     total_fed_ += count;
 
     // Update backlog telemetry for UI/CLI diagnostics.
     const auto backlog = buffer_policy::computeBacklog(
-        write_pos_, correlation_pos_, total_fed_, MAX_BUFFER_SAMPLES, 48000.0f);
+        write_pos_, correlation_pos_, total_fed_, buffer_capacity_samples_, 48000.0f);
     {
         std::lock_guard<std::mutex> slock(stats_mutex_);
         stats_.current_unsearched_samples = backlog.unsearched_samples;
@@ -396,31 +425,31 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
 }
 
 size_t StreamingDecoder::ringPosToAbsoluteLocked(size_t ring_pos) const {
-    if (total_fed_ < MAX_BUFFER_SAMPLES) {
+    if (total_fed_ < buffer_capacity_samples_) {
         return ring_pos;
     }
 
-    const size_t oldest_abs = total_fed_ - MAX_BUFFER_SAMPLES;
+    const size_t oldest_abs = total_fed_ - buffer_capacity_samples_;
     const size_t oldest_pos = write_pos_;
     const size_t offset = (ring_pos >= oldest_pos)
         ? (ring_pos - oldest_pos)
-        : (MAX_BUFFER_SAMPLES - oldest_pos + ring_pos);
+        : (buffer_capacity_samples_ - oldest_pos + ring_pos);
     return oldest_abs + offset;
 }
 
 size_t StreamingDecoder::absoluteToRingLocked(size_t abs_pos) const {
-    if (total_fed_ < MAX_BUFFER_SAMPLES) {
-        return std::min(abs_pos, total_fed_) % MAX_BUFFER_SAMPLES;
+    if (total_fed_ < buffer_capacity_samples_) {
+        return wrapRingIndexLocked(std::min(abs_pos, total_fed_));
     }
 
-    const size_t oldest_abs = total_fed_ - MAX_BUFFER_SAMPLES;
+    const size_t oldest_abs = total_fed_ - buffer_capacity_samples_;
     abs_pos = std::clamp(abs_pos, oldest_abs, total_fed_);
-    return (write_pos_ + (abs_pos - oldest_abs)) % MAX_BUFFER_SAMPLES;
+    return wrapRingIndexLocked(write_pos_ + (abs_pos - oldest_abs));
 }
 
 void StreamingDecoder::setSearchFloorLocked(size_t abs_pos) {
-    const size_t oldest_abs = (total_fed_ > MAX_BUFFER_SAMPLES)
-        ? (total_fed_ - MAX_BUFFER_SAMPLES)
+    const size_t oldest_abs = (total_fed_ > buffer_capacity_samples_)
+        ? (total_fed_ - buffer_capacity_samples_)
         : 0;
     search_floor_abs_ = std::clamp(abs_pos, oldest_abs, total_fed_);
     search_floor_abs_valid_ = true;
@@ -466,7 +495,7 @@ void StreamingDecoder::searchForSync() {
 
         // Initialize correlation_pos_ if needed
         if (correlation_pos_ == 0 && total_fed_ > 0) {
-            if (total_fed_ < MAX_BUFFER_SAMPLES) {
+            if (total_fed_ < buffer_capacity_samples_) {
                 correlation_pos_ = 0;
             } else {
                 correlation_pos_ = write_pos_;
@@ -478,7 +507,7 @@ void StreamingDecoder::searchForSync() {
         if (write_pos_ >= correlation_pos_) {
             unsearched = write_pos_ - correlation_pos_;
         } else {
-            unsearched = MAX_BUFFER_SAMPLES - correlation_pos_ + write_pos_;
+            unsearched = buffer_capacity_samples_ - correlation_pos_ + write_pos_;
         }
 
         // Need at least min_search unsearched samples
@@ -493,7 +522,7 @@ void StreamingDecoder::searchForSync() {
         // Quick RMS check for signal presence
         float rms = 0.0f;
         for (size_t i = 0; i < 1000; i++) {
-            float s = buffer_[(correlation_pos_ + i) % MAX_BUFFER_SAMPLES];
+            float s = buffer_[wrapRingIndexLocked(correlation_pos_ + i)];
             rms += s * s;
         }
         rms = std::sqrt(rms / 1000.0f);
@@ -525,7 +554,7 @@ void StreamingDecoder::searchForSync() {
             if (++rms_skip_count % 10 == 1)
                 LOG_MODEM(INFO, "[%s] searchForSync: RMS skip, rms=%.4f < %.3f, corr_pos=%zu, total=%.2fs",
                           log_prefix_.c_str(), rms, rms_gate, correlation_pos_, audio_sec);
-            correlation_pos_ = (correlation_pos_ + CORRELATION_STEP) % MAX_BUFFER_SAMPLES;
+            correlation_pos_ = wrapRingIndexLocked(correlation_pos_ + CORRELATION_STEP);
             return;
         }
 
@@ -544,12 +573,12 @@ void StreamingDecoder::searchForSync() {
 
         if (correlation_pos_ >= SEARCH_BACKTRACK) {
             search_start = correlation_pos_ - SEARCH_BACKTRACK;
-        } else if (total_fed_ < MAX_BUFFER_SAMPLES) {
+        } else if (total_fed_ < buffer_capacity_samples_) {
             // Buffer hasn't wrapped yet, start from beginning
             search_start = 0;
         } else {
             // Buffer wrapped, handle underflow
-            search_start = (MAX_BUFFER_SAMPLES + correlation_pos_ - SEARCH_BACKTRACK) % MAX_BUFFER_SAMPLES;
+            search_start = wrapRingIndexLocked(buffer_capacity_samples_ + correlation_pos_ - SEARCH_BACKTRACK);
         }
 
         // Do not let the backtrack window re-enter audio that a previous decode
@@ -558,8 +587,8 @@ void StreamingDecoder::searchForSync() {
         // false locks then escalate into expensive fixed-frame LDPC attempts and delay
         // real ACKs long enough to trigger ARQ retransmission storms.
         if (search_floor_abs_valid_) {
-            const size_t oldest_abs = (total_fed_ > MAX_BUFFER_SAMPLES)
-                ? (total_fed_ - MAX_BUFFER_SAMPLES)
+            const size_t oldest_abs = (total_fed_ > buffer_capacity_samples_)
+                ? (total_fed_ - buffer_capacity_samples_)
                 : 0;
             if (search_floor_abs_ < oldest_abs) {
                 search_floor_abs_ = oldest_abs;
@@ -585,11 +614,11 @@ void StreamingDecoder::searchForSync() {
 
         search_buffer.resize(min_search);
         for (size_t i = 0; i < min_search; i++) {
-            search_buffer[i] = buffer_[(search_start + i) % MAX_BUFFER_SAMPLES];
+            search_buffer[i] = buffer_[wrapRingIndexLocked(search_start + i)];
         }
 
         // Advance by small step (100ms = 4800 samples) for accurate detection
-        correlation_pos_ = (correlation_pos_ + CORRELATION_STEP) % MAX_BUFFER_SAMPLES;
+        correlation_pos_ = wrapRingIndexLocked(correlation_pos_ + CORRELATION_STEP);
     }
 
     // DEBUG: Dump the search buffer on first few searches
@@ -739,21 +768,21 @@ void StreamingDecoder::searchForSync() {
     if (found) {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
 
-        sync_position_ = (search_start + sync_result.start_sample) % MAX_BUFFER_SAMPLES;
+        sync_position_ = wrapRingIndexLocked(search_start + sync_result.start_sample);
 
         // Convert ring-buffer index to absolute sample index.
         // Needed so waveform CFO phase starts from true stream time, not local window offset.
         auto ringPosToAbsolute = [this](size_t ring_pos) -> size_t {
-            if (total_fed_ < MAX_BUFFER_SAMPLES) {
+            if (total_fed_ < buffer_capacity_samples_) {
                 // Buffer has not wrapped yet: ring index == absolute sample index.
                 return ring_pos;
             }
 
-            const size_t oldest_abs = total_fed_ - MAX_BUFFER_SAMPLES;
+            const size_t oldest_abs = total_fed_ - buffer_capacity_samples_;
             const size_t oldest_pos = write_pos_;  // write_pos_ points to oldest sample after wrap
             const size_t offset = (ring_pos >= oldest_pos)
                 ? (ring_pos - oldest_pos)
-                : (MAX_BUFFER_SAMPLES - oldest_pos + ring_pos);
+                : (buffer_capacity_samples_ - oldest_pos + ring_pos);
             return oldest_abs + offset;
         };
 
@@ -761,13 +790,13 @@ void StreamingDecoder::searchForSync() {
         if (last_decoded_sync_pos_ != SIZE_MAX) {
             size_t d1 = (sync_position_ >= last_decoded_sync_pos_)
                 ? (sync_position_ - last_decoded_sync_pos_)
-                : (MAX_BUFFER_SAMPLES - last_decoded_sync_pos_ + sync_position_);
-            size_t dist = std::min(d1, MAX_BUFFER_SAMPLES - d1);
+                : (buffer_capacity_samples_ - last_decoded_sync_pos_ + sync_position_);
+            size_t dist = std::min(d1, buffer_capacity_samples_ - d1);
             if (dist < 200) {
                 LOG_MODEM(INFO, "[%s] Anti-replay: duplicate sync at pos=%zu (prev=%zu), skipping",
                           log_prefix_.c_str(), sync_position_, last_decoded_sync_pos_);
                 constexpr size_t SEARCH_BACKTRACK = 9600;
-                correlation_pos_ = (sync_position_ + SEARCH_BACKTRACK + CORRELATION_STEP) % MAX_BUFFER_SAMPLES;
+                correlation_pos_ = wrapRingIndexLocked(sync_position_ + SEARCH_BACKTRACK + CORRELATION_STEP);
                 return;
             }
         }
@@ -834,7 +863,7 @@ void StreamingDecoder::checkIfReadyToDecode() {
         if (write_pos_ >= sync_position_) {
             available = write_pos_ - sync_position_;
         } else {
-            available = MAX_BUFFER_SAMPLES - sync_position_ + write_pos_;
+            available = buffer_capacity_samples_ - sync_position_ + write_pos_;
         }
     }
 
@@ -1030,7 +1059,7 @@ void StreamingDecoder::decodeCurrentFrame() {
     if (!waveform_) {
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
-            correlation_pos_ = (sync_position_ + 4800) % MAX_BUFFER_SAMPLES;
+            correlation_pos_ = wrapRingIndexLocked(sync_position_ + 4800);
         }
         state_ = DecoderState::SEARCHING;
         return;
@@ -1079,14 +1108,14 @@ void StreamingDecoder::decodeCurrentFrame() {
         if (write_pos_ >= sync_position_) {
             available = write_pos_ - sync_position_;
         } else {
-            available = MAX_BUFFER_SAMPLES - sync_position_ + write_pos_;
+            available = buffer_capacity_samples_ - sync_position_ + write_pos_;
         }
 
         frame_len = std::min(frame_len, available);
 
         frame_buffer.resize(frame_len);
         for (size_t i = 0; i < frame_len; i++) {
-            frame_buffer[i] = buffer_[(sync_position_ + i) % MAX_BUFFER_SAMPLES];
+            frame_buffer[i] = buffer_[wrapRingIndexLocked(sync_position_ + i)];
         }
     }
 
@@ -1105,7 +1134,7 @@ void StreamingDecoder::decodeCurrentFrame() {
     if (frame_buffer.empty()) {
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
-            correlation_pos_ = (sync_position_ + 4800) % MAX_BUFFER_SAMPLES;
+            correlation_pos_ = wrapRingIndexLocked(sync_position_ + 4800);
             setSearchFloorLocked(frame_sync_abs + 4800);
         }
         state_ = DecoderState::SEARCHING;
@@ -1121,7 +1150,7 @@ void StreamingDecoder::decodeCurrentFrame() {
             frame_len, data_preamble);
 
         std::lock_guard<std::mutex> lock(buffer_mutex_);
-        correlation_pos_ = (sync_position_ + advance) % MAX_BUFFER_SAMPLES;
+        correlation_pos_ = wrapRingIndexLocked(sync_position_ + advance);
         setSearchFloorLocked(frame_sync_abs + advance);
     };
 
@@ -1167,7 +1196,7 @@ void StreamingDecoder::decodeCurrentFrame() {
             {
                 std::lock_guard<std::mutex> lock(buffer_mutex_);
                 size_t min_frame = static_cast<size_t>(waveform_->getMinSamplesForFrame());
-                correlation_pos_ = (sync_position_ + min_frame) % MAX_BUFFER_SAMPLES;
+                correlation_pos_ = wrapRingIndexLocked(sync_position_ + min_frame);
                 setSearchFloorLocked(frame_sync_abs + min_frame);
                 last_decoded_sync_pos_ = sync_position_;
             }
@@ -1282,7 +1311,7 @@ void StreamingDecoder::decodeCurrentFrame() {
 
                         {
                             std::lock_guard<std::mutex> lock(buffer_mutex_);
-                            correlation_pos_ = (sync_position_ + frame_len) % MAX_BUFFER_SAMPLES;
+                            correlation_pos_ = wrapRingIndexLocked(sync_position_ + frame_len);
                             setSearchFloorLocked(frame_sync_abs + frame_len);
                             last_decoded_sync_pos_ = sync_position_;
                         }
@@ -1313,7 +1342,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         LOG_MODEM(DEBUG, "[%s] process() failed", log_prefix_.c_str());
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
-            correlation_pos_ = (sync_position_ + frame_len) % MAX_BUFFER_SAMPLES;
+            correlation_pos_ = wrapRingIndexLocked(sync_position_ + frame_len);
             setSearchFloorLocked(frame_sync_abs + frame_len);
         }
         state_ = DecoderState::SEARCHING;
@@ -1333,8 +1362,8 @@ void StreamingDecoder::decodeCurrentFrame() {
         if (std::abs(burst_timing_offset) >= kBurstFrameRetryThreshold &&
             std::abs(burst_timing_offset) <= kBurstFrameRetryMax) {
             const int sample_correction = static_cast<int>(std::lround(burst_timing_offset));
-            const size_t corrected_sync_pos =
-                (sync_position_ + MAX_BUFFER_SAMPLES + sample_correction) % MAX_BUFFER_SAMPLES;
+            const size_t corrected_sync_pos = wrapRingIndexLocked(
+                sync_position_ + buffer_capacity_samples_ + sample_correction);
             const size_t corrected_sync_abs =
                 (sample_correction >= 0)
                     ? frame_sync_abs + static_cast<size_t>(sample_correction)
@@ -1349,13 +1378,13 @@ void StreamingDecoder::decodeCurrentFrame() {
                 if (write_pos_ >= corrected_sync_pos) {
                     corrected_available = write_pos_ - corrected_sync_pos;
                 } else {
-                    corrected_available = MAX_BUFFER_SAMPLES - corrected_sync_pos + write_pos_;
+                    corrected_available = buffer_capacity_samples_ - corrected_sync_pos + write_pos_;
                 }
                 have_corrected_frame = corrected_available >= frame_len;
                 if (have_corrected_frame) {
                     frame_buffer.assign(frame_len, 0.0f);
                     for (size_t i = 0; i < frame_len; i++) {
-                        frame_buffer[i] = buffer_[(corrected_sync_pos + i) % MAX_BUFFER_SAMPLES];
+                        frame_buffer[i] = buffer_[wrapRingIndexLocked(corrected_sync_pos + i)];
                     }
                 }
             }
@@ -1410,7 +1439,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         LOG_MODEM(DEBUG, "[%s] getSoftBits() returned empty", log_prefix_.c_str());
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
-            correlation_pos_ = (sync_position_ + frame_len) % MAX_BUFFER_SAMPLES;
+            correlation_pos_ = wrapRingIndexLocked(sync_position_ + frame_len);
             setSearchFloorLocked(frame_sync_abs + frame_len);
         }
         state_ = DecoderState::SEARCHING;
@@ -1451,7 +1480,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         burst_soft_buffer_.push_back(std::move(soft_bits));
         burst_min_block_ = static_cast<size_t>(
             waveform_->getMinSamplesForCWCount(fixed_frame_codewords_));
-        burst_next_pos_ = (sync_position_ + frame_len) % MAX_BUFFER_SAMPLES;
+        burst_next_pos_ = wrapRingIndexLocked(sync_position_ + frame_len);
         burst_snr_ = sync_snr_;
         burst_cfo_ = sync_cfo_;
         burst_start_time_ = std::chrono::steady_clock::now();
@@ -1476,8 +1505,8 @@ void StreamingDecoder::decodeCurrentFrame() {
         if (std::abs(burst_timing_offset) >= kBurstTimingCorrectionThreshold &&
             std::abs(burst_timing_offset) <= kBurstMaxTimingCorrection) {
             const int sample_correction = static_cast<int>(std::lround(burst_timing_offset));
-            burst_next_pos_ = (burst_next_pos_ + MAX_BUFFER_SAMPLES + sample_correction)
-                % MAX_BUFFER_SAMPLES;
+            burst_next_pos_ = wrapRingIndexLocked(
+                burst_next_pos_ + buffer_capacity_samples_ + sample_correction);
             LOG_MODEM(WARN, "[%s] Burst group timing correction: %.1f samples, next_pos=%zu",
                       log_prefix_.c_str(), burst_timing_offset, burst_next_pos_);
         }
@@ -1804,21 +1833,21 @@ void StreamingDecoder::decodeCurrentFrame() {
         }
 
         auto ringPosToAbsolute = [this](size_t ring_pos) -> size_t {
-            if (total_fed_ < MAX_BUFFER_SAMPLES) {
+            if (total_fed_ < buffer_capacity_samples_) {
                 return ring_pos;
             }
-            const size_t oldest_abs = total_fed_ - MAX_BUFFER_SAMPLES;
+            const size_t oldest_abs = total_fed_ - buffer_capacity_samples_;
             const size_t oldest_pos = write_pos_;
             const size_t offset = (ring_pos >= oldest_pos)
                 ? (ring_pos - oldest_pos)
-                : (MAX_BUFFER_SAMPLES - oldest_pos + ring_pos);
+                : (buffer_capacity_samples_ - oldest_pos + ring_pos);
             return oldest_abs + offset;
         };
 
         if (allow_sync_recovery) {
             for (int delta : retry_deltas) {
                 recovery_attempts++;
-                size_t retry_sync = (sync_position_ + MAX_BUFFER_SAMPLES + delta) % MAX_BUFFER_SAMPLES;
+                size_t retry_sync = wrapRingIndexLocked(sync_position_ + buffer_capacity_samples_ + delta);
 
                 std::vector<float> retry_buffer;
                 size_t retry_len = frame_len;
@@ -1828,7 +1857,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                     if (write_pos_ >= retry_sync) {
                         available = write_pos_ - retry_sync;
                     } else {
-                        available = MAX_BUFFER_SAMPLES - retry_sync + write_pos_;
+                        available = buffer_capacity_samples_ - retry_sync + write_pos_;
                     }
                     retry_len = std::min(retry_len, available);
                     if (retry_len == 0) {
@@ -1836,7 +1865,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                     }
                     retry_buffer.resize(retry_len);
                     for (size_t i = 0; i < retry_len; ++i) {
-                        retry_buffer[i] = buffer_[(retry_sync + i) % MAX_BUFFER_SAMPLES];
+                        retry_buffer[i] = buffer_[wrapRingIndexLocked(retry_sync + i)];
                     }
                 }
 
@@ -1972,7 +2001,7 @@ void StreamingDecoder::decodeCurrentFrame() {
             }
         }
     }
-    size_t next_block_pos = (sync_position_ + consumed) % MAX_BUFFER_SAMPLES;
+    size_t next_block_pos = wrapRingIndexLocked(sync_position_ + consumed);
     size_t next_search_abs = frame_sync_abs + consumed;
 
     // Legacy fixed-offset continuation is only safe for a physical burst.
@@ -1995,7 +2024,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                 if (write_pos_ >= next_block_pos) {
                     next_available = write_pos_ - next_block_pos;
                 } else {
-                    next_available = MAX_BUFFER_SAMPLES - next_block_pos + write_pos_;
+                    next_available = buffer_capacity_samples_ - next_block_pos + write_pos_;
                 }
             }
 
@@ -2006,7 +2035,7 @@ void StreamingDecoder::decodeCurrentFrame() {
             {
                 std::lock_guard<std::mutex> lock(buffer_mutex_);
                 for (size_t i = 0; i < min_block; i++) {
-                    next_block[i] = buffer_[(next_block_pos + i) % MAX_BUFFER_SAMPLES];
+                    next_block[i] = buffer_[wrapRingIndexLocked(next_block_pos + i)];
                 }
             }
 
@@ -2090,7 +2119,7 @@ void StreamingDecoder::decodeCurrentFrame() {
 
             // Advance position for next iteration (or final correlation_pos_)
             sync_position_ = next_block_pos;
-            next_block_pos = (next_block_pos + min_block) % MAX_BUFFER_SAMPLES;
+            next_block_pos = wrapRingIndexLocked(next_block_pos + min_block);
             next_search_abs += min_block;
 
             // If decode failed completely, stop the burst
@@ -2102,7 +2131,7 @@ void StreamingDecoder::decodeCurrentFrame() {
     burst_blocks_decoded_ = 0;
     {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
-        correlation_pos_ = (next_block_pos) % MAX_BUFFER_SAMPLES;
+        correlation_pos_ = wrapRingIndexLocked(next_block_pos);
         setSearchFloorLocked(next_search_abs);
         last_decoded_sync_pos_ = sync_position_;
     }
@@ -2326,8 +2355,8 @@ void StreamingDecoder::setCodecType(fec::CodecType type) {
 
 float StreamingDecoder::getBufferFillPercent() const {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
-    size_t used = std::min(total_fed_, MAX_BUFFER_SAMPLES);
-    return 100.0f * used / MAX_BUFFER_SAMPLES;
+    size_t used = std::min(total_fed_, buffer_capacity_samples_);
+    return 100.0f * used / buffer_capacity_samples_;
 }
 
 DecoderStats StreamingDecoder::getStats() const {
@@ -2359,7 +2388,7 @@ StreamingDecoder::DecoderConfig StreamingDecoder::getConfig() const {
 
 size_t StreamingDecoder::samplesInBuffer() const {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
-    return std::min(total_fed_, MAX_BUFFER_SAMPLES);
+    return std::min(total_fed_, buffer_capacity_samples_);
 }
 
 bool StreamingDecoder::isSynced() const {
@@ -3196,7 +3225,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         if (write_pos_ >= burst_next_pos_) {
             next_available = write_pos_ - burst_next_pos_;
         } else {
-            next_available = MAX_BUFFER_SAMPLES - burst_next_pos_ + write_pos_;
+            next_available = buffer_capacity_samples_ - burst_next_pos_ + write_pos_;
         }
     }
 
@@ -3210,7 +3239,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
         for (size_t i = 0; i < burst_min_block_; i++) {
-            block[i] = buffer_[(burst_next_pos_ + i) % MAX_BUFFER_SAMPLES];
+            block[i] = buffer_[wrapRingIndexLocked(burst_next_pos_ + i)];
         }
     }
 
@@ -3237,7 +3266,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
             static_cast<size_t>(fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
             0.0f);
         pushMetricTemplate(0.0f);
-        burst_next_pos_ = (burst_next_pos_ + burst_min_block_) % MAX_BUFFER_SAMPLES;
+        burst_next_pos_ = wrapRingIndexLocked(burst_next_pos_ + burst_min_block_);
         return BurstFrameResult::SUCCESS;
     }
 
@@ -3246,12 +3275,12 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     float burst_pre_cfo = 0.0f;
     size_t abs_burst = burst_next_pos_;
     if (is_ofdm_burst) {
-        if (total_fed_ >= MAX_BUFFER_SAMPLES) {
-            const size_t oldest_abs = total_fed_ - MAX_BUFFER_SAMPLES;
+        if (total_fed_ >= buffer_capacity_samples_) {
+            const size_t oldest_abs = total_fed_ - buffer_capacity_samples_;
             const size_t oldest_pos = write_pos_;
             const size_t offset = (burst_next_pos_ >= oldest_pos)
                 ? (burst_next_pos_ - oldest_pos)
-                : (MAX_BUFFER_SAMPLES - oldest_pos + burst_next_pos_);
+                : (buffer_capacity_samples_ - oldest_pos + burst_next_pos_);
             abs_burst = oldest_abs + offset;
         }
         burst_pre_cfo = applyCFOPreCorrection(block, burst_cfo_, abs_burst);
@@ -3269,7 +3298,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
             static_cast<size_t>(fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
             0.0f);
         pushMetricTemplate(0.0f);
-        burst_next_pos_ = (burst_next_pos_ + burst_min_block_) % MAX_BUFFER_SAMPLES;
+        burst_next_pos_ = wrapRingIndexLocked(burst_next_pos_ + burst_min_block_);
         return BurstFrameResult::SUCCESS;
     }
     captureConstellationSnapshot();
@@ -3280,8 +3309,8 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     if (std::abs(timing_offset) >= kBurstContinuationRetryThreshold &&
         std::abs(timing_offset) <= kBurstContinuationRetryMax) {
         const int sample_correction = static_cast<int>(std::lround(timing_offset));
-        const size_t corrected_pos =
-            (block_start_pos + MAX_BUFFER_SAMPLES + sample_correction) % MAX_BUFFER_SAMPLES;
+        const size_t corrected_pos = wrapRingIndexLocked(
+            block_start_pos + buffer_capacity_samples_ + sample_correction);
         const size_t corrected_abs =
             (sample_correction >= 0)
                 ? abs_burst + static_cast<size_t>(sample_correction)
@@ -3296,13 +3325,13 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
             if (write_pos_ >= corrected_pos) {
                 corrected_available = write_pos_ - corrected_pos;
             } else {
-                corrected_available = MAX_BUFFER_SAMPLES - corrected_pos + write_pos_;
+                corrected_available = buffer_capacity_samples_ - corrected_pos + write_pos_;
             }
             have_corrected_block = corrected_available >= burst_min_block_;
             if (have_corrected_block) {
                 block.assign(burst_min_block_, 0.0f);
                 for (size_t i = 0; i < burst_min_block_; i++) {
-                    block[i] = buffer_[(corrected_pos + i) % MAX_BUFFER_SAMPLES];
+                    block[i] = buffer_[wrapRingIndexLocked(corrected_pos + i)];
                 }
             }
         }
@@ -3337,7 +3366,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
             static_cast<size_t>(fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
             0.0f);
         pushMetricTemplate(waveform_ ? waveform_->estimatedCFO() : 0.0f);
-        burst_next_pos_ = (burst_next_pos_ + burst_min_block_) % MAX_BUFFER_SAMPLES;
+        burst_next_pos_ = wrapRingIndexLocked(burst_next_pos_ + burst_min_block_);
         return BurstFrameResult::SUCCESS;
     }
 
@@ -3351,7 +3380,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
 
     burst_soft_buffer_.push_back(std::move(soft));
     pushMetricTemplate(residual_cfo);
-    burst_next_pos_ = (block_start_pos + burst_min_block_) % MAX_BUFFER_SAMPLES;
+    burst_next_pos_ = wrapRingIndexLocked(block_start_pos + burst_min_block_);
 
     LOG_MODEM(INFO, "[%s] Burst frame %zu/%d demodulated, RMS=%.4f",
               log_prefix_.c_str(), burst_soft_buffer_.size(),
