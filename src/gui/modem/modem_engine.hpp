@@ -222,6 +222,10 @@ public:
     void setFixedFrameHeaderDiscovery(bool enable) {
         if (streaming_decoder_) streaming_decoder_->setFixedFrameHeaderDiscovery(enable);
     }
+    void setCarrierLdpcInterleaver(bool enable) {
+        if (streaming_encoder_) streaming_encoder_->setCarrierLdpcInterleaver(enable);
+        if (streaming_decoder_) streaming_decoder_->setCarrierLdpcInterleaver(enable);
+    }
 
     // FEC codec control
     void setCodecType(fec::CodecType type);

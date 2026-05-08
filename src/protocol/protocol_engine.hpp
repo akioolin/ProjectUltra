@@ -125,6 +125,7 @@ public:
     WaveformMode getNegotiatedMode() const;
     void setPreferredMode(WaveformMode mode);
     void setModeCapabilities(uint8_t caps);
+    bool isPhyMaskV1Negotiated() const;
 
     // Session-scoped narrowband override (cleared on disconnect/reset)
     void setNarrowbandOverride(WaveformMode mode);
@@ -145,6 +146,9 @@ public:
     void setConnectWaveformChangedCallback(ConnectWaveformChangedCallback cb);
     WaveformMode getConnectWaveform() const;
     void setInitialConnectWaveform(WaveformMode mode);
+
+    using PhyMaskV1NegotiatedCallback = Connection::PhyMaskV1NegotiatedCallback;
+    void setPhyMaskV1NegotiatedCallback(PhyMaskV1NegotiatedCallback cb);
 
     // Callback when handshake is confirmed (safe to switch to negotiated waveform)
     using HandshakeConfirmedCallback = Connection::HandshakeConfirmedCallback;

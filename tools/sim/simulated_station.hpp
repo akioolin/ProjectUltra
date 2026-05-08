@@ -550,6 +550,13 @@ public:
         if (encoder_) encoder_->setCarrierMask(active_mask);
         if (decoder_) decoder_->setCarrierMask(active_mask);
     }
+    void setCarrierLdpcInterleaver(bool enable) {
+        carrier_ldpc_interleaver_enabled_ = enable;
+        if (encoder_) encoder_->setCarrierLdpcInterleaver(enable);
+        if (decoder_) decoder_->setCarrierLdpcInterleaver(enable);
+        LOG_MODEM(INFO, "[%s] CarrierLDPC interleaver: %s",
+                  callsign_.c_str(), enable ? "ENABLED" : "disabled");
+    }
     void setSoftCombiningHARQ(bool enable) {
         protocol_.setSoftCombiningHARQ(enable);
         if (decoder_) decoder_->setSoftCombineBuffer(protocol_.softCombineBuffer());
@@ -678,6 +685,7 @@ private:
     int burst_group_size_ = 8;
     int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
     uint64_t carrier_mask_ = UINT64_MAX;
+    bool carrier_ldpc_interleaver_enabled_ = false;
     int rx_overfeed_factor_ = 1;
     int decode_delay_ms_ = 0;
     int rx_batch_callbacks_ = 1;
@@ -742,6 +750,7 @@ private:
         encoder_->setDataMode(data_modulation_, data_code_rate_);
         encoder_->setFixedFrameCodewords(fixed_frame_codewords_);
         encoder_->setCarrierMask(carrier_mask_);
+        encoder_->setCarrierLdpcInterleaver(carrier_ldpc_interleaver_enabled_);
         encoder_->setBurstInterleaveGroupSize(burst_group_size_);
         encoder_->setMCDPSKCarriers(8);
 
@@ -761,6 +770,7 @@ private:
         decoder_->setBurstInterleaveGroupSize(burst_group_size_);
         decoder_->setFixedFrameCodewords(fixed_frame_codewords_);
         decoder_->setCarrierMask(carrier_mask_);
+        decoder_->setCarrierLdpcInterleaver(carrier_ldpc_interleaver_enabled_);
         decoder_->setSoftCombineBuffer(protocol_.softCombineBuffer());
         decoder_->setMCDPSKCarriers(8);
 
@@ -1265,6 +1275,10 @@ private:
             negotiated_waveform_ = mode;
             LOG_MODEM(INFO, "[%s] Connect waveform set: %s (staying on MC-DPSK for handshake)",
                       callsign_.c_str(), waveformModeToString(mode));
+        });
+
+        protocol_.setPhyMaskV1NegotiatedCallback([this](bool enabled) {
+            setCarrierLdpcInterleaver(enabled);
         });
 
         // Handshake confirmed (initiator only - responder switches in setConnected)

@@ -92,6 +92,8 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
 
     remote_capabilities_ = remote_caps;
     remote_preferred_ = remote_pref;
+    setPhyMaskV1Negotiated(hasPhyMaskV1Capability(config_.mode_capabilities) &&
+                           hasPhyMaskV1Capability(remote_caps));
 
     // Default channel estimates for mode selection
     float snr_db = 15.0f;
@@ -190,12 +192,18 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
                                                         static_cast<uint8_t>(negotiated_mode_),
                                                         rec_mod, rec_rate, snr_db, fading_index_,
                                                         cw_byte);
+            if (phy_mask_v1_negotiated_) {
+                v2::setPhyMaskV1Capability(ack);
+            }
             ack_data = ack.serialize();
         } else {
             auto ack = v2::ConnectFrame::makeConnectAckByHash(local_call_, frame.src_hash,
                                                                static_cast<uint8_t>(negotiated_mode_),
                                                                rec_mod, rec_rate, snr_db, fading_index_,
                                                                cw_byte);
+            if (phy_mask_v1_negotiated_) {
+                v2::setPhyMaskV1Capability(ack);
+            }
             ack_data = ack.serialize();
         }
         transmitFrame(ack_data);
@@ -244,6 +252,8 @@ void Connection::handleConnectAck(const v2::ConnectFrame& frame, const std::stri
     // Get negotiated waveform mode from ConnectFrame
     WaveformMode mode = static_cast<WaveformMode>(frame.negotiated_mode);
     negotiated_mode_ = mode;
+    setPhyMaskV1Negotiated(hasPhyMaskV1Capability(config_.mode_capabilities) &&
+                           v2::hasPhyMaskV1Capability(frame));
 
     // Get initial data mode from CONNECT_ACK (eliminates separate MODE_CHANGE)
     Modulation init_mod = static_cast<Modulation>(frame.initial_modulation);

@@ -179,6 +179,8 @@ public:
 
     void setCarrierMask(uint64_t active_mask);
     uint64_t getCarrierMask() const { return carrier_mask_; }
+    void setCarrierLdpcInterleaver(bool enable);
+    bool getCarrierLdpcInterleaver() const { return use_carrier_ldpc_interleaver_; }
 
     void setFixedFrameCodewords(int cw_count) {
         fixed_frame_codewords_ = v2::sanitizeFixedFrameCodewords(cw_count);
@@ -386,6 +388,7 @@ private:
     std::unique_ptr<ChannelInterleaver> interleaver_;
     bool use_channel_interleave_ = true;
     uint64_t carrier_mask_ = UINT64_MAX;
+    bool use_carrier_ldpc_interleaver_ = false;
     int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
     bool fixed_frame_header_discovery_ = false;
 

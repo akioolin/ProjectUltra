@@ -616,6 +616,58 @@ bool test_quick_brown_fox() {
     return true;
 }
 
+bool test_phy_mask_v1_negotiation() {
+    TEST("PHY_MASK_V1 negotiation gates CarrierLDPC");
+
+    ConnectionConfig modern;
+    modern.auto_accept = true;
+
+    ProtocolEngine stationA(modern);
+    ProtocolEngine stationB(modern);
+    stationA.setLocalCallsign("W1ABC");
+    stationB.setLocalCallsign("K2DEF");
+
+    bool a_enabled = false;
+    bool b_enabled = false;
+    stationA.setPhyMaskV1NegotiatedCallback([&](bool enabled) { a_enabled = enabled; });
+    stationB.setPhyMaskV1NegotiatedCallback([&](bool enabled) { b_enabled = enabled; });
+
+    SimulatedChannel channel(stationA, stationB);
+    stationA.connect("K2DEF");
+    channel.run(50, 100);
+
+    if (!stationA.isConnected() || !stationB.isConnected()) FAIL("modern stations did not connect");
+    if (!stationA.isPhyMaskV1Negotiated() || !stationB.isPhyMaskV1Negotiated()) {
+        FAIL("modern stations did not negotiate PHY_MASK_V1");
+    }
+    if (!a_enabled || !b_enabled) FAIL("PHY_MASK_V1 callback not raised on both sides");
+
+    ConnectionConfig legacy = modern;
+    legacy.mode_capabilities = ModeCapabilities::ALL;
+
+    ProtocolEngine stationC(modern);
+    ProtocolEngine stationD(legacy);
+    stationC.setLocalCallsign("W3ABC");
+    stationD.setLocalCallsign("K4DEF");
+
+    bool legacy_enabled = false;
+    stationC.setPhyMaskV1NegotiatedCallback([&](bool enabled) { legacy_enabled = legacy_enabled || enabled; });
+    stationD.setPhyMaskV1NegotiatedCallback([&](bool enabled) { legacy_enabled = legacy_enabled || enabled; });
+
+    SimulatedChannel legacy_channel(stationC, stationD);
+    stationC.connect("K4DEF");
+    legacy_channel.run(50, 100);
+
+    if (!stationC.isConnected() || !stationD.isConnected()) FAIL("legacy pair did not connect");
+    if (stationC.isPhyMaskV1Negotiated() || stationD.isPhyMaskV1Negotiated()) {
+        FAIL("PHY_MASK_V1 negotiated with legacy peer");
+    }
+    if (legacy_enabled) FAIL("PHY_MASK_V1 callback enabled with legacy peer");
+
+    PASS();
+    return true;
+}
+
 // ============================================================================
 // Binary stream / TNC-facing API Tests
 // ============================================================================
@@ -1137,6 +1189,9 @@ int main() {
     test_disconnect();
     test_manual_accept();
     test_multiple_messages();
+
+    std::cout << "\nCapability Negotiation:\n";
+    test_phy_mask_v1_negotiation();
 
     std::cout << "\nRadio Test Messages:\n";
     test_quick_brown_fox();

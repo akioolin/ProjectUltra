@@ -1637,6 +1637,7 @@ void Connection::enterDisconnected(const std::string& reason) {
     state_ = ConnectionState::DISCONNECTED;
     is_initiator_ = false;
     handshake_confirmed_ = false;
+    setPhyMaskV1Negotiated(false);
     narrowband_override_ = WaveformMode::AUTO;  // Clear session-scoped narrowband override
     std::string old_remote = remote_call_;
     remote_call_.clear();
@@ -1687,6 +1688,18 @@ void Connection::setTransmitCallback(TransmitCallback cb) {
 
 void Connection::setTransmitBurstCallback(TransmitBurstCallback cb) {
     on_transmit_burst_ = std::move(cb);
+}
+
+void Connection::setPhyMaskV1Negotiated(bool enabled) {
+    if (phy_mask_v1_negotiated_ == enabled) {
+        return;
+    }
+    phy_mask_v1_negotiated_ = enabled;
+    LOG_MODEM(INFO, "Connection: PHY_MASK_V1 %s",
+              enabled ? "negotiated" : "disabled");
+    if (on_phy_mask_v1_negotiated_) {
+        on_phy_mask_v1_negotiated_(enabled);
+    }
 }
 
 void Connection::flushBurstBuffer() {
@@ -1797,6 +1810,7 @@ void Connection::reset() {
     state_ = ConnectionState::DISCONNECTED;
     is_initiator_ = false;
     handshake_confirmed_ = false;
+    setPhyMaskV1Negotiated(false);
     remote_call_.clear();
     pending_remote_call_.clear();
     timeout_remaining_ms_ = 0;

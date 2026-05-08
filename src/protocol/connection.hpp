@@ -31,7 +31,7 @@ struct ConnectionConfig {
     int connect_retries = 10;  // Robust MC-DPSK control attempts
     bool auto_accept = true;
 
-    uint8_t mode_capabilities = ModeCapabilities::ALL;
+    uint8_t mode_capabilities = ModeCapabilities::ALL | ModeCapabilities::PHY_MASK_V1;
     WaveformMode preferred_mode = WaveformMode::AUTO;  // Forced waveform (0xFF=AUTO)
 
     // Forced data mode - operator can override SNR-based selection
@@ -170,6 +170,7 @@ public:
     bool isHandshakeConfirmed() const { return handshake_confirmed_; }
     void setPreferredMode(WaveformMode mode) { config_.preferred_mode = mode; }
     void setModeCapabilities(uint8_t caps) { config_.mode_capabilities = caps; }
+    bool isPhyMaskV1Negotiated() const { return phy_mask_v1_negotiated_; }
 
     // Session-scoped narrowband override (cleared on disconnect/reset)
     // Set when responder detects narrowband chirp — overrides config_.preferred_mode for this session only
@@ -204,6 +205,11 @@ public:
     // Callback when the connection-attempt waveform changes.
     using ConnectWaveformChangedCallback = std::function<void(WaveformMode mode)>;
     void setConnectWaveformChangedCallback(ConnectWaveformChangedCallback cb) { on_connect_waveform_changed_ = cb; }
+
+    using PhyMaskV1NegotiatedCallback = std::function<void(bool enabled)>;
+    void setPhyMaskV1NegotiatedCallback(PhyMaskV1NegotiatedCallback cb) {
+        on_phy_mask_v1_negotiated_ = cb;
+    }
 
     // Get current waveform being used for connection attempts
     WaveformMode getConnectWaveform() const { return connect_waveform_; }
@@ -245,6 +251,8 @@ public:
     void reset();
 
 private:
+    void setPhyMaskV1Negotiated(bool enabled);
+
     ConnectionConfig config_;
     ConnectionState state_ = ConnectionState::DISCONNECTED;
 
@@ -267,6 +275,7 @@ private:
     WaveformMode negotiated_mode_ = WaveformMode::OFDM_COX;
     uint8_t remote_capabilities_ = ModeCapabilities::OFDM_COX;
     WaveformMode remote_preferred_ = WaveformMode::OFDM_COX;
+    bool phy_mask_v1_negotiated_ = false;
 
     // Data modulation and code rate (adaptive)
     Modulation data_modulation_ = Modulation::DQPSK;
@@ -392,6 +401,7 @@ private:
     ModeNegotiatedCallback on_mode_negotiated_;
     DataModeChangedCallback on_data_mode_changed_;
     ConnectWaveformChangedCallback on_connect_waveform_changed_;
+    PhyMaskV1NegotiatedCallback on_phy_mask_v1_negotiated_;
     HandshakeConfirmedCallback on_handshake_confirmed_;
     PingTxCallback on_ping_tx_;
     PingReceivedCallback on_ping_received_;

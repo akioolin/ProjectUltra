@@ -183,12 +183,9 @@ private:
     bool use_channel_interleave_ = true;
     bool use_frame_interleave_ = true;     // Always on for OFDM
     uint64_t carrier_mask_ = UINT64_MAX;
-    // BUG-CARRIER-LDPC-001 (2026-05-08): default off pending investigation.
-    // SP4 redirect (08ed189) wired the interleaver TX+RX unconditionally
-    // for connected OFDM. Hardware smoke (AWGN R1/2 SNR=15) regressed:
-    // 0 ACKs received, 15 timeouts. Bisected cleanly to 08ed189. Until
-    // root-caused, keep the infrastructure compiled but inactive. Set to
-    // true deliberately if re-enabling for experiments.
+    // Enabled only after both peers negotiate PHY_MASK_V1. A local-only
+    // CarrierLDPC permutation is a different wire image and is not decodable
+    // by legacy peers.
     bool use_carrier_ldpc_interleaver_ = false;
     int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
     bool use_burst_interleave_ = false;    // Burst-level long interleaver (N-frame groups)

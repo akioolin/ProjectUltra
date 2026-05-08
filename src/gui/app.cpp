@@ -637,6 +637,9 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
             appendRxLogLine(adpt_buf);
         }
     });
+    protocol_.setPhyMaskV1NegotiatedCallback([this](bool enabled) {
+        modem_.setCarrierLdpcInterleaver(enabled);
+    });
     ultra::gui::startupTrace("App", "protocol-callbacks-mid7");
 
     // Waveform mode negotiation callback.
@@ -1141,6 +1144,9 @@ void App::initVirtualStation() {
             std::lock_guard<std::mutex> lock(virtual_tx_pending_mutex_);
             virtual_tx_pending_.insert(virtual_tx_pending_.end(), samples.begin(), samples.end());
         }
+    });
+    virtual_protocol_.setPhyMaskV1NegotiatedCallback([this](bool enabled) {
+        virtual_modem_->setCarrierLdpcInterleaver(enabled);
     });
 
     // Virtual station PING received callback - respond with PONG

@@ -1014,15 +1014,8 @@ bool StreamingDecoder::processWaveformForCodewords(SampleSpan samples,
         return false;
     }
 
-    // BUG-CARRIER-LDPC-001 (2026-05-08): CarrierLDPC interleaver disabled
-    // on both TX (StreamingEncoder default) and RX (here) pending
-    // investigation. SP4 redirect (08ed189) wired the permutation
-    // unconditionally for connected OFDM and the hardware AWGN R1/2
-    // SNR=15 smoke regressed (0 ACKs received, 15 timeouts). The math
-    // and tests look correct in isolation but something in the coupled
-    // TX+RX runtime broke -- bisect cleanly fingers 08ed189. Keep the
-    // infrastructure compiled, gate it to false until root-caused.
-    const bool allow_carrier_ldpc = false;
+    const bool allow_carrier_ldpc =
+        use_carrier_ldpc_interleaver_ && connected_ && protocol::isOFDMMode(mode_);
     const bool allow_rx_erasure =
         connected_ &&
         protocol::isOFDMMode(mode_) &&
@@ -2182,6 +2175,14 @@ void StreamingDecoder::setCarrierMask(uint64_t active_mask) {
     carrier_mask_ = active_mask;
     if (waveform_) {
         waveform_->setCarrierMask(active_mask);
+    }
+}
+
+void StreamingDecoder::setCarrierLdpcInterleaver(bool enable) {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    use_carrier_ldpc_interleaver_ = enable;
+    if (waveform_) {
+        waveform_->setCarrierLdpcInterleaverEnabled(enable);
     }
 }
 

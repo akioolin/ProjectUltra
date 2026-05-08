@@ -66,6 +66,12 @@ is_allowed_hw_log_path_file() {
     CLAUDE.md|tools/run_hw_test.sh)
       return 0
       ;;
+    .github/ISSUE_TEMPLATE/agent_followup.yml|.github/ISSUE_TEMPLATE/hardware_followup.yml)
+      return 0
+      ;;
+    docs/AI_COLLABORATION.md|docs/CHANGELOG.md|docs/SESSION_2026-05-05_NIGHT.md)
+      return 0
+      ;;
   esac
 
   return 1

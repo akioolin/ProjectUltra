@@ -305,15 +305,17 @@ Samples OFDMChirpWaveform::modulate(const Bytes& encoded_data) {
     const bool eligible = carrierLdpcPlumbingEligible() && full_codewords;
     const bool masked_carriers =
         !isAllOnMask(carrier_mask_, CARRIER_LDPC_MASK_CARRIERS);
+    const bool carrier_ldpc_active = eligible &&
+        codeword_count != 1 &&
+        carrierLdpcCodewordCountSupported(codeword_count) &&
+        (carrier_ldpc_interleaver_enabled_ || masked_carriers);
 
     if (eligible && codeword_count == 1) {
         // Ncw=1 DQPSK can put a one-carrier erasure into only 5 LDPC base
         // columns; sub-phase 3 therefore forces all-on and keeps 1-CW PHY
         // headers/control frames bit-identical to the legacy ordering.
         effective_mask = ALL_ON_CARRIER_MASK;
-    } else if (eligible &&
-               carrierLdpcCodewordCountSupported(codeword_count) &&
-               (carrier_ldpc_interleaver_enabled_ || masked_carriers)) {
+    } else if (carrier_ldpc_active) {
         // CarrierLDPC is the final TX bit permutation before the air grid.
         // It is mandatory when RX may insert carrier erasures, and remains
         // enabled for legacy explicit mask tests. Direct waveform callers keep
@@ -636,12 +638,14 @@ bool OFDMChirpWaveform::process(SampleSpan samples) {
             (soft_bits_.size() % LDPC_CODEWORD_BITS == 0);
         const bool masked_carriers =
             !isAllOnMask(carrier_mask_, CARRIER_LDPC_MASK_CARRIERS);
+        const bool carrier_ldpc_active = eligible &&
+            codeword_count != 1 &&
+            carrierLdpcCodewordCountSupported(codeword_count) &&
+            (carrier_ldpc_interleaver_enabled_ || masked_carriers);
         if (eligible && codeword_count == 1) {
             // Ncw=1 remains legacy ordered; this includes the future 1-CW
             // R1/4 PHY mask header, which must stay bit-identical.
-        } else if (eligible &&
-                   carrierLdpcCodewordCountSupported(codeword_count) &&
-                   (carrier_ldpc_interleaver_enabled_ || masked_carriers)) {
+        } else if (carrier_ldpc_active) {
             std::vector<float> air_llrs = std::move(soft_bits_);
             if (masked_carriers) {
                 air_llrs = eraseMaskedCarrierLLRs(std::move(air_llrs),

@@ -433,6 +433,11 @@ void ProtocolEngine::setModeCapabilities(uint8_t caps) {
     connection_.setModeCapabilities(caps);
 }
 
+bool ProtocolEngine::isPhyMaskV1Negotiated() const {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    return connection_.isPhyMaskV1Negotiated();
+}
+
 void ProtocolEngine::setNarrowbandOverride(WaveformMode mode) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setNarrowbandOverride(mode);
@@ -485,6 +490,11 @@ void ProtocolEngine::setModeNegotiatedCallback(ModeNegotiatedCallback cb) {
 void ProtocolEngine::setConnectWaveformChangedCallback(ConnectWaveformChangedCallback cb) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setConnectWaveformChangedCallback(std::move(cb));
+}
+
+void ProtocolEngine::setPhyMaskV1NegotiatedCallback(PhyMaskV1NegotiatedCallback cb) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.setPhyMaskV1NegotiatedCallback(std::move(cb));
 }
 
 void ProtocolEngine::setHandshakeConfirmedCallback(HandshakeConfirmedCallback cb) {
