@@ -1,0 +1,558 @@
+// OFDM pilot tracking and channel interpolation
+// Part of OFDMDemodulator::Impl
+
+#define _USE_MATH_DEFINES
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include "demodulator_impl.hpp"
+#include "demodulator_constants.hpp"
+#include "ultra/logging.hpp"
+
+namespace ultra {
+
+using namespace demod_constants;
+
+void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& freq_domain) {
+    // Smoothing factor for channel estimate update:
+    // - First symbol: alpha=1.0 (use pilot estimate directly)
+    // - Subsequent symbols: depends on modulation type and pilot availability
+    //
+    // For DIFFERENTIAL modes (DQPSK, D8PSK, DBPSK):
+    //   WITHOUT pilots: Use low alpha (0.1) to keep H stable
+    //   WITH pilots: Use higher alpha (0.5) to track fading - pilots provide
+    //                reliable per-symbol phase reference that makes differential
+    //                decoding robust even with faster tracking
+    //
+    // For COHERENT modes (QPSK, QAM):
+    //   Use high alpha (0.9) to track channel changes quickly.
+    //
+    bool is_differential = (config.modulation == Modulation::DBPSK ||
+                            config.modulation == Modulation::DQPSK ||
+                            config.modulation == Modulation::D8PSK);
+    bool has_pilots = !pilot_carrier_indices.empty();
+
+    // Use soft_bits.empty() to detect first DATA symbol (snr_symbol_count may be > 0 from LTS)
+    bool is_first_data_symbol = soft_bits.empty();
+
+    float alpha;
+    if (is_first_data_symbol) {
+        alpha = 1.0f;  // First data symbol: use pilot estimate directly (channel changed since LTS)
+    } else if (is_differential) {
+        // Magnitude-only tracking: updates |H| to track fading depth for MMSE,
+        // while phase stays frozen from LTS. Alpha=0.5 balances fading tracking
+        // vs noise smoothing (fading at 0.1Hz Doppler changes ~5%/symbol).
+        alpha = has_pilots ? 0.5f : 0.1f;
+    } else {
+        alpha = 0.9f;  // Coherent: track channel changes
+    }
+
+    // First pass: compute all LS estimates and their average
+    std::vector<Complex> h_ls_all(pilot_carrier_indices.size());
+    Complex h_sum(0, 0);
+
+    for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
+        int idx = pilot_carrier_indices[i];
+        Complex rx = freq_domain[idx];
+        Complex tx = pilot_sequence[i];
+        h_ls_all[i] = rx / tx;
+        h_sum += h_ls_all[i];
+    }
+
+    // Carrier phase recovery: compute average phase offset on first symbol
+    // Skip for coherent modes (QPSK, BPSK) — the LTS provides accurate H that includes
+    // the correct channel phase. MMSE equalization (conj(H)*rx / |H|²+σ²) naturally
+    // removes the phase. Applying carrier_phase_correction removes phase from H but NOT
+    // from the received signal, leaving a residual rotation in the equalized output.
+    if (!is_differential && !carrier_phase_initialized && !pilot_carrier_indices.empty()) {
+        carrier_phase_initialized = true;  // Mark as done (identity correction)
+        LOG_DEMOD(DEBUG, "Carrier phase recovery: SKIPPED for coherent mode (LTS provides accurate H)");
+    } else if (is_differential && !carrier_phase_initialized && !pilot_carrier_indices.empty()) {
+        Complex h_avg = h_sum / float(pilot_carrier_indices.size());
+        float avg_mag = std::abs(h_avg);
+        if (avg_mag > 0.01f) {
+            carrier_phase_correction = std::conj(h_avg) / avg_mag;
+            carrier_phase_initialized = true;
+            LOG_DEMOD(DEBUG, "Carrier phase recovery: avg_phase=%.1f°, applying correction",
+                      std::arg(h_avg) * 180.0f / M_PI);
+        }
+    }
+
+    // Apply carrier phase correction to all H estimates (identity for coherent modes)
+    for (size_t i = 0; i < h_ls_all.size(); ++i) {
+        h_ls_all[i] *= carrier_phase_correction;
+    }
+    h_sum *= carrier_phase_correction;
+
+    // CPE (Common Phase Error) correction for ALL modes (coherent and differential).
+    // Estimate average phase drift from pilot LS vs current H, apply to all carriers.
+    // This tracks residual CFO and slow oscillator drift without modifying freq_offset_hz.
+    // Standard approach used in WiFi 802.11a/g/n receivers.
+    //
+    // For differential modes (DQPSK/D8PSK): CPE keeps channel_estimate phase tracking
+    // the actual channel, improving MMSE equalization quality. The differential decoding
+    // is unaffected because both eq[n] and eq[n-1] use CPE-corrected H, so the common
+    // phase cancels in diff = eq[n] * conj(eq[n-1]). The residual (CPE change between
+    // consecutive symbols) is small (~5° at 0.5 Hz Doppler) — well within DQPSK's 45° margin.
+    {
+        Complex cpe_sum(0, 0);
+        float cpe_weight_sum = 0.0f;
+        for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
+            int idx = pilot_carrier_indices[i];
+            Complex h_old = channel_estimate[idx];
+            float h_old_mag = std::abs(h_old);
+            if (h_old_mag > 0.01f) {
+                // Phase difference between new pilot LS and current channel estimate
+                Complex ratio = h_ls_all[i] * std::conj(h_old);
+                float mag = std::abs(ratio);
+                if (mag > 1e-6f) {
+                    cpe_sum += (ratio / mag) * h_old_mag;  // Weight by channel strength
+                    cpe_weight_sum += h_old_mag;
+                }
+            }
+        }
+        if (cpe_weight_sum > 0.01f) {
+            float cpe_phase = std::arg(cpe_sum);
+
+            // For differential modes, clamp CPE to ±15° per symbol to prevent
+            // overcorrection from noisy pilot estimates on deep fading.
+            // At 6 pilots, phase estimation noise is ~4° at SNR=15; 15° gives ~3.5σ margin.
+            // This still tracks up to ~560°/s of phase drift (15° × 37.5 sym/s),
+            // covering Doppler up to ~1.5 Hz.
+            if (is_differential) {
+                constexpr float MAX_DIFF_CPE_RAD = 0.262f;  // ~15 degrees
+                cpe_phase = std::max(-MAX_DIFF_CPE_RAD, std::min(MAX_DIFF_CPE_RAD, cpe_phase));
+            }
+
+            if (std::abs(cpe_phase) > 0.001f) {  // Skip if negligible
+                Complex cpe_correction = std::exp(Complex(0.0f, cpe_phase));
+                // Apply CPE to ALL carrier H estimates (pilot + data)
+                for (int idx : data_carrier_indices) {
+                    channel_estimate[idx] *= cpe_correction;
+                }
+                for (int idx : pilot_carrier_indices) {
+                    channel_estimate[idx] *= cpe_correction;
+                }
+                static int cpe_log_count = 0;
+                if (cpe_log_count < 10) {
+                    LOG_DEMOD(DEBUG, "CPE correction%s: %.2f° (from %zu pilots)",
+                              is_differential ? " [diff]" : "",
+                              cpe_phase * 180.0f / M_PI, pilot_carrier_indices.size());
+                    cpe_log_count++;
+                }
+            }
+        }
+    }
+
+    // DEBUG: Log first symbol's pilot analysis
+    if (soft_bits.empty()) {
+        LOG_DEMOD(DEBUG, "=== First DATA symbol pilot analysis (snr_symbol_count=%d) ===", snr_symbol_count);
+        for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
+            int idx = pilot_carrier_indices[i];
+            LOG_DEMOD(DEBUG, "DATA pilot[%zu] idx=%d: rx=(%.4f,%.4f) |rx|=%.4f tx=(%.1f,%.1f) H=(%.2f,%.2f) |H|=%.2f",
+                      i, idx,
+                      freq_domain[idx].real(), freq_domain[idx].imag(), std::abs(freq_domain[idx]),
+                      pilot_sequence[i].real(), pilot_sequence[i].imag(),
+                      h_ls_all[i].real(), h_ls_all[i].imag(),
+                      std::abs(h_ls_all[i]));
+        }
+        LOG_DEMOD(DEBUG, "H avg: (%.2f,%.2f), |H|=%.2f, phase=%.1f deg",
+                  (h_sum / float(pilot_carrier_indices.size())).real(),
+                  (h_sum / float(pilot_carrier_indices.size())).imag(),
+                  std::abs(h_sum / float(pilot_carrier_indices.size())),
+                  std::arg(h_sum / float(pilot_carrier_indices.size())) * 180.0f / M_PI);
+    }
+
+    // Compute average signal power from pilots
+    float signal_power_sum = 0.0f;
+    for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
+        signal_power_sum += std::norm(h_ls_all[i]);
+    }
+    float signal_power = signal_power_sum / pilot_carrier_indices.size();
+
+    // Measure noise using TEMPORAL comparison
+    float noise_power_sum = 0.0f;
+    size_t noise_count = 0;
+
+    for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
+        int idx = pilot_carrier_indices[i];
+
+        if (!prev_pilot_phases.empty() && i < prev_pilot_phases.size()) {
+            Complex prev_h = prev_pilot_phases[i];
+            Complex curr_h = h_ls_all[i];
+
+            if (std::norm(prev_h) > 1e-6f && std::norm(curr_h) > 1e-6f) {
+                Complex diff = curr_h - prev_h;
+                noise_power_sum += std::norm(diff);
+                noise_count++;
+            }
+        }
+
+        // Update smoothed channel estimate
+        Complex h_old = channel_estimate[idx];
+        if (is_differential) {
+            // Magnitude-only update: track fading depth for MMSE scaling
+            // while preserving the LTS phase that differential decoding needs.
+            // new_mag = alpha * |H_pilot| + (1-alpha) * |H_old|
+            float new_mag = alpha * std::abs(h_ls_all[i]) + (1.0f - alpha) * std::abs(h_old);
+            float old_phase = std::arg(h_old);
+            channel_estimate[idx] = std::polar(new_mag, old_phase);
+        } else {
+            channel_estimate[idx] = alpha * h_ls_all[i] + (1.0f - alpha) * h_old;
+        }
+    }
+
+    // First symbol fallback: assume 15 dB SNR
+    if (noise_count == 0) {
+        noise_power_sum = signal_power / DEFAULT_SNR_LINEAR;
+        noise_count = 1;
+    }
+
+    // === Frequency offset estimation from pilot phase differences ===
+    // DISABLED for all modes:
+    // - Differential: fading-induced pilot phase changes corrupt CFO estimate.
+    // - Coherent: noise causes progressive freq_offset_hz drift → growing phase error
+    //   (measured 22° on AWGN at SNR=100, growing to 25° by symbol 10).
+    // CPE correction (above) handles residual phase drift for coherent modes.
+    // Chirp/LTS CFO provides the initial frequency offset.
+    constexpr bool enable_pilot_cfo_tracking = false;
+    if (enable_pilot_cfo_tracking && !prev_pilot_phases.empty() && prev_pilot_phases.size() == h_ls_all.size()) {
+        Complex phase_diff_sum(0, 0);
+        int valid_count = 0;
+
+        for (size_t i = 0; i < h_ls_all.size(); ++i) {
+            Complex diff = h_ls_all[i] * std::conj(prev_pilot_phases[i]);
+
+            if (std::norm(prev_pilot_phases[i]) > 1e-6f &&
+                std::norm(h_ls_all[i]) > 1e-6f) {
+                float mag = std::abs(diff);
+                if (mag > 1e-6f) {
+                    phase_diff_sum += diff / mag;
+                    valid_count++;
+                }
+            }
+        }
+
+        if (valid_count > 0) {
+            Complex avg_diff = phase_diff_sum / static_cast<float>(valid_count);
+            float avg_phase_diff = std::atan2(avg_diff.imag(), avg_diff.real());
+
+            pilot_phase_correction = Complex(std::cos(-avg_phase_diff), std::sin(-avg_phase_diff));
+
+            float symbol_duration = static_cast<float>(config.getSymbolDuration()) /
+                                   static_cast<float>(config.sample_rate);
+            float residual_cfo = avg_phase_diff / (2.0f * M_PI * symbol_duration);
+            float total_cfo = freq_offset_hz + residual_cfo;
+
+            // Adaptive alpha for CFO tracking
+            float adaptive_alpha = FREQ_OFFSET_ALPHA;
+            if (symbols_since_sync < CFO_ACQUISITION_SYMBOLS) {
+                float progress = static_cast<float>(symbols_since_sync) / CFO_ACQUISITION_SYMBOLS;
+                adaptive_alpha = 0.9f * (1.0f - progress) + FREQ_OFFSET_ALPHA * progress;
+            }
+            if (std::abs(residual_cfo) > 10.0f) {
+                adaptive_alpha = std::max(adaptive_alpha, 0.9f);
+            }
+            symbols_since_sync++;
+
+            freq_offset_filtered = adaptive_alpha * total_cfo +
+                                  (1.0f - adaptive_alpha) * freq_offset_filtered;
+
+            freq_offset_hz = std::max(-MAX_CFO_HZ, std::min(MAX_CFO_HZ, freq_offset_filtered));
+
+            LOG_DEMOD(TRACE, "Freq offset: residual=%.2f Hz, total=%.2f Hz, filtered=%.2f Hz",
+                     residual_cfo, total_cfo, freq_offset_hz);
+        }
+    } else {
+        pilot_phase_correction = Complex(1, 0);
+    }
+
+    // Store current pilots for next symbol
+    prev_pilot_phases = h_ls_all;
+
+    // Interpolate between pilots
+    if (!is_differential) {
+        // Coherent modes: phase-slope-compensated complex interpolation.
+        // The timing offset introduces a phase gradient across carriers; de-sloping before
+        // interpolation prevents phase wrapping. When slope is near zero (good timing),
+        // de-slope is identity — complex interpolation still preserves phase info that
+        // magnitude-only interpolation would discard.
+        int half_fft = config.fft_size / 2;
+
+        // Precompute de-sloped pilot H values
+        std::vector<Complex> pilot_desloped(pilot_carrier_indices.size());
+        for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
+            int fft_idx = pilot_carrier_indices[i];
+            int k = (fft_idx <= half_fft) ? fft_idx : fft_idx - config.fft_size;
+            float phase = -lts_phase_slope * k;
+            pilot_desloped[i] = channel_estimate[fft_idx] * Complex(std::cos(phase), std::sin(phase));
+        }
+
+        for (size_t dc = 0; dc < interp_table.size(); ++dc) {
+            const auto& info = interp_table[dc];
+
+            // Find desloped values for the neighboring pilots
+            Complex h_lower(0, 0), h_upper(0, 0);
+            if (info.lower_pilot >= 0) {
+                for (size_t p = 0; p < pilot_carrier_indices.size(); ++p) {
+                    if (pilot_carrier_indices[p] == info.lower_pilot) {
+                        h_lower = pilot_desloped[p];
+                        break;
+                    }
+                }
+            }
+            if (info.upper_pilot >= 0) {
+                for (size_t p = 0; p < pilot_carrier_indices.size(); ++p) {
+                    if (pilot_carrier_indices[p] == info.upper_pilot) {
+                        h_upper = pilot_desloped[p];
+                        break;
+                    }
+                }
+            }
+
+            // Complex linear interpolation in de-sloped domain
+            Complex interp_h(0, 0);
+            if (info.lower_pilot >= 0 && info.upper_pilot >= 0) {
+                interp_h = (1.0f - info.alpha) * h_lower + info.alpha * h_upper;
+            } else if (info.lower_pilot >= 0) {
+                interp_h = h_lower;
+            } else {
+                interp_h = h_upper;
+            }
+
+            // Re-slope at data carrier position
+            int k = (info.fft_idx <= half_fft) ? info.fft_idx : info.fft_idx - config.fft_size;
+            float phase = lts_phase_slope * k;
+            channel_estimate[info.fft_idx] = interp_h * Complex(std::cos(phase), std::sin(phase));
+        }
+    } else {
+        // Differential modes or no slope: magnitude-only interpolation.
+        // Preserves LTS phases that differential decoding relies on.
+        for (size_t dc = 0; dc < interp_table.size(); ++dc) {
+            const auto& info = interp_table[dc];
+            float interp_mag = 0.0f;
+            if (info.lower_pilot >= 0 && info.upper_pilot >= 0) {
+                float m1 = std::abs(channel_estimate[info.lower_pilot]);
+                float m2 = std::abs(channel_estimate[info.upper_pilot]);
+                interp_mag = (1.0f - info.alpha) * m1 + info.alpha * m2;
+            } else if (info.lower_pilot >= 0) {
+                interp_mag = std::abs(channel_estimate[info.lower_pilot]);
+            } else if (info.upper_pilot >= 0) {
+                interp_mag = std::abs(channel_estimate[info.upper_pilot]);
+            }
+            float old_phase = std::arg(channel_estimate[info.fft_idx]);
+            channel_estimate[info.fft_idx] = std::polar(interp_mag, old_phase);
+        }
+    }
+
+    // Apply DD (decision-directed) phase corrections from previous symbol.
+    // These are snapshot corrections computed in equalize() after hard-decision.
+    // Applied after interpolation so both pilot-based and DD tracking contribute:
+    // - Interpolation: fresh magnitude + phase baseline from 6 pilots
+    // - DD corrections: per-carrier phase refinement from 53 data decisions
+    if (!is_differential && dd_phase_corrections.size() == data_carrier_indices.size()
+        && snr_symbol_count >= 3) {
+        float dd_blend = 0.3f;
+        for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
+            float corr = dd_phase_corrections[i];
+            if (std::abs(corr) > 0.001f) {
+                float phase_adj = corr * dd_blend;
+                channel_estimate[data_carrier_indices[i]] *=
+                    std::exp(Complex(0.0f, phase_adj));
+            }
+        }
+    }
+
+    // Initialize adaptive equalizer weights from pilot-based estimate
+    if (config.adaptive_eq_enabled) {
+        for (int idx : data_carrier_indices) {
+            if (snr_symbol_count < 3) {
+                lms_weights[idx] = channel_estimate[idx];
+            }
+        }
+        for (int idx : pilot_carrier_indices) {
+            if (snr_symbol_count < 3) {
+                lms_weights[idx] = channel_estimate[idx];
+            }
+        }
+    }
+
+    // Update noise variance and SNR
+    // Note: noise_count == 1 means first symbol fallback (no prev_pilot_phases yet)
+    // In that case, noise_power_sum = signal_power / DEFAULT_SNR_LINEAR is already the variance
+    //
+    // CRITICAL FIX FOR FADING CHANNELS:
+    // On fading channels, H[n] - H[n-1] includes BOTH noise AND fading variation.
+    // The temporal comparison cannot distinguish them, causing noise_variance to be
+    // massively overestimated → compressed LLRs → LDPC decode failure.
+    //
+    // Solution: Detect fading from pilot magnitude variance and use LTS-based SNR
+    // estimate when fading is significant. The pilots still track the channel
+    // (for equalization), but we don't let fading contaminate noise_variance.
+
+    // Compute fading index from pilot magnitude variance
+    // High variance across carriers indicates frequency-selective fading
+    float h_mag_mean = 0.0f;
+    for (size_t i = 0; i < h_ls_all.size(); ++i) {
+        h_mag_mean += std::abs(h_ls_all[i]);
+    }
+    h_mag_mean /= h_ls_all.size();
+
+    float h_mag_variance = 0.0f;
+    for (size_t i = 0; i < h_ls_all.size(); ++i) {
+        float diff = std::abs(h_ls_all[i]) - h_mag_mean;
+        h_mag_variance += diff * diff;
+    }
+    h_mag_variance /= h_ls_all.size();
+
+    // Fading index: normalized magnitude variance (0 = flat, >0.1 = fading)
+    float fading_index = (h_mag_mean > 0.01f) ? std::sqrt(h_mag_variance) / h_mag_mean : 0.0f;
+
+    // Store for external access (GUI display, rate adaptation)
+    last_fading_index = fading_index;
+
+    if (noise_count > 0 && noise_power_sum > 0.0f) {
+        // Noise variance strategy: preserve LTS-based estimate for ALL modes.
+        //
+        // The LTS estimate (from 2 training symbols, averaged over ~53 carriers) is accurate
+        // and reliable. The temporal pilot comparison (curr_h - prev_h) is problematic because:
+        // - Differential: includes fading variation → massively overestimated noise
+        // - Coherent first symbol: fallback to 15 dB overwrites accurate LTS (e.g., at SNR=20+)
+        // - Coherent subsequent: includes fading variation on fading channels
+        //
+        // Only update estimated_snr_linear for display/rate-adaptation purposes.
+        if (!is_differential && noise_count > 1) {
+            float instantaneous_snr = signal_power / std::max(noise_variance, 1e-6f);
+            instantaneous_snr = std::max(0.1f, std::min(10000.0f, instantaneous_snr));
+            estimated_snr_linear = snr_alpha * instantaneous_snr + (1.0f - snr_alpha) * estimated_snr_linear;
+        }
+    }
+
+    snr_symbol_count++;
+}
+
+// =============================================================================
+// CHANNEL INTERPOLATION
+// =============================================================================
+
+void OFDMDemodulator::Impl::interpolateChannel() {
+    // DFT-based channel interpolation:
+    // 1. Build N-point frequency vector: pilot H at known positions, linear interp elsewhere
+    // 2. IDFT → channel impulse response (CIR) in delay domain
+    // 3. Window: zero taps beyond expected delay spread (noise suppression)
+    // 4. DFT back → clean H at every carrier
+    //
+    // This exploits the finite delay spread of the HF channel:
+    // Good fading: 0.5ms delay, Moderate: 1.0ms
+    // At 46.875 Hz carrier spacing, bandwidth = 59 × 46.875 = 2766 Hz
+    // CIR tap spacing = 1/2766 Hz ≈ 0.36ms → keep ~5 taps for 1.8ms coverage
+    //
+    // Benefits over linear interpolation:
+    // - Noise suppression: zeroing high-delay taps removes pilot estimation noise
+    // - Smooth interpolation: DFT naturally produces band-limited frequency response
+    // - No phase discontinuity issues at pilot boundaries
+
+    size_t N = all_carrier_fft_indices.size();  // Total carriers (59)
+    size_t N_p = pilot_carrier_indices.size();
+
+    if (N_p < 2 || N == 0) {
+        // Fallback: linear interpolation
+        for (size_t dc = 0; dc < interp_table.size(); ++dc) {
+            const auto& info = interp_table[dc];
+            if (info.lower_pilot >= 0 && info.upper_pilot >= 0) {
+                Complex H1 = channel_estimate[info.lower_pilot];
+                Complex H2 = channel_estimate[info.upper_pilot];
+                channel_estimate[info.fft_idx] = (1.0f - info.alpha) * H1 + info.alpha * H2;
+            } else if (info.lower_pilot >= 0) {
+                channel_estimate[info.fft_idx] = channel_estimate[info.lower_pilot];
+            } else if (info.upper_pilot >= 0) {
+                channel_estimate[info.fft_idx] = channel_estimate[info.upper_pilot];
+            }
+        }
+        return;
+    }
+
+    // Step 1: Build N-point H vector with pilot values and linear interp between them
+    // This gives IDFT a good starting point (better than zeros at non-pilot positions)
+    auto& H_full = interp_h_full_scratch;
+    H_full.resize(N);
+    std::fill(H_full.begin(), H_full.end(), Complex(0, 0));
+
+    // First, place pilot H values at their logical positions
+    // and track pilot logical indices for interpolation
+    auto& pilot_logical_pos = interp_pilot_logical_pos_scratch;
+    pilot_logical_pos.clear();
+    for (size_t i = 0; i < N; ++i) {
+        if (is_pilot_logical[i]) {
+            H_full[i] = channel_estimate[all_carrier_fft_indices[i]];
+            pilot_logical_pos.push_back(static_cast<int>(i));
+        }
+    }
+
+    // Linear interpolation between pilots (as initial fill)
+    for (size_t seg = 0; seg < pilot_logical_pos.size(); ++seg) {
+        int p1 = pilot_logical_pos[seg];
+        int p2 = (seg + 1 < pilot_logical_pos.size())
+                     ? pilot_logical_pos[seg + 1]
+                     : static_cast<int>(N);  // extrapolate past last pilot
+        Complex H1 = H_full[p1];
+        Complex H2 = (seg + 1 < pilot_logical_pos.size()) ? H_full[p2] : H1;
+
+        for (int i = p1 + 1; i < p2 && i < static_cast<int>(N); ++i) {
+            float t = static_cast<float>(i - p1) / static_cast<float>(p2 - p1);
+            H_full[i] = (1.0f - t) * H1 + t * H2;
+        }
+    }
+    // Extrapolate before first pilot
+    if (!pilot_logical_pos.empty() && pilot_logical_pos[0] > 0) {
+        Complex H0 = H_full[pilot_logical_pos[0]];
+        for (int i = 0; i < pilot_logical_pos[0]; ++i) {
+            H_full[i] = H0;
+        }
+    }
+
+    // Step 2: IDFT → CIR (N-point, small enough for direct computation)
+    auto& h_cir = interp_h_cir_scratch;
+    h_cir.resize(N);
+    float inv_N = 1.0f / static_cast<float>(N);
+    for (size_t n = 0; n < N; ++n) {
+        Complex sum(0, 0);
+        const Complex* phasors = &interp_idft_phasors[n * N];
+        for (size_t k = 0; k < N; ++k) {
+            sum += H_full[k] * phasors[k];
+        }
+        h_cir[n] = sum * inv_N;
+    }
+
+    // Step 3: Window — keep first L taps and last L-1 taps (symmetric CIR)
+    // CIR tap spacing = 1/bandwidth = 1/(N × 46.875 Hz) ≈ 0.36ms
+    // Keep L=5 taps → covers ±1.8ms delay spread (enough for moderate fading)
+    // Taps [0..L-1] = causal (positive delays), [N-L+1..N-1] = acausal (negative delays)
+    size_t L = 5;
+    if (L > N / 2) L = N / 2;
+    for (size_t n = L; n < N - L + 1; ++n) {
+        h_cir[n] = Complex(0, 0);
+    }
+
+    // Step 4: DFT → clean interpolated H at all carriers
+    auto& H_clean = interp_h_clean_scratch;
+    H_clean.resize(N);
+    for (size_t k = 0; k < N; ++k) {
+        Complex sum(0, 0);
+        const Complex* phasors = &interp_dft_phasors[k * N];
+        for (size_t n = 0; n < N; ++n) {
+            sum += h_cir[n] * phasors[n];
+        }
+        H_clean[k] = sum;
+    }
+
+    // Step 5: Write clean H to data carrier positions only
+    // Pilots keep their direct LS estimates (more accurate at pilot positions)
+    for (size_t i = 0; i < N; ++i) {
+        if (!is_pilot_logical[i]) {
+            channel_estimate[all_carrier_fft_indices[i]] = H_clean[i];
+        }
+    }
+}
+
+} // namespace ultra

@@ -1,5 +1,6 @@
 #include "ultra/dsp.hpp"
 #define _USE_MATH_DEFINES
+#include <algorithm>
 #include <cmath>
 #include <numeric>
 
@@ -292,7 +293,12 @@ HilbertTransform::HilbertTransform(size_t taps) {
 
 std::vector<Complex> HilbertTransform::process(SampleSpan in) {
     std::vector<Complex> out(in.size());
+    process(in, out);
+    return out;
+}
 
+void HilbertTransform::process(SampleSpan in, std::vector<Complex>& out) {
+    out.resize(in.size());
     for (size_t i = 0; i < in.size(); ++i) {
         delay_line_[delay_idx_] = in[i];
 
@@ -312,8 +318,11 @@ std::vector<Complex> HilbertTransform::process(SampleSpan in) {
         out[i] = Complex(real, q);
         delay_idx_ = (delay_idx_ + 1) % coeffs_.size();
     }
+}
 
-    return out;
+void HilbertTransform::reset() {
+    std::fill(delay_line_.begin(), delay_line_.end(), 0.0f);
+    delay_idx_ = 0;
 }
 
 // ============ Utility functions ============

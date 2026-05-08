@@ -86,9 +86,15 @@ endif()
 # Core library
 add_library(ultra_core STATIC
     src/ofdm/modulator.cpp
-    src/ofdm/demodulator.cpp
+    src/ofdm/ofdm_demodulator_setup.cpp
+    src/ofdm/ofdm_symbol_demap.cpp
+    src/ofdm/ofdm_stream_processor.cpp
+    src/ofdm/ofdm_sync_adapter.cpp
     src/ofdm/ofdm_sync.cpp
-    src/ofdm/channel_equalizer.cpp
+    src/ofdm/channel_equalizer_baseband.cpp
+    src/ofdm/channel_equalizer_lts.cpp
+    src/ofdm/channel_equalizer_pilot.cpp
+    src/ofdm/channel_equalizer_equalize.cpp
     src/fec/ldpc_encoder.cpp
     src/fec/ldpc_decoder.cpp
     src/fec/ldpc_codec.cpp
@@ -167,8 +173,15 @@ endif()
 
 # Shared GUI/modem runtime source lists. Keep these centralized so CLI tools,
 # TNC, simulator, and GUI builds cannot silently drift apart.
+set(ULTRA_STREAMING_DECODER_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/streaming_decoder.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/streaming_sync_acquisition.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/streaming_ofdm_decode.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/streaming_burst_interleave.cpp
+)
+
 set(ULTRA_STREAMING_MODEM_SOURCES
-    src/gui/modem/streaming_decoder.cpp
+    ${ULTRA_STREAMING_DECODER_SOURCES}
     src/gui/modem/streaming_encoder.cpp
 )
 
@@ -312,7 +325,7 @@ if(ULTRA_BUILD_TOOLS)
     # Decoder-only by design; do not pull in the encoder runtime here.
     add_executable(test_waveform_simple
         tools/test_waveform_simple.cpp
-        src/gui/modem/streaming_decoder.cpp
+        ${ULTRA_STREAMING_DECODER_SOURCES}
     )
     ultra_enable_tool_test_warnings(tools/test_waveform_simple.cpp)
     target_include_directories(test_waveform_simple PRIVATE

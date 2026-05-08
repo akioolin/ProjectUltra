@@ -146,6 +146,8 @@ public:
 
     // Returns analytic signal (I + jQ)
     std::vector<Complex> process(SampleSpan in);
+    void process(SampleSpan in, std::vector<Complex>& out);
+    void reset();
 
 private:
     std::vector<Sample> coeffs_;

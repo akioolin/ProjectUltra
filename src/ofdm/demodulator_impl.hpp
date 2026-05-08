@@ -51,6 +51,8 @@ struct OFDMDemodulator::Impl {
     std::vector<Complex> interp_h_cir_scratch;
     std::vector<Complex> interp_h_clean_scratch;
     std::vector<int> interp_pilot_logical_pos_scratch;
+    std::vector<Complex> interp_idft_phasors;
+    std::vector<Complex> interp_dft_phasors;
 
     // Channel estimate (per carrier)
     std::vector<Complex> channel_estimate;
@@ -192,6 +194,7 @@ struct OFDMDemodulator::Impl {
     void setupCarriers();
     void generateSequences();
     void buildInterpTable();
+    void buildInterpolationPhasors();
 
     // ==========================================================================
     // SYNC DETECTION (ofdm_sync.cpp)

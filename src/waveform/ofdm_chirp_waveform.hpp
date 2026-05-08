@@ -12,6 +12,7 @@
 // - CFO-tolerant via complex correlation chirp detection
 
 #include "waveform_interface.hpp"
+#include "ultra/dsp.hpp"
 #include "ultra/ofdm.hpp"
 #include "sync/chirp_sync.hpp"
 #include <memory>
@@ -137,6 +138,8 @@ private:
     std::unique_ptr<OFDMModulator> modulator_;
     std::unique_ptr<OFDMDemodulator> demodulator_;
     std::unique_ptr<sync::ChirpSync> chirp_sync_;
+    HilbertTransform data_sync_hilbert_{65};
+    std::vector<Complex> data_sync_analytic_scratch_;
 
     // State
     float cfo_hz_ = 0.0f;

@@ -441,8 +441,9 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
     // CFO-aware Schmidl-Cox style autocorrelation for LTS detection.
     // Use analytic signal (Hilbert) so correlation magnitude is robust to
     // carrier/CFO phase rotation and avoids real-only sign collapse.
-    HilbertTransform hilbert(65);
-    auto analytic = hilbert.process(samples);
+    data_sync_hilbert_.reset();
+    auto& analytic = data_sync_analytic_scratch_;
+    data_sync_hilbert_.process(samples, analytic);
     if (analytic.size() < static_cast<size_t>(symbol_samples * 3)) {
         return false;
     }

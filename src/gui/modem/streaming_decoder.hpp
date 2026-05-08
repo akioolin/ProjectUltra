@@ -296,6 +296,7 @@ private:
     void decodeCurrentFrame();
 
     int expectedOFDMCodewordsForSamples(size_t sample_count) const;
+    size_t getOFDMControlFrameSamplesForCurrentMode() const;
     bool processWaveformForCodewords(SampleSpan samples, int expected_codewords);
 
     // Estimate SNR from chirp correlation strength

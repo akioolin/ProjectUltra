@@ -156,7 +156,7 @@ add_test(NAME WaveformLoopback COMMAND test_waveform_loopback)
 
 add_executable(test_streaming_config
     test_streaming_config.cpp
-    ../src/gui/modem/streaming_decoder.cpp
+    ${ULTRA_STREAMING_DECODER_SOURCES}
     ../src/gui/modem/streaming_encoder.cpp
 )
 target_include_directories(test_streaming_config PRIVATE
@@ -196,7 +196,7 @@ add_test(NAME StreamingSignalPolicy COMMAND test_streaming_signal_policy)
 # Current streaming MC-DPSK encode/decode loopback.
 add_executable(test_streaming_mc_dpsk
     test_streaming_mc_dpsk.cpp
-    ../src/gui/modem/streaming_decoder.cpp
+    ${ULTRA_STREAMING_DECODER_SOURCES}
     ../src/gui/modem/streaming_encoder.cpp
 )
 target_include_directories(test_streaming_mc_dpsk PRIVATE
