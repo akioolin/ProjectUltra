@@ -63,7 +63,7 @@ on measured SNR and fading.
 |-------------------------------|------------------------|------:|-----------:|-------|
 | 50 KB Mac↔Pi5 cable           | Clean USB cable        | 174 s |  2354 bps  | Auto DQPSK R3/4 @ SNR=28 |
 | 20 KB Mac↔Pi5 injected        | AWGN, SNR=15           |  72 s |  2266 bps  | Auto DQPSK R2/3, 0 retx, byte-exact |
-| 20 KB Mac↔Pi5 injected        | Watterson Good, SNR=15 | 100 s |  1631 bps  | Auto DQPSK R1/2, 0 retx, byte-exact |
+| 20 KB Mac↔Pi5 injected        | Watterson Good, SNR=15 |  96 s |  1705 bps  | Auto DQPSK R1/2, 0 retx, byte-exact (post F#3/F#4 hot-path fixes 2026-05-08) |
 | 5 KB Mac↔Pi5 injected ×5      | Watterson Good, SNR=15 |  28 s |  1440 bps  | Median of 5 seeds, R1/2; 5/5 PASS post-BUG-RATE-001 fix (worst-case 684 bps; was 444 bps pre-fix with R1/2→R1/4 panic) |
 | 500 KB Mac↔Pi5 injected       | Watterson Good, SNR=15 | 3742 s |  1094 bps | Long-haul, 1346 retx, 0 failed, byte-exact |
 
@@ -206,7 +206,7 @@ ProjectUltra extension:
 ### Status
 
 - Cross-platform: Linux + macOS + Windows. CI matrix all green.
-- ctest: **38/38** (TNC parser, TCP integration, bridge tests, throughput utility, plus
+- ctest: **37/37** (TNC parser, TCP integration, bridge tests, throughput utility, plus
   modem regressions including the new `CarrierLDPC v1` math gate
   and per-carrier mask plumbing).
 - End-to-end byte-exact transfers (hardware harness, Mac ↔ Pi5
