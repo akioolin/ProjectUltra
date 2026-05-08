@@ -62,13 +62,15 @@ ACK roundtrips, retransmissions, and auto-rate downgrades. Auto-rate
 ladder is on; Connection picks among R1/4 / R1/2 / R2/3 / R3/4 based
 on measured SNR and fading.
 
-| Test                          | Channel                | Wall  | Throughput | Notes |
-|-------------------------------|------------------------|------:|-----------:|-------|
-| 50 KB Mac↔Pi5 cable           | Clean USB cable        | 174 s |  2354 bps  | Auto DQPSK R3/4 @ SNR=28 |
-| 20 KB Mac↔Pi5 injected ×5     | AWGN, SNR=15           |  ~94 s | **1736.5 bps** (median) | Forced R1/2, 5-run sweep range [1730.1, 1739.8], 0 retx all 5, byte-exact (2026-05-08) |
-| 20 KB Mac↔Pi5 injected ×5     | Watterson Good, SNR=15 |  ~94 s | **1733.1 bps** (median) | Forced R1/2, 5-run sweep range [1726.8, 1739.6], 0 retx all 5, byte-exact (2026-05-08) |
-| 5 KB Mac↔Pi5 injected ×5      | Watterson Good, SNR=15 |  28 s |  1440 bps  | Median of 5 seeds, R1/2; 5/5 PASS post-BUG-RATE-001 fix (worst-case 684 bps; was 444 bps pre-fix with R1/2→R1/4 panic) |
-| 500 KB Mac↔Pi5 injected       | Watterson Good, SNR=15 | 3742 s |  1094 bps | Long-haul, 1346 retx, 0 failed, byte-exact |
+| Test                          | Channel                | Wall   | Throughput      | Notes |
+|-------------------------------|------------------------|-------:|----------------:|-------|
+| 50 KB Mac↔Pi5 cable           | Clean USB cable        |  174 s |      2354 bps   | Auto DQPSK R3/4 @ SNR=28 — handshake ≈ 3% of wall |
+| 20 KB Mac↔Pi5 injected ×5     | AWGN, SNR=15           |  ~94 s | **1736.5 bps**  | Median of 5; range [1730.1, 1739.8]; R1/2; 0 retx all 5; handshake ≈ 5% (near steady-state) |
+| 20 KB Mac↔Pi5 injected ×5     | Watterson Good, SNR=15 |  ~94 s | **1733.1 bps**  | Median of 5; range [1726.8, 1739.6]; R1/2; 0 retx all 5; handshake ≈ 5% (near steady-state) |
+| 5 KB Mac↔Pi5 injected ×5      | Watterson Good, SNR=15 |  ~27 s | **1540.6 bps**  | Median of 5; range [1540.3, 1550.0]; R1/2; 0 retx all 5; handshake ≈ 19% (fixed ~5 s overhead dominates short transfers) |
+| 500 KB Mac↔Pi5 injected       | Watterson Good, SNR=15 | 3742 s |      1094 bps   | R1/2; 1346 retx, 0 failed, byte-exact; handshake negligible — slowdown vs 20 KB is from retransmissions on a long fading run |
+
+Throughput rises with payload size as the fixed ~5 s handshake (PING/PONG → CONNECT → MODE_CHANGE) amortizes. The R1/2 SNR=15 asymptote on this harness is ≈ 1850 bps; beyond ~50 KB throughput is bounded by per-frame airtime + ACK roundtrip, not handshake.
 
 End-to-end throughput is wall-clock measured by `tools/run_hw_test.sh`
 between A's `Connection: Starting file transfer` and the final ACK
