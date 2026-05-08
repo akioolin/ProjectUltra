@@ -2,7 +2,7 @@
 
 This is the concrete design document for backlog #5 phase-2,
 authored by the Codex expert review pass on 2026-05-06 after the
-night-session attempts failed (see `SESSION_2026-05-05_NIGHT.md`
+night-session attempts failed (see `docs/archive/SESSION_2026-05-05_NIGHT.md`
 for what didn't work and why).
 
 **Status:** Design only. Not implemented. Tag

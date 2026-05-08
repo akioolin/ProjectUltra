@@ -188,8 +188,8 @@ they don't restate it.
 
 1. `git diff` — read the actual changes
 2. `cmake --build build -j4` — confirm clean build
-3. `ctest --test-dir build --output-on-failure` — confirm 30/30 (or
-   whatever the suite count is now)
+3. `ctest --test-dir build --output-on-failure` — confirm the current
+   registered suite count passes
 4. **Hardware smoke test** if the patch touches:
    - `src/protocol/connection*`
    - `src/protocol/selective_repeat_arq*`

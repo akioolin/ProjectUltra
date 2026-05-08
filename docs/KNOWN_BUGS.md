@@ -57,6 +57,10 @@ Current blockers:
 ## Fixed Bugs
 
 - 2026-05-08: BUG-CARRIER-LDPC-001 fixed — CarrierLDPC v1 was a new OFDM coded-bit wire image, but SP4 enabled the runtime as a local modem default instead of a negotiated peer capability. A partially upgraded Mac↔Pi pair applied the TX permutation on one endpoint while the peer decoded legacy ordering, producing the AWGN R1/2 1KB 0-ACK/15-timeout failure. The repair uses the existing `PHY_MASK_V1` capability: modern-modern CONNECT/CONNECT_ACK enables CarrierLDPC on both TX/RX; modern-legacy leaves the legacy ordering active. Synchronized upgraded hardware now passes AWGN / Good / Moderate at SNR=15 R1/2 1KB with DATA `Ncw=8` active and ACK/control `Ncw=1` inactive.
+- 2026-05-08: BUG-BENCH-001 resolved — committed `fixtures/*.wav` are valid
+  post-CONNECT DATA fixtures. They decode cleanly with
+  `./build/decode_bench --mode bench --connected ...`; the earlier `0`-frame
+  result came from running the bench in disconnected control-search mode.
 - 2026-05-05: BUG-RATE-001 fixed — adaptive MODE_CHANGE panic-downshift on short Watterson-Good transfers. Hysteresis (`ADAPTIVE_PRESSURE_WINDOWS_FOR_DOWNGRADE = 2`) + lockout reduction (`ADAPTIVE_POST_DOWNGRADE_LOCKOUT_MS` 15 s → 5 s). 5-seed reproducer now 5/5 PASS with worst-case throughput improved 444 → 684 bps (no panic downgrade). See CHANGELOG 2026-05-05.
 - 2026-02-12: GUI immediate TX abort control (`STOP TX`) added.
 - 2026-02-12: GUI telemetry split into PHY vs effective goodput, plus ARQ health view.

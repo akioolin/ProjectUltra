@@ -1,9 +1,11 @@
 #include "protocol/file_transfer.hpp"
+#include "helpers/temp_dir.hpp"
 
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -75,18 +77,35 @@ std::vector<TxChunk> collectChunks(FileTransferController& tx) {
     return chunks;
 }
 
+struct TransferDirs {
+    ultra::test::TempDir root;
+    std::filesystem::path tx_dir;
+    std::filesystem::path rx_dir;
+    bool ready = false;
+
+    explicit TransferDirs(const std::string& prefix, const std::string& rx_name = "rx")
+        : root(prefix),
+          tx_dir(root.child("tx")),
+          rx_dir(root.child(rx_name)) {
+        if (!root.valid()) {
+            return;
+        }
+        std::error_code ec;
+        std::filesystem::create_directories(tx_dir, ec);
+        if (ec) {
+            return;
+        }
+        std::filesystem::create_directories(rx_dir, ec);
+        ready = !ec;
+    }
+};
+
 void test_compressed_final_chunk_out_of_order_finalizes() {
-    const std::filesystem::path root =
-        std::filesystem::temp_directory_path() /
-        "ultra_file_transfer_controller_test";
-    const std::filesystem::path tx_dir = root / "tx";
-    const std::filesystem::path rx_dir = root / "rx";
-    std::filesystem::remove_all(root);
-    std::filesystem::create_directories(tx_dir);
-    std::filesystem::create_directories(rx_dir);
+    TransferDirs dirs("ultra_file_transfer_controller_test");
+    CHECK(dirs.ready, "create temp directories");
 
     const Bytes original = makeCompressiblePayload();
-    const std::filesystem::path src_path = tx_dir / "compressed_reorder.txt";
+    const std::filesystem::path src_path = dirs.tx_dir / "compressed_reorder.txt";
     CHECK(writeFile(src_path, original), "write source file");
 
     FileTransferController tx;
@@ -102,7 +121,7 @@ void test_compressed_final_chunk_out_of_order_finalizes() {
     CHECK(!chunks.back().more_data, "last chunk carries final marker");
 
     FileTransferController rx;
-    rx.setReceiveDirectory(rx_dir.string());
+    rx.setReceiveDirectory(dirs.rx_dir.string());
 
     bool callback_called = false;
     bool callback_success = false;
@@ -129,25 +148,17 @@ void test_compressed_final_chunk_out_of_order_finalizes() {
     CHECK(callback_called, "receiver callback fired after final buffered chunk drained");
     CHECK(callback_success, "receiver reported success");
     CHECK(readFile(received_path) == original, "received file matches original payload");
-
-    std::filesystem::remove_all(root);
 }
 
 void test_duplicate_filename_in_dotted_receive_directory() {
-    const std::filesystem::path root =
-        std::filesystem::temp_directory_path() /
-        "ultra_file_transfer_duplicate_test";
-    const std::filesystem::path tx_dir = root / "tx";
-    const std::filesystem::path rx_dir = root / "rx.with.dot";
-    std::filesystem::remove_all(root);
-    std::filesystem::create_directories(tx_dir);
-    std::filesystem::create_directories(rx_dir);
+    TransferDirs dirs("ultra_file_transfer_duplicate_test", "rx.with.dot");
+    CHECK(dirs.ready, "create temp directories");
 
     const Bytes original = {'P', 'r', 'o', 'j', 'e', 'c', 't',
                             'U', 'l', 't', 'r', 'a'};
-    const std::filesystem::path src_path = tx_dir / "payload";
+    const std::filesystem::path src_path = dirs.tx_dir / "payload";
     CHECK(writeFile(src_path, original), "write duplicate source file");
-    CHECK(writeFile(rx_dir / "payload", Bytes{'o', 'l', 'd'}),
+    CHECK(writeFile(dirs.rx_dir / "payload", Bytes{'o', 'l', 'd'}),
           "write existing receive file");
 
     FileTransferController tx;
@@ -156,7 +167,7 @@ void test_duplicate_filename_in_dotted_receive_directory() {
     CHECK(chunks.size() >= 2, "duplicate-name transfer has metadata and data");
 
     FileTransferController rx;
-    rx.setReceiveDirectory(rx_dir.string());
+    rx.setReceiveDirectory(dirs.rx_dir.string());
 
     bool callback_called = false;
     bool callback_success = false;
@@ -175,29 +186,21 @@ void test_duplicate_filename_in_dotted_receive_directory() {
     const std::filesystem::path received(received_path);
     CHECK(callback_called, "duplicate-name receiver callback fired");
     CHECK(callback_success, "duplicate-name transfer succeeded");
-    CHECK(received.parent_path() == rx_dir,
+    CHECK(received.parent_path() == dirs.rx_dir,
           "duplicate-name uniquing stays inside dotted receive directory");
     CHECK(received.filename() == "payload_1",
           "duplicate-name uniquing appends suffix to filename without extension");
     CHECK(readFile(received) == original, "duplicate-name received content matches");
-    CHECK(readFile(rx_dir / "payload") == Bytes({'o', 'l', 'd'}),
+    CHECK(readFile(dirs.rx_dir / "payload") == Bytes({'o', 'l', 'd'}),
           "duplicate-name original file preserved");
-
-    std::filesystem::remove_all(root);
 }
 
 void test_single_block_payload_round_trip() {
-    const std::filesystem::path root =
-        std::filesystem::temp_directory_path() /
-        "ultra_file_transfer_block_test";
-    const std::filesystem::path tx_dir = root / "tx";
-    const std::filesystem::path rx_dir = root / "rx";
-    std::filesystem::remove_all(root);
-    std::filesystem::create_directories(tx_dir);
-    std::filesystem::create_directories(rx_dir);
+    TransferDirs dirs("ultra_file_transfer_block_test");
+    CHECK(dirs.ready, "create temp directories");
 
     const Bytes original = {'b', 'l', 'o', 'c', 'k', 0, 1, 2, 3, 4};
-    const std::filesystem::path src_path = tx_dir / "block.bin";
+    const std::filesystem::path src_path = dirs.tx_dir / "block.bin";
     CHECK(writeFile(src_path, original), "write block source file");
 
     FileTransferController tx;
@@ -209,7 +212,7 @@ void test_single_block_payload_round_trip() {
     CHECK(!tx.hasMoreChunks(), "single block consumes tx chunks");
 
     FileTransferController rx;
-    rx.setReceiveDirectory(rx_dir.string());
+    rx.setReceiveDirectory(dirs.rx_dir.string());
     bool callback_called = false;
     bool callback_success = false;
     std::string received_path;
@@ -223,8 +226,6 @@ void test_single_block_payload_round_trip() {
     CHECK(callback_called, "block receiver callback fired");
     CHECK(callback_success, "block transfer succeeded");
     CHECK(readFile(received_path) == original, "block received content matches");
-
-    std::filesystem::remove_all(root);
 }
 
 }  // namespace

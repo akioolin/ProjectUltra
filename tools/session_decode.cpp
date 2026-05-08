@@ -1,9 +1,10 @@
 // Session-aware offline OTA decoder.
 //
-// WAV path: native RIFF/WAVE reader for PCM s16, PCM s24, and IEEE float32,
+// WAV path: shared RIFF/WAVE reader for PCM s16, PCM s24, and IEEE float32,
 // downmixed to mono and resampled to 48 kHz with the repo Resampler. The tool
 // does not normalize or auto-gain unless --rms-target is explicitly supplied.
 
+#include "io/wav_io.hpp"
 #include "sim/simulated_station.hpp"
 
 #include "sync/chirp_sync.hpp"
@@ -16,8 +17,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
-#include <cstring>
-#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -32,13 +31,12 @@
 namespace {
 
 constexpr uint32_t kTargetSampleRate = 48000;
-constexpr uint16_t kFormatPcm = 1;
-constexpr uint16_t kFormatFloat = 3;
-constexpr uint16_t kFormatExtensible = 0xFFFE;
 
 struct Args {
     std::string wav_path;
     std::string callsign = "BRAVO";
+    // Offline replay auto-accepts CONNECT by default. --auto-accept is kept
+    // as a backward-compatible no-op for existing capture-replay commands.
     bool auto_accept = true;
     int decode_drain_ms = 3000;
     std::optional<float> rms_target_dbfs;
@@ -94,7 +92,8 @@ struct FrameSummary {
 void printUsage() {
     std::cout <<
         "session_decode --wav <file.wav> [--callsign BRAVO] "
-        "[--auto-accept] [--decode-drain-ms 3000] [--rms-target -16]\n";
+        "[--auto-accept (default/no-op)] [--decode-drain-ms 3000] "
+        "[--rms-target -16]\n";
 }
 
 std::optional<std::string> needValue(int& i, int argc, char** argv) {
@@ -120,6 +119,7 @@ bool parseArgs(int argc, char** argv, Args& args) {
             if (!v) return false;
             args.callsign = *v;
         } else if (arg == "--auto-accept") {
+            // Backward-compatible no-op: offline decode already auto-accepts.
             args.auto_accept = true;
         } else if (arg == "--decode-drain-ms") {
             auto v = needValue(i, argc, argv);
@@ -145,91 +145,6 @@ bool parseArgs(int argc, char** argv, Args& args) {
         return false;
     }
     return true;
-}
-
-uint16_t readLe16(const uint8_t* p) {
-    return static_cast<uint16_t>(p[0]) |
-           (static_cast<uint16_t>(p[1]) << 8);
-}
-
-uint32_t readLe32(const uint8_t* p) {
-    return static_cast<uint32_t>(p[0]) |
-           (static_cast<uint32_t>(p[1]) << 8) |
-           (static_cast<uint32_t>(p[2]) << 16) |
-           (static_cast<uint32_t>(p[3]) << 24);
-}
-
-bool readExact(std::istream& in, void* dst, size_t len) {
-    in.read(static_cast<char*>(dst), static_cast<std::streamsize>(len));
-    return static_cast<size_t>(in.gcount()) == len;
-}
-
-uint16_t extensibleSubformatTag(const std::vector<uint8_t>& fmt) {
-    if (fmt.size() < 40) return 0;
-    return readLe16(fmt.data() + 24);
-}
-
-std::vector<float> decodeWavPayload(const std::vector<uint8_t>& data,
-                                    uint16_t format,
-                                    uint16_t channels,
-                                    uint32_t sample_rate,
-                                    uint16_t bits,
-                                    uint16_t block_align) {
-    if (channels == 0 || channels > 2) {
-        throw std::runtime_error("Only mono/stereo WAV files are supported");
-    }
-    if (sample_rate == 0) {
-        throw std::runtime_error("Invalid WAV sample rate");
-    }
-
-    if (format == kFormatExtensible) {
-        throw std::runtime_error("Internal error: extensible format not resolved");
-    }
-
-    const bool is_pcm = (format == kFormatPcm);
-    const bool is_float = (format == kFormatFloat);
-    const uint16_t bytes_per_sample = static_cast<uint16_t>((bits + 7) / 8);
-    if (!((is_pcm && (bits == 16 || bits == 24)) || (is_float && bits == 32))) {
-        std::ostringstream oss;
-        oss << "Unsupported WAV format=" << format << " bits=" << bits;
-        throw std::runtime_error(oss.str());
-    }
-
-    const uint16_t expected_align = static_cast<uint16_t>(channels * bytes_per_sample);
-    if (block_align == 0) block_align = expected_align;
-    if (block_align < expected_align) {
-        throw std::runtime_error("Invalid WAV block alignment");
-    }
-
-    const size_t frames = data.size() / block_align;
-    std::vector<float> mono;
-    mono.reserve(frames);
-
-    for (size_t frame = 0; frame < frames; ++frame) {
-        const uint8_t* base = data.data() + frame * block_align;
-        double sum = 0.0;
-        for (uint16_t ch = 0; ch < channels; ++ch) {
-            const uint8_t* p = base + ch * bytes_per_sample;
-            float sample = 0.0f;
-            if (is_float) {
-                uint32_t raw = readLe32(p);
-                std::memcpy(&sample, &raw, sizeof(sample));
-            } else if (bits == 16) {
-                int16_t v = static_cast<int16_t>(readLe16(p));
-                sample = static_cast<float>(v) / 32768.0f;
-            } else {
-                int32_t v = static_cast<int32_t>(p[0]) |
-                            (static_cast<int32_t>(p[1]) << 8) |
-                            (static_cast<int32_t>(p[2]) << 16);
-                if (v & 0x00800000) v |= static_cast<int32_t>(0xFF000000);
-                sample = static_cast<float>(v) / 8388608.0f;
-            }
-            sum += sample;
-        }
-        mono.push_back(static_cast<float>(sum / static_cast<double>(channels)));
-    }
-
-    return mono;
 }
 
 float medianValue(std::vector<float> values) {
@@ -356,77 +271,15 @@ void applyRmsTarget(std::vector<float>& samples, float target_dbfs, RmsNormalize
 }
 
 LoadedWav loadWav(const std::string& path, std::optional<float> rms_target_dbfs) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        throw std::runtime_error("Failed to open WAV: " + path);
-    }
-
-    uint8_t riff_header[12] = {};
-    if (!readExact(in, riff_header, sizeof(riff_header)) ||
-        std::memcmp(riff_header, "RIFF", 4) != 0 ||
-        std::memcmp(riff_header + 8, "WAVE", 4) != 0) {
-        throw std::runtime_error("Not a RIFF/WAVE file: " + path);
-    }
-
-    std::vector<uint8_t> fmt_chunk;
-    std::vector<uint8_t> data_chunk;
-
-    while (in) {
-        uint8_t chunk_header[8] = {};
-        if (!readExact(in, chunk_header, sizeof(chunk_header))) break;
-        const uint32_t chunk_size = readLe32(chunk_header + 4);
-        std::vector<uint8_t> chunk(chunk_size);
-        if (chunk_size > 0 && !readExact(in, chunk.data(), chunk_size)) {
-            throw std::runtime_error("Truncated WAV chunk");
-        }
-        if (chunk_size & 1u) {
-            in.seekg(1, std::ios::cur);
-        }
-
-        if (std::memcmp(chunk_header, "fmt ", 4) == 0) {
-            fmt_chunk = std::move(chunk);
-        } else if (std::memcmp(chunk_header, "data", 4) == 0) {
-            data_chunk = std::move(chunk);
-        }
-    }
-
-    if (fmt_chunk.size() < 16 || data_chunk.empty()) {
-        throw std::runtime_error("WAV missing fmt or data chunk");
-    }
-
-    uint16_t format = readLe16(fmt_chunk.data());
-    const uint16_t channels = readLe16(fmt_chunk.data() + 2);
-    const uint32_t sample_rate = readLe32(fmt_chunk.data() + 4);
-    uint16_t block_align = readLe16(fmt_chunk.data() + 12);
-    uint16_t bits = readLe16(fmt_chunk.data() + 14);
-    if (format == kFormatExtensible) {
-        const uint16_t subformat = extensibleSubformatTag(fmt_chunk);
-        if (subformat == kFormatPcm || subformat == kFormatFloat) {
-            format = subformat;
-        }
-        if (fmt_chunk.size() >= 20) {
-            const uint16_t valid_bits = readLe16(fmt_chunk.data() + 18);
-            if (valid_bits == 16 || valid_bits == 24 || valid_bits == 32) {
-                bits = valid_bits;
-            }
-        }
-    }
+    auto loaded = ultra::tools::io::loadWavMono48k(path);
 
     LoadedWav wav;
-    wav.path = path;
-    wav.source_rate = sample_rate;
-    wav.source_channels = channels;
-    wav.source_bits = bits;
-    wav.source_format = format;
-
-    auto mono = decodeWavPayload(data_chunk, format, channels, sample_rate, bits, block_align);
-    if (sample_rate == kTargetSampleRate) {
-        wav.samples_48k = std::move(mono);
-    } else {
-        ultra::Resampler resampler(sample_rate, kTargetSampleRate);
-        ultra::SampleSpan span(mono.data(), mono.size());
-        wav.samples_48k = resampler.process(span);
-    }
+    wav.path = std::move(loaded.path);
+    wav.samples_48k = std::move(loaded.samples_48k);
+    wav.source_rate = loaded.source_rate;
+    wav.source_channels = loaded.source_channels;
+    wav.source_bits = loaded.source_bits;
+    wav.source_format = loaded.source_format;
     if (rms_target_dbfs) {
         applyRmsTarget(wav.samples_48k, *rms_target_dbfs, wav.rms_normalize);
     }

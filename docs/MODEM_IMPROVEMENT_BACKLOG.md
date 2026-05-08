@@ -148,7 +148,7 @@ the worst carrier the equalizer can still handle.
 approaches without addressing the constraint):**
 
 Three approaches were attempted and all failed hardware validation
-on Watterson Good SNR=15. See `docs/SESSION_2026-05-05_NIGHT.md`
+on Watterson Good SNR=15. See `docs/archive/SESSION_2026-05-05_NIGHT.md`
 and tag `experimental/per-carrier-attempt-1-failed-2026-05-05` for
 full evidence.
 

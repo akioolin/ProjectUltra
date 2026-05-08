@@ -9,6 +9,7 @@
 
 #include "gui/modem/modem_engine.hpp"
 #include "protocol/frame_v2.hpp"
+#include "sim/cli_enums.hpp"
 #include "ultra/types.hpp"
 
 #include <iostream>
@@ -19,6 +20,7 @@
 #include <atomic>
 #include <thread>
 #include <chrono>
+#include <optional>
 
 using namespace ultra;
 using namespace ultra::gui;
@@ -86,13 +88,16 @@ void printInfo() {
 // Waveform type
 enum class WaveformType { OFDM_COX, OFDM_CHIRP, OFDM_NARROW, DPSK };
 
-WaveformType parseWaveform(const char* s) {
-    if (strcmp(s, "mcdpsk") == 0 || strcmp(s, "dpsk") == 0) return WaveformType::DPSK;
-    if (strcmp(s, "ofdm") == 0 || strcmp(s, "chirp") == 0) return WaveformType::OFDM_CHIRP;
-    if (strcmp(s, "cox") == 0) return WaveformType::OFDM_COX;
-    if (strcmp(s, "narrow") == 0 || strcmp(s, "ofdm_narrow") == 0) return WaveformType::OFDM_NARROW;
-    // Default to OFDM (chirp-based, more robust on fading)
-    return WaveformType::OFDM_CHIRP;
+std::optional<WaveformType> parseWaveform(const char* s) {
+    auto mode = tools::cli::parseWaveformMode(s, tools::cli::BareOFDMMode::Chirp);
+    if (!mode) return std::nullopt;
+    switch (*mode) {
+        case protocol::WaveformMode::MC_DPSK: return WaveformType::DPSK;
+        case protocol::WaveformMode::OFDM_CHIRP: return WaveformType::OFDM_CHIRP;
+        case protocol::WaveformMode::OFDM_NARROW: return WaveformType::OFDM_NARROW;
+        case protocol::WaveformMode::OFDM_COX: return WaveformType::OFDM_COX;
+        default: return std::nullopt;
+    }
 }
 
 protocol::WaveformMode toWaveformMode(WaveformType w) {
@@ -104,12 +109,8 @@ protocol::WaveformMode toWaveformMode(WaveformType w) {
     }
 }
 
-CodeRate parseCodeRate(const char* s) {
-    if (strcmp(s, "r1_4") == 0 || strcmp(s, "1/4") == 0) return CodeRate::R1_4;
-    if (strcmp(s, "r1_2") == 0 || strcmp(s, "1/2") == 0) return CodeRate::R1_2;
-    if (strcmp(s, "r2_3") == 0 || strcmp(s, "2/3") == 0) return CodeRate::R2_3;
-    if (strcmp(s, "r3_4") == 0 || strcmp(s, "3/4") == 0) return CodeRate::R3_4;
-    return CodeRate::R1_4;  // Default to most robust
+std::optional<CodeRate> parseCodeRate(const char* s) {
+    return tools::cli::parseCodeRate(s);
 }
 
 // ============================================================================
@@ -348,9 +349,23 @@ int main(int argc, char* argv[]) {
         } else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
             dst_call = argv[++i];
         } else if (strcmp(argv[i], "-w") == 0 && i + 1 < argc) {
-            waveform = parseWaveform(argv[++i]);
+            const char* value = argv[++i];
+            auto parsed = parseWaveform(value);
+            if (!parsed) {
+                std::cerr << "Unknown waveform: " << value
+                          << " (use " << tools::cli::waveformChoices() << ")\n";
+                return 1;
+            }
+            waveform = *parsed;
         } else if (strcmp(argv[i], "-r") == 0 && i + 1 < argc) {
-            rate = parseCodeRate(argv[++i]);
+            const char* value = argv[++i];
+            auto parsed = parseCodeRate(value);
+            if (!parsed) {
+                std::cerr << "Unknown code rate: " << value
+                          << " (use " << tools::cli::codeRateChoices() << ")\n";
+                return 1;
+            }
+            rate = *parsed;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             printUsage(argv[0]);
             return 0;

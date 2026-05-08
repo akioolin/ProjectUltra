@@ -4,6 +4,7 @@
 #include "gui/serial_ptt.hpp"
 #include "protocol/frame_v2.hpp"
 #include "protocol/protocol_engine.hpp"
+#include "sim/awgn.hpp"
 #include "tnc/tnc_bridge.hpp"
 #include "tnc/tnc_server.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
@@ -62,8 +63,7 @@ public:
           engine_(engine),
           audio_(audio),
           bridge_(bridge),
-          rng_(12345),
-          noise_(0.0f, 1.0f) {
+          rng_(12345) {
         configureModem();
         setupCallbacks();
     }
@@ -174,7 +174,6 @@ private:
     bool connected_ = false;
 
     std::mt19937 rng_;
-    std::normal_distribution<float> noise_;
 
     ModemConfig createOFDMConfig() const {
         ModemConfig cfg;
@@ -448,16 +447,7 @@ private:
     }
 
     void applyAwgn(std::vector<float>& samples) {
-        float signal_power = 0.0f;
-        for (float sample : samples) {
-            signal_power += sample * sample;
-        }
-        signal_power = samples.empty() ? 0.0f : signal_power / static_cast<float>(samples.size());
-        const float snr_linear = std::pow(10.0f, cfg_.snr_db / 10.0f);
-        const float noise_stddev = std::sqrt(std::max(signal_power, 1.0e-8f) / std::max(snr_linear, 1.0e-6f));
-        for (float& sample : samples) {
-            sample = std::clamp(sample + noise_(rng_) * noise_stddev, -1.0f, 1.0f);
-        }
+        ultra::sim::awgn::addAWGN(samples, cfg_.snr_db, rng_, 80.0f, true);
     }
 
     void decodeLoop() {

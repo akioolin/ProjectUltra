@@ -52,6 +52,7 @@
 #include "ultra/fec.hpp"  // ChannelInterleaver, LDPCEncoder
 #include "ultra/dsp.hpp"  // FFT for analytic-signal CFO injection
 #include "fec/frame_interleaver.hpp"  // FrameInterleaver
+#include "sim/awgn.hpp"
 #include "sim/hf_channel.hpp"
 
 #include <cstdint>
@@ -59,19 +60,13 @@
 #include <random>
 #include <utility>
 
+#include "sim/cli_enums.hpp"
+
 using namespace ultra;
 using namespace ultra::gui;
 using namespace ultra::protocol;
 using namespace ultra::sim;
 namespace v2 = protocol::v2;
-
-enum class ChannelType {
-    AWGN,       // No fading, no multipath
-    GOOD,       // 0.5ms delay, 0.1Hz Doppler (quiet mid-latitude)
-    MODERATE,   // 1.0ms delay, 0.5Hz Doppler (typical mid-latitude)
-    POOR,       // 2.0ms delay, 1.0Hz Doppler (disturbed conditions)
-    FLUTTER     // 0.5ms delay, 10Hz Doppler (auroral/polar)
-};
 
 enum class OFDMConfigPreset {
     Default,  // OFDM_COX default constructor: 512 FFT, 30 carriers
@@ -178,9 +173,10 @@ public:
 
     void configure(float snr_db, ChannelType channel_type = ChannelType::AWGN) {
         snr_db_ = snr_db;
-        float snr_linear = std::pow(10.0f, snr_db / 10.0f);
-        float signal_power = 0.01f;
-        noise_stddev_ = std::sqrt(signal_power / snr_linear);
+        // Idle-channel noise has no signal reference, so keep the historic
+        // simulator floor. Transmitted AWGN below uses measured active power.
+        constexpr float kIdleReferenceSignalPower = 0.01f;
+        noise_stddev_ = awgn::noiseStddevForSNR(kIdleReferenceSignalPower, snr_db);
         rng_.seed(seed_);
         channel_a_to_b_.reset();
         channel_b_to_a_.reset();
@@ -387,9 +383,7 @@ private:
             return fading->process(span);
         } else {
             std::vector<float> result = samples;
-            for (float& s : result) {
-                s += noise_dist_(rng_) * noise_stddev_;
-            }
+            awgn::addAWGN(result, snr_db_, rng_);
             return result;
         }
     }

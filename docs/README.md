@@ -1,6 +1,6 @@
 # Documentation Map
 
-Last updated: 2026-04-30
+Last updated: 2026-05-07
 
 This folder separates active source-of-truth docs from historical reference docs.
 Agents must treat `docs/archive/` as background only unless a task explicitly
@@ -41,6 +41,9 @@ Archived docs are retained for traceability and postmortem context but are not
 source-of-truth for current behavior.
 
 - `docs/archive/`
+- Dated session reports, one-off audit reports, validation postmortems, and
+  superseded research plans live here unless a task explicitly promotes them
+  back to active source-of-truth status.
 
 Do not base production changes on archived plans without first verifying current
 code and adding a fresh task or design note.

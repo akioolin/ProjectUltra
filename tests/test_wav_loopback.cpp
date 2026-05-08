@@ -16,28 +16,13 @@
 #include <cstring>
 #include <cstdint>
 #include <cmath>
-#include <chrono>
-#include <filesystem>
-#include <system_error>
 
 #include "ultra/ofdm.hpp"
 #include "ultra/fec.hpp"
 #include "ultra/types.hpp"
+#include "helpers/temp_dir.hpp"
 
 using namespace ultra;
-
-std::string makeTempWavPath() {
-    std::error_code ec;
-    auto base = std::filesystem::temp_directory_path(ec);
-    if (ec) return "";
-
-    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-    auto dir = base / ("ultra_wav_loopback_" + std::to_string(stamp));
-    std::filesystem::create_directories(dir, ec);
-    if (ec) return "";
-
-    return (dir / "test_loopback.wav").string();
-}
 
 // Simple WAV file writer (16-bit mono)
 bool writeWav(const std::string& filename, const std::vector<float>& samples, int sample_rate = 48000) {
@@ -330,18 +315,17 @@ bool softwareLoopbackTest() {
     std::vector<float> tx_samples = generateTestSignal(config);
 
     // Write to temp file and read back (tests WAV I/O)
-    std::string temp_file = makeTempWavPath();
-    if (temp_file.empty()) {
+    ultra::test::TempDir temp_dir("ultra_wav_loopback");
+    if (!temp_dir.valid()) {
         std::cerr << "Failed to create temporary WAV path\n";
         return false;
     }
+    const std::string temp_file = temp_dir.child("test_loopback.wav").string();
     if (!writeWav(temp_file, tx_samples)) {
         return false;
     }
 
-    bool ok = decodeWavFile(temp_file);
-    std::filesystem::remove_all(std::filesystem::path(temp_file).parent_path());
-    return ok;
+    return decodeWavFile(temp_file);
 }
 
 int main(int argc, char* argv[]) {

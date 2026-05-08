@@ -2,6 +2,7 @@
 #include "startup_trace.hpp"
 #include "imgui.h"
 #include "ultra/logging.hpp"
+#include "sim/awgn.hpp"
 #include "sim/hf_channel.hpp"
 #include <SDL.h>
 #include <cstring>
@@ -1220,17 +1221,10 @@ std::vector<float> App::applyChannelEffects(const std::vector<float>& samples, i
         sim_channel_active_type_ = -1;
     }
 
-    // Apply AWGN with fixed reference signal power (matches cli_simulator)
-    // Using fixed reference ensures consistent SNR regardless of signal amplitude
+    // Apply AWGN against measured active-sample power, matching the CLI and
+    // Watterson paths and the RX-side LTS SNR convention.
     if (simulation_snr_db_ < 50.0f) {
-        float snr_linear = std::pow(10.0f, simulation_snr_db_ / 10.0f);
-        constexpr float REFERENCE_SIGNAL_POWER = 0.01f;  // Same as cli_simulator
-        float noise_stddev = std::sqrt(REFERENCE_SIGNAL_POWER / snr_linear);
-        std::normal_distribution<float> noise_dist(0.0f, noise_stddev);
-
-        for (float& s : result) {
-            s += noise_dist(sim_rng_);
-        }
+        sim::awgn::addAWGN(result, simulation_snr_db_, sim_rng_, 50.0f);
     }
 
     return result;

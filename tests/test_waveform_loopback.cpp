@@ -1,6 +1,7 @@
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "waveform/ofdm_cox_waveform.hpp"
 #include "protocol/frame_v2.hpp"
+#include "sim/awgn.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
 
 #include <algorithm>
@@ -82,27 +83,8 @@ void appendTailMargin(Samples& dst, int samples) {
 }
 
 void addAwgn(Samples& samples, float snr_db, uint32_t seed) {
-    float signal_power = 0.0f;
-    size_t signal_samples = 0;
-    for (float sample : samples) {
-        if (std::abs(sample) > 1e-6f) {
-            signal_power += sample * sample;
-            ++signal_samples;
-        }
-    }
-    if (signal_samples == 0) {
-        return;
-    }
-
-    signal_power /= static_cast<float>(signal_samples);
-    const float snr_linear = std::pow(10.0f, snr_db / 10.0f);
-    const float noise_std = std::sqrt(signal_power / snr_linear);
-
     std::mt19937 rng(seed);
-    std::normal_distribution<float> noise(0.0f, noise_std);
-    for (float& sample : samples) {
-        sample += noise(rng);
-    }
+    sim::awgn::addAWGN(samples, snr_db, rng);
 }
 
 bool processFromSync(IWaveform& waveform, const Samples& audio, const SyncResult& sync,

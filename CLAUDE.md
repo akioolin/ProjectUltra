@@ -198,7 +198,7 @@ Interpretation of the 2026-04-29 robustness work:
 | OFDM_NARROW | AWGN | 8+ | 100% |
 | OFDM_NARROW | Good fading | 8 | 100% data, 90%+ ACK |
 
-**Current state (2026-03-15):**
+**Current production state (refreshed 2026-05-07; individual calibration dates noted inline):**
 - MC-DPSK: WORKING - 100% at SNR=10 with moderate fading
 - OFDM_CHIRP DQPSK R1/4 AWGN: WORKING - 100% at SNR=15 and SNR=20 (0 retries)
 - OFDM_CHIRP DQPSK R1/4 Good fading SNR=15: WORKING - 100% (0 retries, 0 failures)
@@ -220,14 +220,16 @@ Interpretation of the 2026-04-29 robustness work:
 - Variable-CW frames: WORKING - CONNECT/DISCONNECT use exact CW count (2 at R1/2, 3 at R1/4)
 - OFDM_NARROW DQPSK R1/4 AWGN: WORKING - 100% at SNR=8 (0 retransmissions)
 - OFDM_NARROW DQPSK R1/4 Good fading SNR=8: WORKING - 100% data decode, 93% ACK, all messages delivered via ARQ
-- OFDM_COX: WORKING - DATA phase passes at SNR=20 dB
+- OFDM_COX: FORCEABLE/LEGACY ONLY - implementation exists and can be
+  selected explicitly, but the production auto ladder does not choose it
+  until it has its own reliability gate.
 - OTFS/MFSK: RESERVED ONLY - not in the production build or default capabilities
 - cli_simulator: FULLY WORKING - all phases pass on AWGN and fading
 
-**Auto rate selection ladder (2026-03-15, updated with 802.11n LDPC):**
+**Auto rate selection ladder (2026-05-07, from `selectOFDMCodeRate()`):**
 | Condition | Auto rate | Payload/frame | Throughput |
 |-----------|-----------|---------------|------------|
-| SNR >= 20, AWGN (fading < 0.15) | **R3/4** | 243 bytes | ~3900 bps |
+| SNR >= 15, AWGN (fading < 0.10) | **R3/4** | 243 bytes | ~3900 bps |
 | SNR >= 15, near-AWGN (fading < 0.15) | **R2/3** | 197 bytes | ~3200 bps |
 | SNR >= 15, good/moderate fading (< 1.10) | **R1/2** | 141 bytes | ~2300 bps |
 | Everything else | **R1/4** | 62 bytes | ~1150 bps |
@@ -271,11 +273,15 @@ Interpretation of the 2026-04-29 robustness work:
 **OTFS/MFSK production status (2026-04-30):**
 - OTFS prototype code was removed from the production build. The tested implementation was not competitive with OFDM_CHIRP on fading and required research-grade DD-domain equalization to justify keeping it.
 - MFSK enum/capability values are reserved for wire compatibility, but there is no maintained production implementation. Do not advertise or negotiate MFSK.
-- Default `ModeCapabilities::ALL` includes only production-supported modes: OFDM_COX, MC_DPSK, OFDM_CHIRP, and OFDM_NARROW.
+- Default `ModeCapabilities::ALL` advertises implemented modes:
+  OFDM_COX, MC_DPSK, OFDM_CHIRP, and OFDM_NARROW. This is a capability
+  bitmap, not the auto-selection ladder. The production auto ladder chooses
+  MC_DPSK below SNR 10 and OFDM_CHIRP at SNR 10+; it does not auto-select
+  OFDM_COX.
 
 **Recommendation:** Use OFDM_CHIRP with DQPSK. Rate selection is automatic via `selectOFDMCodeRate()`:
-- R3/4 for AWGN only (SNR≥20, fading<0.15) — ~3.4× throughput vs R1/4
-- R2/3 for good fading or better (SNR≥15) — ~2.8× throughput vs R1/4
+- R3/4 for AWGN only (SNR≥15, fading<0.10) — ~3.4× throughput vs R1/4
+- R2/3 for near-AWGN only (SNR≥15, fading<0.15) — ~2.8× throughput vs R1/4
 - R1/2 for good/moderate fading (SNR≥15) — ~2× throughput vs R1/4
 - R1/4 for heavy fading or lower SNR — robust but slower
 
@@ -407,13 +413,14 @@ make -j4
 | **MC-DPSK** | Dual Chirp | -3 to 10 dB | 938 bps | ±50 Hz | Good |
 | **OFDM_NARROW** | NB Chirp + LTS | 5-10 dB | ~450 bps (R1/2, window=3) | ±50 Hz | Good (R1/4) |
 | **OFDM_CHIRP** | Dual Chirp + LTS | 10-17 dB | 3.4 kbps | ±50 Hz | Good (R1/4) |
-| **OFDM_COX** | Schmidl-Cox | 17+ dB | 7.9 kbps | Needs testing | Poor |
+| **OFDM_COX** | Schmidl-Cox | Forced only | 7.9 kbps | Needs testing | Poor |
 | **SC-DPSK** | Barker-13 | -8 to -3 dB | 125 bps | N/A | Good |
 
 **Waveform Selection:**
 - Poor HF channels (2ms delay): Use MC-DPSK
 - Low SNR (5-10 dB) with good/moderate fading: Use OFDM_NARROW (~200 bps R1/4, ~450 bps R1/2 — selective-repeat window=3)
-- Moderate/Good HF: Use OFDM_CHIRP (10-17 dB) or OFDM_COX (17+ dB)
+- Moderate/Good HF: Use OFDM_CHIRP at SNR 10+; OFDM_COX remains explicit
+  forced/legacy only until separately gated.
 - Very low SNR: Use SC-DPSK or MC-DPSK
 - OTFS/MFSK values are reserved only and are not production-supported
 
@@ -458,7 +465,8 @@ tools/
 
 ## Known Limitations
 
-1. **OFDM_COX CFO:** Needs verification at 17+ dB with Schmidl-Cox
+1. **OFDM_COX default policy:** Forceable implementation exists, but it is
+   not part of the production auto ladder until separately validated.
 2. **Poor HF channels (2ms delay):** OFDM fails - use MC-DPSK instead
 3. **MC-DPSK floor:** -5 dB is hard floor (20-40% success)
 4. **File transfer:** DATA_START/DATA_END not fully implemented

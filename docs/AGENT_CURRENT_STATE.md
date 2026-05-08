@@ -1,6 +1,6 @@
 # Agent System Current State
 
-Last updated: 2026-04-30.
+Last updated: 2026-05-07.
 
 This file is a compact handoff for future Claude/Codex sessions if context is
 compacted or lost.
@@ -86,7 +86,8 @@ ctest --test-dir build -R '^(Protocol|WavLoopback)$' --output-on-failure -j2
 ctest --test-dir build --output-on-failure -j4
 ```
 
-The full local CTest result was `29/29` passed.
+The current full local CTest result is `38/38` passed after registering
+the throughput utility as a CTest target.
 
 Planner/hardware sentinel validation:
 

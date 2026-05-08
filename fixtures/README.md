@@ -20,6 +20,7 @@ Each fixture is reproducible from its name + seed=1:
 
 ```bash
 ./build/decode_bench --mode bench \
+  --connected \
   --wav fixtures/ofdm_chirp_r14_dqpsk_clean.wav \
   --rate r1_4 --mod dqpsk --waveform ofdm_chirp
 ```
@@ -27,6 +28,12 @@ Each fixture is reproducible from its name + seed=1:
 Output prints `frames_decoded` / `frames_failed` and the full
 `DecoderProfile` breakdown (LTS sync, OFDM process, data symbol loop,
 fixed-frame decode, LDPC inner, single-CW paths, HARQ key build, etc.).
+
+Current status (2026-05-08): these bench fixtures decode cleanly when run
+with `--connected`, which is the intended mode for post-CONNECT fixed DATA
+frames. Running without `--connected` starts the decoder in disconnected
+control-search mode and produces `0` decoded frames; that is an invocation
+mismatch, not a stale fixture.
 
 ## Available fixtures
 
@@ -36,9 +43,8 @@ fixed-frame decode, LDPC inner, single-CW paths, HARQ key build, etc.).
 | `ofdm_chirp_r14_dqpsk_snr15_awgn.wav` | R1/4 | DQPSK | 15 dB | AWGN at typical operating SNR |
 | `ota_test_r14_15s.wav` | R1/4 | DQPSK | ∞ | 21-frame, 15.16 s OTA fixture with readable payload `"PROJECTULTRA OTA TEST 2026 R1/4 DQPSK 73 ..."` — play through a real radio, record on the receive side, decode locally |
 
-Both decode 4/4 frames cleanly today. R1/2, R2/3 fixtures TBD — they
-need a per-rate pilot config nuance the bench doesn't yet replicate
-(captured as a follow-up; not a fixture file issue).
+The OFDM bench fixtures are retained as historical inputs, not as a
+passing regression contract. R1/2 and R2/3 fixtures remain TBD.
 
 ## OTA test workflow (no peer needed)
 
@@ -53,7 +59,7 @@ needed, no ARQ.
    another friend's RX, etc.) into a WAV.
 4. Decode the recording locally:
    ```bash
-   ./build/decode_bench --mode bench --wav <recording>.wav --rate r1_4
+   ./build/decode_bench --mode bench --connected --wav <recording>.wav --rate r1_4
    ```
 5. Output prints frames decoded / failed and the first decoded payload
    verbatim. If you see `"PROJECTULTRA OTA TEST 2026 R1/4 DQPSK 73 ..."`
@@ -72,7 +78,7 @@ playback flow.
 - **Listenable.** 32-bit float WAV opens in any audio editor, so a
   human can sanity-check the test material against expected
   spectral content.
-- **No-handshake decode.** `cli_simulator` runs the full PING /
+- **Post-handshake decode.** `cli_simulator` runs the full PING /
   CONNECT / DATA / DISCONNECT path. The bench skips all of that and
-  exercises only the data-frame decode hot path — the surface most
-  worth optimizing for throughput.
+  starts in connected DATA mode, exercising the data-frame decode hot path —
+  the surface most worth optimizing for throughput.

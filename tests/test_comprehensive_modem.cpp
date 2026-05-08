@@ -23,6 +23,7 @@
 #include "ultra/ofdm.hpp"
 #include "ultra/types.hpp"
 #include "ultra/dsp.hpp"
+#include "sim/awgn.hpp"
 
 using namespace ultra;
 using Complex = std::complex<float>;
@@ -421,18 +422,7 @@ bool test_full_chain_awgn(float snr_db) {
     float scale = 0.5f / max_val;
     for (float& s : signal) s *= scale;
 
-    // Add AWGN
-    float signal_power = 0;
-    for (float s : signal) signal_power += s * s;
-    signal_power /= signal.size();
-
-    float noise_power = signal_power / std::pow(10.0f, snr_db / 10.0f);
-    float noise_std = std::sqrt(noise_power);
-
-    std::normal_distribution<float> noise(0.0f, noise_std);
-    for (float& s : signal) {
-        s += noise(rng);
-    }
+    sim::awgn::addAWGN(signal, snr_db, rng);
 
     // RX
     std::vector<float> soft_bits;

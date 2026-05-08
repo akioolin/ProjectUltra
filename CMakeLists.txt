@@ -144,12 +144,41 @@ if(ULTRA_USE_FFTW AND FFTW3_FOUND)
     target_link_libraries(ultra_core PUBLIC PkgConfig::FFTW3)
 endif()
 
+# Shared GUI/modem runtime source lists. Keep these centralized so CLI tools,
+# TNC, simulator, and GUI builds cannot silently drift apart.
+set(ULTRA_STREAMING_MODEM_SOURCES
+    src/gui/modem/streaming_decoder.cpp
+    src/gui/modem/streaming_encoder.cpp
+)
+
+set(ULTRA_AUDIO_ENGINE_SOURCE
+    src/gui/audio_engine.cpp
+)
+
+set(ULTRA_MODEM_ENGINE_SOURCES
+    src/gui/modem/modem_engine.cpp
+    src/gui/modem/modem_rx.cpp
+    src/gui/modem/modem_rx_decode.cpp
+    src/gui/modem/modem_mode.cpp
+    src/gui/modem/modem_carrier_sense.cpp
+    ${ULTRA_STREAMING_MODEM_SOURCES}
+    src/gui/adaptive_mode.cpp
+)
+
 # Command-line modem tool
 if(ULTRA_BUILD_TOOLS)
+    add_library(ultra_tool_wav_io STATIC
+        tools/io/wav_io.cpp
+    )
+    target_include_directories(ultra_tool_wav_io PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
+    )
+    target_link_libraries(ultra_tool_wav_io PUBLIC ultra_core)
+
     add_library(ultra_sim_station STATIC
         tools/sim/simulated_station.cpp
-        src/gui/modem/streaming_decoder.cpp
-        src/gui/modem/streaming_encoder.cpp
+        ${ULTRA_STREAMING_MODEM_SOURCES}
     )
     target_include_directories(ultra_sim_station PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -159,17 +188,11 @@ if(ULTRA_BUILD_TOOLS)
 
     add_executable(ultra
         src/main.cpp
-        src/gui/modem/modem_engine.cpp
-        src/gui/modem/modem_rx.cpp
-        src/gui/modem/modem_rx_decode.cpp
-        src/gui/modem/modem_mode.cpp
-        src/gui/modem/modem_carrier_sense.cpp
-        src/gui/modem/streaming_decoder.cpp
-        src/gui/modem/streaming_encoder.cpp
-        src/gui/adaptive_mode.cpp
+        ${ULTRA_MODEM_ENGINE_SOURCES}
     )
     target_include_directories(ultra PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
     )
     target_link_libraries(ultra PRIVATE ultra_core)
 
@@ -190,13 +213,13 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
     )
-    target_link_libraries(session_decode PRIVATE ultra_sim_station)
+    target_link_libraries(session_decode PRIVATE ultra_sim_station ultra_tool_wav_io)
 
     # Optional hardware-audio support (--role A|B). Reuses the GUI's
     # AudioEngine class; SDL2 is detected at top level above.
     if(SDL2_FOUND)
         target_sources(cli_simulator PRIVATE
-            src/gui/audio_engine.cpp
+            ${ULTRA_AUDIO_ENGINE_SOURCE}
         )
         # SDL_MAIN_HANDLED tells SDL.h not to rename our int main() to
         # SDL_main. Required for CLI tools on Windows; otherwise the linker
@@ -218,10 +241,9 @@ if(ULTRA_BUILD_TOOLS)
         add_executable(ultra_tnc
             tools/ultra_tnc.cpp
             tools/ultra_tnc_config.cpp
-            src/gui/audio_engine.cpp
+            ${ULTRA_AUDIO_ENGINE_SOURCE}
             src/gui/serial_ptt.cpp
-            src/gui/modem/streaming_decoder.cpp
-            src/gui/modem/streaming_encoder.cpp
+            ${ULTRA_STREAMING_MODEM_SOURCES}
         )
         target_include_directories(ultra_tnc PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -241,25 +263,18 @@ if(ULTRA_BUILD_TOOLS)
     # input. No SDL, no real-time pacing, runs as fast as possible.
     add_executable(decode_bench
         tools/decode_bench.cpp
-        src/gui/modem/streaming_decoder.cpp
-        src/gui/modem/streaming_encoder.cpp
+        ${ULTRA_STREAMING_MODEM_SOURCES}
     )
     target_include_directories(decode_bench PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
     )
-    target_link_libraries(decode_bench PRIVATE ultra_core)
+    target_link_libraries(decode_bench PRIVATE ultra_core ultra_tool_wav_io)
 
     # Threaded simulator - proper real-time audio simulation
     add_executable(threaded_simulator
         tools/threaded_simulator.cpp
-        src/gui/modem/modem_engine.cpp
-        src/gui/modem/modem_rx.cpp
-        src/gui/modem/modem_rx_decode.cpp
-        src/gui/modem/modem_mode.cpp
-        src/gui/modem/modem_carrier_sense.cpp
-        src/gui/modem/streaming_decoder.cpp
-        src/gui/modem/streaming_encoder.cpp
-        src/gui/adaptive_mode.cpp
+        ${ULTRA_MODEM_ENGINE_SOURCES}
     )
     target_include_directories(threaded_simulator PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -269,24 +284,21 @@ if(ULTRA_BUILD_TOOLS)
     # Acquisition profiling
     add_executable(profile_acquisition
         tools/profile_acquisition.cpp
-        src/gui/modem/modem_engine.cpp
-        src/gui/modem/modem_rx.cpp
-        src/gui/modem/modem_rx_decode.cpp
-        src/gui/modem/modem_mode.cpp
-        src/gui/modem/modem_carrier_sense.cpp
-        src/gui/modem/streaming_decoder.cpp
-        src/gui/modem/streaming_encoder.cpp
-        src/gui/adaptive_mode.cpp
+        ${ULTRA_MODEM_ENGINE_SOURCES}
     )
     target_include_directories(profile_acquisition PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(profile_acquisition PRIVATE ultra_core)
 
     # Simple waveform test (clean TX/RX with consistent config)
+    # Decoder-only by design; do not pull in the encoder runtime here.
     add_executable(test_waveform_simple
         tools/test_waveform_simple.cpp
         src/gui/modem/streaming_decoder.cpp
     )
-    target_include_directories(test_waveform_simple PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_include_directories(test_waveform_simple PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
+    )
     target_link_libraries(test_waveform_simple PRIVATE ultra_core)
 endif()
 
@@ -303,16 +315,9 @@ if(ULTRA_BUILD_GUI)
         add_executable(ultra_gui
             src/gui/main_gui.cpp
             src/gui/app.cpp
-            src/gui/audio_engine.cpp
+            ${ULTRA_AUDIO_ENGINE_SOURCE}
             src/gui/serial_ptt.cpp
-            src/gui/modem/modem_engine.cpp
-            src/gui/modem/modem_rx.cpp
-            src/gui/modem/modem_rx_decode.cpp
-            src/gui/modem/modem_mode.cpp
-            src/gui/modem/modem_carrier_sense.cpp
-        src/gui/modem/streaming_decoder.cpp
-            src/gui/modem/streaming_encoder.cpp
-            src/gui/adaptive_mode.cpp
+            ${ULTRA_MODEM_ENGINE_SOURCES}
             src/gui/widgets/constellation.cpp
             src/gui/widgets/controls.cpp
             src/gui/widgets/status.cpp

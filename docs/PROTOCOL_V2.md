@@ -189,10 +189,16 @@ Selection logic source:
 - `capInitialOFDMRate(...)`
 
 Current OFDM code-rate thresholds (`selectOFDMCodeRate`):
-- `R3/4`: `fading < 0.15` and `snr >= 20`
-- `R2/3`: `fading < 0.65` and `snr >= 20`
+- `R3/4`: `fading < 0.10` and `snr >= 15`
+- `R2/3`: `fading < 0.15` and `snr >= 15`
 - `R1/2`: `fading < 1.10` and `snr >= 15`
 - otherwise `R1/4`
+
+Current waveform auto-selection:
+- `MC_DPSK`: `snr < 10`
+- `OFDM_CHIRP`: `snr >= 10`
+- `OFDM_COX`: implemented and forceable, but not selected by the production
+  auto ladder
 
 Current data modulation policy:
 - OFDM: DQPSK by default path

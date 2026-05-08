@@ -1,6 +1,7 @@
 #include "ultra_tnc_config.hpp"
 
 #include "protocol/frame_v2.hpp"
+#include "sim/cli_enums.hpp"
 
 #include <cctype>
 #include <cstdlib>
@@ -73,27 +74,11 @@ std::optional<float> parseFloat(const std::string& text) {
 }
 
 std::optional<ultra::CodeRate> parseCodeRate(const std::string& value) {
-    const std::string v = lower(value);
-    if (v == "auto") return ultra::CodeRate::AUTO;
-    if (v == "r1_4") return ultra::CodeRate::R1_4;
-    if (v == "r1_2") return ultra::CodeRate::R1_2;
-    if (v == "r2_3") return ultra::CodeRate::R2_3;
-    if (v == "r3_4") return ultra::CodeRate::R3_4;
-    return std::nullopt;
+    return ultra::tools::cli::parseCodeRate(value, ultra::tools::cli::AllowAuto::Yes);
 }
 
 std::optional<ultra::Modulation> parseModulation(const std::string& value) {
-    const std::string v = lower(value);
-    if (v == "auto") return ultra::Modulation::AUTO;
-    if (v == "dqpsk") return ultra::Modulation::DQPSK;
-    if (v == "d8psk") return ultra::Modulation::D8PSK;
-    if (v == "dbpsk") return ultra::Modulation::DBPSK;
-    if (v == "qpsk") return ultra::Modulation::QPSK;
-    if (v == "bpsk") return ultra::Modulation::BPSK;
-    if (v == "qam16") return ultra::Modulation::QAM16;
-    if (v == "qam32") return ultra::Modulation::QAM32;
-    if (v == "qam64") return ultra::Modulation::QAM64;
-    return std::nullopt;
+    return ultra::tools::cli::parseModulation(value, ultra::tools::cli::AllowAuto::Yes);
 }
 
 void printUsage(std::ostream& out) {

@@ -10,7 +10,7 @@ For module-specific behavior expectations, see `docs/COVERAGE_MAP.md`.
 
 ## Current Test Baseline
 
-Registered CTest targets: 29
+Registered CTest targets: 38
 
 Current maintained local gates:
 

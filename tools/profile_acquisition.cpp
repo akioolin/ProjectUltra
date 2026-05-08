@@ -4,6 +4,7 @@
 #include "gui/modem/modem_engine.hpp"
 #include "gui/adaptive_mode.hpp"
 #include "protocol/frame_v2.hpp"
+#include "sim/awgn.hpp"
 #include <chrono>
 #include <random>
 #include <cstdio>
@@ -55,26 +56,7 @@ struct DecodeSync {
 
 // Add AWGN to signal
 void addNoise(std::vector<float>& samples, float snr_db, std::mt19937& rng) {
-    // Calculate signal power only from active (non-silent) portions
-    // This matches the maintained waveform test tools and gives correct SNR measurement.
-    float signal_energy = 0;
-    size_t active_samples = 0;
-    for (float s : samples) {
-        if (std::abs(s) > 1e-6f) {
-            signal_energy += s * s;
-            active_samples++;
-        }
-    }
-    if (active_samples == 0) return;
-
-    float signal_power = signal_energy / active_samples;
-    float noise_power = signal_power / std::pow(10.0f, snr_db / 10.0f);
-    float noise_std = std::sqrt(noise_power);
-
-    std::normal_distribution<float> noise(0, noise_std);
-    for (float& s : samples) {
-        s += noise(rng);
-    }
+    sim::awgn::addAWGN(samples, snr_db, rng);
 }
 
 // =============================================================================

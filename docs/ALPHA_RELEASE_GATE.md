@@ -1,6 +1,6 @@
 # Alpha Release Gate
 
-Last updated: 2026-04-30
+Last updated: 2026-05-07
 
 ## Purpose
 This file is the source of truth for alpha readiness.
@@ -18,6 +18,9 @@ ProjectUltra alpha means:
 - Core protocol works end-to-end in simulator.
 - ARQ observability is in place (retransmit-cause split, ACK filtering/coalescing counters).
 - OFDM SR-ARQ window is set to 4 (aligned with burst interleaver group size), which materially reduced R2/3 file-transfer retransmission tails.
+- Default waveform auto-selection currently chooses MC-DPSK below SNR 10 and
+  OFDM_CHIRP at SNR 10+. OFDM_COX is implemented and can be forced, but it is
+  not selected by the production auto ladder.
 - D8PSK remains experimental for fading until its dedicated control-path metrics pass.
 
 ### Latest Full Gate Run
@@ -54,6 +57,8 @@ All gates below must pass before alpha tag:
 
 4. Mode policy guardrails (must pass):
 - Default auto-rate excludes modes that fail fading reliability gates.
+- OFDM_COX may remain advertised as an implemented capability, but it stays
+  forced/fallback only until its own gate passes.
 - `D8PSK` and coherent high-order modes remain Expert/forced until validated.
 
 5. Release hygiene (must pass):

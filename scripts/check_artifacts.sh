@@ -62,8 +62,23 @@ is_agent_artifact_path() {
 is_allowed_hw_log_path_file() {
   local path="$1"
 
+  # Documentation and templates may reference the /tmp/ultra_hw_ prefix
+  # in prose without containing actual log content. Real hardware log
+  # files live under /tmp/ outside the repo and never reach this scanner.
   case "$path" in
-    CLAUDE.md|tools/run_hw_test.sh)
+    CLAUDE.md|tools/run_hw_test.sh|scripts/check_artifacts.sh)
+      return 0
+      ;;
+    docs/*.md|docs/**/*.md)
+      return 0
+      ;;
+    .github/ISSUE_TEMPLATE/*.yml|.github/ISSUE_TEMPLATE/*.yaml|.github/PULL_REQUEST_TEMPLATE.md)
+      return 0
+      ;;
+    agents/queue/*.md|agents/archive/*.md|agents/planner/proposals/*.md|agents/planner/reports/*.md)
+      return 0
+      ;;
+    README.md)
       return 0
       ;;
     .github/ISSUE_TEMPLATE/agent_followup.yml|.github/ISSUE_TEMPLATE/hardware_followup.yml)

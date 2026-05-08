@@ -24,6 +24,7 @@
 
 #include "gui/modem/modem_engine.hpp"
 #include "protocol/protocol_engine.hpp"
+#include "sim/awgn.hpp"
 #include "ultra/logging.hpp"
 
 using namespace ultra;
@@ -100,24 +101,8 @@ public:
 
 private:
     std::vector<float> applyNoise(const std::vector<float>& samples) {
-        // Calculate signal RMS
-        float sum_sq = 0.0f;
-        for (float s : samples) sum_sq += s * s;
-        float signal_rms = std::sqrt(sum_sq / samples.size());
-
-        if (signal_rms < 1e-6f) return samples;
-
-        // Calculate noise level for target SNR
-        float snr_linear = std::pow(10.0f, snr_db_ / 10.0f);
-        float noise_power = (signal_rms * signal_rms) / snr_linear;
-        float noise_stddev = std::sqrt(noise_power);
-
         std::vector<float> noisy = samples;
-        std::normal_distribution<float> noise_dist(0.0f, noise_stddev);
-
-        for (float& sample : noisy) {
-            sample += noise_dist(rng_);
-        }
+        ultra::sim::awgn::addAWGN(noisy, snr_db_, rng_);
         return noisy;
     }
 

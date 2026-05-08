@@ -11,10 +11,13 @@
 // Fixtures are committed to fixtures/ so every bench run measures
 // bit-identical audio. Encoder is deterministic given a seed.
 
+#include "io/wav_io.hpp"
 #include "gui/modem/streaming_decoder.hpp"
 #include "gui/modem/streaming_encoder.hpp"
 #include "protocol/connection_policy.hpp"
 #include "protocol/frame_v2.hpp"
+#include "sim/awgn.hpp"
+#include "sim/cli_enums.hpp"
 #include "ultra/timing_profiler.hpp"
 #include "ultra/types.hpp"
 
@@ -24,7 +27,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
+#include <exception>
 #include <fstream>
 #include <iostream>
 #include <mutex>
@@ -45,85 +48,6 @@ using ultra::gui::StreamingDecoder;
 using ultra::gui::StreamingEncoder;
 using ultra::protocol::WaveformMode;
 
-// -------- WAV I/O (32-bit float mono, 48 kHz) -----------------------------
-
-bool writeWavF32(const std::string& path, const std::vector<float>& samples,
-                 int sample_rate = 48000) {
-    std::ofstream out(path, std::ios::binary);
-    if (!out) return false;
-
-    const uint32_t data_bytes = static_cast<uint32_t>(samples.size() * sizeof(float));
-    const uint32_t fmt_size = 16;
-    const uint16_t audio_format = 3;  // IEEE float
-    const uint16_t channels = 1;
-    const uint16_t bits = 32;
-    const uint32_t byte_rate = sample_rate * channels * bits / 8;
-    const uint16_t block_align = channels * bits / 8;
-    const uint32_t riff_size = 36 + data_bytes;
-
-    out.write("RIFF", 4);
-    out.write(reinterpret_cast<const char*>(&riff_size), 4);
-    out.write("WAVE", 4);
-    out.write("fmt ", 4);
-    out.write(reinterpret_cast<const char*>(&fmt_size), 4);
-    out.write(reinterpret_cast<const char*>(&audio_format), 2);
-    out.write(reinterpret_cast<const char*>(&channels), 2);
-    out.write(reinterpret_cast<const char*>(&sample_rate), 4);
-    out.write(reinterpret_cast<const char*>(&byte_rate), 4);
-    out.write(reinterpret_cast<const char*>(&block_align), 2);
-    out.write(reinterpret_cast<const char*>(&bits), 2);
-    out.write("data", 4);
-    out.write(reinterpret_cast<const char*>(&data_bytes), 4);
-    out.write(reinterpret_cast<const char*>(samples.data()), data_bytes);
-    return out.good();
-}
-
-bool readWavF32(const std::string& path, std::vector<float>& samples,
-                int& sample_rate) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) return false;
-    char riff[4], wave[4], chunk_id[4];
-    uint32_t riff_size = 0, chunk_size = 0;
-    uint16_t audio_format = 0, channels = 0, bits = 0, block_align = 0;
-    uint32_t byte_rate = 0;
-    in.read(riff, 4);
-    in.read(reinterpret_cast<char*>(&riff_size), 4);
-    in.read(wave, 4);
-    if (std::strncmp(riff, "RIFF", 4) != 0 || std::strncmp(wave, "WAVE", 4) != 0) {
-        std::cerr << "Not a WAV file: " << path << "\n";
-        return false;
-    }
-    bool got_fmt = false, got_data = false;
-    while (in.read(chunk_id, 4) && in.read(reinterpret_cast<char*>(&chunk_size), 4)) {
-        if (std::strncmp(chunk_id, "fmt ", 4) == 0) {
-            uint32_t fmt_size = chunk_size;
-            in.read(reinterpret_cast<char*>(&audio_format), 2);
-            in.read(reinterpret_cast<char*>(&channels), 2);
-            in.read(reinterpret_cast<char*>(&sample_rate), 4);
-            in.read(reinterpret_cast<char*>(&byte_rate), 4);
-            in.read(reinterpret_cast<char*>(&block_align), 2);
-            in.read(reinterpret_cast<char*>(&bits), 2);
-            if (fmt_size > 16) in.seekg(fmt_size - 16, std::ios::cur);
-            got_fmt = true;
-        } else if (std::strncmp(chunk_id, "data", 4) == 0) {
-            if (audio_format != 3 || bits != 32 || channels != 1) {
-                std::cerr << "Expected 32-bit float mono WAV; got format="
-                          << audio_format << " bits=" << bits
-                          << " channels=" << channels << "\n";
-                return false;
-            }
-            const size_t n = chunk_size / sizeof(float);
-            samples.resize(n);
-            in.read(reinterpret_cast<char*>(samples.data()), chunk_size);
-            got_data = true;
-            break;
-        } else {
-            in.seekg(chunk_size, std::ios::cur);
-        }
-    }
-    return got_fmt && got_data;
-}
-
 // -------- Argument parsing -------------------------------------------------
 
 struct Args {
@@ -143,30 +67,6 @@ struct Args {
     int burst_group_size = 8;
     int cw_count = 0;          // 0 = connected policy default, otherwise explicit
 };
-
-WaveformMode parseWaveform(const std::string& s) {
-    if (s == "ofdm_chirp") return WaveformMode::OFDM_CHIRP;
-    if (s == "ofdm_cox") return WaveformMode::OFDM_COX;
-    if (s == "ofdm_narrow") return WaveformMode::OFDM_NARROW;
-    if (s == "mc_dpsk") return WaveformMode::MC_DPSK;
-    return WaveformMode::OFDM_CHIRP;
-}
-
-CodeRate parseCodeRate(const std::string& s) {
-    if (s == "r1_4") return CodeRate::R1_4;
-    if (s == "r1_2") return CodeRate::R1_2;
-    if (s == "r2_3") return CodeRate::R2_3;
-    if (s == "r3_4") return CodeRate::R3_4;
-    return CodeRate::R1_4;
-}
-
-Modulation parseModulation(const std::string& s) {
-    if (s == "dqpsk") return Modulation::DQPSK;
-    if (s == "qpsk") return Modulation::QPSK;
-    if (s == "d8psk") return Modulation::D8PSK;
-    if (s == "dbpsk") return Modulation::DBPSK;
-    return Modulation::DQPSK;
-}
 
 void printUsage() {
     std::cout <<
@@ -249,30 +149,8 @@ std::string printableBytes(const Bytes& bytes, size_t start = 0) {
 // -------- Channel: AWGN at target SNR -------------------------------------
 
 void applyAWGN(std::vector<float>& samples, float snr_db, uint32_t seed) {
-    if (snr_db >= 80.0f) return;  // sentinel for "no noise"
-
-    // Signal power = mean(s^2) over non-zero samples. Encoder output is
-    // ~peak-normalized; we measure RMS to get a stable scale.
-    double sig_pow = 0.0;
-    size_t n = 0;
-    for (float s : samples) {
-        if (std::abs(s) > 1e-6f) {
-            sig_pow += static_cast<double>(s) * s;
-            ++n;
-        }
-    }
-    if (n == 0) return;
-    sig_pow /= static_cast<double>(n);
-
-    const double snr_linear = std::pow(10.0, snr_db / 10.0);
-    const double noise_pow = sig_pow / snr_linear;
-    const double sigma = std::sqrt(noise_pow);
-
     std::mt19937 rng(seed);
-    std::normal_distribution<float> nz(0.0f, static_cast<float>(sigma));
-    for (float& s : samples) {
-        s += nz(rng);
-    }
+    ultra::sim::awgn::addAWGN(samples, snr_db, rng);
 }
 
 // -------- gen mode --------------------------------------------------------
@@ -306,9 +184,10 @@ ultra::ModemConfig benchOFDMConfig() {
 
 int runGen(const Args& a) {
     StreamingEncoder enc;
-    enc.setMode(parseWaveform(a.waveform));
+    enc.setMode(ultra::tools::cli::requireWaveformMode(a.waveform));
     enc.setOFDMConfig(benchOFDMConfig());
-    enc.setDataMode(parseModulation(a.modulation), parseCodeRate(a.code_rate));
+    enc.setDataMode(ultra::tools::cli::requireModulation(a.modulation),
+                    ultra::tools::cli::requireCodeRate(a.code_rate));
     // Bench targets the connected-mode 4-CW fixed-frame data path —
     // that's the throughput hot path agents will be optimizing.
     enc.setFixedFrameCodewords(4);
@@ -320,7 +199,8 @@ int runGen(const Args& a) {
     // Cap payload to fixed-frame capacity so the encoder doesn't spill
     // into multi-frame fragmentation. We want a deterministic single-
     // frame burst per iteration.
-    const size_t cap = v2::getFixedFramePayloadCapacity(parseCodeRate(a.code_rate), 4);
+    const size_t cap = v2::getFixedFramePayloadCapacity(
+        ultra::tools::cli::requireCodeRate(a.code_rate), 4);
     const size_t payload_bytes = std::min(static_cast<size_t>(a.payload_bytes), cap);
 
     std::cout << "[gen] waveform=" << a.waveform
@@ -362,7 +242,7 @@ int runGen(const Args& a) {
         // CW with saturated-but-wrong-position bits. (Codex review.)
         auto frame = v2::makeFixedDataFrame(
             "BENCH1", "BENCH2", static_cast<uint16_t>(f), payload,
-            parseCodeRate(a.code_rate), /*cw_count=*/4);
+            ultra::tools::cli::requireCodeRate(a.code_rate), /*cw_count=*/4);
         Bytes serialized = frame.serialize();
 
         // Preamble selection:
@@ -410,7 +290,7 @@ int runGen(const Args& a) {
         std::cout << "[gen] noiseless (SNR>=80)\n";
     }
 
-    if (!writeWavF32(a.wav_path, all_samples)) {
+    if (!ultra::tools::io::writeWavF32Mono(a.wav_path, all_samples)) {
         std::cerr << "Failed to write " << a.wav_path << "\n";
         return 1;
     }
@@ -421,28 +301,28 @@ int runGen(const Args& a) {
 // -------- bench mode ------------------------------------------------------
 
 int runBench(const Args& a) {
-    std::vector<float> samples;
-    int sr = 0;
-    if (!readWavF32(a.wav_path, samples, sr)) {
-        std::cerr << "Failed to read " << a.wav_path << "\n";
+    ultra::tools::io::LoadedWav wav;
+    try {
+        wav = ultra::tools::io::loadWavMono48k(a.wav_path);
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to read " << a.wav_path << ": " << e.what() << "\n";
         return 1;
     }
-    if (sr != 48000) {
-        std::cerr << "Expected 48 kHz, got " << sr << "\n";
-        return 1;
-    }
+    std::vector<float>& samples = wav.samples_48k;
     std::cout << "[bench] loaded " << samples.size() << " samples ("
               << static_cast<double>(samples.size()) / 48000.0 << " s) from "
-              << a.wav_path << "\n";
+              << a.wav_path << " [source=" << wav.source_rate << " Hz, "
+              << wav.source_channels << " ch, format=" << wav.source_format
+              << ", bits=" << wav.source_bits << "]\n";
 
-    const WaveformMode waveform = parseWaveform(a.waveform);
+    const WaveformMode waveform = ultra::tools::cli::requireWaveformMode(a.waveform);
     if (a.connected && !ultra::protocol::isOFDMMode(waveform)) {
         std::cerr << "--connected requires an OFDM waveform\n";
         return 1;
     }
 
-    const CodeRate code_rate = parseCodeRate(a.code_rate);
-    const Modulation modulation = parseModulation(a.modulation);
+    const CodeRate code_rate = ultra::tools::cli::requireCodeRate(a.code_rate);
+    const Modulation modulation = ultra::tools::cli::requireModulation(a.modulation);
     const int fixed_cw = (a.cw_count > 0)
         ? v2::sanitizeFixedFrameCodewords(a.cw_count)
         : (a.connected ? ultra::protocol::connection_policy::recommendCWCount(code_rate, waveform)
@@ -670,12 +550,17 @@ int runBench(const Args& a) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    Args a;
-    if (!parseArgs(argc, argv, a)) {
-        printUsage();
+    try {
+        Args a;
+        if (!parseArgs(argc, argv, a)) {
+            printUsage();
+            return 1;
+        }
+        if (a.mode == "gen") return runGen(a);
+        if (a.mode == "bench") return runBench(a);
+        return 1;
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << "\n";
         return 1;
     }
-    if (a.mode == "gen") return runGen(a);
-    if (a.mode == "bench") return runBench(a);
-    return 1;
 }

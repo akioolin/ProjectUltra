@@ -44,6 +44,7 @@
 #include "protocol/protocol_engine.hpp"
 #include "protocol/frame_v2.hpp"
 #include "protocol/waveform_selection.hpp"
+#include "sim/cli_enums.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
 #include "ultra/fec.hpp"  // ChannelInterleaver, LDPCEncoder
@@ -60,6 +61,7 @@ using namespace ultra;
 using namespace ultra::gui;
 using namespace ultra::protocol;
 using namespace ultra::sim;
+namespace cli = ultra::tools::cli;
 
 // Channel condition types (ITU-R F.1487)
 #ifdef ULTRA_HAVE_SDL2
@@ -1681,99 +1683,59 @@ int main(int argc, char* argv[]) {
                 // --fading alone = moderate, --fading <type> = specified type
                 if (i + 1 < argc && argv[i + 1][0] != '-') {
                     std::string ftype = argv[++i];
-                    if (ftype == "good" || ftype == "GOOD") {
-                        sim.setChannelType(ChannelType::GOOD);
-                    } else if (ftype == "moderate" || ftype == "MODERATE") {
-                        sim.setChannelType(ChannelType::MODERATE);
-                    } else if (ftype == "poor" || ftype == "POOR") {
-                        sim.setChannelType(ChannelType::POOR);
-                    } else if (ftype == "flutter" || ftype == "FLUTTER") {
-                        sim.setChannelType(ChannelType::FLUTTER);
-                    } else {
-                        std::cerr << "Unknown fading type: " << ftype << " (use good, moderate, poor, flutter)\n";
+                    auto channel = cli::parseChannelType(ftype, cli::AllowAwgn::No);
+                    if (!channel) {
+                        std::cerr << "Unknown fading type: " << ftype
+                                  << " (use " << cli::channelChoices(cli::AllowAwgn::No) << ")\n";
                         return 1;
                     }
+                    sim.setChannelType(*channel);
                 } else {
                     sim.setChannelType(ChannelType::MODERATE);  // Default fading = moderate
                 }
             } else if (arg == "--channel" || arg == "-c") {
                 if (i + 1 < argc) {
                     std::string ch_str = argv[++i];
-                    if (ch_str == "awgn" || ch_str == "AWGN") {
-                        sim.setChannelType(ChannelType::AWGN);
-                    } else if (ch_str == "good" || ch_str == "GOOD") {
-                        sim.setChannelType(ChannelType::GOOD);
-                    } else if (ch_str == "moderate" || ch_str == "MODERATE") {
-                        sim.setChannelType(ChannelType::MODERATE);
-                    } else if (ch_str == "poor" || ch_str == "POOR") {
-                        sim.setChannelType(ChannelType::POOR);
-                    } else if (ch_str == "flutter" || ch_str == "FLUTTER") {
-                        sim.setChannelType(ChannelType::FLUTTER);
-                    } else {
-                        std::cerr << "Unknown channel: " << ch_str << " (use awgn, good, moderate, poor, flutter)\n";
+                    auto channel = cli::parseChannelType(ch_str);
+                    if (!channel) {
+                        std::cerr << "Unknown channel: " << ch_str
+                                  << " (use " << cli::channelChoices() << ")\n";
                         return 1;
                     }
+                    sim.setChannelType(*channel);
                 }
             } else if (arg == "--hop-channel") {
                 if (i + 1 < argc) {
                     std::string ch_str = argv[++i];
-                    if (ch_str == "awgn" || ch_str == "AWGN") {
-                        sim.setAdaptiveHopChannel(ChannelType::AWGN);
-                    } else if (ch_str == "good" || ch_str == "GOOD") {
-                        sim.setAdaptiveHopChannel(ChannelType::GOOD);
-                    } else if (ch_str == "moderate" || ch_str == "MODERATE") {
-                        sim.setAdaptiveHopChannel(ChannelType::MODERATE);
-                    } else if (ch_str == "poor" || ch_str == "POOR") {
-                        sim.setAdaptiveHopChannel(ChannelType::POOR);
-                    } else if (ch_str == "flutter" || ch_str == "FLUTTER") {
-                        sim.setAdaptiveHopChannel(ChannelType::FLUTTER);
-                    } else {
-                        std::cerr << "Unknown hop channel: " << ch_str << " (use awgn, good, moderate, poor, flutter)\n";
+                    auto channel = cli::parseChannelType(ch_str);
+                    if (!channel) {
+                        std::cerr << "Unknown hop channel: " << ch_str
+                                  << " (use " << cli::channelChoices() << ")\n";
                         return 1;
                     }
+                    sim.setAdaptiveHopChannel(*channel);
                 }
             } else if (arg == "--mod" || arg == "-m") {
                 if (i + 1 < argc) {
                     std::string mod_str = argv[++i];
-                    if (mod_str == "dqpsk" || mod_str == "DQPSK") {
-                        sim.setForcedModulation(Modulation::DQPSK);
-                    } else if (mod_str == "d8psk" || mod_str == "D8PSK") {
-                        sim.setForcedModulation(Modulation::D8PSK);
-                    } else if (mod_str == "dbpsk" || mod_str == "DBPSK") {
-                        sim.setForcedModulation(Modulation::DBPSK);
-                    } else if (mod_str == "qpsk" || mod_str == "QPSK") {
-                        sim.setForcedModulation(Modulation::QPSK);
-                    } else if (mod_str == "bpsk" || mod_str == "BPSK") {
-                        sim.setForcedModulation(Modulation::BPSK);
-                    } else if (mod_str == "qam16" || mod_str == "QAM16") {
-                        sim.setForcedModulation(Modulation::QAM16);
-                    } else if (mod_str == "qam32" || mod_str == "QAM32") {
-                        sim.setForcedModulation(Modulation::QAM32);
-                    } else if (mod_str == "qam64" || mod_str == "QAM64") {
-                        sim.setForcedModulation(Modulation::QAM64);
-                    } else {
+                    auto mod = cli::parseModulation(mod_str);
+                    if (!mod) {
                         std::cerr << "Unknown modulation: " << mod_str
-                                  << " (use dqpsk, d8psk, dbpsk, qpsk, bpsk, qam16, qam32, qam64)\n";
+                                  << " (use " << cli::modulationChoices() << ")\n";
                         return 1;
                     }
+                    sim.setForcedModulation(*mod);
                 }
             } else if (arg == "--rate" || arg == "-r") {
                 if (i + 1 < argc) {
                     std::string rate_str = argv[++i];
-                    if (rate_str == "r1_4" || rate_str == "R1_4") {
-                        sim.setForcedCodeRate(CodeRate::R1_4);
-                    } else if (rate_str == "r1_2" || rate_str == "R1_2") {
-                        sim.setForcedCodeRate(CodeRate::R1_2);
-                    } else if (rate_str == "r2_3" || rate_str == "R2_3") {
-                        sim.setForcedCodeRate(CodeRate::R2_3);
-                    } else if (rate_str == "r3_4" || rate_str == "R3_4") {
-                        sim.setForcedCodeRate(CodeRate::R3_4);
-                    } else if (rate_str == "auto" || rate_str == "AUTO") {
-                        sim.setForcedCodeRate(CodeRate::AUTO);
-                    } else {
-                        std::cerr << "Unknown code rate: " << rate_str << " (use auto, r1_4, r1_2, r2_3, r3_4)\n";
+                    auto rate = cli::parseCodeRate(rate_str, cli::AllowAuto::Yes);
+                    if (!rate) {
+                        std::cerr << "Unknown code rate: " << rate_str
+                                  << " (use " << cli::codeRateChoices(cli::AllowAuto::Yes) << ")\n";
                         return 1;
                     }
+                    sim.setForcedCodeRate(*rate);
                 }
             } else if (arg == "--cw-count" && i + 1 < argc) {
                 int cw_count = std::stoi(argv[++i]);
@@ -1798,18 +1760,13 @@ int main(int argc, char* argv[]) {
             } else if (arg == "--waveform" || arg == "-w") {
                 if (i + 1 < argc) {
                     std::string wf_str = argv[++i];
-                    if (wf_str == "mc_dpsk" || wf_str == "dpsk") {
-                        sim.setPreferredWaveform(WaveformMode::MC_DPSK);
-                    } else if (wf_str == "ofdm_chirp") {
-                        sim.setPreferredWaveform(WaveformMode::OFDM_CHIRP);
-                    } else if (wf_str == "ofdm_cox" || wf_str == "ofdm") {
-                        sim.setPreferredWaveform(WaveformMode::OFDM_COX);
-                    } else if (wf_str == "ofdm_narrow" || wf_str == "narrow") {
-                        sim.setPreferredWaveform(WaveformMode::OFDM_NARROW);
-                    } else {
-                        std::cerr << "Unknown waveform: " << wf_str << " (use mc_dpsk, ofdm_chirp, ofdm_cox, ofdm_narrow)\n";
+                    auto waveform = cli::parseWaveformMode(wf_str, cli::BareOFDMMode::Cox);
+                    if (!waveform) {
+                        std::cerr << "Unknown waveform: " << wf_str
+                                  << " (use " << cli::waveformChoices() << ")\n";
                         return 1;
                     }
+                    sim.setPreferredWaveform(*waveform);
                 }
             } else if (arg == "--ofdm-config") {
                 if (i + 1 >= argc) {

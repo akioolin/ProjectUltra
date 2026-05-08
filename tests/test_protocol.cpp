@@ -11,9 +11,9 @@
 #include "protocol/file_transfer.hpp"
 #include "ultra/types.hpp"
 #include "protocol/compression.hpp"
+#include "helpers/temp_dir.hpp"
 #include <iostream>
 #include <cassert>
-#include <chrono>
 #include <thread>
 #include <queue>
 #include <fstream>
@@ -1026,18 +1026,6 @@ bool test_adaptive_bidirectional() {
 // File Transfer Tests
 // ============================================================================
 
-std::filesystem::path makeTempTestDir(const std::string& prefix) {
-    std::error_code ec;
-    auto base = std::filesystem::temp_directory_path(ec);
-    if (ec) return {};
-
-    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-    auto dir = base / (prefix + "_" + std::to_string(stamp));
-    std::filesystem::create_directories(dir, ec);
-    if (ec) return {};
-    return dir;
-}
-
 std::string createTestFile(const std::filesystem::path& dir, const std::string& name, size_t size) {
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
@@ -1087,8 +1075,9 @@ bool test_file_transfer_small() {
     stationB.setLocalCallsign("K2DEF");
 
     const size_t FILE_SIZE = 100;
-    auto test_dir = makeTempTestDir("ultra_protocol_test");
-    if (test_dir.empty()) FAIL("Could not create temp test directory");
+    ultra::test::TempDir temp_dir("ultra_protocol_test");
+    if (!temp_dir.valid()) FAIL("Could not create temp test directory");
+    const auto& test_dir = temp_dir.path();
 
     std::string src_path = createTestFile(test_dir, "test_small.bin", FILE_SIZE);
     if (src_path.empty()) FAIL("Could not create test file");
@@ -1134,8 +1123,6 @@ bool test_file_transfer_small() {
     if (!receive_success) FAIL("File receive reported failure");
 
     if (!verifyFileContent(received_path, FILE_SIZE)) FAIL("File content mismatch");
-
-    std::filesystem::remove_all(test_dir);
 
     PASS();
     return true;

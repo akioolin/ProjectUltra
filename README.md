@@ -2,7 +2,7 @@
 
 **High-performance HF modem for amateur radio**
 
-*Last updated: 2026-05-02*
+*Last updated: 2026-05-07*
 
 > **EXPERIMENTAL SOFTWARE — WORK IN PROGRESS**
 >
@@ -47,8 +47,8 @@ OFDM 1024-FFT, 59 carriers, CP=96, ~42.9 sym/s:
 | 8+   | OFDM-NARROW R1/2 |    230 bps | 500 Hz BW |
 | 10+  | OFDM DQPSK R1/4  |   1264 bps | Fading-tolerant baseline |
 | 15+  | OFDM DQPSK R1/2  |   2271 bps | Good + moderate fading |
-| 20+  | OFDM DQPSK R2/3  |   3028 bps | Good fading only |
-| 20+  | OFDM DQPSK R3/4  |   3536 bps | AWGN only |
+| 15+  | OFDM DQPSK R2/3  |   3028 bps | Near-AWGN only |
+| 15+  | OFDM DQPSK R3/4  |   3536 bps | AWGN only, fading < 0.10 |
 | 25+  | OFDM 16QAM R3/4  |   5657 bps | Stable paths (NVIS, ground wave) |
 | 30+  | OFDM 32QAM R3/4  |   7071 bps | Stable paths only |
 
@@ -76,7 +76,8 @@ bound given a clean channel.
 
 **Waveforms.** MC-DPSK (chirp sync, low-SNR robust), OFDM-CHIRP
 (wideband 2.8 kHz, 59 carriers), OFDM-NARROW (500 Hz crowded-band
-mode), OFDM-COX (Schmidl-Cox sync), SC-DPSK (very low SNR).
+mode), OFDM-COX (Schmidl-Cox sync, forceable/legacy only),
+SC-DPSK (very low SNR).
 
 **Modulation + FEC.** DBPSK / DQPSK / D8PSK / BPSK / QPSK with
 802.11n LDPC at four code rates (R1/4, R1/2, R2/3, R3/4).
@@ -142,9 +143,9 @@ SNR         Waveform              Reason
 ─────────────────────────────────────────────────────────────────────
 5–10 dB     MC-DPSK (8 carriers)  Differential encoding, dual-chirp sync
 5–10 dB     OFDM-NARROW (500 Hz)  Crowded bands, low SNR
-10–17 dB    OFDM-CHIRP (1024)     Dual-chirp sync, 59 carriers
-17+ dB      OFDM-COX (1024)       Schmidl-Cox sync, faster acquisition
-25+ dB NVIS OFDM 16QAM            Coherent + pilot tracking
+10+ dB      OFDM-CHIRP (1024)     Production auto ladder
+forced      OFDM-COX (1024)       Implemented, not auto-selected
+forced      OFDM 16QAM            Coherent + pilot tracking
 ```
 
 Selection happens during CONNECT (peer-advertised SNR + fading index)
@@ -204,7 +205,7 @@ ProjectUltra extension:
 ### Status
 
 - Cross-platform: Linux + macOS + Windows. CI matrix all green.
-- ctest: **37/37** (TNC parser, TCP integration, bridge tests, plus
+- ctest: **38/38** (TNC parser, TCP integration, bridge tests, throughput utility, plus
   modem regressions including the new `CarrierLDPC v1` math gate
   and per-carrier mask plumbing).
 - End-to-end byte-exact transfers (hardware harness, Mac ↔ Pi5
@@ -456,11 +457,13 @@ necessary. Be ready to QSY.
   byte-exact end-to-end, validated with real Pat sessions.
 - Hardware-in-the-loop test rig (Mac ↔ Pi5 with Watterson
   injection) with byte-exact file-transfer validation.
-- **First real OTA validation (2026-05-03):** ProjectUltra
-  audio played over the air by KC3VPB (US, 40m band,
-  7.102 / 7.113 MHz USB), captured via the NA5B KiwiSDR in
-  Maryland, decoded byte-exact offline. Recordings in
-  `recordings/`.
+- **First OTA full-session decode (2026-05-07):** full
+  chirp + CONNECT + DATA + DISCONNECT sessions decoded from
+  Pennsylvania TX audio captured by the Vermont KiwiSDR at
+  `recordings/ota_capture_2026-05-07_k1vl/`. R1/4 and R1/2
+  completed handshake and byte-exact DATA decode; R3/4 captured
+  chirp but lost the handshake, matching the current auto-rate
+  exclusion for fading channels.
 
 ### Experimental (in tree, not on by default)
 
@@ -480,10 +483,10 @@ necessary. Be ready to QSY.
   reach R3/4 even on clean AWGN because the initial-rate
   cap requires SNR ≥ 24; hardware validation needed before
   lowering.
-- Real over-the-air validation infrastructure: currently
-  limited to the synthetic Watterson hardware harness;
-  KiwiSDR-based remote-receiver TX validation is the
-  near-term plan for solo operators.
+- Real over-the-air validation expansion: the 2026-05-07
+  KiwiSDR replay path works for full sessions; the remaining
+  work is broader live two-way coverage and better low-SNR
+  OTA margins.
 
 ### Deliberately deferred
 
@@ -502,9 +505,9 @@ necessary. Be ready to QSY.
 Active engineering goal lives in `docs/PROJECT_GOALS.md`.
 Recent design + audit notes are in `docs/CHANGELOG.md`,
 `docs/PHASE2_CARRIER_MASK_DESIGN.md`, and the
-`docs/SESSION_*.md` series. Speculative / archived research
-lives under `docs/archive/` — historical only, not part of
-the production build.
+historical reports under `docs/archive/`. Speculative /
+archived research is historical only, not part of the
+production build.
 
 ---
 

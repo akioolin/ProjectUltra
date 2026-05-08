@@ -1,8 +1,8 @@
 #include "protocol/connection.hpp"
 #include "protocol/connection_policy.hpp"
 #include "protocol/frame_v2.hpp"
+#include "helpers/temp_dir.hpp"
 
-#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -26,17 +26,6 @@ int tests_failed = 0;
         } \
     } while (0)
 
-std::filesystem::path makeTempDir(const std::string& prefix) {
-    std::error_code ec;
-    auto base = std::filesystem::temp_directory_path(ec);
-    if (ec) return {};
-    auto dir = base / (prefix + "_" + std::to_string(
-        std::chrono::steady_clock::now().time_since_epoch().count()));
-    std::filesystem::create_directories(dir, ec);
-    if (ec) return {};
-    return dir;
-}
-
 std::string createFile(const std::filesystem::path& dir, size_t bytes) {
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
@@ -50,6 +39,18 @@ std::string createFile(const std::filesystem::path& dir, size_t bytes) {
     }
     return path.string();
 }
+
+struct TempPayloadFile {
+    ultra::test::TempDir dir;
+    std::string path;
+
+    TempPayloadFile(const std::string& prefix, size_t bytes)
+        : dir(prefix) {
+        if (dir.valid()) {
+            path = createFile(dir.path(), bytes);
+        }
+    }
+};
 
 } // namespace
 
@@ -211,14 +212,13 @@ void test_remote_mode_change_reconfigures_arq() {
 }
 
 void test_adaptive_upgrade_requires_backlog_and_clean_windows() {
-    auto dir = makeTempDir("ultra_adapt_upgrade");
-    CHECK(!dir.empty(), "temp dir");
-    auto path = createFile(dir, 5000);
-    CHECK(!path.empty(), "large test file");
+    TempPayloadFile payload("ultra_adapt_upgrade", 5000);
+    CHECK(payload.dir.valid(), "temp dir");
+    CHECK(!payload.path.empty(), "large test file");
 
     Connection c;
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 15.0f, 0.05f);
-    ConnectionAdaptiveTestAccess::startFile(c, path);
+    ConnectionAdaptiveTestAccess::startFile(c, payload.path);
 
     ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
     ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
@@ -230,18 +230,16 @@ void test_adaptive_upgrade_requires_backlog_and_clean_windows() {
           "clean AWGN backlog should request adaptive upgrade");
     CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R3_4,
           "adaptive upgrade should target recommended R3/4 (post-Item-3-calibration)");
-    std::filesystem::remove_all(dir);
 }
 
 void test_adaptive_upgrade_skips_small_backlog() {
-    auto dir = makeTempDir("ultra_adapt_small");
-    CHECK(!dir.empty(), "temp dir");
-    auto path = createFile(dir, 32);
-    CHECK(!path.empty(), "small test file");
+    TempPayloadFile payload("ultra_adapt_small", 32);
+    CHECK(payload.dir.valid(), "temp dir");
+    CHECK(!payload.path.empty(), "small test file");
 
     Connection c;
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 15.0f, 0.05f);
-    ConnectionAdaptiveTestAccess::startFile(c, path);
+    ConnectionAdaptiveTestAccess::startFile(c, payload.path);
 
     for (int i = 0; i < 4; ++i) {
         ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
@@ -249,18 +247,16 @@ void test_adaptive_upgrade_skips_small_backlog() {
 
     CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
           "small backlog should not pay MODE_CHANGE overhead for upgrade");
-    std::filesystem::remove_all(dir);
 }
 
 void test_adaptive_downgrade_hysteresis_and_short_lockout_upgrade() {
-    auto dir = makeTempDir("ultra_adapt_hysteresis");
-    CHECK(!dir.empty(), "temp dir");
-    auto path = createFile(dir, 5000);
-    CHECK(!path.empty(), "large test file");
+    TempPayloadFile payload("ultra_adapt_hysteresis", 5000);
+    CHECK(payload.dir.valid(), "temp dir");
+    CHECK(!payload.path.empty(), "large test file");
 
     Connection c;
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 15.0f, 0.05f);
-    ConnectionAdaptiveTestAccess::startFile(c, path);
+    ConnectionAdaptiveTestAccess::startFile(c, payload.path);
     ConnectionAdaptiveTestAccess::createRetransmissionPressure(
         c, ConnectionAdaptiveTestAccess::arqWindow(c) / 2);
     ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
@@ -293,18 +289,16 @@ void test_adaptive_downgrade_hysteresis_and_short_lockout_upgrade() {
           "clean windows after short lockout should queue upgrade");
     CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(c) == CodeRate::R3_4,
           "short-lockout upgrade should target recommended R3/4");
-    std::filesystem::remove_all(dir);
 }
 
 void test_adaptive_downgrade_waits_when_more_than_half_full() {
-    auto dir = makeTempDir("ultra_adapt_down");
-    CHECK(!dir.empty(), "temp dir");
-    auto path = createFile(dir, 5000);
-    CHECK(!path.empty(), "large test file");
+    TempPayloadFile payload("ultra_adapt_down", 5000);
+    CHECK(payload.dir.valid(), "temp dir");
+    CHECK(!payload.path.empty(), "large test file");
 
     Connection c;
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 15.0f, 0.05f);
-    ConnectionAdaptiveTestAccess::startFile(c, path);
+    ConnectionAdaptiveTestAccess::startFile(c, payload.path);
     const size_t window = ConnectionAdaptiveTestAccess::arqWindow(c);
     ConnectionAdaptiveTestAccess::createRetransmissionPressure(c, (window / 2) + 1);
     ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
@@ -317,18 +311,16 @@ void test_adaptive_downgrade_waits_when_more_than_half_full() {
           "R2/3 retry pressure should step down to R1/2");
     CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
           "downgrade should wait while more than half the ARQ window is occupied");
-    std::filesystem::remove_all(dir);
 }
 
 void test_adaptive_downgrade_fires_when_window_half_full() {
-    auto dir = makeTempDir("ultra_adapt_down_half");
-    CHECK(!dir.empty(), "temp dir");
-    auto path = createFile(dir, 5000);
-    CHECK(!path.empty(), "large test file");
+    TempPayloadFile payload("ultra_adapt_down_half", 5000);
+    CHECK(payload.dir.valid(), "temp dir");
+    CHECK(!payload.path.empty(), "large test file");
 
     Connection c;
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 15.0f, 0.05f);
-    ConnectionAdaptiveTestAccess::startFile(c, path);
+    ConnectionAdaptiveTestAccess::startFile(c, payload.path);
     const size_t window = ConnectionAdaptiveTestAccess::arqWindow(c);
     CHECK(window % 2 == 0, "test expects an even ARQ window");
     ConnectionAdaptiveTestAccess::createRetransmissionPressure(c, window / 2);
@@ -345,18 +337,16 @@ void test_adaptive_downgrade_fires_when_window_half_full() {
           "issued downgrade should target R1/2");
     CHECK(!ConnectionAdaptiveTestAccess::adaptiveTargetPending(c),
           "issued downgrade should clear the queued adaptive target");
-    std::filesystem::remove_all(dir);
 }
 
 void test_adaptive_stuck_downgrade_forces_after_timeout() {
-    auto dir = makeTempDir("ultra_adapt_down_force");
-    CHECK(!dir.empty(), "temp dir");
-    auto path = createFile(dir, 5000);
-    CHECK(!path.empty(), "large test file");
+    TempPayloadFile payload("ultra_adapt_down_force", 5000);
+    CHECK(payload.dir.valid(), "temp dir");
+    CHECK(!payload.path.empty(), "large test file");
 
     Connection c;
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 15.0f, 0.05f);
-    ConnectionAdaptiveTestAccess::startFile(c, path);
+    ConnectionAdaptiveTestAccess::startFile(c, payload.path);
     const size_t window = ConnectionAdaptiveTestAccess::arqWindow(c);
     ConnectionAdaptiveTestAccess::createRetransmissionPressure(c, window);
 
@@ -382,18 +372,16 @@ void test_adaptive_stuck_downgrade_forces_after_timeout() {
           "forced downgrade should clear the queued adaptive target");
     CHECK(ConnectionAdaptiveTestAccess::downgradeQueueAge(c) == 0,
           "forced downgrade should reset queue age");
-    std::filesystem::remove_all(dir);
 }
 
 void test_adaptive_upgrade_not_forced_after_timeout() {
-    auto dir = makeTempDir("ultra_adapt_up_no_force");
-    CHECK(!dir.empty(), "temp dir");
-    auto path = createFile(dir, 5000);
-    CHECK(!path.empty(), "large test file");
+    TempPayloadFile payload("ultra_adapt_up_no_force", 5000);
+    CHECK(payload.dir.valid(), "temp dir");
+    CHECK(!payload.path.empty(), "large test file");
 
     Connection c;
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 15.0f, 0.05f);
-    ConnectionAdaptiveTestAccess::startFile(c, path);
+    ConnectionAdaptiveTestAccess::startFile(c, payload.path);
     const size_t window = ConnectionAdaptiveTestAccess::arqWindow(c);
     ConnectionAdaptiveTestAccess::fillArqWindow(c, window);
 
@@ -419,18 +407,16 @@ void test_adaptive_upgrade_not_forced_after_timeout() {
           "blocked upgrade should remain queued");
     CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(c) == CodeRate::R3_4,
           "blocked upgrade should keep its target rate");
-    std::filesystem::remove_all(dir);
 }
 
 void test_adaptive_post_downgrade_lockout_blocks_upgrade() {
-    auto dir = makeTempDir("ultra_adapt_down_lockout");
-    CHECK(!dir.empty(), "temp dir");
-    auto path = createFile(dir, 5000);
-    CHECK(!path.empty(), "large test file");
+    TempPayloadFile payload("ultra_adapt_down_lockout", 5000);
+    CHECK(payload.dir.valid(), "temp dir");
+    CHECK(!payload.path.empty(), "large test file");
 
     Connection c;
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 15.0f, 0.05f);
-    ConnectionAdaptiveTestAccess::startFile(c, path);
+    ConnectionAdaptiveTestAccess::startFile(c, payload.path);
     ConnectionAdaptiveTestAccess::createRetransmissionPressure(
         c, ConnectionAdaptiveTestAccess::arqWindow(c) / 2);
     ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
@@ -449,18 +435,16 @@ void test_adaptive_post_downgrade_lockout_blocks_upgrade() {
           "post-downgrade lockout should suppress immediate upgrade queue");
     CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
           "post-downgrade lockout should suppress immediate upgrade MODE_CHANGE");
-    std::filesystem::remove_all(dir);
 }
 
 void test_adaptive_post_downgrade_lockout_expires() {
-    auto dir = makeTempDir("ultra_adapt_down_lockout_expire");
-    CHECK(!dir.empty(), "temp dir");
-    auto path = createFile(dir, 5000);
-    CHECK(!path.empty(), "large test file");
+    TempPayloadFile payload("ultra_adapt_down_lockout_expire", 5000);
+    CHECK(payload.dir.valid(), "temp dir");
+    CHECK(!payload.path.empty(), "large test file");
 
     Connection c;
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 15.0f, 0.05f);
-    ConnectionAdaptiveTestAccess::startFile(c, path);
+    ConnectionAdaptiveTestAccess::startFile(c, payload.path);
     ConnectionAdaptiveTestAccess::createRetransmissionPressure(
         c, ConnectionAdaptiveTestAccess::arqWindow(c) / 2);
     ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
@@ -478,19 +462,17 @@ void test_adaptive_post_downgrade_lockout_expires() {
           "upgrade should queue once post-downgrade lockout expires");
     CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(c) == CodeRate::R3_4,
           "expired post-downgrade lockout should allow recommended R3/4 upgrade");
-    std::filesystem::remove_all(dir);
 }
 
 void test_forced_rate_disables_adaptive_controller() {
-    auto dir = makeTempDir("ultra_adapt_forced");
-    CHECK(!dir.empty(), "temp dir");
-    auto path = createFile(dir, 5000);
-    CHECK(!path.empty(), "large test file");
+    TempPayloadFile payload("ultra_adapt_forced", 5000);
+    CHECK(payload.dir.valid(), "temp dir");
+    CHECK(!payload.path.empty(), "large test file");
 
     Connection c;
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 15.0f, 0.05f);
     ConnectionAdaptiveTestAccess::forceCodeRate(c, CodeRate::R1_2);
-    ConnectionAdaptiveTestAccess::startFile(c, path);
+    ConnectionAdaptiveTestAccess::startFile(c, payload.path);
 
     for (int i = 0; i < 4; ++i) {
         ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
@@ -498,7 +480,6 @@ void test_forced_rate_disables_adaptive_controller() {
 
     CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
           "forced code rate should suppress adaptive MODE_CHANGE");
-    std::filesystem::remove_all(dir);
 }
 
 } // namespace

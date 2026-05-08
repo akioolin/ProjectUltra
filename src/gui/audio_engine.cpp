@@ -2,6 +2,7 @@
 #include <cmath>
 #include "audio_engine.hpp"
 #include "gui/startup_trace.hpp"
+#include "sim/awgn.hpp"
 #include "ultra/logging.hpp"
 #include <cstring>
 #include <algorithm>
@@ -446,13 +447,12 @@ void AudioEngine::addChannelNoise(std::vector<float>& samples) {
         return;  // No noise added - perfect loopback
     }
 
-    // Calculate noise stddev from SNR (power ratio)
-    // SNR = 10 * log10(signal_power / noise_power)
-    // Assume signal power = 0.5 (normalized audio)
-    float signal_power = 0.5f;
-    float snr_linear = std::pow(10.0f, snr_db / 10.0f);
-    float noise_power = signal_power / snr_linear;
-    float noise_stddev = std::sqrt(noise_power);
+    // Calculate noise stddev from measured active-sample power.
+    float noise_stddev = sim::awgn::noiseStddevForSNR(
+        sim::awgn::activeSignalPower(samples), snr_db);
+    if (noise_stddev <= 0.0f) {
+        return;
+    }
 
     // Simple AWGN using Box-Muller transform
     for (size_t i = 0; i < samples.size(); ++i) {

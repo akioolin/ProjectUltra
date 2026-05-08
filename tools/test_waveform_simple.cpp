@@ -12,11 +12,13 @@
 #include "waveform/waveform_factory.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "waveform/mc_dpsk_waveform.hpp"
+#include "sim/cli_enums.hpp"
 #include "gui/modem/streaming_decoder.hpp"
 #include "protocol/frame_v2.hpp"
 #include "ultra/fec.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/dsp.hpp"
+#include "sim/awgn.hpp"
 #include "sim/hf_channel.hpp"
 #include <iostream>
 #include <fstream>
@@ -30,6 +32,7 @@
 #include <cstring>
 
 using namespace ultra;
+namespace cli = ultra::tools::cli;
 using namespace ultra::gui;
 using namespace ultra::sim;
 namespace v2 = protocol::v2;
@@ -150,25 +153,7 @@ struct TestConfig {
 // ============================================================================
 
 void addNoise(std::vector<float>& samples, float snr_db, std::mt19937& rng) {
-    float signal_power = 0.0f;
-    size_t signal_samples = 0;
-    for (float s : samples) {
-        if (std::abs(s) > 1e-6f) {
-            signal_power += s * s;
-            signal_samples++;
-        }
-    }
-    if (signal_samples == 0) return;
-
-    signal_power /= signal_samples;
-    float snr_linear = std::pow(10.0f, snr_db / 10.0f);
-    float noise_power = signal_power / snr_linear;
-    float noise_std = std::sqrt(noise_power);
-
-    std::normal_distribution<float> noise_dist(0.0f, noise_std);
-    for (float& s : samples) {
-        s += noise_dist(rng);
-    }
+    ultra::sim::awgn::addAWGN(samples, snr_db, rng);
 }
 
 // Apply CFO using FFT-based Hilbert transform (no group delay)
@@ -502,35 +487,31 @@ int main(int argc, char** argv) {
         }
         else if (arg == "-w" && i + 1 < argc) {
             std::string w = argv[++i];
-            if (w == "ofdm_chirp") cfg.waveform = protocol::WaveformMode::OFDM_CHIRP;
-            else if (w == "mc_dpsk" || w == "dpsk") cfg.waveform = protocol::WaveformMode::MC_DPSK;
-            else {
+            auto parsed = cli::parseWaveformMode(w);
+            if (!parsed || (*parsed != protocol::WaveformMode::OFDM_CHIRP &&
+                            *parsed != protocol::WaveformMode::MC_DPSK)) {
                 fprintf(stderr, "Unknown waveform: %s\n", w.c_str());
                 return 1;
             }
+            cfg.waveform = *parsed;
         }
         else if (arg == "--rate" && i + 1 < argc) {
             std::string r = argv[++i];
-            if (r == "r1_4") cfg.code_rate = CodeRate::R1_4;
-            else if (r == "r1_2") cfg.code_rate = CodeRate::R1_2;
-            else if (r == "r2_3") cfg.code_rate = CodeRate::R2_3;
-            else if (r == "r3_4") cfg.code_rate = CodeRate::R3_4;
-            else {
+            auto parsed = cli::parseCodeRate(r);
+            if (!parsed) {
                 fprintf(stderr, "Unknown rate: %s\n", r.c_str());
                 return 1;
             }
+            cfg.code_rate = *parsed;
         }
         else if (arg == "--mod" && i + 1 < argc) {
             std::string m = argv[++i];
-            if (m == "dqpsk") cfg.modulation = Modulation::DQPSK;
-            else if (m == "d8psk") cfg.modulation = Modulation::D8PSK;
-            else if (m == "dbpsk") cfg.modulation = Modulation::DBPSK;
-            else if (m == "qpsk") cfg.modulation = Modulation::QPSK;
-            else if (m == "bpsk") cfg.modulation = Modulation::BPSK;
-            else {
+            auto parsed = cli::parseModulation(m);
+            if (!parsed) {
                 fprintf(stderr, "Unknown modulation: %s\n", m.c_str());
                 return 1;
             }
+            cfg.modulation = *parsed;
         }
         else if (arg == "--frames" && i + 1 < argc) {
             cfg.num_frames = std::stoi(argv[++i]);

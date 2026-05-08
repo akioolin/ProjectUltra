@@ -57,7 +57,7 @@ make -j4
 ### Optional
 | Dependency | Purpose | Detection | Fallback |
 |------------|---------|-----------|----------|
-| FFTW3 | FFT acceleration | PkgConfig | Built-in Kiss FFT |
+| FFTW3 | FFT acceleration | PkgConfig | Built-in Cooley-Tukey FFT |
 | SDL2 | Audio/video | CMake or PkgConfig | GUI disabled |
 | OpenGL | Rendering | CMake | GUI disabled |
 
@@ -97,7 +97,8 @@ make -j4
 
 ### Unit/Integration Test Targets (`tests/`)
 
-`tests/CMakeLists.txt` defines the maintained CTest targets plus the unregistered `test_throughput` utility.
+`tests/CMakeLists.txt` defines the maintained CTest targets, including
+the `Throughput` target backed by `tools/test_throughput.cpp`.
 
 Run all registered tests:
 
