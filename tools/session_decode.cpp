@@ -2,7 +2,7 @@
 //
 // WAV path: native RIFF/WAVE reader for PCM s16, PCM s24, and IEEE float32,
 // downmixed to mono and resampled to 48 kHz with the repo Resampler. The tool
-// does not normalize or auto-gain; it decodes the samples it was given.
+// does not normalize or auto-gain unless --rms-target is explicitly supplied.
 
 #include "sim/simulated_station.hpp"
 
@@ -41,6 +41,18 @@ struct Args {
     std::string callsign = "BRAVO";
     bool auto_accept = true;
     int decode_drain_ms = 3000;
+    std::optional<float> rms_target_dbfs;
+};
+
+struct RmsNormalizeReport {
+    bool requested = false;
+    float target_dbfs = 0.0f;
+    float active_rms = 0.0f;
+    float gain_db = 0.0f;
+    float peak_before = 0.0f;
+    float peak_after = 0.0f;
+    bool applied = false;
+    bool skipped_would_clip = false;
 };
 
 struct LoadedWav {
@@ -50,6 +62,7 @@ struct LoadedWav {
     uint16_t source_channels = 0;
     uint16_t source_bits = 0;
     uint16_t source_format = 0;
+    RmsNormalizeReport rms_normalize;
 };
 
 struct ChirpObservation {
@@ -68,12 +81,20 @@ struct FrameSummary {
     int data_byte_exact = 0;
     std::vector<size_t> data_payload_bytes;
     std::vector<std::string> frame_types;
+
+    struct DataFrameMetrics {
+        float lts_snr_db = 0.0f;
+        float fading = 0.0f;
+        float sync_corr = 0.0f;
+        float residual_cfo_hz = 0.0f;
+    };
+    std::vector<DataFrameMetrics> data_metrics;
 };
 
 void printUsage() {
     std::cout <<
         "session_decode --wav <file.wav> [--callsign BRAVO] "
-        "[--auto-accept] [--decode-drain-ms 3000]\n";
+        "[--auto-accept] [--decode-drain-ms 3000] [--rms-target -16]\n";
 }
 
 std::optional<std::string> needValue(int& i, int argc, char** argv) {
@@ -104,6 +125,10 @@ bool parseArgs(int argc, char** argv, Args& args) {
             auto v = needValue(i, argc, argv);
             if (!v) return false;
             args.decode_drain_ms = std::max(0, std::stoi(*v));
+        } else if (arg == "--rms-target") {
+            auto v = needValue(i, argc, argv);
+            if (!v) return false;
+            args.rms_target_dbfs = std::stof(*v);
         } else {
             std::cerr << "Unknown option: " << arg << "\n";
             return false;
@@ -207,7 +232,130 @@ std::vector<float> decodeWavPayload(const std::vector<uint8_t>& data,
     return mono;
 }
 
-LoadedWav loadWav(const std::string& path) {
+float medianValue(std::vector<float> values) {
+    if (values.empty()) return 0.0f;
+    const size_t mid = values.size() / 2;
+    std::nth_element(values.begin(), values.begin() + mid, values.end());
+    float median = values[mid];
+    if ((values.size() % 2) == 0) {
+        std::nth_element(values.begin(), values.begin() + mid - 1, values.end());
+        median = 0.5f * (median + values[mid - 1]);
+    }
+    return median;
+}
+
+struct ActiveRegionStats {
+    float rms = 0.0f;
+    float peak = 0.0f;
+};
+
+ActiveRegionStats activeRegionStats(const std::vector<float>& samples) {
+    if (samples.empty()) return {};
+
+    constexpr size_t kActiveWindowSamples = kTargetSampleRate / 5;  // 200 ms
+    struct Window {
+        size_t start = 0;
+        size_t len = 0;
+        float rms = 0.0f;
+    };
+
+    std::vector<Window> windows;
+    windows.reserve((samples.size() + kActiveWindowSamples - 1) / kActiveWindowSamples);
+    for (size_t start = 0; start < samples.size(); start += kActiveWindowSamples) {
+        const size_t len = std::min(kActiveWindowSamples, samples.size() - start);
+        double sum_sq = 0.0;
+        for (size_t i = 0; i < len; ++i) {
+            const double s = samples[start + i];
+            sum_sq += s * s;
+        }
+        windows.push_back({start, len, static_cast<float>(std::sqrt(sum_sq / len))});
+    }
+
+    std::vector<float> window_rms;
+    window_rms.reserve(windows.size());
+    for (const auto& w : windows) {
+        window_rms.push_back(w.rms);
+    }
+    const float median_rms = medianValue(std::move(window_rms));
+    const float active_threshold = 3.0f * median_rms;
+
+    std::vector<bool> active(windows.size(), false);
+    size_t active_count = 0;
+    for (size_t i = 0; i < windows.size(); ++i) {
+        active[i] = windows[i].rms > active_threshold;
+        if (active[i]) ++active_count;
+    }
+
+    std::vector<bool> keep(windows.size(), false);
+    for (size_t i = 0; i < windows.size();) {
+        if (!active[i]) {
+            ++i;
+            continue;
+        }
+        const size_t run_start = i;
+        while (i < windows.size() && active[i]) ++i;
+        const size_t run_len = i - run_start;
+        if (run_len >= 2) {
+            for (size_t j = run_start; j < i; ++j) keep[j] = true;
+        }
+    }
+
+    if (std::none_of(keep.begin(), keep.end(), [](bool v) { return v; })) {
+        if (active_count > 0) {
+            keep = active;
+        } else {
+            for (size_t i = 0; i < windows.size(); ++i) {
+                keep[i] = windows[i].rms > 0.0f;
+            }
+        }
+    }
+
+    ActiveRegionStats stats;
+    double sum_sq = 0.0;
+    size_t count = 0;
+    for (size_t w = 0; w < windows.size(); ++w) {
+        if (!keep[w]) continue;
+        for (size_t i = 0; i < windows[w].len; ++i) {
+            const double s = samples[windows[w].start + i];
+            sum_sq += s * s;
+            stats.peak = std::max(stats.peak, static_cast<float>(std::abs(s)));
+        }
+        count += windows[w].len;
+    }
+    if (count == 0) return {};
+    stats.rms = static_cast<float>(std::sqrt(sum_sq / static_cast<double>(count)));
+    return stats;
+}
+
+void applyRmsTarget(std::vector<float>& samples, float target_dbfs, RmsNormalizeReport& report) {
+    report.requested = true;
+    report.target_dbfs = target_dbfs;
+    const ActiveRegionStats active = activeRegionStats(samples);
+    report.peak_before = active.peak;
+    report.active_rms = active.rms;
+
+    if (report.active_rms <= 0.0f) {
+        report.peak_after = report.peak_before;
+        return;
+    }
+
+    const float target_rms = std::pow(10.0f, target_dbfs / 20.0f);
+    const float gain = target_rms / report.active_rms;
+    report.gain_db = 20.0f * std::log10(std::max(gain, 1.0e-12f));
+    report.peak_after = report.peak_before * gain;
+
+    if (report.peak_after > 0.99f) {
+        report.skipped_would_clip = true;
+        return;
+    }
+
+    for (float& s : samples) {
+        s *= gain;
+    }
+    report.applied = true;
+}
+
+LoadedWav loadWav(const std::string& path, std::optional<float> rms_target_dbfs) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
         throw std::runtime_error("Failed to open WAV: " + path);
@@ -279,6 +427,9 @@ LoadedWav loadWav(const std::string& path) {
         ultra::SampleSpan span(mono.data(), mono.size());
         wav.samples_48k = resampler.process(span);
     }
+    if (rms_target_dbfs) {
+        applyRmsTarget(wav.samples_48k, *rms_target_dbfs, wav.rms_normalize);
+    }
     return wav;
 }
 
@@ -298,6 +449,15 @@ std::string dbfsString(float value) {
 
 std::string yesNo(bool v) {
     return v ? "yes" : "no";
+}
+
+std::string fixedFloat(float value, int precision) {
+    if (!std::isfinite(value)) return "nan";
+    const float zero_epsilon = 0.5f * std::pow(10.0f, -static_cast<float>(precision));
+    if (std::abs(value) < zero_epsilon) value = 0.0f;
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(precision) << value;
+    return oss.str();
 }
 
 ChirpObservation scanFirstChirp(const std::vector<float>& samples) {
@@ -358,8 +518,10 @@ std::string sanitizeForLine(const std::string& s) {
 
 class WavReplayAudioPort : public AudioPort {
 public:
-    WavReplayAudioPort(const std::string& wav_path, int decode_drain_ms)
-        : wav_(loadWav(wav_path)) {
+    WavReplayAudioPort(const std::string& wav_path,
+                       int decode_drain_ms,
+                       std::optional<float> rms_target_dbfs)
+        : wav_(loadWav(wav_path, rms_target_dbfs)) {
         drain_samples_ = static_cast<size_t>(
             (static_cast<int64_t>(decode_drain_ms) * kTargetSampleRate) / 1000);
         total_samples_to_serve_ = wav_.samples_48k.size() + drain_samples_;
@@ -427,6 +589,12 @@ void recordFrame(const ultra::gui::DecodeResult& result, FrameSummary& summary) 
         } else {
             summary.data_payload_bytes.push_back(hdr.payload_len);
         }
+        summary.data_metrics.push_back({
+            result.lts_snr_db,
+            result.lts_fading_index,
+            result.sync_correlation,
+            result.lts_residual_cfo_hz
+        });
     } else {
         summary.control++;
     }
@@ -458,6 +626,19 @@ void printSummary(const Args& args,
     std::cout << "wav_source                " << wav.source_rate << " Hz, "
               << wav.source_channels << " ch, format=" << wav.source_format
               << ", bits=" << wav.source_bits << "\n";
+    if (wav.rms_normalize.requested) {
+        const auto& rn = wav.rms_normalize;
+        std::cout << "rms_normalize: target_rms=" << fixedFloat(rn.target_dbfs, 1)
+                  << " dBFS active_rms=" << dbfsString(rn.active_rms)
+                  << " dBFS gain=" << fixedFloat(rn.gain_db, 1) << " dB\n";
+        std::cout << "               peak_before=" << fixedFloat(rn.peak_before, 6)
+                  << " peak_after=" << fixedFloat(rn.peak_after, 6)
+                  << " applied=" << yesNo(rn.applied) << "\n";
+        if (rn.skipped_would_clip) {
+            std::cout << "rms_normalize_skipped: peak_after="
+                      << fixedFloat(rn.peak_after, 6) << " would clip\n";
+        }
+    }
     std::cout << "connected                 " << yesNo(ever_connected) << "\n";
     std::cout << "handshake_complete        " << yesNo(ever_handshake_complete) << "\n";
     std::cout << "negotiated_waveform       "
@@ -485,6 +666,15 @@ void printSummary(const Args& args,
     std::cout << "frames_data               " << frames.data
               << " bytes=" << dataBytesList(frames.data_payload_bytes)
               << " byte_exact=" << frames.data_byte_exact << "/" << frames.data << "\n";
+    for (size_t i = 0; i < frames.data_metrics.size(); ++i) {
+        const auto& m = frames.data_metrics[i];
+        std::cout << "  frame[" << (i + 1) << "] lts_snr_db="
+                  << fixedFloat(m.lts_snr_db, 1)
+                  << " fading=" << fixedFloat(m.fading, 2)
+                  << " sync_corr=" << fixedFloat(m.sync_corr, 2)
+                  << " residual_cfo_hz=" << fixedFloat(m.residual_cfo_hz, 1)
+                  << "\n";
+    }
     std::cout << "frames_disconnect         " << frames.disconnect << "\n";
     std::cout << "messages_received         " << messages.size() << "\n";
     for (size_t i = 0; i < messages.size(); ++i) {
@@ -508,7 +698,8 @@ int main(int argc, char** argv) {
     }
 
     try {
-        auto port = std::make_unique<WavReplayAudioPort>(args.wav_path, args.decode_drain_ms);
+        auto port = std::make_unique<WavReplayAudioPort>(
+            args.wav_path, args.decode_drain_ms, args.rms_target_dbfs);
         WavReplayAudioPort* replay = port.get();
         ChirpObservation chirp = scanFirstChirp(replay->wav().samples_48k);
 

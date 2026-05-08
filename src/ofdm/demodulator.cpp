@@ -1309,6 +1309,10 @@ float OFDMDemodulator::getLastLTSChannelMagnitude() const {
     return impl_->last_lts_channel_magnitude;
 }
 
+float OFDMDemodulator::getLastLTSResidualCFOHz() const {
+    return impl_->last_lts_residual_cfo_hz;
+}
+
 void OFDMDemodulator::setRXCarrierErasureEnabled(bool enabled) {
     impl_->rx_carrier_erasure_enabled_ = enabled;
 }
@@ -1562,6 +1566,7 @@ void OFDMDemodulator::reset() {
     impl_->noise_variance = 0.1f;
     impl_->last_lts_signal_power = 1.0f;
     impl_->last_lts_channel_magnitude = 1.0f;
+    impl_->last_lts_residual_cfo_hz = 0.0f;
 
     impl_->freq_offset_hz = 0.0f;
     impl_->freq_offset_filtered = 0.0f;

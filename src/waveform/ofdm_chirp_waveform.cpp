@@ -749,6 +749,13 @@ float OFDMChirpWaveform::getLastLTSChannelMagnitude() const {
     return 1.0f;
 }
 
+float OFDMChirpWaveform::getLastLTSResidualCFOHz() const {
+    if (demodulator_) {
+        return demodulator_->getLastLTSResidualCFOHz();
+    }
+    return 0.0f;
+}
+
 std::vector<std::complex<float>> OFDMChirpWaveform::getConstellationSymbols() const {
     if (demodulator_) {
         return demodulator_->getConstellationSymbols();

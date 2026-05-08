@@ -74,6 +74,10 @@ struct DecodeResult {
     int codewords_ok = 0;           // Number of successful LDPC decodes
     int codewords_failed = 0;       // Number of failed LDPC decodes
     bool is_ping = false;           // True if this is a PING (chirp-only) frame
+    float lts_snr_db = 0.0f;        // OFDM LTS-derived demodulator SNR
+    float lts_fading_index = 0.0f;  // Per-carrier LTS/pilot fading index
+    float sync_correlation = 0.0f;  // Light/full preamble sync correlation
+    float lts_residual_cfo_hz = 0.0f;  // Residual CFO reported by OFDM waveform
 };
 
 // Decoder statistics for GUI display
@@ -309,6 +313,8 @@ private:
     // Returns the CFO value used for pre-correction (for feedback adjustment).
     float applyCFOPreCorrection(std::vector<float>& samples, float cfo_hz,
                                  size_t absolute_start_sample);
+    void populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
+                               float residual_cfo_hz) const;
 
     // Ring/absolute sample helpers. Call only while buffer_mutex_ is held.
     size_t ringPosToAbsoluteLocked(size_t ring_pos) const;
@@ -430,6 +436,7 @@ private:
     // Burst interleave accumulation state (valid only in BURST_ACCUMULATING)
     bool use_burst_interleave_ = false;
     std::vector<std::vector<float>> burst_soft_buffer_;  // collected soft bits per frame
+    std::vector<DecodeResult> burst_metric_templates_;   // per-physical-frame LTS metrics
     size_t burst_next_pos_ = 0;          // buffer position for next continuation frame
     size_t burst_min_block_ = 0;         // samples per frame (cached from first frame)
     float burst_snr_ = 0.0f;             // SNR from sync detection

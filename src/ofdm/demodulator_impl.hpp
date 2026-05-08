@@ -48,6 +48,7 @@ struct OFDMDemodulator::Impl {
     // near-zero values here even when the clipped LLR stream looks plausible.
     float last_lts_signal_power = 1.0f;
     float last_lts_channel_magnitude = 1.0f;
+    float last_lts_residual_cfo_hz = 0.0f;
 
     // Fading index (from pilot magnitude variance)
     // 0 = flat channel, > 0.15 = significant fading

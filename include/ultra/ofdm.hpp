@@ -147,6 +147,7 @@ public:
     // Last LTS channel-estimation metrics from processPresynced().
     float getLastLTSSignalPower() const;
     float getLastLTSChannelMagnitude() const;
+    float getLastLTSResidualCFOHz() const;
 
     // RX-local carrier erasure is only LDPC-safe for multi-codeword OFDM
     // frames. Callers that know they are decoding a 1-CW control frame must

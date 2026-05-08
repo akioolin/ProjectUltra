@@ -221,6 +221,7 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
             pending_total_cw_ = 0;
             burst_blocks_decoded_ = 0;
             burst_soft_buffer_.clear();
+            burst_metric_templates_.clear();
             reset_decode_state = true;
         }
 
@@ -378,6 +379,20 @@ float StreamingDecoder::applyCFOPreCorrection(std::vector<float>& samples, float
     LOG_MODEM(DEBUG, "[%s] CFO pre-correction: %.2f Hz, abs_start=%zu, %zu samples",
               log_prefix_.c_str(), cfo_hz, absolute_start_sample, len);
     return cfo_hz;
+}
+
+void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
+                                             float residual_cfo_hz) const {
+    result.sync_correlation = sync_correlation_;
+    if (is_ofdm && waveform_) {
+        result.lts_snr_db = waveform_->estimatedSNR();
+        result.lts_fading_index = waveform_->getFadingIndex();
+        result.lts_residual_cfo_hz = waveform_->getLastLTSResidualCFOHz();
+    } else {
+        result.lts_snr_db = result.snr_db;
+        result.lts_fading_index = 0.0f;
+        result.lts_residual_cfo_hz = residual_cfo_hz;
+    }
 }
 
 size_t StreamingDecoder::ringPosToAbsoluteLocked(size_t ring_pos) const {
@@ -1244,6 +1259,8 @@ void StreamingDecoder::decodeCurrentFrame() {
                         control_result.cfo_hz = sync_cfo_;
                         control_result.codewords_ok = 1;
                         control_result.codewords_failed = 0;
+                        populateDecodeMetrics(control_result, is_ofdm,
+                                              waveform_ ? waveform_->estimatedCFO() : sync_cfo_);
 
                         {
                             std::lock_guard<std::mutex> qlock(queue_mutex_);
@@ -1430,6 +1447,7 @@ void StreamingDecoder::decodeCurrentFrame() {
 
         // Initialize accumulation state with first frame's soft bits
         burst_soft_buffer_.clear();
+        burst_metric_templates_.clear();
         burst_soft_buffer_.push_back(std::move(soft_bits));
         burst_min_block_ = static_cast<size_t>(
             waveform_->getMinSamplesForCWCount(fixed_frame_codewords_));
@@ -1440,6 +1458,9 @@ void StreamingDecoder::decodeCurrentFrame() {
 
         // Feed back CFO from first frame (add pre-correction amount back)
         const float residual_cfo = waveform_->estimatedCFO();
+        DecodeResult first_metrics;
+        populateDecodeMetrics(first_metrics, is_ofdm, residual_cfo);
+        burst_metric_templates_.push_back(first_metrics);
         const float current_cfo = last_cfo_.load();
         const auto cfo_update = signal_policy::combinePilotCFO(
             pre_correction_cfo_, residual_cfo, current_cfo, /*clamp_drift=*/true);
@@ -1901,6 +1922,12 @@ void StreamingDecoder::decodeCurrentFrame() {
         stats_.avg_decode_time_ms = 0.9f * stats_.avg_decode_time_ms + 0.1f * ms;
     }
 
+    if (is_ofdm && waveform_) {
+        populateDecodeMetrics(result, is_ofdm, waveform_->estimatedCFO());
+    } else {
+        populateDecodeMetrics(result, is_ofdm, sync_cfo_);
+    }
+
     if (result.success || result.codewords_ok > 0) {
         {
             std::lock_guard<std::mutex> qlock(queue_mutex_);
@@ -2041,6 +2068,7 @@ void StreamingDecoder::decodeCurrentFrame() {
 
             // Decode the continuation block
             DecodeResult next_result = decodeFrame(next_soft_bits, sync_snr_, sync_cfo_);
+            populateDecodeMetrics(next_result, true, residual_cfo);
 
             {
                 std::lock_guard<std::mutex> slock(stats_mutex_);
@@ -2130,6 +2158,7 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
 
     // Clear burst interleave state on mode change
     burst_soft_buffer_.clear();
+    burst_metric_templates_.clear();
     use_burst_interleave_ = false;  // Re-enabled by caller if needed
 
     // CRITICAL: Reset correlation_pos_ to current write position
@@ -2243,6 +2272,7 @@ void StreamingDecoder::setConnectedOFDMMode(protocol::WaveformMode mode,
     constellation_cache_.clear();
     constellation_cache_time_ = std::chrono::steady_clock::time_point{};
     burst_soft_buffer_.clear();
+    burst_metric_templates_.clear();
     correlation_pos_ = write_pos_;
     setSearchFloorLocked(total_fed_);
 
@@ -2423,6 +2453,7 @@ void StreamingDecoder::reset() {
     pending_total_cw_ = 0;
     burst_blocks_decoded_ = 0;
     burst_soft_buffer_.clear();
+    burst_metric_templates_.clear();
     constellation_cache_.clear();
     constellation_cache_time_ = std::chrono::steady_clock::time_point{};
     use_burst_interleave_ = false;
@@ -3094,6 +3125,7 @@ void StreamingDecoder::accumulateBurstFrames() {
             stats_.frames_failed += burst_group_size;
         }
         burst_soft_buffer_.clear();
+        burst_metric_templates_.clear();
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
             correlation_pos_ = burst_next_pos_;
@@ -3114,6 +3146,7 @@ void StreamingDecoder::accumulateBurstFrames() {
             stats_.frames_failed += burst_group_size;
         }
         burst_soft_buffer_.clear();
+        burst_metric_templates_.clear();
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
             correlation_pos_ = burst_next_pos_;
@@ -3130,6 +3163,7 @@ void StreamingDecoder::accumulateBurstFrames() {
     if (static_cast<int>(burst_soft_buffer_.size()) == burst_group_size) {
         finalizeBurstGroup();
         burst_soft_buffer_.clear();
+        burst_metric_templates_.clear();
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
             correlation_pos_ = burst_next_pos_;
@@ -3141,6 +3175,11 @@ void StreamingDecoder::accumulateBurstFrames() {
 
 StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame() {
     const int burst_group_size = std::max(2, burst_group_size_);
+    auto pushMetricTemplate = [&](float residual_cfo_hz) {
+        DecodeResult metrics;
+        populateDecodeMetrics(metrics, protocol::isOFDMMode(mode_), residual_cfo_hz);
+        burst_metric_templates_.push_back(metrics);
+    };
 
     // Check available samples at burst_next_pos_
     size_t next_available;
@@ -3189,6 +3228,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         burst_soft_buffer_.emplace_back(
             static_cast<size_t>(fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
             0.0f);
+        pushMetricTemplate(0.0f);
         burst_next_pos_ = (burst_next_pos_ + burst_min_block_) % MAX_BUFFER_SAMPLES;
         return BurstFrameResult::SUCCESS;
     }
@@ -3220,6 +3260,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         burst_soft_buffer_.emplace_back(
             static_cast<size_t>(fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
             0.0f);
+        pushMetricTemplate(0.0f);
         burst_next_pos_ = (burst_next_pos_ + burst_min_block_) % MAX_BUFFER_SAMPLES;
         return BurstFrameResult::SUCCESS;
     }
@@ -3287,6 +3328,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         burst_soft_buffer_.emplace_back(
             static_cast<size_t>(fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
             0.0f);
+        pushMetricTemplate(waveform_ ? waveform_->estimatedCFO() : 0.0f);
         burst_next_pos_ = (burst_next_pos_ + burst_min_block_) % MAX_BUFFER_SAMPLES;
         return BurstFrameResult::SUCCESS;
     }
@@ -3300,6 +3342,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     last_fading_index_.store(waveform_->getFadingIndex());
 
     burst_soft_buffer_.push_back(std::move(soft));
+    pushMetricTemplate(residual_cfo);
     burst_next_pos_ = (block_start_pos + burst_min_block_) % MAX_BUFFER_SAMPLES;
 
     LOG_MODEM(INFO, "[%s] Burst frame %zu/%d demodulated, RMS=%.4f",
@@ -3321,6 +3364,15 @@ void StreamingDecoder::finalizeBurstGroup() {
         pending_total_cw_ = fixed_frame_codewords_;
         DecodeResult result = decodeFrame(logical_soft[i], burst_snr_, burst_cfo_);
         pending_total_cw_ = saved_pending_total_cw;
+        if (i < static_cast<int>(burst_metric_templates_.size())) {
+            const auto& metrics = burst_metric_templates_[static_cast<size_t>(i)];
+            result.lts_snr_db = metrics.lts_snr_db;
+            result.lts_fading_index = metrics.lts_fading_index;
+            result.sync_correlation = metrics.sync_correlation;
+            result.lts_residual_cfo_hz = metrics.lts_residual_cfo_hz;
+        } else {
+            populateDecodeMetrics(result, protocol::isOFDMMode(mode_), burst_cfo_);
+        }
 
         {
             std::lock_guard<std::mutex> slock(stats_mutex_);

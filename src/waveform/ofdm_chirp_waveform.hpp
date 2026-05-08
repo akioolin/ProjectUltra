@@ -89,6 +89,7 @@ public:
     float getFadingIndex() const override;  // From demodulator pilot variance
     float getLastLTSSignalPower() const override;
     float getLastLTSChannelMagnitude() const override;
+    float getLastLTSResidualCFOHz() const override;
     std::vector<std::complex<float>> getConstellationSymbols() const override;
 
     // ========================================================================
