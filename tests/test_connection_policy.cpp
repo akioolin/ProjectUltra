@@ -203,6 +203,12 @@ void test_ofdm_profile_selection() {
           "D8PSK R1/2 is high-throughput non-speculative, no padding");
     CHECK(!shouldPadHighRateFadingBurst(Modulation::QPSK, CodeRate::R2_3, false, 7),
           "non-(DQPSK/D8PSK) high-rate burst should not use padding policy");
+    CHECK(!shouldPadBurstInterleaveGroup(1),
+          "single frame does not need burst-interleaver padding");
+    CHECK(shouldPadBurstInterleaveGroup(7),
+          "partial burst-interleaver group should be padded");
+    CHECK(!shouldPadBurstInterleaveGroup(kBurstInterleaveGroupFrames),
+          "complete burst-interleaver group should not be padded");
     CHECK(ofdmAckBatchSize(true) == 0, "near-AWGN ACK batch disabled");
     CHECK(ofdmAckBatchSize(false) == 0, "fading ACK batch sentinel");
 
