@@ -5,6 +5,19 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Default to Release if the operator/dev didn't pick a build type. Debug builds
+# of this modem run several times slower on the audio thread, which manifests
+# as throughput regressions and per-frame retx on hardware. Release is the
+# right default for the modem hot path; the CI matrix overrides explicitly
+# (Debug + sanitizers) for the test stages that need it.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    message(STATUS "CMAKE_BUILD_TYPE not set; defaulting to Release")
+    set(CMAKE_BUILD_TYPE Release CACHE STRING
+        "Choose the type of build (Debug, Release, RelWithDebInfo, MinSizeRel)" FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
+        "Debug" "Release" "RelWithDebInfo" "MinSizeRel")
+endif()
+
 # MSVC-specific settings
 if(MSVC)
     # Ensure math constants (M_PI, etc.) are available from <cmath> in all TUs.

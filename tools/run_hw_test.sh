@@ -169,6 +169,7 @@ set +e
 "$MAC_BIN" --role A \
   ${MAC_DEVS_ARR[@]+"${MAC_DEVS_ARR[@]}"} \
   --snr "$SNR" $RATE_FLAG $MOD_FLAG $CHANNEL_FLAG $INJECT_FLAG $INJECT_GAIN_FLAG $FILE_FLAG \
+  --log-level info --log-categories all \
   $EXTRA_CLI_ARGS \
   > "$LOG_DIR/A.log" 2>&1
 A_EXIT=$?
