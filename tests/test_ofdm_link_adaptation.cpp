@@ -1,5 +1,4 @@
 #include "ultra/ofdm_link_adaptation.hpp"
-#include "ultra/modem.hpp"
 
 #include <cmath>
 #include <iostream>

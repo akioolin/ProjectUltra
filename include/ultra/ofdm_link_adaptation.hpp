@@ -102,5 +102,20 @@ inline int sanitizeBurstGroupSize(int value) {
     return std::clamp(value, 2, 8);
 }
 
+// Estimate the maximum payload rate (bits/sec) for the given OFDM geometry,
+// modulation, and code rate. Bookkeeping helper kept here (used by tests + any
+// future link-adaptation logic). The 0.9 factor is the historical overhead
+// reservation for framing/preamble/pilots; it is the legacy nominal value
+// inherited from the original Modem API.
+inline float calculateMaxDataRate(const ModemConfig& config, Modulation mod, CodeRate rate) {
+    const std::size_t bits_per_carrier = getBitsPerSymbol(mod);
+    const std::size_t data_carriers    = config.getDataCarriers();
+    const std::size_t bits_per_symbol  = data_carriers * bits_per_carrier;
+    const float symbol_samples  = static_cast<float>(config.getSymbolDuration());
+    const float symbol_duration = symbol_samples / static_cast<float>(config.sample_rate);
+    const float raw_bps         = static_cast<float>(bits_per_symbol) / symbol_duration;
+    return raw_bps * getCodeRateValue(rate) * 0.9f;
+}
+
 } // namespace ofdm_link_adaptation
 } // namespace ultra

@@ -73,12 +73,9 @@ add_library(ultra_core STATIC
     src/fec/burst_interleaver.cpp
     src/fec/carrier_ldpc_interleaver.cpp
     src/fec/soft_combine.cpp
-    src/framing/frame_builder.cpp
-    src/arq/arq_controller.cpp
     src/dsp/fft.cpp
     src/dsp/filters.cpp
     src/dsp/resampler.cpp
-    src/modem/modem.cpp
     # Protocol layer (callsign addressing, connection management)
     src/protocol/frame_v2.cpp
     src/protocol/arq_interface.cpp
