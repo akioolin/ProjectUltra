@@ -526,13 +526,15 @@ protocol::WaveformMode TNCBridge::waveformForBandwidth(int hz) {
 }
 
 int TNCBridge::bitrateEstimate(protocol::WaveformMode mode) {
+    // Strict raw-PHY estimates per the production geometry. See
+    // README.md "Raw PHY (theoretical maximum)" for derivation.
     switch (mode) {
     case protocol::WaveformMode::OFDM_NARROW:
-        return 230;
+        return 386;   // DQPSK R1/2, 18 data carriers @ 21.429 sym/s
     case protocol::WaveformMode::MC_DPSK:
-        return 938;
+        return 375;   // 8 carriers DQPSK R1/4 @ 93.75 sym/s
     case protocol::WaveformMode::OFDM_CHIRP:
-        return 2300;
+        return 2208;  // DQPSK R1/2, 53 data carriers @ 41.667 sym/s
     case protocol::WaveformMode::OFDM_COX:
         return 4000;
     case protocol::WaveformMode::OTFS_EQ:

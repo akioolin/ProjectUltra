@@ -10,6 +10,68 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-09: Correct README Raw PHY table — strict bits-on-air definition
+
+**What was broken (documentation accuracy):**
+The README's "Raw PHY (theoretical maximum)" table mixed methodologies
+across rows and inherited stale constants. Specifically:
+
+- **MC-DPSK row showed 938 bps** for "8 carriers". 938 bps only matches
+  the 20-carrier `level11_ultra` preset (20 × 2 × 93.75 × 0.25), not
+  the 8-carrier preset that production actually uses. The number was
+  inherited from a stale `recommendWaveformAndRate()` constant
+  (`waveform_selection.hpp`) and propagated into the GUI / TNC
+  reporting paths via `TNCBridge::bitrateEstimate(MC_DPSK)`.
+- **All OFDM-CHIRP rows used CP=MEDIUM arithmetic** (1120 sample
+  symbol → 42.857 sym/s). Production runs `cp_mode = LONG`
+  (1152 samples → 41.667 sym/s). Every OFDM row was ~3 % optimistic.
+- **R1/4 was treated as pilotless** (59 data carriers). The actual
+  `recommendedPilotSpacing(DQPSK, R1/4)` returns 10 → 6 pilots →
+  53 data carriers. Real R1/4 raw PHY is 1104 bps, not 1264.
+- **The R1/2 row's 1967 bps** was the *effective single-frame payload
+  rate* (8-CW frame airtime including 2 LTS preamble symbols and the
+  19-byte v2 header), not raw PHY. Mixing methodologies in one column.
+- **OFDM-NARROW R1/4 (103 bps) and R1/2 (230 bps)** appear to have been
+  measured throughput from the pre-window=3 ARQ era, not raw PHY at all.
+- **16QAM / 32QAM** rows assumed 44 data carriers (no source).
+  Production: 16QAM R3/4 → spacing 8 → 51 data; 32QAM R3/4 → spacing 5
+  → 47 data.
+
+**What changed:**
+- `README.md` — replaced the Raw PHY table with strict-definition
+  values (`data_carriers × bits_per_symbol × symbol_rate × code_rate`)
+  derived from `recommendedPilotSpacing()` and the production CP
+  setting. Added a derivation paragraph above the table. Reworded the
+  R1/2 prose paragraph below to label 1967 bps as the
+  effective single-frame payload rate, separate from the 2208 bps
+  raw-PHY ceiling.
+- `src/protocol/waveform_selection.hpp` —
+  `estimated_throughput_bps` constants: 938→375 (MC-DPSK), 3900→3438
+  (R3/4), 3200→2944 (R2/3), 2300→2208 (R1/2), 1150→1104 (R1/4). Updated
+  the header comment table to match the strict definition.
+- `src/tnc/tnc_bridge.cpp` — `bitrateEstimate()` returns: MC_DPSK 375
+  (was 938), OFDM_NARROW 386 (was 230), OFDM_CHIRP 2208 (was 2300).
+  Added a comment pointing to the README derivation.
+- `tests/test_tnc_bridge.cpp` — updated the "bitrate event mismatch"
+  expected value from 2300 → 2208 to track the new
+  `bitrateEstimate(OFDM_CHIRP)`.
+
+**Why this is correct:**
+Strict raw PHY = `data_carriers × bits_per_symbol × symbol_rate ×
+code_rate`. No subtraction for preamble, frame header, ARQ, or ACK
+turnaround — that's the ceiling the modulator could feed downstream
+on a steady-state channel. Effective single-frame payload rates (LTS
++ header overhead) and end-to-end measured wall-clock rates are
+genuinely different quantities and now sit in their own columns.
+
+**Test verification:**
+- `cmake --build build -j4 && ctest --test-dir build --output-on-failure`
+  → 39/39 pass after the test_tnc_bridge expected-bitrate update.
+- Manually re-derived each row: math now matches `IWaveform::getThroughput()`
+  for every supported (mode, modulation, rate) tuple.
+
+---
+
 ## 2026-05-08: Refactor/Optimize Round 3 - OFDM scratch preallocation
 
 **What was wasteful:**

@@ -339,7 +339,7 @@ int main() {
         expect(h.sink.connected[0].src == "VK2A", "outbound: src should be us (initiator)");
         expect(h.sink.connected[0].dst == "VK2B", "outbound: dst should be peer (responder)");
         expect(h.sink.connected[0].bw == 2300, "connected bandwidth mismatch");
-        expect(h.sink.bitrate == std::vector<int>({2300}), "bitrate event mismatch");
+        expect(h.sink.bitrate == std::vector<int>({2208}), "bitrate event mismatch");
     });
     runner.run("Inbound CONNECTED line lists peer first (initiator)", [] {
         Harness h;

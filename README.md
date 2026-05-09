@@ -37,26 +37,37 @@ different questions.
 
 ### Raw PHY (theoretical maximum)
 
-Useful payload bits / second over the air, ignoring ARQ overhead and
-auto-rate adaptation. This is what one bulk frame delivers in steady
-state on a stable channel.
+Strict raw-PHY rate: `data_carriers × bits_per_symbol × symbol_rate ×
+code_rate`. No subtraction for preamble, frame header, ARQ, or ACK
+turnaround — that's the ceiling the modulator could feed downstream
+on a steady-state channel.
 
-Wide OFDM uses a 1024-FFT with LONG CP=128: 1152 samples/symbol
-at 48 kHz, or 41.667 sym/s. The 59 carriers are total occupied
-carriers; DQPSK R1/2 uses pilot spacing 10, so 6 pilots leave 53
-data carriers.
+Production geometry used below:
 
-| SNR  | Mode             | Throughput | Notes |
-|------|------------------|-----------:|-------|
-| 5+   | MC-DPSK (8 car)  |    938 bps | ±50 Hz CFO, robust sync |
-| 8+   | OFDM-NARROW R1/4 |    103 bps | 500 Hz BW for crowded bands |
-| 8+   | OFDM-NARROW R1/2 |    230 bps | 500 Hz BW |
-| 10+  | OFDM DQPSK R1/4  |   1264 bps | Fading-tolerant baseline |
-| 15+  | OFDM DQPSK R1/2  |   1967 bps | Pre-ACK fixed-frame payload rate; Good + moderate fading |
-| 15+  | OFDM DQPSK R2/3  |   3028 bps | Near-AWGN only |
-| 15+  | OFDM DQPSK R3/4  |   3536 bps | AWGN-class channel only |
-| 25+  | OFDM 16QAM R3/4  |   5657 bps | Stable paths (NVIS, ground wave) |
-| 30+  | OFDM 32QAM R3/4  |   7071 bps | Stable paths only |
+- MC-DPSK: 8 carriers, 512 samples/symbol → 93.75 sym/s, DQPSK,
+  data-mode pinned to R1/4 by `recommendDataMode()`.
+- OFDM-CHIRP wideband: 1024-FFT, LONG CP=128 → 1152 samples/symbol,
+  41.667 sym/s. 59 occupied carriers; pilot count comes from
+  `recommendedPilotSpacing(mod, rate)`.
+- OFDM-NARROW: 21 occupied carriers, 2240 samples/symbol → 21.429 sym/s,
+  pilot spacing 10 → 18 data carriers.
+
+| SNR  | Mode                 | Data carriers | Raw PHY     | Notes |
+|------|----------------------|--------------:|------------:|-------|
+| 5+   | MC-DPSK 8 car DQPSK R1/4 |        8 |     375 bps | ±50 Hz CFO, robust sync |
+| 8+   | OFDM-NARROW DQPSK R1/4   |       18 |     193 bps | 500 Hz BW for crowded bands |
+| 8+   | OFDM-NARROW DQPSK R1/2   |       18 |     386 bps | 500 Hz BW |
+| 10+  | OFDM-CHIRP DQPSK R1/4    |       53 |    1104 bps | Fading-tolerant baseline (6 pilots @ spacing 10) |
+| 15+  | OFDM-CHIRP DQPSK R1/2    |       53 |    2208 bps | Good + moderate fading (6 pilots @ spacing 10) |
+| 15+  | OFDM-CHIRP DQPSK R2/3    |       53 |    2944 bps | Near-AWGN only (6 pilots @ spacing 10) |
+| 15+  | OFDM-CHIRP DQPSK R3/4    |       55 |    3438 bps | AWGN-class channel only (4 pilots @ spacing 15) |
+| 25+  | OFDM-CHIRP 16QAM R3/4    |       51 |    6375 bps | Stable paths (NVIS, ground wave; 8 pilots @ spacing 8) |
+| 30+  | OFDM-CHIRP 32QAM R3/4    |       47 |    7344 bps | Stable paths only (12 pilots @ spacing 5) |
+
+(2026-05-09: prior table mixed CP=MEDIUM/LONG arithmetic and inherited a
+938 bps "MC-DPSK" constant from a 20-carrier preset that production
+never selects. Numbers above are now derived directly from
+`recommendedPilotSpacing()` and the production CP setting.)
 
 ### End-to-end measured (real hardware)
 
@@ -73,7 +84,7 @@ on measured SNR and fading.
 | 5 KB Mac↔Pi5 injected ×5      | Watterson Good, SNR=15 |  ~27 s | **1540.6 bps**  | Median of 5; range [1540.3, 1550.0]; R1/2; 0 retx all 5; handshake ≈ 19% (fixed ~5 s overhead dominates short transfers) |
 | 500 KB Mac↔Pi5 injected       | Watterson Good, SNR=15 | 3742 s |      1094 bps   | R1/2; 1346 retx, 0 failed, byte-exact; handshake negligible — slowdown vs 20 KB is from retransmissions on a long fading run |
 
-Throughput rises with payload size as the fixed ~5 s handshake (PING/PONG → CONNECT → MODE_CHANGE) amortizes. For R1/2, the 8-CW frame carries 301 payload bytes in 51 OFDM symbols (`2 + ceil(8*648/(53*2))`) = 1.224 s, so the pre-ACK payload rate is 1967 bps. The R1/2 SNR=15 wall-clock asymptote on this harness remains about 1.83-1.90 kbps after ACK turnaround; beyond ~50 KB throughput is bounded by per-frame airtime + ACK roundtrip, not handshake.
+Throughput rises with payload size as the fixed ~5 s handshake (PING/PONG → CONNECT → MODE_CHANGE) amortizes. The 1.83-1.90 kbps wall-clock asymptote at R1/2 SNR=15 sits below the 2208 bps raw-PHY ceiling because the 8-CW frame carries 301 useful payload bytes inside 51 OFDM symbols (`2 LTS + ceil(8*648/(53*2))` = 1.224 s) — that effective single-frame payload rate is ~1967 bps before ARQ overhead, and ACK turnaround takes the rest. Beyond ~50 KB, throughput is bounded by per-frame airtime + ACK roundtrip, not handshake.
 
 End-to-end throughput is wall-clock measured by `tools/run_hw_test.sh`
 between A's `Connection: Starting file transfer` and the final ACK

@@ -88,13 +88,19 @@ inline CodeRate capInitialOFDMRate(float snr_db, float fading_index, CodeRate ca
 // Recommend waveform and rate based on SNR and fading index
 //
 // Fading index now combines freq_cv + temporal_cv (Doppler measurement).
-// Key findings from testing (2026-02-11):
-// - SNR < 10 dB: MC-DPSK is most robust (~938 bps)
-// - SNR >= 20 dB + AWGN: OFDM_CHIRP R3/4 (~3900 bps)
-// - SNR >= 20 dB + good fading: OFDM_CHIRP R2/3 (~3200 bps)
-// - SNR >= 15 dB + good/moderate fading: OFDM_CHIRP R1/2 (~2300 bps)
-// - SNR >= 10 dB + good/moderate fading: OFDM_CHIRP R1/4 (~1150 bps, 30/30 seeds)
-// - Heavy+ fading (>= 1.10): R1/4 only (~1150 bps)
+// Raw-PHY estimates below use the strict definition
+// `data_carriers × bits/sym × sym_rate × code_rate` against the
+// production geometry (8-car MC-DPSK; 1024-FFT 59-car OFDM-CHIRP with
+// CP=LONG, 1152 samples/symbol; pilots from
+// `ofdm_link_adaptation::recommendedPilotSpacing()`).
+//
+// Calibrated reliability bands (2026-02-11):
+// - SNR < 10 dB: MC-DPSK is most robust (~375 bps raw at 8 car DQPSK R1/4)
+// - SNR >= 20 dB + AWGN: OFDM_CHIRP R3/4 (~3438 bps raw)
+// - SNR >= 20 dB + good fading: OFDM_CHIRP R2/3 (~2944 bps raw)
+// - SNR >= 15 dB + good/moderate fading: OFDM_CHIRP R1/2 (~2208 bps raw)
+// - SNR >= 10 dB + good/moderate fading: OFDM_CHIRP R1/4 (~1104 bps raw, 30/30 seeds)
+// - Heavy+ fading (>= 1.10): R1/4 only (~1104 bps raw)
 //
 // Calibrated fading thresholds:
 //   < 0.15: True AWGN, < 0.65: Good, >= 0.65: Moderate+
@@ -105,38 +111,38 @@ inline WaveformRecommendation recommendWaveformAndRate(float snr_db, float fadin
         // Low SNR: MC-DPSK 8 carriers is most robust
         rec.waveform = WaveformMode::MC_DPSK;
         rec.rate = CodeRate::R1_4;
-        rec.estimated_throughput_bps = 938.0f;
+        rec.estimated_throughput_bps = 375.0f;
     }
     else if (fading_index < 0.15f) {
         // True AWGN (no fading)
         rec.waveform = WaveformMode::OFDM_CHIRP;
         rec.rate = selectOFDMCodeRate(snr_db, fading_index);
-        rec.estimated_throughput_bps = (rec.rate == CodeRate::R3_4) ? 3900.0f :
-                                       (rec.rate == CodeRate::R2_3) ? 3200.0f :
-                                       (rec.rate == CodeRate::R1_2) ? 2300.0f : 1150.0f;
+        rec.estimated_throughput_bps = (rec.rate == CodeRate::R3_4) ? 3438.0f :
+                                       (rec.rate == CodeRate::R2_3) ? 2944.0f :
+                                       (rec.rate == CodeRate::R1_2) ? 2208.0f : 1104.0f;
     }
     else if (fading_index < 1.10f && snr_db >= 10.0f) {
         // Good-to-moderate fading: OFDM_CHIRP (30/30 seeds at SNR=10)
         rec.waveform = WaveformMode::OFDM_CHIRP;
         rec.rate = selectOFDMCodeRate(snr_db, fading_index);
-        rec.estimated_throughput_bps = (rec.rate == CodeRate::R3_4) ? 3900.0f :
-                                       (rec.rate == CodeRate::R2_3) ? 3200.0f :
-                                       (rec.rate == CodeRate::R1_2) ? 2300.0f : 1150.0f;
+        rec.estimated_throughput_bps = (rec.rate == CodeRate::R3_4) ? 3438.0f :
+                                       (rec.rate == CodeRate::R2_3) ? 2944.0f :
+                                       (rec.rate == CodeRate::R1_2) ? 2208.0f : 1104.0f;
     }
     else if (snr_db >= 10.0f) {
         // Heavy fading at SNR >= 10: OFDM_CHIRP R1/4 still viable
         rec.waveform = WaveformMode::OFDM_CHIRP;
         rec.rate = selectOFDMCodeRate(snr_db, fading_index);
-        rec.estimated_throughput_bps = (rec.rate == CodeRate::R3_4) ? 3900.0f :
-                                       (rec.rate == CodeRate::R2_3) ? 3200.0f :
-                                       (rec.rate == CodeRate::R1_2) ? 2300.0f : 1150.0f;
+        rec.estimated_throughput_bps = (rec.rate == CodeRate::R3_4) ? 3438.0f :
+                                       (rec.rate == CodeRate::R2_3) ? 2944.0f :
+                                       (rec.rate == CodeRate::R1_2) ? 2208.0f : 1104.0f;
     }
     else {
         // Very heavy fading or low SNR: MC-DPSK
         // SNR < 10 with fading needs MC-DPSK robustness
         rec.waveform = WaveformMode::MC_DPSK;
         rec.rate = CodeRate::R1_4;
-        rec.estimated_throughput_bps = 938.0f;
+        rec.estimated_throughput_bps = 375.0f;
     }
 
     return rec;
