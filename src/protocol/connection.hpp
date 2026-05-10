@@ -360,6 +360,8 @@ private:
     void runDeferredArqRefill();
     void configureArqForCurrentDataMode();
     uint32_t pingTimeoutMsForCurrentProfile() const;
+    bool usesBoundedVariableMCDPSKFrames() const;
+    size_t currentDataPayloadCapacity() const;
     // Apply a new data mode. cw_count: 0 = compute via recommendCWCount(rate),
     // 1..8 = explicit (used when MODE_CHANGE wire byte specifies a value).
     void applyDataMode(Modulation mod, CodeRate rate, int cw_count = 0);

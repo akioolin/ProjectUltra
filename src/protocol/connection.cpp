@@ -312,7 +312,7 @@ void Connection::acceptCall() {
     // initiator's view match what we'll actually use locally.
     int negotiated_cw = (pending_forced_cw_count_ != 0)
         ? v2::sanitizeFixedFrameCodewords(pending_forced_cw_count_)
-        : connection_policy::recommendCWCount(rec_rate, negotiated_mode_);
+        : connection_policy::recommendCWCount(rec_mod, rec_rate, negotiated_mode_);
 
     // Clear pending forced modes
     pending_forced_modulation_ = Modulation::AUTO;
@@ -478,9 +478,9 @@ void Connection::setForcedFrameCodewords(int cw_count, bool forced) {
     config_.fixed_frame_codewords = cw_count;
     arq_.setFixedFrameCodewords(cw_count);
 
-    if (isOFDMMode(negotiated_mode_)) {
-        file_transfer_.setMaxChunkPayload(
-            v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_));
+    const bool bounded_variable_mc_dpsk = usesBoundedVariableMCDPSKFrames();
+    if (isOFDMMode(negotiated_mode_) || bounded_variable_mc_dpsk) {
+        file_transfer_.setMaxChunkPayload(currentDataPayloadCapacity());
         configureArqForCurrentDataMode();
     }
 
@@ -506,26 +506,31 @@ bool Connection::sendPayload(const Bytes& data, bool binary_payload) {
         return false;
     }
 
-    // MC-DPSK uses variable-length codewords (no fixed frame limit), so no fragmentation needed.
-    // OFDM uses fixed 4-CW frames with a hard capacity limit that requires fragmentation.
     bool is_ofdm = isOFDMMode(negotiated_mode_);
+    const bool bounded_variable_mc_dpsk = usesBoundedVariableMCDPSKFrames();
+    const size_t capacity = currentDataPayloadCapacity();
 
-    if (!is_ofdm) {
+    if (!is_ofdm && !bounded_variable_mc_dpsk) {
         if (binary_payload) {
             return arq_.sendDataWithTypeAndFlags(data, v2::FrameType::DATA_END, v2::Flags::NONE);
         }
         return arq_.sendData(data);
     }
 
-    if (data.size() <= v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_)) {
-        // Single frame - MC-DPSK can handle any size, OFDM fits in one frame
-        if (binary_payload) {
-            return arq_.sendFixedDataWithTypeAndFlags(data, v2::FrameType::DATA_END, v2::Flags::NONE);
-        }
-        return arq_.sendFixedDataWithFlags(data, v2::Flags::NONE);
+    if (capacity == 0) {
+        LOG_MODEM(ERROR, "Connection: Data frame payload capacity is zero for current mode");
+        return false;
     }
 
-    size_t capacity = v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
+    if (data.size() <= capacity) {
+        if (binary_payload) {
+            return is_ofdm
+                ? arq_.sendFixedDataWithTypeAndFlags(data, v2::FrameType::DATA_END, v2::Flags::NONE)
+                : arq_.sendDataWithTypeAndFlags(data, v2::FrameType::DATA_END, v2::Flags::NONE);
+        }
+        return is_ofdm ? arq_.sendFixedDataWithFlags(data, v2::Flags::NONE)
+                       : arq_.sendDataWithFlags(data, v2::Flags::NONE);
+    }
 
     // Fragment the message into chunks that fit in one frame each
     LOG_MODEM(INFO, "Connection: Fragmenting %zu byte %s into %zu-byte chunks",
@@ -562,7 +567,8 @@ bool Connection::sendMessages(const std::vector<std::string>& texts) {
     }
 
     bool is_ofdm = isOFDMMode(negotiated_mode_);
-    size_t capacity = is_ofdm ? v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_) : SIZE_MAX;
+    const bool bounded_variable_mc_dpsk = usesBoundedVariableMCDPSKFrames();
+    size_t capacity = (is_ofdm || bounded_variable_mc_dpsk) ? currentDataPayloadCapacity() : SIZE_MAX;
 
     // Pre-fragment all messages into a flat list of frame payloads with flags
     pending_tx_fragments_.clear();
@@ -640,13 +646,23 @@ bool Connection::sendFile(const std::string& filepath) {
         return false;
     }
 
-    // Set chunk size to match frame capacity for current mode
+    // Set chunk size to match frame capacity for bounded frame geometries.
     bool is_ofdm = isOFDMMode(negotiated_mode_);
-    if (is_ofdm) {
-        size_t capacity = v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
+    const bool bounded_variable_mc_dpsk = usesBoundedVariableMCDPSKFrames();
+    if (is_ofdm || bounded_variable_mc_dpsk) {
+        size_t capacity = currentDataPayloadCapacity();
+        if (capacity <= FileTransferController::FILE_DATA_OVERHEAD) {
+            LOG_MODEM(ERROR,
+                      "Connection: File chunk payload capacity %zu is too small for FILE_DATA overhead",
+                      capacity);
+            return false;
+        }
         file_transfer_.setMaxChunkPayload(capacity);
-        LOG_MODEM(INFO, "Connection: File chunk payload limited to %zu bytes (OFDM %s)",
-                  capacity, codeRateToString(data_code_rate_));
+        LOG_MODEM(INFO, "Connection: File chunk payload limited to %zu bytes (%s %s, cw=%d)",
+                  capacity,
+                  is_ofdm ? "OFDM fixed-frame" : "MC-DPSK variable-frame",
+                  codeRateToString(data_code_rate_),
+                  data_frame_cw_count_);
     }
 
     LOG_MODEM(INFO, "Connection: Starting file transfer: %s", filepath.c_str());
@@ -1481,9 +1497,8 @@ void Connection::configureArqForCurrentDataMode() {
     arq_.setCodeRate(data_code_rate_);
     arq_.setFixedFrameCodewords(data_frame_cw_count_);
 
-    if (isOFDMMode(negotiated_mode_)) {
-        file_transfer_.setMaxChunkPayload(
-            v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_));
+    if (isOFDMMode(negotiated_mode_) || usesBoundedVariableMCDPSKFrames()) {
+        file_transfer_.setMaxChunkPayload(currentDataPayloadCapacity());
     }
 
     if (negotiated_mode_ == WaveformMode::MC_DPSK) {
@@ -1598,12 +1613,27 @@ uint32_t Connection::pingTimeoutMsForCurrentProfile() const {
     return robust_low_probe ? ROBUST_LOW_PING_TIMEOUT_MS : PING_TIMEOUT_MS;
 }
 
+bool Connection::usesBoundedVariableMCDPSKFrames() const {
+    return negotiated_mode_ == WaveformMode::MC_DPSK &&
+           data_modulation_ == Modulation::DBPSK;
+}
+
+size_t Connection::currentDataPayloadCapacity() const {
+    if (isOFDMMode(negotiated_mode_)) {
+        return v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
+    }
+    if (usesBoundedVariableMCDPSKFrames()) {
+        return v2::getVariableFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
+    }
+    return SIZE_MAX;
+}
+
 void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count) {
     // Resolve final CW count: explicit value if specified (e.g. from
     // MODE_CHANGE wire byte), else auto-pick from rate.
     const int new_cw = (cw_count > 0)
         ? v2::sanitizeFixedFrameCodewords(cw_count)
-        : connection_policy::recommendCWCount(rate, negotiated_mode_);
+        : connection_policy::recommendCWCount(mod, rate, negotiated_mode_);
     const bool rate_changed = rate != data_code_rate_;
     const bool cw_changed = new_cw != data_frame_cw_count_;
     // Pending chunks must be re-encoded if rate OR CW changed: the ARQ payload

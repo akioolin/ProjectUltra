@@ -231,6 +231,19 @@ inline int recommendCWCount(CodeRate rate, WaveformMode waveform) {
     }
 }
 
+// Modulation-aware data-frame CW policy for waveforms whose fade exposure is
+// dominated by frame duration. OFDM keeps the fixed-frame policy above.
+// Robust-Low MC-DPSK DBPSK uses variable LDPC frames; with R1/4, 3 CW carries
+// a 37-byte ARQ payload, i.e. 32 file bytes after FILE_DATA overhead. 1 CW
+// cannot carry file data and 2 CW is too slow to be operationally useful.
+inline int recommendCWCount(Modulation mod, CodeRate rate, WaveformMode waveform) {
+    if (waveform == WaveformMode::MC_DPSK && mod == Modulation::DBPSK) {
+        (void)rate;
+        return 3;
+    }
+    return recommendCWCount(rate, waveform);
+}
+
 inline AckRepeatProfile ofdmAckRepeatProfile(Modulation mod,
                                              CodeRate rate,
                                              bool near_awgn_ofdm) {

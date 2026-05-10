@@ -814,6 +814,27 @@ inline size_t getFixedFramePayloadCapacity(CodeRate rate, int cw_count) {
 }
 
 /**
+ * Get payload capacity for a variable LDPC data frame at a target CW count.
+ *
+ * MC-DPSK DATA frames use the legacy variable-codeword split where CW0 carries
+ * raw frame bytes and each continuation CW reserves DATA_CW_HEADER_SIZE bytes
+ * for marker/index recovery. This is intentionally different from OFDM fixed
+ * frames, which pack every CW as payload-bearing info bytes before frame-level
+ * interleaving.
+ */
+inline size_t getVariableFramePayloadCapacity(CodeRate rate, int cw_count) {
+    cw_count = sanitizeFixedFrameCodewords(cw_count);
+    const size_t bytes_per_cw = getBytesPerCodeword(rate);
+    const size_t continuation_payload =
+        bytes_per_cw > DATA_CW_HEADER_SIZE ? bytes_per_cw - DATA_CW_HEADER_SIZE : 0;
+    const size_t total_info_bytes =
+        bytes_per_cw + static_cast<size_t>(cw_count - 1) * continuation_payload;
+    return total_info_bytes > FIXED_FRAME_OVERHEAD
+        ? total_info_bytes - FIXED_FRAME_OVERHEAD
+        : 0;
+}
+
+/**
  * Backward-compatible default fixed-frame capacity (4 CWs).
  */
 inline size_t getFixedFramePayloadCapacity(CodeRate rate) {

@@ -283,6 +283,36 @@ void test_recommend_cw_count() {
                   v2::kDefaultFixedFrameCodewords,
               "narrow always caps at default 4 (fade-coherence limit)");
     }
+
+    CHECK(recommendCWCount(Modulation::DBPSK, CodeRate::R1_4, WaveformMode::MC_DPSK) == 3,
+          "Robust-Low MC-DPSK DBPSK uses 3-CW variable frames");
+    CHECK(recommendCWCount(Modulation::DQPSK, CodeRate::R1_4, WaveformMode::MC_DPSK) ==
+              v2::kDefaultFixedFrameCodewords,
+          "standard MC-DPSK DQPSK keeps the legacy CW count");
+    CHECK(recommendCWCount(Modulation::DBPSK, CodeRate::R1_4, WaveformMode::OFDM_CHIRP) ==
+              v2::kDefaultFixedFrameCodewords,
+          "DBPSK does not alter OFDM CW policy");
+}
+
+void test_variable_frame_payload_capacity() {
+    CHECK(v2::getVariableFramePayloadCapacity(CodeRate::R1_4, 1) == 1,
+          "R1/4 variable 1-CW DATA carries only 1 payload byte");
+    CHECK(v2::getVariableFramePayloadCapacity(CodeRate::R1_4, 2) == 19,
+          "R1/4 variable 2-CW DATA carries 19 payload bytes");
+    CHECK(v2::getVariableFramePayloadCapacity(CodeRate::R1_4, 3) == 37,
+          "R1/4 variable 3-CW DATA carries 37 payload bytes");
+    CHECK(v2::getVariableFramePayloadCapacity(CodeRate::R1_4, 4) == 55,
+          "R1/4 variable 4-CW DATA carries 55 payload bytes");
+
+    for (int cw = v2::kMinFixedFrameCodewords; cw <= v2::kMaxFixedFrameCodewords; ++cw) {
+        const size_t cap = v2::getVariableFramePayloadCapacity(CodeRate::R1_4, cw);
+        CHECK(v2::DataFrame::calculateCodewords(cap, CodeRate::R1_4) == cw,
+              "variable frame capacity should fit exactly in the target CW count");
+        if (cw < v2::kMaxFixedFrameCodewords) {
+            CHECK(v2::DataFrame::calculateCodewords(cap + 1, CodeRate::R1_4) == cw + 1,
+                  "one byte over variable capacity should require one more CW");
+        }
+    }
 }
 
 }  // namespace
@@ -294,6 +324,7 @@ int main() {
     test_ofdm_profile_selection();
     test_negotiated_mode_selection();
     test_recommend_cw_count();
+    test_variable_frame_payload_capacity();
 
     if (tests_failed != 0) {
         std::cout << "ConnectionPolicy: " << (tests_run - tests_failed)
