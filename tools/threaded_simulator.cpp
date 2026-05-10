@@ -170,9 +170,19 @@ public:
         // Mode changes (incl. negotiated CW count from wire)
         protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate,
                                                     int cw_count,
-                                                    float snr, float peer_fading) {
+                                                    float snr, float peer_fading,
+                                                    int mc_dpsk_num_carriers,
+                                                    int mc_dpsk_samples_per_symbol) {
             (void)snr;
             (void)peer_fading;
+            if (mc_dpsk_num_carriers > 0 && mc_dpsk_samples_per_symbol > 0) {
+                MultiCarrierDPSKConfig cfg;
+                cfg.num_carriers = mc_dpsk_num_carriers;
+                cfg.samples_per_symbol = mc_dpsk_samples_per_symbol;
+                cfg.bits_per_symbol = (mod == Modulation::DBPSK) ? 1 :
+                                      (mod == Modulation::D8PSK) ? 3 : 2;
+                modem_.setMCDPSKConfig(cfg);
+            }
             modem_.setDataMode(mod, rate);
             modem_.setFixedFrameCodewords(cw_count);
             LOG_INFO("MODEM", "[%s] MODE -> %s %s cw=%d", callsign_.c_str(),

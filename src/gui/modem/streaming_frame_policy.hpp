@@ -38,14 +38,16 @@ struct PingRMSDecision {
     bool is_ping = true;
 };
 
-inline PingRMSDecision evaluatePingRMS(const float* samples, size_t count) {
+inline PingRMSDecision evaluatePingRMS(const float* samples, size_t count,
+                                       size_t training_skip_samples = kPingTrainingSkipSamples,
+                                       size_t rms_check_samples = kPingRMSCheckSamples) {
     PingRMSDecision decision;
 
-    const size_t train_len = std::min(kPingTrainingSkipSamples, count);
+    const size_t train_len = std::min(training_skip_samples, count);
     decision.training_rms = rms(samples, train_len);
 
-    const size_t check_start = std::min(kPingTrainingSkipSamples, count);
-    const size_t check_len = std::min(count - check_start, kPingRMSCheckSamples);
+    const size_t check_start = std::min(training_skip_samples, count);
+    const size_t check_len = std::min(count - check_start, rms_check_samples);
     decision.data_rms = rms(samples ? samples + check_start : nullptr, check_len);
 
     decision.ratio = (decision.training_rms > kMinTrainingRMSForPingRatio)

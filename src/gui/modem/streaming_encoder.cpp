@@ -145,6 +145,7 @@ void StreamingEncoder::setMCDPSKCarriers(int num_carriers) {
     if (mc_dpsk_carriers_ == num_carriers) return;
 
     mc_dpsk_carriers_ = num_carriers;
+    mc_dpsk_config_.num_carriers = num_carriers;
 
     // Recreate waveform if currently in MC-DPSK mode
     if (mode_ == protocol::WaveformMode::MC_DPSK) {
@@ -152,9 +153,36 @@ void StreamingEncoder::setMCDPSKCarriers(int num_carriers) {
     }
 
     // Always update control waveform
-    control_waveform_ = WaveformFactory::createMCDPSK(num_carriers);
+    control_waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
 
     LOG_MODEM(INFO, "[%s] MC-DPSK carriers: %d", log_prefix_.c_str(), num_carriers);
+}
+
+void StreamingEncoder::setMCDPSKConfig(const MultiCarrierDPSKConfig& config) {
+    const bool changed =
+        mc_dpsk_config_.num_carriers != config.num_carriers ||
+        mc_dpsk_config_.samples_per_symbol != config.samples_per_symbol ||
+        mc_dpsk_config_.bits_per_symbol != config.bits_per_symbol ||
+        mc_dpsk_config_.freq_low != config.freq_low ||
+        mc_dpsk_config_.freq_high != config.freq_high ||
+        mc_dpsk_config_.chirp_f_start != config.chirp_f_start ||
+        mc_dpsk_config_.chirp_f_end != config.chirp_f_end ||
+        mc_dpsk_config_.chirp_duration_ms != config.chirp_duration_ms ||
+        mc_dpsk_config_.use_dual_chirp != config.use_dual_chirp;
+    if (!changed) return;
+
+    mc_dpsk_config_ = config;
+    mc_dpsk_carriers_ = config.num_carriers;
+
+    if (mode_ == protocol::WaveformMode::MC_DPSK) {
+        createWaveform();
+    }
+    control_waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
+
+    LOG_MODEM(INFO, "[%s] MC-DPSK config: carriers=%d sps=%d bits/sym=%d raw=%.1f bps",
+              log_prefix_.c_str(), mc_dpsk_config_.num_carriers,
+              mc_dpsk_config_.samples_per_symbol, mc_dpsk_config_.bits_per_symbol,
+              mc_dpsk_config_.getRawBitRate());
 }
 
 void StreamingEncoder::setNarrowbandControl(bool narrowband) {
@@ -168,9 +196,9 @@ void StreamingEncoder::setNarrowbandControl(bool narrowband) {
         }
         LOG_MODEM(INFO, "[%s] Control waveform: narrowband MC-DPSK (500 Hz)", log_prefix_.c_str());
     } else {
-        control_waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_carriers_);
+        control_waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
         if (mode_ == protocol::WaveformMode::MC_DPSK) {
-            waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_carriers_);
+            waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
         }
         LOG_MODEM(INFO, "[%s] Control waveform: wideband MC-DPSK (%d carriers)", log_prefix_.c_str(), mc_dpsk_carriers_);
     }
@@ -368,7 +396,7 @@ std::vector<float> StreamingEncoder::encodePing() {
     // PING is just the preamble (chirp) with no data
     // Always use MC-DPSK waveform for PING
     if (!control_waveform_) {
-        control_waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_carriers_);
+        control_waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
     }
 
     auto preamble = control_waveform_->generatePreamble();
@@ -397,15 +425,23 @@ EncoderConfig StreamingEncoder::getConfig() const {
     cfg.mode = mode_;
     cfg.modulation = modulation_;
     cfg.code_rate = code_rate_;
-    cfg.num_carriers = ofdm_config_.num_carriers;
-    cfg.data_carriers = calculateDataCarriers();
-    cfg.bits_per_symbol = ofdm_link_adaptation::bitsPerOFDMSymbol(
-        static_cast<int>(ofdm_config_.num_carriers),
-        ofdm_config_.use_pilots,
-        static_cast<int>(ofdm_config_.pilot_spacing),
-        modulation_);
-    cfg.use_pilots = ofdm_config_.use_pilots;
-    cfg.pilot_spacing = ofdm_config_.pilot_spacing;
+    if (mode_ == protocol::WaveformMode::MC_DPSK) {
+        cfg.num_carriers = mc_dpsk_config_.num_carriers;
+        cfg.data_carriers = mc_dpsk_config_.num_carriers;
+        cfg.bits_per_symbol = mc_dpsk_config_.num_carriers * mc_dpsk_config_.bits_per_symbol;
+        cfg.use_pilots = false;
+        cfg.pilot_spacing = 0;
+    } else {
+        cfg.num_carriers = ofdm_config_.num_carriers;
+        cfg.data_carriers = calculateDataCarriers();
+        cfg.bits_per_symbol = ofdm_link_adaptation::bitsPerOFDMSymbol(
+            static_cast<int>(ofdm_config_.num_carriers),
+            ofdm_config_.use_pilots,
+            static_cast<int>(ofdm_config_.pilot_spacing),
+            modulation_);
+        cfg.use_pilots = ofdm_config_.use_pilots;
+        cfg.pilot_spacing = ofdm_config_.pilot_spacing;
+    }
     cfg.use_channel_interleave = use_channel_interleave_;
     cfg.use_frame_interleave = use_frame_interleave_;
     return cfg;
@@ -475,7 +511,7 @@ void StreamingEncoder::createWaveform() {
     // Always have MC-DPSK ready for control frames
     if (!control_waveform_) {
         startupTrace("StreamingEncoder", "create-control-waveform-enter");
-        control_waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_carriers_);
+        control_waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
         startupTrace("StreamingEncoder", "create-control-waveform-exit");
     }
 
@@ -485,7 +521,7 @@ void StreamingEncoder::createWaveform() {
             if (narrowband_control_) {
                 waveform_ = WaveformFactory::createNarrowbandMCDPSK();
             } else {
-                waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_carriers_);
+                waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
             }
             startupTrace("StreamingEncoder", "create-main-waveform-mcdpsk-exit");
             break;
@@ -570,6 +606,25 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
         // MC-DPSK: Simple variable CW encoding (no frame interleaving)
         // Control frames (20 bytes): ACK, NACK, etc. - encode as-is, no patching
         // Data frames (>20 bytes): May need total_cw patching
+
+        if (tx_data.size() >= 3 &&
+            tx_data[2] == static_cast<uint8_t>(v2::FrameType::DATA_REPAIR)) {
+            auto repair = v2::DataRepairFrame::deserialize(tx_data);
+            if (!repair) {
+                LOG_MODEM(WARN, "[%s] MC-DPSK: dropping invalid DATA_REPAIR frame",
+                          log_prefix_.c_str());
+                return {};
+            }
+            auto cws = v2::encodeInfoCodewordsWithLDPC(repair->infoCodewords(), repair->rate);
+            Bytes encoded;
+            for (const auto& cw : cws) {
+                encoded.insert(encoded.end(), cw.begin(), cw.end());
+            }
+            LOG_MODEM(INFO, "[%s] MC-DPSK DATA_REPAIR: seq=%d bitmap=0x%04X repair_cw=%d (%zu coded)",
+                      log_prefix_.c_str(), repair->target_seq, repair->repair_bitmap,
+                      repair->repair_count, encoded.size());
+            return encoded;
+        }
 
         // Check if this is a control frame (20 bytes, type 0x10-0x21 or 0x40)
         bool is_control_frame = false;

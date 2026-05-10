@@ -34,6 +34,7 @@ namespace gui {
 class ModemEngine {
 public:
     ModemEngine();
+    explicit ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config);
     ~ModemEngine();
 
     // Set a name/prefix for logging (e.g., "OUR" or "SIM")
@@ -192,14 +193,21 @@ public:
     // MC-DPSK configuration
     int getMCDPSKCarriers() const { return mc_dpsk_config_.num_carriers; }
     float getMCDPSKThroughput() const { return mc_dpsk_config_.getRawBitRate() * 0.25f; } // R1/4 FEC
+    void setMCDPSKConfig(const MultiCarrierDPSKConfig& config);
+    void setMCDPSKProfile(int num_carriers, int samples_per_symbol, int bits_per_symbol) {
+        if (mc_dpsk_config_.num_carriers == num_carriers &&
+            mc_dpsk_config_.samples_per_symbol == samples_per_symbol &&
+            mc_dpsk_config_.bits_per_symbol == bits_per_symbol) {
+            return;
+        }
+        mc_dpsk_config_.num_carriers = num_carriers;
+        mc_dpsk_config_.samples_per_symbol = samples_per_symbol;
+        mc_dpsk_config_.bits_per_symbol = bits_per_symbol;
+        setMCDPSKConfig(mc_dpsk_config_);
+    }
     void setMCDPSKCarriers(int num_carriers) {
         mc_dpsk_config_.num_carriers = num_carriers;
-        if (streaming_decoder_) {
-            streaming_decoder_->setMCDPSKCarriers(num_carriers);
-        }
-        if (streaming_encoder_) {
-            streaming_encoder_->setMCDPSKCarriers(num_carriers);
-        }
+        setMCDPSKConfig(mc_dpsk_config_);
     }
 
     // Recommend MC-DPSK carrier count based on channel conditions
@@ -247,8 +255,8 @@ private:
     bool use_connected_waveform_once_ = false;
 
     // Data frame modulation (negotiated after probing)
-    Modulation data_modulation_ = Modulation::QPSK;
-    CodeRate data_code_rate_ = CodeRate::R1_2;
+    Modulation data_modulation_ = Modulation::DBPSK;
+    CodeRate data_code_rate_ = CodeRate::R1_4;
     fec::CodecType codec_type_ = fec::CodecType::LDPC;  // FEC codec type
 
     // TX chain - StreamingEncoder (unified encoding for all waveform types)

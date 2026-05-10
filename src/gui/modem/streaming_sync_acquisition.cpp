@@ -180,7 +180,11 @@ void StreamingDecoder::searchForSync() {
             return;
         }
 
-        // Quick RMS check for signal presence
+        // Quick RMS check for signal presence. For disconnected MC-DPSK chirps,
+        // use the strongest 20ms slice across the next 100ms search step. A
+        // Watterson notch can erase one narrow chirp segment while the rest of
+        // the sweep remains detectable; the correlator is the real detector,
+        // this gate only keeps silence from burning CPU.
         float rms = 0.0f;
         for (size_t i = 0; i < 1000; i++) {
             float s = buffer_[wrapRingIndexLocked(correlation_pos_ + i)];
@@ -188,10 +192,45 @@ void StreamingDecoder::searchForSync() {
         }
         rms = std::sqrt(rms / 1000.0f);
 
+        const bool disconnected_mc_dpsk =
+            !connected_ && mode_ == protocol::WaveformMode::MC_DPSK;
+        if (disconnected_mc_dpsk) {
+            float max_slice_rms = rms;
+            constexpr size_t RMS_SLICE_SAMPLES = 1000;
+            for (size_t off = RMS_SLICE_SAMPLES;
+                 off + RMS_SLICE_SAMPLES <= CORRELATION_STEP;
+                 off += RMS_SLICE_SAMPLES) {
+                float slice_sum = 0.0f;
+                for (size_t i = 0; i < RMS_SLICE_SAMPLES; ++i) {
+                    float s = buffer_[wrapRingIndexLocked(correlation_pos_ + off + i)];
+                    slice_sum += s * s;
+                }
+                max_slice_rms = std::max(
+                    max_slice_rms,
+                    std::sqrt(slice_sum / static_cast<float>(RMS_SLICE_SAMPLES)));
+            }
+            rms = max_slice_rms;
+        }
+
         // OTA-connected mode can run at lower absolute amplitudes than simulator
         // defaults. Use an adaptive gate so valid low-level frames are not skipped.
         float rms_gate = CORR_NOISE_THRESHOLD;
-        if (connected_ && waveform_->supportsDataPreamble()) {
+        if (disconnected_mc_dpsk) {
+            float noise_floor = std::max(0.0005f, noise_floor_);
+            if (rms < CORR_NOISE_THRESHOLD) {
+                noise_floor_ = 0.98f * noise_floor + 0.02f * rms;
+            } else {
+                noise_floor_ = 0.995f * noise_floor + 0.005f * rms;
+            }
+
+            // Before sync there is no SNR estimate. Use the measured audio
+            // floor, but never raise the historical 0.025 gate; this only
+            // relaxes acquisition when high-SNR fading leaves low absolute RMS.
+            rms_gate = std::clamp(noise_floor_ * 3.0f, 0.006f, CORR_NOISE_THRESHOLD);
+            if (audio_activity_.load(std::memory_order_relaxed)) {
+                rms_gate = std::min(rms_gate, 0.012f);
+            }
+        } else if (connected_ && waveform_->supportsDataPreamble()) {
             float noise_floor = std::max(0.001f, noise_floor_);
             if (rms < noise_floor * 3.0f) {
                 noise_floor_ = 0.98f * noise_floor + 0.02f * rms;

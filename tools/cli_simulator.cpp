@@ -44,6 +44,7 @@
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "waveform/ofdm_cox_waveform.hpp"
 #include "waveform/mc_dpsk_waveform.hpp"
+#include "psk/multi_carrier_dpsk.hpp"
 #include "gui/modem/streaming_decoder.hpp"
 #include "gui/modem/streaming_encoder.hpp"  // TX encoding (mirrors StreamingDecoder)
 #include "protocol/protocol_engine.hpp"
@@ -85,6 +86,52 @@ bool envFlagEnabled(const char* name) {
         return v == "1" || v == "true" || v == "yes" || v == "on";
     }
     return false;
+}
+
+const char* mcDpskPresetChoices() {
+    return "standard, robust_low, robust_mid, robust";
+}
+
+bool parseMCDPSKPreset(const std::string& value,
+                       std::string& preset_name,
+                       MultiCarrierDPSKConfig& config) {
+    const std::string v = cli::normalizedToken(value);
+    if (v == "standard") {
+        preset_name = "standard";
+        config = mc_dpsk_presets::level8();
+        return true;
+    }
+    if (v == "robust_low" || v == "robustlow") {
+        preset_name = "robust_low";
+        config = mc_dpsk_presets::robust_low();
+        return true;
+    }
+    if (v == "robust_mid" || v == "robustmid") {
+        preset_name = "robust_mid";
+        config = mc_dpsk_presets::robust_mid();
+        return true;
+    }
+    if (v == "robust") {
+        preset_name = "robust";
+        config = mc_dpsk_presets::robust();
+        return true;
+    }
+    return false;
+}
+
+std::string mcDpskPresetSummary(const std::string& preset_name,
+                                const MultiCarrierDPSKConfig& config) {
+    std::ostringstream oss;
+    oss << preset_name;
+    if (preset_name == "adaptive") {
+        oss << " listen=robust_mid";
+    }
+    oss << " (" << config.num_carriers << " carriers, "
+        << config.samples_per_symbol << " sps, "
+        << (config.bits_per_symbol == 1 ? "DBPSK" : "DQPSK")
+        << ", raw=" << std::fixed << std::setprecision(1)
+        << config.getRawBitRate() << " bps)";
+    return oss.str();
 }
 
 bool parseForcedModulation(const std::string& value, bool expert_phy, Modulation& out) {
@@ -317,6 +364,14 @@ public:
     void setForcedModulation(Modulation mod) { forced_mod_ = mod; }
     void setForcedCodeRate(CodeRate rate) { forced_rate_ = rate; }
     void setOFDMConfigPreset(OFDMConfigPreset preset) { ofdm_config_preset_ = preset; }
+    void setMCDPSKPreset(const std::string& name, const MultiCarrierDPSKConfig& config) {
+        mc_dpsk_preset_name_ = name;
+        mc_dpsk_config_ = config;
+        forced_waveform_ = WaveformMode::MC_DPSK;
+        forced_mod_ = mc_dpsk_config_.bits_per_symbol == 1
+            ? Modulation::DBPSK
+            : Modulation::DQPSK;
+    }
     // Marks an operator-forced override; remembered so initStation()
     // pushes it into the protocol layer with forced=true (which makes
     // the initiator embed it in CONNECT and the responder honor it).
@@ -398,10 +453,10 @@ public:
         // Create stations with virtual audio ports (in-process channel sim)
         alpha_ = std::make_unique<SimulatedStation>(
             "ALPHA", std::make_unique<VirtualAudioPort>(channel_, /*is_station_a=*/true),
-            ofdm_config_preset_);
+            ofdm_config_preset_, mc_dpsk_config_);
         bravo_ = std::make_unique<SimulatedStation>(
             "BRAVO", std::make_unique<VirtualAudioPort>(channel_, /*is_station_a=*/false),
-            ofdm_config_preset_);
+            ofdm_config_preset_, mc_dpsk_config_);
         alpha_->setRxOverfeedFactor(rx_overfeed_factor_);
         bravo_->setRxOverfeedFactor(rx_overfeed_factor_);
         alpha_->setDecodeDelayMs(decode_delay_ms_);
@@ -559,6 +614,8 @@ private:
     CodeRate forced_rate_ = CodeRate::AUTO;
     WaveformMode forced_waveform_ = WaveformMode::AUTO;
     OFDMConfigPreset ofdm_config_preset_ = OFDMConfigPreset::Default;
+    std::string mc_dpsk_preset_name_ = "adaptive";
+    MultiCarrierDPSKConfig mc_dpsk_config_ = mc_dpsk_presets::robust_mid();
 
     // Hardware-audio role (--role A|B|both, default both = current sim behavior)
     enum class Role { Both, A, B };
@@ -637,6 +694,10 @@ private:
             meta_out << "forced_code_rate=" << rate_str << "\n";
             meta_out << "forced_waveform=" << wf_str << "\n";
             meta_out << "ofdm_config=" << ofdmConfigPresetToString(ofdm_config_preset_) << "\n";
+            meta_out << "mc_dpsk_preset=" << mc_dpsk_preset_name_ << "\n";
+            meta_out << "mc_dpsk_carriers=" << mc_dpsk_config_.num_carriers << "\n";
+            meta_out << "mc_dpsk_samples_per_symbol=" << mc_dpsk_config_.samples_per_symbol << "\n";
+            meta_out << "mc_dpsk_bits_per_symbol=" << mc_dpsk_config_.bits_per_symbol << "\n";
             meta_out << "test_type="
                      << (test_file_transfer_ ? "file_transfer" : (test_burst_ ? "burst" : "messages"))
                      << "\n";
@@ -706,18 +767,19 @@ private:
         std::cout << "  ALPHA connecting to BRAVO...\n";
         alpha_->connect("BRAVO");
 
-        if (!waitFor([this]{ return alpha_->isConnected() && bravo_->isConnected(); }, 30)) {
+        if (!waitFor([this]{ return alpha_->isConnected() && bravo_->isConnected(); }, mcDpskHandshakeTimeoutSeconds())) {
             std::cout << "  \033[31m✗ Connection timeout!\033[0m\n";
             return false;
         }
         std::cout << "  \033[32m✓ Both stations connected!\033[0m\n";
 
         std::cout << "\n=== PHASE 2: HANDSHAKE ===\n";
-        if (!waitFor([this]{ return alpha_->isHandshakeComplete(); }, 30)) {
+        if (!waitFor([this]{ return alpha_->isHandshakeComplete(); }, mcDpskHandshakeTimeoutSeconds())) {
             std::cout << "  \033[31m✗ Handshake timeout!\033[0m\n";
             return false;
         }
         std::cout << "  \033[32m✓ Handshake complete!\033[0m\n";
+        printNegotiatedProfile();
 
         std::cout << "\n=== PHASE 3: ADAPTIVE SMOKE (2 conditions) ===\n";
         std::cout << "  Condition A: SNR=" << snr_db_ << " dB, channel=" << channelTypeName() << "\n";
@@ -759,7 +821,7 @@ private:
         std::cout << "  ALPHA connecting to BRAVO...\n";
         alpha_->connect("BRAVO");
 
-        if (!waitFor([this]{ return alpha_->isConnected() && bravo_->isConnected(); }, 30)) {
+        if (!waitFor([this]{ return alpha_->isConnected() && bravo_->isConnected(); }, mcDpskHandshakeTimeoutSeconds())) {
             std::cout << "  \033[31m✗ Connection timeout!\033[0m\n";
             return false;
         }
@@ -767,11 +829,12 @@ private:
 
         // Phase 2: Mode negotiation
         std::cout << "\n=== PHASE 2: MODE NEGOTIATION ===\n";
-        if (!waitFor([this]{ return alpha_->isHandshakeComplete(); }, 30)) {
+        if (!waitFor([this]{ return alpha_->isHandshakeComplete(); }, mcDpskHandshakeTimeoutSeconds())) {
             std::cout << "  \033[31m✗ Mode negotiation timeout!\033[0m\n";
             return false;
         }
         std::cout << "  \033[32m✓ Handshake complete!\033[0m\n";
+        printNegotiatedProfile();
 
         // Phase 3: Send 5 short + 2 long messages as a burst
         std::cout << "\n=== PHASE 3: DATA TRANSFER (7 messages) ===\n";
@@ -812,7 +875,9 @@ private:
 
         // Wait for all messages to arrive
         // Narrowband needs much longer: ~4.4s/frame RTT with window=1, plus retransmissions
-        int burst_timeout = (forced_waveform_ == WaveformMode::OFDM_NARROW) ? 300 : 120;
+        int burst_timeout = isRobustMCDPSKPreset()
+            ? 360
+            : ((forced_waveform_ == WaveformMode::OFDM_NARROW) ? 300 : 120);
         if (!waitFor([this, total]{ return messages_received_count_.load() >= total; }, burst_timeout)) {
             int got = messages_received_count_.load();
             std::cout << "  \033[31m✗ Only received " << got << "/" << total << " messages!\033[0m\n";
@@ -872,7 +937,7 @@ private:
         std::cout << "  ALPHA connecting to BRAVO...\n";
         alpha_->connect("BRAVO");
 
-        if (!waitFor([this]{ return alpha_->isConnected() && bravo_->isConnected(); }, 30)) {
+        if (!waitFor([this]{ return alpha_->isConnected() && bravo_->isConnected(); }, mcDpskHandshakeTimeoutSeconds())) {
             std::cout << "  \033[31m✗ Connection timeout!\033[0m\n";
             return false;
         }
@@ -880,11 +945,12 @@ private:
 
         // Phase 2: Mode negotiation
         std::cout << "\n=== PHASE 2: MODE NEGOTIATION ===\n";
-        if (!waitFor([this]{ return alpha_->isHandshakeComplete(); }, 30)) {
+        if (!waitFor([this]{ return alpha_->isHandshakeComplete(); }, mcDpskHandshakeTimeoutSeconds())) {
             std::cout << "  \033[31m✗ Mode negotiation timeout!\033[0m\n";
             return false;
         }
         std::cout << "  \033[32m✓ Handshake complete!\033[0m\n";
+        printNegotiatedProfile();
 
         // Phase 3: File transfer
         std::cout << "\n=== PHASE 3: FILE TRANSFER ===\n";
@@ -974,6 +1040,10 @@ private:
             }
         }
 
+        if (!waitFor([this]{ return !alpha_->isFileTransferInProgress() && alpha_->isReadyToSend(); }, 60)) {
+            std::cout << "  \033[33m! Sender ACK drain timeout before disconnect (non-fatal)\033[0m\n";
+        }
+
         // Phase 4: Disconnect (non-fatal if timeout - file transfer already proved)
         std::cout << "\n=== PHASE 4: DISCONNECT ===\n";
         alpha_->disconnect();
@@ -997,7 +1067,7 @@ private:
         std::cout << "  ALPHA connecting to BRAVO...\n";
         alpha_->connect("BRAVO");
 
-        if (!waitFor([this]{ return alpha_->isConnected() && bravo_->isConnected(); }, 30)) {
+        if (!waitFor([this]{ return alpha_->isConnected() && bravo_->isConnected(); }, mcDpskHandshakeTimeoutSeconds())) {
             std::cout << "  \033[31m✗ Connection timeout!\033[0m\n";
             return false;
         }
@@ -1005,11 +1075,12 @@ private:
 
         // Phase 2: Mode negotiation
         std::cout << "\n=== PHASE 2: MODE NEGOTIATION ===\n";
-        if (!waitFor([this]{ return alpha_->isHandshakeComplete(); }, 30)) {
+        if (!waitFor([this]{ return alpha_->isHandshakeComplete(); }, mcDpskHandshakeTimeoutSeconds())) {
             std::cout << "  \033[31m✗ Mode negotiation timeout!\033[0m\n";
             return false;
         }
         std::cout << "  \033[32m✓ Handshake complete!\033[0m\n";
+        printNegotiatedProfile();
 
         // Phase 3: Send 3 large messages that fragment into 5+ frames each
         // At R1/2: payload capacity = 141 bytes, so 600 bytes → ceil(600/141) = 5 frames
@@ -1114,6 +1185,16 @@ private:
         return true;
     }
 
+    int mcDpskHandshakeTimeoutSeconds() const {
+        return (mc_dpsk_config_.samples_per_symbol > 512 ||
+                mc_dpsk_config_.bits_per_symbol < 2) ? 75 : 30;
+    }
+
+    bool isRobustMCDPSKPreset() const {
+        return mc_dpsk_config_.samples_per_symbol > 512 ||
+               mc_dpsk_config_.bits_per_symbol < 2;
+    }
+
     const char* channelTypeName() const {
         switch (channel_type_) {
             case ChannelType::AWGN:     return "AWGN (no fading)";
@@ -1133,10 +1214,18 @@ private:
     //   Good:     ~20 B/s sim, ~12 B/s hardware
     //   Moderate: ~12 B/s sim, ~8 B/s hardware
     //   Poor/Flutter: ~8 B/s sim, ~6 B/s hardware
+    // Robust DBPSK MC-DPSK is much slower: use 1-2 B/s floors so hardware
+    // validation budgets reflect long DBPSK frame airtime.
     // Hardware mode is slower: soundcard jitter, ACK turnaround latency,
     // and ~5-15% retx overhead from USB-1.1 audio devices. Hardware also
     // gets 90s base (vs 60s sim) for two-machine handshake setup time.
     long fileTransferTimeoutSeconds(size_t bytes, bool hardware_mode = false) const {
+        if (isRobustMCDPSKPreset()) {
+            const long bytes_per_second_floor = hardware_mode ? 1 : 2;
+            const long base_overhead_s = hardware_mode ? 180 : 120;
+            return base_overhead_s + static_cast<long>(bytes) / bytes_per_second_floor;
+        }
+
         long bps_floor;
         if (hardware_mode) {
             switch (channel_type_) {
@@ -1190,6 +1279,8 @@ private:
         std::cout << "  Output:   " << (audio_output_device_.empty() ? "(default)" : audio_output_device_) << "\n";
         std::cout << "  Input:    " << (audio_input_device_.empty() ? "(default)" : audio_input_device_) << "\n";
         std::cout << "  OFDM cfg: " << ofdmConfigPresetToString(ofdm_config_preset_) << "\n";
+        std::cout << "  MC-DPSK:  "
+                  << mcDpskPresetSummary(mc_dpsk_preset_name_, mc_dpsk_config_) << "\n";
 
         if (list_audio_devices_) {
             gui::AudioEngine probe;
@@ -1227,7 +1318,7 @@ private:
             audio_output_device_, audio_input_device_, std::move(injector),
             audio_buffer_size_);
         auto station = std::make_unique<SimulatedStation>(
-            self, std::move(port), ofdm_config_preset_);
+            self, std::move(port), ofdm_config_preset_, mc_dpsk_config_);
 
         // Forced settings (only meaningful on initiator A — responder B picks
         // them up from the CONNECT frame):
@@ -1328,15 +1419,17 @@ private:
         std::cout << "\n=== PHASE 1: CONNECT ===\n";
         std::cout << "  Connecting to " << peer << "...\n";
         station.connect(peer);
-        if (!waitForRole(station, [&]{ return station.isConnected(); }, 60, "waiting for connect")) {
-            std::cout << "  \033[31m✗ Connect timeout (60s)\033[0m\n";
+        const int connect_timeout_s = std::max(60, mcDpskHandshakeTimeoutSeconds());
+        if (!waitForRole(station, [&]{ return station.isConnected(); }, connect_timeout_s, "waiting for connect")) {
+            std::cout << "  \033[31m✗ Connect timeout (" << connect_timeout_s << "s)\033[0m\n";
             return false;
         }
         std::cout << "  \033[32m✓ Connected\033[0m\n";
 
         // 2. Mode negotiation / handshake
         std::cout << "\n=== PHASE 2: MODE NEGOTIATION ===\n";
-        if (!waitForRole(station, [&]{ return station.isHandshakeComplete(); }, 30, "handshake")) {
+        if (!waitForRole(station, [&]{ return station.isHandshakeComplete(); },
+                         mcDpskHandshakeTimeoutSeconds(), "handshake")) {
             std::cout << "  \033[31m✗ Handshake timeout\033[0m\n";
             return false;
         }
@@ -1488,6 +1581,8 @@ private:
         std::cout << "  TX CFO:  " << tx_cfo_hz_ << " Hz\n";
         std::cout << "  Channel: " << channelTypeName() << "\n";
         std::cout << "  OFDM cfg: " << ofdmConfigPresetToString(ofdm_config_preset_) << "\n";
+        std::cout << "  MC-DPSK:  "
+                  << mcDpskPresetSummary(mc_dpsk_preset_name_, mc_dpsk_config_) << "\n";
         if (adaptive_test_) {
             std::cout << "  ADPT:    enabled (hop -> "
                       << channelTypeToString(adaptive_hop_channel_)
@@ -1505,6 +1600,22 @@ private:
         }
         if (fixed_frame_codewords_ != v2::kDefaultFixedFrameCodewords) {
             std::cout << "  CW/frame: " << fixed_frame_codewords_ << "\n";
+        }
+        std::cout << "\n";
+    }
+
+    void printNegotiatedProfile() const {
+        if (!alpha_) return;
+        const WaveformMode waveform = alpha_->getNegotiatedWaveform();
+        std::cout << "  Negotiated data: waveform=" << waveformModeToString(waveform)
+                  << " mod=" << modulationToString(alpha_->getDataModulation())
+                  << " rate=" << codeRateToString(alpha_->getDataCodeRate())
+                  << " cw=" << alpha_->getFixedFrameCodewords();
+        if (waveform == WaveformMode::MC_DPSK) {
+            const auto cfg = alpha_->getMCDPSKConfig();
+            std::cout << " mc_carriers=" << cfg.num_carriers
+                      << " mc_sps=" << cfg.samples_per_symbol
+                      << " mc_bits=" << cfg.bits_per_symbol;
         }
         std::cout << "\n";
     }
@@ -1677,6 +1788,16 @@ private:
                   << "  dup_ignored=" << cs.arq.duplicate_acks_ignored
                   << "  repeat_coalesced=" << cs.arq.ack_repeat_jobs_coalesced
                   << "  repeat_dropped=" << cs.arq.ack_repeat_jobs_dropped << "\n";
+        std::cout << "  PCW:  partial_rcvd=" << cs.arq.partial_frames_received
+                  << "  partial_done=" << cs.arq.partial_frames_completed
+                  << "  partial_crc_fail=" << cs.arq.partial_frame_crc_failed
+                  << "  partial_expired=" << cs.arq.partial_frame_expired
+                  << "  cw_nack_sent=" << cs.arq.cw_nacks_sent
+                  << "  cw_nack_rcvd=" << cs.arq.cw_nacks_received
+                  << "  repair_tx=" << cs.arq.data_repairs_sent
+                  << "  repair_rx=" << cs.arq.data_repairs_received
+                  << "  repair_cw_tx=" << cs.arq.data_repair_cws_sent
+                  << "  repair_cw_merge=" << cs.arq.data_repair_cws_merged << "\n";
 
         // Effective ACK rate: how many ACK frames BRAVO sent per data frame
         // received. Baseline reference today on 50 KB OFDM ~1.1.
@@ -1863,6 +1984,21 @@ int main(int argc, char* argv[]) {
                               << " (use default or nvis)\n";
                     return 1;
                 }
+            } else if (arg == "--mc-dpsk-preset") {
+                if (i + 1 >= argc) {
+                    std::cerr << "Missing value for --mc-dpsk-preset (use "
+                              << mcDpskPresetChoices() << ")\n";
+                    return 1;
+                }
+                std::string preset_name;
+                MultiCarrierDPSKConfig preset_config;
+                const std::string preset_arg = argv[++i];
+                if (!parseMCDPSKPreset(preset_arg, preset_name, preset_config)) {
+                    std::cerr << "Unknown MC-DPSK preset: " << preset_arg
+                              << " (use " << mcDpskPresetChoices() << ")\n";
+                    return 1;
+                }
+                sim.setMCDPSKPreset(preset_name, preset_config);
             } else if (arg == "--file" || arg == "--test-file") {
                 sim.setTestFileTransfer(true);
                 // Optional file size argument
@@ -1958,7 +2094,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "                        poor     - 2.0ms delay, 1.0Hz Doppler (disturbed)\n";
                 std::cout << "                        flutter  - 0.5ms delay, 10Hz Doppler (auroral)\n";
                 std::cout << "  --fading, -f        Alias for --channel moderate\n";
-                std::cout << "  --mod, -m <MOD>     Force modulation: dqpsk\n";
+                std::cout << "  --mod, -m <MOD>     Force modulation: dqpsk (DBPSK via robust presets)\n";
                 std::cout << "  --expert            Allow lab-only forced PHY modes in --mod\n";
                 std::cout << "  --rate, -r <RATE>   Force code rate: auto, r1_4, r1_2, r2_3, r3_4\n";
                 std::cout << "  --cw-count <N>      Fixed OFDM data-frame codewords (1-8, default: 4)\n";
@@ -1966,6 +2102,8 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --mask-clear-carrier <N>  Clear one carrier bit (0-58)\n";
                 std::cout << "  --waveform, -w <WF> Force waveform: mc_dpsk, ofdm_chirp, ofdm_cox, ofdm_narrow\n";
                 std::cout << "  --ofdm-config <CFG> OFDM_COX config: default (512/30) or nvis (1024/59)\n";
+                std::cout << "  --mc-dpsk-preset <P> Force MC-DPSK preset: standard, robust_low, robust_mid, robust\n";
+                std::cout << "                        default: adaptive, with Robust-Mid as cold-call/listen PHY\n";
                 std::cout << "  --seed <N>          Random seed (default: 42)\n";
                 std::cout << "  --tx-cfo <Hz>       Inject TX CFO in channel model (default: 0)\n";
                 std::cout << "  --cfo <Hz>          Alias for --tx-cfo\n";

@@ -248,7 +248,7 @@ bool Connection::connect(const std::string& remote_call) {
     // Start with PROBING state - send PING for fast presence check
     state_ = ConnectionState::PROBING;
     ping_retry_count_ = 0;
-    timeout_remaining_ms_ = PING_TIMEOUT_MS;
+    timeout_remaining_ms_ = pingTimeoutMsForCurrentProfile();
     stats_.connects_initiated++;
 
     // Send PING (modem will generate preamble + "ULTR")
@@ -312,18 +312,26 @@ void Connection::acceptCall() {
     // initiator's view match what we'll actually use locally.
     int negotiated_cw = (pending_forced_cw_count_ != 0)
         ? v2::sanitizeFixedFrameCodewords(pending_forced_cw_count_)
-        : connection_policy::recommendCWCount(rec_rate, negotiated_mode_);
+        : connection_policy::recommendCWCount(rec_mod, rec_rate, negotiated_mode_);
 
     // Clear pending forced modes
     pending_forced_modulation_ = Modulation::AUTO;
     pending_forced_code_rate_ = CodeRate::AUTO;
     pending_forced_cw_count_ = 0;
 
-    // Set our local data mode immediately
-    data_modulation_ = rec_mod;
-    data_code_rate_ = rec_rate;
-    data_frame_cw_count_ = negotiated_cw;
-    config_.fixed_frame_codewords = negotiated_cw;
+    LadderRungId rung_id = LadderRungId::UNKNOWN;
+    if (negotiated_mode_ == WaveformMode::MC_DPSK) {
+        rung_id = connection_policy::rungForMCDPSKConfig(
+            rec_mod, config_.mc_dpsk_num_carriers,
+            config_.mc_dpsk_samples_per_symbol, negotiated_cw).id;
+    } else if (negotiated_mode_ == WaveformMode::OFDM_CHIRP) {
+        rung_id = LadderRungId::OFDM_CHIRP;
+    } else if (negotiated_mode_ == WaveformMode::OFDM_NARROW) {
+        rung_id = LadderRungId::OFDM_NARROW;
+    }
+
+    // Set our local data mode immediately.
+    applyDataMode(rec_mod, rec_rate, negotiated_cw, rung_id);
 
     LOG_MODEM(INFO, "Connection: Accepting call from %s (waveform=%s, data=%s %s, cw=%d)",
               remote_call_.c_str(), waveformModeToString(negotiated_mode_),
@@ -332,8 +340,10 @@ void Connection::acceptCall() {
 
     auto ack = v2::ConnectFrame::makeConnectAck(local_call_, remote_call_,
                                                  static_cast<uint8_t>(negotiated_mode_),
-                                                 rec_mod, rec_rate, measured_snr_db_, fading_index_,
-                                                 static_cast<uint8_t>(negotiated_cw));
+                                                 data_modulation_, data_code_rate_,
+                                                 measured_snr_db_, fading_index_,
+                                                 static_cast<uint8_t>(data_frame_cw_count_),
+                                                 rung_id);
     Bytes ack_data = ack.serialize();
 
     LOG_MODEM(INFO, "Connection: Sending CONNECT_ACK (%zu bytes)", ack_data.size());
@@ -347,10 +357,7 @@ void Connection::acceptCall() {
     responder_handshake_wait_ms_ = RESPONDER_HANDSHAKE_FAILSAFE_MS;
 
     // Notify application of initial data mode
-    if (on_data_mode_changed_) {
-        on_data_mode_changed_(data_modulation_, data_code_rate_, data_frame_cw_count_,
-                              measured_snr_db_, fading_index_);
-    }
+    notifyDataModeChanged(measured_snr_db_, fading_index_);
 }
 
 void Connection::rejectCall() {
@@ -478,9 +485,9 @@ void Connection::setForcedFrameCodewords(int cw_count, bool forced) {
     config_.fixed_frame_codewords = cw_count;
     arq_.setFixedFrameCodewords(cw_count);
 
-    if (isOFDMMode(negotiated_mode_)) {
-        file_transfer_.setMaxChunkPayload(
-            v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_));
+    const bool bounded_variable_mc_dpsk = usesBoundedVariableMCDPSKFrames();
+    if (isOFDMMode(negotiated_mode_) || bounded_variable_mc_dpsk) {
+        file_transfer_.setMaxChunkPayload(currentDataPayloadCapacity());
         configureArqForCurrentDataMode();
     }
 
@@ -506,26 +513,31 @@ bool Connection::sendPayload(const Bytes& data, bool binary_payload) {
         return false;
     }
 
-    // MC-DPSK uses variable-length codewords (no fixed frame limit), so no fragmentation needed.
-    // OFDM uses fixed 4-CW frames with a hard capacity limit that requires fragmentation.
     bool is_ofdm = isOFDMMode(negotiated_mode_);
+    const bool bounded_variable_mc_dpsk = usesBoundedVariableMCDPSKFrames();
+    const size_t capacity = currentDataPayloadCapacity();
 
-    if (!is_ofdm) {
+    if (!is_ofdm && !bounded_variable_mc_dpsk) {
         if (binary_payload) {
             return arq_.sendDataWithTypeAndFlags(data, v2::FrameType::DATA_END, v2::Flags::NONE);
         }
         return arq_.sendData(data);
     }
 
-    if (data.size() <= v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_)) {
-        // Single frame - MC-DPSK can handle any size, OFDM fits in one frame
-        if (binary_payload) {
-            return arq_.sendFixedDataWithTypeAndFlags(data, v2::FrameType::DATA_END, v2::Flags::NONE);
-        }
-        return arq_.sendFixedDataWithFlags(data, v2::Flags::NONE);
+    if (capacity == 0) {
+        LOG_MODEM(ERROR, "Connection: Data frame payload capacity is zero for current mode");
+        return false;
     }
 
-    size_t capacity = v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
+    if (data.size() <= capacity) {
+        if (binary_payload) {
+            return is_ofdm
+                ? arq_.sendFixedDataWithTypeAndFlags(data, v2::FrameType::DATA_END, v2::Flags::NONE)
+                : arq_.sendDataWithTypeAndFlags(data, v2::FrameType::DATA_END, v2::Flags::NONE);
+        }
+        return is_ofdm ? arq_.sendFixedDataWithFlags(data, v2::Flags::NONE)
+                       : arq_.sendDataWithFlags(data, v2::Flags::NONE);
+    }
 
     // Fragment the message into chunks that fit in one frame each
     LOG_MODEM(INFO, "Connection: Fragmenting %zu byte %s into %zu-byte chunks",
@@ -562,7 +574,8 @@ bool Connection::sendMessages(const std::vector<std::string>& texts) {
     }
 
     bool is_ofdm = isOFDMMode(negotiated_mode_);
-    size_t capacity = is_ofdm ? v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_) : SIZE_MAX;
+    const bool bounded_variable_mc_dpsk = usesBoundedVariableMCDPSKFrames();
+    size_t capacity = (is_ofdm || bounded_variable_mc_dpsk) ? currentDataPayloadCapacity() : SIZE_MAX;
 
     // Pre-fragment all messages into a flat list of frame payloads with flags
     pending_tx_fragments_.clear();
@@ -640,13 +653,23 @@ bool Connection::sendFile(const std::string& filepath) {
         return false;
     }
 
-    // Set chunk size to match frame capacity for current mode
+    // Set chunk size to match frame capacity for bounded frame geometries.
     bool is_ofdm = isOFDMMode(negotiated_mode_);
-    if (is_ofdm) {
-        size_t capacity = v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
+    const bool bounded_variable_mc_dpsk = usesBoundedVariableMCDPSKFrames();
+    if (is_ofdm || bounded_variable_mc_dpsk) {
+        size_t capacity = currentDataPayloadCapacity();
+        if (capacity <= FileTransferController::FILE_DATA_OVERHEAD) {
+            LOG_MODEM(ERROR,
+                      "Connection: File chunk payload capacity %zu is too small for FILE_DATA overhead",
+                      capacity);
+            return false;
+        }
         file_transfer_.setMaxChunkPayload(capacity);
-        LOG_MODEM(INFO, "Connection: File chunk payload limited to %zu bytes (OFDM %s)",
-                  capacity, codeRateToString(data_code_rate_));
+        LOG_MODEM(INFO, "Connection: File chunk payload limited to %zu bytes (%s %s, cw=%d)",
+                  capacity,
+                  is_ofdm ? "OFDM fixed-frame" : "MC-DPSK variable-frame",
+                  codeRateToString(data_code_rate_),
+                  data_frame_cw_count_);
     }
 
     LOG_MODEM(INFO, "Connection: Starting file transfer: %s", filepath.c_str());
@@ -731,6 +754,7 @@ void Connection::sendNextFileChunk() {
 
 void Connection::sendNextFragment() {
     bool is_ofdm = isOFDMMode(negotiated_mode_);
+    const bool pipeline_fragments = is_ofdm;
 
     // Enable burst buffering for OFDM mode
     if (is_ofdm && on_transmit_burst_) {
@@ -738,6 +762,7 @@ void Connection::sendNextFragment() {
         burst_tx_buffer_.clear();
     }
 
+    size_t submitted_this_call = 0;
     while (arq_.isReadyToSend() && next_fragment_idx_ < pending_tx_fragments_.size()) {
         const Bytes& chunk = pending_tx_fragments_[next_fragment_idx_];
 
@@ -765,6 +790,15 @@ void Connection::sendNextFragment() {
             arq_.sendDataWithTypeAndFlags(chunk, frame_type, flags);
         }
         next_fragment_idx_++;
+        submitted_this_call++;
+
+        // MC-DPSK bulk-file transfer uses sendNextFileChunk() and is safe to
+        // pipeline. The message-fragment path still shares OFDM-oriented
+        // MORE_FRAG/SACK semantics, so keep it stop-and-wait until it has its
+        // own hardware-validated burst pacing.
+        if (!pipeline_fragments && submitted_this_call >= 1) {
+            break;
+        }
     }
 
     // Flush burst buffer
@@ -905,7 +939,7 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                                       modulationToString(pending_modulation_),
                                       codeRateToString(pending_code_rate_));
                             applyDataMode(pending_modulation_, pending_code_rate_,
-                                          pending_cw_count_);
+                                          pending_cw_count_, pending_ladder_rung_id_);
                             if (was_downgrade) {
                                 adaptive_post_downgrade_lockout_ms_ =
                                     ADAPTIVE_POST_DOWNGRADE_LOCKOUT_MS;
@@ -913,13 +947,10 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                                 adaptive_pressure_windows_ = 0;
                             }
                             mode_change_pending_ = false;
+                            pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
 
                             // Notify application of mode change
-                            if (on_data_mode_changed_) {
-                                on_data_mode_changed_(data_modulation_, data_code_rate_,
-                                                      data_frame_cw_count_,
-                                                      pending_snr_db_, pending_fading_index_);
-                            }
+                            notifyDataModeChanged(pending_snr_db_, pending_fading_index_);
                             runDeferredArqRefill();
                         } else {
                             // Regular data ACK
@@ -959,6 +990,31 @@ void Connection::processArqFrame(const Bytes& frame_data) {
     }
 
     arq_.onFrameReceived(frame_data);
+
+    if (outermost) {
+        arq_callback_defer_refill_ = false;
+        runDeferredArqRefill();
+    }
+}
+
+void Connection::onMCDPSKPartialFrame(const v2::PartialFrameCodewords& partial) {
+    if (state_ != ConnectionState::CONNECTED || negotiated_mode_ != WaveformMode::MC_DPSK) {
+        return;
+    }
+    if (!partial.valid()) {
+        return;
+    }
+    const uint32_t our_hash = v2::hashCallsign(local_call_);
+    if (partial.dst_hash != our_hash && partial.dst_hash != 0xFFFFFF) {
+        return;
+    }
+
+    const bool outermost = !arq_callback_defer_refill_;
+    if (outermost) {
+        arq_callback_defer_refill_ = true;
+    }
+
+    arq_.onPartialFrame(partial);
 
     if (outermost) {
         arq_callback_defer_refill_ = false;
@@ -1298,7 +1354,7 @@ void Connection::tick(uint32_t elapsed_ms) {
                     if (on_ping_tx_) {
                         on_ping_tx_();
                     }
-                    timeout_remaining_ms_ = PING_TIMEOUT_MS;
+                    timeout_remaining_ms_ = pingTimeoutMsForCurrentProfile();
                 }
             } else {
                 timeout_remaining_ms_ -= elapsed_ms;
@@ -1383,6 +1439,7 @@ void Connection::tick(uint32_t elapsed_ms) {
                         LOG_MODEM(WARN, "Connection: MODE_CHANGE failed after %d attempts, keeping current mode",
                                   MODE_CHANGE_MAX_RETRIES);
                         mode_change_pending_ = false;
+                        pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
                         resetAdaptiveModeController();
                         runDeferredArqRefill();
                         // Stay at current mode - don't change anything
@@ -1395,7 +1452,8 @@ void Connection::tick(uint32_t elapsed_ms) {
                                                                        pending_code_rate_, pending_snr_db_,
                                                                        pending_fading_index_,
                                                                        pending_reason_,
-                                                                       pending_cw_count_);
+                                                                       pending_cw_count_,
+                                                                       pending_ladder_rung_id_);
                         transmitFrame(frame.serialize());
                         mode_change_timeout_ms_ = MODE_CHANGE_TIMEOUT_MS;
                     }
@@ -1481,18 +1539,50 @@ void Connection::configureArqForCurrentDataMode() {
     arq_.setCodeRate(data_code_rate_);
     arq_.setFixedFrameCodewords(data_frame_cw_count_);
 
-    if (isOFDMMode(negotiated_mode_)) {
-        file_transfer_.setMaxChunkPayload(
-            v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_));
+    if (isOFDMMode(negotiated_mode_) || usesBoundedVariableMCDPSKFrames()) {
+        file_transfer_.setMaxChunkPayload(currentDataPayloadCapacity());
     }
 
     if (negotiated_mode_ == WaveformMode::MC_DPSK) {
-        arq_.setWindowSize(1);
-        arq_.setAckTimeout(18000);
-        arq_.setSackDelay(2000);
-        arq_.setSackDelayShort(0);
-        arq_.setAckRepeatCount(1);
-        LOG_MODEM(INFO, "Connection: ARQ window=1, timeout=18s, ack_repeat=1 (MC-DPSK)");
+        const auto timing = connection_policy::mcDpskFrameTiming(
+            data_modulation_,
+            config_.mc_dpsk_num_carriers,
+            config_.mc_dpsk_samples_per_symbol,
+            data_frame_cw_count_);
+        const size_t window_size = connection_policy::mcDpskWindowSizeForTiming(timing.data_ms);
+        const uint32_t sack_delay_ms = connection_policy::mcDpskSackDelayMs(timing, window_size);
+        const bool pipelined_dqpsk = window_size > 1 && data_modulation_ == Modulation::DQPSK;
+        const int ack_repeat_count = pipelined_dqpsk ? 2 : 1;
+        const uint32_t ack_repeat_delay_ms = pipelined_dqpsk
+            ? std::clamp<uint32_t>(timing.ack_ms + 250u, 750u, 3000u)
+            : 220u;
+        arq_.setWindowSize(window_size);
+        arq_.setSackDelay(sack_delay_ms);
+        arq_.setSackDelayShort(window_size > 1 ? 2000 : 0);
+        arq_.setAckRepeatCount(ack_repeat_count);
+        arq_.setAckRepeatDelay(ack_repeat_delay_ms);
+        uint32_t ack_timeout_ms = connection_policy::computeMCDPSKAckTimeoutMs(
+            timing, window_size, arq_.getSackDelay(), ack_repeat_count);
+        if (data_modulation_ == Modulation::DBPSK &&
+            config_.mc_dpsk_samples_per_symbol >= 2048) {
+            ack_timeout_ms = 72000;
+        }
+        arq_.setAckTimeout(ack_timeout_ms);
+        LOG_MODEM(INFO, "Connection: ARQ window=%zu, timeout=%.1fs (data=%ums, ack=%ums x%d), sack_delay=%ums/%ums, ack_repeat=%d/%ums, cw=%d (MC-DPSK %s %s, carriers=%d, sps=%d)",
+                  window_size,
+                  ack_timeout_ms / 1000.0f,
+                  timing.data_ms,
+                  timing.ack_ms,
+                  ack_repeat_count,
+                  arq_.getSackDelay(),
+                  arq_.getSackDelayShort(),
+                  ack_repeat_count,
+                  ack_repeat_delay_ms,
+                  data_frame_cw_count_,
+                  modulationToString(data_modulation_),
+                  codeRateToString(data_code_rate_),
+                  config_.mc_dpsk_num_carriers,
+                  config_.mc_dpsk_samples_per_symbol);
     } else if (negotiated_mode_ == WaveformMode::OFDM_NARROW) {
         // Selective-repeat window=3 — chosen after A/B in cli_simulator
         // SNR=8 good fading R1/4 7-message test:
@@ -1577,12 +1667,82 @@ void Connection::configureArqForCurrentDataMode() {
     }
 }
 
-void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count) {
+uint32_t Connection::pingTimeoutMsForCurrentProfile() const {
+    // DBPSK MC-DPSK PING/PONG detection has to wait through the same slower
+    // training/ref energy check as CONNECT detection. Keeping the
+    // standard timer unchanged avoids slowing normal retries while preventing
+    // robust DBPSK probe retries from overlapping the following CONNECT.
+    const bool robust_dbpsk_probe =
+        connect_waveform_ == WaveformMode::MC_DPSK &&
+        (config_.forced_modulation == Modulation::DBPSK ||
+         config_.mc_dpsk_samples_per_symbol >= 1024);
+    return robust_dbpsk_probe ? ROBUST_LOW_PING_TIMEOUT_MS : PING_TIMEOUT_MS;
+}
+
+bool Connection::usesBoundedVariableMCDPSKFrames() const {
+    return negotiated_mode_ == WaveformMode::MC_DPSK &&
+           data_modulation_ == Modulation::DBPSK;
+}
+
+size_t Connection::currentDataPayloadCapacity() const {
+    if (isOFDMMode(negotiated_mode_)) {
+        return v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
+    }
+    if (usesBoundedVariableMCDPSKFrames()) {
+        return v2::getVariableFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
+    }
+    return SIZE_MAX;
+}
+
+LadderRungId Connection::currentLadderRungId() const {
+    if (negotiated_mode_ == WaveformMode::OFDM_CHIRP) {
+        return LadderRungId::OFDM_CHIRP;
+    }
+    if (negotiated_mode_ == WaveformMode::OFDM_NARROW) {
+        return LadderRungId::OFDM_NARROW;
+    }
+    if (negotiated_mode_ == WaveformMode::MC_DPSK) {
+        return connection_policy::rungForMCDPSKConfig(
+            data_modulation_, config_.mc_dpsk_num_carriers,
+            config_.mc_dpsk_samples_per_symbol, data_frame_cw_count_).id;
+    }
+    return LadderRungId::UNKNOWN;
+}
+
+void Connection::notifyDataModeChanged(float snr_db, float peer_fading_index) {
+    if (!on_data_mode_changed_) {
+        return;
+    }
+    const bool mc_dpsk = negotiated_mode_ == WaveformMode::MC_DPSK;
+    on_data_mode_changed_(data_modulation_, data_code_rate_, data_frame_cw_count_,
+                          snr_db, peer_fading_index,
+                          mc_dpsk ? config_.mc_dpsk_num_carriers : 0,
+                          mc_dpsk ? config_.mc_dpsk_samples_per_symbol : 0);
+}
+
+void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
+                               LadderRungId rung_id) {
+    if (rung_id != LadderRungId::UNKNOWN) {
+        const auto rung = connection_policy::ladderRungForId(rung_id);
+        if (rung.id != LadderRungId::UNKNOWN) {
+            negotiated_mode_ = rung.waveform;
+            if (rung.waveform == WaveformMode::MC_DPSK) {
+                config_.mc_dpsk_num_carriers = rung.num_carriers;
+                config_.mc_dpsk_samples_per_symbol = rung.samples_per_symbol;
+                mod = rung.modulation;
+                rate = rung.code_rate;
+                if (cw_count == 0) {
+                    cw_count = rung.cw_count;
+                }
+            }
+        }
+    }
+
     // Resolve final CW count: explicit value if specified (e.g. from
     // MODE_CHANGE wire byte), else auto-pick from rate.
     const int new_cw = (cw_count > 0)
         ? v2::sanitizeFixedFrameCodewords(cw_count)
-        : connection_policy::recommendCWCount(rate, negotiated_mode_);
+        : connection_policy::recommendCWCount(mod, rate, negotiated_mode_);
     const bool rate_changed = rate != data_code_rate_;
     const bool cw_changed = new_cw != data_frame_cw_count_;
     // Pending chunks must be re-encoded if rate OR CW changed: the ARQ payload
@@ -1603,6 +1763,9 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count) {
     data_code_rate_ = rate;
     data_frame_cw_count_ = new_cw;
     config_.fixed_frame_codewords = new_cw;
+    data_ladder_rung_id_ = (rung_id != LadderRungId::UNKNOWN)
+        ? rung_id
+        : currentLadderRungId();
     configureArqForCurrentDataMode();
     resetAdaptiveModeController();
 
@@ -1657,6 +1820,8 @@ void Connection::enterDisconnected(const std::string& reason) {
     connect_ack_retransmit_ms_ = 0;
     connect_ack_retransmit_interval_ms_ = CONNECT_ACK_RETRANSMIT_MS;
     connect_ack_retx_remaining_ = 0;
+    data_ladder_rung_id_ = LadderRungId::UNKNOWN;
+    pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
     arq_callback_defer_refill_ = false;
     deferred_file_refill_ = false;
     deferred_fragment_refill_ = false;
@@ -1692,6 +1857,11 @@ void Connection::setTransmitCallback(TransmitCallback cb) {
 
 void Connection::setTransmitBurstCallback(TransmitBurstCallback cb) {
     on_transmit_burst_ = std::move(cb);
+}
+
+void Connection::setMCDPSKConfig(int num_carriers, int samples_per_symbol) {
+    config_.mc_dpsk_num_carriers = std::clamp(num_carriers, 1, 64);
+    config_.mc_dpsk_samples_per_symbol = std::clamp(samples_per_symbol, 1, 8192);
 }
 
 void Connection::setPhyMaskV1Negotiated(bool enabled) {
@@ -1827,8 +1997,10 @@ void Connection::reset() {
     mode_change_pending_ = false;
     mode_change_timeout_ms_ = 0;
     mode_change_retry_count_ = 0;
+    pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
     data_modulation_ = Modulation::DQPSK;
     data_code_rate_ = CodeRate::R1_4;
+    data_ladder_rung_id_ = LadderRungId::UNKNOWN;
     connect_waveform_ = WaveformMode::MC_DPSK;  // Reset to DPSK for next connect attempt
     responder_handshake_wait_ms_ = 0;
     connect_ack_frame_.clear();

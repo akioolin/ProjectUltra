@@ -10,6 +10,7 @@
 
 #include "waveform_interface.hpp"
 #include "protocol/frame_v2.hpp"
+#include "psk/multi_carrier_dpsk.hpp"
 #include <memory>
 #include <vector>
 
@@ -26,6 +27,9 @@ public:
 
     // Create MC-DPSK with specific carrier count
     static WaveformPtr createMCDPSK(int num_carriers);
+
+    // Create MC-DPSK with a full PHY preset
+    static WaveformPtr createMCDPSK(const MultiCarrierDPSKConfig& config);
 
     // Create narrowband MC-DPSK (4 carriers, 500 Hz band, narrowband chirp)
     static WaveformPtr createNarrowbandMCDPSK();

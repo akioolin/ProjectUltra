@@ -222,6 +222,14 @@ void ProtocolEngine::onRxData(const Bytes& data) {
     defer_tx_ = false;
 }
 
+void ProtocolEngine::onMCDPSKPartialFrame(const v2::PartialFrameCodewords& partial) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+
+    defer_tx_ = true;
+    connection_.onMCDPSKPartialFrame(partial);
+    defer_tx_ = false;
+}
+
 void ProtocolEngine::processRxBuffer() {
     // Look for v2 frame magic (2 bytes: 0x554C = "UL")
     while (!rx_buffer_.empty()) {
@@ -297,6 +305,15 @@ void ProtocolEngine::processRxBuffer() {
             // Connect frames: header + 25B payload + 2B CRC = 44 bytes
             frame_size = v2::DataFrame::HEADER_SIZE + v2::ConnectFrame::PAYLOAD_SIZE + v2::DataFrame::CRC_SIZE;
             frame_is_connect = true;
+        } else if (header.type == v2::FrameType::DATA_REPAIR) {
+            auto repair_header = v2::DataRepairFrame::parseHeader(rx_buffer_);
+            if (!repair_header) {
+                LOG_MODEM(WARN, "Protocol: Invalid DATA_REPAIR header, skipping 1 byte");
+                rx_buffer_.erase(rx_buffer_.begin());
+                continue;
+            }
+            frame_size = static_cast<size_t>(repair_header->repair_count + 1) *
+                         v2::getBytesPerCodeword(repair_header->rate);
         } else {
             // Data frame - need to read payload length from header
             // Header layout: [0-1] magic, [2] type, [3] flags, [4-5] seq,
@@ -324,6 +341,9 @@ void ProtocolEngine::processRxBuffer() {
         } else if (frame_is_connect) {
             auto conn = v2::ConnectFrame::deserialize(frame_data);
             crc_ok = conn.has_value();
+        } else if (header.type == v2::FrameType::DATA_REPAIR) {
+            auto repair = v2::DataRepairFrame::deserialize(frame_data);
+            crc_ok = repair.has_value();
         } else {
             auto data_frame = v2::DataFrame::deserialize(frame_data);
             crc_ok = data_frame.has_value();
@@ -451,6 +471,11 @@ void ProtocolEngine::setForcedModulation(Modulation mod) {
 void ProtocolEngine::setForcedCodeRate(CodeRate rate) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setForcedCodeRate(rate);
+}
+
+void ProtocolEngine::setMCDPSKConfig(int num_carriers, int samples_per_symbol) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.setMCDPSKConfig(num_carriers, samples_per_symbol);
 }
 
 void ProtocolEngine::setForcedFrameCodewords(int cw_count, bool forced) {

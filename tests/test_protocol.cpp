@@ -868,10 +868,14 @@ bool test_protocol_rate_upgrade() {
     ultra::CodeRate a_new_rate = ultra::CodeRate::R1_4;
 
     stationA.setDataModeChangedCallback([&](ultra::Modulation mod, ultra::CodeRate rate,
-                                             int cw_count, float snr, float peer_fading) {
+                                             int cw_count, float snr, float peer_fading,
+                                             int mc_dpsk_num_carriers,
+                                             int mc_dpsk_samples_per_symbol) {
         (void)cw_count;
         (void)snr;
         (void)peer_fading;
+        (void)mc_dpsk_num_carriers;
+        (void)mc_dpsk_samples_per_symbol;
         a_mode_changed = true;
         a_new_mod = mod;
         a_new_rate = rate;

@@ -8,6 +8,7 @@
 #include <optional>
 #include <array>
 #include <cstdint>
+#include <vector>
 
 namespace ultra {
 namespace protocol {
@@ -58,6 +59,7 @@ public:
     v2::FrameType lastRxFrameType() const { return last_rx_frame_type_; }
 
     void onFrameReceived(const Bytes& frame_data) override;
+    void onPartialFrame(const v2::PartialFrameCodewords& partial);
 
     void tick(uint32_t elapsed_ms) override;
 
@@ -142,6 +144,7 @@ private:
     struct TXSlot {
         bool active = false;        // Slot in use
         Bytes frame_data;           // Serialized v2 frame to send/resend
+        std::vector<Bytes> info_codewords; // Original variable-frame info CWs for DATA_REPAIR
         uint16_t seq = 0;           // Sequence number
         int fixed_frame_codewords = v2::kDefaultFixedFrameCodewords;
         uint32_t timeout_ms = 0;    // Time until retransmit
@@ -155,21 +158,33 @@ private:
         bool hole_probe_armed = false;      // Timer armed for progress-based probe retx
         uint32_t hole_probe_timer_ms = 0;   // Countdown to hole probe retx
         int hole_probe_count = 0;           // Number of hole-probe retransmits in current epoch
+        uint32_t last_repair_bitmap = 0;    // Dedup repeated CW_NACK copies
+        uint32_t repair_cooldown_ms = 0;
+        bool repair_in_flight = false;      // Compact DATA_REPAIR is awaiting ACK/SACK result
+        uint32_t repair_guard_ms = 0;       // Suppresses full-frame retx while repair can still land
     };
 
     // RX state per frame in receive window
     struct RXSlot {
         bool received = false;      // Frame received
+        bool partial = false;       // Some CWs received, frame not yet complete
         uint16_t seq = 0;           // Sequence number
         Bytes payload;              // Received payload
         uint8_t flags = 0;          // Frame flags
         v2::FrameType type = v2::FrameType::DATA;
+        uint8_t total_cw = 0;
+        uint32_t cw_bitmap = 0;     // Bit i = decoded CW stored in cw_data[i]
+        uint32_t partial_age_ms = 0;
+        uint32_t last_cw_nack_bitmap = 0;
+        uint32_t cw_nack_cooldown_ms = 0;
+        std::vector<Bytes> cw_data;
     };
 
     // Maximum window size. Control frames already carry a 32-bit SACK bitmap;
     // keep the production cap at 16 for bounded memory/latency while allowing
     // clean OFDM audio chains to cover real soundcard buffering.
     static constexpr size_t MAX_WINDOW = 16;
+    static constexpr uint32_t PARTIAL_RX_TTL_MS = 120000;
 
     ARQConfig config_;
     CodeRate code_rate_ = CodeRate::R1_4;  // Default R1/4, updated when connected
@@ -243,13 +258,23 @@ private:
 
     void transmitData(const Bytes& data);
     void handleDataFrame(const v2::DataFrame& frame);
+    void handlePartialFrame(const v2::PartialFrameCodewords& partial);
+    void handleDataRepairFrame(const v2::DataRepairFrame& repair);
     void handleAckFrame(const v2::ControlFrame& frame);
     void handleNackFrame(const v2::ControlFrame& frame);
 
     void retransmitFrame(size_t slot, RetransmitCause cause);
+    bool sendDataRepair(size_t slot, uint32_t missing_bitmap);
+    bool suppressFullRetransmitForRepair(size_t slot, RetransmitCause cause);
+    uint32_t computeRepairGuardMs(const TXSlot& slot, size_t repair_frame_codewords) const;
     void advanceTXWindow();
     void advanceRXWindow();
     void sendSack();
+    void sendCwNack(uint16_t seq, uint32_t missing_bitmap);
+    void maybeSendCwNack(size_t slot_index, uint32_t missing_bitmap);
+    void clearPartialRXSlot(RXSlot& slot);
+    void clearTXSlotRepairState(TXSlot& slot);
+    bool tryCompletePartialRXSlot(size_t slot_index);
     void maybeSampleRTT(TXSlot& slot);
     uint32_t currentAckTimeoutMs() const;
     uint32_t ackRepeatDelayForCopy(int copy_index) const;

@@ -287,13 +287,19 @@ void StreamingDecoder::decodeCurrentFrame() {
     if (allow_ping_detection) {
         // PING detection: use ratio of data RMS to training RMS.
         // PING (chirp only): data region is noise-only; data frames carry energy.
+        const size_t mc_dpsk_symbol_samples =
+            waveform_ ? static_cast<size_t>(std::max(1, waveform_->getSamplesPerSymbol())) : 512;
+        const size_t ping_training_skip = 9 * mc_dpsk_symbol_samples;
+        const size_t ping_check_samples = std::max(
+            frame_policy::kPingRMSCheckSamples, 3 * mc_dpsk_symbol_samples);
         const auto ping_decision = frame_policy::evaluatePingRMS(
-            frame_buffer.data(), frame_buffer.size());
+            frame_buffer.data(), frame_buffer.size(), ping_training_skip, ping_check_samples);
 
-        LOG_MODEM(INFO, "[%s] PING check: RMS=%.4f, train_RMS=%.4f, ratio=%.3f (threshold=%.1f), sync_pos=%zu",
+        LOG_MODEM(INFO, "[%s] PING check: RMS=%.4f, train_RMS=%.4f, ratio=%.3f (threshold=%.1f), skip=%zu, sync_pos=%zu",
                   log_prefix_.c_str(), ping_decision.data_rms,
                   ping_decision.training_rms, ping_decision.ratio,
-                  frame_policy::kPingMaxDataToTrainingRMSRatio, sync_position_);
+                  frame_policy::kPingMaxDataToTrainingRMSRatio,
+                  ping_training_skip, sync_position_);
 
         if (ping_decision.is_ping) {
             LOG_MODEM(INFO, "[%s] PING detected (RMS=%.4f), SNR=%.1f dB, CFO=%.1f Hz",
@@ -1083,12 +1089,17 @@ void StreamingDecoder::decodeCurrentFrame() {
         populateDecodeMetrics(result, is_ofdm, sync_cfo_);
     }
 
+    const bool deliver_partial_mc_dpsk =
+        !result.success && mode_ == protocol::WaveformMode::MC_DPSK &&
+        result.has_partial_codewords;
     if (result.success || result.codewords_ok > 0) {
         {
             std::lock_guard<std::mutex> qlock(queue_mutex_);
             frame_queue_.push(result);
         }
-        if (result.success && frame_callback_) frame_callback_(result);
+        if ((result.success || deliver_partial_mc_dpsk) && frame_callback_) {
+            frame_callback_(result);
+        }
 
         LOG_MODEM(INFO, "[%s] StreamingDecoder: Frame decoded, %d/%d CWs, SNR=%.1f dB, CFO=%.1f Hz",
                   log_prefix_.c_str(), result.codewords_ok, result.codewords_ok + result.codewords_failed,
@@ -1336,6 +1347,71 @@ DecodeResult StreamingDecoder::decodeMCDPSKFrame(const std::vector<float>& soft_
     result.frame_type = hdr.type;
     result.codewords_ok = 1;
 
+    if (hdr.type == v2::FrameType::DATA_REPAIR) {
+        auto repair_header = v2::DataRepairFrame::parseHeader(data0);
+        if (!repair_header) {
+            LOG_MODEM(INFO, "[%s] MC-DPSK: DATA_REPAIR header invalid", log_prefix_.c_str());
+            return result;
+        }
+
+        const int total_cw = static_cast<int>(repair_header->repair_count) + 1;
+        const int avail_cw = static_cast<int>(soft_bits.size() / LDPC_BLOCK);
+        auto repair_indices = repair_header->repairIndices();
+
+        result.partial_codewords.type = v2::FrameType::DATA;
+        result.partial_codewords.flags = v2::Flags::VERSION_V2;
+        result.partial_codewords.seq = repair_header->target_seq;
+        result.partial_codewords.src_hash = repair_header->src_hash;
+        result.partial_codewords.dst_hash = repair_header->dst_hash;
+        result.partial_codewords.total_cw = repair_header->original_total_cw;
+        result.partial_codewords.decoded_bitmap = 0;
+        result.partial_codewords.from_repair = true;
+        result.partial_codewords.data.resize(repair_header->original_total_cw);
+
+        v2::DataRepairFrame decoded_repair = *repair_header;
+        decoded_repair.repair_codewords.clear();
+
+        bool all_repair_cws_ok = avail_cw >= total_cw;
+        const int decodable_repair_cw = std::min<int>(
+            static_cast<int>(repair_indices.size()), std::max(0, avail_cw - 1));
+        for (int i = 0; i < decodable_repair_cw; ++i) {
+            const int cw_num = i + 1;
+            const size_t off = static_cast<size_t>(cw_num) * LDPC_BLOCK;
+            std::vector<float> bits(soft_bits.begin() + off, soft_bits.begin() + off + LDPC_BLOCK);
+            auto [ok, data] = codec_->decode(bits);
+            const uint8_t original_cw = repair_indices[static_cast<size_t>(i)];
+            if (ok && data.size() >= bytes_per_cw) {
+                data.resize(bytes_per_cw);
+                result.partial_codewords.decoded_bitmap |= (1u << original_cw);
+                result.partial_codewords.data[original_cw] = data;
+                decoded_repair.repair_codewords.push_back(data);
+                result.codewords_ok++;
+            } else {
+                all_repair_cws_ok = false;
+                result.codewords_failed++;
+            }
+        }
+        if (avail_cw < total_cw) {
+            result.codewords_failed += total_cw - avail_cw;
+        }
+
+        if (all_repair_cws_ok &&
+            decoded_repair.repair_codewords.size() == repair_indices.size()) {
+            result.success = true;
+            result.frame_data = decoded_repair.serialize();
+            LOG_MODEM(INFO, "[%s] MC-DPSK: DATA_REPAIR seq=%d bitmap=0x%04X decoded",
+                      log_prefix_.c_str(), repair_header->target_seq,
+                      repair_header->repair_bitmap);
+        } else {
+            result.has_partial_codewords = result.partial_codewords.valid();
+            LOG_MODEM(INFO, "[%s] MC-DPSK: DATA_REPAIR seq=%d partial bitmap=0x%08X/%04X",
+                      log_prefix_.c_str(), repair_header->target_seq,
+                      result.partial_codewords.decoded_bitmap,
+                      repair_header->repair_bitmap);
+        }
+        return result;
+    }
+
     // 1-CW frame (control frame like ACK, PROBE, etc.)
     if (hdr.total_cw == 1) {
         result.success = true;
@@ -1348,9 +1424,21 @@ DecodeResult StreamingDecoder::decodeMCDPSKFrame(const std::vector<float>& soft_
     int total_cw = hdr.total_cw;
     int avail_cw = static_cast<int>(soft_bits.size() / LDPC_BLOCK);
 
+    result.partial_codewords.type = hdr.type;
+    result.partial_codewords.flags = data0.size() >= 4 ? data0[3] : v2::Flags::VERSION_V2;
+    result.partial_codewords.seq = hdr.seq;
+    result.partial_codewords.src_hash = hdr.src_hash;
+    result.partial_codewords.dst_hash = hdr.dst_hash;
+    result.partial_codewords.total_cw = static_cast<uint8_t>(std::clamp(total_cw, 0, 32));
+    result.partial_codewords.decoded_bitmap = 0x1u;
+    result.partial_codewords.data.resize(static_cast<size_t>(std::max(total_cw, 0)));
+    result.partial_codewords.data[0] = data0;
+
     if (avail_cw < total_cw) {
         // Not enough codewords available
         result.frame_data = data0;
+        result.codewords_failed = std::max(0, total_cw - avail_cw);
+        result.has_partial_codewords = result.partial_codewords.valid();
         LOG_MODEM(DEBUG, "[%s] MC-DPSK: Need %d CWs, have %d - partial", log_prefix_.c_str(), total_cw, avail_cw);
         return result;
     }
@@ -1372,6 +1460,8 @@ DecodeResult StreamingDecoder::decodeMCDPSKFrame(const std::vector<float>& soft_
             data.resize(bytes_per_cw);
             cw_status.decoded[i] = true;
             cw_status.data[i] = data;
+            result.partial_codewords.decoded_bitmap |= (1u << i);
+            result.partial_codewords.data[static_cast<size_t>(i)] = data;
             result.codewords_ok++;
         } else {
             result.codewords_failed++;
@@ -1383,6 +1473,7 @@ DecodeResult StreamingDecoder::decodeMCDPSKFrame(const std::vector<float>& soft_
         result.frame_data = cw_status.reassemble();
         LOG_MODEM(DEBUG, "[%s] MC-DPSK: %d/%d CWs decoded OK", log_prefix_.c_str(), total_cw, total_cw);
     } else {
+        result.has_partial_codewords = result.partial_codewords.valid();
         LOG_MODEM(DEBUG, "[%s] MC-DPSK: %d/%d CWs failed", log_prefix_.c_str(),
                   result.codewords_failed, total_cw);
     }

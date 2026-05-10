@@ -871,6 +871,41 @@ private:
 // Preset configurations matching commercial HF modem speed levels
 namespace mc_dpsk_presets {
 
+// Robust-Low: 8 carriers, DBPSK, 23.4 baud (2048 samples/symbol),
+// R1/4 LDPC. Targets SNR -3 to -8 dB Moderate fading. Trades 4x
+// frame airtime for +6 dB symbol energy and +3 dB DBPSK margin.
+inline MultiCarrierDPSKConfig robust_low() {
+    MultiCarrierDPSKConfig cfg;
+    cfg.num_carriers = 8;
+    cfg.samples_per_symbol = 2048;  // 23.4375 baud, +6 dB vs 512
+    cfg.bits_per_symbol = 1;        // DBPSK, +3 dB vs DQPSK
+    return cfg;
+}
+
+// Robust-Mid: 8 carriers, DBPSK, 46.9 baud (1024 samples/symbol),
+// R1/4 LDPC. Targets SNR -3 to 0 dB Moderate fading. Same
+// modulation/FEC as Robust-Low; halved samples_per_symbol gives
+// 2x airtime for 3 dB margin cost. Same 3-CW bounded variable
+// frame geometry.
+inline MultiCarrierDPSKConfig robust_mid() {
+    MultiCarrierDPSKConfig cfg;
+    cfg.num_carriers = 8;
+    cfg.samples_per_symbol = 1024;  // 46.875 baud, 2x faster than Robust-Low
+    cfg.bits_per_symbol = 1;        // DBPSK
+    return cfg;
+}
+
+// Robust: 8 carriers, DQPSK, 46.9 baud (1024 samples/symbol),
+// R1/4 LDPC. Targets SNR 0 to +3 dB Moderate fading. Same SPS
+// as Robust-Mid; flip DBPSK -> DQPSK for 2x bps (-3 dB margin).
+inline MultiCarrierDPSKConfig robust() {
+    MultiCarrierDPSKConfig cfg;
+    cfg.num_carriers = 8;
+    cfg.samples_per_symbol = 1024;
+    cfg.bits_per_symbol = 2;  // DQPSK
+    return cfg;
+}
+
 // Level 5 equivalent: 3 carriers, ~270 bps raw
 inline MultiCarrierDPSKConfig level5() {
     MultiCarrierDPSKConfig cfg;

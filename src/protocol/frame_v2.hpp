@@ -52,6 +52,48 @@ namespace ModeCapabilities {
 
 const char* waveformModeToString(WaveformMode mode);
 
+enum class LadderRungId : uint8_t {
+    UNKNOWN     = 0,
+    ROBUST_LOW  = 1,
+    ROBUST_MID  = 2,
+    ROBUST      = 3,
+    STANDARD    = 4,
+    OFDM_CHIRP  = 5,
+    OFDM_NARROW = 6,
+};
+
+inline const char* ladderRungIdToString(LadderRungId id) {
+    switch (id) {
+        case LadderRungId::ROBUST_LOW:  return "Robust-Low";
+        case LadderRungId::ROBUST_MID:  return "Robust-Mid";
+        case LadderRungId::ROBUST:      return "Robust";
+        case LadderRungId::STANDARD:    return "Standard";
+        case LadderRungId::OFDM_CHIRP:  return "OFDM_CHIRP";
+        case LadderRungId::OFDM_NARROW: return "OFDM_NARROW";
+        case LadderRungId::UNKNOWN:
+        default:                        return "Unknown";
+    }
+}
+
+inline uint8_t packCWCountAndRung(uint8_t cw_count,
+                                  LadderRungId rung_id,
+                                  bool phy_mask_v1_capability = false) {
+    uint8_t packed = static_cast<uint8_t>(cw_count & 0x0F);
+    packed |= static_cast<uint8_t>((static_cast<uint8_t>(rung_id) & 0x07) << 4);
+    if (phy_mask_v1_capability) {
+        packed |= ModeCapabilities::PHY_MASK_V1;
+    }
+    return packed;
+}
+
+inline uint8_t unpackCWCount(uint8_t packed) {
+    return static_cast<uint8_t>(packed & 0x0F);
+}
+
+inline LadderRungId unpackLadderRungId(uint8_t packed) {
+    return static_cast<LadderRungId>((packed >> 4) & 0x07);
+}
+
 inline bool hasPhyMaskV1Capability(uint8_t capabilities) {
     return (capabilities & ModeCapabilities::PHY_MASK_V1) != 0;
 }
@@ -203,6 +245,7 @@ enum class FrameType : uint8_t {
     DATA_START  = 0x31,  // First segment of large transfer
     DATA_CONT   = 0x32,  // Continuation segment
     DATA_END    = 0x33,  // Final segment
+    DATA_REPAIR = 0x34,  // MC-DPSK partial-CW repair for an in-flight DATA seq
 };
 
 // Flags byte
@@ -284,7 +327,7 @@ inline bool isConnectFrame(FrameType type) {
 // Check if a type is a data frame (variable codewords)
 inline bool isDataFrame(FrameType type) {
     uint8_t t = static_cast<uint8_t>(type);
-    return t >= 0x30 && t <= 0x33;
+    return t >= 0x30 && t <= 0x34;
 }
 
 // Frame type to string
@@ -401,11 +444,13 @@ struct ControlFrame {
     static ControlFrame makeModeChange(const std::string& src, const std::string& dst,
                                         uint16_t seq, Modulation new_mod, CodeRate new_rate,
                                         float snr_db, float fading_index, uint8_t reason,
-                                        uint8_t cw_count = 0);
+                                        uint8_t cw_count = 0,
+                                        LadderRungId rung_id = LadderRungId::UNKNOWN);
     static ControlFrame makeModeChangeByHash(const std::string& src, uint32_t dst_hash,
                                               uint16_t seq, Modulation new_mod, CodeRate new_rate,
                                               float snr_db, float fading_index, uint8_t reason,
-                                              uint8_t cw_count = 0);
+                                              uint8_t cw_count = 0,
+                                              LadderRungId rung_id = LadderRungId::UNKNOWN);
     static ControlFrame makeConnect(const std::string& src, const std::string& dst,
                                      uint8_t mode_capabilities, uint8_t preferred_mode);
     static ControlFrame makeConnectAck(const std::string& src, const std::string& dst,
@@ -440,8 +485,9 @@ struct ControlFrame {
         uint8_t reason;
         // Negotiated fixed-frame CW count for the new rate. 0 means "old peer
         // / unspecified — receiver picks via recommendCWCount(rate)". Wire
-        // byte: payload[5] (was reserved).
+        // byte: payload[5] low nibble. Bits 4..6 carry LadderRungId.
         uint8_t data_frame_cw_count;
+        LadderRungId ladder_rung_id;
     };
 
     // Parse MODE_CHANGE payload from a ControlFrame
@@ -452,7 +498,8 @@ struct ControlFrame {
         info.snr_db = decodeSNR(payload[2]);
         info.reason = payload[3];
         info.fading_index = decodeFadingIndex(payload[4]);
-        info.data_frame_cw_count = payload[5];
+        info.data_frame_cw_count = unpackCWCount(payload[5]);
+        info.ladder_rung_id = unpackLadderRungId(payload[5]);
         return info;
     }
 };
@@ -554,6 +601,7 @@ struct ConnectFrame {
     // CONNECT_ACK cannot reuse mode_capabilities for PHY_MASK_V1 because that
     // byte carries the responder fading index. Its wire flag is bit 7 here.
     uint8_t data_frame_cw_count = 0;
+    LadderRungId ladder_rung_id = LadderRungId::UNKNOWN;
     bool phy_mask_v1_capability = false;
 
     // Factory methods
@@ -565,7 +613,8 @@ struct ConnectFrame {
     static ConnectFrame makeConnectAck(const std::string& src, const std::string& dst,
                                         uint8_t neg_mode, Modulation init_mod, CodeRate init_rate,
                                         float snr_db, float fading_index,
-                                        uint8_t cw_count);
+                                        uint8_t cw_count,
+                                        LadderRungId rung_id = LadderRungId::UNKNOWN);
     static ConnectFrame makeConnectNak(const std::string& src, const std::string& dst);
     static ConnectFrame makeDisconnect(const std::string& src, const std::string& dst);
 
@@ -573,7 +622,8 @@ struct ConnectFrame {
     static ConnectFrame makeConnectAckByHash(const std::string& src, uint32_t dst_hash,
                                               uint8_t neg_mode, Modulation init_mod, CodeRate init_rate,
                                               float snr_db, float fading_index,
-                                              uint8_t cw_count);
+                                              uint8_t cw_count,
+                                              LadderRungId rung_id = LadderRungId::UNKNOWN);
     static ConnectFrame makeConnectNakByHash(const std::string& src, uint32_t dst_hash);
 
     // Serialize to bytes (uses DATA frame format)
@@ -595,7 +645,7 @@ void setPhyMaskV1Capability(ConnectFrame& frame);
 // ============================================================================
 struct NackPayload {
     uint16_t frame_seq;      // Which frame had errors
-    uint32_t cw_bitmap;      // Bit i = codeword i failed (up to 32 CWs)
+    uint32_t cw_bitmap;      // Bit i = codeword i failed/missing (up to 32 CWs)
 
     // Encode to 6 bytes (fits in control frame payload)
     void encode(uint8_t* out) const;
@@ -610,12 +660,76 @@ struct NackPayload {
     bool isFailed(int i) const { return (cw_bitmap >> i) & 1; }
 };
 
+// MC-DPSK compact repair frame. The serialized form is a sequence of raw LDPC
+// info codewords: CW0 is this 20-byte header, CW1..CWk are the original DATA
+// frame info codewords named by repair_bitmap in ascending bit order.
+struct DataRepairFrame {
+    static constexpr size_t HEADER_BYTES = 20;
+    static constexpr uint8_t MAX_REPAIR_CW = 16;
+
+    uint8_t flags = Flags::VERSION_V2;
+    uint16_t target_seq = 0;
+    uint32_t src_hash = 0;
+    uint32_t dst_hash = 0;
+    uint8_t original_total_cw = 0;
+    uint16_t repair_bitmap = 0;
+    uint8_t repair_count = 0;
+    CodeRate rate = CodeRate::R1_4;
+    std::vector<Bytes> repair_codewords;
+
+    static DataRepairFrame make(const std::string& src, const std::string& dst,
+                                uint16_t target_seq, uint8_t original_total_cw,
+                                uint32_t repair_bitmap, CodeRate rate,
+                                const std::vector<Bytes>& repair_codewords);
+
+    bool valid() const;
+    std::vector<uint8_t> repairIndices() const;
+    Bytes headerCodeword() const;
+    std::vector<Bytes> infoCodewords() const;
+    Bytes serialize() const;
+
+    static std::optional<DataRepairFrame> parseHeader(ByteSpan first_codeword);
+    static std::optional<DataRepairFrame> deserialize(ByteSpan data);
+};
+
+// Partial MC-DPSK data-frame decode. CW0 must have decoded successfully, so
+// seq/addressing are known. ARQ uses this to slot good CWs across full-frame
+// retransmissions; the wire data frame itself is unchanged.
+struct PartialFrameCodewords {
+    FrameType type = FrameType::DATA;
+    uint8_t flags = Flags::VERSION_V2;
+    uint16_t seq = 0;
+    uint32_t src_hash = 0;
+    uint32_t dst_hash = 0;
+    uint8_t total_cw = 0;
+    uint32_t decoded_bitmap = 0;  // Bit i = CW i decoded and data[i] is valid.
+    std::vector<Bytes> data;      // Decoded info bytes, indexed by CW.
+    bool from_repair = false;     // DATA_REPAIR may omit CW0 when only CW1+ failed.
+
+    bool valid() const {
+        return total_cw > 0 && total_cw <= 32 &&
+               data.size() >= total_cw &&
+               (from_repair ? decoded_bitmap != 0 : (decoded_bitmap & 0x1u) != 0);
+    }
+
+    uint32_t expectedBitmap() const {
+        if (total_cw == 0) return 0;
+        if (total_cw >= 32) return 0xFFFFFFFFu;
+        return (1u << total_cw) - 1u;
+    }
+
+    uint32_t missingBitmap() const {
+        return expectedBitmap() & ~decoded_bitmap;
+    }
+};
+
 // ============================================================================
 // Codeword-aware encoder/decoder helpers
 // ============================================================================
 
 // Split serialized frame into codewords (20 bytes each, last may be padded)
 std::vector<Bytes> splitIntoCodewords(const Bytes& frame_data);
+std::vector<Bytes> splitIntoCodewords(const Bytes& frame_data, CodeRate rate);
 
 // Reassemble codewords into frame data (strips padding from last)
 Bytes reassembleCodewords(const std::vector<Bytes>& codewords, size_t expected_size);
@@ -688,6 +802,12 @@ std::vector<Bytes> encodeFrameWithLDPC(const Bytes& frame_data);
 
 // Encode a v2 frame into LDPC codewords with specified rate (for DATA frames)
 std::vector<Bytes> encodeFrameWithLDPC(const Bytes& frame_data, CodeRate rate);
+
+// Encode already-formed LDPC info codewords without adding DATA_CW markers.
+// DATA_REPAIR uses this because CW1.. are original frame info CWs, not a
+// reserialized payload stream.
+std::vector<Bytes> encodeInfoCodewordsWithLDPC(const std::vector<Bytes>& info_codewords,
+                                               CodeRate rate);
 
 // Decode LDPC codewords into frame data with per-codeword status
 // Input: vector of soft bit vectors (648 floats per codeword)
@@ -811,6 +931,27 @@ inline size_t getFixedFramePayloadCapacity(CodeRate rate, int cw_count) {
     cw_count = sanitizeFixedFrameCodewords(cw_count);
     size_t total_info_bytes = static_cast<size_t>(cw_count) * getBytesPerCodeword(rate);
     return total_info_bytes - FIXED_FRAME_OVERHEAD;
+}
+
+/**
+ * Get payload capacity for a variable LDPC data frame at a target CW count.
+ *
+ * MC-DPSK DATA frames use the legacy variable-codeword split where CW0 carries
+ * raw frame bytes and each continuation CW reserves DATA_CW_HEADER_SIZE bytes
+ * for marker/index recovery. This is intentionally different from OFDM fixed
+ * frames, which pack every CW as payload-bearing info bytes before frame-level
+ * interleaving.
+ */
+inline size_t getVariableFramePayloadCapacity(CodeRate rate, int cw_count) {
+    cw_count = sanitizeFixedFrameCodewords(cw_count);
+    const size_t bytes_per_cw = getBytesPerCodeword(rate);
+    const size_t continuation_payload =
+        bytes_per_cw > DATA_CW_HEADER_SIZE ? bytes_per_cw - DATA_CW_HEADER_SIZE : 0;
+    const size_t total_info_bytes =
+        bytes_per_cw + static_cast<size_t>(cw_count - 1) * continuation_payload;
+    return total_info_bytes > FIXED_FRAME_OVERHEAD
+        ? total_info_bytes - FIXED_FRAME_OVERHEAD
+        : 0;
 }
 
 /**

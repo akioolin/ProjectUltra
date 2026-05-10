@@ -23,6 +23,11 @@ static void recommendDataModeForWaveform(float snr_db, float fading_index,
               waveformModeToString(waveform), modulationToString(mod), codeRateToString(rate));
 }
 
+static bool commonSupportsWaveform(uint8_t local_caps, uint8_t remote_caps, WaveformMode mode) {
+    const uint8_t bit = connection_policy::modeToCapabilityBit(mode);
+    return bit != 0 && (local_caps & bit) != 0 && (remote_caps & bit) != 0;
+}
+
 // =============================================================================
 // PING/PONG HANDLING
 // =============================================================================
@@ -108,9 +113,32 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // Use measured SNR from modem (set via setMeasuredSNR)
         snr_db = measured_snr_db_;
 
-        // Let negotiateMode() handle AUTO mode with SNR-based selection
-        // Don't override remote_pref here - negotiateMode() has the correct SNR thresholds
-        negotiated_mode_ = negotiateMode(remote_caps, remote_pref);
+        const Modulation forced_mod = static_cast<Modulation>(frame.initial_modulation);
+        const CodeRate forced_rate = static_cast<CodeRate>(frame.initial_code_rate);
+        const bool forced_profile =
+            forced_mod != Modulation::AUTO || frame.data_frame_cw_count != 0;
+        const bool forced_waveform =
+            remote_pref != WaveformMode::AUTO ||
+            config_.preferred_mode != WaveformMode::AUTO ||
+            narrowband_override_ != WaveformMode::AUTO;
+        const auto selected_rung =
+            connection_policy::selectLadderRung(snr_db, fading_index_);
+        const bool ladder_selected =
+            !forced_profile && !forced_waveform &&
+            commonSupportsWaveform(config_.mode_capabilities, remote_caps,
+                                   selected_rung.waveform);
+
+        if (ladder_selected) {
+            negotiated_mode_ = selected_rung.waveform;
+            LOG_MODEM(INFO,
+                      "Connection: Adaptive ladder selected %s (SNR=%.1f, fading=%.2f %s)",
+                      selected_rung.name, snr_db, fading_index_,
+                      connection_policy::fadingLabel(fading_index_));
+        } else {
+            // Forced presets and explicit waveform preferences keep legacy
+            // negotiation semantics.
+            negotiated_mode_ = negotiateMode(remote_caps, remote_pref);
+        }
 
         LOG_MODEM(INFO, "Connection: Negotiated waveform mode: %s",
                   waveformModeToString(negotiated_mode_));
@@ -119,10 +147,6 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         is_initiator_ = false;
         handshake_confirmed_ = false;  // Responder waits for first frame to confirm
         responder_handshake_wait_ms_ = RESPONDER_HANDSHAKE_FAILSAFE_MS;
-
-        // Check if initiator forced specific modes (0xFF = AUTO, else forced)
-        Modulation forced_mod = static_cast<Modulation>(frame.initial_modulation);
-        CodeRate forced_rate = static_cast<CodeRate>(frame.initial_code_rate);
 
         Modulation rec_mod;
         CodeRate rec_rate;
@@ -138,6 +162,15 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // Get recommended mode based on SNR, fading AND the negotiated waveform
         // This ensures MC-DPSK uses R1/4, OFDM uses appropriate rate, etc.
         recommendDataModeForWaveform(snr_db, fading_index_, negotiated_mode_, rec_mod, rec_rate);
+
+        LadderRungId rung_id = LadderRungId::UNKNOWN;
+        if (ladder_selected) {
+            rung_id = selected_rung.id;
+            if (selected_rung.waveform == WaveformMode::MC_DPSK) {
+                rec_mod = selected_rung.modulation;
+                rec_rate = selected_rung.code_rate;
+            }
+        }
 
         // Bootstrap safety: chirp SNR can overestimate first OFDM frame quality.
         // Start one step more robust when channel is borderline.
@@ -179,10 +212,24 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // the value the initiator will see on the wire — Codex finding 4.
         int negotiated_cw = (frame.data_frame_cw_count != 0)
             ? v2::sanitizeFixedFrameCodewords(frame.data_frame_cw_count)
-            : connection_policy::recommendCWCount(rec_rate, negotiated_mode_);
-        data_frame_cw_count_ = negotiated_cw;
-        config_.fixed_frame_codewords = negotiated_cw;
-        const uint8_t cw_byte = static_cast<uint8_t>(negotiated_cw);
+            : (ladder_selected && selected_rung.waveform == WaveformMode::MC_DPSK
+                ? selected_rung.cw_count
+                : connection_policy::recommendCWCount(rec_mod, rec_rate, negotiated_mode_));
+
+        if (rung_id == LadderRungId::UNKNOWN) {
+            if (negotiated_mode_ == WaveformMode::MC_DPSK) {
+                rung_id = connection_policy::rungForMCDPSKConfig(
+                    rec_mod, config_.mc_dpsk_num_carriers,
+                    config_.mc_dpsk_samples_per_symbol, negotiated_cw).id;
+            } else if (negotiated_mode_ == WaveformMode::OFDM_CHIRP) {
+                rung_id = LadderRungId::OFDM_CHIRP;
+            } else if (negotiated_mode_ == WaveformMode::OFDM_NARROW) {
+                rung_id = LadderRungId::OFDM_NARROW;
+            }
+        }
+
+        applyDataMode(rec_mod, rec_rate, negotiated_cw, rung_id);
+        const uint8_t cw_byte = static_cast<uint8_t>(data_frame_cw_count_);
 
         // Prefer full-callsign CONNECT_ACK when the initiator callsign is known,
         // fallback to hash-only ACK when we only have src_hash.
@@ -190,8 +237,9 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         if (!src_call.empty()) {
             auto ack = v2::ConnectFrame::makeConnectAck(local_call_, src_call,
                                                         static_cast<uint8_t>(negotiated_mode_),
-                                                        rec_mod, rec_rate, snr_db, fading_index_,
-                                                        cw_byte);
+                                                        data_modulation_, data_code_rate_,
+                                                        snr_db, fading_index_,
+                                                        cw_byte, rung_id);
             if (phy_mask_v1_negotiated_) {
                 v2::setPhyMaskV1Capability(ack);
             }
@@ -199,8 +247,9 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         } else {
             auto ack = v2::ConnectFrame::makeConnectAckByHash(local_call_, frame.src_hash,
                                                                static_cast<uint8_t>(negotiated_mode_),
-                                                               rec_mod, rec_rate, snr_db, fading_index_,
-                                                               cw_byte);
+                                                               data_modulation_, data_code_rate_,
+                                                               snr_db, fading_index_,
+                                                               cw_byte, rung_id);
             if (phy_mask_v1_negotiated_) {
                 v2::setPhyMaskV1Capability(ack);
             }
@@ -225,10 +274,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // NOTE: Don't call on_handshake_confirmed_ yet - wait for first frame from initiator
 
         // Notify application of initial data mode
-        if (on_data_mode_changed_) {
-            on_data_mode_changed_(data_modulation_, data_code_rate_, data_frame_cw_count_,
-                                  snr_db, fading_index_);
-        }
+        notifyDataModeChanged(snr_db, fading_index_);
     } else {
         pending_remote_call_ = src_call.empty() ? "REMOTE" : src_call;
         pending_remote_hash_ = frame.src_hash;  // Store hash for later
@@ -266,14 +312,10 @@ void Connection::handleConnectAck(const v2::ConnectFrame& frame, const std::stri
     // hasn't been built since the protocol change — defensive only).
     int negotiated_cw = (frame.data_frame_cw_count != 0)
         ? v2::sanitizeFixedFrameCodewords(frame.data_frame_cw_count)
-        : connection_policy::recommendCWCount(init_rate, negotiated_mode_);
+        : connection_policy::recommendCWCount(init_mod, init_rate, negotiated_mode_);
 
-    // Apply the initial data mode immediately
-    data_modulation_ = init_mod;
-    data_code_rate_ = init_rate;
-    data_frame_cw_count_ = negotiated_cw;
-    config_.fixed_frame_codewords = negotiated_cw;
-    arq_.setCodeRate(data_code_rate_);  // Update ARQ for correct total_cw calculation
+    // Apply the initial data mode immediately.
+    applyDataMode(init_mod, init_rate, negotiated_cw, frame.ladder_rung_id);
 
     // Update remote callsign if we got it from the frame
     if (!src_call.empty() && (remote_call_.empty() || remote_call_ == "REMOTE")) {
@@ -297,10 +339,7 @@ void Connection::handleConnectAck(const v2::ConnectFrame& frame, const std::stri
     }
 
     // Notify application of initial data mode
-    if (on_data_mode_changed_) {
-        on_data_mode_changed_(data_modulation_, data_code_rate_, data_frame_cw_count_,
-                              snr_db, peer_fading);
-    }
+    notifyDataModeChanged(snr_db, peer_fading);
 }
 
 void Connection::handleConnectNak(const v2::ConnectFrame& frame, const std::string& src_call) {
@@ -408,17 +447,15 @@ void Connection::handleModeChange(const v2::ControlFrame& frame, const std::stri
     // more DATA in the new mode. The cw_count field in MODE_CHANGE is the
     // requester's chosen value — receiver applies it directly so both peers
     // stay in lockstep on frame geometry.
-    applyDataMode(info.modulation, info.code_rate, info.data_frame_cw_count);
+    applyDataMode(info.modulation, info.code_rate,
+                  info.data_frame_cw_count, info.ladder_rung_id);
 
     // Send ACK for the MODE_CHANGE
     auto ack = v2::ControlFrame::makeAck(local_call_, remote_call_, frame.seq);
     transmitFrame(ack.serialize());
 
     // Notify application of mode change
-    if (on_data_mode_changed_) {
-        on_data_mode_changed_(info.modulation, info.code_rate, data_frame_cw_count_,
-                              info.snr_db, info.fading_index);
-    }
+    notifyDataModeChanged(info.snr_db, info.fading_index);
 
     runDeferredArqRefill();
 }
@@ -448,6 +485,7 @@ void Connection::requestModeChange(Modulation new_mod, CodeRate new_rate,
     mode_change_pending_ = true;
     mode_change_retry_count_ = 0;
     mode_change_timeout_ms_ = MODE_CHANGE_TIMEOUT_MS;
+    pending_ladder_rung_id_ = currentLadderRungId();
 
     // Pick the CW count for the new rate. If the operator forced a CW
     // count via --cw-count (config_.forced_cw_count != 0), preserve that
@@ -456,13 +494,14 @@ void Connection::requestModeChange(Modulation new_mod, CodeRate new_rate,
     // override (caught by Codex, 2026-05-04).
     pending_cw_count_ = static_cast<uint8_t>((config_.forced_cw_count != 0)
         ? v2::sanitizeFixedFrameCodewords(config_.forced_cw_count)
-        : connection_policy::recommendCWCount(new_rate, negotiated_mode_));
+        : connection_policy::recommendCWCount(new_mod, new_rate, negotiated_mode_));
 
     mode_change_seq_++;
     auto frame = v2::ControlFrame::makeModeChange(local_call_, remote_call_,
                                                    mode_change_seq_, new_mod, new_rate,
                                                    measured_snr, fading_index_, reason,
-                                                   pending_cw_count_);
+                                                   pending_cw_count_,
+                                                   pending_ladder_rung_id_);
     transmitFrame(frame.serialize());
 
     // NOTE: Don't update local mode until ACK is received

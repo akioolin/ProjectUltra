@@ -63,6 +63,7 @@ void SelectiveRepeatARQ::setCodeRate(CodeRate rate) {
         slot.hole_probe_armed = false;
         slot.hole_probe_timer_ms = 0;
         slot.hole_probe_count = 0;
+        clearTXSlotRepairState(slot);
     }
 
     if (aborted_unacked > 0 || cleared_acked > 0 || tx_in_flight_ > 0) {
@@ -81,11 +82,12 @@ void SelectiveRepeatARQ::setCodeRate(CodeRate rate) {
 
     size_t discarded_rx = 0;
     for (auto& slot : rx_window_) {
-        if (!slot.received) {
+        if (!slot.received && !slot.partial) {
             continue;
         }
 
         slot.received = false;
+        clearPartialRXSlot(slot);
         slot.payload.clear();
         slot.flags = 0;
         slot.type = v2::FrameType::DATA;
@@ -152,6 +154,8 @@ bool SelectiveRepeatARQ::sendDataWithTypeAndFlags(const Bytes& data,
 
     tx_window_[slot].active = true;
     tx_window_[slot].frame_data = frame.serialize();
+    tx_window_[slot].info_codewords =
+        v2::splitIntoCodewords(tx_window_[slot].frame_data, code_rate_);
     tx_window_[slot].seq = seq;
     tx_window_[slot].fixed_frame_codewords = fixed_frame_codewords_;
     tx_window_[slot].timeout_ms = currentAckTimeoutMs();
@@ -165,6 +169,10 @@ bool SelectiveRepeatARQ::sendDataWithTypeAndFlags(const Bytes& data,
     tx_window_[slot].hole_probe_armed = false;
     tx_window_[slot].hole_probe_timer_ms = 0;
     tx_window_[slot].hole_probe_count = 0;
+    tx_window_[slot].last_repair_bitmap = 0;
+    tx_window_[slot].repair_cooldown_ms = 0;
+    tx_window_[slot].repair_in_flight = false;
+    tx_window_[slot].repair_guard_ms = 0;
 
     // Publish TX state before invoking the callback. Unit tests and future
     // low-latency transports may synchronously deliver the DATA and its ACK
@@ -208,6 +216,7 @@ bool SelectiveRepeatARQ::sendFixedDataWithTypeAndFlags(const Bytes& data,
 
     tx_window_[slot].active = true;
     tx_window_[slot].frame_data = frame.serialize();
+    tx_window_[slot].info_codewords.clear();
     tx_window_[slot].seq = seq;
     tx_window_[slot].fixed_frame_codewords = fixed_frame_codewords_;
     tx_window_[slot].timeout_ms = currentAckTimeoutMs();
@@ -221,6 +230,10 @@ bool SelectiveRepeatARQ::sendFixedDataWithTypeAndFlags(const Bytes& data,
     tx_window_[slot].hole_probe_armed = false;
     tx_window_[slot].hole_probe_timer_ms = 0;
     tx_window_[slot].hole_probe_count = 0;
+    tx_window_[slot].last_repair_bitmap = 0;
+    tx_window_[slot].repair_cooldown_ms = 0;
+    tx_window_[slot].repair_in_flight = false;
+    tx_window_[slot].repair_guard_ms = 0;
 
     stats_.frames_sent++;
     tx_next_seq_ = (tx_next_seq_ + 1) & 0xFFFF;
@@ -253,6 +266,8 @@ bool SelectiveRepeatARQ::sendVariableDataWithFlags(const Bytes& data, uint8_t fl
 
     tx_window_[slot].active = true;
     tx_window_[slot].frame_data = frame.serialize();
+    tx_window_[slot].info_codewords =
+        v2::splitIntoCodewords(tx_window_[slot].frame_data, code_rate_);
     tx_window_[slot].seq = seq;
     tx_window_[slot].timeout_ms = currentAckTimeoutMs();
     tx_window_[slot].first_tx_ms = arq_time_ms_;
@@ -265,6 +280,10 @@ bool SelectiveRepeatARQ::sendVariableDataWithFlags(const Bytes& data, uint8_t fl
     tx_window_[slot].hole_probe_armed = false;
     tx_window_[slot].hole_probe_timer_ms = 0;
     tx_window_[slot].hole_probe_count = 0;
+    tx_window_[slot].last_repair_bitmap = 0;
+    tx_window_[slot].repair_cooldown_ms = 0;
+    tx_window_[slot].repair_in_flight = false;
+    tx_window_[slot].repair_guard_ms = 0;
 
     stats_.frames_sent++;
     tx_next_seq_ = (tx_next_seq_ + 1) & 0xFFFF;
@@ -342,11 +361,22 @@ void SelectiveRepeatARQ::onFrameReceived(const Bytes& frame_data) {
             }
         }
     } else {
-        auto data_frame = v2::DataFrame::deserialize(frame_data);
-        if (data_frame) {
-            handleDataFrame(*data_frame);
+        if (header.type == v2::FrameType::DATA_REPAIR) {
+            auto repair = v2::DataRepairFrame::deserialize(frame_data);
+            if (repair) {
+                handleDataRepairFrame(*repair);
+            }
+        } else {
+            auto data_frame = v2::DataFrame::deserialize(frame_data);
+            if (data_frame) {
+                handleDataFrame(*data_frame);
+            }
         }
     }
+}
+
+void SelectiveRepeatARQ::onPartialFrame(const v2::PartialFrameCodewords& partial) {
+    handlePartialFrame(partial);
 }
 
 void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
@@ -370,6 +400,7 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
 
         if (!rx_window_[slot].received) {
             rx_window_[slot].received = true;
+            clearPartialRXSlot(rx_window_[slot]);
             rx_window_[slot].seq = seq;
             rx_window_[slot].payload = frame.payload;
             rx_window_[slot].flags = frame.flags;
@@ -443,6 +474,103 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
     }
 }
 
+void SelectiveRepeatARQ::handlePartialFrame(const v2::PartialFrameCodewords& partial) {
+    if (!partial.valid()) {
+        return;
+    }
+    if (!isInRXWindow(partial.seq)) {
+        LOG_MODEM(WARN, "SR-ARQ: Partial DATA seq=%d outside window [%d, %d)",
+                  partial.seq, rx_base_seq_, (rx_base_seq_ + config_.window_size) & 0xFFFF);
+        stats_.sack_trigger_out_of_window++;
+        sendSack();
+        sack_pending_ = false;
+        sack_timer_ms_ = 0;
+        frames_since_ack_ = 0;
+        return;
+    }
+
+    size_t slot_index = seqToSlot(partial.seq);
+    RXSlot& slot = rx_window_[slot_index];
+    if (slot.received) {
+        LOG_MODEM(DEBUG, "SR-ARQ: Partial DATA seq=%d ignored; frame already complete", partial.seq);
+        sendSack();
+        return;
+    }
+
+    if (!slot.partial || slot.seq != partial.seq) {
+        if (partial.from_repair && (partial.decoded_bitmap & 0x1u) == 0) {
+            LOG_MODEM(DEBUG,
+                      "SR-ARQ: DATA_REPAIR seq=%d ignored; no partial slot and CW0 absent",
+                      partial.seq);
+            return;
+        }
+        clearPartialRXSlot(slot);
+        slot.partial = true;
+        slot.seq = partial.seq;
+        slot.flags = partial.flags;
+        slot.type = partial.type;
+        slot.total_cw = partial.total_cw;
+        slot.cw_data.assign(partial.total_cw, Bytes{});
+        slot.partial_age_ms = 0;
+    }
+
+    bool merged = false;
+    const uint32_t expected = partial.expectedBitmap();
+    for (uint8_t cw = 0; cw < partial.total_cw && cw < 32; ++cw) {
+        const uint32_t bit = 1u << cw;
+        if ((partial.decoded_bitmap & bit) == 0) {
+            continue;
+        }
+        if (cw >= partial.data.size() || partial.data[cw].empty()) {
+            continue;
+        }
+        if ((slot.cw_bitmap & bit) == 0) {
+            merged = true;
+            if (partial.from_repair) {
+                stats_.data_repair_cws_merged++;
+            }
+        }
+        slot.cw_bitmap |= bit;
+        slot.cw_data[cw] = partial.data[cw];
+    }
+
+    if (merged) {
+        stats_.partial_frames_received++;
+    }
+
+    LOG_MODEM(INFO, "SR-ARQ: Partial DATA seq=%d cw=0x%08X/%08X missing=0x%08X",
+              partial.seq, slot.cw_bitmap, expected, expected & ~slot.cw_bitmap);
+
+    if (tryCompletePartialRXSlot(slot_index)) {
+        return;
+    }
+
+    maybeSendCwNack(slot_index, expected & ~slot.cw_bitmap);
+}
+
+void SelectiveRepeatARQ::handleDataRepairFrame(const v2::DataRepairFrame& repair) {
+    v2::PartialFrameCodewords partial;
+    partial.type = v2::FrameType::DATA;
+    partial.flags = v2::Flags::VERSION_V2;
+    partial.seq = repair.target_seq;
+    partial.src_hash = repair.src_hash;
+    partial.dst_hash = repair.dst_hash;
+    partial.total_cw = repair.original_total_cw;
+    partial.decoded_bitmap = repair.repair_bitmap;
+    partial.from_repair = true;
+    partial.data.assign(repair.original_total_cw, Bytes{});
+
+    auto indices = repair.repairIndices();
+    for (size_t i = 0; i < indices.size() && i < repair.repair_codewords.size(); ++i) {
+        partial.data[indices[i]] = repair.repair_codewords[i];
+    }
+
+    stats_.data_repairs_received++;
+    LOG_MODEM(INFO, "SR-ARQ: DATA_REPAIR seq=%d bitmap=0x%04X repair_cw=%d",
+              repair.target_seq, repair.repair_bitmap, repair.repair_count);
+    handlePartialFrame(partial);
+}
+
 void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
     uint16_t seq = frame.seq;
     uint32_t bitmap = arq_policy::decodeSackBitmap(frame.payload);
@@ -498,6 +626,7 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
             tx_window_[slot].hole_probe_armed = false;
             tx_window_[slot].hole_probe_timer_ms = 0;
             tx_window_[slot].hole_probe_count = 0;
+            clearTXSlotRepairState(tx_window_[slot]);
             tx_in_flight_--;
             stats_.acks_received++;
 
@@ -602,13 +731,23 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
 }
 
 void SelectiveRepeatARQ::handleNackFrame(const v2::ControlFrame& frame) {
-    uint16_t seq = frame.seq;
+    v2::NackPayload np = v2::NackPayload::decode(frame.payload);
+    uint16_t seq = np.frame_seq;
+    if (seq != frame.seq) {
+        seq = frame.seq;
+    }
 
-    LOG_MODEM(DEBUG, "SR-ARQ: NACK seq=%d", seq);
+    LOG_MODEM(INFO, "SR-ARQ: NACK seq=%d missing_cw=0x%08X", seq, np.cw_bitmap);
+    if (np.cw_bitmap != 0) {
+        stats_.cw_nacks_received++;
+    }
 
     if (isInTXWindow(seq)) {
         size_t slot = seqToSlot(seq);
         if (tx_window_[slot].active && !tx_window_[slot].acked) {
+            if (np.cw_bitmap != 0 && sendDataRepair(slot, np.cw_bitmap)) {
+                return;
+            }
             retransmitFrame(slot, RetransmitCause::NACK);
         }
     }
@@ -647,6 +786,22 @@ void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
         TXSlot& s = tx_window_[slot];
 
         if (s.active && !s.acked) {
+            if (s.repair_cooldown_ms > 0) {
+                if (elapsed_ms >= s.repair_cooldown_ms) {
+                    s.repair_cooldown_ms = 0;
+                } else {
+                    s.repair_cooldown_ms -= elapsed_ms;
+                }
+            }
+            if (s.repair_guard_ms > 0) {
+                if (elapsed_ms >= s.repair_guard_ms) {
+                    s.repair_guard_ms = 0;
+                    s.repair_in_flight = false;
+                } else {
+                    s.repair_guard_ms -= elapsed_ms;
+                }
+            }
+
             if (s.fast_retx_cooldown_ms > 0) {
                 if (elapsed_ms >= s.fast_retx_cooldown_ms) {
                     s.fast_retx_cooldown_ms = 0;
@@ -657,7 +812,12 @@ void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
 
             if (s.hole_probe_armed) {
                 if (elapsed_ms >= s.hole_probe_timer_ms) {
-                    if (s.hole_probe_count < arq_policy::kMaxHoleProbeRetransmits) {
+                    if (s.repair_in_flight && s.repair_guard_ms > 0) {
+                        LOG_MODEM(INFO,
+                                  "SR-ARQ: Suppressed hole-probe full retx seq=%d while DATA_REPAIR in flight (%ums)",
+                                  s.seq, s.repair_guard_ms);
+                        s.hole_probe_timer_ms = s.repair_guard_ms;
+                    } else if (s.hole_probe_count < arq_policy::kMaxHoleProbeRetransmits) {
                         s.hole_probe_count++;
                         s.hole_probe_timer_ms = arq_policy::holeProbeNextTimerMs(
                             currentAckTimeoutMs());
@@ -676,8 +836,15 @@ void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
             }
 
             if (elapsed_ms >= s.timeout_ms) {
-                stats_.timeouts++;
-                retransmitFrame(slot, RetransmitCause::TIMEOUT);
+                if (s.repair_in_flight && s.repair_guard_ms > 0) {
+                    LOG_MODEM(INFO,
+                              "SR-ARQ: Suppressed timeout full retx seq=%d while DATA_REPAIR in flight (%ums)",
+                              s.seq, s.repair_guard_ms);
+                    s.timeout_ms = s.repair_guard_ms;
+                } else {
+                    stats_.timeouts++;
+                    retransmitFrame(slot, RetransmitCause::TIMEOUT);
+                }
             } else {
                 s.timeout_ms -= elapsed_ms;
             }
@@ -697,10 +864,81 @@ void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
             sack_timer_ms_ -= elapsed_ms;
         }
     }
+
+    for (auto& slot : rx_window_) {
+        if (!slot.partial || slot.received) {
+            continue;
+        }
+        if (slot.cw_nack_cooldown_ms > 0) {
+            slot.cw_nack_cooldown_ms = elapsed_ms >= slot.cw_nack_cooldown_ms
+                ? 0
+                : slot.cw_nack_cooldown_ms - elapsed_ms;
+        }
+        if (elapsed_ms >= PARTIAL_RX_TTL_MS - std::min(slot.partial_age_ms, PARTIAL_RX_TTL_MS)) {
+            LOG_MODEM(WARN, "SR-ARQ: Partial DATA seq=%d expired (cw=0x%08X)",
+                      slot.seq, slot.cw_bitmap);
+            clearPartialRXSlot(slot);
+            stats_.partial_frame_expired++;
+        } else {
+            slot.partial_age_ms += elapsed_ms;
+        }
+    }
+}
+
+uint32_t SelectiveRepeatARQ::computeRepairGuardMs(const TXSlot& slot,
+                                                  size_t repair_frame_codewords) const {
+    const uint32_t full_timeout_ms = std::max<uint32_t>(currentAckTimeoutMs(), 1u);
+    const size_t original_cw = std::max<size_t>(
+        1, slot.info_codewords.empty()
+               ? static_cast<size_t>(std::max(slot.fixed_frame_codewords, 1))
+               : slot.info_codewords.size());
+    const size_t repair_cw = std::max<size_t>(1, repair_frame_codewords);
+
+    const uint64_t scaled_airtime_ms =
+        (static_cast<uint64_t>(full_timeout_ms) * repair_cw + original_cw - 1) / original_cw;
+    const uint32_t repeat_margin_ms =
+        ack_repeat_delay_ms_ * static_cast<uint32_t>(std::max(0, ack_repeat_count_ - 1));
+    const uint32_t ack_margin_ms =
+        std::max<uint32_t>(1000u, config_.sack_delay_ms + repeat_margin_ms);
+    const uint32_t max_guard_ms = std::max(full_timeout_ms, ack_margin_ms);
+    const uint64_t guard_ms = scaled_airtime_ms + ack_margin_ms;
+    return static_cast<uint32_t>(std::min<uint64_t>(guard_ms, max_guard_ms));
+}
+
+bool SelectiveRepeatARQ::suppressFullRetransmitForRepair(size_t slot,
+                                                         RetransmitCause cause) {
+    TXSlot& s = tx_window_[slot];
+    if (!s.repair_in_flight || s.repair_guard_ms == 0) {
+        return false;
+    }
+
+    const char* cause_str = "unknown";
+    switch (cause) {
+        case RetransmitCause::TIMEOUT: cause_str = "timeout"; break;
+        case RetransmitCause::FAST_HOLE: cause_str = "fast-hole"; break;
+        case RetransmitCause::HOLE_PROBE: cause_str = "hole-probe"; break;
+        case RetransmitCause::NACK: cause_str = "nack"; break;
+    }
+
+    LOG_MODEM(INFO,
+              "SR-ARQ: Suppressed %s full retx seq=%d while DATA_REPAIR in flight (%ums)",
+              cause_str, s.seq, s.repair_guard_ms);
+    if (s.timeout_ms == 0 || s.timeout_ms > s.repair_guard_ms) {
+        s.timeout_ms = s.repair_guard_ms;
+    }
+    return true;
 }
 
 void SelectiveRepeatARQ::retransmitFrame(size_t slot, RetransmitCause cause) {
     TXSlot& s = tx_window_[slot];
+    if (suppressFullRetransmitForRepair(slot, cause)) {
+        return;
+    }
+
+    s.repair_in_flight = false;
+    s.repair_guard_ms = 0;
+    s.last_repair_bitmap = 0;
+    s.repair_cooldown_ms = 0;
 
     if (cause == RetransmitCause::TIMEOUT) {
         // New timeout epoch: permit another cycle of hole-based fast retransmits.
@@ -755,6 +993,84 @@ void SelectiveRepeatARQ::retransmitFrame(size_t slot, RetransmitCause cause) {
     transmitData(s.frame_data);
 }
 
+bool SelectiveRepeatARQ::sendDataRepair(size_t slot, uint32_t missing_bitmap) {
+    TXSlot& s = tx_window_[slot];
+    if (s.info_codewords.empty()) {
+        return false;
+    }
+    if (s.info_codewords.size() > v2::DataRepairFrame::MAX_REPAIR_CW) {
+        return false;
+    }
+
+    uint32_t available_mask = 0;
+    for (size_t i = 0; i < s.info_codewords.size() && i < 32; ++i) {
+        available_mask |= (1u << i);
+    }
+    const uint32_t repair_bitmap = missing_bitmap & available_mask & 0xFFFFu;
+    if (repair_bitmap == 0) {
+        return false;
+    }
+    if (s.last_repair_bitmap == repair_bitmap && s.repair_cooldown_ms > 0) {
+        LOG_MODEM(DEBUG, "SR-ARQ: Suppressed duplicate DATA_REPAIR seq=%d bitmap=0x%04X",
+                  s.seq, static_cast<unsigned>(repair_bitmap));
+        return true;
+    }
+
+    std::vector<Bytes> repair_codewords;
+    repair_codewords.reserve(8);
+    for (size_t i = 0; i < s.info_codewords.size() && i < 16; ++i) {
+        if ((repair_bitmap & (1u << i)) != 0) {
+            repair_codewords.push_back(s.info_codewords[i]);
+        }
+    }
+    if (repair_codewords.empty()) {
+        return false;
+    }
+
+    // Karn's algorithm: repair frames are retransmissions of the original seq.
+    s.rtt_sample_eligible = false;
+    s.retry_count++;
+    if (s.retry_count >= config_.max_retries) {
+        LOG_MODEM(ERROR, "SR-ARQ: Frame seq=%d failed after %d repairs/retries",
+                  s.seq, config_.max_retries);
+        stats_.failed++;
+        s.active = false;
+        tx_in_flight_--;
+        if (on_send_complete_) {
+            on_send_complete_(false);
+        }
+        advanceTXWindow();
+        return true;
+    }
+
+    auto repair = v2::DataRepairFrame::make(local_call_, remote_call_, s.seq,
+                                            static_cast<uint8_t>(s.info_codewords.size()),
+                                            repair_bitmap, code_rate_, repair_codewords);
+    Bytes repair_data = repair.serialize();
+    if (repair_data.empty()) {
+        return false;
+    }
+
+    stats_.retransmissions++;
+    stats_.retransmissions_nack++;
+    stats_.data_repairs_sent++;
+    stats_.data_repair_cws_sent += static_cast<int>(repair_codewords.size());
+
+    const uint32_t repair_guard_ms = computeRepairGuardMs(s, repair_codewords.size() + 1);
+    s.timeout_ms = repair_guard_ms;
+    s.last_repair_bitmap = repair_bitmap;
+    s.repair_cooldown_ms = repair_guard_ms;
+    s.repair_in_flight = true;
+    s.repair_guard_ms = repair_guard_ms;
+
+    LOG_MODEM(INFO,
+              "SR-ARQ: DATA_REPAIR seq=%d bitmap=0x%04X repair_cw=%zu guard=%ums (attempt %d/%d)",
+              s.seq, static_cast<unsigned>(repair_bitmap), repair_codewords.size(),
+              repair_guard_ms, s.retry_count + 1, config_.max_retries);
+    transmitData(repair_data);
+    return true;
+}
+
 void SelectiveRepeatARQ::advanceTXWindow() {
     while (tx_in_flight_ > 0) {
         size_t slot = seqToSlot(tx_base_seq_);
@@ -770,6 +1086,7 @@ void SelectiveRepeatARQ::advanceTXWindow() {
             tx_window_[slot].hole_probe_armed = false;
             tx_window_[slot].hole_probe_timer_ms = 0;
             tx_window_[slot].hole_probe_count = 0;
+            clearTXSlotRepairState(tx_window_[slot]);
             tx_in_flight_--;
 
             if (on_send_complete_) {
@@ -804,11 +1121,96 @@ void SelectiveRepeatARQ::advanceRXWindow() {
         }
 
         rx_window_[slot].received = false;
+        clearPartialRXSlot(rx_window_[slot]);
         rx_window_[slot].payload.clear();
         rx_window_[slot].flags = 0;
         rx_window_[slot].type = v2::FrameType::DATA;
         rx_base_seq_ = (rx_base_seq_ + 1) & 0xFFFF;
     }
+}
+
+void SelectiveRepeatARQ::clearPartialRXSlot(RXSlot& slot) {
+    slot.partial = false;
+    slot.total_cw = 0;
+    slot.cw_bitmap = 0;
+    slot.partial_age_ms = 0;
+    slot.last_cw_nack_bitmap = 0;
+    slot.cw_nack_cooldown_ms = 0;
+    slot.cw_data.clear();
+}
+
+void SelectiveRepeatARQ::clearTXSlotRepairState(TXSlot& slot) {
+    slot.info_codewords.clear();
+    slot.last_repair_bitmap = 0;
+    slot.repair_cooldown_ms = 0;
+    slot.repair_in_flight = false;
+    slot.repair_guard_ms = 0;
+}
+
+bool SelectiveRepeatARQ::tryCompletePartialRXSlot(size_t slot_index) {
+    RXSlot& slot = rx_window_[slot_index];
+    if (!slot.partial || slot.total_cw == 0 || slot.total_cw > 32) {
+        return false;
+    }
+
+    const uint32_t expected =
+        slot.total_cw >= 32 ? 0xFFFFFFFFu : ((1u << slot.total_cw) - 1u);
+    if ((slot.cw_bitmap & expected) != expected) {
+        return false;
+    }
+
+    v2::CodewordStatus status;
+    status.initForFrame(slot.total_cw);
+    for (uint8_t i = 0; i < slot.total_cw; ++i) {
+        status.decoded[i] = true;
+        status.data[i] = slot.cw_data[i];
+    }
+
+    Bytes assembled = status.reassemble();
+    auto frame = v2::DataFrame::deserialize(assembled);
+    if (!frame || frame->seq != slot.seq) {
+        LOG_MODEM(WARN, "SR-ARQ: Partial DATA seq=%d had all CWs but frame CRC rejected",
+                  slot.seq);
+        stats_.partial_frame_crc_failed++;
+        const uint16_t seq = slot.seq;
+        clearPartialRXSlot(slot);
+        sendCwNack(seq, expected);
+        return false;
+    }
+
+    stats_.partial_frames_completed++;
+    LOG_MODEM(INFO, "SR-ARQ: Partial DATA seq=%d completed from CW slots", slot.seq);
+    clearPartialRXSlot(slot);
+    handleDataFrame(*frame);
+    return true;
+}
+
+void SelectiveRepeatARQ::sendCwNack(uint16_t seq, uint32_t missing_bitmap) {
+    if (missing_bitmap == 0) {
+        return;
+    }
+
+    auto nack = v2::ControlFrame::makeNack(local_call_, remote_call_, seq, missing_bitmap);
+    stats_.cw_nacks_sent++;
+    auto data = nack.serialize();
+    LOG_MODEM(INFO, "SR-ARQ: Sent CW_NACK seq=%d missing=0x%08X", seq, missing_bitmap);
+    transmitData(data);
+}
+
+void SelectiveRepeatARQ::maybeSendCwNack(size_t slot_index, uint32_t missing_bitmap) {
+    if (missing_bitmap == 0) {
+        return;
+    }
+    RXSlot& slot = rx_window_[slot_index];
+    if (slot.last_cw_nack_bitmap == missing_bitmap && slot.cw_nack_cooldown_ms > 0) {
+        LOG_MODEM(DEBUG, "SR-ARQ: Suppressed duplicate CW_NACK seq=%d missing=0x%08X",
+                  slot.seq, missing_bitmap);
+        return;
+    }
+
+    sendCwNack(slot.seq, missing_bitmap);
+    slot.last_cw_nack_bitmap = missing_bitmap;
+    slot.cw_nack_cooldown_ms = std::max<uint32_t>(config_.sack_delay_ms, 1000u);
 }
 
 void SelectiveRepeatARQ::sendSack() {
@@ -997,6 +1399,7 @@ void SelectiveRepeatARQ::abortPendingTx() {
         slot.hole_probe_armed = false;
         slot.hole_probe_timer_ms = 0;
         slot.hole_probe_count = 0;
+        clearTXSlotRepairState(slot);
     }
 
     tx_base_seq_ = tx_next_seq_;
@@ -1026,6 +1429,7 @@ void SelectiveRepeatARQ::reset() {
         slot.hole_probe_armed = false;
         slot.hole_probe_timer_ms = 0;
         slot.hole_probe_count = 0;
+        clearTXSlotRepairState(slot);
     }
     tx_base_seq_ = 0;
     tx_next_seq_ = 0;
@@ -1033,6 +1437,7 @@ void SelectiveRepeatARQ::reset() {
 
     for (auto& slot : rx_window_) {
         slot.received = false;
+        clearPartialRXSlot(slot);
         slot.payload.clear();
         slot.flags = 0;
         slot.type = v2::FrameType::DATA;

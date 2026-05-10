@@ -27,6 +27,14 @@ void test_fading_labels_and_capabilities() {
     CHECK(std::string(fadingLabel(0.30f)) == "Good", "Good fading label");
     CHECK(std::string(fadingLabel(0.80f)) == "Moderate", "Moderate fading label");
     CHECK(std::string(fadingLabel(1.20f)) == "Poor", "Poor fading label");
+    CHECK(classifyChannel(0.14f) == ChannelClassification::AWGN,
+          "channel classifier should preserve AWGN threshold");
+    CHECK(classifyChannel(0.15f) == ChannelClassification::GOOD,
+          "channel classifier should enter Good at 0.15 fading index");
+    CHECK(classifyChannel(0.65f) == ChannelClassification::MODERATE,
+          "channel classifier should enter Moderate at 0.65 fading index");
+    CHECK(classifyChannel(1.10f) == ChannelClassification::POOR,
+          "channel classifier should enter Poor at 1.10 fading index");
 
     CHECK(modeToCapabilityBit(WaveformMode::OFDM_COX) == ModeCapabilities::OFDM_COX,
           "OFDM_COX capability bit");
@@ -37,6 +45,71 @@ void test_fading_labels_and_capabilities() {
     CHECK(modeToCapabilityBit(WaveformMode::MC_DPSK) == ModeCapabilities::MC_DPSK,
           "MC_DPSK capability bit");
     CHECK(modeToCapabilityBit(WaveformMode::AUTO) == 0, "AUTO has no capability bit");
+}
+
+void test_ladder_rung_selection() {
+    const auto robust_low = ladderRungForId(LadderRungId::ROBUST_LOW);
+    CHECK(robust_low.waveform == WaveformMode::MC_DPSK, "Robust-Low waveform");
+    CHECK(robust_low.modulation == Modulation::DBPSK, "Robust-Low modulation");
+    CHECK(robust_low.samples_per_symbol == 2048, "Robust-Low SPS");
+    CHECK(robust_low.cw_count == 3, "Robust-Low CW count");
+
+    const auto robust_mid = ladderRungForId(LadderRungId::ROBUST_MID);
+    CHECK(robust_mid.waveform == WaveformMode::MC_DPSK, "Robust-Mid waveform");
+    CHECK(robust_mid.modulation == Modulation::DBPSK, "Robust-Mid modulation");
+    CHECK(robust_mid.samples_per_symbol == 1024, "Robust-Mid SPS");
+    CHECK(robust_mid.cw_count == 3, "Robust-Mid CW count");
+
+    const auto robust = ladderRungForId(LadderRungId::ROBUST);
+    CHECK(robust.waveform == WaveformMode::MC_DPSK, "Robust waveform");
+    CHECK(robust.modulation == Modulation::DQPSK, "Robust modulation");
+    CHECK(robust.samples_per_symbol == 1024, "Robust SPS");
+    CHECK(robust.cw_count == v2::kDefaultFixedFrameCodewords, "Robust CW count");
+
+    const auto standard = ladderRungForId(LadderRungId::STANDARD);
+    CHECK(standard.waveform == WaveformMode::MC_DPSK, "Standard waveform");
+    CHECK(standard.modulation == Modulation::DQPSK, "Standard modulation");
+    CHECK(standard.samples_per_symbol == 512, "Standard SPS");
+
+    CHECK(ladderRungForId(LadderRungId::OFDM_CHIRP).waveform == WaveformMode::OFDM_CHIRP,
+          "OFDM_CHIRP rung waveform");
+    CHECK(std::string(ladderRungIdToString(LadderRungId::ROBUST_LOW)) == "Robust-Low",
+          "Robust-Low rung string");
+
+    CHECK(selectLadderRung(-3.1f, ChannelClassification::MODERATE).id ==
+              LadderRungId::ROBUST_LOW,
+          "Moderate below -3 dB selects Robust-Low");
+    CHECK(selectLadderRung(-3.0f, ChannelClassification::MODERATE).id ==
+              LadderRungId::ROBUST_MID,
+          "Moderate -3 dB boundary selects Robust-Mid");
+    CHECK(selectLadderRung(4.9f, ChannelClassification::MODERATE).id ==
+              LadderRungId::ROBUST_MID,
+          "Moderate below +5 dB stays Robust-Mid");
+    CHECK(selectLadderRung(5.0f, ChannelClassification::MODERATE).id ==
+              LadderRungId::ROBUST,
+          "Moderate +5 dB boundary selects Robust");
+    CHECK(selectLadderRung(9.9f, ChannelClassification::MODERATE).id ==
+              LadderRungId::ROBUST,
+          "Moderate below +10 dB stays Robust");
+    CHECK(selectLadderRung(10.0f, ChannelClassification::MODERATE).id ==
+              LadderRungId::OFDM_CHIRP,
+          "Moderate +10 dB boundary selects OFDM_CHIRP");
+
+    CHECK(selectLadderRung(7.9f, ChannelClassification::AWGN).id ==
+              LadderRungId::ROBUST,
+          "AWGN uses lower OFDM_CHIRP threshold than Moderate");
+    CHECK(selectLadderRung(8.0f, ChannelClassification::AWGN).id ==
+              LadderRungId::OFDM_CHIRP,
+          "AWGN +8 dB boundary selects OFDM_CHIRP");
+    CHECK(selectLadderRung(6.9f, ChannelClassification::POOR).id ==
+              LadderRungId::ROBUST_MID,
+          "Poor fading keeps extra margin before Robust");
+    CHECK(selectLadderRung(12.0f, ChannelClassification::POOR).id ==
+              LadderRungId::OFDM_CHIRP,
+          "Poor fading delays OFDM_CHIRP until +12 dB");
+
+    CHECK(selectLadderRung(0.0f, 0.80f).id == LadderRungId::ROBUST_MID,
+          "fading-index overload selects Moderate Robust-Mid at 0 dB");
 }
 
 void test_wide_ofdm_timing_and_timeout() {
@@ -142,6 +215,39 @@ void test_narrow_ofdm_timing_and_timeout() {
     //             + 120 + max(700, 1726) = 14071 ms (current narrow default)
     CHECK(w2 >= 10000 && w2 <= 11000, "window=2 timeout ~10.6 s");
     CHECK(w3 >= 13500 && w3 <= 14500, "window=3 timeout ~14.0 s (current narrow default)");
+}
+
+void test_mc_dpsk_window_timing() {
+    auto robust_low = mcDpskFrameTiming(Modulation::DBPSK, 8, 2048, 3);
+    CHECK(robust_low.data_ms == 10752, "Robust-Low MC-DPSK 3-CW data timing");
+    CHECK(mcDpskWindowSizeForTiming(robust_low.data_ms) == 1,
+          "Robust-Low MC-DPSK should keep window=1");
+
+    auto robust_mid = mcDpskFrameTiming(Modulation::DBPSK, 8, 1024, 3);
+    CHECK(robust_mid.data_ms == 5376, "Robust-Mid MC-DPSK 3-CW data timing");
+    CHECK(mcDpskWindowSizeForTiming(robust_mid.data_ms) == 2,
+          "Robust-Mid MC-DPSK should use window=2");
+    CHECK(mcDpskSackDelayMs(robust_mid, 2) == 5876,
+          "Robust-Mid SACK delay should cover the remaining window burst");
+    CHECK(computeMCDPSKAckTimeoutMs(robust_mid, 2, 2000, 1) >=
+              2 * robust_mid.data_ms + robust_mid.ack_ms + 2000,
+          "Robust-Mid ACK timeout should cover the two-frame burst and ACK path");
+
+    auto robust = mcDpskFrameTiming(Modulation::DQPSK, 8, 1024, 4);
+    CHECK(robust.data_ms == 3691, "Robust MC-DPSK 4-CW data timing");
+    CHECK(mcDpskWindowSizeForTiming(robust.data_ms) == 4,
+          "Robust MC-DPSK should use window=4");
+    CHECK(mcDpskSackDelayMs(robust, 4) == 11573,
+          "Robust SACK delay should defer ACK until the MC-DPSK burst tail");
+
+    auto standard = mcDpskFrameTiming(Modulation::DQPSK, 8, 512, 4);
+    CHECK(standard.data_ms == 1845, "Standard MC-DPSK 4-CW data timing");
+    CHECK(mcDpskWindowSizeForTiming(standard.data_ms) == 4,
+          "Standard MC-DPSK should use window=4");
+    CHECK(mcDpskSackDelayMs(standard, 4) == 6035,
+          "Standard SACK delay should defer ACK until the MC-DPSK burst tail");
+    CHECK(computeMCDPSKAckTimeoutMs(standard, 4, mcDpskSackDelayMs(standard, 4), 1) > 18000,
+          "Standard MC-DPSK window=4 timeout should exceed the legacy floor");
 }
 
 void test_ofdm_profile_selection() {
@@ -283,17 +389,50 @@ void test_recommend_cw_count() {
                   v2::kDefaultFixedFrameCodewords,
               "narrow always caps at default 4 (fade-coherence limit)");
     }
+
+    CHECK(recommendCWCount(Modulation::DBPSK, CodeRate::R1_4, WaveformMode::MC_DPSK) == 3,
+          "Robust-Low MC-DPSK DBPSK uses 3-CW variable frames");
+    CHECK(recommendCWCount(Modulation::DQPSK, CodeRate::R1_4, WaveformMode::MC_DPSK) ==
+              v2::kDefaultFixedFrameCodewords,
+          "standard MC-DPSK DQPSK keeps the legacy CW count");
+    CHECK(recommendCWCount(Modulation::DBPSK, CodeRate::R1_4, WaveformMode::OFDM_CHIRP) ==
+              v2::kDefaultFixedFrameCodewords,
+          "DBPSK does not alter OFDM CW policy");
+}
+
+void test_variable_frame_payload_capacity() {
+    CHECK(v2::getVariableFramePayloadCapacity(CodeRate::R1_4, 1) == 1,
+          "R1/4 variable 1-CW DATA carries only 1 payload byte");
+    CHECK(v2::getVariableFramePayloadCapacity(CodeRate::R1_4, 2) == 19,
+          "R1/4 variable 2-CW DATA carries 19 payload bytes");
+    CHECK(v2::getVariableFramePayloadCapacity(CodeRate::R1_4, 3) == 37,
+          "R1/4 variable 3-CW DATA carries 37 payload bytes");
+    CHECK(v2::getVariableFramePayloadCapacity(CodeRate::R1_4, 4) == 55,
+          "R1/4 variable 4-CW DATA carries 55 payload bytes");
+
+    for (int cw = v2::kMinFixedFrameCodewords; cw <= v2::kMaxFixedFrameCodewords; ++cw) {
+        const size_t cap = v2::getVariableFramePayloadCapacity(CodeRate::R1_4, cw);
+        CHECK(v2::DataFrame::calculateCodewords(cap, CodeRate::R1_4) == cw,
+              "variable frame capacity should fit exactly in the target CW count");
+        if (cw < v2::kMaxFixedFrameCodewords) {
+            CHECK(v2::DataFrame::calculateCodewords(cap + 1, CodeRate::R1_4) == cw + 1,
+                  "one byte over variable capacity should require one more CW");
+        }
+    }
 }
 
 }  // namespace
 
 int main() {
     test_fading_labels_and_capabilities();
+    test_ladder_rung_selection();
     test_wide_ofdm_timing_and_timeout();
     test_narrow_ofdm_timing_and_timeout();
+    test_mc_dpsk_window_timing();
     test_ofdm_profile_selection();
     test_negotiated_mode_selection();
     test_recommend_cw_count();
+    test_variable_frame_payload_capacity();
 
     if (tests_failed != 0) {
         std::cout << "ConnectionPolicy: " << (tests_run - tests_failed)

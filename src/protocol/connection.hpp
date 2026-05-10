@@ -40,6 +40,8 @@ struct ConnectionConfig {
     Modulation forced_modulation = Modulation::AUTO;
     CodeRate forced_code_rate = CodeRate::AUTO;
     int fixed_frame_codewords = v2::kDefaultFixedFrameCodewords;
+    int mc_dpsk_num_carriers = 8;
+    int mc_dpsk_samples_per_symbol = 1024;
     // Initiator-side forced CW override (0 = AUTO, responder picks via
     // recommendCWCount(rate)). When non-zero, the initiator embeds this
     // value in CONNECT.data_frame_cw_count and the responder honors it
@@ -126,6 +128,7 @@ public:
 
     // Process received frame data (v2 serialized bytes)
     void onFrameReceived(const Bytes& frame_data);
+    void onMCDPSKPartialFrame(const v2::PartialFrameCodewords& partial);
 
     void tick(uint32_t elapsed_ms);
 
@@ -179,6 +182,7 @@ public:
     // Forced data mode - operator can override SNR-based selection
     void setForcedModulation(Modulation mod) { config_.forced_modulation = mod; }
     void setForcedCodeRate(CodeRate rate) { config_.forced_code_rate = rate; }
+    void setMCDPSKConfig(int num_carriers, int samples_per_symbol);
     // forced=true marks this as an operator override: the initiator will
     // embed it in CONNECT.data_frame_cw_count and the responder will
     // honor + echo it. forced=false is the boot-time default path used
@@ -242,7 +246,9 @@ public:
     // callback (mutex held; re-entry will deadlock).
     using DataModeChangedCallback = std::function<void(Modulation mod, CodeRate rate,
                                                         int cw_count,
-                                                        float snr_db, float peer_fading_index)>;
+                                                        float snr_db, float peer_fading_index,
+                                                        int mc_dpsk_num_carriers,
+                                                        int mc_dpsk_samples_per_symbol)>;
     void setDataModeChangedCallback(DataModeChangedCallback cb) { on_data_mode_changed_ = cb; }
 
     // Request mode change to remote station
@@ -281,6 +287,7 @@ private:
     Modulation data_modulation_ = Modulation::DQPSK;
     CodeRate data_code_rate_ = CodeRate::R1_4;
     int data_frame_cw_count_ = v2::kDefaultFixedFrameCodewords;
+    LadderRungId data_ladder_rung_id_ = LadderRungId::UNKNOWN;
     uint16_t mode_change_seq_ = 0;  // Sequence number for MODE_CHANGE frames
     float measured_snr_db_ = 15.0f;  // SNR measured by modem (updated via setMeasuredSNR)
     float fading_index_ = 0.0f;      // Fading index (0-2, > 0.65 = significant fading)
@@ -292,6 +299,7 @@ private:
     Modulation pending_modulation_ = Modulation::DQPSK;
     CodeRate pending_code_rate_ = CodeRate::R1_4;
     uint8_t pending_cw_count_ = 0;  // 0 = use applyDataMode's default
+    LadderRungId pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
     float pending_snr_db_ = 15.0f;
     float pending_fading_index_ = 0.0f;
     uint8_t pending_reason_ = 0;
@@ -359,9 +367,15 @@ private:
     void processArqFrame(const Bytes& frame_data);
     void runDeferredArqRefill();
     void configureArqForCurrentDataMode();
+    uint32_t pingTimeoutMsForCurrentProfile() const;
+    bool usesBoundedVariableMCDPSKFrames() const;
+    size_t currentDataPayloadCapacity() const;
     // Apply a new data mode. cw_count: 0 = compute via recommendCWCount(rate),
     // 1..8 = explicit (used when MODE_CHANGE wire byte specifies a value).
-    void applyDataMode(Modulation mod, CodeRate rate, int cw_count = 0);
+    void applyDataMode(Modulation mod, CodeRate rate, int cw_count = 0,
+                       LadderRungId rung_id = LadderRungId::UNKNOWN);
+    void notifyDataModeChanged(float snr_db, float peer_fading_index);
+    LadderRungId currentLadderRungId() const;
     void resetAdaptiveModeController();
     void updateAdaptiveModeController(uint32_t elapsed_ms);
     bool tryIssueAdaptiveModeChangeAtBoundary();
@@ -411,6 +425,7 @@ private:
     int ping_retry_count_ = 0;
     static constexpr int MAX_PING_RETRIES = 5;  // Try 5 pings before giving up
     static constexpr uint32_t PING_TIMEOUT_MS = 8000;  // 8 seconds per ping (PING=3.3s + PONG=3.3s + margin)
+    static constexpr uint32_t ROBUST_LOW_PING_TIMEOUT_MS = 20000;
 
     // Handshake state - responder waits for first frame before confirming
     bool is_initiator_ = false;           // True if we initiated the connection

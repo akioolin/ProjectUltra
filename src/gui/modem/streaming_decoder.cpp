@@ -52,6 +52,10 @@ bool isFixedFrameCwCount(int cw_count) {
            cw_count <= v2::kMaxFixedFrameCodewords;
 }
 
+size_t mcDpskBitsPerSymbol(const MultiCarrierDPSKConfig& config) {
+    return static_cast<size_t>(std::max(1, config.num_carriers * config.bits_per_symbol));
+}
+
 size_t validateBufferCapacity(size_t capacity) {
     if (capacity < StreamingDecoder::kMinimumBufferSamples) {
         throw std::invalid_argument("StreamingDecoder buffer capacity is smaller than the sync search window");
@@ -147,9 +151,10 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
     startupTrace("StreamingDecoder", "ctor-enter");
     buffer_.resize(buffer_capacity_samples_, 0.0f);
     startupTrace("StreamingDecoder", "buffer-resized");
-    waveform_ = WaveformFactory::create(protocol::WaveformMode::MC_DPSK);
+    waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
     startupTrace("StreamingDecoder", "waveform-created");
-    interleaver_ = std::make_unique<ChannelInterleaver>(16, v2::LDPC_CODEWORD_BITS);
+    interleaver_ = std::make_unique<ChannelInterleaver>(
+        mcDpskBitsPerSymbol(mc_dpsk_config_), v2::LDPC_CODEWORD_BITS);
     startupTrace("StreamingDecoder", "interleaver-created");
     codec_ = fec::CodecFactory::create(fec::CodecType::LDPC, CodeRate::R1_4);
     startupTrace("StreamingDecoder", "codec-created");
@@ -400,7 +405,7 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     connected_ = connected;
 
     if (mode == protocol::WaveformMode::MC_DPSK) {
-        waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_carriers_);
+        waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
     } else {
         waveform_ = WaveformFactory::create(mode);
     }
@@ -408,7 +413,7 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
         waveform_->setCarrierMask(carrier_mask_);
     }
 
-    size_t bps = mc_dpsk_carriers_ * 2;
+    size_t bps = mcDpskBitsPerSymbol(mc_dpsk_config_);
     if (protocol::isOFDMMode(mode)) {
         bps = 60;
     }
@@ -454,10 +459,39 @@ void StreamingDecoder::setMCDPSKCarriers(int n) {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
     if (mc_dpsk_carriers_ == n) return;
     mc_dpsk_carriers_ = n;
+    mc_dpsk_config_.num_carriers = n;
     if (mode_ == protocol::WaveformMode::MC_DPSK) {
-        waveform_ = WaveformFactory::createMCDPSK(n);
-        interleaver_ = std::make_unique<ChannelInterleaver>(n * 2, v2::LDPC_CODEWORD_BITS);
+        waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
+        interleaver_ = std::make_unique<ChannelInterleaver>(
+            mcDpskBitsPerSymbol(mc_dpsk_config_), v2::LDPC_CODEWORD_BITS);
     }
+}
+
+void StreamingDecoder::setMCDPSKConfig(const MultiCarrierDPSKConfig& config) {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    const bool changed =
+        mc_dpsk_config_.num_carriers != config.num_carriers ||
+        mc_dpsk_config_.samples_per_symbol != config.samples_per_symbol ||
+        mc_dpsk_config_.bits_per_symbol != config.bits_per_symbol ||
+        mc_dpsk_config_.freq_low != config.freq_low ||
+        mc_dpsk_config_.freq_high != config.freq_high ||
+        mc_dpsk_config_.chirp_f_start != config.chirp_f_start ||
+        mc_dpsk_config_.chirp_f_end != config.chirp_f_end ||
+        mc_dpsk_config_.chirp_duration_ms != config.chirp_duration_ms ||
+        mc_dpsk_config_.use_dual_chirp != config.use_dual_chirp;
+    if (!changed) return;
+
+    mc_dpsk_config_ = config;
+    mc_dpsk_carriers_ = config.num_carriers;
+    if (mode_ == protocol::WaveformMode::MC_DPSK) {
+        waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
+        interleaver_ = std::make_unique<ChannelInterleaver>(
+            mcDpskBitsPerSymbol(mc_dpsk_config_), v2::LDPC_CODEWORD_BITS);
+    }
+
+    LOG_MODEM(INFO, "StreamingDecoder: MC-DPSK config carriers=%d sps=%d bits/sym=%d raw=%.1f bps",
+              mc_dpsk_config_.num_carriers, mc_dpsk_config_.samples_per_symbol,
+              mc_dpsk_config_.bits_per_symbol, mc_dpsk_config_.getRawBitRate());
 }
 
 void StreamingDecoder::setOFDMConfig(const ModemConfig& config) {
@@ -606,9 +640,15 @@ StreamingDecoder::DecoderConfig StreamingDecoder::getConfig() const {
     cfg.mode = mode_;
     cfg.modulation = current_modulation_;
     cfg.code_rate = code_rate_;
-    cfg.num_carriers = ofdm_carriers_;
-    cfg.data_carriers = ofdm_data_carriers_;
-    cfg.bits_per_symbol = ofdm_data_carriers_ * static_cast<int>(getBitsPerSymbol(current_modulation_));
+    if (mode_ == protocol::WaveformMode::MC_DPSK) {
+        cfg.num_carriers = mc_dpsk_config_.num_carriers;
+        cfg.data_carriers = mc_dpsk_config_.num_carriers;
+        cfg.bits_per_symbol = static_cast<int>(mcDpskBitsPerSymbol(mc_dpsk_config_));
+    } else {
+        cfg.num_carriers = ofdm_carriers_;
+        cfg.data_carriers = ofdm_data_carriers_;
+        cfg.bits_per_symbol = ofdm_data_carriers_ * static_cast<int>(getBitsPerSymbol(current_modulation_));
+    }
 
     // Get pilot config from waveform (coherent modes use denser pilots)
     cfg.use_pilots = true;

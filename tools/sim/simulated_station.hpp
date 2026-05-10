@@ -42,6 +42,7 @@
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "waveform/ofdm_cox_waveform.hpp"
 #include "waveform/mc_dpsk_waveform.hpp"
+#include "psk/multi_carrier_dpsk.hpp"
 #include "gui/modem/streaming_decoder.hpp"
 #include "gui/modem/streaming_encoder.hpp"  // TX encoding (mirrors StreamingDecoder)
 #include "protocol/protocol_engine.hpp"
@@ -119,6 +120,10 @@ static float samplePeak(const std::vector<float>& samples) {
 
 static float modeEfficiency(Modulation mod, CodeRate rate) {
     return static_cast<float>(getBitsPerSymbol(mod)) * getCodeRateValue(rate);
+}
+
+static Modulation mcDpskModulationForConfig(const MultiCarrierDPSKConfig& config) {
+    return config.bits_per_symbol == 1 ? Modulation::DBPSK : Modulation::DQPSK;
 }
 
 static const char* adaptationDirection(Modulation from_mod, CodeRate from_rate,
@@ -451,13 +456,18 @@ public:
     static constexpr int CALLBACK_INTERVAL_MS = 10;
 
     SimulatedStation(const std::string& callsign, std::unique_ptr<AudioPort> port,
-                     OFDMConfigPreset ofdm_config_preset = OFDMConfigPreset::Default)
+                     OFDMConfigPreset ofdm_config_preset = OFDMConfigPreset::Default,
+                     const MultiCarrierDPSKConfig& mc_dpsk_config = mc_dpsk_presets::robust_mid())
         : callsign_(callsign),
-          port_(std::move(port)),
-          ofdm_config_preset_(ofdm_config_preset) {
+          port_(std::move(port)) {
 
+        ofdm_config_preset_ = ofdm_config_preset;
+        mc_dpsk_config_ = mc_dpsk_config;
         protocol_.setLocalCallsign(callsign);
         protocol_.setAutoAccept(true);
+        protocol_.setMCDPSKConfig(mc_dpsk_config_.num_carriers,
+                                  mc_dpsk_config_.samples_per_symbol);
+        data_modulation_ = mcDpskModulationForConfig(mc_dpsk_config_);
 
         // Initialize OFDM_COX from the selected CLI preset.
         ofdm_config_ = createOFDMConfig();
@@ -531,6 +541,48 @@ public:
     void setAutoAccept(bool auto_accept) { protocol_.setAutoAccept(auto_accept); }
     void setForcedModulation(Modulation mod) { protocol_.setForcedModulation(mod); }
     void setForcedCodeRate(CodeRate rate) { protocol_.setForcedCodeRate(rate); }
+    void setMCDPSKConfig(const MultiCarrierDPSKConfig& config) {
+        mc_dpsk_config_ = config;
+        data_modulation_ = mcDpskModulationForConfig(mc_dpsk_config_);
+        protocol_.setMCDPSKConfig(mc_dpsk_config_.num_carriers,
+                                  mc_dpsk_config_.samples_per_symbol);
+        if (encoder_) {
+            encoder_->setMCDPSKConfig(mc_dpsk_config_);
+            encoder_->setDataMode(data_modulation_, data_code_rate_);
+        }
+        if (decoder_) {
+            decoder_->setMCDPSKConfig(mc_dpsk_config_);
+            decoder_->setDataMode(data_modulation_, data_code_rate_);
+        }
+    }
+    void applyNegotiatedMCDPSKConfig(Modulation mod,
+                                     int num_carriers,
+                                     int samples_per_symbol) {
+        if (num_carriers <= 0 || samples_per_symbol <= 0) {
+            return;
+        }
+        const int bits_per_symbol = (mod == Modulation::DBPSK) ? 1 :
+                                    (mod == Modulation::D8PSK) ? 3 : 2;
+        if (mc_dpsk_config_.num_carriers == num_carriers &&
+            mc_dpsk_config_.samples_per_symbol == samples_per_symbol &&
+            mc_dpsk_config_.bits_per_symbol == bits_per_symbol) {
+            return;
+        }
+
+        mc_dpsk_config_.num_carriers = num_carriers;
+        mc_dpsk_config_.samples_per_symbol = samples_per_symbol;
+        mc_dpsk_config_.bits_per_symbol = bits_per_symbol;
+        if (encoder_) {
+            encoder_->setMCDPSKConfig(mc_dpsk_config_);
+        }
+        if (decoder_) {
+            decoder_->setMCDPSKConfig(mc_dpsk_config_);
+        }
+        LOG_MODEM(INFO, "[%s] Negotiated MC-DPSK config: carriers=%d sps=%d bits/sym=%d",
+                  callsign_.c_str(), mc_dpsk_config_.num_carriers,
+                  mc_dpsk_config_.samples_per_symbol,
+                  mc_dpsk_config_.bits_per_symbol);
+    }
     // forced=true → operator override, propagates via wire.
     // forced=false → boot-time default (encoder/decoder bootstrap only).
     void setFixedFrameCodewords(int cw_count, bool forced = true) {
@@ -621,6 +673,7 @@ public:
     Modulation getDataModulation() const { return data_modulation_; }
     CodeRate getDataCodeRate() const { return data_code_rate_; }
     int getFixedFrameCodewords() const { return fixed_frame_codewords_; }
+    MultiCarrierDPSKConfig getMCDPSKConfig() const { return mc_dpsk_config_; }
     float getLastCFO() const { return last_cfo_hz_; }
 
     void resetAdaptiveAdvisory() {
@@ -649,6 +702,7 @@ private:
     ModemConfig ofdm_config_;
     Modulation data_modulation_ = Modulation::DQPSK;
     CodeRate data_code_rate_ = CodeRate::R1_4;
+    MultiCarrierDPSKConfig mc_dpsk_config_ = mc_dpsk_presets::robust_mid();
 
     // Protocol engine
     ProtocolEngine protocol_{ConnectionConfig{}};
@@ -739,6 +793,7 @@ private:
         }
 
         // Configure encoder with current settings
+        encoder_->setMCDPSKConfig(mc_dpsk_config_);
         encoder_->setOFDMConfig(ofdm_config_);
         encoder_->setMode(tx_waveform_mode_);
         encoder_->setDataMode(data_modulation_, data_code_rate_);
@@ -746,7 +801,6 @@ private:
         encoder_->setCarrierMask(carrier_mask_);
         encoder_->setCarrierLdpcInterleaver(carrier_ldpc_interleaver_enabled_);
         encoder_->setBurstInterleaveGroupSize(burst_group_size_);
-        encoder_->setMCDPSKCarriers(8);
 
         LOG_MODEM(INFO, "[%s] TX encoder: mode=%s, carriers=%d, data_carriers=%d",
                   callsign_.c_str(),
@@ -758,15 +812,16 @@ private:
     void createDecoder() {
         decoder_ = std::make_unique<StreamingDecoder>();
         decoder_->setLogPrefix(callsign_);
+        decoder_->setMCDPSKConfig(mc_dpsk_config_);
 
         // Start in disconnected mode (MC_DPSK for PING detection)
         decoder_->setMode(WaveformMode::MC_DPSK, false);
+        decoder_->setDataMode(data_modulation_, data_code_rate_);
         decoder_->setBurstInterleaveGroupSize(burst_group_size_);
         decoder_->setFixedFrameCodewords(fixed_frame_codewords_);
         decoder_->setCarrierMask(carrier_mask_);
         decoder_->setCarrierLdpcInterleaver(carrier_ldpc_interleaver_enabled_);
         decoder_->setSoftCombineBuffer(protocol_.softCombineBuffer());
-        decoder_->setMCDPSKCarriers(8);
 
         // Set frame callback
         decoder_->setFrameCallback([this](const DecodeResult& result) {
@@ -790,7 +845,14 @@ private:
     }
 
     void handleDecodedFrame(const DecodeResult& result) {
-        if (!result.success) return;
+        if (!result.success) {
+            if (result.has_partial_codewords) {
+                float fading_index = decoder_ ? decoder_->getLastFadingIndex() : 0.0f;
+                protocol_.setChannelQuality(snr_db_, fading_index);
+                protocol_.onMCDPSKPartialFrame(result.partial_codewords);
+            }
+            return;
+        }
 
         if (result.is_ping) {
             // PING handled by ping callback
@@ -1147,7 +1209,7 @@ private:
         if (is_handshake_frame) {
             // Handshake frames always use MC-DPSK R1/4
             encoder_->setMode(WaveformMode::MC_DPSK);
-            encoder_->setDataMode(Modulation::DQPSK, CodeRate::R1_4);
+            encoder_->setDataMode(mcDpskModulationForConfig(mc_dpsk_config_), CodeRate::R1_4);
         }
 
         // Encode frame using the encoder
@@ -1163,6 +1225,12 @@ private:
             result = encoder_->encodeFrameLight(data);
         } else {
             result = encoder_->encodeFrame(data);
+        }
+
+        if (is_mc_dpsk && !is_handshake_frame) {
+            constexpr int kMCDPSKInterFrameGuardMs = 100;
+            constexpr int kGuardSamples = SAMPLE_RATE * kMCDPSKInterFrameGuardMs / 1000;
+            result.insert(result.end(), kGuardSamples, 0.0f);
         }
 
         // Restore encoder mode if we changed it
@@ -1239,7 +1307,11 @@ private:
         // we caught on 2026-05-04).
         protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate,
                                                     int cw_count,
-                                                    float peer_snr_db, float peer_fading) {
+                                                    float peer_snr_db, float peer_fading,
+                                                    int mc_dpsk_num_carriers,
+                                                    int mc_dpsk_samples_per_symbol) {
+            applyNegotiatedMCDPSKConfig(mod, mc_dpsk_num_carriers,
+                                        mc_dpsk_samples_per_symbol);
             setDataMode(mod, rate);
             if (cw_count > 0 && cw_count != fixed_frame_codewords_) {
                 fixed_frame_codewords_ = v2::sanitizeFixedFrameCodewords(cw_count);

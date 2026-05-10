@@ -108,6 +108,7 @@ public:
     // --- Modem Interface ---
 
     void onRxData(const Bytes& data);
+    void onMCDPSKPartialFrame(const v2::PartialFrameCodewords& partial);
     void tick(uint32_t elapsed_ms);
 
     // --- State ---
@@ -135,6 +136,7 @@ public:
     // 0xFF (AUTO) = let responder decide based on SNR
     void setForcedModulation(Modulation mod);
     void setForcedCodeRate(CodeRate rate);
+    void setMCDPSKConfig(int num_carriers, int samples_per_symbol);
     void setForcedFrameCodewords(int cw_count, bool forced = true);
     Modulation getForcedModulation() const;
     CodeRate getForcedCodeRate() const;

@@ -10,6 +10,116 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-10: MC-DPSK speed ladder + adaptive rung negotiation
+
+**What was missing (architectural feature):**
+Production MC-DPSK had a single preset (level8: 8c DQPSK 512sps R1/4)
+with a documented reliable cell of SNR≥10 dB Moderate fading. The
+modem could not serve sub-10 dB cells. Cold-call between stations
+required both endpoints to agree on a preset out-of-band — there was
+no adaptive rung negotiation.
+
+**What changed (9 commits on exp/mc-dpsk-ladder-2026-05-10):**
+
+1. `68923a1` — **Robust-Low preset** (8c DBPSK 2048sps R1/4 3-CW
+   variable frames). CLI flag `--mc-dpsk-preset robust_low`.
+2. `06487e1` — **3-CW frame bound** for DBPSK MC-DPSK file transfer
+   (4-CW frames span too many fade coherence windows).
+3. `448879d` — **Robust-Mid preset** (8c DBPSK 1024sps R1/4 3-CW).
+   Pure SPS halving over Robust-Low: 2× bps for 3 dB cost.
+4. `ec36395` — **Pipelined ARQ** with bitmap SACK for MC-DPSK file
+   transfer (window>1, timing-derived per profile). Robust-Mid jumped
+   from 19.2→28.9 bps at -3 Mod.
+5. `c253739` — **Per-CW repair Phase 1**: decoder surfaces partial
+   CW data; NACK gains `missing_cw_bitmap` field.
+6. `e0b239b` — **Per-CW repair Phase 2**: compact `DATA_REPAIR`
+   frames carry only failed CWs. Coord guard prevents double-tx
+   when timeout fires near NACK arrival. +32% throughput at +8 Mod.
+7. `3194b8c` — **Noise-floor-relative chirp RMS gate**: replaces
+   fixed 0.025 RMS skip with a sweep-max + noise-floor-adaptive
+   gate. Never raises above 0.025 (no lower-SNR regression). Fixes
+   chirp acquisition failures at high-SNR fading.
+8. `6e600a7` — **Adaptive rung negotiation**: LadderRungId enum +
+   `selectLadderRung(snr, fading)` policy. Cold-call/listen defaults
+   to Robust-Mid; responder picks rung in CONNECT_ACK. `cli_simulator`
+   without flags = adaptive. `setMCDPSKProfile()` early-outs on
+   no-op reconfigurations (fixed an SNR=0 segfault that two prior
+   attempts had).
+
+**Wire format additions (pre-deployment, no compat needed):**
+- `LadderRungId` enum (UNKNOWN/ROBUST_LOW/ROBUST_MID/ROBUST/
+  OFDM_CHIRP/OFDM_NARROW/STANDARD) encoded in reserved bits 4-6 of
+  CONNECT_ACK CW-count byte and MODE_CHANGE payload[5].
+- NACK `missing_cw_bitmap` field for per-CW selective NAK.
+- `DATA_REPAIR = 0x34` frame type for compact partial retransmission.
+
+**Architecture (cold-call flow):**
+1. Both endpoints listen at Robust-Mid (universal hearable -3 to +5
+   dB Mod).
+2. PING/PONG/CONNECT/CONNECT_ACK at Robust-Mid.
+3. Responder measures SNR + fading on CONNECT, calls
+   `selectLadderRung()`, embeds chosen rung_id in CONNECT_ACK.
+4. Both endpoints reconfigure for DATA via the data-mode-change
+   callback (skipping no-op reconfigurations).
+5. DATA frames at the negotiated rung.
+6. MODE_CHANGE handles mid-session re-negotiation through the same
+   path.
+
+**Rung selection policy (per channel classification):**
+
+| Channel | OFDM_CHIRP floor | Robust floor | Robust-Mid floor |
+|---------|-----------------:|-------------:|-----------------:|
+| AWGN | +8 dB | +3 dB | -5 dB |
+| GOOD | +9 dB | +4 dB | -4 dB |
+| MODERATE | +10 dB | +5 dB | -3 dB |
+| POOR | +12 dB | +7 dB | -1 dB |
+
+Below Robust-Mid floor: ROBUST_LOW.
+
+**Hardware validation (single-run, Mac↔Pi5, `--inject --inject-gain
+0.70`, 1KB or 20KB file, `--rate auto`, no `--mc-dpsk-preset`):**
+
+| Channel | SNR | Auto-picked | bps | Retx |
+|---------|----:|-------------|----:|----:|
+| AWGN | +15 | OFDM-CHIRP DQPSK R2/3 | 2337 | 0 |
+| Good | +15 | OFDM-CHIRP DQPSK R1/2 | 1703 | 0 |
+| Good | 0 | MC-DPSK DBPSK R1/4 (Robust-Mid) | 28.9 | 0 |
+| Moderate | 0 | MC-DPSK DBPSK R1/4 (Robust-Mid) | 27.3 | 0 |
+
+All 4 cells delivered cleanly with zero retransmissions. The auto-
+selector spans an 85× throughput range based on measured channel
+conditions.
+
+**Forced-preset behavior preserved** as override path:
+`--mc-dpsk-preset {standard, robust_low, robust_mid, robust}` still
+selects explicit configs. Production deployments can use the flag
+during diagnostics or testing.
+
+**Per-rung validated throughputs (forced presets, prior hardware
+data):**
+
+| Rung | Cell | bps | Notes |
+|------|------|----:|-------|
+| Robust-Low | -5 dB Mod | 12.2 | multi-run validated |
+| Robust-Mid | -3 to +5 dB Mod | ~28 | pipelined ARQ win=2 |
+| Robust + Phase 2 | +6 to +9 dB Mod | 42-56 | per-CW repair helps when channel is borderline-good |
+
+**Test verification:**
+- `ctest --test-dir build --output-on-failure`: 39/39 pass
+- `cli_simulator --snr 0 --channel awgn --rate r1_4 --test`: PASS,
+  adaptive picks Robust-Mid
+- `cli_simulator --snr 15 --channel awgn --rate r1_4 --test`: PASS,
+  adaptive picks OFDM-CHIRP
+- 4 hardware cells listed above: PASS, 0 retx each
+
+**What's NOT done (future work):**
+- Multi-run validation (3+ runs per cell) per project ship-gate rule
+- Mid-session re-negotiation under realistic channel transitions
+- GUI display of active rung
+- Further speed work above current ladder ceilings
+
+---
+
 ## 2026-05-09: Correct README Raw PHY table — strict bits-on-air definition
 
 **What was broken (documentation accuracy):**
