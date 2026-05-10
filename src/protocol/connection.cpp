@@ -993,6 +993,31 @@ void Connection::processArqFrame(const Bytes& frame_data) {
     }
 }
 
+void Connection::onMCDPSKPartialFrame(const v2::PartialFrameCodewords& partial) {
+    if (state_ != ConnectionState::CONNECTED || negotiated_mode_ != WaveformMode::MC_DPSK) {
+        return;
+    }
+    if (!partial.valid()) {
+        return;
+    }
+    const uint32_t our_hash = v2::hashCallsign(local_call_);
+    if (partial.dst_hash != our_hash && partial.dst_hash != 0xFFFFFF) {
+        return;
+    }
+
+    const bool outermost = !arq_callback_defer_refill_;
+    if (outermost) {
+        arq_callback_defer_refill_ = true;
+    }
+
+    arq_.onPartialFrame(partial);
+
+    if (outermost) {
+        arq_callback_defer_refill_ = false;
+        runDeferredArqRefill();
+    }
+}
+
 void Connection::runDeferredArqRefill() {
     if (arq_callback_defer_refill_) {
         return;

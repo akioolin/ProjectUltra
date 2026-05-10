@@ -1089,12 +1089,17 @@ void StreamingDecoder::decodeCurrentFrame() {
         populateDecodeMetrics(result, is_ofdm, sync_cfo_);
     }
 
+    const bool deliver_partial_mc_dpsk =
+        !result.success && mode_ == protocol::WaveformMode::MC_DPSK &&
+        result.has_partial_codewords;
     if (result.success || result.codewords_ok > 0) {
         {
             std::lock_guard<std::mutex> qlock(queue_mutex_);
             frame_queue_.push(result);
         }
-        if (result.success && frame_callback_) frame_callback_(result);
+        if ((result.success || deliver_partial_mc_dpsk) && frame_callback_) {
+            frame_callback_(result);
+        }
 
         LOG_MODEM(INFO, "[%s] StreamingDecoder: Frame decoded, %d/%d CWs, SNR=%.1f dB, CFO=%.1f Hz",
                   log_prefix_.c_str(), result.codewords_ok, result.codewords_ok + result.codewords_failed,
@@ -1354,9 +1359,21 @@ DecodeResult StreamingDecoder::decodeMCDPSKFrame(const std::vector<float>& soft_
     int total_cw = hdr.total_cw;
     int avail_cw = static_cast<int>(soft_bits.size() / LDPC_BLOCK);
 
+    result.partial_codewords.type = hdr.type;
+    result.partial_codewords.flags = data0.size() >= 4 ? data0[3] : v2::Flags::VERSION_V2;
+    result.partial_codewords.seq = hdr.seq;
+    result.partial_codewords.src_hash = hdr.src_hash;
+    result.partial_codewords.dst_hash = hdr.dst_hash;
+    result.partial_codewords.total_cw = static_cast<uint8_t>(std::clamp(total_cw, 0, 32));
+    result.partial_codewords.decoded_bitmap = 0x1u;
+    result.partial_codewords.data.resize(static_cast<size_t>(std::max(total_cw, 0)));
+    result.partial_codewords.data[0] = data0;
+
     if (avail_cw < total_cw) {
         // Not enough codewords available
         result.frame_data = data0;
+        result.codewords_failed = std::max(0, total_cw - avail_cw);
+        result.has_partial_codewords = result.partial_codewords.valid();
         LOG_MODEM(DEBUG, "[%s] MC-DPSK: Need %d CWs, have %d - partial", log_prefix_.c_str(), total_cw, avail_cw);
         return result;
     }
@@ -1378,6 +1395,8 @@ DecodeResult StreamingDecoder::decodeMCDPSKFrame(const std::vector<float>& soft_
             data.resize(bytes_per_cw);
             cw_status.decoded[i] = true;
             cw_status.data[i] = data;
+            result.partial_codewords.decoded_bitmap |= (1u << i);
+            result.partial_codewords.data[static_cast<size_t>(i)] = data;
             result.codewords_ok++;
         } else {
             result.codewords_failed++;
@@ -1389,6 +1408,7 @@ DecodeResult StreamingDecoder::decodeMCDPSKFrame(const std::vector<float>& soft_
         result.frame_data = cw_status.reassemble();
         LOG_MODEM(DEBUG, "[%s] MC-DPSK: %d/%d CWs decoded OK", log_prefix_.c_str(), total_cw, total_cw);
     } else {
+        result.has_partial_codewords = result.partial_codewords.valid();
         LOG_MODEM(DEBUG, "[%s] MC-DPSK: %d/%d CWs failed", log_prefix_.c_str(),
                   result.codewords_failed, total_cw);
     }

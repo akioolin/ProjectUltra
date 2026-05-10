@@ -60,6 +60,12 @@ struct ARQStats {
     int sack_trigger_out_of_window = 0; // DATA arrived outside RX window
     int ack_repeat_jobs_coalesced = 0;  // Pending ACK repeat jobs replaced
     int ack_repeat_jobs_dropped = 0;    // Pending ACK repeat jobs dropped on overflow
+    int partial_frames_received = 0;    // Partial MC-DPSK frames with CW0 decoded
+    int partial_frames_completed = 0;   // Partial frames completed by later retransmission
+    int partial_frame_crc_failed = 0;   // All CWs present but frame CRC rejected
+    int partial_frame_expired = 0;      // Stale partial RX slots cleared
+    int cw_nacks_sent = 0;              // Per-CW missing bitmap NACKs sent
+    int cw_nacks_received = 0;          // Per-CW missing bitmap NACKs received
 };
 
 /**

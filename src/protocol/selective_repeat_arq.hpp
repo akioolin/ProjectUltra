@@ -8,6 +8,7 @@
 #include <optional>
 #include <array>
 #include <cstdint>
+#include <vector>
 
 namespace ultra {
 namespace protocol {
@@ -58,6 +59,7 @@ public:
     v2::FrameType lastRxFrameType() const { return last_rx_frame_type_; }
 
     void onFrameReceived(const Bytes& frame_data) override;
+    void onPartialFrame(const v2::PartialFrameCodewords& partial);
 
     void tick(uint32_t elapsed_ms) override;
 
@@ -160,16 +162,22 @@ private:
     // RX state per frame in receive window
     struct RXSlot {
         bool received = false;      // Frame received
+        bool partial = false;       // Some CWs received, frame not yet complete
         uint16_t seq = 0;           // Sequence number
         Bytes payload;              // Received payload
         uint8_t flags = 0;          // Frame flags
         v2::FrameType type = v2::FrameType::DATA;
+        uint8_t total_cw = 0;
+        uint32_t cw_bitmap = 0;     // Bit i = decoded CW stored in cw_data[i]
+        uint32_t partial_age_ms = 0;
+        std::vector<Bytes> cw_data;
     };
 
     // Maximum window size. Control frames already carry a 32-bit SACK bitmap;
     // keep the production cap at 16 for bounded memory/latency while allowing
     // clean OFDM audio chains to cover real soundcard buffering.
     static constexpr size_t MAX_WINDOW = 16;
+    static constexpr uint32_t PARTIAL_RX_TTL_MS = 120000;
 
     ARQConfig config_;
     CodeRate code_rate_ = CodeRate::R1_4;  // Default R1/4, updated when connected
@@ -243,6 +251,7 @@ private:
 
     void transmitData(const Bytes& data);
     void handleDataFrame(const v2::DataFrame& frame);
+    void handlePartialFrame(const v2::PartialFrameCodewords& partial);
     void handleAckFrame(const v2::ControlFrame& frame);
     void handleNackFrame(const v2::ControlFrame& frame);
 
@@ -250,6 +259,9 @@ private:
     void advanceTXWindow();
     void advanceRXWindow();
     void sendSack();
+    void sendCwNack(uint16_t seq, uint32_t missing_bitmap);
+    void clearPartialRXSlot(RXSlot& slot);
+    bool tryCompletePartialRXSlot(size_t slot_index);
     void maybeSampleRTT(TXSlot& slot);
     uint32_t currentAckTimeoutMs() const;
     uint32_t ackRepeatDelayForCopy(int copy_index) const;

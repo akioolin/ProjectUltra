@@ -108,6 +108,7 @@ public:
     // --- Modem Interface ---
 
     void onRxData(const Bytes& data);
+    void onMCDPSKPartialFrame(const v2::PartialFrameCodewords& partial);
     void tick(uint32_t elapsed_ms);
 
     // --- State ---

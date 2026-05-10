@@ -81,11 +81,12 @@ void SelectiveRepeatARQ::setCodeRate(CodeRate rate) {
 
     size_t discarded_rx = 0;
     for (auto& slot : rx_window_) {
-        if (!slot.received) {
+        if (!slot.received && !slot.partial) {
             continue;
         }
 
         slot.received = false;
+        clearPartialRXSlot(slot);
         slot.payload.clear();
         slot.flags = 0;
         slot.type = v2::FrameType::DATA;
@@ -349,6 +350,10 @@ void SelectiveRepeatARQ::onFrameReceived(const Bytes& frame_data) {
     }
 }
 
+void SelectiveRepeatARQ::onPartialFrame(const v2::PartialFrameCodewords& partial) {
+    handlePartialFrame(partial);
+}
+
 void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
     last_rx_flags_ = frame.flags;
     last_rx_more_data_ = (frame.flags & v2::Flags::MORE_FRAG) != 0;
@@ -370,6 +375,7 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
 
         if (!rx_window_[slot].received) {
             rx_window_[slot].received = true;
+            clearPartialRXSlot(rx_window_[slot]);
             rx_window_[slot].seq = seq;
             rx_window_[slot].payload = frame.payload;
             rx_window_[slot].flags = frame.flags;
@@ -441,6 +447,71 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
         sack_timer_ms_ = 0;
         frames_since_ack_ = 0;
     }
+}
+
+void SelectiveRepeatARQ::handlePartialFrame(const v2::PartialFrameCodewords& partial) {
+    if (!partial.valid()) {
+        return;
+    }
+    if (!isInRXWindow(partial.seq)) {
+        LOG_MODEM(WARN, "SR-ARQ: Partial DATA seq=%d outside window [%d, %d)",
+                  partial.seq, rx_base_seq_, (rx_base_seq_ + config_.window_size) & 0xFFFF);
+        stats_.sack_trigger_out_of_window++;
+        sendSack();
+        sack_pending_ = false;
+        sack_timer_ms_ = 0;
+        frames_since_ack_ = 0;
+        return;
+    }
+
+    size_t slot_index = seqToSlot(partial.seq);
+    RXSlot& slot = rx_window_[slot_index];
+    if (slot.received) {
+        LOG_MODEM(DEBUG, "SR-ARQ: Partial DATA seq=%d ignored; frame already complete", partial.seq);
+        sendSack();
+        return;
+    }
+
+    if (!slot.partial || slot.seq != partial.seq) {
+        clearPartialRXSlot(slot);
+        slot.partial = true;
+        slot.seq = partial.seq;
+        slot.flags = partial.flags;
+        slot.type = partial.type;
+        slot.total_cw = partial.total_cw;
+        slot.cw_data.assign(partial.total_cw, Bytes{});
+        slot.partial_age_ms = 0;
+    }
+
+    bool merged = false;
+    const uint32_t expected = partial.expectedBitmap();
+    for (uint8_t cw = 0; cw < partial.total_cw && cw < 32; ++cw) {
+        const uint32_t bit = 1u << cw;
+        if ((partial.decoded_bitmap & bit) == 0) {
+            continue;
+        }
+        if (cw >= partial.data.size() || partial.data[cw].empty()) {
+            continue;
+        }
+        if ((slot.cw_bitmap & bit) == 0) {
+            merged = true;
+        }
+        slot.cw_bitmap |= bit;
+        slot.cw_data[cw] = partial.data[cw];
+    }
+
+    if (merged) {
+        stats_.partial_frames_received++;
+    }
+
+    LOG_MODEM(INFO, "SR-ARQ: Partial DATA seq=%d cw=0x%08X/%08X missing=0x%08X",
+              partial.seq, slot.cw_bitmap, expected, expected & ~slot.cw_bitmap);
+
+    if (tryCompletePartialRXSlot(slot_index)) {
+        return;
+    }
+
+    sendCwNack(partial.seq, expected & ~slot.cw_bitmap);
 }
 
 void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
@@ -602,9 +673,16 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
 }
 
 void SelectiveRepeatARQ::handleNackFrame(const v2::ControlFrame& frame) {
-    uint16_t seq = frame.seq;
+    v2::NackPayload np = v2::NackPayload::decode(frame.payload);
+    uint16_t seq = np.frame_seq;
+    if (seq != frame.seq) {
+        seq = frame.seq;
+    }
 
-    LOG_MODEM(DEBUG, "SR-ARQ: NACK seq=%d", seq);
+    LOG_MODEM(INFO, "SR-ARQ: NACK seq=%d missing_cw=0x%08X", seq, np.cw_bitmap);
+    if (np.cw_bitmap != 0) {
+        stats_.cw_nacks_received++;
+    }
 
     if (isInTXWindow(seq)) {
         size_t slot = seqToSlot(seq);
@@ -695,6 +773,20 @@ void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
             frames_since_ack_ = 0;
         } else {
             sack_timer_ms_ -= elapsed_ms;
+        }
+    }
+
+    for (auto& slot : rx_window_) {
+        if (!slot.partial || slot.received) {
+            continue;
+        }
+        if (elapsed_ms >= PARTIAL_RX_TTL_MS - std::min(slot.partial_age_ms, PARTIAL_RX_TTL_MS)) {
+            LOG_MODEM(WARN, "SR-ARQ: Partial DATA seq=%d expired (cw=0x%08X)",
+                      slot.seq, slot.cw_bitmap);
+            clearPartialRXSlot(slot);
+            stats_.partial_frame_expired++;
+        } else {
+            slot.partial_age_ms += elapsed_ms;
         }
     }
 }
@@ -804,11 +896,70 @@ void SelectiveRepeatARQ::advanceRXWindow() {
         }
 
         rx_window_[slot].received = false;
+        clearPartialRXSlot(rx_window_[slot]);
         rx_window_[slot].payload.clear();
         rx_window_[slot].flags = 0;
         rx_window_[slot].type = v2::FrameType::DATA;
         rx_base_seq_ = (rx_base_seq_ + 1) & 0xFFFF;
     }
+}
+
+void SelectiveRepeatARQ::clearPartialRXSlot(RXSlot& slot) {
+    slot.partial = false;
+    slot.total_cw = 0;
+    slot.cw_bitmap = 0;
+    slot.partial_age_ms = 0;
+    slot.cw_data.clear();
+}
+
+bool SelectiveRepeatARQ::tryCompletePartialRXSlot(size_t slot_index) {
+    RXSlot& slot = rx_window_[slot_index];
+    if (!slot.partial || slot.total_cw == 0 || slot.total_cw > 32) {
+        return false;
+    }
+
+    const uint32_t expected =
+        slot.total_cw >= 32 ? 0xFFFFFFFFu : ((1u << slot.total_cw) - 1u);
+    if ((slot.cw_bitmap & expected) != expected) {
+        return false;
+    }
+
+    v2::CodewordStatus status;
+    status.initForFrame(slot.total_cw);
+    for (uint8_t i = 0; i < slot.total_cw; ++i) {
+        status.decoded[i] = true;
+        status.data[i] = slot.cw_data[i];
+    }
+
+    Bytes assembled = status.reassemble();
+    auto frame = v2::DataFrame::deserialize(assembled);
+    if (!frame || frame->seq != slot.seq) {
+        LOG_MODEM(WARN, "SR-ARQ: Partial DATA seq=%d had all CWs but frame CRC rejected",
+                  slot.seq);
+        stats_.partial_frame_crc_failed++;
+        const uint16_t seq = slot.seq;
+        clearPartialRXSlot(slot);
+        sendCwNack(seq, expected);
+        return false;
+    }
+
+    stats_.partial_frames_completed++;
+    LOG_MODEM(INFO, "SR-ARQ: Partial DATA seq=%d completed from CW slots", slot.seq);
+    clearPartialRXSlot(slot);
+    handleDataFrame(*frame);
+    return true;
+}
+
+void SelectiveRepeatARQ::sendCwNack(uint16_t seq, uint32_t missing_bitmap) {
+    if (missing_bitmap == 0) {
+        return;
+    }
+
+    auto nack = v2::ControlFrame::makeNack(local_call_, remote_call_, seq, missing_bitmap);
+    stats_.cw_nacks_sent++;
+    auto data = nack.serialize();
+    LOG_MODEM(INFO, "SR-ARQ: Sent CW_NACK seq=%d missing=0x%08X", seq, missing_bitmap);
+    transmitData(data);
 }
 
 void SelectiveRepeatARQ::sendSack() {
@@ -1033,6 +1184,7 @@ void SelectiveRepeatARQ::reset() {
 
     for (auto& slot : rx_window_) {
         slot.received = false;
+        clearPartialRXSlot(slot);
         slot.payload.clear();
         slot.flags = 0;
         slot.type = v2::FrameType::DATA;

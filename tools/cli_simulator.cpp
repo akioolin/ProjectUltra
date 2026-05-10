@@ -1764,6 +1764,12 @@ private:
                   << "  dup_ignored=" << cs.arq.duplicate_acks_ignored
                   << "  repeat_coalesced=" << cs.arq.ack_repeat_jobs_coalesced
                   << "  repeat_dropped=" << cs.arq.ack_repeat_jobs_dropped << "\n";
+        std::cout << "  PCW:  partial_rcvd=" << cs.arq.partial_frames_received
+                  << "  partial_done=" << cs.arq.partial_frames_completed
+                  << "  partial_crc_fail=" << cs.arq.partial_frame_crc_failed
+                  << "  partial_expired=" << cs.arq.partial_frame_expired
+                  << "  cw_nack_sent=" << cs.arq.cw_nacks_sent
+                  << "  cw_nack_rcvd=" << cs.arq.cw_nacks_received << "\n";
 
         // Effective ACK rate: how many ACK frames BRAVO sent per data frame
         // received. Baseline reference today on 50 KB OFDM ~1.1.

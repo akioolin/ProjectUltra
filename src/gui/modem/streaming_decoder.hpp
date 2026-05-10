@@ -78,6 +78,8 @@ struct DecodeResult {
     float lts_fading_index = 0.0f;  // Per-carrier LTS/pilot fading index
     float sync_correlation = 0.0f;  // Light/full preamble sync correlation
     float lts_residual_cfo_hz = 0.0f;  // Residual CFO reported by OFDM waveform
+    bool has_partial_codewords = false;  // MC-DPSK only: CW0 parsed, frame incomplete.
+    v2::PartialFrameCodewords partial_codewords;
 };
 
 // Decoder statistics for GUI display

@@ -816,7 +816,14 @@ private:
     }
 
     void handleDecodedFrame(const DecodeResult& result) {
-        if (!result.success) return;
+        if (!result.success) {
+            if (result.has_partial_codewords) {
+                float fading_index = decoder_ ? decoder_->getLastFadingIndex() : 0.0f;
+                protocol_.setChannelQuality(snr_db_, fading_index);
+                protocol_.onMCDPSKPartialFrame(result.partial_codewords);
+            }
+            return;
+        }
 
         if (result.is_ping) {
             // PING handled by ping callback

@@ -222,6 +222,14 @@ void ProtocolEngine::onRxData(const Bytes& data) {
     defer_tx_ = false;
 }
 
+void ProtocolEngine::onMCDPSKPartialFrame(const v2::PartialFrameCodewords& partial) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+
+    defer_tx_ = true;
+    connection_.onMCDPSKPartialFrame(partial);
+    defer_tx_ = false;
+}
+
 void ProtocolEngine::processRxBuffer() {
     // Look for v2 frame magic (2 bytes: 0x554C = "UL")
     while (!rx_buffer_.empty()) {

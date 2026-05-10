@@ -1179,6 +1179,112 @@ bool test_sack_delay_short_zero_sentinel_preserves_legacy() {
     return true;
 }
 
+bool test_partial_mc_dpsk_cw_nack_and_merge() {
+    TEST("Partial MC-DPSK CW state sends NACK and merges later CWs");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.ack_timeout_ms = 1000;
+
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+
+    ByteChannel channel;
+    Bytes delivered;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+    rx.setDataReceivedCallback([&](const Bytes& data) { delivered = data; });
+
+    Bytes payload(50, 0x42);
+    auto frame = v2::DataFrame::makeData("TX1", "RX1", 0, payload, CodeRate::R1_4);
+    auto serialized = frame.serialize();
+    auto cws = v2::splitIntoCodewords(serialized);
+    if (cws.size() != 4) {
+        FAIL("test fixture expected a 4-CW MC-DPSK frame");
+    }
+
+    v2::PartialFrameCodewords first;
+    first.type = frame.type;
+    first.flags = frame.flags;
+    first.seq = frame.seq;
+    first.src_hash = frame.src_hash;
+    first.dst_hash = frame.dst_hash;
+    first.total_cw = static_cast<uint8_t>(cws.size());
+    first.data.assign(cws.size(), Bytes{});
+    first.decoded_bitmap = (1u << 0) | (1u << 2);
+    first.data[0] = cws[0];
+    first.data[2] = cws[2];
+
+    rx.onPartialFrame(first);
+
+    if (channel.size() != 1) {
+        FAIL("partial frame should emit one CW_NACK");
+    }
+    auto nack = v2::ControlFrame::deserialize(channel.receive());
+    if (!nack || nack->type != v2::FrameType::NACK) {
+        FAIL("partial frame response was not a NACK");
+    }
+    auto np = v2::NackPayload::decode(nack->payload);
+    if (np.frame_seq != 0 || np.cw_bitmap != 0x0A) {
+        FAIL("CW_NACK bitmap should request CW1 and CW3");
+    }
+    if (!delivered.empty()) {
+        FAIL("partial frame delivered payload before all CWs arrived");
+    }
+
+    v2::PartialFrameCodewords second = first;
+    second.decoded_bitmap = (1u << 0) | (1u << 1) | (1u << 3);
+    second.data[1] = cws[1];
+    second.data[3] = cws[3];
+
+    rx.onPartialFrame(second);
+
+    if (delivered != payload) {
+        FAIL("merged partial CWs did not deliver original payload");
+    }
+    auto stats = rx.getStats();
+    if (stats.partial_frames_completed != 1 || stats.cw_nacks_sent != 1) {
+        FAIL("partial completion/NACK stats not updated");
+    }
+
+    PASS();
+    return true;
+}
+
+bool test_cw_nack_triggers_full_frame_retransmit_phase1() {
+    TEST("CW_NACK triggers full-frame retransmit in Phase 1");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.ack_timeout_ms = 1000;
+
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+
+    ByteChannel channel;
+    tx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    if (!tx.sendData(Bytes(50, 0x24))) {
+        FAIL("initial send failed");
+    }
+    if (channel.size() != 1) {
+        FAIL("initial DATA was not transmitted");
+    }
+
+    auto nack = v2::ControlFrame::makeNack("RX1", "TX1", 0, 0x04);
+    tx.onFrameReceived(nack.serialize());
+
+    if (channel.size() != 2) {
+        FAIL("CW_NACK should retransmit the whole DATA frame in Phase 1");
+    }
+    auto stats = tx.getStats();
+    if (stats.cw_nacks_received != 1 || stats.retransmissions_nack != 1) {
+        FAIL("CW_NACK retransmission stats not updated");
+    }
+
+    PASS();
+    return true;
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -1205,6 +1311,8 @@ int main() {
     test_sack_delay_short_zero_sentinel_preserves_legacy();
 
     std::cout << "\nARQ Boundary/Property Tests:\n";
+    test_partial_mc_dpsk_cw_nack_and_merge();
+    test_cw_nack_triggers_full_frame_retransmit_phase1();
     test_stale_ack_older_than_base_minus_one_is_ignored();
     test_future_ack_too_far_ahead_is_ignored();
     test_duplicate_sack_hole_is_suppressed_without_duplicate_retx_accounting();

@@ -595,7 +595,7 @@ void setPhyMaskV1Capability(ConnectFrame& frame);
 // ============================================================================
 struct NackPayload {
     uint16_t frame_seq;      // Which frame had errors
-    uint32_t cw_bitmap;      // Bit i = codeword i failed (up to 32 CWs)
+    uint32_t cw_bitmap;      // Bit i = codeword i failed/missing (up to 32 CWs)
 
     // Encode to 6 bytes (fits in control frame payload)
     void encode(uint8_t* out) const;
@@ -608,6 +608,36 @@ struct NackPayload {
 
     // Helper: check if codeword i failed
     bool isFailed(int i) const { return (cw_bitmap >> i) & 1; }
+};
+
+// Partial MC-DPSK data-frame decode. CW0 must have decoded successfully, so
+// seq/addressing are known. ARQ uses this to slot good CWs across full-frame
+// retransmissions; the wire data frame itself is unchanged.
+struct PartialFrameCodewords {
+    FrameType type = FrameType::DATA;
+    uint8_t flags = Flags::VERSION_V2;
+    uint16_t seq = 0;
+    uint32_t src_hash = 0;
+    uint32_t dst_hash = 0;
+    uint8_t total_cw = 0;
+    uint32_t decoded_bitmap = 0;  // Bit i = CW i decoded and data[i] is valid.
+    std::vector<Bytes> data;      // Decoded info bytes, indexed by CW.
+
+    bool valid() const {
+        return total_cw > 0 && total_cw <= 32 &&
+               data.size() >= total_cw &&
+               (decoded_bitmap & 0x1u) != 0;
+    }
+
+    uint32_t expectedBitmap() const {
+        if (total_cw == 0) return 0;
+        if (total_cw >= 32) return 0xFFFFFFFFu;
+        return (1u << total_cw) - 1u;
+    }
+
+    uint32_t missingBitmap() const {
+        return expectedBitmap() & ~decoded_bitmap;
+    }
 };
 
 // ============================================================================
