@@ -1502,12 +1502,11 @@ void Connection::configureArqForCurrentDataMode() {
     }
 
     if (negotiated_mode_ == WaveformMode::MC_DPSK) {
-        // Robust-Low is currently selected by forcing MC-DPSK DBPSK at the
-        // protocol layer while both peers use the 2048-sps PHY preset. Scale
-        // the ACK watchdog for its longer frame airtime; standard DQPSK stays
-        // on the existing 18s path.
-        const bool robust_low_profile = (data_modulation_ == Modulation::DBPSK);
-        const uint32_t ack_timeout_ms = robust_low_profile ? 72000 : 18000;
+        // DBPSK MC-DPSK robust profiles have longer frame airtime than standard
+        // DQPSK. Keep the generous watchdog shared by Robust-Low/Robust-Mid;
+        // standard DQPSK stays on the existing 18s path.
+        const bool dbpsk_profile = (data_modulation_ == Modulation::DBPSK);
+        const uint32_t ack_timeout_ms = dbpsk_profile ? 72000 : 18000;
         arq_.setWindowSize(1);
         arq_.setAckTimeout(ack_timeout_ms);
         arq_.setSackDelay(2000);
@@ -1517,7 +1516,7 @@ void Connection::configureArqForCurrentDataMode() {
                   ack_timeout_ms / 1000.0f,
                   modulationToString(data_modulation_),
                   codeRateToString(data_code_rate_),
-                  robust_low_profile ? ", Robust-Low airtime" : "");
+                  dbpsk_profile ? ", DBPSK robust airtime" : "");
     } else if (negotiated_mode_ == WaveformMode::OFDM_NARROW) {
         // Selective-repeat window=3 — chosen after A/B in cli_simulator
         // SNR=8 good fading R1/4 7-message test:
@@ -1603,14 +1602,14 @@ void Connection::configureArqForCurrentDataMode() {
 }
 
 uint32_t Connection::pingTimeoutMsForCurrentProfile() const {
-    // Robust-Low PING/PONG detection has to wait through the same 2048-sps
-    // MC-DPSK training/ref energy check as CONNECT detection. Keeping the
+    // DBPSK MC-DPSK PING/PONG detection has to wait through the same slower
+    // training/ref energy check as CONNECT detection. Keeping the
     // standard timer unchanged avoids slowing normal retries while preventing
-    // DBPSK Robust-Low probe retries from overlapping the following CONNECT.
-    const bool robust_low_probe =
+    // robust DBPSK probe retries from overlapping the following CONNECT.
+    const bool robust_dbpsk_probe =
         connect_waveform_ == WaveformMode::MC_DPSK &&
         config_.forced_modulation == Modulation::DBPSK;
-    return robust_low_probe ? ROBUST_LOW_PING_TIMEOUT_MS : PING_TIMEOUT_MS;
+    return robust_dbpsk_probe ? ROBUST_LOW_PING_TIMEOUT_MS : PING_TIMEOUT_MS;
 }
 
 bool Connection::usesBoundedVariableMCDPSKFrames() const {

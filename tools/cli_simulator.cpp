@@ -89,7 +89,7 @@ bool envFlagEnabled(const char* name) {
 }
 
 const char* mcDpskPresetChoices() {
-    return "standard, robust_low";
+    return "standard, robust_low, robust_mid";
 }
 
 bool parseMCDPSKPreset(const std::string& value,
@@ -104,6 +104,11 @@ bool parseMCDPSKPreset(const std::string& value,
     if (v == "robust_low" || v == "robustlow") {
         preset_name = "robust_low";
         config = mc_dpsk_presets::robust_low();
+        return true;
+    }
+    if (v == "robust_mid" || v == "robustmid") {
+        preset_name = "robust_mid";
+        config = mc_dpsk_presets::robust_mid();
         return true;
     }
     return false;
@@ -859,7 +864,7 @@ private:
 
         // Wait for all messages to arrive
         // Narrowband needs much longer: ~4.4s/frame RTT with window=1, plus retransmissions
-        int burst_timeout = isRobustLowMCDPSKPreset()
+        int burst_timeout = isRobustMCDPSKPreset()
             ? 360
             : ((forced_waveform_ == WaveformMode::OFDM_NARROW) ? 300 : 120);
         if (!waitFor([this, total]{ return messages_received_count_.load() >= total; }, burst_timeout)) {
@@ -1168,7 +1173,7 @@ private:
                 mc_dpsk_config_.bits_per_symbol < 2) ? 75 : 30;
     }
 
-    bool isRobustLowMCDPSKPreset() const {
+    bool isRobustMCDPSKPreset() const {
         return mc_dpsk_config_.samples_per_symbol > 512 ||
                mc_dpsk_config_.bits_per_symbol < 2;
     }
@@ -1192,13 +1197,13 @@ private:
     //   Good:     ~20 B/s sim, ~12 B/s hardware
     //   Moderate: ~12 B/s sim, ~8 B/s hardware
     //   Poor/Flutter: ~8 B/s sim, ~6 B/s hardware
-    // Robust-Low MC-DPSK is much slower: use 1-2 B/s floors so hardware
-    // validation budgets reflect DBPSK 2048-sps frame airtime.
+    // Robust DBPSK MC-DPSK is much slower: use 1-2 B/s floors so hardware
+    // validation budgets reflect long DBPSK frame airtime.
     // Hardware mode is slower: soundcard jitter, ACK turnaround latency,
     // and ~5-15% retx overhead from USB-1.1 audio devices. Hardware also
     // gets 90s base (vs 60s sim) for two-machine handshake setup time.
     long fileTransferTimeoutSeconds(size_t bytes, bool hardware_mode = false) const {
-        if (isRobustLowMCDPSKPreset()) {
+        if (isRobustMCDPSKPreset()) {
             const long bytes_per_second_floor = hardware_mode ? 1 : 2;
             const long base_overhead_s = hardware_mode ? 180 : 120;
             return base_overhead_s + static_cast<long>(bytes) / bytes_per_second_floor;
@@ -2046,7 +2051,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "                        poor     - 2.0ms delay, 1.0Hz Doppler (disturbed)\n";
                 std::cout << "                        flutter  - 0.5ms delay, 10Hz Doppler (auroral)\n";
                 std::cout << "  --fading, -f        Alias for --channel moderate\n";
-                std::cout << "  --mod, -m <MOD>     Force modulation: dqpsk (DBPSK via robust_low preset)\n";
+                std::cout << "  --mod, -m <MOD>     Force modulation: dqpsk (DBPSK via robust presets)\n";
                 std::cout << "  --expert            Allow lab-only forced PHY modes in --mod\n";
                 std::cout << "  --rate, -r <RATE>   Force code rate: auto, r1_4, r1_2, r2_3, r3_4\n";
                 std::cout << "  --cw-count <N>      Fixed OFDM data-frame codewords (1-8, default: 4)\n";
@@ -2054,7 +2059,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --mask-clear-carrier <N>  Clear one carrier bit (0-58)\n";
                 std::cout << "  --waveform, -w <WF> Force waveform: mc_dpsk, ofdm_chirp, ofdm_cox, ofdm_narrow\n";
                 std::cout << "  --ofdm-config <CFG> OFDM_COX config: default (512/30) or nvis (1024/59)\n";
-                std::cout << "  --mc-dpsk-preset <P> MC-DPSK preset: standard, robust_low\n";
+                std::cout << "  --mc-dpsk-preset <P> MC-DPSK preset: standard, robust_low, robust_mid\n";
                 std::cout << "  --seed <N>          Random seed (default: 42)\n";
                 std::cout << "  --tx-cfo <Hz>       Inject TX CFO in channel model (default: 0)\n";
                 std::cout << "  --cfo <Hz>          Alias for --tx-cfo\n";

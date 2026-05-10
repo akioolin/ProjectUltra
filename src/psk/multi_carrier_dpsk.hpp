@@ -882,6 +882,19 @@ inline MultiCarrierDPSKConfig robust_low() {
     return cfg;
 }
 
+// Robust-Mid: 8 carriers, DBPSK, 46.9 baud (1024 samples/symbol),
+// R1/4 LDPC. Targets SNR -3 to 0 dB Moderate fading. Same
+// modulation/FEC as Robust-Low; halved samples_per_symbol gives
+// 2x airtime for 3 dB margin cost. Same 3-CW bounded variable
+// frame geometry.
+inline MultiCarrierDPSKConfig robust_mid() {
+    MultiCarrierDPSKConfig cfg;
+    cfg.num_carriers = 8;
+    cfg.samples_per_symbol = 1024;  // 46.875 baud, 2x faster than Robust-Low
+    cfg.bits_per_symbol = 1;        // DBPSK
+    return cfg;
+}
+
 // Level 5 equivalent: 3 carriers, ~270 bps raw
 inline MultiCarrierDPSKConfig level5() {
     MultiCarrierDPSKConfig cfg;
