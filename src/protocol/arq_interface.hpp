@@ -66,6 +66,10 @@ struct ARQStats {
     int partial_frame_expired = 0;      // Stale partial RX slots cleared
     int cw_nacks_sent = 0;              // Per-CW missing bitmap NACKs sent
     int cw_nacks_received = 0;          // Per-CW missing bitmap NACKs received
+    int data_repairs_sent = 0;          // Compact DATA_REPAIR frames sent
+    int data_repairs_received = 0;      // Compact DATA_REPAIR frames received
+    int data_repair_cws_sent = 0;       // Original info CWs carried in repairs
+    int data_repair_cws_merged = 0;     // Repair CWs accepted into partial RX slots
 };
 
 /**

@@ -305,6 +305,15 @@ void ProtocolEngine::processRxBuffer() {
             // Connect frames: header + 25B payload + 2B CRC = 44 bytes
             frame_size = v2::DataFrame::HEADER_SIZE + v2::ConnectFrame::PAYLOAD_SIZE + v2::DataFrame::CRC_SIZE;
             frame_is_connect = true;
+        } else if (header.type == v2::FrameType::DATA_REPAIR) {
+            auto repair_header = v2::DataRepairFrame::parseHeader(rx_buffer_);
+            if (!repair_header) {
+                LOG_MODEM(WARN, "Protocol: Invalid DATA_REPAIR header, skipping 1 byte");
+                rx_buffer_.erase(rx_buffer_.begin());
+                continue;
+            }
+            frame_size = static_cast<size_t>(repair_header->repair_count + 1) *
+                         v2::getBytesPerCodeword(repair_header->rate);
         } else {
             // Data frame - need to read payload length from header
             // Header layout: [0-1] magic, [2] type, [3] flags, [4-5] seq,
@@ -332,6 +341,9 @@ void ProtocolEngine::processRxBuffer() {
         } else if (frame_is_connect) {
             auto conn = v2::ConnectFrame::deserialize(frame_data);
             crc_ok = conn.has_value();
+        } else if (header.type == v2::FrameType::DATA_REPAIR) {
+            auto repair = v2::DataRepairFrame::deserialize(frame_data);
+            crc_ok = repair.has_value();
         } else {
             auto data_frame = v2::DataFrame::deserialize(frame_data);
             crc_ok = data_frame.has_value();

@@ -144,6 +144,7 @@ private:
     struct TXSlot {
         bool active = false;        // Slot in use
         Bytes frame_data;           // Serialized v2 frame to send/resend
+        std::vector<Bytes> info_codewords; // Original variable-frame info CWs for DATA_REPAIR
         uint16_t seq = 0;           // Sequence number
         int fixed_frame_codewords = v2::kDefaultFixedFrameCodewords;
         uint32_t timeout_ms = 0;    // Time until retransmit
@@ -157,6 +158,10 @@ private:
         bool hole_probe_armed = false;      // Timer armed for progress-based probe retx
         uint32_t hole_probe_timer_ms = 0;   // Countdown to hole probe retx
         int hole_probe_count = 0;           // Number of hole-probe retransmits in current epoch
+        uint32_t last_repair_bitmap = 0;    // Dedup repeated CW_NACK copies
+        uint32_t repair_cooldown_ms = 0;
+        bool repair_in_flight = false;      // Compact DATA_REPAIR is awaiting ACK/SACK result
+        uint32_t repair_guard_ms = 0;       // Suppresses full-frame retx while repair can still land
     };
 
     // RX state per frame in receive window
@@ -170,6 +175,8 @@ private:
         uint8_t total_cw = 0;
         uint32_t cw_bitmap = 0;     // Bit i = decoded CW stored in cw_data[i]
         uint32_t partial_age_ms = 0;
+        uint32_t last_cw_nack_bitmap = 0;
+        uint32_t cw_nack_cooldown_ms = 0;
         std::vector<Bytes> cw_data;
     };
 
@@ -252,15 +259,21 @@ private:
     void transmitData(const Bytes& data);
     void handleDataFrame(const v2::DataFrame& frame);
     void handlePartialFrame(const v2::PartialFrameCodewords& partial);
+    void handleDataRepairFrame(const v2::DataRepairFrame& repair);
     void handleAckFrame(const v2::ControlFrame& frame);
     void handleNackFrame(const v2::ControlFrame& frame);
 
     void retransmitFrame(size_t slot, RetransmitCause cause);
+    bool sendDataRepair(size_t slot, uint32_t missing_bitmap);
+    bool suppressFullRetransmitForRepair(size_t slot, RetransmitCause cause);
+    uint32_t computeRepairGuardMs(const TXSlot& slot, size_t repair_frame_codewords) const;
     void advanceTXWindow();
     void advanceRXWindow();
     void sendSack();
     void sendCwNack(uint16_t seq, uint32_t missing_bitmap);
+    void maybeSendCwNack(size_t slot_index, uint32_t missing_bitmap);
     void clearPartialRXSlot(RXSlot& slot);
+    void clearTXSlotRepairState(TXSlot& slot);
     bool tryCompletePartialRXSlot(size_t slot_index);
     void maybeSampleRTT(TXSlot& slot);
     uint32_t currentAckTimeoutMs() const;

@@ -607,6 +607,25 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
         // Control frames (20 bytes): ACK, NACK, etc. - encode as-is, no patching
         // Data frames (>20 bytes): May need total_cw patching
 
+        if (tx_data.size() >= 3 &&
+            tx_data[2] == static_cast<uint8_t>(v2::FrameType::DATA_REPAIR)) {
+            auto repair = v2::DataRepairFrame::deserialize(tx_data);
+            if (!repair) {
+                LOG_MODEM(WARN, "[%s] MC-DPSK: dropping invalid DATA_REPAIR frame",
+                          log_prefix_.c_str());
+                return {};
+            }
+            auto cws = v2::encodeInfoCodewordsWithLDPC(repair->infoCodewords(), repair->rate);
+            Bytes encoded;
+            for (const auto& cw : cws) {
+                encoded.insert(encoded.end(), cw.begin(), cw.end());
+            }
+            LOG_MODEM(INFO, "[%s] MC-DPSK DATA_REPAIR: seq=%d bitmap=0x%04X repair_cw=%d (%zu coded)",
+                      log_prefix_.c_str(), repair->target_seq, repair->repair_bitmap,
+                      repair->repair_count, encoded.size());
+            return encoded;
+        }
+
         // Check if this is a control frame (20 bytes, type 0x10-0x21 or 0x40)
         bool is_control_frame = false;
         if (tx_data.size() == 20 && tx_data.size() >= 3) {

@@ -203,6 +203,7 @@ enum class FrameType : uint8_t {
     DATA_START  = 0x31,  // First segment of large transfer
     DATA_CONT   = 0x32,  // Continuation segment
     DATA_END    = 0x33,  // Final segment
+    DATA_REPAIR = 0x34,  // MC-DPSK partial-CW repair for an in-flight DATA seq
 };
 
 // Flags byte
@@ -284,7 +285,7 @@ inline bool isConnectFrame(FrameType type) {
 // Check if a type is a data frame (variable codewords)
 inline bool isDataFrame(FrameType type) {
     uint8_t t = static_cast<uint8_t>(type);
-    return t >= 0x30 && t <= 0x33;
+    return t >= 0x30 && t <= 0x34;
 }
 
 // Frame type to string
@@ -610,6 +611,38 @@ struct NackPayload {
     bool isFailed(int i) const { return (cw_bitmap >> i) & 1; }
 };
 
+// MC-DPSK compact repair frame. The serialized form is a sequence of raw LDPC
+// info codewords: CW0 is this 20-byte header, CW1..CWk are the original DATA
+// frame info codewords named by repair_bitmap in ascending bit order.
+struct DataRepairFrame {
+    static constexpr size_t HEADER_BYTES = 20;
+    static constexpr uint8_t MAX_REPAIR_CW = 16;
+
+    uint8_t flags = Flags::VERSION_V2;
+    uint16_t target_seq = 0;
+    uint32_t src_hash = 0;
+    uint32_t dst_hash = 0;
+    uint8_t original_total_cw = 0;
+    uint16_t repair_bitmap = 0;
+    uint8_t repair_count = 0;
+    CodeRate rate = CodeRate::R1_4;
+    std::vector<Bytes> repair_codewords;
+
+    static DataRepairFrame make(const std::string& src, const std::string& dst,
+                                uint16_t target_seq, uint8_t original_total_cw,
+                                uint32_t repair_bitmap, CodeRate rate,
+                                const std::vector<Bytes>& repair_codewords);
+
+    bool valid() const;
+    std::vector<uint8_t> repairIndices() const;
+    Bytes headerCodeword() const;
+    std::vector<Bytes> infoCodewords() const;
+    Bytes serialize() const;
+
+    static std::optional<DataRepairFrame> parseHeader(ByteSpan first_codeword);
+    static std::optional<DataRepairFrame> deserialize(ByteSpan data);
+};
+
 // Partial MC-DPSK data-frame decode. CW0 must have decoded successfully, so
 // seq/addressing are known. ARQ uses this to slot good CWs across full-frame
 // retransmissions; the wire data frame itself is unchanged.
@@ -622,11 +655,12 @@ struct PartialFrameCodewords {
     uint8_t total_cw = 0;
     uint32_t decoded_bitmap = 0;  // Bit i = CW i decoded and data[i] is valid.
     std::vector<Bytes> data;      // Decoded info bytes, indexed by CW.
+    bool from_repair = false;     // DATA_REPAIR may omit CW0 when only CW1+ failed.
 
     bool valid() const {
         return total_cw > 0 && total_cw <= 32 &&
                data.size() >= total_cw &&
-               (decoded_bitmap & 0x1u) != 0;
+               (from_repair ? decoded_bitmap != 0 : (decoded_bitmap & 0x1u) != 0);
     }
 
     uint32_t expectedBitmap() const {
@@ -646,6 +680,7 @@ struct PartialFrameCodewords {
 
 // Split serialized frame into codewords (20 bytes each, last may be padded)
 std::vector<Bytes> splitIntoCodewords(const Bytes& frame_data);
+std::vector<Bytes> splitIntoCodewords(const Bytes& frame_data, CodeRate rate);
 
 // Reassemble codewords into frame data (strips padding from last)
 Bytes reassembleCodewords(const std::vector<Bytes>& codewords, size_t expected_size);
@@ -718,6 +753,12 @@ std::vector<Bytes> encodeFrameWithLDPC(const Bytes& frame_data);
 
 // Encode a v2 frame into LDPC codewords with specified rate (for DATA frames)
 std::vector<Bytes> encodeFrameWithLDPC(const Bytes& frame_data, CodeRate rate);
+
+// Encode already-formed LDPC info codewords without adding DATA_CW markers.
+// DATA_REPAIR uses this because CW1.. are original frame info CWs, not a
+// reserialized payload stream.
+std::vector<Bytes> encodeInfoCodewordsWithLDPC(const std::vector<Bytes>& info_codewords,
+                                               CodeRate rate);
 
 // Decode LDPC codewords into frame data with per-codeword status
 // Input: vector of soft bit vectors (648 floats per codeword)

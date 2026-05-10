@@ -107,7 +107,8 @@ bool test_send_single_frame() {
 
     ARQConfig config;
     config.window_size = 4;
-    config.ack_timeout_ms = 1000;
+    config.ack_timeout_ms = 4000;
+    config.sack_delay_ms = 100;
 
     SelectiveRepeatARQ tx(config);
     tx.setCallsigns("TX1", "RX1");
@@ -1250,8 +1251,8 @@ bool test_partial_mc_dpsk_cw_nack_and_merge() {
     return true;
 }
 
-bool test_cw_nack_triggers_full_frame_retransmit_phase1() {
-    TEST("CW_NACK triggers full-frame retransmit in Phase 1");
+bool test_cw_nack_triggers_compact_data_repair_phase2() {
+    TEST("CW_NACK triggers compact DATA_REPAIR in Phase 2");
 
     ARQConfig config;
     config.window_size = 4;
@@ -1269,16 +1270,88 @@ bool test_cw_nack_triggers_full_frame_retransmit_phase1() {
     if (channel.size() != 1) {
         FAIL("initial DATA was not transmitted");
     }
+    Bytes full_frame = channel.receive();
+    auto original = v2::DataFrame::deserialize(full_frame);
+    if (!original) {
+        FAIL("initial DATA frame did not deserialize");
+    }
+    auto original_cws = v2::splitIntoCodewords(full_frame);
+    if (original_cws.size() != 4) {
+        FAIL("test fixture expected a 4-CW initial frame");
+    }
 
-    auto nack = v2::ControlFrame::makeNack("RX1", "TX1", 0, 0x04);
+    auto nack = v2::ControlFrame::makeNack("RX1", "TX1", 0, 0x0A);
     tx.onFrameReceived(nack.serialize());
 
-    if (channel.size() != 2) {
-        FAIL("CW_NACK should retransmit the whole DATA frame in Phase 1");
+    if (channel.size() != 1) {
+        FAIL("CW_NACK should emit one DATA_REPAIR frame");
+    }
+    auto repair = v2::DataRepairFrame::deserialize(channel.receive());
+    if (!repair) {
+        FAIL("CW_NACK response was not a valid DATA_REPAIR frame");
+    }
+    if (repair->target_seq != 0 || repair->repair_bitmap != 0x0A ||
+        repair->repair_count != 2 || repair->repair_codewords.size() != 2) {
+        FAIL("DATA_REPAIR header did not carry requested CW bitmap/count");
+    }
+    if (repair->repair_codewords[0] != original_cws[1] ||
+        repair->repair_codewords[1] != original_cws[3]) {
+        FAIL("DATA_REPAIR did not carry the original missing info CWs");
     }
     auto stats = tx.getStats();
-    if (stats.cw_nacks_received != 1 || stats.retransmissions_nack != 1) {
-        FAIL("CW_NACK retransmission stats not updated");
+    if (stats.cw_nacks_received != 1 || stats.retransmissions_nack != 1 ||
+        stats.data_repairs_sent != 1 || stats.data_repair_cws_sent != 2) {
+        FAIL("DATA_REPAIR retransmission stats not updated");
+    }
+    tx.onFrameReceived(nack.serialize());
+    if (channel.size() != 0) {
+        FAIL("duplicate CW_NACK should not emit a second DATA_REPAIR or full DATA frame");
+    }
+    tx.tick(999);
+    if (channel.size() != 0) {
+        FAIL("DATA_REPAIR guard should suppress shadow full-frame retx before cooldown");
+    }
+    tx.tick(10000);
+    if (channel.size() != 1) {
+        FAIL("DATA_REPAIR guard expiry should permit full-frame fallback");
+    }
+    auto fallback = v2::DataFrame::deserialize(channel.receive());
+    if (!fallback || fallback->seq != original->seq || fallback->payload != original->payload) {
+        FAIL("full-frame fallback after DATA_REPAIR guard was invalid");
+    }
+
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+    Bytes delivered;
+    rx.setDataReceivedCallback([&](const Bytes& data) { delivered = data; });
+    ByteChannel rx_channel;
+    rx.setTransmitCallback([&](const Bytes& data) { rx_channel.send(data); });
+
+    v2::PartialFrameCodewords first;
+    first.type = original->type;
+    first.flags = original->flags;
+    first.seq = original->seq;
+    first.src_hash = original->src_hash;
+    first.dst_hash = original->dst_hash;
+    first.total_cw = static_cast<uint8_t>(original_cws.size());
+    first.data.assign(original_cws.size(), Bytes{});
+    first.decoded_bitmap = (1u << 0) | (1u << 2);
+    first.data[0] = original_cws[0];
+    first.data[2] = original_cws[2];
+    rx.onPartialFrame(first);
+    if (rx_channel.size() != 1) {
+        FAIL("receiver partial state should emit one CW_NACK before repair");
+    }
+    (void)rx_channel.receive();
+
+    rx.onFrameReceived(repair->serialize());
+    if (delivered != Bytes(50, 0x24)) {
+        FAIL("DATA_REPAIR did not merge and deliver original payload");
+    }
+    auto rx_stats = rx.getStats();
+    if (rx_stats.data_repairs_received != 1 || rx_stats.data_repair_cws_merged != 2 ||
+        rx_stats.partial_frames_completed != 1) {
+        FAIL("DATA_REPAIR receive/merge stats not updated");
     }
 
     PASS();
@@ -1312,7 +1385,7 @@ int main() {
 
     std::cout << "\nARQ Boundary/Property Tests:\n";
     test_partial_mc_dpsk_cw_nack_and_merge();
-    test_cw_nack_triggers_full_frame_retransmit_phase1();
+    test_cw_nack_triggers_compact_data_repair_phase2();
     test_stale_ack_older_than_base_minus_one_is_ignored();
     test_future_ack_too_far_ahead_is_ignored();
     test_duplicate_sack_hole_is_suppressed_without_duplicate_retx_accounting();

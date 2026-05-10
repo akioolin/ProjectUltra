@@ -1769,7 +1769,11 @@ private:
                   << "  partial_crc_fail=" << cs.arq.partial_frame_crc_failed
                   << "  partial_expired=" << cs.arq.partial_frame_expired
                   << "  cw_nack_sent=" << cs.arq.cw_nacks_sent
-                  << "  cw_nack_rcvd=" << cs.arq.cw_nacks_received << "\n";
+                  << "  cw_nack_rcvd=" << cs.arq.cw_nacks_received
+                  << "  repair_tx=" << cs.arq.data_repairs_sent
+                  << "  repair_rx=" << cs.arq.data_repairs_received
+                  << "  repair_cw_tx=" << cs.arq.data_repair_cws_sent
+                  << "  repair_cw_merge=" << cs.arq.data_repair_cws_merged << "\n";
 
         // Effective ACK rate: how many ACK frames BRAVO sent per data frame
         // received. Baseline reference today on 50 KB OFDM ~1.1.

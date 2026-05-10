@@ -1347,6 +1347,71 @@ DecodeResult StreamingDecoder::decodeMCDPSKFrame(const std::vector<float>& soft_
     result.frame_type = hdr.type;
     result.codewords_ok = 1;
 
+    if (hdr.type == v2::FrameType::DATA_REPAIR) {
+        auto repair_header = v2::DataRepairFrame::parseHeader(data0);
+        if (!repair_header) {
+            LOG_MODEM(INFO, "[%s] MC-DPSK: DATA_REPAIR header invalid", log_prefix_.c_str());
+            return result;
+        }
+
+        const int total_cw = static_cast<int>(repair_header->repair_count) + 1;
+        const int avail_cw = static_cast<int>(soft_bits.size() / LDPC_BLOCK);
+        auto repair_indices = repair_header->repairIndices();
+
+        result.partial_codewords.type = v2::FrameType::DATA;
+        result.partial_codewords.flags = v2::Flags::VERSION_V2;
+        result.partial_codewords.seq = repair_header->target_seq;
+        result.partial_codewords.src_hash = repair_header->src_hash;
+        result.partial_codewords.dst_hash = repair_header->dst_hash;
+        result.partial_codewords.total_cw = repair_header->original_total_cw;
+        result.partial_codewords.decoded_bitmap = 0;
+        result.partial_codewords.from_repair = true;
+        result.partial_codewords.data.resize(repair_header->original_total_cw);
+
+        v2::DataRepairFrame decoded_repair = *repair_header;
+        decoded_repair.repair_codewords.clear();
+
+        bool all_repair_cws_ok = avail_cw >= total_cw;
+        const int decodable_repair_cw = std::min<int>(
+            static_cast<int>(repair_indices.size()), std::max(0, avail_cw - 1));
+        for (int i = 0; i < decodable_repair_cw; ++i) {
+            const int cw_num = i + 1;
+            const size_t off = static_cast<size_t>(cw_num) * LDPC_BLOCK;
+            std::vector<float> bits(soft_bits.begin() + off, soft_bits.begin() + off + LDPC_BLOCK);
+            auto [ok, data] = codec_->decode(bits);
+            const uint8_t original_cw = repair_indices[static_cast<size_t>(i)];
+            if (ok && data.size() >= bytes_per_cw) {
+                data.resize(bytes_per_cw);
+                result.partial_codewords.decoded_bitmap |= (1u << original_cw);
+                result.partial_codewords.data[original_cw] = data;
+                decoded_repair.repair_codewords.push_back(data);
+                result.codewords_ok++;
+            } else {
+                all_repair_cws_ok = false;
+                result.codewords_failed++;
+            }
+        }
+        if (avail_cw < total_cw) {
+            result.codewords_failed += total_cw - avail_cw;
+        }
+
+        if (all_repair_cws_ok &&
+            decoded_repair.repair_codewords.size() == repair_indices.size()) {
+            result.success = true;
+            result.frame_data = decoded_repair.serialize();
+            LOG_MODEM(INFO, "[%s] MC-DPSK: DATA_REPAIR seq=%d bitmap=0x%04X decoded",
+                      log_prefix_.c_str(), repair_header->target_seq,
+                      repair_header->repair_bitmap);
+        } else {
+            result.has_partial_codewords = result.partial_codewords.valid();
+            LOG_MODEM(INFO, "[%s] MC-DPSK: DATA_REPAIR seq=%d partial bitmap=0x%08X/%04X",
+                      log_prefix_.c_str(), repair_header->target_seq,
+                      result.partial_codewords.decoded_bitmap,
+                      repair_header->repair_bitmap);
+        }
+        return result;
+    }
+
     // 1-CW frame (control frame like ACK, PROBE, etc.)
     if (hdr.total_cw == 1) {
         result.success = true;

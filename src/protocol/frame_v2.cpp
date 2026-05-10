@@ -149,6 +149,7 @@ const char* frameTypeToString(FrameType type) {
         case FrameType::DATA_START:  return "DATA_START";
         case FrameType::DATA_CONT:   return "DATA_CONT";
         case FrameType::DATA_END:    return "DATA_END";
+        case FrameType::DATA_REPAIR: return "DATA_REPAIR";
         default:                     return "UNKNOWN";
     }
 }
@@ -1087,27 +1088,219 @@ int NackPayload::countFailed() const {
 }
 
 // ============================================================================
+// DataRepairFrame implementation
+// ============================================================================
+
+namespace {
+
+uint8_t countBits16(uint16_t value) {
+    uint8_t count = 0;
+    while (value != 0) {
+        count += static_cast<uint8_t>(value & 1u);
+        value >>= 1;
+    }
+    return count;
+}
+
+} // namespace
+
+DataRepairFrame DataRepairFrame::make(const std::string& src, const std::string& dst,
+                                      uint16_t target_seq, uint8_t original_total_cw,
+                                      uint32_t repair_bitmap, CodeRate rate,
+                                      const std::vector<Bytes>& repair_codewords) {
+    DataRepairFrame frame;
+    frame.flags = Flags::VERSION_V2;
+    frame.target_seq = target_seq;
+    frame.src_hash = hashCallsign(src);
+    frame.dst_hash = hashCallsign(dst);
+    frame.original_total_cw = original_total_cw;
+    frame.repair_bitmap = static_cast<uint16_t>(repair_bitmap & 0xFFFFu);
+    frame.repair_count = static_cast<uint8_t>(repair_codewords.size());
+    frame.rate = rate;
+    frame.repair_codewords = repair_codewords;
+    return frame;
+}
+
+bool DataRepairFrame::valid() const {
+    if (original_total_cw == 0 || original_total_cw > MAX_REPAIR_CW) {
+        return false;
+    }
+    const uint16_t expected_mask = original_total_cw >= 16
+        ? 0xFFFFu
+        : static_cast<uint16_t>((1u << original_total_cw) - 1u);
+    if (repair_bitmap == 0 || (repair_bitmap & ~expected_mask) != 0) {
+        return false;
+    }
+    if (repair_count == 0 || repair_count != countBits16(repair_bitmap)) {
+        return false;
+    }
+    if (repair_codewords.size() != repair_count) {
+        return false;
+    }
+    const size_t bytes_per_cw = getBytesPerCodeword(rate);
+    if (bytes_per_cw < HEADER_BYTES) {
+        return false;
+    }
+    for (const auto& cw : repair_codewords) {
+        if (cw.empty() || cw.size() > bytes_per_cw) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::vector<uint8_t> DataRepairFrame::repairIndices() const {
+    std::vector<uint8_t> indices;
+    for (uint8_t i = 0; i < original_total_cw && i < MAX_REPAIR_CW; ++i) {
+        if ((repair_bitmap & (1u << i)) != 0) {
+            indices.push_back(i);
+        }
+    }
+    return indices;
+}
+
+Bytes DataRepairFrame::headerCodeword() const {
+    const size_t bytes_per_cw = std::max(getBytesPerCodeword(rate), HEADER_BYTES);
+    Bytes out(bytes_per_cw, 0);
+
+    out[0] = (MAGIC_V2 >> 8) & 0xFF;
+    out[1] = MAGIC_V2 & 0xFF;
+    out[2] = static_cast<uint8_t>(FrameType::DATA_REPAIR);
+    out[3] = flags;
+    out[4] = (target_seq >> 8) & 0xFF;
+    out[5] = target_seq & 0xFF;
+    out[6] = (src_hash >> 16) & 0xFF;
+    out[7] = (src_hash >> 8) & 0xFF;
+    out[8] = src_hash & 0xFF;
+    out[9] = (dst_hash >> 16) & 0xFF;
+    out[10] = (dst_hash >> 8) & 0xFF;
+    out[11] = dst_hash & 0xFF;
+    out[12] = original_total_cw;
+    out[13] = (repair_bitmap >> 8) & 0xFF;
+    out[14] = repair_bitmap & 0xFF;
+    out[15] = repair_count;
+    out[16] = static_cast<uint8_t>(rate);
+    out[17] = 0;  // reserved
+
+    const uint16_t crc = ControlFrame::calculateCRC(out.data(), 18);
+    out[18] = (crc >> 8) & 0xFF;
+    out[19] = crc & 0xFF;
+    return out;
+}
+
+std::vector<Bytes> DataRepairFrame::infoCodewords() const {
+    std::vector<Bytes> codewords;
+    if (!valid()) {
+        return codewords;
+    }
+    const size_t bytes_per_cw = getBytesPerCodeword(rate);
+    codewords.push_back(headerCodeword());
+    for (auto cw : repair_codewords) {
+        cw.resize(bytes_per_cw, 0);
+        codewords.push_back(std::move(cw));
+    }
+    return codewords;
+}
+
+Bytes DataRepairFrame::serialize() const {
+    Bytes out;
+    auto codewords = infoCodewords();
+    const size_t bytes_per_cw = getBytesPerCodeword(rate);
+    out.reserve(codewords.size() * bytes_per_cw);
+    for (const auto& cw : codewords) {
+        out.insert(out.end(), cw.begin(), cw.end());
+    }
+    return out;
+}
+
+std::optional<DataRepairFrame> DataRepairFrame::parseHeader(ByteSpan first_codeword) {
+    if (first_codeword.size() < HEADER_BYTES) {
+        return std::nullopt;
+    }
+    const uint16_t magic = (static_cast<uint16_t>(first_codeword[0]) << 8) | first_codeword[1];
+    if (magic != MAGIC_V2 || first_codeword[2] != static_cast<uint8_t>(FrameType::DATA_REPAIR)) {
+        return std::nullopt;
+    }
+    const uint16_t received_crc =
+        (static_cast<uint16_t>(first_codeword[18]) << 8) | first_codeword[19];
+    const uint16_t calculated_crc = ControlFrame::calculateCRC(first_codeword.data(), 18);
+    if (received_crc != calculated_crc) {
+        return std::nullopt;
+    }
+
+    DataRepairFrame frame;
+    frame.flags = first_codeword[3];
+    frame.target_seq = (static_cast<uint16_t>(first_codeword[4]) << 8) | first_codeword[5];
+    frame.src_hash = (static_cast<uint32_t>(first_codeword[6]) << 16) |
+                     (static_cast<uint32_t>(first_codeword[7]) << 8) |
+                     first_codeword[8];
+    frame.dst_hash = (static_cast<uint32_t>(first_codeword[9]) << 16) |
+                     (static_cast<uint32_t>(first_codeword[10]) << 8) |
+                     first_codeword[11];
+    frame.original_total_cw = first_codeword[12];
+    frame.repair_bitmap = (static_cast<uint16_t>(first_codeword[13]) << 8) |
+                          first_codeword[14];
+    frame.repair_count = first_codeword[15];
+    frame.rate = static_cast<CodeRate>(first_codeword[16]);
+    return frame;
+}
+
+std::optional<DataRepairFrame> DataRepairFrame::deserialize(ByteSpan data) {
+    auto frame = parseHeader(data);
+    if (!frame) {
+        return std::nullopt;
+    }
+    const size_t bytes_per_cw = getBytesPerCodeword(frame->rate);
+    if (bytes_per_cw < HEADER_BYTES) {
+        return std::nullopt;
+    }
+    const size_t expected_size =
+        static_cast<size_t>(frame->repair_count + 1) * bytes_per_cw;
+    if (data.size() < expected_size) {
+        return std::nullopt;
+    }
+
+    frame->repair_codewords.clear();
+    frame->repair_codewords.reserve(frame->repair_count);
+    for (uint8_t i = 0; i < frame->repair_count; ++i) {
+        const size_t offset = static_cast<size_t>(i + 1) * bytes_per_cw;
+        frame->repair_codewords.emplace_back(data.begin() + offset,
+                                             data.begin() + offset + bytes_per_cw);
+    }
+    if (!frame->valid()) {
+        return std::nullopt;
+    }
+    return frame;
+}
+
+// ============================================================================
 // Codeword helpers
 // ============================================================================
 
 std::vector<Bytes> splitIntoCodewords(const Bytes& frame_data) {
+    return splitIntoCodewords(frame_data, CodeRate::R1_4);
+}
+
+std::vector<Bytes> splitIntoCodewords(const Bytes& frame_data, CodeRate rate) {
     std::vector<Bytes> codewords;
+    const size_t bytes_per_cw = getBytesPerCodeword(rate);
+    const size_t data_payload_size = bytes_per_cw - DATA_CW_HEADER_SIZE;
 
     // CW0: First 20 bytes of frame data (contains header with 0x554C magic)
     // No modification needed - the magic already identifies it
     {
-        Bytes cw0(BYTES_PER_CODEWORD, 0);  // Zero-pad if needed
-        size_t cw0_data = std::min(BYTES_PER_CODEWORD, frame_data.size());
+        Bytes cw0(bytes_per_cw, 0);  // Zero-pad if needed
+        size_t cw0_data = std::min(bytes_per_cw, frame_data.size());
         std::memcpy(cw0.data(), frame_data.data(), cw0_data);
         codewords.push_back(std::move(cw0));
     }
 
     // CW1+: Add marker + index header before payload data
-    size_t offset = BYTES_PER_CODEWORD;  // Start after CW0's data
+    size_t offset = bytes_per_cw;  // Start after CW0's data
     uint8_t cw_index = 1;
 
     while (offset < frame_data.size()) {
-        Bytes cw(BYTES_PER_CODEWORD, 0);  // Zero-pad if needed
+        Bytes cw(bytes_per_cw, 0);  // Zero-pad if needed
 
         // Add marker and index
         cw[0] = DATA_CW_MARKER;
@@ -1115,11 +1308,11 @@ std::vector<Bytes> splitIntoCodewords(const Bytes& frame_data) {
 
         // Copy payload data (up to 18 bytes)
         size_t remaining = frame_data.size() - offset;
-        size_t chunk_size = std::min(DATA_CW_PAYLOAD_SIZE, remaining);
+        size_t chunk_size = std::min(data_payload_size, remaining);
         std::memcpy(cw.data() + DATA_CW_HEADER_SIZE, frame_data.data() + offset, chunk_size);
 
         codewords.push_back(std::move(cw));
-        offset += DATA_CW_PAYLOAD_SIZE;  // Each CW1+ consumes 18 bytes of frame data
+        offset += data_payload_size;  // Each CW1+ consumes payload bytes after marker
         cw_index++;
     }
 
@@ -1290,41 +1483,7 @@ std::vector<Bytes> encodeFrameWithLDPC(const Bytes& frame_data) {
 }
 
 std::vector<Bytes> encodeFrameWithLDPC(const Bytes& frame_data, CodeRate rate) {
-    // Get bytes per codeword for this rate
-    size_t bytes_per_cw = getBytesPerCodeword(rate);
-    size_t data_payload_size = bytes_per_cw - DATA_CW_HEADER_SIZE;  // Payload bytes in CW1+
-
-    // Split frame into chunks based on rate
-    std::vector<Bytes> chunks;
-
-    // CW0: First bytes_per_cw bytes of frame data (contains header with 0x554C magic)
-    {
-        Bytes cw0(bytes_per_cw, 0);  // Zero-pad if needed
-        size_t cw0_data = std::min(bytes_per_cw, frame_data.size());
-        std::memcpy(cw0.data(), frame_data.data(), cw0_data);
-        chunks.push_back(std::move(cw0));
-    }
-
-    // CW1+: Add marker + index header before payload data
-    size_t offset = bytes_per_cw;  // Start after CW0's data
-    uint8_t cw_index = 1;
-
-    while (offset < frame_data.size()) {
-        Bytes cw(bytes_per_cw, 0);  // Zero-pad if needed
-
-        // Add marker and index
-        cw[0] = DATA_CW_MARKER;
-        cw[1] = cw_index;
-
-        // Copy payload data
-        size_t remaining = frame_data.size() - offset;
-        size_t chunk_size = std::min(data_payload_size, remaining);
-        std::memcpy(cw.data() + DATA_CW_HEADER_SIZE, frame_data.data() + offset, chunk_size);
-
-        chunks.push_back(std::move(cw));
-        offset += data_payload_size;
-        cw_index++;
-    }
+    std::vector<Bytes> chunks = splitIntoCodewords(frame_data, rate);
 
     // Create LDPC encoder with specified rate
     LDPCEncoder encoder(rate);
@@ -1337,6 +1496,21 @@ std::vector<Bytes> encodeFrameWithLDPC(const Bytes& frame_data, CodeRate rate) {
         encoded_codewords.push_back(std::move(encoded));
     }
 
+    return encoded_codewords;
+}
+
+std::vector<Bytes> encodeInfoCodewordsWithLDPC(const std::vector<Bytes>& info_codewords,
+                                               CodeRate rate) {
+    const size_t bytes_per_cw = getBytesPerCodeword(rate);
+    LDPCEncoder encoder(rate);
+
+    std::vector<Bytes> encoded_codewords;
+    encoded_codewords.reserve(info_codewords.size());
+    for (auto cw : info_codewords) {
+        cw.resize(bytes_per_cw, 0);
+        auto encoded = encoder.encode(cw);
+        encoded_codewords.push_back(std::move(encoded));
+    }
     return encoded_codewords;
 }
 
@@ -1425,6 +1599,13 @@ HeaderInfo parseHeader(const Bytes& first_codeword_data) {
             return info;  // CRC failed
         }
         info.total_cw = 1;
+        info.payload_len = 0;
+    } else if (info.type == FrameType::DATA_REPAIR) {
+        auto repair = DataRepairFrame::parseHeader(first_codeword_data);
+        if (!repair) {
+            return info;
+        }
+        info.total_cw = static_cast<uint8_t>(repair->repair_count + 1);
         info.payload_len = 0;
     } else {
         // Data frame: read TOTAL_CW and LEN, verify header CRC
