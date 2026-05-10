@@ -97,6 +97,52 @@ bool runLoopback(const char* name,
     return true;
 }
 
+bool runLowAmplitudePing(const char* name,
+                         const MultiCarrierDPSKConfig& mc_config,
+                         float amplitude_scale) {
+    StreamingEncoder encoder;
+    encoder.setMode(protocol::WaveformMode::MC_DPSK);
+    encoder.setMCDPSKConfig(mc_config);
+
+    auto samples = encoder.encodePing();
+    if (samples.empty()) {
+        std::cout << "FAIL: " << name << " encoder produced no PING samples\n";
+        return false;
+    }
+    for (auto& s : samples) {
+        s *= amplitude_scale;
+    }
+
+    StreamingDecoder decoder;
+    decoder.setLogPrefix("TEST");
+    decoder.setMode(protocol::WaveformMode::MC_DPSK, false);
+    decoder.setMCDPSKConfig(mc_config);
+
+    bool ping_callback_seen = false;
+    decoder.setPingCallback([&](float, float) {
+        ping_callback_seen = true;
+    });
+
+    auto audio = withSilence(samples);
+    feedInChunks(decoder, audio);
+
+    bool ping_frame_seen = false;
+    while (decoder.hasFrame()) {
+        auto result = decoder.getFrame();
+        if (result.success && result.is_ping) {
+            ping_frame_seen = true;
+            break;
+        }
+    }
+
+    if (!ping_callback_seen || !ping_frame_seen) {
+        std::cout << "FAIL: " << name << " low-amplitude PING was not detected\n";
+        return false;
+    }
+
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -129,6 +175,8 @@ int main() {
                      data_serialized, v2::FrameType::DATA)) return 1;
     if (!runLoopback("robust connect", mc_dpsk_presets::robust(), Modulation::DQPSK,
                      connect_serialized, v2::FrameType::CONNECT)) return 1;
+    if (!runLowAmplitudePing("robust low-amplitude ping", mc_dpsk_presets::robust(),
+                             0.030f)) return 1;
 
     std::cout << "Streaming MC-DPSK loopback: PASS\n";
     return 0;
