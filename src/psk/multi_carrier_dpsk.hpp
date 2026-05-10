@@ -871,6 +871,17 @@ private:
 // Preset configurations matching commercial HF modem speed levels
 namespace mc_dpsk_presets {
 
+// Robust-Low: 8 carriers, DBPSK, 23.4 baud (2048 samples/symbol),
+// R1/4 LDPC. Targets SNR -3 to -8 dB Moderate fading. Trades 4x
+// frame airtime for +6 dB symbol energy and +3 dB DBPSK margin.
+inline MultiCarrierDPSKConfig robust_low() {
+    MultiCarrierDPSKConfig cfg;
+    cfg.num_carriers = 8;
+    cfg.samples_per_symbol = 2048;  // 23.4375 baud, +6 dB vs 512
+    cfg.bits_per_symbol = 1;        // DBPSK, +3 dB vs DQPSK
+    return cfg;
+}
+
 // Level 5 equivalent: 3 carriers, ~270 bps raw
 inline MultiCarrierDPSKConfig level5() {
     MultiCarrierDPSKConfig cfg;

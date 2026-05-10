@@ -12,7 +12,11 @@
 namespace ultra {
 namespace gui {
 
-ModemEngine::ModemEngine() {
+ModemEngine::ModemEngine()
+    : ModemEngine(mc_dpsk_presets::level8()) {
+}
+
+ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
     startupTrace("ModemEngine", "ctor-enter");
     config_ = presets::balanced();
     startupTrace("ModemEngine", "presets-balanced");
@@ -42,10 +46,11 @@ ModemEngine::ModemEngine() {
     startupTrace("ModemEngine", "chirp-sync-created");
 
     // Multi-Carrier DPSK (for fading channels - frequency diversity)
-    // Using level8: 8 carriers, 93.75 baud, DQPSK (~735 bps)
+    // Default is level8: 8 carriers, 93.75 baud, DQPSK (~1500 bps raw).
+    // Test presets can override samples_per_symbol and DBPSK at construction.
     // 8 carriers is more robust than 13 at low SNR with CFO (tested: 100% vs 40% at moderate fading)
     // IMPORTANT: Sync chirp config with modem's chirp_sync_ so TX and RX use same chirp
-    mc_dpsk_config_ = mc_dpsk_presets::level8();
+    mc_dpsk_config_ = mc_dpsk_config;
     mc_dpsk_config_.chirp_f_start = chirp_cfg.f_start;
     mc_dpsk_config_.chirp_f_end = chirp_cfg.f_end;
     mc_dpsk_config_.chirp_duration_ms = chirp_cfg.duration_ms;
@@ -56,7 +61,7 @@ ModemEngine::ModemEngine() {
     streaming_encoder_ = std::make_unique<StreamingEncoder>();
     startupTrace("ModemEngine", "streaming-encoder-created");
     streaming_encoder_->setOFDMConfig(config_);
-    streaming_encoder_->setMCDPSKCarriers(mc_dpsk_config_.num_carriers);
+    streaming_encoder_->setMCDPSKConfig(mc_dpsk_config_);
     startupTrace("ModemEngine", "streaming-encoder-configured");
 
     // Initialize audio filters
@@ -128,8 +133,10 @@ ModemEngine::ModemEngine() {
 
     // Sync MC-DPSK carrier count with ModemEngine's config
     startupTrace("ModemEngine", "decoder-set-carriers-enter");
-    if (mc_dpsk_config_.num_carriers != 8) {
-        streaming_decoder_->setMCDPSKCarriers(mc_dpsk_config_.num_carriers);
+    if (mc_dpsk_config_.num_carriers != 8 ||
+        mc_dpsk_config_.samples_per_symbol != 512 ||
+        mc_dpsk_config_.bits_per_symbol != 2) {
+        streaming_decoder_->setMCDPSKConfig(mc_dpsk_config_);
         startupTrace("ModemEngine", "decoder-carriers-set");
     } else {
         startupTrace("ModemEngine", "decoder-carriers-skip-default");
@@ -202,6 +209,19 @@ void ModemEngine::setFilterConfig(const FilterConfig& config) {
 
 void ModemEngine::setFilterEnabled(bool enabled) {
     filter_config_.enabled = enabled;
+}
+
+void ModemEngine::setMCDPSKConfig(const MultiCarrierDPSKConfig& config) {
+    mc_dpsk_config_ = config;
+    if (streaming_decoder_) {
+        streaming_decoder_->setMCDPSKConfig(mc_dpsk_config_);
+    }
+    if (streaming_encoder_) {
+        streaming_encoder_->setMCDPSKConfig(mc_dpsk_config_);
+    }
+    LOG_MODEM(INFO, "ModemEngine: MC-DPSK config carriers=%d sps=%d bits/sym=%d raw=%.1f bps",
+              mc_dpsk_config_.num_carriers, mc_dpsk_config_.samples_per_symbol,
+              mc_dpsk_config_.bits_per_symbol, mc_dpsk_config_.getRawBitRate());
 }
 
 void ModemEngine::rebuildFilters() {

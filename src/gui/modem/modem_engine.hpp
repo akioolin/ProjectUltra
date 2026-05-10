@@ -34,6 +34,7 @@ namespace gui {
 class ModemEngine {
 public:
     ModemEngine();
+    explicit ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config);
     ~ModemEngine();
 
     // Set a name/prefix for logging (e.g., "OUR" or "SIM")
@@ -192,14 +193,10 @@ public:
     // MC-DPSK configuration
     int getMCDPSKCarriers() const { return mc_dpsk_config_.num_carriers; }
     float getMCDPSKThroughput() const { return mc_dpsk_config_.getRawBitRate() * 0.25f; } // R1/4 FEC
+    void setMCDPSKConfig(const MultiCarrierDPSKConfig& config);
     void setMCDPSKCarriers(int num_carriers) {
         mc_dpsk_config_.num_carriers = num_carriers;
-        if (streaming_decoder_) {
-            streaming_decoder_->setMCDPSKCarriers(num_carriers);
-        }
-        if (streaming_encoder_) {
-            streaming_encoder_->setMCDPSKCarriers(num_carriers);
-        }
+        setMCDPSKConfig(mc_dpsk_config_);
     }
 
     // Recommend MC-DPSK carrier count based on channel conditions

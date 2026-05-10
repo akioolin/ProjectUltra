@@ -359,6 +359,7 @@ private:
     void processArqFrame(const Bytes& frame_data);
     void runDeferredArqRefill();
     void configureArqForCurrentDataMode();
+    uint32_t pingTimeoutMsForCurrentProfile() const;
     // Apply a new data mode. cw_count: 0 = compute via recommendCWCount(rate),
     // 1..8 = explicit (used when MODE_CHANGE wire byte specifies a value).
     void applyDataMode(Modulation mod, CodeRate rate, int cw_count = 0);
@@ -411,6 +412,7 @@ private:
     int ping_retry_count_ = 0;
     static constexpr int MAX_PING_RETRIES = 5;  // Try 5 pings before giving up
     static constexpr uint32_t PING_TIMEOUT_MS = 8000;  // 8 seconds per ping (PING=3.3s + PONG=3.3s + margin)
+    static constexpr uint32_t ROBUST_LOW_PING_TIMEOUT_MS = 20000;
 
     // Handshake state - responder waits for first frame before confirming
     bool is_initiator_ = false;           // True if we initiated the connection

@@ -287,13 +287,19 @@ void StreamingDecoder::decodeCurrentFrame() {
     if (allow_ping_detection) {
         // PING detection: use ratio of data RMS to training RMS.
         // PING (chirp only): data region is noise-only; data frames carry energy.
+        const size_t mc_dpsk_symbol_samples =
+            waveform_ ? static_cast<size_t>(std::max(1, waveform_->getSamplesPerSymbol())) : 512;
+        const size_t ping_training_skip = 9 * mc_dpsk_symbol_samples;
+        const size_t ping_check_samples = std::max(
+            frame_policy::kPingRMSCheckSamples, 3 * mc_dpsk_symbol_samples);
         const auto ping_decision = frame_policy::evaluatePingRMS(
-            frame_buffer.data(), frame_buffer.size());
+            frame_buffer.data(), frame_buffer.size(), ping_training_skip, ping_check_samples);
 
-        LOG_MODEM(INFO, "[%s] PING check: RMS=%.4f, train_RMS=%.4f, ratio=%.3f (threshold=%.1f), sync_pos=%zu",
+        LOG_MODEM(INFO, "[%s] PING check: RMS=%.4f, train_RMS=%.4f, ratio=%.3f (threshold=%.1f), skip=%zu, sync_pos=%zu",
                   log_prefix_.c_str(), ping_decision.data_rms,
                   ping_decision.training_rms, ping_decision.ratio,
-                  frame_policy::kPingMaxDataToTrainingRMSRatio, sync_position_);
+                  frame_policy::kPingMaxDataToTrainingRMSRatio,
+                  ping_training_skip, sync_position_);
 
         if (ping_decision.is_ping) {
             LOG_MODEM(INFO, "[%s] PING detected (RMS=%.4f), SNR=%.1f dB, CFO=%.1f Hz",

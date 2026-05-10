@@ -28,46 +28,31 @@ bool feedInChunks(StreamingDecoder& decoder, const std::vector<float>& audio) {
         const size_t len = std::min(kChunk, audio.size() - pos);
         decoder.feedAudio(audio.data() + pos, len);
         decoder.processBuffer();
-
-        // State transitions consume one wakeup each; feedAudio has already made
-        // new data available for this call, so one process pass per chunk keeps
-        // the test deterministic without wall-clock sleeps.
-        while (decoder.hasFrame()) {
-            return true;
-        }
     }
     return decoder.hasFrame();
 }
 
-}  // namespace
-
-int main() {
-    setLogLevel(LogLevel::ERROR);
-
-    const Bytes payload = {
-        0x55, 0x4c, 0x54, 0x52, 0x41, 0x20, 0x4d, 0x43,
-        0x44, 0x50, 0x53, 0x4b, 0x20, 0x4f, 0x4b
-    };
-
-    auto tx_frame = v2::DataFrame::makeData("ALPHA", "BRAVO", 7, payload, CodeRate::R1_4);
-    const Bytes serialized = tx_frame.serialize();
-
+bool runLoopback(const char* name,
+                 const MultiCarrierDPSKConfig& mc_config,
+                 Modulation modulation,
+                 const Bytes& serialized,
+                 v2::FrameType expected_type) {
     StreamingEncoder encoder;
     encoder.setMode(protocol::WaveformMode::MC_DPSK);
-    encoder.setMCDPSKCarriers(8);
-    encoder.setDataMode(Modulation::DQPSK, CodeRate::R1_4);
+    encoder.setMCDPSKConfig(mc_config);
+    encoder.setDataMode(modulation, CodeRate::R1_4);
 
     auto samples = encoder.encodeFrame(serialized);
     if (samples.empty()) {
-        std::cout << "FAIL: encoder produced no samples\n";
-        return 1;
+        std::cout << "FAIL: " << name << " encoder produced no samples\n";
+        return false;
     }
 
     StreamingDecoder decoder;
     decoder.setLogPrefix("TEST");
     decoder.setMode(protocol::WaveformMode::MC_DPSK, true);
-    decoder.setMCDPSKCarriers(8);
-    decoder.setDataMode(Modulation::DQPSK, CodeRate::R1_4);
+    decoder.setMCDPSKConfig(mc_config);
+    decoder.setDataMode(modulation, CodeRate::R1_4);
 
     bool callback_seen = false;
     DecodeResult decoded;
@@ -91,27 +76,51 @@ int main() {
     }
 
     if (!callback_seen) {
-        std::cout << "FAIL: streaming decoder did not recover MC-DPSK frame\n";
-        return 1;
+        std::cout << "FAIL: " << name << " streaming decoder did not recover MC-DPSK frame\n";
+        return false;
     }
-    if (decoded.frame_type != v2::FrameType::DATA) {
-        std::cout << "FAIL: decoded frame type was not DATA\n";
-        return 1;
+    if (decoded.frame_type != expected_type) {
+        std::cout << "FAIL: " << name << " decoded frame type mismatch\n";
+        return false;
     }
 
-    auto parsed = v2::DataFrame::deserialize(decoded.frame_data);
-    if (!parsed) {
-        std::cout << "FAIL: decoded DATA frame did not parse\n";
-        return 1;
+    if (expected_type == v2::FrameType::DATA && decoded.frame_data != serialized) {
+        std::cout << "FAIL: " << name << " frame payload mismatch\n";
+        return false;
     }
-    if (parsed->seq != 7) {
-        std::cout << "FAIL: sequence mismatch\n";
-        return 1;
+    if (expected_type == v2::FrameType::CONNECT &&
+        !v2::ConnectFrame::deserialize(decoded.frame_data)) {
+        std::cout << "FAIL: " << name << " CONNECT frame did not parse\n";
+        return false;
     }
-    if (parsed->payload != payload) {
-        std::cout << "FAIL: payload mismatch\n";
-        return 1;
-    }
+
+    return true;
+}
+
+}  // namespace
+
+int main() {
+    setLogLevel(LogLevel::ERROR);
+
+    const Bytes payload = {
+        0x55, 0x4c, 0x54, 0x52, 0x41, 0x20, 0x4d, 0x43,
+        0x44, 0x50, 0x53, 0x4b, 0x20, 0x4f, 0x4b
+    };
+    auto data_frame = v2::DataFrame::makeData("ALPHA", "BRAVO", 7, payload, CodeRate::R1_4);
+    const Bytes data_serialized = data_frame.serialize();
+    auto connect_frame = v2::ConnectFrame::makeConnect(
+        "ALPHA", "BRAVO", static_cast<uint8_t>(protocol::WaveformMode::MC_DPSK),
+        static_cast<uint8_t>(Modulation::DBPSK), static_cast<uint8_t>(CodeRate::R1_4));
+    const Bytes connect_serialized = connect_frame.serialize();
+
+    if (!runLoopback("standard data", mc_dpsk_presets::level8(), Modulation::DQPSK,
+                     data_serialized, v2::FrameType::DATA)) return 1;
+    if (!runLoopback("standard connect", mc_dpsk_presets::level8(), Modulation::DQPSK,
+                     connect_serialized, v2::FrameType::CONNECT)) return 1;
+    if (!runLoopback("robust_low data", mc_dpsk_presets::robust_low(), Modulation::DBPSK,
+                     data_serialized, v2::FrameType::DATA)) return 1;
+    if (!runLoopback("robust_low connect", mc_dpsk_presets::robust_low(), Modulation::DBPSK,
+                     connect_serialized, v2::FrameType::CONNECT)) return 1;
 
     std::cout << "Streaming MC-DPSK loopback: PASS\n";
     return 0;

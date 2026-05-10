@@ -113,7 +113,9 @@ using StreamingPingCallback = std::function<void(float snr_db, float cfo_hz)>;
 // StreamingDecoder - Unified RX decoder for all waveform types
 class StreamingDecoder {
 public:
-    static constexpr size_t kDefaultBufferSamples = 480000;  // 10 seconds at 48 kHz
+    // Robust-Low MC-DPSK (2048 sps DBPSK) can produce 30s+ multi-CW data
+    // frames; the streaming ring must hold the full frame plus scheduler slack.
+    static constexpr size_t kDefaultBufferSamples = 2400000; // 50 seconds at 48 kHz
     static constexpr size_t kMinimumBufferSamples = 120000;  // Must cover largest sync search window
 
     explicit StreamingDecoder(size_t buffer_capacity_samples = kDefaultBufferSamples);
@@ -156,6 +158,9 @@ public:
 
     // Set MC-DPSK carrier count (recreates waveform if currently in MC-DPSK mode)
     void setMCDPSKCarriers(int num_carriers);
+
+    // Set the full MC-DPSK PHY preset
+    void setMCDPSKConfig(const MultiCarrierDPSKConfig& config);
 
     // Set OFDM config (recreates waveform with the given config)
     // Use this for NVIS mode (1024 FFT, 59 carriers) or custom OFDM settings
@@ -392,6 +397,7 @@ private:
     bool narrow_waveform_initialized_ = false;
     BandwidthMode detected_bandwidth_ = BandwidthMode::WIDE;
     int mc_dpsk_carriers_ = 8;  // MC-DPSK carrier count (default 8)
+    MultiCarrierDPSKConfig mc_dpsk_config_ = mc_dpsk_presets::level8();
     int ofdm_carriers_ = 30;    // OFDM carrier count (default 30 for standard mode)
     int ofdm_data_carriers_ = 30;  // Data carriers after pilot allocation (for interleaver)
     Modulation current_modulation_ = Modulation::DQPSK;  // Current modulation for interleaver

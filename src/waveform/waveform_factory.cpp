@@ -69,6 +69,10 @@ WaveformPtr WaveformFactory::createMCDPSK(int num_carriers) {
     return std::make_unique<MCDPSKWaveform>(num_carriers);
 }
 
+WaveformPtr WaveformFactory::createMCDPSK(const MultiCarrierDPSKConfig& config) {
+    return std::make_unique<MCDPSKWaveform>(config);
+}
+
 WaveformPtr WaveformFactory::createNarrowbandMCDPSK() {
     return std::make_unique<MCDPSKWaveform>(mc_dpsk_presets::narrowband());
 }
