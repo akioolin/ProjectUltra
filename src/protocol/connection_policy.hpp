@@ -61,6 +61,129 @@ inline const char* fadingLabel(float fading) {
     return "Poor";
 }
 
+enum class ChannelClassification {
+    AWGN,
+    GOOD,
+    MODERATE,
+    POOR,
+};
+
+inline ChannelClassification classifyChannel(float fading) {
+    if (fading < 0.15f) return ChannelClassification::AWGN;
+    if (fading < 0.65f) return ChannelClassification::GOOD;
+    if (fading < 1.10f) return ChannelClassification::MODERATE;
+    return ChannelClassification::POOR;
+}
+
+struct LadderRung {
+    LadderRungId id = LadderRungId::UNKNOWN;
+    const char* name = "Unknown";
+    WaveformMode waveform = WaveformMode::MC_DPSK;
+    Modulation modulation = Modulation::DQPSK;
+    CodeRate code_rate = CodeRate::R1_4;
+    int num_carriers = 0;
+    int samples_per_symbol = 0;
+    int cw_count = v2::kDefaultFixedFrameCodewords;
+};
+
+inline LadderRung ladderRungForId(LadderRungId id) {
+    switch (id) {
+        case LadderRungId::ROBUST_LOW:
+            return {id, "Robust-Low", WaveformMode::MC_DPSK,
+                    Modulation::DBPSK, CodeRate::R1_4, 8, 2048, 3};
+        case LadderRungId::ROBUST_MID:
+            return {id, "Robust-Mid", WaveformMode::MC_DPSK,
+                    Modulation::DBPSK, CodeRate::R1_4, 8, 1024, 3};
+        case LadderRungId::ROBUST:
+            return {id, "Robust", WaveformMode::MC_DPSK,
+                    Modulation::DQPSK, CodeRate::R1_4, 8, 1024,
+                    v2::kDefaultFixedFrameCodewords};
+        case LadderRungId::STANDARD:
+            return {id, "Standard", WaveformMode::MC_DPSK,
+                    Modulation::DQPSK, CodeRate::R1_4, 8, 512,
+                    v2::kDefaultFixedFrameCodewords};
+        case LadderRungId::OFDM_CHIRP:
+            return {id, "OFDM_CHIRP", WaveformMode::OFDM_CHIRP,
+                    Modulation::DQPSK, CodeRate::R1_4, 0, 0,
+                    v2::kDefaultFixedFrameCodewords};
+        case LadderRungId::OFDM_NARROW:
+            return {id, "OFDM_NARROW", WaveformMode::OFDM_NARROW,
+                    Modulation::DQPSK, CodeRate::R1_4, 0, 0,
+                    v2::kDefaultFixedFrameCodewords};
+        case LadderRungId::UNKNOWN:
+        default:
+            return {};
+    }
+}
+
+inline LadderRung rungForMCDPSKConfig(Modulation modulation,
+                                      int num_carriers,
+                                      int samples_per_symbol,
+                                      int cw_count) {
+    if (num_carriers != 8) {
+        return {};
+    }
+    if (modulation == Modulation::DBPSK && samples_per_symbol >= 2048 && cw_count == 3) {
+        return ladderRungForId(LadderRungId::ROBUST_LOW);
+    }
+    if (modulation == Modulation::DBPSK && samples_per_symbol == 1024 && cw_count == 3) {
+        return ladderRungForId(LadderRungId::ROBUST_MID);
+    }
+    if (modulation == Modulation::DQPSK && samples_per_symbol == 1024 &&
+        cw_count == v2::kDefaultFixedFrameCodewords) {
+        return ladderRungForId(LadderRungId::ROBUST);
+    }
+    if (modulation == Modulation::DQPSK && samples_per_symbol == 512 &&
+        cw_count == v2::kDefaultFixedFrameCodewords) {
+        return ladderRungForId(LadderRungId::STANDARD);
+    }
+    return {};
+}
+
+inline LadderRung selectLadderRung(float snr_db, ChannelClassification channel) {
+    float ofdm_floor = 8.0f;
+    float robust_floor = 3.0f;
+    float robust_mid_floor = -5.0f;
+
+    switch (channel) {
+        case ChannelClassification::AWGN:
+            ofdm_floor = 8.0f;
+            robust_floor = 3.0f;
+            robust_mid_floor = -5.0f;
+            break;
+        case ChannelClassification::GOOD:
+            ofdm_floor = 9.0f;
+            robust_floor = 4.0f;
+            robust_mid_floor = -4.0f;
+            break;
+        case ChannelClassification::MODERATE:
+            ofdm_floor = 10.0f;
+            robust_floor = 5.0f;
+            robust_mid_floor = -3.0f;
+            break;
+        case ChannelClassification::POOR:
+            ofdm_floor = 12.0f;
+            robust_floor = 7.0f;
+            robust_mid_floor = -1.0f;
+            break;
+    }
+
+    if (snr_db >= ofdm_floor) {
+        return ladderRungForId(LadderRungId::OFDM_CHIRP);
+    }
+    if (snr_db >= robust_floor) {
+        return ladderRungForId(LadderRungId::ROBUST);
+    }
+    if (snr_db >= robust_mid_floor) {
+        return ladderRungForId(LadderRungId::ROBUST_MID);
+    }
+    return ladderRungForId(LadderRungId::ROBUST_LOW);
+}
+
+inline LadderRung selectLadderRung(float snr_db, float fading_index) {
+    return selectLadderRung(snr_db, classifyChannel(fading_index));
+}
+
 inline uint8_t modeToCapabilityBit(WaveformMode mode) {
     switch (mode) {
         case WaveformMode::OFDM_COX:    return ModeCapabilities::OFDM_COX;

@@ -122,8 +122,11 @@ bool parseMCDPSKPreset(const std::string& value,
 std::string mcDpskPresetSummary(const std::string& preset_name,
                                 const MultiCarrierDPSKConfig& config) {
     std::ostringstream oss;
-    oss << preset_name
-        << " (" << config.num_carriers << " carriers, "
+    oss << preset_name;
+    if (preset_name == "adaptive") {
+        oss << " listen=robust_mid";
+    }
+    oss << " (" << config.num_carriers << " carriers, "
         << config.samples_per_symbol << " sps, "
         << (config.bits_per_symbol == 1 ? "DBPSK" : "DQPSK")
         << ", raw=" << std::fixed << std::setprecision(1)
@@ -364,9 +367,10 @@ public:
     void setMCDPSKPreset(const std::string& name, const MultiCarrierDPSKConfig& config) {
         mc_dpsk_preset_name_ = name;
         mc_dpsk_config_ = config;
-        if (mc_dpsk_config_.bits_per_symbol == 1) {
-            forced_mod_ = Modulation::DBPSK;
-        }
+        forced_waveform_ = WaveformMode::MC_DPSK;
+        forced_mod_ = mc_dpsk_config_.bits_per_symbol == 1
+            ? Modulation::DBPSK
+            : Modulation::DQPSK;
     }
     // Marks an operator-forced override; remembered so initStation()
     // pushes it into the protocol layer with forced=true (which makes
@@ -610,8 +614,8 @@ private:
     CodeRate forced_rate_ = CodeRate::AUTO;
     WaveformMode forced_waveform_ = WaveformMode::AUTO;
     OFDMConfigPreset ofdm_config_preset_ = OFDMConfigPreset::Default;
-    std::string mc_dpsk_preset_name_ = "standard";
-    MultiCarrierDPSKConfig mc_dpsk_config_ = mc_dpsk_presets::level8();
+    std::string mc_dpsk_preset_name_ = "adaptive";
+    MultiCarrierDPSKConfig mc_dpsk_config_ = mc_dpsk_presets::robust_mid();
 
     // Hardware-audio role (--role A|B|both, default both = current sim behavior)
     enum class Role { Both, A, B };
@@ -775,6 +779,7 @@ private:
             return false;
         }
         std::cout << "  \033[32m✓ Handshake complete!\033[0m\n";
+        printNegotiatedProfile();
 
         std::cout << "\n=== PHASE 3: ADAPTIVE SMOKE (2 conditions) ===\n";
         std::cout << "  Condition A: SNR=" << snr_db_ << " dB, channel=" << channelTypeName() << "\n";
@@ -829,6 +834,7 @@ private:
             return false;
         }
         std::cout << "  \033[32m✓ Handshake complete!\033[0m\n";
+        printNegotiatedProfile();
 
         // Phase 3: Send 5 short + 2 long messages as a burst
         std::cout << "\n=== PHASE 3: DATA TRANSFER (7 messages) ===\n";
@@ -944,6 +950,7 @@ private:
             return false;
         }
         std::cout << "  \033[32m✓ Handshake complete!\033[0m\n";
+        printNegotiatedProfile();
 
         // Phase 3: File transfer
         std::cout << "\n=== PHASE 3: FILE TRANSFER ===\n";
@@ -1073,6 +1080,7 @@ private:
             return false;
         }
         std::cout << "  \033[32m✓ Handshake complete!\033[0m\n";
+        printNegotiatedProfile();
 
         // Phase 3: Send 3 large messages that fragment into 5+ frames each
         // At R1/2: payload capacity = 141 bytes, so 600 bytes → ceil(600/141) = 5 frames
@@ -1596,6 +1604,22 @@ private:
         std::cout << "\n";
     }
 
+    void printNegotiatedProfile() const {
+        if (!alpha_) return;
+        const WaveformMode waveform = alpha_->getNegotiatedWaveform();
+        std::cout << "  Negotiated data: waveform=" << waveformModeToString(waveform)
+                  << " mod=" << modulationToString(alpha_->getDataModulation())
+                  << " rate=" << codeRateToString(alpha_->getDataCodeRate())
+                  << " cw=" << alpha_->getFixedFrameCodewords();
+        if (waveform == WaveformMode::MC_DPSK) {
+            const auto cfg = alpha_->getMCDPSKConfig();
+            std::cout << " mc_carriers=" << cfg.num_carriers
+                      << " mc_sps=" << cfg.samples_per_symbol
+                      << " mc_bits=" << cfg.bits_per_symbol;
+        }
+        std::cout << "\n";
+    }
+
     void printSummary() {
         std::cout << "\n";
         std::cout << "╔══════════════════════════════════════════════════════════════╗\n";
@@ -2078,7 +2102,8 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --mask-clear-carrier <N>  Clear one carrier bit (0-58)\n";
                 std::cout << "  --waveform, -w <WF> Force waveform: mc_dpsk, ofdm_chirp, ofdm_cox, ofdm_narrow\n";
                 std::cout << "  --ofdm-config <CFG> OFDM_COX config: default (512/30) or nvis (1024/59)\n";
-                std::cout << "  --mc-dpsk-preset <P> MC-DPSK preset: standard, robust_low, robust_mid, robust\n";
+                std::cout << "  --mc-dpsk-preset <P> Force MC-DPSK preset: standard, robust_low, robust_mid, robust\n";
+                std::cout << "                        default: adaptive, with Robust-Mid as cold-call/listen PHY\n";
                 std::cout << "  --seed <N>          Random seed (default: 42)\n";
                 std::cout << "  --tx-cfo <Hz>       Inject TX CFO in channel model (default: 0)\n";
                 std::cout << "  --cfo <Hz>          Alias for --tx-cfo\n";

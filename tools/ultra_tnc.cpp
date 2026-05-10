@@ -2,6 +2,7 @@
 #include "gui/modem/streaming_decoder.hpp"
 #include "gui/modem/streaming_encoder.hpp"
 #include "gui/serial_ptt.hpp"
+#include "psk/multi_carrier_dpsk.hpp"
 #include "protocol/frame_v2.hpp"
 #include "protocol/protocol_engine.hpp"
 #include "sim/awgn.hpp"
@@ -306,9 +307,20 @@ private:
 
         engine_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate,
                                                   int cw_count,
-                                                  float peer_snr_db, float peer_fading) {
+                                                  float peer_snr_db, float peer_fading,
+                                                  int mc_dpsk_num_carriers,
+                                                  int mc_dpsk_samples_per_symbol) {
             (void)peer_snr_db;
             (void)peer_fading;
+            if (mc_dpsk_num_carriers > 0 && mc_dpsk_samples_per_symbol > 0) {
+                ultra::MultiCarrierDPSKConfig cfg;
+                cfg.num_carriers = mc_dpsk_num_carriers;
+                cfg.samples_per_symbol = mc_dpsk_samples_per_symbol;
+                cfg.bits_per_symbol = (mod == Modulation::DBPSK) ? 1 :
+                                      (mod == Modulation::D8PSK) ? 3 : 2;
+                encoder_.setMCDPSKConfig(cfg);
+                decoder_.setMCDPSKConfig(cfg);
+            }
             setDataMode(mod, rate);
             LOG_INFO("OPERATOR", "Mode: %s %s cw=%d",
                      ultra::modulationToString(mod), ultra::codeRateToString(rate), cw_count);

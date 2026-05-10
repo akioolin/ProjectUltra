@@ -52,6 +52,48 @@ namespace ModeCapabilities {
 
 const char* waveformModeToString(WaveformMode mode);
 
+enum class LadderRungId : uint8_t {
+    UNKNOWN     = 0,
+    ROBUST_LOW  = 1,
+    ROBUST_MID  = 2,
+    ROBUST      = 3,
+    STANDARD    = 4,
+    OFDM_CHIRP  = 5,
+    OFDM_NARROW = 6,
+};
+
+inline const char* ladderRungIdToString(LadderRungId id) {
+    switch (id) {
+        case LadderRungId::ROBUST_LOW:  return "Robust-Low";
+        case LadderRungId::ROBUST_MID:  return "Robust-Mid";
+        case LadderRungId::ROBUST:      return "Robust";
+        case LadderRungId::STANDARD:    return "Standard";
+        case LadderRungId::OFDM_CHIRP:  return "OFDM_CHIRP";
+        case LadderRungId::OFDM_NARROW: return "OFDM_NARROW";
+        case LadderRungId::UNKNOWN:
+        default:                        return "Unknown";
+    }
+}
+
+inline uint8_t packCWCountAndRung(uint8_t cw_count,
+                                  LadderRungId rung_id,
+                                  bool phy_mask_v1_capability = false) {
+    uint8_t packed = static_cast<uint8_t>(cw_count & 0x0F);
+    packed |= static_cast<uint8_t>((static_cast<uint8_t>(rung_id) & 0x07) << 4);
+    if (phy_mask_v1_capability) {
+        packed |= ModeCapabilities::PHY_MASK_V1;
+    }
+    return packed;
+}
+
+inline uint8_t unpackCWCount(uint8_t packed) {
+    return static_cast<uint8_t>(packed & 0x0F);
+}
+
+inline LadderRungId unpackLadderRungId(uint8_t packed) {
+    return static_cast<LadderRungId>((packed >> 4) & 0x07);
+}
+
 inline bool hasPhyMaskV1Capability(uint8_t capabilities) {
     return (capabilities & ModeCapabilities::PHY_MASK_V1) != 0;
 }
@@ -402,11 +444,13 @@ struct ControlFrame {
     static ControlFrame makeModeChange(const std::string& src, const std::string& dst,
                                         uint16_t seq, Modulation new_mod, CodeRate new_rate,
                                         float snr_db, float fading_index, uint8_t reason,
-                                        uint8_t cw_count = 0);
+                                        uint8_t cw_count = 0,
+                                        LadderRungId rung_id = LadderRungId::UNKNOWN);
     static ControlFrame makeModeChangeByHash(const std::string& src, uint32_t dst_hash,
                                               uint16_t seq, Modulation new_mod, CodeRate new_rate,
                                               float snr_db, float fading_index, uint8_t reason,
-                                              uint8_t cw_count = 0);
+                                              uint8_t cw_count = 0,
+                                              LadderRungId rung_id = LadderRungId::UNKNOWN);
     static ControlFrame makeConnect(const std::string& src, const std::string& dst,
                                      uint8_t mode_capabilities, uint8_t preferred_mode);
     static ControlFrame makeConnectAck(const std::string& src, const std::string& dst,
@@ -441,8 +485,9 @@ struct ControlFrame {
         uint8_t reason;
         // Negotiated fixed-frame CW count for the new rate. 0 means "old peer
         // / unspecified — receiver picks via recommendCWCount(rate)". Wire
-        // byte: payload[5] (was reserved).
+        // byte: payload[5] low nibble. Bits 4..6 carry LadderRungId.
         uint8_t data_frame_cw_count;
+        LadderRungId ladder_rung_id;
     };
 
     // Parse MODE_CHANGE payload from a ControlFrame
@@ -453,7 +498,8 @@ struct ControlFrame {
         info.snr_db = decodeSNR(payload[2]);
         info.reason = payload[3];
         info.fading_index = decodeFadingIndex(payload[4]);
-        info.data_frame_cw_count = payload[5];
+        info.data_frame_cw_count = unpackCWCount(payload[5]);
+        info.ladder_rung_id = unpackLadderRungId(payload[5]);
         return info;
     }
 };
@@ -555,6 +601,7 @@ struct ConnectFrame {
     // CONNECT_ACK cannot reuse mode_capabilities for PHY_MASK_V1 because that
     // byte carries the responder fading index. Its wire flag is bit 7 here.
     uint8_t data_frame_cw_count = 0;
+    LadderRungId ladder_rung_id = LadderRungId::UNKNOWN;
     bool phy_mask_v1_capability = false;
 
     // Factory methods
@@ -566,7 +613,8 @@ struct ConnectFrame {
     static ConnectFrame makeConnectAck(const std::string& src, const std::string& dst,
                                         uint8_t neg_mode, Modulation init_mod, CodeRate init_rate,
                                         float snr_db, float fading_index,
-                                        uint8_t cw_count);
+                                        uint8_t cw_count,
+                                        LadderRungId rung_id = LadderRungId::UNKNOWN);
     static ConnectFrame makeConnectNak(const std::string& src, const std::string& dst);
     static ConnectFrame makeDisconnect(const std::string& src, const std::string& dst);
 
@@ -574,7 +622,8 @@ struct ConnectFrame {
     static ConnectFrame makeConnectAckByHash(const std::string& src, uint32_t dst_hash,
                                               uint8_t neg_mode, Modulation init_mod, CodeRate init_rate,
                                               float snr_db, float fading_index,
-                                              uint8_t cw_count);
+                                              uint8_t cw_count,
+                                              LadderRungId rung_id = LadderRungId::UNKNOWN);
     static ConnectFrame makeConnectNakByHash(const std::string& src, uint32_t dst_hash);
 
     // Serialize to bytes (uses DATA frame format)

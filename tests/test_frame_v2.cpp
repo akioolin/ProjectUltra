@@ -395,7 +395,8 @@ void test_phy_mask_capability_roundtrip() {
         auto ack = ConnectFrame::makeConnectAck("W1AW", "VA2MVR/P",
                                                 static_cast<uint8_t>(WaveformMode::OFDM_CHIRP),
                                                 Modulation::DQPSK, CodeRate::R1_2,
-                                                15.25f, 0.62f, 4);
+                                                15.25f, 0.62f, 4,
+                                                LadderRungId::OFDM_CHIRP);
         setPhyMaskV1Capability(ack);
 
         auto ack_parsed = ConnectFrame::deserialize(ack.serialize());
@@ -403,6 +404,7 @@ void test_phy_mask_capability_roundtrip() {
         assert(ack_parsed->type == FrameType::CONNECT_ACK);
         assert(hasPhyMaskV1Capability(*ack_parsed));
         assert(ack_parsed->data_frame_cw_count == 4);
+        assert(ack_parsed->ladder_rung_id == LadderRungId::OFDM_CHIRP);
         assert(std::abs(decodeFadingIndex(ack_parsed->mode_capabilities) - 0.62f) < 0.001f);
 
         PASS();
@@ -436,7 +438,8 @@ void test_connect_frame_roundtrip_and_crc() {
         auto ack = ConnectFrame::makeConnectAck("W1AW", "VA2MVR/P",
                                                 static_cast<uint8_t>(WaveformMode::OFDM_CHIRP),
                                                 Modulation::DQPSK, CodeRate::R1_2,
-                                                15.25f, 0.62f, 8);
+                                                15.25f, 0.62f, 8,
+                                                LadderRungId::OFDM_CHIRP);
         auto ack_bytes = ack.serialize();
         auto ack_parsed = ConnectFrame::deserialize(ack_bytes);
         assert(ack_parsed.has_value());
@@ -444,6 +447,7 @@ void test_connect_frame_roundtrip_and_crc() {
         assert(std::abs(decodeSNR(ack_parsed->measured_snr) - 15.25f) < 0.001f);
         assert(std::abs(decodeFadingIndex(ack_parsed->mode_capabilities) - 0.62f) < 0.001f);
         assert(ack_parsed->data_frame_cw_count == 8);
+        assert(ack_parsed->ladder_rung_id == LadderRungId::OFDM_CHIRP);
 
         auto corrupt_header = serialized;
         corrupt_header[5] ^= 0x01;
@@ -455,6 +459,35 @@ void test_connect_frame_roundtrip_and_crc() {
 
         auto wrong_type = DataFrame::makeData("VA2MVR", "W1AW", 1, "not a connect").serialize();
         assert(!ConnectFrame::deserialize(wrong_type).has_value());
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
+void test_ladder_rung_wire_roundtrip() {
+    TEST("ladder rung bits in CONNECT_ACK and MODE_CHANGE") {
+        auto ack = ConnectFrame::makeConnectAck("W1AW", "VA2MVR/P",
+                                                static_cast<uint8_t>(WaveformMode::MC_DPSK),
+                                                Modulation::DBPSK, CodeRate::R1_4,
+                                                0.0f, 0.20f, 3,
+                                                LadderRungId::ROBUST_MID);
+        auto ack_parsed = ConnectFrame::deserialize(ack.serialize());
+        assert(ack_parsed.has_value());
+        assert(ack_parsed->data_frame_cw_count == 3);
+        assert(ack_parsed->ladder_rung_id == LadderRungId::ROBUST_MID);
+
+        auto mode = ControlFrame::makeModeChange("W1AW", "VA2MVR/P", 7,
+                                                 Modulation::DQPSK, CodeRate::R1_4,
+                                                 6.0f, 0.40f,
+                                                 ModeChangeReason::CHANNEL_IMPROVED,
+                                                 4, LadderRungId::ROBUST);
+        auto parsed = ControlFrame::deserialize(mode.serialize());
+        assert(parsed.has_value());
+        auto info = parsed->getModeChangeInfo();
+        assert(info.data_frame_cw_count == 4);
+        assert(info.ladder_rung_id == LadderRungId::ROBUST);
 
         PASS();
     } catch (const std::exception& e) {
@@ -1308,6 +1341,7 @@ int main() {
     test_phy_mask_header_out_of_range_bits();
     test_phy_mask_capability_roundtrip();
     test_connect_frame_roundtrip_and_crc();
+    test_ladder_rung_wire_roundtrip();
     test_data_frame_codeword_count();
     test_data_frame_roundtrip();
     test_data_frame_crc();

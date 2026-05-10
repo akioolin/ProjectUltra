@@ -12,8 +12,16 @@
 namespace ultra {
 namespace gui {
 
+namespace {
+Modulation mcDpskModulationForConfig(const MultiCarrierDPSKConfig& config) {
+    if (config.bits_per_symbol == 1) return Modulation::DBPSK;
+    if (config.bits_per_symbol == 3) return Modulation::D8PSK;
+    return Modulation::DQPSK;
+}
+}
+
 ModemEngine::ModemEngine()
-    : ModemEngine(mc_dpsk_presets::level8()) {
+    : ModemEngine(mc_dpsk_presets::robust_mid()) {
 }
 
 ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
@@ -46,7 +54,7 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
     startupTrace("ModemEngine", "chirp-sync-created");
 
     // Multi-Carrier DPSK (for fading channels - frequency diversity)
-    // Default is level8: 8 carriers, 93.75 baud, DQPSK (~1500 bps raw).
+    // Default cold-call PHY is Robust-Mid: 8 carriers, 46.875 baud, DBPSK.
     // Test presets can override samples_per_symbol and DBPSK at construction.
     // 8 carriers is more robust than 13 at low SNR with CFO (tested: 100% vs 40% at moderate fading)
     // IMPORTANT: Sync chirp config with modem's chirp_sync_ so TX and RX use same chirp
@@ -62,6 +70,7 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
     startupTrace("ModemEngine", "streaming-encoder-created");
     streaming_encoder_->setOFDMConfig(config_);
     streaming_encoder_->setMCDPSKConfig(mc_dpsk_config_);
+    streaming_encoder_->setDataMode(mcDpskModulationForConfig(mc_dpsk_config_), CodeRate::R1_4);
     startupTrace("ModemEngine", "streaming-encoder-configured");
 
     // Initialize audio filters
@@ -137,6 +146,7 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
         mc_dpsk_config_.samples_per_symbol != 512 ||
         mc_dpsk_config_.bits_per_symbol != 2) {
         streaming_decoder_->setMCDPSKConfig(mc_dpsk_config_);
+        streaming_decoder_->setDataMode(mcDpskModulationForConfig(mc_dpsk_config_), CodeRate::R1_4);
         startupTrace("ModemEngine", "decoder-carriers-set");
     } else {
         startupTrace("ModemEngine", "decoder-carriers-skip-default");
@@ -298,7 +308,9 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     // ========================================================================
     // 2. Determine modulation and code rate
     // ========================================================================
-    Modulation tx_modulation = Modulation::DQPSK;
+    Modulation tx_modulation = protocol::isOFDMMode(tx_waveform_mode)
+        ? Modulation::DQPSK
+        : mcDpskModulationForConfig(mc_dpsk_config_);
     CodeRate tx_code_rate = CodeRate::R1_4;
 
     if ((connected_ && handshake_complete_) || use_connected_waveform_once_) {

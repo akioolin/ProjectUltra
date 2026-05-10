@@ -359,7 +359,8 @@ ControlFrame ControlFrame::makeDisconnect(const std::string& src, const std::str
 ControlFrame ControlFrame::makeModeChange(const std::string& src, const std::string& dst,
                                            uint16_t seq, Modulation new_mod, CodeRate new_rate,
                                            float snr_db, float fading_index, uint8_t reason,
-                                           uint8_t cw_count) {
+                                           uint8_t cw_count,
+                                           LadderRungId rung_id) {
     ControlFrame f;
     f.type = FrameType::MODE_CHANGE;
     f.flags = Flags::VERSION_V2;
@@ -371,14 +372,15 @@ ControlFrame ControlFrame::makeModeChange(const std::string& src, const std::str
     f.payload[2] = encodeSNR(snr_db);
     f.payload[3] = reason;
     f.payload[4] = encodeFadingIndex(fading_index);
-    f.payload[5] = cw_count;  // Negotiated CW count (0=AUTO/unspecified)
+    f.payload[5] = packCWCountAndRung(cw_count, rung_id);
     return f;
 }
 
 ControlFrame ControlFrame::makeModeChangeByHash(const std::string& src, uint32_t dst_hash,
                                                  uint16_t seq, Modulation new_mod, CodeRate new_rate,
                                                  float snr_db, float fading_index, uint8_t reason,
-                                                 uint8_t cw_count) {
+                                                 uint8_t cw_count,
+                                                 LadderRungId rung_id) {
     ControlFrame f;
     f.type = FrameType::MODE_CHANGE;
     f.flags = Flags::VERSION_V2;
@@ -390,7 +392,7 @@ ControlFrame ControlFrame::makeModeChangeByHash(const std::string& src, uint32_t
     f.payload[2] = encodeSNR(snr_db);
     f.payload[3] = reason;
     f.payload[4] = encodeFadingIndex(fading_index);
-    f.payload[5] = cw_count;
+    f.payload[5] = packCWCountAndRung(cw_count, rung_id);
     return f;
 }
 
@@ -773,6 +775,7 @@ ConnectFrame ConnectFrame::makeConnect(const std::string& src, const std::string
     f.initial_code_rate = forced_code_rate;     // 0xFF = AUTO, else forced
     f.measured_snr = 0;                         // Not used in CONNECT
     f.data_frame_cw_count = forced_cw_count;    // 0=AUTO, else 1..8 forced
+    f.ladder_rung_id = LadderRungId::UNKNOWN;
     f.phy_mask_v1_capability = ultra::protocol::hasPhyMaskV1Capability(f.mode_capabilities);
     return f;
 }
@@ -780,7 +783,8 @@ ConnectFrame ConnectFrame::makeConnect(const std::string& src, const std::string
 ConnectFrame ConnectFrame::makeConnectAck(const std::string& src, const std::string& dst,
                                            uint8_t neg_mode, Modulation init_mod, CodeRate init_rate,
                                            float snr_db, float fading_index,
-                                           uint8_t cw_count) {
+                                           uint8_t cw_count,
+                                           LadderRungId rung_id) {
     ConnectFrame f;
     f.type = FrameType::CONNECT_ACK;
     f.flags = Flags::VERSION_V2;
@@ -802,6 +806,7 @@ ConnectFrame ConnectFrame::makeConnectAck(const std::string& src, const std::str
     f.initial_code_rate = static_cast<uint8_t>(init_rate);
     f.measured_snr = encodeSNR(snr_db);
     f.data_frame_cw_count = cw_count;  // Final negotiated CW count (1..8)
+    f.ladder_rung_id = rung_id;
     f.phy_mask_v1_capability = false;
     return f;
 }
@@ -821,6 +826,7 @@ ConnectFrame ConnectFrame::makeConnectNak(const std::string& src, const std::str
 
     f.mode_capabilities = 0;
     f.negotiated_mode = 0;
+    f.ladder_rung_id = LadderRungId::UNKNOWN;
     f.phy_mask_v1_capability = false;
     return f;
 }
@@ -847,7 +853,8 @@ ConnectFrame ConnectFrame::makeDisconnect(const std::string& src, const std::str
 ConnectFrame ConnectFrame::makeConnectAckByHash(const std::string& src, uint32_t dst_hash,
                                                  uint8_t neg_mode, Modulation init_mod, CodeRate init_rate,
                                                  float snr_db, float fading_index,
-                                                 uint8_t cw_count) {
+                                                 uint8_t cw_count,
+                                                 LadderRungId rung_id) {
     ConnectFrame f;
     f.type = FrameType::CONNECT_ACK;
     f.flags = Flags::VERSION_V2;
@@ -868,6 +875,7 @@ ConnectFrame ConnectFrame::makeConnectAckByHash(const std::string& src, uint32_t
     f.initial_code_rate = static_cast<uint8_t>(init_rate);
     f.measured_snr = encodeSNR(snr_db);
     f.data_frame_cw_count = cw_count;  // Final negotiated CW count (1..8)
+    f.ladder_rung_id = rung_id;
     f.phy_mask_v1_capability = false;
     return f;
 }
@@ -939,10 +947,10 @@ Bytes ConnectFrame::serialize() const {
     out.push_back(initial_modulation);
     out.push_back(initial_code_rate);
     out.push_back(measured_snr);
-    uint8_t cw_count_wire = data_frame_cw_count;
-    if (type == FrameType::CONNECT_ACK && phy_mask_v1_capability) {
-        cw_count_wire |= ModeCapabilities::PHY_MASK_V1;
-    }
+    const uint8_t cw_count_wire = packCWCountAndRung(
+        data_frame_cw_count,
+        type == FrameType::CONNECT_ACK ? ladder_rung_id : LadderRungId::UNKNOWN,
+        type == FrameType::CONNECT_ACK && phy_mask_v1_capability);
     out.push_back(cw_count_wire);
 
     // Frame CRC (2 bytes)
@@ -1018,9 +1026,11 @@ std::optional<ConnectFrame> ConnectFrame::deserialize(ByteSpan data) {
     const uint8_t cw_count_wire = data[field_offset + 5];
     if (f.type == FrameType::CONNECT_ACK) {
         f.phy_mask_v1_capability = (cw_count_wire & ModeCapabilities::PHY_MASK_V1) != 0;
-        f.data_frame_cw_count = static_cast<uint8_t>(cw_count_wire & 0x0F);
+        f.data_frame_cw_count = unpackCWCount(cw_count_wire);
+        f.ladder_rung_id = unpackLadderRungId(cw_count_wire);
     } else {
-        f.data_frame_cw_count = cw_count_wire;
+        f.data_frame_cw_count = unpackCWCount(cw_count_wire);
+        f.ladder_rung_id = LadderRungId::UNKNOWN;
         f.phy_mask_v1_capability = ultra::protocol::hasPhyMaskV1Capability(f.mode_capabilities);
     }
 

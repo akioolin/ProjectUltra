@@ -319,11 +319,19 @@ void Connection::acceptCall() {
     pending_forced_code_rate_ = CodeRate::AUTO;
     pending_forced_cw_count_ = 0;
 
-    // Set our local data mode immediately
-    data_modulation_ = rec_mod;
-    data_code_rate_ = rec_rate;
-    data_frame_cw_count_ = negotiated_cw;
-    config_.fixed_frame_codewords = negotiated_cw;
+    LadderRungId rung_id = LadderRungId::UNKNOWN;
+    if (negotiated_mode_ == WaveformMode::MC_DPSK) {
+        rung_id = connection_policy::rungForMCDPSKConfig(
+            rec_mod, config_.mc_dpsk_num_carriers,
+            config_.mc_dpsk_samples_per_symbol, negotiated_cw).id;
+    } else if (negotiated_mode_ == WaveformMode::OFDM_CHIRP) {
+        rung_id = LadderRungId::OFDM_CHIRP;
+    } else if (negotiated_mode_ == WaveformMode::OFDM_NARROW) {
+        rung_id = LadderRungId::OFDM_NARROW;
+    }
+
+    // Set our local data mode immediately.
+    applyDataMode(rec_mod, rec_rate, negotiated_cw, rung_id);
 
     LOG_MODEM(INFO, "Connection: Accepting call from %s (waveform=%s, data=%s %s, cw=%d)",
               remote_call_.c_str(), waveformModeToString(negotiated_mode_),
@@ -332,8 +340,10 @@ void Connection::acceptCall() {
 
     auto ack = v2::ConnectFrame::makeConnectAck(local_call_, remote_call_,
                                                  static_cast<uint8_t>(negotiated_mode_),
-                                                 rec_mod, rec_rate, measured_snr_db_, fading_index_,
-                                                 static_cast<uint8_t>(negotiated_cw));
+                                                 data_modulation_, data_code_rate_,
+                                                 measured_snr_db_, fading_index_,
+                                                 static_cast<uint8_t>(data_frame_cw_count_),
+                                                 rung_id);
     Bytes ack_data = ack.serialize();
 
     LOG_MODEM(INFO, "Connection: Sending CONNECT_ACK (%zu bytes)", ack_data.size());
@@ -347,10 +357,7 @@ void Connection::acceptCall() {
     responder_handshake_wait_ms_ = RESPONDER_HANDSHAKE_FAILSAFE_MS;
 
     // Notify application of initial data mode
-    if (on_data_mode_changed_) {
-        on_data_mode_changed_(data_modulation_, data_code_rate_, data_frame_cw_count_,
-                              measured_snr_db_, fading_index_);
-    }
+    notifyDataModeChanged(measured_snr_db_, fading_index_);
 }
 
 void Connection::rejectCall() {
@@ -932,7 +939,7 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                                       modulationToString(pending_modulation_),
                                       codeRateToString(pending_code_rate_));
                             applyDataMode(pending_modulation_, pending_code_rate_,
-                                          pending_cw_count_);
+                                          pending_cw_count_, pending_ladder_rung_id_);
                             if (was_downgrade) {
                                 adaptive_post_downgrade_lockout_ms_ =
                                     ADAPTIVE_POST_DOWNGRADE_LOCKOUT_MS;
@@ -940,13 +947,10 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                                 adaptive_pressure_windows_ = 0;
                             }
                             mode_change_pending_ = false;
+                            pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
 
                             // Notify application of mode change
-                            if (on_data_mode_changed_) {
-                                on_data_mode_changed_(data_modulation_, data_code_rate_,
-                                                      data_frame_cw_count_,
-                                                      pending_snr_db_, pending_fading_index_);
-                            }
+                            notifyDataModeChanged(pending_snr_db_, pending_fading_index_);
                             runDeferredArqRefill();
                         } else {
                             // Regular data ACK
@@ -1435,6 +1439,7 @@ void Connection::tick(uint32_t elapsed_ms) {
                         LOG_MODEM(WARN, "Connection: MODE_CHANGE failed after %d attempts, keeping current mode",
                                   MODE_CHANGE_MAX_RETRIES);
                         mode_change_pending_ = false;
+                        pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
                         resetAdaptiveModeController();
                         runDeferredArqRefill();
                         // Stay at current mode - don't change anything
@@ -1447,7 +1452,8 @@ void Connection::tick(uint32_t elapsed_ms) {
                                                                        pending_code_rate_, pending_snr_db_,
                                                                        pending_fading_index_,
                                                                        pending_reason_,
-                                                                       pending_cw_count_);
+                                                                       pending_cw_count_,
+                                                                       pending_ladder_rung_id_);
                         transmitFrame(frame.serialize());
                         mode_change_timeout_ms_ = MODE_CHANGE_TIMEOUT_MS;
                     }
@@ -1668,7 +1674,8 @@ uint32_t Connection::pingTimeoutMsForCurrentProfile() const {
     // robust DBPSK probe retries from overlapping the following CONNECT.
     const bool robust_dbpsk_probe =
         connect_waveform_ == WaveformMode::MC_DPSK &&
-        config_.forced_modulation == Modulation::DBPSK;
+        (config_.forced_modulation == Modulation::DBPSK ||
+         config_.mc_dpsk_samples_per_symbol >= 1024);
     return robust_dbpsk_probe ? ROBUST_LOW_PING_TIMEOUT_MS : PING_TIMEOUT_MS;
 }
 
@@ -1687,7 +1694,50 @@ size_t Connection::currentDataPayloadCapacity() const {
     return SIZE_MAX;
 }
 
-void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count) {
+LadderRungId Connection::currentLadderRungId() const {
+    if (negotiated_mode_ == WaveformMode::OFDM_CHIRP) {
+        return LadderRungId::OFDM_CHIRP;
+    }
+    if (negotiated_mode_ == WaveformMode::OFDM_NARROW) {
+        return LadderRungId::OFDM_NARROW;
+    }
+    if (negotiated_mode_ == WaveformMode::MC_DPSK) {
+        return connection_policy::rungForMCDPSKConfig(
+            data_modulation_, config_.mc_dpsk_num_carriers,
+            config_.mc_dpsk_samples_per_symbol, data_frame_cw_count_).id;
+    }
+    return LadderRungId::UNKNOWN;
+}
+
+void Connection::notifyDataModeChanged(float snr_db, float peer_fading_index) {
+    if (!on_data_mode_changed_) {
+        return;
+    }
+    const bool mc_dpsk = negotiated_mode_ == WaveformMode::MC_DPSK;
+    on_data_mode_changed_(data_modulation_, data_code_rate_, data_frame_cw_count_,
+                          snr_db, peer_fading_index,
+                          mc_dpsk ? config_.mc_dpsk_num_carriers : 0,
+                          mc_dpsk ? config_.mc_dpsk_samples_per_symbol : 0);
+}
+
+void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
+                               LadderRungId rung_id) {
+    if (rung_id != LadderRungId::UNKNOWN) {
+        const auto rung = connection_policy::ladderRungForId(rung_id);
+        if (rung.id != LadderRungId::UNKNOWN) {
+            negotiated_mode_ = rung.waveform;
+            if (rung.waveform == WaveformMode::MC_DPSK) {
+                config_.mc_dpsk_num_carriers = rung.num_carriers;
+                config_.mc_dpsk_samples_per_symbol = rung.samples_per_symbol;
+                mod = rung.modulation;
+                rate = rung.code_rate;
+                if (cw_count == 0) {
+                    cw_count = rung.cw_count;
+                }
+            }
+        }
+    }
+
     // Resolve final CW count: explicit value if specified (e.g. from
     // MODE_CHANGE wire byte), else auto-pick from rate.
     const int new_cw = (cw_count > 0)
@@ -1713,6 +1763,9 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count) {
     data_code_rate_ = rate;
     data_frame_cw_count_ = new_cw;
     config_.fixed_frame_codewords = new_cw;
+    data_ladder_rung_id_ = (rung_id != LadderRungId::UNKNOWN)
+        ? rung_id
+        : currentLadderRungId();
     configureArqForCurrentDataMode();
     resetAdaptiveModeController();
 
@@ -1767,6 +1820,8 @@ void Connection::enterDisconnected(const std::string& reason) {
     connect_ack_retransmit_ms_ = 0;
     connect_ack_retransmit_interval_ms_ = CONNECT_ACK_RETRANSMIT_MS;
     connect_ack_retx_remaining_ = 0;
+    data_ladder_rung_id_ = LadderRungId::UNKNOWN;
+    pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
     arq_callback_defer_refill_ = false;
     deferred_file_refill_ = false;
     deferred_fragment_refill_ = false;
@@ -1942,8 +1997,10 @@ void Connection::reset() {
     mode_change_pending_ = false;
     mode_change_timeout_ms_ = 0;
     mode_change_retry_count_ = 0;
+    pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
     data_modulation_ = Modulation::DQPSK;
     data_code_rate_ = CodeRate::R1_4;
+    data_ladder_rung_id_ = LadderRungId::UNKNOWN;
     connect_waveform_ = WaveformMode::MC_DPSK;  // Reset to DPSK for next connect attempt
     responder_handshake_wait_ms_ = 0;
     connect_ack_frame_.clear();

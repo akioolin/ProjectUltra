@@ -568,7 +568,15 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
 
     protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate,
                                                  int cw_count,
-                                                 float snr_db, float peer_fading) {
+                                                 float snr_db, float peer_fading,
+                                                 int mc_dpsk_num_carriers,
+                                                 int mc_dpsk_samples_per_symbol) {
+        if (mc_dpsk_num_carriers > 0 && mc_dpsk_samples_per_symbol > 0) {
+            modem_.setMCDPSKProfile(mc_dpsk_num_carriers,
+                                    mc_dpsk_samples_per_symbol,
+                                    mod == Modulation::DBPSK ? 1 :
+                                    mod == Modulation::D8PSK ? 3 : 2);
+        }
         // Update modem engine with new data mode
         modem_.setDataMode(mod, rate);
         // Sync ModemEngine encoder/decoder to negotiated CW count from the
@@ -1049,7 +1057,15 @@ void App::initVirtualStation() {
 
     virtual_protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate,
                                                          int cw_count,
-                                                         float snr_db, float peer_fading) {
+                                                         float snr_db, float peer_fading,
+                                                         int mc_dpsk_num_carriers,
+                                                         int mc_dpsk_samples_per_symbol) {
+        if (mc_dpsk_num_carriers > 0 && mc_dpsk_samples_per_symbol > 0) {
+            virtual_modem_->setMCDPSKProfile(mc_dpsk_num_carriers,
+                                             mc_dpsk_samples_per_symbol,
+                                             mod == Modulation::DBPSK ? 1 :
+                                             mod == Modulation::D8PSK ? 3 : 2);
+        }
         // Update virtual modem engine with new data mode
         virtual_modem_->setDataMode(mod, rate);
         // Same direct-update path as the real modem — no protocol re-entry.

@@ -457,7 +457,7 @@ public:
 
     SimulatedStation(const std::string& callsign, std::unique_ptr<AudioPort> port,
                      OFDMConfigPreset ofdm_config_preset = OFDMConfigPreset::Default,
-                     const MultiCarrierDPSKConfig& mc_dpsk_config = mc_dpsk_presets::level8())
+                     const MultiCarrierDPSKConfig& mc_dpsk_config = mc_dpsk_presets::robust_mid())
         : callsign_(callsign),
           port_(std::move(port)) {
 
@@ -555,6 +555,34 @@ public:
             decoder_->setDataMode(data_modulation_, data_code_rate_);
         }
     }
+    void applyNegotiatedMCDPSKConfig(Modulation mod,
+                                     int num_carriers,
+                                     int samples_per_symbol) {
+        if (num_carriers <= 0 || samples_per_symbol <= 0) {
+            return;
+        }
+        const int bits_per_symbol = (mod == Modulation::DBPSK) ? 1 :
+                                    (mod == Modulation::D8PSK) ? 3 : 2;
+        if (mc_dpsk_config_.num_carriers == num_carriers &&
+            mc_dpsk_config_.samples_per_symbol == samples_per_symbol &&
+            mc_dpsk_config_.bits_per_symbol == bits_per_symbol) {
+            return;
+        }
+
+        mc_dpsk_config_.num_carriers = num_carriers;
+        mc_dpsk_config_.samples_per_symbol = samples_per_symbol;
+        mc_dpsk_config_.bits_per_symbol = bits_per_symbol;
+        if (encoder_) {
+            encoder_->setMCDPSKConfig(mc_dpsk_config_);
+        }
+        if (decoder_) {
+            decoder_->setMCDPSKConfig(mc_dpsk_config_);
+        }
+        LOG_MODEM(INFO, "[%s] Negotiated MC-DPSK config: carriers=%d sps=%d bits/sym=%d",
+                  callsign_.c_str(), mc_dpsk_config_.num_carriers,
+                  mc_dpsk_config_.samples_per_symbol,
+                  mc_dpsk_config_.bits_per_symbol);
+    }
     // forced=true → operator override, propagates via wire.
     // forced=false → boot-time default (encoder/decoder bootstrap only).
     void setFixedFrameCodewords(int cw_count, bool forced = true) {
@@ -645,6 +673,7 @@ public:
     Modulation getDataModulation() const { return data_modulation_; }
     CodeRate getDataCodeRate() const { return data_code_rate_; }
     int getFixedFrameCodewords() const { return fixed_frame_codewords_; }
+    MultiCarrierDPSKConfig getMCDPSKConfig() const { return mc_dpsk_config_; }
     float getLastCFO() const { return last_cfo_hz_; }
 
     void resetAdaptiveAdvisory() {
@@ -673,7 +702,7 @@ private:
     ModemConfig ofdm_config_;
     Modulation data_modulation_ = Modulation::DQPSK;
     CodeRate data_code_rate_ = CodeRate::R1_4;
-    MultiCarrierDPSKConfig mc_dpsk_config_ = mc_dpsk_presets::level8();
+    MultiCarrierDPSKConfig mc_dpsk_config_ = mc_dpsk_presets::robust_mid();
 
     // Protocol engine
     ProtocolEngine protocol_{ConnectionConfig{}};
@@ -1278,7 +1307,11 @@ private:
         // we caught on 2026-05-04).
         protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate,
                                                     int cw_count,
-                                                    float peer_snr_db, float peer_fading) {
+                                                    float peer_snr_db, float peer_fading,
+                                                    int mc_dpsk_num_carriers,
+                                                    int mc_dpsk_samples_per_symbol) {
+            applyNegotiatedMCDPSKConfig(mod, mc_dpsk_num_carriers,
+                                        mc_dpsk_samples_per_symbol);
             setDataMode(mod, rate);
             if (cw_count > 0 && cw_count != fixed_frame_codewords_) {
                 fixed_frame_codewords_ = v2::sanitizeFixedFrameCodewords(cw_count);
