@@ -44,27 +44,19 @@ on a steady-state channel.
 
 Production geometry used below:
 
-- MC-DPSK ladder (4 rungs, adaptive per channel/SNR):
-  - Robust-Low: 8 carriers, 2048 samples/symbol → 23.4 sym/s, DBPSK,
-    R1/4, 3-CW bounded variable frames
-  - Robust-Mid: 8 carriers, 1024 samples/symbol → 46.9 sym/s, DBPSK,
-    R1/4, 3-CW (cold-call/listen default)
-  - Robust: 8 carriers, 1024 samples/symbol → 46.9 sym/s, DQPSK,
-    R1/4, 4-CW (default)
-  - Standard: 8 carriers, 512 samples/symbol → 93.75 sym/s, DQPSK,
-    R1/4 (legacy, override only)
+- MC-DPSK: 8 carriers, 512 samples/symbol → 93.75 sym/s, DQPSK,
+  data-mode pinned to R1/4 by `recommendDataMode()`. Adaptive ladder
+  extends down to -5 dB via DBPSK + slower symbol rates
+  (`docs/CHANGELOG.md` 2026-05-10).
 - OFDM-CHIRP wideband: 1024-FFT, LONG CP=128 → 1152 samples/symbol,
   41.667 sym/s. 59 occupied carriers; pilot count comes from
   `recommendedPilotSpacing(mod, rate)`.
 - OFDM-NARROW: 21 occupied carriers, 2240 samples/symbol → 21.429 sym/s,
   pilot spacing 10 → 18 data carriers.
 
-| SNR (Mod fading)  | Mode                 | Data carriers | Raw PHY     | Notes |
-|-------------------|----------------------|--------------:|------------:|-------|
-| -5 to -3 dB | MC-DPSK Robust-Low DBPSK R1/4 |    8 |      47 bps | Lowest-SNR rung, 4× longer symbols |
-| -3 to +5 dB | MC-DPSK Robust-Mid DBPSK R1/4 |    8 |      94 bps | Cold-call/listen default; DBPSK + 1024 sps |
-|  +5 to +9 dB | MC-DPSK Robust DQPSK R1/4    |    8 |     188 bps | Borderline-good channel; per-CW repair helps |
-|   +9+ dB | MC-DPSK Standard DQPSK R1/4    |    8 |     375 bps | Legacy / override only |
+| SNR  | Mode                 | Data carriers | Raw PHY     | Notes |
+|------|----------------------|--------------:|------------:|-------|
+| -5+  | MC-DPSK adaptive ladder  |        8 | 47–375 bps  | DBPSK→DQPSK + variable symbol rate via auto-rung |
 | 8+   | OFDM-NARROW DQPSK R1/4   |       18 |     193 bps | 500 Hz BW for crowded bands |
 | 8+   | OFDM-NARROW DQPSK R1/2   |       18 |     386 bps | 500 Hz BW |
 | 10+  | OFDM-CHIRP DQPSK R1/4    |       53 |    1104 bps | Fading-tolerant baseline (6 pilots @ spacing 10) |
@@ -93,22 +85,7 @@ on measured SNR and fading.
 | 20 KB Mac↔Pi5 injected ×5     | Watterson Good, SNR=15 |  ~94 s | **1733.1 bps**  | Median of 5; range [1726.8, 1739.6]; R1/2; 0 retx all 5; handshake ≈ 5% (near steady-state) |
 | 5 KB Mac↔Pi5 injected ×5      | Watterson Good, SNR=15 |  ~27 s | **1540.6 bps**  | Median of 5; range [1540.3, 1550.0]; R1/2; 0 retx all 5; handshake ≈ 19% (fixed ~5 s overhead dominates short transfers) |
 | 500 KB Mac↔Pi5 injected       | Watterson Good, SNR=15 | 3742 s |      1094 bps   | R1/2; 1346 retx, 0 failed, byte-exact; handshake negligible — slowdown vs 20 KB is from retransmissions on a long fading run |
-
-**Adaptive auto-selection (single-run, 2026-05-10):** with no
-`--mc-dpsk-preset` flag and `--rate auto`, the modem cold-calls at
-Robust-Mid then negotiates the right rung from measured SNR + fading:
-
-| Test                  | Channel              | Auto-picked                        | Throughput   |
-|-----------------------|----------------------|------------------------------------|-------------:|
-| 20 KB Mac↔Pi5 injected | AWGN, SNR=15        | OFDM-CHIRP DQPSK R2/3              | **2337 bps** |
-| 20 KB Mac↔Pi5 injected | Watterson Good, SNR=15 | OFDM-CHIRP DQPSK R1/2           | **1703 bps** |
-| 1 KB Mac↔Pi5 injected  | Watterson Good, SNR=0  | MC-DPSK Robust-Mid DBPSK R1/4   | **28.9 bps** |
-| 1 KB Mac↔Pi5 injected  | Watterson Mod, SNR=0   | MC-DPSK Robust-Mid DBPSK R1/4   | **27.3 bps** |
-
-All four cells delivered with **zero retransmissions**. The selector
-spans ~85× throughput dynamic range based on measured channel
-conditions. See `docs/CHANGELOG.md` 2026-05-10 entry for the full
-rung policy table and architecture.
+| 1 KB Mac↔Pi5 injected         | Watterson Mod, SNR=0   |  300 s |    **27.3 bps** | MC-DPSK auto-rung (DBPSK R1/4); 0 retx; below the OFDM SNR floor |
 
 Throughput rises with payload size as the fixed ~5 s handshake (PING/PONG → CONNECT → MODE_CHANGE) amortizes. The 1.83-1.90 kbps wall-clock asymptote at R1/2 SNR=15 sits below the 2208 bps raw-PHY ceiling because the 8-CW frame carries 301 useful payload bytes inside 51 OFDM symbols (`2 LTS + ceil(8*648/(53*2))` = 1.224 s) — that effective single-frame payload rate is ~1967 bps before ARQ overhead, and ACK turnaround takes the rest. Beyond ~50 KB, throughput is bounded by per-frame airtime + ACK roundtrip, not handshake.
 
@@ -191,15 +168,13 @@ SDL2). Virtual-station / simulator mode for development.
 ### Waveform selection (automatic)
 
 ```
-SNR (Mod fading)  Mode                                  Reason
-─────────────────────────────────────────────────────────────────────────
-< -3 dB           MC-DPSK Robust-Low (DBPSK 2048sps)    Most robust, 4× symbols
--3 to +5 dB       MC-DPSK Robust-Mid (DBPSK 1024sps)    Cold-call / listen default
-+5 to +9 dB       MC-DPSK Robust    (DQPSK 1024sps)     Per-CW repair on fade
-5–10 dB           OFDM-NARROW (500 Hz)                  Crowded bands, low SNR
-+10 dB+           OFDM-CHIRP (wideband 1024)            Production auto ladder
-forced            OFDM-COX (1024)                       Implemented, not auto-selected
-forced            OFDM 16QAM                            Coherent + pilot tracking
+SNR         Waveform              Reason
+─────────────────────────────────────────────────────────────────────
+-5 to +9 dB MC-DPSK (auto-rung)   DBPSK→DQPSK + variable SPS, adaptive
+5–10 dB     OFDM-NARROW (500 Hz)  Crowded bands, low SNR
+10+ dB      OFDM-CHIRP (1024)     Production auto ladder
+forced      OFDM-COX (1024)       Implemented, not auto-selected
+forced      OFDM 16QAM            Coherent + pilot tracking
 ```
 
 Selection happens during CONNECT (peer-advertised SNR + fading index)
