@@ -89,7 +89,7 @@ bool envFlagEnabled(const char* name) {
 }
 
 const char* mcDpskPresetChoices() {
-    return "standard, robust_low, robust_mid";
+    return "standard, robust_low, robust_mid, robust";
 }
 
 bool parseMCDPSKPreset(const std::string& value,
@@ -109,6 +109,11 @@ bool parseMCDPSKPreset(const std::string& value,
     if (v == "robust_mid" || v == "robustmid") {
         preset_name = "robust_mid";
         config = mc_dpsk_presets::robust_mid();
+        return true;
+    }
+    if (v == "robust") {
+        preset_name = "robust";
+        config = mc_dpsk_presets::robust();
         return true;
     }
     return false;
@@ -1026,6 +1031,10 @@ private:
                 std::cout << "  \033[31m✗ File contents corrupted!\033[0m\n";
                 return false;
             }
+        }
+
+        if (!waitFor([this]{ return !alpha_->isFileTransferInProgress() && alpha_->isReadyToSend(); }, 60)) {
+            std::cout << "  \033[33m! Sender ACK drain timeout before disconnect (non-fatal)\033[0m\n";
         }
 
         // Phase 4: Disconnect (non-fatal if timeout - file transfer already proved)
@@ -2059,7 +2068,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --mask-clear-carrier <N>  Clear one carrier bit (0-58)\n";
                 std::cout << "  --waveform, -w <WF> Force waveform: mc_dpsk, ofdm_chirp, ofdm_cox, ofdm_narrow\n";
                 std::cout << "  --ofdm-config <CFG> OFDM_COX config: default (512/30) or nvis (1024/59)\n";
-                std::cout << "  --mc-dpsk-preset <P> MC-DPSK preset: standard, robust_low, robust_mid\n";
+                std::cout << "  --mc-dpsk-preset <P> MC-DPSK preset: standard, robust_low, robust_mid, robust\n";
                 std::cout << "  --seed <N>          Random seed (default: 42)\n";
                 std::cout << "  --tx-cfo <Hz>       Inject TX CFO in channel model (default: 0)\n";
                 std::cout << "  --cfo <Hz>          Alias for --tx-cfo\n";

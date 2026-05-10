@@ -125,6 +125,10 @@ int main() {
                      data_serialized, v2::FrameType::DATA)) return 1;
     if (!runLoopback("robust_mid connect", mc_dpsk_presets::robust_mid(), Modulation::DBPSK,
                      connect_serialized, v2::FrameType::CONNECT)) return 1;
+    if (!runLoopback("robust data", mc_dpsk_presets::robust(), Modulation::DQPSK,
+                     data_serialized, v2::FrameType::DATA)) return 1;
+    if (!runLoopback("robust connect", mc_dpsk_presets::robust(), Modulation::DQPSK,
+                     connect_serialized, v2::FrameType::CONNECT)) return 1;
 
     std::cout << "Streaming MC-DPSK loopback: PASS\n";
     return 0;

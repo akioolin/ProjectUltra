@@ -37,6 +37,13 @@ struct OFDMFrameTiming {
     uint32_t ack_ms = 0;
 };
 
+struct MCDPSKFrameTiming {
+    uint32_t data_symbols = 0;
+    uint32_t ack_symbols = 0;
+    uint32_t data_ms = 0;
+    uint32_t ack_ms = 0;
+};
+
 struct SackDelayProfile {
     uint32_t delay_ms = 120;
     uint32_t short_delay_ms = 0;
@@ -283,6 +290,80 @@ inline uint32_t computeWideOFDMAckTimeoutMs(Modulation mod,
             std::max<uint64_t>(16000ULL, 3ULL * tx_burst_ms));
     }
     return std::clamp(timeout_ms, 8000u, ceiling_ms);
+}
+
+inline uint32_t bitsPerMCDPSKCarrier(Modulation mod) {
+    switch (mod) {
+        case Modulation::DBPSK: return 1;
+        case Modulation::D8PSK: return 3;
+        case Modulation::DQPSK:
+        default: return 2;
+    }
+}
+
+inline MCDPSKFrameTiming mcDpskFrameTiming(Modulation mod,
+                                           int num_carriers,
+                                           int samples_per_symbol,
+                                           int data_cw_count = v2::kDefaultFixedFrameCodewords) {
+    const int carriers = std::clamp(num_carriers, 1, 64);
+    const int sps = std::clamp(samples_per_symbol, 1, 8192);
+    const int cw_count = v2::sanitizeFixedFrameCodewords(data_cw_count);
+    const uint32_t bits_per_symbol = static_cast<uint32_t>(carriers) * bitsPerMCDPSKCarrier(mod);
+    const uint32_t data_symbols_per_cw =
+        (kLDPCBitsPerCodeword + bits_per_symbol - 1) / bits_per_symbol;
+
+    constexpr uint32_t kMCDPSKTrainingSymbols = 8;
+    constexpr uint32_t kMCDPSKReferenceSymbols = 1;
+    const uint32_t overhead_symbols = kMCDPSKTrainingSymbols + kMCDPSKReferenceSymbols;
+
+    MCDPSKFrameTiming timing;
+    timing.data_symbols = overhead_symbols + static_cast<uint32_t>(cw_count) * data_symbols_per_cw;
+    timing.ack_symbols = overhead_symbols + data_symbols_per_cw;
+    timing.data_ms = static_cast<uint32_t>(
+        (static_cast<uint64_t>(timing.data_symbols) * static_cast<uint64_t>(sps) * 1000ULL +
+         kOFDMSampleRate / 2) / kOFDMSampleRate);
+    timing.ack_ms = static_cast<uint32_t>(
+        (static_cast<uint64_t>(timing.ack_symbols) * static_cast<uint64_t>(sps) * 1000ULL +
+         kOFDMSampleRate / 2) / kOFDMSampleRate);
+    return timing;
+}
+
+inline size_t mcDpskWindowSizeForTiming(uint32_t data_frame_ms) {
+    if (data_frame_ms == 0) return 1;
+
+    constexpr uint32_t kTargetBurstMs = 16000;
+    constexpr size_t kMaxAuditedMCDPSKWindow = 4;
+    const size_t by_burst = std::max<size_t>(1, kTargetBurstMs / data_frame_ms);
+    return std::clamp<size_t>(by_burst, 1, kMaxAuditedMCDPSKWindow);
+}
+
+inline uint32_t mcDpskSackDelayMs(const MCDPSKFrameTiming& timing,
+                                  size_t window_size) {
+    if (window_size <= 1) {
+        return 2000;
+    }
+
+    // SACK timer starts after the first decoded frame. Delay the ACK until the
+    // rest of the sender's window burst has cleared the half-duplex audio path.
+    const uint32_t remaining_burst_ms =
+        static_cast<uint32_t>(window_size - 1) * timing.data_ms;
+    return std::clamp<uint32_t>(remaining_burst_ms + 500u, 2000u, 16000u);
+}
+
+inline uint32_t computeMCDPSKAckTimeoutMs(const MCDPSKFrameTiming& timing,
+                                          size_t window_size,
+                                          uint32_t sack_delay_ms,
+                                          int ack_repeat_count) {
+    const uint32_t ack_copies = static_cast<uint32_t>(std::clamp(ack_repeat_count, 1, 3));
+    const uint32_t tx_burst_ms = static_cast<uint32_t>(window_size) * timing.data_ms;
+    const uint32_t ack_path_ms = ack_copies * timing.ack_ms + sack_delay_ms;
+
+    // MC-DPSK uses full audio frames and a streaming decoder, so keep a larger
+    // wall-clock margin than OFDM. This prevents a legal window burst from
+    // self-timing-out before the receiver can batch and send its SACK.
+    constexpr uint32_t kStreamingDecoderMarginMs = 12000;
+    const uint32_t timeout_ms = tx_burst_ms + ack_path_ms + kStreamingDecoderMarginMs;
+    return std::clamp(timeout_ms, 18000u, 72000u);
 }
 
 inline uint32_t connectAckRetransmitDelayMs(WaveformMode mode,

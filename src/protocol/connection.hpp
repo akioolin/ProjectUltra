@@ -40,6 +40,8 @@ struct ConnectionConfig {
     Modulation forced_modulation = Modulation::AUTO;
     CodeRate forced_code_rate = CodeRate::AUTO;
     int fixed_frame_codewords = v2::kDefaultFixedFrameCodewords;
+    int mc_dpsk_num_carriers = 8;
+    int mc_dpsk_samples_per_symbol = 512;
     // Initiator-side forced CW override (0 = AUTO, responder picks via
     // recommendCWCount(rate)). When non-zero, the initiator embeds this
     // value in CONNECT.data_frame_cw_count and the responder honors it
@@ -179,6 +181,7 @@ public:
     // Forced data mode - operator can override SNR-based selection
     void setForcedModulation(Modulation mod) { config_.forced_modulation = mod; }
     void setForcedCodeRate(CodeRate rate) { config_.forced_code_rate = rate; }
+    void setMCDPSKConfig(int num_carriers, int samples_per_symbol);
     // forced=true marks this as an operator override: the initiator will
     // embed it in CONNECT.data_frame_cw_count and the responder will
     // honor + echo it. forced=false is the boot-time default path used

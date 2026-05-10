@@ -747,6 +747,7 @@ void Connection::sendNextFileChunk() {
 
 void Connection::sendNextFragment() {
     bool is_ofdm = isOFDMMode(negotiated_mode_);
+    const bool pipeline_fragments = is_ofdm;
 
     // Enable burst buffering for OFDM mode
     if (is_ofdm && on_transmit_burst_) {
@@ -754,6 +755,7 @@ void Connection::sendNextFragment() {
         burst_tx_buffer_.clear();
     }
 
+    size_t submitted_this_call = 0;
     while (arq_.isReadyToSend() && next_fragment_idx_ < pending_tx_fragments_.size()) {
         const Bytes& chunk = pending_tx_fragments_[next_fragment_idx_];
 
@@ -781,6 +783,15 @@ void Connection::sendNextFragment() {
             arq_.sendDataWithTypeAndFlags(chunk, frame_type, flags);
         }
         next_fragment_idx_++;
+        submitted_this_call++;
+
+        // MC-DPSK bulk-file transfer uses sendNextFileChunk() and is safe to
+        // pipeline. The message-fragment path still shares OFDM-oriented
+        // MORE_FRAG/SACK semantics, so keep it stop-and-wait until it has its
+        // own hardware-validated burst pacing.
+        if (!pipeline_fragments && submitted_this_call >= 1) {
+            break;
+        }
     }
 
     // Flush burst buffer
@@ -1502,21 +1513,45 @@ void Connection::configureArqForCurrentDataMode() {
     }
 
     if (negotiated_mode_ == WaveformMode::MC_DPSK) {
-        // DBPSK MC-DPSK robust profiles have longer frame airtime than standard
-        // DQPSK. Keep the generous watchdog shared by Robust-Low/Robust-Mid;
-        // standard DQPSK stays on the existing 18s path.
-        const bool dbpsk_profile = (data_modulation_ == Modulation::DBPSK);
-        const uint32_t ack_timeout_ms = dbpsk_profile ? 72000 : 18000;
-        arq_.setWindowSize(1);
+        const auto timing = connection_policy::mcDpskFrameTiming(
+            data_modulation_,
+            config_.mc_dpsk_num_carriers,
+            config_.mc_dpsk_samples_per_symbol,
+            data_frame_cw_count_);
+        const size_t window_size = connection_policy::mcDpskWindowSizeForTiming(timing.data_ms);
+        const uint32_t sack_delay_ms = connection_policy::mcDpskSackDelayMs(timing, window_size);
+        const bool pipelined_dqpsk = window_size > 1 && data_modulation_ == Modulation::DQPSK;
+        const int ack_repeat_count = pipelined_dqpsk ? 2 : 1;
+        const uint32_t ack_repeat_delay_ms = pipelined_dqpsk
+            ? std::clamp<uint32_t>(timing.ack_ms + 250u, 750u, 3000u)
+            : 220u;
+        arq_.setWindowSize(window_size);
+        arq_.setSackDelay(sack_delay_ms);
+        arq_.setSackDelayShort(window_size > 1 ? 2000 : 0);
+        arq_.setAckRepeatCount(ack_repeat_count);
+        arq_.setAckRepeatDelay(ack_repeat_delay_ms);
+        uint32_t ack_timeout_ms = connection_policy::computeMCDPSKAckTimeoutMs(
+            timing, window_size, arq_.getSackDelay(), ack_repeat_count);
+        if (data_modulation_ == Modulation::DBPSK &&
+            config_.mc_dpsk_samples_per_symbol >= 2048) {
+            ack_timeout_ms = 72000;
+        }
         arq_.setAckTimeout(ack_timeout_ms);
-        arq_.setSackDelay(2000);
-        arq_.setSackDelayShort(0);
-        arq_.setAckRepeatCount(1);
-        LOG_MODEM(INFO, "Connection: ARQ window=1, timeout=%.1fs, ack_repeat=1 (MC-DPSK %s %s%s)",
+        LOG_MODEM(INFO, "Connection: ARQ window=%zu, timeout=%.1fs (data=%ums, ack=%ums x%d), sack_delay=%ums/%ums, ack_repeat=%d/%ums, cw=%d (MC-DPSK %s %s, carriers=%d, sps=%d)",
+                  window_size,
                   ack_timeout_ms / 1000.0f,
+                  timing.data_ms,
+                  timing.ack_ms,
+                  ack_repeat_count,
+                  arq_.getSackDelay(),
+                  arq_.getSackDelayShort(),
+                  ack_repeat_count,
+                  ack_repeat_delay_ms,
+                  data_frame_cw_count_,
                   modulationToString(data_modulation_),
                   codeRateToString(data_code_rate_),
-                  dbpsk_profile ? ", DBPSK robust airtime" : "");
+                  config_.mc_dpsk_num_carriers,
+                  config_.mc_dpsk_samples_per_symbol);
     } else if (negotiated_mode_ == WaveformMode::OFDM_NARROW) {
         // Selective-repeat window=3 — chosen after A/B in cli_simulator
         // SNR=8 good fading R1/4 7-message test:
@@ -1742,6 +1777,11 @@ void Connection::setTransmitCallback(TransmitCallback cb) {
 
 void Connection::setTransmitBurstCallback(TransmitBurstCallback cb) {
     on_transmit_burst_ = std::move(cb);
+}
+
+void Connection::setMCDPSKConfig(int num_carriers, int samples_per_symbol) {
+    config_.mc_dpsk_num_carriers = std::clamp(num_carriers, 1, 64);
+    config_.mc_dpsk_samples_per_symbol = std::clamp(samples_per_symbol, 1, 8192);
 }
 
 void Connection::setPhyMaskV1Negotiated(bool enabled) {

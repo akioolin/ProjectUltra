@@ -144,6 +144,39 @@ void test_narrow_ofdm_timing_and_timeout() {
     CHECK(w3 >= 13500 && w3 <= 14500, "window=3 timeout ~14.0 s (current narrow default)");
 }
 
+void test_mc_dpsk_window_timing() {
+    auto robust_low = mcDpskFrameTiming(Modulation::DBPSK, 8, 2048, 3);
+    CHECK(robust_low.data_ms == 10752, "Robust-Low MC-DPSK 3-CW data timing");
+    CHECK(mcDpskWindowSizeForTiming(robust_low.data_ms) == 1,
+          "Robust-Low MC-DPSK should keep window=1");
+
+    auto robust_mid = mcDpskFrameTiming(Modulation::DBPSK, 8, 1024, 3);
+    CHECK(robust_mid.data_ms == 5376, "Robust-Mid MC-DPSK 3-CW data timing");
+    CHECK(mcDpskWindowSizeForTiming(robust_mid.data_ms) == 2,
+          "Robust-Mid MC-DPSK should use window=2");
+    CHECK(mcDpskSackDelayMs(robust_mid, 2) == 5876,
+          "Robust-Mid SACK delay should cover the remaining window burst");
+    CHECK(computeMCDPSKAckTimeoutMs(robust_mid, 2, 2000, 1) >=
+              2 * robust_mid.data_ms + robust_mid.ack_ms + 2000,
+          "Robust-Mid ACK timeout should cover the two-frame burst and ACK path");
+
+    auto robust = mcDpskFrameTiming(Modulation::DQPSK, 8, 1024, 4);
+    CHECK(robust.data_ms == 3691, "Robust MC-DPSK 4-CW data timing");
+    CHECK(mcDpskWindowSizeForTiming(robust.data_ms) == 4,
+          "Robust MC-DPSK should use window=4");
+    CHECK(mcDpskSackDelayMs(robust, 4) == 11573,
+          "Robust SACK delay should defer ACK until the MC-DPSK burst tail");
+
+    auto standard = mcDpskFrameTiming(Modulation::DQPSK, 8, 512, 4);
+    CHECK(standard.data_ms == 1845, "Standard MC-DPSK 4-CW data timing");
+    CHECK(mcDpskWindowSizeForTiming(standard.data_ms) == 4,
+          "Standard MC-DPSK should use window=4");
+    CHECK(mcDpskSackDelayMs(standard, 4) == 6035,
+          "Standard SACK delay should defer ACK until the MC-DPSK burst tail");
+    CHECK(computeMCDPSKAckTimeoutMs(standard, 4, mcDpskSackDelayMs(standard, 4), 1) > 18000,
+          "Standard MC-DPSK window=4 timeout should exceed the legacy floor");
+}
+
 void test_ofdm_profile_selection() {
     CHECK(isNearAwgnOFDM(0.00f, 15.0f), "near-AWGN threshold should include SNR15");
     CHECK(isNearAwgnOFDM(0.14f, 15.0f), "near-AWGN fading threshold should allow R2/3 cutoff margin");
@@ -321,6 +354,7 @@ int main() {
     test_fading_labels_and_capabilities();
     test_wide_ofdm_timing_and_timeout();
     test_narrow_ofdm_timing_and_timeout();
+    test_mc_dpsk_window_timing();
     test_ofdm_profile_selection();
     test_negotiated_mode_selection();
     test_recommend_cw_count();

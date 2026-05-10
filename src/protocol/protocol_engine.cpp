@@ -453,6 +453,11 @@ void ProtocolEngine::setForcedCodeRate(CodeRate rate) {
     connection_.setForcedCodeRate(rate);
 }
 
+void ProtocolEngine::setMCDPSKConfig(int num_carriers, int samples_per_symbol) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.setMCDPSKConfig(num_carriers, samples_per_symbol);
+}
+
 void ProtocolEngine::setForcedFrameCodewords(int cw_count, bool forced) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setForcedFrameCodewords(cw_count, forced);

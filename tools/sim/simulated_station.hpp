@@ -465,6 +465,8 @@ public:
         mc_dpsk_config_ = mc_dpsk_config;
         protocol_.setLocalCallsign(callsign);
         protocol_.setAutoAccept(true);
+        protocol_.setMCDPSKConfig(mc_dpsk_config_.num_carriers,
+                                  mc_dpsk_config_.samples_per_symbol);
         data_modulation_ = mcDpskModulationForConfig(mc_dpsk_config_);
 
         // Initialize OFDM_COX from the selected CLI preset.
@@ -542,6 +544,8 @@ public:
     void setMCDPSKConfig(const MultiCarrierDPSKConfig& config) {
         mc_dpsk_config_ = config;
         data_modulation_ = mcDpskModulationForConfig(mc_dpsk_config_);
+        protocol_.setMCDPSKConfig(mc_dpsk_config_.num_carriers,
+                                  mc_dpsk_config_.samples_per_symbol);
         if (encoder_) {
             encoder_->setMCDPSKConfig(mc_dpsk_config_);
             encoder_->setDataMode(data_modulation_, data_code_rate_);
@@ -1185,6 +1189,12 @@ private:
             result = encoder_->encodeFrameLight(data);
         } else {
             result = encoder_->encodeFrame(data);
+        }
+
+        if (is_mc_dpsk && !is_handshake_frame) {
+            constexpr int kMCDPSKInterFrameGuardMs = 100;
+            constexpr int kGuardSamples = SAMPLE_RATE * kMCDPSKInterFrameGuardMs / 1000;
+            result.insert(result.end(), kGuardSamples, 0.0f);
         }
 
         // Restore encoder mode if we changed it
