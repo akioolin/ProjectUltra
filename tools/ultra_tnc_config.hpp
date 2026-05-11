@@ -46,6 +46,7 @@ struct Config {
     bool expert_phy = false;
     bool help = false;
     bool list_audio = false;
+    bool version = false;
 };
 
 // Strict parsers — full string consumed, no silent partial accept.

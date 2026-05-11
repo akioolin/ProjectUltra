@@ -1,0 +1,13 @@
+#pragma once
+
+namespace ultra {
+
+inline constexpr const char* kBuildVersion = "@PROJECT_VERSION@";
+inline constexpr const char* kBuildGitCommit = "@ULTRA_GIT_COMMIT@";
+inline constexpr const char* kBuildGitCommitShort = "@ULTRA_GIT_COMMIT_SHORT@";
+inline constexpr const char* kBuildReleaseTag = "@ULTRA_RELEASE_TAG@";
+inline constexpr const char* kBuildOS = "@ULTRA_BUILD_OS@";
+inline constexpr const char* kBuildTimeUtc = "@ULTRA_BUILD_TIME_UTC@";
+inline constexpr bool kBuildDirty = @ULTRA_GIT_DIRTY_BOOL@;
+
+} // namespace ultra

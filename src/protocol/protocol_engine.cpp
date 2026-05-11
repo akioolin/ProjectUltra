@@ -1,7 +1,9 @@
 #include "protocol_engine.hpp"
+#include "diagnostics/diagnostics_recorder.hpp"
 #include "gui/startup_trace.hpp"
 #include "ultra/logging.hpp"
 #include <algorithm>
+#include <cstdio>
 
 namespace ultra {
 namespace protocol {
@@ -22,6 +24,23 @@ ProtocolEngine::ProtocolEngine(const ConnectionConfig& config)
     });
 
     connection_.setDisconnectedCallback([this](const std::string& reason) {
+        const auto stats = connection_.getStats();
+        char fields[384];
+        std::snprintf(fields, sizeof(fields),
+                      "{\"connected_time_ms\":%u,\"connects_failed\":%d,"
+                      "\"disconnects\":%d,\"arq_frames_sent\":%d,"
+                      "\"arq_frames_received\":%d,\"arq_retransmissions\":%d,"
+                      "\"arq_timeouts\":%d,\"arq_failed\":%d}",
+                      stats.connected_time_ms,
+                      stats.connects_failed,
+                      stats.disconnects,
+                      stats.arq.frames_sent,
+                      stats.arq.frames_received,
+                      stats.arq.retransmissions,
+                      stats.arq.timeouts,
+                      stats.arq.failed);
+        ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+            "protocol", "session.stats", fields);
         if (on_connection_changed_) {
             on_connection_changed_(ConnectionState::DISCONNECTED, reason);
         }
@@ -364,10 +383,20 @@ void ProtocolEngine::processRxBuffer() {
             LOG_MODEM(INFO, "[%s] RX << %s seq=%d (%zu bytes)",
                       local_call.c_str(),
                       v2::frameTypeToString(header.type), header.seq, frame_size);
+            char fields[192];
+            std::snprintf(fields, sizeof(fields),
+                          "{\"frame_type\":\"%s\",\"seq\":%u,\"bytes\":%zu}",
+                          v2::frameTypeToString(header.type),
+                          static_cast<unsigned>(header.seq),
+                          frame_size);
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                "protocol", "frame.rx", fields);
             rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + frame_size);
             connection_.onFrameReceived(frame_data);
         } else {
             LOG_MODEM(WARN, "Protocol: CRC failed, skipping frame");
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                "protocol", "decode.fail", "{\"stage\":\"protocol_crc\"}");
             rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + frame_size);
         }
     }
@@ -428,6 +457,19 @@ void ProtocolEngine::handleTxFrame(const Bytes& frame_data) {
     LOG_MODEM(INFO, "[%s] Protocol TX: %zu bytes -> modem%s",
               connection_.getLocalCallsign().c_str(), frame_data.size(),
               defer_tx_ ? " (queued)" : "");
+    auto header = v2::parseHeader(frame_data);
+    char fields[192];
+    if (header.valid) {
+        std::snprintf(fields, sizeof(fields),
+                      "{\"frame_type\":\"%s\",\"seq\":%u,\"bytes\":%zu}",
+                      v2::frameTypeToString(header.type),
+                      static_cast<unsigned>(header.seq),
+                      frame_data.size());
+    } else {
+        std::snprintf(fields, sizeof(fields), "{\"bytes\":%zu}", frame_data.size());
+    }
+    ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+        "protocol", "frame.tx", fields);
 
     if (defer_tx_) {
         tx_queue_.push_back(frame_data);

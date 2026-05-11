@@ -1,6 +1,8 @@
 #include "app.hpp"
+#include "diagnostics/diagnostics_recorder.hpp"
 #include "startup_trace.hpp"
 #include "imgui.h"
+#include "ultra/build_info.hpp"
 #include "ultra/logging.hpp"
 #include "sim/awgn.hpp"
 #include "sim/hf_channel.hpp"
@@ -15,6 +17,7 @@
 #include <limits>
 #include <deque>
 #include <vector>
+#include <utility>
 #include <sys/stat.h>
 
 #ifdef _WIN32
@@ -268,6 +271,22 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     settings_.load();
     ultra::gui::startupTrace("App", "settings-load-exit");
 
+    ultra::diagnostics::SessionMeta diag_meta;
+    diag_meta.app_name = "ultra_gui";
+    diag_meta.station_role = "gui";
+    diag_meta.callsign = std::string(settings_.callsign, boundedCStringLen(settings_.callsign));
+    diag_meta.config_json =
+        std::string("{\"app\":\"ultra_gui\",\"callsign\":\"") +
+        ultra::diagnostics::jsonEscape(diag_meta.callsign) +
+        "\",\"input_device\":\"" + ultra::diagnostics::jsonEscape(settings_.input_device) +
+        "\",\"output_device\":\"" + ultra::diagnostics::jsonEscape(settings_.output_device) +
+        "\"}";
+    auto& diagnostics = ultra::diagnostics::DiagnosticsRecorder::instance();
+    diagnostics.start(std::move(diag_meta));
+    if (auto tombstone = diagnostics.pendingTombstone()) {
+        appendRxLogLine("[FAULT] Previous-session crash detected: " + tombstone->signal_name);
+    }
+
     ultra::gui::startupTrace("App", "presets-balanced-enter");
     config_ = presets::balanced();
     ultra::gui::startupTrace("App", "presets-balanced-exit");
@@ -469,17 +488,34 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
             case protocol::ConnectionState::PROBING:
                 resetAdaptiveAdvisory();
                 msg = "[SYS] Probing " + info + "...";
+                {
+                    auto& diagnostics = ultra::diagnostics::DiagnosticsRecorder::instance();
+                    diagnostics.ensureSessionActive();
+                    diagnostics.emitText("session", "session.state", "{\"state\":\"probing\"}");
+                }
                 break;
             case protocol::ConnectionState::CONNECTING:
                 resetAdaptiveAdvisory();
                 msg = "[SYS] Connecting to " + info + "...";
+                {
+                    auto& diagnostics = ultra::diagnostics::DiagnosticsRecorder::instance();
+                    diagnostics.ensureSessionActive();
+                    diagnostics.emitText("session", "session.state", "{\"state\":\"connecting\"}");
+                }
                 break;
             case protocol::ConnectionState::CONNECTED:
                 resetAdaptiveAdvisory();
                 msg = "[SYS] Connected to " + info;  // info contains remote callsign
+                {
+                    auto& diagnostics = ultra::diagnostics::DiagnosticsRecorder::instance();
+                    diagnostics.ensureSessionActive();
+                    diagnostics.emitText("session", "session.state", "{\"state\":\"connected\"}");
+                }
                 break;
             case protocol::ConnectionState::DISCONNECTING:
                 msg = "[SYS] Disconnecting...";
+                ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                    "session", "session.state", "{\"state\":\"disconnecting\"}");
                 break;
             case protocol::ConnectionState::DISCONNECTED:
                 resetAdaptiveAdvisory();
@@ -492,6 +528,26 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                 modem_.setWaveformMode(protocol::WaveformMode::OFDM_COX);
                 // Reset connect waveform to DPSK for next connection attempt
                 modem_.setConnectWaveform(protocol::WaveformMode::MC_DPSK);
+                {
+                    auto& diagnostics = ultra::diagnostics::DiagnosticsRecorder::instance();
+                    const std::string fields =
+                        std::string("{\"state\":\"disconnected\",\"reason\":\"") +
+                        ultra::diagnostics::jsonEscape(info) + "\"}";
+                    diagnostics.emitText("session", "session.state", fields.c_str());
+                    auto summary = diagnostics.finishSession(info);
+                    if (summary.ok) {
+                        diagnostics_last_summary_ = summary.text;
+                        diagnostics_last_summary_path_ = summary.path.string();
+                        std::snprintf(diagnostics_debrief_save_path_,
+                                      sizeof(diagnostics_debrief_save_path_),
+                                      "%s", diagnostics_last_summary_path_.c_str());
+                        diagnostics_debrief_status_.clear();
+                        diagnostics_debrief_popup_open_ = true;
+                        appendRxLogLine("[DIAG] Debrief saved: " + diagnostics_last_summary_path_);
+                    } else {
+                        appendRxLogLine("[DIAG] Debrief failed: " + summary.error);
+                    }
+                }
                 break;
         }
         appendRxLogLine(msg);
@@ -511,6 +567,8 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     // PING TX callback - protocol wants to send a fast presence probe
     protocol_.setPingTxCallback([this]() {
         guiLog("TX PING: Probing for remote station...");
+        ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+            "protocol", "ping.tx", "{\"kind\":\"ping\"}");
         auto samples = modem_.transmitPing();
         if (!samples.empty()) {
             if (simulation_enabled_) {
@@ -527,6 +585,8 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     // PING received callback - someone is probing us
     protocol_.setPingReceivedCallback([this]() {
         guiLog("RX PING: Incoming probe, sending PONG...");
+        ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+            "protocol", "ping.tx", "{\"kind\":\"pong\"}");
         auto samples = modem_.transmitPong();
         if (!samples.empty()) {
             if (simulation_enabled_) {
@@ -558,6 +618,10 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         } else {
             guiLog("MODEM: Detected PING/PONG (SNR=%.1f dB)", display_snr);
         }
+        char diag_fields[96];
+        std::snprintf(diag_fields, sizeof(diag_fields), "{\"snr_db\":%.1f}", display_snr);
+        ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+            "protocol", "ping.rx", diag_fields);
         // If narrowband chirp detected, set session-scoped override so negotiateMode() picks OFDM_NARROW
         if (modem_.isNarrowbandDetected()) {
             protocol_.setNarrowbandOverride(protocol::WaveformMode::OFDM_NARROW);
@@ -604,6 +668,12 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                wf_name, modulationToString(mod), codeRateToString(rate),
                snr_db, peer_fading_text,
                local_fading, local_quality);
+        char diag_fields[224];
+        snprintf(diag_fields, sizeof(diag_fields),
+                 "{\"waveform\":\"%s\",\"mod\":\"%s\",\"rate\":\"%s\",\"cw\":%d}",
+                 wf_name, modulationToString(mod), codeRateToString(rate), cw_count);
+        ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+            "protocol", "waveform.negotiated", diag_fields);
 
         // Format display with waveform info and channel quality
         char buf[200];
@@ -665,6 +735,11 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
             default: mode_name = "OFDM"; break;
         }
         guiLog("WAVEFORM_CHANGE: %s", mode_name.c_str());
+        char diag_fields[128];
+        snprintf(diag_fields, sizeof(diag_fields),
+                 "{\"waveform\":\"%s\"}", mode_name.c_str());
+        ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+            "protocol", "waveform.negotiated", diag_fields);
 
         // Update modem engine with new waveform mode
         modem_.setWaveformMode(mode);
@@ -722,6 +797,15 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                 last_effective_goodput_bps_ = (8.0f * static_cast<float>(file_bytes)) / seconds;
                 last_goodput_label_ = "RX file";
             }
+            char fields[512];
+            std::snprintf(fields, sizeof(fields),
+                          "{\"direction\":\"rx\",\"path\":\"%s\",\"bytes\":%u,"
+                          "\"seconds\":%.1f,\"success\":true}",
+                          ultra::diagnostics::jsonEscape(path).c_str(),
+                          file_bytes,
+                          seconds);
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                "protocol", "file.transfer", fields);
             char buf[320];
             if (last_goodput_label_ == "RX file" && last_effective_goodput_bps_ > 0.0f) {
                 snprintf(buf, sizeof(buf), "[FILE] Received: %s (%.1fs, %.2f kbps)",
@@ -733,6 +817,12 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
             last_received_file_ = path;
         } else {
             msg = "[FILE] Receive failed";
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                "protocol", "file.transfer",
+                "{\"direction\":\"rx\",\"success\":false,\"error\":\"receive_failed\"}");
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                "fault", "fault.triggered",
+                "{\"reason\":\"file_receive_failed\",\"policy\":\"emit_only\"}");
         }
         appendRxLogLine(msg);
     });
@@ -750,6 +840,15 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                     (8.0f * static_cast<float>(pending_file_tx_payload_bytes_)) / seconds;
                 last_goodput_label_ = "TX file";
             }
+            char fields[512];
+            std::snprintf(fields, sizeof(fields),
+                          "{\"direction\":\"tx\",\"path\":\"%s\",\"bytes\":%u,"
+                          "\"seconds\":%.1f,\"success\":true}",
+                          ultra::diagnostics::jsonEscape(pending_file_tx_path_).c_str(),
+                          pending_file_tx_payload_bytes_,
+                          seconds);
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                "protocol", "file.transfer", fields);
             char buf[196];
             if (last_goodput_label_ == "TX file" && last_effective_goodput_bps_ > 0.0f) {
                 snprintf(buf, sizeof(buf), "[FILE] Transfer complete (%.1fs, %.2f kbps)",
@@ -760,8 +859,17 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
             msg = buf;
         } else {
             msg = "[FILE] Transfer failed: " + error;
+            const std::string fields =
+                std::string("{\"direction\":\"tx\",\"success\":false,\"error\":\"") +
+                ultra::diagnostics::jsonEscape(error) + "\"}";
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                "protocol", "file.transfer", fields.c_str());
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                "fault", "fault.triggered",
+                "{\"reason\":\"file_transfer_failed\",\"policy\":\"emit_only\"}");
         }
         pending_file_tx_payload_bytes_ = 0;
+        pending_file_tx_path_.clear();
         appendRxLogLine(msg);
     });
     ultra::gui::startupTrace("App", "protocol-callbacks-exit");
@@ -919,6 +1027,7 @@ App::~App() {
     if (options_.record_audio) {
         writeRecordingToFile();
     }
+    ultra::diagnostics::DiagnosticsRecorder::instance().stop();
 }
 
 void App::writeRecordingToFile() {
@@ -1480,6 +1589,120 @@ void App::clearRxLog() {
     rx_log_.clear();
 }
 
+void App::renderDiagnosticsDialogs() {
+    auto& recorder = ultra::diagnostics::DiagnosticsRecorder::instance();
+    if (!recorder.hasAudioConsent() && !diagnostics_consent_popup_opened_) {
+        ImGui::OpenPopup("ProjectUltra diagnostics audio consent");
+        diagnostics_consent_popup_opened_ = true;
+    }
+
+    if (ImGui::BeginPopupModal("ProjectUltra diagnostics audio consent", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextWrapped(
+            "ProjectUltra can keep the last two minutes of RX audio as lossless PCM "
+            "for local field reports. RX audio may contain callsigns or third-party "
+            "speech. No upload is performed by the app.");
+        ImGui::Spacing();
+        if (ImGui::Button("Enable RX Recording", ImVec2(180, 0))) {
+            if (recorder.grantAudioConsent()) {
+                appendRxLogLine("[DIAG] RX diagnostics recording enabled");
+            } else {
+                appendRxLogLine("[DIAG] Failed to save audio consent");
+            }
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Not Now", ImVec2(110, 0))) {
+            appendRxLogLine("[DIAG] RX diagnostics recording disabled until consent is granted");
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    if (diagnostics_report_popup_open_) {
+        ImGui::OpenPopup("Create diagnostics report");
+        diagnostics_report_popup_open_ = false;
+    }
+    if (ImGui::BeginPopupModal("Create diagnostics report", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextWrapped(
+            "Create a local report bundle with recent events, build provenance, "
+            "redacted config, and consented RX audio.");
+        ImGui::InputTextMultiline("Note", diagnostics_note_buffer_,
+                                  sizeof(diagnostics_note_buffer_), ImVec2(420, 110));
+        ImGui::Spacing();
+        if (ImGui::Button("Create", ImVec2(120, 0))) {
+            ultra::diagnostics::ReportOptions options;
+            options.note = diagnostics_note_buffer_;
+            auto report = recorder.freeze(ultra::diagnostics::FreezeReason::Manual, options);
+            if (report.ok) {
+                diagnostics_last_report_ = report.path.string();
+                appendRxLogLine("[DIAG] Report created: " + diagnostics_last_report_);
+            } else {
+                appendRxLogLine("[DIAG] Report failed: " + report.error);
+            }
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+            ImGui::CloseCurrentPopup();
+        }
+        if (!diagnostics_last_report_.empty()) {
+            ImGui::Separator();
+            ImGui::TextWrapped("%s", diagnostics_last_report_.c_str());
+        }
+        ImGui::EndPopup();
+    }
+
+    if (diagnostics_debrief_popup_open_) {
+        ImGui::OpenPopup("Session debrief");
+        diagnostics_debrief_popup_open_ = false;
+    }
+    if (ImGui::BeginPopupModal("Session debrief", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextWrapped("%s", diagnostics_last_summary_path_.c_str());
+        ImGui::Separator();
+        ImGui::BeginChild("DebriefText", ImVec2(620, 360), true);
+        ImGui::TextWrapped("%s", diagnostics_last_summary_.c_str());
+        ImGui::EndChild();
+        ImGui::Spacing();
+        ImGui::SetNextItemWidth(500);
+        ImGui::InputText("Save path", diagnostics_debrief_save_path_,
+                         sizeof(diagnostics_debrief_save_path_));
+        if (ImGui::Button("Save debrief", ImVec2(140, 0))) {
+            std::error_code ec;
+            std::filesystem::copy_file(diagnostics_last_summary_path_,
+                                       diagnostics_debrief_save_path_,
+                                       std::filesystem::copy_options::overwrite_existing,
+                                       ec);
+            diagnostics_debrief_status_ = ec ? ("Save failed: " + ec.message())
+                                             : "Debrief saved";
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Create full report", ImVec2(160, 0))) {
+            ultra::diagnostics::ReportOptions options;
+            auto report = recorder.freeze(ultra::diagnostics::FreezeReason::Manual, options);
+            if (report.ok) {
+                diagnostics_last_report_ = report.path.string();
+                diagnostics_debrief_status_ = "Report created: " + diagnostics_last_report_;
+                appendRxLogLine("[DIAG] Report created: " + diagnostics_last_report_);
+            } else {
+                diagnostics_debrief_status_ = "Report failed: " + report.error;
+                appendRxLogLine("[DIAG] Report failed: " + report.error);
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Close", ImVec2(100, 0))) {
+            ImGui::CloseCurrentPopup();
+        }
+        if (!diagnostics_debrief_status_.empty()) {
+            ImGui::Separator();
+            ImGui::TextWrapped("%s", diagnostics_debrief_status_.c_str());
+        }
+        ImGui::EndPopup();
+    }
+}
+
 void App::sendMessage() {
     // Not used in current implementation - messages sent via protocol
 }
@@ -1855,12 +2078,18 @@ void App::render() {
     } else {
         snprintf(goodput_text, sizeof(goodput_text), "n/a");
     }
-    ImGui::Text("Mode: %s | SNR: %.1f dB | TX: %d | RX: %d | PHY: %d bps | Goodput: %s | RXQ: %.0f ms (pk %.0f) | OF: %llu/%llu",
+    ImGui::Text("Mode: %s | SNR: %.1f dB | TX: %d | RX: %d | PHY: %d bps | Goodput: %s | RXQ: %.0f ms (pk %.0f) | OF: %llu/%llu | %s%s",
                 mode_str, mstats.snr_db, mstats.frames_sent, mstats.frames_received,
                 mstats.throughput_bps, goodput_text,
                 dstats.backlog_ms, dstats.peak_backlog_ms,
                 static_cast<unsigned long long>(dstats.buffer_overflows),
-                static_cast<unsigned long long>(dstats.overflow_samples_dropped));
+                static_cast<unsigned long long>(dstats.overflow_samples_dropped),
+                ultra::kBuildGitCommitShort,
+                ultra::kBuildDirty ? "-dirty" : "");
+    if (ultra::diagnostics::DiagnosticsRecorder::instance().isRxAudioRecordingEnabled()) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.25f, 0.18f, 1.0f), "Recording");
+    }
 
     ImGui::End();
     if (first_render) {
@@ -1883,6 +2112,7 @@ void App::render() {
         strncpy(file_path_buffer_, path.c_str(), sizeof(file_path_buffer_) - 1);
         file_path_buffer_[sizeof(file_path_buffer_) - 1] = '\0';
     }
+    renderDiagnosticsDialogs();
     if (first_render) {
         ultra::gui::startupTrace("App", "render-exit");
         first_render = false;
@@ -2500,6 +2730,12 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         if (arq.failed > 0) {
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "fail:%d", arq.failed);
+            if (arq.failed > diagnostics_last_arq_failed_) {
+                diagnostics_last_arq_failed_ = arq.failed;
+                ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                    "fault", "fault.triggered",
+                    "{\"reason\":\"arq_failed_increment\",\"policy\":\"emit_only\"}");
+            }
         }
     }
 
@@ -2746,6 +2982,10 @@ void App::renderOperateTab() {
         ImGui::SetClipboardText(all_log.c_str());
     }
     ImGui::SameLine();
+    if (ImGui::SmallButton("Report...")) {
+        diagnostics_report_popup_open_ = true;
+    }
+    ImGui::SameLine();
     auto mstats = modem_.getStats();
     ImGui::TextDisabled("TX:%d RX:%d", mstats.frames_sent, mstats.frames_received);
 
@@ -2866,9 +3106,11 @@ void App::renderOperateTab() {
             uint32_t file_bytes = safeFileSizeBytes(file_path);
             if (protocol_.sendFile(file_path)) {
                 pending_file_tx_payload_bytes_ = file_bytes;
+                pending_file_tx_path_ = file_path;
                 appendRxLogLine("[FILE] Sending: " + file_path);
             } else {
                 pending_file_tx_payload_bytes_ = 0;
+                pending_file_tx_path_.clear();
                 appendRxLogLine("[FILE] Failed to start transfer");
             }
         }
