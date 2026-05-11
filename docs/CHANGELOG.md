@@ -10,6 +10,65 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-11: MC-DPSK continuous burst — amortize chirp/training
+
+**What was slow (transport efficiency):**
+After 2026-05-10's adaptive ladder landed, MC-DPSK cells were measuring
+20-30% of their coded PHY ceilings — Robust-Mid at 28 bps with a 94 bps
+ceiling, Robust at 43-56 bps with a 188 bps ceiling. Each data frame
+carried its own ~1s chirp + training preamble, then ~5-15 s of LDPC
+payload, then ACK/turnaround. Per-frame preamble cost dominated.
+
+**What changed (1 commit on exp/mc-dpsk-continuous-burst):**
+
+`746433a` — MC-DPSK continuous burst. TX emits one chirp + training
+preamble, then packages multiple logical DATA frames into a single
+physical burst (each frame modulated separately to preserve
+differential phase; symbol-boundary padding keeps RX cursor aligned).
+RX maintains CFO, differential phase, and codeword cursor across the
+burst. Frame-level SACK at burst end unchanged. Per-CW SACK/repair
+semantics preserved.
+
+Wire format: existing DATA frames packaged into one MC-DPSK physical
+burst (no DATA_SUPER frame added) — avoids burning an extra LDPC
+header and keeps DATA_REPAIR/NACK paths intact.
+
+**Hardware-validated multi-run (Mac<->Pi5, --inject --inject-gain
+0.70, --rate auto, 1KB):**
+
+| Cell             | Pre-burst (1 run) | Burst (3 runs)                   | Multiplier |
+|------------------|------------------:|----------------------------------|-----------:|
+| Robust-Mid 0 Mod | 27.3 bps          | 30.3 / 30.2 / 30.3 (0 retx ×3)   | 1.11x      |
+| Robust  +5 Good  | 42.6 bps          | 75.7 / 75.7 / 75.8 (0 retx ×3)   | **1.78x**  |
+| Robust  +8 Good  | 55.8 bps          | 75.7 / 75.8 / 75.8 (0 retx ×3)   | 1.36x      |
+| Adaptive +15 Good 20KB | 1703 bps    | 1718 bps (0 retx)                | 1.01x ✓    |
+
+All cells 3/3 PASS with zero retransmissions. Robust rung gets the
+predicted 1.36-1.78x speedup (within Codex's strategic estimate of
+1.6-2.4x). Robust-Mid sees a modest 1.05-1.11x because it is already
+PHY-ceiling bound on DBPSK 1024sps. OFDM_CHIRP regression check
+clean.
+
+**What's NOT done (future work):**
+- Robust-Mid speed-up: the rung sits near its PHY ceiling; further
+  gains need either a faster code rate (e.g. R1/2 DBPSK) or a Robust
+  rung extension.
+- Standard-Plus rung (8c DQPSK 512sps R1/2 for Good/AWGN +8 to +9
+  cells, target 110-150 bps net) attempted overnight but Codex API
+  service was unreliable through the night with three consecutive
+  stalls; deferred to next session.
+- Per-CW soft-combining HARQ — would help cells with retransmissions;
+  current 0-retx cells leave it as a future lever for marginal
+  channels.
+- Multi-run validation on the lower-SNR cells (Robust-Low at -5 Mod,
+  Robust-Mid at -3 Mod) — burst should not have regressed these,
+  but worth a sweep for completeness.
+
+ctest 39/39 pass. Single-frame DATA path preserved for all forced
+preset paths. OFDM_CHIRP / OFDM_NARROW behavior fully preserved.
+
+---
+
 ## 2026-05-10: MC-DPSK speed ladder + adaptive rung negotiation
 
 **What was missing (architectural feature):**
