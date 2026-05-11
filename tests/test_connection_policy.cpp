@@ -220,34 +220,48 @@ void test_narrow_ofdm_timing_and_timeout() {
 void test_mc_dpsk_window_timing() {
     auto robust_low = mcDpskFrameTiming(Modulation::DBPSK, 8, 2048, 3);
     CHECK(robust_low.data_ms == 10752, "Robust-Low MC-DPSK 3-CW data timing");
-    CHECK(mcDpskWindowSizeForTiming(robust_low.data_ms) == 1,
+    CHECK(robust_low.data_only_ms == 10368, "Robust-Low MC-DPSK data-only timing");
+    CHECK(mcDpskBurstAirtimeMs(robust_low, 1) == 11952,
+          "Robust-Low MC-DPSK physical burst timing");
+    CHECK(mcDpskWindowSizeForTiming(robust_low) == 1,
           "Robust-Low MC-DPSK should keep window=1");
 
     auto robust_mid = mcDpskFrameTiming(Modulation::DBPSK, 8, 1024, 3);
     CHECK(robust_mid.data_ms == 5376, "Robust-Mid MC-DPSK 3-CW data timing");
-    CHECK(mcDpskWindowSizeForTiming(robust_mid.data_ms) == 2,
-          "Robust-Mid MC-DPSK should use window=2");
-    CHECK(mcDpskSackDelayMs(robust_mid, 2) == 5876,
-          "Robust-Mid SACK delay should cover the remaining window burst");
-    CHECK(computeMCDPSKAckTimeoutMs(robust_mid, 2, 2000, 1) >=
-              2 * robust_mid.data_ms + robust_mid.ack_ms + 2000,
-          "Robust-Mid ACK timeout should cover the two-frame burst and ACK path");
+    CHECK(robust_mid.data_only_ms == 5184, "Robust-Mid MC-DPSK data-only timing");
+    CHECK(mcDpskBurstAirtimeMs(robust_mid, 3) == 16944,
+          "Robust-Mid MC-DPSK window=3 physical burst timing");
+    CHECK(mcDpskWindowSizeForTiming(robust_mid) == 3,
+          "Robust-Mid MC-DPSK should use window=3");
+    CHECK(mcDpskSackDelayMs(robust_mid, 3) == 10868,
+          "Robust-Mid SACK delay should cover the remaining data-only burst");
+    CHECK(mcDpskSackTailDelayMs(robust_mid) == 592,
+          "Robust-Mid tail SACK delay should use short burst-end guard");
+    CHECK(computeMCDPSKAckTimeoutMs(robust_mid, 3, 2000, 1) >=
+              3 * robust_mid.data_ms + robust_mid.ack_ms + 2000,
+          "Robust-Mid ACK timeout should cover the three-frame burst and ACK path");
 
     auto robust = mcDpskFrameTiming(Modulation::DQPSK, 8, 1024, 4);
     CHECK(robust.data_ms == 3691, "Robust MC-DPSK 4-CW data timing");
-    CHECK(mcDpskWindowSizeForTiming(robust.data_ms) == 4,
-          "Robust MC-DPSK should use window=4");
-    CHECK(mcDpskSackDelayMs(robust, 4) == 11573,
-          "Robust SACK delay should defer ACK until the MC-DPSK burst tail");
+    CHECK(robust.data_only_ms == 3499, "Robust MC-DPSK data-only timing");
+    CHECK(mcDpskBurstAirtimeMs(robust, 5) == 18887,
+          "Robust MC-DPSK window=5 physical burst timing");
+    CHECK(mcDpskWindowSizeForTiming(robust) == 5,
+          "Robust MC-DPSK should use window=5");
+    CHECK(mcDpskSackDelayMs(robust, 5) == 14496,
+          "Robust SACK delay should defer ACK until the data-only burst tail");
 
     auto standard = mcDpskFrameTiming(Modulation::DQPSK, 8, 512, 4);
     CHECK(standard.data_ms == 1845, "Standard MC-DPSK 4-CW data timing");
-    CHECK(mcDpskWindowSizeForTiming(standard.data_ms) == 4,
-          "Standard MC-DPSK should use window=4");
-    CHECK(mcDpskSackDelayMs(standard, 4) == 6035,
-          "Standard SACK delay should defer ACK until the MC-DPSK burst tail");
-    CHECK(computeMCDPSKAckTimeoutMs(standard, 4, mcDpskSackDelayMs(standard, 4), 1) > 18000,
-          "Standard MC-DPSK window=4 timeout should exceed the legacy floor");
+    CHECK(standard.data_only_ms == 1749, "Standard MC-DPSK data-only timing");
+    CHECK(mcDpskBurstAirtimeMs(standard, 5) == 10041,
+          "Standard MC-DPSK window=5 physical burst timing");
+    CHECK(mcDpskWindowSizeForTiming(standard) == 5,
+          "Standard MC-DPSK should use window=5");
+    CHECK(mcDpskSackDelayMs(standard, 5) == 7496,
+          "Standard SACK delay should defer ACK until the data-only burst tail");
+    CHECK(computeMCDPSKAckTimeoutMs(standard, 5, mcDpskSackDelayMs(standard, 5), 1) > 18000,
+          "Standard MC-DPSK window=5 timeout should exceed the legacy floor");
 }
 
 void test_ofdm_profile_selection() {

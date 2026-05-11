@@ -1552,8 +1552,9 @@ void Connection::configureArqForCurrentDataMode() {
             config_.mc_dpsk_num_carriers,
             config_.mc_dpsk_samples_per_symbol,
             data_frame_cw_count_);
-        const size_t window_size = connection_policy::mcDpskWindowSizeForTiming(timing.data_ms);
+        const size_t window_size = connection_policy::mcDpskWindowSizeForTiming(timing);
         const uint32_t sack_delay_ms = connection_policy::mcDpskSackDelayMs(timing, window_size);
+        const uint32_t sack_tail_delay_ms = connection_policy::mcDpskSackTailDelayMs(timing);
         const bool pipelined_dqpsk = window_size > 1 && data_modulation_ == Modulation::DQPSK;
         const int ack_repeat_count = pipelined_dqpsk ? 2 : 1;
         const uint32_t ack_repeat_delay_ms = pipelined_dqpsk
@@ -1561,7 +1562,7 @@ void Connection::configureArqForCurrentDataMode() {
             : 220u;
         arq_.setWindowSize(window_size);
         arq_.setSackDelay(sack_delay_ms);
-        arq_.setSackDelayShort(window_size > 1 ? 2000 : 0);
+        arq_.setSackDelayShort(window_size > 1 ? sack_tail_delay_ms : 0);
         arq_.setAckBatchThroughMoreFrag(true);
         arq_.setAckRepeatCount(ack_repeat_count);
         arq_.setAckRepeatDelay(ack_repeat_delay_ms);
@@ -1569,7 +1570,8 @@ void Connection::configureArqForCurrentDataMode() {
             timing, window_size, arq_.getSackDelay(), ack_repeat_count);
         if (data_modulation_ == Modulation::DBPSK &&
             config_.mc_dpsk_samples_per_symbol >= 2048) {
-            ack_timeout_ms = 72000;
+            ack_timeout_ms = std::max<uint32_t>(
+                ack_timeout_ms, connection_policy::kMCDPSKRobustLowAckTimeoutFloorMs);
         }
         arq_.setAckTimeout(ack_timeout_ms);
         LOG_MODEM(INFO, "Connection: ARQ window=%zu, timeout=%.1fs (data=%ums, ack=%ums x%d), sack_delay=%ums/%ums, ack_repeat=%d/%ums, cw=%d (MC-DPSK %s %s, carriers=%d, sps=%d)",
