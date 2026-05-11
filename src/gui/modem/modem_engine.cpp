@@ -363,7 +363,7 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 std::vector<float> ModemEngine::transmitBurst(const std::vector<Bytes>& frame_data_list) {
     if (frame_data_list.empty()) return {};
 
-    // Burst mode is only for connected OFDM mode
+    // Burst mode is for connected OFDM and MC-DPSK DATA windows.
     streaming_encoder_->setMode(waveform_mode_);
     streaming_encoder_->setDataMode(data_modulation_, data_code_rate_);
 

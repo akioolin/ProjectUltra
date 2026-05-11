@@ -430,7 +430,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         }
     });
 
-    // Burst TX callback - encode multiple frames as single OFDM burst
+    // Burst TX callback - encode multiple frames as a single waveform burst
     protocol_.setTransmitBurstCallback([this](const std::vector<Bytes>& frames) {
         auto samples = modem_.transmitBurst(frames);
         if (!samples.empty()) {

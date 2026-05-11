@@ -310,6 +310,35 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
         return encodeFrameLight(frame_data_list[0]);
     }
 
+    if (mode_ == protocol::WaveformMode::MC_DPSK) {
+        size_t total_cw = 0;
+        std::vector<Bytes> encoded_frames;
+        encoded_frames.reserve(frame_data_list.size());
+        for (const auto& fd : frame_data_list) {
+            Bytes encoded = encodeFrameBytes(fd);
+            if (encoded.empty()) {
+                LOG_MODEM(WARN, "[%s] MC-DPSK burst: dropping empty encoded frame",
+                          log_prefix_.c_str());
+                return {};
+            }
+            total_cw += encoded.size() / v2::LDPC_CODEWORD_BYTES;
+            encoded_frames.push_back(std::move(encoded));
+        }
+
+        Samples preamble = waveform_->generatePreamble();
+        std::vector<float> result;
+        result.reserve(preamble.size());
+        result.insert(result.end(), preamble.begin(), preamble.end());
+        for (const auto& encoded : encoded_frames) {
+            Samples modulated = waveform_->modulate(encoded);
+            result.insert(result.end(), modulated.begin(), modulated.end());
+        }
+
+        LOG_MODEM(INFO, "[%s] MC-DPSK continuous burst: %zu frames, %zu CWs -> %zu samples",
+                  log_prefix_.c_str(), frame_data_list.size(), total_cw, result.size());
+        return result;
+    }
+
     // Phase 1: LDPC encode all frames
     std::vector<Bytes> encoded_frames;
     for (const auto& fd : frame_data_list) {

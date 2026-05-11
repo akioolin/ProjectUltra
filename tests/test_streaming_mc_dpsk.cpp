@@ -143,6 +143,67 @@ bool runLowAmplitudePing(const char* name,
     return true;
 }
 
+bool runContinuousBurstLoopback() {
+    StreamingEncoder encoder;
+    encoder.setMode(protocol::WaveformMode::MC_DPSK);
+    encoder.setMCDPSKConfig(mc_dpsk_presets::level8());
+    encoder.setDataMode(Modulation::DQPSK, CodeRate::R1_4);
+
+    const std::vector<size_t> payload_sizes{32, 50, 50};
+    std::vector<Bytes> serialized_frames;
+    for (uint16_t i = 0; i < 3; ++i) {
+        Bytes payload(payload_sizes[i]);
+        for (size_t j = 0; j < payload.size(); ++j) {
+            payload[j] = static_cast<uint8_t>(0x30 + i * 17 + j);
+        }
+        auto frame = v2::DataFrame::makeData("ALPHA", "BRAVO",
+                                             static_cast<uint16_t>(40 + i),
+                                             payload, CodeRate::R1_4);
+        frame.flags = static_cast<uint8_t>(
+            v2::Flags::VERSION_V2 |
+            (i + 1 < 3 ? v2::Flags::MORE_FRAG : v2::Flags::NONE));
+        serialized_frames.push_back(frame.serialize());
+    }
+
+    auto samples = encoder.encodeBurstLight(serialized_frames);
+    if (samples.empty()) {
+        std::cout << "FAIL: continuous burst encoder produced no samples\n";
+        return false;
+    }
+
+    StreamingDecoder decoder;
+    decoder.setLogPrefix("TEST");
+    decoder.setMode(protocol::WaveformMode::MC_DPSK, true);
+    decoder.setMCDPSKConfig(mc_dpsk_presets::level8());
+    decoder.setDataMode(Modulation::DQPSK, CodeRate::R1_4);
+
+    auto audio = withSilence(samples);
+    feedInChunks(decoder, audio);
+
+    std::vector<Bytes> decoded_frames;
+    while (decoder.hasFrame()) {
+        auto result = decoder.getFrame();
+        if (result.success && v2::isDataFrame(result.frame_type)) {
+            decoded_frames.push_back(result.frame_data);
+        }
+    }
+
+    if (decoded_frames.size() != serialized_frames.size()) {
+        std::cout << "FAIL: continuous burst decoded " << decoded_frames.size()
+                  << " frames, expected " << serialized_frames.size() << "\n";
+        return false;
+    }
+
+    for (size_t i = 0; i < serialized_frames.size(); ++i) {
+        if (decoded_frames[i] != serialized_frames[i]) {
+            std::cout << "FAIL: continuous burst frame " << i << " mismatch\n";
+            return false;
+        }
+    }
+
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -175,6 +236,7 @@ int main() {
                      data_serialized, v2::FrameType::DATA)) return 1;
     if (!runLoopback("robust connect", mc_dpsk_presets::robust(), Modulation::DQPSK,
                      connect_serialized, v2::FrameType::CONNECT)) return 1;
+    if (!runContinuousBurstLoopback()) return 1;
     if (!runLowAmplitudePing("robust low-amplitude ping", mc_dpsk_presets::robust(),
                              0.030f)) return 1;
 

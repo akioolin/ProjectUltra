@@ -66,6 +66,10 @@ public:
     std::vector<float> getSoftBits() override;
     void reset() override;
 
+    // Demodulate MC-DPSK continuation samples that follow an already-processed
+    // training/reference symbol. Keeps the differential phase cursor intact.
+    bool processDataOnly(SampleSpan samples);
+
     // ========================================================================
     // IWaveform - Status
     // ========================================================================
@@ -87,6 +91,7 @@ public:
     int getPreambleSamples() const override;
     int getMinSamplesForFrame() const override;
     int getMinSamplesForCWCount(int num_cw) const override;
+    int getDataOnlySamplesForCWCount(int num_cw) const;
 
     // ========================================================================
     // MC-DPSK Specific

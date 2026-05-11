@@ -210,6 +210,18 @@ std::vector<float> MCDPSKWaveform::getSoftBits() {
     return std::move(soft_bits_);
 }
 
+bool MCDPSKWaveform::processDataOnly(SampleSpan samples) {
+    if (!demodulator_) {
+        return false;
+    }
+
+    soft_bits_ = demodulator_->demodulateDataOnly(samples);
+    synced_ = !soft_bits_.empty();
+    LOG_MODEM(DEBUG, "MCDPSKWaveform: data-only process: samples=%zu, soft_bits=%zu",
+              samples.size(), soft_bits_.size());
+    return synced_;
+}
+
 void MCDPSKWaveform::reset() {
     if (demodulator_) {
         demodulator_->reset();
@@ -280,32 +292,28 @@ void MCDPSKWaveform::setCarrierCount(int carriers) {
 }
 
 int MCDPSKWaveform::getMinSamplesForFrame() const {
-    // Training symbols + reference symbol + data for 1 LDPC codeword (648 bits)
-    // MC-DPSK does NOT use frame interleaving - CW0 can be decoded independently
-    // to parse the header and determine how many more CWs to request
     int training_samples = config_.training_symbols * config_.samples_per_symbol;
     int ref_samples = config_.samples_per_symbol;
-
-    // Data samples for 1 LDPC codeword (648 bits)
-    constexpr int LDPC_BLOCK_SIZE = 648;
-    int bits_per_symbol = config_.num_carriers * config_.bits_per_symbol;
-    int data_symbols = (LDPC_BLOCK_SIZE + bits_per_symbol - 1) / bits_per_symbol;
-    int data_samples = data_symbols * config_.samples_per_symbol;
-
-    return training_samples + ref_samples + data_samples;
+    return training_samples + ref_samples + getDataOnlySamplesForCWCount(1);
 }
 
 int MCDPSKWaveform::getMinSamplesForCWCount(int num_cw) const {
-    // Training + reference + data for num_cw codewords
+    // Training + reference + exactly the packed data symbols for num_cw LDPC CWs.
+    // The modulator packs the whole frame bitstream before rounding to a symbol
+    // boundary; rounding each CW independently drifts the cursor in continuous
+    // MC-DPSK bursts.
     int training_samples = config_.training_symbols * config_.samples_per_symbol;
     int ref_samples = config_.samples_per_symbol;
+    return training_samples + ref_samples + getDataOnlySamplesForCWCount(num_cw);
+}
 
+int MCDPSKWaveform::getDataOnlySamplesForCWCount(int num_cw) const {
+    num_cw = std::max(1, num_cw);
     constexpr int LDPC_BLOCK_SIZE = 648;
-    int bits_per_symbol = config_.num_carriers * config_.bits_per_symbol;
-    int data_symbols_per_cw = (LDPC_BLOCK_SIZE + bits_per_symbol - 1) / bits_per_symbol;
-    int data_samples = num_cw * data_symbols_per_cw * config_.samples_per_symbol;
-
-    return training_samples + ref_samples + data_samples;
+    int bits_per_symbol = std::max(1, config_.num_carriers * config_.bits_per_symbol);
+    int data_bits = num_cw * LDPC_BLOCK_SIZE;
+    int data_symbols = (data_bits + bits_per_symbol - 1) / bits_per_symbol;
+    return data_symbols * config_.samples_per_symbol;
 }
 
 float MCDPSKWaveform::getFadingIndex() const {

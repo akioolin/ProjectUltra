@@ -722,8 +722,10 @@ void Connection::sendNextFileChunk() {
 
     bool is_ofdm = isOFDMMode(negotiated_mode_);
 
-    // Enable burst buffering for OFDM mode
-    if (is_ofdm && on_transmit_burst_) {
+    const bool is_mc_dpsk = negotiated_mode_ == WaveformMode::MC_DPSK;
+
+    // Enable burst buffering for OFDM and MC-DPSK data-window mode.
+    if ((is_ofdm || is_mc_dpsk) && on_transmit_burst_) {
         burst_mode_active_ = true;
         burst_tx_buffer_.clear();
     }
@@ -746,7 +748,7 @@ void Connection::sendNextFileChunk() {
     }
 
     // Flush burst buffer
-    if (is_ofdm && on_transmit_burst_) {
+    if ((is_ofdm || is_mc_dpsk) && on_transmit_burst_) {
         burst_mode_active_ = false;
         flushBurstBuffer();
     }
@@ -1538,6 +1540,7 @@ void Connection::transmitFrame(const Bytes& frame_data) {
 void Connection::configureArqForCurrentDataMode() {
     arq_.setCodeRate(data_code_rate_);
     arq_.setFixedFrameCodewords(data_frame_cw_count_);
+    arq_.setAckBatchThroughMoreFrag(false);
 
     if (isOFDMMode(negotiated_mode_) || usesBoundedVariableMCDPSKFrames()) {
         file_transfer_.setMaxChunkPayload(currentDataPayloadCapacity());
@@ -1559,6 +1562,7 @@ void Connection::configureArqForCurrentDataMode() {
         arq_.setWindowSize(window_size);
         arq_.setSackDelay(sack_delay_ms);
         arq_.setSackDelayShort(window_size > 1 ? 2000 : 0);
+        arq_.setAckBatchThroughMoreFrag(true);
         arq_.setAckRepeatCount(ack_repeat_count);
         arq_.setAckRepeatDelay(ack_repeat_delay_ms);
         uint32_t ack_timeout_ms = connection_policy::computeMCDPSKAckTimeoutMs(
@@ -1680,8 +1684,7 @@ uint32_t Connection::pingTimeoutMsForCurrentProfile() const {
 }
 
 bool Connection::usesBoundedVariableMCDPSKFrames() const {
-    return negotiated_mode_ == WaveformMode::MC_DPSK &&
-           data_modulation_ == Modulation::DBPSK;
+    return negotiated_mode_ == WaveformMode::MC_DPSK;
 }
 
 size_t Connection::currentDataPayloadCapacity() const {
