@@ -85,9 +85,9 @@ on measured SNR and fading.
 | 20 KB Mac↔Pi5 injected ×5     | Watterson Good, SNR=15 |  ~94 s | **1733.1 bps**  | Median of 5; range [1726.8, 1739.6]; R1/2; 0 retx all 5; handshake ≈ 5% (near steady-state) |
 | 5 KB Mac↔Pi5 injected ×5      | Watterson Good, SNR=15 |  ~27 s | **1540.6 bps**  | Median of 5; range [1540.3, 1550.0]; R1/2; 0 retx all 5; handshake ≈ 19% (fixed ~5 s overhead dominates short transfers) |
 | 500 KB Mac↔Pi5 injected       | Watterson Good, SNR=15 | 3742 s |      1094 bps   | R1/2; 1346 retx, 0 failed, byte-exact; handshake negligible — slowdown vs 20 KB is from retransmissions on a long fading run |
-| 1 KB Mac↔Pi5 injected         | Watterson Mod, SNR=0   |  270 s |    **30.3 bps** | MC-DPSK Robust-Mid (DBPSK R1/4) + continuous burst; 3/3 PASS, 0 retx; below the OFDM SNR floor |
-| 1 KB Mac↔Pi5 injected         | Watterson Good, SNR=5  |  108 s |    **75.7 bps** | MC-DPSK Robust (DQPSK R1/4 4-CW) + continuous burst; 3/3 PASS, 0 retx; ladder above Robust-Mid |
-| 1 KB Mac↔Pi5 injected         | Watterson Mod, SNR=-5  |  608 s |    **13.5 bps** | MC-DPSK Robust-Low (DBPSK 2048sps R1/4 3-CW); 0 retx; lowest-SNR rung |
+| 1 KB Mac↔Pi5 injected         | Watterson Mod, SNR=0   |  235 s |    **34.9 bps** | MC-DPSK Robust-Mid (DBPSK R1/4) + continuous burst + ARQ-tuned window=3; 0 retx; below the OFDM SNR floor |
+| 1 KB Mac↔Pi5 injected         | Watterson Good, SNR=5  |  101 s |    **81.0 bps** | MC-DPSK Robust (DQPSK R1/4 4-CW) + continuous burst + ARQ-tuned window=5; 0 retx; ladder above Robust-Mid |
+| 1 KB Mac↔Pi5 injected         | Watterson Mod, SNR=-5  |  608 s |    **13.5 bps** | MC-DPSK Robust-Low (DBPSK 2048sps R1/4 3-CW); 0 retx; preamble-dominated, window=1 |
 
 Throughput rises with payload size as the fixed ~5 s handshake (PING/PONG → CONNECT → MODE_CHANGE) amortizes. The 1.83-1.90 kbps wall-clock asymptote at R1/2 SNR=15 sits below the 2208 bps raw-PHY ceiling because the 8-CW frame carries 301 useful payload bytes inside 51 OFDM symbols (`2 LTS + ceil(8*648/(53*2))` = 1.224 s) — that effective single-frame payload rate is ~1967 bps before ARQ overhead, and ACK turnaround takes the rest. Beyond ~50 KB, throughput is bounded by per-frame airtime + ACK roundtrip, not handshake.
 
