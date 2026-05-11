@@ -24,6 +24,7 @@
 #include <vector>
 #include <atomic>
 #include <ultra/logging.hpp>
+#include <ultra/build_info.hpp>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -202,6 +203,7 @@ void printGuiUsage(const char* prog) {
     std::printf("  --log-category <list>         Comma list: operator,audio,tnc,modem,\n");
     std::printf("                               demod,sync,ldpc,channel,all\n");
     std::printf("  --log-file <path>             Write logs to file instead of stderr\n");
+    std::printf("  --version                     Print build provenance\n");
     std::printf("  --help, -h                    Show this help\n");
 }
 
@@ -462,6 +464,16 @@ int main(int argc, char* argv[]) {
             opts.enable_sim = true;
         } else if (arg == "--help" || arg == "-h") {
             printGuiUsage(argv[0]);
+            closeStartupLog();
+            return 0;
+        } else if (arg == "--version") {
+            std::printf("ProjectUltra %s commit=%s dirty=%s tag=%s built=%s os=%s\n",
+                        ultra::kBuildVersion,
+                        ultra::kBuildGitCommit,
+                        ultra::kBuildDirty ? "true" : "false",
+                        ultra::kBuildReleaseTag[0] ? ultra::kBuildReleaseTag : "none",
+                        ultra::kBuildTimeUtc,
+                        ultra::kBuildOS);
             closeStartupLog();
             return 0;
         } else if (arg == "-rec") {

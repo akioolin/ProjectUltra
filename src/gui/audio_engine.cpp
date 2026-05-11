@@ -1,11 +1,13 @@
 #define _USE_MATH_DEFINES  // For M_PI on MSVC
 #include <cmath>
 #include "audio_engine.hpp"
+#include "diagnostics/diagnostics_recorder.hpp"
 #include "gui/startup_trace.hpp"
 #include "sim/awgn.hpp"
 #include "ultra/logging.hpp"
 #include <cstring>
 #include <algorithm>
+#include <cstdio>
 
 namespace ultra {
 namespace gui {
@@ -354,6 +356,8 @@ void AudioEngine::outputCallback(void* userdata, Uint8* stream, int len) {
     // Update output level (RMS)
     float rms = std::sqrt(sum_sq / samples);
     engine->output_level_ = rms;
+    ultra::diagnostics::DiagnosticsRecorder::instance().recordTx(
+        SampleSpan(output, static_cast<size_t>(samples)));
 }
 
 void AudioEngine::inputCallback(void* userdata, Uint8* stream, int len) {
@@ -407,6 +411,8 @@ void AudioEngine::appendCapturedSamples(const float* input, size_t samples, floa
     }
     float rms = std::sqrt(sum_sq / static_cast<float>(samples));
     input_level_ = rms;
+    ultra::diagnostics::DiagnosticsRecorder::instance().recordRx(
+        SampleSpan(captured.data(), captured.size()));
 
     std::lock_guard<AudioEngineMutex> lock(rx_mutex_);
 
@@ -428,6 +434,12 @@ void AudioEngine::appendCapturedSamples(const float* input, size_t samples, floa
                 "(%zu samples this batch, event #%d). Consumer can't keep up.",
                 static_cast<double>(s_dropped_since_log) / 48000.0,
                 to_remove, s_drop_event_count);
+            char fields[160];
+            std::snprintf(fields, sizeof(fields),
+                          "{\"dropped_samples\":%zu,\"event_count\":%d}",
+                          s_dropped_since_log, s_drop_event_count);
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                "audio", "audio.overrun", fields);
             s_dropped_since_log = 0;
         }
         if (to_remove >= rx_buffer_.size()) {

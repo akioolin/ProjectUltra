@@ -51,6 +51,13 @@ add_executable(test_tnc_server test_tnc_server.cpp)
 target_link_libraries(test_tnc_server PRIVATE ultra_core)
 add_test(NAME TNCServer COMMAND test_tnc_server)
 
+add_executable(test_diagnostics test_diagnostics.cpp)
+target_include_directories(test_diagnostics PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+target_link_libraries(test_diagnostics PRIVATE ultra_core)
+add_test(NAME Diagnostics COMMAND test_diagnostics)
+
 if(SDL2_FOUND)
     add_executable(test_tnc_bridge
         test_tnc_bridge.cpp
@@ -247,6 +254,7 @@ ultra_enable_test_warnings(
     test_ultra_tnc_config.cpp
     ../tools/ultra_tnc_config.cpp
     test_tnc_server.cpp
+    test_diagnostics.cpp
     test_tnc_bridge.cpp
     test_connection_policy.cpp
     test_connection_adaptive.cpp

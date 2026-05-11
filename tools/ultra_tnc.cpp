@@ -1,4 +1,5 @@
 #include "gui/audio_engine.hpp"
+#include "diagnostics/diagnostics_recorder.hpp"
 #include "gui/modem/streaming_decoder.hpp"
 #include "gui/modem/streaming_encoder.hpp"
 #include "gui/serial_ptt.hpp"
@@ -9,6 +10,7 @@
 #include "tnc/tnc_bridge.hpp"
 #include "tnc/tnc_server.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
+#include "ultra/build_info.hpp"
 #include "waveform/ofdm_cox_waveform.hpp"
 
 #include "ultra_tnc_config.hpp"
@@ -29,6 +31,7 @@
 #include <random>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -45,9 +48,23 @@ using ultra::protocol::WaveformMode;
 namespace v2 = ultra::protocol::v2;
 
 std::atomic<bool> g_stop_requested{false};
+std::atomic<bool> g_report_requested{false};
 
 void handleSignal(int) {
     g_stop_requested.store(true, std::memory_order_release);
+}
+
+void handleReportSignal(int) {
+    g_report_requested.store(true, std::memory_order_release);
+}
+
+void printBuildProvenance(std::ostream& out) {
+    out << "ProjectUltra " << ultra::kBuildVersion
+        << " commit=" << ultra::kBuildGitCommit
+        << " dirty=" << (ultra::kBuildDirty ? "true" : "false")
+        << " tag=" << (ultra::kBuildReleaseTag[0] ? ultra::kBuildReleaseTag : "none")
+        << " built=" << ultra::kBuildTimeUtc
+        << " os=" << ultra::kBuildOS << "\n";
 }
 
 // Config + CLI/config parsing live in ultra_tnc_config.cpp so the
@@ -233,6 +250,7 @@ private:
     bool output_enabled_ = false;
     bool handshake_complete_ = false;
     bool connected_ = false;
+    int consecutive_decode_failures_ = 0;
 
     std::mt19937 rng_;
 
@@ -324,6 +342,12 @@ private:
             setDataMode(mod, rate);
             LOG_INFO("OPERATOR", "Mode: %s %s cw=%d",
                      ultra::modulationToString(mod), ultra::codeRateToString(rate), cw_count);
+            char fields[192];
+            std::snprintf(fields, sizeof(fields),
+                          "{\"mod\":\"%s\",\"rate\":\"%s\",\"cw\":%d}",
+                          ultra::modulationToString(mod), ultra::codeRateToString(rate), cw_count);
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                "protocol", "waveform.negotiated", fields);
             // Sync encoder/decoder to the negotiated CW count (set by the
             // protocol layer from CONNECT_ACK / MODE_CHANGE wire bytes).
             // Direct calls only — DO NOT re-enter ProtocolEngine here, the
@@ -334,6 +358,12 @@ private:
 
         engine_.setModeNegotiatedCallback([this](WaveformMode mode) {
             negotiated_waveform_ = mode;
+            char fields[128];
+            std::snprintf(fields, sizeof(fields),
+                          "{\"waveform\":\"%s\"}",
+                          ultra::protocol::waveformModeToString(mode));
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                "protocol", "waveform.negotiated", fields);
         });
 
         engine_.setConnectWaveformChangedCallback([this](WaveformMode mode) {
@@ -349,12 +379,16 @@ private:
         bridge_.setConnectionChangedCallback([this](ConnectionState state, const std::string&) {
             if (state == ConnectionState::CONNECTED) {
                 setConnected(true);
+                ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                    "session", "session.state", "{\"state\":\"connected\"}");
                 LOG_INFO("OPERATOR", "Connected: waveform=%s mode=%s %s",
                          ultra::protocol::waveformModeToString(negotiated_waveform_),
                          ultra::modulationToString(data_modulation_),
                          ultra::codeRateToString(data_code_rate_));
             } else if (state == ConnectionState::DISCONNECTED) {
                 setConnected(false);
+                ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                    "session", "session.state", "{\"state\":\"disconnected\"}");
                 LOG_INFO("OPERATOR", "Disconnected");
             }
         });
@@ -379,7 +413,23 @@ private:
     }
 
     void handleDecodedFrame(const DecodeResult& result) {
-        if (!result.success || result.is_ping || result.frame_data.empty()) {
+        if (!result.success) {
+            consecutive_decode_failures_++;
+            char fields[160];
+            std::snprintf(fields, sizeof(fields),
+                          "{\"consecutive\":%d,\"cw_failed\":%d}",
+                          consecutive_decode_failures_, result.codewords_failed);
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                "phy", "decode.fail", fields);
+            if (consecutive_decode_failures_ == 5) {
+                ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                    "fault", "fault.triggered",
+                    "{\"reason\":\"repeated_decode_failures\",\"policy\":\"emit_only\"}");
+            }
+            return;
+        }
+        consecutive_decode_failures_ = 0;
+        if (result.is_ping || result.frame_data.empty()) {
             return;
         }
 
@@ -391,6 +441,12 @@ private:
 
         const float fading_index = decoder_.getLastFadingIndex();
         engine_.setChannelQuality(result.snr_db, fading_index);
+        char fields[192];
+        std::snprintf(fields, sizeof(fields),
+                      "{\"bytes\":%zu,\"snr_db\":%.1f,\"fading\":%.2f}",
+                      result.frame_data.size(), result.snr_db, fading_index);
+        ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+            "phy", "frame.rx", fields);
         engine_.onRxData(result.frame_data);
     }
 
@@ -555,6 +611,11 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    if (cfg.version) {
+        printBuildProvenance(std::cout);
+        return 0;
+    }
+
     if (cfg.list_audio) {
         ultra::gui::AudioEngine probe;
         if (!probe.initialize()) {
@@ -573,8 +634,32 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    ultra::diagnostics::SessionMeta diag_meta;
+    diag_meta.app_name = "ultra_tnc";
+    diag_meta.station_role = "tnc";
+    diag_meta.callsign = cfg.callsign;
+    diag_meta.config_json =
+        std::string("{\"app\":\"ultra_tnc\",\"callsign\":\"") +
+        ultra::diagnostics::jsonEscape(cfg.callsign) +
+        "\",\"bind_address\":\"" + ultra::diagnostics::jsonEscape(cfg.bind_address) +
+        "\",\"port\":" + std::to_string(cfg.port) +
+        ",\"audio_input\":\"" + ultra::diagnostics::jsonEscape(audioDeviceLabel(cfg.audio_input)) +
+        "\",\"audio_output\":\"" + ultra::diagnostics::jsonEscape(audioDeviceLabel(cfg.audio_output)) +
+        "\"}";
+    auto& diagnostics = ultra::diagnostics::DiagnosticsRecorder::instance();
+    diagnostics.start(std::move(diag_meta));
+    if (auto tombstone = diagnostics.pendingTombstone()) {
+        LOG_WARN("OPERATOR",
+                 "Previous-session crash tombstone detected: signal=%s session=%s. "
+                 "Run ultra_report --create to package a local crash report.",
+                 tombstone->signal_name.c_str(), tombstone->session_id.c_str());
+    }
+
     std::signal(SIGINT, handleSignal);
     std::signal(SIGTERM, handleSignal);
+#ifndef _WIN32
+    std::signal(SIGUSR1, handleReportSignal);
+#endif
 
     ultra::gui::AudioEngine audio;
     ultra::protocol::ProtocolEngine engine;
@@ -588,6 +673,11 @@ int main(int argc, char** argv) {
              cfg.callsign.c_str(), cfg.bind_address.c_str(),
              static_cast<unsigned>(cfg.port), static_cast<unsigned>(cfg.port + 1),
              ultra::logLevelName(cfg.log_level));
+    LOG_INFO("OPERATOR", "Build: version=%s commit=%s dirty=%s tag=%s built=%s os=%s",
+             ultra::kBuildVersion, ultra::kBuildGitCommit,
+             ultra::kBuildDirty ? "true" : "false",
+             ultra::kBuildReleaseTag[0] ? ultra::kBuildReleaseTag : "none",
+             ultra::kBuildTimeUtc, ultra::kBuildOS);
 
     // Hardware PTT via serial line. When the user supplies --ptt-serial-port,
     // open the serial controller and toggle RTS/DTR on each PTT transition.
@@ -672,10 +762,22 @@ int main(int argc, char** argv) {
         last_tick = now;
         const uint32_t elapsed_ms = static_cast<uint32_t>(std::clamp<int64_t>(elapsed, 1, 1000));
         station.tick(elapsed_ms);
+        if (g_report_requested.exchange(false, std::memory_order_acq_rel)) {
+            ultra::diagnostics::ReportOptions options;
+            options.note = "SIGUSR1 manual TNC snapshot";
+            auto report = diagnostics.freeze(ultra::diagnostics::FreezeReason::Signal, options);
+            if (report.ok) {
+                LOG_INFO("OPERATOR", "Diagnostics report created: %s",
+                         report.path.string().c_str());
+            } else {
+                LOG_ERROR("OPERATOR", "Diagnostics report failed: %s", report.error.c_str());
+            }
+        }
     }
 
     server.stop();
     bridge.stop();
     station.stop();
+    diagnostics.stop();
     return 0;
 }

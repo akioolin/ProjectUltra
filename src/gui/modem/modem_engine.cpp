@@ -2,10 +2,12 @@
 // Constructor, destructor, configuration, and TX functions
 
 #include "modem_engine.hpp"
+#include "diagnostics/diagnostics_recorder.hpp"
 #include "gui/startup_trace.hpp"
 #include "ultra/logging.hpp"
 #include <cstring>
 #include <algorithm>
+#include <cstdio>
 #include <fstream>
 #include <sstream>
 
@@ -95,8 +97,23 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
         });
 
         if (result.success && !result.frame_data.empty()) {
+            char fields[256];
+            std::snprintf(fields, sizeof(fields),
+                          "{\"snr_db\":%.1f,\"cfo_hz\":%.1f,"
+                          "\"cw_ok\":%d,\"cw_failed\":%d}",
+                          result.snr_db, result.cfo_hz,
+                          result.codewords_ok, result.codewords_failed);
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                "phy", "frame.rx", fields);
             deliverFrame(result.frame_data);
             notifyFrameParsed(result.frame_data, result.frame_type);
+        } else if (!result.success && result.codewords_failed > 0) {
+            char fields[192];
+            std::snprintf(fields, sizeof(fields),
+                          "{\"cw_ok\":%d,\"cw_failed\":%d,\"snr_db\":%.1f}",
+                          result.codewords_ok, result.codewords_failed, result.snr_db);
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                "phy", "decode.fail", fields);
         }
         // Save peer CFO for future frames
         if (std::abs(result.cfo_hz) > 0.1f) {
@@ -352,6 +369,16 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
               protocol::waveformModeToString(tx_waveform_mode),
               modulationToString(tx_modulation),
               use_light ? "light" : "full");
+    char fields[256];
+    std::snprintf(fields, sizeof(fields),
+                  "{\"bytes\":%zu,\"samples\":%zu,\"waveform\":\"%s\","
+                  "\"mod\":\"%s\",\"rate\":\"%s\"}",
+                  data.size(), samples.size(),
+                  protocol::waveformModeToString(tx_waveform_mode),
+                  modulationToString(tx_modulation),
+                  codeRateToString(tx_code_rate));
+    ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+        "phy", "frame.tx", fields);
 
     return postProcessTx(samples);
 }

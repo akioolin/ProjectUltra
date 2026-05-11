@@ -150,6 +150,7 @@ void printUsage(std::ostream& out) {
         << "                              demod,sync,ldpc,channel,all\n"
         << "  --log-file <path>           Write logs to file instead of stderr\n"
         << "  --list-audio-devices        Print available SDL audio devices and exit\n"
+        << "  --version                   Print build provenance and exit\n"
         << "  --help\n"
         << "\n"
         << "Config file format (key=value, one per line, # comments):\n"
@@ -296,7 +297,8 @@ bool parseArgs(int argc, char** argv, Config& cfg) {
         if (arg == "--expert") {
             cfg.expert_phy = true;
         }
-        if (arg == "--help" || arg == "-h" || arg == "--list-audio-devices") {
+        if (arg == "--help" || arg == "-h" || arg == "--list-audio-devices" ||
+            arg == "--version") {
             needs_config = false;
             break;
         }
@@ -339,6 +341,8 @@ bool parseArgs(int argc, char** argv, Config& cfg) {
             cfg.help = true;
         } else if (arg == "--list-audio-devices") {
             cfg.list_audio = true;
+        } else if (arg == "--version") {
+            cfg.version = true;
         } else if (arg == "--config") {
             if (i + 1 >= argc) {
                 std::cerr << "Missing value for --config\n";

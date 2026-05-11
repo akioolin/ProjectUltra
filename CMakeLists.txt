@@ -69,9 +69,52 @@ endfunction()
 # Find dependencies
 find_package(Threads REQUIRED)
 
+execute_process(
+    COMMAND git rev-parse --verify HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE ULTRA_GIT_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT ULTRA_GIT_COMMIT)
+    set(ULTRA_GIT_COMMIT "unknown")
+endif()
+string(SUBSTRING "${ULTRA_GIT_COMMIT}" 0 12 ULTRA_GIT_COMMIT_SHORT)
+
+execute_process(
+    COMMAND git describe --tags --exact-match HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE ULTRA_RELEASE_TAG
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT ULTRA_RELEASE_TAG)
+    set(ULTRA_RELEASE_TAG "")
+endif()
+
+execute_process(
+    COMMAND git status --porcelain
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE ULTRA_GIT_STATUS
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(ULTRA_GIT_STATUS STREQUAL "")
+    set(ULTRA_GIT_DIRTY_BOOL false)
+else()
+    set(ULTRA_GIT_DIRTY_BOOL true)
+endif()
+set(ULTRA_BUILD_OS "${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
+string(TIMESTAMP ULTRA_BUILD_TIME_UTC "%Y-%m-%dT%H:%M:%SZ" UTC)
+
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/include/ultra/version.hpp.in
     ${CMAKE_CURRENT_BINARY_DIR}/generated/include/ultra/version.hpp
+    @ONLY
+)
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/ultra/build_info.hpp.in
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/include/ultra/build_info.hpp
     @ONLY
 )
 
@@ -124,6 +167,12 @@ add_library(ultra_core STATIC
     src/protocol/protocol_engine.cpp
     src/protocol/file_transfer.cpp
     src/protocol/compression.cpp
+    # Local diagnostics and field-report bundle support
+    src/diagnostics/audio_ring.cpp
+    src/diagnostics/event_buffer.cpp
+    src/diagnostics/report_bundle.cpp
+    src/diagnostics/redaction.cpp
+    src/diagnostics/diagnostics_recorder.cpp
     # VARA-compatible TNC protocol shell
     # (tnc_bridge.cpp is added conditionally below — depends on SDL2 via
     #  AudioEngine, so it cannot live in the unconditional ultra_core
@@ -257,6 +306,16 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
     )
     target_link_libraries(session_decode PRIVATE ultra_sim_station ultra_tool_wav_io)
+
+    add_executable(ultra_report
+        tools/ultra_report.cpp
+    )
+    ultra_enable_tool_test_warnings(tools/ultra_report.cpp)
+    target_include_directories(ultra_report PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
+    )
+    target_link_libraries(ultra_report PRIVATE ultra_core)
 
     # Optional hardware-audio support (--role A|B). Reuses the GUI's
     # AudioEngine class; SDL2 is detected at top level above.
