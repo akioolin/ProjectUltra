@@ -71,6 +71,11 @@ REMOTE_RX=/tmp/ultra_tnc_loopback_${RUN_ID}_rx.bin
 REMOTE_RX_LOG=/tmp/ultra_tnc_loopback_${RUN_ID}_rx.log
 REMOTE_RX_READY=/tmp/ultra_tnc_loopback_${RUN_ID}_rx.ready
 
+MAC_DIAG_DIR=$LOG_DIR/diagnostics_mac
+PI_DIAG_DIR_REMOTE=/tmp/ultra_tnc_loopback_${RUN_ID}_diag_pi
+PI_DIAG_DIR_LOCAL=$LOG_DIR/diagnostics_pi
+SESSION_FLUSH_SECONDS=${SESSION_FLUSH_SECONDS:-4}
+
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 MAC_BIN=$REPO_ROOT/build/ultra_tnc
@@ -147,9 +152,13 @@ cleanup() {
   [[ -n "$MAC_TNC_PID" ]] && kill "$MAC_TNC_PID" 2>/dev/null
 
   if [[ -n "$PI_TNC_PID" || -n "$PI_RX_PID" ]]; then
+    # SIGTERM first so DiagnosticsRecorder::stop() can run and write
+    # the per-session summary; allow up to 8 s for the writer thread
+    # to flush, then SIGKILL as a fallback.
     local remote_cleanup=""
     [[ -n "$PI_RX_PID" ]] && remote_cleanup="$remote_cleanup kill $PI_RX_PID 2>/dev/null || true;"
-    [[ -n "$PI_TNC_PID" ]] && remote_cleanup="$remote_cleanup kill $PI_TNC_PID 2>/dev/null || true;"
+    [[ -n "$PI_TNC_PID" ]] && remote_cleanup="$remote_cleanup kill -TERM $PI_TNC_PID 2>/dev/null || true;"
+    remote_cleanup="$remote_cleanup for i in 1 2 3 4 5 6 7 8; do kill -0 $PI_TNC_PID 2>/dev/null || break; sleep 1; done;"
     remote_cleanup="$remote_cleanup pkill -9 ultra_tnc 2>/dev/null || true;"
     remote_cleanup="$remote_cleanup rm -f $(shell_quote "$REMOTE_RX_READY") 2>/dev/null || true;"
     ssh_pi "$remote_cleanup" >/dev/null 2>&1
@@ -337,9 +346,12 @@ PI_AUDIO_OUT_Q=$(shell_quote "$PI_AUDIO_OUT")
 PI_AUDIO_IN_Q=$(shell_quote "$PI_AUDIO_IN")
 PI_CALLSIGN_Q=$(shell_quote "$PI_CALLSIGN")
 REMOTE_TNC_LOG_Q=$(shell_quote "$REMOTE_TNC_LOG")
+PI_DIAG_DIR_REMOTE_Q=$(shell_quote "$PI_DIAG_DIR_REMOTE")
 PI_CMD="cd $PI_REPO_Q || exit 1; \
   pkill -9 ultra_tnc 2>/dev/null || true; \
   rm -f $REMOTE_TNC_LOG_Q; \
+  rm -rf $PI_DIAG_DIR_REMOTE_Q && mkdir -p $PI_DIAG_DIR_REMOTE_Q; \
+  ULTRA_DIAGNOSTICS_DIR=$PI_DIAG_DIR_REMOTE_Q \
   nohup ./build/ultra_tnc --port $TNC_PORT \
     --audio-output $PI_AUDIO_OUT_Q \
     --audio-input $PI_AUDIO_IN_Q \
@@ -351,12 +363,15 @@ PI_TNC_PID=$(tr -d '[:space:]' < "$LOG_DIR/pi_tnc_pid.txt")
 info "    Pi ultra_tnc PID=$PI_TNC_PID"
 
 info "[3/7] Starting ultra_tnc locally..."
+mkdir -p "$MAC_DIAG_DIR"
 MAC_ARGS=(--port "$TNC_PORT" --callsign "$MAC_CALLSIGN")
 [[ -n "$MAC_AUDIO_OUT" ]] && MAC_ARGS+=(--audio-output "$MAC_AUDIO_OUT")
 [[ -n "$MAC_AUDIO_IN" ]] && MAC_ARGS+=(--audio-input "$MAC_AUDIO_IN")
-"$MAC_BIN" "${MAC_ARGS[@]}" > "$LOG_DIR/mac_tnc.log" 2>&1 &
+ULTRA_DIAGNOSTICS_DIR="$MAC_DIAG_DIR" "$MAC_BIN" "${MAC_ARGS[@]}" > "$LOG_DIR/mac_tnc.log" 2>&1 &
 MAC_TNC_PID=$!
 info "    Mac ultra_tnc PID=$MAC_TNC_PID"
+info "    Mac diagnostics: $MAC_DIAG_DIR"
+info "    Pi  diagnostics: $PI_DIAG_DIR_REMOTE (will rsync to $PI_DIAG_DIR_LOCAL)"
 
 sleep "$START_SETTLE_SECONDS"
 
@@ -387,8 +402,11 @@ MAC_CONNECT_OFFSET=$(file_size "$MAC_CMD_OUT")
 PI_CONNECT_OFFSET=$(file_size "$PI_CMD_OUT")
 printf '%s\r' "CONNECT $MAC_CALLSIGN $PI_CALLSIGN" >&3
 wait_for_cmd_pattern "Mac CONNECT command ACK" "$MAC_CMD_OUT" "^OK$" "$CMD_TIMEOUT" "$MAC_CONNECT_OFFSET" "$MAC_CMD_PID" >/dev/null
+# Pat convention (commit 3c5b645, docs/archive/PAT_E2E_VALIDATION_2026-05-02.md):
+# both sides emit `CONNECTED <initiator> <responder> 2300`. Mac is the
+# initiator here, so both Mac and Pi see Mac's callsign first.
 wait_for_cmd_pattern "Mac CONNECTED event" "$MAC_CMD_OUT" "^CONNECTED[[:space:]]+$MAC_CALLSIGN[[:space:]]+$PI_CALLSIGN[[:space:]]+2300$" "$CONNECT_TIMEOUT" "$MAC_CONNECT_OFFSET" "$MAC_CMD_PID" >/dev/null
-wait_for_cmd_pattern "Pi CONNECTED event" "$PI_CMD_OUT" "^CONNECTED[[:space:]]+$PI_CALLSIGN[[:space:]]+$MAC_CALLSIGN[[:space:]]+2300$" "$CONNECT_TIMEOUT" "$PI_CONNECT_OFFSET" "$PI_CMD_PID" >/dev/null
+wait_for_cmd_pattern "Pi CONNECTED event" "$PI_CMD_OUT" "^CONNECTED[[:space:]]+$MAC_CALLSIGN[[:space:]]+$PI_CALLSIGN[[:space:]]+2300$" "$CONNECT_TIMEOUT" "$PI_CONNECT_OFFSET" "$PI_CMD_PID" >/dev/null
 
 TX_START=$(now_s)
 send_payload_to_mac_data_port
@@ -425,3 +443,61 @@ info "PASS: $PAYLOAD_SIZE bytes delivered byte-exact"
 info "CRC32/size: $SRC_CRC_SIZE"
 info "Payload delivery window: ${DURATION}s (${THROUGHPUT} bps)"
 info "Logs: $LOG_DIR"
+
+info
+info "Capturing diagnostics bundles + summaries..."
+
+# Let session.finished events flush + summary write through the journal
+# writer thread on both ends before we tear down.
+sleep "$SESSION_FLUSH_SECONDS"
+
+# Graceful shutdown so DiagnosticsRecorder::stop() runs the final
+# session summary on both sides before we kill the daemons.
+if [[ -n "$MAC_TNC_PID" ]] && kill -0 "$MAC_TNC_PID" 2>/dev/null; then
+  kill -TERM "$MAC_TNC_PID" 2>/dev/null || true
+fi
+if [[ -n "$PI_TNC_PID" ]]; then
+  ssh_pi "kill -TERM $PI_TNC_PID 2>/dev/null || true" >/dev/null 2>&1 || true
+fi
+# Give writer thread + summary up to 6 s to flush.
+for _ in $(seq 1 12); do
+  mac_alive=0
+  if [[ -n "$MAC_TNC_PID" ]] && kill -0 "$MAC_TNC_PID" 2>/dev/null; then mac_alive=1; fi
+  pi_alive=0
+  if [[ -n "$PI_TNC_PID" ]] && ssh_pi "kill -0 $PI_TNC_PID 2>/dev/null" >/dev/null 2>&1; then pi_alive=1; fi
+  if (( mac_alive == 0 && pi_alive == 0 )); then break; fi
+  sleep 0.5
+done
+
+# Pull Pi diagnostics back via tar-over-ssh (reuses SSH_ARGS).
+# Don't fail the script if it hiccups; we still want the Mac side.
+mkdir -p "$PI_DIAG_DIR_LOCAL"
+ssh_pi "tar -C $PI_DIAG_DIR_REMOTE_Q -cf - . 2>/dev/null" | \
+  tar -C "$PI_DIAG_DIR_LOCAL" -xf - 2>/dev/null || true
+
+verify_side() {
+  local label="$1" diag_dir="$2"
+  local txt_count zip_count latest_txt outcome
+  txt_count=$(find "$diag_dir/sessions" -maxdepth 1 -name '*.txt' 2>/dev/null | wc -l | tr -d ' ')
+  zip_count=$(find "$diag_dir/reports" -maxdepth 1 -name '*.zip' 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "$txt_count" == "0" ]]; then
+    echo "  $label: NO .txt summary produced under $diag_dir/sessions" >&2
+    return 1
+  fi
+  latest_txt=$(ls -t "$diag_dir"/sessions/*.txt 2>/dev/null | head -1)
+  outcome=$(grep -E '^Session outcome:' "$latest_txt" | head -1)
+  echo "  $label: $txt_count summary, $zip_count bundle"
+  echo "    $outcome"
+  echo "    .txt: $latest_txt"
+  return 0
+}
+
+DIAG_OK=1
+verify_side "Mac" "$MAC_DIAG_DIR" || DIAG_OK=0
+verify_side "Pi " "$PI_DIAG_DIR_LOCAL" || DIAG_OK=0
+
+if [[ "$DIAG_OK" != "1" ]]; then
+  echo "WARNING: diagnostics capture incomplete on one or both sides" >&2
+  exit 0
+fi
+info "Diagnostics captured on both sides."
