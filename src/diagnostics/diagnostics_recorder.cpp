@@ -792,7 +792,11 @@ TombstoneInfo DiagnosticsRecorder::parseTombstoneFile(const fs::path& path) {
         if (pos == std::string::npos) return {};
         const size_t start = pos + needle.size();
         const size_t end = raw.find('\n', start);
-        return raw.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        std::string value = raw.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        if (!value.empty() && value.back() == '\r') {
+            value.pop_back();
+        }
+        return value;
     };
     info.signal_name = readValue("signal");
     info.session_id = readValue("session_id");

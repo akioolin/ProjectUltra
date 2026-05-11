@@ -197,7 +197,7 @@ void test_tombstone_parser() {
 
     const auto corrupt_path = tmp.child("corrupt");
     {
-        std::ofstream out(corrupt_path);
+        std::ofstream out(corrupt_path, std::ios::binary);
         out << "not a tombstone\n";
     }
     auto corrupt = ultra::diagnostics::DiagnosticsRecorder::parseTombstoneFile(corrupt_path);
