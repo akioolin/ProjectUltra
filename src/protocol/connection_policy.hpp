@@ -29,6 +29,8 @@ inline constexpr size_t kHighThroughputOFDMWindowFrames = 16;
 inline constexpr size_t kBurstInterleaveGroupFrames = 8;
 inline constexpr uint32_t kResponderHandshakeFailSafeMs = 2200;
 inline constexpr uint32_t kConnectAckLegacyRetransmitMs = 6000;
+inline constexpr uint32_t kMCDPSKDualChirpPreambleMs = 1200;
+inline constexpr uint32_t kMCDPSKRobustLowAckTimeoutFloorMs = 36000;
 
 struct OFDMFrameTiming {
     uint32_t data_symbols = 0;
@@ -38,8 +40,12 @@ struct OFDMFrameTiming {
 };
 
 struct MCDPSKFrameTiming {
+    uint32_t overhead_symbols = 0;
+    uint32_t data_only_symbols = 0;
     uint32_t data_symbols = 0;
     uint32_t ack_symbols = 0;
+    uint32_t overhead_ms = 0;
+    uint32_t data_only_ms = 0;
     uint32_t data_ms = 0;
     uint32_t ack_ms = 0;
 };
@@ -424,6 +430,13 @@ inline uint32_t bitsPerMCDPSKCarrier(Modulation mod) {
     }
 }
 
+inline uint32_t mcDpskSymbolsToMs(uint32_t symbols, int samples_per_symbol) {
+    const int sps = std::clamp(samples_per_symbol, 1, 8192);
+    return static_cast<uint32_t>(
+        (static_cast<uint64_t>(symbols) * static_cast<uint64_t>(sps) * 1000ULL +
+         kOFDMSampleRate / 2) / kOFDMSampleRate);
+}
+
 inline MCDPSKFrameTiming mcDpskFrameTiming(Modulation mod,
                                            int num_carriers,
                                            int samples_per_symbol,
@@ -440,22 +453,48 @@ inline MCDPSKFrameTiming mcDpskFrameTiming(Modulation mod,
     const uint32_t overhead_symbols = kMCDPSKTrainingSymbols + kMCDPSKReferenceSymbols;
 
     MCDPSKFrameTiming timing;
-    timing.data_symbols = overhead_symbols + static_cast<uint32_t>(cw_count) * data_symbols_per_cw;
+    timing.overhead_symbols = overhead_symbols;
+    timing.data_only_symbols = static_cast<uint32_t>(cw_count) * data_symbols_per_cw;
+    timing.data_symbols = overhead_symbols + timing.data_only_symbols;
     timing.ack_symbols = overhead_symbols + data_symbols_per_cw;
-    timing.data_ms = static_cast<uint32_t>(
-        (static_cast<uint64_t>(timing.data_symbols) * static_cast<uint64_t>(sps) * 1000ULL +
-         kOFDMSampleRate / 2) / kOFDMSampleRate);
-    timing.ack_ms = static_cast<uint32_t>(
-        (static_cast<uint64_t>(timing.ack_symbols) * static_cast<uint64_t>(sps) * 1000ULL +
-         kOFDMSampleRate / 2) / kOFDMSampleRate);
+    timing.overhead_ms = mcDpskSymbolsToMs(timing.overhead_symbols, sps);
+    timing.data_only_ms = mcDpskSymbolsToMs(timing.data_only_symbols, sps);
+    timing.data_ms = mcDpskSymbolsToMs(timing.data_symbols, sps);
+    timing.ack_ms = mcDpskSymbolsToMs(timing.ack_symbols, sps);
     return timing;
+}
+
+inline uint32_t mcDpskBurstAirtimeMs(const MCDPSKFrameTiming& timing,
+                                     size_t window_size) {
+    if (window_size == 0) return 0;
+    const uint64_t burst_ms =
+        static_cast<uint64_t>(kMCDPSKDualChirpPreambleMs) +
+        static_cast<uint64_t>(timing.overhead_ms) +
+        static_cast<uint64_t>(window_size) * timing.data_only_ms;
+    return static_cast<uint32_t>(
+        std::min<uint64_t>(burst_ms, static_cast<uint64_t>(UINT32_MAX)));
+}
+
+inline size_t mcDpskWindowSizeForTiming(const MCDPSKFrameTiming& timing) {
+    if (timing.data_ms == 0 || timing.data_only_ms == 0) return 1;
+
+    constexpr uint32_t kTargetContinuousBurstMs = 19000;
+    constexpr size_t kMaxAuditedContinuousMCDPSKWindow = 5;
+    size_t selected = 1;
+    for (size_t candidate = 2; candidate <= kMaxAuditedContinuousMCDPSKWindow; ++candidate) {
+        if (mcDpskBurstAirtimeMs(timing, candidate) > kTargetContinuousBurstMs) {
+            break;
+        }
+        selected = candidate;
+    }
+    return selected;
 }
 
 inline size_t mcDpskWindowSizeForTiming(uint32_t data_frame_ms) {
     if (data_frame_ms == 0) return 1;
 
-    constexpr uint32_t kTargetBurstMs = 16000;
-    constexpr size_t kMaxAuditedMCDPSKWindow = 4;
+    constexpr uint32_t kTargetBurstMs = 19000;
+    constexpr size_t kMaxAuditedMCDPSKWindow = 5;
     const size_t by_burst = std::max<size_t>(1, kTargetBurstMs / data_frame_ms);
     return std::clamp<size_t>(by_burst, 1, kMaxAuditedMCDPSKWindow);
 }
@@ -466,11 +505,15 @@ inline uint32_t mcDpskSackDelayMs(const MCDPSKFrameTiming& timing,
         return 2000;
     }
 
-    // SACK timer starts after the first decoded frame. Delay the ACK until the
-    // rest of the sender's window burst has cleared the half-duplex audio path.
+    // SACK timer starts after the first decoded frame. Continuous MC-DPSK pays
+    // training/reference once at burst start; continuation frames are data-only.
     const uint32_t remaining_burst_ms =
-        static_cast<uint32_t>(window_size - 1) * timing.data_ms;
+        static_cast<uint32_t>(window_size - 1) * timing.data_only_ms;
     return std::clamp<uint32_t>(remaining_burst_ms + 500u, 2000u, 16000u);
+}
+
+inline uint32_t mcDpskSackTailDelayMs(const MCDPSKFrameTiming& timing) {
+    return std::clamp<uint32_t>(timing.overhead_ms + 400u, 500u, 1000u);
 }
 
 inline uint32_t computeMCDPSKAckTimeoutMs(const MCDPSKFrameTiming& timing,
