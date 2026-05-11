@@ -10,6 +10,88 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-11: OTA field diagnostics (Phase 1 + 2)
+
+**Why:** to start OTA testing with non-developer operators, we need
+to recover what happened on a remote machine when contact fails or
+behaves oddly — without expecting the operator to read logs or run
+terminal commands. Two operators sending a small archive each is the
+minimum viable evidence per Codex's design memo (2026-05-11).
+
+**Phase 1 (`a328d70`):** local black box + report bundle.
+- `src/diagnostics/`: recorder, bounded RX/TX PCM rings,
+  in-memory event tail, zip bundle builder (miniz), redaction
+- `tools/ultra_report.cpp` CLI: `--list / --create / --inspect /
+  --replay-prep`
+- `include/ultra/build_info.hpp.in`: version, git commit, dirty flag,
+  build time, OS surfaced in `--version` and report manifest
+- Choke-point event sinks in AudioEngine / ModemEngine /
+  ProtocolEngine: `session.state`, `waveform.negotiated`, `frame.tx`,
+  `frame.rx`, `decode.fail`, `audio.overrun`, `fault.triggered`,
+  `report.created`
+- GUI "Create report" dialog with note + consent
+- ultra_tnc crash-tombstone signal handler (SIGSEGV / ABRT / ILL /
+  FPE / BUS) + next-launch detection
+
+Bundle layout (zip, universally double-clickable):
+```
+manifest.json
+events/session.jsonl
+audio/rx_48k_s16.wav
+audio/tx_48k_s16.wav  (optional, default off)
+config/effective_config.redacted.json
+logs/operator.log
+system/system.json
+notes/operator_note.txt
+replay/README.md
+```
+
+Audio capture default ON with first-run consent. Lossless PCM16
+authoritative. RX/TX ring is preallocated atomic PCM16; recordRx /
+recordTx / emit are non-blocking, lock-free, allocation-free, run
+from the audio callback; background writer thread does all
+filesystem I/O.
+
+**Phase 2 (`b6b9acd`):** per-session always-on debrief.
+- `src/diagnostics/session_summary.{hpp,cpp}`: reducer over the
+  JSONL journal producing operator-readable debrief (outcome, wall
+  time, mode timeline, file transfer result, ARQ counters, channel
+  SNR/CFO/fading min/median/max, decode failures, audio stats,
+  faults, disconnect reason). Callsigns redacted by default.
+- Every session writes its journal incrementally to
+  `diagnostics/sessions/session-<utc>-<id>.jsonl`; on session end
+  the summary lands next to it at `.txt`.
+- `freeze()` now sources `events/session.jsonl` from the on-disk
+  journal rather than the bounded in-memory tail.
+- GUI end-of-session debrief modal with "Save debrief" + "Create
+  full report" buttons.
+- TNC end-of-session log block prints outcome / wall time / mode /
+  decode failures + path to `.txt`.
+- `ultra_report --list` shows sessions + reports; `--summary
+  newest|<id>` re-renders the debrief on demand.
+- Best-effort session retention: 30 days or 100 sessions, whichever
+  comes first, evaluated at startup.
+
+**Transport (first OTA round):** email. Operator emails the local
+zip; you triage manually. No GitHub auto-upload, no telemetry, no
+network calls in the diagnostics path. GitHub issue body templating
+and Claude-Agent inbox triage are deferred follow-ups.
+
+**Verification:** ctest 40/40 PASS (was 39 — added test_diagnostics
+with summary fixtures for connected / handshake-fail / mode-stuck
+cases, journal consumption, ring drop counters, event wraparound,
+bundle build/inspect roundtrip, tombstone parsing). cli_simulator
+regression unchanged. Phase 1 hardware-smoked at 1047.8 bps Good
+SNR=15 R1/2, 0 retx. Manual `ultra_report --create` + `--summary
+newest` produces a real `.txt` debrief, `--inspect` reads back the
+zip's 8-file layout.
+
+**No wire-format change.** Real-time audio thread unchanged. macOS +
+Linux + Pi5 in scope; Windows deferred (zip container chosen so
+Windows can read bundles natively when scope expands).
+
+---
+
 ## 2026-05-11: MC-DPSK ARQ tuning for continuous bursts
 
 **What was sub-optimal (post-burst transport):**
