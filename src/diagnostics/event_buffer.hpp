@@ -35,6 +35,9 @@ public:
     void push(const DiagEvent& event) noexcept;
 
     std::vector<std::string> snapshotLines() const;
+    std::vector<std::string> snapshotLinesFrom(uint64_t next_sequence,
+                                               uint64_t* next_sequence_out,
+                                               uint64_t* dropped_before = nullptr) const;
     std::string snapshotJsonl() const;
 
     uint64_t eventsWritten() const noexcept {

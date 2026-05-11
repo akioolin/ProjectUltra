@@ -172,6 +172,7 @@ add_library(ultra_core STATIC
     src/diagnostics/event_buffer.cpp
     src/diagnostics/report_bundle.cpp
     src/diagnostics/redaction.cpp
+    src/diagnostics/session_summary.cpp
     src/diagnostics/diagnostics_recorder.cpp
     # VARA-compatible TNC protocol shell
     # (tnc_bridge.cpp is added conditionally below — depends on SDL2 via

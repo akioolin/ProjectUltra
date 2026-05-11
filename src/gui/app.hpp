@@ -145,6 +145,7 @@ private:
     int last_progress_milestone_ = 0;  // Last logged milestone (0, 25, 50, 75)
     std::chrono::steady_clock::time_point file_transfer_start_time_;  // For duration display
     uint32_t pending_file_tx_payload_bytes_ = 0;  // Original file size for TX goodput
+    std::string pending_file_tx_path_;
     float last_effective_goodput_bps_ = 0.0f;  // Last completed file transfer goodput
     std::string last_goodput_label_ = "n/a";  // Context for last goodput sample
     int diagnostics_last_arq_failed_ = 0;
@@ -152,8 +153,13 @@ private:
     // Diagnostics report UI
     bool diagnostics_consent_popup_opened_ = false;
     bool diagnostics_report_popup_open_ = false;
+    bool diagnostics_debrief_popup_open_ = false;
     char diagnostics_note_buffer_[512] = "";
+    char diagnostics_debrief_save_path_[512] = "";
     std::string diagnostics_last_report_;
+    std::string diagnostics_last_summary_;
+    std::string diagnostics_last_summary_path_;
+    std::string diagnostics_debrief_status_;
     void renderDiagnosticsDialogs();
 
     // ========================================

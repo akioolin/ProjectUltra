@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -58,6 +59,18 @@ void writeAllSignalSafe(int fd, const char* data, size_t len) {
         data += n;
         len -= static_cast<size_t>(n);
     }
+}
+
+bool writeAllFd(int fd, const char* data, size_t len) {
+    while (len > 0) {
+        ssize_t n = ::write(fd, data, len);
+        if (n <= 0) {
+            return false;
+        }
+        data += n;
+        len -= static_cast<size_t>(n);
+    }
+    return true;
 }
 
 void appendUnsigned(char*& p, char* end, unsigned long long value) {
@@ -224,18 +237,15 @@ void DiagnosticsRecorder::start(SessionMeta meta) {
 
     meta_ = std::move(meta);
     diagnostics_dir_ = defaultDiagnosticsDir();
-    session_id_ = randomHex(12);
-    session_dir_ = diagnostics_dir_ / "sessions" / session_id_;
 
     std::error_code ec;
-    fs::create_directories(session_dir_, ec);
+    fs::create_directories(diagnostics_dir_ / "sessions", ec);
     fs::create_directories(diagnostics_dir_ / "reports", ec);
 
-    audio_ring_.reset(meta_.sample_rate);
-    events_.reset(EventBuffer::kDefaultCapacity);
     rx_audio_enabled_.store(hasAudioConsent(), std::memory_order_release);
     tx_audio_enabled_.store(false, std::memory_order_release);
     writer_stop_.store(false, std::memory_order_release);
+    beginNewSessionLocked(true);
     running_.store(true, std::memory_order_release);
 
     detectPendingTombstone();
@@ -253,12 +263,19 @@ void DiagnosticsRecorder::stop() {
     if (!running_.load(std::memory_order_acquire)) {
         return;
     }
-    emitText("session", "session.state", "{\"state\":\"stopped\"}");
+    if (!session_finished_) {
+        emitText("session", "session.state", "{\"state\":\"stopped\"}");
+        (void)finishSessionLocked("app_stop", false);
+    }
     writer_stop_.store(true, std::memory_order_release);
     if (writer_thread_.joinable()) {
         writer_thread_.join();
     }
     flushSessionSnapshot();
+    {
+        std::lock_guard<std::mutex> io_lock(io_mutex_);
+        closeJournalLocked();
+    }
     running_.store(false, std::memory_order_release);
 #ifndef _WIN32
     if (g_tombstone_fd >= 0) {
@@ -272,32 +289,259 @@ void DiagnosticsRecorder::stop() {
 #endif
 }
 
-void DiagnosticsRecorder::writerLoop() {
-    while (!writer_stop_.load(std::memory_order_acquire)) {
-        for (int i = 0; i < 50 && !writer_stop_.load(std::memory_order_acquire); ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+void DiagnosticsRecorder::beginNewSessionLocked(bool reset_buffers) {
+    std::lock_guard<std::mutex> io_lock(io_mutex_);
+    closeJournalLocked();
+
+    session_id_ = randomHex(12);
+    session_start_utc_compact_ = utcCompactNow();
+    const std::string short_id = session_id_.substr(0, std::min<size_t>(6, session_id_.size()));
+    session_file_stem_ = "session-" + session_start_utc_compact_ + "-" + short_id;
+    session_dir_ = diagnostics_dir_ / "sessions" / session_id_;
+    session_journal_path_ = diagnostics_dir_ / "sessions" / (session_file_stem_ + ".jsonl");
+    session_summary_path_ = diagnostics_dir_ / "sessions" / (session_file_stem_ + ".txt");
+
+    std::error_code ec;
+    fs::create_directories(session_dir_, ec);
+    fs::create_directories(session_journal_path_.parent_path(), ec);
+
+    if (reset_buffers) {
+        audio_ring_.reset(meta_.sample_rate);
+        events_.reset(EventBuffer::kDefaultCapacity);
+    }
+    journal_next_sequence_ = reset_buffers ? 1 : events_.eventsWritten() + 1;
+    journal_dropped_events_ = 0;
+    journal_lines_since_sync_ = 0;
+    session_finished_ = false;
+    last_summary_ = SessionSummaryPath{};
+    last_summary_.journal_path = session_journal_path_;
+    openJournalLocked();
+}
+
+void DiagnosticsRecorder::ensureSessionActive() {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    if (!running_.load(std::memory_order_acquire) || !session_finished_) {
+        return;
+    }
+    beginNewSessionLocked(false);
+    prepareCrashTombstone();
+    emitText("session", "session.state", "{\"state\":\"started\"}");
+}
+
+SessionSummaryPath DiagnosticsRecorder::finishSession(const std::string& reason,
+                                                      bool include_callsigns) {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return finishSessionLocked(reason, include_callsigns);
+}
+
+SessionSummaryPath DiagnosticsRecorder::finishSessionLocked(const std::string& reason,
+                                                            bool include_callsigns) {
+    SessionSummaryPath result;
+    result.journal_path = session_journal_path_;
+    result.path = session_summary_path_;
+    if (!running_.load(std::memory_order_acquire)) {
+        result.error = "diagnostics recorder is not running";
+        return result;
+    }
+    if (session_finished_) {
+        return last_summary_;
+    }
+
+    const AudioRingSnapshot rx = audio_ring_.snapshotRx();
+    if (!rx.samples.empty()) {
+        double sum_sq = 0.0;
+        double peak = 0.0;
+        for (int16_t sample : rx.samples) {
+            const double normalized = static_cast<double>(sample) / 32768.0;
+            sum_sq += normalized * normalized;
+            peak = std::max(peak, std::abs(normalized));
         }
-        if (running_.load(std::memory_order_acquire)) {
+        const double rms = std::sqrt(sum_sq / static_cast<double>(rx.samples.size()));
+        char fields[192];
+        std::snprintf(fields, sizeof(fields),
+                      "{\"samples\":%zu,\"dropped_samples\":%llu,"
+                      "\"rms\":%.4f,\"peak\":%.4f}",
+                      rx.samples.size(),
+                      static_cast<unsigned long long>(rx.samples_dropped),
+                      rms,
+                      peak);
+        emitText("audio", "audio.stats", fields);
+    }
+
+    char fields[384];
+    std::snprintf(fields, sizeof(fields),
+                  "{\"reason\":\"%s\"}",
+                  jsonEscape(reason).c_str());
+    emitText("session", "session.finished", fields);
+    drainJournal(true);
+
+    auto summary = summarizeSessionJournal(session_journal_path_, summaryOptions(include_callsigns));
+    if (!summary.ok) {
+        result.error = summary.error;
+        return result;
+    }
+
+    std::string error;
+    if (!writeSessionSummary(session_summary_path_, summary, &error)) {
+        result.error = error;
+        return result;
+    }
+
+    result.ok = true;
+    result.outcome = summary.outcome;
+    result.text = summary.text;
+    result.operator_log_lines = summary.operator_log_lines;
+    session_finished_ = true;
+    last_summary_ = result;
+    cleanupStorage();
+    return result;
+}
+
+void DiagnosticsRecorder::writerLoop() {
+    auto last_snapshot = std::chrono::steady_clock::now();
+    while (!writer_stop_.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        if (!running_.load(std::memory_order_acquire)) {
+            continue;
+        }
+        drainJournal(false);
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_snapshot >= std::chrono::seconds(5)) {
             flushSessionSnapshot();
+            last_snapshot = now;
         }
     }
+    drainJournal(true);
+}
+
+bool DiagnosticsRecorder::openJournalLocked() {
+    if (session_journal_path_.empty()) {
+        return false;
+    }
+#ifndef _WIN32
+    if (journal_fd_ >= 0) {
+        return true;
+    }
+    journal_fd_ = ::open(session_journal_path_.string().c_str(),
+                         O_CREAT | O_WRONLY | O_APPEND | O_CLOEXEC,
+                         0644);
+    return journal_fd_ >= 0;
+#else
+    if (journal_stream_.is_open()) {
+        return true;
+    }
+    journal_stream_.open(session_journal_path_, std::ios::binary | std::ios::app);
+    return journal_stream_.good();
+#endif
+}
+
+void DiagnosticsRecorder::closeJournalLocked() {
+#ifndef _WIN32
+    if (journal_fd_ >= 0) {
+        ::fsync(journal_fd_);
+        ::close(journal_fd_);
+        journal_fd_ = -1;
+    }
+#else
+    if (journal_stream_.is_open()) {
+        journal_stream_.flush();
+        journal_stream_.close();
+    }
+#endif
+}
+
+void DiagnosticsRecorder::fsyncJournalLocked() {
+#ifndef _WIN32
+    if (journal_fd_ >= 0) {
+        ::fsync(journal_fd_);
+    }
+#else
+    if (journal_stream_.is_open()) {
+        journal_stream_.flush();
+    }
+#endif
+    journal_lines_since_sync_ = 0;
+}
+
+bool DiagnosticsRecorder::appendJournalLinesLocked(bool fsync_checkpoint) {
+    if (session_journal_path_.empty() || !openJournalLocked()) {
+        return false;
+    }
+    uint64_t next = journal_next_sequence_;
+    uint64_t dropped = 0;
+    auto lines = events_.snapshotLinesFrom(journal_next_sequence_, &next, &dropped);
+    journal_dropped_events_ += dropped;
+    if (lines.empty()) {
+        if (fsync_checkpoint) {
+            fsyncJournalLocked();
+        }
+        journal_next_sequence_ = next;
+        return true;
+    }
+
+    std::string payload;
+    size_t total = 0;
+    for (const auto& line : lines) {
+        total += line.size() + 1;
+    }
+    payload.reserve(total);
+    for (const auto& line : lines) {
+        payload += line;
+        payload += '\n';
+    }
+
+#ifndef _WIN32
+    if (!writeAllFd(journal_fd_, payload.data(), payload.size())) {
+        return false;
+    }
+#else
+    journal_stream_.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+    if (!journal_stream_.good()) {
+        return false;
+    }
+#endif
+    journal_next_sequence_ = next;
+    journal_lines_since_sync_ += lines.size();
+    if (fsync_checkpoint || journal_lines_since_sync_ >= 64) {
+        fsyncJournalLocked();
+    }
+    return true;
+}
+
+bool DiagnosticsRecorder::drainJournal(bool fsync_checkpoint) {
+    std::lock_guard<std::mutex> io_lock(io_mutex_);
+    return appendJournalLinesLocked(fsync_checkpoint);
 }
 
 void DiagnosticsRecorder::flushSessionSnapshot() {
-    if (session_dir_.empty()) {
+    drainJournal(false);
+
+    fs::path session_dir;
+    fs::path journal_path;
+    {
+        std::lock_guard<std::mutex> io_lock(io_mutex_);
+        session_dir = session_dir_;
+        journal_path = session_journal_path_;
+    }
+    if (session_dir.empty()) {
         return;
     }
-    writeTextFile(session_dir_ / "events" / "session.jsonl", events_.snapshotJsonl());
-    writeTextFile(session_dir_ / "config" / "effective_config.redacted.json",
+
+    std::string events_jsonl = readTextFile(journal_path);
+    if (events_jsonl.empty()) {
+        events_jsonl = events_.snapshotJsonl();
+    }
+    writeTextFile(session_dir / "events" / "session.jsonl", events_jsonl);
+    writeTextFile(session_dir / "config" / "effective_config.redacted.json",
                   redactConfigJson(meta_.config_json, {}));
-    writeTextFile(session_dir_ / "system" / "system.json", systemJson());
+    writeTextFile(session_dir / "system" / "system.json", systemJson());
     auto rx = audio_ring_.snapshotRx();
     if (!rx_audio_enabled_.load(std::memory_order_acquire)) {
         rx.samples.clear();
     }
-    (void)writeWavPcm16(session_dir_ / "audio" / "rx_48k_s16.wav", rx);
+    (void)writeWavPcm16(session_dir / "audio" / "rx_48k_s16.wav", rx);
     if (tx_audio_enabled_.load(std::memory_order_acquire)) {
-        (void)writeWavPcm16(session_dir_ / "audio" / "tx_48k_s16.wav",
+        (void)writeWavPcm16(session_dir / "audio" / "tx_48k_s16.wav",
                             audio_ring_.snapshotTx());
     }
 }
@@ -353,12 +597,18 @@ ReportPath DiagnosticsRecorder::freeze(FreezeReason reason, ReportOptions option
                   "{\"path\":\"%s\",\"reason\":\"%s\"}",
                   report_path.string().c_str(), freezeReasonName(reason));
     emitText("report", "report.created", created_fields);
+    drainJournal(true);
+
+    std::string events_jsonl = readTextFile(session_journal_path_);
+    if (events_jsonl.empty()) {
+        events_jsonl = events_.snapshotJsonl();
+    }
 
     BundleBuildInput input;
     input.output_path = report_path;
     input.staging_dir = staging;
     input.manifest_json = manifestJson(reason, options, rx, tx);
-    input.events_jsonl = events_.snapshotJsonl();
+    input.events_jsonl = events_jsonl;
     input.rx_audio = rx;
     input.tx_audio = tx;
     input.config_json = redactConfigJson(meta_.config_json, {options.include_callsigns});
@@ -439,6 +689,15 @@ std::string DiagnosticsRecorder::systemJson() const {
         << "  \"dirty\": " << (kBuildDirty ? "true" : "false") << "\n"
         << "}\n";
     return out.str();
+}
+
+SessionSummaryOptions DiagnosticsRecorder::summaryOptions(bool include_callsigns) const {
+    auto options = defaultSessionSummaryOptions();
+    options.app_name = meta_.app_name;
+    options.station_role = meta_.station_role;
+    options.local_callsign = meta_.callsign;
+    options.include_callsigns = include_callsigns;
+    return options;
 }
 
 bool DiagnosticsRecorder::hasAudioConsent() const {
@@ -551,6 +810,43 @@ void DiagnosticsRecorder::cleanupStorage() {
     if (diagnostics_dir_.empty()) {
         return;
     }
+
+    struct SessionCandidate {
+        fs::path journal;
+        fs::path summary;
+        fs::file_time_type time;
+    };
+    std::vector<SessionCandidate> sessions;
+    std::error_code ec;
+    const fs::path sessions_dir = diagnostics_dir_ / "sessions";
+    if (fs::exists(sessions_dir, ec)) {
+        for (const auto& entry : fs::directory_iterator(sessions_dir, ec)) {
+            if (!entry.is_regular_file(ec)) continue;
+            const auto path = entry.path();
+            const std::string filename = path.filename().string();
+            if (filename.rfind("session-", 0) != 0 || path.extension() != ".jsonl") {
+                continue;
+            }
+            fs::path summary = path;
+            summary.replace_extension(".txt");
+            sessions.push_back({path, summary, entry.last_write_time(ec)});
+        }
+    }
+    std::sort(sessions.begin(), sessions.end(),
+              [](const SessionCandidate& a, const SessionCandidate& b) {
+                  return a.time > b.time;
+              });
+    const auto cutoff = fs::file_time_type::clock::now() - std::chrono::hours(24 * 30);
+    for (size_t i = 0; i < sessions.size(); ++i) {
+        const bool too_many = i >= 100;
+        const bool too_old = sessions[i].time < cutoff;
+        if ((!too_many && !too_old) || sessions[i].journal == session_journal_path_) {
+            continue;
+        }
+        fs::remove(sessions[i].journal, ec);
+        fs::remove(sessions[i].summary, ec);
+    }
+
     uintmax_t total = directorySize(diagnostics_dir_);
     if (total <= kStorageCapBytes) {
         return;
@@ -562,7 +858,6 @@ void DiagnosticsRecorder::cleanupStorage() {
         uintmax_t size = 0;
     };
     std::vector<Candidate> candidates;
-    std::error_code ec;
     const fs::path reports = diagnostics_dir_ / "reports";
     if (fs::exists(reports, ec)) {
         for (const auto& entry : fs::directory_iterator(reports, ec)) {

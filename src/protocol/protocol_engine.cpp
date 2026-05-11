@@ -24,6 +24,23 @@ ProtocolEngine::ProtocolEngine(const ConnectionConfig& config)
     });
 
     connection_.setDisconnectedCallback([this](const std::string& reason) {
+        const auto stats = connection_.getStats();
+        char fields[384];
+        std::snprintf(fields, sizeof(fields),
+                      "{\"connected_time_ms\":%u,\"connects_failed\":%d,"
+                      "\"disconnects\":%d,\"arq_frames_sent\":%d,"
+                      "\"arq_frames_received\":%d,\"arq_retransmissions\":%d,"
+                      "\"arq_timeouts\":%d,\"arq_failed\":%d}",
+                      stats.connected_time_ms,
+                      stats.connects_failed,
+                      stats.disconnects,
+                      stats.arq.frames_sent,
+                      stats.arq.frames_received,
+                      stats.arq.retransmissions,
+                      stats.arq.timeouts,
+                      stats.arq.failed);
+        ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+            "protocol", "session.stats", fields);
         if (on_connection_changed_) {
             on_connection_changed_(ConnectionState::DISCONNECTED, reason);
         }

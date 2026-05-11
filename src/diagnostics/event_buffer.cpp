@@ -135,6 +135,64 @@ std::vector<std::string> EventBuffer::snapshotLines() const {
     return out;
 }
 
+std::vector<std::string> EventBuffer::snapshotLinesFrom(uint64_t next_sequence,
+                                                        uint64_t* next_sequence_out,
+                                                        uint64_t* dropped_before) const {
+    std::vector<std::string> out;
+    if (next_sequence_out) {
+        *next_sequence_out = next_sequence == 0 ? 1 : next_sequence;
+    }
+    if (dropped_before) {
+        *dropped_before = 0;
+    }
+    if (!slots_ || capacity_ == 0) {
+        return out;
+    }
+
+    const uint64_t end = write_seq_.load(std::memory_order_acquire);
+    if (end == 0) {
+        return out;
+    }
+
+    uint64_t seq = next_sequence == 0 ? 1 : next_sequence;
+    const uint64_t earliest = end > capacity_ ? end - capacity_ + 1 : 1;
+    if (seq < earliest) {
+        if (dropped_before) {
+            *dropped_before = earliest - seq;
+        }
+        seq = earliest;
+    }
+    out.reserve(static_cast<size_t>(end >= seq ? end - seq + 1 : 0));
+
+    for (; seq <= end; ++seq) {
+        const uint64_t pos = seq - 1;
+        const Slot& slot = slots_[pos % capacity_];
+        const uint64_t seq_before = slot.sequence.load(std::memory_order_acquire);
+        if (seq_before != seq) {
+            break;
+        }
+        const uint16_t len = slot.length.load(std::memory_order_acquire);
+        if (len == 0 || len >= kMaxJsonLine) {
+            break;
+        }
+        std::string line;
+        line.resize(len);
+        for (uint16_t i = 0; i < len; ++i) {
+            line[i] = slot.bytes[i].load(std::memory_order_relaxed);
+        }
+        const uint64_t seq_after = slot.sequence.load(std::memory_order_acquire);
+        if (seq_after != seq) {
+            break;
+        }
+        out.push_back(std::move(line));
+    }
+
+    if (next_sequence_out) {
+        *next_sequence_out = seq;
+    }
+    return out;
+}
+
 std::string EventBuffer::snapshotJsonl() const {
     auto lines = snapshotLines();
     std::string out;

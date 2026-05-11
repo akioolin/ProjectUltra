@@ -316,10 +316,14 @@ private:
         });
 
         engine_.setPingTxCallback([this]() {
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                "protocol", "ping.tx", "{\"kind\":\"ping\"}");
             queueTx(transmitPing());
         });
 
         engine_.setPingReceivedCallback([this]() {
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                "protocol", "ping.tx", "{\"kind\":\"pong\"}");
             queueTx(transmitPing());
         });
 
@@ -376,20 +380,41 @@ private:
             handshake_complete_ = true;
         });
 
-        bridge_.setConnectionChangedCallback([this](ConnectionState state, const std::string&) {
+        bridge_.setConnectionChangedCallback([this](ConnectionState state, const std::string& info) {
             if (state == ConnectionState::CONNECTED) {
                 setConnected(true);
-                ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
-                    "session", "session.state", "{\"state\":\"connected\"}");
+                auto& diagnostics = ultra::diagnostics::DiagnosticsRecorder::instance();
+                diagnostics.ensureSessionActive();
+                diagnostics.emitText("session", "session.state", "{\"state\":\"connected\"}");
                 LOG_INFO("OPERATOR", "Connected: waveform=%s mode=%s %s",
                          ultra::protocol::waveformModeToString(negotiated_waveform_),
                          ultra::modulationToString(data_modulation_),
                          ultra::codeRateToString(data_code_rate_));
             } else if (state == ConnectionState::DISCONNECTED) {
                 setConnected(false);
-                ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
-                    "session", "session.state", "{\"state\":\"disconnected\"}");
+                auto& diagnostics = ultra::diagnostics::DiagnosticsRecorder::instance();
+                const std::string fields =
+                    std::string("{\"state\":\"disconnected\",\"reason\":\"") +
+                    ultra::diagnostics::jsonEscape(info) + "\"}";
+                diagnostics.emitText("session", "session.state", fields.c_str());
+                auto summary = diagnostics.finishSession(info);
+                if (summary.ok) {
+                    for (const auto& line : summary.operator_log_lines) {
+                        LOG_INFO("OPERATOR", "%s", line.c_str());
+                    }
+                    LOG_INFO("OPERATOR", "Session debrief: %s", summary.path.string().c_str());
+                } else {
+                    LOG_WARN("OPERATOR", "Session debrief failed: %s", summary.error.c_str());
+                }
                 LOG_INFO("OPERATOR", "Disconnected");
+            } else if (state == ConnectionState::PROBING) {
+                auto& diagnostics = ultra::diagnostics::DiagnosticsRecorder::instance();
+                diagnostics.ensureSessionActive();
+                diagnostics.emitText("session", "session.state", "{\"state\":\"probing\"}");
+            } else if (state == ConnectionState::CONNECTING) {
+                auto& diagnostics = ultra::diagnostics::DiagnosticsRecorder::instance();
+                diagnostics.ensureSessionActive();
+                diagnostics.emitText("session", "session.state", "{\"state\":\"connecting\"}");
             }
         });
 
@@ -404,6 +429,11 @@ private:
         decoder_.setPingCallback([this](float snr_db, float cfo_hz) {
             engine_.setMeasuredSNR(snr_db);
             last_cfo_hz_ = cfo_hz;
+            char fields[128];
+            std::snprintf(fields, sizeof(fields),
+                          "{\"snr_db\":%.1f,\"cfo_hz\":%.1f}", snr_db, cfo_hz);
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                "protocol", "ping.rx", fields);
             if (decoder_.getDetectedBandwidth() == ultra::BandwidthMode::NARROW) {
                 encoder_.setNarrowbandControl(true);
                 engine_.setNarrowbandOverride(WaveformMode::OFDM_NARROW);
