@@ -150,6 +150,9 @@ void printUsage(std::ostream& out) {
         << "                              demod,sync,ldpc,channel,all\n"
         << "  --log-file <path>           Write logs to file instead of stderr\n"
         << "  --list-audio-devices        Print available SDL audio devices and exit\n"
+        << "  --accept-audio-consent      Grant diagnostics RX-audio capture consent\n"
+        << "                              (headless equivalent of the GUI's first-run\n"
+        << "                              dialog; without this, report bundles omit audio)\n"
         << "  --version                   Print build provenance and exit\n"
         << "  --help\n"
         << "\n"
@@ -343,6 +346,8 @@ bool parseArgs(int argc, char** argv, Config& cfg) {
             cfg.list_audio = true;
         } else if (arg == "--version") {
             cfg.version = true;
+        } else if (arg == "--accept-audio-consent") {
+            cfg.accept_audio_consent = true;
         } else if (arg == "--config") {
             if (i + 1 >= argc) {
                 std::cerr << "Missing value for --config\n";

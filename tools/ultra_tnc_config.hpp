@@ -44,6 +44,7 @@ struct Config {
     bool log_categories_set = false;
     std::string log_file;
     bool expert_phy = false;
+    bool accept_audio_consent = false;
     bool help = false;
     bool list_audio = false;
     bool version = false;

@@ -678,6 +678,18 @@ int main(int argc, char** argv) {
         "\"}";
     auto& diagnostics = ultra::diagnostics::DiagnosticsRecorder::instance();
     diagnostics.start(std::move(diag_meta));
+    if (cfg.accept_audio_consent && !diagnostics.hasAudioConsent()) {
+        if (diagnostics.grantAudioConsent()) {
+            LOG_INFO("OPERATOR",
+                     "RX-audio capture consent granted via --accept-audio-consent. "
+                     "Marker: %s",
+                     diagnostics.consentPath().string().c_str());
+        } else {
+            LOG_ERROR("OPERATOR",
+                      "Failed to write consent marker at %s",
+                      diagnostics.consentPath().string().c_str());
+        }
+    }
     if (auto tombstone = diagnostics.pendingTombstone()) {
         LOG_WARN("OPERATOR",
                  "Previous-session crash tombstone detected: signal=%s session=%s. "
