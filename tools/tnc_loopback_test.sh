@@ -350,7 +350,8 @@ PI_DIAG_DIR_REMOTE_Q=$(shell_quote "$PI_DIAG_DIR_REMOTE")
 PI_CMD="cd $PI_REPO_Q || exit 1; \
   pkill -9 ultra_tnc 2>/dev/null || true; \
   rm -f $REMOTE_TNC_LOG_Q; \
-  rm -rf $PI_DIAG_DIR_REMOTE_Q && mkdir -p $PI_DIAG_DIR_REMOTE_Q; \
+  rm -rf $PI_DIAG_DIR_REMOTE_Q && mkdir -p $PI_DIAG_DIR_REMOTE_Q/consent; \
+  echo 'consent granted (test rig)' > $PI_DIAG_DIR_REMOTE_Q/consent/rx_audio_capture.accepted; \
   ULTRA_DIAGNOSTICS_DIR=$PI_DIAG_DIR_REMOTE_Q \
   nohup ./build/ultra_tnc --port $TNC_PORT \
     --audio-output $PI_AUDIO_OUT_Q \
@@ -364,6 +365,13 @@ info "    Pi ultra_tnc PID=$PI_TNC_PID"
 
 info "[3/7] Starting ultra_tnc locally..."
 mkdir -p "$MAC_DIAG_DIR"
+# Pre-grant audio capture consent: the GUI shows a first-run dialog,
+# but headless TNC/CI runs have nowhere to prompt. The recorder gates
+# on the existence of this marker file; equivalent to clicking
+# "I agree" once. See src/diagnostics/diagnostics_recorder.cpp:consentPath().
+mkdir -p "$MAC_DIAG_DIR/consent"
+echo "ProjectUltra diagnostics RX audio capture consent granted (test rig)." \
+  > "$MAC_DIAG_DIR/consent/rx_audio_capture.accepted"
 MAC_ARGS=(--port "$TNC_PORT" --callsign "$MAC_CALLSIGN")
 [[ -n "$MAC_AUDIO_OUT" ]] && MAC_ARGS+=(--audio-output "$MAC_AUDIO_OUT")
 [[ -n "$MAC_AUDIO_IN" ]] && MAC_ARGS+=(--audio-input "$MAC_AUDIO_IN")
@@ -447,8 +455,21 @@ info "Logs: $LOG_DIR"
 info
 info "Capturing diagnostics bundles + summaries..."
 
+# SIGUSR1 → ultra_tnc main loop calls DiagnosticsRecorder::freeze() and
+# writes the full report.zip with the last 120 s of RX audio. Without
+# this, we only get the lightweight .txt summary; the audio ring stays
+# in memory and is lost on shutdown.
+if [[ -n "$MAC_TNC_PID" ]] && kill -0 "$MAC_TNC_PID" 2>/dev/null; then
+  kill -USR1 "$MAC_TNC_PID" 2>/dev/null || true
+fi
+if [[ -n "$PI_TNC_PID" ]]; then
+  ssh_pi "kill -USR1 $PI_TNC_PID 2>/dev/null || true" >/dev/null 2>&1 || true
+fi
+
 # Let session.finished events flush + summary write through the journal
-# writer thread on both ends before we tear down.
+# writer thread + freeze() complete the report.zip on both ends before
+# we tear down. freeze() reads the audio ring + builds the zip; that's
+# the slowest step (1-3 s for 120 s of 48 kHz audio + zip).
 sleep "$SESSION_FLUSH_SECONDS"
 
 # Graceful shutdown so DiagnosticsRecorder::stop() runs the final
@@ -477,7 +498,7 @@ ssh_pi "tar -C $PI_DIAG_DIR_REMOTE_Q -cf - . 2>/dev/null" | \
 
 verify_side() {
   local label="$1" diag_dir="$2"
-  local txt_count zip_count latest_txt outcome
+  local txt_count zip_count latest_txt latest_zip outcome audio_bytes
   txt_count=$(find "$diag_dir/sessions" -maxdepth 1 -name '*.txt' 2>/dev/null | wc -l | tr -d ' ')
   zip_count=$(find "$diag_dir/reports" -maxdepth 1 -name '*.zip' 2>/dev/null | wc -l | tr -d ' ')
   if [[ "$txt_count" == "0" ]]; then
@@ -489,6 +510,20 @@ verify_side() {
   echo "  $label: $txt_count summary, $zip_count bundle"
   echo "    $outcome"
   echo "    .txt: $latest_txt"
+
+  if [[ "$zip_count" == "0" ]]; then
+    echo "    $label: NO .zip bundle produced (freeze trigger failed?)" >&2
+    return 1
+  fi
+  latest_zip=$(ls -t "$diag_dir"/reports/*.zip 2>/dev/null | head -1)
+  # Extract WAV size from zip listing (unzip -l prints size in first column)
+  audio_bytes=$(unzip -l "$latest_zip" 2>/dev/null | awk '/audio\/rx_48k_s16\.wav/ {print $1; exit}')
+  if [[ -z "$audio_bytes" || "$audio_bytes" == "0" ]]; then
+    echo "    $label: zip exists but audio/rx_48k_s16.wav is missing or empty" >&2
+    return 1
+  fi
+  echo "    .zip: $latest_zip ($(du -h "$latest_zip" | awk '{print $1}'))"
+  echo "    audio/rx_48k_s16.wav: ${audio_bytes} bytes"
   return 0
 }
 
