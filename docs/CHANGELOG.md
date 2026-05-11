@@ -10,6 +10,59 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-11: MC-DPSK ARQ tuning for continuous bursts
+
+**What was sub-optimal (post-burst transport):**
+After the continuous burst landed, ARQ window/SACK/timeout parameters
+were still sized from single-frame airtime. Continuous burst pays
+chirp+training once at burst start (~1.2 s preamble + ~0.4 s overhead)
+and then streams data-only frames. The transport never fully filled
+the 19 s burst budget — Robust-Mid was running window=2 when window=3
+fits, Robust was at window=4 when window=5 fits. SACK tail delay was
+also a flat 2 s regardless of rung, and Robust-Low had a hard-coded
+72 s ACK timeout that double-counted burst airtime.
+
+**What changed (`bfcfee0`):**
+
+- `connection_policy.hpp` — `MCDPSKFrameTiming` gains overhead_symbols /
+  data_only_symbols / overhead_ms / data_only_ms fields. New
+  `mcDpskBurstAirtimeMs(timing, window)` computes physical burst length
+  (preamble + overhead + N × data-only). `mcDpskWindowSizeForTiming()`
+  now takes the full timing struct and picks the largest window whose
+  burst fits a 19 s budget (max 5). `mcDpskSackDelayMs()` uses
+  data-only continuation time. New `mcDpskSackTailDelayMs()` returns
+  `overhead_ms + 400 ms` clamped to [500, 1000].
+- `connection.cpp` — `configureArqForCurrentDataMode()` passes timing
+  to the window selector, uses the new tail delay for
+  `setSackDelayShort`, and treats the Robust-Low 72 s timeout as a
+  36 s **floor** over the computed timeout rather than a hard override.
+- `test_connection_policy.cpp` — assertions for burst window math,
+  SACK delay decomposition, and Robust-Low timeout floor.
+
+Window sizing impact:
+- Robust-Mid (DBPSK 1024sps): window 2 → 3
+- Robust (DQPSK 1024sps): window 4 → 5
+- Robust-Low (DBPSK 2048sps): window 1 (unchanged — single frame fills
+  burst budget)
+
+**Hardware-validated (Mac↔Pi5, --inject --inject-gain 0.70, 1KB):**
+
+| Cell                         | Pre-tuning | Post-tuning | Delta | Retx |
+|------------------------------|-----------:|------------:|------:|-----:|
+| Robust-Mid 0 dB Mod          | 30.3 bps   | **34.9 bps**| +15%  | 0    |
+| Robust +5 dB Good            | 75.7 bps   | **81.0 bps**| +7%   | 0    |
+| Robust-Low -5 dB Mod         | 13.5 bps   | 13.5 bps    | 0%    | 0    |
+| Adaptive +15 dB Good 20KB OFDM | 1733 bps | 1739.9 bps  | flat  | 0    |
+
+Robust-Low shows no gain because the airtime floor at 2048sps DBPSK is
+preamble-dominated; window=1 is correct there. OFDM-CHIRP regression
+check confirms MC-DPSK-only scope.
+
+**Verification:** ctest 39/39 PASS. Forced-preset AWGN smokes (all 4)
+pass. Adaptive SNR=0 and SNR=15 sim paths pass.
+
+---
+
 ## 2026-05-11: MC-DPSK continuous burst — amortize chirp/training
 
 **What was slow (transport efficiency):**
