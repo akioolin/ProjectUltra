@@ -6,6 +6,7 @@
 #include "streaming_frame_policy.hpp"
 #include "streaming_signal_policy.hpp"
 #include "gui/startup_trace.hpp"
+#include "waveform/mc_dpsk_waveform.hpp"
 #include "waveform/ofdm_cox_waveform.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "fec/frame_interleaver.hpp"
@@ -37,6 +38,27 @@ namespace {
 bool isFixedFrameCwCount(int cw_count) {
     return cw_count >= v2::kMinFixedFrameCodewords &&
            cw_count <= v2::kMaxFixedFrameCodewords;
+}
+
+float sampleRMS(const std::vector<float>& samples) {
+    if (samples.empty()) {
+        return 0.0f;
+    }
+    double energy = 0.0;
+    for (float sample : samples) {
+        energy += static_cast<double>(sample) * sample;
+    }
+    return static_cast<float>(std::sqrt(energy / static_cast<double>(samples.size())));
+}
+
+bool decodedFrameHasMoreFrag(const DecodeResult& result) {
+    if (result.frame_data.size() >= 4) {
+        return (result.frame_data[3] & v2::Flags::MORE_FRAG) != 0;
+    }
+    if (result.has_partial_codewords) {
+        return (result.partial_codewords.flags & v2::Flags::MORE_FRAG) != 0;
+    }
+    return false;
 }
 
 }  // namespace
@@ -1264,6 +1286,19 @@ void StreamingDecoder::decodeCurrentFrame() {
         }
     }
 
+    const bool can_continue_mc_dpsk =
+        result.success &&
+        connected_ &&
+        mode_ == protocol::WaveformMode::MC_DPSK &&
+        v2::isDataFrame(result.frame_type) &&
+        result.frame_type != v2::FrameType::DATA_REPAIR &&
+        decodedFrameHasMoreFrag(result);
+    if (can_continue_mc_dpsk) {
+        startMCDPSKBurstContinuation(next_block_pos, next_search_abs,
+                                     sync_snr_, sync_cfo_);
+        return;
+    }
+
     // Burst over (or non-burst) - skip past everything we decoded and return to SEARCHING
     burst_blocks_decoded_ = 0;
     {
@@ -1274,6 +1309,245 @@ void StreamingDecoder::decodeCurrentFrame() {
     }
 
     state_ = DecoderState::SEARCHING;
+}
+
+void StreamingDecoder::startMCDPSKBurstContinuation(size_t next_pos, size_t next_abs,
+                                                    float snr_db, float cfo_hz) {
+    mc_burst_next_pos_ = next_pos;
+    mc_burst_next_abs_ = next_abs;
+    mc_burst_snr_ = snr_db;
+    mc_burst_cfo_ = cfo_hz;
+    mc_burst_frames_decoded_ = 1;
+    mc_burst_pending_frame_ = false;
+    mc_burst_pending_soft_bits_.clear();
+    mc_burst_wait_start_time_ = std::chrono::steady_clock::now();
+    state_ = DecoderState::MCDPSK_BURST_CONTINUING;
+
+    LOG_MODEM(INFO, "[%s] MC-DPSK continuous burst: waiting for data-only continuation at pos=%zu",
+              log_prefix_.c_str(), mc_burst_next_pos_);
+}
+
+void StreamingDecoder::finishMCDPSKBurstContinuation(size_t search_pos, size_t search_abs) {
+    mc_burst_pending_frame_ = false;
+    mc_burst_pending_soft_bits_.clear();
+    mc_burst_frames_decoded_ = 0;
+
+    {
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        correlation_pos_ = search_pos;
+        setSearchFloorLocked(search_abs);
+        last_decoded_sync_pos_ = sync_position_;
+    }
+    state_ = DecoderState::SEARCHING;
+}
+
+void StreamingDecoder::continueMCDPSKBurst() {
+    auto* mc_waveform = dynamic_cast<MCDPSKWaveform*>(waveform_.get());
+    if (!mc_waveform) {
+        finishMCDPSKBurstContinuation(mc_burst_next_pos_, mc_burst_next_abs_);
+        return;
+    }
+
+    constexpr size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;
+    constexpr float kContinuationRmsFloor = 0.012f;
+    constexpr int kSampleRateHz = 48000;
+
+    const int one_cw_samples_i = mc_waveform->getDataOnlySamplesForCWCount(1);
+    if (one_cw_samples_i <= 0) {
+        finishMCDPSKBurstContinuation(mc_burst_next_pos_, mc_burst_next_abs_);
+        return;
+    }
+    const size_t one_cw_samples = static_cast<size_t>(one_cw_samples_i);
+
+    auto availableFrom = [&](size_t pos) -> size_t {
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        if (write_pos_ >= pos) {
+            return write_pos_ - pos;
+        }
+        return buffer_capacity_samples_ - pos + write_pos_;
+    };
+
+    auto copyFrom = [&](size_t pos, size_t len) -> std::vector<float> {
+        std::vector<float> out(len);
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        for (size_t i = 0; i < len; ++i) {
+            out[i] = buffer_[wrapRingIndexLocked(pos + i)];
+        }
+        return out;
+    };
+
+    auto timedOutWaitingFor = [&](size_t samples_needed) -> bool {
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - mc_burst_wait_start_time_).count();
+        const int needed_ms = static_cast<int>(
+            (samples_needed * 1000 + kSampleRateHz - 1) / kSampleRateHz);
+        return elapsed_ms > needed_ms + 1000;
+    };
+
+    auto deliverContinuationResult = [&](DecodeResult& result) {
+        populateDecodeMetrics(result, false, mc_burst_cfo_);
+        {
+            std::lock_guard<std::mutex> slock(stats_mutex_);
+            if (result.success) {
+                stats_.frames_decoded++;
+            } else {
+                stats_.frames_failed++;
+            }
+        }
+
+        const bool deliver_partial =
+            !result.success && result.has_partial_codewords;
+        if (result.success || result.codewords_ok > 0) {
+            {
+                std::lock_guard<std::mutex> qlock(queue_mutex_);
+                frame_queue_.push(result);
+            }
+            if ((result.success || deliver_partial) && frame_callback_) {
+                frame_callback_(result);
+            }
+        }
+    };
+
+    const size_t frame_start_pos = mc_burst_pending_frame_
+        ? mc_burst_pending_start_pos_
+        : mc_burst_next_pos_;
+    const size_t frame_start_abs = mc_burst_pending_frame_
+        ? mc_burst_pending_start_abs_
+        : mc_burst_next_abs_;
+
+    if (!mc_burst_pending_frame_) {
+        const size_t available = availableFrom(mc_burst_next_pos_);
+        if (available < one_cw_samples) {
+            if (timedOutWaitingFor(one_cw_samples)) {
+                LOG_MODEM(INFO, "[%s] MC-DPSK continuous burst ended after %d frame(s)",
+                          log_prefix_.c_str(), mc_burst_frames_decoded_);
+                finishMCDPSKBurstContinuation(mc_burst_next_pos_, mc_burst_next_abs_);
+            }
+            return;
+        }
+
+        std::vector<float> cw0_samples = copyFrom(mc_burst_next_pos_, one_cw_samples);
+        const float rms = sampleRMS(cw0_samples);
+        if (rms < kContinuationRmsFloor) {
+            LOG_MODEM(INFO, "[%s] MC-DPSK continuous burst tail: RMS=%.4f, frames=%d",
+                      log_prefix_.c_str(), rms, mc_burst_frames_decoded_);
+            finishMCDPSKBurstContinuation(mc_burst_next_pos_, mc_burst_next_abs_);
+            return;
+        }
+
+        if (!mc_waveform->processDataOnly(SampleSpan(cw0_samples.data(), cw0_samples.size()))) {
+            LOG_MODEM(INFO, "[%s] MC-DPSK continuation demod failed at pos=%zu",
+                      log_prefix_.c_str(), mc_burst_next_pos_);
+            finishMCDPSKBurstContinuation(mc_burst_next_pos_, mc_burst_next_abs_);
+            return;
+        }
+
+        auto soft = mc_waveform->getSoftBits();
+        if (soft.size() < LDPC_BLOCK) {
+            finishMCDPSKBurstContinuation(mc_burst_next_pos_, mc_burst_next_abs_);
+            return;
+        }
+
+        codec_->setRate(code_rate_);
+        std::vector<float> cw0_bits(soft.begin(), soft.begin() + LDPC_BLOCK);
+        auto [peek_ok, peek_data] = codec_->decode(cw0_bits);
+        const size_t bytes_per_cw = v2::getBytesPerCodeword(code_rate_);
+        if (!peek_ok || peek_data.size() < bytes_per_cw ||
+            peek_data[0] != 0x55 || peek_data[1] != 0x4C) {
+            LOG_MODEM(INFO, "[%s] MC-DPSK continuous burst stop: no continuation header at pos=%zu",
+                      log_prefix_.c_str(), mc_burst_next_pos_);
+            finishMCDPSKBurstContinuation(mc_burst_next_pos_, mc_burst_next_abs_);
+            return;
+        }
+        if (peek_data.size() > bytes_per_cw) {
+            peek_data.resize(bytes_per_cw);
+        }
+
+        auto hdr = v2::parseHeader(peek_data);
+        if (!hdr.valid || !v2::isDataFrame(hdr.type) ||
+            hdr.type == v2::FrameType::DATA_REPAIR ||
+            hdr.total_cw == 0 || hdr.total_cw > 32) {
+            LOG_MODEM(INFO, "[%s] MC-DPSK continuous burst stop: header type=%s valid=%d cw=%d",
+                      log_prefix_.c_str(), v2::frameTypeToString(hdr.type),
+                      hdr.valid ? 1 : 0, hdr.total_cw);
+            finishMCDPSKBurstContinuation(mc_burst_next_pos_, mc_burst_next_abs_);
+            return;
+        }
+
+        mc_burst_pending_frame_ = true;
+        mc_burst_pending_type_ = hdr.type;
+        mc_burst_pending_total_cw_ = hdr.total_cw;
+        mc_burst_pending_start_pos_ = mc_burst_next_pos_;
+        mc_burst_pending_start_abs_ = mc_burst_next_abs_;
+        mc_burst_pending_total_samples_ = static_cast<size_t>(
+            mc_waveform->getDataOnlySamplesForCWCount(hdr.total_cw));
+        mc_burst_pending_consumed_samples_ = one_cw_samples;
+        mc_burst_pending_soft_bits_ = std::move(soft);
+        mc_burst_next_pos_ = wrapRingIndexLocked(mc_burst_next_pos_ + one_cw_samples);
+        mc_burst_next_abs_ += one_cw_samples;
+        mc_burst_wait_start_time_ = std::chrono::steady_clock::now();
+    }
+
+    const size_t remaining_samples =
+        mc_burst_pending_total_samples_ > mc_burst_pending_consumed_samples_
+            ? mc_burst_pending_total_samples_ - mc_burst_pending_consumed_samples_
+            : 0;
+
+    if (remaining_samples > 0) {
+        const size_t available = availableFrom(mc_burst_next_pos_);
+        if (available < remaining_samples) {
+            if (timedOutWaitingFor(remaining_samples)) {
+                DecodeResult partial = decodeMCDPSKFrame(
+                    mc_burst_pending_soft_bits_, code_rate_,
+                    v2::getBytesPerCodeword(code_rate_), mc_burst_snr_, mc_burst_cfo_);
+                deliverContinuationResult(partial);
+                LOG_MODEM(WARN, "[%s] MC-DPSK continuous burst partial timeout: %s cw=%d",
+                          log_prefix_.c_str(), v2::frameTypeToString(mc_burst_pending_type_),
+                          mc_burst_pending_total_cw_);
+                finishMCDPSKBurstContinuation(mc_burst_next_pos_, mc_burst_next_abs_);
+            }
+            return;
+        }
+
+        std::vector<float> rest = copyFrom(mc_burst_next_pos_, remaining_samples);
+        if (!mc_waveform->processDataOnly(SampleSpan(rest.data(), rest.size()))) {
+            finishMCDPSKBurstContinuation(frame_start_pos, frame_start_abs);
+            return;
+        }
+        auto rest_soft = mc_waveform->getSoftBits();
+        mc_burst_pending_soft_bits_.insert(mc_burst_pending_soft_bits_.end(),
+                                          rest_soft.begin(), rest_soft.end());
+        mc_burst_next_pos_ = wrapRingIndexLocked(mc_burst_next_pos_ + remaining_samples);
+        mc_burst_next_abs_ += remaining_samples;
+    }
+
+    DecodeResult result = decodeMCDPSKFrame(
+        mc_burst_pending_soft_bits_, code_rate_, v2::getBytesPerCodeword(code_rate_),
+        mc_burst_snr_, mc_burst_cfo_);
+    deliverContinuationResult(result);
+
+    const bool more_frag = decodedFrameHasMoreFrag(result);
+    const int total_cw = mc_burst_pending_total_cw_;
+    mc_burst_pending_frame_ = false;
+    mc_burst_pending_soft_bits_.clear();
+    mc_burst_frames_decoded_++;
+    mc_burst_wait_start_time_ = std::chrono::steady_clock::now();
+
+    LOG_MODEM(INFO, "[%s] MC-DPSK continuous burst frame %d decoded: %s %d/%d CW",
+              log_prefix_.c_str(), mc_burst_frames_decoded_,
+              result.success ? "OK" : "partial",
+              result.codewords_ok, result.codewords_ok + result.codewords_failed);
+
+    if (!result.success && result.codewords_ok == 0) {
+        finishMCDPSKBurstContinuation(frame_start_pos, frame_start_abs);
+        return;
+    }
+
+    if (!more_frag || mc_burst_frames_decoded_ >= MC_DPSK_MAX_BURST_FRAMES) {
+        LOG_MODEM(INFO, "[%s] MC-DPSK continuous burst complete: frames=%d last_cw=%d",
+                  log_prefix_.c_str(), mc_burst_frames_decoded_, total_cw);
+        finishMCDPSKBurstContinuation(mc_burst_next_pos_, mc_burst_next_abs_);
+    }
 }
 // ============================================================================
 // HELPERS

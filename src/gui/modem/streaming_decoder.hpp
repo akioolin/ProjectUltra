@@ -62,6 +62,7 @@ enum class DecoderState {
     SYNC_FOUND,             // Chirp detected, collecting frame samples
     DECODING,               // Have enough samples, decoding in progress
     BURST_ACCUMULATING,     // Burst marker detected, waiting for all 4 frames
+    MCDPSK_BURST_CONTINUING, // Data-only MC-DPSK frames after one chirp/training
 };
 
 // Result of decoding a frame
@@ -352,6 +353,10 @@ private:
     void accumulateBurstFrames();
     BurstFrameResult tryDemodulateNextBurstFrame();
     void finalizeBurstGroup();
+    void startMCDPSKBurstContinuation(size_t next_pos, size_t next_abs,
+                                      float snr_db, float cfo_hz);
+    void continueMCDPSKBurst();
+    void finishMCDPSKBurstContinuation(size_t search_pos, size_t search_abs);
 
     // ========================================================================
     // STATE
@@ -470,6 +475,25 @@ private:
     std::chrono::steady_clock::time_point burst_start_time_;  // timeout reference
     int burst_group_size_ = 8;
     static constexpr int BURST_TIMEOUT_MS_BASE = 8000;  // 4 frames × ~0.7s + margin
+
+    // MC-DPSK continuous burst state. The first frame is decoded through the
+    // ordinary chirp/training path; continuation frames are data-only and rely on
+    // the waveform's preserved differential phase cursor.
+    size_t mc_burst_next_pos_ = 0;
+    size_t mc_burst_next_abs_ = 0;
+    float mc_burst_snr_ = 0.0f;
+    float mc_burst_cfo_ = 0.0f;
+    int mc_burst_frames_decoded_ = 0;
+    bool mc_burst_pending_frame_ = false;
+    v2::FrameType mc_burst_pending_type_ = v2::FrameType::DATA;
+    int mc_burst_pending_total_cw_ = 0;
+    size_t mc_burst_pending_start_pos_ = 0;
+    size_t mc_burst_pending_start_abs_ = 0;
+    size_t mc_burst_pending_total_samples_ = 0;
+    size_t mc_burst_pending_consumed_samples_ = 0;
+    std::vector<float> mc_burst_pending_soft_bits_;
+    std::chrono::steady_clock::time_point mc_burst_wait_start_time_;
+    static constexpr int MC_DPSK_MAX_BURST_FRAMES = 8;
 
     // Pending frame state for multi-codeword frames
     // After reading header, if more codewords needed, wait for more samples

@@ -945,6 +945,37 @@ bool test_ack_batch_defers_more_frag_until_tail() {
     return true;
 }
 
+bool test_ack_batch_can_fire_through_more_frag_for_mc_dpsk() {
+    TEST("ack_batch_size threshold can fire through MORE_FRAG when enabled");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.sack_delay_ms = 10000;
+
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+    rx.setAckBatchThroughMoreFrag(true);
+
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    for (int i = 0; i < 4; i++) {
+        auto frame = v2::DataFrame::makeData("TX1", "RX1", i, Bytes{static_cast<uint8_t>(i)});
+        frame.flags |= v2::Flags::MORE_FRAG;
+        rx.onFrameReceived(frame.serialize());
+    }
+
+    if (channel.size() != 1)
+        FAIL("Expected threshold SACK through MORE_FRAG, got " + std::to_string(channel.size()));
+
+    auto ack = v2::ControlFrame::deserialize(channel.receive());
+    if (!ack || ack->type != v2::FrameType::ACK || ack->seq != 3)
+        FAIL("Threshold SACK through MORE_FRAG did not cumulatively acknowledge seq=3");
+
+    PASS();
+    return true;
+}
+
 bool test_wide_sack_bitmap_serializes_beyond_8_frames() {
     TEST("SACK bitmap preserves bits beyond 8-frame legacy window");
 
@@ -1374,6 +1405,7 @@ int main() {
     test_ack_batch_setter_clamping();
     test_ack_batch_default_matches_window();
     test_ack_batch_defers_more_frag_until_tail();
+    test_ack_batch_can_fire_through_more_frag_for_mc_dpsk();
     test_wide_sack_bitmap_serializes_beyond_8_frames();
     test_cumulative_ack_repeats_when_enabled();
     test_cumulative_ack_repeat_coalesces_superseded_state();

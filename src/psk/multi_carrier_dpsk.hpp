@@ -629,6 +629,10 @@ public:
         return soft_bits;
     }
 
+    std::vector<float> demodulateDataOnly(SampleSpan data) {
+        return demodulateSoft(data);
+    }
+
 private:
     // Process in IDLE state - look for chirp
     bool processIdle() {

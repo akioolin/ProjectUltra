@@ -58,8 +58,8 @@ public:
     std::vector<float> transmit(const std::string& text);
     std::vector<float> transmit(const Bytes& data);
 
-    // Transmit multiple frames as a single OFDM burst (one LTS preamble)
-    // Used for file transfer and message fragmentation in connected OFDM mode
+    // Transmit multiple frames as a single waveform burst.
+    // Used for connected OFDM and MC-DPSK DATA windows.
     std::vector<float> transmitBurst(const std::vector<Bytes>& frame_data_list);
 
     // Minimal ping/pong probe (fast presence check, ~1 sec vs ~16 sec CONNECT)

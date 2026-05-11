@@ -124,6 +124,13 @@ public:
     void setSackDelayShort(uint32_t ms) { sack_delay_short_ms_ = ms; }
     uint32_t getSackDelayShort() const { return sack_delay_short_ms_; }
 
+    // MC-DPSK continuous bursts decode several DATA frames from one physical
+    // waveform. Once the ACK batch threshold is reached, transmitting a SACK
+    // no longer risks colliding with a per-frame preamble still in flight.
+    // Leave disabled for OFDM streams, where MORE_FRAG is still the guard.
+    void setAckBatchThroughMoreFrag(bool enabled) { ack_batch_through_more_frag_ = enabled; }
+    bool getAckBatchThroughMoreFrag() const { return ack_batch_through_more_frag_; }
+
     // Set max retries before giving up on a frame
     void setMaxRetries(int retries) { config_.max_retries = std::max(1, retries); }
     int getMaxRetries() const { return config_.max_retries; }
@@ -212,6 +219,7 @@ private:
     uint32_t sack_timer_ms_ = 0;    // Time until SACK is sent
     // Stream-aware tail override (0 = "use sack_delay_ms for both legs").
     uint32_t sack_delay_short_ms_ = 0;
+    bool ack_batch_through_more_frag_ = false;
     uint32_t frames_since_ack_ = 0; // Frames received since last ACK sent
 
     // ACK repeat config (time-diversity for fading channels)

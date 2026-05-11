@@ -422,12 +422,14 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
             LOG_MODEM(DEBUG, "SR-ARQ: Duplicate DATA seq=%d", seq);
         }
 
-        // ACK strategy for OFDM burst traffic:
+        // ACK strategy for burst traffic:
         // - Immediate ACK on hole detection (out-of-order) — safety valve, MUST
         //   stay first in the condition.
         // - While MORE_FRAG is set, threshold ACKs stay on the delayed path so
         //   a receiver does not transmit a control frame into the sender's
-        //   still-arriving physical burst.
+        //   still-arriving physical burst. MC-DPSK continuous-burst mode can
+        //   opt out because decoded frames share one physical preamble and
+        //   arrive only as the sample cursor reaches them.
         // - At stream tail, threshold ACKs fire immediately; otherwise the
         //   short delayed timer covers the final partial batch.
         if (new_frame) {
@@ -437,7 +439,8 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
         const uint32_t batch_threshold = arq_policy::effectiveAckBatchThreshold(
             config_.ack_batch_size, config_.window_size);
         const bool batch_threshold_reached = frames_since_ack_ >= batch_threshold;
-        if (out_of_order || (batch_threshold_reached && !frame_more_frag)) {
+        const bool batch_ack_allowed = !frame_more_frag || ack_batch_through_more_frag_;
+        if (out_of_order || (batch_threshold_reached && batch_ack_allowed)) {
             // Bump the trigger-reason counter BEFORE sendSack — out_of_order
             // takes priority because it's the immediate safety valve. Each
             // SACK send increments exactly one trigger counter.

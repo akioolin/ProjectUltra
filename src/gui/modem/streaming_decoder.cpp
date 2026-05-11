@@ -262,6 +262,8 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
             burst_blocks_decoded_ = 0;
             burst_soft_buffer_.clear();
             burst_metric_templates_.clear();
+            mc_burst_pending_frame_ = false;
+            mc_burst_pending_soft_bits_.clear();
             reset_decode_state = true;
         }
 
@@ -376,6 +378,10 @@ void StreamingDecoder::processBuffer() {
         case DecoderState::BURST_ACCUMULATING:
             accumulateBurstFrames();
             break;
+
+        case DecoderState::MCDPSK_BURST_CONTINUING:
+            continueMCDPSKBurst();
+            break;
     }
 }
 
@@ -428,6 +434,8 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     // Clear burst interleave state on mode change
     burst_soft_buffer_.clear();
     burst_metric_templates_.clear();
+    mc_burst_pending_frame_ = false;
+    mc_burst_pending_soft_bits_.clear();
     use_burst_interleave_ = false;  // Re-enabled by caller if needed
 
     // CRITICAL: Reset correlation_pos_ to current write position
@@ -579,6 +587,8 @@ void StreamingDecoder::setConnectedOFDMMode(protocol::WaveformMode mode,
     constellation_cache_time_ = std::chrono::steady_clock::time_point{};
     burst_soft_buffer_.clear();
     burst_metric_templates_.clear();
+    mc_burst_pending_frame_ = false;
+    mc_burst_pending_soft_bits_.clear();
     correlation_pos_ = write_pos_;
     setSearchFloorLocked(total_fed_);
 
@@ -669,7 +679,8 @@ size_t StreamingDecoder::samplesInBuffer() const {
 bool StreamingDecoder::isSynced() const {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
     return state_ == DecoderState::SYNC_FOUND || state_ == DecoderState::DECODING
-        || state_ == DecoderState::BURST_ACCUMULATING;
+        || state_ == DecoderState::BURST_ACCUMULATING
+        || state_ == DecoderState::MCDPSK_BURST_CONTINUING;
 }
 
 void StreamingDecoder::captureConstellationSnapshot() {
@@ -766,6 +777,8 @@ void StreamingDecoder::reset() {
     burst_blocks_decoded_ = 0;
     burst_soft_buffer_.clear();
     burst_metric_templates_.clear();
+    mc_burst_pending_frame_ = false;
+    mc_burst_pending_soft_bits_.clear();
     constellation_cache_.clear();
     constellation_cache_time_ = std::chrono::steady_clock::time_point{};
     use_burst_interleave_ = false;
