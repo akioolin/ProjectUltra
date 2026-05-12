@@ -54,11 +54,36 @@ add_executable(test_ptt_driver
     ../src/ptt/cat_ptt_driver.cpp
     ../src/ptt/ptt_driver_factory.cpp
 )
+if(HAMLIB_FOUND)
+    target_sources(test_ptt_driver PRIVATE
+        ../src/ptt/hamlib_rig_driver.cpp
+        ../src/ptt/hamlib_rig_list.cpp
+    )
+endif()
 target_include_directories(test_ptt_driver PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../src
 )
 target_link_libraries(test_ptt_driver PRIVATE ultra_core)
+ultra_link_hamlib(test_ptt_driver)
 add_test(NAME PttDriver COMMAND test_ptt_driver)
+
+if(HAMLIB_FOUND)
+    add_executable(test_hamlib_rig_driver
+        test_hamlib_rig_driver.cpp
+        ../src/gui/serial_ptt.cpp
+        ../src/ptt/serial_ptt_driver.cpp
+        ../src/ptt/cat_ptt_driver.cpp
+        ../src/ptt/ptt_driver_factory.cpp
+        ../src/ptt/hamlib_rig_driver.cpp
+        ../src/ptt/hamlib_rig_list.cpp
+    )
+    target_include_directories(test_hamlib_rig_driver PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    )
+    target_link_libraries(test_hamlib_rig_driver PRIVATE ultra_core)
+    ultra_link_hamlib(test_hamlib_rig_driver)
+    add_test(NAME HamlibRigDriver COMMAND test_hamlib_rig_driver)
+endif()
 
 add_executable(test_tnc_server test_tnc_server.cpp)
 target_link_libraries(test_tnc_server PRIVATE ultra_core)
@@ -285,6 +310,9 @@ ultra_enable_test_warnings(
     ../src/ptt/serial_ptt_driver.cpp
     ../src/ptt/cat_ptt_driver.cpp
     ../src/ptt/ptt_driver_factory.cpp
+    test_hamlib_rig_driver.cpp
+    ../src/ptt/hamlib_rig_driver.cpp
+    ../src/ptt/hamlib_rig_list.cpp
     test_tnc_server.cpp
     test_diagnostics.cpp
     test_replay.cpp

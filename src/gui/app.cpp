@@ -219,6 +219,16 @@ static size_t boundedCStringLen(const char (&buf)[N]) {
     return term ? static_cast<size_t>(static_cast<const char*>(term) - buf) : N;
 }
 
+static ptt::HamlibPttMethod hamlibPttMethodFromSettings(int method) {
+    switch (method) {
+        case 0: return ptt::HamlibPttMethod::Vox;
+        case 2: return ptt::HamlibPttMethod::DTR;
+        case 3: return ptt::HamlibPttMethod::RTS;
+        case 1:
+        default: return ptt::HamlibPttMethod::Cat;
+    }
+}
+
 static float codeRateValue(CodeRate rate) {
     switch (rate) {
         case CodeRate::R1_4: return 0.25f;
@@ -963,6 +973,9 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
 
     settings_window_.setPttTestCallback([this](const AppSettings& snapshot) {
         return testPtt(snapshot);
+    });
+    settings_window_.setCatTestCallback([this](const AppSettings& snapshot) {
+        return testCat(snapshot);
     });
     ultra::gui::startupTrace("App", "settings-callbacks-exit");
 
@@ -2163,6 +2176,15 @@ ptt::PttConfig App::pttConfigFromSettings(const AppSettings& settings) const {
             port = 4532;
         }
         config.cat_port = static_cast<uint16_t>(port);
+    } else if (mode == GuiPttMode::HamlibBuiltin) {
+        config.mode = ptt::PttMode::HamlibBuiltin;
+        config.hamlib_model_id = settings.ptt_hamlib_model_id > 0
+                                      ? settings.ptt_hamlib_model_id
+                                      : 1;
+        const size_t port_len = boundedCStringLen(settings.ptt_hamlib_port);
+        config.hamlib_rig_port.assign(settings.ptt_hamlib_port, port_len);
+        config.hamlib_baud = settings.ptt_hamlib_baud > 0 ? settings.ptt_hamlib_baud : 9600;
+        config.hamlib_ptt_method = hamlibPttMethodFromSettings(settings.ptt_hamlib_method);
     }
     return config;
 }
@@ -2206,6 +2228,12 @@ bool App::ensurePttReadyLocked(const AppSettings& settings) {
         guiLog("PTT: CAT ready via rigctld %s:%u",
                config.cat_host.c_str(),
                static_cast<unsigned>(config.cat_port));
+    } else if (config.mode == ptt::PttMode::HamlibBuiltin) {
+        guiLog("PTT: Hamlib built-in ready model=%d port=%s baud=%d ptt=%s",
+               config.hamlib_model_id,
+               config.hamlib_rig_port.c_str(),
+               config.hamlib_baud,
+               ptt::hamlibPttMethodName(config.hamlib_ptt_method));
     }
     return true;
 }
@@ -2221,9 +2249,12 @@ void App::updateWaterfallFrequencyDisplay() {
     }
 
     const ptt::PttConfig config = pttConfigFromSettings(settings_);
-    if (config.mode != ptt::PttMode::Cat) {
+    if (config.mode != ptt::PttMode::Cat &&
+        config.mode != ptt::PttMode::HamlibBuiltin) {
         std::lock_guard<std::mutex> lock(ptt_driver_mutex_);
-        if (ptt_config_.mode == ptt::PttMode::Cat && ptt_driver_) {
+        if ((ptt_config_.mode == ptt::PttMode::Cat ||
+             ptt_config_.mode == ptt::PttMode::HamlibBuiltin) &&
+            ptt_driver_) {
             ptt_driver_->close();
             ptt_driver_.reset();
             ptt_config_ = config;
@@ -2337,6 +2368,21 @@ std::string App::testPtt(AppSettings settings) {
     if (!ptt_driver_->testCycle()) {
         std::string error = ptt_driver_->lastError();
         return error.empty() ? "PTT test failed" : error;
+    }
+    return {};
+}
+
+std::string App::testCat(AppSettings settings) {
+    std::lock_guard<std::mutex> lock(ptt_driver_mutex_);
+    if (!ensurePttReadyLocked(settings)) {
+        return ptt_driver_ ? ptt_driver_->lastError() : "CAT driver unavailable";
+    }
+    if (!ptt_driver_) {
+        return {};
+    }
+    if (!ptt_driver_->testCat()) {
+        std::string error = ptt_driver_->lastError();
+        return error.empty() ? "CAT test failed" : error;
     }
     return {};
 }

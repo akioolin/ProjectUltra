@@ -36,6 +36,7 @@ option(ULTRA_BUILD_TESTS "Build test suite" ON)
 option(ULTRA_BUILD_TOOLS "Build command-line tools" ON)
 option(ULTRA_BUILD_GUI "Build GUI application" ON)
 option(ULTRA_BUILD_HARDWARE_TESTS "Register opt-in hardware smoke CTest target" OFF)
+option(ULTRA_USE_LIBHAMLIB "Link libhamlib for built-in rig control" ON)
 
 if(DEFINED ENV{ULTRA_HARDWARE_TESTS} AND "$ENV{ULTRA_HARDWARE_TESTS}" STREQUAL "1")
     set(ULTRA_BUILD_HARDWARE_TESTS ON CACHE BOOL
@@ -68,6 +69,91 @@ endfunction()
 
 # Find dependencies
 find_package(Threads REQUIRED)
+
+if(ULTRA_USE_LIBHAMLIB)
+    if(WIN32)
+        set(HAMLIB_ZIP
+            ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/hamlib-windows/hamlib-w64-4.7.1.zip)
+        set(HAMLIB_EXTRACT_DIR ${CMAKE_BINARY_DIR}/thirdparty/hamlib)
+        set(HAMLIB_ROOT ${HAMLIB_EXTRACT_DIR}/hamlib-w64-4.7.1)
+        if(NOT EXISTS ${HAMLIB_ROOT}/bin/libhamlib-4.dll)
+            if(NOT EXISTS ${HAMLIB_ZIP})
+                message(FATAL_ERROR "Vendored Hamlib zip not found: ${HAMLIB_ZIP}")
+            endif()
+            file(MAKE_DIRECTORY ${HAMLIB_EXTRACT_DIR})
+            execute_process(
+                COMMAND ${CMAKE_COMMAND} -E tar xf ${HAMLIB_ZIP}
+                WORKING_DIRECTORY ${HAMLIB_EXTRACT_DIR}
+                RESULT_VARIABLE _hl_extract_rc
+            )
+            if(NOT _hl_extract_rc EQUAL 0)
+                message(FATAL_ERROR "Failed to extract vendored Hamlib zip")
+            endif()
+        endif()
+
+        if(MSVC)
+            set(HAMLIB_LIB ${HAMLIB_EXTRACT_DIR}/libhamlib-4.lib)
+            if(NOT EXISTS ${HAMLIB_LIB})
+                execute_process(
+                    COMMAND ${CMAKE_AR}
+                            /def:${HAMLIB_ROOT}/lib/msvc/libhamlib-4.def
+                            /machine:x64
+                            /out:${HAMLIB_LIB}
+                    WORKING_DIRECTORY ${HAMLIB_EXTRACT_DIR}
+                    RESULT_VARIABLE _hl_lib_rc
+                )
+                if(NOT _hl_lib_rc EQUAL 0 OR NOT EXISTS ${HAMLIB_LIB})
+                    message(FATAL_ERROR "Failed to generate MSVC Hamlib import library")
+                endif()
+            endif()
+        elseif(MINGW)
+            set(HAMLIB_LIB ${HAMLIB_ROOT}/lib/gcc/libhamlib-4.lib)
+        else()
+            message(FATAL_ERROR "ULTRA_USE_LIBHAMLIB on Windows requires MSVC or MinGW")
+        endif()
+
+        set(HAMLIB_INCLUDE_DIRS ${HAMLIB_ROOT}/include)
+        set(HAMLIB_LIBRARIES ${HAMLIB_LIB})
+        set(HAMLIB_RUNTIME_DLLS
+            ${HAMLIB_ROOT}/bin/libhamlib-4.dll
+            ${HAMLIB_ROOT}/bin/libusb-1.0.dll
+            ${HAMLIB_ROOT}/bin/libgcc_s_seh-1.dll
+            ${HAMLIB_ROOT}/bin/libwinpthread-1.dll
+        )
+        set(HAMLIB_LICENSE_FILE ${HAMLIB_ROOT}/COPYING.LIB.txt)
+        set(HAMLIB_FOUND TRUE)
+    else()
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(HAMLIB REQUIRED IMPORTED_TARGET hamlib)
+        set(HAMLIB_FOUND TRUE)
+    endif()
+endif()
+
+if(HAMLIB_FOUND)
+    add_library(ultra_hamlib INTERFACE)
+    target_compile_definitions(ultra_hamlib INTERFACE ULTRA_HAVE_LIBHAMLIB=1)
+    if(WIN32)
+        target_include_directories(ultra_hamlib INTERFACE ${HAMLIB_INCLUDE_DIRS})
+        target_link_libraries(ultra_hamlib INTERFACE ${HAMLIB_LIBRARIES})
+    else()
+        target_link_libraries(ultra_hamlib INTERFACE PkgConfig::HAMLIB)
+    endif()
+endif()
+
+function(ultra_link_hamlib target_name)
+    if(TARGET ultra_hamlib)
+        target_link_libraries(${target_name} PRIVATE ultra_hamlib)
+        if(WIN32)
+            add_custom_command(TARGET ${target_name} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${HAMLIB_RUNTIME_DLLS}
+                    $<TARGET_FILE_DIR:${target_name}>
+                COMMAND_EXPAND_LISTS
+                VERBATIM
+            )
+        endif()
+    endif()
+endfunction()
 
 execute_process(
     COMMAND git rev-parse --verify HEAD
@@ -251,6 +337,13 @@ set(ULTRA_PTT_SOURCES
     src/ptt/ptt_driver_factory.cpp
 )
 
+if(HAMLIB_FOUND)
+    list(APPEND ULTRA_PTT_SOURCES
+        src/ptt/hamlib_rig_driver.cpp
+        src/ptt/hamlib_rig_list.cpp
+    )
+endif()
+
 set(ULTRA_MODEM_ENGINE_SOURCES
     src/gui/modem/modem_engine.cpp
     src/gui/modem/modem_rx.cpp
@@ -393,6 +486,7 @@ if(ULTRA_BUILD_TOOLS)
             SDL_MAIN_HANDLED
         )
         target_link_libraries(ultra_tnc PRIVATE ultra_core)
+        ultra_link_hamlib(ultra_tnc)
     else()
         message(STATUS "ultra_tnc disabled: SDL2 not found")
     endif()
@@ -480,6 +574,7 @@ if(ULTRA_BUILD_GUI)
             ${SDL2_LIBRARIES}
             ${OPENGL_LIBRARIES}
         )
+        ultra_link_hamlib(ultra_gui)
 
         # Platform-specific settings
         if(APPLE)

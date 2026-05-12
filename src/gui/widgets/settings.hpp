@@ -14,7 +14,8 @@ enum class GuiPttMode {
     None = 0,
     SerialRTS = 1,
     SerialDTR = 2,
-    Cat = 3
+    Cat = 3,
+    HamlibBuiltin = 4
 };
 
 // Settings that persist across sessions
@@ -45,6 +46,11 @@ struct AppSettings {
     bool ptt_invert = false;   // Invert line polarity
     char ptt_cat_host[128] = "127.0.0.1";
     int ptt_cat_port = 4532;
+    int ptt_hamlib_model_id = 1;
+    char ptt_hamlib_model[96] = "Dummy";
+    char ptt_hamlib_port[128] = "";
+    int ptt_hamlib_baud = 9600;
+    int ptt_hamlib_method = 1;  // 0=VOX, 1=CAT, 2=DTR, 3=RTS
 
     // Audio Settings
     char input_device[128] = "Default";   // Selected input device name
@@ -122,6 +128,9 @@ public:
     using PttTestCallback = std::function<std::string(const AppSettings&)>;
     void setPttTestCallback(PttTestCallback cb) { on_ptt_test_ = cb; }
 
+    using CatTestCallback = std::function<std::string(const AppSettings&)>;
+    void setCatTestCallback(CatTestCallback cb) { on_cat_test_ = cb; }
+
 private:
     bool visible_ = false;
     bool was_visible_ = false;  // Track previous frame visibility
@@ -135,11 +144,16 @@ private:
     ReceiveDirChangedCallback on_receive_dir_changed_;
     ExpertSettingsChangedCallback on_expert_settings_changed_;
     PttTestCallback on_ptt_test_;
+    CatTestCallback on_cat_test_;
 
     std::future<std::string> ptt_test_future_;
     std::chrono::steady_clock::time_point ptt_test_deadline_{};
     bool ptt_test_timed_out_ = false;
     std::string ptt_test_status_;
+    std::future<std::string> cat_test_future_;
+    std::chrono::steady_clock::time_point cat_test_deadline_{};
+    bool cat_test_timed_out_ = false;
+    std::string cat_test_status_;
 
     void renderStationTab(AppSettings& settings);
     void renderRadioTab(AppSettings& settings);

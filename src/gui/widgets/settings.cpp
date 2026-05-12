@@ -1,14 +1,23 @@
 #include "settings.hpp"
 #include "imgui.h"
 #include "gui/startup_trace.hpp"
+#ifdef ULTRA_HAVE_LIBHAMLIB
+#include "ptt/hamlib_rig_list.hpp"
+#endif
 #include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <fstream>
 #include <cstdlib>
+#include <filesystem>
+#include <system_error>
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <direct.h>
+#include <windows.h>
 #define MKDIR(path) _mkdir(path)
 #else
 #include <sys/stat.h>
@@ -101,6 +110,7 @@ static GuiPttMode normalizePttMode(int mode) {
         case GuiPttMode::SerialRTS:
         case GuiPttMode::SerialDTR:
         case GuiPttMode::Cat:
+        case GuiPttMode::HamlibBuiltin:
             return static_cast<GuiPttMode>(mode);
         case GuiPttMode::None:
         default:
@@ -113,6 +123,7 @@ static const char* pttModeToConfigString(GuiPttMode mode) {
         case GuiPttMode::SerialRTS: return "serial_rts";
         case GuiPttMode::SerialDTR: return "serial_dtr";
         case GuiPttMode::Cat: return "cat";
+        case GuiPttMode::HamlibBuiltin: return "hamlib_builtin";
         case GuiPttMode::None:
         default: return "none";
     }
@@ -132,6 +143,10 @@ static GuiPttMode parsePttModeString(const std::string& value) {
     if (v == "cat" || v == "hamlib" || v == "rigctld") {
         return GuiPttMode::Cat;
     }
+    if (v == "hamlib_builtin" || v == "hamlib-built-in" || v == "builtin" ||
+        v == "built_in" || v == "direct") {
+        return GuiPttMode::HamlibBuiltin;
+    }
     if (v == "1") {
         return GuiPttMode::SerialRTS;
     }
@@ -141,7 +156,119 @@ static GuiPttMode parsePttModeString(const std::string& value) {
     if (v == "3") {
         return GuiPttMode::Cat;
     }
+    if (v == "4") {
+        return GuiPttMode::HamlibBuiltin;
+    }
     return GuiPttMode::None;
+}
+
+static int normalizeHamlibPttMethod(int method) {
+    if (method < 0 || method > 3) {
+        return 1;
+    }
+    return method;
+}
+
+static const char* hamlibPttMethodToConfigString(int method) {
+    switch (normalizeHamlibPttMethod(method)) {
+        case 0: return "vox";
+        case 1: return "cat";
+        case 2: return "dtr";
+        case 3: return "rts";
+        default: return "cat";
+    }
+}
+
+static int parseHamlibPttMethodString(const std::string& value) {
+    std::string v = value;
+    std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (v == "vox" || v == "0") return 0;
+    if (v == "cat" || v == "rig" || v == "1") return 1;
+    if (v == "dtr" || v == "2") return 2;
+    if (v == "rts" || v == "3") return 3;
+    return 1;
+}
+
+static std::vector<std::string> detectSerialPorts() {
+    std::vector<std::string> ports;
+#ifdef _WIN32
+    // Enumerate the registry path Windows populates with currently-connected
+    // serial devices (USB-serial adapters, built-in UARTs, BT-SPP, etc.).
+    // Each value's data is the friendly device name (e.g. "COM3"). Same
+    // approach WSJT-X / VARA / Fldigi use. Falls back to nothing on failure;
+    // the operator can still type a port name into the text input.
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+                      "HARDWARE\\DEVICEMAP\\SERIALCOMM",
+                      0,
+                      KEY_READ,
+                      &hKey) == ERROR_SUCCESS) {
+        DWORD index = 0;
+        for (;;) {
+            char value_name[256];
+            DWORD value_name_len = sizeof(value_name);
+            DWORD type = 0;
+            BYTE data[256];
+            DWORD data_len = sizeof(data);
+            LONG rc = RegEnumValueA(hKey, index, value_name, &value_name_len,
+                                    nullptr, &type, data, &data_len);
+            if (rc == ERROR_NO_MORE_ITEMS) {
+                break;
+            }
+            if (rc != ERROR_SUCCESS) {
+                break;
+            }
+            if (type == REG_SZ && data_len > 0) {
+                size_t len = data_len;
+                // Strip trailing NUL if present.
+                while (len > 0 && data[len - 1] == '\0') {
+                    --len;
+                }
+                if (len > 0) {
+                    ports.emplace_back(reinterpret_cast<const char*>(data), len);
+                }
+            }
+            ++index;
+        }
+        RegCloseKey(hKey);
+    }
+#else
+    const char* prefixes[] = {
+#ifdef __APPLE__
+        "/dev/cu.",
+        "/dev/tty."
+#else
+        "/dev/ttyUSB",
+        "/dev/ttyACM",
+        "/dev/serial/by-id/"
+#endif
+    };
+
+    for (const char* prefix : prefixes) {
+        std::filesystem::path base(prefix);
+        std::filesystem::path dir = base.parent_path();
+        const std::string stem = base.filename().string();
+        std::error_code ec;
+        if (!std::filesystem::exists(dir, ec)) {
+            continue;
+        }
+        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+            if (ec) {
+                break;
+            }
+            const std::string path = entry.path().string();
+            if (path.rfind(prefix, 0) == 0 ||
+                (!stem.empty() && entry.path().filename().string().rfind(stem, 0) == 0)) {
+                ports.push_back(path);
+            }
+        }
+    }
+#endif
+    std::sort(ports.begin(), ports.end());
+    ports.erase(std::unique(ports.begin(), ports.end()), ports.end());
+    return ports;
 }
 
 // Save settings to INI file
@@ -174,6 +301,11 @@ bool AppSettings::save(const std::string& path) const {
     file << "ptt_invert=" << (ptt_invert ? "1" : "0") << "\n";
     file << "ptt_cat_host=" << ptt_cat_host << "\n";
     file << "ptt_cat_port=" << ptt_cat_port << "\n";
+    file << "ptt_hamlib_model_id=" << ptt_hamlib_model_id << "\n";
+    file << "ptt_hamlib_model=" << ptt_hamlib_model << "\n";
+    file << "ptt_hamlib_port=" << ptt_hamlib_port << "\n";
+    file << "ptt_hamlib_baud=" << ptt_hamlib_baud << "\n";
+    file << "ptt_hamlib_method=" << hamlibPttMethodToConfigString(ptt_hamlib_method) << "\n";
 
     file << "\n[Audio]\n";
     file << "input_device=" << input_device << "\n";
@@ -271,6 +403,22 @@ bool AppSettings::load(const std::string& path) {
             if (ptt_cat_port <= 0 || ptt_cat_port > 65535) {
                 ptt_cat_port = 4532;
             }
+        } else if (key == "ptt_hamlib_model_id") {
+            ptt_hamlib_model_id = std::atoi(value.c_str());
+            if (ptt_hamlib_model_id <= 0) {
+                ptt_hamlib_model_id = 1;
+            }
+        } else if (key == "ptt_hamlib_model") {
+            copyBounded(ptt_hamlib_model, sizeof(ptt_hamlib_model), value);
+        } else if (key == "ptt_hamlib_port") {
+            copyBounded(ptt_hamlib_port, sizeof(ptt_hamlib_port), value);
+        } else if (key == "ptt_hamlib_baud") {
+            ptt_hamlib_baud = std::atoi(value.c_str());
+            if (ptt_hamlib_baud <= 0) {
+                ptt_hamlib_baud = 9600;
+            }
+        } else if (key == "ptt_hamlib_method") {
+            ptt_hamlib_method = parseHamlibPttMethodString(value);
         }
         // Audio settings
         else if (key == "input_device") {
@@ -472,56 +620,107 @@ void SettingsWindow::renderStationTab(AppSettings& settings) {
 
 void SettingsWindow::renderRadioTab(AppSettings& settings) {
     ImGui::Spacing();
-    ImGui::Text("PTT");
+    ImGui::Text("Rig");
     ImGui::Separator();
     ImGui::Spacing();
 
     GuiPttMode mode = normalizePttMode(settings.ptt_mode);
-    int mode_idx = static_cast<int>(mode);
-    const char* modes[] = {
-        "None (VOX/external)",
-        "Serial RTS",
-        "Serial DTR",
-        "Hamlib CAT (rigctld)"
+
+    struct RigBackendOption {
+        GuiPttMode mode;
+        const char* label;
     };
-    ImGui::Text("PTT mode");
-    ImGui::SetNextItemWidth(240);
-    if (ImGui::Combo("##ptt_mode", &mode_idx, modes, 4)) {
-        mode = normalizePttMode(mode_idx);
-        settings.ptt_mode = static_cast<int>(mode);
-        settings.use_cat_ptt = (mode == GuiPttMode::SerialRTS || mode == GuiPttMode::SerialDTR);
-        settings.ptt_serial_line = (mode == GuiPttMode::SerialDTR) ? 0 : 1;
+    const RigBackendOption backends[] = {
+        {GuiPttMode::None, "None (VOX/external)"},
+        {GuiPttMode::Cat, "Hamlib NET rigctl"},
+        {GuiPttMode::HamlibBuiltin, "Hamlib (built-in)"},
+        {GuiPttMode::SerialRTS, "Serial RTS (direct PTT)"},
+        {GuiPttMode::SerialDTR, "Serial DTR (direct PTT)"}
+    };
+
+    const char* backend_label = backends[0].label;
+    for (const auto& option : backends) {
+        if (option.mode == mode) {
+            backend_label = option.label;
+            break;
+        }
+    }
+
+    ImGui::Text("Rig");
+    ImGui::SetNextItemWidth(280);
+    if (ImGui::BeginCombo("##rig_backend", backend_label)) {
+        for (const auto& option : backends) {
+            const bool selected = option.mode == mode;
+            if (ImGui::Selectable(option.label, selected)) {
+                mode = option.mode;
+                settings.ptt_mode = static_cast<int>(mode);
+                settings.use_cat_ptt =
+                    (mode == GuiPttMode::SerialRTS || mode == GuiPttMode::SerialDTR);
+                settings.ptt_serial_line = (mode == GuiPttMode::SerialDTR) ? 0 : 1;
+            }
+            if (selected) {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
     }
 
     const bool serial_mode = mode == GuiPttMode::SerialRTS || mode == GuiPttMode::SerialDTR;
     const bool cat_mode = mode == GuiPttMode::Cat;
+    const bool hamlib_builtin_mode = mode == GuiPttMode::HamlibBuiltin;
 
-    if (serial_mode) {
-        ImGui::Spacing();
-        ImGui::Text("Serial Port");
-        ImGui::SetNextItemWidth(240);
-        if (ImGui::InputText("##ptt_serial_port", settings.ptt_serial_port,
-                             sizeof(settings.ptt_serial_port))) {
-            copyBounded(settings.rig_port, sizeof(settings.rig_port), settings.ptt_serial_port);
-        }
-        ImGui::TextDisabled("Examples: /dev/ttyUSB0, /dev/ttyACM0, COM3");
-
-        ImGui::Spacing();
-        ImGui::Text("Baud Rate");
-        ImGui::SetNextItemWidth(120);
-        const char* bauds[] = { "1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200" };
-        int baud_values[] = { 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200 };
-        int baud_idx = 3;  // 9600 default
-        for (int i = 0; i < 8; ++i) {
-            if (settings.ptt_serial_baud == baud_values[i]) {
+    const char* bauds[] = { "4800", "9600", "19200", "38400", "57600", "115200" };
+    int baud_values[] = { 4800, 9600, 19200, 38400, 57600, 115200 };
+    auto renderBaudCombo = [&](const char* id, int& baud) {
+        int baud_idx = 1;
+        for (int i = 0; i < 6; ++i) {
+            if (baud == baud_values[i]) {
                 baud_idx = i;
                 break;
             }
         }
-        if (ImGui::Combo("##ptt_baud", &baud_idx, bauds, 8)) {
-            settings.ptt_serial_baud = baud_values[baud_idx];
-            settings.rig_baud = settings.ptt_serial_baud;
+        ImGui::SetNextItemWidth(130);
+        if (ImGui::Combo(id, &baud_idx, bauds, 6)) {
+            baud = baud_values[baud_idx];
         }
+    };
+
+    auto renderSerialPortInput = [&](const char* input_id, const char* combo_id,
+                                     char* port, size_t port_size) {
+        ImGui::SetNextItemWidth(280);
+        ImGui::InputText(input_id, port, port_size);
+
+        const std::vector<std::string> ports = detectSerialPorts();
+        if (!ports.empty()) {
+            ImGui::SetNextItemWidth(280);
+            const char* preview = port[0] ? port : "Detected ports";
+            if (ImGui::BeginCombo(combo_id, preview)) {
+                for (const auto& detected : ports) {
+                    const bool selected = detected == port;
+                    if (ImGui::Selectable(detected.c_str(), selected)) {
+                        copyBounded(port, port_size, detected);
+                    }
+                    if (selected) {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+        }
+    };
+
+    if (serial_mode) {
+        ImGui::Spacing();
+        ImGui::Text("Serial Port");
+        renderSerialPortInput("##ptt_serial_port", "##ptt_serial_port_detected",
+                              settings.ptt_serial_port, sizeof(settings.ptt_serial_port));
+        copyBounded(settings.rig_port, sizeof(settings.rig_port), settings.ptt_serial_port);
+        ImGui::TextDisabled("Examples: /dev/ttyUSB0, /dev/ttyACM0, COM3");
+
+        ImGui::Spacing();
+        ImGui::Text("Baud Rate");
+        renderBaudCombo("##ptt_baud", settings.ptt_serial_baud);
+        settings.rig_baud = settings.ptt_serial_baud;
 
         ImGui::Spacing();
         ImGui::Text("PTT Line");
@@ -557,9 +756,77 @@ void SettingsWindow::renderRadioTab(AppSettings& settings) {
         }
     }
 
+    if (hamlib_builtin_mode) {
+        ImGui::Spacing();
+#ifdef ULTRA_HAVE_LIBHAMLIB
+        const auto& rigs = ultra::ptt::cachedHamlibRigList();
+        const ultra::ptt::HamlibRigInfo* selected_rig =
+            ultra::ptt::findHamlibRigByModelId(settings.ptt_hamlib_model_id);
+        std::string rig_preview = selected_rig ? selected_rig->displayName()
+                                               : settings.ptt_hamlib_model;
+        if (rig_preview.empty()) {
+            rig_preview = "Dummy";
+        }
+
+        ImGui::Text("Rig Model");
+        ImGui::SetNextItemWidth(280);
+        if (ImGui::BeginCombo("##hamlib_model", rig_preview.c_str())) {
+            for (const auto& rig : rigs) {
+                const std::string label = rig.displayName() + "##" + std::to_string(rig.model_id);
+                const bool selected = rig.model_id == settings.ptt_hamlib_model_id;
+                if (ImGui::Selectable(label.c_str(), selected)) {
+                    settings.ptt_hamlib_model_id = rig.model_id;
+                    copyBounded(settings.ptt_hamlib_model,
+                                sizeof(settings.ptt_hamlib_model),
+                                rig.displayName());
+                    copyBounded(settings.rig_model, sizeof(settings.rig_model),
+                                rig.displayName());
+                }
+                if (selected) {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+#else
+        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.25f, 1.0f),
+                           "Built-in Hamlib is not enabled in this build");
+#endif
+
+        ImGui::Spacing();
+        ImGui::Text("Serial Port");
+        renderSerialPortInput("##hamlib_port", "##hamlib_port_detected",
+                              settings.ptt_hamlib_port, sizeof(settings.ptt_hamlib_port));
+        ImGui::TextDisabled("Dummy ignores this field; real radios use the CAT serial device.");
+
+        ImGui::Spacing();
+        ImGui::Text("Baud Rate");
+        renderBaudCombo("##hamlib_baud", settings.ptt_hamlib_baud);
+
+        ImGui::Spacing();
+        ImGui::Text("PTT Method");
+        const char* ptt_methods[] = {"VOX", "CAT", "DTR", "RTS"};
+        settings.ptt_hamlib_method = normalizeHamlibPttMethod(settings.ptt_hamlib_method);
+        ImGui::SetNextItemWidth(130);
+        ImGui::Combo("##hamlib_ptt_method", &settings.ptt_hamlib_method, ptt_methods, 4);
+    }
+
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
+
+    if (cat_test_future_.valid()) {
+        if (cat_test_future_.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+            std::string error = cat_test_future_.get();
+            if (!cat_test_timed_out_) {
+                cat_test_status_ = error.empty() ? "OK" : ("Failed: " + error);
+            }
+        } else if (!cat_test_timed_out_ &&
+                   std::chrono::steady_clock::now() >= cat_test_deadline_) {
+            cat_test_timed_out_ = true;
+            cat_test_status_ = "Failed: timed out";
+        }
+    }
 
     if (ptt_test_future_.valid()) {
         if (ptt_test_future_.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
@@ -574,9 +841,41 @@ void SettingsWindow::renderRadioTab(AppSettings& settings) {
         }
     }
 
+    const bool cat_test_running = cat_test_future_.valid();
+    if (cat_test_running || !hamlib_builtin_mode) {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Button("Test CAT", ImVec2(120, 0))) {
+        if (on_cat_test_) {
+            AppSettings snapshot = settings;
+            cat_test_status_ = "Testing...";
+            cat_test_timed_out_ = false;
+            cat_test_deadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            cat_test_future_ = std::async(std::launch::async, [cb = on_cat_test_, snapshot]() {
+                return cb(snapshot);
+            });
+        } else {
+            cat_test_status_ = "Failed: test callback unavailable";
+        }
+    }
+    if (cat_test_running || !hamlib_builtin_mode) {
+        ImGui::EndDisabled();
+    }
+
+    if (!cat_test_status_.empty()) {
+        ImGui::SameLine();
+        const bool ok = cat_test_status_ == "OK";
+        const ImVec4 color = ok ? ImVec4(0.2f, 1.0f, 0.2f, 1.0f)
+                                : ImVec4(1.0f, 0.55f, 0.25f, 1.0f);
+        ImGui::TextColored(color, "%s", cat_test_status_.c_str());
+    }
+
     const bool test_running = ptt_test_future_.valid();
     if (test_running) {
         ImGui::BeginDisabled();
+    }
+    if (hamlib_builtin_mode) {
+        ImGui::SameLine();
     }
     if (ImGui::Button("Test PTT", ImVec2(120, 0))) {
         if (on_ptt_test_) {

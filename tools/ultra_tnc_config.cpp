@@ -145,9 +145,21 @@ void printUsage(std::ostream& out) {
         << "  --ptt-active-high           Override config ptt_inactive_high=true\n"
         << "                              back to default polarity (also: --no-ptt-inactive-high)\n"
         << "  --ptt-cat                   Enable Hamlib rigctld CAT PTT\n"
-        << "                              (mutually exclusive with --ptt-serial-port)\n"
+        << "                              (mutually exclusive with --ptt-serial-port\n"
+        << "                              and --ptt-hamlib)\n"
         << "  --ptt-cat-host <host>       rigctld host (default: 127.0.0.1)\n"
         << "  --ptt-cat-port <N>          rigctld TCP port (default: 4532)\n"
+        << "  --ptt-hamlib                Enable Hamlib (built-in) CAT PTT\n"
+        << "                              (links libhamlib directly; mutually\n"
+        << "                              exclusive with --ptt-serial-port and\n"
+        << "                              --ptt-cat)\n"
+        << "  --ptt-hamlib-model <id>     Hamlib rig model id (default: 1 = Dummy;\n"
+        << "                              e.g. IC-705 ~ 3085, FT-991A ~ 1042)\n"
+        << "  --ptt-hamlib-port <path>    Serial port for the radio (e.g.\n"
+        << "                              /dev/cu.usbserial-FT001 or COM5)\n"
+        << "  --ptt-hamlib-baud <N>       Serial baud (default: 9600)\n"
+        << "  --ptt-hamlib-ptt <m>        PTT method: vox | cat | dtr | rts\n"
+        << "                              (default: cat)\n"
         << "  --log-level <error|warn|info|debug|trace>\n"
         << "                              Console verbosity (default: info)\n"
         << "  --log-category <list>       Comma list: operator,audio,tnc,modem,\n"
@@ -170,6 +182,11 @@ void printUsage(std::ostream& out) {
         << "  ptt_cat = false\n"
         << "  ptt_cat_host = 127.0.0.1\n"
         << "  ptt_cat_port = 4532\n"
+        << "  ptt_hamlib = false\n"
+        << "  ptt_hamlib_model = 1\n"
+        << "  ptt_hamlib_port = /dev/cu.usbserial-FT001\n"
+        << "  ptt_hamlib_baud = 9600\n"
+        << "  ptt_hamlib_ptt = cat\n"
         << "  log_level   = info\n"
         << "\n"
         << "Default config search path: ./ultra_tnc.conf, then\n"
@@ -240,6 +257,18 @@ bool applyConfigKey(const std::string& key, const std::string& value, Config& cf
         uint16_t port = 0;
         if (!parseUint16(value, port) || port == 0) return false;
         cfg.ptt_cat_port = port;
+    } else if (key == "ptt_hamlib" || key == "ptt-hamlib") {
+        if (!parseBoolStrict(value, cfg.ptt_hamlib)) return false;
+    } else if (key == "ptt_hamlib_model" || key == "ptt-hamlib-model") {
+        if (!parsePositiveIntStrict(value, cfg.ptt_hamlib_model, 1, 99999)) return false;
+    } else if (key == "ptt_hamlib_port" || key == "ptt-hamlib-port") {
+        cfg.ptt_hamlib_port = value;
+    } else if (key == "ptt_hamlib_baud" || key == "ptt-hamlib-baud") {
+        if (!parsePositiveIntStrict(value, cfg.ptt_hamlib_baud, 50, 4000000)) return false;
+    } else if (key == "ptt_hamlib_ptt" || key == "ptt-hamlib-ptt") {
+        const std::string m = lower(value);
+        if (m != "vox" && m != "cat" && m != "dtr" && m != "rts") return false;
+        cfg.ptt_hamlib_ptt = m;
     } else if (key == "log_level" || key == "log-level") {
         if (!ultra::parseLogLevel(value, cfg.log_level)) return false;
         cfg.log_level_set = true;
@@ -495,6 +524,33 @@ bool parseArgs(int argc, char** argv, Config& cfg) {
                 return false;
             }
             cfg.ptt_cat_port = port;
+        } else if (arg == "--ptt-hamlib") {
+            cfg.ptt_hamlib = true;
+        } else if (arg == "--ptt-hamlib-model") {
+            auto value = requireValue("--ptt-hamlib-model");
+            if (!value || !parsePositiveIntStrict(*value, cfg.ptt_hamlib_model, 1, 99999)) {
+                std::cerr << "Invalid --ptt-hamlib-model id (must be 1..99999)\n";
+                return false;
+            }
+        } else if (arg == "--ptt-hamlib-port") {
+            auto value = requireValue("--ptt-hamlib-port");
+            if (!value) return false;
+            cfg.ptt_hamlib_port = *value;
+        } else if (arg == "--ptt-hamlib-baud") {
+            auto value = requireValue("--ptt-hamlib-baud");
+            if (!value || !parsePositiveIntStrict(*value, cfg.ptt_hamlib_baud, 50, 4000000)) {
+                std::cerr << "Invalid --ptt-hamlib-baud value (must be 50..4000000)\n";
+                return false;
+            }
+        } else if (arg == "--ptt-hamlib-ptt") {
+            auto value = requireValue("--ptt-hamlib-ptt");
+            if (!value) return false;
+            const std::string m = lower(*value);
+            if (m != "vox" && m != "cat" && m != "dtr" && m != "rts") {
+                std::cerr << "--ptt-hamlib-ptt must be vox|cat|dtr|rts\n";
+                return false;
+            }
+            cfg.ptt_hamlib_ptt = m;
         } else if (arg == "--log-level") {
             auto value = requireValue("--log-level");
             if (!value || !ultra::parseLogLevel(*value, cfg.log_level)) {
@@ -522,9 +578,16 @@ bool parseArgs(int argc, char** argv, Config& cfg) {
             return false;
         }
     }
-    if (cfg.ptt_cat && !cfg.ptt_serial_port.empty()) {
-        std::cerr << "PTT cannot be both serial and CAT; choose one.\n";
-        return false;
+    {
+        int ptt_backends = 0;
+        if (cfg.ptt_cat) ++ptt_backends;
+        if (!cfg.ptt_serial_port.empty()) ++ptt_backends;
+        if (cfg.ptt_hamlib) ++ptt_backends;
+        if (ptt_backends > 1) {
+            std::cerr << "PTT must be exactly one of: serial, --ptt-cat, "
+                         "or --ptt-hamlib (built-in).\n";
+            return false;
+        }
     }
     return true;
 }

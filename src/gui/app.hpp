@@ -249,6 +249,7 @@ private:
     void releasePtt(const char* reason);
     void closePtt();
     std::string testPtt(AppSettings settings);
+    std::string testCat(AppSettings settings);
     void updateWaterfallFrequencyDisplay();
     void sendMessage();
     void onDataReceived(const std::string& text);

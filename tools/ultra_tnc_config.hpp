@@ -41,6 +41,11 @@ struct Config {
     bool ptt_cat = false;
     std::string ptt_cat_host = "127.0.0.1";
     uint16_t ptt_cat_port = 4532;
+    bool ptt_hamlib = false;
+    int ptt_hamlib_model = 1;
+    std::string ptt_hamlib_port;
+    int ptt_hamlib_baud = 9600;
+    std::string ptt_hamlib_ptt = "cat";
     ultra::LogLevel log_level = ultra::LogLevel::INFO;
     bool log_level_set = false;
     std::string log_categories;

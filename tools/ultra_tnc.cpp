@@ -77,7 +77,22 @@ using ultra::tnc::config::lower;
 
 ultra::ptt::PttConfig makePttConfig(const Config& cfg) {
     ultra::ptt::PttConfig ptt;
-    if (cfg.ptt_cat) {
+    if (cfg.ptt_hamlib) {
+        ptt.mode = ultra::ptt::PttMode::HamlibBuiltin;
+        ptt.hamlib_model_id = cfg.ptt_hamlib_model;
+        ptt.hamlib_rig_port = cfg.ptt_hamlib_port;
+        ptt.hamlib_baud = cfg.ptt_hamlib_baud;
+        const std::string m = lower(cfg.ptt_hamlib_ptt);
+        if (m == "vox") {
+            ptt.hamlib_ptt_method = ultra::ptt::HamlibPttMethod::Vox;
+        } else if (m == "dtr") {
+            ptt.hamlib_ptt_method = ultra::ptt::HamlibPttMethod::DTR;
+        } else if (m == "rts") {
+            ptt.hamlib_ptt_method = ultra::ptt::HamlibPttMethod::RTS;
+        } else {
+            ptt.hamlib_ptt_method = ultra::ptt::HamlibPttMethod::Cat;
+        }
+    } else if (cfg.ptt_cat) {
         ptt.mode = ultra::ptt::PttMode::Cat;
         ptt.cat_host = cfg.ptt_cat_host;
         ptt.cat_port = cfg.ptt_cat_port;
@@ -772,6 +787,19 @@ int main(int argc, char** argv) {
                   << cfg.ptt_cat_host << ":" << cfg.ptt_cat_port << "\n";
         LOG_INFO("OPERATOR", "PTT: CAT rigctld %s:%u",
                  cfg.ptt_cat_host.c_str(), static_cast<unsigned>(cfg.ptt_cat_port));
+    } else if (ptt_config.mode == ultra::ptt::PttMode::HamlibBuiltin) {
+        std::cout << "Hardware PTT enabled via Hamlib (built-in) model="
+                  << cfg.ptt_hamlib_model
+                  << (cfg.ptt_hamlib_port.empty() ? ""
+                                                  : (" port=" + cfg.ptt_hamlib_port))
+                  << " baud=" << cfg.ptt_hamlib_baud
+                  << " ptt=" << cfg.ptt_hamlib_ptt << "\n";
+        LOG_INFO("OPERATOR",
+                 "PTT: Hamlib built-in model=%d port=%s baud=%d ptt=%s",
+                 cfg.ptt_hamlib_model,
+                 cfg.ptt_hamlib_port.c_str(),
+                 cfg.ptt_hamlib_baud,
+                 cfg.ptt_hamlib_ptt.c_str());
     } else {
         LOG_INFO("OPERATOR", "PTT: disabled; use VOX or external PTT");
     }
