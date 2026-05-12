@@ -344,7 +344,11 @@ bool HamlibRigDriver::ensureRigOpen() {
 
     const ptt_type_t ptt_type = hamlibPttType(config_.hamlib_ptt_method);
     rig_->state.pttport.type.ptt = ptt_type;
-    rig_->state.ptt_type = ptt_type;
+    // rig_state.ptt_type was added in Hamlib 4.7 as a convenience mirror
+    // of state.pttport.type.ptt; older Linux distros (Ubuntu 24.04 ships
+    // libhamlib 4.5/4.6) don't have it. The canonical assignment above
+    // is what rig_open() reads; rig_state.ptt_type is derived internally
+    // on versions that expose it.
     copyHamlibPath(rig_->state.pttport.pathname, config_.hamlib_rig_port);
     rig_->state.pttport.parm.serial.rate = normalizedBaud(config_.hamlib_baud);
 
