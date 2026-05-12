@@ -2,6 +2,7 @@
 #include "ptt/serial_ptt_driver.hpp"
 #include "tnc/socket_compat.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -246,7 +247,34 @@ public:
         return commands_;
     }
 
+    bool waitForCommand(const std::string& command, size_t count,
+                        std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, timeout, [&] {
+            return commandCountLocked(command) >= count;
+        });
+    }
+
+    size_t commandCount(const std::string& command) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return commandCountLocked(command);
+    }
+
+    void setFrequencyHz(int64_t frequency_hz) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        frequency_hz_ = frequency_hz;
+    }
+
+    void setFrequencyError(bool enabled) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        frequency_error_ = enabled;
+    }
+
 private:
+    size_t commandCountLocked(const std::string& command) const {
+        return static_cast<size_t>(std::count(commands_.begin(), commands_.end(), command));
+    }
+
     void loop() {
         sockaddr_in peer {};
         ultra::tnc::socket_len_t peer_len = sizeof(peer);
@@ -279,6 +307,11 @@ private:
                 std::string response = "RPRT -1\n";
                 if (line == "T 0" || line == "T 1") {
                     response = "RPRT 0\n";
+                } else if (line == "f" || line == "F") {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    response = frequency_error_
+                                   ? "RPRT -1\n"
+                                   : std::to_string(frequency_hz_) + "\n";
                 } else if (line == "t") {
                     response = "0\n";
                 }
@@ -309,6 +342,8 @@ private:
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::vector<std::string> commands_;
+    int64_t frequency_hz_ = 145000000;
+    bool frequency_error_ = false;
     std::string error_;
 };
 
@@ -349,6 +384,109 @@ void test_cat_driver_mock_server() {
     CHECK(commands[0] == "T 0", "CAT open should initialize PTT off");
     CHECK(commands[1] == "T 1", "CAT setKey(On) should send T 1");
     CHECK(commands[2] == "T 0", "CAT setKey(Off) should send T 0");
+
+    driver.close();
+    server.stop();
+    pass(name);
+}
+
+bool waitForDriverFrequency(CatPttDriver& driver, int64_t expected_hz,
+                            std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto frequency = driver.currentFrequencyHz();
+        if (frequency && *frequency == expected_hz) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
+
+void test_cat_driver_frequency_polling() {
+    const char* name = "CatPttDriver: polls rigctld frequency and updates cached state";
+    MockRigctldServer server;
+    server.setFrequencyHz(14070000);
+    if (!server.start()) {
+        if (server.error().find("Operation not permitted") != std::string::npos) {
+            skip(name, "localhost TCP bind is not permitted in this sandbox");
+            return;
+        }
+        CHECK(false, std::string("mock rigctld start failed: ") + server.error());
+    }
+
+    PttConfig config;
+    config.mode = PttMode::Cat;
+    config.cat_host = "127.0.0.1";
+    config.cat_port = server.port();
+    config.cat_frequency_poll_ms = 50;
+
+    CatPttDriver driver(config);
+    CHECK(driver.open(), std::string("CAT driver open failed: ") + driver.lastError());
+    CHECK(server.waitForCommand("f", 1, std::chrono::seconds(2)),
+          "mock rigctld did not receive first f frequency query");
+    CHECK(waitForDriverFrequency(driver, 14070000, std::chrono::seconds(2)),
+          "driver did not cache initial frequency");
+
+    auto state = driver.radioFrequencyState();
+    CHECK(state.connected, "frequency state should report connected");
+    CHECK(state.hz && *state.hz == 14070000, "frequency state should expose cached Hz");
+    CHECK(!state.stale, "fresh frequency poll should not be stale");
+
+    server.setFrequencyHz(7074000);
+    CHECK(server.waitForCommand("f", 2, std::chrono::seconds(2)),
+          "mock rigctld did not receive second f frequency query");
+    CHECK(waitForDriverFrequency(driver, 7074000, std::chrono::seconds(2)),
+          "driver did not update cached frequency after retune");
+
+    driver.close();
+    server.stop();
+    pass(name);
+}
+
+void test_cat_driver_frequency_error_keeps_last_known_stale() {
+    const char* name = "CatPttDriver: get_freq errors keep last-known frequency with stale flag";
+    MockRigctldServer server;
+    server.setFrequencyHz(14070000);
+    if (!server.start()) {
+        if (server.error().find("Operation not permitted") != std::string::npos) {
+            skip(name, "localhost TCP bind is not permitted in this sandbox");
+            return;
+        }
+        CHECK(false, std::string("mock rigctld start failed: ") + server.error());
+    }
+
+    PttConfig config;
+    config.mode = PttMode::Cat;
+    config.cat_host = "127.0.0.1";
+    config.cat_port = server.port();
+    config.cat_frequency_poll_ms = 50;
+
+    CatPttDriver driver(config);
+    CHECK(driver.open(), std::string("CAT driver open failed: ") + driver.lastError());
+    CHECK(waitForDriverFrequency(driver, 14070000, std::chrono::seconds(2)),
+          "driver did not cache initial frequency");
+
+    const size_t f_count = server.commandCount("f");
+    server.setFrequencyError(true);
+    CHECK(server.waitForCommand("f", f_count + 1, std::chrono::seconds(2)),
+          "mock rigctld did not receive f query after error mode enabled");
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    bool saw_stale = false;
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto state = driver.radioFrequencyState();
+        if (state.hz && *state.hz == 14070000 && state.stale) {
+            saw_stale = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(saw_stale, "get_freq error should preserve last frequency and mark it stale");
+
+    const auto current = driver.currentFrequencyHz();
+    CHECK(current && *current == 14070000,
+          "connected driver should keep last-known currentFrequencyHz after F error");
 
     driver.close();
     server.stop();
@@ -569,6 +707,8 @@ int main() {
     test_serial_driver_preserves_rts_active_high_mapping();
     test_serial_driver_preserves_dtr_inverted_mapping();
     test_cat_driver_mock_server();
+    test_cat_driver_frequency_polling();
+    test_cat_driver_frequency_error_keeps_last_known_stale();
     test_cat_driver_hamlib_dummy_if_available();
 
     std::cout << "\nPTT driver tests: " << passed << " passed, "

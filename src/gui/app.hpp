@@ -116,6 +116,7 @@ private:
     std::unique_ptr<ptt::IPttDriver> ptt_driver_;
     ptt::PttConfig ptt_config_;
     std::mutex ptt_driver_mutex_;
+    uint32_t cat_frequency_next_open_attempt_ms_ = 0;
     char remote_callsign_[16] = "";
     std::string pending_incoming_call_;  // Callsign of incoming caller
     uint32_t last_tick_time_ = 0;
@@ -248,6 +249,7 @@ private:
     void releasePtt(const char* reason);
     void closePtt();
     std::string testPtt(AppSettings settings);
+    void updateWaterfallFrequencyDisplay();
     void sendMessage();
     void onDataReceived(const std::string& text);
     void resetAdaptiveAdvisory();

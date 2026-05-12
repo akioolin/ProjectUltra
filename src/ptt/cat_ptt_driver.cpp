@@ -3,6 +3,7 @@
 #include "ultra/logging.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <limits>
@@ -25,6 +26,7 @@ namespace ultra::ptt {
 namespace {
 
 constexpr auto kCommandTimeout = std::chrono::milliseconds(1500);
+constexpr auto kFrequencyCommandTimeout = std::chrono::milliseconds(500);
 constexpr auto kTestCommandWait = std::chrono::milliseconds(2200);
 constexpr size_t kMaxQueueDepth = 4;
 
@@ -33,6 +35,27 @@ std::string trimLine(std::string line) {
         line.pop_back();
     }
     return line;
+}
+
+bool parseFrequencyHz(const std::string& text, int64_t& value) {
+    if (text.empty()) {
+        return false;
+    }
+
+    int64_t parsed = 0;
+    for (char ch : text) {
+        if (!std::isdigit(static_cast<unsigned char>(ch))) {
+            return false;
+        }
+        const int digit = ch - '0';
+        if (parsed > (std::numeric_limits<int64_t>::max() - digit) / 10) {
+            return false;
+        }
+        parsed = parsed * 10 + digit;
+    }
+
+    value = parsed;
+    return true;
 }
 
 int remainingMs(std::chrono::steady_clock::time_point deadline) {
@@ -102,16 +125,14 @@ CatPttDriver::~CatPttDriver() {
 bool CatPttDriver::open() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (running_) {
-        return true;
-    }
-    if (!winsock_.ok()) {
-        last_error_ = "WinSock initialization failed";
-        LOG_ERROR("OPERATOR", "PTT: CAT %s", last_error_.c_str());
+        if (connected_.load(std::memory_order_acquire)) {
+            return true;
+        }
+        last_error_ = "CAT PTT is not connected";
         return false;
     }
-    if (config_.cat_host.empty()) {
-        last_error_ = "rigctld host is empty";
-        LOG_ERROR("OPERATOR", "PTT: CAT %s", last_error_.c_str());
+
+    if (!validateConfigLocked()) {
         return false;
     }
 
@@ -139,6 +160,23 @@ bool CatPttDriver::open() {
     worker_ = std::thread(&CatPttDriver::workerLoop, this);
     LOG_INFO("OPERATOR", "PTT: CAT connected to rigctld %s:%u",
              config_.cat_host.c_str(), static_cast<unsigned>(config_.cat_port));
+    return true;
+}
+
+bool CatPttDriver::startTelemetry() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (running_) {
+        return true;
+    }
+
+    if (!validateConfigLocked()) {
+        return false;
+    }
+
+    running_ = true;
+    reconnect_delay_ms_ = 1000;
+    last_error_.clear();
+    worker_ = std::thread(&CatPttDriver::workerLoop, this);
     return true;
 }
 
@@ -201,6 +239,43 @@ std::string CatPttDriver::lastError() const {
     return last_error_;
 }
 
+std::optional<int64_t> CatPttDriver::currentFrequencyHz() const {
+    if (!connected_.load(std::memory_order_acquire)) {
+        return std::nullopt;
+    }
+
+    std::lock_guard<std::mutex> lock(frequency_mutex_);
+    return frequency_hz_;
+}
+
+CatPttDriver::RadioFrequencyState CatPttDriver::radioFrequencyState() const {
+    RadioFrequencyState state;
+    state.connected = connected_.load(std::memory_order_acquire);
+    {
+        std::lock_guard<std::mutex> lock(frequency_mutex_);
+        state.hz = frequency_hz_;
+        state.stale = frequency_stale_;
+    }
+    if (!state.connected && state.hz) {
+        state.stale = true;
+    }
+    return state;
+}
+
+bool CatPttDriver::validateConfigLocked() {
+    if (!winsock_.ok()) {
+        last_error_ = "WinSock initialization failed";
+        LOG_ERROR("OPERATOR", "PTT: CAT %s", last_error_.c_str());
+        return false;
+    }
+    if (config_.cat_host.empty()) {
+        last_error_ = "rigctld host is empty";
+        LOG_ERROR("OPERATOR", "PTT: CAT %s", last_error_.c_str());
+        return false;
+    }
+    return true;
+}
+
 bool CatPttDriver::enqueue(PttKey state, std::shared_ptr<std::promise<bool>> completion) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -236,84 +311,146 @@ bool CatPttDriver::enqueue(PttKey state, std::shared_ptr<std::promise<bool>> com
 }
 
 void CatPttDriver::workerLoop() {
+    auto next_frequency_poll = std::chrono::steady_clock::now() + frequencyPollInterval();
+
     for (;;) {
         Command cmd;
+        bool have_command = false;
+        bool poll_frequency = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            cv_.wait(lock, [this] {
+            cv_.wait_until(lock, next_frequency_poll, [this] {
                 return !running_ || !queue_.empty();
             });
             if (!running_ && queue_.empty()) {
                 break;
             }
-            cmd = std::move(queue_.front());
-            queue_.pop_front();
-        }
-
-        bool completed = false;
-        while (true) {
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (!running_) {
-                    break;
-                }
-                if (!cmd.completion && !queue_.empty()) {
-                    cmd = std::move(queue_.back());
-                    queue_.clear();
-                }
-            }
-
-            if (ultra::tnc::isInvalidSocket(socket_)) {
-                ConnectResult connected = connectSocket();
-                if (ultra::tnc::isInvalidSocket(connected.socket)) {
-                    setLastError("CAT PTT reconnect failed: " + connected.error);
-                    LOG_ERROR("OPERATOR", "PTT: %s", lastError().c_str());
-                    if (!cmd.completion && waitBeforeReconnect()) {
-                        continue;
-                    }
-                    break;
-                }
-                socket_ = connected.socket;
-                connected_.store(true, std::memory_order_release);
-                {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    reconnect_delay_ms_ = 1000;
-                }
-                LOG_INFO("OPERATOR", "PTT: CAT reconnected to rigctld %s:%u",
-                         config_.cat_host.c_str(), static_cast<unsigned>(config_.cat_port));
-            }
-
-            std::string error;
-            if (sendPttCommand(cmd.state, error)) {
-                if (cmd.completion) {
-                    cmd.completion->set_value(true);
-                }
-                completed = true;
-                break;
-            }
-
-            setLastError(error);
-            LOG_ERROR("OPERATOR", "PTT: CAT %s", error.c_str());
-            closeCurrentSocket();
-
-            if (cmd.completion) {
-                cmd.completion->set_value(false);
-                completed = true;
-                break;
-            }
-
-            if (!waitBeforeReconnect()) {
-                break;
+            if (!queue_.empty()) {
+                cmd = std::move(queue_.front());
+                queue_.pop_front();
+                have_command = true;
+            } else if (std::chrono::steady_clock::now() >= next_frequency_poll) {
+                poll_frequency = true;
+                next_frequency_poll = std::chrono::steady_clock::now() + frequencyPollInterval();
             }
         }
 
-        if (!completed && cmd.completion) {
-            cmd.completion->set_value(false);
+        if (have_command) {
+            handleCommand(std::move(cmd));
+        } else if (poll_frequency) {
+            pollFrequencyOnce();
         }
     }
 
     closeCurrentSocket();
     drainQueued(false);
+}
+
+void CatPttDriver::handleCommand(Command cmd) {
+    bool completed = false;
+    while (true) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!running_) {
+                break;
+            }
+            if (!cmd.completion && !queue_.empty()) {
+                cmd = std::move(queue_.back());
+                queue_.clear();
+            }
+        }
+
+        if (ultra::tnc::isInvalidSocket(socket_)) {
+            ConnectResult connected = connectSocket();
+            if (ultra::tnc::isInvalidSocket(connected.socket)) {
+                setLastError("CAT PTT reconnect failed: " + connected.error);
+                LOG_ERROR("OPERATOR", "PTT: %s", lastError().c_str());
+                if (!cmd.completion && waitBeforeReconnect()) {
+                    continue;
+                }
+                break;
+            }
+            socket_ = connected.socket;
+            connected_.store(true, std::memory_order_release);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                reconnect_delay_ms_ = 1000;
+            }
+            LOG_INFO("OPERATOR", "PTT: CAT reconnected to rigctld %s:%u",
+                     config_.cat_host.c_str(), static_cast<unsigned>(config_.cat_port));
+        }
+
+        std::string error;
+        if (sendPttCommand(cmd.state, error)) {
+            if (cmd.completion) {
+                cmd.completion->set_value(true);
+            }
+            completed = true;
+            break;
+        }
+
+        setLastError(error);
+        LOG_ERROR("OPERATOR", "PTT: CAT %s", error.c_str());
+        closeCurrentSocket();
+
+        if (cmd.completion) {
+            cmd.completion->set_value(false);
+            completed = true;
+            break;
+        }
+
+        if (!waitBeforeReconnect()) {
+            break;
+        }
+    }
+
+    if (!completed && cmd.completion) {
+        cmd.completion->set_value(false);
+    }
+}
+
+void CatPttDriver::pollFrequencyOnce() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!running_ || !queue_.empty()) {
+            return;
+        }
+    }
+
+    if (ultra::tnc::isInvalidSocket(socket_)) {
+        ConnectResult connected = connectSocket();
+        if (ultra::tnc::isInvalidSocket(connected.socket)) {
+            connected_.store(false, std::memory_order_release);
+            markFrequencyStale();
+            return;
+        }
+        socket_ = connected.socket;
+        connected_.store(true, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            reconnect_delay_ms_ = 1000;
+        }
+    }
+
+    int64_t frequency_hz = 0;
+    bool transport_ok = false;
+    std::string error;
+    if (readFrequency(frequency_hz, transport_ok, error)) {
+        setFrequency(frequency_hz);
+        return;
+    }
+
+    markFrequencyStale();
+    if (!transport_ok) {
+        closeCurrentSocket();
+    }
+}
+
+std::chrono::milliseconds CatPttDriver::frequencyPollInterval() const {
+    if (config_.cat_frequency_poll_ms > 0) {
+        return std::chrono::milliseconds(config_.cat_frequency_poll_ms);
+    }
+    return std::chrono::milliseconds(1500);
 }
 
 bool CatPttDriver::waitBeforeReconnect() {
@@ -465,6 +602,32 @@ bool CatPttDriver::sendPttCommand(PttKey state, std::string& error) {
     return false;
 }
 
+bool CatPttDriver::readFrequency(int64_t& frequency_hz, bool& transport_ok,
+                                 std::string& error) {
+    transport_ok = false;
+    const auto deadline = std::chrono::steady_clock::now() + kFrequencyCommandTimeout;
+    // Hamlib rigctld uses lowercase 'f' for get_freq; uppercase 'F' is set_freq.
+    if (!sendAll("f\n", deadline, error)) {
+        return false;
+    }
+
+    std::string line;
+    if (!readLine(line, deadline, error)) {
+        return false;
+    }
+
+    transport_ok = true;
+    const std::string response = trimLine(line);
+    if (response.rfind("RPRT ", 0) == 0) {
+        return false;
+    }
+
+    if (!parseFrequencyHz(response, frequency_hz)) {
+        return false;
+    }
+    return true;
+}
+
 bool CatPttDriver::sendAll(const std::string& command,
                            std::chrono::steady_clock::time_point deadline,
                            std::string& error) {
@@ -568,11 +731,25 @@ void CatPttDriver::closeCurrentSocket() {
         socket_ = ultra::tnc::kInvalidSocket;
     }
     connected_.store(false, std::memory_order_release);
+    markFrequencyStale();
 }
 
 void CatPttDriver::setLastError(std::string error) {
     std::lock_guard<std::mutex> lock(mutex_);
     last_error_ = std::move(error);
+}
+
+void CatPttDriver::setFrequency(int64_t frequency_hz) {
+    std::lock_guard<std::mutex> lock(frequency_mutex_);
+    frequency_hz_ = frequency_hz;
+    frequency_stale_ = false;
+}
+
+void CatPttDriver::markFrequencyStale() {
+    std::lock_guard<std::mutex> lock(frequency_mutex_);
+    if (frequency_hz_) {
+        frequency_stale_ = true;
+    }
 }
 
 } // namespace ultra::ptt

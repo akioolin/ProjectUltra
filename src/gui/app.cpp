@@ -2053,6 +2053,7 @@ void App::render() {
 
         // Waterfall (uses remaining space)
         if (waterfall_) {
+            updateWaterfallFrequencyDisplay();
             waterfall_->render();
         } else {
             ImGui::TextDisabled("Waterfall disabled");
@@ -2214,6 +2215,55 @@ bool App::ensurePttReady() {
     return ensurePttReadyLocked(settings_);
 }
 
+void App::updateWaterfallFrequencyDisplay() {
+    if (!waterfall_) {
+        return;
+    }
+
+    const ptt::PttConfig config = pttConfigFromSettings(settings_);
+    if (config.mode != ptt::PttMode::Cat) {
+        std::lock_guard<std::mutex> lock(ptt_driver_mutex_);
+        if (ptt_config_.mode == ptt::PttMode::Cat && ptt_driver_) {
+            ptt_driver_->close();
+            ptt_driver_.reset();
+            ptt_config_ = config;
+            cat_frequency_next_open_attempt_ms_ = 0;
+        }
+        waterfall_->setRadioFrequency(std::nullopt, false);
+        return;
+    }
+
+    ptt::IPttDriver::RadioFrequencyState frequency;
+    {
+        std::lock_guard<std::mutex> lock(ptt_driver_mutex_);
+        if (!ptt_driver_ || config != ptt_config_) {
+            if (ptt_driver_) {
+                ptt_driver_->close();
+            }
+            ptt_driver_ = ptt::createPttDriver(config);
+            ptt_config_ = config;
+            cat_frequency_next_open_attempt_ms_ = 0;
+        }
+
+        if (ptt_driver_ && !ptt_driver_->isOpen()) {
+            const uint32_t now_ms = SDL_GetTicks();
+            if (now_ms >= cat_frequency_next_open_attempt_ms_) {
+                if (ptt_driver_->startTelemetry()) {
+                    cat_frequency_next_open_attempt_ms_ = 0;
+                } else {
+                    cat_frequency_next_open_attempt_ms_ = now_ms + 5000;
+                }
+            }
+        }
+
+        if (ptt_driver_) {
+            frequency = ptt_driver_->radioFrequencyState();
+        }
+    }
+
+    waterfall_->setRadioFrequency(frequency.hz, frequency.stale);
+}
+
 bool App::setPtt(bool asserted, const char* reason) {
     std::lock_guard<std::mutex> lock(ptt_driver_mutex_);
     if (!ensurePttReadyLocked(settings_)) {
@@ -2273,6 +2323,7 @@ void App::closePtt() {
         ptt_driver_.reset();
     }
     ptt_config_ = ptt::PttConfig{};
+    cat_frequency_next_open_attempt_ms_ = 0;
 }
 
 std::string App::testPtt(AppSettings settings) {

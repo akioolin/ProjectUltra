@@ -2,9 +2,10 @@
 
 #include "ultra/dsp.hpp"
 #include "imgui.h"
-#include <vector>
-#include <mutex>
 #include <cstdint>
+#include <mutex>
+#include <optional>
+#include <vector>
 
 namespace ultra {
 namespace gui {
@@ -31,6 +32,7 @@ public:
     void setFrequencyRange(float min_hz, float max_hz);
     void setDynamicRange(float min_db, float max_db);
     void setPalette(const WaterfallPalette& palette);
+    void setRadioFrequency(std::optional<int64_t> frequency_hz, bool stale);
 
     // Feed audio samples (called from audio thread or main thread)
     void addSamples(const float* samples, size_t count);
@@ -72,6 +74,8 @@ private:
     float max_freq_ = 3000.0f;
     float min_db_ = -80.0f;
     float max_db_ = 0.0f;
+    std::optional<int64_t> radio_frequency_hz_;
+    bool radio_frequency_stale_ = false;
 
     // Color palette
     WaterfallPalette palette_;

@@ -2,7 +2,9 @@
 #include <cmath>
 #include "waterfall.hpp"
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
+#include <string>
 #include "gui/startup_trace.hpp"
 
 // Silence OpenGL deprecation warnings on macOS
@@ -20,6 +22,24 @@
 
 namespace ultra {
 namespace gui {
+namespace {
+
+std::string formatHzWithSeparators(int64_t frequency_hz) {
+    std::string digits = std::to_string(frequency_hz);
+    std::string formatted;
+    formatted.reserve(digits.size() + digits.size() / 3);
+
+    for (size_t i = 0; i < digits.size(); ++i) {
+        const size_t remaining = digits.size() - i;
+        if (i > 0 && remaining % 3 == 0) {
+            formatted.push_back('.');
+        }
+        formatted.push_back(digits[i]);
+    }
+    return formatted;
+}
+
+} // namespace
 
 // --- Palette implementations ---
 
@@ -166,6 +186,11 @@ void WaterfallWidget::setDynamicRange(float min_db, float max_db) {
 void WaterfallWidget::setPalette(const WaterfallPalette& palette) {
     palette_ = palette;
     texture_dirty_ = true;
+}
+
+void WaterfallWidget::setRadioFrequency(std::optional<int64_t> frequency_hz, bool stale) {
+    radio_frequency_hz_ = frequency_hz;
+    radio_frequency_stale_ = stale && radio_frequency_hz_.has_value();
 }
 
 void WaterfallWidget::createWindow() {
@@ -347,7 +372,19 @@ void WaterfallWidget::render() {
     ImGui::BeginGroup();
 
     // Frequency labels
-    ImGui::Text("Waterfall  %.0f - %.0f Hz", min_freq_, max_freq_);
+    if (radio_frequency_hz_) {
+        std::string label = "Freq: " + formatHzWithSeparators(*radio_frequency_hz_) + " Hz";
+        if (radio_frequency_stale_) {
+            label += " (stale)";
+            ImGui::TextDisabled("%s", label.c_str());
+        } else {
+            ImGui::TextColored(ImVec4(0.75f, 0.95f, 1.0f, 1.0f), "%s", label.c_str());
+        }
+    } else {
+        ImGui::TextDisabled("Freq: --");
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("Audio %.0f - %.0f Hz", min_freq_, max_freq_);
 
     if (texture_id_ != 0) {
         ImVec2 avail = ImGui::GetContentRegionAvail();
