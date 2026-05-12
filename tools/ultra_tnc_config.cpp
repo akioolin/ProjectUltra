@@ -144,6 +144,10 @@ void printUsage(std::ostream& out) {
         << "                              inactive=low / asserted=high\n"
         << "  --ptt-active-high           Override config ptt_inactive_high=true\n"
         << "                              back to default polarity (also: --no-ptt-inactive-high)\n"
+        << "  --ptt-cat                   Enable Hamlib rigctld CAT PTT\n"
+        << "                              (mutually exclusive with --ptt-serial-port)\n"
+        << "  --ptt-cat-host <host>       rigctld host (default: 127.0.0.1)\n"
+        << "  --ptt-cat-port <N>          rigctld TCP port (default: 4532)\n"
         << "  --log-level <error|warn|info|debug|trace>\n"
         << "                              Console verbosity (default: info)\n"
         << "  --log-category <list>       Comma list: operator,audio,tnc,modem,\n"
@@ -163,6 +167,9 @@ void printUsage(std::ostream& out) {
         << "  port         = 8300\n"
         << "  ptt_serial_port = /dev/cu.usbserial-FT001\n"
         << "  ptt_serial_line = rts\n"
+        << "  ptt_cat = false\n"
+        << "  ptt_cat_host = 127.0.0.1\n"
+        << "  ptt_cat_port = 4532\n"
         << "  log_level   = info\n"
         << "\n"
         << "Default config search path: ./ultra_tnc.conf, then\n"
@@ -224,6 +231,15 @@ bool applyConfigKey(const std::string& key, const std::string& value, Config& cf
         cfg.ptt_serial_line = line;
     } else if (key == "ptt_inactive_high" || key == "ptt-inactive-high") {
         if (!parseBoolStrict(value, cfg.ptt_inactive_high)) return false;
+    } else if (key == "ptt_cat" || key == "ptt-cat") {
+        if (!parseBoolStrict(value, cfg.ptt_cat)) return false;
+    } else if (key == "ptt_cat_host" || key == "ptt-cat-host") {
+        if (value.empty()) return false;
+        cfg.ptt_cat_host = value;
+    } else if (key == "ptt_cat_port" || key == "ptt-cat-port") {
+        uint16_t port = 0;
+        if (!parseUint16(value, port) || port == 0) return false;
+        cfg.ptt_cat_port = port;
     } else if (key == "log_level" || key == "log-level") {
         if (!ultra::parseLogLevel(value, cfg.log_level)) return false;
         cfg.log_level_set = true;
@@ -462,6 +478,23 @@ bool parseArgs(int argc, char** argv, Config& cfg) {
             cfg.ptt_inactive_high = true;
         } else if (arg == "--ptt-active-high" || arg == "--no-ptt-inactive-high") {
             cfg.ptt_inactive_high = false;
+        } else if (arg == "--ptt-cat") {
+            cfg.ptt_cat = true;
+        } else if (arg == "--ptt-cat-host") {
+            auto value = requireValue("--ptt-cat-host");
+            if (!value || value->empty()) {
+                std::cerr << "Invalid --ptt-cat-host value\n";
+                return false;
+            }
+            cfg.ptt_cat_host = *value;
+        } else if (arg == "--ptt-cat-port") {
+            auto value = requireValue("--ptt-cat-port");
+            uint16_t port = 0;
+            if (!value || !parseUint16(*value, port) || port == 0) {
+                std::cerr << "Invalid --ptt-cat-port value (must be 1..65535)\n";
+                return false;
+            }
+            cfg.ptt_cat_port = port;
         } else if (arg == "--log-level") {
             auto value = requireValue("--log-level");
             if (!value || !ultra::parseLogLevel(*value, cfg.log_level)) {
@@ -488,6 +521,10 @@ bool parseArgs(int argc, char** argv, Config& cfg) {
             std::cerr << "Unknown option: " << arg << "\n";
             return false;
         }
+    }
+    if (cfg.ptt_cat && !cfg.ptt_serial_port.empty()) {
+        std::cerr << "PTT cannot be both serial and CAT; choose one.\n";
+        return false;
     }
     return true;
 }

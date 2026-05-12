@@ -261,6 +261,23 @@ void test_applyConfigKey_ptt_serial_line() {
     pass("applyConfigKey: ptt_serial_line rts/dtr only");
 }
 
+void test_applyConfigKey_ptt_cat_settings() {
+    Config cfg;
+    CHECK(applyConfigKey("ptt_cat", "true", cfg) && cfg.ptt_cat,
+          "ptt_cat=true should enable CAT");
+    CHECK(applyConfigKey("ptt_cat_host", "localhost", cfg),
+          "ptt_cat_host should parse");
+    CHECK(cfg.ptt_cat_host == "localhost", "cat host stored");
+    CHECK(applyConfigKey("ptt_cat_port", "4533", cfg),
+          "ptt_cat_port should parse");
+    CHECK(cfg.ptt_cat_port == 4533, "cat port stored");
+    CHECK(!applyConfigKey("ptt_cat", "maybe", cfg), "bad bool rejected");
+    CHECK(!applyConfigKey("ptt_cat_host", "", cfg), "empty host rejected");
+    CHECK(!applyConfigKey("ptt_cat_port", "0", cfg), "port 0 rejected");
+    CHECK(!applyConfigKey("ptt_cat_port", "65536", cfg), "port >65535 rejected");
+    pass("applyConfigKey: ptt_cat/host/port parsed strictly");
+}
+
 void test_applyConfigKey_unknown_key_rejected() {
     Config cfg;
     CHECK(!applyConfigKey("nonsense_field", "x", cfg), "unknown key rejected");
@@ -429,6 +446,37 @@ void test_parseArgs_no_ptt_inactive_high_alias() {
     pass("parseArgs: --no-ptt-inactive-high alias works");
 }
 
+void test_parseArgs_ptt_cat_flags() {
+    Argv argv({"ultra_tnc", "--ptt-cat", "--ptt-cat-host", "127.0.0.1",
+               "--ptt-cat-port", "4532"});
+    Config cfg;
+    CHECK(parseArgs(argv.argc(), argv.data(), cfg), "parse ok");
+    CHECK(cfg.ptt_cat, "--ptt-cat stored");
+    CHECK(cfg.ptt_cat_host == "127.0.0.1", "cat host stored");
+    CHECK(cfg.ptt_cat_port == 4532, "cat port stored");
+    pass("parseArgs: --ptt-cat host/port flags stored");
+}
+
+void test_parseArgs_ptt_cat_serial_mutual_exclusion() {
+    Argv argv({"ultra_tnc", "--ptt-cat", "--ptt-serial-port", "/dev/ttyUSB0"});
+    Config cfg;
+    CHECK(!parseArgs(argv.argc(), argv.data(), cfg),
+          "CAT and serial PTT must be mutually exclusive");
+    pass("parseArgs: CAT and serial PTT mutual exclusion enforced");
+}
+
+void test_parseArgs_ptt_cat_serial_mutual_exclusion_from_config() {
+    TempFile cfg_file(
+        "ptt_cat = true\n"
+        "ptt_serial_port = /dev/ttyUSB0\n"
+    );
+    Argv argv({"ultra_tnc", "--config", cfg_file.str().c_str()});
+    Config cfg;
+    CHECK(!parseArgs(argv.argc(), argv.data(), cfg),
+          "config CAT and serial PTT must be mutually exclusive");
+    pass("parseArgs: config CAT/serial mutual exclusion enforced");
+}
+
 void test_parseArgs_log_flags() {
     Argv argv({"ultra_tnc", "--log-level", "trace",
                "--log-category", "operator,demod",
@@ -512,6 +560,7 @@ int main() {
     test_applyConfigKey_ptt_baud_strict();
     test_applyConfigKey_ptt_inactive_high_strict();
     test_applyConfigKey_ptt_serial_line();
+    test_applyConfigKey_ptt_cat_settings();
     test_applyConfigKey_unknown_key_rejected();
     test_applyConfigKey_ofdm_config();
     test_applyConfigKey_log_settings();
@@ -532,6 +581,9 @@ int main() {
     test_parseArgs_no_inject_channel_overrides_config_true();
     test_parseArgs_ptt_active_high_overrides_config_true();
     test_parseArgs_no_ptt_inactive_high_alias();
+    test_parseArgs_ptt_cat_flags();
+    test_parseArgs_ptt_cat_serial_mutual_exclusion();
+    test_parseArgs_ptt_cat_serial_mutual_exclusion_from_config();
     test_parseArgs_log_flags();
     test_parseArgs_mod_qam16_requires_expert();
     test_parseArgs_mod_qam16_with_expert();

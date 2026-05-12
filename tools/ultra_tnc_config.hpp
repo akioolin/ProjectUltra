@@ -38,6 +38,9 @@ struct Config {
     int ptt_serial_baud = 9600;
     std::string ptt_serial_line = "rts";
     bool ptt_inactive_high = false;
+    bool ptt_cat = false;
+    std::string ptt_cat_host = "127.0.0.1";
+    uint16_t ptt_cat_port = 4532;
     ultra::LogLevel log_level = ultra::LogLevel::INFO;
     bool log_level_set = false;
     std::string log_categories;

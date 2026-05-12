@@ -22,13 +22,19 @@ audio_input  = USB Audio CODEC
 port         = 8300            # cmd port; data port = port + 1
 bind         = 127.0.0.1       # 0.0.0.0 to accept LAN clients
 
-# --- Hardware PTT (optional; otherwise use VOX or rigctl on the client) ---
+# --- Hardware PTT (optional; otherwise use VOX or external PTT) ---
+# Serial control-line PTT:
 # ptt_serial_port  = /dev/cu.usbserial-FT001   # Mac
 # ptt_serial_port  = /dev/ttyUSB0              # Linux / Pi
 # ptt_serial_port  = COM3                      # Windows
 # ptt_serial_baud  = 9600
 # ptt_serial_line  = rts                       # rts (default) or dtr
 # ptt_inactive_high = false                    # invert if your radio needs it
+#
+# Hamlib rigctld CAT PTT (mutually exclusive with ptt_serial_port):
+# ptt_cat       = false
+# ptt_cat_host  = 127.0.0.1
+# ptt_cat_port  = 4532
 
 # --- Modem PHY tuning (advanced; defaults are good for most users) ---
 # rate        = auto                            # auto | r1_4 | r1_2 | r2_3 | r3_4

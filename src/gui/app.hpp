@@ -8,8 +8,8 @@
 #include "widgets/waterfall.hpp"
 #include "widgets/file_browser.hpp"
 #include "audio_engine.hpp"
-#include "serial_ptt.hpp"
 #include "modem/modem_engine.hpp"
+#include "ptt/ptt_driver.hpp"
 #include "protocol/protocol_engine.hpp"
 #include "sim/hf_channel.hpp"
 
@@ -113,7 +113,9 @@ private:
 
     // ARQ Protocol state
     protocol::ProtocolEngine protocol_;
-    SerialPttController serial_ptt_;
+    std::unique_ptr<ptt::IPttDriver> ptt_driver_;
+    ptt::PttConfig ptt_config_;
+    std::mutex ptt_driver_mutex_;
     char remote_callsign_[16] = "";
     std::string pending_incoming_call_;  // Callsign of incoming caller
     uint32_t last_tick_time_ = 0;
@@ -239,10 +241,13 @@ private:
     void clearRxLog();
     void stopTxNow(const char* reason);
     bool queueRealTxSamples(const std::vector<float>& samples, const char* context);
-    bool ensureSerialPttReady();
-    bool setSerialPtt(bool asserted, const char* reason);
-    void releaseSerialPtt(const char* reason);
-    void closeSerialPtt();
+    ptt::PttConfig pttConfigFromSettings(const AppSettings& settings) const;
+    bool ensurePttReadyLocked(const AppSettings& settings);
+    bool ensurePttReady();
+    bool setPtt(bool asserted, const char* reason);
+    void releasePtt(const char* reason);
+    void closePtt();
+    std::string testPtt(AppSettings settings);
     void sendMessage();
     void onDataReceived(const std::string& text);
     void resetAdaptiveAdvisory();

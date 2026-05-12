@@ -2,6 +2,7 @@
 #include "imgui.h"
 #include "gui/startup_trace.hpp"
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <cstdlib>
@@ -95,6 +96,54 @@ static size_t boundedCStringLen(const char (&buf)[N]) {
     return term ? static_cast<size_t>(static_cast<const char*>(term) - buf) : N;
 }
 
+static GuiPttMode normalizePttMode(int mode) {
+    switch (static_cast<GuiPttMode>(mode)) {
+        case GuiPttMode::SerialRTS:
+        case GuiPttMode::SerialDTR:
+        case GuiPttMode::Cat:
+            return static_cast<GuiPttMode>(mode);
+        case GuiPttMode::None:
+        default:
+            return GuiPttMode::None;
+    }
+}
+
+static const char* pttModeToConfigString(GuiPttMode mode) {
+    switch (mode) {
+        case GuiPttMode::SerialRTS: return "serial_rts";
+        case GuiPttMode::SerialDTR: return "serial_dtr";
+        case GuiPttMode::Cat: return "cat";
+        case GuiPttMode::None:
+        default: return "none";
+    }
+}
+
+static GuiPttMode parsePttModeString(const std::string& value) {
+    std::string v = value;
+    std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (v == "serial_rts" || v == "serial-rts" || v == "rts") {
+        return GuiPttMode::SerialRTS;
+    }
+    if (v == "serial_dtr" || v == "serial-dtr" || v == "dtr") {
+        return GuiPttMode::SerialDTR;
+    }
+    if (v == "cat" || v == "hamlib" || v == "rigctld") {
+        return GuiPttMode::Cat;
+    }
+    if (v == "1") {
+        return GuiPttMode::SerialRTS;
+    }
+    if (v == "2") {
+        return GuiPttMode::SerialDTR;
+    }
+    if (v == "3") {
+        return GuiPttMode::Cat;
+    }
+    return GuiPttMode::None;
+}
+
 // Save settings to INI file
 bool AppSettings::save(const std::string& path) const {
     std::string filepath = path.empty() ? getDefaultPath() : path;
@@ -111,12 +160,20 @@ bool AppSettings::save(const std::string& path) const {
     file << "name=" << name << "\n";
 
     file << "\n[Radio]\n";
+    const GuiPttMode mode = normalizePttMode(ptt_mode);
+    const bool serial_ptt = mode == GuiPttMode::SerialRTS || mode == GuiPttMode::SerialDTR;
+    const int legacy_line = mode == GuiPttMode::SerialDTR ? 0 : 1;
     file << "rig_model=" << rig_model << "\n";
-    file << "rig_port=" << rig_port << "\n";
-    file << "rig_baud=" << rig_baud << "\n";
-    file << "use_cat_ptt=" << (use_cat_ptt ? "1" : "0") << "\n";
-    file << "ptt_serial_line=" << ptt_serial_line << "\n";
+    file << "rig_port=" << ptt_serial_port << "\n";
+    file << "rig_baud=" << ptt_serial_baud << "\n";
+    file << "use_cat_ptt=" << (serial_ptt ? "1" : "0") << "\n";
+    file << "ptt_serial_line=" << legacy_line << "\n";
+    file << "ptt_mode=" << pttModeToConfigString(mode) << "\n";
+    file << "ptt_serial_port=" << ptt_serial_port << "\n";
+    file << "ptt_serial_baud=" << ptt_serial_baud << "\n";
     file << "ptt_invert=" << (ptt_invert ? "1" : "0") << "\n";
+    file << "ptt_cat_host=" << ptt_cat_host << "\n";
+    file << "ptt_cat_port=" << ptt_cat_port << "\n";
 
     file << "\n[Audio]\n";
     file << "input_device=" << input_device << "\n";
@@ -152,6 +209,7 @@ bool AppSettings::load(const std::string& path) {
     }
 
     std::string line;
+    bool ptt_mode_seen = false;
     while (std::getline(file, line)) {
         // Skip empty lines and comments
         if (line.empty() || line[0] == '#' || line[0] == '[') {
@@ -177,8 +235,14 @@ bool AppSettings::load(const std::string& path) {
             copyBounded(rig_model, sizeof(rig_model), value);
         } else if (key == "rig_port") {
             copyBounded(rig_port, sizeof(rig_port), value);
+            if (ptt_serial_port[0] == '\0') {
+                copyBounded(ptt_serial_port, sizeof(ptt_serial_port), value);
+            }
         } else if (key == "rig_baud") {
             rig_baud = std::atoi(value.c_str());
+            if (rig_baud > 0) {
+                ptt_serial_baud = rig_baud;
+            }
         } else if (key == "use_cat_ptt") {
             use_cat_ptt = (value == "1" || value == "true");
         } else if (key == "ptt_serial_line") {
@@ -186,8 +250,27 @@ bool AppSettings::load(const std::string& path) {
             if (ptt_serial_line < 0 || ptt_serial_line > 1) {
                 ptt_serial_line = 0;
             }
+        } else if (key == "ptt_mode") {
+            ptt_mode = static_cast<int>(parsePttModeString(value));
+            ptt_mode_seen = true;
+        } else if (key == "ptt_serial_port") {
+            copyBounded(ptt_serial_port, sizeof(ptt_serial_port), value);
+            copyBounded(rig_port, sizeof(rig_port), value);
+        } else if (key == "ptt_serial_baud") {
+            ptt_serial_baud = std::atoi(value.c_str());
+            if (ptt_serial_baud <= 0) {
+                ptt_serial_baud = 9600;
+            }
+            rig_baud = ptt_serial_baud;
         } else if (key == "ptt_invert") {
             ptt_invert = (value == "1" || value == "true");
+        } else if (key == "ptt_cat_host") {
+            copyBounded(ptt_cat_host, sizeof(ptt_cat_host), value);
+        } else if (key == "ptt_cat_port") {
+            ptt_cat_port = std::atoi(value.c_str());
+            if (ptt_cat_port <= 0 || ptt_cat_port > 65535) {
+                ptt_cat_port = 4532;
+            }
         }
         // Audio settings
         else if (key == "input_device") {
@@ -223,6 +306,12 @@ bool AppSettings::load(const std::string& path) {
         } else if (key == "forced_code_rate") {
             forced_code_rate = static_cast<uint8_t>(std::atoi(value.c_str()));
         }
+    }
+
+    if (!ptt_mode_seen && use_cat_ptt) {
+        ptt_mode = (ptt_serial_line == 0)
+                       ? static_cast<int>(GuiPttMode::SerialDTR)
+                       : static_cast<int>(GuiPttMode::SerialRTS);
     }
 
     return true;
@@ -383,48 +472,136 @@ void SettingsWindow::renderStationTab(AppSettings& settings) {
 
 void SettingsWindow::renderRadioTab(AppSettings& settings) {
     ImGui::Spacing();
-    ImGui::Text("Radio PTT");
+    ImGui::Text("PTT");
     ImGui::Separator();
     ImGui::Spacing();
 
-    ImGui::Checkbox("Enable Serial PTT (DTR/RTS)", &settings.use_cat_ptt);
-    ImGui::TextDisabled("Keys TX from serial control line; no CAT command protocol needed.");
-
-    ImGui::Spacing();
-    ImGui::Text("Serial Port");
+    GuiPttMode mode = normalizePttMode(settings.ptt_mode);
+    int mode_idx = static_cast<int>(mode);
+    const char* modes[] = {
+        "None (VOX/external)",
+        "Serial RTS",
+        "Serial DTR",
+        "Hamlib CAT (rigctld)"
+    };
+    ImGui::Text("PTT mode");
     ImGui::SetNextItemWidth(240);
-    ImGui::InputText("##rig_port", settings.rig_port, sizeof(settings.rig_port));
-    ImGui::TextDisabled("Examples: /dev/ttyUSB0, /dev/ttyACM0, COM3");
+    if (ImGui::Combo("##ptt_mode", &mode_idx, modes, 4)) {
+        mode = normalizePttMode(mode_idx);
+        settings.ptt_mode = static_cast<int>(mode);
+        settings.use_cat_ptt = (mode == GuiPttMode::SerialRTS || mode == GuiPttMode::SerialDTR);
+        settings.ptt_serial_line = (mode == GuiPttMode::SerialDTR) ? 0 : 1;
+    }
 
-    ImGui::Spacing();
-    ImGui::Text("Baud Rate");
-    ImGui::SetNextItemWidth(120);
-    const char* bauds[] = { "1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200" };
-    int baud_values[] = { 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200 };
-    int baud_idx = 3;  // 9600 default
-    for (int i = 0; i < 8; ++i) {
-        if (settings.rig_baud == baud_values[i]) {
-            baud_idx = i;
-            break;
+    const bool serial_mode = mode == GuiPttMode::SerialRTS || mode == GuiPttMode::SerialDTR;
+    const bool cat_mode = mode == GuiPttMode::Cat;
+
+    if (serial_mode) {
+        ImGui::Spacing();
+        ImGui::Text("Serial Port");
+        ImGui::SetNextItemWidth(240);
+        if (ImGui::InputText("##ptt_serial_port", settings.ptt_serial_port,
+                             sizeof(settings.ptt_serial_port))) {
+            copyBounded(settings.rig_port, sizeof(settings.rig_port), settings.ptt_serial_port);
+        }
+        ImGui::TextDisabled("Examples: /dev/ttyUSB0, /dev/ttyACM0, COM3");
+
+        ImGui::Spacing();
+        ImGui::Text("Baud Rate");
+        ImGui::SetNextItemWidth(120);
+        const char* bauds[] = { "1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200" };
+        int baud_values[] = { 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200 };
+        int baud_idx = 3;  // 9600 default
+        for (int i = 0; i < 8; ++i) {
+            if (settings.ptt_serial_baud == baud_values[i]) {
+                baud_idx = i;
+                break;
+            }
+        }
+        if (ImGui::Combo("##ptt_baud", &baud_idx, bauds, 8)) {
+            settings.ptt_serial_baud = baud_values[baud_idx];
+            settings.rig_baud = settings.ptt_serial_baud;
+        }
+
+        ImGui::Spacing();
+        ImGui::Text("PTT Line");
+        ImGui::SetNextItemWidth(120);
+        const char* ptt_lines[] = {"DTR", "RTS"};
+        int line_idx = (mode == GuiPttMode::SerialRTS) ? 1 : 0;
+        if (ImGui::Combo("##ptt_line", &line_idx, ptt_lines, 2)) {
+            mode = (line_idx == 1) ? GuiPttMode::SerialRTS : GuiPttMode::SerialDTR;
+            settings.ptt_mode = static_cast<int>(mode);
+            settings.ptt_serial_line = line_idx;
+        }
+
+        ImGui::Checkbox("Invert PTT polarity", &settings.ptt_invert);
+
+        ImGui::Spacing();
+        ImGui::TextDisabled("Rig side: set USB SEND to matching line (DTR or RTS).");
+    }
+
+    if (cat_mode) {
+        ImGui::Spacing();
+        ImGui::Text("rigctld Host");
+        ImGui::SetNextItemWidth(220);
+        ImGui::InputText("##ptt_cat_host", settings.ptt_cat_host, sizeof(settings.ptt_cat_host));
+
+        ImGui::Spacing();
+        ImGui::Text("rigctld Port");
+        ImGui::SetNextItemWidth(120);
+        ImGui::InputInt("##ptt_cat_port", &settings.ptt_cat_port, 1, 100);
+        if (settings.ptt_cat_port < 1) {
+            settings.ptt_cat_port = 1;
+        } else if (settings.ptt_cat_port > 65535) {
+            settings.ptt_cat_port = 65535;
         }
     }
-    if (ImGui::Combo("##baud", &baud_idx, bauds, 8)) {
-        settings.rig_baud = baud_values[baud_idx];
-    }
 
     ImGui::Spacing();
-    ImGui::Text("PTT Line");
-    ImGui::SetNextItemWidth(120);
-    const char* ptt_lines[] = {"DTR", "RTS"};
-    int line_idx = (settings.ptt_serial_line == 1) ? 1 : 0;
-    if (ImGui::Combo("##ptt_line", &line_idx, ptt_lines, 2)) {
-        settings.ptt_serial_line = line_idx;
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    if (ptt_test_future_.valid()) {
+        if (ptt_test_future_.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+            std::string error = ptt_test_future_.get();
+            if (!ptt_test_timed_out_) {
+                ptt_test_status_ = error.empty() ? "OK" : ("Failed: " + error);
+            }
+        } else if (!ptt_test_timed_out_ &&
+                   std::chrono::steady_clock::now() >= ptt_test_deadline_) {
+            ptt_test_timed_out_ = true;
+            ptt_test_status_ = "Failed: timed out";
+        }
     }
 
-    ImGui::Checkbox("Invert PTT polarity", &settings.ptt_invert);
+    const bool test_running = ptt_test_future_.valid();
+    if (test_running) {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Button("Test PTT", ImVec2(120, 0))) {
+        if (on_ptt_test_) {
+            AppSettings snapshot = settings;
+            ptt_test_status_ = "Testing...";
+            ptt_test_timed_out_ = false;
+            ptt_test_deadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            ptt_test_future_ = std::async(std::launch::async, [cb = on_ptt_test_, snapshot]() {
+                return cb(snapshot);
+            });
+        } else {
+            ptt_test_status_ = "Failed: test callback unavailable";
+        }
+    }
+    if (test_running) {
+        ImGui::EndDisabled();
+    }
 
-    ImGui::Spacing();
-    ImGui::TextDisabled("Rig side: set USB SEND to matching line (DTR or RTS).");
+    if (!ptt_test_status_.empty()) {
+        ImGui::SameLine();
+        const bool ok = ptt_test_status_ == "OK";
+        const ImVec4 color = ok ? ImVec4(0.2f, 1.0f, 0.2f, 1.0f)
+                                : ImVec4(1.0f, 0.55f, 0.25f, 1.0f);
+        ImGui::TextColored(color, "%s", ptt_test_status_.c_str());
+    }
 }
 
 void SettingsWindow::renderAudioTab(AppSettings& settings) {

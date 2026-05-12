@@ -1,12 +1,21 @@
 #pragma once
 
 #include <cstdint>
+#include <chrono>
 #include <string>
 #include <vector>
 #include <functional>
+#include <future>
 
 namespace ultra {
 namespace gui {
+
+enum class GuiPttMode {
+    None = 0,
+    SerialRTS = 1,
+    SerialDTR = 2,
+    Cat = 3
+};
 
 // Settings that persist across sessions
 struct AppSettings {
@@ -24,13 +33,18 @@ struct AppSettings {
     char grid_square[8] = "";      // Maidenhead locator
     char name[32] = "";
 
-    // Radio Settings (for future Hamlib integration)
+    // Radio/PTT settings
     char rig_model[32] = "None";
-    char rig_port[64] = "";
-    int rig_baud = 9600;
-    bool use_cat_ptt = false;  // Enable serial PTT (DTR/RTS)
-    int ptt_serial_line = 0;   // 0=DTR, 1=RTS
+    char rig_port[64] = "";    // Legacy serial-PTT key, migrated to ptt_serial_port
+    int rig_baud = 9600;       // Legacy serial-PTT key, migrated to ptt_serial_baud
+    bool use_cat_ptt = false;  // Legacy: meant serial DTR/RTS PTT before CAT existed
+    int ptt_serial_line = 1;   // Legacy: 0=DTR, 1=RTS
+    int ptt_mode = static_cast<int>(GuiPttMode::None);
+    char ptt_serial_port[64] = "";
+    int ptt_serial_baud = 9600;
     bool ptt_invert = false;   // Invert line polarity
+    char ptt_cat_host[128] = "127.0.0.1";
+    int ptt_cat_port = 4532;
 
     // Audio Settings
     char input_device[128] = "Default";   // Selected input device name
@@ -103,6 +117,11 @@ public:
     using ExpertSettingsChangedCallback = std::function<void(uint8_t waveform, uint8_t modulation, uint8_t code_rate)>;
     void setExpertSettingsChangedCallback(ExpertSettingsChangedCallback cb) { on_expert_settings_changed_ = cb; }
 
+    // Callback for the Radio tab "Test PTT" button. Returns empty string on
+    // success or an operator-facing error on failure.
+    using PttTestCallback = std::function<std::string(const AppSettings&)>;
+    void setPttTestCallback(PttTestCallback cb) { on_ptt_test_ = cb; }
+
 private:
     bool visible_ = false;
     bool was_visible_ = false;  // Track previous frame visibility
@@ -115,6 +134,12 @@ private:
     FilterChangedCallback on_filter_changed_;
     ReceiveDirChangedCallback on_receive_dir_changed_;
     ExpertSettingsChangedCallback on_expert_settings_changed_;
+    PttTestCallback on_ptt_test_;
+
+    std::future<std::string> ptt_test_future_;
+    std::chrono::steady_clock::time_point ptt_test_deadline_{};
+    bool ptt_test_timed_out_ = false;
+    std::string ptt_test_status_;
 
     void renderStationTab(AppSettings& settings);
     void renderRadioTab(AppSettings& settings);

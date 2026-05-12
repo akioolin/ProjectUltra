@@ -2,7 +2,7 @@
 #include "diagnostics/diagnostics_recorder.hpp"
 #include "gui/modem/streaming_decoder.hpp"
 #include "gui/modem/streaming_encoder.hpp"
-#include "gui/serial_ptt.hpp"
+#include "ptt/ptt_driver_factory.hpp"
 #include "psk/multi_carrier_dpsk.hpp"
 #include "protocol/frame_v2.hpp"
 #include "protocol/protocol_engine.hpp"
@@ -74,6 +74,24 @@ using OFDMConfigPreset = ultra::tnc::config::OFDMConfigPreset;
 using Config = ultra::tnc::config::Config;
 using ultra::tnc::config::isNoneDevice;
 using ultra::tnc::config::lower;
+
+ultra::ptt::PttConfig makePttConfig(const Config& cfg) {
+    ultra::ptt::PttConfig ptt;
+    if (cfg.ptt_cat) {
+        ptt.mode = ultra::ptt::PttMode::Cat;
+        ptt.cat_host = cfg.ptt_cat_host;
+        ptt.cat_port = cfg.ptt_cat_port;
+    } else if (!cfg.ptt_serial_port.empty()) {
+        ptt.mode = ultra::ptt::PttMode::Serial;
+        ptt.serial_port = cfg.ptt_serial_port;
+        ptt.serial_baud = cfg.ptt_serial_baud;
+        ptt.serial_line = (lower(cfg.ptt_serial_line) == "dtr")
+                              ? ultra::ptt::SerialLine::DTR
+                              : ultra::ptt::SerialLine::RTS;
+        ptt.serial_inactive_high = cfg.ptt_inactive_high;
+    }
+    return ptt;
+}
 
 std::string audioDeviceLabel(const std::string& device) {
     return (device.empty() || lower(device) == "default") ? "Default" : device;
@@ -721,42 +739,26 @@ int main(int argc, char** argv) {
              ultra::kBuildReleaseTag[0] ? ultra::kBuildReleaseTag : "none",
              ultra::kBuildTimeUtc, ultra::kBuildOS);
 
-    // Hardware PTT via serial line. When the user supplies --ptt-serial-port,
-    // open the serial controller and toggle RTS/DTR on each PTT transition.
-    // No-op if the port is empty (relies on VOX or external CAT).
-    ultra::gui::SerialPttController serial_ptt;
-    if (!cfg.ptt_serial_port.empty()) {
-        if (!serial_ptt.open(cfg.ptt_serial_port, cfg.ptt_serial_baud)) {
-            std::cerr << "Failed to open serial PTT port '" << cfg.ptt_serial_port << "'\n"
-                      << "Next step: verify the port name and permissions, or omit "
-                         "--ptt-serial-port to use VOX/external PTT.\n";
+    const ultra::ptt::PttConfig ptt_config = makePttConfig(cfg);
+    std::unique_ptr<ultra::ptt::IPttDriver> ptt_driver =
+        ultra::ptt::createPttDriver(ptt_config);
+    if (ptt_config.mode != ultra::ptt::PttMode::None) {
+        if (!ptt_driver->open()) {
+            std::cerr << "Failed to open PTT driver: " << ptt_driver->lastError() << "\n"
+                      << "Next step: verify the PTT settings, or disable PTT to use "
+                         "VOX/external PTT.\n";
             return 1;
         }
-        const ultra::gui::SerialPttLine line =
-            (lower(cfg.ptt_serial_line) == "dtr")
-                ? ultra::gui::SerialPttLine::DTR
-                : ultra::gui::SerialPttLine::RTS;
-        // Initialize line to inactive state. If this fails, abort
-        // startup — running with PTT in an unknown state risks
-        // accidentally keying the radio (the line state on serial
-        // open is implementation-defined).
-        if (!serial_ptt.setLine(line, cfg.ptt_inactive_high)) {
-            std::cerr << "Failed to set initial PTT line state on "
-                      << cfg.ptt_serial_port << "; refusing to start\n"
-                      << "Next step: check --ptt-serial-line "
-                      << cfg.ptt_serial_line
-                      << " against the interface wiring, or omit --ptt-serial-port.\n";
-            return 1;
-        }
-        const bool active_state = !cfg.ptt_inactive_high;
-        bridge.setPttChangedCallback([&serial_ptt, line, active_state](bool on) {
-            // setLine() returning false here means a USB unplug or
-            // OS-level serial error mid-session — log it but don't
-            // crash the modem; the next CLI/CAT command can recover.
-            if (!serial_ptt.setLine(line, on ? active_state : !active_state)) {
-                std::cerr << "[ptt] setLine() failed mid-session\n";
+        bridge.setPttChangedCallback([driver = ptt_driver.get()](bool on) {
+            if (!driver->setKey(on ? ultra::ptt::PttKey::On : ultra::ptt::PttKey::Off)) {
+                const std::string error = driver->lastError();
+                LOG_ERROR("OPERATOR", "PTT transition failed: %s", error.c_str());
+                std::cerr << "[ptt] transition failed: " << error << "\n";
             }
         });
+    }
+
+    if (ptt_config.mode == ultra::ptt::PttMode::Serial) {
         std::cout << "Hardware PTT enabled on " << cfg.ptt_serial_port
                   << " @ " << cfg.ptt_serial_baud << " baud, line="
                   << cfg.ptt_serial_line
@@ -765,8 +767,13 @@ int main(int argc, char** argv) {
                  cfg.ptt_serial_port.c_str(), cfg.ptt_serial_baud,
                  cfg.ptt_serial_line.c_str(),
                  cfg.ptt_inactive_high ? " inverted" : "");
+    } else if (ptt_config.mode == ultra::ptt::PttMode::Cat) {
+        std::cout << "Hardware PTT enabled via Hamlib rigctld "
+                  << cfg.ptt_cat_host << ":" << cfg.ptt_cat_port << "\n";
+        LOG_INFO("OPERATOR", "PTT: CAT rigctld %s:%u",
+                 cfg.ptt_cat_host.c_str(), static_cast<unsigned>(cfg.ptt_cat_port));
     } else {
-        LOG_INFO("OPERATOR", "PTT: serial disabled; use VOX or external/CAT PTT");
+        LOG_INFO("OPERATOR", "PTT: disabled; use VOX or external PTT");
     }
 
     ultra::tnc::TNCServerConfig server_cfg;
@@ -819,6 +826,7 @@ int main(int argc, char** argv) {
 
     server.stop();
     bridge.stop();
+    ptt_driver->close();
     station.stop();
     diagnostics.stop();
     return 0;

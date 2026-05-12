@@ -2,6 +2,7 @@
 #include "diagnostics/diagnostics_recorder.hpp"
 #include "startup_trace.hpp"
 #include "imgui.h"
+#include "ptt/ptt_driver_factory.hpp"
 #include "ultra/build_info.hpp"
 #include "ultra/logging.hpp"
 #include "sim/awgn.hpp"
@@ -897,8 +898,8 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     });
 
     settings_window_.setAudioResetCallback([this]() {
-        releaseSerialPtt("audio_reset");
-        closeSerialPtt();
+        releasePtt("audio_reset");
+        closePtt();
         if (radio_rx_enabled_) {
             stopRadioRx();
         }
@@ -918,8 +919,8 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
 
     settings_window_.setClosedCallback([this]() {
         settings_.save();
-        releaseSerialPtt("settings_closed");
-        closeSerialPtt();
+        releasePtt("settings_closed");
+        closePtt();
 
         if (radio_rx_enabled_) {
             stopRadioRx();
@@ -958,6 +959,10 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         // Switch encoder chirps to narrowband when OFDM_NARROW is forced
         modem_.setNarrowbandControl(waveform == static_cast<uint8_t>(protocol::WaveformMode::OFDM_NARROW));
         settings_.save();
+    });
+
+    settings_window_.setPttTestCallback([this](const AppSettings& snapshot) {
+        return testPtt(snapshot);
     });
     ultra::gui::startupTrace("App", "settings-callbacks-exit");
 
@@ -1014,8 +1019,8 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
 }
 
 App::~App() {
-    releaseSerialPtt("app_shutdown");
-    closeSerialPtt();
+    releasePtt("app_shutdown");
+    closePtt();
 
     // Stop simulator threads first
     stopSimulator();
@@ -2133,119 +2138,156 @@ std::string App::getOutputDeviceName() const {
     return settings_.output_device;
 }
 
-static SerialPttLine serialPttLineFromSettings(const AppSettings& settings) {
-    return (settings.ptt_serial_line == 1) ? SerialPttLine::RTS : SerialPttLine::DTR;
+ptt::PttConfig App::pttConfigFromSettings(const AppSettings& settings) const {
+    ptt::PttConfig config;
+    const GuiPttMode mode = static_cast<GuiPttMode>(settings.ptt_mode);
+    if (mode == GuiPttMode::SerialRTS || mode == GuiPttMode::SerialDTR) {
+        config.mode = ptt::PttMode::Serial;
+        const size_t port_len = boundedCStringLen(settings.ptt_serial_port);
+        config.serial_port.assign(settings.ptt_serial_port, port_len);
+        config.serial_baud = (settings.ptt_serial_baud > 0) ? settings.ptt_serial_baud : 9600;
+        config.serial_line = (mode == GuiPttMode::SerialDTR)
+                                 ? ptt::SerialLine::DTR
+                                 : ptt::SerialLine::RTS;
+        config.serial_inactive_high = settings.ptt_invert;
+    } else if (mode == GuiPttMode::Cat) {
+        config.mode = ptt::PttMode::Cat;
+        const size_t host_len = boundedCStringLen(settings.ptt_cat_host);
+        config.cat_host.assign(settings.ptt_cat_host, host_len);
+        if (config.cat_host.empty()) {
+            config.cat_host = "127.0.0.1";
+        }
+        int port = settings.ptt_cat_port;
+        if (port < 1 || port > 65535) {
+            port = 4532;
+        }
+        config.cat_port = static_cast<uint16_t>(port);
+    }
+    return config;
 }
 
-bool App::ensureSerialPttReady() {
-    if (!settings_.use_cat_ptt) {
+bool App::ensurePttReadyLocked(const AppSettings& settings) {
+    const ptt::PttConfig config = pttConfigFromSettings(settings);
+    if (config.mode == ptt::PttMode::None) {
+        if (ptt_driver_) {
+            ptt_driver_->close();
+            ptt_driver_.reset();
+        }
+        ptt_config_ = config;
         return true;
     }
 
-    size_t port_len = boundedCStringLen(settings_.rig_port);
-    if (port_len == 0) {
-        guiLog("PTT: enabled but serial port is empty");
-        appendRxLogLine("[PTT] Serial PTT enabled but no serial port configured");
-        return false;
+    if (!ptt_driver_ || config != ptt_config_) {
+        if (ptt_driver_) {
+            ptt_driver_->close();
+        }
+        ptt_driver_ = ptt::createPttDriver(config);
+        ptt_config_ = config;
     }
 
-    std::string port(settings_.rig_port, port_len);
-    int baud = (settings_.rig_baud > 0) ? settings_.rig_baud : 9600;
-
-    if (serial_ptt_.matches(port, baud)) {
+    if (ptt_driver_->isOpen()) {
         return true;
     }
 
-    closeSerialPtt();
-    if (!serial_ptt_.open(port, baud)) {
-        char buf[200];
-        snprintf(buf, sizeof(buf), "[PTT] Failed to open %s @ %d", port.c_str(), baud);
-        appendRxLogLine(buf);
+    if (!ptt_driver_->open()) {
+        const std::string error = ptt_driver_->lastError();
+        guiLog("PTT: open failed: %s", error.c_str());
+        appendRxLogLine("[PTT] Failed to open: " + error);
         return false;
     }
 
-    // Force selected line into known inactive state immediately after opening.
-    // This avoids relying on platform/driver defaults.
-    bool active_high = !settings_.ptt_invert;
-    bool inactive_state = active_high ? false : true;
-    SerialPttLine line = serialPttLineFromSettings(settings_);
-    if (!serial_ptt_.setLine(line, inactive_state)) {
-        char buf[220];
-        snprintf(buf, sizeof(buf), "[PTT] Failed to initialize %s line state",
-                 line == SerialPttLine::DTR ? "DTR" : "RTS");
-        appendRxLogLine(buf);
-        guiLog("PTT: failed to set initial inactive state on %s",
-               line == SerialPttLine::DTR ? "DTR" : "RTS");
-        closeSerialPtt();
-        return false;
+    if (config.mode == ptt::PttMode::Serial) {
+        guiLog("PTT: serial ready on %s @ %d line=%s",
+               config.serial_port.c_str(),
+               config.serial_baud,
+               ptt::serialLineName(config.serial_line));
+    } else if (config.mode == ptt::PttMode::Cat) {
+        guiLog("PTT: CAT ready via rigctld %s:%u",
+               config.cat_host.c_str(),
+               static_cast<unsigned>(config.cat_port));
     }
-
-    ptt_active_ = false;
-    guiLog("PTT: serial line ready on %s @ %d", port.c_str(), baud);
     return true;
 }
 
-bool App::setSerialPtt(bool asserted, const char* reason) {
-    if (!settings_.use_cat_ptt) {
-        ptt_active_ = false;
-        return true;
-    }
+bool App::ensurePttReady() {
+    std::lock_guard<std::mutex> lock(ptt_driver_mutex_);
+    return ensurePttReadyLocked(settings_);
+}
 
-    if (!ensureSerialPttReady()) {
+bool App::setPtt(bool asserted, const char* reason) {
+    std::lock_guard<std::mutex> lock(ptt_driver_mutex_);
+    if (!ensurePttReadyLocked(settings_)) {
         ptt_active_ = false;
         return false;
     }
 
-    bool active_high = !settings_.ptt_invert;
-    bool line_state = active_high ? asserted : !asserted;
-    SerialPttLine line = serialPttLineFromSettings(settings_);
-    if (!serial_ptt_.setLine(line, line_state)) {
-        guiLog("PTT: failed to set %s=%d (%s)",
-               line == SerialPttLine::DTR ? "DTR" : "RTS",
-               static_cast<int>(line_state),
-               reason ? reason : "n/a");
+    if (!ptt_driver_) {
+        ptt_active_ = false;
+        return true;
+    }
+
+    if (!ptt_driver_->setKey(asserted ? ptt::PttKey::On : ptt::PttKey::Off)) {
+        const std::string error = ptt_driver_->lastError();
+        guiLog("PTT: %s failed (%s): %s",
+               asserted ? "ASSERT" : "RELEASE",
+               reason ? reason : "n/a",
+               error.c_str());
         if (asserted) {
-            appendRxLogLine("[PTT] Failed to key serial PTT line");
+            appendRxLogLine("[PTT] Failed to key: " + error);
         }
         ptt_active_ = false;
         return false;
     }
 
     ptt_active_ = asserted;
-    guiLog("PTT: %s via %s (%s, invert=%d)",
-           asserted ? "ASSERT" : "RELEASE",
-           line == SerialPttLine::DTR ? "DTR" : "RTS",
-           reason ? reason : "n/a",
-           settings_.ptt_invert ? 1 : 0);
+    guiLog("PTT: %s (%s)", asserted ? "ASSERT" : "RELEASE", reason ? reason : "n/a");
     return true;
 }
 
-void App::releaseSerialPtt(const char* reason) {
+void App::releasePtt(const char* reason) {
     ptt_release_pending_ = false;
     ptt_release_deadline_ms_ = 0;
-    if (!serial_ptt_.isOpen()) {
+    std::lock_guard<std::mutex> lock(ptt_driver_mutex_);
+    if (!ptt_driver_ || !ptt_driver_->isOpen()) {
         ptt_active_ = false;
         return;
     }
 
-    bool active_high = !settings_.ptt_invert;
-    bool line_state = active_high ? false : true;
-    SerialPttLine line = serialPttLineFromSettings(settings_);
-    if (!serial_ptt_.setLine(line, line_state)) {
-        guiLog("PTT: failed to release line (%s)", reason ? reason : "n/a");
+    if (!ptt_driver_->setKey(ptt::PttKey::Off)) {
+        guiLog("PTT: release failed (%s): %s",
+               reason ? reason : "n/a",
+               ptt_driver_->lastError().c_str());
     } else {
-        guiLog("PTT: RELEASE via %s (%s)",
-               line == SerialPttLine::DTR ? "DTR" : "RTS",
-               reason ? reason : "n/a");
+        guiLog("PTT: RELEASE (%s)", reason ? reason : "n/a");
     }
     ptt_active_ = false;
 }
 
-void App::closeSerialPtt() {
+void App::closePtt() {
+    std::lock_guard<std::mutex> lock(ptt_driver_mutex_);
     ptt_active_ = false;
     ptt_release_pending_ = false;
     ptt_release_deadline_ms_ = 0;
-    serial_ptt_.close();
+    if (ptt_driver_) {
+        ptt_driver_->close();
+        ptt_driver_.reset();
+    }
+    ptt_config_ = ptt::PttConfig{};
+}
+
+std::string App::testPtt(AppSettings settings) {
+    std::lock_guard<std::mutex> lock(ptt_driver_mutex_);
+    if (!ensurePttReadyLocked(settings)) {
+        return ptt_driver_ ? ptt_driver_->lastError() : "PTT driver unavailable";
+    }
+    if (!ptt_driver_) {
+        return {};
+    }
+    if (!ptt_driver_->testCycle()) {
+        std::string error = ptt_driver_->lastError();
+        return error.empty() ? "PTT test failed" : error;
+    }
+    return {};
 }
 
 bool App::queueRealTxSamples(const std::vector<float>& samples, const char* context) {
@@ -2277,8 +2319,9 @@ bool App::queueRealTxSamples(const std::vector<float>& samples, const char* cont
         }
     }
 
-    if (settings_.use_cat_ptt) {
-        if (!setSerialPtt(true, context ? context : "tx_start")) {
+    const ptt::PttConfig active_ptt = pttConfigFromSettings(settings_);
+    if (active_ptt.mode != ptt::PttMode::None) {
+        if (!setPtt(true, context ? context : "tx_start")) {
             audio_.setRxMuted(false);
             if (radio_rx_enabled_ && !audio_.isCapturing()) {
                 audio_.startCapture();
@@ -2556,7 +2599,7 @@ void App::stopTxNow(const char* reason) {
 
     tx_in_progress_ = false;
     tx_end_time_ = std::chrono::steady_clock::time_point{};
-    releaseSerialPtt(reason ? reason : "stop_tx_now");
+    releasePtt(reason ? reason : "stop_tx_now");
 
     // Return to RX immediately after aborting TX.
     if (!simulation_enabled_ && radio_rx_enabled_ && !ptt_active_) {
@@ -3036,7 +3079,7 @@ void App::renderOperateTab() {
 
     if (ptt_release_pending_ && !simulation_enabled_ &&
         SDL_TICKS_PASSED(SDL_GetTicks(), ptt_release_deadline_ms_)) {
-        releaseSerialPtt("tx_tail_elapsed");
+        releasePtt("tx_tail_elapsed");
         if (radio_rx_enabled_) {
             audio_.setRxMuted(false);
             if (!audio_.isCapturing()) {

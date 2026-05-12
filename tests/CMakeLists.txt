@@ -47,6 +47,19 @@ target_include_directories(test_ultra_tnc_config PRIVATE
 target_link_libraries(test_ultra_tnc_config PRIVATE ultra_core)
 add_test(NAME UltraTNCConfig COMMAND test_ultra_tnc_config)
 
+add_executable(test_ptt_driver
+    test_ptt_driver.cpp
+    ../src/gui/serial_ptt.cpp
+    ../src/ptt/serial_ptt_driver.cpp
+    ../src/ptt/cat_ptt_driver.cpp
+    ../src/ptt/ptt_driver_factory.cpp
+)
+target_include_directories(test_ptt_driver PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+target_link_libraries(test_ptt_driver PRIVATE ultra_core)
+add_test(NAME PttDriver COMMAND test_ptt_driver)
+
 add_executable(test_tnc_server test_tnc_server.cpp)
 target_link_libraries(test_tnc_server PRIVATE ultra_core)
 add_test(NAME TNCServer COMMAND test_tnc_server)
@@ -268,6 +281,10 @@ ultra_enable_test_warnings(
     test_tnc_session.cpp
     test_ultra_tnc_config.cpp
     ../tools/ultra_tnc_config.cpp
+    test_ptt_driver.cpp
+    ../src/ptt/serial_ptt_driver.cpp
+    ../src/ptt/cat_ptt_driver.cpp
+    ../src/ptt/ptt_driver_factory.cpp
     test_tnc_server.cpp
     test_diagnostics.cpp
     test_replay.cpp

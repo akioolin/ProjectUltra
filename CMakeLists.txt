@@ -244,6 +244,13 @@ set(ULTRA_AUDIO_ENGINE_SOURCE
     src/gui/audio_engine.cpp
 )
 
+set(ULTRA_PTT_SOURCES
+    src/gui/serial_ptt.cpp
+    src/ptt/serial_ptt_driver.cpp
+    src/ptt/cat_ptt_driver.cpp
+    src/ptt/ptt_driver_factory.cpp
+)
+
 set(ULTRA_MODEM_ENGINE_SOURCES
     src/gui/modem/modem_engine.cpp
     src/gui/modem/modem_rx.cpp
@@ -374,7 +381,7 @@ if(ULTRA_BUILD_TOOLS)
             tools/ultra_tnc.cpp
             tools/ultra_tnc_config.cpp
             ${ULTRA_AUDIO_ENGINE_SOURCE}
-            src/gui/serial_ptt.cpp
+            ${ULTRA_PTT_SOURCES}
             ${ULTRA_STREAMING_MODEM_SOURCES}
         )
         target_include_directories(ultra_tnc PRIVATE
@@ -443,7 +450,7 @@ if(ULTRA_BUILD_GUI)
             src/gui/main_gui.cpp
             src/gui/app.cpp
             ${ULTRA_AUDIO_ENGINE_SOURCE}
-            src/gui/serial_ptt.cpp
+            ${ULTRA_PTT_SOURCES}
             ${ULTRA_MODEM_ENGINE_SOURCES}
             src/gui/widgets/constellation.cpp
             src/gui/widgets/controls.cpp
