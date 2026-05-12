@@ -177,6 +177,16 @@ void parseManifest(Bundle& bundle) {
         bundle.audio_start_t_ms = *top_start;
         bundle.audio_start_assumed = false;
     }
+    if (bundle.audio_start_assumed &&
+        bundle.sample_rate > 0 &&
+        bundle.rx_dropped_samples > 0) {
+        bundle.audio_start_t_ms = static_cast<int64_t>(
+            (bundle.rx_dropped_samples * 1000ULL) /
+            static_cast<uint64_t>(bundle.sample_rate));
+        bundle.audio_start_assumed = false;
+        bundle.warnings.push_back(
+            "manifest has no audio.start_t_ms; inferred RX audio start from rx_dropped_samples");
+    }
     if (bundle.audio_start_assumed) {
         bundle.warnings.push_back("manifest has no audio.start_t_ms; assuming first RX sample is t=0");
     }

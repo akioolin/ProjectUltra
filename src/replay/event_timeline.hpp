@@ -43,6 +43,7 @@ struct FrameObservation {
     bool decode_failed = false;
     ModeSpec mode;
     std::string frame_type;
+    int frame_bytes = -1;
     int payload_len = -1;
     int total_cw = -1;
     int cw_ok = -1;

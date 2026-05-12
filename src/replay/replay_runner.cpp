@@ -98,6 +98,7 @@ FrameObservation observationFromDecodeResult(const DecodeResult& result,
     frame.cw_ok = result.codewords_ok;
     frame.cw_failed = result.codewords_failed;
     frame.total_cw = result.codewords_ok + result.codewords_failed;
+    frame.frame_bytes = static_cast<int>(result.frame_data.size());
 
     if (result.is_ping) {
         frame.frame_type = "PING";

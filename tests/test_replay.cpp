@@ -65,6 +65,23 @@ ultra::replay::FrameObservation frame(int seq, int cw_ok, bool fail = false) {
     return f;
 }
 
+ultra::replay::FrameObservation typedFrame(int seq,
+                                           const std::string& type,
+                                           int64_t t_ms,
+                                           size_t frame_bytes = 20) {
+    auto f = frame(seq, type == "DATA_END" ? 4 : 1);
+    f.t_ms = t_ms;
+    f.frame_type = type;
+    f.frame_bytes = static_cast<int>(frame_bytes);
+    if (type == "ACK") {
+        f.payload_len = 0;
+        f.total_cw = 1;
+        f.cw_ok = 1;
+        f.cw_failed = 0;
+    }
+    return f;
+}
+
 void appendSilence(std::vector<float>& samples, size_t count) {
     samples.insert(samples.end(), count, 0.0f);
 }
@@ -143,6 +160,38 @@ void test_bundle_loader_and_timeline_parse() {
     CHECK(timeline.live_frames.size() == 1, "one live frame should parse");
     CHECK(timeline.live_frames.front().has_frame_seq, "live frame seq should parse");
     CHECK(timeline.live_frames.front().frame_seq == 17, "live frame seq value should match");
+}
+
+void test_bundle_loader_infers_audio_start_from_dropped_samples() {
+    ultra::test::TempDir tmp("ultra_replay_audio_start");
+    CHECK(tmp.valid(), "temp dir should be available");
+
+    ultra::diagnostics::AudioRingSnapshot rx;
+    rx.sample_rate = 48000;
+    rx.samples = {0, 0, 0, 0};
+
+    ultra::diagnostics::BundleBuildInput input;
+    input.output_path = tmp.child("report.zip");
+    input.staging_dir = tmp.child("staging");
+    input.manifest_json =
+        "{\"schema\":1,\"session_id\":\"abc\","
+        "\"audio\":{\"sample_rate\":48000,\"rx_samples\":4,"
+        "\"rx_dropped_samples\":96000}}\n";
+    input.rx_audio = rx;
+    input.events_jsonl = "";
+    input.config_json = "{}\n";
+    input.operator_log = "log\n";
+    input.system_json = "{}\n";
+    input.operator_note = "note\n";
+    input.replay_readme = "replay\n";
+
+    std::string error;
+    CHECK(ultra::diagnostics::buildReportBundle(input, &error), error.c_str());
+    auto bundle = ultra::replay::loadBundle(input.output_path);
+    CHECK(bundle.audio_start_t_ms == 2000,
+          "legacy bundle audio start should infer from dropped samples");
+    CHECK(!bundle.audio_start_assumed,
+          "inferred audio start should be treated as usable for alignment");
 }
 
 void test_clean_session_matches_exactly() {
@@ -249,6 +298,26 @@ void test_replay_only_sync_is_flagged() {
           "text report should expose replay-only sync");
 }
 
+void test_reused_sequence_matches_by_type_and_time() {
+    auto live_ack = typedFrame(2, "ACK", 104000);
+    auto live_data = typedFrame(2, "DATA_END", 133000, 23);
+    auto replay_ack = typedFrame(2, "ACK", 103600);
+    auto replay_early_data = typedFrame(2, "DATA_END", 110000, 23);
+
+    auto report = ultra::replay::compareTimelines(
+        liveWith({live_ack, live_data}),
+        replayWith({replay_ack, replay_early_data}));
+
+    CHECK(report.summary.exact_matches == 1,
+          "reused sequence should match the near ACK only");
+    CHECK(report.summary.live_only == 1,
+          "late live data with reused sequence should remain live-only");
+    CHECK(report.summary.replay_only == 1,
+          "early replay data with reused sequence should remain replay-only");
+    CHECK(report.summary.divergent == 0,
+          "reused sequence should not be reported as a frame-type mismatch");
+}
+
 void test_sparse_old_jsonl_degrades_gracefully() {
     ultra::replay::ModeSpec initial;
     const std::string jsonl =
@@ -267,10 +336,12 @@ void test_sparse_old_jsonl_degrades_gracefully() {
 
 int main() {
     test_bundle_loader_and_timeline_parse();
+    test_bundle_loader_infers_audio_start_from_dropped_samples();
     test_clean_session_matches_exactly();
     test_runner_replays_clean_mcdpsk_bundle();
     test_live_decode_failed_but_replay_succeeds();
     test_replay_only_sync_is_flagged();
+    test_reused_sequence_matches_by_type_and_time();
     test_sparse_old_jsonl_degrades_gracefully();
 
     if (tests_failed != 0) {

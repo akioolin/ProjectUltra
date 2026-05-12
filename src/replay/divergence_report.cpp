@@ -3,8 +3,10 @@
 #include "replay/json_util.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <iomanip>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <set>
@@ -13,17 +15,7 @@
 namespace ultra::replay {
 namespace {
 
-struct ModeSeqKey {
-    int seq = -1;
-    std::string mode;
-
-    bool operator<(const ModeSeqKey& other) const {
-        if (seq != other.seq) {
-            return seq < other.seq;
-        }
-        return mode < other.mode;
-    }
-};
+constexpr int64_t kDuplicateSeqTimeToleranceMs = 2500;
 
 std::string matchKindString(MatchKind kind) {
     switch (kind) {
@@ -70,6 +62,9 @@ std::string compareFrame(const FrameObservation& live,
     if (!comparableEqual(live.frame_type, replay.frame_type)) {
         appendReason(reason, "frame type mismatch");
     }
+    if (!comparableEqual(live.frame_bytes, replay.frame_bytes)) {
+        appendReason(reason, "frame bytes mismatch");
+    }
     if (!comparableEqual(live.total_cw, replay.total_cw)) {
         appendReason(reason, "total CW mismatch");
     }
@@ -101,13 +96,49 @@ std::vector<FrameObservation> keyedFrames(const std::vector<FrameObservation>& f
     return out;
 }
 
-std::map<ModeSeqKey, FrameObservation> mapByModeSeq(
-    const std::vector<FrameObservation>& frames) {
-    std::map<ModeSeqKey, FrameObservation> out;
-    for (const auto& f : frames) {
-        out[{f.frame_seq, compactModeLabel(f.mode)}] = f;
+bool sameMode(const FrameObservation& a, const FrameObservation& b) {
+    return compactModeLabel(a.mode) == compactModeLabel(b.mode);
+}
+
+bool sameOutcomeAndType(const FrameObservation& a, const FrameObservation& b) {
+    if (a.decode_failed != b.decode_failed) {
+        return false;
     }
+    if (!a.frame_type.empty() && !b.frame_type.empty()) {
+        return a.frame_type == b.frame_type;
+    }
+    return a.frame_type.empty() || b.frame_type.empty();
+}
+
+bool duplicateSeqTimeCompatible(const FrameObservation& a, const FrameObservation& b) {
+    if (a.t_ms < 0 || b.t_ms < 0) {
+        return true;
+    }
+    return std::llabs(a.t_ms - b.t_ms) <= kDuplicateSeqTimeToleranceMs;
+}
+
+int64_t duplicateSeqTimeDelta(const FrameObservation& a, const FrameObservation& b) {
+    if (a.t_ms < 0 || b.t_ms < 0) {
+        return 0;
+    }
+    return std::llabs(a.t_ms - b.t_ms);
+}
+
+std::string missingPeerReason(const char* peer) {
+    std::string out = "no ";
+    out += peer;
+    out += " frame with same sequence/mode/type near the same time";
     return out;
+}
+
+int64_t rowSortTime(const DivergenceRow& row) {
+    if (row.has_live && row.live.t_ms >= 0) {
+        return row.live.t_ms;
+    }
+    if (row.has_replay && row.replay.t_ms >= 0) {
+        return row.replay.t_ms;
+    }
+    return -1;
 }
 
 std::map<int, std::vector<FrameObservation>> groupBySeq(
@@ -117,6 +148,68 @@ std::map<int, std::vector<FrameObservation>> groupBySeq(
         out[f.frame_seq].push_back(f);
     }
     return out;
+}
+
+std::vector<DivergenceRow> matchDuplicateSequenceFrames(
+    int seq,
+    const std::vector<FrameObservation>& live_frames,
+    const std::vector<FrameObservation>& replay_frames) {
+    std::vector<DivergenceRow> rows;
+    std::vector<bool> replay_used(replay_frames.size(), false);
+
+    for (const auto& live_frame : live_frames) {
+        int best = -1;
+        int64_t best_delta = 0;
+        for (size_t i = 0; i < replay_frames.size(); ++i) {
+            if (replay_used[i]) {
+                continue;
+            }
+            const auto& replay_frame = replay_frames[i];
+            if (!sameMode(live_frame, replay_frame) ||
+                !sameOutcomeAndType(live_frame, replay_frame) ||
+                !duplicateSeqTimeCompatible(live_frame, replay_frame)) {
+                continue;
+            }
+            const int64_t delta = duplicateSeqTimeDelta(live_frame, replay_frame);
+            if (best < 0 || delta < best_delta) {
+                best = static_cast<int>(i);
+                best_delta = delta;
+            }
+        }
+
+        DivergenceRow row;
+        row.frame_seq = seq;
+        row.has_frame_seq = true;
+        row.live = live_frame;
+        row.has_live = true;
+        if (best >= 0) {
+            replay_used[static_cast<size_t>(best)] = true;
+            row.replay = replay_frames[static_cast<size_t>(best)];
+            row.has_replay = true;
+            row.reason = compareFrame(row.live, row.replay);
+            row.kind = row.reason.empty() ? MatchKind::Exact : MatchKind::Divergent;
+        } else {
+            row.kind = MatchKind::LiveOnly;
+            row.reason = missingPeerReason("replay");
+        }
+        rows.push_back(std::move(row));
+    }
+
+    for (size_t i = 0; i < replay_frames.size(); ++i) {
+        if (replay_used[i]) {
+            continue;
+        }
+        DivergenceRow row;
+        row.frame_seq = seq;
+        row.has_frame_seq = true;
+        row.replay = replay_frames[i];
+        row.has_replay = true;
+        row.kind = MatchKind::ReplayOnly;
+        row.reason = missingPeerReason("live");
+        rows.push_back(std::move(row));
+    }
+
+    return rows;
 }
 
 struct ModeAggregate {
@@ -219,6 +312,7 @@ void jsonFrame(std::ostringstream& out, const FrameObservation& frame) {
     out << ",\"outcome\":\"" << (frame.decode_failed ? "decode.fail" : "frame.rx") << "\"";
     out << ",\"mode\":\"" << json::escape(compactModeLabel(frame.mode)) << "\"";
     out << ",\"frame_type\":\"" << json::escape(frame.frame_type) << "\"";
+    out << ",\"frame_bytes\":" << frame.frame_bytes;
     out << ",\"payload_len\":" << frame.payload_len;
     out << ",\"total_cw\":" << frame.total_cw;
     out << ",\"cw_ok\":" << frame.cw_ok;
@@ -258,9 +352,6 @@ DivergenceReport compareTimelines(const ParsedTimeline& live,
 
     auto live_by_seq = groupBySeq(live_keyed);
     auto replay_by_seq = groupBySeq(replay_keyed);
-    auto live_by_mode_seq = mapByModeSeq(live_keyed);
-    auto replay_by_mode_seq = mapByModeSeq(replay_keyed);
-
     std::set<int> seqs;
     for (const auto& [seq, _] : live_by_seq) {
         seqs.insert(seq);
@@ -289,44 +380,13 @@ DivergenceReport compareTimelines(const ParsedTimeline& live,
             continue;
         }
 
-        std::set<ModeSeqKey> keys;
-        if (live_it != live_by_seq.end()) {
-            for (const auto& f : live_it->second) {
-                keys.insert({seq, compactModeLabel(f.mode)});
-            }
-        }
-        if (replay_it != replay_by_seq.end()) {
-            for (const auto& f : replay_it->second) {
-                keys.insert({seq, compactModeLabel(f.mode)});
-            }
-        }
-
-        for (const auto& key : keys) {
-            const auto l = live_by_mode_seq.find(key);
-            const auto r = replay_by_mode_seq.find(key);
-            DivergenceRow row;
-            row.frame_seq = seq;
-            row.has_frame_seq = true;
-            if (l != live_by_mode_seq.end()) {
-                row.live = l->second;
-                row.has_live = true;
-            }
-            if (r != replay_by_mode_seq.end()) {
-                row.replay = r->second;
-                row.has_replay = true;
-            }
-            if (row.has_live && row.has_replay) {
-                row.reason = compareFrame(row.live, row.replay);
-                row.kind = row.reason.empty() ? MatchKind::Exact : MatchKind::Divergent;
-            } else if (row.has_live) {
-                row.kind = MatchKind::LiveOnly;
-                row.reason = "no replay frame with same sequence/mode";
-            } else {
-                row.kind = MatchKind::ReplayOnly;
-                row.reason = "no live frame with same sequence/mode";
-            }
-            report.rows.push_back(std::move(row));
-        }
+        const std::vector<FrameObservation> empty;
+        const auto& live_group = live_it != live_by_seq.end() ? live_it->second : empty;
+        const auto& replay_group = replay_it != replay_by_seq.end() ? replay_it->second : empty;
+        auto rows = matchDuplicateSequenceFrames(seq, live_group, replay_group);
+        report.rows.insert(report.rows.end(),
+                           std::make_move_iterator(rows.begin()),
+                           std::make_move_iterator(rows.end()));
     }
 
     std::sort(report.rows.begin(), report.rows.end(), [](const auto& a, const auto& b) {
@@ -335,6 +395,11 @@ DivergenceReport compareTimelines(const ParsedTimeline& live,
         }
         if (a.frame_seq != b.frame_seq) {
             return a.frame_seq < b.frame_seq;
+        }
+        const int64_t at = rowSortTime(a);
+        const int64_t bt = rowSortTime(b);
+        if (at != bt) {
+            return at < bt;
         }
         return a.reason < b.reason;
     });

@@ -174,6 +174,9 @@ FrameObservation frameFromFields(const ParsedEvent& event,
     if (auto ft = firstStringField(event.fields, {"frame_type", "type"})) {
         frame.frame_type = *ft;
     }
+    if (auto bytes = firstIntField(event.fields, {"frame_bytes", "bytes"})) {
+        frame.frame_bytes = *bytes;
+    }
     if (auto payload = firstIntField(event.fields, {"payload_len", "payload_bytes"})) {
         frame.payload_len = *payload;
     }
