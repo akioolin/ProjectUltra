@@ -118,6 +118,7 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/tests/lsan_suppressions.txt:print_suppressions=0
         run: ctest --test-dir build-sanitizer --output-on-failure --parallel 4
 
   coverage:

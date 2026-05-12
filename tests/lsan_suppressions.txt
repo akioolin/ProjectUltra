@@ -1,0 +1,12 @@
+# LeakSanitizer suppressions for tests that link third-party libraries
+# whose internal data structures intentionally live for the process
+# lifetime. These are not bugs in our code.
+
+# Hamlib registers all supported rigs at process startup via
+# rig_load_all_backends()/rig_register(); the registry is freed only at
+# rig_cleanup() of the global state, which Hamlib doesn't provide. The
+# allocations stay live by design.
+leak:libhamlib
+leak:rig_register
+leak:rig_load_all_backends
+leak:initrigs4_dummy
