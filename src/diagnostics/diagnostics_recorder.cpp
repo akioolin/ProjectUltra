@@ -672,8 +672,21 @@ std::string DiagnosticsRecorder::manifestJson(FreezeReason reason,
         << "  \"audio\": {\"sample_rate\": " << rx.sample_rate
         << ", \"rx_samples\": " << rx.samples.size()
         << ", \"rx_dropped_samples\": " << rx.samples_dropped
+        // The first RX sample in the bundle represents the (samples_dropped)-th
+        // sample ever captured — i.e. it occurred this many ms after recorder
+        // start. ultra_replay uses this to align audio with the JSONL
+        // timeline when a session has been running longer than the audio
+        // ring window.
+        << ", \"rx_start_t_ms\": "
+        << (rx.sample_rate > 0
+             ? (rx.samples_dropped * 1000ULL) / static_cast<uint64_t>(rx.sample_rate)
+             : 0ULL)
         << ", \"tx_samples\": " << (tx ? tx->samples.size() : 0)
-        << ", \"tx_dropped_samples\": " << (tx ? tx->samples_dropped : 0) << "},\n"
+        << ", \"tx_dropped_samples\": " << (tx ? tx->samples_dropped : 0)
+        << ", \"tx_start_t_ms\": "
+        << (tx && tx->sample_rate > 0
+             ? (tx->samples_dropped * 1000ULL) / static_cast<uint64_t>(tx->sample_rate)
+             : 0ULL) << "},\n"
         << "  \"events\": {\"written\": " << events_.eventsWritten()
         << ", \"dropped\": " << events_.eventsDropped() << "}\n"
         << "}\n";
