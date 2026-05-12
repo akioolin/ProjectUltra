@@ -58,6 +58,21 @@ target_include_directories(test_diagnostics PRIVATE
 target_link_libraries(test_diagnostics PRIVATE ultra_core)
 add_test(NAME Diagnostics COMMAND test_diagnostics)
 
+if(TARGET ultra_replay_lib)
+    add_executable(test_replay
+        test_replay.cpp
+        ../src/gui/modem/streaming_encoder.cpp
+    )
+    target_include_directories(test_replay PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
+    )
+    target_link_libraries(test_replay PRIVATE ultra_replay_lib)
+    add_test(NAME Replay COMMAND test_replay)
+else()
+    message(STATUS "Replay tests disabled: ultra_replay_lib target is not built")
+endif()
+
 if(SDL2_FOUND)
     add_executable(test_tnc_bridge
         test_tnc_bridge.cpp
@@ -255,6 +270,7 @@ ultra_enable_test_warnings(
     ../tools/ultra_tnc_config.cpp
     test_tnc_server.cpp
     test_diagnostics.cpp
+    test_replay.cpp
     test_tnc_bridge.cpp
     test_connection_policy.cpp
     test_connection_adaptive.cpp

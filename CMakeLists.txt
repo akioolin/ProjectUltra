@@ -308,6 +308,35 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_link_libraries(session_decode PRIVATE ultra_sim_station ultra_tool_wav_io)
 
+    add_library(ultra_replay_lib STATIC
+        src/replay/bundle_loader.cpp
+        src/replay/event_timeline.cpp
+        src/replay/replay_runner.cpp
+        src/replay/divergence_report.cpp
+        ${ULTRA_STREAMING_DECODER_SOURCES}
+    )
+    ultra_enable_tool_test_warnings(
+        src/replay/bundle_loader.cpp
+        src/replay/event_timeline.cpp
+        src/replay/replay_runner.cpp
+        src/replay/divergence_report.cpp
+    )
+    target_include_directories(ultra_replay_lib PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
+    )
+    target_link_libraries(ultra_replay_lib PUBLIC ultra_tool_wav_io)
+
+    add_executable(ultra_replay
+        tools/ultra_replay.cpp
+    )
+    ultra_enable_tool_test_warnings(tools/ultra_replay.cpp)
+    target_include_directories(ultra_replay PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
+    )
+    target_link_libraries(ultra_replay PRIVATE ultra_replay_lib)
+
     add_executable(ultra_report
         tools/ultra_report.cpp
     )
