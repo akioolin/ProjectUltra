@@ -62,18 +62,12 @@ jobs:
       - name: Configure CMake (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        # Hamlib's prebuilt Windows headers include <pthread.h>, which MSVC
-        # does not ship. Until we vendor a pthread.h shim or switch the
-        # Windows CI build to MinGW, disable the libhamlib backend on
-        # Windows CI test runs. The Hamlib NET rigctl (TCP) path stays
-        # available; only the in-process built-in Hamlib driver is skipped.
         run: >
           cmake -S . -B build -A x64
           -DULTRA_BUILD_TESTS=ON
           -DULTRA_BUILD_TOOLS=OFF
           -DULTRA_BUILD_GUI=OFF
           -DULTRA_USE_FFTW=OFF
-          -DULTRA_USE_LIBHAMLIB=OFF
 
       - name: Build Tests (Linux/macOS)
         if: runner.os != 'Windows'
@@ -204,19 +198,12 @@ jobs:
       - name: Configure CMake (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        # ULTRA_USE_LIBHAMLIB=OFF on Windows release builds: Hamlib's
-        # prebuilt Windows headers include <pthread.h> which MSVC does
-        # not ship. Fixing this needs either a vendored pthread.h shim
-        # or a MinGW-based Windows build. Tracked as a follow-up.
-        # Operators on Windows can still use the Hamlib NET rigctl
-        # (rigctld TCP) backend with an externally-installed rigctld.
         run: >
           cmake -S . -B build -A x64
           -DCMAKE_BUILD_TYPE=Release
           -DULTRA_BUILD_TESTS=OFF
           -DULTRA_BUILD_GUI=ON
           -DULTRA_USE_FFTW=OFF
-          -DULTRA_USE_LIBHAMLIB=OFF
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
           -DVCPKG_TARGET_TRIPLET=x64-windows
 

@@ -112,7 +112,19 @@ if(ULTRA_USE_LIBHAMLIB)
             message(FATAL_ERROR "ULTRA_USE_LIBHAMLIB on Windows requires MSVC or MinGW")
         endif()
 
-        set(HAMLIB_INCLUDE_DIRS ${HAMLIB_ROOT}/include)
+        # Hamlib's prebuilt Windows headers were generated under MinGW
+        # and reference <pthread.h>, which MSVC does not ship. Inject a
+        # minimal pthread.h shim ahead of Hamlib's include dir so rig.h
+        # parses cleanly. The shim only declares pthread_t and
+        # pthread_mutex_t with sizes matching winpthreads' canonical
+        # layout — Hamlib uses these as opaque struct members, and the
+        # real pthread runtime lives in libwinpthread-1.dll alongside
+        # libhamlib-4.dll. We never call pthread API from our code.
+        set(HAMLIB_PTHREAD_SHIM
+            ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/hamlib-windows/pthread_shim)
+        set(HAMLIB_INCLUDE_DIRS
+            ${HAMLIB_PTHREAD_SHIM}
+            ${HAMLIB_ROOT}/include)
         set(HAMLIB_LIBRARIES ${HAMLIB_LIB})
         set(HAMLIB_RUNTIME_DLLS
             ${HAMLIB_ROOT}/bin/libhamlib-4.dll
