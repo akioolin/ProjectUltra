@@ -1,11 +1,13 @@
 #include "ptt/hamlib_rig_driver.hpp"
 
+#include "diagnostics/diagnostics_recorder.hpp"
 #include "ultra/logging.hpp"
 
 #include <hamlib/rig.h>
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <utility>
@@ -161,20 +163,40 @@ bool HamlibRigDriver::testCycle() {
 }
 
 bool HamlibRigDriver::testCat() {
+    auto emit_result = [this](bool ok) {
+        char fields[384];
+        if (ok) {
+            std::snprintf(fields, sizeof(fields),
+                          "{\"backend\":\"hamlib_builtin\",\"result\":\"ok\"}");
+        } else {
+            std::snprintf(fields, sizeof(fields),
+                          "{\"backend\":\"hamlib_builtin\",\"result\":\"fail\","
+                          "\"error\":\"%s\"}",
+                          ultra::diagnostics::jsonEscape(lastError()).c_str());
+        }
+        ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+            "ptt", "ptt.test_cat", fields);
+    };
+
     if (!isOpen() && !open()) {
+        emit_result(false);
         return false;
     }
 
     auto completion = std::make_shared<std::promise<bool>>();
     std::future<bool> future = completion->get_future();
     if (!enqueue(Command{CommandType::ReadFrequency, PttKey::Off, completion})) {
+        emit_result(false);
         return false;
     }
     if (future.wait_for(kCommandWait) != std::future_status::ready) {
         setLastError("Hamlib get_freq timed out");
+        emit_result(false);
         return false;
     }
-    return future.get();
+    const bool ok = future.get();
+    emit_result(ok);
+    return ok;
 }
 
 std::string HamlibRigDriver::lastError() const {
@@ -355,6 +377,16 @@ bool HamlibRigDriver::ensureRigOpen() {
     const int rc = rig_open(rig_);
     if (rc != RIG_OK) {
         setLastError("Hamlib rig_open failed: " + hamlibError(rc));
+        {
+            char fields[384];
+            std::snprintf(fields, sizeof(fields),
+                          "{\"backend\":\"hamlib_builtin\",\"op\":\"rig_open\","
+                          "\"model_id\":%d,\"rc\":%d,\"error\":\"%s\"}",
+                          config_.hamlib_model_id, rc,
+                          ultra::diagnostics::jsonEscape(hamlibError(rc)).c_str());
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                "ptt", "ptt.open_failed", fields);
+        }
         closeRig();
         return false;
     }
@@ -367,6 +399,17 @@ bool HamlibRigDriver::ensureRigOpen() {
              config_.hamlib_rig_port.c_str(),
              normalizedBaud(config_.hamlib_baud),
              hamlibPttMethodName(config_.hamlib_ptt_method));
+    {
+        char fields[256];
+        std::snprintf(fields, sizeof(fields),
+                      "{\"backend\":\"hamlib_builtin\",\"model_id\":%d,"
+                      "\"baud\":%d,\"ptt_method\":\"%s\"}",
+                      config_.hamlib_model_id,
+                      normalizedBaud(config_.hamlib_baud),
+                      hamlibPttMethodName(config_.hamlib_ptt_method));
+        ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+            "ptt", "ptt.opened", fields);
+    }
     return true;
 }
 
@@ -380,10 +423,28 @@ bool HamlibRigDriver::setRigPtt(PttKey state) {
     if (rc != RIG_OK) {
         setLastError("Hamlib set_ptt failed: " + hamlibError(rc));
         LOG_ERROR("OPERATOR", "PTT: %s", lastError().c_str());
+        {
+            char fields[384];
+            std::snprintf(fields, sizeof(fields),
+                          "{\"backend\":\"hamlib_builtin\",\"op\":\"set_ptt\","
+                          "\"state\":\"%s\",\"rc\":%d,\"error\":\"%s\"}",
+                          state == PttKey::On ? "on" : "off", rc,
+                          ultra::diagnostics::jsonEscape(hamlibError(rc)).c_str());
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                "ptt", "ptt.error", fields);
+        }
         return false;
     }
 
     clearLastError();
+    {
+        char fields[96];
+        std::snprintf(fields, sizeof(fields),
+                      "{\"backend\":\"hamlib_builtin\",\"state\":\"%s\"}",
+                      state == PttKey::On ? "on" : "off");
+        ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+            "ptt", "ptt.keyed", fields);
+    }
     return true;
 }
 

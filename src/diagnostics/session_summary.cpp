@@ -440,6 +440,16 @@ SessionSummaryResult summarizeSessionJsonl(const std::string& jsonl,
     int arq_timeouts = 0;
     int arq_failed = 0;
 
+    // PTT/CAT lifecycle accumulator: surface whether the rig actually
+    // opened, how many PTT keys cycled, and the last error (if any).
+    std::string ptt_backend;
+    int ptt_keyed_count = 0;
+    int ptt_error_count = 0;
+    bool ptt_opened = false;
+    bool ptt_open_failed = false;
+    std::string ptt_first_error;
+    std::string ptt_test_cat_result;
+
     for (const ParsedEvent& e : events) {
         last_ts = e.ts_utc;
         if (auto snr = jsonNumberValue(e.fields, "snr_db")) {
@@ -531,6 +541,31 @@ SessionSummaryResult summarizeSessionJsonl(const std::string& jsonl,
             ++pong_rx;
             if (auto snr = jsonNumberValue(e.fields, "snr_db")) {
                 last_rx_snr = *snr;
+            }
+        } else if (e.event == "ptt.opened") {
+            ptt_opened = true;
+            if (auto backend = jsonStringValue(e.fields, "backend")) {
+                ptt_backend = *backend;
+            }
+        } else if (e.event == "ptt.open_failed") {
+            ptt_open_failed = true;
+            if (auto backend = jsonStringValue(e.fields, "backend")) {
+                ptt_backend = *backend;
+            }
+            if (ptt_first_error.empty()) {
+                ptt_first_error = jsonStringValue(e.fields, "error").value_or("");
+            }
+        } else if (e.event == "ptt.keyed") {
+            ++ptt_keyed_count;
+        } else if (e.event == "ptt.error") {
+            ++ptt_error_count;
+            if (ptt_first_error.empty()) {
+                ptt_first_error = jsonStringValue(e.fields, "error").value_or("");
+            }
+        } else if (e.event == "ptt.test_cat") {
+            ptt_test_cat_result = jsonStringValue(e.fields, "result").value_or("");
+            if (ptt_test_cat_result != "ok" && ptt_first_error.empty()) {
+                ptt_first_error = jsonStringValue(e.fields, "error").value_or("");
             }
         } else if (e.event == "file.transfer") {
             FileEvent f;
@@ -682,8 +717,35 @@ SessionSummaryResult summarizeSessionJsonl(const std::string& jsonl,
         << "Channel:         " << channel << "\n"
         << "Decode failures: " << decode_line << "\n"
         << "Audio:           " << audio_line << "\n"
-        << "Faults:          " << faults_line << "\n\n"
-        << "Disconnect:      " << disconnect_line << "\n";
+        << "Faults:          " << faults_line << "\n";
+
+    // PTT/CAT line: omit when there are no PTT events at all (operator
+    // not using CAT). Otherwise summarize backend + outcome.
+    if (ptt_opened || ptt_open_failed || ptt_keyed_count || ptt_error_count ||
+        !ptt_test_cat_result.empty()) {
+        std::ostringstream ptt_line;
+        ptt_line << (ptt_backend.empty() ? "unknown" : ptt_backend);
+        if (ptt_opened) {
+            ptt_line << ", opened OK";
+        } else if (ptt_open_failed) {
+            ptt_line << ", open FAILED";
+        }
+        if (ptt_keyed_count > 0) {
+            ptt_line << ", " << ptt_keyed_count << " key event(s)";
+        }
+        if (!ptt_test_cat_result.empty()) {
+            ptt_line << ", Test CAT: " << ptt_test_cat_result;
+        }
+        if (ptt_error_count > 0) {
+            ptt_line << ", " << ptt_error_count << " error(s)";
+        }
+        if (!ptt_first_error.empty()) {
+            ptt_line << " — \"" << ptt_first_error << "\"";
+        }
+        out << "PTT/CAT:         " << ptt_line.str() << "\n";
+    }
+
+    out << "\nDisconnect:      " << disconnect_line << "\n";
 
     if (!suggestions.empty()) {
         out << "\n";

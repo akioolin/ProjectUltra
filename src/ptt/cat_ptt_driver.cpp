@@ -1,10 +1,12 @@
 #include "ptt/cat_ptt_driver.hpp"
 
+#include "diagnostics/diagnostics_recorder.hpp"
 #include "ultra/logging.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <sstream>
@@ -136,11 +138,24 @@ bool CatPttDriver::open() {
         return false;
     }
 
+    auto emit_open_failed = [this](const std::string& err) {
+        char fields[512];
+        std::snprintf(fields, sizeof(fields),
+                      "{\"backend\":\"cat_rigctld\",\"host\":\"%s\",\"port\":%u,"
+                      "\"error\":\"%s\"}",
+                      ultra::diagnostics::jsonEscape(config_.cat_host).c_str(),
+                      static_cast<unsigned>(config_.cat_port),
+                      ultra::diagnostics::jsonEscape(err).c_str());
+        ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+            "ptt", "ptt.open_failed", fields);
+    };
+
     ConnectResult connected = connectSocket();
     if (ultra::tnc::isInvalidSocket(connected.socket)) {
         last_error_ = "failed to connect to rigctld at " + config_.cat_host + ":" +
                       std::to_string(config_.cat_port) + ": " + connected.error;
         LOG_ERROR("OPERATOR", "PTT: CAT %s", last_error_.c_str());
+        emit_open_failed(last_error_);
         return false;
     }
 
@@ -151,6 +166,7 @@ bool CatPttDriver::open() {
         closeCurrentSocket();
         last_error_ = error;
         LOG_ERROR("OPERATOR", "PTT: CAT %s", last_error_.c_str());
+        emit_open_failed(last_error_);
         return false;
     }
 
@@ -160,6 +176,15 @@ bool CatPttDriver::open() {
     worker_ = std::thread(&CatPttDriver::workerLoop, this);
     LOG_INFO("OPERATOR", "PTT: CAT connected to rigctld %s:%u",
              config_.cat_host.c_str(), static_cast<unsigned>(config_.cat_port));
+    {
+        char fields[256];
+        std::snprintf(fields, sizeof(fields),
+                      "{\"backend\":\"cat_rigctld\",\"host\":\"%s\",\"port\":%u}",
+                      ultra::diagnostics::jsonEscape(config_.cat_host).c_str(),
+                      static_cast<unsigned>(config_.cat_port));
+        ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+            "ptt", "ptt.opened", fields);
+    }
     return true;
 }
 
@@ -382,6 +407,14 @@ void CatPttDriver::handleCommand(Command cmd) {
 
         std::string error;
         if (sendPttCommand(cmd.state, error)) {
+            {
+                char fields[96];
+                std::snprintf(fields, sizeof(fields),
+                              "{\"backend\":\"cat_rigctld\",\"state\":\"%s\"}",
+                              cmd.state == PttKey::On ? "on" : "off");
+                ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                    "ptt", "ptt.keyed", fields);
+            }
             if (cmd.completion) {
                 cmd.completion->set_value(true);
             }
@@ -391,6 +424,16 @@ void CatPttDriver::handleCommand(Command cmd) {
 
         setLastError(error);
         LOG_ERROR("OPERATOR", "PTT: CAT %s", error.c_str());
+        {
+            char fields[512];
+            std::snprintf(fields, sizeof(fields),
+                          "{\"backend\":\"cat_rigctld\",\"op\":\"set_ptt\","
+                          "\"state\":\"%s\",\"error\":\"%s\"}",
+                          cmd.state == PttKey::On ? "on" : "off",
+                          ultra::diagnostics::jsonEscape(error).c_str());
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                "ptt", "ptt.error", fields);
+        }
         closeCurrentSocket();
 
         if (cmd.completion) {
