@@ -823,7 +823,13 @@ TombstoneInfo DiagnosticsRecorder::parseTombstoneFile(const fs::path& path) {
 }
 
 void DiagnosticsRecorder::cleanupStorage() {
-    constexpr uintmax_t kStorageCapBytes = AudioRing::kHardCapBytes;
+    // Storage cap is 8x the audio ring cap so that a freshly created
+    // ~10 MB report bundle never single-handedly trips eviction on the
+    // very freeze() call that produced it. Sessions accumulate over a
+    // shift's worth of operator work; reports are operator-saved
+    // artifacts. Capping at 64 MB (1x AudioRing) made the cleanup eat
+    // the just-saved report whenever sessions/ alone exceeded the cap.
+    constexpr uintmax_t kStorageCapBytes = AudioRing::kHardCapBytes * 8;
     if (diagnostics_dir_.empty()) {
         return;
     }
@@ -832,11 +838,13 @@ void DiagnosticsRecorder::cleanupStorage() {
         fs::path journal;
         fs::path summary;
         fs::file_time_type time;
+        uintmax_t size = 0;
     };
-    std::vector<SessionCandidate> sessions;
     std::error_code ec;
-    const fs::path sessions_dir = diagnostics_dir_ / "sessions";
-    if (fs::exists(sessions_dir, ec)) {
+    auto collectSessions = [&]() {
+        std::vector<SessionCandidate> sessions;
+        const fs::path sessions_dir = diagnostics_dir_ / "sessions";
+        if (!fs::exists(sessions_dir, ec)) return sessions;
         for (const auto& entry : fs::directory_iterator(sessions_dir, ec)) {
             if (!entry.is_regular_file(ec)) continue;
             const auto path = entry.path();
@@ -846,22 +854,30 @@ void DiagnosticsRecorder::cleanupStorage() {
             }
             fs::path summary = path;
             summary.replace_extension(".txt");
-            sessions.push_back({path, summary, entry.last_write_time(ec)});
+            uintmax_t sz = entry.file_size(ec);
+            uintmax_t summary_sz = fs::exists(summary, ec) ? fs::file_size(summary, ec) : 0;
+            sessions.push_back({path, summary, entry.last_write_time(ec), sz + summary_sz});
         }
-    }
-    std::sort(sessions.begin(), sessions.end(),
-              [](const SessionCandidate& a, const SessionCandidate& b) {
-                  return a.time > b.time;
-              });
-    const auto cutoff = fs::file_time_type::clock::now() - std::chrono::hours(24 * 30);
-    for (size_t i = 0; i < sessions.size(); ++i) {
-        const bool too_many = i >= 100;
-        const bool too_old = sessions[i].time < cutoff;
-        if ((!too_many && !too_old) || sessions[i].journal == session_journal_path_) {
-            continue;
+        return sessions;
+    };
+
+    // Pass 1: age/count limits (current session is always preserved).
+    {
+        std::vector<SessionCandidate> sessions = collectSessions();
+        std::sort(sessions.begin(), sessions.end(),
+                  [](const SessionCandidate& a, const SessionCandidate& b) {
+                      return a.time > b.time;
+                  });
+        const auto cutoff = fs::file_time_type::clock::now() - std::chrono::hours(24 * 30);
+        for (size_t i = 0; i < sessions.size(); ++i) {
+            const bool too_many = i >= 100;
+            const bool too_old = sessions[i].time < cutoff;
+            if ((!too_many && !too_old) || sessions[i].journal == session_journal_path_) {
+                continue;
+            }
+            fs::remove(sessions[i].journal, ec);
+            fs::remove(sessions[i].summary, ec);
         }
-        fs::remove(sessions[i].journal, ec);
-        fs::remove(sessions[i].summary, ec);
     }
 
     uintmax_t total = directorySize(diagnostics_dir_);
@@ -869,6 +885,32 @@ void DiagnosticsRecorder::cleanupStorage() {
         return;
     }
 
+    // Pass 2: still over cap. Evict OLDEST sessions before touching
+    // reports/. The current session is always preserved.
+    {
+        std::vector<SessionCandidate> sessions = collectSessions();
+        std::sort(sessions.begin(), sessions.end(),
+                  [](const SessionCandidate& a, const SessionCandidate& b) {
+                      return a.time < b.time;
+                  });
+        for (const auto& s : sessions) {
+            if (total <= kStorageCapBytes) break;
+            if (s.journal == session_journal_path_) continue;
+            fs::remove(s.journal, ec);
+            fs::remove(s.summary, ec);
+            total = s.size < total ? total - s.size : 0;
+            emitText("diagnostics", "diagnostics.cleanup", "{\"removed\":\"old_session\"}");
+        }
+    }
+
+    if (total <= kStorageCapBytes) {
+        return;
+    }
+
+    // Pass 3: STILL over cap. Evict oldest reports, but never the
+    // newest one (which is almost certainly the report the current
+    // freeze() just created — the operator-visible artifact MUST
+    // persist past cleanup).
     struct Candidate {
         fs::path path;
         fs::file_time_type time;
@@ -884,8 +926,12 @@ void DiagnosticsRecorder::cleanupStorage() {
     }
     std::sort(candidates.begin(), candidates.end(),
               [](const Candidate& a, const Candidate& b) { return a.time < b.time; });
-    for (const auto& c : candidates) {
+    // Walk oldest first but stop before the single newest entry so the
+    // operator's most recent save always survives.
+    const size_t stop_at = candidates.empty() ? 0 : candidates.size() - 1;
+    for (size_t i = 0; i < stop_at; ++i) {
         if (total <= kStorageCapBytes) break;
+        const auto& c = candidates[i];
         fs::remove(c.path, ec);
         total = c.size < total ? total - c.size : 0;
         emitText("diagnostics", "diagnostics.cleanup", "{\"removed\":\"old_report\"}");

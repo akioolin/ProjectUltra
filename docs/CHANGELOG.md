@@ -10,6 +10,54 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-13: Diagnostics cleanup eats the just-saved report
+
+**What was broken:** clicking "Save Bundle" in `ultra_gui` would log
+`[DIAG] Report created: …/reports/ultra-report-…zip` but the .zip
+file would be deleted within milliseconds of being written. Discovered
+when an operator clicked Save 3 times in a row and got zero zips on
+disk despite three successful "Report created" log lines.
+
+**Root cause:** `DiagnosticsRecorder::cleanupStorage()` in
+`src/diagnostics/diagnostics_recorder.cpp` ran after every `freeze()`,
+computed total diagnostics dir size, and if over `kStorageCapBytes`
+(then 64 MB = `AudioRing::kHardCapBytes`) it walked `reports/`
+sorted oldest-first and deleted until under cap. The sessions cleanup
+above it only removed sessions by count (>100) or age (>30 days) —
+never by size. A normal operator accumulating ~50 sessions @ ~3 MB
+each = 150 MB > 64 MB cap, then the freshly-created report became
+the only/oldest candidate in `reports/` and got eaten on the same
+`freeze()` call that created it.
+
+**What changed:**
+1. Storage cap raised from `1x AudioRing::kHardCapBytes` (64 MB) to
+   `8x` (512 MB). The previous value was 1.5x a single report's
+   size, leaving no operational headroom for normal session
+   accumulation.
+2. Cleanup is now a three-pass cascade:
+   - Pass 1 (unchanged): drop sessions older than 30 days or beyond
+     the 100-newest, current session preserved.
+   - Pass 2 (new): if still over cap, evict OLDEST sessions until
+     under cap; current session always preserved.
+   - Pass 3 (existing, fixed): if still over cap, evict oldest
+     reports — but **NEVER the single newest report**. The operator-
+     visible artifact MUST survive the same `freeze()` call that
+     created it.
+
+**Why this is the right fix:** the producer/consumer contract of
+`freeze()` is that the returned path is durable. A cleanup pass that
+violates that contract is a correctness bug, not a tuning knob. The
+"never the newest report" invariant is enforced in code by stopping
+the eviction loop at `candidates.size() - 1`. The cap raise to 512 MB
+is operator-realistic headroom — a shift's worth of sessions plus a
+handful of saved reports.
+
+**Test verification:** ctest 43/43 PASS. Manual test plan: open
+`ultra_gui`, click Save Bundle, verify the zip remains on disk after
+the log line prints.
+
+---
+
 ## 2026-05-13: TNC session reset after disconnect
 
 **What was broken:** a persistent `ultra_tnc` process could poison the
