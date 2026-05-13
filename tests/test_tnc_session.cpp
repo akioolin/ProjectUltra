@@ -4,13 +4,20 @@
 #include "ultra/version.hpp"
 
 #include <algorithm>
+#include <cstddef>
+#include <deque>
 #include <functional>
 #include <iostream>
 #include <initializer_list>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#ifdef ULTRA_TNC_TESTING
+#include "../tools/ultra_tnc.cpp"
+#endif
 
 using ultra::tnc::ModemAdapter;
 using ultra::tnc::ModemStats;
@@ -190,6 +197,281 @@ void enterConnected(Harness& h) {
     h.session.onModemConnected("VK2XYZ", "VK2ABC", 2300);
     h.clear();
 }
+
+#ifdef ULTRA_TNC_TESTING
+
+enum class SessionResult {
+    Timeout,
+    Connected,
+};
+
+struct SessionOutcome {
+    SessionResult result = SessionResult::Timeout;
+    bool connect_detected = false;
+    bool payload_received = false;
+    bool disconnected = false;
+};
+
+struct CapturingTncSink final : ultra::tnc::TNCBridgeEventSink {
+    int connected_events = 0;
+    int disconnected_events = 0;
+    int incoming_events = 0;
+    std::vector<std::vector<uint8_t>> data_received;
+
+    void postModemConnected(const std::string&, const std::string&, int) override {
+        ++connected_events;
+    }
+
+    void postModemDisconnected() override {
+        ++disconnected_events;
+    }
+
+    void postModemPTT(bool) override {}
+
+    void postModemDataReceived(std::vector<uint8_t> bytes) override {
+        data_received.push_back(std::move(bytes));
+    }
+
+    void postModemBufferLevel(int) override {}
+    void postModemSNR(float) override {}
+    void postModemBitrate(int) override {}
+
+    void postModemIncomingCall(std::string) override {
+        ++incoming_events;
+    }
+};
+
+ultra::tnc::config::Config makeTncConfig(const std::string& callsign) {
+    ultra::tnc::config::Config cfg;
+    cfg.callsign = callsign;
+    cfg.audio_input = "none";
+    cfg.audio_output = "none";
+    cfg.snr_db = 20.0f;
+    return cfg;
+}
+
+ultra::protocol::ConnectionConfig makeSessionConnectionConfig() {
+    ultra::protocol::ConnectionConfig cfg;
+    cfg.connect_timeout_ms = 8000;
+    cfg.disconnect_timeout_ms = 1000;
+    cfg.connect_retries = 3;
+    return cfg;
+}
+
+struct TncIntegrationStation {
+    ultra::tnc::config::Config cfg;
+    ultra::protocol::ConnectionConfig connection_cfg;
+    ultra::protocol::ProtocolEngine engine;
+    ultra::gui::AudioEngine audio;
+    ultra::tnc::TNCBridge bridge;
+    UltraTNCStation station;
+    CapturingTncSink sink;
+
+    explicit TncIntegrationStation(const std::string& callsign)
+        : cfg(makeTncConfig(callsign)),
+          connection_cfg(makeSessionConnectionConfig()),
+          engine(connection_cfg),
+          bridge(engine, audio),
+          station(cfg, engine, audio, bridge) {
+        bridge.attachEventSink(&sink);
+        bridge.setMyCall({callsign});
+        bridge.setBandwidth(2300);
+        bridge.start();
+    }
+
+    ~TncIntegrationStation() {
+        bridge.stop();
+        station.stop();
+    }
+};
+
+struct TncIntegrationPair {
+    TncIntegrationStation a{"ALPHA"};
+    TncIntegrationStation b{"BRAVO"};
+    std::deque<std::vector<float>> audio_to_a;
+    std::deque<std::vector<float>> audio_to_b;
+
+    TncIntegrationPair() {
+        installTxCallbacks(a, audio_to_b);
+        installTxCallbacks(b, audio_to_a);
+    }
+
+    void installTxCallbacks(TncIntegrationStation& tx,
+                            std::deque<std::vector<float>>& peer_queue) {
+        tx.engine.setTxDataCallback([this, &tx, &peer_queue](const ultra::Bytes& data) {
+            enqueueAudio(peer_queue, tx.station.testTransmitFrame(data));
+        });
+        tx.engine.setTransmitBurstCallback([this, &tx, &peer_queue](
+                                               const std::vector<ultra::Bytes>& frames) {
+            enqueueAudio(peer_queue, tx.station.testTransmitBurst(frames));
+        });
+        tx.engine.setPingTxCallback([this, &tx, &peer_queue]() {
+            enqueueAudio(peer_queue, tx.station.testTransmitPing());
+        });
+        tx.engine.setPingReceivedCallback([this, &tx, &peer_queue]() {
+            enqueueAudio(peer_queue, tx.station.testTransmitPing());
+        });
+    }
+
+    void enqueueAudio(std::deque<std::vector<float>>& queue, std::vector<float> samples) {
+        if (samples.empty()) {
+            return;
+        }
+        std::vector<float> audio;
+        audio.resize(48000, 0.0f);
+        audio.insert(audio.end(), samples.begin(), samples.end());
+        audio.resize(audio.size() + 96000, 0.0f);
+        queue.push_back(std::move(audio));
+    }
+
+    void feedPacket(TncIntegrationStation& rx, const std::vector<float>& audio) {
+        constexpr size_t kChunk = 4800;
+        for (size_t pos = 0; pos < audio.size(); pos += kChunk) {
+            const size_t len = std::min(kChunk, audio.size() - pos);
+            rx.station.testFeedAudio(audio.data() + pos, len);
+            rx.station.testProcessDecoder();
+        }
+    }
+
+    bool deliverOnePacket() {
+        if (!audio_to_a.empty()) {
+            auto audio = std::move(audio_to_a.front());
+            audio_to_a.pop_front();
+            feedPacket(a, audio);
+            return true;
+        }
+        if (!audio_to_b.empty()) {
+            auto audio = std::move(audio_to_b.front());
+            audio_to_b.pop_front();
+            feedPacket(b, audio);
+            return true;
+        }
+        return false;
+    }
+
+    void tickBoth(uint32_t ms) {
+        a.station.tick(ms);
+        b.station.tick(ms);
+    }
+
+    void feedIdleSilence() {
+        const std::vector<float> silence(96000, 0.0f);
+        feedPacket(a, silence);
+        feedPacket(b, silence);
+    }
+
+    template <typename Predicate>
+    bool runUntil(Predicate done, uint32_t timeout_ms) {
+        uint32_t elapsed_ms = 0;
+        int iterations = 0;
+        while (elapsed_ms <= timeout_ms && iterations++ < 20000) {
+            if (done()) {
+                return true;
+            }
+            const bool delivered = deliverOnePacket();
+            tickBoth(delivered ? 20 : 100);
+            elapsed_ms += delivered ? 20 : 100;
+        }
+        return done();
+    }
+
+    SessionOutcome runSession(TncIntegrationStation& initiator,
+                              TncIntegrationStation& responder,
+                              const std::vector<uint8_t>& payload) {
+        SessionOutcome outcome;
+        auto& initiator_rx_queue = (&initiator == &a) ? audio_to_a : audio_to_b;
+        const int responder_connects_before =
+            responder.engine.getStats().connects_received;
+        const size_t responder_payloads_before = responder.sink.data_received.size();
+
+        initiator.bridge.startConnect(initiator.cfg.callsign, responder.cfg.callsign);
+
+        const bool connected = runUntil([&] {
+            return initiator.engine.isConnected() && responder.engine.isConnected();
+        }, 30000);
+        outcome.connect_detected =
+            responder.engine.getStats().connects_received > responder_connects_before;
+        if (!connected) {
+            return outcome;
+        }
+        outcome.result = SessionResult::Connected;
+
+        if (initiator.bridge.sendBinary(payload)) {
+            outcome.payload_received = runUntil([&] {
+                const auto first = responder.sink.data_received.begin() +
+                                   static_cast<std::ptrdiff_t>(responder_payloads_before);
+                return std::find(first, responder.sink.data_received.end(), payload) !=
+                       responder.sink.data_received.end();
+            }, 30000);
+        }
+
+        initiator.bridge.disconnect();
+        const bool initiator_disconnected = runUntil([&] {
+            return initiator.engine.getState() == ultra::protocol::ConnectionState::DISCONNECTED;
+        }, 30000);
+        if (initiator_disconnected) {
+            initiator_rx_queue.clear();
+        }
+        outcome.disconnected = runUntil([&] {
+            if (initiator_disconnected) {
+                initiator_rx_queue.clear();
+            }
+            return initiator.engine.getState() == ultra::protocol::ConnectionState::DISCONNECTED &&
+                   responder.engine.getState() == ultra::protocol::ConnectionState::DISCONNECTED;
+        }, 30000);
+        if (outcome.disconnected) {
+            feedIdleSilence();
+        }
+
+        return outcome;
+    }
+
+    std::string describeStates() const {
+        std::ostringstream out;
+        const auto a_stats = a.engine.getStats();
+        const auto b_stats = b.engine.getStats();
+        const auto a_dec = a.station.testDecoderStats();
+        const auto b_dec = b.station.testDecoderStats();
+        out << "A=" << ultra::protocol::connectionStateToString(a.engine.getState())
+            << " B=" << ultra::protocol::connectionStateToString(b.engine.getState())
+            << " A.rx_connects=" << a_stats.connects_received
+            << " B.rx_connects=" << b_stats.connects_received
+            << " A.failed=" << a_stats.connects_failed
+            << " B.failed=" << b_stats.connects_failed
+            << " A.decoded=" << a_dec.frames_decoded
+            << " A.decode_failed=" << a_dec.frames_failed
+            << " A.pings=" << a_dec.pings_received
+            << " B.decoded=" << b_dec.frames_decoded
+            << " B.decode_failed=" << b_dec.frames_failed
+            << " B.pings=" << b_dec.pings_received
+            << " queued_to_A=" << audio_to_a.size()
+            << " queued_to_B=" << audio_to_b.size();
+        return out.str();
+    }
+};
+
+void testTwoSessionsSameEnginePairBothSucceed() {
+    ultra::setLogLevel(ultra::LogLevel::ERROR);
+
+    TncIntegrationPair pair;
+
+    const std::vector<uint8_t> first_payload = {'s', 'e', 's', 's', 'i', 'o', 'n', '1'};
+    const SessionOutcome first = pair.runSession(pair.a, pair.b, first_payload);
+    expect(first.result == SessionResult::Connected, "session 1 did not connect");
+    expect(first.connect_detected, "session 1 CONNECT was not counted by responder");
+    expect(first.payload_received, "session 1 payload was not delivered");
+    expect(first.disconnected, "session 1 did not disconnect cleanly");
+
+    const std::vector<uint8_t> second_payload = {'s', 'e', 's', 's', 'i', 'o', 'n', '2'};
+    const SessionOutcome second = pair.runSession(pair.b, pair.a, second_payload);
+    expect(second.result == SessionResult::Connected,
+           "session 2 did not connect: " + pair.describeStates());
+    expect(second.connect_detected, "session 2 CONNECT was not counted by responder");
+    expect(second.payload_received, "session 2 payload was not delivered");
+    expect(second.disconnected, "session 2 did not disconnect cleanly");
+}
+
+#endif
 
 } // namespace
 
@@ -807,6 +1089,13 @@ int main() {
         expect(h.data_out.size() == 1, "expected one data_out call");
         expect(h.data_out.front() == plaintext, "decompressed bytes mismatch");
     });
+
+#ifdef ULTRA_TNC_TESTING
+    runner.group("Integration");
+    runner.run("TwoSessionsSameEnginePairBothSucceed", [] {
+        testTwoSessionsSameEnginePairBothSucceed();
+    });
+#endif
 
     runner.group("Tick");
     runner.run("30 seconds does not emit IAMALIVE", [] {

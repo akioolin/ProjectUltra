@@ -492,7 +492,24 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         // Stay "connected" during DISCONNECTING so we can receive the ACK via OFDM
         bool modem_connected = (state == protocol::ConnectionState::CONNECTED ||
                                 state == protocol::ConnectionState::DISCONNECTING);
+
+        // BUG-TNC-SESSION-001 fix (port from tools/ultra_tnc.cpp): on
+        // transition to DISCONNECTED, quiesce the audio input producer
+        // before the modem performs its decoder/encoder reset, then drain
+        // any kernel-queued capture samples and resume. Without this, a
+        // multi-megasample capture backlog can dump into the freshly
+        // reset decoder and bury the next session's CONNECT_ACK window.
+        const bool wrap_audio_quiesce =
+            (state == protocol::ConnectionState::DISCONNECTED) && was_modem_connected_;
+        if (wrap_audio_quiesce) {
+            audio_.pauseInput();
+        }
         modem_.setConnected(modem_connected);
+        if (wrap_audio_quiesce) {
+            audio_.drainInput();
+            audio_.resumeInput();
+        }
+        was_modem_connected_ = modem_connected;
 
         std::string msg;
         switch (state) {

@@ -194,6 +194,7 @@ void AudioEngine::closeInput() {
         input_device_ = 0;
     }
     capturing_ = false;
+    resume_capture_after_pause_ = false;
     input_queue_mode_ = false;
 }
 
@@ -297,6 +298,7 @@ void AudioEngine::startCapture() {
     if (input_device_ != 0) {
         SDL_PauseAudioDevice(input_device_, 0);
         capturing_ = true;
+        resume_capture_after_pause_ = false;
     }
 }
 
@@ -304,6 +306,37 @@ void AudioEngine::stopCapture() {
     if (input_device_ != 0) {
         SDL_PauseAudioDevice(input_device_, 1);
         capturing_ = false;
+        resume_capture_after_pause_ = false;
+    }
+}
+
+void AudioEngine::pauseInput() {
+    if (input_device_ == 0) {
+        resume_capture_after_pause_ = false;
+        return;
+    }
+
+    const bool was_capturing = capturing_.exchange(false);
+    resume_capture_after_pause_ = was_capturing;
+    SDL_PauseAudioDevice(input_device_, 1);
+}
+
+void AudioEngine::drainInput() {
+    if (input_device_ != 0 && input_queue_mode_) {
+        SDL_ClearQueuedAudio(input_device_);
+    }
+    clearRxBuffer();
+}
+
+void AudioEngine::resumeInput() {
+    if (input_device_ == 0) {
+        resume_capture_after_pause_ = false;
+        return;
+    }
+
+    if (resume_capture_after_pause_.exchange(false)) {
+        SDL_PauseAudioDevice(input_device_, 0);
+        capturing_ = true;
     }
 }
 

@@ -98,6 +98,9 @@ public:
     // Capture control
     void startCapture();
     void stopCapture();
+    void pauseInput();
+    void drainInput();
+    void resumeInput();
     bool isCapturing() const { return capturing_; }
     void clearRxBuffer();  // Clear captured audio buffer
     void setRxMuted(bool muted) { rx_muted_ = muted; }  // Prevent callback from firing
@@ -156,6 +159,7 @@ private:
     // State
     std::atomic<bool> playing_{false};
     std::atomic<bool> capturing_{false};
+    std::atomic<bool> resume_capture_after_pause_{false};
     std::atomic<bool> rx_muted_{false};  // Prevent RX callback from firing during TX
     bool initialized_ = false;
     bool owns_audio_subsystem_ = false;

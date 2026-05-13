@@ -33,6 +33,22 @@ add_test(NAME Protocol COMMAND test_protocol)
 
 add_executable(test_tnc_session test_tnc_session.cpp)
 target_link_libraries(test_tnc_session PRIVATE ultra_core)
+if(SDL2_FOUND)
+    target_sources(test_tnc_session PRIVATE
+        ../tools/ultra_tnc_config.cpp
+        ../src/gui/audio_engine.cpp
+        ${ULTRA_STREAMING_DECODER_SOURCES}
+        ../src/gui/modem/streaming_encoder.cpp
+    )
+    target_include_directories(test_tnc_session PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
+    )
+    target_compile_definitions(test_tnc_session PRIVATE
+        ULTRA_TNC_TESTING
+        SDL_MAIN_HANDLED
+    )
+endif()
 add_test(NAME TNCSession COMMAND test_tnc_session)
 
 # ultra_tnc config parsing — pure unit tests, no SDL/audio.

@@ -213,6 +213,10 @@ void StreamingDecoder::decodeCurrentFrame() {
         return;
     }
 
+    const uint32_t gen_at_start = reset_generation_.load(std::memory_order_acquire);
+    auto resetDuringDecode = [this, gen_at_start]() {
+        return reset_generation_.load(std::memory_order_acquire) != gen_at_start;
+    };
     bool is_ofdm = protocol::isOFDMMode(mode_);
 
     // Determine how many samples to copy from buffer
@@ -451,6 +455,9 @@ void StreamingDecoder::decodeCurrentFrame() {
                         }
                         if (frame_callback_) {
                             frame_callback_(control_result);
+                        }
+                        if (resetDuringDecode()) {
+                            return;
                         }
                         {
                             std::lock_guard<std::mutex> slock(stats_mutex_);
@@ -1122,6 +1129,9 @@ void StreamingDecoder::decodeCurrentFrame() {
         if ((result.success || deliver_partial_mc_dpsk) && frame_callback_) {
             frame_callback_(result);
         }
+        if (resetDuringDecode()) {
+            return;
+        }
 
         LOG_MODEM(INFO, "[%s] StreamingDecoder: Frame decoded, %d/%d CWs, SNR=%.1f dB, CFO=%.1f Hz",
                   log_prefix_.c_str(), result.codewords_ok, result.codewords_ok + result.codewords_failed,
@@ -1270,6 +1280,9 @@ void StreamingDecoder::decodeCurrentFrame() {
                     frame_queue_.push(next_result);
                 }
                 if (next_result.success && frame_callback_) frame_callback_(next_result);
+                if (resetDuringDecode()) {
+                    return;
+                }
 
                 LOG_MODEM(INFO, "[%s] Burst block %d decoded: %d/%d CWs",
                           log_prefix_.c_str(), burst_blocks_decoded_,

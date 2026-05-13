@@ -177,11 +177,27 @@ void ModemEngine::setConnected(bool connected) {
         // Switching to disconnected state - use robust mode for RX
         decoder_->setRate(CodeRate::R1_4);
 
-        // CRITICAL: Update StreamingDecoder for disconnected state
-        // Use MC_DPSK to detect new PINGs (chirp-based sync)
+        // BUG-TNC-SESSION-001 fix (port from tools/ultra_tnc.cpp): a persistent
+        // ModemEngine across multiple sessions must perform the same RX/TX
+        // state reset on disconnect that ultra_tnc does, otherwise the next
+        // session's first CONNECT_ACK gets rejected at the early
+        // `cw_ok=0/cw_fail=0/is_ping=0` path because stale negotiated
+        // modulation/code-rate, encoder mode, and cached peer CFO survive
+        // the session boundary. Audio-engine pause/drain/resume is handled
+        // by the App layer around this call (see app.cpp connection-changed
+        // callback).
         if (streaming_decoder_) {
-            streaming_decoder_->setMode(protocol::WaveformMode::MC_DPSK, false);  // false = disconnected
+            streaming_decoder_->reset();
+            streaming_decoder_->setMode(protocol::WaveformMode::MC_DPSK, false);
+            streaming_decoder_->setDataMode(Modulation::DQPSK, CodeRate::R1_4);
         }
+        if (streaming_encoder_) {
+            streaming_encoder_->setMode(protocol::WaveformMode::MC_DPSK);
+            streaming_encoder_->setDataMode(Modulation::DQPSK, CodeRate::R1_4);
+        }
+        data_modulation_ = Modulation::DQPSK;
+        data_code_rate_ = CodeRate::R1_4;
+        peer_cfo_hz_ = 0.0f;
 
         // Keep using connected waveform for the next TX (DISCONNECT ACK)
         // Save the current negotiated waveform BEFORE it might be reset

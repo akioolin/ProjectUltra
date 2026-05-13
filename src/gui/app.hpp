@@ -72,6 +72,12 @@ private:
     AudioEngine audio_;
     ModemEngine modem_;
 
+    // BUG-TNC-SESSION-001 fix: track previous modem-connected state so the
+    // connection-changed callback can detect transitions to DISCONNECTED and
+    // wrap the audio input producer with pause/drain/resume around the
+    // decoder reset (see app.cpp connection-changed callback).
+    bool was_modem_connected_ = false;
+
     // Modem state
     ModemConfig config_;
     ultra::ModemStats stats_;  // From types.hpp for status widget

@@ -10,6 +10,57 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-13: TNC session reset after disconnect
+
+**What was broken:** a persistent `ultra_tnc` process could poison the
+next PAT session after a clean disconnect. The second peer's fresh
+MC-DPSK CONNECT chirp was detected, but the decoder reached the early
+reject path (`cw_ok=0/cw_fail=0/is_ping=0`) because StreamingDecoder
+state, cached CFO, and post-negotiation waveform state survived the
+session boundary. R1 added the decoder/session reset, but hardware
+showed that reset alone was insufficient: resetting decoder positions
+while SDL/CoreAudio capture continued producing input could dump a stale
+capture backlog into the freshly reset decoder, leading to multi-megasample
+RX buffer drops before the next CONNECT_ACK window. The same lifecycle
+boundary also needed an in-flight decode guard so the decoded-frame callback
+could not reset the decoder and then let the old decode path commit stale
+cursor positions afterward.
+
+**What changed:** `tools/ultra_tnc.cpp::setConnected(false)` now pauses
+audio input before the reset, performs a full `StreamingDecoder::reset()`,
+re-enters disconnected MC-DPSK search, re-establishes the MC-DPSK decoder
+mode and DQPSK R1/4 handshake decode profile, restores the TX encoder to
+MC-DPSK DQPSK R1/4 for the next handshake, disables burst interleaving,
+clears the cached negotiated CFO, drains queued input audio, and resumes
+capture; the TNC also serializes input polling/feed with that reset so no
+already-dequeued capture vector can enter the decoder after the reset.
+`src/gui/audio_engine.{hpp,cpp}` adds input-only pause, drain, and resume
+helpers that preserve the open device and only discard queued RX samples.
+`src/gui/modem/streaming_ofdm_decode.cpp` now checks the decoder reset
+generation after decoded-frame callbacks and abandons stale post-callback
+cursor updates if the disconnect reset ran.
+
+**Why this is the right fix:** disconnect is the modem session boundary.
+Resetting RX there matches the empirically good process-restart state
+without widening detection thresholds or changing the wire image. The
+audio quiesce makes that state transition producer/consumer coherent:
+the decoder is reset only while the input producer is paused, and stale
+kernel/user-space capture samples are discarded before the next session's
+fresh chirp is allowed through. The reset-generation check makes the consumer
+side coherent as well: an in-flight decode cannot overwrite the freshly reset
+search cursor with pre-disconnect positions. `StreamingEncoder::setMode()`
+preserves `narrowband_control_`, so the TX handshake reset does not discard
+a narrowband-control override.
+
+**Verification:** added `TwoSessionsSameEnginePairBothSucceed` to
+`tests/test_tnc_session.cpp`, which reuses one engine/encoder/decoder pair
+for two back-to-back sessions and reverses the initiator on session 2.
+Run with `cmake --build build --target test_tnc_session -j4`,
+`build/tests/test_tnc_session`, and
+`ctest --test-dir build --output-on-failure`.
+
+---
+
 ## 2026-05-11: OTA field diagnostics (Phase 1 + 2)
 
 **Why:** to start OTA testing with non-developer operators, we need

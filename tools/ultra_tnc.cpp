@@ -28,6 +28,7 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <string>
 #include <thread>
@@ -47,6 +48,7 @@ using ultra::protocol::ConnectionState;
 using ultra::protocol::WaveformMode;
 namespace v2 = ultra::protocol::v2;
 
+#ifndef ULTRA_TNC_TESTING
 std::atomic<bool> g_stop_requested{false};
 std::atomic<bool> g_report_requested{false};
 
@@ -66,6 +68,7 @@ void printBuildProvenance(std::ostream& out) {
         << " built=" << ultra::kBuildTimeUtc
         << " os=" << ultra::kBuildOS << "\n";
 }
+#endif
 
 // Config + CLI/config parsing live in ultra_tnc_config.cpp so the
 // pure parsing logic can be exercised by unit tests without pulling
@@ -75,6 +78,7 @@ using Config = ultra::tnc::config::Config;
 using ultra::tnc::config::isNoneDevice;
 using ultra::tnc::config::lower;
 
+#ifndef ULTRA_TNC_TESTING
 ultra::ptt::PttConfig makePttConfig(const Config& cfg) {
     ultra::ptt::PttConfig ptt;
     if (cfg.ptt_hamlib) {
@@ -107,6 +111,7 @@ ultra::ptt::PttConfig makePttConfig(const Config& cfg) {
     }
     return ptt;
 }
+#endif
 
 std::string audioDeviceLabel(const std::string& device) {
     return (device.empty() || lower(device) == "default") ? "Default" : device;
@@ -118,6 +123,7 @@ void printTncAudioDeviceHint() {
                  "or ultra_tnc.conf.\n";
 }
 
+#ifndef ULTRA_TNC_TESTING
 struct LogFileCloser {
     void operator()(std::FILE* file) const {
         if (file) std::fclose(file);
@@ -155,6 +161,7 @@ bool configureLogging(const Config& cfg, LogFileHandle& log_file) {
     }
     return true;
 }
+#endif
 
 class UltraTNCStation {
 public:
@@ -249,6 +256,7 @@ public:
         engine_.tick(elapsed_ms);
 
         if (input_enabled_) {
+            std::lock_guard<std::mutex> lock(input_audio_mutex_);
             auto samples = audio_.getRxSamples(4096);
             if (!samples.empty()) {
                 decoder_.feedAudio(samples);
@@ -257,6 +265,32 @@ public:
 
         bridge_.tick(elapsed_ms);
     }
+
+#ifdef ULTRA_TNC_TESTING
+    std::vector<float> testTransmitFrame(const Bytes& data) {
+        return transmitFrame(data);
+    }
+
+    std::vector<float> testTransmitBurst(const std::vector<Bytes>& frames) {
+        return transmitBurst(frames);
+    }
+
+    std::vector<float> testTransmitPing() {
+        return transmitPing();
+    }
+
+    void testFeedAudio(const float* samples, size_t count) {
+        decoder_.feedAudio(samples, count);
+    }
+
+    void testProcessDecoder() {
+        decoder_.processBuffer();
+    }
+
+    ultra::gui::DecoderStats testDecoderStats() const {
+        return decoder_.getStats();
+    }
+#endif
 
 private:
     static constexpr int kSampleRate = 48000;
@@ -279,6 +313,7 @@ private:
 
     std::atomic<bool> running_{false};
     std::thread decode_thread_;
+    std::mutex input_audio_mutex_;
     bool input_enabled_ = false;
     bool output_enabled_ = false;
     bool handshake_complete_ = false;
@@ -575,13 +610,24 @@ private:
                 decoder_.setKnownCFO(last_cfo_hz_);
             }
         } else {
+            std::lock_guard<std::mutex> lock(input_audio_mutex_);
+            audio_.pauseInput();
+            decoder_.reset();
             decoder_.setMode(WaveformMode::MC_DPSK, false);
+            decoder_.setDataMode(Modulation::DQPSK, CodeRate::R1_4);
             encoder_.setBurstInterleave(false);
             decoder_.setBurstInterleave(false);
+            data_modulation_ = Modulation::DQPSK;
+            data_code_rate_ = CodeRate::R1_4;
             negotiated_waveform_ = WaveformMode::MC_DPSK;
             handshake_complete_ = false;
             ofdm_config_ = base_ofdm_config_;
             setWaveformMode(WaveformMode::MC_DPSK);
+            encoder_.setMode(WaveformMode::MC_DPSK);
+            encoder_.setDataMode(Modulation::DQPSK, CodeRate::R1_4);
+            last_cfo_hz_ = 0.0f;
+            audio_.drainInput();
+            audio_.resumeInput();
         }
     }
 
@@ -657,6 +703,7 @@ private:
 
 } // namespace
 
+#ifndef ULTRA_TNC_TESTING
 int main(int argc, char** argv) {
     Config cfg;
     if (!ultra::tnc::config::parseArgs(argc, argv, cfg)) {
@@ -859,3 +906,4 @@ int main(int argc, char** argv) {
     diagnostics.stop();
     return 0;
 }
+#endif
