@@ -290,6 +290,14 @@ bool HamlibRigDriver::validateConfigLocked() {
 
 void HamlibRigDriver::workerLoop() {
     auto next_frequency_poll = std::chrono::steady_clock::now();
+    // Exponential backoff when ensureRigOpen() keeps failing — prevents
+    // the worker from spinning a Hamlib retry storm every 1.5 s while a
+    // misconfigured port (e.g. operator picked a rig but didn't enter a
+    // serial port) keeps returning -6. Resets to the nominal poll
+    // cadence as soon as a single open succeeds. Caps at 60 s.
+    auto open_backoff = std::chrono::milliseconds(0);
+    constexpr auto kBackoffStart = std::chrono::seconds(5);
+    constexpr auto kBackoffMax = std::chrono::seconds(60);
 
     for (;;) {
         Command command;
@@ -315,9 +323,18 @@ void HamlibRigDriver::workerLoop() {
 
         if (have_command) {
             handleCommand(std::move(command));
+            if (rig_open_) {
+                open_backoff = std::chrono::milliseconds(0);
+            }
         } else if (poll_frequency) {
             if (ensureRigOpen()) {
+                open_backoff = std::chrono::milliseconds(0);
                 (void)readFrequencyOnce();
+            } else {
+                open_backoff = open_backoff.count() == 0
+                    ? kBackoffStart
+                    : std::min<std::chrono::milliseconds>(open_backoff * 2, kBackoffMax);
+                next_frequency_poll = std::chrono::steady_clock::now() + open_backoff;
             }
         }
     }
@@ -347,6 +364,19 @@ void HamlibRigDriver::handleCommand(Command command) {
 bool HamlibRigDriver::ensureRigOpen() {
     if (rig_open_) {
         return true;
+    }
+
+    // Validate port path up front. Real rigs (model != 1) need a serial
+    // port; if the operator hasn't configured one, Hamlib's rig_open()
+    // descends into a 4-retry storm against an empty path before
+    // returning -6 ("No such file or directory"). Fail fast with a
+    // clear operator-facing error instead.
+    if (config_.hamlib_model_id != 1 && config_.hamlib_rig_port.empty()) {
+        setLastError(
+            "Hamlib rig port not configured. Set the Serial Port in the "
+            "Radio settings (e.g. /dev/cu.usbserial-FT001 or COM5).");
+        connected_.store(false, std::memory_order_release);
+        return false;
     }
 
     std::call_once(g_hamlib_init_once, initializeHamlib);
