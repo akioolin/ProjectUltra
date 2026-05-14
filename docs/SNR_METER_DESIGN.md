@@ -107,6 +107,36 @@ DATA bursts.
 needs the pilot-power-vs-data-power asymmetry verified empirically;
 sensitive to ICI and residual CFO contamination.
 
+### Phase-1 OFDM calibration derivation (2026-05-14)
+
+The current `pilot_snr_db` diagnostic is anchored to the LTS residual noise
+path in `channel_equalizer_lts.cpp`. The modulator emits data symbols, LTS
+Zadoff-Chu symbols, and BPSK pilot symbols with unit complex magnitude, so the
+actual pilot-vs-data symbol power ratio is `1.0` (`0 dB`). There is no hidden
+`+3 dB` pilot boost in `src/ofdm/modulator.cpp`.
+
+The FFT scaling is explicit: `FFT::inverse()` applies `1/N` at TX and
+`FFT::forward()` applies `1.0` at RX. After real passband upconversion and
+complex downconversion, each active positive-frequency bin carries a common
+`output_scale/2` signal factor. That factor cancels in the LS channel estimate
+`H = R / X`; it is not an SNR calibration offset.
+
+For AWGN, the simulator sets real audio noise power
+`sigma^2 = kModemReferencePower / SNR_broadband`. The RX FFT integrates that
+white noise into each active complex bin with expected power `N * sigma^2`.
+Therefore the broadband reference is:
+
+```text
+SNR_broadband = N * kModemReferencePower / noise_bin
+```
+
+The missing constant is in the repeated-LTS residual estimator. It computes
+`noise_power = E{|H1 - H0|^2} / 4`. For independent per-symbol FFT-bin noises,
+`E{|H1 - H0|^2} = 2N * sigma^2`, so the stored residual is
+`N * sigma^2 / 2`. Using it directly makes the broadband SNR read two times
+high, which is `10*log10(2) = 3.0103 dB`. That accounts for the observed
+`+2.71 dB` AWGN bias without a fitted offset.
+
 ### Recommended path
 
 Prototype both. Ship the simpler one first (probably A — idle-noise) as

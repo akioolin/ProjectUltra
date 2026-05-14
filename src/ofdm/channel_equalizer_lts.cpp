@@ -29,6 +29,34 @@ void OFDMDemodulator::Impl::updateLastSNREstimate(float signal_power,
     // visible. Under selective fading, temporal pilot residuals are not a clean
     // noise proxy, so the caller can keep the LTS residual and reference it to
     // the calibrated broadband noise floor instead.
+    //
+    // Absolute broadband-SNR calibration derivation (Phase 1):
+    //
+    //   TX mapping in src/ofdm/modulator.cpp:
+    //     - data, LTS, and pilots are unit-magnitude complex subcarrier symbols
+    //       (DQPSK differential states, Zadoff-Chu LTS, and BPSK pilots all have
+    //       |X_k| = 1), so the pilot-vs-data power ratio is 1.0 (0 dB).
+    //     - FFT::inverse() applies 1/N, and FFT::forward() applies 1.0.
+    //     - real passband modulation makes each received positive-frequency bin
+    //       carry output_scale/2, but that signal factor cancels in the LS
+    //       residual R_k / X_k used here.
+    //
+    //   AWGN reference:
+    //     - SimulatedChannel sizes real white audio noise as
+    //       sigma^2 = kModemReferencePower / SNR_broadband.
+    //     - after downconversion, an unnormalized N-point FFT gives each active
+    //       complex bin noise power N * sigma^2.
+    //     - therefore SNR_broadband = N * kModemReferencePower / noise_bin.
+    //
+    //   Two-LTS residual normalization:
+    //     - estimateChannelFromLTS() forms noise_power = E|H1 - H0|^2 / 4.
+    //     - for independent per-symbol FFT-bin noises, E|H1 - H0|^2 = 2N*sigma^2.
+    //     - so the stored noise_power is N*sigma^2/2, i.e. 3.0103 dB too small
+    //       for a single-symbol FFT-bin noise reference.
+    //
+    // Phase 2 must apply a 2.0x denominator correction at this site. That
+    // derivation accounts for the observed +2.71 dB AWGN bias without a fitted
+    // offset; the remaining ~0.3 dB is finite-sample/channel-search variance.
     if (noise_reference_only) {
         const float broadband_snr_db = 10.0f * std::log10(
             static_cast<float>(config.fft_size * sim::kModemReferencePower) /
