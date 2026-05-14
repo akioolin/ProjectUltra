@@ -89,6 +89,17 @@ doing while we're not talking").
 **Cons:** doesn't give a per-frame number; lags by one idle window; can
 be confused by carriers from other stations sharing the band.
 
+**Implementation status (2026-05-14, `feat/mcdpsk-honest-snr`):**
+Option A is implemented for MC-DPSK and other non-OFDM frames. The
+idle classifier is the existing `StreamingDecoder` acquisition path:
+only SEARCHING-state audio that has gone through the chirp/LTS detector
+and produced no lock is admitted as idle. The estimator applies the
+actual 101-tap Blackman FIR bandpass coefficients used for the modem
+audio filter family and normalizes by `sum(h^2)` so the finite FIR
+integration bandwidth is removed without a fitted dB offset. Non-OFDM
+`populateDecodeMetrics()` publishes the idle value when available and
+logs the saturated chirp value beside it for comparison.
+
 ### Option B — Pilot/LTS normalized to broadband
 
 1. Take the per-carrier residual variance already accumulated in
@@ -235,7 +246,8 @@ Real radio path:
 
 A merge of the calibrated-meter branch is acceptable only if:
 
-1. `ChannelModemSNRMeterCalibration` CTest gate passes ±1.5 dB on
+1. `ChannelModemSNRMeterCalibration` and
+   `ChannelIdleNoiseSNRCalibration` CTest gates pass ±1.5 dB on
    AWGN, ±3 dB on Good/Moderate fading.
 2. Protocol-context validation (Step 5) shows operator-facing SNR within
    the documented tolerance during DATA phase in `cli_simulator` cells.

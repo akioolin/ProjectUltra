@@ -10,6 +10,38 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-14: MC-DPSK idle-noise SNR meter local validation complete
+
+**What was broken:** Non-OFDM frames, including MC-DPSK CONNECT and
+CONNECT_ACK, still published the chirp-correlation SNR. On calibrated
+AWGN SNR 15, the chirp matched filter reads about `27.9 dB`; the
+handshake therefore carried a saturated number rather than an honest
+receiver noise-floor measurement.
+
+**What changed:** Added `IdleNoiseSNREstimator`, wired it into
+`StreamingDecoder`, and substituted its value in `populateDecodeMetrics()`
+for non-OFDM frames when an idle estimate is available. The estimator uses
+the same 101-tap Blackman FIR bandpass family as the input filter and
+documents the coefficient-energy normalization at the correction site:
+`E{y^2} = sigma^2 * sum(h^2)`, so idle filtered RMS is divided by the
+actual FIR energy before comparing to `kModemReferenceRms^2`. No wire
+format, channel calibration, or mode-ladder threshold changed.
+
+**Validation through local Phase 5:**
+
+| Check | Result |
+|-------|--------|
+| Phase 1 AWGN probe | `idle_snr_probe` measured configured SNR +0.04 dB across -5..20 dB AWGN |
+| Phase 2 decoder wiring | `idle_snr_probe --streaming` measured configured SNR -0.01 dB across -5..20 dB AWGN |
+| Phase 3 CTest | `ChannelIdleNoiseSNRCalibration` PASS: AWGN mean bias -0.03 dB, Good/Moderate -0.02 dB |
+| Phase 4 protocol context | AWGN15 CONNECT/CONNECT_ACK logs show `chirp_snr=27.9 dB idle_snr=15.0 dB`; decoded frame SNR publishes `15.0 dB` |
+| Phase 5 mode picks | Good15 10/10 `OFDM-CHIRP DQPSK R1/2`; Moderate15 10/10 `OFDM-CHIRP DQPSK R1/2`; Good10 10/10 `OFDM-CHIRP DQPSK R1/4` |
+
+**Status:** Local Phases 1-5 passed on branch `feat/mcdpsk-honest-snr`.
+Pi5 hardware validation is still pending; do not merge until Phase 6 passes.
+
+---
+
 ## 2026-05-14: Calibrated absolute OFDM SNR meter ready for review
 
 **What was broken:** The residual-SNR diagnostic was linear on AWGN but read
