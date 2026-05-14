@@ -137,6 +137,27 @@ The missing constant is in the repeated-LTS residual estimator. It computes
 high, which is `10*log10(2) = 3.0103 dB`. That accounts for the observed
 `+2.71 dB` AWGN bias without a fitted offset.
 
+### Phase-4 fading architecture (2026-05-14)
+
+The repeated-LTS difference is not the operator-facing fading estimator. Under
+Watterson channels, `H1 - H0` contains real channel motion as well as AWGN, so
+the instantaneous value compresses at high SNR. The calibrated pilot meter now
+uses FFT guard bins from the LTS symbols as the broadband noise reference:
+
+```text
+noise_bin = mean(|Y_guard[k]|^2)
+SNR_broadband = N_fft * kModemReferencePower / noise_bin
+```
+
+The selected guard bins are on the positive-frequency side immediately beyond
+the occupied OFDM carriers. They are outside the transmitted subcarrier set and
+away from the real-passband image on the negative-frequency side, but they keep
+the same unnormalized RX FFT noise scaling (`N_fft * sigma^2`) as active
+carrier bins. This estimates the receiver noise floor directly and does not let
+fading-channel motion masquerade as broadband noise. LTS signal/noise remains
+logged as a diagnostic sibling, but it is not calibrated for operator-facing
+substitution.
+
 ### Recommended path
 
 Prototype both. Ship the simpler one first (probably A — idle-noise) as

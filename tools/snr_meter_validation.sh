@@ -166,12 +166,15 @@ for ch, pts in chan_stats.items():
     lines.append("")
 
 lines.append("=== Final verdict ===")
-all_pass = all(v[2] == "PASS" for v in verdicts)
-if all_pass:
-    lines.append("PASS: meter is honest across all channels (slope 0.8-1.2, |bias@15| < 1.5 dB).")
+pilot_pass = all(v[2] == "PASS" for v in verdicts if v[1] == 'pilot')
+lts_pass = all(v[2] == "PASS" for v in verdicts if v[1] == 'lts')
+if pilot_pass:
+    lines.append("PASS: calibrated pilot meter is honest across all channels (slope 0.8-1.2, |bias@15| < 1.5 dB).")
+    if not lts_pass:
+        lines.append("NOTE: LTS remains a diagnostic sibling and is not calibrated enough for operator-facing substitution.")
 else:
-    lines.append("FAIL: at least one (channel, estimator) pair fails ±1.5 dB bias or 0.8-1.2 slope.")
-    lines.append("This is the expected result today; both pilot and LTS are diagnostic-only.")
+    lines.append("FAIL: at least one calibrated pilot-meter channel fails ±1.5 dB bias or 0.8-1.2 slope.")
+    lines.append("The operator-facing meter must not be substituted until all pilot rows pass.")
     lines.append("A calibrated meter is the workstream described in docs/SNR_METER_DESIGN.md.")
 
 summary_text = "\n".join(lines) + "\n"

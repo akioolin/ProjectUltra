@@ -228,7 +228,8 @@ struct OFDMDemodulator::Impl {
     void updateLastSNREstimate(float signal_power, float noise_power,
                                size_t independent_bins, float alpha,
                                bool fitted_common_gain = false,
-                               bool noise_reference_only = false);
+                               bool noise_reference_only = false,
+                               float noise_power_reference_scale = 1.0f);
     void interpolateChannel();
     Complex hardDecision(Complex sym, Modulation mod) const;
     void lmsUpdate(int idx, Complex received, Complex reference);

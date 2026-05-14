@@ -168,9 +168,11 @@ void checkChannel(::ChannelType channel, float tolerance_db) {
 }  // namespace
 
 int main() {
-    ultra::setOperatorLogProfile();
+    ultra::setLogLevel(ultra::LogLevel::ERROR);
 
     checkChannel(::ChannelType::AWGN, 1.5f);
+    checkChannel(::ChannelType::GOOD, 3.0f);
+    checkChannel(::ChannelType::MODERATE, 3.0f);
 
     if (tests_failed == 0) {
         std::cout << "PASS: Modem SNR meter calibration (" << tests_run << " checks)\n";

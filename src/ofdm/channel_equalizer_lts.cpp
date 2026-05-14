@@ -19,7 +19,8 @@ void OFDMDemodulator::Impl::updateLastSNREstimate(float signal_power,
                                                   size_t independent_bins,
                                                   float alpha,
                                                   bool fitted_common_gain,
-                                                  bool noise_reference_only) {
+                                                  bool noise_reference_only,
+                                                  float noise_power_reference_scale) {
     if (signal_power <= 0.0f || noise_power <= 0.0f || independent_bins == 0) {
         return;
     }
@@ -54,15 +55,18 @@ void OFDMDemodulator::Impl::updateLastSNREstimate(float signal_power,
     //     - so the stored noise_power is N*sigma^2/2, i.e. 3.0103 dB too small
     //       for a single-symbol FFT-bin noise reference.
     //
-    // The 2.0x denominator below converts the repeated-LTS difference residual
-    // back to a single-symbol FFT-bin noise reference. This accounts for the
-    // observed +2.71 dB AWGN bias without a fitted offset; the remaining
-    // ~0.3 dB is finite-sample/channel-search variance.
+    // The caller-supplied reference scale converts its residual to a
+    // single-symbol FFT-bin noise reference. For the repeated-LTS difference
+    // estimator this scale is 2.0, which accounts for the observed +2.71 dB
+    // AWGN bias without a fitted offset; the remaining ~0.3 dB is
+    // finite-sample/channel-search variance. Guard-bin FFT noise estimates
+    // already use single-symbol bin power, so they use scale 1.0.
     if (noise_reference_only) {
-        constexpr float kTwoLTSResidualNoisePowerCorrection = 2.0f;
+        const float corrected_noise_power =
+            std::max(noise_power_reference_scale, 1.0e-6f) * noise_power;
         const float broadband_snr_db = 10.0f * std::log10(
             static_cast<float>(config.fft_size * sim::kModemReferencePower) /
-            std::max(kTwoLTSResidualNoisePowerCorrection * noise_power, 1.0e-12f));
+            std::max(corrected_noise_power, 1.0e-12f));
 
         if (!std::isfinite(broadband_snr_db)) {
             return;
@@ -171,7 +175,8 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
 
     if (num_symbols == 0 || data_carrier_indices.empty()) return;
 
-    // Store per-symbol channel estimates for noise estimation (data carriers only for now)
+    // Store per-symbol data-carrier channel estimates for LTS difference noise
+    // and residual-CFO estimation.
     std::vector<std::vector<Complex>> h_per_symbol(num_symbols);
     for (auto& v : h_per_symbol) v.resize(data_carrier_indices.size());
 
@@ -181,6 +186,29 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     std::vector<Complex> h_last_pilot(pilot_carrier_indices.size(), Complex(0, 0));
     size_t valid_symbols = 0;
     const float phase_at_training_start = freq_correction_phase;
+
+    double guard_noise_power_sum = 0.0;
+    size_t guard_noise_bin_count = 0;
+
+    auto accumulate_guard_noise = [&](const std::vector<Complex>& freq_domain) {
+        // After downconversion, the desired OFDM signal occupies active positive
+        // bins +1..+ceil(Ncarriers/2). The real-passband image lands on the
+        // negative side near -2*center_freq, so the adjacent positive guard bins
+        // are signal-free FFT-bin noise samples with the same N*sigma^2 scaling
+        // as active-carrier LS residuals.
+        const int positive_active_edge = static_cast<int>((config.num_carriers + 1) / 2);
+        const int guard_start = positive_active_edge + 2;  // one-bin cushion for residual CFO
+        const int nyquist_bin = static_cast<int>(config.fft_size / 2);
+        const int guard_stop = std::min(
+            nyquist_bin - 1,
+            guard_start + static_cast<int>(config.num_carriers) - 1);
+        for (int bin = guard_start; bin <= guard_stop; ++bin) {
+            if (bin >= 0 && static_cast<size_t>(bin) < freq_domain.size()) {
+                guard_noise_power_sum += static_cast<double>(std::norm(freq_domain[bin]));
+                ++guard_noise_bin_count;
+            }
+        }
+    };
 
     // Process each training symbol using the main mixer (it will be advanced)
     const float* ptr = training_samples;
@@ -203,6 +231,8 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
             LOG_DEMOD(DEBUG, "LTS RX freq[idx] first 5 carriers: %s", rx_buf);
             LOG_DEMOD(DEBUG, "LTS TX sync_seq first 5 carriers: %s", tx_buf);
         }
+
+        accumulate_guard_noise(freq);
 
         // Estimate H for each data carrier
         for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
@@ -298,11 +328,15 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
                 for (auto& v : h_per_symbol) std::fill(v.begin(), v.end(), Complex(0, 0));
                 std::fill(h_sum_data.begin(), h_sum_data.end(), Complex(0, 0));
                 std::fill(h_sum_pilot.begin(), h_sum_pilot.end(), Complex(0, 0));
+                guard_noise_power_sum = 0.0;
+                guard_noise_bin_count = 0;
 
                 for (size_t sym = 0; sym < num_symbols; ++sym) {
                     SampleSpan sym_span(ptr2, symbol_samples);
                     const auto& baseband = toBaseband(sym_span);
                     const auto& freq = extractSymbol(baseband, 0);
+
+                    accumulate_guard_noise(freq);
 
                     for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
                         int idx = data_carrier_indices[i];
@@ -406,6 +440,13 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     last_lts_channel_magnitude = h_mag_avg;
     last_lts_signal_power = h_mag_avg * h_mag_avg;
 
+    const float guard_noise_var = guard_noise_bin_count > 0
+        ? static_cast<float>(guard_noise_power_sum /
+                             static_cast<double>(guard_noise_bin_count))
+        : 0.0f;
+    const bool guard_noise_valid =
+        std::isfinite(guard_noise_var) && guard_noise_var > 0.0f;
+
     // Estimate noise variance from LTS training symbols
     // With 2 training symbols, noise = (H1 - H2) / 2, variance = E[|H1-H2|²] / 4
     // At 0.1 Hz Doppler, channel barely changes between training symbols (~0.001 coherence),
@@ -436,15 +477,22 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
 
             noise_variance = lts_noise_var;
             estimated_snr_linear = lts_snr;
-            updateLastSNREstimate(lts_signal_power, lts_noise_var,
+            const float meter_noise_var =
+                guard_noise_valid ? guard_noise_var : lts_noise_var;
+            const float meter_noise_reference_scale =
+                guard_noise_valid ? 1.0f : 2.0f;
+
+            updateLastSNREstimate(lts_signal_power, meter_noise_var,
                                   static_cast<size_t>(count), 1.0f,
-                                  false, true);
+                                  false, true, meter_noise_reference_scale);
 
             LOG_DEMOD(INFO, "LTS SNR estimate: internal=%.1f dB broadband=%.1f dB "
-                      "(measured noise_var=%.6f, signal=%.4f)",
+                      "(measured noise_var=%.6f, meter_noise=%.6f source=%s, signal=%.4f)",
                       10.0f * std::log10(estimated_snr_linear),
                       last_snr_db_estimate_valid ? last_snr_db_estimate : 0.0f,
-                      noise_variance, lts_signal_power);
+                      noise_variance, meter_noise_var,
+                      guard_noise_valid ? "guard" : "time",
+                      lts_signal_power);
         }
     } else if (h_mag_avg > 1e-6f) {
         // Fallback: only 1 training symbol, use default assumption
