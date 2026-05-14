@@ -454,6 +454,7 @@ if(ULTRA_BUILD_TOOLS)
         tools/ota_simulator/scenario.cpp
         tools/ota_simulator/scripted_audio_port.cpp
         tools/ota_simulator/runner.cpp
+        tools/ota_simulator/runner_v2.cpp
         tools/ota_simulator/clip_gen.cpp
         tools/ota_simulator/session_log.cpp
     )
@@ -462,6 +463,7 @@ if(ULTRA_BUILD_TOOLS)
         tools/ota_simulator/scenario.cpp
         tools/ota_simulator/scripted_audio_port.cpp
         tools/ota_simulator/runner.cpp
+        tools/ota_simulator/runner_v2.cpp
         tools/ota_simulator/clip_gen.cpp
         tools/ota_simulator/session_log.cpp
     )

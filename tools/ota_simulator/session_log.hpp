@@ -16,16 +16,27 @@ public:
     ~SessionLog();
 
     void writeState(double t_s, protocol::ConnectionState state);
+    void writeState(const std::string& endpoint, double t_s, protocol::ConnectionState state);
     void writeInject(double t_s, const std::string& file, double gain_db);
     void writeRxFrame(double t_s, const gui::DecodeResult& result);
+    void writeRxFrame(const std::string& endpoint, double t_s,
+                      const gui::DecodeResult& result);
     void writeTxFrame(double t_s, const std::string& frame_type,
                       int seq, const gui::DecodeResult& result);
+    void writeTxFrame(const std::string& endpoint, double t_s,
+                      const std::string& frame_type, int seq,
+                      const gui::DecodeResult& result);
     void writeAssert(double t_s, bool pass, const std::string& description);
+    void writeAssert(const std::string& endpoint, double t_s, bool pass,
+                     const std::string& description);
     void writeNote(double t_s, const std::string& event, const std::string& fields_json);
+    void writeNote(const std::string& endpoint, double t_s, const std::string& event,
+                   const std::string& fields_json);
 
 private:
     void writeLine(double t_s, const std::string& component,
-                   const std::string& event, const std::string& fields_json);
+                   const std::string& event, const std::string& fields_json,
+                   const std::string& endpoint = std::string());
 
     std::ofstream out_;
     std::mutex mutex_;

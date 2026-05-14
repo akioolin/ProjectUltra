@@ -1,6 +1,7 @@
 #include "ota_simulator/runner.hpp"
 
 #include "io/wav_io.hpp"
+#include "ota_simulator/runner_v2.hpp"
 #include "ota_simulator/scripted_audio_port.hpp"
 #include "ota_simulator/session_log.hpp"
 #include "psk/multi_carrier_dpsk.hpp"
@@ -205,7 +206,7 @@ void validateScenarioSupport(const Scenario& scenario) {
 
 }  // namespace
 
-int runScenario(const Scenario& scenario) {
+int runScenarioV1(const Scenario& scenario) {
     validateScenarioSupport(scenario);
 
     auto port = std::make_unique<ScriptedAudioPort>();
@@ -342,6 +343,13 @@ int runScenario(const Scenario& scenario) {
               << scenario.output.tx_capture << " and "
               << scenario.output.session_log << "\n";
     return 0;
+}
+
+int runScenario(const Scenario& scenario) {
+    if (scenario.version == 2) {
+        return runScenarioV2(scenario);
+    }
+    return runScenarioV1(scenario);
 }
 
 }  // namespace ultra::tools::ota

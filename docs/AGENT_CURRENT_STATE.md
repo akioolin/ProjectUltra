@@ -1,25 +1,33 @@
 # Agent System Current State
 
-Last updated: 2026-05-13.
+Last updated: 2026-05-14.
 
 This file is a compact handoff for future Claude/Codex sessions if context is
 compacted or lost.
 
-## Latest Local State: ota_simulator v1
+## Latest Local State: ota_simulator v2
 
-`ota_simulator` v1 is now the deterministic single-endpoint regression rig for
-scripted external audio plus the full `SimulatedStation` state machine. It has:
+`ota_simulator` now covers both deterministic single-endpoint scripted-WAV
+regression and two-endpoint full-QSO regression through live
+`SimulatedStation` instances. It has:
 
 - `ota_simulator gen` for single-frame WAV clip generation through
   `StreamingEncoder`.
 - `ota_simulator run` for v1 JSON scenarios using `ScriptedAudioPort`.
+- `ota_simulator run` for v2 JSON scenarios with named Alice/Bob-style
+  endpoints, local `command` events, endpoint-scoped assertions, and optional
+  channel noise overlay.
 - `out_tx.wav` TX capture and `out_session.jsonl` replay-style event output.
 - `OTASimulatorSmoke`, which injects a clean peer PING into a DISCONNECTED
   endpoint and asserts decoded TX `PONG`.
+- `OTASimulatorTwoEndpointClean` and `OTASimulatorTwoEndpointNoisy`, which run
+  full CONNECT + DATA + ACK + DISCONNECT QSOs; the noisy case overlays
+  `tests/fixtures/ota_ping/ota_noise_no_ping.wav` at `target_rms=0.05`.
 
-Deferred v2 items remain explicitly out of v1: two-endpoint mode,
-Watterson/fading/CFO impairment, KiwiSDR/noise-bed capture workflows, packaged
-bundle output, and GUI/BlackHole routing helpers.
+Deferred v2.1 items: Watterson/fading/CFO scenario plumbing, asymmetric
+per-direction impairment, file-transfer scenarios, ARQ failure injection,
+KiwiSDR/noise-bed capture workflows, packaged bundle output, and GUI/BlackHole
+routing helpers.
 
 ## Objective
 

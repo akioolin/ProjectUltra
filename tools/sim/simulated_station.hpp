@@ -178,11 +178,15 @@ public:
 
     void configure(float snr_db, ChannelType channel_type = ChannelType::AWGN) {
         snr_db_ = snr_db;
+        awgn_enabled_.store(true);
         // Idle-channel noise has no signal reference, so keep the historic
         // simulator floor. Transmitted AWGN below uses measured active power.
         constexpr float kIdleReferenceSignalPower = 0.01f;
         noise_stddev_ = awgn::noiseStddevForSNR(kIdleReferenceSignalPower, snr_db);
-        rng_.seed(seed_);
+        {
+            std::lock_guard<std::mutex> lock(rng_mutex_);
+            rng_.seed(seed_);
+        }
         channel_a_to_b_.reset();
         channel_b_to_a_.reset();
         cfo_phase_a_to_b_ = 0.0f;
@@ -215,6 +219,23 @@ public:
         }
     }
 
+    void setNoiseOverlay(std::vector<float> bed, bool loop, float target_rms) {
+        if (!bed.empty() && target_rms > 0.0f) {
+            const float current = sampleRms(bed);
+            if (current > 0.0f) {
+                const float gain = target_rms / current;
+                for (float& sample : bed) {
+                    sample *= gain;
+                }
+            }
+        }
+        noise_overlay_ = std::move(bed);
+        noise_overlay_loop_ = loop;
+        has_noise_overlay_ = !noise_overlay_.empty();
+        noise_overlay_cursor_a_ = 0;
+        noise_overlay_cursor_b_ = 0;
+    }
+
     // Station A transmits -> goes to B's RX buffer
     void transmitFromA(const std::vector<float>& samples) {
         auto with_cfo = applyTxCFO(samples, cfo_phase_a_to_b_);
@@ -245,11 +266,12 @@ public:
             if (!buffer_a_rx_.empty()) {
                 result[i] = buffer_a_rx_.front();
                 buffer_a_rx_.pop();
-            } else {
+            } else if (awgn_enabled_.load()) {
                 // No signal - just noise
-                result[i] = noise_dist_(rng_) * noise_stddev_;
+                result[i] = nextAwgnSample();
             }
         }
+        applyOverlay(result, noise_overlay_cursor_a_);
         captureRxIfEnabled(result, true);
         return result;
     }
@@ -262,23 +284,32 @@ public:
             if (!buffer_b_rx_.empty()) {
                 result[i] = buffer_b_rx_.front();
                 buffer_b_rx_.pop();
-            } else {
-                result[i] = noise_dist_(rng_) * noise_stddev_;
+            } else if (awgn_enabled_.load()) {
+                result[i] = nextAwgnSample();
             }
         }
+        applyOverlay(result, noise_overlay_cursor_b_);
         captureRxIfEnabled(result, false);
         return result;
     }
 
 private:
     float snr_db_ = 20.0f;
-    float noise_stddev_ = 0.01f;
+    float noise_stddev_ = 0.0f;
+    std::atomic<bool> awgn_enabled_{false};
     float tx_cfo_hz_ = 0.0f;
     float cfo_phase_a_to_b_ = 0.0f;
     float cfo_phase_b_to_a_ = 0.0f;
     uint32_t seed_ = 42;
     std::mt19937 rng_{42};
     std::normal_distribution<float> noise_dist_{0.0f, 1.0f};
+    std::mutex rng_mutex_;
+
+    std::vector<float> noise_overlay_;
+    bool noise_overlay_loop_ = false;
+    bool has_noise_overlay_ = false;
+    uint64_t noise_overlay_cursor_a_ = 0;
+    uint64_t noise_overlay_cursor_b_ = 0;
 
     std::unique_ptr<WattersonChannel> channel_a_to_b_;
     std::unique_ptr<WattersonChannel> channel_b_to_a_;
@@ -331,6 +362,26 @@ private:
             appendLimited(captured_.a_rx_raw, rx_raw);
         } else {
             appendLimited(captured_.b_rx_raw, rx_raw);
+        }
+    }
+
+    float nextAwgnSample() {
+        std::lock_guard<std::mutex> lock(rng_mutex_);
+        return noise_dist_(rng_) * noise_stddev_;
+    }
+
+    void applyOverlay(std::vector<float>& out, uint64_t& cursor) {
+        if (!has_noise_overlay_ || noise_overlay_.empty()) {
+            return;
+        }
+        for (float& sample : out) {
+            if (cursor < noise_overlay_.size()) {
+                sample += noise_overlay_[static_cast<size_t>(cursor)];
+            } else if (noise_overlay_loop_) {
+                sample += noise_overlay_[static_cast<size_t>(
+                    cursor % noise_overlay_.size())];
+            }
+            ++cursor;
         }
     }
 
@@ -388,7 +439,10 @@ private:
             return fading->process(span);
         } else {
             std::vector<float> result = samples;
-            awgn::addAWGN(result, snr_db_, rng_);
+            if (awgn_enabled_.load()) {
+                std::lock_guard<std::mutex> lock(rng_mutex_);
+                awgn::addAWGN(result, snr_db_, rng_);
+            }
             return result;
         }
     }

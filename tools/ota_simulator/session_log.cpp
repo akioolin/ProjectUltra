@@ -41,6 +41,21 @@ int decodeFrameSeq(const gui::DecodeResult& result) {
     return -1;
 }
 
+std::string withEndpointField(const std::string& endpoint,
+                              const std::string& fields_json) {
+    if (endpoint.empty()) {
+        return fields_json;
+    }
+    const std::string tag = "\"endpoint\":\"" + json::escape(endpoint) + "\"";
+    if (fields_json == "{}") {
+        return "{" + tag + "}";
+    }
+    if (!fields_json.empty() && fields_json.front() == '{') {
+        return "{" + tag + "," + fields_json.substr(1);
+    }
+    return "{" + tag + ",\"fields\":\"" + json::escape(fields_json) + "\"}";
+}
+
 }  // namespace
 
 SessionLog::SessionLog(const std::string& path)
@@ -59,6 +74,14 @@ SessionLog::~SessionLog() {
 void SessionLog::writeState(double t_s, protocol::ConnectionState state) {
     writeLine(t_s, "protocol", "session.state",
               "{\"state\":\"" + connectionStateName(state) + "\"}");
+}
+
+void SessionLog::writeState(const std::string& endpoint, double t_s,
+                            protocol::ConnectionState state) {
+    writeLine(t_s, "protocol", "session.state",
+              withEndpointField(endpoint, "{\"state\":\"" +
+                                             connectionStateName(state) + "\"}"),
+              endpoint);
 }
 
 void SessionLog::writeInject(double t_s, const std::string& file, double gain_db) {
@@ -86,6 +109,25 @@ void SessionLog::writeRxFrame(double t_s, const gui::DecodeResult& result) {
               fields.str());
 }
 
+void SessionLog::writeRxFrame(const std::string& endpoint, double t_s,
+                              const gui::DecodeResult& result) {
+    const std::string frame_type = decodeFrameTypeName(result);
+    const int seq = decodeFrameSeq(result);
+    std::ostringstream fields;
+    fields << "{\"frame_type\":\"" << json::escape(frame_type) << "\""
+           << ",\"seq\":" << seq
+           << ",\"frame_bytes\":" << result.frame_data.size()
+           << ",\"codewords_ok\":" << result.codewords_ok
+           << ",\"codewords_failed\":" << result.codewords_failed
+           << ",\"snr_db\":" << std::fixed << std::setprecision(2) << result.snr_db
+           << ",\"cfo_hz\":" << result.cfo_hz
+           << ",\"sync_correlation\":" << result.sync_correlation
+           << ",\"is_ping\":" << (result.is_ping ? "true" : "false")
+           << "}";
+    writeLine(t_s, "modem", result.success || result.is_ping ? "frame.rx" : "decode.fail",
+              withEndpointField(endpoint, fields.str()), endpoint);
+}
+
 void SessionLog::writeTxFrame(double t_s, const std::string& frame_type,
                               int seq, const gui::DecodeResult& result) {
     std::ostringstream fields;
@@ -101,9 +143,34 @@ void SessionLog::writeTxFrame(double t_s, const std::string& frame_type,
     writeLine(t_s, "modem", "frame.tx", fields.str());
 }
 
+void SessionLog::writeTxFrame(const std::string& endpoint, double t_s,
+                              const std::string& frame_type, int seq,
+                              const gui::DecodeResult& result) {
+    std::ostringstream fields;
+    fields << "{\"frame_type\":\"" << json::escape(frame_type) << "\""
+           << ",\"seq\":" << seq
+           << ",\"frame_bytes\":" << result.frame_data.size()
+           << ",\"codewords_ok\":" << result.codewords_ok
+           << ",\"codewords_failed\":" << result.codewords_failed
+           << ",\"snr_db\":" << std::fixed << std::setprecision(2) << result.snr_db
+           << ",\"cfo_hz\":" << result.cfo_hz
+           << ",\"sync_correlation\":" << result.sync_correlation
+           << "}";
+    writeLine(t_s, "modem", "frame.tx", withEndpointField(endpoint, fields.str()),
+              endpoint);
+}
+
 void SessionLog::writeAssert(double t_s, bool pass, const std::string& description) {
     writeLine(t_s, "ota_simulator", pass ? "assert.pass" : "assert.fail",
               "{\"description\":\"" + json::escape(description) + "\"}");
+}
+
+void SessionLog::writeAssert(const std::string& endpoint, double t_s, bool pass,
+                             const std::string& description) {
+    writeLine(t_s, "ota_simulator", pass ? "assert.pass" : "assert.fail",
+              withEndpointField(endpoint, "{\"description\":\"" +
+                                          json::escape(description) + "\"}"),
+              endpoint);
 }
 
 void SessionLog::writeNote(double t_s, const std::string& event,
@@ -111,15 +178,26 @@ void SessionLog::writeNote(double t_s, const std::string& event,
     writeLine(t_s, "ota_simulator", event, fields_json);
 }
 
-void SessionLog::writeLine(double t_s, const std::string& component,
+void SessionLog::writeNote(const std::string& endpoint, double t_s,
                            const std::string& event,
                            const std::string& fields_json) {
+    writeLine(t_s, "ota_simulator", event, withEndpointField(endpoint, fields_json),
+              endpoint);
+}
+
+void SessionLog::writeLine(double t_s, const std::string& component,
+                           const std::string& event,
+                           const std::string& fields_json,
+                           const std::string& endpoint) {
     std::lock_guard<std::mutex> lock(mutex_);
     out_ << "{\"seq\":" << seq_++
          << ",\"t_ms\":" << toMs(t_s)
          << ",\"component\":\"" << json::escape(component)
-         << "\",\"event\":\"" << json::escape(event)
-         << "\",\"fields\":" << fields_json << "}\n";
+         << "\",\"event\":\"" << json::escape(event) << "\"";
+    if (!endpoint.empty()) {
+        out_ << ",\"endpoint\":\"" << json::escape(endpoint) << "\"";
+    }
+    out_ << ",\"fields\":" << fields_json << "}\n";
 }
 
 }  // namespace ultra::tools::ota

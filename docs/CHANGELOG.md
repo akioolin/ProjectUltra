@@ -10,6 +10,36 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-14: ota_simulator v2 two-endpoint real-HF QSO regression
+
+**What was missing:** v1 could inject scripted WAV audio into one live endpoint,
+but it could not validate a bidirectional QSO where peer ACKs, DATA timing, and
+DISCONNECT responses depend on the actual live protocol exchange.
+
+**What changed:** extended `ota_simulator run` with strict `version: 2` JSON:
+two named endpoints, local `command` events, endpoint-scoped assertions, an
+optional channel block, and endpoint-tagged JSONL session events. Added
+`runner_v2` to wire two `SimulatedStation` instances through the existing
+`SimulatedChannel`/`VirtualAudioPort` path used by `cli_simulator`. Added
+`SimulatedChannel::setNoiseOverlay()` for a looped 48 kHz real-HF WAV bed mixed
+additively into both receive directions after RMS normalization, plus clean
+channel behavior when v2 omits `snr_db`.
+
+**Why this is the right fix:** the harness now exercises the live handshake,
+MODE negotiation, DATA/ACK, and DISCONNECT path while keeping PHY code
+unchanged. The real-HF overlay is sample-rate matched at load time, bounded to
+the preloaded WAV vector, and applied at the channel boundary rather than at an
+endpoint's TX or RX implementation.
+
+**Verification:** registered `OTASimulatorTwoEndpointClean` and
+`OTASimulatorTwoEndpointNoisy` with 120 s CTest timeouts. The noisy scenario
+uses `tests/fixtures/ota_ping/ota_noise_no_ping.wav` looped at
+`target_rms=0.05`. v2.1 follow-ups remain out of scope: per-direction
+impairments, Watterson scenario plumbing, file-transfer scenarios, ARQ failure
+injection, and third-station QRM-style overlays.
+
+---
+
 ## 2026-05-13: ota_simulator v1 scripted external-audio regression rig
 
 **What was missing:** after BUG-PING-DETECTOR-001, there was no deterministic

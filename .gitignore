@@ -59,3 +59,8 @@ recordings/*
 /out_session.jsonl
 /out_real_ota_tx.wav
 /out_real_ota_session.jsonl
+/out_alice_tx.wav
+/out_bob_tx.wav
+/out_noisy_alice_tx.wav
+/out_noisy_bob_tx.wav
+/out_noisy_session.jsonl
