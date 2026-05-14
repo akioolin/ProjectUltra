@@ -37,8 +37,32 @@ format, channel calibration, or mode-ladder threshold changed.
 | Phase 4 protocol context | AWGN15 CONNECT/CONNECT_ACK logs show `chirp_snr=27.9 dB idle_snr=15.0 dB`; decoded frame SNR publishes `15.0 dB` |
 | Phase 5 mode picks | Good15 10/10 `OFDM-CHIRP DQPSK R1/2`; Moderate15 10/10 `OFDM-CHIRP DQPSK R1/2`; Good10 10/10 `OFDM-CHIRP DQPSK R1/4` |
 
-**Status:** Local Phases 1-5 passed on branch `feat/mcdpsk-honest-snr`.
-Pi5 hardware validation is still pending; do not merge until Phase 6 passes.
+**Phase 6 — Pi5 hardware smoke (2026-05-14):** branch synced to
+pi5tester, rebuild clean. Audio path verified within spec
+(Pi→Mac RMS=0.123 peak=0.305; Mac→Pi RMS=0.250 peak=0.850).
+`AGENT_HW_AUDIO_CHECK=0 ./agents/run_hardware_smoke.sh`: 3/3 PASS
+(AWGN/Good/Moderate × R1/2 SNR=15 1KB). Report bundle:
+`agents/reports/hardware_20260514_194039/`. Full ctest 51/51 PASS
+including new `ChannelIdleNoiseSNRCalibration` (±1.5 dB AWGN,
+±3 dB Good/Moderate).
+
+**Status:** **ready for review and merge.** Combined with the prior
+`feat/calibrated-snr-meter` (OFDM honest SNR), this completes the
+honest-SNR-everywhere stack. After both branches merge, GUI display,
+MODE_CHANGE handshake, per-frame logs, ARQ stats, and the auto-rate
+ladder will all read calibrated SNR values across the entire session
+(PING/PONG/CONNECT/CONNECT_ACK via idle-noise; DATA frames via
+calibrated pilot residual).
+
+**Operational note from this session:** the autonomous Codex run got
+stuck for ~47 min on `check_hw_audio_path.sh` (SSH child died but
+parent never noticed). The ctest "failures" Codex reported during
+Phase 6 were stale-state artifacts: a leftover literal-string
+`ultra_cli_notch.XXXXXX.log` file from a killed prior run blocked
+`mktemp`, and `ctest -j4` parallel execution had timing flakes on
+the OTA simulator tests. Direct re-runs of all three "failing"
+tests passed cleanly; full serial ctest = 51/51. The
+implementation itself was correct.
 
 ---
 
