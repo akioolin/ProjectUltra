@@ -93,13 +93,23 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
                   result.pilot_snr_db, result.lts_snr_db,
                   result.lts_fading_index);
     } else {
-        result.lts_snr_db = result.snr_db;
+        const float chirp_snr_db = result.snr_db;
+        const auto idle_snr = idle_noise_snr_estimator_.snapshot();
+        if (idle_snr.valid && std::isfinite(idle_snr.snr_db)) {
+            result.snr_db = idle_snr.snr_db;
+        }
+        result.lts_snr_db = chirp_snr_db;
         result.has_pilot_snr_db = false;
         result.pilot_snr_db = 0.0f;
         result.lts_fading_index = 0.0f;
         result.lts_residual_cfo_hz = residual_cfo_hz;
         last_snr_db_estimate_valid_.store(false);
         last_snr_db_estimate_.store(0.0f);
+        LOG_MODEM(DEBUG, "[%s] non-OFDM quality: chirp_snr=%.1f dB "
+                  "idle_snr=%s%.1f dB windows=%zu",
+                  log_prefix_.c_str(), chirp_snr_db,
+                  idle_snr.valid ? "" : "unavailable/",
+                  idle_snr.snr_db, idle_snr.windows_observed);
     }
 }
 
