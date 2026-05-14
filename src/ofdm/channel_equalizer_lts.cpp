@@ -54,13 +54,15 @@ void OFDMDemodulator::Impl::updateLastSNREstimate(float signal_power,
     //     - so the stored noise_power is N*sigma^2/2, i.e. 3.0103 dB too small
     //       for a single-symbol FFT-bin noise reference.
     //
-    // Phase 2 must apply a 2.0x denominator correction at this site. That
-    // derivation accounts for the observed +2.71 dB AWGN bias without a fitted
-    // offset; the remaining ~0.3 dB is finite-sample/channel-search variance.
+    // The 2.0x denominator below converts the repeated-LTS difference residual
+    // back to a single-symbol FFT-bin noise reference. This accounts for the
+    // observed +2.71 dB AWGN bias without a fitted offset; the remaining
+    // ~0.3 dB is finite-sample/channel-search variance.
     if (noise_reference_only) {
+        constexpr float kTwoLTSResidualNoisePowerCorrection = 2.0f;
         const float broadband_snr_db = 10.0f * std::log10(
             static_cast<float>(config.fft_size * sim::kModemReferencePower) /
-            std::max(noise_power, 1.0e-12f));
+            std::max(kTwoLTSResidualNoisePowerCorrection * noise_power, 1.0e-12f));
 
         if (!std::isfinite(broadband_snr_db)) {
             return;
