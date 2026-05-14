@@ -60,6 +60,8 @@ public:
     // Reset filter state
     void reset();
 
+    const std::vector<Sample>& coefficients() const { return coeffs_; }
+
 private:
     std::vector<Sample> coeffs_;
     std::vector<Sample> delay_line_;

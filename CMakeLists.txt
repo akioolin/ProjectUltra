@@ -327,6 +327,7 @@ endif()
 # Shared GUI/modem runtime source lists. Keep these centralized so CLI tools,
 # TNC, simulator, and GUI builds cannot silently drift apart.
 set(ULTRA_STREAMING_DECODER_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/idle_noise_snr_estimator.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/streaming_decoder.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/streaming_sync_acquisition.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/streaming_ofdm_decode.cpp
@@ -429,6 +430,16 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
     )
     target_link_libraries(ofdm_snr_probe PRIVATE ultra_sim_station)
+
+    add_executable(idle_snr_probe
+        tools/idle_snr_probe.cpp
+    )
+    ultra_enable_tool_test_warnings(tools/idle_snr_probe.cpp)
+    target_include_directories(idle_snr_probe PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
+    )
+    target_link_libraries(idle_snr_probe PRIVATE ultra_sim_station)
 
     add_library(ultra_replay_lib STATIC
         src/replay/bundle_loader.cpp
