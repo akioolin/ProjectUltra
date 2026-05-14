@@ -316,6 +316,17 @@ if(TARGET ultra_sim_station)
     set_tests_properties(ChannelModemSNRMeterCalibration PROPERTIES
         TIMEOUT 90
         LABELS regression)
+
+    add_executable(test_idle_noise_snr_calibration test_idle_noise_snr_calibration.cpp)
+    target_include_directories(test_idle_noise_snr_calibration PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
+    )
+    target_link_libraries(test_idle_noise_snr_calibration PRIVATE ultra_sim_station)
+    add_test(NAME ChannelIdleNoiseSNRCalibration COMMAND test_idle_noise_snr_calibration)
+    set_tests_properties(ChannelIdleNoiseSNRCalibration PROPERTIES
+        TIMEOUT 90
+        LABELS regression)
 else()
     message(STATUS "ChannelSNRCalibration disabled: ultra_sim_station target is not built")
 endif()
@@ -437,6 +448,7 @@ ultra_enable_test_warnings(
     test_streaming_mc_dpsk.cpp
     test_channel_snr_calibration.cpp
     test_modem_snr_meter_calibration.cpp
+    test_idle_noise_snr_calibration.cpp
     ../tools/test_throughput.cpp
     test_decode_bench_replay.cpp
 )
