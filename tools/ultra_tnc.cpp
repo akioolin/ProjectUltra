@@ -494,6 +494,10 @@ private:
             handleDecodedFrame(result);
         });
 
+        decoder_.setDataSyncAcceptedCallback([this](float sync_correlation) {
+            engine_.onAcceptedOFDMDataSync(sync_correlation);
+        });
+
         decoder_.setPingCallback([this](float snr_db, float cfo_hz) {
             engine_.setMeasuredSNR(snr_db);
             last_cfo_hz_ = cfo_hz;

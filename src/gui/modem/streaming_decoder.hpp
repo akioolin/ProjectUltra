@@ -122,6 +122,7 @@ struct DecoderStats {
 // Callbacks for frame delivery
 using FrameDecodedCallback = std::function<void(const DecodeResult&)>;
 using StreamingPingCallback = std::function<void(float snr_db, float cfo_hz)>;
+using DataSyncAcceptedCallback = std::function<void(float sync_correlation)>;
 
 // StreamingDecoder - Unified RX decoder for all waveform types
 class StreamingDecoder {
@@ -247,6 +248,7 @@ public:
 
     void setFrameCallback(FrameDecodedCallback callback) { frame_callback_ = callback; }
     void setPingCallback(StreamingPingCallback callback) { ping_callback_ = callback; }
+    void setDataSyncAcceptedCallback(DataSyncAcceptedCallback callback) { data_sync_accepted_callback_ = callback; }
     void setLogPrefix(const std::string& prefix) { log_prefix_ = prefix; }
 
     // ========================================================================
@@ -442,6 +444,7 @@ private:
     // Callbacks
     FrameDecodedCallback frame_callback_;
     StreamingPingCallback ping_callback_;
+    DataSyncAcceptedCallback data_sync_accepted_callback_;
 
     // Statistics
     DecoderStats stats_;

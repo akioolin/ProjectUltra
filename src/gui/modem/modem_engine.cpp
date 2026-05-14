@@ -123,6 +123,12 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
     });
     startupTrace("ModemEngine", "decoder-set-frame-callback-exit");
 
+    streaming_decoder_->setDataSyncAcceptedCallback([this](float sync_correlation) {
+        if (data_sync_accepted_callback_) {
+            data_sync_accepted_callback_(sync_correlation);
+        }
+    });
+
     startupTrace("ModemEngine", "decoder-set-ping-callback-enter");
     streaming_decoder_->setPingCallback([this](float snr_db, float cfo_hz) {
         // If narrowband chirp detected, switch control waveform for PONG/CONNECT_ACK

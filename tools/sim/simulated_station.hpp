@@ -900,6 +900,10 @@ private:
             handleDecodedFrame(result);
         });
 
+        decoder_->setDataSyncAcceptedCallback([this](float sync_correlation) {
+            protocol_.onAcceptedOFDMDataSync(sync_correlation);
+        });
+
         // Set ping callback
         decoder_->setPingCallback([this](float, float cfo_hz) {
             last_cfo_hz_ = cfo_hz;

@@ -405,6 +405,9 @@ void StreamingDecoder::searchForSync() {
         if (found) {
             LOG_MODEM(INFO, "[%s] DATA sync detected (training only, known CFO=%.1f Hz, corr=%.2f)",
                       log_prefix_.c_str(), known_cfo, sync_result.correlation);
+            if (data_sync_accepted_callback_) {
+                data_sync_accepted_callback_(sync_result.correlation);
+            }
         }
         // No chirp fallback — TX sends LTS only when connected, chirp won't be found
     } else {

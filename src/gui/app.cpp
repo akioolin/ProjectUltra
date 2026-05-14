@@ -370,6 +370,10 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     });
     ultra::gui::startupTrace("App", "set-raw-callback-exit");
 
+    modem_.setDataSyncAcceptedCallback([this](float sync_correlation) {
+        protocol_.onAcceptedOFDMDataSync(sync_correlation);
+    });
+
     // Set up status callback to show codeword progress in RX log
     ultra::gui::startupTrace("App", "set-status-callback-enter");
     modem_.setStatusCallback([this](const std::string& status) {
@@ -1173,6 +1177,9 @@ void App::initVirtualStation() {
         virtual_protocol_.setMeasuredSNR(simulation_snr_db_);
         virtual_protocol_.setChannelQuality(simulation_snr_db_, fading);
         virtual_protocol_.onRxData(data);
+    });
+    virtual_modem_->setDataSyncAcceptedCallback([this](float sync_correlation) {
+        virtual_protocol_.onAcceptedOFDMDataSync(sync_correlation);
     });
 
     // Log virtual station events

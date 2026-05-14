@@ -109,6 +109,7 @@ public:
 
     void onRxData(const Bytes& data);
     void onMCDPSKPartialFrame(const v2::PartialFrameCodewords& partial);
+    void onAcceptedOFDMDataSync(float sync_correlation);
     void tick(uint32_t elapsed_ms);
 
     // --- State ---

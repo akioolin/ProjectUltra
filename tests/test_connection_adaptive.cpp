@@ -77,6 +77,26 @@ struct ConnectionAdaptiveTestAccess {
         c.resetAdaptiveModeController();
     }
 
+    static void makeResponderWithConnectAckRescue(Connection& c,
+                                                  WaveformMode mode = WaveformMode::OFDM_CHIRP) {
+        c.local_call_ = "K2DEF";
+        c.remote_call_ = "W1ABC";
+        c.state_ = ConnectionState::CONNECTED;
+        c.is_initiator_ = false;
+        c.handshake_confirmed_ = false;
+        c.negotiated_mode_ = mode;
+        c.data_modulation_ = Modulation::DQPSK;
+        c.data_code_rate_ = CodeRate::R1_4;
+        c.connect_ack_frame_ = Bytes{0x55, 0x4C, static_cast<uint8_t>(v2::FrameType::CONNECT_ACK)};
+        c.connect_ack_retransmit_ms_ = 1000;
+        c.connect_ack_retx_remaining_ = 1;
+    }
+
+    static bool connectAckRescueArmed(const Connection& c) {
+        return !c.connect_ack_frame_.empty() || c.connect_ack_retx_remaining_ > 0 ||
+               c.connect_ack_retransmit_ms_ > 0;
+    }
+
     static void startFile(Connection& c, const std::string& path) {
         CHECK(c.file_transfer_.startSend(path), "startSend should succeed");
     }
@@ -209,6 +229,26 @@ void test_remote_mode_change_reconfigures_arq() {
           "remote MODE_CHANGE should update ARQ code rate");
     CHECK(ConnectionAdaptiveTestAccess::arqWindow(c) == connection_policy::kWideOFDMWindowFrames,
           "remote MODE_CHANGE should recompute ARQ window");
+}
+
+void test_accepted_ofdm_data_sync_clears_connect_ack_rescue() {
+    Connection c;
+    ConnectionAdaptiveTestAccess::makeResponderWithConnectAckRescue(c);
+
+    CHECK(ConnectionAdaptiveTestAccess::connectAckRescueArmed(c),
+          "responder CONNECT_ACK rescue should start armed");
+    c.onAcceptedOFDMDataSync(0.90f);
+    CHECK(!ConnectionAdaptiveTestAccess::connectAckRescueArmed(c),
+          "accepted OFDM DATA sync should clear responder CONNECT_ACK rescue");
+}
+
+void test_accepted_ofdm_data_sync_does_not_clear_non_ofdm_rescue() {
+    Connection c;
+    ConnectionAdaptiveTestAccess::makeResponderWithConnectAckRescue(c, WaveformMode::MC_DPSK);
+
+    c.onAcceptedOFDMDataSync(0.90f);
+    CHECK(ConnectionAdaptiveTestAccess::connectAckRescueArmed(c),
+          "accepted OFDM DATA sync hook should not clear non-OFDM rescue state");
 }
 
 void test_adaptive_upgrade_requires_backlog_and_clean_windows() {
@@ -487,6 +527,8 @@ void test_forced_rate_disables_adaptive_controller() {
 int main() {
     test_local_mode_change_ack_reconfigures_arq();
     test_remote_mode_change_reconfigures_arq();
+    test_accepted_ofdm_data_sync_clears_connect_ack_rescue();
+    test_accepted_ofdm_data_sync_does_not_clear_non_ofdm_rescue();
     test_adaptive_upgrade_requires_backlog_and_clean_windows();
     test_adaptive_upgrade_skips_small_backlog();
     test_adaptive_downgrade_hysteresis_and_short_lockout_upgrade();

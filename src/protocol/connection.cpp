@@ -1024,6 +1024,23 @@ void Connection::onMCDPSKPartialFrame(const v2::PartialFrameCodewords& partial) 
     }
 }
 
+void Connection::onAcceptedOFDMDataSync(float sync_correlation) {
+    if (state_ != ConnectionState::CONNECTED || is_initiator_ ||
+        !isOFDMMode(negotiated_mode_)) {
+        return;
+    }
+    if (connect_ack_frame_.empty() && connect_ack_retx_remaining_ <= 0) {
+        return;
+    }
+
+    connect_ack_frame_.clear();
+    connect_ack_retx_remaining_ = 0;
+    connect_ack_retransmit_ms_ = 0;
+    LOG_MODEM(INFO,
+              "Connection: Accepted OFDM DATA sync (corr=%.2f); clearing cached CONNECT_ACK rescue retry",
+              sync_correlation);
+}
+
 void Connection::runDeferredArqRefill() {
     if (arq_callback_defer_refill_) {
         return;

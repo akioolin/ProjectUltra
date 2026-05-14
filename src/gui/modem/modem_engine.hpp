@@ -121,6 +121,11 @@ public:
     using RawDataCallback = std::function<void(const Bytes&)>;
     void setRawDataCallback(RawDataCallback callback) { raw_data_callback_ = callback; }
 
+    using DataSyncAcceptedCallback = std::function<void(float sync_correlation)>;
+    void setDataSyncAcceptedCallback(DataSyncAcceptedCallback callback) {
+        data_sync_accepted_callback_ = callback;
+    }
+
     using StatusCallback = std::function<void(const std::string&)>;
     void setStatusCallback(StatusCallback callback) { status_callback_ = callback; }
 
@@ -317,6 +322,7 @@ private:
     // Callbacks
     DataCallback data_callback_;
     RawDataCallback raw_data_callback_;
+    DataSyncAcceptedCallback data_sync_accepted_callback_;
     StatusCallback status_callback_;
     PingReceivedCallback ping_received_callback_;
 

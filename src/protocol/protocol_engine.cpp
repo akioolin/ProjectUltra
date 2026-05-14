@@ -249,6 +249,11 @@ void ProtocolEngine::onMCDPSKPartialFrame(const v2::PartialFrameCodewords& parti
     defer_tx_ = false;
 }
 
+void ProtocolEngine::onAcceptedOFDMDataSync(float sync_correlation) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.onAcceptedOFDMDataSync(sync_correlation);
+}
+
 void ProtocolEngine::processRxBuffer() {
     // Look for v2 frame magic (2 bytes: 0x554C = "UL")
     while (!rx_buffer_.empty()) {
