@@ -76,6 +76,8 @@ struct DecodeResult {
     int codewords_failed = 0;       // Number of failed LDPC decodes
     bool is_ping = false;           // True if this is a PING (chirp-only) frame
     float lts_snr_db = 0.0f;        // OFDM LTS-derived demodulator SNR
+    bool has_pilot_snr_db = false;  // True when OFDM residual-derived SNR is available
+    float pilot_snr_db = 0.0f;      // Broadband SNR from OFDM LTS/pilot residuals
     float lts_fading_index = 0.0f;  // Per-carrier LTS/pilot fading index
     float sync_correlation = 0.0f;  // Light/full preamble sync correlation
     float lts_residual_cfo_hz = 0.0f;  // Residual CFO reported by OFDM waveform
@@ -268,6 +270,11 @@ public:
     // 0-1 range, > 0.4 indicates significant fading
     float getLastFadingIndex() const { return last_fading_index_.load(); }
 
+    // Get last residual-derived OFDM broadband SNR estimate. Returns false
+    // from hasLastSNREstimate() until an OFDM LTS/pilot residual has landed.
+    bool hasLastSNREstimate() const { return last_snr_db_estimate_valid_.load(); }
+    float getLastSNREstimate() const { return last_snr_db_estimate_.load(); }
+
     // Get buffer fill level (0-100%)
     float getBufferFillPercent() const;
 
@@ -451,7 +458,9 @@ private:
     mutable std::mutex stats_mutex_;
 
     // Status (atomic for lock-free read from GUI)
-    std::atomic<float> last_snr_{0.0f};
+    mutable std::atomic<float> last_snr_{0.0f};
+    mutable std::atomic<bool> last_snr_db_estimate_valid_{false};
+    mutable std::atomic<float> last_snr_db_estimate_{0.0f};
     std::atomic<float> last_cfo_{0.0f};
     std::atomic<float> last_fading_index_{0.0f};
     float noise_floor_ = 0.001f;

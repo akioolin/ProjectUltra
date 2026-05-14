@@ -7,11 +7,105 @@
 #include <cstdio>
 #include "demodulator_impl.hpp"
 #include "demodulator_constants.hpp"
+#include "sim/channel_calibration.hpp"
 #include "ultra/logging.hpp"
 
 namespace ultra {
 
 using namespace demod_constants;
+
+void OFDMDemodulator::Impl::updateLastSNREstimate(float signal_power,
+                                                  float noise_power,
+                                                  size_t independent_bins,
+                                                  float alpha,
+                                                  bool fitted_common_gain,
+                                                  bool noise_reference_only) {
+    if (signal_power <= 0.0f || noise_power <= 0.0f || independent_bins == 0) {
+        return;
+    }
+
+    // LTS/pilot residuals are measured in FFT-bin channel-estimate units.
+    // Near-AWGN pilot residuals use signal/noise so real signal fades remain
+    // visible. Under selective fading, temporal pilot residuals are not a clean
+    // noise proxy, so the caller can keep the LTS residual and reference it to
+    // the calibrated broadband noise floor instead.
+    if (noise_reference_only) {
+        const float broadband_snr_db = 10.0f * std::log10(
+            static_cast<float>(config.fft_size * sim::kModemReferencePower) /
+            std::max(noise_power, 1.0e-12f));
+
+        if (!std::isfinite(broadband_snr_db)) {
+            return;
+        }
+
+        if (!last_snr_db_estimate_valid) {
+            last_snr_db_estimate = broadband_snr_db;
+            last_snr_db_estimate_valid = true;
+        } else {
+            const float a = std::clamp(alpha, 0.0f, 1.0f);
+            last_snr_db_estimate =
+                a * broadband_snr_db + (1.0f - a) * last_snr_db_estimate;
+        }
+        return;
+    }
+
+    // signal/noise is a frequency-bin SNR. Convert it to the modem's calibrated
+    // broadband-audio SNR reference:
+    //
+    //   TX real passband carrier amplitude at the FFT bin is output_scale/2.
+    //   White audio noise is integrated by the N-point FFT.
+    //   The configured/reference SNR uses kModemReferencePower over the full
+    //   OFDM symbol duration including CP.
+    //
+    // This subtracts OFDM measurement gain while retaining true signal fades in
+    // signal_power. Averaging bins reduces estimator variance; it is not RF
+    // gain. The temporal pilot path also fits one common complex gain, removing
+    // one complex degree of freedom, so undo that small residual-noise bias.
+    const float snr_per_carrier_db =
+        10.0f * std::log10(signal_power / std::max(noise_power, 1.0e-12f));
+    const double carrier_signal_power =
+        static_cast<double>(config.output_scale) *
+        static_cast<double>(config.output_scale) * 0.25;
+    const double fft_noise_reference =
+        static_cast<double>(config.fft_size) * sim::kModemReferencePower;
+    const double cp_reference =
+        static_cast<double>(config.fft_size + config.getCyclicPrefix()) /
+        static_cast<double>(config.fft_size);
+    double measurement_gain = carrier_signal_power / fft_noise_reference;
+    measurement_gain *= cp_reference;
+    if (fitted_common_gain && independent_bins > 1) {
+        measurement_gain *= static_cast<double>(independent_bins) /
+                            static_cast<double>(independent_bins - 1);
+    }
+
+    if (measurement_gain <= 0.0) {
+        return;
+    }
+
+    const float broadband_snr_db =
+        snr_per_carrier_db - 10.0f * std::log10(static_cast<float>(measurement_gain));
+
+    if (!std::isfinite(broadband_snr_db)) {
+        return;
+    }
+
+    // Temporal pilot residuals can contain residual channel motion even when
+    // the magnitude-variance gate says "near AWGN". Do not let that path
+    // overrule the same-frame LTS noise estimate with a large downward jump.
+    if (fitted_common_gain && last_snr_db_estimate_valid &&
+        broadband_snr_db < last_snr_db_estimate - 3.0f) {
+        return;
+    }
+
+    if (!last_snr_db_estimate_valid) {
+        last_snr_db_estimate = broadband_snr_db;
+        last_snr_db_estimate_valid = true;
+    } else {
+        const float a = std::clamp(alpha, 0.0f, 1.0f);
+        last_snr_db_estimate =
+            a * broadband_snr_db + (1.0f - a) * last_snr_db_estimate;
+    }
+}
 
 // =============================================================================
 // CHANNEL ESTIMATION
@@ -312,9 +406,15 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
 
             noise_variance = lts_noise_var;
             estimated_snr_linear = lts_snr;
+            updateLastSNREstimate(lts_signal_power, lts_noise_var,
+                                  static_cast<size_t>(count), 1.0f,
+                                  false, true);
 
-            LOG_DEMOD(INFO, "LTS SNR estimate: %.1f dB (measured noise_var=%.6f, signal=%.4f)",
-                      10.0f * std::log10(estimated_snr_linear), noise_variance, lts_signal_power);
+            LOG_DEMOD(INFO, "LTS SNR estimate: internal=%.1f dB broadband=%.1f dB "
+                      "(measured noise_var=%.6f, signal=%.4f)",
+                      10.0f * std::log10(estimated_snr_linear),
+                      last_snr_db_estimate_valid ? last_snr_db_estimate : 0.0f,
+                      noise_variance, lts_signal_power);
         }
     } else if (h_mag_avg > 1e-6f) {
         // Fallback: only 1 training symbol, use default assumption
@@ -322,6 +422,9 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
         last_lts_signal_power = signal_power;
         noise_variance = signal_power / DEFAULT_SNR_LINEAR;
         estimated_snr_linear = DEFAULT_SNR_LINEAR;
+        updateLastSNREstimate(signal_power, noise_variance,
+                              std::max<size_t>(1, data_carrier_indices.size()),
+                              1.0f);
         LOG_DEMOD(INFO, "LTS SNR estimate: %.1f dB (fallback, 1 training symbol)",
                   10.0f * std::log10(estimated_snr_linear));
     }
@@ -469,7 +572,10 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
         h_mag_var /= data_carrier_indices.size();
 
         last_fading_index = (h_mag_mean > 0.01f) ? std::sqrt(h_mag_var) / h_mag_mean : 0.0f;
-        LOG_DEMOD(INFO, "LTS fading index: %.3f (threshold: LLR>0.15, two-pass>0.30)", last_fading_index);
+        LOG_DEMOD(INFO, "LTS fading index: %.3f broadband_snr=%.1f dB "
+                  "(threshold: LLR>0.15, two-pass>0.30)",
+                  last_fading_index,
+                  last_snr_db_estimate_valid ? last_snr_db_estimate : 0.0f);
     }
 
     // Mark that we have a valid channel estimate (for smoothing factor selection)

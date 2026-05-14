@@ -86,6 +86,8 @@ public:
     bool isSynced() const override;
     bool hasData() const override;
     float estimatedSNR() const override;
+    bool hasLastSNREstimate() const override;
+    float getLastSNREstimate() const override;
     float estimatedCFO() const override;
     float getFadingIndex() const override;  // From demodulator pilot variance
     float getLastLTSSignalPower() const override;

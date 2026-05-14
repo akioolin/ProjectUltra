@@ -75,13 +75,33 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
                                              float residual_cfo_hz) const {
     result.sync_correlation = sync_correlation_;
     if (is_ofdm && waveform_) {
+        const float chirp_snr_db = result.snr_db;
         result.lts_snr_db = waveform_->estimatedSNR();
+        result.has_pilot_snr_db = waveform_->hasLastSNREstimate();
+        result.pilot_snr_db = waveform_->getLastSNREstimate();
         result.lts_fading_index = waveform_->getFadingIndex();
         result.lts_residual_cfo_hz = waveform_->getLastLTSResidualCFOHz();
+        if (result.has_pilot_snr_db) {
+            result.snr_db = result.pilot_snr_db;
+            last_snr_.store(result.snr_db);
+            last_snr_db_estimate_valid_.store(true);
+            last_snr_db_estimate_.store(result.pilot_snr_db);
+        }
+        LOG_MODEM(DEBUG, "[%s] OFDM quality: chirp_snr=%.1f dB frame_snr=%.1f dB "
+                  "pilot_snr=%s%.1f dB "
+                  "lts_snr=%.1f dB fading=%.3f",
+                  log_prefix_.c_str(), chirp_snr_db, result.snr_db,
+                  result.has_pilot_snr_db ? "" : "unavailable/",
+                  result.pilot_snr_db, result.lts_snr_db,
+                  result.lts_fading_index);
     } else {
         result.lts_snr_db = result.snr_db;
+        result.has_pilot_snr_db = false;
+        result.pilot_snr_db = 0.0f;
         result.lts_fading_index = 0.0f;
         result.lts_residual_cfo_hz = residual_cfo_hz;
+        last_snr_db_estimate_valid_.store(false);
+        last_snr_db_estimate_.store(0.0f);
     }
 }
 

@@ -160,6 +160,8 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 std::fill(impl_->channel_estimate.begin(), impl_->channel_estimate.end(), Complex(1, 0));
                 impl_->snr_symbol_count = 0;
                 impl_->estimated_snr_linear = 1.0f;
+                impl_->last_snr_db_estimate_valid = false;
+                impl_->last_snr_db_estimate = 0.0f;
                 impl_->noise_variance = 0.1f;
                 impl_->prev_pilot_phases.clear();
 
@@ -244,6 +246,8 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                     std::fill(impl_->channel_estimate.begin(), impl_->channel_estimate.end(), Complex(1, 0));
                     impl_->snr_symbol_count = 0;
                     impl_->estimated_snr_linear = 1.0f;
+                    impl_->last_snr_db_estimate_valid = false;
+                    impl_->last_snr_db_estimate = 0.0f;
                     impl_->noise_variance = 0.1f;
                     impl_->prev_pilot_phases.clear();
 
@@ -407,6 +411,14 @@ float OFDMDemodulator::getEstimatedSNR() const {
     return 10.0f * std::log10(impl_->estimated_snr_linear);
 }
 
+bool OFDMDemodulator::hasLastSNREstimate() const {
+    return impl_->last_snr_db_estimate_valid;
+}
+
+float OFDMDemodulator::getLastSNREstimate() const {
+    return impl_->last_snr_db_estimate;
+}
+
 float OFDMDemodulator::getFrequencyOffset() const {
     return impl_->freq_offset_hz;
 }
@@ -539,6 +551,8 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     std::fill(impl_->channel_estimate.begin(), impl_->channel_estimate.end(), Complex(1, 0));
     impl_->snr_symbol_count = 0;
     impl_->estimated_snr_linear = 1.0f;
+    impl_->last_snr_db_estimate_valid = false;
+    impl_->last_snr_db_estimate = 0.0f;
     impl_->noise_variance = 0.1f;
 
     // Preserve pre-set CFO and phase (e.g., from chirp-based estimation)
@@ -715,6 +729,8 @@ void OFDMDemodulator::reset() {
     std::fill(impl_->channel_estimate.begin(), impl_->channel_estimate.end(), Complex(1, 0));
     impl_->snr_symbol_count = 0;
     impl_->estimated_snr_linear = 1.0f;
+    impl_->last_snr_db_estimate_valid = false;
+    impl_->last_snr_db_estimate = 0.0f;
     impl_->noise_variance = 0.1f;
     impl_->last_lts_signal_power = 1.0f;
     impl_->last_lts_channel_magnitude = 1.0f;

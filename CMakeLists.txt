@@ -420,6 +420,16 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_link_libraries(session_decode PRIVATE ultra_sim_station ultra_tool_wav_io)
 
+    add_executable(ofdm_snr_probe
+        tools/ofdm_snr_probe.cpp
+    )
+    ultra_enable_tool_test_warnings(tools/ofdm_snr_probe.cpp)
+    target_include_directories(ofdm_snr_probe PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
+    )
+    target_link_libraries(ofdm_snr_probe PRIVATE ultra_sim_station)
+
     add_library(ultra_replay_lib STATIC
         src/replay/bundle_loader.cpp
         src/replay/event_timeline.cpp

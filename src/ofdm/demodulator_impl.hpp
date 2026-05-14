@@ -63,6 +63,12 @@ struct OFDMDemodulator::Impl {
     float snr_alpha = 0.3f;
     int snr_symbol_count = 0;
 
+    // Measurement-quality broadband SNR estimate for operator display and
+    // future adaptation. Valid only after OFDM LTS/pilot residuals have been
+    // measured; unlike estimated_snr_linear, this must not feed LLR scaling.
+    bool last_snr_db_estimate_valid = false;
+    float last_snr_db_estimate = 0.0f;
+
     // Last LTS estimate quality. False training locks on silence/noise have
     // near-zero values here even when the clipped LLR stream looks plausible.
     float last_lts_signal_power = 1.0f;
@@ -219,6 +225,10 @@ struct OFDMDemodulator::Impl {
     const std::vector<Complex>& extractSymbol(const std::vector<Complex>& baseband, size_t offset);
     void updateChannelEstimate(const std::vector<Complex>& freq_domain);
     void estimateChannelFromLTS(const float* training_samples, size_t num_symbols);
+    void updateLastSNREstimate(float signal_power, float noise_power,
+                               size_t independent_bins, float alpha,
+                               bool fitted_common_gain = false,
+                               bool noise_reference_only = false);
     void interpolateChannel();
     Complex hardDecision(Complex sym, Modulation mod) const;
     void lmsUpdate(int idx, Complex received, Complex reference);

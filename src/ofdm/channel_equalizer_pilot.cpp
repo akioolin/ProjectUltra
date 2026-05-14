@@ -170,6 +170,73 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     }
     float signal_power = signal_power_sum / pilot_carrier_indices.size();
 
+    // Fading index: normalized magnitude variance (0 = flat, >0.1 = fading).
+    // Compute it before temporal SNR estimation because H[n]-H[n-1] is a valid
+    // noise proxy only when the pilot channel is near-static across symbols.
+    float h_mag_mean = 0.0f;
+    for (size_t i = 0; i < h_ls_all.size(); ++i) {
+        h_mag_mean += std::abs(h_ls_all[i]);
+    }
+    h_mag_mean /= h_ls_all.size();
+
+    float h_mag_variance = 0.0f;
+    for (size_t i = 0; i < h_ls_all.size(); ++i) {
+        float diff = std::abs(h_ls_all[i]) - h_mag_mean;
+        h_mag_variance += diff * diff;
+    }
+    h_mag_variance /= h_ls_all.size();
+
+    const float fading_index =
+        (h_mag_mean > 0.01f) ? std::sqrt(h_mag_variance) / h_mag_mean : 0.0f;
+
+    // Phase-1 transfer runs showed temporal pilot-channel residuals are too
+    // easily contaminated by channel-estimate motion during long OFDM frames.
+    // Keep the broadband SNR estimate anchored to the same-frame LTS residual;
+    // pilots continue to update fading/equalization below.
+    size_t pilot_residual_count = 0;
+    constexpr float kPilotSNRFadingLimit = 0.0f;
+    if (fading_index < kPilotSNRFadingLimit &&
+        !prev_pilot_phases.empty() && prev_pilot_phases.size() == h_ls_all.size()) {
+        Complex temporal_fit_num(0.0f, 0.0f);
+        float temporal_fit_den = 0.0f;
+        for (size_t i = 0; i < h_ls_all.size(); ++i) {
+            const Complex prev_h = prev_pilot_phases[i];
+            const Complex curr_h = h_ls_all[i];
+            if (std::norm(prev_h) > 1.0e-8f && std::norm(curr_h) > 1.0e-8f) {
+                temporal_fit_num += curr_h * std::conj(prev_h);
+                temporal_fit_den += std::norm(prev_h);
+            }
+        }
+
+        if (temporal_fit_den > 1.0e-8f) {
+            const Complex common_gain = temporal_fit_num / temporal_fit_den;
+            float pilot_residual_signal_sum = 0.0f;
+            float pilot_residual_noise_sum = 0.0f;
+            for (size_t i = 0; i < h_ls_all.size(); ++i) {
+                const Complex prev_h = prev_pilot_phases[i];
+                const Complex curr_h = h_ls_all[i];
+                if (std::norm(prev_h) <= 1.0e-8f || std::norm(curr_h) <= 1.0e-8f) {
+                    continue;
+                }
+
+                const Complex predicted = common_gain * prev_h;
+                const Complex residual = curr_h - predicted;
+                pilot_residual_signal_sum += std::norm(curr_h);
+                pilot_residual_noise_sum += 0.5f * std::norm(residual);
+                ++pilot_residual_count;
+            }
+
+            if (pilot_residual_count > 0) {
+                updateLastSNREstimate(
+                    pilot_residual_signal_sum / static_cast<float>(pilot_residual_count),
+                    pilot_residual_noise_sum / static_cast<float>(pilot_residual_count),
+                    pilot_residual_count,
+                    0.35f,
+                    true);
+            }
+        }
+    }
+
     // Measure noise using TEMPORAL comparison
     float noise_power_sum = 0.0f;
     size_t noise_count = 0;
@@ -390,26 +457,13 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     // estimate when fading is significant. The pilots still track the channel
     // (for equalization), but we don't let fading contaminate noise_variance.
 
-    // Compute fading index from pilot magnitude variance
-    // High variance across carriers indicates frequency-selective fading
-    float h_mag_mean = 0.0f;
-    for (size_t i = 0; i < h_ls_all.size(); ++i) {
-        h_mag_mean += std::abs(h_ls_all[i]);
-    }
-    h_mag_mean /= h_ls_all.size();
-
-    float h_mag_variance = 0.0f;
-    for (size_t i = 0; i < h_ls_all.size(); ++i) {
-        float diff = std::abs(h_ls_all[i]) - h_mag_mean;
-        h_mag_variance += diff * diff;
-    }
-    h_mag_variance /= h_ls_all.size();
-
-    // Fading index: normalized magnitude variance (0 = flat, >0.1 = fading)
-    float fading_index = (h_mag_mean > 0.01f) ? std::sqrt(h_mag_variance) / h_mag_mean : 0.0f;
-
     // Store for external access (GUI display, rate adaptation)
     last_fading_index = fading_index;
+    LOG_DEMOD(DEBUG, "Pilot quality: fading_index=%.3f broadband_snr=%.1f dB "
+              "(pilot_residuals=%zu)",
+              last_fading_index,
+              last_snr_db_estimate_valid ? last_snr_db_estimate : 0.0f,
+              pilot_residual_count);
 
     if (noise_count > 0 && noise_power_sum > 0.0f) {
         // Noise variance strategy: preserve LTS-based estimate for ALL modes.

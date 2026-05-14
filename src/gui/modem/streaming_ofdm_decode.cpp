@@ -1218,7 +1218,7 @@ void StreamingDecoder::decodeCurrentFrame() {
 
         LOG_MODEM(INFO, "[%s] StreamingDecoder: Frame decoded, %d/%d CWs, SNR=%.1f dB, CFO=%.1f Hz",
                   log_prefix_.c_str(), result.codewords_ok, result.codewords_ok + result.codewords_failed,
-                  sync_snr_, sync_cfo_);
+                  result.snr_db, result.cfo_hz);
     } else {
         LOG_MODEM(WARN, "[%s] StreamingDecoder: Decode failed (cw_ok=%d, cw_fail=%d, is_ping=%d)",
                   log_prefix_.c_str(), result.codewords_ok, result.codewords_failed, result.is_ping ? 1 : 0);

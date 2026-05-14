@@ -717,6 +717,17 @@ float OFDMChirpWaveform::estimatedSNR() const {
     return last_snr_;
 }
 
+bool OFDMChirpWaveform::hasLastSNREstimate() const {
+    return demodulator_ && demodulator_->hasLastSNREstimate();
+}
+
+float OFDMChirpWaveform::getLastSNREstimate() const {
+    if (demodulator_) {
+        return demodulator_->getLastSNREstimate();
+    }
+    return 0.0f;
+}
+
 float OFDMChirpWaveform::estimatedCFO() const {
     if (std::abs(last_cfo_) > 0.1f) {
         return last_cfo_;

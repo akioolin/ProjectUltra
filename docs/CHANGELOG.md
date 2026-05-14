@@ -10,6 +10,58 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-14: Honest OFDM residual SNR estimator
+
+**What was broken:** OFDM `frame.rx.snr_db` was the chirp-correlation estimate,
+which saturates in the mid/high 20s once the dual-chirp matched filter has
+enough processing gain. DATA frames at honest broadband SNR around 10-15 dB
+therefore looked like 25+ dB frames to logs, operator display, and adaptive
+logic.
+
+**What changed:** OFDM demodulation now accumulates a residual-derived
+`last_snr_db_estimate` from same-frame LTS residual noise, exposes it through
+the OFDM demodulator and waveform interfaces, and uses it in
+`StreamingDecoder::populateDecodeMetrics()` for OFDM `DecodeResult::snr_db`.
+The chirp-derived estimate is still logged as `chirp_snr` and remains the
+fallback for MC-DPSK and pre-residual frames. Temporal pilot residuals continue
+to drive fading/equalization, but they are not allowed to replace the frame SNR
+because Phase-1 transfer runs showed they contain channel-estimate motion during
+long OFDM frames.
+
+**Why it works:** The LTS residual compares two same-frame OFDM training
+symbols, estimates FFT-bin noise variance, and converts it to the modem's
+calibrated broadband noise reference. This avoids the chirp matched-filter
+saturation path while keeping wire format, channel calibration, and ladder
+thresholds unchanged.
+
+**Phase-1 feasibility:** direct `ofdm_snr_probe` sweep at R1/2 across
+AWGN/Good/Moderate SNR `{20,15,10,5,0,-3,-5}` showed monotonic tracking instead
+of saturation: Pearson `r=1.000` AWGN, `0.987` Good, `0.980` Moderate. The
+one-frame AWGN probe has a +3.5 dB bias; streaming transfer logs center closer
+to configured SNR and are the Phase-3 behavioral reference.
+
+**Phase-2/3 ladder behavior:** default auto-rate file transfers still pick the
+expected floor cells with no threshold changes:
+
+| Cell | Negotiated mode | Result | New DATA frame SNR samples |
+|------|-----------------|--------|----------------------------|
+| Good SNR=15 | OFDM-CHIRP DQPSK R1/2 | PASS, 256 B verified | 13.5-17.7 dB |
+| Moderate SNR=15 | OFDM-CHIRP DQPSK R1/2 | PASS, 256 B verified | 9.6-12.8 dB |
+| Good SNR=10 | OFDM-CHIRP DQPSK R1/4 | PASS, 256 B verified | 8.9-14.7 dB |
+
+**Test verification:** `cmake --build build -j4` completed cleanly. Full CTest
+passed `49/49`; `ChannelSNRCalibration` passed inside that run, preserving the
+separate ±1.5 dB channel-calibration gate. Phase reports and raw sweep tables
+are in `docs/HONEST_SNR_ESTIMATION.md`.
+
+**Follow-ups flagged, not fixed in this round:** The residual SNR estimate is
+deliberately noisier than the old saturated chirp number on individual fading
+frames. Moderate fading can report lower DATA SNR than the configured channel
+knob because the frame is paying real selective-fade penalty. No ladder
+thresholds were tuned.
+
+---
+
 ## 2026-05-14: SimulatedChannel AWGN is continuous RX noise
 
 **What was broken:** `SimulatedChannel` synthetic AWGN was not a real channel

@@ -165,6 +165,11 @@ public:
     // Estimated SNR from current signal (dB)
     virtual float estimatedSNR() const = 0;
 
+    // Measurement-quality broadband SNR from OFDM pilot/LTS residuals.
+    // Non-OFDM waveforms return false and keep their chirp-derived SNR path.
+    virtual bool hasLastSNREstimate() const { return false; }
+    virtual float getLastSNREstimate() const { return 0.0f; }
+
     // Estimated CFO from current signal (Hz)
     virtual float estimatedCFO() const = 0;
 
