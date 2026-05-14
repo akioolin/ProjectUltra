@@ -10,6 +10,40 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-13: ota_simulator v1 scripted external-audio regression rig
+
+**What was missing:** after BUG-PING-DETECTOR-001, there was no deterministic
+CTest-gateable way to inject externally captured or synthetic audio into one
+live endpoint while the full `SimulatedStation` protocol state machine was
+running. Decoder-only replay could validate PHY decode behavior, and
+`cli_simulator` could validate two live endpoints, but neither covered
+"scripted peer audio enters a disconnected endpoint and the endpoint must emit
+the correct protocol response."
+
+**What changed:** added `ota_simulator` with `gen` and `run` subcommands.
+`gen` writes single-frame 48 kHz float WAV clips through `StreamingEncoder`.
+`run` loads a strict v1 JSON scenario, drives a single `SimulatedStation`
+through a new `ScriptedAudioPort`, mixes optional normalized noise-bed audio
+with scheduled clip injections, captures endpoint TX audio to `out_tx.wav`,
+and writes replay-compatible JSONL events to `out_session.jsonl`. TX frame
+identification is done by back-decoding the captured TX audio with
+`StreamingDecoder`; PING/PONG use the protocol context because their wire image
+is intentionally identical.
+
+**Why this is the right fix:** the injected path is additive 48 kHz audio into
+the same streaming decoder and connection callbacks used by the simulator
+station, so it exercises the bug class without touching PHY hot paths. The
+audio callback only mixes preloaded bounded vectors and appends TX samples;
+the heavier TX back-decode and assertions run in the scenario runner.
+
+**Verification:** registered `OTASimulatorSmoke`, which injects
+`tests/fixtures/ota_simulator/clips/peer_ping.wav` into a DISCONNECTED
+`8P9QC` endpoint and asserts a decoded TX `PONG` within 4 s. Deferred v2 items:
+two-endpoint mode, Watterson/CFO/fading impairment plumbing, packaged replay
+bundles, and richer real-HF noise-bed libraries.
+
+---
+
 ## 2026-05-13: BUG-PING-DETECTOR-001 real-HF PING classifier fallback
 
 **What was broken:** real OTA PINGs locked the dual chirp correctly but were

@@ -1,9 +1,25 @@
 # Agent System Current State
 
-Last updated: 2026-05-07.
+Last updated: 2026-05-13.
 
 This file is a compact handoff for future Claude/Codex sessions if context is
 compacted or lost.
+
+## Latest Local State: ota_simulator v1
+
+`ota_simulator` v1 is now the deterministic single-endpoint regression rig for
+scripted external audio plus the full `SimulatedStation` state machine. It has:
+
+- `ota_simulator gen` for single-frame WAV clip generation through
+  `StreamingEncoder`.
+- `ota_simulator run` for v1 JSON scenarios using `ScriptedAudioPort`.
+- `out_tx.wav` TX capture and `out_session.jsonl` replay-style event output.
+- `OTASimulatorSmoke`, which injects a clean peer PING into a DISCONNECTED
+  endpoint and asserts decoded TX `PONG`.
+
+Deferred v2 items remain explicitly out of v1: two-endpoint mode,
+Watterson/fading/CFO impairment, KiwiSDR/noise-bed capture workflows, packaged
+bundle output, and GUI/BlackHole routing helpers.
 
 ## Objective
 

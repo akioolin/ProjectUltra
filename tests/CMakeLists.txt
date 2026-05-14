@@ -316,6 +316,27 @@ if(TARGET cli_simulator)
         LABELS regression)
 endif()
 
+if(TARGET ota_simulator)
+    add_test(NAME OTASimulatorSmoke
+        COMMAND $<TARGET_FILE:ota_simulator> run
+                --scenario tests/fixtures/ota_simulator/smoke_ping_disconnected.json)
+    set_tests_properties(OTASimulatorSmoke PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        TIMEOUT 60
+        LABELS regression)
+
+    # Locks in BUG-PING-DETECTOR-001: real-HF OTA PING capture from
+    # KC3VPB injected over real-HF noise bed must classify as PING and
+    # trigger PONG TX from a DISCONNECTED endpoint.
+    add_test(NAME OTASimulatorRealOTAPing
+        COMMAND $<TARGET_FILE:ota_simulator> run
+                --scenario tests/fixtures/ota_simulator/real_ota_ping_to_pong.json)
+    set_tests_properties(OTASimulatorRealOTAPing PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        TIMEOUT 60
+        LABELS regression)
+endif()
+
 if(ULTRA_BUILD_HARDWARE_TESTS)
     add_test(NAME HardwareSmoke
         COMMAND ${CMAKE_SOURCE_DIR}/agents/run_hardware_smoke.sh)

@@ -449,6 +449,28 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_link_libraries(ultra_replay PRIVATE ultra_replay_lib)
 
+    add_executable(ota_simulator
+        tools/ota_simulator.cpp
+        tools/ota_simulator/scenario.cpp
+        tools/ota_simulator/scripted_audio_port.cpp
+        tools/ota_simulator/runner.cpp
+        tools/ota_simulator/clip_gen.cpp
+        tools/ota_simulator/session_log.cpp
+    )
+    ultra_enable_tool_test_warnings(
+        tools/ota_simulator.cpp
+        tools/ota_simulator/scenario.cpp
+        tools/ota_simulator/scripted_audio_port.cpp
+        tools/ota_simulator/runner.cpp
+        tools/ota_simulator/clip_gen.cpp
+        tools/ota_simulator/session_log.cpp
+    )
+    target_include_directories(ota_simulator PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
+    )
+    target_link_libraries(ota_simulator PRIVATE ultra_sim_station ultra_tool_wav_io)
+
     add_executable(ultra_report
         tools/ultra_report.cpp
     )

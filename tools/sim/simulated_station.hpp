@@ -536,6 +536,9 @@ public:
     void setDecodedFrameCallback(std::function<void(const DecodeResult&)> cb) {
         decoded_frame_callback_ = std::move(cb);
     }
+    void setRxDecodeResultCallback(std::function<void(const DecodeResult&)> cb) {
+        rx_decode_result_callback_ = std::move(cb);
+    }
 
     void setSNR(float snr) { snr_db_ = snr; }
     void setAutoAccept(bool auto_accept) { protocol_.setAutoAccept(auto_accept); }
@@ -667,6 +670,7 @@ public:
 
     // Stats accessors
     ConnectionStats getConnectionStats() const { return protocol_.getStats(); }
+    ConnectionState getConnectionState() const { return protocol_.getState(); }
     DecoderStats getDecoderStats() const { return decoder_ ? decoder_->getStats() : DecoderStats{}; }
     std::string getCallsign() const { return callsign_; }
     WaveformMode getNegotiatedWaveform() const { return negotiated_waveform_; }
@@ -726,6 +730,7 @@ private:
     std::function<void(const std::string&)> message_callback_;
     std::function<void(const std::string&, bool)> file_received_callback_;
     std::function<void(const DecodeResult&)> decoded_frame_callback_;
+    std::function<void(const DecodeResult&)> rx_decode_result_callback_;
 
     std::atomic<uint64_t> total_samples_{0};
     float snr_db_ = 20.0f;
@@ -845,6 +850,10 @@ private:
     }
 
     void handleDecodedFrame(const DecodeResult& result) {
+        if (rx_decode_result_callback_) {
+            rx_decode_result_callback_(result);
+        }
+
         if (!result.success) {
             if (result.has_partial_codewords) {
                 float fading_index = decoder_ ? decoder_->getLastFadingIndex() : 0.0f;

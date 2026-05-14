@@ -53,3 +53,9 @@ CTestTestfile.cmake
 recordings/*
 !recordings/ota_capture_*/
 !recordings/ota_full_session_*/
+
+# ota_simulator runtime outputs (when scenario writes relative paths)
+/out_tx.wav
+/out_session.jsonl
+/out_real_ota_tx.wav
+/out_real_ota_session.jsonl
