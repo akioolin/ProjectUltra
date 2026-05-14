@@ -171,6 +171,24 @@ void StreamingDecoder::setBurstInterleaveGroupSize(int size) {
     burst_group_size_ = ofdm_link_adaptation::sanitizeBurstGroupSize(size);
 }
 
+void StreamingDecoder::observeIdleNoiseCandidate(const float* samples, size_t count) {
+    if (!samples || count == 0) {
+        return;
+    }
+
+    // Idle classification deliberately reuses the StreamingDecoder acquisition
+    // state: this is called only after SEARCHING-state audio has gone through the
+    // existing chirp/LTS detector and produced no lock. If any sync/decode state
+    // is active, the samples are not an idle-noise observation.
+    if (state_ != DecoderState::SEARCHING ||
+        pending_total_cw_ != 0 ||
+        mc_burst_pending_frame_) {
+        return;
+    }
+
+    idle_noise_snr_estimator_.observeIdleAudio(samples, count);
+}
+
 void StreamingDecoder::writeSamplesToRingLocked(const float* samples, size_t count) {
     if (uses_default_buffer_capacity_) {
         for (size_t i = 0; i < count; i++) {
@@ -790,6 +808,7 @@ void StreamingDecoder::reset() {
 
     std::fill(buffer_.begin(), buffer_.end(), 0.0f);
     if (waveform_) waveform_->reset();
+    idle_noise_snr_estimator_.reset();
 
     {
         std::lock_guard<std::mutex> qlock(queue_mutex_);

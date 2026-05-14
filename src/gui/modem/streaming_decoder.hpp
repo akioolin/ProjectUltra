@@ -34,6 +34,7 @@
 //   decoder.stop();  // Wakes decode thread to exit
 
 #include "waveform/waveform_interface.hpp"
+#include "idle_noise_snr_estimator.hpp"
 #include "ultra/dsp.hpp"
 #include "waveform/waveform_factory.hpp"
 #include "protocol/frame_v2.hpp"
@@ -275,6 +276,12 @@ public:
     bool hasLastSNREstimate() const { return last_snr_db_estimate_valid_.load(); }
     float getLastSNREstimate() const { return last_snr_db_estimate_.load(); }
 
+    bool hasIdleNoiseSNREstimate() const { return idle_noise_snr_estimator_.hasEstimate(); }
+    float getIdleNoiseSNREstimate() const { return idle_noise_snr_estimator_.snrDb(); }
+    IdleNoiseSNREstimator::Snapshot getIdleNoiseSNRSnapshot() const {
+        return idle_noise_snr_estimator_.snapshot();
+    }
+
     // Get buffer fill level (0-100%)
     float getBufferFillPercent() const;
 
@@ -349,6 +356,7 @@ private:
                                  size_t absolute_start_sample);
     void populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
                                float residual_cfo_hz) const;
+    void observeIdleNoiseCandidate(const float* samples, size_t count);
 
     // Ring/absolute sample helpers. Call only while buffer_mutex_ is held.
     size_t wrapCustomRingIndexLocked(size_t value) const;
@@ -461,6 +469,7 @@ private:
     mutable std::atomic<float> last_snr_{0.0f};
     mutable std::atomic<bool> last_snr_db_estimate_valid_{false};
     mutable std::atomic<float> last_snr_db_estimate_{0.0f};
+    IdleNoiseSNREstimator idle_noise_snr_estimator_;
     std::atomic<float> last_cfo_{0.0f};
     std::atomic<float> last_fading_index_{0.0f};
     float noise_floor_ = 0.001f;

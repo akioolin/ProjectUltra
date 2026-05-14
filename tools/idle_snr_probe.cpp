@@ -1,4 +1,5 @@
 #include "gui/modem/idle_noise_snr_estimator.hpp"
+#include "gui/modem/streaming_decoder.hpp"
 #include "sim/cli_enums.hpp"
 #include "sim/simulated_station.hpp"
 #include "ultra/logging.hpp"
@@ -16,14 +17,15 @@ struct Args {
     float snr_db = 15.0f;
     ::ChannelType channel = ::ChannelType::AWGN;
     uint32_t seed = 42;
-    size_t idle_samples = 48000 * 3;
+    size_t idle_samples = 48000 * 4;
     bool header = true;
+    bool streaming = false;
 };
 
 void usage(const char* argv0) {
     std::cout
         << "Usage: " << argv0 << " [--snr DB] [--channel awgn|good|moderate|poor|flutter]\n"
-        << "       [--seed N] [--idle-samples N] [--no-header]\n";
+        << "       [--seed N] [--idle-samples N] [--streaming] [--no-header]\n";
 }
 
 const char* channelName(::ChannelType channel) {
@@ -70,6 +72,8 @@ bool parseArgs(int argc, char** argv, Args& args) {
             const char* v = need("--idle-samples");
             if (!v) return false;
             args.idle_samples = std::stoull(v);
+        } else if (arg == "--streaming") {
+            args.streaming = true;
         } else if (arg == "--no-header") {
             args.header = false;
         } else if (arg == "--help" || arg == "-h") {
@@ -101,12 +105,24 @@ int main(int argc, char** argv) {
     sim.transmitFromA(tx);
     std::vector<float> rx = sim.receiveForB(args.idle_samples);
 
-    ultra::gui::IdleNoiseSNREstimator estimator;
-    estimator.observeIdleAudio(rx.data(), rx.size());
-    const auto s = estimator.snapshot();
+    ultra::gui::IdleNoiseSNREstimator::Snapshot s;
+    if (args.streaming) {
+        ultra::gui::StreamingDecoder decoder;
+        constexpr size_t kChunk = 4800;
+        for (size_t off = 0; off < rx.size(); off += kChunk) {
+            const size_t n = std::min(kChunk, rx.size() - off);
+            decoder.feedAudio(rx.data() + off, n);
+            decoder.processBuffer();
+        }
+        s = decoder.getIdleNoiseSNRSnapshot();
+    } else {
+        ultra::gui::IdleNoiseSNREstimator estimator;
+        estimator.observeIdleAudio(rx.data(), rx.size());
+        s = estimator.snapshot();
+    }
 
     if (args.header) {
-        std::cout << "channel,configured_snr,seed,valid,idle_snr_db,delta_db,"
+        std::cout << "channel,configured_snr,seed,source,valid,idle_snr_db,delta_db,"
                   << "instant_snr_db,filtered_noise_rms,normalized_noise_rms,"
                   << "fir_energy,enbw_hz,windows\n";
     }
@@ -116,6 +132,7 @@ int main(int argc, char** argv) {
               << std::fixed << std::setprecision(2)
               << args.snr_db << ","
               << args.seed << ","
+              << (args.streaming ? "streaming" : "direct") << ","
               << (s.valid ? 1 : 0) << ","
               << s.snr_db << ","
               << delta << ","

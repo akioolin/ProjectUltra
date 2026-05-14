@@ -568,6 +568,9 @@ void StreamingDecoder::searchForSync() {
         // (especially after buffer wraps). This caused feedAudio()'s overflow
         // check to compute unsearched ≈ buffer_size, triggering spurious
         // buffer overflows and data loss during async decode.
+    } else if (!search_buffer.empty()) {
+        const size_t idle_count = std::min(search_buffer.size(), CORRELATION_STEP);
+        observeIdleNoiseCandidate(search_buffer.data(), idle_count);
     }
 }
 
