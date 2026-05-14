@@ -767,6 +767,7 @@ void StreamingDecoder::reset() {
     correlation_pos_ = 0;
     sync_position_ = 0;
     sync_correlation_ = 0.0f;
+    sync_gap_error_samples_ = 0.0f;
     samples_since_sync_ = 0;
     total_fed_ = 0;
     feed_iter_ = 0;

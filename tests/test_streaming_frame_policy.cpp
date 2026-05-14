@@ -50,6 +50,40 @@ void test_rms_and_ping_detection() {
     CHECK(silent.is_ping, "silence should classify as ping-compatible chirp-only frame");
 }
 
+void test_ping_chirp_lock_fallback() {
+    std::vector<float> busy_band(kPingTrainingSkipSamples + kPingRMSCheckSamples, 1.0f);
+
+    auto no_lock = evaluatePingFrame(
+        busy_band.data(), busy_band.size(),
+        kPingTrainingSkipSamples, kPingRMSCheckSamples,
+        kPingCorrFloor - 0.001f, 83.0f,
+        false, false);
+    CHECK(!no_lock.is_ping, "chirp fallback should reject below correlation floor");
+
+    auto wide_gap = evaluatePingFrame(
+        busy_band.data(), busy_band.size(),
+        kPingTrainingSkipSamples, kPingRMSCheckSamples,
+        kPingCorrFloor, kPingMaxGapError + 1.0f,
+        false, false);
+    CHECK(!wide_gap.is_ping, "chirp fallback should reject loose dual-chirp gap");
+
+    auto valid_frame = evaluatePingFrame(
+        busy_band.data(), busy_band.size(),
+        kPingTrainingSkipSamples, kPingRMSCheckSamples,
+        kPingCorrFloor, 145.0f,
+        true, true);
+    CHECK(!valid_frame.is_ping, "valid LDPC frame should not classify as ping");
+
+    auto locked_no_frame = evaluatePingFrame(
+        busy_band.data(), busy_band.size(),
+        kPingTrainingSkipSamples, kPingRMSCheckSamples,
+        kPingCorrFloor, -145.0f,
+        false, false);
+    CHECK(locked_no_frame.is_ping, "chirp-locked LDPC failure should classify as ping");
+    CHECK(!locked_no_frame.ping_by_silence, "busy-band fallback should not rely on RMS silence");
+    CHECK(locked_no_frame.ping_by_chirp_lock, "busy-band fallback should use chirp lock");
+}
+
 void test_false_lock_advance() {
     CHECK(falseOFDMLockAdvanceSamples(10000, 0) == kDefaultFalseLockAdvanceSamples,
           "missing preamble estimate should use default false-lock advance");
@@ -123,6 +157,7 @@ void test_consumed_samples_policy() {
 
 int main() {
     test_rms_and_ping_detection();
+    test_ping_chirp_lock_fallback();
     test_false_lock_advance();
     test_control_first_peek_policy();
     test_sync_recovery_gate();

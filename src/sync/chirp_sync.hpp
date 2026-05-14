@@ -347,6 +347,7 @@ public:
         int down_chirp_start = -1;     // True down-chirp start (CFO-corrected)
         float up_correlation = 0.0f;   // Up-chirp correlation value
         float down_correlation = 0.0f; // Down-chirp correlation value
+        float gap_error_samples = 0.0f; // actual_gap - expected_gap, before CFO correction
     };
 
     DualChirpResult detectDualChirp(SampleSpan samples, float threshold = 0.15f) const {
@@ -471,6 +472,7 @@ public:
         // down_pos should be at true_start + chirp_len + gap, but shifts by +CFO * cfo_to_samples
         // So: actual_gap - expected_gap = 2 * CFO * cfo_to_samples
         float gap_error = static_cast<float>(actual_gap - expected_gap);
+        result.gap_error_samples = gap_error;
         result.cfo_hz = gap_error / (2.0f * cfo_to_samples);
 
         LOG_SYNC(INFO, "ChirpSync: Dual chirp: up_pos=%d, down_pos=%d, gap=%d (expected=%d), gap_error=%.1f",

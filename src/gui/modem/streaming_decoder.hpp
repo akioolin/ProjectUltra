@@ -79,6 +79,16 @@ struct DecodeResult {
     float lts_fading_index = 0.0f;  // Per-carrier LTS/pilot fading index
     float sync_correlation = 0.0f;  // Light/full preamble sync correlation
     float lts_residual_cfo_hz = 0.0f;  // Residual CFO reported by OFDM waveform
+    float ping_training_rms = 0.0f;
+    float ping_data_rms = 0.0f;
+    float ping_data_to_training_ratio = 0.0f;
+    float ping_chirp_corr = 0.0f;
+    float ping_gap_error_samples = 0.0f;
+    bool ping_by_silence = false;
+    bool ping_by_chirp_lock = false;
+    bool ping_ldpc_attempted = false;
+    bool ping_ldpc_decode_succeeded = false;
+    bool ping_ldpc_magic_valid = false;
     bool has_partial_codewords = false;  // MC-DPSK only: CW0 parsed, frame incomplete.
     v2::PartialFrameCodewords partial_codewords;
 };
@@ -377,6 +387,7 @@ private:
     float sync_cfo_ = 0.0f;           // CFO from sync detection
     float sync_snr_ = 0.0f;           // SNR estimate from sync detection
     float sync_correlation_ = 0.0f;   // LTS/light-sync confidence for current frame
+    float sync_gap_error_samples_ = 0.0f; // Dual-chirp timing error for current frame
     size_t correlation_pos_ = 0;      // Current position for correlation search
     size_t last_decoded_sync_pos_ = SIZE_MAX;  // Last successfully decoded sync position (to prevent duplicates)
     size_t search_floor_abs_ = 0;     // Earliest absolute sample search may inspect

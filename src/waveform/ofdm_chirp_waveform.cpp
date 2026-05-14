@@ -350,6 +350,7 @@ bool OFDMChirpWaveform::detectSync(SampleSpan samples, SyncResult& result, float
     result.detected = chirp_result.success;
     result.correlation = std::max(chirp_result.up_correlation, chirp_result.down_correlation);
     result.cfo_hz = chirp_result.cfo_hz;
+    result.gap_error_samples = chirp_result.gap_error_samples;
     result.has_training = true;
 
     if (chirp_result.success) {

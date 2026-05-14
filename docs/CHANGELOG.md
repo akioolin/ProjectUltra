@@ -10,6 +10,47 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-13: BUG-PING-DETECTOR-001 real-HF PING classifier fallback
+
+**What was broken:** real OTA PINGs locked the dual chirp correctly but were
+dropped before PONG because the disconnected MC-DPSK PING detector relied only
+on post-training RMS being quiet. On a busy HF band, the post-preamble band
+noise can be close to training RMS, so `data_rms / training_rms` looked like a
+DATA frame even when the waveform was actually a chirp+training+reference PING.
+
+**Root cause:** the old discriminator was implicitly calibrated to clean-cable
+or simulator AWGN noise floors. That is not a signal-model invariant: background
+QRM changes the denominator/ numerator relationship even though the PING wire
+image did not change.
+
+**What changed:** `streaming_frame_policy.hpp::evaluatePingFrame()` now keeps
+the existing PATH 1 RMS silence test and adds PATH 2:
+`chirp_corr >= 0.30`, `abs(gap_error_samples) <= 1000`, and no valid LDPC frame
+(`ldpc_decode_succeeded && ldpc_magic_valid` is false). The call site passes
+the already-computed chirp correlation and dual-chirp gap error from sync, and
+the existing MC-DPSK LDPC decode outcome. Clean PINGs still return early through
+PATH 1; PATH 2 only runs after the decoder already tried LDPC because PATH 1
+did not fire.
+
+**Why this is the right fix:** PING and DATA are identical through chirp,
+training, and reference; they differ only in the LDPC data region. The chirp
+correlation is the matched-filter response against the known ProjectUltra chirp
+template, and the dual-chirp gap error verifies the expected up/down chirp
+geometry. LDPC success plus `0x55 0x4C` magic is the binary truth signal for a
+valid data/control frame. Both parts are invariant to background noise floor by
+construction: a matched filter normalizes the known-template lock, and LDPC
+validity is pass/fail on the decoded codeword structure rather than an energy
+ratio against whatever QRM follows the preamble.
+
+**Verification:** added `tests/test_ping_detector.cpp` with the two real OTA
+PING fixtures, a regenerated direct-`StreamingEncoder::encodePing()` AWGN SNR15
+fixture, and a no-PING noise fixture. The real OTA captures fire PATH 2 with
+gap errors 145 and 83 samples; the synthetic AWGN fixture fires PATH 1. Ran
+`cmake --build build -j4` and `ctest --test-dir build --output-on-failure`:
+44/44 PASS.
+
+---
+
 ## 2026-05-13: Diagnostics cleanup eats the just-saved report
 
 **What was broken:** clicking "Save Bundle" in `ultra_gui` would log

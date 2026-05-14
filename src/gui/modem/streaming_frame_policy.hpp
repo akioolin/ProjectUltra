@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 namespace ultra {
 namespace gui {
@@ -15,6 +16,8 @@ inline constexpr size_t kPingTrainingSkipSamples = 4608;
 inline constexpr size_t kPingRMSCheckSamples = 5000;
 inline constexpr float kMinTrainingRMSForPingRatio = 0.001f;
 inline constexpr float kPingMaxDataToTrainingRMSRatio = 0.5f;
+inline constexpr float kPingCorrFloor = 0.30f;
+inline constexpr float kPingMaxGapError = 1000.0f;
 inline constexpr size_t kDefaultFalseLockAdvanceSamples = 1024;
 inline constexpr size_t kMinFalseLockAdvanceSamples = 512;
 inline constexpr float kMinSyncRecoveryCorrelation = 0.80f;
@@ -31,17 +34,30 @@ inline float rms(const float* samples, size_t count) {
     return std::sqrt(sum / static_cast<float>(count));
 }
 
-struct PingRMSDecision {
+struct PingFrameDecision {
     float training_rms = 0.0f;
     float data_rms = 0.0f;
     float ratio = 0.0f;
+    float chirp_corr = 0.0f;
+    float gap_error_samples = std::numeric_limits<float>::infinity();
+    bool ldpc_decode_succeeded = false;
+    bool ldpc_magic_valid = false;
+    bool ping_by_silence = false;
+    bool ping_by_chirp_lock = false;
     bool is_ping = true;
 };
 
-inline PingRMSDecision evaluatePingRMS(const float* samples, size_t count,
-                                       size_t training_skip_samples = kPingTrainingSkipSamples,
-                                       size_t rms_check_samples = kPingRMSCheckSamples) {
-    PingRMSDecision decision;
+using PingRMSDecision = PingFrameDecision;
+
+inline PingFrameDecision evaluatePingFrame(
+    const float* samples, size_t count,
+    size_t training_skip_samples = kPingTrainingSkipSamples,
+    size_t rms_check_samples = kPingRMSCheckSamples,
+    float chirp_corr = 0.0f,
+    float gap_error_samples = std::numeric_limits<float>::infinity(),
+    bool ldpc_decode_succeeded = false,
+    bool ldpc_magic_valid = false) {
+    PingFrameDecision decision;
 
     const size_t train_len = std::min(training_skip_samples, count);
     decision.training_rms = rms(samples, train_len);
@@ -53,8 +69,28 @@ inline PingRMSDecision evaluatePingRMS(const float* samples, size_t count,
     decision.ratio = (decision.training_rms > kMinTrainingRMSForPingRatio)
         ? decision.data_rms / decision.training_rms
         : 0.0f;
-    decision.is_ping = decision.ratio < kPingMaxDataToTrainingRMSRatio;
+    decision.chirp_corr = chirp_corr;
+    decision.gap_error_samples = gap_error_samples;
+    decision.ldpc_decode_succeeded = ldpc_decode_succeeded;
+    decision.ldpc_magic_valid = ldpc_magic_valid;
+
+    decision.ping_by_silence = decision.ratio < kPingMaxDataToTrainingRMSRatio;
+    const bool chirp_signature_real =
+        chirp_corr >= kPingCorrFloor &&
+        std::abs(gap_error_samples) <= kPingMaxGapError;
+    const bool no_valid_frame = !ldpc_decode_succeeded || !ldpc_magic_valid;
+    decision.ping_by_chirp_lock = chirp_signature_real && no_valid_frame;
+    decision.is_ping = decision.ping_by_silence || decision.ping_by_chirp_lock;
     return decision;
+}
+
+inline PingRMSDecision evaluatePingRMS(
+    const float* samples, size_t count,
+    size_t training_skip_samples = kPingTrainingSkipSamples,
+    size_t rms_check_samples = kPingRMSCheckSamples) {
+    return evaluatePingFrame(samples, count, training_skip_samples, rms_check_samples,
+                             0.0f, std::numeric_limits<float>::infinity(),
+                             true, true);
 }
 
 inline size_t falseOFDMLockAdvanceSamples(size_t frame_len, int data_preamble_samples) {

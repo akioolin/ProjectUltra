@@ -262,6 +262,19 @@ target_include_directories(test_streaming_frame_policy PRIVATE
 target_link_libraries(test_streaming_frame_policy PRIVATE ultra_core)
 add_test(NAME StreamingFramePolicy COMMAND test_streaming_frame_policy)
 
+add_executable(test_ping_detector
+    test_ping_detector.cpp
+    ${ULTRA_STREAMING_DECODER_SOURCES}
+)
+target_include_directories(test_ping_detector PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+target_compile_definitions(test_ping_detector PRIVATE
+    PROJECT_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+target_link_libraries(test_ping_detector PRIVATE ultra_core)
+add_test(NAME PingDetector COMMAND test_ping_detector)
+
 add_executable(test_streaming_signal_policy test_streaming_signal_policy.cpp)
 target_include_directories(test_streaming_signal_policy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../src
@@ -356,6 +369,7 @@ ultra_enable_test_warnings(
     test_streaming_buffer_policy.cpp
     test_streaming_decode_policy.cpp
     test_streaming_frame_policy.cpp
+    test_ping_detector.cpp
     test_streaming_signal_policy.cpp
     test_streaming_mc_dpsk.cpp
     ../tools/test_throughput.cpp

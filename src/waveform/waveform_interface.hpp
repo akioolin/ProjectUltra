@@ -39,6 +39,7 @@ struct SyncResult {
     int start_sample = -1;          // Sample position where data starts
     float correlation = 0.0f;       // Peak correlation value (0-1)
     float cfo_hz = 0.0f;            // Estimated carrier frequency offset
+    float gap_error_samples = 0.0f; // Dual-chirp actual_gap - expected_gap
     float snr_estimate = 0.0f;      // Estimated SNR from preamble
     bool has_training = false;      // True if preamble includes training sequence
 };

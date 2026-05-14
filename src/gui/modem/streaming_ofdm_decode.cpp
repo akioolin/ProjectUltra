@@ -310,56 +310,111 @@ void StreamingDecoder::decodeCurrentFrame() {
     // RMS heuristic for connected OFDM light-preamble frames: valid data/control
     // frames must be accepted or rejected by the demodulator + CRC/FEC path.
     const bool allow_ping_detection = !connected_ && mode_ == protocol::WaveformMode::MC_DPSK;
-    if (allow_ping_detection) {
-        // PING detection: use ratio of data RMS to training RMS.
-        // PING (chirp only): data region is noise-only; data frames carry energy.
-        const size_t mc_dpsk_symbol_samples =
-            waveform_ ? static_cast<size_t>(std::max(1, waveform_->getSamplesPerSymbol())) : 512;
-        const size_t ping_training_skip = 9 * mc_dpsk_symbol_samples;
-        const size_t ping_check_samples = std::max(
-            frame_policy::kPingRMSCheckSamples, 3 * mc_dpsk_symbol_samples);
-        const auto ping_decision = frame_policy::evaluatePingRMS(
-            frame_buffer.data(), frame_buffer.size(), ping_training_skip, ping_check_samples);
+    const size_t mc_dpsk_symbol_samples =
+        (allow_ping_detection && waveform_)
+            ? static_cast<size_t>(std::max(1, waveform_->getSamplesPerSymbol()))
+            : 512;
+    const size_t ping_training_skip = 9 * mc_dpsk_symbol_samples;
+    const size_t ping_check_samples = std::max(
+        frame_policy::kPingRMSCheckSamples, 3 * mc_dpsk_symbol_samples);
+    auto evaluatePingDecision = [&](bool ldpc_decode_succeeded,
+                                    bool ldpc_magic_valid) {
+        return frame_policy::evaluatePingFrame(
+            frame_buffer.data(), frame_buffer.size(), ping_training_skip,
+            ping_check_samples, sync_correlation_, sync_gap_error_samples_,
+            ldpc_decode_succeeded, ldpc_magic_valid);
+    };
+    auto emitPingFrame = [&](const frame_policy::PingFrameDecision& ping_decision,
+                             bool ldpc_attempted) {
+        LOG_MODEM(INFO, "[%s] PING detected: path1=%d path2=%d ratio=%.3f "
+                  "chirp_corr=%.3f gap_error=%.1f ldpc_attempted=%d "
+                  "ldpc_ok=%s magic=%s "
+                  "SNR=%.1f dB CFO=%.1f Hz",
+                  log_prefix_.c_str(), ping_decision.ping_by_silence ? 1 : 0,
+                  ping_decision.ping_by_chirp_lock ? 1 : 0,
+                  ping_decision.ratio, ping_decision.chirp_corr,
+                  ping_decision.gap_error_samples,
+                  ldpc_attempted ? 1 : 0,
+                  ldpc_attempted
+                      ? (ping_decision.ldpc_decode_succeeded ? "1" : "0")
+                      : "skipped",
+                  ldpc_attempted
+                      ? (ping_decision.ldpc_magic_valid ? "1" : "0")
+                      : "skipped",
+                  sync_snr_, sync_cfo_);
 
-        LOG_MODEM(INFO, "[%s] PING check: RMS=%.4f, train_RMS=%.4f, ratio=%.3f (threshold=%.1f), skip=%zu, sync_pos=%zu",
+        DecodeResult ping;
+        ping.success = true;
+        ping.is_ping = true;
+        ping.frame_type = v2::FrameType::PING;
+        ping.snr_db = sync_snr_;
+        ping.cfo_hz = sync_cfo_;
+        ping.sync_correlation = sync_correlation_;
+        ping.ping_training_rms = ping_decision.training_rms;
+        ping.ping_data_rms = ping_decision.data_rms;
+        ping.ping_data_to_training_ratio = ping_decision.ratio;
+        ping.ping_chirp_corr = ping_decision.chirp_corr;
+        ping.ping_gap_error_samples = ping_decision.gap_error_samples;
+        ping.ping_by_silence = ping_decision.ping_by_silence;
+        ping.ping_by_chirp_lock = ping_decision.ping_by_chirp_lock;
+        ping.ping_ldpc_attempted = ldpc_attempted;
+        ping.ping_ldpc_decode_succeeded = ping_decision.ldpc_decode_succeeded;
+        ping.ping_ldpc_magic_valid = ping_decision.ldpc_magic_valid;
+
+        {
+            std::lock_guard<std::mutex> qlock(queue_mutex_);
+            frame_queue_.push(ping);
+        }
+
+        if (frame_callback_) {
+            frame_callback_(ping);
+            if (resetDuringDecode()) {
+                return true;
+            }
+        }
+        if (ping_callback_) {
+            ping_callback_(sync_snr_, sync_cfo_);
+            if (resetDuringDecode()) {
+                return true;
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> slock(stats_mutex_);
+            stats_.pings_received++;
+        }
+
+        // Skip past the PING.
+        {
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            size_t min_frame = static_cast<size_t>(waveform_->getMinSamplesForFrame());
+            correlation_pos_ = wrapRingIndexLocked(sync_position_ + min_frame);
+            setSearchFloorLocked(frame_sync_abs + min_frame);
+            last_decoded_sync_pos_ = sync_position_;
+        }
+
+        state_ = DecoderState::SEARCHING;
+        return true;
+    };
+
+    if (allow_ping_detection) {
+        // PATH 1: clean-cable/AWGN silence after training. LDPC inputs are set
+        // true here only to keep the PATH 2 fallback disabled until LDPC has
+        // actually been attempted below.
+        const auto ping_decision = evaluatePingDecision(true, true);
+
+        LOG_MODEM(INFO, "[%s] PING check: RMS=%.4f, train_RMS=%.4f, "
+                  "ratio=%.3f (threshold=%.1f), chirp_corr=%.3f, "
+                  "gap_error=%.1f, path1=%d, skip=%zu, sync_pos=%zu",
                   log_prefix_.c_str(), ping_decision.data_rms,
                   ping_decision.training_rms, ping_decision.ratio,
                   frame_policy::kPingMaxDataToTrainingRMSRatio,
+                  ping_decision.chirp_corr, ping_decision.gap_error_samples,
+                  ping_decision.ping_by_silence ? 1 : 0,
                   ping_training_skip, sync_position_);
 
-        if (ping_decision.is_ping) {
-            LOG_MODEM(INFO, "[%s] PING detected (RMS=%.4f), SNR=%.1f dB, CFO=%.1f Hz",
-                      log_prefix_.c_str(), ping_decision.data_rms, sync_snr_, sync_cfo_);
-
-            DecodeResult ping;
-            ping.success = true;
-            ping.is_ping = true;
-            ping.frame_type = v2::FrameType::PING;
-            ping.snr_db = sync_snr_;
-            ping.cfo_hz = sync_cfo_;
-
-            {
-                std::lock_guard<std::mutex> qlock(queue_mutex_);
-                frame_queue_.push(ping);
-            }
-
-            if (ping_callback_) ping_callback_(sync_snr_, sync_cfo_);
-
-            {
-                std::lock_guard<std::mutex> slock(stats_mutex_);
-                stats_.pings_received++;
-            }
-
-            // Skip past the PING.
-            {
-                std::lock_guard<std::mutex> lock(buffer_mutex_);
-                size_t min_frame = static_cast<size_t>(waveform_->getMinSamplesForFrame());
-                correlation_pos_ = wrapRingIndexLocked(sync_position_ + min_frame);
-                setSearchFloorLocked(frame_sync_abs + min_frame);
-                last_decoded_sync_pos_ = sync_position_;
-            }
-
-            state_ = DecoderState::SEARCHING;
+        if (ping_decision.ping_by_silence) {
+            emitPingFrame(ping_decision, false);
             return;
         }
     }
@@ -1099,6 +1154,34 @@ void StreamingDecoder::decodeCurrentFrame() {
         if (!recovered) {
             LOG_MODEM(DEBUG, "[%s] Multi-candidate sync recovery: no nearby offset decoded",
                       log_prefix_.c_str());
+        }
+    }
+
+    if (allow_ping_detection && !result.success) {
+        // PATH 2: real chirp lock plus no valid LDPC frame. This uses only
+        // discriminator signals the receiver has already computed: the chirp
+        // matched-filter lock/gap and the binary LDPC frame outcome.
+        const bool ldpc_decode_succeeded = result.success;
+        const bool ldpc_magic_valid =
+            ldpc_decode_succeeded && result.frame_data.size() >= 2 &&
+            result.frame_data[0] == 0x55 && result.frame_data[1] == 0x4C;
+        const auto ping_decision =
+            evaluatePingDecision(ldpc_decode_succeeded, ldpc_magic_valid);
+
+        LOG_MODEM(INFO, "[%s] PING check PATH2: ratio=%.3f, "
+                  "chirp_corr=%.3f (floor=%.2f), gap_error=%.1f (max=%.0f), "
+                  "ldpc_ok=%d, magic=%d, path1=%d, path2=%d",
+                  log_prefix_.c_str(), ping_decision.ratio,
+                  ping_decision.chirp_corr, frame_policy::kPingCorrFloor,
+                  ping_decision.gap_error_samples, frame_policy::kPingMaxGapError,
+                  ping_decision.ldpc_decode_succeeded ? 1 : 0,
+                  ping_decision.ldpc_magic_valid ? 1 : 0,
+                  ping_decision.ping_by_silence ? 1 : 0,
+                  ping_decision.ping_by_chirp_lock ? 1 : 0);
+
+        if (ping_decision.is_ping) {
+            emitPingFrame(ping_decision, true);
+            return;
         }
     }
 
