@@ -10,6 +10,54 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-14: Calibrated absolute OFDM SNR meter ready for review
+
+**What was broken:** The residual-SNR diagnostic was linear on AWGN but read
+about `+2.71 dB` high at the SNR=15 reference cell, and the old two-LTS
+difference path compressed under Watterson fading because `H1-H0` contained
+real channel motion as well as AWGN. That made it unsuitable as an
+operator-facing broadband SNR meter.
+
+**What changed:** `channel_equalizer_lts.cpp` now documents the OFDM
+calibration derivation at the application site. The fixed AWGN constant is the
+two-LTS residual normalization: `E{|H1-H0|^2}/4` is half the single-symbol
+FFT-bin noise power, so the old meter was high by `10*log10(2)`. For fading,
+the calibrated pilot meter uses positive-frequency FFT guard bins adjacent to
+the occupied OFDM carriers as the broadband noise reference; these bins share
+the same unnormalized `N_fft * sigma^2` noise scaling as active carriers but
+do not contain transmitted subcarrier energy. `populateDecodeMetrics()` now
+publishes that calibrated OFDM value through `result.snr_db`; MC-DPSK keeps the
+chirp-derived fallback. LTS remains a diagnostic sibling only.
+
+**Why it is properly fixed:** The constants trace to the actual modulator and
+FFT behavior: data, LTS, and pilot subcarriers are unit power; TX IFFT scales
+by `1/N`; RX FFT is unnormalized; real passband up/downconversion contributes
+a common carrier factor that cancels for LS residuals; and broadband SNR is
+`N_fft * kModemReferencePower / noise_bin`. No wire format, channel
+calibration, or mode-ladder thresholds changed.
+
+**Validation:** `tools/snr_meter_validation.sh 5` now reports calibrated pilot
+PASS on all channel families:
+
+| Channel | Pilot slope | Bias @ SNR=15 |
+|---------|-------------|---------------|
+| AWGN | 1.00 | +0.25 dB |
+| Good | 0.99 | +0.07 dB |
+| Moderate | 0.98 | -0.15 dB |
+
+New CTest `ChannelModemSNRMeterCalibration` passes AWGN at ±1.5 dB and
+Good/Moderate at ±3 dB. Full local CTest passes `50/50`. Protocol ladder
+checks remain unchanged: Good15 negotiates `R1/2`, Moderate15 negotiates
+`R1/2`, and Good10 negotiates `R1/4`. Pi5 hardware validation passed after
+fetching and rebuilding `feat/calibrated-snr-meter`: audio path check
+`/tmp/ultra_audio_path_20260514_161009`, hardware smoke `3/3 PASS`, report
+bundle `agents/reports/hardware_20260514_161038`.
+
+**Status:** Ready for review and merge from branch
+`feat/calibrated-snr-meter`.
+
+---
+
 ## 2026-05-14: OFDM residual-SNR diagnostic plumbing (no operator-facing change)
 
 **What was investigated:** OFDM `frame.rx.snr_db` is the chirp-correlation
