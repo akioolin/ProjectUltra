@@ -165,6 +165,64 @@ Both within the documented calibration spec.
 Report bundle: `agents/reports/hardware_20260514_150426/`
 (`summary.txt` records `hardware_smoke=pass`).
 
-Status: **ready for review and merge.** Phases 1-3 in tree, Phase 4
-hardware-validated end-to-end. Branch `fix/honest-snr-estimation` not
-merged to main; merge decision is the user's.
+Status (as of Phase 4 close): hardware-passing; merge decision
+deferred while the substitution choice was re-evaluated.
+
+## 2026-05-14 Phase 5 — Substitution reverted
+
+After Phase 4, a closer look at the displayed value across protocol
+context (cli_simulator with `--log-level debug --log-category modem`)
+showed both estimators are biased in ways that depend on channel type
+and protocol phase:
+
+| Cell | LTS | Pilot | Configured truth |
+|------|-----|-------|------------------|
+| Probe AWGN (single frame) | +29.3 dB | +23.5 dB | +20 dB |
+| Protocol AWGN DATA phase | +19-22 dB | +13-16 dB | +15 dB |
+| Protocol AWGN handshake | +8-10 dB | +2-5 dB | +15 dB |
+| Protocol Good15 DATA phase | 11-24 dB | 12-16 dB | +15 dB |
+
+Conclusions:
+
+- The "LTS is honest within 1-3 dB" claim from earlier was based on a
+  few favorable log lines and does not generalize. LTS bias is
+  +9 dB on AWGN probes, +4-7 dB on AWGN protocol DATA, and varies
+  11-24 dB on Good fading.
+- Pilot bias is smaller (≤±5 dB) but also channel-dependent.
+- Both estimators read very low during handshake-phase frames, in
+  ways that suggest the measurement context (signal energy reference,
+  AGC settling) differs from DATA-phase context.
+
+Pushing either substitution would trade a saturating-but-stable wrong
+reading (chirp) for a varying wrong reading (pilot or LTS) — not an
+improvement for the operator-facing field.
+
+**Action taken on this branch:**
+
+1. Reverted the `result.snr_db = pilot_snr` (Phase 2) and
+   `result.snr_db = lts_snr_db` (Phase 5) substitutions in
+   `streaming_sync_acquisition.cpp`. The operator-facing
+   `frame.rx.snr_db` keeps its prior chirp-derived behavior.
+2. **Retained** the diagnostic plumbing (`pilot_snr_db`, `lts_snr_db`,
+   `has_pilot_snr_db`, `getLastSNREstimate()`), the
+   `tools/ofdm_snr_probe` tool, and this report. These are the
+   instrumentation foundation for a future calibrated-meter project.
+3. Opened a workstream design doc at
+   [`docs/SNR_METER_DESIGN.md`](SNR_METER_DESIGN.md) laying out the
+   six-step plan to build a calibrated absolute-SNR meter: define the
+   noise model, build a measurement (idle-noise or normalized pilot/
+   LTS), lock with a CTest gate similar to `ChannelSNRCalibration`,
+   validate per channel type, validate in protocol context, validate
+   on hardware.
+
+Operational impact: the auto rate-ladder
+(`selectOFDMCodeRate(snr_db, fading_index)`) was already discriminating
+on `fading_index` (which is calibrated and honest); the `snr_db`
+threshold gate never effectively triggered because the saturated value
+sat above all thresholds. So reverting the substitution does not change
+any production decoding behavior — the modem's auto-selection picks
+were never actually depending on a calibrated `snr_db`.
+
+Branch status: **ready for review and merge as an
+instrumentation-only landing.** No operator-facing behavior change.
+Sets up the calibrated-meter workstream as a clean next step.

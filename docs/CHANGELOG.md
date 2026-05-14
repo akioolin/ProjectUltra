@@ -10,55 +10,69 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
-## 2026-05-14: Honest OFDM residual SNR estimator
+## 2026-05-14: OFDM residual-SNR diagnostic plumbing (no operator-facing change)
 
-**What was broken:** OFDM `frame.rx.snr_db` was the chirp-correlation estimate,
-which saturates in the mid/high 20s once the dual-chirp matched filter has
-enough processing gain. DATA frames at honest broadband SNR around 10-15 dB
-therefore looked like 25+ dB frames to logs, operator display, and adaptive
-logic.
+**What was investigated:** OFDM `frame.rx.snr_db` is the chirp-correlation
+estimate, which saturates in the mid/high 20s once the dual-chirp matched
+filter has enough processing gain. DATA frames at honest broadband SNR around
+10-15 dB look like 25+ dB to logs, operator display, and the MODE_CHANGE
+handshake. The auto rate-ladder `selectOFDMCodeRate(snr_db, fading_index)`
+discriminates in practice on `fading_index` (which **is** calibrated and
+honest) — the `snr_db` threshold gate never effectively triggers because the
+saturated value sits above every threshold.
 
-**What changed:** OFDM demodulation now accumulates a residual-derived
-`last_snr_db_estimate` from same-frame LTS residual noise, exposes it through
-the OFDM demodulator and waveform interfaces, and uses it in
-`StreamingDecoder::populateDecodeMetrics()` for OFDM `DecodeResult::snr_db`.
-The chirp-derived estimate is still logged as `chirp_snr` and remains the
-fallback for MC-DPSK and pre-residual frames. Temporal pilot residuals continue
-to drive fading/equalization, but they are not allowed to replace the frame SNR
-because Phase-1 transfer runs showed they contain channel-estimate motion during
-long OFDM frames.
+**What landed (instrumentation only):**
 
-**Why it works:** The LTS residual compares two same-frame OFDM training
-symbols, estimates FFT-bin noise variance, and converts it to the modem's
-calibrated broadband noise reference. This avoids the chirp matched-filter
-saturation path while keeping wire format, channel calibration, and ladder
-thresholds unchanged.
+1. OFDM demodulation now accumulates a residual-derived `last_snr_db_estimate`
+   from same-frame LTS residual noise and per-symbol pilot residuals, exposed
+   through new `hasLastSNREstimate()` / `getLastSNREstimate()` accessors on
+   the OFDM demodulator and waveform interfaces.
+2. `DecodeResult` gained sibling fields `pilot_snr_db`, `has_pilot_snr_db`,
+   and `lts_snr_db` (the latter was already present but is now consistently
+   populated). These are diagnostic-only and do not replace `snr_db`.
+3. New tool `tools/ofdm_snr_probe` runs a single OFDM frame through
+   `SimulatedChannel` at configured SNR and prints
+   `sync_snr,pilot_snr,lts_snr,fading_index` for offline calibration work.
+4. Debug log line in `populateDecodeMetrics()` reports
+   `chirp_snr / pilot_snr / lts_snr / fading` together so operators can
+   compare the three estimators side-by-side.
 
-**Phase-1 feasibility:** direct `ofdm_snr_probe` sweep at R1/2 across
-AWGN/Good/Moderate SNR `{20,15,10,5,0,-3,-5}` showed monotonic tracking instead
-of saturation: Pearson `r=1.000` AWGN, `0.987` Good, `0.980` Moderate. The
-one-frame AWGN probe has a +3.5 dB bias; streaming transfer logs center closer
-to configured SNR and are the Phase-3 behavioral reference.
+**What did NOT change (and why):** The 2026-05-14 investigation tried two
+substitutions for `frame.rx.snr_db` (`pilot_snr` in Phase 2, then `lts_snr`
+in Phase 5). Both were **reverted** because protocol-context and probe-context
+measurements show both estimators carry channel- and phase-dependent bias of
+5-9 dB. Trading a saturating-but-stable wrong reading for a varying wrong
+reading is not a fix. The operator-facing `frame.rx.snr_db` retains its prior
+chirp-derived behavior; no production decoding path changes.
 
-**Phase-2/3 ladder behavior:** default auto-rate file transfers still pick the
-expected floor cells with no threshold changes:
+**Phase-1 feasibility data (from the diagnostic probe):** monotonic tracking
+of configured channel SNR with Pearson `r=1.000` AWGN, `0.987` Good,
+`0.980` Moderate — but with channel-dependent absolute-value bias of
++3.5 dB (pilot, AWGN), +9 dB (LTS, AWGN), and -5-7 dB (handshake-phase
+frames). Correlation is necessary but not sufficient for a calibrated meter.
 
-| Cell | Negotiated mode | Result | New DATA frame SNR samples |
-|------|-----------------|--------|----------------------------|
-| Good SNR=15 | OFDM-CHIRP DQPSK R1/2 | PASS, 256 B verified | 13.5-17.7 dB |
-| Moderate SNR=15 | OFDM-CHIRP DQPSK R1/2 | PASS, 256 B verified | 9.6-12.8 dB |
-| Good SNR=10 | OFDM-CHIRP DQPSK R1/4 | PASS, 256 B verified | 8.9-14.7 dB |
+**Phase-2/3 protocol context:** ladder picks unchanged on the documented
+floor cells (Good15 / Moderate15 / Good10 all retain DQPSK R1/2 or R1/4 as
+before). Hardware smoke on Pi5 (3/3 AWGN/Good/Moderate at R1/2 SNR=15 1KB)
+passes both before and after this branch — confirming `snr_db` was not a
+load-bearing decoder input.
 
-**Test verification:** `cmake --build build -j4` completed cleanly. Full CTest
-passed `49/49`; `ChannelSNRCalibration` passed inside that run, preserving the
-separate ±1.5 dB channel-calibration gate. Phase reports and raw sweep tables
-are in `docs/HONEST_SNR_ESTIMATION.md`.
+**Why no behavior change is correct:** The mode-ladder was already running
+on `fading_index` for its discrimination. The displayed and handshake-exchanged
+SNR was wrong before this branch and remains the same wrong value after this
+branch lands. The right path forward is a calibrated absolute-SNR meter as
+its own workstream, scoped in [`docs/SNR_METER_DESIGN.md`](SNR_METER_DESIGN.md).
 
-**Follow-ups flagged, not fixed in this round:** The residual SNR estimate is
-deliberately noisier than the old saturated chirp number on individual fading
-frames. Moderate fading can report lower DATA SNR than the configured channel
-knob because the frame is paying real selective-fade penalty. No ladder
-thresholds were tuned.
+**Test verification:** `cmake --build build -j4` clean; full CTest `49/49`
+including `ChannelSNRCalibration` (separate ±1.5 dB channel-side gate
+preserved). Pi5 hardware smoke `agents/run_hardware_smoke.sh` 3/3 PASS.
+
+**Follow-ups flagged:** The calibrated absolute-SNR meter is the next
+workstream — see `docs/SNR_METER_DESIGN.md` for the six-step plan
+(define noise model, build estimator, add CTest calibration gate at
+±1.5 dB, per-channel validation, protocol-context validation, hardware
+validation). Once that lands, the operator-facing field can finally be
+swapped from chirp to a calibrated value with confidence.
 
 ---
 
