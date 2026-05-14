@@ -143,3 +143,28 @@ Follow-ups flagged, not fixed:
 - No mode-ladder thresholds were changed.
 - The CONNECT/PING/control logs can still show chirp-derived SNR before OFDM
   residuals exist; this is intentional fallback behavior.
+
+## 2026-05-14 Phase 4 Pi5 Hardware Smoke
+
+Branch `fix/honest-snr-estimation` (commit `02c6775`) was pushed to origin
+and checked out on `pi5tester:~/ProjectUltra`. The submodule
+`thirdparty/imgui` had a stale gitlink on the Pi5 from a prior cleanup;
+wiped the dir and re-cloned cleanly before rebuilding.
+
+Audio path verified before tests (`SSH_KEY=$HOME/.ssh/id_pi5
+./tools/check_hw_audio_path.sh`):
+- Pi → Mac: RMS=0.124, peak=0.305, ~1046 Hz
+- Mac → Pi: RMS=0.250, peak=0.819, ~1016 Hz
+Both within the documented calibration spec.
+
+`AGENT_HW_AUDIO_CHECK=0 ./agents/run_hardware_smoke.sh` — 3/3 PASS:
+- `hw_awgn_1k_r12_snr15` PASS
+- `hw_good_1k_r12_snr15` PASS
+- `hw_moderate_1k_r12_snr15` PASS
+
+Report bundle: `agents/reports/hardware_20260514_150426/`
+(`summary.txt` records `hardware_smoke=pass`).
+
+Status: **ready for review and merge.** Phases 1-3 in tree, Phase 4
+hardware-validated end-to-end. Branch `fix/honest-snr-estimation` not
+merged to main; merge decision is the user's.
