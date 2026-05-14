@@ -5,7 +5,7 @@
 #include "ptt/ptt_driver_factory.hpp"
 #include "ultra/build_info.hpp"
 #include "ultra/logging.hpp"
-#include "sim/awgn.hpp"
+#include "sim/channel_calibration.hpp"
 #include "sim/hf_channel.hpp"
 #include <SDL.h>
 #include <cstring>
@@ -434,14 +434,15 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         auto samples = modem_.transmit(data);
         if (!samples.empty()) {
             if (simulation_enabled_) {
-                // Add PTT noise once at start of transmission (100-300ms)
+                // Add PTT noise once at start of transmission (100-300ms).
+                // Sized to the calibrated modem-reference RMS so the noise
+                // level matches what the configured snr_db means in the rest
+                // of the simulator (sim::kModemReferenceRms = 0.3180724).
                 std::uniform_int_distribution<size_t> ptt_dist(4800, 14400);
                 size_t ptt_samples = ptt_dist(sim_rng_);
 
-                float typical_rms = 0.1f;
-                float snr_linear = std::pow(10.0f, simulation_snr_db_ / 10.0f);
-                float noise_power = (typical_rms * typical_rms) / snr_linear;
-                float noise_stddev = std::sqrt(noise_power);
+                const float noise_stddev =
+                    sim::modemReferenceNoiseStddev(simulation_snr_db_);
                 std::normal_distribution<float> noise_dist(0.0f, noise_stddev);
 
                 std::vector<float> ptt_noise(ptt_samples);
@@ -1138,14 +1139,14 @@ void App::initVirtualStation() {
         guiLog("SIM: Virtual station TX %zu bytes", data.size());
         auto samples = virtual_modem_->transmit(data);
 
-        // Add PTT noise once at start of transmission (100-300ms)
+        // Add PTT noise once at start of transmission (100-300ms).
+        // Sized to the calibrated modem-reference RMS so the noise level
+        // matches the rest of the simulator's snr_db semantics.
         std::uniform_int_distribution<size_t> ptt_dist(4800, 14400);
         size_t ptt_samples = ptt_dist(sim_rng_);
 
-        float typical_rms = 0.1f;
-        float snr_linear = std::pow(10.0f, simulation_snr_db_ / 10.0f);
-        float noise_power = (typical_rms * typical_rms) / snr_linear;
-        float noise_stddev = std::sqrt(noise_power);
+        const float noise_stddev =
+            sim::modemReferenceNoiseStddev(simulation_snr_db_);
         std::normal_distribution<float> noise_dist(0.0f, noise_stddev);
 
         std::vector<float> ptt_noise(ptt_samples);
@@ -1388,10 +1389,18 @@ std::vector<float> App::applyChannelEffects(const std::vector<float>& samples, i
         sim_channel_active_type_ = -1;
     }
 
-    // Apply AWGN against measured active-sample power, matching the CLI and
-    // Watterson paths and the RX-side LTS SNR convention.
+    // Apply continuous AWGN sized to the fixed modem-reference RMS
+    // (sim::kModemReferenceRms = 0.3180724, measured from
+    // StreamingEncoder::encodePing()). Adding noise on every sample —
+    // not just signal-bearing samples — matches the SimulatedChannel
+    // and WattersonChannel calibration so the configured snr_db means
+    // the same thing here as in the CLI/regression paths.
     if (simulation_snr_db_ < 50.0f) {
-        sim::awgn::addAWGN(result, simulation_snr_db_, sim_rng_, 50.0f);
+        const float sigma = sim::modemReferenceNoiseStddev(simulation_snr_db_);
+        std::normal_distribution<float> noise(0.0f, sigma);
+        for (float& s : result) {
+            s += noise(sim_rng_);
+        }
     }
 
     return result;
