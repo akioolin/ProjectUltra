@@ -37,6 +37,8 @@ void test_ofdm_rate_thresholds() {
           "good fading SNR15 should use R1/2");
     CHECK(selectOFDMCodeRate(15.0f, 0.90f) == CodeRate::R1_2,
           "moderate fading SNR15 should use R1/2");
+    CHECK(selectOFDMCodeRate(10.0f, 0.30f) == CodeRate::R1_4,
+          "good fading SNR10 should stay at R1/4");
     CHECK(selectOFDMCodeRate(15.0f, 1.20f) == CodeRate::R1_4,
           "heavy fading should fall back to R1/4");
 }
