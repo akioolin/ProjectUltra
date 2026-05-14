@@ -18,7 +18,7 @@
 #include "ultra/fec.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/dsp.hpp"
-#include "sim/awgn.hpp"
+#include "sim/channel_calibration.hpp"
 #include "sim/hf_channel.hpp"
 #include <iostream>
 #include <fstream>
@@ -153,7 +153,13 @@ struct TestConfig {
 // ============================================================================
 
 void addNoise(std::vector<float>& samples, float snr_db, std::mt19937& rng) {
-    ultra::sim::awgn::addAWGN(samples, snr_db, rng);
+    // Continuous AWGN sized to the calibrated modem-reference RMS so the
+    // configured snr_db matches the rest of the simulator semantics.
+    const float sigma = ultra::sim::modemReferenceNoiseStddev(snr_db);
+    std::normal_distribution<float> noise(0.0f, sigma);
+    for (float& s : samples) {
+        s += noise(rng);
+    }
 }
 
 // Apply CFO using FFT-based Hilbert transform (no group delay)

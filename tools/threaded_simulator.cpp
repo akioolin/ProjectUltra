@@ -24,7 +24,7 @@
 
 #include "gui/modem/modem_engine.hpp"
 #include "protocol/protocol_engine.hpp"
-#include "sim/awgn.hpp"
+#include "sim/channel_calibration.hpp"
 #include "ultra/logging.hpp"
 
 using namespace ultra;
@@ -101,17 +101,19 @@ public:
 
 private:
     std::vector<float> applyNoise(const std::vector<float>& samples) {
+        // Continuous AWGN sized to the calibrated modem-reference RMS so
+        // configured snr_db means the same here as in the rest of the
+        // simulator.
         std::vector<float> noisy = samples;
-        ultra::sim::awgn::addAWGN(noisy, snr_db_, rng_);
+        const float sigma = ultra::sim::modemReferenceNoiseStddev(snr_db_);
+        std::normal_distribution<float> noise(0.0f, sigma);
+        for (float& s : noisy) s += noise(rng_);
         return noisy;
     }
 
     std::vector<float> generateNoise(size_t num_samples) {
-        float typical_rms = 0.1f;
-        float snr_linear = std::pow(10.0f, snr_db_ / 10.0f);
-        float noise_power = (typical_rms * typical_rms) / snr_linear;
-        float noise_stddev = std::sqrt(noise_power);
-
+        const float noise_stddev =
+            ultra::sim::modemReferenceNoiseStddev(snr_db_);
         std::vector<float> noise(num_samples);
         std::normal_distribution<float> dist(0.0f, noise_stddev);
         for (float& s : noise) s = dist(rng_);

@@ -16,7 +16,7 @@
 #include "gui/modem/streaming_encoder.hpp"
 #include "protocol/connection_policy.hpp"
 #include "protocol/frame_v2.hpp"
-#include "sim/awgn.hpp"
+#include "sim/channel_calibration.hpp"
 #include "sim/cli_enums.hpp"
 #include "sim/hf_channel.hpp"
 #include "ultra/dsp.hpp"
@@ -207,8 +207,14 @@ std::string printableBytes(const Bytes& bytes, size_t start = 0) {
 // -------- Channel models at target SNR -------------------------------------
 
 void applyAWGN(std::vector<float>& samples, float snr_db, uint32_t seed) {
+    // Continuous AWGN sized to the calibrated modem-reference RMS so the
+    // configured snr_db matches the SimulatedChannel / GUI sim semantics.
     std::mt19937 rng(seed);
-    ultra::sim::awgn::addAWGN(samples, snr_db, rng);
+    const float sigma = ultra::sim::modemReferenceNoiseStddev(snr_db);
+    std::normal_distribution<float> noise(0.0f, sigma);
+    for (float& s : samples) {
+        s += noise(rng);
+    }
 }
 
 ultra::sim::WattersonChannel::Config channelConfig(ChannelType type, float snr_db) {

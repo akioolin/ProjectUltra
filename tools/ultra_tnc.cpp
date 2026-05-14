@@ -6,7 +6,7 @@
 #include "psk/multi_carrier_dpsk.hpp"
 #include "protocol/frame_v2.hpp"
 #include "protocol/protocol_engine.hpp"
-#include "sim/awgn.hpp"
+#include "sim/channel_calibration.hpp"
 #include "tnc/tnc_bridge.hpp"
 #include "tnc/tnc_server.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
@@ -695,7 +695,16 @@ private:
     }
 
     void applyAwgn(std::vector<float>& samples) {
-        ultra::sim::awgn::addAWGN(samples, cfg_.snr_db, rng_, 80.0f, true);
+        // Continuous AWGN sized to the calibrated modem-reference RMS so
+        // --snr means the same broadband SNR as in SimulatedChannel and
+        // the GUI simulator. Was previously addAWGN(activeSignalPower)
+        // which made silence between bursts artificially quiet.
+        const float sigma =
+            ultra::sim::modemReferenceNoiseStddev(cfg_.snr_db);
+        std::normal_distribution<float> noise(0.0f, sigma);
+        for (float& s : samples) {
+            s = std::clamp(s + noise(rng_), -1.0f, 1.0f);
+        }
     }
 
     void decodeLoop() {
