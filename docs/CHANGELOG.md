@@ -10,6 +10,74 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-14: SimulatedChannel AWGN is continuous RX noise
+
+**What was broken:** `SimulatedChannel` synthetic AWGN was not a real channel
+noise floor. Active TX chunks got TX-side AWGN from `awgn::addAWGN()`, but
+silent TX chunks measured zero active signal power and passed through as pure
+zeros. Separately, idle RX underflow noise used a fixed `0.01` reference power
+that was decoupled from modem TX RMS. The result was an artificially quiet
+silence model; modem regressions that quoted "AWGN SNR=X dB" were easier than
+a receiver hearing continuous HF band noise.
+
+**What changed:** `tools/sim/simulated_station.hpp::SimulatedChannel` now sizes
+synthetic AWGN from a fixed modem reference RMS and injects it once per RX
+sample in `receiveForA()` and `receiveForB()`, regardless of peer buffer state.
+The TX-side AWGN call was removed from `applyChannel()`, leaving that path for
+Watterson processing only. AWGN is enabled only for explicit
+`configure(snr, ChannelType::AWGN)`; Watterson modes keep their own channel
+noise, and the WAV noise overlay remains independent and additive.
+
+**Reference measurement:** `StreamingEncoder::encodePing()` was measured via
+`./build/ota_simulator gen --frame PING --callsign 8P9QC --peer-callsign KC3VPB
+--out /tmp/projectultra_ping_ref.wav`. The generated float WAV contains the
+raw `encodePing()` samples; `sox ... stat` and direct float parsing measured
+`62208` samples, RMS `0.318072406640`, power `0.101170055866`, peak `1.0`.
+The hard-coded simulator reference is `kModemReferenceRms = 0.3180724f`.
+
+**Before/after SNR sweep:** two-endpoint v2 QSO, DQPSK R1/4 initial mode,
+AUTO waveform negotiation, connect -> message -> disconnect.
+
+| Configured SNR | Pre-fix result | Continuous-AWGN result |
+|----------------|----------------|------------------------|
+| +20 dB | pass, DATA ok, DISCO ok | pass, DATA ok, DISCO ok |
+| +15 dB | pass, DATA ok, DISCO ok | pass, DATA ok, DISCO ok |
+| +10 dB | pass, DATA ok, DISCO ok | pass, DATA ok, DISCO ok |
+| +5 dB | pass, DATA ok, DISCO ok | pass, DATA ok, DISCO ok |
+| 0 dB | pass, DATA ok, DISCO ok | pass, DATA ok, DISCO ok |
+| -3 dB | pass, DATA ok, DISCO ok | pass, DATA ok, DISCO ok |
+| -5 dB | pass, DATA ok, DISCO ok | pass, DATA ok, DISCO ok |
+| -8 dB | pass, DATA ok, DISCO ok | fail: connection/message/disconnect assertions |
+
+Refinement after the required table: -6 dB passes, -7 dB fails the 30 s
+connected-state assertions and the 60 s message assertion. The changed sweep
+cell in the required table is therefore the old -8 dB pass; the nearest
+measured passing continuous-AWGN point is -6 dB, a +2 dB correction from
+-8 dB, and the one-dB break is between -6 and -7 dB.
+
+**Test verification:** pre-fix baseline `ctest --test-dir build
+--output-on-failure -j4` was 48/48 PASS. After the patch, `cmake --build
+build -j4` was clean and the same CTest command was 48/48 PASS. No CTest
+pass/fail statuses changed and no SNR thresholds were raised. The
+`CLISyntheticNotch`, `OTASimulatorTwoEndpointClean`, and real-HF-noise
+`OTASimulatorTwoEndpointNoisy` gates still pass.
+
+**Continuous-noise sanity check:** a direct one-shot `SimulatedChannel` probe
+configured AWGN 15 dB, pulled one idle RX second, then transmitted 480 all-zero
+peer samples and pulled those RX samples. Measured RMS was `idle_rms=0.0563506`
+and `silent_tx_rx_rms=0.0570799`, verifying that RX is not silent during idle
+or all-zero TX chunks.
+
+**Follow-ups flagged, not fixed in this round:** other test/helper paths still
+call `awgn::addAWGN()` with `activeSignalPower()` and may share the "implicitly
+calibrated to active signal only" smell outside `SimulatedChannel`:
+`decode_bench`, `threaded_simulator`, `test_waveform_simple`, GUI audio
+simulation, and several waveform/unit tests. The final -7 dB run now fails
+during connection establishment, which is a real low-SNR modem/ARQ behavior to
+analyze separately if that floor matters. No PHY code was changed here.
+
+---
+
 ## 2026-05-14: ota_simulator v2 two-endpoint real-HF QSO regression
 
 **What was missing:** v1 could inject scripted WAV audio into one live endpoint,

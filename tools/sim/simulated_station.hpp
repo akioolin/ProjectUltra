@@ -178,11 +178,10 @@ public:
 
     void configure(float snr_db, ChannelType channel_type = ChannelType::AWGN) {
         snr_db_ = snr_db;
-        awgn_enabled_.store(true);
-        // Idle-channel noise has no signal reference, so keep the historic
-        // simulator floor. Transmitted AWGN below uses measured active power.
-        constexpr float kIdleReferenceSignalPower = 0.01f;
-        noise_stddev_ = awgn::noiseStddevForSNR(kIdleReferenceSignalPower, snr_db);
+        awgn_enabled_.store(channel_type == ChannelType::AWGN);
+        noise_stddev_ = (channel_type == ChannelType::AWGN)
+            ? awgn::noiseStddevForSNR(kModemReferencePower, snr_db)
+            : 0.0f;
         {
             std::lock_guard<std::mutex> lock(rng_mutex_);
             rng_.seed(seed_);
@@ -262,14 +261,21 @@ public:
     std::vector<float> receiveForA(size_t count) {
         std::lock_guard<std::mutex> lock(mutex_a_rx_);
         std::vector<float> result(count);
+        const bool add_awgn = awgn_enabled_.load();
+        std::unique_lock<std::mutex> rng_lock;
+        if (add_awgn) {
+            rng_lock = std::unique_lock<std::mutex>(rng_mutex_);
+        }
         for (size_t i = 0; i < count; i++) {
+            float sample = 0.0f;
             if (!buffer_a_rx_.empty()) {
-                result[i] = buffer_a_rx_.front();
+                sample = buffer_a_rx_.front();
                 buffer_a_rx_.pop();
-            } else if (awgn_enabled_.load()) {
-                // No signal - just noise
-                result[i] = nextAwgnSample();
             }
+            if (add_awgn) {
+                sample += drawAwgnSampleUnlocked();
+            }
+            result[i] = sample;
         }
         applyOverlay(result, noise_overlay_cursor_a_);
         captureRxIfEnabled(result, true);
@@ -280,13 +286,21 @@ public:
     std::vector<float> receiveForB(size_t count) {
         std::lock_guard<std::mutex> lock(mutex_b_rx_);
         std::vector<float> result(count);
+        const bool add_awgn = awgn_enabled_.load();
+        std::unique_lock<std::mutex> rng_lock;
+        if (add_awgn) {
+            rng_lock = std::unique_lock<std::mutex>(rng_mutex_);
+        }
         for (size_t i = 0; i < count; i++) {
+            float sample = 0.0f;
             if (!buffer_b_rx_.empty()) {
-                result[i] = buffer_b_rx_.front();
+                sample = buffer_b_rx_.front();
                 buffer_b_rx_.pop();
-            } else if (awgn_enabled_.load()) {
-                result[i] = nextAwgnSample();
             }
+            if (add_awgn) {
+                sample += drawAwgnSampleUnlocked();
+            }
+            result[i] = sample;
         }
         applyOverlay(result, noise_overlay_cursor_b_);
         captureRxIfEnabled(result, false);
@@ -295,6 +309,15 @@ public:
 
 private:
     float snr_db_ = 20.0f;
+    // Reference signal RMS: empirically measured from
+    // StreamingEncoder::encodePing() output on 2026-05-14:
+    // 62208 samples, RMS 0.318072406640. AWGN is sized relative to this
+    // fixed TX reference so configured snr_db means TX burst power relative
+    // to a continuous broadband noise floor.
+    static constexpr float kModemReferenceRms = 0.3180724f;
+    static constexpr double kModemReferencePower =
+        static_cast<double>(kModemReferenceRms) *
+        static_cast<double>(kModemReferenceRms);
     float noise_stddev_ = 0.0f;
     std::atomic<bool> awgn_enabled_{false};
     float tx_cfo_hz_ = 0.0f;
@@ -367,6 +390,10 @@ private:
 
     float nextAwgnSample() {
         std::lock_guard<std::mutex> lock(rng_mutex_);
+        return drawAwgnSampleUnlocked();
+    }
+
+    float drawAwgnSampleUnlocked() {
         return noise_dist_(rng_) * noise_stddev_;
     }
 
@@ -437,14 +464,8 @@ private:
         if (fading) {
             SampleSpan span(const_cast<float*>(samples.data()), samples.size());
             return fading->process(span);
-        } else {
-            std::vector<float> result = samples;
-            if (awgn_enabled_.load()) {
-                std::lock_guard<std::mutex> lock(rng_mutex_);
-                awgn::addAWGN(result, snr_db_, rng_);
-            }
-            return result;
         }
+        return samples;
     }
 };
 

@@ -64,3 +64,9 @@ recordings/*
 /out_noisy_alice_tx.wav
 /out_noisy_bob_tx.wav
 /out_noisy_session.jsonl
+/out_snr15_alice_tx.wav
+/out_snr15_bob_tx.wav
+/out_snr15_session.jsonl
+/out_snr_sweep_alice_tx.wav
+/out_snr_sweep_bob_tx.wav
+/out_snr_sweep_session.jsonl

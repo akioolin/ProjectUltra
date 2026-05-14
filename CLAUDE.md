@@ -190,7 +190,7 @@ Interpretation of the 2026-04-29 robustness work:
 **Performance Requirements (cli_simulator --test):**
 | Mode | Channel | SNR | Required CW Success |
 |------|---------|-----|---------------------|
-| MC-DPSK | AWGN | 5+ | 100% |
+| MC-DPSK | AWGN (continuous sim) | -6+ short-QSO floor; 5+ conservative CW margin | 100% at documented gate |
 | MC-DPSK | Moderate fading | 10 | 100% |
 | OFDM_CHIRP | AWGN | 15+ | 100% |
 | OFDM_CHIRP | Good fading | 15 | **100%** |
@@ -198,7 +198,15 @@ Interpretation of the 2026-04-29 robustness work:
 | OFDM_NARROW | AWGN | 8+ | 100% |
 | OFDM_NARROW | Good fading | 8 | 100% data, 90%+ ACK |
 
-**Current production state (refreshed 2026-05-07; individual calibration dates noted inline):**
+**Current production state (refreshed 2026-05-14 for simulator AWGN; individual calibration dates noted inline):**
+- Simulated AWGN calibration: `SimulatedChannel` synthetic AWGN is continuous at RX,
+  sized from `StreamingEncoder::encodePing()` RMS `0.3180724` measured on
+  2026-05-14. Older simulator runs with "AWGN SNR=X dB" used an artificially
+  quiet silence model and must not be used as calibrated floor evidence.
+- Two-endpoint continuous-AWGN v2 QSO sweep (DQPSK R1/4 auto): +20, +15,
+  +10, +5, 0, -3, and -5 dB pass; -8 dB fails connection/message/disconnect
+  assertions. One-dB refinement: -6 dB passes, -7 dB fails the 30 s
+  connected-state assertions and the 60 s message assertion.
 - MC-DPSK: WORKING - 100% at SNR=10 with moderate fading
 - OFDM_CHIRP DQPSK R1/4 AWGN: WORKING - 100% at SNR=15 and SNR=20 (0 retries)
 - OFDM_CHIRP DQPSK R1/4 Good fading SNR=15: WORKING - 100% (0 retries, 0 failures)
@@ -412,7 +420,7 @@ make -j4
 
 | Mode | Sync Method | SNR Range | Max Throughput | CFO Tolerance | Fading |
 |------|-------------|-----------|----------------|---------------|--------|
-| **MC-DPSK** | Dual Chirp | -3 to 10 dB | 938 bps | ±50 Hz | Good |
+| **MC-DPSK** | Dual Chirp | -6 to <10 dB continuous-AWGN short QSO; -7 breaks QSO | 938 bps | ±50 Hz | Good |
 | **OFDM_NARROW** | NB Chirp + LTS | 5-10 dB | ~450 bps (R1/2, window=3) | ±50 Hz | Good (R1/4) |
 | **OFDM_CHIRP** | Dual Chirp + LTS | 10-17 dB | 3.4 kbps | ±50 Hz | Good (R1/4) |
 | **OFDM_COX** | Schmidl-Cox | Forced only | 7.9 kbps | Needs testing | Poor |
@@ -470,7 +478,10 @@ tools/
 1. **OFDM_COX default policy:** Forceable implementation exists, but it is
    not part of the production auto ladder until separately validated.
 2. **Poor HF channels (2ms delay):** OFDM fails - use MC-DPSK instead
-3. **MC-DPSK floor:** -5 dB is hard floor (20-40% success)
+3. **MC-DPSK floor:** continuous-AWGN v2 QSO passes at -6 dB and breaks at
+   -7 dB during connection/message assertions under the 90 s two-endpoint
+   message scenario; older -8 dB simulator passes came from the pre-2026-05-14
+   artificially quiet silence model.
 4. **File transfer:** DATA_START/DATA_END not fully implemented
 
 ---

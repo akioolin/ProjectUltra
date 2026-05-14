@@ -10,6 +10,34 @@
 
 ---
 
+## Simulator Channel Invariants
+
+### INV-SIM-AWGN-001: AWGN Is Continuous RX Noise
+
+**Rule:** `SimulatedChannel` synthetic AWGN is added at RX time to every
+returned sample when the channel is explicitly configured as `ChannelType::AWGN`.
+Noise must not depend on whether a peer TX buffer has audio, silence, or no
+samples. Do not add synthetic AWGN on both TX and RX.
+
+**Reference:** AWGN standard deviation is computed from the fixed modem TX
+reference RMS measured from `StreamingEncoder::encodePing()` output
+(`0.3180724` on 2026-05-14), so configured `snr_db` means TX reference power
+relative to continuous broadband noise power.
+
+**Why:** Real HF receivers hear band noise continuously. A simulator that is
+quiet between bursts lets sync, PING detection, SNR estimation, and decode
+admission gates calibrate against impossible silence.
+
+**Boundaries:**
+- Watterson fading owns its own channel noise and must not receive an extra
+  `SimulatedChannel` AWGN layer.
+- The real-HF WAV noise overlay remains an independent additive RX overlay.
+- No modem PHY threshold should be tuned against simulator silence floors.
+
+**Location:** `tools/sim/simulated_station.hpp::SimulatedChannel`.
+
+---
+
 ## CFO (Carrier Frequency Offset) Invariants
 
 ### INV-CFO-001: Chirp CFO is Coarse — LTS Refines It
