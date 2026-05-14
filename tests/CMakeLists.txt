@@ -294,6 +294,21 @@ target_include_directories(test_streaming_mc_dpsk PRIVATE
 target_link_libraries(test_streaming_mc_dpsk PRIVATE ultra_core)
 add_test(NAME StreamingMCDPSK COMMAND test_streaming_mc_dpsk)
 
+if(TARGET ultra_sim_station)
+    add_executable(test_channel_snr_calibration test_channel_snr_calibration.cpp)
+    target_include_directories(test_channel_snr_calibration PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
+    )
+    target_link_libraries(test_channel_snr_calibration PRIVATE ultra_sim_station)
+    add_test(NAME ChannelSNRCalibration COMMAND test_channel_snr_calibration)
+    set_tests_properties(ChannelSNRCalibration PROPERTIES
+        TIMEOUT 60
+        LABELS regression)
+else()
+    message(STATUS "ChannelSNRCalibration disabled: ultra_sim_station target is not built")
+endif()
+
 # Throughput measurement tool
 add_executable(test_throughput ../tools/test_throughput.cpp)
 target_link_libraries(test_throughput PRIVATE ultra_core)
@@ -409,6 +424,7 @@ ultra_enable_test_warnings(
     test_ping_detector.cpp
     test_streaming_signal_policy.cpp
     test_streaming_mc_dpsk.cpp
+    test_channel_snr_calibration.cpp
     ../tools/test_throughput.cpp
     test_decode_bench_replay.cpp
 )

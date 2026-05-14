@@ -54,6 +54,7 @@
 #include "ultra/dsp.hpp"  // FFT for analytic-signal CFO injection
 #include "fec/frame_interleaver.hpp"  // FrameInterleaver
 #include "sim/awgn.hpp"
+#include "sim/channel_calibration.hpp"
 #include "sim/hf_channel.hpp"
 
 #include <cstdint>
@@ -180,7 +181,7 @@ public:
         snr_db_ = snr_db;
         awgn_enabled_.store(channel_type == ChannelType::AWGN);
         noise_stddev_ = (channel_type == ChannelType::AWGN)
-            ? awgn::noiseStddevForSNR(kModemReferencePower, snr_db)
+            ? awgn::noiseStddevForSNR(ultra::sim::kModemReferencePower, snr_db)
             : 0.0f;
         {
             std::lock_guard<std::mutex> lock(rng_mutex_);
@@ -309,15 +310,6 @@ public:
 
 private:
     float snr_db_ = 20.0f;
-    // Reference signal RMS: empirically measured from
-    // StreamingEncoder::encodePing() output on 2026-05-14:
-    // 62208 samples, RMS 0.318072406640. AWGN is sized relative to this
-    // fixed TX reference so configured snr_db means TX burst power relative
-    // to a continuous broadband noise floor.
-    static constexpr float kModemReferenceRms = 0.3180724f;
-    static constexpr double kModemReferencePower =
-        static_cast<double>(kModemReferenceRms) *
-        static_cast<double>(kModemReferenceRms);
     float noise_stddev_ = 0.0f;
     std::atomic<bool> awgn_enabled_{false};
     float tx_cfo_hz_ = 0.0f;

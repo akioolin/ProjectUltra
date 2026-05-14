@@ -10,6 +10,7 @@
 
 #include "ultra/types.hpp"
 #include "ultra/logging.hpp"
+#include "sim/channel_calibration.hpp"
 #include <random>
 #include <complex>
 #include <deque>
@@ -78,9 +79,10 @@ public:
         // Initialize delay line
         delay_line_.resize(delay_samples_ + 1, 0.0f);
 
-        // Noise standard deviation from SNR
-        // SNR = 10*log10(Ps/Pn), assuming Ps = 1
-        noise_std_ = std::pow(10.0f, -config.snr_db / 20.0f);
+        // Noise standard deviation from the same fixed modem TX reference
+        // used by SimulatedChannel. This makes configured SNR a broadband
+        // TX-reference-vs-noise ratio independent of chunk contents.
+        noise_std_ = modemReferenceNoiseStddev(config.snr_db);
 
         // Fading filter coefficient for Gaussian Doppler spectrum
         // Using simple IIR lowpass to approximate Gaussian spectrum
@@ -102,30 +104,9 @@ public:
         cfo_phase_inc_ = 2.0f * M_PI * actual_cfo_hz_ / config.sample_rate;
     }
 
-    // Process samples through the channel
-    // CRITICAL: Input signal should be normalized to unit RMS for correct SNR
+    // Process samples through the channel.
     Samples process(SampleSpan input) {
         Samples output(input.size());
-
-        // Calculate input RMS for SNR normalization
-        // IMPORTANT: Only count non-zero samples to match addNoise() behavior
-        // This ensures consistent SNR between AWGN and fading channels
-        float input_power = 0.0f;
-        size_t signal_samples = 0;
-        for (size_t i = 0; i < input.size(); ++i) {
-            if (std::abs(input[i]) > 1e-6f) {
-                input_power += input[i] * input[i];
-                signal_samples++;
-            }
-        }
-        float input_rms = (signal_samples > 0)
-            ? std::sqrt(input_power / signal_samples)
-            : 0.1f;  // Default if no signal
-
-        // Normalize noise to achieve correct SNR relative to actual signal power
-        // SNR = 10*log10(Ps/Pn), so Pn = Ps * 10^(-SNR/10)
-        // noise_std = sqrt(Pn) = input_rms * 10^(-SNR/20)
-        float effective_noise_std = input_rms * std::pow(10.0f, -config_.snr_db / 20.0f);
 
         for (size_t i = 0; i < input.size(); ++i) {
             float sample = input[i];
@@ -159,9 +140,10 @@ public:
                 out = sample * h_mag;
             }
 
-            // Add AWGN with SNR relative to actual signal power
+            // Add continuous broadband AWGN. The level is fixed by
+            // kModemReferenceRms, not by active samples in this chunk.
             if (config_.noise_enabled) {
-                out += effective_noise_std * gaussian_(rng_);
+                out += noise_std_ * gaussian_(rng_);
             }
 
             output[i] = out;
@@ -258,7 +240,7 @@ public:
     // Change SNR dynamically
     void setSNR(float snr_db) {
         config_.snr_db = snr_db;
-        noise_std_ = std::pow(10.0f, -snr_db / 20.0f);
+        noise_std_ = modemReferenceNoiseStddev(snr_db);
     }
 
     const Config& getConfig() const { return config_; }
@@ -299,7 +281,7 @@ private:
     float cfo_phase_;
     float cfo_phase_inc_;
     float actual_cfo_hz_;
-    size_t sample_count_ = 0;
+    [[maybe_unused]] size_t sample_count_ = 0;
 };
 
 /**

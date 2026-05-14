@@ -56,6 +56,7 @@
 #include "ultra/fec.hpp"  // ChannelInterleaver, LDPCEncoder
 #include "ultra/dsp.hpp"  // FFT for analytic-signal CFO injection
 #include "fec/frame_interleaver.hpp"  // FrameInterleaver
+#include "sim/channel_snr_probe.hpp"
 #include "sim/hf_channel.hpp"
 #include "sim/simulated_station.hpp"
 
@@ -418,8 +419,13 @@ public:
     void setInjectChannel(bool v) { inject_channel_ = v; }
     void setInjectGain(float gain) { inject_gain_ = std::clamp(gain, 0.05f, 1.0f); }
     void setAudioBufferSize(int n) { audio_buffer_size_ = n; }
+    void setVerifySNR(bool v) { verify_snr_ = v; }
 
     bool runTest() {
+        if (verify_snr_ && !runSNRVerification()) {
+            return false;
+        }
+
         // Hardware-audio mode (real soundcard, single station per process).
         // Dispatched here so we don't spin up the in-process SimulatedChannel
         // or two-station orchestration.
@@ -630,6 +636,7 @@ private:
                                         // to real-audio output (uses snr_db_/channel_type_)
     float inject_gain_ = 0.70f;         // Post-injection headroom before DAC full scale
     int audio_buffer_size_ = 0;         // 0 = AudioEngine default (4096)
+    bool verify_snr_ = false;
 
     SimulatedChannel channel_;
     std::unique_ptr<SimulatedStation> alpha_;
@@ -728,6 +735,34 @@ private:
             std::cout << "\n  \033[33m[capture] warning: failed to write one or more capture files under prefix "
                       << prefix << "\033[0m\n";
         }
+    }
+
+    bool runSNRVerification() const {
+        ChannelSNRProbeConfig cfg;
+        cfg.snr_db = snr_db_;
+        cfg.channel_type = channel_type_;
+        cfg.seed = seed_;
+        cfg.tx_cfo_hz = tx_cfo_hz_;
+
+        const ChannelSNRProbeResult r = runChannelSNRProbe(cfg);
+        std::cout << std::fixed << std::setprecision(2)
+                  << "SNR verify: channel=" << channelSNRProbeName(channel_type_)
+                  << " configured=" << r.configured_snr_db
+                  << " measured=" << r.measured_snr_db
+                  << " delta=" << r.delta_db
+                  << " signal=" << r.measured_signal_rms
+                  << " noise=" << r.measured_noise_rms
+                  << std::defaultfloat << std::endl;
+
+        if (!std::isfinite(r.measured_snr_db) || std::abs(r.delta_db) > 2.0f) {
+            std::cerr << "SNR verification failed: configured="
+                      << r.configured_snr_db
+                      << " measured=" << r.measured_snr_db
+                      << " delta=" << r.delta_db
+                      << " exceeds +/-2 dB\n";
+            return false;
+        }
+        return true;
     }
 
     bool sendAndVerifyMessage(const std::string& msg, int timeout_seconds = 90) {
@@ -2062,8 +2097,10 @@ int main(int argc, char* argv[]) {
                 sim.setListAudioDevices(true);
             } else if (arg == "--idle-seconds" && i + 1 < argc) {
                 sim.setRoleBIdleSeconds(std::stoi(argv[++i]));
-            } else if (arg == "--inject-channel") {
+            } else if (arg == "--inject-channel" || arg == "--inject") {
                 sim.setInjectChannel(true);
+            } else if (arg == "--verify-snr") {
+                sim.setVerifySNR(true);
             } else if (arg == "--inject-gain" && i + 1 < argc) {
                 sim.setInjectGain(std::stof(argv[++i]));
             } else if (arg == "--audio-buffer-size" && i + 1 < argc) {
@@ -2129,6 +2166,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "                      Console verbosity (default: info)\n";
                 std::cout << "  --log-category <list>  Comma list: operator,audio,tnc,modem,demod,sync,ldpc,channel,all\n";
                 std::cout << "  --log-file <PATH>      Write logs to file instead of stderr\n";
+                std::cout << "  --verify-snr           Probe configured broadband SNR and fail if error exceeds +/-2 dB\n";
                 std::cout << "\nHardware audio mode (real soundcard, two-machine setup):\n";
                 std::cout << "  --role A|B|both     A=initiator, B=responder, both=in-process sim (default)\n";
                 std::cout << "  --callsign <NAME>   Local callsign (default: ALPHA for A, BRAVO for B)\n";
@@ -2137,7 +2175,8 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --audio-input <D>   SDL2 input device name (empty = default)\n";
                 std::cout << "  --list-audio-devices  List available audio devices and exit\n";
                 std::cout << "  --idle-seconds <N>  Role B: max idle seconds before giving up (0 = forever)\n";
-                std::cout << "  --inject-channel    Apply --snr/--channel/--cfo to outgoing audio\n";
+                std::cout << "  --inject-channel, --inject\n";
+                std::cout << "                      Apply --snr/--channel/--cfo to outgoing audio\n";
                 std::cout << "                      (lets Mac-to-Pi cable carry a synthetic HF channel)\n";
                 std::cout << "  --inject-gain <G>   Post-injection output gain/headroom (0.05-1.0, default 0.70)\n";
                 std::cout << "  --audio-buffer-size <N>  SDL2 period size, samples (default 8192)\n";
