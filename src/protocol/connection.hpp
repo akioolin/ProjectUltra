@@ -467,6 +467,8 @@ private:
     void enterConnected();
     void enterDisconnected(const std::string& reason);
     void sendFullConnect();  // Send full CONNECT frame after successful PING/PONG
+    void cancelOutboundProbe();
+    void cancelOutboundConnect();
 
     WaveformMode negotiateMode(uint8_t remote_caps, WaveformMode remote_pref);
     void sendNextFileChunk();
