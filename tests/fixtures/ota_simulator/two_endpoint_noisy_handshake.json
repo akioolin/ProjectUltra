@@ -9,7 +9,8 @@
         "waveform": "MC_DPSK",
         "modulation": "DQPSK",
         "code_rate": "R1_4"
-      }
+      },
+      "force_data_mode": true
     },
     "bob": {
       "callsign": "KC3VPB",
@@ -20,6 +21,7 @@
         "modulation": "DQPSK",
         "code_rate": "R1_4"
       },
+      "force_data_mode": true,
       "auto_accept": true
     }
   },

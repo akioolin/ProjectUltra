@@ -360,6 +360,7 @@ if(TARGET ota_simulator)
     set_tests_properties(OTASimulatorSmoke PROPERTIES
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         TIMEOUT 60
+        RUN_SERIAL TRUE
         LABELS regression)
 
     # Locks in BUG-PING-DETECTOR-001: real-HF OTA PING capture from
@@ -371,6 +372,7 @@ if(TARGET ota_simulator)
     set_tests_properties(OTASimulatorRealOTAPing PROPERTIES
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         TIMEOUT 60
+        RUN_SERIAL TRUE
         LABELS regression)
 
     add_test(NAME OTASimulatorTwoEndpointClean
@@ -379,6 +381,7 @@ if(TARGET ota_simulator)
     set_tests_properties(OTASimulatorTwoEndpointClean PROPERTIES
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         TIMEOUT 120
+        RUN_SERIAL TRUE
         LABELS regression)
 
     add_test(NAME OTASimulatorTwoEndpointNoisy
@@ -387,6 +390,7 @@ if(TARGET ota_simulator)
     set_tests_properties(OTASimulatorTwoEndpointNoisy PROPERTIES
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         TIMEOUT 120
+        RUN_SERIAL TRUE
         LABELS regression)
 endif()
 
