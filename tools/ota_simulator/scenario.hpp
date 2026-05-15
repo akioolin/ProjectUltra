@@ -21,6 +21,8 @@ struct EndpointConfig {
     std::string peer_callsign;
     protocol::ConnectionState initial_state = protocol::ConnectionState::DISCONNECTED;
     InitialMode initial_mode;
+    // When true, initial_mode also pins the post-CONNECT data modulation/rate.
+    bool force_data_mode = false;
     bool auto_accept = false;
 };
 
