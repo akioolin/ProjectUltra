@@ -37,8 +37,17 @@ void Connection::onPongReceived() {
         // Not in probing state - this might be an incoming ping from someone else
         // Notify via ping_received callback (they're calling us)
         if (state_ == ConnectionState::DISCONNECTED && on_ping_received_) {
-            LOG_MODEM(INFO, "Connection: Received incoming PING while disconnected");
-            on_ping_received_();
+            if (config_.pong_tx_delay_ms == 0) {
+                LOG_MODEM(INFO, "Connection: Received incoming PING while disconnected, firing PONG TX callback immediately");
+                cancelPendingPongCallback();
+                on_ping_received_();
+            } else {
+                LOG_MODEM(INFO,
+                          "Connection: Received incoming PING while disconnected, deferring PONG TX by %u ms (PTT-settling)",
+                          config_.pong_tx_delay_ms);
+                pending_pong_callback_ = true;
+                pong_callback_delay_remaining_ms_ = config_.pong_tx_delay_ms;
+            }
         }
         return;
     }

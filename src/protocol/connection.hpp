@@ -28,6 +28,7 @@ struct ConnectionConfig {
     ARQConfig arq;
     uint32_t connect_timeout_ms = 60000;  // 60s for DPSK (16s TX + 16s RX + margin)
     uint32_t disconnect_timeout_ms = 30000;
+    uint32_t pong_tx_delay_ms = 500;      // Let peer RX settle after its PING PTT-off
     int connect_retries = 10;  // Robust MC-DPSK control attempts
     bool auto_accept = true;
 
@@ -328,6 +329,8 @@ private:
     uint32_t timeout_remaining_ms_ = 0;
     int connect_retry_count_ = 0;
     uint32_t connected_time_ms_ = 0;
+    bool pending_pong_callback_ = false;
+    uint32_t pong_callback_delay_remaining_ms_ = 0;
 
     // Disconnect retransmission (initiator side)
     Bytes disconnect_frame_;                // Cached DISCONNECT frame for retransmission
@@ -368,6 +371,7 @@ private:
     void processArqFrame(const Bytes& frame_data);
     void runDeferredArqRefill();
     void configureArqForCurrentDataMode();
+    void cancelPendingPongCallback();
     uint32_t pingTimeoutMsForCurrentProfile() const;
     bool usesBoundedVariableMCDPSKFrames() const;
     size_t currentDataPayloadCapacity() const;
