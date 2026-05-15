@@ -80,6 +80,10 @@ struct OutputConfig {
     std::string tx_capture = "out_tx.wav";
     std::string alice_tx_capture = "out_alice_tx.wav";
     std::string bob_tx_capture = "out_bob_tx.wav";
+    // Optional: post-channel RX captures (what each station hears).
+    // Empty by default; set via scenario JSON or --save-rx-audio.
+    std::string alice_rx_capture;
+    std::string bob_rx_capture;
     std::string session_log = "out_session.jsonl";
 };
 

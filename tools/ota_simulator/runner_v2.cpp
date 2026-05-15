@@ -16,6 +16,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -43,12 +44,15 @@ struct TxFrameRecord {
 struct SentFileRecord {
     std::string path;
     std::vector<uint8_t> bytes;
+    double t_s = 0.0;
+    std::string sender;
 };
 
 struct ReceivedFileRecord {
     std::string path;
     bool success = false;
     std::vector<uint8_t> bytes;
+    double t_s = 0.0;
 };
 
 struct EndpointRuntime {
@@ -505,9 +509,11 @@ void executeCommand(const ScenarioEvent& event, EndpointRuntime& runtime,
                                      runtime.name + "'");
         }
 
+        const double sent_t_s = runtime.station->getSimTime();
         {
             std::lock_guard<std::mutex> lock(runtime.mutex);
-            runtime.sent_files.push_back(SentFileRecord{path, std::move(bytes)});
+            runtime.sent_files.push_back(SentFileRecord{
+                path, std::move(bytes), sent_t_s, runtime.name});
         }
         log.writeNote(runtime.name, event.t_s, "command",
                       "{\"action\":\"send_file\",\"size_bytes\":" +
@@ -552,6 +558,43 @@ std::optional<float> configureChannel(const Scenario& scenario, SimulatedChannel
     return station_snr_db;
 }
 
+void emitFileTransferSummaries(
+    std::map<std::string, std::unique_ptr<EndpointRuntime>>& endpoints,
+    SessionLog& log) {
+    const auto sent_files = snapshotSentFiles(endpoints);
+    for (const auto& sent : sent_files) {
+        for (const auto& [name, runtime] : endpoints) {
+            if (name == sent.sender) continue;
+            const auto received_files = snapshotReceivedFiles(*runtime);
+            for (const auto& received : received_files) {
+                if (!received.success) continue;
+                if (received.bytes != sent.bytes) continue;
+                const double transfer_sec = received.t_s - sent.t_s;
+                const double bps = transfer_sec > 0.01
+                    ? static_cast<double>(sent.bytes.size()) * 8.0 / transfer_sec
+                    : 0.0;
+                std::cout << "[" << sent.sender << " -> " << name << "] file "
+                          << sent.bytes.size() << " B in "
+                          << std::fixed << std::setprecision(1) << transfer_sec
+                          << "s = " << std::fixed << std::setprecision(0)
+                          << bps << " bps\n";
+                std::ostringstream fields;
+                fields << "{\"sender\":\"" << json::escape(sent.sender) << "\""
+                       << ",\"receiver\":\"" << json::escape(name) << "\""
+                       << ",\"size_bytes\":" << sent.bytes.size()
+                       << ",\"transfer_sec\":" << std::fixed
+                       << std::setprecision(3) << transfer_sec
+                       << ",\"throughput_bps\":" << std::fixed
+                       << std::setprecision(1) << bps << "}";
+                log.writeNote(received.t_s, "file_transfer.complete",
+                              fields.str());
+                goto next_sent;
+            }
+        }
+    next_sent:;
+    }
+}
+
 void writeCaptures(const Scenario& scenario,
                    const std::vector<std::string>& endpoint_names,
                    const SimulatedChannel::CapturedSignals& captured) {
@@ -563,6 +606,20 @@ void writeCaptures(const Scenario& scenario,
     if (!io::writeWavF32Mono(scenario.output.bob_tx_capture, captured.b_tx_raw)) {
         throw std::runtime_error("failed to write TX capture: " +
                                  scenario.output.bob_tx_capture);
+    }
+    if (!scenario.output.alice_rx_capture.empty()) {
+        if (!io::writeWavF32Mono(scenario.output.alice_rx_capture,
+                                 captured.a_rx_raw)) {
+            throw std::runtime_error("failed to write RX capture: " +
+                                     scenario.output.alice_rx_capture);
+        }
+    }
+    if (!scenario.output.bob_rx_capture.empty()) {
+        if (!io::writeWavF32Mono(scenario.output.bob_rx_capture,
+                                 captured.b_rx_raw)) {
+            throw std::runtime_error("failed to write RX capture: " +
+                                     scenario.output.bob_rx_capture);
+        }
     }
 }
 
@@ -648,10 +705,11 @@ int runScenarioV2(const Scenario& scenario) {
                     }
                 }
                 const size_t captured_size = bytes.size();
+                const double recv_t_s = runtime->station->getSimTime();
                 {
                     std::lock_guard<std::mutex> lock(runtime->mutex);
                     runtime->received_files.push_back(
-                        ReceivedFileRecord{path, captured, std::move(bytes)});
+                        ReceivedFileRecord{path, captured, std::move(bytes), recv_t_s});
                 }
 
                 std::ostringstream fields;
@@ -778,6 +836,8 @@ int runScenarioV2(const Scenario& scenario) {
     }
 
     writeCaptures(scenario, endpoint_names, captured);
+
+    emitFileTransferSummaries(endpoints, log);
 
     if (assertion_failures != 0) {
         std::cerr << "ota_simulator: " << assertion_failures

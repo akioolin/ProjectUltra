@@ -398,7 +398,7 @@ if(TARGET ota_simulator)
                 --scenario tests/fixtures/ota_simulator/two_endpoint_file_transfer_snr15.json)
     set_tests_properties(OTASimulatorFileTransferSNR15 PROPERTIES
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        TIMEOUT 150
+        TIMEOUT 320
         LABELS regression)
 endif()
 

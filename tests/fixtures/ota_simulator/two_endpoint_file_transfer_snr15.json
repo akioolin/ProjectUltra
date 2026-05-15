@@ -27,16 +27,16 @@
     "snr_db": 15.0,
     "fading": "good"
   },
-  "duration_s": 115.0,
+  "duration_s": 300.0,
   "events": [
     { "t_s": 0.0,  "type": "command", "endpoint": "alice", "action": "connect_to", "peer_callsign": "KC3VPB" },
     { "t_s": 30.0, "type": "assert",  "endpoint": "alice", "state": "CONNECTED" },
     { "t_s": 30.0, "type": "assert",  "endpoint": "bob",   "state": "CONNECTED" },
-    { "t_s": 31.0, "type": "command", "endpoint": "alice", "action": "send_file", "size_bytes": 1024 },
-    { "t_s": 90.0, "type": "assert",  "endpoint": "bob",   "received_file_size_at_least": 1024, "received_file_byte_exact": true },
-    { "t_s": 91.0, "type": "command", "endpoint": "alice", "action": "disconnect" },
-    { "t_s": 110.0, "type": "assert", "endpoint": "alice", "state": "DISCONNECTED" },
-    { "t_s": 110.0, "type": "assert", "endpoint": "bob",   "state": "DISCONNECTED" }
+    { "t_s": 31.0, "type": "command", "endpoint": "alice", "action": "send_file", "size_bytes": 20480 },
+    { "t_s": 290.0, "type": "assert",  "endpoint": "bob",   "received_file_size_at_least": 20480, "received_file_byte_exact": true },
+    { "t_s": 291.0, "type": "command", "endpoint": "alice", "action": "disconnect" },
+    { "t_s": 299.0, "type": "assert", "endpoint": "alice", "state": "DISCONNECTED" },
+    { "t_s": 299.0, "type": "assert", "endpoint": "bob",   "state": "DISCONNECTED" }
   ],
   "output": {
     "alice_tx_capture": "out_file_snr15_alice_tx.wav",

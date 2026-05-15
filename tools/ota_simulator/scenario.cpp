@@ -450,6 +450,12 @@ OutputConfig parseOutputV2(const std::string& object) {
     OutputConfig output;
     output.alice_tx_capture = requireString(object, "alice_tx_capture", "output");
     output.bob_tx_capture = requireString(object, "bob_tx_capture", "output");
+    if (auto path = json::stringValue(object, "alice_rx_capture")) {
+        output.alice_rx_capture = *path;
+    }
+    if (auto path = json::stringValue(object, "bob_rx_capture")) {
+        output.bob_rx_capture = *path;
+    }
     output.session_log = requireString(object, "session_log", "output");
     return output;
 }
