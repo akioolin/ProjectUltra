@@ -125,6 +125,10 @@ public:
     // --- Waveform Mode ---
 
     WaveformMode getNegotiatedMode() const;
+    // Raw-PHY bitrate estimate for the currently negotiated waveform.
+    // Returns 0 if no waveform is negotiated yet. See
+    // waveform_selection.hpp::estimatedBitrateBpsForMode.
+    int getCurrentBitrate_bps() const;
     void setPreferredMode(WaveformMode mode);
     void setModeCapabilities(uint8_t caps);
     bool isPhyMaskV1Negotiated() const;

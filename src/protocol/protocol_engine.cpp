@@ -1,4 +1,5 @@
 #include "protocol_engine.hpp"
+#include "protocol/waveform_selection.hpp"
 #include "diagnostics/diagnostics_recorder.hpp"
 #include "gui/startup_trace.hpp"
 #include "ultra/logging.hpp"
@@ -488,6 +489,11 @@ void ProtocolEngine::handleTxFrame(const Bytes& frame_data) {
 WaveformMode ProtocolEngine::getNegotiatedMode() const {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.getNegotiatedMode();
+}
+
+int ProtocolEngine::getCurrentBitrate_bps() const {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    return estimatedBitrateBpsForMode(connection_.getNegotiatedMode());
 }
 
 void ProtocolEngine::setPreferredMode(WaveformMode mode) {
