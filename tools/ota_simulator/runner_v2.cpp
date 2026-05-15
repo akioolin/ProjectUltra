@@ -604,8 +604,10 @@ int runScenarioV2(const Scenario& scenario) {
             mcDpskConfigFor(cfg.initial_mode.modulation));
         runtime->station->setReceiveDirectory(receiveDirectoryPath(name));
         runtime->station->setAutoAccept(cfg.auto_accept);
-        runtime->station->setForcedModulation(cfg.initial_mode.modulation);
-        runtime->station->setForcedCodeRate(cfg.initial_mode.code_rate);
+        if (cfg.force_data_mode) {
+            runtime->station->setForcedModulation(cfg.initial_mode.modulation);
+            runtime->station->setForcedCodeRate(cfg.initial_mode.code_rate);
+        }
         if (station_snr_db) {
             runtime->station->setSNR(*station_snr_db);
         }

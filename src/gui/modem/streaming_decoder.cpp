@@ -425,23 +425,26 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
 
     if (mode_ == mode && connected_ == connected) return;
 
+    const bool waveform_mode_changed = mode_ != mode;
     mode_ = mode;
     connected_ = connected;
 
-    if (mode == protocol::WaveformMode::MC_DPSK) {
-        waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
-    } else {
-        waveform_ = WaveformFactory::create(mode);
-    }
-    if (waveform_) {
-        waveform_->setCarrierMask(carrier_mask_);
-    }
+    if (waveform_mode_changed) {
+        if (mode == protocol::WaveformMode::MC_DPSK) {
+            waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
+        } else {
+            waveform_ = WaveformFactory::create(mode);
+        }
+        if (waveform_) {
+            waveform_->setCarrierMask(carrier_mask_);
+        }
 
-    size_t bps = mcDpskBitsPerSymbol(mc_dpsk_config_);
-    if (protocol::isOFDMMode(mode)) {
-        bps = 60;
+        size_t bps = mcDpskBitsPerSymbol(mc_dpsk_config_);
+        if (protocol::isOFDMMode(mode)) {
+            bps = 60;
+        }
+        interleaver_ = std::make_unique<ChannelInterleaver>(bps, v2::LDPC_CODEWORD_BITS);
     }
-    interleaver_ = std::make_unique<ChannelInterleaver>(bps, v2::LDPC_CODEWORD_BITS);
 
     state_ = DecoderState::SEARCHING;
     pending_total_cw_ = 0;

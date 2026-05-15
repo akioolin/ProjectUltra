@@ -295,6 +295,9 @@ EndpointConfig parseEndpoint(const std::string& object) {
         requireString(object, "initial_state", "endpoint"));
     endpoint.initial_mode = parseInitialMode(
         requireObject(object, "initial_mode", "endpoint"));
+    if (auto force_data_mode = json::boolValue(object, "force_data_mode")) {
+        endpoint.force_data_mode = *force_data_mode;
+    }
     if (auto auto_accept = json::boolValue(object, "auto_accept")) {
         endpoint.auto_accept = *auto_accept;
     }
