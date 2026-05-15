@@ -419,6 +419,10 @@ int runScenarioV2(const Scenario& scenario) {
         if (station_snr_db) {
             runtime->station->setSNR(*station_snr_db);
         }
+        if (scenario.channel && scenario.channel->force_connected_waveform) {
+            runtime->station->setPreferredWaveform(
+                *scenario.channel->force_connected_waveform);
+        }
         endpoints.emplace(name, std::move(runtime));
     }
 

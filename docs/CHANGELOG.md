@@ -38,6 +38,18 @@ prints `noise_bed station_snr_db=-3.98699`, negotiates/enters `MC-DPSK`,
 decodes the DATA message, and passes all assertions. `cmake --build build
 --target ota_simulator -j4` is clean.
 
+**Phase 2 forced-waveform diagnostic path:** Added
+`channel.force_connected_waveform` for v2 scenarios and wired it to the
+existing CONNECT preferred-mode negotiation. Added
+`tests/fixtures/ota_simulator/two_endpoint_mcdpsk_realhf_snr_minus3.json`,
+which forces MC-DPSK over the real-HF noise bed at measured
+`station_snr_db=-3.00088`. Verification:
+`./build/ota_simulator run --scenario
+tests/fixtures/ota_simulator/two_endpoint_mcdpsk_realhf_snr_minus3.json`
+passes; logs show `Using remote preferred mode: MC-DPSK`, DATA `4/4 CW`
+decoded at `snr_db=-3.22`, ACKs decoded, and clean disconnect. Captured
+session JSON: `/tmp/phase2_mcdpsk_realhf_snr_minus3_session.jsonl`.
+
 ---
 
 ## 2026-05-14: MC-DPSK idle-noise SNR meter local validation complete

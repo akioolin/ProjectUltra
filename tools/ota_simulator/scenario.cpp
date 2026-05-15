@@ -304,6 +304,13 @@ ChannelConfig parseChannel(const std::string& object) {
     if (auto snr = json::numberValue(object, "snr_db")) {
         channel.snr_db = *snr;
     }
+    if (auto waveform = json::stringValue(object, "force_connected_waveform")) {
+        channel.force_connected_waveform =
+            cli::requireWaveformMode(*waveform);
+        if (*channel.force_connected_waveform == protocol::WaveformMode::AUTO) {
+            throw std::runtime_error("channel.force_connected_waveform cannot be AUTO");
+        }
+    }
     return channel;
 }
 

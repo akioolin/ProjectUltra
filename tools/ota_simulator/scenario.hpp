@@ -33,6 +33,7 @@ struct NoiseBedConfig {
 struct ChannelConfig {
     std::optional<NoiseBedConfig> noise_bed;
     std::optional<double> snr_db;
+    std::optional<protocol::WaveformMode> force_connected_waveform;
 };
 
 struct TxFrameWithinAssert {
