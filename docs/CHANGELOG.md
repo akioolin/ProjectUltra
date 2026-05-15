@@ -10,6 +10,37 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-15: PONG-TX half-duplex timing race fix
+
+**What was broken:** A disconnected station that decoded an incoming PING fired
+the `on_ping_received_` callback synchronously, so GUI/TNC PONG TX could start
+before the peer radio had finished PTT-off and RX-path settling. In the real-HF
+repro, the operator-side symptom was "ping sent, no response decoded
+peer-side": 4 consecutive PING retries over 60 s, 4 local PONGs, and 0 CONNECTs.
+
+**What changed:** `ConnectionConfig::pong_tx_delay_ms` defaults to 500 ms at
+`src/protocol/connection.hpp:31`, with pending callback state at
+`src/protocol/connection.hpp:332-333`. The DISCONNECTED PING/PONG branch now
+schedules or immediately fires the callback at
+`src/protocol/connection_handlers.cpp:39-50`, and `Connection::tick()` drains
+the deferred callback before the existing state timers at
+`src/protocol/connection.cpp:1359-1373`. Cancellation is centralized at
+`src/protocol/connection.cpp:1573-1579` and runs on `connect()` plus connected,
+disconnect/reset paths.
+
+**Why it is properly fixed:** The wire format and modem PONG waveform are
+unchanged; only the protocol-layer callback schedule moved. A re-PING while the
+callback is pending restarts the delay, and `pong_tx_delay_ms=0` preserves an
+immediate operator override.
+
+**Verification:** `cmake --build build -j4` passed. `ctest --test-dir build
+--output-on-failure -j4` passed `56/56`, including
+`ConnectionPongDelayDeferred`, `ConnectionPongDelayCancelOnConnect`,
+`ConnectionPongDelayRepingRestarts`, `ConnectionPongDelayZeroDelay`,
+`Protocol`, and `ConnectionAdaptive`.
+
+---
+
 ## 2026-05-15: ota_simulator data-mode auto-ladder fix
 
 **Fixed:** `initial_mode` now selects the MC-DPSK handshake preset without forcing post-CONNECT data mode; `force_data_mode` is default-false parser plumbing and the runner gate is at `tools/ota_simulator/runner_v2.cpp:417-420` (the brief's `:607-608` force calls).
