@@ -2,7 +2,9 @@
 
 #include "protocol/connection.hpp"
 #include "protocol/frame_v2.hpp"
+#include "sim/cli_enums.hpp"
 
+#include <cstddef>
 #include <optional>
 #include <map>
 #include <string>
@@ -33,6 +35,7 @@ struct NoiseBedConfig {
 struct ChannelConfig {
     std::optional<NoiseBedConfig> noise_bed;
     std::optional<double> snr_db;
+    std::optional<ChannelType> channel_type;
     std::optional<protocol::WaveformMode> force_connected_waveform;
 };
 
@@ -61,10 +64,14 @@ struct ScenarioEvent {
     std::string action;
     std::string peer_callsign;
     std::string text;
+    std::optional<size_t> file_size_bytes;
+    std::optional<std::string> filename;
 
     std::optional<protocol::ConnectionState> assert_state;
     std::optional<TxFrameWithinAssert> assert_tx_frame_within;
     std::optional<std::string> assert_received_message_contains;
+    std::optional<size_t> assert_received_file_size_at_least;
+    bool assert_received_file_byte_exact = false;
 };
 
 struct OutputConfig {

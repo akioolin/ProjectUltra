@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <sstream>
 #include <stdexcept>
@@ -64,6 +66,20 @@ bool requireBool(const std::string& object,
         throw std::runtime_error(context + " missing bool '" + key + "'");
     }
     return *value;
+}
+
+size_t requireSize(const std::string& object,
+                   const std::string& key,
+                   const std::string& context) {
+    auto value = json::numberValue(object, key);
+    if (!value) {
+        throw std::runtime_error(context + " missing number '" + key + "'");
+    }
+    if (*value < 0.0 || std::floor(*value) != *value ||
+        *value > static_cast<double>(std::numeric_limits<size_t>::max())) {
+        throw std::runtime_error(context + " '" + key + "' must be a non-negative integer");
+    }
+    return static_cast<size_t>(*value);
 }
 
 std::string objectAt(const std::string& text, size_t object_start,
@@ -304,6 +320,12 @@ ChannelConfig parseChannel(const std::string& object) {
     if (auto snr = json::numberValue(object, "snr_db")) {
         channel.snr_db = *snr;
     }
+    if (auto fading = json::stringValue(object, "fading")) {
+        channel.channel_type = cli::requireChannelType(*fading);
+    }
+    if (auto type = json::stringValue(object, "type")) {
+        channel.channel_type = cli::requireChannelType(*type);
+    }
     if (auto waveform = json::stringValue(object, "force_connected_waveform")) {
         channel.force_connected_waveform =
             cli::requireWaveformMode(*waveform);
@@ -359,6 +381,11 @@ ScenarioEvent parseEvent(const std::string& object, size_t index, int scenario_v
             event.peer_callsign = requireString(object, "peer_callsign", context);
         } else if (event.action == "send_message") {
             event.text = requireString(object, "text", context);
+        } else if (event.action == "send_file") {
+            event.file_size_bytes = requireSize(object, "size_bytes", context);
+            if (auto filename = json::stringValue(object, "filename")) {
+                event.filename = *filename;
+            }
         } else if (event.action == "disconnect") {
             // No extra fields.
         } else {
@@ -379,10 +406,30 @@ ScenarioEvent parseEvent(const std::string& object, size_t index, int scenario_v
             }
             event.assert_received_message_contains = *msg;
         }
+        if (json::findValue(object, "received_file_size_at_least")) {
+            if (scenario_version != 2) {
+                throw std::runtime_error(
+                    context + " received_file_size_at_least is only supported by scenario version 2");
+            }
+            event.assert_received_file_size_at_least =
+                requireSize(object, "received_file_size_at_least", context);
+        }
+        if (json::findValue(object, "received_file_byte_exact")) {
+            if (scenario_version != 2) {
+                throw std::runtime_error(
+                    context + " received_file_byte_exact is only supported by scenario version 2");
+            }
+            event.assert_received_file_byte_exact =
+                requireBool(object, "received_file_byte_exact", context);
+        }
         if (!event.assert_state && !event.assert_tx_frame_within &&
-            !event.assert_received_message_contains) {
+            !event.assert_received_message_contains &&
+            !event.assert_received_file_size_at_least &&
+            !event.assert_received_file_byte_exact) {
             throw std::runtime_error(
-                context + " assert must specify state, tx_frame_within, or received_message_contains");
+                context + " assert must specify state, tx_frame_within, "
+                          "received_message_contains, received_file_size_at_least, "
+                          "or received_file_byte_exact");
         }
     }
 
