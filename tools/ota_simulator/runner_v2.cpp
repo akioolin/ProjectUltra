@@ -45,12 +45,19 @@ struct SentFileRecord {
     std::vector<uint8_t> bytes;
 };
 
+struct ReceivedFileRecord {
+    std::string path;
+    bool success = false;
+    std::vector<uint8_t> bytes;
+};
+
 struct EndpointRuntime {
     std::string name;
     EndpointConfig config;
     std::unique_ptr<SimulatedStation> station;
     std::vector<std::string> received_messages;
     std::vector<SentFileRecord> sent_files;
+    std::vector<ReceivedFileRecord> received_files;
     std::vector<TxFrameRecord> tx_frames;
     std::mutex mutex;
     protocol::ConnectionState last_state = protocol::ConnectionState::DISCONNECTED;
@@ -125,6 +132,13 @@ std::string generatedFilePath(const EndpointRuntime& runtime,
          << static_cast<long long>(event.t_s * 1000.0 + 0.5) << "_"
          << runtime.sent_files.size() << ".bin";
     return (dir / name.str()).string();
+}
+
+std::string receiveDirectoryPath(const std::string& endpoint) {
+    fs::path dir = fs::temp_directory_path() / "projectultra_ota_sim" /
+                   "received" / endpoint;
+    fs::create_directories(dir);
+    return dir.string();
 }
 
 float rmsOf(const std::vector<float>& samples) {
@@ -345,8 +359,52 @@ bool hasReceivedMessageContaining(EndpointRuntime& runtime, const std::string& n
                        });
 }
 
+size_t maxSuccessfulReceivedFileSize(EndpointRuntime& runtime) {
+    std::lock_guard<std::mutex> lock(runtime.mutex);
+    size_t max_size = 0;
+    for (const auto& file : runtime.received_files) {
+        if (file.success) {
+            max_size = std::max(max_size, file.bytes.size());
+        }
+    }
+    return max_size;
+}
+
+std::vector<ReceivedFileRecord> snapshotReceivedFiles(EndpointRuntime& runtime) {
+    std::lock_guard<std::mutex> lock(runtime.mutex);
+    return runtime.received_files;
+}
+
+std::vector<SentFileRecord> snapshotSentFiles(
+    std::map<std::string, std::unique_ptr<EndpointRuntime>>& endpoints) {
+    std::vector<SentFileRecord> out;
+    for (auto& [name, runtime] : endpoints) {
+        (void)name;
+        std::lock_guard<std::mutex> lock(runtime->mutex);
+        out.insert(out.end(), runtime->sent_files.begin(), runtime->sent_files.end());
+    }
+    return out;
+}
+
+bool hasByteExactReceivedFile(EndpointRuntime& runtime,
+                              const std::vector<SentFileRecord>& sent_files) {
+    const auto received_files = snapshotReceivedFiles(runtime);
+    for (const auto& received : received_files) {
+        if (!received.success) {
+            continue;
+        }
+        for (const auto& sent : sent_files) {
+            if (received.bytes == sent.bytes) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool evaluateAssert(const ScenarioEvent& event,
                     EndpointRuntime& runtime,
+                    const std::vector<SentFileRecord>& sent_files,
                     SessionLog& log,
                     bool check_state_and_messages,
                     bool check_tx) {
@@ -368,6 +426,26 @@ bool evaluateAssert(const ScenarioEvent& event,
         log.writeAssert(runtime.name, event.t_s, found,
                         "received_message_contains=\"" +
                             *event.assert_received_message_contains + "\"");
+    }
+
+    if (check_state_and_messages && event.assert_received_file_size_at_least) {
+        const size_t actual = maxSuccessfulReceivedFileSize(runtime);
+        const bool pass = actual >= *event.assert_received_file_size_at_least;
+        ok = ok && pass;
+        std::ostringstream desc;
+        desc << "received_file_size_at_least expected="
+             << *event.assert_received_file_size_at_least
+             << " actual_max=" << actual;
+        log.writeAssert(runtime.name, event.t_s, pass, desc.str());
+    }
+
+    if (check_state_and_messages && event.assert_received_file_byte_exact) {
+        const bool pass = hasByteExactReceivedFile(runtime, sent_files);
+        ok = ok && pass;
+        std::ostringstream desc;
+        desc << "received_file_byte_exact sent_files=" << sent_files.size()
+             << " received_files=" << snapshotReceivedFiles(runtime).size();
+        log.writeAssert(runtime.name, event.t_s, pass, desc.str());
     }
 
     if (check_tx && event.assert_tx_frame_within) {
@@ -524,6 +602,7 @@ int runScenarioV2(const Scenario& scenario) {
             cfg.callsign, std::move(port),
             OFDMConfigPreset::Default,
             mcDpskConfigFor(cfg.initial_mode.modulation));
+        runtime->station->setReceiveDirectory(receiveDirectoryPath(name));
         runtime->station->setAutoAccept(cfg.auto_accept);
         runtime->station->setForcedModulation(cfg.initial_mode.modulation);
         runtime->station->setForcedCodeRate(cfg.initial_mode.code_rate);
@@ -553,6 +632,37 @@ int runScenarioV2(const Scenario& scenario) {
             log.writeNote(runtime->name, runtime->station->getSimTime(), "message.rx",
                           "{\"text\":\"" + json::escape(msg) + "\"}");
         });
+        runtime->station->setFileReceivedCallback(
+            [&log, runtime = runtime.get()](const std::string& path, bool success) {
+                std::vector<uint8_t> bytes;
+                bool captured = success;
+                std::string error;
+                if (success && !path.empty()) {
+                    try {
+                        bytes = readBinaryFile(path);
+                    } catch (const std::exception& e) {
+                        captured = false;
+                        error = e.what();
+                    }
+                }
+                const size_t captured_size = bytes.size();
+                {
+                    std::lock_guard<std::mutex> lock(runtime->mutex);
+                    runtime->received_files.push_back(
+                        ReceivedFileRecord{path, captured, std::move(bytes)});
+                }
+
+                std::ostringstream fields;
+                fields << "{\"success\":" << (captured ? "true" : "false")
+                       << ",\"path\":\"" << json::escape(path) << "\""
+                       << ",\"size_bytes\":" << captured_size;
+                if (!error.empty()) {
+                    fields << ",\"error\":\"" << json::escape(error) << "\"";
+                }
+                fields << "}";
+                log.writeNote(runtime->name, runtime->station->getSimTime(),
+                              "file.rx", fields.str());
+            });
     }
 
     for (auto& [name, runtime] : endpoints) {
@@ -594,7 +704,8 @@ int runScenarioV2(const Scenario& scenario) {
                                scenario, log);
             } else if (event.type == ScenarioEvent::Type::Assert) {
                 auto& runtime = endpointFor(endpoints, event.endpoint);
-                if (!evaluateAssert(event, runtime, log, true, false)) {
+                if (!evaluateAssert(event, runtime, snapshotSentFiles(endpoints),
+                                    log, true, false)) {
                     ++assertion_failures;
                 }
                 if (event.assert_tx_frame_within) {
@@ -629,7 +740,8 @@ int runScenarioV2(const Scenario& scenario) {
         const auto& event = scenario.events[event_index];
         if (event.type == ScenarioEvent::Type::Assert) {
             auto& runtime = endpointFor(endpoints, event.endpoint);
-            if (!evaluateAssert(event, runtime, log, true, false)) {
+            if (!evaluateAssert(event, runtime, snapshotSentFiles(endpoints),
+                                log, true, false)) {
                 ++assertion_failures;
             }
             if (event.assert_tx_frame_within) {
@@ -657,7 +769,8 @@ int runScenarioV2(const Scenario& scenario) {
 
     for (const auto& event : pending_tx_asserts) {
         auto& runtime = endpointFor(endpoints, event.endpoint);
-        if (!evaluateAssert(event, runtime, log, false, true)) {
+        if (!evaluateAssert(event, runtime, snapshotSentFiles(endpoints),
+                            log, false, true)) {
             ++assertion_failures;
         }
     }
