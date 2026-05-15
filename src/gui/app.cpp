@@ -8,8 +8,10 @@
 #include "sim/channel_calibration.hpp"
 #include "sim/hf_channel.hpp"
 #include <SDL.h>
+#include <cctype>
 #include <cstring>
 #include <cmath>
+#include <cstdio>
 #include <fstream>
 #include <cstdarg>
 #include <chrono>
@@ -211,6 +213,54 @@ static uint32_t safeFileSizeBytes(const std::string& path) {
         return 0;
     }
     return static_cast<uint32_t>(size);
+}
+
+static const char* imageFormatName(ImageFormat fmt) {
+    switch (fmt) {
+        case ImageFormat::JPEG: return "JPEG";
+        case ImageFormat::PNG: return "PNG";
+        case ImageFormat::Unknown:
+        default: return "Unknown";
+    }
+}
+
+static std::string formatByteCount(uint64_t bytes) {
+    char buf[64];
+    if (bytes >= 1024ull * 1024ull) {
+        std::snprintf(buf, sizeof(buf), "%.1f MB",
+                      static_cast<double>(bytes) / (1024.0 * 1024.0));
+    } else if (bytes >= 1024ull) {
+        std::snprintf(buf, sizeof(buf), "%llu KB",
+                      static_cast<unsigned long long>((bytes + 1023ull) / 1024ull));
+    } else {
+        std::snprintf(buf, sizeof(buf), "%llu B",
+                      static_cast<unsigned long long>(bytes));
+    }
+    return buf;
+}
+
+static std::string formatWireTime(uint64_t bytes, int bps) {
+    if (bps <= 0) {
+        return "n/a";
+    }
+
+    const auto seconds = static_cast<uint64_t>(
+        std::ceil((static_cast<long double>(bytes) * 8.0L) /
+                  static_cast<long double>(bps)));
+    char buf[64];
+    if (seconds < 60) {
+        std::snprintf(buf, sizeof(buf), "%llus",
+                      static_cast<unsigned long long>(seconds));
+    } else if (seconds < 3600) {
+        std::snprintf(buf, sizeof(buf), "%llum:%02llus",
+                      static_cast<unsigned long long>(seconds / 60),
+                      static_cast<unsigned long long>(seconds % 60));
+    } else {
+        std::snprintf(buf, sizeof(buf), "%lluh:%02llum",
+                      static_cast<unsigned long long>(seconds / 3600),
+                      static_cast<unsigned long long>((seconds % 3600) / 60));
+    }
+    return buf;
 }
 
 template <size_t N>
@@ -1628,6 +1678,175 @@ void App::appendRxLogLine(const std::string& msg) {
     while (rx_log_.size() > MAX_RX_LOG) {
         rx_log_.pop_front();
     }
+}
+
+bool App::startFileSend(const std::string& file_path, const std::string& success_log) {
+    last_progress_milestone_ = 0;
+    file_transfer_start_time_ = std::chrono::steady_clock::now();
+    const uint32_t file_bytes = safeFileSizeBytes(file_path);
+    if (protocol_.sendFile(file_path)) {
+        pending_file_tx_payload_bytes_ = file_bytes;
+        pending_file_tx_path_ = file_path;
+        appendRxLogLine(success_log);
+        return true;
+    }
+
+    pending_file_tx_payload_bytes_ = 0;
+    pending_file_tx_path_.clear();
+    appendRxLogLine("[FILE] Failed to start transfer");
+    return false;
+}
+
+void App::startFileSendOrImageDialog(const std::string& file_path) {
+    ImageFormat fmt = ImageFormat::Unknown;
+    if (!sniffImageFormat(file_path, fmt)) {
+        startFileSend(file_path, "[FILE] Sending: " + file_path);
+        return;
+    }
+
+    ImageInfo info;
+    if (!readImageInfo(file_path, info)) {
+        appendRxLogLine("[IMAGE] Failed to read image info; sending original");
+        startFileSend(file_path, "[FILE] Sending: " + file_path);
+        return;
+    }
+
+    image_send_path_ = file_path;
+    image_send_info_ = info;
+    image_send_preset_ = 0;
+    image_send_error_.clear();
+    ImGui::OpenPopup("Send Image##image_send_modal");
+}
+
+void App::renderImageSendModal() {
+    if (!ImGui::BeginPopupModal("Send Image##image_send_modal", nullptr,
+                                ImGuiWindowFlags_AlwaysAutoResize)) {
+        return;
+    }
+
+    struct Preset {
+        const char* label;
+        const char* details;
+        int max_w;
+        int max_h;
+        int quality;
+        uint64_t estimated_bytes;
+        bool full_size;
+    };
+
+    const Preset presets[] = {
+        {"Thumbnail", "320x240, JPEG q=70", 320, 240, 70, 10ull * 1024ull, false},
+        {"Preview", "640x480, JPEG q=75", 640, 480, 75, 40ull * 1024ull, false},
+        {"Full size", "as-is", 0, 0, 0, image_send_info_.file_size_bytes, true},
+    };
+
+    int bps = protocol_.getCurrentBitrate_bps();
+    const bool fallback_bps = bps <= 0;
+    if (fallback_bps) {
+        bps = 1400;
+    }
+
+    ImGui::TextUnformatted("Send image");
+    ImGui::Separator();
+    ImGui::Text("Source: %dx%d %s, %s",
+                image_send_info_.width,
+                image_send_info_.height,
+                imageFormatName(image_send_info_.format),
+                formatByteCount(image_send_info_.file_size_bytes).c_str());
+    ImGui::Spacing();
+
+    for (int i = 0; i < 3; ++i) {
+        const Preset& preset = presets[i];
+        ImGui::PushID(i);
+        ImGui::RadioButton(preset.label, &image_send_preset_, i);
+        ImGui::SameLine();
+
+        const std::string size_label =
+            std::string(preset.full_size ? "" : "~") + formatByteCount(preset.estimated_bytes);
+        std::string time_label = "~" + formatWireTime(preset.estimated_bytes, bps);
+        if (fallback_bps) {
+            time_label += " (R1/2 Good est)";
+        }
+        ImGui::TextDisabled("%s - %s %s",
+                            preset.details,
+                            size_label.c_str(),
+                            time_label.c_str());
+        ImGui::PopID();
+    }
+
+    if (!image_send_error_.empty()) {
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.3f, 1.0f), "%s",
+                           image_send_error_.c_str());
+    }
+
+    ImGui::Separator();
+    const bool can_confirm = protocol_.isConnected() && protocol_.isReadyToSend();
+    ImGui::BeginDisabled(!can_confirm);
+    if (ImGui::Button("Confirm", ImVec2(90, 0))) {
+        const Preset& preset = presets[image_send_preset_];
+        if (preset.full_size) {
+            startFileSend(image_send_path_, "[FILE] Sending: " + image_send_path_);
+            image_send_path_.clear();
+            image_send_info_ = ImageInfo{};
+            image_send_error_.clear();
+            ImGui::CloseCurrentPopup();
+        } else {
+            std::string call(settings_.callsign, boundedCStringLen(settings_.callsign));
+            for (char& ch : call) {
+                const unsigned char c = static_cast<unsigned char>(ch);
+                ch = std::isalnum(c) ? static_cast<char>(std::toupper(c)) : '_';
+            }
+            if (call.empty()) {
+                call = "NOCALL";
+            }
+
+            const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            std::error_code ec;
+            const std::filesystem::path tmp_dir = std::filesystem::temp_directory_path(ec);
+            if (ec) {
+                image_send_error_ = "failed to locate temp directory";
+            } else {
+                const std::filesystem::path dst =
+                    tmp_dir / ("ultra_img_send_" + call + "_" +
+                               std::to_string(now_ms) + ".jpg");
+                std::string error;
+                if (!resizeAndEncodeJPEG(image_send_path_, preset.max_w, preset.max_h,
+                                         preset.quality, dst.string(), error)) {
+                    image_send_error_ = error.empty() ? "failed to resize image" : error;
+                } else {
+                    ImageInfo resized_info;
+                    const bool have_resized_info = readImageInfo(dst.string(), resized_info);
+                    const uint64_t resized_bytes = have_resized_info
+                        ? resized_info.file_size_bytes
+                        : static_cast<uint64_t>(safeFileSizeBytes(dst.string()));
+                    const int log_w = have_resized_info ? resized_info.width : preset.max_w;
+                    const int log_h = have_resized_info ? resized_info.height : preset.max_h;
+                    const std::string log =
+                        "[IMAGE] Resized: " + std::to_string(log_w) + "x" +
+                        std::to_string(log_h) + " " + formatByteCount(resized_bytes) +
+                        " -> sending " + dst.string();
+                    startFileSend(dst.string(), log);
+                    image_send_path_.clear();
+                    image_send_info_ = ImageInfo{};
+                    image_send_error_.clear();
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+        }
+    }
+    ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(90, 0))) {
+        image_send_path_.clear();
+        image_send_info_ = ImageInfo{};
+        image_send_error_.clear();
+        ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::EndPopup();
 }
 
 std::deque<std::string> App::snapshotRxLog() const {
@@ -3273,22 +3492,13 @@ void App::renderOperateTab() {
                              boundedCStringLen(file_path_buffer_) > 0;
         ImGui::BeginDisabled(!can_send_file);
         if (ImGui::Button("Send##file", ImVec2(60, 0))) {
-            last_progress_milestone_ = 0;  // Reset milestone tracker
-            file_transfer_start_time_ = std::chrono::steady_clock::now();  // Start timing
             std::string file_path(file_path_buffer_, boundedCStringLen(file_path_buffer_));
-            uint32_t file_bytes = safeFileSizeBytes(file_path);
-            if (protocol_.sendFile(file_path)) {
-                pending_file_tx_payload_bytes_ = file_bytes;
-                pending_file_tx_path_ = file_path;
-                appendRxLogLine("[FILE] Sending: " + file_path);
-            } else {
-                pending_file_tx_payload_bytes_ = 0;
-                pending_file_tx_path_.clear();
-                appendRxLogLine("[FILE] Failed to start transfer");
-            }
+            startFileSendOrImageDialog(file_path);
         }
         ImGui::EndDisabled();
     }
+
+    renderImageSendModal();
 }
 
 } // namespace gui

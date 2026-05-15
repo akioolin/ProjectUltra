@@ -112,6 +112,16 @@ target_include_directories(test_diagnostics PRIVATE
 target_link_libraries(test_diagnostics PRIVATE ultra_core)
 add_test(NAME Diagnostics COMMAND test_diagnostics)
 
+add_executable(test_image_util test_image_util.cpp)
+target_include_directories(test_image_util PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+target_compile_definitions(test_image_util PRIVATE
+    PROJECT_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+target_link_libraries(test_image_util PRIVATE ultra_core)
+add_test(NAME ImageUtil COMMAND test_image_util)
+
 if(TARGET ultra_replay_lib)
     add_executable(test_replay
         test_replay.cpp

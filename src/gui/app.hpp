@@ -7,6 +7,7 @@
 #include "widgets/settings.hpp"
 #include "widgets/waterfall.hpp"
 #include "widgets/file_browser.hpp"
+#include "image_util.hpp"
 #include "audio_engine.hpp"
 #include "modem/modem_engine.hpp"
 #include "ptt/ptt_driver.hpp"
@@ -158,6 +159,14 @@ private:
     float last_effective_goodput_bps_ = 0.0f;  // Last completed file transfer goodput
     std::string last_goodput_label_ = "n/a";  // Context for last goodput sample
     int diagnostics_last_arq_failed_ = 0;
+    std::string image_send_path_;
+    ImageInfo image_send_info_;
+    int image_send_preset_ = 0;  // 0 thumbnail, 1 preview, 2 full size
+    std::string image_send_error_;
+
+    bool startFileSend(const std::string& file_path, const std::string& success_log);
+    void startFileSendOrImageDialog(const std::string& file_path);
+    void renderImageSendModal();
 
     // Diagnostics report UI
     bool diagnostics_consent_popup_opened_ = false;
