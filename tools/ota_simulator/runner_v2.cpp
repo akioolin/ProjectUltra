@@ -12,8 +12,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -38,11 +41,27 @@ struct TxFrameRecord {
     int seq = -1;
 };
 
+struct SentFileRecord {
+    std::string path;
+    std::vector<uint8_t> bytes;
+    double t_s = 0.0;
+    std::string sender;
+};
+
+struct ReceivedFileRecord {
+    std::string path;
+    bool success = false;
+    std::vector<uint8_t> bytes;
+    double t_s = 0.0;
+};
+
 struct EndpointRuntime {
     std::string name;
     EndpointConfig config;
     std::unique_ptr<SimulatedStation> station;
     std::vector<std::string> received_messages;
+    std::vector<SentFileRecord> sent_files;
+    std::vector<ReceivedFileRecord> received_files;
     std::vector<TxFrameRecord> tx_frames;
     std::mutex mutex;
     protocol::ConnectionState last_state = protocol::ConnectionState::DISCONNECTED;
@@ -59,6 +78,71 @@ std::string resolveInputPath(const std::string& scenario_path,
         return base.string();
     }
     return path;
+}
+
+std::vector<uint8_t> deterministicFilePayload(size_t size_bytes) {
+    std::vector<uint8_t> out(size_bytes);
+    uint32_t state = 0x9E3779B9u;
+    for (size_t i = 0; i < out.size(); ++i) {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        out[i] = static_cast<uint8_t>((state >> 24) ^ (i * 37u));
+    }
+    return out;
+}
+
+std::vector<uint8_t> readBinaryFile(const std::string& path) {
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in) {
+        throw std::runtime_error("failed to open file payload: " + path);
+    }
+    const std::streampos end = in.tellg();
+    if (end < 0) {
+        throw std::runtime_error("failed to size file payload: " + path);
+    }
+    std::vector<uint8_t> bytes(static_cast<size_t>(end));
+    in.seekg(0, std::ios::beg);
+    if (!bytes.empty()) {
+        in.read(reinterpret_cast<char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+        if (!in) {
+            throw std::runtime_error("failed to read file payload: " + path);
+        }
+    }
+    return bytes;
+}
+
+void writeBinaryFile(const std::string& path, const std::vector<uint8_t>& bytes) {
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+        throw std::runtime_error("failed to create file payload: " + path);
+    }
+    if (!bytes.empty()) {
+        out.write(reinterpret_cast<const char*>(bytes.data()),
+                  static_cast<std::streamsize>(bytes.size()));
+        if (!out) {
+            throw std::runtime_error("failed to write file payload: " + path);
+        }
+    }
+}
+
+std::string generatedFilePath(const EndpointRuntime& runtime,
+                              const ScenarioEvent& event) {
+    fs::path dir = fs::temp_directory_path() / "projectultra_ota_sim";
+    fs::create_directories(dir);
+    std::ostringstream name;
+    name << "send_file_" << runtime.name << "_"
+         << static_cast<long long>(event.t_s * 1000.0 + 0.5) << "_"
+         << runtime.sent_files.size() << ".bin";
+    return (dir / name.str()).string();
+}
+
+std::string receiveDirectoryPath(const std::string& endpoint) {
+    fs::path dir = fs::temp_directory_path() / "projectultra_ota_sim" /
+                   "received" / endpoint;
+    fs::create_directories(dir);
+    return dir.string();
 }
 
 float rmsOf(const std::vector<float>& samples) {
@@ -279,8 +363,52 @@ bool hasReceivedMessageContaining(EndpointRuntime& runtime, const std::string& n
                        });
 }
 
+size_t maxSuccessfulReceivedFileSize(EndpointRuntime& runtime) {
+    std::lock_guard<std::mutex> lock(runtime.mutex);
+    size_t max_size = 0;
+    for (const auto& file : runtime.received_files) {
+        if (file.success) {
+            max_size = std::max(max_size, file.bytes.size());
+        }
+    }
+    return max_size;
+}
+
+std::vector<ReceivedFileRecord> snapshotReceivedFiles(EndpointRuntime& runtime) {
+    std::lock_guard<std::mutex> lock(runtime.mutex);
+    return runtime.received_files;
+}
+
+std::vector<SentFileRecord> snapshotSentFiles(
+    std::map<std::string, std::unique_ptr<EndpointRuntime>>& endpoints) {
+    std::vector<SentFileRecord> out;
+    for (auto& [name, runtime] : endpoints) {
+        (void)name;
+        std::lock_guard<std::mutex> lock(runtime->mutex);
+        out.insert(out.end(), runtime->sent_files.begin(), runtime->sent_files.end());
+    }
+    return out;
+}
+
+bool hasByteExactReceivedFile(EndpointRuntime& runtime,
+                              const std::vector<SentFileRecord>& sent_files) {
+    const auto received_files = snapshotReceivedFiles(runtime);
+    for (const auto& received : received_files) {
+        if (!received.success) {
+            continue;
+        }
+        for (const auto& sent : sent_files) {
+            if (received.bytes == sent.bytes) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool evaluateAssert(const ScenarioEvent& event,
                     EndpointRuntime& runtime,
+                    const std::vector<SentFileRecord>& sent_files,
                     SessionLog& log,
                     bool check_state_and_messages,
                     bool check_tx) {
@@ -304,6 +432,26 @@ bool evaluateAssert(const ScenarioEvent& event,
                             *event.assert_received_message_contains + "\"");
     }
 
+    if (check_state_and_messages && event.assert_received_file_size_at_least) {
+        const size_t actual = maxSuccessfulReceivedFileSize(runtime);
+        const bool pass = actual >= *event.assert_received_file_size_at_least;
+        ok = ok && pass;
+        std::ostringstream desc;
+        desc << "received_file_size_at_least expected="
+             << *event.assert_received_file_size_at_least
+             << " actual_max=" << actual;
+        log.writeAssert(runtime.name, event.t_s, pass, desc.str());
+    }
+
+    if (check_state_and_messages && event.assert_received_file_byte_exact) {
+        const bool pass = hasByteExactReceivedFile(runtime, sent_files);
+        ok = ok && pass;
+        std::ostringstream desc;
+        desc << "received_file_byte_exact sent_files=" << sent_files.size()
+             << " received_files=" << snapshotReceivedFiles(runtime).size();
+        log.writeAssert(runtime.name, event.t_s, pass, desc.str());
+    }
+
     if (check_tx && event.assert_tx_frame_within) {
         const auto& assertion = *event.assert_tx_frame_within;
         const bool found = std::any_of(runtime.tx_frames.begin(), runtime.tx_frames.end(),
@@ -317,6 +465,7 @@ bool evaluateAssert(const ScenarioEvent& event,
 }
 
 void executeCommand(const ScenarioEvent& event, EndpointRuntime& runtime,
+                    const Scenario& scenario,
                     SessionLog& log) {
     if (event.action == "connect_to") {
         runtime.station->connect(event.peer_callsign);
@@ -328,6 +477,48 @@ void executeCommand(const ScenarioEvent& event, EndpointRuntime& runtime,
         log.writeNote(runtime.name, event.t_s, "command",
                       "{\"action\":\"send_message\",\"text\":\"" +
                           json::escape(event.text) + "\"}");
+    } else if (event.action == "send_file") {
+        if (!event.file_size_bytes) {
+            throw std::runtime_error("send_file missing size_bytes");
+        }
+
+        std::string path;
+        std::vector<uint8_t> bytes;
+        if (event.filename) {
+            path = resolveInputPath(scenario.source_path, *event.filename);
+            bytes = readBinaryFile(path);
+            if (bytes.size() != *event.file_size_bytes) {
+                std::ostringstream err;
+                err << "send_file filename size mismatch: " << path
+                    << " has " << bytes.size() << " bytes, expected "
+                    << *event.file_size_bytes;
+                throw std::runtime_error(err.str());
+            }
+        } else {
+            bytes = deterministicFilePayload(*event.file_size_bytes);
+            path = generatedFilePath(runtime, event);
+            writeBinaryFile(path, bytes);
+        }
+
+        if (!runtime.station->sendFile(path)) {
+            log.writeNote(runtime.name, event.t_s, "command",
+                          "{\"action\":\"send_file\",\"size_bytes\":" +
+                              std::to_string(bytes.size()) +
+                              ",\"started\":false}");
+            throw std::runtime_error("send_file failed to start for endpoint '" +
+                                     runtime.name + "'");
+        }
+
+        const double sent_t_s = runtime.station->getSimTime();
+        {
+            std::lock_guard<std::mutex> lock(runtime.mutex);
+            runtime.sent_files.push_back(SentFileRecord{
+                path, std::move(bytes), sent_t_s, runtime.name});
+        }
+        log.writeNote(runtime.name, event.t_s, "command",
+                      "{\"action\":\"send_file\",\"size_bytes\":" +
+                          std::to_string(*event.file_size_bytes) +
+                          ",\"path\":\"" + json::escape(path) + "\"}");
     } else if (event.action == "disconnect") {
         runtime.station->disconnect();
         log.writeNote(runtime.name, event.t_s, "command",
@@ -342,7 +533,11 @@ std::optional<float> configureChannel(const Scenario& scenario, SimulatedChannel
     std::optional<float> station_snr_db;
     if (scenario.channel && scenario.channel->snr_db) {
         station_snr_db = static_cast<float>(*scenario.channel->snr_db);
-        channel.configure(*station_snr_db, ChannelType::AWGN);
+        const ChannelType channel_type =
+            scenario.channel->channel_type.value_or(ChannelType::AWGN);
+        channel.configure(*station_snr_db, channel_type);
+    } else if (scenario.channel && scenario.channel->channel_type) {
+        throw std::runtime_error("channel.fading/type requires channel.snr_db");
     }
     if (scenario.channel && scenario.channel->noise_bed) {
         const auto& bed = *scenario.channel->noise_bed;
@@ -363,6 +558,43 @@ std::optional<float> configureChannel(const Scenario& scenario, SimulatedChannel
     return station_snr_db;
 }
 
+void emitFileTransferSummaries(
+    std::map<std::string, std::unique_ptr<EndpointRuntime>>& endpoints,
+    SessionLog& log) {
+    const auto sent_files = snapshotSentFiles(endpoints);
+    for (const auto& sent : sent_files) {
+        for (const auto& [name, runtime] : endpoints) {
+            if (name == sent.sender) continue;
+            const auto received_files = snapshotReceivedFiles(*runtime);
+            for (const auto& received : received_files) {
+                if (!received.success) continue;
+                if (received.bytes != sent.bytes) continue;
+                const double transfer_sec = received.t_s - sent.t_s;
+                const double bps = transfer_sec > 0.01
+                    ? static_cast<double>(sent.bytes.size()) * 8.0 / transfer_sec
+                    : 0.0;
+                std::cout << "[" << sent.sender << " -> " << name << "] file "
+                          << sent.bytes.size() << " B in "
+                          << std::fixed << std::setprecision(1) << transfer_sec
+                          << "s = " << std::fixed << std::setprecision(0)
+                          << bps << " bps\n";
+                std::ostringstream fields;
+                fields << "{\"sender\":\"" << json::escape(sent.sender) << "\""
+                       << ",\"receiver\":\"" << json::escape(name) << "\""
+                       << ",\"size_bytes\":" << sent.bytes.size()
+                       << ",\"transfer_sec\":" << std::fixed
+                       << std::setprecision(3) << transfer_sec
+                       << ",\"throughput_bps\":" << std::fixed
+                       << std::setprecision(1) << bps << "}";
+                log.writeNote(received.t_s, "file_transfer.complete",
+                              fields.str());
+                goto next_sent;
+            }
+        }
+    next_sent:;
+    }
+}
+
 void writeCaptures(const Scenario& scenario,
                    const std::vector<std::string>& endpoint_names,
                    const SimulatedChannel::CapturedSignals& captured) {
@@ -374,6 +606,20 @@ void writeCaptures(const Scenario& scenario,
     if (!io::writeWavF32Mono(scenario.output.bob_tx_capture, captured.b_tx_raw)) {
         throw std::runtime_error("failed to write TX capture: " +
                                  scenario.output.bob_tx_capture);
+    }
+    if (!scenario.output.alice_rx_capture.empty()) {
+        if (!io::writeWavF32Mono(scenario.output.alice_rx_capture,
+                                 captured.a_rx_raw)) {
+            throw std::runtime_error("failed to write RX capture: " +
+                                     scenario.output.alice_rx_capture);
+        }
+    }
+    if (!scenario.output.bob_rx_capture.empty()) {
+        if (!io::writeWavF32Mono(scenario.output.bob_rx_capture,
+                                 captured.b_rx_raw)) {
+            throw std::runtime_error("failed to write RX capture: " +
+                                     scenario.output.bob_rx_capture);
+        }
     }
 }
 
@@ -413,9 +659,12 @@ int runScenarioV2(const Scenario& scenario) {
             cfg.callsign, std::move(port),
             OFDMConfigPreset::Default,
             mcDpskConfigFor(cfg.initial_mode.modulation));
+        runtime->station->setReceiveDirectory(receiveDirectoryPath(name));
         runtime->station->setAutoAccept(cfg.auto_accept);
-        runtime->station->setForcedModulation(cfg.initial_mode.modulation);
-        runtime->station->setForcedCodeRate(cfg.initial_mode.code_rate);
+        if (cfg.force_data_mode) {
+            runtime->station->setForcedModulation(cfg.initial_mode.modulation);
+            runtime->station->setForcedCodeRate(cfg.initial_mode.code_rate);
+        }
         if (station_snr_db) {
             runtime->station->setSNR(*station_snr_db);
         }
@@ -442,6 +691,38 @@ int runScenarioV2(const Scenario& scenario) {
             log.writeNote(runtime->name, runtime->station->getSimTime(), "message.rx",
                           "{\"text\":\"" + json::escape(msg) + "\"}");
         });
+        runtime->station->setFileReceivedCallback(
+            [&log, runtime = runtime.get()](const std::string& path, bool success) {
+                std::vector<uint8_t> bytes;
+                bool captured = success;
+                std::string error;
+                if (success && !path.empty()) {
+                    try {
+                        bytes = readBinaryFile(path);
+                    } catch (const std::exception& e) {
+                        captured = false;
+                        error = e.what();
+                    }
+                }
+                const size_t captured_size = bytes.size();
+                const double recv_t_s = runtime->station->getSimTime();
+                {
+                    std::lock_guard<std::mutex> lock(runtime->mutex);
+                    runtime->received_files.push_back(
+                        ReceivedFileRecord{path, captured, std::move(bytes), recv_t_s});
+                }
+
+                std::ostringstream fields;
+                fields << "{\"success\":" << (captured ? "true" : "false")
+                       << ",\"path\":\"" << json::escape(path) << "\""
+                       << ",\"size_bytes\":" << captured_size;
+                if (!error.empty()) {
+                    fields << ",\"error\":\"" << json::escape(error) << "\"";
+                }
+                fields << "}";
+                log.writeNote(runtime->name, runtime->station->getSimTime(),
+                              "file.rx", fields.str());
+            });
     }
 
     for (auto& [name, runtime] : endpoints) {
@@ -479,10 +760,12 @@ int runScenarioV2(const Scenario& scenario) {
                scenario.events[event_index].t_s <= elapsed) {
             const auto& event = scenario.events[event_index];
             if (event.type == ScenarioEvent::Type::Command) {
-                executeCommand(event, endpointFor(endpoints, event.endpoint), log);
+                executeCommand(event, endpointFor(endpoints, event.endpoint),
+                               scenario, log);
             } else if (event.type == ScenarioEvent::Type::Assert) {
                 auto& runtime = endpointFor(endpoints, event.endpoint);
-                if (!evaluateAssert(event, runtime, log, true, false)) {
+                if (!evaluateAssert(event, runtime, snapshotSentFiles(endpoints),
+                                    log, true, false)) {
                     ++assertion_failures;
                 }
                 if (event.assert_tx_frame_within) {
@@ -517,7 +800,8 @@ int runScenarioV2(const Scenario& scenario) {
         const auto& event = scenario.events[event_index];
         if (event.type == ScenarioEvent::Type::Assert) {
             auto& runtime = endpointFor(endpoints, event.endpoint);
-            if (!evaluateAssert(event, runtime, log, true, false)) {
+            if (!evaluateAssert(event, runtime, snapshotSentFiles(endpoints),
+                                log, true, false)) {
                 ++assertion_failures;
             }
             if (event.assert_tx_frame_within) {
@@ -545,12 +829,15 @@ int runScenarioV2(const Scenario& scenario) {
 
     for (const auto& event : pending_tx_asserts) {
         auto& runtime = endpointFor(endpoints, event.endpoint);
-        if (!evaluateAssert(event, runtime, log, false, true)) {
+        if (!evaluateAssert(event, runtime, snapshotSentFiles(endpoints),
+                            log, false, true)) {
             ++assertion_failures;
         }
     }
 
     writeCaptures(scenario, endpoint_names, captured);
+
+    emitFileTransferSummaries(endpoints, log);
 
     if (assertion_failures != 0) {
         std::cerr << "ota_simulator: " << assertion_failures

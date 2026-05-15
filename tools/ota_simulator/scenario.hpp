@@ -2,7 +2,9 @@
 
 #include "protocol/connection.hpp"
 #include "protocol/frame_v2.hpp"
+#include "sim/cli_enums.hpp"
 
+#include <cstddef>
 #include <optional>
 #include <map>
 #include <string>
@@ -21,6 +23,8 @@ struct EndpointConfig {
     std::string peer_callsign;
     protocol::ConnectionState initial_state = protocol::ConnectionState::DISCONNECTED;
     InitialMode initial_mode;
+    // When true, initial_mode also pins the post-CONNECT data modulation/rate.
+    bool force_data_mode = false;
     bool auto_accept = false;
 };
 
@@ -33,6 +37,7 @@ struct NoiseBedConfig {
 struct ChannelConfig {
     std::optional<NoiseBedConfig> noise_bed;
     std::optional<double> snr_db;
+    std::optional<ChannelType> channel_type;
     std::optional<protocol::WaveformMode> force_connected_waveform;
 };
 
@@ -61,16 +66,24 @@ struct ScenarioEvent {
     std::string action;
     std::string peer_callsign;
     std::string text;
+    std::optional<size_t> file_size_bytes;
+    std::optional<std::string> filename;
 
     std::optional<protocol::ConnectionState> assert_state;
     std::optional<TxFrameWithinAssert> assert_tx_frame_within;
     std::optional<std::string> assert_received_message_contains;
+    std::optional<size_t> assert_received_file_size_at_least;
+    bool assert_received_file_byte_exact = false;
 };
 
 struct OutputConfig {
     std::string tx_capture = "out_tx.wav";
     std::string alice_tx_capture = "out_alice_tx.wav";
     std::string bob_tx_capture = "out_bob_tx.wav";
+    // Optional: post-channel RX captures (what each station hears).
+    // Empty by default; set via scenario JSON or --save-rx-audio.
+    std::string alice_rx_capture;
+    std::string bob_rx_capture;
     std::string session_log = "out_session.jsonl";
 };
 

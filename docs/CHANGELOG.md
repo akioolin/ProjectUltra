@@ -10,6 +10,14 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-15: ota_simulator data-mode auto-ladder fix
+
+**Fixed:** `initial_mode` now selects the MC-DPSK handshake preset without forcing post-CONNECT data mode; `force_data_mode` is default-false parser plumbing and the runner gate is at `tools/ota_simulator/runner_v2.cpp:417-420` (the brief's `:607-608` force calls).
+**Fixed:** `tests/fixtures/ota_simulator/two_endpoint_noisy_handshake.json:13,24` opts into `force_data_mode` to preserve the real-HF R1/4 survival test, and the OTA CTest cases are marked `RUN_SERIAL` because they are wall-clock DSP simulations.
+**Verification:** `ctest --test-dir build --output-on-failure -R OTASimulator` passed 4/4; after CTest reconfigure, `ctest --test-dir build --output-on-failure -j4 -R OTASimulator` passed 4/4. A same-waveform decoder rebuild exposed by repeated noisy runs is fixed at `src/gui/modem/streaming_decoder.cpp:428-447`.
+
+---
+
 ## 2026-05-14: MC-DPSK real-HF hardening Phase 1 harness fix
 
 **What was broken:** `ota_simulator` v2 `noise_bed` scenarios without
