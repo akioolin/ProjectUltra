@@ -10,6 +10,36 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-14: MC-DPSK real-HF hardening Phase 1 harness fix
+
+**What was broken:** `ota_simulator` v2 `noise_bed` scenarios without
+`channel.snr_db` added the WAV overlay to the channel but left station SNR
+metadata at the simulator default `20 dB`. The adaptive ladder therefore
+negotiated OFDM-CHIRP for real-HF connected data even when decoded CONNECT
+frames reported roughly `-4 dB` idle-noise SNR.
+
+**What changed:** `tools/ota_simulator/runner_v2.cpp` now scales the loaded
+noise bed to `target_rms`, estimates station SNR from the scaled 50-2950 Hz
+FIR-bandpassed noise against `sim::kModemReferencePower`, and applies that
+metadata to both endpoints when no explicit `channel.snr_db` is present.
+Explicit `channel.snr_db` still wins.
+
+**Why it is properly fixed:** The harness now uses the same finite-FIR energy
+normalization documented for the idle-noise SNR estimator instead of treating
+real-HF in-band energy as a harmless full-band RMS overlay. No wire format,
+channel calibration constant, mode-ladder threshold, or OFDM decoder behavior
+changed.
+
+**Verification:** Before the patch,
+`/tmp/ota_realhf_sweep/realhf_snr5.json` negotiated `OFDM-CHIRP` at default
+`SNR=20.0 dB` and failed 3 assertions. After the patch,
+`./build/ota_simulator run --scenario /tmp/ota_realhf_sweep/realhf_snr5.json`
+prints `noise_bed station_snr_db=-3.98699`, negotiates/enters `MC-DPSK`,
+decodes the DATA message, and passes all assertions. `cmake --build build
+--target ota_simulator -j4` is clean.
+
+---
+
 ## 2026-05-14: MC-DPSK idle-noise SNR meter local validation complete
 
 **What was broken:** Non-OFDM frames, including MC-DPSK CONNECT and

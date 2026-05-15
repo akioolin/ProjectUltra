@@ -5,7 +5,9 @@
 #include "protocol/frame_v2.hpp"
 #include "psk/multi_carrier_dpsk.hpp"
 #include "replay/json_util.hpp"
+#include "sim/channel_calibration.hpp"
 #include "sim/simulated_station.hpp"
+#include "ultra/dsp.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -16,6 +18,8 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <numeric>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
@@ -55,6 +59,70 @@ std::string resolveInputPath(const std::string& scenario_path,
         return base.string();
     }
     return path;
+}
+
+float rmsOf(const std::vector<float>& samples) {
+    if (samples.empty()) {
+        return 0.0f;
+    }
+    double sum_sq = 0.0;
+    for (float sample : samples) {
+        sum_sq += static_cast<double>(sample) * static_cast<double>(sample);
+    }
+    return static_cast<float>(std::sqrt(sum_sq / static_cast<double>(samples.size())));
+}
+
+void scaleToTargetRms(std::vector<float>& samples, double target_rms) {
+    if (samples.empty() || target_rms <= 0.0) {
+        return;
+    }
+    const float current = rmsOf(samples);
+    if (current <= 0.0f) {
+        return;
+    }
+    const float gain = static_cast<float>(target_rms) / current;
+    for (float& sample : samples) {
+        sample *= gain;
+    }
+}
+
+double coefficientEnergy(const FIRFilter& filter) {
+    const auto& coeffs = filter.coefficients();
+    return std::accumulate(coeffs.begin(), coeffs.end(), 0.0,
+                           [](double sum, float h) {
+                               return sum + static_cast<double>(h) *
+                                            static_cast<double>(h);
+                           });
+}
+
+std::optional<float> estimateNoiseBedStationSNRDb(const std::vector<float>& scaled_noise) {
+    if (scaled_noise.empty()) {
+        return std::nullopt;
+    }
+
+    FIRFilter filter = FIRFilter::bandpass(/*num_taps=*/101,
+                                           /*low_freq=*/50.0f,
+                                           /*high_freq=*/2950.0f,
+                                           /*sample_rate=*/48000.0f);
+    const double fir_energy = coefficientEnergy(filter);
+    if (fir_energy <= 0.0 || !std::isfinite(fir_energy)) {
+        return std::nullopt;
+    }
+
+    double filtered_sum_sq = 0.0;
+    for (float sample : scaled_noise) {
+        const float filtered = filter.process(sample);
+        filtered_sum_sq += static_cast<double>(filtered) * static_cast<double>(filtered);
+    }
+    const double filtered_power =
+        filtered_sum_sq / static_cast<double>(scaled_noise.size());
+    const double noise_power = filtered_power / fir_energy;
+    if (noise_power <= 0.0 || !std::isfinite(noise_power)) {
+        return std::nullopt;
+    }
+
+    return static_cast<float>(
+        10.0 * std::log10(sim::kModemReferencePower / noise_power));
 }
 
 MultiCarrierDPSKConfig mcDpskConfigFor(Modulation modulation) {
@@ -269,20 +337,30 @@ void executeCommand(const ScenarioEvent& event, EndpointRuntime& runtime,
     }
 }
 
-void configureChannel(const Scenario& scenario, SimulatedChannel& channel) {
+std::optional<float> configureChannel(const Scenario& scenario, SimulatedChannel& channel) {
     channel.setSeed(42);
+    std::optional<float> station_snr_db;
     if (scenario.channel && scenario.channel->snr_db) {
-        channel.configure(static_cast<float>(*scenario.channel->snr_db),
-                          ChannelType::AWGN);
+        station_snr_db = static_cast<float>(*scenario.channel->snr_db);
+        channel.configure(*station_snr_db, ChannelType::AWGN);
     }
     if (scenario.channel && scenario.channel->noise_bed) {
         const auto& bed = *scenario.channel->noise_bed;
         const std::string path = resolveInputPath(scenario.source_path, bed.file);
         auto wav = io::loadWavMono48k(path);
-        channel.setNoiseOverlay(std::move(wav.samples_48k),
-                                bed.loop,
-                                static_cast<float>(bed.target_rms));
+        scaleToTargetRms(wav.samples_48k, bed.target_rms);
+        if (!station_snr_db) {
+            station_snr_db = estimateNoiseBedStationSNRDb(wav.samples_48k);
+            if (!station_snr_db) {
+                throw std::runtime_error(
+                    "noise_bed station SNR estimate failed; set channel.snr_db explicitly");
+            }
+            std::cout << "ota_simulator: noise_bed station_snr_db="
+                      << *station_snr_db << " from " << path << "\n";
+        }
+        channel.setNoiseOverlay(std::move(wav.samples_48k), bed.loop, 0.0f);
     }
+    return station_snr_db;
 }
 
 void writeCaptures(const Scenario& scenario,
@@ -314,7 +392,7 @@ int runScenarioV2(const Scenario& scenario) {
     }
 
     SimulatedChannel channel;
-    configureChannel(scenario, channel);
+    const auto station_snr_db = configureChannel(scenario, channel);
     const size_t capture_samples = static_cast<size_t>(
         std::ceil(scenario.duration_s * SimulatedStation::SAMPLE_RATE)) +
         static_cast<size_t>(10 * SimulatedStation::SAMPLE_RATE);
@@ -338,8 +416,8 @@ int runScenarioV2(const Scenario& scenario) {
         runtime->station->setAutoAccept(cfg.auto_accept);
         runtime->station->setForcedModulation(cfg.initial_mode.modulation);
         runtime->station->setForcedCodeRate(cfg.initial_mode.code_rate);
-        if (scenario.channel && scenario.channel->snr_db) {
-            runtime->station->setSNR(static_cast<float>(*scenario.channel->snr_db));
+        if (station_snr_db) {
+            runtime->station->setSNR(*station_snr_db);
         }
         endpoints.emplace(name, std::move(runtime));
     }
