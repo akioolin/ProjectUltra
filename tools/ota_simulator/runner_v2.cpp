@@ -12,8 +12,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -38,11 +40,17 @@ struct TxFrameRecord {
     int seq = -1;
 };
 
+struct SentFileRecord {
+    std::string path;
+    std::vector<uint8_t> bytes;
+};
+
 struct EndpointRuntime {
     std::string name;
     EndpointConfig config;
     std::unique_ptr<SimulatedStation> station;
     std::vector<std::string> received_messages;
+    std::vector<SentFileRecord> sent_files;
     std::vector<TxFrameRecord> tx_frames;
     std::mutex mutex;
     protocol::ConnectionState last_state = protocol::ConnectionState::DISCONNECTED;
@@ -59,6 +67,64 @@ std::string resolveInputPath(const std::string& scenario_path,
         return base.string();
     }
     return path;
+}
+
+std::vector<uint8_t> deterministicFilePayload(size_t size_bytes) {
+    std::vector<uint8_t> out(size_bytes);
+    uint32_t state = 0x9E3779B9u;
+    for (size_t i = 0; i < out.size(); ++i) {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        out[i] = static_cast<uint8_t>((state >> 24) ^ (i * 37u));
+    }
+    return out;
+}
+
+std::vector<uint8_t> readBinaryFile(const std::string& path) {
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in) {
+        throw std::runtime_error("failed to open file payload: " + path);
+    }
+    const std::streampos end = in.tellg();
+    if (end < 0) {
+        throw std::runtime_error("failed to size file payload: " + path);
+    }
+    std::vector<uint8_t> bytes(static_cast<size_t>(end));
+    in.seekg(0, std::ios::beg);
+    if (!bytes.empty()) {
+        in.read(reinterpret_cast<char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+        if (!in) {
+            throw std::runtime_error("failed to read file payload: " + path);
+        }
+    }
+    return bytes;
+}
+
+void writeBinaryFile(const std::string& path, const std::vector<uint8_t>& bytes) {
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+        throw std::runtime_error("failed to create file payload: " + path);
+    }
+    if (!bytes.empty()) {
+        out.write(reinterpret_cast<const char*>(bytes.data()),
+                  static_cast<std::streamsize>(bytes.size()));
+        if (!out) {
+            throw std::runtime_error("failed to write file payload: " + path);
+        }
+    }
+}
+
+std::string generatedFilePath(const EndpointRuntime& runtime,
+                              const ScenarioEvent& event) {
+    fs::path dir = fs::temp_directory_path() / "projectultra_ota_sim";
+    fs::create_directories(dir);
+    std::ostringstream name;
+    name << "send_file_" << runtime.name << "_"
+         << static_cast<long long>(event.t_s * 1000.0 + 0.5) << "_"
+         << runtime.sent_files.size() << ".bin";
+    return (dir / name.str()).string();
 }
 
 float rmsOf(const std::vector<float>& samples) {
@@ -317,6 +383,7 @@ bool evaluateAssert(const ScenarioEvent& event,
 }
 
 void executeCommand(const ScenarioEvent& event, EndpointRuntime& runtime,
+                    const Scenario& scenario,
                     SessionLog& log) {
     if (event.action == "connect_to") {
         runtime.station->connect(event.peer_callsign);
@@ -328,6 +395,46 @@ void executeCommand(const ScenarioEvent& event, EndpointRuntime& runtime,
         log.writeNote(runtime.name, event.t_s, "command",
                       "{\"action\":\"send_message\",\"text\":\"" +
                           json::escape(event.text) + "\"}");
+    } else if (event.action == "send_file") {
+        if (!event.file_size_bytes) {
+            throw std::runtime_error("send_file missing size_bytes");
+        }
+
+        std::string path;
+        std::vector<uint8_t> bytes;
+        if (event.filename) {
+            path = resolveInputPath(scenario.source_path, *event.filename);
+            bytes = readBinaryFile(path);
+            if (bytes.size() != *event.file_size_bytes) {
+                std::ostringstream err;
+                err << "send_file filename size mismatch: " << path
+                    << " has " << bytes.size() << " bytes, expected "
+                    << *event.file_size_bytes;
+                throw std::runtime_error(err.str());
+            }
+        } else {
+            bytes = deterministicFilePayload(*event.file_size_bytes);
+            path = generatedFilePath(runtime, event);
+            writeBinaryFile(path, bytes);
+        }
+
+        if (!runtime.station->sendFile(path)) {
+            log.writeNote(runtime.name, event.t_s, "command",
+                          "{\"action\":\"send_file\",\"size_bytes\":" +
+                              std::to_string(bytes.size()) +
+                              ",\"started\":false}");
+            throw std::runtime_error("send_file failed to start for endpoint '" +
+                                     runtime.name + "'");
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(runtime.mutex);
+            runtime.sent_files.push_back(SentFileRecord{path, std::move(bytes)});
+        }
+        log.writeNote(runtime.name, event.t_s, "command",
+                      "{\"action\":\"send_file\",\"size_bytes\":" +
+                          std::to_string(*event.file_size_bytes) +
+                          ",\"path\":\"" + json::escape(path) + "\"}");
     } else if (event.action == "disconnect") {
         runtime.station->disconnect();
         log.writeNote(runtime.name, event.t_s, "command",
@@ -342,7 +449,11 @@ std::optional<float> configureChannel(const Scenario& scenario, SimulatedChannel
     std::optional<float> station_snr_db;
     if (scenario.channel && scenario.channel->snr_db) {
         station_snr_db = static_cast<float>(*scenario.channel->snr_db);
-        channel.configure(*station_snr_db, ChannelType::AWGN);
+        const ChannelType channel_type =
+            scenario.channel->channel_type.value_or(ChannelType::AWGN);
+        channel.configure(*station_snr_db, channel_type);
+    } else if (scenario.channel && scenario.channel->channel_type) {
+        throw std::runtime_error("channel.fading/type requires channel.snr_db");
     }
     if (scenario.channel && scenario.channel->noise_bed) {
         const auto& bed = *scenario.channel->noise_bed;
@@ -479,7 +590,8 @@ int runScenarioV2(const Scenario& scenario) {
                scenario.events[event_index].t_s <= elapsed) {
             const auto& event = scenario.events[event_index];
             if (event.type == ScenarioEvent::Type::Command) {
-                executeCommand(event, endpointFor(endpoints, event.endpoint), log);
+                executeCommand(event, endpointFor(endpoints, event.endpoint),
+                               scenario, log);
             } else if (event.type == ScenarioEvent::Type::Assert) {
                 auto& runtime = endpointFor(endpoints, event.endpoint);
                 if (!evaluateAssert(event, runtime, log, true, false)) {
