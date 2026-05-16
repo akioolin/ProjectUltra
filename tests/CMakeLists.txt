@@ -405,6 +405,18 @@ if(TARGET ota_simulator)
         RUN_SERIAL TRUE
         LABELS regression)
 
+    # Locks in the call-collision NAK fix: both stations probe each other
+    # near-simultaneously, exercise the PROBING + CONNECTING-state acceptance
+    # of inbound CONNECT plus the callsign-lex tiebreaker. Pre-fix would NAK.
+    add_test(NAME OTASimulatorTwoEndpointSimultaneousProbe
+        COMMAND $<TARGET_FILE:ota_simulator> run
+                --scenario tests/fixtures/ota_simulator/two_endpoint_simultaneous_probe.json)
+    set_tests_properties(OTASimulatorTwoEndpointSimultaneousProbe PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        TIMEOUT 120
+        RUN_SERIAL TRUE
+        LABELS regression)
+
     add_test(NAME OTASimulatorTwoEndpointNoisy
         COMMAND $<TARGET_FILE:ota_simulator> run
                 --scenario tests/fixtures/ota_simulator/two_endpoint_noisy_handshake.json)
