@@ -263,5 +263,31 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
     rate = selectOFDMCodeRate(snr_db, fading_index);
 }
 
+// Conservative raw-PHY bitrate estimate per waveform mode. Used by
+// TNC STATS and GUI wire-time estimators that need a single bps
+// number without knowing the active rate/modulation pair. The numbers
+// are the documented "raw PHY (theoretical maximum)" from
+// README.md for the production geometry — they are deliberately
+// pessimistic vs the per-rate ladder, so use selectOFDMCodeRate()
+// when the caller wants per-rate precision.
+inline int estimatedBitrateBpsForMode(WaveformMode mode) {
+    switch (mode) {
+    case WaveformMode::OFDM_NARROW:
+        return 386;   // DQPSK R1/2, 18 data carriers @ 21.429 sym/s
+    case WaveformMode::MC_DPSK:
+        return 375;   // 8 carriers DQPSK R1/4 @ 93.75 sym/s
+    case WaveformMode::OFDM_CHIRP:
+        return 2208;  // DQPSK R1/2, 53 data carriers @ 41.667 sym/s
+    case WaveformMode::OFDM_COX:
+        return 4000;
+    case WaveformMode::OTFS_EQ:
+    case WaveformMode::OTFS_RAW:
+    case WaveformMode::MFSK:
+    case WaveformMode::AUTO:
+        return 0;
+    }
+    return 0;
+}
+
 } // namespace protocol
 } // namespace ultra

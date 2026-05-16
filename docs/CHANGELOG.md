@@ -66,6 +66,33 @@ immediate operator override.
 
 ---
 
+## 2026-05-15: GUI image send presets
+
+**Added:** The GUI send-file path now detects JPEG/PNG inputs and presents
+operator-selectable send presets before queueing image bytes: Thumbnail
+(`320x240`, JPEG q=70), Preview (`640x480`, JPEG q=75), or Full size
+(original file). Non-image files keep the previous direct `sendFile()`
+behavior.
+
+**What changed:** Added `src/gui/image_util.*` with magic-byte sniffing,
+`stb_image_info` metadata reads, and gamma-correct
+`stbir_resize_uint8_srgb` resize plus JPEG encode. Wired the vendored STB
+headers into CMake, added `tests/test_image_util.cpp` with a tiny JPEG
+fixture, and added an ImGui modal around the existing file Send button.
+
+**Why it is properly fixed:** Wire format and `FileTransferController` stay
+unchanged; resized images are written to temp JPEG files and sent through the
+existing byte-transparent file-transfer path. Wire-time estimates use
+`ProtocolEngine::getCurrentBitrate_bps()` and label the 1400 bps fallback as
+an R1/2 Good estimate so operators do not get unmarked pre-connection timing.
+
+**Verification:** `cmake -S . -B build`, `cmake --build build -j4`, and
+`ctest --test-dir build -R ImageUtil --output-on-failure` pass. Native GUI
+manual smoke could not be completed in this sandbox because SDL reports
+`The video driver did not add any displays`.
+
+---
+
 ## 2026-05-15: ota_simulator data-mode auto-ladder fix
 
 **Fixed:** `initial_mode` now selects the MC-DPSK handshake preset without forcing post-CONNECT data mode; `force_data_mode` is default-false parser plumbing and the runner gate is at `tools/ota_simulator/runner_v2.cpp:417-420` (the brief's `:607-608` force calls).

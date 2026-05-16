@@ -265,6 +265,7 @@ add_library(ultra_core STATIC
     src/protocol/protocol_engine.cpp
     src/protocol/file_transfer.cpp
     src/protocol/compression.cpp
+    src/gui/image_util.cpp
     # Local diagnostics and field-report bundle support
     src/diagnostics/audio_ring.cpp
     src/diagnostics/event_buffer.cpp
@@ -296,6 +297,7 @@ target_include_directories(ultra_core PUBLIC
     ${CMAKE_CURRENT_BINARY_DIR}/generated/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src  # For protocol headers
     ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty  # For miniz
+    ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/stb  # Header-only image decode/resize/write
 )
 
 target_link_libraries(ultra_core PUBLIC
