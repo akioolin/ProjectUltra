@@ -236,11 +236,23 @@ public:
         noise_overlay_cursor_b_ = 0;
     }
 
+    void setRxBlackoutCallback(bool is_station_a, std::function<bool()> callback) {
+        std::lock_guard<std::mutex> lock(rx_blackout_mutex_);
+        if (is_station_a) {
+            station_a_rx_blackout_ = std::move(callback);
+        } else {
+            station_b_rx_blackout_ = std::move(callback);
+        }
+    }
+
     // Station A transmits -> goes to B's RX buffer
     void transmitFromA(const std::vector<float>& samples) {
         auto with_cfo = applyTxCFO(samples, cfo_phase_a_to_b_);
         auto processed = applyChannel(with_cfo, channel_a_to_b_.get());
         captureTxIfEnabled(samples, true);
+        if (isStationBInRxBlackout()) {
+            return;
+        }
         std::lock_guard<std::mutex> lock(mutex_b_rx_);
         for (float s : processed) {
             buffer_b_rx_.push(s);
@@ -252,6 +264,9 @@ public:
         auto with_cfo = applyTxCFO(samples, cfo_phase_b_to_a_);
         auto processed = applyChannel(with_cfo, channel_b_to_a_.get());
         captureTxIfEnabled(samples, false);
+        if (isStationAInRxBlackout()) {
+            return;
+        }
         std::lock_guard<std::mutex> lock(mutex_a_rx_);
         for (float s : processed) {
             buffer_a_rx_.push(s);
@@ -332,6 +347,10 @@ private:
     std::mutex mutex_a_rx_, mutex_b_rx_;
     std::queue<float> buffer_a_rx_, buffer_b_rx_;
 
+    mutable std::mutex rx_blackout_mutex_;
+    std::function<bool()> station_a_rx_blackout_;
+    std::function<bool()> station_b_rx_blackout_;
+
     std::atomic<bool> capture_enabled_{false};
     mutable std::mutex capture_mutex_;
     CapturedSignals captured_;
@@ -402,6 +421,24 @@ private:
             }
             ++cursor;
         }
+    }
+
+    bool isStationAInRxBlackout() const {
+        std::function<bool()> callback;
+        {
+            std::lock_guard<std::mutex> lock(rx_blackout_mutex_);
+            callback = station_a_rx_blackout_;
+        }
+        return callback && callback();
+    }
+
+    bool isStationBInRxBlackout() const {
+        std::function<bool()> callback;
+        {
+            std::lock_guard<std::mutex> lock(rx_blackout_mutex_);
+            callback = station_b_rx_blackout_;
+        }
+        return callback && callback();
     }
 
     // Apply TX CFO as an analytic-signal frequency shift with phase continuity.
@@ -489,6 +526,7 @@ public:
     // Optional lifecycle hooks; default no-op.
     virtual bool start() { return true; }
     virtual void stop() {}
+    virtual void setRxBlackoutCallback(std::function<bool()> /*callback*/) {}
 };
 
 /**
@@ -510,9 +548,20 @@ public:
         else               channel_.transmitFromB(samples);
     }
 
+    void setRxBlackoutCallback(std::function<bool()> callback) override {
+        channel_.setRxBlackoutCallback(is_station_a_, std::move(callback));
+    }
+
 private:
     SimulatedChannel& channel_;
     bool is_station_a_;
+};
+
+
+enum class PttState {
+    RX,
+    TX,
+    TRANSITION
 };
 
 
@@ -524,9 +573,11 @@ public:
 
     SimulatedStation(const std::string& callsign, std::unique_ptr<AudioPort> port,
                      OFDMConfigPreset ofdm_config_preset = OFDMConfigPreset::Default,
-                     const MultiCarrierDPSKConfig& mc_dpsk_config = mc_dpsk_presets::robust_mid())
+                     const MultiCarrierDPSKConfig& mc_dpsk_config = mc_dpsk_presets::robust_mid(),
+                     const ConnectionConfig& connection_config = ConnectionConfig{})
         : callsign_(callsign),
-          port_(std::move(port)) {
+          port_(std::move(port)),
+          protocol_(connection_config) {
 
         ofdm_config_preset_ = ofdm_config_preset;
         mc_dpsk_config_ = mc_dpsk_config;
@@ -544,10 +595,18 @@ public:
         createDecoder();
 
         setupCallbacks();
+        if (port_) {
+            port_->setRxBlackoutCallback([this]() {
+                return isInRxBlackout();
+            });
+        }
     }
 
     ~SimulatedStation() {
         stop();
+        if (port_) {
+            port_->setRxBlackoutCallback({});
+        }
     }
 
     void start() {
@@ -695,6 +754,25 @@ public:
     void setRxOverfeedFactor(int n) { rx_overfeed_factor_ = std::clamp(n, 1, 200); }
     void setDecodeDelayMs(int ms) { decode_delay_ms_ = std::clamp(ms, 0, 500); }
     void setRxBatchCallbacks(int n) { rx_batch_callbacks_ = std::clamp(n, 1, 1000); }
+    void setRxSettlingMs(uint32_t ms) {
+        std::lock_guard<std::mutex> lock(ptt_mutex_);
+        rx_settling_ms_ = ms;
+        if (ms == 0 && ptt_state_ == PttState::TRANSITION) {
+            transition_samples_remaining_ = 0;
+            ptt_state_ = PttState::RX;
+        }
+    }
+    PttState pttState() const {
+        std::lock_guard<std::mutex> lock(ptt_mutex_);
+        return ptt_state_;
+    }
+    bool isInRxBlackout() const {
+        std::lock_guard<std::mutex> lock(ptt_mutex_);
+        if (rx_settling_ms_ == 0) {
+            return false;
+        }
+        return ptt_state_ == PttState::TX || ptt_state_ == PttState::TRANSITION;
+    }
 
     // Enable/disable channel interleaving on both TX encoder and RX decoder
     void setChannelInterleave(bool enable) {
@@ -788,6 +866,14 @@ private:
     std::mutex tx_mutex_;
     std::queue<float> tx_queue_;
     uint64_t tx_sample_clock_ = 0;  // Continuous TX capture sample cursor.
+
+    // Explicit half-duplex PTT state. The rx_settling_ms_ == 0 default keeps
+    // legacy simulator full-duplex behavior; nonzero values enable blackout.
+    mutable std::mutex ptt_mutex_;
+    PttState ptt_state_ = PttState::RX;
+    uint64_t tx_in_flight_samples_remaining_ = 0;
+    uint64_t transition_samples_remaining_ = 0;
+    uint32_t rx_settling_ms_ = 0;
 
     // State
     std::atomic<bool> connected_{false};
@@ -1363,6 +1449,59 @@ private:
         return samples;
     }
 
+    uint64_t rxSettlingSamplesLocked() const {
+        return (static_cast<uint64_t>(rx_settling_ms_) *
+                static_cast<uint64_t>(SAMPLE_RATE)) / 1000ULL;
+    }
+
+    void notePttTxQueued(size_t sample_count) {
+        if (sample_count == 0) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(ptt_mutex_);
+        tx_in_flight_samples_remaining_ += static_cast<uint64_t>(sample_count);
+        transition_samples_remaining_ = 0;
+        ptt_state_ = PttState::TX;
+    }
+
+    void notePttTxDrained(size_t drained_samples) {
+        if (drained_samples == 0) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(ptt_mutex_);
+        if (ptt_state_ != PttState::TX) {
+            return;
+        }
+        const uint64_t drained = static_cast<uint64_t>(drained_samples);
+        if (drained >= tx_in_flight_samples_remaining_) {
+            tx_in_flight_samples_remaining_ = 0;
+        } else {
+            tx_in_flight_samples_remaining_ -= drained;
+        }
+        if (tx_in_flight_samples_remaining_ == 0) {
+            transition_samples_remaining_ = rxSettlingSamplesLocked();
+            ptt_state_ = transition_samples_remaining_ > 0 ? PttState::TRANSITION
+                                                           : PttState::RX;
+        }
+    }
+
+    void advancePttTransition(size_t elapsed_samples) {
+        if (elapsed_samples == 0) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(ptt_mutex_);
+        if (ptt_state_ != PttState::TRANSITION) {
+            return;
+        }
+        const uint64_t elapsed = static_cast<uint64_t>(elapsed_samples);
+        if (elapsed >= transition_samples_remaining_) {
+            transition_samples_remaining_ = 0;
+            ptt_state_ = PttState::RX;
+        } else {
+            transition_samples_remaining_ -= elapsed;
+        }
+    }
+
     void setupCallbacks() {
         // TX callback - encode and modulate frame
         protocol_.setTxDataCallback([this](const Bytes& data) {
@@ -1497,6 +1636,7 @@ private:
 
     void queueTx(const std::vector<float>& samples, const std::string& label = std::string()) {
         if (port_ && !port_->shouldPaceTxInStationLoop()) {
+            notePttTxQueued(samples.size());
             port_->queueTx(samples);
             if (!label.empty()) {
                 LOG_MODEM(INFO, "[%s] TX direct: %s samples=%zu",
@@ -1512,6 +1652,7 @@ private:
         queued_before = tx_queue_.size();
         start_sample = tx_sample_clock_ + queued_before;
         end_sample = start_sample + samples.size();
+        notePttTxQueued(samples.size());
         for (float s : samples) {
             tx_queue_.push(s);
         }
@@ -1533,6 +1674,7 @@ private:
 
         while (running_) {
             // ===== AUDIO CALLBACK START =====
+            advancePttTransition(SAMPLES_PER_CALLBACK);
 
             // 1. READ RX - get samples from audio port (virtual channel or soundcard)
             std::vector<float> rx_samples = port_
@@ -1560,6 +1702,7 @@ private:
             // output callback is already the hardware clock.
             std::vector<float> tx_samples(SAMPLES_PER_CALLBACK, 0.0f);
             size_t tx_pending = 0;
+            size_t tx_drained_samples = 0;
             const bool pace_tx = !port_ || port_->shouldPaceTxInStationLoop();
             if (pace_tx) {
                 {
@@ -1569,13 +1712,17 @@ private:
                     for (int i = 0; i < SAMPLES_PER_CALLBACK && !tx_queue_.empty(); i++) {
                         tx_samples[i] = tx_queue_.front();
                         tx_queue_.pop();
+                        ++tx_drained_samples;
                     }
                 }
 
                 // 4. SEND TX TO AUDIO PORT (virtual channel only; hardware TX
                 // is queued directly in queueTx() above)
                 if (port_) port_->queueTx(tx_samples);
+            } else {
+                tx_drained_samples = SAMPLES_PER_CALLBACK;
             }
+            notePttTxDrained(tx_drained_samples);
 
             // ===== AUDIO CALLBACK END =====
 

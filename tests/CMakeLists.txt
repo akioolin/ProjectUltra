@@ -348,6 +348,24 @@ if(TARGET ultra_sim_station)
     set_tests_properties(ChannelIdleNoiseSNRCalibration PROPERTIES
         TIMEOUT 90
         LABELS regression)
+
+    add_executable(test_pong_tx_race_with_ptt_model
+        test_pong_tx_race_with_ptt_model.cpp)
+    target_include_directories(test_pong_tx_race_with_ptt_model PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
+    )
+    target_link_libraries(test_pong_tx_race_with_ptt_model PRIVATE ultra_sim_station)
+    add_test(NAME PongTxRaceWithPttBugRepro
+        COMMAND test_pong_tx_race_with_ptt_model bug_repro)
+    add_test(NAME PongTxRaceWithPttFixVerified
+        COMMAND test_pong_tx_race_with_ptt_model fix_verified)
+    set_tests_properties(
+        PongTxRaceWithPttBugRepro
+        PongTxRaceWithPttFixVerified
+        PROPERTIES
+        TIMEOUT 45
+        LABELS regression)
 else()
     message(STATUS "ChannelSNRCalibration disabled: ultra_sim_station target is not built")
 endif()
