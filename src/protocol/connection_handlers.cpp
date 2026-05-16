@@ -74,12 +74,69 @@ void Connection::sendFullConnect() {
     transmitFrame(connect_data);
 }
 
+void Connection::cancelOutboundProbe() {
+    LOG_MODEM(INFO, "[CONNECT] Outbound probe canceled by inbound CONNECT");
+    ping_retry_count_ = 0;
+    timeout_remaining_ms_ = 0;
+    remote_call_.clear();
+    remote_hash_ = 0;
+    pending_remote_call_.clear();
+    pending_remote_hash_ = 0;
+    state_ = ConnectionState::DISCONNECTED;
+}
+
+void Connection::cancelOutboundConnect() {
+    LOG_MODEM(INFO, "[CONNECT] Outbound CONNECT canceled by inbound CONNECT");
+    connect_retry_count_ = 0;
+    timeout_remaining_ms_ = 0;
+    remote_call_.clear();
+    remote_hash_ = 0;
+    pending_remote_call_.clear();
+    pending_remote_hash_ = 0;
+    state_ = ConnectionState::DISCONNECTED;
+}
+
 // =============================================================================
 // CONNECT FRAME HANDLERS
 // =============================================================================
 
 void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string& src_call) {
-    if (state_ != ConnectionState::DISCONNECTED) {
+    if (state_ == ConnectionState::PROBING) {
+        LOG_MODEM(INFO,
+                  "Connection: Inbound CONNECT during PROBING - accepting "
+                  "(call collision; aborting local probe)");
+        cancelOutboundProbe();
+    } else if (state_ == ConnectionState::CONNECTING) {
+        if (src_call.empty()) {
+            LOG_MODEM(WARN, "Connection: Simultaneous CONNECT without callsign, rejecting");
+            auto nak = v2::ConnectFrame::makeConnectNakByHash(local_call_, frame.src_hash);
+            transmitFrame(nak.serialize());
+            return;
+        }
+
+        if (local_call_ < src_call) {
+            LOG_MODEM(INFO,
+                      "Connection: Simultaneous CONNECT, local %s < remote %s, "
+                      "keeping our connect attempt",
+                      local_call_.c_str(), src_call.c_str());
+            return;
+        }
+
+        if (local_call_ > src_call) {
+            LOG_MODEM(INFO,
+                      "Connection: Simultaneous CONNECT, local %s > remote %s, "
+                      "abandoning local and accepting inbound",
+                      local_call_.c_str(), src_call.c_str());
+            cancelOutboundConnect();
+        } else {
+            LOG_MODEM(WARN,
+                      "Connection: Simultaneous CONNECT with identical callsign %s, rejecting",
+                      local_call_.c_str());
+            auto nak = v2::ConnectFrame::makeConnectNakByHash(local_call_, frame.src_hash);
+            transmitFrame(nak.serialize());
+            return;
+        }
+    } else if (state_ != ConnectionState::DISCONNECTED) {
         LOG_MODEM(WARN, "Connection: Rejecting CONNECT (busy, state=%s)",
                   connectionStateToString(state_));
         auto nak = v2::ConnectFrame::makeConnectNakByHash(local_call_, frame.src_hash);

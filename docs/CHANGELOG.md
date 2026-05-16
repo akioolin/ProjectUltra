@@ -10,6 +10,31 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-15: CONNECT call-collision handling
+
+**Fixed:** Inbound CONNECT frames arriving while the local station was in
+`PROBING` were rejected as "busy" at
+`src/protocol/connection_handlers.cpp:103-145`, producing CONNECT_NAK even
+though the outbound probe was just the symmetric call attempt. `handleConnect`
+now cancels the outbound probe with `cancelOutboundProbe()` at
+`src/protocol/connection_handlers.cpp:77-86` and falls through to the normal
+responder path.
+
+**Fixed:** The true simultaneous CONNECT race now resolves deterministically by
+callsign order at `src/protocol/connection_handlers.cpp:109-138`. The
+lexicographically lower callsign keeps its outbound CONNECT attempt and ignores
+the inbound CONNECT; the higher callsign cancels its outbound CONNECT with
+`cancelOutboundConnect()` at `src/protocol/connection_handlers.cpp:88-97` and
+accepts as responder. No wire format, PING/PONG, CONNECT encode/decode, PHY, or
+modem path changed.
+
+**Verification:** Added `ConnectionCallCollision` in
+`tests/test_connection_call_collision.cpp` covering the live PROBING collision
+and the simultaneous CONNECT tiebreaker. `cmake --build build -j4` passed and
+`ctest --test-dir build --output-on-failure -j4` passed `53/53`.
+
+---
+
 ## 2026-05-15: ota_simulator data-mode auto-ladder fix
 
 **Fixed:** `initial_mode` now selects the MC-DPSK handshake preset without forcing post-CONNECT data mode; `force_data_mode` is default-false parser plumbing and the runner gate is at `tools/ota_simulator/runner_v2.cpp:417-420` (the brief's `:607-608` force calls).
