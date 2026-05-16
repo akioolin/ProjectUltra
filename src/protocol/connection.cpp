@@ -132,6 +132,7 @@ Connection::Connection(const ConnectionConfig& config)
     , arq_(config.arq)
 {
     ultra::gui::startupTrace("Connection", "ctor-enter");
+    config_.pong_tx_delay_ms = std::min<uint32_t>(config_.pong_tx_delay_ms, 2000u);
     data_frame_cw_count_ = v2::sanitizeFixedFrameCodewords(config_.fixed_frame_codewords);
     config_.fixed_frame_codewords = data_frame_cw_count_;
     arq_.setFixedFrameCodewords(data_frame_cw_count_);
@@ -238,6 +239,8 @@ bool Connection::connect(const std::string& remote_call) {
     }
 
     LOG_MODEM(INFO, "Connection: Connecting to %s (starting with PING probe)", remote_call_.c_str());
+
+    cancelPendingPongCallback();
 
     // Use current connect_waveform_ (can be pre-set via setInitialConnectWaveform)
     // Notify the modem of the waveform to use
@@ -1356,6 +1359,19 @@ void Connection::updateAdaptiveModeController(uint32_t elapsed_ms) {
 void Connection::tick(uint32_t elapsed_ms) {
     soft_combine_harq_.tick(elapsed_ms);
 
+    if (pending_pong_callback_) {
+        if (elapsed_ms >= pong_callback_delay_remaining_ms_) {
+            pending_pong_callback_ = false;
+            pong_callback_delay_remaining_ms_ = 0;
+            if (state_ == ConnectionState::DISCONNECTED && on_ping_received_) {
+                LOG_MODEM(INFO, "Connection: Firing deferred PONG TX callback");
+                on_ping_received_();
+            }
+        } else {
+            pong_callback_delay_remaining_ms_ -= elapsed_ms;
+        }
+    }
+
     switch (state_) {
         case ConnectionState::PROBING:
             // Fast presence check via PING/PONG
@@ -1552,6 +1568,14 @@ void Connection::transmitFrame(const Bytes& frame_data) {
     if (on_transmit_) {
         on_transmit_(frame_data);
     }
+}
+
+void Connection::cancelPendingPongCallback() {
+    if (pending_pong_callback_) {
+        LOG_MODEM(DEBUG, "Connection: Cancelling deferred PONG TX callback");
+    }
+    pending_pong_callback_ = false;
+    pong_callback_delay_remaining_ms_ = 0;
 }
 
 void Connection::configureArqForCurrentDataMode() {
@@ -1797,6 +1821,8 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
 }
 
 void Connection::enterConnected() {
+    cancelPendingPongCallback();
+
     state_ = ConnectionState::CONNECTED;
     connected_time_ms_ = 0;
     if (is_initiator_ || handshake_confirmed_) {
@@ -1844,6 +1870,7 @@ void Connection::enterDisconnected(const std::string& reason) {
     connect_ack_retx_remaining_ = 0;
     data_ladder_rung_id_ = LadderRungId::UNKNOWN;
     pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
+    cancelPendingPongCallback();
     arq_callback_defer_refill_ = false;
     deferred_file_refill_ = false;
     deferred_fragment_refill_ = false;
@@ -2020,6 +2047,7 @@ void Connection::reset() {
     mode_change_timeout_ms_ = 0;
     mode_change_retry_count_ = 0;
     pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
+    cancelPendingPongCallback();
     data_modulation_ = Modulation::DQPSK;
     data_code_rate_ = CodeRate::R1_4;
     data_ladder_rung_id_ = LadderRungId::UNKNOWN;
