@@ -366,6 +366,21 @@ if(TARGET ultra_sim_station)
         PROPERTIES
         TIMEOUT 45
         LABELS regression)
+
+    add_executable(test_session_ptt_sweep test_session_ptt_sweep.cpp)
+    target_include_directories(test_session_ptt_sweep PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
+    )
+    target_link_libraries(test_session_ptt_sweep PRIVATE ultra_sim_station)
+    foreach(rx_settling_ms 0 100 200 300 500 700 1000 1500 2000)
+        add_test(NAME SessionPttSweep_${rx_settling_ms}ms
+            COMMAND test_session_ptt_sweep ${rx_settling_ms})
+        set_tests_properties(SessionPttSweep_${rx_settling_ms}ms PROPERTIES
+            TIMEOUT 75
+            LABELS regression
+            RUN_SERIAL TRUE)
+    endforeach()
 else()
     message(STATUS "ChannelSNRCalibration disabled: ultra_sim_station target is not built")
 endif()
