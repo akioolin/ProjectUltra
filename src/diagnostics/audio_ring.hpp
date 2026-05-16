@@ -53,8 +53,12 @@ private:
 class AudioRing {
 public:
     static constexpr int kDefaultSampleRate = 48000;
-    static constexpr int kDefaultWindowSeconds = 120;
-    static constexpr size_t kHardCapBytes = 64u * 1024u * 1024u;
+    // Pre-alpha: bias toward capturing full multi-minute QSOs (handshake
+    // retries + 20 KB file transfer + cooldown) so offline replay/spectrogram
+    // analysis has the whole story, not just the last 2 min. Drop back to a
+    // smaller window before operator-facing release.
+    static constexpr int kDefaultWindowSeconds = 600;          // 10 min/ring
+    static constexpr size_t kHardCapBytes = 256u * 1024u * 1024u;  // 256 MB cap → up to ~22 min/ring
 
     AudioRing() = default;
 
