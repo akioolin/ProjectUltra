@@ -48,7 +48,7 @@ void check_channel(::ChannelType channel_type) {
         CHECK(std::isfinite(r.measured_snr_db), "measured SNR should be finite");
         CHECK(std::abs(r.delta_db) <= kToleranceDb,
               std::string(channelSNRProbeName(channel_type)) +
-                  " configured SNR should match measured broadband SNR");
+                  " configured SNR should match measured in-band SNR");
     }
 }
 

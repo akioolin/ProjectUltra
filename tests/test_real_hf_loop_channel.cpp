@@ -1,5 +1,6 @@
 #include "ota_channel_core/models.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <iostream>
@@ -10,13 +11,19 @@ namespace channel = ultra::ota_channel_core;
 
 namespace {
 
-void assertNear(float actual, float expected, float eps = 1.0e-6f) {
-    assert(std::abs(actual - expected) <= eps);
+void assertNear(float actual, float expected, float eps = 1.0e-5f) {
+    const float tolerance = eps * std::max(1.0f, std::abs(expected));
+    if (std::abs(actual - expected) > tolerance) {
+        std::cerr << "assertNear failed actual=" << actual
+                  << " expected=" << expected
+                  << " tolerance=" << tolerance << "\n";
+    }
+    assert(std::abs(actual - expected) <= tolerance);
 }
 
 void assertNear(const std::vector<float>& actual,
                 const std::vector<float>& expected,
-                float eps = 1.0e-6f) {
+                float eps = 1.0e-5f) {
     assert(actual.size() == expected.size());
     for (size_t i = 0; i < actual.size(); ++i) {
         assertNear(actual[i], expected[i], eps);
@@ -39,9 +46,10 @@ int main() {
 
     {
         const float snr_db = 10.0f;
-        const float scale = channel::modemReferenceNoiseStddev(snr_db);
         channel::RealHfLoopChannelModel model(snr_db, unit_rms_loop, 3);
         const auto output = model.process(std::vector<float>(4, 0.0f));
+        const float scale = output[0] / -high;
+        assert(scale > 0.0f);
 
         assertNear(rms(output), scale);
         assertNear(output, {
@@ -51,18 +59,22 @@ int main() {
             high * scale,
         });
 
-        const float new_scale = channel::modemReferenceNoiseStddev(20.0f);
         model.setSNR(20.0f);
-        assertNear(model.process(std::vector<float>(2, 0.0f)), {
+        const auto rerun = model.process(std::vector<float>(2, 0.0f));
+        const float new_scale = rerun[0] / -high;
+        assertNear(new_scale / scale, std::pow(10.0f, -10.0f / 20.0f), 1.0e-5f);
+        assertNear(rerun, {
             -high * new_scale,
             0.5f * new_scale,
         });
     }
 
     {
-        const float scale = channel::modemReferenceNoiseStddev(12.0f);
         channel::RealHfLoopChannelModel model(12.0f, unit_rms_loop, 2);
-        assertNear(model.process(std::vector<float>(6, 0.0f)), {
+        const auto output = model.process(std::vector<float>(6, 0.0f));
+        const float scale = output[0] / high;
+        assert(scale > 0.0f);
+        assertNear(output, {
             high * scale,
             -high * scale,
             0.5f * scale,

@@ -13,9 +13,7 @@ inline constexpr double kModemReferencePower =
 
 // Equivalent noise bandwidth of the 101-tap 50-2950 Hz receive FIR used by
 // IdleNoiseSNREstimator. White broadband noise at the channel input leaves this
-// fraction of its power inside the modem band. The operator/rate-selection SNR
-// convention is in-band SNR, so older broadband-equivalent estimates add this
-// correction before publication.
+// fraction of its power inside the modem band.
 inline constexpr double kModemInBandNoisePowerFraction = 0.10858718;
 inline constexpr double kModemBroadbandToInBandSnrOffsetDb = 9.64221445;
 
@@ -24,9 +22,21 @@ inline float broadbandToInBandSnrDb(float broadband_snr_db) {
            static_cast<float>(kModemBroadbandToInBandSnrOffsetDb);
 }
 
-inline float modemReferenceNoiseStddev(float snr_db) {
+inline float inBandToBroadbandSnrDb(float in_band_snr_db) {
+    return in_band_snr_db -
+           static_cast<float>(kModemBroadbandToInBandSnrOffsetDb);
+}
+
+inline float modemReferenceBroadbandNoiseStddev(float broadband_snr_db) {
     return kModemReferenceRms *
-           std::pow(10.0f, -snr_db / 20.0f);
+           std::pow(10.0f, -broadband_snr_db / 20.0f);
+}
+
+// Configured channel SNR is operator-facing in-band SNR. For white noise
+// generated over the full audio stream, size the broadband sigma so the
+// receiver FIR leaves the requested in-band noise power.
+inline float modemReferenceNoiseStddev(float snr_db) {
+    return modemReferenceBroadbandNoiseStddev(inBandToBroadbandSnrDb(snr_db));
 }
 
 }  // namespace ultra::sim

@@ -801,9 +801,9 @@ private:
 
     void applyAwgn(std::vector<float>& samples) {
         // Continuous AWGN sized to the calibrated modem-reference RMS so
-        // --snr means the same broadband SNR as in SimulatedChannel and
-        // the GUI simulator. Was previously addAWGN(activeSignalPower)
-        // which made silence between bursts artificially quiet.
+        // --snr means the same in-band SNR as SimulatedChannel and the GUI
+        // simulator. Was previously addAWGN(activeSignalPower), which made
+        // silence between bursts artificially quiet.
         const float sigma =
             ultra::sim::modemReferenceNoiseStddev(cfg_.snr_db);
         std::normal_distribution<float> noise(0.0f, sigma);

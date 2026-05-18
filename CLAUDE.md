@@ -203,10 +203,11 @@ Interpretation of the 2026-04-29 robustness work:
   sized from `StreamingEncoder::encodePing()` RMS `0.3180724` measured on
   2026-05-14. Older simulator runs with "AWGN SNR=X dB" used an artificially
   quiet silence model and must not be used as calibrated floor evidence.
-- SNR convention: operator-facing idle and OFDM residual meters report receiver
-  in-band SNR. For AWGN/Watterson historical configured-SNR cells, in-band is
-  approximately configured +9.6 dB. Forced-rate captures below keep the legacy
-  configured value in parentheses where useful.
+- SNR convention: operator-facing channel knobs, idle meter, and OFDM residual
+  meter all use receiver in-band SNR. For pre-round-5 AWGN/Watterson logs,
+  legacy configured-SNR cells map to approximately configured +9.6 dB in-band;
+  forced-rate captures below keep the legacy configured value in parentheses
+  where useful.
 - Two-endpoint continuous-AWGN v2 QSO sweep (DQPSK R1/4 auto): in-band +29.6,
   +24.6, +19.6, +14.6, +9.6, +6.6, and +4.6 dB pass; +1.6 dB fails
   connection/message/disconnect assertions. One-dB refinement: +3.6 dB passes,

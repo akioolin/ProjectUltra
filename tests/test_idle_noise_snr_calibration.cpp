@@ -188,13 +188,9 @@ void checkChannel(
     const std::vector<float> snrs = {-6.0f, 0.0f, 6.0f, 12.0f, 18.0f, 24.0f};
     const std::vector<uint32_t> seeds = {1u, 2u, 3u, 4u, 5u};
 
-    // New convention: the idle meter reports in-band SNR. The old broadband
-    // assertions expected AWGN measured ~= configured SNR, so AWGN SNR=12 used
-    // to expect about 12 dB. With this 50-2950 Hz FIR, true in-band AWGN is
-    // about 12 - 10*log10(0.1086) = 21.6 dB. For the real_hf_loop capture, the
-    // reference is the measured FIR-band power of the capture slice itself; in
-    // this matrix SNR=12 is about 15.0 dB, while the old white-noise divide
-    // would have reported about 5.4 dB for the same slice.
+    // The channel knob and idle meter are both in-band. The reference below
+    // independently filters the generated noise and verifies the estimator is
+    // still reporting the true FIR-band noise power.
     for (float snr_db : snrs) {
         double reported_sum = 0.0;
         double true_sum = 0.0;

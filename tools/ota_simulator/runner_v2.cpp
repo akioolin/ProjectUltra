@@ -520,7 +520,7 @@ std::optional<float> configureChannel(const Scenario& scenario, SimulatedChannel
     std::optional<float> station_snr_db;
     if (scenario.channel && scenario.channel->snr_db) {
         const float configured_snr_db = static_cast<float>(*scenario.channel->snr_db);
-        station_snr_db = sim::broadbandToInBandSnrDb(configured_snr_db);
+        station_snr_db = configured_snr_db;
         const ChannelType channel_type =
             scenario.channel->channel_type.value_or(ChannelType::AWGN);
         channel.configure(configured_snr_db, channel_type);

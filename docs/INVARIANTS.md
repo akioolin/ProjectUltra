@@ -21,8 +21,10 @@ samples. Do not add synthetic AWGN on both TX and RX.
 
 **Reference:** AWGN standard deviation is computed from the fixed modem TX
 reference RMS measured from `StreamingEncoder::encodePing()` output
-(`0.3180724` on 2026-05-14), so configured `snr_db` means TX reference power
-relative to continuous broadband noise power.
+(`0.3180724` on 2026-05-14). Configured `snr_db` is operator-facing in-band
+SNR: the generated broadband white-noise sigma is increased by
+`1 / sqrt(kModemInBandNoisePowerFraction)` so the 50-2950 Hz receive FIR leaves
+the requested in-band noise power.
 
 **Why:** Real HF receivers hear band noise continuously. A simulator that is
 quiet between bursts lets sync, PING detection, SNR estimation, and decode

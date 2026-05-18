@@ -186,8 +186,7 @@ void checkChannel(::ChannelType channel, float tolerance_db) {
         }
 
         const float measured = static_cast<float>(sum / static_cast<double>(count));
-        const float expected = snr_db +
-            static_cast<float>(ultra::sim::kModemBroadbandToInBandSnrOffsetDb);
+        const float expected = snr_db;
         const float delta = measured - expected;
         std::cout << std::fixed << std::setprecision(2)
                   << channelName(channel)

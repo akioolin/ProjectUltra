@@ -26,6 +26,85 @@ constexpr float kPi = 3.14159265358979323846f;
 constexpr uint16_t kWavFormatPcm = 1;
 constexpr uint16_t kRealHfLoopChannels = 1;
 constexpr uint16_t kRealHfLoopBitsPerSample = 16;
+constexpr size_t kIdleSnrBandpassTaps = 101;
+constexpr float kIdleSnrBandLowHz = 50.0f;
+constexpr float kIdleSnrBandHighHz = 2950.0f;
+constexpr size_t kRealHfLoopPowerProbeSamples =
+    static_cast<size_t>(kDefaultSampleRate) * 10u;
+
+float modemReferenceBroadbandNoiseStddev(float broadband_snr_db) {
+    return kModemReferenceRms *
+           std::pow(10.0f, -broadband_snr_db / 20.0f);
+}
+
+std::vector<float> modemBandpassFirCoefficients() {
+    std::vector<float> coeffs(kIdleSnrBandpassTaps);
+    const float fc_low = kIdleSnrBandLowHz / static_cast<float>(kDefaultSampleRate);
+    const float fc_high = kIdleSnrBandHighHz / static_cast<float>(kDefaultSampleRate);
+    const int midpoint = static_cast<int>((kIdleSnrBandpassTaps - 1) / 2);
+
+    for (int n = 0; n < static_cast<int>(kIdleSnrBandpassTaps); ++n) {
+        if (n == midpoint) {
+            coeffs[static_cast<size_t>(n)] = 2.0f * (fc_high - fc_low);
+        } else {
+            const float x = kPi * static_cast<float>(n - midpoint);
+            coeffs[static_cast<size_t>(n)] =
+                (std::sin(2.0f * fc_high * x) -
+                 std::sin(2.0f * fc_low * x)) / x;
+        }
+        const float w = 2.0f * kPi * static_cast<float>(n) /
+                        static_cast<float>(kIdleSnrBandpassTaps - 1);
+        coeffs[static_cast<size_t>(n)] *=
+            0.42f - 0.5f * std::cos(w) + 0.08f * std::cos(2.0f * w);
+    }
+    return coeffs;
+}
+
+float processFirSample(float sample,
+                       const std::vector<float>& coeffs,
+                       std::vector<float>& delay_line,
+                       size_t& delay_idx) {
+    delay_line[delay_idx] = sample;
+
+    float out = 0.0f;
+    size_t j = delay_idx;
+    for (size_t i = 0; i < coeffs.size(); ++i) {
+        out += coeffs[i] * delay_line[j];
+        if (j == 0) {
+            j = coeffs.size();
+        }
+        --j;
+    }
+
+    delay_idx = (delay_idx + 1) % coeffs.size();
+    return out;
+}
+
+double measureLoopInBandPower(std::span<const float> loop) {
+    if (loop.empty()) {
+        return 0.0;
+    }
+
+    const std::vector<float> coeffs = modemBandpassFirCoefficients();
+    std::vector<float> delay_line(coeffs.size(), 0.0f);
+    size_t delay_idx = 0;
+
+    const size_t measurement_samples =
+        std::min(std::max(loop.size(), static_cast<size_t>(kDefaultSampleRate)),
+                 kRealHfLoopPowerProbeSamples);
+    const size_t warmup_samples = coeffs.size();
+    double sum_sq = 0.0;
+    for (size_t i = 0; i < warmup_samples + measurement_samples; ++i) {
+        const float filtered = processFirSample(loop[i % loop.size()],
+                                                coeffs,
+                                                delay_line,
+                                                delay_idx);
+        if (i >= warmup_samples) {
+            sum_sq += static_cast<double>(filtered) * static_cast<double>(filtered);
+        }
+    }
+    return sum_sq / static_cast<double>(measurement_samples);
+}
 
 void analyticFrequencyShift(std::vector<float>& samples,
                             float cfo_hz,
@@ -119,7 +198,8 @@ std::runtime_error realHfLoopWavError(std::string_view path,
 }  // namespace
 
 float modemReferenceNoiseStddev(float snr_db) {
-    return kModemReferenceRms * std::pow(10.0f, -snr_db / 20.0f);
+    return modemReferenceBroadbandNoiseStddev(
+        snr_db - static_cast<float>(kModemBroadbandToInBandSnrOffsetDb));
 }
 
 const char* channelTypeName(ChannelType type) {
@@ -287,6 +367,9 @@ RealHfLoopChannelModel::RealHfLoopChannelModel(
             seed_for_phase % static_cast<uint64_t>(loop_->size()));
         position_ = start_position_;
     }
+    if (loop_ && !loop_->empty()) {
+        loop_in_band_power_ = measureLoopInBandPower(*loop_);
+    }
     setSNR(snr_db);
 }
 
@@ -295,7 +378,15 @@ void RealHfLoopChannelModel::reset() {
 }
 
 void RealHfLoopChannelModel::setSNR(float snr_db) {
-    scale_ = modemReferenceNoiseStddev(snr_db);
+    if (!loop_ || loop_->empty() ||
+        !(loop_in_band_power_ > std::numeric_limits<double>::min())) {
+        scale_ = 0.0f;
+        return;
+    }
+    const double target_in_band_power =
+        kModemReferencePower * std::pow(10.0, -static_cast<double>(snr_db) / 10.0);
+    scale_ = static_cast<float>(
+        std::sqrt(target_in_band_power / loop_in_band_power_));
 }
 
 void RealHfLoopChannelModel::process(std::span<const float> input,
