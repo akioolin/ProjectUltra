@@ -4,18 +4,27 @@
 // Separated for cleaner organization and potential reuse
 
 #include "protocol/frame_v2.hpp"  // WaveformMode, FrameType
+#include "ultra/types.hpp"
 #include <queue>
 #include <mutex>
 #include <condition_variable>
 #include <chrono>
 #include <atomic>
+#include <cmath>
 
 namespace ultra {
 namespace gui {
 
 // Statistics for display (local to modem engine)
 struct LoopbackStats {
-    float snr_db = 0.0f;
+    float snr_db = 0.0f;  // Consumer-facing routed value; see snr_source.
+    SNRSource snr_source = SNRSource::NONE;
+    bool has_idle_in_band_snr_db = false;
+    float idle_in_band_snr_db = 0.0f;
+    bool has_ofdm_broadband_snr_db = false;
+    float ofdm_broadband_snr_db = 0.0f;
+    float ofdm_internal_snr_db = 0.0f;
+    float sync_quality_db = 0.0f;
     float ber = 0.0f;
     int frames_sent = 0;
     int frames_received = 0;
@@ -23,6 +32,22 @@ struct LoopbackStats {
     bool synced = false;
     int throughput_bps = 0;
 };
+
+struct OperatorSNRDisplay {
+    bool valid = false;
+    float snr_db = 0.0f;
+    SNRSource source = SNRSource::NONE;
+};
+
+inline OperatorSNRDisplay selectOperatorSNRDisplay(const LoopbackStats& stats) {
+    if (stats.has_idle_in_band_snr_db && std::isfinite(stats.idle_in_band_snr_db)) {
+        return {true, stats.idle_in_band_snr_db, SNRSource::IDLE_IN_BAND};
+    }
+    if (stats.has_ofdm_broadband_snr_db && std::isfinite(stats.ofdm_broadband_snr_db)) {
+        return {true, stats.ofdm_broadband_snr_db, SNRSource::OFDM_BROADBAND};
+    }
+    return {};
+}
 
 // ============================================================================
 // RX ARCHITECTURE: Clean separation of concerns

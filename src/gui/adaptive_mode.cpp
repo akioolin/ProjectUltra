@@ -17,9 +17,9 @@ void AdaptiveModeController::reset() {
 }
 
 void AdaptiveModeController::recommendMode(float snr_db, Modulation& mod, CodeRate& rate) {
-    // Thresholds calibrated for pilot-based SNR measurement
-    // Our pilot SNR is higher than channel SNR due to measurement methodology
-    // These thresholds are based on empirical testing
+    // Thresholds calibrated for the routed consumer-facing SNR convention.
+    // The source must travel with snr_db (for example ofdm_broadband vs
+    // idle_in_band); this legacy controller preserves its existing numbers.
     //
     // Pilot SNR thresholds (approximate mapping):
     //   Pilot > 38 dB: Excellent channel, use highest modes

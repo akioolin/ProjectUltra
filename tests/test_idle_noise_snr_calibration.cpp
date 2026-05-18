@@ -168,10 +168,11 @@ EstimateResult measureIdleSNR(
 
     EstimateResult result;
     result.valid = snapshot.valid;
-    result.snr_db = snapshot.snr_db;
-    result.latest_snr_db = snapshot.latest_instant_snr_db;
+    result.snr_db = snapshot.idle_in_band_snr_db;
+    result.latest_snr_db = snapshot.latest_instant_idle_in_band_snr_db;
     result.true_in_band_snr_db = reference.smoothed_snr_db;
-    result.delta_db = static_cast<double>(snapshot.snr_db) - reference.smoothed_snr_db;
+    result.delta_db = static_cast<double>(snapshot.idle_in_band_snr_db) -
+                      reference.smoothed_snr_db;
     result.in_band_noise_rms = snapshot.normalized_noise_rms;
     result.fir_energy = snapshot.fir_energy;
     result.enbw_hz = snapshot.equivalent_noise_bandwidth_hz;

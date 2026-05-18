@@ -231,13 +231,19 @@ public:
     CodeRate getDataCodeRate() const { return data_code_rate_; }
 
     // Set measured SNR from modem layer (call this when decoding frames)
-    void setMeasuredSNR(float snr_db) { measured_snr_db_ = snr_db; }
+    void setMeasuredSNR(float snr_db, SNRSource source = SNRSource::NONE) {
+        measured_snr_db_ = snr_db;
+        measured_snr_source_ = source;
+    }
     float getMeasuredSNR() const { return measured_snr_db_; }
+    SNRSource getMeasuredSNRSource() const { return measured_snr_source_; }
 
     // Set channel quality including fading detection
     // fading_index: combined freq_cv + temporal_cv, where > 0.65 indicates significant fading
-    void setChannelQuality(float snr_db, float fading_index) {
+    void setChannelQuality(float snr_db, float fading_index,
+                           SNRSource source = SNRSource::NONE) {
         measured_snr_db_ = snr_db;
+        measured_snr_source_ = source;
         fading_index_ = fading_index;
     }
     float getFadingIndex() const { return fading_index_; }
@@ -293,7 +299,8 @@ private:
     int data_frame_cw_count_ = v2::kDefaultFixedFrameCodewords;
     LadderRungId data_ladder_rung_id_ = LadderRungId::UNKNOWN;
     uint16_t mode_change_seq_ = 0;  // Sequence number for MODE_CHANGE frames
-    float measured_snr_db_ = 15.0f;  // SNR measured by modem (updated via setMeasuredSNR)
+    float measured_snr_db_ = 15.0f;  // Routed SNR measured by modem (see source).
+    SNRSource measured_snr_source_ = SNRSource::NONE;
     float fading_index_ = 0.0f;      // Fading index (0-2, > 0.65 = significant fading)
 
     // MODE_CHANGE timeout/retry tracking

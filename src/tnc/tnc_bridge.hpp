@@ -52,6 +52,7 @@ public:
     virtual protocol::ConnectionState getState() const = 0;
     virtual std::string getRemoteCallsign() const = 0;
     virtual float getMeasuredSNR() const = 0;
+    virtual SNRSource getMeasuredSNRSource() const = 0;
     virtual protocol::WaveformMode getNegotiatedMode() const = 0;
     virtual void setPreferredMode(protocol::WaveformMode mode) = 0;
     virtual protocol::ConnectionStats getStats() const = 0;

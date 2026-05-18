@@ -164,11 +164,13 @@ public:
     // --- Adaptive Data Mode ---
 
     // Set measured SNR from modem (used for adaptive mode selection)
-    void setMeasuredSNR(float snr_db);
+    void setMeasuredSNR(float snr_db, SNRSource source = SNRSource::NONE);
     float getMeasuredSNR() const;
+    SNRSource getMeasuredSNRSource() const;
 
     // Set channel quality including fading detection
-    void setChannelQuality(float snr_db, float fading_index);
+    void setChannelQuality(float snr_db, float fading_index,
+                           SNRSource source = SNRSource::NONE);
     float getFadingIndex() const;
 
     // Get current data mode

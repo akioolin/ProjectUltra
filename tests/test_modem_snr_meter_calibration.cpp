@@ -117,8 +117,8 @@ EstimateResult measureSNR(const ModemConfig& cfg, const TxFrame& tx,
 
     result.ready = rx_waveform.process(
         SampleSpan(rx.data() + tx.signal_start, tx.frame_samples));
-    result.valid = rx_waveform.hasLastSNREstimate();
-    result.snr_db = rx_waveform.getLastSNREstimate();
+    result.valid = rx_waveform.hasLastOFDMBroadbandSNREstimate();
+    result.snr_db = rx_waveform.getLastOFDMBroadbandSNREstimate();
     return result;
 }
 

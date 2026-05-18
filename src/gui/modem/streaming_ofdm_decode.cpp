@@ -329,7 +329,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         LOG_MODEM(INFO, "[%s] PING detected: path1=%d path2=%d ratio=%.3f "
                   "chirp_corr=%.3f gap_error=%.1f ldpc_attempted=%d "
                   "ldpc_ok=%s magic=%s "
-                  "SNR=%.1f dB CFO=%.1f Hz",
+                  "SNR=%.1f dB (%s) CFO=%.1f Hz",
                   log_prefix_.c_str(), ping_decision.ping_by_silence ? 1 : 0,
                   ping_decision.ping_by_chirp_lock ? 1 : 0,
                   ping_decision.ratio, ping_decision.chirp_corr,
@@ -341,13 +341,15 @@ void StreamingDecoder::decodeCurrentFrame() {
                   ldpc_attempted
                       ? (ping_decision.ldpc_magic_valid ? "1" : "0")
                       : "skipped",
-                  sync_snr_, sync_cfo_);
+                  sync_snr_, snrSourceToString(SNRSource::SYNC_QUALITY), sync_cfo_);
 
         DecodeResult ping;
         ping.success = true;
         ping.is_ping = true;
         ping.frame_type = v2::FrameType::PING;
         ping.snr_db = sync_snr_;
+        ping.snr_source = SNRSource::SYNC_QUALITY;
+        ping.sync_quality_db = sync_snr_;
         ping.cfo_hz = sync_cfo_;
         ping.sync_correlation = sync_correlation_;
         ping.ping_training_rms = ping_decision.training_rms;
@@ -1237,9 +1239,9 @@ void StreamingDecoder::decodeCurrentFrame() {
             return;
         }
 
-        LOG_MODEM(INFO, "[%s] StreamingDecoder: Frame decoded, %d/%d CWs, SNR=%.1f dB, CFO=%.1f Hz",
+        LOG_MODEM(INFO, "[%s] StreamingDecoder: Frame decoded, %d/%d CWs, SNR=%.1f dB (%s), CFO=%.1f Hz",
                   log_prefix_.c_str(), result.codewords_ok, result.codewords_ok + result.codewords_failed,
-                  result.snr_db, result.cfo_hz);
+                  result.snr_db, snrSourceToString(result.snr_source), result.cfo_hz);
     } else {
         LOG_MODEM(WARN, "[%s] StreamingDecoder: Decode failed (cw_ok=%d, cw_fail=%d, is_ping=%d)",
                   log_prefix_.c_str(), result.codewords_ok, result.codewords_failed, result.is_ping ? 1 : 0);
@@ -1670,7 +1672,7 @@ void StreamingDecoder::continueMCDPSKBurst() {
 // HELPERS
 // ============================================================================
 
-float StreamingDecoder::estimateSNRFromChirp(float corr, float /*noise*/) {
+float StreamingDecoder::chirpSyncQualityDb(float corr, float /*noise*/) {
     float snr = (corr - 0.15f) / 0.03f;
     return std::max(-5.0f, std::min(30.0f, snr));
 }
@@ -1683,6 +1685,8 @@ DecodeResult StreamingDecoder::decodeMCDPSKFrame(const std::vector<float>& soft_
                                                    float snr, float cfo) {
     DecodeResult result;
     result.snr_db = snr;
+    result.snr_source = SNRSource::SYNC_QUALITY;
+    result.sync_quality_db = snr;
     result.cfo_hz = cfo;
 
     constexpr size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;
@@ -1875,6 +1879,8 @@ DecodeResult StreamingDecoder::decodeMCDPSKFrame(const std::vector<float>& soft_
 DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, float snr, float cfo) {
     DecodeResult result;
     result.snr_db = snr;
+    result.snr_source = SNRSource::SYNC_QUALITY;
+    result.sync_quality_db = snr;
     result.cfo_hz = cfo;
 
     constexpr size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;

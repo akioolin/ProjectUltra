@@ -120,8 +120,8 @@ IdleNoiseSNREstimator::Snapshot IdleNoiseSNREstimator::snapshot() const {
     std::lock_guard<std::mutex> lock(mutex_);
     Snapshot out;
     out.valid = valid_;
-    out.snr_db = smoothed_snr_db_;
-    out.latest_instant_snr_db = latest_instant_snr_db_;
+    out.idle_in_band_snr_db = smoothed_snr_db_;
+    out.latest_instant_idle_in_band_snr_db = latest_instant_snr_db_;
     out.filtered_noise_rms = filtered_noise_rms_;
     out.normalized_noise_rms = normalized_noise_rms_;
     out.fir_energy = fir_energy_;

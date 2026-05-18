@@ -54,19 +54,25 @@ ControlsWidget::Event ControlsWidget::render(const LoopbackStats& stats, ModemCo
     ImGui::Separator();
     ImGui::Spacing();
 
+    const auto operator_snr = selectOperatorSNRDisplay(stats);
+
     // SNR display with visual bar
-    ImGui::Text("SNR");
+    ImGui::Text("%s", operator_snr.valid
+                ? snrSourceDisplayLabel(operator_snr.source) : "SNR");
     ImGui::SameLine(80);
 
     // SNR bar: 0-40 dB range
-    float snr_normalized = stats.snr_db / 40.0f;
-    snr_normalized = std::max(0.0f, std::min(1.0f, snr_normalized));
+    float snr_normalized = operator_snr.valid
+        ? std::max(0.0f, std::min(1.0f, operator_snr.snr_db / 40.0f))
+        : 0.0f;
 
     // Color based on SNR quality
     ImVec4 snr_color;
-    if (stats.snr_db >= 20.0f) {
+    if (!operator_snr.valid) {
+        snr_color = ImVec4(0.3f, 0.3f, 0.3f, 1.0f);
+    } else if (operator_snr.snr_db >= 20.0f) {
         snr_color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);  // Green - excellent
-    } else if (stats.snr_db >= 10.0f) {
+    } else if (operator_snr.snr_db >= 10.0f) {
         snr_color = ImVec4(1.0f, 1.0f, 0.2f, 1.0f);  // Yellow - good
     } else {
         snr_color = ImVec4(1.0f, 0.3f, 0.3f, 1.0f);  // Red - poor
@@ -74,7 +80,11 @@ ControlsWidget::Event ControlsWidget::render(const LoopbackStats& stats, ModemCo
 
     ImGui::PushStyleColor(ImGuiCol_PlotHistogram, snr_color);
     char snr_text[32];
-    snprintf(snr_text, sizeof(snr_text), "%.1f dB", stats.snr_db);
+    if (operator_snr.valid) {
+        snprintf(snr_text, sizeof(snr_text), "%.1f dB", operator_snr.snr_db);
+    } else {
+        snprintf(snr_text, sizeof(snr_text), "-- dB");
+    }
     ImGui::ProgressBar(snr_normalized, ImVec2(-1, 18), snr_text);
     ImGui::PopStyleColor();
 

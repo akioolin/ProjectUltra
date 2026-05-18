@@ -21,8 +21,8 @@ public:
 
     struct Snapshot {
         bool valid = false;
-        float snr_db = 0.0f;
-        float latest_instant_snr_db = 0.0f;
+        float idle_in_band_snr_db = 0.0f;
+        float latest_instant_idle_in_band_snr_db = 0.0f;
         float filtered_noise_rms = 0.0f;
         float normalized_noise_rms = 0.0f;
         double fir_energy = 0.0;

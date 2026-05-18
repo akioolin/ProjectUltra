@@ -433,12 +433,14 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             }
         }
         // Update protocol layer with current SNR and fading before processing frame.
-        float snr_db = modem_.getStats().snr_db;
+        auto modem_stats = modem_.getStats();
+        float snr_db = modem_stats.snr_db;
+        SNRSource snr_source = modem_stats.snr_source;
         float fading = modem_.getFadingIndex();
-        protocol_.setMeasuredSNR(snr_db);
-        protocol_.setChannelQuality(snr_db, fading);
+        protocol_.setMeasuredSNR(snr_db, snr_source);
+        protocol_.setChannelQuality(snr_db, fading, snr_source);
         protocol_.onRxData(data);
-        updateAdaptiveAdvisory(snr_db, fading);
+        updateAdaptiveAdvisory(snr_db, fading, snr_source);
     });
     ultra::gui::startupTrace("App", "set-raw-callback-exit");
 
@@ -662,16 +664,21 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         // Note: Fading index not shown here - it's only reliable after decoding data frames
         // Check state to show appropriate message
         if (protocol_.getState() == protocol::ConnectionState::PROBING) {
-            guiLog("RX PONG: Remote station responded! (SNR=%.1f dB)", display_snr);
+            guiLog("RX PONG: Remote station responded! (SNR=%.1f dB (%s))",
+                   display_snr, snrSourceToString(SNRSource::SYNC_QUALITY));
             // Add to message log so user sees it in the app
-            char buf[80];
-            snprintf(buf, sizeof(buf), "[PONG] Station responded (SNR=%.0f dB)", display_snr);
+            char buf[112];
+            snprintf(buf, sizeof(buf), "[PONG] Station responded (SNR=%.0f dB (%s))",
+                     display_snr, snrSourceToString(SNRSource::SYNC_QUALITY));
             appendRxLogLine(buf);
         } else {
-            guiLog("MODEM: Detected PING/PONG (SNR=%.1f dB)", display_snr);
+            guiLog("MODEM: Detected PING/PONG (SNR=%.1f dB (%s))",
+                   display_snr, snrSourceToString(SNRSource::SYNC_QUALITY));
         }
         char diag_fields[96];
-        std::snprintf(diag_fields, sizeof(diag_fields), "{\"snr_db\":%.1f}", display_snr);
+        std::snprintf(diag_fields, sizeof(diag_fields),
+                      "{\"snr_db\":%.1f,\"snr_source\":\"%s\"}", display_snr,
+                      snrSourceToString(SNRSource::SYNC_QUALITY));
         ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
             "protocol", "ping.rx", diag_fields);
         // If narrowband chirp detected, set session-scoped override so negotiateMode() picks OFDM_NARROW
@@ -716,7 +723,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             snprintf(peer_fading_text, sizeof(peer_fading_text), "n/a");
         }
         const char* wf_name = waveformDisplayName(waveform);
-        guiLog("MODE_CHANGE: %s %s %s (peer_snr=%.1f dB, peer_fading=%s, local_fading=%.2f %s)",
+        guiLog("MODE_CHANGE: %s %s %s (peer_snr=%.1f dB (wire_peer), peer_fading=%s, local_fading=%.2f %s)",
                wf_name, modulationToString(mod), codeRateToString(rate),
                snr_db, peer_fading_text,
                local_fading, local_quality);
@@ -728,16 +735,16 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             "protocol", "waveform.negotiated", diag_fields);
 
         // Format display with waveform info and channel quality
-        char buf[200];
+        char buf[260];
         if (waveform == protocol::WaveformMode::MC_DPSK) {
             snprintf(buf, sizeof(buf),
-                     "[MODE] MC-DPSK 8 carriers %s (peer SNR=%d dB, peer fading=%s, local fading=%.2f %s)",
+                     "[MODE] MC-DPSK 8 carriers %s (peer SNR=%d dB (wire_peer), peer fading=%s, local fading=%.2f %s)",
                      codeRateToString(rate), static_cast<int>(snr_db),
                      peer_fading_text,
                      local_fading, local_quality);
         } else {
             snprintf(buf, sizeof(buf),
-                     "[MODE] %s %s %s (peer SNR=%d dB, peer fading=%s, local fading=%.2f %s)",
+                     "[MODE] %s %s %s (peer SNR=%d dB (wire_peer), peer fading=%s, local fading=%.2f %s)",
                      wf_name, modulationToString(mod), codeRateToString(rate),
                      static_cast<int>(snr_db), peer_fading_text,
                      local_fading, local_quality);
@@ -751,16 +758,16 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             protocol::recommendDataMode(snr_db, waveform, peer_mod, peer_rate, peer_fading);
             bool peer_change = (peer_mod != mod || peer_rate != rate);
 
-            char adpt_buf[220];
+            char adpt_buf[260];
             if (peer_change) {
                 const char* direction = adaptationDirection(mod, rate, peer_mod, peer_rate);
                 snprintf(adpt_buf, sizeof(adpt_buf),
-                         "[ADPT] Peer reports %s conditions (SNR=%.1f dB, F.I.=%.2f): %s -> %s %s",
+                         "[ADPT] Peer reports %s conditions (SNR=%.1f dB (wire_peer), F.I.=%.2f): %s -> %s %s",
                          direction, snr_db, peer_fading,
                          direction, modulationToString(peer_mod), codeRateToString(peer_rate));
             } else {
                 snprintf(adpt_buf, sizeof(adpt_buf),
-                         "[ADPT] Peer reports stable conditions (SNR=%.1f dB, F.I.=%.2f): keep %s %s",
+                         "[ADPT] Peer reports stable conditions (SNR=%.1f dB (wire_peer), F.I.=%.2f): keep %s %s",
                          snr_db, peer_fading, modulationToString(mod), codeRateToString(rate));
             }
 
@@ -1569,7 +1576,7 @@ void App::resetAdaptiveAdvisory() {
     adapt_upgrade_hold_logged_ = false;
 }
 
-void App::updateAdaptiveAdvisory(float snr_db, float fading_index) {
+void App::updateAdaptiveAdvisory(float snr_db, float fading_index, SNRSource snr_source) {
     if (protocol_.getState() != protocol::ConnectionState::CONNECTED) {
         return;
     }
@@ -1652,9 +1659,9 @@ void App::updateAdaptiveAdvisory(float snr_db, float fading_index) {
                 adapt_upgrade_hold_rate_ != rec_rate) {
                 char hold_msg[260];
                 snprintf(hold_msg, sizeof(hold_msg),
-                         "[ADPT] Local improving conditions (SNR=%.1f dB, F.I.=%.2f): "
+                         "[ADPT] Local improving conditions (SNR=%.1f dB (%s), F.I.=%.2f): "
                          "hysteresis hold %.1fs before upgrade to %s %s",
-                         avg_snr, avg_fading,
+                         avg_snr, snrSourceToString(snr_source), avg_fading,
                          hold_remaining_ms / 1000.0f,
                          modulationToString(rec_mod), codeRateToString(rec_rate));
                 guiLog("%s", hold_msg);
@@ -1671,9 +1678,9 @@ void App::updateAdaptiveAdvisory(float snr_db, float fading_index) {
     const char* direction = adaptationDirection(eval_mod, eval_rate, rec_mod, rec_rate);
     char msg[240];
     snprintf(msg, sizeof(msg),
-             "[ADPT] Local %s conditions (SNR=%.1f dB, F.I.=%.2f): "
+             "[ADPT] Local %s conditions (SNR=%.1f dB (%s), F.I.=%.2f): "
              "hysteresis allows switch %s %s -> %s %s",
-             direction, avg_snr, avg_fading,
+             direction, avg_snr, snrSourceToString(snr_source), avg_fading,
              modulationToString(eval_mod), codeRateToString(eval_rate),
              modulationToString(rec_mod), codeRateToString(rec_rate));
 
@@ -1920,8 +1927,16 @@ void App::render() {
     } else {
         snprintf(goodput_text, sizeof(goodput_text), "n/a");
     }
-    ImGui::Text("Mode: %s | SNR: %.1f dB | TX: %d | RX: %d | PHY: %d bps | Goodput: %s | RXQ: %.0f ms (pk %.0f) | OF: %llu/%llu | %s%s",
-                mode_str, mstats.snr_db, mstats.frames_sent, mstats.frames_received,
+    const auto status_snr = selectOperatorSNRDisplay(mstats);
+    char status_snr_text[64];
+    if (status_snr.valid) {
+        snprintf(status_snr_text, sizeof(status_snr_text), "%.1f dB (%s)",
+                 status_snr.snr_db, snrSourceToString(status_snr.source));
+    } else {
+        snprintf(status_snr_text, sizeof(status_snr_text), "-- dB (none)");
+    }
+    ImGui::Text("Mode: %s | SNR: %s | TX: %d | RX: %d | PHY: %d bps | Goodput: %s | RXQ: %.0f ms (pk %.0f) | OF: %llu/%llu | %s%s",
+                mode_str, status_snr_text, mstats.frames_sent, mstats.frames_received,
                 mstats.throughput_bps, goodput_text,
                 dstats.backlog_ms, dstats.peak_backlog_ms,
                 static_cast<unsigned long long>(dstats.buffer_overflows),
@@ -2594,6 +2609,7 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
     ImGui::BeginChild("ChannelStatus", ImVec2(0, 140), false);
 
     auto conn_state = protocol_.getState();
+    const auto operator_snr = selectOperatorSNRDisplay(stats);
 
     // Row 1: Connection state + Channel Quality (only when connected) + SNR bar
     if (conn_state == protocol::ConnectionState::DISCONNECTED) {
@@ -2602,12 +2618,27 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         ImGui::SameLine();
         ImGui::TextDisabled("[Standby]");
         ImGui::SameLine();
-        ImGui::Text("SNR:");
+        ImGui::Text("%s:", operator_snr.valid
+                    ? snrSourceDisplayLabel(operator_snr.source) : "SNR");
         ImGui::SameLine();
-        // Empty SNR bar
-        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.3f, 0.3f, 0.3f, 1.0f));
+        ImVec4 snr_color = ImVec4(0.3f, 0.3f, 0.3f, 1.0f);
+        float snr_normalized = 0.0f;
+        char snr_text[24];
+        snprintf(snr_text, sizeof(snr_text), "-- dB");
+        if (operator_snr.valid) {
+            snr_normalized = std::max(0.0f, std::min(1.0f, operator_snr.snr_db / 40.0f));
+            if (operator_snr.snr_db >= 15.0f) {
+                snr_color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);
+            } else if (operator_snr.snr_db >= 5.0f) {
+                snr_color = ImVec4(0.8f, 0.8f, 0.0f, 1.0f);
+            } else {
+                snr_color = ImVec4(1.0f, 0.4f, 0.2f, 1.0f);
+            }
+            snprintf(snr_text, sizeof(snr_text), "%.1f dB", operator_snr.snr_db);
+        }
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, snr_color);
         ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-        ImGui::ProgressBar(0.0f, ImVec2(-1, 16), "-- dB");
+        ImGui::ProgressBar(snr_normalized, ImVec2(-1, 16), snr_text);
         ImGui::PopStyleColor();
     } else if (conn_state == protocol::ConnectionState::CONNECTING) {
         // Connecting - show our outgoing mode, no channel quality yet
@@ -2675,24 +2706,32 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         ImVec4 sync_color = stats.synced ? ImVec4(0.2f, 1.0f, 0.2f, 1.0f) : ImVec4(0.5f, 0.5f, 0.5f, 1.0f);
         ImGui::TextColored(sync_color, "%s", stats.synced ? "SYNC" : "----");
         ImGui::SameLine();
-        ImGui::Text("SNR:");
+        ImGui::Text("%s:", operator_snr.valid
+                    ? snrSourceDisplayLabel(operator_snr.source) : "SNR");
         ImGui::SameLine();
 
         // SNR bar - color indicates signal strength
-        float snr_normalized = stats.snr_db / 40.0f;
-        snr_normalized = std::max(0.0f, std::min(1.0f, snr_normalized));
+        float snr_normalized = operator_snr.valid
+            ? std::max(0.0f, std::min(1.0f, operator_snr.snr_db / 40.0f))
+            : 0.0f;
         // Color based on SNR value (green=good signal, yellow=moderate, red=weak)
         ImVec4 snr_color;
-        if (stats.snr_db >= 15.0f) {
+        if (!operator_snr.valid) {
+            snr_color = ImVec4(0.3f, 0.3f, 0.3f, 1.0f);
+        } else if (operator_snr.snr_db >= 15.0f) {
             snr_color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);  // Green
-        } else if (stats.snr_db >= 5.0f) {
+        } else if (operator_snr.snr_db >= 5.0f) {
             snr_color = ImVec4(0.8f, 0.8f, 0.0f, 1.0f);  // Yellow
         } else {
             snr_color = ImVec4(1.0f, 0.4f, 0.2f, 1.0f);  // Orange-red
         }
         ImGui::PushStyleColor(ImGuiCol_PlotHistogram, snr_color);
-        char snr_text[16];
-        snprintf(snr_text, sizeof(snr_text), "%.1f dB", stats.snr_db);
+        char snr_text[24];
+        if (operator_snr.valid) {
+            snprintf(snr_text, sizeof(snr_text), "%.1f dB", operator_snr.snr_db);
+        } else {
+            snprintf(snr_text, sizeof(snr_text), "-- dB");
+        }
         ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
         ImGui::ProgressBar(snr_normalized, ImVec2(-1, 16), snr_text);
         ImGui::PopStyleColor();

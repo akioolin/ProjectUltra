@@ -355,6 +355,13 @@ target_include_directories(test_streaming_signal_policy PRIVATE
 target_link_libraries(test_streaming_signal_policy PRIVATE ultra_core)
 add_test(NAME StreamingSignalPolicy COMMAND test_streaming_signal_policy)
 
+add_executable(test_snr_source_routing test_snr_source_routing.cpp)
+target_include_directories(test_snr_source_routing PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+target_link_libraries(test_snr_source_routing PRIVATE ultra_core)
+add_test(NAME SNRSourceRouting COMMAND test_snr_source_routing)
+
 # Current streaming MC-DPSK encode/decode loopback.
 add_executable(test_streaming_mc_dpsk
     test_streaming_mc_dpsk.cpp
@@ -612,6 +619,7 @@ ultra_enable_test_warnings(
     test_streaming_frame_policy.cpp
     test_ping_detector.cpp
     test_streaming_signal_policy.cpp
+    test_snr_source_routing.cpp
     test_streaming_mc_dpsk.cpp
     test_channel_snr_calibration.cpp
     test_modem_snr_meter_calibration.cpp

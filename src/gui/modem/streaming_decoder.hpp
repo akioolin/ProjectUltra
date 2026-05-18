@@ -8,7 +8,7 @@
 //   3. Correct IWaveform call sequence: reset(), detectSync(), setFrequencyOffset(), process()
 //   4. Thread-safe with condition variable for blocking wait
 //   5. PING detection via energy ratio after chirp
-//   6. SNR estimation from chirp correlation strength
+//   6. Sync-quality estimation from chirp correlation strength
 //
 // Thread model:
 //   - Audio thread: feedAudio() - fast, just copies samples to buffer
@@ -71,14 +71,18 @@ struct DecodeResult {
     bool success = false;           // True if frame decoded successfully
     Bytes frame_data;               // Decoded frame payload
     v2::FrameType frame_type = v2::FrameType::PROBE;
-    float snr_db = 0.0f;            // Estimated SNR from preamble
+    float snr_db = 0.0f;            // Consumer-facing routed value; see snr_source.
+    SNRSource snr_source = SNRSource::NONE;
     float cfo_hz = 0.0f;            // Measured CFO
     int codewords_ok = 0;           // Number of successful LDPC decodes
     int codewords_failed = 0;       // Number of failed LDPC decodes
     bool is_ping = false;           // True if this is a PING (chirp-only) frame
-    float lts_snr_db = 0.0f;        // OFDM LTS-derived demodulator SNR
-    bool has_pilot_snr_db = false;  // True when OFDM residual-derived SNR is available
-    float pilot_snr_db = 0.0f;      // Broadband SNR from OFDM LTS/pilot residuals
+    bool has_idle_in_band_snr_db = false;
+    float idle_in_band_snr_db = 0.0f;       // Receiver passband/in-band idle SNR.
+    bool has_ofdm_broadband_snr_db = false;
+    float ofdm_broadband_snr_db = 0.0f;     // OFDM LTS/pilot residual broadband SNR.
+    float ofdm_internal_snr_db = 0.0f;      // Demodulator internal LLR/channel-quality scale.
+    float sync_quality_db = 0.0f;           // Chirp correlation confidence; not physical SNR.
     float lts_fading_index = 0.0f;  // Per-carrier LTS/pilot fading index
     float sync_correlation = 0.0f;  // Light/full preamble sync correlation
     float lts_residual_cfo_hz = 0.0f;  // Residual CFO reported by OFDM waveform
@@ -258,8 +262,8 @@ public:
     // STATUS
     // ========================================================================
 
-    // Get last measured SNR (from most recent chirp detection)
-    float getLastSNR() const { return last_snr_.load(); }
+    // Get last chirp sync-quality score from the most recent chirp detection.
+    float getLastSyncQualityDb() const { return last_snr_.load(); }
 
     // Get last measured CFO
     float getLastCFO() const { return last_cfo_.load(); }
@@ -272,9 +276,13 @@ public:
     float getLastFadingIndex() const { return last_fading_index_.load(); }
 
     // Get last residual-derived OFDM broadband SNR estimate. Returns false
-    // from hasLastSNREstimate() until an OFDM LTS/pilot residual has landed.
-    bool hasLastSNREstimate() const { return last_snr_db_estimate_valid_.load(); }
-    float getLastSNREstimate() const { return last_snr_db_estimate_.load(); }
+    // until an OFDM LTS/pilot residual has landed.
+    bool hasLastOFDMBroadbandSNREstimate() const {
+        return last_ofdm_broadband_snr_db_valid_.load();
+    }
+    float getLastOFDMBroadbandSNREstimate() const {
+        return last_ofdm_broadband_snr_db_.load();
+    }
 
     bool hasIdleNoiseSNREstimate() const { return idle_noise_snr_estimator_.hasEstimate(); }
     float getIdleNoiseSNREstimate() const { return idle_noise_snr_estimator_.snrDb(); }
@@ -333,8 +341,8 @@ private:
     size_t getOFDMControlFrameSamplesForCurrentMode() const;
     bool processWaveformForCodewords(SampleSpan samples, int expected_codewords);
 
-    // Estimate SNR from chirp correlation strength
-    float estimateSNRFromChirp(float correlation, float noise_floor);
+    // Chirp correlation confidence score, historically dB-scaled but not physical SNR.
+    float chirpSyncQualityDb(float correlation, float noise_floor);
 
     // Decode soft bits into frame data
     DecodeResult decodeFrame(const std::vector<float>& soft_bits, float snr, float cfo);
@@ -402,7 +410,7 @@ private:
     size_t sync_position_ = 0;        // Buffer position where sync was found
     size_t samples_since_sync_ = 0;   // How many samples collected since sync
     float sync_cfo_ = 0.0f;           // CFO from sync detection
-    float sync_snr_ = 0.0f;           // SNR estimate from sync detection
+    float sync_snr_ = 0.0f;           // Chirp sync-quality score
     float sync_correlation_ = 0.0f;   // LTS/light-sync confidence for current frame
     float sync_gap_error_samples_ = 0.0f; // Dual-chirp timing error for current frame
     size_t correlation_pos_ = 0;      // Current position for correlation search
@@ -467,8 +475,8 @@ private:
 
     // Status (atomic for lock-free read from GUI)
     mutable std::atomic<float> last_snr_{0.0f};
-    mutable std::atomic<bool> last_snr_db_estimate_valid_{false};
-    mutable std::atomic<float> last_snr_db_estimate_{0.0f};
+    mutable std::atomic<bool> last_ofdm_broadband_snr_db_valid_{false};
+    mutable std::atomic<float> last_ofdm_broadband_snr_db_{0.0f};
     IdleNoiseSNREstimator idle_noise_snr_estimator_;
     std::atomic<float> last_cfo_{0.0f};
     std::atomic<float> last_fading_index_{0.0f};
@@ -502,7 +510,7 @@ private:
     std::vector<DecodeResult> burst_metric_templates_;   // per-physical-frame LTS metrics
     size_t burst_next_pos_ = 0;          // buffer position for next continuation frame
     size_t burst_min_block_ = 0;         // samples per frame (cached from first frame)
-    float burst_snr_ = 0.0f;             // SNR from sync detection
+    float burst_snr_ = 0.0f;             // Chirp sync-quality score
     float burst_cfo_ = 0.0f;             // CFO (updated per frame from pilot tracking)
     std::chrono::steady_clock::time_point burst_start_time_;  // timeout reference
     int burst_group_size_ = 8;

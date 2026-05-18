@@ -247,13 +247,13 @@ float OFDMNvisWaveform::estimatedSNR() const {
     return 0.0f;
 }
 
-bool OFDMNvisWaveform::hasLastSNREstimate() const {
-    return demodulator_ && demodulator_->hasLastSNREstimate();
+bool OFDMNvisWaveform::hasLastOFDMBroadbandSNREstimate() const {
+    return demodulator_ && demodulator_->hasLastOFDMBroadbandSNREstimate();
 }
 
-float OFDMNvisWaveform::getLastSNREstimate() const {
+float OFDMNvisWaveform::getLastOFDMBroadbandSNREstimate() const {
     if (demodulator_) {
-        return demodulator_->getLastSNREstimate();
+        return demodulator_->getLastOFDMBroadbandSNREstimate();
     }
     return 0.0f;
 }

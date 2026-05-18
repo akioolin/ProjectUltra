@@ -825,8 +825,8 @@ void StreamingDecoder::reset() {
 
     noise_floor_ = 0.001f;
     last_snr_.store(0.0f);
-    last_snr_db_estimate_valid_.store(false);
-    last_snr_db_estimate_.store(0.0f);
+    last_ofdm_broadband_snr_db_valid_.store(false);
+    last_ofdm_broadband_snr_db_.store(0.0f);
     last_cfo_.store(0.0f);
     last_fading_index_.store(0.0f);
 }

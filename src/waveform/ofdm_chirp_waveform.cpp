@@ -717,13 +717,13 @@ float OFDMChirpWaveform::estimatedSNR() const {
     return last_snr_;
 }
 
-bool OFDMChirpWaveform::hasLastSNREstimate() const {
-    return demodulator_ && demodulator_->hasLastSNREstimate();
+bool OFDMChirpWaveform::hasLastOFDMBroadbandSNREstimate() const {
+    return demodulator_ && demodulator_->hasLastOFDMBroadbandSNREstimate();
 }
 
-float OFDMChirpWaveform::getLastSNREstimate() const {
+float OFDMChirpWaveform::getLastOFDMBroadbandSNREstimate() const {
     if (demodulator_) {
-        return demodulator_->getLastSNREstimate();
+        return demodulator_->getLastOFDMBroadbandSNREstimate();
     }
     return 0.0f;
 }

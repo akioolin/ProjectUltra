@@ -290,8 +290,9 @@ void Connection::acceptCall() {
     if (isOFDMMode(negotiated_mode_)) {
         CodeRate capped = capInitialOFDMRate(measured_snr_db_, fading_index_, rec_rate);
         if (capped != rec_rate) {
-            LOG_MODEM(INFO, "Connection: Bootstrap cap %s -> %s for initial OFDM setup (SNR=%.1f, fading=%.2f)",
-                      codeRateToString(rec_rate), codeRateToString(capped), measured_snr_db_, fading_index_);
+            LOG_MODEM(INFO, "Connection: Bootstrap cap %s -> %s for initial OFDM setup (SNR=%.1f (%s), fading=%.2f)",
+                      codeRateToString(rec_rate), codeRateToString(capped), measured_snr_db_,
+                      snrSourceToString(measured_snr_source_), fading_index_);
             rec_rate = capped;
         }
     }
@@ -349,7 +350,8 @@ void Connection::acceptCall() {
                                                  rung_id);
     Bytes ack_data = ack.serialize();
 
-    LOG_MODEM(INFO, "Connection: Sending CONNECT_ACK (%zu bytes)", ack_data.size());
+    LOG_MODEM(INFO, "Connection: Sending CONNECT_ACK (%zu bytes, SNR=%.1f dB (%s))",
+              ack_data.size(), measured_snr_db_, snrSourceToString(measured_snr_source_));
     transmitFrame(ack_data);
 
     enterConnected();
@@ -694,8 +696,9 @@ bool Connection::sendFile(const std::string& filepath) {
             return true;
         }
     } else if (is_ofdm) {
-        LOG_MODEM(INFO, "Connection: Using interleaved OFDM chunks for file (SNR=%.1f, fading=%.2f, rate=%s)",
-                  measured_snr_db_, fading_index_, codeRateToString(data_code_rate_));
+        LOG_MODEM(INFO, "Connection: Using interleaved OFDM chunks for file (SNR=%.1f (%s), fading=%.2f, rate=%s)",
+                  measured_snr_db_, snrSourceToString(measured_snr_source_),
+                  fading_index_, codeRateToString(data_code_rate_));
     }
 
     sendNextFileChunk();
@@ -1218,11 +1221,11 @@ bool Connection::tryIssueAdaptiveModeChangeAtBoundary() {
                   codeRateToString(adaptive_target_.rate));
     }
 
-    LOG_MODEM(INFO, "Connection: Adaptive MODE_CHANGE at TX boundary: %s %s -> %s %s (SNR=%.1f, fading=%.2f, backlog=%zu frames)",
+    LOG_MODEM(INFO, "Connection: Adaptive MODE_CHANGE at TX boundary: %s %s -> %s %s (SNR=%.1f (%s), fading=%.2f, backlog=%zu frames)",
               modulationToString(data_modulation_), codeRateToString(data_code_rate_),
               modulationToString(adaptive_target_.modulation),
               codeRateToString(adaptive_target_.rate),
-              measured_snr_db_, fading_index_,
+              measured_snr_db_, snrSourceToString(measured_snr_source_), fading_index_,
               backlog_frames);
 
     requestModeChange(adaptive_target_.modulation,
@@ -1322,11 +1325,11 @@ void Connection::updateAdaptiveModeController(uint32_t elapsed_ms) {
         adaptive_target_.modulation = recommended_mod;
         adaptive_target_.rate = adaptiveDowngradeTarget(data_code_rate_, recommended_rate);
         adaptive_target_.reason = v2::ModeChangeReason::CHANNEL_DEGRADED;
-        LOG_MODEM(INFO, "Connection: Adaptive downgrade queued: %s -> %s (recommended=%s, SNR=%.1f, fading=%.2f)",
+        LOG_MODEM(INFO, "Connection: Adaptive downgrade queued: %s -> %s (recommended=%s, SNR=%.1f (%s), fading=%.2f)",
                   codeRateToString(data_code_rate_),
                   codeRateToString(adaptive_target_.rate),
                   codeRateToString(recommended_rate),
-                  measured_snr_db_, fading_index_);
+                  measured_snr_db_, snrSourceToString(measured_snr_source_), fading_index_);
         tryIssueAdaptiveModeChangeAtBoundary();
         return;
     }
@@ -1347,10 +1350,10 @@ void Connection::updateAdaptiveModeController(uint32_t elapsed_ms) {
         adaptive_target_.modulation = recommended_mod;
         adaptive_target_.rate = recommended_rate;
         adaptive_target_.reason = v2::ModeChangeReason::CHANNEL_IMPROVED;
-        LOG_MODEM(INFO, "Connection: Adaptive upgrade queued: %s -> %s (SNR=%.1f, fading=%.2f, clean=%d, backlog=%zu frames)",
+        LOG_MODEM(INFO, "Connection: Adaptive upgrade queued: %s -> %s (SNR=%.1f (%s), fading=%.2f, clean=%d, backlog=%zu frames)",
                   codeRateToString(data_code_rate_),
                   codeRateToString(adaptive_target_.rate),
-                  measured_snr_db_, fading_index_,
+                  measured_snr_db_, snrSourceToString(measured_snr_source_), fading_index_,
                   adaptive_clean_windows_,
                   adaptiveBacklogFrames(recommended_rate));
         tryIssueAdaptiveModeChangeAtBoundary();

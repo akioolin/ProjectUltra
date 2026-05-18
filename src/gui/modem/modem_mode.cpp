@@ -286,8 +286,8 @@ protocol::WaveformMode ModemEngine::recommendWaveformMode(float snr_db) {
 ModemEngine::WaveformRecommendation ModemEngine::recommendWaveformAndRate(float snr_db, float fading_index) {
     // Delegate to shared algorithm in protocol namespace
     auto rec = protocol::recommendWaveformAndRate(snr_db, fading_index);
-    LOG_MODEM(DEBUG, "recommendWaveformAndRate: SNR=%.1f, fading=%.2f -> %s %s (%.0f bps)",
-              snr_db, fading_index,
+    LOG_MODEM(DEBUG, "recommendWaveformAndRate: SNR=%.1f (%s), fading=%.2f -> %s %s (%.0f bps)",
+              snr_db, snrSourceToString(SNRSource::NONE), fading_index,
               protocol::waveformModeToString(rec.waveform),
               codeRateToString(rec.rate),
               rec.estimated_throughput_bps);

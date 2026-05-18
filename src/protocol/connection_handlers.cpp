@@ -12,14 +12,15 @@ namespace protocol {
 // Recommend data mode based on SNR, fading, and the NEGOTIATED waveform
 // Uses shared recommendDataMode() algorithm from waveform_selection.hpp
 // IMPORTANT: waveform should be the negotiated/forced waveform, NOT auto-selected
-static void recommendDataModeForWaveform(float snr_db, float fading_index,
+static void recommendDataModeForWaveform(float snr_db, SNRSource snr_source,
+                                          float fading_index,
                                           WaveformMode waveform,
                                           Modulation& mod, CodeRate& rate) {
     // Use shared algorithm for modulation and rate selection
     recommendDataMode(snr_db, waveform, mod, rate, fading_index);
 
-    LOG_MODEM(INFO, "recommendDataModeForWaveform: SNR=%.1f, fading=%.2f, waveform=%s -> %s %s",
-              snr_db, fading_index,
+    LOG_MODEM(INFO, "recommendDataModeForWaveform: SNR=%.1f (%s), fading=%.2f, waveform=%s -> %s %s",
+              snr_db, snrSourceToString(snr_source), fading_index,
               waveformModeToString(waveform), modulationToString(mod), codeRateToString(rate));
 }
 
@@ -178,6 +179,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
 
         // Use measured SNR from modem (set via setMeasuredSNR)
         snr_db = measured_snr_db_;
+        const SNRSource snr_source = measured_snr_source_;
 
         const Modulation forced_mod = static_cast<Modulation>(frame.initial_modulation);
         const CodeRate forced_rate = static_cast<CodeRate>(frame.initial_code_rate);
@@ -197,8 +199,8 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         if (ladder_selected) {
             negotiated_mode_ = selected_rung.waveform;
             LOG_MODEM(INFO,
-                      "Connection: Adaptive ladder selected %s (SNR=%.1f, fading=%.2f %s)",
-                      selected_rung.name, snr_db, fading_index_,
+                      "Connection: Adaptive ladder selected %s (SNR=%.1f (%s), fading=%.2f %s)",
+                      selected_rung.name, snr_db, snrSourceToString(snr_source), fading_index_,
                       connection_policy::fadingLabel(fading_index_));
         } else {
             // Forced presets and explicit waveform preferences keep legacy
@@ -221,13 +223,15 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         if (negotiated_mode_ == WaveformMode::AUTO) {
             auto rec = recommendWaveformAndRate(snr_db, fading_index_);
             negotiated_mode_ = rec.waveform;
-            LOG_MODEM(INFO, "Connection: Auto-selected waveform %s based on SNR=%.1f, fading=%.2f",
-                      waveformModeToString(negotiated_mode_), snr_db, fading_index_);
+            LOG_MODEM(INFO, "Connection: Auto-selected waveform %s based on SNR=%.1f (%s), fading=%.2f",
+                      waveformModeToString(negotiated_mode_), snr_db,
+                      snrSourceToString(snr_source), fading_index_);
         }
 
         // Get recommended mode based on SNR, fading AND the negotiated waveform
         // This ensures MC-DPSK uses R1/4, OFDM uses appropriate rate, etc.
-        recommendDataModeForWaveform(snr_db, fading_index_, negotiated_mode_, rec_mod, rec_rate);
+        recommendDataModeForWaveform(snr_db, snr_source, fading_index_,
+                                     negotiated_mode_, rec_mod, rec_rate);
 
         LadderRungId rung_id = LadderRungId::UNKNOWN;
         if (ladder_selected) {
@@ -243,8 +247,9 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         if (isOFDMMode(negotiated_mode_)) {
             CodeRate capped = capInitialOFDMRate(snr_db, fading_index_, rec_rate);
             if (capped != rec_rate) {
-                LOG_MODEM(INFO, "Connection: Bootstrap cap %s -> %s for initial OFDM setup (SNR=%.1f, fading=%.2f)",
-                          codeRateToString(rec_rate), codeRateToString(capped), snr_db, fading_index_);
+                LOG_MODEM(INFO, "Connection: Bootstrap cap %s -> %s for initial OFDM setup (SNR=%.1f (%s), fading=%.2f)",
+                          codeRateToString(rec_rate), codeRateToString(capped), snr_db,
+                          snrSourceToString(snr_source), fading_index_);
                 rec_rate = capped;
             }
         }
@@ -262,8 +267,9 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
                       codeRateToString(rec_rate));
         }
 
-        LOG_MODEM(INFO, "Connection: Initial data mode %s %s (SNR=%.1f dB, forced_mod=%d, forced_rate=%d)",
+        LOG_MODEM(INFO, "Connection: Initial data mode %s %s (SNR=%.1f dB (%s), forced_mod=%d, forced_rate=%d)",
                   modulationToString(rec_mod), codeRateToString(rec_rate), snr_db,
+                  snrSourceToString(snr_source),
                   static_cast<int>(forced_mod), static_cast<int>(forced_rate));
 
         // Set our local data mode immediately
@@ -321,6 +327,8 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             }
             ack_data = ack.serialize();
         }
+        LOG_MODEM(INFO, "Connection: Sending CONNECT_ACK (%zu bytes, SNR=%.1f dB (%s))",
+                  ack_data.size(), snr_db, snrSourceToString(snr_source));
         transmitFrame(ack_data);
 
         // Cache the ACK for proactive retransmission. ALPHA can fail to decode
@@ -388,7 +396,7 @@ void Connection::handleConnectAck(const v2::ConnectFrame& frame, const std::stri
         remote_call_ = src_call;
     }
 
-    LOG_MODEM(INFO, "Connection: Connected to %s (waveform=%s, data=%s %s, SNR=%.1f dB, peer_fading=%.2f)",
+    LOG_MODEM(INFO, "Connection: Connected to %s (waveform=%s, data=%s %s, SNR=%.1f dB (wire_peer), peer_fading=%.2f)",
               remote_call_.c_str(), waveformModeToString(negotiated_mode_),
               modulationToString(data_modulation_), codeRateToString(data_code_rate_), snr_db, peer_fading);
 
@@ -500,7 +508,7 @@ void Connection::handleModeChange(const v2::ControlFrame& frame, const std::stri
         case v2::ModeChangeReason::INITIAL_SETUP:    reason_str = "initial setup"; break;
     }
 
-    LOG_MODEM(INFO, "Connection: MODE_CHANGE from %s: %s %s (SNR=%.1f dB, fading=%.2f, reason=%s)",
+    LOG_MODEM(INFO, "Connection: MODE_CHANGE from %s: %s %s (SNR=%.1f dB (wire_peer), fading=%.2f, reason=%s)",
               remote_call_.c_str(),
               modulationToString(info.modulation),
               codeRateToString(info.code_rate),
@@ -539,8 +547,9 @@ void Connection::requestModeChange(Modulation new_mod, CodeRate new_rate,
         return;
     }
 
-    LOG_MODEM(INFO, "Connection: Requesting MODE_CHANGE to %s %s (SNR=%.1f dB)",
-              modulationToString(new_mod), codeRateToString(new_rate), measured_snr);
+    LOG_MODEM(INFO, "Connection: Requesting MODE_CHANGE to %s %s (SNR=%.1f dB (%s))",
+              modulationToString(new_mod), codeRateToString(new_rate), measured_snr,
+              snrSourceToString(measured_snr_source_));
 
     // Store pending mode change parameters for retry
     pending_modulation_ = new_mod;
@@ -702,17 +711,19 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
 
     // AUTO mode: Use shared algorithm from waveform_selection.hpp
     // This ensures negotiateMode and recommendDataModeWithFading use same logic
-    LOG_MODEM(INFO, "Connection: AUTO mode selection, SNR=%.1f dB, fading_index=%.2f (%s)",
-              snr, fading_index_, connection_policy::fadingLabel(fading_index_));
+    LOG_MODEM(INFO, "Connection: AUTO mode selection, SNR=%.1f dB (%s), fading_index=%.2f (%s)",
+              snr, snrSourceToString(measured_snr_source_), fading_index_,
+              connection_policy::fadingLabel(fading_index_));
 
     auto rec = recommendWaveformAndRate(snr, fading_index_);
 
     // Check if selected mode is supported by both sides
     if (selected == rec.waveform &&
         (common & connection_policy::modeToCapabilityBit(selected))) {
-        LOG_MODEM(INFO, "Connection: Selected %s (SNR=%.1f, fading=%.2f %s)",
+        LOG_MODEM(INFO, "Connection: Selected %s (SNR=%.1f (%s), fading=%.2f %s)",
                   waveformModeToString(selected),
                   snr,
+                  snrSourceToString(measured_snr_source_),
                   fading_index_,
                   connection_policy::fadingLabel(fading_index_));
         return selected;

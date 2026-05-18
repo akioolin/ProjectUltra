@@ -408,11 +408,13 @@ std::set<uint16_t> decodeFrames(const std::vector<float>& audio, const TestConfi
                         uint16_t seq = (result.frame_data[4] << 8) | result.frame_data[5];
                         decoded_seqs.insert(seq);
                         if (cfg.verbose) {
-                            printf("  DECODED seq=%d (chirp_snr=%.1f, pilot_snr=%s%.1f, "
-                                   "lts_snr=%.1f, fading=%.3f, CFO=%.1f)\n",
-                                   seq, result.snr_db,
-                                   result.has_pilot_snr_db ? "" : "unavailable/",
-                                   result.pilot_snr_db, result.lts_snr_db,
+                            printf("  DECODED seq=%d (SNR=%.1f (%s), sync_quality=%.1f, "
+                                   "ofdm_broadband=%s%.1f, ofdm_internal=%.1f, "
+                                   "fading=%.3f, CFO=%.1f)\n",
+                                   seq, result.snr_db, snrSourceToString(result.snr_source),
+                                   result.sync_quality_db,
+                                   result.has_ofdm_broadband_snr_db ? "" : "unavailable/",
+                                   result.ofdm_broadband_snr_db, result.ofdm_internal_snr_db,
                                    result.lts_fading_index, result.cfo_hz);
                         }
                     }

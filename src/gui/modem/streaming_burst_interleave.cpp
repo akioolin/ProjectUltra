@@ -294,7 +294,14 @@ void StreamingDecoder::finalizeBurstGroup() {
         pending_total_cw_ = saved_pending_total_cw;
         if (i < static_cast<int>(burst_metric_templates_.size())) {
             const auto& metrics = burst_metric_templates_[static_cast<size_t>(i)];
-            result.lts_snr_db = metrics.lts_snr_db;
+            result.snr_db = metrics.snr_db;
+            result.snr_source = metrics.snr_source;
+            result.has_idle_in_band_snr_db = metrics.has_idle_in_band_snr_db;
+            result.idle_in_band_snr_db = metrics.idle_in_band_snr_db;
+            result.has_ofdm_broadband_snr_db = metrics.has_ofdm_broadband_snr_db;
+            result.ofdm_broadband_snr_db = metrics.ofdm_broadband_snr_db;
+            result.ofdm_internal_snr_db = metrics.ofdm_internal_snr_db;
+            result.sync_quality_db = metrics.sync_quality_db;
             result.lts_fading_index = metrics.lts_fading_index;
             result.sync_correlation = metrics.sync_correlation;
             result.lts_residual_cfo_hz = metrics.lts_residual_cfo_hz;
