@@ -22,6 +22,12 @@ endif()
 if(MSVC)
     # Ensure math constants (M_PI, etc.) are available from <cmath> in all TUs.
     add_compile_definitions(_USE_MATH_DEFINES)
+    # Block windows.h macro pollution: NOMINMAX kills max()/min() macros
+    # that collide with std::numeric_limits<>::max() in protobuf/gRPC templates,
+    # NOGDI skips wingdi.h which defines PASSTHROUGH and many other identifiers
+    # that collide with normal C++ identifiers (e.g., our ChannelType::PASSTHROUGH),
+    # WIN32_LEAN_AND_MEAN trims the windows.h surface area generally.
+    add_compile_definitions(WIN32_LEAN_AND_MEAN NOMINMAX NOGDI)
     # Enable parallel builds
     add_compile_options(/MP)
     # Suppress some common warnings
@@ -37,6 +43,7 @@ option(ULTRA_BUILD_TOOLS "Build command-line tools" ON)
 option(ULTRA_BUILD_GUI "Build GUI application" ON)
 option(ULTRA_BUILD_HARDWARE_TESTS "Register opt-in hardware smoke CTest target" OFF)
 option(ULTRA_USE_LIBHAMLIB "Link libhamlib for built-in rig control" ON)
+option(ULTRA_FETCH_GRPC "Fetch gRPC/protobuf when CMake packages are unavailable" ON)
 
 if(DEFINED ENV{ULTRA_HARDWARE_TESTS} AND "$ENV{ULTRA_HARDWARE_TESTS}" STREQUAL "1")
     set(ULTRA_BUILD_HARDWARE_TESTS ON CACHE BOOL
@@ -69,6 +76,93 @@ endfunction()
 
 # Find dependencies
 find_package(Threads REQUIRED)
+
+find_package(Protobuf CONFIG QUIET)
+find_package(gRPC CONFIG QUIET)
+
+if(TARGET gRPC::grpc++ AND TARGET protobuf::libprotobuf)
+    message(STATUS "Found gRPC/protobuf via CMake packages")
+    set(ULTRA_GRPC_GRPCPP_TARGET gRPC::grpc++)
+    set(ULTRA_PROTOBUF_LIB_TARGET protobuf::libprotobuf)
+else()
+    if(NOT ULTRA_FETCH_GRPC)
+        message(FATAL_ERROR "gRPC/protobuf CMake packages not found and ULTRA_FETCH_GRPC=OFF")
+    endif()
+
+    include(FetchContent)
+    set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
+    set(protobuf_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(protobuf_INSTALL OFF CACHE BOOL "" FORCE)
+    set(gRPC_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(gRPC_INSTALL OFF CACHE BOOL "" FORCE)
+    set(gRPC_ABSL_PROVIDER module CACHE STRING "" FORCE)
+    set(gRPC_CARES_PROVIDER module CACHE STRING "" FORCE)
+    set(gRPC_PROTOBUF_PROVIDER module CACHE STRING "" FORCE)
+    set(gRPC_RE2_PROVIDER module CACHE STRING "" FORCE)
+    set(gRPC_SSL_PROVIDER module CACHE STRING "" FORCE)
+    set(gRPC_ZLIB_PROVIDER module CACHE STRING "" FORCE)
+
+    FetchContent_Declare(
+        grpc
+        GIT_REPOSITORY https://github.com/grpc/grpc.git
+        GIT_TAG v1.62.2
+        GIT_SUBMODULES_RECURSE TRUE
+    )
+    FetchContent_MakeAvailable(grpc)
+    set(ULTRA_GRPC_GRPCPP_TARGET grpc++)
+    set(ULTRA_PROTOBUF_LIB_TARGET libprotobuf)
+endif()
+
+if(TARGET protobuf::protoc)
+    set(ULTRA_PROTOC_EXECUTABLE $<TARGET_FILE:protobuf::protoc>)
+elseif(TARGET protoc)
+    set(ULTRA_PROTOC_EXECUTABLE $<TARGET_FILE:protoc>)
+else()
+    find_program(ULTRA_PROTOC_EXECUTABLE protoc REQUIRED)
+endif()
+
+if(TARGET gRPC::grpc_cpp_plugin)
+    set(ULTRA_GRPC_CPP_PLUGIN $<TARGET_FILE:gRPC::grpc_cpp_plugin>)
+elseif(TARGET grpc_cpp_plugin)
+    set(ULTRA_GRPC_CPP_PLUGIN $<TARGET_FILE:grpc_cpp_plugin>)
+else()
+    find_program(ULTRA_GRPC_CPP_PLUGIN grpc_cpp_plugin REQUIRED)
+endif()
+
+set(ULTRA_OTASIM_PROTO_FILE
+    ${CMAKE_CURRENT_SOURCE_DIR}/proto/ota_simulator.proto)
+set(ULTRA_OTASIM_PROTO_GEN_DIR
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/otasim_proto)
+set(ULTRA_OTASIM_PROTO_SRCS
+    ${ULTRA_OTASIM_PROTO_GEN_DIR}/ota_simulator.pb.cc
+    ${ULTRA_OTASIM_PROTO_GEN_DIR}/ota_simulator.grpc.pb.cc)
+set(ULTRA_OTASIM_PROTO_HDRS
+    ${ULTRA_OTASIM_PROTO_GEN_DIR}/ota_simulator.pb.h
+    ${ULTRA_OTASIM_PROTO_GEN_DIR}/ota_simulator.grpc.pb.h)
+
+add_custom_command(
+    OUTPUT ${ULTRA_OTASIM_PROTO_SRCS} ${ULTRA_OTASIM_PROTO_HDRS}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${ULTRA_OTASIM_PROTO_GEN_DIR}
+    COMMAND ${ULTRA_PROTOC_EXECUTABLE}
+            --proto_path=${CMAKE_CURRENT_SOURCE_DIR}/proto
+            --cpp_out=${ULTRA_OTASIM_PROTO_GEN_DIR}
+            --grpc_out=${ULTRA_OTASIM_PROTO_GEN_DIR}
+            --plugin=protoc-gen-grpc=${ULTRA_GRPC_CPP_PLUGIN}
+            ${ULTRA_OTASIM_PROTO_FILE}
+    DEPENDS ${ULTRA_OTASIM_PROTO_FILE}
+    VERBATIM)
+
+add_library(otasim_proto STATIC
+    ${ULTRA_OTASIM_PROTO_SRCS}
+    ${ULTRA_OTASIM_PROTO_HDRS}
+)
+target_include_directories(otasim_proto PUBLIC
+    ${ULTRA_OTASIM_PROTO_GEN_DIR}
+)
+target_link_libraries(otasim_proto PUBLIC
+    ${ULTRA_GRPC_GRPCPP_TARGET}
+    ${ULTRA_PROTOBUF_LIB_TARGET}
+)
 
 if(ULTRA_USE_LIBHAMLIB)
     if(WIN32)
@@ -232,6 +326,69 @@ else()
     message(STATUS "SDL2 not found: cli_simulator --role A|B will be unavailable")
 endif()
 
+add_library(ota_channel_core STATIC
+    src/ota_channel_core/rng.cpp
+    src/ota_channel_core/models.cpp
+    src/ota_channel_core/mixer.cpp
+    src/ota_channel_core/session_context.cpp
+    src/ota_channel_core/session_manager.cpp
+    src/ota_channel_core/channel.cpp
+)
+set_target_properties(ota_channel_core PROPERTIES OUTPUT_NAME ota_channel_core)
+target_include_directories(ota_channel_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ota_channel_core
+)
+target_include_directories(ota_channel_core PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty
+)
+target_link_libraries(ota_channel_core PUBLIC Threads::Threads)
+
+add_library(ota_simulator_service STATIC
+    src/ota_simulator_service/auth_allowlist.cpp
+    src/ota_simulator_service/audio_packet.cpp
+    src/ota_simulator_service/audio_plane.cpp
+    src/ota_simulator_service/capture_writer.cpp
+    src/ota_simulator_service/ota_simulator_service.cpp
+    src/tnc/socket_compat.cpp
+)
+set_target_properties(ota_simulator_service PROPERTIES OUTPUT_NAME ota_simulator_service)
+target_include_directories(ota_simulator_service PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ota_simulator_service
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${ULTRA_OTASIM_PROTO_GEN_DIR}
+)
+target_include_directories(ota_simulator_service PRIVATE
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/include
+)
+target_link_libraries(ota_simulator_service PUBLIC
+    ota_channel_core
+    otasim_proto
+    Threads::Threads
+)
+if(WIN32)
+    target_link_libraries(ota_simulator_service PRIVATE ws2_32)
+endif()
+
+add_library(ultra_otasim_client STATIC
+    src/otasim_client/ota_audio_backend.cpp
+)
+target_include_directories(ultra_otasim_client PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(ultra_otasim_client PUBLIC
+    ota_simulator_service
+)
+if(WIN32)
+    target_link_libraries(ultra_otasim_client PRIVATE ws2_32)
+endif()
+ultra_enable_tool_test_warnings(
+    src/ota_simulator_service/auth_allowlist.cpp
+    src/ota_simulator_service/audio_packet.cpp
+    src/ota_simulator_service/audio_plane.cpp
+    src/ota_simulator_service/capture_writer.cpp
+    src/ota_simulator_service/ota_simulator_service.cpp
+)
+
 # Core library
 add_library(ultra_core STATIC
     src/ofdm/modulator.cpp
@@ -391,6 +548,7 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
     )
     target_link_libraries(ultra_sim_station PUBLIC ultra_core)
+    target_link_libraries(ultra_sim_station PUBLIC ota_channel_core)
 
     add_executable(ultra
         src/main.cpp
@@ -400,7 +558,7 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
     )
-    target_link_libraries(ultra PRIVATE ultra_core)
+    target_link_libraries(ultra PRIVATE ultra_core ota_channel_core)
 
     # CLI Simulator - Uses IWaveform + StreamingDecoder/Encoder directly (NOT ModemEngine)
     add_executable(cli_simulator
@@ -411,7 +569,7 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
     )
-    target_link_libraries(cli_simulator PRIVATE ultra_sim_station)
+    target_link_libraries(cli_simulator PRIVATE ultra_sim_station ultra_otasim_client)
 
     add_executable(session_decode
         tools/session_decode.cpp
@@ -493,8 +651,9 @@ if(ULTRA_BUILD_TOOLS)
     target_include_directories(ota_simulator PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
+        ${CMAKE_CURRENT_BINARY_DIR}/generated/include
     )
-    target_link_libraries(ota_simulator PRIVATE ultra_sim_station ultra_tool_wav_io)
+    target_link_libraries(ota_simulator PRIVATE ultra_sim_station ultra_tool_wav_io ota_simulator_service)
 
     add_executable(ultra_report
         tools/ultra_report.cpp
@@ -544,7 +703,7 @@ if(ULTRA_BUILD_TOOLS)
             ULTRA_HAVE_SDL2
             SDL_MAIN_HANDLED
         )
-        target_link_libraries(ultra_tnc PRIVATE ultra_core)
+        target_link_libraries(ultra_tnc PRIVATE ultra_core ota_channel_core ultra_otasim_client)
         ultra_link_hamlib(ultra_tnc)
     else()
         message(STATUS "ultra_tnc disabled: SDL2 not found")
@@ -562,7 +721,17 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
     )
-    target_link_libraries(decode_bench PRIVATE ultra_tool_wav_io)
+    target_link_libraries(decode_bench PRIVATE ultra_tool_wav_io ota_channel_core)
+
+    # otasim_audio_demo - generates a ~60s WAV of channel-model audio
+    # for human listening (sanity check / iCloud sample).
+    add_executable(otasim_audio_demo tools/otasim_audio_demo.cpp)
+    target_include_directories(otasim_audio_demo PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
+    )
+    target_link_libraries(otasim_audio_demo PRIVATE
+        ultra_tool_wav_io ota_channel_core)
 
     # Threaded simulator - proper real-time audio simulation
     add_executable(threaded_simulator
@@ -586,7 +755,7 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
     )
-    target_link_libraries(test_waveform_simple PRIVATE ultra_core)
+    target_link_libraries(test_waveform_simple PRIVATE ultra_core ota_channel_core)
 endif()
 
 # GUI Application
@@ -630,6 +799,8 @@ if(ULTRA_BUILD_GUI)
 
         target_link_libraries(ultra_gui PRIVATE
             ultra_core
+            ota_channel_core
+            ultra_otasim_client
             ${SDL2_LIBRARIES}
             ${OPENGL_LIBRARIES}
         )
