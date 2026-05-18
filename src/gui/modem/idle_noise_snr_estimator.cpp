@@ -65,33 +65,25 @@ void IdleNoiseSNREstimator::observeIdleAudio(const float* samples, size_t count)
         const double filtered_power =
             window_sum_sq_ / static_cast<double>(config_.window_samples);
 
-        // Bandwidth-normalization derivation:
+        // In-band SNR convention:
         //
-        // The receive chain uses the same windowed FIR bandpass family as the
-        // operator audio filter. For idle white receiver noise x[n] with sample
-        // variance sigma^2, the FIR output is y[n] = sum_k h[k] x[n-k]. Because
-        // white samples are uncorrelated, first principles/Parseval give
+        // The decoder and operator meter care about signal/noise inside the
+        // receiver's actual modem bandwidth. The FIR output is therefore the
+        // reference noise measurement:
         //
-        //     E{y^2} = sigma^2 * sum_k h[k]^2 .
+        //     P_noise_in_band = E{y^2}
         //
-        // The actual 101-tap Blackman bandpass configured here is 50-2950 Hz,
-        // matching the default input-chain filter around the 2.8 kHz modem
-        // band. Its finite-transition coefficient energy is not the ideal
-        // 2800/24000 rectangular fraction; with the current coefficients
-        // sum(h^2) ~= 0.1086, i.e. ENBW ~= 24000 * sum(h^2) ~= 2.61 kHz.
-        // Comparing kModemReferenceRms^2 directly to filtered_power would
-        // therefore read about +10*log10(1/sum(h^2)) = +9.64 dB high on the
-        // locked SimulatedChannel/ChannelSNRProbe reference, which defines SNR
-        // against sigma^2 at the receiver samples. The non-heuristic correction
-        // is to divide by the actual coefficient energy:
+        // Earlier code divided filtered_power by sum_k h[k]^2 to extrapolate a
+        // broadband-equivalent variance. That is only valid for white noise. On
+        // real-HF noise with nearly all energy already in the modem passband,
+        // the divide inflated the measured noise by about 1/sum(h^2), causing
+        // the meter to under-read by roughly 9.6 dB. Keeping filtered_power here
+        // reports the physically relevant in-band SNR for both white and
+        // colored idle noise.
         //
-        //     P_noise_reference = filtered_power / sum_k h[k]^2 .
-        //
-        // This single factor accounts for both the FIR integration bandwidth and
-        // passband gain because it is computed from the exact coefficients being
-        // applied to the idle window.
-        const double normalized_noise_power =
-            filtered_power / safePositive(fir_energy_, 1.0);
+        // Snapshot::normalized_noise_rms keeps its legacy field name for local
+        // API stability, but now carries the in-band FIR-output RMS.
+        const double normalized_noise_power = filtered_power;
         const double bounded_noise_power =
             std::max(normalized_noise_power, std::numeric_limits<double>::min());
         const float snr_db = static_cast<float>(

@@ -1,6 +1,7 @@
 #include "gui/modem/idle_noise_snr_estimator.hpp"
-#include "sim/cli_enums.hpp"
-#include "sim/simulated_station.hpp"
+#include "ota_channel_core/models.hpp"
+#include "sim/channel_calibration.hpp"
+#include "ultra/dsp.hpp"
 #include "ultra/logging.hpp"
 
 #include <algorithm>
@@ -8,6 +9,9 @@
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
+#include <limits>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -25,37 +29,140 @@ int tests_failed = 0;
         } \
     } while (0)
 
-const char* channelName(::ChannelType channel) {
+enum class MatrixChannel {
+    AWGN,
+    RealHfLoop
+};
+
+const char* channelName(MatrixChannel channel) {
     switch (channel) {
-        case ::ChannelType::AWGN: return "AWGN";
-        case ::ChannelType::GOOD: return "GOOD";
-        case ::ChannelType::MODERATE: return "MODERATE";
-        default: return "UNKNOWN";
+        case MatrixChannel::AWGN: return "AWGN";
+        case MatrixChannel::RealHfLoop: return "real_hf_loop";
     }
+    return "UNKNOWN";
 }
 
 struct EstimateResult {
     bool valid = false;
     float snr_db = 0.0f;
     float latest_snr_db = 0.0f;
-    float normalized_noise_rms = 0.0f;
+    double true_in_band_snr_db = 0.0;
+    double delta_db = 0.0;
+    float in_band_noise_rms = 0.0f;
     double fir_energy = 0.0;
     double enbw_hz = 0.0;
     size_t windows = 0;
+    size_t reference_windows = 0;
 };
 
-EstimateResult measureIdleSNR(::ChannelType channel, float snr_db, uint32_t seed) {
+struct InBandReference {
+    double smoothed_snr_db = 0.0;
+    size_t windows = 0;
+};
+
+std::vector<float> loadRealHfLoopNoise() {
+    namespace channel = ultra::ota_channel_core;
+    const std::vector<std::string> candidates = {
+        "recordings/ota_noise_bed_2026-05-18_20m_14100/noise_bed.wav",
+        "../recordings/ota_noise_bed_2026-05-18_20m_14100/noise_bed.wav",
+        "../../recordings/ota_noise_bed_2026-05-18_20m_14100/noise_bed.wav",
+    };
+
+    std::string last_error;
+    for (const std::string& path : candidates) {
+        try {
+            return channel::loadRealHfLoopNoiseBedWav(path);
+        } catch (const std::exception& e) {
+            last_error = e.what();
+        }
+    }
+
+    throw std::runtime_error("failed to load real_hf_loop noise bed: " + last_error);
+}
+
+std::vector<float> synthesizeIdleNoise(
+    MatrixChannel channel,
+    float snr_db,
+    uint32_t seed,
+    const std::shared_ptr<const std::vector<float>>& real_hf_loop,
+    size_t count) {
+    std::vector<float> silence(count, 0.0f);
+
+    if (channel == MatrixChannel::AWGN) {
+        ultra::ota_channel_core::RngRoot root(seed);
+        ultra::ota_channel_core::AWGNChannelModel model(
+            snr_db,
+            root.stream("idle-noise-snr-awgn"));
+        return model.process(silence);
+    }
+
+    ultra::ota_channel_core::RealHfLoopChannelModel model(
+        snr_db,
+        real_hf_loop,
+        seed);
+    return model.process(silence);
+}
+
+InBandReference computeInBandReference(
+    const std::vector<float>& samples,
+    const ultra::gui::IdleNoiseSNREstimator::Config& config) {
+    auto filter = ultra::FIRFilter::bandpass(
+        static_cast<size_t>(std::max(3, config.filter_taps)),
+        config.band_low_hz,
+        config.band_high_hz,
+        config.sample_rate);
+
+    const float alpha = std::clamp(config.ema_alpha, 0.0f, 1.0f);
+    double window_sum_sq = 0.0;
+    size_t window_fill = 0;
+    bool valid = false;
+    InBandReference reference;
+
+    for (float sample : samples) {
+        const float filtered = filter.process(sample);
+        window_sum_sq += static_cast<double>(filtered) * static_cast<double>(filtered);
+        ++window_fill;
+
+        if (window_fill < config.window_samples) {
+            continue;
+        }
+
+        const double noise_power =
+            std::max(window_sum_sq / static_cast<double>(config.window_samples),
+                     std::numeric_limits<double>::min());
+        const double instant_snr_db =
+            10.0 * std::log10(ultra::sim::kModemReferencePower / noise_power);
+        if (!valid) {
+            reference.smoothed_snr_db = instant_snr_db;
+            valid = true;
+        } else {
+            reference.smoothed_snr_db =
+                static_cast<double>(alpha) * instant_snr_db +
+                (1.0 - static_cast<double>(alpha)) * reference.smoothed_snr_db;
+        }
+        ++reference.windows;
+
+        window_sum_sq = 0.0;
+        window_fill = 0;
+    }
+
+    return reference;
+}
+
+EstimateResult measureIdleSNR(
+    MatrixChannel channel,
+    float snr_db,
+    uint32_t seed,
+    const std::shared_ptr<const std::vector<float>>& real_hf_loop) {
     constexpr size_t kIdleSamples = 48000 * 4;
 
-    ::SimulatedChannel sim;
-    sim.setSeed(seed);
-    sim.configure(snr_db, channel);
+    ultra::gui::IdleNoiseSNREstimator::Config config;
 
-    std::vector<float> tx(kIdleSamples, 0.0f);
-    sim.transmitFromA(tx);
-    std::vector<float> rx = sim.receiveForB(kIdleSamples);
+    const std::vector<float> rx =
+        synthesizeIdleNoise(channel, snr_db, seed, real_hf_loop, kIdleSamples);
+    const InBandReference reference = computeInBandReference(rx, config);
 
-    ultra::gui::IdleNoiseSNREstimator estimator;
+    ultra::gui::IdleNoiseSNREstimator estimator(config);
     estimator.observeIdleAudio(rx.data(), rx.size());
     const auto snapshot = estimator.snapshot();
 
@@ -63,36 +170,54 @@ EstimateResult measureIdleSNR(::ChannelType channel, float snr_db, uint32_t seed
     result.valid = snapshot.valid;
     result.snr_db = snapshot.snr_db;
     result.latest_snr_db = snapshot.latest_instant_snr_db;
-    result.normalized_noise_rms = snapshot.normalized_noise_rms;
+    result.true_in_band_snr_db = reference.smoothed_snr_db;
+    result.delta_db = static_cast<double>(snapshot.snr_db) - reference.smoothed_snr_db;
+    result.in_band_noise_rms = snapshot.normalized_noise_rms;
     result.fir_energy = snapshot.fir_energy;
     result.enbw_hz = snapshot.equivalent_noise_bandwidth_hz;
     result.windows = snapshot.windows_observed;
+    result.reference_windows = reference.windows;
     return result;
 }
 
-void checkChannel(::ChannelType channel, float tolerance_db) {
-    const std::vector<float> snrs = {-5.0f, 0.0f, 5.0f, 10.0f, 15.0f, 20.0f};
+void checkChannel(
+    MatrixChannel channel,
+    const std::shared_ptr<const std::vector<float>>& real_hf_loop) {
+    constexpr float kToleranceDb = 1.5f;
+    const std::vector<float> snrs = {-6.0f, 0.0f, 6.0f, 12.0f, 18.0f, 24.0f};
     const std::vector<uint32_t> seeds = {1u, 2u, 3u, 4u, 5u};
 
+    // New convention: the idle meter reports in-band SNR. The old broadband
+    // assertions expected AWGN measured ~= configured SNR, so AWGN SNR=12 used
+    // to expect about 12 dB. With this 50-2950 Hz FIR, true in-band AWGN is
+    // about 12 - 10*log10(0.1086) = 21.6 dB. For the real_hf_loop capture, the
+    // reference is the measured FIR-band power of the capture slice itself; in
+    // this matrix SNR=12 is about 15.0 dB, while the old white-noise divide
+    // would have reported about 5.4 dB for the same slice.
     for (float snr_db : snrs) {
-        double sum = 0.0;
-        float min_estimate = 1000.0f;
-        float max_estimate = -1000.0f;
+        double reported_sum = 0.0;
+        double true_sum = 0.0;
+        double max_abs_delta = 0.0;
         int count = 0;
         EstimateResult last;
 
         for (uint32_t seed : seeds) {
-            const EstimateResult r = measureIdleSNR(channel, snr_db, seed);
+            const EstimateResult r = measureIdleSNR(channel, snr_db, seed, real_hf_loop);
             last = r;
             CHECK(r.valid, std::string(channelName(channel)) + " idle SNR should be valid");
             CHECK(r.windows >= 10,
                   std::string(channelName(channel)) + " should observe multiple idle windows");
+            CHECK(r.windows == r.reference_windows,
+                  std::string(channelName(channel)) + " should match reference window count");
             CHECK(std::isfinite(r.snr_db),
                   std::string(channelName(channel)) + " idle SNR should be finite");
+            CHECK(std::abs(r.delta_db) <= kToleranceDb,
+                  std::string(channelName(channel)) +
+                      " idle-noise SNR should match true in-band SNR");
             if (r.valid && std::isfinite(r.snr_db)) {
-                sum += r.snr_db;
-                min_estimate = std::min(min_estimate, r.snr_db);
-                max_estimate = std::max(max_estimate, r.snr_db);
+                reported_sum += r.snr_db;
+                true_sum += r.true_in_band_snr_db;
+                max_abs_delta = std::max(max_abs_delta, std::abs(r.delta_db));
                 ++count;
             }
         }
@@ -103,24 +228,21 @@ void checkChannel(::ChannelType channel, float tolerance_db) {
             continue;
         }
 
-        const float measured = static_cast<float>(sum / static_cast<double>(count));
-        const float delta = measured - snr_db;
+        const double reported = reported_sum / static_cast<double>(count);
+        const double true_snr = true_sum / static_cast<double>(count);
+        const double delta = reported - true_snr;
         std::cout << std::fixed << std::setprecision(2)
                   << channelName(channel)
                   << " configured=" << snr_db
-                  << " measured=" << measured
+                  << " true_in_band=" << true_snr
+                  << " reported=" << reported
                   << " delta=" << delta
-                  << " min=" << min_estimate
-                  << " max=" << max_estimate
-                  << " tolerance=" << tolerance_db
-                  << " norm_noise_rms=" << last.normalized_noise_rms
+                  << " max_abs_delta=" << max_abs_delta
+                  << " tolerance=" << kToleranceDb
+                  << " in_band_noise_rms=" << last.in_band_noise_rms
                   << " fir_energy=" << std::setprecision(8) << last.fir_energy
                   << " enbw_hz=" << std::setprecision(2) << last.enbw_hz
                   << "\n";
-
-        CHECK(std::abs(delta) <= tolerance_db,
-              std::string(channelName(channel)) +
-                  " idle-noise SNR should match configured broadband SNR");
     }
 }
 
@@ -129,12 +251,15 @@ void checkChannel(::ChannelType channel, float tolerance_db) {
 int main() {
     ultra::setLogLevel(ultra::LogLevel::ERROR);
 
-    checkChannel(::ChannelType::AWGN, 1.5f);
-    checkChannel(::ChannelType::GOOD, 3.0f);
-    checkChannel(::ChannelType::MODERATE, 3.0f);
+    const auto real_hf_loop = std::make_shared<const std::vector<float>>(
+        loadRealHfLoopNoise());
+
+    checkChannel(MatrixChannel::AWGN, real_hf_loop);
+    checkChannel(MatrixChannel::RealHfLoop, real_hf_loop);
 
     if (tests_failed == 0) {
-        std::cout << "PASS: Idle-noise SNR calibration (" << tests_run << " checks)\n";
+        std::cout << "PASS: Idle-noise in-band SNR calibration ("
+                  << tests_run << " checks)\n";
         return 0;
     }
     std::cout << "FAIL: " << tests_failed << "/" << tests_run << " checks failed\n";
