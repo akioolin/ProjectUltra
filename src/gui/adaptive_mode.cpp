@@ -17,37 +17,37 @@ void AdaptiveModeController::reset() {
 }
 
 void AdaptiveModeController::recommendMode(float snr_db, Modulation& mod, CodeRate& rate) {
-    // Thresholds calibrated for the routed consumer-facing SNR convention.
-    // The source must travel with snr_db (for example ofdm_broadband vs
-    // idle_in_band); this legacy controller preserves its existing numbers.
+    // Thresholds use the unified in-band SNR convention shared by the idle and
+    // OFDM operator-facing meters. This controller is a legacy coherent-QAM
+    // path; production auto-selection uses protocol::recommendDataMode().
     //
-    // Pilot SNR thresholds (approximate mapping):
-    //   Pilot > 38 dB: Excellent channel, use highest modes
-    //   Pilot > 32 dB: Good channel
-    //   Pilot > 28 dB: Moderate channel
-    //   Pilot > 24 dB: Fair channel
-    //   Pilot > 20 dB: Poor channel
-    //   Pilot < 20 dB: Very poor, use most robust mode
+    // In-band SNR thresholds (legacy broadband-equivalent + ~9.6 dB):
+    //   > 48 dB: Excellent channel, use highest modes
+    //   > 44 dB: Good channel
+    //   > 40 dB: Moderate channel
+    //   > 36 dB: Fair channel
+    //   > 34 dB: Poor channel
+    //   <= 28 dB: Very poor, use most robust mode
 
-    if (snr_db > 38.0f) {
+    if (snr_db > 48.0f) {
         mod = Modulation::QAM64;
         rate = CodeRate::R5_6;
-    } else if (snr_db > 34.0f) {
+    } else if (snr_db > 44.0f) {
         mod = Modulation::QAM64;
         rate = CodeRate::R3_4;
-    } else if (snr_db > 30.0f) {
+    } else if (snr_db > 40.0f) {
         mod = Modulation::QAM16;
         rate = CodeRate::R3_4;
-    } else if (snr_db > 26.0f) {
+    } else if (snr_db > 36.0f) {
         mod = Modulation::QAM16;
         rate = CodeRate::R2_3;
-    } else if (snr_db > 24.0f) {
+    } else if (snr_db > 34.0f) {
         mod = Modulation::QPSK;
         rate = CodeRate::R2_3;
-    } else if (snr_db > 22.0f) {
+    } else if (snr_db > 32.0f) {
         mod = Modulation::QPSK;
         rate = CodeRate::R1_2;
-    } else if (snr_db > 18.0f) {
+    } else if (snr_db > 28.0f) {
         mod = Modulation::BPSK;
         rate = CodeRate::R1_2;
     } else {

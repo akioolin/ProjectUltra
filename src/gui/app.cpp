@@ -2627,9 +2627,9 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         snprintf(snr_text, sizeof(snr_text), "-- dB");
         if (operator_snr.valid) {
             snr_normalized = std::max(0.0f, std::min(1.0f, operator_snr.snr_db / 40.0f));
-            if (operator_snr.snr_db >= 15.0f) {
+            if (operator_snr.snr_db >= 25.0f) {
                 snr_color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);
-            } else if (operator_snr.snr_db >= 5.0f) {
+            } else if (operator_snr.snr_db >= 15.0f) {
                 snr_color = ImVec4(0.8f, 0.8f, 0.0f, 1.0f);
             } else {
                 snr_color = ImVec4(1.0f, 0.4f, 0.2f, 1.0f);
@@ -2679,8 +2679,7 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         ImGui::TextColored(wf_color, "%s", wf_str);
         ImGui::SameLine();
 
-        // Show mode-appropriate settings and throughput
-        float throughput_bps = 0.0f;
+        // Show mode-appropriate settings
         ImVec4 mode_quality_color;
         const char* mode_quality = "Good";
 
@@ -2691,16 +2690,13 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         if (waveform == protocol::WaveformMode::MC_DPSK) {
             // For MC-DPSK, just show carrier count (DQPSK R1/4 is implicit)
             int carriers = modem_.getMCDPSKCarriers();
-            throughput_bps = modem_.getMCDPSKThroughput();
             ImGui::Text("%d carriers", carriers);
         } else {
             // For OFDM modes, show negotiated modulation/rate
             ImGui::Text("%s %s", modulationToString(data_mod), codeRateToString(data_rate));
-            throughput_bps = config_.getTheoreticalThroughput(data_mod, data_rate);
         }
         ImGui::SameLine();
         ImGui::TextColored(mode_quality_color, "[%s]", mode_quality);
-        ImGui::TextDisabled("PHY ~%.1f kbps", throughput_bps / 1000.0f);
 
         // Row 2: Our SNR measurement
         ImVec4 sync_color = stats.synced ? ImVec4(0.2f, 1.0f, 0.2f, 1.0f) : ImVec4(0.5f, 0.5f, 0.5f, 1.0f);
@@ -2718,9 +2714,9 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         ImVec4 snr_color;
         if (!operator_snr.valid) {
             snr_color = ImVec4(0.3f, 0.3f, 0.3f, 1.0f);
-        } else if (operator_snr.snr_db >= 15.0f) {
+        } else if (operator_snr.snr_db >= 25.0f) {
             snr_color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);  // Green
-        } else if (operator_snr.snr_db >= 5.0f) {
+        } else if (operator_snr.snr_db >= 15.0f) {
             snr_color = ImVec4(0.8f, 0.8f, 0.0f, 1.0f);  // Yellow
         } else {
             snr_color = ImVec4(1.0f, 0.4f, 0.2f, 1.0f);  // Orange-red

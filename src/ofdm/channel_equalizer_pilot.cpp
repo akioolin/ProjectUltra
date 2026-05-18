@@ -191,7 +191,7 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
 
     // Phase-1 transfer runs showed temporal pilot-channel residuals are too
     // easily contaminated by channel-estimate motion during long OFDM frames.
-    // Keep the broadband SNR estimate anchored to the same-frame LTS residual;
+    // Keep the in-band SNR estimate anchored to the same-frame LTS residual;
     // pilots continue to update fading/equalization below.
     size_t pilot_residual_count = 0;
     constexpr float kPilotSNRFadingLimit = 0.0f;
@@ -459,7 +459,7 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
 
     // Store for external access (GUI display, rate adaptation)
     last_fading_index = fading_index;
-    LOG_DEMOD(DEBUG, "Pilot quality: fading_index=%.3f broadband_snr=%.1f dB "
+    LOG_DEMOD(DEBUG, "Pilot quality: fading_index=%.3f in_band_snr=%.1f dB "
               "(pilot_residuals=%zu)",
               last_fading_index,
               last_snr_db_estimate_valid ? last_snr_db_estimate : 0.0f,

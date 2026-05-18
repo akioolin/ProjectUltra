@@ -10,6 +10,49 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-18: Unified in-band SNR and rate-threshold recalibration
+
+**Fixed:** Round 1 made the idle estimator report receiver in-band SNR, but
+the OFDM LTS/pilot residual meter and the rate selector still used the old
+broadband-equivalent convention. On AWGN configured 12 dB, idle reported about
+22 dB in-band and the selector interpreted that as old-style 22 dB, promoting
+to D8PSK R2/3. That path could not decode the actual channel and triggered
+constant two-pass correction plus retransmission cascades.
+
+**Changed:** OFDM operator-facing LTS/pilot residual SNR now converts the
+legacy broadband-equivalent estimate to the same in-band convention as the idle
+meter using the 50-2950 Hz FIR noise-power fraction (`0.10858718`, +9.642 dB).
+The OFDM internal LLR/channel-quality SNR is unchanged. The noise-bed station
+SNR estimator now keeps filtered in-band power instead of extrapolating it back
+to broadband white-noise power.
+
+**Recalibrated:** Production SNR thresholds moved to the in-band scale:
+
+| Threshold | Old broadband | New in-band |
+|-----------|---------------|-------------|
+| Wide OFDM entry | 10 dB | 20 dB |
+| DQPSK R1/2/R2/3/R3/4 OFDM gates | 15 dB | 25 dB |
+| Bootstrap R3/4 keep cap | 24 dB | 34 dB |
+| D8PSK R2/3 clean/AWGN gates | 18 / 22 dB | 28 / 32 dB |
+| D8PSK R1/2 good-fading floor | 22 dB | 32 dB |
+| D8PSK R3/4 AWGN floor | 24 dB | 34 dB |
+| OFDM_NARROW AWGN/good R1/2 gates | 8 / 10 dB | 18 / 20 dB |
+
+**Verification:** `ChannelModemSNRMeterCalibration` now checks AWGN idle-vs-OFDM
+agreement within ±1.5 dB and expects configured SNR +9.642 dB on AWGN/Good/
+Moderate. Boundary tests lock AWGN-12 in-band (~22 dB) to DQPSK R1/4, not
+D8PSK R2/3.
+
+```bash
+cmake --build build -j4
+./build/tests/test_modem_snr_meter_calibration
+./build/tests/test_waveform_policy
+./build/tests/test_connection_policy
+./build/tests/test_protocol
+```
+
+---
+
 ## 2026-05-18: OTASim admin role + otasim_ctl admin CLI
 
 **Fixed:** Any authenticated OTASim token could call destructive RPCs

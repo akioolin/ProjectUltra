@@ -80,7 +80,7 @@ struct DecodeResult {
     bool has_idle_in_band_snr_db = false;
     float idle_in_band_snr_db = 0.0f;       // Receiver passband/in-band idle SNR.
     bool has_ofdm_broadband_snr_db = false;
-    float ofdm_broadband_snr_db = 0.0f;     // OFDM LTS/pilot residual broadband SNR.
+    float ofdm_broadband_snr_db = 0.0f;     // Historical field name; OFDM in-band SNR.
     float ofdm_internal_snr_db = 0.0f;      // Demodulator internal LLR/channel-quality scale.
     float sync_quality_db = 0.0f;           // Chirp correlation confidence; not physical SNR.
     float lts_fading_index = 0.0f;  // Per-carrier LTS/pilot fading index
@@ -275,7 +275,7 @@ public:
     // 0-1 range, > 0.4 indicates significant fading
     float getLastFadingIndex() const { return last_fading_index_.load(); }
 
-    // Get last residual-derived OFDM broadband SNR estimate. Returns false
+    // Get last residual-derived OFDM in-band SNR estimate. Returns false
     // until an OFDM LTS/pilot residual has landed.
     bool hasLastOFDMBroadbandSNREstimate() const {
         return last_ofdm_broadband_snr_db_valid_.load();

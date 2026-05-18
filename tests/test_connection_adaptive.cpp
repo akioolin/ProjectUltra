@@ -257,7 +257,7 @@ void test_adaptive_upgrade_requires_backlog_and_clean_windows() {
     CHECK(!payload.path.empty(), "large test file");
 
     Connection c;
-    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 15.0f, 0.05f);
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 25.0f, 0.05f);
     ConnectionAdaptiveTestAccess::startFile(c, payload.path);
 
     ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
@@ -278,7 +278,7 @@ void test_adaptive_upgrade_skips_small_backlog() {
     CHECK(!payload.path.empty(), "small test file");
 
     Connection c;
-    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 15.0f, 0.05f);
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 25.0f, 0.05f);
     ConnectionAdaptiveTestAccess::startFile(c, payload.path);
 
     for (int i = 0; i < 4; ++i) {
@@ -295,7 +295,7 @@ void test_adaptive_downgrade_hysteresis_and_short_lockout_upgrade() {
     CHECK(!payload.path.empty(), "large test file");
 
     Connection c;
-    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 15.0f, 0.05f);
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 25.0f, 0.05f);
     ConnectionAdaptiveTestAccess::startFile(c, payload.path);
     ConnectionAdaptiveTestAccess::createRetransmissionPressure(
         c, ConnectionAdaptiveTestAccess::arqWindow(c) / 2);
@@ -337,7 +337,7 @@ void test_adaptive_downgrade_waits_when_more_than_half_full() {
     CHECK(!payload.path.empty(), "large test file");
 
     Connection c;
-    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 15.0f, 0.05f);
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 25.0f, 0.05f);
     ConnectionAdaptiveTestAccess::startFile(c, payload.path);
     const size_t window = ConnectionAdaptiveTestAccess::arqWindow(c);
     ConnectionAdaptiveTestAccess::createRetransmissionPressure(c, (window / 2) + 1);
@@ -359,7 +359,7 @@ void test_adaptive_downgrade_fires_when_window_half_full() {
     CHECK(!payload.path.empty(), "large test file");
 
     Connection c;
-    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 15.0f, 0.05f);
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 25.0f, 0.05f);
     ConnectionAdaptiveTestAccess::startFile(c, payload.path);
     const size_t window = ConnectionAdaptiveTestAccess::arqWindow(c);
     CHECK(window % 2 == 0, "test expects an even ARQ window");
@@ -385,7 +385,7 @@ void test_adaptive_stuck_downgrade_forces_after_timeout() {
     CHECK(!payload.path.empty(), "large test file");
 
     Connection c;
-    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 15.0f, 0.05f);
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 25.0f, 0.05f);
     ConnectionAdaptiveTestAccess::startFile(c, payload.path);
     const size_t window = ConnectionAdaptiveTestAccess::arqWindow(c);
     ConnectionAdaptiveTestAccess::createRetransmissionPressure(c, window);
@@ -420,7 +420,7 @@ void test_adaptive_upgrade_not_forced_after_timeout() {
     CHECK(!payload.path.empty(), "large test file");
 
     Connection c;
-    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 15.0f, 0.05f);
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 25.0f, 0.05f);
     ConnectionAdaptiveTestAccess::startFile(c, payload.path);
     const size_t window = ConnectionAdaptiveTestAccess::arqWindow(c);
     ConnectionAdaptiveTestAccess::fillArqWindow(c, window);
@@ -455,7 +455,7 @@ void test_adaptive_post_downgrade_lockout_blocks_upgrade() {
     CHECK(!payload.path.empty(), "large test file");
 
     Connection c;
-    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 15.0f, 0.05f);
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 25.0f, 0.05f);
     ConnectionAdaptiveTestAccess::startFile(c, payload.path);
     ConnectionAdaptiveTestAccess::createRetransmissionPressure(
         c, ConnectionAdaptiveTestAccess::arqWindow(c) / 2);
@@ -483,7 +483,7 @@ void test_adaptive_post_downgrade_lockout_expires() {
     CHECK(!payload.path.empty(), "large test file");
 
     Connection c;
-    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 15.0f, 0.05f);
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 25.0f, 0.05f);
     ConnectionAdaptiveTestAccess::startFile(c, payload.path);
     ConnectionAdaptiveTestAccess::createRetransmissionPressure(
         c, ConnectionAdaptiveTestAccess::arqWindow(c) / 2);
@@ -510,7 +510,7 @@ void test_forced_rate_disables_adaptive_controller() {
     CHECK(!payload.path.empty(), "large test file");
 
     Connection c;
-    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 15.0f, 0.05f);
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 25.0f, 0.05f);
     ConnectionAdaptiveTestAccess::forceCodeRate(c, CodeRate::R1_2);
     ConnectionAdaptiveTestAccess::startFile(c, payload.path);
 

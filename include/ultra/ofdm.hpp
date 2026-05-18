@@ -82,9 +82,10 @@ public:
     // Get estimated SNR in dB on the demodulator's internal LLR scale.
     float getEstimatedSNR() const;
 
-    // Get the last broadband SNR estimate derived from OFDM pilot/LTS
-    // residuals. This is separate from getEstimatedSNR(), which remains the
-    // demodulator's internal per-carrier quality value for LLR scaling.
+    // Get the last in-band SNR estimate derived from OFDM pilot/LTS residuals.
+    // The accessor name is historical. This is separate from getEstimatedSNR(),
+    // which remains the demodulator's internal per-carrier quality value for
+    // LLR scaling.
     bool hasLastOFDMBroadbandSNREstimate() const;
     float getLastOFDMBroadbandSNREstimate() const;
 

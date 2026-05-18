@@ -120,14 +120,14 @@ std::string WaveformFactory::getModeName(protocol::WaveformMode mode) {
 }
 
 protocol::WaveformMode WaveformFactory::recommendMode(float snr_db) {
-    // Conservative thresholds calibrated for real HF channels
+    // Legacy SNR-only thresholds on the unified in-band SNR convention.
     // HF has multipath fading that requires margin vs AWGN
 
-    if (snr_db < 10.0f) {
+    if (snr_db < 20.0f) {
         // Low SNR: Use MC-DPSK with chirp sync
-        // Reliable from -3 dB to 10 dB
+        // Reliable from ~7 dB to 20 dB in-band
         return protocol::WaveformMode::MC_DPSK;
-    } else if (snr_db < 17.0f) {
+    } else if (snr_db < 27.0f) {
         // Mid SNR: Use OFDM with chirp sync + DQPSK
         // Higher throughput than MC-DPSK, more robust than Schmidl-Cox
         return protocol::WaveformMode::OFDM_CHIRP;
@@ -142,10 +142,10 @@ protocol::WaveformMode WaveformFactory::recommendMode(float snr_db) {
 
 float WaveformFactory::getMinSNR(protocol::WaveformMode mode) {
     switch (mode) {
-        case protocol::WaveformMode::MC_DPSK:    return -3.0f;
-        case protocol::WaveformMode::OFDM_CHIRP: return 10.0f;
-        case protocol::WaveformMode::OFDM_NARROW: return 3.0f;
-        case protocol::WaveformMode::OFDM_COX:  return 17.0f;
+        case protocol::WaveformMode::MC_DPSK:    return 7.0f;
+        case protocol::WaveformMode::OFDM_CHIRP: return 20.0f;
+        case protocol::WaveformMode::OFDM_NARROW: return 13.0f;
+        case protocol::WaveformMode::OFDM_COX:  return 27.0f;
         case protocol::WaveformMode::OTFS_EQ:
         case protocol::WaveformMode::OTFS_RAW:
         case protocol::WaveformMode::MFSK:       return 0.0f;
@@ -171,15 +171,15 @@ int WaveformFactory::recommendMCDPSKCarriers(float snr_db) {
     // More carriers = higher throughput but need better SNR
     // Carrier spacing affects fading diversity
 
-    if (snr_db < 0.0f) {
+    if (snr_db < 10.0f) {
         return 5;   // 234 bps with R1/4
-    } else if (snr_db < 3.0f) {
+    } else if (snr_db < 13.0f) {
         return 5;   // 234 bps
-    } else if (snr_db < 8.0f) {
+    } else if (snr_db < 18.0f) {
         return 8;   // 375 bps
-    } else if (snr_db < 10.0f) {
+    } else if (snr_db < 20.0f) {
         return 10;  // 469 bps
-    } else if (snr_db < 15.0f) {
+    } else if (snr_db < 25.0f) {
         return 13;  // 609 bps
     } else {
         return 20;  // 938 bps

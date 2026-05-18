@@ -70,9 +70,9 @@ ControlsWidget::Event ControlsWidget::render(const LoopbackStats& stats, ModemCo
     ImVec4 snr_color;
     if (!operator_snr.valid) {
         snr_color = ImVec4(0.3f, 0.3f, 0.3f, 1.0f);
-    } else if (operator_snr.snr_db >= 20.0f) {
+    } else if (operator_snr.snr_db >= 30.0f) {
         snr_color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);  // Green - excellent
-    } else if (operator_snr.snr_db >= 10.0f) {
+    } else if (operator_snr.snr_db >= 20.0f) {
         snr_color = ImVec4(1.0f, 1.0f, 0.2f, 1.0f);  // Yellow - good
     } else {
         snr_color = ImVec4(1.0f, 0.3f, 0.3f, 1.0f);  // Red - poor

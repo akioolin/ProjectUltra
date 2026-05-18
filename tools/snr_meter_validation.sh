@@ -4,11 +4,12 @@
 # Runs the same channel scenarios three times across the channel-type axis
 # (AWGN / Good / Moderate) and across the SNR axis (-5..+20 dB), with
 # multi-seed averaging. Reports absolute bias and slope per channel for
-# both the OFDM broadband and OFDM internal estimators, plus a PASS/FAIL
+# both the OFDM in-band and OFDM internal estimators, plus a PASS/FAIL
 # verdict against ±1.5 dB bias and 0.8-1.2 slope tolerances.
 #
-# Does NOT touch operator-facing snr_db; this is a calibration probe
-# against the documented, locked SimulatedChannel reference.
+# This is a calibration probe against the documented, locked SimulatedChannel
+# reference. The OFDM historical "broadband" column now reports in-band SNR,
+# so the expected AWGN/Watterson value is configured SNR + 9.642 dB.
 #
 # Usage: tools/snr_meter_validation.sh [seeds]
 #   seeds: number of seeds per cell (default 5)
@@ -67,6 +68,8 @@ echo ""
 python3 - "$CSV" "$OUTDIR/summary.txt" <<'PY'
 import csv, sys, statistics
 
+IN_BAND_OFFSET_DB = 9.64221445
+
 path = sys.argv[1]
 summary_path = sys.argv[2]
 
@@ -89,7 +92,7 @@ for r in rows:
     key = (r['channel'], r['configured_snr'])
     cells.setdefault(key, []).append(r)
 
-# Per-channel slope + bias against configured SNR
+# Per-channel slope + bias against the configured-SNR-derived in-band reference
 chan_stats = {}
 for ch in ['AWGN', 'GOOD', 'MODERATE']:
     pts = []
@@ -144,7 +147,7 @@ for ch, pts in chan_stats.items():
     sp, ip = slope_intercept(xs, broadband_ys)
     sl, il = slope_intercept(xs, internal_ys)
     # Bias at SNR=15 (typical floor reference)
-    bias_broadband_15 = (sp * 15 + ip) - 15
+    bias_broadband_15 = (sp * 15 + ip) - (15 + IN_BAND_OFFSET_DB)
     bias_internal_15 = (sl * 15 + il) - 15
     def verdict(slope, bias):
         slope_ok = 0.8 <= slope <= 1.2
@@ -159,22 +162,22 @@ for ch, pts in chan_stats.items():
         return "FAIL(" + ",".join(bits) + ")"
     vp = verdict(sp, bias_broadband_15)
     vl = verdict(sl, bias_internal_15)
-    verdicts.append((ch, 'broad', vp))
+    verdicts.append((ch, 'inband', vp))
     verdicts.append((ch, 'intern', vl))
-    lines.append(f"{ch:<10} {'broad':<6} {sp:>8.2f} {bias_broadband_15:>9.2f} {vp:>20}")
+    lines.append(f"{ch:<10} {'inband':<6} {sp:>8.2f} {bias_broadband_15:>9.2f} {vp:>20}")
     lines.append(f"{ch:<10} {'intern':<6} {sl:>8.2f} {bias_internal_15:>9.2f} {vl:>20}")
     lines.append("")
 
 lines.append("=== Final verdict ===")
-broadband_pass = all(v[2] == "PASS" for v in verdicts if v[1] == 'broad')
+broadband_pass = all(v[2] == "PASS" for v in verdicts if v[1] == 'inband')
 internal_pass = all(v[2] == "PASS" for v in verdicts if v[1] == 'intern')
 if broadband_pass:
-    lines.append("PASS: OFDM broadband meter is honest across all channels (slope 0.8-1.2, |bias@15| < 1.5 dB).")
+    lines.append("PASS: OFDM in-band meter is honest across all channels (slope 0.8-1.2, |bias@15| < 1.5 dB).")
     if not internal_pass:
         lines.append("NOTE: OFDM internal remains a diagnostic sibling and is not calibrated enough for operator-facing substitution.")
 else:
-    lines.append("FAIL: at least one OFDM broadband-meter channel fails ±1.5 dB bias or 0.8-1.2 slope.")
-    lines.append("The operator-facing meter must not be substituted until all broadband rows pass.")
+    lines.append("FAIL: at least one OFDM in-band-meter channel fails ±1.5 dB bias or 0.8-1.2 slope.")
+    lines.append("The operator-facing meter must not be substituted until all in-band rows pass.")
     lines.append("A calibrated meter is the workstream described in docs/SNR_METER_DESIGN.md.")
 
 summary_text = "\n".join(lines) + "\n"

@@ -147,30 +147,30 @@ inline LadderRung rungForMCDPSKConfig(Modulation modulation,
 }
 
 inline LadderRung selectLadderRung(float snr_db, ChannelClassification channel) {
-    float ofdm_floor = 8.0f;
-    float robust_floor = 3.0f;
-    float robust_mid_floor = -5.0f;
+    float ofdm_floor = 18.0f;
+    float robust_floor = 13.0f;
+    float robust_mid_floor = 5.0f;
 
     switch (channel) {
         case ChannelClassification::AWGN:
-            ofdm_floor = 8.0f;
-            robust_floor = 3.0f;
-            robust_mid_floor = -5.0f;
+            ofdm_floor = 18.0f;
+            robust_floor = 13.0f;
+            robust_mid_floor = 5.0f;
             break;
         case ChannelClassification::GOOD:
-            ofdm_floor = 9.0f;
-            robust_floor = 4.0f;
-            robust_mid_floor = -4.0f;
+            ofdm_floor = 19.0f;
+            robust_floor = 14.0f;
+            robust_mid_floor = 6.0f;
             break;
         case ChannelClassification::MODERATE:
-            ofdm_floor = 10.0f;
-            robust_floor = 5.0f;
-            robust_mid_floor = -3.0f;
+            ofdm_floor = 20.0f;
+            robust_floor = 15.0f;
+            robust_mid_floor = 7.0f;
             break;
         case ChannelClassification::POOR:
-            ofdm_floor = 12.0f;
-            robust_floor = 7.0f;
-            robust_mid_floor = -1.0f;
+            ofdm_floor = 22.0f;
+            robust_floor = 17.0f;
+            robust_mid_floor = 9.0f;
             break;
     }
 
@@ -204,11 +204,11 @@ inline uint8_t modeToCapabilityBit(WaveformMode mode) {
 }
 
 inline bool isNearAwgnOFDM(float fading_index, float snr_db) {
-    return fading_index < 0.15f && snr_db >= 15.0f;
+    return fading_index < 0.15f && snr_db >= 25.0f;
 }
 
 inline bool isHighThroughputOFDM(float fading_index, float snr_db) {
-    return fading_index < 0.65f && snr_db >= 15.0f;
+    return fading_index < 0.65f && snr_db >= 25.0f;
 }
 
 inline bool isHighThroughputOFDMMode(Modulation mod, CodeRate rate) {
@@ -216,7 +216,7 @@ inline bool isHighThroughputOFDMMode(Modulation mod, CodeRate rate) {
     // (vs window=8 default). DQPSK at R1/2+ uses bigger window because
     // fading correlation across an 8-frame burst is tolerable; D8PSK
     // gets the same treatment because the 2026-05-04 D8PSK gate only
-    // fires when the channel is good enough to support it (SNR>=10
+    // fires when the channel is good enough to support it (in-band SNR>=20
     // fading<0.65 minimum), which is the same precondition the larger
     // window assumes.
     if (mod == Modulation::DQPSK || mod == Modulation::D8PSK) {
