@@ -1,7 +1,10 @@
 #include "fec/soft_combine.hpp"
+#include "ultra/fec.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <random>
 #include <vector>
 
 using ultra::CodeRate;
@@ -33,10 +36,57 @@ bool vecNear(const std::vector<float>& a, const std::vector<float>& b) {
     return true;
 }
 
+std::vector<float> damagedLdpcObservation(const ultra::Bytes& encoded,
+                                          float correct_mag,
+                                          float wrong_mag,
+                                          uint32_t seed,
+                                          int flips) {
+    std::vector<float> llrs;
+    llrs.reserve(encoded.size() * 8);
+    for (uint8_t byte : encoded) {
+        for (int b = 7; b >= 0; --b) {
+            const int bit = (byte >> b) & 1;
+            llrs.push_back(bit ? -correct_mag : correct_mag);
+        }
+    }
+
+    std::vector<int> indices(llrs.size());
+    for (int i = 0; i < static_cast<int>(indices.size()); ++i) {
+        indices[static_cast<size_t>(i)] = i;
+    }
+    std::mt19937 rng(seed);
+    std::shuffle(indices.begin(), indices.end(), rng);
+    for (int j = 0; j < flips && j < static_cast<int>(indices.size()); ++j) {
+        const int i = indices[static_cast<size_t>(j)];
+        llrs[static_cast<size_t>(i)] =
+            llrs[static_cast<size_t>(i)] < 0.0f ? wrong_mag : -wrong_mag;
+    }
+    return llrs;
+}
+
+bool ldpcDecodeMatches(CodeRate rate,
+                       const std::vector<float>& llrs,
+                       const ultra::Bytes& expected) {
+    ultra::LDPCDecoder decoder(rate);
+    decoder.setMaxIterations(50);
+    decoder.setMinSumFactor(0.75f);
+    auto decoded = decoder.decodeSoft(llrs);
+    if (!decoder.lastDecodeSuccess()) {
+        return false;
+    }
+    if (decoded.size() > expected.size()) {
+        decoded.resize(expected.size());
+    }
+    return decoded == expected;
+}
+
 SoftCombineBuffer::Key key(uint32_t sender, uint16_t seq,
                            CodeRate rate = CodeRate::R1_2,
-                           uint8_t cw_count = 6) {
-    return SoftCombineBuffer::Key{sender, seq, rate, cw_count};
+                           uint8_t cw_count = 6,
+                           uint8_t cw_index = 0) {
+    auto k = SoftCombineBuffer::Key{sender, seq, rate, cw_count};
+    k.cw_index = cw_index;
+    return k;
 }
 
 void pass(const char* name) {
@@ -95,6 +145,56 @@ void test_sum_across_attempts() {
     CHECK(attempts == 3, "third attempt should report three combined attempts");
     CHECK(vecNear(out, {9.0f, 9.0f, 3.0f}), "third attempt should sum all three vectors");
     pass("sum across attempts");
+}
+
+void test_identical_retx_retention_reuse() {
+    // Smoke test for Chase combining on an identical retransmission:
+    // the second observation must find the retained CW entry and sum it.
+    SoftCombineBuffer buffer;
+    buffer.setEnabled(true);
+    const auto k = key(0x010203, 21, CodeRate::R1_4, 4, 2);
+
+    std::vector<float> out;
+    int attempts = buffer.combine(k, {0.5f, -0.75f, 1.25f}, out);
+    CHECK(attempts == 1, "first identical-retx smoke attempt should be fresh");
+    buffer.retain(k, out);
+
+    attempts = buffer.combine(k, {0.5f, -0.75f, 1.25f}, out);
+    CHECK(attempts == 2, "second identical-retx smoke attempt should reuse retained CW");
+    CHECK(vecNear(out, {1.0f, -1.5f, 2.5f}),
+          "identical retransmission should sum with retained LLRs");
+    pass("identical retx retention reuse");
+}
+
+void test_two_attempt_ldpc_combining_passes() {
+    // Real LDPC fixture: each low-confidence observation has independent
+    // damaged bit positions and fails alone. Chase-combined LLRs carry enough
+    // accumulated evidence for the R1/4 decoder to converge.
+    constexpr CodeRate rate = CodeRate::R1_4;
+    ultra::Bytes info(20);
+    for (size_t i = 0; i < info.size(); ++i) {
+        info[i] = static_cast<uint8_t>(0x31 + i * 17 + i / 3);
+    }
+
+    ultra::LDPCEncoder encoder(rate);
+    const auto encoded = encoder.encode(info);
+    const auto obs1 = damagedLdpcObservation(encoded, 0.35f, 0.05f, 0x104cu, 220);
+    const auto obs2 = damagedLdpcObservation(encoded, 0.35f, 0.05f, 0x900bu, 220);
+
+    CHECK(!ldpcDecodeMatches(rate, obs1, info), "observation 1 should fail alone");
+    CHECK(!ldpcDecodeMatches(rate, obs2, info), "observation 2 should fail alone");
+
+    SoftCombineBuffer buffer;
+    buffer.setEnabled(true);
+    const auto k = key(0x010203, 22, rate, 4, 0);
+    std::vector<float> combined;
+    buffer.combine(k, obs1, combined);
+    buffer.retain(k, combined);
+    CHECK(buffer.combine(k, obs2, combined) == 2,
+          "second LDPC attempt should combine with retained observation");
+    CHECK(ldpcDecodeMatches(rate, combined, info),
+          "two individually failing observations should decode when summed");
+    pass("two-attempt LDPC combining passes");
 }
 
 void test_llr_magnitude_grows_with_attempts() {
@@ -214,6 +314,39 @@ void test_max_entries_lru_eviction() {
     pass("max entries LRU eviction");
 }
 
+void test_sequence_window_slide_with_wrap() {
+    SoftCombineBuffer buffer;
+    buffer.setEnabled(true);
+    std::vector<float> out;
+
+    const auto before = key(0x010203, 0xFFFE, CodeRate::R1_4, 4, 0);
+    const auto base = key(0x010203, 0xFFFF, CodeRate::R1_4, 4, 0);
+    const auto wrap0 = key(0x010203, 0x0000, CodeRate::R1_4, 4, 0);
+    const auto wrap1 = key(0x010203, 0x0001, CodeRate::R1_4, 4, 0);
+    const auto after = key(0x010203, 0x0002, CodeRate::R1_4, 4, 0);
+
+    buffer.combine(before, {1.0f}, out); buffer.retain(before, out);
+    buffer.combine(base, {2.0f}, out); buffer.retain(base, out);
+    buffer.combine(wrap0, {3.0f}, out); buffer.retain(wrap0, out);
+    buffer.combine(wrap1, {4.0f}, out); buffer.retain(wrap1, out);
+    buffer.combine(after, {5.0f}, out); buffer.retain(after, out);
+    CHECK(buffer.size() == 5, "five retained entries before window slide");
+
+    buffer.retainOnlySeqWindow(0xFFFF, 3);
+    CHECK(buffer.size() == 3, "window [65535,0,1] should retain three entries");
+    CHECK(buffer.combine(base, {10.0f}, out) == 2 && vecNear(out, {12.0f}),
+          "base seq should survive wrap window");
+    CHECK(buffer.combine(wrap0, {10.0f}, out) == 2 && vecNear(out, {13.0f}),
+          "wrapped seq 0 should survive wrap window");
+    CHECK(buffer.combine(wrap1, {10.0f}, out) == 2 && vecNear(out, {14.0f}),
+          "wrapped seq 1 should survive wrap window");
+    CHECK(buffer.combine(before, {10.0f}, out) == 1 && vecNear(out, {10.0f}),
+          "seq before new base should be discarded");
+    CHECK(buffer.combine(after, {10.0f}, out) == 1 && vecNear(out, {10.0f}),
+          "seq just beyond receive window should be discarded");
+    pass("sequence window slide with wrap");
+}
+
 void test_key_disambiguation() {
     SoftCombineBuffer buffer;
     buffer.setEnabled(true);
@@ -223,6 +356,7 @@ void test_key_disambiguation() {
     const auto other_sender = key(0x0A0B0C, 42, CodeRate::R1_2, 6);
     const auto other_rate = key(0x010203, 42, CodeRate::R3_4, 6);
     const auto other_cw = key(0x010203, 42, CodeRate::R1_2, 8);
+    const auto other_cw_index = key(0x010203, 42, CodeRate::R1_2, 6, 2);
 
     // Use small LLR magnitudes so the test is about key disambiguation,
     // not the saturation cap.
@@ -230,8 +364,9 @@ void test_key_disambiguation() {
     buffer.combine(other_sender, {2.0f}, out); buffer.retain(other_sender, out);
     buffer.combine(other_rate, {4.0f}, out); buffer.retain(other_rate, out);
     buffer.combine(other_cw, {8.0f}, out); buffer.retain(other_cw, out);
+    buffer.combine(other_cw_index, {16.0f}, out); buffer.retain(other_cw_index, out);
 
-    CHECK(buffer.size() == 4, "distinct keys should occupy distinct entries");
+    CHECK(buffer.size() == 5, "distinct keys should occupy distinct entries");
     CHECK(buffer.combine(base, {3.0f}, out) == 2 && vecNear(out, {4.0f}),
           "base key should combine only with base entry (sum: 1+3)");
     CHECK(buffer.combine(other_sender, {3.0f}, out) == 2 && vecNear(out, {5.0f}),
@@ -240,6 +375,8 @@ void test_key_disambiguation() {
           "code rate should disambiguate same sender/seq (sum: 4+3)");
     CHECK(buffer.combine(other_cw, {3.0f}, out) == 2 && vecNear(out, {11.0f}),
           "cw count should disambiguate same sender/seq/rate (sum: 8+3)");
+    CHECK(buffer.combine(other_cw_index, {3.0f}, out) == 2 && vecNear(out, {19.0f}),
+          "cw index should disambiguate same frame's codewords (sum: 16+3)");
     pass("key disambiguation");
 }
 
@@ -382,6 +519,7 @@ void test_makeKey_basic_field_propagation() {
     in.seq = 0x1234;
     in.rate = CodeRate::R2_3;
     in.cw_count = 4;
+    in.cw_index = 3;
     in.modulation = ultra::Modulation::QPSK;
     in.channel_interleave = true;
     in.waveform_mode = 0x05;       // OFDM_CHIRP
@@ -391,6 +529,7 @@ void test_makeKey_basic_field_propagation() {
     CHECK(k.seq == 0x1234, "seq");
     CHECK(k.rate == CodeRate::R2_3, "rate");
     CHECK(k.cw_count == 4, "cw_count");
+    CHECK(k.cw_index == 3, "cw_index");
     CHECK(k.modulation == ultra::Modulation::QPSK, "modulation");
     CHECK(k.channel_interleave == 1, "channel_interleave true → 1");
     CHECK(k.carrier_count_hash != 0, "carrier_count_hash nonzero");
@@ -464,6 +603,8 @@ int main() {
     test_disabled_noop();
     test_first_attempt_identity();
     test_sum_across_attempts();
+    test_identical_retx_retention_reuse();
+    test_two_attempt_ldpc_combining_passes();
     test_llr_magnitude_grows_with_attempts();
     test_llr_saturation();
     test_size_mismatch_drops_entry();
@@ -475,6 +616,7 @@ int main() {
     test_drop_on_success();
     test_ttl_eviction();
     test_max_entries_lru_eviction();
+    test_sequence_window_slide_with_wrap();
     test_key_disambiguation();
     test_phy_field_disambiguation();
     test_makeKey_basic_field_propagation();
