@@ -386,10 +386,16 @@ inline AckRepeatProfile ofdmAckRepeatProfile(Modulation mod,
                                              bool near_awgn_ofdm) {
     (void)mod;
     (void)rate;
+    (void)near_awgn_ofdm;
+    // Parallel to MC-DPSK ACK repeat removal (commit 316ade5). An OFDM ACK
+    // is a full RF burst (preamble + 1-CW LDPC payload). Repeating it
+    // extends BRAVO's TX-busy window past ALPHA's next pipelined DATA
+    // frame, deafening BRAVO when DATA arrives -- the half-duplex
+    // pathology we eliminated for MC-DPSK. Repetition over the same
+    // channel realization is rank-deficient diversity anyway: it costs
+    // airtime without buying decode SNR.
     AckRepeatProfile profile;
-    if (near_awgn_ofdm) {
-        profile.count = 1;
-    }
+    profile.count = 1;
     return profile;
 }
 
