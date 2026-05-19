@@ -599,3 +599,184 @@ Layer 4 round-1 floor delta: MC-DPSK AWGN QSO moved from the Layer 3
 stop-after-measurable-move rule, lower SNRs were not swept in this round.
 The next Layer 4 round should start by probing `14 dB` before attempting a
 second independent improvement such as retry integration or threshold tuning.
+
+## Layer 4: Round 2 and OFDM cascade
+
+Round 2 scope: restart below the round-1 `15 dB` MC-DPSK floor, identify the
+next sync gate, apply one targeted fix only, then run the requested OFDM forced
+R1/4 cascade.
+
+### MC-DPSK lower-SNR probe
+
+Command family:
+
+- Generated temporary scenario v2 files from
+  `tests/fixtures/ota_simulator/two_endpoint_mcdpsk_low_snr_qso.json`.
+- Set `channel.type=awgn`, `channel.seed={42,43,44}`, and swept SNR.
+- Full per-run logs are under `/tmp/l4r2_mcdpsk_snr*_seed*_full.log`.
+- Filtered audit log: `/tmp/codex_audit_and_chain_part5.log`.
+
+Results:
+
+| SNR dB | Seeds | Result | Chirp/sync evidence |
+|--------|-------|--------|---------------------|
+| 14 | 42,43,44 | 3/3 pass | PING chirp corr `~0.887-0.889`, gap error `0.0` |
+| 13 | 42,43,44 | 3/3 pass | PING chirp corr `~0.862-0.865`, gap error `0.0` |
+| 12 | 42,43,44 | 3/3 pass | PING chirp corr `~0.832-0.839`, gap error `0.0` |
+| 11 | 42,43,44 | 3/3 pass | PING chirp corr `~0.803-0.809`, gap error `0.0` |
+| 10 | 42,43,44 | 3/3 pass | PING chirp corr `~0.768-0.777`, gap error `0.0` |
+| 9 | 42,43,44 | 3/3 pass | PING chirp corr `~0.731-0.740`, gap error `0.0` |
+| 8 | 42,43,44 | 3/3 pass | PING chirp corr `~0.690-0.699`, gap error `0.0` |
+| 7 | 42,43,44 | 3/3 pass | PING chirp corr `~0.647-0.655`, gap error `0.0` |
+| 6 | 42,43,44 | 3/3 pass | PING chirp corr `~0.603-0.618`, gap error `0.0` |
+| 5 | 42,43,44 | 3/3 pass | PING chirp corr `~0.557-0.570`, gap error `0.0` |
+
+Finding: the MC-DPSK QSO target floor was reached without a new MC-DPSK code
+change. The round-1 chirp-lock PING ordering fix was the actual blocker below
+15 dB; after that fix, MC-DPSK DBPSK R1/4 completes CONNECT, DATA, ACK, and
+DISCONNECT through `5 dB` AWGN across three seeds.
+
+Candidate gate status:
+
+- Coherent integration across PING retries: not required for AWGN down to
+  `5 dB`; first visible PING/PONG locks were still dual-chirp-valid.
+- Pre-LDPC LLR threshold: no longer blocks MC-DPSK PING after the round-1
+  ordering fix; data/control frame decodes also completed at `5 dB`.
+- Dual-chirp threshold: not binding; measured `5 dB` PING correlations remain
+  `~0.56`, well above the `0.30` PING fallback floor and `0.15` dual-chirp
+  detector floor.
+- First-PING classifier ratio: still rises above `0.50` at low SNR, but the
+  chirp-lock path correctly carries PING classification.
+
+Multi-perspective check:
+
+- PHY: the matched-filter evidence remains strong; even at `5 dB`, the
+  normalized dual-chirp correlations are far above the current acceptance
+  floors with exact up/down spacing.
+- DSP: this is not a component-only chirp test; the seeded two-endpoint QSO
+  completed all protocol frames at each SNR.
+- HF operator: noisy post-chirp passband energy is expected at low SNR and
+  should not suppress a geometrically valid chirp lock.
+- Physics: the correlation trend decreases monotonically with SNR, but the
+  time-bandwidth gain still leaves substantial acquisition margin at `5 dB`.
+
+Layer 4 round-2 MC-DPSK verdict: no new MC-DPSK sync fix was justified. Per the
+one-change rule, no extra PING/chirp threshold was changed without a failing
+MC-DPSK gate.
+
+### OFDM forced R1/4 cascade
+
+Cascade scenario:
+
+- Same two-endpoint QSO fixture.
+- `force_connected_waveform=OFDM_CHIRP`.
+- `force_data_mode=true` on both endpoints.
+- Initial mode `MC_DPSK`, `DQPSK`, `R1_4`; this preserves the cold-call
+  handshake while pinning the connected data path to OFDM DQPSK R1/4.
+
+Pre-fix cascade:
+
+| SNR dB | Seeds | Result | Failing gate |
+|--------|-------|--------|--------------|
+| 14 | 42,43,44 | 3/3 pass | None; OFDM DATA decoded `4/4` CWs and OFDM controls completed |
+| 12 | 42,43,44 | 0/3 pass | Connected OFDM light-sync threshold delayed DATA and lost ACK/DISCONNECT completion |
+| 10 | 42,43,44 | 0/3 pass | Connected OFDM DATA sync rejected repeatedly after successful CONNECT/CONNECT_ACK |
+
+The 12 dB/10 dB cascade failures were not cold-call chirp failures. PING,
+CONNECT, and CONNECT_ACK succeeded with strong dual-chirp evidence. The new gate
+was connected OFDM LTS-only data/control sync:
+
+- 12 dB DATA/control candidates often appeared around `0.40-0.45` correlation.
+- The existing connected wideband non-coherent policy started at `0.52` and
+  relaxed only to `0.45`.
+- At 12 dB, successful DATA decodes occurred when a candidate eventually
+  reached `~0.45-0.48`, but ACK/DISCONNECT completion was still inconsistent.
+- At 10 dB, most connected OFDM candidates stayed below `0.40`; the handshake
+  still completed, but data/control delivery did not.
+
+Multi-perspective check:
+
+- PHY: connected OFDM frames use LTS-only light preambles, so chirp fallback is
+  impossible after CONNECT; the relevant detector is `detectDataSync()`.
+- DSP: full logs showed repeated `DATA sync rejected` messages before missing
+  message or disconnect assertions, and successful frame decodes immediately
+  after late weak accepts at 12 dB.
+- HF operator: the link sounded/behaved connected, but control tail frames
+  needed retries because light-sync acquisition, not the ARQ state machine, was
+  rejecting candidates.
+- Physics: lowering a sync gate in the autocorrelation-noise region is risky,
+  so the change must remain late, connected-only, and backed by downstream
+  LLR/LDPC validation rather than unconditional acceptance.
+
+### Fix
+
+Code change:
+
+- `streaming_signal_policy::lightSyncThresholds()` now has named constants for
+  connected OFDM light-sync relaxation.
+- Non-coherent connected OFDM still starts at `0.52`.
+- After repeated rejects, the minimum confidence can now relax to `0.40`
+  instead of `0.45`.
+- After a longer reject streak, wideband non-coherent connected OFDM can weak
+  accept down to `0.35`.
+- Coherent modes, disconnected acquisition, and the initial cold-call chirp path
+  are unchanged.
+
+This is intentionally a late rescue path, not a global threshold lowering.
+Candidates admitted by this path still have to pass the existing LLR and LDPC
+frame decode gates before any protocol frame is accepted.
+
+Regression added:
+
+- `test_streaming_signal_policy` now checks the `0.40` connected OFDM
+  relaxation floor and the late `0.35` rescue floor.
+- The test also verifies a `0.36` connected OFDM rescue candidate is accepted
+  as a weak sync after the configured reject streak.
+
+### Validation
+
+Targeted build/test:
+
+- `cmake --build build --target test_streaming_signal_policy ota_simulator -j4`:
+  passed.
+- `./build/tests/test_streaming_signal_policy`: passed `65/65`.
+
+Post-fix OFDM cascade:
+
+| SNR dB | Seeds | Result | Evidence |
+|--------|-------|--------|----------|
+| 12 | 42,43,44 | 3/3 pass | Weak-accepted DATA/control syncs followed by valid DATA, ACK, DISCONNECT, and final ACK decodes |
+| 10 | 42,43,44 | 0/3 pass | Handshake completes; DATA sometimes decodes late, but ACK/DISCONNECT control completion still fails |
+
+Layer 4 round-2 floor delta:
+
+- MC-DPSK AWGN QSO: `15 dB` after round 1 to `5 dB` after round-2 probe
+  validation, with no additional MC-DPSK change required.
+- OFDM forced DQPSK R1/4 AWGN QSO: `14 dB` to `12 dB` after one connected
+  OFDM light-sync policy change.
+- Remaining OFDM target gap: `10 dB` still fails 3/3. The next gate is
+  connected OFDM LTS/control sync margin below `0.40`, not cold-call chirp
+  acquisition.
+
+Layer 5 status: not entered in this round. The cascade left an unresolved Layer
+4 connected-OFDM sync gate at `10 dB`, so moving into LLR scaling before another
+sync round would mix layers and violate the one-change protocol.
+
+### Round-stop status
+
+Commit not made in this sandbox. Targeted builds, policy regression tests, and
+the direct multi-seed simulator sweeps above passed, but the required full ctest
+baseline could not be preserved here:
+
+- `ctest --test-dir build --output-on-failure`: `75/86` passed.
+- Immediate environment-sensitive failures included gRPC service startup,
+  ephemeral TCP bind, and UDP bind tests.
+- The ctest log also reported `/bin/ps: Operation not permitted`, and multiple
+  long OTA ctests timed out after the restricted process/socket failures.
+- `OTASimulatorTwoEndpointMCDPSKLowSNR` also timed out when run by ctest, even
+  though direct `ota_simulator run --scenario` low-SNR QSO validation reached
+  `5 dB` at `3/3` seeds in this round.
+
+Because the protocol requires the `86/86` ctest baseline to remain preserved,
+this round stops with uncommitted working-tree changes for review or rerun in an
+unrestricted environment. No push was performed.

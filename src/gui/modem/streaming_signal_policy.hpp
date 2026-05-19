@@ -91,6 +91,11 @@ struct LightSyncThresholds {
     float weak_floor = 0.55f;
 };
 
+inline constexpr uint64_t kConnectedOFDMLightSyncRelaxStreak = 5;
+inline constexpr uint64_t kConnectedOFDMLightSyncRescueStreak = 8;
+inline constexpr float kConnectedOFDMLightSyncRelaxFloor = 0.40f;
+inline constexpr float kConnectedOFDMLightSyncRescueFloor = 0.35f;
+
 inline LightSyncThresholds lightSyncThresholds(bool is_coherent,
                                                bool is_narrowband,
                                                bool connected,
@@ -107,10 +112,20 @@ inline LightSyncThresholds lightSyncThresholds(bool is_coherent,
         thresholds.weak_floor = 0.45f;
     }
 
-    if (!is_coherent && connected && sync_reject_streak >= 5) {
+    if (!is_coherent && connected &&
+        sync_reject_streak >= kConnectedOFDMLightSyncRelaxStreak) {
         const float extra_relax = std::min(
-            0.10f, 0.02f * static_cast<float>(sync_reject_streak - 4));
-        thresholds.min_confidence = std::max(0.45f, thresholds.min_confidence - extra_relax);
+            0.12f,
+            0.02f * static_cast<float>(
+                sync_reject_streak - (kConnectedOFDMLightSyncRelaxStreak - 1)));
+        thresholds.min_confidence = std::max(
+            kConnectedOFDMLightSyncRelaxFloor,
+            thresholds.min_confidence - extra_relax);
+    }
+
+    if (!is_coherent && connected && !is_narrowband &&
+        sync_reject_streak >= kConnectedOFDMLightSyncRescueStreak) {
+        thresholds.weak_floor = kConnectedOFDMLightSyncRescueFloor;
     }
 
     return thresholds;

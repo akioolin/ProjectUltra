@@ -100,7 +100,9 @@ void test_light_sync_thresholds() {
     CHECK_CLOSE(relaxed.min_confidence, 0.50f, 0.0001f, "reject streak should relax threshold");
 
     auto floor = lightSyncThresholds(false, false, true, 99);
-    CHECK_CLOSE(floor.min_confidence, 0.45f, 0.0001f, "relaxation should have a hard floor");
+    CHECK_CLOSE(floor.min_confidence, 0.40f, 0.0001f, "relaxation should have a hard floor");
+    CHECK_CLOSE(floor.weak_floor, 0.35f, 0.0001f,
+                "long reject streak should enable connected OFDM rescue floor");
 }
 
 void test_light_sync_decision() {
@@ -124,6 +126,12 @@ void test_light_sync_decision() {
     CHECK(weak.found, "weak candidate should be accepted after reject streak");
     CHECK(weak.weak_accept, "weak candidate should report weak accept");
     CHECK(weak.next_reject_streak == 1, "weak accept should decay reject streak");
+
+    auto rescued = evaluateLightSyncCandidate(
+        true, 0.36f, false, true, 8,
+        lightSyncThresholds(false, false, true, 8));
+    CHECK(rescued.found, "late connected OFDM rescue candidate should be accepted");
+    CHECK(rescued.weak_accept, "late connected OFDM rescue should report weak accept");
 
     auto coherent = evaluateLightSyncCandidate(true, 0.86f, true, true, 10,
                                                LightSyncThresholds{0.90f, 0.85f});
