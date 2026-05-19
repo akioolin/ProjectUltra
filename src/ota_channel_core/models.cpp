@@ -501,56 +501,7 @@ void WattersonChannel::updateFading() {
 }
 
 void WattersonChannel::applyCFO(std::vector<float>& samples) {
-    if (samples.size() < 256) {
-        return;
-    }
-
-    constexpr float fc = 1500.0f;
-    const float fs = static_cast<float>(config_.sample_rate);
-    std::vector<float> i_bb(samples.size(), 0.0f);
-    std::vector<float> q_bb(samples.size(), 0.0f);
-
-    for (size_t i = 0; i < samples.size(); ++i) {
-        const float t = static_cast<float>(i) / fs;
-        const float phase = 2.0f * kPi * fc * t;
-        i_bb[i] = samples[i] * std::cos(phase);
-        q_bb[i] = samples[i] * std::sin(phase);
-    }
-
-    constexpr size_t win = 48;
-    std::vector<float> i_filt(samples.size(), 0.0f);
-    std::vector<float> q_filt(samples.size(), 0.0f);
-    float i_sum = 0.0f;
-    float q_sum = 0.0f;
-    for (size_t i = 0; i < samples.size(); ++i) {
-        i_sum += i_bb[i];
-        q_sum += q_bb[i];
-        if (i >= win) {
-            i_sum -= i_bb[i - win];
-            q_sum -= q_bb[i - win];
-        }
-        const size_t n = std::min(i + 1, win);
-        i_filt[i] = i_sum / static_cast<float>(n);
-        q_filt[i] = q_sum / static_cast<float>(n);
-    }
-
-    float phase = cfo_phase_;
-    for (size_t i = 0; i < samples.size(); ++i) {
-        const float t = static_cast<float>(i) / fs;
-        const float mix_phase = 2.0f * kPi * fc * t;
-        const float cfo_cos = std::cos(phase);
-        const float cfo_sin = std::sin(phase);
-        const float i_cfo = i_filt[i] * cfo_cos - q_filt[i] * cfo_sin;
-        const float q_cfo = i_filt[i] * cfo_sin + q_filt[i] * cfo_cos;
-        samples[i] =
-            2.0f * (i_cfo * std::cos(mix_phase) - q_cfo * std::sin(mix_phase));
-
-        phase += cfo_phase_inc_;
-        if (phase > 2.0f * kPi) {
-            phase -= 2.0f * kPi;
-        }
-    }
-    cfo_phase_ = phase;
+    analyticFrequencyShift(samples, actual_cfo_hz_, config_.sample_rate, cfo_phase_);
 }
 
 WattersonChannelModel::WattersonChannelModel(const WattersonChannel::Config& config,
