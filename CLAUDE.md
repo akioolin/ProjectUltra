@@ -187,29 +187,38 @@ Interpretation of the 2026-04-29 robustness work:
 
 ---
 
-**Performance Requirements (cli_simulator --test, post-2026-05-19 calibration audit):**
-| Mode | Channel | In-band SNR floor | Status |
+**Performance Requirements (post-2026-05-19 calibration audit):**
+| Mode | Channel | In-band SNR floor | Confidence |
 |------|---------|-----|---------------------|
-| MC-DPSK | AWGN | **5 dB** | 3/3 seeds cli_simulator + OTASim fixture `OTASimulatorTwoEndpointMCDPSKLowSNR` |
-| MC-DPSK | Moderate fading | 19.6 | 100% at documented gate (pre-audit) |
+| MC-DPSK R1/4 | AWGN | **5 dB** | 3/3 seeds cli_simulator + OTASim fixture `OTASimulatorTwoEndpointMCDPSKLowSNR` |
+| MC-DPSK R1/4 | Moderate fading | 19.6 | pre-audit, not re-measured |
 | OFDM_CHIRP R1/4 | AWGN | **12 dB** | 3/3 seeds cli_simulator |
-| OFDM_CHIRP R1/4 | Good fading | **15 dB** | 3/3 seeds cli_simulator + DecodeBenchReplay fixture |
-| OFDM_CHIRP R1/4 | Moderate fading | 24.6 | pre-audit, not re-measured |
-| OFDM_CHIRP R1/2 | AWGN / Good | 24.6 / 24.6 | pre-audit |
+| OFDM_CHIRP R1/4 | Good fading | **15 dB** | 3/3 seeds cli_simulator + `DecodeBenchReplay` fixture |
+| OFDM_CHIRP R1/4 | Moderate fading | **15 dB** | 1-seed OTASim (Mod ≈ Good at this rate — FEC absorbs the difference) |
+| OFDM_CHIRP R1/2 | AWGN | **14 dB** | 1-seed OTASim (boundary, ~40 retx but ARQ recovers) |
+| OFDM_CHIRP R1/2 | Good fading | **14 dB** | 1-seed OTASim |
+| OFDM_CHIRP R1/2 | Moderate fading | **18-22 dB** (unrefined) | 1-seed OTASim — 22 passes, 18 fails; bisect 19/20/21 pending |
 | OFDM_NARROW R1/4 | AWGN / Good | 17.6 / 17.6 | pre-audit |
 
 Higher rates (R2/3, R3/4, QPSK) — see historical section below; not re-measured against the new floor.
 
+Sweep methodology (2026-05-19): `cli_simulator --ota-host 127.0.0.1:50051 --ota-alpha-token admin_tok --ota-bravo-token bravo_tok` against the running OTASim server, walking SNR down until a `TEST FAILED` cell. Single-seed cells are floor *locators*, not statistical floors — multi-seed verification is still TODO for the 1-seed entries.
+
 **Current production state (post-2026-05-19 8-layer calibration audit, branch `fix/honest-snr-in-band-and-rate-recalibration`):**
 
 The 2026-05-19 audit moved floors:
-- MC-DPSK AWGN floor: **18 dB → 5 dB** (-13 dB)
+- MC-DPSK R1/4 AWGN floor: **18 dB → 5 dB** (-13 dB)
 - OFDM R1/4 AWGN floor: **18 dB → 12 dB** (-6 dB)
 - OFDM R1/4 Good fading floor: **18 dB → 15 dB** (-3 dB, locked in DecodeBenchReplay fixture)
+- OFDM R1/4 Moderate fading floor: **24.6 dB → 15 dB** (-9 dB, 1-seed)
+- OFDM R1/2 AWGN floor: **24.6 dB → 14 dB** (-10 dB, 1-seed)
+- OFDM R1/2 Good fading floor: **24.6 dB → 14 dB** (-10 dB, 1-seed)
+- OFDM R1/2 Moderate fading floor: **24.6 dB → 18-22 dB** (-3 to -7 dB, 1-seed, unrefined)
 
 Verification (2026-05-19):
 - `ctest --test-dir build --output-on-failure -j1`: **86/86 PASS**
-- Multi-seed cli_simulator: MC-DPSK SNR=5, OFDM R1/4 SNR=12 AWGN, OFDM R1/4 SNR=15 Good — all **3/3 seeds** (42, 43, 44)
+- Multi-seed cli_simulator (3 seeds × 3 cells): **9/9 PASS** at MC-DPSK SNR=5, OFDM R1/4 SNR=12 AWGN, OFDM R1/4 SNR=15 Good
+- Single-seed OTASim sweep: 7 cells located floors for the rate × fading combos above
 
 Calibration baseline:
 - Simulated AWGN calibration: `SimulatedChannel` synthetic AWGN is continuous at RX,
