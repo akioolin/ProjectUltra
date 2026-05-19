@@ -33,6 +33,9 @@ constexpr size_t kRealHfLoopPowerProbeSamples =
     static_cast<size_t>(kDefaultSampleRate) * 10u;
 
 float modemReferenceBroadbandNoiseStddev(float broadband_snr_db) {
+    // The SNR reference is the PING's receiver in-band RMS. The "broadband"
+    // part of this helper names the generated white-noise sigma before the
+    // receiver bandpass removes out-of-band noise.
     return kModemReferenceRms *
            std::pow(10.0f, -broadband_snr_db / 20.0f);
 }

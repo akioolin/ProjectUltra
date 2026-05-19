@@ -56,8 +56,10 @@ To call any number an honest SNR, the noise model must be documented.
 The proposed reference, consistent with the channel-RMS calibration
 (commits `1036969`, `8015495`):
 
-- **Signal power reference.** TX RMS at `kModemReferenceRms = 0.3180724`
-  (already measured from `StreamingEncoder::encodePing()` and locked).
+- **Signal power reference.** TX broadband RMS at
+  `kModemReferenceBroadbandRms = 0.3180724`, with the calibrated SNR reference
+  using the same PING through the receiver bandpass:
+  `kModemReferenceRms = kModemReferenceInBandRms = 0.30482664`.
 - **Noise integration bandwidth.** 2.8 kHz (the modem's RF bandwidth),
   not the 24 kHz Nyquist. Operators read 2.4–3.0 kHz BW SNR on real
   radios; that is the comparable number.

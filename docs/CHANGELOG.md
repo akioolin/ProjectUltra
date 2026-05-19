@@ -10,6 +10,33 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-19: Layer 1 calibration audit fixes in-band PING reference
+
+**Fixed:** The SNR calibration constants used the measured
+`StreamingEncoder::encodePing()` broadband RMS (`0.3180724`) as the signal
+power reference while the current channel/meter convention compares against
+receiver in-band noise. The actual PING after the 101-tap 50-2950 Hz receive
+FIR is `0.30482664` RMS, so the operator-facing in-band SNR reference was high
+by `0.369 dB`.
+
+**Changed:** Added explicit broadband and in-band PING reference constants and
+made `kModemReferenceRms`/`kModemReferencePower` use the in-band value. Mirrored
+the constants in `ota_channel_core` and updated the invariant text so AWGN,
+Watterson, real-HF-loop, idle meter, and OFDM LTS/pilot meter all share the
+same in-band reference convention.
+
+**Verification:** `ChannelSNRCalibration` now checks the PING broadband RMS,
+PING FIR in-band RMS, FIR coefficient energy, and broadband-to-in-band offset
+directly from the implementation.
+
+```bash
+cmake --build build -j4
+ctest --test-dir build -R ChannelSNRCalibration --output-on-failure
+ctest --test-dir build --output-on-failure -j4
+```
+
+---
+
 ## 2026-05-18: Unified in-band SNR and rate-threshold recalibration
 
 **Fixed:** Round 1 made the idle estimator report receiver in-band SNR, but

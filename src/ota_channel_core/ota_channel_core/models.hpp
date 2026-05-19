@@ -16,7 +16,9 @@
 namespace ultra::ota_channel_core {
 
 inline constexpr uint32_t kDefaultSampleRate = 48000;
-inline constexpr float kModemReferenceRms = 0.3180724f;
+inline constexpr float kModemReferenceBroadbandRms = 0.3180724f;
+inline constexpr float kModemReferenceInBandRms = 0.30482664f;
+inline constexpr float kModemReferenceRms = kModemReferenceInBandRms;
 inline constexpr double kModemReferencePower =
     static_cast<double>(kModemReferenceRms) *
     static_cast<double>(kModemReferenceRms);

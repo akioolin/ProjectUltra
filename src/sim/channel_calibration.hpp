@@ -5,8 +5,14 @@
 namespace ultra::sim {
 
 // Empirically measured from StreamingEncoder::encodePing() output on
-// 2026-05-14: 62208 samples, RMS 0.318072406640.
-inline constexpr float kModemReferenceRms = 0.3180724f;
+// 2026-05-14: 62208 samples, broadband RMS 0.318072406640.
+inline constexpr float kModemReferenceBroadbandRms = 0.3180724f;
+
+// The operator-facing SNR convention is receiver in-band signal/noise. Measured
+// by passing the same PING through the 101-tap 50-2950 Hz receive FIR:
+// in-band RMS 0.304826641347, i.e. -0.369461 dB versus broadband.
+inline constexpr float kModemReferenceInBandRms = 0.30482664f;
+inline constexpr float kModemReferenceRms = kModemReferenceInBandRms;
 inline constexpr double kModemReferencePower =
     static_cast<double>(kModemReferenceRms) *
     static_cast<double>(kModemReferenceRms);

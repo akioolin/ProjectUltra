@@ -82,8 +82,8 @@ int main() {
 
     const auto awgn = runModel(ChannelType::AWGN, 0x1234u);
     const std::vector<float> expected_awgn{
-        -0.144521100f, 0.105682398f, -0.404467570f, 0.357195774f,
-        -0.152917148f, -0.108846974f, 0.142506611f, -0.063576495f};
+        -0.138502685f, 0.105445761f, -0.395952753f, 0.354813922f,
+        -0.163206630f, -0.104314167f, 0.146983050f, -0.067175503f};
     assertNear(awgn, expected_awgn, 1.0e-6f);
 
     std::cout << "channel core models deterministic\n";

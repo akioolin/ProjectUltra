@@ -43,7 +43,8 @@ void OFDMDemodulator::Impl::updateLastSNREstimate(float signal_power,
     //       residual R_k / X_k used here.
     //
     //   AWGN broadband reference:
-    //     - SimulatedChannel sizes real white audio noise as
+    //     - SimulatedChannel sizes real white audio noise from the calibrated
+    //       in-band PING reference:
     //       sigma^2 = kModemReferencePower / SNR_broadband.
     //     - after downconversion, an unnormalized N-point FFT gives each active
     //       complex bin noise power N * sigma^2.
@@ -94,8 +95,8 @@ void OFDMDemodulator::Impl::updateLastSNREstimate(float signal_power,
     //
     //   TX real passband carrier amplitude at the FFT bin is output_scale/2.
     //   White audio noise is integrated by the N-point FFT.
-    //   The configured/reference SNR uses kModemReferencePower over the full
-    //   OFDM symbol duration including CP.
+    //   The configured/reference SNR uses the calibrated in-band PING reference
+    //   over the full OFDM symbol duration including CP.
     //
     // This subtracts OFDM measurement gain while retaining true signal fades in
     // signal_power. Averaging bins reduces estimator variance; it is not RF
