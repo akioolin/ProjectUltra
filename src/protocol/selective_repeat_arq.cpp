@@ -1101,6 +1101,7 @@ void SelectiveRepeatARQ::advanceTXWindow() {
 }
 
 void SelectiveRepeatARQ::advanceRXWindow() {
+    const uint16_t base_before = rx_base_seq_;
     while (true) {
         size_t slot = seqToSlot(rx_base_seq_);
         if (!rx_window_[slot].received) {
@@ -1129,6 +1130,10 @@ void SelectiveRepeatARQ::advanceRXWindow() {
         rx_window_[slot].flags = 0;
         rx_window_[slot].type = v2::FrameType::DATA;
         rx_base_seq_ = (rx_base_seq_ + 1) & 0xFFFF;
+    }
+
+    if (rx_base_seq_ != base_before && on_rx_window_advanced_) {
+        on_rx_window_advanced_(rx_base_seq_, config_.window_size);
     }
 }
 

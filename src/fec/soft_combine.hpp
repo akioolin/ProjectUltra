@@ -17,6 +17,7 @@ public:
         uint16_t seq = 0;
         CodeRate rate = CodeRate::R1_4;
         uint8_t cw_count = 0;
+        uint8_t cw_index = 0;
         // PHY parameters that change LLR scaling and bit ordering. If
         // any of these differ between attempts, stored LLRs aren't
         // comparable and combining would corrupt the decode. Including
@@ -37,6 +38,7 @@ public:
                    seq == other.seq &&
                    rate == other.rate &&
                    cw_count == other.cw_count &&
+                   cw_index == other.cw_index &&
                    modulation == other.modulation &&
                    channel_interleave == other.channel_interleave &&
                    carrier_count_hash == other.carrier_count_hash;
@@ -58,6 +60,7 @@ public:
         uint16_t seq = 0;
         CodeRate rate = CodeRate::R1_4;
         uint8_t cw_count = 0;
+        uint8_t cw_index = 0;
         Modulation modulation = Modulation::DQPSK;
         bool channel_interleave = false;
         int waveform_mode = 0;          // protocol::WaveformMode underlying byte
@@ -70,6 +73,7 @@ public:
                 std::vector<float>& out_llrs);
     void retain(const Key& key, std::vector<float> combined_llrs);
     void drop(const Key& key);
+    void retainOnlySeqWindow(uint16_t base_seq, size_t window_size);
     void clear();
     void tick(uint32_t elapsed_ms);
 

@@ -5,9 +5,11 @@
 #include "selective_repeat_arq_policy.hpp"
 #include <algorithm>
 #include <deque>
+#include <functional>
 #include <optional>
 #include <array>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 namespace ultra {
@@ -141,6 +143,11 @@ public:
     int getAckRepeatCount() const { return ack_repeat_count_; }
     uint32_t getAckRepeatDelay() const { return ack_repeat_delay_ms_; }
 
+    using ReceiveWindowAdvancedCallback = std::function<void(uint16_t base_seq, size_t window_size)>;
+    void setReceiveWindowAdvancedCallback(ReceiveWindowAdvancedCallback cb) {
+        on_rx_window_advanced_ = std::move(cb);
+    }
+
 private:
     enum class RetransmitCause : uint8_t {
         TIMEOUT,
@@ -260,6 +267,7 @@ private:
     TransmitCallback on_transmit_;
     DataReceivedCallback on_data_received_;
     SendCompleteCallback on_send_complete_;
+    ReceiveWindowAdvancedCallback on_rx_window_advanced_;
 
     // Internal helpers
     size_t seqToSlot(uint16_t seq) const;

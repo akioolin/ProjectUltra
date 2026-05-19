@@ -409,6 +409,7 @@ private:
     void processArqFrame(const Bytes& frame_data);
     void runDeferredArqRefill();
     void configureArqForCurrentDataMode();
+    void configureSoftCombineHARQBounds();
     void cancelPendingPongCallback();
     uint32_t pingTimeoutMsForCurrentProfile() const;
     bool usesBoundedVariableMCDPSKFrames() const;

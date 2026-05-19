@@ -146,6 +146,10 @@ Connection::Connection(const ConnectionConfig& config)
         handleDataPayload(data, arq_.lastRxHadMoreData(), arq_.lastRxFrameType());
     });
 
+    arq_.setReceiveWindowAdvancedCallback([this](uint16_t base_seq, size_t window_size) {
+        soft_combine_harq_.retainOnlySeqWindow(base_seq, window_size);
+    });
+
     arq_.setSendCompleteCallback([this](bool success) {
         if (file_transfer_.getState() == FileTransferState::SENDING) {
             if (success) {
@@ -1770,6 +1774,14 @@ void Connection::configureArqForCurrentDataMode() {
                   modulationToString(data_modulation_),
                   codeRateToString(data_code_rate_));
     }
+
+    configureSoftCombineHARQBounds();
+}
+
+void Connection::configureSoftCombineHARQBounds() {
+    const size_t max_entries = arq_.getWindowSize() *
+        static_cast<size_t>(v2::sanitizeFixedFrameCodewords(data_frame_cw_count_));
+    soft_combine_harq_.setMaxEntries(max_entries);
 }
 
 uint32_t Connection::pingTimeoutMsForCurrentProfile() const {
@@ -1871,6 +1883,9 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
         ? rung_id
         : currentLadderRungId();
     configureArqForCurrentDataMode();
+    if (rate_changed || cw_changed) {
+        soft_combine_harq_.clear();
+    }
     resetAdaptiveModeController();
 
     if (refill_file) {

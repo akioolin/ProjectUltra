@@ -10,6 +10,7 @@ SoftCombineBuffer::Key SoftCombineBuffer::makeKey(const HarqKeyInputs& in) {
     k.seq = in.seq;
     k.rate = in.rate;
     k.cw_count = in.cw_count;
+    k.cw_index = in.cw_index;
     k.modulation = in.modulation;
     k.channel_interleave = static_cast<uint8_t>(in.channel_interleave ? 1 : 0);
     // Hash OFDM geometry into 16 bits. Two attempts with the same
@@ -27,6 +28,7 @@ size_t SoftCombineBuffer::KeyHash::operator()(const Key& key) const {
     size_t h = static_cast<size_t>(key.sender_hash);
     h ^= static_cast<size_t>(key.seq) + 0x9e3779b9u + (h << 6) + (h >> 2);
     h ^= static_cast<size_t>(key.cw_count) + 0x9e3779b9u + (h << 6) + (h >> 2);
+    h ^= static_cast<size_t>(key.cw_index) + 0x9e3779b9u + (h << 6) + (h >> 2);
     h ^= static_cast<size_t>(key.rate) + 0x9e3779b9u + (h << 6) + (h >> 2);
     h ^= static_cast<size_t>(key.modulation) + 0x9e3779b9u + (h << 6) + (h >> 2);
     h ^= static_cast<size_t>(key.channel_interleave) + 0x9e3779b9u + (h << 6) + (h >> 2);
@@ -106,6 +108,25 @@ void SoftCombineBuffer::retain(const Key& key, std::vector<float> combined_llrs)
 void SoftCombineBuffer::drop(const Key& key) {
     std::lock_guard<std::mutex> lock(mutex_);
     eraseLocked(key);
+}
+
+void SoftCombineBuffer::retainOnlySeqWindow(uint16_t base_seq, size_t window_size) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (window_size == 0) {
+        entries_.clear();
+        lru_.clear();
+        return;
+    }
+
+    for (auto it = entries_.begin(); it != entries_.end();) {
+        const uint16_t diff = (it->first.seq - base_seq) & 0xFFFF;
+        if (diff >= window_size) {
+            lru_.erase(it->second.lru_it);
+            it = entries_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 void SoftCombineBuffer::clear() {

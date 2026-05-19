@@ -1749,36 +1749,12 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
         return status;  // All failed - not enough data
     }
 
-    std::vector<float> combined_llrs;
-    const std::vector<float>* llrs_to_decode = &interleaved_soft;
     const bool harq_has_key =
         harq_buffer && harq_key && harq_key->sender_hash != 0;
     const bool harq_active = harq_has_key && harq_buffer->enabled();
-    if (harq_active) {
-        combined_llrs.resize(interleaved_soft.size());
-        const int attempts = harq_buffer->combine(*harq_key, interleaved_soft, combined_llrs);
-        llrs_to_decode = &combined_llrs;
-        if (attempts > 1) {
-            LOG_MODEM(INFO, "HARQ: combining attempt %d for seq=%u (sender_hash=0x%06X, cw=%u)",
-                      attempts, harq_key->seq, harq_key->sender_hash, harq_key->cw_count);
-        }
-    }
-
-    auto finalize_harq = [&](const CodewordStatus& final_status) {
-        if (!harq_has_key) {
-            return;
-        }
-        if (final_status.allSuccess()) {
-            harq_buffer->drop(*harq_key);
-        } else if (harq_active) {
-            harq_buffer->retain(*harq_key, combined_llrs.empty()
-                                               ? interleaved_soft
-                                               : std::move(combined_llrs));
-        }
-    };
 
     // Deinterleave to restore original CW order (frame-level)
-    auto cw_soft_bits = FrameInterleaver::deinterleave(*llrs_to_decode, cw_count);
+    auto cw_soft_bits = FrameInterleaver::deinterleave(interleaved_soft, cw_count);
 
     // Create channel interleaver for deinterleaving if enabled
     std::unique_ptr<ChannelInterleaver> interleaver;
@@ -1793,6 +1769,30 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
     size_t bytes_per_cw = getBytesPerCodeword(rate);
 
     int perturbation_cw_count = 0;  // How many CWs needed perturbation retry
+    std::vector<std::vector<float>> decoder_soft_bits(static_cast<size_t>(cw_count));
+
+    auto keyForCodeword = [&](int cw) {
+        fec::SoftCombineBuffer::Key cw_key = *harq_key;
+        cw_key.cw_index = static_cast<uint8_t>(std::clamp(cw, 0, 255));
+        return cw_key;
+    };
+
+    auto finalize_harq = [&](const CodewordStatus& final_status) {
+        if (!harq_has_key) {
+            return;
+        }
+        for (int cw = 0; cw < cw_count; ++cw) {
+            const auto cw_key = keyForCodeword(cw);
+            if (cw < static_cast<int>(final_status.decoded.size()) &&
+                final_status.decoded[static_cast<size_t>(cw)]) {
+                harq_buffer->drop(cw_key);
+            } else if (harq_active &&
+                       cw < static_cast<int>(decoder_soft_bits.size()) &&
+                       !decoder_soft_bits[static_cast<size_t>(cw)].empty()) {
+                harq_buffer->retain(cw_key, decoder_soft_bits[static_cast<size_t>(cw)]);
+            }
+        }
+    };
 
     for (int cw = 0; cw < cw_count; ++cw) {
         auto cw_bits = cw_soft_bits[cw];
@@ -1801,6 +1801,22 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
         if (use_channel_deinterleave && interleaver) {
             cw_bits = interleaver->deinterleave(cw_bits);
         }
+
+        if (harq_active) {
+            std::vector<float> combined_cw_bits;
+            const auto cw_key = keyForCodeword(cw);
+            const int attempts = harq_buffer->combine(cw_key, cw_bits, combined_cw_bits);
+            if (!combined_cw_bits.empty()) {
+                cw_bits = std::move(combined_cw_bits);
+            }
+            if (attempts > 1) {
+                LOG_MODEM(INFO,
+                          "HARQ: combining attempt %d for seq=%u cw=%d/%u (sender_hash=0x%06X)",
+                          attempts, harq_key->seq, cw, harq_key->cw_count,
+                          harq_key->sender_hash);
+            }
+        }
+        decoder_soft_bits[static_cast<size_t>(cw)] = cw_bits;
 
         // The decoder is cached per thread/rate and retry paths mutate this
         // factor. Reset before every CW so one marginal CW cannot bias the
@@ -2095,10 +2111,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                         std::vector<SuspectBit> suspects;
 
                         for (int c = 0; c < cw_count; ++c) {
-                            auto soft = cw_soft_bits[c];
-                            if (use_channel_deinterleave && interleaver) {
-                                soft = interleaver->deinterleave(soft);
-                            }
+                            const auto& soft = decoder_soft_bits[static_cast<size_t>(c)];
                             for (size_t i = 0; i < bytes_per_cw * 8 && i < soft.size(); ++i) {
                                 size_t cw_byte = i / 8;
                                 int byte_bit = 7 - static_cast<int>(i % 8);
@@ -2161,10 +2174,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
                 static constexpr float recovery_factors[] = {0.75f, 0.625f, 0.5f, 0.875f};
                 for (int attempt = 0; attempt < 4 && !recovered; ++attempt) {
                     for (int cw = 0; cw < cw_count && !recovered; ++cw) {
-                        auto cw_bits = cw_soft_bits[cw];
-                        if (use_channel_deinterleave && interleaver) {
-                            cw_bits = interleaver->deinterleave(cw_bits);
-                        }
+                        const auto& cw_bits = decoder_soft_bits[static_cast<size_t>(cw)];
                         auto original_data = status.data[cw];
 
                         decoder.setMinSumFactor(recovery_factors[attempt]);
