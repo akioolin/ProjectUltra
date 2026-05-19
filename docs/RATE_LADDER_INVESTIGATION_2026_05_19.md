@@ -1,6 +1,9 @@
 # Rate Ladder Ground-Up Investigation - 2026-05-19
 
-Phase 1 status: diagnosis only. No source-code behavior changes have been made.
+Phase 1 status: diagnosis was completed first. Follow-up status on
+2026-05-19: the external OTASim half-duplex RX-blackout fix has been
+implemented in this working tree; no rate-ladder retuning has been
+done in this round.
 
 Branch observed locally: `fix/rate-ladder-groundup-2026-05-19`.
 
@@ -108,6 +111,59 @@ Perspective check:
 - HF operator: this misses the actual operator/radio behavior: when transmitting, the receiver is muted or desensed, and there is PTT/ALC settling before useful receive resumes.
 - Physics escape hatch: unless the hardware has simultaneous TX/RX isolation, the ACK cannot be observed by the station currently transmitting.
 
+#### 2026-05-19 Fix Addendum
+
+The external OTASim path now carries explicit TX state on the UDP
+audio plane and applies RX blackout in `SessionContext`:
+
+- `OtaAudioPacketHeader::flags` uses `TX_STATE_VALID` and `TX_ACTIVE`
+  bits without changing the packet size or version.
+- New clients stamp every UDP audio packet with `TX_STATE_VALID`;
+  `TX_ACTIVE` follows the audio-port PTT/RX-blackout callback.
+- `OtaAudioPort` now overrides `setRxBlackoutCallback()` and bridges
+  `SimulatedStation`'s explicit PTT state into `OtaAudioBackend`.
+- `SessionContext::enqueueTransmit()` stores a per-sample RX-blackout
+  queue beside the TX audio queue, so server mixing blacks out the
+  receiver window aligned with the station's own samples-in-flight.
+- Older clients that omit `TX_STATE_VALID` keep the previous
+  full-duplex behavior for compatibility; the server emits a
+  `tx_state_legacy_client` event the first time it sees such traffic.
+- `rx_settling_ms` now controls only post-TX recovery tail. Active TX
+  itself always blackouts local RX.
+
+Validation in this sandbox:
+
+- `cmake -S . -B build`: passed.
+- Build targets: `ota_channel_core`, `ota_simulator_service`,
+  `ultra_otasim_client`, `cli_simulator`, `ota_simulator`, and the
+  touched tests: passed.
+- `ctest --test-dir build --output-on-failure -R
+  '^(AudioPacket|SessionContext|SessionHalfDuplexBlackout|AudioPlaneOrdering)$'`:
+  4/4 passed.
+- `ctest --test-dir build --output-on-failure -R '^OTASimulator'`:
+  7/7 passed after updating `OTASimulatorTwoEndpointSimultaneousProbe`
+  to expect a half-duplex collision/disconnect instead of the old
+  full-duplex successful connect.
+- `GrpcServiceSmoke` still cannot run in this Codex sandbox: it aborts
+  at `service.start(&error)` while binding the UDP audio plane on
+  `127.0.0.1:0`. That should be rerun from an unrestricted shell or the
+  Linux bench.
+
+Perspective check:
+
+- PHY theorist: the TX-state bit is on the sampled audio timeline, so
+  blackout is applied to the same sample windows that contain the
+  on-air signal and cannot race a separate control RPC.
+- DSP systems: the server stores blackout state with queued samples,
+  not as a stale wall-clock boolean, so UDP jitter and queue depth do
+  not misplace PTT edges relative to audio.
+- HF operator: synchronized probes now collide and time out instead of
+  connecting through impossible full-duplex leakage, matching what an
+  operator would experience with both stations keyed.
+- Physics escape hatch: peer signal energy is removed from a station's
+  RX stream while that station's transmitter is active; channel noise
+  can remain, but peer information cannot be decoded locally.
+
 ### 5. Decode CPU Time Is Not The Dominant Timeout Budget
 
 I generated connected OFDM_CHIRP decode fixtures with `decode_bench` and decoded 8 frames per rate. This measures local decode CPU cost, not OTASim transport latency.
@@ -195,9 +251,13 @@ Suggested cells once OTASim half-duplex semantics are settled:
 
 No candidate below should be landed until it is validated with multi-seed OTASim or hardware-bench evidence.
 
-1. Add half-duplex/PTT RX blackout to external OTASim.
-   - Wire station TX/RX state into `SessionContext` or the audio client protocol.
-   - Drop or attenuate receiver samples while the receiver station is transmitting and during configured turnaround tail.
+1. Add half-duplex/PTT RX blackout to external OTASim. Completed in
+   this working tree.
+   - TX state is carried by UDP audio packet flags.
+   - `SessionContext` applies per-sample receiver blackout while the
+     receiver station's own TX samples are active.
+   - Optional turnaround tail remains controlled by `rx_settling_ms`;
+     default tail is 0 ms.
 
 2. Replace `MORE_FRAG`-based SACK deferral with physical-burst-aware deferral.
    - The receiver should not send SACK before the sender's on-air burst is complete.
@@ -217,4 +277,9 @@ No candidate below should be landed until it is validated with multi-seed OTASim
 
 ## Stop Condition
 
-This is an architectural stop before code changes. The current external OTASim path is not yet a faithful half-duplex HF arbiter, and fresh OTASim measurements are blocked in this sandbox. The next useful step is to run the Phase 2 sweep from an unrestricted shell or fix OTASim half-duplex semantics first, then retune the ladder from that data.
+The original architectural stop was the missing half-duplex OTASim
+semantics. The core/client semantics are now fixed, but live-daemon
+smoke testing is still blocked in this sandbox by UDP bind denial. The
+next useful step is to rerun `GrpcServiceSmoke` and the external
+`ota_simulator serve`/client path from an unrestricted shell, then run
+the Phase 2 multi-seed sweep before changing the production rate ladder.

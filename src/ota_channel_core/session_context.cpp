@@ -170,7 +170,8 @@ size_t SessionContext::pendingAudioBlocks() const {
 }
 
 bool SessionContext::enqueueTransmit(std::string_view station_id,
-                                     std::span<const float> samples) {
+                                     std::span<const float> samples,
+                                     StationTxAudioState tx_state) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = audio_queues_.find(std::string(station_id));
     if (it == audio_queues_.end()) {
@@ -179,9 +180,13 @@ bool SessionContext::enqueueTransmit(std::string_view station_id,
     if (samples.empty()) {
         return true;
     }
-    auto& queue = it->second.tx_inbox;
-    queue.insert(queue.end(), samples.begin(), samples.end());
-    trimQueueLocked(queue);
+    auto& queues = it->second;
+    queues.tx_inbox.insert(queues.tx_inbox.end(), samples.begin(), samples.end());
+    const uint8_t rx_blackout = tx_state.tx_state_valid && tx_state.tx_active ? 1u : 0u;
+    queues.rx_blackout_inbox.insert(queues.rx_blackout_inbox.end(),
+                                    samples.size(),
+                                    rx_blackout);
+    trimTxQueueLocked(queues);
     appendEventLocked("tx_enqueued", std::string(station_id), session_clock_samples_);
     return true;
 }
@@ -197,13 +202,21 @@ SessionClockTick SessionContext::advanceSessionClock() {
     }
 
     std::map<std::string, std::vector<float>> tx_by_station;
+    std::map<std::string, std::vector<uint8_t>> rx_blackout_by_station;
     for (const auto& station_id : stations_) {
-        auto& queue = audio_queues_[station_id].tx_inbox;
+        auto& queues = audio_queues_[station_id];
+        auto& queue = queues.tx_inbox;
+        auto& rx_blackout_queue = queues.rx_blackout_inbox;
         std::vector<float> samples(tick_samples_, 0.0f);
+        std::vector<uint8_t> rx_blackout(tick_samples_, 0u);
         const size_t available = std::min(tick_samples_, queue.size());
         for (size_t i = 0; i < available; ++i) {
             samples[i] = queue.front();
             queue.pop_front();
+            if (!rx_blackout_queue.empty()) {
+                rx_blackout[i] = rx_blackout_queue.front();
+                rx_blackout_queue.pop_front();
+            }
         }
         if (available > 0) {
             tick.tx_blocks.push_back({
@@ -216,15 +229,23 @@ SessionClockTick SessionContext::advanceSessionClock() {
             }
         }
         tx_by_station.emplace(station_id, std::move(samples));
+        rx_blackout_by_station.emplace(station_id, std::move(rx_blackout));
     }
 
     for (const auto& receiver_id : stations_) {
         std::vector<float> mixed(tick_samples_, 0.0f);
+        const auto rx_blackout_it = rx_blackout_by_station.find(receiver_id);
+        const std::vector<uint8_t>* rx_blackout =
+            rx_blackout_it == rx_blackout_by_station.end() ? nullptr
+                                                           : &rx_blackout_it->second;
         for (const auto& [sender_id, samples] : tx_by_station) {
             if (sender_id == receiver_id) {
                 continue;
             }
             for (size_t i = 0; i < tick_samples_; ++i) {
+                if (rx_blackout && (*rx_blackout)[i] != 0u) {
+                    continue;
+                }
                 mixed[i] += samples[i];
             }
         }
@@ -310,9 +331,15 @@ std::vector<SessionEvent> SessionContext::eventLog() const {
     return events_;
 }
 
-void SessionContext::trimQueueLocked(std::deque<float>& queue) const {
-    while (queue.size() > max_tx_queue_samples_) {
-        queue.pop_front();
+void SessionContext::trimTxQueueLocked(StationAudioQueues& queues) const {
+    while (queues.tx_inbox.size() > max_tx_queue_samples_) {
+        queues.tx_inbox.pop_front();
+        if (!queues.rx_blackout_inbox.empty()) {
+            queues.rx_blackout_inbox.pop_front();
+        }
+    }
+    while (queues.rx_blackout_inbox.size() > queues.tx_inbox.size()) {
+        queues.rx_blackout_inbox.pop_front();
     }
 }
 

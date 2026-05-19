@@ -145,7 +145,9 @@ void OtaAudioBackend::close() {
     }
 }
 
-bool OtaAudioBackend::queueTxSamples(std::span<const float> samples, std::string* error) {
+bool OtaAudioBackend::queueTxSamples(std::span<const float> samples,
+                                     std::string* error,
+                                     bool tx_active) {
     if (samples.empty()) {
         if (error) *error = "no samples to send";
         return false;
@@ -161,7 +163,10 @@ bool OtaAudioBackend::queueTxSamples(std::span<const float> samples, std::string
     while (offset < samples.size()) {
         const uint32_t limit = max_packet_samples_ == 0 ? kFallbackMaxPacketSamples : max_packet_samples_;
         const size_t chunk = std::min<size_t>(samples.size() - offset, limit);
-        if (!sendSamplesLocked(tx_sample_cursor_, samples.subspan(offset, chunk), error)) {
+        if (!sendSamplesLocked(tx_sample_cursor_,
+                               samples.subspan(offset, chunk),
+                               tx_active,
+                               error)) {
             return false;
         }
         tx_sample_cursor_ += chunk;
@@ -384,11 +389,16 @@ bool OtaAudioBackend::openUdpSocket(const UdpTarget& target, std::string* error)
 
 bool OtaAudioBackend::sendSamplesLocked(uint64_t start_sample,
                                         std::span<const float> samples,
+                                        bool tx_active,
                                         std::string* error) {
     service::OtaAudioPacket packet;
     packet.header.lease_id = lease_id_;
     packet.header.seq = tx_seq_++;
     packet.header.start_sample = start_sample;
+    packet.header.flags = service::kOtaAudioFlagTxStateValid;
+    if (tx_active) {
+        packet.header.flags |= service::kOtaAudioFlagTxActive;
+    }
     packet.samples.assign(samples.begin(), samples.end());
     const auto bytes = service::serializeAudioPacket(packet);
 
@@ -407,7 +417,10 @@ bool OtaAudioBackend::sendSamplesLocked(uint64_t start_sample,
 
 bool OtaAudioBackend::sendPrimeLocked(std::string* error) {
     std::array<float, kPrimeSamples> prime{};
-    if (!sendSamplesLocked(0, std::span<const float>(prime.data(), prime.size()), error)) {
+    if (!sendSamplesLocked(0,
+                           std::span<const float>(prime.data(), prime.size()),
+                           false,
+                           error)) {
         return false;
     }
     tx_sample_cursor_ = prime.size();

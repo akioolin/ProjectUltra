@@ -310,6 +310,9 @@ void UdpAudioPlane::handleDatagram(std::span<const uint8_t> bytes,
             .session_id = it->second.session_id,
             .station_id = it->second.station_id,
             .start_sample = packet->header.start_sample,
+            .tx_state_valid =
+                (packet->header.flags & kOtaAudioFlagTxStateValid) != 0,
+            .tx_active = (packet->header.flags & kOtaAudioFlagTxActive) != 0,
             .samples = std::move(packet->samples),
         };
         callback = callback_;

@@ -405,9 +405,6 @@ public:
     }
     bool isInRxBlackout() const {
         std::lock_guard<std::mutex> lock(ptt_mutex_);
-        if (rx_settling_ms_ == 0) {
-            return false;
-        }
         return ptt_state_ == PttState::TX || ptt_state_ == PttState::TRANSITION;
     }
 
@@ -505,8 +502,8 @@ private:
     std::queue<float> tx_queue_;
     uint64_t tx_sample_clock_ = 0;  // Continuous TX capture sample cursor.
 
-    // Explicit half-duplex PTT state. The rx_settling_ms_ == 0 default keeps
-    // legacy simulator full-duplex behavior; nonzero values enable blackout.
+    // Explicit half-duplex PTT state. rx_settling_ms_ controls post-TX
+    // receiver recovery tail; active TX itself always blacks out local RX.
     mutable std::mutex ptt_mutex_;
     PttState ptt_state_ = PttState::RX;
     uint64_t tx_in_flight_samples_remaining_ = 0;

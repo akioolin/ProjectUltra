@@ -345,12 +345,17 @@ public:
         return backend_.getRxSamples(count);
     }
 
+    void setRxBlackoutCallback(std::function<bool()> callback) override {
+        rx_blackout_callback_ = std::move(callback);
+    }
+
     void queueTx(const std::vector<float>& samples) override {
         if (samples.empty()) {
             return;
         }
         std::string error;
-        if (!backend_.queueTxSamples(samples, &error)) {
+        const bool tx_active = rx_blackout_callback_ && rx_blackout_callback_();
+        if (!backend_.queueTxSamples(samples, &error, tx_active)) {
             tx_errors_++;
             if (tx_errors_ <= 4 || (tx_errors_ % 32) == 0) {
                 LOG_MODEM(WARN, "%s OTASim TX failed: %s", label_.c_str(), error.c_str());
@@ -362,6 +367,7 @@ private:
     otasim_client::OtaAudioBackendConfig config_;
     std::string label_;
     otasim_client::OtaAudioBackend backend_;
+    std::function<bool()> rx_blackout_callback_;
     uint64_t tx_errors_ = 0;
 };
 

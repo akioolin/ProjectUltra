@@ -33,6 +33,10 @@ add_executable(test_session_context test_session_context.cpp)
 target_link_libraries(test_session_context PRIVATE ota_channel_core)
 add_test(NAME SessionContext COMMAND test_session_context)
 
+add_executable(test_session_half_duplex_blackout test_session_half_duplex_blackout.cpp)
+target_link_libraries(test_session_half_duplex_blackout PRIVATE ota_channel_core)
+add_test(NAME SessionHalfDuplexBlackout COMMAND test_session_half_duplex_blackout)
+
 add_executable(test_session_manager test_session_manager.cpp)
 target_link_libraries(test_session_manager PRIVATE ota_channel_core)
 add_test(NAME SessionManager COMMAND test_session_manager)

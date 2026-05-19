@@ -674,7 +674,36 @@ void OtaSimulatorService::onAudioPacket(const ReceivedAudioPacket& packet) {
     if (!session) {
         return;
     }
-    if (!session->enqueueTransmit(packet.station_id, packet.samples)) {
+    const std::string tx_state_key = packet.session_id + "\n" + packet.station_id;
+    bool emit_explicit_tx_state = false;
+    bool emit_legacy_tx_state = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (packet.tx_state_valid) {
+            emit_explicit_tx_state = tx_state_seen_logged_.insert(tx_state_key).second;
+        } else {
+            emit_legacy_tx_state = tx_state_missing_logged_.insert(tx_state_key).second;
+        }
+    }
+    if (emit_explicit_tx_state) {
+        emitEvent(packet.session_id,
+                  session->sessionClockSamples(),
+                  "tx_state_explicit_client",
+                  jsonPair("station_id", packet.station_id));
+    }
+    if (emit_legacy_tx_state) {
+        emitEvent(packet.session_id,
+                  session->sessionClockSamples(),
+                  "tx_state_legacy_client",
+                  jsonPair("station_id", packet.station_id));
+    }
+
+    if (!session->enqueueTransmit(packet.station_id,
+                                  packet.samples,
+                                  {
+                                      .tx_state_valid = packet.tx_state_valid,
+                                      .tx_active = packet.tx_active,
+                                  })) {
         return;
     }
 }

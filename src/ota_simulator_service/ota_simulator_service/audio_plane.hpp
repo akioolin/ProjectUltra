@@ -39,6 +39,8 @@ struct ReceivedAudioPacket {
     std::string session_id;
     std::string station_id;
     uint64_t start_sample = 0;
+    bool tx_state_valid = false;
+    bool tx_active = false;
     std::vector<float> samples;
 };
 
