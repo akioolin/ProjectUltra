@@ -230,6 +230,60 @@ Payload: `sample_count` interleaved samples. Server orders by
 `start_sample` per stream, drops late duplicates, treats absent
 TX for a tick as zero-signal contribution.
 
+### Half-Duplex PTT / RX Blackout Contract
+
+OTASim is a half-duplex HF medium. When a station is transmitting,
+its colocated receiver is deaf to peer audio. The server must not
+deliver other stations' audio into that station's RX stream while the
+station's own TX samples are active. Channel noise may still be
+present; peer signal energy must not be.
+
+TX state is carried on the UDP audio packet, not by a separate gRPC
+RPC:
+
+```text
+flags bit 0: TX_STATE_VALID
+flags bit 1: TX_ACTIVE
+```
+
+`TX_STATE_VALID=1` means the sender is a half-duplex-aware client.
+`TX_ACTIVE=1` means every sample in this packet belongs to an active
+PTT/on-air interval and should black out that station's receiver for
+the matching server-side audio window. `TX_STATE_VALID=0` preserves
+legacy behavior for older clients: the server treats that station as
+not providing explicit PTT state and keeps the previous full-duplex
+mixing behavior for that station. This compatibility mode is explicit
+and should be visible in events/logs when a station first sends audio
+without TX-state signaling.
+
+The server aligns blackout with queued audio samples, not with wall
+clock packet-arrival time. UDP jitter can move packets around; the
+station's own samples-in-flight are the only reliable clock for when
+the transmitter is on air. During each session tick, if station `S`
+has TX-active samples for a sample position, the mixer zeros peer
+contributions into `S` for that sample position before channel
+processing.
+
+Optional RX-recovery tail is a server/client policy parameter rather
+than a wire-format change. A tail of 0 ms means blackout ends at the
+last TX-active sample; a configured 100-300 ms tail models PTT release,
+ALC/relay/AGC recovery, and VOX-style hang time.
+
+Multi-perspective decision check:
+
+- PHY theorist: the bit is part of the sampled channel timeline, so it
+  protects ACK/control timing at the same granularity as the signal
+  that caused receiver desense.
+- Real-time DSP systems engineer: no per-PTT RPC round trip or control
+  packet ordering problem is inserted into the audio path; queueing
+  state beside samples keeps the server mixer deterministic under UDP
+  jitter.
+- HF operator: this matches the operator experience of PTT down, ALC
+  settle, on-air transmit, PTT release, then RX recovery. If both
+  stations transmit, both local receivers are deaf for their own
+  transmit windows, so collisions do not leak into impossible
+  full-duplex ACKs.
+
 ---
 
 ## Channel Models (Sealed Built-in Set)

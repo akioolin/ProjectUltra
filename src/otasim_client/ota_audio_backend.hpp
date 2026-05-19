@@ -50,7 +50,8 @@ public:
     bool start(OtaAudioBackendConfig config, std::string* error = nullptr);
     void close();
 
-    bool queueTxSamples(std::span<const float> samples, std::string* error = nullptr);
+    bool queueTxSamples(std::span<const float> samples,
+                        std::string* error = nullptr);
     std::vector<float> getRxSamples(size_t max_samples);
     size_t getRxBufferSize() const;
 
@@ -68,7 +69,9 @@ private:
 
     bool connectOnce(std::string* error);
     bool openUdpSocket(const UdpTarget& target, std::string* error);
-    bool sendSamplesLocked(uint64_t start_sample, std::span<const float> samples, std::string* error);
+    bool sendSamplesLocked(uint64_t start_sample,
+                           std::span<const float> samples,
+                           std::string* error);
     bool sendPrimeLocked(std::string* error);
     bool heartbeat(std::string* error);
     void leaveSession();

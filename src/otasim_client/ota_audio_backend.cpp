@@ -4,9 +4,14 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
+#include <cstdlib>
+#include <cmath>
+#include <fstream>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <utility>
 
 #include <grpcpp/grpcpp.h>
@@ -80,6 +85,31 @@ bool copySockaddr(const addrinfo* info,
     return true;
 }
 
+void e2eDebugLine(const std::string& line) {
+    const char* path = std::getenv("ULTRA_E2E_DEBUG_LOG");
+    if (path == nullptr || *path == '\0') {
+        return;
+    }
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
+    std::ofstream out(path, std::ios::app);
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    const auto epoch_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+    out << "epoch_ms=" << epoch_ms << ' ' << line << '\n';
+}
+
+float rms(std::span<const float> samples) {
+    if (samples.empty()) {
+        return 0.0f;
+    }
+    double sum = 0.0;
+    for (float sample : samples) {
+        sum += static_cast<double>(sample) * static_cast<double>(sample);
+    }
+    return static_cast<float>(std::sqrt(sum / static_cast<double>(samples.size())));
+}
+
 }  // namespace
 
 OtaAudioBackend::OtaAudioBackend() = default;
@@ -145,7 +175,8 @@ void OtaAudioBackend::close() {
     }
 }
 
-bool OtaAudioBackend::queueTxSamples(std::span<const float> samples, std::string* error) {
+bool OtaAudioBackend::queueTxSamples(std::span<const float> samples,
+                                     std::string* error) {
     if (samples.empty()) {
         if (error) *error = "no samples to send";
         return false;
@@ -161,7 +192,9 @@ bool OtaAudioBackend::queueTxSamples(std::span<const float> samples, std::string
     while (offset < samples.size()) {
         const uint32_t limit = max_packet_samples_ == 0 ? kFallbackMaxPacketSamples : max_packet_samples_;
         const size_t chunk = std::min<size_t>(samples.size() - offset, limit);
-        if (!sendSamplesLocked(tx_sample_cursor_, samples.subspan(offset, chunk), error)) {
+        if (!sendSamplesLocked(tx_sample_cursor_,
+                               samples.subspan(offset, chunk),
+                               error)) {
             return false;
         }
         tx_sample_cursor_ += chunk;
@@ -175,6 +208,17 @@ std::vector<float> OtaAudioBackend::getRxSamples(size_t max_samples) {
     const size_t count = std::min(max_samples, rx_buffer_.size());
     std::vector<float> out(rx_buffer_.begin(), rx_buffer_.begin() + static_cast<std::ptrdiff_t>(count));
     rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + static_cast<std::ptrdiff_t>(count));
+    if (config_.station_id == "BRAVO") {
+        std::ostringstream oss;
+        oss << "client_get_rx station=" << config_.station_id
+            << " request=" << max_samples
+            << " returned=" << out.size()
+            << " rms=" << rms(out)
+            << " rx_buffer_remaining=" << rx_buffer_.size()
+            << " rx_pending_blocks=" << rx_pending_.size()
+            << " rx_next_sample=" << rx_next_sample_;
+        e2eDebugLine(oss.str());
+    }
     return out;
 }
 
@@ -402,12 +446,23 @@ bool OtaAudioBackend::sendSamplesLocked(uint64_t start_sample,
         if (error) *error = "UDP audio send failed";
         return false;
     }
+    std::ostringstream oss;
+    oss << "client_udp_send station=" << config_.station_id
+        << " lease=" << lease_id_
+        << " seq=" << packet.header.seq
+        << " start=" << start_sample
+        << " samples=" << samples.size()
+        << " bytes=" << bytes.size()
+        << " rms=" << rms(samples);
+    e2eDebugLine(oss.str());
     return true;
 }
 
 bool OtaAudioBackend::sendPrimeLocked(std::string* error) {
     std::array<float, kPrimeSamples> prime{};
-    if (!sendSamplesLocked(0, std::span<const float>(prime.data(), prime.size()), error)) {
+    if (!sendSamplesLocked(0,
+                           std::span<const float>(prime.data(), prime.size()),
+                           error)) {
         return false;
     }
     tx_sample_cursor_ = prime.size();
@@ -603,6 +658,22 @@ void OtaAudioBackend::rxLoop() {
             std::span<const uint8_t>(buffer.data(), static_cast<size_t>(n)));
         if (!packet || packet->header.lease_id != lease_id) {
             continue;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (config_.station_id == "BRAVO") {
+                std::ostringstream oss;
+                oss << "client_udp_recv station=" << config_.station_id
+                    << " lease=" << packet->header.lease_id
+                    << " seq=" << packet->header.seq
+                    << " start=" << packet->header.start_sample
+                    << " samples=" << packet->samples.size()
+                    << " bytes=" << n
+                    << " rms=" << rms(packet->samples)
+                    << " rx_buffer=" << rx_buffer_.size()
+                    << " rx_pending_blocks=" << rx_pending_.size();
+                e2eDebugLine(oss.str());
+            }
         }
         pushRxPacket(packet->header.start_sample, packet->samples);
     }

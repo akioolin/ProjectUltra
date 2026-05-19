@@ -1,6 +1,11 @@
 #include "ota_channel_core/session_context.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 
@@ -25,6 +30,31 @@ std::string streamNameForSession(std::string_view session_id,
 size_t samplesForMs(uint32_t sample_rate, uint32_t ms) {
     return std::max<size_t>(1, static_cast<size_t>(
         (static_cast<uint64_t>(sample_rate) * ms) / 1000u));
+}
+
+void e2eDebugLine(const std::string& line) {
+    const char* path = std::getenv("ULTRA_E2E_DEBUG_LOG");
+    if (path == nullptr || *path == '\0') {
+        return;
+    }
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
+    std::ofstream out(path, std::ios::app);
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    const auto epoch_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+    out << "epoch_ms=" << epoch_ms << ' ' << line << '\n';
+}
+
+float rms(std::span<const float> samples) {
+    if (samples.empty()) {
+        return 0.0f;
+    }
+    double sum = 0.0;
+    for (float sample : samples) {
+        sum += static_cast<double>(sample) * static_cast<double>(sample);
+    }
+    return static_cast<float>(std::sqrt(sum / static_cast<double>(samples.size())));
 }
 
 }  // namespace
@@ -179,9 +209,19 @@ bool SessionContext::enqueueTransmit(std::string_view station_id,
     if (samples.empty()) {
         return true;
     }
-    auto& queue = it->second.tx_inbox;
-    queue.insert(queue.end(), samples.begin(), samples.end());
-    trimQueueLocked(queue);
+    auto& queues = it->second;
+    queues.tx_inbox.insert(queues.tx_inbox.end(), samples.begin(), samples.end());
+    {
+        std::ostringstream oss;
+        oss << "session_tx_inbox station=" << station_id
+            << " session=" << config_.session_id
+            << " clock=" << session_clock_samples_
+            << " samples=" << samples.size()
+            << " rms=" << rms(samples)
+            << " queued_after=" << queues.tx_inbox.size();
+        e2eDebugLine(oss.str());
+    }
+    trimTxQueueLocked(queues);
     appendEventLocked("tx_enqueued", std::string(station_id), session_clock_samples_);
     return true;
 }
@@ -198,7 +238,8 @@ SessionClockTick SessionContext::advanceSessionClock() {
 
     std::map<std::string, std::vector<float>> tx_by_station;
     for (const auto& station_id : stations_) {
-        auto& queue = audio_queues_[station_id].tx_inbox;
+        auto& queues = audio_queues_[station_id];
+        auto& queue = queues.tx_inbox;
         std::vector<float> samples(tick_samples_, 0.0f);
         const size_t available = std::min(tick_samples_, queue.size());
         for (size_t i = 0; i < available; ++i) {
@@ -236,6 +277,17 @@ SessionClockTick SessionContext::advanceSessionClock() {
             .start_sample = tick.start_sample,
             .samples = rx,
         });
+        const float rx_rms = rms(rx);
+        if (receiver_id == "BRAVO" || rx_rms > 0.001f) {
+            std::ostringstream oss;
+            oss << "session_outbox_enqueue receiver=" << receiver_id
+                << " session=" << config_.session_id
+                << " start=" << tick.start_sample
+                << " samples=" << rx.size()
+                << " rms=" << rx_rms
+                << " outbox_blocks_before_trim=" << outbox.size();
+            e2eDebugLine(oss.str());
+        }
         trimOutboxLocked(outbox);
         tick.rx_blocks.push_back({
             .station_id = receiver_id,
@@ -310,9 +362,9 @@ std::vector<SessionEvent> SessionContext::eventLog() const {
     return events_;
 }
 
-void SessionContext::trimQueueLocked(std::deque<float>& queue) const {
-    while (queue.size() > max_tx_queue_samples_) {
-        queue.pop_front();
+void SessionContext::trimTxQueueLocked(StationAudioQueues& queues) const {
+    while (queues.tx_inbox.size() > max_tx_queue_samples_) {
+        queues.tx_inbox.pop_front();
     }
 }
 

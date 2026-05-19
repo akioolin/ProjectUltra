@@ -342,13 +342,30 @@ public:
     }
 
     std::vector<float> pullRx(size_t count) override {
-        return backend_.getRxSamples(count);
+        auto samples = backend_.getRxSamples(count);
+        const float raw_rms = sampleRms(samples);
+        auto shaped = shapeRxForLocalRadio(std::move(samples), count);
+        if (label_ == "BRAVO") {
+            std::ostringstream oss;
+            oss << "audioport_pull_rx station=" << label_
+                << " request=" << count
+                << " returned=" << shaped.size()
+                << " raw_rms=" << raw_rms
+                << " shaped_rms=" << sampleRms(shaped);
+            e2eDebugLine(oss.str());
+        }
+        return shaped;
     }
 
     void queueTx(const std::vector<float>& samples) override {
         if (samples.empty()) {
             return;
         }
+        std::ostringstream oss;
+        oss << "audioport_queue_tx station=" << label_
+            << " samples=" << samples.size()
+            << " rms=" << sampleRms(samples);
+        e2eDebugLine(oss.str());
         std::string error;
         if (!backend_.queueTxSamples(samples, &error)) {
             tx_errors_++;

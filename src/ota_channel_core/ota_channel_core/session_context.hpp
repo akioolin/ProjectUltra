@@ -76,7 +76,8 @@ public:
     void discardBefore(uint64_t sample_index);
     size_t pendingAudioBlocks() const;
 
-    bool enqueueTransmit(std::string_view station_id, std::span<const float> samples);
+    bool enqueueTransmit(std::string_view station_id,
+                         std::span<const float> samples);
     SessionClockTick advanceSessionClock();
     std::vector<SessionAudioBlock> drainReceiveOutbox();
     uint64_t sessionClockSamples() const;
@@ -106,7 +107,7 @@ private:
         std::deque<QueuedAudioBlock> rx_outbox;
     };
 
-    void trimQueueLocked(std::deque<float>& queue) const;
+    void trimTxQueueLocked(StationAudioQueues& queues) const;
     void trimOutboxLocked(std::deque<QueuedAudioBlock>& queue) const;
     void appendEventLocked(std::string type,
                            std::string station_id,

@@ -33,15 +33,6 @@ struct Event {
     std::string detail;
 };
 
-const char* pttStateName(PttState state) {
-    switch (state) {
-        case PttState::RX: return "RX";
-        case PttState::TX: return "TX";
-        case PttState::TRANSITION: return "TRANSITION";
-    }
-    return "UNKNOWN";
-}
-
 class EventLog {
 public:
     void add(double t_s, std::string station, std::string kind, std::string detail) {
@@ -89,7 +80,7 @@ public:
             if (e.station != station || e.kind != "ptt.state") {
                 continue;
             }
-            if (!start && e.detail == "TRANSITION") {
+            if (!start && e.detail == "TX_TR_SWITCH") {
                 start = e.t_s;
             } else if (start && e.detail == "RX") {
                 return std::make_pair(*start, e.t_s);
@@ -158,7 +149,7 @@ void pollPttState(SimulatedStation& station,
         return;
     }
     last = current;
-    log.add(station.getSimTime(), name, "ptt.state", pttStateName(current));
+    log.add(station.getSimTime(), name, "ptt.state", ::pttStateName(current));
 }
 
 void runStations(SimulatedStation& station_a,
@@ -167,8 +158,8 @@ void runStations(SimulatedStation& station_a,
                  std::chrono::seconds duration) {
     PttState last_a = station_a.pttState();
     PttState last_b = station_b.pttState();
-    log.add(station_a.getSimTime(), "ALPHA", "ptt.state", pttStateName(last_a));
-    log.add(station_b.getSimTime(), "BRAVO", "ptt.state", pttStateName(last_b));
+    log.add(station_a.getSimTime(), "ALPHA", "ptt.state", ::pttStateName(last_a));
+    log.add(station_b.getSimTime(), "BRAVO", "ptt.state", ::pttStateName(last_b));
 
     const auto deadline = std::chrono::steady_clock::now() + duration;
     while (std::chrono::steady_clock::now() < deadline) {

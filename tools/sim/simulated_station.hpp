@@ -35,6 +35,7 @@
 #include <queue>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <functional>
 #include <sstream>
 
@@ -47,6 +48,7 @@
 #include "gui/modem/streaming_encoder.hpp"  // TX encoding (mirrors StreamingDecoder)
 #include "protocol/protocol_engine.hpp"
 #include "protocol/frame_v2.hpp"
+#include "protocol/connection_policy.hpp"
 #include "protocol/waveform_selection.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
@@ -116,6 +118,20 @@ static float samplePeak(const std::vector<float>& samples) {
     return count;
 }
 
+inline void e2eDebugLine(const std::string& line) {
+    const char* path = std::getenv("ULTRA_E2E_DEBUG_LOG");
+    if (path == nullptr || *path == '\0') {
+        return;
+    }
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
+    std::ofstream out(path, std::ios::app);
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    const auto epoch_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+    out << "epoch_ms=" << epoch_ms << ' ' << line << '\n';
+}
+
 static float modeEfficiency(Modulation mod, CodeRate rate) {
     return static_cast<float>(getBitsPerSymbol(mod)) * getCodeRateValue(rate);
 }
@@ -132,6 +148,8 @@ static const char* adaptationDirection(Modulation from_mod, CodeRate from_rate,
     if (to_eff < from_eff - 0.05f) return "degrading";
     return "changing";
 }
+
+class RadioPttStateMachine;
 
 /**
  * AudioPort - Pluggable audio backend for a SimulatedStation.
@@ -161,7 +179,17 @@ public:
     // Optional lifecycle hooks; default no-op.
     virtual bool start() { return true; }
     virtual void stop() {}
-    virtual void setRxBlackoutCallback(std::function<bool()> /*callback*/) {}
+    virtual void attachRadioState(const RadioPttStateMachine* ptt) {
+        attached_ptt_ = ptt;
+    }
+
+protected:
+    bool attachedRadioInRxBlackout() const;
+    std::vector<float> shapeRxForLocalRadio(std::vector<float> samples,
+                                            size_t count) const;
+
+private:
+    const RadioPttStateMachine* attached_ptt_ = nullptr;
 };
 
 /**
@@ -174,17 +202,14 @@ public:
         : channel_(channel), is_station_a_(is_station_a) {}
 
     std::vector<float> pullRx(size_t count) override {
-        return is_station_a_ ? channel_.receiveForA(count)
-                             : channel_.receiveForB(count);
+        auto samples = is_station_a_ ? channel_.receiveForA(count)
+                                     : channel_.receiveForB(count);
+        return shapeRxForLocalRadio(std::move(samples), count);
     }
 
     void queueTx(const std::vector<float>& samples) override {
         if (is_station_a_) channel_.transmitFromA(samples);
         else               channel_.transmitFromB(samples);
-    }
-
-    void setRxBlackoutCallback(std::function<bool()> callback) override {
-        channel_.setRxBlackoutCallback(is_station_a_, std::move(callback));
     }
 
 private:
@@ -196,7 +221,164 @@ private:
 enum class PttState {
     RX,
     TX,
-    TRANSITION
+    TX_TR_SWITCH,
+    TX_COOLDOWN
+};
+
+inline const char* pttStateName(PttState state) {
+    switch (state) {
+        case PttState::RX: return "RX";
+        case PttState::TX: return "TX";
+        case PttState::TX_TR_SWITCH: return "TX_TR_SWITCH";
+        case PttState::TX_COOLDOWN: return "TX_COOLDOWN";
+    }
+    return "UNKNOWN";
+}
+
+class RadioPttStateMachine {
+public:
+    explicit RadioPttStateMachine(uint32_t sample_rate = 48000)
+        : sample_rate_(sample_rate) {}
+
+    void setRecoveryTimings(uint32_t tr_switch_ms, uint32_t cooldown_ms) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        tx_tr_switch_ms_ = tr_switch_ms;
+        tx_cooldown_ms_ = cooldown_ms;
+        if (ptt_state_ == PttState::TX_TR_SWITCH && tx_tr_switch_ms_ == 0) {
+            tx_tr_switch_samples_remaining_ = 0;
+            enterCooldownOrRxLocked();
+        } else if (ptt_state_ == PttState::TX_COOLDOWN && tx_cooldown_ms_ == 0) {
+            tx_cooldown_samples_remaining_ = 0;
+            ptt_state_ = PttState::RX;
+        }
+    }
+
+    void setTxTrSwitchMs(uint32_t ms) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        tx_tr_switch_ms_ = ms;
+    }
+
+    void setTxCooldownMs(uint32_t ms) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        tx_cooldown_ms_ = ms;
+    }
+
+    uint32_t txTrSwitchMs() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return tx_tr_switch_ms_;
+    }
+
+    uint32_t txCooldownMs() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return tx_cooldown_ms_;
+    }
+
+    PttState state() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ptt_state_;
+    }
+
+    bool isInRxBlackout() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ptt_state_ == PttState::TX ||
+               ptt_state_ == PttState::TX_TR_SWITCH;
+    }
+
+    bool isReadyForNextTx() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ptt_state_ == PttState::RX;
+    }
+
+    void noteTxQueued(size_t sample_count) {
+        if (sample_count == 0) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        tx_in_flight_samples_remaining_ += static_cast<uint64_t>(sample_count);
+        tx_tr_switch_samples_remaining_ = 0;
+        tx_cooldown_samples_remaining_ = 0;
+        ptt_state_ = PttState::TX;
+    }
+
+    void noteTxDrained(size_t drained_samples) {
+        if (drained_samples == 0) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (ptt_state_ != PttState::TX) {
+            return;
+        }
+        const uint64_t drained = static_cast<uint64_t>(drained_samples);
+        if (drained >= tx_in_flight_samples_remaining_) {
+            tx_in_flight_samples_remaining_ = 0;
+        } else {
+            tx_in_flight_samples_remaining_ -= drained;
+        }
+        if (tx_in_flight_samples_remaining_ == 0) {
+            beginPostTxRecoveryLocked();
+        }
+    }
+
+    void advanceSamples(size_t elapsed_samples) {
+        if (elapsed_samples == 0) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        uint64_t remaining = static_cast<uint64_t>(elapsed_samples);
+        if (ptt_state_ == PttState::TX_TR_SWITCH) {
+            remaining = consumeLocked(tx_tr_switch_samples_remaining_, remaining);
+            if (tx_tr_switch_samples_remaining_ > 0) {
+                return;
+            }
+            enterCooldownOrRxLocked();
+        }
+        if (remaining > 0 && ptt_state_ == PttState::TX_COOLDOWN) {
+            consumeLocked(tx_cooldown_samples_remaining_, remaining);
+            if (tx_cooldown_samples_remaining_ == 0) {
+                ptt_state_ = PttState::RX;
+            }
+        }
+    }
+
+private:
+    uint64_t samplesForMsLocked(uint32_t ms) const {
+        return (static_cast<uint64_t>(ms) * static_cast<uint64_t>(sample_rate_)) /
+               1000ULL;
+    }
+
+    static uint64_t consumeLocked(uint64_t& counter, uint64_t elapsed) {
+        if (elapsed >= counter) {
+            const uint64_t leftover = elapsed - counter;
+            counter = 0;
+            return leftover;
+        }
+        counter -= elapsed;
+        return 0;
+    }
+
+    void beginPostTxRecoveryLocked() {
+        tx_tr_switch_samples_remaining_ = samplesForMsLocked(tx_tr_switch_ms_);
+        tx_cooldown_samples_remaining_ = samplesForMsLocked(tx_cooldown_ms_);
+        if (tx_tr_switch_samples_remaining_ > 0) {
+            ptt_state_ = PttState::TX_TR_SWITCH;
+            return;
+        }
+        enterCooldownOrRxLocked();
+    }
+
+    void enterCooldownOrRxLocked() {
+        ptt_state_ = tx_cooldown_samples_remaining_ > 0 ? PttState::TX_COOLDOWN
+                                                        : PttState::RX;
+    }
+
+    const uint32_t sample_rate_;
+    mutable std::mutex mutex_;
+    PttState ptt_state_ = PttState::RX;
+    uint64_t tx_in_flight_samples_remaining_ = 0;
+    uint64_t tx_tr_switch_samples_remaining_ = 0;
+    uint64_t tx_cooldown_samples_remaining_ = 0;
+    uint32_t tx_tr_switch_ms_ = 20;
+    uint32_t tx_cooldown_ms_ = 100;
 };
 
 
@@ -205,6 +387,7 @@ public:
     static constexpr int SAMPLE_RATE = 48000;
     static constexpr int SAMPLES_PER_CALLBACK = 480;  // 10ms
     static constexpr int CALLBACK_INTERVAL_MS = 10;
+    static constexpr int TX_CONTINUATION_GRACE_MS = CALLBACK_INTERVAL_MS * 2;
 
     SimulatedStation(const std::string& callsign, std::unique_ptr<AudioPort> port,
                      OFDMConfigPreset ofdm_config_preset = OFDMConfigPreset::Default,
@@ -213,7 +396,6 @@ public:
         : callsign_(callsign),
           port_(std::move(port)),
           protocol_(connection_config) {
-
         ofdm_config_preset_ = ofdm_config_preset;
         mc_dpsk_config_ = mc_dpsk_config;
         control_mc_dpsk_config_ = mc_dpsk_config;
@@ -230,18 +412,16 @@ public:
         createEncoder();
         createDecoder();
 
-        setupCallbacks();
         if (port_) {
-            port_->setRxBlackoutCallback([this]() {
-                return isInRxBlackout();
-            });
+            port_->attachRadioState(&ptt_);
         }
+        setupCallbacks();
     }
 
     ~SimulatedStation() {
         stop();
         if (port_) {
-            port_->setRxBlackoutCallback({});
+            port_->attachRadioState(nullptr);
         }
     }
 
@@ -391,25 +571,60 @@ public:
     void setRxOverfeedFactor(int n) { rx_overfeed_factor_ = std::clamp(n, 1, 200); }
     void setDecodeDelayMs(int ms) { decode_delay_ms_ = std::clamp(ms, 0, 500); }
     void setRxBatchCallbacks(int n) { rx_batch_callbacks_ = std::clamp(n, 1, 1000); }
-    void setRxSettlingMs(uint32_t ms) {
-        std::lock_guard<std::mutex> lock(ptt_mutex_);
-        rx_settling_ms_ = ms;
-        if (ms == 0 && ptt_state_ == PttState::TRANSITION) {
-            transition_samples_remaining_ = 0;
-            ptt_state_ = PttState::RX;
-        }
+    void setTxRecoveryTimings(uint32_t tr_switch_ms, uint32_t cooldown_ms) {
+        ptt_.setRecoveryTimings(tr_switch_ms, cooldown_ms);
     }
+    void setTxTrSwitchMs(uint32_t ms) { ptt_.setTxTrSwitchMs(ms); }
+    void setTxCooldownMs(uint32_t ms) { ptt_.setTxCooldownMs(ms); }
+    void setRxSettlingMs(uint32_t ms) { ptt_.setRecoveryTimings(ms, 0); }
     PttState pttState() const {
-        std::lock_guard<std::mutex> lock(ptt_mutex_);
-        return ptt_state_;
+        return ptt_.state();
     }
     bool isInRxBlackout() const {
-        std::lock_guard<std::mutex> lock(ptt_mutex_);
-        if (rx_settling_ms_ == 0) {
-            return false;
-        }
-        return ptt_state_ == PttState::TX || ptt_state_ == PttState::TRANSITION;
+        return ptt_.isInRxBlackout();
     }
+    bool isReadyForNextTx() const {
+        return ptt_.isReadyForNextTx();
+    }
+
+#ifdef ULTRA_SIM_STATION_TEST_HOOKS
+    void testQueueTxSamples(const std::vector<float>& samples,
+                            const std::string& label = std::string()) {
+        queueTx(samples, label);
+    }
+
+    size_t testDrainLocalTxSamples(size_t max_samples) {
+        size_t drained = 0;
+        {
+            std::lock_guard<std::mutex> lock(tx_mutex_);
+            while (drained < max_samples && !tx_queue_.empty()) {
+                tx_queue_.pop();
+                ++drained;
+            }
+            tx_sample_clock_ += drained;
+        }
+        notePttTxDrained(drained);
+        return drained;
+    }
+
+    void testAdvanceRadioSamples(size_t elapsed_samples) {
+        advancePttRecovery(elapsed_samples);
+    }
+
+    void testFlushDeferredTxIfReady() {
+        flushDeferredTxIfReady();
+    }
+
+    size_t testTxQueueDepth() {
+        std::lock_guard<std::mutex> lock(tx_mutex_);
+        return tx_queue_.size();
+    }
+
+    size_t testDeferredTxDepth() {
+        std::lock_guard<std::mutex> lock(deferred_tx_mutex_);
+        return deferred_tx_submissions_.size();
+    }
+#endif
 
     // Enable/disable channel interleaving on both TX encoder and RX decoder
     void setChannelInterleave(bool enable) {
@@ -505,13 +720,20 @@ private:
     std::queue<float> tx_queue_;
     uint64_t tx_sample_clock_ = 0;  // Continuous TX capture sample cursor.
 
-    // Explicit half-duplex PTT state. The rx_settling_ms_ == 0 default keeps
-    // legacy simulator full-duplex behavior; nonzero values enable blackout.
-    mutable std::mutex ptt_mutex_;
-    PttState ptt_state_ = PttState::RX;
-    uint64_t tx_in_flight_samples_remaining_ = 0;
-    uint64_t transition_samples_remaining_ = 0;
-    uint32_t rx_settling_ms_ = 0;
+    struct DeferredTxSubmission {
+        std::vector<float> samples;
+        std::string label;
+    };
+    std::mutex deferred_tx_mutex_;
+    std::deque<DeferredTxSubmission> deferred_tx_submissions_;
+    uint64_t deferred_tx_count_ = 0;
+    uint64_t rejected_tx_count_ = 0;
+    static constexpr size_t kMaxDeferredTxSubmissions = 16;
+
+    // Explicit radio PTT state. TX and TX_TR_SWITCH deafen RX; TX_COOLDOWN
+    // reopens RX while holding off the next TX keying edge.
+    RadioPttStateMachine ptt_{SAMPLE_RATE};
+    std::atomic<uint64_t> tx_continuation_grace_samples_{0};
 
     // State
     std::atomic<bool> connected_{false};
@@ -1035,8 +1257,8 @@ private:
         }
 
         if (is_mc_dpsk && !is_handshake_frame) {
-            constexpr int kMCDPSKInterFrameGuardMs = 100;
-            constexpr int kGuardSamples = SAMPLE_RATE * kMCDPSKInterFrameGuardMs / 1000;
+            constexpr int kGuardSamples =
+                SAMPLE_RATE * connection_policy::kMCDPSKInterFrameGuardMs / 1000;
             result.insert(result.end(), kGuardSamples, 0.0f);
         }
 
@@ -1091,57 +1313,25 @@ private:
         return samples;
     }
 
-    uint64_t rxSettlingSamplesLocked() const {
-        return (static_cast<uint64_t>(rx_settling_ms_) *
-                static_cast<uint64_t>(SAMPLE_RATE)) / 1000ULL;
-    }
-
     void notePttTxQueued(size_t sample_count) {
-        if (sample_count == 0) {
-            return;
-        }
-        std::lock_guard<std::mutex> lock(ptt_mutex_);
-        tx_in_flight_samples_remaining_ += static_cast<uint64_t>(sample_count);
-        transition_samples_remaining_ = 0;
-        ptt_state_ = PttState::TX;
+        tx_continuation_grace_samples_.store(0, std::memory_order_relaxed);
+        ptt_.noteTxQueued(sample_count);
     }
 
     void notePttTxDrained(size_t drained_samples) {
-        if (drained_samples == 0) {
-            return;
-        }
-        std::lock_guard<std::mutex> lock(ptt_mutex_);
-        if (ptt_state_ != PttState::TX) {
-            return;
-        }
-        const uint64_t drained = static_cast<uint64_t>(drained_samples);
-        if (drained >= tx_in_flight_samples_remaining_) {
-            tx_in_flight_samples_remaining_ = 0;
-        } else {
-            tx_in_flight_samples_remaining_ -= drained;
-        }
-        if (tx_in_flight_samples_remaining_ == 0) {
-            transition_samples_remaining_ = rxSettlingSamplesLocked();
-            ptt_state_ = transition_samples_remaining_ > 0 ? PttState::TRANSITION
-                                                           : PttState::RX;
+        const PttState before = ptt_.state();
+        ptt_.noteTxDrained(drained_samples);
+        const PttState after = ptt_.state();
+        if (drained_samples > 0 && before == PttState::TX && after != PttState::TX) {
+            tx_continuation_grace_samples_.store(
+                samplesForMs(TX_CONTINUATION_GRACE_MS),
+                std::memory_order_relaxed);
         }
     }
 
-    void advancePttTransition(size_t elapsed_samples) {
-        if (elapsed_samples == 0) {
-            return;
-        }
-        std::lock_guard<std::mutex> lock(ptt_mutex_);
-        if (ptt_state_ != PttState::TRANSITION) {
-            return;
-        }
-        const uint64_t elapsed = static_cast<uint64_t>(elapsed_samples);
-        if (elapsed >= transition_samples_remaining_) {
-            transition_samples_remaining_ = 0;
-            ptt_state_ = PttState::RX;
-        } else {
-            transition_samples_remaining_ -= elapsed;
-        }
+    void advancePttRecovery(size_t elapsed_samples) {
+        ptt_.advanceSamples(elapsed_samples);
+        advanceTxContinuationGrace(elapsed_samples);
     }
 
     void setupCallbacks() {
@@ -1277,9 +1467,126 @@ private:
     }
 
     void queueTx(const std::vector<float>& samples, const std::string& label = std::string()) {
+        if (samples.empty()) {
+            return;
+        }
+        if (pttState() == PttState::RX && hasDeferredTxSubmission()) {
+            deferTxSubmission(samples, label);
+            flushDeferredTxIfReady();
+            return;
+        }
+        if (!canAcceptTxSubmission()) {
+            deferTxSubmission(samples, label);
+            return;
+        }
+        submitTxNow(samples, label);
+    }
+
+    bool canAcceptTxSubmission() {
+        const PttState state = pttState();
+        return state == PttState::RX || state == PttState::TX ||
+               txContinuationGraceActive();
+    }
+
+    bool txContinuationGraceActive() const {
+        return tx_continuation_grace_samples_.load(std::memory_order_relaxed) > 0;
+    }
+
+    bool hasDeferredTxSubmission() {
+        std::lock_guard<std::mutex> lock(deferred_tx_mutex_);
+        return !deferred_tx_submissions_.empty();
+    }
+
+    static uint64_t samplesForMs(uint32_t ms) {
+        return (static_cast<uint64_t>(SAMPLE_RATE) * static_cast<uint64_t>(ms)) /
+               1000ULL;
+    }
+
+    void advanceTxContinuationGrace(size_t elapsed_samples) {
+        uint64_t remaining =
+            tx_continuation_grace_samples_.load(std::memory_order_relaxed);
+        while (remaining > 0) {
+            const uint64_t next = elapsed_samples >= remaining
+                ? 0
+                : remaining - static_cast<uint64_t>(elapsed_samples);
+            if (tx_continuation_grace_samples_.compare_exchange_weak(
+                    remaining, next, std::memory_order_relaxed)) {
+                return;
+            }
+        }
+    }
+
+    void deferTxSubmission(const std::vector<float>& samples,
+                           const std::string& label) {
+        bool rejected = false;
+        size_t depth = 0;
+        uint64_t event = 0;
+        {
+            std::lock_guard<std::mutex> lock(deferred_tx_mutex_);
+            if (deferred_tx_submissions_.size() >= kMaxDeferredTxSubmissions) {
+                rejected = true;
+                event = ++rejected_tx_count_;
+            } else {
+                deferred_tx_submissions_.push_back({
+                    .samples = samples,
+                    .label = label,
+                });
+                depth = deferred_tx_submissions_.size();
+                event = ++deferred_tx_count_;
+            }
+        }
+
+        if (rejected) {
+            if (event <= 4 || (event % 32) == 0) {
+                LOG_MODEM(WARN,
+                          "[%s] TX rejected while radio recovery queue is full "
+                          "(state=%s samples=%zu label=%s rejected=%llu)",
+                          callsign_.c_str(), pttStateName(pttState()),
+                          samples.size(), label.empty() ? "-" : label.c_str(),
+                          static_cast<unsigned long long>(event));
+            }
+            return;
+        }
+
+        if (event <= 8 || (event % 32) == 0) {
+            LOG_MODEM(INFO,
+                      "[%s] TX deferred until radio RX (state=%s samples=%zu "
+                      "depth=%zu label=%s deferred=%llu)",
+                      callsign_.c_str(), pttStateName(pttState()),
+                      samples.size(), depth, label.empty() ? "-" : label.c_str(),
+                      static_cast<unsigned long long>(event));
+        }
+    }
+
+    void flushDeferredTxIfReady() {
+        if (!ptt_.isReadyForNextTx()) {
+            return;
+        }
+
+        DeferredTxSubmission submission;
+        {
+            std::lock_guard<std::mutex> lock(deferred_tx_mutex_);
+            if (deferred_tx_submissions_.empty()) {
+                return;
+            }
+            submission = std::move(deferred_tx_submissions_.front());
+            deferred_tx_submissions_.pop_front();
+        }
+        submitTxNow(submission.samples, submission.label);
+    }
+
+    void submitTxNow(const std::vector<float>& samples, const std::string& label) {
         if (port_ && !port_->shouldPaceTxInStationLoop()) {
             notePttTxQueued(samples.size());
             port_->queueTx(samples);
+            std::ostringstream oss;
+            oss << "station_tx_direct station=" << callsign_
+                << " sim_t=" << getSimTime()
+                << " samples=" << samples.size()
+                << " rms=" << sampleRms(samples)
+                << " ptt=" << pttStateName(pttState())
+                << " label=" << (label.empty() ? "-" : label);
+            e2eDebugLine(oss.str());
             if (!label.empty()) {
                 LOG_MODEM(INFO, "[%s] TX direct: %s samples=%zu",
                           callsign_.c_str(), label.c_str(), samples.size());
@@ -1316,7 +1623,8 @@ private:
 
         while (running_) {
             // ===== AUDIO CALLBACK START =====
-            advancePttTransition(SAMPLES_PER_CALLBACK);
+            advancePttRecovery(SAMPLES_PER_CALLBACK);
+            flushDeferredTxIfReady();
 
             // 1. READ RX - get samples from audio port (virtual channel or soundcard)
             std::vector<float> rx_samples = port_
@@ -1360,11 +1668,36 @@ private:
 
                 // 4. SEND TX TO AUDIO PORT (virtual channel only; hardware TX
                 // is queued directly in queueTx() above)
-                if (port_) port_->queueTx(tx_samples);
+                if (port_) {
+                    port_->queueTx(tx_samples);
+                    if (tx_drained_samples > 0 || callsign_ == "BRAVO") {
+                        std::ostringstream oss;
+                        oss << "station_tx_to_port station=" << callsign_
+                            << " sim_t=" << getSimTime()
+                            << " drained=" << tx_drained_samples
+                            << " tx_pending_before=" << tx_pending
+                            << " tx_clock=" << tx_sample_clock_
+                            << " rms=" << sampleRms(tx_samples)
+                            << " ptt=" << pttStateName(pttState());
+                        e2eDebugLine(oss.str());
+                    }
+                }
             } else {
                 tx_drained_samples = SAMPLES_PER_CALLBACK;
             }
             notePttTxDrained(tx_drained_samples);
+            flushDeferredTxIfReady();
+            if (callsign_ == "BRAVO") {
+                std::ostringstream oss;
+                oss << "station_tick station=" << callsign_
+                    << " sim_t=" << getSimTime()
+                    << " rx_rms=" << sampleRms(rx_samples)
+                    << " tx_drained=" << tx_drained_samples
+                    << " tx_pending_before=" << tx_pending
+                    << " ptt_after=" << pttStateName(pttState())
+                    << " blackout=" << (isInRxBlackout() ? 1 : 0);
+                e2eDebugLine(oss.str());
+            }
 
             // ===== AUDIO CALLBACK END =====
 
@@ -1407,3 +1740,17 @@ private:
         }
     }
 };
+
+inline bool AudioPort::attachedRadioInRxBlackout() const {
+    return attached_ptt_ && attached_ptt_->isInRxBlackout();
+}
+
+inline std::vector<float> AudioPort::shapeRxForLocalRadio(
+    std::vector<float> samples,
+    size_t count) const {
+    if (attachedRadioInRxBlackout()) {
+        return std::vector<float>(count, 0.0f);
+    }
+    samples.resize(count, 0.0f);
+    return samples;
+}

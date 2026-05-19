@@ -138,6 +138,8 @@ public:
     // ACK repeat: send multiple copies with delay for fading reliability
     void setAckRepeatCount(int count) { ack_repeat_count_ = std::clamp(count, 1, 3); }
     void setAckRepeatDelay(uint32_t ms) { ack_repeat_delay_ms_ = std::max(1u, ms); }
+    int getAckRepeatCount() const { return ack_repeat_count_; }
+    uint32_t getAckRepeatDelay() const { return ack_repeat_delay_ms_; }
 
 private:
     enum class RetransmitCause : uint8_t {

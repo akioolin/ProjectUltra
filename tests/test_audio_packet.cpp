@@ -19,6 +19,7 @@ int main() {
     packet.header.lease_id = 0x1122334455667788ull;
     packet.header.seq = 17;
     packet.header.start_sample = 480;
+    packet.header.flags = 0x0040u;
     packet.samples = {0.25f, -0.5f, 0.75f};
 
     const auto bytes = serializeAudioPacket(packet);
@@ -35,6 +36,7 @@ int main() {
     assert(parsed->header.lease_id == packet.header.lease_id);
     assert(parsed->header.seq == 17);
     assert(parsed->header.start_sample == 480);
+    assert(parsed->header.flags == packet.header.flags);
     assert(parsed->header.sample_count == 3);
     assert(parsed->samples.size() == 3);
     assertNear(parsed->samples[0], 0.25f);

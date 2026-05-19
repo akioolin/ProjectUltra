@@ -33,6 +33,10 @@ add_executable(test_session_context test_session_context.cpp)
 target_link_libraries(test_session_context PRIVATE ota_channel_core)
 add_test(NAME SessionContext COMMAND test_session_context)
 
+add_executable(test_session_half_duplex_blackout test_session_half_duplex_blackout.cpp)
+target_link_libraries(test_session_half_duplex_blackout PRIVATE ota_channel_core)
+add_test(NAME SessionHalfDuplexBlackout COMMAND test_session_half_duplex_blackout)
+
 add_executable(test_session_manager test_session_manager.cpp)
 target_link_libraries(test_session_manager PRIVATE ota_channel_core)
 add_test(NAME SessionManager COMMAND test_session_manager)
@@ -415,15 +419,64 @@ if(TARGET ultra_sim_station)
         ${CMAKE_CURRENT_SOURCE_DIR}/../tools
     )
     target_link_libraries(test_pong_tx_race_with_ptt_model PRIVATE ultra_sim_station)
-    add_test(NAME PongTxRaceWithPttBugRepro
-        COMMAND test_pong_tx_race_with_ptt_model bug_repro)
     add_test(NAME PongTxRaceWithPttFixVerified
         COMMAND test_pong_tx_race_with_ptt_model fix_verified)
     set_tests_properties(
-        PongTxRaceWithPttBugRepro
         PongTxRaceWithPttFixVerified
         PROPERTIES
         TIMEOUT 45
+        LABELS regression)
+
+    add_executable(test_simulated_radio_ptt_state
+        test_simulated_radio_ptt_state.cpp)
+    target_include_directories(test_simulated_radio_ptt_state PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
+    )
+    target_link_libraries(test_simulated_radio_ptt_state PRIVATE ultra_sim_station)
+    add_test(NAME SimulatedRadioPttState
+        COMMAND test_simulated_radio_ptt_state)
+    set_tests_properties(SimulatedRadioPttState PROPERTIES
+        TIMEOUT 30
+        LABELS regression)
+
+    add_executable(test_client_audio_port_radio_gate
+        test_client_audio_port_radio_gate.cpp)
+    target_include_directories(test_client_audio_port_radio_gate PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
+    )
+    target_link_libraries(test_client_audio_port_radio_gate PRIVATE ultra_sim_station)
+    add_test(NAME ClientAudioPortRadioGate
+        COMMAND test_client_audio_port_radio_gate)
+    set_tests_properties(ClientAudioPortRadioGate PROPERTIES
+        TIMEOUT 30
+        LABELS regression)
+
+    add_executable(test_deferred_tx_fragmentation
+        test_deferred_tx_fragmentation.cpp)
+    target_include_directories(test_deferred_tx_fragmentation PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
+    )
+    target_link_libraries(test_deferred_tx_fragmentation PRIVATE ultra_sim_station)
+    add_test(NAME DeferredTxFragmentation
+        COMMAND test_deferred_tx_fragmentation)
+    set_tests_properties(DeferredTxFragmentation PROPERTIES
+        TIMEOUT 30
+        LABELS regression)
+
+    add_executable(test_mcdpsk_ack_turnaround
+        test_mcdpsk_ack_turnaround.cpp)
+    target_include_directories(test_mcdpsk_ack_turnaround PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
+    )
+    target_link_libraries(test_mcdpsk_ack_turnaround PRIVATE ultra_sim_station)
+    add_test(NAME MCDPSKAckTurnaround
+        COMMAND test_mcdpsk_ack_turnaround)
+    set_tests_properties(MCDPSKAckTurnaround PROPERTIES
+        TIMEOUT 30
         LABELS regression)
 
     add_executable(test_session_ptt_sweep test_session_ptt_sweep.cpp)
@@ -440,6 +493,20 @@ if(TARGET ultra_sim_station)
             LABELS regression
             RUN_SERIAL TRUE)
     endforeach()
+
+    add_executable(test_mcdpsk_half_duplex_timing
+        test_mcdpsk_half_duplex_timing.cpp)
+    target_include_directories(test_mcdpsk_half_duplex_timing PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
+    )
+    target_link_libraries(test_mcdpsk_half_duplex_timing PRIVATE ultra_sim_station)
+    add_test(NAME MCDPSKHalfDuplexTiming
+        COMMAND test_mcdpsk_half_duplex_timing)
+    set_tests_properties(MCDPSKHalfDuplexTiming PROPERTIES
+        TIMEOUT 100
+        LABELS regression
+        RUN_SERIAL TRUE)
 else()
     message(STATUS "ChannelSNRCalibration disabled: ultra_sim_station target is not built")
 endif()

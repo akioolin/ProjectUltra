@@ -2,7 +2,12 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
+#include <cstdlib>
+#include <cmath>
+#include <fstream>
+#include <sstream>
 #include <utility>
 
 namespace ultra::ota_simulator_service {
@@ -32,6 +37,31 @@ bool fillAddress(const std::string& host,
 
 bool isRunningLocked(bool running, ultra::tnc::socket_t socket) {
     return running && !ultra::tnc::isInvalidSocket(socket);
+}
+
+void e2eDebugLine(const std::string& line) {
+    const char* path = std::getenv("ULTRA_E2E_DEBUG_LOG");
+    if (path == nullptr || *path == '\0') {
+        return;
+    }
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
+    std::ofstream out(path, std::ios::app);
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    const auto epoch_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+    out << "epoch_ms=" << epoch_ms << ' ' << line << '\n';
+}
+
+float rms(std::span<const float> samples) {
+    if (samples.empty()) {
+        return 0.0f;
+    }
+    double sum = 0.0;
+    for (float sample : samples) {
+        sum += static_cast<double>(sample) * static_cast<double>(sample);
+    }
+    return static_cast<float>(std::sqrt(sum / static_cast<double>(samples.size())));
 }
 
 }  // namespace
@@ -251,7 +281,17 @@ bool UdpAudioPlane::sendAudio(uint64_t lease_id,
                                0,
                                reinterpret_cast<const sockaddr*>(&endpoint.addr),
                                endpoint.len);
-    return sent == static_cast<ultra::tnc::socket_io_result_t>(bytes.size());
+    const bool ok = sent == static_cast<ultra::tnc::socket_io_result_t>(bytes.size());
+    std::ostringstream oss;
+    oss << "server_udp_send lease=" << lease_id
+        << " seq=" << seq
+        << " start=" << start_sample
+        << " samples=" << samples.size()
+        << " bytes=" << bytes.size()
+        << " rms=" << rms(samples)
+        << " ok=" << (ok ? 1 : 0);
+    e2eDebugLine(oss.str());
+    return ok;
 }
 
 void UdpAudioPlane::run() {
@@ -314,6 +354,17 @@ void UdpAudioPlane::handleDatagram(std::span<const uint8_t> bytes,
         };
         callback = callback_;
     }
+
+    std::ostringstream oss;
+    oss << "server_udp_recv station=" << ready.station_id
+        << " session=" << ready.session_id
+        << " lease=" << ready.lease_id
+        << " seq=" << ready.seq
+        << " start=" << ready.start_sample
+        << " samples=" << ready.samples.size()
+        << " bytes=" << bytes.size()
+        << " rms=" << rms(ready.samples);
+    e2eDebugLine(oss.str());
 
     if (!callback) {
         return;

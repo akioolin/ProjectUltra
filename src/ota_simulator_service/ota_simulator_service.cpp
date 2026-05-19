@@ -4,6 +4,9 @@
 #include "ultra/version.hpp"
 
 #include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <fstream>
 #include <sstream>
 #include <utility>
 
@@ -30,6 +33,31 @@ std::string jsonPair(std::string_view key, std::string_view value) {
     std::ostringstream out;
     out << "{\"" << key << "\":\"" << value << "\"}";
     return out.str();
+}
+
+void e2eDebugLine(const std::string& line) {
+    const char* path = std::getenv("ULTRA_E2E_DEBUG_LOG");
+    if (path == nullptr || *path == '\0') {
+        return;
+    }
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
+    std::ofstream out(path, std::ios::app);
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    const auto epoch_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+    out << "epoch_ms=" << epoch_ms << ' ' << line << '\n';
+}
+
+float rms(std::span<const float> samples) {
+    if (samples.empty()) {
+        return 0.0f;
+    }
+    double sum = 0.0;
+    for (float sample : samples) {
+        sum += static_cast<double>(sample) * static_cast<double>(sample);
+    }
+    return static_cast<float>(std::sqrt(sum / static_cast<double>(samples.size())));
 }
 
 void fillCaptureInfo(const CaptureSummary& summary, pb::CaptureInfo* response) {
@@ -674,7 +702,17 @@ void OtaSimulatorService::onAudioPacket(const ReceivedAudioPacket& packet) {
     if (!session) {
         return;
     }
-    if (!session->enqueueTransmit(packet.station_id, packet.samples)) {
+    const bool enqueued = session->enqueueTransmit(packet.station_id, packet.samples);
+    std::ostringstream oss;
+    oss << "server_on_audio station=" << packet.station_id
+        << " session=" << packet.session_id
+        << " seq=" << packet.seq
+        << " start=" << packet.start_sample
+        << " samples=" << packet.samples.size()
+        << " rms=" << rms(packet.samples)
+        << " enqueued=" << (enqueued ? 1 : 0);
+    e2eDebugLine(oss.str());
+    if (!enqueued) {
         return;
     }
 }

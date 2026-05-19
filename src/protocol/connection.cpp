@@ -1657,19 +1657,16 @@ void Connection::configureArqForCurrentDataMode() {
         const size_t window_size = connection_policy::mcDpskWindowSizeForTiming(timing);
         const uint32_t sack_delay_ms = connection_policy::mcDpskSackDelayMs(timing, window_size);
         const uint32_t sack_tail_delay_ms = connection_policy::mcDpskSackTailDelayMs(timing);
-        const bool pipelined_dqpsk = window_size > 1 && data_modulation_ == Modulation::DQPSK;
-        const int ack_repeat_count = pipelined_dqpsk ? 2 : 1;
-        const uint32_t ack_repeat_delay_ms = pipelined_dqpsk
-            ? std::clamp<uint32_t>(timing.ack_ms + 250u, 750u, 3000u)
-            : 220u;
+        const auto ack_repeat = connection_policy::mcDpskAckRepeatProfile(
+            timing, window_size, data_modulation_);
         arq_.setWindowSize(window_size);
         arq_.setSackDelay(sack_delay_ms);
         arq_.setSackDelayShort(window_size > 1 ? sack_tail_delay_ms : 0);
         arq_.setAckBatchThroughMoreFrag(true);
-        arq_.setAckRepeatCount(ack_repeat_count);
-        arq_.setAckRepeatDelay(ack_repeat_delay_ms);
+        arq_.setAckRepeatCount(ack_repeat.count);
+        arq_.setAckRepeatDelay(ack_repeat.delay_ms);
         uint32_t ack_timeout_ms = connection_policy::computeMCDPSKAckTimeoutMs(
-            timing, window_size, arq_.getSackDelay(), ack_repeat_count);
+            timing, window_size, arq_.getSackDelay(), ack_repeat.count);
         if (data_modulation_ == Modulation::DBPSK &&
             config_.mc_dpsk_samples_per_symbol >= 2048) {
             ack_timeout_ms = std::max<uint32_t>(
@@ -1681,11 +1678,11 @@ void Connection::configureArqForCurrentDataMode() {
                   ack_timeout_ms / 1000.0f,
                   timing.data_ms,
                   timing.ack_ms,
-                  ack_repeat_count,
+                  ack_repeat.count,
                   arq_.getSackDelay(),
                   arq_.getSackDelayShort(),
-                  ack_repeat_count,
-                  ack_repeat_delay_ms,
+                  ack_repeat.count,
+                  ack_repeat.delay_ms,
                   data_frame_cw_count_,
                   modulationToString(data_modulation_),
                   codeRateToString(data_code_rate_),

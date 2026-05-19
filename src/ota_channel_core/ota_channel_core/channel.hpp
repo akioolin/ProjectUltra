@@ -44,8 +44,6 @@ public:
     CapturedSignals getCapturedSignals() const;
 
     void setNoiseOverlay(std::vector<float> bed, bool loop, float target_rms);
-    void setRxBlackoutCallback(bool is_station_a, std::function<bool()> callback);
-
     void transmitFromA(const std::vector<float>& samples);
     void transmitFromB(const std::vector<float>& samples);
     std::vector<float> receiveForA(size_t count);
@@ -57,8 +55,6 @@ private:
                                     IChannelModel& model);
     void addReceiveNoise(std::vector<float>& samples, bool for_a);
     void applyOverlay(std::vector<float>& out, uint64_t& cursor);
-    bool isStationAInRxBlackout() const;
-    bool isStationBInRxBlackout() const;
     void captureTxIfEnabled(std::span<const float> tx_raw, bool from_a);
     void captureRxIfEnabled(std::span<const float> rx_raw, bool for_a);
     void appendLimited(std::vector<float>& dst, std::span<const float> src);
@@ -88,10 +84,6 @@ private:
     bool has_noise_overlay_ = false;
     uint64_t noise_overlay_cursor_a_ = 0;
     uint64_t noise_overlay_cursor_b_ = 0;
-
-    mutable std::mutex rx_blackout_mutex_;
-    std::function<bool()> station_a_rx_blackout_;
-    std::function<bool()> station_b_rx_blackout_;
 
     std::atomic<bool> capture_enabled_{false};
     mutable std::mutex capture_mutex_;
