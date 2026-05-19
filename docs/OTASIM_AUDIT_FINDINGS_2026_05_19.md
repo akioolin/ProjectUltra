@@ -52,9 +52,30 @@ gRPC/UDP service).
 - Simulator switches instantly. Once A1 lands, ACK timing gets tight
   because the receiver can immediately switch to TX and start the
   ACK with zero turnaround. Real radio cannot.
-- Recommended: configurable per-station `tx_to_rx_tail_ms` and
-  `rx_to_tx_settle_ms`, default to a documented HF-typical value
-  (e.g., 100 ms each direction).
+- Real radio physics has TWO sub-phases:
+  - T/R switching transient (~10-30 ms): genuinely deaf both ways
+  - RX recovery (rest of ~100-200 ms): RX is open (AGC settling),
+    TX is still locked because operator/state machine prevents
+    quick re-key
+- Current `TRANSITION` state is binary deaf — matches phase 1 but
+  is too aggressive for phase 2.
+- Recommended: split into `TX_TR_SWITCH` (deaf both ways, ~10-30 ms)
+  and `TX_COOLDOWN` (RX open, TX locked, rest of tail). Default
+  values to be measured from real radios.
+
+### A4. Client-side defense-in-depth: AudioPort should not deliver RX during own TX
+- Today the half-duplex blackout is server-enforced. Client trusts
+  the server to drop peer audio from its RX outbox during own TX.
+- A small client-side guard would short-circuit any RX delivery while
+  the client's own `isInRxBlackout()` is true. This:
+  - Belt-and-suspenders: any tiny server timing gap doesn't leak
+  - Matches real radio hardware (RX front-end is physically
+    disconnected during TX, not just muted)
+  - Saves CPU: skip RX processing entirely during TX
+  - Simpler contract: client doesn't trust server for half-duplex
+- Recommended change: `OtaAudioPort::getRxSamples()` and
+  `VirtualAudioPort::getRxSamples()` both early-return silence
+  when `rx_blackout_callback_()` is true.
 
 ## Tier B — must-have for hardware A/B confidence
 
