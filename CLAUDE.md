@@ -187,27 +187,45 @@ Interpretation of the 2026-04-29 robustness work:
 
 ---
 
-**Performance Requirements (cli_simulator --test):**
-| Mode | Channel | In-band SNR | Required CW Success |
+**Performance Requirements (cli_simulator --test, post-2026-05-19 calibration audit):**
+| Mode | Channel | In-band SNR floor | Status |
 |------|---------|-----|---------------------|
-| MC-DPSK | AWGN (continuous sim) | 3.6+ short-QSO floor; 14.6+ conservative CW margin | 100% at documented gate |
-| MC-DPSK | Moderate fading | 19.6 | 100% |
-| OFDM_CHIRP | AWGN | 24.6+ | 100% |
-| OFDM_CHIRP | Good fading | 24.6 | **100%** |
-| OFDM_CHIRP | Moderate fading | 24.6 | ~90% |
-| OFDM_NARROW | AWGN | 17.6+ | 100% |
-| OFDM_NARROW | Good fading | 17.6 | 100% data, 90%+ ACK |
+| MC-DPSK | AWGN | **5 dB** | 3/3 seeds cli_simulator + OTASim fixture `OTASimulatorTwoEndpointMCDPSKLowSNR` |
+| MC-DPSK | Moderate fading | 19.6 | 100% at documented gate (pre-audit) |
+| OFDM_CHIRP R1/4 | AWGN | **12 dB** | 3/3 seeds cli_simulator |
+| OFDM_CHIRP R1/4 | Good fading | **15 dB** | 3/3 seeds cli_simulator + DecodeBenchReplay fixture |
+| OFDM_CHIRP R1/4 | Moderate fading | 24.6 | pre-audit, not re-measured |
+| OFDM_CHIRP R1/2 | AWGN / Good | 24.6 / 24.6 | pre-audit |
+| OFDM_NARROW R1/4 | AWGN / Good | 17.6 / 17.6 | pre-audit |
 
-**Current production state (refreshed 2026-05-18 for unified in-band SNR; individual calibration dates noted inline):**
+Higher rates (R2/3, R3/4, QPSK) — see historical section below; not re-measured against the new floor.
+
+**Current production state (post-2026-05-19 8-layer calibration audit, branch `fix/honest-snr-in-band-and-rate-recalibration`):**
+
+The 2026-05-19 audit moved floors:
+- MC-DPSK AWGN floor: **18 dB → 5 dB** (-13 dB)
+- OFDM R1/4 AWGN floor: **18 dB → 12 dB** (-6 dB)
+- OFDM R1/4 Good fading floor: **18 dB → 15 dB** (-3 dB, locked in DecodeBenchReplay fixture)
+
+Verification (2026-05-19):
+- `ctest --test-dir build --output-on-failure -j1`: **86/86 PASS**
+- Multi-seed cli_simulator: MC-DPSK SNR=5, OFDM R1/4 SNR=12 AWGN, OFDM R1/4 SNR=15 Good — all **3/3 seeds** (42, 43, 44)
+
+Calibration baseline:
 - Simulated AWGN calibration: `SimulatedChannel` synthetic AWGN is continuous at RX,
-  sized from `StreamingEncoder::encodePing()` RMS `0.3180724` measured on
-  2026-05-14. Older simulator runs with "AWGN SNR=X dB" used an artificially
-  quiet silence model and must not be used as calibrated floor evidence.
-- SNR convention: operator-facing channel knobs, idle meter, and OFDM residual
-  meter all use receiver in-band SNR. For pre-round-5 AWGN/Watterson logs,
-  legacy configured-SNR cells map to approximately configured +9.6 dB in-band;
-  forced-rate captures below keep the legacy configured value in parentheses
-  where useful.
+  sized from `StreamingEncoder::encodePing()` measured in-band RMS `0.3048` (after
+  101-tap 50-2950 Hz receive FIR), per Layer 1 audit commit `7bbf22d`. The older
+  broadband reference `0.3180724` is preserved for analytical use only.
+- SNR convention: operator-facing channel knobs, idle meter, OFDM LTS/pilot
+  meter, and rate selector all use receiver in-band SNR (3 kHz noise BW), per
+  the unified-SNR work in commits `580e3b5`, `9a54402`, `f3d0c03`, `def3f6a`.
+- Watterson channel: CFO uses analytic-signal (Hilbert) shifter per Layer 2
+  audit (`bf0939a`), replacing the legacy custom passband down-mix/re-mix.
+- Rate selector: only physical SNR sources (IDLE_IN_BAND, OFDM_BROADBAND) feed
+  rate selection per Layer 3 audit (`2133b89`).
+
+Historical / pre-audit measurements (not re-verified at the new floor, but still
+valid at the SNRs listed):
 - Two-endpoint continuous-AWGN v2 QSO sweep (DQPSK R1/4 auto): in-band +29.6,
   +24.6, +19.6, +14.6, +9.6, +6.6, and +4.6 dB pass; +1.6 dB fails
   connection/message/disconnect assertions. One-dB refinement: +3.6 dB passes,
@@ -426,20 +444,19 @@ make -j4
 
 ## Waveform Summary
 
-| Mode | Sync Method | SNR Range | Max Throughput | CFO Tolerance | Fading |
+| Mode | Sync Method | In-band SNR floor | Max Throughput | CFO Tolerance | Fading |
 |------|-------------|-----------|----------------|---------------|--------|
-| **MC-DPSK** | Dual Chirp | -6 to <10 dB continuous-AWGN short QSO; -7 breaks QSO | 938 bps | ±50 Hz | Good |
-| **OFDM_NARROW** | NB Chirp + LTS | 5-10 dB | ~450 bps (R1/2, window=3) | ±50 Hz | Good (R1/4) |
-| **OFDM_CHIRP** | Dual Chirp + LTS | 10-17 dB | 3.4 kbps | ±50 Hz | Good (R1/4) |
+| **MC-DPSK** | Dual Chirp | 5 dB AWGN (post-2026-05-19 audit) | 938 bps | ±50 Hz | Good |
+| **OFDM_NARROW** | NB Chirp + LTS | ~17 dB AWGN (pre-audit) | ~450 bps (R1/2, window=3) | ±50 Hz | Good (R1/4) |
+| **OFDM_CHIRP** R1/4 | Dual Chirp + LTS | 12 dB AWGN, 15 dB Good (post-audit) | 3.4 kbps | ±50 Hz | Good (R1/4) |
 | **OFDM_COX** | Schmidl-Cox | Forced only | 7.9 kbps | Needs testing | Poor |
 | **SC-DPSK** | Barker-13 | -8 to -3 dB | 125 bps | N/A | Good |
 
 **Waveform Selection:**
 - Poor HF channels (2ms delay): Use MC-DPSK
-- Low SNR (5-10 dB) with good/moderate fading: Use OFDM_NARROW (~200 bps R1/4, ~450 bps R1/2 — selective-repeat window=3)
-- Moderate/Good HF: Use OFDM_CHIRP at SNR 10+; OFDM_COX remains explicit
-  forced/legacy only until separately gated.
-- Very low SNR: Use SC-DPSK or MC-DPSK
+- Low SNR (5-12 dB) AWGN: MC-DPSK handles down to 5 dB; OFDM_CHIRP R1/4 from 12 dB up
+- Moderate/Good HF: Use OFDM_CHIRP; OFDM_COX remains explicit forced/legacy only
+- OFDM_NARROW retained for narrowband-detected paths
 - OTFS/MFSK values are reserved only and are not production-supported
 
 ---
@@ -486,10 +503,10 @@ tools/
 1. **OFDM_COX default policy:** Forceable implementation exists, but it is
    not part of the production auto ladder until separately validated.
 2. **Poor HF channels (2ms delay):** OFDM fails - use MC-DPSK instead
-3. **MC-DPSK floor:** continuous-AWGN v2 QSO passes at -6 dB and breaks at
-   -7 dB during connection/message assertions under the 90 s two-endpoint
-   message scenario; older -8 dB simulator passes came from the pre-2026-05-14
-   artificially quiet silence model.
+3. **MC-DPSK floor:** in-band 5 dB AWGN (3/3 seeds cli_simulator + OTASim
+   `OTASimulatorTwoEndpointMCDPSKLowSNR` fixture, post-2026-05-19 audit).
+   Below 5 dB is currently un-explored as a separate workstream
+   (MC-DPSK speed ladder for sub-0 dB SNR remains future work).
 4. **File transfer:** DATA_START/DATA_END not fully implemented
 
 ---

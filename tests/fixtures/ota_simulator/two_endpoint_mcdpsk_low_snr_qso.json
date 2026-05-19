@@ -24,7 +24,7 @@
     }
   },
   "channel": {
-    "snr_db": 18.0,
+    "snr_db": 5.0,
     "type": "awgn",
     "force_connected_waveform": "MC_DPSK"
   },

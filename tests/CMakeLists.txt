@@ -558,6 +558,7 @@ if(TARGET ota_simulator)
     set_tests_properties(OTASimulatorFileTransferSNR15 PROPERTIES
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         TIMEOUT 320
+        RUN_SERIAL TRUE
         LABELS regression)
 endif()
 

@@ -10,6 +10,158 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-19: 8-layer calibration audit consolidation — verified floor
+
+**Summary:** The 8-layer calibration audit completed Layers 1-5 of the
+framework documented in `docs/CALIBRATION_AUDIT.md`. Cumulative floor delta
+on AWGN:
+
+| Mode | Pre-audit | Post-audit | Delta |
+|---|---|---|---|
+| MC-DPSK (R1/4) | 18 dB | **5 dB** | -13 dB |
+| OFDM_CHIRP R1/4 | 18 dB | **12 dB** | -6 dB |
+| OFDM_CHIRP R1/4 Good fading | 18 dB | **15 dB** | -3 dB |
+
+**Verification (2026-05-19):**
+- `ctest --test-dir build --output-on-failure -j1`: **86/86 PASS**
+- Multi-seed cli_simulator (seeds 42, 43, 44 each):
+  - MC-DPSK SNR=5 AWGN R1/4: 3/3 PASS
+  - OFDM_CHIRP R1/4 SNR=12 AWGN: 3/3 PASS
+  - OFDM_CHIRP R1/4 SNR=15 Good fading: 3/3 PASS
+- OTASim regression fixture `OTASimulatorTwoEndpointMCDPSKLowSNR` bumped
+  from SNR=18 → SNR=5 to lock in the new MC-DPSK floor; passes 120.22 sec.
+- `DecodeBenchReplay` (`fixtures/ofdm_chirp_r14_dqpsk_snr15_good.wav`) passes,
+  exercising the OFDM data-sync rescue path.
+
+**Layer-by-layer detail:** see `docs/CALIBRATION_AUDIT.md`. The five
+load-bearing commits are listed below in chronological order.
+
+---
+
+## 2026-05-19: Layer 4 round 3 — bounded later-peak rescue for OFDM data-sync
+
+**Fixed:** Layer 4 round 2's relaxation of the connected non-coherent OFDM
+light-sync floor from 0.45 to 0.40 (with a 0.35 weak-rescue floor) admitted
+weak edge candidates at the search-window cap, then committed to them
+before the true (later, stronger) LTS peak could be evaluated. On the Good
+SNR=15 R1/4 `DecodeBenchReplay` fixture, the true LTS at sample 57722
+(corr=0.68) was just beyond the capped search end and never evaluated
+because a weak candidate at corr=0.44 was admitted first.
+
+**Changed:** `src/waveform/ofdm_chirp_waveform.cpp::detectDataSync()` now
+runs ONE bounded extension pass when (a) the best candidate is below 0.45
+AND (b) lands within 16 samples of the capped search end. The extension
+scans to the streaming-buffer end and replaces the candidate only if a
+later peak exceeds it by ≥ 0.02. A refined ±5-sample search locks the
+new peak. High-confidence (≥ 0.45) and non-edge candidates are unchanged.
+
+**Verification:** `DecodeBenchReplay`: PASS (was 0 frames; now 1
+byte-exact DATA frame, corr 0.44 → 0.68 after rescue). OFDM R1/4 AWGN
+12 dB and OFDM R1/4 Good 15 dB sweeps: 3/3 seeds each.
+
+```bash
+ctest --test-dir build -R DecodeBenchReplay --output-on-failure
+```
+
+Commit: `97dc785`.
+
+---
+
+## 2026-05-19: Layer 5 LLR-scaling audit — diagnosed, no fix justified
+
+**Fixed:** Nothing — the diagnosis showed Layer 5 is not the current floor
+gate. Known-position decodes via `ofdm_snr_probe` at SNR=10 dB AWGN R1/4
+DQPSK pass 3/3 seeds through the production demap, frame interleaver,
+carrier deinterleaver, and fixed-frame LDPC decoder. A temporary
+`CARRIER_ADAPTIVE_K=0.0` experiment did not change the 8 dB edge case
+either. LLR clipping is not binding (peak ~5.91 vs MAX_LLR=20), LDPC
+iterations have headroom (worst observed 25 of 50), and HARQ soft-combine
+is not engaged in the failing path.
+
+**Verdict:** The remaining 10 dB QSO gate is connected OFDM light-sync
++ tail-control acquisition (Layer 4 territory) and ARQ timing (Layer 7).
+Applying an LLR scaling fudge factor would not move the floor.
+
+This commit is documentation-only. Codex (the second AI on this project)
+correctly refused to ship an unjustified change under the multi-perspective
+stack rules in CLAUDE.md.
+
+Commit: `7e1a96a`.
+
+---
+
+## 2026-05-19: Layer 4 round 2 — adaptive light-sync threshold relaxation
+
+**Fixed:** The connected non-coherent OFDM LTS detector hard-rejected any
+candidate below 0.45 correlation. At low SNR (12-14 dB AWGN), real LTS
+candidates land in the 0.40-0.45 band; the gate over-rejected and the
+modem timed out without ever decoding the connected frame even though the
+dual-chirp detector locked correctly.
+
+**Changed:** `src/gui/modem/streaming_signal_policy.hpp::lightSyncThresholds()`
+now lowers `min_confidence` proportionally to `sync_reject_streak` for
+connected non-coherent OFDM. The relax floor is 0.40, with a deeper 0.35
+weak-rescue floor for wideband connected non-coherent after a longer
+reject streak. Coherent modes (D8PSK, QPSK) keep the tighter pre-audit
+floor. Constants `kConnectedOFDMLightSyncRelaxFloor` and
+`kConnectedOFDMLightSyncRescueFloor` are named for clarity.
+
+**Verification:** MC-DPSK AWGN QSO floor moved from 15 dB → 5 dB (3/3
+seeds); OFDM R1/4 AWGN QSO floor moved from 14 dB → 12 dB (3/3 seeds).
+`test_streaming_signal_policy`: 65/65 PASS. A regression in
+`DecodeBenchReplay` introduced by this commit was fixed in Layer 4
+round 3 (`97dc785`).
+
+Commit: `bcd3f5a`.
+
+---
+
+## 2026-05-19: Layer 4 round 1 — accept chirp-locked low-SNR PING before LLR gate
+
+**Fixed:** On a low-SNR PING, the chirp dual-correlator was locking
+correctly, but the pre-LDPC LLR false-lock gate rejected the candidate
+before the chirp-locked-PING fallback (`ping_by_chirp_lock`) could rescue
+it. Order of operations was wrong.
+
+**Changed:** `src/gui/modem/streaming_ofdm_decode.cpp` — when
+`evaluatePingFrame()` reports `ping_by_chirp_lock`, accept the PING even
+if the pre-LDPC LLR pre-screen would have rejected it.
+
+**Verification:** MC-DPSK floor 17 dB → 15 dB. Commit: `f519485`.
+
+---
+
+## 2026-05-19: Layer 3 — reject nonphysical SNR sources for rate selection
+
+**Fixed:** Rate-selector path was accepting any SNR source, including
+`SYNC_QUALITY` (a chirp correlation metric) and `OFDM_INTERNAL` (a pilot
+variance proxy). These are not physical in-band channel SNR; using them
+to pick rates produced over-aggressive selections at low SNR.
+
+**Changed:** `src/protocol/connection.hpp` adds
+`acceptsRateSelectionSNR(SNRSource)` that only admits `NONE`,
+`IDLE_IN_BAND`, and `OFDM_BROADBAND` sources.
+
+**Verification:** Existing rate-policy boundary tests in
+`tests/test_waveform_policy.cpp` still pass. Commit: `2133b89`.
+
+---
+
+## 2026-05-19: Layer 2 — Watterson CFO uses analytic-signal shifter
+
+**Fixed:** The Watterson channel model implemented CFO with custom
+passband down-mix / re-mix instead of the standard analytic-signal
+(Hilbert) shifter. Mathematically equivalent in the limit but introduces
+spectral artifacts at finite filter lengths.
+
+**Changed:** `src/ota_channel_core/models.cpp` now uses an analytic-signal
+multiplicative CFO. Mirrored in the standalone simulator.
+
+**Verification:** No floor change; correctness fix. Existing Watterson
+tests pass. Commit: `bf0939a`.
+
+---
+
 ## 2026-05-19: Layer 1 calibration audit fixes in-band PING reference
 
 **Fixed:** The SNR calibration constants used the measured
