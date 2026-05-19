@@ -780,3 +780,150 @@ baseline could not be preserved here:
 Because the protocol requires the `86/86` ctest baseline to remain preserved,
 this round stops with uncommitted working-tree changes for review or rerun in an
 unrestricted environment. No push was performed.
+
+## Layer 5: LLR scaling
+
+Round 1 scope: diagnose the current forced OFDM DQPSK R1/4 AWGN 10 dB QSO
+failure before changing any LLR/LDPC constants. The suspects were LDPC
+iterations, LLR magnitude scaling, pre-LDPC LLR gates, LLR clipping, and
+soft-combine HARQ.
+
+Status: diagnosed, no code fix applied. The Layer 5 path is not the current
+10 dB QSO gate.
+
+### Audit
+
+Current Layer 5 constants and gates:
+
+- `CARRIER_ADAPTIVE_K = 10.0`: per-carrier noise inflation uses
+  `nv *= (1 + K * norm_var)`, where `norm_var` is the EMA magnitude variance
+  divided by squared EMA magnitude.
+- `MAX_LLR = 20.0` and `MIN_LLR_MAG = 0.01`: final soft-demapper clipping and
+  near-erasure floor.
+- `kMinPreSyncLLR = 1.5`, `kMinLLRForSingleCWDecode = 1.5`, and
+  `kMinLLRForEscalation = 1.5`: coarse false-lock gates before expensive LDPC
+  work.
+- R1/4 LDPC recommended iterations remain `50`, with fixed-frame decoder
+  diversity retry factors after an initial miss.
+- Soft-combine HARQ is available for fixed data frames, but only contributes
+  after a failed decode is retained and the same frame is retransmitted.
+
+The old global `1 + 10 * fading_index^2` heuristic is not present in the
+current demapper. It was replaced by per-carrier `1 + K * norm_var` adaptive
+noise inflation. The remaining `K=10` value is empirical rather than derived
+from a closed-form AWGN or Watterson model.
+
+### Diagnosis
+
+Existing post-Layer-4 OFDM QSO logs show the 10 dB failure sequence:
+
+| Seed | 10 dB QSO outcome | Layer 5 evidence |
+|------|-------------------|------------------|
+| 42 | handshake passes, DATA never accepted before message assertion | no OFDM DATA LLR/LDPC path is reached |
+| 43 | DATA decodes `4/4` CWs; disconnect tail fails | accepted DATA CWs decode with `|LLR|_avg ~= 1.58-1.64` and iterations `5-6` |
+| 44 | DATA decodes `4/4`; DISCONNECT control decodes; final ACK/disconnect tail fails | accepted DATA CWs decode with `|LLR|_avg ~= 1.81-1.87` and iterations `4-25` |
+
+When connected OFDM sync is bypassed and the exact known frame slice is decoded
+with `ofdm_snr_probe`, DQPSK R1/4 at 10 dB passes all three requested seeds:
+
+| SNR dB | Seeds | Result | Measured in-band SNR / fading index |
+|--------|-------|--------|-------------------------------------|
+| 10 | 42 | pass, `4/4` CWs | `10.46 dB`, fading `0.16` |
+| 10 | 43 | pass, `4/4` CWs | `9.58 dB`, fading `0.13` |
+| 10 | 44 | pass, `4/4` CWs | `10.03 dB`, fading `0.05` |
+
+Below the target, known-position 8 dB is genuinely marginal:
+
+| SNR dB | Seeds | Result |
+|--------|-------|--------|
+| 8 | 42 | fail, `0/4` CWs |
+| 8 | 43 | fail, `3/4` CWs |
+| 8 | 44 | pass, `4/4` CWs |
+| 9 | 42 | pass, `4/4` CWs |
+
+Targeted scaling experiment: setting `CARRIER_ADAPTIVE_K` to `0.0` and
+rebuilding did not change the 8 dB known-position outcomes for seeds 42-44.
+The experiment was reverted. That rules out the `K=10` adaptive inflation as
+the dominant AWGN edge at this rate.
+
+Pre-LDPC gates:
+
+- `control_first`: not the DATA failure gate at 10 dB. Seed 44 proved the path
+  can decode an OFDM DISCONNECT control frame once light sync is accepted.
+- `cw0_peek`: accepted DATA frames passed the escalation gate with
+  `|LLR|_avg ~= 1.9-2.0`, above the `1.5` threshold.
+- `pre_ldpc_llr`: seed 42 never reaches this gate for DATA because connected
+  OFDM light sync is rejected first.
+
+LLR clipping: accepted 10 dB frames logged max absolute LLRs around
+`5.25-5.91`, far below the `MAX_LLR=20.0` clip. Clipping is not binding.
+
+LDPC iterations/convergence: accepted 10 dB DATA frames converged within the
+existing R1/4 `50` iteration budget. The worst observed accepted CW used
+`25` iterations; seed 43 needed one decoder-diversity retry on CW0 and then
+completed. Raising the iteration ceiling is not supported by this evidence.
+
+Soft-combine HARQ: no `HARQ: combining attempt` evidence appears in the 10 dB
+DATA decode path. When sync accepts a DATA frame, it decodes on that receive;
+when sync does not accept, no soft buffer exists to combine. HARQ is not the
+current floor gate.
+
+Multi-perspective check:
+
+- PHY: R1/4 LDPC has enough soft information at the 10 dB target when the
+  correct OFDM frame is presented to the decoder. The remaining miss is before
+  the decoder sees a codeword, not a Shannon/LDPC margin issue at 10 dB.
+- DSP: `ofdm_snr_probe` used the production OFDM waveform, channel model,
+  demapper, frame interleaver, carrier deinterleaver, and fixed-frame LDPC
+  decoder on the exact known frame slice; it passed `3/3` seeds at 10 dB.
+- HF operator: the observed behavior matches an acquisition/tail-control
+  problem: the link connects and can deliver payloads when it locks, but short
+  ACK/DISCONNECT frames are easy to miss at low SNR.
+- Physics: LLR clipping is far from saturation, LDPC iterations have headroom,
+  and the adaptive scaling experiment did not move the 8 dB edge. There is no
+  measured basis for an LLR-scale fudge factor.
+
+### Verdict
+
+Layer 5 round 1 found no justified code fix. Applying an LLR scaling, clipping,
+iteration, pre-screen, or HARQ change would not move the current OFDM R1/4 QSO
+floor from 12 dB to 10 dB because the failing 10 dB QSO candidates usually die
+before the Layer 5 path runs. The actionable remaining gate is connected OFDM
+light-sync/tail-control acquisition for short ACK/DISCONNECT frames, with Layer
+7 ARQ timing also relevant once DATA delivery succeeds.
+
+Commands run:
+
+- `cmake --build build --target ofdm_snr_probe test_streaming_signal_policy test_soft_combine -j4`
+- `./build/ofdm_snr_probe --snr 10 --channel awgn --rate r1_4 --mod dqpsk --cw-count 4 --seed 42`
+- `./build/ofdm_snr_probe --snr 10 --channel awgn --rate r1_4 --mod dqpsk --cw-count 4 --seed 43 --no-header`
+- `./build/ofdm_snr_probe --snr 10 --channel awgn --rate r1_4 --mod dqpsk --cw-count 4 --seed 44 --no-header`
+- `./build/ofdm_snr_probe --snr 8 --channel awgn --rate r1_4 --mod dqpsk --cw-count 4 --seed 42`
+- `./build/ofdm_snr_probe --snr 8 --channel awgn --rate r1_4 --mod dqpsk --cw-count 4 --seed 43 --no-header`
+- `./build/ofdm_snr_probe --snr 8 --channel awgn --rate r1_4 --mod dqpsk --cw-count 4 --seed 44 --no-header`
+- `./build/tests/test_streaming_signal_policy`
+- `./build/tests/test_soft_combine`
+
+No code change remains in the worktree from the temporary
+`CARRIER_ADAPTIVE_K=0.0` experiment.
+
+### Gate / Stop Status
+
+No commit was made for Layer 5 round 1. The full ctest gate did not meet the
+required `86/86` baseline with only the five sandbox-bind exemptions:
+
+- `ctest --test-dir build --output-on-failure -j4`: `80/86` passed.
+- Allowed sandbox/bind failures: `GrpcServiceSmoke`, `CLISyntheticNotch`,
+  `OtasimServeSmoke`, `UltraGuiOtaClient`, `UltraTncSimAudio`.
+- Additional non-sandbox failure: `DecodeBenchReplay`.
+- Rerun with `ctest --test-dir build -R DecodeBenchReplay --output-on-failure`
+  reproduced the failure.
+
+`DecodeBenchReplay` failed on
+`fixtures/ofdm_chirp_r14_dqpsk_snr15_good.wav`, decoding `0` frames where the
+test expected one byte-exact DATA frame. The log shows connected OFDM light-sync
+weak acceptance at correlation `0.443`, CW0 peek `|llr|_avg=1.9`, then the
+full 4-CW attempt rejected as a false chirp lock with `|llr|_avg=1.50`.
+
+Because this is a non-sandbox gate failure, the audit documentation remains
+uncommitted and the work stops here.
