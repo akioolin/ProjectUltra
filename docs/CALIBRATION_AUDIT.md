@@ -455,3 +455,147 @@ checks. One silent source-routing bug was fixed so chirp confidence and OFDM
 internal quality cannot drive protocol rate selection. The remaining MC-DPSK
 floor below 17 dB is still sync/handshake-limited, so Layer 4 remains the
 expected high-payoff layer.
+
+## Layer 4: Chirp/sync detector
+
+Round 1 scope: diagnose the known MC-DPSK AWGN SNR 15 QSO failure and ship one
+targeted fix only.
+
+### Audit
+
+Current chirp constants from `src/sync/chirp_sync.hpp`:
+
+- Up chirp: 300 Hz to 2700 Hz over 0.5 s.
+- Down chirp: 2700 Hz to 300 Hz over 0.5 s.
+- Gap: 0.1 s, so expected up-to-down start gap is 28800 samples.
+- Dual-chirp threshold: `0.15`; single-chirp `detect()` default threshold:
+  `0.30`.
+- Dual-chirp CFO sanity limit: `+/-100 Hz`, corresponding to `+/-1000`
+  samples of chirp peak shift at `10 samples/Hz`.
+- PING chirp-lock fallback in `streaming_frame_policy` requires correlation
+  `>=0.30` and gap error `<=1000` samples.
+
+Processing gain: the code uses `T=0.5 s` and `B=2400 Hz`, so one chirp has
+`T*B=1200` or `30.8 dB` ideal time-bandwidth gain. The up+down pair has twice
+the energy, `T*B=2400` or `33.8 dB` ideal gain before implementation losses.
+That is close to the prior rough 36 dB expectation and still far below the
+observed 17 dB CONNECT floor, so the failing gate needed to be found from logs.
+
+Correlation false-alarm derivation: the detector uses normalized complex
+correlation magnitude. For white noise and a 24000-sample chirp, a conservative
+Rayleigh tail model gives:
+
+`P(false peak > r) ~= exp(-N*r^2/2)`, with `N=24000`.
+
+| Threshold | Per-position tail | Approx per 128K FFT search |
+|-----------|-------------------|-----------------------------|
+| 0.30 | `~1e-469` | `~1e-464` |
+| 0.15 | `~5e-118` | `~7e-113` |
+| 0.10 | `~8e-53` | `~1e-47` |
+| 0.05 | `~9e-14` | `~1e-8` |
+
+The dual-chirp validator adds a second chirp, gap consistency, and CFO sanity,
+so the effective false alarm probability is lower than the single-peak table.
+However, SNR 15 logs showed correlation around `0.907-0.909`, gap error `0.0`,
+and CFO `0.00 Hz`. Therefore lowering the raw chirp threshold was not the
+highest-payoff fix for this round.
+
+Other Layer 4 gates:
+
+- Gap tolerance is not the SNR 15 blocker: measured gap error was `0.0`
+  samples against the `1000` sample PING fallback tolerance.
+- CFO compensation is not the SNR 15 blocker: dual chirp estimated `0.00 Hz`
+  and the correlation peak stayed above `0.90`.
+- Search window is not the SNR 15 blocker: the FFT detector found both chirps
+  repeatedly at the true PING/PONG positions.
+- Coherent integration across retries is not implemented. It remains a
+  possible later-layer improvement, but it was not required to fix this
+  measured failure.
+- Normalization is active: correlation divides by signal-window energy and
+  template energy, so the observed `~0.908` statistic is not an input-RMS
+  artifact.
+
+### Finding
+
+The SNR 15 failure was not a raw chirp miss. Bob detected Alice's PING with a
+strong dual-chirp lock:
+
+- `chirp_corr ~= 0.908`
+- `gap_error = 0.0`
+- `CFO = 0.00 Hz`
+
+The first PING classifier path failed because the post-chirp region is no longer
+quiet relative to the training chirp at low SNR:
+
+- `ratio ~= 0.53-0.55`
+- threshold is `0.50`
+
+After that, the decoder's pre-LDPC LLR false-lock screen rejected the window
+before the existing chirp-locked PING fallback could run:
+
+- `False chirp lock rejected: |llr|_avg ~= 1.32 ... re-searching`
+
+That kept Bob from emitting the PING event, so Bob never sent PONG, Alice never
+sent CONNECT, and the scenario remained Alice `PROBING`, Bob `DISCONNECTED`.
+
+Multi-perspective check:
+
+- PHY: the detector had enough processing-gain evidence; the lost event was a
+  classifier ordering error after successful synchronization.
+- DSP: INFO logs from the failing QSO showed high correlation, zero gap error,
+  zero CFO, and the pre-LDPC LLR gate as the rejecting branch.
+- HF operator: a clean dual-chirp PING in a noisy idle passband should still
+  wake the peer even if the following data-like region cannot decode as a frame.
+- Physics: the high normalized matched-filter output and exact up/down spacing
+  are stronger evidence than a low-SNR RMS silence heuristic.
+
+### Fix
+
+`StreamingDecoder::decodeCurrentFrame()` now runs the chirp-lock PING fallback
+before advancing past a pre-LDPC LLR false-lock rejection. It only emits a PING
+when `evaluatePingFrame()` reports `ping_by_chirp_lock`, so a random weak frame
+still falls through to the existing false-lock rejection path.
+
+The fix does not lower the global chirp threshold. It preserves the existing
+multi-hypothesis validation: strong chirp correlation, bounded dual-chirp gap
+error, and no valid LDPC frame.
+
+Validation support: scenario v2 `channel.seed` is now parsed and passed to
+`SimulatedChannel`, defaulting to the old seed 42 when omitted. This made the
+requested seeded AWGN QSO validation reproducible without changing existing
+fixtures.
+
+Regression added:
+
+- `test_streaming_frame_policy`: measured SNR 15 style case with
+  `chirp_corr=0.908`, `gap_error=0`, no valid LDPC frame, and non-silent
+  post-chirp RMS must classify as `ping_by_chirp_lock`.
+
+### Measure
+
+Pre-fix failing case:
+
+- `./build/ota_simulator run --scenario /tmp/layer4_mcdpsk_snr15.json`
+- Result: failed with 3 scenario assertions.
+- State at 35 s: Alice `PROBING`, Bob `DISCONNECTED`.
+- Gate: pre-LDPC LLR false-lock rejection before PING fallback.
+
+Post-fix validation:
+
+| Scenario | Seed | Result | Evidence |
+|----------|------|--------|----------|
+| MC-DPSK AWGN SNR 15 QSO | 42 | pass | CONNECT, DATA, ACK, DISCONNECT completed |
+| MC-DPSK AWGN SNR 15 QSO | 43 | pass | CONNECT, DATA, ACK, DISCONNECT completed |
+| MC-DPSK AWGN SNR 15 QSO | 44 | pass | CONNECT, DATA, ACK, DISCONNECT completed |
+
+Targeted build/test status:
+
+- `cmake --build build --target ota_simulator test_streaming_frame_policy -j4`:
+  passed.
+- `./build/tests/test_streaming_frame_policy`: passed `38/38`.
+
+Layer 4 round-1 floor delta: MC-DPSK AWGN QSO moved from the Layer 3
+`17 dB` floor to at least `15 dB` across three AWGN seeds. Per the
+stop-after-measurable-move rule, lower SNRs were not swept in this round.
+The next Layer 4 round should start by probing `14 dB` before attempting a
+second independent improvement such as retry integration or threshold tuning.

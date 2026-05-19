@@ -516,7 +516,9 @@ void executeCommand(const ScenarioEvent& event, EndpointRuntime& runtime,
 }
 
 std::optional<float> configureChannel(const Scenario& scenario, SimulatedChannel& channel) {
-    channel.setSeed(42);
+    const uint64_t seed =
+        scenario.channel && scenario.channel->seed ? *scenario.channel->seed : 42;
+    channel.setSeed(seed);
     std::optional<float> station_snr_db;
     if (scenario.channel && scenario.channel->snr_db) {
         const float configured_snr_db = static_cast<float>(*scenario.channel->snr_db);

@@ -398,6 +398,25 @@ void StreamingDecoder::decodeCurrentFrame() {
         state_ = DecoderState::SEARCHING;
         return true;
     };
+    auto tryEmitPingByChirpLock = [&](const char* reason, bool ldpc_attempted) {
+        const auto ping_decision = evaluatePingDecision(false, false);
+
+        LOG_MODEM(INFO, "[%s] PING check PATH2: ratio=%.3f, "
+                  "chirp_corr=%.3f (floor=%.2f), gap_error=%.1f (max=%.0f), "
+                  "valid_frame=0, reason=%s, path1=%d, path2=%d",
+                  log_prefix_.c_str(), ping_decision.ratio,
+                  ping_decision.chirp_corr, frame_policy::kPingCorrFloor,
+                  ping_decision.gap_error_samples, frame_policy::kPingMaxGapError,
+                  reason,
+                  ping_decision.ping_by_silence ? 1 : 0,
+                  ping_decision.ping_by_chirp_lock ? 1 : 0);
+
+        if (ping_decision.ping_by_chirp_lock) {
+            emitPingFrame(ping_decision, ldpc_attempted);
+            return true;
+        }
+        return false;
+    };
 
     if (allow_ping_detection) {
         // PATH 1: clean-cable/AWGN silence after training. LDPC inputs are set
@@ -672,6 +691,10 @@ void StreamingDecoder::decodeCurrentFrame() {
         const auto llr_quality = signal_policy::evaluatePreSyncLLR(
             soft_bits.data(), soft_bits.size(), v2::LDPC_CODEWORD_BITS);
         if (llr_quality.reject_as_false_lock) {
+            if (allow_ping_detection &&
+                tryEmitPingByChirpLock("pre_ldpc_llr_reject", false)) {
+                return;
+            }
             LOG_MODEM(INFO, "[%s] False chirp lock rejected: |llr|_avg=%.2f, "
                       "near_zero=%zu/%zu (%.1f%%), soft_bits=%zu — re-searching",
                       log_prefix_.c_str(), llr_quality.mean_abs,
