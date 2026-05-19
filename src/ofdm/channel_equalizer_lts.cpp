@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include "demodulator_impl.hpp"
 #include "demodulator_constants.hpp"
 #include "sim/channel_calibration.hpp"
@@ -13,6 +14,22 @@
 namespace ultra {
 
 using namespace demod_constants;
+
+namespace {
+
+bool cfoDebugLogEnabled() {
+    static const bool enabled = [] {
+        const char* cfo = std::getenv("ULTRA_CFO_DEBUG_LOG");
+        const char* harq = std::getenv("ULTRA_HARQ_DEBUG_LOG");
+        auto enabled_env = [](const char* value) {
+            return value && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
+        };
+        return enabled_env(cfo) || enabled_env(harq);
+    }();
+    return enabled;
+}
+
+}  // namespace
 
 void OFDMDemodulator::Impl::updateLastSNREstimate(float signal_power,
                                                   float noise_power,
@@ -315,14 +332,26 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
             float residual_cfo = avg_phase / (2.0f * M_PI * symbol_duration);
             last_lts_residual_cfo_hz = residual_cfo;
 
-            // Only correct if residual is significant (> 0.3 Hz) but sane (< 5 Hz)
-            if (std::abs(residual_cfo) > 0.3f && std::abs(residual_cfo) < 5.0f) {
-                float old_cfo = freq_offset_hz;
+            const float cfo_coherence =
+                std::abs(phase_diff_sum) / static_cast<float>(cfo_valid);
+
+            // Only correct if residual is significant, sane, coherent across
+            // carriers, and refining an already-trusted non-zero CFO seed.
+            // With a zero-CFO chirp/cache value, slow fading can still present a
+            // common LTS phase step; treating that as oscillator CFO injects a
+            // false correction into the whole frame and poisons the feedback loop.
+            constexpr float kMinTrustedCFOSeedHz = 0.75f;
+            constexpr float kMinResidualCFOCoherence = 0.70f;
+            float old_cfo = freq_offset_hz;
+            const bool trusted_cfo_seed = std::abs(old_cfo) >= kMinTrustedCFOSeedHz;
+            const bool coherent_residual = cfo_coherence >= kMinResidualCFOCoherence;
+            if (std::abs(residual_cfo) > 0.3f && std::abs(residual_cfo) < 5.0f &&
+                coherent_residual && trusted_cfo_seed) {
                 freq_offset_hz += residual_cfo;
                 freq_offset_filtered = freq_offset_hz;
 
-                LOG_DEMOD(WARN, "LTS residual CFO: %.2f Hz detected (chirp gave %.2f, corrected to %.2f Hz)",
-                          residual_cfo, old_cfo, freq_offset_hz);
+                LOG_DEMOD(WARN, "LTS residual CFO: %.2f Hz detected (coh=%.2f, chirp gave %.2f, corrected to %.2f Hz)",
+                          residual_cfo, cfo_coherence, old_cfo, freq_offset_hz);
 
                 // Re-process training symbols with corrected CFO for accurate channel estimate
                 // Reset mixer to start position and re-run
@@ -371,6 +400,12 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
                 }
 
                 LOG_DEMOD(INFO, "LTS re-processed with corrected CFO=%.2f Hz", freq_offset_hz);
+            } else if (std::abs(residual_cfo) > 0.3f && std::abs(residual_cfo) < 5.0f &&
+                       cfoDebugLogEnabled()) {
+                LOG_DEMOD(WARN,
+                          "LTS residual CFO ignored: %.2f Hz (seed=%.2f Hz, coh=%.2f, valid=%d, min_seed=%.2f, min_coh=%.2f)",
+                          residual_cfo, old_cfo, cfo_coherence, cfo_valid,
+                          kMinTrustedCFOSeedHz, kMinResidualCFOCoherence);
             } else if (std::abs(residual_cfo) > 0.1f) {
                 LOG_DEMOD(DEBUG, "LTS residual CFO: %.2f Hz (below correction threshold)", residual_cfo);
             }

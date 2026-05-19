@@ -55,7 +55,8 @@ bool shouldPadPartialOFDMBurst(WaveformMode mode,
         return false;
     }
     if (file_state != FileTransferState::SENDING) {
-        return connection_policy::shouldPadBurstInterleaveGroup(burst_frames);
+        return connection_policy::isHighThroughputOFDMMode(modulation, rate) &&
+               connection_policy::shouldPadBurstInterleaveGroup(burst_frames);
     }
 
     return connection_policy::shouldPadHighRateFadingBurst(
@@ -353,6 +354,16 @@ void Connection::acceptCall() {
                                                  static_cast<uint8_t>(data_frame_cw_count_),
                                                  rung_id);
     Bytes ack_data = ack.serialize();
+    connect_ack_frame_ = ack_data;
+    connect_ack_retransmit_interval_ms_ =
+        connection_policy::connectAckRetransmitDelayMs(
+            negotiated_mode_, data_modulation_, data_code_rate_, data_frame_cw_count_);
+    connect_ack_retransmit_ms_ = connect_ack_retransmit_interval_ms_;
+    connect_ack_retx_remaining_ =
+        negotiated_mode_ == WaveformMode::OFDM_CHIRP ? CONNECT_ACK_MAX_RETX : 0;
+    const uint32_t responder_handshake_failsafe_ms = std::max<uint32_t>(
+        RESPONDER_HANDSHAKE_FAILSAFE_MS,
+        connect_ack_retransmit_interval_ms_ + CONNECT_ACK_RETRANSMIT_MS);
 
     LOG_MODEM(INFO, "Connection: Sending CONNECT_ACK (%zu bytes, SNR=%.1f dB (%s))",
               ack_data.size(), measured_snr_db_, snrSourceToString(measured_snr_source_));
@@ -363,7 +374,7 @@ void Connection::acceptCall() {
     // We are the responder - we received CONNECT and are sending CONNECT_ACK
     is_initiator_ = false;
     handshake_confirmed_ = false;  // Responder waits for first frame to confirm
-    responder_handshake_wait_ms_ = RESPONDER_HANDSHAKE_FAILSAFE_MS;
+    responder_handshake_wait_ms_ = responder_handshake_failsafe_ms;
 
     // Notify application of initial data mode
     notifyDataModeChanged(measured_snr_db_, fading_index_);
@@ -851,9 +862,9 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
 
     // Any frame from the initiator means our CONNECT_ACK got through — stop
     // proactive ACK retx regardless of whether the formal handshake-confirmed
-    // bit has flipped (the 2.2s fail-safe sets that bit before first DATA
-    // arrives, so without this clear, retx fires uselessly during early data
-    // phase and clogs the channel).
+    // bit has flipped (the responder fail-safe can set that bit before first
+    // DATA arrives, so without this clear, retx fires uselessly during early
+    // data phase and clogs the channel).
     if (state_ == ConnectionState::CONNECTED && !is_initiator_ &&
         !connect_ack_frame_.empty()) {
         connect_ack_frame_.clear();

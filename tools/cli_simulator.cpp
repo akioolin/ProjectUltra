@@ -1133,7 +1133,7 @@ private:
     int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
     bool cw_count_forced_ = false;  // true iff --cw-count was passed
     uint64_t carrier_mask_ = UINT64_MAX;
-    bool soft_combining_harq_ = true;
+    bool soft_combining_harq_ = false;
     bool save_signals_ = false;
     int save_signals_message_limit_ = 0;   // 0 = full run
     size_t save_signals_max_samples_ = 0;  // 0 = unlimited
@@ -2648,8 +2648,8 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --channel-interleave, -ci  Enable channel interleaving\n";
                 std::cout << "  --no-burst-interleave     Disable burst-level long interleaving\n";
                 std::cout << "  --burst-group-size <N>    Burst interleave group size (2-8, default: 8)\n";
-                std::cout << "  --harq                    Enable RX soft-combining HARQ (default: on)\n";
-                std::cout << "  --no-harq                 Disable RX soft-combining HARQ for A/B tests\n";
+                std::cout << "  --harq                    Enable RX soft-combining HARQ (default: off)\n";
+                std::cout << "  --no-harq                 Keep RX soft-combining HARQ disabled for A/B tests\n";
                 std::cout << "  --rx-overfeed-factor <N>  Run audio callbacks N× faster wall-clock (stress, default: 1)\n";
                 std::cout << "  --decode-delay-ms <N>     Add decode-thread delay (0-500 ms, stress)\n";
                 std::cout << "  --rx-batch-callbacks <N>  Batch N callbacks per decoder feed (stress)\n";

@@ -6,6 +6,8 @@
 #include "waveform_selection.hpp"  // Shared waveform/rate selection algorithm
 #include "ultra/logging.hpp"
 
+#include <algorithm>
+
 namespace ultra {
 namespace protocol {
 
@@ -339,12 +341,17 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             connection_policy::connectAckRetransmitDelayMs(
                 negotiated_mode_, rec_mod, rec_rate, data_frame_cw_count_);
         connect_ack_retransmit_ms_ = connect_ack_retransmit_interval_ms_;
-        connect_ack_retx_remaining_ = CONNECT_ACK_MAX_RETX;
+        connect_ack_retx_remaining_ =
+            negotiated_mode_ == WaveformMode::OFDM_CHIRP ? CONNECT_ACK_MAX_RETX : 0;
+        const uint32_t responder_handshake_failsafe_ms = std::max<uint32_t>(
+            RESPONDER_HANDSHAKE_FAILSAFE_MS,
+            connect_ack_retransmit_interval_ms_ + CONNECT_ACK_RETRANSMIT_MS);
         LOG_MODEM(INFO, "Connection: CONNECT_ACK rescue retry armed in %.2fs (%d remaining)",
                   connect_ack_retransmit_interval_ms_ / 1000.0f,
                   connect_ack_retx_remaining_);
 
         enterConnected();
+        responder_handshake_wait_ms_ = responder_handshake_failsafe_ms;
         // NOTE: Don't call on_handshake_confirmed_ yet - wait for first frame from initiator
 
         // Notify application of initial data mode

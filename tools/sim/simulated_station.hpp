@@ -1166,8 +1166,14 @@ private:
                     decoder_->setBurstInterleaveGroupSize(burst_group_size_);
                     decoder_->setKnownCFO(last_cfo_hz_);
                 }
-                // Enable burst interleaving for OFDM_CHIRP (not COX — no LTS marker)
-                if (negotiated_waveform_ == WaveformMode::OFDM_CHIRP && !no_burst_interleave_) {
+                // Enable burst interleaving only for higher-throughput OFDM modes.
+                // At R1/4 Good fading, one erased physical block was spreading
+                // across every logical frame and presenting as uniform 4/4 CW
+                // failures; keep the low-rate path localized per frame.
+                if (negotiated_waveform_ == WaveformMode::OFDM_CHIRP &&
+                    !no_burst_interleave_ &&
+                    connection_policy::isHighThroughputOFDMMode(data_modulation_,
+                                                                data_code_rate_)) {
                     if (encoder_) encoder_->setBurstInterleave(true);
                     if (decoder_) decoder_->setBurstInterleave(true);
                     LOG_MODEM(INFO, "[%s] Burst interleaving ENABLED (group=%d)",
