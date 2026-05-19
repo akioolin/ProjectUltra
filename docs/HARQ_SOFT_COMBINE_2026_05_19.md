@@ -102,4 +102,4 @@ End-to-end validation target:
   --waveform ofdm_chirp --test
 ```
 
-Expected result is `TEST PASSED` with retransmissions collapsing from the pre-HARQ storm level. `cli_simulator` now enables RX soft-combining by default; use `--no-harq` only for explicit A/B comparisons against the old isolated-decode behavior.
+Expected result is `TEST PASSED` with retransmissions collapsing from the pre-HARQ storm level. `cli_simulator` keeps RX soft-combining off by default while the end-to-end Good-fading regression is under audit; use `--harq` for explicit A/B comparisons against the old isolated-decode behavior.
