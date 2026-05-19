@@ -2188,6 +2188,12 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
             if (!hdr.valid || hdr.is_control || !isFixedFrameCwCount(hdr.total_cw)) {
                 return false;
             }
+            if (hdr.total_cw != cw_count) {
+                LOG_MODEM(WARN,
+                          "[%s] HARQ key rejected: header total_cw=%d does not match decode cw_count=%d",
+                          log_prefix_.c_str(), hdr.total_cw, cw_count);
+                return false;
+            }
 
             fec::SoftCombineBuffer::HarqKeyInputs ki;
             ki.sender_hash = hdr.src_hash;

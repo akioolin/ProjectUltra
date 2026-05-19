@@ -1,8 +1,123 @@
 #include "soft_combine.hpp"
+#include "ultra/logging.hpp"
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <sstream>
 #include <limits>
 
 namespace ultra::fec {
+
+namespace {
+
+bool harqDebugLogEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ULTRA_HARQ_DEBUG_LOG");
+        return value && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
+    }();
+    return enabled;
+}
+
+int harqDebugFilter(const char* name) {
+    const char* value = std::getenv(name);
+    if (!value || value[0] == '\0') {
+        return -1;
+    }
+    char* end = nullptr;
+    const long parsed = std::strtol(value, &end, 0);
+    return (end && *end == '\0') ? static_cast<int>(parsed) : -1;
+}
+
+bool harqDebugKeySelected(const SoftCombineBuffer::Key& key) {
+    if (!harqDebugLogEnabled()) {
+        return false;
+    }
+    const int seq_filter = harqDebugFilter("ULTRA_HARQ_DEBUG_SEQ");
+    if (seq_filter >= 0 && static_cast<int>(key.seq) != seq_filter) {
+        return false;
+    }
+    const int cw_filter = harqDebugFilter("ULTRA_HARQ_DEBUG_CW");
+    if (cw_filter >= 0 && static_cast<int>(key.cw_index) != cw_filter) {
+        return false;
+    }
+    return true;
+}
+
+std::string firstLlrs(const std::vector<float>& llrs) {
+    std::ostringstream out;
+    out.setf(std::ios::fixed);
+    out.precision(2);
+    const size_t n = std::min<size_t>(16, llrs.size());
+    out << '[';
+    for (size_t i = 0; i < n; ++i) {
+        if (i != 0) {
+            out << ',';
+        }
+        out << llrs[i];
+    }
+    if (llrs.size() > n) {
+        out << ",...";
+    }
+    out << ']';
+    return out.str();
+}
+
+float meanAbsLlr(const std::vector<float>& llrs) {
+    if (llrs.empty()) {
+        return 0.0f;
+    }
+    double sum = 0.0;
+    for (float llr : llrs) {
+        sum += std::abs(llr);
+    }
+    return static_cast<float>(sum / static_cast<double>(llrs.size()));
+}
+
+size_t signDisagreements(const std::vector<float>& a, const std::vector<float>& b) {
+    const size_t n = std::min(a.size(), b.size());
+    size_t disagreements = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if ((a[i] < 0.0f) != (b[i] < 0.0f)) {
+            ++disagreements;
+        }
+    }
+    return disagreements;
+}
+
+void logHarqVector(const char* event, const SoftCombineBuffer::Key& key,
+                   int attempts, const std::vector<float>& llrs) {
+    if (!harqDebugKeySelected(key)) {
+        return;
+    }
+    LOG_MODEM(WARN,
+              "HARQ_DEBUG %s key={sender=0x%06X seq=%u rate=%d cw=%u/%u mod=%u ch_int=%u geom=%u} "
+              "attempts=%d len=%zu mean_abs=%.3f first16=%s",
+              event, key.sender_hash, key.seq, static_cast<int>(key.rate),
+              key.cw_index, key.cw_count, key.modulation, key.channel_interleave,
+              key.carrier_count_hash, attempts, llrs.size(), meanAbsLlr(llrs),
+              firstLlrs(llrs).c_str());
+}
+
+void logHarqCombineHit(const SoftCombineBuffer::Key& key, int attempts,
+                       const std::vector<float>& retained,
+                       const std::vector<float>& incoming,
+                       const std::vector<float>& combined) {
+    if (!harqDebugKeySelected(key)) {
+        return;
+    }
+    LOG_MODEM(WARN,
+              "HARQ_DEBUG combine_hit key={sender=0x%06X seq=%u rate=%d cw=%u/%u mod=%u ch_int=%u geom=%u} "
+              "attempts=%d len=%zu sign_disagree=%zu mean_abs_retained=%.3f mean_abs_new=%.3f "
+              "mean_abs_sum=%.3f retained16=%s new16=%s sum16=%s",
+              key.sender_hash, key.seq, static_cast<int>(key.rate), key.cw_index,
+              key.cw_count, key.modulation, key.channel_interleave, key.carrier_count_hash,
+              attempts, incoming.size(), signDisagreements(retained, incoming),
+              meanAbsLlr(retained), meanAbsLlr(incoming), meanAbsLlr(combined),
+              firstLlrs(retained).c_str(), firstLlrs(incoming).c_str(),
+              firstLlrs(combined).c_str());
+}
+
+}  // namespace
 
 SoftCombineBuffer::Key SoftCombineBuffer::makeKey(const HarqKeyInputs& in) {
     Key k;
@@ -47,11 +162,18 @@ int SoftCombineBuffer::combine(const Key& key, const std::vector<float>& incomin
 
     auto it = entries_.find(key);
     if (it == entries_.end()) {
+        logHarqVector("combine_miss_new", key, 1, incoming_llrs);
         return 1;
     }
 
     Entry& entry = it->second;
     if (entry.llrs.size() != incoming_llrs.size()) {
+        if (harqDebugKeySelected(key)) {
+            LOG_MODEM(WARN,
+                      "HARQ_DEBUG combine_size_mismatch key={sender=0x%06X seq=%u cw=%u/%u} retained_len=%zu new_len=%zu",
+                      key.sender_hash, key.seq, key.cw_index, key.cw_count,
+                      entry.llrs.size(), incoming_llrs.size());
+        }
         eraseLocked(key);
         return 1;
     }
@@ -74,6 +196,7 @@ int SoftCombineBuffer::combine(const Key& key, const std::vector<float>& incomin
         out_llrs[i] = std::clamp(sum, -kMaxAccumulatedLLR, kMaxAccumulatedLLR);
     }
 
+    logHarqCombineHit(key, next_attempts, entry.llrs, incoming_llrs, out_llrs);
     touchLocked(entry);
     return next_attempts;
 }
@@ -102,11 +225,19 @@ void SoftCombineBuffer::retain(const Key& key, std::vector<float> combined_llrs)
     entry.attempts = attempts;
     entry.lru_it = lru_.begin();
     entries_.emplace(key, std::move(entry));
+    logHarqVector("retain", key, attempts, entries_.find(key)->second.llrs);
     evictOverflowLocked();
 }
 
 void SoftCombineBuffer::drop(const Key& key) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (harqDebugKeySelected(key)) {
+        LOG_MODEM(WARN,
+                  "HARQ_DEBUG drop key={sender=0x%06X seq=%u rate=%d cw=%u/%u mod=%u ch_int=%u geom=%u}",
+                  key.sender_hash, key.seq, static_cast<int>(key.rate),
+                  key.cw_index, key.cw_count, key.modulation, key.channel_interleave,
+                  key.carrier_count_hash);
+    }
     eraseLocked(key);
 }
 

@@ -10,6 +10,7 @@
 #include <bit>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <memory>
 #include <random>
 
@@ -51,6 +52,50 @@ LDPCDecoder& fixedFrameDecoderForRate(CodeRate rate) {
     decoder.setMaxIterations(fec::LDPCCodec::getRecommendedIterations(rate));
     decoder.setMinSumFactor(kFixedFrameDefaultMinSumFactor);
     return decoder;
+}
+
+bool harqDebugLogEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ULTRA_HARQ_DEBUG_LOG");
+        return value && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
+    }();
+    return enabled;
+}
+
+int harqDebugFilter(const char* name) {
+    const char* value = std::getenv(name);
+    if (!value || value[0] == '\0') {
+        return -1;
+    }
+    char* end = nullptr;
+    const long parsed = std::strtol(value, &end, 0);
+    return (end && *end == '\0') ? static_cast<int>(parsed) : -1;
+}
+
+bool harqDebugKeySelected(const fec::SoftCombineBuffer::Key& key) {
+    if (!harqDebugLogEnabled()) {
+        return false;
+    }
+    const int seq_filter = harqDebugFilter("ULTRA_HARQ_DEBUG_SEQ");
+    if (seq_filter >= 0 && static_cast<int>(key.seq) != seq_filter) {
+        return false;
+    }
+    const int cw_filter = harqDebugFilter("ULTRA_HARQ_DEBUG_CW");
+    if (cw_filter >= 0 && static_cast<int>(key.cw_index) != cw_filter) {
+        return false;
+    }
+    return true;
+}
+
+float meanAbsLlr(const std::vector<float>& llrs) {
+    if (llrs.empty()) {
+        return 0.0f;
+    }
+    double sum = 0.0;
+    for (float llr : llrs) {
+        sum += std::abs(llr);
+    }
+    return static_cast<float>(sum / static_cast<double>(llrs.size()));
 }
 
 } // namespace
@@ -1770,6 +1815,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
 
     int perturbation_cw_count = 0;  // How many CWs needed perturbation retry
     std::vector<std::vector<float>> decoder_soft_bits(static_cast<size_t>(cw_count));
+    std::vector<int> harq_attempts(static_cast<size_t>(cw_count), 1);
 
     auto keyForCodeword = [&](int cw) {
         fec::SoftCombineBuffer::Key cw_key = *harq_key;
@@ -1785,10 +1831,22 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
             const auto cw_key = keyForCodeword(cw);
             if (cw < static_cast<int>(final_status.decoded.size()) &&
                 final_status.decoded[static_cast<size_t>(cw)]) {
+                if (harqDebugKeySelected(cw_key)) {
+                    LOG_MODEM(WARN,
+                              "HARQ_DEBUG finalize action=drop seq=%u cw=%d/%u frame_all_success=%d decoded=1",
+                              cw_key.seq, cw, cw_key.cw_count, final_status.allSuccess() ? 1 : 0);
+                }
                 harq_buffer->drop(cw_key);
             } else if (harq_active &&
                        cw < static_cast<int>(decoder_soft_bits.size()) &&
                        !decoder_soft_bits[static_cast<size_t>(cw)].empty()) {
+                if (harqDebugKeySelected(cw_key)) {
+                    LOG_MODEM(WARN,
+                              "HARQ_DEBUG finalize action=retain seq=%u cw=%d/%u frame_all_success=%d decoded=0 mean_abs=%.3f",
+                              cw_key.seq, cw, cw_key.cw_count,
+                              final_status.allSuccess() ? 1 : 0,
+                              meanAbsLlr(decoder_soft_bits[static_cast<size_t>(cw)]));
+                }
                 harq_buffer->retain(cw_key, decoder_soft_bits[static_cast<size_t>(cw)]);
             }
         }
@@ -1806,6 +1864,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
             std::vector<float> combined_cw_bits;
             const auto cw_key = keyForCodeword(cw);
             const int attempts = harq_buffer->combine(cw_key, cw_bits, combined_cw_bits);
+            harq_attempts[static_cast<size_t>(cw)] = attempts;
             if (!combined_cw_bits.empty()) {
                 cw_bits = std::move(combined_cw_bits);
             }
@@ -1918,6 +1977,16 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
 
         LOG_MODEM(INFO, "CW[%d]: %s (iters=%d, llr_avg=%.2f, |llr|_avg=%.2f)",
                   cw, success ? "OK" : "FAIL", iterations, llr_avg, llr_abs_avg);
+        if (harq_active) {
+            const auto cw_key = keyForCodeword(cw);
+            if (harq_attempts[static_cast<size_t>(cw)] > 1 && harqDebugKeySelected(cw_key)) {
+                LOG_MODEM(WARN,
+                          "HARQ_DEBUG decode_after_combine seq=%u cw=%d/%u attempts=%d success=%d iters=%d mean_abs=%.3f perturbation=%d",
+                          cw_key.seq, cw, cw_key.cw_count,
+                          harq_attempts[static_cast<size_t>(cw)], success ? 1 : 0,
+                          iterations, meanAbsLlr(cw_bits), used_perturbation ? 1 : 0);
+            }
+        }
 
         status.decoded[cw] = success;
         if (success && decoded.size() >= bytes_per_cw) {
