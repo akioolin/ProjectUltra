@@ -30,6 +30,7 @@ inline constexpr size_t kBurstInterleaveGroupFrames = 8;
 inline constexpr uint32_t kResponderHandshakeFailSafeMs = 2200;
 inline constexpr uint32_t kConnectAckLegacyRetransmitMs = 6000;
 inline constexpr uint32_t kMCDPSKDualChirpPreambleMs = 1200;
+inline constexpr uint32_t kMCDPSKInterFrameGuardMs = 100;
 inline constexpr uint32_t kMCDPSKRobustLowAckTimeoutFloorMs = 36000;
 
 struct OFDMFrameTiming {
@@ -389,6 +390,22 @@ inline AckRepeatProfile ofdmAckRepeatProfile(Modulation mod,
     if (near_awgn_ofdm) {
         profile.count = 1;
     }
+    return profile;
+}
+
+inline AckRepeatProfile mcDpskAckRepeatProfile(const MCDPSKFrameTiming& timing,
+                                               size_t window_size,
+                                               Modulation mod) {
+    (void)timing;
+    (void)window_size;
+    (void)mod;
+
+    // A MC-DPSK ACK is a full-preamble RF burst. Repeating it keys the receiver
+    // for another multi-second ACK just as the peer starts its next DATA frame,
+    // creating a deterministic half-duplex deaf window rather than diversity.
+    AckRepeatProfile profile;
+    profile.count = 1;
+    profile.delay_ms = 220;
     return profile;
 }
 

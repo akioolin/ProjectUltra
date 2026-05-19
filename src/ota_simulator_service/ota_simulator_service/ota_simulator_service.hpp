@@ -140,8 +140,6 @@ private:
     std::map<std::string, RegisteredStation> registered_;
     std::map<std::string, SessionCaptureWriter> captures_;
     std::map<std::string, std::vector<projectultra::otasim::v1::ActiveEffect>> active_effects_;
-    std::set<std::string> tx_state_seen_logged_;
-    std::set<std::string> tx_state_missing_logged_;
     std::vector<StoredEvent> events_;
     std::condition_variable events_cv_;
     uint64_t next_event_id_ = 1;

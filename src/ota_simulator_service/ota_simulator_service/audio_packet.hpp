@@ -15,8 +15,6 @@ inline constexpr uint16_t kOtaAudioVersion = 1;
 inline constexpr uint16_t kOtaAudioFormatF32LE = 1;
 inline constexpr uint16_t kOtaAudioChannelCountMono = 1;
 inline constexpr size_t kOtaAudioHeaderBytes = 40;
-inline constexpr uint16_t kOtaAudioFlagTxStateValid = 1u << 0u;
-inline constexpr uint16_t kOtaAudioFlagTxActive = 1u << 1u;
 
 struct OtaAudioPacketHeader {
     uint32_t magic = kOtaAudioMagic;

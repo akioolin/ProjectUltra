@@ -250,6 +250,8 @@ void test_mc_dpsk_window_timing() {
           "Robust MC-DPSK should use window=5");
     CHECK(mcDpskSackDelayMs(robust, 5) == 14496,
           "Robust SACK delay should defer ACK until the data-only burst tail");
+    CHECK(mcDpskAckRepeatProfile(robust, 5, Modulation::DQPSK).count == 1,
+          "Robust MC-DPSK must not repeat full-preamble ACKs into the next DATA turn");
 
     auto standard = mcDpskFrameTiming(Modulation::DQPSK, 8, 512, 4);
     CHECK(standard.data_ms == 1845, "Standard MC-DPSK 4-CW data timing");

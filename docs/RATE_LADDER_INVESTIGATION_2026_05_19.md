@@ -1,5 +1,11 @@
 # Rate Ladder Ground-Up Investigation - 2026-05-19
 
+> Update: the Phase 1 half-duplex diagnosis described the then-current
+> implementation direction. As of 2026-05-19, the corrected architecture
+> is documented in `docs/RADIO_VS_MEDIUM_ARCHITECTURE_2026_05_19.md`:
+> OTASim remains the full-duplex HF medium, while radio deafness and
+> post-PTT TX cooldown are client-side simulated-radio behavior.
+
 Phase 1 status: diagnosis was completed first. Follow-up status on
 2026-05-19: the external OTASim half-duplex RX-blackout fix has been
 implemented in this working tree; no rate-ladder retuning has been

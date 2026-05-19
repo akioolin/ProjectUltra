@@ -99,23 +99,10 @@ void SimulatedChannel::setNoiseOverlay(std::vector<float> bed,
     noise_overlay_cursor_b_ = 0;
 }
 
-void SimulatedChannel::setRxBlackoutCallback(bool is_station_a,
-                                             std::function<bool()> callback) {
-    std::lock_guard<std::mutex> lock(rx_blackout_mutex_);
-    if (is_station_a) {
-        station_a_rx_blackout_ = std::move(callback);
-    } else {
-        station_b_rx_blackout_ = std::move(callback);
-    }
-}
-
 void SimulatedChannel::transmitFromA(const std::vector<float>& samples) {
     auto with_cfo = applyTxCFO(samples, cfo_phase_a_to_b_);
     auto processed = applyChannel(with_cfo, *channel_a_to_b_);
     captureTxIfEnabled(samples, true);
-    if (isStationBInRxBlackout()) {
-        return;
-    }
 
     std::lock_guard<std::mutex> lock(mutex_b_rx_);
     for (float sample : processed) {
@@ -127,9 +114,6 @@ void SimulatedChannel::transmitFromB(const std::vector<float>& samples) {
     auto with_cfo = applyTxCFO(samples, cfo_phase_b_to_a_);
     auto processed = applyChannel(with_cfo, *channel_b_to_a_);
     captureTxIfEnabled(samples, false);
-    if (isStationAInRxBlackout()) {
-        return;
-    }
 
     std::lock_guard<std::mutex> lock(mutex_a_rx_);
     for (float sample : processed) {
@@ -223,24 +207,6 @@ void SimulatedChannel::applyOverlay(std::vector<float>& out, uint64_t& cursor) {
         }
         ++cursor;
     }
-}
-
-bool SimulatedChannel::isStationAInRxBlackout() const {
-    std::function<bool()> callback;
-    {
-        std::lock_guard<std::mutex> lock(rx_blackout_mutex_);
-        callback = station_a_rx_blackout_;
-    }
-    return callback && callback();
-}
-
-bool SimulatedChannel::isStationBInRxBlackout() const {
-    std::function<bool()> callback;
-    {
-        std::lock_guard<std::mutex> lock(rx_blackout_mutex_);
-        callback = station_b_rx_blackout_;
-    }
-    return callback && callback();
 }
 
 void SimulatedChannel::captureTxIfEnabled(std::span<const float> tx_raw, bool from_a) {

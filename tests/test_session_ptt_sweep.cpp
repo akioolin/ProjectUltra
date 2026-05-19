@@ -38,15 +38,6 @@ struct Event {
     std::optional<uint16_t> frame_seq;
 };
 
-const char* pttStateName(PttState state) {
-    switch (state) {
-        case PttState::RX: return "RX";
-        case PttState::TX: return "TX";
-        case PttState::TRANSITION: return "TRANSITION";
-    }
-    return "UNKNOWN";
-}
-
 const char* okFail(bool ok) {
     return ok ? "OK" : "FAIL";
 }
@@ -178,7 +169,7 @@ void pollStation(SimulatedStation& station,
     const PttState ptt = station.pttState();
     if (ptt != observed.last_ptt) {
         observed.last_ptt = ptt;
-        log.add(station.getSimTime(), name, "ptt.state", pttStateName(ptt));
+        log.add(station.getSimTime(), name, "ptt.state", ::pttStateName(ptt));
     }
 }
 
@@ -191,7 +182,7 @@ void initializeObservedState(SimulatedStation& station,
     log.add(station.getSimTime(), name, "conn.state",
             connectionStateToString(observed.last_connection));
     log.add(station.getSimTime(), name, "ptt.state",
-            pttStateName(observed.last_ptt));
+            ::pttStateName(observed.last_ptt));
 }
 
 template <typename Predicate>

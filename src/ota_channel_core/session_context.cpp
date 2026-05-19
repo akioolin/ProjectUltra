@@ -1,6 +1,11 @@
 #include "ota_channel_core/session_context.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 
@@ -25,6 +30,31 @@ std::string streamNameForSession(std::string_view session_id,
 size_t samplesForMs(uint32_t sample_rate, uint32_t ms) {
     return std::max<size_t>(1, static_cast<size_t>(
         (static_cast<uint64_t>(sample_rate) * ms) / 1000u));
+}
+
+void e2eDebugLine(const std::string& line) {
+    const char* path = std::getenv("ULTRA_E2E_DEBUG_LOG");
+    if (path == nullptr || *path == '\0') {
+        return;
+    }
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
+    std::ofstream out(path, std::ios::app);
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    const auto epoch_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+    out << "epoch_ms=" << epoch_ms << ' ' << line << '\n';
+}
+
+float rms(std::span<const float> samples) {
+    if (samples.empty()) {
+        return 0.0f;
+    }
+    double sum = 0.0;
+    for (float sample : samples) {
+        sum += static_cast<double>(sample) * static_cast<double>(sample);
+    }
+    return static_cast<float>(std::sqrt(sum / static_cast<double>(samples.size())));
 }
 
 }  // namespace
@@ -170,8 +200,7 @@ size_t SessionContext::pendingAudioBlocks() const {
 }
 
 bool SessionContext::enqueueTransmit(std::string_view station_id,
-                                     std::span<const float> samples,
-                                     StationTxAudioState tx_state) {
+                                     std::span<const float> samples) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = audio_queues_.find(std::string(station_id));
     if (it == audio_queues_.end()) {
@@ -182,10 +211,16 @@ bool SessionContext::enqueueTransmit(std::string_view station_id,
     }
     auto& queues = it->second;
     queues.tx_inbox.insert(queues.tx_inbox.end(), samples.begin(), samples.end());
-    const uint8_t rx_blackout = tx_state.tx_state_valid && tx_state.tx_active ? 1u : 0u;
-    queues.rx_blackout_inbox.insert(queues.rx_blackout_inbox.end(),
-                                    samples.size(),
-                                    rx_blackout);
+    {
+        std::ostringstream oss;
+        oss << "session_tx_inbox station=" << station_id
+            << " session=" << config_.session_id
+            << " clock=" << session_clock_samples_
+            << " samples=" << samples.size()
+            << " rms=" << rms(samples)
+            << " queued_after=" << queues.tx_inbox.size();
+        e2eDebugLine(oss.str());
+    }
     trimTxQueueLocked(queues);
     appendEventLocked("tx_enqueued", std::string(station_id), session_clock_samples_);
     return true;
@@ -202,21 +237,14 @@ SessionClockTick SessionContext::advanceSessionClock() {
     }
 
     std::map<std::string, std::vector<float>> tx_by_station;
-    std::map<std::string, std::vector<uint8_t>> rx_blackout_by_station;
     for (const auto& station_id : stations_) {
         auto& queues = audio_queues_[station_id];
         auto& queue = queues.tx_inbox;
-        auto& rx_blackout_queue = queues.rx_blackout_inbox;
         std::vector<float> samples(tick_samples_, 0.0f);
-        std::vector<uint8_t> rx_blackout(tick_samples_, 0u);
         const size_t available = std::min(tick_samples_, queue.size());
         for (size_t i = 0; i < available; ++i) {
             samples[i] = queue.front();
             queue.pop_front();
-            if (!rx_blackout_queue.empty()) {
-                rx_blackout[i] = rx_blackout_queue.front();
-                rx_blackout_queue.pop_front();
-            }
         }
         if (available > 0) {
             tick.tx_blocks.push_back({
@@ -229,23 +257,15 @@ SessionClockTick SessionContext::advanceSessionClock() {
             }
         }
         tx_by_station.emplace(station_id, std::move(samples));
-        rx_blackout_by_station.emplace(station_id, std::move(rx_blackout));
     }
 
     for (const auto& receiver_id : stations_) {
         std::vector<float> mixed(tick_samples_, 0.0f);
-        const auto rx_blackout_it = rx_blackout_by_station.find(receiver_id);
-        const std::vector<uint8_t>* rx_blackout =
-            rx_blackout_it == rx_blackout_by_station.end() ? nullptr
-                                                           : &rx_blackout_it->second;
         for (const auto& [sender_id, samples] : tx_by_station) {
             if (sender_id == receiver_id) {
                 continue;
             }
             for (size_t i = 0; i < tick_samples_; ++i) {
-                if (rx_blackout && (*rx_blackout)[i] != 0u) {
-                    continue;
-                }
                 mixed[i] += samples[i];
             }
         }
@@ -257,6 +277,17 @@ SessionClockTick SessionContext::advanceSessionClock() {
             .start_sample = tick.start_sample,
             .samples = rx,
         });
+        const float rx_rms = rms(rx);
+        if (receiver_id == "BRAVO" || rx_rms > 0.001f) {
+            std::ostringstream oss;
+            oss << "session_outbox_enqueue receiver=" << receiver_id
+                << " session=" << config_.session_id
+                << " start=" << tick.start_sample
+                << " samples=" << rx.size()
+                << " rms=" << rx_rms
+                << " outbox_blocks_before_trim=" << outbox.size();
+            e2eDebugLine(oss.str());
+        }
         trimOutboxLocked(outbox);
         tick.rx_blocks.push_back({
             .station_id = receiver_id,
@@ -334,12 +365,6 @@ std::vector<SessionEvent> SessionContext::eventLog() const {
 void SessionContext::trimTxQueueLocked(StationAudioQueues& queues) const {
     while (queues.tx_inbox.size() > max_tx_queue_samples_) {
         queues.tx_inbox.pop_front();
-        if (!queues.rx_blackout_inbox.empty()) {
-            queues.rx_blackout_inbox.pop_front();
-        }
-    }
-    while (queues.rx_blackout_inbox.size() > queues.tx_inbox.size()) {
-        queues.rx_blackout_inbox.pop_front();
     }
 }
 

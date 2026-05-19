@@ -1,5 +1,11 @@
 # OTASim audit findings — 2026-05-19
 
+> Update: the server-side half-duplex direction in A1 was superseded on
+> 2026-05-19 by `docs/RADIO_VS_MEDIUM_ARCHITECTURE_2026_05_19.md`.
+> The corrected model keeps the OTASim server as the full-duplex HF
+> medium and moves receiver deafness / TX cooldown to the client-side
+> simulated radio.
+
 Following Codex's Phase 1 rate-ladder investigation
 (`docs/RATE_LADDER_INVESTIGATION_2026_05_19.md`), this doc enumerates
 **all** OTASim fidelity gaps surfaced while reading the code, not just

@@ -12,7 +12,6 @@ using ultra::ota_channel_core::ChannelType;
 using ultra::ota_channel_core::SessionAudioBlock;
 using ultra::ota_channel_core::SessionConfig;
 using ultra::ota_channel_core::SessionContext;
-using ultra::ota_channel_core::StationTxAudioState;
 
 namespace {
 
@@ -46,90 +45,49 @@ std::unique_ptr<SessionContext> makeSession(const std::string& id) {
     config.default_channel_model = ChannelType::PASSTHROUGH;
     config.default_snr_db = 80.0f;
     config.seed = 0x5150u;
-    config.station_cap = 2;
+    config.station_cap = 3;
     auto session = std::make_unique<SessionContext>(std::move(config));
     assert(session->registerStation("alice"));
     assert(session->registerStation("bob"));
+    assert(session->registerStation("charlie"));
     return session;
-}
-
-void enqueueTick(SessionContext& session,
-                 const std::vector<float>& alice_tx,
-                 StationTxAudioState alice_state,
-                 const std::vector<float>& bob_tx,
-                 StationTxAudioState bob_state) {
-    assert(session.enqueueTransmit("alice", alice_tx, alice_state));
-    assert(session.enqueueTransmit("bob", bob_tx, bob_state));
 }
 
 }  // namespace
 
 int main() {
-    auto legacy = makeSession("legacy");
-    const size_t tick_samples = legacy->sessionTickSamples();
+    auto session = makeSession("medium-mixer");
+    const size_t tick_samples = session->sessionTickSamples();
     const auto alice_signal = constant(tick_samples, 0.25f);
     const auto bob_signal = constant(tick_samples, -0.5f);
-    const auto silence = constant(tick_samples, 0.0f);
+    const auto charlie_signal = constant(tick_samples, 0.125f);
 
-    enqueueTick(*legacy,
-                alice_signal,
-                {.tx_state_valid = false, .tx_active = true},
-                bob_signal,
-                {.tx_state_valid = false, .tx_active = true});
-    auto tick = legacy->advanceSessionClock();
-    auto rx_blocks = legacy->drainReceiveOutbox();
+    assert(session->enqueueTransmit("alice", alice_signal));
+    assert(session->enqueueTransmit("bob", bob_signal));
+    assert(session->enqueueTransmit("charlie", charlie_signal));
+
+    const auto tick = session->advanceSessionClock();
+    const auto rx_blocks = session->drainReceiveOutbox();
     const auto* alice_rx = findBlock(rx_blocks, "alice", tick.start_sample);
     const auto* bob_rx = findBlock(rx_blocks, "bob", tick.start_sample);
+    const auto* charlie_rx = findBlock(rx_blocks, "charlie", tick.start_sample);
     assert(alice_rx);
     assert(bob_rx);
-    assertVectorNear(alice_rx->samples, bob_signal);
-    assertVectorNear(bob_rx->samples, alice_signal);
+    assert(charlie_rx);
 
-    auto half_duplex = makeSession("half-duplex");
+    std::vector<float> alice_expected(tick_samples);
+    std::vector<float> bob_expected(tick_samples);
+    std::vector<float> charlie_expected(tick_samples);
+    for (size_t i = 0; i < tick_samples; ++i) {
+        alice_expected[i] = bob_signal[i] + charlie_signal[i];
+        bob_expected[i] = alice_signal[i] + charlie_signal[i];
+        charlie_expected[i] = alice_signal[i] + bob_signal[i];
+    }
 
-    enqueueTick(*half_duplex,
-                alice_signal,
-                {.tx_state_valid = true, .tx_active = true},
-                silence,
-                {.tx_state_valid = true, .tx_active = false});
-    tick = half_duplex->advanceSessionClock();
-    rx_blocks = half_duplex->drainReceiveOutbox();
-    alice_rx = findBlock(rx_blocks, "alice", tick.start_sample);
-    bob_rx = findBlock(rx_blocks, "bob", tick.start_sample);
-    assert(alice_rx);
-    assert(bob_rx);
-    assertVectorNear(alice_rx->samples, silence);
-    assertVectorNear(bob_rx->samples, alice_signal);
+    assertVectorNear(alice_rx->samples, alice_expected);
+    assertVectorNear(bob_rx->samples, bob_expected);
+    assertVectorNear(charlie_rx->samples, charlie_expected);
 
-    enqueueTick(*half_duplex,
-                alice_signal,
-                {.tx_state_valid = true, .tx_active = true},
-                bob_signal,
-                {.tx_state_valid = true, .tx_active = true});
-    tick = half_duplex->advanceSessionClock();
-    rx_blocks = half_duplex->drainReceiveOutbox();
-    alice_rx = findBlock(rx_blocks, "alice", tick.start_sample);
-    bob_rx = findBlock(rx_blocks, "bob", tick.start_sample);
-    assert(alice_rx);
-    assert(bob_rx);
-    assertVectorNear(alice_rx->samples, silence);
-    assertVectorNear(bob_rx->samples, silence);
-
-    enqueueTick(*half_duplex,
-                silence,
-                {.tx_state_valid = true, .tx_active = false},
-                bob_signal,
-                {.tx_state_valid = true, .tx_active = true});
-    tick = half_duplex->advanceSessionClock();
-    rx_blocks = half_duplex->drainReceiveOutbox();
-    alice_rx = findBlock(rx_blocks, "alice", tick.start_sample);
-    bob_rx = findBlock(rx_blocks, "bob", tick.start_sample);
-    assert(alice_rx);
-    assert(bob_rx);
-    assertVectorNear(alice_rx->samples, bob_signal);
-    assertVectorNear(bob_rx->samples, silence);
-
-    std::cout << "session half-duplex TX-state blackout preserves legacy clients and "
-                 "blocks peer audio during local TX\n";
+    std::cout << "session medium mixer carries simultaneous stations and only removes self audio\n";
     return 0;
 }

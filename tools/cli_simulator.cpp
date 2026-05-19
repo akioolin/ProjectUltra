@@ -342,20 +342,32 @@ public:
     }
 
     std::vector<float> pullRx(size_t count) override {
-        return backend_.getRxSamples(count);
-    }
-
-    void setRxBlackoutCallback(std::function<bool()> callback) override {
-        rx_blackout_callback_ = std::move(callback);
+        auto samples = backend_.getRxSamples(count);
+        const float raw_rms = sampleRms(samples);
+        auto shaped = shapeRxForLocalRadio(std::move(samples), count);
+        if (label_ == "BRAVO") {
+            std::ostringstream oss;
+            oss << "audioport_pull_rx station=" << label_
+                << " request=" << count
+                << " returned=" << shaped.size()
+                << " raw_rms=" << raw_rms
+                << " shaped_rms=" << sampleRms(shaped);
+            e2eDebugLine(oss.str());
+        }
+        return shaped;
     }
 
     void queueTx(const std::vector<float>& samples) override {
         if (samples.empty()) {
             return;
         }
+        std::ostringstream oss;
+        oss << "audioport_queue_tx station=" << label_
+            << " samples=" << samples.size()
+            << " rms=" << sampleRms(samples);
+        e2eDebugLine(oss.str());
         std::string error;
-        const bool tx_active = rx_blackout_callback_ && rx_blackout_callback_();
-        if (!backend_.queueTxSamples(samples, &error, tx_active)) {
+        if (!backend_.queueTxSamples(samples, &error)) {
             tx_errors_++;
             if (tx_errors_ <= 4 || (tx_errors_ % 32) == 0) {
                 LOG_MODEM(WARN, "%s OTASim TX failed: %s", label_.c_str(), error.c_str());
@@ -367,7 +379,6 @@ private:
     otasim_client::OtaAudioBackendConfig config_;
     std::string label_;
     otasim_client::OtaAudioBackend backend_;
-    std::function<bool()> rx_blackout_callback_;
     uint64_t tx_errors_ = 0;
 };
 

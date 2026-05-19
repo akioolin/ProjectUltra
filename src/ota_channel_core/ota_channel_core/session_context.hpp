@@ -45,11 +45,6 @@ struct SessionClockTick {
     std::vector<SessionAudioBlock> rx_blocks;
 };
 
-struct StationTxAudioState {
-    bool tx_state_valid = false;
-    bool tx_active = false;
-};
-
 class SessionContext {
 public:
     explicit SessionContext(SessionConfig config);
@@ -82,8 +77,7 @@ public:
     size_t pendingAudioBlocks() const;
 
     bool enqueueTransmit(std::string_view station_id,
-                         std::span<const float> samples,
-                         StationTxAudioState tx_state = {});
+                         std::span<const float> samples);
     SessionClockTick advanceSessionClock();
     std::vector<SessionAudioBlock> drainReceiveOutbox();
     uint64_t sessionClockSamples() const;
@@ -110,7 +104,6 @@ private:
 
     struct StationAudioQueues {
         std::deque<float> tx_inbox;
-        std::deque<uint8_t> rx_blackout_inbox;
         std::deque<QueuedAudioBlock> rx_outbox;
     };
 
