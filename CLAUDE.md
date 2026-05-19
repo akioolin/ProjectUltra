@@ -136,8 +136,8 @@ Interpretation of the 2026-04-29 robustness work:
 
 **The modem has TWO completely different operating modes based on SNR:**
 
-### Mode 1: MC-DPSK (SNR ≤ 10 dB)
-- **When:** SNR below 10, or heavy fading conditions
+### Mode 1: MC-DPSK (in-band SNR < 20 dB)
+- **When:** in-band SNR below 20, or heavy fading conditions
 - **Waveform:** Multi-Carrier DPSK with chirp sync
 - **ARQ:** Stop-and-wait (window=1) - send ONE frame, wait for ACK
 - **Frame format:** Variable codewords, simple sequential encoding
@@ -147,8 +147,8 @@ Interpretation of the 2026-04-29 robustness work:
 - **Preamble:** ALWAYS full chirp preamble (no light sync)
 - **Key files:** `decodeMCDPSKFrame()` in streaming_decoder.cpp
 
-### Mode 2: OFDM (SNR ≥ 10 dB)
-- **When:** SNR 10 and above with acceptable fading
+### Mode 2: OFDM (in-band SNR ≥ 20 dB)
+- **When:** in-band SNR 20 and above with acceptable fading
 - **Waveform:** OFDM with chirp or Schmidl-Cox sync
 - **ARQ:** Selective Repeat (window=8) - send up to 8 frames before waiting
 - **Frame format:** Fixed 4-codeword frames for data, 1-codeword for control
@@ -158,7 +158,7 @@ Interpretation of the 2026-04-29 robustness work:
 - **Preamble:** Light preamble (LTS only) for data after handshake
 - **Key files:** `decodeFixedFrame()` in frame_v2.cpp
 
-### Mode 3: OFDM_NARROW (SNR 5-10 dB, 500 Hz bandwidth)
+### Mode 3: OFDM_NARROW (in-band SNR ~13-20 dB, 500 Hz bandwidth)
 - **When:** Narrowband chirp detected (1250-1750 Hz), low SNR where wideband fails
 - **Waveform:** OFDM with narrowband chirp sync, FFT=2048, 21 carriers, 492 Hz BW
 - **ARQ:** Stop-and-wait (window=1) - same as MC-DPSK due to long frame times (~3s)
@@ -173,8 +173,8 @@ Interpretation of the 2026-04-29 robustness work:
 1. **Connection starts:** MC-DPSK for PING/PONG/CONNECT (wideband or narrowband chirp)
 2. **Dual-listen:** RX detects chirp type → sets BandwidthMode (WIDE or NARROW)
 3. **After CONNECT_ACK:** SNR is measured, mode is negotiated
-   - SNR < 10 + wideband: Stay in MC-DPSK
-   - SNR ≥ 10 + wideband: Switch to OFDM_CHIRP
+   - In-band SNR < 20 + wideband: Stay in MC-DPSK
+   - In-band SNR ≥ 20 + wideband: Switch to OFDM_CHIRP
    - Narrowband detected: Switch to OFDM_NARROW
 4. **enterConnected():** Sets ARQ window based on mode (1 for MC-DPSK/NARROW, 4 for wideband OFDM)
 5. **StreamingEncoder/Decoder:** Check `mode_` to use correct path, `isOFDMMode()` for OFDM family
@@ -187,57 +187,83 @@ Interpretation of the 2026-04-29 robustness work:
 
 ---
 
-**Performance Requirements (cli_simulator --test):**
-| Mode | Channel | SNR | Required CW Success |
+**Performance Requirements (cli_simulator --test, post-2026-05-19 calibration audit):**
+| Mode | Channel | In-band SNR floor | Status |
 |------|---------|-----|---------------------|
-| MC-DPSK | AWGN (continuous sim) | -6+ short-QSO floor; 5+ conservative CW margin | 100% at documented gate |
-| MC-DPSK | Moderate fading | 10 | 100% |
-| OFDM_CHIRP | AWGN | 15+ | 100% |
-| OFDM_CHIRP | Good fading | 15 | **100%** |
-| OFDM_CHIRP | Moderate fading | 15 | ~90% |
-| OFDM_NARROW | AWGN | 8+ | 100% |
-| OFDM_NARROW | Good fading | 8 | 100% data, 90%+ ACK |
+| MC-DPSK | AWGN | **5 dB** | 3/3 seeds cli_simulator + OTASim fixture `OTASimulatorTwoEndpointMCDPSKLowSNR` |
+| MC-DPSK | Moderate fading | 19.6 | 100% at documented gate (pre-audit) |
+| OFDM_CHIRP R1/4 | AWGN | **12 dB** | 3/3 seeds cli_simulator |
+| OFDM_CHIRP R1/4 | Good fading | **15 dB** | 3/3 seeds cli_simulator + DecodeBenchReplay fixture |
+| OFDM_CHIRP R1/4 | Moderate fading | 24.6 | pre-audit, not re-measured |
+| OFDM_CHIRP R1/2 | AWGN / Good | 24.6 / 24.6 | pre-audit |
+| OFDM_NARROW R1/4 | AWGN / Good | 17.6 / 17.6 | pre-audit |
 
-**Current production state (refreshed 2026-05-14 for simulator AWGN; individual calibration dates noted inline):**
+Higher rates (R2/3, R3/4, QPSK) — see historical section below; not re-measured against the new floor.
+
+**Current production state (post-2026-05-19 8-layer calibration audit, branch `fix/honest-snr-in-band-and-rate-recalibration`):**
+
+The 2026-05-19 audit moved floors:
+- MC-DPSK AWGN floor: **18 dB → 5 dB** (-13 dB)
+- OFDM R1/4 AWGN floor: **18 dB → 12 dB** (-6 dB)
+- OFDM R1/4 Good fading floor: **18 dB → 15 dB** (-3 dB, locked in DecodeBenchReplay fixture)
+
+Verification (2026-05-19):
+- `ctest --test-dir build --output-on-failure -j1`: **86/86 PASS**
+- Multi-seed cli_simulator: MC-DPSK SNR=5, OFDM R1/4 SNR=12 AWGN, OFDM R1/4 SNR=15 Good — all **3/3 seeds** (42, 43, 44)
+
+Calibration baseline:
 - Simulated AWGN calibration: `SimulatedChannel` synthetic AWGN is continuous at RX,
-  sized from `StreamingEncoder::encodePing()` RMS `0.3180724` measured on
-  2026-05-14. Older simulator runs with "AWGN SNR=X dB" used an artificially
-  quiet silence model and must not be used as calibrated floor evidence.
-- Two-endpoint continuous-AWGN v2 QSO sweep (DQPSK R1/4 auto): +20, +15,
-  +10, +5, 0, -3, and -5 dB pass; -8 dB fails connection/message/disconnect
-  assertions. One-dB refinement: -6 dB passes, -7 dB fails the 30 s
-  connected-state assertions and the 60 s message assertion.
-- MC-DPSK: WORKING - 100% at SNR=10 with moderate fading
-- OFDM_CHIRP DQPSK R1/4 AWGN: WORKING - 100% at SNR=15 and SNR=20 (0 retries)
-- OFDM_CHIRP DQPSK R1/4 Good fading SNR=15: WORKING - 100% (0 retries, 0 failures)
-- OFDM_CHIRP DQPSK R1/4 Good fading SNR=10: WORKING - 30/30 seeds PASS (avg 1.5 retx, 100% delivery)
-- OFDM_CHIRP DQPSK R1/4 Moderate fading SNR=15: WORKING - 5/5 seeds PASS (avg 1.4 retx, 100% delivery)
-- OFDM_CHIRP DQPSK R1/2 AWGN: WORKING - 100% at SNR=15 and SNR=20 (0 retries)
-- OFDM_CHIRP DQPSK R1/2 Good fading: WORKING - 100% at SNR=15 (5/5 seeds, 0 retries)
-- OFDM_CHIRP DQPSK R1/2 Moderate fading SNR=15: WORKING - 5/5 seeds PASS (avg 2.4 retx, 100% delivery)
-- OFDM_CHIRP DQPSK R2/3 AWGN: WORKING - 100% at SNR=20 (0 retries)
-- OFDM_CHIRP DQPSK R2/3 Good fading SNR=20: WORKING - 30/30 seeds PASS, 0 retransmissions
-- OFDM_CHIRP DQPSK R2/3 Good fading SNR=15: WORKING - 10/10 seeds PASS (avg 1.5 retx, 100% delivery)
-- OFDM_CHIRP QPSK R1/2 AWGN: WORKING - 100% at SNR=20 (0 retries)
-- OFDM_CHIRP QPSK R1/2 Good fading: WORKING - avg 95% frame success at SNR=20 (30-seed survey, all messages delivered via ARQ)
-- OFDM_CHIRP QPSK R2/3 AWGN: WORKING - 100% at SNR=20 (0 retries)
+  sized from `StreamingEncoder::encodePing()` measured in-band RMS `0.3048` (after
+  101-tap 50-2950 Hz receive FIR), per Layer 1 audit commit `7bbf22d`. The older
+  broadband reference `0.3180724` is preserved for analytical use only.
+- SNR convention: operator-facing channel knobs, idle meter, OFDM LTS/pilot
+  meter, and rate selector all use receiver in-band SNR (3 kHz noise BW), per
+  the unified-SNR work in commits `580e3b5`, `9a54402`, `f3d0c03`, `def3f6a`.
+- Watterson channel: CFO uses analytic-signal (Hilbert) shifter per Layer 2
+  audit (`bf0939a`), replacing the legacy custom passband down-mix/re-mix.
+- Rate selector: only physical SNR sources (IDLE_IN_BAND, OFDM_BROADBAND) feed
+  rate selection per Layer 3 audit (`2133b89`).
+
+Historical / pre-audit measurements (not re-verified at the new floor, but still
+valid at the SNRs listed):
+- Two-endpoint continuous-AWGN v2 QSO sweep (DQPSK R1/4 auto): in-band +29.6,
+  +24.6, +19.6, +14.6, +9.6, +6.6, and +4.6 dB pass; +1.6 dB fails
+  connection/message/disconnect assertions. One-dB refinement: +3.6 dB passes,
+  +2.6 dB fails the 30 s connected-state assertions and the 60 s message
+  assertion.
+- MC-DPSK: WORKING - 100% at in-band SNR≈19.6 (legacy configured 10) with moderate fading
+- OFDM_CHIRP DQPSK R1/4 AWGN: WORKING - 100% at in-band SNR≈24.6 and 29.6 (legacy 15/20), 0 retries
+- OFDM_CHIRP DQPSK R1/4 Good fading in-band SNR≈24.6 (legacy 15): WORKING - 100% (0 retries, 0 failures)
+- OFDM_CHIRP DQPSK R1/4 Good fading in-band SNR≈19.6 (legacy 10): WORKING - 30/30 seeds PASS (avg 1.5 retx, 100% delivery)
+- OFDM_CHIRP DQPSK R1/4 Moderate fading in-band SNR≈24.6 (legacy 15): WORKING - 5/5 seeds PASS (avg 1.4 retx, 100% delivery)
+- OFDM_CHIRP DQPSK R1/2 AWGN: WORKING - 100% at in-band SNR≈24.6 and 29.6 (legacy 15/20), 0 retries
+- OFDM_CHIRP DQPSK R1/2 Good fading: WORKING - 100% at in-band SNR≈24.6 (legacy 15), 5/5 seeds, 0 retries
+- OFDM_CHIRP DQPSK R1/2 Moderate fading in-band SNR≈24.6 (legacy 15): WORKING - 5/5 seeds PASS (avg 2.4 retx, 100% delivery)
+- OFDM_CHIRP DQPSK R2/3 AWGN: WORKING - 100% at in-band SNR≈29.6 (legacy 20), 0 retries
+- OFDM_CHIRP DQPSK R2/3 Good fading in-band SNR≈29.6 (legacy 20): WORKING - 30/30 seeds PASS, 0 retransmissions
+- OFDM_CHIRP DQPSK R2/3 Good fading in-band SNR≈24.6 (legacy 15): WORKING - 10/10 seeds PASS (avg 1.5 retx, 100% delivery)
+- OFDM_CHIRP QPSK R1/2 AWGN: WORKING - 100% at in-band SNR≈29.6 (legacy 20), 0 retries
+- OFDM_CHIRP QPSK R1/2 Good fading: WORKING - avg 95% frame success at in-band SNR≈29.6 (legacy 20), 30-seed survey, all messages delivered via ARQ
+- OFDM_CHIRP QPSK R2/3 AWGN: WORKING - 100% at in-band SNR≈29.6 (legacy 20), 0 retries
 - OFDM_CHIRP QPSK R2/3 Good fading: WORKING - 5/5 seeds PASS (2 seeds had retx, 3 clean)
-- OFDM_CHIRP DQPSK R3/4 AWGN: WORKING - 100% at SNR=20 (10/10 seeds, 0 retries)
+- OFDM_CHIRP DQPSK R3/4 AWGN: WORKING - 100% at in-band SNR≈29.6 (legacy 20), 10/10 seeds, 0 retries
 - OFDM_CHIRP DQPSK R3/4 Good fading: NOT RECOMMENDED (23 retx / 5 seeds — AWGN only)
 - 1-CW ACK frames: WORKING - control frames use 1 CW (3x faster ACK)
 - Variable-CW frames: WORKING - CONNECT/DISCONNECT use exact CW count (2 at R1/2, 3 at R1/4)
-- OFDM_NARROW DQPSK R1/4 AWGN: WORKING - 100% at SNR=8 (0 retransmissions)
-- OFDM_NARROW DQPSK R1/4 Good fading SNR=8: WORKING - 100% data decode, 93% ACK, all messages delivered via ARQ
+- OFDM_NARROW DQPSK R1/4 AWGN: WORKING - 100% at in-band SNR≈17.6 (legacy 8), 0 retransmissions
+- OFDM_NARROW DQPSK R1/4 Good fading in-band SNR≈17.6 (legacy 8): WORKING - 100% data decode, 93% ACK, all messages delivered via ARQ
 - OFDM_COX: FORCEABLE/LEGACY ONLY - implementation exists and can be
   selected explicitly, but the production auto ladder does not choose it
   until it has its own reliability gate.
 - OTFS/MFSK: RESERVED ONLY - not in the production build or default capabilities
 - cli_simulator: FULLY WORKING - all phases pass on AWGN and fading
 
-**Auto rate selection ladder (2026-05-07):**
+**Auto rate selection ladder (2026-05-18):**
 `src/protocol/waveform_selection.hpp::selectOFDMCodeRate()` is the
-single source of truth. `tests/test_waveform_policy.cpp` locks the
-boundary behavior; do not duplicate the threshold table here.
+single source of truth. Thresholds are in-band SNR. `tests/test_waveform_policy.cpp`
+locks the boundary behavior, including the AWGN-12 regression where in-band
+~22 dB must stay DQPSK R1/4 instead of D8PSK R2/3; do not duplicate the
+threshold table here.
 
 **Temporal fading measurement (2026-02-03):**
 - `getFadingIndex()` now combines freq_cv (multipath) + temporal_cv (Doppler spread)
@@ -418,20 +444,19 @@ make -j4
 
 ## Waveform Summary
 
-| Mode | Sync Method | SNR Range | Max Throughput | CFO Tolerance | Fading |
+| Mode | Sync Method | In-band SNR floor | Max Throughput | CFO Tolerance | Fading |
 |------|-------------|-----------|----------------|---------------|--------|
-| **MC-DPSK** | Dual Chirp | -6 to <10 dB continuous-AWGN short QSO; -7 breaks QSO | 938 bps | ±50 Hz | Good |
-| **OFDM_NARROW** | NB Chirp + LTS | 5-10 dB | ~450 bps (R1/2, window=3) | ±50 Hz | Good (R1/4) |
-| **OFDM_CHIRP** | Dual Chirp + LTS | 10-17 dB | 3.4 kbps | ±50 Hz | Good (R1/4) |
+| **MC-DPSK** | Dual Chirp | 5 dB AWGN (post-2026-05-19 audit) | 938 bps | ±50 Hz | Good |
+| **OFDM_NARROW** | NB Chirp + LTS | ~17 dB AWGN (pre-audit) | ~450 bps (R1/2, window=3) | ±50 Hz | Good (R1/4) |
+| **OFDM_CHIRP** R1/4 | Dual Chirp + LTS | 12 dB AWGN, 15 dB Good (post-audit) | 3.4 kbps | ±50 Hz | Good (R1/4) |
 | **OFDM_COX** | Schmidl-Cox | Forced only | 7.9 kbps | Needs testing | Poor |
 | **SC-DPSK** | Barker-13 | -8 to -3 dB | 125 bps | N/A | Good |
 
 **Waveform Selection:**
 - Poor HF channels (2ms delay): Use MC-DPSK
-- Low SNR (5-10 dB) with good/moderate fading: Use OFDM_NARROW (~200 bps R1/4, ~450 bps R1/2 — selective-repeat window=3)
-- Moderate/Good HF: Use OFDM_CHIRP at SNR 10+; OFDM_COX remains explicit
-  forced/legacy only until separately gated.
-- Very low SNR: Use SC-DPSK or MC-DPSK
+- Low SNR (5-12 dB) AWGN: MC-DPSK handles down to 5 dB; OFDM_CHIRP R1/4 from 12 dB up
+- Moderate/Good HF: Use OFDM_CHIRP; OFDM_COX remains explicit forced/legacy only
+- OFDM_NARROW retained for narrowband-detected paths
 - OTFS/MFSK values are reserved only and are not production-supported
 
 ---
@@ -478,10 +503,10 @@ tools/
 1. **OFDM_COX default policy:** Forceable implementation exists, but it is
    not part of the production auto ladder until separately validated.
 2. **Poor HF channels (2ms delay):** OFDM fails - use MC-DPSK instead
-3. **MC-DPSK floor:** continuous-AWGN v2 QSO passes at -6 dB and breaks at
-   -7 dB during connection/message assertions under the 90 s two-endpoint
-   message scenario; older -8 dB simulator passes came from the pre-2026-05-14
-   artificially quiet silence model.
+3. **MC-DPSK floor:** in-band 5 dB AWGN (3/3 seeds cli_simulator + OTASim
+   `OTASimulatorTwoEndpointMCDPSKLowSNR` fixture, post-2026-05-19 audit).
+   Below 5 dB is currently un-explored as a separate workstream
+   (MC-DPSK speed ladder for sub-0 dB SNR remains future work).
 4. **File transfer:** DATA_START/DATA_END not fully implemented
 
 ---

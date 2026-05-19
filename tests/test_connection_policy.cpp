@@ -76,40 +76,40 @@ void test_ladder_rung_selection() {
     CHECK(std::string(ladderRungIdToString(LadderRungId::ROBUST_LOW)) == "Robust-Low",
           "Robust-Low rung string");
 
-    CHECK(selectLadderRung(-3.1f, ChannelClassification::MODERATE).id ==
+    CHECK(selectLadderRung(6.9f, ChannelClassification::MODERATE).id ==
               LadderRungId::ROBUST_LOW,
-          "Moderate below -3 dB selects Robust-Low");
-    CHECK(selectLadderRung(-3.0f, ChannelClassification::MODERATE).id ==
+          "Moderate below in-band 7 dB selects Robust-Low");
+    CHECK(selectLadderRung(7.0f, ChannelClassification::MODERATE).id ==
               LadderRungId::ROBUST_MID,
-          "Moderate -3 dB boundary selects Robust-Mid");
-    CHECK(selectLadderRung(4.9f, ChannelClassification::MODERATE).id ==
+          "Moderate in-band 7 dB boundary selects Robust-Mid");
+    CHECK(selectLadderRung(14.9f, ChannelClassification::MODERATE).id ==
               LadderRungId::ROBUST_MID,
-          "Moderate below +5 dB stays Robust-Mid");
-    CHECK(selectLadderRung(5.0f, ChannelClassification::MODERATE).id ==
+          "Moderate below in-band 15 dB stays Robust-Mid");
+    CHECK(selectLadderRung(15.0f, ChannelClassification::MODERATE).id ==
               LadderRungId::ROBUST,
-          "Moderate +5 dB boundary selects Robust");
-    CHECK(selectLadderRung(9.9f, ChannelClassification::MODERATE).id ==
+          "Moderate in-band 15 dB boundary selects Robust");
+    CHECK(selectLadderRung(19.9f, ChannelClassification::MODERATE).id ==
               LadderRungId::ROBUST,
-          "Moderate below +10 dB stays Robust");
-    CHECK(selectLadderRung(10.0f, ChannelClassification::MODERATE).id ==
+          "Moderate below in-band 20 dB stays Robust");
+    CHECK(selectLadderRung(20.0f, ChannelClassification::MODERATE).id ==
               LadderRungId::OFDM_CHIRP,
-          "Moderate +10 dB boundary selects OFDM_CHIRP");
+          "Moderate in-band 20 dB boundary selects OFDM_CHIRP");
 
-    CHECK(selectLadderRung(7.9f, ChannelClassification::AWGN).id ==
+    CHECK(selectLadderRung(17.9f, ChannelClassification::AWGN).id ==
               LadderRungId::ROBUST,
           "AWGN uses lower OFDM_CHIRP threshold than Moderate");
-    CHECK(selectLadderRung(8.0f, ChannelClassification::AWGN).id ==
+    CHECK(selectLadderRung(18.0f, ChannelClassification::AWGN).id ==
               LadderRungId::OFDM_CHIRP,
-          "AWGN +8 dB boundary selects OFDM_CHIRP");
-    CHECK(selectLadderRung(6.9f, ChannelClassification::POOR).id ==
+          "AWGN in-band 18 dB boundary selects OFDM_CHIRP");
+    CHECK(selectLadderRung(16.9f, ChannelClassification::POOR).id ==
               LadderRungId::ROBUST_MID,
           "Poor fading keeps extra margin before Robust");
-    CHECK(selectLadderRung(12.0f, ChannelClassification::POOR).id ==
+    CHECK(selectLadderRung(22.0f, ChannelClassification::POOR).id ==
               LadderRungId::OFDM_CHIRP,
-          "Poor fading delays OFDM_CHIRP until +12 dB");
+          "Poor fading delays OFDM_CHIRP until in-band 22 dB");
 
-    CHECK(selectLadderRung(0.0f, 0.80f).id == LadderRungId::ROBUST_MID,
-          "fading-index overload selects Moderate Robust-Mid at 0 dB");
+    CHECK(selectLadderRung(10.0f, 0.80f).id == LadderRungId::ROBUST_MID,
+          "fading-index overload selects Moderate Robust-Mid at in-band 10 dB");
 }
 
 void test_wide_ofdm_timing_and_timeout() {
@@ -265,14 +265,14 @@ void test_mc_dpsk_window_timing() {
 }
 
 void test_ofdm_profile_selection() {
-    CHECK(isNearAwgnOFDM(0.00f, 15.0f), "near-AWGN threshold should include SNR15");
-    CHECK(isNearAwgnOFDM(0.14f, 15.0f), "near-AWGN fading threshold should allow R2/3 cutoff margin");
-    CHECK(!isNearAwgnOFDM(0.15f, 15.0f), "near-AWGN fading threshold should match R2/3 cutoff");
-    CHECK(!isNearAwgnOFDM(0.30f, 15.0f), "near-AWGN fading threshold is strict");
-    CHECK(!isNearAwgnOFDM(0.00f, 14.9f), "near-AWGN SNR threshold is strict");
-    CHECK(isHighThroughputOFDM(0.30f, 15.0f), "Good fading SNR15 should use high-throughput OFDM window");
-    CHECK(!isHighThroughputOFDM(0.65f, 15.0f), "Moderate fading should not use high-throughput OFDM window yet");
-    CHECK(!isHighThroughputOFDM(0.30f, 14.9f), "high-throughput OFDM SNR threshold is strict");
+    CHECK(isNearAwgnOFDM(0.00f, 25.0f), "near-AWGN threshold should include in-band SNR25");
+    CHECK(isNearAwgnOFDM(0.14f, 25.0f), "near-AWGN fading threshold should allow R2/3 cutoff margin");
+    CHECK(!isNearAwgnOFDM(0.15f, 25.0f), "near-AWGN fading threshold should match R2/3 cutoff");
+    CHECK(!isNearAwgnOFDM(0.30f, 25.0f), "near-AWGN fading threshold is strict");
+    CHECK(!isNearAwgnOFDM(0.00f, 24.9f), "near-AWGN in-band SNR threshold is strict");
+    CHECK(isHighThroughputOFDM(0.30f, 25.0f), "Good fading in-band SNR25 should use high-throughput OFDM window");
+    CHECK(!isHighThroughputOFDM(0.65f, 25.0f), "Moderate fading should not use high-throughput OFDM window yet");
+    CHECK(!isHighThroughputOFDM(0.30f, 24.9f), "high-throughput OFDM in-band SNR threshold is strict");
 
     CHECK(isHighThroughputOFDMMode(Modulation::DQPSK, CodeRate::R1_2),
           "DQPSK R1/2 should use high-throughput OFDM mode");
@@ -286,16 +286,16 @@ void test_ofdm_profile_selection() {
           "R2/3 can use two burst groups only near AWGN");
     CHECK(ofdmWindowSize(Modulation::DQPSK, CodeRate::R2_3, false) == kWideOFDMWindowFrames,
           "legacy R2/3 window helper should stay conservative on fading channels");
-    CHECK(ofdmWindowSizeForChannel(Modulation::DQPSK, CodeRate::R2_3, 0.30f, 15.0f)
+    CHECK(ofdmWindowSizeForChannel(Modulation::DQPSK, CodeRate::R2_3, 0.30f, 25.0f)
               == kWideOFDMWindowFrames,
-          "R2/3 should keep one burst group on good fading at SNR15");
-    CHECK(ofdmWindowSizeForChannel(Modulation::DQPSK, CodeRate::R2_3, 0.05f, 15.0f)
+          "R2/3 should keep one burst group on good fading at in-band SNR25");
+    CHECK(ofdmWindowSizeForChannel(Modulation::DQPSK, CodeRate::R2_3, 0.05f, 25.0f)
               == kHighThroughputOFDMWindowFrames,
           "R2/3 can use two burst groups only on near-AWGN channels");
-    CHECK(ofdmWindowSizeForChannel(Modulation::DQPSK, CodeRate::R2_3, 0.80f, 15.0f)
+    CHECK(ofdmWindowSizeForChannel(Modulation::DQPSK, CodeRate::R2_3, 0.80f, 25.0f)
               == kWideOFDMWindowFrames,
           "R2/3 should keep one burst group on moderate fading");
-    CHECK(ofdmWindowSizeForChannel(Modulation::DQPSK, CodeRate::R3_4, 0.30f, 15.0f)
+    CHECK(ofdmWindowSizeForChannel(Modulation::DQPSK, CodeRate::R3_4, 0.30f, 25.0f)
               == kWideOFDMWindowFrames,
           "R3/4 remains near-AWGN only for two burst groups");
     CHECK(ofdmWindowSize(Modulation::DQPSK, CodeRate::R1_2, false) == kHighThroughputOFDMWindowFrames,

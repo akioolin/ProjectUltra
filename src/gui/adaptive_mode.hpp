@@ -11,8 +11,8 @@ namespace gui {
  * Automatically selects modulation and code rate based on measured SNR.
  * Uses hysteresis to prevent rapid switching at threshold boundaries.
  *
- * Note: Thresholds are calibrated for pilot-based SNR estimation,
- * which has an offset from theoretical channel SNR.
+ * Note: Thresholds are legacy empirical values for the routed SNR convention.
+ * Callers must preserve the accompanying SNRSource outside this controller.
  */
 class AdaptiveModeController {
 public:
@@ -20,7 +20,7 @@ public:
 
     /**
      * Update with current SNR measurement.
-     * @param snr_db Pilot SNR in dB (from demodulator)
+     * @param snr_db Routed consumer-facing SNR in dB
      * @return true if mode changed
      */
     bool update(float snr_db);

@@ -11,7 +11,9 @@ LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/ultra_cli_notch.XXXXXX.log")"
 trap 'rm -f "$LOG_FILE"' EXIT
 
 set +e
-"$CLI_BIN" --snr 15 --fading good --rate r1_2 \
+# SNR is operator-facing in-band SNR. 25 dB preserves the pre-conversion
+# physical channel that was formerly requested as broadband SNR 15.
+"$CLI_BIN" --snr 25 --fading good --rate r1_2 \
   --mask-clear-carrier 17 --test >"$LOG_FILE" 2>&1
 cli_status=$?
 set -e

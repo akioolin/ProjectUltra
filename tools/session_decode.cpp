@@ -81,7 +81,9 @@ struct FrameSummary {
     std::vector<std::string> frame_types;
 
     struct DataFrameMetrics {
-        float lts_snr_db = 0.0f;
+        float ofdm_internal_snr_db = 0.0f;
+        float ofdm_broadband_snr_db = 0.0f;
+        ultra::SNRSource snr_source = ultra::SNRSource::NONE;
         float fading = 0.0f;
         float sync_corr = 0.0f;
         float residual_cfo_hz = 0.0f;
@@ -443,7 +445,9 @@ void recordFrame(const ultra::gui::DecodeResult& result, FrameSummary& summary) 
             summary.data_payload_bytes.push_back(hdr.payload_len);
         }
         summary.data_metrics.push_back({
-            result.lts_snr_db,
+            result.ofdm_internal_snr_db,
+            result.ofdm_broadband_snr_db,
+            result.snr_source,
             result.lts_fading_index,
             result.sync_correlation,
             result.lts_residual_cfo_hz
@@ -520,8 +524,11 @@ void printSummary(const LoadedWav& wav,
               << " byte_exact=" << frames.data_byte_exact << "/" << frames.data << "\n";
     for (size_t i = 0; i < frames.data_metrics.size(); ++i) {
         const auto& m = frames.data_metrics[i];
-        std::cout << "  frame[" << (i + 1) << "] lts_snr_db="
-                  << fixedFloat(m.lts_snr_db, 1)
+        std::cout << "  frame[" << (i + 1) << "] ofdm_internal_snr_db="
+                  << fixedFloat(m.ofdm_internal_snr_db, 1)
+                  << " ofdm_broadband_snr_db="
+                  << fixedFloat(m.ofdm_broadband_snr_db, 1)
+                  << " snr_source=" << ultra::snrSourceToString(m.snr_source)
                   << " fading=" << fixedFloat(m.fading, 2)
                   << " sync_corr=" << fixedFloat(m.sync_corr, 2)
                   << " residual_cfo_hz=" << fixedFloat(m.residual_cfo_hz, 1)

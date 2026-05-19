@@ -143,7 +143,8 @@ inline ChannelSNRProbeResult runChannelSNRProbe(const ChannelSNRProbeConfig& cfg
     result.signal_samples = signal_window.count;
     result.noise_samples = noise.count;
     result.measured_snr_db =
-        detail::dbRatio(result.measured_signal_rms, result.measured_noise_rms);
+        broadbandToInBandSnrDb(
+            detail::dbRatio(result.measured_signal_rms, result.measured_noise_rms));
     result.delta_db = result.measured_snr_db - result.configured_snr_db;
     return result;
 }

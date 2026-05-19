@@ -487,8 +487,8 @@ void AudioEngine::appendCapturedSamples(const float* input, size_t samples, floa
 void AudioEngine::addChannelNoise(std::vector<float>& samples) {
     float snr_db = loopback_snr_db_.load();
 
-    // Skip noise entirely for very high SNR (clean testing mode)
-    if (snr_db >= 50.0f) {
+    // Skip noise entirely for very high in-band SNR (clean testing mode).
+    if (snr_db >= 60.0f) {
         return;  // No noise added - perfect loopback
     }
 

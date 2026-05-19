@@ -396,7 +396,7 @@ private:
 
     void configureModem() {
         engine_.setLocalCallsign(cfg_.callsign);
-        engine_.setMeasuredSNR(cfg_.snr_db);
+        engine_.setMeasuredSNR(cfg_.snr_db, ultra::SNRSource::NONE);
         if (cfg_.forced_mod != Modulation::AUTO) {
             engine_.setForcedModulation(cfg_.forced_mod);
         }
@@ -552,11 +552,13 @@ private:
         });
 
         decoder_.setPingCallback([this](float snr_db, float cfo_hz) {
-            engine_.setMeasuredSNR(snr_db);
+            engine_.setMeasuredSNR(snr_db, ultra::SNRSource::SYNC_QUALITY);
             last_cfo_hz_ = cfo_hz;
-            char fields[128];
+            char fields[176];
             std::snprintf(fields, sizeof(fields),
-                          "{\"snr_db\":%.1f,\"cfo_hz\":%.1f}", snr_db, cfo_hz);
+                          "{\"snr_db\":%.1f,\"snr_source\":\"%s\",\"cfo_hz\":%.1f}",
+                          snr_db, ultra::snrSourceToString(ultra::SNRSource::SYNC_QUALITY),
+                          cfo_hz);
             ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
                 "protocol", "ping.rx", fields);
             if (decoder_.getDetectedBandwidth() == ultra::BandwidthMode::NARROW) {
@@ -595,11 +597,13 @@ private:
         }
 
         const float fading_index = decoder_.getLastFadingIndex();
-        engine_.setChannelQuality(result.snr_db, fading_index);
-        char fields[192];
+        engine_.setChannelQuality(result.snr_db, fading_index, result.snr_source);
+        char fields[224];
         std::snprintf(fields, sizeof(fields),
-                      "{\"bytes\":%zu,\"snr_db\":%.1f,\"fading\":%.2f}",
-                      result.frame_data.size(), result.snr_db, fading_index);
+                      "{\"bytes\":%zu,\"snr_db\":%.1f,\"snr_source\":\"%s\","
+                      "\"fading\":%.2f}",
+                      result.frame_data.size(), result.snr_db,
+                      ultra::snrSourceToString(result.snr_source), fading_index);
         ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
             "phy", "frame.rx", fields);
         engine_.onRxData(result.frame_data);
@@ -797,9 +801,9 @@ private:
 
     void applyAwgn(std::vector<float>& samples) {
         // Continuous AWGN sized to the calibrated modem-reference RMS so
-        // --snr means the same broadband SNR as in SimulatedChannel and
-        // the GUI simulator. Was previously addAWGN(activeSignalPower)
-        // which made silence between bursts artificially quiet.
+        // --snr means the same in-band SNR as SimulatedChannel and the GUI
+        // simulator. Was previously addAWGN(activeSignalPower), which made
+        // silence between bursts artificially quiet.
         const float sigma =
             ultra::sim::modemReferenceNoiseStddev(cfg_.snr_db);
         std::normal_distribution<float> noise(0.0f, sigma);

@@ -16,10 +16,14 @@
 namespace ultra::ota_channel_core {
 
 inline constexpr uint32_t kDefaultSampleRate = 48000;
-inline constexpr float kModemReferenceRms = 0.3180724f;
+inline constexpr float kModemReferenceBroadbandRms = 0.3180724f;
+inline constexpr float kModemReferenceInBandRms = 0.30482664f;
+inline constexpr float kModemReferenceRms = kModemReferenceInBandRms;
 inline constexpr double kModemReferencePower =
     static_cast<double>(kModemReferenceRms) *
     static_cast<double>(kModemReferenceRms);
+inline constexpr double kModemInBandNoisePowerFraction = 0.10858718;
+inline constexpr double kModemBroadbandToInBandSnrOffsetDb = 9.64221445;
 
 enum class ChannelType {
     PASSTHROUGH,
@@ -97,6 +101,7 @@ public:
 
 private:
     float scale_ = 0.0f;
+    double loop_in_band_power_ = 0.0;
     std::shared_ptr<const std::vector<float>> loop_;
     size_t start_position_ = 0;
     size_t position_ = 0;

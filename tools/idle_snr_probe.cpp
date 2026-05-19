@@ -122,21 +122,21 @@ int main(int argc, char** argv) {
     }
 
     if (args.header) {
-        std::cout << "channel,configured_snr,seed,source,valid,idle_snr_db,delta_db,"
-                  << "instant_snr_db,filtered_noise_rms,normalized_noise_rms,"
+        std::cout << "channel,configured_snr,seed,source,valid,idle_in_band_snr_db,delta_db,"
+                  << "latest_instant_idle_in_band_snr_db,filtered_noise_rms,normalized_noise_rms,"
                   << "fir_energy,enbw_hz,windows\n";
     }
 
-    const float delta = s.snr_db - args.snr_db;
+    const float delta = s.idle_in_band_snr_db - args.snr_db;
     std::cout << channelName(args.channel) << ","
               << std::fixed << std::setprecision(2)
               << args.snr_db << ","
               << args.seed << ","
               << (args.streaming ? "streaming" : "direct") << ","
               << (s.valid ? 1 : 0) << ","
-              << s.snr_db << ","
+              << s.idle_in_band_snr_db << ","
               << delta << ","
-              << s.latest_instant_snr_db << ","
+              << s.latest_instant_idle_in_band_snr_db << ","
               << s.filtered_noise_rms << ","
               << s.normalized_noise_rms << ","
               << std::setprecision(8) << s.fir_energy << ","

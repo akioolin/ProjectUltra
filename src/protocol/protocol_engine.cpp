@@ -592,9 +592,9 @@ void ProtocolEngine::setInitialConnectWaveform(WaveformMode mode) {
 
 // --- Adaptive Data Mode ---
 
-void ProtocolEngine::setMeasuredSNR(float snr_db) {
+void ProtocolEngine::setMeasuredSNR(float snr_db, SNRSource source) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
-    connection_.setMeasuredSNR(snr_db);
+    connection_.setMeasuredSNR(snr_db, source);
 }
 
 float ProtocolEngine::getMeasuredSNR() const {
@@ -602,9 +602,15 @@ float ProtocolEngine::getMeasuredSNR() const {
     return connection_.getMeasuredSNR();
 }
 
-void ProtocolEngine::setChannelQuality(float snr_db, float fading_index) {
+SNRSource ProtocolEngine::getMeasuredSNRSource() const {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
-    connection_.setChannelQuality(snr_db, fading_index);
+    return connection_.getMeasuredSNRSource();
+}
+
+void ProtocolEngine::setChannelQuality(float snr_db, float fading_index,
+                                       SNRSource source) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.setChannelQuality(snr_db, fading_index, source);
 }
 
 float ProtocolEngine::getFadingIndex() const {

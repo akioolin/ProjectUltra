@@ -2644,7 +2644,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "                      Console verbosity (default: info)\n";
                 std::cout << "  --log-category <list>  Comma list: operator,audio,tnc,modem,demod,sync,ldpc,channel,all\n";
                 std::cout << "  --log-file <PATH>      Write logs to file instead of stderr\n";
-                std::cout << "  --verify-snr           Probe configured broadband SNR and fail if error exceeds +/-2 dB\n";
+                std::cout << "  --verify-snr           Probe configured in-band SNR and fail if error exceeds +/-2 dB\n";
                 std::cout << "  --ota-host HOST:PORT   Use existing ota_simulator serve instead of self-spawn\n";
                 std::cout << "  --ota-session ID       OTASim session id (default: lobby)\n";
                 std::cout << "  --ota-alpha-token T    Token for ALPHA (default: alpha_token)\n";

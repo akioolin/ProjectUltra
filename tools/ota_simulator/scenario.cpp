@@ -323,6 +323,13 @@ ChannelConfig parseChannel(const std::string& object) {
     if (auto snr = json::numberValue(object, "snr_db")) {
         channel.snr_db = *snr;
     }
+    if (auto seed = json::numberValue(object, "seed")) {
+        if (*seed < 0.0 || std::floor(*seed) != *seed ||
+            *seed > static_cast<double>(std::numeric_limits<uint64_t>::max())) {
+            throw std::runtime_error("channel.seed must be a non-negative integer");
+        }
+        channel.seed = static_cast<uint64_t>(*seed);
+    }
     if (auto fading = json::stringValue(object, "fading")) {
         channel.channel_type = cli::requireChannelType(*fading);
     }

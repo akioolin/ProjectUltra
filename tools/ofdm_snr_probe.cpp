@@ -190,10 +190,10 @@ struct ProbeResult {
     bool success = false;
     int cw_ok = 0;
     int cw_failed = 0;
-    float sync_snr_db = 0.0f;
-    bool has_pilot_snr = false;
-    float pilot_snr_db = 0.0f;
-    float lts_snr_db = 0.0f;
+    float sync_quality_db = 0.0f;
+    bool has_ofdm_broadband_snr = false;
+    float ofdm_broadband_snr_db = 0.0f;
+    float ofdm_internal_snr_db = 0.0f;
     float fading_index = 0.0f;
 };
 
@@ -205,8 +205,8 @@ ProbeResult decodeProbe(const Args& args, const ModemConfig& cfg,
     sync_waveform.configure(args.mod, args.rate);
     ultra::SyncResult sync;
     if (sync_waveform.detectDataSync(SampleSpan(rx.data(), rx.size()), sync, 0.0f, 0.3f)) {
-        result.sync_snr_db = std::clamp((sync.correlation - 0.15f) / 0.03f,
-                                        -5.0f, 30.0f);
+        result.sync_quality_db = std::clamp((sync.correlation - 0.15f) / 0.03f,
+                                            -5.0f, 30.0f);
     }
 
     if (tx.signal_start + tx.frame_samples > rx.size()) {
@@ -221,9 +221,9 @@ ProbeResult decodeProbe(const Args& args, const ModemConfig& cfg,
     const bool ready = rx_waveform.process(
         SampleSpan(rx.data() + tx.signal_start, tx.frame_samples));
     result.got_result = ready;
-    result.lts_snr_db = rx_waveform.estimatedSNR();
-    result.has_pilot_snr = rx_waveform.hasLastSNREstimate();
-    result.pilot_snr_db = rx_waveform.getLastSNREstimate();
+    result.ofdm_internal_snr_db = rx_waveform.estimatedSNR();
+    result.has_ofdm_broadband_snr = rx_waveform.hasLastOFDMBroadbandSNREstimate();
+    result.ofdm_broadband_snr_db = rx_waveform.getLastOFDMBroadbandSNREstimate();
     result.fading_index = rx_waveform.getFadingIndex();
 
     std::vector<float> soft_bits = rx_waveform.getSoftBits();
@@ -263,7 +263,7 @@ int main(int argc, char** argv) {
     const ProbeResult r = decodeProbe(args, cfg, tx, rx);
     if (args.header) {
         std::cout << "channel,configured_snr,mod,rate,cw_count,success,cw_ok,cw_failed,"
-                  << "sync_snr_db,pilot_snr_db,lts_snr_db,fading_index\n";
+                  << "sync_quality_db,ofdm_broadband_snr_db,ofdm_internal_snr_db,fading_index\n";
     }
     std::cout << channelName(args.channel) << ","
               << std::fixed << std::setprecision(2)
@@ -274,9 +274,9 @@ int main(int argc, char** argv) {
               << (r.success ? 1 : 0) << ","
               << r.cw_ok << ","
               << r.cw_failed << ","
-              << r.sync_snr_db << ","
-              << (r.has_pilot_snr ? r.pilot_snr_db : 0.0f) << ","
-              << r.lts_snr_db << ","
+              << r.sync_quality_db << ","
+              << (r.has_ofdm_broadband_snr ? r.ofdm_broadband_snr_db : 0.0f) << ","
+              << r.ofdm_internal_snr_db << ","
               << r.fading_index << "\n";
 
     return r.got_result ? 0 : 2;

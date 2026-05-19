@@ -64,6 +64,10 @@ public:
         return engine_.getMeasuredSNR();
     }
 
+    SNRSource getMeasuredSNRSource() const override {
+        return engine_.getMeasuredSNRSource();
+    }
+
     protocol::WaveformMode getNegotiatedMode() const override {
         return engine_.getNegotiatedMode();
     }
@@ -335,6 +339,7 @@ ModemStats TNCBridge::getStats() const {
     out.modulation = modulationToString(engine_.getDataModulation());
     out.waveform = protocol::waveformModeToString(engine_.getNegotiatedMode());
     out.snr_db = getCurrentSNR_db();
+    out.snr_source = snrSourceToString(engine_.getMeasuredSNRSource());
     out.bitrate_bps = getCurrentBitrate_bps();
     out.tx_backlog_bytes = getTxBacklogBytes();
     return out;

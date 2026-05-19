@@ -16,6 +16,39 @@ using Symbol = std::vector<Complex>;           // One OFDM symbol
 using Samples = std::vector<Sample>;           // Audio buffer
 using Bytes = std::vector<uint8_t>;            // Data payload
 
+// Provenance for consumer-facing snr_db values. Historical string tokens remain
+// stable, but operator/rate-selection physical SNR producers now report the
+// shared receiver in-band convention.
+enum class SNRSource : uint8_t {
+    NONE = 0,
+    IDLE_IN_BAND,     // IdleNoiseSNREstimator, receiver passband/in-band SNR.
+    OFDM_BROADBAND,   // Historical name; OFDM LTS/pilot residual in-band SNR.
+    OFDM_INTERNAL,    // Demodulator internal LLR/channel-quality SNR scale.
+    SYNC_QUALITY,     // Chirp correlation confidence score, not physical SNR.
+};
+
+inline const char* snrSourceToString(SNRSource source) {
+    switch (source) {
+        case SNRSource::IDLE_IN_BAND:   return "idle_in_band";
+        case SNRSource::OFDM_BROADBAND: return "ofdm_broadband";
+        case SNRSource::OFDM_INTERNAL:  return "ofdm_internal";
+        case SNRSource::SYNC_QUALITY:   return "sync_quality";
+        case SNRSource::NONE:
+        default:                        return "none";
+    }
+}
+
+inline const char* snrSourceDisplayLabel(SNRSource source) {
+    switch (source) {
+        case SNRSource::IDLE_IN_BAND:   return "in-band SNR";
+        case SNRSource::OFDM_BROADBAND: return "OFDM in-band SNR";
+        case SNRSource::OFDM_INTERNAL:  return "OFDM internal SNR";
+        case SNRSource::SYNC_QUALITY:   return "sync quality";
+        case SNRSource::NONE:
+        default:                        return "no SNR";
+    }
+}
+
 // Spans for zero-copy operations
 using SampleSpan = std::span<const Sample>;
 using ByteSpan = std::span<const uint8_t>;
@@ -419,7 +452,7 @@ inline ModemConfig high_throughput() {
     return cfg;
 }
 
-// High-speed mode for good conditions (15+ dB SNR)
+// High-speed mode for good conditions (25+ dB in-band SNR)
 // Uses DQPSK R3/4 for higher throughput with default 1024 FFT / 59 carriers
 inline ModemConfig high_speed() {
     ModemConfig cfg;  // Inherits 1024 FFT, 59 carriers, DQPSK, no pilots
@@ -431,7 +464,7 @@ inline ModemConfig high_speed() {
 
 // Narrowband OFDM: 500 Hz bandwidth, FFT=2048, 21 carriers
 // 7.5 dB noise bandwidth advantage over wideband (2.8 kHz)
-// For low-SNR conditions (3-10 dB) where wideband doesn't work
+// For low-SNR conditions (~13-20 dB in-band) where wideband doesn't work
 inline ModemConfig narrowbandOFDM() {
     ModemConfig cfg;
     cfg.fft_size = 2048;                    // 23.4 Hz bin spacing

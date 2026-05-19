@@ -131,10 +131,10 @@ void test_channel_report_and_quantizers() {
         assert(decoded.recommended_mode == WaveformMode::OFDM_CHIRP);
         assert(decoded.capabilities == report.capabilities);
 
-        ChannelReport excellent{30.0f, 0.5f, 0.5f, WaveformMode::OFDM_COX, ModeCapabilities::ALL};
-        ChannelReport good{20.0f, 1.5f, 1.5f, WaveformMode::OFDM_CHIRP, ModeCapabilities::ALL};
-        ChannelReport moderate{12.0f, 5.0f, 5.0f, WaveformMode::OFDM_CHIRP, ModeCapabilities::ALL};
-        ChannelReport poor{4.0f, 5.0f, 5.0f, WaveformMode::MC_DPSK, ModeCapabilities::ALL};
+        ChannelReport excellent{35.0f, 0.5f, 0.5f, WaveformMode::OFDM_COX, ModeCapabilities::ALL};
+        ChannelReport good{28.0f, 1.5f, 1.5f, WaveformMode::OFDM_CHIRP, ModeCapabilities::ALL};
+        ChannelReport moderate{20.0f, 5.0f, 5.0f, WaveformMode::OFDM_CHIRP, ModeCapabilities::ALL};
+        ChannelReport poor{13.0f, 5.0f, 5.0f, WaveformMode::MC_DPSK, ModeCapabilities::ALL};
         ChannelReport flutter{0.0f, 5.0f, 5.0f, WaveformMode::MC_DPSK, ModeCapabilities::ALL};
         assert(std::strcmp(excellent.getConditionName(), "Excellent") == 0);
         assert(std::strcmp(good.getConditionName(), "Good") == 0);

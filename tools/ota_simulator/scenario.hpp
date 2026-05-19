@@ -4,6 +4,7 @@
 #include "protocol/frame_v2.hpp"
 #include "sim/cli_enums.hpp"
 
+#include <cstdint>
 #include <cstddef>
 #include <optional>
 #include <map>
@@ -37,6 +38,7 @@ struct NoiseBedConfig {
 struct ChannelConfig {
     std::optional<NoiseBedConfig> noise_bed;
     std::optional<double> snr_db;
+    std::optional<uint64_t> seed;
     std::optional<ChannelType> channel_type;
     std::optional<protocol::WaveformMode> force_connected_waveform;
 };

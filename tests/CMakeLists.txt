@@ -355,6 +355,13 @@ target_include_directories(test_streaming_signal_policy PRIVATE
 target_link_libraries(test_streaming_signal_policy PRIVATE ultra_core)
 add_test(NAME StreamingSignalPolicy COMMAND test_streaming_signal_policy)
 
+add_executable(test_snr_source_routing test_snr_source_routing.cpp)
+target_include_directories(test_snr_source_routing PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+target_link_libraries(test_snr_source_routing PRIVATE ultra_core)
+add_test(NAME SNRSourceRouting COMMAND test_snr_source_routing)
+
 # Current streaming MC-DPSK encode/decode loopback.
 add_executable(test_streaming_mc_dpsk
     test_streaming_mc_dpsk.cpp
@@ -536,12 +543,22 @@ if(TARGET ota_simulator)
         RUN_SERIAL TRUE
         LABELS regression)
 
+    add_test(NAME OTASimulatorTwoEndpointMCDPSKLowSNR
+        COMMAND $<TARGET_FILE:ota_simulator> run
+                --scenario tests/fixtures/ota_simulator/two_endpoint_mcdpsk_low_snr_qso.json)
+    set_tests_properties(OTASimulatorTwoEndpointMCDPSKLowSNR PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        TIMEOUT 150
+        RUN_SERIAL TRUE
+        LABELS regression)
+
     add_test(NAME OTASimulatorFileTransferSNR15
         COMMAND $<TARGET_FILE:ota_simulator> run
                 --scenario tests/fixtures/ota_simulator/two_endpoint_file_transfer_snr15.json)
     set_tests_properties(OTASimulatorFileTransferSNR15 PROPERTIES
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         TIMEOUT 320
+        RUN_SERIAL TRUE
         LABELS regression)
 endif()
 
@@ -612,6 +629,7 @@ ultra_enable_test_warnings(
     test_streaming_frame_policy.cpp
     test_ping_detector.cpp
     test_streaming_signal_policy.cpp
+    test_snr_source_routing.cpp
     test_streaming_mc_dpsk.cpp
     test_channel_snr_calibration.cpp
     test_modem_snr_meter_calibration.cpp

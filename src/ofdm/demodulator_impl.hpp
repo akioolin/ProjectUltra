@@ -63,9 +63,9 @@ struct OFDMDemodulator::Impl {
     float snr_alpha = 0.3f;
     int snr_symbol_count = 0;
 
-    // Measurement-quality broadband SNR estimate for operator display and
-    // future adaptation. Valid only after OFDM LTS/pilot residuals have been
-    // measured; unlike estimated_snr_linear, this must not feed LLR scaling.
+    // Measurement-quality in-band SNR estimate for operator display and future
+    // adaptation. Valid only after OFDM LTS/pilot residuals have been measured;
+    // unlike estimated_snr_linear, this must not feed LLR scaling.
     bool last_snr_db_estimate_valid = false;
     float last_snr_db_estimate = 0.0f;
 

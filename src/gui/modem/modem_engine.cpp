@@ -20,6 +20,17 @@ Modulation mcDpskModulationForConfig(const MultiCarrierDPSKConfig& config) {
     if (config.bits_per_symbol == 3) return Modulation::D8PSK;
     return Modulation::DQPSK;
 }
+
+void copySNRMetrics(LoopbackStats& stats, const DecodeResult& result) {
+    stats.snr_db = result.snr_db;
+    stats.snr_source = result.snr_source;
+    stats.has_idle_in_band_snr_db = result.has_idle_in_band_snr_db;
+    stats.idle_in_band_snr_db = result.idle_in_band_snr_db;
+    stats.has_ofdm_broadband_snr_db = result.has_ofdm_broadband_snr_db;
+    stats.ofdm_broadband_snr_db = result.ofdm_broadband_snr_db;
+    stats.ofdm_internal_snr_db = result.ofdm_internal_snr_db;
+    stats.sync_quality_db = result.sync_quality_db;
+}
 }
 
 ModemEngine::ModemEngine()
@@ -92,7 +103,7 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
         // Update SNR/sync stats before delivering frame so downstream callbacks
         // (ProtocolEngine via raw_data_callback_) read fresh channel estimates.
         updateStats([&](LoopbackStats& s) {
-            s.snr_db = result.snr_db;
+            copySNRMetrics(s, result);
             s.synced = result.success;
         });
 
@@ -100,9 +111,11 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
             char fields[256];
             std::snprintf(fields, sizeof(fields),
                           "{\"snr_db\":%.1f,\"cfo_hz\":%.1f,"
-                          "\"cw_ok\":%d,\"cw_failed\":%d}",
+                          "\"cw_ok\":%d,\"cw_failed\":%d,"
+                          "\"snr_source\":\"%s\"}",
                           result.snr_db, result.cfo_hz,
-                          result.codewords_ok, result.codewords_failed);
+                          result.codewords_ok, result.codewords_failed,
+                          snrSourceToString(result.snr_source));
             ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
                 "phy", "frame.rx", fields);
             deliverFrame(result.frame_data);
@@ -110,8 +123,10 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
         } else if (!result.success && result.codewords_failed > 0) {
             char fields[192];
             std::snprintf(fields, sizeof(fields),
-                          "{\"cw_ok\":%d,\"cw_failed\":%d,\"snr_db\":%.1f}",
-                          result.codewords_ok, result.codewords_failed, result.snr_db);
+                          "{\"cw_ok\":%d,\"cw_failed\":%d,\"snr_db\":%.1f,"
+                          "\"snr_source\":\"%s\"}",
+                          result.codewords_ok, result.codewords_failed, result.snr_db,
+                          snrSourceToString(result.snr_source));
             ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
                 "phy", "decode.fail", fields);
         }
@@ -144,6 +159,8 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
         updateStats([&](LoopbackStats& s) {
             s.frames_received++;
             s.snr_db = snr_db;
+            s.snr_source = SNRSource::SYNC_QUALITY;
+            s.sync_quality_db = snr_db;
             s.synced = true;
         });
         last_rx_complete_time_ = std::chrono::steady_clock::now();

@@ -312,10 +312,11 @@ bool OFDMDemodulator::process(SampleSpan samples) {
         if (symbols_processed > 0) {
             float snr_db = (impl_->estimated_snr_linear > 0)
                 ? 10.0f * std::log10(impl_->estimated_snr_linear) : 0.0f;
-            LOG_DEMOD(INFO, "Processed %zu symbols, soft_bits=%zu (+%zu), SNR=%.1f dB, CFO=%.1f Hz",
+            LOG_DEMOD(INFO, "Processed %zu symbols, soft_bits=%zu (+%zu), SNR=%.1f dB (%s), CFO=%.1f Hz",
                       symbols_processed, impl_->soft_bits.size(),
                       impl_->soft_bits.size() - soft_bits_before,
-                      snr_db, impl_->freq_offset_hz);
+                      snr_db, snrSourceToString(SNRSource::OFDM_INTERNAL),
+                      impl_->freq_offset_hz);
         }
 
         // Track idle calls
@@ -411,11 +412,11 @@ float OFDMDemodulator::getEstimatedSNR() const {
     return 10.0f * std::log10(impl_->estimated_snr_linear);
 }
 
-bool OFDMDemodulator::hasLastSNREstimate() const {
+bool OFDMDemodulator::hasLastOFDMBroadbandSNREstimate() const {
     return impl_->last_snr_db_estimate_valid;
 }
 
-float OFDMDemodulator::getLastSNREstimate() const {
+float OFDMDemodulator::getLastOFDMBroadbandSNREstimate() const {
     return impl_->last_snr_db_estimate;
 }
 

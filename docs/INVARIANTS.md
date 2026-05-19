@@ -19,10 +19,12 @@ returned sample when the channel is explicitly configured as `ChannelType::AWGN`
 Noise must not depend on whether a peer TX buffer has audio, silence, or no
 samples. Do not add synthetic AWGN on both TX and RX.
 
-**Reference:** AWGN standard deviation is computed from the fixed modem TX
-reference RMS measured from `StreamingEncoder::encodePing()` output
-(`0.3180724` on 2026-05-14), so configured `snr_db` means TX reference power
-relative to continuous broadband noise power.
+**Reference:** AWGN standard deviation is computed from the fixed modem PING
+reference measured from `StreamingEncoder::encodePing()` output: broadband RMS
+`0.3180724`, then receiver-FIR in-band RMS `0.30482664`. Configured `snr_db` is
+operator-facing in-band SNR: the generated broadband white-noise sigma is
+increased by `1 / sqrt(kModemInBandNoisePowerFraction)` so the 50-2950 Hz
+receive FIR leaves the requested in-band noise power.
 
 **Why:** Real HF receivers hear band noise continuously. A simulator that is
 quiet between bursts lets sync, PING detection, SNR estimation, and decode

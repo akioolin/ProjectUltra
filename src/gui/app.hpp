@@ -229,7 +229,7 @@ private:
     void sendMessage();
     void onDataReceived(const std::string& text);
     void resetAdaptiveAdvisory();
-    void updateAdaptiveAdvisory(float snr_db, float fading_index);
+    void updateAdaptiveAdvisory(float snr_db, float fading_index, SNRSource snr_source);
     bool startRadioRx();
     void stopRadioRx();
     void pollRadioRx();

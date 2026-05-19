@@ -101,13 +101,13 @@ ChannelReport ChannelReport::decode(const Bytes& data) {
 }
 
 const char* ChannelReport::getConditionName() const {
-    if (snr_db >= 25.0f && delay_spread_ms < 1.0f && doppler_spread_hz < 1.0f) {
+    if (snr_db >= 35.0f && delay_spread_ms < 1.0f && doppler_spread_hz < 1.0f) {
         return "Excellent";
-    } else if (snr_db >= 18.0f && delay_spread_ms < 2.0f && doppler_spread_hz < 2.0f) {
+    } else if (snr_db >= 28.0f && delay_spread_ms < 2.0f && doppler_spread_hz < 2.0f) {
         return "Good";
-    } else if (snr_db >= 10.0f) {
+    } else if (snr_db >= 20.0f) {
         return "Moderate";
-    } else if (snr_db >= 3.0f) {
+    } else if (snr_db >= 13.0f) {
         return "Poor";
     } else {
         return "Flutter";

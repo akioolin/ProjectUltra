@@ -162,13 +162,14 @@ public:
     // Does demodulator have data ready?
     virtual bool hasData() const = 0;
 
-    // Estimated SNR from current signal (dB)
+    // Demodulator-internal SNR scale from the current signal (dB).
     virtual float estimatedSNR() const = 0;
 
-    // Measurement-quality broadband SNR from OFDM pilot/LTS residuals.
-    // Non-OFDM waveforms return false and keep their chirp-derived SNR path.
-    virtual bool hasLastSNREstimate() const { return false; }
-    virtual float getLastSNREstimate() const { return 0.0f; }
+    // Measurement-quality in-band SNR from OFDM pilot/LTS residuals. The
+    // accessor name is historical. Non-OFDM waveforms return false and keep
+    // their chirp-derived SNR path.
+    virtual bool hasLastOFDMBroadbandSNREstimate() const { return false; }
+    virtual float getLastOFDMBroadbandSNREstimate() const { return 0.0f; }
 
     // Estimated CFO from current signal (Hz)
     virtual float estimatedCFO() const = 0;

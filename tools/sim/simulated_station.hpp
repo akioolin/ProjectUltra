@@ -216,6 +216,7 @@ public:
 
         ofdm_config_preset_ = ofdm_config_preset;
         mc_dpsk_config_ = mc_dpsk_config;
+        control_mc_dpsk_config_ = mc_dpsk_config;
         protocol_.setLocalCallsign(callsign);
         protocol_.setAutoAccept(true);
         protocol_.setMCDPSKConfig(mc_dpsk_config_.num_carriers,
@@ -307,6 +308,7 @@ public:
     void setForcedCodeRate(CodeRate rate) { protocol_.setForcedCodeRate(rate); }
     void setMCDPSKConfig(const MultiCarrierDPSKConfig& config) {
         mc_dpsk_config_ = config;
+        control_mc_dpsk_config_ = config;
         data_modulation_ = mcDpskModulationForConfig(mc_dpsk_config_);
         protocol_.setMCDPSKConfig(mc_dpsk_config_.num_carriers,
                                   mc_dpsk_config_.samples_per_symbol);
@@ -487,6 +489,7 @@ private:
     Modulation data_modulation_ = Modulation::DQPSK;
     CodeRate data_code_rate_ = CodeRate::R1_4;
     MultiCarrierDPSKConfig mc_dpsk_config_ = mc_dpsk_presets::robust_mid();
+    MultiCarrierDPSKConfig control_mc_dpsk_config_ = mc_dpsk_presets::robust_mid();
 
     // Protocol engine
     ProtocolEngine protocol_{ConnectionConfig{}};
@@ -1006,11 +1009,14 @@ private:
         // Temporarily switch encoder mode for handshake frames
         auto saved_mode = encoder_->getMode();
         auto saved_rate = encoder_->getCodeRate();
+        auto saved_mc_dpsk_config = mc_dpsk_config_;
 
         if (is_handshake_frame) {
-            // Handshake frames always use MC-DPSK R1/4
+            // Handshake frames must use the cold-call control profile until the
+            // initiator has decoded CONNECT_ACK and can switch to DATA mode.
+            encoder_->setMCDPSKConfig(control_mc_dpsk_config_);
             encoder_->setMode(WaveformMode::MC_DPSK);
-            encoder_->setDataMode(mcDpskModulationForConfig(mc_dpsk_config_), CodeRate::R1_4);
+            encoder_->setDataMode(mcDpskModulationForConfig(control_mc_dpsk_config_), CodeRate::R1_4);
         }
 
         // Encode frame using the encoder
@@ -1036,6 +1042,7 @@ private:
 
         // Restore encoder mode if we changed it
         if (is_handshake_frame) {
+            encoder_->setMCDPSKConfig(saved_mc_dpsk_config);
             encoder_->setMode(saved_mode);
             encoder_->setDataMode(data_modulation_, saved_rate);
         }

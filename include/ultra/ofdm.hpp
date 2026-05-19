@@ -79,14 +79,15 @@ public:
     // Get current channel estimate
     ChannelQuality getChannelQuality() const;
 
-    // Get estimated SNR in dB (from pilot measurements)
+    // Get estimated SNR in dB on the demodulator's internal LLR scale.
     float getEstimatedSNR() const;
 
-    // Get the last broadband SNR estimate derived from OFDM pilot/LTS
-    // residuals. This is separate from getEstimatedSNR(), which remains the
-    // demodulator's internal per-carrier quality value for LLR scaling.
-    bool hasLastSNREstimate() const;
-    float getLastSNREstimate() const;
+    // Get the last in-band SNR estimate derived from OFDM pilot/LTS residuals.
+    // The accessor name is historical. This is separate from getEstimatedSNR(),
+    // which remains the demodulator's internal per-carrier quality value for
+    // LLR scaling.
+    bool hasLastOFDMBroadbandSNREstimate() const;
+    float getLastOFDMBroadbandSNREstimate() const;
 
     // Get estimated frequency offset in Hz (from pilot phase tracking)
     float getFrequencyOffset() const;

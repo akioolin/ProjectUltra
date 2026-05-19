@@ -275,8 +275,8 @@ void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
 protocol::WaveformMode ModemEngine::recommendWaveformMode(float snr_db) {
     // Legacy SNR-only selection (use recommendWaveformAndRate for better results)
     // DPSK works down to -11 dB SNR (tested), so we use it for low SNR
-    // OFDM requires ~17 dB for reliable sync detection
-    if (snr_db < 17.0f) {
+    // OFDM requires ~27 dB on the unified in-band meter for reliable sync detection
+    if (snr_db < 27.0f) {
         return protocol::WaveformMode::MC_DPSK;
     } else {
         return protocol::WaveformMode::OFDM_COX;
@@ -286,8 +286,8 @@ protocol::WaveformMode ModemEngine::recommendWaveformMode(float snr_db) {
 ModemEngine::WaveformRecommendation ModemEngine::recommendWaveformAndRate(float snr_db, float fading_index) {
     // Delegate to shared algorithm in protocol namespace
     auto rec = protocol::recommendWaveformAndRate(snr_db, fading_index);
-    LOG_MODEM(DEBUG, "recommendWaveformAndRate: SNR=%.1f, fading=%.2f -> %s %s (%.0f bps)",
-              snr_db, fading_index,
+    LOG_MODEM(DEBUG, "recommendWaveformAndRate: SNR=%.1f (%s), fading=%.2f -> %s %s (%.0f bps)",
+              snr_db, snrSourceToString(SNRSource::NONE), fading_index,
               protocol::waveformModeToString(rec.waveform),
               codeRateToString(rec.rate),
               rec.estimated_throughput_bps);
@@ -331,14 +331,14 @@ void ModemEngine::setCodecType(fec::CodecType type) {
 
 fec::CodecType ModemEngine::recommendCodecType(float snr_db) {
     // Codec selection based on SNR:
-    // - LDPC: Works well at moderate-high SNR (>5 dB), steep waterfall curve
-    // - Convolutional: Better at very low SNR (<5 dB), graceful degradation
+    // - LDPC: Works well at moderate-high in-band SNR (>15 dB), steep waterfall curve
+    // - Convolutional: Better at very low in-band SNR (<15 dB), graceful degradation
     // - Turbo: Excellent near Shannon limit, but high latency
     //
     // For now, always use LDPC since it's the only implemented codec.
-    // When convolutional codec is implemented, use it for SNR < 5 dB.
+    // When convolutional codec is implemented, use it for in-band SNR < 15 dB.
 
-    if (snr_db < 5.0f) {
+    if (snr_db < 15.0f) {
         // Low SNR: Would prefer convolutional, but LDPC is all we have
         // return fec::CodecType::CONVOLUTIONAL;  // Future
         return fec::CodecType::LDPC;
@@ -371,9 +371,11 @@ fec::CodecType ModemEngine::getCodecForWaveform(protocol::WaveformMode mode) {
 }
 
 int ModemEngine::recommendMCDPSKCarriers(float snr_db, float fading_index) {
-    // MC-DPSK is used for SNR 0-10 dB range (above 10 dB switches to OFDM)
+    // MC-DPSK is used for roughly in-band SNR 10-20 dB range
+    // (above 20 dB switches to OFDM)
     // Testing with 20Hz CFO shows 8 carriers is optimal for this range:
-    //   - 8 carriers: 100% at SNR 5, moderate fading, 20Hz CFO
+    //   - 8 carriers: 100% at legacy SNR 5 (about 15 dB in-band),
+    //     moderate fading, 20Hz CFO
     //   - 9+ carriers: 40-60% at same conditions
     //
     // Always use 8 carriers for MC-DPSK - it's the most robust choice

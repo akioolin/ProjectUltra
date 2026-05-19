@@ -23,6 +23,7 @@ struct ModemStats {
     std::string modulation;     // e.g. "DQPSK"
     std::string waveform;       // e.g. "OFDM_CHIRP", "MC_DPSK"
     int snr_db = 0;
+    std::string snr_source;      // e.g. "ofdm_broadband", "idle_in_band"
     int bitrate_bps = 0;
     int tx_backlog_bytes = 0;
 };

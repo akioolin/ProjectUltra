@@ -31,7 +31,7 @@ void OFDMDemodulator::Impl::updateLastSNREstimate(float signal_power,
     // noise proxy, so the caller can keep the LTS residual and reference it to
     // the calibrated broadband noise floor instead.
     //
-    // Absolute broadband-SNR calibration derivation (Phase 1):
+    // Absolute SNR calibration derivation:
     //
     //   TX mapping in src/ofdm/modulator.cpp:
     //     - data, LTS, and pilots are unit-magnitude complex subcarrier symbols
@@ -42,12 +42,16 @@ void OFDMDemodulator::Impl::updateLastSNREstimate(float signal_power,
     //       carry output_scale/2, but that signal factor cancels in the LS
     //       residual R_k / X_k used here.
     //
-    //   AWGN reference:
-    //     - SimulatedChannel sizes real white audio noise as
+    //   AWGN broadband reference:
+    //     - SimulatedChannel sizes real white audio noise from the calibrated
+    //       in-band PING reference:
     //       sigma^2 = kModemReferencePower / SNR_broadband.
     //     - after downconversion, an unnormalized N-point FFT gives each active
     //       complex bin noise power N * sigma^2.
     //     - therefore SNR_broadband = N * kModemReferencePower / noise_bin.
+    //     - operator/rate-selection SNR is in-band, matching the idle-noise
+    //       estimator. For white noise, in-band noise is the 50-2950 Hz FIR
+    //       output power, so SNR_in_band = SNR_broadband / FIR_energy.
     //
     //   Two-LTS residual normalization:
     //     - estimateChannelFromLTS() forms noise_power = E|H1 - H0|^2 / 4.
@@ -67,29 +71,32 @@ void OFDMDemodulator::Impl::updateLastSNREstimate(float signal_power,
         const float broadband_snr_db = 10.0f * std::log10(
             static_cast<float>(config.fft_size * sim::kModemReferencePower) /
             std::max(corrected_noise_power, 1.0e-12f));
+        const float in_band_snr_db =
+            sim::broadbandToInBandSnrDb(broadband_snr_db);
 
-        if (!std::isfinite(broadband_snr_db)) {
+        if (!std::isfinite(in_band_snr_db)) {
             return;
         }
 
         if (!last_snr_db_estimate_valid) {
-            last_snr_db_estimate = broadband_snr_db;
+            last_snr_db_estimate = in_band_snr_db;
             last_snr_db_estimate_valid = true;
         } else {
             const float a = std::clamp(alpha, 0.0f, 1.0f);
             last_snr_db_estimate =
-                a * broadband_snr_db + (1.0f - a) * last_snr_db_estimate;
+                a * in_band_snr_db + (1.0f - a) * last_snr_db_estimate;
         }
         return;
     }
 
-    // signal/noise is a frequency-bin SNR. Convert it to the modem's calibrated
-    // broadband-audio SNR reference:
+    // signal/noise is a frequency-bin SNR. Convert it through the modem's
+    // calibrated broadband-audio reference and then to the shared in-band
+    // operator/rate-selection SNR convention:
     //
     //   TX real passband carrier amplitude at the FFT bin is output_scale/2.
     //   White audio noise is integrated by the N-point FFT.
-    //   The configured/reference SNR uses kModemReferencePower over the full
-    //   OFDM symbol duration including CP.
+    //   The configured/reference SNR uses the calibrated in-band PING reference
+    //   over the full OFDM symbol duration including CP.
     //
     // This subtracts OFDM measurement gain while retaining true signal fades in
     // signal_power. Averaging bins reduces estimator variance; it is not RF
@@ -118,8 +125,10 @@ void OFDMDemodulator::Impl::updateLastSNREstimate(float signal_power,
 
     const float broadband_snr_db =
         snr_per_carrier_db - 10.0f * std::log10(static_cast<float>(measurement_gain));
+    const float in_band_snr_db =
+        sim::broadbandToInBandSnrDb(broadband_snr_db);
 
-    if (!std::isfinite(broadband_snr_db)) {
+    if (!std::isfinite(in_band_snr_db)) {
         return;
     }
 
@@ -127,17 +136,17 @@ void OFDMDemodulator::Impl::updateLastSNREstimate(float signal_power,
     // the magnitude-variance gate says "near AWGN". Do not let that path
     // overrule the same-frame LTS noise estimate with a large downward jump.
     if (fitted_common_gain && last_snr_db_estimate_valid &&
-        broadband_snr_db < last_snr_db_estimate - 3.0f) {
+        in_band_snr_db < last_snr_db_estimate - 3.0f) {
         return;
     }
 
     if (!last_snr_db_estimate_valid) {
-        last_snr_db_estimate = broadband_snr_db;
+        last_snr_db_estimate = in_band_snr_db;
         last_snr_db_estimate_valid = true;
     } else {
         const float a = std::clamp(alpha, 0.0f, 1.0f);
         last_snr_db_estimate =
-            a * broadband_snr_db + (1.0f - a) * last_snr_db_estimate;
+            a * in_band_snr_db + (1.0f - a) * last_snr_db_estimate;
     }
 }
 
@@ -486,7 +495,7 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
                                   static_cast<size_t>(count), 1.0f,
                                   false, true, meter_noise_reference_scale);
 
-            LOG_DEMOD(INFO, "LTS SNR estimate: internal=%.1f dB broadband=%.1f dB "
+            LOG_DEMOD(INFO, "LTS SNR estimate: internal=%.1f dB in_band=%.1f dB "
                       "(measured noise_var=%.6f, meter_noise=%.6f source=%s, signal=%.4f)",
                       10.0f * std::log10(estimated_snr_linear),
                       last_snr_db_estimate_valid ? last_snr_db_estimate : 0.0f,
@@ -650,7 +659,7 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
         h_mag_var /= data_carrier_indices.size();
 
         last_fading_index = (h_mag_mean > 0.01f) ? std::sqrt(h_mag_var) / h_mag_mean : 0.0f;
-        LOG_DEMOD(INFO, "LTS fading index: %.3f broadband_snr=%.1f dB "
+        LOG_DEMOD(INFO, "LTS fading index: %.3f in_band_snr=%.1f dB "
                   "(threshold: LLR>0.15, two-pass>0.30)",
                   last_fading_index,
                   last_snr_db_estimate_valid ? last_snr_db_estimate : 0.0f);

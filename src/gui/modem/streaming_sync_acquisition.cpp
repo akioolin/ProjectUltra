@@ -74,42 +74,54 @@ float StreamingDecoder::applyCFOPreCorrection(std::vector<float>& samples, float
 void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
                                              float residual_cfo_hz) const {
     result.sync_correlation = sync_correlation_;
+    result.sync_quality_db = result.snr_db;
+    const auto idle_snr = idle_noise_snr_estimator_.snapshot();
+    result.has_idle_in_band_snr_db =
+        idle_snr.valid && std::isfinite(idle_snr.idle_in_band_snr_db);
+    result.idle_in_band_snr_db = idle_snr.idle_in_band_snr_db;
+
     if (is_ofdm && waveform_) {
-        const float chirp_snr_db = result.snr_db;
-        result.lts_snr_db = waveform_->estimatedSNR();
-        result.has_pilot_snr_db = waveform_->hasLastSNREstimate();
-        result.pilot_snr_db = waveform_->getLastSNREstimate();
+        result.ofdm_internal_snr_db = waveform_->estimatedSNR();
+        result.has_ofdm_broadband_snr_db = waveform_->hasLastOFDMBroadbandSNREstimate();
+        result.ofdm_broadband_snr_db = waveform_->getLastOFDMBroadbandSNREstimate();
         result.lts_fading_index = waveform_->getFadingIndex();
         result.lts_residual_cfo_hz = waveform_->getLastLTSResidualCFOHz();
-        if (result.has_pilot_snr_db) {
-            result.snr_db = result.pilot_snr_db;
-            last_snr_db_estimate_valid_.store(true);
-            last_snr_db_estimate_.store(result.pilot_snr_db);
+        result.snr_source = SNRSource::SYNC_QUALITY;
+        if (result.has_ofdm_broadband_snr_db) {
+            result.snr_db = result.ofdm_broadband_snr_db;
+            result.snr_source = SNRSource::OFDM_BROADBAND;
+            last_ofdm_broadband_snr_db_valid_.store(true);
+            last_ofdm_broadband_snr_db_.store(result.ofdm_broadband_snr_db);
         }
-        LOG_MODEM(DEBUG, "[%s] OFDM quality: chirp_snr=%.1f dB "
-                  "pilot_snr=%s%.1f dB lts_snr=%.1f dB fading=%.3f",
-                  log_prefix_.c_str(), chirp_snr_db,
-                  result.has_pilot_snr_db ? "" : "unavailable/",
-                  result.pilot_snr_db, result.lts_snr_db,
+        LOG_MODEM(DEBUG, "[%s] OFDM quality: sync_quality=%.1f dB "
+                  "ofdm_broadband=%s%.1f dB ofdm_internal=%.1f dB "
+                  "idle_in_band=%s%.1f dB routed_snr=%.1f dB (%s) fading=%.3f",
+                  log_prefix_.c_str(), result.sync_quality_db,
+                  result.has_ofdm_broadband_snr_db ? "" : "unavailable/",
+                  result.ofdm_broadband_snr_db, result.ofdm_internal_snr_db,
+                  result.has_idle_in_band_snr_db ? "" : "unavailable/",
+                  result.idle_in_band_snr_db, result.snr_db,
+                  snrSourceToString(result.snr_source),
                   result.lts_fading_index);
     } else {
-        const float chirp_snr_db = result.snr_db;
-        const auto idle_snr = idle_noise_snr_estimator_.snapshot();
-        if (idle_snr.valid && std::isfinite(idle_snr.snr_db)) {
-            result.snr_db = idle_snr.snr_db;
+        result.snr_source = SNRSource::SYNC_QUALITY;
+        if (result.has_idle_in_band_snr_db) {
+            result.snr_db = result.idle_in_band_snr_db;
+            result.snr_source = SNRSource::IDLE_IN_BAND;
         }
-        result.lts_snr_db = chirp_snr_db;
-        result.has_pilot_snr_db = false;
-        result.pilot_snr_db = 0.0f;
+        result.ofdm_internal_snr_db = 0.0f;
+        result.has_ofdm_broadband_snr_db = false;
+        result.ofdm_broadband_snr_db = 0.0f;
         result.lts_fading_index = 0.0f;
         result.lts_residual_cfo_hz = residual_cfo_hz;
-        last_snr_db_estimate_valid_.store(false);
-        last_snr_db_estimate_.store(0.0f);
-        LOG_MODEM(DEBUG, "[%s] non-OFDM quality: chirp_snr=%.1f dB "
-                  "idle_snr=%s%.1f dB windows=%zu",
-                  log_prefix_.c_str(), chirp_snr_db,
-                  idle_snr.valid ? "" : "unavailable/",
-                  idle_snr.snr_db, idle_snr.windows_observed);
+        last_ofdm_broadband_snr_db_valid_.store(false);
+        last_ofdm_broadband_snr_db_.store(0.0f);
+        LOG_MODEM(DEBUG, "[%s] non-OFDM quality: sync_quality=%.1f dB "
+                  "idle_in_band=%s%.1f dB routed_snr=%.1f dB (%s) windows=%zu",
+                  log_prefix_.c_str(), result.sync_quality_db,
+                  result.has_idle_in_band_snr_db ? "" : "unavailable/",
+                  result.idle_in_band_snr_db, result.snr_db,
+                  snrSourceToString(result.snr_source), idle_snr.windows_observed);
     }
 }
 
@@ -554,7 +566,7 @@ void StreamingDecoder::searchForSync() {
         }
 
         sync_cfo_ = new_cfo;
-        sync_snr_ = estimateSNRFromChirp(sync_result.correlation, noise_floor_);
+        sync_snr_ = chirpSyncQualityDb(sync_result.correlation, noise_floor_);
         sync_correlation_ = sync_result.correlation;
         sync_gap_error_samples_ = sync_result.gap_error_samples;
         sync_start_time_ = std::chrono::steady_clock::now();
@@ -565,8 +577,9 @@ void StreamingDecoder::searchForSync() {
         last_snr_.store(sync_snr_);
         last_cfo_.store(sync_cfo_);
 
-        LOG_MODEM(INFO, "[%s] SYNC at pos=%zu, CFO=%.1f Hz, SNR=%.1f dB",
-                  log_prefix_.c_str(), sync_position_, sync_cfo_, sync_snr_);
+        LOG_MODEM(INFO, "[%s] SYNC at pos=%zu, CFO=%.1f Hz, SNR=%.1f dB (%s)",
+                  log_prefix_.c_str(), sync_position_, sync_cfo_, sync_snr_,
+                  snrSourceToString(SNRSource::SYNC_QUALITY));
 
         // NOTE: Do NOT advance correlation_pos_ past the frame here.
         // It was already advanced by CORRELATION_STEP at line 323 during search.

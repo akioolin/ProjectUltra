@@ -308,6 +308,48 @@ bool test_connection_establishment() {
     return true;
 }
 
+bool test_nonphysical_snr_sources_do_not_drive_negotiation() {
+    TEST("Non-physical SNR sources do not drive negotiation");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+
+    ProtocolEngine stationA(config);
+    ProtocolEngine stationB(config);
+
+    stationA.setLocalCallsign("TEST1A");
+    stationB.setLocalCallsign("TEST2B");
+
+    stationB.setMeasuredSNR(30.0f, ultra::SNRSource::SYNC_QUALITY);
+    stationB.setMeasuredSNR(35.0f, ultra::SNRSource::OFDM_INTERNAL);
+
+    SimulatedChannel channel(stationA, stationB);
+
+    if (!stationA.connect("TEST2B")) {
+        FAIL("Connect() returned false");
+    }
+
+    channel.run(50, 100);
+
+    if (!stationA.isConnected()) FAIL("Station A did not connect");
+    if (!stationB.isConnected()) FAIL("Station B did not connect");
+    if (stationB.getMeasuredSNRSource() == ultra::SNRSource::SYNC_QUALITY) {
+        FAIL("SYNC_QUALITY was stored as rate-selection SNR");
+    }
+    if (stationB.getMeasuredSNRSource() == ultra::SNRSource::OFDM_INTERNAL) {
+        FAIL("OFDM_INTERNAL was stored as rate-selection SNR");
+    }
+    if (stationB.getNegotiatedMode() != WaveformMode::MC_DPSK) {
+        FAIL("non-physical SNR promoted responder out of MC-DPSK fallback");
+    }
+    if (stationA.getNegotiatedMode() != WaveformMode::MC_DPSK) {
+        FAIL("non-physical SNR promoted initiator out of MC-DPSK fallback");
+    }
+
+    PASS();
+    return true;
+}
+
 bool test_data_transfer() {
     TEST("Data transfer with ACK");
 
@@ -745,6 +787,7 @@ bool test_send_binary_roundtrip_arbitrary_bytes() {
 
     stationA.setLocalCallsign("W1ABC");
     stationB.setLocalCallsign("K2DEF");
+    stationB.setMeasuredSNR(25.0f);  // Keep this byte-preservation test on OFDM.
 
     Bytes received;
     stationB.setDataReceivedCallback([&](const Bytes& data, bool more_data) {
@@ -773,7 +816,7 @@ bool test_send_binary_roundtrip_arbitrary_bytes() {
 
     if (!stationA.sendBinary(payload)) FAIL("sendBinary() returned false");
 
-    for (int i = 0; i < 240 && received.empty(); ++i) {
+    for (int i = 0; i < 360 && received.empty(); ++i) {
         channel.run(1, 50);
     }
 
@@ -857,11 +900,10 @@ bool test_protocol_rate_upgrade() {
     stationA.setLocalCallsign("W1ABC");
     stationB.setLocalCallsign("K2DEF");
 
-    // Station B measures good SNR - should trigger MODE_CHANGE.
-    // SNR=22 + AWGN now promotes to D8PSK R3/4 (1.5× bits/symbol vs
-    // the previous DQPSK R2/3 expectation, after the 2026-05-04
-    // D8PSK ladder re-enable).
-    stationB.setMeasuredSNR(22.0f);
+    // Station B measures good in-band SNR - should trigger MODE_CHANGE.
+    // In-band SNR=32 + AWGN promotes to D8PSK while staying below the
+    // initial R3/4 cap.
+    stationB.setMeasuredSNR(32.0f);
 
     bool a_mode_changed = false;
     ultra::Modulation a_new_mod = ultra::Modulation::DQPSK;
@@ -894,15 +936,15 @@ bool test_protocol_rate_upgrade() {
     if (!a_mode_changed) FAIL("No MODE_CHANGE received at A");
     if (a_new_mod != ultra::Modulation::D8PSK) {
         std::cout << "(got " << ultra::modulationToString(a_new_mod) << ") ";
-        FAIL("Expected D8PSK at 22 dB SNR after D8PSK ladder re-enable");
+        FAIL("Expected D8PSK at 32 dB in-band SNR");
     }
-    // Bootstrap rate cap: capInitialOFDMRate keeps R3/4 only at SNR>=24
-    // AND fading<0.05. At SNR=22 the cap returns R2/3, so the expected
+    // Bootstrap rate cap: capInitialOFDMRate keeps R3/4 only at in-band SNR>=34
+    // AND fading<0.05. At SNR=32 the cap returns R2/3, so the expected
     // outcome is D8PSK R2/3 not D8PSK R3/4. (See waveform_selection.hpp
     // line 64.)
     if (a_new_rate != ultra::CodeRate::R2_3) {
         std::cout << "(got " << ultra::codeRateToString(a_new_rate) << ") ";
-        FAIL("Expected R2/3 at 22 dB SNR (D8PSK R3/4 capped to R2/3 at bootstrap)");
+        FAIL("Expected R2/3 at 32 dB in-band SNR");
     }
 
     // Verify both stations report same mode
@@ -925,9 +967,9 @@ bool test_adaptive_data_transfer() {
     stationA.setLocalCallsign("W1ABC");
     stationB.setLocalCallsign("K2DEF");
 
-    // Good fading at SNR 18 should choose DQPSK R1/2. With default fading=0
+    // Good fading at in-band SNR 28 should choose DQPSK R1/2. With default fading=0
     // this is classified as near-AWGN and can safely use R2/3.
-    stationB.setChannelQuality(18.0f, 0.30f);
+    stationB.setChannelQuality(28.0f, 0.30f);
 
     std::vector<std::string> received_at_b;
     stationB.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
@@ -945,7 +987,7 @@ bool test_adaptive_data_transfer() {
     // Verify mode upgrade happened
     if (stationA.getDataCodeRate() != ultra::CodeRate::R1_2) {
         std::cout << "(got " << ultra::codeRateToString(stationA.getDataCodeRate()) << ") ";
-        FAIL("Expected R1/2 at 18 dB SNR");
+        FAIL("Expected R1/2 at 28 dB in-band SNR");
     }
 
     // Send message - should work with upgraded mode
@@ -973,9 +1015,9 @@ bool test_adaptive_bidirectional() {
     stationA.setLocalCallsign("W1ABC");
     stationB.setLocalCallsign("K2DEF");
 
-    // Excellent near-AWGN SNR should use high-rate DQPSK. Coherent QAM is no
+    // Excellent near-AWGN in-band SNR should use high-rate DPSK. Coherent QAM is no
     // longer the automatic HF default.
-    stationB.setMeasuredSNR(27.0f);
+    stationB.setMeasuredSNR(37.0f);
 
     std::vector<std::string> received_at_a;
     std::vector<std::string> received_at_b;
@@ -997,15 +1039,15 @@ bool test_adaptive_bidirectional() {
     // Verify high-rate mode. D8PSK ladder re-enabled 2026-05-04
     // (see waveform_selection.hpp): high-SNR AWGN picks D8PSK R3/4
     // (recommendDataMode result), but bootstrap cap (capInitialOFDMRate)
-    // requires SNR>=24 to keep R3/4. SNR=27 with fading=0 satisfies
+    // requires in-band SNR>=34 to keep R3/4. SNR=37 with fading=0 satisfies
     // both, so the expected outcome is D8PSK R3/4.
     if (stationA.getDataModulation() != ultra::Modulation::D8PSK) {
         std::cout << "(got " << ultra::modulationToString(stationA.getDataModulation()) << ") ";
-        FAIL("Expected D8PSK at 27 dB SNR (post-D8PSK-gate)");
+        FAIL("Expected D8PSK at 37 dB in-band SNR");
     }
     if (stationA.getDataCodeRate() != ultra::CodeRate::R3_4) {
         std::cout << "(got " << ultra::codeRateToString(stationA.getDataCodeRate()) << ") ";
-        FAIL("Expected R3/4 at 27 dB SNR");
+        FAIL("Expected R3/4 at 37 dB in-band SNR");
     }
 
     // Bidirectional transfer
@@ -1174,6 +1216,7 @@ int main() {
 
     std::cout << "\nTwo-Station Simulation:\n";
     test_connection_establishment();
+    test_nonphysical_snr_sources_do_not_drive_negotiation();
     test_data_transfer();
     test_bidirectional_transfer();
     test_retransmission();

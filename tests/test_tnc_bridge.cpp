@@ -12,6 +12,7 @@
 using ultra::Bytes;
 using ultra::CodeRate;
 using ultra::Modulation;
+using ultra::SNRSource;
 using ultra::protocol::ConnectionState;
 using ultra::protocol::WaveformMode;
 using ultra::tnc::ProtocolEnginePort;
@@ -40,6 +41,7 @@ struct FakeProtocolEngine : ProtocolEnginePort {
     std::vector<Bytes> sent_binary;
     size_t backlog_bytes = 0;
     float measured_snr = 12.4f;
+    SNRSource measured_snr_source = SNRSource::OFDM_BROADBAND;
     ConnectionState state = ConnectionState::DISCONNECTED;
     WaveformMode preferred_mode = WaveformMode::AUTO;
     WaveformMode negotiated_mode = WaveformMode::OFDM_CHIRP;
@@ -98,6 +100,10 @@ struct FakeProtocolEngine : ProtocolEnginePort {
 
     float getMeasuredSNR() const override {
         return measured_snr;
+    }
+
+    SNRSource getMeasuredSNRSource() const override {
+        return measured_snr_source;
     }
 
     WaveformMode getNegotiatedMode() const override {
@@ -472,6 +478,7 @@ int main() {
         ultra::tnc::ModemStats s = h.bridge.getStats();
         expect(s.tx_backlog_bytes == 256, "tx_backlog_bytes mismatch");
         expect(s.snr_db == 18, "snr_db should be rounded engine value");
+        expect(s.snr_source == "ofdm_broadband", "snr_source should be named");
         expect(s.modulation == "DQPSK", "modulation string");
         expect(s.code_rate == "R1/2", "code_rate string");
     });

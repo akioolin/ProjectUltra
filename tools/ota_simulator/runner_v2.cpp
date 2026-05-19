@@ -170,15 +170,6 @@ void scaleToTargetRms(std::vector<float>& samples, double target_rms) {
     }
 }
 
-double coefficientEnergy(const FIRFilter& filter) {
-    const auto& coeffs = filter.coefficients();
-    return std::accumulate(coeffs.begin(), coeffs.end(), 0.0,
-                           [](double sum, float h) {
-                               return sum + static_cast<double>(h) *
-                                            static_cast<double>(h);
-                           });
-}
-
 std::optional<float> estimateNoiseBedStationSNRDb(const std::vector<float>& scaled_noise) {
     if (scaled_noise.empty()) {
         return std::nullopt;
@@ -188,10 +179,6 @@ std::optional<float> estimateNoiseBedStationSNRDb(const std::vector<float>& scal
                                            /*low_freq=*/50.0f,
                                            /*high_freq=*/2950.0f,
                                            /*sample_rate=*/48000.0f);
-    const double fir_energy = coefficientEnergy(filter);
-    if (fir_energy <= 0.0 || !std::isfinite(fir_energy)) {
-        return std::nullopt;
-    }
 
     double filtered_sum_sq = 0.0;
     for (float sample : scaled_noise) {
@@ -200,7 +187,7 @@ std::optional<float> estimateNoiseBedStationSNRDb(const std::vector<float>& scal
     }
     const double filtered_power =
         filtered_sum_sq / static_cast<double>(scaled_noise.size());
-    const double noise_power = filtered_power / fir_energy;
+    const double noise_power = filtered_power;
     if (noise_power <= 0.0 || !std::isfinite(noise_power)) {
         return std::nullopt;
     }
@@ -529,13 +516,16 @@ void executeCommand(const ScenarioEvent& event, EndpointRuntime& runtime,
 }
 
 std::optional<float> configureChannel(const Scenario& scenario, SimulatedChannel& channel) {
-    channel.setSeed(42);
+    const uint64_t seed =
+        scenario.channel && scenario.channel->seed ? *scenario.channel->seed : 42;
+    channel.setSeed(seed);
     std::optional<float> station_snr_db;
     if (scenario.channel && scenario.channel->snr_db) {
-        station_snr_db = static_cast<float>(*scenario.channel->snr_db);
+        const float configured_snr_db = static_cast<float>(*scenario.channel->snr_db);
+        station_snr_db = configured_snr_db;
         const ChannelType channel_type =
             scenario.channel->channel_type.value_or(ChannelType::AWGN);
-        channel.configure(*station_snr_db, channel_type);
+        channel.configure(configured_snr_db, channel_type);
     } else if (scenario.channel && scenario.channel->channel_type) {
         throw std::runtime_error("channel.fading/type requires channel.snr_db");
     }

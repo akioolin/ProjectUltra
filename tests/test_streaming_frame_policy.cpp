@@ -82,6 +82,16 @@ void test_ping_chirp_lock_fallback() {
     CHECK(locked_no_frame.is_ping, "chirp-locked LDPC failure should classify as ping");
     CHECK(!locked_no_frame.ping_by_silence, "busy-band fallback should not rely on RMS silence");
     CHECK(locked_no_frame.ping_by_chirp_lock, "busy-band fallback should use chirp lock");
+
+    auto low_snr_ping_after_llr_reject = evaluatePingFrame(
+        busy_band.data(), busy_band.size(),
+        kPingTrainingSkipSamples, kPingRMSCheckSamples,
+        0.908f, 0.0f,
+        false, false);
+    CHECK(low_snr_ping_after_llr_reject.is_ping,
+          "measured SNR15 chirp lock plus rejected data frame should classify as ping");
+    CHECK(low_snr_ping_after_llr_reject.ping_by_chirp_lock,
+          "measured SNR15 fallback should depend on chirp lock");
 }
 
 void test_false_lock_advance() {

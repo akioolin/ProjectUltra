@@ -11,6 +11,19 @@ namespace gui {
 
 using namespace rx_constants;
 
+namespace {
+void copySNRMetrics(LoopbackStats& stats, const DecodeResult& result) {
+    stats.snr_db = result.snr_db;
+    stats.snr_source = result.snr_source;
+    stats.has_idle_in_band_snr_db = result.has_idle_in_band_snr_db;
+    stats.idle_in_band_snr_db = result.idle_in_band_snr_db;
+    stats.has_ofdm_broadband_snr_db = result.has_ofdm_broadband_snr_db;
+    stats.ofdm_broadband_snr_db = result.ofdm_broadband_snr_db;
+    stats.ofdm_internal_snr_db = result.ofdm_internal_snr_db;
+    stats.sync_quality_db = result.sync_quality_db;
+}
+}
+
 // ============================================================================
 // RX/DECODE THREAD
 // ============================================================================
@@ -43,7 +56,7 @@ void ModemEngine::processRxBuffer() {
         if (result.success) {
             updateStats([&](LoopbackStats& s) {
                 s.frames_received++;
-                s.snr_db = result.snr_db;
+                copySNRMetrics(s, result);
                 s.synced = true;
             });
         } else if (result.codewords_failed > 0) {
@@ -118,7 +131,7 @@ void ModemEngine::rxDecodeLoop() {
                 // Frame already logged by StreamingDecoder - just update stats
                 updateStats([&](LoopbackStats& s) {
                     s.frames_received++;
-                    s.snr_db = result.snr_db;
+                    copySNRMetrics(s, result);
                     s.synced = true;
                 });
 

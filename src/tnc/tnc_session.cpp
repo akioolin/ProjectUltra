@@ -829,13 +829,14 @@ void TNCSession::cmdStats(std::string_view args) {
     std::snprintf(buf, sizeof(buf),
                   "STATS frames_sent=%d frames_recv=%d retx=%d timeouts=%d "
                   "failed=%d out_of_order=%d rate=%s mod=%s mode=%s snr=%d "
-                  "bps=%d backlog=%d\r",
+                  "snr_source=%s bps=%d backlog=%d\r",
                   s.frames_sent, s.frames_received, s.retransmissions,
                   s.timeouts, s.failed, s.out_of_order,
                   s.code_rate.empty() ? "?" : s.code_rate.c_str(),
                   s.modulation.empty() ? "?" : s.modulation.c_str(),
                   s.waveform.empty() ? "?" : s.waveform.c_str(),
-                  s.snr_db, s.bitrate_bps, s.tx_backlog_bytes);
+                  s.snr_db, s.snr_source.empty() ? "none" : s.snr_source.c_str(),
+                  s.bitrate_bps, s.tx_backlog_bytes);
     if (cmd_emit_) {
         cmd_emit_(buf);
     }
