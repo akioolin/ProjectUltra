@@ -543,6 +543,15 @@ if(TARGET ota_simulator)
         RUN_SERIAL TRUE
         LABELS regression)
 
+    add_test(NAME OTASimulatorTwoEndpointMCDPSKLowSNR
+        COMMAND $<TARGET_FILE:ota_simulator> run
+                --scenario tests/fixtures/ota_simulator/two_endpoint_mcdpsk_low_snr_qso.json)
+    set_tests_properties(OTASimulatorTwoEndpointMCDPSKLowSNR PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        TIMEOUT 150
+        RUN_SERIAL TRUE
+        LABELS regression)
+
     add_test(NAME OTASimulatorFileTransferSNR15
         COMMAND $<TARGET_FILE:ota_simulator> run
                 --scenario tests/fixtures/ota_simulator/two_endpoint_file_transfer_snr15.json)
