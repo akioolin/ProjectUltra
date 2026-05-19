@@ -927,3 +927,152 @@ full 4-CW attempt rejected as a false chirp lock with `|llr|_avg=1.50`.
 
 Because this is a non-sandbox gate failure, the audit documentation remains
 uncommitted and the work stops here.
+
+## Layer 4: Round 3 DecodeBenchReplay regression
+
+Round 3 scope: repair the `DecodeBenchReplay` regression introduced after the
+connected OFDM light-sync relaxation while preserving the Layer 4 floor gains.
+The failing fixture was
+`fixtures/ofdm_chirp_r14_dqpsk_snr15_good.wav`, which had regressed from one
+byte-exact DATA frame to zero decoded frames. The companion
+`fixtures/ofdm_chirp_r12_dqpsk_snr18_good.wav` continued to pass.
+
+Status: the DecodeBenchReplay regression is fixed by one OFDM data-sync search
+repair, but no commit was made because full ctest still has one non-exempt
+failure outside the allowed bind failures.
+
+### Diagnostics
+
+Finding 1: the failing fixture was not an LDPC/LLR scaling failure. The decoder
+accepted an early weak OFDM DATA sync at correlation `0.443`, then rejected the
+full 4-CW decode as a false chirp lock at `|llr|_avg=1.50`. A direct LTS scan
+of the same audio showed a stronger later peak at absolute sample `57722`
+with correlation `0.681338`. The original capped search admitted the weak
+candidate at absolute sample `57276` and did not get to the stronger LTS.
+
+Multi-perspective check:
+
+- PHY theorist: the later peak has materially higher Schmidl-Cox/LTS
+  autocorrelation and produces stronger soft information. The weak early peak
+  is a false timing hypothesis, not a code-rate or LDPC margin limit.
+- DSP systems engineer: the failure is caused by the search boundary. The weak
+  peak sits at the end of the capped search window, while the stronger peak is
+  still inside the same streaming buffer.
+- Veteran HF operator: this is the practical "locked too early" failure mode.
+  The modem heard the burst, chose a marginal timing point, and then missed the
+  actual usable part of the signal.
+- First-principles physics: identical OFDM training symbols can only produce
+  the intended high autocorrelation when the integration windows line up with
+  the repeated LTS. The later peak aligns more energy coherently, so it is the
+  physically better timing candidate.
+
+Finding 2: raising the pre-sync LLR gate would not fix this replay. The failing
+4-CW attempt is exactly at the existing `kMinPreSyncLLR` edge, but by the time
+that gate rejects, the streaming decoder has already consumed the false lock and
+advanced past the true LTS.
+
+Multi-perspective check:
+
+- PHY theorist: a stricter LLR screen would reject the bad hypothesis slightly
+  earlier, but it would not present the correct hypothesis to the decoder.
+- DSP systems engineer: the missed opportunity is in acquisition candidate
+  ordering. Once `advancePastFalseOFDMLock()` runs from the weak lock, the later
+  stronger peak is skipped.
+- Veteran HF operator: this would sound like telling the receiver to distrust a
+  bad lock after it already stopped listening at the right instant.
+- First-principles physics: thresholding a derived soft-bit magnitude cannot
+  recover timing energy that was never evaluated as the selected lock point.
+
+Finding 3: the least invasive surviving fix is a bounded "prefer the better
+peak" rescue for weak edge candidates, not a global floor rollback. Tightening
+the relaxed floor from `0.40` toward `0.45` would likely repair the fixture by
+rejecting the early `0.443` candidate, but it directly trades away the round-2
+12 dB floor gain. SNR-conditioning the floor adds a new coupling to a noisy
+measurement and would still tend to admit this fixture's weak candidate.
+
+Multi-perspective check:
+
+- PHY theorist: preferring a later peak only when it is stronger by a measured
+  margin keeps the relaxed low-SNR hypothesis space while selecting the better
+  timing maximum.
+- DSP systems engineer: the rescue is bounded to sub-`0.45` candidates at the
+  search edge and only scans the remainder of the current buffer. It does not
+  change ordinary high-confidence locks or the initial threshold policy.
+- Veteran HF operator: this preserves weak-signal patience, but if a stronger
+  copy is immediately behind the marginal one, the receiver takes the better
+  copy instead of committing to the first fluttery hint.
+- First-principles physics: a stronger later autocorrelation peak in the same
+  observation window is more likely to be the coherent repeated-symbol match.
+  The `0.02` improvement margin avoids chasing numerical ties.
+
+### Fix
+
+Code change:
+
+- `OFDMChirpWaveform::detectDataSync()` now performs one bounded extension
+  pass when the best DATA-sync candidate is below `0.45`, above the current
+  relaxed threshold, and within `16` samples of the capped search end.
+- The extension scans from the old search end to the end of the current buffer
+  and replaces the candidate only if a later peak improves correlation by at
+  least `0.02`.
+- The normal search threshold, initial high-confidence exit, and non-edge
+  candidates are unchanged.
+
+This intentionally preserves the connected OFDM relaxed floor. It only handles
+the measured regression shape: a weak relaxed-floor candidate at the search cap
+with a clearly stronger LTS still present later in the same buffer.
+
+### Validation
+
+Targeted build/test:
+
+- `cmake --build build --target decode_bench test_decode_bench_replay test_streaming_signal_policy cli_simulator ofdm_snr_probe -j4`: passed.
+- `cmake --build build --target ota_simulator -j4`: passed.
+- `./build/tests/test_streaming_signal_policy`: passed `65/65`.
+- `ctest --test-dir build -R DecodeBenchReplay --output-on-failure`: passed.
+
+Direct replay evidence:
+
+- Before the fix, the failing fixture accepted `corr=0.443` at sample `57276`,
+  reported CW0 peek `|llr|_avg=1.9`, rejected the 4-CW decode at
+  `|llr|_avg=1.50`, and decoded `0` frames.
+- After the fix, the decoder logged replacement of the weak peak at offset
+  `4476` with a later peak at offset `4922` (`corr=0.68`), synced at sample
+  `57722`, reported CW0 peek `|llr|_avg=3.2`, and decoded one byte-exact DATA
+  frame.
+
+Required QSO preservation sweeps:
+
+| Scenario | Seeds | Result | Evidence |
+|----------|-------|--------|----------|
+| OFDM forced DQPSK R1/4 AWGN 12 dB | 42,43,44 | 3/3 pass | DATA decoded `4/4` CWs; DATA sync correlations `0.40`, `0.42`, `0.42`; ACK/DISCONNECT completed |
+| OFDM forced DQPSK R1/4 Good 15 dB | 42,43,44 | 3/3 pass | DATA decoded `4/4` CWs; DATA sync correlations `0.53`, `0.55`, `0.61`; disconnect completed |
+| MC-DPSK AWGN 5 dB | 42,43,44 | 3/3 pass | DATA decoded `2/2` CWs and ACK/DISCONNECT completed at measured SNR about `4.8-5.1 dB` |
+| OFDM forced DQPSK R1/4 AWGN 10 dB | 42,43,44 | 0/3 pass | CONNECT/CONNECT_ACK completed, but the DATA message assertion still failed |
+
+The OFDM 10 dB target did not move in this round. The change repairs the
+measured false early timing commit without claiming a new floor.
+
+Full ctest gate:
+
+- `ctest --test-dir build --output-on-failure -j4`: `80/86` passed.
+- `DecodeBenchReplay`: passed inside the full ctest run.
+- Allowed sandbox/bind failures: `GrpcServiceSmoke`, `CLISyntheticNotch`,
+  `OtasimServeSmoke`, `UltraGuiOtaClient`, `UltraTncSimAudio`.
+- Additional non-exempt failure: `OTASimulatorTwoEndpointMCDPSKLowSNR`.
+
+`OTASimulatorTwoEndpointMCDPSKLowSNR` is not a bind failure. Its session log
+showed Bob received CONNECT, Alice remained `CONNECTING` at the 35 s assertion,
+the QSO payload was not received, and Bob remained `CONNECTED` at the final
+disconnect assertion. The direct socket-free MC-DPSK 5 dB sweep above still
+passed `3/3`, so this ctest failure is recorded as a separate harness/scenario
+gate rather than evidence that the OFDM replay repair regressed MC-DPSK.
+
+### Round-stop status
+
+Commit not made. The DecodeBenchReplay regression is fixed and the requested
+direct sweeps passed, but the hard full-ctest rule allows only five
+sandbox-bind exemptions. The sixth failure,
+`OTASimulatorTwoEndpointMCDPSKLowSNR`, is non-exempt. No push was performed.
+
+Evidence log for this round: `/tmp/codex_audit_and_chain_part7.log`.

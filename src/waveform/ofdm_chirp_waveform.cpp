@@ -536,6 +536,92 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
         }
     }
 
+    // If a weak candidate lands at the edge of the capped connected search,
+    // the real LTS can be just beyond the cap in the same streaming buffer.
+    // Do one bounded rescue pass only for sub-0.45 edge candidates, preserving
+    // the low-SNR relaxed floor when no stronger peak is present.
+    constexpr float kWeakConnectedPeakCorr = 0.45f;
+    constexpr float kMinLaterPeakImprovement = 0.02f;
+    constexpr int kEdgeCandidateMarginSamples = 16;
+    const bool weak_edge_candidate =
+        best_corr > threshold &&
+        best_corr < kWeakConnectedPeakCorr &&
+        best_offset + kEdgeCandidateMarginSamples >= search_end;
+    if (weak_edge_candidate) {
+        const int extended_search_end =
+            static_cast<int>(samples.size()) - symbol_samples * 2;
+        const int original_best_offset = best_offset;
+        const float original_best_corr = best_corr;
+        Complex original_best_p = best_p;
+
+        for (int offset = search_end; offset < extended_search_end; offset += 8) {
+            Complex P(0.0f, 0.0f);
+            float energy1 = 0.0f, energy2 = 0.0f;
+
+            for (int n = 0; n < symbol_samples; ++n) {
+                int idx1 = offset + n;
+                int idx2 = offset + n + symbol_samples;
+                if (idx2 >= static_cast<int>(analytic.size())) break;
+
+                const Complex& s1 = analytic[idx1];
+                const Complex& s2 = analytic[idx2];
+                P += std::conj(s1) * s2;
+                energy1 += std::norm(s1);
+                energy2 += std::norm(s2);
+            }
+
+            float denom = std::sqrt(energy1 * energy2) + 1e-10f;
+            float corr = std::abs(P) / denom;
+
+            if (corr > best_corr + kMinLaterPeakImprovement) {
+                best_corr = corr;
+                best_offset = offset;
+                best_p = P;
+            }
+        }
+
+        if (best_offset != original_best_offset) {
+            int refine_start = std::max(search_end, best_offset - 4);
+            int refine_end = std::min(extended_search_end, best_offset + 5);
+
+            for (int offset = refine_start; offset < refine_end; ++offset) {
+                if (offset == best_offset) continue;
+
+                Complex P(0.0f, 0.0f);
+                float energy1 = 0.0f, energy2 = 0.0f;
+
+                for (int n = 0; n < symbol_samples; ++n) {
+                    int idx1 = offset + n;
+                    int idx2 = offset + n + symbol_samples;
+                    if (idx2 >= static_cast<int>(analytic.size())) break;
+
+                    const Complex& s1 = analytic[idx1];
+                    const Complex& s2 = analytic[idx2];
+                    P += std::conj(s1) * s2;
+                    energy1 += std::norm(s1);
+                    energy2 += std::norm(s2);
+                }
+
+                float denom = std::sqrt(energy1 * energy2) + 1e-10f;
+                float corr = std::abs(P) / denom;
+
+                if (corr > best_corr) {
+                    best_corr = corr;
+                    best_offset = offset;
+                    best_p = P;
+                }
+            }
+
+            LOG_MODEM(INFO, "OFDMChirpWaveform: Data sync replaced weak peak at %d (corr=%.2f) "
+                      "with later peak at %d (corr=%.2f)",
+                      original_best_offset, original_best_corr, best_offset, best_corr);
+        } else {
+            best_corr = original_best_corr;
+            best_offset = original_best_offset;
+            best_p = original_best_p;
+        }
+    }
+
     result.correlation = best_corr;
 
     // Reset latched marker at start of each detection attempt
