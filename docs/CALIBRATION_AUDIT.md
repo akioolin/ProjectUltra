@@ -269,3 +269,189 @@ injection. AWGN, Watterson noise/taps, and real-HF-loop SNR scaling matched the
 in-band calibration contract. The AWGN MC-DPSK floor remains handshake/sync
 limited below 17 dB, so the next expected payoff is still Layer 4 chirp/sync
 rather than another channel-model calibration constant.
+
+## Layer 3: SNR estimators
+
+Status: audited, one routing bug fixed, measured, and ready to commit.
+
+Scope: Layer 3 covered `IdleNoiseSNREstimator`, the OFDM LTS/pilot residual
+meter exposed through `getLastOFDMBroadbandSNREstimate()`, the demodulator
+internal `getEstimatedSNR()` scale, and the chirp correlation confidence score
+used by disconnected sync.
+
+### Audit
+
+Idle-noise estimator:
+
+| Quantity | Expected | Measured | Layer-3 verdict |
+|----------|----------|----------|-----------------|
+| FIR convention | 50-2950 Hz receiver in-band power | `normalized_noise_rms` is FIR-output RMS | correct |
+| FIR energy / ENBW | `sum(h^2)=0.10858718`, ENBW `2606.09 Hz` | `0.10858718`, `2606.09 Hz` | correct |
+| AWGN SNR delta | reported equals independent in-band reference | max absolute delta `0.00 dB` over -6..24 dB | correct |
+| real-HF-loop SNR delta | reported equals independent in-band reference | max absolute delta `0.00 dB` over -6..24 dB | correct |
+
+Derivation: the idle estimator is an idle-noise meter, so the signal numerator
+is the calibrated in-band PING reference power and the denominator is the
+receiver passband noise power measured by the same 101-tap 50-2950 Hz FIR:
+
+`SNR_in_band = 10*log10(kModemReferencePower / E{y_fir^2})`.
+
+The old broadband extrapolation (`E{y_fir^2}/sum(h^2)`) would only be valid for
+white input noise and is intentionally absent. The current formula has matching
+in-band numerator and denominator units for both AWGN and colored real-HF noise.
+
+Multi-perspective check:
+
+- PHY: the estimator reports received in-band signal/noise, not audio
+  broadband-equivalent SNR.
+- DSP: `test_idle_noise_snr_calibration` generated the actual AWGN and
+  real-HF-loop channel paths, independently filtered the received samples, and
+  matched the estimator with zero measurable delta.
+- HF operator: an idle meter should rise when the actual receiver passband gets
+  quieter; it should not penalize colored HF noise for not being white outside
+  the modem band.
+- Physics: Parseval/FIR energy gives the white-noise ENBW, while colored-noise
+  power must be measured directly in the receiver passband.
+
+OFDM LTS/pilot residual meter:
+
+| Channel | Configured in-band SNRs | Mean measured delta | Layer-3 verdict |
+|---------|--------------------------|---------------------|-----------------|
+| AWGN | -5, 0, 5, 10, 15, 20 dB | `+0.24` to `+0.25 dB` | correct |
+| AWGN idle-vs-OFDM cross-check | same seeds | OFDM `+0.27` to `+0.28 dB` over idle | correct |
+| Good Watterson | -5, 0, 5, 10, 15, 20 dB | `+0.07` to `+0.08 dB` | correct |
+| Moderate Watterson | -5, 0, 5, 10, 15, 20 dB | `+0.01` to `+0.08 dB` | correct |
+
+Derivation: after downconversion, real white audio noise with broadband
+variance `sigma^2` contributes `N*sigma^2` power to an unnormalized N-point FFT
+bin. The channel knob is in-band SNR, so `sigma^2 =
+kModemReferencePower/(SNR_in_band * kModemInBandNoisePowerFraction)`. The OFDM
+meter therefore first recovers broadband SNR from the FFT-bin noise reference,
+then applies `broadbandToInBandSnrDb()`. The two-LTS time-difference residual
+uses `E{|H1-H0|^2}/4`, which is half a single-symbol FFT-bin noise reference,
+so the meter scales that residual by `2.0`. Guard-bin noise is already a
+single-symbol FFT-bin reference and uses scale `1.0`.
+
+The accessor and source token still say `ofdm_broadband` for wire/API
+compatibility, but the value is now in-band SNR. This was verified by
+`test_modem_snr_meter_calibration`, including a same-channel AWGN cross-check
+against the idle estimator.
+
+Multi-perspective check:
+
+- PHY: the FFT-bin noise derivation and two-LTS factor follow directly from the
+  OFDM receiver math; averaging bins reduces variance, not RF gain.
+- DSP: the actual `OFDMChirpWaveform`/`OFDMDemodulator` path measured within
+  `0.3 dB` of the configured AWGN in-band SNR and within `0.1 dB` on the
+  Watterson presets used by the test.
+- HF operator: OFDM residual SNR now reads on the same in-band scale as the idle
+  meter, so the operator does not see a 9.6 dB source-dependent jump.
+- Physics: FFT noise power and FIR noise bandwidth account for the full
+  conversion; no fitted offset remains.
+
+OFDM internal SNR:
+
+`OFDMDemodulator::getEstimatedSNR()` returns
+`10*log10(estimated_snr_linear)`. That value is the demodulator's internal
+LLR/channel-quality scale, initialized from LTS signal/noise and then preserved
+for differential modes so pilot temporal fading does not compress LLRs. It is
+not a physical in-band SNR meter and must not feed mode or rate selection.
+
+The audit verified the call routing:
+
+- `populateDecodeMetrics()` exposes it only as `ofdm_internal_snr_db`.
+- `result.snr_db` for OFDM is overwritten by the OFDM residual in-band meter
+  when that meter is valid.
+- Operator display uses idle in-band first, then OFDM residual in-band, and
+  never OFDM internal.
+
+Finding: protocol `Connection::setMeasuredSNR()` and `setChannelQuality()`
+accepted any `SNRSource`. That meant a future or TNC-side caller could store
+`OFDM_INTERNAL` as `measured_snr_db_`, even though the value is explicitly not a
+rate-selection SNR.
+
+Multi-perspective check:
+
+- PHY: an LLR scale is receiver-internal confidence, not a calibrated
+  signal/noise ratio.
+- DSP: the new protocol regression injects `OFDM_INTERNAL=35 dB` before
+  negotiation and verifies it cannot promote the link.
+- HF operator: the radio should not change modes based on a private demodulator
+  confidence number.
+- Physics: no absolute received noise reference exists in this value, so it has
+  no physical SNR units.
+
+Chirp sync confidence:
+
+`StreamingDecoder::chirpSyncQualityDb()` computes
+`clamp((correlation - 0.15)/0.03, -5, 30)`. The `noise_floor` argument is unused.
+This is a correlation confidence score, not an SNR estimator. The detector's
+physical evidence is the dual-chirp correlation and gap/CFO consistency; the
+reported "dB" is only a legacy quality scale.
+
+Finding: the display path already rejected `SYNC_QUALITY` as an operator SNR,
+but the protocol path did not. `ultra_tnc` can call `setMeasuredSNR(...,
+SYNC_QUALITY)` on ping detection, and decoded non-OFDM frames can also carry
+`SYNC_QUALITY` if no idle estimate is available. Before this fix, that value
+could feed the CONNECT responder's adaptive ladder and make chirp correlation
+look like calibrated SNR.
+
+Multi-perspective check:
+
+- PHY: normalized chirp correlation is a detection statistic; converting it by
+  a linear threshold mapping does not create signal/noise units.
+- DSP: the new regression injects `SYNC_QUALITY=30 dB` before CONNECT and
+  verifies the responder stays on the conservative MC-DPSK fallback instead of
+  promoting to OFDM.
+- HF operator: a strong sync lock should not be displayed or negotiated as a
+  30 dB channel.
+- Physics: processing gain belongs in detector probability-of-detection math;
+  this score has no calibrated noise bandwidth or signal-power reference.
+
+### Fix
+
+Code change:
+
+- `Connection::setMeasuredSNR()` and `Connection::setChannelQuality()` now
+  accept only rate-selection-safe sources: `NONE` for explicit simulator/harness
+  truth, `IDLE_IN_BAND`, and `OFDM_BROADBAND` (historical token for OFDM
+  residual in-band SNR).
+- `SYNC_QUALITY`, `OFDM_INTERNAL`, and non-finite values are ignored by the
+  protocol rate-selection state.
+- `setChannelQuality()` updates the fading index only when the SNR source is
+  rate-selection-safe and the fading value is finite.
+- Added a protocol regression that preloads both `SYNC_QUALITY=30 dB` and
+  `OFDM_INTERNAL=35 dB`; the responder must still negotiate MC-DPSK from the
+  conservative default rather than promote to OFDM.
+
+Regression status:
+
+- `cmake --build build --target test_protocol test_snr_source_routing test_idle_noise_snr_calibration test_modem_snr_meter_calibration -j4`: passed.
+- `./build/tests/test_protocol`: passed `24/24`.
+- `./build/tests/test_snr_source_routing`: passed.
+- `./build/tests/test_idle_noise_snr_calibration`: passed `312` checks.
+- `./build/tests/test_modem_snr_meter_calibration`: passed `378` checks.
+
+### Measure
+
+Required Layer 3 MC-DPSK QSO floor sweep through OTASim:
+
+| SNR dB | Result | Notes |
+|--------|--------|-------|
+| 18 | pass | full scenario passed |
+| 17 | pass | refinement to compare against Layer 1/2 floor |
+| 16 | fail | 3 failed assertions; Alice `PROBING`, Bob `DISCONNECTED` at 35 s, message absent |
+| 14 | fail | same 3 failed assertions |
+| 12 | fail | same 3 failed assertions |
+| 10 | fail | same 3 failed assertions |
+
+Layer 3 MC-DPSK floor delta: no change; refined floor remains `17 dB`.
+
+Cascade decision: no OFDM cascade sweep was required for Layer 3 because the
+MC-DPSK floor did not improve.
+
+Layer 3 verdict: the four estimators now have documented units and empirical
+checks. One silent source-routing bug was fixed so chirp confidence and OFDM
+internal quality cannot drive protocol rate selection. The remaining MC-DPSK
+floor below 17 dB is still sync/handshake-limited, so Layer 4 remains the
+expected high-payoff layer.

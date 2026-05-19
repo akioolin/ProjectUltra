@@ -308,6 +308,48 @@ bool test_connection_establishment() {
     return true;
 }
 
+bool test_nonphysical_snr_sources_do_not_drive_negotiation() {
+    TEST("Non-physical SNR sources do not drive negotiation");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+
+    ProtocolEngine stationA(config);
+    ProtocolEngine stationB(config);
+
+    stationA.setLocalCallsign("TEST1A");
+    stationB.setLocalCallsign("TEST2B");
+
+    stationB.setMeasuredSNR(30.0f, ultra::SNRSource::SYNC_QUALITY);
+    stationB.setMeasuredSNR(35.0f, ultra::SNRSource::OFDM_INTERNAL);
+
+    SimulatedChannel channel(stationA, stationB);
+
+    if (!stationA.connect("TEST2B")) {
+        FAIL("Connect() returned false");
+    }
+
+    channel.run(50, 100);
+
+    if (!stationA.isConnected()) FAIL("Station A did not connect");
+    if (!stationB.isConnected()) FAIL("Station B did not connect");
+    if (stationB.getMeasuredSNRSource() == ultra::SNRSource::SYNC_QUALITY) {
+        FAIL("SYNC_QUALITY was stored as rate-selection SNR");
+    }
+    if (stationB.getMeasuredSNRSource() == ultra::SNRSource::OFDM_INTERNAL) {
+        FAIL("OFDM_INTERNAL was stored as rate-selection SNR");
+    }
+    if (stationB.getNegotiatedMode() != WaveformMode::MC_DPSK) {
+        FAIL("non-physical SNR promoted responder out of MC-DPSK fallback");
+    }
+    if (stationA.getNegotiatedMode() != WaveformMode::MC_DPSK) {
+        FAIL("non-physical SNR promoted initiator out of MC-DPSK fallback");
+    }
+
+    PASS();
+    return true;
+}
+
 bool test_data_transfer() {
     TEST("Data transfer with ACK");
 
@@ -1174,6 +1216,7 @@ int main() {
 
     std::cout << "\nTwo-Station Simulation:\n";
     test_connection_establishment();
+    test_nonphysical_snr_sources_do_not_drive_negotiation();
     test_data_transfer();
     test_bidirectional_transfer();
     test_retransmission();

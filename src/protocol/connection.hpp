@@ -6,6 +6,7 @@
 #include "file_transfer.hpp"
 #include "ultra/types.hpp"
 #include "fec/soft_combine.hpp"
+#include <cmath>
 #include <functional>
 #include <string>
 
@@ -232,6 +233,9 @@ public:
 
     // Set measured SNR from modem layer (call this when decoding frames)
     void setMeasuredSNR(float snr_db, SNRSource source = SNRSource::NONE) {
+        if (!std::isfinite(snr_db) || !acceptsRateSelectionSNR(source)) {
+            return;
+        }
         measured_snr_db_ = snr_db;
         measured_snr_source_ = source;
     }
@@ -242,9 +246,14 @@ public:
     // fading_index: combined freq_cv + temporal_cv, where > 0.65 indicates significant fading
     void setChannelQuality(float snr_db, float fading_index,
                            SNRSource source = SNRSource::NONE) {
+        if (!std::isfinite(snr_db) || !acceptsRateSelectionSNR(source)) {
+            return;
+        }
         measured_snr_db_ = snr_db;
         measured_snr_source_ = source;
-        fading_index_ = fading_index;
+        if (std::isfinite(fading_index)) {
+            fading_index_ = fading_index;
+        }
     }
     float getFadingIndex() const { return fading_index_; }
     bool isFading() const { return fading_index_ > 0.65f; }
@@ -268,6 +277,11 @@ public:
 
 private:
     void setPhyMaskV1Negotiated(bool enabled);
+    static bool acceptsRateSelectionSNR(SNRSource source) {
+        return source == SNRSource::NONE ||
+               source == SNRSource::IDLE_IN_BAND ||
+               source == SNRSource::OFDM_BROADBAND;
+    }
 
     ConnectionConfig config_;
     ConnectionState state_ = ConnectionState::DISCONNECTED;
