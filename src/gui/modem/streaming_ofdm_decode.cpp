@@ -1308,6 +1308,10 @@ void StreamingDecoder::decodeCurrentFrame() {
     size_t next_block_pos = wrapRingIndexLocked(sync_position_ + consumed);
     size_t next_search_abs = frame_sync_abs + consumed;
 
+    if (result.success && connected_ && is_ofdm) {
+        noteFrameArrivalSuccess(frame_sync_abs, next_search_abs);
+    }
+
     // Legacy fixed-offset continuation is only safe for a physical burst.
     // Marker-based bursts are handled earlier by BURST_ACCUMULATING; ordinary
     // ARQ-refilled frames must re-acquire sync because hardware audio latency
@@ -1422,6 +1426,10 @@ void StreamingDecoder::decodeCurrentFrame() {
                 LOG_MODEM(INFO, "[%s] Burst block %d decoded: %d/%d CWs",
                           log_prefix_.c_str(), burst_blocks_decoded_,
                           next_result.codewords_ok, next_result.codewords_ok + next_result.codewords_failed);
+            }
+
+            if (next_result.success) {
+                noteFrameArrivalSuccess(next_search_abs, next_search_abs + min_block);
             }
 
             // Advance position for next iteration (or final correlation_pos_)

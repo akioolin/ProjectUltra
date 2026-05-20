@@ -41,6 +41,7 @@
 #include "ultra/fec.hpp"
 #include "fec/codec_factory.hpp"  // ICodec for FEC decoding
 #include "fec/soft_combine.hpp"
+#include "streaming_frame_arrival_policy.hpp"
 #include <vector>
 #include <queue>
 #include <mutex>
@@ -300,6 +301,25 @@ public:
     // Get decoder statistics
     DecoderStats getStats() const;
 
+    struct FrameArrivalSnapshot {
+        bool has_prediction = false;
+        size_t next_expected_frame_sample = 0;
+        float frame_arrival_confidence = 0.0f;
+        int consecutive_sync_misses = 0;
+        bool has_last_frame = false;
+        size_t last_frame_start_sample = 0;
+        size_t last_frame_end_sample = 0;
+        bool has_last_arrival_error = false;
+        int64_t last_arrival_error_samples = 0;
+        size_t expected_frame_gap_samples = 0;
+    };
+
+    // Passive warm-sync timing state. The decoder derives this only from
+    // successfully decoded OFDM frames; protocol code may set a known TX-turn
+    // gap, but no ARQ coupling is required for contiguous OFDM bursts.
+    FrameArrivalSnapshot getFrameArrivalSnapshot() const;
+    void setExpectedFrameGapSamples(size_t samples);
+
     // Get number of samples in buffer
     size_t samplesInBuffer() const;
     size_t bufferCapacitySamples() const { return buffer_capacity_samples_; }
@@ -369,6 +389,10 @@ private:
     void populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
                                float residual_cfo_hz) const;
     void observeIdleNoiseCandidate(const float* samples, size_t count);
+    void resetFrameArrivalTrackingLocked();
+    void noteFrameArrivalSuccess(size_t frame_start_abs, size_t frame_end_abs);
+    void noteFrameArrivalSuccessLocked(size_t frame_start_abs, size_t frame_end_abs);
+    void noteFrameArrivalSyncMissLocked();
 
     // Ring/absolute sample helpers. Call only while buffer_mutex_ is held.
     size_t wrapCustomRingIndexLocked(size_t value) const;
@@ -422,6 +446,16 @@ private:
     size_t search_floor_abs_ = 0;     // Earliest absolute sample search may inspect
     bool search_floor_abs_valid_ = false;
     bool expect_full_ofdm_anchor_ = false;
+    bool next_expected_frame_sample_valid_ = false;
+    size_t next_expected_frame_sample_ = 0;
+    float frame_arrival_confidence_ = 0.0f;
+    int consecutive_sync_misses_ = 0;
+    bool last_frame_arrival_valid_ = false;
+    size_t last_frame_start_sample_ = 0;
+    size_t last_frame_end_sample_ = 0;
+    bool last_frame_arrival_error_valid_ = false;
+    int64_t last_frame_arrival_error_samples_ = 0;
+    size_t expected_frame_gap_samples_ = 0;
 
     // Reset generation counter - incremented on reset(), checked after slow operations
     // to detect if state was reset mid-operation (e.g., during correlation)

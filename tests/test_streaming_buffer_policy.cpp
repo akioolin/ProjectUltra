@@ -1,9 +1,11 @@
 #include "gui/modem/streaming_buffer_policy.hpp"
+#include "gui/modem/streaming_frame_arrival_policy.hpp"
 
 #include <cmath>
 #include <iostream>
 
 using namespace ultra::gui::streaming_buffer_policy;
+namespace arrival_policy = ultra::gui::streaming_frame_arrival_policy;
 
 namespace {
 
@@ -93,6 +95,61 @@ void test_backlog_snapshot() {
     CHECK(invalid.unsearched_samples == 0, "invalid capacity should be safe");
 }
 
+void test_frame_arrival_prediction_tracks_cadence() {
+    constexpr size_t tight_window = 960;  // 20 ms at 48 kHz
+    constexpr size_t frame_samples = 11520;
+    constexpr size_t gap_samples = 480;   // 10 ms
+
+    bool have_prediction = false;
+    size_t expected = 0;
+    float confidence = 0.0f;
+    int misses = 0;
+    size_t actual_start = 240000;
+
+    for (int i = 0; i < 50; ++i) {
+        if (have_prediction) {
+            const int jitter = ((i % 5) - 2) * 120;  // +/-2.5 ms max
+            actual_start = jitter >= 0
+                ? expected + static_cast<size_t>(jitter)
+                : expected - static_cast<size_t>(-jitter);
+        }
+
+        const auto update = arrival_policy::updateOnSuccessfulFrame(
+            have_prediction, expected, confidence,
+            actual_start, actual_start + frame_samples,
+            gap_samples, tight_window);
+
+        CHECK(update.within_tight_window, "predicted frame arrival should stay inside 20 ms window");
+        if (update.has_arrival_error) {
+            CHECK(arrival_policy::absSampleError(update.arrival_error_samples) <= tight_window,
+                  "arrival error should remain bounded by tight window");
+        }
+        CHECK(update.next_expected_frame_sample == actual_start + frame_samples + gap_samples,
+              "next prediction should be last frame end plus configured gap");
+        CHECK(update.consecutive_sync_misses == 0,
+              "successful frame should clear consecutive sync misses");
+
+        have_prediction = true;
+        expected = update.next_expected_frame_sample;
+        confidence = update.confidence;
+        misses = update.consecutive_sync_misses;
+    }
+
+    CHECK(misses == 0, "sequential successes should not accumulate misses");
+    CHECK(confidence > 0.75f, "arrival confidence should build over stable cadence");
+}
+
+void test_frame_arrival_miss_accounting() {
+    int misses = 0;
+    misses = arrival_policy::incrementSyncMisses(misses);
+    misses = arrival_policy::incrementSyncMisses(misses);
+    CHECK(misses == 2, "sync miss counter should increment");
+
+    const float confidence = arrival_policy::confidenceAfterSyncMiss(0.8f);
+    CHECK(confidence < 0.8f && confidence > 0.0f,
+          "sync miss should reduce but not zero arrival confidence");
+}
+
 }  // namespace
 
 int main() {
@@ -102,6 +159,8 @@ int main() {
     test_overflow_drop_with_wrap();
     test_pointer_drift_guard();
     test_backlog_snapshot();
+    test_frame_arrival_prediction_tracks_cadence();
+    test_frame_arrival_miss_accounting();
 
     if (tests_failed != 0) {
         std::cout << "StreamingBufferPolicy: " << (tests_run - tests_failed)
