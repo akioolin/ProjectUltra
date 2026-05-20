@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ultra/dsp.hpp"
+
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -19,6 +21,12 @@ struct ChannelBusyDetectorConfig {
     uint32_t min_noise_floor_observations = 10;
     float noise_floor_percentile = 0.10f;
     float quiet_noise_multiplier = 1.5f;
+    float noise_floor_bootstrap_rms_ceiling = 0.11f;
+    bool receive_band_rms = true;
+    float sample_rate_hz = 48000.0f;
+    uint32_t receive_band_filter_taps = 101;
+    float receive_band_low_hz = 50.0f;
+    float receive_band_high_hz = 2950.0f;
     uint32_t max_wait_for_idle_ms = 15000;
 };
 
@@ -47,18 +55,25 @@ public:
     bool waitUntilIdle(std::chrono::milliseconds guard);
     bool waitUntilIdle(std::chrono::milliseconds guard,
                        std::chrono::milliseconds max_wait);
+    float quietThreshold() const;
 
     const ChannelBusyDetectorConfig& config() const { return config_; }
 
 private:
+    void observeRmsLocked(float rms, bool local_rx_blackout, TimePoint now);
+    float receiveBandRmsLocked(std::span<const float> samples);
     bool idleForLocked(TimePoint now, std::chrono::milliseconds guard) const;
     std::chrono::milliseconds requiredQuietDuration(std::chrono::milliseconds guard) const;
     TimePoint idleReadyAtLocked(std::chrono::milliseconds guard) const;
     void pruneWindowLocked(TimePoint now);
     void pruneNoiseFloorLocked(TimePoint now);
+    bool hasNoiseFloorEstimateLocked() const;
+    float noiseFloorEstimateLocked() const;
+    bool shouldRecordNoiseFloorSampleLocked(float rms) const;
     float quietThresholdLocked() const;
 
     ChannelBusyDetectorConfig config_;
+    FIRFilter receive_band_filter_;
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;

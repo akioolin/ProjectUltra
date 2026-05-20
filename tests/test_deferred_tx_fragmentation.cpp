@@ -142,12 +142,42 @@ void handshakeConnectUsesDeferredCarrierSenseGate() {
             "CONNECT should enter the local TX queue after deferred flush");
 }
 
+void deferredArqAcksCoalesceToLatestState() {
+    auto station = makeStation();
+
+    station.testQueueTxSamples(samples(kFirstChunkSamples, 0.30f),
+                               "frame=seed");
+    require(station.testDrainLocalTxSamples(kFirstChunkSamples) == kFirstChunkSamples,
+            "seed frame should drain fully");
+    station.testObserveIdleTxBlock();
+    station.testAdvanceRadioSamples(kTrSwitchSamples);
+    require(station.pttState() == PttState::TX_COOLDOWN,
+            "radio should be in cooldown before ACK deferral");
+
+    station.testQueueTxSamples(samples(120, 0.40f), "frame_type=ACK seq=1");
+    require(station.testDeferredTxDepth() == 1,
+            "first carrier-sensed ACK should be deferred");
+
+    station.testQueueTxSamples(samples(130, 0.50f), "frame_type=ACK seq=1");
+    require(station.testDeferredTxDepth() == 1,
+            "newer SACK state should replace older deferred ACK/SACK");
+
+    station.testAdvanceRadioSamples(kCooldownSamples);
+    station.testAdvanceRadioSamples(kPostTxAckListenSamples);
+    station.testFlushDeferredTxIfReady();
+    require(station.testDeferredTxDepth() == 0,
+            "coalesced ACK should be the only deferred submission to flush");
+    require(station.testTxQueueDepth() == 130,
+            "latest deferred ACK/SACK waveform should be preserved");
+}
+
 }  // namespace
 
 int main() {
     continuationChunkBypassesRecoveryGate();
     deferredLogicalSubmissionsFlushOnePerRadioKeyup();
     handshakeConnectUsesDeferredCarrierSenseGate();
+    deferredArqAcksCoalesceToLatestState();
     std::cout << "deferred TX fragmentation regression passed\n";
     return 0;
 }

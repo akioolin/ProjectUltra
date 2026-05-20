@@ -36,10 +36,23 @@ float rmsOf(std::span<const float> samples) {
     return static_cast<float>(std::sqrt(sum_sq / static_cast<double>(samples.size())));
 }
 
+size_t sanitizedFirTaps(uint32_t taps) {
+    size_t sanitized = static_cast<size_t>(std::max<uint32_t>(3, taps));
+    if ((sanitized % 2) == 0) {
+        ++sanitized;
+    }
+    return sanitized;
+}
+
 }  // namespace
 
 ChannelBusyDetector::ChannelBusyDetector(ChannelBusyDetectorConfig config)
-    : config_(config) {
+    : config_(config),
+      receive_band_filter_(FIRFilter::bandpass(
+          sanitizedFirTaps(config_.receive_band_filter_taps),
+          config_.receive_band_low_hz,
+          config_.receive_band_high_hz,
+          config_.sample_rate_hz)) {
     reset();
 }
 
@@ -47,6 +60,7 @@ void ChannelBusyDetector::reset(TimePoint now) {
     std::lock_guard<std::mutex> lock(mutex_);
     rms_window_.clear();
     noise_floor_window_.clear();
+    receive_band_filter_.reset();
     rms_window_sum_ = 0.0;
     current_rms_ = 0.0f;
     const auto initial_quiet_age =
@@ -60,14 +74,24 @@ void ChannelBusyDetector::reset(TimePoint now) {
 void ChannelBusyDetector::observeSamples(std::span<const float> samples,
                                          bool local_rx_blackout,
                                          TimePoint now) {
-    observeRms(rmsOf(samples), local_rx_blackout, now);
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (local_rx_blackout) {
+        observeRmsLocked(0.0f, true, now);
+        return;
+    }
+    observeRmsLocked(receiveBandRmsLocked(samples), local_rx_blackout, now);
 }
 
 void ChannelBusyDetector::observeRms(float rms,
                                      bool local_rx_blackout,
                                      TimePoint now) {
     std::lock_guard<std::mutex> lock(mutex_);
+    observeRmsLocked(rms, local_rx_blackout, now);
+}
 
+void ChannelBusyDetector::observeRmsLocked(float rms,
+                                           bool local_rx_blackout,
+                                           TimePoint now) {
     current_rms_ = std::max(0.0f, rms);
     const bool was_quiet = (quiet_since_ != TimePoint{});
 
@@ -85,7 +109,6 @@ void ChannelBusyDetector::observeRms(float rms,
 
     rms_window_.emplace_back(now, current_rms_);
     rms_window_sum_ += current_rms_;
-    noise_floor_window_.emplace_back(now, current_rms_);
     pruneWindowLocked(now);
     pruneNoiseFloorLocked(now);
 
@@ -93,6 +116,11 @@ void ChannelBusyDetector::observeRms(float rms,
         ? current_rms_
         : static_cast<float>(rms_window_sum_ / static_cast<double>(rms_window_.size()));
     const float threshold = quietThresholdLocked();
+
+    if (shouldRecordNoiseFloorSampleLocked(current_rms_)) {
+        noise_floor_window_.emplace_back(now, current_rms_);
+        pruneNoiseFloorLocked(now);
+    }
 
     if (window_rms > threshold) {
         last_busy_at_ = now;
@@ -113,6 +141,22 @@ void ChannelBusyDetector::observeRms(float rms,
         }
     }
     cv_.notify_all();
+}
+
+float ChannelBusyDetector::receiveBandRmsLocked(std::span<const float> samples) {
+    if (!config_.receive_band_rms) {
+        return rmsOf(samples);
+    }
+    if (samples.empty()) {
+        return 0.0f;
+    }
+
+    double sum_sq = 0.0;
+    for (float sample : samples) {
+        const float filtered = receive_band_filter_.process(sample);
+        sum_sq += static_cast<double>(filtered) * static_cast<double>(filtered);
+    }
+    return static_cast<float>(std::sqrt(sum_sq / static_cast<double>(samples.size())));
 }
 
 bool ChannelBusyDetector::isIdle() const {
@@ -140,6 +184,11 @@ std::chrono::milliseconds ChannelBusyDetector::timeSinceQuiet(TimePoint now) con
 float ChannelBusyDetector::currentRms() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return current_rms_;
+}
+
+float ChannelBusyDetector::quietThreshold() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return quietThresholdLocked();
 }
 
 bool ChannelBusyDetector::waitUntilIdle(std::chrono::milliseconds guard) {
@@ -231,11 +280,16 @@ void ChannelBusyDetector::pruneNoiseFloorLocked(TimePoint now) {
     }
 }
 
-float ChannelBusyDetector::quietThresholdLocked() const {
-    float threshold = std::max(0.0f, config_.quiet_rms_threshold);
-    if (!config_.adaptive_noise_floor ||
-        noise_floor_window_.size() < config_.min_noise_floor_observations) {
-        return threshold;
+bool ChannelBusyDetector::hasNoiseFloorEstimateLocked() const {
+    const size_t required =
+        static_cast<size_t>(std::max<uint32_t>(1, config_.min_noise_floor_observations));
+    return config_.adaptive_noise_floor &&
+           noise_floor_window_.size() >= required;
+}
+
+float ChannelBusyDetector::noiseFloorEstimateLocked() const {
+    if (noise_floor_window_.empty()) {
+        return 0.0f;
     }
 
     std::vector<float> values;
@@ -250,8 +304,33 @@ float ChannelBusyDetector::quietThresholdLocked() const {
         static_cast<size_t>(percentile * static_cast<float>(values.size() - 1)));
     std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(index),
                      values.end());
+    return std::max(0.0f, values[index]);
+}
 
-    const float noise_floor = std::max(0.0f, values[index]);
+bool ChannelBusyDetector::shouldRecordNoiseFloorSampleLocked(float rms) const {
+    if (!config_.adaptive_noise_floor || !std::isfinite(rms)) {
+        return false;
+    }
+
+    const float sample_rms = std::max(0.0f, rms);
+    if (!hasNoiseFloorEstimateLocked()) {
+        return sample_rms <= std::max(0.0f, config_.noise_floor_bootstrap_rms_ceiling);
+    }
+
+    const float noise_floor = noiseFloorEstimateLocked();
+    const float candidate_gate = std::max(
+        std::max(0.0f, config_.quiet_rms_threshold),
+        noise_floor * std::max(1.0f, config_.quiet_noise_multiplier));
+    return sample_rms <= candidate_gate;
+}
+
+float ChannelBusyDetector::quietThresholdLocked() const {
+    float threshold = std::max(0.0f, config_.quiet_rms_threshold);
+    if (!hasNoiseFloorEstimateLocked()) {
+        return threshold;
+    }
+
+    const float noise_floor = noiseFloorEstimateLocked();
     const float adaptive_threshold =
         noise_floor * std::max(1.0f, config_.quiet_noise_multiplier);
     return std::max(threshold, adaptive_threshold);

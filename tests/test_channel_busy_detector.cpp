@@ -125,6 +125,42 @@ void testAdaptiveThresholdRejectsFadedCarrierDips() {
     assert(!detector.isIdleFor(std::chrono::milliseconds(50)));
 }
 
+void testSignalDominatedHistoryDoesNotRaiseNoiseFloor() {
+    ChannelBusyDetectorConfig config = testConfig();
+    config.min_noise_floor_observations = 5;
+    config.noise_floor_window_ms = 5000;
+    ChannelBusyDetector detector(config);
+
+    for (int i = 0; i < 20; ++i) {
+        observe(detector, 0.060f, i * 10);
+    }
+
+    const float seeded_threshold = detector.quietThreshold();
+    assert(seeded_threshold > 0.085f);
+    assert(seeded_threshold < 0.100f);
+    assert(detector.isIdle());
+
+    for (int i = 0; i < 650; ++i) {
+        const float signal_rms =
+            (i % 3 == 0) ? 0.180f : ((i % 3 == 1) ? 0.260f : 0.300f);
+        observe(detector, signal_rms, 500 + i * 10);
+        assert(detector.quietThreshold() < 0.120f);
+    }
+
+    assert(!detector.isIdle());
+    observe(detector, 0.181f, 7100);
+    assert(!detector.isIdle());
+
+    for (int i = 0; i < 10; ++i) {
+        observe(detector, 0.060f, 8000 + i * 10);
+    }
+
+    const float recovered_threshold = detector.quietThreshold();
+    assert(recovered_threshold > 0.085f);
+    assert(recovered_threshold < 0.100f);
+    assert(detector.isIdle());
+}
+
 void testWaitUntilIdleTimeoutAndGuard() {
     ChannelBusyDetector detector(testConfig());
     observe(detector, 0.050f, 0);
@@ -152,6 +188,7 @@ int main() {
     testLocalTxBlackoutIsBusyRegardlessOfRms();
     testAdaptiveNoiseFloorTreatsAwgnFloorAsIdle();
     testAdaptiveThresholdRejectsFadedCarrierDips();
+    testSignalDominatedHistoryDoesNotRaiseNoiseFloor();
     testWaitUntilIdleTimeoutAndGuard();
 
     std::cout << "ChannelBusyDetector tests passed\n";
