@@ -93,7 +93,7 @@ std::vector<float> ScriptedAudioPort::pullRx(size_t count) {
     }
 
     rx_cursor_ += count;
-    return out;
+    return shapeRxForLocalRadio(std::move(out), count);
 }
 
 void ScriptedAudioPort::queueTx(const std::vector<float>& samples) {

@@ -762,7 +762,7 @@ public:
             // discontinuities when the hardware callback size is not 480.
             got.resize(count, 0.0f);
         }
-        return got;
+        return shapeRxForLocalRadio(std::move(got), count);
     }
 
     void queueTx(const std::vector<float>& samples) override {

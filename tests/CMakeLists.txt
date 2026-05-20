@@ -457,6 +457,19 @@ if(TARGET ultra_sim_station)
         TIMEOUT 30
         LABELS regression)
 
+    add_executable(test_audio_port_carrier_sense
+        test_audio_port_carrier_sense.cpp)
+    target_include_directories(test_audio_port_carrier_sense PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
+    )
+    target_link_libraries(test_audio_port_carrier_sense PRIVATE ultra_sim_station)
+    add_test(NAME AudioPortCarrierSense
+        COMMAND test_audio_port_carrier_sense)
+    set_tests_properties(AudioPortCarrierSense PROPERTIES
+        TIMEOUT 30
+        LABELS regression)
+
     add_executable(test_deferred_tx_fragmentation
         test_deferred_tx_fragmentation.cpp)
     target_include_directories(test_deferred_tx_fragmentation PRIVATE

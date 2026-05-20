@@ -43,6 +43,7 @@
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "waveform/ofdm_cox_waveform.hpp"
 #include "waveform/mc_dpsk_waveform.hpp"
+#include "audio/channel_busy_detector.hpp"
 #include "psk/multi_carrier_dpsk.hpp"
 #include "gui/modem/streaming_decoder.hpp"
 #include "gui/modem/streaming_encoder.hpp"  // TX encoding (mirrors StreamingDecoder)
@@ -182,6 +183,22 @@ public:
     virtual void attachRadioState(const RadioPttStateMachine* ptt) {
         attached_ptt_ = ptt;
     }
+    bool isChannelIdle() const {
+        return channel_busy_detector_.isIdle();
+    }
+    bool isChannelIdleFor(uint32_t guard_ms) const {
+        return channel_busy_detector_.isIdleFor(std::chrono::milliseconds(guard_ms));
+    }
+    bool waitForChannelIdle(uint32_t guard_ms) {
+        return channel_busy_detector_.waitUntilIdle(std::chrono::milliseconds(guard_ms));
+    }
+    bool waitForChannelIdle(uint32_t guard_ms, uint32_t max_wait_ms) {
+        return channel_busy_detector_.waitUntilIdle(std::chrono::milliseconds(guard_ms),
+                                                    std::chrono::milliseconds(max_wait_ms));
+    }
+    float channelRms() const {
+        return channel_busy_detector_.currentRms();
+    }
 
 protected:
     bool attachedRadioInRxBlackout() const;
@@ -190,6 +207,7 @@ protected:
 
 private:
     const RadioPttStateMachine* attached_ptt_ = nullptr;
+    mutable ultra::audio::ChannelBusyDetector channel_busy_detector_;
 };
 
 /**
@@ -388,6 +406,7 @@ public:
     static constexpr int SAMPLES_PER_CALLBACK = 480;  // 10ms
     static constexpr int CALLBACK_INTERVAL_MS = 10;
     static constexpr int TX_CONTINUATION_GRACE_MS = CALLBACK_INTERVAL_MS * 2;
+    static constexpr uint32_t DEFAULT_TR_GUARD_MS = 50;
 
     SimulatedStation(const std::string& callsign, std::unique_ptr<AudioPort> port,
                      OFDMConfigPreset ofdm_config_preset = OFDMConfigPreset::Default,
@@ -577,6 +596,7 @@ public:
     void setTxTrSwitchMs(uint32_t ms) { ptt_.setTxTrSwitchMs(ms); }
     void setTxCooldownMs(uint32_t ms) { ptt_.setTxCooldownMs(ms); }
     void setRxSettlingMs(uint32_t ms) { ptt_.setRecoveryTimings(ms, 0); }
+    void setCarrierSenseGuardMs(uint32_t ms) { tx_turnaround_guard_ms_ = ms; }
     PttState pttState() const {
         return ptt_.state();
     }
@@ -712,6 +732,7 @@ private:
     std::atomic<bool> running_{false};
     std::thread audio_thread_;
     std::thread decode_thread_;
+    std::thread::id audio_thread_id_{};
     // Real-time tick accounting (see tick() above).
     std::chrono::steady_clock::time_point last_tick_time_{};
 
@@ -734,6 +755,7 @@ private:
     // reopens RX while holding off the next TX keying edge.
     RadioPttStateMachine ptt_{SAMPLE_RATE};
     std::atomic<uint64_t> tx_continuation_grace_samples_{0};
+    uint32_t tx_turnaround_guard_ms_ = DEFAULT_TR_GUARD_MS;
 
     // State
     std::atomic<bool> connected_{false};
@@ -1476,11 +1498,27 @@ private:
         if (samples.empty()) {
             return;
         }
+
         if (pttState() == PttState::RX && hasDeferredTxSubmission()) {
             deferTxSubmission(samples, label);
             flushDeferredTxIfReady();
             return;
         }
+
+        if (pttState() == PttState::RX && !channelIdleForTxGuard()) {
+            if (isAudioThread()) {
+                deferTxSubmission(samples, label);
+                return;
+            }
+
+            waitForChannelIdleBeforeTx(label);
+            if (pttState() == PttState::RX && hasDeferredTxSubmission()) {
+                deferTxSubmission(samples, label);
+                flushDeferredTxIfReady();
+                return;
+            }
+        }
+
         if (!canAcceptTxSubmission()) {
             deferTxSubmission(samples, label);
             return;
@@ -1568,6 +1606,9 @@ private:
         if (!ptt_.isReadyForNextTx()) {
             return;
         }
+        if (!channelIdleForTxGuard()) {
+            return;
+        }
 
         DeferredTxSubmission submission;
         {
@@ -1579,6 +1620,39 @@ private:
             deferred_tx_submissions_.pop_front();
         }
         submitTxNow(submission.samples, submission.label);
+    }
+
+    bool isAudioThread() const {
+        return audio_thread_id_ != std::thread::id{} &&
+               std::this_thread::get_id() == audio_thread_id_;
+    }
+
+    bool channelIdleForTxGuard() const {
+        return !port_ || port_->isChannelIdleFor(tx_turnaround_guard_ms_);
+    }
+
+    bool waitForChannelIdleBeforeTx(const std::string& label) {
+        if (!port_) {
+            return true;
+        }
+        if (port_->isChannelIdleFor(tx_turnaround_guard_ms_)) {
+            return true;
+        }
+
+        LOG_MODEM(INFO,
+                  "[%s] Carrier sense waiting for idle channel before TX "
+                  "(guard=%ums label=%s rms=%.4f)",
+                  callsign_.c_str(), tx_turnaround_guard_ms_,
+                  label.empty() ? "-" : label.c_str(), port_->channelRms());
+        const bool idle = port_->waitForChannelIdle(tx_turnaround_guard_ms_);
+        if (!idle) {
+            LOG_MODEM(WARN,
+                      "[%s] Carrier sense wait timed out; submitting TX after fail-safe "
+                      "(guard=%ums label=%s rms=%.4f)",
+                      callsign_.c_str(), tx_turnaround_guard_ms_,
+                      label.empty() ? "-" : label.c_str(), port_->channelRms());
+        }
+        return idle;
     }
 
     void submitTxNow(const std::vector<float>& samples, const std::string& label) {
@@ -1624,6 +1698,7 @@ private:
     // THE AUDIO LOOP - like a real sound card callback
     void audioLoop() {
         ultra::setLogStationTag(callsign_.c_str());
+        audio_thread_id_ = std::this_thread::get_id();
         auto next_callback = std::chrono::steady_clock::now();
         int callback_count = 0;
 
@@ -1754,9 +1829,12 @@ inline bool AudioPort::attachedRadioInRxBlackout() const {
 inline std::vector<float> AudioPort::shapeRxForLocalRadio(
     std::vector<float> samples,
     size_t count) const {
-    if (attachedRadioInRxBlackout()) {
+    const bool rx_blackout = attachedRadioInRxBlackout();
+    if (rx_blackout) {
+        channel_busy_detector_.observeRms(0.0f, true);
         return std::vector<float>(count, 0.0f);
     }
     samples.resize(count, 0.0f);
+    channel_busy_detector_.observeSamples(samples, false);
     return samples;
 }
