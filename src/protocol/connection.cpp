@@ -1654,19 +1654,20 @@ void Connection::configureArqForCurrentDataMode() {
 
         const auto timing = connection_policy::wideOFDMFrameTiming(
             data_modulation_, data_code_rate_, data_frame_cw_count_);
+        constexpr int kWideOFDMAckRepeatCount = 3;
         const uint32_t sack_delay_ms = connection_policy::wideOFDMSackDelayMs(
             data_modulation_, data_code_rate_, arq_.getWindowSize(),
             data_frame_cw_count_);
         arq_.setSackDelay(sack_delay_ms);
         arq_.setSackDelayShort(0);
-        arq_.setAckRepeatCount(connection_policy::kCarrierSenseAckRepeatCount);
+        arq_.setAckRepeatCount(kWideOFDMAckRepeatCount);
 
         uint32_t ack_timeout_ms = connection_policy::computeWideOFDMAckTimeoutMs(
             data_modulation_,
             data_code_rate_,
             arq_.getWindowSize(),
             arq_.getSackDelay(),
-            connection_policy::kCarrierSenseAckRepeatCount,
+            kWideOFDMAckRepeatCount,
             data_frame_cw_count_);
         arq_.setAckTimeout(ack_timeout_ms);
 
@@ -1676,11 +1677,11 @@ void Connection::configureArqForCurrentDataMode() {
                   ack_timeout_ms / 1000.0f,
                   timing.data_ms,
                   timing.ack_ms,
-                  connection_policy::kCarrierSenseAckRepeatCount,
+                  kWideOFDMAckRepeatCount,
                   arq_.getMaxRetries(),
                   arq_.getAckBatchSize(),
                   arq_.getSackDelay(),
-                  connection_policy::kCarrierSenseAckRepeatCount,
+                  kWideOFDMAckRepeatCount,
                   data_frame_cw_count_,
                   modulationToString(data_modulation_),
                   codeRateToString(data_code_rate_));

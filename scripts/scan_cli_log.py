@@ -23,6 +23,7 @@ from pathlib import Path
 ANSI = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 RE_HEADER_SNR = re.compile(r"SNR:\s+(-?\d+(?:\.\d+)?)\s+dB")
 RE_HEADER_CHANNEL = re.compile(r"Channel:\s+(AWGN|Good|Moderate|Poor)")
+RE_MCDPSK_RAW_BPS = re.compile(r"MC-DPSK:\s+.*raw=(\d+(?:\.\d+)?)\s+bps")
 RE_HARQ_ENABLED = re.compile(r"RX soft-combining HARQ ENABLED")
 RE_CONNECT_START = re.compile(r"PHASE 1: CONNECTION")
 RE_CONNECT_DONE = re.compile(r"Both stations connected!")
@@ -61,6 +62,28 @@ def fmt_hz(values):
     if not values:
         return "—"
     return f"min={min(values):+.2f} max={max(values):+.2f} span={max(values)-min(values):.2f}"
+
+
+def handshake_budget_seconds(text: str) -> float:
+    """Return a physics-aware cold-call handshake budget for this log.
+
+    The default 5s budget catches the original queue-inflated fail-safe issue
+    for fast control paths. The MC-DPSK cold-call path used by cli_simulator can
+    be intentionally much slower: robust_mid is 375 bps and its real on-air
+    PING/PONG/CONNECT/CONNECT_ACK exchange is about 16-20s without any TX queue
+    artifact. Keep that from being reported as a simulator anomaly while still
+    flagging explicit handshake fail-safes below.
+    """
+    raw_match = RE_MCDPSK_RAW_BPS.search(text)
+    if not raw_match:
+        return 5.0
+
+    raw_bps = float(raw_match.group(1))
+    if raw_bps <= 500.0:
+        return 25.0
+    if raw_bps <= 1000.0:
+        return 15.0
+    return 8.0
 
 
 # ---- main scan --------------------------------------------------------
@@ -148,15 +171,22 @@ def scan(path: Path) -> int:
 
     anomalies: list[str] = []
 
-    # 1. Slow handshake.
+    # 1. Slow handshake / fail-safe.
+    handshake_budget = handshake_budget_seconds(text)
     if handshake_secs is not None:
-        if handshake_secs > 5.0:
+        if failsafe_count > 0:
             anomalies.append(
-                f"Handshake duration: {handshake_secs:.1f}s (expected <5s)"
-                + (f", {failsafe_count} fail-safe trigger(s) fired" if failsafe_count else "")
+                f"Handshake duration: {handshake_secs:.1f}s, "
+                f"{failsafe_count} fail-safe trigger(s) fired"
+            )
+        elif handshake_secs > handshake_budget:
+            anomalies.append(
+                f"Handshake duration: {handshake_secs:.1f}s "
+                f"(budget {handshake_budget:.1f}s for this control PHY)"
             )
         else:
-            print(f"  ✓ Handshake: {handshake_secs:.1f}s")
+            print(f"  ✓ Handshake: {handshake_secs:.1f}s "
+                  f"(budget {handshake_budget:.1f}s)")
     elif failsafe_count > 0:
         anomalies.append(f"{failsafe_count} handshake fail-safe trigger(s)")
 

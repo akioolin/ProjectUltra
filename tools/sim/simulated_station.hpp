@@ -1757,6 +1757,9 @@ private:
         if (txContinuationGraceActive() && !hasLocalTxQueued()) {
             return true;
         }
+        if (postTxAckListenActive()) {
+            return false;
+        }
         return state == PttState::RX && !hasLocalTxQueued();
     }
 
@@ -1910,6 +1913,9 @@ private:
 
     void flushDeferredTxIfReady() {
         if (!ptt_.isReadyForNextTx()) {
+            return;
+        }
+        if (postTxAckListenActive()) {
             return;
         }
         if (hasLocalTxQueued()) {

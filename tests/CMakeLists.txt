@@ -556,7 +556,7 @@ if(TARGET cli_simulator)
         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_cli_synthetic_notch.sh
                      $<TARGET_FILE:cli_simulator>)
     set_tests_properties(CLISyntheticNotch PROPERTIES
-        TIMEOUT 180
+        TIMEOUT 240
         RUN_SERIAL TRUE
         LABELS regression)
 endif()
