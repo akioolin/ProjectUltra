@@ -108,6 +108,10 @@ struct ConnectionAdaptiveTestAccess {
         c.enterConnected();
     }
 
+    static void transmitFrame(Connection& c, const Bytes& frame) {
+        c.transmitFrame(frame);
+    }
+
     static bool connectAckRescueArmed(const Connection& c) {
         return !c.connect_ack_frame_.empty() || c.connect_ack_retx_remaining_ > 0 ||
                c.connect_ack_retransmit_ms_ > 0;
@@ -202,6 +206,18 @@ struct ConnectionAdaptiveTestAccess {
         return c.arq_.getCodeRate();
     }
 
+    static uint32_t arqSackDelay(const Connection& c) {
+        return c.arq_.getSackDelay();
+    }
+
+    static uint32_t arqSackDelayShort(const Connection& c) {
+        return c.arq_.getSackDelayShort();
+    }
+
+    static uint32_t arqAckTimeout(const Connection& c) {
+        return c.arq_.getAckTimeout();
+    }
+
     static void forceCodeRate(Connection& c, CodeRate rate) {
         c.config_.forced_code_rate = rate;
     }
@@ -247,6 +263,27 @@ void test_remote_mode_change_reconfigures_arq() {
           "remote MODE_CHANGE should recompute ARQ window");
 }
 
+void test_wide_ofdm_configures_short_tail_sack_delay() {
+    Connection c;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_4, 10.0f, 0.05f);
+
+    const uint32_t long_delay = ConnectionAdaptiveTestAccess::arqSackDelay(c);
+    const uint32_t tail_delay = ConnectionAdaptiveTestAccess::arqSackDelayShort(c);
+
+    CHECK(tail_delay == connection_policy::wideOFDMSackTailDelayMs(),
+          "wide OFDM should use the derived short SACK delay at stream tail");
+    CHECK(tail_delay == connection_policy::kCarrierSenseSackCoalesceMs,
+          "wide OFDM tail SACK delay should be carrier-sense coalescing only");
+    CHECK(long_delay > tail_delay,
+          "wide OFDM in-burst physical SACK hold should remain longer than tail delay");
+    CHECK(ConnectionAdaptiveTestAccess::arqAckTimeout(c) ==
+              connection_policy::computeWideOFDMAckTimeoutMs(
+                  Modulation::DQPSK, CodeRate::R1_4,
+                  ConnectionAdaptiveTestAccess::arqWindow(c),
+                  long_delay, 3, v2::kDefaultFixedFrameCodewords),
+          "wide OFDM ACK timeout should remain derived from the long physical SACK hold");
+}
+
 void test_accepted_ofdm_data_sync_clears_connect_ack_rescue() {
     Connection c;
     ConnectionAdaptiveTestAccess::makeResponderWithConnectAckRescue(c);
@@ -278,6 +315,57 @@ void test_ofdm_connected_entry_does_not_emit_unsolicited_timing_anchor() {
     ConnectionAdaptiveTestAccess::enterConnected(c);
     CHECK(tx_frames.empty(),
           "connected OFDM entry should not emit an unsolicited KEEPALIVE anchor");
+}
+
+void test_normal_ofdm_ack_arms_full_anchor_expectation() {
+    Connection c;
+    std::vector<Bytes> tx_frames;
+    int full_anchor_expectations = 0;
+    c.setTransmitCallback([&](const Bytes& data) {
+        tx_frames.push_back(data);
+    });
+    c.setFullOFDMAnchorExpectedCallback([&]() {
+        ++full_anchor_expectations;
+    });
+    ConnectionAdaptiveTestAccess::makeConnectedInitiator(c, WaveformMode::OFDM_CHIRP);
+
+    auto ack = v2::ControlFrame::makeAck("W1ABC", "K2DEF", 7);
+    ConnectionAdaptiveTestAccess::transmitFrame(c, ack.serialize());
+    CHECK(tx_frames.size() == 1, "normal ACK should still transmit through Connection");
+    CHECK(full_anchor_expectations == 1,
+          "normal connected OFDM ACK should arm full-anchor expectation");
+
+    auto connect_ack_sentinel = v2::ControlFrame::makeAck("W1ABC", "K2DEF", 0xFFFF);
+    ConnectionAdaptiveTestAccess::transmitFrame(c, connect_ack_sentinel.serialize());
+    CHECK(full_anchor_expectations == 1,
+          "CONNECT_ACK sentinel seq=65535 must not arm full-anchor expectation");
+
+    Connection metadata;
+    int metadata_expectations = 0;
+    int immediate_expectations = 0;
+    metadata.setTransmitInfoCallback([&](const Bytes&, bool expect_full_anchor_after_tx) {
+        if (expect_full_anchor_after_tx) {
+            ++metadata_expectations;
+        }
+    });
+    metadata.setFullOFDMAnchorExpectedCallback([&]() {
+        ++immediate_expectations;
+    });
+    ConnectionAdaptiveTestAccess::makeConnectedInitiator(metadata, WaveformMode::OFDM_CHIRP);
+    ConnectionAdaptiveTestAccess::transmitFrame(metadata, ack.serialize());
+    CHECK(metadata_expectations == 1,
+          "Connection should attach full-anchor expectation metadata to normal OFDM ACK");
+    CHECK(immediate_expectations == 0,
+          "metadata TX callback should defer full-anchor application to the transport TX edge");
+
+    Connection mcdpsk;
+    mcdpsk.setFullOFDMAnchorExpectedCallback([&]() {
+        ++full_anchor_expectations;
+    });
+    ConnectionAdaptiveTestAccess::makeConnectedInitiator(mcdpsk, WaveformMode::MC_DPSK);
+    ConnectionAdaptiveTestAccess::transmitFrame(mcdpsk, ack.serialize());
+    CHECK(full_anchor_expectations == 1,
+          "non-OFDM ACK must not arm full-anchor expectation");
 }
 
 void test_adaptive_upgrade_requires_backlog_and_clean_windows() {
@@ -556,9 +644,11 @@ void test_forced_rate_disables_adaptive_controller() {
 int main() {
     test_local_mode_change_ack_reconfigures_arq();
     test_remote_mode_change_reconfigures_arq();
+    test_wide_ofdm_configures_short_tail_sack_delay();
     test_accepted_ofdm_data_sync_clears_connect_ack_rescue();
     test_accepted_ofdm_data_sync_does_not_clear_non_ofdm_rescue();
     test_ofdm_connected_entry_does_not_emit_unsolicited_timing_anchor();
+    test_normal_ofdm_ack_arms_full_anchor_expectation();
     test_adaptive_upgrade_requires_backlog_and_clean_windows();
     test_adaptive_upgrade_skips_small_backlog();
     test_adaptive_downgrade_hysteresis_and_short_lockout_upgrade();

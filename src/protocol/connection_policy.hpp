@@ -319,6 +319,10 @@ inline uint32_t wideOFDMSackDelayMs(Modulation mod,
     return burst_ms + kCarrierSenseSackCoalesceMs;
 }
 
+inline uint32_t wideOFDMSackTailDelayMs() {
+    return kCarrierSenseSackCoalesceMs;
+}
+
 // Recommend fixed-frame CW count for a given OFDM data rate + waveform.
 // Inputs are deterministic and shared by both peers (rate is negotiated;
 // waveform is negotiated too) so both peers compute the same CW count

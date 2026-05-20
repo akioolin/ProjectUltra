@@ -9,6 +9,7 @@
 #include <cmath>
 #include <functional>
 #include <string>
+#include <utility>
 
 namespace ultra {
 namespace protocol {
@@ -72,6 +73,8 @@ class Connection {
 public:
     // Callback types - all use serialized Bytes (v2 frames)
     using TransmitCallback = std::function<void(const Bytes&)>;
+    using TransmitInfoCallback =
+        std::function<void(const Bytes&, bool expect_full_ofdm_anchor_after_tx)>;
     using ConnectedCallback = std::function<void()>;
     using DisconnectedCallback = std::function<void(const std::string& reason)>;
     using MessageReceivedCallback = std::function<void(const std::string& text)>;
@@ -137,6 +140,7 @@ public:
     // --- Callbacks ---
 
     void setTransmitCallback(TransmitCallback cb);
+    void setTransmitInfoCallback(TransmitInfoCallback cb);
 
     // Burst mode TX callback - transmits multiple frames as single audio burst.
     // Used for OFDM connected mode and MC-DPSK DATA file-window bursts.
@@ -207,6 +211,13 @@ public:
     // For responder: called when first frame received after sending CONNECT_ACK
     using HandshakeConfirmedCallback = std::function<void()>;
     void setHandshakeConfirmedCallback(HandshakeConfirmedCallback cb) { on_handshake_confirmed_ = cb; }
+
+    // Callback when the protocol has just emitted an OFDM ACK that makes the
+    // peer's next DATA turn likely to begin with a full OFDM anchor.
+    using FullOFDMAnchorExpectedCallback = std::function<void()>;
+    void setFullOFDMAnchorExpectedCallback(FullOFDMAnchorExpectedCallback cb) {
+        on_full_ofdm_anchor_expected_ = std::move(cb);
+    }
 
     // Callback when the connection-attempt waveform changes.
     using ConnectWaveformChangedCallback = std::function<void(WaveformMode mode)>;
@@ -432,6 +443,7 @@ private:
 
     // Callbacks
     TransmitCallback on_transmit_;
+    TransmitInfoCallback on_transmit_info_;
     ConnectedCallback on_connected_;
     DisconnectedCallback on_disconnected_;
     MessageReceivedCallback on_message_received_;
@@ -443,6 +455,7 @@ private:
     ConnectWaveformChangedCallback on_connect_waveform_changed_;
     PhyMaskV1NegotiatedCallback on_phy_mask_v1_negotiated_;
     HandshakeConfirmedCallback on_handshake_confirmed_;
+    FullOFDMAnchorExpectedCallback on_full_ofdm_anchor_expected_;
     PingTxCallback on_ping_tx_;
     PingReceivedCallback on_ping_received_;
     StateChangedCallback on_state_changed_;

@@ -1119,8 +1119,8 @@ bool test_cumulative_ack_repeat_coalesces_superseded_state() {
 // Stream-aware SACK timer tests (post-Phase 3 plan)
 // ============================================================================
 
-bool test_sack_timer_more_frag_short_collapses_long() {
-    TEST("MORE_FRAG=0 frame collapses long timer to short via std::min");
+bool test_sack_timer_final_short_collapses_long() {
+    TEST("FINAL frame collapses long timer to short via std::min");
 
     ARQConfig config;
     config.window_size = 4;
@@ -1140,14 +1140,48 @@ bool test_sack_timer_more_frag_short_collapses_long() {
     if (channel.size() != 0)
         FAIL("Long timer fired prematurely after 60ms");
 
-    // Frame 1 with MORE_FRAG=0 → pick_ms=50, std::min(440, 50) = 50
+    // Frame 1 with FINAL → pick_ms=50, std::min(440, 50) = 50
     auto f1 = v2::DataFrame::makeData("TX1", "RX1", 1, Bytes{1});
-    // (no MORE_FRAG flag = end-of-burst)
+    f1.flags |= v2::Flags::FINAL;
     rx.onFrameReceived(f1.serialize());
     rx.tick(60);  // 50 - 60 ≤ 0 → fires
     if (channel.size() != 1)
         FAIL("Short-collapsed timer did not fire after 60ms tick (got " +
              std::to_string(channel.size()) + " SACKs)");
+
+    PASS();
+    return true;
+}
+
+bool test_sack_timer_message_boundary_uses_long_without_final() {
+    TEST("MORE_FRAG=0 message boundary uses long timer unless FINAL is set");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.sack_delay_ms = 500;
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+    rx.setSackDelayShort(50);
+
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    auto f0 = v2::DataFrame::makeData("TX1", "RX1", 0, Bytes{0});
+    f0.flags |= v2::Flags::MORE_FRAG;
+    rx.onFrameReceived(f0.serialize());
+    rx.tick(60);  // 440ms remaining on the long timer
+
+    auto f1 = v2::DataFrame::makeData("TX1", "RX1", 1, Bytes{1});
+    // No MORE_FRAG, but also no FINAL: this can be an ordinary message
+    // boundary inside a multi-message physical burst.
+    rx.onFrameReceived(f1.serialize());
+    rx.tick(60);
+    if (channel.size() != 0)
+        FAIL("Non-FINAL message boundary incorrectly used short SACK timer");
+
+    rx.tick(400);
+    if (channel.size() != 1)
+        FAIL("Long SACK timer did not fire for non-FINAL message boundary");
 
     PASS();
     return true;
@@ -1184,7 +1218,7 @@ bool test_sack_timer_more_frag_does_not_extend() {
 }
 
 bool test_sack_delay_short_zero_sentinel_preserves_legacy() {
-    TEST("sack_delay_short=0 sentinel uses sack_delay_ms regardless of MORE_FRAG");
+    TEST("sack_delay_short=0 sentinel uses sack_delay_ms even for FINAL");
 
     ARQConfig config;
     config.window_size = 4;
@@ -1196,9 +1230,10 @@ bool test_sack_delay_short_zero_sentinel_preserves_legacy() {
     ByteChannel channel;
     rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
 
-    // MORE_FRAG=0 frame — under sentinel should arm at 120ms (sack_delay_ms),
-    // not at 0 or any short-override value.
+    // FINAL frame — under sentinel should arm at 120ms (sack_delay_ms), not
+    // at 0 or any short-override value.
     auto f0 = v2::DataFrame::makeData("TX1", "RX1", 0, Bytes{0});
+    f0.flags |= v2::Flags::FINAL;
     rx.onFrameReceived(f0.serialize());
     rx.tick(50);
     if (channel.size() != 0)
@@ -1411,7 +1446,8 @@ int main() {
     test_cumulative_ack_repeat_coalesces_superseded_state();
 
     std::cout << "\nStream-Aware SACK Timer Tests:\n";
-    test_sack_timer_more_frag_short_collapses_long();
+    test_sack_timer_final_short_collapses_long();
+    test_sack_timer_message_boundary_uses_long_without_final();
     test_sack_timer_more_frag_does_not_extend();
     test_sack_delay_short_zero_sentinel_preserves_legacy();
 

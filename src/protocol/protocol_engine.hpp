@@ -46,7 +46,8 @@ using ProtocolEngineMutex = std::mutex;
  */
 class ProtocolEngine {
 public:
-    using TxDataCallback = std::function<void(const Bytes& data)>;
+    using TxDataCallback =
+        std::function<void(const Bytes& data, bool expect_full_ofdm_anchor_after_tx)>;
     using MessageReceivedCallback = std::function<void(const std::string& from, const std::string& text)>;
     using ConnectionChangedCallback = std::function<void(ConnectionState state, const std::string& remote)>;
     using IncomingCallCallback = std::function<void(const std::string& from)>;
@@ -211,10 +212,14 @@ private:
 
     Bytes rx_buffer_;
 
-    std::vector<Bytes> tx_queue_;
+    struct PendingTxFrame {
+        Bytes data;
+        bool expect_full_ofdm_anchor_after_tx = false;
+    };
+    std::vector<PendingTxFrame> tx_queue_;
     bool defer_tx_ = false;
 
-    void handleTxFrame(const Bytes& frame_data);
+    void handleTxFrame(const Bytes& frame_data, bool expect_full_ofdm_anchor_after_tx);
     void processRxBuffer();
 };
 

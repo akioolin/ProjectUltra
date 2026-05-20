@@ -200,7 +200,7 @@ public:
     SimulatedChannel(ProtocolEngine& stationA, ProtocolEngine& stationB)
         : stationA_(stationA), stationB_(stationB) {
 
-        stationA_.setTxDataCallback([this](const Bytes& data) {
+        stationA_.setTxDataCallback([this](const Bytes& data, bool) {
             if (verbose_) {
                 std::cout << "    [A->B] " << data.size() << " bytes\n";
             }
@@ -210,7 +210,7 @@ public:
             }
         });
 
-        stationB_.setTxDataCallback([this](const Bytes& data) {
+        stationB_.setTxDataCallback([this](const Bytes& data, bool) {
             if (verbose_) {
                 std::cout << "    [B->A] " << data.size() << " bytes\n";
             }

@@ -101,12 +101,12 @@ void test_ack_dedup_policy() {
 void test_sack_timer_policy() {
     CHECK(sackTimerForFrame(0, 500, 0, false) == 500,
           "zero short sentinel should use normal delay");
-    CHECK(sackTimerForFrame(0, 500, 50, true) == 500,
-          "MORE_FRAG should use long delay");
-    CHECK(sackTimerForFrame(0, 500, 50, false) == 50,
-          "tail frame should use short delay");
-    CHECK(sackTimerForFrame(440, 500, 50, false) == 50,
-          "tail frame should collapse existing long timer");
+    CHECK(sackTimerForFrame(0, 500, 50, false) == 500,
+          "regular frame should use long delay");
+    CHECK(sackTimerForFrame(0, 500, 50, true) == 50,
+          "explicit tail frame should use short delay");
+    CHECK(sackTimerForFrame(440, 500, 50, true) == 50,
+          "explicit tail frame should collapse existing long timer");
     CHECK(sackTimerForFrame(50, 500, 0, true) == 50,
           "new in-burst frame should not extend existing timer");
 }

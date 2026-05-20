@@ -428,8 +428,13 @@ private:
     }
 
     void setupCallbacks() {
-        engine_.setTxDataCallback([this](const Bytes& data) {
-            queueTx(transmitFrame(data));
+        engine_.setTxDataCallback([this](const Bytes& data,
+                                         bool expect_full_ofdm_anchor_after_tx) {
+            auto samples = transmitFrame(data);
+            queueTx(samples);
+            if (!samples.empty() && expect_full_ofdm_anchor_after_tx) {
+                decoder_.expectFullOFDMAnchorOnce();
+            }
         });
 
         engine_.setTransmitBurstCallback([this](const std::vector<Bytes>& frames) {

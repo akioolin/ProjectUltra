@@ -389,6 +389,7 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
     // logic below needs the value of THIS frame, not whichever frame
     // advanceRXWindow happened to deliver last.
     const bool frame_more_frag = (frame.flags & v2::Flags::MORE_FRAG) != 0;
+    const bool frame_final = (frame.flags & v2::Flags::FINAL) != 0;
 
     uint16_t seq = frame.seq;
 
@@ -430,8 +431,10 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
         //   still-arriving physical burst. MC-DPSK continuous-burst mode can
         //   opt out because decoded frames share one physical preamble and
         //   arrive only as the sample cursor reaches them.
-        // - At stream tail, threshold ACKs fire immediately; otherwise the
-        //   short delayed timer covers the final partial batch.
+        // - At message/stream tail, threshold ACKs fire immediately; otherwise
+        //   only an explicit FINAL marker can use the short delayed timer. A
+        //   plain MORE_FRAG=0 boundary may be just one message inside a still
+        //   arriving physical burst.
         if (new_frame) {
             frames_since_ack_++;
         }
@@ -455,14 +458,14 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
             frames_since_ack_ = 0;
         } else if (new_frame) {
             sack_pending_ = true;
-            // Stream-aware timer: in-burst frames (MORE_FRAG=1) get the
-            // long delay (sack_delay_ms); end-of-burst (MORE_FRAG=0) gets
-            // the short delay so the sender's window advances promptly.
-            // Sentinel sack_delay_short_ms_ = 0 → use sack_delay_ms for
-            // both legs (legacy behavior bit-for-bit).
+            // Stream-aware timer: regular frames get the long physical burst
+            // delay; explicit FINAL frames can use the short tail delay so the
+            // sender's window advances promptly after the actual stream tail.
+            // Sentinel sack_delay_short_ms_ = 0 preserves legacy long-delay
+            // behavior for every frame.
             sack_timer_ms_ = arq_policy::sackTimerForFrame(
                 sack_timer_ms_, config_.sack_delay_ms, sack_delay_short_ms_,
-                frame_more_frag);
+                frame_final);
         }
 
     } else {
@@ -1119,6 +1122,9 @@ void SelectiveRepeatARQ::advanceRXWindow() {
         last_rx_flags_ = rx_window_[slot].flags;
         last_rx_more_data_ = (rx_window_[slot].flags & v2::Flags::MORE_FRAG) != 0;
         last_rx_frame_type_ = rx_window_[slot].type;
+        if ((rx_window_[slot].flags & v2::Flags::FINAL) != 0) {
+            rx_final_delivered_since_sack_ = true;
+        }
 
         if (on_data_received_) {
             on_data_received_(rx_window_[slot].payload);
@@ -1231,11 +1237,15 @@ void SelectiveRepeatARQ::sendSack() {
                                             bitmap);
     // Override type to ACK for cumulative ack behavior
     sack.type = v2::FrameType::ACK;
+    if (rx_final_delivered_since_sack_) {
+        sack.flags |= v2::Flags::FINAL;
+    }
 
     stats_.sacks_sent++;
     stats_.acks_sent++;
 
     auto data = sack.serialize();
+    rx_final_delivered_since_sack_ = false;
 
     LOG_MODEM(INFO, "SR-ARQ: Sent SACK base=%d bitmap=0x%08X",
               base_seq, bitmap);
@@ -1455,6 +1465,7 @@ void SelectiveRepeatARQ::reset() {
     last_rx_more_data_ = false;
     last_rx_flags_ = 0;
     last_rx_frame_type_ = v2::FrameType::DATA;
+    rx_final_delivered_since_sack_ = false;
 
     sack_pending_ = false;
     sack_timer_ms_ = 0;

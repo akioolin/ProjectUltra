@@ -31,6 +31,7 @@ void copySNRMetrics(LoopbackStats& stats, const DecodeResult& result) {
     stats.ofdm_internal_snr_db = result.ofdm_internal_snr_db;
     stats.sync_quality_db = result.sync_quality_db;
 }
+
 }
 
 ModemEngine::ModemEngine()

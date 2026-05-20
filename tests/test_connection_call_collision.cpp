@@ -27,12 +27,12 @@ class SimulatedChannel {
 public:
     SimulatedChannel(ProtocolEngine& station_a, ProtocolEngine& station_b)
         : station_a_(station_a), station_b_(station_b) {
-        station_a_.setTxDataCallback([this](const Bytes& data) {
+        station_a_.setTxDataCallback([this](const Bytes& data, bool) {
             recordFrame(data);
             pending_b_.push(data);
         });
 
-        station_b_.setTxDataCallback([this](const Bytes& data) {
+        station_b_.setTxDataCallback([this](const Bytes& data, bool) {
             recordFrame(data);
             pending_a_.push(data);
         });

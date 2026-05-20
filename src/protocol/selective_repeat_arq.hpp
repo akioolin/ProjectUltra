@@ -119,9 +119,10 @@ public:
     void setSackDelay(uint32_t ms) { config_.sack_delay_ms = std::max(1u, ms); }
     uint32_t getSackDelay() const { return config_.sack_delay_ms; }
 
-    // Stream-aware tail-of-burst override: when set to nonzero, end-of-burst
-    // frames (MORE_FRAG=0) arm the SACK timer at this shorter delay instead of
-    // sack_delay_ms. In-burst frames (MORE_FRAG=1) keep using sack_delay_ms.
+    // Stream-aware tail-of-burst override: when set to nonzero, frames
+    // explicitly marked FINAL arm the SACK timer at this shorter delay instead
+    // of sack_delay_ms. Ordinary MORE_FRAG=0 message boundaries are not enough:
+    // a multi-message physical burst can contain several such frames.
     // Sentinel 0 (default) preserves prior behavior bit-for-bit.
     void setSackDelayShort(uint32_t ms) { sack_delay_short_ms_ = ms; }
     uint32_t getSackDelayShort() const { return sack_delay_short_ms_; }
@@ -222,6 +223,7 @@ private:
     bool last_rx_more_data_ = false;
     uint8_t last_rx_flags_ = 0;
     v2::FrameType last_rx_frame_type_ = v2::FrameType::DATA;
+    bool rx_final_delivered_since_sack_ = false;
 
     // Delayed SACK for half-duplex (wait for burst to complete)
     bool sack_pending_ = false;     // SACK waiting to be sent

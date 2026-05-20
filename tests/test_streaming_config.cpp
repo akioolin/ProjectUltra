@@ -146,6 +146,31 @@ void test_forced_full_preamble_is_one_shot() {
     CHECK(light_again.size() == light.size(), "forced full preamble should be one-shot");
 }
 
+void test_multi_frame_ofdm_burst_starts_with_full_anchor() {
+    auto cfg = makeOFDMConfig(Modulation::DQPSK, CodeRate::R1_4);
+
+    StreamingEncoder encoder;
+    encoder.setMode(protocol::WaveformMode::OFDM_CHIRP);
+    encoder.setOFDMConfig(cfg);
+    encoder.setDataMode(Modulation::DQPSK, CodeRate::R1_4);
+
+    auto data = protocol::v2::makeFixedDataFrame(
+        "ALPHA", "BRAVO", 8, Bytes(16, 0x42), CodeRate::R1_4).serialize();
+
+    const auto full = encoder.encodeFrame(data);
+    const auto light = encoder.encodeFrameLight(data);
+    const auto burst = encoder.encodeBurstLight({data, data, data});
+    const auto light_after_burst = encoder.encodeFrameLight(data);
+
+    CHECK(!full.empty(), "full OFDM encode should produce samples");
+    CHECK(!light.empty(), "light OFDM encode should produce samples");
+    CHECK(full.size() > light.size(), "full OFDM preamble should be longer than data preamble");
+    CHECK(burst.size() == full.size() + 2 * light.size(),
+          "3-frame OFDM burst should use full anchor then light preambles");
+    CHECK(light_after_burst.size() == light.size(),
+          "multi-frame burst anchor should not leave one-shot full preamble armed");
+}
+
 }  // namespace
 
 int main() {
@@ -156,6 +181,7 @@ int main() {
     test_burst_group_clamps_match();
     test_decoder_buffer_capacity_policy();
     test_forced_full_preamble_is_one_shot();
+    test_multi_frame_ofdm_burst_starts_with_full_anchor();
 
     if (tests_failed != 0) {
         std::cout << "StreamingConfig: " << (tests_run - tests_failed)
