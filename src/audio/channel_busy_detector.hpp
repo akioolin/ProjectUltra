@@ -18,7 +18,7 @@ struct ChannelBusyDetectorConfig {
     uint32_t noise_floor_window_ms = 5000;
     uint32_t min_noise_floor_observations = 10;
     float noise_floor_percentile = 0.10f;
-    float quiet_noise_multiplier = 3.0f;
+    float quiet_noise_multiplier = 1.5f;
     uint32_t max_wait_for_idle_ms = 15000;
 };
 

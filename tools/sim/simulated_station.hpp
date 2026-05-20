@@ -732,7 +732,6 @@ private:
     std::atomic<bool> running_{false};
     std::thread audio_thread_;
     std::thread decode_thread_;
-    std::thread::id audio_thread_id_{};
     // Real-time tick accounting (see tick() above).
     std::chrono::steady_clock::time_point last_tick_time_{};
 
@@ -1506,17 +1505,8 @@ private:
         }
 
         if (pttState() == PttState::RX && !channelIdleForTxGuard()) {
-            if (isAudioThread()) {
-                deferTxSubmission(samples, label);
-                return;
-            }
-
-            waitForChannelIdleBeforeTx(label);
-            if (pttState() == PttState::RX && hasDeferredTxSubmission()) {
-                deferTxSubmission(samples, label);
-                flushDeferredTxIfReady();
-                return;
-            }
+            deferTxSubmission(samples, label);
+            return;
         }
 
         if (!canAcceptTxSubmission()) {
@@ -1528,8 +1518,7 @@ private:
 
     bool canAcceptTxSubmission() {
         const PttState state = pttState();
-        return state == PttState::RX || state == PttState::TX ||
-               txContinuationGraceActive();
+        return state == PttState::RX || txContinuationGraceActive();
     }
 
     bool txContinuationGraceActive() const {
@@ -1610,49 +1599,37 @@ private:
             return;
         }
 
-        DeferredTxSubmission submission;
-        {
-            std::lock_guard<std::mutex> lock(deferred_tx_mutex_);
-            if (deferred_tx_submissions_.empty()) {
-                return;
+        while (true) {
+            DeferredTxSubmission submission;
+            {
+                std::lock_guard<std::mutex> lock(deferred_tx_mutex_);
+                if (deferred_tx_submissions_.empty()) {
+                    return;
+                }
+                submission = std::move(deferred_tx_submissions_.front());
+                deferred_tx_submissions_.pop_front();
             }
-            submission = std::move(deferred_tx_submissions_.front());
-            deferred_tx_submissions_.pop_front();
+
+            if (isStaleDeferredTxSubmission(submission)) {
+                LOG_MODEM(INFO,
+                          "[%s] Dropping stale deferred TX: %s",
+                          callsign_.c_str(),
+                          submission.label.empty() ? "-" : submission.label.c_str());
+                continue;
+            }
+
+            submitTxNow(submission.samples, submission.label);
+            return;
         }
-        submitTxNow(submission.samples, submission.label);
     }
 
-    bool isAudioThread() const {
-        return audio_thread_id_ != std::thread::id{} &&
-               std::this_thread::get_id() == audio_thread_id_;
+    bool isStaleDeferredTxSubmission(const DeferredTxSubmission& submission) const {
+        return handshake_complete_.load(std::memory_order_relaxed) &&
+               submission.label.find("frame_type=CONNECT_ACK") != std::string::npos;
     }
 
     bool channelIdleForTxGuard() const {
         return !port_ || port_->isChannelIdleFor(tx_turnaround_guard_ms_);
-    }
-
-    bool waitForChannelIdleBeforeTx(const std::string& label) {
-        if (!port_) {
-            return true;
-        }
-        if (port_->isChannelIdleFor(tx_turnaround_guard_ms_)) {
-            return true;
-        }
-
-        LOG_MODEM(INFO,
-                  "[%s] Carrier sense waiting for idle channel before TX "
-                  "(guard=%ums label=%s rms=%.4f)",
-                  callsign_.c_str(), tx_turnaround_guard_ms_,
-                  label.empty() ? "-" : label.c_str(), port_->channelRms());
-        const bool idle = port_->waitForChannelIdle(tx_turnaround_guard_ms_);
-        if (!idle) {
-            LOG_MODEM(WARN,
-                      "[%s] Carrier sense wait timed out; submitting TX after fail-safe "
-                      "(guard=%ums label=%s rms=%.4f)",
-                      callsign_.c_str(), tx_turnaround_guard_ms_,
-                      label.empty() ? "-" : label.c_str(), port_->channelRms());
-        }
-        return idle;
     }
 
     void submitTxNow(const std::vector<float>& samples, const std::string& label) {
@@ -1698,7 +1675,6 @@ private:
     // THE AUDIO LOOP - like a real sound card callback
     void audioLoop() {
         ultra::setLogStationTag(callsign_.c_str());
-        audio_thread_id_ = std::this_thread::get_id();
         auto next_callback = std::chrono::steady_clock::now();
         int callback_count = 0;
 

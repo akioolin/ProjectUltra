@@ -104,6 +104,27 @@ void testAdaptiveNoiseFloorTreatsAwgnFloorAsIdle() {
     assert(detector.isIdle());
 }
 
+void testAdaptiveThresholdRejectsFadedCarrierDips() {
+    ChannelBusyDetectorConfig config = testConfig();
+    config.min_noise_floor_observations = 5;
+    ChannelBusyDetector detector(config);
+
+    for (int i = 0; i < 20; ++i) {
+        observe(detector, 0.050f, i * 10);
+    }
+    assert(detector.isIdle());
+
+    observe(detector, 0.220f, 300);
+    observe(detector, 0.180f, 310);
+    observe(detector, 0.120f, 320);
+    observe(detector, 0.095f, 330);
+    observe(detector, 0.090f, 340);
+    observe(detector, 0.105f, 350);
+    observe(detector, 0.130f, 360);
+    assert(!detector.isIdle());
+    assert(!detector.isIdleFor(std::chrono::milliseconds(50)));
+}
+
 void testWaitUntilIdleTimeoutAndGuard() {
     ChannelBusyDetector detector(testConfig());
     observe(detector, 0.050f, 0);
@@ -130,6 +151,7 @@ int main() {
     testMovingWindowAbsorbsShortDropout();
     testLocalTxBlackoutIsBusyRegardlessOfRms();
     testAdaptiveNoiseFloorTreatsAwgnFloorAsIdle();
+    testAdaptiveThresholdRejectsFadedCarrierDips();
     testWaitUntilIdleTimeoutAndGuard();
 
     std::cout << "ChannelBusyDetector tests passed\n";

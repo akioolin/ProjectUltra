@@ -7,7 +7,7 @@ if [[ $# -lt 1 ]]; then
 fi
 
 CLI_BIN="$1"
-LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/ultra_cli_notch.XXXXXX.log")"
+LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/ultra_cli_notch.XXXXXX")"
 trap 'rm -f "$LOG_FILE"' EXIT
 
 set +e
