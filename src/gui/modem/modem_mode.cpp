@@ -52,6 +52,9 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
         protocol::WaveformMode decoder_mode = connected_ ? mode : protocol::WaveformMode::MC_DPSK;
         if (connected_ && protocol::isOFDMMode(mode)) {
             streaming_decoder_->setConnectedOFDMMode(mode, config_, data_modulation_, data_code_rate_);
+            if (mode == protocol::WaveformMode::OFDM_CHIRP) {
+                streaming_decoder_->expectFullOFDMAnchorOnce();
+            }
             LOG_MODEM(INFO, "setWaveformMode: StreamingDecoder connected OFDM config set (FFT=%d, carriers=%d)",
                       config_.fft_size, config_.num_carriers);
         } else {
@@ -71,6 +74,9 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
         streaming_encoder_->setMode(mode);
         if (protocol::isOFDMMode(mode)) {
             streaming_encoder_->setOFDMConfig(config_);
+            if (connected_ && mode == protocol::WaveformMode::OFDM_CHIRP) {
+                streaming_encoder_->forceNextFrameFullPreamble();
+            }
         }
     }
 
@@ -159,6 +165,9 @@ void ModemEngine::setConnected(bool connected) {
                 streaming_decoder_->setKnownCFO(peer_cfo_hz_);
                 LOG_MODEM(INFO, "setConnected: seeded CFO=%.2f Hz from handshake", peer_cfo_hz_);
             }
+            if (waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP) {
+                streaming_decoder_->expectFullOFDMAnchorOnce();
+            }
         }
 
         // Update StreamingEncoder for connected state
@@ -167,6 +176,9 @@ void ModemEngine::setConnected(bool connected) {
             if (protocol::isOFDMMode(waveform_mode_)) {
                 streaming_encoder_->setOFDMConfig(config_);
                 streaming_encoder_->setDataMode(data_modulation_, data_code_rate_);
+                if (waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP) {
+                    streaming_encoder_->forceNextFrameFullPreamble();
+                }
             }
         }
 

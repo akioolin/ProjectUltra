@@ -88,6 +88,11 @@ public:
     // Only works if waveform supports data preamble
     std::vector<float> encodeFrameLight(const Bytes& frame_data);
 
+    // Force/mark the next OFDM frame encode as the full chirp+LTS anchor.
+    // Used once when entering connected OFDM so the receiver can establish an
+    // OFDM-specific timing anchor before switching to LTS-only warm sync.
+    void forceNextFrameFullPreamble() { force_full_preamble_once_ = true; }
+
     // Encode multiple frames as a single burst with one LTS preamble
     // Each frame gets its own training symbols for per-block channel estimation
     // Returns: [LTS] + [train+data_0] + [train+data_1] + ... + [train+data_N]
@@ -194,6 +199,7 @@ private:
     int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
     bool use_burst_interleave_ = false;    // Burst-level long interleaver (N-frame groups)
     int burst_group_size_ = 8;
+    bool force_full_preamble_once_ = false;
 
     // Logging
     std::string log_prefix_ = "StreamingEncoder";

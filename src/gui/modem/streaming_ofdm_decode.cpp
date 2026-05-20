@@ -548,6 +548,7 @@ void StreamingDecoder::decodeCurrentFrame() {
 
                         {
                             std::lock_guard<std::mutex> lock(buffer_mutex_);
+                            expect_full_ofdm_anchor_ = false;
                             correlation_pos_ = wrapRingIndexLocked(sync_position_ + frame_len);
                             setSearchFloorLocked(frame_sync_abs + frame_len);
                             last_decoded_sync_pos_ = sync_position_;
@@ -1260,6 +1261,11 @@ void StreamingDecoder::decodeCurrentFrame() {
         }
         if (resetDuringDecode()) {
             return;
+        }
+
+        if (result.success && connected_ && is_ofdm) {
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            expect_full_ofdm_anchor_ = false;
         }
 
         LOG_MODEM(INFO, "[%s] StreamingDecoder: Frame decoded, %d/%d CWs, SNR=%.1f dB (%s), CFO=%.1f Hz",

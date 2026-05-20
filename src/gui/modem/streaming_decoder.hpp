@@ -271,6 +271,10 @@ public:
     // Set known CFO (for testing or when CFO is known from other source)
     void setKnownCFO(float cfo_hz) { last_cfo_.store(cfo_hz); }
 
+    // Expect the next connected OFDM frame to carry full chirp+LTS preamble.
+    // This bootstraps OFDM-specific timing after an MC-DPSK handshake.
+    void expectFullOFDMAnchorOnce();
+
     // Get last measured fading index (from per-carrier magnitude variance)
     // 0-1 range, > 0.4 indicates significant fading
     float getLastFadingIndex() const { return last_fading_index_.load(); }
@@ -417,6 +421,7 @@ private:
     size_t last_decoded_sync_pos_ = SIZE_MAX;  // Last successfully decoded sync position (to prevent duplicates)
     size_t search_floor_abs_ = 0;     // Earliest absolute sample search may inspect
     bool search_floor_abs_valid_ = false;
+    bool expect_full_ofdm_anchor_ = false;
 
     // Reset generation counter - incremented on reset(), checked after slow operations
     // to detect if state was reset mid-operation (e.g., during correlation)

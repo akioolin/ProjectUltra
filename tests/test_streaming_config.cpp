@@ -124,6 +124,28 @@ void test_decoder_buffer_capacity_policy() {
     CHECK(rejected, "decoder should reject rings smaller than the sync search window");
 }
 
+void test_forced_full_preamble_is_one_shot() {
+    auto cfg = makeOFDMConfig(Modulation::DQPSK, CodeRate::R1_4);
+
+    StreamingEncoder encoder;
+    encoder.setMode(protocol::WaveformMode::OFDM_CHIRP);
+    encoder.setOFDMConfig(cfg);
+    encoder.setDataMode(Modulation::DQPSK, CodeRate::R1_4);
+
+    Bytes frame = protocol::v2::ControlFrame::makeAck("BRAVO", "ALPHA", 7).serialize();
+    auto light = encoder.encodeFrameLight(frame);
+
+    encoder.forceNextFrameFullPreamble();
+    auto forced_full = encoder.encodeFrameLight(frame);
+    auto light_again = encoder.encodeFrameLight(frame);
+
+    CHECK(!light.empty(), "light OFDM encode should produce samples");
+    CHECK(forced_full.size() > light.size(), "forced anchor should use a longer full preamble");
+    CHECK(forced_full.size() - light.size() >= 20000,
+          "forced anchor should include the OFDM chirp, not just LTS");
+    CHECK(light_again.size() == light.size(), "forced full preamble should be one-shot");
+}
+
 }  // namespace
 
 int main() {
@@ -133,6 +155,7 @@ int main() {
     test_coherent_ofdm_config_match();
     test_burst_group_clamps_match();
     test_decoder_buffer_capacity_policy();
+    test_forced_full_preamble_is_one_shot();
 
     if (tests_failed != 0) {
         std::cout << "StreamingConfig: " << (tests_run - tests_failed)

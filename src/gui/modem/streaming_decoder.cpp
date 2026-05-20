@@ -449,6 +449,7 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     state_ = DecoderState::SEARCHING;
     pending_total_cw_ = 0;
     sync_reject_streak_ = 0;
+    expect_full_ofdm_anchor_ = false;
     constellation_cache_.clear();
     constellation_cache_time_ = std::chrono::steady_clock::time_point{};
 
@@ -482,6 +483,18 @@ void StreamingDecoder::setCarrierLdpcInterleaver(bool enable) {
     if (waveform_) {
         waveform_->setCarrierLdpcInterleaverEnabled(enable);
     }
+}
+
+void StreamingDecoder::expectFullOFDMAnchorOnce() {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    if (!connected_ || mode_ != protocol::WaveformMode::OFDM_CHIRP) {
+        expect_full_ofdm_anchor_ = false;
+        return;
+    }
+
+    expect_full_ofdm_anchor_ = true;
+    sync_reject_streak_ = 0;
+    LOG_MODEM(INFO, "StreamingDecoder: expecting full OFDM chirp+LTS timing anchor");
 }
 
 void StreamingDecoder::setMCDPSKCarriers(int n) {
@@ -604,6 +617,7 @@ void StreamingDecoder::setConnectedOFDMMode(protocol::WaveformMode mode,
     state_ = DecoderState::SEARCHING;
     pending_total_cw_ = 0;
     sync_reject_streak_ = 0;
+    expect_full_ofdm_anchor_ = false;
     constellation_cache_.clear();
     constellation_cache_time_ = std::chrono::steady_clock::time_point{};
     burst_soft_buffer_.clear();
@@ -794,6 +808,7 @@ void StreamingDecoder::reset() {
     feed_iter_ = 0;
     overflow_events_ = 0;
     sync_reject_streak_ = 0;
+    expect_full_ofdm_anchor_ = false;
     state_ = DecoderState::SEARCHING;
     pending_total_cw_ = 0;
     burst_blocks_decoded_ = 0;

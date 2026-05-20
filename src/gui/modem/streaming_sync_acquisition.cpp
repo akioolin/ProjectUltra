@@ -174,7 +174,11 @@ void StreamingDecoder::searchForSync() {
     constexpr size_t LIGHT_SEARCH_SIZE = 9600;    // ~0.20s for connected LTS-only detection
 
     size_t chirp_min_search = std::min(preamble + 65000, CHIRP_MAX_SEARCH);
-    bool use_light_search = connected_ && waveform_->supportsDataPreamble();
+    bool connected_data_preamble = connected_ && waveform_->supportsDataPreamble();
+    bool use_full_ofdm_anchor_search =
+        connected_data_preamble && expect_full_ofdm_anchor_ &&
+        mode_ == protocol::WaveformMode::OFDM_CHIRP;
+    bool use_light_search = connected_data_preamble && !use_full_ofdm_anchor_search;
     size_t min_search = use_light_search ? LIGHT_SEARCH_SIZE : chirp_min_search;
 
     std::vector<float> search_buffer;
@@ -270,7 +274,7 @@ void StreamingDecoder::searchForSync() {
             if (audio_activity_.load(std::memory_order_relaxed)) {
                 rms_gate = std::min(rms_gate, 0.012f);
             }
-        } else if (connected_ && waveform_->supportsDataPreamble()) {
+        } else if (connected_data_preamble) {
             float noise_floor = std::max(0.001f, noise_floor_);
             if (rms < noise_floor * 3.0f) {
                 noise_floor_ = 0.98f * noise_floor + 0.02f * rms;
@@ -397,11 +401,11 @@ void StreamingDecoder::searchForSync() {
     SyncResult sync_result;
     bool found = false;
 
-    // When connected, use light sync only (LTS training symbols, no chirp).
-    // TX sends LTS-only preamble when connected — chirp fallback can NEVER work
-    // because there is no chirp in the signal. Reject false positives where data
-    // autocorrelation produces spurious peaks (observed up to 0.63). Real LTS
-    // correlation is always >0.81 even on moderate fading.
+    // When connected, use light sync (LTS training symbols, no chirp) after the
+    // first connected OFDM frame has established an OFDM-specific chirp+LTS anchor.
+    // Reject false positives where data autocorrelation produces spurious peaks
+    // (observed up to 0.63). Real LTS correlation is always >0.81 even on
+    // moderate fading.
     // Coherent modes need higher sync quality — badly-synced frames always fail
     // because stale LTS phases can't be recovered by DD tracking alone.
     const bool is_coherent = (current_modulation_ == Modulation::QPSK ||
@@ -416,7 +420,7 @@ void StreamingDecoder::searchForSync() {
     const auto light_sync_thresholds = signal_policy::lightSyncThresholds(
         is_coherent, is_narrowband, connected_, sync_reject_streak_);
 
-    if (connected_ && waveform_->supportsDataPreamble()) {
+    if (use_light_search) {
         float known_cfo = last_cfo_.load();
         found = waveform_->detectDataSync(
             SampleSpan(search_buffer.data(), search_buffer.size()),
@@ -449,12 +453,17 @@ void StreamingDecoder::searchForSync() {
                 data_sync_accepted_callback_(sync_result.correlation);
             }
         }
-        // No chirp fallback — TX sends LTS only when connected, chirp won't be found
+        // No chirp fallback — TX sends LTS only after the one-shot OFDM anchor.
     } else {
         // Use full sync detection with chirp (wideband)
         found = waveform_->detectSync(
             SampleSpan(search_buffer.data(), search_buffer.size()),
             sync_result, CORR_DETECT_THRESHOLD);
+
+        if (found && use_full_ofdm_anchor_search) {
+            LOG_MODEM(INFO, "[%s] Full OFDM anchor sync detected while connected (corr=%.2f)",
+                      log_prefix_.c_str(), sync_result.correlation);
+        }
 
         // Dual-listen: if wideband didn't find anything, try narrowband chirp
         if (!found && !connected_) {

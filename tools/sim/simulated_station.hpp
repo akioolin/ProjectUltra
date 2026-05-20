@@ -1246,6 +1246,9 @@ private:
 
         tx_waveform_mode_ = mode;
         createEncoder();
+        if (connected_.load() && encoder_ && mode == WaveformMode::OFDM_CHIRP) {
+            encoder_->forceNextFrameFullPreamble();
+        }
 
         LOG_MODEM(INFO, "[%s] Switched to waveform: %s",
                   callsign_.c_str(), waveformModeToString(mode));
@@ -1354,6 +1357,12 @@ private:
                                                    data_modulation_, data_code_rate_);
                     decoder_->setBurstInterleaveGroupSize(burst_group_size_);
                     decoder_->setKnownCFO(last_cfo_hz_);
+                    if (negotiated_waveform_ == WaveformMode::OFDM_CHIRP) {
+                        decoder_->expectFullOFDMAnchorOnce();
+                    }
+                }
+                if (encoder_ && negotiated_waveform_ == WaveformMode::OFDM_CHIRP) {
+                    encoder_->forceNextFrameFullPreamble();
                 }
                 // Enable burst interleaving only for higher-throughput OFDM modes.
                 // At R1/4 Good fading, one erased physical block was spreading
