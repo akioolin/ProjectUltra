@@ -192,6 +192,7 @@ void StreamingDecoder::observeIdleNoiseCandidate(const float* samples, size_t co
 }
 
 void StreamingDecoder::resetFrameArrivalTrackingLocked() {
+    warm_sync_active_ = false;
     next_expected_frame_sample_valid_ = false;
     next_expected_frame_sample_ = 0;
     frame_arrival_confidence_ = 0.0f;
@@ -224,6 +225,7 @@ void StreamingDecoder::noteFrameArrivalSuccessLocked(size_t frame_start_abs,
         expected_frame_gap_samples_);
 
     next_expected_frame_sample_valid_ = true;
+    warm_sync_active_ = true;
     next_expected_frame_sample_ = update.next_expected_frame_sample;
     frame_arrival_confidence_ = update.confidence;
     consecutive_sync_misses_ = update.consecutive_sync_misses;
@@ -747,6 +749,7 @@ StreamingDecoder::FrameArrivalSnapshot StreamingDecoder::getFrameArrivalSnapshot
     std::lock_guard<std::mutex> lock(buffer_mutex_);
 
     FrameArrivalSnapshot snapshot;
+    snapshot.warm_sync_active = warm_sync_active_;
     snapshot.has_prediction = next_expected_frame_sample_valid_;
     snapshot.next_expected_frame_sample = next_expected_frame_sample_;
     snapshot.frame_arrival_confidence = frame_arrival_confidence_;

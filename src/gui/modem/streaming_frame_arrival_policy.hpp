@@ -11,6 +11,8 @@ namespace streaming_frame_arrival_policy {
 
 static constexpr size_t kSampleRateHz = 48000;
 static constexpr size_t kDefaultTightWindowSamples = kSampleRateHz / 50; // 20 ms
+static constexpr size_t kWarmSearchSlackSamples = 256;
+static constexpr float kMinWarmWindowConfidence = 0.25f;
 
 struct SuccessfulFrameUpdate {
     bool had_previous_prediction = false;
@@ -98,6 +100,69 @@ inline int incrementSyncMisses(int current_misses) {
 
 inline float confidenceAfterSyncMiss(float previous_confidence) {
     return clampConfidence(previous_confidence * 0.65f);
+}
+
+struct WarmSearchWindowPlan {
+    bool active = false;
+    bool wait_for_more_samples = false;
+    size_t search_start_abs = 0;
+    size_t search_size_samples = 0;
+    size_t search_end_abs = 0;
+};
+
+inline WarmSearchWindowPlan planWarmSearchWindow(
+    bool use_light_search,
+    bool warm_sync_active,
+    bool has_prediction,
+    size_t next_expected_frame_sample,
+    float frame_arrival_confidence,
+    int consecutive_sync_misses,
+    size_t total_fed_samples,
+    size_t oldest_available_abs,
+    bool search_floor_valid,
+    size_t search_floor_abs,
+    size_t correlation_abs,
+    size_t symbol_samples,
+    size_t correlation_step_samples,
+    size_t half_window_samples = kDefaultTightWindowSamples) {
+
+    WarmSearchWindowPlan plan;
+    const size_t safe_symbol_samples = std::max<size_t>(1, symbol_samples);
+    const size_t candidate_span = half_window_samples * 2 + kWarmSearchSlackSamples;
+    const size_t tail_samples = safe_symbol_samples * 2;
+    plan.search_start_abs = next_expected_frame_sample > half_window_samples
+        ? next_expected_frame_sample - half_window_samples
+        : 0;
+    plan.search_size_samples = candidate_span + tail_samples;
+    plan.search_end_abs = plan.search_start_abs + plan.search_size_samples;
+
+    if (!use_light_search || !warm_sync_active || !has_prediction ||
+        consecutive_sync_misses != 0 ||
+        frame_arrival_confidence < kMinWarmWindowConfidence) {
+        return plan;
+    }
+
+    if (plan.search_start_abs < oldest_available_abs) {
+        return plan;
+    }
+    if (search_floor_valid && next_expected_frame_sample < search_floor_abs) {
+        return plan;
+    }
+
+    const bool current_step_intersects_window =
+        correlation_abs + correlation_step_samples >= plan.search_start_abs &&
+        correlation_abs <= plan.search_end_abs;
+    if (!current_step_intersects_window) {
+        return plan;
+    }
+
+    if (total_fed_samples < plan.search_end_abs) {
+        plan.wait_for_more_samples = true;
+        return plan;
+    }
+
+    plan.active = true;
+    return plan;
 }
 
 }  // namespace streaming_frame_arrival_policy

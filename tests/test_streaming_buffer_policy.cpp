@@ -150,6 +150,54 @@ void test_frame_arrival_miss_accounting() {
           "sync miss should reduce but not zero arrival confidence");
 }
 
+void test_warm_search_window_planning() {
+    constexpr size_t symbol_samples = 1152;
+    constexpr size_t step_samples = 4800;
+    constexpr size_t expected = 240000;
+    constexpr size_t half_window = 960;
+
+    auto active = arrival_policy::planWarmSearchWindow(
+        true, true, true, expected, 0.6f, 0,
+        expected + 6000, expected - 20000,
+        true, expected - 4000,
+        expected - 1200,
+        symbol_samples, step_samples, half_window);
+
+    CHECK(active.active, "warm window should activate when prediction is available and current step intersects it");
+    CHECK(active.search_start_abs == expected - half_window,
+          "warm window should start half-window before expected arrival");
+    CHECK(active.search_size_samples ==
+              half_window * 2 + arrival_policy::kWarmSearchSlackSamples + symbol_samples * 2,
+          "warm window should include candidate span plus two LTS symbols");
+
+    auto wait = arrival_policy::planWarmSearchWindow(
+        true, true, true, expected, 0.6f, 0,
+        expected + 1000, expected - 20000,
+        true, expected - 4000,
+        expected - 1200,
+        symbol_samples, step_samples, half_window);
+    CHECK(!wait.active && wait.wait_for_more_samples,
+          "warm window should wait until enough post-LTS samples are buffered");
+
+    auto missed = arrival_policy::planWarmSearchWindow(
+        true, true, true, expected, 0.6f, 1,
+        expected + 6000, expected - 20000,
+        true, expected - 4000,
+        expected - 1200,
+        symbol_samples, step_samples, half_window);
+    CHECK(!missed.active && !missed.wait_for_more_samples,
+          "warm window should fall back wide after a miss until the state machine recovers");
+
+    auto far = arrival_policy::planWarmSearchWindow(
+        true, true, true, expected, 0.6f, 0,
+        expected + 6000, expected - 20000,
+        true, expected - 4000,
+        expected + 12000,
+        symbol_samples, step_samples, half_window);
+    CHECK(!far.active && !far.wait_for_more_samples,
+          "warm window should not activate when the current search step is outside the expected window");
+}
+
 }  // namespace
 
 int main() {
@@ -161,6 +209,7 @@ int main() {
     test_backlog_snapshot();
     test_frame_arrival_prediction_tracks_cadence();
     test_frame_arrival_miss_accounting();
+    test_warm_search_window_planning();
 
     if (tests_failed != 0) {
         std::cout << "StreamingBufferPolicy: " << (tests_run - tests_failed)
