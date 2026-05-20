@@ -49,22 +49,26 @@ void continuationChunkBypassesRecoveryGate() {
 
     station.testQueueTxSamples(samples(kFirstChunkSamples, 0.10f),
                                "frame=7 chunk=1/2");
-    require(station.pttState() == PttState::TX, "first chunk should key TX");
+    require(station.pttState() == PttState::RX,
+            "queued samples should not deafen RX until they reach the audio port");
     require(station.testTxQueueDepth() == kFirstChunkSamples,
             "first chunk should enter local TX queue");
 
     const size_t drained = station.testDrainLocalTxSamples(kFirstChunkSamples);
     require(drained == kFirstChunkSamples, "first chunk should drain fully");
+    require(station.pttState() == PttState::TX,
+            "active drained samples should key TX for that audio block");
     require(station.testTxQueueDepth() == 0,
             "local TX queue should be empty after draining first chunk");
+    station.testObserveIdleTxBlock();
     require(station.pttState() == PttState::TX_TR_SWITCH,
-            "radio should be in post-TX recovery after first chunk drains");
+            "radio should enter post-TX recovery on the first idle audio block");
 
     station.testQueueTxSamples(samples(kSecondChunkSamples, 0.20f),
                                "frame=7 chunk=2/2");
 
-    require(station.pttState() == PttState::TX,
-            "continuation chunk should keep the same TX keyed");
+    require(station.pttState() == PttState::TX_TR_SWITCH,
+            "queued continuation waits for its active audio block before keying TX");
     require(station.testDeferredTxDepth() == 0,
             "continuation chunk must not enter deferred queue");
     require(station.testTxQueueDepth() == kSecondChunkSamples,
@@ -78,6 +82,7 @@ void deferredLogicalSubmissionsFlushOnePerRadioKeyup() {
                                "frame=seed");
     require(station.testDrainLocalTxSamples(kFirstChunkSamples) == kFirstChunkSamples,
             "seed frame should drain fully");
+    station.testObserveIdleTxBlock();
     station.testAdvanceRadioSamples(kTrSwitchSamples);
     require(station.pttState() == PttState::TX_COOLDOWN,
             "radio should be in cooldown after T/R switch");
@@ -95,8 +100,8 @@ void deferredLogicalSubmissionsFlushOnePerRadioKeyup() {
             "radio should be RX-ready after cooldown expires");
 
     station.testFlushDeferredTxIfReady();
-    require(station.pttState() == PttState::TX,
-            "one deferred logical submission should key TX");
+    require(station.pttState() == PttState::RX,
+            "flushing deferred audio queues samples without deafening RX first");
     require(station.testDeferredTxDepth() == 2,
             "only one deferred logical submission should flush per radio key-up");
     require(station.testTxQueueDepth() == 120,

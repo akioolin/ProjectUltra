@@ -111,6 +111,16 @@ static float samplePeak(const std::vector<float>& samples) {
     return peak;
 }
 
+static bool samplesHaveEnergy(const std::vector<float>& samples) {
+    constexpr float kActiveSampleEpsilon = 1.0e-6f;
+    for (float s : samples) {
+        if (std::fabs(s) > kActiveSampleEpsilon) {
+            return true;
+        }
+    }
+    return false;
+}
+
 [[maybe_unused]] static size_t countFullScaleSamples(const std::vector<float>& samples) {
     size_t count = 0;
     for (float s : samples) {
@@ -337,6 +347,21 @@ public:
         }
     }
 
+    void noteTxSampleBlock(bool tx_active) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (tx_active) {
+            tx_in_flight_samples_remaining_ = 0;
+            tx_tr_switch_samples_remaining_ = 0;
+            tx_cooldown_samples_remaining_ = 0;
+            ptt_state_ = PttState::TX;
+            return;
+        }
+
+        if (ptt_state_ == PttState::TX) {
+            beginPostTxRecoveryLocked();
+        }
+    }
+
     void advanceSamples(size_t elapsed_samples) {
         if (elapsed_samples == 0) {
             return;
@@ -406,6 +431,7 @@ public:
     static constexpr int SAMPLES_PER_CALLBACK = 480;  // 10ms
     static constexpr int CALLBACK_INTERVAL_MS = 10;
     static constexpr int TX_CONTINUATION_GRACE_MS = CALLBACK_INTERVAL_MS * 2;
+    static constexpr int POST_TX_ACK_LISTEN_MS = CALLBACK_INTERVAL_MS * 3;
     static constexpr uint32_t DEFAULT_TR_GUARD_MS = 50;
 
     SimulatedStation(const std::string& callsign, std::unique_ptr<AudioPort> port,
@@ -615,20 +641,27 @@ public:
 
     size_t testDrainLocalTxSamples(size_t max_samples) {
         size_t drained = 0;
+        std::vector<float> drained_samples;
+        drained_samples.reserve(max_samples);
         {
             std::lock_guard<std::mutex> lock(tx_mutex_);
             while (drained < max_samples && !tx_queue_.empty()) {
+                drained_samples.push_back(tx_queue_.front());
                 tx_queue_.pop();
                 ++drained;
             }
             tx_sample_clock_ += drained;
         }
-        notePttTxDrained(drained);
+        notePttTxSampleBlock(samplesHaveEnergy(drained_samples));
         return drained;
     }
 
     void testAdvanceRadioSamples(size_t elapsed_samples) {
         advancePttRecovery(elapsed_samples);
+    }
+
+    void testObserveIdleTxBlock() {
+        notePttTxSampleBlock(false);
     }
 
     void testFlushDeferredTxIfReady() {
@@ -670,7 +703,9 @@ public:
         auto now = std::chrono::steady_clock::now();
         if (last_tick_time_.time_since_epoch().count() == 0) {
             last_tick_time_ = now;
-            protocol_.tick(CALLBACK_INTERVAL_MS);
+            if (protocolTimersCanAdvance()) {
+                protocol_.tick(CALLBACK_INTERVAL_MS);
+            }
             return;
         }
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -680,6 +715,9 @@ public:
         uint32_t elapsed_ms = static_cast<uint32_t>(
             std::clamp<int64_t>(elapsed, 1, 1000));
         last_tick_time_ = now;
+        if (!protocolTimersCanAdvance()) {
+            return;
+        }
         protocol_.tick(elapsed_ms);
     }
 
@@ -754,6 +792,7 @@ private:
     // reopens RX while holding off the next TX keying edge.
     RadioPttStateMachine ptt_{SAMPLE_RATE};
     std::atomic<uint64_t> tx_continuation_grace_samples_{0};
+    std::atomic<uint64_t> post_tx_ack_listen_samples_{0};
     uint32_t tx_turnaround_guard_ms_ = DEFAULT_TR_GUARD_MS;
 
     // State
@@ -1342,7 +1381,12 @@ private:
 
     void notePttTxQueued(size_t sample_count) {
         tx_continuation_grace_samples_.store(0, std::memory_order_relaxed);
+        post_tx_ack_listen_samples_.store(0, std::memory_order_relaxed);
         ptt_.noteTxQueued(sample_count);
+    }
+
+    void markPacedTxSubmissionQueued() {
+        tx_continuation_grace_samples_.store(0, std::memory_order_relaxed);
     }
 
     void notePttTxDrained(size_t drained_samples) {
@@ -1356,9 +1400,32 @@ private:
         }
     }
 
+    void notePttTxSampleBlock(bool tx_active) {
+        const PttState before = ptt_.state();
+        ptt_.noteTxSampleBlock(tx_active);
+        const PttState after = ptt_.state();
+        if (tx_active) {
+            tx_continuation_grace_samples_.store(0, std::memory_order_relaxed);
+            post_tx_ack_listen_samples_.store(0, std::memory_order_relaxed);
+        } else if (before == PttState::TX && after != PttState::TX) {
+            tx_continuation_grace_samples_.store(
+                samplesForMs(TX_CONTINUATION_GRACE_MS),
+                std::memory_order_relaxed);
+        }
+    }
+
     void advancePttRecovery(size_t elapsed_samples) {
+        const PttState before = ptt_.state();
         ptt_.advanceSamples(elapsed_samples);
+        const PttState after = ptt_.state();
         advanceTxContinuationGrace(elapsed_samples);
+        if (before != PttState::RX && after == PttState::RX) {
+            post_tx_ack_listen_samples_.store(
+                samplesForMs(POST_TX_ACK_LISTEN_MS),
+                std::memory_order_relaxed);
+        } else {
+            advancePostTxAckListen(elapsed_samples);
+        }
     }
 
     void setupCallbacks() {
@@ -1518,16 +1585,38 @@ private:
 
     bool canAcceptTxSubmission() {
         const PttState state = pttState();
-        return state == PttState::RX || txContinuationGraceActive();
+        if (txContinuationGraceActive() && !hasLocalTxQueued()) {
+            return true;
+        }
+        return state == PttState::RX && !hasLocalTxQueued();
     }
 
     bool txContinuationGraceActive() const {
         return tx_continuation_grace_samples_.load(std::memory_order_relaxed) > 0;
     }
 
+    bool postTxAckListenActive() const {
+        return post_tx_ack_listen_samples_.load(std::memory_order_relaxed) > 0;
+    }
+
+    bool protocolTimersCanAdvance() {
+        // The ARQ clock must measure time spent able to hear the peer's reply,
+        // not time spent draining our own audio queue. Otherwise a legal ACK can
+        // race a timeout retransmission at the first RX-open callback.
+        return ptt_.isReadyForNextTx() &&
+               !hasLocalTxQueued() &&
+               !txContinuationGraceActive() &&
+               !postTxAckListenActive();
+    }
+
     bool hasDeferredTxSubmission() {
         std::lock_guard<std::mutex> lock(deferred_tx_mutex_);
         return !deferred_tx_submissions_.empty();
+    }
+
+    bool hasLocalTxQueued() {
+        std::lock_guard<std::mutex> lock(tx_mutex_);
+        return !tx_queue_.empty();
     }
 
     static uint64_t samplesForMs(uint32_t ms) {
@@ -1543,6 +1632,20 @@ private:
                 ? 0
                 : remaining - static_cast<uint64_t>(elapsed_samples);
             if (tx_continuation_grace_samples_.compare_exchange_weak(
+                    remaining, next, std::memory_order_relaxed)) {
+                return;
+            }
+        }
+    }
+
+    void advancePostTxAckListen(size_t elapsed_samples) {
+        uint64_t remaining =
+            post_tx_ack_listen_samples_.load(std::memory_order_relaxed);
+        while (remaining > 0) {
+            const uint64_t next = elapsed_samples >= remaining
+                ? 0
+                : remaining - static_cast<uint64_t>(elapsed_samples);
+            if (post_tx_ack_listen_samples_.compare_exchange_weak(
                     remaining, next, std::memory_order_relaxed)) {
                 return;
             }
@@ -1593,6 +1696,9 @@ private:
 
     void flushDeferredTxIfReady() {
         if (!ptt_.isReadyForNextTx()) {
+            return;
+        }
+        if (hasLocalTxQueued()) {
             return;
         }
         if (!channelIdleForTxGuard()) {
@@ -1658,7 +1764,7 @@ private:
         queued_before = tx_queue_.size();
         start_sample = tx_sample_clock_ + queued_before;
         end_sample = start_sample + samples.size();
-        notePttTxQueued(samples.size());
+        markPacedTxSubmissionQueued();
         for (float s : samples) {
             tx_queue_.push(s);
         }
@@ -1683,12 +1789,38 @@ private:
             advancePttRecovery(SAMPLES_PER_CALLBACK);
             flushDeferredTxIfReady();
 
-            // 1. READ RX - get samples from audio port (virtual channel or soundcard)
+            // 1. GET TX SAMPLES - check if we have anything to transmit.
+            // HardwareAudioPort bypasses this simulated pacer because SDL's
+            // output callback is already the hardware clock.
+            std::vector<float> tx_samples(SAMPLES_PER_CALLBACK, 0.0f);
+            size_t tx_pending = 0;
+            size_t tx_drained_samples = 0;
+            bool tx_active_block = false;
+            const bool pace_tx = !port_ || port_->shouldPaceTxInStationLoop();
+            if (pace_tx) {
+                {
+                    std::lock_guard<std::mutex> lock(tx_mutex_);
+                    tx_sample_clock_ += SAMPLES_PER_CALLBACK;
+                    tx_pending = tx_queue_.size();
+                    for (int i = 0; i < SAMPLES_PER_CALLBACK && !tx_queue_.empty(); i++) {
+                        tx_samples[i] = tx_queue_.front();
+                        tx_queue_.pop();
+                        ++tx_drained_samples;
+                    }
+                }
+                tx_active_block = samplesHaveEnergy(tx_samples);
+                notePttTxSampleBlock(tx_active_block);
+            }
+
+            // 2. READ RX - get samples from audio port (virtual channel or soundcard).
+            // RX blackout follows active sample-domain TX, not the software
+            // queue depth. Queued zero blocks still hold off new local TX, but
+            // they do not make the receiver deaf.
             std::vector<float> rx_samples = port_
                 ? port_->pullRx(SAMPLES_PER_CALLBACK)
                 : std::vector<float>(SAMPLES_PER_CALLBACK, 0.0f);
 
-            // 2. FEED TO DECODER (audio thread only buffers - decode thread processes)
+            // 3. FEED TO DECODER (audio thread only buffers - decode thread processes)
             if (decoder_) {
                 if (rx_batch_callbacks_ <= 1) {
                     decoder_->feedAudio(rx_samples.data(), rx_samples.size());
@@ -1704,25 +1836,7 @@ private:
                 }
             }
 
-            // 3. GET TX SAMPLES - check if we have anything to transmit.
-            // HardwareAudioPort bypasses this simulated pacer because SDL's
-            // output callback is already the hardware clock.
-            std::vector<float> tx_samples(SAMPLES_PER_CALLBACK, 0.0f);
-            size_t tx_pending = 0;
-            size_t tx_drained_samples = 0;
-            const bool pace_tx = !port_ || port_->shouldPaceTxInStationLoop();
             if (pace_tx) {
-                {
-                    std::lock_guard<std::mutex> lock(tx_mutex_);
-                    tx_sample_clock_ += SAMPLES_PER_CALLBACK;
-                    tx_pending = tx_queue_.size();
-                    for (int i = 0; i < SAMPLES_PER_CALLBACK && !tx_queue_.empty(); i++) {
-                        tx_samples[i] = tx_queue_.front();
-                        tx_queue_.pop();
-                        ++tx_drained_samples;
-                    }
-                }
-
                 // 4. SEND TX TO AUDIO PORT (virtual channel only; hardware TX
                 // is queued directly in queueTx() above)
                 if (port_) {
@@ -1735,22 +1849,24 @@ private:
                             << " tx_pending_before=" << tx_pending
                             << " tx_clock=" << tx_sample_clock_
                             << " rms=" << sampleRms(tx_samples)
+                            << " tx_active=" << (tx_active_block ? 1 : 0)
                             << " ptt=" << pttStateName(pttState());
                         e2eDebugLine(oss.str());
                     }
                 }
             } else {
                 tx_drained_samples = SAMPLES_PER_CALLBACK;
+                notePttTxDrained(tx_drained_samples);
             }
-            notePttTxDrained(tx_drained_samples);
             flushDeferredTxIfReady();
-            if (callsign_ == "BRAVO") {
+            if (callsign_ == "ALPHA" || callsign_ == "BRAVO") {
                 std::ostringstream oss;
                 oss << "station_tick station=" << callsign_
                     << " sim_t=" << getSimTime()
                     << " rx_rms=" << sampleRms(rx_samples)
                     << " tx_drained=" << tx_drained_samples
                     << " tx_pending_before=" << tx_pending
+                    << " tx_active=" << (tx_active_block ? 1 : 0)
                     << " ptt_after=" << pttStateName(pttState())
                     << " blackout=" << (isInRxBlackout() ? 1 : 0);
                 e2eDebugLine(oss.str());

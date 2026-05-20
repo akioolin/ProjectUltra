@@ -57,6 +57,16 @@ int main() {
     ptt.noteTxDrained(480);
     expectState(ptt, PttState::RX, false, true);
 
+    ptt.setRecoveryTimings(20, 100);
+    ptt.noteTxSampleBlock(true);
+    expectState(ptt, PttState::TX, true, false);
+    ptt.noteTxSampleBlock(false);
+    expectState(ptt, PttState::TX_TR_SWITCH, true, false);
+    ptt.advanceSamples(kTrSwitchSamples);
+    expectState(ptt, PttState::TX_COOLDOWN, false, false);
+    ptt.advanceSamples(kCooldownSamples);
+    expectState(ptt, PttState::RX, false, true);
+
     std::cout << "simulated radio PTT state separates TX deafness, T/R switch, and cooldown\n";
     return 0;
 }

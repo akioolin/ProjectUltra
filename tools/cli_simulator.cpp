@@ -345,13 +345,15 @@ public:
         auto samples = backend_.getRxSamples(count);
         const float raw_rms = sampleRms(samples);
         auto shaped = shapeRxForLocalRadio(std::move(samples), count);
-        if (label_ == "BRAVO") {
+        const float shaped_rms = sampleRms(shaped);
+        if (raw_rms > 0.05f || shaped_rms > 0.05f ||
+            std::fabs(raw_rms - shaped_rms) > 0.05f) {
             std::ostringstream oss;
             oss << "audioport_pull_rx station=" << label_
                 << " request=" << count
                 << " returned=" << shaped.size()
                 << " raw_rms=" << raw_rms
-                << " shaped_rms=" << sampleRms(shaped);
+                << " shaped_rms=" << shaped_rms;
             e2eDebugLine(oss.str());
         }
         return shaped;
@@ -361,11 +363,14 @@ public:
         if (samples.empty()) {
             return;
         }
-        std::ostringstream oss;
-        oss << "audioport_queue_tx station=" << label_
-            << " samples=" << samples.size()
-            << " rms=" << sampleRms(samples);
-        e2eDebugLine(oss.str());
+        const float tx_rms = sampleRms(samples);
+        if (tx_rms > 1.0e-6f) {
+            std::ostringstream oss;
+            oss << "audioport_queue_tx station=" << label_
+                << " samples=" << samples.size()
+                << " rms=" << tx_rms;
+            e2eDebugLine(oss.str());
+        }
         std::string error;
         if (!backend_.queueTxSamples(samples, &error)) {
             tx_errors_++;

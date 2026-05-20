@@ -309,6 +309,16 @@ inline OFDMFrameTiming wideOFDMFrameTiming(Modulation mod,
     return timing;
 }
 
+inline uint32_t wideOFDMSackDelayMs(Modulation mod,
+                                    CodeRate rate,
+                                    size_t window_size,
+                                    int cw_count = v2::kDefaultFixedFrameCodewords) {
+    const OFDMFrameTiming timing = wideOFDMFrameTiming(mod, rate, cw_count);
+    const uint32_t burst_ms = static_cast<uint32_t>(
+        std::max<size_t>(1, window_size)) * timing.data_ms;
+    return burst_ms + kCarrierSenseSackCoalesceMs;
+}
+
 // Recommend fixed-frame CW count for a given OFDM data rate + waveform.
 // Inputs are deterministic and shared by both peers (rate is negotiated;
 // waveform is negotiated too) so both peers compute the same CW count

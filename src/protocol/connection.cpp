@@ -1654,7 +1654,10 @@ void Connection::configureArqForCurrentDataMode() {
 
         const auto timing = connection_policy::wideOFDMFrameTiming(
             data_modulation_, data_code_rate_, data_frame_cw_count_);
-        arq_.setSackDelay(connection_policy::kCarrierSenseSackCoalesceMs);
+        const uint32_t sack_delay_ms = connection_policy::wideOFDMSackDelayMs(
+            data_modulation_, data_code_rate_, arq_.getWindowSize(),
+            data_frame_cw_count_);
+        arq_.setSackDelay(sack_delay_ms);
         arq_.setSackDelayShort(0);
         arq_.setAckRepeatCount(connection_policy::kCarrierSenseAckRepeatCount);
 
@@ -1668,7 +1671,7 @@ void Connection::configureArqForCurrentDataMode() {
         arq_.setAckTimeout(ack_timeout_ms);
 
         LOG_MODEM(INFO,
-                  "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, ack=%ums x%d), max_retries=%d, ack_batch=%u, carrier_sense_sack_coalesce=%ums, ack_repeat=%d, cw=%d (OFDM %s %s)",
+                  "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, ack=%ums x%d), max_retries=%d, ack_batch=%u, physical_sack_hold=%ums, ack_repeat=%d, cw=%d (OFDM %s %s)",
                   arq_.getWindowSize(),
                   ack_timeout_ms / 1000.0f,
                   timing.data_ms,

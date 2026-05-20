@@ -129,8 +129,16 @@ void test_wide_ofdm_timing_and_timeout() {
     CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 4, 120, 2) == 8000,
           "wide OFDM window=4 timeout should clamp to hardware-safe floor");
 
+    const uint32_t w8_sack_delay = wideOFDMSackDelayMs(
+        Modulation::DQPSK, CodeRate::R1_2, 8);
+    CHECK(w8_sack_delay == 8 * dqpsk.data_ms + kCarrierSenseSackCoalesceMs,
+          "wide OFDM SACK delay should hold ACKs through a physical sender window");
+
     CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 8, 120, 1) == 8000,
           "wide OFDM window=8 timeout should keep default-CW floor after burst accounting");
+    CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 8,
+                                      w8_sack_delay, 1) == 12014,
+          "wide OFDM window=8 timeout should cover physical SACK holdoff");
     CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 8, 120, 1, 6) == 9224,
           "wide OFDM 6-CW ACK timeout should cover the longer burst");
     CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 8, 120, 1, 8) == 11528,
