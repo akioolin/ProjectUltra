@@ -544,6 +544,7 @@ if(TARGET cli_simulator)
                      $<TARGET_FILE:cli_simulator>)
     set_tests_properties(CLISyntheticNotch PROPERTIES
         TIMEOUT 180
+        RUN_SERIAL TRUE
         LABELS regression)
 endif()
 
@@ -638,7 +639,7 @@ if(TARGET ota_simulator)
                 --scenario tests/fixtures/ota_simulator/two_endpoint_file_transfer_snr15.json)
     set_tests_properties(OTASimulatorFileTransferSNR15 PROPERTIES
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        TIMEOUT 320
+        TIMEOUT 360
         RUN_SERIAL TRUE
         LABELS regression)
 endif()

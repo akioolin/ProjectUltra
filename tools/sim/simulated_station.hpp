@@ -347,9 +347,9 @@ public:
         }
     }
 
-    void noteTxSampleBlock(bool tx_active) {
+    void noteTxSampleBlock(bool tx_active, bool tx_draining_block = false) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (tx_active) {
+        if (tx_active || tx_draining_block) {
             tx_in_flight_samples_remaining_ = 0;
             tx_tr_switch_samples_remaining_ = 0;
             tx_cooldown_samples_remaining_ = 0;
@@ -652,7 +652,7 @@ public:
             }
             tx_sample_clock_ += drained;
         }
-        notePttTxSampleBlock(samplesHaveEnergy(drained_samples));
+        notePttTxSampleBlock(samplesHaveEnergy(drained_samples), drained > 0);
         return drained;
     }
 
@@ -666,6 +666,10 @@ public:
 
     void testFlushDeferredTxIfReady() {
         flushDeferredTxIfReady();
+    }
+
+    void testMarkRxObserved() {
+        rx_observation_epoch_.fetch_add(1, std::memory_order_relaxed);
     }
 
     size_t testTxQueueDepth() {
@@ -781,12 +785,14 @@ private:
     struct DeferredTxSubmission {
         std::vector<float> samples;
         std::string label;
+        uint64_t min_rx_observation_epoch = 0;
     };
     std::mutex deferred_tx_mutex_;
     std::deque<DeferredTxSubmission> deferred_tx_submissions_;
     uint64_t deferred_tx_count_ = 0;
     uint64_t rejected_tx_count_ = 0;
     static constexpr size_t kMaxDeferredTxSubmissions = 16;
+    std::atomic<uint64_t> rx_observation_epoch_{0};
 
     // Explicit radio PTT state. TX and TX_TR_SWITCH deafen RX; TX_COOLDOWN
     // reopens RX while holding off the next TX keying edge.
@@ -1400,11 +1406,11 @@ private:
         }
     }
 
-    void notePttTxSampleBlock(bool tx_active) {
+    void notePttTxSampleBlock(bool tx_active, bool tx_draining_block = false) {
         const PttState before = ptt_.state();
-        ptt_.noteTxSampleBlock(tx_active);
+        ptt_.noteTxSampleBlock(tx_active, tx_draining_block);
         const PttState after = ptt_.state();
-        if (tx_active) {
+        if (tx_active || tx_draining_block) {
             tx_continuation_grace_samples_.store(0, std::memory_order_relaxed);
             post_tx_ack_listen_samples_.store(0, std::memory_order_relaxed);
         } else if (before == PttState::TX && after != PttState::TX) {
@@ -1560,8 +1566,17 @@ private:
         return oss.str();
     }
 
+    static bool requiresFreshCarrierSense(const std::string& label) {
+        return label.find("frame_type=CONNECT") != std::string::npos;
+    }
+
     void queueTx(const std::vector<float>& samples, const std::string& label = std::string()) {
         if (samples.empty()) {
+            return;
+        }
+
+        if (requiresFreshCarrierSense(label)) {
+            deferTxSubmission(samples, label, true);
             return;
         }
 
@@ -1653,10 +1668,14 @@ private:
     }
 
     void deferTxSubmission(const std::vector<float>& samples,
-                           const std::string& label) {
+                           const std::string& label,
+                           bool require_fresh_rx_observation = false) {
         bool rejected = false;
         size_t depth = 0;
         uint64_t event = 0;
+        const uint64_t min_rx_observation_epoch =
+            rx_observation_epoch_.load(std::memory_order_relaxed) +
+            (require_fresh_rx_observation ? 1ULL : 0ULL);
         {
             std::lock_guard<std::mutex> lock(deferred_tx_mutex_);
             if (deferred_tx_submissions_.size() >= kMaxDeferredTxSubmissions) {
@@ -1666,6 +1685,7 @@ private:
                 deferred_tx_submissions_.push_back({
                     .samples = samples,
                     .label = label,
+                    .min_rx_observation_epoch = min_rx_observation_epoch,
                 });
                 depth = deferred_tx_submissions_.size();
                 event = ++deferred_tx_count_;
@@ -1710,6 +1730,10 @@ private:
             {
                 std::lock_guard<std::mutex> lock(deferred_tx_mutex_);
                 if (deferred_tx_submissions_.empty()) {
+                    return;
+                }
+                if (deferred_tx_submissions_.front().min_rx_observation_epoch >
+                    rx_observation_epoch_.load(std::memory_order_relaxed)) {
                     return;
                 }
                 submission = std::move(deferred_tx_submissions_.front());
@@ -1796,6 +1820,7 @@ private:
             size_t tx_pending = 0;
             size_t tx_drained_samples = 0;
             bool tx_active_block = false;
+            bool tx_draining_block = false;
             const bool pace_tx = !port_ || port_->shouldPaceTxInStationLoop();
             if (pace_tx) {
                 {
@@ -1809,16 +1834,18 @@ private:
                     }
                 }
                 tx_active_block = samplesHaveEnergy(tx_samples);
-                notePttTxSampleBlock(tx_active_block);
+                tx_draining_block = tx_drained_samples > 0;
+                notePttTxSampleBlock(tx_active_block, tx_draining_block);
             }
 
             // 2. READ RX - get samples from audio port (virtual channel or soundcard).
-            // RX blackout follows active sample-domain TX, not the software
-            // queue depth. Queued zero blocks still hold off new local TX, but
-            // they do not make the receiver deaf.
+            // RX blackout follows samples leaving the local audio port. A silent
+            // block inside a queued waveform still keeps PTT keyed; the blackout
+            // ends on the first callback after the waveform drain finishes.
             std::vector<float> rx_samples = port_
                 ? port_->pullRx(SAMPLES_PER_CALLBACK)
                 : std::vector<float>(SAMPLES_PER_CALLBACK, 0.0f);
+            rx_observation_epoch_.fetch_add(1, std::memory_order_relaxed);
 
             // 3. FEED TO DECODER (audio thread only buffers - decode thread processes)
             if (decoder_) {
@@ -1850,6 +1877,7 @@ private:
                             << " tx_clock=" << tx_sample_clock_
                             << " rms=" << sampleRms(tx_samples)
                             << " tx_active=" << (tx_active_block ? 1 : 0)
+                            << " tx_draining=" << (tx_draining_block ? 1 : 0)
                             << " ptt=" << pttStateName(pttState());
                         e2eDebugLine(oss.str());
                     }
@@ -1867,6 +1895,7 @@ private:
                     << " tx_drained=" << tx_drained_samples
                     << " tx_pending_before=" << tx_pending
                     << " tx_active=" << (tx_active_block ? 1 : 0)
+                    << " tx_draining=" << (tx_draining_block ? 1 : 0)
                     << " ptt_after=" << pttStateName(pttState())
                     << " blackout=" << (isInRxBlackout() ? 1 : 0);
                 e2eDebugLine(oss.str());

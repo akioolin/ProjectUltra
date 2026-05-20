@@ -60,7 +60,9 @@ int main() {
     ptt.setRecoveryTimings(20, 100);
     ptt.noteTxSampleBlock(true);
     expectState(ptt, PttState::TX, true, false);
-    ptt.noteTxSampleBlock(false);
+    ptt.noteTxSampleBlock(false, true);
+    expectState(ptt, PttState::TX, true, false);
+    ptt.noteTxSampleBlock(false, false);
     expectState(ptt, PttState::TX_TR_SWITCH, true, false);
     ptt.advanceSamples(kTrSwitchSamples);
     expectState(ptt, PttState::TX_COOLDOWN, false, false);

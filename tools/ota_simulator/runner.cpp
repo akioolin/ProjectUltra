@@ -23,6 +23,7 @@ namespace {
 
 namespace fs = std::filesystem;
 namespace v2 = ultra::protocol::v2;
+constexpr double kTxMonitorPostrollSeconds = 3.0;
 
 struct TxFrameRecord {
     double t_s = 0.0;
@@ -113,6 +114,23 @@ public:
                                static_cast<double>(ScriptedAudioPort::kSampleRate);
             frames.push_back(TxFrameRecord{t_s, frame_type, seq});
             log.writeTxFrame(t_s, frame_type, seq, result);
+        }
+    }
+
+    void feedSilence(double seconds, SessionLog& log,
+                     std::vector<TxFrameRecord>& frames) {
+        const size_t total_samples = static_cast<size_t>(
+            seconds * static_cast<double>(ScriptedAudioPort::kSampleRate));
+        std::vector<float> block(480, 0.0f);
+        size_t remaining = total_samples;
+        while (remaining > 0) {
+            const size_t count = std::min(remaining, block.size());
+            if (count == block.size()) {
+                feed(block, log, frames);
+            } else {
+                feed(std::vector<float>(count, 0.0f), log, frames);
+            }
+            remaining -= count;
         }
     }
 
@@ -305,6 +323,10 @@ int runScenarioV1(const Scenario& scenario) {
     station.stop();
     auto new_tx = port_ptr->capturedTxSince(tx_cursor);
     tx_monitor.feed(new_tx, log, tx_frames);
+    // The monitor is an offline checker for "did this station transmit by
+    // time T?", but it uses the streaming decoder, which needs trailing quiet
+    // samples to flush a complete late-scenario waveform.
+    tx_monitor.feedSilence(kTxMonitorPostrollSeconds, log, tx_frames);
 
     while (event_index < scenario.events.size()) {
         const auto& event = scenario.events[event_index];

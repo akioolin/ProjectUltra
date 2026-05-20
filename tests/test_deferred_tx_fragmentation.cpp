@@ -108,11 +108,37 @@ void deferredLogicalSubmissionsFlushOnePerRadioKeyup() {
             "first deferred logical submission should be the only queued audio");
 }
 
+void handshakeConnectUsesDeferredCarrierSenseGate() {
+    auto station = makeStation();
+
+    station.testQueueTxSamples(samples(120, 0.40f), "frame_type=CONNECT seq=0");
+    require(station.pttState() == PttState::RX,
+            "CONNECT deferral should not key PTT before the audio loop flush");
+    require(station.testDeferredTxDepth() == 1,
+            "CONNECT should wait for a fresh audio-loop carrier-sense observation");
+    require(station.testTxQueueDepth() == 0,
+            "CONNECT should not enter the local TX queue synchronously");
+
+    station.testFlushDeferredTxIfReady();
+    require(station.testDeferredTxDepth() == 1,
+            "CONNECT should not flush before a fresh RX observation");
+    require(station.testTxQueueDepth() == 0,
+            "CONNECT should remain out of the local TX queue before RX refresh");
+
+    station.testMarkRxObserved();
+    station.testFlushDeferredTxIfReady();
+    require(station.testDeferredTxDepth() == 0,
+            "CONNECT should flush once carrier sense is fresh and idle");
+    require(station.testTxQueueDepth() == 120,
+            "CONNECT should enter the local TX queue after deferred flush");
+}
+
 }  // namespace
 
 int main() {
     continuationChunkBypassesRecoveryGate();
     deferredLogicalSubmissionsFlushOnePerRadioKeyup();
+    handshakeConnectUsesDeferredCarrierSenseGate();
     std::cout << "deferred TX fragmentation regression passed\n";
     return 0;
 }
