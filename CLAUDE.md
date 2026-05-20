@@ -376,6 +376,37 @@ automatic via `selectOFDMCodeRate()`; keep the exact thresholds in
 
 ---
 
+## SIMULATOR FIDELITY — Non-Negotiable
+
+cli_simulator, OTASim, and channel models exist to test the modem **AS IF WE WERE A RADIO**. Every change must hold up to: *"would a real radio behave this way?"* When that fidelity breaks down, every protocol fix carries a hidden "works in simulator, unvalidated on hardware" caveat.
+
+**Rules:**
+
+1. **Review two layers, not one:**
+   - **Code-level review:** look for places where the implementation doesn't reflect HF-radio physics — fixed-time turn-around delays, magic timing constants, immediate-fire responses without carrier sense, hardcoded noise thresholds, etc.
+   - **Simulator-fidelity review:** look for places where the simulator diverges from real-radio behavior — push-vs-pull audio chain, missing ALC / AGC / PA modeling, channel-model gaps, state machines in modem-time vs wall-clock time, etc.
+
+2. **Before every architectural change**, ask "is this how a real radio does it?" Reject the answer *"the simulator does it differently because it's a simulator."* That's the failure mode.
+
+3. **Re-review fidelity when:**
+   - A new module is added (channel model, audio path, state machine)
+   - Hardware testing reveals a behavior the simulator didn't predict
+   - A protocol fix ships with a "simulator-artifact-dependent" caveat
+   - Before any major refactor of the simulator audio chain
+
+4. **Real-radio reference points (verify against, do not invent):**
+   - Soundcard: pull-based callbacks driven by hardware clock, bounded buffers (~50-200 ms)
+   - T/R relay timing: typical 5-30 ms, specific to radio model (Icom IC-7300 ~15 ms, Yaesu FT-891 ~20 ms)
+   - HF channel models: ITU-R F.1487, CCIR Report 549 propagation tables
+   - Hamlib CAT latency: 100-500 ms per command
+   - AGC settling, ALC peak compression, PA saturation: all real physics that must be modeled, not idealized away
+
+5. **A test that passes in simulator but fails on hardware = simulator bug.** Fix the simulator, not the test. Document the fidelity gap if the simulator can't yet model it.
+
+The mission: when a fix passes the simulator gate, it should pass the hardware gate too.
+
+---
+
 ## Essential Documentation
 
 ### Priority 1: Always Read First
