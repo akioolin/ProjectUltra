@@ -191,6 +191,7 @@ void StreamingDecoder::searchForSync() {
     size_t search_start = 0;
     bool used_warm_narrow_window = false;
     size_t warm_narrow_end_abs = 0;
+    size_t warm_narrow_candidate_span_samples = 0;
 
     {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
@@ -239,6 +240,7 @@ void StreamingDecoder::searchForSync() {
         if (warm_plan.active) {
             used_warm_narrow_window = true;
             warm_narrow_end_abs = warm_plan.search_end_abs;
+            warm_narrow_candidate_span_samples = warm_plan.candidate_span_samples;
             min_search = warm_plan.search_size_samples;
             search_start = absoluteToRingLocked(warm_plan.search_start_abs);
         }
@@ -471,8 +473,12 @@ void StreamingDecoder::searchForSync() {
     // show real tail DATA can dip to ~0.52-0.56. Data autocorrelation noise is
     // usually 0.20-0.45; candidates admitted near the low end still pass the
     // downstream LLR/LDPC gates before they can be accepted as frames.
+    const size_t light_sync_candidate_window_samples =
+        used_warm_narrow_window ? warm_narrow_candidate_span_samples : LIGHT_SEARCH_SIZE;
     const auto light_sync_thresholds = signal_policy::lightSyncThresholds(
-        is_coherent, is_narrowband, connected_, sync_reject_streak_);
+        is_coherent, is_narrowband, connected_, sync_reject_streak_,
+        used_warm_narrow_window, LIGHT_SEARCH_SIZE,
+        light_sync_candidate_window_samples);
 
     if (use_light_search) {
         float known_cfo = last_cfo_.load();
@@ -501,8 +507,16 @@ void StreamingDecoder::searchForSync() {
         sync_reject_streak_ = sync_decision.next_reject_streak;
 
         if (found) {
-            LOG_MODEM(INFO, "[%s] DATA sync detected (training only, known CFO=%.1f Hz, corr=%.2f)",
-                      log_prefix_.c_str(), known_cfo, sync_result.correlation);
+            if (light_sync_thresholds.narrow_expected_window) {
+                LOG_MODEM(INFO,
+                          "[%s] DATA sync detected in warm window (known CFO=%.1f Hz, corr=%.2f, threshold=%.2f, window_reduction=%.2fx)",
+                          log_prefix_.c_str(), known_cfo, sync_result.correlation,
+                          light_sync_thresholds.min_confidence,
+                          light_sync_thresholds.false_positive_window_reduction);
+            } else {
+                LOG_MODEM(INFO, "[%s] DATA sync detected (training only, known CFO=%.1f Hz, corr=%.2f)",
+                          log_prefix_.c_str(), known_cfo, sync_result.correlation);
+            }
             if (data_sync_accepted_callback_) {
                 data_sync_accepted_callback_(sync_result.correlation);
             }

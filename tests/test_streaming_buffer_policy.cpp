@@ -166,6 +166,9 @@ void test_warm_search_window_planning() {
     CHECK(active.active, "warm window should activate when prediction is available and current step intersects it");
     CHECK(active.search_start_abs == expected - half_window,
           "warm window should start half-window before expected arrival");
+    CHECK(active.candidate_span_samples ==
+              half_window * 2 + arrival_policy::kWarmSearchSlackSamples,
+          "warm window candidate span should be independent of LTS tail samples");
     CHECK(active.search_size_samples ==
               half_window * 2 + arrival_policy::kWarmSearchSlackSamples + symbol_samples * 2,
           "warm window should include candidate span plus two LTS symbols");

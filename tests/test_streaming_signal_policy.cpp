@@ -92,6 +92,20 @@ void test_light_sync_thresholds() {
     CHECK_CLOSE(connected.min_confidence, 0.52f, 0.0001f, "connected threshold");
     CHECK_CLOSE(connected.weak_floor, 0.45f, 0.0001f, "connected weak floor");
 
+    auto warm = lightSyncThresholds(false, false, true, 0, true, 9600, 2176);
+    const float expected_warm_threshold =
+        deriveNarrowWindowMagnitudeThreshold(0.52f, 9600, 2176);
+    CHECK(warm.narrow_expected_window, "warm expected-window threshold should report narrow mode");
+    CHECK_CLOSE(warm.false_positive_window_reduction, 9600.0f / 2176.0f, 0.001f,
+                "warm threshold should expose window reduction factor");
+    CHECK_CLOSE(warm.threshold_reduction_db,
+                10.0f * std::log10(9600.0f / 2176.0f), 0.001f,
+                "warm threshold should expose dB reduction");
+    CHECK_CLOSE(warm.min_confidence, expected_warm_threshold, 0.0001f,
+                "warm threshold should be derived from window-size reduction");
+    CHECK(warm.min_confidence > 0.24f && warm.min_confidence < 0.26f,
+          "warm threshold should land near 0.25 for the current narrow window");
+
     auto disconnected = lightSyncThresholds(false, false, false, 0);
     CHECK_CLOSE(disconnected.min_confidence, 0.65f, 0.0001f, "disconnected threshold");
     CHECK_CLOSE(disconnected.weak_floor, 0.55f, 0.0001f, "disconnected weak floor");

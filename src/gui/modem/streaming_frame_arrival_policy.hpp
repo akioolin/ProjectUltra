@@ -106,6 +106,7 @@ struct WarmSearchWindowPlan {
     bool active = false;
     bool wait_for_more_samples = false;
     size_t search_start_abs = 0;
+    size_t candidate_span_samples = 0;
     size_t search_size_samples = 0;
     size_t search_end_abs = 0;
 };
@@ -130,6 +131,7 @@ inline WarmSearchWindowPlan planWarmSearchWindow(
     const size_t safe_symbol_samples = std::max<size_t>(1, symbol_samples);
     const size_t candidate_span = half_window_samples * 2 + kWarmSearchSlackSamples;
     const size_t tail_samples = safe_symbol_samples * 2;
+    plan.candidate_span_samples = candidate_span;
     plan.search_start_abs = next_expected_frame_sample > half_window_samples
         ? next_expected_frame_sample - half_window_samples
         : 0;
