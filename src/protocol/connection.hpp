@@ -235,6 +235,7 @@ public:
         }
         measured_snr_db_ = snr_db;
         measured_snr_source_ = source;
+        measured_snr_valid_ = true;
     }
     float getMeasuredSNR() const { return measured_snr_db_; }
     SNRSource getMeasuredSNRSource() const { return measured_snr_source_; }
@@ -248,6 +249,7 @@ public:
         }
         measured_snr_db_ = snr_db;
         measured_snr_source_ = source;
+        measured_snr_valid_ = true;
         if (std::isfinite(fading_index)) {
             fading_index_ = fading_index;
         }
@@ -312,6 +314,7 @@ private:
     uint16_t mode_change_seq_ = 0;  // Sequence number for MODE_CHANGE frames
     float measured_snr_db_ = 15.0f;  // Routed SNR measured by modem (see source).
     SNRSource measured_snr_source_ = SNRSource::NONE;
+    bool measured_snr_valid_ = false;
     float fading_index_ = 0.0f;      // Fading index (0-2, > 0.65 = significant fading)
 
     // MODE_CHANGE timeout/retry tracking

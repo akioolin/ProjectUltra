@@ -4,6 +4,7 @@
 #include "streaming_buffer_policy.hpp"
 #include "streaming_decode_policy.hpp"
 #include "streaming_decoder_debug.hpp"
+#include "streaming_frame_arrival_policy.hpp"
 #include "streaming_frame_policy.hpp"
 #include "streaming_signal_policy.hpp"
 #include "gui/startup_trace.hpp"
@@ -30,6 +31,7 @@ namespace gui {
 namespace v2 = protocol::v2;
 namespace buffer_policy = streaming_buffer_policy;
 namespace decode_policy = streaming_decode_policy;
+namespace arrival_policy = streaming_frame_arrival_policy;
 namespace frame_policy = streaming_frame_policy;
 namespace signal_policy = streaming_signal_policy;
 
@@ -174,25 +176,28 @@ void StreamingDecoder::searchForSync() {
     constexpr size_t LIGHT_SEARCH_SIZE = 9600;    // ~0.20s for connected LTS-only detection
 
     size_t chirp_min_search = std::min(preamble + 65000, CHIRP_MAX_SEARCH);
-    bool use_light_search = connected_ && waveform_->supportsDataPreamble();
+    bool connected_data_preamble = connected_ && waveform_->supportsDataPreamble();
+    bool use_full_ofdm_anchor_search =
+        connected_data_preamble && expect_full_ofdm_anchor_ &&
+        mode_ == protocol::WaveformMode::OFDM_CHIRP;
+    bool use_light_search = connected_data_preamble && !use_full_ofdm_anchor_search;
     size_t min_search = use_light_search ? LIGHT_SEARCH_SIZE : chirp_min_search;
+    const size_t data_symbol_samples =
+        (use_light_search && waveform_)
+            ? static_cast<size_t>(std::max(1, waveform_->getSamplesPerSymbol()))
+            : 0;
 
     std::vector<float> search_buffer;
-    size_t search_start;
+    size_t search_start = 0;
+    bool used_warm_timed_window = false;
+    bool used_warm_narrow_window = false;
+    size_t warm_narrow_end_abs = 0;
+    size_t warm_narrow_candidate_span_samples = 0;
 
     {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
 
         float audio_sec = total_fed_ / 48000.0f;
-
-        // Need minimum samples before we can search
-        if (total_fed_ < min_search) {
-            static int skip_count = 0;
-            if (++skip_count % 50 == 1)
-                LOG_MODEM(INFO, "[%s] searchForSync: SKIP not enough samples, total=%.2fs, need=%.2fs",
-                          log_prefix_.c_str(), audio_sec, min_search / 48000.0f);
-            return;
-        }
 
         // Initialize correlation_pos_ if needed
         if (correlation_pos_ == 0 && total_fed_ > 0) {
@@ -201,6 +206,55 @@ void StreamingDecoder::searchForSync() {
             } else {
                 correlation_pos_ = write_pos_;
             }
+        }
+
+        const size_t oldest_abs = (total_fed_ > buffer_capacity_samples_)
+            ? (total_fed_ - buffer_capacity_samples_)
+            : 0;
+        const size_t correlation_abs = ringPosToAbsoluteLocked(correlation_pos_);
+        auto warm_plan = arrival_policy::planWarmSearchWindow(
+            use_light_search,
+            warm_sync_active_,
+            next_expected_frame_sample_valid_,
+            next_expected_frame_sample_,
+            frame_arrival_confidence_,
+            consecutive_sync_misses_,
+            warm_sync_phase_,
+            total_fed_,
+            oldest_abs,
+            search_floor_abs_valid_,
+            search_floor_abs_,
+            correlation_abs,
+            data_symbol_samples,
+            CORRELATION_STEP);
+
+        if (warm_plan.wait_for_more_samples) {
+            static int warm_wait_count = 0;
+            if (++warm_wait_count % 50 == 1) {
+                LOG_MODEM(INFO,
+                          "[%s] warm-sync: wait for expected window, need_abs=%zu total=%zu expected=%zu",
+                          log_prefix_.c_str(), warm_plan.search_end_abs, total_fed_,
+                          next_expected_frame_sample_);
+            }
+            return;
+        }
+
+        if (warm_plan.active) {
+            used_warm_timed_window = true;
+            used_warm_narrow_window = warm_plan.lower_threshold;
+            warm_narrow_end_abs = warm_plan.search_end_abs;
+            warm_narrow_candidate_span_samples = warm_plan.candidate_span_samples;
+            min_search = warm_plan.search_size_samples;
+            search_start = absoluteToRingLocked(warm_plan.search_start_abs);
+        }
+
+        // Need minimum samples before we can search
+        if (total_fed_ < min_search) {
+            static int skip_count = 0;
+            if (++skip_count % 50 == 1)
+                LOG_MODEM(INFO, "[%s] searchForSync: SKIP not enough samples, total=%.2fs, need=%.2fs",
+                          log_prefix_.c_str(), audio_sec, min_search / 48000.0f);
+            return;
         }
 
         // Calculate unsearched data available
@@ -212,7 +266,7 @@ void StreamingDecoder::searchForSync() {
         }
 
         // Need at least min_search unsearched samples
-        if (unsearched < min_search) {
+        if (!used_warm_timed_window && unsearched < min_search) {
             static int skip_count2 = 0;
             if (++skip_count2 % 50 == 1)
                 LOG_MODEM(INFO, "[%s] searchForSync: SKIP unsearched=%zu < min=%zu, total=%.2fs, corr_pos=%zu",
@@ -225,9 +279,10 @@ void StreamingDecoder::searchForSync() {
         // Watterson notch can erase one narrow chirp segment while the rest of
         // the sweep remains detectable; the correlator is the real detector,
         // this gate only keeps silence from burning CPU.
+        const size_t rms_probe_pos = used_warm_timed_window ? search_start : correlation_pos_;
         float rms = 0.0f;
         for (size_t i = 0; i < 1000; i++) {
-            float s = buffer_[wrapRingIndexLocked(correlation_pos_ + i)];
+            float s = buffer_[wrapRingIndexLocked(rms_probe_pos + i)];
             rms += s * s;
         }
         rms = std::sqrt(rms / 1000.0f);
@@ -242,7 +297,7 @@ void StreamingDecoder::searchForSync() {
                  off += RMS_SLICE_SAMPLES) {
                 float slice_sum = 0.0f;
                 for (size_t i = 0; i < RMS_SLICE_SAMPLES; ++i) {
-                    float s = buffer_[wrapRingIndexLocked(correlation_pos_ + off + i)];
+                    float s = buffer_[wrapRingIndexLocked(rms_probe_pos + off + i)];
                     slice_sum += s * s;
                 }
                 max_slice_rms = std::max(
@@ -270,7 +325,7 @@ void StreamingDecoder::searchForSync() {
             if (audio_activity_.load(std::memory_order_relaxed)) {
                 rms_gate = std::min(rms_gate, 0.012f);
             }
-        } else if (connected_ && waveform_->supportsDataPreamble()) {
+        } else if (connected_data_preamble) {
             float noise_floor = std::max(0.001f, noise_floor_);
             if (rms < noise_floor * 3.0f) {
                 noise_floor_ = 0.98f * noise_floor + 0.02f * rms;
@@ -311,14 +366,16 @@ void StreamingDecoder::searchForSync() {
         // FIX: We may have skipped past the chirp start during low-RMS phases.
         constexpr size_t SEARCH_BACKTRACK = 9600; // Back up slightly more than lead-in
 
-        if (correlation_pos_ >= SEARCH_BACKTRACK) {
-            search_start = correlation_pos_ - SEARCH_BACKTRACK;
-        } else if (total_fed_ < buffer_capacity_samples_) {
-            // Buffer hasn't wrapped yet, start from beginning
-            search_start = 0;
-        } else {
-            // Buffer wrapped, handle underflow
-            search_start = wrapRingIndexLocked(buffer_capacity_samples_ + correlation_pos_ - SEARCH_BACKTRACK);
+        if (!used_warm_timed_window) {
+            if (correlation_pos_ >= SEARCH_BACKTRACK) {
+                search_start = correlation_pos_ - SEARCH_BACKTRACK;
+            } else if (total_fed_ < buffer_capacity_samples_) {
+                // Buffer hasn't wrapped yet, start from beginning
+                search_start = 0;
+            } else {
+                // Buffer wrapped, handle underflow
+                search_start = wrapRingIndexLocked(buffer_capacity_samples_ + correlation_pos_ - SEARCH_BACKTRACK);
+            }
         }
 
         // Do not let the backtrack window re-enter audio that a previous decode
@@ -326,10 +383,7 @@ void StreamingDecoder::searchForSync() {
         // just-decoded 1-CW control frame can find false LTS-like peaks; those
         // false locks then escalate into expensive fixed-frame LDPC attempts and delay
         // real ACKs long enough to trigger ARQ retransmission storms.
-        if (search_floor_abs_valid_) {
-            const size_t oldest_abs = (total_fed_ > buffer_capacity_samples_)
-                ? (total_fed_ - buffer_capacity_samples_)
-                : 0;
+        if (!used_warm_timed_window && search_floor_abs_valid_) {
             if (search_floor_abs_ < oldest_abs) {
                 search_floor_abs_ = oldest_abs;
             }
@@ -357,8 +411,19 @@ void StreamingDecoder::searchForSync() {
             search_buffer[i] = buffer_[wrapRingIndexLocked(search_start + i)];
         }
 
-        // Advance by small step (100ms = 4800 samples) for accurate detection
-        correlation_pos_ = wrapRingIndexLocked(correlation_pos_ + CORRELATION_STEP);
+        if (used_warm_timed_window) {
+            correlation_pos_ = absoluteToRingLocked(warm_narrow_end_abs);
+            LOG_MODEM(INFO,
+                      "[%s] warm-sync: %s LTS search expected=%zu start_abs=%zu size=%zu confidence=%.2f",
+                      log_prefix_.c_str(),
+                      used_warm_narrow_window ? "narrow" : "degraded",
+                      next_expected_frame_sample_,
+                      warm_plan.search_start_abs, min_search,
+                      frame_arrival_confidence_);
+        } else {
+            // Advance by small step (100ms = 4800 samples) for accurate detection
+            correlation_pos_ = wrapRingIndexLocked(correlation_pos_ + CORRELATION_STEP);
+        }
     }
 
     // DEBUG: Dump the search buffer on first few searches
@@ -397,11 +462,11 @@ void StreamingDecoder::searchForSync() {
     SyncResult sync_result;
     bool found = false;
 
-    // When connected, use light sync only (LTS training symbols, no chirp).
-    // TX sends LTS-only preamble when connected — chirp fallback can NEVER work
-    // because there is no chirp in the signal. Reject false positives where data
-    // autocorrelation produces spurious peaks (observed up to 0.63). Real LTS
-    // correlation is always >0.81 even on moderate fading.
+    // When connected, use light sync (LTS training symbols, no chirp) after the
+    // first connected OFDM frame has established an OFDM-specific chirp+LTS anchor.
+    // Reject false positives where data autocorrelation produces spurious peaks
+    // (observed up to 0.63). Real LTS correlation is always >0.81 even on
+    // moderate fading.
     // Coherent modes need higher sync quality — badly-synced frames always fail
     // because stale LTS phases can't be recovered by DD tracking alone.
     const bool is_coherent = (current_modulation_ == Modulation::QPSK ||
@@ -413,10 +478,14 @@ void StreamingDecoder::searchForSync() {
     // show real tail DATA can dip to ~0.52-0.56. Data autocorrelation noise is
     // usually 0.20-0.45; candidates admitted near the low end still pass the
     // downstream LLR/LDPC gates before they can be accepted as frames.
+    const size_t light_sync_candidate_window_samples =
+        used_warm_narrow_window ? warm_narrow_candidate_span_samples : LIGHT_SEARCH_SIZE;
     const auto light_sync_thresholds = signal_policy::lightSyncThresholds(
-        is_coherent, is_narrowband, connected_, sync_reject_streak_);
+        is_coherent, is_narrowband, connected_, sync_reject_streak_,
+        used_warm_narrow_window, LIGHT_SEARCH_SIZE,
+        light_sync_candidate_window_samples);
 
-    if (connected_ && waveform_->supportsDataPreamble()) {
+    if (use_light_search) {
         float known_cfo = last_cfo_.load();
         found = waveform_->detectDataSync(
             SampleSpan(search_buffer.data(), search_buffer.size()),
@@ -443,18 +512,31 @@ void StreamingDecoder::searchForSync() {
         sync_reject_streak_ = sync_decision.next_reject_streak;
 
         if (found) {
-            LOG_MODEM(INFO, "[%s] DATA sync detected (training only, known CFO=%.1f Hz, corr=%.2f)",
-                      log_prefix_.c_str(), known_cfo, sync_result.correlation);
+            if (light_sync_thresholds.narrow_expected_window) {
+                LOG_MODEM(INFO,
+                          "[%s] DATA sync detected in warm window (known CFO=%.1f Hz, corr=%.2f, threshold=%.2f, window_reduction=%.2fx)",
+                          log_prefix_.c_str(), known_cfo, sync_result.correlation,
+                          light_sync_thresholds.min_confidence,
+                          light_sync_thresholds.false_positive_window_reduction);
+            } else {
+                LOG_MODEM(INFO, "[%s] DATA sync detected (training only, known CFO=%.1f Hz, corr=%.2f)",
+                          log_prefix_.c_str(), known_cfo, sync_result.correlation);
+            }
             if (data_sync_accepted_callback_) {
                 data_sync_accepted_callback_(sync_result.correlation);
             }
         }
-        // No chirp fallback — TX sends LTS only when connected, chirp won't be found
+        // No chirp fallback — TX sends LTS only after the one-shot OFDM anchor.
     } else {
         // Use full sync detection with chirp (wideband)
         found = waveform_->detectSync(
             SampleSpan(search_buffer.data(), search_buffer.size()),
             sync_result, CORR_DETECT_THRESHOLD);
+
+        if (found && use_full_ofdm_anchor_search) {
+            LOG_MODEM(INFO, "[%s] Full OFDM anchor sync detected while connected (corr=%.2f)",
+                      log_prefix_.c_str(), sync_result.correlation);
+        }
 
         // Dual-listen: if wideband didn't find anything, try narrowband chirp
         if (!found && !connected_) {
@@ -571,6 +653,7 @@ void StreamingDecoder::searchForSync() {
         sync_gap_error_samples_ = sync_result.gap_error_samples;
         sync_start_time_ = std::chrono::steady_clock::now();
         pending_total_cw_ = 0;
+        sync_from_warm_timed_window_ = used_warm_timed_window;
 
         state_ = DecoderState::SYNC_FOUND;
 
@@ -592,6 +675,17 @@ void StreamingDecoder::searchForSync() {
         // check to compute unsearched ≈ buffer_size, triggering spurious
         // buffer overflows and data loss during async decode.
     } else if (!search_buffer.empty()) {
+        if (used_warm_timed_window) {
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            setSearchFloorLocked(warm_narrow_end_abs);
+            noteFrameArrivalSyncMissLocked();
+            LOG_MODEM(INFO,
+                      "[%s] warm-sync: no LTS in %s expected window, misses=%d confidence=%.2f",
+                      log_prefix_.c_str(),
+                      used_warm_narrow_window ? "narrow" : "degraded",
+                      consecutive_sync_misses_,
+                      frame_arrival_confidence_);
+        }
         const size_t idle_count = std::min(search_buffer.size(), CORRELATION_STEP);
         observeIdleNoiseCandidate(search_buffer.data(), idle_count);
     }

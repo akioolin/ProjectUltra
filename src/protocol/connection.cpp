@@ -1830,6 +1830,7 @@ void Connection::enterConnected() {
     if (on_connected_) {
         on_connected_();
     }
+
 }
 
 void Connection::enterDisconnected(const std::string& reason) {

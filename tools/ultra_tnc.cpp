@@ -615,6 +615,9 @@ private:
         encoder_.setMode(mode);
         encoder_.setDataMode(data_modulation_, data_code_rate_);
         encoder_.setMCDPSKCarriers(8);
+        if (connected_ && mode == WaveformMode::OFDM_CHIRP) {
+            encoder_.forceNextFrameFullPreamble();
+        }
     }
 
     void setDataMode(Modulation mod, CodeRate rate) {
@@ -661,6 +664,10 @@ private:
                 decoder_.setConnectedOFDMMode(negotiated_waveform_, ofdm_config_,
                                               data_modulation_, data_code_rate_);
                 decoder_.setKnownCFO(last_cfo_hz_);
+                if (negotiated_waveform_ == WaveformMode::OFDM_CHIRP) {
+                    decoder_.expectFullOFDMAnchorOnce();
+                    encoder_.forceNextFrameFullPreamble();
+                }
                 if (negotiated_waveform_ == WaveformMode::OFDM_CHIRP) {
                     encoder_.setBurstInterleave(true);
                     decoder_.setBurstInterleave(true);
@@ -761,14 +768,23 @@ private:
                 return;
             }
             std::string error;
-            if (!ota_audio_->queueTxSamples(samples, &error)) {
+            const bool queued = ota_audio_->queueTxSamples(samples, &error);
+            if (!queued) {
                 LOG_WARN("AUDIO", "OTASim TX failed: %s", error.c_str());
                 std::cerr << "[otasim] TX failed: " << error << "\n";
+            }
+            if (queued && tx_waveform_mode_ == WaveformMode::OFDM_CHIRP) {
+                constexpr size_t kReplyTurnaroundSamples = kSampleRate * 50 / 1000;
+                decoder_.seedExpectedFrameArrivalAfterSamples(samples.size() + kReplyTurnaroundSamples);
             }
             return;
         }
 
         audio_.queueTxSamples(samples);
+        if (tx_waveform_mode_ == WaveformMode::OFDM_CHIRP) {
+            constexpr size_t kReplyTurnaroundSamples = kSampleRate * 50 / 1000;
+            decoder_.seedExpectedFrameArrivalAfterSamples(samples.size() + kReplyTurnaroundSamples);
+        }
     }
 
     void drainOtaRxLocked() {

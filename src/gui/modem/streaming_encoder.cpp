@@ -219,6 +219,12 @@ std::vector<float> StreamingEncoder::encodeFrame(const Bytes& frame_data) {
     Modulation tx_mod = use_control_profile ? Modulation::DQPSK : modulation_;
     CodeRate tx_rate = use_control_profile ? CodeRate::R1_4 : code_rate_;
 
+    if (force_full_preamble_once_ && is_ofdm) {
+        force_full_preamble_once_ = false;
+        LOG_MODEM(INFO, "[%s] Full preamble OFDM timing anchor emitted",
+                  log_prefix_.c_str());
+    }
+
     if (use_control_profile) {
         LOG_MODEM(DEBUG, "[%s] OFDM control profile TX: %s %s",
                   log_prefix_.c_str(), modulationToString(tx_mod), codeRateToString(tx_rate));
@@ -251,6 +257,13 @@ std::vector<float> StreamingEncoder::encodeFrame(const Bytes& frame_data) {
 }
 
 std::vector<float> StreamingEncoder::encodeFrameLight(const Bytes& frame_data) {
+    if (force_full_preamble_once_) {
+        force_full_preamble_once_ = false;
+        LOG_MODEM(INFO, "[%s] Full preamble forced for OFDM timing anchor",
+                  log_prefix_.c_str());
+        return encodeFrame(frame_data);
+    }
+
     if (!waveform_) {
         LOG_MODEM(ERROR, "[%s] No waveform!", log_prefix_.c_str());
         return {};
@@ -311,6 +324,7 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
     }
 
     if (mode_ == protocol::WaveformMode::MC_DPSK) {
+        force_full_preamble_once_ = false;
         size_t total_cw = 0;
         std::vector<Bytes> encoded_frames;
         encoded_frames.reserve(frame_data_list.size());
@@ -378,11 +392,17 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
 
     // Phase 3: Modulate with preambles
     std::vector<float> result;
+    const bool force_first_full_preamble = force_full_preamble_once_;
+    force_full_preamble_once_ = false;
 
     for (size_t i = 0; i < encoded_frames.size(); i++) {
         // Generate preamble (LTS training symbols)
         Samples preamble;
-        if (i == 0) {
+        if (i == 0 && force_first_full_preamble) {
+            preamble = waveform_->generatePreamble();
+            LOG_MODEM(INFO, "[%s] Full preamble forced for first burst frame OFDM timing anchor",
+                      log_prefix_.c_str());
+        } else if (i == 0) {
             // First frame of burst: LTS data preamble
             preamble = waveform_->supportsDataPreamble()
                 ? waveform_->generateDataPreamble()

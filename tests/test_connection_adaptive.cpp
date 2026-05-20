@@ -92,6 +92,22 @@ struct ConnectionAdaptiveTestAccess {
         c.connect_ack_retx_remaining_ = 1;
     }
 
+    static void makeConnectedInitiator(Connection& c, WaveformMode mode) {
+        c.local_call_ = "W1ABC";
+        c.remote_call_ = "K2DEF";
+        c.state_ = ConnectionState::CONNECTED;
+        c.is_initiator_ = true;
+        c.handshake_confirmed_ = true;
+        c.negotiated_mode_ = mode;
+        c.data_modulation_ = Modulation::DQPSK;
+        c.data_code_rate_ = CodeRate::R1_4;
+        c.arq_.setCallsigns(c.local_call_, c.remote_call_);
+    }
+
+    static void enterConnected(Connection& c) {
+        c.enterConnected();
+    }
+
     static bool connectAckRescueArmed(const Connection& c) {
         return !c.connect_ack_frame_.empty() || c.connect_ack_retx_remaining_ > 0 ||
                c.connect_ack_retransmit_ms_ > 0;
@@ -249,6 +265,19 @@ void test_accepted_ofdm_data_sync_does_not_clear_non_ofdm_rescue() {
     c.onAcceptedOFDMDataSync(0.90f);
     CHECK(ConnectionAdaptiveTestAccess::connectAckRescueArmed(c),
           "accepted OFDM DATA sync hook should not clear non-OFDM rescue state");
+}
+
+void test_ofdm_connected_entry_does_not_emit_unsolicited_timing_anchor() {
+    Connection c;
+    std::vector<Bytes> tx_frames;
+    c.setTransmitCallback([&](const Bytes& data) {
+        tx_frames.push_back(data);
+    });
+    ConnectionAdaptiveTestAccess::makeConnectedInitiator(c, WaveformMode::OFDM_CHIRP);
+
+    ConnectionAdaptiveTestAccess::enterConnected(c);
+    CHECK(tx_frames.empty(),
+          "connected OFDM entry should not emit an unsolicited KEEPALIVE anchor");
 }
 
 void test_adaptive_upgrade_requires_backlog_and_clean_windows() {
@@ -529,6 +558,7 @@ int main() {
     test_remote_mode_change_reconfigures_arq();
     test_accepted_ofdm_data_sync_clears_connect_ack_rescue();
     test_accepted_ofdm_data_sync_does_not_clear_non_ofdm_rescue();
+    test_ofdm_connected_entry_does_not_emit_unsolicited_timing_anchor();
     test_adaptive_upgrade_requires_backlog_and_clean_windows();
     test_adaptive_upgrade_skips_small_backlog();
     test_adaptive_downgrade_hysteresis_and_short_lockout_upgrade();

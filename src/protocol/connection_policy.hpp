@@ -139,28 +139,28 @@ inline LadderRung rungForMCDPSKConfig(Modulation modulation,
 }
 
 inline LadderRung selectLadderRung(float snr_db, ChannelClassification channel) {
-    float ofdm_floor = 18.0f;
+    float ofdm_floor = 10.0f;
     float robust_floor = 13.0f;
     float robust_mid_floor = 5.0f;
 
     switch (channel) {
         case ChannelClassification::AWGN:
-            ofdm_floor = 18.0f;
+            ofdm_floor = 10.0f;
             robust_floor = 13.0f;
             robust_mid_floor = 5.0f;
             break;
         case ChannelClassification::GOOD:
-            ofdm_floor = 19.0f;
+            ofdm_floor = 12.0f;
             robust_floor = 14.0f;
             robust_mid_floor = 6.0f;
             break;
         case ChannelClassification::MODERATE:
-            ofdm_floor = 20.0f;
+            ofdm_floor = 14.0f;
             robust_floor = 15.0f;
             robust_mid_floor = 7.0f;
             break;
         case ChannelClassification::POOR:
-            ofdm_floor = 22.0f;
+            ofdm_floor = 18.0f;
             robust_floor = 17.0f;
             robust_mid_floor = 9.0f;
             break;

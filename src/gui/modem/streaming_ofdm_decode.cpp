@@ -304,6 +304,10 @@ void StreamingDecoder::decodeCurrentFrame() {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
         correlation_pos_ = wrapRingIndexLocked(sync_position_ + advance);
         setSearchFloorLocked(frame_sync_abs + advance);
+        if (sync_from_warm_timed_window_) {
+            noteFrameArrivalSyncMissLocked();
+            sync_from_warm_timed_window_ = false;
+        }
     };
 
     // PING is a disconnected MC-DPSK chirp-only presence probe. Do not run this
@@ -546,8 +550,11 @@ void StreamingDecoder::decodeCurrentFrame() {
                             waveform_->configure(saved_mod, saved_rate);
                         }
 
+                        noteFrameArrivalSuccess(frame_sync_abs, frame_sync_abs + frame_len);
                         {
                             std::lock_guard<std::mutex> lock(buffer_mutex_);
+                            expect_full_ofdm_anchor_ = false;
+                            sync_from_warm_timed_window_ = false;
                             correlation_pos_ = wrapRingIndexLocked(sync_position_ + frame_len);
                             setSearchFloorLocked(frame_sync_abs + frame_len);
                             last_decoded_sync_pos_ = sync_position_;
@@ -1262,6 +1269,11 @@ void StreamingDecoder::decodeCurrentFrame() {
             return;
         }
 
+        if (result.success && connected_ && is_ofdm) {
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            sync_from_warm_timed_window_ = false;
+        }
+
         LOG_MODEM(INFO, "[%s] StreamingDecoder: Frame decoded, %d/%d CWs, SNR=%.1f dB (%s), CFO=%.1f Hz",
                   log_prefix_.c_str(), result.codewords_ok, result.codewords_ok + result.codewords_failed,
                   result.snr_db, snrSourceToString(result.snr_source), result.cfo_hz);
@@ -1301,6 +1313,18 @@ void StreamingDecoder::decodeCurrentFrame() {
     }
     size_t next_block_pos = wrapRingIndexLocked(sync_position_ + consumed);
     size_t next_search_abs = frame_sync_abs + consumed;
+
+    if (result.success && connected_ && is_ofdm) {
+        noteFrameArrivalSuccess(frame_sync_abs, next_search_abs);
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        expect_full_ofdm_anchor_ = false;
+    } else if (!result.success && result.codewords_ok == 0 && connected_ && is_ofdm) {
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        if (sync_from_warm_timed_window_) {
+            noteFrameArrivalSyncMissLocked();
+            sync_from_warm_timed_window_ = false;
+        }
+    }
 
     // Legacy fixed-offset continuation is only safe for a physical burst.
     // Marker-based bursts are handled earlier by BURST_ACCUMULATING; ordinary
@@ -1416,6 +1440,10 @@ void StreamingDecoder::decodeCurrentFrame() {
                 LOG_MODEM(INFO, "[%s] Burst block %d decoded: %d/%d CWs",
                           log_prefix_.c_str(), burst_blocks_decoded_,
                           next_result.codewords_ok, next_result.codewords_ok + next_result.codewords_failed);
+            }
+
+            if (next_result.success) {
+                noteFrameArrivalSuccess(next_search_abs, next_search_abs + min_block);
             }
 
             // Advance position for next iteration (or final correlation_pos_)

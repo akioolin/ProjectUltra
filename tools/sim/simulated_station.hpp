@@ -202,6 +202,19 @@ public:
     virtual void pushRxSamples(const float* in, size_t count) = 0;
 };
 
+inline ultra::audio::ChannelBusyDetectorConfig virtualAudioCarrierSenseConfig() {
+    auto config = ultra::audio::ChannelBusyDetectorConfig{};
+    // The virtual channel injects calibrated AWGN as continuous RX audio. At
+    // low SNR that idle floor is intentionally much higher than the hardware
+    // detector's conservative bootstrap ceiling, so the simulator must learn
+    // the modem-calibrated floor before applying carrier-sense guards.
+    config.noise_floor_bootstrap_rms_ceiling = std::max(
+        config.noise_floor_bootstrap_rms_ceiling,
+        ultra::ota_channel_core::kModemReferenceRms);
+    config.noise_floor_percentile = 0.50f;
+    return config;
+}
+
 /**
  * AudioPort - Pluggable audio backend for a SimulatedStation.
  *
@@ -217,6 +230,8 @@ public:
  */
 class AudioPort {
 public:
+    explicit AudioPort(ultra::audio::ChannelBusyDetectorConfig config = {})
+        : channel_busy_detector_(config) {}
     virtual ~AudioPort() = default;
     // Pull up to `count` RX samples; pads with noise/zero if buffer underruns.
     virtual std::vector<float> pullRx(size_t count) = 0;
@@ -267,7 +282,8 @@ private:
 class VirtualAudioPort : public AudioPort {
 public:
     VirtualAudioPort(SimulatedChannel& channel, bool is_station_a)
-        : channel_(channel), is_station_a_(is_station_a) {}
+        : AudioPort(virtualAudioCarrierSenseConfig()),
+          channel_(channel), is_station_a_(is_station_a) {}
 
     std::vector<float> pullRx(size_t count) override {
         auto samples = is_station_a_ ? channel_.receiveForA(count)
@@ -1246,6 +1262,9 @@ private:
 
         tx_waveform_mode_ = mode;
         createEncoder();
+        if (connected_.load() && encoder_ && mode == WaveformMode::OFDM_CHIRP) {
+            encoder_->forceNextFrameFullPreamble();
+        }
 
         LOG_MODEM(INFO, "[%s] Switched to waveform: %s",
                   callsign_.c_str(), waveformModeToString(mode));
@@ -1354,6 +1373,12 @@ private:
                                                    data_modulation_, data_code_rate_);
                     decoder_->setBurstInterleaveGroupSize(burst_group_size_);
                     decoder_->setKnownCFO(last_cfo_hz_);
+                    if (negotiated_waveform_ == WaveformMode::OFDM_CHIRP) {
+                        decoder_->expectFullOFDMAnchorOnce();
+                    }
+                }
+                if (encoder_ && negotiated_waveform_ == WaveformMode::OFDM_CHIRP) {
+                    encoder_->forceNextFrameFullPreamble();
                 }
                 // Enable burst interleaving only for higher-throughput OFDM modes.
                 // At R1/4 Good fading, one erased physical block was spreading
@@ -1812,6 +1837,15 @@ private:
                1000ULL;
     }
 
+    void seedWarmSyncReplyPrediction(size_t tx_samples) {
+        if (!decoder_ || tx_samples == 0) {
+            return;
+        }
+        const size_t delay = tx_samples +
+            static_cast<size_t>(samplesForMs(tx_turnaround_guard_ms_));
+        decoder_->seedExpectedFrameArrivalAfterSamples(delay);
+    }
+
     void advanceTxContinuationGrace(size_t elapsed_samples) {
         uint64_t remaining =
             tx_continuation_grace_samples_.load(std::memory_order_relaxed);
@@ -2051,6 +2085,7 @@ private:
 
         const std::string label = submission.label;
         auto samples = encodeTxSubmission(submission);
+        seedWarmSyncReplyPrediction(samples.size());
 
         std::lock_guard<std::mutex> lock(tx_mutex_);
         tx_job_starting_ = false;
@@ -2106,6 +2141,7 @@ private:
             if (samples.empty()) {
                 return;
             }
+            seedWarmSyncReplyPrediction(samples.size());
             notePttTxQueued(samples.size());
             port_->queueTx(samples);
             std::ostringstream oss;

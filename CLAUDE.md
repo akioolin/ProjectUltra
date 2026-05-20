@@ -136,8 +136,8 @@ Interpretation of the 2026-04-29 robustness work:
 
 **The modem has TWO completely different operating modes based on SNR:**
 
-### Mode 1: MC-DPSK (in-band SNR < 20 dB)
-- **When:** in-band SNR below 20, or heavy fading conditions
+### Mode 1: MC-DPSK (below wide-OFDM floor, or heavy fading)
+- **When:** in-band SNR is below the wide-OFDM ladder floor, or heavy fading conditions make OFDM inappropriate
 - **Waveform:** Multi-Carrier DPSK with chirp sync
 - **ARQ:** Stop-and-wait (window=1) - send ONE frame, wait for ACK
 - **Frame format:** Variable codewords, simple sequential encoding
@@ -147,8 +147,8 @@ Interpretation of the 2026-04-29 robustness work:
 - **Preamble:** ALWAYS full chirp preamble (no light sync)
 - **Key files:** `decodeMCDPSKFrame()` in streaming_decoder.cpp
 
-### Mode 2: OFDM (in-band SNR ≥ 20 dB)
-- **When:** in-band SNR 20 and above with acceptable fading
+### Mode 2: OFDM (in-band SNR >= 10 dB AWGN, with fading margins)
+- **When:** AWGN >=10 dB, Good >=12 dB, Moderate >=14 dB, Poor >=18 dB, with acceptable fading
 - **Waveform:** OFDM with chirp or Schmidl-Cox sync
 - **ARQ:** Selective Repeat (window=8) - send up to 8 frames before waiting
 - **Frame format:** Fixed 4-codeword frames for data, 1-codeword for control
@@ -173,8 +173,9 @@ Interpretation of the 2026-04-29 robustness work:
 1. **Connection starts:** MC-DPSK for PING/PONG/CONNECT (wideband or narrowband chirp)
 2. **Dual-listen:** RX detects chirp type → sets BandwidthMode (WIDE or NARROW)
 3. **After CONNECT_ACK:** SNR is measured, mode is negotiated
-   - In-band SNR < 20 + wideband: Stay in MC-DPSK
-   - In-band SNR ≥ 20 + wideband: Switch to OFDM_CHIRP
+   - Wideband AWGN-like SNR < 10: Stay in MC-DPSK
+   - Wideband AWGN-like SNR >= 10: Switch to OFDM_CHIRP R1/4
+   - Good/Moderate/Poor fading use 12/14/18 dB OFDM entry floors respectively
    - Narrowband detected: Switch to OFDM_NARROW
 4. **enterConnected():** Sets ARQ window based on mode (1 for MC-DPSK/NARROW, 4 for wideband OFDM)
 5. **StreamingEncoder/Decoder:** Check `mode_` to use correct path, `isOFDMMode()` for OFDM family
@@ -187,12 +188,12 @@ Interpretation of the 2026-04-29 robustness work:
 
 ---
 
-**Performance Requirements (post-2026-05-19 calibration audit):**
+**Performance Requirements (post-2026-05-20 warm-sync LTS verification):**
 | Mode | Channel | In-band SNR floor | Confidence |
 |------|---------|-----|---------------------|
 | MC-DPSK R1/4 | AWGN | **5 dB** | 3/3 seeds cli_simulator + OTASim fixture `OTASimulatorTwoEndpointMCDPSKLowSNR` |
 | MC-DPSK R1/4 | Moderate fading | 19.6 | pre-audit, not re-measured |
-| OFDM_CHIRP R1/4 | AWGN | **12 dB** | 3/3 seeds cli_simulator |
+| OFDM_CHIRP R1/4 | AWGN | **10 dB** | warm-sync LTS FER: 4.875% at 10 dB (n=800), 0.167% at 12 dB (n=600), 0% at 14-20 dB |
 | OFDM_CHIRP R1/4 | Good fading | **15 dB** | 3/3 seeds cli_simulator + `DecodeBenchReplay` fixture |
 | OFDM_CHIRP R1/4 | Moderate fading | **15 dB** | 1-seed OTASim (Mod ≈ Good at this rate — FEC absorbs the difference) |
 | OFDM_CHIRP R1/2 | AWGN | **14 dB** | 1-seed OTASim (boundary, ~40 retx but ARQ recovers) |
@@ -204,13 +205,12 @@ Higher rates (R2/3, R3/4, QPSK) — see historical section below; not re-measure
 
 **⚠️ What these floors measure — read this before quoting them:**
 
-These are **QSO-completion floors**, not raw isolated frame decode floors. The
-measurement methodology (`cli_simulator` / OTASim) runs a full session:
+The QSO floor and the raw-frame floor are now separately documented. The
+`cli_simulator` / OTASim floor still measures a full session:
 PING/PONG/CONNECT handshake with **full chirp+LTS preamble**, then post-handshake
-data frames with **light preamble (LTS-only)**, with selective-repeat ARQ
-recovering failed light-preamble frames. The "floor" is the lowest SNR at which
-the whole session completes — which is materially lower than the SNR at which
-individual light-preamble frames decode reliably.
+data frames with **light preamble (LTS-only)** and selective-repeat ARQ. The
+`warm_sync_light` FER harness measures the raw connected-mode light frame after
+a full OFDM chirp+LTS anchor has seeded warm timing state.
 
 Quantified by `docs/ACK_FRAME_FER_BASELINE_2026_05_20.md` (24 cells × 600 frames
 AWGN, isolated-frame measurement):
@@ -221,26 +221,22 @@ AWGN, isolated-frame measurement):
 - 1-CW ACK with **full chirp+LTS preamble**: 0.3% FER at SNR=12, 3.8% at SNR=10,
   68% at SNR=8
 
-The dominant low-SNR failure is **light-preamble LTS sync acquisition**, not
-LDPC. At SNR≤12, the light preamble does not have enough integration time for
-the LTS autocorrelation peak to clear the production 0.52 acceptance threshold
-(measured 0.20-0.34). The QSO-completion floor of 12 dB AWGN works because the
-CONNECT handshake (full preamble) gets through, and ARQ retransmits the
-light-preamble data frames until a few of them happen to sync.
-
-This is the gap that motivates the adaptive-preamble workstream: switch the
-post-handshake preamble to full chirp+LTS below some SNR threshold (~14-15 dB),
-recovering reliable raw frame decode at the cost of ~800 ms extra per frame —
-net throughput-positive at marginal SNR (saved retransmissions exceed added
-preamble airtime).
+The old isolated-frame baseline remains important: cold light-preamble ACK and
+4-CW data frames were 100% FER at 8/10/12 dB because the LTS-only detector had
+to search a 200 ms window with a 0.52 acceptance threshold. In the connected
+warm-sync regime, the receiver first decodes a full OFDM chirp+LTS anchor, then
+uses frame-arrival timing to narrow the expected LTS window and lower the
+threshold by the corresponding false-positive window reduction. The verified
+raw connected ACK light FER is now 4.875% at 10 dB, 0.167% at 12 dB, and 0% at
+14-20 dB AWGN (`docs/WARM_SYNC_LTS_VERIFICATION_2026_05_20.md`).
 
 Sweep methodology (2026-05-19): `cli_simulator --ota-host 127.0.0.1:50051 --ota-alpha-token admin_tok --ota-bravo-token bravo_tok` against the running OTASim server, walking SNR down until a `TEST FAILED` cell. Single-seed cells are floor *locators*, not statistical floors — multi-seed verification is still TODO for the 1-seed entries.
 
-**Current production state (post-2026-05-19 8-layer calibration audit, branch `fix/honest-snr-in-band-and-rate-recalibration`):**
+**Current production state (post-2026-05-20 warm-sync LTS work, branch `feat/warm-sync-lts-2026-05-20`):**
 
-The 2026-05-19 audit moved floors:
+The 2026-05-19 audit plus 2026-05-20 warm-sync LTS work moved floors:
 - MC-DPSK R1/4 AWGN floor: **18 dB → 5 dB** (-13 dB)
-- OFDM R1/4 AWGN floor: **18 dB → 12 dB** (-6 dB)
+- OFDM R1/4 AWGN floor: **18 dB → 10 dB** (-8 dB)
 - OFDM R1/4 Good fading floor: **18 dB → 15 dB** (-3 dB, locked in DecodeBenchReplay fixture)
 - OFDM R1/4 Moderate fading floor: **24.6 dB → 15 dB** (-9 dB, 1-seed)
 - OFDM R1/2 AWGN floor: **24.6 dB → 14 dB** (-10 dB, 1-seed)
@@ -251,6 +247,11 @@ Verification (2026-05-19):
 - `ctest --test-dir build --output-on-failure -j1`: **86/86 PASS**
 - Multi-seed cli_simulator (3 seeds × 3 cells): **9/9 PASS** at MC-DPSK SNR=5, OFDM R1/4 SNR=12 AWGN, OFDM R1/4 SNR=15 Good
 - Single-seed OTASim sweep: 7 cells located floors for the rate × fading combos above
+
+Verification (2026-05-20):
+- `warm_sync_light` ACK FER: SNR 10/12/14/16/18/20 AWGN, n=800 at 10/14 and n=600 elsewhere, results in `docs/data/warm_sync_lts_verification_2026_05_20.csv`
+- cli_simulator AWGN matrix: SNR 10/12/14 seeds 42/43/44 all pass (SNR 10 retx 0/0/0; SNR >=12 retx 0), and SNR 16/18/20/24 seed 42 all pass retx 0.
+- The first natural connected OFDM frame in each direction is a full chirp+LTS timing anchor; subsequent connected OFDM frames use light LTS preambles with warm timing state and TX-turnaround reply prediction. No unsolicited protocol KEEPALIVE anchor is emitted.
 
 Calibration baseline:
 - Simulated AWGN calibration: `SimulatedChannel` synthetic AWGN is continuous at RX,
@@ -299,12 +300,13 @@ valid at the SNRs listed):
 - OTFS/MFSK: RESERVED ONLY - not in the production build or default capabilities
 - cli_simulator: FULLY WORKING - all phases pass on AWGN and fading
 
-**Auto rate selection ladder (2026-05-18):**
+**Auto rate selection ladder (2026-05-20):**
 `src/protocol/waveform_selection.hpp::selectOFDMCodeRate()` is the
-single source of truth. Thresholds are in-band SNR. `tests/test_waveform_policy.cpp`
-locks the boundary behavior, including the AWGN-12 regression where in-band
-~22 dB must stay DQPSK R1/4 instead of D8PSK R2/3; do not duplicate the
-threshold table here.
+single source of truth for OFDM code-rate selection. Wideband waveform entry
+floors are in `src/protocol/connection_policy.hpp`: AWGN 10 dB, Good 12 dB,
+Moderate 14 dB, Poor 18 dB. Boundary tests live in
+`tests/test_waveform_policy.cpp` and `tests/test_connection_policy.cpp`; do not
+duplicate the full threshold table here.
 
 **Temporal fading measurement (2026-02-03):**
 - `getFadingIndex()` now combines freq_cv (multipath) + temporal_cv (Doppler spread)
@@ -520,13 +522,13 @@ make -j4
 |------|-------------|-----------|----------------|---------------|--------|
 | **MC-DPSK** | Dual Chirp | 5 dB AWGN (post-2026-05-19 audit) | 938 bps | ±50 Hz | Good |
 | **OFDM_NARROW** | NB Chirp + LTS | ~17 dB AWGN (pre-audit) | ~450 bps (R1/2, window=3) | ±50 Hz | Good (R1/4) |
-| **OFDM_CHIRP** R1/4 | Dual Chirp + LTS | 12 dB AWGN, 15 dB Good (post-audit) | 3.4 kbps | ±50 Hz | Good (R1/4) |
+| **OFDM_CHIRP** R1/4 | Dual Chirp + LTS anchor, warm LTS data | 10 dB AWGN, 15 dB Good | 3.4 kbps | ±50 Hz | Good (R1/4) |
 | **OFDM_COX** | Schmidl-Cox | Forced only | 7.9 kbps | Needs testing | Poor |
 | **SC-DPSK** | Barker-13 | -8 to -3 dB | 125 bps | N/A | Good |
 
 **Waveform Selection:**
 - Poor HF channels (2ms delay): Use MC-DPSK
-- Low SNR (5-12 dB) AWGN: MC-DPSK handles down to 5 dB; OFDM_CHIRP R1/4 from 12 dB up
+- Low SNR (5-10 dB) AWGN: MC-DPSK handles down to 5 dB; OFDM_CHIRP R1/4 from 10 dB up
 - Moderate/Good HF: Use OFDM_CHIRP; OFDM_COX remains explicit forced/legacy only
 - OFDM_NARROW retained for narrowband-detected paths
 - OTFS/MFSK values are reserved only and are not production-supported

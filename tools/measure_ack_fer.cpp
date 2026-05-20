@@ -31,6 +31,7 @@ enum class MeasureConfig {
     AckLight,
     Data4Light,
     AckFull,
+    WarmSyncLight,
 };
 
 struct Args {
@@ -60,10 +61,13 @@ struct TrialOutcome {
     gui::DecodeResult result;
 };
 
+bool bytesMatch(const Bytes& a, const Bytes& b);
+void classify(const TrialOutcome& outcome, const Bytes& expected, Counts& counts);
+
 void usage(const char* argv0) {
     std::cerr
         << "Usage: " << argv0
-        << " --snr <db> --config <ack_light|data4_light|ack_full>"
+        << " --snr <db> --config <ack_light|data4_light|ack_full|warm_sync_light>"
         << " --seed <u64> --n <frames>\n";
 }
 
@@ -76,6 +80,9 @@ MeasureConfig parseConfig(const std::string& name) {
     }
     if (name == "ack_full") {
         return MeasureConfig::AckFull;
+    }
+    if (name == "warm_sync_light") {
+        return MeasureConfig::WarmSyncLight;
     }
     throw std::runtime_error("unknown --config: " + name);
 }
@@ -197,7 +204,25 @@ FrameTrial makeFrame(gui::StreamingEncoder& encoder,
     return trial;
 }
 
-void drainDecoder(gui::StreamingDecoder& decoder, TrialOutcome& outcome) {
+FrameTrial makeAckFrame(gui::StreamingEncoder& encoder,
+                        uint16_t seq,
+                        bool full_preamble) {
+    FrameTrial trial;
+    const auto ack = v2::ControlFrame::makeAck("BRAVO", "ALPHA", seq);
+    trial.frame_bytes = ack.serialize();
+    trial.tx_samples = full_preamble
+        ? encoder.encodeFrame(trial.frame_bytes)
+        : encoder.encodeFrameLight(trial.frame_bytes);
+
+    if (trial.tx_samples.empty()) {
+        throw std::runtime_error("encoder produced no samples");
+    }
+    return trial;
+}
+
+void drainDecoder(gui::StreamingDecoder& decoder,
+                  TrialOutcome& outcome,
+                  uint64_t initial_frames_failed) {
     while (decoder.hasFrame()) {
         auto result = decoder.getFrame();
         if (result.is_ping) {
@@ -208,21 +233,31 @@ void drainDecoder(gui::StreamingDecoder& decoder, TrialOutcome& outcome) {
     }
 
     const auto stats = decoder.getStats();
-    if (stats.frames_failed > 0) {
+    if (stats.frames_failed > initial_frames_failed) {
         outcome.decoder_failed = true;
     }
 }
 
-TrialOutcome runTrial(gui::StreamingDecoder& decoder,
+TrialOutcome runFrame(gui::StreamingDecoder& decoder,
                       ultra::ota_channel_core::SimulatedChannel& channel,
                       const std::vector<float>& tx_samples,
-                      bool full_preamble) {
-    decoder.reset();
+                      bool full_preamble,
+                      bool reset_decoder,
+                      bool expect_full_anchor) {
+    if (reset_decoder) {
+        decoder.reset();
+    }
+    if (expect_full_anchor) {
+        decoder.expectFullOFDMAnchorOnce();
+    }
 
     TrialOutcome outcome;
     decoder.setDataSyncAcceptedCallback([&outcome](float) {
         outcome.sync_seen = true;
     });
+
+    const auto initial_stats = decoder.getStats();
+    const uint64_t initial_frames_failed = initial_stats.frames_failed;
 
     channel.transmitFromA(tx_samples);
 
@@ -237,7 +272,7 @@ TrialOutcome runTrial(gui::StreamingDecoder& decoder,
         decoder.feedAudio(rx.data(), rx.size());
         decoder.processBuffer();
         outcome.sync_seen = outcome.sync_seen || decoder.isSynced();
-        drainDecoder(decoder, outcome);
+        drainDecoder(decoder, outcome, initial_frames_failed);
 
         if (outcome.saw_result && outcome.result.success) {
             break;
@@ -250,10 +285,47 @@ TrialOutcome runTrial(gui::StreamingDecoder& decoder,
         decoder.feedAudio(rx.data(), rx.size());
         decoder.processBuffer();
         outcome.sync_seen = outcome.sync_seen || decoder.isSynced();
-        drainDecoder(decoder, outcome);
+        drainDecoder(decoder, outcome, initial_frames_failed);
     }
 
     return outcome;
+}
+
+TrialOutcome runTrial(gui::StreamingDecoder& decoder,
+                      ultra::ota_channel_core::SimulatedChannel& channel,
+                      const std::vector<float>& tx_samples,
+                      bool full_preamble) {
+    return runFrame(decoder, channel, tx_samples, full_preamble,
+                    /*reset_decoder=*/true, /*expect_full_anchor=*/false);
+}
+
+bool isExpectedSuccess(const TrialOutcome& outcome, const Bytes& expected) {
+    return outcome.saw_result &&
+           outcome.result.success &&
+           bytesMatch(outcome.result.frame_data, expected);
+}
+
+void runWarmSyncTrial(gui::StreamingEncoder& encoder,
+                      gui::StreamingDecoder& decoder,
+                      ultra::ota_channel_core::SimulatedChannel& channel,
+                      const FrameTrial& measured_light,
+                      uint16_t anchor_seq,
+                      Counts& counts) {
+    const FrameTrial anchor = makeAckFrame(encoder, anchor_seq, /*full_preamble=*/true);
+    auto anchor_outcome = runFrame(decoder, channel, anchor.tx_samples,
+                                   /*full_preamble=*/true,
+                                   /*reset_decoder=*/true,
+                                   /*expect_full_anchor=*/true);
+    if (!isExpectedSuccess(anchor_outcome, anchor.frame_bytes)) {
+        classify(anchor_outcome, anchor.frame_bytes, counts);
+        return;
+    }
+
+    auto measured_outcome = runFrame(decoder, channel, measured_light.tx_samples,
+                                     /*full_preamble=*/false,
+                                     /*reset_decoder=*/false,
+                                     /*expect_full_anchor=*/false);
+    classify(measured_outcome, measured_light.frame_bytes, counts);
 }
 
 bool bytesMatch(const Bytes& a, const Bytes& b) {
@@ -300,6 +372,13 @@ Counts measure(const Args& args) {
 
     for (int i = 0; i < args.n; ++i) {
         const auto trial = makeFrame(encoder, args.config, payload_rng, i);
+        if (args.config == MeasureConfig::WarmSyncLight) {
+            const uint16_t anchor_seq =
+                static_cast<uint16_t>((0x8000u + static_cast<unsigned>(i)) & 0xFFFFu);
+            runWarmSyncTrial(encoder, decoder, channel, trial, anchor_seq, counts);
+            continue;
+        }
+
         const bool full_preamble = args.config == MeasureConfig::AckFull;
         auto outcome = runTrial(decoder, channel, trial.tx_samples, full_preamble);
         classify(outcome, trial.frame_bytes, counts);

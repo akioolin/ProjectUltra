@@ -10,6 +10,51 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-20: Warm-sync LTS detection makes OFDM R1/4 usable at 10 dB AWGN
+
+**Fixed:** Connected OFDM light-preamble frames were decoded as isolated cold
+LTS searches. The receiver scanned a 9600-sample (~200 ms) window and required
+the production 0.52 LTS correlation threshold, so true low-SNR LTS peaks at
+10-12 dB never cleared the gate. A full connected OFDM control/data anchor
+could also decode through the control-profile fast path without updating frame
+arrival tracking, leaving the subsequent light frame without warm-sync state.
+Full-session testing also showed that each direction needed its own natural
+first-frame OFDM anchor and TX-turnaround timing hint; otherwise ACK windows
+could be centered on stale receive timing.
+
+**Changed:** `StreamingDecoder` now tracks successful connected OFDM frame
+arrival times, narrows the expected WARM LTS search window, lowers the LTS
+threshold only by the window-size false-positive reduction, and degrades back
+through wider/recovery search after misses. `OFDMChirpWaveform::detectDataSync()`
+adds a CFO-precorrected matched-filter LTS score on the lowered warm path. The
+first connected OFDM frame after mode transition is forced to full chirp+LTS
+per endpoint/session, local OFDM TX seeds expected peer-reply timing, and the
+control-profile ACK success path now calls `noteFrameArrivalSuccess()`. No
+unsolicited protocol KEEPALIVE anchor is emitted. Virtual OTA audio carrier
+sense now learns the calibrated simulator noise floor so continuous AWGN/noise
+bed audio does not defer PING/PONG forever, while virtual channel occupancy
+still marks actual peer TX as busy.
+The automatic wide-OFDM entry floor is now AWGN 10 dB, Good 12 dB, Moderate
+14 dB, Poor 18 dB, gated on a valid measured physical SNR.
+
+**Why it works:** The warm WARM-window candidate span is 2176 samples versus
+the 9600-sample cold light-search window, a 4.41x false-positive-window
+reduction. That permits a threshold reduction from ~0.52 to ~0.25 only inside
+the predicted arrival window. Cold/wide/recovery paths keep the higher
+threshold, preserving the false-lock guard.
+
+**Verification:** `docs/WARM_SYNC_LTS_VERIFICATION_2026_05_20.md` records
+AWGN FER cells for `warm_sync_light`: 4.875% at 10 dB (n=800), 0.167% at
+12 dB (n=600), and 0% at 14 dB (n=800) plus 16/18/20 dB (n=600). The
+cli_simulator AWGN matrix also passes at SNR 10/12/14 for seeds 42/43/44 and
+at SNR 16/18/20/24 for seed 42, with SNR 10 retransmissions 0/0/0 and zero
+retransmissions at SNR >=12. Aggregate raw data is in
+`docs/data/warm_sync_lts_verification_2026_05_20.csv`.
+
+Commit range: `M0:` through `M8:` on branch `feat/warm-sync-lts-2026-05-20`.
+
+---
+
 ## 2026-05-19: 8-layer calibration audit consolidation — verified floor
 
 **Summary:** The 8-layer calibration audit completed Layers 1-5 of the

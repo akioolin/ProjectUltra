@@ -16,6 +16,7 @@
 #include "streaming_buffer_policy.hpp"
 #include "streaming_decode_policy.hpp"
 #include "streaming_decoder_debug.hpp"
+#include "streaming_frame_arrival_policy.hpp"
 #include "streaming_frame_policy.hpp"
 #include "streaming_signal_policy.hpp"
 #include "gui/startup_trace.hpp"
@@ -42,6 +43,7 @@ namespace gui {
 namespace v2 = protocol::v2;
 namespace buffer_policy = streaming_buffer_policy;
 namespace decode_policy = streaming_decode_policy;
+namespace arrival_policy = streaming_frame_arrival_policy;
 namespace frame_policy = streaming_frame_policy;
 namespace signal_policy = streaming_signal_policy;
 
@@ -187,6 +189,111 @@ void StreamingDecoder::observeIdleNoiseCandidate(const float* samples, size_t co
     }
 
     idle_noise_snr_estimator_.observeIdleAudio(samples, count);
+}
+
+void StreamingDecoder::resetFrameArrivalTrackingLocked() {
+    warm_sync_active_ = false;
+    warm_sync_phase_ = arrival_policy::WarmSyncPhase::COLD;
+    next_expected_frame_sample_valid_ = false;
+    next_expected_frame_sample_ = 0;
+    frame_arrival_confidence_ = 0.0f;
+    consecutive_sync_misses_ = 0;
+    last_frame_arrival_valid_ = false;
+    last_frame_start_sample_ = 0;
+    last_frame_end_sample_ = 0;
+    last_frame_arrival_error_valid_ = false;
+    last_frame_arrival_error_samples_ = 0;
+}
+
+void StreamingDecoder::noteFrameArrivalSuccess(size_t frame_start_abs,
+                                               size_t frame_end_abs) {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    noteFrameArrivalSuccessLocked(frame_start_abs, frame_end_abs);
+}
+
+void StreamingDecoder::noteFrameArrivalSuccessLocked(size_t frame_start_abs,
+                                                     size_t frame_end_abs) {
+    if (!connected_ || mode_ != protocol::WaveformMode::OFDM_CHIRP) {
+        return;
+    }
+    if (!next_expected_frame_sample_valid_ &&
+        !expect_full_ofdm_anchor_ &&
+        expected_frame_gap_samples_ == 0) {
+        return;
+    }
+
+    const auto previous_phase = warm_sync_phase_;
+    const auto update = arrival_policy::updateOnSuccessfulFrame(
+        next_expected_frame_sample_valid_,
+        next_expected_frame_sample_,
+        frame_arrival_confidence_,
+        frame_start_abs,
+        frame_end_abs,
+        expected_frame_gap_samples_);
+
+    next_expected_frame_sample_valid_ = true;
+    warm_sync_active_ = true;
+    warm_sync_phase_ = arrival_policy::phaseAfterSuccessfulFrame();
+    next_expected_frame_sample_ = update.next_expected_frame_sample;
+    frame_arrival_confidence_ = update.confidence;
+    consecutive_sync_misses_ = update.consecutive_sync_misses;
+    last_frame_arrival_valid_ = true;
+    last_frame_start_sample_ = frame_start_abs;
+    last_frame_end_sample_ = frame_end_abs;
+    last_frame_arrival_error_valid_ = update.has_arrival_error;
+    last_frame_arrival_error_samples_ = update.arrival_error_samples;
+
+    if (update.has_arrival_error) {
+        LOG_MODEM(DEBUG, "[%s] warm-sync arrival: start=%zu end=%zu next=%zu error=%lld confidence=%.2f",
+                  log_prefix_.c_str(), frame_start_abs, frame_end_abs,
+                  next_expected_frame_sample_,
+                  static_cast<long long>(last_frame_arrival_error_samples_),
+                  frame_arrival_confidence_);
+    } else {
+        LOG_MODEM(DEBUG, "[%s] warm-sync arrival seeded: start=%zu end=%zu next=%zu confidence=%.2f",
+                  log_prefix_.c_str(), frame_start_abs, frame_end_abs,
+                  next_expected_frame_sample_, frame_arrival_confidence_);
+    }
+
+    if (previous_phase != warm_sync_phase_) {
+        LOG_MODEM(INFO, "[%s] warm-sync state: %s -> %s",
+                  log_prefix_.c_str(),
+                  arrival_policy::warmSyncPhaseName(previous_phase),
+                  arrival_policy::warmSyncPhaseName(warm_sync_phase_));
+    }
+}
+
+void StreamingDecoder::noteFrameArrivalSyncMissLocked() {
+    const auto previous_phase = warm_sync_phase_;
+    consecutive_sync_misses_ = arrival_policy::incrementSyncMisses(consecutive_sync_misses_);
+    frame_arrival_confidence_ =
+        arrival_policy::confidenceAfterSyncMiss(frame_arrival_confidence_);
+
+    if (next_expected_frame_sample_valid_ && last_frame_arrival_valid_) {
+        const size_t last_duration =
+            last_frame_end_sample_ >= last_frame_start_sample_
+                ? (last_frame_end_sample_ - last_frame_start_sample_)
+                : 0;
+        const size_t cadence = last_duration + expected_frame_gap_samples_;
+        if (cadence > 0) {
+            next_expected_frame_sample_ += cadence;
+        }
+    }
+
+    warm_sync_phase_ = arrival_policy::phaseAfterSyncMiss(consecutive_sync_misses_);
+    if (warm_sync_phase_ == arrival_policy::WarmSyncPhase::RECOVERY) {
+        warm_sync_active_ = false;
+        next_expected_frame_sample_valid_ = false;
+        frame_arrival_confidence_ = 0.0f;
+    }
+
+    if (previous_phase != warm_sync_phase_) {
+        LOG_MODEM(INFO, "[%s] warm-sync state: %s -> %s (misses=%d)",
+                  log_prefix_.c_str(),
+                  arrival_policy::warmSyncPhaseName(previous_phase),
+                  arrival_policy::warmSyncPhaseName(warm_sync_phase_),
+                  consecutive_sync_misses_);
+    }
 }
 
 void StreamingDecoder::writeSamplesToRingLocked(const float* samples, size_t count) {
@@ -449,6 +556,9 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     state_ = DecoderState::SEARCHING;
     pending_total_cw_ = 0;
     sync_reject_streak_ = 0;
+    expect_full_ofdm_anchor_ = false;
+    sync_from_warm_timed_window_ = false;
+    resetFrameArrivalTrackingLocked();
     constellation_cache_.clear();
     constellation_cache_time_ = std::chrono::steady_clock::time_point{};
 
@@ -482,6 +592,18 @@ void StreamingDecoder::setCarrierLdpcInterleaver(bool enable) {
     if (waveform_) {
         waveform_->setCarrierLdpcInterleaverEnabled(enable);
     }
+}
+
+void StreamingDecoder::expectFullOFDMAnchorOnce() {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    if (!connected_ || mode_ != protocol::WaveformMode::OFDM_CHIRP) {
+        expect_full_ofdm_anchor_ = false;
+        return;
+    }
+
+    expect_full_ofdm_anchor_ = true;
+    sync_reject_streak_ = 0;
+    LOG_MODEM(INFO, "StreamingDecoder: expecting full OFDM chirp+LTS timing anchor");
 }
 
 void StreamingDecoder::setMCDPSKCarriers(int n) {
@@ -604,6 +726,9 @@ void StreamingDecoder::setConnectedOFDMMode(protocol::WaveformMode mode,
     state_ = DecoderState::SEARCHING;
     pending_total_cw_ = 0;
     sync_reject_streak_ = 0;
+    expect_full_ofdm_anchor_ = false;
+    sync_from_warm_timed_window_ = false;
+    resetFrameArrivalTrackingLocked();
     constellation_cache_.clear();
     constellation_cache_time_ = std::chrono::steady_clock::time_point{};
     burst_soft_buffer_.clear();
@@ -662,6 +787,60 @@ float StreamingDecoder::getBufferFillPercent() const {
 DecoderStats StreamingDecoder::getStats() const {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     return stats_;
+}
+
+StreamingDecoder::FrameArrivalSnapshot StreamingDecoder::getFrameArrivalSnapshot() const {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+
+    FrameArrivalSnapshot snapshot;
+    snapshot.warm_sync_active = warm_sync_active_;
+    snapshot.warm_sync_phase = warm_sync_phase_;
+    snapshot.has_prediction = next_expected_frame_sample_valid_;
+    snapshot.next_expected_frame_sample = next_expected_frame_sample_;
+    snapshot.frame_arrival_confidence = frame_arrival_confidence_;
+    snapshot.consecutive_sync_misses = consecutive_sync_misses_;
+    snapshot.has_last_frame = last_frame_arrival_valid_;
+    snapshot.last_frame_start_sample = last_frame_start_sample_;
+    snapshot.last_frame_end_sample = last_frame_end_sample_;
+    snapshot.has_last_arrival_error = last_frame_arrival_error_valid_;
+    snapshot.last_arrival_error_samples = last_frame_arrival_error_samples_;
+    snapshot.expected_frame_gap_samples = expected_frame_gap_samples_;
+    return snapshot;
+}
+
+void StreamingDecoder::setExpectedFrameGapSamples(size_t samples) {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    expected_frame_gap_samples_ = samples;
+}
+
+void StreamingDecoder::seedExpectedFrameArrivalAfterSamples(size_t delay_samples,
+                                                            float confidence) {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    if (!connected_ || mode_ != protocol::WaveformMode::OFDM_CHIRP) {
+        return;
+    }
+
+    const auto previous_phase = warm_sync_phase_;
+    warm_sync_active_ = true;
+    warm_sync_phase_ = arrival_policy::WarmSyncPhase::WARM;
+    next_expected_frame_sample_valid_ = true;
+    next_expected_frame_sample_ = total_fed_ + delay_samples;
+    frame_arrival_confidence_ =
+        arrival_policy::clampConfidence(std::max(frame_arrival_confidence_, confidence));
+    consecutive_sync_misses_ = 0;
+    last_frame_arrival_error_valid_ = false;
+    last_frame_arrival_error_samples_ = 0;
+
+    LOG_MODEM(DEBUG,
+              "[%s] warm-sync arrival seeded from local TX: now=%zu delay=%zu next=%zu confidence=%.2f",
+              log_prefix_.c_str(), total_fed_, delay_samples,
+              next_expected_frame_sample_, frame_arrival_confidence_);
+    if (previous_phase != warm_sync_phase_) {
+        LOG_MODEM(INFO, "[%s] warm-sync state: %s -> %s",
+                  log_prefix_.c_str(),
+                  arrival_policy::warmSyncPhaseName(previous_phase),
+                  arrival_policy::warmSyncPhaseName(warm_sync_phase_));
+    }
 }
 
 StreamingDecoder::DecoderConfig StreamingDecoder::getConfig() const {
@@ -794,6 +973,9 @@ void StreamingDecoder::reset() {
     feed_iter_ = 0;
     overflow_events_ = 0;
     sync_reject_streak_ = 0;
+    expect_full_ofdm_anchor_ = false;
+    sync_from_warm_timed_window_ = false;
+    resetFrameArrivalTrackingLocked();
     state_ = DecoderState::SEARCHING;
     pending_total_cw_ = 0;
     burst_blocks_decoded_ = 0;

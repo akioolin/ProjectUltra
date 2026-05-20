@@ -89,6 +89,9 @@ inline bool invalidOFDMLTSTraining(bool is_ofdm,
 struct LightSyncThresholds {
     float min_confidence = 0.65f;
     float weak_floor = 0.55f;
+    bool narrow_expected_window = false;
+    float false_positive_window_reduction = 1.0f;
+    float threshold_reduction_db = 0.0f;
 };
 
 inline constexpr uint64_t kConnectedOFDMLightSyncRelaxStreak = 5;
@@ -96,10 +99,30 @@ inline constexpr uint64_t kConnectedOFDMLightSyncRescueStreak = 8;
 inline constexpr float kConnectedOFDMLightSyncRelaxFloor = 0.40f;
 inline constexpr float kConnectedOFDMLightSyncRescueFloor = 0.35f;
 
+inline float deriveNarrowWindowMagnitudeThreshold(float wide_window_threshold,
+                                                  size_t wide_window_samples,
+                                                  size_t narrow_window_samples) {
+    if (wide_window_threshold <= 0.0f ||
+        wide_window_samples == 0 ||
+        narrow_window_samples == 0 ||
+        narrow_window_samples >= wide_window_samples) {
+        return wide_window_threshold;
+    }
+
+    const float reduction_factor = static_cast<float>(wide_window_samples) /
+                                   static_cast<float>(narrow_window_samples);
+    const float threshold_reduction_db = 10.0f * std::log10(reduction_factor);
+    const float magnitude_scale = std::pow(10.0f, threshold_reduction_db / 20.0f);
+    return wide_window_threshold / magnitude_scale;
+}
+
 inline LightSyncThresholds lightSyncThresholds(bool is_coherent,
                                                bool is_narrowband,
                                                bool connected,
-                                               uint64_t sync_reject_streak) {
+                                               uint64_t sync_reject_streak,
+                                               bool narrow_expected_window = false,
+                                               size_t wide_window_samples = 0,
+                                               size_t narrow_window_samples = 0) {
     LightSyncThresholds thresholds;
     if (is_coherent) {
         thresholds.min_confidence = 0.90f;
@@ -110,6 +133,22 @@ inline LightSyncThresholds lightSyncThresholds(bool is_coherent,
     } else if (connected) {
         thresholds.min_confidence = 0.52f;
         thresholds.weak_floor = 0.45f;
+    }
+
+    if (!is_coherent && connected && !is_narrowband && narrow_expected_window &&
+        wide_window_samples > narrow_window_samples && narrow_window_samples > 0) {
+        const float wide_threshold = thresholds.min_confidence;
+        const float narrowed_threshold = deriveNarrowWindowMagnitudeThreshold(
+            wide_threshold, wide_window_samples, narrow_window_samples);
+        thresholds.min_confidence = narrowed_threshold;
+        thresholds.weak_floor = std::min(thresholds.weak_floor, narrowed_threshold);
+        thresholds.narrow_expected_window = true;
+        thresholds.false_positive_window_reduction =
+            static_cast<float>(wide_window_samples) /
+            static_cast<float>(narrow_window_samples);
+        thresholds.threshold_reduction_db =
+            10.0f * std::log10(thresholds.false_positive_window_reduction);
+        return thresholds;
     }
 
     if (!is_coherent && connected &&

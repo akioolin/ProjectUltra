@@ -167,6 +167,52 @@ void OFDMChirpWaveform::initComponents() {
     demodulator_ = std::make_unique<OFDMDemodulator>(config_);
     demodulator_->setRXCarrierErasureEnabled(rx_carrier_erasure_enabled_);
     chirp_sync_ = std::make_unique<sync::ChirpSync>(getChirpConfig());
+    invalidateDataSyncTemplate();
+}
+
+void OFDMChirpWaveform::invalidateDataSyncTemplate() {
+    data_sync_template_analytic_.clear();
+    data_sync_template_energy_ = 0.0f;
+    data_sync_template_symbol_samples_ = 0;
+}
+
+bool OFDMChirpWaveform::ensureDataSyncTemplate(int symbol_samples) {
+    const size_t template_samples = static_cast<size_t>(symbol_samples) * 2;
+    if (symbol_samples <= 0 || template_samples == 0) {
+        return false;
+    }
+
+    if (data_sync_template_symbol_samples_ == symbol_samples &&
+        data_sync_template_analytic_.size() == template_samples &&
+        data_sync_template_energy_ > 0.0f) {
+        return true;
+    }
+
+    ModemConfig template_config = config_;
+    template_config.tx_cfo_hz = 0.0f;
+    OFDMModulator template_modulator(template_config);
+    Samples lts_template = template_modulator.generateTrainingSymbols(2);
+    if (lts_template.size() < template_samples) {
+        invalidateDataSyncTemplate();
+        return false;
+    }
+
+    HilbertTransform template_hilbert(65);
+    template_hilbert.process(
+        SampleSpan(lts_template.data(), template_samples),
+        data_sync_template_analytic_);
+
+    data_sync_template_energy_ = 0.0f;
+    for (const auto& s : data_sync_template_analytic_) {
+        data_sync_template_energy_ += std::norm(s);
+    }
+    data_sync_template_symbol_samples_ = symbol_samples;
+
+    if (data_sync_template_energy_ <= 1.0e-8f) {
+        invalidateDataSyncTemplate();
+        return false;
+    }
+    return true;
 }
 
 sync::ChirpConfig OFDMChirpWaveform::getChirpConfig() const {
@@ -449,10 +495,98 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
         return false;
     }
 
-    // LTS has 2 identical symbols, so correlate with 1 symbol delay
+    const bool matched_filter_ready = ensureDataSyncTemplate(symbol_samples);
+    const bool matched_filter_can_drive_lock = threshold < 0.50f;
+    const int lts_pair_samples = symbol_samples * 2;
+
+    struct DataSyncCandidate {
+        float combined_corr = 0.0f;
+        float schmidl_corr = 0.0f;
+        float matched_corr = 0.0f;
+        Complex schmidl_p = Complex(0.0f, 0.0f);
+    };
+
+    auto evaluate_offset = [&](int offset) -> DataSyncCandidate {
+        DataSyncCandidate candidate;
+        if (offset < 0 ||
+            offset + lts_pair_samples > static_cast<int>(analytic.size())) {
+            return candidate;
+        }
+
+        // LTS has 2 identical symbols, so correlate with 1 symbol delay.
+        Complex P(0.0f, 0.0f);
+        float energy1 = 0.0f;
+        float energy2 = 0.0f;
+
+        for (int n = 0; n < symbol_samples; ++n) {
+            const int idx1 = offset + n;
+            const int idx2 = offset + n + symbol_samples;
+            const Complex& s1 = analytic[idx1];
+            const Complex& s2 = analytic[idx2];
+            P += std::conj(s1) * s2;
+            energy1 += std::norm(s1);
+            energy2 += std::norm(s2);
+        }
+
+        const float schmidl_denom = std::sqrt(energy1 * energy2) + 1e-10f;
+        candidate.schmidl_corr = std::abs(P) / schmidl_denom;
+        candidate.schmidl_p = P;
+
+        if (matched_filter_ready &&
+            data_sync_template_analytic_.size() == static_cast<size_t>(lts_pair_samples)) {
+            Complex first_symbol_corr(0.0f, 0.0f);
+            Complex second_symbol_corr(0.0f, 0.0f);
+            float rx_energy = 0.0f;
+
+            const float phase_inc = -2.0f * static_cast<float>(M_PI) *
+                                    known_cfo_hz / config_.sample_rate;
+            float phase = 0.0f;
+            for (int n = 0; n < lts_pair_samples; ++n) {
+                const Complex cfo_correction(std::cos(phase), std::sin(phase));
+                const Complex rx = analytic[offset + n] * cfo_correction;
+                const Complex& ref = data_sync_template_analytic_[static_cast<size_t>(n)];
+                const Complex corr = std::conj(ref) * rx;
+                if (n < symbol_samples) {
+                    first_symbol_corr += corr;
+                } else {
+                    second_symbol_corr += corr;
+                }
+                rx_energy += std::norm(rx);
+                phase += phase_inc;
+            }
+
+            const float matched_denom =
+                std::sqrt(data_sync_template_energy_ * rx_energy) + 1e-10f;
+            const float normal_score =
+                std::abs(first_symbol_corr + second_symbol_corr) / matched_denom;
+            const float marker_score =
+                std::abs(-first_symbol_corr + second_symbol_corr) / matched_denom;
+            candidate.matched_corr = std::max(normal_score, marker_score);
+        }
+
+        // The matched filter is allowed to lower the effective detection floor
+        // only in the narrowed expected-arrival path. In the wide/cold fallback
+        // window, keep legacy Schmidl-Cox acceptance semantics so payload data
+        // cannot lock on a matched-only LTS-like projection.
+        candidate.combined_corr = matched_filter_can_drive_lock
+            ? std::max(candidate.schmidl_corr, candidate.matched_corr)
+            : candidate.schmidl_corr;
+        return candidate;
+    };
+
     float best_corr = 0.0f;
+    float best_schmidl_corr = 0.0f;
+    float best_matched_corr = 0.0f;
     int best_offset = 0;
     Complex best_p(0.0f, 0.0f);
+
+    auto adopt_candidate = [&](int offset, const DataSyncCandidate& candidate) {
+        best_corr = candidate.combined_corr;
+        best_schmidl_corr = candidate.schmidl_corr;
+        best_matched_corr = candidate.matched_corr;
+        best_offset = offset;
+        best_p = candidate.schmidl_p;
+    };
 
     // Keep search local to expected frame start. Scanning the full buffer makes
     // payload autocorrelation peaks compete with LTS and increases false locks.
@@ -464,29 +598,9 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
     for (int offset = static_cast<int>(signal_start);
          offset < search_end; offset += 8) {  // Step by 8 for speed
 
-        // Correlate: P = sum(conj(s1[n]) * s2[n])
-        Complex P(0.0f, 0.0f);
-        float energy1 = 0.0f, energy2 = 0.0f;
-
-        for (int n = 0; n < symbol_samples; ++n) {
-            int idx1 = offset + n;
-            int idx2 = offset + n + symbol_samples;
-            if (idx2 >= static_cast<int>(analytic.size())) break;
-
-            const Complex& s1 = analytic[idx1];
-            const Complex& s2 = analytic[idx2];
-            P += std::conj(s1) * s2;
-            energy1 += std::norm(s1);
-            energy2 += std::norm(s2);
-        }
-
-        float denom = std::sqrt(energy1 * energy2) + 1e-10f;
-        float corr = std::abs(P) / denom;
-
-        if (corr > best_corr) {
-            best_corr = corr;
-            best_offset = offset;
-            best_p = P;
+        const DataSyncCandidate candidate = evaluate_offset(offset);
+        if (candidate.combined_corr > best_corr) {
+            adopt_candidate(offset, candidate);
         }
 
         // Early exit on first high-confidence peak. The LTS (two identical training
@@ -494,7 +608,7 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
         // 1-CW LDPC zero-padding, data symbols can also be identical (all-zero bits →
         // 0° DQPSK phase change), creating false peaks later in the search window.
         // By stopping at the first peak above 0.95, we always lock onto the real LTS.
-        if (corr > 0.95f) {
+        if (candidate.combined_corr > 0.95f) {
             break;
         }
     }
@@ -510,28 +624,9 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
         for (int offset = refine_start; offset < refine_end; ++offset) {
             if (offset == best_offset) continue;  // Skip already-evaluated
 
-            Complex P(0.0f, 0.0f);
-            float energy1 = 0.0f, energy2 = 0.0f;
-
-            for (int n = 0; n < symbol_samples; ++n) {
-                int idx1 = offset + n;
-                int idx2 = offset + n + symbol_samples;
-                if (idx2 >= static_cast<int>(analytic.size())) break;
-
-                const Complex& s1 = analytic[idx1];
-                const Complex& s2 = analytic[idx2];
-                P += std::conj(s1) * s2;
-                energy1 += std::norm(s1);
-                energy2 += std::norm(s2);
-            }
-
-            float denom = std::sqrt(energy1 * energy2) + 1e-10f;
-            float corr = std::abs(P) / denom;
-
-            if (corr > best_corr) {
-                best_corr = corr;
-                best_offset = offset;
-                best_p = P;
+            const DataSyncCandidate candidate = evaluate_offset(offset);
+            if (candidate.combined_corr > best_corr) {
+                adopt_candidate(offset, candidate);
             }
         }
     }
@@ -552,31 +647,14 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
             static_cast<int>(samples.size()) - symbol_samples * 2;
         const int original_best_offset = best_offset;
         const float original_best_corr = best_corr;
+        const float original_best_schmidl_corr = best_schmidl_corr;
+        const float original_best_matched_corr = best_matched_corr;
         Complex original_best_p = best_p;
 
         for (int offset = search_end; offset < extended_search_end; offset += 8) {
-            Complex P(0.0f, 0.0f);
-            float energy1 = 0.0f, energy2 = 0.0f;
-
-            for (int n = 0; n < symbol_samples; ++n) {
-                int idx1 = offset + n;
-                int idx2 = offset + n + symbol_samples;
-                if (idx2 >= static_cast<int>(analytic.size())) break;
-
-                const Complex& s1 = analytic[idx1];
-                const Complex& s2 = analytic[idx2];
-                P += std::conj(s1) * s2;
-                energy1 += std::norm(s1);
-                energy2 += std::norm(s2);
-            }
-
-            float denom = std::sqrt(energy1 * energy2) + 1e-10f;
-            float corr = std::abs(P) / denom;
-
-            if (corr > best_corr + kMinLaterPeakImprovement) {
-                best_corr = corr;
-                best_offset = offset;
-                best_p = P;
+            const DataSyncCandidate candidate = evaluate_offset(offset);
+            if (candidate.combined_corr > best_corr + kMinLaterPeakImprovement) {
+                adopt_candidate(offset, candidate);
             }
         }
 
@@ -587,28 +665,9 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
             for (int offset = refine_start; offset < refine_end; ++offset) {
                 if (offset == best_offset) continue;
 
-                Complex P(0.0f, 0.0f);
-                float energy1 = 0.0f, energy2 = 0.0f;
-
-                for (int n = 0; n < symbol_samples; ++n) {
-                    int idx1 = offset + n;
-                    int idx2 = offset + n + symbol_samples;
-                    if (idx2 >= static_cast<int>(analytic.size())) break;
-
-                    const Complex& s1 = analytic[idx1];
-                    const Complex& s2 = analytic[idx2];
-                    P += std::conj(s1) * s2;
-                    energy1 += std::norm(s1);
-                    energy2 += std::norm(s2);
-                }
-
-                float denom = std::sqrt(energy1 * energy2) + 1e-10f;
-                float corr = std::abs(P) / denom;
-
-                if (corr > best_corr) {
-                    best_corr = corr;
-                    best_offset = offset;
-                    best_p = P;
+                const DataSyncCandidate candidate = evaluate_offset(offset);
+                if (candidate.combined_corr > best_corr) {
+                    adopt_candidate(offset, candidate);
                 }
             }
 
@@ -617,6 +676,8 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
                       original_best_offset, original_best_corr, best_offset, best_corr);
         } else {
             best_corr = original_best_corr;
+            best_schmidl_corr = original_best_schmidl_corr;
+            best_matched_corr = original_best_matched_corr;
             best_offset = original_best_offset;
             best_p = original_best_p;
         }
@@ -644,8 +705,9 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
         burst_interleaved_detected_ = (marker_metric.real() < 0.0f);
         burst_interleave_latched_ = burst_interleaved_detected_;
 
-        LOG_MODEM(INFO, "OFDMChirpWaveform: Data sync detected at %d, corr=%.2f, using CFO=%.1f Hz%s",
-                  best_offset, best_corr, known_cfo_hz,
+        LOG_MODEM(INFO,
+                  "OFDMChirpWaveform: Data sync detected at %d, corr=%.2f (sc=%.2f mf=%.2f), using CFO=%.1f Hz%s",
+                  best_offset, best_corr, best_schmidl_corr, best_matched_corr, known_cfo_hz,
                   burst_interleaved_detected_ ? " [BURST-INTERLEAVED]" : "");
     }
 

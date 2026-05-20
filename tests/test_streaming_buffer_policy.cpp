@@ -1,9 +1,11 @@
 #include "gui/modem/streaming_buffer_policy.hpp"
+#include "gui/modem/streaming_frame_arrival_policy.hpp"
 
 #include <cmath>
 #include <iostream>
 
 using namespace ultra::gui::streaming_buffer_policy;
+namespace arrival_policy = ultra::gui::streaming_frame_arrival_policy;
 
 namespace {
 
@@ -93,6 +95,142 @@ void test_backlog_snapshot() {
     CHECK(invalid.unsearched_samples == 0, "invalid capacity should be safe");
 }
 
+void test_frame_arrival_prediction_tracks_cadence() {
+    constexpr size_t tight_window = 960;  // 20 ms at 48 kHz
+    constexpr size_t frame_samples = 11520;
+    constexpr size_t gap_samples = 480;   // 10 ms
+
+    bool have_prediction = false;
+    size_t expected = 0;
+    float confidence = 0.0f;
+    int misses = 0;
+    size_t actual_start = 240000;
+
+    for (int i = 0; i < 50; ++i) {
+        if (have_prediction) {
+            const int jitter = ((i % 5) - 2) * 120;  // +/-2.5 ms max
+            actual_start = jitter >= 0
+                ? expected + static_cast<size_t>(jitter)
+                : expected - static_cast<size_t>(-jitter);
+        }
+
+        const auto update = arrival_policy::updateOnSuccessfulFrame(
+            have_prediction, expected, confidence,
+            actual_start, actual_start + frame_samples,
+            gap_samples, tight_window);
+
+        CHECK(update.within_tight_window, "predicted frame arrival should stay inside 20 ms window");
+        if (update.has_arrival_error) {
+            CHECK(arrival_policy::absSampleError(update.arrival_error_samples) <= tight_window,
+                  "arrival error should remain bounded by tight window");
+        }
+        CHECK(update.next_expected_frame_sample == actual_start + frame_samples + gap_samples,
+              "next prediction should be last frame end plus configured gap");
+        CHECK(update.consecutive_sync_misses == 0,
+              "successful frame should clear consecutive sync misses");
+
+        have_prediction = true;
+        expected = update.next_expected_frame_sample;
+        confidence = update.confidence;
+        misses = update.consecutive_sync_misses;
+    }
+
+    CHECK(misses == 0, "sequential successes should not accumulate misses");
+    CHECK(confidence > 0.75f, "arrival confidence should build over stable cadence");
+}
+
+void test_frame_arrival_miss_accounting() {
+    int misses = 0;
+    misses = arrival_policy::incrementSyncMisses(misses);
+    misses = arrival_policy::incrementSyncMisses(misses);
+    CHECK(misses == 2, "sync miss counter should increment");
+
+    const float confidence = arrival_policy::confidenceAfterSyncMiss(0.8f);
+    CHECK(confidence < 0.8f && confidence > 0.0f,
+          "sync miss should reduce but not zero arrival confidence");
+}
+
+void test_warm_search_window_planning() {
+    constexpr size_t symbol_samples = 1152;
+    constexpr size_t step_samples = 4800;
+    constexpr size_t expected = 240000;
+    constexpr size_t half_window = 960;
+
+    auto active = arrival_policy::planWarmSearchWindow(
+        true, true, true, expected, 0.6f, 0,
+        arrival_policy::WarmSyncPhase::WARM,
+        expected + 6000, expected - 20000,
+        true, expected - 4000,
+        expected - 1200,
+        symbol_samples, step_samples);
+
+    CHECK(active.active, "warm window should activate when prediction is available and current step intersects it");
+    CHECK(active.lower_threshold, "warm window should use lowered threshold");
+    CHECK(active.search_start_abs == expected - half_window,
+          "warm window should start half-window before expected arrival");
+    CHECK(active.candidate_span_samples ==
+              half_window * 2 + arrival_policy::kWarmSearchSlackSamples,
+          "warm window candidate span should be independent of LTS tail samples");
+    CHECK(active.search_size_samples ==
+              half_window * 2 + arrival_policy::kWarmSearchSlackSamples + symbol_samples * 2,
+          "warm window should include candidate span plus two LTS symbols");
+
+    auto wait = arrival_policy::planWarmSearchWindow(
+        true, true, true, expected, 0.6f, 0,
+        arrival_policy::WarmSyncPhase::WARM,
+        expected + 1000, expected - 20000,
+        true, expected - 4000,
+        expected - 1200,
+        symbol_samples, step_samples);
+    CHECK(!wait.active && wait.wait_for_more_samples,
+          "warm window should wait until enough post-LTS samples are buffered");
+
+    auto degraded = arrival_policy::planWarmSearchWindow(
+        true, true, true, expected, 0.2f, 1,
+        arrival_policy::WarmSyncPhase::DEGRADED,
+        expected + 6000, expected - 20000,
+        true, expected - 4000,
+        expected - 1200,
+        symbol_samples, step_samples);
+    CHECK(degraded.active && !degraded.lower_threshold,
+          "degraded warm-sync should keep timed search at low confidence without lowered threshold");
+    CHECK(degraded.candidate_span_samples ==
+              arrival_policy::kDegradedWindowSamples * 2 +
+              arrival_policy::kWarmSearchSlackSamples,
+          "degraded warm-sync should widen the timed window");
+
+    auto recovery = arrival_policy::planWarmSearchWindow(
+        true, true, true, expected, 0.2f, 4,
+        arrival_policy::WarmSyncPhase::RECOVERY,
+        expected + 6000, expected - 20000,
+        true, expected - 4000,
+        expected - 1200,
+        symbol_samples, step_samples);
+    CHECK(!recovery.active && !recovery.wait_for_more_samples,
+          "recovery state should fall back to cold wide search");
+
+    auto far = arrival_policy::planWarmSearchWindow(
+        true, true, true, expected, 0.6f, 0,
+        arrival_policy::WarmSyncPhase::WARM,
+        expected + 6000, expected - 20000,
+        true, expected - 4000,
+        expected + 12000,
+        symbol_samples, step_samples);
+    CHECK(!far.active && !far.wait_for_more_samples,
+          "warm window should not activate when the current search step is outside the expected window");
+}
+
+void test_warm_sync_phase_transitions() {
+    CHECK(arrival_policy::phaseAfterSuccessfulFrame() == arrival_policy::WarmSyncPhase::WARM,
+          "successful frame should enter warm sync");
+    CHECK(arrival_policy::phaseAfterSyncMiss(1) == arrival_policy::WarmSyncPhase::DEGRADED,
+          "first missed expected window should degrade warm sync");
+    CHECK(arrival_policy::phaseAfterSyncMiss(3) == arrival_policy::WarmSyncPhase::DEGRADED,
+          "short outages should remain in degraded warm sync");
+    CHECK(arrival_policy::phaseAfterSyncMiss(4) == arrival_policy::WarmSyncPhase::RECOVERY,
+          "long outages should enter recovery");
+}
+
 }  // namespace
 
 int main() {
@@ -102,6 +240,10 @@ int main() {
     test_overflow_drop_with_wrap();
     test_pointer_drift_guard();
     test_backlog_snapshot();
+    test_frame_arrival_prediction_tracks_cadence();
+    test_frame_arrival_miss_accounting();
+    test_warm_search_window_planning();
+    test_warm_sync_phase_transitions();
 
     if (tests_failed != 0) {
         std::cout << "StreamingBufferPolicy: " << (tests_run - tests_failed)

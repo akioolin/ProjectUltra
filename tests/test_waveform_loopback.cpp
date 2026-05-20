@@ -1,5 +1,6 @@
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "waveform/ofdm_cox_waveform.hpp"
+#include "gui/modem/streaming_signal_policy.hpp"
 #include "protocol/frame_v2.hpp"
 #include "sim/awgn.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
@@ -12,6 +13,7 @@
 #include <vector>
 
 using namespace ultra;
+namespace signal_policy = ultra::gui::streaming_signal_policy;
 
 namespace {
 
@@ -293,6 +295,102 @@ bool test_ofdm_chirp_data_preamble_loopback() {
     return processFromSync(waveform, audio, sync, "OFDM-CHIRP data");
 }
 
+bool test_ofdm_chirp_data_preamble_awgn_warm_sync() {
+    ModemConfig cfg;
+    cfg.sample_rate = 48000;
+    cfg.fft_size = 1024;
+    cfg.num_carriers = 59;
+    cfg.cp_mode = CyclicPrefixMode::LONG;
+    cfg.modulation = Modulation::DQPSK;
+    cfg.code_rate = CodeRate::R1_4;
+    cfg.use_pilots = true;
+    cfg.pilot_spacing = 10;
+
+    OFDMChirpWaveform tx(cfg);
+    tx.configure(Modulation::DQPSK, CodeRate::R1_4);
+    tx.setTxFrequencyOffset(4.0f);
+
+    Samples audio;
+    append(audio, tx.generateDataPreamble());
+    append(audio, tx.modulate(makeEncodedCodeword()));
+    appendTailMargin(audio, tx.getSamplesPerSymbol());
+    addAwgn(audio, 10.0f, 0x20260525u);
+
+    OFDMChirpWaveform rx(cfg);
+    rx.configure(Modulation::DQPSK, CodeRate::R1_4);
+
+    constexpr size_t wide_window_samples = 9600;
+    constexpr size_t narrow_candidate_span = 2176;
+    const auto thresholds = signal_policy::lightSyncThresholds(
+        false, false, true, 0, true, wide_window_samples, narrow_candidate_span);
+
+    SyncResult sync;
+    CHECK(rx.detectDataSync(SampleSpan(audio), sync, 4.0f, thresholds.min_confidence),
+          "OFDM-CHIRP warm data: SNR10 LTS should sync with known-CFO matched filter");
+    CHECK(sync.detected, "OFDM-CHIRP warm data: sync result should be marked detected");
+    CHECK(sync.correlation >= thresholds.min_confidence,
+          "OFDM-CHIRP warm data: correlation should clear warm threshold");
+    CHECK(std::abs(sync.cfo_hz - 4.0f) < 0.001f,
+          "OFDM-CHIRP warm data: known CFO should be preserved");
+    return true;
+}
+
+bool test_ofdm_chirp_data_preamble_noise_false_sync_rate() {
+    ModemConfig cfg;
+    cfg.sample_rate = 48000;
+    cfg.fft_size = 512;
+    cfg.num_carriers = 30;
+    cfg.cp_mode = CyclicPrefixMode::LONG;
+    cfg.modulation = Modulation::DQPSK;
+    cfg.code_rate = CodeRate::R1_4;
+    cfg.use_pilots = true;
+    cfg.pilot_spacing = 10;
+
+    OFDMChirpWaveform waveform(cfg);
+    waveform.configure(Modulation::DQPSK, CodeRate::R1_4);
+
+    constexpr size_t wide_window_samples = 9600;
+    constexpr size_t narrow_candidate_span = 2176;
+    const auto thresholds = signal_policy::lightSyncThresholds(
+        false, false, true, 0, true, wide_window_samples, narrow_candidate_span);
+    CHECK(thresholds.narrow_expected_window,
+          "OFDM-CHIRP noise: threshold should be the warm expected-window threshold");
+
+    const size_t window_samples =
+        narrow_candidate_span + static_cast<size_t>(waveform.getSamplesPerSymbol()) * 2;
+    constexpr size_t noise_seconds = 60;
+    const size_t total_samples = static_cast<size_t>(cfg.sample_rate) * noise_seconds;
+
+    std::mt19937 rng(0x20260520u);
+    std::normal_distribution<float> noise_dist(0.0f, 0.08f);
+    Samples noise(total_samples);
+    for (float& sample : noise) {
+        sample = noise_dist(rng);
+    }
+
+    int false_syncs = 0;
+    int windows = 0;
+    for (size_t offset = 0; offset + window_samples <= noise.size();
+         offset += narrow_candidate_span) {
+        SyncResult sync;
+        waveform.reset();
+        const bool raw_found = waveform.detectDataSync(
+            SampleSpan(noise.data() + offset, window_samples),
+            sync, 0.0f, thresholds.min_confidence);
+        const auto decision = signal_policy::evaluateLightSyncCandidate(
+            raw_found, sync.correlation, false, true, 0, thresholds);
+        if (decision.found) {
+            ++false_syncs;
+        }
+        ++windows;
+    }
+
+    CHECK(windows > 1000, "OFDM-CHIRP noise: should scan about one minute of narrow windows");
+    CHECK(false_syncs <= 1,
+          "OFDM-CHIRP noise: warm narrow threshold should stay under 1 false sync/min");
+    return true;
+}
+
 bool test_ofdm_cox_fixed_frame_roundtrip() {
     const ModemConfig cfg = makeCoxConfig();
     constexpr int CW_COUNT = 4;
@@ -429,6 +527,8 @@ int main() {
     test_ofdm_cox_clean_loopback();
     test_ofdm_chirp_full_preamble_loopback();
     test_ofdm_chirp_data_preamble_loopback();
+    test_ofdm_chirp_data_preamble_awgn_warm_sync();
+    test_ofdm_chirp_data_preamble_noise_false_sync_rate();
     test_ofdm_cox_fixed_frame_roundtrip();
     test_ofdm_cox_qam_fixed_frame_roundtrip();
     test_ofdm_cox_qam_awgn_margin();
