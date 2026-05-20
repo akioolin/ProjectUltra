@@ -412,6 +412,7 @@ add_library(ultra_core STATIC
     src/dsp/fft.cpp
     src/dsp/filters.cpp
     src/dsp/resampler.cpp
+    src/audio/channel_busy_detector.cpp
     # Protocol layer (callsign addressing, connection management)
     src/protocol/frame_v2.cpp
     src/protocol/arq_interface.cpp

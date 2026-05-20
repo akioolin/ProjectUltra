@@ -78,6 +78,10 @@ add_test(NAME OFDM COMMAND test_ofdm)
 add_executable(test_audio_basic test_audio_basic.cpp)
 add_test(NAME AudioBasic COMMAND test_audio_basic)
 
+add_executable(test_channel_busy_detector test_channel_busy_detector.cpp)
+target_link_libraries(test_channel_busy_detector PRIVATE ultra_core)
+add_test(NAME ChannelBusyDetector COMMAND test_channel_busy_detector)
+
 # WAV file loopback test (generate/decode WAV files for cross-wire testing)
 add_executable(test_wav_loopback test_wav_loopback.cpp)
 target_link_libraries(test_wav_loopback PRIVATE ultra_core)
