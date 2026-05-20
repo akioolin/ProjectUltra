@@ -335,18 +335,53 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
             const float cfo_coherence =
                 std::abs(phase_diff_sum) / static_cast<float>(cfo_valid);
 
-            // Only correct if residual is significant, sane, coherent across
-            // carriers, and refining an already-trusted non-zero CFO seed.
-            // With a zero-CFO chirp/cache value, slow fading can still present a
-            // common LTS phase step; treating that as oscillator CFO injects a
-            // false correction into the whole frame and poisons the feedback loop.
+            // LTS channel magnitude coefficient-of-variation across carriers.
+            // Low CV (< 0.20) indicates a flat channel (AWGN territory) where
+            // the false-zero-CFO-from-fading concern that motivated the seed
+            // gate does not apply. High CV indicates frequency-selective fading
+            // where a "common LTS phase step" can genuinely be fading-induced
+            // and the seed gate's caution is warranted.
+            float h_mag_sum = 0.0f;
+            double h_mag_sq_sum = 0.0;
+            size_t h_mag_count = 0;
+            for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
+                Complex h_avg = (h_per_symbol[0][i] + h_per_symbol[1][i]) * 0.5f;
+                if (std::abs(h_avg) > 0.01f) {
+                    float mag = std::abs(h_avg);
+                    h_mag_sum += mag;
+                    h_mag_sq_sum += static_cast<double>(mag) * mag;
+                    ++h_mag_count;
+                }
+            }
+            float lts_channel_cv = 1.0f;  // pessimistic default: assume fading
+            if (h_mag_count > 5) {
+                float mean = h_mag_sum / static_cast<float>(h_mag_count);
+                float mean_sq = static_cast<float>(h_mag_sq_sum / static_cast<double>(h_mag_count));
+                float variance = std::max(0.0f, mean_sq - mean * mean);
+                float stddev = std::sqrt(variance);
+                lts_channel_cv = (mean > 1e-6f) ? stddev / mean : 1.0f;
+            }
+
+            // Apply LTS residual CFO if it is significant, sane, coherent
+            // across carriers, AND either the chirp seed is already trusted OR
+            // the LTS channel looks flat enough that the original fading-
+            // false-CFO concern doesn't apply.
+            //
+            // The seed gate alone was too restrictive: at TX CFO=0 the chirp
+            // typically reports 0.00 Hz and the seed gate blocked all LTS
+            // refinement, including legitimate clock-drift corrections that
+            // matter at low SNR. Allowing zero-seed correction on flat channels
+            // restores the refinement where it is safe.
             constexpr float kMinTrustedCFOSeedHz = 0.75f;
             constexpr float kMinResidualCFOCoherence = 0.70f;
+            constexpr float kFlatChannelCvMax = 0.20f;
             float old_cfo = freq_offset_hz;
             const bool trusted_cfo_seed = std::abs(old_cfo) >= kMinTrustedCFOSeedHz;
             const bool coherent_residual = cfo_coherence >= kMinResidualCFOCoherence;
+            const bool flat_lts_channel = lts_channel_cv < kFlatChannelCvMax;
+            const bool seed_ok = trusted_cfo_seed || flat_lts_channel;
             if (std::abs(residual_cfo) > 0.3f && std::abs(residual_cfo) < 5.0f &&
-                coherent_residual && trusted_cfo_seed) {
+                coherent_residual && seed_ok) {
                 freq_offset_hz += residual_cfo;
                 freq_offset_filtered = freq_offset_hz;
 
