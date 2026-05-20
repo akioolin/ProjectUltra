@@ -40,17 +40,9 @@ void Connection::onPongReceived() {
         // Not in probing state - this might be an incoming ping from someone else
         // Notify via ping_received callback (they're calling us)
         if (state_ == ConnectionState::DISCONNECTED && on_ping_received_) {
-            if (config_.pong_tx_delay_ms == 0) {
-                LOG_MODEM(INFO, "Connection: Received incoming PING while disconnected, firing PONG TX callback immediately");
-                cancelPendingPongCallback();
-                on_ping_received_();
-            } else {
-                LOG_MODEM(INFO,
-                          "Connection: Received incoming PING while disconnected, deferring PONG TX by %u ms (PTT-settling)",
-                          config_.pong_tx_delay_ms);
-                pending_pong_callback_ = true;
-                pong_callback_delay_remaining_ms_ = config_.pong_tx_delay_ms;
-            }
+            LOG_MODEM(INFO,
+                      "Connection: Received incoming PING while disconnected, firing PONG TX callback");
+            on_ping_received_();
         }
         return;
     }
@@ -282,8 +274,8 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // Pick negotiated CW count. Honor initiator's forced value if it sent
         // one (frame.data_frame_cw_count != 0), else auto-pick from rate.
         // We store the result in data_frame_cw_count_ here BEFORE building
-        // the CONNECT_ACK and before computing the retry delay so both reflect
-        // the value the initiator will see on the wire — Codex finding 4.
+        // the CONNECT_ACK so it reflects the value the initiator will see on
+        // the wire.
         int negotiated_cw = (frame.data_frame_cw_count != 0)
             ? v2::sanitizeFixedFrameCodewords(frame.data_frame_cw_count)
             : (ladder_selected && selected_rung.waveform == WaveformMode::MC_DPSK
@@ -337,18 +329,15 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // the single MC-DPSK CONNECT_ACK on faded seeds, leaving handshake stuck.
         // We re-send periodically until handshake is confirmed by first frame.
         connect_ack_frame_ = ack_data;
-        connect_ack_retransmit_interval_ms_ =
-            connection_policy::connectAckRetransmitDelayMs(
-                negotiated_mode_, rec_mod, rec_rate, data_frame_cw_count_);
-        connect_ack_retransmit_ms_ = connect_ack_retransmit_interval_ms_;
+        connect_ack_retransmit_ms_ = CONNECT_ACK_RETRANSMIT_MS;
         connect_ack_retx_remaining_ =
             negotiated_mode_ == WaveformMode::OFDM_CHIRP ? CONNECT_ACK_MAX_RETX : 0;
         const uint32_t responder_handshake_failsafe_ms = std::max<uint32_t>(
             RESPONDER_HANDSHAKE_FAILSAFE_MS,
-            connect_ack_retransmit_interval_ms_ + CONNECT_ACK_RETRANSMIT_MS);
-        LOG_MODEM(INFO, "Connection: CONNECT_ACK rescue retry armed in %.2fs (%d remaining)",
-                  connect_ack_retransmit_interval_ms_ / 1000.0f,
-                  connect_ack_retx_remaining_);
+            2 * CONNECT_ACK_RETRANSMIT_MS);
+        LOG_MODEM(INFO,
+                  "Connection: CONNECT_ACK rescue retry armed in %.2fs (%d remaining, carrier-sense gated)",
+                  CONNECT_ACK_RETRANSMIT_MS / 1000.0f, connect_ack_retx_remaining_);
 
         enterConnected();
         responder_handshake_wait_ms_ = responder_handshake_failsafe_ms;

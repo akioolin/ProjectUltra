@@ -38,9 +38,6 @@ struct ConnectionAdaptiveTestAccess {
         return c.arq_.getAckRepeatCount();
     }
 
-    static uint32_t arqAckRepeatDelay(const Connection& c) {
-        return c.arq_.getAckRepeatDelay();
-    }
 };
 
 }  // namespace protocol
@@ -77,20 +74,12 @@ void mcdpskAckDoesNotRepeatIntoNextDataTurn() {
     require(old_repeat_delay_ms < ack_burst_ms,
             "old DQPSK ACK repeat would be queued before the primary ACK finished");
 
-    const auto profile = connection_policy::mcDpskAckRepeatProfile(
-        timing, connection_policy::mcDpskWindowSizeForTiming(timing),
-        Modulation::DQPSK);
-    require(profile.count == 1,
-            "MC-DPSK ACK profile must not schedule delayed duplicate ACKs");
-
     Connection c;
     ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(
         c, Modulation::DQPSK, CodeRate::R1_4,
         kCarriers, kSamplesPerSymbol, kDataCodewords);
     require(ConnectionAdaptiveTestAccess::arqAckRepeatCount(c) == 1,
             "connected MC-DPSK DQPSK ARQ must send only the primary ACK");
-    require(ConnectionAdaptiveTestAccess::arqAckRepeatDelay(c) == profile.delay_ms,
-            "connected MC-DPSK ARQ should use the MC-DPSK ACK profile");
 }
 
 }  // namespace

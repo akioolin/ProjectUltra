@@ -36,9 +36,6 @@ public:
 
 SimulatedStation makeStation() {
     ConnectionConfig config;
-    config.pong_tx_delay_ms = 0;
-    config.post_connect_data_delay_ms = 0;
-    config.ack_tx_delay_ms = 0;
     return SimulatedStation(
         "ALPHA",
         std::make_unique<SinkAudioPort>(),

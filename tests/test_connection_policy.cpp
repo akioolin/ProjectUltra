@@ -136,47 +136,32 @@ void test_wide_ofdm_timing_and_timeout() {
     CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 8, 120, 1, 8) == 11528,
           "wide OFDM 8-CW ACK timeout should cover the longer burst");
 
-    const auto sack_4cw = ofdmSackDelays(true, kHighThroughputOFDMWindowFrames, dqpsk.data_ms);
     const uint32_t timeout_4cw = computeWideOFDMAckTimeoutMs(
         Modulation::DQPSK, CodeRate::R1_2, kHighThroughputOFDMWindowFrames,
-        sack_4cw.delay_ms, 1);
-    CHECK(timeout_4cw == 16000,
-          "wide OFDM window=16 4-CW timeout should preserve the current ceiling");
+        kCarrierSenseSackCoalesceMs, kCarrierSenseAckRepeatCount);
+    const uint32_t min_4cw_ack_path =
+        static_cast<uint32_t>(kHighThroughputOFDMWindowFrames) * dqpsk.data_ms +
+        kCarrierSenseSackCoalesceMs + dqpsk.ack_ms;
+    CHECK(timeout_4cw >= min_4cw_ack_path,
+          "wide OFDM window=16 4-CW timeout should cover burst plus carrier-sensed ACK path");
 
-    const auto sack_6cw = ofdmSackDelays(true, kHighThroughputOFDMWindowFrames, dqpsk_6cw.data_ms);
     const uint32_t timeout_6cw = computeWideOFDMAckTimeoutMs(
         Modulation::DQPSK, CodeRate::R1_2, kHighThroughputOFDMWindowFrames,
-        sack_6cw.delay_ms, 1, 6);
+        kCarrierSenseSackCoalesceMs, kCarrierSenseAckRepeatCount, 6);
     const uint32_t min_6cw_ack_path =
         static_cast<uint32_t>(kHighThroughputOFDMWindowFrames) * dqpsk_6cw.data_ms +
-        sack_6cw.delay_ms + dqpsk_6cw.ack_ms;
+        kCarrierSenseSackCoalesceMs + dqpsk_6cw.ack_ms;
     CHECK(timeout_6cw >= min_6cw_ack_path,
-          "wide OFDM window=16 6-CW timeout should cover burst plus ACK path");
+          "wide OFDM window=16 6-CW timeout should cover burst plus carrier-sensed ACK path");
 
-    const auto sack_8cw = ofdmSackDelays(true, kHighThroughputOFDMWindowFrames, dqpsk_8cw.data_ms);
     const uint32_t timeout_8cw = computeWideOFDMAckTimeoutMs(
         Modulation::DQPSK, CodeRate::R1_2, kHighThroughputOFDMWindowFrames,
-        sack_8cw.delay_ms, 1, 8);
+        kCarrierSenseSackCoalesceMs, kCarrierSenseAckRepeatCount, 8);
     const uint32_t min_8cw_ack_path =
         static_cast<uint32_t>(kHighThroughputOFDMWindowFrames) * dqpsk_8cw.data_ms +
-        sack_8cw.delay_ms + dqpsk_8cw.ack_ms;
+        kCarrierSenseSackCoalesceMs + dqpsk_8cw.ack_ms;
     CHECK(timeout_8cw >= min_8cw_ack_path,
-          "wide OFDM window=16 8-CW timeout should cover burst plus ACK path");
-
-    const auto connect_ack_r23 =
-        connectAckRetransmitDelayMs(WaveformMode::OFDM_CHIRP,
-                                    Modulation::DQPSK,
-                                    CodeRate::R2_3);
-    const auto dqpsk_r23 = wideOFDMFrameTiming(Modulation::DQPSK, CodeRate::R2_3);
-    const uint32_t first_group_r23_ms =
-        kResponderHandshakeFailSafeMs +
-        kBurstInterleaveGroupFrames * dqpsk_r23.data_ms;
-    CHECK(connect_ack_r23 > first_group_r23_ms,
-          "OFDM CONNECT_ACK rescue retry should wait for first burst group");
-    CHECK(connectAckRetransmitDelayMs(WaveformMode::MC_DPSK,
-                                      Modulation::DQPSK,
-                                      CodeRate::R1_4) == kConnectAckLegacyRetransmitMs,
-          "non-OFDM CONNECT_ACK retry should keep legacy delay");
+          "wide OFDM window=16 8-CW timeout should cover burst plus carrier-sensed ACK path");
 
     auto d8psk = wideOFDMFrameTiming(Modulation::D8PSK, CodeRate::R1_2);
     CHECK(d8psk.data_symbols == 19, "D8PSK R1/2 wide OFDM data symbols");
@@ -233,13 +218,10 @@ void test_mc_dpsk_window_timing() {
           "Robust-Mid MC-DPSK window=3 physical burst timing");
     CHECK(mcDpskWindowSizeForTiming(robust_mid) == 3,
           "Robust-Mid MC-DPSK should use window=3");
-    CHECK(mcDpskSackDelayMs(robust_mid, 3) == 10868,
-          "Robust-Mid SACK delay should cover the remaining data-only burst");
-    CHECK(mcDpskSackTailDelayMs(robust_mid) == 592,
-          "Robust-Mid tail SACK delay should use short burst-end guard");
-    CHECK(computeMCDPSKAckTimeoutMs(robust_mid, 3, 2000, 1) >=
-              3 * robust_mid.data_ms + robust_mid.ack_ms + 2000,
-          "Robust-Mid ACK timeout should cover the three-frame burst and ACK path");
+    CHECK(computeMCDPSKAckTimeoutMs(robust_mid, 3, kCarrierSenseSackCoalesceMs,
+                                    kCarrierSenseAckRepeatCount) >=
+              3 * robust_mid.data_ms + robust_mid.ack_ms + kCarrierSenseSackCoalesceMs,
+          "Robust-Mid ACK timeout should cover the three-frame burst and carrier-sensed ACK path");
 
     auto robust = mcDpskFrameTiming(Modulation::DQPSK, 8, 1024, 4);
     CHECK(robust.data_ms == 3691, "Robust MC-DPSK 4-CW data timing");
@@ -248,9 +230,7 @@ void test_mc_dpsk_window_timing() {
           "Robust MC-DPSK window=5 physical burst timing");
     CHECK(mcDpskWindowSizeForTiming(robust) == 5,
           "Robust MC-DPSK should use window=5");
-    CHECK(mcDpskSackDelayMs(robust, 5) == 14496,
-          "Robust SACK delay should defer ACK until the data-only burst tail");
-    CHECK(mcDpskAckRepeatProfile(robust, 5, Modulation::DQPSK).count == 1,
+    CHECK(kCarrierSenseAckRepeatCount == 1,
           "Robust MC-DPSK must not repeat full-preamble ACKs into the next DATA turn");
 
     auto standard = mcDpskFrameTiming(Modulation::DQPSK, 8, 512, 4);
@@ -260,10 +240,9 @@ void test_mc_dpsk_window_timing() {
           "Standard MC-DPSK window=5 physical burst timing");
     CHECK(mcDpskWindowSizeForTiming(standard) == 5,
           "Standard MC-DPSK should use window=5");
-    CHECK(mcDpskSackDelayMs(standard, 5) == 7496,
-          "Standard SACK delay should defer ACK until the data-only burst tail");
-    CHECK(computeMCDPSKAckTimeoutMs(standard, 5, mcDpskSackDelayMs(standard, 5), 1) > 18000,
-          "Standard MC-DPSK window=5 timeout should exceed the legacy floor");
+    CHECK(computeMCDPSKAckTimeoutMs(standard, 5, kCarrierSenseSackCoalesceMs,
+                                    kCarrierSenseAckRepeatCount) >= 18000,
+          "Standard MC-DPSK window=5 timeout should retain the conservative floor");
 }
 
 void test_ofdm_profile_selection() {
@@ -334,25 +313,10 @@ void test_ofdm_profile_selection() {
     CHECK(ofdmAckBatchSize(true) == 0, "near-AWGN ACK batch disabled");
     CHECK(ofdmAckBatchSize(false) == 0, "fading ACK batch sentinel");
 
-    auto default_sack = ofdmSackDelays(false, 4, 648);
-    CHECK(default_sack.delay_ms == 120 && default_sack.short_delay_ms == 0,
-          "default OFDM SACK delay profile");
-    auto near_sack = ofdmSackDelays(true, kWideOFDMWindowFrames, 648);
-    CHECK(near_sack.delay_ms == 120 && near_sack.short_delay_ms == 120,
-          "single-group high-throughput OFDM can ACK at burst tail");
-    auto wide_sack = ofdmSackDelays(true, kHighThroughputOFDMWindowFrames, 648);
-    CHECK(wide_sack.delay_ms == 5304 && wide_sack.short_delay_ms == 120,
-          "two-group high-throughput OFDM defers SACK until burst tail");
-
-    auto default_ack = ofdmAckRepeatProfile(Modulation::DQPSK, CodeRate::R1_2, false);
-    CHECK(default_ack.count == 2 && default_ack.delay_ms == 220,
-          "default OFDM ACK repeat profile");
-    auto near_ack = ofdmAckRepeatProfile(Modulation::DQPSK, CodeRate::R1_2, true);
-    CHECK(near_ack.count == 1 && near_ack.delay_ms == 220,
-          "near-AWGN ACK repeat profile");
-    auto d8psk_ack = ofdmAckRepeatProfile(Modulation::D8PSK, CodeRate::R1_2, true);
-    CHECK(d8psk_ack.count == 1 && d8psk_ack.delay_ms == 220,
-          "near-AWGN D8PSK ACK repeat profile");
+    CHECK(kCarrierSenseSackCoalesceMs == 30,
+          "OFDM SACK policy should use a small coalescing timer, not burst-tail guessing");
+    CHECK(kCarrierSenseAckRepeatCount == 1,
+          "OFDM ACK policy should not schedule delayed duplicate ACK bursts");
 }
 
 void test_negotiated_mode_selection() {

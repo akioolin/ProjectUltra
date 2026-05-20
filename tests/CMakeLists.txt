@@ -226,10 +226,7 @@ add_test(NAME ConnectionCallCollision COMMAND test_connection_call_collision)
 
 add_executable(test_connection_pong_delay test_connection_pong_delay.cpp)
 target_link_libraries(test_connection_pong_delay PRIVATE ultra_core)
-add_test(NAME ConnectionPongDelayDeferred COMMAND test_connection_pong_delay deferred)
-add_test(NAME ConnectionPongDelayCancelOnConnect COMMAND test_connection_pong_delay cancel_on_connect)
-add_test(NAME ConnectionPongDelayRepingRestarts COMMAND test_connection_pong_delay reping_restarts)
-add_test(NAME ConnectionPongDelayZeroDelay COMMAND test_connection_pong_delay zero_delay)
+add_test(NAME ConnectionPongCarrierSenseCallback COMMAND test_connection_pong_delay)
 
 add_executable(test_file_transfer_controller test_file_transfer_controller.cpp)
 target_link_libraries(test_file_transfer_controller PRIVATE ultra_core)
@@ -423,10 +420,10 @@ if(TARGET ultra_sim_station)
         ${CMAKE_CURRENT_SOURCE_DIR}/../tools
     )
     target_link_libraries(test_pong_tx_race_with_ptt_model PRIVATE ultra_sim_station)
-    add_test(NAME PongTxRaceWithPttFixVerified
-        COMMAND test_pong_tx_race_with_ptt_model fix_verified)
+    add_test(NAME PongTxCarrierSenseVerified
+        COMMAND test_pong_tx_race_with_ptt_model)
     set_tests_properties(
-        PongTxRaceWithPttFixVerified
+        PongTxCarrierSenseVerified
         PROPERTIES
         TIMEOUT 45
         LABELS regression)

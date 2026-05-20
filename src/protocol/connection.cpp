@@ -133,7 +133,6 @@ Connection::Connection(const ConnectionConfig& config)
     , arq_(config.arq)
 {
     ultra::gui::startupTrace("Connection", "ctor-enter");
-    config_.pong_tx_delay_ms = std::min<uint32_t>(config_.pong_tx_delay_ms, 2000u);
     data_frame_cw_count_ = v2::sanitizeFixedFrameCodewords(config_.fixed_frame_codewords);
     config_.fixed_frame_codewords = data_frame_cw_count_;
     arq_.setFixedFrameCodewords(data_frame_cw_count_);
@@ -245,8 +244,6 @@ bool Connection::connect(const std::string& remote_call) {
 
     LOG_MODEM(INFO, "Connection: Connecting to %s (starting with PING probe)", remote_call_.c_str());
 
-    cancelPendingPongCallback();
-
     // Use current connect_waveform_ (can be pre-set via setInitialConnectWaveform)
     // Notify the modem of the waveform to use
     if (on_connect_waveform_changed_) {
@@ -355,15 +352,12 @@ void Connection::acceptCall() {
                                                  rung_id);
     Bytes ack_data = ack.serialize();
     connect_ack_frame_ = ack_data;
-    connect_ack_retransmit_interval_ms_ =
-        connection_policy::connectAckRetransmitDelayMs(
-            negotiated_mode_, data_modulation_, data_code_rate_, data_frame_cw_count_);
-    connect_ack_retransmit_ms_ = connect_ack_retransmit_interval_ms_;
+    connect_ack_retransmit_ms_ = CONNECT_ACK_RETRANSMIT_MS;
     connect_ack_retx_remaining_ =
         negotiated_mode_ == WaveformMode::OFDM_CHIRP ? CONNECT_ACK_MAX_RETX : 0;
     const uint32_t responder_handshake_failsafe_ms = std::max<uint32_t>(
         RESPONDER_HANDSHAKE_FAILSAFE_MS,
-        connect_ack_retransmit_interval_ms_ + CONNECT_ACK_RETRANSMIT_MS);
+        2 * CONNECT_ACK_RETRANSMIT_MS);
 
     LOG_MODEM(INFO, "Connection: Sending CONNECT_ACK (%zu bytes, SNR=%.1f dB (%s))",
               ack_data.size(), measured_snr_db_, snrSourceToString(measured_snr_source_));
@@ -463,7 +457,6 @@ void Connection::abortTxNow() {
     responder_handshake_wait_ms_ = 0;
     connect_ack_frame_.clear();
     connect_ack_retransmit_ms_ = 0;
-    connect_ack_retransmit_interval_ms_ = CONNECT_ACK_RETRANSMIT_MS;
     connect_ack_retx_remaining_ = 0;
     resetAdaptiveModeController();
 
@@ -1001,11 +994,6 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
     } else {
         // Data frame - pass to ARQ
         if (state_ == ConnectionState::CONNECTED) {
-            if (v2::isDataFrame(header.type) && config_.ack_tx_delay_ms > 0) {
-                ack_hold_remaining_ms_ = config_.ack_tx_delay_ms;
-                LOG_MODEM(INFO, "Connection: Received DATA, holding outbound ACK for %u ms (peer PTT-off settling)",
-                          config_.ack_tx_delay_ms);
-            }
             processArqFrame(frame_data);
         }
     }
@@ -1382,50 +1370,6 @@ void Connection::updateAdaptiveModeController(uint32_t elapsed_ms) {
 void Connection::tick(uint32_t elapsed_ms) {
     soft_combine_harq_.tick(elapsed_ms);
 
-    if (pending_pong_callback_) {
-        if (elapsed_ms >= pong_callback_delay_remaining_ms_) {
-            pending_pong_callback_ = false;
-            pong_callback_delay_remaining_ms_ = 0;
-            if (state_ == ConnectionState::DISCONNECTED && on_ping_received_) {
-                LOG_MODEM(INFO, "Connection: Firing deferred PONG TX callback");
-                on_ping_received_();
-            }
-        } else {
-            pong_callback_delay_remaining_ms_ -= elapsed_ms;
-        }
-    }
-
-    if (post_connect_data_hold_active_) {
-        if (elapsed_ms >= post_connect_data_hold_remaining_ms_) {
-            post_connect_data_hold_active_ = false;
-            post_connect_data_hold_remaining_ms_ = 0;
-            LOG_MODEM(INFO, "Connection: post-CONNECT data hold expired, releasing %zu held DATA frame(s)",
-                      held_data_frames_.size());
-            auto released = std::move(held_data_frames_);
-            held_data_frames_.clear();
-            for (auto& frame : released) {
-                transmitFrame(frame);
-            }
-        } else {
-            post_connect_data_hold_remaining_ms_ -= elapsed_ms;
-        }
-    }
-
-    if (ack_hold_remaining_ms_ > 0) {
-        if (elapsed_ms >= ack_hold_remaining_ms_) {
-            ack_hold_remaining_ms_ = 0;
-            LOG_MODEM(INFO, "Connection: ACK TX hold expired, releasing %zu held ACK frame(s)",
-                      held_ack_frames_.size());
-            auto released = std::move(held_ack_frames_);
-            held_ack_frames_.clear();
-            for (auto& frame : released) {
-                transmitFrame(frame);
-            }
-        } else {
-            ack_hold_remaining_ms_ -= elapsed_ms;
-        }
-    }
-
     switch (state_) {
         case ConnectionState::PROBING:
             // Fast presence check via PING/PONG
@@ -1494,9 +1438,9 @@ void Connection::tick(uint32_t elapsed_ms) {
                 negotiated_mode_ == WaveformMode::OFDM_CHIRP &&
                 !connect_ack_frame_.empty() && connect_ack_retx_remaining_ > 0) {
                 if (elapsed_ms >= connect_ack_retransmit_ms_) {
-                    connect_ack_retransmit_ms_ = connect_ack_retransmit_interval_ms_;
+                    connect_ack_retransmit_ms_ = CONNECT_ACK_RETRANSMIT_MS;
                     connect_ack_retx_remaining_--;
-                    LOG_MODEM(INFO, "Connection: Re-sending CONNECT_ACK (proactive, %d retx remaining)",
+                    LOG_MODEM(INFO, "Connection: Re-sending CONNECT_ACK (proactive, %d retx remaining, carrier-sense gated)",
                               connect_ack_retx_remaining_);
                     transmitFrame(connect_ack_frame_);
                 } else {
@@ -1613,28 +1557,6 @@ void Connection::tick(uint32_t elapsed_ms) {
 void Connection::transmitFrame(const Bytes& frame_data) {
     LOG_MODEM(DEBUG, "Connection: TX %zu bytes", frame_data.size());
 
-    // Post-CONNECT data hold: defer DATA-class frames so peer's PTT-off
-    // transition has time to complete. ACK/control frames are NOT held
-    // because the peer was in RX when it sent CONNECT_ACK and stays in
-    // RX while we ACK; only our outbound DATA hits their TRANSITION.
-    if (post_connect_data_hold_active_) {
-        const auto header = v2::parseHeader(frame_data);
-        if (header.valid && v2::isDataFrame(header.type)) {
-            held_data_frames_.push_back(frame_data);
-            return;
-        }
-    }
-
-    // ACK TX hold: after inbound DATA, defer ACK-class responses until the
-    // sender has completed its PTT-off transition from DATA TX.
-    if (ack_hold_remaining_ms_ > 0) {
-        const auto header = v2::parseHeader(frame_data);
-        if (header.valid && header.type == v2::FrameType::ACK) {
-            held_ack_frames_.push_back(frame_data);
-            return;
-        }
-    }
-
     // If burst mode is active, buffer instead of transmitting immediately
     if (burst_mode_active_ && on_transmit_burst_) {
         burst_tx_buffer_.push_back(frame_data);
@@ -1644,14 +1566,6 @@ void Connection::transmitFrame(const Bytes& frame_data) {
     if (on_transmit_) {
         on_transmit_(frame_data);
     }
-}
-
-void Connection::cancelPendingPongCallback() {
-    if (pending_pong_callback_) {
-        LOG_MODEM(DEBUG, "Connection: Cancelling deferred PONG TX callback");
-    }
-    pending_pong_callback_ = false;
-    pong_callback_delay_remaining_ms_ = 0;
 }
 
 void Connection::configureArqForCurrentDataMode() {
@@ -1670,34 +1584,27 @@ void Connection::configureArqForCurrentDataMode() {
             config_.mc_dpsk_samples_per_symbol,
             data_frame_cw_count_);
         const size_t window_size = connection_policy::mcDpskWindowSizeForTiming(timing);
-        const uint32_t sack_delay_ms = connection_policy::mcDpskSackDelayMs(timing, window_size);
-        const uint32_t sack_tail_delay_ms = connection_policy::mcDpskSackTailDelayMs(timing);
-        const auto ack_repeat = connection_policy::mcDpskAckRepeatProfile(
-            timing, window_size, data_modulation_);
         arq_.setWindowSize(window_size);
-        arq_.setSackDelay(sack_delay_ms);
-        arq_.setSackDelayShort(window_size > 1 ? sack_tail_delay_ms : 0);
+        arq_.setSackDelay(connection_policy::kCarrierSenseSackCoalesceMs);
+        arq_.setSackDelayShort(0);
         arq_.setAckBatchThroughMoreFrag(true);
-        arq_.setAckRepeatCount(ack_repeat.count);
-        arq_.setAckRepeatDelay(ack_repeat.delay_ms);
+        arq_.setAckRepeatCount(connection_policy::kCarrierSenseAckRepeatCount);
         uint32_t ack_timeout_ms = connection_policy::computeMCDPSKAckTimeoutMs(
-            timing, window_size, arq_.getSackDelay(), ack_repeat.count);
+            timing, window_size, arq_.getSackDelay(),
+            connection_policy::kCarrierSenseAckRepeatCount);
         if (data_modulation_ == Modulation::DBPSK &&
             config_.mc_dpsk_samples_per_symbol >= 2048) {
             ack_timeout_ms = std::max<uint32_t>(
                 ack_timeout_ms, connection_policy::kMCDPSKRobustLowAckTimeoutFloorMs);
         }
         arq_.setAckTimeout(ack_timeout_ms);
-        LOG_MODEM(INFO, "Connection: ARQ window=%zu, timeout=%.1fs (data=%ums, ack=%ums x%d), sack_delay=%ums/%ums, ack_repeat=%d/%ums, cw=%d (MC-DPSK %s %s, carriers=%d, sps=%d)",
+        LOG_MODEM(INFO, "Connection: ARQ window=%zu, timeout=%.1fs (data=%ums, ack=%ums x%d), carrier_sense_sack_coalesce=%ums, cw=%d (MC-DPSK %s %s, carriers=%d, sps=%d)",
                   window_size,
                   ack_timeout_ms / 1000.0f,
                   timing.data_ms,
                   timing.ack_ms,
-                  ack_repeat.count,
+                  connection_policy::kCarrierSenseAckRepeatCount,
                   arq_.getSackDelay(),
-                  arq_.getSackDelayShort(),
-                  ack_repeat.count,
-                  ack_repeat.delay_ms,
                   data_frame_cw_count_,
                   modulationToString(data_modulation_),
                   codeRateToString(data_code_rate_),
@@ -1721,9 +1628,9 @@ void Connection::configureArqForCurrentDataMode() {
         constexpr size_t kNarrowWindow = 3;
         arq_.setWindowSize(kNarrowWindow);
         arq_.setMaxRetries(15);
-        arq_.setSackDelay(120);
+        arq_.setSackDelay(connection_policy::kCarrierSenseSackCoalesceMs);
         arq_.setSackDelayShort(0);
-        arq_.setAckRepeatCount(1);
+        arq_.setAckRepeatCount(connection_policy::kCarrierSenseAckRepeatCount);
 
         const auto timing = connection_policy::narrowOFDMFrameTiming(
             data_modulation_, data_frame_cw_count_);
@@ -1731,8 +1638,10 @@ void Connection::configureArqForCurrentDataMode() {
             data_modulation_, data_frame_cw_count_, kNarrowWindow);
         arq_.setAckTimeout(timeout_ms);
 
-        LOG_MODEM(INFO, "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, ack=%ums), ack_repeat=1, cw=%d (OFDM_NARROW %s %s)",
+        LOG_MODEM(INFO, "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, ack=%ums), carrier_sense_sack_coalesce=%ums, ack_repeat=%d, cw=%d (OFDM_NARROW %s %s)",
                   kNarrowWindow, timeout_ms / 1000.0f, timing.data_ms, timing.ack_ms,
+                  arq_.getSackDelay(),
+                  connection_policy::kCarrierSenseAckRepeatCount,
                   data_frame_cw_count_,
                   modulationToString(data_modulation_), codeRateToString(data_code_rate_));
     } else {
@@ -1745,42 +1654,30 @@ void Connection::configureArqForCurrentDataMode() {
 
         const auto timing = connection_policy::wideOFDMFrameTiming(
             data_modulation_, data_code_rate_, data_frame_cw_count_);
-        const bool defer_sack_to_burst_tail =
-            arq_.getWindowSize() > connection_policy::kWideOFDMWindowFrames;
-        const auto sack = connection_policy::ofdmSackDelays(
-            defer_sack_to_burst_tail,
-            arq_.getWindowSize(),
-            timing.data_ms);
-        arq_.setSackDelay(sack.delay_ms);
-        arq_.setSackDelayShort(sack.short_delay_ms);
-
-        const auto ack_repeat = connection_policy::ofdmAckRepeatProfile(
-            data_modulation_, data_code_rate_, near_awgn_ofdm);
-        arq_.setAckRepeatCount(ack_repeat.count);
-        arq_.setAckRepeatDelay(ack_repeat.delay_ms);
+        arq_.setSackDelay(connection_policy::kCarrierSenseSackCoalesceMs);
+        arq_.setSackDelayShort(0);
+        arq_.setAckRepeatCount(connection_policy::kCarrierSenseAckRepeatCount);
 
         uint32_t ack_timeout_ms = connection_policy::computeWideOFDMAckTimeoutMs(
             data_modulation_,
             data_code_rate_,
             arq_.getWindowSize(),
             arq_.getSackDelay(),
-            ack_repeat.count,
+            connection_policy::kCarrierSenseAckRepeatCount,
             data_frame_cw_count_);
         arq_.setAckTimeout(ack_timeout_ms);
 
         LOG_MODEM(INFO,
-                  "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, ack=%ums x%d), max_retries=%d, ack_batch=%u, sack_delay=%ums/%ums, ack_repeat=%d/%ums, cw=%d (OFDM %s %s)",
+                  "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, ack=%ums x%d), max_retries=%d, ack_batch=%u, carrier_sense_sack_coalesce=%ums, ack_repeat=%d, cw=%d (OFDM %s %s)",
                   arq_.getWindowSize(),
                   ack_timeout_ms / 1000.0f,
                   timing.data_ms,
                   timing.ack_ms,
-                  ack_repeat.count,
+                  connection_policy::kCarrierSenseAckRepeatCount,
                   arq_.getMaxRetries(),
                   arq_.getAckBatchSize(),
                   arq_.getSackDelay(),
-                  arq_.getSackDelayShort(),
-                  ack_repeat.count,
-                  ack_repeat.delay_ms,
+                  connection_policy::kCarrierSenseAckRepeatCount,
                   data_frame_cw_count_,
                   modulationToString(data_modulation_),
                   codeRateToString(data_code_rate_));
@@ -1905,23 +1802,9 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
 }
 
 void Connection::enterConnected() {
-    cancelPendingPongCallback();
-
     state_ = ConnectionState::CONNECTED;
     connected_time_ms_ = 0;
 
-    // Hold first outbound DATA so peer's PTT-off transition after their
-    // CONNECT_ACK TX has time to complete. Without this, every rig with
-    // PTT settling >=100ms drops the first DATA frame.
-    if (config_.post_connect_data_delay_ms > 0) {
-        post_connect_data_hold_active_ = true;
-        post_connect_data_hold_remaining_ms_ = config_.post_connect_data_delay_ms;
-        LOG_MODEM(INFO, "Connection: CONNECTED, holding outbound DATA for %u ms (peer PTT-off settling)",
-                  config_.post_connect_data_delay_ms);
-    } else {
-        post_connect_data_hold_active_ = false;
-        post_connect_data_hold_remaining_ms_ = 0;
-    }
     if (is_initiator_ || handshake_confirmed_) {
         responder_handshake_wait_ms_ = 0;
     } else if (responder_handshake_wait_ms_ == 0) {
@@ -1960,19 +1843,12 @@ void Connection::enterDisconnected(const std::string& reason) {
     disconnect_ack_frame_.clear();
     burst_mode_active_ = false;
     burst_tx_buffer_.clear();
-    post_connect_data_hold_active_ = false;
-    post_connect_data_hold_remaining_ms_ = 0;
-    held_data_frames_.clear();
-    ack_hold_remaining_ms_ = 0;
-    held_ack_frames_.clear();
     responder_handshake_wait_ms_ = 0;
     connect_ack_frame_.clear();
     connect_ack_retransmit_ms_ = 0;
-    connect_ack_retransmit_interval_ms_ = CONNECT_ACK_RETRANSMIT_MS;
     connect_ack_retx_remaining_ = 0;
     data_ladder_rung_id_ = LadderRungId::UNKNOWN;
     pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
-    cancelPendingPongCallback();
     arq_callback_defer_refill_ = false;
     deferred_file_refill_ = false;
     deferred_fragment_refill_ = false;
@@ -2149,7 +2025,6 @@ void Connection::reset() {
     mode_change_timeout_ms_ = 0;
     mode_change_retry_count_ = 0;
     pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
-    cancelPendingPongCallback();
     data_modulation_ = Modulation::DQPSK;
     data_code_rate_ = CodeRate::R1_4;
     data_ladder_rung_id_ = LadderRungId::UNKNOWN;
@@ -2157,7 +2032,6 @@ void Connection::reset() {
     responder_handshake_wait_ms_ = 0;
     connect_ack_frame_.clear();
     connect_ack_retransmit_ms_ = 0;
-    connect_ack_retransmit_interval_ms_ = CONNECT_ACK_RETRANSMIT_MS;
     connect_ack_retx_remaining_ = 0;
     burst_mode_active_ = false;
     burst_tx_buffer_.clear();

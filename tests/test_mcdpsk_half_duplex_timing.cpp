@@ -69,12 +69,6 @@ int main(int argc, char** argv) {
 
     ConnectionConfig alpha_config;
     ConnectionConfig bravo_config;
-    alpha_config.pong_tx_delay_ms = 0;
-    alpha_config.post_connect_data_delay_ms = 0;
-    alpha_config.ack_tx_delay_ms = 0;
-    bravo_config.pong_tx_delay_ms = 0;
-    bravo_config.post_connect_data_delay_ms = 0;
-    bravo_config.ack_tx_delay_ms = 0;
 
     SimulatedStation alpha(
         "ALPHA",

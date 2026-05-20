@@ -14,16 +14,11 @@
 
 namespace {
 
-// The live SimulatedStation path currently adds roughly 700 ms from full PING
-// arrival to PingCallback. Use a slower-radio settling window so the test still
-// exercises the 500 ms protocol PONG deferral instead of simulator latency.
-//
-// This test is scoped to the PONG race itself: BugRepro asserts BRAVO drops
-// the zero-delay PONG inside its RX-deaf window; FixVerified asserts BRAVO
-// decodes the deferred PONG after that window expires. Full CONNECT/CONNECT_ACK
-// completion is downstream handshake coverage and belongs to separate tests.
-constexpr uint32_t kRxSettlingMs = 1500;
-constexpr uint32_t kFixedPongDelayMs = 500;
+// This test is scoped to the PONG turn-around itself: ALPHA must not send PONG
+// while BRAVO is still transmitting PING, and the carrier-sense T/R guard must
+// clear BRAVO's RX-settling window before PONG arrives.
+constexpr uint32_t kRxSettlingMs = 80;
+constexpr uint32_t kCarrierSenseGuardMs = 120;
 
 struct Event {
     uint64_t seq = 0;
@@ -178,11 +173,10 @@ struct CaseResult {
     std::shared_ptr<EventLog> log;
 };
 
-CaseResult runCase(const std::string& name, uint32_t alpha_pong_delay_ms) {
+CaseResult runCase(const std::string& name) {
     SimulatedChannel channel;
 
     ConnectionConfig alpha_config;
-    alpha_config.pong_tx_delay_ms = alpha_pong_delay_ms;
     ConnectionConfig bravo_config;
 
     const auto mc_config = mc_dpsk_presets::level8();
@@ -201,6 +195,8 @@ CaseResult runCase(const std::string& name, uint32_t alpha_pong_delay_ms) {
 
     alpha.setRxSettlingMs(kRxSettlingMs);
     bravo.setRxSettlingMs(kRxSettlingMs);
+    alpha.setCarrierSenseGuardMs(kCarrierSenseGuardMs);
+    bravo.setCarrierSenseGuardMs(kCarrierSenseGuardMs);
     alpha.setSNR(30.0f);
     bravo.setSNR(30.0f);
 
@@ -235,48 +231,23 @@ CaseResult runCase(const std::string& name, uint32_t alpha_pong_delay_ms) {
     return result;
 }
 
-bool PongTxRaceWithPttBugRepro() {
-    auto result = runCase("PongTxRaceWithPttBugRepro", 0);
-    if (result.alpha_connected || result.bravo_connected) {
-        std::cout << "FAIL: zero-delay PONG unexpectedly connected; "
-                  << "PTT model did not reproduce the race\n";
-        return false;
-    }
-    if (result.bravo_decoded_ping_pong) {
-        std::cout << "FAIL: BRAVO decoded PING_OR_PONG despite "
-                  << kRxSettlingMs << "ms RX settling\n";
-        return false;
-    }
-    std::cout << "PASS: zero-delay PONG is dropped during BRAVO RX settling\n";
-    return true;
-}
-
-bool PongTxRaceWithPttFixVerified() {
-    auto result = runCase("PongTxRaceWithPttFixVerified", kFixedPongDelayMs);
+bool PongTxCarrierSenseVerified() {
+    auto result = runCase("PongTxCarrierSenseVerified");
     if (!result.bravo_decoded_ping_pong) {
-        std::cout << "FAIL: BRAVO did not decode PONG despite 500ms protocol deferral\n";
+        std::cout << "FAIL: BRAVO did not decode PONG despite carrier-sense guard\n";
         return false;
     }
-    std::cout << "PASS: 500ms PONG deferral cleared BRAVO's RX-settling window\n";
+    std::cout << "PASS: carrier sense cleared BRAVO's RX-settling window\n";
     return true;
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 2) {
-        std::cout << "Usage: " << argv[0] << " bug_repro|fix_verified\n";
+    if (argc != 1) {
+        std::cout << "Usage: " << argv[0] << "\n";
         return 1;
     }
 
-    const std::string arg = argv[1];
-    if (arg == "bug_repro") {
-        return PongTxRaceWithPttBugRepro() ? 0 : 1;
-    }
-    if (arg == "fix_verified") {
-        return PongTxRaceWithPttFixVerified() ? 0 : 1;
-    }
-
-    std::cout << "Unknown test case: " << arg << "\n";
-    return 1;
+    return PongTxCarrierSenseVerified() ? 0 : 1;
 }

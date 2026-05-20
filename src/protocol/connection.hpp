@@ -29,9 +29,6 @@ struct ConnectionConfig {
     ARQConfig arq;
     uint32_t connect_timeout_ms = 60000;  // 60s for DPSK (16s TX + 16s RX + margin)
     uint32_t disconnect_timeout_ms = 30000;
-    uint32_t pong_tx_delay_ms = 500;      // Let peer RX settle after its PING PTT-off
-    uint32_t post_connect_data_delay_ms = 500;  // Hold first DATA after CONNECTED; peer's PTT-off settling on CONNECT_ACK TX needs this window
-    uint32_t ack_tx_delay_ms = 500;       // Hold ACK after inbound DATA; peer's PTT-off settling on DATA TX needs this window
     int connect_retries = 10;  // Robust MC-DPSK control attempts
     bool auto_accept = true;
 
@@ -352,23 +349,6 @@ private:
     uint32_t timeout_remaining_ms_ = 0;
     int connect_retry_count_ = 0;
     uint32_t connected_time_ms_ = 0;
-    bool pending_pong_callback_ = false;
-    uint32_t pong_callback_delay_remaining_ms_ = 0;
-
-    // After entering CONNECTED, block outbound DATA TX for this window so
-    // peer's PTT-off transition (after CONNECT_ACK / DATA TX) completes
-    // before our reply hits their antenna. Symmetric to pong_tx_delay_ms.
-    // DATA-class frames are held in held_data_frames_ and released on
-    // hold expiry; ACK/control frames pass through unaffected.
-    bool post_connect_data_hold_active_ = false;
-    uint32_t post_connect_data_hold_remaining_ms_ = 0;
-    std::vector<Bytes> held_data_frames_;
-
-    // After receiving DATA, block outbound ACK TX for this window so the
-    // sender's PTT-off transition after DATA TX completes before our ACK
-    // arrives. ACK frames are held and released when the timer expires.
-    uint32_t ack_hold_remaining_ms_ = 0;
-    std::vector<Bytes> held_ack_frames_;
 
     // Disconnect retransmission (initiator side)
     Bytes disconnect_frame_;                // Cached DISCONNECT frame for retransmission
@@ -410,7 +390,6 @@ private:
     void runDeferredArqRefill();
     void configureArqForCurrentDataMode();
     void configureSoftCombineHARQBounds();
-    void cancelPendingPongCallback();
     uint32_t pingTimeoutMsForCurrentProfile() const;
     bool usesBoundedVariableMCDPSKFrames() const;
     size_t currentDataPayloadCapacity() const;
@@ -483,16 +462,9 @@ private:
     // a first frame from the initiator, mirroring the disconnect-ACK pattern.
     Bytes connect_ack_frame_;                  // Cached CONNECT_ACK for re-sending
     uint32_t connect_ack_retransmit_ms_ = 0;   // Time until next retransmit
-    uint32_t connect_ack_retransmit_interval_ms_ = 6000;
     int connect_ack_retx_remaining_ = 0;       // Retries left (counts down to 0)
-    // First retx fires AFTER the OFDM round-trip window so the success path
-    // (ALPHA decoded the original ACK and started sending) clears retx state
-    // before any retx is sent — keeping the retx pure overhead-on-failure only.
-    // Capped at 1 retx because additional retx fire uselessly when BRAVO's PHY
-    // is stuck decoding (e.g. burst of false syncs at the LTS): the original
-    // ACK either reached ALPHA or didn't, and the 1st retx is the only second
-    // chance worth paying for. The runtime interval is lengthened for OFDM so
-    // the retry does not transmit into the first burst-interleaver group.
+    // The retry cadence is only a fail-safe. AudioPort carrier sense gates the
+    // actual TX edge so a rescue ACK cannot key up over the peer's transmission.
     static constexpr uint32_t CONNECT_ACK_RETRANSMIT_MS = 6000;
     static constexpr int CONNECT_ACK_MAX_RETX = 1;
 

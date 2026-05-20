@@ -955,14 +955,8 @@ public:
         bravo_ota.station_id = "BRAVO";
         bravo_ota.session_id = ota_session_id_;
 
-        // Simulator stations have zero PTT-off settling, so the
-        // 500 ms connection-level holds added for real-radio safety
-        // become pure latency that drives spurious ARQ retx. Override
-        // to 0 here (same pattern as tools/ota_simulator/runner_v2.cpp).
+        // All turn-arounds are serialized by AudioPort carrier sense.
         protocol::ConnectionConfig connection_config;
-        connection_config.pong_tx_delay_ms = 0;
-        connection_config.post_connect_data_delay_ms = 0;
-        connection_config.ack_tx_delay_ms = 0;
 
         alpha_ = std::make_unique<SimulatedStation>(
             "ALPHA", std::make_unique<OtaAudioPort>(std::move(alpha_ota), "ALPHA"),

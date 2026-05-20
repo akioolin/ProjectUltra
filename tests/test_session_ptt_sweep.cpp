@@ -254,8 +254,7 @@ struct ExpectedOutcome {
 };
 
 ExpectedOutcome expectedOutcomeFor(uint32_t rx_settling_ms) {
-    // Measured envelope after pong_tx_delay_ms=500,
-    // post_connect_data_delay_ms=500, and ack_tx_delay_ms=500:
+    // Measured envelope before unified carrier-sense turn-around:
     //   0-500 ms:   full session OK (holds dodge peer's PTT-off)
     //   700-1500 ms: PROBE+CONNECT+MODE_CHANGE OK, DATA fails
     //                (500 ms post-CONNECT hold is exceeded by peer settling)

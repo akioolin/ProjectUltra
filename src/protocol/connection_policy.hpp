@@ -28,10 +28,11 @@ inline constexpr size_t kWideOFDMWindowFrames = 8;
 inline constexpr size_t kHighThroughputOFDMWindowFrames = 16;
 inline constexpr size_t kBurstInterleaveGroupFrames = 8;
 inline constexpr uint32_t kResponderHandshakeFailSafeMs = 2200;
-inline constexpr uint32_t kConnectAckLegacyRetransmitMs = 6000;
 inline constexpr uint32_t kMCDPSKDualChirpPreambleMs = 1200;
 inline constexpr uint32_t kMCDPSKInterFrameGuardMs = 100;
 inline constexpr uint32_t kMCDPSKRobustLowAckTimeoutFloorMs = 36000;
+inline constexpr uint32_t kCarrierSenseSackCoalesceMs = 30;
+inline constexpr int kCarrierSenseAckRepeatCount = 1;
 
 struct OFDMFrameTiming {
     uint32_t data_symbols = 0;
@@ -49,16 +50,6 @@ struct MCDPSKFrameTiming {
     uint32_t data_only_ms = 0;
     uint32_t data_ms = 0;
     uint32_t ack_ms = 0;
-};
-
-struct SackDelayProfile {
-    uint32_t delay_ms = 120;
-    uint32_t short_delay_ms = 0;
-};
-
-struct AckRepeatProfile {
-    int count = 2;
-    uint32_t delay_ms = 220;
 };
 
 inline const char* fadingLabel(float fading) {
@@ -318,23 +309,6 @@ inline OFDMFrameTiming wideOFDMFrameTiming(Modulation mod,
     return timing;
 }
 
-inline SackDelayProfile ofdmSackDelays(bool defer_to_burst_tail,
-                                       size_t window_size,
-                                       uint32_t data_frame_ms) {
-    SackDelayProfile profile;
-    if (defer_to_burst_tail && window_size >= 8) {
-        const size_t deferred_frames = window_size > kBurstInterleaveGroupFrames
-            ? window_size - kBurstInterleaveGroupFrames
-            : 0;
-        const uint64_t burst_tail_ms =
-            static_cast<uint64_t>(deferred_frames) * data_frame_ms + 120u;
-        profile.delay_ms = static_cast<uint32_t>(
-            std::clamp<uint64_t>(burst_tail_ms, 120ULL, 12000ULL));
-        profile.short_delay_ms = 120;
-    }
-    return profile;
-}
-
 // Recommend fixed-frame CW count for a given OFDM data rate + waveform.
 // Inputs are deterministic and shared by both peers (rate is negotiated;
 // waveform is negotiated too) so both peers compute the same CW count
@@ -381,40 +355,6 @@ inline int recommendCWCount(Modulation mod, CodeRate rate, WaveformMode waveform
     return recommendCWCount(rate, waveform);
 }
 
-inline AckRepeatProfile ofdmAckRepeatProfile(Modulation mod,
-                                             CodeRate rate,
-                                             bool near_awgn_ofdm) {
-    (void)mod;
-    (void)rate;
-    (void)near_awgn_ofdm;
-    // Parallel to MC-DPSK ACK repeat removal (commit 316ade5). An OFDM ACK
-    // is a full RF burst (preamble + 1-CW LDPC payload). Repeating it
-    // extends BRAVO's TX-busy window past ALPHA's next pipelined DATA
-    // frame, deafening BRAVO when DATA arrives -- the half-duplex
-    // pathology we eliminated for MC-DPSK. Repetition over the same
-    // channel realization is rank-deficient diversity anyway: it costs
-    // airtime without buying decode SNR.
-    AckRepeatProfile profile;
-    profile.count = 1;
-    return profile;
-}
-
-inline AckRepeatProfile mcDpskAckRepeatProfile(const MCDPSKFrameTiming& timing,
-                                               size_t window_size,
-                                               Modulation mod) {
-    (void)timing;
-    (void)window_size;
-    (void)mod;
-
-    // A MC-DPSK ACK is a full-preamble RF burst. Repeating it keys the receiver
-    // for another multi-second ACK just as the peer starts its next DATA frame,
-    // creating a deterministic half-duplex deaf window rather than diversity.
-    AckRepeatProfile profile;
-    profile.count = 1;
-    profile.delay_ms = 220;
-    return profile;
-}
-
 inline uint32_t computeWideOFDMAckTimeoutMs(Modulation mod,
                                             CodeRate rate,
                                             size_t window_size,
@@ -432,8 +372,9 @@ inline uint32_t computeWideOFDMAckTimeoutMs(Modulation mod,
     const uint32_t decode_jitter_margin_ms = std::max<uint32_t>(700, timing.data_ms / 2)
                                              + audio_chain_rtt_margin_ms;
 
-    // tx_burst_ms already spans every frame in the sender window, and
-    // sack_delay_ms already includes receiver-side burst-tail ACK deferral.
+    // tx_burst_ms already spans every frame in the sender window. The SACK
+    // delay is only a small coalescing timer; AudioPort carrier sense handles
+    // the physical TX turn-around.
     const uint32_t timeout_ms = tx_burst_ms + ack_path_ms + decode_jitter_margin_ms;
 
     uint32_t ceiling_ms = 16000;
@@ -522,23 +463,6 @@ inline size_t mcDpskWindowSizeForTiming(uint32_t data_frame_ms) {
     return std::clamp<size_t>(by_burst, 1, kMaxAuditedMCDPSKWindow);
 }
 
-inline uint32_t mcDpskSackDelayMs(const MCDPSKFrameTiming& timing,
-                                  size_t window_size) {
-    if (window_size <= 1) {
-        return 2000;
-    }
-
-    // SACK timer starts after the first decoded frame. Continuous MC-DPSK pays
-    // training/reference once at burst start; continuation frames are data-only.
-    const uint32_t remaining_burst_ms =
-        static_cast<uint32_t>(window_size - 1) * timing.data_only_ms;
-    return std::clamp<uint32_t>(remaining_burst_ms + 500u, 2000u, 16000u);
-}
-
-inline uint32_t mcDpskSackTailDelayMs(const MCDPSKFrameTiming& timing) {
-    return std::clamp<uint32_t>(timing.overhead_ms + 400u, 500u, 1000u);
-}
-
 inline uint32_t computeMCDPSKAckTimeoutMs(const MCDPSKFrameTiming& timing,
                                           size_t window_size,
                                           uint32_t sack_delay_ms,
@@ -553,29 +477,6 @@ inline uint32_t computeMCDPSKAckTimeoutMs(const MCDPSKFrameTiming& timing,
     constexpr uint32_t kStreamingDecoderMarginMs = 12000;
     const uint32_t timeout_ms = tx_burst_ms + ack_path_ms + kStreamingDecoderMarginMs;
     return std::clamp(timeout_ms, 18000u, 72000u);
-}
-
-inline uint32_t connectAckRetransmitDelayMs(WaveformMode mode,
-                                            Modulation mod,
-                                            CodeRate rate,
-                                            int cw_count = v2::kDefaultFixedFrameCodewords) {
-    if (!isOFDMMode(mode)) {
-        return kConnectAckLegacyRetransmitMs;
-    }
-
-    // CONNECT_ACK is an MC-DPSK full-preamble frame. If the initiator receives
-    // it and immediately starts an OFDM burst, the responder cannot deliver a
-    // valid DATA frame until the first burst-interleaver group has been
-    // collected and deinterleaved. Delay the rescue retransmit until after that
-    // success path has had time to clear the cached ACK.
-    const OFDMFrameTiming timing = wideOFDMFrameTiming(mod, rate, cw_count);
-    const uint64_t first_group_ms =
-        static_cast<uint64_t>(timing.data_ms) * kBurstInterleaveGroupFrames;
-    const uint64_t delay_ms =
-        kResponderHandshakeFailSafeMs + first_group_ms + 3500u;
-
-    return static_cast<uint32_t>(
-        std::clamp<uint64_t>(delay_ms, kConnectAckLegacyRetransmitMs, 12000ULL));
 }
 
 inline OFDMFrameTiming narrowOFDMFrameTiming(Modulation mod,
