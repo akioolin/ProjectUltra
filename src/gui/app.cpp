@@ -503,11 +503,15 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
 
     // Set up protocol engine callbacks
     ultra::gui::startupTrace("App", "protocol-callbacks-enter");
-    protocol_.setTxDataCallback([this](const Bytes& data) {
+    protocol_.setTxDataCallback([this](const Bytes& data,
+                                       bool expect_full_ofdm_anchor_after_tx) {
         // When protocol layer wants to transmit, convert to audio
         auto samples = modem_.transmit(data);
         if (!samples.empty()) {
             queueRealTxSamples(samples, "TX audio");
+            if (expect_full_ofdm_anchor_after_tx) {
+                modem_.expectFullOFDMAnchorOnce();
+            }
         }
     });
 
@@ -518,6 +522,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             queueRealTxSamples(samples, "TX burst audio");
         }
     });
+
     ultra::gui::startupTrace("App", "protocol-callbacks-mid1");
 
     protocol_.setMessageReceivedCallback([this](const std::string& from, const std::string& text) {

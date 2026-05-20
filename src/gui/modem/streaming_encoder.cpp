@@ -28,6 +28,24 @@ bool isControlFrameBytes(const Bytes& frame_data) {
     return v2::isControlFrame(ft);
 }
 
+void markFirstLTSSymbolForBurstGroup(Samples& preamble, size_t symbol_samples) {
+    if (preamble.empty() || symbol_samples == 0) {
+        return;
+    }
+
+    // Full OFDM preambles are [sync][LTS][LTS]; light data preambles are
+    // [LTS][LTS]. The burst marker belongs on the first LTS symbol, not on
+    // the chirp/STS sync portion of a full anchor.
+    const size_t lts_pair_samples = symbol_samples * 2;
+    const size_t lts_start = preamble.size() > lts_pair_samples
+        ? preamble.size() - lts_pair_samples
+        : 0;
+    const size_t lts_symbol_end = std::min(preamble.size(), lts_start + symbol_samples);
+    for (size_t j = lts_start; j < lts_symbol_end; ++j) {
+        preamble[j] = -preamble[j];
+    }
+}
+
 }  // namespace
 
 // ============================================================================
@@ -398,15 +416,18 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
     for (size_t i = 0; i < encoded_frames.size(); i++) {
         // Generate preamble (LTS training symbols)
         Samples preamble;
-        if (i == 0 && force_first_full_preamble) {
+        if (i == 0 && (force_first_full_preamble || waveform_->supportsDataPreamble())) {
             preamble = waveform_->generatePreamble();
-            LOG_MODEM(INFO, "[%s] Full preamble forced for first burst frame OFDM timing anchor",
-                      log_prefix_.c_str());
+            if (force_first_full_preamble) {
+                LOG_MODEM(INFO, "[%s] Full preamble forced for first burst frame OFDM timing anchor",
+                          log_prefix_.c_str());
+            } else {
+                LOG_MODEM(INFO, "[%s] Full preamble emitted for first OFDM burst frame timing anchor",
+                          log_prefix_.c_str());
+            }
         } else if (i == 0) {
-            // First frame of burst: LTS data preamble
-            preamble = waveform_->supportsDataPreamble()
-                ? waveform_->generateDataPreamble()
-                : waveform_->generatePreamble();
+            // Waveforms without a separate data preamble already use their full preamble.
+            preamble = waveform_->generatePreamble();
         } else {
             // All subsequent frames: LTS data preamble
             preamble = waveform_->generateDataPreamble();
@@ -419,10 +440,7 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
             //   Normal: P_real > 0 (same signs multiply to positive)
             //   Negated: P_real < 0 (opposite signs multiply to negative)
             // abs() ensures detection still works; sign indicates burst marker.
-            size_t lts_sym_len = preamble.size() / 2;  // Half = one LTS symbol
-            for (size_t j = 0; j < lts_sym_len; j++) {
-                preamble[j] = -preamble[j];
-            }
+            markFirstLTSSymbolForBurstGroup(preamble, ofdm_config_.getSymbolDuration());
             LOG_MODEM(INFO, "[%s] LTS marker: negated first symbol for frame %zu (group start)",
                       log_prefix_.c_str(), i);
         }

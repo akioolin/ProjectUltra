@@ -538,6 +538,45 @@ void StreamingDecoder::searchForSync() {
                       log_prefix_.c_str(), sync_result.correlation);
         }
 
+        if (!found && use_full_ofdm_anchor_search) {
+            SyncResult light_sync_result;
+            const float known_cfo = last_cfo_.load();
+            const bool light_found = waveform_->detectDataSync(
+                SampleSpan(search_buffer.data(), search_buffer.size()),
+                light_sync_result, known_cfo, CORR_DETECT_THRESHOLD);
+            const auto fallback_thresholds = signal_policy::lightSyncThresholds(
+                is_coherent, is_narrowband, connected_, sync_reject_streak_);
+            auto sync_decision = signal_policy::evaluateLightSyncCandidate(
+                light_found, light_sync_result.correlation, is_coherent,
+                connected_, sync_reject_streak_, fallback_thresholds);
+            if (light_found && light_sync_result.correlation < fallback_thresholds.min_confidence) {
+                if (sync_decision.weak_accept) {
+                    LOG_MODEM(INFO,
+                              "[%s] Full-anchor wait fell back to weak DATA sync (corr=%.2f < %.2f, streak=%llu)",
+                              log_prefix_.c_str(), light_sync_result.correlation,
+                              fallback_thresholds.min_confidence,
+                              static_cast<unsigned long long>(sync_reject_streak_));
+                } else if (sync_decision.rejected) {
+                    LOG_MODEM(INFO,
+                              "[%s] Full-anchor wait rejected DATA fallback (corr=%.2f < %.2f, streak=%llu)",
+                              log_prefix_.c_str(), light_sync_result.correlation,
+                              fallback_thresholds.min_confidence,
+                              static_cast<unsigned long long>(sync_decision.next_reject_streak));
+                }
+            }
+            sync_reject_streak_ = sync_decision.next_reject_streak;
+            if (sync_decision.found) {
+                found = true;
+                sync_result = light_sync_result;
+                LOG_MODEM(INFO,
+                          "[%s] Full OFDM anchor not found; accepted connected DATA sync fallback (corr=%.2f)",
+                          log_prefix_.c_str(), sync_result.correlation);
+                if (data_sync_accepted_callback_) {
+                    data_sync_accepted_callback_(sync_result.correlation);
+                }
+            }
+        }
+
         // Dual-listen: if wideband didn't find anything, try narrowband chirp
         if (!found && !connected_) {
             // Lazy-init narrowband waveform on first use

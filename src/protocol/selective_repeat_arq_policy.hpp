@@ -100,9 +100,9 @@ inline uint32_t ackDedupWindowMs(uint32_t ack_repeat_delay_ms) {
 inline uint32_t sackTimerForFrame(uint32_t current_timer_ms,
                                   uint32_t sack_delay_ms,
                                   uint32_t sack_delay_short_ms,
-                                  bool frame_more_frag) {
+                                  bool use_short_delay) {
     uint32_t pick_ms = sack_delay_ms;
-    if (sack_delay_short_ms != 0 && !frame_more_frag) {
+    if (sack_delay_short_ms != 0 && use_short_delay) {
         pick_ms = sack_delay_short_ms;
     }
 

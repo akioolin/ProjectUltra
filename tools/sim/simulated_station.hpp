@@ -896,6 +896,7 @@ private:
         std::vector<float> raw_samples;
         std::string label;
         uint64_t min_rx_observation_epoch = 0;
+        bool expect_full_ofdm_anchor_after_tx = false;
     };
 
     struct ActiveTx {
@@ -1585,8 +1586,9 @@ private:
     void setupCallbacks() {
         // TX callback - enqueue a logical frame. The audio loop owns the
         // soundcard clock and pulls encoded samples from the active TX cursor.
-        protocol_.setTxDataCallback([this](const Bytes& data) {
-            queueTxFrame(data, txFrameLabel(data));
+        protocol_.setTxDataCallback([this](const Bytes& data,
+                                           bool expect_full_ofdm_anchor_after_tx) {
+            queueTxFrame(data, txFrameLabel(data), expect_full_ofdm_anchor_after_tx);
         });
 
         // Connection state changes
@@ -1720,11 +1722,14 @@ private:
                label.find(" seq=65535") == std::string::npos;
     }
 
-    void queueTxFrame(const Bytes& frame, const std::string& label) {
+    void queueTxFrame(const Bytes& frame,
+                      const std::string& label,
+                      bool expect_full_ofdm_anchor_after_tx = false) {
         TxSubmission submission;
         submission.kind = TxSubmission::Kind::Frame;
         submission.frame = frame;
         submission.label = label;
+        submission.expect_full_ofdm_anchor_after_tx = expect_full_ofdm_anchor_after_tx;
         queueTxSubmission(std::move(submission));
     }
 
@@ -2086,6 +2091,9 @@ private:
         const std::string label = submission.label;
         auto samples = encodeTxSubmission(submission);
         seedWarmSyncReplyPrediction(samples.size());
+        if (submission.expect_full_ofdm_anchor_after_tx && decoder_) {
+            decoder_->expectFullOFDMAnchorOnce();
+        }
 
         std::lock_guard<std::mutex> lock(tx_mutex_);
         tx_job_starting_ = false;
@@ -2142,6 +2150,9 @@ private:
                 return;
             }
             seedWarmSyncReplyPrediction(samples.size());
+            if (submission.expect_full_ofdm_anchor_after_tx && decoder_) {
+                decoder_->expectFullOFDMAnchorOnce();
+            }
             notePttTxQueued(samples.size());
             port_->queueTx(samples);
             std::ostringstream oss;

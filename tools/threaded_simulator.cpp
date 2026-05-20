@@ -142,10 +142,14 @@ public:
         protocol_.setAutoAccept(true);
 
         // TX: protocol -> modem -> channel
-        protocol_.setTxDataCallback([this](const Bytes& data) {
+        protocol_.setTxDataCallback([this](const Bytes& data,
+                                           bool expect_full_ofdm_anchor_after_tx) {
             LOG_INFO("MODEM", "[%s] TX %zu bytes", callsign_.c_str(), data.size());
             auto samples = modem_.transmit(data);
             tx_channel_.write(samples);
+            if (!samples.empty() && expect_full_ofdm_anchor_after_tx) {
+                modem_.expectFullOFDMAnchorOnce();
+            }
         });
 
         // RX: modem -> protocol

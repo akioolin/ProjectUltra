@@ -298,7 +298,7 @@ struct TncIntegrationPair {
 
     void installTxCallbacks(TncIntegrationStation& tx,
                             std::deque<std::vector<float>>& peer_queue) {
-        tx.engine.setTxDataCallback([this, &tx, &peer_queue](const ultra::Bytes& data) {
+        tx.engine.setTxDataCallback([this, &tx, &peer_queue](const ultra::Bytes& data, bool) {
             enqueueAudio(peer_queue, tx.station.testTransmitFrame(data));
         });
         tx.engine.setTransmitBurstCallback([this, &tx, &peer_queue](

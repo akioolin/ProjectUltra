@@ -95,6 +95,17 @@ bool isMoreRobustRate(CodeRate candidate, CodeRate current) {
     return getCodeRateValue(candidate) < getCodeRateValue(current);
 }
 
+bool isNormalArqAckFrame(const Bytes& frame_data) {
+    if (frame_data.size() < v2::ControlFrame::SIZE ||
+        static_cast<v2::FrameType>(frame_data[2]) != v2::FrameType::ACK) {
+        return false;
+    }
+
+    const uint16_t seq =
+        (static_cast<uint16_t>(frame_data[4]) << 8) | frame_data[5];
+    return seq != 0xFFFF;
+}
+
 CodeRate oneStepMoreRobust(CodeRate rate) {
     switch (rate) {
         case CodeRate::R3_4: return CodeRate::R2_3;
@@ -545,11 +556,11 @@ bool Connection::sendPayload(const Bytes& data, bool binary_payload) {
     if (data.size() <= capacity) {
         if (binary_payload) {
             return is_ofdm
-                ? arq_.sendFixedDataWithTypeAndFlags(data, v2::FrameType::DATA_END, v2::Flags::NONE)
-                : arq_.sendDataWithTypeAndFlags(data, v2::FrameType::DATA_END, v2::Flags::NONE);
+                ? arq_.sendFixedDataWithTypeAndFlags(data, v2::FrameType::DATA_END, v2::Flags::FINAL)
+                : arq_.sendDataWithTypeAndFlags(data, v2::FrameType::DATA_END, v2::Flags::FINAL);
         }
-        return is_ofdm ? arq_.sendFixedDataWithFlags(data, v2::Flags::NONE)
-                       : arq_.sendDataWithFlags(data, v2::Flags::NONE);
+        return is_ofdm ? arq_.sendFixedDataWithFlags(data, v2::Flags::FINAL)
+                       : arq_.sendDataWithFlags(data, v2::Flags::FINAL);
     }
 
     // Fragment the message into chunks that fit in one frame each
@@ -572,6 +583,9 @@ bool Connection::sendPayload(const Bytes& data, bool binary_payload) {
                 first ? v2::FrameType::DATA_START :
                 (last ? v2::FrameType::DATA_END : v2::FrameType::DATA_CONT));
         }
+        const bool last = (offset + chunk_size >= data.size());
+        pending_tx_fragment_flags_.push_back(
+            last ? v2::Flags::FINAL : v2::Flags::MORE_FRAG);
     }
 
     LOG_MODEM(INFO, "Connection: Split into %zu fragments", pending_tx_fragments_.size());
@@ -615,6 +629,10 @@ bool Connection::sendMessages(const std::vector<std::string>& texts) {
                     is_last ? v2::Flags::NONE : v2::Flags::MORE_FRAG);
             }
         }
+    }
+
+    if (!pending_tx_fragment_flags_.empty()) {
+        pending_tx_fragment_flags_.back() |= v2::Flags::FINAL;
     }
 
     LOG_MODEM(INFO, "Connection: Batch queued %zu messages as %zu frames",
@@ -697,7 +715,7 @@ bool Connection::sendFile(const std::string& filepath) {
         if (!block.empty()) {
             LOG_MODEM(INFO, "Connection: Sending file as single OFDM block (%zu bytes payload)",
                       block.size());
-            if (!arq_.sendVariableDataWithFlags(block, v2::Flags::NONE)) {
+            if (!arq_.sendVariableDataWithFlags(block, v2::Flags::FINAL)) {
                 file_transfer_.onSendFailed();
                 return false;
             }
@@ -752,8 +770,10 @@ void Connection::sendNextFileChunk() {
             break;
         }
 
-        // MORE_FRAG indicates more data remaining in file (not burst)
-        uint8_t flags = file_transfer_.hasMoreChunks() ? v2::Flags::MORE_FRAG : v2::Flags::NONE;
+        // MORE_FRAG indicates more data remaining in file (not burst). FINAL
+        // marks the actual stream tail for the short SACK timer.
+        const bool has_more = file_transfer_.hasMoreChunks();
+        uint8_t flags = has_more ? v2::Flags::MORE_FRAG : v2::Flags::FINAL;
         if (is_ofdm) {
             arq_.sendFixedDataWithFlags(chunk, flags);
         } else {
@@ -1556,6 +1576,10 @@ void Connection::tick(uint32_t elapsed_ms) {
 
 void Connection::transmitFrame(const Bytes& frame_data) {
     LOG_MODEM(DEBUG, "Connection: TX %zu bytes", frame_data.size());
+    const bool expect_full_anchor_after_tx =
+        negotiated_mode_ == WaveformMode::OFDM_CHIRP &&
+        state_ == ConnectionState::CONNECTED &&
+        isNormalArqAckFrame(frame_data);
 
     // If burst mode is active, buffer instead of transmitting immediately
     if (burst_mode_active_ && on_transmit_burst_) {
@@ -1563,8 +1587,17 @@ void Connection::transmitFrame(const Bytes& frame_data) {
         return;
     }
 
+    if (on_transmit_info_) {
+        on_transmit_info_(frame_data, expect_full_anchor_after_tx);
+        return;
+    }
+
     if (on_transmit_) {
         on_transmit_(frame_data);
+    }
+
+    if (expect_full_anchor_after_tx && on_full_ofdm_anchor_expected_) {
+        on_full_ofdm_anchor_expected_();
     }
 }
 
@@ -1659,7 +1692,7 @@ void Connection::configureArqForCurrentDataMode() {
             data_modulation_, data_code_rate_, arq_.getWindowSize(),
             data_frame_cw_count_);
         arq_.setSackDelay(sack_delay_ms);
-        arq_.setSackDelayShort(0);
+        arq_.setSackDelayShort(connection_policy::wideOFDMSackTailDelayMs());
         arq_.setAckRepeatCount(kWideOFDMAckRepeatCount);
 
         uint32_t ack_timeout_ms = connection_policy::computeWideOFDMAckTimeoutMs(
@@ -1672,7 +1705,7 @@ void Connection::configureArqForCurrentDataMode() {
         arq_.setAckTimeout(ack_timeout_ms);
 
         LOG_MODEM(INFO,
-                  "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, ack=%ums x%d), max_retries=%d, ack_batch=%u, physical_sack_hold=%ums, ack_repeat=%d, cw=%d (OFDM %s %s)",
+                  "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, ack=%ums x%d), max_retries=%d, ack_batch=%u, physical_sack_hold=%ums, tail_sack=%ums, ack_repeat=%d, cw=%d (OFDM %s %s)",
                   arq_.getWindowSize(),
                   ack_timeout_ms / 1000.0f,
                   timing.data_ms,
@@ -1681,6 +1714,7 @@ void Connection::configureArqForCurrentDataMode() {
                   arq_.getMaxRetries(),
                   arq_.getAckBatchSize(),
                   arq_.getSackDelay(),
+                  arq_.getSackDelayShort(),
                   kWideOFDMAckRepeatCount,
                   data_frame_cw_count_,
                   modulationToString(data_modulation_),
@@ -1885,6 +1919,10 @@ void Connection::enterDisconnected(const std::string& reason) {
 
 void Connection::setTransmitCallback(TransmitCallback cb) {
     on_transmit_ = std::move(cb);
+}
+
+void Connection::setTransmitInfoCallback(TransmitInfoCallback cb) {
+    on_transmit_info_ = std::move(cb);
 }
 
 void Connection::setTransmitBurstCallback(TransmitBurstCallback cb) {

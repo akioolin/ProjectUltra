@@ -232,6 +232,9 @@ public:
         if (streaming_encoder_) streaming_encoder_->setFixedFrameCodewords(cw_count);
         if (streaming_decoder_) streaming_decoder_->setFixedFrameCodewords(cw_count);
     }
+    void expectFullOFDMAnchorOnce() {
+        if (streaming_decoder_) streaming_decoder_->expectFullOFDMAnchorOnce();
+    }
     void setFixedFrameHeaderDiscovery(bool enable) {
         if (streaming_decoder_) streaming_decoder_->setFixedFrameHeaderDiscovery(enable);
     }

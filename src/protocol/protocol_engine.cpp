@@ -14,8 +14,9 @@ ProtocolEngine::ProtocolEngine(const ConnectionConfig& config)
 {
     ultra::gui::startupTrace("ProtocolEngine", "ctor-enter");
     // Wire up Connection callbacks
-    connection_.setTransmitCallback([this](const Bytes& data) {
-        handleTxFrame(data);
+    connection_.setTransmitInfoCallback([this](const Bytes& data,
+                                               bool expect_full_ofdm_anchor_after_tx) {
+        handleTxFrame(data, expect_full_ofdm_anchor_after_tx);
     });
 
     connection_.setConnectedCallback([this]() {
@@ -409,7 +410,7 @@ void ProtocolEngine::processRxBuffer() {
 }
 
 void ProtocolEngine::tick(uint32_t elapsed_ms) {
-    std::vector<Bytes> to_send;
+    std::vector<PendingTxFrame> to_send;
     {
         std::lock_guard<ProtocolEngineMutex> lock(mutex_);
         to_send = std::move(tx_queue_);
@@ -418,7 +419,7 @@ void ProtocolEngine::tick(uint32_t elapsed_ms) {
 
     for (const auto& tx_data : to_send) {
         if (on_tx_data_) {
-            on_tx_data_(tx_data);
+            on_tx_data_(tx_data.data, tx_data.expect_full_ofdm_anchor_after_tx);
         }
     }
 
@@ -459,7 +460,8 @@ void ProtocolEngine::reset() {
     defer_tx_ = false;
 }
 
-void ProtocolEngine::handleTxFrame(const Bytes& frame_data) {
+void ProtocolEngine::handleTxFrame(const Bytes& frame_data,
+                                   bool expect_full_ofdm_anchor_after_tx) {
     LOG_MODEM(INFO, "[%s] Protocol TX: %zu bytes -> modem%s",
               connection_.getLocalCallsign().c_str(), frame_data.size(),
               defer_tx_ ? " (queued)" : "");
@@ -478,9 +480,9 @@ void ProtocolEngine::handleTxFrame(const Bytes& frame_data) {
         "protocol", "frame.tx", fields);
 
     if (defer_tx_) {
-        tx_queue_.push_back(frame_data);
+        tx_queue_.push_back(PendingTxFrame{frame_data, expect_full_ofdm_anchor_after_tx});
     } else if (on_tx_data_) {
-        on_tx_data_(frame_data);
+        on_tx_data_(frame_data, expect_full_ofdm_anchor_after_tx);
     }
 }
 
