@@ -36,10 +36,23 @@ float rmsOf(std::span<const float> samples) {
     return static_cast<float>(std::sqrt(sum_sq / static_cast<double>(samples.size())));
 }
 
+size_t sanitizedFirTaps(uint32_t taps) {
+    size_t sanitized = static_cast<size_t>(std::max<uint32_t>(3, taps));
+    if ((sanitized % 2) == 0) {
+        ++sanitized;
+    }
+    return sanitized;
+}
+
 }  // namespace
 
 ChannelBusyDetector::ChannelBusyDetector(ChannelBusyDetectorConfig config)
-    : config_(config) {
+    : config_(config),
+      receive_band_filter_(FIRFilter::bandpass(
+          sanitizedFirTaps(config_.receive_band_filter_taps),
+          config_.receive_band_low_hz,
+          config_.receive_band_high_hz,
+          config_.sample_rate_hz)) {
     reset();
 }
 
@@ -47,6 +60,7 @@ void ChannelBusyDetector::reset(TimePoint now) {
     std::lock_guard<std::mutex> lock(mutex_);
     rms_window_.clear();
     noise_floor_window_.clear();
+    receive_band_filter_.reset();
     rms_window_sum_ = 0.0;
     current_rms_ = 0.0f;
     const auto initial_quiet_age =
@@ -60,14 +74,24 @@ void ChannelBusyDetector::reset(TimePoint now) {
 void ChannelBusyDetector::observeSamples(std::span<const float> samples,
                                          bool local_rx_blackout,
                                          TimePoint now) {
-    observeRms(rmsOf(samples), local_rx_blackout, now);
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (local_rx_blackout) {
+        observeRmsLocked(0.0f, true, now);
+        return;
+    }
+    observeRmsLocked(receiveBandRmsLocked(samples), local_rx_blackout, now);
 }
 
 void ChannelBusyDetector::observeRms(float rms,
                                      bool local_rx_blackout,
                                      TimePoint now) {
     std::lock_guard<std::mutex> lock(mutex_);
+    observeRmsLocked(rms, local_rx_blackout, now);
+}
 
+void ChannelBusyDetector::observeRmsLocked(float rms,
+                                           bool local_rx_blackout,
+                                           TimePoint now) {
     current_rms_ = std::max(0.0f, rms);
     const bool was_quiet = (quiet_since_ != TimePoint{});
 
@@ -117,6 +141,22 @@ void ChannelBusyDetector::observeRms(float rms,
         }
     }
     cv_.notify_all();
+}
+
+float ChannelBusyDetector::receiveBandRmsLocked(std::span<const float> samples) {
+    if (!config_.receive_band_rms) {
+        return rmsOf(samples);
+    }
+    if (samples.empty()) {
+        return 0.0f;
+    }
+
+    double sum_sq = 0.0;
+    for (float sample : samples) {
+        const float filtered = receive_band_filter_.process(sample);
+        sum_sq += static_cast<double>(filtered) * static_cast<double>(filtered);
+    }
+    return static_cast<float>(std::sqrt(sum_sq / static_cast<double>(samples.size())));
 }
 
 bool ChannelBusyDetector::isIdle() const {
