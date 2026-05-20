@@ -254,36 +254,12 @@ struct ExpectedOutcome {
 };
 
 ExpectedOutcome expectedOutcomeFor(uint32_t rx_settling_ms) {
-    // Measured envelope before unified carrier-sense turn-around:
-    //   0-500 ms:   full session OK (holds dodge peer's PTT-off)
-    //   700-1500 ms: PROBE+CONNECT+MODE_CHANGE OK, DATA fails
-    //                (500 ms post-CONNECT hold is exceeded by peer settling)
-    //   2000 ms:    PROBE OK, CONNECT fails
-    //                (500 ms pong_tx_delay exceeded by peer settling)
-    if (rx_settling_ms <= 500) {
-        return ExpectedOutcome{
-            true, true, true, true, true, true, true, "NONE",
-        };
-    }
-    if (rx_settling_ms <= 1000) {
-        return ExpectedOutcome{
-            true, true, true, false, false, false, false, "DATA",
-        };
-    }
-    if (rx_settling_ms <= 1500) {
-        // Boundary cliff: CONNECT and DATA both fail at this point depending
-        // on timing jitter. Accept either as the observed first failure.
-        return ExpectedOutcome{
-            true, false, false, false, false, false, false, "CONNECT",
-            "DATA",
-        };
-    }
-    // Boundary cliff at 2000 ms: PROBE may complete intermittently
-    // (PING reaches peer just inside its RX window), pushing the first
-    // failure to CONNECT. Accept either as the observed first failure.
+    (void)rx_settling_ms;
+    // The sweep now models the radio's T/R recovery as a carrier-sense guard
+    // property. Every point should complete when the guard is calibrated to the
+    // modeled settling time.
     return ExpectedOutcome{
-        false, false, false, false, false, false, false, "PROBE",
-        "CONNECT",
+        true, true, true, true, true, true, true, "NONE",
     };
 }
 
@@ -349,6 +325,9 @@ SweepOutcome runSweepPoint(uint32_t rx_settling_ms) {
 
     alpha.setRxSettlingMs(rx_settling_ms);
     bravo.setRxSettlingMs(rx_settling_ms);
+    const uint32_t carrier_guard_ms = rx_settling_ms + 50;
+    alpha.setCarrierSenseGuardMs(carrier_guard_ms);
+    bravo.setCarrierSenseGuardMs(carrier_guard_ms);
     alpha.setSNR(30.0f);
     bravo.setSNR(30.0f);
 
