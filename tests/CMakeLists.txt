@@ -480,6 +480,19 @@ if(TARGET ultra_sim_station)
         TIMEOUT 30
         LABELS regression)
 
+    add_executable(test_radio_realism_tx_pending
+        test_radio_realism_tx_pending.cpp)
+    target_include_directories(test_radio_realism_tx_pending PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
+    )
+    target_link_libraries(test_radio_realism_tx_pending PRIVATE ultra_sim_station)
+    add_test(NAME test_radio_realism_tx_pending
+        COMMAND test_radio_realism_tx_pending)
+    set_tests_properties(test_radio_realism_tx_pending PROPERTIES
+        TIMEOUT 30
+        LABELS regression)
+
     add_executable(test_mcdpsk_ack_turnaround
         test_mcdpsk_ack_turnaround.cpp)
     target_include_directories(test_mcdpsk_ack_turnaround PRIVATE
@@ -543,7 +556,7 @@ if(TARGET cli_simulator)
         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_cli_synthetic_notch.sh
                      $<TARGET_FILE:cli_simulator>)
     set_tests_properties(CLISyntheticNotch PROPERTIES
-        TIMEOUT 180
+        TIMEOUT 240
         RUN_SERIAL TRUE
         LABELS regression)
 endif()

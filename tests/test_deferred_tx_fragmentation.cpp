@@ -13,6 +13,8 @@ constexpr size_t kFirstChunkSamples = SimulatedStation::SAMPLES_PER_CALLBACK;
 constexpr size_t kSecondChunkSamples = SimulatedStation::SAMPLES_PER_CALLBACK;
 constexpr size_t kTrSwitchSamples = SimulatedStation::SAMPLE_RATE * 20 / 1000;
 constexpr size_t kCooldownSamples = SimulatedStation::SAMPLE_RATE * 100 / 1000;
+constexpr size_t kPostTxAckListenSamples =
+    SimulatedStation::SAMPLE_RATE * SimulatedStation::POST_TX_ACK_LISTEN_MS / 1000;
 
 std::vector<float> samples(size_t count, float value) {
     return std::vector<float>(count, value);
@@ -99,6 +101,13 @@ void deferredLogicalSubmissionsFlushOnePerRadioKeyup() {
     require(station.pttState() == PttState::RX,
             "radio should be RX-ready after cooldown expires");
 
+    station.testFlushDeferredTxIfReady();
+    require(station.testDeferredTxDepth() == 3,
+            "post-TX ACK listen window should hold deferred TX briefly after RX opens");
+    require(station.testTxQueueDepth() == 0,
+            "post-TX ACK listen should keep local TX queue empty");
+
+    station.testAdvanceRadioSamples(kPostTxAckListenSamples);
     station.testFlushDeferredTxIfReady();
     require(station.pttState() == PttState::RX,
             "flushing deferred audio queues samples without deafening RX first");
