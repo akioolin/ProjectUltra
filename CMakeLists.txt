@@ -599,6 +599,16 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_link_libraries(ofdm_snr_probe PRIVATE ultra_sim_station)
 
+    add_executable(measure_ack_fer
+        tools/measure_ack_fer.cpp
+    )
+    ultra_enable_tool_test_warnings(tools/measure_ack_fer.cpp)
+    target_include_directories(measure_ack_fer PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
+    )
+    target_link_libraries(measure_ack_fer PRIVATE ultra_sim_station)
+
     add_executable(idle_snr_probe
         tools/idle_snr_probe.cpp
     )
