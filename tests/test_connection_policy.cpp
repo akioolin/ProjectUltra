@@ -82,31 +82,34 @@ void test_ladder_rung_selection() {
     CHECK(selectLadderRung(7.0f, ChannelClassification::MODERATE).id ==
               LadderRungId::ROBUST_MID,
           "Moderate in-band 7 dB boundary selects Robust-Mid");
-    CHECK(selectLadderRung(14.9f, ChannelClassification::MODERATE).id ==
+    CHECK(selectLadderRung(13.9f, ChannelClassification::MODERATE).id ==
               LadderRungId::ROBUST_MID,
-          "Moderate below in-band 15 dB stays Robust-Mid");
-    CHECK(selectLadderRung(15.0f, ChannelClassification::MODERATE).id ==
-              LadderRungId::ROBUST,
-          "Moderate in-band 15 dB boundary selects Robust");
-    CHECK(selectLadderRung(19.9f, ChannelClassification::MODERATE).id ==
-              LadderRungId::ROBUST,
-          "Moderate below in-band 20 dB stays Robust");
-    CHECK(selectLadderRung(20.0f, ChannelClassification::MODERATE).id ==
+          "Moderate below in-band 14 dB stays Robust-Mid");
+    CHECK(selectLadderRung(14.0f, ChannelClassification::MODERATE).id ==
               LadderRungId::OFDM_CHIRP,
-          "Moderate in-band 20 dB boundary selects OFDM_CHIRP");
+          "Moderate in-band 14 dB boundary selects OFDM_CHIRP");
 
-    CHECK(selectLadderRung(17.9f, ChannelClassification::AWGN).id ==
-              LadderRungId::ROBUST,
-          "AWGN uses lower OFDM_CHIRP threshold than Moderate");
-    CHECK(selectLadderRung(18.0f, ChannelClassification::AWGN).id ==
+    CHECK(selectLadderRung(9.9f, ChannelClassification::AWGN).id ==
+              LadderRungId::ROBUST_MID,
+          "AWGN below in-band 10 dB stays MC-DPSK");
+    CHECK(selectLadderRung(10.0f, ChannelClassification::AWGN).id ==
               LadderRungId::OFDM_CHIRP,
-          "AWGN in-band 18 dB boundary selects OFDM_CHIRP");
+          "AWGN in-band 10 dB boundary selects OFDM_CHIRP");
+    CHECK(selectLadderRung(11.9f, ChannelClassification::GOOD).id ==
+              LadderRungId::ROBUST_MID,
+          "Good fading below in-band 12 dB stays MC-DPSK");
+    CHECK(selectLadderRung(12.0f, ChannelClassification::GOOD).id ==
+              LadderRungId::OFDM_CHIRP,
+          "Good fading in-band 12 dB boundary selects OFDM_CHIRP");
     CHECK(selectLadderRung(16.9f, ChannelClassification::POOR).id ==
               LadderRungId::ROBUST_MID,
           "Poor fading keeps extra margin before Robust");
-    CHECK(selectLadderRung(22.0f, ChannelClassification::POOR).id ==
+    CHECK(selectLadderRung(17.0f, ChannelClassification::POOR).id ==
+              LadderRungId::ROBUST,
+          "Poor fading keeps Robust below the OFDM_CHIRP floor");
+    CHECK(selectLadderRung(18.0f, ChannelClassification::POOR).id ==
               LadderRungId::OFDM_CHIRP,
-          "Poor fading delays OFDM_CHIRP until in-band 22 dB");
+          "Poor fading delays OFDM_CHIRP until in-band 18 dB");
 
     CHECK(selectLadderRung(10.0f, 0.80f).id == LadderRungId::ROBUST_MID,
           "fading-index overload selects Moderate Robust-Mid at in-band 10 dB");

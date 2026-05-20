@@ -174,6 +174,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // Use measured SNR from modem (set via setMeasuredSNR)
         snr_db = measured_snr_db_;
         const SNRSource snr_source = measured_snr_source_;
+        const bool rate_selection_snr_valid = measured_snr_valid_;
 
         const Modulation forced_mod = static_cast<Modulation>(frame.initial_modulation);
         const CodeRate forced_rate = static_cast<CodeRate>(frame.initial_code_rate);
@@ -183,9 +184,11 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             remote_pref != WaveformMode::AUTO ||
             config_.preferred_mode != WaveformMode::AUTO ||
             narrowband_override_ != WaveformMode::AUTO;
-        const auto selected_rung =
-            connection_policy::selectLadderRung(snr_db, fading_index_);
+        const auto selected_rung = rate_selection_snr_valid
+            ? connection_policy::selectLadderRung(snr_db, fading_index_)
+            : connection_policy::ladderRungForId(LadderRungId::ROBUST);
         const bool ladder_selected =
+            rate_selection_snr_valid &&
             !forced_profile && !forced_waveform &&
             commonSupportsWaveform(config_.mode_capabilities, remote_caps,
                                    selected_rung.waveform);
@@ -660,7 +663,8 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data, v2::Fra
 
 WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_pref) {
     uint8_t common = config_.mode_capabilities & remote_caps;
-    float snr = measured_snr_db_;
+    const bool rate_selection_snr_valid = measured_snr_valid_;
+    float snr = rate_selection_snr_valid ? measured_snr_db_ : 0.0f;
     WaveformMode selected = connection_policy::selectNegotiatedMode(
         config_.mode_capabilities,
         remote_caps,

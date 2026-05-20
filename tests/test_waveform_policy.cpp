@@ -80,13 +80,23 @@ void test_bootstrap_caps() {
 }
 
 void test_waveform_recommendations() {
-    auto low = recommendWaveformAndRate(19.0f, 0.00f);
-    CHECK(low.waveform == WaveformMode::MC_DPSK, "in-band SNR19 should use MC-DPSK");
+    auto low = recommendWaveformAndRate(9.9f, 0.00f);
+    CHECK(low.waveform == WaveformMode::MC_DPSK, "AWGN below in-band SNR10 should use MC-DPSK");
     CHECK(low.rate == CodeRate::R1_4, "MC-DPSK recommendation should be R1/4");
 
-    auto awgn = recommendWaveformAndRate(20.0f, 0.00f);
-    CHECK(awgn.waveform == WaveformMode::OFDM_CHIRP, "AWGN in-band SNR20 should use OFDM_CHIRP");
-    CHECK(awgn.rate == CodeRate::R1_4, "AWGN in-band SNR20 should recommend R1/4");
+    auto awgn = recommendWaveformAndRate(10.0f, 0.00f);
+    CHECK(awgn.waveform == WaveformMode::OFDM_CHIRP, "AWGN in-band SNR10 should use OFDM_CHIRP");
+    CHECK(awgn.rate == CodeRate::R1_4, "AWGN in-band SNR10 should recommend R1/4");
+
+    auto good_below_floor = recommendWaveformAndRate(11.9f, 0.30f);
+    CHECK(good_below_floor.waveform == WaveformMode::MC_DPSK,
+          "good fading below in-band SNR12 should keep MC-DPSK margin");
+
+    auto moderate_floor = recommendWaveformAndRate(14.0f, 0.90f);
+    CHECK(moderate_floor.waveform == WaveformMode::OFDM_CHIRP,
+          "moderate fading in-band SNR14 should use OFDM_CHIRP");
+    CHECK(moderate_floor.rate == CodeRate::R1_4,
+          "moderate fading in-band SNR14 should recommend R1/4");
 
     auto moderate = recommendWaveformAndRate(25.0f, 0.90f);
     CHECK(moderate.waveform == WaveformMode::OFDM_CHIRP,
