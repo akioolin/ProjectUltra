@@ -202,6 +202,38 @@ Interpretation of the 2026-04-29 robustness work:
 
 Higher rates (R2/3, R3/4, QPSK) — see historical section below; not re-measured against the new floor.
 
+**⚠️ What these floors measure — read this before quoting them:**
+
+These are **QSO-completion floors**, not raw isolated frame decode floors. The
+measurement methodology (`cli_simulator` / OTASim) runs a full session:
+PING/PONG/CONNECT handshake with **full chirp+LTS preamble**, then post-handshake
+data frames with **light preamble (LTS-only)**, with selective-repeat ARQ
+recovering failed light-preamble frames. The "floor" is the lowest SNR at which
+the whole session completes — which is materially lower than the SNR at which
+individual light-preamble frames decode reliably.
+
+Quantified by `docs/ACK_FRAME_FER_BASELINE_2026_05_20.md` (24 cells × 600 frames
+AWGN, isolated-frame measurement):
+- 4-CW data frame with **light preamble**: 100% FER at SNR=8/10/12, 31% FER at
+  SNR=14, ~0% at SNR≥16
+- 1-CW ACK with **light preamble**: 100% FER at SNR=8/10/12, 29% FER at SNR=14,
+  ~0% at SNR≥16
+- 1-CW ACK with **full chirp+LTS preamble**: 0.3% FER at SNR=12, 3.8% at SNR=10,
+  68% at SNR=8
+
+The dominant low-SNR failure is **light-preamble LTS sync acquisition**, not
+LDPC. At SNR≤12, the light preamble does not have enough integration time for
+the LTS autocorrelation peak to clear the production 0.52 acceptance threshold
+(measured 0.20-0.34). The QSO-completion floor of 12 dB AWGN works because the
+CONNECT handshake (full preamble) gets through, and ARQ retransmits the
+light-preamble data frames until a few of them happen to sync.
+
+This is the gap that motivates the adaptive-preamble workstream: switch the
+post-handshake preamble to full chirp+LTS below some SNR threshold (~14-15 dB),
+recovering reliable raw frame decode at the cost of ~800 ms extra per frame —
+net throughput-positive at marginal SNR (saved retransmissions exceed added
+preamble airtime).
+
 Sweep methodology (2026-05-19): `cli_simulator --ota-host 127.0.0.1:50051 --ota-alpha-token admin_tok --ota-bravo-token bravo_tok` against the running OTASim server, walking SNR down until a `TEST FAILED` cell. Single-seed cells are floor *locators*, not statistical floors — multi-seed verification is still TODO for the 1-seed entries.
 
 **Current production state (post-2026-05-19 8-layer calibration audit, branch `fix/honest-snr-in-band-and-rate-recalibration`):**
