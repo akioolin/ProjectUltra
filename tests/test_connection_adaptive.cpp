@@ -104,8 +104,8 @@ struct ConnectionAdaptiveTestAccess {
         c.arq_.setCallsigns(c.local_call_, c.remote_call_);
     }
 
-    static void sendOFDMTimingAnchorIfNeeded(Connection& c) {
-        c.sendOFDMTimingAnchorIfNeeded();
+    static void enterConnected(Connection& c) {
+        c.enterConnected();
     }
 
     static bool connectAckRescueArmed(const Connection& c) {
@@ -267,7 +267,7 @@ void test_accepted_ofdm_data_sync_does_not_clear_non_ofdm_rescue() {
           "accepted OFDM DATA sync hook should not clear non-OFDM rescue state");
 }
 
-void test_ofdm_timing_anchor_is_keepalive_from_initiator_only() {
+void test_ofdm_connected_entry_does_not_emit_unsolicited_timing_anchor() {
     Connection c;
     std::vector<Bytes> tx_frames;
     c.setTransmitCallback([&](const Bytes& data) {
@@ -275,26 +275,9 @@ void test_ofdm_timing_anchor_is_keepalive_from_initiator_only() {
     });
     ConnectionAdaptiveTestAccess::makeConnectedInitiator(c, WaveformMode::OFDM_CHIRP);
 
-    ConnectionAdaptiveTestAccess::sendOFDMTimingAnchorIfNeeded(c);
-    CHECK(tx_frames.size() == 1, "OFDM_CHIRP initiator should emit one timing anchor frame");
-
-    auto anchor = v2::ControlFrame::deserialize(tx_frames.front());
-    CHECK(anchor.has_value(), "timing anchor should be a valid control frame");
-    CHECK(anchor->type == v2::FrameType::KEEPALIVE,
-          "timing anchor should reuse KEEPALIVE control frame");
-    CHECK(anchor->src_hash == v2::hashCallsign("W1ABC"),
-          "timing anchor source should be local callsign");
-    CHECK(anchor->dst_hash == v2::hashCallsign("K2DEF"),
-          "timing anchor destination should be remote callsign");
-
-    Connection responder;
-    std::vector<Bytes> responder_tx;
-    responder.setTransmitCallback([&](const Bytes& data) {
-        responder_tx.push_back(data);
-    });
-    ConnectionAdaptiveTestAccess::makeResponderWithConnectAckRescue(responder);
-    ConnectionAdaptiveTestAccess::sendOFDMTimingAnchorIfNeeded(responder);
-    CHECK(responder_tx.empty(), "responder should not emit unsolicited timing anchor");
+    ConnectionAdaptiveTestAccess::enterConnected(c);
+    CHECK(tx_frames.empty(),
+          "connected OFDM entry should not emit an unsolicited KEEPALIVE anchor");
 }
 
 void test_adaptive_upgrade_requires_backlog_and_clean_windows() {
@@ -575,7 +558,7 @@ int main() {
     test_remote_mode_change_reconfigures_arq();
     test_accepted_ofdm_data_sync_clears_connect_ack_rescue();
     test_accepted_ofdm_data_sync_does_not_clear_non_ofdm_rescue();
-    test_ofdm_timing_anchor_is_keepalive_from_initiator_only();
+    test_ofdm_connected_entry_does_not_emit_unsolicited_timing_anchor();
     test_adaptive_upgrade_requires_backlog_and_clean_windows();
     test_adaptive_upgrade_skips_small_backlog();
     test_adaptive_downgrade_hysteresis_and_short_lockout_upgrade();

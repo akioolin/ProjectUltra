@@ -768,14 +768,23 @@ private:
                 return;
             }
             std::string error;
-            if (!ota_audio_->queueTxSamples(samples, &error)) {
+            const bool queued = ota_audio_->queueTxSamples(samples, &error);
+            if (!queued) {
                 LOG_WARN("AUDIO", "OTASim TX failed: %s", error.c_str());
                 std::cerr << "[otasim] TX failed: " << error << "\n";
+            }
+            if (queued && tx_waveform_mode_ == WaveformMode::OFDM_CHIRP) {
+                constexpr size_t kReplyTurnaroundSamples = kSampleRate * 50 / 1000;
+                decoder_.seedExpectedFrameArrivalAfterSamples(samples.size() + kReplyTurnaroundSamples);
             }
             return;
         }
 
         audio_.queueTxSamples(samples);
+        if (tx_waveform_mode_ == WaveformMode::OFDM_CHIRP) {
+            constexpr size_t kReplyTurnaroundSamples = kSampleRate * 50 / 1000;
+            decoder_.seedExpectedFrameArrivalAfterSamples(samples.size() + kReplyTurnaroundSamples);
+        }
     }
 
     void drainOtaRxLocked() {

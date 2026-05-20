@@ -322,6 +322,8 @@ public:
     // gap, but no ARQ coupling is required for contiguous OFDM bursts.
     FrameArrivalSnapshot getFrameArrivalSnapshot() const;
     void setExpectedFrameGapSamples(size_t samples);
+    void seedExpectedFrameArrivalAfterSamples(size_t delay_samples,
+                                              float confidence = 0.50f);
 
     // Get number of samples in buffer
     size_t samplesInBuffer() const;
@@ -449,6 +451,7 @@ private:
     size_t search_floor_abs_ = 0;     // Earliest absolute sample search may inspect
     bool search_floor_abs_valid_ = false;
     bool expect_full_ofdm_anchor_ = false;
+    bool sync_from_warm_timed_window_ = false;
     bool warm_sync_active_ = false;
     streaming_frame_arrival_policy::WarmSyncPhase warm_sync_phase_ =
         streaming_frame_arrival_policy::WarmSyncPhase::COLD;

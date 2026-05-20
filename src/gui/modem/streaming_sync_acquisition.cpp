@@ -653,6 +653,7 @@ void StreamingDecoder::searchForSync() {
         sync_gap_error_samples_ = sync_result.gap_error_samples;
         sync_start_time_ = std::chrono::steady_clock::now();
         pending_total_cw_ = 0;
+        sync_from_warm_timed_window_ = used_warm_timed_window;
 
         state_ = DecoderState::SYNC_FOUND;
 

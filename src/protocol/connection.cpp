@@ -1568,20 +1568,6 @@ void Connection::transmitFrame(const Bytes& frame_data) {
     }
 }
 
-void Connection::sendOFDMTimingAnchorIfNeeded() {
-    if (negotiated_mode_ != WaveformMode::OFDM_CHIRP || !is_initiator_) {
-        return;
-    }
-    if (local_call_.empty() || remote_call_.empty()) {
-        return;
-    }
-
-    auto anchor = v2::ControlFrame::makeKeepalive(local_call_, remote_call_);
-    LOG_MODEM(INFO,
-              "Connection: Sending OFDM full-preamble timing anchor KEEPALIVE");
-    transmitFrame(anchor.serialize());
-}
-
 void Connection::configureArqForCurrentDataMode() {
     arq_.setCodeRate(data_code_rate_);
     arq_.setFixedFrameCodewords(data_frame_cw_count_);
@@ -1845,7 +1831,6 @@ void Connection::enterConnected() {
         on_connected_();
     }
 
-    sendOFDMTimingAnchorIfNeeded();
 }
 
 void Connection::enterDisconnected(const std::string& reason) {

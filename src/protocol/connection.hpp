@@ -482,7 +482,6 @@ private:
     void handleDataPayload(const Bytes& payload, bool more_data, v2::FrameType frame_type);
 
     void transmitFrame(const Bytes& frame_data);
-    void sendOFDMTimingAnchorIfNeeded();
     void enterConnected();
     void enterDisconnected(const std::string& reason);
     void sendFullConnect();  // Send full CONNECT frame after successful PING/PONG

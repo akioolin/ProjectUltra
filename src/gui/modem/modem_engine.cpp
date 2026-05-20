@@ -403,7 +403,13 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
         "phy", "frame.tx", fields);
 
-    return postProcessTx(samples);
+    auto processed = postProcessTx(samples);
+    if (is_ofdm && streaming_decoder_) {
+        const size_t turn_samples =
+            static_cast<size_t>(48000ULL * static_cast<uint64_t>(turnaround_delay_ms_) / 1000ULL);
+        streaming_decoder_->seedExpectedFrameArrivalAfterSamples(processed.size() + turn_samples);
+    }
+    return processed;
 }
 
 // ============================================================================
@@ -429,7 +435,13 @@ std::vector<float> ModemEngine::transmitBurst(const std::vector<Bytes>& frame_da
               protocol::waveformModeToString(waveform_mode_),
               modulationToString(data_modulation_));
 
-    return postProcessTx(samples);
+    auto processed = postProcessTx(samples);
+    if (protocol::isOFDMMode(waveform_mode_) && streaming_decoder_) {
+        const size_t turn_samples =
+            static_cast<size_t>(48000ULL * static_cast<uint64_t>(turnaround_delay_ms_) / 1000ULL);
+        streaming_decoder_->seedExpectedFrameArrivalAfterSamples(processed.size() + turn_samples);
+    }
+    return processed;
 }
 
 std::vector<float> ModemEngine::transmitPing() {

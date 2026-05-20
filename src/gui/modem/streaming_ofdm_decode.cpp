@@ -304,6 +304,10 @@ void StreamingDecoder::decodeCurrentFrame() {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
         correlation_pos_ = wrapRingIndexLocked(sync_position_ + advance);
         setSearchFloorLocked(frame_sync_abs + advance);
+        if (sync_from_warm_timed_window_) {
+            noteFrameArrivalSyncMissLocked();
+            sync_from_warm_timed_window_ = false;
+        }
     };
 
     // PING is a disconnected MC-DPSK chirp-only presence probe. Do not run this
@@ -546,9 +550,11 @@ void StreamingDecoder::decodeCurrentFrame() {
                             waveform_->configure(saved_mod, saved_rate);
                         }
 
+                        noteFrameArrivalSuccess(frame_sync_abs, frame_sync_abs + frame_len);
                         {
                             std::lock_guard<std::mutex> lock(buffer_mutex_);
                             expect_full_ofdm_anchor_ = false;
+                            sync_from_warm_timed_window_ = false;
                             correlation_pos_ = wrapRingIndexLocked(sync_position_ + frame_len);
                             setSearchFloorLocked(frame_sync_abs + frame_len);
                             last_decoded_sync_pos_ = sync_position_;
@@ -1265,7 +1271,7 @@ void StreamingDecoder::decodeCurrentFrame() {
 
         if (result.success && connected_ && is_ofdm) {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
-            expect_full_ofdm_anchor_ = false;
+            sync_from_warm_timed_window_ = false;
         }
 
         LOG_MODEM(INFO, "[%s] StreamingDecoder: Frame decoded, %d/%d CWs, SNR=%.1f dB (%s), CFO=%.1f Hz",
@@ -1310,6 +1316,14 @@ void StreamingDecoder::decodeCurrentFrame() {
 
     if (result.success && connected_ && is_ofdm) {
         noteFrameArrivalSuccess(frame_sync_abs, next_search_abs);
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        expect_full_ofdm_anchor_ = false;
+    } else if (!result.success && result.codewords_ok == 0 && connected_ && is_ofdm) {
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        if (sync_from_warm_timed_window_) {
+            noteFrameArrivalSyncMissLocked();
+            sync_from_warm_timed_window_ = false;
+        }
     }
 
     // Legacy fixed-offset continuation is only safe for a physical burst.
