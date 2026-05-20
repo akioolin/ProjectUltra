@@ -11,8 +11,43 @@ namespace streaming_frame_arrival_policy {
 
 static constexpr size_t kSampleRateHz = 48000;
 static constexpr size_t kDefaultTightWindowSamples = kSampleRateHz / 50; // 20 ms
+static constexpr size_t kDegradedWindowSamples = kSampleRateHz / 20; // 50 ms
 static constexpr size_t kWarmSearchSlackSamples = 256;
 static constexpr float kMinWarmWindowConfidence = 0.25f;
+static constexpr float kMinDegradedWindowConfidence = 0.05f;
+static constexpr int kWarmSyncMissesBeforeDegraded = 1;
+static constexpr int kWarmSyncMissesBeforeRecovery = 4;
+
+enum class WarmSyncPhase {
+    COLD,
+    WARM,
+    DEGRADED,
+    RECOVERY,
+};
+
+inline const char* warmSyncPhaseName(WarmSyncPhase phase) {
+    switch (phase) {
+        case WarmSyncPhase::COLD: return "COLD";
+        case WarmSyncPhase::WARM: return "WARM";
+        case WarmSyncPhase::DEGRADED: return "DEGRADED";
+        case WarmSyncPhase::RECOVERY: return "RECOVERY";
+    }
+    return "UNKNOWN";
+}
+
+inline WarmSyncPhase phaseAfterSuccessfulFrame() {
+    return WarmSyncPhase::WARM;
+}
+
+inline WarmSyncPhase phaseAfterSyncMiss(int consecutive_misses) {
+    if (consecutive_misses >= kWarmSyncMissesBeforeRecovery) {
+        return WarmSyncPhase::RECOVERY;
+    }
+    if (consecutive_misses >= kWarmSyncMissesBeforeDegraded) {
+        return WarmSyncPhase::DEGRADED;
+    }
+    return WarmSyncPhase::WARM;
+}
 
 struct SuccessfulFrameUpdate {
     bool had_previous_prediction = false;
@@ -105,6 +140,8 @@ inline float confidenceAfterSyncMiss(float previous_confidence) {
 struct WarmSearchWindowPlan {
     bool active = false;
     bool wait_for_more_samples = false;
+    bool lower_threshold = false;
+    WarmSyncPhase phase = WarmSyncPhase::COLD;
     size_t search_start_abs = 0;
     size_t candidate_span_samples = 0;
     size_t search_size_samples = 0;
@@ -118,17 +155,23 @@ inline WarmSearchWindowPlan planWarmSearchWindow(
     size_t next_expected_frame_sample,
     float frame_arrival_confidence,
     int consecutive_sync_misses,
+    WarmSyncPhase warm_sync_phase,
     size_t total_fed_samples,
     size_t oldest_available_abs,
     bool search_floor_valid,
     size_t search_floor_abs,
     size_t correlation_abs,
     size_t symbol_samples,
-    size_t correlation_step_samples,
-    size_t half_window_samples = kDefaultTightWindowSamples) {
+    size_t correlation_step_samples) {
 
     WarmSearchWindowPlan plan;
+    plan.phase = warm_sync_phase;
     const size_t safe_symbol_samples = std::max<size_t>(1, symbol_samples);
+    const bool degraded = warm_sync_phase == WarmSyncPhase::DEGRADED;
+    const size_t half_window_samples =
+        degraded ? kDegradedWindowSamples : kDefaultTightWindowSamples;
+    const float min_confidence =
+        degraded ? kMinDegradedWindowConfidence : kMinWarmWindowConfidence;
     const size_t candidate_span = half_window_samples * 2 + kWarmSearchSlackSamples;
     const size_t tail_samples = safe_symbol_samples * 2;
     plan.candidate_span_samples = candidate_span;
@@ -139,8 +182,9 @@ inline WarmSearchWindowPlan planWarmSearchWindow(
     plan.search_end_abs = plan.search_start_abs + plan.search_size_samples;
 
     if (!use_light_search || !warm_sync_active || !has_prediction ||
-        consecutive_sync_misses != 0 ||
-        frame_arrival_confidence < kMinWarmWindowConfidence) {
+        warm_sync_phase == WarmSyncPhase::COLD ||
+        warm_sync_phase == WarmSyncPhase::RECOVERY ||
+        frame_arrival_confidence < min_confidence) {
         return plan;
     }
 
@@ -164,6 +208,8 @@ inline WarmSearchWindowPlan planWarmSearchWindow(
     }
 
     plan.active = true;
+    plan.lower_threshold = warm_sync_phase == WarmSyncPhase::WARM &&
+        consecutive_sync_misses == 0;
     return plan;
 }
 

@@ -158,12 +158,14 @@ void test_warm_search_window_planning() {
 
     auto active = arrival_policy::planWarmSearchWindow(
         true, true, true, expected, 0.6f, 0,
+        arrival_policy::WarmSyncPhase::WARM,
         expected + 6000, expected - 20000,
         true, expected - 4000,
         expected - 1200,
-        symbol_samples, step_samples, half_window);
+        symbol_samples, step_samples);
 
     CHECK(active.active, "warm window should activate when prediction is available and current step intersects it");
+    CHECK(active.lower_threshold, "warm window should use lowered threshold");
     CHECK(active.search_start_abs == expected - half_window,
           "warm window should start half-window before expected arrival");
     CHECK(active.candidate_span_samples ==
@@ -175,30 +177,58 @@ void test_warm_search_window_planning() {
 
     auto wait = arrival_policy::planWarmSearchWindow(
         true, true, true, expected, 0.6f, 0,
+        arrival_policy::WarmSyncPhase::WARM,
         expected + 1000, expected - 20000,
         true, expected - 4000,
         expected - 1200,
-        symbol_samples, step_samples, half_window);
+        symbol_samples, step_samples);
     CHECK(!wait.active && wait.wait_for_more_samples,
           "warm window should wait until enough post-LTS samples are buffered");
 
-    auto missed = arrival_policy::planWarmSearchWindow(
-        true, true, true, expected, 0.6f, 1,
+    auto degraded = arrival_policy::planWarmSearchWindow(
+        true, true, true, expected, 0.2f, 1,
+        arrival_policy::WarmSyncPhase::DEGRADED,
         expected + 6000, expected - 20000,
         true, expected - 4000,
         expected - 1200,
-        symbol_samples, step_samples, half_window);
-    CHECK(!missed.active && !missed.wait_for_more_samples,
-          "warm window should fall back wide after a miss until the state machine recovers");
+        symbol_samples, step_samples);
+    CHECK(degraded.active && !degraded.lower_threshold,
+          "degraded warm-sync should keep timed search at low confidence without lowered threshold");
+    CHECK(degraded.candidate_span_samples ==
+              arrival_policy::kDegradedWindowSamples * 2 +
+              arrival_policy::kWarmSearchSlackSamples,
+          "degraded warm-sync should widen the timed window");
+
+    auto recovery = arrival_policy::planWarmSearchWindow(
+        true, true, true, expected, 0.2f, 4,
+        arrival_policy::WarmSyncPhase::RECOVERY,
+        expected + 6000, expected - 20000,
+        true, expected - 4000,
+        expected - 1200,
+        symbol_samples, step_samples);
+    CHECK(!recovery.active && !recovery.wait_for_more_samples,
+          "recovery state should fall back to cold wide search");
 
     auto far = arrival_policy::planWarmSearchWindow(
         true, true, true, expected, 0.6f, 0,
+        arrival_policy::WarmSyncPhase::WARM,
         expected + 6000, expected - 20000,
         true, expected - 4000,
         expected + 12000,
-        symbol_samples, step_samples, half_window);
+        symbol_samples, step_samples);
     CHECK(!far.active && !far.wait_for_more_samples,
           "warm window should not activate when the current search step is outside the expected window");
+}
+
+void test_warm_sync_phase_transitions() {
+    CHECK(arrival_policy::phaseAfterSuccessfulFrame() == arrival_policy::WarmSyncPhase::WARM,
+          "successful frame should enter warm sync");
+    CHECK(arrival_policy::phaseAfterSyncMiss(1) == arrival_policy::WarmSyncPhase::DEGRADED,
+          "first missed expected window should degrade warm sync");
+    CHECK(arrival_policy::phaseAfterSyncMiss(3) == arrival_policy::WarmSyncPhase::DEGRADED,
+          "short outages should remain in degraded warm sync");
+    CHECK(arrival_policy::phaseAfterSyncMiss(4) == arrival_policy::WarmSyncPhase::RECOVERY,
+          "long outages should enter recovery");
 }
 
 }  // namespace
@@ -213,6 +243,7 @@ int main() {
     test_frame_arrival_prediction_tracks_cadence();
     test_frame_arrival_miss_accounting();
     test_warm_search_window_planning();
+    test_warm_sync_phase_transitions();
 
     if (tests_failed != 0) {
         std::cout << "StreamingBufferPolicy: " << (tests_run - tests_failed)

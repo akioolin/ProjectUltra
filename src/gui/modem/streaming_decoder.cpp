@@ -193,6 +193,7 @@ void StreamingDecoder::observeIdleNoiseCandidate(const float* samples, size_t co
 
 void StreamingDecoder::resetFrameArrivalTrackingLocked() {
     warm_sync_active_ = false;
+    warm_sync_phase_ = arrival_policy::WarmSyncPhase::COLD;
     next_expected_frame_sample_valid_ = false;
     next_expected_frame_sample_ = 0;
     frame_arrival_confidence_ = 0.0f;
@@ -216,6 +217,7 @@ void StreamingDecoder::noteFrameArrivalSuccessLocked(size_t frame_start_abs,
         return;
     }
 
+    const auto previous_phase = warm_sync_phase_;
     const auto update = arrival_policy::updateOnSuccessfulFrame(
         next_expected_frame_sample_valid_,
         next_expected_frame_sample_,
@@ -226,6 +228,7 @@ void StreamingDecoder::noteFrameArrivalSuccessLocked(size_t frame_start_abs,
 
     next_expected_frame_sample_valid_ = true;
     warm_sync_active_ = true;
+    warm_sync_phase_ = arrival_policy::phaseAfterSuccessfulFrame();
     next_expected_frame_sample_ = update.next_expected_frame_sample;
     frame_arrival_confidence_ = update.confidence;
     consecutive_sync_misses_ = update.consecutive_sync_misses;
@@ -246,12 +249,46 @@ void StreamingDecoder::noteFrameArrivalSuccessLocked(size_t frame_start_abs,
                   log_prefix_.c_str(), frame_start_abs, frame_end_abs,
                   next_expected_frame_sample_, frame_arrival_confidence_);
     }
+
+    if (previous_phase != warm_sync_phase_) {
+        LOG_MODEM(INFO, "[%s] warm-sync state: %s -> %s",
+                  log_prefix_.c_str(),
+                  arrival_policy::warmSyncPhaseName(previous_phase),
+                  arrival_policy::warmSyncPhaseName(warm_sync_phase_));
+    }
 }
 
 void StreamingDecoder::noteFrameArrivalSyncMissLocked() {
+    const auto previous_phase = warm_sync_phase_;
     consecutive_sync_misses_ = arrival_policy::incrementSyncMisses(consecutive_sync_misses_);
     frame_arrival_confidence_ =
         arrival_policy::confidenceAfterSyncMiss(frame_arrival_confidence_);
+
+    if (next_expected_frame_sample_valid_ && last_frame_arrival_valid_) {
+        const size_t last_duration =
+            last_frame_end_sample_ >= last_frame_start_sample_
+                ? (last_frame_end_sample_ - last_frame_start_sample_)
+                : 0;
+        const size_t cadence = last_duration + expected_frame_gap_samples_;
+        if (cadence > 0) {
+            next_expected_frame_sample_ += cadence;
+        }
+    }
+
+    warm_sync_phase_ = arrival_policy::phaseAfterSyncMiss(consecutive_sync_misses_);
+    if (warm_sync_phase_ == arrival_policy::WarmSyncPhase::RECOVERY) {
+        warm_sync_active_ = false;
+        next_expected_frame_sample_valid_ = false;
+        frame_arrival_confidence_ = 0.0f;
+    }
+
+    if (previous_phase != warm_sync_phase_) {
+        LOG_MODEM(INFO, "[%s] warm-sync state: %s -> %s (misses=%d)",
+                  log_prefix_.c_str(),
+                  arrival_policy::warmSyncPhaseName(previous_phase),
+                  arrival_policy::warmSyncPhaseName(warm_sync_phase_),
+                  consecutive_sync_misses_);
+    }
 }
 
 void StreamingDecoder::writeSamplesToRingLocked(const float* samples, size_t count) {
@@ -750,6 +787,7 @@ StreamingDecoder::FrameArrivalSnapshot StreamingDecoder::getFrameArrivalSnapshot
 
     FrameArrivalSnapshot snapshot;
     snapshot.warm_sync_active = warm_sync_active_;
+    snapshot.warm_sync_phase = warm_sync_phase_;
     snapshot.has_prediction = next_expected_frame_sample_valid_;
     snapshot.next_expected_frame_sample = next_expected_frame_sample_;
     snapshot.frame_arrival_confidence = frame_arrival_confidence_;

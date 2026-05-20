@@ -303,6 +303,8 @@ public:
 
     struct FrameArrivalSnapshot {
         bool warm_sync_active = false;
+        streaming_frame_arrival_policy::WarmSyncPhase warm_sync_phase =
+            streaming_frame_arrival_policy::WarmSyncPhase::COLD;
         bool has_prediction = false;
         size_t next_expected_frame_sample = 0;
         float frame_arrival_confidence = 0.0f;
@@ -448,6 +450,8 @@ private:
     bool search_floor_abs_valid_ = false;
     bool expect_full_ofdm_anchor_ = false;
     bool warm_sync_active_ = false;
+    streaming_frame_arrival_policy::WarmSyncPhase warm_sync_phase_ =
+        streaming_frame_arrival_policy::WarmSyncPhase::COLD;
     bool next_expected_frame_sample_valid_ = false;
     size_t next_expected_frame_sample_ = 0;
     float frame_arrival_confidence_ = 0.0f;
