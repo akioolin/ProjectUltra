@@ -19,6 +19,7 @@ struct ChannelBusyDetectorConfig {
     uint32_t min_noise_floor_observations = 10;
     float noise_floor_percentile = 0.10f;
     float quiet_noise_multiplier = 1.5f;
+    float noise_floor_bootstrap_rms_ceiling = 0.11f;
     uint32_t max_wait_for_idle_ms = 15000;
 };
 
@@ -47,6 +48,7 @@ public:
     bool waitUntilIdle(std::chrono::milliseconds guard);
     bool waitUntilIdle(std::chrono::milliseconds guard,
                        std::chrono::milliseconds max_wait);
+    float quietThreshold() const;
 
     const ChannelBusyDetectorConfig& config() const { return config_; }
 
@@ -56,6 +58,9 @@ private:
     TimePoint idleReadyAtLocked(std::chrono::milliseconds guard) const;
     void pruneWindowLocked(TimePoint now);
     void pruneNoiseFloorLocked(TimePoint now);
+    bool hasNoiseFloorEstimateLocked() const;
+    float noiseFloorEstimateLocked() const;
+    bool shouldRecordNoiseFloorSampleLocked(float rms) const;
     float quietThresholdLocked() const;
 
     ChannelBusyDetectorConfig config_;
