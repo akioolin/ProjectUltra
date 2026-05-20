@@ -142,6 +142,17 @@ static bool sampleBlockHasEnergy(const float* samples, size_t count) {
     return count;
 }
 
+// ULTRA_CARRIER_SENSE_DEBUG=1 gates per-event logging for carrier-sense
+// decisions made at the station / audio-port layer. Pairs with the same
+// env var in src/audio/channel_busy_detector.cpp.
+inline bool csDebugEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("ULTRA_CARRIER_SENSE_DEBUG");
+        return env && env[0] != '\0' && !(env[0] == '0' && env[1] == '\0');
+    }();
+    return enabled;
+}
+
 inline void e2eDebugLine(const std::string& line) {
     const char* path = std::getenv("ULTRA_E2E_DEBUG_LOG");
     if (path == nullptr || *path == '\0') {
@@ -1913,15 +1924,31 @@ private:
 
     void flushDeferredTxIfReady() {
         if (!ptt_.isReadyForNextTx()) {
+            if (csDebugEnabled() && hasDeferredTxSubmission()) {
+                LOG_MODEM(WARN, "[%s] flushDeferred blocked: ptt=%s (not RX yet)",
+                          callsign_.c_str(), pttStateName(pttState()));
+            }
             return;
         }
         if (postTxAckListenActive()) {
+            if (csDebugEnabled() && hasDeferredTxSubmission()) {
+                LOG_MODEM(WARN, "[%s] flushDeferred blocked: post-TX ACK listen window",
+                          callsign_.c_str());
+            }
             return;
         }
         if (hasLocalTxQueued()) {
+            if (csDebugEnabled() && hasDeferredTxSubmission()) {
+                LOG_MODEM(WARN, "[%s] flushDeferred blocked: local TX queue not empty",
+                          callsign_.c_str());
+            }
             return;
         }
         if (!channelIdleForTxGuard()) {
+            if (csDebugEnabled() && hasDeferredTxSubmission()) {
+                LOG_MODEM(WARN, "[%s] flushDeferred blocked: carrier sense (channel busy)",
+                          callsign_.c_str());
+            }
             return;
         }
 
