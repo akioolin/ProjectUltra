@@ -295,6 +295,46 @@ bool test_ofdm_chirp_data_preamble_loopback() {
     return processFromSync(waveform, audio, sync, "OFDM-CHIRP data");
 }
 
+bool test_ofdm_chirp_data_preamble_awgn_warm_sync() {
+    ModemConfig cfg;
+    cfg.sample_rate = 48000;
+    cfg.fft_size = 1024;
+    cfg.num_carriers = 59;
+    cfg.cp_mode = CyclicPrefixMode::LONG;
+    cfg.modulation = Modulation::DQPSK;
+    cfg.code_rate = CodeRate::R1_4;
+    cfg.use_pilots = true;
+    cfg.pilot_spacing = 10;
+
+    OFDMChirpWaveform tx(cfg);
+    tx.configure(Modulation::DQPSK, CodeRate::R1_4);
+    tx.setTxFrequencyOffset(4.0f);
+
+    Samples audio;
+    append(audio, tx.generateDataPreamble());
+    append(audio, tx.modulate(makeEncodedCodeword()));
+    appendTailMargin(audio, tx.getSamplesPerSymbol());
+    addAwgn(audio, 10.0f, 0x20260525u);
+
+    OFDMChirpWaveform rx(cfg);
+    rx.configure(Modulation::DQPSK, CodeRate::R1_4);
+
+    constexpr size_t wide_window_samples = 9600;
+    constexpr size_t narrow_candidate_span = 2176;
+    const auto thresholds = signal_policy::lightSyncThresholds(
+        false, false, true, 0, true, wide_window_samples, narrow_candidate_span);
+
+    SyncResult sync;
+    CHECK(rx.detectDataSync(SampleSpan(audio), sync, 4.0f, thresholds.min_confidence),
+          "OFDM-CHIRP warm data: SNR10 LTS should sync with known-CFO matched filter");
+    CHECK(sync.detected, "OFDM-CHIRP warm data: sync result should be marked detected");
+    CHECK(sync.correlation >= thresholds.min_confidence,
+          "OFDM-CHIRP warm data: correlation should clear warm threshold");
+    CHECK(std::abs(sync.cfo_hz - 4.0f) < 0.001f,
+          "OFDM-CHIRP warm data: known CFO should be preserved");
+    return true;
+}
+
 bool test_ofdm_chirp_data_preamble_noise_false_sync_rate() {
     ModemConfig cfg;
     cfg.sample_rate = 48000;
@@ -487,6 +527,7 @@ int main() {
     test_ofdm_cox_clean_loopback();
     test_ofdm_chirp_full_preamble_loopback();
     test_ofdm_chirp_data_preamble_loopback();
+    test_ofdm_chirp_data_preamble_awgn_warm_sync();
     test_ofdm_chirp_data_preamble_noise_false_sync_rate();
     test_ofdm_cox_fixed_frame_roundtrip();
     test_ofdm_cox_qam_fixed_frame_roundtrip();

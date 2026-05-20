@@ -134,6 +134,8 @@ private:
     void configurePilotsForCodeRate(CodeRate rate);
     bool carrierLdpcPlumbingEligible() const;
     bool carrierLdpcCodewordCountSupported(size_t codeword_count) const;
+    void invalidateDataSyncTemplate();
+    bool ensureDataSyncTemplate(int symbol_samples);
 
     protocol::WaveformMode mode_ = protocol::WaveformMode::OFDM_CHIRP;
     ModemConfig config_;
@@ -142,6 +144,9 @@ private:
     std::unique_ptr<sync::ChirpSync> chirp_sync_;
     HilbertTransform data_sync_hilbert_{65};
     std::vector<Complex> data_sync_analytic_scratch_;
+    std::vector<Complex> data_sync_template_analytic_;
+    float data_sync_template_energy_ = 0.0f;
+    int data_sync_template_symbol_samples_ = 0;
 
     // State
     float cfo_hz_ = 0.0f;
