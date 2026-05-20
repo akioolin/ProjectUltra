@@ -1,14 +1,28 @@
 #include "audio/channel_busy_detector.hpp"
 
+#include "ultra/logging.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <limits>
 #include <vector>
 
 namespace ultra::audio {
 
 namespace {
+
+// ULTRA_CARRIER_SENSE_DEBUG=1 enables per-event logging at WARN level
+// for state transitions and waits. Off by default (production silent).
+// Matches the pattern of ULTRA_HARQ_DEBUG_LOG / ULTRA_CFO_DEBUG_LOG.
+bool csDebugEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("ULTRA_CARRIER_SENSE_DEBUG");
+        return env && env[0] != '\0' && !(env[0] == '0' && env[1] == '\0');
+    }();
+    return enabled;
+}
 
 float rmsOf(std::span<const float> samples) {
     if (samples.empty()) {
@@ -55,6 +69,7 @@ void ChannelBusyDetector::observeRms(float rms,
     std::lock_guard<std::mutex> lock(mutex_);
 
     current_rms_ = std::max(0.0f, rms);
+    const bool was_quiet = (quiet_since_ != TimePoint{});
 
     if (local_rx_blackout) {
         rms_window_.clear();
@@ -62,6 +77,9 @@ void ChannelBusyDetector::observeRms(float rms,
         last_busy_at_ = now;
         quiet_since_ = TimePoint{};
         cv_.notify_all();
+        if (was_quiet && csDebugEnabled()) {
+            LOG_MODEM(WARN, "CS quiet->busy (local TX blackout) rms=%.4f", current_rms_);
+        }
         return;
     }
 
@@ -74,16 +92,25 @@ void ChannelBusyDetector::observeRms(float rms,
     const float window_rms = rms_window_.empty()
         ? current_rms_
         : static_cast<float>(rms_window_sum_ / static_cast<double>(rms_window_.size()));
+    const float threshold = quietThresholdLocked();
 
-    if (window_rms > quietThresholdLocked()) {
+    if (window_rms > threshold) {
         last_busy_at_ = now;
         quiet_since_ = TimePoint{};
         cv_.notify_all();
+        if (was_quiet && csDebugEnabled()) {
+            LOG_MODEM(WARN, "CS quiet->busy window_rms=%.4f thresh=%.4f",
+                      window_rms, threshold);
+        }
         return;
     }
 
     if (quiet_since_ == TimePoint{}) {
         quiet_since_ = now;
+        if (csDebugEnabled()) {
+            LOG_MODEM(WARN, "CS busy->quiet window_rms=%.4f thresh=%.4f",
+                      window_rms, threshold);
+        }
     }
     cv_.notify_all();
 }
@@ -124,7 +151,17 @@ bool ChannelBusyDetector::waitUntilIdle(std::chrono::milliseconds guard) {
 bool ChannelBusyDetector::waitUntilIdle(std::chrono::milliseconds guard,
                                         std::chrono::milliseconds max_wait) {
     std::unique_lock<std::mutex> lock(mutex_);
-    const TimePoint deadline = Clock::now() + max_wait;
+    const TimePoint start = Clock::now();
+    const TimePoint deadline = start + max_wait;
+    const bool debug = csDebugEnabled();
+    const bool was_idle = idleForLocked(start, guard);
+
+    if (debug && !was_idle) {
+        LOG_MODEM(WARN, "CS wait_until_idle: blocking guard=%dms max_wait=%dms rms=%.4f",
+                  static_cast<int>(guard.count()),
+                  static_cast<int>(max_wait.count()),
+                  current_rms_);
+    }
 
     while (!idleForLocked(Clock::now(), guard)) {
         const TimePoint ready_at = idleReadyAtLocked(guard);
@@ -134,10 +171,22 @@ bool ChannelBusyDetector::waitUntilIdle(std::chrono::milliseconds guard,
 
         if (cv_.wait_until(lock, wait_until) == std::cv_status::timeout &&
             Clock::now() >= deadline) {
-            return idleForLocked(Clock::now(), guard);
+            const bool final_idle = idleForLocked(Clock::now(), guard);
+            if (debug) {
+                const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    Clock::now() - start).count();
+                LOG_MODEM(WARN, "CS wait_until_idle: timeout after %dms (idle=%d)",
+                          static_cast<int>(elapsed), final_idle ? 1 : 0);
+            }
+            return final_idle;
         }
     }
 
+    if (debug && !was_idle) {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            Clock::now() - start).count();
+        LOG_MODEM(WARN, "CS wait_until_idle: released after %dms", static_cast<int>(elapsed));
+    }
     return true;
 }
 
