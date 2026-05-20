@@ -24,7 +24,7 @@ void observe(ChannelBusyDetector& detector,
              float rms,
              int ms,
              bool local_tx = false) {
-    static const Clock::time_point base = Clock::now();
+    static const Clock::time_point base = Clock::now() - std::chrono::seconds(10);
     detector.observeRms(rms, local_tx, base + std::chrono::milliseconds(ms));
 }
 
@@ -83,6 +83,27 @@ void testLocalTxBlackoutIsBusyRegardlessOfRms() {
     assert(detector.isIdle());
 }
 
+void testAdaptiveNoiseFloorTreatsAwgnFloorAsIdle() {
+    ChannelBusyDetectorConfig config = testConfig();
+    config.min_noise_floor_observations = 5;
+    ChannelBusyDetector detector(config);
+
+    for (int i = 0; i < 10; ++i) {
+        observe(detector, 0.090f, i * 10);
+    }
+    assert(detector.isIdle());
+
+    observe(detector, 0.360f, 200);
+    observe(detector, 0.360f, 210);
+    observe(detector, 0.360f, 220);
+    assert(!detector.isIdle());
+
+    for (int i = 0; i < 5; ++i) {
+        observe(detector, 0.090f, 300 + i * 10);
+    }
+    assert(detector.isIdle());
+}
+
 void testWaitUntilIdleTimeoutAndGuard() {
     ChannelBusyDetector detector(testConfig());
     observe(detector, 0.050f, 0);
@@ -108,6 +129,7 @@ int main() {
     testBusyThenQuietHold();
     testMovingWindowAbsorbsShortDropout();
     testLocalTxBlackoutIsBusyRegardlessOfRms();
+    testAdaptiveNoiseFloorTreatsAwgnFloorAsIdle();
     testWaitUntilIdleTimeoutAndGuard();
 
     std::cout << "ChannelBusyDetector tests passed\n";

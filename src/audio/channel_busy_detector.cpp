@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <limits>
+#include <vector>
 
 namespace ultra::audio {
 
@@ -30,6 +32,7 @@ ChannelBusyDetector::ChannelBusyDetector(ChannelBusyDetectorConfig config)
 void ChannelBusyDetector::reset(TimePoint now) {
     std::lock_guard<std::mutex> lock(mutex_);
     rms_window_.clear();
+    noise_floor_window_.clear();
     rms_window_sum_ = 0.0;
     current_rms_ = 0.0f;
     const auto initial_quiet_age =
@@ -64,13 +67,15 @@ void ChannelBusyDetector::observeRms(float rms,
 
     rms_window_.emplace_back(now, current_rms_);
     rms_window_sum_ += current_rms_;
+    noise_floor_window_.emplace_back(now, current_rms_);
     pruneWindowLocked(now);
+    pruneNoiseFloorLocked(now);
 
     const float window_rms = rms_window_.empty()
         ? current_rms_
         : static_cast<float>(rms_window_sum_ / static_cast<double>(rms_window_.size()));
 
-    if (window_rms > config_.quiet_rms_threshold) {
+    if (window_rms > quietThresholdLocked()) {
         last_busy_at_ = now;
         quiet_since_ = TimePoint{};
         cv_.notify_all();
@@ -167,6 +172,40 @@ void ChannelBusyDetector::pruneWindowLocked(TimePoint now) {
     if (rms_window_.empty()) {
         rms_window_sum_ = 0.0;
     }
+}
+
+void ChannelBusyDetector::pruneNoiseFloorLocked(TimePoint now) {
+    const auto window =
+        std::chrono::milliseconds(std::max<uint32_t>(1, config_.noise_floor_window_ms));
+    while (!noise_floor_window_.empty() && now - noise_floor_window_.front().first > window) {
+        noise_floor_window_.pop_front();
+    }
+}
+
+float ChannelBusyDetector::quietThresholdLocked() const {
+    float threshold = std::max(0.0f, config_.quiet_rms_threshold);
+    if (!config_.adaptive_noise_floor ||
+        noise_floor_window_.size() < config_.min_noise_floor_observations) {
+        return threshold;
+    }
+
+    std::vector<float> values;
+    values.reserve(noise_floor_window_.size());
+    for (const auto& entry : noise_floor_window_) {
+        values.push_back(entry.second);
+    }
+
+    const float percentile = std::clamp(config_.noise_floor_percentile, 0.0f, 1.0f);
+    const size_t index = std::min(
+        values.size() - 1,
+        static_cast<size_t>(percentile * static_cast<float>(values.size() - 1)));
+    std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(index),
+                     values.end());
+
+    const float noise_floor = std::max(0.0f, values[index]);
+    const float adaptive_threshold =
+        noise_floor * std::max(1.0f, config_.quiet_noise_multiplier);
+    return std::max(threshold, adaptive_threshold);
 }
 
 }  // namespace ultra::audio

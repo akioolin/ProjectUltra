@@ -14,6 +14,11 @@ struct ChannelBusyDetectorConfig {
     float quiet_rms_threshold = 0.005f;
     uint32_t quiet_hold_ms = 30;
     uint32_t rms_window_ms = 30;
+    bool adaptive_noise_floor = true;
+    uint32_t noise_floor_window_ms = 5000;
+    uint32_t min_noise_floor_observations = 10;
+    float noise_floor_percentile = 0.10f;
+    float quiet_noise_multiplier = 3.0f;
     uint32_t max_wait_for_idle_ms = 15000;
 };
 
@@ -50,12 +55,15 @@ private:
     std::chrono::milliseconds requiredQuietDuration(std::chrono::milliseconds guard) const;
     TimePoint idleReadyAtLocked(std::chrono::milliseconds guard) const;
     void pruneWindowLocked(TimePoint now);
+    void pruneNoiseFloorLocked(TimePoint now);
+    float quietThresholdLocked() const;
 
     ChannelBusyDetectorConfig config_;
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::deque<std::pair<TimePoint, float>> rms_window_;
+    std::deque<std::pair<TimePoint, float>> noise_floor_window_;
     double rms_window_sum_ = 0.0;
     float current_rms_ = 0.0f;
     TimePoint last_busy_at_{};
