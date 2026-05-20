@@ -1690,6 +1690,11 @@ private:
         return label.find("frame_type=CONNECT") != std::string::npos;
     }
 
+    static bool isDeferredArqAck(const std::string& label) {
+        return label.find("frame_type=ACK ") != std::string::npos &&
+               label.find(" seq=65535") == std::string::npos;
+    }
+
     void queueTxFrame(const Bytes& frame, const std::string& label) {
         TxSubmission submission;
         submission.kind = TxSubmission::Kind::Frame;
@@ -1879,6 +1884,7 @@ private:
                            bool require_fresh_rx_observation = false) {
         bool rejected = false;
         size_t depth = 0;
+        size_t coalesced_acks = 0;
         uint64_t event = 0;
         const size_t size_hint = txSubmissionSizeHint(submission);
         const std::string label = submission.label;
@@ -1887,6 +1893,17 @@ private:
             (require_fresh_rx_observation ? 1ULL : 0ULL);
         {
             std::lock_guard<std::mutex> lock(deferred_tx_mutex_);
+            if (isDeferredArqAck(label)) {
+                for (auto it = deferred_tx_submissions_.begin();
+                     it != deferred_tx_submissions_.end();) {
+                    if (isDeferredArqAck(it->label)) {
+                        it = deferred_tx_submissions_.erase(it);
+                        coalesced_acks++;
+                    } else {
+                        ++it;
+                    }
+                }
+            }
             if (deferred_tx_submissions_.size() >= kMaxDeferredTxSubmissions) {
                 rejected = true;
                 event = ++rejected_tx_count_;
@@ -1896,6 +1913,14 @@ private:
                 depth = deferred_tx_submissions_.size();
                 event = ++deferred_tx_count_;
             }
+        }
+
+        if (coalesced_acks > 0) {
+            LOG_MODEM(INFO,
+                      "[%s] Coalesced %zu stale deferred ACK/SACK submission(s) before %s",
+                      callsign_.c_str(),
+                      coalesced_acks,
+                      label.empty() ? "-" : label.c_str());
         }
 
         if (rejected) {
