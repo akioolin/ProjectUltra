@@ -25,6 +25,13 @@ add_executable(test_watterson_channel test_watterson_channel.cpp)
 target_link_libraries(test_watterson_channel PRIVATE ota_channel_core)
 add_test(NAME WattersonChannel COMMAND test_watterson_channel)
 
+add_executable(test_watterson_proof test_watterson_proof.cpp)
+target_link_libraries(test_watterson_proof PRIVATE ota_channel_core)
+target_include_directories(test_watterson_proof PRIVATE
+    ${CMAKE_SOURCE_DIR}/thirdparty/pocketfft)
+add_test(NAME WattersonProof COMMAND test_watterson_proof)
+set_tests_properties(WattersonProof PROPERTIES TIMEOUT 60)
+
 add_executable(test_real_hf_loop_channel test_real_hf_loop_channel.cpp)
 target_link_libraries(test_real_hf_loop_channel PRIVATE ota_channel_core)
 add_test(NAME RealHfLoopChannel COMMAND test_real_hf_loop_channel)
