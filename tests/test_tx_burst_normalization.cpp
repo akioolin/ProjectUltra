@@ -8,6 +8,7 @@
 #include "psk/multi_carrier_dpsk.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
+#include "ultra/papr_reduction.hpp"
 #include "ultra/tx_burst_normalization.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
 
@@ -104,28 +105,59 @@ std::vector<uint8_t> fixedDataFrame(ultra::CodeRate rate,
     return frame.serialize();
 }
 
-std::vector<float> connectedData(ultra::CodeRate rate, int cw_count) {
+std::vector<float> connectedData(ultra::CodeRate rate,
+                                 int cw_count,
+                                 bool papr_reduction = true) {
     gui::ModemEngine engine;
+    engine.setPaprReductionEnabled(papr_reduction);
     configureConnectedEngine(engine, rate, cw_count);
     (void)engine.transmit(fixedDataFrame(rate, cw_count, 1, 0x1111u));
     return engine.transmit(fixedDataFrame(rate, cw_count, 2, 0x2222u));
 }
 
-std::vector<float> connectedAck(ultra::CodeRate session_rate, int cw_count) {
+std::vector<float> connectedBurstData(ultra::CodeRate rate,
+                                      int cw_count,
+                                      int frame_count,
+                                      bool papr_reduction = true) {
     gui::ModemEngine engine;
+    engine.setPaprReductionEnabled(papr_reduction);
+    configureConnectedEngine(engine, rate, cw_count);
+    std::vector<ultra::Bytes> frames;
+    frames.reserve(static_cast<size_t>(frame_count));
+    for (int i = 0; i < frame_count; ++i) {
+        frames.push_back(fixedDataFrame(rate, cw_count,
+                                        static_cast<uint16_t>(i + 1),
+                                        0x4400u + static_cast<uint32_t>(i)));
+    }
+    return engine.transmitBurst(frames);
+}
+
+std::vector<float> connectedAck(ultra::CodeRate session_rate,
+                                int cw_count,
+                                bool papr_reduction = true) {
+    gui::ModemEngine engine;
+    engine.setPaprReductionEnabled(papr_reduction);
     configureConnectedEngine(engine, session_rate, cw_count);
     (void)engine.transmit(fixedDataFrame(session_rate, cw_count, 1, 0x3333u));
     const auto ack = v2::ControlFrame::makeAck("BRAVO", "ALPHA", 1);
     return engine.transmit(ack.serialize());
 }
 
-std::vector<float> modemPing() {
+std::vector<float> modemPing(bool papr_reduction = true) {
     gui::ModemEngine engine;
+    engine.setPaprReductionEnabled(papr_reduction);
     return engine.transmitPing();
 }
 
-std::vector<float> connectFrame() {
+std::vector<float> modemPong(bool papr_reduction = true) {
     gui::ModemEngine engine;
+    engine.setPaprReductionEnabled(papr_reduction);
+    return engine.transmitPong();
+}
+
+std::vector<float> connectFrame(bool papr_reduction = true) {
+    gui::ModemEngine engine;
+    engine.setPaprReductionEnabled(papr_reduction);
     const auto frame = v2::ConnectFrame::makeConnect(
         "ALPHA", "BRAVO",
         protocol::ModeCapabilities::ALL | protocol::ModeCapabilities::PHY_MASK_V1,
@@ -136,8 +168,9 @@ std::vector<float> connectFrame() {
     return engine.transmit(frame.serialize());
 }
 
-std::vector<float> connectAckFrame() {
+std::vector<float> connectAckFrame(bool papr_reduction = true) {
     gui::ModemEngine engine;
+    engine.setPaprReductionEnabled(papr_reduction);
     const auto frame = v2::ConnectFrame::makeConnectAck(
         "BRAVO", "ALPHA",
         static_cast<uint8_t>(protocol::WaveformMode::OFDM_CHIRP),
@@ -158,15 +191,18 @@ std::vector<PathSpec> operationalPaths() {
         protocol::connection_policy::recommendCWCount(ultra::CodeRate::R1_2, ofdm);
 
     return {
-        {"PING-limited handshake", 76416, 66815, -2.052, modemPing},
-        {"OFDM data R1/4 light cw4", 39840, 30240, -3.352,
+        {"PING-limited handshake", 76416, 66815, -2.052,
+         [] { return modemPing(); }},
+        {"OFDM data R1/4 light cw4", 39840, 30240, -0.720,
          [=] { return connectedData(ultra::CodeRate::R1_4, r14_cw); }},
-        {"OFDM data R1/2 light cw8", 66720, 57120, -5.187,
+        {"OFDM data R1/2 light cw8", 66720, 57120, -2.519,
          [=] { return connectedData(ultra::CodeRate::R1_2, r12_cw); }},
         {"OFDM ACK light R1/4 hardened", 19680, 10080, -5.097,
          [=] { return connectedAck(ultra::CodeRate::R1_2, r12_cw); }},
-        {"CONNECT MC-DPSK control", 325248, 315647, -3.484, connectFrame},
-        {"CONNECT_ACK MC-DPSK control", 325248, 315647, -3.494, connectAckFrame},
+        {"CONNECT MC-DPSK control", 325248, 315647, -3.484,
+         [] { return connectFrame(); }},
+        {"CONNECT_ACK MC-DPSK control", 325248, 315647, -3.494,
+         [] { return connectAckFrame(); }},
     };
 }
 
@@ -515,6 +551,92 @@ void runBurstBoundaryInvariant(const std::vector<PathResult>& path_results) {
           "480-sample callback fragment must trip fragment guard");
 }
 
+struct PaprPathSpec {
+    std::string label;
+    bool expect_reduction = false;
+    std::function<std::vector<float>(bool)> build;
+};
+
+std::vector<PaprPathSpec> paprOperationalPaths() {
+    constexpr auto ofdm = protocol::WaveformMode::OFDM_CHIRP;
+    const int r14_cw =
+        protocol::connection_policy::recommendCWCount(ultra::CodeRate::R1_4, ofdm);
+    const int r12_cw =
+        protocol::connection_policy::recommendCWCount(ultra::CodeRate::R1_2, ofdm);
+
+    return {
+        {"PING", false, [](bool enabled) { return modemPing(enabled); }},
+        {"PONG", false, [](bool enabled) { return modemPong(enabled); }},
+        {"CONNECT", false, [](bool enabled) { return connectFrame(enabled); }},
+        {"OFDM data R1/4", true,
+         [=](bool enabled) {
+             return connectedData(ultra::CodeRate::R1_4, r14_cw, enabled);
+         }},
+        {"OFDM data R1/2", true,
+         [=](bool enabled) {
+             return connectedData(ultra::CodeRate::R1_2, r12_cw, enabled);
+         }},
+        {"OFDM burst R1/4 x8", true,
+         [=](bool enabled) {
+             return connectedBurstData(ultra::CodeRate::R1_4, r14_cw, 8, enabled);
+         }},
+        {"ACK", false,
+         [=](bool enabled) {
+             return connectedAck(ultra::CodeRate::R1_2, r12_cw, enabled);
+         }},
+    };
+}
+
+void runPaprOperationalTable(bool proof_mode) {
+    struct Row {
+        std::string label;
+        bool expect_reduction = false;
+        float papr_off = 0.0f;
+        float papr_on = 0.0f;
+        float rms_delta_db = 0.0f;
+    };
+
+    std::vector<Row> rows;
+    for (const auto& spec : paprOperationalPaths()) {
+        const std::vector<float> off = spec.build(false);
+        const std::vector<float> on = spec.build(true);
+        const auto off_rms = sim::measureTxBurstInBandRms(off);
+        const auto on_rms = sim::measureTxBurstInBandRms(on);
+        Row row;
+        row.label = spec.label;
+        row.expect_reduction = spec.expect_reduction;
+        row.papr_off = ultra::phy::measurePaprDb(off);
+        row.papr_on = ultra::phy::measurePaprDb(on);
+        row.rms_delta_db = dbRmsRatio(on_rms.in_band_rms, off_rms.in_band_rms);
+        rows.push_back(row);
+
+        if (spec.expect_reduction) {
+            CHECK(row.papr_off >= 9.0f,
+                  spec.label + ": PAPR-off path should preserve high-PAPR OFDM");
+            CHECK(row.papr_off - row.papr_on >= 1.5f,
+                  spec.label + ": PAPR reduction should remove measurable crest factor");
+            CHECK(row.rms_delta_db >= -0.7f,
+                  spec.label + ": PAPR reduction should not lose more than 0.7 dB RMS");
+        } else {
+            CHECK(std::abs(row.papr_on - row.papr_off) <= 0.02f,
+                  spec.label + ": non-OFDM-data path should be unchanged");
+        }
+    }
+
+    if (proof_mode) {
+        std::cout << "\nPAPR operational burst table\n";
+        std::cout << "path,papr_off_db,papr_on_db,delta_db,in_band_rms_delta_db\n";
+        std::cout << std::fixed << std::setprecision(6);
+        for (const auto& row : rows) {
+            std::cout << row.label << ","
+                      << row.papr_off << ","
+                      << row.papr_on << ","
+                      << (row.papr_on - row.papr_off) << ","
+                      << row.rms_delta_db << "\n";
+        }
+    }
+}
+
 void runProbeTables(const std::vector<PathResult>& path_results) {
     const PathSpec& snr_path = path_results[1].spec;
     const std::vector<float> snrs = {0.0f, 5.0f, 10.0f, 15.0f, 20.0f};
@@ -617,6 +739,7 @@ int main(int argc, char** argv) {
     }
 
     const bool proof_mode = argc > 1 && std::string(argv[1]) == "--proof";
+    runPaprOperationalTable(proof_mode);
     if (proof_mode && !path_results.empty()) {
         runProbeTables(path_results);
     }

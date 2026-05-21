@@ -264,6 +264,17 @@ void test_applyConfigKey_tx_drive_clamped() {
     pass("applyConfigKey: tx_drive hardware peak target parsed and clamped");
 }
 
+void test_applyConfigKey_papr_reduction() {
+    Config cfg;
+    CHECK(cfg.papr_reduction, "papr reduction defaults on");
+    CHECK(applyConfigKey("papr_reduction", "off", cfg), "papr_reduction off ok");
+    CHECK(!cfg.papr_reduction, "papr reduction disabled");
+    CHECK(applyConfigKey("papr-reduction", "on", cfg), "papr-reduction on ok");
+    CHECK(cfg.papr_reduction, "papr reduction enabled");
+    CHECK(!applyConfigKey("papr_reduction", "maybe", cfg), "bad papr value rejected");
+    pass("applyConfigKey: papr_reduction parses on/off");
+}
+
 void test_applyConfigKey_ptt_baud_strict() {
     Config cfg;
     CHECK(applyConfigKey("ptt_serial_baud", "9600", cfg) && cfg.ptt_serial_baud == 9600,
@@ -534,6 +545,14 @@ void test_parseArgs_tx_drive_flag() {
     pass("parseArgs: --tx-drive stored");
 }
 
+void test_parseArgs_papr_reduction_flag() {
+    Argv argv({"ultra_tnc", "--papr-reduction", "off"});
+    Config cfg;
+    CHECK(parseArgs(argv.argc(), argv.data(), cfg), "parse ok");
+    CHECK(!cfg.papr_reduction, "papr reduction flag stored");
+    pass("parseArgs: --papr-reduction stored");
+}
+
 void test_parseArgs_sim_audio_flags() {
     Argv argv({"ultra_tnc", "--sim-audio",
                "--ota-host", "127.0.0.1:47000",
@@ -629,6 +648,7 @@ int main() {
     test_applyConfigKey_callsign_sanitized();
     test_applyConfigKey_inject_channel_modes();
     test_applyConfigKey_tx_drive_clamped();
+    test_applyConfigKey_papr_reduction();
     test_applyConfigKey_ptt_baud_strict();
     test_applyConfigKey_ptt_inactive_high_strict();
     test_applyConfigKey_ptt_serial_line();
@@ -658,6 +678,7 @@ int main() {
     test_parseArgs_ptt_cat_serial_mutual_exclusion_from_config();
     test_parseArgs_log_flags();
     test_parseArgs_tx_drive_flag();
+    test_parseArgs_papr_reduction_flag();
     test_parseArgs_sim_audio_flags();
     test_parseArgs_sim_audio_requires_identity();
     test_parseArgs_mod_qam16_requires_expert();
