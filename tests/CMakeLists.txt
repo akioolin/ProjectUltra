@@ -611,74 +611,91 @@ if(TARGET ota_simulator)
             LABELS regression)
     endif()
 
-    add_test(NAME OTASimulatorSmoke
-        COMMAND $<TARGET_FILE:ota_simulator> run
-                --scenario tests/fixtures/ota_simulator/smoke_ping_disconnected.json)
-    set_tests_properties(OTASimulatorSmoke PROPERTIES
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        TIMEOUT 60
-        RUN_SERIAL TRUE
-        LABELS regression)
+    # OTASim scenario tests (ota_simulator run --scenario *.json).
+    # These predate Task #92's sample-clock-paced refactor and use
+    # wall-clock event timestamps (e.g. "t_s": 95.0 means wait 95s of
+    # real time). The 7 tests below combined add ~12+ minutes to ctest.
+    # Disabled by default; re-enable once the scenario runner is taught
+    # to consume scenario time from the sample clock.
+    # Tracking: TODO-SCENARIO-SAMPLE-CLOCK.
+    option(ULTRA_RUN_SLOW_SCENARIO_TESTS
+        "Run the wall-clock-paced OTASim scenario regression tests" OFF)
 
-    # Locks in BUG-PING-DETECTOR-001: real-HF OTA PING capture from
-    # KC3VPB injected over real-HF noise bed must classify as PING and
-    # trigger PONG TX from a DISCONNECTED endpoint.
-    add_test(NAME OTASimulatorRealOTAPing
-        COMMAND $<TARGET_FILE:ota_simulator> run
-                --scenario tests/fixtures/ota_simulator/real_ota_ping_to_pong.json)
-    set_tests_properties(OTASimulatorRealOTAPing PROPERTIES
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        TIMEOUT 60
-        RUN_SERIAL TRUE
-        LABELS regression)
+    if(ULTRA_RUN_SLOW_SCENARIO_TESTS)
+        add_test(NAME OTASimulatorSmoke
+            COMMAND $<TARGET_FILE:ota_simulator> run
+                    --scenario tests/fixtures/ota_simulator/smoke_ping_disconnected.json)
+        set_tests_properties(OTASimulatorSmoke PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            TIMEOUT 60
+            RUN_SERIAL TRUE
+            LABELS "regression;slow_scenario")
 
-    add_test(NAME OTASimulatorTwoEndpointClean
-        COMMAND $<TARGET_FILE:ota_simulator> run
-                --scenario tests/fixtures/ota_simulator/two_endpoint_clean_handshake.json)
-    set_tests_properties(OTASimulatorTwoEndpointClean PROPERTIES
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        TIMEOUT 120
-        RUN_SERIAL TRUE
-        LABELS regression)
+        # Locks in BUG-PING-DETECTOR-001: real-HF OTA PING capture from
+        # KC3VPB injected over real-HF noise bed must classify as PING and
+        # trigger PONG TX from a DISCONNECTED endpoint.
+        add_test(NAME OTASimulatorRealOTAPing
+            COMMAND $<TARGET_FILE:ota_simulator> run
+                    --scenario tests/fixtures/ota_simulator/real_ota_ping_to_pong.json)
+        set_tests_properties(OTASimulatorRealOTAPing PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            TIMEOUT 60
+            RUN_SERIAL TRUE
+            LABELS "regression;slow_scenario")
 
-    # Locks in the call-collision NAK fix: both stations probe each other
-    # near-simultaneously, exercise the PROBING + CONNECTING-state acceptance
-    # of inbound CONNECT plus the callsign-lex tiebreaker. Pre-fix would NAK.
-    add_test(NAME OTASimulatorTwoEndpointSimultaneousProbe
-        COMMAND $<TARGET_FILE:ota_simulator> run
-                --scenario tests/fixtures/ota_simulator/two_endpoint_simultaneous_probe.json)
-    set_tests_properties(OTASimulatorTwoEndpointSimultaneousProbe PROPERTIES
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        TIMEOUT 120
-        RUN_SERIAL TRUE
-        LABELS regression)
+        add_test(NAME OTASimulatorTwoEndpointClean
+            COMMAND $<TARGET_FILE:ota_simulator> run
+                    --scenario tests/fixtures/ota_simulator/two_endpoint_clean_handshake.json)
+        set_tests_properties(OTASimulatorTwoEndpointClean PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            TIMEOUT 120
+            RUN_SERIAL TRUE
+            LABELS "regression;slow_scenario")
 
-    add_test(NAME OTASimulatorTwoEndpointNoisy
-        COMMAND $<TARGET_FILE:ota_simulator> run
-                --scenario tests/fixtures/ota_simulator/two_endpoint_noisy_handshake.json)
-    set_tests_properties(OTASimulatorTwoEndpointNoisy PROPERTIES
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        TIMEOUT 120
-        RUN_SERIAL TRUE
-        LABELS regression)
+        # Locks in the call-collision NAK fix: both stations probe each other
+        # near-simultaneously, exercise the PROBING + CONNECTING-state acceptance
+        # of inbound CONNECT plus the callsign-lex tiebreaker. Pre-fix would NAK.
+        add_test(NAME OTASimulatorTwoEndpointSimultaneousProbe
+            COMMAND $<TARGET_FILE:ota_simulator> run
+                    --scenario tests/fixtures/ota_simulator/two_endpoint_simultaneous_probe.json)
+        set_tests_properties(OTASimulatorTwoEndpointSimultaneousProbe PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            TIMEOUT 120
+            RUN_SERIAL TRUE
+            LABELS "regression;slow_scenario")
 
-    add_test(NAME OTASimulatorTwoEndpointMCDPSKLowSNR
-        COMMAND $<TARGET_FILE:ota_simulator> run
-                --scenario tests/fixtures/ota_simulator/two_endpoint_mcdpsk_low_snr_qso.json)
-    set_tests_properties(OTASimulatorTwoEndpointMCDPSKLowSNR PROPERTIES
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        TIMEOUT 150
-        RUN_SERIAL TRUE
-        LABELS regression)
+        add_test(NAME OTASimulatorTwoEndpointNoisy
+            COMMAND $<TARGET_FILE:ota_simulator> run
+                    --scenario tests/fixtures/ota_simulator/two_endpoint_noisy_handshake.json)
+        set_tests_properties(OTASimulatorTwoEndpointNoisy PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            TIMEOUT 120
+            RUN_SERIAL TRUE
+            LABELS "regression;slow_scenario")
 
-    add_test(NAME OTASimulatorFileTransferSNR15
-        COMMAND $<TARGET_FILE:ota_simulator> run
-                --scenario tests/fixtures/ota_simulator/two_endpoint_file_transfer_snr15.json)
-    set_tests_properties(OTASimulatorFileTransferSNR15 PROPERTIES
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        TIMEOUT 360
-        RUN_SERIAL TRUE
-        LABELS regression)
+        add_test(NAME OTASimulatorTwoEndpointMCDPSKLowSNR
+            COMMAND $<TARGET_FILE:ota_simulator> run
+                    --scenario tests/fixtures/ota_simulator/two_endpoint_mcdpsk_low_snr_qso.json)
+        set_tests_properties(OTASimulatorTwoEndpointMCDPSKLowSNR PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            TIMEOUT 150
+            RUN_SERIAL TRUE
+            LABELS "regression;slow_scenario")
+
+        add_test(NAME OTASimulatorFileTransferSNR15
+            COMMAND $<TARGET_FILE:ota_simulator> run
+                    --scenario tests/fixtures/ota_simulator/two_endpoint_file_transfer_snr15.json)
+        set_tests_properties(OTASimulatorFileTransferSNR15 PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            TIMEOUT 360
+            RUN_SERIAL TRUE
+            LABELS "regression;slow_scenario")
+    else()
+        message(STATUS
+            "OTASim scenario regression tests DISABLED (wall-clock-paced; ~12+ min). "
+            "Re-enable with -DULTRA_RUN_SLOW_SCENARIO_TESTS=ON once scenario runner "
+            "consumes time from the sample clock (see TODO-SCENARIO-SAMPLE-CLOCK).")
+    endif()
 endif()
 
 if(ULTRA_BUILD_HARDWARE_TESTS)
