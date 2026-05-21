@@ -73,7 +73,7 @@ WattersonChannel::Config diagnosticConfig(uint32_t sample_rate,
 struct FadingSeries {
     std::vector<Complex> h1;
     std::vector<Complex> h2;
-    double alpha = 0.0;
+    double sigma_hz = 0.0;
 };
 
 FadingSeries sampleFading(uint32_t sample_rate,
@@ -87,7 +87,7 @@ FadingSeries sampleFading(uint32_t sample_rate,
     FadingSeries series;
     series.h1.reserve(count);
     series.h2.reserve(count);
-    series.alpha = channel.fadingAlphaForDiagnostics();
+    series.sigma_hz = channel.fadingSigmaHzForDiagnostics();
 
     for (size_t i = 0; i < warmup + count; ++i) {
         channel.stepFadingForDiagnostics();
@@ -142,9 +142,9 @@ void checkMoment(const std::vector<Complex>& values,
     require(std::abs(mean_i) < 0.05 * sigma, "tap I mean near zero");
     require(std::abs(mean_q) < 0.05 * sigma, "tap Q mean near zero");
     require(std::abs(var_i - expected_variance) / expected_variance < 0.05,
-            "tap I variance matches CN(0,1) AR(1) moment");
+            "tap I variance matches CN(0,1) Gaussian-Doppler moment");
     require(std::abs(var_q - expected_variance) / expected_variance < 0.05,
-            "tap Q variance matches CN(0,1) AR(1) moment");
+            "tap Q variance matches CN(0,1) Gaussian-Doppler moment");
 }
 
 void checkRayleighMomentsAndAutocorrelation() {
@@ -155,7 +155,7 @@ void checkRayleighMomentsAndAutocorrelation() {
     const FadingSeries series =
         sampleFading(sample_rate, doppler_hz, warmup, count);
 
-    const double expected_variance = 1.0 / (2.0 - series.alpha);
+    const double expected_variance = 0.5;
     checkMoment(series.h1, "h1", expected_variance);
     checkMoment(series.h2, "h2", expected_variance);
 
@@ -167,17 +167,20 @@ void checkRayleighMomentsAndAutocorrelation() {
         denominator += std::norm(series.h1[i]);
     }
     const Complex normalized = numerator / denominator;
-    const double expected = std::pow(1.0 - series.alpha, static_cast<double>(lag));
+    const double tau = static_cast<double>(lag) / static_cast<double>(sample_rate);
+    const double expected =
+        std::exp(-2.0 * kPi * kPi * series.sigma_hz * series.sigma_hz *
+                 tau * tau);
 
     std::cout << "watterson_autocorrelation lag=" << lag
               << " measured_real=" << normalized.real()
               << " measured_imag=" << normalized.imag()
               << " expected=" << expected
-              << " alpha=" << series.alpha
+              << " sigma_hz=" << series.sigma_hz
               << "\n";
 
     require(std::abs(normalized.real() - expected) / expected < 0.05,
-            "complex tap autocorrelation matches AR(1)");
+            "complex tap autocorrelation matches Gaussian Doppler");
     require(std::abs(normalized.imag()) < 0.03,
             "complex tap autocorrelation has negligible quadrature bias");
 }
@@ -291,7 +294,7 @@ void checkDopplerPsd() {
     require(static_cast<double>(envelope_peak_bin) * bin_hz <=
                 static_cast<double>(doppler_hz),
             "Rayleigh envelope PSD is centered near DC");
-    require(envelope_half_power_hz > static_cast<double>(doppler_hz) &&
+    require(envelope_half_power_hz > 0.5 * static_cast<double>(doppler_hz) &&
                 envelope_half_power_hz < 3.0 * static_cast<double>(doppler_hz),
             "Rayleigh envelope PSD remains Doppler-limited");
 }

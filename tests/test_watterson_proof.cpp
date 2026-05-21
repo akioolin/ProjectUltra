@@ -5,15 +5,19 @@
 // Watterson complex-fading refactor (commit 6a7d3fd) and any future change
 // that could silently weaken the model.
 //
-// 29 checks across:
+// Checks across:
 //   PART A — per-tap statistics (E[|h|^2]=1, CN orthogonality, path independence)
-//   PART B — AR(1) autocorrelation matches Doppler-derived alpha
-//   PART C — Doppler PSD narrow + low-frequency consistent with config
+//   PART B — ITU-R F.1487 "2σ frequency spread" maps to Gaussian sigma
+//   PART C — legacy AR(1) PART C measurement diagnosis
 //   PART D — multipath delay = configured ms * sample_rate / 1000
 //   PART E — broadband noise stddev matches calibrated formula at 5 SNRs
 //   PART F — long-run (120 s) power conservation within 1 dB
 //   PART G — |H(f)| matches closed-form h1*g1 + h2*g2*exp(-j2pi*f*D)
 //   PART H — ITU-R F.1487 preset parameters (Good/Moderate/Poor)
+//   PART I — Gaussian-Doppler multi-lag autocorrelation
+//   PART J — Gaussian-Doppler PSD shape fit
+//   PART K — production Hilbert response with frozen taps
+//   PART L — per-direction fading independence
 
 #include <cstdio>
 #include <vector>
@@ -22,6 +26,7 @@
 #include <complex>
 #include <numeric>
 #include <algorithm>
+#include <limits>
 #include "ota_channel_core/models.hpp"
 #include "pocketfft_hdronly.h"
 
@@ -47,40 +52,210 @@ void checkRange(std::string name, double measured, double lo, double hi) {
     RESULTS.push_back({std::move(name), measured, (lo+hi)/2.0, (hi-lo)/2.0, pass});
 }
 
-// AR(1) settling time: ~3/alpha samples. For Good (alpha~1.3e-5): ~230k samples.
-// Use 1M warmup steps to be safe.
-constexpr size_t kAR1Warmup = 1'000'000;
-
-void partA_TapStatistics() {
-    printf("\n=== PART A: per-tap fading statistics (after AR(1) warmup) ===\n");
-
+WattersonChannel::Config fadingDiagnosticConfig(uint32_t sample_rate = 100,
+                                                float doppler_hz = 0.1f) {
     auto cfg = itu::good(100.0f);
+    cfg.sample_rate = sample_rate;
+    cfg.doppler_spread_hz = doppler_hz;
     cfg.noise_enabled = false;
     cfg.fading_enabled = true;
-    WattersonChannel chan(cfg, 12345u);
+    cfg.multipath_enabled = false;
+    cfg.cfo_enabled = false;
+    return cfg;
+}
 
-    // Warmup
-    for (size_t i = 0; i < kAR1Warmup; ++i) chan.stepFadingForDiagnostics();
+cd meanOf(const std::vector<cd>& values) {
+    cd mean(0.0, 0.0);
+    for (const cd& value : values) {
+        mean += value;
+    }
+    return values.empty() ? mean : mean / static_cast<double>(values.size());
+}
 
-    // Measure 2M samples = 4.2 sec at 48 kHz = 0.42 Doppler cycles.
-    // That's still few cycles for an ergodic mean. Use 6M samples = 12.5s = 1.25 cycles.
-    constexpr size_t N = 6'000'000;
-    std::vector<cd> h1s, h2s; h1s.reserve(N); h2s.reserve(N);
-    for (size_t i = 0; i < N; ++i) {
+std::vector<cd> sampleTap(uint32_t sample_rate,
+                          float doppler_hz,
+                          uint64_t seed,
+                          size_t count,
+                          bool tap2 = false) {
+    auto cfg = fadingDiagnosticConfig(sample_rate, doppler_hz);
+    WattersonChannel chan(cfg, seed);
+    std::vector<cd> samples;
+    samples.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
         chan.stepFadingForDiagnostics();
-        auto t1 = chan.fadingTap1ForDiagnostics();
-        auto t2 = chan.fadingTap2ForDiagnostics();
-        h1s.emplace_back(t1.real(), t1.imag());
-        h2s.emplace_back(t2.real(), t2.imag());
+        const auto tap = tap2 ? chan.fadingTap2ForDiagnostics()
+                              : chan.fadingTap1ForDiagnostics();
+        samples.emplace_back(tap.real(), tap.imag());
+    }
+    return samples;
+}
+
+cd normalizedAutocorrelation(const std::vector<cd>& samples, size_t lag) {
+    const cd mean = meanOf(samples);
+    cd numerator(0.0, 0.0);
+    double denominator = 0.0;
+    for (size_t i = 0; i + lag < samples.size(); ++i) {
+        const cd a = samples[i] - mean;
+        const cd b = samples[i + lag] - mean;
+        numerator += b * std::conj(a);
+        denominator += std::norm(a);
+    }
+    return denominator > 0.0 ? numerator / denominator : cd(0.0, 0.0);
+}
+
+struct GaussianPsdFit {
+    double fitted_sigma_hz = 0.0;
+    double shape_rms_fraction = 0.0;
+    double peak_hz = 0.0;
+};
+
+GaussianPsdFit fitGaussianDopplerPsd(const std::vector<std::vector<cd>>& series,
+                                     double sample_rate,
+                                     size_t segment_size,
+                                     double max_fit_hz) {
+    const size_t max_bin = static_cast<size_t>(
+        std::floor(max_fit_hz * static_cast<double>(segment_size) / sample_rate));
+    std::vector<double> psd(max_bin + 1, 0.0);
+    size_t averaged_segments = 0;
+
+    std::vector<cd> windowed(segment_size);
+    std::vector<cd> spectrum(segment_size);
+    const pocketfft::shape_t shape{segment_size};
+    const pocketfft::stride_t stride{static_cast<ptrdiff_t>(sizeof(cd))};
+    const pocketfft::shape_t axes{0};
+
+    std::vector<double> window(segment_size);
+    double window_power = 0.0;
+    for (size_t n = 0; n < segment_size; ++n) {
+        window[n] = 0.5 - 0.5 * std::cos(2.0 * kPi *
+                                         static_cast<double>(n) /
+                                         static_cast<double>(segment_size - 1));
+        window_power += window[n] * window[n];
     }
 
+    for (const auto& samples : series) {
+        const size_t segments = samples.size() / segment_size;
+        const cd global_mean = meanOf(samples);
+        for (size_t segment = 0; segment < segments; ++segment) {
+            const size_t offset = segment * segment_size;
+            for (size_t n = 0; n < segment_size; ++n) {
+                windowed[n] = (samples[offset + n] - global_mean) * window[n];
+            }
+            pocketfft::c2c<double>(shape, stride, stride, axes,
+                                   pocketfft::FORWARD,
+                                   windowed.data(), spectrum.data(), 1.0);
+            psd[0] += std::norm(spectrum[0]) / window_power;
+            for (size_t k = 1; k <= max_bin; ++k) {
+                psd[k] += (std::norm(spectrum[k]) +
+                           std::norm(spectrum[segment_size - k])) /
+                          (2.0 * window_power);
+            }
+            ++averaged_segments;
+        }
+    }
+
+    if (averaged_segments == 0) {
+        return {};
+    }
+    for (double& value : psd) {
+        value /= static_cast<double>(averaged_segments);
+    }
+
+    std::vector<double> smooth(psd.size(), 0.0);
+    for (size_t k = 0; k < psd.size(); ++k) {
+        const size_t lo = k > 2 ? k - 2 : 0;
+        const size_t hi = std::min(psd.size() - 1, k + 2);
+        double sum = 0.0;
+        for (size_t j = lo; j <= hi; ++j) {
+            sum += psd[j];
+        }
+        smooth[k] = sum / static_cast<double>(hi - lo + 1);
+    }
+
+    size_t peak_bin = 1;
+    for (size_t k = 1; k < smooth.size(); ++k) {
+        if (smooth[k] > smooth[peak_bin]) {
+            peak_bin = k;
+        }
+    }
+    const double bin_hz = sample_rate / static_cast<double>(segment_size);
+    const double peak = smooth[peak_bin];
+
+    double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+    size_t fit_count = 0;
+    for (size_t k = 1; k < smooth.size(); ++k) {
+        if (smooth[k] <= std::max(peak * 1.0e-4,
+                                  std::numeric_limits<double>::min())) {
+            continue;
+        }
+        const double f = static_cast<double>(k) * bin_hz;
+        const double x = f * f;
+        const double y = std::log(smooth[k]);
+        sx += x;
+        sy += y;
+        sxx += x * x;
+        sxy += x * y;
+        ++fit_count;
+    }
+
+    GaussianPsdFit fit;
+    fit.peak_hz = static_cast<double>(peak_bin) * bin_hz;
+    if (fit_count < 3) {
+        return fit;
+    }
+
+    const double n = static_cast<double>(fit_count);
+    const double slope = (n * sxy - sx * sy) / (n * sxx - sx * sx);
+    fit.fitted_sigma_hz = slope < 0.0 ? std::sqrt(-1.0 / (2.0 * slope)) : 0.0;
+
+    double amp_num = 0.0;
+    double amp_den = 0.0;
+    for (size_t k = 1; k < smooth.size(); ++k) {
+        const double f = static_cast<double>(k) * bin_hz;
+        const double model =
+            std::exp(-(f * f) / (2.0 * fit.fitted_sigma_hz * fit.fitted_sigma_hz));
+        amp_num += smooth[k] * model;
+        amp_den += model * model;
+    }
+    const double amplitude = amp_den > 0.0 ? amp_num / amp_den : 0.0;
+
+    double err_sq = 0.0;
+    size_t err_count = 0;
+    for (size_t k = 1; k < smooth.size(); ++k) {
+        const double f = static_cast<double>(k) * bin_hz;
+        const double model = amplitude *
+            std::exp(-(f * f) / (2.0 * fit.fitted_sigma_hz * fit.fitted_sigma_hz));
+        const double err = smooth[k] - model;
+        err_sq += err * err;
+        ++err_count;
+    }
+    fit.shape_rms_fraction =
+        peak > 0.0 ? std::sqrt(err_sq / static_cast<double>(err_count)) / peak : 0.0;
+    return fit;
+}
+
+void partA_TapStatistics() {
+    printf("\n=== PART A: per-tap Gaussian fading statistics ===\n");
+
+    constexpr uint32_t fs = 100;
+    constexpr float doppler_hz = 0.1f;
+    constexpr size_t per_seed_count = 200'000;  // 2000 s at 100 Hz.
+    std::vector<cd> h1s, h2s;
+    h1s.reserve(per_seed_count * 4);
+    h2s.reserve(per_seed_count * 4);
+    for (uint64_t seed : {12345u, 12346u, 12347u, 12348u}) {
+        auto h1 = sampleTap(fs, doppler_hz, seed, per_seed_count, false);
+        auto h2 = sampleTap(fs, doppler_hz, seed, per_seed_count, true);
+        h1s.insert(h1s.end(), h1.begin(), h1.end());
+        h2s.insert(h2s.end(), h2.begin(), h2.end());
+    }
+
+    const size_t N = h1s.size();
     cd m1(0,0), m2(0,0);
     for (size_t i = 0; i < N; ++i) { m1 += h1s[i]; m2 += h2s[i]; }
     m1 /= double(N); m2 /= double(N);
     double v1=0,v2=0; for (size_t i=0; i<N; ++i){ v1+=std::norm(h1s[i]); v2+=std::norm(h2s[i]); }
     v1/=N; v2/=N;
-    // Mean tolerance: with 1.25 Doppler cycles, statistical std of mean ~0.5-1.0 for unit variance,
-    // so use loose tolerance for the mean. The variance is more robust.
     check("E[|h1|^2] = 1 (unit variance, expected for CN(0,1))", v1, 1.0, 0.30);
     check("E[|h2|^2] = 1 (unit variance, expected for CN(0,1))", v2, 1.0, 0.30);
 
@@ -105,89 +280,35 @@ void partA_TapStatistics() {
 }
 
 void partB_Autocorrelation() {
-    printf("\n=== PART B: AR(1) autocorrelation matches Doppler-derived alpha ===\n");
+    printf("\n=== PART B: ITU-R 2-sigma spread mapping ===\n");
 
-    auto cfg = itu::good(100.0f);
-    cfg.noise_enabled = false; cfg.fading_enabled = true;
+    auto cfg = fadingDiagnosticConfig(100, 0.1f);
     WattersonChannel chan(cfg, 67890u);
-    for (size_t i = 0; i < kAR1Warmup; ++i) chan.stepFadingForDiagnostics();
-
-    constexpr size_t N = 2'000'000;
-    std::vector<cd> h1s; h1s.reserve(N);
-    for (size_t i = 0; i < N; ++i) {
-        chan.stepFadingForDiagnostics();
-        auto t = chan.fadingTap1ForDiagnostics();
-        h1s.emplace_back(t.real(), t.imag());
-    }
-    const double normalized_doppler = 0.1 / 48000.0;
-    const double alpha = 1.0 - std::exp(-2.0*kPi*normalized_doppler);
-    const double rho_predicted = 1.0 - alpha;
-
-    cd a01(0,0); double p0=0;
-    for (size_t i = 1; i < N; ++i) { a01 += h1s[i]*std::conj(h1s[i-1]); p0 += std::norm(h1s[i-1]); }
-    a01/=double(N-1); p0/=double(N-1);
-    double rho_measured = std::abs(a01)/p0;
-    check("AR(1) 1-step autocorrelation matches 1-alpha", rho_measured, rho_predicted, 1e-4);
-    printf("  alpha=%.4e  rho_predicted=%.10f  rho_measured=%.10f\n", alpha, rho_predicted, rho_measured);
+    const double expected_sigma = static_cast<double>(cfg.doppler_spread_hz) / 2.0;
+    check("Gaussian Doppler sigma = ITU frequency spread / 2",
+          chan.fadingSigmaHzForDiagnostics(), expected_sigma, 1.0e-6);
+    check("SoS oscillator count per tap", chan.fadingSosOscillatorCountForDiagnostics(),
+          128.0, 0.0);
+    printf("  spread=%.4f Hz  sigma=%.4f Hz  oscillators=%zu/tap\n",
+           cfg.doppler_spread_hz, chan.fadingSigmaHzForDiagnostics(),
+           chan.fadingSosOscillatorCountForDiagnostics());
 }
 
 void partC_DopplerPSD() {
-    printf("\n=== PART C: Doppler PSD shape (post-warmup) ===\n");
+    printf("\n=== PART C: legacy AR(1) PART C diagnosis ===\n");
 
-    auto cfg = itu::good(100.0f);
-    cfg.noise_enabled = false; cfg.fading_enabled = true;
-    WattersonChannel chan(cfg, 4242u);
-    for (size_t i = 0; i < kAR1Warmup; ++i) chan.stepFadingForDiagnostics();
-
-    constexpr size_t stride = 480;  // 100 Hz fading-domain rate
-    constexpr size_t fft_n = 65536;
-    const double bin_hz = (48000.0/stride)/fft_n;
-
-    std::vector<cd> h1stride; h1stride.reserve(fft_n);
-    size_t step = 0;
-    while (h1stride.size() < fft_n) {
-        chan.stepFadingForDiagnostics();
-        if (step % stride == 0) {
-            auto t = chan.fadingTap1ForDiagnostics();
-            h1stride.emplace_back(t.real(), t.imag());
-        }
-        ++step;
-    }
-    // Subtract mean (windowed estimate of DC) — the Doppler process is zero-mean in expectation,
-    // but a finite-sample mean is the dominant low-freq leak in the FFT
-    cd m(0,0); for (auto& x: h1stride) m += x; m /= double(fft_n);
-    for (auto& x: h1stride) x -= m;
-
-    std::vector<cd> H(fft_n);
-    pocketfft::shape_t shape{fft_n};
-    pocketfft::stride_t st{(ptrdiff_t)sizeof(cd)};
-    pocketfft::shape_t axes{0};
-    pocketfft::c2c<double>(shape, st, st, axes, pocketfft::FORWARD, h1stride.data(), H.data(), 1.0);
-    std::vector<double> P(fft_n);
-    for (size_t k=0;k<fft_n;++k) P[k] = std::norm(H[k]) / fft_n;
-
-    // After mean subtraction, P[0] should be near 0. Real peak is at lowest non-DC bins (slow process)
-    // Find argmax over k >= 1
-    size_t peak_k = 1;
-    for (size_t k = 1; k < fft_n/4; ++k) if (P[k] > P[peak_k]) peak_k = k;
-    double peak_hz = peak_k * bin_hz;
-    // For AR(1), spectrum is Lorentzian, peak at DC. After mean removal, peak SHOULD be in low-freq region.
-    checkRange("PSD peak (post-mean-removal) in 0-0.2 Hz region (config=0.1Hz Doppler)",
-               peak_hz, 0.0, 0.2);
-    printf("  peak bin: %zu = %.4f Hz\n", peak_k, peak_hz);
-
-    // Half-power from the LOW-FREQ peak
-    double peak_p = P[peak_k];
-    size_t half_k = peak_k;
-    for (size_t k = peak_k; k < fft_n/4; ++k) if (P[k] < 0.5*peak_p) { half_k = k; break; }
-    double half_hz = half_k * bin_hz;
-    // For AR(1) the spectrum is Lorentzian; the half-power BW at the decimated rate
-    // is governed by α·fs/(2π) ≈ Doppler/(2π) ≈ 0.016 Hz at configured 0.1 Hz Doppler.
-    // We accept anything between 0.005 and 0.5 Hz — the key check is that the spectrum
-    // is narrow and centered near DC, consistent with a slow Doppler process.
-    checkRange("Half-power roll-off within an order of magnitude of configured Doppler",
-               half_hz, 0.005, 0.5);
-    printf("  half-power bin: %zu = %.4f Hz  (configured Doppler=0.1 Hz)\n", half_k, half_hz);
+    const double fs = 48000.0;
+    const double configured_doppler = 0.1;
+    const double alpha = 1.0 - std::exp(-2.0 * kPi * configured_doppler / fs);
+    const double rho = 1.0 - alpha;
+    const double cos_omega =
+        (1.0 + rho * rho - 2.0 * alpha * alpha) / (2.0 * rho);
+    const double half_power_hz =
+        std::acos(std::clamp(cos_omega, -1.0, 1.0)) * fs / (2.0 * kPi);
+    check("Legacy AR(1) alpha half-power is configured Doppler, not 0.018 Hz",
+          half_power_hz, configured_doppler, 0.001);
+    printf("  legacy alpha=%.8g  AR(1) half-power=%.6f Hz; old 0.018 Hz was a biased single-periodogram local-spike measurement\n",
+           alpha, half_power_hz);
 }
 
 void partD_MultipathDelay() {
@@ -247,23 +368,30 @@ void partF_PowerConservation() {
     printf("\n=== PART F: long-run power conservation ===\n");
     auto cfg = itu::good(100.0f);
     cfg.noise_enabled = false; cfg.fading_enabled = true; cfg.multipath_enabled = true;
-    WattersonChannel chan(cfg, 99u);
-    // Warmup
-    for (size_t i = 0; i < kAR1Warmup; ++i) chan.stepFadingForDiagnostics();
     // 120 s tone
     constexpr size_t N = 48000*120;
     std::vector<float> tone(N);
     const double amp = kModemReferenceInBandRms*std::sqrt(2.0);
     for (size_t i = 0; i < N; ++i) tone[i] = float(amp*std::sin(2.0*kPi*1500.0*i/48000.0));
-    std::vector<float> out; chan.process(tone, out);
     // Skip Hilbert warmup at output start
     constexpr size_t skip = 8192;
     double in_p=0, out_p=0;
-    for (size_t i = skip; i < N; ++i) { in_p+=double(tone[i])*tone[i]; out_p+=double(out[i])*out[i]; }
-    in_p/=(N-skip); out_p/=(N-skip);
+    size_t measured_samples = 0;
+    for (uint64_t seed : {99u, 100u, 101u}) {
+        WattersonChannel chan(cfg, seed);
+        std::vector<float> out; chan.process(tone, out);
+        for (size_t i = skip; i < N; ++i) {
+            in_p += double(tone[i]) * tone[i];
+            out_p += double(out[i]) * out[i];
+            ++measured_samples;
+        }
+    }
+    in_p/=static_cast<double>(measured_samples);
+    out_p/=static_cast<double>(measured_samples);
     double r_db = 10.0*std::log10(out_p/in_p);
-    check("long-run power conservation (Good, 120s)", r_db, 0.0, 1.0);
-    printf("  in=%.6f  out=%.6f  ratio=%+.3f dB\n", in_p, out_p, r_db);
+    check("long-run power conservation (Good, 3x120s)", r_db, 0.0, 1.0);
+    printf("  in=%.6f  out=%.6f  ratio=%+.3f dB (3 seeds x 120 s)\n",
+           in_p, out_p, r_db);
 }
 
 void partG_ChannelResponseFrozen() {
@@ -322,6 +450,181 @@ void partH_PresetParameters() {
           double(g.path1_gain*g.path1_gain) + double(g.path2_gain*g.path2_gain), 1.0, 0.005);
 }
 
+void partI_GaussianAutocorrelation() {
+    printf("\n=== PART I: Gaussian-Doppler multi-lag autocorrelation ===\n");
+    constexpr uint32_t fs = 100;
+    constexpr float doppler_hz = 0.1f;
+    constexpr double sigma_hz = static_cast<double>(doppler_hz) / 2.0;
+    constexpr size_t count = 200'000;  // 2000 s at the fading diagnostic rate.
+    constexpr size_t base_lag_samples = 10;  // tau = 0.1 s.
+
+    std::vector<std::vector<cd>> series;
+    for (uint64_t seed : {7001u, 7002u, 7003u, 7004u}) {
+        series.push_back(sampleTap(fs, doppler_hz, seed, count, false));
+        series.push_back(sampleTap(fs, doppler_hz, seed, count, true));
+    }
+
+    for (size_t k : {1u, 2u, 5u, 10u, 20u, 50u}) {
+        const size_t lag = k * base_lag_samples;
+        cd accum(0.0, 0.0);
+        for (const auto& samples : series) {
+            accum += normalizedAutocorrelation(samples, lag);
+        }
+        const cd measured_complex = accum / static_cast<double>(series.size());
+        const double tau = static_cast<double>(lag) / static_cast<double>(fs);
+        const double expected =
+            std::exp(-2.0 * kPi * kPi * sigma_hz * sigma_hz * tau * tau);
+        const double measured = measured_complex.real();
+        char name[120];
+        snprintf(name, sizeof(name),
+                 "R_h(tau=%.1fs) matches exp(-2*pi^2*sigma^2*tau^2)", tau);
+        check(std::string(name), measured, expected,
+              std::max(0.02, 0.05 * expected));
+        printf("  tau=%4.1f s  measured=%.6f%+.6fj  expected=%.6f\n",
+               tau, measured_complex.real(), measured_complex.imag(), expected);
+    }
+}
+
+void partJ_GaussianPsdFit() {
+    printf("\n=== PART J: Gaussian-Doppler PSD shape fit ===\n");
+    constexpr uint32_t fs = 100;
+    constexpr float doppler_hz = 0.1f;
+    constexpr double expected_sigma = static_cast<double>(doppler_hz) / 2.0;
+    constexpr size_t segment_size = 32768;
+    constexpr size_t count = segment_size * 4;
+
+    std::vector<std::vector<cd>> series;
+    for (uint64_t seed : {8101u, 8102u, 8103u, 8104u, 8105u, 8106u}) {
+        series.push_back(sampleTap(fs, doppler_hz, seed, count, false));
+        series.push_back(sampleTap(fs, doppler_hz, seed, count, true));
+    }
+
+    const GaussianPsdFit fit =
+        fitGaussianDopplerPsd(series, fs, segment_size, 0.20);
+    check("Gaussian PSD fitted sigma within 5%",
+          fit.fitted_sigma_hz, expected_sigma, 0.05 * expected_sigma);
+    check("Gaussian PSD shape RMS error < 10% of peak",
+          fit.shape_rms_fraction, 0.0, 0.10);
+    checkRange("Gaussian PSD peak remains near DC",
+               fit.peak_hz, 0.0, 0.02);
+    printf("  fitted sigma=%.6f Hz  expected=%.6f Hz  shape_rms=%.4f of peak  peak=%.4f Hz\n",
+           fit.fitted_sigma_hz, expected_sigma, fit.shape_rms_fraction,
+           fit.peak_hz);
+}
+
+double measureFrozenToneGain(double hz,
+                             std::complex<float> tap1,
+                             std::complex<float> tap2,
+                             const WattersonChannel::Config& cfg) {
+    constexpr size_t skip = 8192;
+    const size_t measure_n = static_cast<size_t>(cfg.sample_rate) * 2;
+    const size_t total_n = skip + measure_n;
+    constexpr double peak_amplitude = 0.25;
+
+    std::vector<float> tone(total_n);
+    for (size_t i = 0; i < total_n; ++i) {
+        tone[i] = static_cast<float>(
+            peak_amplitude * std::sin(2.0 * kPi * hz *
+                                      static_cast<double>(i) /
+                                      static_cast<double>(cfg.sample_rate)));
+    }
+
+    WattersonChannel channel(cfg, 0xabcddcu);
+    channel.setFadingTapsForDiagnostics(tap1, tap2);
+    const std::vector<float> out = channel.process(tone);
+
+    cd acc(0.0, 0.0);
+    for (size_t n = 0; n < measure_n; ++n) {
+        const double phase =
+            -2.0 * kPi * hz * static_cast<double>(n) /
+            static_cast<double>(cfg.sample_rate);
+        acc += static_cast<double>(out[skip + n]) *
+               cd(std::cos(phase), std::sin(phase));
+    }
+    const double measured_peak = 2.0 * std::abs(acc) /
+                                 static_cast<double>(measure_n);
+    return measured_peak / peak_amplitude;
+}
+
+void partK_ProductionHilbertResponse() {
+    printf("\n=== PART K: production Hilbert response with frozen taps ===\n");
+    auto cfg = itu::good(100.0f);
+    cfg.noise_enabled = false;
+    cfg.fading_enabled = true;
+    cfg.multipath_enabled = true;
+    cfg.cfo_enabled = false;
+
+    const std::complex<float> tap1(0.6f, -0.4f);
+    const std::complex<float> tap2(-0.3f, 0.5f);
+    const double delay_seconds = static_cast<double>(cfg.delay_spread_ms) / 1000.0;
+
+    for (double f : {50.0, 250.0, 500.0, 1000.0, 1500.0,
+                     2000.0, 2500.0, 2900.0}) {
+        const double measured = measureFrozenToneGain(f, tap1, tap2, cfg);
+        const cd expected_h =
+            cd(tap1.real(), tap1.imag()) * static_cast<double>(cfg.path1_gain) +
+            cd(tap2.real(), tap2.imag()) * static_cast<double>(cfg.path2_gain) *
+                std::polar(1.0, -2.0 * kPi * f * delay_seconds);
+        const double expected = std::abs(expected_h);
+        const double error_db = 20.0 * std::log10(measured / expected);
+        char name[96];
+        snprintf(name, sizeof(name), "production |H(%g Hz)| within 0.1 dB", f);
+        check(std::string(name), error_db, 0.0, 0.1);
+        printf("  f=%6.1f Hz  measured=%.6f  expected=%.6f  err=%+.3f dB\n",
+               f, measured, expected, error_db);
+    }
+
+    for (double f : {3200.0, 3600.0}) {
+        auto stop_cfg = cfg;
+        stop_cfg.multipath_enabled = false;
+        const double measured = measureFrozenToneGain(
+            f, std::complex<float>(1.0f, 0.0f),
+            std::complex<float>(0.0f, 0.0f), stop_cfg);
+        const double attenuation_db = 20.0 * std::log10(std::max(measured, 1.0e-12));
+        char name[96];
+        snprintf(name, sizeof(name), "production Hilbert stop-band at %g Hz", f);
+        checkRange(std::string(name), attenuation_db, -200.0, -40.0);
+        printf("  stop f=%6.1f Hz  gain=%.6g  attenuation=%.2f dB\n",
+               f, measured, attenuation_db);
+    }
+}
+
+void partL_DirectionIndependence() {
+    printf("\n=== PART L: per-direction fading independence ===\n");
+    constexpr uint32_t fs = 100;
+    constexpr float doppler_hz = 0.1f;
+    constexpr size_t count = fs * 10;
+    auto cfg = fadingDiagnosticConfig(fs, doppler_hz);
+    cd numerator(0.0, 0.0);
+    double pa = 0.0, pb = 0.0;
+    constexpr uint64_t base_seed = 0x515151u;
+    constexpr size_t seed_pairs = 16;
+    for (size_t pair = 0; pair < seed_pairs; ++pair) {
+        const uint64_t seed = base_seed + 2u * pair;
+        WattersonChannel a_chan(cfg, seed);
+        WattersonChannel b_chan(cfg, seed + 1u);
+        for (size_t i = 0; i < count; ++i) {
+            a_chan.stepFadingForDiagnostics();
+            b_chan.stepFadingForDiagnostics();
+            for (bool tap2 : {false, true}) {
+                const auto at = tap2 ? a_chan.fadingTap2ForDiagnostics()
+                                     : a_chan.fadingTap1ForDiagnostics();
+                const auto bt = tap2 ? b_chan.fadingTap2ForDiagnostics()
+                                     : b_chan.fadingTap1ForDiagnostics();
+                const cd xa(at.real(), at.imag());
+                const cd xb(bt.real(), bt.imag());
+                numerator += xa * std::conj(xb);
+                pa += std::norm(xa);
+                pb += std::norm(xb);
+            }
+        }
+    }
+    const double rho = std::abs(numerator) / std::sqrt(pa * pb);
+    check("|corr(seed s, seed s+1)| < 0.1 over 10 s windows", rho, 0.0, 0.1);
+    printf("  |cross-correlation|=%.6f over %zu adjacent seed pairs, %.1f s each\n",
+           rho, seed_pairs, static_cast<double>(count) / static_cast<double>(fs));
+}
+
 int main() {
     partA_TapStatistics();
     partB_Autocorrelation();
@@ -331,6 +634,10 @@ int main() {
     partF_PowerConservation();
     partG_ChannelResponseFrozen();
     partH_PresetParameters();
+    partI_GaussianAutocorrelation();
+    partJ_GaussianPsdFit();
+    partK_ProductionHilbertResponse();
+    partL_DirectionIndependence();
 
     printf("\n\n========== RESULTS ==========\n");
     int pass=0, fail=0;

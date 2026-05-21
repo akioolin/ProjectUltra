@@ -154,6 +154,10 @@ public:
     std::complex<float> fadingTap1ForDiagnostics() const { return fading1_; }
     std::complex<float> fadingTap2ForDiagnostics() const { return fading2_; }
     float fadingAlphaForDiagnostics() const { return fading_alpha_; }
+    float fadingSigmaHzForDiagnostics() const { return fading_sigma_hz_; }
+    size_t fadingSosOscillatorCountForDiagnostics() const {
+        return fading1_oscillators_.size();
+    }
     void stepFadingForDiagnostics();
     void setFadingTapsForDiagnostics(std::complex<float> tap1,
                                       std::complex<float> tap2);
@@ -167,7 +171,21 @@ public:
     const Config& config() const { return config_; }
 
 private:
+    struct FadingOscillator {
+        std::complex<double> phasor{1.0, 0.0};
+        std::complex<double> initial_phasor{1.0, 0.0};
+        std::complex<double> rotation{1.0, 0.0};
+        double amplitude = 0.0;
+    };
+
     void initializeHilbert();
+    void initializeGaussianDoppler(uint64_t seed);
+    void initializeGaussianDopplerTap(std::vector<FadingOscillator>& oscillators,
+                                      std::mt19937& rng);
+    void resetFadingOscillators();
+    std::complex<float> evaluateFadingTap(std::vector<FadingOscillator>& oscillators);
+    std::complex<float> currentFadingTap(const std::vector<FadingOscillator>& oscillators) const;
+    void renormalizeFadingOscillators();
     std::complex<float> analyticSample(float sample);
     void processWithoutFading(std::span<const float> input,
                               std::vector<float>& output);
@@ -181,15 +199,21 @@ private:
     std::normal_distribution<float> gaussian_{0.0f, 1.0f};
     std::deque<float> delay_line_;
     std::deque<std::complex<float>> analytic_delay_line_;
+    std::vector<float> hilbert_inphase_coeffs_;
     std::vector<float> hilbert_coeffs_;
     std::vector<float> hilbert_delay_line_;
+    std::vector<FadingOscillator> fading1_oscillators_;
+    std::vector<FadingOscillator> fading2_oscillators_;
     size_t delay_samples_ = 0;
     size_t hilbert_delay_idx_ = 0;
     size_t hilbert_delay_samples_ = 0;
     float noise_stddev_ = 0.0f;
     float fading_alpha_ = 0.0f;
+    float fading_sigma_hz_ = 0.0f;
     std::complex<float> fading1_{1.0f, 0.0f};
     std::complex<float> fading2_{1.0f, 0.0f};
+    uint64_t fading_sample_index_ = 0;
+    bool diagnostic_fading_frozen_ = false;
     float cfo_phase_ = 0.0f;
     float cfo_phase_inc_ = 0.0f;
     float actual_cfo_hz_ = 0.0f;

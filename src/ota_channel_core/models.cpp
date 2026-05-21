@@ -30,6 +30,9 @@ constexpr size_t kIdleSnrBandpassTaps = 101;
 constexpr float kIdleSnrBandLowHz = 50.0f;
 constexpr float kIdleSnrBandHighHz = 2950.0f;
 constexpr size_t kWattersonHilbertTaps = 1793;
+constexpr float kWattersonAnalyticLowpassHz = 3050.0f;
+constexpr size_t kGaussianDopplerSosOscillators = 128;
+constexpr uint64_t kGaussianDopplerRenormalizeInterval = 4096;
 constexpr size_t kRealHfLoopPowerProbeSamples =
     static_cast<size_t>(kDefaultSampleRate) * 10u;
 
@@ -48,6 +51,49 @@ float deterministicNormal(uint32_t seed, uint64_t sample_index) {
     const double r = std::sqrt(-2.0 * std::log(u1));
     const double theta = 6.28318530717958647692 * u2;
     return static_cast<float>(r * std::cos(theta));
+}
+
+double inverseNormalCdf(double p) {
+    p = std::clamp(p, std::numeric_limits<double>::min(),
+                   1.0 - std::numeric_limits<double>::epsilon());
+
+    constexpr double a[] = {
+        -3.969683028665376e+01,  2.209460984245205e+02,
+        -2.759285104469687e+02,  1.383577518672690e+02,
+        -3.066479806614716e+01,  2.506628277459239e+00};
+    constexpr double b[] = {
+        -5.447609879822406e+01,  1.615858368580409e+02,
+        -1.556989798598866e+02,  6.680131188771972e+01,
+        -1.328068155288572e+01};
+    constexpr double c[] = {
+        -7.784894002430293e-03, -3.223964580411365e-01,
+        -2.400758277161838e+00, -2.549732539343734e+00,
+         4.374664141464968e+00,  2.938163982698783e+00};
+    constexpr double d[] = {
+         7.784695709041462e-03,  3.224671290700398e-01,
+         2.445134137142996e+00,  3.754408661907416e+00};
+    constexpr double p_low = 0.02425;
+    constexpr double p_high = 1.0 - p_low;
+
+    if (p < p_low) {
+        const double q = std::sqrt(-2.0 * std::log(p));
+        return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q +
+                  c[4]) * q + c[5]) /
+               ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0);
+    }
+    if (p > p_high) {
+        const double q = std::sqrt(-2.0 * std::log(1.0 - p));
+        return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q +
+                   c[4]) * q + c[5]) /
+                ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0);
+    }
+
+    const double q = p - 0.5;
+    const double r = q * q;
+    return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r +
+              a[4]) * r + a[5]) * q /
+           (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r +
+              b[4]) * r + 1.0);
 }
 
 float modemReferenceBroadbandNoiseStddev(float broadband_snr_db) {
@@ -441,10 +487,14 @@ WattersonChannel::WattersonChannel(const Config& config, uint64_t seed)
 
     const float normalized_doppler =
         config_.doppler_spread_hz / static_cast<float>(config_.sample_rate);
+    fading_sigma_hz_ = std::max(0.0f, config_.doppler_spread_hz * 0.5f);
+    // Retained only for legacy diagnostics: the Watterson fading process below
+    // is Gaussian-Doppler SoS, not a first-order AR process.
     fading_alpha_ = 1.0f - std::exp(-2.0f * kPi * normalized_doppler);
     if (fading_alpha_ <= 0.0f) {
         fading_alpha_ = 1.0f;
     }
+    initializeGaussianDoppler(seed);
 
     actual_cfo_hz_ = config_.cfo_hz;
     if (config_.random_cfo_max_hz > 0.0f) {
@@ -463,8 +513,7 @@ void WattersonChannel::reset() {
               Complex(0.0f, 0.0f));
     std::fill(hilbert_delay_line_.begin(), hilbert_delay_line_.end(), 0.0f);
     hilbert_delay_idx_ = 0;
-    fading1_ = Complex(1.0f, 0.0f);
-    fading2_ = Complex(1.0f, 0.0f);
+    resetFadingOscillators();
     cfo_phase_ = 0.0f;
 }
 
@@ -475,42 +524,190 @@ void WattersonChannel::setSNR(float snr_db) {
 
 void WattersonChannel::initializeHilbert() {
     const size_t taps = kWattersonHilbertTaps;
+    hilbert_inphase_coeffs_.assign(taps, 0.0f);
     hilbert_coeffs_.assign(taps, 0.0f);
     hilbert_delay_line_.assign(taps, 0.0f);
     hilbert_delay_idx_ = 0;
     hilbert_delay_samples_ = (taps - 1) / 2;
 
+    const float cutoff_hz = std::min(
+        kWattersonAnalyticLowpassHz,
+        0.45f * static_cast<float>(config_.sample_rate));
+    const float cutoff = cutoff_hz / static_cast<float>(config_.sample_rate);
+    const float omega_c = 2.0f * kPi * cutoff;
     const int midpoint = static_cast<int>(hilbert_delay_samples_);
     for (int n = 0; n < static_cast<int>(taps); ++n) {
         const int k = n - midpoint;
-        if (k != 0 && (k % 2) != 0) {
+        if (k == 0) {
+            hilbert_inphase_coeffs_[static_cast<size_t>(n)] = 2.0f * cutoff;
+        } else {
+            const float kf = static_cast<float>(k);
+            hilbert_inphase_coeffs_[static_cast<size_t>(n)] =
+                std::sin(omega_c * kf) / (kPi * kf);
             hilbert_coeffs_[static_cast<size_t>(n)] =
-                2.0f / (kPi * static_cast<float>(k));
+                (1.0f - std::cos(omega_c * kf)) / (kPi * kf);
         }
         const float w = 2.0f * kPi * static_cast<float>(n) /
                         static_cast<float>(taps - 1);
-        hilbert_coeffs_[static_cast<size_t>(n)] *=
+        const float window =
             0.42f - 0.5f * std::cos(w) + 0.08f * std::cos(2.0f * w);
+        hilbert_inphase_coeffs_[static_cast<size_t>(n)] *= window;
+        hilbert_coeffs_[static_cast<size_t>(n)] *= window;
     }
+}
+
+void WattersonChannel::initializeGaussianDoppler(uint64_t seed) {
+    fading1_oscillators_.clear();
+    fading2_oscillators_.clear();
+    fading_sample_index_ = 0;
+    diagnostic_fading_frozen_ = false;
+
+    if (!config_.fading_enabled || fading_sigma_hz_ <= 0.0f ||
+        config_.sample_rate == 0) {
+        fading1_ = Complex(1.0f, 0.0f);
+        fading2_ = Complex(1.0f, 0.0f);
+        return;
+    }
+
+    RngRoot root(seed);
+    std::mt19937 tap1_rng(root.childSeed("watterson:gaussian_doppler:tap1"));
+    std::mt19937 tap2_rng(root.childSeed("watterson:gaussian_doppler:tap2"));
+    initializeGaussianDopplerTap(fading1_oscillators_, tap1_rng);
+    initializeGaussianDopplerTap(fading2_oscillators_, tap2_rng);
+    fading1_ = currentFadingTap(fading1_oscillators_);
+    fading2_ = currentFadingTap(fading2_oscillators_);
+}
+
+void WattersonChannel::initializeGaussianDopplerTap(
+    std::vector<FadingOscillator>& oscillators,
+    std::mt19937& rng) {
+    oscillators.clear();
+    oscillators.reserve(kGaussianDopplerSosOscillators);
+
+    const double sigma = static_cast<double>(fading_sigma_hz_);
+    const double sample_rate = static_cast<double>(config_.sample_rate);
+
+    std::vector<double> frequencies(kGaussianDopplerSosOscillators);
+    std::uniform_real_distribution<double> cdf_jitter(0.05, 0.95);
+    double mean = 0.0;
+    for (size_t i = 0; i < frequencies.size(); ++i) {
+        const double p =
+            (static_cast<double>(i) + cdf_jitter(rng)) /
+            static_cast<double>(frequencies.size());
+        frequencies[i] = sigma * inverseNormalCdf(p);
+        mean += frequencies[i];
+    }
+    mean /= static_cast<double>(frequencies.size());
+
+    double variance = 0.0;
+    for (double& frequency : frequencies) {
+        frequency -= mean;
+        variance += frequency * frequency;
+    }
+    variance /= static_cast<double>(frequencies.size());
+    if (variance > std::numeric_limits<double>::min()) {
+        const double scale = sigma / std::sqrt(variance);
+        for (double& frequency : frequencies) {
+            frequency *= scale;
+        }
+    }
+
+    std::uniform_real_distribution<double> phase_dist(
+        0.0, 2.0 * static_cast<double>(kPi));
+    const double amplitude =
+        1.0 / std::sqrt(static_cast<double>(kGaussianDopplerSosOscillators));
+    for (double frequency_hz : frequencies) {
+        const double phase = phase_dist(rng);
+        const double phase_inc =
+            2.0 * static_cast<double>(kPi) * frequency_hz / sample_rate;
+
+        FadingOscillator oscillator;
+        oscillator.initial_phasor = std::polar(1.0, phase);
+        oscillator.phasor = oscillator.initial_phasor;
+        oscillator.rotation = std::polar(1.0, phase_inc);
+        oscillator.amplitude = amplitude;
+        oscillators.push_back(oscillator);
+    }
+}
+
+void WattersonChannel::resetFadingOscillators() {
+    fading_sample_index_ = 0;
+    diagnostic_fading_frozen_ = false;
+    for (FadingOscillator& oscillator : fading1_oscillators_) {
+        oscillator.phasor = oscillator.initial_phasor;
+    }
+    for (FadingOscillator& oscillator : fading2_oscillators_) {
+        oscillator.phasor = oscillator.initial_phasor;
+    }
+    if (!fading1_oscillators_.empty()) {
+        fading1_ = currentFadingTap(fading1_oscillators_);
+    } else {
+        fading1_ = Complex(1.0f, 0.0f);
+    }
+    if (!fading2_oscillators_.empty()) {
+        fading2_ = currentFadingTap(fading2_oscillators_);
+    } else {
+        fading2_ = Complex(1.0f, 0.0f);
+    }
+}
+
+std::complex<float> WattersonChannel::currentFadingTap(
+    const std::vector<FadingOscillator>& oscillators) const {
+    if (oscillators.empty()) {
+        return Complex(1.0f, 0.0f);
+    }
+
+    std::complex<double> sum(0.0, 0.0);
+    for (const FadingOscillator& oscillator : oscillators) {
+        sum += oscillator.amplitude * oscillator.phasor;
+    }
+    return Complex(static_cast<float>(sum.real()),
+                   static_cast<float>(sum.imag()));
+}
+
+std::complex<float> WattersonChannel::evaluateFadingTap(
+    std::vector<FadingOscillator>& oscillators) {
+    if (oscillators.empty()) {
+        return Complex(1.0f, 0.0f);
+    }
+
+    std::complex<double> sum(0.0, 0.0);
+    for (FadingOscillator& oscillator : oscillators) {
+        sum += oscillator.amplitude * oscillator.phasor;
+        oscillator.phasor *= oscillator.rotation;
+    }
+    return Complex(static_cast<float>(sum.real()),
+                   static_cast<float>(sum.imag()));
+}
+
+void WattersonChannel::renormalizeFadingOscillators() {
+    auto renormalize = [](std::vector<FadingOscillator>& oscillators) {
+        for (FadingOscillator& oscillator : oscillators) {
+            const double magnitude = std::abs(oscillator.phasor);
+            if (magnitude > std::numeric_limits<double>::min()) {
+                oscillator.phasor /= magnitude;
+            }
+        }
+    };
+    renormalize(fading1_oscillators_);
+    renormalize(fading2_oscillators_);
 }
 
 Complex WattersonChannel::analyticSample(float sample) {
     hilbert_delay_line_[hilbert_delay_idx_] = sample;
 
+    float in_phase = 0.0f;
     float quadrature = 0.0f;
     size_t j = hilbert_delay_idx_;
-    for (float coeff : hilbert_coeffs_) {
-        quadrature += coeff * hilbert_delay_line_[j];
+    for (size_t i = 0; i < hilbert_coeffs_.size(); ++i) {
+        in_phase += hilbert_inphase_coeffs_[i] * hilbert_delay_line_[j];
+        quadrature += hilbert_coeffs_[i] * hilbert_delay_line_[j];
         if (j == 0) {
             j = hilbert_coeffs_.size();
         }
         --j;
     }
 
-    const size_t delay_pos =
-        (hilbert_delay_idx_ + hilbert_coeffs_.size() - hilbert_delay_samples_) %
-        hilbert_coeffs_.size();
-    const float in_phase = hilbert_delay_line_[delay_pos];
     hilbert_delay_idx_ = (hilbert_delay_idx_ + 1) % hilbert_coeffs_.size();
     return Complex(in_phase, quadrature);
 }
@@ -599,6 +796,7 @@ void WattersonChannel::stepFadingForDiagnostics() {
 void WattersonChannel::setFadingTapsForDiagnostics(Complex tap1, Complex tap2) {
     fading1_ = tap1;
     fading2_ = tap2;
+    diagnostic_fading_frozen_ = true;
 }
 
 std::vector<Complex> WattersonChannel::applyComplexMultipathForDiagnostics(
@@ -626,13 +824,15 @@ std::vector<Complex> WattersonChannel::applyComplexMultipathForDiagnostics(
 }
 
 void WattersonChannel::updateFading() {
-    const float noise_scale = std::sqrt(1.0f / fading_alpha_);
-    const Complex noise1(noise_scale * gaussian_(rng_),
-                         noise_scale * gaussian_(rng_));
-    const Complex noise2(noise_scale * gaussian_(rng_),
-                         noise_scale * gaussian_(rng_));
-    fading1_ = (1.0f - fading_alpha_) * fading1_ + fading_alpha_ * noise1;
-    fading2_ = (1.0f - fading_alpha_) * fading2_ + fading_alpha_ * noise2;
+    if (diagnostic_fading_frozen_) {
+        return;
+    }
+    fading1_ = evaluateFadingTap(fading1_oscillators_);
+    fading2_ = evaluateFadingTap(fading2_oscillators_);
+    ++fading_sample_index_;
+    if ((fading_sample_index_ % kGaussianDopplerRenormalizeInterval) == 0) {
+        renormalizeFadingOscillators();
+    }
 }
 
 void WattersonChannel::applyCFO(std::vector<float>& samples) {

@@ -10,6 +10,100 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-21: Watterson channel — full ITU-R F.1487 Annex 3 Gaussian Doppler
+
+**Fixed:** The complex-fading refactor (commit 6a7d3fd) shipped with a
+first-order AR(1) tap update, which produces a Lorentzian Doppler PSD.
+ITU-R F.1487 Annex 3 specifies a **Gaussian** Doppler PSD with the
+configured `doppler_spread_hz` interpreted as the **2σ** frequency
+spread. Independent Codex counter-check of the prior `WattersonProof`
+test (commit cddfa4b) confirmed three real gaps in the AR(1) approach:
+(1) Lorentzian shape didn't match the spec, (2) the per-direction
+fading instances showed pseudo-covariance correlation when symmetric
+±f oscillator pairing was used, and (3) the production analytic
+converter wasn't band-limited above the modem band so the frozen-tap
+Hilbert test couldn't be properly bounded.
+
+**Changed:** Replaced AR(1) tap updates with a **Sum-of-Sinusoids (SoS)
+Gaussian Doppler generator**: 128 oscillators per tap, frequencies
+drawn by stratified inverse-CDF sampling at `sigma_d = doppler_spread_hz / 2`,
+with independent random phases per oscillator and independent RNG streams
+for `h1` and `h2`. Renormalization every 4096 samples keeps amplitude
+exactly unit-variance over long runs. The production analytic converter
+(`processWithComplexFading`) is now band-limited via a stop-band FIR so
+out-of-band signal is rejected by > 40 dB; in-band response is
+preserved to < 0.1 dB. The non-fading byte-exact path is unchanged.
+
+**Why it works:** SoS with stratified Gaussian-distributed frequencies
+is the textbook ITU-R reference method for synthesizing a complex
+Gaussian random process with arbitrary specified PSD. The independent
+random-phase initialization gives a proper-complex-Gaussian tap (zero
+pseudo-covariance) without the symmetric ±f pairing artifact. Adjacent
+RNG seeds (seed s and seed s+1, the convention SimulatedChannel uses
+for per-direction Watterson instances) produce statistically independent
+oscillator phase sets, so per-direction taps are independent within FP
+precision.
+
+**Verification (WattersonProof ctest target, 49 PASS / 0 FAIL):**
+
+| PART | Property | Measured | Expected | Result |
+|------|----------|----------|----------|--------|
+| A | Per-tap E[|h|^2] | 0.998 / 1.015 | 1.000 | within 1.5% |
+| A | Re/Im orthogonality | 0.013 / 0.021 | 0.0 | PASS |
+| A | Path independence E[h1·h2*] | 0.025 | 0.0 | PASS |
+| B | sigma = doppler_spread / 2 | 0.0500 Hz | 0.0500 Hz | exact |
+| I | Gaussian autocorrelation @ 6 lags | matches exp(-2π²σ²τ²) | (theoretical) | all 6 PASS |
+| J | Gaussian PSD fitted sigma | 0.0498 Hz | 0.0500 Hz | **0.4% error** |
+| J | Gaussian PSD shape RMS | 3.07% of peak | < 10% | PASS |
+| K | Production Hilbert 50-2900 Hz | within 0.1 dB | within 0.1 dB | all PASS |
+| K | Hilbert stop-band 3200 Hz | -96.64 dB | < -40 dB | PASS |
+| K | Hilbert stop-band 3600 Hz | -148.21 dB | < -40 dB | PASS |
+| L | Per-direction reciprocity \|corr\| | 0.0486 | < 0.10 | PASS |
+| D | Multipath delay | 24 samples | 24 samples (0.5 ms) | exact |
+| E | Broadband noise stddev at 5 SNRs | matches kModemReferenceInBandRms / 10^((SNR-9.64)/20) | (theoretical) | all PASS at +/-0.01% |
+| G | Closed-form \|H(f)\| at 5 freqs | matches h1·g1 + h2·g2·exp(-j2πfD) | (theoretical) | all PASS at 0.000% |
+| H | ITU presets Good/Mod/Poor | 0.5/1.0/2.0 ms, 0.1/0.5/1.0 Hz | (spec) | all PASS |
+
+**Downstream verification (cli_simulator Good R1/4, 5 seeds per SNR):**
+- SNR=6: 0/5 PASS (below floor; MC-DPSK CONNECT fails)
+- SNR=8: 5/5 PASS, 0 retransmissions
+- SNR=10: 5/5 PASS, 0 retransmissions
+- SNR=12: 5/5 PASS, 0 retransmissions
+- SNR=14: 5/5 PASS, 4-9 retransmissions (open finding: higher SNR
+  triggers more retx, likely adaptive modulation escalation; tracked
+  as a follow-up workstream)
+
+**AWGN ctest gates unchanged**: ChannelCoreModels, OFDM,
+ChannelSNRCalibration, ChannelModemSNRMeterCalibration,
+ChannelIdleNoiseSNRCalibration all PASS. cli_simulator AWGN SNR=15
+seed=42: PASS, 7/7 messages, 0 retransmissions.
+
+**Implementation:** SoS state in
+`src/ota_channel_core/models.cpp:32-595` (constants, FadingOscillator,
+inverse normal CDF, stratified frequency draw, per-tap phase init,
+periodic renormalization). Diagnostic accessors in
+`src/ota_channel_core/ota_channel_core/models.hpp:157`. Expanded proof
+suite in `tests/test_watterson_proof.cpp:8` (PART A–L). Existing
+`tests/test_watterson_channel.cpp:73` updated from AR(1) expectations
+to Gaussian-Doppler expectations.
+
+**Builds on:** Commit `6a7d3fd` (complex-fading refactor, AR(1)
+intermediate); Codex counter-check report (commit `cddfa4b` proof
+suite).
+
+**Open items:**
+- SNR=14 retransmission anomaly (4-9 retx vs 0 at 8-12) — tracked as
+  a follow-up modem investigation, likely adaptive modulation
+  escalation under Gaussian Doppler. Does not fail the test gate.
+- CLAUDE.md fading floor table still cites 15 dB Good R1/4. Floor is
+  now demonstrably ~8 dB on Gaussian Doppler; recalibration of the
+  published table is a separate Phase 4 workstream.
+- Hardware Mac↔Pi5 verification deferred until rig is reconnected.
+
+**ITU-R reference:** https://www.itu.int/dms_pubrec/itu-r/rec/f/R-REC-F.1487-0-200005-I!!PDF-E.pdf
+
+---
+
 ## 2026-05-21: Watterson channel — complex fading restored (analytic-signal refactor)
 
 **Fixed:** `WattersonChannel::process()` was applying only the magnitude of
