@@ -380,7 +380,9 @@ bool stopOtaCapture(const std::string& grpc_target,
 class OtaAudioPort : public AudioPort {
 public:
     OtaAudioPort(otasim_client::OtaAudioBackendConfig config, std::string label)
-        : config_(std::move(config)), label_(std::move(label)) {}
+        : AudioPort(virtualAudioCarrierSenseConfig()),
+          config_(std::move(config)),
+          label_(std::move(label)) {}
 
     bool start() override {
         std::string error;
@@ -1765,8 +1767,15 @@ private:
                 return false;
             }
 
-            alpha_->tick();
-            bravo_->tick();
+            if (ota_sample_clock_mode_) {
+                if (!pumpOtaSampleClockOnce()) {
+                    std::cout << "  \033[31m✗ OTASim sample-clock pump stopped during file transfer!\033[0m\n";
+                    return false;
+                }
+            } else {
+                alpha_->tick();
+                bravo_->tick();
+            }
 
             // Show progress
             auto progress = alpha_->getFileProgress();
@@ -1776,7 +1785,9 @@ private:
                 last_progress = pct;
             }
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            if (!ota_sample_clock_mode_) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
         }
 
         // Measure transfer time (from sendFile to file_received)

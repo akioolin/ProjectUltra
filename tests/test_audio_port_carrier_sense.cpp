@@ -18,6 +18,9 @@ std::vector<float> samples(float value) {
 
 class BufferedAudioPort : public AudioPort {
 public:
+    explicit BufferedAudioPort(ultra::audio::ChannelBusyDetectorConfig config = {})
+        : AudioPort(config) {}
+
     void pushRx(std::vector<float> in) {
         rx_.insert(rx_.end(), in.begin(), in.end());
     }
@@ -38,6 +41,14 @@ private:
 void observe(BufferedAudioPort& port, float rms) {
     port.pushRx(samples(rms));
     (void)port.pullRx(kCount);
+}
+
+void observeAt(BufferedAudioPort& port,
+               const std::vector<float>& in,
+               uint64_t start_sample) {
+    port.setCarrierSenseSampleClock(start_sample);
+    port.pushRx(in);
+    (void)port.pullRx(in.size());
 }
 
 void waitBlocksUntilRxRmsDrops() {
@@ -89,11 +100,36 @@ void localTxBlackoutKeepsPortBusyEvenWithSilentRx() {
     assert(waiter.get());
 }
 
+void otasimCarrierSenseLearnsCalibratedGoodChannelIdleNoise() {
+    BufferedAudioPort port(virtualAudioCarrierSenseConfig());
+    ultra::ota_channel_core::ChannelConfig config{
+        .type = ChannelType::GOOD,
+        .snr_db = 12.0f,
+        .seed = 42,
+        .sample_rate = SimulatedStation::SAMPLE_RATE};
+    ultra::ota_channel_core::RngRoot root(config.seed);
+    auto channel = ultra::ota_channel_core::createChannelModel(
+        config, root, "test:otasim:carrier_sense_idle_noise");
+
+    std::vector<float> zeros(kCount, 0.0f);
+    std::vector<float> rx;
+    for (int block = 0; block < 40; ++block) {
+        const uint64_t start_sample = static_cast<uint64_t>(block) * kCount;
+        channel->process(zeros, start_sample, rx);
+        observeAt(port, rx, start_sample);
+    }
+
+    port.setCarrierSenseSampleClock(40ULL * kCount);
+    assert(port.channelRms() > 0.01f);
+    assert(port.isChannelIdleFor(SimulatedStation::DEFAULT_TR_GUARD_MS));
+}
+
 }  // namespace
 
 int main() {
     waitBlocksUntilRxRmsDrops();
     localTxBlackoutKeepsPortBusyEvenWithSilentRx();
+    otasimCarrierSenseLearnsCalibratedGoodChannelIdleNoise();
     std::cout << "AudioPort carrier sense tests passed\n";
     return 0;
 }

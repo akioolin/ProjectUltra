@@ -10,6 +10,67 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-21: OTASim 1 KB file-transfer sample-clock pump fix
+
+**What was broken:** After the OTASim carrier-sense calibration fix, the
+Good/SNR12/R1_4 1 KB file run could still stall immediately after
+`Connection: Flushing burst of 8 frames`. ALPHA logged the BURST in the logical
+TX queue, but the file-transfer wait loop advanced only protocol timers with
+`alpha_->tick()` / `bravo_->tick()`. In the sample-clock OTASim path, queued TX
+audio leaves only when the simulated soundcard callback pulls samples, so no
+DATA burst ever reached `TX active cursor`.
+
+**What changed:** `tools/cli_simulator.cpp` now uses the same
+`pumpOtaSampleClockOnce()` scheduler during the file-transfer wait phase when
+OTASim sample-clock mode is active. Threaded/non-OTASim mode keeps the existing
+timer tick and sleep path. `tests/test_cli_otasim_mandatory.sh` now requires
+the 1 KB Good/SNR12/R1_4 regression to show ALPHA's DATA burst reaching
+`TX active cursor`, in addition to failing on any radio-recovery queue stall.
+
+**Why this is correct:** This is a scheduler fidelity fix, not a protocol or
+PHY shortcut. A real radio's soundcard output callback keeps pulling queued
+samples after the operator starts a file transfer; the single-process OTASim
+harness must do the same. The modem still sees only local audio, carrier sense,
+PTT recovery, decoder output, and ARQ timers.
+
+**Verification command shape:**
+```
+cmake --build build --target cli_simulator ota_simulator -j4
+ctest --test-dir build --output-on-failure -R CliOtasimMandatory
+```
+
+---
+
+## 2026-05-21: OTASim 1 KB file-transfer stall carrier-sense fix
+
+**What was broken:** `cli_simulator --channel good --snr 12 --rate r1_4
+--file 1024 --seed 42` could stall in the single-process OTASim path with
+`TX rejected while radio recovery queue is full`. The external OTASim
+audio port used the hardware carrier-sense noise-floor defaults even though
+OTASim provides continuous calibrated channel noise, so idle channel noise
+could be treated as a busy carrier and deferred DATA frames accumulated.
+
+**What changed:** `tools/cli_simulator.cpp` now constructs `OtaAudioPort`
+with the same calibrated virtual-audio carrier-sense config used by the
+in-memory virtual port. `tests/test_audio_port_carrier_sense.cpp` adds a
+Good/SNR12 idle-noise lock, and the existing CTest `CliOtasimMandatory`
+now also runs the 1 KB Good/SNR12/R1_4 file-transfer regression and fails on
+any `radio recovery queue is full` log line.
+
+**Why this is correct:** The fix changes only the local audio energy
+calibration for a simulated soundcard path. It does not expose peer TX state
+to the modem, does not alter ARQ window/timeout/retry policy, and keeps the
+real-radio invariant: the station keys only when its own carrier-sense view
+of received audio is idle.
+
+**Verification command shape:**
+```
+cmake --build build --target cli_simulator test_audio_port_carrier_sense -j4
+ctest --test-dir build --output-on-failure -R "AudioPortCarrierSense|CliOtasimMandatory"
+```
+
+---
+
 ## 2026-05-21: OFDM PAPR reduction — soft-knee Hilbert saturation (Mac↔Pi5 cable verification)
 
 **Workstream:** Today's PAPR reduction implementation (commits `44a2d13`,
