@@ -344,6 +344,11 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     // Load persistent settings
     ultra::gui::startupTrace("App", "settings-load-enter");
     settings_.load();
+    LOG_INFO("AUDIO",
+             "TX drive (tx_drive=%.3f) now controls per-burst peak target, "
+             "not post-mix attenuation. Previous tx_drive = 0.8 behavior is "
+             "replaced by per-burst peak normalization to tx_drive's value.",
+             settings_.tx_drive);
     ultra::gui::startupTrace("App", "settings-load-exit");
 
     ultra::diagnostics::SessionMeta diag_meta;
@@ -976,7 +981,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
 
         initAudio();
         if (audio_initialized_) {
-            audio_.setOutputGain(settings_.tx_drive);
+            audio_.setOutputGain(1.0f);
             startRadioRx();
         }
     });
@@ -995,7 +1000,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         audio_.closeOutput();
 
         if (audio_initialized_) {
-            audio_.setOutputGain(settings_.tx_drive);
+            audio_.setOutputGain(1.0f);
             startRadioRx();
         }
     });
@@ -1049,7 +1054,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     initial_filter.bandwidth = settings_.filter_bandwidth;
     initial_filter.taps = settings_.filter_taps;
     modem_.setFilterConfig(initial_filter);
-    audio_.setOutputGain(settings_.tx_drive);
+    audio_.setOutputGain(1.0f);
     ultra::gui::startupTrace("App", "apply-filter-exit");
 
     if (simulation_enabled_) {
@@ -1706,11 +1711,11 @@ void App::render() {
     if (first_render) {
         ultra::gui::startupTrace("App", "render-enter");
     }
-    // Keep output attenuation synchronized with the TX Drive slider.
+    // TX drive is embedded per burst; keep AudioEngine output at unity.
     if (first_render) {
         ultra::gui::startupTrace("App", "render-set-output-gain-enter");
     }
-    audio_.setOutputGain(settings_.tx_drive);
+    audio_.setOutputGain(1.0f);
     if (first_render) {
         ultra::gui::startupTrace("App", "render-set-output-gain-exit");
     }
@@ -2352,20 +2357,36 @@ bool App::queueRealTxSamples(const std::vector<float>& samples, const char* cont
         ptt_active_ = false;
     }
 
-    size_t tx_duration_ms = (samples.size() * 1000) / 48000;
+    std::vector<float> hardware_samples(samples.begin(), samples.end());
+    const auto measurement =
+        ultra::sim::normalizeTxBurstForHardware(hardware_samples, settings_.tx_drive);
+    if (measurement.burst_fragment_warning) {
+        LOG_WARN("AUDIO",
+                 "%s: hardware TX peak normalization bypassed fragment "
+                 "active=%zu minimum=%zu samples=%zu target=%.3f",
+                 context ? context : "TX audio",
+                 measurement.active_samples,
+                 ultra::sim::kTxBurstMinimumActiveSamples,
+                 hardware_samples.size(),
+                 measurement.target_peak);
+    }
+
+    size_t tx_duration_ms = (hardware_samples.size() * 1000) / 48000;
     tx_in_progress_ = true;
     tx_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(tx_duration_ms + 100);
 
     if (waterfall_) {
-        waterfall_->addSamples(samples.data(), samples.size());
+        waterfall_->addSamples(hardware_samples.data(), hardware_samples.size());
     }
 
     if (recording_enabled_) {
-        recorded_tx_samples_.insert(recorded_tx_samples_.end(), samples.begin(), samples.end());
+        recorded_tx_samples_.insert(recorded_tx_samples_.end(),
+                                    hardware_samples.begin(),
+                                    hardware_samples.end());
     }
 
     audio_.startPlayback();
-    audio_.queueTxSamples(samples);
+    audio_.queueTxSamples(hardware_samples);
     return true;
 }
 

@@ -6,6 +6,7 @@
 #endif
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <cstdlib>
@@ -197,7 +198,7 @@ static std::vector<std::string> detectSerialPorts() {
     // Enumerate the registry path Windows populates with currently-connected
     // serial devices (USB-serial adapters, built-in UARTs, BT-SPP, etc.).
     // Each value's data is the friendly device name (e.g. "COM3"). Same
-    // approach WSJT-X / VARA / Fldigi use. Falls back to nothing on failure;
+    // approach common radio applications use. Falls back to nothing on failure;
     // the operator can still type a port name into the text input.
     HKEY hKey = nullptr;
     if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
@@ -461,6 +462,13 @@ bool AppSettings::load(const std::string& path) {
                        ? static_cast<int>(GuiPttMode::SerialDTR)
                        : static_cast<int>(GuiPttMode::SerialRTS);
     }
+
+    if (!std::isfinite(tx_drive)) {
+        tx_drive = ultra::sim::kHardwareTxDefaultPeakTarget;
+    }
+    tx_drive = std::clamp(tx_drive,
+                          ultra::sim::kHardwareTxMinPeakTarget,
+                          ultra::sim::kHardwareTxMaxPeakTarget);
 
     return true;
 }
@@ -978,14 +986,27 @@ void SettingsWindow::renderAudioTab(AppSettings& settings) {
     ImGui::Spacing();
 
     // TX Drive
-    ImGui::Text("TX Drive Level");
+    ImGui::Text("TX Drive Target Peak");
     ImGui::SetNextItemWidth(200);
     float tx_drive_pct = settings.tx_drive * 100.0f;
-    if (ImGui::SliderFloat("##tx_drive", &tx_drive_pct, 0.0f, 100.0f, "%.0f%%")) {
-        settings.tx_drive = std::clamp(tx_drive_pct / 100.0f, 0.0f, 1.0f);
+    if (ImGui::SliderFloat("##tx_drive", &tx_drive_pct,
+                           ultra::sim::kHardwareTxMinPeakTarget * 100.0f,
+                           ultra::sim::kHardwareTxMaxPeakTarget * 100.0f,
+                           "%.0f%%")) {
+        settings.tx_drive = std::clamp(tx_drive_pct / 100.0f,
+                                       ultra::sim::kHardwareTxMinPeakTarget,
+                                       ultra::sim::kHardwareTxMaxPeakTarget);
+    }
+    if (ImGui::IsItemHovered()) {
+        const float dbfs = 20.0f * std::log10(std::max(
+            settings.tx_drive, ultra::sim::kHardwareTxMinPeakTarget));
+        ImGui::SetTooltip("Target peak %.2f full scale (%.1f dBFS). Default %.2f.",
+                          settings.tx_drive,
+                          dbfs,
+                          ultra::sim::kHardwareTxDefaultPeakTarget);
     }
     ImGui::SameLine();
-    ImGui::TextDisabled("Audio output level");
+    ImGui::TextDisabled("Target peak (0.05-0.70 FS, default 0.50)");
 
     ImGui::Spacing();
     ImGui::Spacing();

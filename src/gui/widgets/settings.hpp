@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ultra/tx_burst_normalization.hpp"
+
 #include <cstdint>
 #include <chrono>
 #include <string>
@@ -57,7 +59,7 @@ struct AppSettings {
     char output_device[128] = "Default";  // Selected output device name
     int tx_delay_ms = 50;      // Delay before TX after PTT
     int tx_tail_ms = 50;       // Delay after TX before releasing PTT
-    float tx_drive = 0.8f;     // TX audio level (0-1)
+    float tx_drive = ultra::sim::kHardwareTxDefaultPeakTarget; // TX peak target
 
     // Audio Filter Settings
     bool filter_enabled = false;      // Disabled by default (radio's SSB filter sufficient)
