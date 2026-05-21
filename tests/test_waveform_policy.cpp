@@ -23,20 +23,44 @@ int tests_failed = 0;
     } while (0)
 
 void test_ofdm_rate_thresholds() {
-    CHECK(selectOFDMCodeRate(21.7f, 0.00f) == CodeRate::R1_4,
-          "AWGN-12 in-band SNR should stay R1/4");
+    // R3/4 / R2/3 — unchanged SNR>=25 gates (not re-measured 2026-05-21).
     CHECK(selectOFDMCodeRate(25.0f, 0.00f) == CodeRate::R3_4,
           "AWGN in-band SNR25 should allow R3/4");
     CHECK(selectOFDMCodeRate(25.0f, 0.12f) == CodeRate::R2_3,
           "near-AWGN in-band SNR25 with slight fading should fall back to R2/3");
-    CHECK(selectOFDMCodeRate(25.0f, 0.30f) == CodeRate::R1_2,
-          "good fading in-band SNR25 should use R1/2");
+
+    // R1/2 — new per-fading thresholds (2026-05-21 floor recalibration,
+    // PAPR-OFF baseline, +2 dB margin above measured reliable floor).
+    //
+    // AWGN gate at SNR >= 12 dB:
+    CHECK(selectOFDMCodeRate(11.9f, 0.00f) == CodeRate::R1_4,
+          "AWGN in-band SNR=11.9 should stay R1/4 (just under R1/2 gate)");
+    CHECK(selectOFDMCodeRate(12.0f, 0.00f) == CodeRate::R1_2,
+          "AWGN in-band SNR=12 should promote to R1/2");
+    CHECK(selectOFDMCodeRate(21.7f, 0.00f) == CodeRate::R1_2,
+          "AWGN in-band SNR=21.7 should use R1/2 (well above gate)");
+
+    // Good fading gate at SNR >= 14 dB:
+    CHECK(selectOFDMCodeRate(13.9f, 0.30f) == CodeRate::R1_4,
+          "good fading in-band SNR=13.9 should stay R1/4 (just under R1/2 gate)");
+    CHECK(selectOFDMCodeRate(14.0f, 0.30f) == CodeRate::R1_2,
+          "good fading in-band SNR=14 should promote to R1/2");
+    CHECK(selectOFDMCodeRate(20.0f, 0.30f) == CodeRate::R1_2,
+          "good fading in-band SNR=20 should use R1/2 (well above gate)");
+
+    // Moderate fading gate at SNR >= 18 dB:
+    CHECK(selectOFDMCodeRate(17.9f, 0.90f) == CodeRate::R1_4,
+          "moderate fading in-band SNR=17.9 should stay R1/4 (just under R1/2 gate)");
+    CHECK(selectOFDMCodeRate(18.0f, 0.90f) == CodeRate::R1_2,
+          "moderate fading in-band SNR=18 should promote to R1/2");
     CHECK(selectOFDMCodeRate(25.0f, 0.90f) == CodeRate::R1_2,
-          "moderate fading in-band SNR25 should use R1/2");
-    CHECK(selectOFDMCodeRate(20.0f, 0.30f) == CodeRate::R1_4,
-          "good fading in-band SNR20 should stay at R1/4");
+          "moderate fading in-band SNR=25 should use R1/2 (well above gate)");
+
+    // Heavy+ fading (>= 1.10) — R1/4 only at all SNRs.
     CHECK(selectOFDMCodeRate(25.0f, 1.20f) == CodeRate::R1_4,
           "heavy fading should fall back to R1/4");
+    CHECK(selectOFDMCodeRate(40.0f, 1.20f) == CodeRate::R1_4,
+          "heavy fading at very high SNR should still stay R1/4");
 }
 
 void test_narrow_data_mode() {
@@ -129,14 +153,21 @@ void test_data_mode_policy() {
     CHECK(mod == Modulation::DQPSK, "good-fading in-band SNR28 stays DQPSK");
     CHECK(rate == CodeRate::R1_2, "good-fading in-band SNR28 should use R1/2 with DQPSK");
 
-    // AWGN-12 in-band regression: must not promote to D8PSK R2/3.
+    // AWGN-12 in-band regression: must not promote to D8PSK R2/3
+    // (D8PSK R2/3 needs SNR>=28-32). DQPSK R1/2 now applies above 12 dB
+    // AWGN gate (2026-05-21 floor recalibration).
     recommendDataMode(21.7f, WaveformMode::OFDM_CHIRP, mod, rate, 0.04f);
     CHECK(mod == Modulation::DQPSK, "AWGN-12 in-band stays DQPSK");
-    CHECK(rate == CodeRate::R1_4, "AWGN-12 in-band uses DQPSK R1/4");
+    CHECK(rate == CodeRate::R1_2, "AWGN-12 in-band SNR=21.7 should use DQPSK R1/2");
 
+    // SNR=19 Good fading: above the new R1/2 Good gate of 14 dB.
     recommendDataMode(19.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
-    CHECK(mod == Modulation::DQPSK, "below-floor in-band SNR19 falls back to DQPSK");
-    CHECK(rate == CodeRate::R1_4, "DQPSK fallback at in-band SNR19 uses R1/4");
+    CHECK(mod == Modulation::DQPSK, "in-band SNR=19 falls back to DQPSK (no D8PSK below 32)");
+    CHECK(rate == CodeRate::R1_2, "in-band SNR=19 good fading should use DQPSK R1/2");
+
+    // Just under the R1/2 Good gate at SNR=13.9 dB.
+    recommendDataMode(13.9f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
+    CHECK(rate == CodeRate::R1_4, "in-band SNR=13.9 good fading should stay R1/4");
 
     // Moderate fading: D8PSK rejected even at high SNR - falls back to DQPSK.
     recommendDataMode(30.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.90f);

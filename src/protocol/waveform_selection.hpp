@@ -26,45 +26,55 @@ struct WaveformRecommendation {
 // Both recommendWaveformAndRate() and recommendDataMode() use this.
 //
 // Fading index now combines freq_cv + temporal_cv (Doppler measurement).
-// Thresholds (2026-05-18) - in-band SNR convention:
-//   AWGN only (< 0.10):             R3/4 @ in-band SNR >= 25
-//   Near-AWGN (< 0.15):             R2/3 @ in-band SNR >= 25
-//   Good fading (< 0.65):           R1/2 @ in-band SNR >= 25
-//   Moderate fading (< 1.10):       R1/2 @ in-band SNR >= 25
-//   Heavy+ (>= 1.10):              R1/4 only
+// Thresholds (2026-05-21 floor recalibration sweep, PAPR-OFF baseline,
+// in-band SNR convention; forced-waveform caveat below):
+//   AWGN only (< 0.10):             R3/4 @ in-band SNR >= 25 (legacy)
+//   Near-AWGN (< 0.15):             R2/3 @ in-band SNR >= 25 (legacy)
+//   AWGN     (< 0.15):              R1/2 @ in-band SNR >= 12 (was 25)
+//   Good     (< 0.65):              R1/2 @ in-band SNR >= 14 (was 25)
+//   Moderate (< 1.10):              R1/2 @ in-band SNR >= 18 (was 25)
+//   Heavy+   (>= 1.10):             R1/4 only
 //
-// Historical hardware/protocol captures below used the legacy configured
-// broadband-equivalent SNR numbers. The 2026-05-18 recalibration keeps those
-// same channel boundaries but expresses them on the post-round-1 in-band meter,
-// approximately +9.6 dB for AWGN/Watterson channels.
+// 2026-05-21 floor recalibration measurements (PAPR-OFF, --waveform ofdm_chirp
+// forced — see FLOOR_RECALIBRATION_2026_05_21.md). Each "reliable floor" is
+// the lowest SNR where 3/3 seeds PASS with stable retx behavior:
+//   OFDM R1/2 AWGN     reliable floor = 10 dB → gate ≥ 12 dB (+2 dB margin)
+//   OFDM R1/2 Good     reliable floor = 12 dB → gate ≥ 14 dB (+2 dB margin)
+//   OFDM R1/2 Moderate reliable floor = 16 dB → gate ≥ 18 dB (+2 dB margin)
 //
-// R3/4 verified (2026-02-10):
+// The +2 dB margin protects against seed variance and the
+// IMD-vs-headroom asymmetry that PAPR ON introduces on simulator paths.
+// Production hardware should see net +1.4 to +1.6 dB additional margin
+// from PAPR-driven on-wire RMS gain (see PAPR_HARDWARE_VERIFICATION
+// CHANGELOG entry).
+//
+// Caveat: today's floor measurements used `--waveform ofdm_chirp` which
+// skips the MC-DPSK→OFDM handshake upgrade. Auto-negotiation
+// re-verification is a deferred follow-up workstream
+// (feedback_test_with_auto_negotiation.md). The relative ordering of
+// R1/2 vs R1/4 should be unaffected, but absolute thresholds may shift
+// ±1 dB.
+//
+// R3/4 verified (2026-02-10) — not re-measured:
 //   DQPSK R3/4 AWGN SNR=20: 10/10 seeds PASS, 0 retransmissions
 //   DQPSK R3/4 Good fading: FAILS (23 retx / 5 seeds) — AWGN only!
-// R2/3 verified (2026-03-15, 802.11n LDPC + CPE correction):
-//   10KB file transfer good fading SNR=15: 1485 bps, 33% retx
-//   10KB file transfer AWGN SNR=15: near-ideal (low retx)
-//   Demoted from good fading: R1/2 gives similar throughput (1418 bps)
-//   with half the retransmissions (14% vs 33%) — more reliable.
-// R1/2 verified (2026-03-15, 802.11n LDPC):
-//   10KB file transfer good fading SNR=15: 1418 bps, 14% retx, 100% frame success
-//   10KB file transfer moderate fading SNR=15: 1055 bps, 52% retx, 99% frame success
-//   10KB file transfer AWGN SNR=15: 1636 bps, 3% retx, 100% frame success
+// R2/3 verified (2026-03-15) — not re-measured:
+//   10KB Good fading SNR=15: 1485 bps, 33% retx
+//   Demoted from Good: R1/2 gives similar throughput with half the retx.
 inline CodeRate selectOFDMCodeRate(float snr_db, float fading_index) {
-    // AWGN only: R3/4 at in-band SNR >= 25 (Item 3 hw calibration 2026-05-07:
-    //   5/5 seeds 20KB AWGN SNR=15 forced R3/4: 2670-2691 bps, 0 retx,
-    //   +18% vs auto-R2/3. Tighter fading gate (< 0.10) protects against
-    //   borderline-fading misclassifications since R3/4 is documented to
-    //   FAIL on Good fading.) Previous in-band gate was legacy SNR + 9.6 dB.
+    // R3/4 — AWGN-only, very high SNR (unchanged pending re-measurement)
     if (fading_index < 0.10f && snr_db >= 25.0f) return CodeRate::R3_4;
 
-    // Near-AWGN: R2/3 at in-band SNR >= 25 (too many retx on real fading channels)
+    // R2/3 — near-AWGN, very high SNR (unchanged pending re-measurement)
     if (fading_index < 0.15f && snr_db >= 25.0f) return CodeRate::R2_3;
 
-    // Good-to-moderate fading: R1/2 at in-band SNR >= 25
-    if (fading_index < 1.10f && snr_db >= 25.0f) return CodeRate::R1_2;
+    // R1/2 — promoted 2026-05-21 from a single SNR>=25 gate to per-fading
+    // thresholds matched to measured reliable floors + 2 dB safety margin.
+    if (fading_index < 0.15f && snr_db >= 12.0f) return CodeRate::R1_2;
+    if (fading_index < 0.65f && snr_db >= 14.0f) return CodeRate::R1_2;
+    if (fading_index < 1.10f && snr_db >= 18.0f) return CodeRate::R1_2;
 
-    // All other conditions: R1/4 (most robust)
+    // Default: R1/4 (most robust)
     return CodeRate::R1_4;
 }
 
