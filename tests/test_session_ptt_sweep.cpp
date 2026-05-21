@@ -430,9 +430,16 @@ SweepOutcome runSweepPoint(uint32_t rx_settling_ms) {
     }
 
     if (outcome.disconnect_ack_ok) {
+        // Both stations must reach DISCONNECTED, which requires the
+        // carrier-sense guard (rx_settling_ms + 50 ms) to expire on each
+        // side after the last TX. Scale the wait so extreme T/R relay
+        // values (e.g. 2 s) still leave room for the wind-down handshake.
+        const auto disconnect_done_timeout =
+            kDisconnectDoneTimeout +
+            std::chrono::milliseconds(rx_settling_ms * 5);
         outcome.done = runUntil(
             alpha, bravo, alpha_observed, bravo_observed, log,
-            kDisconnectDoneTimeout, [&]() {
+            disconnect_done_timeout, [&]() {
                 return alpha.getConnectionState() == ConnectionState::DISCONNECTED &&
                        bravo.getConnectionState() == ConnectionState::DISCONNECTED;
             });
