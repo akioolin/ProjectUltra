@@ -84,6 +84,7 @@
 #include "sim/channel_snr_probe.hpp"
 #include "sim/hf_channel.hpp"
 #include "sim/simulated_station.hpp"
+#include "ultra/tx_burst_normalization.hpp"
 
 #ifdef ULTRA_HAVE_SDL2
 #include "gui/audio_engine.hpp"  // Real SDL2 audio I/O for --role A|B
@@ -187,6 +188,51 @@ bool parseForcedModulation(const std::string& value, bool expert_phy, Modulation
     }
     out = *parsed_any;
     return true;
+}
+
+std::optional<float> parseFloatStrict(const std::string& value) {
+    if (value.empty()) {
+        return std::nullopt;
+    }
+    try {
+        size_t parsed = 0;
+        const float out = std::stof(value, &parsed);
+        if (parsed != value.size() || !std::isfinite(out)) {
+            return std::nullopt;
+        }
+        return out;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::string formatPeakTarget(float value) {
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(3) << value;
+    return out.str();
+}
+
+float parseAndClampTxDrive(const std::string& value, bool* ok) {
+    const auto parsed = parseFloatStrict(value);
+    if (!parsed) {
+        if (ok) *ok = false;
+        return ultra::sim::kHardwareTxDefaultPeakTarget;
+    }
+
+    const float clamped = std::clamp(*parsed,
+                                     ultra::sim::kHardwareTxMinPeakTarget,
+                                     ultra::sim::kHardwareTxMaxPeakTarget);
+    if (clamped != *parsed) {
+        std::cerr << "cli_simulator: --tx-drive " << formatPeakTarget(*parsed)
+                  << " clamped to " << formatPeakTarget(clamped)
+                  << " (allowed "
+                  << formatPeakTarget(ultra::sim::kHardwareTxMinPeakTarget)
+                  << ".."
+                  << formatPeakTarget(ultra::sim::kHardwareTxMaxPeakTarget)
+                  << ")\n";
+    }
+    if (ok) *ok = true;
+    return clamped;
 }
 
 constexpr const char* kOtaDefaultSession = "lobby";
@@ -654,6 +700,40 @@ private:
 
 // Channel condition types (ITU-R F.1487)
 #ifdef ULTRA_HAVE_SDL2
+struct HardwareAudioPortTxStats {
+    bool valid = false;
+    bool injector_used = false;
+    float injection_delta = 0.0f;
+    float pre_norm_rms = 0.0f;
+    float pre_norm_peak = 0.0f;
+    float post_norm_rms = 0.0f;
+    float post_norm_peak = 0.0f;
+    ultra::sim::TxBurstHardwareMeasurement normalization;
+};
+
+float sampleMaxAbsDelta(const std::vector<float>& a, const std::vector<float>& b) {
+    const size_t n = std::min(a.size(), b.size());
+    float delta = 0.0f;
+    for (size_t i = 0; i < n; ++i) {
+        delta = std::max(delta, std::fabs(a[i] - b[i]));
+    }
+    return delta;
+}
+
+std::vector<float> makeHardwareTxSelfTestBurst() {
+    std::vector<float> samples(ultra::sim::kTxBurstMinimumActiveSamples + 480, 0.0f);
+    uint32_t state = 0x4877504bu;
+    for (float& sample : samples) {
+        state = 1664525u * state + 1013904223u;
+        const float unit =
+            (static_cast<float>((state >> 8) & 0xffffu) / 32767.5f) - 1.0f;
+        sample = ultra::sim::kHardwareTxDefaultPeakTarget * unit;
+    }
+    samples.front() = ultra::sim::kHardwareTxDefaultPeakTarget;
+    samples.back() = -ultra::sim::kHardwareTxDefaultPeakTarget;
+    return samples;
+}
+
 /**
      * ChannelInjector - Streaming TX-side channel emulator. Applies CFO +
      * Watterson fading + AWGN to each transmitted audio buffer before it
@@ -726,10 +806,14 @@ public:
     HardwareAudioPort(const std::string& output_device,
                       const std::string& input_device,
                       std::unique_ptr<ChannelInjector> injector = nullptr,
+                      float target_peak = ultra::sim::kHardwareTxDefaultPeakTarget,
                       int buffer_size = 0)
         : output_device_(output_device),
           input_device_(input_device),
           injector_(std::move(injector)),
+          target_peak_(std::clamp(target_peak,
+                                  ultra::sim::kHardwareTxMinPeakTarget,
+                                  ultra::sim::kHardwareTxMaxPeakTarget)),
           buffer_size_(buffer_size) {}
 
     bool start() override {
@@ -803,34 +887,70 @@ public:
         } else {
             queued_samples = samples;
         }
+        const float injection_delta =
+            injector_ ? sampleMaxAbsDelta(samples, queued_samples) : 0.0f;
+        const float pre_norm_rms = sampleRms(queued_samples);
+        const float pre_norm_peak = samplePeak(queued_samples);
+        const auto normalization =
+            ultra::sim::normalizeTxBurstForHardware(queued_samples, target_peak_);
+        if (normalization.burst_fragment_warning) {
+            LOG_MODEM(WARN,
+                      "HardwareAudioPort: TX peak normalization bypassed "
+                      "fragment active=%zu minimum=%zu samples=%zu target=%.3f",
+                      normalization.active_samples,
+                      ultra::sim::kTxBurstMinimumActiveSamples,
+                      queued_samples.size(),
+                      normalization.target_peak);
+        }
+        const float post_norm_rms = sampleRms(queued_samples);
+        const float post_norm_peak = samplePeak(queued_samples);
+        last_tx_stats_ = HardwareAudioPortTxStats{
+            true,
+            static_cast<bool>(injector_),
+            injection_delta,
+            pre_norm_rms,
+            pre_norm_peak,
+            post_norm_rms,
+            post_norm_peak,
+            normalization,
+        };
         engine_.queueTxSamples(queued_samples);
 
         tx_queue_events_++;
         if (tx_queue_events_ <= 8 || (tx_queue_events_ % 32) == 0) {
             LOG_MODEM(INFO,
                       "HardwareAudioPort: TX queue #%llu inject=%s "
-                      "in=%zu rms=%.4f peak=%.4f out=%zu rms=%.4f peak=%.4f "
+                      "in=%zu rms=%.4f peak=%.4f "
+                      "pre_norm_rms=%.4f pre_norm_peak=%.4f "
+                      "target=%.3f gain=%.4f "
+                      "out=%zu post_norm_rms=%.4f post_norm_peak=%.4f "
                       "device='%s'",
                       static_cast<unsigned long long>(tx_queue_events_),
                       injector_ ? "yes" : "no",
                       samples.size(), sampleRms(samples), samplePeak(samples),
-                      queued_samples.size(), sampleRms(queued_samples),
-                      samplePeak(queued_samples), output_device_.c_str());
+                      pre_norm_rms, pre_norm_peak,
+                      normalization.target_peak,
+                      normalization.gain_to_target,
+                      queued_samples.size(), post_norm_rms, post_norm_peak,
+                      output_device_.c_str());
         }
     }
 
     bool shouldPaceTxInStationLoop() const override { return false; }
+    const HardwareAudioPortTxStats& lastTxStats() const { return last_tx_stats_; }
 
 private:
     gui::AudioEngine engine_;
     std::string output_device_;
     std::string input_device_;
     std::unique_ptr<ChannelInjector> injector_;
+    float target_peak_ = ultra::sim::kHardwareTxDefaultPeakTarget;
     int buffer_size_ = 0;  // 0 = engine default
     std::mutex tx_mutex_;
     uint64_t rx_short_reads_ = 0;
     uint64_t rx_padded_samples_ = 0;
     uint64_t tx_queue_events_ = 0;
+    HardwareAudioPortTxStats last_tx_stats_;
 };
 #endif  // ULTRA_HAVE_SDL2
 
@@ -906,6 +1026,11 @@ public:
     void setRoleBIdleSeconds(int s) { role_b_idle_seconds_ = std::max(0, s); }
     void setInjectChannel(bool v) { inject_channel_ = v; }
     void setInjectGain(float gain) { inject_gain_ = std::clamp(gain, 0.05f, 1.0f); }
+    void setTxDriveTarget(float target) {
+        tx_drive_target_ = std::clamp(target,
+                                      ultra::sim::kHardwareTxMinPeakTarget,
+                                      ultra::sim::kHardwareTxMaxPeakTarget);
+    }
     void setAudioBufferSize(int n) { audio_buffer_size_ = n; }
     void setVerifySNR(bool v) { verify_snr_ = v; }
     void setOtaHost(const std::string& host) { ota_host_ = host; }
@@ -1188,6 +1313,62 @@ public:
         return success;
     }
 
+    bool runHardwareTxNormalizationSelfTest() {
+#ifndef ULTRA_HAVE_SDL2
+        std::cerr << "Hardware TX normalization self-test requires SDL2.\n";
+        return false;
+#else
+        auto injector = std::make_unique<ChannelInjector>(
+            snr_db_, ChannelType::AWGN, seed_, tx_cfo_hz_, 1.0f);
+        HardwareAudioPort port("", "", std::move(injector), tx_drive_target_,
+                               audio_buffer_size_);
+
+        const auto input = makeHardwareTxSelfTestBurst();
+        std::vector<float> sim_path = input;
+        const auto sim_norm = ultra::sim::normalizeTxBurstToReference(sim_path);
+        const auto sim_post = ultra::sim::measureTxBurstInBandRms(sim_path);
+        const float sim_path_peak = samplePeak(sim_path);
+
+        port.queueTx(input);
+        const auto& stats = port.lastTxStats();
+        const float target = std::clamp(tx_drive_target_,
+                                        ultra::sim::kHardwareTxMinPeakTarget,
+                                        ultra::sim::kHardwareTxMaxPeakTarget);
+        const float papr_factor = stats.post_norm_rms > 0.0f
+            ? stats.post_norm_peak / stats.post_norm_rms
+            : 0.0f;
+
+        const bool pass =
+            stats.valid &&
+            stats.injector_used &&
+            stats.injection_delta > 0.0f &&
+            !stats.normalization.burst_fragment_warning &&
+            !sim_norm.burst_fragment_warning &&
+            std::fabs(sim_path_peak - stats.post_norm_peak) > 0.001f &&
+            std::fabs(stats.post_norm_peak - target) <= 0.001f &&
+            std::fabs(stats.normalization.peak_after_gain - target) <= 0.001f;
+
+        std::cout << std::fixed << std::setprecision(6)
+                  << "hardware_tx_normalization_self_test "
+                  << "target=" << target
+                  << " injection_delta=" << stats.injection_delta
+                  << " pre_norm_rms=" << stats.pre_norm_rms
+                  << " pre_norm_peak=" << stats.pre_norm_peak
+                  << " post_norm_rms=" << stats.post_norm_rms
+                  << " post_norm_peak=" << stats.post_norm_peak
+                  << " sim_path_in_band_rms=" << sim_post.in_band_rms
+                  << " sim_path_peak=" << sim_path_peak
+                  << " path_peak_delta="
+                  << std::fabs(sim_path_peak - stats.post_norm_peak)
+                  << " gain=" << stats.normalization.gain_to_target
+                  << " papr_factor=" << papr_factor
+                  << "\n";
+        std::cout << "hardware_tx_normalization_self_test "
+                  << (pass ? "PASS" : "FAIL") << "\n";
+        return pass;
+#endif
+    }
+
 private:
     float snr_db_ = 20.0f;
     bool verbose_ = false;
@@ -1234,7 +1415,8 @@ private:
     int role_b_idle_seconds_ = 0;      // 0 = run until peer disconnects (no idle cap)
     bool inject_channel_ = false;       // --inject-channel: apply TX-side channel sim
                                         // to real-audio output (uses snr_db_/channel_type_)
-    float inject_gain_ = 0.70f;         // Post-injection headroom before DAC full scale
+    float inject_gain_ = 0.70f;         // Post-injection scalar before TX peak normalization
+    float tx_drive_target_ = ultra::sim::kHardwareTxDefaultPeakTarget;
     int audio_buffer_size_ = 0;         // 0 = AudioEngine default (4096)
     bool verify_snr_ = false;
     std::string ota_host_;
@@ -1913,6 +2095,7 @@ private:
         if (role_ == Role::A) std::cout << "  Peer:     " << peer << "\n";
         std::cout << "  Output:   " << (audio_output_device_.empty() ? "(default)" : audio_output_device_) << "\n";
         std::cout << "  Input:    " << (audio_input_device_.empty() ? "(default)" : audio_input_device_) << "\n";
+        std::cout << "  TX drive: " << tx_drive_target_ << " peak FS\n";
         std::cout << "  OFDM cfg: " << ofdmConfigPresetToString(ofdm_config_preset_) << "\n";
         std::cout << "  MC-DPSK:  "
                   << mcDpskPresetSummary(mc_dpsk_preset_name_, mc_dpsk_config_) << "\n";
@@ -1951,7 +2134,7 @@ private:
         // Build the single station with hardware I/O
         auto port = std::make_unique<HardwareAudioPort>(
             audio_output_device_, audio_input_device_, std::move(injector),
-            audio_buffer_size_);
+            tx_drive_target_, audio_buffer_size_);
         auto station = std::make_unique<SimulatedStation>(
             self, std::move(port), ofdm_config_preset_, mc_dpsk_config_);
 
@@ -2499,6 +2682,7 @@ int main(int argc, char* argv[]) {
         bool log_categories_set = false;
         std::string log_categories;
         std::string log_file_path;
+        bool hardware_tx_normalization_self_test = false;
         bool expert_phy = envFlagEnabled("ULTRA_EXPERT_PHY");
         for (int i = 1; i < argc; ++i) {
             if (std::string(argv[i]) == "--expert") {
@@ -2707,6 +2891,27 @@ int main(int argc, char* argv[]) {
                 sim.setVerifySNR(true);
             } else if (arg == "--inject-gain" && i + 1 < argc) {
                 sim.setInjectGain(std::stof(argv[++i]));
+            } else if (arg == "--tx-drive") {
+                if (i + 1 >= argc) {
+                    std::cerr << "Missing value for --tx-drive (use "
+                              << formatPeakTarget(ultra::sim::kHardwareTxMinPeakTarget)
+                              << ".."
+                              << formatPeakTarget(ultra::sim::kHardwareTxMaxPeakTarget)
+                              << ")\n";
+                    return 1;
+                }
+                const std::string value = argv[++i];
+                bool ok = false;
+                const float target_peak = parseAndClampTxDrive(value, &ok);
+                if (!ok) {
+                    std::cerr << "Invalid --tx-drive: " << value << " (use "
+                              << formatPeakTarget(ultra::sim::kHardwareTxMinPeakTarget)
+                              << ".."
+                              << formatPeakTarget(ultra::sim::kHardwareTxMaxPeakTarget)
+                              << ")\n";
+                    return 1;
+                }
+                sim.setTxDriveTarget(target_peak);
             } else if (arg == "--audio-buffer-size" && i + 1 < argc) {
                 sim.setAudioBufferSize(std::stoi(argv[++i]));
             } else if (arg == "--ota-host" && i + 1 < argc) {
@@ -2732,6 +2937,8 @@ int main(int argc, char* argv[]) {
                 log_categories_set = true;
             } else if (arg == "--log-file" && i + 1 < argc) {
                 log_file_path = argv[++i];
+            } else if (arg == "--hardware-tx-normalization-self-test") {
+                hardware_tx_normalization_self_test = true;
             } else if (arg == "--help" || arg == "-h") {
                 std::cout << "CLI Simulator -- OTASim test harness (two-station modem, Watterson channel)\n\n";
                 std::cout << "Uses IWaveform for TX and StreamingDecoder for RX directly.\n";
@@ -2799,7 +3006,8 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --inject-channel, --inject\n";
                 std::cout << "                      Apply --snr/--channel/--cfo to outgoing audio\n";
                 std::cout << "                      (lets Mac-to-Pi cable carry a synthetic HF channel)\n";
-                std::cout << "  --inject-gain <G>   Post-injection output gain/headroom (0.05-1.0, default 0.70)\n";
+                std::cout << "  --inject-gain <G>   Post-injection scalar before TX peak normalization (0.05-1.0, default 0.70)\n";
+                std::cout << "  --tx-drive <0.05..0.70>  Hardware TX target peak FS (default 0.50)\n";
                 std::cout << "  --audio-buffer-size <N>  SDL2 period size, samples (default 8192)\n";
                 std::cout << "                      Smaller = lower latency. Larger = more XRUN headroom.\n";
                 return 0;
@@ -2825,6 +3033,9 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             setLogFile(log_file.get());
+        }
+        if (hardware_tx_normalization_self_test) {
+            return sim.runHardwareTxNormalizationSelfTest() ? 0 : 1;
         }
         return sim.runTest() ? 0 : 1;
     } catch (const std::exception& e) {
