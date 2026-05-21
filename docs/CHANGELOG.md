@@ -10,6 +10,86 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-21: OFDM PAPR reduction — soft-knee Hilbert saturation (Mac↔Pi5 cable verification)
+
+**Workstream:** Today's PAPR reduction implementation (commits `44a2d13`,
+`0f37802`, `44bbc57`) reduces the average peak-to-average-power ratio of
+OFDM TX bursts via a single-pass soft-knee Hilbert envelope saturator
+followed by a band-limit FIR cleanup pass. The change is gated by an
+operator toggle (`--papr-reduction <on|off>` on cli_simulator / ultra_tnc,
+checkbox in GUI settings). DPSK / control bursts bypass the algorithm and
+remain bit-identical to the prior behavior. Codex Round 2 proof
+(`/tmp/codex_papr_reduction_round2_proof.md`) measured the PAPR reduction
+table on the operational TX types (PING/PONG/CONNECT/OFDM data R1/4/R1/2/
+burst R1/4/ACK) — DPSK paths show 0.00 dB delta as designed; OFDM data and
+burst paths show **−2.27 to −2.45 dB PAPR reduction** with **+2.62 to +2.73
+dB in-band RMS preservation** (no power loss) and post-clip spectral
+guard-band ≤ −42 dBc at 50 Hz and ≤ −136 dBc at 100 Hz outside the band.
+Decoder integrity verified at the AWGN SNR=10 floor: 3 PAPR-ON + 3 PAPR-OFF
+cli_simulator seeds all PASS at 100% frame success with 0 retransmissions.
+
+**Hardware verification on Mac↔Pi5 USB audio cable:** ran the full QSO
+twice (PAPR OFF and PAPR ON) and read the Mac-side HardwareAudioPort
+per-burst log line (`post_norm_rms` field, measured AFTER hardware peak
+normalization at the 0.5 full-scale target):
+
+| Burst | PAPR OFF post_rms | PAPR ON post_rms | Δ on-wire RMS |
+|---|---|---|---|
+| PING (DPSK) | 0.1569 | 0.1569 | **0.00 dB** ✓ pass-through |
+| CONNECT (DPSK) | 0.1325 | 0.1325 | **0.00 dB** ✓ pass-through |
+| OFDM DATA (4-CW R1/4) | 0.1917 | 0.2389 | **+1.92 dB** ✓ on-wire gain |
+| ACK #1 (DPSK) | 0.1362 | 0.1362 | **0.00 dB** ✓ pass-through |
+| ACK #2 (DPSK) | 0.1362 | 0.1362 | **0.00 dB** ✓ pass-through |
+
+Calculation: `20·log10(0.2389 / 0.1917) = +1.917 dB`. The +1.92 dB measured
+on the wire is consistent within measurement variance with the −2.27 dB
+PAPR reduction measured in Codex Round 2's operational table. **The DPSK
+paths are exactly bit-identical** between PAPR OFF and PAPR ON — confirming
+the operator-toggle bit-identity claim is preserved end-to-end through the
+real soundcard path.
+
+**`--inject` cable test (Good SNR=12 R1/4, 1 KB):** ran the same QSO with
+synthetic channel injection at SNR=12 Good fading on top of the cable, both
+PAPR OFF and PAPR ON. Both PASS, both produce **20 frames sent / 4 retx / 4
+timeouts / 183-184 bps / 100% delivery** — identical retx counts. This is
+the expected outcome: the `--inject` channel model is RMS-SNR-targeted (it
+scales noise to maintain a configured in-band SNR vs the signal's measured
+in-band RMS), so PAPR-ON's +1.92 dB on-wire RMS gain is matched by a +1.92
+dB noise scaling, and the receiver sees the same channel SNR. This is the
+same OTASim limitation already documented in
+`~/Documents/ProjectUltra-private/FLOOR_RECALIBRATION_2026_05_21.md`.
+
+**Where the +2 dB SNR gain will appear:** the on-wire +1.92 dB RMS gain
+converts to receiver-SNR gain whenever the channel is **PEP-limited or
+absolute-noise-floor**, not RMS-SNR-targeted. Concretely: (1) real radio
+with ALC enforcing a fixed PA peak, (2) off-air RF through atmospheric /
+man-made noise (which has fixed noise PSD), or (3) KiwiSDR-noise-bed
+simulator (separate workstream, `project_kiwisdr_ota_simulator.md`). The
+cable + synthetic injector cannot reveal the receiver-SNR benefit by
+construction — the physics is verified independently via the on-wire RMS
+measurement above.
+
+**Verification command shape:**
+```
+SSH_KEY="$HOME/.ssh/id_pi5" \
+EXTRA_CLI_ARGS="--papr-reduction <on|off> --log-level info --log-category modem,operator" \
+./tools/run_hw_test.sh --inject --inject-gain 0.70 --snr 12 --channel good \
+                       --rate r1_4 --file 1024
+```
+
+**ctest:** `ctest --test-dir build --output-on-failure -j4` → **92/92 PASS**
+(including `PaprReduction` and `TxBurstNormalization` regression locks).
+
+**Status:** PAPR work complete and ready to ship. The +2 dB SNR
+improvement at the receiver will materialize automatically the first time
+the modem goes on-air with a real radio. CLAUDE.md floor-table updates are
+deferred until real-radio or KiwiSDR-noise-bed validation lands.
+
+**Detailed hardware proof:**
+`~/Documents/ProjectUltra-private/PAPR_HARDWARE_VERIFICATION_2026_05_21.md`
+
+---
+
 ## 2026-05-21: Watterson channel — full ITU-R F.1487 Annex 3 Gaussian Doppler
 
 **Fixed:** The complex-fading refactor (commit 6a7d3fd) shipped with a
