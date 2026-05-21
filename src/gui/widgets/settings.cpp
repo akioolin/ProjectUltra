@@ -314,6 +314,7 @@ bool AppSettings::save(const std::string& path) const {
     file << "tx_delay_ms=" << tx_delay_ms << "\n";
     file << "tx_tail_ms=" << tx_tail_ms << "\n";
     file << "tx_drive=" << tx_drive << "\n";
+    file << "papr_reduction=" << (papr_reduction_enabled ? "1" : "0") << "\n";
 
     file << "\n[Filter]\n";
     file << "enabled=" << (filter_enabled ? "1" : "0") << "\n";
@@ -432,6 +433,9 @@ bool AppSettings::load(const std::string& path) {
             tx_tail_ms = std::atoi(value.c_str());
         } else if (key == "tx_drive") {
             tx_drive = std::strtof(value.c_str(), nullptr);
+        } else if (key == "papr_reduction" || key == "papr_reduction_enabled") {
+            papr_reduction_enabled = (value == "1" || value == "true" ||
+                                      value == "yes" || value == "on");
         }
         // Filter settings
         else if (key == "enabled") {
@@ -1007,6 +1011,14 @@ void SettingsWindow::renderAudioTab(AppSettings& settings) {
     }
     ImGui::SameLine();
     ImGui::TextDisabled("Target peak (0.05-0.70 FS, default 0.50)");
+
+    ImGui::Spacing();
+
+    if (ImGui::Checkbox("OFDM PAPR Reduction", &settings.papr_reduction_enabled)) {
+        if (on_papr_reduction_changed_) {
+            on_papr_reduction_changed_(settings.papr_reduction_enabled);
+        }
+    }
 
     ImGui::Spacing();
     ImGui::Spacing();

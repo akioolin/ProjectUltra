@@ -51,6 +51,8 @@ public:
     const FilterConfig& getFilterConfig() const { return filter_config_; }
     void setFilterEnabled(bool enabled);
     bool isFilterEnabled() const { return filter_config_.enabled; }
+    void setPaprReductionEnabled(bool enabled);
+    bool isPaprReductionEnabled() const;
 
     // ========================================================================
     // TX: Convert data to audio samples

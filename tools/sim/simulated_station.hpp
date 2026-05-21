@@ -694,6 +694,10 @@ public:
         protocol_.setSoftCombiningHARQ(enable);
         if (decoder_) decoder_->setSoftCombineBuffer(protocol_.softCombineBuffer());
     }
+    void setPaprReductionEnabled(bool enable) {
+        papr_reduction_enabled_ = enable;
+        if (encoder_) encoder_->setPaprReductionEnabled(enable);
+    }
     void setPreferredWaveform(WaveformMode mode) {
         protocol_.setPreferredMode(mode);
         // For narrowband, use narrowband chirp for PING/PONG/CONNECT control frames
@@ -1070,6 +1074,7 @@ private:
     int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
     uint64_t carrier_mask_ = UINT64_MAX;
     bool carrier_ldpc_interleaver_enabled_ = false;
+    bool papr_reduction_enabled_ = ultra::phy::kPaprReductionDefaultEnabled;
     int rx_overfeed_factor_ = 1;
     int decode_delay_ms_ = 0;
     int rx_batch_callbacks_ = 1;
@@ -1137,6 +1142,7 @@ private:
         encoder_->setCarrierMask(carrier_mask_);
         encoder_->setCarrierLdpcInterleaver(carrier_ldpc_interleaver_enabled_);
         encoder_->setBurstInterleaveGroupSize(burst_group_size_);
+        encoder_->setPaprReductionEnabled(papr_reduction_enabled_);
 
         LOG_MODEM(INFO, "[%s] TX encoder: mode=%s, carriers=%d, data_carriers=%d",
                   callsign_.c_str(),

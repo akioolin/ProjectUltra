@@ -262,6 +262,16 @@ void ModemEngine::setFilterEnabled(bool enabled) {
     filter_config_.enabled = enabled;
 }
 
+void ModemEngine::setPaprReductionEnabled(bool enabled) {
+    if (streaming_encoder_) {
+        streaming_encoder_->setPaprReductionEnabled(enabled);
+    }
+}
+
+bool ModemEngine::isPaprReductionEnabled() const {
+    return streaming_encoder_ && streaming_encoder_->getPaprReductionEnabled();
+}
+
 void ModemEngine::setMCDPSKConfig(const MultiCarrierDPSKConfig& config) {
     mc_dpsk_config_ = config;
     if (streaming_decoder_) {

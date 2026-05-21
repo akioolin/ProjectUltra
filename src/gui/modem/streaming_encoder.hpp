@@ -27,6 +27,7 @@
 #include "waveform/waveform_factory.hpp"
 #include "protocol/frame_v2.hpp"
 #include "ultra/fec.hpp"
+#include "ultra/papr_reduction.hpp"
 #include <vector>
 #include <memory>
 
@@ -151,6 +152,14 @@ public:
     void setBurstInterleaveGroupSize(int size);
     int getBurstInterleaveGroupSize() const { return burst_group_size_; }
 
+    void setPaprReductionEnabled(bool enable);
+    bool getPaprReductionEnabled() const { return papr_reduction_enabled_; }
+    void setPaprReductionThresholdDb(float threshold_db);
+    float getPaprReductionThresholdDb() const { return papr_reduction_threshold_db_; }
+    const phy::PaprReductionMeasurement& getLastPaprReductionMeasurement() const {
+        return last_papr_reduction_;
+    }
+
 private:
     // ========================================================================
     // INTERNAL HELPERS
@@ -167,6 +176,11 @@ private:
 
     // Calculate data carriers from OFDM config
     int calculateDataCarriers() const;
+
+    void applyPaprReductionIfNeeded(std::vector<float>& samples,
+                                    bool is_ofdm,
+                                    bool is_control_frame,
+                                    const char* label);
 
     // ========================================================================
     // STATE (mirrors StreamingDecoder)
@@ -200,6 +214,9 @@ private:
     bool use_burst_interleave_ = false;    // Burst-level long interleaver (N-frame groups)
     int burst_group_size_ = 8;
     bool force_full_preamble_once_ = false;
+    bool papr_reduction_enabled_ = phy::kPaprReductionDefaultEnabled;
+    float papr_reduction_threshold_db_ = phy::kOfdmPaprReductionDefaultThresholdDb;
+    phy::PaprReductionMeasurement last_papr_reduction_;
 
     // Logging
     std::string log_prefix_ = "StreamingEncoder";

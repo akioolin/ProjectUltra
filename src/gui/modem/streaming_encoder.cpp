@@ -12,6 +12,7 @@
 #include "ultra/logging.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
 #include <algorithm>
+#include <cmath>
 
 namespace ultra {
 namespace gui {
@@ -83,6 +84,46 @@ StreamingEncoder::StreamingEncoder() {
 }
 
 StreamingEncoder::~StreamingEncoder() = default;
+
+void StreamingEncoder::setPaprReductionEnabled(bool enable) {
+    papr_reduction_enabled_ = enable;
+    last_papr_reduction_ = {};
+}
+
+void StreamingEncoder::setPaprReductionThresholdDb(float threshold_db) {
+    if (!std::isfinite(threshold_db) || !(threshold_db > 0.0f)) {
+        threshold_db = phy::kOfdmPaprReductionDefaultThresholdDb;
+    }
+    papr_reduction_threshold_db_ = threshold_db;
+}
+
+void StreamingEncoder::applyPaprReductionIfNeeded(std::vector<float>& samples,
+                                                  bool is_ofdm,
+                                                  bool is_control_frame,
+                                                  const char* label) {
+    last_papr_reduction_ = {};
+    if (!papr_reduction_enabled_ || !is_ofdm || is_control_frame ||
+        samples.empty()) {
+        return;
+    }
+
+    last_papr_reduction_ = phy::applyPaprReduction(
+        samples, papr_reduction_threshold_db_, true);
+    if (last_papr_reduction_.applied) {
+        LOG_MODEM(INFO,
+                  "[%s] PAPR reduction %s threshold=%.2f dB pre=%.2f dB "
+                  "post=%.2f dB reduction=%.2f dB clips=%zu rms_delta=%.2f dB",
+                  log_prefix_.c_str(),
+                  label ? label : "-",
+                  last_papr_reduction_.threshold_db,
+                  last_papr_reduction_.pre_papr_db,
+                  last_papr_reduction_.post_papr_db,
+                  last_papr_reduction_.pre_papr_db -
+                      last_papr_reduction_.post_papr_db,
+                  last_papr_reduction_.clipped_samples,
+                  last_papr_reduction_.in_band_rms_delta_db);
+    }
+}
 
 void StreamingEncoder::setBurstInterleaveGroupSize(int size) {
     burst_group_size_ = ofdm_link_adaptation::sanitizeBurstGroupSize(size);
@@ -268,6 +309,8 @@ std::vector<float> StreamingEncoder::encodeFrame(const Bytes& frame_data) {
         waveform_->configure(modulation_, code_rate_);
     }
 
+    applyPaprReductionIfNeeded(result, is_ofdm, use_control_profile, "frame");
+
     LOG_MODEM(INFO, "[%s] Encoded frame: %zu bytes -> %zu coded -> %zu samples",
               log_prefix_.c_str(), frame_data.size(), encoded.size(), result.size());
 
@@ -322,6 +365,8 @@ std::vector<float> StreamingEncoder::encodeFrameLight(const Bytes& frame_data) {
     if (use_control_profile && (modulation_ != tx_mod || code_rate_ != tx_rate)) {
         waveform_->configure(modulation_, code_rate_);
     }
+
+    applyPaprReductionIfNeeded(result, is_ofdm, use_control_profile, "frame-light");
 
     LOG_MODEM(DEBUG, "[%s] Encoded frame (light): %zu bytes -> %zu samples",
               log_prefix_.c_str(), frame_data.size(), result.size());
@@ -455,6 +500,8 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
     LOG_MODEM(INFO, "[%s] Encoded burst: %zu blocks -> %zu samples (burst_interleave=%s groups=%zu)",
               log_prefix_.c_str(), frame_data_list.size(), result.size(),
               interleaved_groups > 0 ? "yes" : "no", interleaved_groups);
+
+    applyPaprReductionIfNeeded(result, protocol::isOFDMMode(mode_), false, "burst-light");
 
     return result;
 }

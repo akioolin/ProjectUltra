@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ultra/papr_reduction.hpp"
 #include "ultra/tx_burst_normalization.hpp"
 
 #include <cstdint>
@@ -60,6 +61,7 @@ struct AppSettings {
     int tx_delay_ms = 50;      // Delay before TX after PTT
     int tx_tail_ms = 50;       // Delay after TX before releasing PTT
     float tx_drive = ultra::sim::kHardwareTxDefaultPeakTarget; // TX peak target
+    bool papr_reduction_enabled = ultra::phy::kPaprReductionDefaultEnabled;
 
     // Audio Filter Settings
     bool filter_enabled = false;      // Disabled by default (radio's SSB filter sufficient)
@@ -117,6 +119,11 @@ public:
     using FilterChangedCallback = std::function<void(bool enabled, float center, float bw, int taps)>;
     void setFilterChangedCallback(FilterChangedCallback cb) { on_filter_changed_ = cb; }
 
+    using PaprReductionChangedCallback = std::function<void(bool enabled)>;
+    void setPaprReductionChangedCallback(PaprReductionChangedCallback cb) {
+        on_papr_reduction_changed_ = cb;
+    }
+
     // Callback when receive directory changes
     using ReceiveDirChangedCallback = std::function<void(const std::string&)>;
     void setReceiveDirChangedCallback(ReceiveDirChangedCallback cb) { on_receive_dir_changed_ = cb; }
@@ -143,6 +150,7 @@ private:
     AudioResetCallback on_audio_reset_;
     ClosedCallback on_closed_;
     FilterChangedCallback on_filter_changed_;
+    PaprReductionChangedCallback on_papr_reduction_changed_;
     ReceiveDirChangedCallback on_receive_dir_changed_;
     ExpertSettingsChangedCallback on_expert_settings_changed_;
     PttTestCallback on_ptt_test_;

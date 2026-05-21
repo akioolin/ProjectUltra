@@ -35,6 +35,10 @@ inline constexpr float kHardwareTxMinPeakTarget = 0.05f;
 //   - Power-normalized convention: a unit-RMS passband tone remains unit-RMS
 //   - Used to define kModemReferenceInBandRms; receiver code may share these
 //     coefficients, but the calibration contract is owned by the simulator
+inline constexpr size_t kReferenceBandFirTaps = 101;
+inline constexpr float kReferenceBandLowHz = 50.0f;
+inline constexpr float kReferenceBandHighHz = 2950.0f;
+inline constexpr float kReferenceSampleRateHz = 48000.0f;
 const std::vector<float>& referenceBandFirCoefficients();
 
 struct TxBurstRmsMeasurement {

@@ -1015,6 +1015,11 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         settings_.save();
     });
 
+    settings_window_.setPaprReductionChangedCallback([this](bool enabled) {
+        modem_.setPaprReductionEnabled(enabled);
+        settings_.save();
+    });
+
     settings_window_.setReceiveDirChangedCallback([this](const std::string& dir) {
         protocol_.setReceiveDirectory(dir);
         settings_.save();
@@ -1054,6 +1059,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     initial_filter.bandwidth = settings_.filter_bandwidth;
     initial_filter.taps = settings_.filter_taps;
     modem_.setFilterConfig(initial_filter);
+    modem_.setPaprReductionEnabled(settings_.papr_reduction_enabled);
     audio_.setOutputGain(1.0f);
     ultra::gui::startupTrace("App", "apply-filter-exit");
 

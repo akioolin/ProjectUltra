@@ -11,10 +11,6 @@ namespace ultra::sim {
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
-constexpr size_t kReferenceBandFirTaps = 101;
-constexpr float kReferenceBandLowHz = 50.0f;
-constexpr float kReferenceBandHighHz = 2950.0f;
-constexpr float kReferenceSampleRate = 48000.0f;
 
 struct ActiveRegion {
     size_t begin = 0;
@@ -62,8 +58,8 @@ float maxAbsSample(std::span<const float> samples) {
 
 std::vector<float> makeReferenceBandFirCoefficients() {
     std::vector<float> coeffs(kReferenceBandFirTaps);
-    const float fc_low = kReferenceBandLowHz / kReferenceSampleRate;
-    const float fc_high = kReferenceBandHighHz / kReferenceSampleRate;
+    const float fc_low = kReferenceBandLowHz / kReferenceSampleRateHz;
+    const float fc_high = kReferenceBandHighHz / kReferenceSampleRateHz;
     const int midpoint = static_cast<int>((kReferenceBandFirTaps - 1) / 2);
 
     for (int n = 0; n < static_cast<int>(kReferenceBandFirTaps); ++n) {

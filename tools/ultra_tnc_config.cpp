@@ -150,6 +150,7 @@ void printUsage(std::ostream& out) {
         << "  --no-inject-channel         Override config inject_channel=true back to false\n"
         << "  --snr <db>                  SNR for channel injection and mode reports\n"
         << "  --tx-drive <0.05..0.70>     Hardware TX target peak (default: 0.50)\n"
+        << "  --papr-reduction <on|off>   OFDM data PAPR reduction (default: on)\n"
         << "  --rate <auto|r1_4|r1_2|r2_3|r3_4>\n"
         << "  --mod <auto|dqpsk>\n"
         << "  --expert                    Allow lab-only forced PHY modes in --mod\n"
@@ -266,6 +267,8 @@ bool applyConfigKey(const std::string& key, const std::string& value, Config& cf
         auto parsed = parseTxDriveTarget(value);
         if (!parsed) return false;
         cfg.tx_drive = *parsed;
+    } else if (key == "papr_reduction" || key == "papr-reduction") {
+        if (!parseBoolStrict(value, cfg.papr_reduction)) return false;
     } else if (key == "rate") {
         auto parsed = parseCodeRate(value);
         if (!parsed) return false;
@@ -528,6 +531,12 @@ bool parseArgs(int argc, char** argv, Config& cfg) {
                 return false;
             }
             cfg.tx_drive = *parsed;
+        } else if (arg == "--papr-reduction") {
+            auto value = requireValue("--papr-reduction");
+            if (!value || !parseBoolStrict(*value, cfg.papr_reduction)) {
+                std::cerr << "Invalid --papr-reduction value (use on or off)\n";
+                return false;
+            }
         } else if (arg == "--rate") {
             auto value = requireValue("--rate");
             auto parsed = value ? parseCodeRate(*value) : std::nullopt;

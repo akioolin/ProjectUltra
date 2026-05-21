@@ -1013,6 +1013,7 @@ public:
     void setDecodeDelayMs(int ms) { decode_delay_ms_ = std::clamp(ms, 0, 500); }
     void setRxBatchCallbacks(int n) { rx_batch_callbacks_ = std::clamp(n, 1, 1000); }
     void setSoftCombiningHARQ(bool enable) { soft_combining_harq_ = enable; }
+    void setPaprReductionEnabled(bool enable) { papr_reduction_enabled_ = enable; }
 
     // Hardware-audio mode (real soundcard I/O across two physical machines)
     void setRoleBoth() { role_ = Role::Both; }
@@ -1163,6 +1164,8 @@ public:
         bravo_->setCarrierMask(carrier_mask_);
         alpha_->setSoftCombiningHARQ(soft_combining_harq_);
         bravo_->setSoftCombiningHARQ(soft_combining_harq_);
+        alpha_->setPaprReductionEnabled(papr_reduction_enabled_);
+        bravo_->setPaprReductionEnabled(papr_reduction_enabled_);
 
         // Set channel SNR for mode negotiation
         alpha_->setSNR(snr_db_);
@@ -1386,6 +1389,7 @@ private:
     bool cw_count_forced_ = false;  // true iff --cw-count was passed
     uint64_t carrier_mask_ = UINT64_MAX;
     bool soft_combining_harq_ = false;
+    bool papr_reduction_enabled_ = ultra::phy::kPaprReductionDefaultEnabled;
     bool save_signals_ = false;
     int save_signals_message_limit_ = 0;   // 0 = full run
     size_t save_signals_max_samples_ = 0;  // 0 = unlimited
@@ -2159,6 +2163,7 @@ private:
         // so the responder gets to auto-pick via recommendCWCount(rate).
         station->setFixedFrameCodewords(fixed_frame_codewords_, cw_count_forced_);
         station->setSoftCombiningHARQ(soft_combining_harq_);
+        station->setPaprReductionEnabled(papr_reduction_enabled_);
         if (soft_combining_harq_) {
             std::cout << "  HARQ:     RX soft-combining enabled\n";
         }
@@ -2838,6 +2843,17 @@ int main(int argc, char* argv[]) {
                 sim.setSoftCombiningHARQ(true);
             } else if (arg == "--no-harq") {
                 sim.setSoftCombiningHARQ(false);
+            } else if (arg == "--papr-reduction" && i + 1 < argc) {
+                const std::string value = cli::normalizedToken(argv[++i]);
+                if (value == "on" || value == "true" || value == "1" || value == "yes") {
+                    sim.setPaprReductionEnabled(true);
+                } else if (value == "off" || value == "false" || value == "0" || value == "no") {
+                    sim.setPaprReductionEnabled(false);
+                } else {
+                    std::cerr << "Invalid --papr-reduction: " << value
+                              << " (use on or off)\n";
+                    return 1;
+                }
             } else if (arg == "--rx-overfeed-factor" && i + 1 < argc) {
                 sim.setRxOverfeedFactor(std::stoi(argv[++i]));
             } else if (arg == "--decode-delay-ms" && i + 1 < argc) {
@@ -2975,6 +2991,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --burst-group-size <N>    Burst interleave group size (2-8, default: 8)\n";
                 std::cout << "  --harq                    Enable RX soft-combining HARQ (default: off)\n";
                 std::cout << "  --no-harq                 Keep RX soft-combining HARQ disabled for A/B tests\n";
+                std::cout << "  --papr-reduction on|off   OFDM data PAPR reduction (default: on)\n";
                 std::cout << "  --rx-overfeed-factor <N>  Run audio callbacks N× faster wall-clock (stress, default: 1)\n";
                 std::cout << "  --decode-delay-ms <N>     Add decode-thread delay (0-500 ms, stress)\n";
                 std::cout << "  --rx-batch-callbacks <N>  Batch N callbacks per decoder feed (stress)\n";

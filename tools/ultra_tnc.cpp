@@ -420,6 +420,7 @@ private:
         encoder_.setDataMode(data_modulation_, data_code_rate_);
         encoder_.setMCDPSKCarriers(8);
         encoder_.setFixedFrameCodewords(v2::kDefaultFixedFrameCodewords);
+        encoder_.setPaprReductionEnabled(cfg_.papr_reduction);
 
         decoder_.setLogPrefix(cfg_.callsign);
         decoder_.setMode(WaveformMode::MC_DPSK, false);
@@ -919,6 +920,7 @@ int main(int argc, char** argv) {
         "\",\"bind_address\":\"" + ultra::diagnostics::jsonEscape(cfg.bind_address) +
         "\",\"port\":" + std::to_string(cfg.port) +
         ",\"tx_drive\":" + std::to_string(cfg.tx_drive) +
+        ",\"papr_reduction\":" + std::string(cfg.papr_reduction ? "true" : "false") +
         ",\"audio_input\":\"" + ultra::diagnostics::jsonEscape(audioDeviceLabel(cfg.audio_input)) +
         "\",\"audio_output\":\"" + ultra::diagnostics::jsonEscape(audioDeviceLabel(cfg.audio_output)) +
         "\"}";
