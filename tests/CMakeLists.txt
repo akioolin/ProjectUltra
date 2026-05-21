@@ -395,6 +395,27 @@ target_link_libraries(test_streaming_mc_dpsk PRIVATE ultra_core)
 add_test(NAME StreamingMCDPSK COMMAND test_streaming_mc_dpsk)
 
 if(TARGET ultra_sim_station)
+    add_executable(test_tx_burst_normalization
+        test_tx_burst_normalization.cpp
+        ../src/gui/modem/modem_engine.cpp
+        ../src/gui/modem/modem_rx.cpp
+        ../src/gui/modem/modem_rx_decode.cpp
+        ../src/gui/modem/modem_mode.cpp
+        ../src/gui/modem/modem_carrier_sense.cpp
+        ../src/gui/adaptive_mode.cpp
+        ${ULTRA_STREAMING_DECODER_SOURCES}
+        ../src/gui/modem/streaming_encoder.cpp
+    )
+    target_include_directories(test_tx_burst_normalization PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
+    )
+    target_link_libraries(test_tx_burst_normalization PRIVATE ultra_core ota_channel_core)
+    add_test(NAME TxBurstNormalization COMMAND test_tx_burst_normalization)
+    set_tests_properties(TxBurstNormalization PROPERTIES
+        TIMEOUT 90
+        LABELS regression)
+
     add_executable(test_channel_snr_calibration test_channel_snr_calibration.cpp)
     target_include_directories(test_channel_snr_calibration PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../src
@@ -766,6 +787,7 @@ ultra_enable_test_warnings(
     test_ping_detector.cpp
     test_streaming_signal_policy.cpp
     test_snr_source_routing.cpp
+    test_tx_burst_normalization.cpp
     test_streaming_mc_dpsk.cpp
     test_channel_snr_calibration.cpp
     test_modem_snr_meter_calibration.cpp
