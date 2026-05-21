@@ -574,6 +574,15 @@ if(TARGET cli_simulator)
         TIMEOUT 240
         RUN_SERIAL TRUE
         LABELS regression)
+
+    if(TARGET ota_simulator)
+        add_test(NAME CliOtasimMandatory
+            COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_cli_otasim_mandatory.sh)
+        set_tests_properties(CliOtasimMandatory PROPERTIES
+            TIMEOUT 120
+            RUN_SERIAL TRUE
+            LABELS regression)
+    endif()
 endif()
 
 if(TARGET ota_simulator)

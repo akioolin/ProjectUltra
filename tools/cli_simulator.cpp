@@ -1,15 +1,25 @@
 /**
- * CLI Simulator - Single Audio I/O Thread Model (like real sound card)
+ * CLI Simulator -- OTASim test harness for the two-station modem.
  *
- * Each station has ONE audio thread that handles both TX and RX,
- * exactly like a real sound card callback:
- *   - Every 10ms, read RX samples from channel
+ * In the default --role both mode, both ALPHA and BRAVO run as OtaAudioPort
+ * gRPC/UDP clients against an OTASim server (spawned locally per-run, or
+ * connected to via --ota-host). All audio between the two stations MUST
+ * traverse OTASim -- there is intentionally no in-process audio fallback,
+ * because OTASim is the documented production simulator path (ITU-R F.1487
+ * Watterson channel, sample-clock pacing, real gRPC/UDP transport). The
+ * CliOtasimMandatory ctest gate enforces this invariant.
+ *
+ * In --role A or --role B, a single station runs against real soundcard
+ * I/O (HardwareAudioPort) for Mac-Pi5 cable/radio testing. That path uses
+ * the SimulatedChannel-based ChannelInjector only to overlay a Watterson
+ * channel on top of the clean cable before the soundcard.
+ *
+ * Each station has ONE audio thread that handles both TX and RX, exactly
+ * like a real sound card callback:
+ *   - Every 10ms, read RX samples from the audio port
  *   - Feed RX to StreamingDecoder
  *   - Check if we have TX samples pending
- *   - Send TX samples to channel
- *
- * REFACTORED: Uses IWaveform + StreamingDecoder directly (not ModemEngine)
- * This ensures consistent configuration between TX and RX.
+ *   - Push TX samples to the audio port
  */
 
 #include <iostream>
@@ -916,6 +926,35 @@ public:
 
         printHeader();
 
+        // OTASim is MANDATORY in --role both (default) mode.
+        //
+        // Every audio sample crossing between ALPHA and BRAVO in this mode
+        // MUST traverse the OTASim gRPC/UDP production path. There is
+        // intentionally NO in-process audio fallback in this binary. The
+        // CI test `cli_otasim_mandatory` greps for the BACKEND LOCKED
+        // banner below to enforce this invariant — if you find yourself
+        // bypassing it, you are wrong; fix the test setup, not the modem.
+        if (ota_host_.empty()) {
+            std::filesystem::path bin_path(ota_server_binary_);
+            if (bin_path.is_absolute() || bin_path.has_parent_path()) {
+                if (!std::filesystem::exists(bin_path)) {
+                    std::cerr << "\n"
+                              << "═══════════════════════════════════════════════════════════════════\n"
+                              << "  FATAL: OTASim binary missing and is MANDATORY\n"
+                              << "  Expected at: " << bin_path.string() << "\n"
+                              << "  Build it:    cmake --build build --target ota_simulator\n"
+                              << "  Or remote:   pass --ota-host <host:port>\n"
+                              << "═══════════════════════════════════════════════════════════════════\n";
+                    return false;
+                }
+            }
+        }
+
+        std::cout << "\n"
+                  << "═══════════════════════════════════════════════════════════════════\n"
+                  << "  OTASim BACKEND IS MANDATORY -- no in-process audio fallback\n"
+                  << "═══════════════════════════════════════════════════════════════════\n";
+
         LocalOtaServer local_server;
         active_ota_grpc_target_ = ota_host_;
         const bool spawned_local = active_ota_grpc_target_.empty();
@@ -926,10 +965,10 @@ public:
                 return false;
             }
             active_ota_grpc_target_ = local_server.grpcTarget();
-            std::cout << "  OTASim: spawned " << active_ota_grpc_target_
+            std::cout << "  OTASim BACKEND LOCKED: spawned " << active_ota_grpc_target_
                       << " (captures " << local_server.captureRoot().string() << ")\n";
         } else {
-            std::cout << "  OTASim: using " << active_ota_grpc_target_ << "\n";
+            std::cout << "  OTASim BACKEND LOCKED: " << active_ota_grpc_target_ << " (remote)\n";
         }
 
         {
@@ -2168,7 +2207,7 @@ private:
     void printHeader() {
         std::cout << "\n";
         std::cout << "╔══════════════════════════════════════════════════════════════╗\n";
-        std::cout << "║   CLI Simulator - IWaveform + StreamingDecoder               ║\n";
+        std::cout << "║   CLI Simulator -- OTASim test harness                          ║\n";
         std::cout << "╚══════════════════════════════════════════════════════════════╝\n";
         std::cout << "\n";
         std::cout << "  SNR:     " << snr_db_ << " dB\n";
@@ -2692,7 +2731,7 @@ int main(int argc, char* argv[]) {
             } else if (arg == "--log-file" && i + 1 < argc) {
                 log_file_path = argv[++i];
             } else if (arg == "--help" || arg == "-h") {
-                std::cout << "CLI Simulator - IWaveform + StreamingDecoder Model\n\n";
+                std::cout << "CLI Simulator -- OTASim test harness (two-station modem, Watterson channel)\n\n";
                 std::cout << "Uses IWaveform for TX and StreamingDecoder for RX directly.\n";
                 std::cout << "Every 10ms: read RX, feed decoder, get TX, send to channel.\n\n";
                 std::cout << "Options:\n";
