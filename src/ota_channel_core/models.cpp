@@ -1,4 +1,5 @@
 #include "ota_channel_core/models.hpp"
+#include "ultra/tx_burst_normalization.hpp"
 
 #define POCKETFFT_CACHE_SIZE 64
 #if defined(__APPLE__) || defined(__unix__)
@@ -26,9 +27,6 @@ constexpr float kPi = 3.14159265358979323846f;
 constexpr uint16_t kWavFormatPcm = 1;
 constexpr uint16_t kRealHfLoopChannels = 1;
 constexpr uint16_t kRealHfLoopBitsPerSample = 16;
-constexpr size_t kIdleSnrBandpassTaps = 101;
-constexpr float kIdleSnrBandLowHz = 50.0f;
-constexpr float kIdleSnrBandHighHz = 2950.0f;
 constexpr size_t kWattersonHilbertTaps = 1793;
 constexpr float kWattersonAnalyticLowpassHz = 3050.0f;
 constexpr size_t kGaussianDopplerSosOscillators = 128;
@@ -105,26 +103,8 @@ float modemReferenceBroadbandNoiseStddev(float broadband_snr_db) {
 }
 
 std::vector<float> modemBandpassFirCoefficients() {
-    std::vector<float> coeffs(kIdleSnrBandpassTaps);
-    const float fc_low = kIdleSnrBandLowHz / static_cast<float>(kDefaultSampleRate);
-    const float fc_high = kIdleSnrBandHighHz / static_cast<float>(kDefaultSampleRate);
-    const int midpoint = static_cast<int>((kIdleSnrBandpassTaps - 1) / 2);
-
-    for (int n = 0; n < static_cast<int>(kIdleSnrBandpassTaps); ++n) {
-        if (n == midpoint) {
-            coeffs[static_cast<size_t>(n)] = 2.0f * (fc_high - fc_low);
-        } else {
-            const float x = kPi * static_cast<float>(n - midpoint);
-            coeffs[static_cast<size_t>(n)] =
-                (std::sin(2.0f * fc_high * x) -
-                 std::sin(2.0f * fc_low * x)) / x;
-        }
-        const float w = 2.0f * kPi * static_cast<float>(n) /
-                        static_cast<float>(kIdleSnrBandpassTaps - 1);
-        coeffs[static_cast<size_t>(n)] *=
-            0.42f - 0.5f * std::cos(w) + 0.08f * std::cos(2.0f * w);
-    }
-    return coeffs;
+    const auto& coeffs = ultra::sim::referenceBandFirCoefficients();
+    return std::vector<float>(coeffs.begin(), coeffs.end());
 }
 
 float processFirSample(float sample,

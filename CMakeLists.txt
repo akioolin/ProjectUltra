@@ -327,6 +327,7 @@ else()
 endif()
 
 add_library(ota_channel_core STATIC
+    src/sim/tx_burst_normalization.cpp
     src/ota_channel_core/rng.cpp
     src/ota_channel_core/models.cpp
     src/ota_channel_core/mixer.cpp
@@ -336,6 +337,7 @@ add_library(ota_channel_core STATIC
 )
 set_target_properties(ota_channel_core PROPERTIES OUTPUT_NAME ota_channel_core)
 target_include_directories(ota_channel_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ota_channel_core
 )
 target_include_directories(ota_channel_core PRIVATE
@@ -454,6 +456,7 @@ target_include_directories(ultra_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_BINARY_DIR}/generated/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src  # For protocol headers
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ota_channel_core  # Shared simulator calibration constants
     ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty  # For miniz
     ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/stb  # Header-only image decode/resize/write
 )

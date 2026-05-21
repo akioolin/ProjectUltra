@@ -1,27 +1,26 @@
 #pragma once
 
+#include "ota_channel_core/models.hpp"
+
 #include <cmath>
 
 namespace ultra::sim {
 
-// Empirically measured from StreamingEncoder::encodePing() output on
-// 2026-05-14: 62208 samples, broadband RMS 0.318072406640.
-inline constexpr float kModemReferenceBroadbandRms = 0.3180724f;
-
-// The operator-facing SNR convention is receiver in-band signal/noise. Measured
-// by passing the same PING through the 101-tap 50-2950 Hz receive FIR:
-// in-band RMS 0.304826641347, i.e. -0.369461 dB versus broadband.
-inline constexpr float kModemReferenceInBandRms = 0.30482664f;
+// Compatibility aliases for simulator code. The canonical modem SNR reference
+// constants live in ota_channel_core because that is where channel/noise
+// injection is defined.
+inline constexpr float kModemReferenceBroadbandRms =
+    ota_channel_core::kModemReferenceBroadbandRms;
+inline constexpr float kModemReferenceInBandRms =
+    ota_channel_core::kModemReferenceInBandRms;
 inline constexpr float kModemReferenceRms = kModemReferenceInBandRms;
 inline constexpr double kModemReferencePower =
-    static_cast<double>(kModemReferenceRms) *
-    static_cast<double>(kModemReferenceRms);
+    ota_channel_core::kModemReferencePower;
 
-// Equivalent noise bandwidth of the 101-tap 50-2950 Hz receive FIR used by
-// IdleNoiseSNREstimator. White broadband noise at the channel input leaves this
-// fraction of its power inside the modem band.
-inline constexpr double kModemInBandNoisePowerFraction = 0.10858718;
-inline constexpr double kModemBroadbandToInBandSnrOffsetDb = 9.64221445;
+inline constexpr double kModemInBandNoisePowerFraction =
+    ota_channel_core::kModemInBandNoisePowerFraction;
+inline constexpr double kModemBroadbandToInBandSnrOffsetDb =
+    ota_channel_core::kModemBroadbandToInBandSnrOffsetDb;
 
 inline float broadbandToInBandSnrDb(float broadband_snr_db) {
     return broadband_snr_db +
@@ -34,7 +33,7 @@ inline float inBandToBroadbandSnrDb(float in_band_snr_db) {
 }
 
 inline float modemReferenceBroadbandNoiseStddev(float broadband_snr_db) {
-    return kModemReferenceRms *
+    return ota_channel_core::kModemReferenceRms *
            std::pow(10.0f, -broadband_snr_db / 20.0f);
 }
 
