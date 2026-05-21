@@ -799,6 +799,18 @@ private:
             applyAwgn(samples);
         }
 
+        const auto measurement =
+            ultra::sim::normalizeTxBurstForHardware(samples, cfg_.tx_drive);
+        if (measurement.burst_fragment_warning) {
+            LOG_WARN("AUDIO",
+                     "Hardware TX peak normalization bypassed fragment: "
+                     "active=%zu minimum=%zu samples=%zu target=%.3f",
+                     measurement.active_samples,
+                     ultra::sim::kTxBurstMinimumActiveSamples,
+                     samples.size(),
+                     measurement.target_peak);
+        }
+
         audio_.queueTxSamples(samples);
         if (tx_waveform_mode_ == WaveformMode::OFDM_CHIRP) {
             constexpr size_t kReplyTurnaroundSamples = kSampleRate * 50 / 1000;
@@ -906,6 +918,7 @@ int main(int argc, char** argv) {
         ultra::diagnostics::jsonEscape(cfg.callsign) +
         "\",\"bind_address\":\"" + ultra::diagnostics::jsonEscape(cfg.bind_address) +
         "\",\"port\":" + std::to_string(cfg.port) +
+        ",\"tx_drive\":" + std::to_string(cfg.tx_drive) +
         ",\"audio_input\":\"" + ultra::diagnostics::jsonEscape(audioDeviceLabel(cfg.audio_input)) +
         "\",\"audio_output\":\"" + ultra::diagnostics::jsonEscape(audioDeviceLabel(cfg.audio_output)) +
         "\"}";
@@ -948,6 +961,11 @@ int main(int argc, char** argv) {
              cfg.callsign.c_str(), cfg.bind_address.c_str(),
              static_cast<unsigned>(cfg.port), static_cast<unsigned>(cfg.port + 1),
              ultra::logLevelName(cfg.log_level));
+    LOG_INFO("AUDIO",
+             "TX drive (tx_drive=%.3f) now controls per-burst peak target, "
+             "not post-mix attenuation. Previous tx_drive = 0.8 behavior is "
+             "replaced by per-burst peak normalization to tx_drive's value.",
+             cfg.tx_drive);
     LOG_INFO("OPERATOR", "Build: version=%s commit=%s dirty=%s tag=%s built=%s os=%s",
              ultra::kBuildVersion, ultra::kBuildGitCommit,
              ultra::kBuildDirty ? "true" : "false",

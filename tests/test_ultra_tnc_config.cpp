@@ -250,6 +250,20 @@ void test_applyConfigKey_inject_channel_modes() {
     pass("applyConfigKey: inject_channel accepts bool + 'awgn', rejects others");
 }
 
+void test_applyConfigKey_tx_drive_clamped() {
+    Config cfg;
+    CHECK(applyConfigKey("tx_drive", "0.50", cfg), "tx_drive ok");
+    CHECK(std::abs(cfg.tx_drive - 0.50f) < 0.0001f, "tx_drive value stored");
+    CHECK(applyConfigKey("tx-drive", "1.50", cfg), "tx-drive alias ok");
+    CHECK(std::abs(cfg.tx_drive - ultra::sim::kHardwareTxMaxPeakTarget) < 0.0001f,
+          "tx_drive clamps to hardware ceiling");
+    CHECK(applyConfigKey("tx_drive", "0.01", cfg), "low tx_drive ok");
+    CHECK(std::abs(cfg.tx_drive - ultra::sim::kHardwareTxMinPeakTarget) < 0.0001f,
+          "tx_drive clamps to hardware floor");
+    CHECK(!applyConfigKey("tx_drive", "bad", cfg), "bad tx_drive rejected");
+    pass("applyConfigKey: tx_drive hardware peak target parsed and clamped");
+}
+
 void test_applyConfigKey_ptt_baud_strict() {
     Config cfg;
     CHECK(applyConfigKey("ptt_serial_baud", "9600", cfg) && cfg.ptt_serial_baud == 9600,
@@ -512,6 +526,14 @@ void test_parseArgs_log_flags() {
     pass("parseArgs: log flags stored");
 }
 
+void test_parseArgs_tx_drive_flag() {
+    Argv argv({"ultra_tnc", "--tx-drive", "0.65"});
+    Config cfg;
+    CHECK(parseArgs(argv.argc(), argv.data(), cfg), "parse ok");
+    CHECK(std::abs(cfg.tx_drive - 0.65f) < 0.0001f, "tx_drive flag stored");
+    pass("parseArgs: --tx-drive stored");
+}
+
 void test_parseArgs_sim_audio_flags() {
     Argv argv({"ultra_tnc", "--sim-audio",
                "--ota-host", "127.0.0.1:47000",
@@ -606,6 +628,7 @@ int main() {
     test_applyConfigKey_port_bounds();
     test_applyConfigKey_callsign_sanitized();
     test_applyConfigKey_inject_channel_modes();
+    test_applyConfigKey_tx_drive_clamped();
     test_applyConfigKey_ptt_baud_strict();
     test_applyConfigKey_ptt_inactive_high_strict();
     test_applyConfigKey_ptt_serial_line();
@@ -634,6 +657,7 @@ int main() {
     test_parseArgs_ptt_cat_serial_mutual_exclusion();
     test_parseArgs_ptt_cat_serial_mutual_exclusion_from_config();
     test_parseArgs_log_flags();
+    test_parseArgs_tx_drive_flag();
     test_parseArgs_sim_audio_flags();
     test_parseArgs_sim_audio_requires_identity();
     test_parseArgs_mod_qam16_requires_expert();

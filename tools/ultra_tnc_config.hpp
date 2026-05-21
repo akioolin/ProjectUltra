@@ -8,6 +8,7 @@
 
 #include "ultra/types.hpp"
 #include "ultra/logging.hpp"
+#include "ultra/tx_burst_normalization.hpp"
 
 #include <climits>
 #include <cstdint>
@@ -37,6 +38,7 @@ struct Config {
     bool inject_channel = false;
     std::string inject_channel_type = "awgn";
     float snr_db = 20.0f;
+    float tx_drive = ultra::sim::kHardwareTxDefaultPeakTarget;
     ultra::CodeRate forced_rate = ultra::CodeRate::AUTO;
     ultra::Modulation forced_mod = ultra::Modulation::AUTO;
     OFDMConfigPreset ofdm_config = OFDMConfigPreset::Default;

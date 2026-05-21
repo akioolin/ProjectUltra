@@ -3,7 +3,9 @@
 #include "protocol/frame_v2.hpp"
 #include "sim/cli_enums.hpp"
 
+#include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -85,6 +87,16 @@ std::optional<ultra::Modulation> parseModulation(const std::string& value, bool 
         value, ultra::tools::cli::AllowAuto::Yes, allow_experimental);
 }
 
+std::optional<float> parseTxDriveTarget(const std::string& value) {
+    auto parsed = parseFloat(value);
+    if (!parsed || !std::isfinite(*parsed)) {
+        return std::nullopt;
+    }
+    return std::clamp(*parsed,
+                      ultra::sim::kHardwareTxMinPeakTarget,
+                      ultra::sim::kHardwareTxMaxPeakTarget);
+}
+
 bool envFlagEnabled(const char* name) {
     if (const char* value = std::getenv(name)) {
         const std::string v = lower(value);
@@ -137,6 +149,7 @@ void printUsage(std::ostream& out) {
         << "                              (only awgn is implemented; other types rejected)\n"
         << "  --no-inject-channel         Override config inject_channel=true back to false\n"
         << "  --snr <db>                  SNR for channel injection and mode reports\n"
+        << "  --tx-drive <0.05..0.70>     Hardware TX target peak (default: 0.50)\n"
         << "  --rate <auto|r1_4|r1_2|r2_3|r3_4>\n"
         << "  --mod <auto|dqpsk>\n"
         << "  --expert                    Allow lab-only forced PHY modes in --mod\n"
@@ -249,6 +262,10 @@ bool applyConfigKey(const std::string& key, const std::string& value, Config& cf
         auto parsed = parseFloat(value);
         if (!parsed) return false;
         cfg.snr_db = *parsed;
+    } else if (key == "tx_drive" || key == "tx-drive") {
+        auto parsed = parseTxDriveTarget(value);
+        if (!parsed) return false;
+        cfg.tx_drive = *parsed;
     } else if (key == "rate") {
         auto parsed = parseCodeRate(value);
         if (!parsed) return false;
@@ -503,6 +520,14 @@ bool parseArgs(int argc, char** argv, Config& cfg) {
                 return false;
             }
             cfg.snr_db = *parsed;
+        } else if (arg == "--tx-drive") {
+            auto value = requireValue("--tx-drive");
+            auto parsed = value ? parseTxDriveTarget(*value) : std::nullopt;
+            if (!parsed) {
+                std::cerr << "Invalid --tx-drive value\n";
+                return false;
+            }
+            cfg.tx_drive = *parsed;
         } else if (arg == "--rate") {
             auto value = requireValue("--rate");
             auto parsed = value ? parseCodeRate(*value) : std::nullopt;
