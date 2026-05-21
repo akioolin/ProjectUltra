@@ -10,6 +10,89 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-21: cli_simulator + OTASim sample-clock-paced test path
+
+**Fixed:** The cli_simulator + OTASim test path was wall-clock-driven end to
+end: audio threads on each station pulled samples on real time, the server
+tick thread advanced the session clock on `steady_clock` intervals, ARQ
+timers ran on real elapsed milliseconds, and carrier sense queried
+`steady_clock::now()`. Same-seed runs of the same command produced different
+`retx` values depending on host scheduling jitter, log-level overhead, and
+UDP packet arrival timing. Earlier surgical fixes (rounds 1-5, commit
+`569a95b`) closed wall-clock leaks one at a time — sample-indexed noise,
+per-lease clock bridge, channel-epoch anchor, first-TX gate, deterministic
+protocol tick — but each fix exposed the next leak underneath. Trial-to-trial
+variance went from ~50% to ~10-30% but never to zero. The remaining variance
+came from host scheduling: even with the server made deterministic, the
+client still presented audio to the modem at wall-clock-paced intervals.
+
+**Changed:** cli_simulator now opts into a new `sample_clock_pacing` mode
+for the OTASim test path. Both ALPHA and BRAVO `SimulatedStation` instances
+are driven by a single synchronous sample pump (`pumpOtaSampleClockOnce` in
+`tools/cli_simulator.cpp:1739`) that pulls 480 TX samples from each station,
+queues both, blocks for exactly 480 RX samples back from the server, feeds
+RX synchronously, and advances ARQ timers by a deterministic 10 ms
+`tickByMs` call. The OTASim server skips its async wall-clock tick thread
+for sessions flagged sample-clock-paced and instead barrier-syncs: it only
+advances the session clock when every joined station has one tick of audio
+queued (`processSampleClockSessionTicks` in
+`src/ota_simulator_service/ota_simulator_service.cpp:858`). Carrier sense in
+`SimulatedStation` is pluggable: when the OTASim pump injects a sample-clock
+timestamp via `setCarrierSenseSampleClock`, the `ChannelBusyDetector`
+consumes it instead of `steady_clock::now()`
+(`tools/sim/simulated_station.hpp:260`,
+`src/audio/channel_busy_detector.hpp:51`). The `OtaAudioBackend` sample-clock
+mode skips the prime packet and exposes a blocking `waitForRxSamples`
+primitive driven by a condition variable.
+
+**Why it works:** Eliminating wall-clock dependencies one at a time was
+whack-a-mole because every layer that "absorbed" host scheduling jitter on
+the server still let the client present audio to the modem on
+wall-clock-paced boundaries. The architectural answer is to make the entire
+test path advance by a single deterministic sample counter: client TX pull,
+server tick, RX delivery, and ARQ tick all gated on exact sample counts. No
+`sleep`, no `steady_clock`, no thread races. The server's barrier-sync pump
+enforces the invariant that the channel clock only advances when both
+stations have contributed audio for the same tick, so the channel noise
+sequence is invariant across trials regardless of trial-to-trial wall-clock
+spacing.
+
+**Hardware path unaffected:** `sample_clock_pacing` is opt-in. The backend
+config defaults to `false` and only cli_simulator sets it `true` on its two
+test backends. ultra_gui, ultra_tnc, and the SDL2 hardware audio path never
+set the flag, so the server keeps its async tick thread, the client keeps
+the prime packet and wall-clock RX polling, and
+`AudioPort::isChannelIdleFor` falls through to `steady_clock::now()` when no
+sample-clock is injected. The hardware build was sanity-checked with a
+5-second `--role A` startup probe; no live Mac<->Pi soundcard session was
+run as part of this work.
+
+**Verification:**
+- `ctest --test-dir build -R SimulatorDeterminism --output-on-failure`:
+  PASS (test now covers six persistent-session trials with
+  `wall_clock_delay_ms = trial % 3` injected between trials)
+- Fresh-server 20x sweep at AWGN SNR=10 seed=200: 20/20 identical
+  (`retx=0, frames=11, frame_success=100.0, TEST PASSED`)
+- Same-server 20x sweep without restart: 20/20 identical and matching the
+  fresh-server values
+- Combined unique tally across all 40 trials: single value for retx, frames,
+  frame_success, result
+- Trial wall-clock time dropped from ~30 s to ~3-4 s (~10x faster)
+
+**Out of scope:**
+- Watterson/fading determinism (AWGN-first; should extend to the same
+  architecture)
+- Real Mac<->Pi soundcard verification (rig not attached during this work;
+  hardware path is preserved by construction)
+- Cleanup of `sample_clock_pacing_sessions_` set on session deletion
+  (idempotent on re-register; benign in practice)
+- Cosmetic collapse of `if (ota_sample_clock_mode_)` guards inside the
+  OTASim test runner (mode is unconditional on that path today)
+
+**Builds on:** Commit `569a95b` (channel-core determinism: Rounds 1-3).
+
+---
+
 ## 2026-05-20: Warm-sync LTS detection makes OFDM R1/4 usable at 10 dB AWGN
 
 **Fixed:** Connected OFDM light-preamble frames were decoded as isolated cold

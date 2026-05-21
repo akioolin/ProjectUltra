@@ -253,6 +253,19 @@ uint64_t UdpAudioPlane::addLease(std::string session_id, std::string station_id)
     return lease_id;
 }
 
+void UdpAudioPlane::removeLeases(std::string_view session_id,
+                                 std::string_view station_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto it = leases_.begin(); it != leases_.end();) {
+        if (it->second.session_id == session_id &&
+            it->second.station_id == station_id) {
+            it = leases_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 std::vector<UdpAudioPlane::LeaseSnapshot> UdpAudioPlane::leasesForSession(
     std::string_view session_id) const {
     std::lock_guard<std::mutex> lock(mutex_);

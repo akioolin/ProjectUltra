@@ -229,6 +229,7 @@ bool setOtaChannel(const std::string& grpc_target,
                    ChannelType channel_type,
                    float snr_db,
                    uint64_t seed,
+                   bool sample_clock_pacing,
                    std::string* error) {
     auto channel = grpc::CreateChannel(grpc_target, grpc::InsecureChannelCredentials());
     if (!channel->WaitForConnected(std::chrono::system_clock::now() +
@@ -242,6 +243,9 @@ bool setOtaChannel(const std::string& grpc_target,
     request.set_model(channelModelForOta(channel_type));
     request.set_snr_db(snr_db);
     request.set_seed(seed);
+    if (sample_clock_pacing) {
+        request.set_sample_clock_pacing(true);
+    }
     otasim::CommandAck ack;
     grpc::ClientContext context;
     addOtaToken(context, token);
@@ -357,6 +361,15 @@ public:
             e2eDebugLine(oss.str());
         }
         return shaped;
+    }
+
+    std::vector<float> pullRxBlocking(size_t count,
+                                      std::chrono::milliseconds timeout) override {
+        std::vector<float> samples;
+        if (!backend_.waitForRxSamples(count, timeout, &samples)) {
+            return {};
+        }
+        return shapeRxForLocalRadio(std::move(samples), count);
     }
 
     void queueTx(const std::vector<float>& samples) override {
@@ -922,7 +935,8 @@ public:
         {
             std::string error;
             if (!setOtaChannel(active_ota_grpc_target_, ota_alpha_token_,
-                               ota_session_id_, channel_type_, snr_db_, seed_, &error)) {
+                               ota_session_id_, channel_type_, snr_db_, seed_,
+                               true, &error)) {
                 std::cerr << "Failed to configure OTASim channel: " << error << "\n";
                 return false;
             }
@@ -953,12 +967,14 @@ public:
         alpha_ota.token = ota_alpha_token_;
         alpha_ota.station_id = "ALPHA";
         alpha_ota.session_id = ota_session_id_;
+        alpha_ota.sample_clock_pacing = true;
 
         otasim_client::OtaAudioBackendConfig bravo_ota;
         bravo_ota.grpc_target = active_ota_grpc_target_;
         bravo_ota.token = ota_bravo_token_;
         bravo_ota.station_id = "BRAVO";
         bravo_ota.session_id = ota_session_id_;
+        bravo_ota.sample_clock_pacing = true;
 
         // All turn-arounds are serialized by AudioPort carrier sense.
         protocol::ConnectionConfig connection_config;
@@ -1054,9 +1070,19 @@ public:
             file_received_ = true;
         });
 
-        // Start audio threads
-        alpha_->start();
-        bravo_->start();
+        ota_sample_clock_mode_ = true;
+        if (ota_sample_clock_mode_) {
+            if (!alpha_->startSampleClockPump()) {
+                return false;
+            }
+            if (!bravo_->startSampleClockPump()) {
+                alpha_->stopSampleClockPump();
+                return false;
+            }
+        } else {
+            alpha_->start();
+            bravo_->start();
+        }
 
         // Run protocol test (message, file, or burst)
         bool success;
@@ -1071,8 +1097,13 @@ public:
         }
 
         // Stop
-        alpha_->stop();
-        bravo_->stop();
+        if (ota_sample_clock_mode_) {
+            alpha_->stopSampleClockPump();
+            bravo_->stopSampleClockPump();
+        } else {
+            alpha_->stop();
+            bravo_->stop();
+        }
         if (ota_capture_active_) {
             std::string error;
             std::string stopped_path;
@@ -1173,6 +1204,7 @@ private:
     std::string active_ota_grpc_target_;
     bool ota_capture_active_ = false;
     std::string ota_capture_path_;
+    bool ota_sample_clock_mode_ = false;
 
     std::unique_ptr<SimulatedStation> alpha_;
     std::unique_ptr<SimulatedStation> bravo_;
@@ -1302,7 +1334,7 @@ private:
         std::string error;
         if (!setOtaChannel(active_ota_grpc_target_, ota_alpha_token_,
                            ota_session_id_, adaptive_hop_channel_,
-                           adaptive_hop_snr_db_, seed_, &error)) {
+                           adaptive_hop_snr_db_, seed_, true, &error)) {
             std::cout << "  \033[31m✗ OTASim channel update failed: "
                       << error << "\033[0m\n";
             return false;
@@ -1674,6 +1706,10 @@ private:
     }
 
     bool waitFor(std::function<bool()> condition, int timeout_seconds) {
+        if (ota_sample_clock_mode_) {
+            return waitForSampleClocked(std::move(condition), timeout_seconds);
+        }
+
         auto start = std::chrono::steady_clock::now();
         int last_print = -1;
 
@@ -1698,6 +1734,48 @@ private:
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         return true;
+    }
+
+    bool pumpOtaSampleClockOnce() {
+        constexpr size_t kPumpSamples = SimulatedStation::SAMPLES_PER_CALLBACK;
+        constexpr auto kRxWait = std::chrono::seconds(2);
+
+        auto alpha_tx = alpha_->sampleClockPullTx(kPumpSamples);
+        auto bravo_tx = bravo_->sampleClockPullTx(kPumpSamples);
+        alpha_->sampleClockQueueTx(alpha_tx);
+        bravo_->sampleClockQueueTx(bravo_tx);
+
+        auto alpha_rx = alpha_->sampleClockPullRx(kPumpSamples, kRxWait);
+        auto bravo_rx = bravo_->sampleClockPullRx(kPumpSamples, kRxWait);
+        if (alpha_rx.size() != kPumpSamples || bravo_rx.size() != kPumpSamples) {
+            return false;
+        }
+
+        alpha_->sampleClockPushRx(alpha_rx);
+        bravo_->sampleClockPushRx(bravo_rx);
+        alpha_->tickByMs(SimulatedStation::CALLBACK_INTERVAL_MS);
+        bravo_->tickByMs(SimulatedStation::CALLBACK_INTERVAL_MS);
+        return true;
+    }
+
+    bool waitForSampleClocked(std::function<bool()> condition, int timeout_seconds) {
+        const uint64_t max_ticks = static_cast<uint64_t>(timeout_seconds) * 1000ULL /
+            static_cast<uint64_t>(SimulatedStation::CALLBACK_INTERVAL_MS);
+        int last_print = -1;
+
+        for (uint64_t tick = 0; tick < max_ticks && !condition(); ++tick) {
+            if (!pumpOtaSampleClockOnce()) {
+                return false;
+            }
+
+            const int elapsed = static_cast<int>(
+                ((tick + 1) * SimulatedStation::CALLBACK_INTERVAL_MS) / 1000);
+            if (elapsed != last_print && elapsed % 2 == 0) {
+                std::cout << "  [" << alpha_->getSimTime() << "s sim]\n";
+                last_print = elapsed;
+            }
+        }
+        return condition();
     }
 
     int mcDpskHandshakeTimeoutSeconds() const {

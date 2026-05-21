@@ -122,6 +122,7 @@ message SetChannelRequest {
   string model = 2;
   double snr_db = 3;
   uint64 seed = 4;
+  optional bool sample_clock_pacing = 5;
 }
 
 message InjectEffectRequest {

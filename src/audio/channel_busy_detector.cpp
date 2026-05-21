@@ -168,6 +168,12 @@ bool ChannelBusyDetector::isIdleFor(std::chrono::milliseconds guard) const {
     return idleForLocked(Clock::now(), guard);
 }
 
+bool ChannelBusyDetector::isIdleFor(std::chrono::milliseconds guard,
+                                    TimePoint now) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return idleForLocked(now, guard);
+}
+
 ChannelBusyDetector::TimePoint ChannelBusyDetector::lastBusyAt() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return last_busy_at_;

@@ -37,6 +37,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <functional>
+#include <optional>
 #include <sstream>
 
 #include "waveform/waveform_factory.hpp"
@@ -235,6 +236,11 @@ public:
     virtual ~AudioPort() = default;
     // Pull up to `count` RX samples; pads with noise/zero if buffer underruns.
     virtual std::vector<float> pullRx(size_t count) = 0;
+    virtual std::vector<float> pullRxBlocking(size_t count,
+                                              std::chrono::milliseconds timeout) {
+        (void)timeout;
+        return pullRx(count);
+    }
     // Push TX samples for transmission.
     virtual void queueTx(const std::vector<float>& samples) = 0;
     // VirtualAudioPort needs the simulator's 10 ms loop to pace samples into
@@ -252,6 +258,10 @@ public:
         return channel_busy_detector_.isIdle();
     }
     bool isChannelIdleFor(uint32_t guard_ms) const {
+        if (carrier_sense_sample_clock_time_) {
+            return channel_busy_detector_.isIdleFor(std::chrono::milliseconds(guard_ms),
+                                                    *carrier_sense_sample_clock_time_);
+        }
         return channel_busy_detector_.isIdleFor(std::chrono::milliseconds(guard_ms));
     }
     bool waitForChannelIdle(uint32_t guard_ms) {
@@ -264,15 +274,32 @@ public:
     float channelRms() const {
         return channel_busy_detector_.currentRms();
     }
+    void setCarrierSenseSampleClock(uint64_t sample_index,
+                                    uint32_t sample_rate = 48000) const {
+        const auto micros = static_cast<int64_t>(
+            (sample_index * 1'000'000ULL) / std::max<uint32_t>(1, sample_rate));
+        carrier_sense_sample_clock_time_ =
+            ultra::audio::ChannelBusyDetector::TimePoint{} +
+            std::chrono::microseconds(micros);
+    }
+    void clearCarrierSenseSampleClock() const {
+        carrier_sense_sample_clock_time_.reset();
+    }
 
 protected:
     bool attachedRadioInRxBlackout() const;
     std::vector<float> shapeRxForLocalRadio(std::vector<float> samples,
                                             size_t count) const;
+    ultra::audio::ChannelBusyDetector::TimePoint carrierSenseNow() const {
+        return carrier_sense_sample_clock_time_.value_or(
+            ultra::audio::ChannelBusyDetector::Clock::now());
+    }
 
 private:
     const RadioPttStateMachine* attached_ptt_ = nullptr;
     mutable ultra::audio::ChannelBusyDetector channel_busy_detector_;
+    mutable std::optional<ultra::audio::ChannelBusyDetector::TimePoint>
+        carrier_sense_sample_clock_time_;
 };
 
 /**
@@ -827,6 +854,78 @@ public:
             return;
         }
         protocol_.tick(elapsed_ms);
+    }
+
+    void tickByMs(uint32_t elapsed_ms) {
+        if (!protocolTimersCanAdvance()) {
+            return;
+        }
+        protocol_.tick(elapsed_ms);
+    }
+
+    bool startSampleClockPump() {
+        if (running_) return true;
+        if (port_ && !port_->start()) {
+            LOG_MODEM(ERROR, "[%s] AudioPort start failed", callsign_.c_str());
+            return false;
+        }
+        running_ = true;
+        return true;
+    }
+
+    void stopSampleClockPump() {
+        running_ = false;
+        if (decoder_) decoder_->stop();
+        if (port_) {
+            port_->clearCarrierSenseSampleClock();
+            port_->stop();
+        }
+    }
+
+    std::vector<float> sampleClockPullTx(size_t count) {
+        if (port_) {
+            port_->setCarrierSenseSampleClock(total_samples_.load(std::memory_order_relaxed),
+                                              SAMPLE_RATE);
+        }
+        advancePttRecovery(count);
+        flushDeferredTxIfReady();
+
+        std::vector<float> tx_samples(count, 0.0f);
+        const bool pace_tx = !port_ || port_->shouldPaceTxInStationLoop();
+        if (pace_tx) {
+            (void)pullTxSamples(tx_samples.data(), tx_samples.size());
+        }
+        return tx_samples;
+    }
+
+    void sampleClockQueueTx(const std::vector<float>& samples) {
+        if (port_) {
+            port_->queueTx(samples);
+        }
+    }
+
+    std::vector<float> sampleClockPullRx(size_t count,
+                                         std::chrono::milliseconds timeout) {
+        if (!port_) {
+            return std::vector<float>(count, 0.0f);
+        }
+        port_->setCarrierSenseSampleClock(
+            total_samples_.load(std::memory_order_relaxed) + count,
+            SAMPLE_RATE);
+        return port_->pullRxBlocking(count, timeout);
+    }
+
+    void sampleClockPushRx(const std::vector<float>& samples) {
+        if (samples.empty()) {
+            return;
+        }
+        pushRxSamples(samples.data(), samples.size());
+        rx_observation_epoch_.fetch_add(1, std::memory_order_relaxed);
+        if (decoder_) {
+            decoder_->processBuffer();
+        }
+        flushDeferredTxIfReady();
+        total_samples_ += samples.size();
     }
 
     float getSimTime() const { return total_samples_ / (float)SAMPLE_RATE; }
@@ -2312,11 +2411,12 @@ inline std::vector<float> AudioPort::shapeRxForLocalRadio(
     std::vector<float> samples,
     size_t count) const {
     const bool rx_blackout = attachedRadioInRxBlackout();
+    const auto now = carrierSenseNow();
     if (rx_blackout) {
-        channel_busy_detector_.observeRms(0.0f, true);
+        channel_busy_detector_.observeRms(0.0f, true, now);
         return std::vector<float>(count, 0.0f);
     }
     samples.resize(count, 0.0f);
-    channel_busy_detector_.observeSamples(samples, false);
+    channel_busy_detector_.observeSamples(samples, false, now);
     return samples;
 }

@@ -162,6 +162,7 @@ void OtaAudioBackend::close() {
         std::lock_guard<std::mutex> lock(mutex_);
         running_ = false;
     }
+    rx_cv_.notify_all();
     if (control_thread_.joinable()) {
         control_thread_.join();
     }
@@ -220,6 +221,32 @@ std::vector<float> OtaAudioBackend::getRxSamples(size_t max_samples) {
         e2eDebugLine(oss.str());
     }
     return out;
+}
+
+bool OtaAudioBackend::waitForRxSamples(size_t count,
+                                       std::chrono::milliseconds timeout,
+                                       std::vector<float>* out) {
+    if (out) {
+        out->clear();
+    }
+    if (count == 0) {
+        return true;
+    }
+
+    std::unique_lock<std::mutex> lock(mutex_);
+    const bool ready = rx_cv_.wait_for(lock, timeout, [&] {
+        return !running_ || rx_buffer_.size() >= count;
+    });
+    if (!ready || rx_buffer_.size() < count) {
+        return false;
+    }
+    if (out) {
+        out->assign(rx_buffer_.begin(),
+                    rx_buffer_.begin() + static_cast<std::ptrdiff_t>(count));
+    }
+    rx_buffer_.erase(rx_buffer_.begin(),
+                     rx_buffer_.begin() + static_cast<std::ptrdiff_t>(count));
+    return true;
 }
 
 size_t OtaAudioBackend::getRxBufferSize() const {
@@ -358,7 +385,7 @@ bool OtaAudioBackend::connectOnce(std::string* error) {
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!sendPrimeLocked(error)) {
+        if (!config_.sample_clock_pacing && !sendPrimeLocked(error)) {
             leaveSession();
             closeTransport();
             return false;
@@ -704,6 +731,7 @@ void OtaAudioBackend::pushRxPacket(uint64_t start_sample, std::span<const float>
     std::vector<float> copy(samples.begin() + static_cast<std::ptrdiff_t>(offset), samples.end());
     rx_pending_.emplace(start_sample, std::move(copy));
     drainReadyRxLocked();
+    rx_cv_.notify_all();
 #ifdef ULTRA_OTASIM_AUDIO_DIAGNOSTICS
     logRxDiagnosticsLocked("push");
 #endif

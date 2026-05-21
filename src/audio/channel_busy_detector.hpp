@@ -48,6 +48,7 @@ public:
 
     bool isIdle() const;
     bool isIdleFor(std::chrono::milliseconds guard) const;
+    bool isIdleFor(std::chrono::milliseconds guard, TimePoint now) const;
     TimePoint lastBusyAt() const;
     std::chrono::milliseconds timeSinceQuiet(TimePoint now = Clock::now()) const;
     float currentRms() const;

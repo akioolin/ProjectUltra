@@ -4,6 +4,7 @@
 
 #include <cassert>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
@@ -12,6 +13,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -226,6 +228,53 @@ void checkLocalClockBridgeRegression() {
             "bridged payload missing from receiver");
 }
 
+SimResult runPersistentSampleClockTrial(channel::SessionContext& session,
+                                        int wall_clock_delay_ms) {
+    session.setChannel({
+        .type = channel::ChannelType::AWGN,
+        .snr_db = 10.0f,
+        .seed = 200,
+        .sample_rate = channel::kDefaultSampleRate,
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(wall_clock_delay_ms));
+
+    require(session.registerStation("ALPHA"), "persistent register ALPHA");
+    require(session.registerStation("BRAVO"), "persistent register BRAVO");
+
+    service::LeaseAudioClockBridge alpha_bridge;
+    service::LeaseAudioClockBridge bravo_bridge;
+    const auto payload = payloadFrame();
+    const std::vector<float> silence(payload.size(), 0.0f);
+
+    auto alpha_blocks = alpha_bridge.push(0, payload, session.sessionClockSamples());
+    auto bravo_blocks = bravo_bridge.push(0, silence, session.sessionClockSamples());
+    require(alpha_blocks.size() == 1, "persistent alpha scheduled");
+    require(bravo_blocks.size() == 1, "persistent bravo scheduled");
+    require(session.enqueueTransmit("ALPHA", alpha_blocks[0].samples),
+            "persistent alpha enqueued");
+    require(session.enqueueTransmit("BRAVO", bravo_blocks[0].samples),
+            "persistent bravo enqueued");
+
+    const auto tick = session.advanceSessionClock();
+    std::vector<float> bravo_rx;
+    for (const auto& block : tick.rx_blocks) {
+        if (block.station_id == "BRAVO") {
+            bravo_rx.insert(bravo_rx.end(), block.samples.begin(), block.samples.end());
+        }
+    }
+    require(!bravo_rx.empty(), "persistent BRAVO RX missing");
+
+    require(session.leaveStation("ALPHA"), "persistent leave ALPHA");
+    require(session.leaveStation("BRAVO"), "persistent leave BRAVO");
+
+    SimResult result;
+    result.frames_sent = 1;
+    result.frame_success = rxEnergyForStation(tick, "BRAVO") > 1.0 ? 100 : 0;
+    result.retx = result.frame_success == 100 ? 0 : 1;
+    result.rx_hash = hashSamples(bravo_rx);
+    return result;
+}
+
 }  // namespace
 
 int main() {
@@ -242,6 +291,31 @@ int main() {
         require(got.frames_sent == reference.frames_sent, "frames_sent varied");
         require(got.frame_success == reference.frame_success, "frame_success varied");
         require(got.rx_hash == reference.rx_hash, "RX samples varied");
+    }
+
+    // Task #83: the OTASim test path is sample-clock paced. Reusing one
+    // SessionContext across trials must not leak wall-clock setup delay into
+    // the RF sample index, retransmission metric, or RX sample stream.
+    channel::SessionConfig persistent_cfg;
+    persistent_cfg.session_id = "persistent-sample-clock";
+    persistent_cfg.display_name = "persistent-sample-clock";
+    persistent_cfg.default_channel_model = channel::ChannelType::AWGN;
+    persistent_cfg.default_snr_db = 10.0f;
+    persistent_cfg.seed = 200;
+    channel::SessionContext persistent_session(persistent_cfg);
+    const SimResult persistent_reference =
+        runPersistentSampleClockTrial(persistent_session, 0);
+    for (int trial = 1; trial < 6; ++trial) {
+        const SimResult got =
+            runPersistentSampleClockTrial(persistent_session, trial % 3);
+        require(got.retx == persistent_reference.retx,
+                "persistent retx varied");
+        require(got.frames_sent == persistent_reference.frames_sent,
+                "persistent frames_sent varied");
+        require(got.frame_success == persistent_reference.frame_success,
+                "persistent frame_success varied");
+        require(got.rx_hash == persistent_reference.rx_hash,
+                "persistent RX samples varied");
     }
 
     std::cout << "SimulatorDeterminism retx=" << reference.retx

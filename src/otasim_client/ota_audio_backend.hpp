@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <condition_variable>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -23,6 +24,7 @@ struct OtaAudioBackendConfig {
     std::string token;
     std::string station_id;
     std::string session_id = "lobby";
+    bool sample_clock_pacing = false;
 };
 
 enum class OtaAudioConnectionState {
@@ -53,6 +55,9 @@ public:
     bool queueTxSamples(std::span<const float> samples,
                         std::string* error = nullptr);
     std::vector<float> getRxSamples(size_t max_samples);
+    bool waitForRxSamples(size_t count,
+                          std::chrono::milliseconds timeout,
+                          std::vector<float>* out);
     size_t getRxBufferSize() const;
 
     OtaAudioStatus status() const;
@@ -115,6 +120,7 @@ private:
     uint64_t rx_next_sample_ = 0;
     std::map<uint64_t, std::vector<float>> rx_pending_;
     std::vector<float> rx_buffer_;
+    std::condition_variable rx_cv_;
 #ifdef ULTRA_OTASIM_AUDIO_DIAGNOSTICS
     uint64_t rx_diagnostic_packet_counter_ = 0;
 #endif

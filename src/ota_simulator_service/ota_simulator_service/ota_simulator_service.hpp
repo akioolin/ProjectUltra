@@ -130,6 +130,10 @@ private:
     void startSessionClock();
     void stopSessionClock();
     void runSessionClock();
+    bool sampleClockPacingEnabled(std::string_view session_id) const;
+    void setSampleClockPacing(std::string session_id, bool enabled);
+    void processSampleClockSessionTicks(
+        const std::shared_ptr<ultra::ota_channel_core::SessionContext>& session);
     void processSessionClockTick(
         const std::shared_ptr<ultra::ota_channel_core::SessionContext>& session);
     void stopActiveCaptures();
@@ -147,6 +151,7 @@ private:
     std::map<std::string, SessionCaptureWriter> captures_;
     std::map<std::string, std::vector<projectultra::otasim::v1::ActiveEffect>> active_effects_;
     std::map<uint64_t, TxClockBridgeState> tx_clock_bridges_;
+    std::set<std::string> sample_clock_pacing_sessions_;
     std::vector<StoredEvent> events_;
     std::condition_variable events_cv_;
     uint64_t next_event_id_ = 1;

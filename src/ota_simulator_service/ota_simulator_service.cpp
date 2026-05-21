@@ -3,6 +3,7 @@
 #include "ota_channel_core/models.hpp"
 #include "ultra/version.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -341,6 +342,7 @@ grpc::Status OtaSimulatorService::LeaveSession(
             }
         }
     }
+    audio_plane_.removeLeases(request->session_id(), station_id);
     emitEvent(request->session_id(), 0, "station_left", jsonPair("station_id", station_id));
     return grpc::Status::OK;
 }
@@ -394,6 +396,9 @@ grpc::Status OtaSimulatorService::SetChannel(
         .sample_rate = channel::kDefaultSampleRate,
         .real_hf_loop_noise = config_.real_hf_loop_noise,
     });
+    if (request->has_sample_clock_pacing()) {
+        setSampleClockPacing(request->session_id(), request->sample_clock_pacing());
+    }
 
     uint64_t command_id = 0;
     {
@@ -737,8 +742,10 @@ void OtaSimulatorService::onAudioPacket(const ReceivedAudioPacket& packet) {
     if (!session) {
         return;
     }
+    const bool sample_clock_pacing = sampleClockPacingEnabled(packet.session_id);
     const uint64_t earliest_session_sample =
-        session->sessionClockSamples() + session->sessionTickSamples();
+        session->sessionClockSamples() +
+        (sample_clock_pacing ? 0 : session->sessionTickSamples());
     std::vector<ScheduledAudioBlock> scheduled;
     uint64_t next_local_sample = 0;
     uint64_t next_session_sample = 0;
@@ -758,8 +765,12 @@ void OtaSimulatorService::onAudioPacket(const ReceivedAudioPacket& packet) {
 
     bool enqueued = false;
     for (const auto& block : scheduled) {
-        enqueued = session->submitTransmit(packet.station_id, block.start_sample, block.samples) ||
-                   enqueued;
+        if (sample_clock_pacing) {
+            enqueued = session->enqueueTransmit(packet.station_id, block.samples) || enqueued;
+        } else {
+            enqueued = session->submitTransmit(packet.station_id, block.start_sample, block.samples) ||
+                       enqueued;
+        }
     }
     const uint64_t first_scheduled_start =
         scheduled.empty() ? 0 : scheduled.front().start_sample;
@@ -780,6 +791,9 @@ void OtaSimulatorService::onAudioPacket(const ReceivedAudioPacket& packet) {
     e2eDebugLine(oss.str());
     if (!enqueued) {
         return;
+    }
+    if (sample_clock_pacing) {
+        processSampleClockSessionTicks(session);
     }
 }
 
@@ -806,11 +820,53 @@ void OtaSimulatorService::runSessionClock() {
         next_tick += kTickInterval;
 
         for (const auto& session_id : sessions_.listSessions()) {
+            if (sampleClockPacingEnabled(session_id)) {
+                continue;
+            }
             auto session = sessions_.getSession(session_id);
             if (session) {
                 processSessionClockTick(session);
             }
         }
+    }
+}
+
+bool OtaSimulatorService::sampleClockPacingEnabled(std::string_view session_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return sample_clock_pacing_sessions_.find(std::string(session_id)) !=
+           sample_clock_pacing_sessions_.end();
+}
+
+void OtaSimulatorService::setSampleClockPacing(std::string session_id, bool enabled) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (enabled) {
+            sample_clock_pacing_sessions_.insert(session_id);
+        } else {
+            sample_clock_pacing_sessions_.erase(session_id);
+        }
+    }
+    emitEvent(session_id, 0,
+              enabled ? "sample_clock_pacing_enabled" : "sample_clock_pacing_disabled",
+              "{}");
+}
+
+void OtaSimulatorService::processSampleClockSessionTicks(
+    const std::shared_ptr<ultra::ota_channel_core::SessionContext>& session) {
+    while (true) {
+        const auto stations = session->listStations();
+        if (stations.size() < 2) {
+            return;
+        }
+        const size_t tick_samples = session->sessionTickSamples();
+        const bool ready = std::all_of(
+            stations.begin(), stations.end(), [&](const std::string& station_id) {
+                return session->pendingTransmitSamples(station_id) >= tick_samples;
+            });
+        if (!ready) {
+            return;
+        }
+        processSessionClockTick(session);
     }
 }
 

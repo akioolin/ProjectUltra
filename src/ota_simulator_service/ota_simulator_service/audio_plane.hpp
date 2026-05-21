@@ -87,6 +87,7 @@ public:
     std::string host() const;
 
     uint64_t addLease(std::string session_id, std::string station_id);
+    void removeLeases(std::string_view session_id, std::string_view station_id);
     std::vector<LeaseSnapshot> leasesForSession(std::string_view session_id) const;
     bool sendAudio(uint64_t lease_id, uint64_t start_sample, std::span<const float> samples);
 
