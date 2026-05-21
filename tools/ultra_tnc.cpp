@@ -12,6 +12,7 @@
 #include "tnc/tnc_server.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
 #include "ultra/build_info.hpp"
+#include "ultra/tx_burst_normalization.hpp"
 #include "waveform/ofdm_cox_waveform.hpp"
 
 #include "ultra_tnc_config.hpp"
@@ -762,15 +763,24 @@ private:
             return;
         }
 
-        if (cfg_.inject_channel) {
-            applyAwgn(samples);
-        }
-
         if (cfg_.sim_audio) {
             if (!ota_audio_ || !ota_audio_->isConnected()) {
                 reportOtaStatus(false);
                 LOG_WARN("AUDIO", "OTASim TX dropped: audio backend is not connected");
                 return;
+            }
+            const auto measurement =
+                ultra::sim::normalizeTxBurstToReference(samples);
+            if (measurement.peak_warning || measurement.peak_clip_error) {
+                LOG_WARN("AUDIO",
+                         "OTASim TX burst normalization peak_after_gain=%.3f "
+                         "clip_samples=%zu gain=%.3f active=%zu in_band_rms=%.6f%s",
+                         measurement.peak_after_gain,
+                         measurement.peak_clip_samples,
+                         measurement.gain_to_reference,
+                         measurement.active_samples,
+                         measurement.in_band_rms,
+                         measurement.peak_clip_error ? " CLIP_EXPECTED" : "");
             }
             std::string error;
             const bool queued = ota_audio_->queueTxSamples(samples, &error);
@@ -783,6 +793,10 @@ private:
                 decoder_.seedExpectedFrameArrivalAfterSamples(samples.size() + kReplyTurnaroundSamples);
             }
             return;
+        }
+
+        if (cfg_.inject_channel) {
+            applyAwgn(samples);
         }
 
         audio_.queueTxSamples(samples);

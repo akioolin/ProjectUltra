@@ -54,6 +54,7 @@
 #include "protocol/waveform_selection.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
+#include "ultra/tx_burst_normalization.hpp"
 #include "ultra/fec.hpp"  // ChannelInterleaver, LDPCEncoder
 #include "fec/frame_interleaver.hpp"  // FrameInterleaver
 #include "ota_channel_core/channel.hpp"
@@ -248,6 +249,10 @@ public:
     // device callback, so feeding it through a second 10 ms pacer can create
     // callback-phase underflows and synthetic gaps in the transmitted waveform.
     virtual bool shouldPaceTxInStationLoop() const { return true; }
+    // Simulator audio transports need modem bursts normalized before the
+    // soundcard-style 10 ms loop fragments them. Hardware radios keep the
+    // modem output unchanged and rely on the real PA/ALC chain.
+    virtual bool requiresTxBurstNormalization() const { return false; }
     // Optional lifecycle hooks; default no-op.
     virtual bool start() { return true; }
     virtual void stop() {}
@@ -310,7 +315,13 @@ class VirtualAudioPort : public AudioPort {
 public:
     VirtualAudioPort(SimulatedChannel& channel, bool is_station_a)
         : AudioPort(virtualAudioCarrierSenseConfig()),
-          channel_(channel), is_station_a_(is_station_a) {}
+          channel_(channel), is_station_a_(is_station_a) {
+        // This port emits fixed-size audio callback chunks, not logical TX
+        // bursts. Burst normalization must happen before packetization or on a
+        // full vector at SimulatedChannel::transmitFrom*(); per-callback
+        // normalization would make callback boundaries part of the PHY.
+        channel_.setTxBurstNormalizationEnabled(false);
+    }
 
     std::vector<float> pullRx(size_t count) override {
         auto samples = is_station_a_ ? channel_.receiveForA(count)
@@ -322,6 +333,8 @@ public:
         if (is_station_a_) channel_.transmitFromA(samples);
         else               channel_.transmitFromB(samples);
     }
+
+    bool requiresTxBurstNormalization() const override { return true; }
 
 private:
     SimulatedChannel& channel_;
@@ -2168,6 +2181,30 @@ private:
         return {};
     }
 
+    void normalizeTxSubmissionIfNeeded(std::vector<float>& samples,
+                                       const TxSubmission& submission) const {
+        if (!port_ || !port_->requiresTxBurstNormalization() ||
+            submission.kind == TxSubmission::Kind::RawSamples ||
+            samples.empty()) {
+            return;
+        }
+
+        const auto measurement = ultra::sim::normalizeTxBurstToReference(samples);
+        if (measurement.peak_warning || measurement.peak_clip_error) {
+            LOG_MODEM(WARN,
+                      "[%s] TX burst normalization %s peak_after_gain=%.3f "
+                      "clip_samples=%zu gain=%.3f active=%zu in_band_rms=%.6f%s",
+                      callsign_.c_str(),
+                      submission.label.empty() ? "-" : submission.label.c_str(),
+                      measurement.peak_after_gain,
+                      measurement.peak_clip_samples,
+                      measurement.gain_to_reference,
+                      measurement.active_samples,
+                      measurement.in_band_rms,
+                      measurement.peak_clip_error ? " CLIP_EXPECTED" : "");
+        }
+    }
+
     bool ensureActiveTx() {
         {
             std::lock_guard<std::mutex> lock(tx_mutex_);
@@ -2189,6 +2226,7 @@ private:
 
         const std::string label = submission.label;
         auto samples = encodeTxSubmission(submission);
+        normalizeTxSubmissionIfNeeded(samples, submission);
         seedWarmSyncReplyPrediction(samples.size());
         if (submission.expect_full_ofdm_anchor_after_tx && decoder_) {
             decoder_->expectFullOFDMAnchorOnce();
@@ -2244,7 +2282,8 @@ private:
     void submitTxNow(TxSubmission submission) {
         const std::string label = submission.label;
         if (port_ && !port_->shouldPaceTxInStationLoop()) {
-            const auto samples = encodeTxSubmission(submission);
+            auto samples = encodeTxSubmission(submission);
+            normalizeTxSubmissionIfNeeded(samples, submission);
             if (samples.empty()) {
                 return;
             }

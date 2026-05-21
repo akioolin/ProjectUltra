@@ -1,4 +1,6 @@
 #include "ota_channel_core/channel.hpp"
+#include "ultra/logging.hpp"
+#include "ultra/tx_burst_normalization.hpp"
 
 #define POCKETFFT_CACHE_SIZE 64
 #if defined(__APPLE__) || defined(__unix__)
@@ -100,9 +102,10 @@ void SimulatedChannel::setNoiseOverlay(std::vector<float> bed,
 }
 
 void SimulatedChannel::transmitFromA(const std::vector<float>& samples) {
-    auto with_cfo = applyTxCFO(samples, cfo_phase_a_to_b_);
+    auto normalized = normalizeTxBurst(samples, "A->B");
+    auto with_cfo = applyTxCFO(normalized, cfo_phase_a_to_b_);
     auto processed = applyChannel(with_cfo, *channel_a_to_b_);
-    captureTxIfEnabled(samples, true);
+    captureTxIfEnabled(normalized, true);
 
     std::lock_guard<std::mutex> lock(mutex_b_rx_);
     for (float sample : processed) {
@@ -111,9 +114,10 @@ void SimulatedChannel::transmitFromA(const std::vector<float>& samples) {
 }
 
 void SimulatedChannel::transmitFromB(const std::vector<float>& samples) {
-    auto with_cfo = applyTxCFO(samples, cfo_phase_b_to_a_);
+    auto normalized = normalizeTxBurst(samples, "B->A");
+    auto with_cfo = applyTxCFO(normalized, cfo_phase_b_to_a_);
     auto processed = applyChannel(with_cfo, *channel_b_to_a_);
-    captureTxIfEnabled(samples, false);
+    captureTxIfEnabled(normalized, false);
 
     std::lock_guard<std::mutex> lock(mutex_a_rx_);
     for (float sample : processed) {
@@ -172,6 +176,31 @@ void SimulatedChannel::rebuildModels() {
         channel_a_to_b_ = createChannelModel(path_config, root, "path:a_to_b");
         channel_b_to_a_ = createChannelModel(path_config, root, "path:b_to_a");
     }
+}
+
+std::vector<float> SimulatedChannel::normalizeTxBurst(std::span<const float> samples,
+                                                      const char* direction) const {
+    std::vector<float> normalized(samples.begin(), samples.end());
+    if (!tx_burst_normalization_enabled_ ||
+        channel_type_ == ChannelType::PASSTHROUGH ||
+        normalized.empty()) {
+        return normalized;
+    }
+
+    const auto measurement = ultra::sim::normalizeTxBurstToReference(normalized);
+    if (measurement.peak_clip_error || measurement.peak_warning) {
+        LOG_WARN("CHANNEL",
+                 "TX burst normalization %s peak_after_gain=%.3f "
+                 "clip_samples=%zu gain=%.3f active=%zu in_band_rms=%.6f%s",
+                 direction ? direction : "-",
+                 measurement.peak_after_gain,
+                 measurement.peak_clip_samples,
+                 measurement.gain_to_reference,
+                 measurement.active_samples,
+                 measurement.in_band_rms,
+                 measurement.peak_clip_error ? " CLIP_EXPECTED" : "");
+    }
+    return normalized;
 }
 
 std::vector<float> SimulatedChannel::applyChannel(std::span<const float> samples,

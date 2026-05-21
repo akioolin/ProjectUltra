@@ -5,6 +5,7 @@
 #include "ptt/ptt_driver_factory.hpp"
 #include "ultra/build_info.hpp"
 #include "ultra/logging.hpp"
+#include "ultra/tx_burst_normalization.hpp"
 #include <SDL.h>
 #include <cctype>
 #include <cstring>
@@ -2272,19 +2273,36 @@ bool App::queueRealTxSamples(const std::vector<float>& samples, const char* cont
             return false;
         }
 
-        const size_t tx_duration_ms = (samples.size() * 1000) / 48000;
+        std::vector<float> sim_samples(samples.begin(), samples.end());
+        const auto measurement =
+            ultra::sim::normalizeTxBurstToReference(sim_samples);
+        if (measurement.peak_warning || measurement.peak_clip_error) {
+            LOG_WARN("AUDIO",
+                     "OTASim TX burst normalization peak_after_gain=%.3f "
+                     "clip_samples=%zu gain=%.3f active=%zu in_band_rms=%.6f%s",
+                     measurement.peak_after_gain,
+                     measurement.peak_clip_samples,
+                     measurement.gain_to_reference,
+                     measurement.active_samples,
+                     measurement.in_band_rms,
+                     measurement.peak_clip_error ? " CLIP_EXPECTED" : "");
+        }
+
+        const size_t tx_duration_ms = (sim_samples.size() * 1000) / 48000;
         tx_in_progress_ = true;
         tx_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(tx_duration_ms + 100);
 
         if (waterfall_) {
-            waterfall_->addSamples(samples.data(), samples.size());
+            waterfall_->addSamples(sim_samples.data(), sim_samples.size());
         }
         if (recording_enabled_) {
-            recorded_tx_samples_.insert(recorded_tx_samples_.end(), samples.begin(), samples.end());
+            recorded_tx_samples_.insert(recorded_tx_samples_.end(),
+                                        sim_samples.begin(),
+                                        sim_samples.end());
         }
 
         std::string error;
-        if (!ota_audio_->queueTxSamples(samples, &error)) {
+        if (!ota_audio_->queueTxSamples(sim_samples, &error)) {
             tx_in_progress_ = false;
             guiLog("%s: OTASim TX failed: %s",
                    context ? context : "TX audio",

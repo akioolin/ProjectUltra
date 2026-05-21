@@ -403,6 +403,8 @@ public:
         }
     }
 
+    bool requiresTxBurstNormalization() const override { return true; }
+
 private:
     otasim_client::OtaAudioBackendConfig config_;
     std::string label_;

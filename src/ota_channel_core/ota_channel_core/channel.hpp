@@ -42,6 +42,12 @@ public:
     void setSignalCaptureMaxSamples(size_t max_samples);
     void clearCapturedSignals();
     CapturedSignals getCapturedSignals() const;
+    void setTxBurstNormalizationEnabled(bool enabled) {
+        tx_burst_normalization_enabled_ = enabled;
+    }
+    bool txBurstNormalizationEnabled() const {
+        return tx_burst_normalization_enabled_;
+    }
 
     void setNoiseOverlay(std::vector<float> bed, bool loop, float target_rms);
     void transmitFromA(const std::vector<float>& samples);
@@ -51,6 +57,8 @@ public:
 
 private:
     void rebuildModels();
+    std::vector<float> normalizeTxBurst(std::span<const float> samples,
+                                        const char* direction) const;
     std::vector<float> applyChannel(std::span<const float> samples,
                                     IChannelModel& model);
     void addReceiveNoise(std::vector<float>& samples, bool for_a);
@@ -65,6 +73,7 @@ private:
     ChannelType channel_type_ = ChannelType::PASSTHROUGH;
     float noise_stddev_ = 0.0f;
     float tx_cfo_hz_ = 0.0f;
+    bool tx_burst_normalization_enabled_ = true;
     float cfo_phase_a_to_b_ = 0.0f;
     float cfo_phase_b_to_a_ = 0.0f;
 
