@@ -328,6 +328,7 @@ endif()
 
 add_library(ota_channel_core STATIC
     src/sim/tx_burst_normalization.cpp
+    src/sim/papr_reduction.cpp
     src/ota_channel_core/rng.cpp
     src/ota_channel_core/models.cpp
     src/ota_channel_core/mixer.cpp
@@ -763,7 +764,7 @@ if(ULTRA_BUILD_TOOLS)
     target_include_directories(threaded_simulator PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
-    target_link_libraries(threaded_simulator PRIVATE ultra_core)
+    target_link_libraries(threaded_simulator PRIVATE ultra_core ota_channel_core)
 
     # Simple waveform test (clean TX/RX with consistent config)
     # Decoder-only by design; do not pull in the encoder runtime here.

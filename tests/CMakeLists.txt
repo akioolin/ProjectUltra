@@ -32,6 +32,12 @@ target_include_directories(test_watterson_proof PRIVATE
 add_test(NAME WattersonProof COMMAND test_watterson_proof)
 set_tests_properties(WattersonProof PROPERTIES TIMEOUT 60)
 
+add_executable(test_papr_reduction test_papr_reduction.cpp)
+target_link_libraries(test_papr_reduction PRIVATE ota_channel_core)
+target_include_directories(test_papr_reduction PRIVATE
+    ${CMAKE_SOURCE_DIR}/thirdparty/pocketfft)
+add_test(NAME PaprReduction COMMAND test_papr_reduction)
+
 add_executable(test_real_hf_loop_channel test_real_hf_loop_channel.cpp)
 target_link_libraries(test_real_hf_loop_channel PRIVATE ota_channel_core)
 add_test(NAME RealHfLoopChannel COMMAND test_real_hf_loop_channel)
@@ -206,7 +212,7 @@ if(TARGET ultra_replay_lib)
         ${CMAKE_CURRENT_SOURCE_DIR}/../src
         ${CMAKE_CURRENT_SOURCE_DIR}/../tools
     )
-    target_link_libraries(test_replay PRIVATE ultra_replay_lib)
+    target_link_libraries(test_replay PRIVATE ultra_replay_lib ota_channel_core)
     add_test(NAME Replay COMMAND test_replay)
 else()
     message(STATUS "Replay tests disabled: ultra_replay_lib target is not built")
@@ -331,7 +337,7 @@ add_executable(test_streaming_config
 target_include_directories(test_streaming_config PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../src
 )
-target_link_libraries(test_streaming_config PRIVATE ultra_core)
+target_link_libraries(test_streaming_config PRIVATE ultra_core ota_channel_core)
 add_test(NAME StreamingConfig COMMAND test_streaming_config)
 
 add_executable(test_streaming_buffer_policy test_streaming_buffer_policy.cpp)
@@ -391,7 +397,7 @@ add_executable(test_streaming_mc_dpsk
 target_include_directories(test_streaming_mc_dpsk PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../src
 )
-target_link_libraries(test_streaming_mc_dpsk PRIVATE ultra_core)
+target_link_libraries(test_streaming_mc_dpsk PRIVATE ultra_core ota_channel_core)
 add_test(NAME StreamingMCDPSK COMMAND test_streaming_mc_dpsk)
 
 if(TARGET ultra_sim_station)
