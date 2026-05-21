@@ -161,6 +161,22 @@ grpc::Status OtaSimulatorService::NegotiateAudio(
     }
 
     const uint64_t lease_id = audio_plane_.addLease(request->session_id(), station_id);
+    const uint64_t negotiate_session_sample = session->sessionClockSamples();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        tx_clock_bridges_[lease_id] = TxClockBridgeState{
+            .session_id = request->session_id(),
+            .station_id = station_id,
+        };
+    }
+    {
+        std::ostringstream oss;
+        oss << "audio_negotiated_clock station=" << station_id
+            << " session=" << request->session_id()
+            << " lease=" << lease_id
+            << " session_clock=" << negotiate_session_sample;
+        e2eDebugLine(oss.str());
+    }
     response->set_lease_id(lease_id);
     response->set_session_id(request->session_id());
     response->set_station_id(station_id);
@@ -280,6 +296,13 @@ grpc::Status OtaSimulatorService::JoinSession(
         return grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED,
                             "station cap reached or duplicate station");
     }
+    {
+        std::ostringstream oss;
+        oss << "station_join_clock station=" << station_id
+            << " session=" << request->session_id()
+            << " session_clock=" << session->sessionClockSamples();
+        e2eDebugLine(oss.str());
+    }
 
     *response->mutable_session() = sessionInfo(session);
     fillStationLease(station_id, principal, response->mutable_station());
@@ -305,6 +328,18 @@ grpc::Status OtaSimulatorService::LeaveSession(
     const std::string station_id = stationIdFor(request->station_id(), principal);
     if (!session->leaveStation(station_id)) {
         return grpc::Status(grpc::StatusCode::NOT_FOUND, "station not in session");
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto it = tx_clock_bridges_.begin(); it != tx_clock_bridges_.end();) {
+            const auto& bridge = it->second;
+            if (bridge.session_id == request->session_id() &&
+                bridge.station_id == station_id) {
+                it = tx_clock_bridges_.erase(it);
+            } else {
+                ++it;
+            }
+        }
     }
     emitEvent(request->session_id(), 0, "station_left", jsonPair("station_id", station_id));
     return grpc::Status::OK;
@@ -702,12 +737,43 @@ void OtaSimulatorService::onAudioPacket(const ReceivedAudioPacket& packet) {
     if (!session) {
         return;
     }
-    const bool enqueued = session->enqueueTransmit(packet.station_id, packet.samples);
+    const uint64_t earliest_session_sample =
+        session->sessionClockSamples() + session->sessionTickSamples();
+    std::vector<ScheduledAudioBlock> scheduled;
+    uint64_t next_local_sample = 0;
+    uint64_t next_session_sample = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto& bridge = tx_clock_bridges_[packet.lease_id];
+        if (bridge.session_id.empty()) {
+            bridge.session_id = packet.session_id;
+            bridge.station_id = packet.station_id;
+        }
+        scheduled = bridge.bridge.push(packet.start_sample,
+                                       packet.samples,
+                                       earliest_session_sample);
+        next_local_sample = bridge.bridge.nextLocalSample();
+        next_session_sample = bridge.bridge.nextSessionSample();
+    }
+
+    bool enqueued = false;
+    for (const auto& block : scheduled) {
+        enqueued = session->submitTransmit(packet.station_id, block.start_sample, block.samples) ||
+                   enqueued;
+    }
+    const uint64_t first_scheduled_start =
+        scheduled.empty() ? 0 : scheduled.front().start_sample;
     std::ostringstream oss;
     oss << "server_on_audio station=" << packet.station_id
         << " session=" << packet.session_id
+        << " lease=" << packet.lease_id
         << " seq=" << packet.seq
-        << " start=" << packet.start_sample
+        << " local_start=" << packet.start_sample
+        << " earliest_session=" << earliest_session_sample
+        << " scheduled_blocks=" << scheduled.size()
+        << " first_scheduled_start=" << first_scheduled_start
+        << " next_local=" << next_local_sample
+        << " next_session=" << next_session_sample
         << " samples=" << packet.samples.size()
         << " rms=" << rms(packet.samples)
         << " enqueued=" << (enqueued ? 1 : 0);
@@ -773,6 +839,25 @@ void OtaSimulatorService::processSessionClockTick(
             }
             (void)audio_plane_.sendAudio(lease.lease_id, block.start_sample, block.samples);
         }
+    }
+
+    for (const auto& block : tick.tx_blocks) {
+        std::ostringstream oss;
+        oss << "session_tick_tx station=" << block.station_id
+            << " session=" << session->id()
+            << " start=" << block.start_sample
+            << " samples=" << block.samples.size()
+            << " rms=" << rms(block.samples);
+        e2eDebugLine(oss.str());
+    }
+    for (const auto& block : rx_blocks) {
+        std::ostringstream oss;
+        oss << "session_tick_rx station=" << block.station_id
+            << " session=" << session->id()
+            << " start=" << block.start_sample
+            << " samples=" << block.samples.size()
+            << " rms=" << rms(block.samples);
+        e2eDebugLine(oss.str());
     }
 }
 

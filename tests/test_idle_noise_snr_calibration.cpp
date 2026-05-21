@@ -92,7 +92,7 @@ std::vector<float> synthesizeIdleNoise(
         ultra::ota_channel_core::RngRoot root(seed);
         ultra::ota_channel_core::AWGNChannelModel model(
             snr_db,
-            root.stream("idle-noise-snr-awgn"));
+            root.childSeed("idle-noise-snr-awgn"));
         return model.process(silence);
     }
 

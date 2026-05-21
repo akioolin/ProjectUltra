@@ -52,11 +52,23 @@ class IChannelModel {
 public:
     virtual ~IChannelModel() = default;
     virtual void reset() = 0;
-    virtual void process(std::span<const float> input, std::vector<float>& output) = 0;
+    virtual void process(std::span<const float> input,
+                         uint64_t start_sample,
+                         std::vector<float>& output) = 0;
+
+    void process(std::span<const float> input, std::vector<float>& output) {
+        process(input, 0, output);
+    }
 
     std::vector<float> process(std::span<const float> input) {
         std::vector<float> output;
         process(input, output);
+        return output;
+    }
+
+    std::vector<float> process(std::span<const float> input, uint64_t start_sample) {
+        std::vector<float> output;
+        process(input, start_sample, output);
         return output;
     }
 };
@@ -66,22 +78,26 @@ public:
     using IChannelModel::process;
 
     void reset() override {}
-    void process(std::span<const float> input, std::vector<float>& output) override;
+    void process(std::span<const float> input,
+                 uint64_t start_sample,
+                 std::vector<float>& output) override;
 };
 
 class AWGNChannelModel final : public IChannelModel {
 public:
     using IChannelModel::process;
 
-    AWGNChannelModel(float snr_db, RngStream rng);
+    AWGNChannelModel(float snr_db, uint32_t seed);
 
     void reset() override {}
     void setSNR(float snr_db);
-    void process(std::span<const float> input, std::vector<float>& output) override;
+    void process(std::span<const float> input,
+                 uint64_t start_sample,
+                 std::vector<float>& output) override;
 
 private:
     float noise_stddev_ = 0.0f;
-    RngStream rng_;
+    uint32_t seed_ = 0;
 };
 
 class RealHfLoopChannelModel final : public IChannelModel {
@@ -97,7 +113,9 @@ public:
 
     void reset() override;
     void setSNR(float snr_db);
-    void process(std::span<const float> input, std::vector<float>& output) override;
+    void process(std::span<const float> input,
+                 uint64_t start_sample,
+                 std::vector<float>& output) override;
 
 private:
     float scale_ = 0.0f;
@@ -161,7 +179,9 @@ public:
 
     void reset() override;
     void setSNR(float snr_db);
-    void process(std::span<const float> input, std::vector<float>& output) override;
+    void process(std::span<const float> input,
+                 uint64_t start_sample,
+                 std::vector<float>& output) override;
 
     const WattersonChannel::Config& config() const;
 

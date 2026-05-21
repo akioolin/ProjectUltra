@@ -190,7 +190,7 @@ void checkAwgnStatisticsAndSpectrum() {
     constexpr float snr_db = 18.0f;
     constexpr size_t sample_count = 65536;
     RngRoot root(0x123456u);
-    AWGNChannelModel model(snr_db, root.stream("awgn:statistics"));
+    AWGNChannelModel model(snr_db, root.childSeed("awgn:statistics"));
     const auto noise = model.process(std::vector<float>(sample_count, 0.0f));
 
     const float sigma = ultra::ota_channel_core::modemReferenceNoiseStddev(snr_db);
@@ -336,8 +336,8 @@ int main() {
 
     {
         RngRoot root(0xabcdefu);
-        AWGNChannelModel a(15.0f, root.stream("awgn"));
-        AWGNChannelModel b(15.0f, root.stream("awgn"));
+        AWGNChannelModel a(15.0f, root.childSeed("awgn"));
+        AWGNChannelModel b(15.0f, root.childSeed("awgn"));
         const std::vector<float> zeros(16, 0.0f);
         assertNear(a.process(zeros), b.process(zeros), 0.0f);
     }
@@ -358,8 +358,8 @@ int main() {
 
     const auto awgn = runModel(ChannelType::AWGN, 0x1234u);
     const std::vector<float> expected_awgn{
-        -0.138502685f, 0.105445761f, -0.395952753f, 0.354813922f,
-        -0.163206630f, -0.104314167f, 0.146983050f, -0.067175503f};
+        -0.014517599f, 0.017606046f, -0.134695336f, 0.469496787f,
+        -0.440251589f, 0.006981332f, 0.318243772f, -0.168747187f};
     assertNear(awgn, expected_awgn, 1.0e-6f);
 
     std::cout << "channel core models deterministic\n";

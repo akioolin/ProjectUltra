@@ -107,6 +107,10 @@ private:
         std::deque<QueuedAudioBlock> rx_outbox;
     };
 
+    std::unique_ptr<IChannelModel> createRxChannelLocked(std::string_view receiver_id) const;
+    IChannelModel* rxChannelForLocked(std::string_view receiver_id);
+    void maybeSetChannelEpochLocked(uint64_t start_sample, std::span<const float> samples);
+    uint64_t channelSampleIndexLocked(uint64_t session_sample) const;
     void trimTxQueueLocked(StationAudioQueues& queues) const;
     void trimOutboxLocked(std::deque<QueuedAudioBlock>& queue) const;
     void appendEventLocked(std::string type,
@@ -115,13 +119,15 @@ private:
 
     SessionConfig config_;
     RngRoot rng_root_;
-    std::unique_ptr<IChannelModel> channel_;
+    std::map<std::string, std::unique_ptr<IChannelModel>> rx_channels_;
     SampleIndexedMixer mixer_;
     std::set<std::string> stations_;
     std::map<std::string, StationAudioQueues> audio_queues_;
     CaptureState capture_;
     std::vector<SessionEvent> events_;
     uint64_t session_clock_samples_ = 0;
+    bool channel_epoch_set_ = false;
+    uint64_t channel_epoch_sample_ = 0;
     size_t tick_samples_ = 0;
     size_t max_tx_queue_samples_ = 0;
     size_t max_rx_queue_samples_ = 0;

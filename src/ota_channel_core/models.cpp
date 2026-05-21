@@ -32,6 +32,23 @@ constexpr float kIdleSnrBandHighHz = 2950.0f;
 constexpr size_t kRealHfLoopPowerProbeSamples =
     static_cast<size_t>(kDefaultSampleRate) * 10u;
 
+double unitFromU64(uint64_t value) {
+    constexpr double kScale = 1.0 / 9007199254740992.0;  // 2^53
+    return (static_cast<double>(value >> 11) + 0.5) * kScale;
+}
+
+float deterministicNormal(uint32_t seed, uint64_t sample_index) {
+    const uint64_t key = (static_cast<uint64_t>(seed) << 32) ^
+                         splitmix64(sample_index);
+    const double u1 = std::max(
+        unitFromU64(splitmix64(key ^ 0xd1b54a32d192ed03ull)),
+        std::numeric_limits<double>::min());
+    const double u2 = unitFromU64(splitmix64(key ^ 0xabc98388fb8fac03ull));
+    const double r = std::sqrt(-2.0 * std::log(u1));
+    const double theta = 6.28318530717958647692 * u2;
+    return static_cast<float>(r * std::cos(theta));
+}
+
 float modemReferenceBroadbandNoiseStddev(float broadband_snr_db) {
     // The SNR reference is the PING's receiver in-band RMS. The "broadband"
     // part of this helper names the generated white-noise sigma before the
@@ -331,12 +348,13 @@ std::vector<float> loadRealHfLoopNoiseBedWav(std::string_view path_view) {
 }
 
 void PassthroughChannelModel::process(std::span<const float> input,
+                                      uint64_t,
                                       std::vector<float>& output) {
     output.assign(input.begin(), input.end());
 }
 
-AWGNChannelModel::AWGNChannelModel(float snr_db, RngStream rng)
-    : rng_(std::move(rng)) {
+AWGNChannelModel::AWGNChannelModel(float snr_db, uint32_t seed)
+    : seed_(seed) {
     setSNR(snr_db);
 }
 
@@ -345,10 +363,12 @@ void AWGNChannelModel::setSNR(float snr_db) {
 }
 
 void AWGNChannelModel::process(std::span<const float> input,
+                               uint64_t start_sample,
                                std::vector<float>& output) {
     output.resize(input.size());
     for (size_t i = 0; i < input.size(); ++i) {
-        output[i] = input[i] + noise_stddev_ * rng_.normal();
+        output[i] = input[i] + noise_stddev_ *
+                                 deterministicNormal(seed_, start_sample + i);
     }
 }
 
@@ -393,6 +413,7 @@ void RealHfLoopChannelModel::setSNR(float snr_db) {
 }
 
 void RealHfLoopChannelModel::process(std::span<const float> input,
+                                     uint64_t,
                                      std::vector<float>& output) {
     output.resize(input.size());
     if (!loop_ || loop_->empty()) {
@@ -517,6 +538,7 @@ void WattersonChannelModel::setSNR(float snr_db) {
 }
 
 void WattersonChannelModel::process(std::span<const float> input,
+                                    uint64_t,
                                     std::vector<float>& output) {
     channel_.process(input, output);
 }
@@ -628,7 +650,7 @@ std::unique_ptr<IChannelModel> createChannelModel(const ChannelConfig& config,
             return std::make_unique<PassthroughChannelModel>();
         case ChannelType::AWGN:
             return std::make_unique<AWGNChannelModel>(
-                config.snr_db, rng_root.stream(stream_name));
+                config.snr_db, rng_root.childSeed(stream_name));
         case ChannelType::REAL_HF_LOOP:
             if (!config.real_hf_loop_noise || config.real_hf_loop_noise->empty()) {
                 throw std::invalid_argument(

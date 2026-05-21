@@ -57,14 +57,17 @@ float rms(std::span<const float> samples) {
     return static_cast<float>(std::sqrt(sum / static_cast<double>(samples.size())));
 }
 
+bool allZero(std::span<const float> samples) {
+    return std::all_of(samples.begin(), samples.end(), [](float sample) {
+        return sample == 0.0f;
+    });
+}
+
 }  // namespace
 
 SessionContext::SessionContext(SessionConfig config)
     : config_(std::move(config)),
       rng_root_(config_.seed),
-      channel_(createChannelModel(config_.channelConfig(),
-                                  rng_root_,
-                                  streamNameForSession(config_.session_id, "channel"))),
       tick_samples_(samplesForMs(config_.sample_rate, kDefaultTickIntervalMs)),
       max_tx_queue_samples_(samplesForMs(config_.sample_rate, kMaxTxQueuedAudioMs)),
       max_rx_queue_samples_(samplesForMs(config_.sample_rate, kMaxRxQueuedAudioMs)) {
@@ -91,7 +94,9 @@ bool SessionContext::registerStation(std::string station_id) {
     if (!inserted) {
         return false;
     }
-    audio_queues_.try_emplace(station_id);
+    const std::string station_key = station_id;
+    audio_queues_.try_emplace(station_key);
+    rx_channels_[station_key] = createRxChannelLocked(station_key);
     appendEventLocked("station_registered", std::move(station_id), 0);
     return true;
 }
@@ -104,6 +109,7 @@ bool SessionContext::leaveStation(std::string_view station_id) {
     }
     stations_.erase(it);
     audio_queues_.erase(std::string(station_id));
+    rx_channels_.erase(std::string(station_id));
     appendEventLocked("station_left", std::string(station_id), 0);
     return true;
 }
@@ -129,10 +135,61 @@ void SessionContext::setChannel(ChannelConfig config) {
     max_tx_queue_samples_ = samplesForMs(config_.sample_rate, kMaxTxQueuedAudioMs);
     max_rx_queue_samples_ = samplesForMs(config_.sample_rate, kMaxRxQueuedAudioMs);
     rng_root_ = RngRoot(config_.seed);
-    channel_ = createChannelModel(config_.channelConfig(),
-                                  rng_root_,
-                                  streamNameForSession(config_.session_id, "channel"));
+    channel_epoch_set_ = false;
+    channel_epoch_sample_ = 0;
+    if (stations_.empty()) {
+        session_clock_samples_ = 0;
+        mixer_.clear();
+        audio_queues_.clear();
+        rx_channels_.clear();
+    } else {
+        rx_channels_.clear();
+        for (const auto& station_id : stations_) {
+            rx_channels_[station_id] = createRxChannelLocked(station_id);
+        }
+    }
     appendEventLocked("channel_set", {}, 0);
+}
+
+std::unique_ptr<IChannelModel> SessionContext::createRxChannelLocked(
+    std::string_view receiver_id) const {
+    return createChannelModel(
+        config_.channelConfig(),
+        rng_root_,
+        streamNameForSession(config_.session_id,
+                             std::string("channel:rx:").append(receiver_id)));
+}
+
+IChannelModel* SessionContext::rxChannelForLocked(std::string_view receiver_id) {
+    auto it = rx_channels_.find(std::string(receiver_id));
+    if (it != rx_channels_.end()) {
+        return it->second.get();
+    }
+    auto channel = createRxChannelLocked(receiver_id);
+    auto* ptr = channel.get();
+    rx_channels_[std::string(receiver_id)] = std::move(channel);
+    return ptr;
+}
+
+void SessionContext::maybeSetChannelEpochLocked(uint64_t start_sample,
+                                                std::span<const float> samples) {
+    if (channel_epoch_set_ || samples.empty() || allZero(samples)) {
+        return;
+    }
+    channel_epoch_set_ = true;
+    channel_epoch_sample_ = start_sample;
+    std::ostringstream oss;
+    oss << "session_channel_epoch session=" << config_.session_id
+        << " start=" << channel_epoch_sample_
+        << " rms=" << rms(samples);
+    e2eDebugLine(oss.str());
+}
+
+uint64_t SessionContext::channelSampleIndexLocked(uint64_t session_sample) const {
+    if (!channel_epoch_set_ || session_sample < channel_epoch_sample_) {
+        return session_sample;
+    }
+    return session_sample - channel_epoch_sample_;
 }
 
 size_t SessionContext::stationCount() const {
@@ -152,6 +209,7 @@ bool SessionContext::submitTransmit(std::string_view station_id,
     if (stations_.find(std::string(station_id)) == stations_.end()) {
         return false;
     }
+    maybeSetChannelEpochLocked(start_sample, samples);
     mixer_.submit(std::string(station_id), start_sample, samples);
     if (capture_.enabled) {
         capture_.tx_samples += samples.size();
@@ -172,7 +230,7 @@ bool SessionContext::receiveForStation(std::string_view station_id,
 
     std::vector<float> mixed;
     mixer_.mixForReceiver(station_id, start_sample, count, mixed);
-    channel_->process(mixed, output);
+    rxChannelForLocked(station_id)->process(mixed, channelSampleIndexLocked(start_sample), output);
     if (capture_.enabled) {
         capture_.rx_samples += output.size();
     }
@@ -232,11 +290,10 @@ SessionClockTick SessionContext::advanceSessionClock() {
     SessionClockTick tick;
     tick.start_sample = session_clock_samples_;
     tick.sample_count = tick_samples_;
-    if (tick_samples_ == 0) {
+    if (tick_samples_ == 0 || stations_.empty()) {
         return tick;
     }
 
-    std::map<std::string, std::vector<float>> tx_by_station;
     for (const auto& station_id : stations_) {
         auto& queues = audio_queues_[station_id];
         auto& queue = queues.tx_inbox;
@@ -247,31 +304,37 @@ SessionClockTick SessionContext::advanceSessionClock() {
             queue.pop_front();
         }
         if (available > 0) {
-            tick.tx_blocks.push_back({
-                .station_id = station_id,
-                .start_sample = tick.start_sample,
-                .samples = samples,
-            });
+            maybeSetChannelEpochLocked(tick.start_sample, samples);
             if (capture_.enabled) {
                 capture_.tx_samples += samples.size();
             }
+            mixer_.submit(station_id, tick.start_sample, samples);
         }
-        tx_by_station.emplace(station_id, std::move(samples));
+    }
+
+    for (const auto& station_id : stations_) {
+        std::vector<float> own_tx;
+        if (mixer_.mixForStation(station_id, tick.start_sample, tick_samples_, own_tx)) {
+            const bool all_zero = std::all_of(own_tx.begin(), own_tx.end(), [](float sample) {
+                return sample == 0.0f;
+            });
+            if (!all_zero) {
+                tick.tx_blocks.push_back({
+                    .station_id = station_id,
+                    .start_sample = tick.start_sample,
+                    .samples = std::move(own_tx),
+                });
+            }
+        }
     }
 
     for (const auto& receiver_id : stations_) {
         std::vector<float> mixed(tick_samples_, 0.0f);
-        for (const auto& [sender_id, samples] : tx_by_station) {
-            if (sender_id == receiver_id) {
-                continue;
-            }
-            for (size_t i = 0; i < tick_samples_; ++i) {
-                mixed[i] += samples[i];
-            }
-        }
+        mixer_.mixForReceiver(receiver_id, tick.start_sample, tick_samples_, mixed);
 
         std::vector<float> rx;
-        channel_->process(mixed, rx);
+        rxChannelForLocked(receiver_id)->process(
+            mixed, channelSampleIndexLocked(tick.start_sample), rx);
         auto& outbox = audio_queues_[receiver_id].rx_outbox;
         outbox.push_back({
             .start_sample = tick.start_sample,
@@ -300,6 +363,7 @@ SessionClockTick SessionContext::advanceSessionClock() {
     }
 
     session_clock_samples_ += tick_samples_;
+    mixer_.discardBefore(session_clock_samples_);
     return tick;
 }
 

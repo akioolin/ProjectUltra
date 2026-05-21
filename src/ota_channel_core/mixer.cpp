@@ -60,6 +60,41 @@ void SampleIndexedMixer::mixForReceiver(std::string_view receiver_id,
     }
 }
 
+bool SampleIndexedMixer::mixForStation(std::string_view station_id,
+                                       uint64_t start_sample,
+                                       size_t count,
+                                       std::vector<float>& output) const {
+    output.assign(count, 0.0f);
+    bool had_overlap = false;
+    const uint64_t end_sample = start_sample + count;
+
+    for (const TxBlock& block : blocks_) {
+        if (block.station_id != station_id) {
+            continue;
+        }
+        const uint64_t block_end = block.start_sample + block.samples.size();
+        if (block_end <= start_sample) {
+            continue;
+        }
+        if (block.start_sample >= end_sample) {
+            break;
+        }
+
+        const uint64_t overlap_begin = std::max(start_sample, block.start_sample);
+        const uint64_t overlap_end = std::min(end_sample, block_end);
+        const size_t out_offset = static_cast<size_t>(overlap_begin - start_sample);
+        const size_t in_offset = static_cast<size_t>(overlap_begin - block.start_sample);
+        const size_t n = static_cast<size_t>(overlap_end - overlap_begin);
+
+        had_overlap = true;
+        for (size_t i = 0; i < n; ++i) {
+            output[out_offset + i] += block.samples[in_offset + i];
+        }
+    }
+
+    return had_overlap;
+}
+
 std::vector<float> SampleIndexedMixer::mixForReceiver(std::string_view receiver_id,
                                                       uint64_t start_sample,
                                                       size_t count) const {

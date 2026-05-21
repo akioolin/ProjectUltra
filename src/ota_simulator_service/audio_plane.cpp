@@ -125,6 +125,26 @@ std::vector<float> OrderedAudioQueue::readWindow(uint64_t start_sample, size_t c
     return out;
 }
 
+std::vector<ScheduledAudioBlock> LeaseAudioClockBridge::push(
+    uint64_t local_start_sample,
+    std::span<const float> samples,
+    uint64_t earliest_session_sample) {
+    std::vector<ScheduledAudioBlock> scheduled;
+    if (!local_queue_.push(local_start_sample, samples)) {
+        return scheduled;
+    }
+
+    for (auto& block : local_queue_.drainReady()) {
+        next_session_sample_ = std::max(next_session_sample_, earliest_session_sample);
+        scheduled.push_back({
+            .start_sample = next_session_sample_,
+            .samples = std::move(block.samples),
+        });
+        next_session_sample_ += scheduled.back().samples.size();
+    }
+    return scheduled;
+}
+
 UdpAudioPlane::UdpAudioPlane() = default;
 
 UdpAudioPlane::~UdpAudioPlane() {

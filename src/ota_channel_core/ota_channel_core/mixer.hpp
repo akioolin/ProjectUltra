@@ -23,6 +23,10 @@ public:
                         uint64_t start_sample,
                         size_t count,
                         std::vector<float>& output) const;
+    bool mixForStation(std::string_view station_id,
+                       uint64_t start_sample,
+                       size_t count,
+                       std::vector<float>& output) const;
     std::vector<float> mixForReceiver(std::string_view receiver_id,
                                       uint64_t start_sample,
                                       size_t count) const;

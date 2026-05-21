@@ -45,6 +45,10 @@ add_executable(test_session_isolation test_session_isolation.cpp)
 target_link_libraries(test_session_isolation PRIVATE ota_channel_core)
 add_test(NAME SessionIsolation COMMAND test_session_isolation)
 
+add_executable(test_simulator_determinism test_simulator_determinism.cpp)
+target_link_libraries(test_simulator_determinism PRIVATE ota_channel_core ota_simulator_service)
+add_test(NAME SimulatorDeterminism COMMAND test_simulator_determinism)
+
 add_executable(test_auth_allowlist test_auth_allowlist.cpp)
 target_link_libraries(test_auth_allowlist PRIVATE ota_simulator_service)
 add_test(NAME AuthAllowlist COMMAND test_auth_allowlist)

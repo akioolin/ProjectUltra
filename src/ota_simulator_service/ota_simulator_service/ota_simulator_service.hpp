@@ -104,6 +104,12 @@ private:
         std::string payload_json;
     };
 
+    struct TxClockBridgeState {
+        std::string session_id;
+        std::string station_id;
+        LeaseAudioClockBridge bridge;
+    };
+
     grpc::Status authenticate(grpc::ServerContext* context,
                               AuthPrincipal* principal) const;
     grpc::Status requireAdmin(const AuthPrincipal& principal) const;
@@ -140,6 +146,7 @@ private:
     std::map<std::string, RegisteredStation> registered_;
     std::map<std::string, SessionCaptureWriter> captures_;
     std::map<std::string, std::vector<projectultra::otasim::v1::ActiveEffect>> active_effects_;
+    std::map<uint64_t, TxClockBridgeState> tx_clock_bridges_;
     std::vector<StoredEvent> events_;
     std::condition_variable events_cv_;
     uint64_t next_event_id_ = 1;

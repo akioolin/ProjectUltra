@@ -33,6 +33,24 @@ private:
     std::map<uint64_t, std::vector<float>> pending_;
 };
 
+struct ScheduledAudioBlock {
+    uint64_t start_sample = 0;
+    std::vector<float> samples;
+};
+
+class LeaseAudioClockBridge {
+public:
+    std::vector<ScheduledAudioBlock> push(uint64_t local_start_sample,
+                                          std::span<const float> samples,
+                                          uint64_t earliest_session_sample);
+    uint64_t nextLocalSample() const { return local_queue_.nextSample(); }
+    uint64_t nextSessionSample() const { return next_session_sample_; }
+
+private:
+    OrderedAudioQueue local_queue_;
+    uint64_t next_session_sample_ = 0;
+};
+
 struct ReceivedAudioPacket {
     uint64_t lease_id = 0;
     uint64_t seq = 0;
