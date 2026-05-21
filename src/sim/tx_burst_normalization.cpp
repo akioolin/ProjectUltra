@@ -16,6 +16,50 @@ constexpr float kReferenceBandLowHz = 50.0f;
 constexpr float kReferenceBandHighHz = 2950.0f;
 constexpr float kReferenceSampleRate = 48000.0f;
 
+struct ActiveRegion {
+    size_t begin = 0;
+    size_t end = 0;
+    size_t samples = 0;
+    bool fragment_warning = false;
+};
+
+ActiveRegion detectActiveRegion(std::span<const float> samples) {
+    ActiveRegion active;
+    if (samples.empty()) {
+        return active;
+    }
+
+    size_t begin = 0;
+    while (begin < samples.size() &&
+           std::abs(samples[begin]) <= kTxBurstActiveThreshold) {
+        ++begin;
+    }
+
+    size_t end = samples.size();
+    while (end > begin &&
+           std::abs(samples[end - 1]) <= kTxBurstActiveThreshold) {
+        --end;
+    }
+
+    active.begin = begin;
+    active.end = end;
+    active.samples = end > begin ? end - begin : 0;
+    active.fragment_warning =
+        active.samples > 0 && active.samples < kTxBurstMinimumActiveSamples;
+    return active;
+}
+
+float maxAbsSample(std::span<const float> samples) {
+    float peak = 0.0f;
+    for (float sample : samples) {
+        const float abs_sample = std::abs(sample);
+        if (abs_sample > peak) {
+            peak = abs_sample;
+        }
+    }
+    return peak;
+}
+
 std::vector<float> makeReferenceBandFirCoefficients() {
     std::vector<float> coeffs(kReferenceBandFirTaps);
     const float fc_low = kReferenceBandLowHz / kReferenceSampleRate;
@@ -92,24 +136,13 @@ TxBurstRmsMeasurement measureTxBurstInBandRms(std::span<const float> samples) {
         return result;
     }
 
-    size_t begin = 0;
-    while (begin < samples.size() &&
-           std::abs(samples[begin]) <= kTxBurstActiveThreshold) {
-        ++begin;
-    }
-
-    size_t end = samples.size();
-    while (end > begin &&
-           std::abs(samples[end - 1]) <= kTxBurstActiveThreshold) {
-        --end;
-    }
-
-    result.active_begin = begin;
-    result.active_end = end;
-    result.active_samples = end > begin ? end - begin : 0;
-    result.burst_fragment_warning =
-        result.active_samples > 0 &&
-        result.active_samples < kTxBurstMinimumActiveSamples;
+    const ActiveRegion active = detectActiveRegion(samples);
+    const size_t begin = active.begin;
+    const size_t end = active.end;
+    result.active_begin = active.begin;
+    result.active_end = active.end;
+    result.active_samples = active.samples;
+    result.burst_fragment_warning = active.fragment_warning;
 
     if (result.active_samples == 0) {
         updatePeakStats(result, samples);
@@ -145,6 +178,57 @@ TxBurstRmsMeasurement measureTxBurstInBandRms(std::span<const float> samples) {
     }
 
     updatePeakStats(result, samples);
+    return result;
+}
+
+TxBurstHardwareMeasurement normalizeTxBurstForHardware(std::vector<float>& samples,
+                                                       float target_peak) {
+    TxBurstHardwareMeasurement result;
+    if (!std::isfinite(target_peak)) {
+        target_peak = kHardwareTxDefaultPeakTarget;
+    }
+    result.target_peak = std::clamp(target_peak,
+                                    kHardwareTxMinPeakTarget,
+                                    kHardwareTxMaxPeakTarget);
+
+    const ActiveRegion active = detectActiveRegion(samples);
+    result.active_begin = active.begin;
+    result.active_end = active.end;
+    result.active_samples = active.samples;
+    result.burst_fragment_warning = active.fragment_warning;
+    result.peak_before_gain = maxAbsSample(samples);
+    result.peak_after_gain = result.peak_before_gain;
+
+    if (samples.empty() || result.active_samples == 0) {
+        return result;
+    }
+
+    if (result.burst_fragment_warning) {
+        LOG_WARN("AUDIO",
+                 "Hardware TX peak normalization bypassed fragment: active=%zu "
+                 "minimum=%zu samples=%zu",
+                 result.active_samples,
+                 kTxBurstMinimumActiveSamples,
+                 samples.size());
+        return result;
+    }
+
+    if (!(result.peak_before_gain > 0.0f) ||
+        !std::isfinite(result.peak_before_gain)) {
+        return result;
+    }
+
+    result.gain_to_target = result.target_peak / result.peak_before_gain;
+    if (!(result.gain_to_target > 0.0f) ||
+        !std::isfinite(result.gain_to_target)) {
+        result.gain_to_target = 1.0f;
+        return result;
+    }
+
+    for (float& sample : samples) {
+        sample *= result.gain_to_target;
+    }
+    result.peak_after_gain = maxAbsSample(samples);
     return result;
 }
 

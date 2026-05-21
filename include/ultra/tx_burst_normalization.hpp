@@ -15,6 +15,20 @@ inline constexpr float kTxBurstPeakClipThreshold = 1.0f;
 // not PHY bursts, and must be moved upstream before normalization.
 inline constexpr size_t kTxBurstMinimumActiveSamples = 10080;
 
+inline constexpr float kHardwareTxDefaultPeakTarget = 0.5f;
+// Primary-source industry baseline: one leading HF OFDM implementation
+// normalizes modulator output to 16384 / 32767 = 0.50015 full scale.
+// This is the -6 dBFS default peak target for real soundcard output.
+
+inline constexpr float kHardwareTxMaxPeakTarget = 0.7f;
+// Operator-tunable ceiling after clean no-ALC verification on the specific
+// radio/audio chain. Above this, DAC clipping and radio ALC pumping risk rise
+// sharply. 0.7 full scale is -3.1 dBFS.
+
+inline constexpr float kHardwareTxMinPeakTarget = 0.05f;
+// Practical lower bound for real soundcard drive: below this, DAC/input noise
+// floor dominates and SNR collapses regardless of channel conditions.
+
 // Simulator reference-band filter contract:
 //   - Bandwidth: 50-2950 Hz, 48 kHz sample rate
 //   - 101-tap Blackman-windowed FIR
@@ -38,6 +52,17 @@ struct TxBurstRmsMeasurement {
     bool burst_fragment_warning = false; // active_samples < kTxBurstMinimumActiveSamples
 };
 
+struct TxBurstHardwareMeasurement {
+    size_t active_begin = 0;
+    size_t active_end = 0;
+    size_t active_samples = 0;
+    float peak_before_gain = 0.0f;
+    float gain_to_target = 1.0f;
+    float peak_after_gain = 0.0f;
+    float target_peak = 0.0f;
+    bool burst_fragment_warning = false;
+};
+
 // Measure only. Does not modify the samples.
 TxBurstRmsMeasurement measureTxBurstInBandRms(std::span<const float> samples);
 
@@ -50,5 +75,26 @@ TxBurstRmsMeasurement measureTxBurstInBandRms(std::span<const float> samples);
 // tolerance. A future expert absolute-noise-density mode can bypass the normal
 // SNR-to-reference-noise formula without changing this measurement contract.
 TxBurstRmsMeasurement normalizeTxBurstToReference(std::vector<float>& samples);
+
+// Hardware peak normalization. Scales a whole burst so its maximum |sample|
+// equals target_peak. Active-region detection uses kTxBurstActiveThreshold and
+// kTxBurstMinimumActiveSamples, matching the simulator measurement contract. If
+// the active region is shorter than the minimum, normalization is bypassed and
+// the original samples are returned unchanged with burst_fragment_warning=true.
+//
+// PHY lens: peak normalization preserves waveform shape and PAPR character. It
+// accepts lower average power on high-PAPR bursts because the hardware chain is
+// peak-limited.
+//
+// DSP lens: one scalar is computed off the audio callback and applied to the
+// full burst before queueing. Broadband peak, not in-band FIR RMS, is the
+// operational quantity for DAC clip protection.
+//
+// Operator lens: target_peak is the soundcard output peak. The default 0.5
+// leaves practical headroom; operators may tune upward only after confirming
+// clean ALC behavior on their own station.
+TxBurstHardwareMeasurement normalizeTxBurstForHardware(
+    std::vector<float>& samples,
+    float target_peak = kHardwareTxDefaultPeakTarget);
 
 }  // namespace ultra::sim

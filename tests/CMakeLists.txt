@@ -416,6 +416,27 @@ if(TARGET ultra_sim_station)
         TIMEOUT 90
         LABELS regression)
 
+    add_executable(test_hardware_tx_normalization
+        test_hardware_tx_normalization.cpp
+        ../src/gui/modem/modem_engine.cpp
+        ../src/gui/modem/modem_rx.cpp
+        ../src/gui/modem/modem_rx_decode.cpp
+        ../src/gui/modem/modem_mode.cpp
+        ../src/gui/modem/modem_carrier_sense.cpp
+        ../src/gui/adaptive_mode.cpp
+        ${ULTRA_STREAMING_DECODER_SOURCES}
+        ../src/gui/modem/streaming_encoder.cpp
+    )
+    target_include_directories(test_hardware_tx_normalization PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
+    )
+    target_link_libraries(test_hardware_tx_normalization PRIVATE ultra_core ota_channel_core)
+    add_test(NAME TxBurstHardwareNormalization COMMAND test_hardware_tx_normalization)
+    set_tests_properties(TxBurstHardwareNormalization PROPERTIES
+        TIMEOUT 90
+        LABELS regression)
+
     add_executable(test_channel_snr_calibration test_channel_snr_calibration.cpp)
     target_include_directories(test_channel_snr_calibration PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../src
@@ -588,6 +609,13 @@ else()
 endif()
 
 if(TARGET cli_simulator)
+    add_test(NAME CliTxDriveParse
+        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_cli_tx_drive_parse.sh
+                     $<TARGET_FILE:cli_simulator>)
+    set_tests_properties(CliTxDriveParse PROPERTIES
+        TIMEOUT 30
+        LABELS regression)
+
     add_test(NAME CLISyntheticNotch
         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_cli_synthetic_notch.sh
                      $<TARGET_FILE:cli_simulator>)
@@ -788,6 +816,7 @@ ultra_enable_test_warnings(
     test_streaming_signal_policy.cpp
     test_snr_source_routing.cpp
     test_tx_burst_normalization.cpp
+    test_hardware_tx_normalization.cpp
     test_streaming_mc_dpsk.cpp
     test_channel_snr_calibration.cpp
     test_modem_snr_meter_calibration.cpp
