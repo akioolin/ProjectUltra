@@ -1389,7 +1389,14 @@ private:
     bool cw_count_forced_ = false;  // true iff --cw-count was passed
     uint64_t carrier_mask_ = UINT64_MAX;
     bool soft_combining_harq_ = false;
-    bool papr_reduction_enabled_ = ultra::phy::kPaprReductionDefaultEnabled;
+    // cli_simulator overrides the project-wide ultra::phy::kPaprReductionDefaultEnabled
+    // (true) to false because the simulator's RMS-SNR-targeted channel model pays
+    // the in-band IMD penalty without rewarding the on-wire RMS gain that
+    // production hardware actually delivers. Defaulting OFF here lets floor
+    // sweeps measure the decoder ceiling cleanly; pass --papr-reduction on for
+    // the production-equivalent TX waveform. See 2026-05-21 CHANGELOG entry
+    // "PAPR reduction — haven't broken anything proof package."
+    bool papr_reduction_enabled_ = false;
     bool save_signals_ = false;
     int save_signals_message_limit_ = 0;   // 0 = full run
     size_t save_signals_max_samples_ = 0;  // 0 = unlimited
@@ -2991,7 +2998,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --burst-group-size <N>    Burst interleave group size (2-8, default: 8)\n";
                 std::cout << "  --harq                    Enable RX soft-combining HARQ (default: off)\n";
                 std::cout << "  --no-harq                 Keep RX soft-combining HARQ disabled for A/B tests\n";
-                std::cout << "  --papr-reduction on|off   OFDM data PAPR reduction (default: on)\n";
+                std::cout << "  --papr-reduction on|off   OFDM data PAPR reduction (cli_simulator default: off; production default: on)\n";
                 std::cout << "  --rx-overfeed-factor <N>  Run audio callbacks N× faster wall-clock (stress, default: 1)\n";
                 std::cout << "  --decode-delay-ms <N>     Add decode-thread delay (0-500 ms, stress)\n";
                 std::cout << "  --rx-batch-callbacks <N>  Batch N callbacks per decoder feed (stress)\n";
