@@ -55,7 +55,14 @@ std::vector<float> damagedLdpcObservation(const ultra::Bytes& encoded,
         indices[static_cast<size_t>(i)] = i;
     }
     std::mt19937 rng(seed);
-    std::shuffle(indices.begin(), indices.end(), rng);
+    // Fisher-Yates with raw mt19937 output: std::shuffle / uniform_int_distribution
+    // are implementation-defined across libc++ vs libstdc++, which makes the
+    // damaged observation differ between Mac and Linux for the same seed.
+    for (int i = static_cast<int>(indices.size()) - 1; i > 0; --i) {
+        const uint32_t r = static_cast<uint32_t>(rng());
+        const int j = static_cast<int>(r % static_cast<uint32_t>(i + 1));
+        std::swap(indices[static_cast<size_t>(i)], indices[static_cast<size_t>(j)]);
+    }
     for (int j = 0; j < flips && j < static_cast<int>(indices.size()); ++j) {
         const int i = indices[static_cast<size_t>(j)];
         llrs[static_cast<size_t>(i)] =
@@ -178,8 +185,10 @@ void test_two_attempt_ldpc_combining_passes() {
 
     ultra::LDPCEncoder encoder(rate);
     const auto encoded = encoder.encode(info);
-    const auto obs1 = damagedLdpcObservation(encoded, 0.35f, 0.05f, 0x104cu, 220);
-    const auto obs2 = damagedLdpcObservation(encoded, 0.35f, 0.05f, 0x900bu, 220);
+    // Seeds chosen so that each observation fails alone but their sum decodes,
+    // under the deterministic Fisher-Yates shuffle in damagedLdpcObservation.
+    const auto obs1 = damagedLdpcObservation(encoded, 0.35f, 0.05f, 0x1014u, 220);
+    const auto obs2 = damagedLdpcObservation(encoded, 0.35f, 0.05f, 0x104du, 220);
 
     CHECK(!ldpcDecodeMatches(rate, obs1, info), "observation 1 should fail alone");
     CHECK(!ldpcDecodeMatches(rate, obs2, info), "observation 2 should fail alone");

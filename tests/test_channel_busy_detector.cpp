@@ -20,12 +20,24 @@ ChannelBusyDetectorConfig testConfig() {
     return config;
 }
 
+Clock::time_point syntheticBase() {
+    static const Clock::time_point base = Clock::now() - std::chrono::seconds(10);
+    return base;
+}
+
+Clock::time_point atMs(int ms) {
+    return syntheticBase() + std::chrono::milliseconds(ms);
+}
+
 void observe(ChannelBusyDetector& detector,
              float rms,
              int ms,
              bool local_tx = false) {
-    static const Clock::time_point base = Clock::now() - std::chrono::seconds(10);
-    detector.observeRms(rms, local_tx, base + std::chrono::milliseconds(ms));
+    detector.observeRms(rms, local_tx, atMs(ms));
+}
+
+bool isIdleAtMs(const ChannelBusyDetector& detector, int ms) {
+    return detector.isIdleFor(std::chrono::milliseconds(0), atMs(ms));
 }
 
 void testInitialStateIsIdle() {
@@ -72,15 +84,15 @@ void testLocalTxBlackoutIsBusyRegardlessOfRms() {
     ChannelBusyDetector detector(testConfig());
 
     observe(detector, 0.000f, 0, true);
-    assert(!detector.isIdle());
+    assert(!isIdleAtMs(detector, 0));
 
     observe(detector, 0.000f, 10, false);
     observe(detector, 0.000f, 20, false);
     observe(detector, 0.000f, 30, false);
-    assert(!detector.isIdle());
+    assert(!isIdleAtMs(detector, 30));
 
     observe(detector, 0.000f, 40, false);
-    assert(detector.isIdle());
+    assert(isIdleAtMs(detector, 40));
 }
 
 void testAdaptiveNoiseFloorTreatsAwgnFloorAsIdle() {
