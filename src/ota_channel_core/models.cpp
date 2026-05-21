@@ -29,6 +29,7 @@ constexpr uint16_t kRealHfLoopBitsPerSample = 16;
 constexpr size_t kIdleSnrBandpassTaps = 101;
 constexpr float kIdleSnrBandLowHz = 50.0f;
 constexpr float kIdleSnrBandHighHz = 2950.0f;
+constexpr size_t kWattersonHilbertTaps = 1793;
 constexpr size_t kRealHfLoopPowerProbeSamples =
     static_cast<size_t>(kDefaultSampleRate) * 10u;
 
@@ -434,6 +435,8 @@ WattersonChannel::WattersonChannel(const Config& config, uint64_t seed)
     delay_samples_ = static_cast<size_t>(
         config_.delay_spread_ms * static_cast<float>(config_.sample_rate) / 1000.0f);
     delay_line_.assign(delay_samples_, 0.0f);
+    analytic_delay_line_.assign(delay_samples_, Complex(0.0f, 0.0f));
+    initializeHilbert();
     noise_stddev_ = modemReferenceNoiseStddev(config_.snr_db);
 
     const float normalized_doppler =
@@ -455,6 +458,11 @@ WattersonChannel::WattersonChannel(const Config& config, uint64_t seed)
 
 void WattersonChannel::reset() {
     std::fill(delay_line_.begin(), delay_line_.end(), 0.0f);
+    std::fill(analytic_delay_line_.begin(),
+              analytic_delay_line_.end(),
+              Complex(0.0f, 0.0f));
+    std::fill(hilbert_delay_line_.begin(), hilbert_delay_line_.end(), 0.0f);
+    hilbert_delay_idx_ = 0;
     fading1_ = Complex(1.0f, 0.0f);
     fading2_ = Complex(1.0f, 0.0f);
     cfo_phase_ = 0.0f;
@@ -465,29 +473,78 @@ void WattersonChannel::setSNR(float snr_db) {
     noise_stddev_ = modemReferenceNoiseStddev(snr_db);
 }
 
+void WattersonChannel::initializeHilbert() {
+    const size_t taps = kWattersonHilbertTaps;
+    hilbert_coeffs_.assign(taps, 0.0f);
+    hilbert_delay_line_.assign(taps, 0.0f);
+    hilbert_delay_idx_ = 0;
+    hilbert_delay_samples_ = (taps - 1) / 2;
+
+    const int midpoint = static_cast<int>(hilbert_delay_samples_);
+    for (int n = 0; n < static_cast<int>(taps); ++n) {
+        const int k = n - midpoint;
+        if (k != 0 && (k % 2) != 0) {
+            hilbert_coeffs_[static_cast<size_t>(n)] =
+                2.0f / (kPi * static_cast<float>(k));
+        }
+        const float w = 2.0f * kPi * static_cast<float>(n) /
+                        static_cast<float>(taps - 1);
+        hilbert_coeffs_[static_cast<size_t>(n)] *=
+            0.42f - 0.5f * std::cos(w) + 0.08f * std::cos(2.0f * w);
+    }
+}
+
+Complex WattersonChannel::analyticSample(float sample) {
+    hilbert_delay_line_[hilbert_delay_idx_] = sample;
+
+    float quadrature = 0.0f;
+    size_t j = hilbert_delay_idx_;
+    for (float coeff : hilbert_coeffs_) {
+        quadrature += coeff * hilbert_delay_line_[j];
+        if (j == 0) {
+            j = hilbert_coeffs_.size();
+        }
+        --j;
+    }
+
+    const size_t delay_pos =
+        (hilbert_delay_idx_ + hilbert_coeffs_.size() - hilbert_delay_samples_) %
+        hilbert_coeffs_.size();
+    const float in_phase = hilbert_delay_line_[delay_pos];
+    hilbert_delay_idx_ = (hilbert_delay_idx_ + 1) % hilbert_coeffs_.size();
+    return Complex(in_phase, quadrature);
+}
+
 void WattersonChannel::process(std::span<const float> input,
                                std::vector<float>& output) {
+    if (config_.fading_enabled) {
+        processWithComplexFading(input, output);
+    } else {
+        processWithoutFading(input, output);
+    }
+
+    if (config_.cfo_enabled && std::abs(actual_cfo_hz_) > 0.001f) {
+        applyCFO(output);
+    }
+}
+
+void WattersonChannel::processWithoutFading(std::span<const float> input,
+                                            std::vector<float>& output) {
     output.resize(input.size());
 
     for (size_t i = 0; i < input.size(); ++i) {
         const float sample = input[i];
-        if (config_.fading_enabled) {
-            updateFading();
-        }
 
         float out = 0.0f;
         if (config_.multipath_enabled && delay_samples_ > 0) {
-            const float h1_mag = config_.fading_enabled ? std::abs(fading1_) : 1.0f;
-            const float h2_mag = config_.fading_enabled ? std::abs(fading2_) : 1.0f;
-            out += sample * config_.path1_gain * h1_mag;
+            out += sample * config_.path1_gain;
 
             const float delayed = delay_line_.front();
             delay_line_.pop_front();
             delay_line_.push_back(sample);
-            out += delayed * config_.path2_gain * h2_mag;
+            out += delayed * config_.path2_gain;
         } else {
-            const float h_mag = config_.fading_enabled ? std::abs(fading1_) : 1.0f;
-            out = sample * h_mag;
+            out = sample;
         }
 
         if (config_.noise_enabled) {
@@ -495,9 +552,33 @@ void WattersonChannel::process(std::span<const float> input,
         }
         output[i] = out;
     }
+}
 
-    if (config_.cfo_enabled && std::abs(actual_cfo_hz_) > 0.001f) {
-        applyCFO(output);
+void WattersonChannel::processWithComplexFading(std::span<const float> input,
+                                                std::vector<float>& output) {
+    output.resize(input.size());
+
+    for (size_t i = 0; i < input.size(); ++i) {
+        const Complex analytic = analyticSample(input[i]);
+        updateFading();
+
+        Complex out(0.0f, 0.0f);
+        if (config_.multipath_enabled && delay_samples_ > 0) {
+            out += analytic * (config_.path1_gain * fading1_);
+
+            const Complex delayed = analytic_delay_line_.front();
+            analytic_delay_line_.pop_front();
+            analytic_delay_line_.push_back(analytic);
+            out += delayed * (config_.path2_gain * fading2_);
+        } else {
+            out = analytic * fading1_;
+        }
+
+        float real_out = std::real(out);
+        if (config_.noise_enabled) {
+            real_out += noise_stddev_ * gaussian_(rng_);
+        }
+        output[i] = real_out;
     }
 }
 
@@ -509,6 +590,39 @@ std::vector<float> WattersonChannel::process(std::span<const float> input) {
 
 float WattersonChannel::fadingMagnitude() const {
     return std::abs(fading1_);
+}
+
+void WattersonChannel::stepFadingForDiagnostics() {
+    updateFading();
+}
+
+void WattersonChannel::setFadingTapsForDiagnostics(Complex tap1, Complex tap2) {
+    fading1_ = tap1;
+    fading2_ = tap2;
+}
+
+std::vector<Complex> WattersonChannel::applyComplexMultipathForDiagnostics(
+    std::span<const Complex> input,
+    size_t delay_samples,
+    Complex tap1,
+    Complex tap2,
+    float path1_gain,
+    float path2_gain) {
+    std::vector<Complex> output(input.size(), Complex(0.0f, 0.0f));
+    std::deque<Complex> delay(delay_samples, Complex(0.0f, 0.0f));
+
+    for (size_t i = 0; i < input.size(); ++i) {
+        output[i] += input[i] * (path1_gain * tap1);
+        if (delay_samples > 0) {
+            const Complex delayed = delay.front();
+            delay.pop_front();
+            delay.push_back(input[i]);
+            output[i] += delayed * (path2_gain * tap2);
+        } else {
+            output[i] += input[i] * (path2_gain * tap2);
+        }
+    }
+    return output;
 }
 
 void WattersonChannel::updateFading() {

@@ -151,9 +151,28 @@ public:
 
     float actualCFO() const { return actual_cfo_hz_; }
     float fadingMagnitude() const;
+    std::complex<float> fadingTap1ForDiagnostics() const { return fading1_; }
+    std::complex<float> fadingTap2ForDiagnostics() const { return fading2_; }
+    float fadingAlphaForDiagnostics() const { return fading_alpha_; }
+    void stepFadingForDiagnostics();
+    void setFadingTapsForDiagnostics(std::complex<float> tap1,
+                                      std::complex<float> tap2);
+    static std::vector<std::complex<float>> applyComplexMultipathForDiagnostics(
+        std::span<const std::complex<float>> input,
+        size_t delay_samples,
+        std::complex<float> tap1,
+        std::complex<float> tap2,
+        float path1_gain,
+        float path2_gain);
     const Config& config() const { return config_; }
 
 private:
+    void initializeHilbert();
+    std::complex<float> analyticSample(float sample);
+    void processWithoutFading(std::span<const float> input,
+                              std::vector<float>& output);
+    void processWithComplexFading(std::span<const float> input,
+                                  std::vector<float>& output);
     void updateFading();
     void applyCFO(std::vector<float>& samples);
 
@@ -161,7 +180,12 @@ private:
     std::mt19937 rng_;
     std::normal_distribution<float> gaussian_{0.0f, 1.0f};
     std::deque<float> delay_line_;
+    std::deque<std::complex<float>> analytic_delay_line_;
+    std::vector<float> hilbert_coeffs_;
+    std::vector<float> hilbert_delay_line_;
     size_t delay_samples_ = 0;
+    size_t hilbert_delay_idx_ = 0;
+    size_t hilbert_delay_samples_ = 0;
     float noise_stddev_ = 0.0f;
     float fading_alpha_ = 0.0f;
     std::complex<float> fading1_{1.0f, 0.0f};

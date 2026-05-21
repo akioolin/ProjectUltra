@@ -21,6 +21,10 @@ add_executable(test_channel_core_models test_channel_core_models.cpp)
 target_link_libraries(test_channel_core_models PRIVATE ota_channel_core)
 add_test(NAME ChannelCoreModels COMMAND test_channel_core_models)
 
+add_executable(test_watterson_channel test_watterson_channel.cpp)
+target_link_libraries(test_watterson_channel PRIVATE ota_channel_core)
+add_test(NAME WattersonChannel COMMAND test_watterson_channel)
+
 add_executable(test_real_hf_loop_channel test_real_hf_loop_channel.cpp)
 target_link_libraries(test_real_hf_loop_channel PRIVATE ota_channel_core)
 add_test(NAME RealHfLoopChannel COMMAND test_real_hf_loop_channel)

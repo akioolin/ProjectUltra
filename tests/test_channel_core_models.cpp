@@ -241,12 +241,24 @@ void checkWattersonNoiseAndFading() {
     flutter_cfg.multipath_enabled = false;
     flutter_cfg.cfo_enabled = false;
     WattersonChannel flutter(flutter_cfg, 0x13579u);
-    const auto envelope = flutter.process(std::vector<float>(sample_count, 1.0f));
-    const double mean_square_gain =
-        std::inner_product(envelope.begin() + 4096, envelope.end(),
-                           envelope.begin() + 4096, 0.0) /
-        static_cast<double>(envelope.size() - 4096);
-    std::cout << "watterson_flutter mean_square_gain=" << mean_square_gain
+    std::vector<float> tone(sample_count);
+    for (size_t i = 0; i < tone.size(); ++i) {
+        tone[i] = static_cast<float>(
+            std::sin(2.0 * static_cast<double>(kPi) * 1000.0 *
+                     static_cast<double>(i) /
+                     static_cast<double>(kSampleRate)));
+    }
+    const auto faded = flutter.process(tone);
+    const double output_power =
+        std::inner_product(faded.begin() + 4096, faded.end(),
+                           faded.begin() + 4096, 0.0) /
+        static_cast<double>(faded.size() - 4096);
+    const double input_power =
+        std::inner_product(tone.begin() + 4096, tone.end(),
+                           tone.begin() + 4096, 0.0) /
+        static_cast<double>(tone.size() - 4096);
+    const double mean_square_gain = output_power / input_power;
+    std::cout << "watterson_flutter_tone mean_square_gain=" << mean_square_gain
               << " doppler_hz=" << flutter_cfg.doppler_spread_hz
               << "\n";
     assert(mean_square_gain > 0.80 && mean_square_gain < 1.20);

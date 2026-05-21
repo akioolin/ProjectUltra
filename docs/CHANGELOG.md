@@ -10,6 +10,92 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-21: Watterson channel — complex fading restored (analytic-signal refactor)
+
+**Fixed:** `WattersonChannel::process()` was applying only the magnitude of
+the complex AR(1) fading taps to the signal (via `std::abs(fading1_)` and
+`std::abs(fading2_)` at `src/ota_channel_core/models.cpp:480,481,489`). The
+underlying fading processes were correctly complex Gaussian, but the phase
+information was stripped before being applied to the real passband audio.
+Result: the channel response `H(f, t) = |h1(t)| + |h2(t)| · exp(-j 2π f D)`
+had a frequency-selective notch pinned at `f = 1/(2D)` (≈ 1000 Hz for Good's
+0.5 ms delay) that only varied in depth, never in position. Real HF Watterson
+per ITU-R F.1487 is `H(f, t) = h1(t) + h2(t) · exp(-j 2π f D)` with **complex**
+taps — the notches drift across the band at the Doppler rate. The fixed-notch
+defect was empirically verified by a Python port of the C++ code: notch
+position std-dev was 38.8 Hz (≈ FFT bin granularity), never escaping the
+949–1055 Hz window over a 120 s run.
+
+**Changed:** Refactored `WattersonChannel::process()` to apply complex fading
+to an analytic (Hilbert-transformed) representation of the passband audio,
+then take the real part. The analytic signal is produced by a 1793-tap
+Type-III Blackman FIR Hilbert filter, giving a ~18.7 ms group delay (well
+under the 20 ms real-time budget). The complex multipath delay line operates
+on the analytic samples so that `h2(t) · z⁻ᴰ` carries its phase correctly.
+The non-fading path (passthrough, AWGN, `fading_enabled=false`, multipath
+disabled) keeps the original real-sample fast path and produces byte-exact
+output for unchanged inputs. CFO continues to use the existing
+`analyticFrequencyShift` (separate Hilbert pass). The complex fading update
+itself was already correct AR(1) `CN(0, 1)`; no change to
+`updateFading()`.
+
+**Why it works:** Complex fading on an analytic baseband matches the
+mathematical formulation of the Watterson model exactly. Each path contributes
+`h_i(t) · x_analytic(t - τ_i)`; the resulting analytic output is summed and
+the real part is taken. Because both `h1(t)` and `h2(t)` are complex
+processes with independent Doppler-rate temporal correlation, the relative
+phase between the two paths drifts continuously, producing notches that
+sweep across the receive band — the dominant impairment for coherent OFDM
+at HF. The FIR Hilbert is preferred over a block-FFT approach because it has
+no block-boundary artifacts (which would alias as spurious noise on long
+data runs) and adds only a fixed group delay (which is folded into the
+existing delay line accounting).
+
+**Verification:**
+- `verify_watterson_v2.py` (Python reference reproducer, unchanged) plus C++
+  equivalent in `tests/test_watterson_channel.cpp`: Good preset notch
+  position std-dev `518.41 Hz` over 120 s (was 38.8 Hz). Sample positions
+  across the run: 1000, 600, 610, 1800, 1700, 1775, 1580, 1365, 1160, 580,
+  2130, 1295, 2030 Hz — clearly sweeping the entire 580-2130 Hz range. Pass
+  criterion: std-dev > 200 Hz with > 500 Hz range.
+- Per-tap Rayleigh statistics: `Re{h1}`, `Im{h1}` variance ≈ 0.51 (expected
+  0.508); AR(1) autocorrelation measured 0.4564 vs expected 0.4559.
+- Doppler PSD: peak at DC, tap half-power ≈ configured Doppler rate within
+  FFT bin granularity.
+- Multipath impulse response: with `h1, h2` clamped to known complex
+  values, output matches `h1 · δ(t) + h2 · δ(t - D)` to FP epsilon.
+- In-band RMS preservation: input/output RMS both 0.304827 (the calibrated
+  `kModemReferenceInBandRms`); error 0 dB.
+- Fading-disabled path byte-exact to pre-refactor output.
+- Determinism: same seed × 2 runs → bit-identical sample stream
+  (hash `0x60f46a825dee9368`).
+- `./build/cli_simulator --snr 10 --channel awgn --seed 42 --test`: PASS
+  (AWGN path untouched).
+- `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test`: PASS
+  with 8 retransmissions. The 15 dB R1/4 Good floor still completes the
+  full QSO, but ARQ now does more work to absorb the time-varying notch.
+  This is the expected behavior of an honest Watterson model — real HF
+  needs ARQ to work harder than the previously-published numbers implied.
+- `ctest --test-dir build-debug -j4`: 60/60 PASS.
+- `ctest --test-dir build -j4`: 92/93. The lone failure is
+  `SessionPttSweep_2000ms`, a `PASSTHROUGH`-channel test that fails the
+  same way on the parent commit (`d75e133` and earlier); it never
+  exercises `WattersonChannel` and is tracked as a separate triage item.
+
+**Out of scope (deferred):**
+- CLAUDE.md fading-floor recalibration. The current Good 15 dB floor still
+  passes but with heavier ARQ. Published floors should be re-measured
+  against the corrected model and updated in a separate calibration sweep.
+- Hardware Mac↔Pi5 verification (rig not attached during this work).
+- Watterson preset re-tuning (`itu_r_f1487::good/moderate/poor`). The ITU-R
+  spec parameters are correct; revisit only if recalibration reveals a
+  spec-level mismatch.
+
+**Builds on:** `~/Documents/ProjectUltra-private/WATTERSON_CHANNEL_FIDELITY_AUDIT_2026_05_20.md`
+(audit + Python verification by Claude on 2026-05-20).
+
+---
+
 ## 2026-05-21: cli_simulator + OTASim sample-clock-paced test path
 
 **Fixed:** The cli_simulator + OTASim test path was wall-clock-driven end to
