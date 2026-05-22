@@ -1766,6 +1766,14 @@ private:
         // the real on-air time the audio actually occupies.
         const uint64_t alpha_tx_samples_start = alpha_->txEmittedSampleClock();
         const uint64_t bravo_tx_samples_start = bravo_->txEmittedSampleClock();
+        // Continuous soundcard sample clock: advances by SAMPLES_PER_CALLBACK on
+        // every pull (silence included), so its delta is the TRUE real-time span
+        // of the data phase — inter-frame dead air (T/R turnaround, SACK delay,
+        // retx waits) counted as real time, but the handshake EXCLUDED because we
+        // snapshot here (after CONNECT/MODE_CHANGE, before sendFile). This is the
+        // operator-facing data throughput comparable to industry bytes/min.
+        const uint64_t alpha_clock_start = alpha_->txSampleClock();
+        const uint64_t bravo_clock_start = bravo_->txSampleClock();
 
         if (!alpha_->sendFile(test_file)) {
             std::cout << "  \033[31m✗ Failed to start file transfer!\033[0m\n";
@@ -1831,6 +1839,22 @@ private:
         const float on_air_bps = (on_air_sec > 0.01f)
             ? (test_file_size_ * 8.0f / on_air_sec) : 0.0f;
 
+        // TRUE end-to-end data-phase goodput: real-time span of the transfer
+        // (every pull = 10 ms of soundcard time, dead air included), handshake
+        // excluded. on_air_bps above counts ONLY keyed-TX samples and therefore
+        // OVERSTATES throughput by the dead-air fraction; this is the honest
+        // number to compare against the industry-leader figures.
+        const uint64_t alpha_clock_delta = alpha_->txSampleClock() - alpha_clock_start;
+        const uint64_t bravo_clock_delta = bravo_->txSampleClock() - bravo_clock_start;
+        const uint64_t end_to_end_samples = std::max(alpha_clock_delta, bravo_clock_delta);
+        const float end_to_end_sec = static_cast<float>(end_to_end_samples) / 48000.0f;
+        const float end_to_end_bps = (end_to_end_sec > 0.01f)
+            ? (test_file_size_ * 8.0f / end_to_end_sec) : 0.0f;
+        const float dead_air_pct = (end_to_end_samples > on_air_samples && end_to_end_samples > 0)
+            ? 100.0f * (1.0f - static_cast<float>(on_air_samples) /
+                                static_cast<float>(end_to_end_samples))
+            : 0.0f;
+
         // Verify received file
         {
             std::lock_guard<std::mutex> lock(msg_mutex_);
@@ -1846,7 +1870,12 @@ private:
             std::cout << "  \033[36mOn-air goodput:        " << test_file_size_ << " bytes in "
                       << std::fixed << std::setprecision(2) << on_air_sec << "s = "
                       << std::setprecision(0) << on_air_bps << " bps"
-                      << " (DATA+ACK samples / 48 kHz; what a real radio sees)\033[0m\n";
+                      << " (DATA+ACK keyed samples / 48 kHz; EXCLUDES dead air — optimistic)\033[0m\n";
+            std::cout << "  \033[1;32mEnd-to-end goodput:    " << test_file_size_ << " bytes in "
+                      << std::fixed << std::setprecision(2) << end_to_end_sec << "s = "
+                      << std::setprecision(0) << end_to_end_bps << " bps"
+                      << " (data phase, dead air INCL, handshake EXCL — TRUST THIS; "
+                      << std::setprecision(0) << dead_air_pct << "% dead air)\033[0m\n";
 
             // Verify contents
             std::ifstream ifs(received_file_path_, std::ios::binary);
