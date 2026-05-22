@@ -147,6 +147,18 @@ inline uint32_t ackRepeatDelayForCopy(uint32_t ack_repeat_delay_ms, int copy_ind
     return ack_repeat_delay_ms * 3;
 }
 
+inline uint32_t ackRepeatDelayWithHalfDuplexGuard(uint32_t repeat_delay_ms,
+                                                  uint32_t peer_burst_guard_ms,
+                                                  bool guard_half_duplex) {
+    if (!guard_half_duplex) {
+        return repeat_delay_ms;
+    }
+
+    const uint64_t guarded_delay =
+        static_cast<uint64_t>(peer_burst_guard_ms) + repeat_delay_ms;
+    return static_cast<uint32_t>(std::min<uint64_t>(guarded_delay, 0xFFFFFFFFull));
+}
+
 inline int ackRepeatJitterMs(uint16_t base_seq, uint32_t bitmap, int copy_index) {
     uint32_t h = static_cast<uint32_t>(base_seq);
     h = (h * 1103515245u + 12345u) ^ (bitmap << 8) ^ (bitmap >> 16)

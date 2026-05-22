@@ -1028,6 +1028,9 @@ bool test_cumulative_ack_repeats_when_enabled() {
 
     for (int i = 0; i < 4; i++) {
         auto frame = v2::DataFrame::makeData("TX1", "RX1", i, Bytes{static_cast<uint8_t>(i)});
+        if (i == 3) {
+            frame.flags |= v2::Flags::FINAL;
+        }
         rx.onFrameReceived(frame.serialize());
     }
 
@@ -1064,12 +1067,100 @@ bool test_cumulative_ack_repeats_when_enabled() {
     return true;
 }
 
+bool test_non_final_ack_repeat_waits_past_peer_burst_guard() {
+    TEST("non-final ACK repeat waits past peer burst guard");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.sack_delay_ms = 500;
+
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+    rx.setAckRepeatCount(2);
+    rx.setAckRepeatDelay(100);
+
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    for (int i = 0; i < 4; i++) {
+        auto frame = v2::DataFrame::makeData("TX1", "RX1", i, Bytes{static_cast<uint8_t>(i)});
+        rx.onFrameReceived(frame.serialize());
+    }
+
+    if (channel.size() != 1)
+        FAIL("Expected primary ACK only before guarded repeat timer");
+
+    auto primary = v2::ControlFrame::deserialize(channel.receive());
+    if (!primary || primary->seq != 3)
+        FAIL("Primary non-final ACK did not acknowledge seq=3");
+
+    rx.tick(500);
+    if (channel.size() != 0)
+        FAIL("Non-final ACK repeat fired before peer burst guard elapsed");
+
+    rx.tick(200);
+    if (channel.size() != 1)
+        FAIL("Expected one delayed non-final ACK repeat after peer burst guard");
+
+    auto repeat = v2::ControlFrame::deserialize(channel.receive());
+    if (!repeat || repeat->seq != 3)
+        FAIL("Guarded ACK repeat did not acknowledge seq=3");
+
+    PASS();
+    return true;
+}
+
+bool test_hole_sack_repeat_stays_prompt() {
+    TEST("hole-bearing SACK repeat stays prompt");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.sack_delay_ms = 500;
+
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+    rx.setAckRepeatCount(2);
+    rx.setAckRepeatDelay(100);
+
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    auto frame = v2::DataFrame::makeData("TX1", "RX1", 1, Bytes{1});
+    rx.onFrameReceived(frame.serialize());
+
+    if (channel.size() != 1)
+        FAIL("Expected primary out-of-order SACK before repeat timer");
+
+    auto primary = v2::ControlFrame::deserialize(channel.receive());
+    if (!primary)
+        FAIL("Primary SACK did not parse");
+    if (v2::NackPayload::decode(primary->payload).cw_bitmap == 0)
+        FAIL("Expected primary SACK to carry a hole bitmap");
+
+    rx.tick(99);
+    if (channel.size() != 0)
+        FAIL("Hole-bearing SACK repeat fired before configured delay");
+
+    rx.tick(40);
+    if (channel.size() != 1)
+        FAIL("Hole-bearing SACK repeat was incorrectly held by peer burst guard");
+
+    auto repeat = v2::ControlFrame::deserialize(channel.receive());
+    if (!repeat)
+        FAIL("Repeated SACK did not parse");
+    if (v2::NackPayload::decode(repeat->payload).cw_bitmap == 0)
+        FAIL("Expected repeated SACK to carry the hole bitmap");
+
+    PASS();
+    return true;
+}
+
 bool test_cumulative_ack_repeat_coalesces_superseded_state() {
     TEST("new cumulative ACK coalesces superseded pending repeat");
 
     ARQConfig config;
     config.window_size = 4;
-    config.sack_delay_ms = 10000;
+    config.sack_delay_ms = 500;
 
     SelectiveRepeatARQ rx(config);
     rx.setCallsigns("RX1", "TX1");
@@ -1098,7 +1189,7 @@ bool test_cumulative_ack_repeat_coalesces_superseded_state() {
     if (!first || first->seq != 3 || !second || second->seq != 7)
         FAIL("Expected primary ACK sequence 3 then 7");
 
-    rx.tick(120);
+    rx.tick(700);
     if (channel.size() != 1)
         FAIL("Expected only the latest cumulative ACK repeat after coalescing");
 
@@ -1443,6 +1534,8 @@ int main() {
     test_ack_batch_can_fire_through_more_frag_for_mc_dpsk();
     test_wide_sack_bitmap_serializes_beyond_8_frames();
     test_cumulative_ack_repeats_when_enabled();
+    test_non_final_ack_repeat_waits_past_peer_burst_guard();
+    test_hole_sack_repeat_stays_prompt();
     test_cumulative_ack_repeat_coalesces_superseded_state();
 
     std::cout << "\nStream-Aware SACK Timer Tests:\n";

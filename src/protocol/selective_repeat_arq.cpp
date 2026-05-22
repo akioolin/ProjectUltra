@@ -1230,6 +1230,7 @@ void SelectiveRepeatARQ::maybeSendCwNack(size_t slot_index, uint32_t missing_bit
 void SelectiveRepeatARQ::sendSack() {
     uint32_t bitmap = buildRXBitmap();
     uint16_t base_seq = (rx_base_seq_ - 1) & 0xFFFF;
+    const bool sack_has_final = rx_final_delivered_since_sack_;
 
     // Use NACK with bitmap as SACK
     auto sack = v2::ControlFrame::makeNack(local_call_, remote_call_,
@@ -1237,7 +1238,7 @@ void SelectiveRepeatARQ::sendSack() {
                                             bitmap);
     // Override type to ACK for cumulative ack behavior
     sack.type = v2::FrameType::ACK;
-    if (rx_final_delivered_since_sack_) {
+    if (sack_has_final) {
         sack.flags |= v2::Flags::FINAL;
     }
 
@@ -1288,7 +1289,15 @@ void SelectiveRepeatARQ::sendSack() {
             continue;
         }
 
-        uint32_t delay_ms = ackRepeatDelayForCopy(copy_index);
+        const uint32_t base_delay_ms = ackRepeatDelayForCopy(copy_index);
+        // Clean non-final cumulative ACK repeats are diversity copies for a
+        // state after which the peer may immediately start its next data burst.
+        // In half-duplex audio/radio paths, sending those copies immediately can
+        // deafen the receiver to that burst. Hole-bearing SACK repeats remain
+        // prompt because they are repair feedback, not just ACK diversity.
+        const bool guard_half_duplex_repeat = (bitmap == 0) && !sack_has_final;
+        uint32_t delay_ms = arq_policy::ackRepeatDelayWithHalfDuplexGuard(
+            base_delay_ms, config_.sack_delay_ms, guard_half_duplex_repeat);
         int jitter_ms = ackRepeatJitterMs(base_seq, bitmap, copy_index);
 
         int64_t scheduled = static_cast<int64_t>(delay_ms) + jitter_ms;

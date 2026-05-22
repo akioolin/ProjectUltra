@@ -146,6 +146,10 @@ void test_ack_repeat_policy() {
           "first delayed ACK repeat should use configured delay");
     CHECK(ackRepeatDelayForCopy(100, 3) == 300,
           "later ACK repeat should use wider spacing");
+    CHECK(ackRepeatDelayWithHalfDuplexGuard(100, 5000, false) == 100,
+          "unguarded ACK repeat should stay prompt");
+    CHECK(ackRepeatDelayWithHalfDuplexGuard(100, 5000, true) == 5100,
+          "guarded ACK repeat should wait past peer burst guard");
 
     const int jitter = ackRepeatJitterMs(7, 0x1234, 2);
     CHECK(jitter >= -30 && jitter <= 30, "ACK repeat jitter should stay bounded");
