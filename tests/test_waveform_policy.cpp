@@ -1,4 +1,5 @@
 #include "protocol/waveform_selection.hpp"
+#include "waveform/ofdm_chirp_waveform.hpp"
 #include "waveform/waveform_factory.hpp"
 #include "ultra/types.hpp"
 
@@ -179,6 +180,22 @@ void test_data_mode_policy() {
     CHECK(rate == CodeRate::R1_4, "MC-DPSK should use R1/4");
 }
 
+void test_ofdm_chirp_qam16_configuration() {
+    OFDMChirpWaveform waveform;
+    waveform.configure(Modulation::QAM16, CodeRate::R2_3);
+
+    CHECK(waveform.getModulation() == Modulation::QAM16,
+          "OFDM_CHIRP should keep QAM16 instead of falling back to DQPSK");
+    CHECK(waveform.getCodeRate() == CodeRate::R2_3,
+          "OFDM_CHIRP QAM16 configuration should keep requested rate");
+    CHECK(waveform.getConfig().use_pilots,
+          "OFDM_CHIRP QAM16 should use pilot-aided coherent demodulation");
+    CHECK(waveform.getPilotSpacing() == 5,
+          "OFDM_CHIRP QAM16 R2/3 should use dense coherent pilot spacing");
+    CHECK(waveform.getCapabilities().requires_pilots,
+          "OFDM_CHIRP capabilities should advertise pilots when QAM16 is active");
+}
+
 void test_waveform_factory() {
     for (auto mode : WaveformFactory::getAvailableModes()) {
         auto waveform = WaveformFactory::create(mode);
@@ -209,6 +226,7 @@ int main() {
     test_bootstrap_caps();
     test_waveform_recommendations();
     test_data_mode_policy();
+    test_ofdm_chirp_qam16_configuration();
     test_waveform_factory();
 
     if (tests_failed != 0) {

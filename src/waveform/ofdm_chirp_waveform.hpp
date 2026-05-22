@@ -7,7 +7,8 @@
 //
 // Features:
 // - Chirp preamble for robust sync at lower SNR than Schmidl-Cox
-// - DQPSK modulation (differential, no pilots needed)
+// - DPSK modulation for robust fading paths
+// - Pilot-aided coherent QAM16 for high-SNR data paths
 // - Good fading performance with frequency diversity
 // - CFO-tolerant via complex correlation chirp detection
 

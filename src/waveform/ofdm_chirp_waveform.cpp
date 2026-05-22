@@ -20,6 +20,15 @@ constexpr size_t CARRIER_LDPC_MIN_CODEWORDS = 2;
 constexpr size_t CARRIER_LDPC_MAX_CODEWORDS = 8;
 constexpr uint64_t ALL_ON_CARRIER_MASK = UINT64_MAX;
 
+bool isSupportedChirpModulation(Modulation mod) {
+    return mod == Modulation::DBPSK ||
+           mod == Modulation::DQPSK ||
+           mod == Modulation::D8PSK ||
+           mod == Modulation::QPSK ||
+           mod == Modulation::BPSK ||
+           mod == Modulation::QAM16;
+}
+
 uint64_t activeBitsMask(size_t carriers) {
     return carriers >= 64 ? UINT64_MAX : ((uint64_t{1} << carriers) - 1);
 }
@@ -135,12 +144,8 @@ OFDMChirpWaveform::OFDMChirpWaveform() {
 OFDMChirpWaveform::OFDMChirpWaveform(const ModemConfig& config)
     : config_(config)
 {
-    // Allow differential and coherent modulations for chirp mode
-    if (config_.modulation != Modulation::DBPSK &&
-        config_.modulation != Modulation::DQPSK &&
-        config_.modulation != Modulation::D8PSK &&
-        config_.modulation != Modulation::QPSK &&
-        config_.modulation != Modulation::BPSK) {
+    // Allow differential and selected coherent modulations for chirp mode.
+    if (!isSupportedChirpModulation(config_.modulation)) {
         config_.modulation = Modulation::DQPSK;
     }
     configurePilotsForCodeRate(config_.code_rate);
@@ -150,12 +155,8 @@ OFDMChirpWaveform::OFDMChirpWaveform(const ModemConfig& config)
 OFDMChirpWaveform::OFDMChirpWaveform(const ModemConfig& config, protocol::WaveformMode mode)
     : mode_(mode), config_(config)
 {
-    // Allow differential and coherent modulations for chirp mode
-    if (config_.modulation != Modulation::DBPSK &&
-        config_.modulation != Modulation::DQPSK &&
-        config_.modulation != Modulation::D8PSK &&
-        config_.modulation != Modulation::QPSK &&
-        config_.modulation != Modulation::BPSK) {
+    // Allow differential and selected coherent modulations for chirp mode.
+    if (!isSupportedChirpModulation(config_.modulation)) {
         config_.modulation = Modulation::DQPSK;
     }
     configurePilotsForCodeRate(config_.code_rate);
@@ -231,7 +232,7 @@ WaveformCapabilities OFDMChirpWaveform::getCapabilities() const {
     WaveformCapabilities caps;
     caps.supports_cfo_correction = true;    // Via dual chirp
     caps.supports_doppler_correction = true; // OFDM with differential
-    caps.requires_pilots = false;            // Differential modulation
+    caps.requires_pilots = config_.use_pilots;
     caps.supports_differential = true;
     caps.min_snr_db = 10.0f;                // Lower than Schmidl-Cox
     caps.max_snr_db = 20.0f;                // Above this, use OFDM_COX
@@ -262,9 +263,8 @@ bool OFDMChirpWaveform::carrierLdpcCodewordCountSupported(size_t codeword_count)
 }
 
 void OFDMChirpWaveform::configure(Modulation mod, CodeRate rate) {
-    // Allow differential and coherent modulations
-    if (mod != Modulation::DBPSK && mod != Modulation::DQPSK && mod != Modulation::D8PSK &&
-        mod != Modulation::QPSK && mod != Modulation::BPSK) {
+    // Allow differential and selected coherent modulations.
+    if (!isSupportedChirpModulation(mod)) {
         LOG_MODEM(WARN, "OFDMChirpWaveform: Unsupported modulation %d, using DQPSK",
                   static_cast<int>(mod));
         mod = Modulation::DQPSK;
