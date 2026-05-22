@@ -13,6 +13,30 @@ namespace ultra {
 
 using namespace demod_constants;
 
+namespace {
+
+constexpr float kQam16MinPosteriorOdds = 2.1972246f;   // ln(9): >= 9:1 bit odds.
+constexpr float kQam16FullPosteriorOdds = 4.5951199f;  // ln(99): near-certain DD.
+constexpr float kQam16DecisionChiSq95 = 2.9957323f;    // 95% radius for 2-D Gaussian EVM.
+
+float clamp01(float x) {
+    return std::max(0.0f, std::min(1.0f, x));
+}
+
+float qam16MinAbsLLRNoClip(Complex sym, float noise_var) {
+    const float scale = 2.0f / std::max(noise_var, MIN_CARRIER_NOISE_VAR);
+    const float i_abs = std::abs(sym.real());
+    const float q_abs = std::abs(sym.imag());
+    const float llr_i_sign = std::abs(scale * sym.real());
+    const float llr_i_ring = std::abs(scale * (i_abs - QAM16_THRESHOLD));
+    const float llr_q_sign = std::abs(scale * sym.imag());
+    const float llr_q_ring = std::abs(scale * (q_abs - QAM16_THRESHOLD));
+    return std::min(std::min(llr_i_sign, llr_i_ring),
+                    std::min(llr_q_sign, llr_q_ring));
+}
+
+} // namespace
+
 // =============================================================================
 // HARD DECISION SLICER
 // =============================================================================
@@ -30,9 +54,9 @@ Complex OFDMDemodulator::Impl::hardDecision(Complex sym, Modulation mod) const {
 
         case Modulation::QAM16: {
             auto slice = [](float x) -> float {
-                if (x < -0.4f) return -0.9487f;
+                if (x < -QAM16_THRESHOLD) return -0.9487f;
                 if (x < 0.0f) return -0.3162f;
-                if (x < 0.4f) return 0.3162f;
+                if (x < QAM16_THRESHOLD) return 0.3162f;
                 return 0.9487f;
             };
             return Complex(slice(sym.real()), slice(sym.imag()));
@@ -246,6 +270,91 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
             carrier_erasure_flags_[i] = 1;
             carrier_noise_var[i] = MAX_CARRIER_NOISE_VAR;
         }
+    }
+
+    // QAM16 decision-directed channel observations. The noise reference is the
+    // post-equalizer carrier noise variance used by the QAM16 LLRs, inflated by
+    // the same CE margin as demapping. A carrier is accepted only when:
+    // - its EVM is inside the 95% 2-D Gaussian noise radius,
+    // - it remains inside half the QAM16 decision-cell spacing, and
+    // - every bit has at least 9:1 posterior odds.
+    //
+    // The actual H update is consumed in updateChannelEstimate() after the next
+    // symbol's pilots have re-anchored the channel, which matches the receiver
+    // loop order: pilot update -> equalize -> demap/decision.
+    if (mod == Modulation::QAM16 && data_carrier_indices.size() == equalized.size()) {
+        dd_qam16_channel_observations_.assign(data_carrier_indices.size(), Complex(0, 0));
+        dd_qam16_measurement_var_.assign(data_carrier_indices.size(), 0.0f);
+        dd_qam16_reliability_.assign(data_carrier_indices.size(), 0.0f);
+
+        float norm_evm_sum = 0.0f;
+        size_t norm_evm_count = 0;
+        size_t reliable_count = 0;
+        constexpr float kDecisionCellGuard2 =
+            0.25f * QAM16_THRESHOLD * QAM16_THRESHOLD;
+
+        for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
+            if (i < carrier_erasure_flags_.size() && carrier_erasure_flags_[i] != 0) {
+                continue;
+            }
+
+            const int idx = data_carrier_indices[i];
+            const Complex decision = hardDecision(equalized[i], mod);
+            const float decision_power = std::norm(decision);
+            if (decision_power <= 1.0e-6f) {
+                continue;
+            }
+
+            const float effective_noise =
+                std::max(carrier_noise_var[i] * CE_MARGIN_QAM16, MIN_CARRIER_NOISE_VAR);
+            const float evm2 = std::norm(equalized[i] - decision);
+            const float norm_evm = evm2 / effective_noise;
+            norm_evm_sum += norm_evm;
+            ++norm_evm_count;
+
+            const float min_abs_llr = qam16MinAbsLLRNoClip(equalized[i], effective_noise);
+            const bool inside_noise_model = norm_evm <= kQam16DecisionChiSq95;
+            const bool inside_decision_cell = evm2 <= kDecisionCellGuard2;
+            const bool enough_posterior_margin = min_abs_llr >= kQam16MinPosteriorOdds;
+            if (!inside_noise_model || !inside_decision_cell || !enough_posterior_margin) {
+                continue;
+            }
+
+            const float evm_reliability = clamp01(1.0f - norm_evm / kQam16DecisionChiSq95);
+            const float llr_reliability = clamp01(
+                (min_abs_llr - kQam16MinPosteriorOdds) /
+                (kQam16FullPosteriorOdds - kQam16MinPosteriorOdds));
+            const float reliability = std::min(evm_reliability, llr_reliability);
+            if (reliability <= 0.0f) {
+                continue;
+            }
+
+            dd_qam16_channel_observations_[i] = freq_domain[idx] / decision;
+            dd_qam16_measurement_var_[i] =
+                std::max(noise_variance / decision_power, MIN_CARRIER_NOISE_VAR);
+            dd_qam16_reliability_[i] = reliability;
+            ++reliable_count;
+        }
+
+        const float mean_norm_evm = (norm_evm_count > 0)
+            ? norm_evm_sum / static_cast<float>(norm_evm_count)
+            : kQam16DecisionChiSq95 + 1.0f;
+        const size_t min_reliable_carriers = std::max(
+            pilot_carrier_indices.size(),
+            static_cast<size_t>(1));
+
+        // If the whole symbol is outside the documented noise model and the
+        // number of reliable decisions is below the pilot anchor density, freeze
+        // DD for this symbol and let the next update use pilot interpolation.
+        if (mean_norm_evm > kQam16DecisionChiSq95 &&
+            reliable_count < min_reliable_carriers) {
+            std::fill(dd_qam16_reliability_.begin(), dd_qam16_reliability_.end(), 0.0f);
+        }
+    } else if (mod != Modulation::QAM16) {
+        dd_qam16_channel_observations_.clear();
+        dd_qam16_measurement_var_.clear();
+        dd_qam16_reliability_.clear();
+        dd_qam16_channel_var_.clear();
     }
 
     // Decision-directed per-carrier phase tracking for coherent modes.

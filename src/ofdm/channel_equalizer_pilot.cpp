@@ -338,6 +338,12 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     prev_pilot_phases = h_ls_all;
 
     // Interpolate between pilots
+    const bool use_qam16_dd = (config.modulation == Modulation::QAM16);
+    const bool have_qam16_dd =
+        use_qam16_dd &&
+        dd_qam16_channel_observations_.size() == data_carrier_indices.size() &&
+        dd_qam16_measurement_var_.size() == data_carrier_indices.size() &&
+        dd_qam16_reliability_.size() == data_carrier_indices.size();
     if (!is_differential) {
         // Coherent modes: phase-slope-compensated complex interpolation.
         // The timing offset introduces a phase gradient across carriers; de-sloping before
@@ -345,6 +351,11 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
         // de-slope is identity — complex interpolation still preserves phase info that
         // magnitude-only interpolation would discard.
         int half_fft = config.fft_size / 2;
+        if (use_qam16_dd && dd_qam16_channel_var_.size() != data_carrier_indices.size()) {
+            dd_qam16_channel_var_.assign(
+                data_carrier_indices.size(),
+                std::max(noise_variance, MIN_CARRIER_NOISE_VAR));
+        }
 
         // Precompute de-sloped pilot H values
         std::vector<Complex> pilot_desloped(pilot_carrier_indices.size());
@@ -390,7 +401,80 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
             // Re-slope at data carrier position
             int k = (info.fft_idx <= half_fft) ? info.fft_idx : info.fft_idx - config.fft_size;
             float phase = lts_phase_slope * k;
-            channel_estimate[info.fft_idx] = interp_h * Complex(std::cos(phase), std::sin(phase));
+            Complex pilot_h = interp_h * Complex(std::cos(phase), std::sin(phase));
+
+            if (use_qam16_dd) {
+                // Coherent 16-QAM DD tracking. Each data carrier is a scalar
+                // complex Kalman state H[k]. The previous H is predicted with a
+                // Good-channel Doppler random walk, pilot interpolation is the
+                // first measurement/anchor, and a reliable hard decision is the
+                // second measurement H_dd=Y/X_hat.
+                //
+                // Noise model:
+                // - process variance: Good/Watterson channel changes about
+                //   5% per OFDM data symbol in the existing simulator model.
+                // - pilot interpolation variance: pilot LS noise plus a
+                //   frequency-selective interpolation floor for 0.5 ms HF delay
+                //   spread over a five-carrier pilot gap.
+                // - DD measurement variance: raw FFT-bin noise divided by
+                //   |X_hat|^2 and inflated by the posterior/EVM reliability.
+                // The DD innovation is additionally clipped to a 30% H step so
+                // one wrong 16-QAM decision cannot rotate or scale a carrier
+                // without bound.
+                constexpr float kGoodDopplerSigmaFrac = 0.05f;
+                constexpr float kPilotInterpSigmaFrac = 0.20f;
+                constexpr float kMaxDdStepFrac = 0.30f;
+
+                const Complex prior_h = channel_estimate[info.fft_idx];
+                const float h_ref_mag = std::max(
+                    1.0e-3f,
+                    std::max(std::abs(prior_h), std::abs(pilot_h)));
+                const float process_sigma = kGoodDopplerSigmaFrac * h_ref_mag;
+                const float process_var = process_sigma * process_sigma;
+                const float pilot_interp_sigma = kPilotInterpSigmaFrac * h_ref_mag;
+                const float pilot_measurement_var =
+                    std::max(noise_variance + pilot_interp_sigma * pilot_interp_sigma,
+                             MIN_CARRIER_NOISE_VAR);
+
+                float prior_var = pilot_measurement_var;
+                if (dc < dd_qam16_channel_var_.size() &&
+                    std::isfinite(dd_qam16_channel_var_[dc]) &&
+                    dd_qam16_channel_var_[dc] > 0.0f) {
+                    prior_var = dd_qam16_channel_var_[dc] + process_var;
+                }
+
+                const float pilot_gain = prior_var / (prior_var + pilot_measurement_var);
+                Complex tracked_h = prior_h + pilot_gain * (pilot_h - prior_h);
+                float tracked_var = (1.0f - pilot_gain) * prior_var;
+
+                if (have_qam16_dd && dd_qam16_reliability_[dc] > 0.0f) {
+                    const float reliability = std::max(dd_qam16_reliability_[dc], 0.05f);
+                    const float measurement_var =
+                        std::max(dd_qam16_measurement_var_[dc] / reliability,
+                                 MIN_CARRIER_NOISE_VAR);
+                    const float kalman_gain =
+                        tracked_var / (tracked_var + measurement_var);
+
+                    Complex step = dd_qam16_channel_observations_[dc] - tracked_h;
+                    const float step_mag = std::abs(step);
+                    const float max_step = kMaxDdStepFrac * h_ref_mag;
+                    if (step_mag > max_step && step_mag > 1.0e-6f) {
+                        step *= max_step / step_mag;
+                    }
+
+                    tracked_h += kalman_gain * step;
+                    tracked_var *= (1.0f - kalman_gain);
+                }
+
+                if (dc < dd_qam16_channel_var_.size()) {
+                    dd_qam16_channel_var_[dc] =
+                        std::max(tracked_var, MIN_CARRIER_NOISE_VAR);
+                }
+
+                channel_estimate[info.fft_idx] = tracked_h;
+            } else {
+                channel_estimate[info.fft_idx] = pilot_h;
+            }
         }
     } else {
         // Differential modes or no slope: magnitude-only interpolation.
@@ -410,6 +494,10 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
             float old_phase = std::arg(channel_estimate[info.fft_idx]);
             channel_estimate[info.fft_idx] = std::polar(interp_mag, old_phase);
         }
+    }
+
+    if (have_qam16_dd) {
+        std::fill(dd_qam16_reliability_.begin(), dd_qam16_reliability_.end(), 0.0f);
     }
 
     // Apply DD (decision-directed) phase corrections from previous symbol.

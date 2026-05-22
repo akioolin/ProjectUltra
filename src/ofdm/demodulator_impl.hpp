@@ -141,6 +141,15 @@ struct OFDMDemodulator::Impl {
     // Each entry is the phase error (radians) measured at that data carrier.
     std::vector<float> dd_phase_corrections;
 
+    // QAM16 decision-directed per-carrier channel observations from the previous
+    // data symbol. The receiver loop updates pilots before equalization, so the
+    // DD H=Y/X_hat observations are produced in equalize() and consumed once by
+    // the next updateChannelEstimate() call after pilot interpolation.
+    std::vector<Complex> dd_qam16_channel_observations_;
+    std::vector<float> dd_qam16_measurement_var_;
+    std::vector<float> dd_qam16_reliability_;
+    std::vector<float> dd_qam16_channel_var_;
+
     // LTS time-domain reference for fine timing (passband templates)
     std::vector<float> lts_passband_I;
     std::vector<float> lts_passband_Q;

@@ -175,6 +175,10 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 impl_->differential_prev_erased_.clear();
                 impl_->carrier_eq_mag_ema_.clear();
                 impl_->carrier_eq_mag_var_.clear();
+                impl_->dd_qam16_channel_observations_.clear();
+                impl_->dd_qam16_measurement_var_.clear();
+                impl_->dd_qam16_reliability_.clear();
+                impl_->dd_qam16_channel_var_.clear();
                 if (!is_differential || impl_->config.use_pilots) {
                     impl_->carrier_phase_initialized = false;
                     impl_->carrier_phase_correction = Complex(1, 0);
@@ -260,6 +264,10 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                     impl_->differential_prev_erased_.clear();
                     impl_->carrier_eq_mag_ema_.clear();
                     impl_->carrier_eq_mag_var_.clear();
+                    impl_->dd_qam16_channel_observations_.clear();
+                    impl_->dd_qam16_measurement_var_.clear();
+                    impl_->dd_qam16_reliability_.clear();
+                    impl_->dd_qam16_channel_var_.clear();
                     impl_->carrier_phase_initialized = false;
                     impl_->carrier_phase_correction = Complex(1, 0);
 
@@ -578,6 +586,10 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     impl_->differential_prev_erased_.clear();
     impl_->carrier_eq_mag_ema_.clear();
     impl_->carrier_eq_mag_var_.clear();
+    impl_->dd_qam16_channel_observations_.clear();
+    impl_->dd_qam16_measurement_var_.clear();
+    impl_->dd_qam16_reliability_.clear();
+    impl_->dd_qam16_channel_var_.clear();
     impl_->carrier_phase_initialized = false;
     impl_->carrier_phase_correction = Complex(1, 0);
     impl_->lts_phase_offset = Complex(1, 0);  // Will be updated by estimateChannelFromLTS
@@ -753,6 +765,10 @@ void OFDMDemodulator::reset() {
     impl_->differential_prev_erased_.clear();
     impl_->carrier_eq_mag_ema_.clear();
     impl_->carrier_eq_mag_var_.clear();
+    impl_->dd_qam16_channel_observations_.clear();
+    impl_->dd_qam16_measurement_var_.clear();
+    impl_->dd_qam16_reliability_.clear();
+    impl_->dd_qam16_channel_var_.clear();
     impl_->carrier_phase_initialized = false;
     impl_->carrier_phase_correction = Complex(1, 0);
 
