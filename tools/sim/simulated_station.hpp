@@ -624,6 +624,10 @@ public:
     }
 
     void setSNR(float snr) { snr_db_ = snr; }
+    void setChannelType(ChannelType channel_type) {
+        channel_type_ = channel_type;
+        syncBurstInterleaveForConnectedMode();
+    }
     void setAutoAccept(bool auto_accept) { protocol_.setAutoAccept(auto_accept); }
     void setForcedModulation(Modulation mod) { protocol_.setForcedModulation(mod); }
     void setForcedCodeRate(CodeRate rate) { protocol_.setForcedCodeRate(rate); }
@@ -991,6 +995,7 @@ private:
     CodeRate data_code_rate_ = CodeRate::R1_4;
     MultiCarrierDPSKConfig mc_dpsk_config_ = mc_dpsk_presets::robust_mid();
     MultiCarrierDPSKConfig control_mc_dpsk_config_ = mc_dpsk_presets::robust_mid();
+    ChannelType channel_type_ = ChannelType::AWGN;
 
     // Protocol engine
     ProtocolEngine protocol_{ConnectionConfig{}};
@@ -1212,8 +1217,12 @@ private:
         return connected_.load() &&
                negotiated_waveform_ == WaveformMode::OFDM_CHIRP &&
                !no_burst_interleave_ &&
-               connection_policy::isSpeculativeHighRateOFDM(data_modulation_,
-                                                            data_code_rate_);
+               ((data_modulation_ == Modulation::QAM16 &&
+                 channel_type_ != ChannelType::AWGN &&
+                 connection_policy::isBurstInterleavedOFDMMode(data_modulation_,
+                                                               data_code_rate_)) ||
+                connection_policy::isSpeculativeHighRateOFDM(data_modulation_,
+                                                             data_code_rate_));
     }
 
     void syncBurstInterleaveForConnectedMode() {

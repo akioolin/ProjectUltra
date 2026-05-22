@@ -1172,6 +1172,8 @@ public:
         // Set channel SNR for mode negotiation
         alpha_->setSNR(snr_db_);
         bravo_->setSNR(snr_db_);
+        alpha_->setChannelType(channel_type_);
+        bravo_->setChannelType(channel_type_);
 
         // Set forced settings on INITIATOR only (alpha)
         // Responder (bravo) reads these from the CONNECT frame and honors them
@@ -2200,6 +2202,7 @@ private:
         // a hint to the link-adaptation layer; the real channel is whatever
         // the soundcard cable + --inject-channel produces.
         station->setSNR(snr_db_);
+        station->setChannelType(channel_type_);
         station->setChannelInterleave(use_channel_interleave_);
         station->setNoBurstInterleave(no_burst_interleave_);
         station->setBurstInterleaveGroupSize(burst_group_size_);

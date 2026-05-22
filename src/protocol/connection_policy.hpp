@@ -227,6 +227,15 @@ inline bool isSpeculativeHighRateOFDM(Modulation mod, CodeRate rate) {
     return risky_rate && (mod == Modulation::DQPSK || mod == Modulation::D8PSK);
 }
 
+inline bool isBurstInterleavedOFDMMode(Modulation mod, CodeRate rate) {
+    if (mod == Modulation::QAM16) {
+        return rate == CodeRate::R1_2 ||
+               rate == CodeRate::R2_3 ||
+               rate == CodeRate::R3_4;
+    }
+    return isSpeculativeHighRateOFDM(mod, rate);
+}
+
 inline size_t ofdmWindowSize(Modulation mod, CodeRate rate, bool near_awgn_ofdm) {
     if (!isHighThroughputOFDMMode(mod, rate)) {
         return kWideOFDMWindowFrames;
