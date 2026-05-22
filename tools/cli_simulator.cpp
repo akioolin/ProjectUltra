@@ -1752,8 +1752,8 @@ private:
         // samples faster than 48 kHz wall-clock, so the wall-clock-based
         // throughput print below is inflated. Sample-count delta / 48 kHz gives
         // the real on-air time the audio actually occupies.
-        const uint64_t alpha_tx_samples_start = alpha_->txSampleClock();
-        const uint64_t bravo_tx_samples_start = bravo_->txSampleClock();
+        const uint64_t alpha_tx_samples_start = alpha_->txEmittedSampleClock();
+        const uint64_t bravo_tx_samples_start = bravo_->txEmittedSampleClock();
 
         if (!alpha_->sendFile(test_file)) {
             std::cout << "  \033[31m✗ Failed to start file transfer!\033[0m\n";
@@ -1810,9 +1810,9 @@ private:
         // what a real radio (or cable test, or GUI/ultra_tnc via SDL2) would
         // actually take.
         const uint64_t alpha_tx_samples_total =
-            alpha_->txSampleClock() - alpha_tx_samples_start;
+            alpha_->txEmittedSampleClock() - alpha_tx_samples_start;
         const uint64_t bravo_tx_samples_total =
-            bravo_->txSampleClock() - bravo_tx_samples_start;
+            bravo_->txEmittedSampleClock() - bravo_tx_samples_start;
         const uint64_t on_air_samples =
             alpha_tx_samples_total + bravo_tx_samples_total;
         const float on_air_sec = static_cast<float>(on_air_samples) / 48000.0f;

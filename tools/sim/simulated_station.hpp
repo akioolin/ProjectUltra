@@ -761,6 +761,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(tx_mutex_);
             tx_sample_clock_ += count;
+            tx_emitted_sample_clock_ += result.emitted_samples;
         }
 
         result.tx_active = sampleBlockHasEnergy(out, count);
@@ -1045,13 +1046,17 @@ private:
     ActiveTx active_tx_;
     bool tx_job_starting_ = false;
     uint64_t tx_sample_clock_ = 0;  // Continuous TX capture sample cursor.
+    uint64_t tx_emitted_sample_clock_ = 0;  // Actual non-idle waveform samples emitted.
 
 public:
-    // Total samples this station has TX'd since start. Used by cli_simulator
-    // to compute real on-air goodput (samples / 48 kHz) since the wall-clock
-    // "Payload throughput" metric is CPU-paced (not sample-clock-paced) in
-    // single-process OTASim mode.
+    // Continuous TX callback cursor since station start. This includes idle
+    // pulls and remains useful for TX ordering diagnostics.
     uint64_t txSampleClock() const { return tx_sample_clock_; }
+
+    // Actual queued waveform samples emitted by this station. Unlike
+    // txSampleClock(), this excludes idle/silent callbacks and is the right
+    // numerator for DATA+ACK on-air goodput accounting.
+    uint64_t txEmittedSampleClock() const { return tx_emitted_sample_clock_; }
 
 private:
 
@@ -2322,6 +2327,10 @@ private:
                 decoder_->expectFullOFDMAnchorOnce();
             }
             notePttTxQueued(samples.size());
+            {
+                std::lock_guard<std::mutex> lock(tx_mutex_);
+                tx_emitted_sample_clock_ += samples.size();
+            }
             port_->queueTx(samples);
             std::ostringstream oss;
             oss << "station_tx_direct station=" << callsign_

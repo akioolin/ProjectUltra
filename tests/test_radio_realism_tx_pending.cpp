@@ -62,6 +62,8 @@ void burstBacklogDoesNotBecomeAudioBacklog() {
     std::vector<float> callback(SimulatedStation::SAMPLES_PER_CALLBACK, 0.0f);
     size_t peak_audio_pending = 0;
     size_t emitted_total = 0;
+    require(station.txEmittedSampleClock() == 0,
+            "emitted-sample clock should start at zero");
 
     for (size_t cb = 0; cb < kMaxCallbacks && emitted_total < kFrameSamples * kFrameCount; ++cb) {
         station.testAdvanceRadioSamples(SimulatedStation::SAMPLES_PER_CALLBACK);
@@ -70,6 +72,8 @@ void burstBacklogDoesNotBecomeAudioBacklog() {
         auto result = station.pullTxSamples(callback.data(), callback.size());
         peak_audio_pending = std::max(peak_audio_pending, result.audio_chain_pending_samples);
         emitted_total += result.emitted_samples;
+        require(station.txEmittedSampleClock() == emitted_total,
+                "emitted-sample clock should count waveform samples, not idle callbacks");
 
         require(result.audio_chain_pending_samples <= kAudioChainLimitSamples,
                 "TX_pending exceeded the 100 ms audio-chain bound");
@@ -80,8 +84,16 @@ void burstBacklogDoesNotBecomeAudioBacklog() {
 
     require(emitted_total == kFrameSamples * kFrameCount,
             "all queued frame-sized submissions should eventually go on air");
+    require(station.txEmittedSampleClock() == kFrameSamples * kFrameCount,
+            "final emitted-sample clock should equal actual queued waveform length");
     require(peak_audio_pending <= SimulatedStation::SAMPLES_PER_CALLBACK,
             "pull-clocked audio chain should expose at most one callback as pending");
+
+    auto idle_result = station.pullTxSamples(callback.data(), callback.size());
+    require(idle_result.emitted_samples == 0,
+            "idle pull should not emit waveform samples");
+    require(station.txEmittedSampleClock() == kFrameSamples * kFrameCount,
+            "idle pull should not advance emitted-sample clock");
 }
 
 }  // namespace
