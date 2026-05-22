@@ -1,11 +1,52 @@
 #include "ultra/ofdm.hpp"
 #include "ultra/dsp.hpp"
+#include "ofdm/soft_demap.hpp"
 #include <iostream>
 #include <cmath>
 #include <random>
 
+namespace {
+
+bool checkCoherent8PskLlrSigns() {
+    static const int data_to_phase[8] = {0, 1, 3, 2, 7, 6, 4, 5};
+    constexpr float pi = 3.14159265358979f;
+    constexpr float noise_var = 0.05f;
+
+    for (int bits = 0; bits < 8; ++bits) {
+        const float angle = data_to_phase[bits] * (pi / 4.0f) + pi / 8.0f;
+        ultra::Complex sym(std::cos(angle), std::sin(angle));
+        auto llrs = ultra::soft_demap::demap8PSK(sym, noise_var);
+        if (llrs.size() != 3) {
+            std::cout << "  8PSK LLR size failed for bits=" << bits << "\n";
+            return false;
+        }
+        for (int bit = 0; bit < 3; ++bit) {
+            const bool expected_one = (bits & (1 << (2 - bit))) != 0;
+            if (expected_one && llrs[bit] >= 0.0f) {
+                std::cout << "  8PSK LLR sign failed for bits=" << bits
+                          << " bit=" << bit << " llr=" << llrs[bit] << "\n";
+                return false;
+            }
+            if (!expected_one && llrs[bit] <= 0.0f) {
+                std::cout << "  8PSK LLR sign failed for bits=" << bits
+                          << " bit=" << bit << " llr=" << llrs[bit] << "\n";
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+} // namespace
+
 int main() {
     std::cout << "Testing OFDM implementation...\n\n";
+
+    std::cout << "Testing coherent 8PSK soft demapper...\n";
+    if (!checkCoherent8PskLlrSigns()) {
+        return 1;
+    }
+    std::cout << "  8PSK LLR signs OK\n";
 
     ultra::ModemConfig config;
     config.sample_rate = 48000;
@@ -25,13 +66,14 @@ int main() {
 
     // Test each modulation scheme
     for (auto mod : {ultra::Modulation::BPSK, ultra::Modulation::QPSK,
-                     ultra::Modulation::QAM16}) {
+                     ultra::Modulation::QAM8, ultra::Modulation::QAM16}) {
         auto samples = modulator.modulate(test_data, mod);
 
         const char* mod_name = "";
         switch (mod) {
             case ultra::Modulation::BPSK: mod_name = "BPSK"; break;
             case ultra::Modulation::QPSK: mod_name = "QPSK"; break;
+            case ultra::Modulation::QAM8: mod_name = "8PSK"; break;
             case ultra::Modulation::QAM16: mod_name = "QAM16"; break;
             default: mod_name = "?"; break;
         }
@@ -95,7 +137,8 @@ int main() {
     // Test data rate calculations
     std::cout << "\nTheoretical data rates:\n";
     for (auto mod : {ultra::Modulation::BPSK, ultra::Modulation::QPSK,
-                     ultra::Modulation::QAM16, ultra::Modulation::QAM64}) {
+                     ultra::Modulation::QAM8, ultra::Modulation::QAM16,
+                     ultra::Modulation::QAM64}) {
         size_t bits_per_symbol = modulator.bitsPerSymbol(mod);
         size_t samples_per_symbol = modulator.samplesPerSymbol();
         float symbol_rate = static_cast<float>(config.sample_rate) / samples_per_symbol;
@@ -105,6 +148,7 @@ int main() {
         switch (mod) {
             case ultra::Modulation::BPSK: mod_name = "BPSK"; break;
             case ultra::Modulation::QPSK: mod_name = "QPSK"; break;
+            case ultra::Modulation::QAM8: mod_name = "8PSK"; break;
             case ultra::Modulation::QAM16: mod_name = "QAM16"; break;
             case ultra::Modulation::QAM64: mod_name = "QAM64"; break;
             default: break;

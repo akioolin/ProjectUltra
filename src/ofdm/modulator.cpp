@@ -36,6 +36,15 @@ Complex qam16_point(int bits) {
     return Complex(levels[i_bits] * QAM16_SCALE, levels[q_bits] * QAM16_SCALE);
 }
 
+Complex qam8_point(int bits) {
+    // Coherent 8PSK uses the same Gray phase ordering as the differential
+    // D8PSK rung, but referenced to the absolute pilot/LTS phase.
+    static const int data_to_phase[8] = {0, 1, 3, 2, 7, 6, 4, 5};
+    static const float pi = 3.14159265358979f;
+    const float angle = data_to_phase[bits & 7] * (pi / 4.0f) + pi / 8.0f;
+    return Complex(std::cos(angle), std::sin(angle));
+}
+
 // 32-QAM rectangular constellation (5 bits per symbol)
 // Uses 8×4 grid: 8 Q levels × 4 I levels = 32 points
 // Gray-coded for minimum bit errors on adjacent symbol errors
@@ -77,6 +86,8 @@ Complex mapBits(uint32_t bits, Modulation mod) {
             return BPSK_MAP[bits & 1];
         case Modulation::QPSK:
             return QPSK_MAP[bits & 3];
+        case Modulation::QAM8:
+            return qam8_point(bits & 0x7);
         case Modulation::QAM16:
             return qam16_point(bits & 0xF);
         case Modulation::QAM32:

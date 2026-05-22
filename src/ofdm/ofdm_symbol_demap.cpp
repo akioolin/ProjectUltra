@@ -27,6 +27,7 @@ size_t bitsPerCarrier(Modulation mod) {
         case Modulation::QPSK:
             return 2;
         case Modulation::D8PSK:
+        case Modulation::QAM8:
             return 3;
         case Modulation::QAM16:
             return 4;
@@ -263,6 +264,13 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
                 break;
             case Modulation::QPSK: {
                 auto llrs = soft_demap::demapQPSK(sym, nv);
+                for (auto& llr : llrs) llr *= llr_sign;
+                soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
+                constellation_update.push_back(sym);
+                break;
+            }
+            case Modulation::QAM8: {
+                auto llrs = soft_demap::demap8PSK(sym, nv);
                 for (auto& llr : llrs) llr *= llr_sign;
                 soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
                 constellation_update.push_back(sym);

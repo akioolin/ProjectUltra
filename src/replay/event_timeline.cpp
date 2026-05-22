@@ -244,8 +244,8 @@ std::optional<Modulation> parseModulation(std::string value) {
     if (value == "BPSK") return Modulation::BPSK;
     if (value == "DQPSK") return Modulation::DQPSK;
     if (value == "QPSK") return Modulation::QPSK;
-    if (value == "D8PSK" || value == "8PSK") return Modulation::D8PSK;
-    if (value == "QAM8" || value == "8QAM") return Modulation::QAM8;
+    if (value == "D8PSK") return Modulation::D8PSK;
+    if (value == "8PSK" || value == "QAM8" || value == "8QAM") return Modulation::QAM8;
     if (value == "QAM16" || value == "16QAM") return Modulation::QAM16;
     if (value == "QAM32" || value == "32QAM") return Modulation::QAM32;
     if (value == "QAM64" || value == "64QAM") return Modulation::QAM64;

@@ -172,6 +172,8 @@ void test_parseCodeRate() {
 void test_parseModulation() {
     CHECK(parseModulation("dqpsk") && *parseModulation("dqpsk") == ultra::Modulation::DQPSK, "dqpsk");
     CHECK(!parseModulation("QAM64"), "QAM64 requires expert mode");
+    CHECK(parseModulation("8psk", true) && *parseModulation("8psk", true) == ultra::Modulation::QAM8,
+          "coherent 8PSK accepted in expert mode");
     CHECK(parseModulation("QAM64", true) && *parseModulation("QAM64", true) == ultra::Modulation::QAM64,
           "QAM64 accepted in expert mode");
     CHECK(!parseModulation("nonsense"), "unknown rejected");

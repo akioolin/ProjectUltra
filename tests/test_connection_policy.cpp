@@ -177,6 +177,10 @@ void test_wide_ofdm_timing_and_timeout() {
     auto d8psk = wideOFDMFrameTiming(Modulation::D8PSK, CodeRate::R1_2);
     CHECK(d8psk.data_symbols == 19, "D8PSK R1/2 wide OFDM data symbols");
     CHECK(d8psk.ack_symbols == 7, "D8PSK R1/2 wide OFDM ACK symbols");
+
+    auto qam8 = wideOFDMFrameTiming(Modulation::QAM8, CodeRate::R1_2, 8);
+    CHECK(qam8.data_symbols == 39, "coherent 8PSK R1/2 8-CW wide OFDM data symbols");
+    CHECK(qam8.ack_symbols == 7, "coherent 8PSK R1/2 wide OFDM ACK symbols");
 }
 
 void test_narrow_ofdm_timing_and_timeout() {

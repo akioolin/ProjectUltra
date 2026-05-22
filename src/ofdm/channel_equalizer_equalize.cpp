@@ -35,6 +35,35 @@ float qam16MinAbsLLRNoClip(Complex sym, float noise_var) {
                     std::min(llr_q_sign, llr_q_ring));
 }
 
+float psk8MinAbsLLRNoClip(Complex sym, float noise_var) {
+    const float scale = 2.0f / std::max(noise_var, MIN_CARRIER_NOISE_VAR);
+    static constexpr int gray_bits[8] = {0, 1, 3, 2, 6, 7, 5, 4};
+    static const float pi = 3.14159265358979f;
+    float dist_sq[8];
+    for (int i = 0; i < 8; ++i) {
+        const float angle = i * (pi / 4.0f) + pi / 8.0f;
+        const Complex ref(std::cos(angle), std::sin(angle));
+        const Complex diff = sym - ref;
+        dist_sq[i] = std::norm(diff);
+    }
+
+    float min_abs = 1.0e30f;
+    for (int bit = 0; bit < 3; ++bit) {
+        const int mask = 1 << (2 - bit);
+        float min_d0 = 1.0e30f;
+        float min_d1 = 1.0e30f;
+        for (int i = 0; i < 8; ++i) {
+            if (gray_bits[i] & mask) {
+                min_d1 = std::min(min_d1, dist_sq[i]);
+            } else {
+                min_d0 = std::min(min_d0, dist_sq[i]);
+            }
+        }
+        min_abs = std::min(min_abs, std::abs(scale * (min_d1 - min_d0)));
+    }
+    return min_abs;
+}
+
 } // namespace
 
 // =============================================================================
@@ -50,6 +79,16 @@ Complex OFDMDemodulator::Impl::hardDecision(Complex sym, Modulation mod) const {
             float I = sym.real() > 0 ? 0.7071f : -0.7071f;
             float Q = sym.imag() > 0 ? 0.7071f : -0.7071f;
             return Complex(I, Q);
+        }
+
+        case Modulation::QAM8: {
+            static const float pi = 3.14159265358979f;
+            float phase = std::atan2(sym.imag(), sym.real());
+            float phase_minus_offset = phase - pi / 8.0f;
+            int octant = static_cast<int>(std::round(phase_minus_offset * 4.0f / pi));
+            octant = ((octant % 8) + 8) % 8;
+            const float angle = octant * (pi / 4.0f) + pi / 8.0f;
+            return Complex(std::cos(angle), std::sin(angle));
         }
 
         case Modulation::QAM16: {
@@ -272,17 +311,19 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
         }
     }
 
-    // QAM16 decision-directed channel observations. The noise reference is the
-    // post-equalizer carrier noise variance used by the QAM16 LLRs, inflated by
-    // the same CE margin as demapping. A carrier is accepted only when:
+    // Coherent 8PSK/16-QAM decision-directed channel observations. The noise
+    // reference is the post-equalizer carrier noise variance used by the LLRs,
+    // inflated by the same CE margin as demapping. A carrier is accepted only when:
     // - its EVM is inside the 95% 2-D Gaussian noise radius,
-    // - it remains inside half the QAM16 decision-cell spacing, and
+    // - it remains inside half the constellation decision-cell spacing, and
     // - every bit has at least 9:1 posterior odds.
     //
     // The actual H update is consumed in updateChannelEstimate() after the next
     // symbol's pilots have re-anchored the channel, which matches the receiver
     // loop order: pilot update -> equalize -> demap/decision.
-    if (mod == Modulation::QAM16 && data_carrier_indices.size() == equalized.size()) {
+    const bool use_coherent_dd =
+        (mod == Modulation::QAM8 || mod == Modulation::QAM16);
+    if (use_coherent_dd && data_carrier_indices.size() == equalized.size()) {
         dd_qam16_channel_observations_.assign(data_carrier_indices.size(), Complex(0, 0));
         dd_qam16_measurement_var_.assign(data_carrier_indices.size(), 0.0f);
         dd_qam16_reliability_.assign(data_carrier_indices.size(), 0.0f);
@@ -290,8 +331,10 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
         float norm_evm_sum = 0.0f;
         size_t norm_evm_count = 0;
         size_t reliable_count = 0;
-        constexpr float kDecisionCellGuard2 =
-            0.25f * QAM16_THRESHOLD * QAM16_THRESHOLD;
+        const float decision_cell_guard2 =
+            (mod == Modulation::QAM8)
+                ? std::pow(2.0f * std::sin(static_cast<float>(M_PI) / 16.0f), 2.0f)
+                : 0.25f * QAM16_THRESHOLD * QAM16_THRESHOLD;
 
         for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
             if (i < carrier_erasure_flags_.size() && carrier_erasure_flags_[i] != 0) {
@@ -305,16 +348,20 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
                 continue;
             }
 
+            const float ce_margin =
+                (mod == Modulation::QAM8) ? CE_MARGIN_8PSK : CE_MARGIN_QAM16;
             const float effective_noise =
-                std::max(carrier_noise_var[i] * CE_MARGIN_QAM16, MIN_CARRIER_NOISE_VAR);
+                std::max(carrier_noise_var[i] * ce_margin, MIN_CARRIER_NOISE_VAR);
             const float evm2 = std::norm(equalized[i] - decision);
             const float norm_evm = evm2 / effective_noise;
             norm_evm_sum += norm_evm;
             ++norm_evm_count;
 
-            const float min_abs_llr = qam16MinAbsLLRNoClip(equalized[i], effective_noise);
+            const float min_abs_llr = (mod == Modulation::QAM8)
+                ? psk8MinAbsLLRNoClip(equalized[i], effective_noise)
+                : qam16MinAbsLLRNoClip(equalized[i], effective_noise);
             const bool inside_noise_model = norm_evm <= kQam16DecisionChiSq95;
-            const bool inside_decision_cell = evm2 <= kDecisionCellGuard2;
+            const bool inside_decision_cell = evm2 <= decision_cell_guard2;
             const bool enough_posterior_margin = min_abs_llr >= kQam16MinPosteriorOdds;
             if (!inside_noise_model || !inside_decision_cell || !enough_posterior_margin) {
                 continue;
@@ -350,7 +397,7 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
             reliable_count < min_reliable_carriers) {
             std::fill(dd_qam16_reliability_.begin(), dd_qam16_reliability_.end(), 0.0f);
         }
-    } else if (mod != Modulation::QAM16) {
+    } else if (!use_coherent_dd) {
         dd_qam16_channel_observations_.clear();
         dd_qam16_measurement_var_.clear();
         dd_qam16_reliability_.clear();

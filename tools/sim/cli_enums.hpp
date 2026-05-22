@@ -56,8 +56,8 @@ inline const char* modulationChoices(
         return allow_auto == AllowAuto::Yes ? "auto, dqpsk" : "dqpsk";
     }
     return allow_auto == AllowAuto::Yes
-        ? "auto, dqpsk, d8psk, dbpsk, qpsk, bpsk, qam16, qam32, qam64"
-        : "dqpsk, d8psk, dbpsk, qpsk, bpsk, qam16, qam32, qam64";
+        ? "auto, dqpsk, d8psk, dbpsk, qpsk, bpsk, 8psk, qam8, qam16, qam32, qam64"
+        : "dqpsk, d8psk, dbpsk, qpsk, bpsk, 8psk, qam8, qam16, qam32, qam64";
 }
 
 inline const char* waveformChoices() {
@@ -100,6 +100,7 @@ inline std::optional<Modulation> parseModulation(const std::string& value,
     if (v == "dbpsk") return Modulation::DBPSK;
     if (v == "qpsk") return Modulation::QPSK;
     if (v == "bpsk") return Modulation::BPSK;
+    if (v == "8psk" || v == "qam8" || v == "8qam") return Modulation::QAM8;
     if (v == "qam16") return Modulation::QAM16;
     if (v == "qam32") return Modulation::QAM32;
     if (v == "qam64") return Modulation::QAM64;

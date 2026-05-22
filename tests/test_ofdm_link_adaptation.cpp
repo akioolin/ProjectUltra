@@ -61,6 +61,8 @@ void test_bits_per_symbol_geometry() {
           "DQPSK bits per OFDM symbol");
     CHECK(bitsPerOFDMSymbol(59, true, 10, Modulation::D8PSK) == 159,
           "D8PSK bits per OFDM symbol");
+    CHECK(bitsPerOFDMSymbol(59, true, 10, Modulation::QAM8) == 159,
+          "coherent 8PSK bits per OFDM symbol");
     CHECK(bitsPerOFDMSymbol(59, true, 10, Modulation::QAM16) == 212,
           "QAM16 bits per OFDM symbol");
     CHECK(bitsPerOFDMSymbol(0, true, 10, Modulation::DQPSK) == 0,

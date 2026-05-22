@@ -45,6 +45,43 @@ inline std::vector<float> demapQPSK(Complex sym, float noise_var) {
     return {clipLLR(sym.real() * scale), clipLLR(sym.imag() * scale)};
 }
 
+// Coherent 8PSK soft demapping. This is the absolute-phase version of the
+// differential D8PSK Gray constellation: same 22.5 degree offset and same
+// bit mapping, but no previous-symbol multiplication. Max-log-MAP compares
+// squared Euclidean distances to all eight unit-radius symbols.
+inline std::vector<float> demap8PSK(Complex sym, float noise_var) {
+    std::vector<float> llrs(3, 0.0f);
+
+    const float nv = std::max(noise_var, MIN_CARRIER_NOISE_VAR);
+    const float scale = 2.0f / nv;
+    static constexpr int gray_bits[8] = {0, 1, 3, 2, 6, 7, 5, 4};
+    static const float pi = 3.14159265358979f;
+
+    float dist_sq[8];
+    for (int i = 0; i < 8; ++i) {
+        const float angle = i * (pi / 4.0f) + pi / 8.0f;
+        const Complex ref(std::cos(angle), std::sin(angle));
+        const Complex diff = sym - ref;
+        dist_sq[i] = std::norm(diff);
+    }
+
+    for (int bit = 0; bit < 3; ++bit) {
+        const int mask = 1 << (2 - bit);
+        float min_d0 = 1.0e30f;
+        float min_d1 = 1.0e30f;
+        for (int i = 0; i < 8; ++i) {
+            if (gray_bits[i] & mask) {
+                min_d1 = std::min(min_d1, dist_sq[i]);
+            } else {
+                min_d0 = std::min(min_d0, dist_sq[i]);
+            }
+        }
+        llrs[bit] = clipLLR(scale * (min_d1 - min_d0));
+    }
+
+    return llrs;
+}
+
 // 16-QAM soft demapping with correct LLR signs
 // Gray code: levels[] = {-3, -1, 3, 1} for bits 00,01,10,11
 inline std::vector<float> demapQAM16(Complex sym, float noise_var) {

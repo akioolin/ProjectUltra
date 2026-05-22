@@ -358,7 +358,8 @@ int OFDMNvisWaveform::getMinSamplesForCWCount(int num_cw) const {
         case Modulation::DBPSK: bits_per_carrier = 1; break;
         case Modulation::QPSK:
         case Modulation::DQPSK: bits_per_carrier = 2; break;
-        case Modulation::D8PSK: bits_per_carrier = 3; break;
+        case Modulation::D8PSK:
+        case Modulation::QAM8: bits_per_carrier = 3; break;
         case Modulation::QAM16: bits_per_carrier = 4; break;
         case Modulation::QAM32: bits_per_carrier = 5; break;
         case Modulation::QAM64: bits_per_carrier = 6; break;

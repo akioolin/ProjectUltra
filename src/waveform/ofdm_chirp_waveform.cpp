@@ -26,6 +26,7 @@ bool isSupportedChirpModulation(Modulation mod) {
            mod == Modulation::D8PSK ||
            mod == Modulation::QPSK ||
            mod == Modulation::BPSK ||
+           mod == Modulation::QAM8 ||
            mod == Modulation::QAM16;
 }
 

@@ -338,9 +338,11 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     prev_pilot_phases = h_ls_all;
 
     // Interpolate between pilots
-    const bool use_qam16_dd = (config.modulation == Modulation::QAM16);
+    const bool use_coherent_dd =
+        (config.modulation == Modulation::QAM8 ||
+         config.modulation == Modulation::QAM16);
     const bool have_qam16_dd =
-        use_qam16_dd &&
+        use_coherent_dd &&
         dd_qam16_channel_observations_.size() == data_carrier_indices.size() &&
         dd_qam16_measurement_var_.size() == data_carrier_indices.size() &&
         dd_qam16_reliability_.size() == data_carrier_indices.size();
@@ -351,7 +353,7 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
         // de-slope is identity — complex interpolation still preserves phase info that
         // magnitude-only interpolation would discard.
         int half_fft = config.fft_size / 2;
-        if (use_qam16_dd && dd_qam16_channel_var_.size() != data_carrier_indices.size()) {
+        if (use_coherent_dd && dd_qam16_channel_var_.size() != data_carrier_indices.size()) {
             dd_qam16_channel_var_.assign(
                 data_carrier_indices.size(),
                 std::max(noise_variance, MIN_CARRIER_NOISE_VAR));
@@ -403,8 +405,8 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
             float phase = lts_phase_slope * k;
             Complex pilot_h = interp_h * Complex(std::cos(phase), std::sin(phase));
 
-            if (use_qam16_dd) {
-                // Coherent 16-QAM DD tracking. Each data carrier is a scalar
+            if (use_coherent_dd) {
+                // Coherent 8PSK/16-QAM DD tracking. Each data carrier is a scalar
                 // complex Kalman state H[k]. The previous H is predicted with a
                 // Good-channel Doppler random walk, pilot interpolation is the
                 // first measurement/anchor, and a reliable hard decision is the
@@ -419,7 +421,7 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
                 // - DD measurement variance: raw FFT-bin noise divided by
                 //   |X_hat|^2 and inflated by the posterior/EVM reliability.
                 // The DD innovation is additionally clipped to a 30% H step so
-                // one wrong 16-QAM decision cannot rotate or scale a carrier
+                // one wrong coherent decision cannot rotate or scale a carrier
                 // without bound.
                 constexpr float kGoodDopplerSigmaFrac = 0.05f;
                 constexpr float kPilotInterpSigmaFrac = 0.20f;
