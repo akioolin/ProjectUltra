@@ -536,6 +536,9 @@ void StreamingDecoder::searchForSync() {
         if (found && use_full_ofdm_anchor_search) {
             LOG_MODEM(INFO, "[%s] Full OFDM anchor sync detected while connected (corr=%.2f)",
                       log_prefix_.c_str(), sync_result.correlation);
+            if (data_sync_accepted_callback_) {
+                data_sync_accepted_callback_(sync_result.correlation);
+            }
         }
 
         if (!found && use_full_ofdm_anchor_search) {

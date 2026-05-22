@@ -1747,6 +1747,14 @@ private:
         ultra::timing::globalDecoderProfile().reset();
         std::cout << "  Sending file: " << test_file << " (" << test_file_size_ << " bytes)\n";
 
+        // Snapshot per-station TX sample-clock counters for an honest on-air
+        // goodput measurement. In OTASim single-process mode the CPU crunches
+        // samples faster than 48 kHz wall-clock, so the wall-clock-based
+        // throughput print below is inflated. Sample-count delta / 48 kHz gives
+        // the real on-air time the audio actually occupies.
+        const uint64_t alpha_tx_samples_start = alpha_->txSampleClock();
+        const uint64_t bravo_tx_samples_start = bravo_->txSampleClock();
+
         if (!alpha_->sendFile(test_file)) {
             std::cout << "  \033[31m✗ Failed to start file transfer!\033[0m\n";
             return false;
@@ -1796,6 +1804,21 @@ private:
         float throughput_bps = (transfer_sec > 0.01f)
             ? (test_file_size_ * 8.0f / transfer_sec) : 0.0f;
 
+        // True on-air goodput from TX sample-clock counters. In OTASim
+        // single-process mode the CPU crunches samples faster than 48 kHz, so
+        // wall-clock throughput is inflated. Samples-on-the-wire / 48 kHz is
+        // what a real radio (or cable test, or GUI/ultra_tnc via SDL2) would
+        // actually take.
+        const uint64_t alpha_tx_samples_total =
+            alpha_->txSampleClock() - alpha_tx_samples_start;
+        const uint64_t bravo_tx_samples_total =
+            bravo_->txSampleClock() - bravo_tx_samples_start;
+        const uint64_t on_air_samples =
+            alpha_tx_samples_total + bravo_tx_samples_total;
+        const float on_air_sec = static_cast<float>(on_air_samples) / 48000.0f;
+        const float on_air_bps = (on_air_sec > 0.01f)
+            ? (test_file_size_ * 8.0f / on_air_sec) : 0.0f;
+
         // Verify received file
         {
             std::lock_guard<std::mutex> lock(msg_mutex_);
@@ -1804,9 +1827,14 @@ private:
                 return false;
             }
             std::cout << "  \033[32m✓ File received: " << received_file_path_ << "\033[0m\n";
-            std::cout << "  Transfer: " << test_file_size_ << " bytes in "
+            std::cout << "  Transfer (wall-clock):  " << test_file_size_ << " bytes in "
                       << std::fixed << std::setprecision(1) << transfer_sec << "s = "
-                      << std::setprecision(0) << throughput_bps << " bps\n";
+                      << std::setprecision(0) << throughput_bps << " bps"
+                      << " \033[33m(CPU-paced in OTASim — not real on-air rate)\033[0m\n";
+            std::cout << "  \033[36mOn-air goodput:        " << test_file_size_ << " bytes in "
+                      << std::fixed << std::setprecision(2) << on_air_sec << "s = "
+                      << std::setprecision(0) << on_air_bps << " bps"
+                      << " (DATA+ACK samples / 48 kHz; what a real radio sees)\033[0m\n";
 
             // Verify contents
             std::ifstream ifs(received_file_path_, std::ios::binary);

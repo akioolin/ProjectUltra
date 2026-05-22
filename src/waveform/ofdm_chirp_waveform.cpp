@@ -390,6 +390,9 @@ bool OFDMChirpWaveform::detectSync(SampleSpan samples, SyncResult& result, float
         return false;
     }
 
+    burst_interleave_latched_ = false;
+    burst_interleaved_detected_ = false;
+
     // Use dual chirp detection for CFO-tolerant sync
     auto chirp_result = chirp_sync_->detectDualChirp(samples, threshold);
 
@@ -424,8 +427,36 @@ bool OFDMChirpWaveform::detectSync(SampleSpan samples, SyncResult& result, float
         // Store training start position for CFO phase calculation in process()
         training_start_sample_ = result.start_sample;
 
-        LOG_MODEM(INFO, "OFDMChirpWaveform: Chirp detected at %d, CFO=%.1f Hz, training_start=%d",
-                  chirp_result.up_chirp_start, chirp_result.cfo_hz, result.start_sample);
+        const int symbol_samples = getSamplesPerSymbol();
+        const size_t training_start = static_cast<size_t>(result.start_sample);
+        if (symbol_samples > 0 &&
+            training_start + static_cast<size_t>(symbol_samples * 2) <= samples.size()) {
+            data_sync_hilbert_.reset();
+            auto& analytic = data_sync_analytic_scratch_;
+            data_sync_hilbert_.process(samples, analytic);
+
+            if (training_start + static_cast<size_t>(symbol_samples * 2) <= analytic.size()) {
+                Complex marker_p(0.0f, 0.0f);
+                for (int n = 0; n < symbol_samples; ++n) {
+                    const size_t idx1 = training_start + static_cast<size_t>(n);
+                    const size_t idx2 = idx1 + static_cast<size_t>(symbol_samples);
+                    marker_p += std::conj(analytic[idx1]) * analytic[idx2];
+                }
+
+                const float cfo_phase =
+                    2.0f * static_cast<float>(M_PI) * chirp_result.cfo_hz *
+                    static_cast<float>(symbol_samples) / config_.sample_rate;
+                const Complex cfo_comp(std::cos(-cfo_phase), std::sin(-cfo_phase));
+                const Complex marker_metric = marker_p * cfo_comp;
+                burst_interleaved_detected_ = (marker_metric.real() < 0.0f);
+                burst_interleave_latched_ = burst_interleaved_detected_;
+            }
+        }
+
+        LOG_MODEM(INFO,
+                  "OFDMChirpWaveform: Chirp detected at %d, CFO=%.1f Hz, training_start=%d%s",
+                  chirp_result.up_chirp_start, chirp_result.cfo_hz, result.start_sample,
+                  burst_interleaved_detected_ ? " [BURST-INTERLEAVED]" : "");
     }
 
     return result.detected;

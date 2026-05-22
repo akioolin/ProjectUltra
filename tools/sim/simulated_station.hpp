@@ -707,7 +707,10 @@ public:
     }
 
     // Disable burst interleaving (for A/B testing)
-    void setNoBurstInterleave(bool v) { no_burst_interleave_ = v; }
+    void setNoBurstInterleave(bool v) {
+        no_burst_interleave_ = v;
+        syncBurstInterleaveForConnectedMode();
+    }
     void setBurstInterleaveGroupSize(int n) {
         burst_group_size_ = ofdm_link_adaptation::sanitizeBurstGroupSize(n);
         if (encoder_) encoder_->setBurstInterleaveGroupSize(burst_group_size_);
@@ -1043,6 +1046,15 @@ private:
     bool tx_job_starting_ = false;
     uint64_t tx_sample_clock_ = 0;  // Continuous TX capture sample cursor.
 
+public:
+    // Total samples this station has TX'd since start. Used by cli_simulator
+    // to compute real on-air goodput (samples / 48 kHz) since the wall-clock
+    // "Payload throughput" metric is CPU-paced (not sample-clock-paced) in
+    // single-process OTASim mode.
+    uint64_t txSampleClock() const { return tx_sample_clock_; }
+
+private:
+
     std::mutex deferred_tx_mutex_;
     std::deque<TxSubmission> deferred_tx_submissions_;
     uint64_t deferred_tx_count_ = 0;
@@ -1070,6 +1082,7 @@ private:
     std::atomic<uint64_t> total_samples_{0};
     float snr_db_ = 20.0f;
     bool no_burst_interleave_ = false;  // Disable burst interleaving for A/B testing
+    bool burst_interleave_active_ = false;
     int burst_group_size_ = 8;
     int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
     uint64_t carrier_mask_ = UINT64_MAX;
@@ -1188,6 +1201,27 @@ private:
             }
             protocol_.onPingReceived();
         });
+    }
+
+    bool shouldEnableBurstInterleaveForConnectedMode() const {
+        return connected_.load() &&
+               negotiated_waveform_ == WaveformMode::OFDM_CHIRP &&
+               !no_burst_interleave_ &&
+               connection_policy::isSpeculativeHighRateOFDM(data_modulation_,
+                                                            data_code_rate_);
+    }
+
+    void syncBurstInterleaveForConnectedMode() {
+        const bool enable = shouldEnableBurstInterleaveForConnectedMode();
+        if (encoder_) encoder_->setBurstInterleave(enable);
+        if (decoder_) decoder_->setBurstInterleave(enable);
+
+        if (burst_interleave_active_ != enable) {
+            burst_interleave_active_ = enable;
+            LOG_MODEM(INFO, "[%s] Burst interleaving %s (group=%d)",
+                      callsign_.c_str(), enable ? "ENABLED" : "DISABLED",
+                      burst_group_size_);
+        }
     }
 
     void handleDecodedFrame(const DecodeResult& result) {
@@ -1459,6 +1493,7 @@ private:
             }
             decoder_->setDataMode(mod, rate);
         }
+        syncBurstInterleaveForConnectedMode();
 
         LOG_MODEM(INFO, "[%s] Data mode: %s %s (pilots=%d, spacing=%d)",
                   callsign_.c_str(), modulationToString(mod), codeRateToString(rate),
@@ -1499,19 +1534,7 @@ private:
                 if (encoder_ && negotiated_waveform_ == WaveformMode::OFDM_CHIRP) {
                     encoder_->forceNextFrameFullPreamble();
                 }
-                // Enable burst interleaving only for higher-throughput OFDM modes.
-                // At R1/4 Good fading, one erased physical block was spreading
-                // across every logical frame and presenting as uniform 4/4 CW
-                // failures; keep the low-rate path localized per frame.
-                if (negotiated_waveform_ == WaveformMode::OFDM_CHIRP &&
-                    !no_burst_interleave_ &&
-                    connection_policy::isHighThroughputOFDMMode(data_modulation_,
-                                                                data_code_rate_)) {
-                    if (encoder_) encoder_->setBurstInterleave(true);
-                    if (decoder_) decoder_->setBurstInterleave(true);
-                    LOG_MODEM(INFO, "[%s] Burst interleaving ENABLED (group=%d)",
-                              callsign_.c_str(), burst_group_size_);
-                }
+                syncBurstInterleaveForConnectedMode();
                 LOG_MODEM(INFO, "[%s] Entered CONNECTED state, switched to %s, CFO=%.1f Hz",
                           callsign_.c_str(), waveformModeToString(negotiated_waveform_), last_cfo_hz_);
                 verifyTxRxConfig();
@@ -1534,6 +1557,7 @@ private:
             // Clear burst interleave state on disconnect
             if (encoder_) encoder_->setBurstInterleave(false);
             if (decoder_) decoder_->setBurstInterleave(false);
+            burst_interleave_active_ = false;
             // Reset TX encoder to MC-DPSK
             if (tx_waveform_mode_ != WaveformMode::MC_DPSK) {
                 tx_waveform_mode_ = WaveformMode::MC_DPSK;

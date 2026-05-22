@@ -66,6 +66,14 @@ bool shouldPadPartialOFDMBurst(WaveformMode mode,
         burst_frames);
 }
 
+bool isFinalDataFrame(const Bytes& frame_data) {
+    auto hdr = v2::parseHeader(frame_data);
+    return hdr.valid &&
+           hdr.type == v2::FrameType::DATA &&
+           frame_data.size() > 3 &&
+           ((frame_data[3] & v2::Flags::FINAL) != 0);
+}
+
 int statDelta(int now, int before) {
     return std::max(0, now - before);
 }
@@ -1950,7 +1958,11 @@ void Connection::flushBurstBuffer() {
     if (burst_tx_buffer_.empty()) return;
 
     const size_t real_frame_count = burst_tx_buffer_.size();
-    if (shouldPadPartialOFDMBurst(negotiated_mode_,
+    const bool final_file_tail =
+        file_transfer_.getState() == FileTransferState::SENDING &&
+        isFinalDataFrame(burst_tx_buffer_.back());
+    if (!final_file_tail &&
+        shouldPadPartialOFDMBurst(negotiated_mode_,
                                   data_modulation_,
                                   data_code_rate_,
                                   fading_index_,
