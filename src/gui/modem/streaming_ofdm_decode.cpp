@@ -2212,52 +2212,6 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 return out_key.sender_hash != 0;
             };
 
-            auto seqInWindow = [](uint16_t seq, uint16_t base, size_t window_size) -> bool {
-                const uint16_t diff = (seq - base) & 0xFFFFu;
-                return static_cast<size_t>(diff) < window_size;
-            };
-
-            auto buildProvisionalKey = [&]() -> bool {
-                // QAM16 is the only connected mode here with a coherent DD
-                // channel tracker and enough fading sensitivity to justify
-                // retaining header-damaged fixed-frame LLRs. Differential
-                // modes keep the older decoded-header-only HARQ behavior.
-                if (current_modulation_ != Modulation::QAM16 ||
-                    !connected_ ||
-                    !protocol::isOFDMMode(mode_) ||
-                    !harq_context_callback_) {
-                    return false;
-                }
-
-                auto ctx = harq_context_callback_();
-                if (!ctx || !ctx->valid()) {
-                    return false;
-                }
-
-                if (!harq_provisional_seq_valid_ ||
-                    !seqInWindow(harq_provisional_next_seq_, ctx->seq, ctx->window_size)) {
-                    harq_provisional_next_seq_ = ctx->seq;
-                    harq_provisional_seq_valid_ = true;
-                }
-
-                const uint16_t provisional_seq = harq_provisional_next_seq_;
-                harq_provisional_next_seq_ =
-                    static_cast<uint16_t>((harq_provisional_next_seq_ + 1u) & 0xFFFFu);
-
-                if (!seqInWindow(provisional_seq, ctx->seq, ctx->window_size)) {
-                    harq_provisional_seq_valid_ = false;
-                    return false;
-                }
-
-                const bool ok = fillKey(ctx->sender_hash, provisional_seq, cw_count);
-                if (ok) {
-                    ultra::timing::globalDecoderProfile()
-                        .harq_key_build_provisional.fetch_add(
-                            1, std::memory_order_relaxed);
-                }
-                return ok;
-            };
-
             std::vector<float> cw0_bits = std::move(cw_soft[0]);
             if (apply_channel_deinterleave) {
                 ChannelInterleaver channel_deinterleaver(bps, v2::LDPC_CODEWORD_BITS);
@@ -2269,7 +2223,10 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 ultra::timing::SingleCWCallSite::Cw0Peek);
             const size_t bytes_per_fixed_cw = v2::getBytesPerCodeword(rate);
             if (!peek_ok || peek_data.size() < bytes_per_fixed_cw) {
-                return buildProvisionalKey();
+                // Do not fabricate a provisional QAM16 HARQ key from rx_base.
+                // Receive-order guesses collide under bursts/retransmissions,
+                // and false chase-combines are worse than losing this copy.
+                return false;
             }
             if (peek_data.size() > bytes_per_fixed_cw) {
                 peek_data.resize(bytes_per_fixed_cw);
@@ -2277,20 +2234,13 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
 
             auto hdr = v2::parseHeader(peek_data);
             if (!hdr.valid || hdr.is_control || !isFixedFrameCwCount(hdr.total_cw)) {
-                return buildProvisionalKey();
+                return false;
             }
             if (hdr.total_cw != cw_count) {
                 LOG_MODEM(WARN,
                           "[%s] HARQ key rejected: header total_cw=%d does not match decode cw_count=%d",
                           log_prefix_.c_str(), hdr.total_cw, cw_count);
                 return false;
-            }
-
-            if (current_modulation_ == Modulation::QAM16 && connected_ &&
-                protocol::isOFDMMode(mode_)) {
-                harq_provisional_next_seq_ =
-                    static_cast<uint16_t>((hdr.seq + 1u) & 0xFFFFu);
-                harq_provisional_seq_valid_ = true;
             }
 
             return fillKey(hdr.src_hash, hdr.seq, hdr.total_cw);

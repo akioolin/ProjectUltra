@@ -545,8 +545,6 @@ private:
     fec::CodecPtr codec_;
     fec::SoftCombineBuffer* harq_buffer_ = nullptr;  // Non-owning; Connection owns lifecycle.
     HarqProvisionalContextCallback harq_context_callback_;
-    bool harq_provisional_seq_valid_ = false;
-    uint16_t harq_provisional_next_seq_ = 0;
 
     // Decoded frame queue
     std::queue<DecodeResult> frame_queue_;
