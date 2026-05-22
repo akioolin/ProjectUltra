@@ -292,10 +292,10 @@ void test_ofdm_profile_selection() {
           "R3/4 remains near-AWGN only for two burst groups");
     CHECK(ofdmWindowSize(Modulation::DQPSK, CodeRate::R1_2, false) == kHighThroughputOFDMWindowFrames,
           "R1/2 keeps the high-throughput OFDM window in fading");
-    CHECK(isBurstInterleavedOFDMMode(Modulation::QAM16, CodeRate::R1_2),
-          "QAM16 R1/2 should use burst interleaving for fading nulls");
-    CHECK(isBurstInterleavedOFDMMode(Modulation::QAM16, CodeRate::R3_4),
-          "QAM16 R3/4 should use burst interleaving for fading nulls");
+    CHECK(!isBurstInterleavedOFDMMode(Modulation::QAM16, CodeRate::R1_2),
+          "coherent QAM16 R1/2 should keep per-frame sync/channel tracking");
+    CHECK(!isBurstInterleavedOFDMMode(Modulation::QAM16, CodeRate::R3_4),
+          "coherent QAM16 R3/4 should keep per-frame sync/channel tracking");
     CHECK(isBurstInterleavedOFDMMode(Modulation::DQPSK, CodeRate::R2_3),
           "legacy speculative DQPSK high-rate burst interleaving should remain enabled");
     CHECK(!isBurstInterleavedOFDMMode(Modulation::DQPSK, CodeRate::R1_2),

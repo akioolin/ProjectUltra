@@ -228,11 +228,10 @@ inline bool isSpeculativeHighRateOFDM(Modulation mod, CodeRate rate) {
 }
 
 inline bool isBurstInterleavedOFDMMode(Modulation mod, CodeRate rate) {
-    if (mod == Modulation::QAM16) {
-        return rate == CodeRate::R1_2 ||
-               rate == CodeRate::R2_3 ||
-               rate == CodeRate::R3_4;
-    }
+    // Coherent QAM16 needs the per-frame chirp/LTS channel reference while the
+    // 2026-05 burst-accumulation path is still being reworked. Round-5 Good
+    // fading A/B showed burst groups 2/4/8 lose to independent QAM16 frames
+    // because continuation timing failures dominate the diversity gain.
     return isSpeculativeHighRateOFDM(mod, rate);
 }
 
