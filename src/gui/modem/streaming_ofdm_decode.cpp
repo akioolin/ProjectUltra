@@ -20,8 +20,11 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <exception>
 #include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
 
 namespace ultra {
@@ -59,6 +62,124 @@ bool decodedFrameHasMoreFrag(const DecodeResult& result) {
         return (result.partial_codewords.flags & v2::Flags::MORE_FRAG) != 0;
     }
     return false;
+}
+
+bool failureAttributionEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ULTRA_FAILURE_ATTRIBUTION");
+        return value && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
+    }();
+    return enabled;
+}
+
+std::string formatU8Vector(const std::vector<uint8_t>& values) {
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i) oss << ",";
+        oss << static_cast<int>(values[i]);
+    }
+    oss << "]";
+    return oss.str();
+}
+
+std::string formatIntVector(const std::vector<int>& values) {
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i) oss << ",";
+        oss << values[i];
+    }
+    oss << "]";
+    return oss.str();
+}
+
+std::string formatFloatVector(const std::vector<float>& values) {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(2) << "[";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i) oss << ",";
+        oss << values[i];
+    }
+    oss << "]";
+    return oss.str();
+}
+
+void copyCodewordDiagnostics(DecodeResult& result, const v2::CodewordStatus& status) {
+    result.cw_decoded.clear();
+    result.cw_decoded.reserve(status.decoded.size());
+    for (bool decoded : status.decoded) {
+        result.cw_decoded.push_back(decoded ? 1 : 0);
+    }
+    result.cw_iterations = status.iterations;
+    result.cw_unsatisfied_checks = status.unsatisfied_checks;
+    result.cw_llr_abs_mean = status.llr_abs_mean;
+    result.cw_llr_abs_min = status.llr_abs_min;
+    result.cw_llr_abs_p10 = status.llr_abs_p10;
+    result.cw_llr_abs_p50 = status.llr_abs_p50;
+    result.cw_llr_abs_p90 = status.llr_abs_p90;
+    result.cw_used_perturbation = status.used_perturbation;
+    result.cw_harq_attempts = status.harq_attempts;
+}
+
+void logFailureAttributionFrame(const char* prefix,
+                                const DecodeResult& result,
+                                IWaveform* waveform,
+                                bool is_ofdm,
+                                bool connected,
+                                size_t frame_sync_abs,
+                                size_t frame_len,
+                                Modulation modulation,
+                                CodeRate rate,
+                                float sync_correlation) {
+    if (!failureAttributionEnabled() || !is_ofdm || !connected) {
+        return;
+    }
+    const int attempted_codewords = result.codewords_ok + result.codewords_failed;
+    if (attempted_codewords < v2::kMinFixedFrameCodewords || result.cw_decoded.empty()) {
+        return;
+    }
+
+    const char* outcome = result.success ? "PASS" : "FAIL";
+    const auto cw_decoded = formatU8Vector(result.cw_decoded);
+    const auto cw_iters = formatIntVector(result.cw_iterations);
+    const auto cw_unsat = formatIntVector(result.cw_unsatisfied_checks);
+    const auto cw_llr_mean = formatFloatVector(result.cw_llr_abs_mean);
+    const auto cw_llr_min = formatFloatVector(result.cw_llr_abs_min);
+    const auto cw_llr_p10 = formatFloatVector(result.cw_llr_abs_p10);
+    const auto cw_llr_p50 = formatFloatVector(result.cw_llr_abs_p50);
+    const auto cw_llr_p90 = formatFloatVector(result.cw_llr_abs_p90);
+    const auto perturb = formatU8Vector(result.cw_used_perturbation);
+    const auto harq_attempts = formatIntVector(result.cw_harq_attempts);
+
+    if (result.success) {
+        LOG_MODEM(WARN,
+                  "[%s] FAIL_ATTR frame outcome=%s mod=%s rate=%s sync_abs=%zu frame_len=%zu cw_ok=%d cw_fail=%d snr=%.2f snr_src=%s cfo=%.2f corr=%.3f "
+                  "cw_decoded=%s cw_iters=%s cw_unsat=%s cw_llr_mean=%s cw_llr_min=%s cw_llr_p10=%s cw_llr_p50=%s cw_llr_p90=%s perturb=%s harq_attempts=%s",
+                  prefix, outcome, modulationToString(modulation), codeRateToString(rate),
+                  frame_sync_abs, frame_len, result.codewords_ok, result.codewords_failed,
+                  result.snr_db, snrSourceToString(result.snr_source), result.cfo_hz,
+                  sync_correlation, cw_decoded.c_str(), cw_iters.c_str(),
+                  cw_unsat.c_str(), cw_llr_mean.c_str(), cw_llr_min.c_str(),
+                  cw_llr_p10.c_str(), cw_llr_p50.c_str(), cw_llr_p90.c_str(),
+                  perturb.c_str(), harq_attempts.c_str());
+    } else {
+        LOG_MODEM(WARN,
+                  "[%s] FAIL_ATTR frame outcome=%s mod=%s rate=%s sync_abs=%zu frame_len=%zu cw_ok=%d cw_fail=%d snr=%.2f snr_src=%s cfo=%.2f corr=%.3f "
+                  "cw_decoded=%s cw_iters=%s cw_unsat=%s cw_llr_mean=%s cw_llr_min=%s cw_llr_p10=%s cw_llr_p50=%s cw_llr_p90=%s perturb=%s harq_attempts=%s",
+                  prefix, outcome, modulationToString(modulation), codeRateToString(rate),
+                  frame_sync_abs, frame_len, result.codewords_ok, result.codewords_failed,
+                  result.snr_db, snrSourceToString(result.snr_source), result.cfo_hz,
+                  sync_correlation, cw_decoded.c_str(), cw_iters.c_str(),
+                  cw_unsat.c_str(), cw_llr_mean.c_str(), cw_llr_min.c_str(),
+                  cw_llr_p10.c_str(), cw_llr_p50.c_str(), cw_llr_p90.c_str(),
+                  perturb.c_str(), harq_attempts.c_str());
+    }
+
+    if (!result.success && waveform) {
+        const auto eq_diag = waveform->getFailureAttributionDiagnosticsText();
+        LOG_MODEM(WARN, "[%s] FAIL_ATTR %s", prefix, eq_diag.c_str());
+    }
 }
 
 }  // namespace
@@ -1257,6 +1378,10 @@ void StreamingDecoder::decodeCurrentFrame() {
         populateDecodeMetrics(result, is_ofdm, sync_cfo_);
     }
 
+    logFailureAttributionFrame(log_prefix_.c_str(), result, waveform_.get(),
+                               is_ofdm, connected_, frame_sync_abs, frame_len,
+                               current_modulation_, code_rate_, sync_correlation_);
+
     const bool deliver_partial_mc_dpsk =
         !result.success && mode_ == protocol::WaveformMode::MC_DPSK &&
         result.has_partial_codewords;
@@ -1423,6 +1548,9 @@ void StreamingDecoder::decodeCurrentFrame() {
             // Decode the continuation block
             DecodeResult next_result = decodeFrame(next_soft_bits, sync_snr_, sync_cfo_);
             populateDecodeMetrics(next_result, true, residual_cfo);
+            logFailureAttributionFrame(log_prefix_.c_str(), next_result, waveform_.get(),
+                                       true, connected_, next_search_abs, min_block,
+                                       current_modulation_, code_rate_, sync_correlation_);
 
             {
                 std::lock_guard<std::mutex> slock(stats_mutex_);
@@ -2302,6 +2430,7 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 cw_status = decodeFixed(decode_cw_count);
             }
         }
+        copyCodewordDiagnostics(result, cw_status);
 
         // Record duration into failed_4cw_after_peek if this attempt failed.
         // Note: this duration also counts inside decode_fixed_frame_total

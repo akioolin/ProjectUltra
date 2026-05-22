@@ -738,6 +738,15 @@ Bytes reassembleCodewords(const std::vector<Bytes>& codewords, size_t expected_s
 struct CodewordStatus {
     std::vector<bool> decoded;  // true = LDPC succeeded for this CW
     std::vector<Bytes> data;    // Decoded data for each CW (20 bytes each)
+    std::vector<int> iterations;             // Final LDPC iteration count per CW
+    std::vector<int> unsatisfied_checks;     // Final syndrome weight per CW
+    std::vector<float> llr_abs_mean;         // Pre-FEC |LLR| mean per CW
+    std::vector<float> llr_abs_min;          // Pre-FEC |LLR| minimum per CW
+    std::vector<float> llr_abs_p10;          // Pre-FEC |LLR| 10th percentile per CW
+    std::vector<float> llr_abs_p50;          // Pre-FEC |LLR| median per CW
+    std::vector<float> llr_abs_p90;          // Pre-FEC |LLR| 90th percentile per CW
+    std::vector<uint8_t> used_perturbation;  // Non-zero if perturbation retry decoded this CW
+    std::vector<int> harq_attempts;          // Soft-combine attempts contributing to this CW
     bool fixed_frame = false;   // true for OFDM fixed-CW frames without CW1+ markers
 
     // Build NACK bitmap from decode status

@@ -4,7 +4,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <iomanip>
+#include <limits>
 #include <memory>
+#include <sstream>
 #include <vector>
 #include "ultra/ofdm.hpp"
 #include "ultra/dsp.hpp"
@@ -16,6 +19,120 @@
 namespace ultra {
 
 using namespace demod_constants;
+
+void OFDMDemodulator::Impl::resetFailureAttributionDiagnostics() {
+    current_data_symbol_index_ = 0;
+    failure_diag_carriers_.clear();
+    failure_diag_symbols_.clear();
+    failure_diag_evm_.clear();
+    failure_diag_norm_evm_.clear();
+}
+
+std::string OFDMDemodulator::Impl::getFailureAttributionDiagnosticsText() const {
+    auto percentile = [](std::vector<float> values, double q) -> float {
+        if (values.empty()) {
+            return 0.0f;
+        }
+        std::sort(values.begin(), values.end());
+        const double pos = q * static_cast<double>(values.size() - 1);
+        const size_t lo = static_cast<size_t>(std::floor(pos));
+        const size_t hi = std::min(lo + 1, values.size() - 1);
+        const double frac = pos - static_cast<double>(lo);
+        return static_cast<float>(values[lo] * (1.0 - frac) + values[hi] * frac);
+    };
+
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(3);
+
+    if (failure_diag_symbols_.empty() || failure_diag_evm_.empty()) {
+        oss << "eq_diag=empty";
+        return oss.str();
+    }
+
+    double evm_sum = 0.0;
+    double norm_evm_sum = 0.0;
+    double inside_noise = 0.0;
+    double min_abs_h = std::numeric_limits<double>::max();
+    double mean_abs_h_sum = 0.0;
+    double mean_snr_db_sum = 0.0;
+    double edge_evm_sum = 0.0;
+    double edge_norm_evm_sum = 0.0;
+    size_t edge_samples = 0;
+
+    const size_t last_symbol = failure_diag_symbols_.empty()
+        ? 0
+        : failure_diag_symbols_.back().symbol_index;
+    for (const auto& symbol : failure_diag_symbols_) {
+        if (symbol.samples == 0) {
+            continue;
+        }
+        evm_sum += symbol.evm_sum;
+        norm_evm_sum += symbol.norm_evm_sum;
+        inside_noise += static_cast<double>(symbol.inside_noise);
+        min_abs_h = std::min(min_abs_h, static_cast<double>(symbol.min_abs_h));
+        mean_abs_h_sum += symbol.mean_abs_h;
+        mean_snr_db_sum += symbol.mean_snr_db;
+
+        const bool edge_symbol = symbol.symbol_index < 2 ||
+                                 symbol.symbol_index + 2 >= last_symbol;
+        if (edge_symbol) {
+            edge_evm_sum += symbol.evm_sum;
+            edge_norm_evm_sum += symbol.norm_evm_sum;
+            edge_samples += symbol.samples;
+        }
+    }
+
+    const double sample_count = static_cast<double>(failure_diag_evm_.size());
+    const double symbol_count = static_cast<double>(failure_diag_symbols_.size());
+    const double edge_count = static_cast<double>(std::max<size_t>(edge_samples, 1));
+    const double abs_h_min = std::isfinite(min_abs_h) ? min_abs_h : 0.0;
+
+    oss << "eq_diag samples=" << failure_diag_evm_.size()
+        << " symbols=" << failure_diag_symbols_.size()
+        << " carriers=" << failure_diag_carriers_.size()
+        << " evm_mean=" << (evm_sum / sample_count)
+        << " evm_p95=" << percentile(failure_diag_evm_, 0.95)
+        << " norm_evm_mean=" << (norm_evm_sum / sample_count)
+        << " norm_evm_p95=" << percentile(failure_diag_norm_evm_, 0.95)
+        << " inside_noise_frac=" << (inside_noise / sample_count)
+        << " mean_absH=" << (mean_abs_h_sum / symbol_count)
+        << " min_absH=" << abs_h_min
+        << " mean_carrier_snr_db=" << (mean_snr_db_sum / symbol_count)
+        << " edge_evm_mean=" << (edge_evm_sum / edge_count)
+        << " edge_norm_evm_mean=" << (edge_norm_evm_sum / edge_count);
+
+    oss << " symbol_metrics=[";
+    for (size_t i = 0; i < failure_diag_symbols_.size(); ++i) {
+        if (i) oss << ",";
+        const auto& symbol = failure_diag_symbols_[i];
+        const double count = static_cast<double>(std::max<size_t>(symbol.samples, 1));
+        oss << symbol.symbol_index
+            << ":evm=" << (symbol.evm_sum / count)
+            << ":nEvm=" << (symbol.norm_evm_sum / count)
+            << ":inside=" << (static_cast<double>(symbol.inside_noise) / count)
+            << ":minH=" << symbol.min_abs_h
+            << ":meanH=" << symbol.mean_abs_h
+            << ":snr=" << symbol.mean_snr_db;
+    }
+    oss << "]";
+
+    oss << " carrier_metrics=[";
+    for (size_t i = 0; i < failure_diag_carriers_.size(); ++i) {
+        if (i) oss << ",";
+        const auto& carrier = failure_diag_carriers_[i];
+        const double count = static_cast<double>(std::max<size_t>(carrier.samples, 1));
+        oss << carrier.logical_carrier
+            << ":bin=" << carrier.fft_index
+            << ":evm=" << (carrier.evm_sum / count)
+            << ":nEvm=" << (carrier.norm_evm_sum / count)
+            << ":absH=" << (carrier.abs_h_sum / count)
+            << ":snr=" << (carrier.snr_db_sum / count)
+            << ":inside=" << (static_cast<double>(carrier.inside_noise) / count);
+    }
+    oss << "]";
+
+    return oss.str();
+}
 
 // =============================================================================
 // PUBLIC INTERFACE
@@ -179,6 +296,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 impl_->dd_qam16_measurement_var_.clear();
                 impl_->dd_qam16_reliability_.clear();
                 impl_->dd_qam16_channel_var_.clear();
+                impl_->resetFailureAttributionDiagnostics();
                 if (!is_differential || impl_->config.use_pilots) {
                     impl_->carrier_phase_initialized = false;
                     impl_->carrier_phase_correction = Complex(1, 0);
@@ -268,6 +386,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                     impl_->dd_qam16_measurement_var_.clear();
                     impl_->dd_qam16_reliability_.clear();
                     impl_->dd_qam16_channel_var_.clear();
+                    impl_->resetFailureAttributionDiagnostics();
                     impl_->carrier_phase_initialized = false;
                     impl_->carrier_phase_correction = Complex(1, 0);
 
@@ -288,6 +407,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             const auto& freq_domain = impl_->extractSymbol(baseband, 0);
 
             impl_->updateChannelEstimate(freq_domain);
+            impl_->current_data_symbol_index_ = static_cast<size_t>(impl_->synced_symbol_count.load());
 
             const auto& equalized = impl_->equalize(freq_domain);
             impl_->demodulateSymbol(equalized, impl_->config.modulation);
@@ -481,6 +601,10 @@ float OFDMDemodulator::getLastLTSResidualCFOHz() const {
     return impl_->last_lts_residual_cfo_hz;
 }
 
+std::string OFDMDemodulator::getFailureAttributionDiagnosticsText() const {
+    return impl_->getFailureAttributionDiagnosticsText();
+}
+
 void OFDMDemodulator::setRXCarrierErasureEnabled(bool enabled) {
     impl_->rx_carrier_erasure_enabled_ = enabled;
 }
@@ -552,6 +676,7 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     impl_->soft_bits.clear();
     impl_->demod_data.clear();
     impl_->rx_buffer.clear();
+    impl_->resetFailureAttributionDiagnostics();
     impl_->synced_symbol_count.store(0);
     impl_->idle_call_count.store(0);
     impl_->mixer.reset();
@@ -590,6 +715,7 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     impl_->dd_qam16_measurement_var_.clear();
     impl_->dd_qam16_reliability_.clear();
     impl_->dd_qam16_channel_var_.clear();
+    impl_->resetFailureAttributionDiagnostics();
     impl_->carrier_phase_initialized = false;
     impl_->carrier_phase_correction = Complex(1, 0);
     impl_->lts_phase_offset = Complex(1, 0);  // Will be updated by estimateChannelFromLTS
@@ -670,6 +796,7 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     // === PHASE 2: Process data symbols ===
     LOG_DEMOD(DEBUG, "DATA phase: first_sample=%.6f, remaining=%zu", *ptr, remaining);
     size_t data_offset = 0;
+    size_t data_symbol_index = 0;
 
     while (remaining - data_offset >= impl_->symbol_samples) {
         timing::ScopedTimer _profile_(timing::globalDecoderProfile().data_symbol_loop);
@@ -686,10 +813,12 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
         if (!impl_->pilot_carrier_indices.empty()) {
             impl_->updateChannelEstimate(fd);
         }
+        impl_->current_data_symbol_index_ = data_symbol_index;
         const auto& eq = impl_->equalize(fd);
         impl_->demodulateSymbol(eq, impl_->config.modulation);
 
         data_offset += impl_->symbol_samples;
+        ++data_symbol_index;
         ++impl_->synced_symbol_count;
         impl_->updateQuality();
     }
@@ -769,6 +898,7 @@ void OFDMDemodulator::reset() {
     impl_->dd_qam16_measurement_var_.clear();
     impl_->dd_qam16_reliability_.clear();
     impl_->dd_qam16_channel_var_.clear();
+    impl_->resetFailureAttributionDiagnostics();
     impl_->carrier_phase_initialized = false;
     impl_->carrier_phase_correction = Complex(1, 0);
 

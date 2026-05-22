@@ -27,7 +27,9 @@ bool isSupportedChirpModulation(Modulation mod) {
            mod == Modulation::QPSK ||
            mod == Modulation::BPSK ||
            mod == Modulation::QAM8 ||
-           mod == Modulation::QAM16;
+           mod == Modulation::QAM16 ||
+           mod == Modulation::QAM32 ||
+           mod == Modulation::QAM64;
 }
 
 uint64_t activeBitsMask(size_t carriers) {
@@ -951,6 +953,13 @@ float OFDMChirpWaveform::getLastLTSResidualCFOHz() const {
         return demodulator_->getLastLTSResidualCFOHz();
     }
     return 0.0f;
+}
+
+std::string OFDMChirpWaveform::getFailureAttributionDiagnosticsText() const {
+    if (demodulator_) {
+        return demodulator_->getFailureAttributionDiagnosticsText();
+    }
+    return {};
 }
 
 std::vector<std::complex<float>> OFDMChirpWaveform::getConstellationSymbols() const {

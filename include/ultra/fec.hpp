@@ -62,6 +62,11 @@ public:
     // Get number of iterations used in last decode
     int lastIterations() const;
 
+    // Get the final LDPC syndrome weight from the last decode attempt.
+    // Zero means all parity checks were satisfied; positive values are
+    // unsatisfied checks after the final BP/min-sum iteration.
+    int lastUnsatisfiedChecks() const;
+
     // Set code rate
     void setRate(CodeRate rate);
 

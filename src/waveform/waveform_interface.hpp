@@ -194,6 +194,9 @@ public:
     // Last LTS-derived timing offset in samples. Positive means start later.
     virtual float getLastTimingOffsetSamples() const { return 0.0f; }
 
+    // Post-equalizer failure-attribution diagnostics for the last decoded frame.
+    virtual std::string getFailureAttributionDiagnosticsText() const { return {}; }
+
     // Get constellation symbols for GUI display
     virtual std::vector<std::complex<float>> getConstellationSymbols() const = 0;
 

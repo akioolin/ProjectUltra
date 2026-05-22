@@ -5,8 +5,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include "demodulator_impl.hpp"
 #include "demodulator_constants.hpp"
+#include "soft_demap.hpp"
 #include "ultra/logging.hpp"
 
 namespace ultra {
@@ -62,6 +64,13 @@ float psk8MinAbsLLRNoClip(Complex sym, float noise_var) {
         min_abs = std::min(min_abs, std::abs(scale * (min_d1 - min_d0)));
     }
     return min_abs;
+}
+
+bool failureAttributionEligible(Modulation mod) {
+    return mod == Modulation::QAM8 ||
+           mod == Modulation::QAM16 ||
+           mod == Modulation::QAM32 ||
+           mod == Modulation::QAM64;
 }
 
 } // namespace
@@ -142,6 +151,78 @@ Complex OFDMDemodulator::Impl::hardDecision(Complex sym, Modulation mod) const {
             return Complex(sym.real() > 0 ? 0.7071f : -0.7071f,
                           sym.imag() > 0 ? 0.7071f : -0.7071f);
     }
+}
+
+void OFDMDemodulator::Impl::recordFailureAttributionSymbol(
+    const std::vector<Complex>& equalized,
+    Modulation mod) {
+    if (!failureAttributionEligible(mod) ||
+        equalized.size() != data_carrier_indices.size() ||
+        carrier_noise_var.size() != data_carrier_indices.size()) {
+        return;
+    }
+
+    if (failure_diag_carriers_.size() != data_carrier_indices.size()) {
+        failure_diag_carriers_.clear();
+        failure_diag_carriers_.reserve(data_carrier_indices.size());
+        for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
+            FailureAttributionCarrier carrier;
+            carrier.logical_carrier = static_cast<int>(i);
+            carrier.fft_index = data_carrier_indices[i];
+            failure_diag_carriers_.push_back(carrier);
+        }
+    }
+
+    FailureAttributionSymbol symbol;
+    symbol.symbol_index = current_data_symbol_index_;
+    symbol.samples = equalized.size();
+    symbol.min_abs_h = std::numeric_limits<float>::max();
+
+    double abs_h_sum = 0.0;
+    double snr_db_sum = 0.0;
+    const float ce_margin = soft_demap::getCEErrorMargin(mod);
+    const float noise_ref = std::max(noise_variance, MIN_CARRIER_NOISE_VAR);
+
+    for (size_t i = 0; i < equalized.size(); ++i) {
+        const int idx = data_carrier_indices[i];
+        const Complex decision = hardDecision(equalized[i], mod);
+        const float evm = std::sqrt(std::norm(equalized[i] - decision));
+        const float effective_noise =
+            std::max(carrier_noise_var[i] * ce_margin, MIN_CARRIER_NOISE_VAR);
+        const float norm_evm = (evm * evm) / effective_noise;
+        const float abs_h = std::abs(channel_estimate[idx]);
+        const float gamma = std::norm(channel_estimate[idx]) / noise_ref;
+        const float snr_db = 10.0f * std::log10(std::max(gamma, 1.0e-6f));
+        const bool inside_noise_model = norm_evm <= kQam16DecisionChiSq95;
+
+        FailureAttributionCarrier& carrier = failure_diag_carriers_[i];
+        ++carrier.samples;
+        carrier.evm_sum += evm;
+        carrier.norm_evm_sum += norm_evm;
+        carrier.abs_h_sum += abs_h;
+        carrier.snr_db_sum += snr_db;
+        if (inside_noise_model) {
+            ++carrier.inside_noise;
+            ++symbol.inside_noise;
+        }
+
+        symbol.evm_sum += evm;
+        symbol.norm_evm_sum += norm_evm;
+        symbol.min_abs_h = std::min(symbol.min_abs_h, abs_h);
+        abs_h_sum += abs_h;
+        snr_db_sum += snr_db;
+        failure_diag_evm_.push_back(evm);
+        failure_diag_norm_evm_.push_back(norm_evm);
+    }
+
+    if (symbol.samples > 0) {
+        const double inv = 1.0 / static_cast<double>(symbol.samples);
+        symbol.mean_abs_h = static_cast<float>(abs_h_sum * inv);
+        symbol.mean_snr_db = static_cast<float>(snr_db_sum * inv);
+    } else {
+        symbol.min_abs_h = 0.0f;
+    }
+    failure_diag_symbols_.push_back(symbol);
 }
 
 // =============================================================================
@@ -310,6 +391,8 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
             carrier_noise_var[i] = MAX_CARRIER_NOISE_VAR;
         }
     }
+
+    recordFailureAttributionSymbol(equalized, mod);
 
     // Coherent 8PSK/16-QAM decision-directed channel observations. The noise
     // reference is the post-equalizer carrier noise variance used by the LLRs,

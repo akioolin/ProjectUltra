@@ -11,6 +11,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <random>
 
@@ -96,6 +97,49 @@ float meanAbsLlr(const std::vector<float>& llrs) {
         sum += std::abs(llr);
     }
     return static_cast<float>(sum / static_cast<double>(llrs.size()));
+}
+
+struct LlrAbsSummary {
+    float mean = 0.0f;
+    float min = 0.0f;
+    float p10 = 0.0f;
+    float p50 = 0.0f;
+    float p90 = 0.0f;
+};
+
+LlrAbsSummary summarizeAbsLlrs(const std::vector<float>& llrs) {
+    LlrAbsSummary out;
+    if (llrs.empty()) {
+        return out;
+    }
+
+    std::vector<float> abs_values;
+    abs_values.reserve(llrs.size());
+    double sum = 0.0;
+    float min_value = std::numeric_limits<float>::max();
+    for (float llr : llrs) {
+        const float a = std::abs(llr);
+        abs_values.push_back(a);
+        sum += static_cast<double>(a);
+        min_value = std::min(min_value, a);
+    }
+
+    std::sort(abs_values.begin(), abs_values.end());
+    auto percentile = [&](float q) -> float {
+        if (abs_values.empty()) {
+            return 0.0f;
+        }
+        const float pos = q * static_cast<float>(abs_values.size() - 1);
+        const size_t idx = static_cast<size_t>(std::round(pos));
+        return abs_values[std::min(idx, abs_values.size() - 1)];
+    };
+
+    out.mean = static_cast<float>(sum / static_cast<double>(llrs.size()));
+    out.min = min_value;
+    out.p10 = percentile(0.10f);
+    out.p50 = percentile(0.50f);
+    out.p90 = percentile(0.90f);
+    return out;
 }
 
 } // namespace
@@ -1526,6 +1570,15 @@ void CodewordStatus::initForFrame(uint8_t total_cw) {
     decoded.resize(total_cw, false);
     data.clear();
     data.resize(total_cw);
+    iterations.assign(total_cw, 0);
+    unsatisfied_checks.assign(total_cw, -1);
+    llr_abs_mean.assign(total_cw, 0.0f);
+    llr_abs_min.assign(total_cw, 0.0f);
+    llr_abs_p10.assign(total_cw, 0.0f);
+    llr_abs_p50.assign(total_cw, 0.0f);
+    llr_abs_p90.assign(total_cw, 0.0f);
+    used_perturbation.assign(total_cw, 0);
+    harq_attempts.assign(total_cw, 0);
 }
 
 // ============================================================================
@@ -1603,10 +1656,25 @@ CodewordStatus decodeCodewordsWithLDPC(const std::vector<std::vector<float>>& so
     CodewordStatus status;
     status.decoded.resize(soft_bits.size(), false);
     status.data.resize(soft_bits.size());
+    status.iterations.assign(soft_bits.size(), 0);
+    status.unsatisfied_checks.assign(soft_bits.size(), -1);
+    status.llr_abs_mean.assign(soft_bits.size(), 0.0f);
+    status.llr_abs_min.assign(soft_bits.size(), 0.0f);
+    status.llr_abs_p10.assign(soft_bits.size(), 0.0f);
+    status.llr_abs_p50.assign(soft_bits.size(), 0.0f);
+    status.llr_abs_p90.assign(soft_bits.size(), 0.0f);
+    status.used_perturbation.assign(soft_bits.size(), 0);
+    status.harq_attempts.assign(soft_bits.size(), 1);
 
     for (size_t i = 0; i < soft_bits.size(); i++) {
+        const auto llr_summary = summarizeAbsLlrs(soft_bits[i]);
         auto [success, data] = decodeSingleCodeword(soft_bits[i]);
         status.decoded[i] = success;
+        status.llr_abs_mean[i] = llr_summary.mean;
+        status.llr_abs_min[i] = llr_summary.min;
+        status.llr_abs_p10[i] = llr_summary.p10;
+        status.llr_abs_p50[i] = llr_summary.p50;
+        status.llr_abs_p90[i] = llr_summary.p90;
         if (success) {
             status.data[i] = std::move(data);
         }
@@ -1788,6 +1856,15 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
     status.fixed_frame = true;
     status.decoded.resize(static_cast<size_t>(cw_count), false);
     status.data.resize(static_cast<size_t>(cw_count));
+    status.iterations.assign(static_cast<size_t>(cw_count), 0);
+    status.unsatisfied_checks.assign(static_cast<size_t>(cw_count), -1);
+    status.llr_abs_mean.assign(static_cast<size_t>(cw_count), 0.0f);
+    status.llr_abs_min.assign(static_cast<size_t>(cw_count), 0.0f);
+    status.llr_abs_p10.assign(static_cast<size_t>(cw_count), 0.0f);
+    status.llr_abs_p50.assign(static_cast<size_t>(cw_count), 0.0f);
+    status.llr_abs_p90.assign(static_cast<size_t>(cw_count), 0.0f);
+    status.used_perturbation.assign(static_cast<size_t>(cw_count), 0);
+    status.harq_attempts.assign(static_cast<size_t>(cw_count), 0);
 
     // Check we have enough soft bits
     if (interleaved_soft.size() < total_frame_bits) {
@@ -1883,14 +1960,12 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
         decoder.setMinSumFactor(kFixedFrameDefaultMinSumFactor);
 
         // Debug: check LLR statistics for this CW
-        float llr_sum = 0, llr_abs_sum = 0;
+        float llr_sum = 0.0f;
         for (float llr : cw_bits) {
             llr_sum += llr;
-            llr_abs_sum += std::abs(llr);
         }
-
-        float llr_avg = llr_sum / cw_bits.size();
-        float llr_abs_avg = llr_abs_sum / cw_bits.size();
+        const float llr_avg = cw_bits.empty() ? 0.0f : llr_sum / cw_bits.size();
+        const auto llr_summary = summarizeAbsLlrs(cw_bits);
 
         std::vector<uint8_t> decoded;
         {
@@ -1975,8 +2050,13 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
 
         if (used_perturbation && success) perturbation_cw_count++;
 
-        LOG_MODEM(INFO, "CW[%d]: %s (iters=%d, llr_avg=%.2f, |llr|_avg=%.2f)",
-                  cw, success ? "OK" : "FAIL", iterations, llr_avg, llr_abs_avg);
+        const int final_iterations = decoder.lastIterations();
+        const int final_unsatisfied = decoder.lastUnsatisfiedChecks();
+
+        LOG_MODEM(INFO, "CW[%d]: %s (iters=%d, unsat=%d, llr_avg=%.2f, |llr|=mean %.2f p10 %.2f p50 %.2f p90 %.2f)",
+                  cw, success ? "OK" : "FAIL", final_iterations, final_unsatisfied,
+                  llr_avg, llr_summary.mean, llr_summary.p10,
+                  llr_summary.p50, llr_summary.p90);
         if (harq_active) {
             const auto cw_key = keyForCodeword(cw);
             if (harq_attempts[static_cast<size_t>(cw)] > 1 && harqDebugKeySelected(cw_key)) {
@@ -1989,6 +2069,17 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
         }
 
         status.decoded[cw] = success;
+        status.iterations[static_cast<size_t>(cw)] = final_iterations;
+        status.unsatisfied_checks[static_cast<size_t>(cw)] = final_unsatisfied;
+        status.llr_abs_mean[static_cast<size_t>(cw)] = llr_summary.mean;
+        status.llr_abs_min[static_cast<size_t>(cw)] = llr_summary.min;
+        status.llr_abs_p10[static_cast<size_t>(cw)] = llr_summary.p10;
+        status.llr_abs_p50[static_cast<size_t>(cw)] = llr_summary.p50;
+        status.llr_abs_p90[static_cast<size_t>(cw)] = llr_summary.p90;
+        status.used_perturbation[static_cast<size_t>(cw)] =
+            used_perturbation ? static_cast<uint8_t>(1) : static_cast<uint8_t>(0);
+        status.harq_attempts[static_cast<size_t>(cw)] =
+            harq_attempts[static_cast<size_t>(cw)];
         if (success && decoded.size() >= bytes_per_cw) {
             // Take exactly bytes_per_cw bytes
             status.data[cw].assign(decoded.begin(), decoded.begin() + bytes_per_cw);

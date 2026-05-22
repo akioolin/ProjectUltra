@@ -2,6 +2,7 @@
 
 #include "types.hpp"
 #include <memory>
+#include <string>
 
 namespace ultra {
 
@@ -160,6 +161,10 @@ public:
     // frames. Callers that know they are decoding a 1-CW control frame must
     // leave this disabled.
     void setRXCarrierErasureEnabled(bool enabled);
+
+    // Compact post-equalizer diagnostics for the most recently demodulated
+    // frame. Intended for failure attribution logging only.
+    std::string getFailureAttributionDiagnosticsText() const;
 
 private:
     struct Impl;

@@ -45,6 +45,7 @@ struct LDPCDecoder::Impl {
     float min_sum_factor = 0.75f;
     bool last_success = false;
     int last_iters = 0;
+    int last_unsatisfied_checks = -1;
 
     // Full H matrix representation
     // H_rows[i] contains all variable node indices connected to check i
@@ -182,7 +183,8 @@ struct LDPCDecoder::Impl {
         }
     }
 
-    bool checkParity(const std::vector<uint8_t>& bits) {
+    int countUnsatisfiedChecks(const std::vector<uint8_t>& bits) const {
+        int unsatisfied = 0;
         for (size_t i = 0; i < H_rows.size(); ++i) {
             uint8_t sum = 0;
             for (int j : H_rows[i]) {
@@ -190,9 +192,13 @@ struct LDPCDecoder::Impl {
                     sum ^= bits[j];
                 }
             }
-            if (sum != 0) return false;
+            if (sum != 0) ++unsatisfied;
         }
-        return true;
+        return unsatisfied;
+    }
+
+    bool checkParity(const std::vector<uint8_t>& bits) const {
+        return countUnsatisfiedChecks(bits) == 0;
     }
 
     Bytes decodeBP(std::span<const float> llrs) {
@@ -222,6 +228,7 @@ struct LDPCDecoder::Impl {
 
         // Iterative decoding
         last_success = false;
+        last_unsatisfied_checks = m;
         for (last_iters = 0; last_iters < max_iterations; ++last_iters) {
             // Check-to-variable messages (min-sum approximation)
             updateCheckToVar(m);
@@ -250,7 +257,8 @@ struct LDPCDecoder::Impl {
                 hard_bits[j] = (llr_total[j] < 0) ? 1 : 0;
             }
 
-            if (checkParity(hard_bits)) {
+            last_unsatisfied_checks = countUnsatisfiedChecks(hard_bits);
+            if (last_unsatisfied_checks == 0) {
                 last_success = true;
                 break;
             }
@@ -303,6 +311,7 @@ Bytes LDPCDecoder::decodeSoft(std::span<const float> llrs) {
     if (llrs.empty()) {
         impl_->last_success = false;
         impl_->last_iters = 0;
+        impl_->last_unsatisfied_checks = -1;
         return {};
     }
 
@@ -312,6 +321,7 @@ Bytes LDPCDecoder::decodeSoft(std::span<const float> llrs) {
     if (llrs.size() % static_cast<size_t>(n) != 0) {
         impl_->last_success = false;
         impl_->last_iters = 0;
+        impl_->last_unsatisfied_checks = -1;
         return {};
     }
 
@@ -325,6 +335,7 @@ Bytes LDPCDecoder::decodeSoft(std::span<const float> llrs) {
     std::vector<uint8_t> all_decoded_bits;
     size_t offset = 0;
     impl_->last_success = true;
+    impl_->last_unsatisfied_checks = 0;
 
     while (offset + n <= llrs.size()) {
         std::span<const float> block_llrs(llrs.data() + offset, n);
@@ -351,6 +362,7 @@ Bytes LDPCDecoder::decodeSoft(std::span<const float> llrs) {
 
         // Iterative decoding
         bool block_success = false;
+        int block_unsatisfied = m;
         for (impl_->last_iters = 0; impl_->last_iters < impl_->max_iterations; ++impl_->last_iters) {
             // Check-to-variable messages (min-sum)
             impl_->updateCheckToVar(m);
@@ -376,11 +388,13 @@ Bytes LDPCDecoder::decodeSoft(std::span<const float> llrs) {
             for (int j = 0; j < n; ++j) {
                 hard_bits[j] = (impl_->llr_total[j] < 0) ? 1 : 0;
             }
-            if (impl_->checkParity(hard_bits)) {
+            block_unsatisfied = impl_->countUnsatisfiedChecks(hard_bits);
+            if (block_unsatisfied == 0) {
                 block_success = true;
                 break;
             }
         }
+        impl_->last_unsatisfied_checks = block_unsatisfied;
 
         if (!block_success) {
             impl_->last_success = false;
@@ -422,6 +436,10 @@ bool LDPCDecoder::lastDecodeSuccess() const {
 
 int LDPCDecoder::lastIterations() const {
     return impl_->last_iters;
+}
+
+int LDPCDecoder::lastUnsatisfiedChecks() const {
+    return impl_->last_unsatisfied_checks;
 }
 
 void LDPCDecoder::setRate(CodeRate rate) {

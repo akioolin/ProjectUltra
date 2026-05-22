@@ -100,6 +100,19 @@ struct DecodeResult {
     bool ping_ldpc_magic_valid = false;
     bool has_partial_codewords = false;  // MC-DPSK only: CW0 parsed, frame incomplete.
     v2::PartialFrameCodewords partial_codewords;
+
+    // Failure-attribution diagnostics. Populated for OFDM fixed-codeword
+    // decode attempts; unused by normal receive behavior.
+    std::vector<uint8_t> cw_decoded;
+    std::vector<int> cw_iterations;
+    std::vector<int> cw_unsatisfied_checks;
+    std::vector<float> cw_llr_abs_mean;
+    std::vector<float> cw_llr_abs_min;
+    std::vector<float> cw_llr_abs_p10;
+    std::vector<float> cw_llr_abs_p50;
+    std::vector<float> cw_llr_abs_p90;
+    std::vector<uint8_t> cw_used_perturbation;
+    std::vector<int> cw_harq_attempts;
 };
 
 // Decoder statistics for GUI display

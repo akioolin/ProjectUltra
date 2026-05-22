@@ -8,6 +8,7 @@
 #include "demodulator_constants.hpp"
 #include <atomic>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace ultra {
@@ -150,6 +151,34 @@ struct OFDMDemodulator::Impl {
     std::vector<float> dd_qam16_reliability_;
     std::vector<float> dd_qam16_channel_var_;
 
+    // Diagnostic-only failure attribution for coherent OFDM frames. These
+    // fields are reset per received frame and never feed decode decisions.
+    struct FailureAttributionCarrier {
+        int logical_carrier = 0;
+        int fft_index = 0;
+        size_t samples = 0;
+        double evm_sum = 0.0;
+        double norm_evm_sum = 0.0;
+        double abs_h_sum = 0.0;
+        double snr_db_sum = 0.0;
+        size_t inside_noise = 0;
+    };
+    struct FailureAttributionSymbol {
+        size_t symbol_index = 0;
+        size_t samples = 0;
+        double evm_sum = 0.0;
+        double norm_evm_sum = 0.0;
+        size_t inside_noise = 0;
+        float min_abs_h = 0.0f;
+        float mean_abs_h = 0.0f;
+        float mean_snr_db = 0.0f;
+    };
+    size_t current_data_symbol_index_ = 0;
+    std::vector<FailureAttributionCarrier> failure_diag_carriers_;
+    std::vector<FailureAttributionSymbol> failure_diag_symbols_;
+    std::vector<float> failure_diag_evm_;
+    std::vector<float> failure_diag_norm_evm_;
+
     // LTS time-domain reference for fine timing (passband templates)
     std::vector<float> lts_passband_I;
     std::vector<float> lts_passband_Q;
@@ -241,6 +270,9 @@ struct OFDMDemodulator::Impl {
                                float noise_power_reference_scale = 1.0f);
     void interpolateChannel();
     Complex hardDecision(Complex sym, Modulation mod) const;
+    void resetFailureAttributionDiagnostics();
+    void recordFailureAttributionSymbol(const std::vector<Complex>& equalized, Modulation mod);
+    std::string getFailureAttributionDiagnosticsText() const;
     void lmsUpdate(int idx, Complex received, Complex reference);
     void rlsUpdate(int idx, Complex received, Complex reference);
     const std::vector<Complex>& equalize(const std::vector<Complex>& freq_domain, Modulation mod);
