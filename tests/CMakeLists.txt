@@ -87,6 +87,7 @@ target_link_libraries(test_otasim_serve_smoke PRIVATE ota_simulator_service)
 
 add_executable(test_ultra_gui_ota_client test_ultra_gui_ota_client.cpp)
 target_link_libraries(test_ultra_gui_ota_client PRIVATE ultra_otasim_client)
+target_compile_definitions(test_ultra_gui_ota_client PRIVATE PROJECT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 add_executable(test_ultra_tnc_sim_audio test_ultra_tnc_sim_audio.cpp)
 

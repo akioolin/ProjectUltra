@@ -209,6 +209,12 @@ void ModemEngine::setLogPrefix(const std::string& prefix) {
     }
 }
 
+void ModemEngine::setSoftCombineBuffer(fec::SoftCombineBuffer* buffer) {
+    if (streaming_decoder_) {
+        streaming_decoder_->setSoftCombineBuffer(buffer);
+    }
+}
+
 // ============================================================================
 // CONFIGURATION
 // ============================================================================

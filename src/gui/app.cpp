@@ -407,6 +407,9 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     }
     ultra::gui::startupTrace("App", "callsign-init-exit");
 
+    protocol_.setSoftCombiningHARQ(true);
+    modem_.setSoftCombineBuffer(protocol_.softCombineBuffer());
+
     // Set up raw data callback for protocol layer
     ultra::gui::startupTrace("App", "set-raw-callback-enter");
     modem_.setRawDataCallback([this](const Bytes& data) {

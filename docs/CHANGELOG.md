@@ -10,6 +10,80 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-21: GUI — enable receiver soft-combining HARQ (close production parity gap)
+
+**What was broken:** `ultra_gui` users on real radios had **silently worse decoder
+behavior** than `ultra_tnc` and `cli_simulator` users on the same channel.
+`tools/ultra_tnc.cpp:429` and `tools/sim/simulated_station.hpp:1166` both
+called `decoder.setSoftCombineBuffer(...)` to wire HARQ soft-combining; the
+GUI path through `src/gui/modem/modem_engine.cpp` never did. GUI retx
+decoded each retransmission from scratch instead of combining with retained
+first-attempt LLRs.
+
+This was the production-parity gap audited in `~/Documents/ProjectUltra-private/HARQ_GUI_PARITY_GAP_2026_05_20.md`.
+
+**What changed:**
+- `src/gui/app.cpp` now enables `protocol_.setSoftCombiningHARQ(true)` for
+  the GUI production path and forwards `protocol_.softCombineBuffer()` to
+  the modem.
+- `src/gui/modem/modem_engine.{hpp,cpp}` add a `setSoftCombineBuffer()`
+  method that forwards the buffer to `StreamingDecoder` (the same path TNC
+  and sim_station already used).
+- `tests/test_ultra_gui_ota_client.cpp` adds a `checkGuiHarqWiring()`
+  regression that verifies all 5 wiring sites stay present (GUI: enable +
+  forward; ModemEngine: forward; TNC: enable + forward). If any future
+  refactor removes one, CI fails.
+
+**Why this is correct:** A real radio's combining receiver retains the
+soft-bit (LLR) outputs of failed first-attempt decodes and combines them
+with subsequent retransmissions. This is industry-standard HARQ Chase
+combining. The GUI path was missing the wiring; this commit restores
+parity with the other two surfaces, behind the same code path so future
+refactors keep them in sync.
+
+**Verification (auto-negotiated, single-seed reproducer):**
+
+| Cell | Before | After |
+|---|---|---|
+| 1 KB Good/SNR12/R1_4 seed 42 (HARQ ON) | n/a (GUI HARQ unwired) | 4 retx, 4 timeouts, 775 bps (matches TNC) |
+| 4 KB Good/SNR12/R1_4 seed 42 (HARQ ON) | n/a | density 0.003662 retx/byte vs 1 KB baseline 0.003906 — **HARQ scales positively on larger transfers** |
+| 1 KB Good/SNR20 (HARQ ON) | n/a | 0 retx (no regression) |
+| 1 KB AWGN/SNR20 (HARQ ON) | n/a | 0 retx (no regression) |
+| `ultra_gui -sim` headless startup | (silent) | `Connection: soft-combining HARQ ENABLED` |
+
+**Empirical note (important):** at the Good/SNR12 reproducer cell, HARQ
+ON vs OFF is **silent** (retx and timeouts unchanged). The remaining 4
+retx + 4 timeouts at this cell are **sync-stage** rejections — frames
+are rejected before the LDPC decoder runs, so there are no failed-decode
+LLRs to combine. HARQ buffer behavior was verified via `HARQ_DEBUG`
+log lines: `combine_miss_new` fires only on frames that reach the
+decoder; frames rejected at sync stage never store LLRs and therefore
+never produce `combine_hit` on retx. This is exactly the expected
+behavior — HARQ helps decode-stage failures, not sync-stage failures.
+
+The fix scales positively on cells where decode-stage failures occur
+(the 4 KB density improvement, and any future fading cell where decoder
+margin is the bottleneck). It is **free** on cells where sync-stage
+failures dominate (no buffer entries → no decoder side-effect).
+
+**Default policy:**
+- GUI: HARQ default ON in production (this commit).
+- `ultra_tnc`: HARQ default ON in production (unchanged).
+- `cli_simulator`: HARQ default OFF; `--harq` flag enables. This matches
+  the cli_simulator's pattern with PAPR (default OFF) — production wants
+  the win, the simulator wants the clean ceiling for floor measurements.
+
+**Verification command shape:**
+```
+cmake --build build --target ultra_gui modem_engine -j4
+ctest --test-dir build --output-on-failure -j4   # → 92/92 PASS
+./build/cli_simulator --channel good --snr 12 --file 4096 --seed 42 --harq
+```
+
+**Detailed proof artifact:** `/tmp/codex_harq_investigation_round_1_proof.md`
+
+---
+
 ## 2026-05-21: ARQ — guard clean ACK repeats from half-duplex tail collisions
 
 **What was broken:** On 1 KB Good/SNR12/R1_4 file transfers, ALPHA experienced

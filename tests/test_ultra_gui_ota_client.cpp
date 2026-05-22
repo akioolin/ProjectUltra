@@ -36,6 +36,10 @@ namespace {
 
 namespace otasim_client = ultra::otasim_client;
 
+#ifndef PROJECT_SOURCE_DIR
+#define PROJECT_SOURCE_DIR "."
+#endif
+
 struct UniqueFd {
     int fd = -1;
 
@@ -123,6 +127,43 @@ void check(bool condition, const std::string& message) {
     if (!condition) {
         throw std::runtime_error(message);
     }
+}
+
+std::string readSourceFile(const std::filesystem::path& relative_path) {
+    const auto path = std::filesystem::path(PROJECT_SOURCE_DIR) / relative_path;
+    std::ifstream in(path);
+    check(in.good(), "failed to open source file: " + path.string());
+    return std::string(std::istreambuf_iterator<char>(in),
+                       std::istreambuf_iterator<char>());
+}
+
+void checkSourceContains(const std::string& source,
+                         const std::string& snippet,
+                         const std::string& message) {
+    check(source.find(snippet) != std::string::npos, message);
+}
+
+void checkGuiHarqWiring() {
+    const auto gui_app = readSourceFile("src/gui/app.cpp");
+    checkSourceContains(gui_app,
+                        "protocol_.setSoftCombiningHARQ(true);",
+                        "GUI protocol HARQ production default is not enabled");
+    checkSourceContains(gui_app,
+                        "modem_.setSoftCombineBuffer(protocol_.softCombineBuffer());",
+                        "GUI modem decoder is not wired to protocol HARQ buffer");
+
+    const auto modem_engine = readSourceFile("src/gui/modem/modem_engine.cpp");
+    checkSourceContains(modem_engine,
+                        "streaming_decoder_->setSoftCombineBuffer(buffer);",
+                        "ModemEngine does not forward the HARQ buffer to StreamingDecoder");
+
+    const auto ultra_tnc = readSourceFile("tools/ultra_tnc.cpp");
+    checkSourceContains(ultra_tnc,
+                        "engine_.setSoftCombiningHARQ(true);",
+                        "ultra_tnc HARQ production default is not enabled");
+    checkSourceContains(ultra_tnc,
+                        "decoder_.setSoftCombineBuffer(engine_.softCombineBuffer());",
+                        "ultra_tnc decoder is not wired to protocol HARQ buffer");
 }
 
 std::string valueFor(const std::string& line, const std::string& key) {
@@ -250,6 +291,8 @@ int main(int argc, char** argv) {
     ChildProcess child;
     try {
         check(argc == 2, "usage: test_ultra_gui_ota_client <ota_simulator>");
+        checkGuiHarqWiring();
+
         ultra::test::TempDir temp("ultra_gui_ota_client");
         check(temp.valid(), "failed to create temp dir");
 

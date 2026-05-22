@@ -13,6 +13,7 @@
 #include "psk/multi_carrier_dpsk.hpp"  // MultiCarrierDPSK for fading channels
 #include "sync/chirp_sync.hpp"  // ChirpSync for robust fading channel detection
 #include "../adaptive_mode.hpp"
+#include "fec/soft_combine.hpp"
 #include "protocol/frame_v2.hpp"  // v2::FrameType
 #include "protocol/waveform_selection.hpp"  // WaveformRecommendation, recommendWaveformAndRate
 #include "waveform/waveform_interface.hpp"  // IWaveform abstraction
@@ -40,6 +41,7 @@ public:
     // Set a name/prefix for logging (e.g., "OUR" or "SIM")
     void setLogPrefix(const std::string& prefix);
     const std::string& getLogPrefix() const { return log_prefix_; }
+    void setSoftCombineBuffer(fec::SoftCombineBuffer* buffer);
 
     // ========================================================================
     // CONFIGURATION
