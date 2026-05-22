@@ -418,9 +418,40 @@ private:
         WAITING,    // Not enough samples yet — caller should return and wait
         FAILED,     // Unrecoverable alignment/state failure — abort group
     };
+    struct BurstPhysicalDiag {
+        size_t abs_start_sample = 0;
+        float rms = 0.0f;
+        float mean_abs_llr = 0.0f;
+        float near_zero_fraction = 1.0f;
+        float pre_cfo_hz = 0.0f;
+        float residual_cfo_hz = 0.0f;
+        float accepted_cfo_hz = 0.0f;
+        float fading_index = 0.0f;
+        float lts_signal_power = 0.0f;
+        float lts_channel_magnitude = 0.0f;
+        float timing_offset_samples = 0.0f;
+        bool erasure = false;
+        bool process_ok = false;
+    };
     void accumulateBurstFrames();
     BurstFrameResult tryDemodulateNextBurstFrame();
     void finalizeBurstGroup();
+    void beginBurstDiagnosticsGroup(size_t abs_start_sample,
+                                    const std::vector<float>& soft_bits,
+                                    float rms,
+                                    float pre_cfo_hz,
+                                    float residual_cfo_hz,
+                                    float accepted_cfo_hz);
+    void appendBurstPhysicalDiagnostics(size_t abs_start_sample,
+                                        const std::vector<float>& soft_bits,
+                                        float rms,
+                                        float pre_cfo_hz,
+                                        float residual_cfo_hz,
+                                        float accepted_cfo_hz,
+                                        bool erasure,
+                                        bool process_ok);
+    void logBurstDiagnosticsAbort(const char* reason, size_t collected_frames);
+    void clearBurstDiagnostics();
     void startMCDPSKBurstContinuation(size_t next_pos, size_t next_abs,
                                       float snr_db, float cfo_hz);
     void continueMCDPSKBurst();
@@ -556,6 +587,10 @@ private:
     bool use_burst_interleave_ = false;
     std::vector<std::vector<float>> burst_soft_buffer_;  // collected soft bits per frame
     std::vector<DecodeResult> burst_metric_templates_;   // per-physical-frame LTS metrics
+    std::vector<BurstPhysicalDiag> burst_physical_diag_;
+    uint64_t burst_diag_next_group_index_ = 0;
+    uint64_t burst_diag_group_index_ = 0;
+    size_t burst_diag_group_start_abs_ = 0;
     size_t burst_next_pos_ = 0;          // buffer position for next continuation frame
     size_t burst_min_block_ = 0;         // samples per frame (cached from first frame)
     float burst_snr_ = 0.0f;             // Chirp sync-quality score

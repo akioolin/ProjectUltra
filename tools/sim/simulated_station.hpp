@@ -54,6 +54,7 @@
 #include "protocol/waveform_selection.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
+#include "ultra/phy_diagnostics.hpp"
 #include "ultra/tx_burst_normalization.hpp"
 #include "ultra/fec.hpp"  // ChannelInterleaver, LDPCEncoder
 #include "fec/frame_interleaver.hpp"  // FrameInterleaver
@@ -2128,6 +2129,16 @@ private:
                           label.empty() ? "-" : label.c_str(),
                           static_cast<unsigned long long>(event));
             }
+            if (ultra::phyDiagnosticsEnabled()) {
+                std::ostringstream oss;
+                oss << "event=station_tx_reject"
+                    << " station=" << callsign_
+                    << " ptt=" << pttStateName(pttState())
+                    << " size_hint=" << size_hint
+                    << " label=" << (label.empty() ? "-" : label)
+                    << " rejected=" << event;
+                ultra::phyDiagLine(oss.str());
+            }
             return;
         }
 
@@ -2139,6 +2150,18 @@ private:
                       size_hint, depth,
                       label.empty() ? "-" : label.c_str(),
                       static_cast<unsigned long long>(event));
+        }
+        if (ultra::phyDiagnosticsEnabled()) {
+            std::ostringstream oss;
+            oss << "event=station_tx_defer"
+                << " station=" << callsign_
+                << " ptt=" << pttStateName(pttState())
+                << " size_hint=" << size_hint
+                << " depth=" << depth
+                << " min_rx_epoch=" << min_rx_observation_epoch
+                << " coalesced_acks=" << coalesced_acks
+                << " label=" << (label.empty() ? "-" : label);
+            ultra::phyDiagLine(oss.str());
         }
     }
 
@@ -2296,6 +2319,18 @@ private:
                       static_cast<unsigned long long>(end_sample),
                       active_tx_.samples.size());
         }
+        if (ultra::phyDiagnosticsEnabled()) {
+            std::ostringstream diag;
+            diag << "event=station_tx_active"
+                 << " station=" << callsign_
+                 << " start_sample=" << start_sample
+                 << " end_sample=" << end_sample
+                 << " samples=" << active_tx_.samples.size()
+                 << " sim_t=" << getSimTime()
+                 << " ptt=" << pttStateName(pttState())
+                 << " label=" << (label.empty() ? "-" : label);
+            ultra::phyDiagLine(diag.str());
+        }
         return active_tx_.hasRemaining();
     }
 
@@ -2353,6 +2388,17 @@ private:
                 LOG_MODEM(INFO, "[%s] TX direct: %s samples=%zu",
                           callsign_.c_str(), label.c_str(), samples.size());
             }
+            if (ultra::phyDiagnosticsEnabled()) {
+                std::ostringstream diag;
+                diag << "event=station_tx_submit"
+                     << " station=" << callsign_
+                     << " path=direct"
+                     << " samples=" << samples.size()
+                     << " sim_t=" << getSimTime()
+                     << " ptt=" << pttStateName(pttState())
+                     << " label=" << (label.empty() ? "-" : label);
+                ultra::phyDiagLine(diag.str());
+            }
             return;
         }
 
@@ -2366,6 +2412,18 @@ private:
                       "[%s] TX logical queue: %s queued_before=%zu logical_depth=%zu",
                       callsign_.c_str(), label.c_str(),
                       queued_before, tx_submissions_.size());
+        }
+        if (ultra::phyDiagnosticsEnabled()) {
+            std::ostringstream diag;
+            diag << "event=station_tx_submit"
+                 << " station=" << callsign_
+                 << " path=paced_queue"
+                 << " queued_before=" << queued_before
+                 << " logical_depth=" << tx_submissions_.size()
+                 << " sim_t=" << getSimTime()
+                 << " ptt=" << pttStateName(pttState())
+                 << " label=" << (label.empty() ? "-" : label);
+            ultra::phyDiagLine(diag.str());
         }
     }
 

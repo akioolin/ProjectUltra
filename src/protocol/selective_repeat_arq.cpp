@@ -1,6 +1,8 @@
 #include "selective_repeat_arq.hpp"
 #include "selective_repeat_arq_policy.hpp"
 #include "ultra/logging.hpp"
+#include "ultra/phy_diagnostics.hpp"
+#include <sstream>
 
 namespace ultra {
 namespace protocol {
@@ -11,6 +13,10 @@ namespace {
 
 uint8_t dataFrameFlags(uint8_t flags) {
     return static_cast<uint8_t>(v2::Flags::VERSION_V2 | flags);
+}
+
+const char* boolDigit(bool value) {
+    return value ? "1" : "0";
 }
 
 }  // namespace
@@ -183,6 +189,22 @@ bool SelectiveRepeatARQ::sendDataWithTypeAndFlags(const Bytes& data,
 
     LOG_MODEM(DEBUG, "SR-ARQ: Sent %s seq=%d slot=%zu, window=[%d,%d)",
               v2::frameTypeToString(frame_type), seq, slot, tx_base_seq_, tx_next_seq_);
+    if (ultra::phyDiagnosticsEnabled()) {
+        std::ostringstream oss;
+        oss << "event=arq_data_tx"
+            << " local=" << local_call_
+            << " remote=" << remote_call_
+            << " seq=" << seq
+            << " slot=" << slot
+            << " frame_type=" << v2::frameTypeToString(frame_type)
+            << " fixed=0"
+            << " payload_bytes=" << data.size()
+            << " frame_bytes=" << tx_window_[slot].frame_data.size()
+            << " in_flight=" << tx_in_flight_
+            << " window=" << config_.window_size
+            << " timeout_ms=" << tx_window_[slot].timeout_ms;
+        ultra::phyDiagLine(oss.str());
+    }
 
     transmitData(tx_window_[slot].frame_data);
 
@@ -242,6 +264,23 @@ bool SelectiveRepeatARQ::sendFixedDataWithTypeAndFlags(const Bytes& data,
     LOG_MODEM(DEBUG, "SR-ARQ: Sent fixed %s seq=%d slot=%zu cw=%d, window=[%d,%d)",
               v2::frameTypeToString(frame_type), seq, slot, fixed_frame_codewords_,
               tx_base_seq_, tx_next_seq_);
+    if (ultra::phyDiagnosticsEnabled()) {
+        std::ostringstream oss;
+        oss << "event=arq_data_tx"
+            << " local=" << local_call_
+            << " remote=" << remote_call_
+            << " seq=" << seq
+            << " slot=" << slot
+            << " frame_type=" << v2::frameTypeToString(frame_type)
+            << " fixed=1"
+            << " payload_bytes=" << data.size()
+            << " frame_bytes=" << tx_window_[slot].frame_data.size()
+            << " cw=" << fixed_frame_codewords_
+            << " in_flight=" << tx_in_flight_
+            << " window=" << config_.window_size
+            << " timeout_ms=" << tx_window_[slot].timeout_ms;
+        ultra::phyDiagLine(oss.str());
+    }
 
     transmitData(tx_window_[slot].frame_data);
     return true;
@@ -291,6 +330,24 @@ bool SelectiveRepeatARQ::sendVariableDataWithFlags(const Bytes& data, uint8_t fl
 
     LOG_MODEM(INFO, "SR-ARQ: Sent variable DATA seq=%d slot=%zu total_cw=%d",
               seq, slot, static_cast<int>(frame.total_cw));
+    if (ultra::phyDiagnosticsEnabled()) {
+        std::ostringstream oss;
+        oss << "event=arq_data_tx"
+            << " local=" << local_call_
+            << " remote=" << remote_call_
+            << " seq=" << seq
+            << " slot=" << slot
+            << " frame_type=DATA"
+            << " fixed=0"
+            << " variable=1"
+            << " payload_bytes=" << data.size()
+            << " frame_bytes=" << tx_window_[slot].frame_data.size()
+            << " total_cw=" << static_cast<int>(frame.total_cw)
+            << " in_flight=" << tx_in_flight_
+            << " window=" << config_.window_size
+            << " timeout_ms=" << tx_window_[slot].timeout_ms;
+        ultra::phyDiagLine(oss.str());
+    }
 
     transmitData(tx_window_[slot].frame_data);
     return true;
@@ -423,6 +480,26 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
             LOG_MODEM(DEBUG, "SR-ARQ: Duplicate DATA seq=%d", seq);
         }
 
+        if (ultra::phyDiagnosticsEnabled()) {
+            std::ostringstream oss;
+            oss << "event=arq_data_rx"
+                << " local=" << local_call_
+                << " remote=" << remote_call_
+                << " seq=" << seq
+                << " expected=" << expected_seq
+                << " slot=" << slot
+                << " frame_type=" << v2::frameTypeToString(frame.type)
+                << " new=" << boolDigit(new_frame)
+                << " duplicate=" << boolDigit(!new_frame)
+                << " out_of_order=" << boolDigit(out_of_order)
+                << " in_window=1"
+                << " more_frag=" << boolDigit(frame_more_frag)
+                << " final=" << boolDigit(frame_final)
+                << " rx_base=" << rx_base_seq_
+                << " frames_since_ack=" << frames_since_ack_;
+            ultra::phyDiagLine(oss.str());
+        }
+
         // ACK strategy for burst traffic:
         // - Immediate ACK on hole detection (out-of-order) — safety valve, MUST
         //   stay first in the condition.
@@ -471,6 +548,18 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
     } else {
         LOG_MODEM(WARN, "SR-ARQ: DATA seq=%d outside window [%d, %d)",
                   seq, rx_base_seq_, (rx_base_seq_ + config_.window_size) & 0xFFFF);
+        if (ultra::phyDiagnosticsEnabled()) {
+            std::ostringstream oss;
+            oss << "event=arq_data_rx"
+                << " local=" << local_call_
+                << " remote=" << remote_call_
+                << " seq=" << seq
+                << " frame_type=" << v2::frameTypeToString(frame.type)
+                << " in_window=0"
+                << " rx_base=" << rx_base_seq_
+                << " window=" << config_.window_size;
+            ultra::phyDiagLine(oss.str());
+        }
         // Out-of-window: send SACK immediately to help sender recover
         stats_.sack_trigger_out_of_window++;
         sendSack();
@@ -583,6 +672,17 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
 
     LOG_MODEM(INFO, "SR-ARQ: ACK seq=%d bitmap=0x%08X (base=%d, in_flight=%zu)",
               seq, bitmap, tx_base_seq_, tx_in_flight_);
+    if (ultra::phyDiagnosticsEnabled()) {
+        std::ostringstream oss;
+        oss << "event=arq_ack_rx"
+            << " local=" << local_call_
+            << " remote=" << remote_call_
+            << " ack_seq=" << seq
+            << " bitmap=0x" << std::hex << bitmap << std::dec
+            << " tx_base=" << tx_base_seq_
+            << " in_flight=" << tx_in_flight_;
+        ultra::phyDiagLine(oss.str());
+    }
     stats_.sacks_received++;
 
     // Stale-ACK guard: reject ACKs strictly older than (tx_base_seq_ - 1).
@@ -594,6 +694,16 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
     if (ack_freshness == arq_policy::AckFreshness::Stale) {
         stats_.stale_acks_ignored++;
         LOG_MODEM(INFO, "SR-ARQ: Stale ACK seq=%d < base-1=%d, ignoring", seq, ack_base);
+        if (ultra::phyDiagnosticsEnabled()) {
+            std::ostringstream oss;
+            oss << "event=arq_ack_ignore"
+                << " local=" << local_call_
+                << " ack_seq=" << seq
+                << " reason=stale"
+                << " tx_base=" << tx_base_seq_
+                << " bitmap=0x" << std::hex << bitmap << std::dec;
+            ultra::phyDiagLine(oss.str());
+        }
         return;
     }
 
@@ -601,6 +711,16 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
     if (ack_freshness == arq_policy::AckFreshness::Future) {
         stats_.future_acks_ignored++;
         LOG_MODEM(INFO, "SR-ARQ: Future ACK seq=%d too far ahead of base=%d, ignoring", seq, tx_base_seq_);
+        if (ultra::phyDiagnosticsEnabled()) {
+            std::ostringstream oss;
+            oss << "event=arq_ack_ignore"
+                << " local=" << local_call_
+                << " ack_seq=" << seq
+                << " reason=future"
+                << " tx_base=" << tx_base_seq_
+                << " bitmap=0x" << std::hex << bitmap << std::dec;
+            ultra::phyDiagLine(oss.str());
+        }
         return;
     }
 
@@ -611,6 +731,16 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
             last_ack_bitmap_, seq, bitmap)) {
         stats_.duplicate_acks_ignored++;
         LOG_MODEM(INFO, "SR-ARQ: Duplicate ACK seq=%d bitmap=0x%08X suppressed", seq, bitmap);
+        if (ultra::phyDiagnosticsEnabled()) {
+            std::ostringstream oss;
+            oss << "event=arq_ack_ignore"
+                << " local=" << local_call_
+                << " ack_seq=" << seq
+                << " reason=duplicate"
+                << " tx_base=" << tx_base_seq_
+                << " bitmap=0x" << std::hex << bitmap << std::dec;
+            ultra::phyDiagLine(oss.str());
+        }
         return;
     }
     last_ack_signature_valid_ = true;
@@ -778,6 +908,16 @@ void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
             transmitData(job.frame_data);
             stats_.acks_sent++;
             LOG_MODEM(INFO, "SR-ARQ: ACK_REPEAT_SENT copy=%d", job.copy_index);
+            if (ultra::phyDiagnosticsEnabled()) {
+                std::ostringstream oss;
+                oss << "event=arq_ack_repeat_tx"
+                    << " local=" << local_call_
+                    << " remote=" << remote_call_
+                    << " ack_seq=" << job.base_seq
+                    << " bitmap=0x" << std::hex << job.bitmap << std::dec
+                    << " copy=" << job.copy_index;
+                ultra::phyDiagLine(oss.str());
+            }
             it = ack_repeat_jobs_.erase(it);
             continue;
         }
@@ -848,6 +988,18 @@ void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
                               s.seq, s.repair_guard_ms);
                     s.timeout_ms = s.repair_guard_ms;
                 } else {
+                    if (ultra::phyDiagnosticsEnabled()) {
+                        std::ostringstream oss;
+                        oss << "event=arq_timeout"
+                            << " local=" << local_call_
+                            << " remote=" << remote_call_
+                            << " seq=" << s.seq
+                            << " slot=" << slot
+                            << " retry_count=" << s.retry_count
+                            << " in_flight=" << tx_in_flight_
+                            << " ack_timeout_ms=" << currentAckTimeoutMs();
+                        ultra::phyDiagLine(oss.str());
+                    }
                     stats_.timeouts++;
                     retransmitFrame(slot, RetransmitCause::TIMEOUT);
                 }
@@ -963,6 +1115,16 @@ void SelectiveRepeatARQ::retransmitFrame(size_t slot, RetransmitCause cause) {
     if (s.retry_count >= config_.max_retries) {
         LOG_MODEM(ERROR, "SR-ARQ: Frame seq=%d failed after %d retries",
                   s.seq, config_.max_retries);
+        if (ultra::phyDiagnosticsEnabled()) {
+            std::ostringstream oss;
+            oss << "event=arq_frame_fail"
+                << " local=" << local_call_
+                << " remote=" << remote_call_
+                << " seq=" << s.seq
+                << " retries=" << s.retry_count
+                << " max_retries=" << config_.max_retries;
+            ultra::phyDiagLine(oss.str());
+        }
         stats_.failed++;
 
         s.active = false;
@@ -987,6 +1149,21 @@ void SelectiveRepeatARQ::retransmitFrame(size_t slot, RetransmitCause cause) {
     LOG_MODEM(INFO, "SR-ARQ: Retransmitting seq=%d (attempt %d/%d, cause=%s, cw=%d)",
               s.seq, s.retry_count + 1, config_.max_retries, cause_str,
               s.fixed_frame_codewords);
+    if (ultra::phyDiagnosticsEnabled()) {
+        std::ostringstream oss;
+        oss << "event=arq_retx"
+            << " local=" << local_call_
+            << " remote=" << remote_call_
+            << " seq=" << s.seq
+            << " slot=" << slot
+            << " attempt=" << (s.retry_count + 1)
+            << " max_retries=" << config_.max_retries
+            << " cause=" << cause_str
+            << " cw=" << s.fixed_frame_codewords
+            << " in_flight=" << tx_in_flight_
+            << " timeout_ms=" << currentAckTimeoutMs();
+        ultra::phyDiagLine(oss.str());
+    }
 
     stats_.retransmissions++;
     switch (cause) {
@@ -1250,6 +1427,19 @@ void SelectiveRepeatARQ::sendSack() {
 
     LOG_MODEM(INFO, "SR-ARQ: Sent SACK base=%d bitmap=0x%08X",
               base_seq, bitmap);
+    if (ultra::phyDiagnosticsEnabled()) {
+        std::ostringstream oss;
+        oss << "event=arq_ack_tx"
+            << " local=" << local_call_
+            << " remote=" << remote_call_
+            << " ack_seq=" << base_seq
+            << " bitmap=0x" << std::hex << bitmap << std::dec
+            << " final=" << boolDigit(sack_has_final)
+            << " rx_base=" << rx_base_seq_
+            << " frames_since_ack=" << frames_since_ack_
+            << " repeat_count=" << ack_repeat_count_;
+        ultra::phyDiagLine(oss.str());
+    }
 
     transmitData(data);
 
@@ -1322,6 +1512,19 @@ void SelectiveRepeatARQ::sendSack() {
         LOG_MODEM(INFO, "SR-ARQ: ACK_REPEAT scheduled copy=%d delay=%ums jitter=%dms enabled=%d queue=%zu",
                   copy_index, static_cast<uint32_t>(scheduled), jitter_ms, repeat_ack ? 1 : 0,
                   ack_repeat_jobs_.size());
+        if (ultra::phyDiagnosticsEnabled()) {
+            std::ostringstream oss;
+            oss << "event=arq_ack_repeat_schedule"
+                << " local=" << local_call_
+                << " remote=" << remote_call_
+                << " ack_seq=" << base_seq
+                << " bitmap=0x" << std::hex << bitmap << std::dec
+                << " copy=" << copy_index
+                << " delay_ms=" << static_cast<uint32_t>(scheduled)
+                << " queue=" << ack_repeat_jobs_.size()
+                << " final=" << boolDigit(sack_has_final);
+            ultra::phyDiagLine(oss.str());
+        }
     }
 }
 

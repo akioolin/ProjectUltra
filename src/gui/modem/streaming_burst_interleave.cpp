@@ -14,6 +14,7 @@
 #include "fec/ldpc_codec.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
+#include "ultra/phy_diagnostics.hpp"
 #include "ultra/timing_profiler.hpp"
 #include <algorithm>
 #include <atomic>
@@ -21,6 +22,8 @@
 #include <cmath>
 #include <exception>
 #include <fstream>
+#include <limits>
+#include <sstream>
 #include <stdexcept>
 
 namespace ultra {
@@ -32,9 +35,145 @@ namespace decode_policy = streaming_decode_policy;
 namespace frame_policy = streaming_frame_policy;
 namespace signal_policy = streaming_signal_policy;
 
+namespace {
+
+const char* boolDigit(bool value) {
+    return value ? "1" : "0";
+}
+
+std::string burstFrameTypeAndSeq(const DecodeResult& result) {
+    if (!result.success || result.frame_data.empty()) {
+        return "frame_type=- seq=-";
+    }
+
+    auto header = v2::parseHeader(result.frame_data);
+    if (!header.valid) {
+        return "frame_type=invalid seq=-";
+    }
+
+    std::ostringstream oss;
+    oss << "frame_type=" << v2::frameTypeToString(header.type)
+        << " seq=" << header.seq;
+    return oss.str();
+}
+
+}  // namespace
+
 // ============================================================================
 // BURST INTERLEAVE ACCUMULATION
 // ============================================================================
+
+void StreamingDecoder::clearBurstDiagnostics() {
+    burst_physical_diag_.clear();
+    burst_diag_group_start_abs_ = 0;
+}
+
+void StreamingDecoder::beginBurstDiagnosticsGroup(size_t abs_start_sample,
+                                                  const std::vector<float>& soft_bits,
+                                                  float rms,
+                                                  float pre_cfo_hz,
+                                                  float residual_cfo_hz,
+                                                  float accepted_cfo_hz) {
+    if (!ultra::phyDiagnosticsEnabled()) {
+        return;
+    }
+
+    burst_diag_group_index_ = burst_diag_next_group_index_++;
+    burst_diag_group_start_abs_ = abs_start_sample;
+    burst_physical_diag_.clear();
+
+    std::ostringstream oss;
+    oss << "event=burst_group_begin"
+        << " station=" << log_prefix_
+        << " group=" << burst_diag_group_index_
+        << " group_size=" << std::max(2, burst_group_size_)
+        << " cw=" << fixed_frame_codewords_
+        << " start_abs=" << abs_start_sample
+        << " start_sec=" << (static_cast<double>(abs_start_sample) / 48000.0)
+        << " seed_cfo_hz=" << burst_cfo_;
+    ultra::phyDiagLine(oss.str());
+
+    appendBurstPhysicalDiagnostics(abs_start_sample, soft_bits, rms,
+                                   pre_cfo_hz, residual_cfo_hz,
+                                   accepted_cfo_hz,
+                                   /*erasure=*/false, /*process_ok=*/true);
+}
+
+void StreamingDecoder::appendBurstPhysicalDiagnostics(size_t abs_start_sample,
+                                                      const std::vector<float>& soft_bits,
+                                                      float rms,
+                                                      float pre_cfo_hz,
+                                                      float residual_cfo_hz,
+                                                      float accepted_cfo_hz,
+                                                      bool erasure,
+                                                      bool process_ok) {
+    if (!ultra::phyDiagnosticsEnabled()) {
+        return;
+    }
+
+    BurstPhysicalDiag diag;
+    diag.abs_start_sample = abs_start_sample;
+    diag.rms = rms;
+    diag.pre_cfo_hz = pre_cfo_hz;
+    diag.residual_cfo_hz = residual_cfo_hz;
+    diag.accepted_cfo_hz = accepted_cfo_hz;
+    diag.erasure = erasure;
+    diag.process_ok = process_ok;
+
+    const auto llr_quality = signal_policy::evaluatePreSyncLLR(
+        soft_bits.empty() ? nullptr : soft_bits.data(),
+        soft_bits.size(), soft_bits.size());
+    diag.mean_abs_llr = llr_quality.mean_abs;
+    diag.near_zero_fraction = llr_quality.near_zero_fraction;
+
+    if (waveform_) {
+        diag.fading_index = waveform_->getFadingIndex();
+        diag.lts_signal_power = waveform_->getLastLTSSignalPower();
+        diag.lts_channel_magnitude = waveform_->getLastLTSChannelMagnitude();
+        diag.timing_offset_samples = waveform_->getLastTimingOffsetSamples();
+    }
+
+    const size_t physical_index = burst_physical_diag_.size();
+    burst_physical_diag_.push_back(diag);
+
+    std::ostringstream oss;
+    oss << "event=burst_phys"
+        << " station=" << log_prefix_
+        << " group=" << burst_diag_group_index_
+        << " phys=" << physical_index
+        << " abs=" << diag.abs_start_sample
+        << " sec=" << (static_cast<double>(diag.abs_start_sample) / 48000.0)
+        << " rms=" << diag.rms
+        << " llr_mean_abs=" << diag.mean_abs_llr
+        << " llr_near_zero=" << diag.near_zero_fraction
+        << " erasure=" << boolDigit(diag.erasure)
+        << " process_ok=" << boolDigit(diag.process_ok)
+        << " pre_cfo_hz=" << diag.pre_cfo_hz
+        << " residual_cfo_hz=" << diag.residual_cfo_hz
+        << " accepted_cfo_hz=" << diag.accepted_cfo_hz
+        << " fading=" << diag.fading_index
+        << " lts_signal=" << diag.lts_signal_power
+        << " lts_mag=" << diag.lts_channel_magnitude
+        << " timing_offset=" << diag.timing_offset_samples;
+    ultra::phyDiagLine(oss.str());
+}
+
+void StreamingDecoder::logBurstDiagnosticsAbort(const char* reason,
+                                                size_t collected_frames) {
+    if (!ultra::phyDiagnosticsEnabled()) {
+        return;
+    }
+    std::ostringstream oss;
+    oss << "event=burst_group_abort"
+        << " station=" << log_prefix_
+        << " group=" << burst_diag_group_index_
+        << " reason=" << (reason ? reason : "-")
+        << " collected=" << collected_frames
+        << " group_size=" << std::max(2, burst_group_size_)
+        << " start_abs=" << burst_diag_group_start_abs_
+        << " start_sec=" << (static_cast<double>(burst_diag_group_start_abs_) / 48000.0);
+    ultra::phyDiagLine(oss.str());
+}
 
 void StreamingDecoder::accumulateBurstFrames() {
     const int burst_group_size = std::max(2, burst_group_size_);
@@ -47,6 +186,7 @@ void StreamingDecoder::accumulateBurstFrames() {
     if (elapsed > burst_timeout_ms) {
         LOG_MODEM(WARN, "[%s] Burst group timeout: got %zu/%d frames",
                   log_prefix_.c_str(), burst_soft_buffer_.size(), burst_group_size);
+        logBurstDiagnosticsAbort("timeout", burst_soft_buffer_.size());
         // Discard — TX used 4-frame interleaving, partial is undecodable
         {
             std::lock_guard<std::mutex> slock(stats_mutex_);
@@ -54,6 +194,7 @@ void StreamingDecoder::accumulateBurstFrames() {
         }
         burst_soft_buffer_.clear();
         burst_metric_templates_.clear();
+        clearBurstDiagnostics();
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
             correlation_pos_ = burst_next_pos_;
@@ -69,12 +210,14 @@ void StreamingDecoder::accumulateBurstFrames() {
         // Hard failure (energy lost or process error) — abort immediately
         LOG_MODEM(WARN, "[%s] Burst group aborted: hard failure at frame %zu/%d",
                   log_prefix_.c_str(), burst_soft_buffer_.size() + 1, burst_group_size);
+        logBurstDiagnosticsAbort("hard_failure", burst_soft_buffer_.size() + 1);
         {
             std::lock_guard<std::mutex> slock(stats_mutex_);
             stats_.frames_failed += burst_group_size;
         }
         burst_soft_buffer_.clear();
         burst_metric_templates_.clear();
+        clearBurstDiagnostics();
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
             correlation_pos_ = burst_next_pos_;
@@ -92,6 +235,7 @@ void StreamingDecoder::accumulateBurstFrames() {
         finalizeBurstGroup();
         burst_soft_buffer_.clear();
         burst_metric_templates_.clear();
+        clearBurstDiagnostics();
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
             correlation_pos_ = burst_next_pos_;
@@ -134,6 +278,16 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         }
     }
 
+    size_t abs_burst = burst_next_pos_;
+    if (total_fed_ >= buffer_capacity_samples_) {
+        const size_t oldest_abs = total_fed_ - buffer_capacity_samples_;
+        const size_t oldest_pos = write_pos_;
+        const size_t offset = (burst_next_pos_ >= oldest_pos)
+            ? (burst_next_pos_ - oldest_pos)
+            : (buffer_capacity_samples_ - oldest_pos + burst_next_pos_);
+        abs_burst = oldest_abs + offset;
+    }
+
     // Energy check. In a marked burst-interleaved group, a weak/missing
     // physical frame is exactly what the burst interleaver is meant to absorb:
     // represent it as zero-confidence LLR erasures and keep collecting the
@@ -157,6 +311,9 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
             static_cast<size_t>(fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
             0.0f);
         pushMetricTemplate(0.0f);
+        appendBurstPhysicalDiagnostics(abs_burst, burst_soft_buffer_.back(), next_rms,
+                                       0.0f, 0.0f, burst_cfo_,
+                                       /*erasure=*/true, /*process_ok=*/false);
         burst_next_pos_ = wrapRingIndexLocked(burst_next_pos_ + burst_min_block_);
         return BurstFrameResult::SUCCESS;
     }
@@ -164,16 +321,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     // Pre-correct CFO on burst block
     bool is_ofdm_burst = protocol::isOFDMMode(mode_);
     float burst_pre_cfo = 0.0f;
-    size_t abs_burst = burst_next_pos_;
     if (is_ofdm_burst) {
-        if (total_fed_ >= buffer_capacity_samples_) {
-            const size_t oldest_abs = total_fed_ - buffer_capacity_samples_;
-            const size_t oldest_pos = write_pos_;
-            const size_t offset = (burst_next_pos_ >= oldest_pos)
-                ? (burst_next_pos_ - oldest_pos)
-                : (buffer_capacity_samples_ - oldest_pos + burst_next_pos_);
-            abs_burst = oldest_abs + offset;
-        }
         burst_pre_cfo = applyCFOPreCorrection(block, burst_cfo_, abs_burst);
     }
 
@@ -189,6 +337,9 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
             static_cast<size_t>(fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
             0.0f);
         pushMetricTemplate(0.0f);
+        appendBurstPhysicalDiagnostics(abs_burst, burst_soft_buffer_.back(), next_rms,
+                                       burst_pre_cfo, 0.0f, burst_cfo_,
+                                       /*erasure=*/true, /*process_ok=*/false);
         burst_next_pos_ = wrapRingIndexLocked(burst_next_pos_ + burst_min_block_);
         return BurstFrameResult::SUCCESS;
     }
@@ -257,6 +408,11 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
             static_cast<size_t>(fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_)),
             0.0f);
         pushMetricTemplate(waveform_ ? waveform_->estimatedCFO() : 0.0f);
+        appendBurstPhysicalDiagnostics(abs_burst, burst_soft_buffer_.back(), next_rms,
+                                       burst_pre_cfo,
+                                       waveform_ ? waveform_->estimatedCFO() : 0.0f,
+                                       burst_cfo_,
+                                       /*erasure=*/true, /*process_ok=*/true);
         burst_next_pos_ = wrapRingIndexLocked(burst_next_pos_ + burst_min_block_);
         return BurstFrameResult::SUCCESS;
     }
@@ -271,6 +427,9 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
 
     burst_soft_buffer_.push_back(std::move(soft));
     pushMetricTemplate(residual_cfo);
+    appendBurstPhysicalDiagnostics(abs_burst, burst_soft_buffer_.back(), next_rms,
+                                   burst_pre_cfo, residual_cfo, cfo_update.accepted_cfo,
+                                   /*erasure=*/false, /*process_ok=*/true);
     burst_next_pos_ = wrapRingIndexLocked(block_start_pos + burst_min_block_);
 
     LOG_MODEM(INFO, "[%s] Burst frame %zu/%d demodulated, RMS=%.4f",
@@ -286,6 +445,27 @@ void StreamingDecoder::finalizeBurstGroup() {
 
     auto logical_soft = fec::BurstInterleaver::deinterleave(
         burst_soft_buffer_, fixed_frame_codewords_);
+
+    int logical_ok = 0;
+    int logical_fail = 0;
+    int physical_erasures = 0;
+    int physical_process_fail = 0;
+    float min_physical_llr = std::numeric_limits<float>::max();
+    const bool diagnostics_enabled = ultra::phyDiagnosticsEnabled();
+    if (diagnostics_enabled) {
+        for (const auto& diag : burst_physical_diag_) {
+            if (diag.erasure) {
+                ++physical_erasures;
+            }
+            if (!diag.process_ok) {
+                ++physical_process_fail;
+            }
+            min_physical_llr = std::min(min_physical_llr, diag.mean_abs_llr);
+        }
+    }
+    if (min_physical_llr == std::numeric_limits<float>::max()) {
+        min_physical_llr = 0.0f;
+    }
 
     for (int i = 0; i < burst_group_size; i++) {
         const int saved_pending_total_cw = pending_total_cw_;
@@ -314,6 +494,11 @@ void StreamingDecoder::finalizeBurstGroup() {
             if (result.success) stats_.frames_decoded++;
             else stats_.frames_failed++;
         }
+        if (result.success) {
+            ++logical_ok;
+        } else {
+            ++logical_fail;
+        }
 
         if (result.success || result.codewords_ok > 0) {
             {
@@ -327,6 +512,47 @@ void StreamingDecoder::finalizeBurstGroup() {
                   log_prefix_.c_str(), i + 1, burst_group_size,
                   result.success ? "OK" : "FAIL",
                   result.codewords_ok, result.codewords_ok + result.codewords_failed);
+        if (diagnostics_enabled) {
+            const auto logical_llr_quality = signal_policy::evaluatePreSyncLLR(
+                logical_soft[static_cast<size_t>(i)].empty()
+                    ? nullptr
+                    : logical_soft[static_cast<size_t>(i)].data(),
+                logical_soft[static_cast<size_t>(i)].size(),
+                logical_soft[static_cast<size_t>(i)].size());
+            std::ostringstream oss;
+            oss << "event=burst_logical"
+                << " station=" << log_prefix_
+                << " group=" << burst_diag_group_index_
+                << " logical=" << i
+                << " success=" << boolDigit(result.success)
+                << ' ' << burstFrameTypeAndSeq(result)
+                << " cw_ok=" << result.codewords_ok
+                << " cw_fail=" << result.codewords_failed
+                << " llr_mean_abs=" << logical_llr_quality.mean_abs
+                << " llr_near_zero=" << logical_llr_quality.near_zero_fraction
+                << " residual_cfo_hz=" << result.lts_residual_cfo_hz
+                << " routed_snr_db=" << result.snr_db
+                << " sync_quality_db=" << result.sync_quality_db
+                << " ofdm_internal_snr_db=" << result.ofdm_internal_snr_db
+                << " fading=" << result.lts_fading_index
+                << " sync_corr=" << result.sync_correlation;
+            ultra::phyDiagLine(oss.str());
+        }
+    }
+
+    if (diagnostics_enabled) {
+        std::ostringstream oss;
+        oss << "event=burst_group_end"
+            << " station=" << log_prefix_
+            << " group=" << burst_diag_group_index_
+            << " logical_ok=" << logical_ok
+            << " logical_fail=" << logical_fail
+            << " physical_erasures=" << physical_erasures
+            << " physical_process_fail=" << physical_process_fail
+            << " min_physical_llr=" << min_physical_llr
+            << " start_abs=" << burst_diag_group_start_abs_
+            << " start_sec=" << (static_cast<double>(burst_diag_group_start_abs_) / 48000.0);
+        ultra::phyDiagLine(oss.str());
     }
 }
 

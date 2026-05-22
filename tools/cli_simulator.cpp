@@ -78,6 +78,7 @@
 #include "sim/cli_enums.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
+#include "ultra/phy_diagnostics.hpp"
 #include "ultra/fec.hpp"  // ChannelInterleaver, LDPCEncoder
 #include "ultra/dsp.hpp"  // FFT for analytic-signal CFO injection
 #include "fec/frame_interleaver.hpp"  // FrameInterleaver
@@ -2736,6 +2737,7 @@ int main(int argc, char* argv[]) {
         bool log_categories_set = false;
         std::string log_categories;
         std::string log_file_path;
+        std::string phy_diag_log_path;
         bool hardware_tx_normalization_self_test = false;
         bool expert_phy = envFlagEnabled("ULTRA_EXPERT_PHY");
         for (int i = 1; i < argc; ++i) {
@@ -3002,6 +3004,8 @@ int main(int argc, char* argv[]) {
                 log_categories_set = true;
             } else if (arg == "--log-file" && i + 1 < argc) {
                 log_file_path = argv[++i];
+            } else if (arg == "--phy-diag-log" && i + 1 < argc) {
+                phy_diag_log_path = argv[++i];
             } else if (arg == "--hardware-tx-normalization-self-test") {
                 hardware_tx_normalization_self_test = true;
             } else if (arg == "--help" || arg == "-h") {
@@ -3055,6 +3059,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "                      Console verbosity (default: info)\n";
                 std::cout << "  --log-category <list>  Comma list: operator,audio,tnc,modem,demod,sync,ldpc,channel,all\n";
                 std::cout << "  --log-file <PATH>      Write logs to file instead of stderr\n";
+                std::cout << "  --phy-diag-log <PATH>  Write compact PHY/ARQ diagnostics for lab analysis\n";
                 std::cout << "  --verify-snr           Probe configured in-band SNR and fail if error exceeds +/-2 dB\n";
                 std::cout << "  --ota-host HOST:PORT   Use existing ota_simulator serve instead of self-spawn\n";
                 std::cout << "  --ota-session ID       OTASim session id (default: lobby)\n";
@@ -3099,6 +3104,9 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             setLogFile(log_file.get());
+        }
+        if (!phy_diag_log_path.empty()) {
+            ultra::setPhyDiagnosticsLogPath(phy_diag_log_path);
         }
         if (hardware_tx_normalization_self_test) {
             return sim.runHardwareTxNormalizationSelfTest() ? 0 : 1;

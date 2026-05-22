@@ -743,6 +743,10 @@ void StreamingDecoder::decodeCurrentFrame() {
             pre_correction_cfo_, residual_cfo, current_cfo, /*clamp_drift=*/true);
         last_cfo_.store(cfo_update.accepted_cfo);
         burst_cfo_ = cfo_update.accepted_cfo;
+        beginBurstDiagnosticsGroup(frame_sync_abs, burst_soft_buffer_.back(),
+                                   sampleRMS(frame_buffer),
+                                   pre_correction_cfo_, residual_cfo,
+                                   cfo_update.accepted_cfo);
 
         // LTS autocorrelation can lock early on later marked groups inside a
         // long burst. The marker frame is retried above; keep this as a guard
