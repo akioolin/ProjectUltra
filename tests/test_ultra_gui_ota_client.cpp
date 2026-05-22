@@ -151,6 +151,9 @@ void checkGuiHarqWiring() {
     checkSourceContains(gui_app,
                         "modem_.setSoftCombineBuffer(protocol_.softCombineBuffer());",
                         "GUI modem decoder is not wired to protocol HARQ buffer");
+    checkSourceContains(gui_app,
+                        "return protocol_.harqProvisionalContext();",
+                        "GUI modem decoder is not wired to provisional HARQ context");
 
     const auto modem_engine = readSourceFile("src/gui/modem/modem_engine.cpp");
     checkSourceContains(modem_engine,
@@ -164,6 +167,9 @@ void checkGuiHarqWiring() {
     checkSourceContains(ultra_tnc,
                         "decoder_.setSoftCombineBuffer(engine_.softCombineBuffer());",
                         "ultra_tnc decoder is not wired to protocol HARQ buffer");
+    checkSourceContains(ultra_tnc,
+                        "return engine_.harqProvisionalContext();",
+                        "ultra_tnc decoder is not wired to provisional HARQ context");
 }
 
 std::string valueFor(const std::string& line, const std::string& key) {

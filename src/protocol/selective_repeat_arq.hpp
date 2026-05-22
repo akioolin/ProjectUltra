@@ -94,6 +94,7 @@ public:
             config_.ack_batch_size, config_.window_size, MAX_WINDOW);
     }
     size_t getWindowSize() const { return config_.window_size; }
+    uint16_t getRxBaseSeq() const { return rx_base_seq_; }
 
     // ACK batch size: send SACK after this many in-order data frames received.
     // 0 (default) means "track window_size" — preserves prior behavior bit

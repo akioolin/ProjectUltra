@@ -562,6 +562,12 @@ fec::SoftCombineBuffer* ProtocolEngine::softCombineBuffer() {
     return connection_.softCombineBuffer();
 }
 
+std::optional<fec::SoftCombineBuffer::ProvisionalContext>
+ProtocolEngine::harqProvisionalContext() const {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    return connection_.harqProvisionalContext();
+}
+
 void ProtocolEngine::setModeNegotiatedCallback(ModeNegotiatedCallback cb) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setModeNegotiatedCallback(std::move(cb));

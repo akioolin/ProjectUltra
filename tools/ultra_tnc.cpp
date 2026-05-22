@@ -427,6 +427,9 @@ private:
         decoder_.setMCDPSKCarriers(8);
         decoder_.setFixedFrameCodewords(v2::kDefaultFixedFrameCodewords);
         decoder_.setSoftCombineBuffer(engine_.softCombineBuffer());
+        decoder_.setHarqProvisionalContextCallback([this]() {
+            return engine_.harqProvisionalContext();
+        });
     }
 
     void setupCallbacks() {

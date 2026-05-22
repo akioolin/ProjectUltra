@@ -409,6 +409,9 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
 
     protocol_.setSoftCombiningHARQ(true);
     modem_.setSoftCombineBuffer(protocol_.softCombineBuffer());
+    modem_.setHarqProvisionalContextCallback([this]() {
+        return protocol_.harqProvisionalContext();
+    });
 
     // Set up raw data callback for protocol layer
     ultra::gui::startupTrace("App", "set-raw-callback-enter");

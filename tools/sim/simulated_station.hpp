@@ -1188,6 +1188,9 @@ private:
         decoder_->setCarrierMask(carrier_mask_);
         decoder_->setCarrierLdpcInterleaver(carrier_ldpc_interleaver_enabled_);
         decoder_->setSoftCombineBuffer(protocol_.softCombineBuffer());
+        decoder_->setHarqProvisionalContextCallback([this]() {
+            return protocol_.harqProvisionalContext();
+        });
 
         // Set frame callback
         decoder_->setFrameCallback([this](const DecodeResult& result) {

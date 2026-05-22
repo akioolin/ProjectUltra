@@ -973,7 +973,12 @@ public:
     void setVerbose(bool v) { verbose_ = v; }
     void setFading(bool f) { use_fading_ = f; }
     void setChannelType(ChannelType t) { channel_type_ = t; use_fading_ = (t != ChannelType::AWGN); }
-    void setForcedModulation(Modulation mod) { forced_mod_ = mod; }
+    void setForcedModulation(Modulation mod) {
+        forced_mod_ = mod;
+        if (mod == Modulation::QAM16 && !soft_combining_harq_explicit_) {
+            soft_combining_harq_ = true;
+        }
+    }
     void setForcedCodeRate(CodeRate rate) { forced_rate_ = rate; }
     void setOFDMConfigPreset(OFDMConfigPreset preset) { ofdm_config_preset_ = preset; }
     void setMCDPSKPreset(const std::string& name, const MultiCarrierDPSKConfig& config) {
@@ -1015,7 +1020,10 @@ public:
     void setRxOverfeedFactor(int factor) { rx_overfeed_factor_ = std::clamp(factor, 1, 200); }
     void setDecodeDelayMs(int ms) { decode_delay_ms_ = std::clamp(ms, 0, 500); }
     void setRxBatchCallbacks(int n) { rx_batch_callbacks_ = std::clamp(n, 1, 1000); }
-    void setSoftCombiningHARQ(bool enable) { soft_combining_harq_ = enable; }
+    void setSoftCombiningHARQ(bool enable) {
+        soft_combining_harq_ = enable;
+        soft_combining_harq_explicit_ = true;
+    }
     void setPaprReductionEnabled(bool enable) { papr_reduction_enabled_ = enable; }
 
     // Hardware-audio mode (real soundcard I/O across two physical machines)
@@ -1394,6 +1402,7 @@ private:
     bool cw_count_forced_ = false;  // true iff --cw-count was passed
     uint64_t carrier_mask_ = UINT64_MAX;
     bool soft_combining_harq_ = false;
+    bool soft_combining_harq_explicit_ = false;
     // cli_simulator overrides the project-wide ultra::phy::kPaprReductionDefaultEnabled
     // (true) to false because the simulator's RMS-SNR-targeted channel model pays
     // the in-band IMD penalty without rewarding the on-wire RMS gain that
@@ -2554,16 +2563,14 @@ private:
                   << "  cw0_peek="
                   << dp.low_llr_1cw_skipped_cw0_peek.load()
                   << "  (LLR pre-screen avoided the ~85ms decode-and-fail)\n";
-        // Codex review #17 instrumentation: HARQ requires CW0 to peek-
-        // decode for the chase key. Failures here mean the failed-frame
-        // LLRs are NOT retained for combining; HARQ silently provides
-        // no benefit on first-attempt header damage.
         {
             const auto succ = dp.harq_key_build_success.load();
             const auto fail = dp.harq_key_build_failed.load();
+            const auto provisional = dp.harq_key_build_provisional.load();
             const auto total = succ + fail;
             std::cout << "  harq_key_build            success=" << succ
-                      << "  failed=" << fail;
+                      << "  failed=" << fail
+                      << "  provisional=" << provisional;
             if (total > 0) {
                 const double pct = 100.0 * static_cast<double>(fail) /
                                    static_cast<double>(total);
@@ -3042,8 +3049,8 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --channel-interleave, -ci  Enable channel interleaving\n";
                 std::cout << "  --no-burst-interleave     Disable burst-level long interleaving\n";
                 std::cout << "  --burst-group-size <N>    Burst interleave group size (2-8, default: 8)\n";
-                std::cout << "  --harq                    Enable RX soft-combining HARQ (default: off)\n";
-                std::cout << "  --no-harq                 Keep RX soft-combining HARQ disabled for A/B tests\n";
+                std::cout << "  --harq                    Enable RX soft-combining HARQ\n";
+                std::cout << "  --no-harq                 Disable RX soft-combining HARQ for A/B tests\n";
                 std::cout << "  --papr-reduction on|off   OFDM data PAPR reduction (cli_simulator default: off; production default: on)\n";
                 std::cout << "  --rx-overfeed-factor <N>  Run audio callbacks N× faster wall-clock (stress, default: 1)\n";
                 std::cout << "  --decode-delay-ms <N>     Add decode-thread delay (0-500 ms, stress)\n";

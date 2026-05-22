@@ -8,6 +8,7 @@
 #include "fec/soft_combine.hpp"
 #include <cmath>
 #include <functional>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -202,6 +203,8 @@ public:
     void setSoftCombiningHARQ(bool enable);
     bool getSoftCombiningHARQ() const { return soft_combine_harq_.enabled(); }
     fec::SoftCombineBuffer* softCombineBuffer() { return &soft_combine_harq_; }
+    std::optional<fec::SoftCombineBuffer::ProvisionalContext>
+    harqProvisionalContext() const;
 
     using ModeNegotiatedCallback = std::function<void(WaveformMode mode)>;
     void setModeNegotiatedCallback(ModeNegotiatedCallback cb) { on_mode_negotiated_ = cb; }

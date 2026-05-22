@@ -50,6 +50,7 @@
 #include <memory>
 #include <functional>
 #include <chrono>
+#include <optional>
 
 namespace ultra {
 namespace gui {
@@ -219,6 +220,11 @@ public:
     void setFixedFrameHeaderDiscovery(bool enable) { fixed_frame_header_discovery_ = enable; }
 
     void setSoftCombineBuffer(fec::SoftCombineBuffer* buffer) { harq_buffer_ = buffer; }
+    using HarqProvisionalContextCallback =
+        std::function<std::optional<fec::SoftCombineBuffer::ProvisionalContext>()>;
+    void setHarqProvisionalContextCallback(HarqProvisionalContextCallback cb) {
+        harq_context_callback_ = std::move(cb);
+    }
 
     // Burst-level long interleaver (N-frame groups)
     void setBurstInterleave(bool enable) { use_burst_interleave_ = enable; }
@@ -538,6 +544,9 @@ private:
     // FEC codec (uses ICodec interface)
     fec::CodecPtr codec_;
     fec::SoftCombineBuffer* harq_buffer_ = nullptr;  // Non-owning; Connection owns lifecycle.
+    HarqProvisionalContextCallback harq_context_callback_;
+    bool harq_provisional_seq_valid_ = false;
+    uint16_t harq_provisional_next_seq_ = 0;
 
     // Decoded frame queue
     std::queue<DecodeResult> frame_queue_;

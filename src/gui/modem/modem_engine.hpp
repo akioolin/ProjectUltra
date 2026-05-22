@@ -42,6 +42,8 @@ public:
     void setLogPrefix(const std::string& prefix);
     const std::string& getLogPrefix() const { return log_prefix_; }
     void setSoftCombineBuffer(fec::SoftCombineBuffer* buffer);
+    void setHarqProvisionalContextCallback(
+        StreamingDecoder::HarqProvisionalContextCallback cb);
 
     // ========================================================================
     // CONFIGURATION

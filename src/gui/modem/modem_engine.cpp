@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <fstream>
 #include <sstream>
+#include <utility>
 
 namespace ultra {
 namespace gui {
@@ -212,6 +213,13 @@ void ModemEngine::setLogPrefix(const std::string& prefix) {
 void ModemEngine::setSoftCombineBuffer(fec::SoftCombineBuffer* buffer) {
     if (streaming_decoder_) {
         streaming_decoder_->setSoftCombineBuffer(buffer);
+    }
+}
+
+void ModemEngine::setHarqProvisionalContextCallback(
+    StreamingDecoder::HarqProvisionalContextCallback cb) {
+    if (streaming_decoder_) {
+        streaming_decoder_->setHarqProvisionalContextCallback(std::move(cb));
     }
 }
 

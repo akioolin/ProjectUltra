@@ -2062,6 +2062,24 @@ void Connection::setSoftCombiningHARQ(bool enable) {
               enable ? "ENABLED" : "disabled");
 }
 
+std::optional<fec::SoftCombineBuffer::ProvisionalContext>
+Connection::harqProvisionalContext() const {
+    if (state_ != ConnectionState::CONNECTED ||
+        remote_call_.empty() ||
+        !soft_combine_harq_.enabled()) {
+        return std::nullopt;
+    }
+
+    fec::SoftCombineBuffer::ProvisionalContext ctx;
+    ctx.sender_hash = v2::hashCallsign(remote_call_);
+    ctx.seq = arq_.getRxBaseSeq();
+    ctx.window_size = arq_.getWindowSize();
+    if (!ctx.valid()) {
+        return std::nullopt;
+    }
+    return ctx;
+}
+
 void Connection::reset() {
     state_ = ConnectionState::DISCONNECTED;
     is_initiator_ = false;

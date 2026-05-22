@@ -4,6 +4,7 @@
 #include "frame_v2.hpp"
 #include <functional>
 #include <mutex>
+#include <optional>
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -149,6 +150,8 @@ public:
     int getForcedFrameCodewords() const;
     void setSoftCombiningHARQ(bool enable);
     fec::SoftCombineBuffer* softCombineBuffer();
+    std::optional<fec::SoftCombineBuffer::ProvisionalContext>
+    harqProvisionalContext() const;
 
     void setModeNegotiatedCallback(ModeNegotiatedCallback cb);
     void setConnectWaveformChangedCallback(ConnectWaveformChangedCallback cb);

@@ -67,6 +67,16 @@ public:
         int ofdm_data_carriers = 0;
     };
 
+    struct ProvisionalContext {
+        uint32_t sender_hash = 0;
+        uint16_t seq = 0;
+        size_t window_size = 0;
+
+        bool valid() const {
+            return sender_hash != 0 && window_size > 0;
+        }
+    };
+
     static Key makeKey(const HarqKeyInputs& in);
 
     int combine(const Key& key, const std::vector<float>& incoming_llrs,
