@@ -73,6 +73,28 @@ bool failureAttributionEligible(Modulation mod) {
            mod == Modulation::QAM64;
 }
 
+bool useSoftGrayZoneCsi(Modulation mod) {
+    return mod == Modulation::QAM16 ||
+           mod == Modulation::QAM32 ||
+           mod == Modulation::QAM64;
+}
+
+float softGrayZoneNoiseInflation(float h_power, float noise_var) {
+    if (!std::isfinite(h_power) || !std::isfinite(noise_var) ||
+        h_power < 0.0f || noise_var <= MIN_CARRIER_NOISE_VAR) {
+        return 1.0f;
+    }
+
+    // Smoothly reduce trust in carriers near the deep-fade floor without the
+    // old hard-erasure cliff. gamma0=0.5 starts acting below about -3 dB and
+    // is nearly identity for clean carriers (gamma >> 1).
+    constexpr float kGamma0 = 0.5f;
+    constexpr float kMaxInflation = 12.0f;
+    const float gamma = h_power / noise_var;
+    const float inflation = (gamma + kGamma0) / std::max(gamma, 1.0e-6f);
+    return std::clamp(inflation, 1.0f, kMaxInflation);
+}
+
 } // namespace
 
 // =============================================================================
@@ -335,6 +357,7 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
 
     bool use_adaptive = config.adaptive_eq_enabled;
     const float reliability_noise_var = std::max(noise_variance, MIN_CARRIER_NOISE_VAR);
+    const bool soft_gray_zone_csi = useSoftGrayZoneCsi(mod);
 
     for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
         int idx = data_carrier_indices[i];
@@ -385,6 +408,12 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
         }
 
         float h_power = std::norm(channel_estimate[idx]);
+        if (soft_gray_zone_csi) {
+            carrier_noise_var[i] *= softGrayZoneNoiseInflation(h_power, reliability_noise_var);
+            carrier_noise_var[i] =
+                std::max(MIN_CARRIER_NOISE_VAR,
+                         std::min(MAX_CARRIER_NOISE_VAR, carrier_noise_var[i]));
+        }
         if (rx_carrier_erasure_enabled_ &&
             h_power < RX_ERASURE_GAMMA_FLOOR_LINEAR * reliability_noise_var) {
             carrier_erasure_flags_[i] = 1;
