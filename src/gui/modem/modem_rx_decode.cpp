@@ -10,6 +10,25 @@ namespace gui {
 
 namespace v2 = protocol::v2;
 
+namespace {
+// A decoded DATA payload is shown in the operator message log only if it is
+// actual readable text. payloadAsText() returns the RAW bytes, so file-transfer
+// DATA chunks are non-empty *binary* and would otherwise render as blank
+// `[MESSAGE] ""` lines (one per frame during a transfer). Treat a payload as
+// text iff every byte is printable (>= 0x20, excluding DEL) or common
+// whitespace; a random binary chunk reliably contains control bytes and is
+// rejected, while ASCII/UTF-8 messages pass.
+bool isReadableTextPayload(const std::string& s) {
+    if (s.empty()) return false;
+    for (unsigned char c : s) {
+        const bool printable = (c >= 0x20 && c != 0x7F);
+        const bool whitespace = (c == '\t' || c == '\n' || c == '\r');
+        if (!printable && !whitespace) return false;
+    }
+    return true;
+}
+}  // namespace
+
 // ============================================================================
 // FRAME DELIVERY AND NOTIFICATION
 // ============================================================================
@@ -87,16 +106,17 @@ void ModemEngine::notifyFrameParsed(const Bytes& frame_data, protocol::v2::Frame
     auto data = v2::DataFrame::deserialize(frame_data);
     if (data && !data->payload.empty()) {
         std::string msg = data->payloadAsText();
-        // Only surface real text messages in the operator message log. File-
-        // transfer DATA chunks have empty/non-printable payloadAsText() — they
-        // are tracked via the [FILE] progress line, and must NOT flood the log
-        // with blank `[MESSAGE] ""` lines (2026-05-23: one blank line per decoded
-        // frame during a file transfer). File assembly uses a separate path, so
-        // gating the display here does not affect it.
-        if (!msg.empty()) {
-            if (data_callback_) {
-                data_callback_(msg);
-            }
+        // data_callback_ carries the raw payload onward (protocol / file
+        // assembly) for every non-empty frame — unchanged.
+        if (!msg.empty() && data_callback_) {
+            data_callback_(msg);
+        }
+        // Only DISPLAY a [MESSAGE] line for readable text. payloadAsText()
+        // returns raw bytes, so file-transfer DATA chunks are non-empty BINARY
+        // and a plain !empty() check (the earlier fix) still flooded the log with
+        // blank `[MESSAGE] ""` lines. Gate the display on printability instead;
+        // file data is surfaced via the [FILE] progress line, not as messages.
+        if (isReadableTextPayload(msg)) {
             status_callback_("[MESSAGE] \"" + msg + "\"");
         }
         return;
