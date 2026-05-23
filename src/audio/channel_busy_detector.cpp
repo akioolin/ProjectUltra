@@ -89,6 +89,13 @@ void ChannelBusyDetector::observeRms(float rms,
     observeRmsLocked(rms, local_rx_blackout, now);
 }
 
+void ChannelBusyDetector::setNoiseFloorEstimateRmsCeiling(float ceiling) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    config_.noise_floor_estimate_rms_ceiling = std::isfinite(ceiling)
+        ? std::max(0.0f, ceiling)
+        : 0.0f;
+}
+
 void ChannelBusyDetector::observeRmsLocked(float rms,
                                            bool local_rx_blackout,
                                            TimePoint now) {
@@ -313,21 +320,34 @@ float ChannelBusyDetector::noiseFloorEstimateLocked() const {
     return std::max(0.0f, values[index]);
 }
 
+float ChannelBusyDetector::noiseFloorEstimateCeilingLocked() const {
+    return std::isfinite(config_.noise_floor_estimate_rms_ceiling)
+        ? std::max(0.0f, config_.noise_floor_estimate_rms_ceiling)
+        : 0.0f;
+}
+
 bool ChannelBusyDetector::shouldRecordNoiseFloorSampleLocked(float rms) const {
     if (!config_.adaptive_noise_floor || !std::isfinite(rms)) {
         return false;
     }
 
     const float sample_rms = std::max(0.0f, rms);
+    const float multiplier = std::max(1.0f, config_.quiet_noise_multiplier);
+    const float sample_ceiling_config = noiseFloorEstimateCeilingLocked();
+    const float sample_ceiling = sample_ceiling_config > 0.0f
+        ? sample_ceiling_config
+        : std::numeric_limits<float>::infinity();
     if (!hasNoiseFloorEstimateLocked()) {
-        return sample_rms <= std::max(0.0f, config_.noise_floor_bootstrap_rms_ceiling);
+        return sample_rms <= std::min(
+            std::max(0.0f, config_.noise_floor_bootstrap_rms_ceiling),
+            sample_ceiling);
     }
 
     const float noise_floor = noiseFloorEstimateLocked();
     const float candidate_gate = std::max(
         std::max(0.0f, config_.quiet_rms_threshold),
-        noise_floor * std::max(1.0f, config_.quiet_noise_multiplier));
-    return sample_rms <= candidate_gate;
+        noise_floor * multiplier);
+    return sample_rms <= std::min(candidate_gate, sample_ceiling);
 }
 
 float ChannelBusyDetector::quietThresholdLocked() const {

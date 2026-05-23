@@ -187,6 +187,30 @@ static const char* adaptationDirection(Modulation from_mod, CodeRate from_rate,
     return "changing";
 }
 
+inline bool isCarrierSenseCeilingQamMode(Modulation mod) {
+    return mod == Modulation::QAM16 ||
+           mod == Modulation::QAM32 ||
+           mod == Modulation::QAM64 ||
+           mod == Modulation::QAM256;
+}
+
+inline float carrierSenseDbpskNoiseFloorSampleCeiling() {
+    return 0.75f * ultra::ota_channel_core::kModemReferenceInBandRms;
+}
+
+inline float carrierSenseQamNoiseFloorSampleCeiling() {
+    return 0.77f * ultra::ota_channel_core::kModemReferenceInBandRms;
+}
+
+inline float carrierSenseNoiseFloorSampleCeilingForMode(Modulation mod) {
+    switch (mod) {
+        case Modulation::DBPSK:
+            return carrierSenseDbpskNoiseFloorSampleCeiling();
+        default:
+            return 0.0f;
+    }
+}
+
 class RadioPttStateMachine;
 
 struct RadioTxPullResult {
@@ -279,6 +303,9 @@ public:
     }
     float channelRms() const {
         return channel_busy_detector_.currentRms();
+    }
+    void setCarrierSenseNoiseFloorSampleCeiling(float ceiling) const {
+        channel_busy_detector_.setNoiseFloorEstimateRmsCeiling(ceiling);
     }
     void setCarrierSenseSampleClock(uint64_t sample_index,
                                     uint32_t sample_rate = 48000) const {
@@ -1276,6 +1303,17 @@ private:
             }
 
             float fading_index = decoder_ ? decoder_->getLastFadingIndex() : 0.0f;
+            if (port_) {
+                if (isCarrierSenseCeilingQamMode(data_modulation_)) {
+                    const bool low_fading_frame =
+                        std::isfinite(fading_index) && fading_index >= 0.0f &&
+                        fading_index <= 0.05f;
+                    port_->setCarrierSenseNoiseFloorSampleCeiling(
+                        low_fading_frame
+                            ? carrierSenseQamNoiseFloorSampleCeiling()
+                            : 0.0f);
+                }
+            }
             protocol_.setChannelQuality(snr_db_, fading_index);
             protocol_.onRxData(result.frame_data);
             updateAdaptiveAdvisory(snr_db_, fading_index);
@@ -1491,6 +1529,10 @@ private:
         data_modulation_ = mod;
         data_code_rate_ = rate;
         resetAdaptiveAdvisory();
+        if (port_) {
+            port_->setCarrierSenseNoiseFloorSampleCeiling(
+                carrierSenseNoiseFloorSampleCeilingForMode(mod));
+        }
 
         // Update OFDM config with pilots based on code rate
         ofdm_config_.modulation = mod;

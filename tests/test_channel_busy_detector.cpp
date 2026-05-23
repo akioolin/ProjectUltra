@@ -173,6 +173,52 @@ void testSignalDominatedHistoryDoesNotRaiseNoiseFloor() {
     assert(detector.isIdle());
 }
 
+void testSignalSampleCeilingRejectsFullPowerCarrier() {
+    ChannelBusyDetectorConfig config = testConfig();
+    config.min_noise_floor_observations = 5;
+    config.noise_floor_window_ms = 5000;
+    config.noise_floor_percentile = 0.50f;
+    config.noise_floor_bootstrap_rms_ceiling = 0.305f;
+    config.noise_floor_estimate_rms_ceiling = 0.229f;
+    ChannelBusyDetector detector(config);
+
+    for (int i = 0; i < 20; ++i) {
+        observe(detector, 0.030f, i * 10);
+    }
+
+    assert(detector.isIdle());
+    assert(detector.quietThreshold() > 0.040f);
+    assert(detector.quietThreshold() < 0.050f);
+
+    for (int i = 0; i < 650; ++i) {
+        observe(detector, 0.260f, 500 + i * 10);
+        if (i >= 4) {
+            assert(!isIdleAtMs(detector, 500 + i * 10));
+        }
+        assert(detector.quietThreshold() < 0.050f);
+    }
+
+    assert(!detector.isIdle());
+    observe(detector, 0.261f, 7100);
+    assert(!detector.isIdle());
+}
+
+void testNoisyIdleCanSeedBelowSignalSampleCeiling() {
+    ChannelBusyDetectorConfig config = testConfig();
+    config.min_noise_floor_observations = 5;
+    config.noise_floor_bootstrap_rms_ceiling = 0.305f;
+    config.noise_floor_estimate_rms_ceiling = 0.229f;
+    ChannelBusyDetector detector(config);
+
+    for (int i = 0; i < 20; ++i) {
+        observe(detector, 0.180f, i * 10);
+    }
+
+    assert(detector.isIdle());
+    assert(detector.quietThreshold() > 0.265f);
+    assert(detector.quietThreshold() < 0.275f);
+}
+
 void testWaitUntilIdleTimeoutAndGuard() {
     ChannelBusyDetector detector(testConfig());
     observe(detector, 0.050f, 0);
@@ -201,6 +247,8 @@ int main() {
     testAdaptiveNoiseFloorTreatsAwgnFloorAsIdle();
     testAdaptiveThresholdRejectsFadedCarrierDips();
     testSignalDominatedHistoryDoesNotRaiseNoiseFloor();
+    testSignalSampleCeilingRejectsFullPowerCarrier();
+    testNoisyIdleCanSeedBelowSignalSampleCeiling();
     testWaitUntilIdleTimeoutAndGuard();
 
     std::cout << "ChannelBusyDetector tests passed\n";

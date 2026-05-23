@@ -22,6 +22,11 @@ struct ChannelBusyDetectorConfig {
     float noise_floor_percentile = 0.10f;
     float quiet_noise_multiplier = 1.5f;
     float noise_floor_bootstrap_rms_ceiling = 0.11f;
+    // Optional absolute ceiling for samples admitted to the adaptive noise
+    // floor. Values <= 0 disable the cap. This is separate from the bootstrap
+    // ceiling so calibrated noisy-idle virtual channels can seed at low SNR
+    // without ever training on a near-reference modem carrier.
+    float noise_floor_estimate_rms_ceiling = 0.0f;
     bool receive_band_rms = true;
     float sample_rate_hz = 48000.0f;
     uint32_t receive_band_filter_taps = 101;
@@ -45,6 +50,7 @@ public:
     void observeRms(float rms,
                     bool local_rx_blackout,
                     TimePoint now = Clock::now());
+    void setNoiseFloorEstimateRmsCeiling(float ceiling);
 
     bool isIdle() const;
     bool isIdleFor(std::chrono::milliseconds guard) const;
@@ -70,6 +76,7 @@ private:
     void pruneNoiseFloorLocked(TimePoint now);
     bool hasNoiseFloorEstimateLocked() const;
     float noiseFloorEstimateLocked() const;
+    float noiseFloorEstimateCeilingLocked() const;
     bool shouldRecordNoiseFloorSampleLocked(float rms) const;
     float quietThresholdLocked() const;
 
