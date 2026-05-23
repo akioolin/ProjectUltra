@@ -1,6 +1,7 @@
 #include "status.hpp"
 #include "imgui.h"
 #include "gui/startup_trace.hpp"
+#include <cmath>
 
 namespace ultra {
 namespace gui {
@@ -16,10 +17,17 @@ void StatusWidget::render(const ModemStats& stats, const ModemConfig& config,
     float item_width = width / 5;
 
     // SNR
-    ImGui::TextColored(
-        ImVec4(0.7f, 0.9f, 0.7f, 1.0f),
-        "SNR: %.1f dB", stats.current_snr_db
-    );
+    if (std::isfinite(stats.current_snr_db) && stats.current_snr_db >= 0.0f) {
+        ImGui::TextColored(
+            ImVec4(0.7f, 0.9f, 0.7f, 1.0f),
+            "SNR: %.1f dB", stats.current_snr_db
+        );
+    } else {
+        ImGui::TextColored(
+            ImVec4(0.7f, 0.9f, 0.7f, 1.0f),
+            "SNR: -- dB"
+        );
+    }
     ImGui::SameLine(item_width);
 
     // Modulation

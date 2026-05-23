@@ -548,6 +548,9 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     ultra::gui::startupTrace("App", "protocol-callbacks-mid1");
 
     protocol_.setMessageReceivedCallback([this](const std::string& from, const std::string& text) {
+        if (text.empty()) {
+            return;
+        }
         // Received a message via ARQ
         std::string msg = "[RX " + from + "] " + text;
         appendRxLogLine(msg);
@@ -587,6 +590,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         switch (state) {
             case protocol::ConnectionState::PROBING:
                 resetAdaptiveAdvisory();
+                connected_peer_snr_valid_ = false;
                 msg = "[SYS] Probing " + info + "...";
                 {
                     auto& diagnostics = ultra::diagnostics::DiagnosticsRecorder::instance();
@@ -596,6 +600,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                 break;
             case protocol::ConnectionState::CONNECTING:
                 resetAdaptiveAdvisory();
+                connected_peer_snr_valid_ = false;
                 msg = "[SYS] Connecting to " + info + "...";
                 {
                     auto& diagnostics = ultra::diagnostics::DiagnosticsRecorder::instance();
@@ -619,6 +624,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                 break;
             case protocol::ConnectionState::DISCONNECTED:
                 resetAdaptiveAdvisory();
+                connected_peer_snr_valid_ = false;
                 if (info.find("timeout") != std::string::npos) {
                     msg = "[FAILED] " + info;  // Make failures more visible
                 } else {
@@ -739,6 +745,13 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         }
         // Update modem engine with new data mode
         modem_.setDataMode(mod, rate);
+        connected_peer_snr_valid_ = std::isfinite(snr_db) && snr_db >= 0.0f;
+        if (connected_peer_snr_valid_) {
+            connected_peer_snr_db_ = snr_db;
+            stats_.current_snr_db = snr_db;
+        }
+        stats_.current_modulation = mod;
+        stats_.current_code_rate = rate;
         // Sync ModemEngine encoder/decoder to negotiated CW count from the
         // wire. DO NOT call protocol_.setForcedFrameCodewords here — the
         // engine mutex is held while this callback runs and re-entry will
@@ -1982,6 +1995,9 @@ void App::render() {
     if (status_snr.valid) {
         snprintf(status_snr_text, sizeof(status_snr_text), "%.1f dB (%s)",
                  status_snr.snr_db, snrSourceToString(status_snr.source));
+    } else if (connected_peer_snr_valid_) {
+        snprintf(status_snr_text, sizeof(status_snr_text), "%.1f dB (wire_peer)",
+                 connected_peer_snr_db_);
     } else {
         snprintf(status_snr_text, sizeof(status_snr_text), "-- dB (none)");
     }
@@ -2948,32 +2964,38 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         ImGui::TextColored(mode_quality_color, "[%s]", mode_quality);
 
         // Row 2: Our SNR measurement
+        const bool connected_snr_valid = operator_snr.valid || connected_peer_snr_valid_;
+        const float connected_snr_db = operator_snr.valid
+            ? operator_snr.snr_db
+            : connected_peer_snr_db_;
+        const char* connected_snr_label = operator_snr.valid
+            ? snrSourceDisplayLabel(operator_snr.source)
+            : "peer SNR";
         ImVec4 sync_color = stats.synced ? ImVec4(0.2f, 1.0f, 0.2f, 1.0f) : ImVec4(0.5f, 0.5f, 0.5f, 1.0f);
         ImGui::TextColored(sync_color, "%s", stats.synced ? "SYNC" : "----");
         ImGui::SameLine();
-        ImGui::Text("%s:", operator_snr.valid
-                    ? snrSourceDisplayLabel(operator_snr.source) : "SNR");
+        ImGui::Text("%s:", connected_snr_valid ? connected_snr_label : "SNR");
         ImGui::SameLine();
 
         // SNR bar - color indicates signal strength
-        float snr_normalized = operator_snr.valid
-            ? std::max(0.0f, std::min(1.0f, operator_snr.snr_db / 40.0f))
+        float snr_normalized = connected_snr_valid
+            ? std::max(0.0f, std::min(1.0f, connected_snr_db / 40.0f))
             : 0.0f;
         // Color based on SNR value (green=good signal, yellow=moderate, red=weak)
         ImVec4 snr_color;
-        if (!operator_snr.valid) {
+        if (!connected_snr_valid) {
             snr_color = ImVec4(0.3f, 0.3f, 0.3f, 1.0f);
-        } else if (operator_snr.snr_db >= 25.0f) {
+        } else if (connected_snr_db >= 25.0f) {
             snr_color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);  // Green
-        } else if (operator_snr.snr_db >= 15.0f) {
+        } else if (connected_snr_db >= 15.0f) {
             snr_color = ImVec4(0.8f, 0.8f, 0.0f, 1.0f);  // Yellow
         } else {
             snr_color = ImVec4(1.0f, 0.4f, 0.2f, 1.0f);  // Orange-red
         }
         ImGui::PushStyleColor(ImGuiCol_PlotHistogram, snr_color);
         char snr_text[24];
-        if (operator_snr.valid) {
-            snprintf(snr_text, sizeof(snr_text), "%.1f dB", operator_snr.snr_db);
+        if (connected_snr_valid) {
+            snprintf(snr_text, sizeof(snr_text), "%.1f dB", connected_snr_db);
         } else {
             snprintf(snr_text, sizeof(snr_text), "-- dB");
         }

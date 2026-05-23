@@ -102,6 +102,8 @@ private:
     // Modem state
     ModemConfig config_;
     ultra::ModemStats stats_;  // From types.hpp for status widget
+    bool connected_peer_snr_valid_ = false;
+    float connected_peer_snr_db_ = 0.0f;
 
     // Operate mode state
     char tx_text_buffer_[256] = "Hello from ProjectUltra!";

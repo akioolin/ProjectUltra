@@ -648,7 +648,7 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data, v2::Fra
                     complete_payload.end());
     }
 
-    if (on_message_received_) {
+    if (!text.empty() && on_message_received_) {
         on_message_received_(text);
     }
 
