@@ -302,7 +302,16 @@ inline void log(LogLevel level, const char* category, const char* format, ...) {
     va_end(args);
 
     fprintf(out, "\n");
-    fflush(out);
+    // Flush only WARN/ERROR. A per-line fflush() on INFO/DEBUG/TRACE forces a
+    // blocking write() syscall on every log call, under g_log_mutex, on the
+    // render/decode/audio hot path — which stalls the wall-clock loop on busy
+    // transfers and manufactures timing-induced ARQ retransmissions (the
+    // "logging distorts processing" effect, 2026-05-23). Verbose levels now ride
+    // the normal stdio file buffer (the C runtime flushes it on clean exit);
+    // WARN/ERROR still flush immediately so crash-relevant lines stay durable.
+    if (level <= LogLevel::WARN) {
+        fflush(out);
+    }
 #ifdef _WIN32
     ReleaseSRWLockShared(&g_log_lock);
 #endif
