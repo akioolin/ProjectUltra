@@ -31,6 +31,11 @@ inline constexpr uint32_t kResponderHandshakeFailSafeMs = 2200;
 inline constexpr uint32_t kMCDPSKDualChirpPreambleMs = 1200;
 inline constexpr uint32_t kMCDPSKInterFrameGuardMs = 100;
 inline constexpr uint32_t kMCDPSKRobustLowAckTimeoutFloorMs = 36000;
+inline constexpr uint32_t kRadioTxRxSwitchMs = 20;
+inline constexpr uint32_t kRadioTurnaroundMarginMs = 30;
+inline constexpr uint32_t kRadioTurnaroundBudgetMs =
+    kRadioTxRxSwitchMs + kRadioTurnaroundMarginMs;
+inline constexpr uint32_t kCarrierSenseGuardMs = kRadioTxRxSwitchMs;
 inline constexpr uint32_t kCarrierSenseSackCoalesceMs = 30;
 inline constexpr int kCarrierSenseAckRepeatCount = 1;
 
@@ -325,6 +330,21 @@ inline uint32_t wideOFDMSackDelayMs(Modulation mod,
     const uint32_t burst_ms = static_cast<uint32_t>(
         std::max<size_t>(1, window_size)) * timing.data_ms;
     return burst_ms + kCarrierSenseSackCoalesceMs;
+}
+
+inline bool usesCoherentWideOFDMTiming(Modulation mod) {
+    return ofdm_link_adaptation::isCoherentModulation(mod) &&
+           !ofdm_link_adaptation::isDifferentialModulation(mod);
+}
+
+inline uint32_t coherentWideOFDMSackDelayMs(
+    Modulation mod,
+    CodeRate rate,
+    size_t window_size,
+    int cw_count = v2::kDefaultFixedFrameCodewords) {
+    (void)window_size;
+    const OFDMFrameTiming timing = wideOFDMFrameTiming(mod, rate, cw_count);
+    return timing.data_ms + kCarrierSenseSackCoalesceMs;
 }
 
 inline uint32_t wideOFDMSackTailDelayMs() {

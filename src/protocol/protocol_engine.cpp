@@ -588,6 +588,11 @@ void ProtocolEngine::setHandshakeConfirmedCallback(HandshakeConfirmedCallback cb
     connection_.setHandshakeConfirmedCallback(std::move(cb));
 }
 
+void ProtocolEngine::setTransmitWindowAdvancedCallback(TransmitWindowAdvancedCallback cb) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.setTransmitWindowAdvancedCallback(std::move(cb));
+}
+
 WaveformMode ProtocolEngine::getConnectWaveform() const {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.getConnectWaveform();

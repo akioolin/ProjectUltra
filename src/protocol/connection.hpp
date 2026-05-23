@@ -215,6 +215,14 @@ public:
     using HandshakeConfirmedCallback = std::function<void()>;
     void setHandshakeConfirmedCallback(HandshakeConfirmedCallback cb) { on_handshake_confirmed_ = cb; }
 
+    // Callback when an ACK/SACK advances the local transmit window. Transports
+    // use this as the "resume early" signal for any post-DATA listen hold.
+    using TransmitWindowAdvancedCallback = std::function<void(uint16_t old_base_seq,
+                                                             uint16_t new_base_seq)>;
+    void setTransmitWindowAdvancedCallback(TransmitWindowAdvancedCallback cb) {
+        on_tx_window_advanced_ = std::move(cb);
+    }
+
     // Callback when the protocol has just emitted an OFDM ACK that makes the
     // peer's next DATA turn likely to begin with a full OFDM anchor.
     using FullOFDMAnchorExpectedCallback = std::function<void()>;
@@ -458,6 +466,7 @@ private:
     ConnectWaveformChangedCallback on_connect_waveform_changed_;
     PhyMaskV1NegotiatedCallback on_phy_mask_v1_negotiated_;
     HandshakeConfirmedCallback on_handshake_confirmed_;
+    TransmitWindowAdvancedCallback on_tx_window_advanced_;
     FullOFDMAnchorExpectedCallback on_full_ofdm_anchor_expected_;
     PingTxCallback on_ping_tx_;
     PingReceivedCallback on_ping_received_;

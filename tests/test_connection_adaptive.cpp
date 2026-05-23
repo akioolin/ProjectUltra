@@ -61,14 +61,15 @@ struct ConnectionAdaptiveTestAccess {
     static void makeConnectedOFDM(Connection& c,
                                   CodeRate rate,
                                   float snr = 15.0f,
-                                  float fading = 0.05f) {
+                                  float fading = 0.05f,
+                                  Modulation mod = Modulation::DQPSK) {
         c.local_call_ = "W1ABC";
         c.remote_call_ = "K2DEF";
         c.state_ = ConnectionState::CONNECTED;
         c.is_initiator_ = true;
         c.handshake_confirmed_ = true;
         c.negotiated_mode_ = WaveformMode::OFDM_CHIRP;
-        c.data_modulation_ = Modulation::DQPSK;
+        c.data_modulation_ = mod;
         c.data_code_rate_ = rate;
         c.measured_snr_db_ = snr;
         c.fading_index_ = fading;
@@ -214,6 +215,18 @@ struct ConnectionAdaptiveTestAccess {
         return c.arq_.getSackDelayShort();
     }
 
+    static uint32_t arqSackDataAirtime(const Connection& c) {
+        return c.arq_.getSackDataAirtimeMs();
+    }
+
+    static bool arqAckBatchThroughMoreFrag(const Connection& c) {
+        return c.arq_.getAckBatchThroughMoreFrag();
+    }
+
+    static int arqAckRepeatCount(const Connection& c) {
+        return c.arq_.getAckRepeatCount();
+    }
+
     static uint32_t arqAckTimeout(const Connection& c) {
         return c.arq_.getAckTimeout();
     }
@@ -265,23 +278,60 @@ void test_remote_mode_change_reconfigures_arq() {
 
 void test_wide_ofdm_configures_short_tail_sack_delay() {
     Connection c;
-    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_4, 10.0f, 0.05f);
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R1_2, 20.0f, 0.05f, Modulation::QAM16);
 
     const uint32_t long_delay = ConnectionAdaptiveTestAccess::arqSackDelay(c);
     const uint32_t tail_delay = ConnectionAdaptiveTestAccess::arqSackDelayShort(c);
+    const size_t window = ConnectionAdaptiveTestAccess::arqWindow(c);
+    const auto timing = connection_policy::wideOFDMFrameTiming(
+        Modulation::QAM16, CodeRate::R1_2, v2::kDefaultFixedFrameCodewords);
 
     CHECK(tail_delay == connection_policy::wideOFDMSackTailDelayMs(),
           "wide OFDM should use the derived short SACK delay at stream tail");
     CHECK(tail_delay == connection_policy::kCarrierSenseSackCoalesceMs,
           "wide OFDM tail SACK delay should be carrier-sense coalescing only");
     CHECK(long_delay > tail_delay,
-          "wide OFDM in-burst physical SACK hold should remain longer than tail delay");
+          "wide OFDM in-burst adaptive SACK hold should remain longer than tail delay");
+    CHECK(long_delay == connection_policy::coherentWideOFDMSackDelayMs(
+                            Modulation::QAM16, CodeRate::R1_2, window,
+                            v2::kDefaultFixedFrameCodewords),
+          "wide OFDM SACK hold should be one DATA airtime plus coalescing guard");
+    CHECK(ConnectionAdaptiveTestAccess::arqSackDataAirtime(c) == timing.data_ms,
+          "coherent wide OFDM adaptive SACK model should expose the DATA frame airtime");
+    CHECK(ConnectionAdaptiveTestAccess::arqAckBatchThroughMoreFrag(c),
+          "coherent wide OFDM full-burst threshold ACK should be allowed through MORE_FRAG");
+    CHECK(ConnectionAdaptiveTestAccess::arqAckRepeatCount(c) ==
+              connection_policy::kCarrierSenseAckRepeatCount,
+          "coherent wide OFDM should rely on the guaranteed listen slot instead of delayed ACK repeats");
     CHECK(ConnectionAdaptiveTestAccess::arqAckTimeout(c) ==
               connection_policy::computeWideOFDMAckTimeoutMs(
-                  Modulation::DQPSK, CodeRate::R1_4,
-                  ConnectionAdaptiveTestAccess::arqWindow(c),
-                  long_delay, 3, v2::kDefaultFixedFrameCodewords),
-          "wide OFDM ACK timeout should remain derived from the long physical SACK hold");
+                  Modulation::QAM16, CodeRate::R1_2, window,
+                  long_delay, connection_policy::kCarrierSenseAckRepeatCount,
+                  v2::kDefaultFixedFrameCodewords),
+          "coherent wide OFDM ACK timeout should use the coherent airtime budget");
+}
+
+void test_differential_wide_ofdm_keeps_baseline_timing() {
+    Connection c;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R1_4, 12.0f, 0.80f, Modulation::DQPSK);
+
+    const size_t window = ConnectionAdaptiveTestAccess::arqWindow(c);
+    const uint32_t baseline_sack = connection_policy::wideOFDMSackDelayMs(
+        Modulation::DQPSK, CodeRate::R1_4, window,
+        v2::kDefaultFixedFrameCodewords);
+
+    CHECK(ConnectionAdaptiveTestAccess::arqSackDelay(c) == baseline_sack,
+          "DQPSK wide OFDM should keep the baseline full-window SACK hold");
+    CHECK(ConnectionAdaptiveTestAccess::arqSackDataAirtime(c) == 0,
+          "DQPSK wide OFDM should not enable adaptive SACK timing");
+    CHECK(!ConnectionAdaptiveTestAccess::arqAckBatchThroughMoreFrag(c),
+          "DQPSK wide OFDM should keep the baseline MORE_FRAG ACK gate");
+    CHECK(ConnectionAdaptiveTestAccess::arqAckRepeatCount(c) == 3,
+          "DQPSK wide OFDM should keep baseline ACK diversity");
+    CHECK(ConnectionAdaptiveTestAccess::arqAckTimeout(c) == 12446,
+          "DQPSK R1/4 wide OFDM should retain the audited 12.446s RTO guard");
 }
 
 void test_accepted_ofdm_data_sync_clears_connect_ack_rescue() {
@@ -645,6 +695,7 @@ int main() {
     test_local_mode_change_ack_reconfigures_arq();
     test_remote_mode_change_reconfigures_arq();
     test_wide_ofdm_configures_short_tail_sack_delay();
+    test_differential_wide_ofdm_keeps_baseline_timing();
     test_accepted_ofdm_data_sync_clears_connect_ack_rescue();
     test_accepted_ofdm_data_sync_does_not_clear_non_ofdm_rescue();
     test_ofdm_connected_entry_does_not_emit_unsolicited_timing_anchor();

@@ -169,6 +169,13 @@ Connection::Connection(const ConnectionConfig& config)
         soft_combine_harq_.retainOnlySeqWindow(base_seq, window_size);
     });
 
+    arq_.setTransmitWindowAdvancedCallback([this](uint16_t old_base_seq,
+                                                  uint16_t new_base_seq) {
+        if (on_tx_window_advanced_) {
+            on_tx_window_advanced_(old_base_seq, new_base_seq);
+        }
+    });
+
     arq_.setSendCompleteCallback([this](bool success) {
         if (file_transfer_.getState() == FileTransferState::SENDING) {
             if (success) {
@@ -1613,6 +1620,7 @@ void Connection::configureArqForCurrentDataMode() {
     arq_.setCodeRate(data_code_rate_);
     arq_.setFixedFrameCodewords(data_frame_cw_count_);
     arq_.setAckBatchThroughMoreFrag(false);
+    arq_.setSackTimingModel(0, 0);
 
     if (isOFDMMode(negotiated_mode_) || usesBoundedVariableMCDPSKFrames()) {
         file_transfer_.setMaxChunkPayload(currentDataPayloadCapacity());
@@ -1695,35 +1703,49 @@ void Connection::configureArqForCurrentDataMode() {
 
         const auto timing = connection_policy::wideOFDMFrameTiming(
             data_modulation_, data_code_rate_, data_frame_cw_count_);
-        constexpr int kWideOFDMAckRepeatCount = 3;
-        const uint32_t sack_delay_ms = connection_policy::wideOFDMSackDelayMs(
-            data_modulation_, data_code_rate_, arq_.getWindowSize(),
-            data_frame_cw_count_);
+        const bool coherent_timing =
+            connection_policy::usesCoherentWideOFDMTiming(data_modulation_);
+        const int ack_repeat_count = coherent_timing
+            ? connection_policy::kCarrierSenseAckRepeatCount
+            : 3;
+        const uint32_t sack_delay_ms = coherent_timing
+            ? connection_policy::coherentWideOFDMSackDelayMs(
+                  data_modulation_, data_code_rate_, arq_.getWindowSize(),
+                  data_frame_cw_count_)
+            : connection_policy::wideOFDMSackDelayMs(
+                  data_modulation_, data_code_rate_, arq_.getWindowSize(),
+                  data_frame_cw_count_);
         arq_.setSackDelay(sack_delay_ms);
         arq_.setSackDelayShort(connection_policy::wideOFDMSackTailDelayMs());
-        arq_.setAckRepeatCount(kWideOFDMAckRepeatCount);
+        if (coherent_timing) {
+            arq_.setSackTimingModel(timing.data_ms,
+                                    connection_policy::kCarrierSenseSackCoalesceMs);
+            arq_.setAckBatchThroughMoreFrag(true);
+        }
+        arq_.setAckRepeatCount(ack_repeat_count);
 
         uint32_t ack_timeout_ms = connection_policy::computeWideOFDMAckTimeoutMs(
             data_modulation_,
             data_code_rate_,
             arq_.getWindowSize(),
             arq_.getSackDelay(),
-            kWideOFDMAckRepeatCount,
+            ack_repeat_count,
             data_frame_cw_count_);
         arq_.setAckTimeout(ack_timeout_ms);
 
         LOG_MODEM(INFO,
-                  "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, ack=%ums x%d), max_retries=%d, ack_batch=%u, physical_sack_hold=%ums, tail_sack=%ums, ack_repeat=%d, cw=%d (OFDM %s %s)",
+                  "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, ack=%ums x%d), max_retries=%d, ack_batch=%u, %s_sack_hold=%ums, tail_sack=%ums, ack_repeat=%d, cw=%d (OFDM %s %s)",
                   arq_.getWindowSize(),
                   ack_timeout_ms / 1000.0f,
                   timing.data_ms,
                   timing.ack_ms,
-                  kWideOFDMAckRepeatCount,
+                  ack_repeat_count,
                   arq_.getMaxRetries(),
                   arq_.getAckBatchSize(),
+                  coherent_timing ? "adaptive" : "physical",
                   arq_.getSackDelay(),
                   arq_.getSackDelayShort(),
-                  kWideOFDMAckRepeatCount,
+                  ack_repeat_count,
                   data_frame_cw_count_,
                   modulationToString(data_modulation_),
                   codeRateToString(data_code_rate_));

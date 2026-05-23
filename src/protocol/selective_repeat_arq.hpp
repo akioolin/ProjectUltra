@@ -128,6 +128,16 @@ public:
     void setSackDelayShort(uint32_t ms) { sack_delay_short_ms_ = ms; }
     uint32_t getSackDelayShort() const { return sack_delay_short_ms_; }
 
+    // Airtime-derived delayed-SACK cadence. When configured, regular in-burst
+    // frames re-arm the pending SACK for one expected DATA frame airtime plus a
+    // coalescing guard. A full receive batch still ACKs immediately.
+    void setSackTimingModel(uint32_t data_airtime_ms, uint32_t coalesce_guard_ms) {
+        sack_data_airtime_ms_ = data_airtime_ms;
+        sack_coalesce_guard_ms_ = coalesce_guard_ms;
+    }
+    uint32_t getSackDataAirtimeMs() const { return sack_data_airtime_ms_; }
+    uint32_t getSackCoalesceGuardMs() const { return sack_coalesce_guard_ms_; }
+
     // MC-DPSK continuous bursts decode several DATA frames from one physical
     // waveform. Once the ACK batch threshold is reached, transmitting a SACK
     // no longer risks colliding with a per-frame preamble still in flight.
@@ -148,6 +158,12 @@ public:
     using ReceiveWindowAdvancedCallback = std::function<void(uint16_t base_seq, size_t window_size)>;
     void setReceiveWindowAdvancedCallback(ReceiveWindowAdvancedCallback cb) {
         on_rx_window_advanced_ = std::move(cb);
+    }
+
+    using TransmitWindowAdvancedCallback = std::function<void(uint16_t old_base_seq,
+                                                             uint16_t new_base_seq)>;
+    void setTransmitWindowAdvancedCallback(TransmitWindowAdvancedCallback cb) {
+        on_tx_window_advanced_ = std::move(cb);
     }
 
 private:
@@ -231,6 +247,8 @@ private:
     uint32_t sack_timer_ms_ = 0;    // Time until SACK is sent
     // Stream-aware tail override (0 = "use sack_delay_ms for both legs").
     uint32_t sack_delay_short_ms_ = 0;
+    uint32_t sack_data_airtime_ms_ = 0;
+    uint32_t sack_coalesce_guard_ms_ = 0;
     bool ack_batch_through_more_frag_ = false;
     uint32_t frames_since_ack_ = 0; // Frames received since last ACK sent
 
@@ -271,6 +289,7 @@ private:
     DataReceivedCallback on_data_received_;
     SendCompleteCallback on_send_complete_;
     ReceiveWindowAdvancedCallback on_rx_window_advanced_;
+    TransmitWindowAdvancedCallback on_tx_window_advanced_;
 
     // Internal helpers
     size_t seqToSlot(uint16_t seq) const;

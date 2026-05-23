@@ -109,6 +109,15 @@ void test_sack_timer_policy() {
           "explicit tail frame should collapse existing long timer");
     CHECK(sackTimerForFrame(50, 500, 0, true) == 50,
           "new in-burst frame should not extend existing timer");
+
+    CHECK(adaptiveSackTimerForFrame(0, 5000, 50, false, 840, 30) == 870,
+          "adaptive SACK should derive hold from one DATA airtime plus guard");
+    CHECK(adaptiveSackTimerForFrame(20, 5000, 50, false, 840, 30) == 870,
+          "adaptive SACK should re-arm while frames keep arriving");
+    CHECK(adaptiveSackTimerForFrame(900, 5000, 50, true, 840, 30) == 50,
+          "adaptive SACK should keep explicit FINAL short-tail behavior");
+    CHECK(adaptiveSackTimerForFrame(0, 500, 50, false, 840, 30) == 500,
+          "adaptive SACK should respect the configured maximum hold");
 }
 
 void test_hole_and_repeat_policy() {

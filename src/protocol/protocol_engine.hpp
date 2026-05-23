@@ -165,6 +165,9 @@ public:
     using HandshakeConfirmedCallback = Connection::HandshakeConfirmedCallback;
     void setHandshakeConfirmedCallback(HandshakeConfirmedCallback cb);
 
+    using TransmitWindowAdvancedCallback = Connection::TransmitWindowAdvancedCallback;
+    void setTransmitWindowAdvancedCallback(TransmitWindowAdvancedCallback cb);
+
     // --- Adaptive Data Mode ---
 
     // Set measured SNR from modem (used for adaptive mode selection)

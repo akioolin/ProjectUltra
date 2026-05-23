@@ -6,6 +6,17 @@
 namespace ultra {
 namespace ofdm_link_adaptation {
 
+inline bool isDifferentialModulation(Modulation mod) {
+    switch (mod) {
+        case Modulation::DBPSK:
+        case Modulation::DQPSK:
+        case Modulation::D8PSK:
+            return true;
+        default:
+            return false;
+    }
+}
+
 inline bool isCoherentModulation(Modulation mod) {
     switch (mod) {
         case Modulation::BPSK:

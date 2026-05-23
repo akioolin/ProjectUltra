@@ -112,6 +112,38 @@ inline uint32_t sackTimerForFrame(uint32_t current_timer_ms,
     return std::min(current_timer_ms, pick_ms);
 }
 
+inline uint32_t adaptiveSackTimerForFrame(uint32_t current_timer_ms,
+                                          uint32_t sack_delay_ms,
+                                          uint32_t sack_delay_short_ms,
+                                          bool use_short_delay,
+                                          uint32_t data_airtime_ms,
+                                          uint32_t coalesce_guard_ms) {
+    if (data_airtime_ms == 0) {
+        return sackTimerForFrame(current_timer_ms, sack_delay_ms,
+                                 sack_delay_short_ms, use_short_delay);
+    }
+
+    if (sack_delay_short_ms != 0 && use_short_delay) {
+        return sackTimerForFrame(current_timer_ms, sack_delay_ms,
+                                 sack_delay_short_ms, true);
+    }
+
+    const uint64_t derived_ms =
+        static_cast<uint64_t>(std::max(1u, data_airtime_ms)) +
+        static_cast<uint64_t>(coalesce_guard_ms);
+    const uint32_t pick_ms = static_cast<uint32_t>(
+        std::min<uint64_t>(derived_ms, static_cast<uint64_t>(UINT32_MAX)));
+    const uint32_t capped_ms = std::min(std::max(1u, sack_delay_ms),
+                                        std::max(1u, pick_ms));
+
+    // Adaptive cadence mode deliberately re-arms on every new in-burst frame.
+    // If frames continue arriving at the expected data airtime, the receiver
+    // can batch a real burst. If the sender drained early, this expires after
+    // one missing-frame interval instead of waiting a whole static window.
+    (void)current_timer_ms;
+    return capped_ms;
+}
+
 inline bool isAlignedBaseHoleAck(uint16_t ack_seq,
                                  uint16_t tx_base_seq,
                                  uint32_t bitmap) {

@@ -529,6 +529,8 @@ public:
     static constexpr int CALLBACK_INTERVAL_MS = 10;
     static constexpr int TX_CONTINUATION_GRACE_MS = CALLBACK_INTERVAL_MS * 2;
     static constexpr int POST_TX_ACK_LISTEN_MS = CALLBACK_INTERVAL_MS * 3;
+    static constexpr int POST_DATA_BURST_DECODE_CALLBACKS = 4;
+    static constexpr int POST_DATA_BURST_ACK_COPIES = 1;
     static constexpr uint32_t DEFAULT_TR_GUARD_MS = 50;
 
     SimulatedStation(const std::string& callsign, std::unique_ptr<AudioPort> port,
@@ -730,7 +732,10 @@ public:
     void setTxTrSwitchMs(uint32_t ms) { ptt_.setTxTrSwitchMs(ms); }
     void setTxCooldownMs(uint32_t ms) { ptt_.setTxCooldownMs(ms); }
     void setRxSettlingMs(uint32_t ms) { ptt_.setRecoveryTimings(ms, 0); }
-    void setCarrierSenseGuardMs(uint32_t ms) { tx_turnaround_guard_ms_ = ms; }
+    void setCarrierSenseGuardMs(uint32_t ms) {
+        tx_turnaround_guard_ms_ = ms;
+        tx_turnaround_guard_override_ = true;
+    }
     PttState pttState() const {
         return ptt_.state();
     }
@@ -837,6 +842,27 @@ public:
     size_t testDeferredTxDepth() {
         std::lock_guard<std::mutex> lock(deferred_tx_mutex_);
         return deferred_tx_submissions_.size();
+    }
+
+    size_t testPostTxListenSamples() const {
+        return post_tx_ack_listen_samples_.load(std::memory_order_relaxed);
+    }
+
+    size_t testDerivedPostDataBurstListenSamples() const {
+        return static_cast<size_t>(
+            postDataBurstListenSamplesForLabel("frame_type=DATA"));
+    }
+
+    void testReleasePostTxAckListenWindow(uint16_t old_base_seq, uint16_t new_base_seq) {
+        releasePostTxAckListenWindow(old_base_seq, new_base_seq);
+    }
+
+    void testSetTimingPolicyMode(WaveformMode waveform,
+                                 Modulation modulation,
+                                 CodeRate rate = CodeRate::R1_2) {
+        negotiated_waveform_ = waveform;
+        data_modulation_ = modulation;
+        data_code_rate_ = rate;
     }
 #endif
 
@@ -1023,12 +1049,14 @@ private:
         std::string label;
         uint64_t min_rx_observation_epoch = 0;
         bool expect_full_ofdm_anchor_after_tx = false;
+        uint64_t post_tx_listen_samples = 0;
     };
 
     struct ActiveTx {
         std::vector<float> samples;
         size_t offset = 0;
         std::string label;
+        uint64_t post_tx_listen_samples = 0;
 
         bool hasRemaining() const {
             return offset < samples.size();
@@ -1042,6 +1070,7 @@ private:
             samples.clear();
             offset = 0;
             label.clear();
+            post_tx_listen_samples = 0;
         }
     };
 
@@ -1077,8 +1106,10 @@ private:
     // reopens RX while holding off the next TX keying edge.
     RadioPttStateMachine ptt_{SAMPLE_RATE};
     std::atomic<uint64_t> tx_continuation_grace_samples_{0};
+    std::atomic<uint64_t> pending_post_tx_listen_samples_{0};
     std::atomic<uint64_t> post_tx_ack_listen_samples_{0};
     uint32_t tx_turnaround_guard_ms_ = DEFAULT_TR_GUARD_MS;
+    bool tx_turnaround_guard_override_ = false;
 
     // State
     std::atomic<bool> connected_{false};
@@ -1696,6 +1727,7 @@ private:
 
     void notePttTxQueued(size_t sample_count) {
         tx_continuation_grace_samples_.store(0, std::memory_order_relaxed);
+        pending_post_tx_listen_samples_.store(0, std::memory_order_relaxed);
         post_tx_ack_listen_samples_.store(0, std::memory_order_relaxed);
         ptt_.noteTxQueued(sample_count);
     }
@@ -1735,9 +1767,7 @@ private:
         const PttState after = ptt_.state();
         advanceTxContinuationGrace(elapsed_samples);
         if (before != PttState::RX && after == PttState::RX) {
-            post_tx_ack_listen_samples_.store(
-                samplesForMs(POST_TX_ACK_LISTEN_MS),
-                std::memory_order_relaxed);
+            armPostTxListenWindow();
         } else {
             advancePostTxAckListen(elapsed_samples);
         }
@@ -1808,6 +1838,11 @@ private:
         protocol_.setHandshakeConfirmedCallback([this]() {
             setHandshakeComplete(true);
             LOG_MODEM(INFO, "[%s] Handshake confirmed", callsign_.c_str());
+        });
+
+        protocol_.setTransmitWindowAdvancedCallback([this](uint16_t old_base_seq,
+                                                           uint16_t new_base_seq) {
+            releasePostTxAckListenWindow(old_base_seq, new_base_seq);
         });
 
         // Burst TX callback - encode multiple frames as single OFDM burst
@@ -1890,6 +1925,7 @@ private:
         submission.frame = frame;
         submission.label = label;
         submission.expect_full_ofdm_anchor_after_tx = expect_full_ofdm_anchor_after_tx;
+        submission.post_tx_listen_samples = postDataBurstListenSamplesForFrame(frame);
         queueTxSubmission(std::move(submission));
     }
 
@@ -1901,6 +1937,7 @@ private:
         submission.kind = TxSubmission::Kind::Burst;
         submission.burst = frames;
         submission.label = label;
+        submission.post_tx_listen_samples = postDataBurstListenSamplesForBurst(frames);
         queueTxSubmission(std::move(submission));
     }
 
@@ -1927,6 +1964,7 @@ private:
         submission.kind = TxSubmission::Kind::RawSamples;
         submission.raw_samples = samples;
         submission.label = label;
+        submission.post_tx_listen_samples = postDataBurstListenSamplesForLabel(label);
         queueTxSubmission(std::move(submission));
     }
 
@@ -1936,23 +1974,23 @@ private:
         }
 
         if (requiresFreshCarrierSense(submission.label)) {
-            deferTxSubmission(std::move(submission), true);
+            deferTxSubmission(std::move(submission), "fresh_carrier_sense", true);
             return;
         }
 
         if (pttState() == PttState::RX && hasDeferredTxSubmission()) {
-            deferTxSubmission(std::move(submission));
+            deferTxSubmission(std::move(submission), "deferred_queue");
             flushDeferredTxIfReady();
             return;
         }
 
         if (pttState() == PttState::RX && !channelIdleForTxGuard()) {
-            deferTxSubmission(std::move(submission));
+            deferTxSubmission(std::move(submission), "carrier_sense");
             return;
         }
 
         if (!canAcceptTxSubmission()) {
-            deferTxSubmission(std::move(submission));
+            deferTxSubmission(std::move(submission), "ptt_or_local_tx");
             return;
         }
         submitTxNow(std::move(submission));
@@ -2002,12 +2040,162 @@ private:
                1000ULL;
     }
 
+    static bool frameBytesAreData(const Bytes& frame) {
+        if (frame.size() < 3) {
+            return false;
+        }
+        return v2::isDataFrame(static_cast<v2::FrameType>(frame[2]));
+    }
+
+    static bool labelNamesDataTx(const std::string& label) {
+        return label.find("frame_type=DATA") != std::string::npos ||
+               label.find("first_frame_type=DATA") != std::string::npos;
+    }
+
+    uint32_t controlAckAirtimeMsForCurrentMode() const {
+        if (negotiated_waveform_ == WaveformMode::OFDM_NARROW) {
+            return connection_policy::narrowOFDMFrameTiming(Modulation::DQPSK, 1).ack_ms;
+        }
+        if (protocol::isOFDMMode(negotiated_waveform_)) {
+            return connection_policy::wideOFDMFrameTiming(
+                Modulation::DQPSK, CodeRate::R1_4, 1).ack_ms;
+        }
+
+        const auto timing = connection_policy::mcDpskFrameTiming(
+            data_modulation_,
+            mc_dpsk_config_.num_carriers,
+            mc_dpsk_config_.samples_per_symbol,
+            1);
+        return timing.ack_ms;
+    }
+
+    uint32_t postDataBurstListenWindowMs() const {
+        const uint32_t receiver_tr_switch_ms = ptt_.txTrSwitchMs();
+        const uint32_t receiver_decode_budget_ms =
+            CALLBACK_INTERVAL_MS * POST_DATA_BURST_DECODE_CALLBACKS;
+        const uint32_t ack_airtime_ms = controlAckAirtimeMsForCurrentMode();
+        const uint32_t ack_copies = POST_DATA_BURST_ACK_COPIES;
+        const uint32_t guard_ms = connection_policy::kCarrierSenseSackCoalesceMs;
+        return receiver_tr_switch_ms + receiver_decode_budget_ms +
+               ack_airtime_ms * ack_copies + guard_ms;
+    }
+
+    uint64_t postDataBurstListenSamplesForFrame(const Bytes& frame) const {
+        if (!usesCoherentTimingPolicy()) {
+            return 0;
+        }
+        return frameBytesAreData(frame) ? samplesForMs(postDataBurstListenWindowMs()) : 0;
+    }
+
+    uint64_t postDataBurstListenSamplesForBurst(const std::vector<Bytes>& frames) const {
+        if (!usesCoherentTimingPolicy()) {
+            return 0;
+        }
+        for (const auto& frame : frames) {
+            if (frameBytesAreData(frame)) {
+                return samplesForMs(postDataBurstListenWindowMs());
+            }
+        }
+        return 0;
+    }
+
+    uint64_t postDataBurstListenSamplesForLabel(const std::string& label) const {
+        if (!usesCoherentTimingPolicy()) {
+            return 0;
+        }
+        return labelNamesDataTx(label) ? samplesForMs(postDataBurstListenWindowMs()) : 0;
+    }
+
+    bool usesCoherentTimingPolicy() const {
+        return protocol::isOFDMMode(negotiated_waveform_) &&
+               negotiated_waveform_ != WaveformMode::OFDM_NARROW &&
+               connection_policy::usesCoherentWideOFDMTiming(data_modulation_);
+    }
+
+    uint32_t currentCarrierSenseGuardMs() const {
+        if (tx_turnaround_guard_override_) {
+            return tx_turnaround_guard_ms_;
+        }
+        return usesCoherentTimingPolicy()
+            ? connection_policy::kCarrierSenseGuardMs
+            : DEFAULT_TR_GUARD_MS;
+    }
+
+    void rememberPostTxListenRequirement(uint64_t listen_samples,
+                                         const std::string& label) {
+        if (listen_samples == 0) {
+            return;
+        }
+
+        uint64_t current = pending_post_tx_listen_samples_.load(std::memory_order_relaxed);
+        while (listen_samples > current &&
+               !pending_post_tx_listen_samples_.compare_exchange_weak(
+                   current, listen_samples, std::memory_order_relaxed)) {
+        }
+
+        if (ultra::phyDiagnosticsEnabled()) {
+            std::ostringstream oss;
+            oss << "event=station_post_data_listen_pending"
+                << " station=" << callsign_
+                << " samples=" << listen_samples
+                << " ms=" << (listen_samples * 1000ULL / SAMPLE_RATE)
+                << " ack_airtime_ms=" << controlAckAirtimeMsForCurrentMode()
+                << " ack_copies=" << POST_DATA_BURST_ACK_COPIES
+                << " rx_tr_switch_ms=" << ptt_.txTrSwitchMs()
+                << " decode_budget_ms="
+                << (CALLBACK_INTERVAL_MS * POST_DATA_BURST_DECODE_CALLBACKS)
+                << " guard_ms=" << connection_policy::kCarrierSenseSackCoalesceMs
+                << " label=" << (label.empty() ? "-" : label);
+            ultra::phyDiagLine(oss.str());
+        }
+    }
+
+    void armPostTxListenWindow() {
+        const uint64_t data_listen =
+            pending_post_tx_listen_samples_.exchange(0, std::memory_order_relaxed);
+        const uint64_t legacy_listen = samplesForMs(POST_TX_ACK_LISTEN_MS);
+        const uint64_t listen = data_listen > 0 ? data_listen : legacy_listen;
+        post_tx_ack_listen_samples_.store(listen, std::memory_order_relaxed);
+
+        if (ultra::phyDiagnosticsEnabled()) {
+            std::ostringstream oss;
+            oss << "event=station_post_tx_listen_arm"
+                << " station=" << callsign_
+                << " source=" << (data_listen > 0 ? "data" : "legacy")
+                << " samples=" << listen
+                << " ms=" << (listen * 1000ULL / SAMPLE_RATE);
+            ultra::phyDiagLine(oss.str());
+        }
+    }
+
+    void releasePostTxAckListenWindow(uint16_t old_base_seq, uint16_t new_base_seq) {
+        const uint64_t released =
+            post_tx_ack_listen_samples_.exchange(0, std::memory_order_relaxed);
+        if (released == 0) {
+            return;
+        }
+
+        LOG_MODEM(INFO,
+                  "[%s] Post-DATA listen released by advancing ACK base %u -> %u",
+                  callsign_.c_str(), old_base_seq, new_base_seq);
+        if (ultra::phyDiagnosticsEnabled()) {
+            std::ostringstream oss;
+            oss << "event=station_post_tx_listen_release"
+                << " station=" << callsign_
+                << " old_base=" << old_base_seq
+                << " new_base=" << new_base_seq
+                << " released_samples=" << released
+                << " released_ms=" << (released * 1000ULL / SAMPLE_RATE);
+            ultra::phyDiagLine(oss.str());
+        }
+    }
+
     void seedWarmSyncReplyPrediction(size_t tx_samples) {
         if (!decoder_ || tx_samples == 0) {
             return;
         }
         const size_t delay = tx_samples +
-            static_cast<size_t>(samplesForMs(tx_turnaround_guard_ms_));
+            static_cast<size_t>(samplesForMs(currentCarrierSenseGuardMs()));
         decoder_->seedExpectedFrameArrivalAfterSamples(delay);
     }
 
@@ -2080,6 +2268,7 @@ private:
     }
 
     void deferTxSubmission(TxSubmission submission,
+                           const char* reason,
                            bool require_fresh_rx_observation = false) {
         bool rejected = false;
         size_t depth = 0;
@@ -2087,6 +2276,7 @@ private:
         uint64_t event = 0;
         const size_t size_hint = txSubmissionSizeHint(submission);
         const std::string label = submission.label;
+        const char* reason_label = reason != nullptr ? reason : "unspecified";
         const uint64_t min_rx_observation_epoch =
             rx_observation_epoch_.load(std::memory_order_relaxed) +
             (require_fresh_rx_observation ? 1ULL : 0ULL);
@@ -2126,8 +2316,9 @@ private:
             if (event <= 4 || (event % 32) == 0) {
                 LOG_MODEM(WARN,
                           "[%s] TX rejected while radio recovery queue is full "
-                          "(state=%s size_hint=%zu label=%s rejected=%llu)",
+                          "(state=%s reason=%s size_hint=%zu label=%s rejected=%llu)",
                           callsign_.c_str(), pttStateName(pttState()),
+                          reason_label,
                           size_hint,
                           label.empty() ? "-" : label.c_str(),
                           static_cast<unsigned long long>(event));
@@ -2136,6 +2327,7 @@ private:
                 std::ostringstream oss;
                 oss << "event=station_tx_reject"
                     << " station=" << callsign_
+                    << " reason=" << reason_label
                     << " ptt=" << pttStateName(pttState())
                     << " size_hint=" << size_hint
                     << " label=" << (label.empty() ? "-" : label)
@@ -2148,9 +2340,9 @@ private:
         if (event <= 8 || (event % 32) == 0) {
             LOG_MODEM(INFO,
                       "[%s] TX deferred until radio RX (state=%s samples=%zu "
-                      "depth=%zu label=%s deferred=%llu)",
+                      "reason=%s depth=%zu label=%s deferred=%llu)",
                       callsign_.c_str(), pttStateName(pttState()),
-                      size_hint, depth,
+                      size_hint, reason_label, depth,
                       label.empty() ? "-" : label.c_str(),
                       static_cast<unsigned long long>(event));
         }
@@ -2158,6 +2350,7 @@ private:
             std::ostringstream oss;
             oss << "event=station_tx_defer"
                 << " station=" << callsign_
+                << " reason=" << reason_label
                 << " ptt=" << pttStateName(pttState())
                 << " size_hint=" << size_hint
                 << " depth=" << depth
@@ -2232,7 +2425,7 @@ private:
     }
 
     bool channelIdleForTxGuard() const {
-        return !port_ || port_->isChannelIdleFor(tx_turnaround_guard_ms_);
+        return !port_ || port_->isChannelIdleFor(currentCarrierSenseGuardMs());
     }
 
     std::vector<float> encodeTxSubmission(const TxSubmission& submission) {
@@ -2313,6 +2506,7 @@ private:
         active_tx_.samples = std::move(samples);
         active_tx_.offset = 0;
         active_tx_.label = label;
+        active_tx_.post_tx_listen_samples = submission.post_tx_listen_samples;
 
         if (!label.empty()) {
             LOG_MODEM(INFO,
@@ -2356,6 +2550,8 @@ private:
         }
         active_tx_.offset += n;
         if (!active_tx_.hasRemaining()) {
+            rememberPostTxListenRequirement(active_tx_.post_tx_listen_samples,
+                                            active_tx_.label);
             active_tx_.clear();
         }
         return n;
@@ -2374,6 +2570,7 @@ private:
                 decoder_->expectFullOFDMAnchorOnce();
             }
             notePttTxQueued(samples.size());
+            rememberPostTxListenRequirement(submission.post_tx_listen_samples, label);
             {
                 std::lock_guard<std::mutex> lock(tx_mutex_);
                 tx_emitted_sample_clock_ += samples.size();
