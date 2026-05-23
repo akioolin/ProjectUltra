@@ -56,6 +56,19 @@ public:
         std::string monitor_mode;
         std::string monitor_rate = "r1_4";   // Used when monitor_mode is OFDM
         std::string monitor_modulation = "dqpsk";
+
+        // Scenario scripting (additive test/demo automation). Drives the real
+        // UI actions (connect/accept/sendFile/sendMessage) from the render loop
+        // so the production App path can be exercised headlessly-ish (window
+        // still renders) and cross-checked against cli_simulator. NOT a
+        // deterministic CI gate — wall-clock paced; cli_simulator keeps that role.
+        std::string auto_connect;             // peer callsign to initiate a connection to
+        int connect_delay_sec = 0;            // wait N s after startup before auto-connecting
+        bool auto_accept = false;             // auto-accept the first incoming call
+        std::string auto_send_file;           // file to send once CONNECTED (fires once)
+        std::string auto_send_message;        // message to send once CONNECTED (fires once)
+        int auto_disconnect_after_sec = 0;    // 0 = never; else disconnect N s after CONNECTED
+        int exit_after_sec = 0;               // 0 = never; else push SDL_QUIT after N s
     };
 
     App();  // Default constructor
@@ -120,6 +133,25 @@ private:
     std::chrono::steady_clock::time_point deferred_tx_deadline_{};
     static constexpr size_t kMaxDeferredTx = 8;     // bounded memory (drop-oldest)
     static constexpr uint32_t kMaxTxDeferMs = 4000; // ~one max OFDM burst; never deadlock
+    // Cached connection state for the carrier-sense gate. queueRealTxSamples()
+    // runs inside protocol_ TX callbacks (during protocol_.tick(), which holds
+    // the engine mutex), so it must NOT call protocol_.getState() (re-entrant
+    // deadlock). The connection-changed callback updates this atomic instead.
+    std::atomic<protocol::ConnectionState> conn_state_cached_{
+        protocol::ConnectionState::DISCONNECTED};
+
+    // Scenario scripting state (see Options auto_* fields). tickScenario() runs
+    // each render frame and drives the real UI actions at the right lifecycle
+    // points. Wall-clock paced (this is a parity/visual harness, not a
+    // deterministic gate).
+    bool scenario_active_ = false;          // any auto_* flag set
+    bool scenario_started_ = false;         // scenario_start_ armed
+    bool scenario_connect_issued_ = false;  // connect() fired once
+    bool scenario_payload_sent_ = false;    // file/message fired once
+    bool scenario_disconnect_issued_ = false;
+    std::chrono::steady_clock::time_point scenario_start_;
+    std::chrono::steady_clock::time_point scenario_connected_at_;
+    void tickScenario();
 
     // Radio mode state
     std::vector<std::string> input_devices_;

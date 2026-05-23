@@ -340,6 +340,17 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         recording_enabled_ = true;
         guiLog("Recording enabled (-rec): base path '%s'", options_.record_path.c_str());
     }
+    scenario_active_ = !options_.auto_connect.empty() || options_.auto_accept ||
+                       !options_.auto_send_file.empty() ||
+                       !options_.auto_send_message.empty() ||
+                       options_.exit_after_sec > 0;
+    if (scenario_active_) {
+        guiLog("[scenario] scripting active: auto_connect='%s' auto_accept=%d "
+               "send_file='%s' send_msg='%s' disconnect_after=%ds exit_after=%ds",
+               options_.auto_connect.c_str(), options_.auto_accept ? 1 : 0,
+               options_.auto_send_file.c_str(), options_.auto_send_message.c_str(),
+               options_.auto_disconnect_after_sec, options_.exit_after_sec);
+    }
     // Load persistent settings
     ultra::gui::startupTrace("App", "settings-load-enter");
     settings_.load();
@@ -544,6 +555,9 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     ultra::gui::startupTrace("App", "protocol-callbacks-mid2");
 
     protocol_.setConnectionChangedCallback([this](protocol::ConnectionState state, const std::string& info) {
+        // Cache for the carrier-sense gate (read on the TX-callback path where
+        // calling protocol_.getState() would re-enter the engine mutex).
+        conn_state_cached_.store(state, std::memory_order_relaxed);
         guiLog("Connection state changed: %d (%s)", static_cast<int>(state), info.c_str());
 
         // Update modem engine connection state (affects waveform selection)
@@ -1862,6 +1876,9 @@ void App::render() {
         protocol_.tick(elapsed);
     }
 
+    // Scenario scripting: drive the real connect/accept/send actions.
+    tickScenario();
+
     // Create main window
     if (first_render) {
         ultra::gui::startupTrace("App", "render-main-window-enter");
@@ -2283,17 +2300,108 @@ std::string App::testCat(AppSettings settings) {
     return {};
 }
 
+void App::tickScenario() {
+    if (!scenario_active_) {
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (!scenario_started_) {
+        scenario_start_ = now;
+        scenario_started_ = true;
+    }
+
+    // Hard exit timer so a scripted run self-terminates and logs can be collected.
+    if (options_.exit_after_sec > 0 &&
+        now - scenario_start_ >= std::chrono::seconds(options_.exit_after_sec)) {
+        guiLog("[scenario] exit-after %ds elapsed; quitting", options_.exit_after_sec);
+        scenario_active_ = false;
+        SDL_Event quit_event;
+        quit_event.type = SDL_QUIT;
+        SDL_PushEvent(&quit_event);
+        return;
+    }
+
+    // Auto-accept an incoming call (drives the same path as the Accept button).
+    if (options_.auto_accept) {
+        std::string pending;
+        {
+            std::lock_guard<std::mutex> lock(rx_log_mutex_);
+            pending = pending_incoming_call_;
+        }
+        if (!pending.empty()) {
+            guiLog("[scenario] auto-accepting call from %s", pending.c_str());
+            protocol_.acceptCall();
+            std::lock_guard<std::mutex> lock(rx_log_mutex_);
+            pending_incoming_call_.clear();
+        }
+    }
+
+    const protocol::ConnectionState state = protocol_.getState();
+    const bool ota_ready =
+        !simulation_enabled_ || (ota_audio_ && ota_audio_->isConnected());
+
+    // Initiate the connection once the link is up and the optional startup
+    // delay has elapsed (gives the receiver + the carrier-sense detector time
+    // to settle before we probe).
+    const bool connect_delay_elapsed =
+        options_.connect_delay_sec <= 0 ||
+        now - scenario_start_ >= std::chrono::seconds(options_.connect_delay_sec);
+    if (!options_.auto_connect.empty() && !scenario_connect_issued_ && ota_ready &&
+        connect_delay_elapsed && state == protocol::ConnectionState::DISCONNECTED) {
+        guiLog("[scenario] auto-connecting to %s", options_.auto_connect.c_str());
+        protocol_.connect(options_.auto_connect);
+        scenario_connect_issued_ = true;
+    }
+
+    // Once CONNECTED, fire the payload exactly once.
+    if (state == protocol::ConnectionState::CONNECTED && !scenario_payload_sent_) {
+        scenario_connected_at_ = now;
+        scenario_payload_sent_ = true;
+        if (!options_.auto_send_file.empty()) {
+            guiLog("[scenario] connected; sending file %s",
+                   options_.auto_send_file.c_str());
+            startFileSend(options_.auto_send_file,
+                          "[scenario] file send started: " + options_.auto_send_file);
+        } else if (!options_.auto_send_message.empty()) {
+            guiLog("[scenario] connected; sending message (%zu bytes)",
+                   options_.auto_send_message.size());
+            protocol_.sendMessage(options_.auto_send_message);
+        }
+    }
+
+    // Optional auto-disconnect after the payload has had time to drain.
+    if (options_.auto_disconnect_after_sec > 0 && scenario_payload_sent_ &&
+        !scenario_disconnect_issued_ &&
+        state == protocol::ConnectionState::CONNECTED &&
+        now - scenario_connected_at_ >=
+            std::chrono::seconds(options_.auto_disconnect_after_sec)) {
+        guiLog("[scenario] auto-disconnect after %ds connected",
+               options_.auto_disconnect_after_sec);
+        protocol_.disconnect();
+        scenario_disconnect_issued_ = true;
+    }
+}
+
 bool App::queueRealTxSamples(const std::vector<float>& samples, const char* context) {
     if (samples.empty()) {
         return false;
     }
 
-    // OFDM carrier-sense gate (half-duplex collision avoidance): never key up while
-    // the peer is still transmitting. channelBusyForTx() is true only in OFDM mode
-    // (carrier sense is off at MC-DPSK/handshake SNRs by design — energy detection
-    // can't see the signal there), so PING/CONNECT and MC-DPSK data are unaffected.
-    // We also stay FIFO: if anything is already deferred, append rather than jump it.
-    if (!deferred_tx_.empty() || modem_.channelBusyForTx()) {
+    // Carrier-sense gate = listen-before-CALL only. Energy CCA gates the
+    // unsolicited probe that *starts* a session (so we don't key a PING/CONNECT
+    // on top of an ongoing QSO); it must NOT gate traffic inside an established
+    // connection. In-QSO collision avoidance is owned by the protocol's
+    // half-duplex turnaround/ARQ layer — gating turnaround ACKs here stalls the
+    // selective-repeat window and drops ACKs (verified 2026-05-23: a window-8
+    // transfer kept the channel busy, so every ACK was deferred to the depth-8
+    // cap and dropped -> timeout retx storm). So only engage before the
+    // connection is established (DISCONNECTED/PROBING), and only in OFDM mode
+    // (channelBusyForTx()). FIFO: if something is already deferred, append.
+    const auto cca_state = conn_state_cached_.load(std::memory_order_relaxed);
+    const bool pre_connection =
+        (cca_state == protocol::ConnectionState::DISCONNECTED ||
+         cca_state == protocol::ConnectionState::PROBING);
+    if (pre_connection && (!deferred_tx_.empty() || modem_.channelBusyForTx())) {
         deferTxSamples(samples, context);
         return true;  // queued (deferred), not dropped
     }
@@ -2321,6 +2429,15 @@ void App::deferTxSamples(const std::vector<float>& samples, const char* context)
 
 void App::flushDeferredTxIfReady() {
     if (deferred_tx_.empty()) {
+        return;
+    }
+    // Deferred items are only ever pre-connection probes (the gate engages only
+    // when DISCONNECTED/PROBING). Once the session is past the call phase they
+    // are stale — drop them rather than inject a late PING into an active QSO.
+    const auto st = conn_state_cached_.load(std::memory_order_relaxed);
+    if (st != protocol::ConnectionState::DISCONNECTED &&
+        st != protocol::ConnectionState::PROBING) {
+        deferred_tx_.clear();
         return;
     }
     if (tx_in_progress_.load()) {

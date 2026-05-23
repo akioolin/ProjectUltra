@@ -205,6 +205,14 @@ void printGuiUsage(const char* prog) {
     std::printf("  --monitor-ofdm-narrow [rate]  Monitor OFDM_NARROW\n");
     std::printf("  --monitor-mcdpsk              Monitor MC-DPSK\n");
     std::printf("  --monitor-mod <mod>           Monitor modulation\n");
+    std::printf("  Scenario scripting (drives the real UI actions; reuse with -sim + OTASim):\n");
+    std::printf("  --auto-connect <peer>         Initiate a connection once the link is up\n");
+    std::printf("  --connect-delay <s>           Wait N seconds after startup before auto-connect\n");
+    std::printf("  --auto-accept                 Auto-accept the first incoming call\n");
+    std::printf("  --auto-send-file <path>       Send file once CONNECTED\n");
+    std::printf("  --auto-send-message <text>    Send message once CONNECTED\n");
+    std::printf("  --auto-disconnect-after <s>   Disconnect N seconds after CONNECTED\n");
+    std::printf("  --exit-after <s>              Quit N seconds after startup\n");
     std::printf("  --log-level <error|warn|info|debug|trace>\n");
     std::printf("                               Console verbosity (default: info)\n");
     std::printf("  --log-category <list>         Comma list: operator,audio,tnc,modem,\n");
@@ -562,6 +570,50 @@ int main(int argc, char* argv[]) {
             if (i + 1 < argc) {
                 opts.monitor_modulation = argv[++i];
             }
+        } else if (arg == "--auto-connect") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Missing value for --auto-connect\n");
+                closeStartupLog();
+                return 1;
+            }
+            opts.auto_connect = argv[++i];
+        } else if (arg == "--connect-delay") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Missing value for --connect-delay\n");
+                closeStartupLog();
+                return 1;
+            }
+            opts.connect_delay_sec = std::atoi(argv[++i]);
+        } else if (arg == "--auto-accept") {
+            opts.auto_accept = true;
+        } else if (arg == "--auto-send-file") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Missing value for --auto-send-file\n");
+                closeStartupLog();
+                return 1;
+            }
+            opts.auto_send_file = argv[++i];
+        } else if (arg == "--auto-send-message") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Missing value for --auto-send-message\n");
+                closeStartupLog();
+                return 1;
+            }
+            opts.auto_send_message = argv[++i];
+        } else if (arg == "--auto-disconnect-after") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Missing value for --auto-disconnect-after\n");
+                closeStartupLog();
+                return 1;
+            }
+            opts.auto_disconnect_after_sec = std::atoi(argv[++i]);
+        } else if (arg == "--exit-after") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Missing value for --exit-after\n");
+                closeStartupLog();
+                return 1;
+            }
+            opts.exit_after_sec = std::atoi(argv[++i]);
         } else if (arg == "--log-level") {
             if (i + 1 >= argc) {
                 std::fprintf(stderr, "Missing value for --log-level\n");

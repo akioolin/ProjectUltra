@@ -10,6 +10,45 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-23: GUI scenario scripting + carrier-sense gate scope correction
+
+**Context:** Added headless-ish GUI scripting so the production `App` path can be
+driven and cross-checked against cli_simulator (two `ultra_gui -sim` instances
+auto-connect + transfer a file over OTASim). The first real scripted QAM16
+transfer immediately exposed two bugs in the carrier-sense gate added earlier
+today (see entry below).
+
+**What changed:**
+- `src/gui/main_gui.cpp` + `src/gui/app.{hpp,cpp}`: new scenario flags
+  `--auto-connect <peer>`, `--connect-delay <s>`, `--auto-accept`,
+  `--auto-send-file <path>`, `--auto-send-message <text>`,
+  `--auto-disconnect-after <s>`, `--exit-after <s>`. `tickScenario()` (run from
+  the render loop) drives the real UI actions (connect/accept/sendFile/
+  sendMessage) at the right lifecycle points. Wall-clock paced — a parity/visual
+  harness, NOT a deterministic gate; cli_simulator keeps that role.
+
+**Two carrier-sense gate bugs found by the scripted test and fixed:**
+1. **Gate dropped in-QSO ACKs → timeout retx storm.** The original gate deferred
+   *all* OFDM TX including ACKs. In a window-8 transfer the sender is on-air
+   near-continuously, so the receiver's channel reads busy and its ACKs piled
+   into the depth-8 defer queue and were dropped (drop-oldest) → sender timeouts.
+   **Fix:** the gate is now *listen-before-CALL only* — it engages only
+   pre-connection (`DISCONNECTED`/`PROBING`) to keep an unsolicited PING/CONNECT
+   off an ongoing QSO. In-QSO collision avoidance is owned by the protocol's
+   half-duplex turnaround/ARQ layer, not a blanket energy gate. Verified: BRAVO
+   in-QSO CCA defers 50 → 0.
+2. **Re-entrant deadlock.** `queueRealTxSamples()` runs inside protocol_ TX
+   callbacks (during `protocol_.tick()`, which holds the engine mutex); calling
+   `protocol_.getState()` there re-entered the mutex and froze the render loop on
+   the first PING. **Fix:** the connection state is cached in a
+   `std::atomic<ConnectionState>` updated from the connection-changed callback;
+   the gate and flush read the cache, never `getState()`.
+
+**Test verification:** ctest unaffected (GUI not in CI). Scripted GUI run: clean
+handshake, QAM16 R1/2 auto-negotiated both ends, 4 KB file delivered, 0 in-QSO
+CCA defers, no deadlock. (Residual QAM16 R1/2 retx churn is a separate,
+in-progress item — not gate-related.)
+
 ## 2026-05-23: GUI — wire the production carrier-sense TX gate (half-duplex collision avoidance)
 
 **What was broken:** `ultra_gui` had **no peer-collision protection on TX**. The
