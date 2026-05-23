@@ -87,10 +87,18 @@ void ModemEngine::notifyFrameParsed(const Bytes& frame_data, protocol::v2::Frame
     auto data = v2::DataFrame::deserialize(frame_data);
     if (data && !data->payload.empty()) {
         std::string msg = data->payloadAsText();
-        if (!msg.empty() && data_callback_) {
-            data_callback_(msg);
+        // Only surface real text messages in the operator message log. File-
+        // transfer DATA chunks have empty/non-printable payloadAsText() — they
+        // are tracked via the [FILE] progress line, and must NOT flood the log
+        // with blank `[MESSAGE] ""` lines (2026-05-23: one blank line per decoded
+        // frame during a file transfer). File assembly uses a separate path, so
+        // gating the display here does not affect it.
+        if (!msg.empty()) {
+            if (data_callback_) {
+                data_callback_(msg);
+            }
+            status_callback_("[MESSAGE] \"" + msg + "\"");
         }
-        status_callback_("[MESSAGE] \"" + msg + "\"");
         return;
     }
 
