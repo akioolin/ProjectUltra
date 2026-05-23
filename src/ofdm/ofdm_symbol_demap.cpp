@@ -152,19 +152,10 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
         }
     }
 
-    // Two-pass DQPSK decoding: DISABLED.
-    // Testing shows it compresses LLR dynamic range too much at SNR=20,
-    // reducing scale from ~20 to 5-13. The normal path with per-carrier
-    // noise_var + fading scaling + perturbation retry works better.
-    // if (mod == Modulation::DQPSK && dqpsk_two_pass_enabled_) {
-    //     float fading_index = last_fading_index;
-    //     if (fading_index > TWO_PASS_FADING_THRESHOLD) {
-    //         demodulateDQPSKTwoPass(equalized, noise_variance);
-    //         snr_symbol_count++;
-    //         dqpsk_skip_first_symbol = false;
-    //         return;
-    //     }
-    // }
+    // Two-pass DQPSK decoding is intentionally disabled. Testing showed it
+    // compresses LLR dynamic range too much at SNR=20, reducing scale from
+    // ~20 to 5-13. The normal path with per-carrier noise_var, fading scaling,
+    // and perturbation retry works better.
 
     // Debug: log modulation value once per symbol
     static int mod_log_once = 0;

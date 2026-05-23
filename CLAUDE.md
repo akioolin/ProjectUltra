@@ -330,8 +330,8 @@ duplicate the full threshold table here.
 - Fading index now combines freq_cv + temporal_cv for better Good vs Moderate separation
 - OFDM internal uses separate `last_fading_index` from pilot variance (~0.15-0.50)
 - LLR scaling (1 + 10×fading²) applied when OFDM fading_index > 0.15 to prevent overconfident wrong bits
-- Two-pass DQPSK decoding enabled for fading channels (threshold=0.12)
-- Two-pass uses `last_fading_index` from pilot variance (NOT computeFadingIndex() which returns 0 after sync)
+- DQPSK two-pass DISABLED; D8PSK two-pass threshold 0.30
+- D8PSK two-pass uses `last_fading_index` from pilot variance (NOT computeFadingIndex() which returns 0 after sync)
 - Light sync confidence threshold=0.8 (raised from 0.5) to reject marginal timing syncs on fading channels
 - CFO drift limited to ±1 Hz per frame when connected (multipath can cause false CFO readings)
 - **CFO feedback loop** (2026-02-03): Pilot-corrected CFO propagates back to StreamingDecoder's cached value

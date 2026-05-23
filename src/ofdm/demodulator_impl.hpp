@@ -223,9 +223,9 @@ struct OFDMDemodulator::Impl {
     bool d8psk_two_pass_enabled_ = true;
     static constexpr float TWO_PASS_FADING_THRESHOLD = 0.30f;  // Above AWGN noise floor (~0.12-0.28)
 
-    // Two-pass DQPSK decoding (per-carrier phase correction)
-    // Estimates phase error from hard decisions, corrects before soft demapping
-    bool dqpsk_two_pass_enabled_ = true;  // Enable for fading channel improvement
+    // Two-pass DQPSK decoding is disabled in the symbol path; the helper is
+    // retained only for supervised experiments because it compressed LLRs in
+    // the production DQPSK fading cells.
 
     // ==========================================================================
     // CONSTRUCTOR
