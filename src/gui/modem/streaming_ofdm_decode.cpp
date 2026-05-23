@@ -63,6 +63,30 @@ bool decodedFrameHasMoreFrag(const DecodeResult& result) {
     return false;
 }
 
+bool hasCleanFadingMeasurementTiming(const DecodeResult& result) {
+    // The public coherent fading meter is an LTS magnitude-CV measurement. If
+    // the LTS phase slope says the FFT window is tens of samples off the frame
+    // boundary, the magnitude ripple is a timing/windowing artifact, not RF
+    // selectivity. Decoding can still succeed inside the cyclic prefix, but the
+    // channel-quality sample must be held unless data pilots independently show
+    // static frequency selectivity. A real notch is frequency-CV dominated with
+    // little common symbol-mean motion; the AWGN artifact is not.
+    constexpr float kMaxLtsTimingOffsetForFadingMeterSamples = 24.0f;
+    if (std::isfinite(result.lts_timing_offset_samples) &&
+        std::abs(result.lts_timing_offset_samples) <=
+            kMaxLtsTimingOffsetForFadingMeterSamples) {
+        return true;
+    }
+
+    constexpr float kStaticSelectivityMinFrequencyCV = 0.12f;
+    constexpr float kStaticSelectivityDominance = 1.5f;
+    constexpr float kStaticSelectivityMaxSymbolMeanCV = 0.08f;
+    return result.pilot_frequency_cv >= kStaticSelectivityMinFrequencyCV &&
+           result.pilot_frequency_cv >=
+               kStaticSelectivityDominance * result.pilot_temporal_cv &&
+           result.pilot_symbol_mean_cv <= kStaticSelectivityMaxSymbolMeanCV;
+}
+
 bool failureAttributionEnabled() {
     static const bool enabled = [] {
         const char* value = std::getenv("ULTRA_FAILURE_ATTRIBUTION");
@@ -841,8 +865,6 @@ void StreamingDecoder::decodeCurrentFrame() {
     LOG_MODEM(INFO, "[%s] Got %zu soft bits (%zu samples), proceeding to decode",
               log_prefix_.c_str(), soft_bits.size(), frame_buffer.size());
 
-    last_fading_index_.store(waveform_->getFadingIndex());
-
     if (burst_marker) {
         LOG_MODEM(INFO, "[%s] Burst interleave marker detected, entering accumulation",
                   log_prefix_.c_str());
@@ -1302,7 +1324,6 @@ void StreamingDecoder::decodeCurrentFrame() {
                     pre_correction_cfo_, residual_cfo, current_cfo, connected_);
                 last_cfo_.store(cfo_update.accepted_cfo);
                 sync_cfo_ = cfo_update.accepted_cfo;
-                last_fading_index_.store(waveform_->getFadingIndex());
 
                 sync_position_ = retry_sync;
                 frame_len = retry_len;
@@ -1386,6 +1407,37 @@ void StreamingDecoder::decodeCurrentFrame() {
                                is_ofdm, connected_, frame_sync_abs, frame_len,
                                current_modulation_, code_rate_, sync_correlation_);
 
+    const bool is_non_data_frame = frame_policy::isNonDataFrame(
+        result.success, result.frame_data.data(), result.frame_data.size());
+    const bool clean_fading_timing = hasCleanFadingMeasurementTiming(result);
+    const bool initial_link_quality_frame =
+        result.success && !connected_ && waveform_;
+    const bool measurement_quality_data_frame =
+        result.success && connected_ && is_ofdm && !is_non_data_frame &&
+        clean_fading_timing;
+    if (initial_link_quality_frame) {
+        last_fading_index_.store(waveform_->getFadingIndex());
+    } else if (measurement_quality_data_frame) {
+        last_fading_index_.store(result.lts_fading_index);
+    } else if (result.success && connected_ && is_ofdm && !is_non_data_frame &&
+               sync_from_full_anchor_fallback_) {
+        LOG_MODEM(INFO,
+                  "[%s] Fading measurement held: decoded via full-anchor DATA fallback "
+                  "(candidate=%.3f, keeping %.3f)",
+                  log_prefix_.c_str(), result.lts_fading_index,
+                  last_fading_index_.load());
+    } else if (result.success && connected_ && is_ofdm && !is_non_data_frame &&
+               !clean_fading_timing) {
+        LOG_MODEM(INFO,
+                  "[%s] Fading measurement held: LTS timing offset %.1f samples "
+                  "contaminates magnitude-CV (candidate=%.3f, keeping %.3f, "
+                  "pilot_freq_cv=%.3f pilot_temporal_cv=%.3f pilot_symbol_cv=%.3f)",
+                  log_prefix_.c_str(), result.lts_timing_offset_samples,
+                  result.lts_fading_index, last_fading_index_.load(),
+                  result.pilot_frequency_cv, result.pilot_temporal_cv,
+                  result.pilot_symbol_mean_cv);
+    }
+
     const bool deliver_partial_mc_dpsk =
         !result.success && mode_ == protocol::WaveformMode::MC_DPSK &&
         result.has_partial_codewords;
@@ -1416,9 +1468,6 @@ void StreamingDecoder::decodeCurrentFrame() {
 
     // Calculate consumed samples based on actual frame content
     // For non-data frames (control/connect), use exact sample count to avoid eating into next frame
-    const bool is_non_data_frame = frame_policy::isNonDataFrame(
-        result.success, result.frame_data.data(), result.frame_data.size());
-
     size_t consumed = frame_len;
     if (result.success && is_ofdm && waveform_) {
         // Use exact sample count for decoded OFDM frames when the copied buffer
@@ -1547,7 +1596,6 @@ void StreamingDecoder::decodeCurrentFrame() {
                 0.0f, residual_cfo, sync_cfo_, /*clamp_drift=*/true);
             sync_cfo_ = cfo_update.accepted_cfo;
             last_cfo_.store(cfo_update.accepted_cfo);
-            last_fading_index_.store(waveform_->getFadingIndex());
 
             // Decode the continuation block
             DecodeResult next_result = decodeFrame(next_soft_bits, sync_snr_, sync_cfo_);
@@ -1563,6 +1611,22 @@ void StreamingDecoder::decodeCurrentFrame() {
             }
 
             if (next_result.success || next_result.codewords_ok > 0) {
+                if (next_result.success && hasCleanFadingMeasurementTiming(next_result)) {
+                    last_fading_index_.store(next_result.lts_fading_index);
+                } else if (next_result.success) {
+                    LOG_MODEM(INFO,
+                              "[%s] Burst continuation fading measurement held: "
+                              "LTS timing offset %.1f samples contaminates magnitude-CV "
+                              "(candidate=%.3f, keeping %.3f, "
+                              "pilot_freq_cv=%.3f pilot_temporal_cv=%.3f pilot_symbol_cv=%.3f)",
+                              log_prefix_.c_str(),
+                              next_result.lts_timing_offset_samples,
+                              next_result.lts_fading_index,
+                              last_fading_index_.load(),
+                              next_result.pilot_frequency_cv,
+                              next_result.pilot_temporal_cv,
+                              next_result.pilot_symbol_mean_cv);
+                }
                 {
                     std::lock_guard<std::mutex> qlock(queue_mutex_);
                     frame_queue_.push(next_result);

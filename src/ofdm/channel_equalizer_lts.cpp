@@ -710,29 +710,62 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     // The LTS channel estimates provide magnitude and approximate phase.
     // The first data symbol's pilots will refine the common phase offset.
 
-    // Compute fading index from LTS channel estimate
+    // Compute fading index from the LTS channel estimate. Use the averaged LTS
+    // H for measurement to reduce AWGN estimator variance, but keep the
+    // last-symbol H above for equalization phase consistency.
     // This is critical for differential modes (DQPSK, DBPSK, D8PSK) which skip
     // updateChannelEstimate() — without this, last_fading_index stays at 0 and
     // LLR fading scaling + two-pass decoding never activate on fading channels.
     {
         float h_mag_mean = 0.0f;
+        size_t h_mag_count = 0;
+        std::vector<float> lts_measure_mags;
+        lts_measure_mags.reserve(data_carrier_indices.size());
         for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
-            h_mag_mean += std::abs(channel_estimate[data_carrier_indices[i]]);
+            Complex h = channel_estimate[data_carrier_indices[i]];
+            if (valid_symbols > 0 && i < h_sum_data.size()) {
+                h = h_sum_data[i] / static_cast<float>(valid_symbols);
+            }
+            const float mag = std::abs(h);
+            if (mag > 0.01f && std::isfinite(mag)) {
+                h_mag_mean += mag;
+                lts_measure_mags.push_back(mag);
+                ++h_mag_count;
+            }
         }
-        h_mag_mean /= data_carrier_indices.size();
+        if (h_mag_count > 0) {
+            h_mag_mean /= static_cast<float>(h_mag_count);
+        }
 
         float h_mag_var = 0.0f;
-        for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
-            float diff = std::abs(channel_estimate[data_carrier_indices[i]]) - h_mag_mean;
+        for (float mag : lts_measure_mags) {
+            const float diff = mag - h_mag_mean;
             h_mag_var += diff * diff;
         }
-        h_mag_var /= data_carrier_indices.size();
+        if (h_mag_count > 0) {
+            h_mag_var /= static_cast<float>(h_mag_count);
+        }
 
-        last_fading_index = (h_mag_mean > 0.01f) ? std::sqrt(h_mag_var) / h_mag_mean : 0.0f;
+        const float raw_cv2 = (h_mag_mean > 0.01f)
+            ? h_mag_var / (h_mag_mean * h_mag_mean)
+            : 0.0f;
+        const float snr_linear = last_snr_db_estimate_valid
+            ? std::pow(10.0f, last_snr_db_estimate / 10.0f)
+            : estimated_snr_linear;
+        const float lts_average_count = std::max<size_t>(1, valid_symbols);
+        const float lts_mag_noise_cv2 =
+            (snr_linear > 1.0f && std::isfinite(snr_linear))
+                ? 0.25f / (snr_linear * static_cast<float>(lts_average_count))
+                : 0.0f;
+        const float corrected_cv2 =
+            std::max(0.0f, raw_cv2 - lts_mag_noise_cv2);
+        last_fading_index = std::sqrt(corrected_cv2);
         public_fading_index = last_fading_index;
-        LOG_DEMOD(INFO, "LTS fading index: %.3f in_band_snr=%.1f dB "
-                  "(threshold: LLR>0.15, two-pass>0.30)",
+        LOG_DEMOD(INFO, "LTS fading index: %.3f raw=%.3f noise_cv2=%.6f "
+                  "in_band_snr=%.1f dB (threshold: LLR>0.15, two-pass>0.30)",
                   last_fading_index,
+                  std::sqrt(std::max(0.0f, raw_cv2)),
+                  lts_mag_noise_cv2,
                   last_snr_db_estimate_valid ? last_snr_db_estimate : 0.0f);
     }
 

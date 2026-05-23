@@ -35,6 +35,7 @@
 #include <queue>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <optional>
@@ -1300,7 +1301,29 @@ private:
             }
 
             float fading_index = decoder_ ? decoder_->getLastFadingIndex() : 0.0f;
-            if (port_) {
+            const bool use_quality_sample =
+                protocol_.shouldUseRxFrameForChannelQuality(result.frame_data);
+            if (phyDiagnosticsEnabled()) {
+                char line[512];
+                std::snprintf(line, sizeof(line),
+                              "event=%s station=%s frame_type=%s "
+                              "seq=%d snr_db=%.2f fading=%.6f data_mod=%d data_rate=%d "
+                              "cw_ok=%d cw_fail=%d",
+                              use_quality_sample
+                                  ? "station_frame_quality"
+                                  : "station_frame_quality_rejected",
+                              callsign_.c_str(),
+                              header.valid ? v2::frameTypeToString(header.type) : "INVALID",
+                              header.valid ? header.seq : -1,
+                              snr_db_,
+                              fading_index,
+                              static_cast<int>(data_modulation_),
+                              static_cast<int>(data_code_rate_),
+                              result.codewords_ok,
+                              result.codewords_failed);
+                phyDiagLine(line);
+            }
+            if (use_quality_sample && port_) {
                 if (isCarrierSenseCeilingQamMode(data_modulation_)) {
                     const bool low_fading_frame =
                         std::isfinite(fading_index) && fading_index >= 0.0f &&
@@ -1311,9 +1334,13 @@ private:
                             : 0.0f);
                 }
             }
-            protocol_.setChannelQuality(snr_db_, fading_index);
+            if (use_quality_sample) {
+                protocol_.setChannelQuality(snr_db_, fading_index);
+            }
             protocol_.onRxData(result.frame_data);
-            updateAdaptiveAdvisory(snr_db_, fading_index);
+            if (use_quality_sample) {
+                updateAdaptiveAdvisory(snr_db_, fading_index);
+            }
         }
     }
 

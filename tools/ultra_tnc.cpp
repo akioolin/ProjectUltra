@@ -604,13 +604,18 @@ private:
         }
 
         const float fading_index = decoder_.getLastFadingIndex();
-        engine_.setChannelQuality(result.snr_db, fading_index, result.snr_source);
+        const bool use_quality_sample =
+            engine_.shouldUseRxFrameForChannelQuality(result.frame_data);
+        if (use_quality_sample) {
+            engine_.setChannelQuality(result.snr_db, fading_index, result.snr_source);
+        }
         char fields[224];
         std::snprintf(fields, sizeof(fields),
                       "{\"bytes\":%zu,\"snr_db\":%.1f,\"snr_source\":\"%s\","
-                      "\"fading\":%.2f}",
+                      "\"fading\":%.2f,\"quality_sample\":%s}",
                       result.frame_data.size(), result.snr_db,
-                      ultra::snrSourceToString(result.snr_source), fading_index);
+                      ultra::snrSourceToString(result.snr_source), fading_index,
+                      use_quality_sample ? "true" : "false");
         ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
             "phy", "frame.rx", fields);
         engine_.onRxData(result.frame_data);

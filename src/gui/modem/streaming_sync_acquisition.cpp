@@ -36,8 +36,14 @@ namespace frame_policy = streaming_frame_policy;
 namespace signal_policy = streaming_signal_policy;
 
 float StreamingDecoder::applyCFOPreCorrection(std::vector<float>& samples, float cfo_hz,
-                                               size_t absolute_start_sample) {
-    if (std::abs(cfo_hz) < 0.05f || samples.empty()) {
+                                              size_t absolute_start_sample) {
+    // The Hilbert pre-corrector operates on a finite frame whose first samples
+    // are the OFDM LTS. At sub-Hz offsets the real CFO over one frame is
+    // negligible, while the finite analytic-filter edge transient can imprint a
+    // false per-carrier magnitude ripple on the LTS/pilots. Leave those small
+    // offsets for the demodulator's complex baseband correction path.
+    constexpr float kMinCFOForHilbertPreCorrectionHz = 0.75f;
+    if (std::abs(cfo_hz) < kMinCFOForHilbertPreCorrectionHz || samples.empty()) {
         pre_correction_cfo_ = 0.0f;
         return 0.0f;  // Skip if negligible
     }
@@ -87,6 +93,10 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
         result.has_ofdm_broadband_snr_db = waveform_->hasLastOFDMBroadbandSNREstimate();
         result.ofdm_broadband_snr_db = waveform_->getLastOFDMBroadbandSNREstimate();
         result.lts_fading_index = waveform_->getFadingIndex();
+        result.lts_timing_offset_samples = waveform_->getLastTimingOffsetSamples();
+        result.pilot_frequency_cv = waveform_->getLastPilotFrequencyCV();
+        result.pilot_temporal_cv = waveform_->getLastPilotTemporalCV();
+        result.pilot_symbol_mean_cv = waveform_->getLastPilotSymbolMeanCV();
         result.lts_residual_cfo_hz = waveform_->getLastLTSResidualCFOHz();
         result.snr_source = SNRSource::SYNC_QUALITY;
         if (result.has_ofdm_broadband_snr_db) {
@@ -187,6 +197,7 @@ void StreamingDecoder::searchForSync() {
         connected_data_preamble && expect_full_ofdm_anchor_ &&
         mode_ == protocol::WaveformMode::OFDM_CHIRP;
     bool use_light_search = connected_data_preamble && !use_full_ofdm_anchor_search;
+    bool used_full_anchor_fallback = false;
     size_t min_search = use_light_search ? LIGHT_SEARCH_SIZE : chirp_min_search;
     const size_t data_symbol_samples =
         (use_light_search && waveform_)
@@ -577,6 +588,7 @@ void StreamingDecoder::searchForSync() {
             if (sync_decision.found) {
                 found = true;
                 sync_result = light_sync_result;
+                used_full_anchor_fallback = true;
                 LOG_MODEM(INFO,
                           "[%s] Full OFDM anchor not found; accepted connected DATA sync fallback (corr=%.2f)",
                           log_prefix_.c_str(), sync_result.correlation);
@@ -702,6 +714,7 @@ void StreamingDecoder::searchForSync() {
         sync_start_time_ = std::chrono::steady_clock::now();
         pending_total_cw_ = 0;
         sync_from_warm_timed_window_ = used_warm_timed_window;
+        sync_from_full_anchor_fallback_ = used_full_anchor_fallback;
 
         state_ = DecoderState::SYNC_FOUND;
 

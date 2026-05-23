@@ -86,6 +86,10 @@ struct DecodeResult {
     float ofdm_internal_snr_db = 0.0f;      // Demodulator internal LLR/channel-quality scale.
     float sync_quality_db = 0.0f;           // Chirp correlation confidence; not physical SNR.
     float lts_fading_index = 0.0f;  // Per-carrier LTS/pilot fading index
+    float lts_timing_offset_samples = 0.0f;  // LTS phase-slope timing diagnostic.
+    float pilot_frequency_cv = 0.0f;  // Data-pilot corroboration of static selectivity.
+    float pilot_temporal_cv = 0.0f;
+    float pilot_symbol_mean_cv = 0.0f;
     float sync_correlation = 0.0f;  // Light/full preamble sync correlation
     float lts_residual_cfo_hz = 0.0f;  // Residual CFO reported by OFDM waveform
     float ping_training_rms = 0.0f;
@@ -502,6 +506,7 @@ private:
     bool search_floor_abs_valid_ = false;
     bool expect_full_ofdm_anchor_ = false;
     bool sync_from_warm_timed_window_ = false;
+    bool sync_from_full_anchor_fallback_ = false;
     bool warm_sync_active_ = false;
     streaming_frame_arrival_policy::WarmSyncPhase warm_sync_phase_ =
         streaming_frame_arrival_policy::WarmSyncPhase::COLD;

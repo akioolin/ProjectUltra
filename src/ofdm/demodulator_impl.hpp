@@ -80,12 +80,18 @@ struct OFDMDemodulator::Impl {
     // This scale feeds demapper/two-pass decisions; it is intentionally
     // separate from the public channel-quality meter below.
     float last_fading_index = 0.0f;
-    // Public channel-quality fading index: pilot-only frequency CV plus
-    // temporal CV, matching the waveform-layer calibration used by adaptation.
+    // Public channel-quality fading index. Coherent modes keep this on the
+    // payload-independent LTS estimate; differential modes can use pilot-only
+    // frequency CV plus temporal CV.
     float public_fading_index = 0.0f;
     std::vector<float> pilot_mag_sum_;
     std::vector<float> pilot_mag_sq_sum_;
+    float pilot_symbol_mean_sum_ = 0.0f;
+    float pilot_symbol_mean_sq_sum_ = 0.0f;
     size_t pilot_fading_symbol_count_ = 0;
+    mutable float last_pilot_frequency_cv = 0.0f;
+    mutable float last_pilot_temporal_cv = 0.0f;
+    mutable float last_pilot_symbol_mean_cv = 0.0f;
 
     // Output data
     Bytes demod_data;

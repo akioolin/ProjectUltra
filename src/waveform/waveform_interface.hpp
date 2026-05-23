@@ -178,6 +178,9 @@ public:
     // Combined freq_cv + temporal_cv; > 0.65 indicates significant fading
     // Returns 0 for single-carrier modes or modes without fading detection
     virtual float getFadingIndex() const { return 0.0f; }
+    virtual float getLastPilotFrequencyCV() const { return 0.0f; }
+    virtual float getLastPilotTemporalCV() const { return 0.0f; }
+    virtual float getLastPilotSymbolMeanCV() const { return 0.0f; }
 
     // Last OFDM LTS channel metrics. Non-OFDM waveforms return safe defaults.
     virtual float getLastLTSSignalPower() const { return 1.0f; }

@@ -463,14 +463,22 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                 appendRxLogLine(buf);
             }
         }
-        // Update protocol layer with current SNR and fading before processing frame.
+        // SNR is per decoded frame. Fading is a channel-quality sample only
+        // for addressed data/handshake frames after the PHY meter has accepted
+        // the measurement.
         float snr_db = modem_stats.snr_db;
         SNRSource snr_source = modem_stats.snr_source;
         float fading = modem_.getFadingIndex();
+        const bool use_quality_sample =
+            protocol_.shouldUseRxFrameForChannelQuality(data);
         protocol_.setMeasuredSNR(snr_db, snr_source);
-        protocol_.setChannelQuality(snr_db, fading, snr_source);
+        if (use_quality_sample) {
+            protocol_.setChannelQuality(snr_db, fading, snr_source);
+        }
         protocol_.onRxData(data);
-        updateAdaptiveAdvisory(snr_db, fading, snr_source);
+        if (use_quality_sample) {
+            updateAdaptiveAdvisory(snr_db, fading, snr_source);
+        }
     });
     ultra::gui::startupTrace("App", "set-raw-callback-exit");
 

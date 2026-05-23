@@ -621,6 +621,21 @@ void ProtocolEngine::setChannelQuality(float snr_db, float fading_index,
     connection_.setChannelQuality(snr_db, fading_index, source);
 }
 
+bool ProtocolEngine::shouldUseRxFrameForChannelQuality(const Bytes& data) const {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    const auto header = v2::parseHeader(data);
+    if (!header.valid ||
+        !v2::isAddressedToCallsign(header, connection_.getLocalCallsign())) {
+        return false;
+    }
+
+    if (connection_.getState() != ConnectionState::CONNECTED) {
+        return true;
+    }
+
+    return v2::isDataFrame(header.type);
+}
+
 float ProtocolEngine::getFadingIndex() const {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.getFadingIndex();

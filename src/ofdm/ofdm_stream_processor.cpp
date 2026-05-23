@@ -562,6 +562,18 @@ float OFDMDemodulator::getFadingIndex() const {
     return impl_->public_fading_index;
 }
 
+float OFDMDemodulator::getLastPilotFrequencyCV() const {
+    return impl_->last_pilot_frequency_cv;
+}
+
+float OFDMDemodulator::getLastPilotTemporalCV() const {
+    return impl_->last_pilot_temporal_cv;
+}
+
+float OFDMDemodulator::getLastPilotSymbolMeanCV() const {
+    return impl_->last_pilot_symbol_mean_cv;
+}
+
 float OFDMDemodulator::getLastLTSSignalPower() const {
     return impl_->last_lts_signal_power;
 }

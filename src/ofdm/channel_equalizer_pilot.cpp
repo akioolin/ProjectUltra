@@ -5,18 +5,44 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include "demodulator_impl.hpp"
 #include "demodulator_constants.hpp"
 #include "ultra/logging.hpp"
+#include "ultra/phy_diagnostics.hpp"
 
 namespace ultra {
 
 using namespace demod_constants;
 
+namespace {
+
+bool coherentPublicFadingUsesLTS(Modulation mod) {
+    switch (mod) {
+        case Modulation::BPSK:
+        case Modulation::QPSK:
+        case Modulation::QAM8:
+        case Modulation::QAM16:
+        case Modulation::QAM32:
+        case Modulation::QAM64:
+        case Modulation::QAM256:
+            return true;
+        default:
+            return false;
+    }
+}
+
+}  // namespace
+
 void OFDMDemodulator::Impl::resetPilotFadingStats() {
     pilot_mag_sum_.clear();
     pilot_mag_sq_sum_.clear();
+    pilot_symbol_mean_sum_ = 0.0f;
+    pilot_symbol_mean_sq_sum_ = 0.0f;
     pilot_fading_symbol_count_ = 0;
+    last_pilot_frequency_cv = 0.0f;
+    last_pilot_temporal_cv = 0.0f;
+    last_pilot_symbol_mean_cv = 0.0f;
     public_fading_index = 0.0f;
 }
 
@@ -53,12 +79,18 @@ float OFDMDemodulator::Impl::computePilotFadingIndexFromStats() const {
     const float freq_mean = freq_mean_sum / static_cast<float>(freq_count);
     float freq_var_sum = 0.0f;
     float temporal_cv_sum = 0.0f;
+    float temporal_raw_cv_sum = 0.0f;
+    float temporal_cv2_max = 0.0f;
+    float freq_min = std::numeric_limits<float>::max();
+    float freq_max = 0.0f;
     size_t temporal_count = 0;
     for (size_t i = 0; i < pilot_mag_sum_.size(); ++i) {
         const float mean = pilot_mag_sum_[i] * inv_count;
         if (mean <= 0.01f || !std::isfinite(mean)) {
             continue;
         }
+        freq_min = std::min(freq_min, mean);
+        freq_max = std::max(freq_max, mean);
 
         const float freq_diff = mean - freq_mean;
         freq_var_sum += freq_diff * freq_diff;
@@ -66,6 +98,8 @@ float OFDMDemodulator::Impl::computePilotFadingIndexFromStats() const {
         const float mean_sq = pilot_mag_sq_sum_[i] * inv_count;
         const float temporal_var = std::max(0.0f, mean_sq - mean * mean);
         const float temporal_cv2 = temporal_var / (mean * mean);
+        temporal_raw_cv_sum += std::sqrt(std::max(0.0f, temporal_cv2));
+        temporal_cv2_max = std::max(temporal_cv2_max, temporal_cv2);
         temporal_cv_sum +=
             std::sqrt(std::max(0.0f, temporal_cv2 - pilot_mag_noise_cv2));
         ++temporal_count;
@@ -75,12 +109,66 @@ float OFDMDemodulator::Impl::computePilotFadingIndexFromStats() const {
         ? (freq_var_sum / static_cast<float>(freq_count)) / (freq_mean * freq_mean)
         : 0.0f;
     const float freq_noise_cv2 = pilot_mag_noise_cv2 * inv_count;
+    const float freq_cv_raw = std::sqrt(std::max(0.0f, freq_cv2));
     const float freq_cv = std::sqrt(std::max(0.0f, freq_cv2 - freq_noise_cv2));
+    const float temporal_cv_raw = (temporal_count > 0)
+        ? temporal_raw_cv_sum / static_cast<float>(temporal_count)
+        : 0.0f;
     const float temporal_cv = (temporal_count > 0)
         ? temporal_cv_sum / static_cast<float>(temporal_count)
         : 0.0f;
+    float symbol_mean_cv_raw = 0.0f;
+    if (pilot_fading_symbol_count_ > 0) {
+        const float symbol_mean =
+            pilot_symbol_mean_sum_ / static_cast<float>(pilot_fading_symbol_count_);
+        const float symbol_mean_sq =
+            pilot_symbol_mean_sq_sum_ / static_cast<float>(pilot_fading_symbol_count_);
+        const float symbol_mean_var =
+            std::max(0.0f, symbol_mean_sq - symbol_mean * symbol_mean);
+        symbol_mean_cv_raw = (symbol_mean > 0.01f)
+            ? std::sqrt(symbol_mean_var) / symbol_mean
+            : 0.0f;
+    }
 
-    return freq_cv + temporal_cv;
+    const float fading_index = freq_cv + temporal_cv;
+    last_pilot_frequency_cv = freq_cv;
+    last_pilot_temporal_cv = temporal_cv;
+    last_pilot_symbol_mean_cv = symbol_mean_cv_raw;
+    if (phyDiagnosticsEnabled()) {
+        char line[768];
+        std::snprintf(line, sizeof(line),
+                      "event=pilot_fading_stats mod=%d rate=%d symbols=%zu "
+                      "pilots=%zu snr_db=%.2f snr_linear=%.3f "
+                      "pilot_noise_cv2=%.6f freq_noise_cv2=%.6f "
+                      "freq_mean=%.6f freq_min=%.6f freq_max=%.6f "
+                      "freq_cv_raw=%.6f freq_cv=%.6f "
+                      "temporal_cv_raw=%.6f temporal_cv=%.6f "
+                      "temporal_cv2_max=%.6f symbol_mean_cv_raw=%.6f "
+                      "public_fading=%.6f "
+                      "instant_fading=%.6f",
+                      static_cast<int>(config.modulation),
+                      static_cast<int>(config.code_rate),
+                      pilot_fading_symbol_count_,
+                      temporal_count,
+                      last_snr_db_estimate_valid ? last_snr_db_estimate : 0.0f,
+                      snr_linear,
+                      pilot_mag_noise_cv2,
+                      freq_noise_cv2,
+                      freq_mean,
+                      freq_min == std::numeric_limits<float>::max() ? 0.0f : freq_min,
+                      freq_max,
+                      freq_cv_raw,
+                      freq_cv,
+                      temporal_cv_raw,
+                      temporal_cv,
+                      temporal_cv2_max,
+                      symbol_mean_cv_raw,
+                      fading_index,
+                      last_fading_index);
+        phyDiagLine(line);
+    }
+
+    return fading_index;
 }
 
 void OFDMDemodulator::Impl::updatePilotFadingStats(const std::vector<Complex>& h_ls_all) {
@@ -97,8 +185,13 @@ void OFDMDemodulator::Impl::updatePilotFadingStats(const std::vector<Complex>& h
     }
 
     float symbol_mag_sum = 0.0f;
+    float symbol_mag_min = std::numeric_limits<float>::max();
+    float symbol_mag_max = 0.0f;
     for (const Complex& h : h_ls_all) {
-        symbol_mag_sum += std::abs(h);
+        const float mag = std::abs(h);
+        symbol_mag_sum += mag;
+        symbol_mag_min = std::min(symbol_mag_min, mag);
+        symbol_mag_max = std::max(symbol_mag_max, mag);
     }
     const float symbol_mag_mean =
         symbol_mag_sum / static_cast<float>(h_ls_all.size());
@@ -112,9 +205,39 @@ void OFDMDemodulator::Impl::updatePilotFadingStats(const std::vector<Complex>& h
         pilot_mag_sum_[i] += mag;
         pilot_mag_sq_sum_[i] += mag * mag;
     }
+    pilot_symbol_mean_sum_ += symbol_mag_mean;
+    pilot_symbol_mean_sq_sum_ += symbol_mag_mean * symbol_mag_mean;
     ++pilot_fading_symbol_count_;
 
     public_fading_index = computePilotFadingIndexFromStats();
+
+    if (phyDiagnosticsEnabled()) {
+        float symbol_mag_var = 0.0f;
+        for (const Complex& h : h_ls_all) {
+            const float diff = std::abs(h) - symbol_mag_mean;
+            symbol_mag_var += diff * diff;
+        }
+        symbol_mag_var /= static_cast<float>(h_ls_all.size());
+        const float symbol_cv = (symbol_mag_mean > 0.01f)
+            ? std::sqrt(symbol_mag_var) / symbol_mag_mean
+            : 0.0f;
+        char line[512];
+        std::snprintf(line, sizeof(line),
+                      "event=pilot_fading_symbol mod=%d rate=%d symbol=%zu "
+                      "pilots=%zu raw_mean=%.6f raw_min=%.6f raw_max=%.6f "
+                      "raw_cv=%.6f public_fading=%.6f instant_fading=%.6f",
+                      static_cast<int>(config.modulation),
+                      static_cast<int>(config.code_rate),
+                      pilot_fading_symbol_count_,
+                      h_ls_all.size(),
+                      symbol_mag_mean,
+                      symbol_mag_min == std::numeric_limits<float>::max() ? 0.0f : symbol_mag_min,
+                      symbol_mag_max,
+                      symbol_cv,
+                      public_fading_index,
+                      last_fading_index);
+        phyDiagLine(line);
+    }
 }
 
 void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& freq_domain) {
@@ -293,7 +416,19 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     const float fading_index =
         (h_mag_mean > 0.01f) ? std::sqrt(h_mag_variance) / h_mag_mean : 0.0f;
     last_fading_index = fading_index;
-    updatePilotFadingStats(h_ls_all);
+    if (coherentPublicFadingUsesLTS(config.modulation)) {
+        // Coherent QAM/BPSK data-symbol pilot magnitudes are useful for
+        // equalization, but the real-passband coherent payload can imprint
+        // symbol-dependent pilot magnitude ripple that is not RF fading. Keep
+        // the public meter on the payload-independent LTS channel estimate
+        // while still retaining pilot frequency/temporal components as a
+        // measurement-validity cross-check for static notches.
+        const float lts_public_fading = public_fading_index;
+        updatePilotFadingStats(h_ls_all);
+        public_fading_index = lts_public_fading;
+    } else {
+        updatePilotFadingStats(h_ls_all);
+    }
 
     // Phase-1 transfer runs showed temporal pilot-channel residuals are too
     // easily contaminated by channel-estimate motion during long OFDM frames.

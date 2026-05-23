@@ -151,6 +151,9 @@ public:
     // 0-1 range: < 0.1 = flat (AWGN), 0.15-0.30 = mild fading, > 0.30 = heavy fading
     // Note: OFDM internal thresholds use this directly; MC-DPSK adds temporal CV on top
     float getFadingIndex() const;
+    float getLastPilotFrequencyCV() const;
+    float getLastPilotTemporalCV() const;
+    float getLastPilotSymbolMeanCV() const;
 
     // Last LTS channel-estimation metrics from processPresynced().
     float getLastLTSSignalPower() const;

@@ -91,6 +91,9 @@ public:
     float getLastOFDMBroadbandSNREstimate() const override;
     float estimatedCFO() const override;
     float getFadingIndex() const override;  // From demodulator pilot variance
+    float getLastPilotFrequencyCV() const override;
+    float getLastPilotTemporalCV() const override;
+    float getLastPilotSymbolMeanCV() const override;
     float getLastLTSSignalPower() const override;
     float getLastLTSChannelMagnitude() const override;
     float getLastLTSResidualCFOHz() const override;

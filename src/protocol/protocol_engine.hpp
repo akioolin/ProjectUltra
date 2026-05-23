@@ -175,6 +175,7 @@ public:
     // Set channel quality including fading detection
     void setChannelQuality(float snr_db, float fading_index,
                            SNRSource source = SNRSource::NONE);
+    bool shouldUseRxFrameForChannelQuality(const Bytes& data) const;
     float getFadingIndex() const;
 
     // Get current data mode

@@ -927,6 +927,27 @@ float OFDMChirpWaveform::getFadingIndex() const {
     return 0.0f;
 }
 
+float OFDMChirpWaveform::getLastPilotFrequencyCV() const {
+    if (demodulator_) {
+        return demodulator_->getLastPilotFrequencyCV();
+    }
+    return 0.0f;
+}
+
+float OFDMChirpWaveform::getLastPilotTemporalCV() const {
+    if (demodulator_) {
+        return demodulator_->getLastPilotTemporalCV();
+    }
+    return 0.0f;
+}
+
+float OFDMChirpWaveform::getLastPilotSymbolMeanCV() const {
+    if (demodulator_) {
+        return demodulator_->getLastPilotSymbolMeanCV();
+    }
+    return 0.0f;
+}
+
 float OFDMChirpWaveform::getLastTimingOffsetSamples() const {
     if (demodulator_) {
         return demodulator_->getLastTimingOffsetSamples();
