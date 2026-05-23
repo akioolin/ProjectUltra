@@ -487,6 +487,17 @@ if(SDL2_FOUND)
     target_sources(ultra_core PRIVATE src/tnc/tnc_bridge.cpp)
 endif()
 
+add_library(ultra_tool_wav_io STATIC
+    tools/io/wav_io.cpp
+)
+ultra_enable_tool_test_warnings(tools/io/wav_io.cpp)
+target_include_directories(ultra_tool_wav_io PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools
+)
+target_link_libraries(ultra_tool_wav_io PUBLIC ultra_core)
+target_link_libraries(ota_simulator_service PUBLIC ultra_tool_wav_io)
+
 # Shared GUI/modem runtime source lists. Keep these centralized so CLI tools,
 # TNC, simulator, and GUI builds cannot silently drift apart.
 set(ULTRA_STREAMING_DECODER_SOURCES
@@ -532,16 +543,6 @@ set(ULTRA_MODEM_ENGINE_SOURCES
 
 # Command-line modem tool
 if(ULTRA_BUILD_TOOLS)
-    add_library(ultra_tool_wav_io STATIC
-        tools/io/wav_io.cpp
-    )
-    ultra_enable_tool_test_warnings(tools/io/wav_io.cpp)
-    target_include_directories(ultra_tool_wav_io PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/tools
-    )
-    target_link_libraries(ultra_tool_wav_io PUBLIC ultra_core)
-
     add_library(ultra_sim_station STATIC
         tools/sim/simulated_station.cpp
         ${ULTRA_STREAMING_MODEM_SOURCES}

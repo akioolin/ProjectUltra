@@ -19,6 +19,14 @@ void assertEqual(const std::vector<float>& actual, const std::vector<float>& exp
     }
 }
 
+double rms(const std::vector<float>& samples) {
+    double sum = 0.0;
+    for (float sample : samples) {
+        sum += static_cast<double>(sample) * static_cast<double>(sample);
+    }
+    return samples.empty() ? 0.0 : std::sqrt(sum / static_cast<double>(samples.size()));
+}
+
 std::vector<float> ramp(size_t count, float scale = 0.001f) {
     std::vector<float> out(count);
     for (size_t i = 0; i < out.size(); ++i) {
@@ -194,6 +202,40 @@ int main() {
         "fast",
         std::vector<float>(bounded.maxQueuedSamples() + bounded.sessionTickSamples(), 0.25f)));
     assert(bounded.pendingTransmitSamples("fast") == bounded.maxQueuedSamples());
+
+    SessionContext injected({
+        .session_id = "injected",
+        .display_name = "Injected",
+        .default_channel_model = ChannelType::PASSTHROUGH,
+        .default_snr_db = 80.0f,
+        .seed = 0x6060u,
+        .station_cap = 2,
+    });
+    assert(injected.registerStation("listener"));
+    assert(!injected.registerStation(std::string(
+        ultra::ota_channel_core::kInjectedAudioStationId)));
+    assert(injected.stationCount() == 1);
+
+    const uint64_t inject_start = injected.sessionTickSamples() * 2;
+    const auto injected_audio = ramp(injected.sessionTickSamples(), 0.01f);
+    assert(injected.injectAudio(inject_start, injected_audio));
+
+    const auto injected_stations = injected.listStations();
+    assert(injected_stations.size() == 1);
+    assert(injected_stations[0] == "listener");
+    assert(!injected.hasStation(ultra::ota_channel_core::kInjectedAudioStationId));
+
+    const auto before_injection =
+        injected.receiveForStation("listener", 0, injected.sessionTickSamples());
+    assert(rms(before_injection) == 0.0);
+    const auto during_injection =
+        injected.receiveForStation("listener", inject_start, injected_audio.size());
+    assertEqual(during_injection, injected_audio);
+    const auto after_injection =
+        injected.receiveForStation("listener",
+                                   inject_start + injected_audio.size(),
+                                   injected.sessionTickSamples());
+    assert(rms(after_injection) == 0.0);
 
     std::cout << "session context lifecycle deterministic\n";
     return 0;

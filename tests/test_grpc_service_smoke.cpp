@@ -1,15 +1,18 @@
 #include "helpers/temp_dir.hpp"
+#include "io/wav_io.hpp"
 #include "ota_channel_core/session_manager.hpp"
 #include "ota_simulator.grpc.pb.h"
 #include "ota_simulator_service/auth_allowlist.hpp"
 #include "ota_simulator_service/ota_simulator_service.hpp"
 
 #include <cassert>
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <grpcpp/grpcpp.h>
 
@@ -28,6 +31,14 @@ bool hasSession(const otasim::ListSessionsResponse& response, const std::string&
         }
     }
     return false;
+}
+
+double rms(const std::vector<float>& samples) {
+    double sum = 0.0;
+    for (float sample : samples) {
+        sum += static_cast<double>(sample) * static_cast<double>(sample);
+    }
+    return samples.empty() ? 0.0 : std::sqrt(sum / static_cast<double>(samples.size()));
 }
 
 }  // namespace
@@ -141,6 +152,91 @@ int main() {
     status = stub->SetChannel(&set_channel_context, set_channel, &ack);
     assert(status.ok());
     assert(ack.accepted());
+
+    otasim::SetChannelRequest passthrough_channel;
+    passthrough_channel.set_session_id(ultra::ota_channel_core::kLobbySessionId);
+    passthrough_channel.set_model("passthrough");
+    passthrough_channel.set_snr_db(80.0);
+    passthrough_channel.set_seed(99);
+    otasim::CommandAck passthrough_ack;
+    grpc::ClientContext passthrough_context;
+    addToken(passthrough_context, "alice_token");
+    status = stub->SetChannel(&passthrough_context, passthrough_channel, &passthrough_ack);
+    assert(status.ok());
+    assert(passthrough_ack.accepted());
+
+    otasim::JoinSessionRequest lobby_join;
+    lobby_join.set_session_id(ultra::ota_channel_core::kLobbySessionId);
+    lobby_join.set_station_id("ALPHA");
+    otasim::JoinSessionResponse lobby_join_response;
+    grpc::ClientContext lobby_join_context;
+    addToken(lobby_join_context, "alice_token");
+    status = stub->JoinSession(&lobby_join_context, lobby_join, &lobby_join_response);
+    assert(status.ok());
+    assert(lobby_join_response.session().station_count() == 1);
+
+    auto lobby = service.sessionManager().getSession(ultra::ota_channel_core::kLobbySessionId);
+    assert(lobby);
+    assert(lobby->stationCount() == 1);
+
+    otasim::InjectEffectRequest tone_inject;
+    tone_inject.set_session_id(ultra::ota_channel_core::kLobbySessionId);
+    tone_inject.set_effect_type("tone");
+    tone_inject.set_params_json("kind=tone;hz=1500;gain=0.35");
+    tone_inject.set_start_sample(9600);
+    tone_inject.set_duration_samples(4800);
+    otasim::CommandAck tone_ack;
+    grpc::ClientContext tone_context;
+    addToken(tone_context, "alice_token");
+    status = stub->InjectEffect(&tone_context, tone_inject, &tone_ack);
+    assert(status.ok());
+    assert(tone_ack.accepted());
+    assert(lobby->stationCount() == 1);
+    assert(!lobby->hasStation(ultra::ota_channel_core::kInjectedAudioStationId));
+
+    const auto tone_before = lobby->receiveForStation("ALPHA", 9120, 480);
+    const auto tone_during = lobby->receiveForStation("ALPHA", 9600, 4800);
+    const auto tone_after = lobby->receiveForStation("ALPHA", 14400, 480);
+    assert(rms(tone_before) == 0.0);
+    assert(rms(tone_during) > 0.20);
+    assert(rms(tone_after) == 0.0);
+
+    const auto wav_path = temp.child("inject.wav");
+    std::vector<float> wav_source(960, 0.0f);
+    constexpr double kTwoPi = 6.283185307179586476925286766559;
+    for (size_t i = 0; i < wav_source.size(); ++i) {
+        wav_source[i] = 0.45f * std::sin(kTwoPi * 1000.0 *
+                                         static_cast<double>(i) / 48000.0);
+    }
+    assert(ultra::tools::io::writeWavPCM16Mono(wav_path.string(), wav_source));
+
+    otasim::InjectEffectRequest wav_inject;
+    wav_inject.set_session_id(ultra::ota_channel_core::kLobbySessionId);
+    wav_inject.set_effect_type("wav");
+    wav_inject.set_params_json("kind=wav;path=" + wav_path.string() + ";gain=0.5");
+    wav_inject.set_start_sample(19200);
+    wav_inject.set_duration_samples(480);
+    otasim::CommandAck wav_ack;
+    grpc::ClientContext wav_context;
+    addToken(wav_context, "alice_token");
+    status = stub->InjectEffect(&wav_context, wav_inject, &wav_ack);
+    assert(status.ok());
+    assert(wav_ack.accepted());
+    const auto wav_during = lobby->receiveForStation("ALPHA", 19200, 480);
+    const auto wav_after = lobby->receiveForStation("ALPHA", 19680, 480);
+    assert(rms(wav_during) > 0.10);
+    assert(rms(wav_after) == 0.0);
+
+    otasim::GetChannelRequest injected_channel_request;
+    injected_channel_request.set_session_id(ultra::ota_channel_core::kLobbySessionId);
+    otasim::ChannelState injected_channel;
+    grpc::ClientContext injected_channel_context;
+    addToken(injected_channel_context, "alice_token");
+    status = stub->GetChannel(&injected_channel_context,
+                              injected_channel_request,
+                              &injected_channel);
+    assert(status.ok());
+    assert(injected_channel.active_effects_size() >= 2);
 
     otasim::SetChannelRequest real_hf_without_bed;
     real_hf_without_bed.set_session_id(ultra::ota_channel_core::kLobbySessionId);

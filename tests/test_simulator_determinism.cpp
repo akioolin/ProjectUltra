@@ -59,6 +59,19 @@ std::vector<float> payloadFrame() {
     return payload;
 }
 
+std::vector<float> injectedTone(size_t count) {
+    constexpr double kTwoPi = 6.283185307179586476925286766559;
+    constexpr double kToneHz = 1500.0;
+    constexpr double kGain = 0.35;
+    std::vector<float> tone(count);
+    const double phase_step = kTwoPi * kToneHz /
+                              static_cast<double>(channel::kDefaultSampleRate);
+    for (size_t i = 0; i < tone.size(); ++i) {
+        tone[i] = static_cast<float>(kGain * std::sin(phase_step * static_cast<double>(i)));
+    }
+    return tone;
+}
+
 SimResult runSameSeedCell(int arrival_delay_ticks) {
     channel::SessionConfig cfg;
     cfg.session_id = "determinism";
@@ -108,6 +121,57 @@ SimResult runSameSeedCell(int arrival_delay_ticks) {
     result.frame_success = payload_energy > 1.0 ? 100 : 0;
     result.retx = result.frame_success == 100 ? 0 : 1;
     result.rx_hash = hashSamples(bravo_rx);
+    return result;
+}
+
+SimResult runInjectedAudioCell() {
+    channel::SessionConfig cfg;
+    cfg.session_id = "injected-determinism";
+    cfg.display_name = "injected-determinism";
+    cfg.default_channel_model = channel::ChannelType::AWGN;
+    cfg.default_snr_db = 10.0f;
+    cfg.seed = 901;
+
+    channel::SessionContext session(cfg);
+    require(session.registerStation("ALPHA"), "register injected ALPHA");
+    require(session.registerStation("BRAVO"), "register injected BRAVO");
+    require(!session.hasStation(channel::kInjectedAudioStationId),
+            "phantom injector is registered");
+
+    const uint64_t start_sample = 4800;
+    const auto tone = injectedTone(2400);
+    require(session.injectAudio(start_sample, tone), "inject scheduled tone");
+    require(session.stationCount() == 2, "injector changed station count");
+
+    std::vector<float> alpha_rx;
+    std::vector<float> bravo_rx;
+    while (session.sessionClockSamples() < start_sample + tone.size() + 480) {
+        const auto tick = session.advanceSessionClock();
+        for (const auto& block : tick.rx_blocks) {
+            if (block.station_id == "ALPHA") {
+                alpha_rx.insert(alpha_rx.end(), block.samples.begin(), block.samples.end());
+            } else if (block.station_id == "BRAVO") {
+                bravo_rx.insert(bravo_rx.end(), block.samples.begin(), block.samples.end());
+            }
+        }
+    }
+
+    require(alpha_rx.size() >= start_sample + tone.size(), "ALPHA injected RX too short");
+    require(bravo_rx.size() >= start_sample + tone.size(), "BRAVO injected RX too short");
+
+    double alpha_energy = 0.0;
+    double bravo_energy = 0.0;
+    for (size_t i = static_cast<size_t>(start_sample);
+         i < static_cast<size_t>(start_sample) + tone.size(); ++i) {
+        alpha_energy += static_cast<double>(alpha_rx[i]) * static_cast<double>(alpha_rx[i]);
+        bravo_energy += static_cast<double>(bravo_rx[i]) * static_cast<double>(bravo_rx[i]);
+    }
+
+    SimResult result;
+    result.frames_sent = 1;
+    result.frame_success = (alpha_energy > 10.0 && bravo_energy > 10.0) ? 100 : 0;
+    result.retx = result.frame_success == 100 ? 0 : 1;
+    result.rx_hash = hashSamples(alpha_rx) ^ (hashSamples(bravo_rx) * kFnvPrime);
     return result;
 }
 
@@ -293,6 +357,18 @@ int main() {
         require(got.rx_hash == reference.rx_hash, "RX samples varied");
     }
 
+    const SimResult injected_reference = runInjectedAudioCell();
+    for (int trial = 1; trial < 6; ++trial) {
+        const SimResult got = runInjectedAudioCell();
+        require(got.retx == injected_reference.retx, "injected retx varied");
+        require(got.frames_sent == injected_reference.frames_sent,
+                "injected frames_sent varied");
+        require(got.frame_success == injected_reference.frame_success,
+                "injected frame_success varied");
+        require(got.rx_hash == injected_reference.rx_hash,
+                "injected RX samples varied");
+    }
+
     // Task #83: the OTASim test path is sample-clock paced. Reusing one
     // SessionContext across trials must not leak wall-clock setup delay into
     // the RF sample index, retransmission metric, or RX sample stream.
@@ -321,6 +397,7 @@ int main() {
     std::cout << "SimulatorDeterminism retx=" << reference.retx
               << " frames_sent=" << reference.frames_sent
               << " frame_success=" << reference.frame_success
-              << " rx_hash=" << reference.rx_hash << "\n";
+              << " rx_hash=" << reference.rx_hash
+              << " injected_rx_hash=" << injected_reference.rx_hash << "\n";
     return 0;
 }

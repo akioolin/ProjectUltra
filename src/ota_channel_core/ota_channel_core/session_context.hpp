@@ -19,6 +19,8 @@
 
 namespace ultra::ota_channel_core {
 
+inline constexpr std::string_view kInjectedAudioStationId = "__inject__";
+
 struct SessionEvent {
     uint64_t sequence = 0;
     uint64_t sample_index = 0;
@@ -66,6 +68,8 @@ public:
     bool submitTransmit(std::string_view station_id,
                         uint64_t start_sample,
                         std::span<const float> samples);
+    bool injectAudio(uint64_t start_sample,
+                     std::span<const float> samples);
     bool receiveForStation(std::string_view station_id,
                            uint64_t start_sample,
                            size_t count,

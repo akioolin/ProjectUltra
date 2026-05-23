@@ -1,14 +1,20 @@
 #include "ota_simulator_service/ota_simulator_service.hpp"
 
+#include "io/wav_io.hpp"
 #include "ota_channel_core/models.hpp"
 #include "ultra/version.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
+#include <map>
+#include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <utility>
 
 namespace ultra::ota_simulator_service {
@@ -19,6 +25,15 @@ namespace channel = ultra::ota_channel_core;
 
 constexpr const char* kRealHfLoopMissingMessage =
     "real_hf_loop requires the server's --noise-bed-wav flag";
+constexpr uint64_t kDefaultToneDurationSamples = 3ull * channel::kDefaultSampleRate;
+constexpr uint64_t kNowInjectionLeadTicks = 2;
+constexpr double kTwoPi = 6.283185307179586476925286766559;
+constexpr double kMaxInjectionGain = 4.0;
+
+struct BuiltEffectAudio {
+    std::string kind;
+    std::vector<float> samples;
+};
 
 google::protobuf::Timestamp nowTimestamp() {
     const auto now = std::chrono::system_clock::now().time_since_epoch();
@@ -59,6 +74,171 @@ float rms(std::span<const float> samples) {
         sum += static_cast<double>(sample) * static_cast<double>(sample);
     }
     return static_cast<float>(std::sqrt(sum / static_cast<double>(samples.size())));
+}
+
+std::string trim(std::string_view value) {
+    size_t begin = 0;
+    while (begin < value.size() &&
+           std::isspace(static_cast<unsigned char>(value[begin]))) {
+        ++begin;
+    }
+    size_t end = value.size();
+    while (end > begin &&
+           std::isspace(static_cast<unsigned char>(value[end - 1]))) {
+        --end;
+    }
+    return std::string(value.substr(begin, end - begin));
+}
+
+std::map<std::string, std::string> parseEffectParams(std::string_view raw) {
+    std::map<std::string, std::string> params;
+    size_t cursor = 0;
+    while (cursor <= raw.size()) {
+        const size_t next = raw.find(';', cursor);
+        const std::string_view token = raw.substr(
+            cursor, next == std::string_view::npos ? std::string_view::npos : next - cursor);
+        const auto equals = token.find('=');
+        if (equals != std::string_view::npos) {
+            const std::string key = trim(token.substr(0, equals));
+            const std::string value = trim(token.substr(equals + 1));
+            if (!key.empty()) {
+                params[key] = value;
+            }
+        } else if (!trim(token).empty()) {
+            throw std::invalid_argument(
+                "params_json must use key=value;... tokens");
+        }
+        if (next == std::string_view::npos) {
+            break;
+        }
+        cursor = next + 1;
+    }
+    return params;
+}
+
+std::optional<std::string> paramValue(const std::map<std::string, std::string>& params,
+                                      std::string_view key) {
+    const auto it = params.find(std::string(key));
+    if (it == params.end()) {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
+double parseDoubleParam(const std::map<std::string, std::string>& params,
+                        std::string_view key,
+                        double default_value) {
+    const auto value = paramValue(params, key);
+    if (!value) {
+        return default_value;
+    }
+    size_t pos = 0;
+    const double parsed = std::stod(*value, &pos);
+    if (pos != value->size() || !std::isfinite(parsed)) {
+        throw std::invalid_argument(std::string(key) + " must be a finite number");
+    }
+    return parsed;
+}
+
+std::string normalizedEffectKind(std::string effect_type,
+                                 const std::map<std::string, std::string>& params) {
+    if (auto kind = paramValue(params, "kind")) {
+        effect_type = *kind;
+    }
+    std::string out;
+    out.reserve(effect_type.size());
+    for (const char c : effect_type) {
+        out.push_back(c == '-' ? '_' : static_cast<char>(
+            std::tolower(static_cast<unsigned char>(c))));
+    }
+    if (out == "inject_tone") {
+        return "tone";
+    }
+    if (out == "inject_wav") {
+        return "wav";
+    }
+    return out;
+}
+
+void validateGain(double gain) {
+    if (!std::isfinite(gain) || gain < 0.0 || gain > kMaxInjectionGain) {
+        std::ostringstream oss;
+        oss << "gain must be finite and in [0," << kMaxInjectionGain << "]";
+        throw std::invalid_argument(oss.str());
+    }
+}
+
+size_t checkedSampleCount(uint64_t samples, std::string_view field) {
+    if (samples == 0) {
+        throw std::invalid_argument(std::string(field) + " must be non-zero");
+    }
+    if (samples > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+        throw std::invalid_argument(std::string(field) + " is too large");
+    }
+    return static_cast<size_t>(samples);
+}
+
+std::vector<float> buildToneSamples(const std::map<std::string, std::string>& params,
+                                    uint64_t requested_duration_samples) {
+    const double hz = parseDoubleParam(params, "hz", 1500.0);
+    const double gain = parseDoubleParam(params, "gain", 0.35);
+    if (!std::isfinite(hz) || hz <= 0.0 ||
+        hz >= static_cast<double>(channel::kDefaultSampleRate) * 0.5) {
+        throw std::invalid_argument("hz must be finite and below Nyquist");
+    }
+    validateGain(gain);
+
+    const uint64_t duration_samples =
+        requested_duration_samples == 0 ? kDefaultToneDurationSamples
+                                        : requested_duration_samples;
+    const size_t count = checkedSampleCount(duration_samples, "duration_samples");
+    std::vector<float> samples(count);
+    const double phase_step = kTwoPi * hz /
+                              static_cast<double>(channel::kDefaultSampleRate);
+    for (size_t i = 0; i < samples.size(); ++i) {
+        samples[i] = static_cast<float>(gain * std::sin(phase_step * static_cast<double>(i)));
+    }
+    return samples;
+}
+
+std::vector<float> buildWavSamples(const std::map<std::string, std::string>& params,
+                                   uint64_t requested_duration_samples) {
+    const auto path = paramValue(params, "path");
+    if (!path || path->empty()) {
+        throw std::invalid_argument("wav injection requires path=FILE");
+    }
+    const double gain = parseDoubleParam(params, "gain", 1.0);
+    validateGain(gain);
+
+    auto wav = ultra::tools::io::loadWavMono48k(*path);
+    if (wav.samples_48k.empty()) {
+        throw std::invalid_argument("WAV contains no samples");
+    }
+    const uint64_t available = static_cast<uint64_t>(wav.samples_48k.size());
+    const uint64_t duration_samples =
+        requested_duration_samples == 0 ? available
+                                        : std::min(requested_duration_samples, available);
+    const size_t count = checkedSampleCount(duration_samples, "duration_samples");
+    std::vector<float> samples(count);
+    for (size_t i = 0; i < samples.size(); ++i) {
+        samples[i] = static_cast<float>(static_cast<double>(wav.samples_48k[i]) * gain);
+    }
+    return samples;
+}
+
+BuiltEffectAudio buildEffectAudio(const pb::InjectEffectRequest& request) {
+    const auto params = parseEffectParams(request.params_json());
+    const std::string kind = normalizedEffectKind(request.effect_type(), params);
+    if (kind == "tone") {
+        return {.kind = kind,
+                .samples = buildToneSamples(params, request.duration_samples())};
+    }
+    if (kind == "wav") {
+        return {.kind = kind,
+                .samples = buildWavSamples(params, request.duration_samples())};
+    }
+    throw std::invalid_argument(
+        "unsupported effect kind; use kind=tone or kind=wav");
 }
 
 void fillCaptureInfo(const CaptureSummary& summary, pb::CaptureInfo* response) {
@@ -433,6 +613,23 @@ grpc::Status OtaSimulatorService::InjectEffect(
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "effect_type is required");
     }
 
+    BuiltEffectAudio audio;
+    try {
+        audio = buildEffectAudio(*request);
+    } catch (const std::exception& e) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, e.what());
+    }
+
+    uint64_t start_sample = request->start_sample();
+    if (start_sample == 0) {
+        start_sample = session->sessionClockSamples() +
+                       kNowInjectionLeadTicks * session->sessionTickSamples();
+    }
+    if (!session->injectAudio(start_sample, audio.samples)) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                            "effect produced no audio samples");
+    }
+
     uint64_t command_id = 0;
     std::string effect_id;
     {
@@ -441,17 +638,22 @@ grpc::Status OtaSimulatorService::InjectEffect(
         effect_id = "effect-" + std::to_string(command_id);
         pb::ActiveEffect effect;
         effect.set_effect_id(effect_id);
-        effect.set_effect_type(request->effect_type());
-        effect.set_start_sample(request->start_sample());
-        effect.set_duration_samples(request->duration_samples());
+        effect.set_effect_type(audio.kind);
+        effect.set_start_sample(start_sample);
+        effect.set_duration_samples(static_cast<uint64_t>(audio.samples.size()));
         effect.set_params_json(request->params_json());
         active_effects_[request->session_id()].push_back(std::move(effect));
     }
-    session->appendEvent("effect_injected", {}, request->start_sample());
+    session->appendEvent("effect_injected", {}, start_sample);
     response->set_accepted(true);
-    response->set_message("effect recorded");
+    {
+        std::ostringstream message;
+        message << "effect injected start_sample=" << start_sample
+                << " duration_samples=" << audio.samples.size();
+        response->set_message(message.str());
+    }
     response->set_command_id(effect_id);
-    emitEvent(request->session_id(), request->start_sample(),
+    emitEvent(request->session_id(), start_sample,
               "effect_injected", jsonPair("effect_id", effect_id));
     return grpc::Status::OK;
 }

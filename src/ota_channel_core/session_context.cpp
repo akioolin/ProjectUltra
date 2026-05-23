@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -81,7 +82,7 @@ SessionContext::SessionContext(SessionConfig config)
 }
 
 bool SessionContext::registerStation(std::string station_id) {
-    if (station_id.empty()) {
+    if (station_id.empty() || station_id == kInjectedAudioStationId) {
         return false;
     }
 
@@ -215,6 +216,23 @@ bool SessionContext::submitTransmit(std::string_view station_id,
         capture_.tx_samples += samples.size();
     }
     appendEventLocked("tx", std::string(station_id), start_sample);
+    return true;
+}
+
+bool SessionContext::injectAudio(uint64_t start_sample,
+                                 std::span<const float> samples) {
+    if (samples.empty()) {
+        return false;
+    }
+    if (start_sample > std::numeric_limits<uint64_t>::max() -
+                           static_cast<uint64_t>(samples.size())) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    maybeSetChannelEpochLocked(start_sample, samples);
+    mixer_.submit(std::string(kInjectedAudioStationId), start_sample, samples);
+    appendEventLocked("audio_injected", std::string(kInjectedAudioStationId), start_sample);
     return true;
 }
 
