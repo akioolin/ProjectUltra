@@ -162,12 +162,20 @@ struct ConnectionAdaptiveTestAccess {
         return c.pending_code_rate_;
     }
 
+    static Modulation pendingModulation(const Connection& c) {
+        return c.pending_modulation_;
+    }
+
     static uint16_t modeChangeSeq(const Connection& c) {
         return c.mode_change_seq_;
     }
 
     static CodeRate adaptiveTargetRate(const Connection& c) {
         return c.adaptive_target_.rate;
+    }
+
+    static Modulation adaptiveTargetModulation(const Connection& c) {
+        return c.adaptive_target_.modulation;
     }
 
     static bool adaptiveTargetPending(const Connection& c) {
@@ -385,8 +393,10 @@ void test_adaptive_upgrade_requires_backlog_and_clean_windows() {
 
     CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c),
           "clean AWGN backlog should request adaptive upgrade");
-    CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R3_4,
-          "adaptive upgrade should target recommended R3/4 (post-Item-3-calibration)");
+    CHECK(ConnectionAdaptiveTestAccess::pendingModulation(c) == Modulation::QAM16,
+          "adaptive upgrade should target coherent QAM16 as the top AWGN rung");
+    CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R1_2,
+          "adaptive upgrade should target QAM16 R1/2");
 }
 
 void test_adaptive_upgrade_skips_small_backlog() {
@@ -428,6 +438,8 @@ void test_adaptive_downgrade_hysteresis_and_short_lockout_upgrade() {
 
     CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c),
           "two consecutive retry-pressure windows should issue downgrade");
+    CHECK(ConnectionAdaptiveTestAccess::pendingModulation(c) == Modulation::DQPSK,
+          "retry-pressure downgrade should stay on differential QPSK");
     CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R1_4,
           "R1/2 retry pressure should step down to R1/4");
     ConnectionAdaptiveTestAccess::acknowledgeModeChange(c);
@@ -444,8 +456,10 @@ void test_adaptive_downgrade_hysteresis_and_short_lockout_upgrade() {
 
     CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetPending(c),
           "clean windows after short lockout should queue upgrade");
-    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(c) == CodeRate::R3_4,
-          "short-lockout upgrade should target recommended R3/4");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetModulation(c) == Modulation::QAM16,
+          "short-lockout upgrade should target coherent QAM16 as the top AWGN rung");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(c) == CodeRate::R1_2,
+          "short-lockout upgrade should target QAM16 R1/2");
 }
 
 void test_adaptive_downgrade_waits_when_more_than_half_full() {
@@ -464,6 +478,8 @@ void test_adaptive_downgrade_waits_when_more_than_half_full() {
 
     CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetPending(c),
           "retry pressure should queue an adaptive downgrade");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetModulation(c) == Modulation::DQPSK,
+          "queued retry-pressure downgrade should stay on differential QPSK");
     CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(c) == CodeRate::R1_2,
           "R2/3 retry pressure should step down to R1/2");
     CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
@@ -490,6 +506,8 @@ void test_adaptive_downgrade_fires_when_window_half_full() {
 
     CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c),
           "half-free downgrade should issue MODE_CHANGE immediately");
+    CHECK(ConnectionAdaptiveTestAccess::pendingModulation(c) == Modulation::DQPSK,
+          "issued retry-pressure downgrade should stay on differential QPSK");
     CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R1_2,
           "issued downgrade should target R1/2");
     CHECK(!ConnectionAdaptiveTestAccess::adaptiveTargetPending(c),
@@ -523,6 +541,8 @@ void test_adaptive_stuck_downgrade_forces_after_timeout() {
 
     CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c),
           "stuck downgrade should force MODE_CHANGE after timeout");
+    CHECK(ConnectionAdaptiveTestAccess::pendingModulation(c) == Modulation::DQPSK,
+          "forced retry-pressure downgrade should stay on differential QPSK");
     CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R1_2,
           "forced downgrade should target R1/2");
     CHECK(!ConnectionAdaptiveTestAccess::adaptiveTargetPending(c),
@@ -550,8 +570,10 @@ void test_adaptive_upgrade_not_forced_after_timeout() {
 
     CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetPending(c),
           "clean backlog should queue an adaptive upgrade");
-    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(c) == CodeRate::R3_4,
-          "queued upgrade should target R3/4");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetModulation(c) == Modulation::QAM16,
+          "queued upgrade should target coherent QAM16 as the top AWGN rung");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(c) == CodeRate::R1_2,
+          "queued upgrade should target QAM16 R1/2");
     CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
           "full ARQ window should block normal upgrade boundary");
 
@@ -562,7 +584,9 @@ void test_adaptive_upgrade_not_forced_after_timeout() {
           "upgrade should not force MODE_CHANGE after downgrade timeout");
     CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetPending(c),
           "blocked upgrade should remain queued");
-    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(c) == CodeRate::R3_4,
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetModulation(c) == Modulation::QAM16,
+          "blocked upgrade should keep its target modulation");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(c) == CodeRate::R1_2,
           "blocked upgrade should keep its target rate");
 }
 
@@ -617,8 +641,10 @@ void test_adaptive_post_downgrade_lockout_expires() {
 
     CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetPending(c),
           "upgrade should queue once post-downgrade lockout expires");
-    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(c) == CodeRate::R3_4,
-          "expired post-downgrade lockout should allow recommended R3/4 upgrade");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetModulation(c) == Modulation::QAM16,
+          "expired post-downgrade lockout should allow recommended QAM16 upgrade");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(c) == CodeRate::R1_2,
+          "expired post-downgrade lockout should allow QAM16 R1/2 upgrade");
 }
 
 void test_forced_rate_disables_adaptive_controller() {

@@ -900,9 +900,8 @@ bool test_protocol_rate_upgrade() {
     stationA.setLocalCallsign("W1ABC");
     stationB.setLocalCallsign("K2DEF");
 
-    // Station B measures good in-band SNR - should trigger MODE_CHANGE.
-    // In-band SNR=32 + AWGN promotes to D8PSK while staying below the
-    // initial R3/4 cap.
+    // Station B measures clean high in-band SNR. The AWGN top rung is now
+    // coherent QAM16 R1/2, superseding the differential D8PSK AWGN rungs.
     stationB.setMeasuredSNR(32.0f);
 
     bool a_mode_changed = false;
@@ -934,22 +933,20 @@ bool test_protocol_rate_upgrade() {
 
     // Verify MODE_CHANGE was received
     if (!a_mode_changed) FAIL("No MODE_CHANGE received at A");
-    if (a_new_mod != ultra::Modulation::D8PSK) {
+    if (a_new_mod != ultra::Modulation::QAM16) {
         std::cout << "(got " << ultra::modulationToString(a_new_mod) << ") ";
-        FAIL("Expected D8PSK at 32 dB in-band SNR");
+        FAIL("Expected QAM16 at 32 dB in-band SNR");
     }
-    // Bootstrap rate cap: capInitialOFDMRate keeps R3/4 only at in-band SNR>=34
-    // AND fading<0.05. At SNR=32 the cap returns R2/3, so the expected
-    // outcome is D8PSK R2/3 not D8PSK R3/4. (See waveform_selection.hpp
-    // line 64.)
-    if (a_new_rate != ultra::CodeRate::R2_3) {
+    if (a_new_rate != ultra::CodeRate::R1_2) {
         std::cout << "(got " << ultra::codeRateToString(a_new_rate) << ") ";
-        FAIL("Expected R2/3 at 32 dB in-band SNR");
+        FAIL("Expected QAM16 R1/2 at 32 dB in-band SNR");
     }
 
     // Verify both stations report same mode
-    if (stationA.getDataCodeRate() != ultra::CodeRate::R2_3) FAIL("A has wrong code rate");
-    if (stationB.getDataCodeRate() != ultra::CodeRate::R2_3) FAIL("B has wrong code rate");
+    if (stationA.getDataModulation() != ultra::Modulation::QAM16) FAIL("A has wrong modulation");
+    if (stationB.getDataModulation() != ultra::Modulation::QAM16) FAIL("B has wrong modulation");
+    if (stationA.getDataCodeRate() != ultra::CodeRate::R1_2) FAIL("A has wrong code rate");
+    if (stationB.getDataCodeRate() != ultra::CodeRate::R1_2) FAIL("B has wrong code rate");
 
     PASS();
     return true;
@@ -1015,8 +1012,7 @@ bool test_adaptive_bidirectional() {
     stationA.setLocalCallsign("W1ABC");
     stationB.setLocalCallsign("K2DEF");
 
-    // Excellent near-AWGN in-band SNR should use high-rate DPSK. Coherent QAM is no
-    // longer the automatic HF default.
+    // Excellent AWGN in-band SNR should use the coherent QAM16 R1/2 top rung.
     stationB.setMeasuredSNR(37.0f);
 
     std::vector<std::string> received_at_a;
@@ -1036,18 +1032,15 @@ bool test_adaptive_bidirectional() {
 
     if (!stationA.isConnected()) FAIL("Not connected");
 
-    // Verify high-rate mode. D8PSK ladder re-enabled 2026-05-04
-    // (see waveform_selection.hpp): high-SNR AWGN picks D8PSK R3/4
-    // (recommendDataMode result), but bootstrap cap (capInitialOFDMRate)
-    // requires in-band SNR>=34 to keep R3/4. SNR=37 with fading=0 satisfies
-    // both, so the expected outcome is D8PSK R3/4.
-    if (stationA.getDataModulation() != ultra::Modulation::D8PSK) {
+    // Verify high-rate mode. QAM16 R1/2 now supersedes the differential D8PSK
+    // AWGN rungs, including at very high SNR.
+    if (stationA.getDataModulation() != ultra::Modulation::QAM16) {
         std::cout << "(got " << ultra::modulationToString(stationA.getDataModulation()) << ") ";
-        FAIL("Expected D8PSK at 37 dB in-band SNR");
+        FAIL("Expected QAM16 at 37 dB in-band SNR");
     }
-    if (stationA.getDataCodeRate() != ultra::CodeRate::R3_4) {
+    if (stationA.getDataCodeRate() != ultra::CodeRate::R1_2) {
         std::cout << "(got " << ultra::codeRateToString(stationA.getDataCodeRate()) << ") ";
-        FAIL("Expected R3/4 at 37 dB in-band SNR");
+        FAIL("Expected QAM16 R1/2 at 37 dB in-band SNR");
     }
 
     // Bidirectional transfer

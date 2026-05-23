@@ -226,6 +226,25 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
     // 1.5× the bits/symbol of DQPSK R2/3 at the same conditions, so
     // the throughput jumps from ~3.4 kbps to ~5 kbps with zero retx.
     //
+    // Coherent QAM16 — AWGN-only, R1/2 only for now (P5 ladder integration,
+    // 2026-05-23). Floor map (docs/COHERENT_LADDER_FLOOR_MAP_2026_05_22.md + the
+    // overnight 16-QAM journal) measured the AWGN R1/2 reliable floor at 14 dB,
+    // matching the industry-leader coherent 16-QAM. Gated to true AWGN
+    // (fading_index < 0.15) with the project's standard +2 dB margin (≥16 dB).
+    // Starting with R1/2 only to first prove coherent QAM16 drives end-to-end;
+    // R2/3 (floor 16 dB) is a follow-up once R1/2 is confirmed. Coherent QAM16
+    // still STORMS on fading, so the full Good-fading coherent selector (8PSK
+    // fallback + hysteresis + ARQ-health, see
+    // docs/COHERENT_LADDER_SELECTOR_DESIGN_2026_05_22.md) is deferred and the
+    // differential DQPSK/D8PSK ladder below remains the fading path. QAM16 is
+    // coherent and higher-order than the D8PSK rungs, so it correctly
+    // supersedes them on clean channels.
+    if (fading_index < 0.15f && snr_db >= 16.0f) {
+        mod = Modulation::QAM16;
+        rate = CodeRate::R1_2;
+        return;
+    }
+
     // D8PSK R3/4 — only on near-AWGN with very high SNR. Sweep showed
     // 6 retx at SNR=20 good fading (borderline) so reserve for AWGN.
     if (fading_index < 0.15f && snr_db >= 34.0f) {

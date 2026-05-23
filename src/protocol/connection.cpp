@@ -103,6 +103,42 @@ bool isMoreRobustRate(CodeRate candidate, CodeRate current) {
     return getCodeRateValue(candidate) < getCodeRateValue(current);
 }
 
+float modeEfficiency(Modulation mod, CodeRate rate) {
+    return static_cast<float>(getBitsPerSymbol(mod)) * getCodeRateValue(rate);
+}
+
+bool isFasterMode(Modulation candidate_mod, CodeRate candidate_rate,
+                  Modulation current_mod, CodeRate current_rate) {
+    return modeEfficiency(candidate_mod, candidate_rate) >
+           modeEfficiency(current_mod, current_rate) + 0.05f;
+}
+
+bool isMoreRobustMode(Modulation candidate_mod, CodeRate candidate_rate,
+                      Modulation current_mod, CodeRate current_rate) {
+    return modeEfficiency(candidate_mod, candidate_rate) <
+           modeEfficiency(current_mod, current_rate) - 0.05f;
+}
+
+Modulation oneStepMoreRobustModulation(Modulation mod) {
+    switch (mod) {
+        case Modulation::D8PSK:
+        case Modulation::QPSK:
+        case Modulation::QAM8:
+        case Modulation::QAM16:
+        case Modulation::QAM32:
+        case Modulation::QAM64:
+        case Modulation::QAM256:
+            return Modulation::DQPSK;
+        default:
+            return mod;
+    }
+}
+
+bool canDowngradeMode(Modulation mod, CodeRate rate) {
+    return oneStepMoreRobustModulation(mod) != mod ||
+           isFasterRate(rate, CodeRate::R1_4);
+}
+
 bool isNormalArqAckFrame(const Bytes& frame_data) {
     if (frame_data.size() < v2::ControlFrame::SIZE ||
         static_cast<v2::FrameType>(frame_data[2]) != v2::FrameType::ACK) {
@@ -1202,7 +1238,8 @@ bool Connection::tryIssueAdaptiveModeChangeAtBoundary() {
     }
 
     const bool is_downgrade =
-        isMoreRobustRate(adaptive_target_.rate, data_code_rate_);
+        isMoreRobustMode(adaptive_target_.modulation, adaptive_target_.rate,
+                         data_modulation_, data_code_rate_);
     const bool downgrade_stuck =
         is_downgrade &&
         adaptive_downgrade_queue_age_ms_ >= ADAPTIVE_DOWNGRADE_FORCE_MS;
@@ -1230,7 +1267,9 @@ bool Connection::tryIssueAdaptiveModeChangeAtBoundary() {
         return false;
     }
 
-    const bool is_upgrade = isFasterRate(adaptive_target_.rate, data_code_rate_);
+    const bool is_upgrade =
+        isFasterMode(adaptive_target_.modulation, adaptive_target_.rate,
+                     data_modulation_, data_code_rate_);
     if (is_upgrade && !hasAdaptiveUpgradeBacklog(adaptive_target_.rate)) {
         adaptive_target_ = AdaptiveModeTarget{};
         adaptive_downgrade_queue_age_ms_ = 0;
@@ -1246,9 +1285,11 @@ bool Connection::tryIssueAdaptiveModeChangeAtBoundary() {
 
     if (force_downgrade) {
         LOG_MODEM(WARN,
-                  "Connection: Forced downgrade after %ums queue age (window state ignored): %s -> %s",
+                  "Connection: Forced downgrade after %ums queue age (window state ignored): %s %s -> %s %s",
                   adaptive_downgrade_queue_age_ms_,
+                  modulationToString(data_modulation_),
                   codeRateToString(data_code_rate_),
+                  modulationToString(adaptive_target_.modulation),
                   codeRateToString(adaptive_target_.rate));
     }
 
@@ -1315,7 +1356,8 @@ void Connection::updateAdaptiveModeController(uint32_t elapsed_ms) {
     }
 
     if (adaptive_target_.pending &&
-        isMoreRobustRate(adaptive_target_.rate, data_code_rate_)) {
+        isMoreRobustMode(adaptive_target_.modulation, adaptive_target_.rate,
+                         data_modulation_, data_code_rate_)) {
         adaptive_downgrade_queue_age_ms_ += elapsed_ms;
         if (adaptive_downgrade_queue_age_ms_ >= ADAPTIVE_DOWNGRADE_FORCE_MS &&
             tryIssueAdaptiveModeChangeAtBoundary()) {
@@ -1350,15 +1392,35 @@ void Connection::updateAdaptiveModeController(uint32_t elapsed_ms) {
 
     if (retry_pressure &&
         adaptive_pressure_windows_ >= ADAPTIVE_PRESSURE_WINDOWS_FOR_DOWNGRADE &&
-        isFasterRate(data_code_rate_, CodeRate::R1_4)) {
+        canDowngradeMode(data_modulation_, data_code_rate_)) {
+        Modulation target_mod = data_modulation_;
+        CodeRate target_rate = adaptiveDowngradeTarget(data_code_rate_, recommended_rate);
+        const bool recommended_is_safe_downgrade =
+            isMoreRobustMode(recommended_mod, recommended_rate,
+                             data_modulation_, data_code_rate_) &&
+            getBitsPerSymbol(recommended_mod) <= getBitsPerSymbol(data_modulation_);
+        if (recommended_is_safe_downgrade) {
+            target_mod = recommended_mod;
+            target_rate = recommended_rate;
+        } else {
+            const Modulation robust_mod = oneStepMoreRobustModulation(data_modulation_);
+            if (robust_mod != data_modulation_) {
+                target_mod = robust_mod;
+                target_rate = data_code_rate_;
+            }
+        }
+
         adaptive_clean_windows_ = 0;
         adaptive_target_.pending = true;
-        adaptive_target_.modulation = recommended_mod;
-        adaptive_target_.rate = adaptiveDowngradeTarget(data_code_rate_, recommended_rate);
+        adaptive_target_.modulation = target_mod;
+        adaptive_target_.rate = target_rate;
         adaptive_target_.reason = v2::ModeChangeReason::CHANNEL_DEGRADED;
-        LOG_MODEM(INFO, "Connection: Adaptive downgrade queued: %s -> %s (recommended=%s, SNR=%.1f (%s), fading=%.2f)",
+        LOG_MODEM(INFO, "Connection: Adaptive downgrade queued: %s %s -> %s %s (recommended=%s %s, SNR=%.1f (%s), fading=%.2f)",
+                  modulationToString(data_modulation_),
                   codeRateToString(data_code_rate_),
+                  modulationToString(adaptive_target_.modulation),
                   codeRateToString(adaptive_target_.rate),
+                  modulationToString(recommended_mod),
                   codeRateToString(recommended_rate),
                   measured_snr_db_, snrSourceToString(measured_snr_source_), fading_index_);
         tryIssueAdaptiveModeChangeAtBoundary();
@@ -1375,14 +1437,17 @@ void Connection::updateAdaptiveModeController(uint32_t elapsed_ms) {
         adaptive_post_downgrade_lockout_ms_ == 0 &&
         !adaptive_target_.pending &&
         adaptive_clean_windows_ >= ADAPTIVE_CLEAN_WINDOWS_FOR_UPGRADE &&
-        isFasterRate(recommended_rate, data_code_rate_) &&
+        isFasterMode(recommended_mod, recommended_rate,
+                     data_modulation_, data_code_rate_) &&
         hasAdaptiveUpgradeBacklog(recommended_rate)) {
         adaptive_target_.pending = true;
         adaptive_target_.modulation = recommended_mod;
         adaptive_target_.rate = recommended_rate;
         adaptive_target_.reason = v2::ModeChangeReason::CHANNEL_IMPROVED;
-        LOG_MODEM(INFO, "Connection: Adaptive upgrade queued: %s -> %s (SNR=%.1f (%s), fading=%.2f, clean=%d, backlog=%zu frames)",
+        LOG_MODEM(INFO, "Connection: Adaptive upgrade queued: %s %s -> %s %s (SNR=%.1f (%s), fading=%.2f, clean=%d, backlog=%zu frames)",
+                  modulationToString(data_modulation_),
                   codeRateToString(data_code_rate_),
+                  modulationToString(adaptive_target_.modulation),
                   codeRateToString(adaptive_target_.rate),
                   measured_snr_db_, snrSourceToString(measured_snr_source_), fading_index_,
                   adaptive_clean_windows_,
