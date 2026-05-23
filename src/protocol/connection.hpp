@@ -293,7 +293,8 @@ private:
     static bool acceptsRateSelectionSNR(SNRSource source) {
         return source == SNRSource::NONE ||
                source == SNRSource::IDLE_IN_BAND ||
-               source == SNRSource::OFDM_BROADBAND;
+               source == SNRSource::OFDM_BROADBAND ||
+               source == SNRSource::MCDPSK_IN_BAND;
     }
 
     ConnectionConfig config_;

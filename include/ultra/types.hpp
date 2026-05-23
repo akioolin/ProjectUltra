@@ -23,6 +23,7 @@ enum class SNRSource : uint8_t {
     NONE = 0,
     IDLE_IN_BAND,     // IdleNoiseSNREstimator, receiver passband/in-band SNR.
     OFDM_BROADBAND,   // Historical name; OFDM LTS/pilot residual in-band SNR.
+    MCDPSK_IN_BAND,   // MC-DPSK training/data residual receiver in-band SNR.
     OFDM_INTERNAL,    // Demodulator internal LLR/channel-quality SNR scale.
     SYNC_QUALITY,     // Chirp correlation confidence score, not physical SNR.
 };
@@ -31,6 +32,7 @@ inline const char* snrSourceToString(SNRSource source) {
     switch (source) {
         case SNRSource::IDLE_IN_BAND:   return "idle_in_band";
         case SNRSource::OFDM_BROADBAND: return "ofdm_broadband";
+        case SNRSource::MCDPSK_IN_BAND: return "mcdpsk_in_band";
         case SNRSource::OFDM_INTERNAL:  return "ofdm_internal";
         case SNRSource::SYNC_QUALITY:   return "sync_quality";
         case SNRSource::NONE:
@@ -42,6 +44,7 @@ inline const char* snrSourceDisplayLabel(SNRSource source) {
     switch (source) {
         case SNRSource::IDLE_IN_BAND:   return "in-band SNR";
         case SNRSource::OFDM_BROADBAND: return "OFDM in-band SNR";
+        case SNRSource::MCDPSK_IN_BAND: return "MC-DPSK in-band SNR";
         case SNRSource::OFDM_INTERNAL:  return "OFDM internal SNR";
         case SNRSource::SYNC_QUALITY:   return "sync quality";
         case SNRSource::NONE:

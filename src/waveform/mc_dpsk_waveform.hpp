@@ -76,6 +76,7 @@ public:
 
     bool isSynced() const override;
     bool hasData() const override;
+    bool hasEstimatedSNR() const { return last_snr_valid_; }
     float estimatedSNR() const override;
     float estimatedCFO() const override;
     std::vector<std::complex<float>> getConstellationSymbols() const override;
@@ -129,6 +130,7 @@ private:
     bool synced_ = false;
     std::vector<float> soft_bits_;
     float last_snr_ = 0.0f;
+    bool last_snr_valid_ = false;
     float last_cfo_ = 0.0f;
 };
 

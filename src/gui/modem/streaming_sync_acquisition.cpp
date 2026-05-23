@@ -8,6 +8,7 @@
 #include "streaming_frame_policy.hpp"
 #include "streaming_signal_policy.hpp"
 #include "gui/startup_trace.hpp"
+#include "waveform/mc_dpsk_waveform.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "fec/frame_interleaver.hpp"
 #include "fec/burst_interleaver.hpp"
@@ -106,7 +107,13 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
                   result.lts_fading_index);
     } else {
         result.snr_source = SNRSource::SYNC_QUALITY;
-        if (result.has_idle_in_band_snr_db) {
+        const auto* mc_waveform = dynamic_cast<const MCDPSKWaveform*>(waveform_.get());
+        if (connected_ && mode_ == protocol::WaveformMode::MC_DPSK &&
+            mc_waveform && mc_waveform->hasEstimatedSNR() &&
+            std::isfinite(mc_waveform->estimatedSNR())) {
+            result.snr_db = mc_waveform->estimatedSNR();
+            result.snr_source = SNRSource::MCDPSK_IN_BAND;
+        } else if (result.has_idle_in_band_snr_db) {
             result.snr_db = result.idle_in_band_snr_db;
             result.snr_source = SNRSource::IDLE_IN_BAND;
         }

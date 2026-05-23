@@ -39,7 +39,17 @@ struct OperatorSNRDisplay {
     SNRSource source = SNRSource::NONE;
 };
 
+inline bool isOperatorPhysicalSNRSource(SNRSource source) {
+    return source == SNRSource::IDLE_IN_BAND ||
+           source == SNRSource::OFDM_BROADBAND ||
+           source == SNRSource::MCDPSK_IN_BAND;
+}
+
 inline OperatorSNRDisplay selectOperatorSNRDisplay(const LoopbackStats& stats) {
+    if (isOperatorPhysicalSNRSource(stats.snr_source) &&
+        std::isfinite(stats.snr_db)) {
+        return {true, stats.snr_db, stats.snr_source};
+    }
     if (stats.has_idle_in_band_snr_db && std::isfinite(stats.idle_in_band_snr_db)) {
         return {true, stats.idle_in_band_snr_db, SNRSource::IDLE_IN_BAND};
     }

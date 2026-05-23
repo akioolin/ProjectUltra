@@ -20,6 +20,8 @@
 #include <complex>
 #include <cmath>
 #include <random>
+#include <algorithm>
+#include <limits>
 
 namespace ultra {
 
@@ -329,6 +331,8 @@ public:
 
     // Get estimated CFO
     float getEstimatedCFO() const { return cfo_hz_; }
+    bool hasEstimatedSNR() const { return last_snr_valid_; }
+    float getEstimatedSNR() const { return last_snr_db_; }
 
     // Set CFO (from external estimation like dual chirp)
     void setCFO(float cfo_hz) { cfo_hz_ = cfo_hz; cfo_initial_phase_ = 0.0f; }
@@ -426,6 +430,8 @@ public:
         expected_data_bytes_ = 0;
         carrier_magnitudes_.clear();
         temporal_fading_index_ = 0.0f;
+        last_snr_valid_ = false;
+        last_snr_db_ = 0.0f;
     }
 
     const MultiCarrierDPSKConfig& getConfig() const { return config_; }
@@ -742,6 +748,7 @@ private:
         {
             size_t training_start = chirp_offset;  // 0 if external chirp, chirp_samples_ otherwise
             SampleSpan train_span(sample_buffer_.data() + training_start, training_samples_);
+            updateTrainingSNREstimate(train_span);
 
             // If external chirp detection was used, ALWAYS trust the chirp CFO
             // (processTraining's CFO estimate is unreliable - it can give spurious values
@@ -823,6 +830,83 @@ private:
         cfo_hz_ = 0.0f;
     }
 
+    void updateTrainingSNREstimate(SampleSpan training) {
+        last_snr_valid_ = false;
+        last_snr_db_ = 0.0f;
+        if (training.size() < training_samples_ ||
+            config_.training_symbols <= 0 ||
+            config_.num_carriers <= 0) {
+            return;
+        }
+
+        std::vector<Complex> channel(static_cast<size_t>(config_.num_carriers),
+                                     Complex(0.0f, 0.0f));
+        for (int c = 0; c < config_.num_carriers; ++c) {
+            Complex sum(0.0f, 0.0f);
+            for (int sym = 0; sym < config_.training_symbols; ++sym) {
+                const float phase = static_cast<float>(c * sym) *
+                                    static_cast<float>(M_PI) / 2.0f;
+                const Complex expected = std::polar(1.0f, phase);
+                const Complex observed = demodulateOneSymbol(
+                    training.data() + sym * config_.samples_per_symbol, c);
+                sum += observed * std::conj(expected);
+            }
+            channel[static_cast<size_t>(c)] =
+                sum / static_cast<float>(config_.training_symbols);
+        }
+
+        double signal_power = 0.0;
+        double residual_power = 0.0;
+        size_t sample_count = 0;
+        FIRFilter signal_filter = FIRFilter::bandpass(101, 50.0f, 2950.0f,
+                                                       config_.sample_rate);
+        FIRFilter residual_filter = FIRFilter::bandpass(101, 50.0f, 2950.0f,
+                                                         config_.sample_rate);
+        for (int sym = 0; sym < config_.training_symbols; ++sym) {
+            for (int i = 0; i < config_.samples_per_symbol; ++i) {
+                Complex fitted_complex(0.0f, 0.0f);
+                for (int c = 0; c < config_.num_carriers; ++c) {
+                    const float train_phase = static_cast<float>(c * sym) *
+                                              static_cast<float>(M_PI) / 2.0f;
+                    const Complex training_symbol = std::polar(1.0f, train_phase);
+                    const float carrier_phase =
+                        2.0f * static_cast<float>(M_PI) * carrier_freqs_[static_cast<size_t>(c)] *
+                        static_cast<float>(i) / config_.sample_rate;
+                    const Complex carrier = std::polar(1.0f, carrier_phase);
+                    fitted_complex += channel[static_cast<size_t>(c)] *
+                                      training_symbol * carrier;
+                }
+
+                const float fitted = 2.0f * fitted_complex.real();
+                const float sample =
+                    training[static_cast<size_t>(sym * config_.samples_per_symbol + i)];
+                const float residual = sample - fitted;
+                const float signal_in_band = signal_filter.process(fitted);
+                const float residual_in_band = residual_filter.process(residual);
+                signal_power += static_cast<double>(signal_in_band) * signal_in_band;
+                residual_power += static_cast<double>(residual_in_band) * residual_in_band;
+                ++sample_count;
+            }
+        }
+
+        if (sample_count == 0) {
+            return;
+        }
+        signal_power /= static_cast<double>(sample_count);
+        residual_power /= static_cast<double>(sample_count);
+        if (signal_power <= 0.0 || residual_power <= std::numeric_limits<double>::min()) {
+            return;
+        }
+
+        const float snr_db = static_cast<float>(
+            10.0 * std::log10(signal_power / residual_power));
+        if (!std::isfinite(snr_db)) {
+            return;
+        }
+        last_snr_db_ = std::clamp(snr_db, -20.0f, 60.0f);
+        last_snr_valid_ = true;
+    }
+
     // Demodulate one symbol period for one carrier
     // CFO correction: mix at carrier frequency, but the samples have already been
     // frequency-corrected if cfo_hz_ != 0 (done in applyCFOCorrection)
@@ -864,6 +948,8 @@ private:
 
     // Temporal fading index (Doppler-related magnitude variation over symbols)
     float temporal_fading_index_ = 0.0f;
+    bool last_snr_valid_ = false;
+    float last_snr_db_ = 0.0f;
 
     // Precomputed sizes
     size_t chirp_samples_;

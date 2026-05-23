@@ -200,6 +200,10 @@ bool MCDPSKWaveform::process(SampleSpan samples) {
     if (ready) {
         // Get soft bits from demodulator's internal state (computed in processGotChirp)
         soft_bits_ = demodulator_->getSoftBits();
+        last_snr_valid_ = demodulator_->hasEstimatedSNR();
+        if (last_snr_valid_) {
+            last_snr_ = demodulator_->getEstimatedSNR();
+        }
         LOG_MODEM(DEBUG, "MCDPSKWaveform: got %zu soft bits", soft_bits_.size());
         synced_ = true;
     }
@@ -217,6 +221,10 @@ bool MCDPSKWaveform::processDataOnly(SampleSpan samples) {
     }
 
     soft_bits_ = demodulator_->demodulateDataOnly(samples);
+    if (demodulator_->hasEstimatedSNR()) {
+        last_snr_valid_ = true;
+        last_snr_ = demodulator_->getEstimatedSNR();
+    }
     synced_ = !soft_bits_.empty();
     LOG_MODEM(DEBUG, "MCDPSKWaveform: data-only process: samples=%zu, soft_bits=%zu",
               samples.size(), soft_bits_.size());
@@ -229,6 +237,8 @@ void MCDPSKWaveform::reset() {
     }
     soft_bits_.clear();
     synced_ = false;
+    last_snr_valid_ = false;
+    last_snr_ = 0.0f;
     // NOTE: CFO is intentionally preserved across reset() for continuous tracking
     // Use setFrequencyOffset(0) to explicitly clear if needed
 }

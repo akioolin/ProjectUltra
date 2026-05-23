@@ -1,9 +1,11 @@
 #include "gui/modem/streaming_decoder.hpp"
 #include "gui/modem/streaming_encoder.hpp"
+#include "ota_channel_core/channel.hpp"
 #include "protocol/frame_v2.hpp"
 #include "ultra/logging.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <vector>
@@ -36,7 +38,9 @@ bool runLoopback(const char* name,
                  const MultiCarrierDPSKConfig& mc_config,
                  Modulation modulation,
                  const Bytes& serialized,
-                 v2::FrameType expected_type) {
+                 v2::FrameType expected_type,
+                 bool awgn_channel = false,
+                 float channel_snr_db = 20.0f) {
     StreamingEncoder encoder;
     encoder.setMode(protocol::WaveformMode::MC_DPSK);
     encoder.setMCDPSKConfig(mc_config);
@@ -64,6 +68,13 @@ bool runLoopback(const char* name,
     });
 
     auto audio = withSilence(samples);
+    if (awgn_channel) {
+        ultra::ota_channel_core::SimulatedChannel channel;
+        channel.setSeed(0x5a17u);
+        channel.configure(channel_snr_db, ultra::ota_channel_core::ChannelType::AWGN);
+        channel.transmitFromA(audio);
+        audio = channel.receiveForB(audio.size());
+    }
     feedInChunks(decoder, audio);
 
     while (decoder.hasFrame()) {
@@ -93,6 +104,16 @@ bool runLoopback(const char* name,
         std::cout << "FAIL: " << name << " CONNECT frame did not parse\n";
         return false;
     }
+    if (decoded.snr_source != SNRSource::MCDPSK_IN_BAND ||
+        !std::isfinite(decoded.snr_db) || decoded.snr_db <= 1.0f) {
+        std::cout << "FAIL: " << name << " MC-DPSK connected SNR invalid: "
+                  << decoded.snr_db << " dB ("
+                  << snrSourceToString(decoded.snr_source) << ")\n";
+        return false;
+    }
+    std::cout << name << " MC-DPSK connected SNR="
+              << decoded.snr_db << " dB ("
+              << snrSourceToString(decoded.snr_source) << ")\n";
 
     return true;
 }
@@ -224,6 +245,8 @@ int main() {
                      data_serialized, v2::FrameType::DATA)) return 1;
     if (!runLoopback("standard connect", mc_dpsk_presets::level8(), Modulation::DQPSK,
                      connect_serialized, v2::FrameType::CONNECT)) return 1;
+    if (!runLoopback("standard awgn12 data", mc_dpsk_presets::level8(), Modulation::DQPSK,
+                     data_serialized, v2::FrameType::DATA, true, 12.0f)) return 1;
     if (!runLoopback("robust_low data", mc_dpsk_presets::robust_low(), Modulation::DBPSK,
                      data_serialized, v2::FrameType::DATA)) return 1;
     if (!runLoopback("robust_low connect", mc_dpsk_presets::robust_low(), Modulation::DBPSK,

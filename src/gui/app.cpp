@@ -426,7 +426,16 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     // Set up raw data callback for protocol layer
     ultra::gui::startupTrace("App", "set-raw-callback-enter");
     modem_.setRawDataCallback([this](const Bytes& data) {
-        guiLog("Our modem decoded %zu bytes", data.size());
+        auto modem_stats = modem_.getStats();
+        const auto operator_snr = selectOperatorSNRDisplay(modem_stats);
+        if (operator_snr.valid) {
+            guiLog("Our modem decoded %zu bytes; operator_snr=%.1f dB (%s)",
+                   data.size(), operator_snr.snr_db,
+                   snrSourceToString(operator_snr.source));
+        } else {
+            guiLog("Our modem decoded %zu bytes; operator_snr=-- dB (none)",
+                   data.size());
+        }
         // Monitor mode: surface every decoded frame's payload in the
         // RX log regardless of addressing. The protocol layer would
         // otherwise drop frames whose dst hash doesn't match local
@@ -455,7 +464,6 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             }
         }
         // Update protocol layer with current SNR and fading before processing frame.
-        auto modem_stats = modem_.getStats();
         float snr_db = modem_stats.snr_db;
         SNRSource snr_source = modem_stats.snr_source;
         float fading = modem_.getFadingIndex();

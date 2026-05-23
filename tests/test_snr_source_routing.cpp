@@ -35,6 +35,8 @@ void connectedOFDMKeepsBroadbandSourceForConsumers() {
     DecodeResult result;
     result.snr_db = 15.4f;
     result.snr_source = SNRSource::OFDM_BROADBAND;
+    result.has_idle_in_band_snr_db = true;
+    result.idle_in_band_snr_db = -0.7f;
     result.has_ofdm_broadband_snr_db = true;
     result.ofdm_broadband_snr_db = 15.4f;
     result.ofdm_internal_snr_db = 24.3f;
@@ -46,7 +48,9 @@ void connectedOFDMKeepsBroadbandSourceForConsumers() {
           "connected OFDM data must route OFDM broadband source");
 
     const auto display = selectOperatorSNRDisplay(stats);
-    check(display.valid, "OFDM broadband should be displayable when idle is absent");
+    check(display.valid, "OFDM broadband should be displayable when idle is present");
+    check(display.snr_db == 15.4f,
+          "connected OFDM display must not prefer stale idle in-band value");
     check(display.source == SNRSource::OFDM_BROADBAND,
           "OFDM-only display should be labeled broadband");
 }
@@ -67,6 +71,21 @@ void idleMeterPrefersInBandSource() {
           "operator display should label idle in-band source");
 }
 
+void connectedMCDPSKKeepsConnectedSourceForConsumers() {
+    LoopbackStats stats;
+    stats.snr_db = 8.5f;
+    stats.snr_source = SNRSource::MCDPSK_IN_BAND;
+    stats.has_idle_in_band_snr_db = true;
+    stats.idle_in_band_snr_db = -1.0f;
+
+    const auto display = selectOperatorSNRDisplay(stats);
+    check(display.valid, "MC-DPSK connected SNR should be displayable");
+    check(display.snr_db == 8.5f,
+          "connected MC-DPSK display must not prefer stale idle in-band value");
+    check(display.source == SNRSource::MCDPSK_IN_BAND,
+          "connected MC-DPSK display should be labeled MC-DPSK in-band");
+}
+
 void chirpOnlyDoesNotLookLikeAnSNRMeter() {
     LoopbackStats stats;
     stats.snr_db = 27.4f;
@@ -85,6 +104,7 @@ int main() {
     try {
         connectedOFDMKeepsBroadbandSourceForConsumers();
         idleMeterPrefersInBandSource();
+        connectedMCDPSKKeepsConnectedSourceForConsumers();
         chirpOnlyDoesNotLookLikeAnSNRMeter();
     } catch (const std::exception& e) {
         std::cerr << "FAIL: " << e.what() << "\n";
