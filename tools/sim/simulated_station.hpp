@@ -1154,13 +1154,15 @@ private:
     OFDMConfigPreset ofdm_config_preset_ = OFDMConfigPreset::Default;
 
     ModemConfig createOFDMConfig() {
+        // A default-constructed ModemConfig already carries the canonical OFDM
+        // geometry (1024-FFT, 59 carriers, MEDIUM CP) that OFDM-CHIRP uses. The
+        // Default preset keeps it as-is; only the explicit NVIS preset overrides
+        // it. (This used to borrow the legacy OFDM_COX waveform purely as a
+        // geometry source, which made the logs read as if COX were in play.)
         ModemConfig cfg;
         if (ofdm_config_preset_ == OFDMConfigPreset::Nvis) {
             auto nvis = OFDMNvisWaveform::createNvisMode();
             cfg = nvis->getConfig();
-        } else {
-            OFDMNvisWaveform default_cox;
-            cfg = default_cox.getConfig();
         }
 
         cfg.sample_rate = SAMPLE_RATE;
@@ -1171,7 +1173,7 @@ private:
         cfg.pilot_spacing =
             ofdm_link_adaptation::recommendedPilotSpacing(cfg.modulation, cfg.code_rate);
 
-        LOG_MODEM(INFO, "[%s] OFDM_COX config preset=%s FFT=%d carriers=%d CP=%d pilots=%d spacing=%d",
+        LOG_MODEM(INFO, "[%s] OFDM config preset=%s FFT=%d carriers=%d CP=%d pilots=%d spacing=%d",
                   callsign_.c_str(), ofdmConfigPresetToString(ofdm_config_preset_),
                   static_cast<int>(cfg.fft_size), static_cast<int>(cfg.num_carriers),
                   static_cast<int>(cfg.getCyclicPrefix()),
