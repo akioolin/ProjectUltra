@@ -109,7 +109,12 @@ private:
     char tx_text_buffer_[256] = "Hello from ProjectUltra!";
     std::deque<std::string> rx_log_;
     mutable std::mutex rx_log_mutex_;
-    static const size_t MAX_RX_LOG = 20;
+    // In-memory scrollback for the operator Message Log. The full history is
+    // also mirrored to the GUI log file (see appendRxLogLine), so this only
+    // bounds what is scrollable/copyable in the UI. 20 was far too small — it
+    // dropped almost all history within seconds of a transfer, breaking
+    // scroll-back and making Copy capture only the last 20 lines.
+    static const size_t MAX_RX_LOG = 5000;
     bool audio_initialized_ = false;
     bool deferred_audio_auto_init_pending_ = false;
     uint32_t deferred_audio_auto_init_deadline_ms_ = 0;
@@ -149,10 +154,13 @@ private:
     bool scenario_active_ = false;          // any auto_* flag set
     bool scenario_started_ = false;         // scenario_start_ armed
     bool scenario_connect_issued_ = false;  // connect() fired once
-    bool scenario_payload_sent_ = false;    // file/message fired once
+    bool scenario_payload_sent_ = false;    // full payload sequence dispatched
+    bool scenario_message_sent_ = false;    // chat-message phase fired (if any)
+    bool scenario_file_started_ = false;    // file phase started (if any)
     bool scenario_disconnect_issued_ = false;
     std::chrono::steady_clock::time_point scenario_start_;
     std::chrono::steady_clock::time_point scenario_connected_at_;
+    std::chrono::steady_clock::time_point scenario_message_sent_at_;
     void tickScenario();
 
     // Radio mode state

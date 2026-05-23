@@ -1324,6 +1324,11 @@ void App::appendRxLogLine(const std::string& msg) {
     while (rx_log_.size() > MAX_RX_LOG) {
         rx_log_.pop_front();
     }
+    // Mirror every operator-visible Message Log line into the GUI log file so
+    // the log file is a strict superset of the on-screen message box. Without
+    // this, lines like [MESSAGE], [FILE], [RX ...] and status notifications
+    // appeared only in the UI and were never written to disk.
+    guiLog("%s", msg.c_str());
 }
 
 bool App::startFileSend(const std::string& file_path, const std::string& success_log) {
@@ -2377,32 +2382,63 @@ void App::tickScenario() {
         scenario_connect_issued_ = true;
     }
 
-    // Once CONNECTED, fire the payload exactly once.
-    if (state == protocol::ConnectionState::CONNECTED && !scenario_payload_sent_) {
-        scenario_connected_at_ = now;
-        scenario_payload_sent_ = true;
-        if (!options_.auto_send_file.empty()) {
-            guiLog("[scenario] connected; sending file %s",
-                   options_.auto_send_file.c_str());
-            startFileSend(options_.auto_send_file,
-                          "[scenario] file send started: " + options_.auto_send_file);
-        } else if (!options_.auto_send_message.empty()) {
+    // Once CONNECTED, run the scripted payload sequence (each phase fires once):
+    //   1. send the chat message (if any),
+    //   2. once the message TX has drained, start the file transfer (if any),
+    //   3. mark the sequence dispatched so the disconnect phase can arm.
+    // message and file are no longer mutually exclusive — this exercises the
+    // real operator flow of chatting and then sending a file on one link.
+    if (state == protocol::ConnectionState::CONNECTED) {
+        // Phase 1: chat message.
+        if (!options_.auto_send_message.empty() && !scenario_message_sent_) {
             guiLog("[scenario] connected; sending message (%zu bytes)",
                    options_.auto_send_message.size());
             protocol_.sendMessage(options_.auto_send_message);
+            scenario_message_sent_ = true;
+            scenario_message_sent_at_ = now;
+        }
+        // Phase 2: file, but only after the message has finished transmitting
+        // (TX idle) plus a short settle, so the two payloads don't collide on
+        // the air.
+        const bool message_phase_clear =
+            options_.auto_send_message.empty() ||
+            (scenario_message_sent_ && !tx_in_progress_ &&
+             now - scenario_message_sent_at_ >= std::chrono::milliseconds(2000));
+        if (!options_.auto_send_file.empty() && !scenario_file_started_ &&
+            message_phase_clear) {
+            guiLog("[scenario] sending file %s", options_.auto_send_file.c_str());
+            startFileSend(options_.auto_send_file,
+                          "[scenario] file send started: " + options_.auto_send_file);
+            scenario_file_started_ = true;
+        }
+        // Mark the whole sequence dispatched once every requested phase fired.
+        if (!scenario_payload_sent_ &&
+            (options_.auto_send_message.empty() || scenario_message_sent_) &&
+            (options_.auto_send_file.empty() || scenario_file_started_)) {
+            scenario_payload_sent_ = true;
+            scenario_connected_at_ = now;
         }
     }
 
-    // Optional auto-disconnect after the payload has had time to drain.
+    // Optional auto-disconnect after the payload has drained. With a file in
+    // the script we additionally wait for the transfer to leave "in progress"
+    // (so we don't tear the link down mid-transfer); the configured delay then
+    // acts as a trailing grace period for the final ACKs. 0 = never disconnect.
     if (options_.auto_disconnect_after_sec > 0 && scenario_payload_sent_ &&
         !scenario_disconnect_issued_ &&
-        state == protocol::ConnectionState::CONNECTED &&
-        now - scenario_connected_at_ >=
-            std::chrono::seconds(options_.auto_disconnect_after_sec)) {
-        guiLog("[scenario] auto-disconnect after %ds connected",
-               options_.auto_disconnect_after_sec);
-        protocol_.disconnect();
-        scenario_disconnect_issued_ = true;
+        state == protocol::ConnectionState::CONNECTED) {
+        const bool file_drained =
+            options_.auto_send_file.empty() ||
+            (scenario_file_started_ && !protocol_.isFileTransferInProgress());
+        const bool hold_elapsed =
+            now - scenario_connected_at_ >=
+            std::chrono::seconds(options_.auto_disconnect_after_sec);
+        if (file_drained && hold_elapsed) {
+            guiLog("[scenario] auto-disconnect (payload drained, %ds grace)",
+                   options_.auto_disconnect_after_sec);
+            protocol_.disconnect();
+            scenario_disconnect_issued_ = true;
+        }
     }
 }
 
@@ -3279,6 +3315,14 @@ void App::renderOperateTab() {
     if (log_height < 100) log_height = 100;  // Minimum height
 
     ImGui::BeginChild("RXLogRadio", ImVec2(-1, log_height), true);
+    // Auto-scroll only when the operator is already parked at the bottom. The
+    // check uses last frame's scroll extent (rows for this frame are not
+    // submitted yet), so if the user scrolled up to read history we leave their
+    // position untouched. The old code called SetScrollHereY() unconditionally
+    // every frame, which re-pinned to the bottom and made it impossible to
+    // scroll back up at all.
+    const bool rx_log_stick_bottom =
+        ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 2.0f;
     for (const auto& msg : rx_log_snapshot) {
         ImVec4 color(0.7f, 0.7f, 0.7f, 1.0f);
         if (msg.size() >= 4 && msg.substr(0, 4) == "[TX]") {
@@ -3297,7 +3341,7 @@ void App::renderOperateTab() {
         ImGui::TextWrapped("%s", msg.c_str());
         ImGui::PopStyleColor();
     }
-    if (!rx_log_snapshot.empty()) ImGui::SetScrollHereY(1.0f);
+    if (rx_log_stick_bottom) ImGui::SetScrollHereY(1.0f);
     ImGui::EndChild();
 
     // ========================================
