@@ -229,7 +229,7 @@ std::optional<protocol::WaveformMode> parseWaveformMode(std::string value) {
     }
     if (value == "OFDM-COX" || value == "OFDMC0X" || value == "OFDMCOX" ||
         value == "OFDM") {
-        return protocol::WaveformMode::OFDM_COX;
+        return protocol::WaveformMode::OFDM_CHIRP;
     }
     if (value == "AUTO") {
         return protocol::WaveformMode::AUTO;

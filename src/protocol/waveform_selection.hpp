@@ -293,8 +293,6 @@ inline int estimatedBitrateBpsForMode(WaveformMode mode) {
         return 375;   // 8 carriers DQPSK R1/4 @ 93.75 sym/s
     case WaveformMode::OFDM_CHIRP:
         return 2208;  // DQPSK R1/2, 53 data carriers @ 41.667 sym/s
-    case WaveformMode::OFDM_COX:
-        return 4000;
     case WaveformMode::OTFS_EQ:
     case WaveformMode::OTFS_RAW:
     case WaveformMode::MFSK:

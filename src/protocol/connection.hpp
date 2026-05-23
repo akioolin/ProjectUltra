@@ -315,9 +315,9 @@ private:
 
     // Waveform mode
     WaveformMode narrowband_override_ = WaveformMode::AUTO;  // Session-scoped, cleared on disconnect/reset
-    WaveformMode negotiated_mode_ = WaveformMode::OFDM_COX;
-    uint8_t remote_capabilities_ = ModeCapabilities::OFDM_COX;
-    WaveformMode remote_preferred_ = WaveformMode::OFDM_COX;
+    WaveformMode negotiated_mode_ = WaveformMode::OFDM_CHIRP;
+    uint8_t remote_capabilities_ = ModeCapabilities::OFDM_CHIRP;
+    WaveformMode remote_preferred_ = WaveformMode::OFDM_CHIRP;
     bool phy_mask_v1_negotiated_ = false;
 
     // Data modulation and code rate (adaptive)

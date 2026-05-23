@@ -2,7 +2,6 @@
 
 #include "waveform_factory.hpp"
 #include "mc_dpsk_waveform.hpp"
-#include "ofdm_cox_waveform.hpp"
 #include "ofdm_chirp_waveform.hpp"
 #include "ultra/logging.hpp"
 
@@ -12,9 +11,6 @@ WaveformPtr WaveformFactory::create(protocol::WaveformMode mode) {
     switch (mode) {
         case protocol::WaveformMode::MC_DPSK:
             return std::make_unique<MCDPSKWaveform>();
-
-        case protocol::WaveformMode::OFDM_COX:
-            return std::make_unique<OFDMNvisWaveform>();
 
         case protocol::WaveformMode::OFDM_CHIRP:
             return std::make_unique<OFDMChirpWaveform>();
@@ -51,9 +47,6 @@ WaveformPtr WaveformFactory::create(protocol::WaveformMode mode, const ModemConf
             return std::make_unique<MCDPSKWaveform>(mc_cfg);
         }
 
-        case protocol::WaveformMode::OFDM_COX:
-            return std::make_unique<OFDMNvisWaveform>(config);
-
         case protocol::WaveformMode::OFDM_CHIRP:
             return std::make_unique<OFDMChirpWaveform>(config);
 
@@ -81,7 +74,6 @@ std::vector<protocol::WaveformMode> WaveformFactory::getAvailableModes() {
     return {
         protocol::WaveformMode::MC_DPSK,
         protocol::WaveformMode::OFDM_CHIRP,
-        protocol::WaveformMode::OFDM_COX,
         protocol::WaveformMode::OFDM_NARROW,
     };
 }
@@ -89,7 +81,6 @@ std::vector<protocol::WaveformMode> WaveformFactory::getAvailableModes() {
 bool WaveformFactory::isSupported(protocol::WaveformMode mode) {
     switch (mode) {
         case protocol::WaveformMode::MC_DPSK:
-        case protocol::WaveformMode::OFDM_COX:
         case protocol::WaveformMode::OFDM_CHIRP:
         case protocol::WaveformMode::OFDM_NARROW:
         case protocol::WaveformMode::AUTO:
@@ -108,7 +99,6 @@ bool WaveformFactory::isSupported(protocol::WaveformMode mode) {
 std::string WaveformFactory::getModeName(protocol::WaveformMode mode) {
     switch (mode) {
         case protocol::WaveformMode::MC_DPSK:    return "MC-DPSK";
-        case protocol::WaveformMode::OFDM_COX:  return "OFDM-COX";
         case protocol::WaveformMode::OFDM_CHIRP: return "OFDM-Chirp";
         case protocol::WaveformMode::OFDM_NARROW: return "OFDM-Narrow";
         case protocol::WaveformMode::OTFS_EQ:    return "OTFS-EQ";
@@ -127,14 +117,9 @@ protocol::WaveformMode WaveformFactory::recommendMode(float snr_db) {
         // Low SNR: Use MC-DPSK with chirp sync
         // Reliable from ~7 dB to 20 dB in-band
         return protocol::WaveformMode::MC_DPSK;
-    } else if (snr_db < 27.0f) {
-        // Mid SNR: Use OFDM with chirp sync + DQPSK
-        // Higher throughput than MC-DPSK, more robust than Schmidl-Cox
-        return protocol::WaveformMode::OFDM_CHIRP;
     } else {
-        // High SNR: Use OFDM with Schmidl-Cox + coherent modulation
-        // Maximum throughput
-        return protocol::WaveformMode::OFDM_COX;
+        // Mid/high SNR: OFDM with chirp sync (coherent modulation at high SNR)
+        return protocol::WaveformMode::OFDM_CHIRP;
     }
 }
 
@@ -145,7 +130,6 @@ float WaveformFactory::getMinSNR(protocol::WaveformMode mode) {
         case protocol::WaveformMode::MC_DPSK:    return 7.0f;
         case protocol::WaveformMode::OFDM_CHIRP: return 20.0f;
         case protocol::WaveformMode::OFDM_NARROW: return 13.0f;
-        case protocol::WaveformMode::OFDM_COX:  return 27.0f;
         case protocol::WaveformMode::OTFS_EQ:
         case protocol::WaveformMode::OTFS_RAW:
         case protocol::WaveformMode::MFSK:       return 0.0f;
@@ -159,7 +143,6 @@ float WaveformFactory::getMaxThroughput(protocol::WaveformMode mode) {
         case protocol::WaveformMode::MC_DPSK:    return 1500.0f;   // 20 carriers, DQPSK R3/4
         case protocol::WaveformMode::OFDM_CHIRP: return 4000.0f;   // 30 carriers, D8PSK R2/3
         case protocol::WaveformMode::OFDM_NARROW: return 230.0f;  // 21 carriers, DQPSK R1/2
-        case protocol::WaveformMode::OFDM_COX:  return 8000.0f;   // 30 carriers, 32QAM R3/4
         case protocol::WaveformMode::OTFS_EQ:
         case protocol::WaveformMode::OTFS_RAW:
         case protocol::WaveformMode::MFSK:       return 0.0f;

@@ -20,7 +20,6 @@
 #include "streaming_frame_policy.hpp"
 #include "streaming_signal_policy.hpp"
 #include "gui/startup_trace.hpp"
-#include "waveform/ofdm_cox_waveform.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "fec/frame_interleaver.hpp"  // Frame-level interleaving for fixed-CW frames
 #include "fec/burst_interleaver.hpp"  // Burst-level long interleaver
@@ -672,9 +671,9 @@ void StreamingDecoder::setOFDMConfig(const ModemConfig& config) {
         LOG_MODEM(INFO, "StreamingDecoder: OFDM_NARROW config set (FFT=%d, carriers=%d)",
                   config.fft_size, config.num_carriers);
     } else {
-        waveform_ = std::make_unique<OFDMNvisWaveform>(config);
-        LOG_MODEM(INFO, "StreamingDecoder: OFDM_COX config set (FFT=%d, carriers=%d)",
-                  config.fft_size, config.num_carriers);
+        LOG_MODEM(WARN, "StreamingDecoder: unexpected OFDM mode %d; defaulting to OFDM-CHIRP",
+                  static_cast<int>(mode_));
+        waveform_ = std::make_unique<OFDMChirpWaveform>(config);
     }
     if (waveform_) {
         waveform_->setCarrierMask(carrier_mask_);
@@ -706,7 +705,7 @@ void StreamingDecoder::setConnectedOFDMMode(protocol::WaveformMode mode,
     } else if (mode_ == protocol::WaveformMode::OFDM_NARROW) {
         waveform_ = std::make_unique<OFDMChirpWaveform>(config, protocol::WaveformMode::OFDM_NARROW);
     } else {
-        waveform_ = std::make_unique<OFDMNvisWaveform>(config);
+        waveform_ = std::make_unique<OFDMChirpWaveform>(config);
     }
 
     if (waveform_) {

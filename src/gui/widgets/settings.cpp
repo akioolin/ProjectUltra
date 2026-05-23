@@ -1116,20 +1116,18 @@ void SettingsWindow::renderExpertTab(AppSettings& settings) {
     ImGui::SetNextItemWidth(200);
 
     // Current waveform display string
-    const char* waveform_items[] = { "AUTO", "OFDM", "OFDM Narrow", "OFDM HiSpeed", "DPSK" };
+    const char* waveform_items[] = { "AUTO", "OFDM", "OFDM Narrow", "DPSK" };
     int waveform_idx = 0;  // AUTO
     if (settings.forced_waveform == 0x05) waveform_idx = 1;       // OFDM (OFDM_CHIRP)
     else if (settings.forced_waveform == 0x06) waveform_idx = 2;  // OFDM Narrow
-    else if (settings.forced_waveform == 0x00) waveform_idx = 3;  // OFDM HiSpeed (OFDM_COX)
-    else if (settings.forced_waveform == 0x04) waveform_idx = 4;  // DPSK
+    else if (settings.forced_waveform == 0x04) waveform_idx = 3;  // DPSK
 
-    if (ImGui::Combo("##waveform", &waveform_idx, waveform_items, 5)) {
+    if (ImGui::Combo("##waveform", &waveform_idx, waveform_items, 4)) {
         switch (waveform_idx) {
             case 0: settings.forced_waveform = 0xFF; break;  // AUTO
             case 1: settings.forced_waveform = 0x05; break;  // OFDM (OFDM_CHIRP)
             case 2: settings.forced_waveform = 0x06; break;  // OFDM Narrow
-            case 3: settings.forced_waveform = 0x00; break;  // OFDM HiSpeed (OFDM_COX)
-            case 4: settings.forced_waveform = 0x04; break;  // DPSK
+            case 3: settings.forced_waveform = 0x04; break;  // DPSK
         }
         changed = true;
     }

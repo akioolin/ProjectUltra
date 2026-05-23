@@ -443,7 +443,6 @@ add_library(ultra_core STATIC
     src/tnc/tnc_server.cpp
     # Waveform abstraction layer
     src/waveform/mc_dpsk_waveform.cpp
-    src/waveform/ofdm_cox_waveform.cpp
     src/waveform/ofdm_chirp_waveform.cpp
     src/waveform/waveform_factory.cpp
     # miniz compression library (public domain)
@@ -754,17 +753,6 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_link_libraries(otasim_audio_demo PRIVATE
         ultra_tool_wav_io ota_channel_core)
-
-    # Threaded simulator - proper real-time audio simulation
-    add_executable(threaded_simulator
-        tools/threaded_simulator.cpp
-        ${ULTRA_MODEM_ENGINE_SOURCES}
-    )
-    ultra_enable_tool_test_warnings(tools/threaded_simulator.cpp)
-    target_include_directories(threaded_simulator PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-    )
-    target_link_libraries(threaded_simulator PRIVATE ultra_core ota_channel_core)
 
     # Simple waveform test (clean TX/RX with consistent config)
     # Decoder-only by design; do not pull in the encoder runtime here.

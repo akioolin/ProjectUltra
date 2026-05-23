@@ -719,8 +719,8 @@ bool test_binary_fragment_reassembly_single_callback() {
 
     ConnectionConfig config;
     config.auto_accept = true;
-    config.mode_capabilities = ModeCapabilities::OFDM_COX;
-    config.preferred_mode = WaveformMode::OFDM_COX;
+    config.mode_capabilities = ModeCapabilities::OFDM_CHIRP;
+    config.preferred_mode = WaveformMode::OFDM_CHIRP;
 
     ProtocolEngine stationA(config);
     ProtocolEngine stationB(config);
@@ -831,8 +831,8 @@ bool test_tx_backlog_bytes_snapshot() {
 
     ConnectionConfig config;
     config.auto_accept = true;
-    config.mode_capabilities = ModeCapabilities::OFDM_COX;
-    config.preferred_mode = WaveformMode::OFDM_COX;
+    config.mode_capabilities = ModeCapabilities::OFDM_CHIRP;
+    config.preferred_mode = WaveformMode::OFDM_CHIRP;
 
     ProtocolEngine stationA(config);
     ProtocolEngine stationB(config);

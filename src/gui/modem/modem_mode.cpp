@@ -98,7 +98,6 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
                       config_.num_carriers);
             break;
 
-        case protocol::WaveformMode::OFDM_COX:
         default:
             LOG_MODEM(INFO, "OFDM mode active: %d carriers, %s",
                       config_.num_carriers,
@@ -291,7 +290,7 @@ protocol::WaveformMode ModemEngine::recommendWaveformMode(float snr_db) {
     if (snr_db < 27.0f) {
         return protocol::WaveformMode::MC_DPSK;
     } else {
-        return protocol::WaveformMode::OFDM_COX;
+        return protocol::WaveformMode::OFDM_CHIRP;
     }
 }
 
@@ -363,8 +362,7 @@ fec::CodecType ModemEngine::recommendCodecType(float snr_db) {
 fec::CodecType ModemEngine::getCodecForWaveform(protocol::WaveformMode mode) {
     // Map waveform modes to optimal codec types:
     // - MC-DPSK (low SNR): Would benefit from convolutional (when implemented)
-    // - OFDM_CHIRP (medium SNR): LDPC with R1/4 or R1/2
-    // - OFDM_COX (high SNR): LDPC with higher rates
+    // - OFDM_CHIRP (medium/high SNR): LDPC with R1/4 up through higher rates
     //
     // For now, always return LDPC since it's the only implemented codec.
 
@@ -376,7 +374,6 @@ fec::CodecType ModemEngine::getCodecForWaveform(protocol::WaveformMode mode) {
 
         case protocol::WaveformMode::OFDM_CHIRP:
         case protocol::WaveformMode::OFDM_NARROW:
-        case protocol::WaveformMode::OFDM_COX:
         default:
             return fec::CodecType::LDPC;
     }

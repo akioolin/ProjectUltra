@@ -13,7 +13,6 @@
 #include "ultra/ofdm_link_adaptation.hpp"
 #include "ultra/build_info.hpp"
 #include "ultra/tx_burst_normalization.hpp"
-#include "waveform/ofdm_cox_waveform.hpp"
 
 #include "ultra_tnc_config.hpp"
 
@@ -377,13 +376,11 @@ private:
     std::mt19937 rng_;
 
     ModemConfig createOFDMConfig() const {
+        // A default-constructed ModemConfig already carries the canonical OFDM
+        // geometry (1024-FFT, 59 carriers, MEDIUM CP) that OFDM-CHIRP uses; the
+        // overrides below set modulation/rate/pilots. (The NVIS preset shares the
+        // same geometry, so no special-casing is needed here.)
         ModemConfig cfg;
-        if (cfg_.ofdm_config == OFDMConfigPreset::Nvis) {
-            cfg = ultra::OFDMNvisWaveform::createNvisMode()->getConfig();
-        } else {
-            ultra::OFDMNvisWaveform default_cox;
-            cfg = default_cox.getConfig();
-        }
 
         cfg.sample_rate = kSampleRate;
         cfg.center_freq = 1500.0f;

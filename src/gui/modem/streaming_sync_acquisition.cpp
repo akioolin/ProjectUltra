@@ -8,7 +8,6 @@
 #include "streaming_frame_policy.hpp"
 #include "streaming_signal_policy.hpp"
 #include "gui/startup_trace.hpp"
-#include "waveform/ofdm_cox_waveform.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "fec/frame_interleaver.hpp"
 #include "fec/burst_interleaver.hpp"

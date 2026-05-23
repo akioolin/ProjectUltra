@@ -206,7 +206,7 @@ static const char* fadingToQualityWithColor(float fading, ImVec4& color) {
     }
 }
 
-// User-friendly waveform name (hides internal variants like OFDM_COX/OFDM_CHIRP)
+// User-friendly waveform name (hides internal variants like OFDM_CHIRP/OFDM_NARROW)
 static const char* waveformDisplayName(protocol::WaveformMode mode) {
     switch (mode) {
         case protocol::WaveformMode::MC_DPSK: return "MC-DPSK";
@@ -215,7 +215,6 @@ static const char* waveformDisplayName(protocol::WaveformMode mode) {
         case protocol::WaveformMode::OTFS_RAW: return "OTFS";
         case protocol::WaveformMode::OFDM_NARROW: return "OFDM Narrow";
         case protocol::WaveformMode::OFDM_CHIRP:
-        case protocol::WaveformMode::OFDM_COX:
         default: return "OFDM";
     }
 }
@@ -612,7 +611,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                     msg = "[SYS] Disconnected" + (info.empty() ? "" : ": " + info);
                 }
                 // Reset waveform mode to OFDM when disconnected
-                modem_.setWaveformMode(protocol::WaveformMode::OFDM_COX);
+                modem_.setWaveformMode(protocol::WaveformMode::OFDM_CHIRP);
                 // Reset connect waveform to DPSK for next connection attempt
                 modem_.setConnectWaveform(protocol::WaveformMode::MC_DPSK);
                 {
@@ -807,7 +806,6 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             case protocol::WaveformMode::OTFS_RAW: mode_name = "OTFS"; break;
             case protocol::WaveformMode::OFDM_CHIRP: mode_name = "OFDM"; break;
             case protocol::WaveformMode::OFDM_NARROW: mode_name = "OFDM Narrow"; break;
-            case protocol::WaveformMode::OFDM_COX: mode_name = "OFDM"; break;
             default: mode_name = "OFDM"; break;
         }
         guiLog("WAVEFORM_CHANGE: %s", mode_name.c_str());
@@ -2726,7 +2724,7 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         // Row 1: Remote's negotiated mode + implied channel condition
         auto waveform = modem_.getWaveformMode();
         const char* wf_str = waveformDisplayName(waveform);
-        ImVec4 wf_color = (waveform == protocol::WaveformMode::OFDM_COX) ? ImVec4(0.4f, 0.8f, 1.0f, 1.0f) :
+        ImVec4 wf_color = (waveform == protocol::WaveformMode::OFDM_CHIRP) ? ImVec4(0.4f, 0.8f, 1.0f, 1.0f) :
                           (waveform == protocol::WaveformMode::MC_DPSK) ? ImVec4(0.8f, 0.8f, 0.4f, 1.0f) :
                           (waveform == protocol::WaveformMode::MFSK) ? ImVec4(0.8f, 0.4f, 0.8f, 1.0f) :
                                                                        ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
@@ -2799,7 +2797,7 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         // Show actual waveform being used for connection attempt (always R1/4)
         auto connect_wf = protocol_.getConnectWaveform();
         const char* wf_str = waveformDisplayName(connect_wf);
-        ImVec4 wf_color = (connect_wf == protocol::WaveformMode::OFDM_COX) ? ImVec4(0.4f, 0.8f, 1.0f, 1.0f) :
+        ImVec4 wf_color = (connect_wf == protocol::WaveformMode::OFDM_CHIRP) ? ImVec4(0.4f, 0.8f, 1.0f, 1.0f) :
                           (connect_wf == protocol::WaveformMode::MC_DPSK) ? ImVec4(0.8f, 0.8f, 0.4f, 1.0f) :
                           (connect_wf == protocol::WaveformMode::MFSK) ? ImVec4(0.8f, 0.4f, 0.8f, 1.0f) :
                                                                          ImVec4(0.6f, 0.6f, 0.6f, 1.0f);

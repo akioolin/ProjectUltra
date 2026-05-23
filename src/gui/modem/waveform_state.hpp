@@ -197,7 +197,7 @@ private:
     // Waveform modes
     protocol::WaveformMode active_waveform_ = protocol::WaveformMode::MC_DPSK;
     protocol::WaveformMode connect_waveform_ = protocol::WaveformMode::MC_DPSK;
-    protocol::WaveformMode negotiated_waveform_ = protocol::WaveformMode::OFDM_COX;
+    protocol::WaveformMode negotiated_waveform_ = protocol::WaveformMode::OFDM_CHIRP;
     protocol::WaveformMode disconnect_waveform_ = protocol::WaveformMode::MC_DPSK;
     protocol::WaveformMode last_rx_waveform_ = protocol::WaveformMode::MC_DPSK;
 

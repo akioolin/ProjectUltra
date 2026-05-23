@@ -36,8 +36,6 @@ void test_fading_labels_and_capabilities() {
     CHECK(classifyChannel(1.10f) == ChannelClassification::POOR,
           "channel classifier should enter Poor at 1.10 fading index");
 
-    CHECK(modeToCapabilityBit(WaveformMode::OFDM_COX) == ModeCapabilities::OFDM_COX,
-          "OFDM_COX capability bit");
     CHECK(modeToCapabilityBit(WaveformMode::OFDM_CHIRP) == ModeCapabilities::OFDM_CHIRP,
           "OFDM_CHIRP capability bit");
     CHECK(modeToCapabilityBit(WaveformMode::OFDM_NARROW) == ModeCapabilities::OFDM_NARROW,
@@ -365,8 +363,8 @@ void test_negotiated_mode_selection() {
 
     CHECK(selectNegotiatedMode(0, ModeCapabilities::MC_DPSK, WaveformMode::AUTO,
                                WaveformMode::AUTO, WaveformMode::AUTO,
-                               20.0f, 0.0f) == WaveformMode::OFDM_COX,
-          "no common modes should preserve OFDM_COX fallback");
+                               20.0f, 0.0f) == WaveformMode::MC_DPSK,
+          "no common modes should fall back to MC-DPSK (universal floor), never OFDM_COX");
 }
 
 void test_recommend_cw_count() {
@@ -380,10 +378,6 @@ void test_recommend_cw_count() {
     CHECK(recommendCWCount(CodeRate::R1_4, WaveformMode::OFDM_CHIRP) ==
               v2::kDefaultFixedFrameCodewords,
           "wide R1/4 stays at default 4 (low-SNR robustness)");
-
-    // OFDM_COX shares the wide policy.
-    CHECK(recommendCWCount(CodeRate::R1_2, WaveformMode::OFDM_COX) == 8,
-          "OFDM_COX R1/2 follows the wide policy");
 
     // OFDM_NARROW: always default 4. Narrow R1/2 frames are ~6 s at CW=8;
     // window=3 burst would be ~18 s, exceeding typical narrow good-fading

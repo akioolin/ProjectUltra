@@ -2091,9 +2091,9 @@ void Connection::reset() {
     connect_retry_count_ = 0;
     connected_time_ms_ = 0;
     narrowband_override_ = WaveformMode::AUTO;  // Clear session-scoped narrowband override
-    negotiated_mode_ = WaveformMode::OFDM_COX;
-    remote_capabilities_ = ModeCapabilities::OFDM_COX;
-    remote_preferred_ = WaveformMode::OFDM_COX;
+    negotiated_mode_ = WaveformMode::OFDM_CHIRP;
+    remote_capabilities_ = ModeCapabilities::OFDM_CHIRP;
+    remote_preferred_ = WaveformMode::OFDM_CHIRP;
     mode_change_pending_ = false;
     mode_change_timeout_ms_ = 0;
     mode_change_retry_count_ = 0;

@@ -128,8 +128,7 @@ struct TestConfig {
         printf("Waveform: %s\n", protocol::waveformModeToString(waveform));
         printf("Modulation: %s\n", modulationToString(modulation));
         printf("Code Rate: %s\n", codeRateToString(code_rate));
-        if (waveform == protocol::WaveformMode::OFDM_CHIRP ||
-            waveform == protocol::WaveformMode::OFDM_COX) {
+        if (waveform == protocol::WaveformMode::OFDM_CHIRP) {
             printf("FFT: %d, Carriers: %d\n", fft_size, num_carriers);
             printf("Pilots: %s (spacing=%d, count=%d, data=%d)\n",
                    use_pilots ? "ON" : "OFF", pilot_spacing,
@@ -379,8 +378,7 @@ std::set<uint16_t> decodeFrames(const std::vector<float>& audio, const TestConfi
     decoder.setMode(cfg.waveform, true);
 
     // Configure OFDM if needed
-    if (cfg.waveform == protocol::WaveformMode::OFDM_CHIRP ||
-        cfg.waveform == protocol::WaveformMode::OFDM_COX) {
+    if (cfg.waveform == protocol::WaveformMode::OFDM_CHIRP) {
         ModemConfig modem_cfg = cfg.toModemConfig();
         decoder.setOFDMConfig(modem_cfg);
         decoder.setDataMode(cfg.modulation, cfg.code_rate);

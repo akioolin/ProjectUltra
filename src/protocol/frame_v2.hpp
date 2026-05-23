@@ -27,7 +27,8 @@ namespace FrameFlags {
 
 // Modulation modes for adaptive selection (negotiated in CONNECT)
 enum class WaveformMode : uint8_t {
-    OFDM_COX  = 0x00,  // High-speed OFDM with Schmidl-Cox sync (17+ dB, good conditions)
+    // 0x00 reserved (formerly OFDM_COX — removed; was a Schmidl-Cox experiment
+    // never selected by the auto ladder. OFDM uses OFDM_CHIRP/OFDM_NARROW.)
     OTFS_EQ    = 0x01,  // Reserved legacy value; not advertised by production builds
     OTFS_RAW   = 0x02,  // Reserved legacy value; not advertised by production builds
     MFSK       = 0x03,  // Reserved legacy value; not implemented
@@ -39,7 +40,7 @@ enum class WaveformMode : uint8_t {
 
 // Mode capabilities bitmap (for CONNECT payload)
 namespace ModeCapabilities {
-    constexpr uint8_t OFDM_COX  = 0x01;
+    // 0x01 reserved (formerly OFDM_COX capability bit — removed)
     constexpr uint8_t OTFS_EQ    = 0x02;  // Reserved; not in ALL
     constexpr uint8_t OTFS_RAW   = 0x04;  // Reserved; not in ALL
     constexpr uint8_t MFSK       = 0x08;  // Reserved; not in ALL
@@ -47,7 +48,7 @@ namespace ModeCapabilities {
     constexpr uint8_t OFDM_CHIRP = 0x20;  // OFDM with chirp sync + DQPSK (fading)
     constexpr uint8_t OFDM_NARROW = 0x40; // Narrowband OFDM (500 Hz, 3-10 dB)
     constexpr uint8_t PHY_MASK_V1 = 0x80; // Optional per-frame PHY carrier mask header
-    constexpr uint8_t ALL        = OFDM_COX | MC_DPSK | OFDM_CHIRP | OFDM_NARROW;
+    constexpr uint8_t ALL        = MC_DPSK | OFDM_CHIRP | OFDM_NARROW;
 }
 
 const char* waveformModeToString(WaveformMode mode);
@@ -102,10 +103,9 @@ inline uint8_t setPhyMaskV1Capability(uint8_t capabilities) {
     return capabilities | ModeCapabilities::PHY_MASK_V1;
 }
 
-// Helper: check if a WaveformMode is any OFDM variant (CHIRP, COX, or NARROW)
+// Helper: check if a WaveformMode is any OFDM variant (CHIRP or NARROW)
 inline bool isOFDMMode(WaveformMode mode) {
     return mode == WaveformMode::OFDM_CHIRP ||
-           mode == WaveformMode::OFDM_COX ||
            mode == WaveformMode::OFDM_NARROW;
 }
 
@@ -115,7 +115,7 @@ struct ChannelReport {
     float snr_db = 0.0f;           // Measured SNR (dB)
     float delay_spread_ms = 0.0f;  // RMS delay spread (ms)
     float doppler_spread_hz = 0.0f; // Doppler spread (Hz)
-    WaveformMode recommended_mode = WaveformMode::OFDM_COX;
+    WaveformMode recommended_mode = WaveformMode::OFDM_CHIRP;
     uint8_t capabilities = ModeCapabilities::ALL;
 
     // Encode to bytes for transmission (5 bytes)

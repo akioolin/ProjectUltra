@@ -67,7 +67,6 @@
 #include "otasim_client/ota_audio_backend.hpp"
 #include "waveform/waveform_factory.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
-#include "waveform/ofdm_cox_waveform.hpp"
 #include "waveform/mc_dpsk_waveform.hpp"
 #include "psk/multi_carrier_dpsk.hpp"
 #include "gui/modem/streaming_decoder.hpp"
@@ -2874,7 +2873,7 @@ int main(int argc, char* argv[]) {
             } else if (arg == "--waveform" || arg == "-w") {
                 if (i + 1 < argc) {
                     std::string wf_str = argv[++i];
-                    auto waveform = cli::parseWaveformMode(wf_str, cli::BareOFDMMode::Cox);
+                    auto waveform = cli::parseWaveformMode(wf_str, cli::BareOFDMMode::Chirp);
                     if (!waveform) {
                         std::cerr << "Unknown waveform: " << wf_str
                                   << " (use " << cli::waveformChoices() << ")\n";
@@ -3064,8 +3063,8 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --cw-count <N>      Fixed OFDM data-frame codewords (1-8, default: 4)\n";
                 std::cout << "  --carrier-mask <M>  OFDM_CHIRP active-carrier mask (default: all-on)\n";
                 std::cout << "  --mask-clear-carrier <N>  Clear one carrier bit (0-58)\n";
-                std::cout << "  --waveform, -w <WF> Force waveform: mc_dpsk, ofdm_chirp, ofdm_cox, ofdm_narrow\n";
-                std::cout << "  --ofdm-config <CFG> OFDM_COX config: default (512/30) or nvis (1024/59)\n";
+                std::cout << "  --waveform, -w <WF> Force waveform: mc_dpsk, ofdm_chirp, ofdm_narrow\n";
+                std::cout << "  --ofdm-config <CFG> OFDM geometry preset: default or nvis (both 1024/59)\n";
                 std::cout << "  --mc-dpsk-preset <P> Force MC-DPSK preset: standard, robust_low, robust_mid, robust\n";
                 std::cout << "                        default: adaptive, with Robust-Mid as cold-call/listen PHY\n";
                 std::cout << "  --seed <N>          Random seed (default: 42)\n";

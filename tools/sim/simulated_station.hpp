@@ -42,7 +42,6 @@
 
 #include "waveform/waveform_factory.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
-#include "waveform/ofdm_cox_waveform.hpp"
 #include "waveform/mc_dpsk_waveform.hpp"
 #include "audio/channel_busy_detector.hpp"
 #include "psk/multi_carrier_dpsk.hpp"
@@ -73,8 +72,8 @@ namespace v2 = protocol::v2;
 using SimulatedChannel = ultra::ota_channel_core::SimulatedChannel;
 
 enum class OFDMConfigPreset {
-    Default,  // OFDM_COX default constructor: 512 FFT, 30 carriers
-    Nvis      // OFDMNvisWaveform::createNvisMode(): 1024 FFT, 59 carriers
+    Default,  // canonical OFDM geometry: 1024 FFT, 59 carriers
+    Nvis      // legacy alias for the canonical 1024-FFT / 59-carrier geometry
 };
 
 [[maybe_unused]] static const char* channelTypeToString(ChannelType t) {
@@ -574,7 +573,7 @@ public:
                                   mc_dpsk_config_.samples_per_symbol);
         data_modulation_ = mcDpskModulationForConfig(mc_dpsk_config_);
 
-        // Initialize OFDM_COX from the selected CLI preset.
+        // Initialize OFDM geometry from the selected CLI preset.
         ofdm_config_ = createOFDMConfig();
 
         // Create TX encoder and RX decoder (both use same config)
@@ -1155,15 +1154,11 @@ private:
 
     ModemConfig createOFDMConfig() {
         // A default-constructed ModemConfig already carries the canonical OFDM
-        // geometry (1024-FFT, 59 carriers, MEDIUM CP) that OFDM-CHIRP uses. The
-        // Default preset keeps it as-is; only the explicit NVIS preset overrides
-        // it. (This used to borrow the legacy OFDM_COX waveform purely as a
-        // geometry source, which made the logs read as if COX were in play.)
+        // geometry (1024-FFT, 59 carriers, MEDIUM CP) that OFDM-CHIRP uses; the
+        // NVIS preset shares the same geometry. (This used to borrow a legacy
+        // OFDM waveform class as a geometry source, which made the logs read as
+        // if COX were in play.)
         ModemConfig cfg;
-        if (ofdm_config_preset_ == OFDMConfigPreset::Nvis) {
-            auto nvis = OFDMNvisWaveform::createNvisMode();
-            cfg = nvis->getConfig();
-        }
 
         cfg.sample_rate = SAMPLE_RATE;
         cfg.center_freq = 1500.0f;

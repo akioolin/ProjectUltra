@@ -238,7 +238,7 @@ WaveformCapabilities OFDMChirpWaveform::getCapabilities() const {
     caps.requires_pilots = config_.use_pilots;
     caps.supports_differential = true;
     caps.min_snr_db = 10.0f;                // Lower than Schmidl-Cox
-    caps.max_snr_db = 20.0f;                // Above this, use OFDM_COX
+    caps.max_snr_db = 20.0f;                // Above this, prefer a higher-order modulation
     caps.max_throughput_bps = getThroughput(CodeRate::R2_3);
 
     // Chirp preamble + training

@@ -31,8 +31,7 @@ enum class AllowExperimentalModulation {
 
 enum class BareOFDMMode {
     Reject,
-    Chirp,
-    Cox
+    Chirp
 };
 
 inline std::string normalizedToken(std::string value) {
@@ -61,7 +60,7 @@ inline const char* modulationChoices(
 }
 
 inline const char* waveformChoices() {
-    return "mc_dpsk, dpsk, ofdm_chirp, chirp, ofdm_cox, cox, ofdm_narrow, narrow";
+    return "mc_dpsk, dpsk, ofdm_chirp, chirp, ofdm_narrow, narrow";
 }
 
 inline const char* channelChoices(AllowAwgn allow_awgn = AllowAwgn::Yes) {
@@ -128,11 +127,9 @@ inline std::optional<protocol::WaveformMode> parseWaveformMode(
     if (allow_auto == AllowAuto::Yes && v == "auto") return protocol::WaveformMode::AUTO;
     if (v == "mc_dpsk" || v == "mcdpsk" || v == "dpsk") return protocol::WaveformMode::MC_DPSK;
     if (v == "ofdm_chirp" || v == "chirp") return protocol::WaveformMode::OFDM_CHIRP;
-    if (v == "ofdm_cox" || v == "cox") return protocol::WaveformMode::OFDM_COX;
     if (v == "ofdm_narrow" || v == "narrow") return protocol::WaveformMode::OFDM_NARROW;
     if (v == "ofdm") {
         if (bare_ofdm == BareOFDMMode::Chirp) return protocol::WaveformMode::OFDM_CHIRP;
-        if (bare_ofdm == BareOFDMMode::Cox) return protocol::WaveformMode::OFDM_COX;
     }
     return std::nullopt;
 }

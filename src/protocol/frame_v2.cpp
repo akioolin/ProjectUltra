@@ -150,7 +150,6 @@ LlrAbsSummary summarizeAbsLlrs(const std::vector<float>& llrs) {
 
 const char* waveformModeToString(WaveformMode mode) {
     switch (mode) {
-        case WaveformMode::OFDM_COX:  return "OFDM-COX";
         case WaveformMode::OTFS_EQ:    return "OTFS-EQ";
         case WaveformMode::OTFS_RAW:   return "OTFS-RAW";
         case WaveformMode::MFSK:       return "MFSK";

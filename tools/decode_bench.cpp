@@ -81,7 +81,7 @@ void printUsage() {
         "decode_bench --mode gen|bench --wav <path> [options]\n"
         "\n"
         "Common:\n"
-        "  --waveform <ofdm_chirp|ofdm_cox|ofdm_narrow|mc_dpsk>  default: ofdm_chirp\n"
+        "  --waveform <ofdm_chirp|ofdm_narrow|mc_dpsk>  default: ofdm_chirp\n"
         "  --rate <r1_4|r1_2|r2_3|r3_4>                          default: r1_4\n"
         "  --mod <dqpsk>                                           default: dqpsk\n"
         "  --expert                                                Allow lab-only forced PHY modes in --mod\n"

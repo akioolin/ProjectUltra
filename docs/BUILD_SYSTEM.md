@@ -86,7 +86,6 @@ make -j4
 | `ultra` | main.cpp + modem_engine | ultra_core | CLI tool |
 | `ultra_gui` | gui/*.cpp + imgui | ultra_core, SDL2, OpenGL | GUI app |
 | `cli_simulator` | cli_simulator.cpp | ultra_core | Protocol simulator |
-| `threaded_simulator` | threaded_simulator.cpp | ultra_core | Real-time simulator |
 | `test_waveform_simple` | test_waveform_simple.cpp | ultra_core | Waveform smoke test |
 
 ### Unit/Integration Test Targets (`tests/`)
@@ -263,7 +262,6 @@ build/
 ├── ultra                 # CLI tool
 ├── ultra_gui             # GUI app (if SDL2+OpenGL)
 ├── cli_simulator         # Protocol simulator
-├── threaded_simulator    # Real-time simulator
 ├── test_waveform_simple  # Waveform smoke test
 ├── tests/*               # Test executables from tests/CMakeLists.txt
 ├── compile_commands.json # IDE integration

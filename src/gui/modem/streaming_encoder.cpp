@@ -4,7 +4,6 @@
 
 #include "streaming_encoder.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
-#include "waveform/ofdm_cox_waveform.hpp"
 #include "waveform/mc_dpsk_waveform.hpp"
 #include "fec/frame_interleaver.hpp"
 #include "fec/burst_interleaver.hpp"
@@ -638,14 +637,6 @@ void StreamingEncoder::createWaveform() {
                 waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
             }
             startupTrace("StreamingEncoder", "create-main-waveform-mcdpsk-exit");
-            break;
-
-        case protocol::WaveformMode::OFDM_COX:
-            startupTrace("StreamingEncoder", "create-main-waveform-ofdm-cox-enter");
-            waveform_ = std::make_unique<OFDMNvisWaveform>(ofdm_config_);
-            static_cast<OFDMNvisWaveform*>(waveform_.get())->configure(
-                modulation_, code_rate_);
-            startupTrace("StreamingEncoder", "create-main-waveform-ofdm-cox-exit");
             break;
 
         case protocol::WaveformMode::OFDM_NARROW:

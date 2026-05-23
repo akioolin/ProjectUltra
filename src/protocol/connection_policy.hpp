@@ -184,7 +184,6 @@ inline LadderRung selectLadderRung(float snr_db, float fading_index) {
 
 inline uint8_t modeToCapabilityBit(WaveformMode mode) {
     switch (mode) {
-        case WaveformMode::OFDM_COX:    return ModeCapabilities::OFDM_COX;
         case WaveformMode::OFDM_CHIRP:  return ModeCapabilities::OFDM_CHIRP;
         case WaveformMode::OFDM_NARROW: return ModeCapabilities::OFDM_NARROW;
         case WaveformMode::OTFS_EQ:     return ModeCapabilities::OTFS_EQ;
@@ -337,7 +336,7 @@ inline uint32_t wideOFDMSackTailDelayMs() {
 // without risk of one reading a different SNR/fading and picking a
 // different CW geometry.
 //
-// Wide OFDM (OFDM_CHIRP / OFDM_COX):
+// Wide OFDM (OFDM_CHIRP):
 //   R1/2, R2/3, R3/4 → 8 (hardware A/B Mac↔Pi5 5KB DQPSK R1/2 SNR=15
 //   good fading: CW=4 → 1077 bps 2 retx; CW=8 → 1615 bps 0 retx, +50%.
 //   D8PSK R3/4 SNR=27 AWGN ceiling: CW=8 → 3127 bps.)
@@ -553,7 +552,9 @@ inline WaveformMode selectNegotiatedMode(uint8_t local_caps,
                                          float fading_index) {
     const uint8_t common = local_caps & remote_caps;
     if (common == 0) {
-        return WaveformMode::OFDM_COX;
+        // No overlap in advertised capabilities: fall back to MC-DPSK, the
+        // universal robust floor every station implements.
+        return WaveformMode::MC_DPSK;
     }
 
     if (remote_pref != WaveformMode::AUTO &&
@@ -576,12 +577,12 @@ inline WaveformMode selectNegotiatedMode(uint8_t local_caps,
         return rec.waveform;
     }
 
-    if (common & ModeCapabilities::OFDM_COX) return WaveformMode::OFDM_COX;
     if (common & ModeCapabilities::OFDM_CHIRP) return WaveformMode::OFDM_CHIRP;
     if (common & ModeCapabilities::OFDM_NARROW) return WaveformMode::OFDM_NARROW;
     if (common & ModeCapabilities::MC_DPSK) return WaveformMode::MC_DPSK;
 
-    return WaveformMode::OFDM_COX;
+    // Last resort: MC-DPSK, the universal robust floor.
+    return WaveformMode::MC_DPSK;
 }
 
 }  // namespace connection_policy

@@ -95,7 +95,7 @@ void printInfo() {
 }
 
 // Waveform type
-enum class WaveformType { OFDM_COX, OFDM_CHIRP, OFDM_NARROW, DPSK };
+enum class WaveformType { OFDM_CHIRP, OFDM_NARROW, DPSK };
 
 std::optional<WaveformType> parseWaveform(const char* s) {
     auto mode = tools::cli::parseWaveformMode(s, tools::cli::BareOFDMMode::Chirp);
@@ -104,7 +104,6 @@ std::optional<WaveformType> parseWaveform(const char* s) {
         case protocol::WaveformMode::MC_DPSK: return WaveformType::DPSK;
         case protocol::WaveformMode::OFDM_CHIRP: return WaveformType::OFDM_CHIRP;
         case protocol::WaveformMode::OFDM_NARROW: return WaveformType::OFDM_NARROW;
-        case protocol::WaveformMode::OFDM_COX: return WaveformType::OFDM_COX;
         default: return std::nullopt;
     }
 }
@@ -114,7 +113,7 @@ protocol::WaveformMode toWaveformMode(WaveformType w) {
         case WaveformType::DPSK: return protocol::WaveformMode::MC_DPSK;
         case WaveformType::OFDM_CHIRP: return protocol::WaveformMode::OFDM_CHIRP;
         case WaveformType::OFDM_NARROW: return protocol::WaveformMode::OFDM_NARROW;
-        default: return protocol::WaveformMode::OFDM_COX;
+        default: return protocol::WaveformMode::OFDM_CHIRP;
     }
 }
 
@@ -219,7 +218,7 @@ int runProtocolRx(const char* input_file, WaveformType waveform, CodeRate rate) 
     modem.setLogPrefix("MODEM");
 
     // For OFDM waveforms, set connected mode so decoder uses OFDM path
-    if (waveform == WaveformType::OFDM_CHIRP || waveform == WaveformType::OFDM_COX || waveform == WaveformType::OFDM_NARROW) {
+    if (waveform == WaveformType::OFDM_CHIRP || waveform == WaveformType::OFDM_NARROW) {
         modem.setConnected(true);
         modem.setHandshakeComplete(true);
         modem.setFixedFrameHeaderDiscovery(true);

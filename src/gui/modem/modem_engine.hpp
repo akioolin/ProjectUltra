@@ -260,7 +260,7 @@ private:
     std::string log_prefix_ = "MODEM";
 
     // Waveform mode state
-    protocol::WaveformMode waveform_mode_ = protocol::WaveformMode::OFDM_COX;
+    protocol::WaveformMode waveform_mode_ = protocol::WaveformMode::OFDM_CHIRP;
     protocol::WaveformMode connect_waveform_ = protocol::WaveformMode::MC_DPSK;
     protocol::WaveformMode last_rx_waveform_ = protocol::WaveformMode::MC_DPSK;
     protocol::WaveformMode disconnect_waveform_ = protocol::WaveformMode::MC_DPSK;  // Saved for ACK

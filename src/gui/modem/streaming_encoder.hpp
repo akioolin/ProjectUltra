@@ -59,7 +59,7 @@ public:
     // MODE CONTROL (mirrors StreamingDecoder)
     // ========================================================================
 
-    // Set waveform mode (MC_DPSK, OFDM_CHIRP, OFDM_COX)
+    // Set waveform mode (MC_DPSK, OFDM_CHIRP, OFDM_NARROW)
     void setMode(protocol::WaveformMode mode);
 
     // Set data mode (modulation and code rate)

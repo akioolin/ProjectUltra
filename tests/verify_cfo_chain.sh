@@ -54,7 +54,7 @@ Options:
   --snr <dB>          Channel SNR (default: 20)
   --seed <N>          RNG seed (default: 42)
   --channel <name>    awgn|good|moderate|poor|flutter (default: awgn)
-  --waveform <name>   mc_dpsk|ofdm_chirp|ofdm_cox (default: ofdm_chirp)
+  --waveform <name>   mc_dpsk|ofdm_chirp|ofdm_narrow (default: ofdm_chirp)
   --mod <name>        dqpsk|d8psk|dbpsk|qpsk|bpsk (default: dqpsk)
   --rate <name>       r1_4|r1_2|r2_3|r3_4 (default: r1_2)
   --calls <N>         Number of internal dump calls (default: 6)
