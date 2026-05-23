@@ -135,31 +135,17 @@ void test_wide_ofdm_timing_and_timeout() {
     const uint32_t w8_sack_delay = wideOFDMSackDelayMs(
         Modulation::DQPSK, CodeRate::R1_2, 8);
     CHECK(w8_sack_delay == 8 * dqpsk.data_ms + kCarrierSenseSackCoalesceMs,
-          "differential wide OFDM SACK delay should retain the baseline full-window hold");
-
-    const uint32_t coherent_w8_sack_delay = coherentWideOFDMSackDelayMs(
-        Modulation::QAM16, CodeRate::R1_2, 8);
-    const auto qam16 = wideOFDMFrameTiming(Modulation::QAM16, CodeRate::R1_2);
-    CHECK(coherent_w8_sack_delay == qam16.data_ms + kCarrierSenseSackCoalesceMs,
-          "coherent wide OFDM SACK delay should wait one expected DATA frame");
-    CHECK(usesCoherentWideOFDMTiming(Modulation::QAM16),
-          "QAM16 should use coherent timing");
-    CHECK(!usesCoherentWideOFDMTiming(Modulation::DQPSK),
-          "DQPSK should stay on baseline differential timing");
+          "wide OFDM SACK delay should hold ACKs through a physical sender window");
 
     CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 8, 120, 1) == 8000,
           "wide OFDM window=8 timeout should keep default-CW floor after burst accounting");
     CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 8,
-                                      w8_sack_delay, 3) == 12446,
-          "DQPSK R1/2 wide OFDM should retain the audited baseline RTO guard");
+                                      w8_sack_delay, 1) == 12014,
+          "wide OFDM window=8 timeout should cover physical SACK holdoff");
     CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 8, 120, 1, 6) == 9224,
           "wide OFDM 6-CW ACK timeout should cover the longer burst");
     CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 8, 120, 1, 8) == 11528,
           "wide OFDM 8-CW ACK timeout should cover the longer burst");
-
-    CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_4, 8,
-                                      w8_sack_delay, 3) == 12446,
-          "DQPSK R1/4 RTO should reproduce the audited 12.446s guard");
 
     const uint32_t timeout_4cw = computeWideOFDMAckTimeoutMs(
         Modulation::DQPSK, CodeRate::R1_2, kHighThroughputOFDMWindowFrames,
@@ -354,8 +340,6 @@ void test_ofdm_profile_selection() {
 
     CHECK(kCarrierSenseSackCoalesceMs == 30,
           "OFDM SACK policy should use a small coalescing timer, not burst-tail guessing");
-    CHECK(kCarrierSenseGuardMs == kRadioTxRxSwitchMs,
-          "carrier-sense guard should add T/R switch time because quiet-hold supplies the margin");
     CHECK(kCarrierSenseAckRepeatCount == 1,
           "OFDM ACK policy should not schedule delayed duplicate ACK bursts");
 }

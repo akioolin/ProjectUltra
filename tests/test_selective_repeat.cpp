@@ -1244,40 +1244,6 @@ bool test_sack_timer_final_short_collapses_long() {
     return true;
 }
 
-bool test_gap_fill_that_delivers_final_uses_short_sack_timer() {
-    TEST("gap fill that delivers buffered FINAL uses short SACK timer");
-
-    ARQConfig config;
-    config.window_size = 4;
-    config.sack_delay_ms = 500;
-    SelectiveRepeatARQ rx(config);
-    rx.setCallsigns("RX1", "TX1");
-    rx.setSackDelayShort(50);
-
-    ByteChannel channel;
-    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
-
-    auto tail = v2::DataFrame::makeData("TX1", "RX1", 1, Bytes{1});
-    tail.flags |= v2::Flags::FINAL;
-    rx.onFrameReceived(tail.serialize());
-    if (channel.size() != 1)
-        FAIL("Out-of-order FINAL should send immediate hole SACK");
-    channel.receive();
-
-    auto gap = v2::DataFrame::makeData("TX1", "RX1", 0, Bytes{0});
-    gap.flags |= v2::Flags::MORE_FRAG;
-    rx.onFrameReceived(gap.serialize());
-    rx.tick(40);
-    if (channel.size() != 0)
-        FAIL("Gap-fill stream-tail SACK fired before short delay elapsed");
-    rx.tick(20);
-    if (channel.size() != 1)
-        FAIL("Gap-fill stream-tail SACK did not use short delay");
-
-    PASS();
-    return true;
-}
-
 bool test_sack_timer_message_boundary_uses_long_without_final() {
     TEST("MORE_FRAG=0 message boundary uses long timer unless FINAL is set");
 
@@ -1574,7 +1540,6 @@ int main() {
 
     std::cout << "\nStream-Aware SACK Timer Tests:\n";
     test_sack_timer_final_short_collapses_long();
-    test_gap_fill_that_delivers_final_uses_short_sack_timer();
     test_sack_timer_message_boundary_uses_long_without_final();
     test_sack_timer_more_frag_does_not_extend();
     test_sack_delay_short_zero_sentinel_preserves_legacy();

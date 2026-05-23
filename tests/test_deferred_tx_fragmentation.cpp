@@ -117,55 +117,6 @@ void deferredLogicalSubmissionsFlushOnePerRadioKeyup() {
             "first deferred logical submission should be the only queued audio");
 }
 
-void dataTxArmsDerivedListenAndAdvancingAckReleasesIt() {
-    auto station = makeStation();
-    station.testSetTimingPolicyMode(WaveformMode::OFDM_CHIRP,
-                                    Modulation::QAM16,
-                                    CodeRate::R1_2);
-    const size_t derived_listen = station.testDerivedPostDataBurstListenSamples();
-    require(derived_listen > kPostTxAckListenSamples,
-            "coherent DATA listen window must exceed the legacy fixed 30 ms hold");
-
-    station.testQueueTxSamples(samples(kFirstChunkSamples, 0.30f),
-                               "frame_type=DATA seq=7");
-    require(station.testDrainLocalTxSamples(kFirstChunkSamples) == kFirstChunkSamples,
-            "DATA frame should drain fully");
-    station.testObserveIdleTxBlock();
-    station.testAdvanceRadioSamples(kTrSwitchSamples + kCooldownSamples);
-    require(station.pttState() == PttState::RX,
-            "radio should be RX-ready after data TX recovery");
-    require(station.testPostTxListenSamples() == derived_listen,
-            "DATA frame should arm the airtime-derived listen window");
-
-    station.testQueueTxSamples(samples(120, 0.40f), "frame_type=DATA seq=8");
-    require(station.testDeferredTxDepth() == 1,
-            "next DATA must wait during the post-DATA listen window");
-    station.testReleasePostTxAckListenWindow(7, 8);
-    station.testFlushDeferredTxIfReady();
-    require(station.testDeferredTxDepth() == 0,
-            "advancing ACK should release the post-DATA listen window immediately");
-    require(station.testTxQueueDepth() == 120,
-            "released DATA should enter the local TX queue");
-}
-
-void differentialDataTxKeepsLegacyListenOnly() {
-    auto station = makeStation();
-    station.testSetTimingPolicyMode(WaveformMode::OFDM_CHIRP,
-                                    Modulation::DQPSK,
-                                    CodeRate::R1_4);
-    require(station.testDerivedPostDataBurstListenSamples() == 0,
-            "differential DATA should not arm the coherent post-DATA listen window");
-
-    station.testQueueTxSamples(samples(kFirstChunkSamples, 0.30f),
-                               "frame_type=DATA seq=7");
-    require(station.testDrainLocalTxSamples(kFirstChunkSamples) == kFirstChunkSamples,
-            "differential DATA frame should drain fully");
-    station.testObserveIdleTxBlock();
-    station.testAdvanceRadioSamples(kTrSwitchSamples + kCooldownSamples);
-    require(station.testPostTxListenSamples() == kPostTxAckListenSamples,
-            "differential DATA should keep only the baseline legacy listen hold");
-}
-
 void handshakeConnectUsesDeferredCarrierSenseGate() {
     auto station = makeStation();
 
@@ -225,8 +176,6 @@ void deferredArqAcksCoalesceToLatestState() {
 int main() {
     continuationChunkBypassesRecoveryGate();
     deferredLogicalSubmissionsFlushOnePerRadioKeyup();
-    dataTxArmsDerivedListenAndAdvancingAckReleasesIt();
-    differentialDataTxKeepsLegacyListenOnly();
     handshakeConnectUsesDeferredCarrierSenseGate();
     deferredArqAcksCoalesceToLatestState();
     std::cout << "deferred TX fragmentation regression passed\n";

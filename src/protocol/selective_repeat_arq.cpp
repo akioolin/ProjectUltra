@@ -518,10 +518,8 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
 
         const uint32_t batch_threshold = arq_policy::effectiveAckBatchThreshold(
             config_.ack_batch_size, config_.window_size);
-        const bool stream_tail_delivered = frame_final || rx_final_delivered_since_sack_;
         const bool batch_threshold_reached = frames_since_ack_ >= batch_threshold;
-        const bool batch_ack_allowed =
-            !frame_more_frag || stream_tail_delivered || ack_batch_through_more_frag_;
+        const bool batch_ack_allowed = !frame_more_frag || ack_batch_through_more_frag_;
         if (out_of_order || (batch_threshold_reached && batch_ack_allowed)) {
             // Bump the trigger-reason counter BEFORE sendSack — out_of_order
             // takes priority because it's the immediate safety valve. Each
@@ -537,31 +535,14 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
             frames_since_ack_ = 0;
         } else if (new_frame) {
             sack_pending_ = true;
-            // Stream-aware timer: regular frames wait one expected DATA-frame
-            // airtime plus the coalescing guard when a timing model is known.
-            // A continuous burst keeps re-arming this timer until the batch
-            // threshold fires immediately; a drained sender gets a prompt SACK
-            // instead of a whole-window static pad. Explicit FINAL frames keep
-            // using the short tail delay so the stream tail advances promptly.
-            sack_timer_ms_ = arq_policy::adaptiveSackTimerForFrame(
+            // Stream-aware timer: regular frames get the long physical burst
+            // delay; explicit FINAL frames can use the short tail delay so the
+            // sender's window advances promptly after the actual stream tail.
+            // Sentinel sack_delay_short_ms_ = 0 preserves legacy long-delay
+            // behavior for every frame.
+            sack_timer_ms_ = arq_policy::sackTimerForFrame(
                 sack_timer_ms_, config_.sack_delay_ms, sack_delay_short_ms_,
-                stream_tail_delivered, sack_data_airtime_ms_, sack_coalesce_guard_ms_);
-            if (ultra::phyDiagnosticsEnabled()) {
-                std::ostringstream oss;
-                oss << "event=arq_sack_timer_arm"
-                    << " local=" << local_call_
-                    << " remote=" << remote_call_
-                    << " seq=" << seq
-                    << " timer_ms=" << sack_timer_ms_
-                    << " data_airtime_ms=" << sack_data_airtime_ms_
-                    << " coalesce_guard_ms=" << sack_coalesce_guard_ms_
-                    << " frames_since_ack=" << frames_since_ack_
-                    << " batch_threshold=" << batch_threshold
-                    << " final=" << boolDigit(frame_final)
-                    << " stream_tail=" << boolDigit(stream_tail_delivered)
-                    << " adaptive=" << boolDigit(sack_data_airtime_ms_ != 0);
-                ultra::phyDiagLine(oss.str());
-            }
+                frame_final);
         }
 
     } else {
@@ -881,9 +862,6 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
             tx_window_[slot].hole_probe_armed = false;
             tx_window_[slot].hole_probe_timer_ms = 0;
             tx_window_[slot].hole_probe_count = 0;
-        }
-        if (on_tx_window_advanced_) {
-            on_tx_window_advanced_(base_before_ack, tx_base_seq_);
         }
     }
 }
