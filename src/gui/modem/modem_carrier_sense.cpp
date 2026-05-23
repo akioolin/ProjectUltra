@@ -1,48 +1,16 @@
-// modem_carrier_sense.cpp - Carrier sense (Listen Before Talk) for ModemEngine
+// modem_carrier_sense.cpp - Half-duplex turnaround timing for ModemEngine
+//
+// Carrier sense (listen-before-talk) is owned by the shared ChannelBusyDetector
+// (src/audio/channel_busy_detector.cpp), reached by simulator/TNC stations via
+// AudioPort::isChannelIdleFor(). The old fixed-threshold ModemEngine energy
+// detector was an unwired dead stub and was removed; only the half-duplex
+// turnaround timing remains here.
 
 #include "modem_engine.hpp"
-#include <cmath>
-#include <algorithm>
+#include <chrono>
 
 namespace ultra {
 namespace gui {
-
-void ModemEngine::updateChannelEnergy(const std::vector<float>& samples) {
-    if (samples.empty()) return;
-
-    // Calculate RMS energy of samples
-    float sum_sq = 0.0f;
-    for (float s : samples) {
-        sum_sq += s * s;
-    }
-    float rms = std::sqrt(sum_sq / samples.size());
-
-    // Smooth the energy estimate (exponential moving average)
-    float current = channel_energy_.load();
-    float smoothed = ENERGY_SMOOTHING * rms + (1.0f - ENERGY_SMOOTHING) * current;
-    channel_energy_.store(smoothed);
-}
-
-bool ModemEngine::isChannelBusy() const {
-    // Channel is busy if energy is above threshold (someone is transmitting)
-    // Note: We don't check isSynced() here because:
-    // 1. Sync state persists after decode (would block response TX)
-    // 2. Energy detection is the true carrier sense - if there's RF energy, channel is busy
-    // 3. Protocol layer handles half-duplex timing separately
-    return channel_energy_.load() > carrier_sense_threshold_;
-}
-
-float ModemEngine::getChannelEnergy() const {
-    return channel_energy_.load();
-}
-
-void ModemEngine::setCarrierSenseThreshold(float threshold) {
-    carrier_sense_threshold_ = std::max(0.0f, std::min(1.0f, threshold));
-}
-
-float ModemEngine::getCarrierSenseThreshold() const {
-    return carrier_sense_threshold_;
-}
 
 bool ModemEngine::isTurnaroundActive() const {
     if (turnaround_delay_ms_ == 0) return false;

@@ -761,9 +761,6 @@ void ModemEngine::reset() {
         streaming_decoder_->reset();
     }
 
-    // Reset carrier sense
-    channel_energy_.store(0.0f);
-
     {
         std::lock_guard<std::mutex> lock2(stats_mutex_);
         stats_ = LoopbackStats{};

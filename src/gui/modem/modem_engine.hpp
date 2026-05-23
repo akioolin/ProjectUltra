@@ -149,13 +149,10 @@ public:
     void reset();
     void clearRxBuffer();  // Clear RX audio buffer (use before TX to prevent echo)
 
-    // ========================================================================
-    // CARRIER SENSE (Listen Before Talk)
-    // ========================================================================
-    bool isChannelBusy() const;
-    float getChannelEnergy() const;
-    void setCarrierSenseThreshold(float threshold);
-    float getCarrierSenseThreshold() const;
+    // Carrier sense (listen-before-talk) lives in the shared ChannelBusyDetector
+    // (src/audio/channel_busy_detector.cpp), reached by simulator/TNC stations via
+    // AudioPort::isChannelIdleFor(). The old fixed-threshold ModemEngine energy
+    // detector was an unwired dead stub and has been removed.
 
     // Half-duplex turnaround delay
     void setTurnaroundDelay(uint32_t delay_ms) { turnaround_delay_ms_ = delay_ms; }
@@ -342,11 +339,6 @@ private:
     FilterConfig filter_config_;
     std::unique_ptr<FIRFilter> tx_filter_;
     std::unique_ptr<FIRFilter> rx_filter_;
-
-    // Carrier sense
-    std::atomic<float> channel_energy_{0.0f};
-    float carrier_sense_threshold_ = 0.02f;
-    static constexpr float ENERGY_SMOOTHING = 0.3f;
 
     // Half-duplex turnaround
     std::chrono::steady_clock::time_point last_rx_complete_time_;

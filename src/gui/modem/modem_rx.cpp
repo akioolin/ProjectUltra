@@ -174,12 +174,6 @@ void ModemEngine::feedAudio(const float* samples, size_t count) {
     if (streaming_decoder_) {
         streaming_decoder_->feedAudio(samples, count);
     }
-
-    // Update carrier sense
-    if (count >= ENERGY_WINDOW_SAMPLES) {
-        std::vector<float> window(samples, samples + std::min(count, ENERGY_WINDOW_SAMPLES));
-        updateChannelEnergy(window);
-    }
 }
 
 void ModemEngine::feedAudio(const std::vector<float>& samples) {
