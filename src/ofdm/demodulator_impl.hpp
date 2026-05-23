@@ -76,9 +76,16 @@ struct OFDMDemodulator::Impl {
     float last_lts_channel_magnitude = 1.0f;
     float last_lts_residual_cfo_hz = 0.0f;
 
-    // Fading index (from pilot magnitude variance)
-    // 0 = flat channel, > 0.15 = significant fading
+    // Internal per-symbol fading index from raw pilot magnitude variance.
+    // This scale feeds demapper/two-pass decisions; it is intentionally
+    // separate from the public channel-quality meter below.
     float last_fading_index = 0.0f;
+    // Public channel-quality fading index: pilot-only frequency CV plus
+    // temporal CV, matching the waveform-layer calibration used by adaptation.
+    float public_fading_index = 0.0f;
+    std::vector<float> pilot_mag_sum_;
+    std::vector<float> pilot_mag_sq_sum_;
+    size_t pilot_fading_symbol_count_ = 0;
 
     // Output data
     Bytes demod_data;
@@ -268,6 +275,9 @@ struct OFDMDemodulator::Impl {
                                bool fitted_common_gain = false,
                                bool noise_reference_only = false,
                                float noise_power_reference_scale = 1.0f);
+    void resetPilotFadingStats();
+    void updatePilotFadingStats(const std::vector<Complex>& h_ls_all);
+    float computePilotFadingIndexFromStats() const;
     void interpolateChannel();
     Complex hardDecision(Complex sym, Modulation mod) const;
     void resetFailureAttributionDiagnostics();

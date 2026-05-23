@@ -281,6 +281,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 impl_->last_snr_db_estimate = 0.0f;
                 impl_->noise_variance = 0.1f;
                 impl_->prev_pilot_phases.clear();
+                impl_->resetPilotFadingStats();
 
                 // Reset adaptive equalizer
                 std::fill(impl_->lms_weights.begin(), impl_->lms_weights.end(), Complex(1, 0));
@@ -372,6 +373,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                     impl_->last_snr_db_estimate = 0.0f;
                     impl_->noise_variance = 0.1f;
                     impl_->prev_pilot_phases.clear();
+                    impl_->resetPilotFadingStats();
 
                     std::fill(impl_->lms_weights.begin(), impl_->lms_weights.end(), Complex(1, 0));
                     std::fill(impl_->last_decisions.begin(), impl_->last_decisions.end(), Complex(0, 0));
@@ -557,36 +559,7 @@ float OFDMDemodulator::getLastTimingOffsetSamples() const {
 }
 
 float OFDMDemodulator::getFadingIndex() const {
-    // Compute coefficient of variation of per-carrier channel estimate magnitudes
-    // Uses data_carrier_indices to get magnitudes of active carriers only
-    const auto& indices = impl_->data_carrier_indices;
-    if (indices.empty()) return 0.0f;
-
-    // Collect carrier magnitudes
-    std::vector<float> magnitudes;
-    magnitudes.reserve(indices.size());
-    for (int idx : indices) {
-        float mag = std::abs(impl_->channel_estimate[idx]);
-        magnitudes.push_back(mag);
-    }
-
-    // Calculate mean
-    float sum = 0.0f;
-    for (float m : magnitudes) sum += m;
-    float mean = sum / magnitudes.size();
-
-    if (mean < 0.001f) return 0.0f;  // No signal
-
-    // Calculate standard deviation
-    float var_sum = 0.0f;
-    for (float m : magnitudes) {
-        float diff = m - mean;
-        var_sum += diff * diff;
-    }
-    float std_dev = std::sqrt(var_sum / magnitudes.size());
-
-    // Coefficient of variation (normalized std dev)
-    return std_dev / mean;
+    return impl_->public_fading_index;
 }
 
 float OFDMDemodulator::getLastLTSSignalPower() const {
@@ -688,6 +661,7 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     impl_->last_snr_db_estimate_valid = false;
     impl_->last_snr_db_estimate = 0.0f;
     impl_->noise_variance = 0.1f;
+    impl_->resetPilotFadingStats();
 
     // Preserve pre-set CFO and phase (e.g., from chirp-based estimation)
     // If CFO was explicitly set via setFrequencyOffsetWithPhase(), the phase
@@ -874,6 +848,7 @@ void OFDMDemodulator::reset() {
     impl_->last_snr_db_estimate_valid = false;
     impl_->last_snr_db_estimate = 0.0f;
     impl_->noise_variance = 0.1f;
+    impl_->resetPilotFadingStats();
     impl_->last_lts_signal_power = 1.0f;
     impl_->last_lts_channel_magnitude = 1.0f;
     impl_->last_lts_residual_cfo_hz = 0.0f;

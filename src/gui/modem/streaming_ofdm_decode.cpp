@@ -664,7 +664,12 @@ void StreamingDecoder::decodeCurrentFrame() {
                             stats_.frames_decoded++;
                         }
 
-                        last_fading_index_.store(waveform_->getFadingIndex());
+                        // Connected ACK/NACK/MODE_CHANGE frames use the short
+                        // hardened control profile; keep the adaptation meter
+                        // tied to data-channel frames after the link is up.
+                        if (!connected_) {
+                            last_fading_index_.store(waveform_->getFadingIndex());
+                        }
 
                         if (switched_profile) {
                             waveform_->configure(saved_mod, saved_rate);

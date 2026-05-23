@@ -46,6 +46,10 @@ void markFirstLTSSymbolForBurstGroup(Samples& preamble, size_t symbol_samples) {
     }
 }
 
+bool paprReductionWouldCorruptCoherentPilots(Modulation mod) {
+    return ofdm_link_adaptation::isCoherentModulation(mod);
+}
+
 }  // namespace
 
 // ============================================================================
@@ -103,6 +107,16 @@ void StreamingEncoder::applyPaprReductionIfNeeded(std::vector<float>& samples,
     last_papr_reduction_ = {};
     if (!papr_reduction_enabled_ || !is_ofdm || is_control_frame ||
         samples.empty()) {
+        return;
+    }
+
+    if (paprReductionWouldCorruptCoherentPilots(modulation_)) {
+        LOG_MODEM(DEBUG,
+                  "[%s] PAPR reduction skipped for %s %s: coherent OFDM "
+                  "pilots require a linear transmit waveform",
+                  log_prefix_.c_str(),
+                  modulationToString(modulation_),
+                  codeRateToString(code_rate_));
         return;
     }
 

@@ -729,6 +729,7 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
         h_mag_var /= data_carrier_indices.size();
 
         last_fading_index = (h_mag_mean > 0.01f) ? std::sqrt(h_mag_var) / h_mag_mean : 0.0f;
+        public_fading_index = last_fading_index;
         LOG_DEMOD(INFO, "LTS fading index: %.3f in_band_snr=%.1f dB "
                   "(threshold: LLR>0.15, two-pass>0.30)",
                   last_fading_index,

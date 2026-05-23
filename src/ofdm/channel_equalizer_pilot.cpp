@@ -13,6 +13,110 @@ namespace ultra {
 
 using namespace demod_constants;
 
+void OFDMDemodulator::Impl::resetPilotFadingStats() {
+    pilot_mag_sum_.clear();
+    pilot_mag_sq_sum_.clear();
+    pilot_fading_symbol_count_ = 0;
+    public_fading_index = 0.0f;
+}
+
+float OFDMDemodulator::Impl::computePilotFadingIndexFromStats() const {
+    if (pilot_fading_symbol_count_ == 0 ||
+        pilot_mag_sum_.empty() ||
+        pilot_mag_sum_.size() != pilot_mag_sq_sum_.size()) {
+        return last_fading_index;
+    }
+
+    const float inv_count =
+        1.0f / static_cast<float>(pilot_fading_symbol_count_);
+    const float snr_linear = last_snr_db_estimate_valid
+        ? std::pow(10.0f, last_snr_db_estimate / 10.0f)
+        : 0.0f;
+    const float pilot_mag_noise_cv2 =
+        (snr_linear > 1.0f && std::isfinite(snr_linear))
+            ? 0.25f / snr_linear
+            : 0.0f;
+
+    float freq_mean_sum = 0.0f;
+    size_t freq_count = 0;
+    for (float sum : pilot_mag_sum_) {
+        const float mean = sum * inv_count;
+        if (mean > 0.01f && std::isfinite(mean)) {
+            freq_mean_sum += mean;
+            ++freq_count;
+        }
+    }
+    if (freq_count == 0) {
+        return 0.0f;
+    }
+
+    const float freq_mean = freq_mean_sum / static_cast<float>(freq_count);
+    float freq_var_sum = 0.0f;
+    float temporal_cv_sum = 0.0f;
+    size_t temporal_count = 0;
+    for (size_t i = 0; i < pilot_mag_sum_.size(); ++i) {
+        const float mean = pilot_mag_sum_[i] * inv_count;
+        if (mean <= 0.01f || !std::isfinite(mean)) {
+            continue;
+        }
+
+        const float freq_diff = mean - freq_mean;
+        freq_var_sum += freq_diff * freq_diff;
+
+        const float mean_sq = pilot_mag_sq_sum_[i] * inv_count;
+        const float temporal_var = std::max(0.0f, mean_sq - mean * mean);
+        const float temporal_cv2 = temporal_var / (mean * mean);
+        temporal_cv_sum +=
+            std::sqrt(std::max(0.0f, temporal_cv2 - pilot_mag_noise_cv2));
+        ++temporal_count;
+    }
+
+    const float freq_cv2 = (freq_mean > 0.01f)
+        ? (freq_var_sum / static_cast<float>(freq_count)) / (freq_mean * freq_mean)
+        : 0.0f;
+    const float freq_noise_cv2 = pilot_mag_noise_cv2 * inv_count;
+    const float freq_cv = std::sqrt(std::max(0.0f, freq_cv2 - freq_noise_cv2));
+    const float temporal_cv = (temporal_count > 0)
+        ? temporal_cv_sum / static_cast<float>(temporal_count)
+        : 0.0f;
+
+    return freq_cv + temporal_cv;
+}
+
+void OFDMDemodulator::Impl::updatePilotFadingStats(const std::vector<Complex>& h_ls_all) {
+    if (h_ls_all.empty()) {
+        public_fading_index = last_fading_index;
+        return;
+    }
+
+    if (pilot_mag_sum_.size() != h_ls_all.size() ||
+        pilot_mag_sq_sum_.size() != h_ls_all.size()) {
+        pilot_mag_sum_.assign(h_ls_all.size(), 0.0f);
+        pilot_mag_sq_sum_.assign(h_ls_all.size(), 0.0f);
+        pilot_fading_symbol_count_ = 0;
+    }
+
+    float symbol_mag_sum = 0.0f;
+    for (const Complex& h : h_ls_all) {
+        symbol_mag_sum += std::abs(h);
+    }
+    const float symbol_mag_mean =
+        symbol_mag_sum / static_cast<float>(h_ls_all.size());
+    if (symbol_mag_mean <= 0.01f || !std::isfinite(symbol_mag_mean)) {
+        public_fading_index = last_fading_index;
+        return;
+    }
+
+    for (size_t i = 0; i < h_ls_all.size(); ++i) {
+        const float mag = std::abs(h_ls_all[i]);
+        pilot_mag_sum_[i] += mag;
+        pilot_mag_sq_sum_[i] += mag * mag;
+    }
+    ++pilot_fading_symbol_count_;
+
+    public_fading_index = computePilotFadingIndexFromStats();
+}
+
 void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& freq_domain) {
     // Smoothing factor for channel estimate update:
     // - First symbol: alpha=1.0 (use pilot estimate directly)
@@ -188,6 +292,8 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
 
     const float fading_index =
         (h_mag_mean > 0.01f) ? std::sqrt(h_mag_variance) / h_mag_mean : 0.0f;
+    last_fading_index = fading_index;
+    updatePilotFadingStats(h_ls_all);
 
     // Phase-1 transfer runs showed temporal pilot-channel residuals are too
     // easily contaminated by channel-estimate motion during long OFDM frames.
@@ -547,12 +653,14 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     // estimate when fading is significant. The pilots still track the channel
     // (for equalization), but we don't let fading contaminate noise_variance.
 
-    // Store for external access (GUI display, rate adaptation)
-    last_fading_index = fading_index;
+    // Store for internal OFDM demapper access. The externally reported fading
+    // index is accumulated from raw pilot LS magnitudes before interpolation or
+    // decision-directed tracking can modify data-carrier channel estimates.
     LOG_DEMOD(DEBUG, "Pilot quality: fading_index=%.3f in_band_snr=%.1f dB "
-              "(pilot_residuals=%zu)",
+              "(public=%.3f pilot_residuals=%zu)",
               last_fading_index,
               last_snr_db_estimate_valid ? last_snr_db_estimate : 0.0f,
+              public_fading_index,
               pilot_residual_count);
 
     if (noise_count > 0 && noise_power_sum > 0.0f) {
