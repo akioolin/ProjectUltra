@@ -10,6 +10,66 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-23: GUI — wire the production carrier-sense TX gate (half-duplex collision avoidance)
+
+**What was broken:** `ultra_gui` had **no peer-collision protection on TX**. The
+half-duplex collision class fixed in the sim station yesterday (don't key up
+while the peer is still transmitting — the ACK-tail-collision / TX-RX-deaf-window
+work, commits `645f4d5` / `109d949`, task #79) was never ported to the GUI app:
+- `tx_in_progress_` is only a *self* guard (don't start a TX while our own TX is
+  still playing — `app.cpp` send-button check); it knows nothing about the peer.
+- `ModemEngine::isTurnaroundActive()` (the time-based turnaround guard) is **dead** —
+  nothing in `app.cpp` consults it before keying up.
+- The protocol engine's "busy" is ARQ-state, not channel state.
+- The shared `ChannelBusyDetector` we wired earlier (commit `e7c1680`) only
+  **observed + logged** in the GUI; nothing gated TX on it ("Step B").
+
+So nothing stopped the GUI from keying straight over the peer mid-transmission.
+`SimulatedStation`/`ultra_tnc` had the guard; the GUI did not — a production
+parity gap on the operator-facing path.
+
+**What changed (`src/gui/app.{hpp,cpp}` only):**
+- `queueRealTxSamples()` — the single chokepoint all five TX paths funnel through
+  (data, burst, PING, PONG, test) — is now an OFDM carrier-sense **gate**. When
+  `modem_.channelBusyForTx()` is true (peer on-channel) or a burst is already
+  deferred, it stashes the burst in a bounded FIFO (`deferred_tx_`, cap 8,
+  drop-oldest) and returns *queued, not dropped*. The real key-up + send body
+  moved to `doQueueRealTxSamples()`.
+- `flushDeferredTxIfReady()` runs each frame from the main render loop right after
+  `pollRadioRx()` (which just refreshed the detector). It drains one deferred
+  burst when the channel goes idle (peer finished) and we're not mid-TX. Flushing
+  one-per-frame lets `tx_in_progress_` serialize the queue (half-duplex).
+- **Deadlock-proof:** `kMaxTxDeferMs = 4000` (~one max OFDM burst). If the channel
+  never clears (stuck-busy reading), the burst flushes anyway — TX can never
+  deadlock. Mirrors the sim station's eventual-flush.
+- **OFDM-gated:** `channelBusyForTx()` is true only in OFDM mode (carrier sense is
+  off at MC-DPSK/handshake SNRs by design — energy detection can't see the signal
+  there), so PING/CONNECT and MC-DPSK data are unaffected; the MC-DPSK CONNECT
+  floor is untouched.
+- Deferred queue cleared on `DISCONNECTED` so a stale burst can't fire into the
+  next session.
+- Single-threaded by construction: `queueRealTxSamples` runs from
+  `protocol_.tick()` and `flushDeferredTxIfReady` from the main loop — both on the
+  main thread — so the FIFO needs no locking; only the detector reads are
+  cross-thread (already safe). This is *why* the mechanism is non-blocking
+  defer-and-reflush rather than a blocking wait-until-idle: `pollOtaRx()` feeds the
+  detector on the same main thread, so a blocking wait would deadlock the OTASim
+  path.
+
+**How it's properly fixed:** Listen-before-talk for the peer is enforced at the
+one place TX actually keys up, OFDM-only, FIFO-ordered, non-blocking, and bounded
+so it can never strand the link.
+
+**Test verification:**
+- `cmake --build build -j4`: clean.
+- `ctest --test-dir build -j4`: **92/92 PASS** (the cli_simulator/OTASim suite
+  exercises `SimulatedStation`, not the GUI `ModemEngine`, so these numbers are
+  unaffected by construction — the change is confined to `src/gui/`).
+- **Pending real proof:** the GUI TX path is not CI-covered. Validation is a live
+  two-station OTASim QSO showing the GUI defers its ACK behind the peer's burst
+  (CCA defer/flush log lines), plus a Codex counter-check per the standing rule
+  for changes in this area.
+
 ## 2026-05-21: GUI — enable receiver soft-combining HARQ (close production parity gap)
 
 **What was broken:** `ultra_gui` users on real radios had **silently worse decoder

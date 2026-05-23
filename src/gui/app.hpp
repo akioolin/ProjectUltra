@@ -108,6 +108,19 @@ private:
     std::atomic<bool> tx_in_progress_{false};  // Thread-safe TX flag for waterfall control
     std::chrono::steady_clock::time_point tx_end_time_;  // When current TX finishes
 
+    // OFDM carrier-sense TX defer queue (half-duplex collision avoidance). Touched
+    // only on the main thread (queueRealTxSamples runs from protocol_.tick(), and
+    // flushDeferredTxIfReady() runs from the main render loop after pollRadioRx()),
+    // so no locking is needed; only the detector reads are cross-thread (safe).
+    struct DeferredTx {
+        std::vector<float> samples;
+        std::string context;
+    };
+    std::deque<DeferredTx> deferred_tx_;
+    std::chrono::steady_clock::time_point deferred_tx_deadline_{};
+    static constexpr size_t kMaxDeferredTx = 8;     // bounded memory (drop-oldest)
+    static constexpr uint32_t kMaxTxDeferMs = 4000; // ~one max OFDM burst; never deadlock
+
     // Radio mode state
     std::vector<std::string> input_devices_;
     std::vector<std::string> output_devices_;
@@ -216,7 +229,16 @@ private:
     std::deque<std::string> snapshotRxLog() const;
     void clearRxLog();
     void stopTxNow(const char* reason);
+    // OFDM carrier-sense TX gate (half-duplex collision avoidance). queueRealTxSamples
+    // is the single chokepoint all TX paths funnel through; in OFDM mode it defers the
+    // burst when the peer is still on-channel instead of keying up over it.
+    // flushDeferredTxIfReady() drains the deferred queue on the main thread once the
+    // channel goes idle, bounded by kMaxTxDeferMs so a stuck-busy reading never
+    // deadlocks TX. doQueueRealTxSamples() is the real key-up + send (bypasses the gate).
     bool queueRealTxSamples(const std::vector<float>& samples, const char* context);
+    bool doQueueRealTxSamples(const std::vector<float>& samples, const char* context);
+    void deferTxSamples(const std::vector<float>& samples, const char* context);
+    void flushDeferredTxIfReady();
     ptt::PttConfig pttConfigFromSettings(const AppSettings& settings) const;
     bool ensurePttReadyLocked(const AppSettings& settings);
     bool ensurePttReady();

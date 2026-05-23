@@ -610,6 +610,13 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                 } else {
                     msg = "[SYS] Disconnected" + (info.empty() ? "" : ": " + info);
                 }
+                // Drop any carrier-sense-deferred TX so a stale burst can't fire
+                // into the next session.
+                if (!deferred_tx_.empty()) {
+                    guiLog("CCA: clearing %zu deferred TX burst(s) on disconnect",
+                           deferred_tx_.size());
+                    deferred_tx_.clear();
+                }
                 // Reset waveform mode to OFDM when disconnected
                 modem_.setWaveformMode(protocol::WaveformMode::OFDM_CHIRP);
                 // Reset connect waveform to DPSK for next connection attempt
@@ -1733,6 +1740,11 @@ void App::render() {
     // Process captured RX audio in the main thread.
     pollRadioRx();
 
+    // Carrier-sense TX gate: pollRadioRx() just refreshed the channel-busy detector,
+    // so this is the right point to release any OFDM burst we deferred to avoid
+    // transmitting over the peer (half-duplex collision avoidance).
+    flushDeferredTxIfReady();
+
     // Safe-startup mode: auto-start audio shortly after first frames.
     // Keeps process bring-up lightweight while preserving "auto-listen" behavior.
     if (deferred_audio_auto_init_pending_ &&
@@ -2272,6 +2284,72 @@ std::string App::testCat(AppSettings settings) {
 }
 
 bool App::queueRealTxSamples(const std::vector<float>& samples, const char* context) {
+    if (samples.empty()) {
+        return false;
+    }
+
+    // OFDM carrier-sense gate (half-duplex collision avoidance): never key up while
+    // the peer is still transmitting. channelBusyForTx() is true only in OFDM mode
+    // (carrier sense is off at MC-DPSK/handshake SNRs by design — energy detection
+    // can't see the signal there), so PING/CONNECT and MC-DPSK data are unaffected.
+    // We also stay FIFO: if anything is already deferred, append rather than jump it.
+    if (!deferred_tx_.empty() || modem_.channelBusyForTx()) {
+        deferTxSamples(samples, context);
+        return true;  // queued (deferred), not dropped
+    }
+
+    return doQueueRealTxSamples(samples, context);
+}
+
+void App::deferTxSamples(const std::vector<float>& samples, const char* context) {
+    if (deferred_tx_.empty()) {
+        // Start the deadlock-guard clock on the first deferral of a burst.
+        deferred_tx_deadline_ = std::chrono::steady_clock::now() +
+                                std::chrono::milliseconds(kMaxTxDeferMs);
+    }
+    if (deferred_tx_.size() >= kMaxDeferredTx) {
+        deferred_tx_.pop_front();  // bounded memory: drop oldest
+    }
+    deferred_tx_.push_back(
+        DeferredTx{std::vector<float>(samples.begin(), samples.end()),
+                   context ? std::string(context) : std::string("TX audio")});
+    guiLog("CCA: deferred %s (peer on channel, rms=%.4f thresh=%.4f depth=%zu)",
+           context ? context : "TX audio",
+           modem_.channelRms(), modem_.channelQuietThreshold(),
+           deferred_tx_.size());
+}
+
+void App::flushDeferredTxIfReady() {
+    if (deferred_tx_.empty()) {
+        return;
+    }
+    if (tx_in_progress_.load()) {
+        return;  // don't stack a deferred burst on top of our own ongoing TX
+    }
+    const bool channel_idle = !modem_.channelBusyForTx();
+    const bool defer_timed_out =
+        std::chrono::steady_clock::now() >= deferred_tx_deadline_;
+    if (!channel_idle && !defer_timed_out) {
+        return;  // peer still transmitting and we haven't hit the safety bound yet
+    }
+
+    // Flush one burst per call; doQueueRealTxSamples() sets tx_in_progress_, so the
+    // next deferred burst waits for this TX to finish before its turn (half-duplex).
+    DeferredTx front = std::move(deferred_tx_.front());
+    deferred_tx_.pop_front();
+    guiLog("CCA: flushing deferred %s (%s, remaining=%zu)",
+           front.context.c_str(),
+           channel_idle ? "channel idle" : "defer timeout",
+           deferred_tx_.size());
+    if (!deferred_tx_.empty()) {
+        // Re-arm the guard clock for the remaining queued bursts.
+        deferred_tx_deadline_ = std::chrono::steady_clock::now() +
+                                std::chrono::milliseconds(kMaxTxDeferMs);
+    }
+    doQueueRealTxSamples(front.samples, front.context.c_str());
+}
+
+bool App::doQueueRealTxSamples(const std::vector<float>& samples, const char* context) {
     if (samples.empty()) {
         return false;
     }
