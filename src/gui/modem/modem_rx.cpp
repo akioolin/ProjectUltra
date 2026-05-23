@@ -174,6 +174,22 @@ void ModemEngine::feedAudio(const float* samples, size_t count) {
     if (streaming_decoder_) {
         streaming_decoder_->feedAudio(samples, count);
     }
+
+    // Carrier sense (listen-before-talk): feed the shared detector the same RX
+    // audio. local_rx_blackout=false here — in listen mode we are not keyed.
+    // (The TX-deaf blackout + the actual transmit gate land in a follow-up.)
+    channel_busy_detector_.observeSamples(std::span<const float>(samples, count),
+                                          /*local_rx_blackout=*/false);
+    cca_samples_since_log_ += count;
+    if (cca_samples_since_log_ >= 48000) {  // ~1 s at 48 kHz
+        cca_samples_since_log_ = 0;
+        LOG_MODEM(INFO, "[%s] CCA: rms=%.4f quiet_thresh=%.4f idle=%d ofdm_gated=%d",
+                  log_prefix_.c_str(),
+                  channel_busy_detector_.currentRms(),
+                  channel_busy_detector_.quietThreshold(),
+                  channel_busy_detector_.isIdle() ? 1 : 0,
+                  carrierSenseActiveForTx() ? 1 : 0);
+    }
 }
 
 void ModemEngine::feedAudio(const std::vector<float>& samples) {

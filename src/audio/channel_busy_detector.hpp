@@ -35,6 +35,28 @@ struct ChannelBusyDetectorConfig {
     uint32_t max_wait_for_idle_ms = 15000;
 };
 
+// Ratiometric, level-independent carrier-sense calibration for HF channels.
+// Every knob here is dimensionless, so the busy decision works at any absolute
+// noise level / AF-gain setting:
+//   - median floor (percentile 0.50) tracks the typical noise, robust to bursty
+//     real-HF excursions and to a transient signal (minority of the window);
+//   - busy threshold = floor x 2.0 (+6 dB);
+//   - a real signal is kept out of the floor by the detector's ratiometric
+//     admission gate (samples > floor x multiplier are not learned as noise), so
+//     no absolute estimate ceiling is needed (0 = disabled);
+//   - bootstrap admits any startup level (ceiling ~ full scale): assume idle at
+//     startup / listen-before-talk, so the floor seeds to whatever the noise is.
+// Shared by ModemEngine (GUI) and exercised by test_channel_busy_detector so the
+// calibration cannot drift between the production path and its test.
+inline ChannelBusyDetectorConfig ratiometricHfCarrierSenseConfig() {
+    ChannelBusyDetectorConfig config;
+    config.noise_floor_percentile = 0.50f;
+    config.quiet_noise_multiplier = 2.0f;
+    config.noise_floor_bootstrap_rms_ceiling = 2.0f;
+    config.noise_floor_estimate_rms_ceiling = 0.0f;
+    return config;
+}
+
 class ChannelBusyDetector {
 public:
     using Clock = std::chrono::steady_clock;

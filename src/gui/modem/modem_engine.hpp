@@ -17,6 +17,7 @@
 #include "protocol/frame_v2.hpp"  // v2::FrameType
 #include "protocol/waveform_selection.hpp"  // WaveformRecommendation, recommendWaveformAndRate
 #include "waveform/waveform_interface.hpp"  // IWaveform abstraction
+#include "audio/channel_busy_detector.hpp"  // shared carrier-sense (listen-before-talk)
 #include "streaming_decoder.hpp"  // StreamingDecoder - primary decoder
 #include "streaming_encoder.hpp"  // StreamingEncoder - unified TX encoder
 #include <memory>
@@ -159,6 +160,20 @@ public:
     uint32_t getTurnaroundDelay() const { return turnaround_delay_ms_; }
     bool isTurnaroundActive() const;
     uint32_t getTurnaroundRemaining() const;
+
+    // Carrier sense (listen-before-talk). Energy detection is only meaningful in
+    // the OFDM regime: at MC-DPSK SNRs the peer sits at/below the noise floor and
+    // is not energy-detectable, so CCA is skipped there (stop-and-wait turnaround
+    // coordinates instead). Gating to OFDM also matches where the half-duplex
+    // collision actually occurs (multi-frame OFDM bursts).
+    bool carrierSenseActiveForTx() const {
+        return protocol::isOFDMMode(waveform_mode_);
+    }
+    bool channelBusyForTx() const {
+        return carrierSenseActiveForTx() && !channel_busy_detector_.isIdle();
+    }
+    float channelRms() const { return channel_busy_detector_.currentRms(); }
+    float channelQuietThreshold() const { return channel_busy_detector_.quietThreshold(); }
 
     // ========================================================================
     // WAVEFORM & MODE CONTROL
@@ -344,12 +359,35 @@ private:
     std::chrono::steady_clock::time_point last_rx_complete_time_;
     uint32_t turnaround_delay_ms_ = 200;
 
+    // Carrier sense (listen-before-talk): the shared adaptive detector, fed RX
+    // audio in feedAudio(). Same component the simulator/TNC stations use.
+    //
+    // RATIOMETRIC, level-independent calibration (no absolute RMS constants, so
+    // it works at any HF noise level / AF-gain setting):
+    //   - MEDIAN floor (percentile 0.50): tracks the typical noise, robust to
+    //     the bursty excursions of real HF and to a transient signal (minority
+    //     of a long window).
+    //   - busy threshold = floor x 2.0 (+6 dB): dimensionless; rides over noise
+    //     peaks and trips on any occupant >= ~6 dB above the floor.
+    //   - signal kept out of the floor by the detector's RATIOMETRIC admission
+    //     gate (samples > floor x multiplier are not learned as "noise") — no
+    //     absolute ceiling needed, so estimate_ceiling stays disabled (0).
+    //   - bootstrap admits any startup level (ceiling 2.0 ~ full scale):
+    //     assume-idle-at-startup / listen-before-talk, so the floor seeds to
+    //     whatever the real noise is regardless of absolute level.
+    // Validated live (real_hf_loop OTASim bed, 2026-05-23) at multiple noise
+    // levels; see docs/tools probe. Energy CCA is only consulted in OFDM mode
+    // (carrierSenseActiveForTx()) — at MC-DPSK SNRs the peer is at/below the
+    // noise floor and is not energy-detectable.
+    ultra::audio::ChannelBusyDetector channel_busy_detector_{
+        ultra::audio::ratiometricHfCarrierSenseConfig()};
+    uint64_t cca_samples_since_log_ = 0;
+
     // Estimated CFO from peer (detected during connection, persists for connected mode)
     float peer_cfo_hz_ = 0.0f;
 
     // Helper methods
     void rebuildFilters();
-    void updateChannelEnergy(const std::vector<float>& samples);
 
     // Post-process TX samples (lead-in, filter, scale, stats)
     std::vector<float> postProcessTx(const std::vector<float>& samples);

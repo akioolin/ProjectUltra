@@ -219,6 +219,60 @@ void testNoisyIdleCanSeedBelowSignalSampleCeiling() {
     assert(detector.quietThreshold() < 0.275f);
 }
 
+// The production GUI/ModemEngine ratiometric calibration must (a) read idle on a
+// bursty noise floor at ANY absolute level, (b) detect a signal that rises a few
+// dB above that floor, (c) stay busy for ~the signal's length, and (d) release to
+// idle once the signal stops — using the SAME shared config the GUI uses, so the
+// calibration and its proof cannot drift apart.
+void testRatiometricCarrierSenseAcrossLevelsAndSignal() {
+    const float levels[] = {0.02f, 0.10f, 0.30f};  // ~16x absolute range
+    for (float L : levels) {
+        ChannelBusyDetectorConfig cfg = ultra::audio::ratiometricHfCarrierSenseConfig();
+        cfg.quiet_hold_ms = 30;
+        cfg.rms_window_ms = 30;
+        cfg.min_noise_floor_observations = 5;
+        cfg.max_wait_for_idle_ms = 50;
+        ChannelBusyDetector detector(cfg);
+
+        int t = 0;
+        // (a) ~2 s of bursty noise around floor L (real-HF-like +/-15%).
+        for (; t < 2000; t += 20) {
+            observe(detector, (t / 20) % 2 ? L * 1.15f : L * 0.85f, t);
+        }
+        assert(isIdleAtMs(detector, t));  // idle on the noise floor at level L
+        const float thr = detector.quietThreshold();
+        assert(thr > 1.6f * L && thr < 2.4f * L);  // threshold tracks ~2x floor (ratiometric)
+
+        // (b)+(c) inject a signal at 3x floor (+9.5 dB) for a known duration D.
+        const int sig_start = t;
+        const int D = 1000;
+        int first_busy = -1;
+        int last_busy = -1;
+        for (; t < sig_start + D; t += 20) {
+            observe(detector, 3.0f * L, t);
+            if (!isIdleAtMs(detector, t)) {
+                if (first_busy < 0) first_busy = t;
+                last_busy = t;
+            }
+        }
+        assert(first_busy >= 0);                       // signal was DETECTED
+        assert(first_busy - sig_start <= 100);         // detected promptly (~window+hold)
+        assert(detector.quietThreshold() < 2.6f * L);  // signal did NOT pollute the floor
+
+        // (d) noise resumes -> must release back to idle.
+        const int sig_end = t;
+        for (; t < sig_end + 400; t += 20) {
+            observe(detector, (t / 20) % 2 ? L * 1.15f : L * 0.85f, t);
+        }
+        assert(isIdleAtMs(detector, t));               // released after the signal stopped
+
+        // busy interval should match the signal length within the detector latency.
+        const int busy_dur = last_busy - first_busy + 20;
+        const int err = busy_dur > D ? busy_dur - D : D - busy_dur;
+        assert(err <= 150);                            // busy duration ~= signal length
+    }
+}
+
 void testWaitUntilIdleTimeoutAndGuard() {
     ChannelBusyDetector detector(testConfig());
     observe(detector, 0.050f, 0);
@@ -249,6 +303,7 @@ int main() {
     testSignalDominatedHistoryDoesNotRaiseNoiseFloor();
     testSignalSampleCeilingRejectsFullPowerCarrier();
     testNoisyIdleCanSeedBelowSignalSampleCeiling();
+    testRatiometricCarrierSenseAcrossLevelsAndSignal();
     testWaitUntilIdleTimeoutAndGuard();
 
     std::cout << "ChannelBusyDetector tests passed\n";
