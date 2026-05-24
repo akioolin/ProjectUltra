@@ -10,7 +10,81 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
-## 2026-05-23: GUI scenario scripting + carrier-sense gate scope correction
+## 2026-05-23: Coherent fading meter honesty (8f2a43f) + airtime-derived ARQ RTO (d182751) + GUI Message Log fixes (5721408)
+
+Three fixes landed on branch `feat/16qam-promotion-2026-05-21` (branch-only,
+not pushed), surfaced by repeated GUI 20 KB QAM16 transfers over OTASim AWGN
+SNR20. All Codex-implemented PHY/ARQ fixes were independently re-verified by
+Claude (the verify-Codex-claims rule).
+
+### 1. Spurious 16QAM→DQPSK downgrade on clean AWGN — fading meter (commit `8f2a43f`)
+- **Broken:** on pure AWGN SNR20 (zero fading), the local OFDM fading index
+  transiently spiked from ~0.04 to ~0.29–0.35 mid-transfer, crossed the 0.15
+  AWGN/Good boundary in `recommendDataMode()`, and tripped a needless
+  `16QAM R1/2 → DQPSK R1/2` downgrade (~16% slower on affected runs). ~12.5%
+  GUI incidence (1/8), up to 5/10 forced-headless. **Not PAPR** (reproduced with
+  PAPR both on and off, so `e71e269`'s coherent-skip was not the cause).
+- **Root cause:** the public coherent fading index read polluted *data-pilot*
+  magnitude stats, and the LTS public meter used raw magnitude CV without
+  subtracting the AWGN magnitude-noise contribution (SPEC-bug S4 dual-scale).
+- **Fixed:** use the **averaged LTS channel estimate** for the coherent public
+  meter; subtract documented AWGN term `0.25/(snr_linear·lts_symbol_count)` from
+  squared-magnitude CV; keep the **meter estimate separate from the equalization
+  estimate**; only feed connected DATA/handshake quality into adaptation
+  (pre-connect frames still publish so real fading drives initial negotiation).
+  Files: `src/ofdm/channel_equalizer_{pilot,lts}.cpp`, `demodulator_impl.hpp`,
+  `ofdm_stream_processor.cpp`, `streaming_*`, `src/gui/app.cpp`, sim plumbing.
+- **Verification:** AWGN SNR20 16QAM R1/2 20KB seeds 1..10, PAPR on+off → 20/20
+  complete, max F.I. ≤ 0.062, **0 spurious downgrades**. Real fading still
+  measured: Good max 0.86, Moderate max 0.86. Claude independent confirm seed 3
+  (worst): `station_frame_quality` max F.I.=0.054, 0 downgrades. ctest 92/92.
+
+### 2. Premature ARQ retx of already-delivered frames on a clean channel — airtime-derived RTO (commit `d182751`, resolves backlog #119)
+- **Broken:** on a zero-loss channel, the sender retransmitted frames the
+  receiver had already received + cumulatively ACKed (receiver logged them as
+  `SR-ARQ: DATA seq=N outside window`). 5/10 AWGN SNR20 16QAM seeds burned
+  timeout-retx (retx 16/9/9/9/16, all `cause=timeout`, `nack=0`).
+- **Root cause:** the receiver is half-duplex and cannot key its cumulative ACK
+  while still receiving the sender's back-to-back SR-ARQ burst (`TX deferred
+  until radio RX`). The ACK return time = remaining burst airtime + T/R
+  turnaround + ACK airtime, which exceeded the sender's per-frame retransmit
+  timeout, so the RTO fired before the legit ACK could physically return.
+- **Fixed:** derive the wide-OFDM ACK/retransmit timeout from **measured burst
+  airtime + carrier-sense/SACK coalesce + ACK airtime** (replaces the old
+  `[8000,12000]` magic clamp — backlog #119), with regression CHECKs in
+  `tests/test_connection_policy.cpp` asserting the timeout covers the physical
+  ACK path across window/CW configs. Files: `src/protocol/connection.cpp`,
+  `connection_policy.hpp`, `tests/test_connection_policy.cpp`.
+- **Verification:** AWGN SNR20 16QAM R1/2 20KB seeds 1..10 → **retransmissions=0,
+  out_of_window=0** on every seed (was 5/10 affected). Loss recovery intact
+  (good/SNR12 4KB retx=23, moderate/SNR12 1KB retx=10, both PASS). ctest 92/92.
+  Claude independent confirm: rebuilt, 10/10 seeds retx=0; DQPSK guard PASS.
+  End-to-end GUI 10×20KB sweep with both fixes: 0 downgrades, 0 out-of-window,
+  10/10 complete.
+- **Open follow-up (#121):** clean-AWGN transfer time settled at a consistent
+  ~85 s (vs ~75.5 s in the earlier *buggy* sweep — not apples-to-apples, since
+  retx wasn't logged there). The airtime-derived RTO makes the sender *wait
+  honestly* for half-duplex-deferred ACKs instead of retransmitting, which can
+  add idle at window boundaries. Whether this is a net slowdown vs the old
+  wasted-retx behavior needs a proper before/after measurement — tracked under
+  #121 (recoverable dead air).
+
+### 3. GUI Message Log: file-mirror + scrollback + copy + scenario sequencing (commit `5721408`)
+- **Broken:** (a) operator Message Log lines (`[MESSAGE]`, `[FILE]`, `[RX …]`,
+  status) were UI-only, never written to the log file; (b) `MAX_RX_LOG=20`
+  dropped history within seconds, and `SetScrollHereY(1.0f)` fired every frame
+  so scroll-back was impossible; (c) Copy captured only the last ~20 lines.
+- **Fixed:** `appendRxLogLine()` mirrors every line to the GUI log via `guiLog`
+  (log is now a strict superset of the msgbox); `MAX_RX_LOG` 20→5000; replaced
+  the unconditional auto-scroll with a stick-to-bottom check (auto-scrolls only
+  when the user is already at the bottom). Scenario scripting now sequences
+  **message → file → disconnect** (was message XOR file), with the auto-disconnect
+  waiting for the file transfer to leave "in progress". Files: `src/gui/app.{cpp,hpp}`.
+- **Verification:** live OTASim QAM16 SNR20 — bidirectional messages + 5KB file +
+  clean disconnect, msgbox lines confirmed in log file, scroll-back + full-history
+  Copy confirmed by operator.
+
+
 
 **Context:** Added headless-ish GUI scripting so the production `App` path can be
 driven and cross-checked against cli_simulator (two `ultra_gui -sim` instances

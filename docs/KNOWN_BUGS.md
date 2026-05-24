@@ -1,6 +1,6 @@
 # Known Bugs
 
-Last updated: 2026-05-13
+Last updated: 2026-05-23
 
 ## Purpose
 Track only currently relevant issues that can affect reliability, throughput, or release quality.
@@ -25,6 +25,14 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
     losses at OFDM data modes. Auto-mode baseline at SNR=15 moderate (DQPSK R1/2)
     went from 4/5 → 5/5 message tests and 2/3 → 3/3 file 2048 tests on 5/3-seed
     samples. See CHANGELOG 2026-04-26.
+  - **Airtime-derived ACK/retransmit RTO (commit `d182751`, 2026-05-23, backlog #119).**
+    Replaced the `[8000,12000]` magic timeout clamp with an RTO derived from burst
+    airtime + carrier-sense/SACK coalesce + ACK airtime, so the sender no longer
+    times out before a half-duplex-deferred ACK can physically return. Eliminated
+    premature timeout-retransmission of already-delivered frames on a clean channel
+    (AWGN SNR20 16QAM R1/2: 5/10 seeds → 0/10). See CHANGELOG 2026-05-23. NOTE: a
+    longer honest RTO may add idle wait at window boundaries on clean channels —
+    quantify under #121 (recoverable dead air) before further RTO tuning.
 - Remaining work:
   - Connected-mode tail variance under aggressive forced profiles (D8PSK R1/2,
     DQPSK R3/4) when channel falls outside auto-selector envelope — these aren't
