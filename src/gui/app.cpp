@@ -353,11 +353,12 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                        options_.exit_after_sec > 0;
     if (scenario_active_) {
         guiLog("[scenario] scripting active: auto_connect='%s' auto_accept=%d "
-               "send_file='%s' send_msg='%s' msg_delay=%ds cancel_file_after=%ds "
+               "send_file='%s' send_msg='%s' msg_delay=%ds msg_after_file=%d cancel_file_after=%ds "
                "disconnect_after=%ds exit_after=%ds",
                options_.auto_connect.c_str(), options_.auto_accept ? 1 : 0,
                options_.auto_send_file.c_str(), options_.auto_send_message.c_str(),
                options_.auto_message_start_delay_sec,
+               options_.auto_message_after_file ? 1 : 0,
                options_.auto_cancel_file_after_sec,
                options_.auto_disconnect_after_sec, options_.exit_after_sec);
     }
@@ -969,6 +970,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             msg = buf;
             last_received_file_ = path;
         } else if (error == "Transfer cancelled") {
+            beginFileCancelAudioDrain("peer sender cancel");
             msg = "[FILE] Transfer cancelled";
             ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
                 "protocol", "file.transfer",
@@ -1302,6 +1304,45 @@ void App::stopOtaAudio() {
     }
 }
 
+void App::beginFileCancelAudioDrain(const char* reason) {
+    file_cancel_audio_drain_active_ = true;
+    file_cancel_audio_drain_until_ =
+        std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(kFileCancelAudioDrainMs);
+    modem_.clearRxBuffer();
+    guiLog("FILE_CANCEL: RX audio drain armed for %ums (%s)",
+           kFileCancelAudioDrainMs,
+           reason ? reason : "cancel");
+}
+
+bool App::isFileCancelAudioDrainActive() {
+    if (!file_cancel_audio_drain_active_) {
+        return false;
+    }
+
+    if (std::chrono::steady_clock::now() < file_cancel_audio_drain_until_) {
+        return true;
+    }
+
+    file_cancel_audio_drain_active_ = false;
+    modem_.clearRxBuffer();
+    modem_.expectFullOFDMAnchorOnce();
+    guiLog("FILE_CANCEL: RX audio drain complete; receiver resynchronized");
+    return false;
+}
+
+void App::cancelActiveFileTransfer() {
+    bool receiving_file = false;
+    if (protocol_.isFileTransferInProgress()) {
+        const auto progress = protocol_.getFileProgress();
+        receiving_file = !progress.is_sending;
+    }
+    if (receiving_file) {
+        beginFileCancelAudioDrain("local receiver cancel");
+    }
+    protocol_.cancelFileTransfer();
+}
+
 void App::pollOtaRx() {
     if (!ota_audio_) {
         return;
@@ -1316,6 +1357,9 @@ void App::pollOtaRx() {
         }
         if (recording_enabled_) {
             recorded_rx_samples_.insert(recorded_rx_samples_.end(), samples.begin(), samples.end());
+        }
+        if (isFileCancelAudioDrainActive()) {
+            continue;
         }
         modem_.feedAudio(samples);
         if (modem_.isSynchronousMode()) {
@@ -2448,14 +2492,27 @@ void App::tickScenario() {
             scenario_connected_first_at_ = now;
         }
 
+        const bool message_after_file =
+            options_.auto_message_after_file && !options_.auto_send_file.empty();
+
+        if (scenario_file_started_ && !scenario_file_done_seen_ &&
+            !protocol_.isFileTransferInProgress()) {
+            scenario_file_done_seen_ = true;
+            scenario_file_done_at_ = now;
+            guiLog("[scenario] file phase cleared; auto-message-after-file may proceed");
+        }
+
         // Phase 1: chat message(s) — send the first on connect, then optional
         // repeats at a fixed interval (a test harness for sequential interactive
         // messaging). Each repeat is numbered so RX-side delivery is unambiguous.
         if (!options_.auto_send_message.empty() &&
-            scenario_messages_sent_ < message_target) {
+            scenario_messages_sent_ < message_target &&
+            (!message_after_file || scenario_file_done_seen_)) {
+            const auto message_start_anchor =
+                message_after_file ? scenario_file_done_at_ : scenario_connected_first_at_;
             const bool start_delay_elapsed =
                 options_.auto_message_start_delay_sec <= 0 ||
-                now - scenario_connected_first_at_ >=
+                now - message_start_anchor >=
                     std::chrono::seconds(options_.auto_message_start_delay_sec);
             const bool first = !scenario_message_sent_ && start_delay_elapsed;
             const bool interval_elapsed =
@@ -2503,6 +2560,7 @@ void App::tickScenario() {
         // Phase 2: file, but only after ALL messages have finished transmitting
         // (TX idle) plus a short settle, so the payloads don't collide on the air.
         const bool message_phase_clear =
+            message_after_file ||
             options_.auto_send_message.empty() ||
             (scenario_messages_sent_ >= message_target && !tx_in_progress_ &&
              now - scenario_message_sent_at_ >= std::chrono::milliseconds(2000));
@@ -2524,7 +2582,7 @@ void App::tickScenario() {
                 } else if (now - scenario_file_cancel_started_at_ >=
                            std::chrono::seconds(options_.auto_cancel_file_after_sec)) {
                     guiLog("[scenario] cancelling active file transfer");
-                    protocol_.cancelFileTransfer();
+                    cancelActiveFileTransfer();
                     scenario_file_cancel_issued_ = true;
                     appendRxLogLine("[scenario] file cancel requested");
                 }
@@ -3087,6 +3145,9 @@ void App::pollRadioRx() {
         }
         if (recording_enabled_) {
             recorded_rx_samples_.insert(recorded_rx_samples_.end(), samples.begin(), samples.end());
+        }
+        if (isFileCancelAudioDrainActive()) {
+            continue;
         }
         modem_.feedAudio(samples);
         if (!radio_rx_first_chunk_logged_) {
@@ -3692,7 +3753,7 @@ void App::renderOperateTab() {
                 progress.percentage());
         }
         ImGui::SameLine();
-        if (ImGui::SmallButton("Cancel")) protocol_.cancelFileTransfer();
+        if (ImGui::SmallButton("Cancel")) cancelActiveFileTransfer();
     } else {
         ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 160);
         ImGui::InputText("##filepath", file_path_buffer_, sizeof(file_path_buffer_));

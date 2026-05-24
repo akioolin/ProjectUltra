@@ -215,6 +215,7 @@ void printGuiUsage(const char* prog) {
     std::printf("  --auto-message-count <N>      Send N sequential numbered auto-messages (default 1)\n");
     std::printf("  --auto-message-interval <s>   Gap between sequential auto-messages (default 8)\n");
     std::printf("  --auto-message-vary-len       Randomize each auto-message length (mix short+long)\n");
+    std::printf("  --auto-message-after-file     With file+message, send message after file completes/cancels\n");
     std::printf("  --auto-cancel-file-after <s>  Cancel active file transfer N seconds after first observed\n");
     std::printf("  --auto-disconnect-after <s>   Disconnect N seconds after CONNECTED\n");
     std::printf("  --exit-after <s>              Quit N seconds after startup\n");
@@ -628,6 +629,8 @@ int main(int argc, char* argv[]) {
             opts.auto_message_interval_sec = std::atoi(argv[++i]);
         } else if (arg == "--auto-message-vary-len") {
             opts.auto_message_vary_len = true;
+        } else if (arg == "--auto-message-after-file") {
+            opts.auto_message_after_file = true;
         } else if (arg == "--auto-cancel-file-after") {
             if (i + 1 >= argc) {
                 std::fprintf(stderr, "Missing value for --auto-cancel-file-after\n");

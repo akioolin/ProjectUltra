@@ -699,11 +699,21 @@ void StreamingDecoder::decodeCurrentFrame() {
                             waveform_->configure(saved_mod, saved_rate);
                         }
 
-                        noteFrameArrivalSuccess(frame_sync_abs, frame_sync_abs + frame_len);
+                        const bool file_cancel_control =
+                            hdr.type == v2::FrameType::FILE_CANCEL;
+                        if (!file_cancel_control) {
+                            noteFrameArrivalSuccess(frame_sync_abs, frame_sync_abs + frame_len);
+                        }
                         {
                             std::lock_guard<std::mutex> lock(buffer_mutex_);
-                            expect_full_ofdm_anchor_ = false;
                             sync_from_warm_timed_window_ = false;
+                            if (file_cancel_control) {
+                                resetFrameArrivalTrackingLocked();
+                                expect_full_ofdm_anchor_ = true;
+                                sync_reject_streak_ = 0;
+                            } else {
+                                expect_full_ofdm_anchor_ = false;
+                            }
                             correlation_pos_ = wrapRingIndexLocked(sync_position_ + frame_len);
                             setSearchFloorLocked(frame_sync_abs + frame_len);
                             last_decoded_sync_pos_ = sync_position_;
@@ -711,6 +721,11 @@ void StreamingDecoder::decodeCurrentFrame() {
 
                         LOG_MODEM(INFO, "[%s] OFDM control-profile decode SUCCESS (%s seq=%d)",
                                   log_prefix_.c_str(), v2::frameTypeToString(hdr.type), hdr.seq);
+                        if (file_cancel_control) {
+                            LOG_MODEM(INFO,
+                                      "[%s] FILE_CANCEL decoded; forcing full OFDM anchor for next frame",
+                                      log_prefix_.c_str());
+                        }
                         state_ = DecoderState::SEARCHING;
                         return;
                     }

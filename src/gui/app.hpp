@@ -71,6 +71,7 @@ public:
         int auto_message_count = 1;           // how many sequential messages to send (numbered)
         int auto_message_interval_sec = 8;    // gap between sequential auto-messages
         bool auto_message_vary_len = false;   // randomize each auto-message length (mix short+long)
+        bool auto_message_after_file = false; // if file+message are set, send message after file clears
         int auto_cancel_file_after_sec = 0;   // cancel active file N s after first observing it
         int auto_disconnect_after_sec = 0;    // 0 = never; else disconnect N s after CONNECTED
         int exit_after_sec = 0;               // 0 = never; else push SDL_QUIT after N s
@@ -157,6 +158,9 @@ private:
     static constexpr size_t kMaxDeferredTx = 32;    // bounded memory (drop-oldest)
     static constexpr uint32_t kMaxTxDeferMs = 4000; // ~one max OFDM burst; never deadlock
     static constexpr uint32_t kInQsoDataQuietGuardMs = 2000;
+    static constexpr uint32_t kFileCancelAudioDrainMs = 5000;
+    std::chrono::steady_clock::time_point file_cancel_audio_drain_until_{};
+    bool file_cancel_audio_drain_active_ = false;
     // Cached connection state for the carrier-sense gate. queueRealTxSamples()
     // runs inside protocol_ TX callbacks (during protocol_.tick(), which holds
     // the engine mutex), so it must NOT call protocol_.getState() (re-entrant
@@ -175,6 +179,7 @@ private:
     bool scenario_message_sent_ = false;    // chat-message phase fired (if any)
     int scenario_messages_sent_ = 0;        // count of sequential auto-messages sent
     bool scenario_file_started_ = false;    // file phase started (if any)
+    bool scenario_file_done_seen_ = false;  // file phase left in-progress (complete/cancel)
     bool scenario_connected_seen_ = false;
     bool scenario_file_cancel_timer_started_ = false;
     bool scenario_file_cancel_issued_ = false;
@@ -183,6 +188,7 @@ private:
     std::chrono::steady_clock::time_point scenario_connected_first_at_;
     std::chrono::steady_clock::time_point scenario_connected_at_;
     std::chrono::steady_clock::time_point scenario_message_sent_at_;
+    std::chrono::steady_clock::time_point scenario_file_done_at_;
     std::chrono::steady_clock::time_point scenario_file_cancel_started_at_;
     void tickScenario();
 
@@ -302,6 +308,9 @@ private:
     std::deque<std::string> snapshotRxLog() const;
     void clearRxLog();
     void stopTxNow(const char* reason);
+    void cancelActiveFileTransfer();
+    void beginFileCancelAudioDrain(const char* reason);
+    bool isFileCancelAudioDrainActive();
     // OFDM carrier-sense TX gate (half-duplex collision avoidance). queueRealTxSamples
     // is the single chokepoint all TX paths funnel through; in OFDM mode it defers the
     // burst when the peer is still on-channel instead of keying up over it.

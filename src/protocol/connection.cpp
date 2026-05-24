@@ -647,6 +647,7 @@ bool Connection::shouldPauseLocalDataForPeerRequest() const {
     if (state_ != ConnectionState::CONNECTED ||
         !local_data_turn_ ||
         !peer_data_turn_requested_ ||
+        file_cancel_confirm_pending_ ||
         file_transfer_.getState() == FileTransferState::SENDING ||
         !dataTurnFairBudgetMet()) {
         return false;
@@ -673,6 +674,7 @@ bool Connection::shouldQueuePayloadForLinkTurn() const {
            data_turn_yield_pending_ ||
            !local_data_turn_ ||
            peer_data_turn_requested_ ||
+           file_cancel_confirm_pending_ ||
            data_turn_tx_guard_ms_ > 0 ||
            hasLocalOutboundDataTurn();
 }
@@ -681,6 +683,7 @@ bool Connection::shouldRequestDataTurnOnAck() const {
     return state_ == ConnectionState::CONNECTED &&
            !local_data_turn_ &&
            !file_transfer_.isBusy() &&
+           !file_cancel_confirm_pending_ &&
            hasLocalDataWaitingForTurn() &&
            (is_initiator_ || handshake_confirmed_);
 }
@@ -700,18 +703,11 @@ void Connection::sendTurnRequestIfNeeded() {
     if (state_ != ConnectionState::CONNECTED ||
         local_data_turn_ ||
         file_transfer_.isBusy() ||
+        file_cancel_confirm_pending_ ||
         !hasLocalDataWaitingForTurn() ||
         local_turn_request_pending_ ||
         turn_request_holdoff_ms_ > 0 ||
         (!is_initiator_ && !handshake_confirmed_)) {
-        return;
-    }
-
-    // Prefer the in-band SACK turn-request bit when the peer is actively
-    // sending DATA. A standalone request is for the common idle case where this
-    // side queued data after the peer's last DATA/ACK exchange had already
-    // completed.
-    if (!received_peer_data_since_connect_) {
         return;
     }
 
@@ -839,6 +835,38 @@ bool Connection::startPayloadNow(const Bytes& data, bool binary_payload) {
     return true;
 }
 
+void Connection::transmitFileCancelControl(const char* reason) {
+    if (state_ != ConnectionState::CONNECTED) {
+        return;
+    }
+
+    auto cancel = v2::ControlFrame::makeFileCancel(local_call_, remote_call_);
+    LOG_MODEM(INFO, "Connection: TX FILE_CANCEL to %s%s",
+              remote_call_.c_str(), reason ? reason : "");
+    transmitFrame(cancel.serialize());
+}
+
+void Connection::armFileCancelReassertion() {
+    file_cancel_reassert_ms_ = FILE_CANCEL_REASSERT_WINDOW_MS;
+    file_cancel_reassert_cooldown_ms_ = 0;
+}
+
+void Connection::clearFileCancelReassertion() {
+    file_cancel_reassert_ms_ = 0;
+    file_cancel_reassert_cooldown_ms_ = 0;
+}
+
+void Connection::maybeReassertFileCancelForStaleData() {
+    if (file_cancel_reassert_ms_ == 0 ||
+        file_cancel_reassert_cooldown_ms_ > 0 ||
+        state_ != ConnectionState::CONNECTED) {
+        return;
+    }
+
+    transmitFileCancelControl(" (reassert stale DATA)");
+    file_cancel_reassert_cooldown_ms_ = FILE_CANCEL_REASSERT_COOLDOWN_MS;
+}
+
 bool Connection::tryStartQueuedFileIfReady() {
     if (!queued_file_path_) {
         return false;
@@ -848,6 +876,9 @@ bool Connection::tryStartQueuedFileIfReady() {
     }
     if (!local_data_turn_) {
         sendTurnRequestIfNeeded();
+        return false;
+    }
+    if (file_cancel_confirm_pending_) {
         return false;
     }
     if (peer_data_turn_requested_ || data_turn_yield_pending_) {
@@ -885,6 +916,9 @@ void Connection::sendNextQueuedPayloadIfReady() {
     }
     if (!local_data_turn_) {
         sendTurnRequestIfNeeded();
+        return;
+    }
+    if (file_cancel_confirm_pending_) {
         return;
     }
     if (data_turn_tx_guard_ms_ > 0) {
@@ -977,6 +1011,7 @@ bool Connection::sendMessages(const std::vector<std::string>& texts) {
 bool Connection::isReadyToSend() const {
     return state_ == ConnectionState::CONNECTED && arq_.isReadyToSend() &&
            local_data_turn_ && !peer_data_turn_requested_ &&
+           !file_cancel_confirm_pending_ &&
            data_turn_tx_guard_ms_ == 0 && !file_transfer_.isBusy() &&
            !queued_file_path_.has_value();
 }
@@ -1024,6 +1059,7 @@ bool Connection::sendFile(const std::string& filepath) {
 
     if (!local_data_turn_ ||
         peer_data_turn_requested_ ||
+        file_cancel_confirm_pending_ ||
         data_turn_tx_guard_ms_ > 0 ||
         hasLocalOutboundDataTurn() ||
         !pending_tx_fragments_.empty() ||
@@ -1106,21 +1142,28 @@ void Connection::clearFileTransferArqState() {
     burst_tx_buffer_.clear();
     arq_.reset();
     soft_combine_harq_.clear();
+    mode_change_pending_ = false;
+    mode_change_timeout_ms_ = 0;
+    mode_change_retry_count_ = 0;
+    pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
+    resetAdaptiveModeController();
 }
 
 void Connection::cancelFileTransfer() {
     const bool had_active_transfer = file_transfer_.isBusy();
     const bool was_local_iss = local_data_turn_;
     if (state_ == ConnectionState::CONNECTED && had_active_transfer) {
-        auto cancel = v2::ControlFrame::makeFileCancel(local_call_, remote_call_);
-        LOG_MODEM(INFO, "Connection: TX FILE_CANCEL to %s", remote_call_.c_str());
-        transmitFrame(cancel.serialize());
+        transmitFileCancelControl(" (local cancel)");
+        armFileCancelReassertion();
     }
 
     queued_file_path_.reset();
     if (had_active_transfer) {
         file_transfer_.cancel("Transfer cancelled");
         clearFileTransferArqState();
+        file_cancel_rx_drain_ms_ = FILE_CANCEL_RX_DRAIN_MS;
+        armDataTurnTxGuard(FILE_CANCEL_TX_GUARD_MS);
+        file_cancel_confirm_pending_ = false;
     }
 
     if (state_ == ConnectionState::CONNECTED) {
@@ -1438,6 +1481,16 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
     } else {
         // Data frame - pass to ARQ
         if (state_ == ConnectionState::CONNECTED) {
+            if (file_cancel_rx_drain_ms_ > 0 || file_cancel_reassert_ms_ > 0) {
+                LOG_MODEM(INFO,
+                          "Connection: Dropping stale DATA seq=%u during FILE_CANCEL drain/reassert (drain=%ums reassert=%ums)",
+                          header.seq, file_cancel_rx_drain_ms_, file_cancel_reassert_ms_);
+                if (file_cancel_rx_drain_ms_ == 0) {
+                    file_cancel_rx_drain_ms_ = FILE_CANCEL_RX_DRAIN_MS;
+                }
+                maybeReassertFileCancelForStaleData();
+                return;
+            }
             processArqFrame(frame_data);
         }
     }
@@ -1520,7 +1573,7 @@ void Connection::runDeferredArqRefill() {
     if (state_ != ConnectionState::CONNECTED) {
         return;
     }
-    if (!local_data_turn_ || data_turn_tx_guard_ms_ > 0) {
+    if (!local_data_turn_ || file_cancel_confirm_pending_ || data_turn_tx_guard_ms_ > 0) {
         deferred_file_refill_ = refill_file || deferred_file_refill_;
         deferred_fragment_refill_ = refill_fragments || deferred_fragment_refill_;
         return;
@@ -1922,8 +1975,32 @@ void Connection::tick(uint32_t elapsed_ms) {
                 turn_request_holdoff_ms_ =
                     elapsed_ms >= turn_request_holdoff_ms_ ? 0 : turn_request_holdoff_ms_ - elapsed_ms;
             }
+            if (file_cancel_rx_drain_ms_ > 0) {
+                file_cancel_rx_drain_ms_ =
+                    elapsed_ms >= file_cancel_rx_drain_ms_ ? 0 : file_cancel_rx_drain_ms_ - elapsed_ms;
+            }
+            if (file_cancel_reassert_ms_ > 0) {
+                file_cancel_reassert_ms_ =
+                    elapsed_ms >= file_cancel_reassert_ms_ ? 0 : file_cancel_reassert_ms_ - elapsed_ms;
+            }
+            if (file_cancel_reassert_cooldown_ms_ > 0) {
+                file_cancel_reassert_cooldown_ms_ =
+                    elapsed_ms >= file_cancel_reassert_cooldown_ms_
+                        ? 0
+                        : file_cancel_reassert_cooldown_ms_ - elapsed_ms;
+            }
             if (local_data_turn_ && peer_data_turn_requested_) {
                 data_turn_contended_ms_ += elapsed_ms;
+            }
+            if (file_cancel_confirm_pending_ &&
+                data_turn_tx_guard_ms_ == 0 &&
+                arq_.isReadyToSend()) {
+                transmitFileCancelControl(" (confirm)");
+                file_cancel_confirm_pending_ = false;
+                armDataTurnTxGuard(FILE_CANCEL_CONFIRM_DATA_GUARD_MS);
+            }
+            if (!local_data_turn_ && hasLocalDataWaitingForTurn() && !local_turn_request_pending_) {
+                sendTurnRequestIfNeeded();
             }
             if (!local_data_turn_ && hasLocalDataWaitingForTurn() && local_turn_request_pending_) {
                 if (elapsed_ms >= turn_request_retransmit_ms_) {
@@ -2347,6 +2424,9 @@ void Connection::enterConnected() {
     data_turn_tx_guard_ms_ = 0;
     turn_request_retransmit_ms_ = 0;
     turn_request_holdoff_ms_ = 0;
+    file_cancel_rx_drain_ms_ = 0;
+    clearFileCancelReassertion();
+    file_cancel_confirm_pending_ = false;
     if (local_data_turn_) {
         armDataTurnTxGuard(DATA_TURN_CONNECT_GUARD_MS);
     }
@@ -2404,6 +2484,9 @@ void Connection::enterDisconnected(const std::string& reason) {
     data_turn_tx_guard_ms_ = 0;
     turn_request_retransmit_ms_ = 0;
     turn_request_holdoff_ms_ = 0;
+    file_cancel_rx_drain_ms_ = 0;
+    clearFileCancelReassertion();
+    file_cancel_confirm_pending_ = false;
     data_ladder_rung_id_ = LadderRungId::UNKNOWN;
     pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
     arq_callback_defer_refill_ = false;
@@ -2627,6 +2710,9 @@ void Connection::reset() {
     data_turn_tx_guard_ms_ = 0;
     turn_request_retransmit_ms_ = 0;
     turn_request_holdoff_ms_ = 0;
+    file_cancel_rx_drain_ms_ = 0;
+    clearFileCancelReassertion();
+    file_cancel_confirm_pending_ = false;
     burst_mode_active_ = false;
     burst_tx_buffer_.clear();
     arq_callback_defer_refill_ = false;

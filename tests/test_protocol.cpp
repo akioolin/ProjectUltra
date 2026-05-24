@@ -208,6 +208,9 @@ public:
             }
             tx_count_a_++;
             observeControlFrame(data, true);
+            if (shouldDropNextFileCancel(data, true)) {
+                return;
+            }
             if (!drop_a_to_b_) {
                 pending_b_.push(data);
             }
@@ -219,6 +222,9 @@ public:
             }
             tx_count_b_++;
             observeControlFrame(data, false);
+            if (shouldDropNextFileCancel(data, false)) {
+                return;
+            }
             if (!drop_b_to_a_) {
                 pending_a_.push(data);
             }
@@ -250,6 +256,8 @@ public:
 
     void setDropAtoB(bool drop) { drop_a_to_b_ = drop; }
     void setDropBtoA(bool drop) { drop_b_to_a_ = drop; }
+    void dropNextFileCancelAtoB() { drop_next_file_cancel_a_to_b_ = true; }
+    void dropNextFileCancelBtoA() { drop_next_file_cancel_b_to_a_ = true; }
     void setVerbose(bool v) { verbose_ = v; }
 
     int getTxCountA() const { return tx_count_a_; }
@@ -262,6 +270,20 @@ public:
     int getFileCancelCountB() const { return file_cancel_count_b_; }
 
 private:
+    bool shouldDropNextFileCancel(const Bytes& data, bool from_a) {
+        auto ctrl = v2::ControlFrame::deserialize(data);
+        if (!ctrl || ctrl->type != v2::FrameType::FILE_CANCEL) {
+            return false;
+        }
+        bool& drop_next = from_a ? drop_next_file_cancel_a_to_b_
+                                 : drop_next_file_cancel_b_to_a_;
+        if (!drop_next) {
+            return false;
+        }
+        drop_next = false;
+        return true;
+    }
+
     void observeControlFrame(const Bytes& data, bool from_a) {
         auto ctrl = v2::ControlFrame::deserialize(data);
         if (!ctrl) {
@@ -296,6 +318,8 @@ private:
 
     bool drop_a_to_b_ = false;
     bool drop_b_to_a_ = false;
+    bool drop_next_file_cancel_a_to_b_ = false;
+    bool drop_next_file_cancel_b_to_a_ = false;
     bool verbose_ = false;
 
     int tx_count_a_ = 0;
@@ -508,18 +532,27 @@ bool test_half_duplex_turn_taking_queues_irs_data() {
 
     if (!stationA.isConnected() || !stationB.isConnected()) FAIL("Connection not established");
 
-    const int b_tx_before_queue = channel.getTxCountB();
-    if (!stationB.sendMessage("Bob queued while IRS")) FAIL("B sendMessage should queue");
-    if (channel.getTxCountB() != b_tx_before_queue) {
-        FAIL("IRS transmitted before receiving a DATA turn");
-    }
-
     if (!stationA.sendMessage("Alice owns first ISS turn")) FAIL("A sendMessage failed");
-    channel.run(100, 100);
-
+    channel.run(30, 100);
     if (received_at_b.size() != 1 || received_at_b[0] != "Alice owns first ISS turn") {
         FAIL("B did not receive A message");
     }
+
+    const int b_tx_before_queue = channel.getTxCountB();
+    const int b_turn_requests_before = channel.getTurnRequestCountB();
+    if (!stationB.sendMessage("Bob queued while IRS")) FAIL("B sendMessage should queue");
+    for (int i = 0; i < 80 && channel.getTurnRequestCountB() == b_turn_requests_before; i++) {
+        channel.run(1, 100);
+    }
+    if (channel.getTurnRequestCountB() != b_turn_requests_before + 1) {
+        FAIL("IRS did not emit a bounded TURN_REQUEST for queued DATA");
+    }
+    if (channel.getTxCountB() <= b_tx_before_queue) {
+        FAIL("IRS did not transmit a TURN_REQUEST control before receiving DATA turn");
+    }
+
+    channel.run(100, 100);
+
     if (received_at_a.size() != 1 || received_at_a[0] != "Bob queued while IRS") {
         FAIL("A did not receive queued B message after TURNOVER");
     }
@@ -1534,6 +1567,109 @@ bool test_file_transfer_receiver_cancel_propagates_and_frees_link() {
     return true;
 }
 
+bool test_file_transfer_receiver_cancel_sender_retains_turn() {
+    TEST("Receiver file cancel leaves sender ISS turn intact");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+    config.arq.ack_timeout_ms = 200;
+
+    ProtocolEngine stationA(config);
+    ProtocolEngine stationB(config);
+
+    stationA.setLocalCallsign("W1ABC");
+    stationB.setLocalCallsign("K2DEF");
+
+    ultra::test::TempDir temp_dir("ultra_protocol_rx_cancel_iss_test");
+    if (!temp_dir.valid()) FAIL("Could not create temp test directory");
+    const auto& test_dir = temp_dir.path();
+
+    const size_t FILE_SIZE = 32768;
+    std::string src_path = createPseudoRandomTestFile(test_dir, "rx_cancel_iss_source.bin", FILE_SIZE);
+    if (src_path.empty()) FAIL("Could not create cancel ISS test file");
+
+    std::string rx_dir = (test_dir / "rx").string();
+    std::filesystem::create_directories(rx_dir);
+    stationB.setReceiveDirectory(rx_dir);
+
+    bool receive_started = false;
+    bool receive_cancelled = false;
+    bool sender_cancelled = false;
+    stationB.setFileProgressCallback([&](const FileTransferProgress& p) {
+        if (!p.is_sending && p.total_bytes > 0) {
+            receive_started = true;
+        }
+    });
+    stationB.setFileReceivedCallback([&](const std::string&, bool success, const std::string& error) {
+        if (!success && error == "Transfer cancelled") {
+            receive_cancelled = true;
+        }
+    });
+    stationA.setFileSentCallback([&](bool success, const std::string& error) {
+        if (!success && error == "Transfer cancelled") {
+            sender_cancelled = true;
+        }
+    });
+
+    std::vector<std::string> received_at_b;
+    stationB.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
+        received_at_b.push_back(text);
+    });
+
+    SimulatedChannel channel(stationA, stationB);
+    stationA.connect("K2DEF");
+    channel.run(30, 100);
+
+    if (!stationA.isConnected() || !stationB.isConnected()) FAIL("Connection not established");
+    if (!stationA.sendFile(src_path)) FAIL("A sendFile() returned false");
+
+    for (int i = 0; i < 400 && !receive_started; i++) {
+        channel.run(1, 50);
+    }
+    if (!receive_started) FAIL("B did not start receiving file");
+
+    const int a_turnovers_before_cancel = channel.getTurnoverCountA();
+    channel.dropNextFileCancelBtoA();
+    stationB.cancelFileTransfer();
+    for (int i = 0; i < 1200 && (!receive_cancelled || !sender_cancelled); i++) {
+        channel.run(1, 50);
+    }
+
+    if (channel.getFileCancelCountB() < 2) {
+        FAIL("Receiver did not reassert FILE_CANCEL after the first cancel was missed");
+    }
+    if (!receive_cancelled) FAIL("Receiver did not report transfer cancelled");
+    if (!sender_cancelled) FAIL("Sender did not report transfer cancelled");
+    if (channel.getTurnoverCountA() != a_turnovers_before_cancel) {
+        FAIL("Sender emitted TURNOVER after peer FILE_CANCEL");
+    }
+
+    // FILE_CANCEL drains any already-launched file DATA before the retained ISS
+    // turn may carry new operator payloads. This wait is a local drain guard, not
+    // a peer turn grant.
+    channel.run(120, 50);
+    const int a_tx_before_message = channel.getTxCountA();
+    if (!stationA.sendMessage("A message after receiver cancel")) {
+        FAIL("A message after receiver cancel should be accepted");
+    }
+    for (int i = 0; i < 160 && channel.getTxCountA() <= a_tx_before_message; i++) {
+        channel.run(1, 50);
+    }
+    if (channel.getTxCountA() <= a_tx_before_message) {
+        FAIL("Sender did not transmit post-cancel message after bounded cancel guard");
+    }
+
+    for (int i = 0; i < 40 && received_at_b.empty(); i++) {
+        channel.run(1, 50);
+    }
+    if (received_at_b.empty() || received_at_b[0] != "A message after receiver cancel") {
+        FAIL("Post-cancel sender message did not deliver promptly");
+    }
+
+    PASS();
+    return true;
+}
+
 bool test_file_transfer_sender_cancel_propagates_and_frees_link() {
     TEST("Sender file cancel propagates and frees link");
 
@@ -1684,6 +1820,7 @@ int main() {
     test_file_transfer_queues_during_connect_guard();
     test_file_transfer_holds_link_and_defers_peer_message();
     test_file_transfer_receiver_cancel_propagates_and_frees_link();
+    test_file_transfer_receiver_cancel_sender_retains_turn();
     test_file_transfer_sender_cancel_propagates_and_frees_link();
 
     std::cout << "\nCompression Tests:\n";

@@ -576,18 +576,40 @@ void Connection::handleFileCancel(const v2::ControlFrame& frame, const std::stri
     LOG_MODEM(INFO, "Connection: RX FILE_CANCEL from %s",
               src_call.empty() ? remote_call_.c_str() : src_call.c_str());
 
+    const bool had_active_transfer =
+        file_transfer_.isBusy() || queued_file_path_.has_value();
+    if (!had_active_transfer && file_cancel_reassert_ms_ > 0) {
+        LOG_MODEM(INFO, "Connection: RX FILE_CANCEL confirmation; cancel reassertion cleared");
+        clearFileCancelReassertion();
+        file_cancel_rx_drain_ms_ = 0;
+        file_cancel_confirm_pending_ = false;
+        return;
+    }
+    if (!had_active_transfer) {
+        LOG_MODEM(INFO, "Connection: RX duplicate FILE_CANCEL with no active transfer; ignoring");
+        return;
+    }
+
     const bool was_local_iss = local_data_turn_;
     queued_file_path_.reset();
     if (file_transfer_.isBusy()) {
         file_transfer_.cancel("Transfer cancelled");
     }
     clearFileTransferArqState();
+    file_cancel_rx_drain_ms_ = FILE_CANCEL_RX_DRAIN_MS;
+    armDataTurnTxGuard(FILE_CANCEL_TX_GUARD_MS);
+    file_cancel_confirm_pending_ = had_active_transfer;
     data_turn_yield_pending_ = false;
     resetDataTurnFairness();
 
     if (was_local_iss) {
-        peer_data_turn_requested_ = true;
-        maybeYieldDataTurn();
+        // A FILE_CANCEL aborts the file transfer, not the DATA turn. If the peer
+        // cancelled while receiving our file, we keep ISS ownership so locally
+        // queued operator payloads can go out immediately after the abort.
+        peer_data_turn_requested_ = false;
+        local_turn_request_pending_ = false;
+        turn_request_retransmit_ms_ = 0;
+        turn_request_holdoff_ms_ = 0;
     } else {
         local_turn_request_pending_ = false;
         turn_request_retransmit_ms_ = 0;
