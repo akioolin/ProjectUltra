@@ -315,15 +315,15 @@ bool FileTransferController::isBusy() const {
            state_ == FileTransferState::RECEIVING;
 }
 
-void FileTransferController::cancel() {
+void FileTransferController::cancel(const std::string& error) {
     if (state_ == FileTransferState::SENDING) {
         if (on_sent_) {
-            on_sent_(false, "Transfer cancelled");
+            on_sent_(false, error);
         }
         resetTxState();
     } else if (state_ == FileTransferState::RECEIVING) {
         if (on_received_) {
-            on_received_("", false);
+            on_received_("", false, error);
         }
         resetRxState();
     }
@@ -559,7 +559,7 @@ bool FileTransferController::processFileData(const Bytes& payload, bool more_dat
                 LOG_MODEM(ERROR, "FileTransfer: Decompression failed (%zu bytes compressed)",
                           rx_data_.size());
                 if (on_received_) {
-                    on_received_("", false);
+                    on_received_("", false, "Decompression failed");
                 }
                 resetRxState();
                 return true;
@@ -604,7 +604,8 @@ bool FileTransferController::processFileData(const Bytes& payload, bool more_dat
         state_ = success ? FileTransferState::COMPLETE : FileTransferState::ERROR;
 
         if (on_received_) {
-            on_received_(success ? rx_filepath_ : "", success);
+            on_received_(success ? rx_filepath_ : "", success,
+                         success ? "" : "CRC mismatch or file write failed");
         }
 
         resetRxState();
@@ -652,7 +653,7 @@ bool FileTransferController::processFileBlock(const Bytes& payload) {
             LOG_MODEM(ERROR, "FileTransfer: FILE_BLOCK decompression failed (%zu bytes)",
                       data.size());
             if (on_received_) {
-                on_received_("", false);
+                on_received_("", false, "Decompression failed");
             }
             return true;
         }
@@ -665,7 +666,7 @@ bool FileTransferController::processFileBlock(const Bytes& payload) {
         LOG_MODEM(ERROR, "FileTransfer: FILE_BLOCK size mismatch (%zu/%u bytes)",
                   final_data.size(), original_size);
         if (on_received_) {
-            on_received_("", false);
+            on_received_("", false, "Size mismatch");
         }
         return true;
     }
@@ -694,7 +695,8 @@ bool FileTransferController::processFileBlock(const Bytes& payload) {
 
     state_ = success ? FileTransferState::COMPLETE : FileTransferState::ERROR;
     if (on_received_) {
-        on_received_(success ? filepath : "", success);
+        on_received_(success ? filepath : "", success,
+                     success ? "" : "CRC mismatch or file write failed");
     }
     resetRxState();
     return true;

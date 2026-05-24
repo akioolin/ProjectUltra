@@ -74,6 +74,7 @@ public:
 
     void reset() override;
     void abortPendingTx();
+    void clearPendingAckRepeats();
 
     // Set the code rate for DATA frame total_cw calculation
     void setCodeRate(CodeRate rate);
@@ -148,6 +149,10 @@ public:
     using ReceiveWindowAdvancedCallback = std::function<void(uint16_t base_seq, size_t window_size)>;
     void setReceiveWindowAdvancedCallback(ReceiveWindowAdvancedCallback cb) {
         on_rx_window_advanced_ = std::move(cb);
+    }
+    using TurnRequestCallback = std::function<bool()>;
+    void setTurnRequestCallback(TurnRequestCallback cb) {
+        should_request_turn_ = std::move(cb);
     }
 
 private:
@@ -271,6 +276,7 @@ private:
     DataReceivedCallback on_data_received_;
     SendCompleteCallback on_send_complete_;
     ReceiveWindowAdvancedCallback on_rx_window_advanced_;
+    TurnRequestCallback should_request_turn_;
 
     // Internal helpers
     size_t seqToSlot(uint16_t seq) const;

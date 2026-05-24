@@ -58,6 +58,19 @@ namespace ultra {
 namespace protocol {
 
 struct ConnectionAdaptiveTestAccess {
+    static void makeLocalIss(Connection& c) {
+        c.local_data_turn_ = true;
+        c.peer_data_turn_requested_ = false;
+        c.local_turn_request_pending_ = false;
+        c.received_peer_data_since_connect_ = false;
+        c.data_turn_yield_pending_ = false;
+        c.data_turn_payload_bytes_sent_ = 0;
+        c.data_turn_contended_ms_ = 0;
+        c.data_turn_tx_guard_ms_ = 0;
+        c.turn_request_retransmit_ms_ = 0;
+        c.turn_request_holdoff_ms_ = 0;
+    }
+
     static void makeConnectedOFDM(Connection& c,
                                   CodeRate rate,
                                   float snr = 15.0f,
@@ -72,6 +85,7 @@ struct ConnectionAdaptiveTestAccess {
         c.data_code_rate_ = rate;
         c.measured_snr_db_ = snr;
         c.fading_index_ = fading;
+        makeLocalIss(c);
         c.arq_.setCallsigns(c.local_call_, c.remote_call_);
         c.configureArqForCurrentDataMode();
         c.resetAdaptiveModeController();
@@ -101,6 +115,7 @@ struct ConnectionAdaptiveTestAccess {
         c.negotiated_mode_ = mode;
         c.data_modulation_ = Modulation::DQPSK;
         c.data_code_rate_ = CodeRate::R1_4;
+        makeLocalIss(c);
         c.arq_.setCallsigns(c.local_call_, c.remote_call_);
     }
 

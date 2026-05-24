@@ -72,7 +72,8 @@ public:
 
     // Callbacks
     using ProgressCallback = std::function<void(const FileTransferProgress&)>;
-    using ReceivedCallback = std::function<void(const std::string& path, bool success)>;
+    using ReceivedCallback = std::function<void(const std::string& path, bool success,
+                                                const std::string& error)>;
     using SentCallback = std::function<void(bool success, const std::string& error)>;
 
     FileTransferController() = default;
@@ -143,7 +144,7 @@ public:
     bool isBusy() const;
 
     // Cancel current transfer
-    void cancel();
+    void cancel(const std::string& error = "Transfer cancelled");
 
     // --- Callbacks ---
 

@@ -111,6 +111,8 @@ private:
     std::deque<std::pair<TimePoint, float>> noise_floor_window_;
     double rms_window_sum_ = 0.0;
     float current_rms_ = 0.0f;
+    float cached_noise_floor_rms_ = 0.0f;
+    bool cached_noise_floor_valid_ = false;
     TimePoint last_busy_at_{};
     TimePoint quiet_since_{};
 };

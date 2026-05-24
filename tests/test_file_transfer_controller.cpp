@@ -126,7 +126,7 @@ void test_compressed_final_chunk_out_of_order_finalizes() {
     bool callback_called = false;
     bool callback_success = false;
     std::string received_path;
-    rx.setReceivedCallback([&](const std::string& path, bool success) {
+    rx.setReceivedCallback([&](const std::string& path, bool success, const std::string&) {
         callback_called = true;
         callback_success = success;
         received_path = path;
@@ -172,7 +172,7 @@ void test_duplicate_filename_in_dotted_receive_directory() {
     bool callback_called = false;
     bool callback_success = false;
     std::string received_path;
-    rx.setReceivedCallback([&](const std::string& path, bool success) {
+    rx.setReceivedCallback([&](const std::string& path, bool success, const std::string&) {
         callback_called = true;
         callback_success = success;
         received_path = path;
@@ -216,7 +216,7 @@ void test_single_block_payload_round_trip() {
     bool callback_called = false;
     bool callback_success = false;
     std::string received_path;
-    rx.setReceivedCallback([&](const std::string& path, bool success) {
+    rx.setReceivedCallback([&](const std::string& path, bool success, const std::string&) {
         callback_called = true;
         callback_success = success;
         received_path = path;

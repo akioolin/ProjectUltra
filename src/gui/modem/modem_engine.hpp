@@ -28,6 +28,7 @@
 #include <string>
 #include <atomic>
 #include <thread>
+#include <chrono>
 
 namespace ultra {
 namespace gui {
@@ -170,8 +171,11 @@ public:
     bool carrierSenseActiveForTx() const {
         return protocol::isOFDMMode(waveform_mode_);
     }
+    bool channelIdleForTx(std::chrono::milliseconds guard = std::chrono::milliseconds(0)) const {
+        return !carrierSenseActiveForTx() || channel_busy_detector_.isIdleFor(guard);
+    }
     bool channelBusyForTx() const {
-        return carrierSenseActiveForTx() && !channel_busy_detector_.isIdle();
+        return !channelIdleForTx();
     }
     float channelRms() const { return channel_busy_detector_.currentRms(); }
     float channelQuietThreshold() const { return channel_busy_detector_.quietThreshold(); }

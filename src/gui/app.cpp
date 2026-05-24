@@ -7,6 +7,7 @@
 #include "ultra/logging.hpp"
 #include "ultra/tx_burst_normalization.hpp"
 #include <SDL.h>
+#include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <cmath>
@@ -36,6 +37,11 @@ using ultra::otasim_client::OtaAudioBackend;
 using ultra::otasim_client::OtaAudioBackendConfig;
 using ultra::otasim_client::OtaAudioConnectionState;
 using ultra::otasim_client::OtaAudioStatus;
+
+static bool isInQsoDataFrame(const Bytes& frame) {
+    auto header = protocol::v2::parseHeader(frame);
+    return header.valid && protocol::v2::isDataFrame(header.type);
+}
 
 // File logger for GUI debugging - writes to logs/gui.log next to binary
 // ALL logging (including modem, protocol, etc.) goes to this file
@@ -343,12 +349,16 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     scenario_active_ = !options_.auto_connect.empty() || options_.auto_accept ||
                        !options_.auto_send_file.empty() ||
                        !options_.auto_send_message.empty() ||
+                       options_.auto_cancel_file_after_sec > 0 ||
                        options_.exit_after_sec > 0;
     if (scenario_active_) {
         guiLog("[scenario] scripting active: auto_connect='%s' auto_accept=%d "
-               "send_file='%s' send_msg='%s' disconnect_after=%ds exit_after=%ds",
+               "send_file='%s' send_msg='%s' msg_delay=%ds cancel_file_after=%ds "
+               "disconnect_after=%ds exit_after=%ds",
                options_.auto_connect.c_str(), options_.auto_accept ? 1 : 0,
                options_.auto_send_file.c_str(), options_.auto_send_message.c_str(),
+               options_.auto_message_start_delay_sec,
+               options_.auto_cancel_file_after_sec,
                options_.auto_disconnect_after_sec, options_.exit_after_sec);
     }
     // Load persistent settings
@@ -543,10 +553,15 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     ultra::gui::startupTrace("App", "protocol-callbacks-enter");
     protocol_.setTxDataCallback([this](const Bytes& data,
                                        bool expect_full_ofdm_anchor_after_tx) {
+        if (isInQsoDataFrame(data) && shouldDeferInQsoDataForTx()) {
+            deferTxFrame(data, "TX audio", expect_full_ofdm_anchor_after_tx);
+            return;
+        }
+
         // When protocol layer wants to transmit, convert to audio
         auto samples = modem_.transmit(data);
         if (!samples.empty()) {
-            queueRealTxSamples(samples, "TX audio");
+            queueRealTxSamples(samples, "TX audio", false);
             if (expect_full_ofdm_anchor_after_tx) {
                 modem_.expectFullOFDMAnchorOnce();
             }
@@ -555,9 +570,17 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
 
     // Burst TX callback - encode multiple frames as a single waveform burst
     protocol_.setTransmitBurstCallback([this](const std::vector<Bytes>& frames) {
+        const bool in_qso_data = std::any_of(
+            frames.begin(), frames.end(),
+            [](const Bytes& frame) { return isInQsoDataFrame(frame); });
+        if (in_qso_data && shouldDeferInQsoDataForTx()) {
+            deferTxBurst(frames, "TX burst audio");
+            return;
+        }
+
         auto samples = modem_.transmitBurst(frames);
         if (!samples.empty()) {
-            queueRealTxSamples(samples, "TX burst audio");
+            queueRealTxSamples(samples, "TX burst audio", false);
         }
     });
 
@@ -891,8 +914,12 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     // File transfer callbacks
     protocol_.setFileProgressCallback([this](const protocol::FileTransferProgress& p) {
         // Start timing on first progress (for receiving files)
-        if (last_progress_milestone_ == 0 && !p.is_sending) {
+        if (last_progress_milestone_ == 0 && !p.is_sending && p.transferred_bytes == 0) {
             file_transfer_start_time_ = std::chrono::steady_clock::now();
+            if (p.total_bytes > 0 && p.transferred_bytes == 0) {
+                appendRxLogLine("[FILE] Receiving " + p.filename + " (" +
+                                std::to_string(p.total_bytes) + " bytes)...");
+            }
         }
 
         // Log progress milestones (25%, 50%, 75%)
@@ -909,7 +936,8 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     });
     ultra::gui::startupTrace("App", "protocol-callbacks-mid11");
 
-    protocol_.setFileReceivedCallback([this](const std::string& path, bool success) {
+    protocol_.setFileReceivedCallback([this](const std::string& path, bool success,
+                                             const std::string& error) {
         last_progress_milestone_ = 0;  // Reset for next transfer
         auto duration = std::chrono::steady_clock::now() - file_transfer_start_time_;
         float seconds = std::chrono::duration<float>(duration).count();
@@ -930,17 +958,23 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                           seconds);
             ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
                 "protocol", "file.transfer", fields);
-            char buf[320];
+            char buf[360];
             if (last_goodput_label_ == "RX file" && last_effective_goodput_bps_ > 0.0f) {
-                snprintf(buf, sizeof(buf), "[FILE] Received: %s (%.1fs, %.2f kbps)",
-                         path.c_str(), seconds, last_effective_goodput_bps_ / 1000.0f);
+                snprintf(buf, sizeof(buf), "[FILE] Received %s (%u bytes, CRC ok, %.1fs, %.2f kbps)",
+                         path.c_str(), file_bytes, seconds, last_effective_goodput_bps_ / 1000.0f);
             } else {
-                snprintf(buf, sizeof(buf), "[FILE] Received: %s (%.1fs)", path.c_str(), seconds);
+                snprintf(buf, sizeof(buf), "[FILE] Received %s (%u bytes, CRC ok, %.1fs)",
+                         path.c_str(), file_bytes, seconds);
             }
             msg = buf;
             last_received_file_ = path;
+        } else if (error == "Transfer cancelled") {
+            msg = "[FILE] Transfer cancelled";
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                "protocol", "file.transfer",
+                "{\"direction\":\"rx\",\"success\":false,\"error\":\"cancelled\"}");
         } else {
-            msg = "[FILE] Receive failed";
+            msg = error.empty() ? "[FILE] Receive failed" : "[FILE] Receive failed: " + error;
             ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
                 "protocol", "file.transfer",
                 "{\"direction\":\"rx\",\"success\":false,\"error\":\"receive_failed\"}");
@@ -981,6 +1015,11 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                 snprintf(buf, sizeof(buf), "[FILE] Transfer complete (%.1fs)", seconds);
             }
             msg = buf;
+        } else if (error == "Transfer cancelled") {
+            msg = "[FILE] Transfer cancelled";
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                "protocol", "file.transfer",
+                "{\"direction\":\"tx\",\"success\":false,\"error\":\"cancelled\"}");
         } else {
             msg = "[FILE] Transfer failed: " + error;
             const std::string fields =
@@ -2404,12 +2443,21 @@ void App::tickScenario() {
     // real operator flow of chatting and then sending a file on one link.
     const int message_target = std::max(1, options_.auto_message_count);
     if (state == protocol::ConnectionState::CONNECTED) {
+        if (!scenario_connected_seen_) {
+            scenario_connected_seen_ = true;
+            scenario_connected_first_at_ = now;
+        }
+
         // Phase 1: chat message(s) — send the first on connect, then optional
         // repeats at a fixed interval (a test harness for sequential interactive
         // messaging). Each repeat is numbered so RX-side delivery is unambiguous.
         if (!options_.auto_send_message.empty() &&
             scenario_messages_sent_ < message_target) {
-            const bool first = !scenario_message_sent_;
+            const bool start_delay_elapsed =
+                options_.auto_message_start_delay_sec <= 0 ||
+                now - scenario_connected_first_at_ >=
+                    std::chrono::seconds(options_.auto_message_start_delay_sec);
+            const bool first = !scenario_message_sent_ && start_delay_elapsed;
             const bool interval_elapsed =
                 scenario_message_sent_ && !tx_in_progress_ &&
                 now - scenario_message_sent_at_ >=
@@ -2436,7 +2484,17 @@ void App::tickScenario() {
                 msg += " #" + std::to_string(scenario_messages_sent_ + 1);
                 guiLog("[scenario] sending message %d/%d (%zu bytes)",
                        scenario_messages_sent_ + 1, message_target, msg.size());
-                protocol_.sendMessage(msg);
+                const bool file_busy = protocol_.isFileTransferInProgress();
+                const bool ready_now = protocol_.isReadyToSend();
+                if (protocol_.sendMessage(msg)) {
+                    if (file_busy) {
+                        appendRxLogLine("[INFO] Message queued - file transfer in progress, will send after.");
+                    } else if (!ready_now) {
+                        appendRxLogLine("[INFO] Message queued - waiting for DATA turn.");
+                    } else {
+                        appendRxLogLine("[TX] " + msg);
+                    }
+                }
                 scenario_message_sent_ = true;
                 scenario_message_sent_at_ = now;
                 ++scenario_messages_sent_;
@@ -2455,6 +2513,24 @@ void App::tickScenario() {
                           "[scenario] file send started: " + options_.auto_send_file);
             scenario_file_started_ = true;
         }
+
+        if (options_.auto_cancel_file_after_sec > 0 && !scenario_file_cancel_issued_) {
+            if (protocol_.isFileTransferInProgress()) {
+                if (!scenario_file_cancel_timer_started_) {
+                    scenario_file_cancel_timer_started_ = true;
+                    scenario_file_cancel_started_at_ = now;
+                    guiLog("[scenario] file cancel timer armed (%ds)",
+                           options_.auto_cancel_file_after_sec);
+                } else if (now - scenario_file_cancel_started_at_ >=
+                           std::chrono::seconds(options_.auto_cancel_file_after_sec)) {
+                    guiLog("[scenario] cancelling active file transfer");
+                    protocol_.cancelFileTransfer();
+                    scenario_file_cancel_issued_ = true;
+                    appendRxLogLine("[scenario] file cancel requested");
+                }
+            }
+        }
+
         // Mark the whole sequence dispatched once every requested phase fired.
         if (!scenario_payload_sent_ &&
             (options_.auto_send_message.empty() || scenario_messages_sent_ >= message_target) &&
@@ -2486,88 +2562,192 @@ void App::tickScenario() {
     }
 }
 
-bool App::queueRealTxSamples(const std::vector<float>& samples, const char* context) {
+bool App::queueRealTxSamples(const std::vector<float>& samples, const char* context,
+                             bool in_qso_data) {
     if (samples.empty()) {
         return false;
     }
 
-    // Carrier-sense gate = listen-before-CALL only. Energy CCA gates the
-    // unsolicited probe that *starts* a session (so we don't key a PING/CONNECT
-    // on top of an ongoing QSO); it must NOT gate traffic inside an established
-    // connection. In-QSO collision avoidance is owned by the protocol's
-    // half-duplex turnaround/ARQ layer — gating turnaround ACKs here stalls the
-    // selective-repeat window and drops ACKs (verified 2026-05-23: a window-8
-    // transfer kept the channel busy, so every ACK was deferred to the depth-8
-    // cap and dropped -> timeout retx storm). So only engage before the
-    // connection is established (DISCONNECTED/PROBING), and only in OFDM mode
-    // (channelBusyForTx()). FIFO: if something is already deferred, append.
+    // Carrier-sense gate is listen-before-call only. Once connected, DATA
+    // access is owned by the protocol ISS/IRS turn state, not randomized CSMA.
     const auto cca_state = conn_state_cached_.load(std::memory_order_relaxed);
     const bool pre_connection =
         (cca_state == protocol::ConnectionState::DISCONNECTED ||
          cca_state == protocol::ConnectionState::PROBING);
     if (pre_connection && (!deferred_tx_.empty() || modem_.channelBusyForTx())) {
-        deferTxSamples(samples, context);
+        deferTxSamples(samples, context, false);
         return true;  // queued (deferred), not dropped
     }
 
     return doQueueRealTxSamples(samples, context);
 }
 
-void App::deferTxSamples(const std::vector<float>& samples, const char* context) {
+bool App::shouldDeferInQsoDataForTx() const {
+    return false;
+}
+
+uint32_t App::nextInQsoDataBackoffMs() {
+    static thread_local std::mt19937 rng{std::random_device{}()};
+    std::uniform_int_distribution<uint32_t> dist(250, 2500);
+    return dist(rng);
+}
+
+void App::deferTxSamples(const std::vector<float>& samples, const char* context,
+                         bool in_qso_data) {
+    const auto now = std::chrono::steady_clock::now();
+    const uint32_t backoff_ms = in_qso_data ? nextInQsoDataBackoffMs() : 0;
     if (deferred_tx_.empty()) {
         // Start the deadlock-guard clock on the first deferral of a burst.
-        deferred_tx_deadline_ = std::chrono::steady_clock::now() +
-                                std::chrono::milliseconds(kMaxTxDeferMs);
+        deferred_tx_deadline_ = now + std::chrono::milliseconds(kMaxTxDeferMs);
     }
     if (deferred_tx_.size() >= kMaxDeferredTx) {
         deferred_tx_.pop_front();  // bounded memory: drop oldest
     }
     deferred_tx_.push_back(
-        DeferredTx{std::vector<float>(samples.begin(), samples.end()),
-                   context ? std::string(context) : std::string("TX audio")});
-    guiLog("CCA: deferred %s (peer on channel, rms=%.4f thresh=%.4f depth=%zu)",
+        DeferredTx{DeferredTxKind::Samples,
+                   std::vector<float>(samples.begin(), samples.end()),
+                   {},
+                   {},
+                   context ? std::string(context) : std::string("TX audio"),
+                   in_qso_data,
+                   false,
+                   now + std::chrono::milliseconds(backoff_ms)});
+    guiLog("CCA: deferred %s%s (rms=%.4f thresh=%.4f depth=%zu backoff=%ums)",
+           context ? context : "TX audio",
+           in_qso_data ? " in-QSO DATA" : "",
+           modem_.channelRms(), modem_.channelQuietThreshold(),
+           deferred_tx_.size(), backoff_ms);
+}
+
+void App::deferTxFrame(const Bytes& frame, const char* context,
+                       bool expect_full_ofdm_anchor_after_tx) {
+    const auto now = std::chrono::steady_clock::now();
+    const uint32_t backoff_ms = nextInQsoDataBackoffMs();
+    if (deferred_tx_.empty()) {
+        deferred_tx_deadline_ = now + std::chrono::milliseconds(kMaxTxDeferMs);
+    }
+    if (deferred_tx_.size() >= kMaxDeferredTx) {
+        deferred_tx_.pop_front();
+    }
+    deferred_tx_.push_back(
+        DeferredTx{DeferredTxKind::Frame,
+                   {},
+                   Bytes(frame.begin(), frame.end()),
+                   {},
+                   context ? std::string(context) : std::string("TX audio"),
+                   true,
+                   expect_full_ofdm_anchor_after_tx,
+                   now + std::chrono::milliseconds(backoff_ms)});
+    guiLog("CCA: deferred %s in-QSO DATA pre-encode (rms=%.4f thresh=%.4f depth=%zu backoff=%ums)",
            context ? context : "TX audio",
            modem_.channelRms(), modem_.channelQuietThreshold(),
-           deferred_tx_.size());
+           deferred_tx_.size(), backoff_ms);
+}
+
+void App::deferTxBurst(const std::vector<Bytes>& frames, const char* context) {
+    const auto now = std::chrono::steady_clock::now();
+    const uint32_t backoff_ms = nextInQsoDataBackoffMs();
+    if (deferred_tx_.empty()) {
+        deferred_tx_deadline_ = now + std::chrono::milliseconds(kMaxTxDeferMs);
+    }
+    if (deferred_tx_.size() >= kMaxDeferredTx) {
+        deferred_tx_.pop_front();
+    }
+    deferred_tx_.push_back(
+        DeferredTx{DeferredTxKind::Burst,
+                   {},
+                   {},
+                   std::vector<Bytes>(frames.begin(), frames.end()),
+                   context ? std::string(context) : std::string("TX burst audio"),
+                   true,
+                   false,
+                   now + std::chrono::milliseconds(backoff_ms)});
+    guiLog("CCA: deferred %s in-QSO DATA pre-encode (frames=%zu rms=%.4f thresh=%.4f depth=%zu backoff=%ums)",
+           context ? context : "TX burst audio",
+           frames.size(), modem_.channelRms(), modem_.channelQuietThreshold(),
+           deferred_tx_.size(), backoff_ms);
 }
 
 void App::flushDeferredTxIfReady() {
     if (deferred_tx_.empty()) {
         return;
     }
-    // Deferred items are only ever pre-connection probes (the gate engages only
-    // when DISCONNECTED/PROBING). Once the session is past the call phase they
-    // are stale — drop them rather than inject a late PING into an active QSO.
     const auto st = conn_state_cached_.load(std::memory_order_relaxed);
-    if (st != protocol::ConnectionState::DISCONNECTED &&
-        st != protocol::ConnectionState::PROBING) {
+    const bool pre_connection =
+        (st == protocol::ConnectionState::DISCONNECTED ||
+         st == protocol::ConnectionState::PROBING);
+    const bool connected = (st == protocol::ConnectionState::CONNECTED);
+    if (!deferred_tx_.front().in_qso_data && !pre_connection) {
+        // Pre-connection probes are stale once the call phase is over.
+        deferred_tx_.clear();
+        return;
+    }
+    if (deferred_tx_.front().in_qso_data && !connected) {
         deferred_tx_.clear();
         return;
     }
     if (tx_in_progress_.load()) {
         return;  // don't stack a deferred burst on top of our own ongoing TX
     }
-    const bool channel_idle = !modem_.channelBusyForTx();
+
+    const auto now = std::chrono::steady_clock::now();
+    if (deferred_tx_.front().in_qso_data && now < deferred_tx_.front().earliest_flush) {
+        return;
+    }
+
+    const bool channel_idle = deferred_tx_.front().in_qso_data
+        ? modem_.channelIdleForTx(std::chrono::milliseconds(kInQsoDataQuietGuardMs))
+        : !modem_.channelBusyForTx();
     const bool defer_timed_out =
-        std::chrono::steady_clock::now() >= deferred_tx_deadline_;
-    if (!channel_idle && !defer_timed_out) {
-        return;  // peer still transmitting and we haven't hit the safety bound yet
+        now >= deferred_tx_deadline_;
+    if (!channel_idle) {
+        if (deferred_tx_.front().in_qso_data) {
+            const uint32_t backoff_ms = nextInQsoDataBackoffMs();
+            deferred_tx_.front().earliest_flush =
+                now + std::chrono::milliseconds(backoff_ms);
+            return;  // in-QSO DATA must wait for a genuinely clear channel
+        }
+        if (!defer_timed_out) {
+            return;  // peer still transmitting and we haven't hit the safety bound yet
+        }
     }
 
     // Flush one burst per call; doQueueRealTxSamples() sets tx_in_progress_, so the
     // next deferred burst waits for this TX to finish before its turn (half-duplex).
     DeferredTx front = std::move(deferred_tx_.front());
     deferred_tx_.pop_front();
+    const char* flush_reason = channel_idle
+        ? (front.in_qso_data ? "channel idle guard" : "channel idle")
+        : "defer timeout";
     guiLog("CCA: flushing deferred %s (%s, remaining=%zu)",
            front.context.c_str(),
-           channel_idle ? "channel idle" : "defer timeout",
+           flush_reason,
            deferred_tx_.size());
     if (!deferred_tx_.empty()) {
         // Re-arm the guard clock for the remaining queued bursts.
-        deferred_tx_deadline_ = std::chrono::steady_clock::now() +
-                                std::chrono::milliseconds(kMaxTxDeferMs);
+        deferred_tx_deadline_ = now + std::chrono::milliseconds(kMaxTxDeferMs);
     }
-    doQueueRealTxSamples(front.samples, front.context.c_str());
+    std::vector<float> samples;
+    switch (front.kind) {
+        case DeferredTxKind::Samples:
+            samples = std::move(front.samples);
+            break;
+        case DeferredTxKind::Frame:
+            samples = modem_.transmit(front.frame);
+            if (front.expect_full_ofdm_anchor_after_tx) {
+                modem_.expectFullOFDMAnchorOnce();
+            }
+            break;
+        case DeferredTxKind::Burst:
+            samples = modem_.transmitBurst(front.frames);
+            break;
+    }
+    if (samples.empty()) {
+        guiLog("CCA: dropped deferred %s because encoder returned no samples",
+               front.context.c_str());
+        return;
+    }
+    doQueueRealTxSamples(samples, front.context.c_str());
 }
 
 bool App::doQueueRealTxSamples(const std::vector<float>& samples, const char* context) {
@@ -3425,8 +3605,43 @@ void App::renderOperateTab() {
         }
     }
 
-    bool can_send = !tx_in_progress_ && boundedCStringLen(tx_text_buffer_) > 0 &&
-                    protocol_.isConnected() && protocol_.isReadyToSend();
+    const bool scenario_drives_payload =
+        !options_.auto_send_file.empty() ||
+        !options_.auto_send_message.empty() ||
+        options_.auto_cancel_file_after_sec > 0;
+    const bool file_transfer_busy = protocol_.isFileTransferInProgress();
+    const bool tx_inprog = tx_in_progress_.load();
+    const size_t tx_text_len = boundedCStringLen(tx_text_buffer_);
+    const bool connected_now = protocol_.isConnected();
+    const bool would_enable_send =
+        !file_transfer_busy && !tx_inprog && tx_text_len > 0 && connected_now;
+    const bool can_send = !scenario_drives_payload && would_enable_send;
+
+    if (!send_btn_log_valid_ ||
+        send_btn_log_enabled_ != can_send ||
+        send_btn_log_scenario_ != scenario_drives_payload ||
+        send_btn_log_file_busy_ != file_transfer_busy ||
+        send_btn_log_tx_inprog_ != tx_inprog ||
+        send_btn_log_textlen_ != tx_text_len ||
+        send_btn_log_connected_ != connected_now ||
+        send_btn_log_would_enable_ != would_enable_send) {
+        guiLog("SEND_BTN enabled=%d scenario=%d file_busy=%d tx_inprog=%d textlen=%zu connected=%d would_enable=%d",
+               can_send ? 1 : 0,
+               scenario_drives_payload ? 1 : 0,
+               file_transfer_busy ? 1 : 0,
+               tx_inprog ? 1 : 0,
+               tx_text_len,
+               connected_now ? 1 : 0,
+               would_enable_send ? 1 : 0);
+        send_btn_log_valid_ = true;
+        send_btn_log_enabled_ = can_send;
+        send_btn_log_scenario_ = scenario_drives_payload;
+        send_btn_log_file_busy_ = file_transfer_busy;
+        send_btn_log_tx_inprog_ = tx_inprog;
+        send_btn_log_textlen_ = tx_text_len;
+        send_btn_log_connected_ = connected_now;
+        send_btn_log_would_enable_ = would_enable_send;
+    }
 
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 90);
     bool send = ImGui::InputText("##txinput", tx_text_buffer_, sizeof(tx_text_buffer_),
@@ -3436,10 +3651,21 @@ void App::renderOperateTab() {
     ImVec4 send_color = can_send ? ImVec4(0.3f, 0.6f, 0.3f, 1.0f) : ImVec4(0.4f, 0.4f, 0.4f, 1.0f);
     ImGui::PushStyleColor(ImGuiCol_Button, send_color);
     ImGui::BeginDisabled(!can_send);
-    if (ImGui::Button("Send##msg", ImVec2(80, 0)) || (send && can_send)) {
+    const bool send_clicked = ImGui::Button("Send##msg", ImVec2(80, 0));
+    if (file_transfer_busy && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("File transfer in progress — cancel to send a message.");
+    }
+    if (send_clicked || (send && can_send)) {
         std::string text(tx_text_buffer_);
+        const bool ready_now = protocol_.isReadyToSend();
         if (protocol_.sendMessage(text)) {
-            appendRxLogLine("[TX] " + text);
+            if (file_transfer_busy) {
+                appendRxLogLine("[INFO] Message queued - file transfer in progress, will send after.");
+            } else if (!ready_now) {
+                appendRxLogLine("[INFO] Message queued - waiting for DATA turn.");
+            } else {
+                appendRxLogLine("[TX] " + text);
+            }
             tx_text_buffer_[0] = '\0';
         }
     }
@@ -3476,7 +3702,8 @@ void App::renderOperateTab() {
             file_browser_.open();
         }
         ImGui::SameLine();
-        bool can_send_file = protocol_.isConnected() && protocol_.isReadyToSend() &&
+        bool can_send_file = !scenario_drives_payload &&
+                             protocol_.isConnected() &&
                              boundedCStringLen(file_path_buffer_) > 0;
         ImGui::BeginDisabled(!can_send_file);
         if (ImGui::Button("Send##file", ImVec2(60, 0))) {

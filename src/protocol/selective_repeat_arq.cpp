@@ -1413,6 +1413,7 @@ void SelectiveRepeatARQ::sendSack() {
     uint32_t bitmap = buildRXBitmap();
     uint16_t base_seq = (rx_base_seq_ - 1) & 0xFFFF;
     const bool sack_has_final = rx_final_delivered_since_sack_;
+    const bool turn_requested = should_request_turn_ && should_request_turn_();
 
     // Use NACK with bitmap as SACK
     auto sack = v2::ControlFrame::makeNack(local_call_, remote_call_,
@@ -1423,6 +1424,9 @@ void SelectiveRepeatARQ::sendSack() {
     if (sack_has_final) {
         sack.flags |= v2::Flags::FINAL;
     }
+    if (turn_requested) {
+        sack.flags |= v2::Flags::TURN_REQUEST;
+    }
 
     stats_.sacks_sent++;
     stats_.acks_sent++;
@@ -1430,8 +1434,8 @@ void SelectiveRepeatARQ::sendSack() {
     auto data = sack.serialize();
     rx_final_delivered_since_sack_ = false;
 
-    LOG_MODEM(INFO, "SR-ARQ: Sent SACK base=%d bitmap=0x%08X",
-              base_seq, bitmap);
+    LOG_MODEM(INFO, "SR-ARQ: Sent SACK base=%d bitmap=0x%08X turn_request=%d",
+              base_seq, bitmap, turn_requested ? 1 : 0);
     if (ultra::phyDiagnosticsEnabled()) {
         std::ostringstream oss;
         oss << "event=arq_ack_tx"
@@ -1440,6 +1444,7 @@ void SelectiveRepeatARQ::sendSack() {
             << " ack_seq=" << base_seq
             << " bitmap=0x" << std::hex << bitmap << std::dec
             << " final=" << boolDigit(sack_has_final)
+            << " turn_request=" << boolDigit(turn_requested)
             << " rx_base=" << rx_base_seq_
             << " frames_since_ack=" << frames_since_ack_
             << " repeat_count=" << ack_repeat_count_;
@@ -1664,6 +1669,13 @@ void SelectiveRepeatARQ::abortPendingTx() {
     ack_dedup_timer_ms_ = 0;
 
     LOG_MODEM(INFO, "SR-ARQ: Aborted pending TX state");
+}
+
+void SelectiveRepeatARQ::clearPendingAckRepeats() {
+    if (!ack_repeat_jobs_.empty()) {
+        LOG_MODEM(INFO, "SR-ARQ: Cleared %zu turn-scoped ACK repeat(s)", ack_repeat_jobs_.size());
+    }
+    ack_repeat_jobs_.clear();
 }
 
 void SelectiveRepeatARQ::reset() {

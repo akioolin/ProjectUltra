@@ -7,6 +7,7 @@
 #include "waveform_selection.hpp"
 #include "ultra/logging.hpp"
 #include <algorithm>
+#include <filesystem>
 
 namespace ultra {
 namespace protocol {
@@ -15,6 +16,7 @@ namespace {
 constexpr size_t kOFDMFileBlockPayloadLimit = 2300;
 constexpr const char* kOFDMBurstPadCallsign = "ULPAD";
 constexpr uint16_t kOFDMBurstPadSeq = 0xFFFE;
+constexpr size_t kMaxQueuedPayloads = 32;
 
 Bytes makeOFDMBurstPadPayload(CodeRate rate, int cw_count, size_t pad_index) {
     const size_t capacity = v2::getFixedFramePayloadCapacity(rate, cw_count);
@@ -203,6 +205,9 @@ Connection::Connection(const ConnectionConfig& config)
 
     arq_.setReceiveWindowAdvancedCallback([this](uint16_t base_seq, size_t window_size) {
         soft_combine_harq_.retainOnlySeqWindow(base_seq, window_size);
+    });
+    arq_.setTurnRequestCallback([this]() {
+        return shouldRequestDataTurnOnAck();
     });
 
     arq_.setSendCompleteCallback([this](bool success) {
@@ -418,12 +423,12 @@ void Connection::acceptCall() {
               ack_data.size(), measured_snr_db_, snrSourceToString(measured_snr_source_));
     transmitFrame(ack_data);
 
-    enterConnected();
-
     // We are the responder - we received CONNECT and are sending CONNECT_ACK
     is_initiator_ = false;
     handshake_confirmed_ = false;  // Responder waits for first frame to confirm
     responder_handshake_wait_ms_ = responder_handshake_failsafe_ms;
+
+    enterConnected();
 
     // Notify application of initial data mode
     notifyDataModeChanged(measured_snr_db_, fading_index_);
@@ -491,6 +496,7 @@ void Connection::abortTxNow() {
     deferred_fragment_refill_ = false;
 
     // Cancel file TX if active. Keep RX file state untouched.
+    queued_file_path_.reset();
     if (file_transfer_.getState() == FileTransferState::SENDING) {
         file_transfer_.cancel();
     }
@@ -581,15 +587,208 @@ bool Connection::sendPayload(const Bytes& data, bool binary_payload) {
         return false;
     }
 
+    if (shouldQueuePayloadForLinkTurn()) {
+        if (queued_payloads_.size() >= kMaxQueuedPayloads) {
+            queued_payloads_.pop_front();
+            LOG_MODEM(WARN, "Connection: Queued payload limit reached, dropping oldest deferred payload");
+        }
+        queued_payloads_.push_back(QueuedPayload{data, binary_payload});
+        LOG_MODEM(INFO,
+                  "Connection: Queued %zu byte %s until local ISS DATA turn (depth=%zu, local_turn=%d, peer_request=%d)",
+                  data.size(), binary_payload ? "binary payload" : "message",
+                  queued_payloads_.size(), local_data_turn_ ? 1 : 0,
+                  peer_data_turn_requested_ ? 1 : 0);
+        sendTurnRequestIfNeeded();
+        return true;
+    }
+
+    return startPayloadNow(data, binary_payload);
+}
+
+bool Connection::hasLocalOutboundDataTurn() const {
+    return file_transfer_.getState() == FileTransferState::SENDING ||
+           mode_change_pending_ ||
+           !pending_tx_fragments_.empty() ||
+           arq_.getTxInFlightBytes() > 0;
+}
+
+bool Connection::hasLocalInFlightDataTurn() const {
+    return mode_change_pending_ ||
+           !pending_tx_fragments_.empty() ||
+           arq_.getTxInFlightBytes() > 0 ||
+           (file_transfer_.getState() == FileTransferState::SENDING &&
+            file_transfer_.hasPendingChunks());
+}
+
+bool Connection::hasLocalDataWaitingForTurn() const {
+    const bool file_waiting =
+        file_transfer_.getState() == FileTransferState::SENDING &&
+        (file_transfer_.hasMoreChunks() || file_transfer_.hasPendingChunks());
+
+    const bool fragments_waiting =
+        !pending_tx_fragments_.empty() &&
+        (next_fragment_idx_ < pending_tx_fragments_.size() ||
+         acked_fragment_count_ < pending_tx_fragments_.size());
+
+    return queued_file_path_.has_value() ||
+           !queued_payloads_.empty() ||
+           file_waiting ||
+           fragments_waiting ||
+           mode_change_pending_;
+}
+
+bool Connection::dataTurnFairBudgetMet() const {
+    return data_turn_payload_bytes_sent_ >= DATA_TURN_FAIR_BURST_BYTES ||
+           (data_turn_contended_ms_ >= DATA_TURN_FAIR_BURST_MS &&
+            data_turn_payload_bytes_sent_ >= DATA_TURN_FAIR_MIN_BYTES_FOR_TIME_YIELD);
+}
+
+bool Connection::shouldPauseLocalDataForPeerRequest() const {
+    if (state_ != ConnectionState::CONNECTED ||
+        !local_data_turn_ ||
+        !peer_data_turn_requested_ ||
+        file_transfer_.getState() == FileTransferState::SENDING ||
+        !dataTurnFairBudgetMet()) {
+        return false;
+    }
+
+    // Do not split an already-started fragmented operator payload. An active
+    // file transfer owns the DATA turn until completion or cancel, so file
+    // chunks are intentionally not paused for chat turn requests.
+    return pending_tx_fragments_.empty();
+}
+
+bool Connection::shouldQueuePayloadForLinkTurn() const {
+    if (state_ != ConnectionState::CONNECTED) {
+        return false;
+    }
+
+    // HF ARQ is a half-duplex link. Only the current ISS may originate DATA.
+    // Operator payloads from the IRS are queued and announced through a
+    // turn-request ACK/control frame; they do not race the peer on the channel.
+    const bool responder_handshake_turn =
+        !is_initiator_ && !handshake_confirmed_;
+
+    return responder_handshake_turn ||
+           data_turn_yield_pending_ ||
+           !local_data_turn_ ||
+           peer_data_turn_requested_ ||
+           data_turn_tx_guard_ms_ > 0 ||
+           hasLocalOutboundDataTurn();
+}
+
+bool Connection::shouldRequestDataTurnOnAck() const {
+    return state_ == ConnectionState::CONNECTED &&
+           !local_data_turn_ &&
+           !file_transfer_.isBusy() &&
+           hasLocalDataWaitingForTurn() &&
+           (is_initiator_ || handshake_confirmed_);
+}
+
+void Connection::resetDataTurnFairness() {
+    data_turn_payload_bytes_sent_ = 0;
+    data_turn_contended_ms_ = 0;
+}
+
+void Connection::noteDataTurnPayloadStarted(size_t payload_bytes) {
+    if (local_data_turn_) {
+        data_turn_payload_bytes_sent_ += payload_bytes;
+    }
+}
+
+void Connection::sendTurnRequestIfNeeded() {
+    if (state_ != ConnectionState::CONNECTED ||
+        local_data_turn_ ||
+        file_transfer_.isBusy() ||
+        !hasLocalDataWaitingForTurn() ||
+        local_turn_request_pending_ ||
+        turn_request_holdoff_ms_ > 0 ||
+        (!is_initiator_ && !handshake_confirmed_)) {
+        return;
+    }
+
+    // Prefer the in-band SACK turn-request bit when the peer is actively
+    // sending DATA. A standalone request is for the common idle case where this
+    // side queued data after the peer's last DATA/ACK exchange had already
+    // completed.
+    if (!received_peer_data_since_connect_) {
+        return;
+    }
+
+    auto request = v2::ControlFrame::makeTurnRequest(local_call_, remote_call_);
+    LOG_MODEM(INFO, "Connection: TX TURN_REQUEST (queued=%zu, backlog=%zu bytes)",
+              queued_payloads_.size(), getTxBacklogBytes());
+    transmitFrame(request.serialize());
+    local_turn_request_pending_ = true;
+    turn_request_retransmit_ms_ = TURN_REQUEST_RETRANSMIT_MS;
+}
+
+void Connection::armDataTurnTxGuard(uint32_t guard_ms) {
+    data_turn_tx_guard_ms_ = std::max(data_turn_tx_guard_ms_, guard_ms);
+}
+
+bool Connection::maybeYieldDataTurn() {
+    if (state_ != ConnectionState::CONNECTED ||
+        !local_data_turn_ ||
+        !peer_data_turn_requested_ ||
+        file_transfer_.getState() == FileTransferState::SENDING ||
+        hasLocalInFlightDataTurn()) {
+        return false;
+    }
+
+    if (!data_turn_yield_pending_ &&
+        data_turn_payload_bytes_sent_ > 0 &&
+        hasLocalDataWaitingForTurn() &&
+        !dataTurnFairBudgetMet()) {
+        return false;
+    }
+
+    if (data_turn_tx_guard_ms_ > 0) {
+        data_turn_yield_pending_ = true;
+        return false;
+    }
+
+    auto turnover = v2::ControlFrame::makeTurnover(local_call_, remote_call_);
+    LOG_MODEM(INFO,
+              "Connection: TX TURNOVER to %s (peer requested DATA turn, turn_bytes=%llu, contended_ms=%u, backlog=%zu)",
+              remote_call_.c_str(),
+              static_cast<unsigned long long>(data_turn_payload_bytes_sent_),
+              data_turn_contended_ms_, getTxBacklogBytes());
+    transmitFrame(turnover.serialize());
+    local_data_turn_ = false;
+    peer_data_turn_requested_ = false;
+    local_turn_request_pending_ = false;
+    data_turn_yield_pending_ = false;
+    turn_request_retransmit_ms_ = 0;
+    turn_request_holdoff_ms_ = TURN_REQUEST_HOLDOFF_AFTER_DATA_MS;
+    received_peer_data_since_connect_ = false;
+    resetDataTurnFairness();
+    armDataTurnTxGuard(DATA_TURN_CONTROL_GUARD_MS);
+    return true;
+}
+
+bool Connection::startPayloadNow(const Bytes& data, bool binary_payload) {
+    if (state_ != ConnectionState::CONNECTED) {
+        LOG_MODEM(WARN, "Connection: Cannot send, not connected");
+        return false;
+    }
+
     bool is_ofdm = isOFDMMode(negotiated_mode_);
     const bool bounded_variable_mc_dpsk = usesBoundedVariableMCDPSKFrames();
     const size_t capacity = currentDataPayloadCapacity();
+    auto markPayloadStarted = [this, &data](bool started) {
+        if (started) {
+            noteDataTurnPayloadStarted(data.size());
+        }
+        return started;
+    };
 
     if (!is_ofdm && !bounded_variable_mc_dpsk) {
         if (binary_payload) {
-            return arq_.sendDataWithTypeAndFlags(data, v2::FrameType::DATA_END, v2::Flags::NONE);
+            return markPayloadStarted(
+                arq_.sendDataWithTypeAndFlags(data, v2::FrameType::DATA_END, v2::Flags::NONE));
         }
-        return arq_.sendData(data);
+        return markPayloadStarted(arq_.sendData(data));
     }
 
     if (capacity == 0) {
@@ -599,12 +798,14 @@ bool Connection::sendPayload(const Bytes& data, bool binary_payload) {
 
     if (data.size() <= capacity) {
         if (binary_payload) {
-            return is_ofdm
-                ? arq_.sendFixedDataWithTypeAndFlags(data, v2::FrameType::DATA_END, v2::Flags::FINAL)
-                : arq_.sendDataWithTypeAndFlags(data, v2::FrameType::DATA_END, v2::Flags::FINAL);
+            return markPayloadStarted(
+                is_ofdm
+                    ? arq_.sendFixedDataWithTypeAndFlags(data, v2::FrameType::DATA_END, v2::Flags::FINAL)
+                    : arq_.sendDataWithTypeAndFlags(data, v2::FrameType::DATA_END, v2::Flags::FINAL));
         }
-        return is_ofdm ? arq_.sendFixedDataWithFlags(data, v2::Flags::FINAL)
-                       : arq_.sendDataWithFlags(data, v2::Flags::FINAL);
+        return markPayloadStarted(
+            is_ofdm ? arq_.sendFixedDataWithFlags(data, v2::Flags::FINAL)
+                    : arq_.sendDataWithFlags(data, v2::Flags::FINAL));
     }
 
     // Fragment the message into chunks that fit in one frame each
@@ -638,10 +839,96 @@ bool Connection::sendPayload(const Bytes& data, bool binary_payload) {
     return true;
 }
 
+bool Connection::tryStartQueuedFileIfReady() {
+    if (!queued_file_path_) {
+        return false;
+    }
+    if (state_ != ConnectionState::CONNECTED) {
+        return false;
+    }
+    if (!local_data_turn_) {
+        sendTurnRequestIfNeeded();
+        return false;
+    }
+    if (peer_data_turn_requested_ || data_turn_yield_pending_) {
+        maybeYieldDataTurn();
+        return false;
+    }
+    if (data_turn_tx_guard_ms_ > 0 ||
+        hasLocalOutboundDataTurn() ||
+        !pending_tx_fragments_.empty() ||
+        !queued_payloads_.empty() ||
+        !arq_.isReadyToSend()) {
+        return false;
+    }
+
+    const std::string path = *queued_file_path_;
+    queued_file_path_.reset();
+    LOG_MODEM(INFO, "Connection: Starting queued file transfer on local ISS DATA turn: %s",
+              path.c_str());
+    if (!startFileTransferNow(path)) {
+        return false;
+    }
+    return true;
+}
+
+void Connection::sendNextQueuedPayloadIfReady() {
+    if (queued_payloads_.empty()) {
+        tryStartQueuedFileIfReady();
+        return;
+    }
+    if (state_ != ConnectionState::CONNECTED) {
+        return;
+    }
+    if (!is_initiator_ && !handshake_confirmed_) {
+        return;
+    }
+    if (!local_data_turn_) {
+        sendTurnRequestIfNeeded();
+        return;
+    }
+    if (data_turn_tx_guard_ms_ > 0) {
+        return;
+    }
+    if (data_turn_yield_pending_) {
+        maybeYieldDataTurn();
+        return;
+    }
+    if (shouldPauseLocalDataForPeerRequest()) {
+        maybeYieldDataTurn();
+        return;
+    }
+    if (hasLocalOutboundDataTurn() || !arq_.isReadyToSend()) {
+        return;
+    }
+
+    QueuedPayload payload = std::move(queued_payloads_.front());
+    queued_payloads_.pop_front();
+    LOG_MODEM(INFO,
+              "Connection: Sending deferred half-duplex payload (%zu bytes, remaining=%zu)",
+              payload.data.size(), queued_payloads_.size());
+    startPayloadNow(payload.data, payload.binary_payload);
+}
+
 bool Connection::sendMessages(const std::vector<std::string>& texts) {
     if (state_ != ConnectionState::CONNECTED) {
         LOG_MODEM(WARN, "Connection: Cannot send, not connected");
         return false;
+    }
+    if (shouldQueuePayloadForLinkTurn()) {
+        for (const auto& text : texts) {
+            if (queued_payloads_.size() >= kMaxQueuedPayloads) {
+                queued_payloads_.pop_front();
+                LOG_MODEM(WARN, "Connection: Queued payload limit reached, dropping oldest deferred message");
+            }
+            queued_payloads_.push_back(
+                QueuedPayload{Bytes(text.begin(), text.end()), false});
+        }
+        LOG_MODEM(INFO,
+                  "Connection: Queued %zu-message batch until local ISS DATA turn (depth=%zu)",
+                  texts.size(), queued_payloads_.size());
+        sendTurnRequestIfNeeded();
+        return !texts.empty();
     }
 
     bool is_ofdm = isOFDMMode(negotiated_mode_);
@@ -689,7 +976,9 @@ bool Connection::sendMessages(const std::vector<std::string>& texts) {
 
 bool Connection::isReadyToSend() const {
     return state_ == ConnectionState::CONNECTED && arq_.isReadyToSend() &&
-           !file_transfer_.isBusy();
+           local_data_turn_ && !peer_data_turn_requested_ &&
+           data_turn_tx_guard_ms_ == 0 && !file_transfer_.isBusy() &&
+           !queued_file_path_.has_value();
 }
 
 size_t Connection::getTxBacklogBytes() const {
@@ -699,6 +988,16 @@ size_t Connection::getTxBacklogBytes() const {
         for (size_t i = next_fragment_idx_; i < pending_tx_fragments_.size(); ++i) {
             bytes += pending_tx_fragments_[i].size();
         }
+    }
+
+    for (const auto& payload : queued_payloads_) {
+        bytes += payload.data.size();
+    }
+
+    if (queued_file_path_) {
+        std::error_code ec;
+        const auto size = std::filesystem::file_size(*queued_file_path_, ec);
+        bytes += ec ? 1 : static_cast<size_t>(size);
     }
 
     if (file_transfer_.getState() == FileTransferState::SENDING) {
@@ -718,11 +1017,32 @@ bool Connection::sendFile(const std::string& filepath) {
         return false;
     }
 
-    if (file_transfer_.isBusy()) {
+    if (file_transfer_.isBusy() || queued_file_path_) {
         LOG_MODEM(WARN, "Connection: File transfer already in progress");
         return false;
     }
 
+    if (!local_data_turn_ ||
+        peer_data_turn_requested_ ||
+        data_turn_tx_guard_ms_ > 0 ||
+        hasLocalOutboundDataTurn() ||
+        !pending_tx_fragments_.empty() ||
+        !queued_payloads_.empty() ||
+        !arq_.isReadyToSend()) {
+        queued_file_path_ = filepath;
+        LOG_MODEM(INFO,
+                  "Connection: Queued file transfer until local ISS DATA turn is clear (path=%s, local_turn=%d, peer_request=%d, guard_ms=%u)",
+                  filepath.c_str(), local_data_turn_ ? 1 : 0,
+                  peer_data_turn_requested_ ? 1 : 0, data_turn_tx_guard_ms_);
+        sendTurnRequestIfNeeded();
+        maybeYieldDataTurn();
+        return true;
+    }
+
+    return startFileTransferNow(filepath);
+}
+
+bool Connection::startFileTransferNow(const std::string& filepath) {
     if (!arq_.isReadyToSend()) {
         LOG_MODEM(WARN, "Connection: ARQ busy, cannot start file transfer");
         return false;
@@ -763,6 +1083,7 @@ bool Connection::sendFile(const std::string& filepath) {
                 file_transfer_.onSendFailed();
                 return false;
             }
+            noteDataTurnPayloadStarted(block.size());
             return true;
         }
     } else if (is_ofdm) {
@@ -779,12 +1100,44 @@ void Connection::setReceiveDirectory(const std::string& dir) {
     file_transfer_.setReceiveDirectory(dir);
 }
 
+void Connection::clearFileTransferArqState() {
+    deferred_file_refill_ = false;
+    burst_mode_active_ = false;
+    burst_tx_buffer_.clear();
+    arq_.reset();
+    soft_combine_harq_.clear();
+}
+
 void Connection::cancelFileTransfer() {
-    file_transfer_.cancel();
+    const bool had_active_transfer = file_transfer_.isBusy();
+    const bool was_local_iss = local_data_turn_;
+    if (state_ == ConnectionState::CONNECTED && had_active_transfer) {
+        auto cancel = v2::ControlFrame::makeFileCancel(local_call_, remote_call_);
+        LOG_MODEM(INFO, "Connection: TX FILE_CANCEL to %s", remote_call_.c_str());
+        transmitFrame(cancel.serialize());
+    }
+
+    queued_file_path_.reset();
+    if (had_active_transfer) {
+        file_transfer_.cancel("Transfer cancelled");
+        clearFileTransferArqState();
+    }
+
+    if (state_ == ConnectionState::CONNECTED) {
+        data_turn_yield_pending_ = false;
+        resetDataTurnFairness();
+        if (!was_local_iss) {
+            local_turn_request_pending_ = false;
+            turn_request_retransmit_ms_ = 0;
+            sendTurnRequestIfNeeded();
+        }
+        maybeYieldDataTurn();
+        sendNextQueuedPayloadIfReady();
+    }
 }
 
 bool Connection::isFileTransferInProgress() const {
-    return file_transfer_.isBusy();
+    return file_transfer_.isBusy() || queued_file_path_.has_value();
 }
 
 FileTransferProgress Connection::getFileProgress() const {
@@ -818,10 +1171,14 @@ void Connection::sendNextFileChunk() {
         // marks the actual stream tail for the short SACK timer.
         const bool has_more = file_transfer_.hasMoreChunks();
         uint8_t flags = has_more ? v2::Flags::MORE_FRAG : v2::Flags::FINAL;
+        bool sent = false;
         if (is_ofdm) {
-            arq_.sendFixedDataWithFlags(chunk, flags);
+            sent = arq_.sendFixedDataWithFlags(chunk, flags);
         } else {
-            arq_.sendDataWithFlags(chunk, flags);
+            sent = arq_.sendDataWithFlags(chunk, flags);
+        }
+        if (sent) {
+            noteDataTurnPayloadStarted(chunk.size());
         }
     }
 
@@ -864,10 +1221,14 @@ void Connection::sendNextFragment() {
                   next_fragment_idx_ + 1, pending_tx_fragments_.size(), chunk.size(),
                   v2::frameTypeToString(frame_type), flags);
 
+        bool sent = false;
         if (is_ofdm) {
-            arq_.sendFixedDataWithTypeAndFlags(chunk, frame_type, flags);
+            sent = arq_.sendFixedDataWithTypeAndFlags(chunk, frame_type, flags);
         } else {
-            arq_.sendDataWithTypeAndFlags(chunk, frame_type, flags);
+            sent = arq_.sendDataWithTypeAndFlags(chunk, frame_type, flags);
+        }
+        if (sent) {
+            noteDataTurnPayloadStarted(chunk.size());
         }
         next_fragment_idx_++;
         submitted_this_call++;
@@ -1034,7 +1395,17 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                             runDeferredArqRefill();
                         } else {
                             // Regular data ACK
+                            if (local_data_turn_) {
+                                armDataTurnTxGuard(DATA_TURN_ACK_DIVERSITY_GUARD_MS);
+                                if ((ctrl->flags & v2::Flags::TURN_REQUEST) != 0) {
+                                    peer_data_turn_requested_ = true;
+                                    LOG_MODEM(INFO,
+                                              "Connection: Peer requested DATA turn on ACK seq=%u",
+                                              ctrl->seq);
+                                }
+                            }
                             processArqFrame(frame_data);
+                            maybeYieldDataTurn();
                         }
                     }
                     break;
@@ -1045,6 +1416,15 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                     break;
                 case v2::FrameType::MODE_CHANGE:
                     handleModeChange(*ctrl, src_call);
+                    break;
+                case v2::FrameType::TURNOVER:
+                    handleTurnover(*ctrl, src_call);
+                    break;
+                case v2::FrameType::TURN_REQUEST:
+                    handleTurnRequest(*ctrl, src_call);
+                    break;
+                case v2::FrameType::FILE_CANCEL:
+                    handleFileCancel(*ctrl, src_call);
                     break;
                 case v2::FrameType::PROBE:
                 case v2::FrameType::PROBE_ACK:
@@ -1140,6 +1520,17 @@ void Connection::runDeferredArqRefill() {
     if (state_ != ConnectionState::CONNECTED) {
         return;
     }
+    if (!local_data_turn_ || data_turn_tx_guard_ms_ > 0) {
+        deferred_file_refill_ = refill_file || deferred_file_refill_;
+        deferred_fragment_refill_ = refill_fragments || deferred_fragment_refill_;
+        return;
+    }
+    if (shouldPauseLocalDataForPeerRequest()) {
+        deferred_file_refill_ = refill_file || deferred_file_refill_;
+        deferred_fragment_refill_ = refill_fragments || deferred_fragment_refill_;
+        maybeYieldDataTurn();
+        return;
+    }
 
     if (refill_file && file_transfer_.getState() == FileTransferState::SENDING) {
         sendNextFileChunk();
@@ -1150,6 +1541,8 @@ void Connection::runDeferredArqRefill() {
         next_fragment_idx_ < pending_tx_fragments_.size()) {
         sendNextFragment();
     }
+
+    sendNextQueuedPayloadIfReady();
 }
 
 void Connection::resetAdaptiveModeController() {
@@ -1165,6 +1558,9 @@ void Connection::resetAdaptiveModeController() {
 
 bool Connection::canIssueAdaptiveModeChange(bool is_downgrade) const {
     if (state_ != ConnectionState::CONNECTED || !isOFDMMode(negotiated_mode_)) {
+        return false;
+    }
+    if (!local_data_turn_ || peer_data_turn_requested_ || data_turn_tx_guard_ms_ > 0) {
         return false;
     }
     if (config_.forced_modulation != Modulation::AUTO ||
@@ -1518,6 +1914,25 @@ void Connection::tick(uint32_t elapsed_ms) {
         case ConnectionState::CONNECTED:
             connected_time_ms_ += elapsed_ms;
             stats_.connected_time_ms = connected_time_ms_;
+            if (data_turn_tx_guard_ms_ > 0) {
+                data_turn_tx_guard_ms_ =
+                    elapsed_ms >= data_turn_tx_guard_ms_ ? 0 : data_turn_tx_guard_ms_ - elapsed_ms;
+            }
+            if (turn_request_holdoff_ms_ > 0) {
+                turn_request_holdoff_ms_ =
+                    elapsed_ms >= turn_request_holdoff_ms_ ? 0 : turn_request_holdoff_ms_ - elapsed_ms;
+            }
+            if (local_data_turn_ && peer_data_turn_requested_) {
+                data_turn_contended_ms_ += elapsed_ms;
+            }
+            if (!local_data_turn_ && hasLocalDataWaitingForTurn() && local_turn_request_pending_) {
+                if (elapsed_ms >= turn_request_retransmit_ms_) {
+                    local_turn_request_pending_ = false;
+                    sendTurnRequestIfNeeded();
+                } else {
+                    turn_request_retransmit_ms_ -= elapsed_ms;
+                }
+            }
 
             // Proactive CONNECT_ACK retransmission (responder side, BUG-CTRL-001).
             // ALPHA can miss the single MC-DPSK ACK on faded seeds — without retx
@@ -1552,6 +1967,7 @@ void Connection::tick(uint32_t elapsed_ms) {
                     if (on_handshake_confirmed_) {
                         on_handshake_confirmed_();
                     }
+                    runDeferredArqRefill();
                 } else {
                     responder_handshake_wait_ms_ -= elapsed_ms;
                 }
@@ -1614,6 +2030,9 @@ void Connection::tick(uint32_t elapsed_ms) {
 
             arq_.tick(elapsed_ms);
             updateAdaptiveModeController(elapsed_ms);
+            maybeYieldDataTurn();
+            runDeferredArqRefill();
+            sendNextQueuedPayloadIfReady();
             break;
 
         case ConnectionState::DISCONNECTING:
@@ -1919,6 +2338,18 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
 void Connection::enterConnected() {
     state_ = ConnectionState::CONNECTED;
     connected_time_ms_ = 0;
+    local_data_turn_ = is_initiator_;
+    peer_data_turn_requested_ = false;
+    local_turn_request_pending_ = false;
+    received_peer_data_since_connect_ = false;
+    data_turn_yield_pending_ = false;
+    resetDataTurnFairness();
+    data_turn_tx_guard_ms_ = 0;
+    turn_request_retransmit_ms_ = 0;
+    turn_request_holdoff_ms_ = 0;
+    if (local_data_turn_) {
+        armDataTurnTxGuard(DATA_TURN_CONNECT_GUARD_MS);
+    }
 
     if (is_initiator_ || handshake_confirmed_) {
         responder_handshake_wait_ms_ = 0;
@@ -1931,8 +2362,9 @@ void Connection::enterConnected() {
     configureArqForCurrentDataMode();
     resetAdaptiveModeController();
 
-    LOG_MODEM(INFO, "Connection: Now CONNECTED to %s (mode=%s)",
-              remote_call_.c_str(), waveformModeToString(negotiated_mode_));
+    LOG_MODEM(INFO, "Connection: Now CONNECTED to %s (mode=%s, data_turn=%s)",
+              remote_call_.c_str(), waveformModeToString(negotiated_mode_),
+              local_data_turn_ ? "ISS" : "IRS");
 
     if (on_mode_negotiated_) {
         on_mode_negotiated_(negotiated_mode_);
@@ -1963,6 +2395,15 @@ void Connection::enterDisconnected(const std::string& reason) {
     connect_ack_frame_.clear();
     connect_ack_retransmit_ms_ = 0;
     connect_ack_retx_remaining_ = 0;
+    local_data_turn_ = false;
+    peer_data_turn_requested_ = false;
+    local_turn_request_pending_ = false;
+    received_peer_data_since_connect_ = false;
+    data_turn_yield_pending_ = false;
+    resetDataTurnFairness();
+    data_turn_tx_guard_ms_ = 0;
+    turn_request_retransmit_ms_ = 0;
+    turn_request_holdoff_ms_ = 0;
     data_ladder_rung_id_ = LadderRungId::UNKNOWN;
     pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
     arq_callback_defer_refill_ = false;
@@ -1972,6 +2413,8 @@ void Connection::enterDisconnected(const std::string& reason) {
     soft_combine_harq_.clear();
     resetAdaptiveModeController();
     file_transfer_.cancel();
+    queued_file_path_.reset();
+    queued_payloads_.clear();
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
     pending_tx_fragment_types_.clear();
@@ -2175,6 +2618,15 @@ void Connection::reset() {
     connect_ack_frame_.clear();
     connect_ack_retransmit_ms_ = 0;
     connect_ack_retx_remaining_ = 0;
+    local_data_turn_ = false;
+    peer_data_turn_requested_ = false;
+    local_turn_request_pending_ = false;
+    received_peer_data_since_connect_ = false;
+    data_turn_yield_pending_ = false;
+    resetDataTurnFairness();
+    data_turn_tx_guard_ms_ = 0;
+    turn_request_retransmit_ms_ = 0;
+    turn_request_holdoff_ms_ = 0;
     burst_mode_active_ = false;
     burst_tx_buffer_.clear();
     arq_callback_defer_refill_ = false;
@@ -2184,6 +2636,8 @@ void Connection::reset() {
     soft_combine_harq_.clear();
     resetAdaptiveModeController();
     file_transfer_.cancel();
+    queued_file_path_.reset();
+    queued_payloads_.clear();
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
     pending_tx_fragment_types_.clear();

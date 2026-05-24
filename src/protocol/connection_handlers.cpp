@@ -533,6 +533,70 @@ void Connection::handleModeChange(const v2::ControlFrame& frame, const std::stri
     runDeferredArqRefill();
 }
 
+void Connection::handleTurnover(const v2::ControlFrame& frame, const std::string& src_call) {
+    (void)frame;
+    if (state_ != ConnectionState::CONNECTED) {
+        return;
+    }
+
+    local_data_turn_ = true;
+    peer_data_turn_requested_ = false;
+    local_turn_request_pending_ = false;
+    data_turn_yield_pending_ = false;
+    turn_request_retransmit_ms_ = 0;
+    turn_request_holdoff_ms_ = 0;
+    resetDataTurnFairness();
+    arq_.clearPendingAckRepeats();
+    armDataTurnTxGuard(DATA_TURN_CONTROL_GUARD_MS);
+
+    LOG_MODEM(INFO, "Connection: RX TURNOVER from %s; local station is now ISS",
+              src_call.empty() ? remote_call_.c_str() : src_call.c_str());
+    runDeferredArqRefill();
+    sendNextQueuedPayloadIfReady();
+}
+
+void Connection::handleTurnRequest(const v2::ControlFrame& frame, const std::string& src_call) {
+    (void)frame;
+    if (state_ != ConnectionState::CONNECTED || !local_data_turn_) {
+        return;
+    }
+
+    peer_data_turn_requested_ = true;
+    LOG_MODEM(INFO, "Connection: RX TURN_REQUEST from %s",
+              src_call.empty() ? remote_call_.c_str() : src_call.c_str());
+    maybeYieldDataTurn();
+}
+
+void Connection::handleFileCancel(const v2::ControlFrame& frame, const std::string& src_call) {
+    (void)frame;
+    if (state_ != ConnectionState::CONNECTED) {
+        return;
+    }
+
+    LOG_MODEM(INFO, "Connection: RX FILE_CANCEL from %s",
+              src_call.empty() ? remote_call_.c_str() : src_call.c_str());
+
+    const bool was_local_iss = local_data_turn_;
+    queued_file_path_.reset();
+    if (file_transfer_.isBusy()) {
+        file_transfer_.cancel("Transfer cancelled");
+    }
+    clearFileTransferArqState();
+    data_turn_yield_pending_ = false;
+    resetDataTurnFairness();
+
+    if (was_local_iss) {
+        peer_data_turn_requested_ = true;
+        maybeYieldDataTurn();
+    } else {
+        local_turn_request_pending_ = false;
+        turn_request_retransmit_ms_ = 0;
+        sendTurnRequestIfNeeded();
+    }
+
+    sendNextQueuedPayloadIfReady();
+}
+
 void Connection::requestModeChange(Modulation new_mod, CodeRate new_rate,
                                     float measured_snr, uint8_t reason) {
     if (state_ != ConnectionState::CONNECTED) {
@@ -590,6 +654,8 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data, v2::Fra
     if (payload.empty()) {
         return;
     }
+    received_peer_data_since_connect_ = true;
+    turn_request_holdoff_ms_ = TURN_REQUEST_HOLDOFF_AFTER_DATA_MS;
 
     const bool binary_payload =
         frame_type == v2::FrameType::DATA_START ||

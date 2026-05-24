@@ -1903,7 +1903,8 @@ private:
         });
 
         // File received
-        protocol_.setFileReceivedCallback([this](const std::string& filepath, bool success) {
+        protocol_.setFileReceivedCallback([this](const std::string& filepath, bool success,
+                                                 const std::string&) {
             if (file_received_callback_) {
                 file_received_callback_(filepath, success);
             }

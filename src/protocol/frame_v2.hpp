@@ -238,6 +238,9 @@ enum class FrameType : uint8_t {
     MODE_CHANGE = 0x17,  // Request modulation/rate change
     ACK         = 0x20,  // Acknowledge frame
     NACK        = 0x21,  // Request retransmit (with codeword bitmap)
+    TURNOVER    = 0x22,  // Current ISS yields DATA turn to peer
+    TURN_REQUEST = 0x23, // Current IRS requests the next DATA turn
+    FILE_CANCEL = 0x24,  // Abort the active file transfer on both peers
     BEACON      = 0x40,  // CQ broadcast
 
     // Data frames (variable codewords)
@@ -253,6 +256,7 @@ namespace Flags {
     constexpr uint8_t NONE       = 0x00;
     constexpr uint8_t VERSION_V2 = 0x01;  // Always set for v2
     constexpr uint8_t URGENT     = 0x02;  // High priority
+    constexpr uint8_t TURN_REQUEST = URGENT;  // ACK flag: IRS has queued DATA
     constexpr uint8_t COMPRESSED = 0x04;  // Payload is compressed
     constexpr uint8_t ENCRYPTED  = 0x08;  // Payload is encrypted
     constexpr uint8_t MORE_FRAG  = 0x10;  // More fragments follow
@@ -276,6 +280,8 @@ inline bool isControlFrame(FrameType type) {
     return type == FrameType::PROBE || type == FrameType::PROBE_ACK ||
            type == FrameType::KEEPALIVE || type == FrameType::MODE_CHANGE ||
            type == FrameType::ACK || type == FrameType::NACK ||
+           type == FrameType::TURNOVER || type == FrameType::TURN_REQUEST ||
+           type == FrameType::FILE_CANCEL ||
            type == FrameType::DISCONNECT ||
            type == FrameType::BEACON;
 }
@@ -438,6 +444,9 @@ struct ControlFrame {
     static ControlFrame makeAck(const std::string& src, const std::string& dst, uint16_t seq);
     static ControlFrame makeNack(const std::string& src, const std::string& dst,
                                   uint16_t seq, uint32_t cw_bitmap);
+    static ControlFrame makeTurnover(const std::string& src, const std::string& dst);
+    static ControlFrame makeTurnRequest(const std::string& src, const std::string& dst);
+    static ControlFrame makeFileCancel(const std::string& src, const std::string& dst);
     static ControlFrame makeBeacon(const std::string& src);
     static ControlFrame makeKeepalive(const std::string& src, const std::string& dst);
     static ControlFrame makeDisconnect(const std::string& src, const std::string& dst);

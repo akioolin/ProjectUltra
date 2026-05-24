@@ -211,9 +211,11 @@ void printGuiUsage(const char* prog) {
     std::printf("  --auto-accept                 Auto-accept the first incoming call\n");
     std::printf("  --auto-send-file <path>       Send file once CONNECTED\n");
     std::printf("  --auto-send-message <text>    Send message once CONNECTED\n");
+    std::printf("  --auto-message-start-delay <s> Wait N seconds after CONNECTED before first auto-message\n");
     std::printf("  --auto-message-count <N>      Send N sequential numbered auto-messages (default 1)\n");
     std::printf("  --auto-message-interval <s>   Gap between sequential auto-messages (default 8)\n");
     std::printf("  --auto-message-vary-len       Randomize each auto-message length (mix short+long)\n");
+    std::printf("  --auto-cancel-file-after <s>  Cancel active file transfer N seconds after first observed\n");
     std::printf("  --auto-disconnect-after <s>   Disconnect N seconds after CONNECTED\n");
     std::printf("  --exit-after <s>              Quit N seconds after startup\n");
     std::printf("  --log-level <error|warn|info|debug|trace>\n");
@@ -603,6 +605,13 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             opts.auto_send_message = argv[++i];
+        } else if (arg == "--auto-message-start-delay") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Missing value for --auto-message-start-delay\n");
+                closeStartupLog();
+                return 1;
+            }
+            opts.auto_message_start_delay_sec = std::atoi(argv[++i]);
         } else if (arg == "--auto-message-count") {
             if (i + 1 >= argc) {
                 std::fprintf(stderr, "Missing value for --auto-message-count\n");
@@ -619,6 +628,13 @@ int main(int argc, char* argv[]) {
             opts.auto_message_interval_sec = std::atoi(argv[++i]);
         } else if (arg == "--auto-message-vary-len") {
             opts.auto_message_vary_len = true;
+        } else if (arg == "--auto-cancel-file-after") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Missing value for --auto-cancel-file-after\n");
+                closeStartupLog();
+                return 1;
+            }
+            opts.auto_cancel_file_after_sec = std::atoi(argv[++i]);
         } else if (arg == "--auto-disconnect-after") {
             if (i + 1 >= argc) {
                 std::fprintf(stderr, "Missing value for --auto-disconnect-after\n");

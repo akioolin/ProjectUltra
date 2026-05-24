@@ -67,9 +67,11 @@ public:
         bool auto_accept = false;             // auto-accept the first incoming call
         std::string auto_send_file;           // file to send once CONNECTED (fires once)
         std::string auto_send_message;        // message to send once CONNECTED (fires once)
+        int auto_message_start_delay_sec = 0; // wait N s after CONNECTED before first auto-message
         int auto_message_count = 1;           // how many sequential messages to send (numbered)
         int auto_message_interval_sec = 8;    // gap between sequential auto-messages
         bool auto_message_vary_len = false;   // randomize each auto-message length (mix short+long)
+        int auto_cancel_file_after_sec = 0;   // cancel active file N s after first observing it
         int auto_disconnect_after_sec = 0;    // 0 = never; else disconnect N s after CONNECTED
         int exit_after_sec = 0;               // 0 = never; else push SDL_QUIT after N s
     };
@@ -135,14 +137,26 @@ private:
     // only on the main thread (queueRealTxSamples runs from protocol_.tick(), and
     // flushDeferredTxIfReady() runs from the main render loop after pollRadioRx()),
     // so no locking is needed; only the detector reads are cross-thread (safe).
+    enum class DeferredTxKind {
+        Samples,
+        Frame,
+        Burst
+    };
     struct DeferredTx {
+        DeferredTxKind kind = DeferredTxKind::Samples;
         std::vector<float> samples;
+        Bytes frame;
+        std::vector<Bytes> frames;
         std::string context;
+        bool in_qso_data = false;
+        bool expect_full_ofdm_anchor_after_tx = false;
+        std::chrono::steady_clock::time_point earliest_flush{};
     };
     std::deque<DeferredTx> deferred_tx_;
     std::chrono::steady_clock::time_point deferred_tx_deadline_{};
-    static constexpr size_t kMaxDeferredTx = 8;     // bounded memory (drop-oldest)
+    static constexpr size_t kMaxDeferredTx = 32;    // bounded memory (drop-oldest)
     static constexpr uint32_t kMaxTxDeferMs = 4000; // ~one max OFDM burst; never deadlock
+    static constexpr uint32_t kInQsoDataQuietGuardMs = 2000;
     // Cached connection state for the carrier-sense gate. queueRealTxSamples()
     // runs inside protocol_ TX callbacks (during protocol_.tick(), which holds
     // the engine mutex), so it must NOT call protocol_.getState() (re-entrant
@@ -161,10 +175,15 @@ private:
     bool scenario_message_sent_ = false;    // chat-message phase fired (if any)
     int scenario_messages_sent_ = 0;        // count of sequential auto-messages sent
     bool scenario_file_started_ = false;    // file phase started (if any)
+    bool scenario_connected_seen_ = false;
+    bool scenario_file_cancel_timer_started_ = false;
+    bool scenario_file_cancel_issued_ = false;
     bool scenario_disconnect_issued_ = false;
     std::chrono::steady_clock::time_point scenario_start_;
+    std::chrono::steady_clock::time_point scenario_connected_first_at_;
     std::chrono::steady_clock::time_point scenario_connected_at_;
     std::chrono::steady_clock::time_point scenario_message_sent_at_;
+    std::chrono::steady_clock::time_point scenario_file_cancel_started_at_;
     void tickScenario();
 
     // Radio mode state
@@ -229,6 +248,14 @@ private:
     ImageInfo image_send_info_;
     int image_send_preset_ = 0;  // 0 thumbnail, 1 preview, 2 full size
     std::string image_send_error_;
+    bool send_btn_log_valid_ = false;
+    bool send_btn_log_enabled_ = false;
+    bool send_btn_log_scenario_ = false;
+    bool send_btn_log_file_busy_ = false;
+    bool send_btn_log_tx_inprog_ = false;
+    size_t send_btn_log_textlen_ = 0;
+    bool send_btn_log_connected_ = false;
+    bool send_btn_log_would_enable_ = false;
 
     bool startFileSend(const std::string& file_path, const std::string& success_log);
     void startFileSendOrImageDialog(const std::string& file_path);
@@ -281,9 +308,16 @@ private:
     // flushDeferredTxIfReady() drains the deferred queue on the main thread once the
     // channel goes idle, bounded by kMaxTxDeferMs so a stuck-busy reading never
     // deadlocks TX. doQueueRealTxSamples() is the real key-up + send (bypasses the gate).
-    bool queueRealTxSamples(const std::vector<float>& samples, const char* context);
+    bool queueRealTxSamples(const std::vector<float>& samples, const char* context,
+                            bool in_qso_data = false);
     bool doQueueRealTxSamples(const std::vector<float>& samples, const char* context);
-    void deferTxSamples(const std::vector<float>& samples, const char* context);
+    bool shouldDeferInQsoDataForTx() const;
+    void deferTxSamples(const std::vector<float>& samples, const char* context,
+                        bool in_qso_data);
+    void deferTxFrame(const Bytes& frame, const char* context,
+                      bool expect_full_ofdm_anchor_after_tx);
+    void deferTxBurst(const std::vector<Bytes>& frames, const char* context);
+    uint32_t nextInQsoDataBackoffMs();
     void flushDeferredTxIfReady();
     ptt::PttConfig pttConfigFromSettings(const AppSettings& settings) const;
     bool ensurePttReadyLocked(const AppSettings& settings);

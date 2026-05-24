@@ -7,6 +7,7 @@
 #include "ultra/types.hpp"
 #include "fec/soft_combine.hpp"
 #include <cmath>
+#include <deque>
 #include <functional>
 #include <optional>
 #include <string>
@@ -352,8 +353,14 @@ private:
 
     // File transfer controller
     FileTransferController file_transfer_;
+    std::optional<std::string> queued_file_path_;
 
     // Message fragmentation (TX) - splits long messages across multiple ARQ frames
+    struct QueuedPayload {
+        Bytes data;
+        bool binary_payload = false;
+    };
+    std::deque<QueuedPayload> queued_payloads_;
     std::vector<Bytes> pending_tx_fragments_;
     std::vector<uint8_t> pending_tx_fragment_flags_;  // Per-fragment flags (for sendMessages batch)
     std::vector<v2::FrameType> pending_tx_fragment_types_;  // DATA_START/CONT/END for binary streams
@@ -402,6 +409,28 @@ private:
     bool arq_callback_defer_refill_ = false;
     bool deferred_file_refill_ = false;
     bool deferred_fragment_refill_ = false;
+
+    // In-QSO HF ARQ DATA turn ownership. Exactly one peer is ISS (allowed to
+    // originate DATA) at a time; the other queues operator payloads and requests
+    // a deterministic changeover via ACK flag or TURN_REQUEST control.
+    bool local_data_turn_ = false;
+    bool peer_data_turn_requested_ = false;
+    bool local_turn_request_pending_ = false;
+    bool received_peer_data_since_connect_ = false;
+    bool data_turn_yield_pending_ = false;
+    uint64_t data_turn_payload_bytes_sent_ = 0;
+    uint32_t data_turn_contended_ms_ = 0;
+    uint32_t data_turn_tx_guard_ms_ = 0;
+    uint32_t turn_request_retransmit_ms_ = 0;
+    uint32_t turn_request_holdoff_ms_ = 0;
+    static constexpr uint32_t DATA_TURN_ACK_DIVERSITY_GUARD_MS = 250;
+    static constexpr uint32_t DATA_TURN_CONNECT_GUARD_MS = 2500;
+    static constexpr uint32_t DATA_TURN_CONTROL_GUARD_MS = 1000;
+    static constexpr uint64_t DATA_TURN_FAIR_BURST_BYTES = 4096;
+    static constexpr uint64_t DATA_TURN_FAIR_MIN_BYTES_FOR_TIME_YIELD = 1024;
+    static constexpr uint32_t DATA_TURN_FAIR_BURST_MS = 24000;
+    static constexpr uint32_t TURN_REQUEST_HOLDOFF_AFTER_DATA_MS = 7000;
+    static constexpr uint32_t TURN_REQUEST_RETRANSMIT_MS = 7000;
 
     void flushBurstBuffer();
     void processArqFrame(const Bytes& frame_data);
@@ -485,7 +514,7 @@ private:
     int connect_ack_retx_remaining_ = 0;       // Retries left (counts down to 0)
     // The retry cadence is only a fail-safe. AudioPort carrier sense gates the
     // actual TX edge so a rescue ACK cannot key up over the peer's transmission.
-    static constexpr uint32_t CONNECT_ACK_RETRANSMIT_MS = 6000;
+    static constexpr uint32_t CONNECT_ACK_RETRANSMIT_MS = 14000;
     static constexpr int CONNECT_ACK_MAX_RETX = 1;
 
     // Internal handlers for v2 frames
@@ -496,7 +525,27 @@ private:
     void handleDisconnectFrame(const v2::ConnectFrame& frame, const std::string& src_call);
     void handleModeChange(const v2::ControlFrame& frame, const std::string& src_call);
     bool sendPayload(const Bytes& data, bool binary_payload);
+    bool startPayloadNow(const Bytes& data, bool binary_payload);
+    bool shouldQueuePayloadForLinkTurn() const;
+    bool hasLocalOutboundDataTurn() const;
+    bool hasLocalInFlightDataTurn() const;
+    bool hasLocalDataWaitingForTurn() const;
+    bool dataTurnFairBudgetMet() const;
+    bool shouldPauseLocalDataForPeerRequest() const;
+    bool shouldRequestDataTurnOnAck() const;
+    void resetDataTurnFairness();
+    void noteDataTurnPayloadStarted(size_t payload_bytes);
+    void sendTurnRequestIfNeeded();
+    bool maybeYieldDataTurn();
+    void armDataTurnTxGuard(uint32_t guard_ms);
+    bool startFileTransferNow(const std::string& filepath);
+    bool tryStartQueuedFileIfReady();
+    void sendNextQueuedPayloadIfReady();
+    void clearFileTransferArqState();
     void handleDataPayload(const Bytes& payload, bool more_data, v2::FrameType frame_type);
+    void handleTurnover(const v2::ControlFrame& frame, const std::string& src_call);
+    void handleTurnRequest(const v2::ControlFrame& frame, const std::string& src_call);
+    void handleFileCancel(const v2::ControlFrame& frame, const std::string& src_call);
 
     void transmitFrame(const Bytes& frame_data);
     void enterConnected();

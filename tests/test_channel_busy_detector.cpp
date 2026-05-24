@@ -273,6 +273,36 @@ void testRatiometricCarrierSenseAcrossLevelsAndSignal() {
     }
 }
 
+void testRatiometricFloorSurvivesLongBusySignal() {
+    ChannelBusyDetectorConfig cfg = ultra::audio::ratiometricHfCarrierSenseConfig();
+    cfg.quiet_hold_ms = 30;
+    cfg.rms_window_ms = 30;
+    cfg.noise_floor_window_ms = 1000;
+    cfg.min_noise_floor_observations = 5;
+    ChannelBusyDetector detector(cfg);
+
+    int t = 0;
+    for (; t < 1200; t += 20) {
+        observe(detector, 0.030f, t);
+    }
+    assert(isIdleAtMs(detector, t));
+    assert(detector.quietThreshold() > 0.055f);
+    assert(detector.quietThreshold() < 0.070f);
+
+    for (; t < 9000; t += 20) {
+        observe(detector, 0.300f, t);
+        assert(!isIdleAtMs(detector, t));
+        assert(detector.quietThreshold() < 0.080f);
+    }
+
+    for (; t < 9400; t += 20) {
+        observe(detector, 0.030f, t);
+    }
+    assert(isIdleAtMs(detector, t));
+    assert(detector.quietThreshold() > 0.055f);
+    assert(detector.quietThreshold() < 0.080f);
+}
+
 void testWaitUntilIdleTimeoutAndGuard() {
     ChannelBusyDetector detector(testConfig());
     observe(detector, 0.050f, 0);
@@ -304,6 +334,7 @@ int main() {
     testSignalSampleCeilingRejectsFullPowerCarrier();
     testNoisyIdleCanSeedBelowSignalSampleCeiling();
     testRatiometricCarrierSenseAcrossLevelsAndSignal();
+    testRatiometricFloorSurvivesLongBusySignal();
     testWaitUntilIdleTimeoutAndGuard();
 
     std::cout << "ChannelBusyDetector tests passed\n";

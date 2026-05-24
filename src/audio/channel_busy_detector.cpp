@@ -63,6 +63,8 @@ void ChannelBusyDetector::reset(TimePoint now) {
     receive_band_filter_.reset();
     rms_window_sum_ = 0.0;
     current_rms_ = 0.0f;
+    cached_noise_floor_rms_ = 0.0f;
+    cached_noise_floor_valid_ = false;
     const auto initial_quiet_age =
         std::chrono::hours(24) +
         std::chrono::milliseconds(config_.quiet_hold_ms + config_.max_wait_for_idle_ms);
@@ -127,6 +129,12 @@ void ChannelBusyDetector::observeRmsLocked(float rms,
     if (shouldRecordNoiseFloorSampleLocked(current_rms_)) {
         noise_floor_window_.emplace_back(now, current_rms_);
         pruneNoiseFloorLocked(now);
+    }
+    const size_t required_noise_samples =
+        static_cast<size_t>(std::max<uint32_t>(1, config_.min_noise_floor_observations));
+    if (noise_floor_window_.size() >= required_noise_samples) {
+        cached_noise_floor_rms_ = noiseFloorEstimateLocked();
+        cached_noise_floor_valid_ = true;
     }
 
     if (window_rms > threshold) {
@@ -297,10 +305,15 @@ bool ChannelBusyDetector::hasNoiseFloorEstimateLocked() const {
     const size_t required =
         static_cast<size_t>(std::max<uint32_t>(1, config_.min_noise_floor_observations));
     return config_.adaptive_noise_floor &&
-           noise_floor_window_.size() >= required;
+           (noise_floor_window_.size() >= required || cached_noise_floor_valid_);
 }
 
 float ChannelBusyDetector::noiseFloorEstimateLocked() const {
+    const size_t required =
+        static_cast<size_t>(std::max<uint32_t>(1, config_.min_noise_floor_observations));
+    if (noise_floor_window_.size() < required) {
+        return cached_noise_floor_valid_ ? cached_noise_floor_rms_ : 0.0f;
+    }
     if (noise_floor_window_.empty()) {
         return 0.0f;
     }

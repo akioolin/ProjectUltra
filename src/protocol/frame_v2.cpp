@@ -232,6 +232,9 @@ const char* frameTypeToString(FrameType type) {
         case FrameType::MODE_CHANGE: return "MODE_CHANGE";
         case FrameType::ACK:         return "ACK";
         case FrameType::NACK:        return "NACK";
+        case FrameType::TURNOVER:    return "TURNOVER";
+        case FrameType::TURN_REQUEST: return "TURN_REQUEST";
+        case FrameType::FILE_CANCEL: return "FILE_CANCEL";
         case FrameType::BEACON:      return "BEACON";
         case FrameType::DATA:        return "DATA";
         case FrameType::DATA_START:  return "DATA_START";
@@ -408,6 +411,39 @@ ControlFrame ControlFrame::makeNack(const std::string& src, const std::string& d
     np.cw_bitmap = cw_bitmap;
     np.encode(f.payload);
 
+    return f;
+}
+
+ControlFrame ControlFrame::makeTurnover(const std::string& src, const std::string& dst) {
+    ControlFrame f;
+    f.type = FrameType::TURNOVER;
+    f.flags = Flags::VERSION_V2;
+    f.seq = 0;
+    f.src_hash = hashCallsign(src);
+    f.dst_hash = hashCallsign(dst);
+    std::memset(f.payload, 0, PAYLOAD_SIZE);
+    return f;
+}
+
+ControlFrame ControlFrame::makeTurnRequest(const std::string& src, const std::string& dst) {
+    ControlFrame f;
+    f.type = FrameType::TURN_REQUEST;
+    f.flags = Flags::VERSION_V2;
+    f.seq = 0;
+    f.src_hash = hashCallsign(src);
+    f.dst_hash = hashCallsign(dst);
+    std::memset(f.payload, 0, PAYLOAD_SIZE);
+    return f;
+}
+
+ControlFrame ControlFrame::makeFileCancel(const std::string& src, const std::string& dst) {
+    ControlFrame f;
+    f.type = FrameType::FILE_CANCEL;
+    f.flags = Flags::VERSION_V2;
+    f.seq = 0;
+    f.src_hash = hashCallsign(src);
+    f.dst_hash = hashCallsign(dst);
+    std::memset(f.payload, 0, PAYLOAD_SIZE);
     return f;
 }
 

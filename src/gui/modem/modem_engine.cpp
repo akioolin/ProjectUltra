@@ -402,12 +402,18 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 
     const auto header = protocol::v2::parseHeader(data);
     const bool is_data_frame = header.valid && protocol::v2::isDataFrame(header.type);
+    const bool is_turn_control = header.valid &&
+        (header.type == protocol::v2::FrameType::TURNOVER ||
+         header.type == protocol::v2::FrameType::TURN_REQUEST ||
+         header.type == protocol::v2::FrameType::FILE_CANCEL);
 
     // Use light preamble (LTS only) for connected OFDM control turns. A single
     // DATA frame is a new physical DATA turn and carries a full anchor so the
-    // peer can recover after idle or after an ACK/NACK turnaround.
+    // peer can recover after idle or after an ACK/NACK turnaround. TURNOVER and
+    // TURN_REQUEST are link-state transition tokens, so they also carry a full
+    // anchor instead of depending on warm sync across a half-duplex turnaround.
     bool use_light = ((connected_ && handshake_complete_) || is_disconnect_ack) &&
-                     is_ofdm && !is_data_frame;
+                     is_ofdm && !is_data_frame && !is_turn_control;
     auto samples = use_light ? streaming_encoder_->encodeFrameLight(data)
                              : streaming_encoder_->encodeFrame(data);
 
