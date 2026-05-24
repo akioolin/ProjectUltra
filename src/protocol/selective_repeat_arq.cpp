@@ -206,6 +206,9 @@ bool SelectiveRepeatARQ::sendDataWithTypeAndFlags(const Bytes& data,
         ultra::phyDiagLine(oss.str());
     }
 
+    if (on_tx_frame_submitted_) {
+        on_tx_frame_submitted_(seq);
+    }
     transmitData(tx_window_[slot].frame_data);
 
     return true;
@@ -282,6 +285,9 @@ bool SelectiveRepeatARQ::sendFixedDataWithTypeAndFlags(const Bytes& data,
         ultra::phyDiagLine(oss.str());
     }
 
+    if (on_tx_frame_submitted_) {
+        on_tx_frame_submitted_(seq);
+    }
     transmitData(tx_window_[slot].frame_data);
     return true;
 }
@@ -349,6 +355,9 @@ bool SelectiveRepeatARQ::sendVariableDataWithFlags(const Bytes& data, uint8_t fl
         ultra::phyDiagLine(oss.str());
     }
 
+    if (on_tx_frame_submitted_) {
+        on_tx_frame_submitted_(seq);
+    }
     transmitData(tx_window_[slot].frame_data);
     return true;
 }
@@ -777,6 +786,7 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
         }
         tx_base_seq_ = (tx_base_seq_ + 1) & 0xFFFF;
     }
+    notifyTXBaseAdvanced(base_before_ack);
 
     // --- Positive-only SACK bitmap: mark frames the receiver confirms it HAS ---
     if (bitmap != 0) {
@@ -1132,6 +1142,9 @@ void SelectiveRepeatARQ::retransmitFrame(size_t slot, RetransmitCause cause) {
         }
         stats_.failed++;
 
+        if (on_tx_frame_failed_) {
+            on_tx_frame_failed_(s.seq);
+        }
         s.active = false;
         tx_in_flight_--;
 
@@ -1222,6 +1235,9 @@ bool SelectiveRepeatARQ::sendDataRepair(size_t slot, uint32_t missing_bitmap) {
         LOG_MODEM(ERROR, "SR-ARQ: Frame seq=%d failed after %d repairs/retries",
                   s.seq, config_.max_retries);
         stats_.failed++;
+        if (on_tx_frame_failed_) {
+            on_tx_frame_failed_(s.seq);
+        }
         s.active = false;
         tx_in_flight_--;
         if (on_send_complete_) {
@@ -1260,6 +1276,7 @@ bool SelectiveRepeatARQ::sendDataRepair(size_t slot, uint32_t missing_bitmap) {
 }
 
 void SelectiveRepeatARQ::advanceTXWindow() {
+    const uint16_t base_before = tx_base_seq_;
     while (tx_in_flight_ > 0) {
         size_t slot = seqToSlot(tx_base_seq_);
         if (tx_window_[slot].active && !tx_window_[slot].acked) {
@@ -1282,6 +1299,13 @@ void SelectiveRepeatARQ::advanceTXWindow() {
             }
         }
         tx_base_seq_ = (tx_base_seq_ + 1) & 0xFFFF;
+    }
+    notifyTXBaseAdvanced(base_before);
+}
+
+void SelectiveRepeatARQ::notifyTXBaseAdvanced(uint16_t base_before) {
+    if (tx_base_seq_ != base_before && on_tx_base_advanced_) {
+        on_tx_base_advanced_(tx_base_seq_);
     }
 }
 

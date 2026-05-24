@@ -10,25 +10,6 @@ namespace gui {
 
 namespace v2 = protocol::v2;
 
-namespace {
-// A decoded DATA payload is shown in the operator message log only if it is
-// actual readable text. payloadAsText() returns the RAW bytes, so file-transfer
-// DATA chunks are non-empty *binary* and would otherwise render as blank
-// `[MESSAGE] ""` lines (one per frame during a transfer). Treat a payload as
-// text iff every byte is printable (>= 0x20, excluding DEL) or common
-// whitespace; a random binary chunk reliably contains control bytes and is
-// rejected, while ASCII/UTF-8 messages pass.
-bool isReadableTextPayload(const std::string& s) {
-    if (s.empty()) return false;
-    for (unsigned char c : s) {
-        const bool printable = (c >= 0x20 && c != 0x7F);
-        const bool whitespace = (c == '\t' || c == '\n' || c == '\r');
-        if (!printable && !whitespace) return false;
-    }
-    return true;
-}
-}  // namespace
-
 // ============================================================================
 // FRAME DELIVERY AND NOTIFICATION
 // ============================================================================
@@ -111,14 +92,12 @@ void ModemEngine::notifyFrameParsed(const Bytes& frame_data, protocol::v2::Frame
         if (!msg.empty() && data_callback_) {
             data_callback_(msg);
         }
-        // Only DISPLAY a [MESSAGE] line for readable text. payloadAsText()
-        // returns raw bytes, so file-transfer DATA chunks are non-empty BINARY
-        // and a plain !empty() check (the earlier fix) still flooded the log with
-        // blank `[MESSAGE] ""` lines. Gate the display on printability instead;
-        // file data is surfaced via the [FILE] progress line, not as messages.
-        if (isReadableTextPayload(msg)) {
-            status_callback_("[MESSAGE] \"" + msg + "\"");
-        }
+        return;
+    }
+
+    if (frame_type == v2::FrameType::ACK ||
+        frame_type == v2::FrameType::NACK ||
+        type_str == "FRAME") {
         return;
     }
 

@@ -76,6 +76,10 @@ bool isFinalDataFrame(const Bytes& frame_data) {
            ((frame_data[3] & v2::Flags::FINAL) != 0);
 }
 
+bool seqBefore(uint16_t a, uint16_t b) {
+    return a != b && static_cast<uint16_t>(b - a) < 0x8000;
+}
+
 int statDelta(int now, int before) {
     return std::max(0, now - before);
 }
@@ -206,6 +210,15 @@ Connection::Connection(const ConnectionConfig& config)
     arq_.setReceiveWindowAdvancedCallback([this](uint16_t base_seq, size_t window_size) {
         soft_combine_harq_.retainOnlySeqWindow(base_seq, window_size);
     });
+    arq_.setTxFrameSubmittedCallback([this](uint16_t seq) {
+        handleArqFrameSubmitted(seq);
+    });
+    arq_.setTxBaseAdvancedCallback([this](uint16_t base_seq) {
+        handleArqTxBaseAdvanced(base_seq);
+    });
+    arq_.setTxFrameFailedCallback([this](uint16_t seq) {
+        handleArqFrameFailed(seq);
+    });
     arq_.setTurnRequestCallback([this]() {
         return shouldRequestDataTurnOnAck();
     });
@@ -230,6 +243,7 @@ Connection::Connection(const ConnectionConfig& config)
                 pending_tx_fragments_.clear();
                 pending_tx_fragment_flags_.clear();
                 pending_tx_fragment_types_.clear();
+                pending_tx_fragment_message_tokens_.clear();
                 next_fragment_idx_ = 0;
                 acked_fragment_count_ = 0;
                 if (on_message_sent_) {
@@ -254,6 +268,7 @@ Connection::Connection(const ConnectionConfig& config)
                     pending_tx_fragments_.clear();
                     pending_tx_fragment_flags_.clear();
                     pending_tx_fragment_types_.clear();
+                    pending_tx_fragment_message_tokens_.clear();
                     next_fragment_idx_ = 0;
                     acked_fragment_count_ = 0;
                     if (on_message_sent_) {
@@ -487,8 +502,10 @@ void Connection::abortTxNow() {
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
     pending_tx_fragment_types_.clear();
+    pending_tx_fragment_message_tokens_.clear();
     next_fragment_idx_ = 0;
     acked_fragment_count_ = 0;
+    clearOutboundMessageTracking();
     burst_mode_active_ = false;
     burst_tx_buffer_.clear();
     arq_callback_defer_refill_ = false;
@@ -581,18 +598,186 @@ bool Connection::sendBinary(const Bytes& data) {
     return sendPayload(data, true);
 }
 
+uint64_t Connection::createOutboundMessageRecord(const Bytes& data) {
+    if (data.empty()) {
+        return 0;
+    }
+
+    OutboundMessageTxRecord record;
+    record.token = next_outbound_message_token_++;
+    if (next_outbound_message_token_ == 0) {
+        next_outbound_message_token_ = 1;
+    }
+    record.text.assign(data.begin(), data.end());
+    outbound_message_tx_records_.push_back(std::move(record));
+    return outbound_message_tx_records_.back().token;
+}
+
+void Connection::setOutboundMessageExpectedFragments(uint64_t token, size_t fragments) {
+    if (token == 0) {
+        return;
+    }
+    for (auto& record : outbound_message_tx_records_) {
+        if (record.token == token) {
+            record.expected_fragments = fragments;
+            return;
+        }
+    }
+}
+
+void Connection::dropOutboundMessageRecord(uint64_t token) {
+    if (token == 0) {
+        return;
+    }
+    outbound_message_tx_records_.erase(
+        std::remove_if(outbound_message_tx_records_.begin(),
+                       outbound_message_tx_records_.end(),
+                       [token](const OutboundMessageTxRecord& record) {
+                           return record.token == token;
+                       }),
+        outbound_message_tx_records_.end());
+}
+
+void Connection::clearOutboundMessageTracking() {
+    outbound_message_tx_records_.clear();
+    pending_tx_fragment_message_tokens_.clear();
+    arq_submit_message_token_ = 0;
+}
+
+bool Connection::sendArqPayloadFrame(const Bytes& chunk,
+                                     v2::FrameType frame_type,
+                                     uint8_t flags,
+                                     bool fixed_frame,
+                                     uint64_t message_token) {
+    arq_submit_message_token_ = message_token;
+    const bool sent = fixed_frame
+        ? arq_.sendFixedDataWithTypeAndFlags(chunk, frame_type, flags)
+        : arq_.sendDataWithTypeAndFlags(chunk, frame_type, flags);
+    arq_submit_message_token_ = 0;
+    return sent;
+}
+
+void Connection::emitMessageTxStatus(OutboundMessageTxRecord& record,
+                                     MessageTxStatus status) {
+    if (!on_message_tx_status_) {
+        return;
+    }
+
+    MessageTxStatusEvent event;
+    event.status = status;
+    event.first_seq = record.first_seq;
+    event.last_seq = record.last_seq;
+    event.remote_call = remote_call_;
+    event.text = record.text;
+    if (record.first_seq_valid) {
+        const auto now = std::chrono::steady_clock::now();
+        event.elapsed_ms = static_cast<uint32_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - record.submitted_at).count());
+    }
+    on_message_tx_status_(event);
+}
+
+void Connection::handleArqFrameSubmitted(uint16_t seq) {
+    const uint64_t token = arq_submit_message_token_;
+    if (token == 0) {
+        return;
+    }
+
+    for (auto& record : outbound_message_tx_records_) {
+        if (record.token != token || record.terminal_reported) {
+            continue;
+        }
+        if (!record.first_seq_valid) {
+            record.first_seq = seq;
+            record.first_seq_valid = true;
+            record.submitted_at = std::chrono::steady_clock::now();
+        }
+        record.last_seq = seq;
+        record.assigned_fragments++;
+        if (!record.submitted_reported) {
+            record.submitted_reported = true;
+            emitMessageTxStatus(record, MessageTxStatus::SUBMITTED);
+        }
+        if (record.expected_fragments != 0 &&
+            record.assigned_fragments >= record.expected_fragments) {
+            LOG_MODEM(INFO,
+                      "Connection: Message TX #%u spans seq=%u..%u (%zu frame%s, %zu bytes)",
+                      record.first_seq,
+                      record.first_seq,
+                      record.last_seq,
+                      record.assigned_fragments,
+                      record.assigned_fragments == 1 ? "" : "s",
+                      record.text.size());
+        }
+        return;
+    }
+}
+
+void Connection::handleArqTxBaseAdvanced(uint16_t base_seq) {
+    for (auto& record : outbound_message_tx_records_) {
+        if (record.terminal_reported ||
+            !record.first_seq_valid ||
+            record.assigned_fragments < record.expected_fragments) {
+            continue;
+        }
+        if (seqBefore(record.last_seq, base_seq)) {
+            record.terminal_reported = true;
+            emitMessageTxStatus(record, MessageTxStatus::DELIVERED);
+        }
+    }
+
+    outbound_message_tx_records_.erase(
+        std::remove_if(outbound_message_tx_records_.begin(),
+                       outbound_message_tx_records_.end(),
+                       [](const OutboundMessageTxRecord& record) {
+                           return record.terminal_reported;
+                       }),
+        outbound_message_tx_records_.end());
+}
+
+void Connection::handleArqFrameFailed(uint16_t seq) {
+    for (auto& record : outbound_message_tx_records_) {
+        if (record.terminal_reported ||
+            !record.first_seq_valid ||
+            record.assigned_fragments == 0) {
+            continue;
+        }
+        const bool in_record =
+            seq == record.first_seq ||
+            seq == record.last_seq ||
+            (seqBefore(record.first_seq, seq) && seqBefore(seq, record.last_seq));
+        if (!in_record) {
+            continue;
+        }
+        record.terminal_reported = true;
+        emitMessageTxStatus(record, MessageTxStatus::FAILED);
+        break;
+    }
+
+    outbound_message_tx_records_.erase(
+        std::remove_if(outbound_message_tx_records_.begin(),
+                       outbound_message_tx_records_.end(),
+                       [](const OutboundMessageTxRecord& record) {
+                           return record.terminal_reported;
+                       }),
+        outbound_message_tx_records_.end());
+}
+
 bool Connection::sendPayload(const Bytes& data, bool binary_payload) {
     if (state_ != ConnectionState::CONNECTED) {
         LOG_MODEM(WARN, "Connection: Cannot send, not connected");
         return false;
     }
 
+    const uint64_t message_token = binary_payload ? 0 : createOutboundMessageRecord(data);
     if (shouldQueuePayloadForLinkTurn()) {
         if (queued_payloads_.size() >= kMaxQueuedPayloads) {
+            dropOutboundMessageRecord(queued_payloads_.front().message_token);
             queued_payloads_.pop_front();
             LOG_MODEM(WARN, "Connection: Queued payload limit reached, dropping oldest deferred payload");
         }
-        queued_payloads_.push_back(QueuedPayload{data, binary_payload});
+        queued_payloads_.push_back(QueuedPayload{data, binary_payload, message_token});
         LOG_MODEM(INFO,
                   "Connection: Queued %zu byte %s until local ISS DATA turn (depth=%zu, local_turn=%d, peer_request=%d)",
                   data.size(), binary_payload ? "binary payload" : "message",
@@ -602,7 +787,11 @@ bool Connection::sendPayload(const Bytes& data, bool binary_payload) {
         return true;
     }
 
-    return startPayloadNow(data, binary_payload);
+    const bool started = startPayloadNow(data, binary_payload, message_token);
+    if (!started) {
+        dropOutboundMessageRecord(message_token);
+    }
+    return started;
 }
 
 bool Connection::hasLocalOutboundDataTurn() const {
@@ -763,7 +952,7 @@ bool Connection::maybeYieldDataTurn() {
     return true;
 }
 
-bool Connection::startPayloadNow(const Bytes& data, bool binary_payload) {
+bool Connection::startPayloadNow(const Bytes& data, bool binary_payload, uint64_t message_token) {
     if (state_ != ConnectionState::CONNECTED) {
         LOG_MODEM(WARN, "Connection: Cannot send, not connected");
         return false;
@@ -780,11 +969,15 @@ bool Connection::startPayloadNow(const Bytes& data, bool binary_payload) {
     };
 
     if (!is_ofdm && !bounded_variable_mc_dpsk) {
+        setOutboundMessageExpectedFragments(message_token, 1);
         if (binary_payload) {
             return markPayloadStarted(
-                arq_.sendDataWithTypeAndFlags(data, v2::FrameType::DATA_END, v2::Flags::NONE));
+                sendArqPayloadFrame(data, v2::FrameType::DATA_END, v2::Flags::NONE,
+                                    false, message_token));
         }
-        return markPayloadStarted(arq_.sendData(data));
+        return markPayloadStarted(
+            sendArqPayloadFrame(data, v2::FrameType::DATA, v2::Flags::NONE,
+                                false, message_token));
     }
 
     if (capacity == 0) {
@@ -793,15 +986,18 @@ bool Connection::startPayloadNow(const Bytes& data, bool binary_payload) {
     }
 
     if (data.size() <= capacity) {
+        setOutboundMessageExpectedFragments(message_token, 1);
         if (binary_payload) {
             return markPayloadStarted(
                 is_ofdm
-                    ? arq_.sendFixedDataWithTypeAndFlags(data, v2::FrameType::DATA_END, v2::Flags::FINAL)
-                    : arq_.sendDataWithTypeAndFlags(data, v2::FrameType::DATA_END, v2::Flags::FINAL));
+                    ? sendArqPayloadFrame(data, v2::FrameType::DATA_END, v2::Flags::FINAL,
+                                          true, message_token)
+                    : sendArqPayloadFrame(data, v2::FrameType::DATA_END, v2::Flags::FINAL,
+                                          false, message_token));
         }
         return markPayloadStarted(
-            is_ofdm ? arq_.sendFixedDataWithFlags(data, v2::Flags::FINAL)
-                    : arq_.sendDataWithFlags(data, v2::Flags::FINAL));
+            sendArqPayloadFrame(data, v2::FrameType::DATA, v2::Flags::FINAL,
+                                is_ofdm, message_token));
     }
 
     // Fragment the message into chunks that fit in one frame each
@@ -811,6 +1007,7 @@ bool Connection::startPayloadNow(const Bytes& data, bool binary_payload) {
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
     pending_tx_fragment_types_.clear();
+    pending_tx_fragment_message_tokens_.clear();
     next_fragment_idx_ = 0;
     acked_fragment_count_ = 0;
 
@@ -827,7 +1024,9 @@ bool Connection::startPayloadNow(const Bytes& data, bool binary_payload) {
         const bool last = (offset + chunk_size >= data.size());
         pending_tx_fragment_flags_.push_back(
             last ? v2::Flags::FINAL : v2::Flags::MORE_FRAG);
+        pending_tx_fragment_message_tokens_.push_back(message_token);
     }
+    setOutboundMessageExpectedFragments(message_token, pending_tx_fragments_.size());
 
     LOG_MODEM(INFO, "Connection: Split into %zu fragments", pending_tx_fragments_.size());
 
@@ -941,7 +1140,7 @@ void Connection::sendNextQueuedPayloadIfReady() {
     LOG_MODEM(INFO,
               "Connection: Sending deferred half-duplex payload (%zu bytes, remaining=%zu)",
               payload.data.size(), queued_payloads_.size());
-    startPayloadNow(payload.data, payload.binary_payload);
+    startPayloadNow(payload.data, payload.binary_payload, payload.message_token);
 }
 
 bool Connection::sendMessages(const std::vector<std::string>& texts) {
@@ -951,12 +1150,14 @@ bool Connection::sendMessages(const std::vector<std::string>& texts) {
     }
     if (shouldQueuePayloadForLinkTurn()) {
         for (const auto& text : texts) {
+            Bytes data(text.begin(), text.end());
+            const uint64_t message_token = createOutboundMessageRecord(data);
             if (queued_payloads_.size() >= kMaxQueuedPayloads) {
+                dropOutboundMessageRecord(queued_payloads_.front().message_token);
                 queued_payloads_.pop_front();
                 LOG_MODEM(WARN, "Connection: Queued payload limit reached, dropping oldest deferred message");
             }
-            queued_payloads_.push_back(
-                QueuedPayload{Bytes(text.begin(), text.end()), false});
+            queued_payloads_.push_back(QueuedPayload{data, false, message_token});
         }
         LOG_MODEM(INFO,
                   "Connection: Queued %zu-message batch until local ISS DATA turn (depth=%zu)",
@@ -973,16 +1174,21 @@ bool Connection::sendMessages(const std::vector<std::string>& texts) {
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
     pending_tx_fragment_types_.clear();
+    pending_tx_fragment_message_tokens_.clear();
     next_fragment_idx_ = 0;
     acked_fragment_count_ = 0;
 
     for (const auto& text : texts) {
         Bytes data(text.begin(), text.end());
+        const uint64_t message_token = createOutboundMessageRecord(data);
+        size_t frames_for_message = 0;
 
         if (data.size() <= capacity) {
             // Single frame — no MORE_FRAG
             pending_tx_fragments_.push_back(data);
             pending_tx_fragment_flags_.push_back(v2::Flags::NONE);
+            pending_tx_fragment_message_tokens_.push_back(message_token);
+            frames_for_message = 1;
         } else {
             // Fragment this message
             for (size_t offset = 0; offset < data.size(); offset += capacity) {
@@ -992,8 +1198,11 @@ bool Connection::sendMessages(const std::vector<std::string>& texts) {
                 pending_tx_fragments_.push_back(chunk);
                 pending_tx_fragment_flags_.push_back(
                     is_last ? v2::Flags::NONE : v2::Flags::MORE_FRAG);
+                pending_tx_fragment_message_tokens_.push_back(message_token);
+                frames_for_message++;
             }
         }
+        setOutboundMessageExpectedFragments(message_token, frames_for_message);
     }
 
     if (!pending_tx_fragment_flags_.empty()) {
@@ -1259,17 +1468,17 @@ void Connection::sendNextFragment() {
         if (next_fragment_idx_ < pending_tx_fragment_types_.size()) {
             frame_type = pending_tx_fragment_types_[next_fragment_idx_];
         }
+        uint64_t message_token = 0;
+        if (next_fragment_idx_ < pending_tx_fragment_message_tokens_.size()) {
+            message_token = pending_tx_fragment_message_tokens_[next_fragment_idx_];
+        }
 
         LOG_MODEM(DEBUG, "Connection: Sending fragment %zu/%zu (%zu bytes, type=%s, flags=0x%02X)",
                   next_fragment_idx_ + 1, pending_tx_fragments_.size(), chunk.size(),
                   v2::frameTypeToString(frame_type), flags);
 
         bool sent = false;
-        if (is_ofdm) {
-            sent = arq_.sendFixedDataWithTypeAndFlags(chunk, frame_type, flags);
-        } else {
-            sent = arq_.sendDataWithTypeAndFlags(chunk, frame_type, flags);
-        }
+        sent = sendArqPayloadFrame(chunk, frame_type, flags, is_ofdm, message_token);
         if (sent) {
             noteDataTurnPayloadStarted(chunk.size());
         }
@@ -2501,9 +2710,11 @@ void Connection::enterDisconnected(const std::string& reason) {
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
     pending_tx_fragment_types_.clear();
+    pending_tx_fragment_message_tokens_.clear();
     next_fragment_idx_ = 0;
     acked_fragment_count_ = 0;
     rx_reassembly_buffer_.clear();
+    clearOutboundMessageTracking();
 
     // Reset connect waveform to DPSK for next connection attempt
     connect_waveform_ = WaveformMode::MC_DPSK;
@@ -2613,6 +2824,10 @@ void Connection::setMessageReceivedCallback(MessageReceivedCallback cb) {
 
 void Connection::setMessageSentCallback(MessageSentCallback cb) {
     on_message_sent_ = std::move(cb);
+}
+
+void Connection::setMessageTxStatusCallback(MessageTxStatusCallback cb) {
+    on_message_tx_status_ = std::move(cb);
 }
 
 void Connection::setIncomingCallCallback(IncomingCallCallback cb) {
@@ -2727,9 +2942,11 @@ void Connection::reset() {
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
     pending_tx_fragment_types_.clear();
+    pending_tx_fragment_message_tokens_.clear();
     next_fragment_idx_ = 0;
     acked_fragment_count_ = 0;
     rx_reassembly_buffer_.clear();
+    clearOutboundMessageTracking();
     LOG_MODEM(DEBUG, "Connection: Full reset");
 }
 

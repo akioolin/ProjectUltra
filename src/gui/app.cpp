@@ -12,6 +12,7 @@
 #include <cstring>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <cstdarg>
 #include <chrono>
@@ -21,6 +22,7 @@
 #include <deque>
 #include <vector>
 #include <utility>
+#include <thread>
 #include <sys/stat.h>
 
 #ifdef _WIN32
@@ -41,6 +43,75 @@ using ultra::otasim_client::OtaAudioStatus;
 static bool isInQsoDataFrame(const Bytes& frame) {
     auto header = protocol::v2::parseHeader(frame);
     return header.valid && protocol::v2::isDataFrame(header.type);
+}
+
+static bool hasOperatorTimestampPrefix(const std::string& msg) {
+    return msg.size() >= 11 &&
+           msg[0] == '[' &&
+           std::isdigit(static_cast<unsigned char>(msg[1])) &&
+           std::isdigit(static_cast<unsigned char>(msg[2])) &&
+           msg[3] == ':' &&
+           std::isdigit(static_cast<unsigned char>(msg[4])) &&
+           std::isdigit(static_cast<unsigned char>(msg[5])) &&
+           msg[6] == ':' &&
+           std::isdigit(static_cast<unsigned char>(msg[7])) &&
+           std::isdigit(static_cast<unsigned char>(msg[8])) &&
+           msg[9] == ']' &&
+           msg[10] == ' ';
+}
+
+static std::string timestampOperatorLine(const std::string& msg) {
+    if (hasOperatorTimestampPrefix(msg)) {
+        return msg;
+    }
+
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+    std::tm local_tm{};
+#ifdef _WIN32
+    localtime_s(&local_tm, &now_time);
+#else
+    localtime_r(&now_time, &local_tm);
+#endif
+    char prefix[16];
+    std::strftime(prefix, sizeof(prefix), "[%H:%M:%S] ", &local_tm);
+    return std::string(prefix) + msg;
+}
+
+static size_t operatorLineBodyOffset(const std::string& msg) {
+    return hasOperatorTimestampPrefix(msg) ? 11u : 0u;
+}
+
+static bool operatorLineStartsWith(const std::string& msg, const char* prefix) {
+    const size_t offset = operatorLineBodyOffset(msg);
+    const size_t len = std::strlen(prefix);
+    return msg.size() >= offset + len &&
+           msg.compare(offset, len, prefix) == 0;
+}
+
+static bool envFlagEnabled(const char* name) {
+    const char* value = std::getenv(name);
+    if (!value || value[0] == '\0') {
+        return false;
+    }
+    return std::strcmp(value, "0") != 0 &&
+           std::strcmp(value, "false") != 0 &&
+           std::strcmp(value, "FALSE") != 0 &&
+           std::strcmp(value, "off") != 0 &&
+           std::strcmp(value, "OFF") != 0;
+}
+
+static uint32_t envUInt(const char* name, uint32_t fallback) {
+    const char* value = std::getenv(name);
+    if (!value || value[0] == '\0') {
+        return fallback;
+    }
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    if (end == value) {
+        return fallback;
+    }
+    return static_cast<uint32_t>(std::min<unsigned long>(parsed, 1000000ul));
 }
 
 // File logger for GUI debugging - writes to logs/gui.log next to binary
@@ -362,6 +433,25 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                options_.auto_cancel_file_after_sec,
                options_.auto_disconnect_after_sec, options_.exit_after_sec);
     }
+    operator_log_file_suppressed_ = envFlagEnabled("ULTRA_GUI_OPERATOR_LOG_SUPPRESS");
+    operator_log_slow_ms_ = envUInt("ULTRA_GUI_OPERATOR_LOG_SLOW_MS", 0);
+    operator_event_drain_limit_ =
+        static_cast<size_t>(envUInt("ULTRA_GUI_OPERATOR_EVENT_DRAIN_LIMIT", 128));
+    operator_event_queue_limit_ = std::clamp<size_t>(
+        static_cast<size_t>(envUInt("ULTRA_GUI_OPERATOR_EVENT_QUEUE_LIMIT",
+                                    static_cast<uint32_t>(MAX_OPERATOR_EVENTS))),
+        1,
+        MAX_OPERATOR_EVENTS);
+    if (operator_log_file_suppressed_ || operator_log_slow_ms_ > 0 ||
+        operator_event_drain_limit_ != 128 ||
+        operator_event_queue_limit_ != MAX_OPERATOR_EVENTS) {
+        guiLog("OPERATOR_EVENT_QUEUE mode: suppress_file=%d slow_ms=%u drain_limit=%zu limit=%zu max=%zu",
+               operator_log_file_suppressed_ ? 1 : 0,
+               operator_log_slow_ms_,
+               operator_event_drain_limit_,
+               operator_event_queue_limit_,
+               MAX_OPERATOR_EVENTS);
+    }
     // Load persistent settings
     ultra::gui::startupTrace("App", "settings-load-enter");
     settings_.load();
@@ -438,15 +528,6 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     ultra::gui::startupTrace("App", "set-raw-callback-enter");
     modem_.setRawDataCallback([this](const Bytes& data) {
         auto modem_stats = modem_.getStats();
-        const auto operator_snr = selectOperatorSNRDisplay(modem_stats);
-        if (operator_snr.valid) {
-            guiLog("Our modem decoded %zu bytes; operator_snr=%.1f dB (%s)",
-                   data.size(), operator_snr.snr_db,
-                   snrSourceToString(operator_snr.source));
-        } else {
-            guiLog("Our modem decoded %zu bytes; operator_snr=-- dB (none)",
-                   data.size());
-        }
         // Monitor mode: surface every decoded frame's payload in the
         // RX log regardless of addressing. The protocol layer would
         // otherwise drop frames whose dst hash doesn't match local
@@ -500,7 +581,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     // Set up status callback to show codeword progress in RX log
     ultra::gui::startupTrace("App", "set-status-callback-enter");
     modem_.setStatusCallback([this](const std::string& status) {
-        appendRxLogLine(status);
+        enqueueOperatorLogLine(status);
     });
     ultra::gui::startupTrace("App", "set-status-callback-exit");
 
@@ -591,9 +672,10 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         if (text.empty()) {
             return;
         }
-        // Received a message via ARQ
-        std::string msg = "[RX " + from + "] " + text;
-        appendRxLogLine(msg);
+        enqueueMessageReceived(from, text);
+    });
+    protocol_.setMessageTxStatusCallback([this](const protocol::ProtocolEngine::MessageTxStatusEvent& event) {
+        enqueueMessageTxStatus(event);
     });
     ultra::gui::startupTrace("App", "protocol-callbacks-mid2");
 
@@ -861,7 +943,6 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                          snr_db, peer_fading, modulationToString(mod), codeRateToString(rate));
             }
 
-            guiLog("%s", adpt_buf);
             appendRxLogLine(adpt_buf);
         }
     });
@@ -1197,6 +1278,9 @@ App::~App() {
 
     stopOtaAudio();
 
+    drainOperatorEvents(true);
+    logOperatorEventStats("shutdown");
+
     settings_.save();
     audio_.shutdown();
 
@@ -1409,17 +1493,160 @@ void App::initAudio() {
     ultra::gui::startupTrace("App", "initAudio-exit");
 }
 
+void App::enqueueOperatorEvent(OperatorEvent event) {
+    std::unique_lock<std::mutex> lock(operator_event_mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        operator_events_dropped_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    if (operator_event_queue_.size() >= operator_event_queue_limit_) {
+        operator_event_queue_.pop_front();
+        operator_events_dropped_.fetch_add(1, std::memory_order_relaxed);
+    }
+    operator_event_queue_.push_back(std::move(event));
+}
+
+void App::enqueueOperatorLogLine(std::string line) {
+    operator_events_log_lines_.fetch_add(1, std::memory_order_relaxed);
+    OperatorEvent event;
+    event.kind = OperatorEventKind::LogLine;
+    event.line = std::move(line);
+    enqueueOperatorEvent(std::move(event));
+}
+
+void App::enqueueMessageReceived(std::string from, std::string text) {
+    operator_events_rx_messages_.fetch_add(1, std::memory_order_relaxed);
+    OperatorEvent event;
+    event.kind = OperatorEventKind::MessageReceived;
+    event.from = std::move(from);
+    event.text = std::move(text);
+    enqueueOperatorEvent(std::move(event));
+}
+
+void App::enqueueMessageTxStatus(protocol::ProtocolEngine::MessageTxStatusEvent event_status) {
+    switch (event_status.status) {
+        case protocol::ProtocolEngine::MessageTxStatus::SUBMITTED:
+            operator_events_tx_submitted_.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case protocol::ProtocolEngine::MessageTxStatus::DELIVERED:
+            operator_events_tx_delivered_.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case protocol::ProtocolEngine::MessageTxStatus::FAILED:
+            operator_events_tx_failed_.fetch_add(1, std::memory_order_relaxed);
+            break;
+    }
+    OperatorEvent event;
+    event.kind = OperatorEventKind::MessageTxStatus;
+    event.tx_status = std::move(event_status);
+    enqueueOperatorEvent(std::move(event));
+}
+
 void App::appendRxLogLine(const std::string& msg) {
-    std::lock_guard<std::mutex> lock(rx_log_mutex_);
-    rx_log_.push_back(msg);
-    while (rx_log_.size() > MAX_RX_LOG) {
-        rx_log_.pop_front();
+    enqueueOperatorLogLine(msg);
+}
+
+void App::appendRxLogLineNow(const std::string& msg) {
+    const std::string line = timestampOperatorLine(msg);
+    {
+        std::lock_guard<std::mutex> lock(rx_log_mutex_);
+        rx_log_.push_back(line);
+        while (rx_log_.size() > MAX_RX_LOG) {
+            rx_log_.pop_front();
+        }
     }
     // Mirror every operator-visible Message Log line into the GUI log file so
     // the log file is a strict superset of the on-screen message box. Without
     // this, lines like [MESSAGE], [FILE], [RX ...] and status notifications
     // appeared only in the UI and were never written to disk.
-    guiLog("%s", msg.c_str());
+    if (!operator_log_file_suppressed_) {
+        guiLog("%s", line.c_str());
+    }
+}
+
+void App::drainOperatorEvents(bool flush_all) {
+    const size_t drain_limit = flush_all
+        ? static_cast<size_t>(-1)
+        : operator_event_drain_limit_;
+    if (drain_limit == 0) {
+        return;
+    }
+
+    std::deque<OperatorEvent> batch;
+    {
+        std::lock_guard<std::mutex> lock(operator_event_mutex_);
+        const size_t count = std::min(drain_limit, operator_event_queue_.size());
+        for (size_t i = 0; i < count; ++i) {
+            batch.push_back(std::move(operator_event_queue_.front()));
+            operator_event_queue_.pop_front();
+        }
+    }
+
+    for (const auto& event : batch) {
+        switch (event.kind) {
+            case OperatorEventKind::LogLine:
+                appendRxLogLineNow(event.line);
+                break;
+            case OperatorEventKind::MessageReceived:
+                appendRxLogLineNow("[RX " + event.from + "] " + event.text);
+                break;
+            case OperatorEventKind::MessageTxStatus:
+                switch (event.tx_status.status) {
+                    case protocol::ProtocolEngine::MessageTxStatus::SUBMITTED:
+                        appendRxLogLineNow("TX #" + std::to_string(event.tx_status.first_seq) +
+                                           " -> " +
+                                           (event.tx_status.remote_call.empty()
+                                                ? std::string("peer")
+                                                : event.tx_status.remote_call) +
+                                           ": " + event.tx_status.text);
+                        break;
+                    case protocol::ProtocolEngine::MessageTxStatus::DELIVERED: {
+                        char line[96];
+                        snprintf(line, sizeof(line), "OK #%u delivered (%.1fs)",
+                                 event.tx_status.first_seq,
+                                 event.tx_status.elapsed_ms / 1000.0);
+                        appendRxLogLineNow(line);
+                        break;
+                    }
+                    case protocol::ProtocolEngine::MessageTxStatus::FAILED: {
+                        char line[96];
+                        snprintf(line, sizeof(line), "FAIL #%u failed (max retries)",
+                                 event.tx_status.first_seq);
+                        appendRxLogLineNow(line);
+                        break;
+                    }
+                }
+                break;
+        }
+
+        if (operator_log_slow_ms_ > 0 && !flush_all) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(operator_log_slow_ms_));
+        }
+    }
+}
+
+void App::logOperatorEventStats(const char* reason) {
+    uint64_t queued = 0;
+    {
+        std::lock_guard<std::mutex> lock(operator_event_mutex_);
+        queued = operator_event_queue_.size();
+    }
+    guiLog("OPERATOR_EVENT_STATS reason=%s log_lines=%llu rx_messages=%llu tx_submitted=%llu "
+           "tx_delivered=%llu tx_failed=%llu dropped=%llu queued=%llu suppress_file=%d "
+           "slow_ms=%u drain_limit=%zu queue_limit=%zu max=%zu",
+           reason ? reason : "n/a",
+           static_cast<unsigned long long>(operator_events_log_lines_.load(std::memory_order_relaxed)),
+           static_cast<unsigned long long>(operator_events_rx_messages_.load(std::memory_order_relaxed)),
+           static_cast<unsigned long long>(operator_events_tx_submitted_.load(std::memory_order_relaxed)),
+           static_cast<unsigned long long>(operator_events_tx_delivered_.load(std::memory_order_relaxed)),
+           static_cast<unsigned long long>(operator_events_tx_failed_.load(std::memory_order_relaxed)),
+           static_cast<unsigned long long>(operator_events_dropped_.load(std::memory_order_relaxed)),
+           static_cast<unsigned long long>(queued),
+           operator_log_file_suppressed_ ? 1 : 0,
+           operator_log_slow_ms_,
+           operator_event_drain_limit_,
+           operator_event_queue_limit_,
+           MAX_OPERATOR_EVENTS);
 }
 
 bool App::startFileSend(const std::string& file_path, const std::string& success_log) {
@@ -1843,7 +2070,6 @@ void App::updateAdaptiveAdvisory(float snr_db, float fading_index, SNRSource snr
              modulationToString(eval_mod), codeRateToString(eval_rate),
              modulationToString(rec_mod), codeRateToString(rec_rate));
 
-    guiLog("%s", msg);
     appendRxLogLine(msg);
 
     adapt_virtual_mod_ = rec_mod;
@@ -1995,6 +2221,11 @@ void App::render() {
 
     // Scenario scripting: drive the real connect/accept/send actions.
     tickScenario();
+
+    // Drain bounded modem/protocol UI events on the GUI thread after protocol
+    // work for this frame. Formatting and log-file flushes happen here, never
+    // on the RX decode / ARQ callback path.
+    drainOperatorEvents();
 
     // Create main window
     if (first_render) {
@@ -2548,8 +2779,6 @@ void App::tickScenario() {
                         appendRxLogLine("[INFO] Message queued - file transfer in progress, will send after.");
                     } else if (!ready_now) {
                         appendRxLogLine("[INFO] Message queued - waiting for DATA turn.");
-                    } else {
-                        appendRxLogLine("[TX] " + msg);
                     }
                 }
                 scenario_message_sent_ = true;
@@ -3611,14 +3840,19 @@ void App::renderOperateTab() {
         ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 2.0f;
     for (const auto& msg : rx_log_snapshot) {
         ImVec4 color(0.7f, 0.7f, 0.7f, 1.0f);
-        if (msg.size() >= 4 && msg.substr(0, 4) == "[TX]") {
-            color = ImVec4(0.5f, 0.8f, 1.0f, 1.0f);
-        } else if (msg.size() >= 3 && msg.substr(0, 3) == "[RX") {
-            color = ImVec4(0.5f, 1.0f, 0.5f, 1.0f);
-        } else if ((msg.size() >= 4 && msg.substr(0, 4) == "[SIM") ||
-                   (msg.size() >= 8 && msg.substr(0, 8) == "[OTASIM")) {
+        if (operatorLineStartsWith(msg, "TX #") ||
+            operatorLineStartsWith(msg, "[TX]")) {
+            color = ImVec4(0.35f, 0.95f, 0.45f, 1.0f);
+        } else if (operatorLineStartsWith(msg, "OK #")) {
+            color = ImVec4(0.35f, 0.65f, 1.0f, 1.0f);
+        } else if (operatorLineStartsWith(msg, "FAIL #")) {
+            color = ImVec4(1.0f, 0.35f, 0.2f, 1.0f);
+        } else if (operatorLineStartsWith(msg, "[RX")) {
+            color = ImVec4(0.35f, 0.95f, 0.95f, 1.0f);
+        } else if (operatorLineStartsWith(msg, "[SIM") ||
+                   operatorLineStartsWith(msg, "[OTASIM")) {
             color = ImVec4(1.0f, 0.8f, 0.3f, 1.0f);
-        } else if (msg.size() >= 4 && msg.substr(0, 4) == "[SYS") {
+        } else if (operatorLineStartsWith(msg, "[SYS")) {
             color = ImVec4(0.8f, 0.8f, 0.8f, 1.0f);
         } else if (msg.find("[FAILED]") != std::string::npos) {
             color = ImVec4(1.0f, 0.4f, 0.4f, 1.0f);
@@ -3724,8 +3958,6 @@ void App::renderOperateTab() {
                 appendRxLogLine("[INFO] Message queued - file transfer in progress, will send after.");
             } else if (!ready_now) {
                 appendRxLogLine("[INFO] Message queued - waiting for DATA turn.");
-            } else {
-                appendRxLogLine("[TX] " + text);
             }
             tx_text_buffer_[0] = '\0';
         }

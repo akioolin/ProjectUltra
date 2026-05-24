@@ -456,6 +456,92 @@ bool test_data_transfer() {
     return true;
 }
 
+bool test_message_tx_status_callbacks() {
+    TEST("Message TX status uses ARQ sequence IDs and cumulative ACK delivery");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+
+    ProtocolEngine stationA(config);
+    ProtocolEngine stationB(config);
+
+    stationA.setLocalCallsign("W1ABC");
+    stationB.setLocalCallsign("K2DEF");
+
+    std::vector<ProtocolEngine::MessageTxStatusEvent> tx_events;
+    std::vector<std::string> received_at_b;
+
+    stationA.setMessageTxStatusCallback(
+        [&](const ProtocolEngine::MessageTxStatusEvent& event) {
+            tx_events.push_back(event);
+        });
+    stationB.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
+        received_at_b.push_back(text);
+    });
+
+    SimulatedChannel channel(stationA, stationB);
+
+    stationA.connect("K2DEF");
+    channel.run(40, 100);
+
+    if (!stationA.isConnected() || !stationB.isConnected()) {
+        FAIL("Connection not established");
+    }
+
+    if (!stationA.sendMessage("short operator message")) {
+        FAIL("short sendMessage() returned false");
+    }
+    channel.run(60, 100);
+
+    if (received_at_b.size() != 1 || received_at_b[0] != "short operator message") {
+        FAIL("Short message not received exactly once");
+    }
+    if (tx_events.size() < 2) {
+        FAIL("Short message did not emit submitted+delivered callbacks");
+    }
+    if (tx_events[0].status != ProtocolEngine::MessageTxStatus::SUBMITTED ||
+        tx_events[1].status != ProtocolEngine::MessageTxStatus::DELIVERED) {
+        FAIL("Short message status order was not SUBMITTED then DELIVERED");
+    }
+    if (tx_events[0].first_seq != tx_events[1].first_seq ||
+        tx_events[1].first_seq != tx_events[1].last_seq) {
+        FAIL("Short message should use one ARQ sequence id");
+    }
+
+    tx_events.clear();
+    received_at_b.clear();
+
+    std::string long_message;
+    for (int i = 0; i < 120; ++i) {
+        long_message += "Long operator message segment " + std::to_string(i) + ". ";
+    }
+
+    if (!stationA.sendMessage(long_message)) {
+        FAIL("long sendMessage() returned false");
+    }
+    channel.run(300, 100);
+
+    if (received_at_b.size() != 1 || received_at_b[0] != long_message) {
+        FAIL("Long fragmented message not received exactly once");
+    }
+    if (tx_events.size() < 2) {
+        FAIL("Long message did not emit submitted+delivered callbacks");
+    }
+    if (tx_events[0].status != ProtocolEngine::MessageTxStatus::SUBMITTED ||
+        tx_events.back().status != ProtocolEngine::MessageTxStatus::DELIVERED) {
+        FAIL("Long message status order was not SUBMITTED then DELIVERED");
+    }
+    if (tx_events[0].first_seq != tx_events.back().first_seq) {
+        FAIL("Long message delivery did not preserve first ARQ sequence id");
+    }
+    if (tx_events.back().last_seq == tx_events.back().first_seq) {
+        FAIL("Long message should span multiple ARQ sequence ids");
+    }
+
+    PASS();
+    return true;
+}
+
 bool test_bidirectional_transfer() {
     TEST("Bidirectional data transfer");
 
@@ -1792,6 +1878,7 @@ int main() {
     test_connection_establishment();
     test_nonphysical_snr_sources_do_not_drive_negotiation();
     test_data_transfer();
+    test_message_tx_status_callbacks();
     test_bidirectional_transfer();
     test_half_duplex_turn_taking_queues_irs_data();
     test_retransmission();

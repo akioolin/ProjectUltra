@@ -5,6 +5,7 @@
 #include "ultra/logging.hpp"
 #include <algorithm>
 #include <cstdio>
+#include <utility>
 
 namespace ultra {
 namespace protocol {
@@ -49,9 +50,14 @@ ProtocolEngine::ProtocolEngine(const ConnectionConfig& config)
     });
 
     connection_.setMessageReceivedCallback([this](const std::string& text) {
-        if (on_message_received_) {
-            on_message_received_(connection_.getRemoteCallsign(), text);
-        }
+        PendingMessageReceived event;
+        event.from = connection_.getRemoteCallsign();
+        event.text = text;
+        pending_message_received_.push_back(std::move(event));
+    });
+
+    connection_.setMessageTxStatusCallback([this](const Connection::MessageTxStatusEvent& event) {
+        pending_message_tx_status_.push_back(event);
     });
 
     connection_.setDataReceivedCallback([this](const Bytes& data, bool more_data) {
@@ -113,6 +119,11 @@ void ProtocolEngine::setMessageReceivedCallback(MessageReceivedCallback cb) {
     on_message_received_ = std::move(cb);
 }
 
+void ProtocolEngine::setMessageTxStatusCallback(MessageTxStatusCallback cb) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    on_message_tx_status_ = std::move(cb);
+}
+
 void ProtocolEngine::setConnectionChangedCallback(ConnectionChangedCallback cb) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     on_connection_changed_ = std::move(cb);
@@ -126,6 +137,30 @@ void ProtocolEngine::setIncomingCallCallback(IncomingCallCallback cb) {
 void ProtocolEngine::setDataReceivedCallback(DataReceivedCallback cb) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     on_data_received_ = std::move(cb);
+}
+
+ProtocolEngine::PendingCallbackBatch ProtocolEngine::takePendingCallbacksLocked() {
+    PendingCallbackBatch callbacks;
+    callbacks.message_received = on_message_received_;
+    callbacks.message_tx_status = on_message_tx_status_;
+    callbacks.received_messages = std::move(pending_message_received_);
+    callbacks.tx_status_events = std::move(pending_message_tx_status_);
+    pending_message_received_.clear();
+    pending_message_tx_status_.clear();
+    return callbacks;
+}
+
+void ProtocolEngine::emitPendingCallbacks(PendingCallbackBatch callbacks) {
+    if (callbacks.message_received) {
+        for (const auto& event : callbacks.received_messages) {
+            callbacks.message_received(event.from, event.text);
+        }
+    }
+    if (callbacks.message_tx_status) {
+        for (const auto& event : callbacks.tx_status_events) {
+            callbacks.message_tx_status(event);
+        }
+    }
 }
 
 bool ProtocolEngine::connect(const std::string& remote_call) {
@@ -164,18 +199,39 @@ void ProtocolEngine::abortTxNow() {
 }
 
 bool ProtocolEngine::sendMessage(const std::string& text) {
-    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
-    return connection_.sendMessage(text);
+    bool result = false;
+    PendingCallbackBatch callbacks;
+    {
+        std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+        result = connection_.sendMessage(text);
+        callbacks = takePendingCallbacksLocked();
+    }
+    emitPendingCallbacks(std::move(callbacks));
+    return result;
 }
 
 bool ProtocolEngine::sendBinary(const Bytes& data) {
-    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
-    return connection_.sendBinary(data);
+    bool result = false;
+    PendingCallbackBatch callbacks;
+    {
+        std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+        result = connection_.sendBinary(data);
+        callbacks = takePendingCallbacksLocked();
+    }
+    emitPendingCallbacks(std::move(callbacks));
+    return result;
 }
 
 bool ProtocolEngine::sendMessages(const std::vector<std::string>& texts) {
-    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
-    return connection_.sendMessages(texts);
+    bool result = false;
+    PendingCallbackBatch callbacks;
+    {
+        std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+        result = connection_.sendMessages(texts);
+        callbacks = takePendingCallbacksLocked();
+    }
+    emitPendingCallbacks(std::move(callbacks));
+    return result;
 }
 
 bool ProtocolEngine::isReadyToSend() const {
@@ -191,8 +247,15 @@ size_t ProtocolEngine::getTxBacklogBytes() const {
 // --- File Transfer ---
 
 bool ProtocolEngine::sendFile(const std::string& filepath) {
-    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
-    return connection_.sendFile(filepath);
+    bool result = false;
+    PendingCallbackBatch callbacks;
+    {
+        std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+        result = connection_.sendFile(filepath);
+        callbacks = takePendingCallbacksLocked();
+    }
+    emitPendingCallbacks(std::move(callbacks));
+    return result;
 }
 
 void ProtocolEngine::setReceiveDirectory(const std::string& dir) {
@@ -201,8 +264,13 @@ void ProtocolEngine::setReceiveDirectory(const std::string& dir) {
 }
 
 void ProtocolEngine::cancelFileTransfer() {
-    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
-    connection_.cancelFileTransfer();
+    PendingCallbackBatch callbacks;
+    {
+        std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+        connection_.cancelFileTransfer();
+        callbacks = takePendingCallbacksLocked();
+    }
+    emitPendingCallbacks(std::move(callbacks));
 }
 
 bool ProtocolEngine::isFileTransferInProgress() const {
@@ -231,24 +299,34 @@ void ProtocolEngine::setFileSentCallback(FileSentCallback cb) {
 }
 
 void ProtocolEngine::onRxData(const Bytes& data) {
-    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    PendingCallbackBatch callbacks;
+    {
+        std::lock_guard<ProtocolEngineMutex> lock(mutex_);
 
-    LOG_MODEM(INFO, "[%s] Protocol RX: %zu bytes from modem (buffer now %zu)",
-              connection_.getLocalCallsign().c_str(), data.size(), rx_buffer_.size() + data.size());
+        LOG_MODEM(INFO, "[%s] Protocol RX: %zu bytes from modem (buffer now %zu)",
+                  connection_.getLocalCallsign().c_str(), data.size(), rx_buffer_.size() + data.size());
 
-    rx_buffer_.insert(rx_buffer_.end(), data.begin(), data.end());
+        rx_buffer_.insert(rx_buffer_.end(), data.begin(), data.end());
 
-    defer_tx_ = true;
-    processRxBuffer();
-    defer_tx_ = false;
+        defer_tx_ = true;
+        processRxBuffer();
+        defer_tx_ = false;
+        callbacks = takePendingCallbacksLocked();
+    }
+    emitPendingCallbacks(std::move(callbacks));
 }
 
 void ProtocolEngine::onMCDPSKPartialFrame(const v2::PartialFrameCodewords& partial) {
-    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    PendingCallbackBatch callbacks;
+    {
+        std::lock_guard<ProtocolEngineMutex> lock(mutex_);
 
-    defer_tx_ = true;
-    connection_.onMCDPSKPartialFrame(partial);
-    defer_tx_ = false;
+        defer_tx_ = true;
+        connection_.onMCDPSKPartialFrame(partial);
+        defer_tx_ = false;
+        callbacks = takePendingCallbacksLocked();
+    }
+    emitPendingCallbacks(std::move(callbacks));
 }
 
 void ProtocolEngine::onAcceptedOFDMDataSync(float sync_correlation) {
@@ -423,8 +501,13 @@ void ProtocolEngine::tick(uint32_t elapsed_ms) {
         }
     }
 
-    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
-    connection_.tick(elapsed_ms);
+    PendingCallbackBatch callbacks;
+    {
+        std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+        connection_.tick(elapsed_ms);
+        callbacks = takePendingCallbacksLocked();
+    }
+    emitPendingCallbacks(std::move(callbacks));
 }
 
 ConnectionState ProtocolEngine::getState() const {

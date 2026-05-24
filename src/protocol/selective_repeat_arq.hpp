@@ -150,6 +150,18 @@ public:
     void setReceiveWindowAdvancedCallback(ReceiveWindowAdvancedCallback cb) {
         on_rx_window_advanced_ = std::move(cb);
     }
+    using TxFrameSubmittedCallback = std::function<void(uint16_t seq)>;
+    void setTxFrameSubmittedCallback(TxFrameSubmittedCallback cb) {
+        on_tx_frame_submitted_ = std::move(cb);
+    }
+    using TxBaseAdvancedCallback = std::function<void(uint16_t base_seq)>;
+    void setTxBaseAdvancedCallback(TxBaseAdvancedCallback cb) {
+        on_tx_base_advanced_ = std::move(cb);
+    }
+    using TxFrameFailedCallback = std::function<void(uint16_t seq)>;
+    void setTxFrameFailedCallback(TxFrameFailedCallback cb) {
+        on_tx_frame_failed_ = std::move(cb);
+    }
     using TurnRequestCallback = std::function<bool()>;
     void setTurnRequestCallback(TurnRequestCallback cb) {
         should_request_turn_ = std::move(cb);
@@ -276,6 +288,9 @@ private:
     DataReceivedCallback on_data_received_;
     SendCompleteCallback on_send_complete_;
     ReceiveWindowAdvancedCallback on_rx_window_advanced_;
+    TxFrameSubmittedCallback on_tx_frame_submitted_;
+    TxBaseAdvancedCallback on_tx_base_advanced_;
+    TxFrameFailedCallback on_tx_frame_failed_;
     TurnRequestCallback should_request_turn_;
 
     // Internal helpers
@@ -295,6 +310,7 @@ private:
     bool suppressFullRetransmitForRepair(size_t slot, RetransmitCause cause);
     uint32_t computeRepairGuardMs(const TXSlot& slot, size_t repair_frame_codewords) const;
     void advanceTXWindow();
+    void notifyTXBaseAdvanced(uint16_t base_before);
     void advanceRXWindow();
     void sendSack();
     void sendFrameNack(uint16_t seq);

@@ -192,6 +192,42 @@ private:
     std::chrono::steady_clock::time_point scenario_file_cancel_started_at_;
     void tickScenario();
 
+    // Modem/protocol callbacks can run on the RX decode / ARQ path. They must
+    // never block behind GUI rendering or log-file I/O, so they only enqueue
+    // bounded best-effort operator events. The GUI thread drains and formats.
+    enum class OperatorEventKind {
+        LogLine,
+        MessageReceived,
+        MessageTxStatus
+    };
+    struct OperatorEvent {
+        OperatorEventKind kind = OperatorEventKind::LogLine;
+        std::string line;
+        std::string from;
+        std::string text;
+        protocol::ProtocolEngine::MessageTxStatusEvent tx_status;
+    };
+    std::deque<OperatorEvent> operator_event_queue_;
+    std::mutex operator_event_mutex_;
+    std::atomic<uint64_t> operator_events_dropped_{0};
+    std::atomic<uint64_t> operator_events_log_lines_{0};
+    std::atomic<uint64_t> operator_events_rx_messages_{0};
+    std::atomic<uint64_t> operator_events_tx_submitted_{0};
+    std::atomic<uint64_t> operator_events_tx_delivered_{0};
+    std::atomic<uint64_t> operator_events_tx_failed_{0};
+    bool operator_log_file_suppressed_ = false;
+    uint32_t operator_log_slow_ms_ = 0;
+    size_t operator_event_drain_limit_ = 128;
+    static constexpr size_t MAX_OPERATOR_EVENTS = 1024;
+    size_t operator_event_queue_limit_ = MAX_OPERATOR_EVENTS;
+    void enqueueOperatorEvent(OperatorEvent event);
+    void enqueueOperatorLogLine(std::string line);
+    void enqueueMessageReceived(std::string from, std::string text);
+    void enqueueMessageTxStatus(protocol::ProtocolEngine::MessageTxStatusEvent event);
+    void drainOperatorEvents(bool flush_all = false);
+    void appendRxLogLineNow(const std::string& msg);
+    void logOperatorEventStats(const char* reason);
+
     // Radio mode state
     std::vector<std::string> input_devices_;
     std::vector<std::string> output_devices_;

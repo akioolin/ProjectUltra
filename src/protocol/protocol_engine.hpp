@@ -5,6 +5,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <vector>
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -50,6 +51,9 @@ public:
     using TxDataCallback =
         std::function<void(const Bytes& data, bool expect_full_ofdm_anchor_after_tx)>;
     using MessageReceivedCallback = std::function<void(const std::string& from, const std::string& text)>;
+    using MessageTxStatus = Connection::MessageTxStatus;
+    using MessageTxStatusEvent = Connection::MessageTxStatusEvent;
+    using MessageTxStatusCallback = Connection::MessageTxStatusCallback;
     using ConnectionChangedCallback = std::function<void(ConnectionState state, const std::string& remote)>;
     using IncomingCallCallback = std::function<void(const std::string& from)>;
     using DataReceivedCallback = Connection::DataReceivedCallback;
@@ -75,6 +79,7 @@ public:
 
     void setTxDataCallback(TxDataCallback cb);
     void setMessageReceivedCallback(MessageReceivedCallback cb);
+    void setMessageTxStatusCallback(MessageTxStatusCallback cb);
     void setConnectionChangedCallback(ConnectionChangedCallback cb);
     void setIncomingCallCallback(IncomingCallCallback cb);
     void setDataReceivedCallback(DataReceivedCallback cb);
@@ -208,6 +213,7 @@ private:
 
     TxDataCallback on_tx_data_;
     MessageReceivedCallback on_message_received_;
+    MessageTxStatusCallback on_message_tx_status_;
     ConnectionChangedCallback on_connection_changed_;
     IncomingCallCallback on_incoming_call_;
     DataReceivedCallback on_data_received_;
@@ -223,8 +229,23 @@ private:
     std::vector<PendingTxFrame> tx_queue_;
     bool defer_tx_ = false;
 
+    struct PendingMessageReceived {
+        std::string from;
+        std::string text;
+    };
+    struct PendingCallbackBatch {
+        MessageReceivedCallback message_received;
+        MessageTxStatusCallback message_tx_status;
+        std::vector<PendingMessageReceived> received_messages;
+        std::vector<MessageTxStatusEvent> tx_status_events;
+    };
+    std::vector<PendingMessageReceived> pending_message_received_;
+    std::vector<MessageTxStatusEvent> pending_message_tx_status_;
+
     void handleTxFrame(const Bytes& frame_data, bool expect_full_ofdm_anchor_after_tx);
     void processRxBuffer();
+    PendingCallbackBatch takePendingCallbacksLocked();
+    static void emitPendingCallbacks(PendingCallbackBatch callbacks);
 };
 
 } // namespace protocol

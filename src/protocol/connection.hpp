@@ -7,6 +7,7 @@
 #include "ultra/types.hpp"
 #include "fec/soft_combine.hpp"
 #include <cmath>
+#include <chrono>
 #include <deque>
 #include <functional>
 #include <optional>
@@ -81,6 +82,20 @@ public:
     using DisconnectedCallback = std::function<void(const std::string& reason)>;
     using MessageReceivedCallback = std::function<void(const std::string& text)>;
     using MessageSentCallback = std::function<void(bool success)>;
+    enum class MessageTxStatus {
+        SUBMITTED,
+        DELIVERED,
+        FAILED
+    };
+    struct MessageTxStatusEvent {
+        MessageTxStatus status = MessageTxStatus::SUBMITTED;
+        uint16_t first_seq = 0;
+        uint16_t last_seq = 0;
+        std::string remote_call;
+        std::string text;
+        uint32_t elapsed_ms = 0;
+    };
+    using MessageTxStatusCallback = std::function<void(const MessageTxStatusEvent& event)>;
     using IncomingCallCallback = std::function<void(const std::string& remote_call)>;
     using DataReceivedCallback = std::function<void(const Bytes& data, bool more_data)>;
 
@@ -153,6 +168,7 @@ public:
     void setDisconnectedCallback(DisconnectedCallback cb);
     void setMessageReceivedCallback(MessageReceivedCallback cb);
     void setMessageSentCallback(MessageSentCallback cb);
+    void setMessageTxStatusCallback(MessageTxStatusCallback cb);
     void setIncomingCallCallback(IncomingCallCallback cb);
     void setDataReceivedCallback(DataReceivedCallback cb);
 
@@ -359,13 +375,30 @@ private:
     struct QueuedPayload {
         Bytes data;
         bool binary_payload = false;
+        uint64_t message_token = 0;
     };
     std::deque<QueuedPayload> queued_payloads_;
     std::vector<Bytes> pending_tx_fragments_;
     std::vector<uint8_t> pending_tx_fragment_flags_;  // Per-fragment flags (for sendMessages batch)
     std::vector<v2::FrameType> pending_tx_fragment_types_;  // DATA_START/CONT/END for binary streams
+    std::vector<uint64_t> pending_tx_fragment_message_tokens_;
     size_t next_fragment_idx_ = 0;
     size_t acked_fragment_count_ = 0;  // Actual ACKs received (vs next_fragment_idx_ = submitted)
+    struct OutboundMessageTxRecord {
+        uint64_t token = 0;
+        std::string text;
+        size_t expected_fragments = 0;
+        size_t assigned_fragments = 0;
+        uint16_t first_seq = 0;
+        uint16_t last_seq = 0;
+        bool first_seq_valid = false;
+        bool submitted_reported = false;
+        bool terminal_reported = false;
+        std::chrono::steady_clock::time_point submitted_at{};
+    };
+    std::deque<OutboundMessageTxRecord> outbound_message_tx_records_;
+    uint64_t next_outbound_message_token_ = 1;
+    uint64_t arq_submit_message_token_ = 0;
 
     // Message reassembly (RX) - accumulates fragments into complete messages
     Bytes rx_reassembly_buffer_;
@@ -429,7 +462,10 @@ private:
     bool file_cancel_confirm_pending_ = false;
     static constexpr uint32_t DATA_TURN_ACK_DIVERSITY_GUARD_MS = 250;
     static constexpr uint32_t DATA_TURN_CONNECT_GUARD_MS = 2500;
-    static constexpr uint32_t DATA_TURN_CONTROL_GUARD_MS = 1000;
+    // Explicit post-TURNOVER settle for the receiver to finish the control
+    // frame tail and reacquire the following DATA burst. This must not depend
+    // on incidental GUI log I/O such as per-ACK msgbox lines.
+    static constexpr uint32_t DATA_TURN_CONTROL_GUARD_MS = 1500;
     static constexpr uint32_t FILE_CANCEL_RX_DRAIN_MS = 5000;
     static constexpr uint32_t FILE_CANCEL_TX_GUARD_MS = 6000;
     static constexpr uint32_t FILE_CANCEL_CONFIRM_DATA_GUARD_MS = 5000;
@@ -490,6 +526,7 @@ private:
     DisconnectedCallback on_disconnected_;
     MessageReceivedCallback on_message_received_;
     MessageSentCallback on_message_sent_;
+    MessageTxStatusCallback on_message_tx_status_;
     IncomingCallCallback on_incoming_call_;
     DataReceivedCallback on_data_received_;
     ModeNegotiatedCallback on_mode_negotiated_;
@@ -534,7 +571,17 @@ private:
     void handleDisconnectFrame(const v2::ConnectFrame& frame, const std::string& src_call);
     void handleModeChange(const v2::ControlFrame& frame, const std::string& src_call);
     bool sendPayload(const Bytes& data, bool binary_payload);
-    bool startPayloadNow(const Bytes& data, bool binary_payload);
+    bool startPayloadNow(const Bytes& data, bool binary_payload, uint64_t message_token = 0);
+    uint64_t createOutboundMessageRecord(const Bytes& data);
+    void setOutboundMessageExpectedFragments(uint64_t token, size_t fragments);
+    void dropOutboundMessageRecord(uint64_t token);
+    void clearOutboundMessageTracking();
+    bool sendArqPayloadFrame(const Bytes& chunk, v2::FrameType frame_type, uint8_t flags,
+                             bool fixed_frame, uint64_t message_token);
+    void handleArqFrameSubmitted(uint16_t seq);
+    void handleArqTxBaseAdvanced(uint16_t base_seq);
+    void handleArqFrameFailed(uint16_t seq);
+    void emitMessageTxStatus(OutboundMessageTxRecord& record, MessageTxStatus status);
     bool shouldQueuePayloadForLinkTurn() const;
     bool hasLocalOutboundDataTurn() const;
     bool hasLocalInFlightDataTurn() const;
