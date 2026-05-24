@@ -18,6 +18,13 @@ inline constexpr uint32_t kWideOFDMFFTSamples = 1024;
 inline constexpr uint32_t kWideOFDMLongCPSamples = 128;
 inline constexpr uint32_t kWideOFDMSymbolSamples = kWideOFDMFFTSamples + kWideOFDMLongCPSamples;
 inline constexpr uint32_t kWideOFDMCarriers = 59;
+inline constexpr uint32_t kWideOFDMChirpDurationMs = 500;
+inline constexpr uint32_t kWideOFDMChirpGapMs = 100;
+inline constexpr uint32_t kWideOFDMFullAnchorExtraSamples =
+    2 * ((kOFDMSampleRate * kWideOFDMChirpDurationMs) / 1000) +
+    2 * ((kOFDMSampleRate * kWideOFDMChirpGapMs) / 1000);
+inline constexpr uint32_t kWideOFDMFullAnchorExtraMs =
+    (kWideOFDMFullAnchorExtraSamples * 1000 + kOFDMSampleRate - 1) / kOFDMSampleRate;
 inline constexpr uint32_t kNarrowOFDMSymbolSamples = 2240;
 inline constexpr uint32_t kNarrowOFDMCarriers = 21;
 inline constexpr uint32_t kNarrowOFDMPilotSpacing = 10;
@@ -33,6 +40,7 @@ inline constexpr uint32_t kMCDPSKInterFrameGuardMs = 100;
 inline constexpr uint32_t kMCDPSKRobustLowAckTimeoutFloorMs = 36000;
 inline constexpr uint32_t kCarrierSenseSackCoalesceMs = 30;
 inline constexpr int kCarrierSenseAckRepeatCount = 1;
+inline constexpr uint32_t kWideOFDMAckTimeoutFloorMs = 8000;
 
 struct OFDMFrameTiming {
     uint32_t data_symbols = 0;
@@ -316,13 +324,30 @@ inline OFDMFrameTiming wideOFDMFrameTiming(Modulation mod,
     return timing;
 }
 
+inline uint32_t wideOFDMBurstAirtimeMs(Modulation mod,
+                                       CodeRate rate,
+                                       size_t frame_count,
+                                       int cw_count = v2::kDefaultFixedFrameCodewords) {
+    if (frame_count == 0) {
+        return 0;
+    }
+
+    const OFDMFrameTiming timing = wideOFDMFrameTiming(mod, rate, cw_count);
+    uint64_t burst_ms = static_cast<uint64_t>(frame_count) * timing.data_ms;
+    if (frame_count > 1) {
+        // StreamingEncoder::encodeBurstLight() emits a full chirp anchor on the
+        // first OFDM burst frame, then light LTS-only preambles for continuations.
+        burst_ms += kWideOFDMFullAnchorExtraMs;
+    }
+    return static_cast<uint32_t>(std::min<uint64_t>(burst_ms, 0xFFFFFFFFull));
+}
+
 inline uint32_t wideOFDMSackDelayMs(Modulation mod,
                                     CodeRate rate,
                                     size_t window_size,
                                     int cw_count = v2::kDefaultFixedFrameCodewords) {
-    const OFDMFrameTiming timing = wideOFDMFrameTiming(mod, rate, cw_count);
-    const uint32_t burst_ms = static_cast<uint32_t>(
-        std::max<size_t>(1, window_size)) * timing.data_ms;
+    const uint32_t burst_ms = wideOFDMBurstAirtimeMs(
+        mod, rate, std::max<size_t>(1, window_size), cw_count);
     return burst_ms + kCarrierSenseSackCoalesceMs;
 }
 
@@ -386,24 +411,25 @@ inline uint32_t computeWideOFDMAckTimeoutMs(Modulation mod,
     const OFDMFrameTiming timing = wideOFDMFrameTiming(mod, rate, sanitized_cw_count);
 
     const uint32_t ack_copies = static_cast<uint32_t>(std::clamp(ack_repeat_count, 1, 3));
-    const uint32_t tx_burst_ms = static_cast<uint32_t>(window_size) * timing.data_ms;
-    const uint32_t ack_path_ms = ack_copies * timing.ack_ms + sack_delay_ms;
+    const size_t window_frames = std::max<size_t>(1, window_size);
+    const uint32_t tx_burst_ms = wideOFDMBurstAirtimeMs(
+        mod, rate, window_frames, sanitized_cw_count);
+    const uint32_t physical_sack_hold_ms = std::max<uint32_t>(
+        sack_delay_ms,
+        wideOFDMSackDelayMs(mod, rate, window_frames, sanitized_cw_count));
+    const uint32_t ack_path_ms = ack_copies * timing.ack_ms + physical_sack_hold_ms;
 
     constexpr uint32_t audio_chain_rtt_margin_ms = 700;
     const uint32_t decode_jitter_margin_ms = std::max<uint32_t>(700, timing.data_ms / 2)
                                              + audio_chain_rtt_margin_ms;
 
-    // tx_burst_ms already spans every frame in the sender window. The SACK
-    // delay is only a small coalescing timer; AudioPort carrier sense handles
-    // the physical TX turn-around.
+    // tx_burst_ms spans the actual multi-frame OFDM burst, including the full
+    // chirp anchor on the first frame. The SACK path must also include that
+    // receiver holdoff because a half-duplex peer cannot ACK until the burst
+    // has physically cleared.
     const uint32_t timeout_ms = tx_burst_ms + ack_path_ms + decode_jitter_margin_ms;
 
-    uint32_t ceiling_ms = 16000;
-    if (sanitized_cw_count > v2::kDefaultFixedFrameCodewords) {
-        ceiling_ms = static_cast<uint32_t>(
-            std::max<uint64_t>(16000ULL, 3ULL * tx_burst_ms));
-    }
-    return std::clamp(timeout_ms, 8000u, ceiling_ms);
+    return std::max<uint32_t>(timeout_ms, kWideOFDMAckTimeoutFloorMs);
 }
 
 inline uint32_t bitsPerMCDPSKCarrier(Modulation mod) {

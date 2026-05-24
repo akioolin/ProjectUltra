@@ -1760,6 +1760,9 @@ void Connection::configureArqForCurrentDataMode() {
 
         const auto timing = connection_policy::wideOFDMFrameTiming(
             data_modulation_, data_code_rate_, data_frame_cw_count_);
+        const uint32_t burst_airtime_ms = connection_policy::wideOFDMBurstAirtimeMs(
+            data_modulation_, data_code_rate_, arq_.getWindowSize(),
+            data_frame_cw_count_);
         constexpr int kWideOFDMAckRepeatCount = 3;
         const uint32_t sack_delay_ms = connection_policy::wideOFDMSackDelayMs(
             data_modulation_, data_code_rate_, arq_.getWindowSize(),
@@ -1778,10 +1781,11 @@ void Connection::configureArqForCurrentDataMode() {
         arq_.setAckTimeout(ack_timeout_ms);
 
         LOG_MODEM(INFO,
-                  "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, ack=%ums x%d), max_retries=%d, ack_batch=%u, physical_sack_hold=%ums, tail_sack=%ums, ack_repeat=%d, cw=%d (OFDM %s %s)",
+                  "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, burst=%ums, ack=%ums x%d), max_retries=%d, ack_batch=%u, physical_sack_hold=%ums, tail_sack=%ums, ack_repeat=%d, cw=%d (OFDM %s %s)",
                   arq_.getWindowSize(),
                   ack_timeout_ms / 1000.0f,
                   timing.data_ms,
+                  burst_airtime_ms,
                   timing.ack_ms,
                   kWideOFDMAckRepeatCount,
                   arq_.getMaxRetries(),

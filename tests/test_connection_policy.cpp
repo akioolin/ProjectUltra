@@ -127,29 +127,39 @@ void test_wide_ofdm_timing_and_timeout() {
     CHECK(dqpsk_6cw.data_ms > dqpsk.data_ms && dqpsk_8cw.data_ms > dqpsk_6cw.data_ms,
           "wide OFDM data duration should scale with fixed-frame CW count");
 
-    CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 4, 120, 2) == 8000,
-          "wide OFDM window=4 timeout should clamp to hardware-safe floor");
+    CHECK(kWideOFDMFullAnchorExtraMs == 1200,
+          "wide OFDM full chirp anchor should add 1.2 s to multi-frame bursts");
+    CHECK(wideOFDMBurstAirtimeMs(Modulation::DQPSK, CodeRate::R1_2, 1) == dqpsk.data_ms,
+          "single wide OFDM light frame should not include a burst chirp anchor");
+
+    const uint32_t w8_burst_ms = wideOFDMBurstAirtimeMs(
+        Modulation::DQPSK, CodeRate::R1_2, 8);
+    CHECK(w8_burst_ms == 8 * dqpsk.data_ms + kWideOFDMFullAnchorExtraMs,
+          "wide OFDM multi-frame burst airtime should include the first-frame chirp anchor");
 
     const uint32_t w8_sack_delay = wideOFDMSackDelayMs(
         Modulation::DQPSK, CodeRate::R1_2, 8);
-    CHECK(w8_sack_delay == 8 * dqpsk.data_ms + kCarrierSenseSackCoalesceMs,
+    CHECK(w8_sack_delay == w8_burst_ms + kCarrierSenseSackCoalesceMs,
           "wide OFDM SACK delay should hold ACKs through a physical sender window");
 
-    CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 8, 120, 1) == 8000,
-          "wide OFDM window=8 timeout should keep default-CW floor after burst accounting");
+    CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 4, 120, 2) == 9446,
+          "wide OFDM window=4 timeout should cover physical burst, ACK copies, and SACK holdoff");
+    CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 8, 120, 1) == 14414,
+          "wide OFDM window=8 timeout should derive from burst airtime, not the configured short SACK");
     CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 8,
-                                      w8_sack_delay, 1) == 12014,
+                                      w8_sack_delay, 1) == 14414,
           "wide OFDM window=8 timeout should cover physical SACK holdoff");
-    CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 8, 120, 1, 6) == 9224,
+    CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 8, 120, 1, 6) == 19022,
           "wide OFDM 6-CW ACK timeout should cover the longer burst");
-    CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 8, 120, 1, 8) == 11528,
+    CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 8, 120, 1, 8) == 23630,
           "wide OFDM 8-CW ACK timeout should cover the longer burst");
 
     const uint32_t timeout_4cw = computeWideOFDMAckTimeoutMs(
         Modulation::DQPSK, CodeRate::R1_2, kHighThroughputOFDMWindowFrames,
         kCarrierSenseSackCoalesceMs, kCarrierSenseAckRepeatCount);
     const uint32_t min_4cw_ack_path =
-        static_cast<uint32_t>(kHighThroughputOFDMWindowFrames) * dqpsk.data_ms +
+        wideOFDMBurstAirtimeMs(
+            Modulation::DQPSK, CodeRate::R1_2, kHighThroughputOFDMWindowFrames) +
         kCarrierSenseSackCoalesceMs + dqpsk.ack_ms;
     CHECK(timeout_4cw >= min_4cw_ack_path,
           "wide OFDM window=16 4-CW timeout should cover burst plus carrier-sensed ACK path");
@@ -158,7 +168,8 @@ void test_wide_ofdm_timing_and_timeout() {
         Modulation::DQPSK, CodeRate::R1_2, kHighThroughputOFDMWindowFrames,
         kCarrierSenseSackCoalesceMs, kCarrierSenseAckRepeatCount, 6);
     const uint32_t min_6cw_ack_path =
-        static_cast<uint32_t>(kHighThroughputOFDMWindowFrames) * dqpsk_6cw.data_ms +
+        wideOFDMBurstAirtimeMs(
+            Modulation::DQPSK, CodeRate::R1_2, kHighThroughputOFDMWindowFrames, 6) +
         kCarrierSenseSackCoalesceMs + dqpsk_6cw.ack_ms;
     CHECK(timeout_6cw >= min_6cw_ack_path,
           "wide OFDM window=16 6-CW timeout should cover burst plus carrier-sensed ACK path");
@@ -167,7 +178,8 @@ void test_wide_ofdm_timing_and_timeout() {
         Modulation::DQPSK, CodeRate::R1_2, kHighThroughputOFDMWindowFrames,
         kCarrierSenseSackCoalesceMs, kCarrierSenseAckRepeatCount, 8);
     const uint32_t min_8cw_ack_path =
-        static_cast<uint32_t>(kHighThroughputOFDMWindowFrames) * dqpsk_8cw.data_ms +
+        wideOFDMBurstAirtimeMs(
+            Modulation::DQPSK, CodeRate::R1_2, kHighThroughputOFDMWindowFrames, 8) +
         kCarrierSenseSackCoalesceMs + dqpsk_8cw.ack_ms;
     CHECK(timeout_8cw >= min_8cw_ack_path,
           "wide OFDM window=16 8-CW timeout should cover burst plus carrier-sensed ACK path");
