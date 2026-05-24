@@ -193,9 +193,9 @@ std::vector<PathSpec> operationalPaths() {
     return {
         {"PING-limited handshake", 76416, 66815, -2.052,
          [] { return modemPing(); }},
-        {"OFDM data R1/4 light cw4", 39840, 30240, -0.720,
+        {"OFDM data R1/4 full-anchor cw4", 97440, 87840, 2.133,
          [=] { return connectedData(ultra::CodeRate::R1_4, r14_cw); }},
-        {"OFDM data R1/2 light cw8", 66720, 57120, -2.519,
+        {"OFDM data R1/2 full-anchor cw8", 124320, 114720, 0.138,
          [=] { return connectedData(ultra::CodeRate::R1_2, r12_cw); }},
         {"OFDM ACK light R1/4 hardened", 19680, 10080, -5.097,
          [=] { return connectedAck(ultra::CodeRate::R1_2, r12_cw); }},
@@ -554,6 +554,7 @@ void runBurstBoundaryInvariant(const std::vector<PathResult>& path_results) {
 struct PaprPathSpec {
     std::string label;
     bool expect_reduction = false;
+    float min_papr_off_db = 0.0f;
     std::function<std::vector<float>(bool)> build;
 };
 
@@ -565,22 +566,22 @@ std::vector<PaprPathSpec> paprOperationalPaths() {
         protocol::connection_policy::recommendCWCount(ultra::CodeRate::R1_2, ofdm);
 
     return {
-        {"PING", false, [](bool enabled) { return modemPing(enabled); }},
-        {"PONG", false, [](bool enabled) { return modemPong(enabled); }},
-        {"CONNECT", false, [](bool enabled) { return connectFrame(enabled); }},
-        {"OFDM data R1/4", true,
+        {"PING", false, 0.0f, [](bool enabled) { return modemPing(enabled); }},
+        {"PONG", false, 0.0f, [](bool enabled) { return modemPong(enabled); }},
+        {"CONNECT", false, 0.0f, [](bool enabled) { return connectFrame(enabled); }},
+        {"OFDM data R1/4", true, 8.0f,
          [=](bool enabled) {
              return connectedData(ultra::CodeRate::R1_4, r14_cw, enabled);
          }},
-        {"OFDM data R1/2", true,
+        {"OFDM data R1/2", true, 9.0f,
          [=](bool enabled) {
              return connectedData(ultra::CodeRate::R1_2, r12_cw, enabled);
          }},
-        {"OFDM burst R1/4 x8", true,
+        {"OFDM burst R1/4 x8", true, 9.0f,
          [=](bool enabled) {
              return connectedBurstData(ultra::CodeRate::R1_4, r14_cw, 8, enabled);
          }},
-        {"ACK", false,
+        {"ACK", false, 0.0f,
          [=](bool enabled) {
              return connectedAck(ultra::CodeRate::R1_2, r12_cw, enabled);
          }},
@@ -611,7 +612,7 @@ void runPaprOperationalTable(bool proof_mode) {
         rows.push_back(row);
 
         if (spec.expect_reduction) {
-            CHECK(row.papr_off >= 9.0f,
+            CHECK(row.papr_off >= spec.min_papr_off_db,
                   spec.label + ": PAPR-off path should preserve high-PAPR OFDM");
             CHECK(row.papr_off - row.papr_on >= 1.5f,
                   spec.label + ": PAPR reduction should remove measurable crest factor");

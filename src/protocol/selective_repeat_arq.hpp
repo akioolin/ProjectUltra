@@ -291,6 +291,7 @@ private:
     void advanceTXWindow();
     void advanceRXWindow();
     void sendSack();
+    void sendFrameNack(uint16_t seq);
     void sendCwNack(uint16_t seq, uint32_t missing_bitmap);
     void maybeSendCwNack(size_t slot_index, uint32_t missing_bitmap);
     void clearPartialRXSlot(RXSlot& slot);

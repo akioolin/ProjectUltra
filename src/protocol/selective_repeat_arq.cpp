@@ -520,6 +520,11 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
             config_.ack_batch_size, config_.window_size);
         const bool batch_threshold_reached = frames_since_ack_ >= batch_threshold;
         const bool batch_ack_allowed = !frame_more_frag || ack_batch_through_more_frag_;
+        if (arq_policy::shouldSendImmediateFrameNackForGap(
+                out_of_order, frame_more_frag, frame_final)) {
+            sendFrameNack(expected_seq);
+        }
+
         if (out_of_order || (batch_threshold_reached && batch_ack_allowed)) {
             // Bump the trigger-reason counter BEFORE sendSack — out_of_order
             // takes priority because it's the immediate safety valve. Each
@@ -1560,6 +1565,22 @@ void SelectiveRepeatARQ::maybeSampleRTT(TXSlot& slot) {
 
     LOG_MODEM(DEBUG, "SR-ARQ: RTT sample=%ums srtt=%.1f rttvar=%.1f rto=%ums",
               sample_ms, srtt_ms_, rttvar_ms_, adaptive_ack_timeout_ms_);
+}
+
+void SelectiveRepeatARQ::sendFrameNack(uint16_t seq) {
+    auto nack = v2::ControlFrame::makeNack(local_call_, remote_call_, seq, 0);
+    auto data = nack.serialize();
+    LOG_MODEM(INFO, "SR-ARQ: Sent frame NACK seq=%d", seq);
+    if (ultra::phyDiagnosticsEnabled()) {
+        std::ostringstream oss;
+        oss << "event=arq_nack_tx"
+            << " local=" << local_call_
+            << " remote=" << remote_call_
+            << " seq=" << seq
+            << " missing_cw=0x00000000";
+        ultra::phyDiagLine(oss.str());
+    }
+    transmitData(data);
 }
 
 uint32_t SelectiveRepeatARQ::ackRepeatDelayForCopy(int copy_index) const {

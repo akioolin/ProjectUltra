@@ -394,8 +394,21 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
         return {};
     }
 
-    // Single frame: just use normal encodeFrameLight
+    // A one-frame connected OFDM DATA turn has no following in-burst frame to
+    // refresh timing if the receiver's warm LTS state is stale. Treat it as a
+    // new physical turn and emit a full chirp+LTS anchor.
     if (frame_data_list.size() == 1) {
+        if (protocol::isOFDMMode(mode_) && waveform_->supportsDataPreamble()) {
+            if (force_full_preamble_once_) {
+                LOG_MODEM(INFO, "[%s] Full preamble forced for single OFDM burst frame timing anchor",
+                          log_prefix_.c_str());
+            } else {
+                LOG_MODEM(INFO, "[%s] Full preamble emitted for single OFDM burst frame timing anchor",
+                          log_prefix_.c_str());
+            }
+            force_full_preamble_once_ = false;
+            return encodeFrame(frame_data_list[0]);
+        }
         return encodeFrameLight(frame_data_list[0]);
     }
 

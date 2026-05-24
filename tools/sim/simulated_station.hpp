@@ -1688,14 +1688,19 @@ private:
             encoder_->setDataMode(mcDpskModulationForConfig(control_mc_dpsk_config_), CodeRate::R1_4);
         }
 
-        // Encode frame using the encoder
-        // MC-DPSK: ALWAYS use full preamble (is_mc_dpsk covers all MC-DPSK frames incl ACK/NACK)
-        // OFDM: Use light preamble for all frames after handshake (DATA, ACK, NACK, etc.)
-        // Handshake frames (CONNECT/CONNECT_ACK): Always full preamble (pre-negotiation)
+        const auto header = v2::parseHeader(data);
+        const bool is_data_frame = header.valid && v2::isDataFrame(header.type);
+
+        // Encode frame using the encoder.
+        // MC-DPSK: always full preamble.
+        // OFDM controls: light preamble after handshake.
+        // OFDM single DATA turns: full preamble so the peer can re-anchor after
+        // idle or after an ACK/NACK turnaround.
         std::vector<float> result;
         bool is_mc_dpsk = (encoder_->getMode() == WaveformMode::MC_DPSK);
         bool use_light = !is_handshake_frame && !is_mc_dpsk &&
-                         connected_.load() && handshake_complete_.load();
+                         connected_.load() && handshake_complete_.load() &&
+                         !is_data_frame;
 
         if (use_light) {
             result = encoder_->encodeFrameLight(data);

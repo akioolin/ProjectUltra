@@ -140,6 +140,12 @@ inline bool shouldFastRetransmitHole(int hole_ack_count,
            fast_retx_cooldown_ms == 0;
 }
 
+inline bool shouldSendImmediateFrameNackForGap(bool out_of_order,
+                                               bool more_frag,
+                                               bool final_frame) {
+    return out_of_order && final_frame && !more_frag;
+}
+
 inline uint32_t ackRepeatDelayForCopy(uint32_t ack_repeat_delay_ms, int copy_index) {
     if (copy_index <= 2) {
         return ack_repeat_delay_ms;

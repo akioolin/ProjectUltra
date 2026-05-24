@@ -171,6 +171,30 @@ void test_multi_frame_ofdm_burst_starts_with_full_anchor() {
           "multi-frame burst anchor should not leave one-shot full preamble armed");
 }
 
+void test_single_frame_ofdm_burst_uses_full_anchor() {
+    auto cfg = makeOFDMConfig(Modulation::QAM16, CodeRate::R1_2);
+
+    StreamingEncoder encoder;
+    encoder.setMode(protocol::WaveformMode::OFDM_CHIRP);
+    encoder.setOFDMConfig(cfg);
+    encoder.setDataMode(Modulation::QAM16, CodeRate::R1_2);
+
+    auto data = protocol::v2::makeFixedDataFrame(
+        "BRAVO", "ALPHA", 8, Bytes(24, 0x42), CodeRate::R1_2).serialize();
+
+    const auto light = encoder.encodeFrameLight(data);
+    const auto burst = encoder.encodeBurstLight({data});
+    const auto light_after_burst = encoder.encodeFrameLight(data);
+
+    CHECK(!light.empty(), "light OFDM encode should produce samples");
+    CHECK(burst.size() > light.size(),
+          "single-frame OFDM DATA burst should use full anchor after idle");
+    CHECK(burst.size() - light.size() >= 20000,
+          "single-frame OFDM DATA burst should include chirp+LTS anchor");
+    CHECK(light_after_burst.size() == light.size(),
+          "single-frame burst anchor should not leave one-shot full preamble armed");
+}
+
 }  // namespace
 
 int main() {
@@ -182,6 +206,7 @@ int main() {
     test_decoder_buffer_capacity_policy();
     test_forced_full_preamble_is_one_shot();
     test_multi_frame_ofdm_burst_starts_with_full_anchor();
+    test_single_frame_ofdm_burst_uses_full_anchor();
 
     if (tests_failed != 0) {
         std::cout << "StreamingConfig: " << (tests_run - tests_failed)

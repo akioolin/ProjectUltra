@@ -400,10 +400,14 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     streaming_encoder_->setMode(tx_waveform_mode);
     streaming_encoder_->setDataMode(tx_modulation, tx_code_rate);
 
-    // Use light preamble (LTS only) when the remote station expects it:
-    // - Normal connected mode: connected_ && handshake_complete_
-    // - Disconnect ACK: remote is still connected and looking for LTS sync, not chirp
-    bool use_light = ((connected_ && handshake_complete_) || is_disconnect_ack) && is_ofdm;
+    const auto header = protocol::v2::parseHeader(data);
+    const bool is_data_frame = header.valid && protocol::v2::isDataFrame(header.type);
+
+    // Use light preamble (LTS only) for connected OFDM control turns. A single
+    // DATA frame is a new physical DATA turn and carries a full anchor so the
+    // peer can recover after idle or after an ACK/NACK turnaround.
+    bool use_light = ((connected_ && handshake_complete_) || is_disconnect_ack) &&
+                     is_ofdm && !is_data_frame;
     auto samples = use_light ? streaming_encoder_->encodeFrameLight(data)
                              : streaming_encoder_->encodeFrame(data);
 

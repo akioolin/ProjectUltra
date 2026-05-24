@@ -848,6 +848,116 @@ bool test_ack_batch_out_of_order_safety_valve() {
     return true;
 }
 
+bool test_final_out_of_order_frame_sends_explicit_frame_nack() {
+    TEST("FINAL out-of-order frame sends explicit frame NACK plus SACK");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.sack_delay_ms = 10000;
+
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    auto f1 = v2::DataFrame::makeData("TX1", "RX1", 1, Bytes{1});
+    f1.flags |= v2::Flags::FINAL;
+    rx.onFrameReceived(f1.serialize());
+
+    if (channel.size() != 2)
+        FAIL("Expected frame NACK and SACK for FINAL out-of-order gap, got " +
+             std::to_string(channel.size()));
+
+    auto nack = v2::ControlFrame::deserialize(channel.receive());
+    if (!nack || nack->type != v2::FrameType::NACK || nack->seq != 0)
+        FAIL("First control should be explicit NACK for missing seq=0");
+    if (v2::NackPayload::decode(nack->payload).cw_bitmap != 0)
+        FAIL("Frame NACK should carry cw bitmap=0 for full-frame retransmit");
+
+    auto sack = v2::ControlFrame::deserialize(channel.receive());
+    if (!sack || sack->type != v2::FrameType::ACK || sack->seq != 0xFFFF)
+        FAIL("Second control should be SACK at base-1 for the same hole");
+    if (v2::NackPayload::decode(sack->payload).cw_bitmap != 0x2)
+        FAIL("SACK bitmap should confirm seq=1 while seq=0 is missing");
+
+    PASS();
+    return true;
+}
+
+bool test_more_frag_out_of_order_uses_sack_without_explicit_frame_nack() {
+    TEST("MORE_FRAG out-of-order frame keeps guarded SACK-only path");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.sack_delay_ms = 10000;
+
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    auto f1 = v2::DataFrame::makeData("TX1", "RX1", 1, Bytes{1});
+    f1.flags |= v2::Flags::MORE_FRAG;
+    rx.onFrameReceived(f1.serialize());
+
+    if (channel.size() != 1)
+        FAIL("Expected only SACK for MORE_FRAG out-of-order gap, got " +
+             std::to_string(channel.size()));
+
+    auto sack = v2::ControlFrame::deserialize(channel.receive());
+    if (!sack || sack->type != v2::FrameType::ACK)
+        FAIL("MORE_FRAG out-of-order control should remain a SACK");
+
+    PASS();
+    return true;
+}
+
+bool test_explicit_frame_nack_retransmits_before_long_rto() {
+    TEST("explicit frame NACK retransmits before long RTO");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.ack_timeout_ms = 15000;
+    config.sack_delay_ms = 10000;
+
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+
+    ByteChannel channel;
+    tx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    if (!tx.sendDataWithFlags(Bytes{0}, v2::Flags::FINAL))
+        FAIL("failed to send seq=0");
+    if (!tx.sendDataWithFlags(Bytes{1}, v2::Flags::FINAL))
+        FAIL("failed to send seq=1");
+
+    if (channel.size() != 2)
+        FAIL("expected two original DATA frames");
+    (void)channel.receive();
+    (void)channel.receive();
+
+    auto nack = v2::ControlFrame::makeNack("RX1", "TX1", 0, 0);
+    tx.onFrameReceived(nack.serialize());
+
+    if (channel.size() != 1)
+        FAIL("explicit NACK should immediately enqueue one retransmission");
+    if (!expectDataSeq(channel.receive(), 0, "explicit NACK retx"))
+        return false;
+
+    auto stats = tx.getStats();
+    if (stats.timeouts != 0)
+        FAIL("NACK retransmit should occur before timeout accounting");
+    if (stats.retransmissions_nack != 1 || stats.retransmissions != 1)
+        FAIL("Expected exactly one NACK retransmission");
+    if (stats.retransmissions_fast_hole != 0 || stats.retransmissions_hole_probe != 0)
+        FAIL("Explicit NACK should not count as fast_hole or hole_probe");
+
+    PASS();
+    return true;
+}
+
 bool test_ack_batch_setter_clamping() {
     TEST("setWindowSize() clamps ack_batch_size when shrinking below");
 
@@ -1528,6 +1638,9 @@ int main() {
     std::cout << "ack_batch_size Decoupling Tests (Phase 1b):\n";
     test_ack_batch_threshold_independent();
     test_ack_batch_out_of_order_safety_valve();
+    test_final_out_of_order_frame_sends_explicit_frame_nack();
+    test_more_frag_out_of_order_uses_sack_without_explicit_frame_nack();
+    test_explicit_frame_nack_retransmits_before_long_rto();
     test_ack_batch_setter_clamping();
     test_ack_batch_default_matches_window();
     test_ack_batch_defers_more_frag_until_tail();
