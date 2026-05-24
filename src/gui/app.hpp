@@ -67,6 +67,8 @@ public:
         bool auto_accept = false;             // auto-accept the first incoming call
         std::string auto_send_file;           // file to send once CONNECTED (fires once)
         std::string auto_send_message;        // message to send once CONNECTED (fires once)
+        int auto_message_count = 1;           // how many sequential messages to send (numbered)
+        int auto_message_interval_sec = 8;    // gap between sequential auto-messages
         int auto_disconnect_after_sec = 0;    // 0 = never; else disconnect N s after CONNECTED
         int exit_after_sec = 0;               // 0 = never; else push SDL_QUIT after N s
     };
@@ -156,6 +158,7 @@ private:
     bool scenario_connect_issued_ = false;  // connect() fired once
     bool scenario_payload_sent_ = false;    // full payload sequence dispatched
     bool scenario_message_sent_ = false;    // chat-message phase fired (if any)
+    int scenario_messages_sent_ = 0;        // count of sequential auto-messages sent
     bool scenario_file_started_ = false;    // file phase started (if any)
     bool scenario_disconnect_issued_ = false;
     std::chrono::steady_clock::time_point scenario_start_;

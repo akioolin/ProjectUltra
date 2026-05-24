@@ -211,6 +211,8 @@ void printGuiUsage(const char* prog) {
     std::printf("  --auto-accept                 Auto-accept the first incoming call\n");
     std::printf("  --auto-send-file <path>       Send file once CONNECTED\n");
     std::printf("  --auto-send-message <text>    Send message once CONNECTED\n");
+    std::printf("  --auto-message-count <N>      Send N sequential numbered auto-messages (default 1)\n");
+    std::printf("  --auto-message-interval <s>   Gap between sequential auto-messages (default 8)\n");
     std::printf("  --auto-disconnect-after <s>   Disconnect N seconds after CONNECTED\n");
     std::printf("  --exit-after <s>              Quit N seconds after startup\n");
     std::printf("  --log-level <error|warn|info|debug|trace>\n");
@@ -600,6 +602,20 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             opts.auto_send_message = argv[++i];
+        } else if (arg == "--auto-message-count") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Missing value for --auto-message-count\n");
+                closeStartupLog();
+                return 1;
+            }
+            opts.auto_message_count = std::atoi(argv[++i]);
+        } else if (arg == "--auto-message-interval") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Missing value for --auto-message-interval\n");
+                closeStartupLog();
+                return 1;
+            }
+            opts.auto_message_interval_sec = std::atoi(argv[++i]);
         } else if (arg == "--auto-disconnect-after") {
             if (i + 1 >= argc) {
                 std::fprintf(stderr, "Missing value for --auto-disconnect-after\n");

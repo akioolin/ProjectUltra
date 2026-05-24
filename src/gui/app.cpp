@@ -2402,21 +2402,36 @@ void App::tickScenario() {
     //   3. mark the sequence dispatched so the disconnect phase can arm.
     // message and file are no longer mutually exclusive — this exercises the
     // real operator flow of chatting and then sending a file on one link.
+    const int message_target = std::max(1, options_.auto_message_count);
     if (state == protocol::ConnectionState::CONNECTED) {
-        // Phase 1: chat message.
-        if (!options_.auto_send_message.empty() && !scenario_message_sent_) {
-            guiLog("[scenario] connected; sending message (%zu bytes)",
-                   options_.auto_send_message.size());
-            protocol_.sendMessage(options_.auto_send_message);
-            scenario_message_sent_ = true;
-            scenario_message_sent_at_ = now;
+        // Phase 1: chat message(s) — send the first on connect, then optional
+        // repeats at a fixed interval (a test harness for sequential interactive
+        // messaging). Each repeat is numbered so RX-side delivery is unambiguous.
+        if (!options_.auto_send_message.empty() &&
+            scenario_messages_sent_ < message_target) {
+            const bool first = !scenario_message_sent_;
+            const bool interval_elapsed =
+                scenario_message_sent_ && !tx_in_progress_ &&
+                now - scenario_message_sent_at_ >=
+                    std::chrono::seconds(std::max(1, options_.auto_message_interval_sec));
+            if (first || interval_elapsed) {
+                std::string msg = options_.auto_send_message;
+                if (scenario_messages_sent_ > 0) {
+                    msg += " #" + std::to_string(scenario_messages_sent_ + 1);
+                }
+                guiLog("[scenario] sending message %d/%d (%zu bytes)",
+                       scenario_messages_sent_ + 1, message_target, msg.size());
+                protocol_.sendMessage(msg);
+                scenario_message_sent_ = true;
+                scenario_message_sent_at_ = now;
+                ++scenario_messages_sent_;
+            }
         }
-        // Phase 2: file, but only after the message has finished transmitting
-        // (TX idle) plus a short settle, so the two payloads don't collide on
-        // the air.
+        // Phase 2: file, but only after ALL messages have finished transmitting
+        // (TX idle) plus a short settle, so the payloads don't collide on the air.
         const bool message_phase_clear =
             options_.auto_send_message.empty() ||
-            (scenario_message_sent_ && !tx_in_progress_ &&
+            (scenario_messages_sent_ >= message_target && !tx_in_progress_ &&
              now - scenario_message_sent_at_ >= std::chrono::milliseconds(2000));
         if (!options_.auto_send_file.empty() && !scenario_file_started_ &&
             message_phase_clear) {
@@ -2427,7 +2442,7 @@ void App::tickScenario() {
         }
         // Mark the whole sequence dispatched once every requested phase fired.
         if (!scenario_payload_sent_ &&
-            (options_.auto_send_message.empty() || scenario_message_sent_) &&
+            (options_.auto_send_message.empty() || scenario_messages_sent_ >= message_target) &&
             (options_.auto_send_file.empty() || scenario_file_started_)) {
             scenario_payload_sent_ = true;
             scenario_connected_at_ = now;
@@ -3100,22 +3115,23 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         ImVec4 arq_color = (arq.failed > 0 || arq.timeouts > 0) ? ImVec4(1.0f, 0.4f, 0.4f, 1.0f) :
                            (arq.retransmissions > 0) ? ImVec4(0.9f, 0.8f, 0.3f, 1.0f) :
                            ImVec4(0.7f, 0.7f, 0.7f, 1.0f);
-        char arq_line[256];
-        snprintf(arq_line, sizeof(arq_line),
-                 "ARQ retx:%d to:%d fast:%d probe:%d nack:%d dupACK:%d",
-                 arq.retransmissions, arq.timeouts, arq.retransmissions_fast_hole,
+        // Two compact lines so every counter is visible in the narrow left panel
+        // (TextColored does not wrap, so the old single line clipped nack/dupACK/fail).
+        char arq_l1[128];
+        snprintf(arq_l1, sizeof(arq_l1), "ARQ retx:%d to:%d fast:%d",
+                 arq.retransmissions, arq.timeouts, arq.retransmissions_fast_hole);
+        ImGui::TextColored(arq_color, "%s", arq_l1);
+        char arq_l2[128];
+        snprintf(arq_l2, sizeof(arq_l2), "  probe:%d nack:%d dup:%d fail:%d",
                  arq.retransmissions_hole_probe, arq.retransmissions_nack,
-                 arq.duplicate_acks_ignored);
-        ImGui::TextColored(arq_color, "%s", arq_line);
-        if (arq.failed > 0) {
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "fail:%d", arq.failed);
-            if (arq.failed > diagnostics_last_arq_failed_) {
-                diagnostics_last_arq_failed_ = arq.failed;
-                ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
-                    "fault", "fault.triggered",
-                    "{\"reason\":\"arq_failed_increment\",\"policy\":\"emit_only\"}");
-            }
+                 arq.duplicate_acks_ignored, arq.failed);
+        ImVec4 arq_l2_color = (arq.failed > 0) ? ImVec4(1.0f, 0.3f, 0.3f, 1.0f) : arq_color;
+        ImGui::TextColored(arq_l2_color, "%s", arq_l2);
+        if (arq.failed > diagnostics_last_arq_failed_) {
+            diagnostics_last_arq_failed_ = arq.failed;
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
+                "fault", "fault.triggered",
+                "{\"reason\":\"arq_failed_increment\",\"policy\":\"emit_only\"}");
         }
     }
 
