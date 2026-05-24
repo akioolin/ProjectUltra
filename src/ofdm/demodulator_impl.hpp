@@ -105,6 +105,14 @@ struct OFDMDemodulator::Impl {
     // reset whenever the modulation changes so the GUI never overlays, e.g., a
     // 16QAM data frame and a DQPSK control/ACK frame into one smeared cloud.
     Modulation constellation_mod_ = Modulation::QPSK;
+    // Visualization-only LDPC air-bit span for the current OFDM frame. The
+    // modulator pads the last OFDM symbol with zero carriers when N*648 LDPC bits
+    // do not fill the final symbol; those carriers are not data and must not be
+    // rendered as constellation points. Decode still receives the unchanged soft
+    // bits and ignores the incomplete trailing chunk as before.
+    size_t constellation_air_bit_index_ = 0;
+    size_t constellation_valid_air_bits_ = static_cast<size_t>(-1);
+    size_t constellation_capacity_air_bits_ = 0;
 
     // Sync detection
     std::vector<Complex> sync_sequence;

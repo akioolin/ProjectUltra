@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <limits>
 #include "ultra/ofdm.hpp"
 #include "ultra/dsp.hpp"
 #include "ultra/logging.hpp"
@@ -52,6 +54,164 @@ bool isDifferentialModulation(Modulation mod) {
            mod == Modulation::D8PSK;
 }
 
+constexpr float MIN_DIFFERENTIAL_DISPLAY_POWER = 0.2f;
+
+Complex normalizePhaseOnlyForDisplay(Complex symbol) {
+    const float mag = std::abs(symbol);
+    if (mag < 1.0e-6f) {
+        return symbol;
+    }
+    return symbol / mag;
+}
+
+const char* constellationDiagModName(Modulation mod) {
+    switch (mod) {
+        case Modulation::DBPSK: return "DBPSK";
+        case Modulation::BPSK: return "BPSK";
+        case Modulation::DQPSK: return "DQPSK";
+        case Modulation::QPSK: return "QPSK";
+        case Modulation::D8PSK: return "D8PSK";
+        case Modulation::QAM8: return "QAM8";
+        case Modulation::QAM16: return "16QAM";
+        case Modulation::QAM32: return "QAM32";
+        case Modulation::QAM64: return "QAM64";
+        case Modulation::QAM256: return "QAM256";
+        default: return "UNKNOWN";
+    }
+}
+
+bool constellationDiagEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ULTRA_CONSTELLATION_DIAG");
+        if (!value) return false;
+        return value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled;
+}
+
+struct ConstellationDiagStats {
+    size_t count = 0;
+    size_t below_0p2 = 0;
+    float min_mag = 0.0f;
+    float avg_mag = 0.0f;
+    float max_mag = 0.0f;
+};
+
+struct ConstellationClusterStats {
+    size_t occupied = 0;
+    float rms_evm = 0.0f;
+    float max_evm = 0.0f;
+};
+
+ConstellationDiagStats constellationDiagStats(const std::vector<Complex>& symbols) {
+    ConstellationDiagStats stats;
+    stats.count = symbols.size();
+    if (symbols.empty()) {
+        return stats;
+    }
+
+    stats.min_mag = std::numeric_limits<float>::max();
+    double sum = 0.0;
+    for (const auto& symbol : symbols) {
+        const float mag = std::abs(symbol);
+        stats.min_mag = std::min(stats.min_mag, mag);
+        stats.max_mag = std::max(stats.max_mag, mag);
+        sum += mag;
+        if (mag < 0.2f) {
+            ++stats.below_0p2;
+        }
+    }
+    stats.avg_mag = static_cast<float>(sum / static_cast<double>(symbols.size()));
+    return stats;
+}
+
+std::vector<Complex> constellationReferencePoints(Modulation mod) {
+    static const float pi = 3.14159265358979f;
+    std::vector<Complex> points;
+
+    if (mod == Modulation::DBPSK || mod == Modulation::BPSK) {
+        points = {Complex(-1, 0), Complex(1, 0)};
+    } else if (mod == Modulation::DQPSK) {
+        for (int i = 0; i < 4; ++i) {
+            const float angle = i * pi / 2.0f;
+            points.emplace_back(std::cos(angle), std::sin(angle));
+        }
+    } else if (mod == Modulation::QPSK) {
+        for (int i = 0; i < 4; ++i) {
+            const float angle = pi / 4.0f + i * pi / 2.0f;
+            points.emplace_back(std::cos(angle), std::sin(angle));
+        }
+    } else if (mod == Modulation::D8PSK || mod == Modulation::QAM8) {
+        const float offset = (mod == Modulation::D8PSK) ? pi / 8.0f : pi / 8.0f;
+        for (int i = 0; i < 8; ++i) {
+            const float angle = offset + i * pi / 4.0f;
+            points.emplace_back(std::cos(angle), std::sin(angle));
+        }
+    } else if (mod == Modulation::QAM16 || mod == Modulation::QAM64 ||
+               mod == Modulation::QAM256) {
+        int points_per_axis = 4;
+        if (mod == Modulation::QAM64) {
+            points_per_axis = 8;
+        } else if (mod == Modulation::QAM256) {
+            points_per_axis = 16;
+        }
+        const float norm = std::sqrt((2.0f / 3.0f) *
+                                     (points_per_axis * points_per_axis - 1.0f));
+        points.reserve(static_cast<size_t>(points_per_axis * points_per_axis));
+        for (int yi = 0; yi < points_per_axis; ++yi) {
+            for (int xi = 0; xi < points_per_axis; ++xi) {
+                const float x = (2.0f * xi - points_per_axis + 1) / norm;
+                const float y = (2.0f * yi - points_per_axis + 1) / norm;
+                points.emplace_back(x, y);
+            }
+        }
+    }
+    return points;
+}
+
+ConstellationClusterStats constellationClusterStats(
+        const std::vector<Complex>& symbols, Modulation mod) {
+    ConstellationClusterStats stats;
+    const auto refs = constellationReferencePoints(mod);
+    if (symbols.empty() || refs.empty()) {
+        return stats;
+    }
+
+    float power = 0.0f;
+    for (const auto& symbol : symbols) {
+        power += std::norm(symbol);
+    }
+    const float rms = std::sqrt(power / static_cast<float>(symbols.size()));
+    const float scale = (rms > 1.0e-6f) ? (1.0f / rms) : 1.0f;
+
+    std::vector<size_t> hits(refs.size(), 0);
+    double evm_sq_sum = 0.0;
+    for (const auto& symbol : symbols) {
+        const Complex normalized = symbol * scale;
+        size_t best = 0;
+        float best_dist = std::numeric_limits<float>::max();
+        for (size_t i = 0; i < refs.size(); ++i) {
+            const float dist = std::norm(normalized - refs[i]);
+            if (dist < best_dist) {
+                best_dist = dist;
+                best = i;
+            }
+        }
+        ++hits[best];
+        evm_sq_sum += best_dist;
+        stats.max_evm = std::max(stats.max_evm, std::sqrt(best_dist));
+    }
+
+    for (size_t hit : hits) {
+        if (hit > 0) {
+            ++stats.occupied;
+        }
+    }
+    stats.rms_evm = std::sqrt(
+        static_cast<float>(evm_sq_sum / static_cast<double>(symbols.size())));
+    return stats;
+}
+
 } // namespace
 // =============================================================================
 // SYMBOL DEMODULATION
@@ -75,6 +235,43 @@ void OFDMDemodulator::Impl::appendConstellationSymbols(
             constellation_symbols.begin(),
             constellation_symbols.begin() +
                 (constellation_symbols.size() - MAX_CONSTELLATION_SYMBOLS));
+    }
+
+    if (constellationDiagEnabled()) {
+        static int append_log_count = 0;
+        if (append_log_count < 80) {
+            const auto update_stats = constellationDiagStats(update);
+            const auto buffer_stats = constellationDiagStats(constellation_symbols);
+            const auto update_clusters = constellationClusterStats(update, mod);
+            const auto buffer_clusters = constellationClusterStats(constellation_symbols, mod);
+            LOG_DEMOD(INFO,
+                      "CONSTELLATION_DIAG stage=append mod=%s update_count=%zu "
+                      "update_mag=[%.4f,%.4f,%.4f] update_lt0p2=%zu/%zu "
+                      "update_clusters=%zu update_evm_rms=%.4f update_evm_max=%.4f "
+                      "buffer_count=%zu buffer_mag=[%.4f,%.4f,%.4f] "
+                      "buffer_lt0p2=%zu/%zu buffer_clusters=%zu "
+                      "buffer_evm_rms=%.4f buffer_evm_max=%.4f",
+                      constellationDiagModName(mod),
+                      update_stats.count,
+                      update_stats.min_mag,
+                      update_stats.avg_mag,
+                      update_stats.max_mag,
+                      update_stats.below_0p2,
+                      update_stats.count,
+                      update_clusters.occupied,
+                      update_clusters.rms_evm,
+                      update_clusters.max_evm,
+                      buffer_stats.count,
+                      buffer_stats.min_mag,
+                      buffer_stats.avg_mag,
+                      buffer_stats.max_mag,
+                      buffer_stats.below_0p2,
+                      buffer_stats.count,
+                      buffer_clusters.occupied,
+                      buffer_clusters.rms_evm,
+                      buffer_clusters.max_evm);
+            ++append_log_count;
+        }
     }
 }
 
@@ -195,7 +392,14 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
         std::fill(differential_signal_power.begin(), differential_signal_power.end(), 0.0f);
     }
 
+    size_t constellation_padding_skipped = 0;
+    size_t constellation_weak_diff_skipped = 0;
+    const size_t carrier_bits = bitsPerCarrier(mod);
     for (size_t i = 0; i < equalized.size(); ++i) {
+        const size_t air_bit_index = constellation_air_bit_index_;
+        constellation_air_bit_index_ += carrier_bits;
+        const bool display_payload_carrier =
+            air_bit_index < constellation_valid_air_bits_;
         const auto& sym = equalized[i];
         float base_nv = (i < carrier_noise_var.size()) ? carrier_noise_var[i] : noise_variance;
         float nv = base_nv * ce_error_margin;
@@ -235,7 +439,14 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
                 soft_bits.push_back(llr);
                 if (!dqpsk_skip_first_symbol) {
                     Complex diff = sym * std::conj(prev_sym);
-                    constellation_update.push_back(diff);
+                    const float signal_power = std::abs(sym) * std::abs(prev_sym);
+                    if (!display_payload_carrier) {
+                        ++constellation_padding_skipped;
+                    } else if (signal_power < MIN_DIFFERENTIAL_DISPLAY_POWER) {
+                        ++constellation_weak_diff_skipped;
+                    } else {
+                        constellation_update.push_back(normalizePhaseOnlyForDisplay(diff));
+                    }
                 }
                 dbpsk_prev_equalized[i] = sym;
                 differential_prev_erased_[i] = 0;
@@ -250,7 +461,13 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
                 soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
 
                 if (!dqpsk_skip_first_symbol) {
-                    constellation_update.push_back(diff);
+                    if (!display_payload_carrier) {
+                        ++constellation_padding_skipped;
+                    } else if (differential_signal_power[i] < MIN_DIFFERENTIAL_DISPLAY_POWER) {
+                        ++constellation_weak_diff_skipped;
+                    } else {
+                        constellation_update.push_back(normalizePhaseOnlyForDisplay(diff));
+                    }
                 }
                 dbpsk_prev_equalized[i] = sym;
                 differential_prev_erased_[i] = 0;
@@ -264,7 +481,13 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
                 auto llrs = soft_demap::demapD8PSK(sym, prev_sym, nv);
                 soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
                 if (!dqpsk_skip_first_symbol) {
-                    constellation_update.push_back(diff);
+                    if (!display_payload_carrier) {
+                        ++constellation_padding_skipped;
+                    } else if (differential_signal_power[i] < MIN_DIFFERENTIAL_DISPLAY_POWER) {
+                        ++constellation_weak_diff_skipped;
+                    } else {
+                        constellation_update.push_back(normalizePhaseOnlyForDisplay(diff));
+                    }
                 }
                 dbpsk_prev_equalized[i] = sym;
                 differential_prev_erased_[i] = 0;
@@ -272,44 +495,76 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
             }
             case Modulation::BPSK:
                 soft_bits.push_back(soft_demap::demapBPSK(sym, nv) * llr_sign);
-                constellation_update.push_back(sym);
+                if (display_payload_carrier) {
+                    constellation_update.push_back(sym);
+                } else {
+                    ++constellation_padding_skipped;
+                }
                 break;
             case Modulation::QPSK: {
                 auto llrs = soft_demap::demapQPSK(sym, nv);
                 for (auto& llr : llrs) llr *= llr_sign;
                 soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
-                constellation_update.push_back(sym);
+                if (display_payload_carrier) {
+                    constellation_update.push_back(sym);
+                } else {
+                    ++constellation_padding_skipped;
+                }
                 break;
             }
             case Modulation::QAM8: {
                 auto llrs = soft_demap::demap8PSK(sym, nv);
                 for (auto& llr : llrs) llr *= llr_sign;
                 soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
-                constellation_update.push_back(sym);
+                if (display_payload_carrier) {
+                    constellation_update.push_back(normalizePhaseOnlyForDisplay(sym));
+                } else {
+                    ++constellation_padding_skipped;
+                }
                 break;
             }
             case Modulation::QAM16: {
                 auto llrs = soft_demap::demapQAM16(sym, nv);
                 for (auto& llr : llrs) llr *= llr_sign;
                 soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
+                if (display_payload_carrier) {
+                    constellation_update.push_back(sym);
+                } else {
+                    ++constellation_padding_skipped;
+                }
                 break;
             }
             case Modulation::QAM32: {
                 auto llrs = soft_demap::demapQAM32(sym, nv);
                 for (auto& llr : llrs) llr *= llr_sign;
                 soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
+                if (display_payload_carrier) {
+                    constellation_update.push_back(sym);
+                } else {
+                    ++constellation_padding_skipped;
+                }
                 break;
             }
             case Modulation::QAM64: {
                 auto llrs = soft_demap::demapQAM64(sym, nv);
                 for (auto& llr : llrs) llr *= llr_sign;
                 soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
+                if (display_payload_carrier) {
+                    constellation_update.push_back(sym);
+                } else {
+                    ++constellation_padding_skipped;
+                }
                 break;
             }
             case Modulation::QAM256: {
                 auto llrs = soft_demap::demapQAM256(sym, nv);
                 for (auto& llr : llrs) llr *= llr_sign;
                 soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
+                if (display_payload_carrier) {
+                    constellation_update.push_back(sym);
+                } else {
+                    ++constellation_padding_skipped;
+                }
                 break;
             }
             default: {
@@ -402,6 +657,61 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
     }
 
     // Store constellation symbols (differential decoded for DPSK, raw equalized for coherent)
+    if (constellationDiagEnabled()) {
+        static int demod_log_count = 0;
+        if (demod_log_count < 120) {
+            size_t erased = 0;
+            for (uint8_t flag : carrier_erasure_flags_) {
+                if (flag != 0) {
+                    ++erased;
+                }
+            }
+            size_t weak_diff_refs = 0;
+            if ((mod == Modulation::DQPSK || mod == Modulation::D8PSK) &&
+                differential_signal_power.size() == equalized.size()) {
+                for (float signal_power : differential_signal_power) {
+                    if (signal_power < MIN_DIFFERENTIAL_DISPLAY_POWER) {
+                        ++weak_diff_refs;
+                    }
+                }
+            }
+            const auto eq_stats = constellationDiagStats(equalized);
+            const auto update_stats = constellationDiagStats(constellation_update);
+            LOG_DEMOD(INFO,
+                      "CONSTELLATION_DIAG stage=demod mod=%s data_symbol=%zu "
+                      "all_carriers=%zu data_carriers=%zu pilots=%zu "
+                      "air_bits=%zu/%zu "
+                      "equalized_count=%zu equalized_mag=[%.4f,%.4f,%.4f] "
+                      "equalized_lt0p2=%zu/%zu erased=%zu "
+                      "weak_diff_refs=%zu plotted_update_count=%zu "
+                      "plot_skip_padding=%zu plot_skip_weak_diff=%zu "
+                      "plotted_mag=[%.4f,%.4f,%.4f] plotted_lt0p2=%zu/%zu",
+                      constellationDiagModName(mod),
+                      current_data_symbol_index_,
+                      all_carrier_fft_indices.size(),
+                      data_carrier_indices.size(),
+                      pilot_carrier_indices.size(),
+                      std::min(constellation_air_bit_index_, constellation_valid_air_bits_),
+                      constellation_valid_air_bits_,
+                      eq_stats.count,
+                      eq_stats.min_mag,
+                      eq_stats.avg_mag,
+                      eq_stats.max_mag,
+                      eq_stats.below_0p2,
+                      eq_stats.count,
+                      erased,
+                      weak_diff_refs,
+                      update_stats.count,
+                      constellation_padding_skipped,
+                      constellation_weak_diff_skipped,
+                      update_stats.min_mag,
+                      update_stats.avg_mag,
+                      update_stats.max_mag,
+                      update_stats.below_0p2,
+                      update_stats.count);
+            ++demod_log_count;
+        }
+    }
     appendConstellationSymbols(constellation_update, mod);
 
     // Clear skip flag so subsequent symbols show in constellation
@@ -497,7 +807,12 @@ bool OFDMDemodulator::Impl::demodulateD8PSKTwoPass(
     if (differential_prev_erased_.size() != equalized.size()) {
         differential_prev_erased_.assign(equalized.size(), 0);
     }
+    const size_t carrier_bits = bitsPerCarrier(Modulation::D8PSK);
     for (size_t i = 0; i < equalized.size(); ++i) {
+        const size_t air_bit_index = constellation_air_bit_index_;
+        constellation_air_bit_index_ += carrier_bits;
+        const bool display_payload_carrier =
+            air_bit_index < constellation_valid_air_bits_;
         const bool carrier_erased =
             i < carrier_erasure_flags_.size() && carrier_erasure_flags_[i] != 0;
         const bool prev_erased = differential_prev_erased_[i] != 0;
@@ -525,7 +840,11 @@ bool OFDMDemodulator::Impl::demodulateD8PSKTwoPass(
 
         if (!dqpsk_skip_first_symbol) {
             Complex diff = corrected_sym * std::conj(prev_sym);
-            constellation_update.push_back(diff);
+            const float signal_power = std::abs(corrected_sym) * std::abs(prev_sym);
+            if (display_payload_carrier &&
+                signal_power >= MIN_DIFFERENTIAL_DISPLAY_POWER) {
+                constellation_update.push_back(normalizePhaseOnlyForDisplay(diff));
+            }
         }
 
         // Update reference with corrected symbol
@@ -620,7 +939,12 @@ void OFDMDemodulator::Impl::demodulateDQPSKTwoPass(
 
     auto& constellation_update = dqpsk_constellation_update_scratch;
     constellation_update.clear();
+    const size_t carrier_bits = bitsPerCarrier(Modulation::DQPSK);
     for (size_t i = 0; i < equalized.size(); ++i) {
+        const size_t air_bit_index = constellation_air_bit_index_;
+        constellation_air_bit_index_ += carrier_bits;
+        const bool display_payload_carrier =
+            air_bit_index < constellation_valid_air_bits_;
         Complex prev_sym = dbpsk_prev_equalized[i];
         float sp = std::abs(equalized[i]) * std::abs(prev_sym);
 
@@ -645,7 +969,9 @@ void OFDMDemodulator::Impl::demodulateDQPSKTwoPass(
         // Constellation display
         if (!dqpsk_skip_first_symbol) {
             Complex diff = equalized[i] * phase_corr * std::conj(prev_sym);
-            constellation_update.push_back(diff);
+            if (display_payload_carrier && sp >= MIN_DIFFERENTIAL_DISPLAY_POWER) {
+                constellation_update.push_back(normalizePhaseOnlyForDisplay(diff));
+            }
         }
 
         // Update reference with ORIGINAL symbol (not corrected)

@@ -123,8 +123,10 @@ void ConstellationWidget::drawGrid(ImDrawList* draw_list, ImVec2 center, float s
 
         for (int yi = 0; yi < points_per_axis; ++yi) {
             for (int xi = 0; xi < points_per_axis; ++xi) {
-                float x = (2.0f * xi - points_per_axis + 1) / (points_per_axis - 1);
-                float y = (2.0f * yi - points_per_axis + 1) / (points_per_axis - 1);
+                const float norm = std::sqrt((2.0f / 3.0f) *
+                                             (points_per_axis * points_per_axis - 1.0f));
+                float x = (2.0f * xi - points_per_axis + 1) / norm;
+                float y = (2.0f * yi - points_per_axis + 1) / norm;
 
                 float px = center.x + x * half * 0.8f;
                 float py = center.y - y * half * 0.8f;

@@ -391,6 +391,9 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                     impl_->resetFailureAttributionDiagnostics();
                     impl_->carrier_phase_initialized = false;
                     impl_->carrier_phase_correction = Complex(1, 0);
+                    impl_->constellation_air_bit_index_ = 0;
+                    impl_->constellation_valid_air_bits_ = static_cast<size_t>(-1);
+                    impl_->constellation_capacity_air_bits_ = 0;
 
                     break;
                 }
@@ -710,6 +713,9 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     impl_->carrier_phase_initialized = false;
     impl_->carrier_phase_correction = Complex(1, 0);
     impl_->lts_phase_offset = Complex(1, 0);  // Will be updated by estimateChannelFromLTS
+    impl_->constellation_air_bit_index_ = 0;
+    impl_->constellation_valid_air_bits_ = static_cast<size_t>(-1);
+    impl_->constellation_capacity_air_bits_ = 0;
 
     // Clear constellation symbols so we only show the current frame's data
     {
@@ -788,6 +794,16 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     LOG_DEMOD(DEBUG, "DATA phase: first_sample=%.6f, remaining=%zu", *ptr, remaining);
     size_t data_offset = 0;
     size_t data_symbol_index = 0;
+    const size_t complete_data_symbols = remaining / impl_->symbol_samples;
+    const size_t bits_per_symbol =
+        impl_->data_carrier_indices.size() *
+        static_cast<size_t>(getBitsPerSymbol(impl_->config.modulation));
+    impl_->constellation_air_bit_index_ = 0;
+    impl_->constellation_capacity_air_bits_ = complete_data_symbols * bits_per_symbol;
+    impl_->constellation_valid_air_bits_ =
+        (bits_per_symbol > 0)
+            ? (impl_->constellation_capacity_air_bits_ / LDPC_BLOCK_SIZE) * LDPC_BLOCK_SIZE
+            : 0;
 
     while (remaining - data_offset >= impl_->symbol_samples) {
         timing::ScopedTimer _profile_(timing::globalDecoderProfile().data_symbol_loop);
@@ -893,6 +909,9 @@ void OFDMDemodulator::reset() {
     impl_->resetFailureAttributionDiagnostics();
     impl_->carrier_phase_initialized = false;
     impl_->carrier_phase_correction = Complex(1, 0);
+    impl_->constellation_air_bit_index_ = 0;
+    impl_->constellation_valid_air_bits_ = static_cast<size_t>(-1);
+    impl_->constellation_capacity_air_bits_ = 0;
 
     std::fill(impl_->lms_weights.begin(), impl_->lms_weights.end(), Complex(1, 0));
     std::fill(impl_->last_decisions.begin(), impl_->last_decisions.end(), Complex(0, 0));
