@@ -952,6 +952,14 @@ std::vector<std::complex<float>> StreamingDecoder::getConstellationSymbols() con
     return {};
 }
 
+Modulation StreamingDecoder::getConstellationModulation() const {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    if (waveform_) {
+        return waveform_->getConstellationModulation();
+    }
+    return Modulation::QPSK;
+}
+
 // ============================================================================
 // LIFECYCLE
 // ============================================================================

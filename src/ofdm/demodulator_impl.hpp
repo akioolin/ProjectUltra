@@ -101,6 +101,10 @@ struct OFDMDemodulator::Impl {
     // Constellation display (latest equalized symbols)
     std::vector<Complex> constellation_symbols;
     mutable std::mutex constellation_mutex;
+    // Modulation of the symbols currently in constellation_symbols. The buffer is
+    // reset whenever the modulation changes so the GUI never overlays, e.g., a
+    // 16QAM data frame and a DQPSK control/ACK frame into one smeared cloud.
+    Modulation constellation_mod_ = Modulation::QPSK;
 
     // Sync detection
     std::vector<Complex> sync_sequence;
@@ -298,6 +302,10 @@ struct OFDMDemodulator::Impl {
     // DEMODULATION (demodulator.cpp)
     // ==========================================================================
     void demodulateSymbol(const std::vector<Complex>& equalized, Modulation mod);
+    // Append symbols to the constellation buffer, resetting it (and recording the
+    // new modulation) whenever `mod` differs from the last batch — keeps the GUI
+    // constellation homogeneous per modulation instead of a mixed cloud.
+    void appendConstellationSymbols(const std::vector<Complex>& update, Modulation mod);
     bool demodulateD8PSKTwoPass(const std::vector<Complex>& equalized, float noise_variance);
     void demodulateDQPSKTwoPass(const std::vector<Complex>& equalized, float noise_variance);
     float computeFadingIndex() const;

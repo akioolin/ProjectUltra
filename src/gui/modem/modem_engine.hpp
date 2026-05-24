@@ -121,6 +121,7 @@ public:
     // Set known CFO for light preamble mode (for testing or external CFO source)
     void setKnownCFO(float cfo_hz);
     std::vector<std::complex<float>> getConstellationSymbols() const;
+    Modulation getConstellationModulation() const;
 
     using DataCallback = std::function<void(const std::string&)>;
     void setDataCallback(DataCallback callback) { data_callback_ = callback; }

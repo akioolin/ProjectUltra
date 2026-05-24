@@ -203,6 +203,11 @@ public:
     // Get constellation symbols for GUI display
     virtual std::vector<std::complex<float>> getConstellationSymbols() const = 0;
 
+    // Modulation of the symbols from getConstellationSymbols(), so the GUI can
+    // draw the matching reference grid. Default QPSK for waveforms that don't
+    // expose it (e.g. MC-DPSK); OFDM overrides with the buffer's actual modulation.
+    virtual Modulation getConstellationModulation() const { return Modulation::QPSK; }
+
     // ========================================================================
     // GUI DISPLAY
     // ========================================================================

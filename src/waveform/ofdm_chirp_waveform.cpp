@@ -990,6 +990,13 @@ std::vector<std::complex<float>> OFDMChirpWaveform::getConstellationSymbols() co
     return {};
 }
 
+Modulation OFDMChirpWaveform::getConstellationModulation() const {
+    if (demodulator_) {
+        return demodulator_->getConstellationModulation();
+    }
+    return Modulation::QPSK;
+}
+
 std::string OFDMChirpWaveform::getStatusString() const {
     std::ostringstream oss;
     oss << "OFDM-Chirp " << config_.num_carriers << " carriers, "

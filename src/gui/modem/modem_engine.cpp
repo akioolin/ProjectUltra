@@ -735,6 +735,13 @@ std::vector<std::complex<float>> ModemEngine::getConstellationSymbols() const {
     return {};
 }
 
+Modulation ModemEngine::getConstellationModulation() const {
+    if (streaming_decoder_) {
+        return streaming_decoder_->getConstellationModulation();
+    }
+    return Modulation::QPSK;
+}
+
 bool ModemEngine::isNarrowbandDetected() const {
     if (streaming_decoder_) {
         return streaming_decoder_->getDetectedBandwidth() == BandwidthMode::NARROW;

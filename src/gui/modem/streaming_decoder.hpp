@@ -357,6 +357,7 @@ public:
 
     // Get constellation symbols for display
     std::vector<std::complex<float>> getConstellationSymbols() const;
+    Modulation getConstellationModulation() const;
 
     // ========================================================================
     // LIFECYCLE

@@ -99,6 +99,7 @@ public:
     float getLastLTSResidualCFOHz() const override;
     std::string getFailureAttributionDiagnosticsText() const override;
     std::vector<std::complex<float>> getConstellationSymbols() const override;
+    Modulation getConstellationModulation() const override;
 
     // ========================================================================
     // IWaveform - GUI Display

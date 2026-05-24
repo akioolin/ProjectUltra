@@ -110,6 +110,10 @@ public:
     // Get equalized symbols for constellation display
     Symbol getConstellationSymbols() const;
 
+    // Modulation of the symbols returned by getConstellationSymbols() (the buffer
+    // is reset on modulation change, so this is the modulation of the whole set).
+    Modulation getConstellationModulation() const;
+
     // Check if demodulator is currently synchronized (processing a frame)
     bool isSynced() const;
 

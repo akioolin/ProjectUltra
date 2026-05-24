@@ -139,10 +139,21 @@ void ConstellationWidget::drawSymbols(ImDrawList* draw_list, ImVec2 center, floa
                                        const std::vector<std::complex<float>>& symbols) {
     float half = size / 2;
     ImU32 symbol_color = IM_COL32(100, 200, 255, 200);
+    if (symbols.empty()) return;
+
+    // Power-normalize to unit RMS so the cluster scale matches the reference grid
+    // regardless of the equalizer's absolute amplitude. Without this, symbols
+    // either clamp to the edges or pile up near the origin depending on gain.
+    float power = 0.0f;
+    for (const auto& s : symbols) {
+        power += s.real() * s.real() + s.imag() * s.imag();
+    }
+    float rms = std::sqrt(power / static_cast<float>(symbols.size()));
+    float scale = (rms > 1e-6f) ? (1.0f / rms) : 1.0f;
 
     for (const auto& sym : symbols) {
-        float px = center.x + sym.real() * half * 0.8f;
-        float py = center.y - sym.imag() * half * 0.8f;  // Flip Y
+        float px = center.x + sym.real() * scale * half * 0.8f;
+        float py = center.y - sym.imag() * scale * half * 0.8f;  // Flip Y
 
         // Clamp to display area
         px = std::max(center.x - half, std::min(center.x + half, px));

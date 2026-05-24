@@ -1964,7 +1964,13 @@ void App::render() {
         // Constellation diagram
         ImGui::BeginChild("ConstellationArea", ImVec2(0, 180), false);
         auto symbols = modem_.getConstellationSymbols();
-        constellation_.render(symbols, config_.modulation);
+        // Draw against the modulation of the symbols actually captured (the RX
+        // buffer is reset on modulation change, so it is homogeneous), not the
+        // configured data mode — e.g. a file SENDER's RX shows the DQPSK ACKs it
+        // receives, not its own 16QAM TX. Fall back to the configured mode when idle.
+        Modulation disp_mod = symbols.empty() ? config_.modulation
+                                              : modem_.getConstellationModulation();
+        constellation_.render(symbols, disp_mod);
         ImGui::EndChild();
 
         ImGui::Separator();

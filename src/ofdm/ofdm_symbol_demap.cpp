@@ -57,6 +57,27 @@ bool isDifferentialModulation(Modulation mod) {
 // SYMBOL DEMODULATION
 // =============================================================================
 
+void OFDMDemodulator::Impl::appendConstellationSymbols(
+        const std::vector<Complex>& update, Modulation mod) {
+    if (update.empty()) return;
+    std::lock_guard<std::mutex> lock(constellation_mutex);
+    // Reset the display buffer when the modulation changes so the GUI never
+    // overlays different constellations (e.g. 16QAM data + DQPSK ACKs) into one
+    // smeared cloud. Each batch is homogeneous in modulation.
+    if (mod != constellation_mod_) {
+        constellation_symbols.clear();
+        constellation_mod_ = mod;
+    }
+    constellation_symbols.insert(constellation_symbols.end(),
+                                 update.begin(), update.end());
+    if (constellation_symbols.size() > MAX_CONSTELLATION_SYMBOLS) {
+        constellation_symbols.erase(
+            constellation_symbols.begin(),
+            constellation_symbols.begin() +
+                (constellation_symbols.size() - MAX_CONSTELLATION_SYMBOLS));
+    }
+}
+
 void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equalized, Modulation mod) {
     // Constellation symbols collected during demodulation (differential decoded for DPSK modes)
     auto& constellation_update = constellation_update_scratch;
@@ -381,15 +402,7 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
     }
 
     // Store constellation symbols (differential decoded for DPSK, raw equalized for coherent)
-    if (!constellation_update.empty()) {
-        std::lock_guard<std::mutex> lock(constellation_mutex);
-        constellation_symbols.insert(constellation_symbols.end(),
-                                     constellation_update.begin(), constellation_update.end());
-        if (constellation_symbols.size() > MAX_CONSTELLATION_SYMBOLS) {
-            constellation_symbols.erase(constellation_symbols.begin(),
-                constellation_symbols.begin() + (constellation_symbols.size() - MAX_CONSTELLATION_SYMBOLS));
-        }
-    }
+    appendConstellationSymbols(constellation_update, mod);
 
     // Clear skip flag so subsequent symbols show in constellation
     dqpsk_skip_first_symbol = false;
@@ -520,16 +533,8 @@ bool OFDMDemodulator::Impl::demodulateD8PSKTwoPass(
         differential_prev_erased_[i] = 0;
     }
 
-    // Store differential symbols for constellation display
-    {
-        std::lock_guard<std::mutex> lock(constellation_mutex);
-        constellation_symbols.insert(constellation_symbols.end(),
-                                     constellation_update.begin(), constellation_update.end());
-        if (constellation_symbols.size() > MAX_CONSTELLATION_SYMBOLS) {
-            constellation_symbols.erase(constellation_symbols.begin(),
-                constellation_symbols.begin() + (constellation_symbols.size() - MAX_CONSTELLATION_SYMBOLS));
-        }
-    }
+    // Store differential symbols for constellation display (D8PSK two-pass path)
+    appendConstellationSymbols(constellation_update, Modulation::D8PSK);
 
     return true;
 }
@@ -647,16 +652,8 @@ void OFDMDemodulator::Impl::demodulateDQPSKTwoPass(
         dbpsk_prev_equalized[i] = equalized[i];
     }
 
-    // Store differential symbols for constellation display
-    {
-        std::lock_guard<std::mutex> lock(constellation_mutex);
-        constellation_symbols.insert(constellation_symbols.end(),
-                                     constellation_update.begin(), constellation_update.end());
-        if (constellation_symbols.size() > MAX_CONSTELLATION_SYMBOLS) {
-            constellation_symbols.erase(constellation_symbols.begin(),
-                constellation_symbols.begin() + (constellation_symbols.size() - MAX_CONSTELLATION_SYMBOLS));
-        }
-    }
+    // Store differential symbols for constellation display (DQPSK two-pass path)
+    appendConstellationSymbols(constellation_update, Modulation::DQPSK);
 
     // DEBUG: log first few differential phases to diagnose constellation
     if (snr_symbol_count < 3 && !constellation_update.empty()) {

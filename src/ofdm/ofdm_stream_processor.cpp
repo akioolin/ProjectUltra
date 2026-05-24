@@ -621,6 +621,11 @@ Symbol OFDMDemodulator::getConstellationSymbols() const {
     return impl_->constellation_symbols;
 }
 
+Modulation OFDMDemodulator::getConstellationModulation() const {
+    std::lock_guard<std::mutex> lock(impl_->constellation_mutex);
+    return impl_->constellation_mod_;
+}
+
 bool OFDMDemodulator::isSynced() const {
     return impl_->state.load() == Impl::State::SYNCED;
 }
