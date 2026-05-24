@@ -69,6 +69,7 @@ public:
         std::string auto_send_message;        // message to send once CONNECTED (fires once)
         int auto_message_count = 1;           // how many sequential messages to send (numbered)
         int auto_message_interval_sec = 8;    // gap between sequential auto-messages
+        bool auto_message_vary_len = false;   // randomize each auto-message length (mix short+long)
         int auto_disconnect_after_sec = 0;    // 0 = never; else disconnect N s after CONNECTED
         int exit_after_sec = 0;               // 0 = never; else push SDL_QUIT after N s
     };

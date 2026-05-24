@@ -2415,10 +2415,25 @@ void App::tickScenario() {
                 now - scenario_message_sent_at_ >=
                     std::chrono::seconds(std::max(1, options_.auto_message_interval_sec));
             if (first || interval_elapsed) {
-                std::string msg = options_.auto_send_message;
-                if (scenario_messages_sent_ > 0) {
-                    msg += " #" + std::to_string(scenario_messages_sent_ + 1);
+                std::string msg;
+                if (options_.auto_message_vary_len) {
+                    // Randomize length per message (mix short + long) to exercise
+                    // varied frame counts/timing when hunting intermittent failures.
+                    static std::mt19937 rng{std::random_device{}()};
+                    static const std::string pool =
+                        "ProjectUltra HF modem reliability lorem ipsum dolor sit amet "
+                        "consectetur adipiscing elit sed do eiusmod tempor incididunt ut "
+                        "labore et dolore magna aliqua ut enim ad minim veniam quis nostrud "
+                        "exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat "
+                        "duis aute irure dolor in reprehenderit in voluptate velit esse cillum";
+                    // Span really-short (a few chars, single tiny frame) to long
+                    // (multi-frame) to maximize frame-count/timing diversity.
+                    std::uniform_int_distribution<size_t> dist(2, pool.size());
+                    msg = pool.substr(0, dist(rng));
+                } else {
+                    msg = options_.auto_send_message;
                 }
+                msg += " #" + std::to_string(scenario_messages_sent_ + 1);
                 guiLog("[scenario] sending message %d/%d (%zu bytes)",
                        scenario_messages_sent_ + 1, message_target, msg.size());
                 protocol_.sendMessage(msg);
