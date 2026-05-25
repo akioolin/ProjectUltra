@@ -9,7 +9,12 @@
 #pragma once
 
 #include "protocol/frame_v2.hpp"  // WaveformMode
+#include "ultra/ofdm_link_adaptation.hpp"
 #include "ultra/types.hpp"        // CodeRate
+
+#include <array>
+#include <cmath>
+#include <cstddef>
 
 namespace ultra {
 namespace protocol {
@@ -25,6 +30,231 @@ struct WaveformRecommendation {
     CodeRate rate;
     float estimated_throughput_bps;
 };
+
+inline constexpr float kAnyFadingIndex = 1000.0f;
+inline constexpr float kNoRateSnrDb = 1000.0f;
+inline constexpr uint32_t kOFDMWideSampleRate = 48000;
+inline constexpr uint32_t kOFDMWideSymbolSamples = 1024 + 128;
+inline constexpr uint32_t kOFDMWideCarriers = 59;
+
+struct OFDMRateGate {
+    float max_fading_index = 0.0f;
+    float required_snr_db = kNoRateSnrDb;
+};
+
+struct OFDMCodeRateDescriptor {
+    CodeRate rate = CodeRate::R1_4;
+    float code_rate = 0.25f;
+    uint32_t info_bits_per_codeword = 162;
+    uint32_t coded_bits_per_codeword = v2::LDPC_CODEWORD_BITS;
+    int wide_cw_count = v2::kDefaultFixedFrameCodewords;
+    std::array<OFDMRateGate, 4> differential_gates{};
+    size_t differential_gate_count = 0;
+    std::array<OFDMRateGate, 4> bootstrap_gates{};
+    size_t bootstrap_gate_count = 0;
+    std::array<OFDMRateGate, 4> qam16_gates{};
+    size_t qam16_gate_count = 0;
+};
+
+inline constexpr std::array<OFDMCodeRateDescriptor, 4> kOFDMCodeRateDescriptors{{
+    {
+        CodeRate::R1_4,
+        0.25f,
+        162,
+        v2::LDPC_CODEWORD_BITS,
+        v2::kDefaultFixedFrameCodewords,
+        {{{kAnyFadingIndex, -1000.0f}}},
+        1,
+        {{{kAnyFadingIndex, -1000.0f}}},
+        1,
+        {{{kQAM16AwgnFadingMax, kQAM16AwgnSnrFloorDb},
+          {kQAM16GoodFadingMax, kQAM16GoodSnrFloorDb}}},
+        2,
+    },
+    {
+        CodeRate::R1_2,
+        0.50f,
+        324,
+        v2::LDPC_CODEWORD_BITS,
+        8,
+        {{{0.15f, 12.0f}, {0.65f, 14.0f}, {1.10f, 18.0f}}},
+        3,
+        {{{kAnyFadingIndex, -1000.0f}}},
+        1,
+        {},
+        0,
+    },
+    {
+        CodeRate::R2_3,
+        2.0f / 3.0f,
+        432,
+        v2::LDPC_CODEWORD_BITS,
+        8,
+        {{{0.15f, 25.0f}}},
+        1,
+        {{{0.10f, 25.0f}}},
+        1,
+        {},
+        0,
+    },
+    {
+        CodeRate::R3_4,
+        0.75f,
+        486,
+        v2::LDPC_CODEWORD_BITS,
+        8,
+        {{{0.10f, 25.0f}}},
+        1,
+        {{{0.05f, 34.0f}}},
+        1,
+        {},
+        0,
+    },
+}};
+
+inline const OFDMCodeRateDescriptor* ofdmCodeRateDescriptor(CodeRate rate) {
+    for (const auto& descriptor : kOFDMCodeRateDescriptors) {
+        if (descriptor.rate == rate) {
+            return &descriptor;
+        }
+    }
+    return nullptr;
+}
+
+inline const OFDMCodeRateDescriptor& fallbackOFDMCodeRateDescriptor() {
+    return kOFDMCodeRateDescriptors.front();
+}
+
+inline bool rateGateAllows(const OFDMRateGate& gate, float snr_db, float fading_index) {
+    return fading_index < gate.max_fading_index && snr_db >= gate.required_snr_db;
+}
+
+inline bool descriptorAllowsDifferentialOFDM(const OFDMCodeRateDescriptor& descriptor,
+                                             float snr_db,
+                                             float fading_index) {
+    for (size_t i = 0; i < descriptor.differential_gate_count; ++i) {
+        if (rateGateAllows(descriptor.differential_gates[i], snr_db, fading_index)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+inline bool descriptorAllowsQAM16OFDM(const OFDMCodeRateDescriptor& descriptor,
+                                      float snr_db,
+                                      float fading_index) {
+    for (size_t i = 0; i < descriptor.qam16_gate_count; ++i) {
+        if (rateGateAllows(descriptor.qam16_gates[i], snr_db, fading_index)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+inline bool descriptorAllowsBootstrapOFDM(const OFDMCodeRateDescriptor& descriptor,
+                                          float snr_db,
+                                          float fading_index) {
+    for (size_t i = 0; i < descriptor.bootstrap_gate_count; ++i) {
+        if (rateGateAllows(descriptor.bootstrap_gates[i], snr_db, fading_index)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+template <typename Predicate>
+inline const OFDMCodeRateDescriptor* selectBestOFDMRateDescriptor(Predicate allows) {
+    const OFDMCodeRateDescriptor* best = nullptr;
+    for (const auto& descriptor : kOFDMCodeRateDescriptors) {
+        if (!allows(descriptor)) {
+            continue;
+        }
+        if (best == nullptr || descriptor.code_rate > best->code_rate) {
+            best = &descriptor;
+        }
+    }
+    return best;
+}
+
+inline const OFDMCodeRateDescriptor* selectDifferentialOFDMRateDescriptor(float snr_db,
+                                                                          float fading_index) {
+    return selectBestOFDMRateDescriptor([&](const OFDMCodeRateDescriptor& descriptor) {
+        return descriptorAllowsDifferentialOFDM(descriptor, snr_db, fading_index);
+    });
+}
+
+inline const OFDMCodeRateDescriptor* selectQAM16OFDMRateDescriptor(float snr_db,
+                                                                   float fading_index) {
+    return selectBestOFDMRateDescriptor([&](const OFDMCodeRateDescriptor& descriptor) {
+        return descriptorAllowsQAM16OFDM(descriptor, snr_db, fading_index);
+    });
+}
+
+inline const OFDMCodeRateDescriptor* selectBootstrapOFDMRateDescriptor(float snr_db,
+                                                                       float fading_index,
+                                                                       CodeRate candidate) {
+    const auto* candidate_descriptor = ofdmCodeRateDescriptor(candidate);
+    if (candidate_descriptor == nullptr) {
+        return nullptr;
+    }
+    return selectBestOFDMRateDescriptor([&](const OFDMCodeRateDescriptor& descriptor) {
+        return descriptor.code_rate <= candidate_descriptor->code_rate &&
+               descriptorAllowsBootstrapOFDM(descriptor, snr_db, fading_index);
+    });
+}
+
+inline float estimateWideOFDMRawBps(Modulation mod, CodeRate rate) {
+    const auto* descriptor = ofdmCodeRateDescriptor(rate);
+    if (descriptor == nullptr) {
+        descriptor = &fallbackOFDMCodeRateDescriptor();
+    }
+    const int pilot_spacing = ofdm_link_adaptation::recommendedPilotSpacing(mod, rate);
+    const auto bits_per_symbol = static_cast<float>(
+        ofdm_link_adaptation::bitsPerOFDMSymbol(
+            static_cast<int>(kOFDMWideCarriers), true, pilot_spacing, mod));
+    const float symbol_rate =
+        static_cast<float>(kOFDMWideSampleRate) / static_cast<float>(kOFDMWideSymbolSamples);
+    return bits_per_symbol * symbol_rate * descriptor->code_rate;
+}
+
+inline const OFDMCodeRateDescriptor* previousOFDMRateDescriptor(CodeRate rate) {
+    const auto* current = ofdmCodeRateDescriptor(rate);
+    if (current == nullptr) {
+        return nullptr;
+    }
+    const OFDMCodeRateDescriptor* previous = nullptr;
+    for (const auto& descriptor : kOFDMCodeRateDescriptors) {
+        if (descriptor.code_rate < current->code_rate &&
+            (previous == nullptr || descriptor.code_rate > previous->code_rate)) {
+            previous = &descriptor;
+        }
+    }
+    return previous;
+}
+
+inline const OFDMCodeRateDescriptor* nextOFDMRateDescriptorToward(CodeRate current_rate,
+                                                                  CodeRate target_rate) {
+    const auto* current = ofdmCodeRateDescriptor(current_rate);
+    const auto* target = ofdmCodeRateDescriptor(target_rate);
+    if (current == nullptr || target == nullptr || target->code_rate <= current->code_rate) {
+        return current;
+    }
+    const OFDMCodeRateDescriptor* next = target;
+    for (const auto& descriptor : kOFDMCodeRateDescriptors) {
+        if (descriptor.code_rate > current->code_rate &&
+            descriptor.code_rate < next->code_rate) {
+            next = &descriptor;
+        }
+    }
+    return next;
+}
+
+inline float ofdmCodeRateValue(CodeRate rate) {
+    if (const auto* descriptor = ofdmCodeRateDescriptor(rate)) {
+        return descriptor->code_rate;
+    }
+    return fallbackOFDMCodeRateDescriptor().code_rate;
+}
 
 // Shared helper: Select code rate for OFDM modes based on SNR and fading
 // This is the SINGLE SOURCE OF TRUTH for rate selection thresholds.
@@ -67,54 +297,26 @@ struct WaveformRecommendation {
 //   10KB Good fading SNR=15: 1485 bps, 33% retx
 //   Demoted from Good: R1/2 gives similar throughput with half the retx.
 inline CodeRate selectOFDMCodeRate(float snr_db, float fading_index) {
-    // R3/4 — AWGN-only, very high SNR (unchanged pending re-measurement)
-    if (fading_index < 0.10f && snr_db >= 25.0f) return CodeRate::R3_4;
-
-    // R2/3 — near-AWGN, very high SNR (unchanged pending re-measurement)
-    if (fading_index < 0.15f && snr_db >= 25.0f) return CodeRate::R2_3;
-
-    // R1/2 — promoted 2026-05-21 from a single SNR>=25 gate to per-fading
-    // thresholds matched to measured reliable floors + 2 dB safety margin.
-    if (fading_index < 0.15f && snr_db >= 12.0f) return CodeRate::R1_2;
-    if (fading_index < 0.65f && snr_db >= 14.0f) return CodeRate::R1_2;
-    if (fading_index < 1.10f && snr_db >= 18.0f) return CodeRate::R1_2;
-
-    // Default: R1/4 (most robust)
-    return CodeRate::R1_4;
+    const auto* descriptor = selectDifferentialOFDMRateDescriptor(snr_db, fading_index);
+    return descriptor ? descriptor->rate : fallbackOFDMCodeRateDescriptor().rate;
 }
 
-inline bool shouldSelectQAM16R12(float snr_db, float fading_index) {
-    const bool awgn_path =
-        fading_index < kQAM16AwgnFadingMax && snr_db >= kQAM16AwgnSnrFloorDb;
-    // OTASim GOOD fading can estimate just into the Moderate label on a
-    // receiver-local realization. Keep this as a narrow measurement hysteresis
-    // band so Good@20 does not go asymmetric or silently fall to DQPSK.
-    const bool good_fading_measurement_path =
-        fading_index >= kQAM16AwgnFadingMax &&
-        fading_index < kQAM16GoodFadingMax &&
-        snr_db >= kQAM16GoodSnrFloorDb;
-    return awgn_path || good_fading_measurement_path;
+inline CodeRate selectQAM16CodeRate(float snr_db, float fading_index) {
+    const auto* descriptor = selectQAM16OFDMRateDescriptor(snr_db, fading_index);
+    return descriptor ? descriptor->rate : CodeRate::AUTO;
+}
+
+inline bool shouldSelectQAM16(float snr_db, float fading_index) {
+    return selectQAM16OFDMRateDescriptor(snr_db, fading_index) != nullptr;
 }
 
 // Cap initial OFDM rate during handshake bootstrap using only chirp-era metrics.
 // This avoids optimistic R2/3 starts when first post-connect OFDM quality is unknown.
 inline CodeRate capInitialOFDMRate(float snr_db, float fading_index, CodeRate candidate) {
-    if (candidate == CodeRate::R3_4) {
-        // Keep R3/4 for near-ideal channels only.
-        if (fading_index >= 0.05f || snr_db < 34.0f) {
-            return CodeRate::R2_3;
-        }
-        return candidate;
+    if (const auto* descriptor =
+            selectBootstrapOFDMRateDescriptor(snr_db, fading_index, candidate)) {
+        return descriptor->rate;
     }
-
-    if (candidate == CodeRate::R2_3) {
-        // R2/3 is now AWGN-only (fading < 0.15). At bootstrap, chirp-era fading
-        // can read slightly high, so cap to R1/2 if any fading detected.
-        if (fading_index >= 0.10f || snr_db < 25.0f) {
-            return CodeRate::R1_2;
-        }
-    }
-
     return candidate;
 }
 
@@ -157,25 +359,19 @@ inline WaveformRecommendation recommendWaveformAndRate(float snr_db, float fadin
         // True AWGN (no fading)
         rec.waveform = WaveformMode::OFDM_CHIRP;
         rec.rate = selectOFDMCodeRate(snr_db, fading_index);
-        rec.estimated_throughput_bps = (rec.rate == CodeRate::R3_4) ? 3438.0f :
-                                       (rec.rate == CodeRate::R2_3) ? 2944.0f :
-                                       (rec.rate == CodeRate::R1_2) ? 2208.0f : 1104.0f;
+        rec.estimated_throughput_bps = estimateWideOFDMRawBps(Modulation::DQPSK, rec.rate);
     }
     else if (fading_index < 1.10f) {
         // Good-to-moderate fading: OFDM_CHIRP with extra floor margin vs AWGN.
         rec.waveform = WaveformMode::OFDM_CHIRP;
         rec.rate = selectOFDMCodeRate(snr_db, fading_index);
-        rec.estimated_throughput_bps = (rec.rate == CodeRate::R3_4) ? 3438.0f :
-                                       (rec.rate == CodeRate::R2_3) ? 2944.0f :
-                                       (rec.rate == CodeRate::R1_2) ? 2208.0f : 1104.0f;
+        rec.estimated_throughput_bps = estimateWideOFDMRawBps(Modulation::DQPSK, rec.rate);
     }
     else {
         // Heavy fading keeps extra margin but still uses the OFDM_CHIRP R1/4 floor.
         rec.waveform = WaveformMode::OFDM_CHIRP;
         rec.rate = selectOFDMCodeRate(snr_db, fading_index);
-        rec.estimated_throughput_bps = (rec.rate == CodeRate::R3_4) ? 3438.0f :
-                                       (rec.rate == CodeRate::R2_3) ? 2944.0f :
-                                       (rec.rate == CodeRate::R1_2) ? 2208.0f : 1104.0f;
+        rec.estimated_throughput_bps = estimateWideOFDMRawBps(Modulation::DQPSK, rec.rate);
     }
 
     return rec;
@@ -244,15 +440,11 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
     // 1.5× the bits/symbol of DQPSK R2/3 at the same conditions, so
     // the throughput jumps from ~3.4 kbps to ~5 kbps with zero retx.
     //
-    // Coherent QAM16 R1/2. AWGN stays on the 16 dB gate measured during the
-    // 2026-05-23 P5 wiring. GOOD fading is intentionally enabled at 17 dB as
-    // a measurement rung. The GOOD gate allows a small estimator-spread margin
-    // above the nominal 0.65 label boundary because the GUI/OTASim GOOD lobby
-    // can report ~0.68 during handshake. MODERATE/POOR fixtures remain on the
-    // differential fallback.
-    if (shouldSelectQAM16R12(snr_db, fading_index)) {
+    // Coherent QAM16 rate ladder. The active first rung is R1/4; higher code
+    // rates are added by table entry once the GUI scenario proves each rung.
+    if (shouldSelectQAM16(snr_db, fading_index)) {
         mod = Modulation::QAM16;
-        rate = CodeRate::R1_2;
+        rate = selectQAM16CodeRate(snr_db, fading_index);
         return;
     }
 

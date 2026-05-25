@@ -460,22 +460,29 @@ private:
     uint32_t file_cancel_reassert_ms_ = 0;
     uint32_t file_cancel_reassert_cooldown_ms_ = 0;
     bool file_cancel_confirm_pending_ = false;
-    static constexpr uint32_t DATA_TURN_ACK_DIVERSITY_GUARD_MS = 250;
-    static constexpr uint32_t DATA_TURN_CONNECT_GUARD_MS = 2500;
-    // Explicit post-TURNOVER settle for the receiver to finish the control
-    // frame tail and reacquire the following DATA burst. This must not depend
-    // on incidental GUI log I/O such as per-ACK msgbox lines.
-    static constexpr uint32_t DATA_TURN_CONTROL_GUARD_MS = 1500;
+    static constexpr uint32_t DATA_TURN_ACK_DIVERSITY_GUARD_FLOOR_MS = 250;
+    static constexpr uint32_t DATA_TURN_CONNECT_GUARD_FLOOR_MS = 500;
+    static constexpr uint32_t DATA_TURN_CONTROL_GUARD_FLOOR_MS = 500;
+    static constexpr uint32_t TURN_REQUEST_HOLDOFF_FLOOR_MS = 2000;
+    static constexpr uint32_t TURN_REQUEST_RETRANSMIT_FLOOR_MS = 2500;
+    static constexpr uint32_t FILE_CANCEL_TX_GUARD_FLOOR_MS = 1500;
+    static constexpr uint32_t FILE_CANCEL_CONFIRM_DATA_GUARD_FLOOR_MS = 1500;
     static constexpr uint32_t FILE_CANCEL_RX_DRAIN_MS = 5000;
-    static constexpr uint32_t FILE_CANCEL_TX_GUARD_MS = 6000;
-    static constexpr uint32_t FILE_CANCEL_CONFIRM_DATA_GUARD_MS = 5000;
     static constexpr uint32_t FILE_CANCEL_REASSERT_WINDOW_MS = 30000;
     static constexpr uint32_t FILE_CANCEL_REASSERT_COOLDOWN_MS = 1500;
     static constexpr uint64_t DATA_TURN_FAIR_BURST_BYTES = 4096;
     static constexpr uint64_t DATA_TURN_FAIR_MIN_BYTES_FOR_TIME_YIELD = 1024;
     static constexpr uint32_t DATA_TURN_FAIR_BURST_MS = 24000;
-    static constexpr uint32_t TURN_REQUEST_HOLDOFF_AFTER_DATA_MS = 7000;
-    static constexpr uint32_t TURN_REQUEST_RETRANSMIT_MS = 7000;
+    uint32_t currentDataFrameAirtimeMs() const;
+    uint32_t currentControlFrameAirtimeMs() const;
+    uint32_t currentBurstAnchorAirtimeMs() const;
+    uint32_t dataTurnAckDiversityGuardMs() const;
+    uint32_t dataTurnConnectGuardMs() const;
+    uint32_t dataTurnControlGuardMs() const;
+    uint32_t turnRequestHoldoffAfterDataMs() const;
+    uint32_t turnRequestRetransmitMs() const;
+    uint32_t fileCancelTxGuardMs() const;
+    uint32_t fileCancelConfirmDataGuardMs() const;
 
     void flushBurstBuffer();
     void processArqFrame(const Bytes& frame_data);

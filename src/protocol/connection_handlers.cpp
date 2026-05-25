@@ -547,7 +547,7 @@ void Connection::handleTurnover(const v2::ControlFrame& frame, const std::string
     turn_request_holdoff_ms_ = 0;
     resetDataTurnFairness();
     arq_.clearPendingAckRepeats();
-    armDataTurnTxGuard(DATA_TURN_CONTROL_GUARD_MS);
+    armDataTurnTxGuard(dataTurnControlGuardMs());
 
     LOG_MODEM(INFO, "Connection: RX TURNOVER from %s; local station is now ISS",
               src_call.empty() ? remote_call_.c_str() : src_call.c_str());
@@ -597,7 +597,7 @@ void Connection::handleFileCancel(const v2::ControlFrame& frame, const std::stri
     }
     clearFileTransferArqState();
     file_cancel_rx_drain_ms_ = FILE_CANCEL_RX_DRAIN_MS;
-    armDataTurnTxGuard(FILE_CANCEL_TX_GUARD_MS);
+    armDataTurnTxGuard(fileCancelTxGuardMs());
     file_cancel_confirm_pending_ = had_active_transfer;
     data_turn_yield_pending_ = false;
     resetDataTurnFairness();
@@ -677,7 +677,7 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data, v2::Fra
         return;
     }
     received_peer_data_since_connect_ = true;
-    turn_request_holdoff_ms_ = TURN_REQUEST_HOLDOFF_AFTER_DATA_MS;
+    turn_request_holdoff_ms_ = turnRequestHoldoffAfterDataMs();
 
     const bool binary_payload =
         frame_type == v2::FrameType::DATA_START ||

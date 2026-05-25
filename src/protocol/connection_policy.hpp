@@ -219,9 +219,10 @@ inline bool isHighThroughputOFDMMode(Modulation mod, CodeRate rate) {
     // fading<0.65 minimum), which is the same precondition the larger
     // window assumes.
     if (mod == Modulation::DQPSK || mod == Modulation::D8PSK) {
-        return rate == CodeRate::R1_2 ||
-               rate == CodeRate::R2_3 ||
-               rate == CodeRate::R3_4;
+        const auto* descriptor = ofdmCodeRateDescriptor(rate);
+        const auto* floor = ofdmCodeRateDescriptor(CodeRate::R1_2);
+        return descriptor != nullptr && floor != nullptr &&
+               descriptor->code_rate >= floor->code_rate;
     }
     return false;
 }
@@ -230,7 +231,10 @@ inline bool isSpeculativeHighRateOFDM(Modulation mod, CodeRate rate) {
     // R2/3 and R3/4 are speculative (window=16 only on near-AWGN);
     // R1/2 is non-speculative (window=16 always when fading channel
     // is good). Both DQPSK and D8PSK follow the same logic.
-    const bool risky_rate = (rate == CodeRate::R2_3 || rate == CodeRate::R3_4);
+    const auto* descriptor = ofdmCodeRateDescriptor(rate);
+    const auto* floor = ofdmCodeRateDescriptor(CodeRate::R1_2);
+    const bool risky_rate = descriptor != nullptr && floor != nullptr &&
+                            descriptor->code_rate > floor->code_rate;
     return risky_rate && (mod == Modulation::DQPSK || mod == Modulation::D8PSK);
 }
 
@@ -377,15 +381,10 @@ inline int recommendCWCount(CodeRate rate, WaveformMode waveform) {
     if (waveform == WaveformMode::OFDM_NARROW) {
         return v2::kDefaultFixedFrameCodewords;  // 4 — fade-coherence cap
     }
-    switch (rate) {
-        case CodeRate::R1_2:
-        case CodeRate::R2_3:
-        case CodeRate::R3_4:
-            return 8;
-        case CodeRate::R1_4:
-        default:
-            return v2::kDefaultFixedFrameCodewords;  // 4
+    if (const auto* descriptor = ofdmCodeRateDescriptor(rate)) {
+        return descriptor->wide_cw_count;
     }
+    return v2::kDefaultFixedFrameCodewords;
 }
 
 // Modulation-aware data-frame CW policy for waveforms whose fade exposure is

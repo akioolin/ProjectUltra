@@ -425,7 +425,7 @@ void test_adaptive_upgrade_requires_backlog_and_clean_windows() {
     CHECK(!payload.path.empty(), "large test file");
 
     Connection c;
-    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 25.0f, 0.05f);
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_4, 25.0f, 0.05f);
     ConnectionAdaptiveTestAccess::startFile(c, payload.path);
 
     for (int i = 0; i < ConnectionAdaptiveTestAccess::cleanWindowsForUpgrade() - 1; ++i) {
@@ -438,9 +438,9 @@ void test_adaptive_upgrade_requires_backlog_and_clean_windows() {
     CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c),
           "clean AWGN backlog should request adaptive upgrade");
     CHECK(ConnectionAdaptiveTestAccess::pendingModulation(c) == Modulation::D8PSK,
-          "adaptive upgrade should step one rung toward the coherent top mode");
-    CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R1_2,
-          "adaptive upgrade should keep R1/2 on the first faster rung");
+          "adaptive upgrade should step one modulation rung toward the QAM16 ladder");
+    CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R1_4,
+          "adaptive upgrade should keep the descriptor-selected R1/4 rung");
 }
 
 void test_adaptive_upgrade_skips_small_backlog() {
@@ -501,10 +501,10 @@ void test_adaptive_downgrade_hysteresis_and_short_lockout_upgrade() {
 
     CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c),
           "clean windows after recovery dwell should issue an upgrade at the boundary");
-    CHECK(ConnectionAdaptiveTestAccess::pendingModulation(c) == Modulation::DQPSK,
-          "recovery-dwell upgrade should step rate first from the robust floor");
-    CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R1_2,
-          "recovery-dwell upgrade should target DQPSK R1/2");
+    CHECK(ConnectionAdaptiveTestAccess::pendingModulation(c) == Modulation::D8PSK,
+          "recovery-dwell upgrade should step modulation toward the active QAM16 rung");
+    CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R1_4,
+          "recovery-dwell upgrade should keep the active descriptor-selected rate");
 }
 
 void test_adaptive_high_order_downgrade_steps_one_rung() {
@@ -524,13 +524,13 @@ void test_adaptive_high_order_downgrade_steps_one_rung() {
 
     CHECK(ConnectionAdaptiveTestAccess::modeChangePending(qam16),
           "QAM16 retry pressure should issue a one-rung downgrade");
-    CHECK(ConnectionAdaptiveTestAccess::pendingModulation(qam16) == Modulation::D8PSK,
-          "QAM16 should downgrade to differential 8PSK, not slam to DQPSK");
-    CHECK(ConnectionAdaptiveTestAccess::pendingRate(qam16) == CodeRate::R1_2,
-          "QAM16 one-rung downgrade should keep R1/2");
+    CHECK(ConnectionAdaptiveTestAccess::pendingModulation(qam16) == Modulation::QAM16,
+          "QAM16 code-rate pressure should step down inside the QAM16 ladder first");
+    CHECK(ConnectionAdaptiveTestAccess::pendingRate(qam16) == CodeRate::R1_4,
+          "QAM16 one-rung downgrade should target the active R1/4 rung");
     ConnectionAdaptiveTestAccess::acknowledgeModeChange(qam16);
-    CHECK(qam16.getDataModulation() == Modulation::D8PSK,
-          "acknowledged QAM16 downgrade should apply D8PSK");
+    CHECK(qam16.getDataModulation() == Modulation::QAM16,
+          "acknowledged QAM16 code-rate downgrade should remain QAM16");
     CHECK(ConnectionAdaptiveTestAccess::postDowngradeLockoutRemaining(qam16) ==
               ConnectionAdaptiveTestAccess::postDowngradeLockoutMs(),
           "same-rate modulation downgrade should arm upgrade lockout");
@@ -545,10 +545,37 @@ void test_adaptive_high_order_downgrade_steps_one_rung() {
     ConnectionAdaptiveTestAccess::advanceRetransmissionPressure(d8psk);
     ConnectionAdaptiveTestAccess::updateAdaptive(d8psk, 1000);
 
-    CHECK(!ConnectionAdaptiveTestAccess::adaptiveTargetPending(d8psk),
-          "sparse D8PSK retry pressure should hold the stable 8PSK landing");
-    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(d8psk),
-          "sparse D8PSK retry pressure should not issue a QPSK fallback");
+    CHECK(ConnectionAdaptiveTestAccess::modeChangePending(d8psk),
+          "sparse D8PSK retry pressure should step code rate before abandoning 8PSK");
+    CHECK(ConnectionAdaptiveTestAccess::pendingModulation(d8psk) == Modulation::D8PSK,
+          "sparse D8PSK retry pressure should keep modulation on the first downgrade");
+    CHECK(ConnectionAdaptiveTestAccess::pendingRate(d8psk) == CodeRate::R1_4,
+          "sparse D8PSK retry pressure should step to the robust code-rate rung");
+}
+
+void test_adaptive_qam16_r14_is_ladder_floor() {
+    TempPayloadFile payload("ultra_adapt_qam16_floor", 5000);
+    CHECK(payload.dir.valid(), "temp dir");
+    CHECK(!payload.path.empty(), "large test file");
+
+    Connection c;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R1_4, 20.0f, 0.05f, Modulation::QAM16);
+    ConnectionAdaptiveTestAccess::startFile(c, payload.path);
+    ConnectionAdaptiveTestAccess::createRetransmissionPressure(
+        c, ConnectionAdaptiveTestAccess::arqWindow(c));
+    ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
+    ConnectionAdaptiveTestAccess::advanceRetransmissionPressure(c);
+    ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
+
+    CHECK(!ConnectionAdaptiveTestAccess::adaptiveTargetPending(c),
+          "QAM16 R1/4 retry pressure must not queue a differential fallback");
+    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
+          "QAM16 R1/4 is the QAM16 ladder floor and should not emit MODE_CHANGE");
+    CHECK(c.getDataModulation() == Modulation::QAM16,
+          "QAM16 floor should keep the active data modulation coherent");
+    CHECK(c.getDataCodeRate() == CodeRate::R1_4,
+          "QAM16 floor should keep the active code rate");
 }
 
 void test_adaptive_full_window_timeout_downgrades_immediately() {
@@ -568,10 +595,10 @@ void test_adaptive_full_window_timeout_downgrades_immediately() {
           "full-window timeout should queue a downgrade after one pressure window");
     CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(qam16),
           "full-window downgrade should still wait for boundary or force dwell");
-    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetModulation(qam16) == Modulation::D8PSK,
-          "full-window QAM16 failure should step down one rung to D8PSK");
-    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(qam16) == CodeRate::R1_2,
-          "full-window QAM16 failure should keep R1/2 on the first downgrade");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetModulation(qam16) == Modulation::QAM16,
+          "full-window QAM16 failure should step down within the QAM16 code-rate ladder");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(qam16) == CodeRate::R1_4,
+          "full-window QAM16 failure should target the active R1/4 rung");
 
     Connection d8psk;
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(
@@ -585,10 +612,10 @@ void test_adaptive_full_window_timeout_downgrades_immediately() {
           "full-window D8PSK timeout should prove the 8PSK landing unusable");
     CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(d8psk),
           "full-window D8PSK fallback should still wait for boundary or force dwell");
-    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetModulation(d8psk) == Modulation::QPSK,
-          "severe D8PSK failure should step down one rung to QPSK");
-    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(d8psk) == CodeRate::R1_2,
-          "severe D8PSK fallback should keep R1/2 on the first coherent rung");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetModulation(d8psk) == Modulation::D8PSK,
+          "severe D8PSK failure should step code rate before changing modulation");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(d8psk) == CodeRate::R1_4,
+          "severe D8PSK fallback should target the robust code-rate rung first");
 }
 
 void test_adaptive_cooldown_blocks_cascaded_downgrade() {
@@ -820,12 +847,10 @@ void test_adaptive_post_downgrade_lockout_expires() {
         c, ConnectionAdaptiveTestAccess::postDowngradeLockoutMs() -
                (ConnectionAdaptiveTestAccess::cleanWindowsForUpgrade() - 1) * 1000 + 1);
 
-    CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c),
-          "upgrade should issue at the boundary once post-downgrade lockout expires");
-    CHECK(ConnectionAdaptiveTestAccess::pendingModulation(c) == Modulation::D8PSK,
-          "expired post-downgrade lockout should allow one-rung upgrade");
-    CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R1_2,
-          "expired post-downgrade lockout should allow D8PSK R1/2 upgrade");
+    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
+          "expired post-downgrade lockout should not upgrade into a slower active QAM16 rung");
+    CHECK(!ConnectionAdaptiveTestAccess::adaptiveTargetPending(c),
+          "slower active QAM16 rung should remain unqueued after recovery dwell");
 }
 
 void test_forced_rate_disables_adaptive_controller() {
@@ -860,6 +885,7 @@ int main() {
     test_adaptive_upgrade_skips_small_backlog();
     test_adaptive_downgrade_hysteresis_and_short_lockout_upgrade();
     test_adaptive_high_order_downgrade_steps_one_rung();
+    test_adaptive_qam16_r14_is_ladder_floor();
     test_adaptive_full_window_timeout_downgrades_immediately();
     test_adaptive_cooldown_blocks_cascaded_downgrade();
     test_adaptive_downgrade_waits_when_more_than_half_full();

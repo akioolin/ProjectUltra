@@ -42,8 +42,11 @@ Bytes makeOFDMBurstPadPayload(CodeRate rate, int cw_count, size_t pad_index) {
 }
 
 bool shouldUseSingleOFDMFileBlock(float fading_index, float snr_db, CodeRate rate) {
+    const auto* descriptor = ofdmCodeRateDescriptor(rate);
+    const auto* single_block_floor = ofdmCodeRateDescriptor(CodeRate::R2_3);
     return connection_policy::isNearAwgnOFDM(fading_index, snr_db) &&
-           getCodeRateValue(rate) >= getCodeRateValue(CodeRate::R2_3);
+           descriptor != nullptr && single_block_floor != nullptr &&
+           descriptor->code_rate >= single_block_floor->code_rate;
 }
 
 bool shouldPadPartialOFDMBurst(WaveformMode mode,
@@ -131,15 +134,15 @@ bool hasCleanAdaptiveWindow(const ARQStats& now,
 }
 
 bool isFasterRate(CodeRate candidate, CodeRate current) {
-    return getCodeRateValue(candidate) > getCodeRateValue(current);
+    return ofdmCodeRateValue(candidate) > ofdmCodeRateValue(current);
 }
 
 bool isMoreRobustRate(CodeRate candidate, CodeRate current) {
-    return getCodeRateValue(candidate) < getCodeRateValue(current);
+    return ofdmCodeRateValue(candidate) < ofdmCodeRateValue(current);
 }
 
 float modeEfficiency(Modulation mod, CodeRate rate) {
-    return static_cast<float>(getBitsPerSymbol(mod)) * getCodeRateValue(rate);
+    return estimateWideOFDMRawBps(mod, rate);
 }
 
 bool isFasterMode(Modulation candidate_mod, CodeRate candidate_rate,
@@ -202,12 +205,10 @@ bool expectsFullOFDMAnchorAfterTx(const Bytes& frame_data) {
 }
 
 CodeRate oneStepMoreRobust(CodeRate rate) {
-    switch (rate) {
-        case CodeRate::R3_4: return CodeRate::R2_3;
-        case CodeRate::R2_3: return CodeRate::R1_2;
-        case CodeRate::R1_2: return CodeRate::R1_4;
-        default: return CodeRate::R1_4;
+    if (const auto* previous = previousOFDMRateDescriptor(rate)) {
+        return previous->rate;
     }
+    return rate;
 }
 
 struct AdaptiveMode {
@@ -216,7 +217,7 @@ struct AdaptiveMode {
 };
 
 AdaptiveMode oneStepMoreRobustMode(Modulation mod, CodeRate rate) {
-    if (rate == CodeRate::R3_4 || rate == CodeRate::R2_3) {
+    if (isFasterRate(rate, fallbackOFDMCodeRateDescriptor().rate)) {
         return {mod, oneStepMoreRobust(rate)};
     }
 
@@ -224,8 +225,9 @@ AdaptiveMode oneStepMoreRobustMode(Modulation mod, CodeRate rate) {
         case Modulation::QAM256:
         case Modulation::QAM64:
         case Modulation::QAM32:
+            return {Modulation::QAM16, rate};
         case Modulation::QAM16:
-            return {Modulation::D8PSK, rate};
+            return {mod, rate};
         case Modulation::D8PSK:
         case Modulation::QAM8:
             return {Modulation::QPSK, rate};
@@ -235,7 +237,7 @@ AdaptiveMode oneStepMoreRobustMode(Modulation mod, CodeRate rate) {
             break;
     }
 
-    if (isFasterRate(rate, CodeRate::R1_4)) {
+    if (isFasterRate(rate, fallbackOFDMCodeRateDescriptor().rate)) {
         return {mod, oneStepMoreRobust(rate)};
     }
     return {mod, rate};
@@ -247,9 +249,9 @@ AdaptiveMode oneStepFasterToward(Modulation current_mod, CodeRate current_rate,
         return {current_mod, current_rate};
     }
 
-    if (current_rate == CodeRate::R1_4 &&
-        getCodeRateValue(recommended_rate) >= getCodeRateValue(CodeRate::R1_2)) {
-        return {current_mod, CodeRate::R1_2};
+    if (const auto* next = nextOFDMRateDescriptorToward(current_rate, recommended_rate);
+        next != nullptr && next->rate != current_rate) {
+        return {current_mod, next->rate};
     }
 
     if (current_mod == Modulation::DQPSK &&
@@ -262,7 +264,7 @@ AdaptiveMode oneStepFasterToward(Modulation current_mod, CodeRate current_rate,
     }
     if ((current_mod == Modulation::D8PSK || current_mod == Modulation::QAM8) &&
         adaptiveModulationRank(recommended_mod) >= adaptiveModulationRank(Modulation::QAM16)) {
-        return {Modulation::QAM16, CodeRate::R1_2};
+        return {Modulation::QAM16, recommended_rate};
     }
 
     return {recommended_mod, recommended_rate};
@@ -1017,7 +1019,7 @@ void Connection::sendTurnRequestIfNeeded() {
               queued_payloads_.size(), getTxBacklogBytes());
     transmitFrame(request.serialize());
     local_turn_request_pending_ = true;
-    turn_request_retransmit_ms_ = TURN_REQUEST_RETRANSMIT_MS;
+    turn_request_retransmit_ms_ = turnRequestRetransmitMs();
 }
 
 void Connection::armDataTurnTxGuard(uint32_t guard_ms) {
@@ -1057,10 +1059,10 @@ bool Connection::maybeYieldDataTurn() {
     local_turn_request_pending_ = false;
     data_turn_yield_pending_ = false;
     turn_request_retransmit_ms_ = 0;
-    turn_request_holdoff_ms_ = TURN_REQUEST_HOLDOFF_AFTER_DATA_MS;
+    turn_request_holdoff_ms_ = turnRequestHoldoffAfterDataMs();
     received_peer_data_since_connect_ = false;
     resetDataTurnFairness();
-    armDataTurnTxGuard(DATA_TURN_CONTROL_GUARD_MS);
+    armDataTurnTxGuard(dataTurnControlGuardMs());
     return true;
 }
 
@@ -1483,7 +1485,7 @@ void Connection::cancelFileTransfer() {
         file_transfer_.cancel("Transfer cancelled");
         clearFileTransferArqState();
         file_cancel_rx_drain_ms_ = FILE_CANCEL_RX_DRAIN_MS;
-        armDataTurnTxGuard(FILE_CANCEL_TX_GUARD_MS);
+        armDataTurnTxGuard(fileCancelTxGuardMs());
         file_cancel_confirm_pending_ = false;
     }
 
@@ -1761,7 +1763,7 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                         } else {
                             // Regular data ACK
                             if (local_data_turn_) {
-                                armDataTurnTxGuard(DATA_TURN_ACK_DIVERSITY_GUARD_MS);
+                                armDataTurnTxGuard(dataTurnAckDiversityGuardMs());
                                 if ((ctrl->flags & v2::Flags::TURN_REQUEST) != 0) {
                                     peer_data_turn_requested_ = true;
                                     LOG_MODEM(INFO,
@@ -2378,7 +2380,7 @@ void Connection::tick(uint32_t elapsed_ms) {
                 arq_.isReadyToSend()) {
                 transmitFileCancelControl(" (confirm)");
                 file_cancel_confirm_pending_ = false;
-                armDataTurnTxGuard(FILE_CANCEL_CONFIRM_DATA_GUARD_MS);
+                armDataTurnTxGuard(fileCancelConfirmDataGuardMs());
             }
             if (!local_data_turn_ && hasLocalDataWaitingForTurn() && !local_turn_request_pending_) {
                 sendTurnRequestIfNeeded();
@@ -2549,6 +2551,109 @@ void Connection::transmitFrame(const Bytes& frame_data) {
     if (expect_full_anchor_after_tx && on_full_ofdm_anchor_expected_) {
         on_full_ofdm_anchor_expected_();
     }
+}
+
+uint32_t Connection::currentDataFrameAirtimeMs() const {
+    if (negotiated_mode_ == WaveformMode::OFDM_CHIRP) {
+        return connection_policy::wideOFDMFrameTiming(
+            data_modulation_, data_code_rate_, data_frame_cw_count_).data_ms;
+    }
+    if (negotiated_mode_ == WaveformMode::OFDM_NARROW) {
+        return connection_policy::narrowOFDMFrameTiming(
+            data_modulation_, data_frame_cw_count_).data_ms;
+    }
+    if (negotiated_mode_ == WaveformMode::MC_DPSK) {
+        return connection_policy::mcDpskFrameTiming(
+            data_modulation_,
+            config_.mc_dpsk_num_carriers,
+            config_.mc_dpsk_samples_per_symbol,
+            data_frame_cw_count_).data_ms;
+    }
+    return 1000;
+}
+
+uint32_t Connection::currentControlFrameAirtimeMs() const {
+    if (negotiated_mode_ == WaveformMode::OFDM_CHIRP) {
+        return connection_policy::wideOFDMFrameTiming(
+            data_modulation_, data_code_rate_, data_frame_cw_count_).ack_ms;
+    }
+    if (negotiated_mode_ == WaveformMode::OFDM_NARROW) {
+        return connection_policy::narrowOFDMFrameTiming(
+            data_modulation_, data_frame_cw_count_).ack_ms;
+    }
+    if (negotiated_mode_ == WaveformMode::MC_DPSK) {
+        return connection_policy::mcDpskFrameTiming(
+            data_modulation_,
+            config_.mc_dpsk_num_carriers,
+            config_.mc_dpsk_samples_per_symbol,
+            data_frame_cw_count_).ack_ms;
+    }
+    return 500;
+}
+
+uint32_t Connection::currentBurstAnchorAirtimeMs() const {
+    if (negotiated_mode_ == WaveformMode::OFDM_CHIRP) {
+        return connection_policy::kWideOFDMFullAnchorExtraMs;
+    }
+    if (negotiated_mode_ == WaveformMode::MC_DPSK) {
+        return connection_policy::kMCDPSKDualChirpPreambleMs;
+    }
+    return 0;
+}
+
+uint32_t Connection::dataTurnAckDiversityGuardMs() const {
+    const uint32_t control_tail_ms =
+        currentControlFrameAirtimeMs() / 2 + connection_policy::kCarrierSenseSackCoalesceMs;
+    return std::max(DATA_TURN_ACK_DIVERSITY_GUARD_FLOOR_MS, control_tail_ms);
+}
+
+uint32_t Connection::dataTurnConnectGuardMs() const {
+    const uint64_t guard_ms =
+        static_cast<uint64_t>(currentBurstAnchorAirtimeMs()) +
+        static_cast<uint64_t>(currentControlFrameAirtimeMs()) +
+        static_cast<uint64_t>(currentDataFrameAirtimeMs() / 2);
+    return static_cast<uint32_t>(
+        std::max<uint64_t>(DATA_TURN_CONNECT_GUARD_FLOOR_MS, guard_ms));
+}
+
+uint32_t Connection::dataTurnControlGuardMs() const {
+    const uint64_t guard_ms =
+        static_cast<uint64_t>(currentBurstAnchorAirtimeMs()) +
+        static_cast<uint64_t>(currentControlFrameAirtimeMs());
+    return static_cast<uint32_t>(
+        std::max<uint64_t>(DATA_TURN_CONTROL_GUARD_FLOOR_MS, guard_ms));
+}
+
+uint32_t Connection::turnRequestHoldoffAfterDataMs() const {
+    const uint64_t guard_ms =
+        2ULL * static_cast<uint64_t>(dataTurnControlGuardMs()) +
+        static_cast<uint64_t>(currentDataFrameAirtimeMs());
+    return static_cast<uint32_t>(
+        std::max<uint64_t>(TURN_REQUEST_HOLDOFF_FLOOR_MS, guard_ms));
+}
+
+uint32_t Connection::turnRequestRetransmitMs() const {
+    const uint64_t guard_ms =
+        static_cast<uint64_t>(turnRequestHoldoffAfterDataMs()) +
+        static_cast<uint64_t>(currentControlFrameAirtimeMs());
+    return static_cast<uint32_t>(
+        std::max<uint64_t>(TURN_REQUEST_RETRANSMIT_FLOOR_MS, guard_ms));
+}
+
+uint32_t Connection::fileCancelTxGuardMs() const {
+    const uint64_t guard_ms =
+        static_cast<uint64_t>(dataTurnControlGuardMs()) +
+        2ULL * static_cast<uint64_t>(currentDataFrameAirtimeMs());
+    return static_cast<uint32_t>(
+        std::max<uint64_t>(FILE_CANCEL_TX_GUARD_FLOOR_MS, guard_ms));
+}
+
+uint32_t Connection::fileCancelConfirmDataGuardMs() const {
+    const uint64_t guard_ms =
+        static_cast<uint64_t>(dataTurnControlGuardMs()) +
+        static_cast<uint64_t>(currentDataFrameAirtimeMs());
+    return static_cast<uint32_t>(
+        std::max<uint64_t>(FILE_CANCEL_CONFIRM_DATA_GUARD_FLOOR_MS, guard_ms));
 }
 
 void Connection::configureArqForCurrentDataMode() {
@@ -2809,7 +2914,7 @@ void Connection::enterConnected() {
     clearFileCancelReassertion();
     file_cancel_confirm_pending_ = false;
     if (local_data_turn_) {
-        armDataTurnTxGuard(DATA_TURN_CONNECT_GUARD_MS);
+        armDataTurnTxGuard(dataTurnConnectGuardMs());
     }
 
     if (is_initiator_ || handshake_confirmed_) {

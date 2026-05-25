@@ -391,11 +391,11 @@ void test_auto_data_mode_boundaries() {
           "GOOD fading SNR20 auto-negotiates OFDM_CHIRP");
     recommendDataMode(20.0f, waveform, mod, rate, 0.30f);
     CHECK(mod == Modulation::QAM16, "GOOD fading SNR20 auto data mode selects QAM16");
-    CHECK(rate == CodeRate::R1_2, "GOOD fading SNR20 auto data mode selects R1/2");
+    CHECK(rate == CodeRate::R1_4, "GOOD fading SNR20 auto data mode selects active QAM16 R1/4 rung");
 
     recommendDataMode(20.0f, waveform, mod, rate, 0.79f);
-    CHECK(mod == Modulation::QAM16 && rate == CodeRate::R1_2,
-          "GOOD-lobby estimator spread at SNR20 still selects QAM16 R1/2");
+    CHECK(mod == Modulation::QAM16 && rate == CodeRate::R1_4,
+          "GOOD-lobby estimator spread at SNR20 still selects QAM16 R1/4");
 
     recommendDataMode(20.0f, waveform, mod, rate, 0.80f);
     CHECK(mod == Modulation::DQPSK,
@@ -427,8 +427,8 @@ void test_auto_data_mode_boundaries() {
     CHECK(waveform == WaveformMode::OFDM_CHIRP,
           "AWGN SNR20 auto-negotiates OFDM_CHIRP");
     recommendDataMode(20.0f, waveform, mod, rate, 0.05f);
-    CHECK(mod == Modulation::QAM16 && rate == CodeRate::R1_2,
-          "AWGN SNR20 remains QAM16 R1/2");
+    CHECK(mod == Modulation::QAM16 && rate == CodeRate::R1_4,
+          "AWGN SNR20 selects active QAM16 R1/4 rung");
 
     waveform = selectNegotiatedMode(
         all, all, WaveformMode::AUTO, WaveformMode::AUTO, WaveformMode::AUTO,
