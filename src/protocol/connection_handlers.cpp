@@ -56,7 +56,7 @@ void Connection::sendFullConnect() {
     // Transition to CONNECTING and send full CONNECT frame
     state_ = ConnectionState::CONNECTING;
     connect_retry_count_ = 0;
-    timeout_remaining_ms_ = config_.connect_timeout_ms;
+    timeout_remaining_ms_ = connectRetryIntervalMs();
 
     // Notify about state change (PROBING -> CONNECTING)
     if (on_state_changed_) {
@@ -140,6 +140,25 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             transmitFrame(nak.serialize());
             return;
         }
+    } else if (state_ == ConnectionState::CONNECTED && !is_initiator_) {
+        const bool same_peer =
+            (!src_call.empty() && src_call == remote_call_) ||
+            (frame.src_hash != 0 && frame.src_hash == v2::hashCallsign(remote_call_)) ||
+            (remote_hash_ != 0 && frame.src_hash == remote_hash_);
+        if (same_peer && !connect_ack_frame_.empty()) {
+            connect_ack_retransmit_ms_ = connectAckRetransmitMs();
+            LOG_MODEM(WARN,
+                      "Connection: Duplicate CONNECT from %s while responder ACK unconfirmed; re-sending cached CONNECT_ACK",
+                      remote_call_.c_str());
+            transmitFrame(connect_ack_frame_);
+            return;
+        }
+
+        LOG_MODEM(WARN, "Connection: Rejecting CONNECT (busy, state=%s)",
+                  connectionStateToString(state_));
+        auto nak = v2::ConnectFrame::makeConnectNakByHash(local_call_, frame.src_hash);
+        transmitFrame(nak.serialize());
+        return;
     } else if (state_ != ConnectionState::DISCONNECTED) {
         LOG_MODEM(WARN, "Connection: Rejecting CONNECT (busy, state=%s)",
                   connectionStateToString(state_));
@@ -211,7 +230,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // We are the responder - we received CONNECT and are sending CONNECT_ACK
         is_initiator_ = false;
         handshake_confirmed_ = false;  // Responder waits for first frame to confirm
-        responder_handshake_wait_ms_ = RESPONDER_HANDSHAKE_FAILSAFE_MS;
+        responder_handshake_wait_ms_ = responderHandshakeFailSafeMs();
 
         Modulation rec_mod;
         CodeRate rec_rate;
@@ -332,15 +351,13 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // the single MC-DPSK CONNECT_ACK on faded seeds, leaving handshake stuck.
         // We re-send periodically until handshake is confirmed by first frame.
         connect_ack_frame_ = ack_data;
-        connect_ack_retransmit_ms_ = CONNECT_ACK_RETRANSMIT_MS;
+        connect_ack_retransmit_ms_ = connectAckRetransmitMs();
         connect_ack_retx_remaining_ =
-            negotiated_mode_ == WaveformMode::OFDM_CHIRP ? CONNECT_ACK_MAX_RETX : 0;
-        const uint32_t responder_handshake_failsafe_ms = std::max<uint32_t>(
-            RESPONDER_HANDSHAKE_FAILSAFE_MS,
-            2 * CONNECT_ACK_RETRANSMIT_MS);
+            negotiated_mode_ == WaveformMode::OFDM_CHIRP ? connectAckRetxBudget() : 0;
+        const uint32_t responder_handshake_failsafe_ms = responderHandshakeFailSafeMs();
         LOG_MODEM(INFO,
                   "Connection: CONNECT_ACK rescue retry armed in %.2fs (%d remaining, carrier-sense gated)",
-                  CONNECT_ACK_RETRANSMIT_MS / 1000.0f, connect_ack_retx_remaining_);
+                  connect_ack_retransmit_ms_ / 1000.0f, connect_ack_retx_remaining_);
 
         enterConnected();
         responder_handshake_wait_ms_ = responder_handshake_failsafe_ms;

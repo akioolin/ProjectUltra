@@ -541,12 +541,10 @@ void Connection::acceptCall() {
                                                  rung_id);
     Bytes ack_data = ack.serialize();
     connect_ack_frame_ = ack_data;
-    connect_ack_retransmit_ms_ = CONNECT_ACK_RETRANSMIT_MS;
+    connect_ack_retransmit_ms_ = connectAckRetransmitMs();
     connect_ack_retx_remaining_ =
-        negotiated_mode_ == WaveformMode::OFDM_CHIRP ? CONNECT_ACK_MAX_RETX : 0;
-    const uint32_t responder_handshake_failsafe_ms = std::max<uint32_t>(
-        RESPONDER_HANDSHAKE_FAILSAFE_MS,
-        2 * CONNECT_ACK_RETRANSMIT_MS);
+        negotiated_mode_ == WaveformMode::OFDM_CHIRP ? connectAckRetxBudget() : 0;
+    const uint32_t responder_handshake_failsafe_ms = responderHandshakeFailSafeMs();
 
     LOG_MODEM(INFO, "Connection: Sending CONNECT_ACK (%zu bytes, SNR=%.1f dB (%s))",
               ack_data.size(), measured_snr_db_, snrSourceToString(measured_snr_source_));
@@ -1644,20 +1642,23 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
         return;
     }
 
-    // Any frame from the initiator means our CONNECT_ACK got through — stop
-    // proactive ACK retx regardless of whether the formal handshake-confirmed
-    // bit has flipped (the responder fail-safe can set that bit before first
-    // DATA arrives, so without this clear, retx fires uselessly during early
-    // data phase and clogs the channel).
+    const bool duplicate_connect_retry = header.type == v2::FrameType::CONNECT;
+
+    // Any post-CONNECT frame from the initiator means our CONNECT_ACK got
+    // through — stop proactive ACK retx regardless of whether the formal
+    // handshake-confirmed bit has flipped. A duplicate CONNECT means the
+    // opposite: the initiator is still CONNECTING because CONNECT_ACK was lost,
+    // so keep the cached ACK for handleConnect() to re-send.
     if (state_ == ConnectionState::CONNECTED && !is_initiator_ &&
-        !connect_ack_frame_.empty()) {
+        !duplicate_connect_retry && !connect_ack_frame_.empty()) {
         connect_ack_frame_.clear();
         connect_ack_retx_remaining_ = 0;
     }
 
     // Responder handshake confirmation: first valid protocol frame after CONNECT_ACK
     // means the initiator received our ACK and switched to data/control exchange.
-    if (state_ == ConnectionState::CONNECTED && !is_initiator_ && !handshake_confirmed_) {
+    if (state_ == ConnectionState::CONNECTED && !is_initiator_ && !handshake_confirmed_ &&
+        !duplicate_connect_retry) {
         LOG_MODEM(INFO, "Connection: Handshake confirmed (received first valid frame from initiator)");
         handshake_confirmed_ = true;
         responder_handshake_wait_ms_ = 0;
@@ -1868,11 +1869,8 @@ void Connection::onAcceptedOFDMDataSync(float sync_correlation) {
         return;
     }
 
-    connect_ack_frame_.clear();
-    connect_ack_retx_remaining_ = 0;
-    connect_ack_retransmit_ms_ = 0;
     LOG_MODEM(INFO,
-              "Connection: Accepted OFDM DATA sync (corr=%.2f); clearing cached CONNECT_ACK rescue retry",
+              "Connection: Accepted OFDM DATA sync (corr=%.2f); keeping CONNECT_ACK rescue armed until decoded initiator frame",
               sync_correlation);
 }
 
@@ -2340,7 +2338,7 @@ void Connection::tick(uint32_t elapsed_ms) {
                                                                         static_cast<uint8_t>(config_.forced_code_rate),
                                                                         config_.forced_cw_count);
                     transmitFrame(connect_frame.serialize());
-                    timeout_remaining_ms_ = config_.connect_timeout_ms;
+                    timeout_remaining_ms_ = connectRetryIntervalMs();
                 }
             } else {
                 timeout_remaining_ms_ -= elapsed_ms;
@@ -2395,18 +2393,15 @@ void Connection::tick(uint32_t elapsed_ms) {
             }
 
             // Proactive CONNECT_ACK retransmission (responder side, BUG-CTRL-001).
-            // ALPHA can miss the single MC-DPSK ACK on faded seeds — without retx
-            // the only recovery is the 60s connect_timeout, which is too slow.
-            // Gated to OFDM_CHIRP data mode: when MC-DPSK is the negotiated data
-            // mode, the round-trip is ~12-16s and retx clogs ALPHA's RX buffer
-            // ahead of the first ACK, hurting more than it helps. The interval is
-            // set long enough for the first OFDM burst-interleaver group to decode
-            // and clear this cached ACK on the success path.
+            // ALPHA can miss MC-DPSK ACKs on faded seeds. The cadence is derived
+            // from MC-DPSK control airtime and carrier-sense still gates the
+            // actual TX edge, so it scales with slower robust profiles without
+            // becoming an AWGN-only timeout tweak.
             if (!is_initiator_ &&
                 negotiated_mode_ == WaveformMode::OFDM_CHIRP &&
                 !connect_ack_frame_.empty() && connect_ack_retx_remaining_ > 0) {
                 if (elapsed_ms >= connect_ack_retransmit_ms_) {
-                    connect_ack_retransmit_ms_ = CONNECT_ACK_RETRANSMIT_MS;
+                    connect_ack_retransmit_ms_ = connectAckRetransmitMs();
                     connect_ack_retx_remaining_--;
                     LOG_MODEM(INFO, "Connection: Re-sending CONNECT_ACK (proactive, %d retx remaining, carrier-sense gated)",
                               connect_ack_retx_remaining_);
@@ -2416,18 +2411,16 @@ void Connection::tick(uint32_t elapsed_ms) {
                 }
             }
 
-            // Responder fail-safe: if first post-ACK frame is lost, don't stay in
-            // handshake waveform forever. After a short grace period, force
-            // handshake completion so TX uses negotiated waveform/control path.
-            if (!is_initiator_ && !handshake_confirmed_) {
+            // Responder fail-safe: after the CONNECT_ACK rescue window, keep the
+            // responder quiet until a real post-CONNECT frame arrives. A duplicate
+            // CONNECT means the initiator is still in MC-DPSK setup, so do not mark
+            // the protocol handshake confirmed on a timer.
+            if (!is_initiator_ && !handshake_confirmed_ &&
+                responder_handshake_wait_ms_ > 0) {
                 if (elapsed_ms >= responder_handshake_wait_ms_) {
                     responder_handshake_wait_ms_ = 0;
-                    handshake_confirmed_ = true;
-                    LOG_MODEM(WARN, "Connection: Handshake fail-safe triggered (no post-ACK frame), switching to negotiated waveform");
-                    if (on_handshake_confirmed_) {
-                        on_handshake_confirmed_();
-                    }
-                    runDeferredArqRefill();
+                    LOG_MODEM(WARN,
+                              "Connection: Responder handshake still unconfirmed after CONNECT_ACK rescue window; waiting for initiator frame");
                 } else {
                     responder_handshake_wait_ms_ -= elapsed_ms;
                 }
@@ -2599,6 +2592,61 @@ uint32_t Connection::currentBurstAnchorAirtimeMs() const {
         return connection_policy::kMCDPSKDualChirpPreambleMs;
     }
     return 0;
+}
+
+uint32_t Connection::connectControlFrameAirtimeMs() const {
+    // The GUI/OTASim cold-call MC-DPSK profile is Robust-Mid DBPSK. Forced
+    // MC-DPSK profiles can override this, but AUTO should match the waveform
+    // engine's real handshake modulation rather than the connected data default.
+    Modulation control_mod = Modulation::DBPSK;
+    if (config_.forced_modulation == Modulation::DBPSK ||
+        config_.forced_modulation == Modulation::DQPSK ||
+        config_.forced_modulation == Modulation::D8PSK) {
+        control_mod = config_.forced_modulation;
+    }
+
+    const int connect_cw_count = v2::kDefaultFixedFrameCodewords;
+    const auto timing = connection_policy::mcDpskFrameTiming(
+        control_mod,
+        config_.mc_dpsk_num_carriers,
+        config_.mc_dpsk_samples_per_symbol,
+        connect_cw_count);
+
+    const uint64_t airtime_ms =
+        static_cast<uint64_t>(connection_policy::mcDpskBurstAirtimeMs(timing, 1)) +
+        2ULL * static_cast<uint64_t>(connection_policy::kMCDPSKInterFrameGuardMs);
+    return static_cast<uint32_t>(std::min<uint64_t>(airtime_ms, 0xFFFFFFFFull));
+}
+
+uint32_t Connection::connectRetryIntervalMs() const {
+    const uint64_t control_ms = std::max<uint32_t>(1, connectControlFrameAirtimeMs());
+    const uint64_t interval_ms =
+        4ULL * control_ms +
+        static_cast<uint64_t>(connection_policy::kCarrierSenseSackCoalesceMs);
+    return static_cast<uint32_t>(std::min<uint64_t>(interval_ms, 0xFFFFFFFFull));
+}
+
+uint32_t Connection::connectAckRetransmitMs() const {
+    const uint64_t control_ms = std::max<uint32_t>(1, connectControlFrameAirtimeMs());
+    const uint64_t interval_ms =
+        2ULL * control_ms +
+        static_cast<uint64_t>(connection_policy::kCarrierSenseSackCoalesceMs);
+    return static_cast<uint32_t>(std::min<uint64_t>(interval_ms, 0xFFFFFFFFull));
+}
+
+int Connection::connectAckRetxBudget() const {
+    return std::max(0, config_.connect_retries - 1);
+}
+
+uint32_t Connection::responderHandshakeFailSafeMs() const {
+    const uint64_t attempts = static_cast<uint64_t>(connectAckRetxBudget() + 1);
+    const uint64_t rescue_window_ms =
+        attempts * static_cast<uint64_t>(connectAckRetransmitMs()) +
+        static_cast<uint64_t>(connectControlFrameAirtimeMs());
+    const uint64_t failsafe_ms = std::max<uint64_t>(
+        RESPONDER_HANDSHAKE_FAILSAFE_MS,
+        rescue_window_ms);
+    return static_cast<uint32_t>(std::min<uint64_t>(failsafe_ms, 0xFFFFFFFFull));
 }
 
 uint32_t Connection::dataTurnAckDiversityGuardMs() const {
@@ -2925,7 +2973,7 @@ void Connection::enterConnected() {
     if (is_initiator_ || handshake_confirmed_) {
         responder_handshake_wait_ms_ = 0;
     } else if (responder_handshake_wait_ms_ == 0) {
-        responder_handshake_wait_ms_ = RESPONDER_HANDSHAKE_FAILSAFE_MS;
+        responder_handshake_wait_ms_ = responderHandshakeFailSafeMs();
     }
 
     arq_.setCallsigns(local_call_, remote_call_);

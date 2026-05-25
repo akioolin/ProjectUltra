@@ -483,6 +483,11 @@ private:
     uint32_t turnRequestRetransmitMs() const;
     uint32_t fileCancelTxGuardMs() const;
     uint32_t fileCancelConfirmDataGuardMs() const;
+    uint32_t connectControlFrameAirtimeMs() const;
+    uint32_t connectRetryIntervalMs() const;
+    uint32_t connectAckRetransmitMs() const;
+    int connectAckRetxBudget() const;
+    uint32_t responderHandshakeFailSafeMs() const;
 
     void flushBurstBuffer();
     void processArqFrame(const Bytes& frame_data);
@@ -560,16 +565,12 @@ private:
     static constexpr uint32_t RESPONDER_HANDSHAKE_FAILSAFE_MS = 2200;
 
     // CONNECT_ACK retransmission (responder side, BUG-CTRL-001)
-    // ALPHA can fail to decode the single MC-DPSK CONNECT_ACK on faded seeds.
-    // We proactively re-send it from BRAVO until the handshake is confirmed by
-    // a first frame from the initiator, mirroring the disconnect-ACK pattern.
+    // ALPHA can fail to decode MC-DPSK CONNECT_ACK on faded seeds. Retry timing
+    // is derived from the current MC-DPSK control-frame airtime so the same rule
+    // scales with slower robust profiles and faster audited profiles.
     Bytes connect_ack_frame_;                  // Cached CONNECT_ACK for re-sending
     uint32_t connect_ack_retransmit_ms_ = 0;   // Time until next retransmit
     int connect_ack_retx_remaining_ = 0;       // Retries left (counts down to 0)
-    // The retry cadence is only a fail-safe. AudioPort carrier sense gates the
-    // actual TX edge so a rescue ACK cannot key up over the peer's transmission.
-    static constexpr uint32_t CONNECT_ACK_RETRANSMIT_MS = 14000;
-    static constexpr int CONNECT_ACK_MAX_RETX = 1;
 
     // Internal handlers for v2 frames
     void handleConnect(const v2::ConnectFrame& frame, const std::string& src_call);

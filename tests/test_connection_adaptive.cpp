@@ -129,6 +129,26 @@ struct ConnectionAdaptiveTestAccess {
         c.transmitFrame(frame);
     }
 
+    static uint32_t connectRetryInterval(Connection& c) {
+        return c.connectRetryIntervalMs();
+    }
+
+    static uint32_t connectAckRetransmitMs(Connection& c) {
+        return c.connectAckRetransmitMs();
+    }
+
+    static bool handshakeConfirmed(const Connection& c) {
+        return c.handshake_confirmed_;
+    }
+
+    static void setResponderHandshakeWait(Connection& c, uint32_t ms) {
+        c.responder_handshake_wait_ms_ = ms;
+    }
+
+    static void clearConnectAckRetxBudget(Connection& c) {
+        c.connect_ack_retx_remaining_ = 0;
+    }
+
     static bool connectAckRescueArmed(const Connection& c) {
         return !c.connect_ack_frame_.empty() || c.connect_ack_retx_remaining_ > 0 ||
                c.connect_ack_retransmit_ms_ > 0;
@@ -333,15 +353,15 @@ void test_wide_ofdm_configures_short_tail_sack_delay() {
           "wide OFDM ACK timeout should remain derived from the long physical SACK hold");
 }
 
-void test_accepted_ofdm_data_sync_clears_connect_ack_rescue() {
+void test_accepted_ofdm_data_sync_keeps_connect_ack_rescue_armed() {
     Connection c;
     ConnectionAdaptiveTestAccess::makeResponderWithConnectAckRescue(c);
 
     CHECK(ConnectionAdaptiveTestAccess::connectAckRescueArmed(c),
           "responder CONNECT_ACK rescue should start armed");
     c.onAcceptedOFDMDataSync(0.90f);
-    CHECK(!ConnectionAdaptiveTestAccess::connectAckRescueArmed(c),
-          "accepted OFDM DATA sync should clear responder CONNECT_ACK rescue");
+    CHECK(ConnectionAdaptiveTestAccess::connectAckRescueArmed(c),
+          "accepted OFDM DATA sync alone must not clear CONNECT_ACK rescue before a decoded initiator frame");
 }
 
 void test_accepted_ofdm_data_sync_does_not_clear_non_ofdm_rescue() {
@@ -351,6 +371,71 @@ void test_accepted_ofdm_data_sync_does_not_clear_non_ofdm_rescue() {
     c.onAcceptedOFDMDataSync(0.90f);
     CHECK(ConnectionAdaptiveTestAccess::connectAckRescueArmed(c),
           "accepted OFDM DATA sync hook should not clear non-OFDM rescue state");
+}
+
+void test_duplicate_connect_replays_cached_connect_ack_without_confirming() {
+    Connection c;
+    std::vector<Bytes> tx_frames;
+    c.setTransmitCallback([&](const Bytes& data) {
+        tx_frames.push_back(data);
+    });
+    ConnectionAdaptiveTestAccess::makeResponderWithConnectAckRescue(c);
+
+    auto duplicate_connect = v2::ConnectFrame::makeConnect(
+        "W1ABC", "K2DEF",
+        ModeCapabilities::ALL | ModeCapabilities::PHY_MASK_V1,
+        static_cast<uint8_t>(WaveformMode::AUTO));
+
+    c.onFrameReceived(duplicate_connect.serialize());
+
+    CHECK(tx_frames.size() == 1,
+          "duplicate CONNECT from the same unconfirmed peer should replay CONNECT_ACK");
+    CHECK(ConnectionAdaptiveTestAccess::connectAckRescueArmed(c),
+          "duplicate CONNECT must not clear cached CONNECT_ACK rescue state");
+    CHECK(!ConnectionAdaptiveTestAccess::handshakeConfirmed(c),
+          "duplicate CONNECT means CONNECT_ACK was lost and must not confirm responder handshake");
+}
+
+void test_connect_retry_interval_is_control_airtime_derived() {
+    Connection c;
+    c.setLocalCallsign("W1ABC");
+    std::vector<Bytes> tx_frames;
+    c.setTransmitCallback([&](const Bytes& data) {
+        tx_frames.push_back(data);
+    });
+
+    CHECK(c.connect("K2DEF"), "connect should start without a ping callback");
+    CHECK(tx_frames.size() == 1, "connect fallback should send initial CONNECT");
+
+    const uint32_t retry_ms = ConnectionAdaptiveTestAccess::connectRetryInterval(c);
+    const uint32_t ack_retx_ms = ConnectionAdaptiveTestAccess::connectAckRetransmitMs(c);
+    CHECK(retry_ms > 0, "CONNECT retry interval should be derived from control airtime");
+    CHECK(ack_retx_ms > 0 && ack_retx_ms < retry_ms,
+          "responder CONNECT_ACK rescue should be airtime-derived and faster than full initiator retry");
+
+    c.tick(retry_ms - 1);
+    CHECK(tx_frames.size() == 1, "CONNECT should not retry before the airtime-derived interval");
+
+    c.tick(1);
+    CHECK(tx_frames.size() == 2, "CONNECT should retry at the airtime-derived interval");
+}
+
+void test_responder_handshake_timer_does_not_false_confirm() {
+    Connection c;
+    int confirmed_callbacks = 0;
+    c.setHandshakeConfirmedCallback([&]() {
+        ++confirmed_callbacks;
+    });
+    ConnectionAdaptiveTestAccess::makeResponderWithConnectAckRescue(c);
+    ConnectionAdaptiveTestAccess::clearConnectAckRetxBudget(c);
+    ConnectionAdaptiveTestAccess::setResponderHandshakeWait(c, 1);
+
+    c.tick(1);
+
+    CHECK(!ConnectionAdaptiveTestAccess::handshakeConfirmed(c),
+          "responder timer alone must not confirm a half-connected handshake");
+    CHECK(confirmed_callbacks == 0,
+          "responder timer must not switch TX to connected waveform without an initiator frame");
 }
 
 void test_ofdm_connected_entry_does_not_emit_unsolicited_timing_anchor() {
@@ -891,8 +976,11 @@ int main() {
     test_local_mode_change_ack_reconfigures_arq();
     test_remote_mode_change_reconfigures_arq();
     test_wide_ofdm_configures_short_tail_sack_delay();
-    test_accepted_ofdm_data_sync_clears_connect_ack_rescue();
+    test_accepted_ofdm_data_sync_keeps_connect_ack_rescue_armed();
     test_accepted_ofdm_data_sync_does_not_clear_non_ofdm_rescue();
+    test_duplicate_connect_replays_cached_connect_ack_without_confirming();
+    test_connect_retry_interval_is_control_airtime_derived();
+    test_responder_handshake_timer_does_not_false_confirm();
     test_ofdm_connected_entry_does_not_emit_unsolicited_timing_anchor();
     test_normal_ofdm_ack_arms_full_anchor_expectation();
     test_adaptive_upgrade_requires_backlog_and_clean_windows();

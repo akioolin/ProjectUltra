@@ -71,23 +71,26 @@ void test_ping_chirp_lock_fallback() {
         busy_band.data(), busy_band.size(),
         kPingTrainingSkipSamples, kPingRMSCheckSamples,
         kPingCorrFloor, 145.0f,
-        true, true);
+        true, true, true);
     CHECK(!valid_frame.is_ping, "valid LDPC frame should not classify as ping");
 
-    auto locked_no_frame = evaluatePingFrame(
+    auto full_ldpc_failure = evaluatePingFrame(
         busy_band.data(), busy_band.size(),
         kPingTrainingSkipSamples, kPingRMSCheckSamples,
         kPingCorrFloor, -145.0f,
-        false, false);
-    CHECK(locked_no_frame.is_ping, "chirp-locked LDPC failure should classify as ping");
-    CHECK(!locked_no_frame.ping_by_silence, "busy-band fallback should not rely on RMS silence");
-    CHECK(locked_no_frame.ping_by_chirp_lock, "busy-band fallback should use chirp lock");
+        false, false, true);
+    CHECK(!full_ldpc_failure.is_ping,
+          "chirp-locked full-LDPC failure with data energy should stay a frame failure");
+    CHECK(!full_ldpc_failure.ping_by_silence,
+          "busy-band full-LDPC failure should not rely on RMS silence");
+    CHECK(!full_ldpc_failure.ping_by_chirp_lock,
+          "busy-band full-LDPC failure must not emit a false PING");
 
     auto low_snr_ping_after_llr_reject = evaluatePingFrame(
         busy_band.data(), busy_band.size(),
         kPingTrainingSkipSamples, kPingRMSCheckSamples,
         0.908f, 0.0f,
-        false, false);
+        false, false, false);
     CHECK(low_snr_ping_after_llr_reject.is_ping,
           "measured SNR15 chirp lock plus rejected data frame should classify as ping");
     CHECK(low_snr_ping_after_llr_reject.ping_by_chirp_lock,

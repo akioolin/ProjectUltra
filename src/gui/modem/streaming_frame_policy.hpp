@@ -16,6 +16,7 @@ inline constexpr size_t kPingTrainingSkipSamples = 4608;
 inline constexpr size_t kPingRMSCheckSamples = 5000;
 inline constexpr float kMinTrainingRMSForPingRatio = 0.001f;
 inline constexpr float kPingMaxDataToTrainingRMSRatio = 0.5f;
+inline constexpr float kPingChirpLockMaxDataRMS = 0.16f;
 inline constexpr float kPingCorrFloor = 0.30f;
 inline constexpr float kPingMaxGapError = 1000.0f;
 inline constexpr size_t kDefaultFalseLockAdvanceSamples = 1024;
@@ -40,6 +41,7 @@ struct PingFrameDecision {
     float ratio = 0.0f;
     float chirp_corr = 0.0f;
     float gap_error_samples = std::numeric_limits<float>::infinity();
+    bool ldpc_decode_attempted = false;
     bool ldpc_decode_succeeded = false;
     bool ldpc_magic_valid = false;
     bool ping_by_silence = false;
@@ -56,7 +58,8 @@ inline PingFrameDecision evaluatePingFrame(
     float chirp_corr = 0.0f,
     float gap_error_samples = std::numeric_limits<float>::infinity(),
     bool ldpc_decode_succeeded = false,
-    bool ldpc_magic_valid = false) {
+    bool ldpc_magic_valid = false,
+    bool ldpc_decode_attempted = false) {
     PingFrameDecision decision;
 
     const size_t train_len = std::min(training_skip_samples, count);
@@ -71,6 +74,7 @@ inline PingFrameDecision evaluatePingFrame(
         : 0.0f;
     decision.chirp_corr = chirp_corr;
     decision.gap_error_samples = gap_error_samples;
+    decision.ldpc_decode_attempted = ldpc_decode_attempted;
     decision.ldpc_decode_succeeded = ldpc_decode_succeeded;
     decision.ldpc_magic_valid = ldpc_magic_valid;
 
@@ -79,7 +83,16 @@ inline PingFrameDecision evaluatePingFrame(
         chirp_corr >= kPingCorrFloor &&
         std::abs(gap_error_samples) <= kPingMaxGapError;
     const bool no_valid_frame = !ldpc_decode_succeeded || !ldpc_magic_valid;
-    decision.ping_by_chirp_lock = chirp_signature_real && no_valid_frame;
+    // PATH2 is for chirp-only probes whose payload area was too weak/noisy to
+    // justify an LDPC decode. Once a full LDPC attempt has been made on a
+    // data-bearing MC-DPSK frame, a failure is a frame failure, not evidence
+    // that the peer sent a PING. This keeps faded CONNECT frames from eliciting
+    // false PONGs while preserving low-SNR PING acquisition.
+    const bool payload_energy_absent =
+        decision.ping_by_silence || decision.data_rms <= kPingChirpLockMaxDataRMS;
+    decision.ping_by_chirp_lock =
+        chirp_signature_real && no_valid_frame &&
+        (!ldpc_decode_attempted || payload_energy_absent);
     decision.is_ping = decision.ping_by_silence || decision.ping_by_chirp_lock;
     return decision;
 }

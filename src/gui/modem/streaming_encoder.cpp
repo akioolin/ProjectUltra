@@ -739,6 +739,35 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
         // Control frames (20 bytes): ACK, NACK, etc. - encode as-is, no patching
         // Data frames (>20 bytes): May need total_cw patching
 
+        bool is_connect_frame = false;
+        if (tx_data.size() >= 3) {
+            const auto frame_type = static_cast<v2::FrameType>(tx_data[2]);
+            is_connect_frame =
+                tx_data.size() > v2::ControlFrame::SIZE &&
+                v2::isConnectFrame(frame_type);
+        }
+
+        if (is_connect_frame) {
+            if (tx_data.size() >= v2::DataFrame::HEADER_SIZE &&
+                tx_data[12] != v2::kDefaultFixedFrameCodewords) {
+                tx_data[12] = v2::kDefaultFixedFrameCodewords;
+                uint16_t hcrc = v2::ControlFrame::calculateCRC(tx_data.data(), 15);
+                tx_data[15] = (hcrc >> 8) & 0xFF;
+                tx_data[16] = hcrc & 0xFF;
+                const size_t fcrc_offset = tx_data.size() - 2;
+                uint16_t fcrc = v2::ControlFrame::calculateCRC(tx_data.data(), fcrc_offset);
+                tx_data[fcrc_offset] = (fcrc >> 8) & 0xFF;
+                tx_data[fcrc_offset + 1] = fcrc & 0xFF;
+            }
+
+            Bytes encoded = v2::encodeFixedFrame(
+                tx_data, CodeRate::R1_4, v2::kDefaultFixedFrameCodewords);
+            LOG_MODEM(INFO, "[%s] MC-DPSK fixed CONNECT: %zu bytes -> %d CWs (%zu coded, frame_interleave=yes)",
+                      log_prefix_.c_str(), tx_data.size(),
+                      v2::kDefaultFixedFrameCodewords, encoded.size());
+            return encoded;
+        }
+
         if (tx_data.size() >= 3 &&
             tx_data[2] == static_cast<uint8_t>(v2::FrameType::DATA_REPAIR)) {
             auto repair = v2::DataRepairFrame::deserialize(tx_data);

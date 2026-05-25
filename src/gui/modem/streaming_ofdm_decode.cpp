@@ -465,12 +465,13 @@ void StreamingDecoder::decodeCurrentFrame() {
     const size_t ping_training_skip = 9 * mc_dpsk_symbol_samples;
     const size_t ping_check_samples = std::max(
         frame_policy::kPingRMSCheckSamples, 3 * mc_dpsk_symbol_samples);
-    auto evaluatePingDecision = [&](bool ldpc_decode_succeeded,
+    auto evaluatePingDecision = [&](bool ldpc_attempted,
+                                    bool ldpc_decode_succeeded,
                                     bool ldpc_magic_valid) {
         return frame_policy::evaluatePingFrame(
             frame_buffer.data(), frame_buffer.size(), ping_training_skip,
             ping_check_samples, sync_correlation_, sync_gap_error_samples_,
-            ldpc_decode_succeeded, ldpc_magic_valid);
+            ldpc_decode_succeeded, ldpc_magic_valid, ldpc_attempted);
     };
     auto emitPingFrame = [&](const frame_policy::PingFrameDecision& ping_decision,
                              bool ldpc_attempted) {
@@ -547,7 +548,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         return true;
     };
     auto tryEmitPingByChirpLock = [&](const char* reason, bool ldpc_attempted) {
-        const auto ping_decision = evaluatePingDecision(false, false);
+        const auto ping_decision = evaluatePingDecision(ldpc_attempted, false, false);
 
         LOG_MODEM(INFO, "[%s] PING check PATH2: ratio=%.3f, "
                   "chirp_corr=%.3f (floor=%.2f), gap_error=%.1f (max=%.0f), "
@@ -570,7 +571,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         // PATH 1: clean-cable/AWGN silence after training. LDPC inputs are set
         // true here only to keep the PATH 2 fallback disabled until LDPC has
         // actually been attempted below.
-        const auto ping_decision = evaluatePingDecision(true, true);
+        const auto ping_decision = evaluatePingDecision(false, true, true);
 
         LOG_MODEM(INFO, "[%s] PING check: RMS=%.4f, train_RMS=%.4f, "
                   "ratio=%.3f (threshold=%.1f), chirp_corr=%.3f, "
@@ -990,6 +991,23 @@ void StreamingDecoder::decodeCurrentFrame() {
                     return;
                 }
             }
+        } else {
+            const bool wait_for_fixed_connect = [&]() {
+                if (!allow_ping_detection) {
+                    return true;
+                }
+                const auto ping_decision = evaluatePingDecision(true, false, false);
+                return !ping_decision.is_ping;
+            }();
+            if (wait_for_fixed_connect) {
+                pending_total_cw_ = v2::kDefaultFixedFrameCodewords;
+                state_ = DecoderState::SYNC_FOUND;
+                LOG_MODEM(INFO,
+                          "[%s] MC-DPSK CW0 failed with data energy; waiting for %d-CW fixed CONNECT frame (%d samples)",
+                          log_prefix_.c_str(), pending_total_cw_,
+                          waveform_->getMinSamplesForCWCount(pending_total_cw_));
+                return;
+            }
         }
     }
 
@@ -1393,7 +1411,7 @@ void StreamingDecoder::decodeCurrentFrame() {
             ldpc_decode_succeeded && result.frame_data.size() >= 2 &&
             result.frame_data[0] == 0x55 && result.frame_data[1] == 0x4C;
         const auto ping_decision =
-            evaluatePingDecision(ldpc_decode_succeeded, ldpc_magic_valid);
+            evaluatePingDecision(true, ldpc_decode_succeeded, ldpc_magic_valid);
 
         LOG_MODEM(INFO, "[%s] PING check PATH2: ratio=%.3f, "
                   "chirp_corr=%.3f (floor=%.2f), gap_error=%.1f (max=%.0f), "
@@ -1704,6 +1722,9 @@ void StreamingDecoder::decodeCurrentFrame() {
     }
 
     // Burst over (or non-burst) - skip past everything we decoded and return to SEARCHING
+    if (!is_ofdm) {
+        pending_total_cw_ = 0;
+    }
     burst_blocks_decoded_ = 0;
     {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
@@ -1980,11 +2001,56 @@ DecodeResult StreamingDecoder::decodeMCDPSKFrame(const std::vector<float>& soft_
 
     codec_->setRate(rate);
 
+    auto tryFixedConnectFrame = [&]() -> DecodeResult {
+        DecodeResult fixed;
+        fixed.snr_db = snr;
+        fixed.snr_source = SNRSource::SYNC_QUALITY;
+        fixed.sync_quality_db = snr;
+        fixed.cfo_hz = cfo;
+
+        const int cw_count = v2::kDefaultFixedFrameCodewords;
+        const size_t frame_bits =
+            static_cast<size_t>(fec::FrameInterleaver::totalFrameBits(cw_count));
+        if (soft_bits.size() < frame_bits) {
+            return fixed;
+        }
+
+        auto status = v2::decodeFixedFrame(soft_bits, CodeRate::R1_4, cw_count);
+        for (size_t i = 0; i < status.decoded.size(); ++i) {
+            if (status.decoded[i]) {
+                fixed.codewords_ok++;
+            } else {
+                fixed.codewords_failed++;
+            }
+        }
+        if (!status.allSuccess()) {
+            return fixed;
+        }
+
+        Bytes assembled = status.reassemble();
+        auto hdr = v2::parseHeader(assembled);
+        if (!hdr.valid || !v2::isConnectFrame(hdr.type)) {
+            return fixed;
+        }
+
+        fixed.success = true;
+        fixed.frame_data = std::move(assembled);
+        fixed.frame_type = hdr.type;
+        LOG_MODEM(INFO, "[%s] MC-DPSK fixed CONNECT decode SUCCESS (%d/%d CWs)",
+                  log_prefix_.c_str(), fixed.codewords_ok,
+                  fixed.codewords_ok + fixed.codewords_failed);
+        return fixed;
+    };
+
     // Decode CW0 (header codeword)
     std::vector<float> cw0_bits(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
     auto [ok0, data0] = codec_->decode(cw0_bits);
 
     if (!ok0 || data0.size() < 2 || data0[0] != 0x55 || data0[1] != 0x4C) {
+        auto fixed = tryFixedConnectFrame();
+        if (fixed.success) {
+            return fixed;
+        }
         LOG_MODEM(INFO, "[%s] MC-DPSK: CW0 decode failed (ok=%d, size=%zu, magic=0x%02X%02X)",
                   log_prefix_.c_str(), ok0 ? 1 : 0, data0.size(),
                   data0.size() >= 1 ? data0[0] : 0, data0.size() >= 2 ? data0[1] : 0);
@@ -1997,6 +2063,10 @@ DecodeResult StreamingDecoder::decodeMCDPSKFrame(const std::vector<float>& soft_
     // Parse header
     auto hdr = v2::parseHeader(data0);
     if (!hdr.valid) {
+        auto fixed = tryFixedConnectFrame();
+        if (fixed.success) {
+            return fixed;
+        }
         // Log CRC details for control frames (ACK, etc.)
         if (data0.size() >= 20) {
             uint16_t received_crc = (static_cast<uint16_t>(data0[18]) << 8) | data0[19];
