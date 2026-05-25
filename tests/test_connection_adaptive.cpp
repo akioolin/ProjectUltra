@@ -864,7 +864,7 @@ void test_adaptive_post_downgrade_lockout_expires() {
     CHECK(ConnectionAdaptiveTestAccess::pendingModulation(c) == Modulation::DQPSK,
           "post-lockout recovery should step code rate before modulation");
     CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R2_3,
-          "post-lockout recovery should use the active descriptor-selected R2/3 rate");
+          "post-lockout recovery should use the next descriptor-selected R2/3 rate");
 }
 
 void test_forced_rate_disables_adaptive_controller() {

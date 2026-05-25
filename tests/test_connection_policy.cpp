@@ -435,8 +435,8 @@ void test_auto_data_mode_boundaries() {
     CHECK(waveform == WaveformMode::OFDM_CHIRP,
           "AWGN SNR20 auto-negotiates OFDM_CHIRP");
     recommendDataMode(20.0f, waveform, mod, rate, 0.05f);
-    CHECK(mod == Modulation::QAM16 && rate == CodeRate::R2_3,
-          "AWGN SNR20 selects active QAM16 R2/3 rung");
+    CHECK(mod == Modulation::QAM16 && rate == CodeRate::R3_4,
+          "AWGN SNR20 selects active QAM16 R3/4 rung");
 
     waveform = selectNegotiatedMode(
         all, all, WaveformMode::AUTO, WaveformMode::AUTO, WaveformMode::AUTO,

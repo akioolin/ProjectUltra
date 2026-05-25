@@ -96,15 +96,15 @@ void test_narrow_data_mode() {
 }
 
 void test_qam16_selection_rung() {
-    // Coherent QAM16 descriptor ladder. R2/3 is enabled for AWGN20 by
+    // Coherent QAM16 descriptor ladder. R3/4 is enabled for AWGN20 by
     // descriptor gate; GOOD fading stays on the proven R1/4 rung.
     Modulation mod;
     CodeRate rate;
 
-    // True AWGN at the R2/3 rung gate -> coherent QAM16 R2/3.
+    // True AWGN at the R3/4 rung gate -> coherent QAM16 R3/4.
     recommendDataMode(20.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.05f);
     CHECK(mod == Modulation::QAM16, "AWGN in-band SNR=20 should select coherent QAM16");
-    CHECK(rate == CodeRate::R2_3, "AWGN QAM16 SNR20 should select the active R2/3 rung");
+    CHECK(rate == CodeRate::R3_4, "AWGN QAM16 SNR20 should select the active R3/4 rung");
 
     recommendDataMode(16.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.05f);
     CHECK(mod == Modulation::QAM16 && rate == CodeRate::R1_4,
@@ -125,6 +125,14 @@ void test_qam16_selection_rung() {
     recommendDataMode(19.5f, WaveformMode::OFDM_CHIRP, mod, rate, 0.05f);
     CHECK(mod == Modulation::QAM16 && rate == CodeRate::R2_3,
           "AWGN in-band SNR=19.5 should promote to QAM16 R2/3");
+
+    recommendDataMode(19.6f, WaveformMode::OFDM_CHIRP, mod, rate, 0.05f);
+    CHECK(mod == Modulation::QAM16 && rate == CodeRate::R2_3,
+          "AWGN in-band SNR=19.6 should stay on the proven QAM16 R2/3 rung");
+
+    recommendDataMode(19.7f, WaveformMode::OFDM_CHIRP, mod, rate, 0.05f);
+    CHECK(mod == Modulation::QAM16 && rate == CodeRate::R3_4,
+          "AWGN in-band SNR=19.7 should promote to QAM16 R3/4");
 
     // Just under the gate stays differential.
     recommendDataMode(15.9f, WaveformMode::OFDM_CHIRP, mod, rate, 0.05f);
@@ -170,10 +178,10 @@ void test_qam16_selection_rung() {
 }
 
 void test_bootstrap_caps() {
-    CHECK(capInitialOFDMRate(33.0f, 0.00f, CodeRate::R3_4) == CodeRate::R2_3,
-          "initial R3/4 should cap to R2/3 below in-band 34 dB");
-    CHECK(capInitialOFDMRate(34.0f, 0.00f, CodeRate::R3_4) == CodeRate::R3_4,
-          "initial R3/4 should be kept on near-ideal in-band SNR34");
+    CHECK(capInitialOFDMRate(19.6f, 0.04f, CodeRate::R3_4) == CodeRate::R2_3,
+          "initial R3/4 should cap to R2/3 below the AWGN20 rung");
+    CHECK(capInitialOFDMRate(19.7f, 0.04f, CodeRate::R3_4) == CodeRate::R3_4,
+          "initial R3/4 should be kept for the AWGN20 QAM16 rung");
     CHECK(capInitialOFDMRate(20.0f, 0.05f, CodeRate::R2_3) == CodeRate::R2_3,
           "initial R2/3 should be kept for the AWGN20 QAM16 rung");
     CHECK(capInitialOFDMRate(30.0f, 0.12f, CodeRate::R2_3) == CodeRate::R1_2,
@@ -217,7 +225,7 @@ void test_data_mode_policy() {
     // remains on the separately proven R1/4 rung.
     recommendDataMode(37.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.00f);
     CHECK(mod == Modulation::QAM16, "high-SNR AWGN should select coherent QAM16");
-    CHECK(rate == CodeRate::R2_3, "high-SNR AWGN QAM16 uses the active R2/3 rung");
+    CHECK(rate == CodeRate::R3_4, "high-SNR AWGN QAM16 uses the active R3/4 rung");
 
     recommendDataMode(32.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
     CHECK(mod == Modulation::QAM16, "good-fading in-band SNR32 should select QAM16");
@@ -231,11 +239,11 @@ void test_data_mode_policy() {
     CHECK(mod == Modulation::QAM16, "good-fading in-band SNR28 should select QAM16");
     CHECK(rate == CodeRate::R1_4, "good-fading in-band SNR28 QAM16 uses R1/4");
 
-    // AWGN in-band SNR=21.7 is above the coherent QAM16 R2/3 AWGN gate. Below
+    // AWGN in-band SNR=21.7 is above the coherent QAM16 R3/4 AWGN gate. Below
     // 16 dB AWGN it remains differential.
     recommendDataMode(21.7f, WaveformMode::OFDM_CHIRP, mod, rate, 0.04f);
     CHECK(mod == Modulation::QAM16, "AWGN in-band SNR=21.7 selects coherent QAM16");
-    CHECK(rate == CodeRate::R2_3, "AWGN in-band SNR=21.7 QAM16 uses R2/3");
+    CHECK(rate == CodeRate::R3_4, "AWGN in-band SNR=21.7 QAM16 uses R3/4");
 
     // SNR=19 GOOD fading: above the QAM16 measurement gate.
     recommendDataMode(19.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
