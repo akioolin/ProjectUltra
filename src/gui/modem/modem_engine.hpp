@@ -258,6 +258,9 @@ public:
     void expectFullOFDMAnchorOnce() {
         if (streaming_decoder_) streaming_decoder_->expectFullOFDMAnchorOnce();
     }
+    void clearFullOFDMAnchorExpectation() {
+        if (streaming_decoder_) streaming_decoder_->clearFullOFDMAnchorExpectation();
+    }
     void setFixedFrameHeaderDiscovery(bool enable) {
         if (streaming_decoder_) streaming_decoder_->setFixedFrameHeaderDiscovery(enable);
     }

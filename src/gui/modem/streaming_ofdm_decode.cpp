@@ -712,7 +712,17 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 expect_full_ofdm_anchor_ = true;
                                 sync_reject_streak_ = 0;
                             } else {
-                                expect_full_ofdm_anchor_ = false;
+                                // A pending connected full-anchor request is for
+                                // the next DATA burst after a turn/control
+                                // boundary. ACK/NACK/control repeats may arrive
+                                // first; decoding them must not consume that
+                                // DATA re-anchor latch.
+                                if (expect_full_ofdm_anchor_) {
+                                    LOG_MODEM(INFO,
+                                              "[%s] OFDM control %s decoded; preserving pending full DATA anchor",
+                                              log_prefix_.c_str(),
+                                              v2::frameTypeToString(hdr.type));
+                                }
                             }
                             correlation_pos_ = wrapRingIndexLocked(sync_position_ + frame_len);
                             setSearchFloorLocked(frame_sync_abs + frame_len);
@@ -1513,12 +1523,22 @@ void StreamingDecoder::decodeCurrentFrame() {
     if (result.success && connected_ && is_ofdm) {
         noteFrameArrivalSuccess(frame_sync_abs, next_search_abs);
         std::lock_guard<std::mutex> lock(buffer_mutex_);
-        expect_full_ofdm_anchor_ = false;
+        if (!is_non_data_frame) {
+            expect_full_ofdm_anchor_ = false;
+        }
     } else if (!result.success && result.codewords_ok == 0 && connected_ && is_ofdm) {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
         if (sync_from_warm_timed_window_) {
             noteFrameArrivalSyncMissLocked();
             sync_from_warm_timed_window_ = false;
+        }
+        if (mode_ == protocol::WaveformMode::OFDM_CHIRP) {
+            resetFrameArrivalTrackingLocked();
+            expect_full_ofdm_anchor_ = true;
+            sync_reject_streak_ = 0;
+            LOG_MODEM(WARN,
+                      "[%s] OFDM decode failed with 0/%d CWs; forcing full chirp+LTS re-anchor",
+                      log_prefix_.c_str(), result.codewords_failed);
         }
     }
 

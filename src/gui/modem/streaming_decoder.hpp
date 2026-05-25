@@ -298,6 +298,8 @@ public:
     // Expect the next connected OFDM frame to carry full chirp+LTS preamble.
     // This bootstraps OFDM-specific timing after an MC-DPSK handshake.
     void expectFullOFDMAnchorOnce();
+    void clearFullOFDMAnchorExpectation();
+    bool expectsFullOFDMAnchorForTesting() const;
 
     // Get last measured fading index (from per-carrier magnitude variance)
     // 0-1 range, > 0.4 indicates significant fading

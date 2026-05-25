@@ -406,6 +406,9 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         (header.type == protocol::v2::FrameType::TURNOVER ||
          header.type == protocol::v2::FrameType::TURN_REQUEST ||
          header.type == protocol::v2::FrameType::FILE_CANCEL);
+    if (is_ofdm && connected_ && handshake_complete_ && is_data_frame && streaming_decoder_) {
+        streaming_decoder_->clearFullOFDMAnchorExpectation();
+    }
 
     // Use light preamble (LTS only) for connected OFDM control turns. A single
     // DATA frame is a new physical DATA turn and carries a full anchor so the
@@ -457,6 +460,17 @@ std::vector<float> ModemEngine::transmitBurst(const std::vector<Bytes>& frame_da
     // Burst mode is for connected OFDM and MC-DPSK DATA windows.
     streaming_encoder_->setMode(waveform_mode_);
     streaming_encoder_->setDataMode(data_modulation_, data_code_rate_);
+    if (protocol::isOFDMMode(waveform_mode_) && connected_ && handshake_complete_ && streaming_decoder_) {
+        const bool has_data_frame = std::any_of(
+            frame_data_list.begin(), frame_data_list.end(),
+            [](const Bytes& frame) {
+                const auto header = protocol::v2::parseHeader(frame);
+                return header.valid && protocol::v2::isDataFrame(header.type);
+            });
+        if (has_data_frame) {
+            streaming_decoder_->clearFullOFDMAnchorExpectation();
+        }
+    }
 
     auto samples = streaming_encoder_->encodeBurstLight(frame_data_list);
 

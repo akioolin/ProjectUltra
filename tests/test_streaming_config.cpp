@@ -195,6 +195,27 @@ void test_single_frame_ofdm_burst_uses_full_anchor() {
           "single-frame burst anchor should not leave one-shot full preamble armed");
 }
 
+void test_connected_ofdm_config_arms_full_anchor() {
+    auto cfg = makeOFDMConfig(Modulation::DQPSK, CodeRate::R1_4);
+
+    StreamingDecoder decoder;
+    decoder.setConnectedOFDMMode(protocol::WaveformMode::OFDM_CHIRP,
+                                 cfg, Modulation::DQPSK, CodeRate::R1_4);
+    CHECK(decoder.expectsFullOFDMAnchorForTesting(),
+          "connected OFDM entry should arm full chirp+LTS acquisition");
+
+    decoder.expectFullOFDMAnchorOnce();
+    auto promoted = makeOFDMConfig(Modulation::QAM16, CodeRate::R1_2);
+    decoder.setConnectedOFDMMode(protocol::WaveformMode::OFDM_CHIRP,
+                                 promoted, Modulation::QAM16, CodeRate::R1_2);
+    CHECK(decoder.expectsFullOFDMAnchorForTesting(),
+          "connected OFDM reconfiguration must not clear a pending full-anchor expectation");
+
+    decoder.clearFullOFDMAnchorExpectation();
+    CHECK(!decoder.expectsFullOFDMAnchorForTesting(),
+          "local DATA TX should be able to clear a pending peer-DATA full-anchor expectation");
+}
+
 }  // namespace
 
 int main() {
@@ -207,6 +228,7 @@ int main() {
     test_forced_full_preamble_is_one_shot();
     test_multi_frame_ofdm_burst_starts_with_full_anchor();
     test_single_frame_ofdm_burst_uses_full_anchor();
+    test_connected_ofdm_config_arms_full_anchor();
 
     if (tests_failed != 0) {
         std::cout << "StreamingConfig: " << (tests_run - tests_failed)

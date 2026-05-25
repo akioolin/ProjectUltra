@@ -156,6 +156,20 @@ bool isNormalArqAckFrame(const Bytes& frame_data) {
     return seq != 0xFFFF;
 }
 
+bool expectsFullOFDMAnchorAfterTx(const Bytes& frame_data) {
+    if (isNormalArqAckFrame(frame_data)) {
+        return true;
+    }
+    if (frame_data.size() < v2::ControlFrame::SIZE) {
+        return false;
+    }
+
+    const auto type = static_cast<v2::FrameType>(frame_data[2]);
+    return type == v2::FrameType::TURNOVER ||
+           type == v2::FrameType::TURN_REQUEST ||
+           type == v2::FrameType::FILE_CANCEL;
+}
+
 CodeRate oneStepMoreRobust(CodeRate rate) {
     switch (rate) {
         case CodeRate::R3_4: return CodeRate::R2_3;
@@ -2357,7 +2371,7 @@ void Connection::transmitFrame(const Bytes& frame_data) {
     const bool expect_full_anchor_after_tx =
         negotiated_mode_ == WaveformMode::OFDM_CHIRP &&
         state_ == ConnectionState::CONNECTED &&
-        isNormalArqAckFrame(frame_data);
+        expectsFullOFDMAnchorAfterTx(frame_data);
 
     // If burst mode is active, buffer instead of transmitting immediately
     if (burst_mode_active_ && on_transmit_burst_) {

@@ -363,6 +363,16 @@ void test_normal_ofdm_ack_arms_full_anchor_expectation() {
     CHECK(full_anchor_expectations == 1,
           "CONNECT_ACK sentinel seq=65535 must not arm full-anchor expectation");
 
+    auto turnover = v2::ControlFrame::makeTurnover("W1ABC", "K2DEF");
+    ConnectionAdaptiveTestAccess::transmitFrame(c, turnover.serialize());
+    CHECK(full_anchor_expectations == 2,
+          "connected OFDM TURNOVER should arm full-anchor expectation before listening");
+
+    auto turn_request = v2::ControlFrame::makeTurnRequest("W1ABC", "K2DEF");
+    ConnectionAdaptiveTestAccess::transmitFrame(c, turn_request.serialize());
+    CHECK(full_anchor_expectations == 3,
+          "connected OFDM TURN_REQUEST should arm full-anchor expectation before listening");
+
     Connection metadata;
     int metadata_expectations = 0;
     int immediate_expectations = 0;
@@ -378,16 +388,20 @@ void test_normal_ofdm_ack_arms_full_anchor_expectation() {
     ConnectionAdaptiveTestAccess::transmitFrame(metadata, ack.serialize());
     CHECK(metadata_expectations == 1,
           "Connection should attach full-anchor expectation metadata to normal OFDM ACK");
+    ConnectionAdaptiveTestAccess::transmitFrame(metadata, turnover.serialize());
+    CHECK(metadata_expectations == 2,
+          "Connection should attach full-anchor expectation metadata to TURNOVER");
     CHECK(immediate_expectations == 0,
           "metadata TX callback should defer full-anchor application to the transport TX edge");
 
     Connection mcdpsk;
+    int mcdpsk_expectations = 0;
     mcdpsk.setFullOFDMAnchorExpectedCallback([&]() {
-        ++full_anchor_expectations;
+        ++mcdpsk_expectations;
     });
     ConnectionAdaptiveTestAccess::makeConnectedInitiator(mcdpsk, WaveformMode::MC_DPSK);
     ConnectionAdaptiveTestAccess::transmitFrame(mcdpsk, ack.serialize());
-    CHECK(full_anchor_expectations == 1,
+    CHECK(mcdpsk_expectations == 0,
           "non-OFDM ACK must not arm full-anchor expectation");
 }
 
