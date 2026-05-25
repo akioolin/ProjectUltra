@@ -24,6 +24,8 @@ struct OFDMDemodulator::Impl {
     // Carrier indices (must match modulator)
     std::vector<int> data_carrier_indices;
     std::vector<int> pilot_carrier_indices;
+    std::vector<size_t> data_logical_carrier_indices;
+    std::vector<size_t> pilot_logical_carrier_indices;
     std::vector<Complex> pilot_sequence;
 
     // Synchronization state (atomic for thread-safe UI access)
@@ -142,6 +144,7 @@ struct OFDMDemodulator::Impl {
     float freq_offset_filtered = 0.0f;
     bool chirp_cfo_estimated = false;  // True if CFO was set externally (e.g., chirp)
     std::vector<Complex> prev_pilot_phases;
+    std::vector<size_t> prev_pilot_logical_indices;
     int symbols_since_sync = 0;
     float freq_correction_phase = 0.0f;
 
@@ -175,6 +178,20 @@ struct OFDMDemodulator::Impl {
     std::vector<float> dd_qam16_measurement_var_;
     std::vector<float> dd_qam16_reliability_;
     std::vector<float> dd_qam16_channel_var_;
+
+    // Höher/Kaiser/Robertson-style separable 2-D Wiener pilot interpolation.
+    // History is keyed by logical carrier so scattered pilots can be combined
+    // across time before frequency-domain MMSE interpolation.
+    struct WienerPilotHistorySample {
+        int64_t symbol_index = 0;
+        Complex h = Complex(0, 0);
+        float noise_norm = 0.0f;
+    };
+    std::vector<std::vector<WienerPilotHistorySample>> wiener_pilot_history_;
+    std::vector<Complex> wiener_time_estimate_;
+    std::vector<float> wiener_time_error_var_;
+    std::vector<uint8_t> wiener_time_valid_;
+    int64_t wiener_time_symbol_index_ = -999999;
 
     // Diagnostic-only failure attribution for coherent OFDM frames. These
     // fields are reset per received frame and never feed decode decisions.
@@ -261,6 +278,7 @@ struct OFDMDemodulator::Impl {
     // INITIALIZATION (demodulator.cpp)
     // ==========================================================================
     void setupCarriers();
+    void activateCarrierPattern(size_t symbol_index);
     void generateSequences();
     void buildInterpTable();
     void buildInterpolationPhasors();
@@ -296,6 +314,17 @@ struct OFDMDemodulator::Impl {
     void resetPilotFadingStats();
     void updatePilotFadingStats(const std::vector<Complex>& h_ls_all);
     float computePilotFadingIndexFromStats() const;
+    void resetWienerPilotHistory();
+    void seedWienerPilotHistoryFromCurrentChannel(int64_t symbol_index);
+    void addWienerPilotObservation(size_t logical_carrier,
+                                   int64_t symbol_index,
+                                   Complex h,
+                                   float noise_norm);
+    Complex estimateWienerChannel(size_t logical_carrier,
+                                  int64_t symbol_index,
+                                  float noise_norm,
+                                  Complex fallback,
+                                  float* out_error_var);
     void interpolateChannel();
     Complex hardDecision(Complex sym, Modulation mod) const;
     void resetFailureAttributionDiagnostics();

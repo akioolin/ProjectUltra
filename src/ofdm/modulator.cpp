@@ -4,6 +4,7 @@
 #include "ultra/dsp.hpp"
 #include "ultra/logging.hpp"
 #include "demodulator_constants.hpp"
+#include "pilot_pattern.hpp"
 #include <algorithm>
 #include <random>
 
@@ -131,8 +132,10 @@ struct OFDMModulator::Impl {
     // Carrier mapping
     std::vector<int> data_carrier_indices;
     std::vector<int> pilot_carrier_indices;
+    std::vector<int> all_carrier_fft_indices;
     std::vector<size_t> data_logical_carrier_indices;
     std::vector<size_t> pilot_logical_carrier_indices;
+    std::vector<bool> is_pilot_logical;
     Symbol last_data_carrier_symbols_for_testing;
 
     // DBPSK state: previous symbol per data carrier for differential encoding
@@ -176,50 +179,19 @@ struct OFDMModulator::Impl {
     }
 
     void setupCarriers() {
-        // Place carriers symmetrically around DC (excluding DC itself)
-        //
-        // For N carriers total:
-        //   Negative bins: -floor(N/2) to -1  → floor(N/2) carriers
-        //   Positive bins: +1 to +ceil(N/2)   → ceil(N/2) carriers
-        //   Total: floor(N/2) + ceil(N/2) = N carriers
-        //
-        // Examples:
-        //   N=30: -15..-1 (15) + 1..15 (15) = 30 carriers ✓
-        //   N=59: -29..-1 (29) + 1..30 (30) = 59 carriers ✓
+        activateCarrierPattern(0);
+    }
 
-        int neg_limit = config.num_carriers / 2;         // Floor
-        int pos_limit = (config.num_carriers + 1) / 2;   // Ceiling
-
-        data_carrier_indices.clear();
-        pilot_carrier_indices.clear();
-        data_logical_carrier_indices.clear();
-        pilot_logical_carrier_indices.clear();
-
-        int pilot_count = 0;
-        size_t logical_carrier = 0;
-        for (int i = -neg_limit; i <= pos_limit; ++i) {
-            if (i == 0) continue;  // Skip DC
-
-            int fft_idx = (i + config.fft_size) % config.fft_size;
-
-            // If use_pilots=false (e.g., DQPSK), all carriers are data
-            if (!config.use_pilots) {
-                data_carrier_indices.push_back(fft_idx);
-                data_logical_carrier_indices.push_back(logical_carrier);
-            } else {
-                // Every pilot_spacing carrier is a pilot
-                if (pilot_count % config.pilot_spacing == 0) {
-                    pilot_carrier_indices.push_back(fft_idx);
-                    pilot_logical_carrier_indices.push_back(logical_carrier);
-                } else {
-                    data_carrier_indices.push_back(fft_idx);
-                    data_logical_carrier_indices.push_back(logical_carrier);
-                }
-            }
-            ++pilot_count;
-            ++logical_carrier;
-        }
-
+    void activateCarrierPattern(size_t symbol_index) {
+        ofdm_pilots::buildCarrierPattern(config,
+                                         symbol_index,
+                                         all_carrier_fft_indices,
+                                         data_carrier_indices,
+                                         pilot_carrier_indices,
+                                         data_logical_carrier_indices,
+                                         pilot_logical_carrier_indices,
+                                         is_pilot_logical,
+                                         pilot_sequence);
     }
 
     void generateSequences() {
@@ -232,13 +204,6 @@ struct OFDMModulator::Impl {
         for (size_t n = 0; n < N; ++n) {
             float phase = -M_PI * u * n * (n + 1) / N;
             sync_sequence[n] = Complex(std::cos(phase), std::sin(phase));
-        }
-
-        // Pilot sequence: known BPSK pattern (pseudo-random but deterministic)
-        pilot_sequence.resize(pilot_carrier_indices.size());
-        std::mt19937 rng(demod_constants::PILOT_RNG_SEED);
-        for (size_t i = 0; i < pilot_sequence.size(); ++i) {
-            pilot_sequence[i] = (rng() & 1) ? Complex(1, 0) : Complex(-1, 0);
         }
 
         // DEBUG: Log pilot configuration for comparison with RX
@@ -407,6 +372,7 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod,
                                  uint64_t active_carrier_mask,
                                  bool carrier_mask_enabled) {
     // Note: mixer phase continues from preamble for phase coherence
+    impl_->activateCarrierPattern(0);
 
     // Use the proper function to get bits per symbol, NOT the enum value!
     // (enum values don't correspond to bit counts)
@@ -437,8 +403,10 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod,
     // Process data in symbol-sized chunks
     size_t data_idx = 0;
     size_t bit_idx = 0;
+    size_t symbol_index = 0;
 
     while (data_idx < data.size()) {
+        impl_->activateCarrierPattern(symbol_index);
         auto& symbol_data = impl_->symbol_data_scratch;
         symbol_data.clear();
 
@@ -551,6 +519,7 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod,
             output.push_back(0);
             impl_->mixer.next();  // Keep mixer in sync with RX
         }
+        ++symbol_index;
     }
 
     return output;
@@ -569,6 +538,7 @@ Samples OFDMModulator::generatePreamble() {
     g_logged_tx_pilots = false;
 
     // Initialize DBPSK state: all carriers start at +1 (reference symbol)
+    impl_->activateCarrierPattern(0);
     impl_->dbpsk_prev_symbols.assign(impl_->data_carrier_indices.size(), Complex(1, 0));
 
     // Preamble structure (Schmidl-Cox):
@@ -628,6 +598,7 @@ Samples OFDMModulator::generateTrainingSymbols(int count) {
     impl_->mixer.reset();
 
     // Initialize DBPSK state for differential modes
+    impl_->activateCarrierPattern(0);
     impl_->dbpsk_prev_symbols.assign(impl_->data_carrier_indices.size(), Complex(1, 0));
 
     // DEBUG: Print carrier indices
@@ -673,6 +644,7 @@ Samples OFDMModulator::generateProbe() {
     // Channel probe: known sequence across all carriers
     // Used for channel quality measurement
 
+    impl_->activateCarrierPattern(0);
     auto& probe_data = impl_->probe_data_scratch;
     probe_data.resize(impl_->data_carrier_indices.size());
     for (size_t i = 0; i < probe_data.size(); ++i) {

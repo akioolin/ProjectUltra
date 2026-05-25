@@ -186,6 +186,8 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     // We average over multiple training symbols for robustness.
     // We also estimate noise variance from the variance of H estimates.
 
+    activateCarrierPattern(0);
+
     LOG_DEMOD(DEBUG, "estimateChannelFromLTS: num_symbols=%zu, symbol_samples=%zu, first_sample=%.6f",
              num_symbols, symbol_samples, training_samples[0]);
 
@@ -770,6 +772,7 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     }
 
     // Mark that we have a valid channel estimate (for smoothing factor selection)
+    seedWienerPilotHistoryFromCurrentChannel(-1);
     snr_symbol_count = num_symbols;
 }
 

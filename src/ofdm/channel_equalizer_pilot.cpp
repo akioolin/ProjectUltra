@@ -8,6 +8,8 @@
 #include <limits>
 #include "demodulator_impl.hpp"
 #include "demodulator_constants.hpp"
+#include "pilot_pattern.hpp"
+#include "wiener_interpolator.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/phy_diagnostics.hpp"
 
@@ -16,6 +18,12 @@ namespace ultra {
 using namespace demod_constants;
 
 namespace {
+
+constexpr float kRobustDelaySpreadS = 1.0e-3f;
+constexpr float kRobustDopplerHz = 0.5f;
+constexpr size_t kWienerMaxHistoryPerCarrier = 6;
+constexpr size_t kWienerMaxTimeObs = 4;
+constexpr size_t kWienerMaxFreqObs = 16;
 
 bool coherentPublicFadingUsesLTS(Modulation mod) {
     switch (mod) {
@@ -33,6 +41,166 @@ bool coherentPublicFadingUsesLTS(Modulation mod) {
 }
 
 }  // namespace
+
+void OFDMDemodulator::Impl::resetWienerPilotHistory() {
+    if (wiener_pilot_history_.size() != config.num_carriers) {
+        wiener_pilot_history_.assign(config.num_carriers, {});
+    } else {
+        for (auto& history : wiener_pilot_history_) {
+            history.clear();
+        }
+    }
+    wiener_time_estimate_.assign(config.num_carriers, Complex(0, 0));
+    wiener_time_error_var_.assign(config.num_carriers, 1.0f);
+    wiener_time_valid_.assign(config.num_carriers, 0);
+    wiener_time_symbol_index_ = -999999;
+}
+
+void OFDMDemodulator::Impl::addWienerPilotObservation(size_t logical_carrier,
+                                                      int64_t symbol_index,
+                                                      Complex h,
+                                                      float noise_norm) {
+    if (logical_carrier >= config.num_carriers ||
+        !std::isfinite(h.real()) || !std::isfinite(h.imag())) {
+        return;
+    }
+    if (wiener_pilot_history_.size() != config.num_carriers) {
+        wiener_pilot_history_.resize(config.num_carriers);
+    }
+
+    auto& history = wiener_pilot_history_[logical_carrier];
+    if (!history.empty() && history.back().symbol_index == symbol_index) {
+        history.back().h = h;
+        history.back().noise_norm = std::clamp(noise_norm, 1.0e-5f, 10.0f);
+    } else {
+        history.push_back(WienerPilotHistorySample{
+            symbol_index,
+            h,
+            std::clamp(noise_norm, 1.0e-5f, 10.0f)});
+    }
+    while (history.size() > kWienerMaxHistoryPerCarrier) {
+        history.erase(history.begin());
+    }
+    wiener_time_symbol_index_ = -999999;
+}
+
+void OFDMDemodulator::Impl::seedWienerPilotHistoryFromCurrentChannel(int64_t symbol_index) {
+    resetWienerPilotHistory();
+    const size_t n = std::min<size_t>(config.num_carriers, all_carrier_fft_indices.size());
+    for (size_t logical = 0; logical < n; ++logical) {
+        const int idx = all_carrier_fft_indices[logical];
+        const Complex h = channel_estimate[idx];
+        const float signal_ref = std::max(std::norm(h), MIN_CARRIER_NOISE_VAR);
+        const float noise_norm = noise_variance / signal_ref;
+        addWienerPilotObservation(logical, symbol_index, h, noise_norm);
+    }
+}
+
+Complex OFDMDemodulator::Impl::estimateWienerChannel(size_t logical_carrier,
+                                                     int64_t symbol_index,
+                                                     float noise_norm,
+                                                     Complex fallback,
+                                                     float* out_error_var) {
+    if (logical_carrier >= config.num_carriers ||
+        wiener_pilot_history_.empty()) {
+        if (out_error_var) {
+            *out_error_var = 1.0f;
+        }
+        return fallback;
+    }
+
+    const float symbol_period_s =
+        static_cast<float>(config.getSymbolDuration()) /
+        static_cast<float>(config.sample_rate);
+    const float carrier_spacing_hz =
+        static_cast<float>(config.sample_rate) /
+        static_cast<float>(config.fft_size);
+
+    if (wiener_time_symbol_index_ != symbol_index) {
+        if (wiener_time_estimate_.size() != config.num_carriers) {
+            wiener_time_estimate_.assign(config.num_carriers, Complex(0, 0));
+            wiener_time_error_var_.assign(config.num_carriers, 1.0f);
+            wiener_time_valid_.assign(config.num_carriers, 0);
+        }
+
+        for (size_t logical = 0; logical < wiener_pilot_history_.size(); ++logical) {
+            std::vector<ofdm_wiener::Observation1D> time_obs;
+            time_obs.reserve(wiener_pilot_history_[logical].size());
+            for (const auto& sample : wiener_pilot_history_[logical]) {
+                time_obs.push_back(ofdm_wiener::Observation1D{
+                    static_cast<float>(sample.symbol_index),
+                    sample.h,
+                    sample.noise_norm});
+            }
+            const auto estimate = ofdm_wiener::estimate1D(
+                time_obs,
+                static_cast<float>(symbol_index),
+                kWienerMaxTimeObs,
+                [&](float delta_symbols) {
+                    return ofdm_wiener::timeCorrelation(
+                        delta_symbols, symbol_period_s, kRobustDopplerHz);
+                });
+            if (estimate.valid) {
+                wiener_time_estimate_[logical] = estimate.value;
+                wiener_time_error_var_[logical] = estimate.error_var;
+                wiener_time_valid_[logical] = 1;
+            } else {
+                wiener_time_valid_[logical] = 0;
+                wiener_time_error_var_[logical] = 1.0f;
+            }
+        }
+        wiener_time_symbol_index_ = symbol_index;
+    }
+
+    std::vector<ofdm_wiener::Observation1D> freq_obs;
+    freq_obs.reserve(config.num_carriers);
+    const int half_fft = static_cast<int>(config.fft_size / 2);
+    for (size_t logical = 0;
+         logical < wiener_time_valid_.size() &&
+         logical < all_carrier_fft_indices.size();
+         ++logical) {
+        if (!wiener_time_valid_[logical]) {
+            continue;
+        }
+        const int fft_idx = all_carrier_fft_indices[logical];
+        const int k = (fft_idx <= half_fft)
+            ? fft_idx
+            : fft_idx - static_cast<int>(config.fft_size);
+        const float phase = -lts_phase_slope * static_cast<float>(k);
+        const Complex desloped =
+            wiener_time_estimate_[logical] *
+            Complex(std::cos(phase), std::sin(phase));
+        freq_obs.push_back(ofdm_wiener::Observation1D{
+            static_cast<float>(logical),
+            desloped,
+            std::max(noise_norm, wiener_time_error_var_[logical])});
+    }
+
+    const auto freq_estimate = ofdm_wiener::estimate1D(
+        freq_obs,
+        static_cast<float>(logical_carrier),
+        kWienerMaxFreqObs,
+        [&](float delta_logical) {
+            return ofdm_wiener::frequencyCorrelation(
+                delta_logical, carrier_spacing_hz, kRobustDelaySpreadS);
+        });
+    if (!freq_estimate.valid) {
+        if (out_error_var) {
+            *out_error_var = 1.0f;
+        }
+        return fallback;
+    }
+
+    const int target_fft = all_carrier_fft_indices[logical_carrier];
+    const int target_k = (target_fft <= half_fft)
+        ? target_fft
+        : target_fft - static_cast<int>(config.fft_size);
+    const float phase = lts_phase_slope * static_cast<float>(target_k);
+    if (out_error_var) {
+        *out_error_var = freq_estimate.error_var;
+    }
+    return freq_estimate.value * Complex(std::cos(phase), std::sin(phase));
+}
 
 void OFDMDemodulator::Impl::resetPilotFadingStats() {
     pilot_mag_sum_.clear();
@@ -258,6 +426,13 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
                             config.modulation == Modulation::DQPSK ||
                             config.modulation == Modulation::D8PSK);
     bool has_pilots = !pilot_carrier_indices.empty();
+    if (!has_pilots) {
+        pilot_phase_correction = Complex(1, 0);
+        prev_pilot_phases.clear();
+        prev_pilot_logical_indices.clear();
+        ++snr_symbol_count;
+        return;
+    }
 
     // Use soft_bits.empty() to detect first DATA symbol (snr_symbol_count may be > 0 from LTS)
     bool is_first_data_symbol = soft_bits.empty();
@@ -396,6 +571,16 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
         signal_power_sum += std::norm(h_ls_all[i]);
     }
     float signal_power = signal_power_sum / pilot_carrier_indices.size();
+    const float wiener_noise_norm =
+        noise_variance / std::max(signal_power, MIN_CARRIER_NOISE_VAR);
+    for (size_t i = 0;
+         i < h_ls_all.size() && i < pilot_logical_carrier_indices.size();
+         ++i) {
+        addWienerPilotObservation(pilot_logical_carrier_indices[i],
+                                  static_cast<int64_t>(current_data_symbol_index_),
+                                  h_ls_all[i],
+                                  wiener_noise_norm);
+    }
 
     // Fading index: normalized magnitude variance (0 = flat, >0.1 = fading).
     // Compute it before temporal SNR estimation because H[n]-H[n-1] is a valid
@@ -437,10 +622,14 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     size_t pilot_residual_count = 0;
     constexpr float kPilotSNRFadingLimit = 0.0f;
     if (fading_index < kPilotSNRFadingLimit &&
-        !prev_pilot_phases.empty() && prev_pilot_phases.size() == h_ls_all.size()) {
+        !prev_pilot_phases.empty() && prev_pilot_phases.size() == h_ls_all.size() &&
+        prev_pilot_logical_indices.size() == pilot_logical_carrier_indices.size()) {
         Complex temporal_fit_num(0.0f, 0.0f);
         float temporal_fit_den = 0.0f;
         for (size_t i = 0; i < h_ls_all.size(); ++i) {
+            if (prev_pilot_logical_indices[i] != pilot_logical_carrier_indices[i]) {
+                continue;
+            }
             const Complex prev_h = prev_pilot_phases[i];
             const Complex curr_h = h_ls_all[i];
             if (std::norm(prev_h) > 1.0e-8f && std::norm(curr_h) > 1.0e-8f) {
@@ -454,6 +643,9 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
             float pilot_residual_signal_sum = 0.0f;
             float pilot_residual_noise_sum = 0.0f;
             for (size_t i = 0; i < h_ls_all.size(); ++i) {
+                if (prev_pilot_logical_indices[i] != pilot_logical_carrier_indices[i]) {
+                    continue;
+                }
                 const Complex prev_h = prev_pilot_phases[i];
                 const Complex curr_h = h_ls_all[i];
                 if (std::norm(prev_h) <= 1.0e-8f || std::norm(curr_h) <= 1.0e-8f) {
@@ -485,7 +677,10 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
         int idx = pilot_carrier_indices[i];
 
-        if (!prev_pilot_phases.empty() && i < prev_pilot_phases.size()) {
+        if (!prev_pilot_phases.empty() && i < prev_pilot_phases.size() &&
+            i < prev_pilot_logical_indices.size() &&
+            i < pilot_logical_carrier_indices.size() &&
+            prev_pilot_logical_indices[i] == pilot_logical_carrier_indices[i]) {
             Complex prev_h = prev_pilot_phases[i];
             Complex curr_h = h_ls_all[i];
 
@@ -524,11 +719,15 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     // CPE correction (above) handles residual phase drift for coherent modes.
     // Chirp/LTS CFO provides the initial frequency offset.
     constexpr bool enable_pilot_cfo_tracking = false;
-    if (enable_pilot_cfo_tracking && !prev_pilot_phases.empty() && prev_pilot_phases.size() == h_ls_all.size()) {
+    if (enable_pilot_cfo_tracking && !prev_pilot_phases.empty() && prev_pilot_phases.size() == h_ls_all.size() &&
+        prev_pilot_logical_indices.size() == pilot_logical_carrier_indices.size()) {
         Complex phase_diff_sum(0, 0);
         int valid_count = 0;
 
         for (size_t i = 0; i < h_ls_all.size(); ++i) {
+            if (prev_pilot_logical_indices[i] != pilot_logical_carrier_indices[i]) {
+                continue;
+            }
             Complex diff = h_ls_all[i] * std::conj(prev_pilot_phases[i]);
 
             if (std::norm(prev_pilot_phases[i]) > 1e-6f &&
@@ -577,6 +776,7 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
 
     // Store current pilots for next symbol
     prev_pilot_phases = h_ls_all;
+    prev_pilot_logical_indices = pilot_logical_carrier_indices;
 
     // Interpolate between pilots
     const bool use_coherent_dd =
@@ -584,9 +784,9 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
          config.modulation == Modulation::QAM16);
     const bool have_qam16_dd =
         use_coherent_dd &&
-        dd_qam16_channel_observations_.size() == data_carrier_indices.size() &&
-        dd_qam16_measurement_var_.size() == data_carrier_indices.size() &&
-        dd_qam16_reliability_.size() == data_carrier_indices.size();
+        dd_qam16_channel_observations_.size() == config.fft_size &&
+        dd_qam16_measurement_var_.size() == config.fft_size &&
+        dd_qam16_reliability_.size() == config.fft_size;
     if (!is_differential) {
         // Coherent modes: phase-slope-compensated complex interpolation.
         // The timing offset introduces a phase gradient across carriers; de-sloping before
@@ -594,9 +794,9 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
         // de-slope is identity — complex interpolation still preserves phase info that
         // magnitude-only interpolation would discard.
         int half_fft = config.fft_size / 2;
-        if (use_coherent_dd && dd_qam16_channel_var_.size() != data_carrier_indices.size()) {
+        if (use_coherent_dd && dd_qam16_channel_var_.size() != config.fft_size) {
             dd_qam16_channel_var_.assign(
-                data_carrier_indices.size(),
+                config.fft_size,
                 std::max(noise_variance, MIN_CARRIER_NOISE_VAR));
         }
 
@@ -608,6 +808,9 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
             float phase = -lts_phase_slope * k;
             pilot_desloped[i] = channel_estimate[fft_idx] * Complex(std::cos(phase), std::sin(phase));
         }
+
+        const bool use_wiener_interpolation =
+            ofdm_pilots::scatteredPilotsActive(config);
 
         for (size_t dc = 0; dc < interp_table.size(); ++dc) {
             const auto& info = interp_table[dc];
@@ -645,6 +848,16 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
             int k = (info.fft_idx <= half_fft) ? info.fft_idx : info.fft_idx - config.fft_size;
             float phase = lts_phase_slope * k;
             Complex pilot_h = interp_h * Complex(std::cos(phase), std::sin(phase));
+            float wiener_error_var = 1.0f;
+            if (use_wiener_interpolation &&
+                dc < data_logical_carrier_indices.size()) {
+                pilot_h = estimateWienerChannel(
+                    data_logical_carrier_indices[dc],
+                    static_cast<int64_t>(current_data_symbol_index_),
+                    wiener_noise_norm,
+                    pilot_h,
+                    &wiener_error_var);
+            }
 
             if (use_coherent_dd) {
                 // Coherent 8PSK/16-QAM DD tracking. Each data carrier is a scalar
@@ -665,7 +878,6 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
                 // one wrong coherent decision cannot rotate or scale a carrier
                 // without bound.
                 constexpr float kGoodDopplerSigmaFrac = 0.05f;
-                constexpr float kPilotInterpSigmaFrac = 0.20f;
                 constexpr float kMaxDdStepFrac = 0.30f;
 
                 const Complex prior_h = channel_estimate[info.fft_idx];
@@ -674,31 +886,36 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
                     std::max(std::abs(prior_h), std::abs(pilot_h)));
                 const float process_sigma = kGoodDopplerSigmaFrac * h_ref_mag;
                 const float process_var = process_sigma * process_sigma;
-                const float pilot_interp_sigma = kPilotInterpSigmaFrac * h_ref_mag;
+                const float pilot_interp_sigma = use_wiener_interpolation
+                    ? std::sqrt(std::clamp(wiener_error_var, 0.0f, 1.0f)) * h_ref_mag
+                    : 0.20f * h_ref_mag;
                 const float pilot_measurement_var =
                     std::max(noise_variance + pilot_interp_sigma * pilot_interp_sigma,
                              MIN_CARRIER_NOISE_VAR);
 
                 float prior_var = pilot_measurement_var;
-                if (dc < dd_qam16_channel_var_.size() &&
-                    std::isfinite(dd_qam16_channel_var_[dc]) &&
-                    dd_qam16_channel_var_[dc] > 0.0f) {
-                    prior_var = dd_qam16_channel_var_[dc] + process_var;
+                const size_t state_idx = static_cast<size_t>(info.fft_idx);
+                if (state_idx < dd_qam16_channel_var_.size() &&
+                    std::isfinite(dd_qam16_channel_var_[state_idx]) &&
+                    dd_qam16_channel_var_[state_idx] > 0.0f) {
+                    prior_var = dd_qam16_channel_var_[state_idx] + process_var;
                 }
 
                 const float pilot_gain = prior_var / (prior_var + pilot_measurement_var);
                 Complex tracked_h = prior_h + pilot_gain * (pilot_h - prior_h);
                 float tracked_var = (1.0f - pilot_gain) * prior_var;
 
-                if (have_qam16_dd && dd_qam16_reliability_[dc] > 0.0f) {
-                    const float reliability = std::max(dd_qam16_reliability_[dc], 0.05f);
+                if (have_qam16_dd &&
+                    state_idx < dd_qam16_reliability_.size() &&
+                    dd_qam16_reliability_[state_idx] > 0.0f) {
+                    const float reliability = std::max(dd_qam16_reliability_[state_idx], 0.05f);
                     const float measurement_var =
-                        std::max(dd_qam16_measurement_var_[dc] / reliability,
+                        std::max(dd_qam16_measurement_var_[state_idx] / reliability,
                                  MIN_CARRIER_NOISE_VAR);
                     const float kalman_gain =
                         tracked_var / (tracked_var + measurement_var);
 
-                    Complex step = dd_qam16_channel_observations_[dc] - tracked_h;
+                    Complex step = dd_qam16_channel_observations_[state_idx] - tracked_h;
                     const float step_mag = std::abs(step);
                     const float max_step = kMaxDdStepFrac * h_ref_mag;
                     if (step_mag > max_step && step_mag > 1.0e-6f) {
@@ -709,8 +926,8 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
                     tracked_var *= (1.0f - kalman_gain);
                 }
 
-                if (dc < dd_qam16_channel_var_.size()) {
-                    dd_qam16_channel_var_[dc] =
+                if (state_idx < dd_qam16_channel_var_.size()) {
+                    dd_qam16_channel_var_[state_idx] =
                         std::max(tracked_var, MIN_CARRIER_NOISE_VAR);
                 }
 
@@ -749,7 +966,8 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     // - Interpolation: fresh magnitude + phase baseline from 6 pilots
     // - DD corrections: per-carrier phase refinement from 53 data decisions
     if (!is_differential && dd_phase_corrections.size() == data_carrier_indices.size()
-        && snr_symbol_count >= 3) {
+        && snr_symbol_count >= 3 &&
+        !ofdm_pilots::scatteredPilotsActive(config)) {
         float dd_blend = 0.3f;
         for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
             float corr = dd_phase_corrections[i];

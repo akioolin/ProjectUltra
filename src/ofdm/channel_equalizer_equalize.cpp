@@ -436,9 +436,9 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
     const bool use_coherent_dd =
         (mod == Modulation::QAM8 || mod == Modulation::QAM16);
     if (use_coherent_dd && data_carrier_indices.size() == equalized.size()) {
-        dd_qam16_channel_observations_.assign(data_carrier_indices.size(), Complex(0, 0));
-        dd_qam16_measurement_var_.assign(data_carrier_indices.size(), 0.0f);
-        dd_qam16_reliability_.assign(data_carrier_indices.size(), 0.0f);
+        dd_qam16_channel_observations_.assign(config.fft_size, Complex(0, 0));
+        dd_qam16_measurement_var_.assign(config.fft_size, 0.0f);
+        dd_qam16_reliability_.assign(config.fft_size, 0.0f);
 
         float norm_evm_sum = 0.0f;
         size_t norm_evm_count = 0;
@@ -488,10 +488,11 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
                 continue;
             }
 
-            dd_qam16_channel_observations_[i] = freq_domain[idx] / decision;
-            dd_qam16_measurement_var_[i] =
+            const size_t state_idx = static_cast<size_t>(idx);
+            dd_qam16_channel_observations_[state_idx] = freq_domain[idx] / decision;
+            dd_qam16_measurement_var_[state_idx] =
                 std::max(noise_variance / decision_power, MIN_CARRIER_NOISE_VAR);
-            dd_qam16_reliability_[i] = reliability;
+            dd_qam16_reliability_[state_idx] = reliability;
             ++reliable_count;
         }
 

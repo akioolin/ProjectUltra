@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHANNEL="awgn"
 SNR_DB="20"
+SEED="42"
 EXPECT_RATE="R1/4"
 EXPECT_MOD="16QAM"
 MSG_COUNT=3
@@ -15,7 +16,7 @@ FILE_KB=10
 OUT=""
 
 usage() {
-  printf 'Usage: %s [--channel awgn] [--snr-db 20] [--expect-rate R1/4] [--out DIR]\n' "$0"
+  printf 'Usage: %s [--channel awgn] [--snr-db 20] [--seed 42] [--expect-rate R1/4] [--out DIR]\n' "$0"
   printf '       [--exit-after SEC] [--auto-disconnect-after SEC] [--message-count N]\n'
 }
 
@@ -91,6 +92,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --channel) CHANNEL="${2:?}"; shift 2 ;;
     --snr-db) SNR_DB="${2:?}"; shift 2 ;;
+    --seed) SEED="${2:?}"; shift 2 ;;
     --expect-rate) EXPECT_RATE="${2:?}"; shift 2 ;;
     --expect-mod) EXPECT_MOD="${2:?}"; shift 2 ;;
     --out) OUT="${2:?}"; shift 2 ;;
@@ -106,7 +108,7 @@ done
 
 if [[ -z "$OUT" ]]; then
   stamp="$(date +%Y%m%d_%H%M%S)"
-  OUT="/tmp/qam16_ladder_${CHANNEL}_snr${SNR_DB}_${stamp}"
+  OUT="/tmp/qam16_ladder_${CHANNEL}_snr${SNR_DB}_seed${SEED}_${stamp}"
 fi
 
 mkdir -p "$OUT"
@@ -268,6 +270,7 @@ printf 'alpha_tok:ALPHA:alpha\nbravo_tok:BRAVO:bravo\n' > "$TOKENS"
   --captures-root "$OUT/caps" \
   --lobby-channel "$CHANNEL" \
   --lobby-snr-db "$SNR_DB" \
+  --lobby-seed "$SEED" \
   --shutdown-deadline-sec "$((EXIT_AFTER + 120))" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 

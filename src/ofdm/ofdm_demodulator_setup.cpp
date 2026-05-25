@@ -10,6 +10,7 @@
 #include "ultra/logging.hpp"
 #include "demodulator_impl.hpp"
 #include "demodulator_constants.hpp"
+#include "pilot_pattern.hpp"
 
 namespace ultra {
 
@@ -41,6 +42,10 @@ OFDMDemodulator::Impl::Impl(const ModemConfig& cfg)
     interp_h_clean_scratch.resize(static_cast<size_t>(cfg.num_carriers));
     interp_pilot_logical_pos_scratch.reserve(static_cast<size_t>(cfg.num_carriers));
     channel_estimate.resize(cfg.fft_size, Complex(1, 0));
+    wiener_pilot_history_.resize(static_cast<size_t>(cfg.num_carriers));
+    wiener_time_estimate_.resize(static_cast<size_t>(cfg.num_carriers), Complex(0, 0));
+    wiener_time_error_var_.resize(static_cast<size_t>(cfg.num_carriers), 1.0f);
+    wiener_time_valid_.resize(static_cast<size_t>(cfg.num_carriers), 0);
 
     // Initialize adaptive equalizer state
     lms_weights.resize(cfg.fft_size, Complex(1, 0));
@@ -54,37 +59,21 @@ OFDMDemodulator::Impl::Impl(const ModemConfig& cfg)
 }
 
 void OFDMDemodulator::Impl::setupCarriers() {
-    // Must match modulator exactly
-    int neg_limit = config.num_carriers / 2;
-    int pos_limit = (config.num_carriers + 1) / 2;
+    activateCarrierPattern(0);
+}
 
-    // Build all-carrier ordered list AND separate pilot/data lists
-    all_carrier_fft_indices.clear();
-    is_pilot_logical.clear();
-
-    int pilot_count = 0;
-    for (int i = -neg_limit; i <= pos_limit; ++i) {
-        if (i == 0) continue;
-
-        int fft_idx = (i + config.fft_size) % config.fft_size;
-        bool is_pilot = config.use_pilots && (pilot_count % config.pilot_spacing == 0);
-
-        all_carrier_fft_indices.push_back(fft_idx);
-        is_pilot_logical.push_back(is_pilot);
-
-        if (!config.use_pilots) {
-            data_carrier_indices.push_back(fft_idx);
-        } else {
-            if (is_pilot) {
-                pilot_carrier_indices.push_back(fft_idx);
-            } else {
-                data_carrier_indices.push_back(fft_idx);
-            }
-        }
-        ++pilot_count;
-    }
-
-    }
+void OFDMDemodulator::Impl::activateCarrierPattern(size_t symbol_index) {
+    ofdm_pilots::buildCarrierPattern(config,
+                                     symbol_index,
+                                     all_carrier_fft_indices,
+                                     data_carrier_indices,
+                                     pilot_carrier_indices,
+                                     data_logical_carrier_indices,
+                                     pilot_logical_carrier_indices,
+                                     is_pilot_logical,
+                                     pilot_sequence);
+    buildInterpTable();
+}
 
 void OFDMDemodulator::Impl::generateSequences() {
     // Zadoff-Chu sequence for sync
@@ -95,13 +84,6 @@ void OFDMDemodulator::Impl::generateSequences() {
     for (size_t n = 0; n < N; ++n) {
         float phase = -M_PI * u * n * (n + 1) / N;
         sync_sequence[n] = Complex(std::cos(phase), std::sin(phase));
-    }
-
-    // Pilot sequence (must match modulator)
-    pilot_sequence.resize(pilot_carrier_indices.size());
-    std::mt19937 rng(PILOT_RNG_SEED);
-    for (size_t i = 0; i < pilot_sequence.size(); ++i) {
-        pilot_sequence[i] = (rng() & 1) ? Complex(1, 0) : Complex(-1, 0);
     }
 
     LOG_DEMOD(DEBUG, "Demod pilot config: %zu pilots, %zu data carriers",
@@ -156,48 +138,32 @@ void OFDMDemodulator::Impl::generateSequences() {
 
 void OFDMDemodulator::Impl::buildInterpTable() {
     // Pre-compute interpolation weights for each data carrier
-    struct CarrierInfo {
-        int fft_idx;
-        bool is_pilot;
-    };
-    std::vector<CarrierInfo> carriers;
-    int neg_limit = config.num_carriers / 2;
-    int pos_limit = (config.num_carriers + 1) / 2;
-    int pilot_count = 0;
-
-    for (int i = -neg_limit; i <= pos_limit; ++i) {
-        if (i == 0) continue;
-        int fft_idx = (i + config.fft_size) % config.fft_size;
-        bool is_pilot = (pilot_count % config.pilot_spacing == 0);
-        carriers.push_back({fft_idx, is_pilot});
-        ++pilot_count;
-    }
-
     interp_table.clear();
     interp_table.reserve(data_carrier_indices.size());
 
-    for (size_t ci = 0; ci < carriers.size(); ++ci) {
-        if (carriers[ci].is_pilot) continue;
+    for (size_t ci = 0; ci < all_carrier_fft_indices.size(); ++ci) {
+        if (ci < is_pilot_logical.size() && is_pilot_logical[ci]) continue;
 
         InterpInfo info;
-        info.fft_idx = carriers[ci].fft_idx;
+        info.fft_idx = all_carrier_fft_indices[ci];
         info.lower_pilot = -1;
         info.upper_pilot = -1;
         info.alpha = 0.5f;
 
         int lower_ci = -1;
         for (int j = (int)ci - 1; j >= 0; --j) {
-            if (carriers[j].is_pilot) {
-                info.lower_pilot = carriers[j].fft_idx;
+            if (j < static_cast<int>(is_pilot_logical.size()) &&
+                is_pilot_logical[j]) {
+                info.lower_pilot = all_carrier_fft_indices[j];
                 lower_ci = j;
                 break;
             }
         }
 
         int upper_ci = -1;
-        for (size_t j = ci + 1; j < carriers.size(); ++j) {
-            if (carriers[j].is_pilot) {
-                info.upper_pilot = carriers[j].fft_idx;
+        for (size_t j = ci + 1; j < all_carrier_fft_indices.size(); ++j) {
+            if (j < is_pilot_logical.size() && is_pilot_logical[j]) {
+                info.upper_pilot = all_carrier_fft_indices[j];
                 upper_ci = (int)j;
                 break;
             }

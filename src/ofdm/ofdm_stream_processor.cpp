@@ -281,6 +281,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 impl_->last_snr_db_estimate = 0.0f;
                 impl_->noise_variance = 0.1f;
                 impl_->prev_pilot_phases.clear();
+                impl_->prev_pilot_logical_indices.clear();
                 impl_->resetPilotFadingStats();
 
                 // Reset adaptive equalizer
@@ -297,6 +298,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 impl_->dd_qam16_measurement_var_.clear();
                 impl_->dd_qam16_reliability_.clear();
                 impl_->dd_qam16_channel_var_.clear();
+                impl_->resetWienerPilotHistory();
                 impl_->resetFailureAttributionDiagnostics();
                 if (!is_differential || impl_->config.use_pilots) {
                     impl_->carrier_phase_initialized = false;
@@ -373,6 +375,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                     impl_->last_snr_db_estimate = 0.0f;
                     impl_->noise_variance = 0.1f;
                     impl_->prev_pilot_phases.clear();
+                    impl_->prev_pilot_logical_indices.clear();
                     impl_->resetPilotFadingStats();
 
                     std::fill(impl_->lms_weights.begin(), impl_->lms_weights.end(), Complex(1, 0));
@@ -388,6 +391,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                     impl_->dd_qam16_measurement_var_.clear();
                     impl_->dd_qam16_reliability_.clear();
                     impl_->dd_qam16_channel_var_.clear();
+                    impl_->resetWienerPilotHistory();
                     impl_->resetFailureAttributionDiagnostics();
                     impl_->carrier_phase_initialized = false;
                     impl_->carrier_phase_correction = Complex(1, 0);
@@ -407,12 +411,15 @@ bool OFDMDemodulator::process(SampleSpan samples) {
         // Process all complete symbols
         size_t symbols_processed = 0;
         while (impl_->rx_buffer.size() >= impl_->symbol_samples) {
+            impl_->current_data_symbol_index_ =
+                static_cast<size_t>(impl_->synced_symbol_count.load());
+            impl_->activateCarrierPattern(impl_->current_data_symbol_index_);
+
             SampleSpan sym_samples(impl_->rx_buffer.data(), impl_->symbol_samples);
             const auto& baseband = impl_->toBaseband(sym_samples);
             const auto& freq_domain = impl_->extractSymbol(baseband, 0);
 
             impl_->updateChannelEstimate(freq_domain);
-            impl_->current_data_symbol_index_ = static_cast<size_t>(impl_->synced_symbol_count.load());
 
             const auto& equalized = impl_->equalize(freq_domain);
             impl_->demodulateSymbol(equalized, impl_->config.modulation);
@@ -420,6 +427,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
                                    impl_->rx_buffer.begin() + impl_->symbol_samples);
             ++symbols_processed;
+            int sym_count = ++impl_->synced_symbol_count;
 
             impl_->updateQuality();
 
@@ -431,7 +439,6 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 break;
             }
 
-            int sym_count = ++impl_->synced_symbol_count;
             if (sym_count > MAX_SYMBOLS_BEFORE_TIMEOUT) {
                 LOG_SYNC(WARN, "Sync timeout after %d symbols (%zu soft bits accumulated), resetting to SEARCHING",
                          sym_count, impl_->soft_bits.size());
@@ -693,6 +700,7 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
              impl_->freq_offset_hz, impl_->freq_correction_phase * 180.0f / M_PI);
     impl_->symbols_since_sync = 0;
     impl_->prev_pilot_phases.clear();
+    impl_->prev_pilot_logical_indices.clear();
     impl_->pilot_phase_correction = Complex(1, 0);
 
     // Reset adaptive equalizer state
@@ -709,6 +717,7 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     impl_->dd_qam16_measurement_var_.clear();
     impl_->dd_qam16_reliability_.clear();
     impl_->dd_qam16_channel_var_.clear();
+    impl_->resetWienerPilotHistory();
     impl_->resetFailureAttributionDiagnostics();
     impl_->carrier_phase_initialized = false;
     impl_->carrier_phase_correction = Complex(1, 0);
@@ -808,6 +817,9 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     while (remaining - data_offset >= impl_->symbol_samples) {
         timing::ScopedTimer _profile_(timing::globalDecoderProfile().data_symbol_loop);
 
+        impl_->current_data_symbol_index_ = data_symbol_index;
+        impl_->activateCarrierPattern(data_symbol_index);
+
         SampleSpan sym_samples(ptr + data_offset, impl_->symbol_samples);
         const auto& bb = impl_->toBaseband(sym_samples);
         const auto& fd = impl_->extractSymbol(bb, 0);
@@ -820,7 +832,6 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
         if (!impl_->pilot_carrier_indices.empty()) {
             impl_->updateChannelEstimate(fd);
         }
-        impl_->current_data_symbol_index_ = data_symbol_index;
         const auto& eq = impl_->equalize(fd);
         impl_->demodulateSymbol(eq, impl_->config.modulation);
 
@@ -892,6 +903,7 @@ void OFDMDemodulator::reset() {
     impl_->chirp_cfo_estimated = false;
     impl_->symbols_since_sync = 0;
     impl_->prev_pilot_phases.clear();
+    impl_->prev_pilot_logical_indices.clear();
     impl_->pilot_phase_correction = Complex(1, 0);
     impl_->lts_phase_offset = Complex(1, 0);
 
@@ -906,6 +918,7 @@ void OFDMDemodulator::reset() {
     impl_->dd_qam16_measurement_var_.clear();
     impl_->dd_qam16_reliability_.clear();
     impl_->dd_qam16_channel_var_.clear();
+    impl_->resetWienerPilotHistory();
     impl_->resetFailureAttributionDiagnostics();
     impl_->carrier_phase_initialized = false;
     impl_->carrier_phase_correction = Complex(1, 0);

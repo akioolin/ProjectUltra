@@ -323,6 +323,14 @@ add_executable(test_ofdm_link_adaptation test_ofdm_link_adaptation.cpp)
 target_link_libraries(test_ofdm_link_adaptation PRIVATE ultra_core)
 add_test(NAME OFDMLinkAdaptation COMMAND test_ofdm_link_adaptation)
 
+add_executable(test_ofdm_pilot_pattern test_ofdm_pilot_pattern.cpp)
+target_link_libraries(test_ofdm_pilot_pattern PRIVATE ultra_core)
+add_test(NAME OFDMPilotPattern COMMAND test_ofdm_pilot_pattern)
+
+add_executable(test_ofdm_wiener_interpolator test_ofdm_wiener_interpolator.cpp)
+target_link_libraries(test_ofdm_wiener_interpolator PRIVATE ultra_core)
+add_test(NAME OFDMWienerInterpolator COMMAND test_ofdm_wiener_interpolator)
+
 # Clean baseband loopback for maintained OFDM waveform wrappers. This verifies
 # sync detection, training handoff, demodulation, and soft-bit extraction without
 # involving ARQ or hardware audio.
