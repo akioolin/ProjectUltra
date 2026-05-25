@@ -449,10 +449,10 @@ void test_adaptive_upgrade_requires_backlog_and_clean_windows() {
 
     CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c),
           "clean AWGN backlog should request adaptive upgrade");
-    CHECK(ConnectionAdaptiveTestAccess::pendingModulation(c) == Modulation::D8PSK,
-          "adaptive upgrade should step one modulation rung toward the QAM16 ladder");
-    CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R1_4,
-          "adaptive upgrade should keep the descriptor-selected R1/4 rung");
+    CHECK(ConnectionAdaptiveTestAccess::pendingModulation(c) == Modulation::DQPSK,
+          "adaptive upgrade should first step the code-rate rung toward QAM16 R1/2");
+    CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R1_2,
+          "adaptive upgrade should use the descriptor-selected R1/2 rung");
 }
 
 void test_adaptive_upgrade_skips_small_backlog() {
@@ -513,10 +513,10 @@ void test_adaptive_downgrade_hysteresis_and_short_lockout_upgrade() {
 
     CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c),
           "clean windows after recovery dwell should issue an upgrade at the boundary");
-    CHECK(ConnectionAdaptiveTestAccess::pendingModulation(c) == Modulation::D8PSK,
-          "recovery-dwell upgrade should step modulation toward the active QAM16 rung");
-    CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R1_4,
-          "recovery-dwell upgrade should keep the active descriptor-selected rate");
+    CHECK(ConnectionAdaptiveTestAccess::pendingModulation(c) == Modulation::DQPSK,
+          "recovery-dwell upgrade should first step code rate toward the active QAM16 rung");
+    CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R1_2,
+          "recovery-dwell upgrade should use the active descriptor-selected rate");
 }
 
 void test_adaptive_high_order_downgrade_steps_one_rung() {
@@ -859,10 +859,12 @@ void test_adaptive_post_downgrade_lockout_expires() {
         c, ConnectionAdaptiveTestAccess::postDowngradeLockoutMs() -
                (ConnectionAdaptiveTestAccess::cleanWindowsForUpgrade() - 1) * 1000 + 1);
 
-    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
-          "expired post-downgrade lockout should not upgrade into a slower active QAM16 rung");
-    CHECK(!ConnectionAdaptiveTestAccess::adaptiveTargetPending(c),
-          "slower active QAM16 rung should remain unqueued after recovery dwell");
+    CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c),
+          "expired post-downgrade lockout should upgrade once the active QAM16 rung is faster");
+    CHECK(ConnectionAdaptiveTestAccess::pendingModulation(c) == Modulation::D8PSK,
+          "post-lockout recovery should step one modulation rung toward QAM16");
+    CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R1_2,
+          "post-lockout recovery should keep the active descriptor-selected R1/2 rate");
 }
 
 void test_forced_rate_disables_adaptive_controller() {

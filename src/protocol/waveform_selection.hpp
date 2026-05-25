@@ -21,6 +21,7 @@ namespace protocol {
 
 inline constexpr float kQAM16AwgnFadingMax = 0.15f;
 inline constexpr float kQAM16AwgnSnrFloorDb = 16.0f;
+inline constexpr float kQAM16AwgnR12SnrFloorDb = 19.0f;
 inline constexpr float kQAM16GoodFadingMax = 0.80f;
 inline constexpr float kQAM16GoodSnrFloorDb = 17.0f;
 
@@ -81,8 +82,8 @@ inline constexpr std::array<OFDMCodeRateDescriptor, 4> kOFDMCodeRateDescriptors{
         3,
         {{{kAnyFadingIndex, -1000.0f}}},
         1,
-        {},
-        0,
+        {{{kQAM16AwgnFadingMax, kQAM16AwgnR12SnrFloorDb}}},
+        1,
     },
     {
         CodeRate::R2_3,
@@ -440,8 +441,8 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
     // 1.5× the bits/symbol of DQPSK R2/3 at the same conditions, so
     // the throughput jumps from ~3.4 kbps to ~5 kbps with zero retx.
     //
-    // Coherent QAM16 rate ladder. The active first rung is R1/4; higher code
-    // rates are added by table entry once the GUI scenario proves each rung.
+    // Coherent QAM16 rate ladder. Higher code rates are enabled by descriptor
+    // gate once the GUI scenario proves each rung.
     if (shouldSelectQAM16(snr_db, fading_index)) {
         mod = Modulation::QAM16;
         rate = selectQAM16CodeRate(snr_db, fading_index);

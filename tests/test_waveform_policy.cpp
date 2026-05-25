@@ -96,19 +96,27 @@ void test_narrow_data_mode() {
 }
 
 void test_qam16_selection_rung() {
-    // Coherent QAM16 descriptor ladder. The active first rung is R1/4; higher
-    // code rates are enabled later by adding descriptor entries.
+    // Coherent QAM16 descriptor ladder. R1/2 is enabled for AWGN20 by
+    // descriptor gate; GOOD fading stays on the proven R1/4 rung.
     Modulation mod;
     CodeRate rate;
 
-    // True AWGN at/above the +2 dB-margin gate (16 dB) -> coherent QAM16 R1/4.
+    // True AWGN at the R1/2 rung gate -> coherent QAM16 R1/2.
     recommendDataMode(20.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.05f);
     CHECK(mod == Modulation::QAM16, "AWGN in-band SNR=20 should select coherent QAM16");
-    CHECK(rate == CodeRate::R1_4, "AWGN QAM16 first rung uses R1/4");
+    CHECK(rate == CodeRate::R1_2, "AWGN QAM16 SNR20 should select the active R1/2 rung");
 
     recommendDataMode(16.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.05f);
     CHECK(mod == Modulation::QAM16 && rate == CodeRate::R1_4,
           "AWGN in-band SNR=16 should promote to QAM16 R1/4");
+
+    recommendDataMode(18.9f, WaveformMode::OFDM_CHIRP, mod, rate, 0.05f);
+    CHECK(mod == Modulation::QAM16 && rate == CodeRate::R1_4,
+          "AWGN in-band SNR=18.9 should stay on the proven QAM16 R1/4 rung");
+
+    recommendDataMode(19.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.05f);
+    CHECK(mod == Modulation::QAM16 && rate == CodeRate::R1_2,
+          "AWGN in-band SNR=19 should promote to QAM16 R1/2");
 
     // Just under the gate stays differential.
     recommendDataMode(15.9f, WaveformMode::OFDM_CHIRP, mod, rate, 0.05f);
@@ -195,12 +203,11 @@ void test_data_mode_policy() {
     // D8PSK gates use the unified in-band meter. AWGN-12 in-band (~22 dB)
     // must remain below all D8PSK promotion thresholds.
 
-    // High-SNR AWGN and GOOD fading select the active QAM16 first rung. Higher
-    // QAM16 code rates are deliberately not enabled until their GUI scenario
-    // rung passes.
+    // High-SNR AWGN selects the highest proven QAM16 AWGN rung. GOOD fading
+    // remains on the separately proven R1/4 rung.
     recommendDataMode(37.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.00f);
     CHECK(mod == Modulation::QAM16, "high-SNR AWGN should select coherent QAM16");
-    CHECK(rate == CodeRate::R1_4, "high-SNR AWGN QAM16 uses the active R1/4 rung");
+    CHECK(rate == CodeRate::R1_2, "high-SNR AWGN QAM16 uses the active R1/2 rung");
 
     recommendDataMode(32.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
     CHECK(mod == Modulation::QAM16, "good-fading in-band SNR32 should select QAM16");
@@ -214,11 +221,11 @@ void test_data_mode_policy() {
     CHECK(mod == Modulation::QAM16, "good-fading in-band SNR28 should select QAM16");
     CHECK(rate == CodeRate::R1_4, "good-fading in-band SNR28 QAM16 uses R1/4");
 
-    // AWGN in-band SNR=21.7 is above the coherent QAM16 AWGN gate (16 dB), so
-    // it now selects QAM16 R1/4. Below 16 dB AWGN it remains differential.
+    // AWGN in-band SNR=21.7 is above the coherent QAM16 R1/2 AWGN gate. Below
+    // 16 dB AWGN it remains differential.
     recommendDataMode(21.7f, WaveformMode::OFDM_CHIRP, mod, rate, 0.04f);
     CHECK(mod == Modulation::QAM16, "AWGN in-band SNR=21.7 selects coherent QAM16");
-    CHECK(rate == CodeRate::R1_4, "AWGN in-band SNR=21.7 QAM16 uses R1/4");
+    CHECK(rate == CodeRate::R1_2, "AWGN in-band SNR=21.7 QAM16 uses R1/2");
 
     // SNR=19 GOOD fading: above the QAM16 measurement gate.
     recommendDataMode(19.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
