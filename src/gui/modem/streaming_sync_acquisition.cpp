@@ -21,6 +21,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <exception>
 #include <fstream>
 #include <stdexcept>
@@ -34,6 +35,18 @@ namespace decode_policy = streaming_decode_policy;
 namespace arrival_policy = streaming_frame_arrival_policy;
 namespace frame_policy = streaming_frame_policy;
 namespace signal_policy = streaming_signal_policy;
+
+namespace {
+
+bool qam16GenieTimingCfoEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ULTRA_QAM16_GENIE_TIMING_CFO");
+        return value && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
+    }();
+    return enabled;
+}
+
+}  // namespace
 
 float StreamingDecoder::applyCFOPreCorrection(std::vector<float>& samples, float cfo_hz,
                                               size_t absolute_start_sample) {
@@ -655,21 +668,27 @@ void StreamingDecoder::searchForSync() {
 
         sync_position_ = wrapRingIndexLocked(search_start + sync_result.start_sample);
 
-        // Convert ring-buffer index to absolute sample index.
-        // Needed so waveform CFO phase starts from true stream time, not local window offset.
-        auto ringPosToAbsolute = [this](size_t ring_pos) -> size_t {
-            if (total_fed_ < buffer_capacity_samples_) {
-                // Buffer has not wrapped yet: ring index == absolute sample index.
-                return ring_pos;
-            }
-
-            const size_t oldest_abs = total_fed_ - buffer_capacity_samples_;
-            const size_t oldest_pos = write_pos_;  // write_pos_ points to oldest sample after wrap
-            const size_t offset = (ring_pos >= oldest_pos)
-                ? (ring_pos - oldest_pos)
-                : (buffer_capacity_samples_ - oldest_pos + ring_pos);
-            return oldest_abs + offset;
-        };
+        const bool timing_cfo_genie =
+            qam16GenieTimingCfoEnabled() &&
+            connected_data_preamble &&
+            current_modulation_ == Modulation::QAM16 &&
+            use_light_search &&
+            used_warm_timed_window &&
+            next_expected_frame_sample_valid_;
+        if (timing_cfo_genie) {
+            const size_t detected_abs = ringPosToAbsoluteLocked(sync_position_);
+            const size_t expected_abs = next_expected_frame_sample_;
+            sync_position_ = absoluteToRingLocked(expected_abs);
+            LOG_MODEM(WARN,
+                      "[%s] DIAG genie-timing-cfo: overriding light-LTS sync "
+                      "detected_abs=%zu expected_abs=%zu delta=%lld corr=%.3f",
+                      log_prefix_.c_str(),
+                      detected_abs,
+                      expected_abs,
+                      static_cast<long long>(
+                          arrival_policy::signedSampleError(detected_abs, expected_abs)),
+                      sync_result.correlation);
+        }
 
         // Anti-replay: reject sync at same position as last decoded frame (circular distance)
         if (last_decoded_sync_pos_ != SIZE_MAX) {
@@ -688,7 +707,7 @@ void StreamingDecoder::searchForSync() {
 
         // Provide absolute training position to waveform so initial CFO phase is aligned.
         if (waveform_) {
-            const size_t abs_training_pos = ringPosToAbsolute(sync_position_);
+            const size_t abs_training_pos = ringPosToAbsoluteLocked(sync_position_);
             waveform_->setAbsoluteTrainingPosition(abs_training_pos);
         }
 
@@ -705,6 +724,12 @@ void StreamingDecoder::searchForSync() {
                       log_prefix_.c_str(), new_cfo, known_cfo, cfo_decision.diff_hz,
                       signal_policy::kMaxSyncCFODriftHz);
             new_cfo = cfo_decision.accepted_cfo;  // Trust established CFO over noisy measurement
+        }
+        if (timing_cfo_genie) {
+            LOG_MODEM(WARN,
+                      "[%s] DIAG genie-timing-cfo: forcing sync CFO %.2f Hz -> 0.00 Hz",
+                      log_prefix_.c_str(), new_cfo);
+            new_cfo = 0.0f;
         }
 
         sync_cfo_ = new_cfo;

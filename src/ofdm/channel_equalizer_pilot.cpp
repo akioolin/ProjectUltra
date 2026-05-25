@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include "demodulator_impl.hpp"
 #include "demodulator_constants.hpp"
@@ -38,6 +39,19 @@ bool coherentPublicFadingUsesLTS(Modulation mod) {
         default:
             return false;
     }
+}
+
+int diagnosticTwoPathDelaySamples() {
+    const char* value = std::getenv("ULTRA_QAM16_GENIE_CHANNEL_DELAY_SAMPLES");
+    if (!value || value[0] == '\0') {
+        return 24;  // Good channel: 0.5 ms at 48 kHz.
+    }
+    char* end = nullptr;
+    const long parsed = std::strtol(value, &end, 10);
+    if (end == value || parsed < 0 || parsed > 512) {
+        return 24;
+    }
+    return static_cast<int>(parsed);
 }
 
 }  // namespace
@@ -93,6 +107,73 @@ void OFDMDemodulator::Impl::seedWienerPilotHistoryFromCurrentChannel(int64_t sym
         const float signal_ref = std::max(std::norm(h), MIN_CARRIER_NOISE_VAR);
         const float noise_norm = noise_variance / signal_ref;
         addWienerPilotObservation(logical, symbol_index, h, noise_norm);
+    }
+}
+
+void OFDMDemodulator::Impl::applyDiagnosticTwoPathChannelOracle(
+        const std::vector<Complex>& h_ls_all) {
+    if (!qam16GenieChannelTwoPathEnabled() ||
+        config.modulation != Modulation::QAM16 ||
+        h_ls_all.size() != pilot_carrier_indices.size() ||
+        h_ls_all.size() < 2) {
+        return;
+    }
+
+    const int delay_samples = diagnosticTwoPathDelaySamples();
+    const float fft_size_f = static_cast<float>(config.fft_size);
+    const float phase_per_bin =
+        -2.0f * static_cast<float>(M_PI) *
+        static_cast<float>(delay_samples) / fft_size_f;
+
+    Complex s01(0.0f, 0.0f);
+    Complex rhs0(0.0f, 0.0f);
+    Complex rhs1(0.0f, 0.0f);
+    const int half_fft = config.fft_size / 2;
+    for (size_t i = 0; i < h_ls_all.size(); ++i) {
+        const int idx = pilot_carrier_indices[i];
+        const int signed_bin = (idx <= half_fft) ? idx : idx - config.fft_size;
+        const Complex p = std::exp(Complex(0.0f, phase_per_bin * signed_bin));
+        s01 += p;
+        rhs0 += h_ls_all[i];
+        rhs1 += std::conj(p) * h_ls_all[i];
+    }
+
+    const float n = static_cast<float>(h_ls_all.size());
+    const Complex s00(n, 0.0f);
+    const Complex s11(n, 0.0f);
+    const Complex s10 = std::conj(s01);
+    const Complex det = s00 * s11 - s01 * s10;
+    if (std::abs(det) < 1.0e-6f) {
+        return;
+    }
+
+    const Complex tap0 = (rhs0 * s11 - s01 * rhs1) / det;
+    const Complex tap1 = (s00 * rhs1 - s10 * rhs0) / det;
+
+    auto model_h = [&](int idx) {
+        const int signed_bin = (idx <= half_fft) ? idx : idx - config.fft_size;
+        const Complex p = std::exp(Complex(0.0f, phase_per_bin * signed_bin));
+        return tap0 + tap1 * p;
+    };
+
+    for (int idx : data_carrier_indices) {
+        channel_estimate[idx] = model_h(idx);
+    }
+    for (int idx : pilot_carrier_indices) {
+        channel_estimate[idx] = model_h(idx);
+    }
+
+    static int log_count = 0;
+    if (log_count < 8) {
+        LOG_DEMOD(WARN,
+                  "DIAG genie-channel two-path LS applied: delay=%d samples "
+                  "symbol=%zu pilots=%zu tap0=%.3f%+.3fj tap1=%.3f%+.3fj",
+                  delay_samples,
+                  current_data_symbol_index_,
+                  h_ls_all.size(),
+                  tap0.real(), tap0.imag(),
+                  tap1.real(), tap1.imag());
+        ++log_count;
     }
 }
 
@@ -955,6 +1036,8 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
             channel_estimate[info.fft_idx] = std::polar(interp_mag, old_phase);
         }
     }
+
+    applyDiagnosticTwoPathChannelOracle(h_ls_all);
 
     if (have_qam16_dd) {
         std::fill(dd_qam16_reliability_.begin(), dd_qam16_reliability_.end(), 0.0f);

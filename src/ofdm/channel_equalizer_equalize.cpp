@@ -95,6 +95,12 @@ float softGrayZoneNoiseInflation(float h_power, float noise_var) {
     return std::clamp(inflation, 1.0f, kMaxInflation);
 }
 
+float wrapPi(float phase) {
+    while (phase > static_cast<float>(M_PI)) phase -= 2.0f * static_cast<float>(M_PI);
+    while (phase < -static_cast<float>(M_PI)) phase += 2.0f * static_cast<float>(M_PI);
+    return phase;
+}
+
 } // namespace
 
 // =============================================================================
@@ -202,13 +208,26 @@ void OFDMDemodulator::Impl::recordFailureAttributionSymbol(
 
     double abs_h_sum = 0.0;
     double snr_db_sum = 0.0;
+    double evm2_sum = 0.0;
+    double phase_unit_re = 0.0;
+    double phase_unit_im = 0.0;
+    std::vector<float> phase_errors;
+    std::vector<float> phase_bins;
     const float ce_margin = soft_demap::getCEErrorMargin(mod);
     const float noise_ref = std::max(noise_variance, MIN_CARRIER_NOISE_VAR);
+    const bool deep_diag =
+        qam16FailureAttributionDiagEnabled() ||
+        qam16GenieSigmaEmpiricalEnabled();
+    if (deep_diag) {
+        phase_errors.reserve(equalized.size());
+        phase_bins.reserve(equalized.size());
+    }
 
     for (size_t i = 0; i < equalized.size(); ++i) {
         const int idx = data_carrier_indices[i];
         const Complex decision = hardDecision(equalized[i], mod);
-        const float evm = std::sqrt(std::norm(equalized[i] - decision));
+        const float evm2 = std::norm(equalized[i] - decision);
+        const float evm = std::sqrt(evm2);
         const float effective_noise =
             std::max(carrier_noise_var[i] * ce_margin, MIN_CARRIER_NOISE_VAR);
         const float norm_evm = (evm * evm) / effective_noise;
@@ -233,16 +252,80 @@ void OFDMDemodulator::Impl::recordFailureAttributionSymbol(
         symbol.min_abs_h = std::min(symbol.min_abs_h, abs_h);
         abs_h_sum += abs_h;
         snr_db_sum += snr_db;
+        evm2_sum += evm2;
         failure_diag_evm_.push_back(evm);
         failure_diag_norm_evm_.push_back(norm_evm);
+
+        if (deep_diag && std::norm(decision) > 1.0e-6f) {
+            const Complex phase_ratio = equalized[i] * std::conj(decision);
+            const float phase_mag = std::abs(phase_ratio);
+            if (phase_mag > 1.0e-6f) {
+                const float phase = std::arg(phase_ratio);
+                phase_unit_re += std::cos(phase);
+                phase_unit_im += std::sin(phase);
+                const int half_fft = config.fft_size / 2;
+                const int signed_bin = (idx <= half_fft) ? idx : idx - config.fft_size;
+                phase_bins.push_back(static_cast<float>(signed_bin));
+                phase_errors.push_back(phase);
+            }
+        }
+
+        if (mod == Modulation::QAM16) {
+            const bool outer_point =
+                std::abs(decision.real()) > 0.6f ||
+                std::abs(decision.imag()) > 0.6f;
+            if (outer_point) {
+                failure_diag_outer_evm2_sum_ += evm2;
+                ++failure_diag_outer_evm2_count_;
+            } else {
+                failure_diag_inner_evm2_sum_ += evm2;
+                ++failure_diag_inner_evm2_count_;
+            }
+        }
     }
 
     if (symbol.samples > 0) {
         const double inv = 1.0 / static_cast<double>(symbol.samples);
         symbol.mean_abs_h = static_cast<float>(abs_h_sum * inv);
         symbol.mean_snr_db = static_cast<float>(snr_db_sum * inv);
+        failure_diag_last_symbol_empirical_var_ =
+            static_cast<float>(evm2_sum * inv);
+        failure_diag_last_symbol_empirical_valid_ = true;
+        failure_diag_empirical_var_sum_ += failure_diag_last_symbol_empirical_var_;
+        ++failure_diag_empirical_var_count_;
     } else {
         symbol.min_abs_h = 0.0f;
+        failure_diag_last_symbol_empirical_valid_ = false;
+    }
+
+    if (deep_diag && phase_errors.size() >= 2) {
+        const float cpe = std::atan2(static_cast<float>(phase_unit_im),
+                                     static_cast<float>(phase_unit_re));
+        double x_sum = 0.0;
+        double y_sum = 0.0;
+        double xx_sum = 0.0;
+        double xy_sum = 0.0;
+        float min_bin = std::numeric_limits<float>::max();
+        float max_bin = -std::numeric_limits<float>::max();
+        for (size_t i = 0; i < phase_errors.size(); ++i) {
+            const float x = phase_bins[i];
+            const float y = wrapPi(phase_errors[i] - cpe);
+            x_sum += x;
+            y_sum += y;
+            xx_sum += static_cast<double>(x) * x;
+            xy_sum += static_cast<double>(x) * y;
+            min_bin = std::min(min_bin, x);
+            max_bin = std::max(max_bin, x);
+        }
+        const double n = static_cast<double>(phase_errors.size());
+        const double denom = n * xx_sum - x_sum * x_sum;
+        float slope = 0.0f;
+        if (std::abs(denom) > 1.0e-9) {
+            slope = static_cast<float>((n * xy_sum - x_sum * y_sum) / denom);
+        }
+        symbol.cpe_rad = cpe;
+        symbol.phase_slope_rad_per_bin = slope;
+        symbol.phase_ramp_edge_rad = slope * (max_bin - min_bin);
     }
     failure_diag_symbols_.push_back(symbol);
 }

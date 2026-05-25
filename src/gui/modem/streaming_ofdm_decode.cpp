@@ -95,6 +95,14 @@ bool failureAttributionEnabled() {
     return enabled;
 }
 
+bool qam16GenieTimingCfoEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ULTRA_QAM16_GENIE_TIMING_CFO");
+        return value && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
+    }();
+    return enabled;
+}
+
 std::string formatU8Vector(const std::vector<uint8_t>& values) {
     std::ostringstream oss;
     oss << "[";
@@ -418,14 +426,25 @@ void StreamingDecoder::decodeCurrentFrame() {
     // CFO pre-correction: remove known CFO from raw samples so the entire
     // demodulation chain sees a clean, CFO-free signal.  The waveform/demodulator
     // is then told CFO=0 and only needs to handle small residuals.
-    if (is_ofdm && !frame_buffer.empty()) {
+    const bool timing_cfo_genie =
+        qam16GenieTimingCfoEnabled() &&
+        is_ofdm &&
+        connected_ &&
+        current_modulation_ == Modulation::QAM16;
+    if (timing_cfo_genie) {
+        pre_correction_cfo_ = 0.0f;
+        LOG_MODEM(WARN,
+                  "[%s] DIAG genie-timing-cfo: bypassing CFO pre-correction "
+                  "and forcing demod CFO to 0 Hz",
+                  log_prefix_.c_str());
+    } else if (is_ofdm && !frame_buffer.empty()) {
         applyCFOPreCorrection(frame_buffer, sync_cfo_, frame_sync_abs);
     }
 
     // After pre-correction, tell waveform CFO=0 (already removed from samples).
     // For non-OFDM (MC-DPSK), no pre-correction — pass original sync_cfo_.
-    const float decode_cfo = (is_ofdm && std::abs(pre_correction_cfo_) > 0.01f)
-                              ? 0.0f : sync_cfo_;
+    const float decode_cfo = timing_cfo_genie ? 0.0f
+        : ((is_ofdm && std::abs(pre_correction_cfo_) > 0.01f) ? 0.0f : sync_cfo_);
 
     if (frame_buffer.empty()) {
         {

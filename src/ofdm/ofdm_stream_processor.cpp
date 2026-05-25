@@ -3,6 +3,7 @@
 #define _USE_MATH_DEFINES
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <iomanip>
 #include <limits>
@@ -20,12 +21,44 @@ namespace ultra {
 
 using namespace demod_constants;
 
+namespace {
+
+bool envFlagEnabled(const char* name) {
+    const char* value = std::getenv(name);
+    return value && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
+}
+
+}  // namespace
+
 void OFDMDemodulator::Impl::resetFailureAttributionDiagnostics() {
     current_data_symbol_index_ = 0;
     failure_diag_carriers_.clear();
     failure_diag_symbols_.clear();
     failure_diag_evm_.clear();
     failure_diag_norm_evm_.clear();
+    failure_diag_empirical_var_sum_ = 0.0;
+    failure_diag_empirical_var_count_ = 0;
+    failure_diag_last_symbol_empirical_var_ = 0.0f;
+    failure_diag_last_symbol_empirical_valid_ = false;
+    failure_diag_llr_sigma2_sum_ = 0.0;
+    failure_diag_llr_sigma2_count_ = 0;
+    failure_diag_llr_base_sigma2_sum_ = 0.0;
+    failure_diag_inner_evm2_sum_ = 0.0;
+    failure_diag_inner_evm2_count_ = 0;
+    failure_diag_outer_evm2_sum_ = 0.0;
+    failure_diag_outer_evm2_count_ = 0;
+}
+
+bool OFDMDemodulator::Impl::qam16FailureAttributionDiagEnabled() const {
+    return envFlagEnabled("ULTRA_FAILURE_ATTRIBUTION");
+}
+
+bool OFDMDemodulator::Impl::qam16GenieSigmaEmpiricalEnabled() const {
+    return envFlagEnabled("ULTRA_QAM16_GENIE_SIGMA_EMPIRICAL");
+}
+
+bool OFDMDemodulator::Impl::qam16GenieChannelTwoPathEnabled() const {
+    return envFlagEnabled("ULTRA_QAM16_GENIE_CHANNEL_TWOPATH_LS");
 }
 
 std::string OFDMDemodulator::Impl::getFailureAttributionDiagnosticsText() const {
@@ -55,6 +88,9 @@ std::string OFDMDemodulator::Impl::getFailureAttributionDiagnosticsText() const 
     double min_abs_h = std::numeric_limits<double>::max();
     double mean_abs_h_sum = 0.0;
     double mean_snr_db_sum = 0.0;
+    double cpe_abs_sum = 0.0;
+    double phase_ramp_abs_sum = 0.0;
+    double phase_slope_abs_sum = 0.0;
     double edge_evm_sum = 0.0;
     double edge_norm_evm_sum = 0.0;
     size_t edge_samples = 0;
@@ -72,6 +108,9 @@ std::string OFDMDemodulator::Impl::getFailureAttributionDiagnosticsText() const 
         min_abs_h = std::min(min_abs_h, static_cast<double>(symbol.min_abs_h));
         mean_abs_h_sum += symbol.mean_abs_h;
         mean_snr_db_sum += symbol.mean_snr_db;
+        cpe_abs_sum += std::abs(symbol.cpe_rad);
+        phase_ramp_abs_sum += std::abs(symbol.phase_ramp_edge_rad);
+        phase_slope_abs_sum += std::abs(symbol.phase_slope_rad_per_bin);
 
         const bool edge_symbol = symbol.symbol_index < 2 ||
                                  symbol.symbol_index + 2 >= last_symbol;
@@ -86,6 +125,33 @@ std::string OFDMDemodulator::Impl::getFailureAttributionDiagnosticsText() const 
     const double symbol_count = static_cast<double>(failure_diag_symbols_.size());
     const double edge_count = static_cast<double>(std::max<size_t>(edge_samples, 1));
     const double abs_h_min = std::isfinite(min_abs_h) ? min_abs_h : 0.0;
+    const double empirical_sigma2 =
+        failure_diag_empirical_var_count_ > 0
+            ? failure_diag_empirical_var_sum_ /
+                  static_cast<double>(failure_diag_empirical_var_count_)
+            : 0.0;
+    const double llr_sigma2 =
+        failure_diag_llr_sigma2_count_ > 0
+            ? failure_diag_llr_sigma2_sum_ /
+                  static_cast<double>(failure_diag_llr_sigma2_count_)
+            : 0.0;
+    const double llr_base_sigma2 =
+        failure_diag_llr_sigma2_count_ > 0
+            ? failure_diag_llr_base_sigma2_sum_ /
+                  static_cast<double>(failure_diag_llr_sigma2_count_)
+            : 0.0;
+    const double sigma2_ratio =
+        empirical_sigma2 > 0.0 ? llr_sigma2 / empirical_sigma2 : 0.0;
+    const double inner_evm2 =
+        failure_diag_inner_evm2_count_ > 0
+            ? failure_diag_inner_evm2_sum_ /
+                  static_cast<double>(failure_diag_inner_evm2_count_)
+            : 0.0;
+    const double outer_evm2 =
+        failure_diag_outer_evm2_count_ > 0
+            ? failure_diag_outer_evm2_sum_ /
+                  static_cast<double>(failure_diag_outer_evm2_count_)
+            : 0.0;
 
     oss << "eq_diag samples=" << failure_diag_evm_.size()
         << " symbols=" << failure_diag_symbols_.size()
@@ -98,6 +164,19 @@ std::string OFDMDemodulator::Impl::getFailureAttributionDiagnosticsText() const 
         << " mean_absH=" << (mean_abs_h_sum / symbol_count)
         << " min_absH=" << abs_h_min
         << " mean_carrier_snr_db=" << (mean_snr_db_sum / symbol_count)
+        << " llr_sigma2_mean=" << llr_sigma2
+        << " llr_base_sigma2_mean=" << llr_base_sigma2
+        << " empirical_posteq_sigma2=" << empirical_sigma2
+        << " llr_to_empirical_sigma2=" << sigma2_ratio
+        << " cpe_abs_mean_deg=" << (cpe_abs_sum / symbol_count) * 180.0 / M_PI
+        << " phase_slope_abs_mean_mrad_per_bin="
+        << (phase_slope_abs_sum / symbol_count) * 1000.0
+        << " phase_ramp_edge_abs_mean_deg="
+        << (phase_ramp_abs_sum / symbol_count) * 180.0 / M_PI
+        << " inner_evm2_mean=" << inner_evm2
+        << " outer_evm2_mean=" << outer_evm2
+        << " outer_to_inner_evm2="
+        << (inner_evm2 > 0.0 ? outer_evm2 / inner_evm2 : 0.0)
         << " edge_evm_mean=" << (edge_evm_sum / edge_count)
         << " edge_norm_evm_mean=" << (edge_norm_evm_sum / edge_count);
 
@@ -112,7 +191,9 @@ std::string OFDMDemodulator::Impl::getFailureAttributionDiagnosticsText() const 
             << ":inside=" << (static_cast<double>(symbol.inside_noise) / count)
             << ":minH=" << symbol.min_abs_h
             << ":meanH=" << symbol.mean_abs_h
-            << ":snr=" << symbol.mean_snr_db;
+            << ":snr=" << symbol.mean_snr_db
+            << ":cpeDeg=" << (symbol.cpe_rad * 180.0f / static_cast<float>(M_PI))
+            << ":rampDeg=" << (symbol.phase_ramp_edge_rad * 180.0f / static_cast<float>(M_PI));
     }
     oss << "]";
 

@@ -418,6 +418,24 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
             nv *= (1.0f + CARRIER_ADAPTIVE_K * norm_var);
         }
 
+        if (mod == Modulation::QAM16) {
+            if (qam16GenieSigmaEmpiricalEnabled() &&
+                failure_diag_last_symbol_empirical_valid_) {
+                // Diagnostic oracle: isolate LLR scaling by replacing the
+                // demapper sigma^2 with the measured post-equalizer residual
+                // variance for this symbol. This is never enabled unless the
+                // CLI/env diagnostic hook requests it.
+                nv = std::clamp(failure_diag_last_symbol_empirical_var_,
+                                MIN_CARRIER_NOISE_VAR, MAX_CARRIER_NOISE_VAR);
+            }
+            if (qam16FailureAttributionDiagEnabled() ||
+                qam16GenieSigmaEmpiricalEnabled()) {
+                failure_diag_llr_base_sigma2_sum_ += base_nv;
+                failure_diag_llr_sigma2_sum_ += nv;
+                ++failure_diag_llr_sigma2_count_;
+            }
+        }
+
         if (erase_llrs) {
             appendErasureLLRs(soft_bits, mod);
             if (is_differential) {

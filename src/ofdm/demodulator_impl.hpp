@@ -214,12 +214,26 @@ struct OFDMDemodulator::Impl {
         float min_abs_h = 0.0f;
         float mean_abs_h = 0.0f;
         float mean_snr_db = 0.0f;
+        float cpe_rad = 0.0f;
+        float phase_slope_rad_per_bin = 0.0f;
+        float phase_ramp_edge_rad = 0.0f;
     };
     size_t current_data_symbol_index_ = 0;
     std::vector<FailureAttributionCarrier> failure_diag_carriers_;
     std::vector<FailureAttributionSymbol> failure_diag_symbols_;
     std::vector<float> failure_diag_evm_;
     std::vector<float> failure_diag_norm_evm_;
+    double failure_diag_empirical_var_sum_ = 0.0;
+    size_t failure_diag_empirical_var_count_ = 0;
+    float failure_diag_last_symbol_empirical_var_ = 0.0f;
+    bool failure_diag_last_symbol_empirical_valid_ = false;
+    double failure_diag_llr_sigma2_sum_ = 0.0;
+    size_t failure_diag_llr_sigma2_count_ = 0;
+    double failure_diag_llr_base_sigma2_sum_ = 0.0;
+    double failure_diag_inner_evm2_sum_ = 0.0;
+    size_t failure_diag_inner_evm2_count_ = 0;
+    double failure_diag_outer_evm2_sum_ = 0.0;
+    size_t failure_diag_outer_evm2_count_ = 0;
 
     // LTS time-domain reference for fine timing (passband templates)
     std::vector<float> lts_passband_I;
@@ -330,6 +344,10 @@ struct OFDMDemodulator::Impl {
     void resetFailureAttributionDiagnostics();
     void recordFailureAttributionSymbol(const std::vector<Complex>& equalized, Modulation mod);
     std::string getFailureAttributionDiagnosticsText() const;
+    bool qam16FailureAttributionDiagEnabled() const;
+    bool qam16GenieSigmaEmpiricalEnabled() const;
+    bool qam16GenieChannelTwoPathEnabled() const;
+    void applyDiagnosticTwoPathChannelOracle(const std::vector<Complex>& h_ls_all);
     void lmsUpdate(int idx, Complex received, Complex reference);
     void rlsUpdate(int idx, Complex received, Complex reference);
     const std::vector<Complex>& equalize(const std::vector<Complex>& freq_domain, Modulation mod);

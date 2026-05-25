@@ -1024,6 +1024,26 @@ public:
         soft_combining_harq_explicit_ = true;
     }
     void setPaprReductionEnabled(bool enable) { papr_reduction_enabled_ = enable; }
+    void setDiagFailureAttribution(bool enable) { diag_failure_attribution_ = enable; }
+    void setDiagGenieChannel(bool enable) {
+        diag_genie_channel_twopath_ls_ = enable;
+        if (enable) diag_failure_attribution_ = true;
+    }
+    void setDiagGenieSigma(bool enable) {
+        diag_genie_sigma_empirical_ = enable;
+        if (enable) diag_failure_attribution_ = true;
+    }
+    void setDiagGenieTimingCfo(bool enable) {
+        diag_genie_timing_cfo_ = enable;
+        if (enable) diag_failure_attribution_ = true;
+    }
+    void setDiagGenieNoClip(bool enable) {
+        diag_genie_no_clip_ = enable;
+        if (enable) {
+            diag_failure_attribution_ = true;
+            papr_reduction_enabled_ = false;
+        }
+    }
 
     // Hardware-audio mode (real soundcard I/O across two physical machines)
     void setRoleBoth() { role_ = Role::Both; }
@@ -1051,6 +1071,8 @@ public:
     void setOtaSimulatorPath(const std::string& path) { ota_server_binary_ = path; }
 
     bool runTest() {
+        applyDiagnosticEnvironment();
+
         if (verify_snr_ && !runSNRVerification()) {
             return false;
         }
@@ -1410,6 +1432,11 @@ private:
     // the production-equivalent TX waveform. See 2026-05-21 CHANGELOG entry
     // "PAPR reduction — haven't broken anything proof package."
     bool papr_reduction_enabled_ = false;
+    bool diag_failure_attribution_ = false;
+    bool diag_genie_channel_twopath_ls_ = false;
+    bool diag_genie_sigma_empirical_ = false;
+    bool diag_genie_timing_cfo_ = false;
+    bool diag_genie_no_clip_ = false;
     bool save_signals_ = false;
     int save_signals_message_limit_ = 0;   // 0 = full run
     size_t save_signals_max_samples_ = 0;  // 0 = unlimited
@@ -1473,6 +1500,25 @@ private:
         out.write(reinterpret_cast<const char*>(data.data()),
                   static_cast<std::streamsize>(data.size() * sizeof(float)));
         return static_cast<bool>(out);
+    }
+
+    void applyDiagnosticEnvironment() const {
+        if (diag_failure_attribution_) {
+            setenv("ULTRA_FAILURE_ATTRIBUTION", "1", 1);
+        }
+        if (diag_genie_channel_twopath_ls_) {
+            setenv("ULTRA_QAM16_GENIE_CHANNEL_TWOPATH_LS", "1", 1);
+            setenv("ULTRA_QAM16_GENIE_CHANNEL_DELAY_SAMPLES", "24", 1);
+        }
+        if (diag_genie_sigma_empirical_) {
+            setenv("ULTRA_QAM16_GENIE_SIGMA_EMPIRICAL", "1", 1);
+        }
+        if (diag_genie_timing_cfo_) {
+            setenv("ULTRA_QAM16_GENIE_TIMING_CFO", "1", 1);
+        }
+        if (diag_genie_no_clip_) {
+            setenv("ULTRA_QAM16_GENIE_NO_CLIP", "1", 1);
+        }
     }
 
     std::string capturePrefixForRun() const {
@@ -2940,6 +2986,16 @@ int main(int argc, char* argv[]) {
                               << " (use on or off)\n";
                     return 1;
                 }
+            } else if (arg == "--diag-attribution") {
+                sim.setDiagFailureAttribution(true);
+            } else if (arg == "--diag-genie-channel") {
+                sim.setDiagGenieChannel(true);
+            } else if (arg == "--diag-genie-sigma") {
+                sim.setDiagGenieSigma(true);
+            } else if (arg == "--diag-genie-timing") {
+                sim.setDiagGenieTimingCfo(true);
+            } else if (arg == "--diag-genie-no-clip") {
+                sim.setDiagGenieNoClip(true);
             } else if (arg == "--rx-overfeed-factor" && i + 1 < argc) {
                 sim.setRxOverfeedFactor(std::stoi(argv[++i]));
             } else if (arg == "--decode-delay-ms" && i + 1 < argc) {
@@ -3080,6 +3136,11 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --harq                    Enable RX soft-combining HARQ\n";
                 std::cout << "  --no-harq                 Disable RX soft-combining HARQ for A/B tests\n";
                 std::cout << "  --papr-reduction on|off   OFDM data PAPR reduction (cli_simulator default: off; production default: on)\n";
+                std::cout << "  --diag-attribution        Log OFDM QAM failure-attribution metrics\n";
+                std::cout << "  --diag-genie-channel      Diag-only two-path LS channel oracle approximation\n";
+                std::cout << "  --diag-genie-sigma        Diag-only empirical post-EQ sigma^2 oracle for QAM16 LLRs\n";
+                std::cout << "  --diag-genie-timing       Diag-only expected-arrival timing + zero-CFO oracle for QAM16\n";
+                std::cout << "  --diag-genie-no-clip      Diag-only explicit PAPR-off/no-clip oracle for QAM16\n";
                 std::cout << "  --rx-overfeed-factor <N>  Run audio callbacks N× faster wall-clock (stress, default: 1)\n";
                 std::cout << "  --decode-delay-ms <N>     Add decode-thread delay (0-500 ms, stress)\n";
                 std::cout << "  --rx-batch-callbacks <N>  Batch N callbacks per decoder feed (stress)\n";
