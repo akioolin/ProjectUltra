@@ -142,6 +142,14 @@ void test_wide_ofdm_timing_and_timeout() {
     CHECK(w8_sack_delay == w8_burst_ms + kCarrierSenseSackCoalesceMs,
           "wide OFDM SACK delay should hold ACKs through a physical sender window");
 
+    const auto qam16_r14 = wideOFDMFrameTiming(Modulation::QAM16, CodeRate::R1_4);
+    CHECK(wideOFDMSlidingSackDelayMs(Modulation::QAM16, CodeRate::R1_4) ==
+              qam16_r14.data_ms + qam16_r14.ack_ms + kCarrierSenseSackCoalesceMs,
+          "wide OFDM sliding SACK delay should derive from selected data and ACK airtime");
+    CHECK(wideOFDMSlidingSackDelayMs(Modulation::QAM16, CodeRate::R1_4) <
+              wideOFDMSackDelayMs(Modulation::QAM16, CodeRate::R1_4, 8),
+          "wide OFDM sliding SACK delay should be a burst-tail quiet interval, not a full-window hold");
+
     CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 4, 120, 2) == 9446,
           "wide OFDM window=4 timeout should cover physical burst, ACK copies, and SACK holdoff");
     CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 8, 120, 1) == 14414,

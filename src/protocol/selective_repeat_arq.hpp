@@ -129,6 +129,14 @@ public:
     void setSackDelayShort(uint32_t ms) { sack_delay_short_ms_ = ms; }
     uint32_t getSackDelayShort() const { return sack_delay_short_ms_; }
 
+    // OFDM burst streams need a quiet-interval SACK timer: each decoded DATA
+    // frame proves the physical burst is still arriving, so the delayed SACK
+    // timer should slide forward until an airtime-derived burst-tail interval
+    // has passed.
+    // Disabled by default to preserve legacy "earliest timer wins" behavior.
+    void setSackDelaySlidesOnData(bool enabled) { sack_delay_slides_on_data_ = enabled; }
+    bool getSackDelaySlidesOnData() const { return sack_delay_slides_on_data_; }
+
     // MC-DPSK continuous bursts decode several DATA frames from one physical
     // waveform. Once the ACK batch threshold is reached, transmitting a SACK
     // no longer risks colliding with a per-frame preamble still in flight.
@@ -248,6 +256,7 @@ private:
     uint32_t sack_timer_ms_ = 0;    // Time until SACK is sent
     // Stream-aware tail override (0 = "use sack_delay_ms for both legs").
     uint32_t sack_delay_short_ms_ = 0;
+    bool sack_delay_slides_on_data_ = false;
     bool ack_batch_through_more_frag_ = false;
     uint32_t frames_since_ack_ = 0; // Frames received since last ACK sent
 

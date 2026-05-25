@@ -2660,6 +2660,7 @@ void Connection::configureArqForCurrentDataMode() {
     arq_.setCodeRate(data_code_rate_);
     arq_.setFixedFrameCodewords(data_frame_cw_count_);
     arq_.setAckBatchThroughMoreFrag(false);
+    arq_.setSackDelaySlidesOnData(false);
 
     if (isOFDMMode(negotiated_mode_) || usesBoundedVariableMCDPSKFrames()) {
         file_transfer_.setMaxChunkPayload(currentDataPayloadCapacity());
@@ -2746,11 +2747,14 @@ void Connection::configureArqForCurrentDataMode() {
             data_modulation_, data_code_rate_, arq_.getWindowSize(),
             data_frame_cw_count_);
         constexpr int kWideOFDMAckRepeatCount = 3;
-        const uint32_t sack_delay_ms = connection_policy::wideOFDMSackDelayMs(
+        const uint32_t physical_sack_hold_ms = connection_policy::wideOFDMSackDelayMs(
             data_modulation_, data_code_rate_, arq_.getWindowSize(),
             data_frame_cw_count_);
+        const uint32_t sack_delay_ms = connection_policy::wideOFDMSlidingSackDelayMs(
+            data_modulation_, data_code_rate_, data_frame_cw_count_);
         arq_.setSackDelay(sack_delay_ms);
         arq_.setSackDelayShort(connection_policy::wideOFDMSackTailDelayMs());
+        arq_.setSackDelaySlidesOnData(true);
         arq_.setAckRepeatCount(kWideOFDMAckRepeatCount);
 
         uint32_t ack_timeout_ms = connection_policy::computeWideOFDMAckTimeoutMs(
@@ -2763,7 +2767,7 @@ void Connection::configureArqForCurrentDataMode() {
         arq_.setAckTimeout(ack_timeout_ms);
 
         LOG_MODEM(INFO,
-                  "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, burst=%ums, ack=%ums x%d), max_retries=%d, ack_batch=%u, physical_sack_hold=%ums, tail_sack=%ums, ack_repeat=%d, cw=%d (OFDM %s %s)",
+                  "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, burst=%ums, ack=%ums x%d), max_retries=%d, ack_batch=%u, sliding_sack=%ums, physical_sack_hold=%ums, tail_sack=%ums, ack_repeat=%d, cw=%d (OFDM %s %s)",
                   arq_.getWindowSize(),
                   ack_timeout_ms / 1000.0f,
                   timing.data_ms,
@@ -2773,6 +2777,7 @@ void Connection::configureArqForCurrentDataMode() {
                   arq_.getMaxRetries(),
                   arq_.getAckBatchSize(),
                   arq_.getSackDelay(),
+                  physical_sack_hold_ms,
                   arq_.getSackDelayShort(),
                   kWideOFDMAckRepeatCount,
                   data_frame_cw_count_,

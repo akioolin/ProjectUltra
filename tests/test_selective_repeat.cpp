@@ -1418,6 +1418,44 @@ bool test_sack_timer_more_frag_does_not_extend() {
     return true;
 }
 
+bool test_sack_timer_slides_on_more_frag_when_enabled() {
+    TEST("MORE_FRAG=1 subsequent frames slide quiet SACK timer when enabled");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.sack_delay_ms = 500;
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+    rx.setSackDelayShort(50);
+    rx.setSackDelaySlidesOnData(true);
+
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    auto f0 = v2::DataFrame::makeData("TX1", "RX1", 0, Bytes{0});
+    f0.flags |= v2::Flags::MORE_FRAG;
+    rx.onFrameReceived(f0.serialize());
+    rx.tick(450);  // ~50ms remaining on the first quiet timer
+
+    auto f1 = v2::DataFrame::makeData("TX1", "RX1", 1, Bytes{1});
+    f1.flags |= v2::Flags::MORE_FRAG;
+    rx.onFrameReceived(f1.serialize());
+    rx.tick(60);
+    if (channel.size() != 0)
+        FAIL("Sliding quiet timer fired before the newest MORE_FRAG frame's delay elapsed");
+
+    rx.tick(450);
+    if (channel.size() != 1)
+        FAIL("Sliding quiet timer did not fire after the re-armed SACK delay");
+
+    auto ack = v2::ControlFrame::deserialize(channel.receive());
+    if (!ack || ack->type != v2::FrameType::ACK || ack->seq != 1)
+        FAIL("Sliding quiet timer SACK did not cumulatively acknowledge the newest frame");
+
+    PASS();
+    return true;
+}
+
 bool test_sack_delay_short_zero_sentinel_preserves_legacy() {
     TEST("sack_delay_short=0 sentinel uses sack_delay_ms even for FINAL");
 
@@ -1655,6 +1693,7 @@ int main() {
     test_sack_timer_final_short_collapses_long();
     test_sack_timer_message_boundary_uses_long_without_final();
     test_sack_timer_more_frag_does_not_extend();
+    test_sack_timer_slides_on_more_frag_when_enabled();
     test_sack_delay_short_zero_sentinel_preserves_legacy();
 
     std::cout << "\nARQ Boundary/Property Tests:\n";

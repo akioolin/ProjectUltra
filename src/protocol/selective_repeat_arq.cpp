@@ -549,14 +549,22 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
             frames_since_ack_ = 0;
         } else if (new_frame) {
             sack_pending_ = true;
-            // Stream-aware timer: regular frames get the long physical burst
-            // delay; explicit FINAL frames can use the short tail delay so the
-            // sender's window advances promptly after the actual stream tail.
-            // Sentinel sack_delay_short_ms_ = 0 preserves legacy long-delay
-            // behavior for every frame.
-            sack_timer_ms_ = arq_policy::sackTimerForFrame(
-                sack_timer_ms_, config_.sack_delay_ms, sack_delay_short_ms_,
-                frame_final);
+            if (sack_delay_slides_on_data_) {
+                // OFDM physical bursts decode frames in cadence. Re-arming on
+                // each decoded frame turns the SACK timer into a burst-tail
+                // quiet detector while the delay itself still comes from the
+                // selected waveform's DATA/ACK airtime.
+                sack_timer_ms_ = arq_policy::sackDelayForFrame(
+                    config_.sack_delay_ms, sack_delay_short_ms_, frame_final);
+            } else {
+                // Legacy stream-aware timer: regular frames get the long
+                // physical burst delay; explicit FINAL frames can collapse to
+                // the short tail delay. Sentinel sack_delay_short_ms_ = 0
+                // preserves legacy long-delay behavior for every frame.
+                sack_timer_ms_ = arq_policy::sackTimerForFrame(
+                    sack_timer_ms_, config_.sack_delay_ms, sack_delay_short_ms_,
+                    frame_final);
+            }
         }
 
     } else {

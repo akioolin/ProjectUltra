@@ -359,6 +359,22 @@ inline uint32_t wideOFDMSackTailDelayMs() {
     return kCarrierSenseSackCoalesceMs;
 }
 
+inline uint32_t wideOFDMSlidingSackDelayMs(
+        Modulation mod,
+        CodeRate rate,
+        int cw_count = v2::kDefaultFixedFrameCodewords) {
+    const OFDMFrameTiming timing = wideOFDMFrameTiming(mod, rate, cw_count);
+    // This timer is re-armed on every decoded DATA frame, so it is a quiet
+    // interval after the observed burst tail, not a full-window hold. It covers
+    // one selected-rate DATA frame cadence plus one selected-rate ACK/control
+    // frame and the carrier-sense coalescing guard.
+    const uint64_t quiet_interval_ms =
+        static_cast<uint64_t>(timing.data_ms) +
+        static_cast<uint64_t>(timing.ack_ms) +
+        static_cast<uint64_t>(kCarrierSenseSackCoalesceMs);
+    return static_cast<uint32_t>(std::min<uint64_t>(quiet_interval_ms, 0xFFFFFFFFull));
+}
+
 // Recommend fixed-frame CW count for a given OFDM data rate + waveform.
 // Inputs are deterministic and shared by both peers (rate is negotiated;
 // waveform is negotiated too) so both peers compute the same CW count

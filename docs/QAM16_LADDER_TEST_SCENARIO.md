@@ -6,6 +6,13 @@
 ## Strategic direction (why this matters)
 The endgame is **coherent everywhere**: if QAM16/coherent OFDM can be made to work across all conditions (AWGN → Good → Moderate fading, full rate ladder), the plan is to **retire differential (DQPSK/DBPSK/MC-DPSK) entirely.** So: (a) focus is QAM16/coherent — do not invest in differential paths; (b) differential/other-waveform regressions are **not blockers** for this work (don't chase them, don't gate on them); (c) the bar for coherent is "works in all conditions," because it's meant to replace, not coexist with, differential.
 
+## Design for the whole matrix, never one cell (non-negotiable)
+AWGN R1/4 is the first cell we PROVE, not the thing we DESIGN FOR. Every fix must be the design that also holds across the full target matrix: **{all code rates} × {AWGN, Good, Moderate fading} × {high SNR → eventually low SNR}.**
+- **No point-fixes / magic constants** tuned to make one cell green. If a change only makes sense for AWGN R1/4, it is wrong.
+- **Derive, don't tune.** Parameters (RTO, SACK delay, turnaround, thresholds) must derive from measured/physical quantities (airtime, round-trip, fading index, per-carrier SNR/CSI) so the SAME code self-adjusts across the matrix.
+- **Beware fixes that sabotage untested cells.** Example: killing AWGN "spurious" timeout-retx by lengthening RTO or hardcoding a SACK delay would break fading/low-SNR, where retransmissions are REAL loss recovery you need. The fix must make clean-AWGN ACKs tight (no spurious retx) WHILE preserving timely real-loss recovery on fading/low-SNR.
+- **PHY-theorist sanity check on every choice:** "would this still be correct at R1/2? on Moderate fading? at SNR 8?" Even when only AWGN is being tested now, the design reasoning must survive the matrix.
+
 ## Principle (non-negotiable)
 - Validate through the **real GUI auto-path** (`ultra_gui` + OTASim), because real-HF plug-in is driven by the **ladder**, not by flags. **NEVER `--expert`-force the modulation/rate.** To exercise a specific QAM16 rung, make the **ladder select it** for the test condition (edit the ladder, code-rate-agnostically). Forcing bypasses the exact code that ships.
 - **Code-rate-agnostic everywhere.** "There might be more code rates." No hardcoded per-rate constants. Ladder selection, frame airtime, ARQ window/RTO, and turn-around/settle guards must all **derive from a rate descriptor**, not switch on `R1_4`/`R1_2`/etc. (Ties to task #141: the fixed-ms guards in `connection.hpp` must become airtime-derived.)

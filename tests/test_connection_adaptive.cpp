@@ -251,6 +251,10 @@ struct ConnectionAdaptiveTestAccess {
         return c.arq_.getSackDelayShort();
     }
 
+    static bool arqSackDelaySlidesOnData(const Connection& c) {
+        return c.arq_.getSackDelaySlidesOnData();
+    }
+
     static uint32_t arqAckTimeout(const Connection& c) {
         return c.arq_.getAckTimeout();
     }
@@ -304,20 +308,28 @@ void test_wide_ofdm_configures_short_tail_sack_delay() {
     Connection c;
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_4, 10.0f, 0.05f);
 
-    const uint32_t long_delay = ConnectionAdaptiveTestAccess::arqSackDelay(c);
+    const uint32_t sliding_delay = ConnectionAdaptiveTestAccess::arqSackDelay(c);
     const uint32_t tail_delay = ConnectionAdaptiveTestAccess::arqSackDelayShort(c);
+    const uint32_t physical_delay = connection_policy::wideOFDMSackDelayMs(
+        Modulation::DQPSK, CodeRate::R1_4,
+        ConnectionAdaptiveTestAccess::arqWindow(c), v2::kDefaultFixedFrameCodewords);
 
     CHECK(tail_delay == connection_policy::wideOFDMSackTailDelayMs(),
           "wide OFDM should use the derived short SACK delay at stream tail");
     CHECK(tail_delay == connection_policy::kCarrierSenseSackCoalesceMs,
           "wide OFDM tail SACK delay should be carrier-sense coalescing only");
-    CHECK(long_delay > tail_delay,
-          "wide OFDM in-burst physical SACK hold should remain longer than tail delay");
+    CHECK(sliding_delay == connection_policy::wideOFDMSlidingSackDelayMs(
+                               Modulation::DQPSK, CodeRate::R1_4),
+          "wide OFDM in-stream SACK delay should be a data/ACK-airtime-derived quiet interval");
+    CHECK(ConnectionAdaptiveTestAccess::arqSackDelaySlidesOnData(c),
+          "wide OFDM should re-arm the SACK quiet timer on each decoded DATA frame");
+    CHECK(physical_delay > sliding_delay && sliding_delay > tail_delay,
+          "wide OFDM should retain physical RTO coverage while ACKing burst tails promptly");
     CHECK(ConnectionAdaptiveTestAccess::arqAckTimeout(c) ==
               connection_policy::computeWideOFDMAckTimeoutMs(
                   Modulation::DQPSK, CodeRate::R1_4,
                   ConnectionAdaptiveTestAccess::arqWindow(c),
-                  long_delay, 3, v2::kDefaultFixedFrameCodewords),
+                  sliding_delay, 3, v2::kDefaultFixedFrameCodewords),
           "wide OFDM ACK timeout should remain derived from the long physical SACK hold");
 }
 

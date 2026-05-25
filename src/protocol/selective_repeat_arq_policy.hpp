@@ -97,14 +97,22 @@ inline uint32_t ackDedupWindowMs(uint32_t ack_repeat_delay_ms) {
     return std::clamp(ack_repeat_delay_ms + 40u, 80u, 500u);
 }
 
-inline uint32_t sackTimerForFrame(uint32_t current_timer_ms,
-                                  uint32_t sack_delay_ms,
+inline uint32_t sackDelayForFrame(uint32_t sack_delay_ms,
                                   uint32_t sack_delay_short_ms,
                                   bool use_short_delay) {
     uint32_t pick_ms = sack_delay_ms;
     if (sack_delay_short_ms != 0 && use_short_delay) {
         pick_ms = sack_delay_short_ms;
     }
+    return pick_ms;
+}
+
+inline uint32_t sackTimerForFrame(uint32_t current_timer_ms,
+                                  uint32_t sack_delay_ms,
+                                  uint32_t sack_delay_short_ms,
+                                  bool use_short_delay) {
+    const uint32_t pick_ms =
+        sackDelayForFrame(sack_delay_ms, sack_delay_short_ms, use_short_delay);
 
     if (current_timer_ms == 0) {
         return pick_ms;
