@@ -450,9 +450,9 @@ void test_adaptive_upgrade_requires_backlog_and_clean_windows() {
     CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c),
           "clean AWGN backlog should request adaptive upgrade");
     CHECK(ConnectionAdaptiveTestAccess::pendingModulation(c) == Modulation::DQPSK,
-          "adaptive upgrade should first step the code-rate rung toward QAM16 R1/2");
+          "adaptive upgrade should first step the code-rate rung toward active QAM16");
     CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R1_2,
-          "adaptive upgrade should use the descriptor-selected R1/2 rung");
+          "adaptive upgrade should use the next descriptor-selected rate rung");
 }
 
 void test_adaptive_upgrade_skips_small_backlog() {
@@ -516,7 +516,7 @@ void test_adaptive_downgrade_hysteresis_and_short_lockout_upgrade() {
     CHECK(ConnectionAdaptiveTestAccess::pendingModulation(c) == Modulation::DQPSK,
           "recovery-dwell upgrade should first step code rate toward the active QAM16 rung");
     CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R1_2,
-          "recovery-dwell upgrade should use the active descriptor-selected rate");
+          "recovery-dwell upgrade should use the next descriptor-selected rate rung");
 }
 
 void test_adaptive_high_order_downgrade_steps_one_rung() {
@@ -861,10 +861,10 @@ void test_adaptive_post_downgrade_lockout_expires() {
 
     CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c),
           "expired post-downgrade lockout should upgrade once the active QAM16 rung is faster");
-    CHECK(ConnectionAdaptiveTestAccess::pendingModulation(c) == Modulation::D8PSK,
-          "post-lockout recovery should step one modulation rung toward QAM16");
-    CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R1_2,
-          "post-lockout recovery should keep the active descriptor-selected R1/2 rate");
+    CHECK(ConnectionAdaptiveTestAccess::pendingModulation(c) == Modulation::DQPSK,
+          "post-lockout recovery should step code rate before modulation");
+    CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R2_3,
+          "post-lockout recovery should use the active descriptor-selected R2/3 rate");
 }
 
 void test_forced_rate_disables_adaptive_controller() {

@@ -22,6 +22,7 @@ namespace protocol {
 inline constexpr float kQAM16AwgnFadingMax = 0.15f;
 inline constexpr float kQAM16AwgnSnrFloorDb = 16.0f;
 inline constexpr float kQAM16AwgnR12SnrFloorDb = 19.0f;
+inline constexpr float kQAM16AwgnR23SnrFloorDb = 19.5f;
 inline constexpr float kQAM16GoodFadingMax = 0.80f;
 inline constexpr float kQAM16GoodSnrFloorDb = 17.0f;
 
@@ -93,10 +94,10 @@ inline constexpr std::array<OFDMCodeRateDescriptor, 4> kOFDMCodeRateDescriptors{
         8,
         {{{0.15f, 25.0f}}},
         1,
-        {{{0.10f, 25.0f}}},
+        {{{0.10f, kQAM16AwgnR23SnrFloorDb}}},
         1,
-        {},
-        0,
+        {{{kQAM16AwgnFadingMax, kQAM16AwgnR23SnrFloorDb}}},
+        1,
     },
     {
         CodeRate::R3_4,
