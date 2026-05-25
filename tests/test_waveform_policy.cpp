@@ -95,8 +95,9 @@ void test_narrow_data_mode() {
     CHECK(rate == CodeRate::R1_4, "narrow moderate fading should stay R1/4");
 }
 
-void test_qam16_awgn_rung() {
-    // Coherent QAM16 AWGN-only rung (2026-05-23 P5 wiring). R1/2 only for now.
+void test_qam16_selection_rung() {
+    // Coherent QAM16 R1/2 rung. AWGN keeps the 2026-05-23 gate; GOOD fading
+    // is deliberately enabled at 17 dB for the channel-estimation baseline.
     Modulation mod;
     CodeRate rate;
 
@@ -114,10 +115,38 @@ void test_qam16_awgn_rung() {
     CHECK(mod == Modulation::DQPSK,
           "AWGN in-band SNR=15.9 (just under QAM16 gate) stays differential");
 
-    // Any fading must NOT select QAM16 (coherent QAM16 still storms on fading).
+    // GOOD fading at/above 17 dB now selects QAM16 R1/2 for measurement.
     recommendDataMode(20.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.40f);
+    CHECK(mod == Modulation::QAM16,
+          "good fading in-band SNR=20 should select coherent QAM16");
+    CHECK(rate == CodeRate::R1_2, "good fading QAM16 rung uses R1/2");
+
+    recommendDataMode(17.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.40f);
+    CHECK(mod == Modulation::QAM16 && rate == CodeRate::R1_2,
+          "good fading in-band SNR=17 should promote to QAM16 R1/2");
+
+    recommendDataMode(20.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.79f);
+    CHECK(mod == Modulation::QAM16 && rate == CodeRate::R1_2,
+          "GOOD-lobby estimator spread should still allow QAM16 R1/2");
+
+    recommendDataMode(20.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.80f);
     CHECK(mod == Modulation::DQPSK,
-          "good fading in-band SNR=20 must stay differential (QAM16 fading deferred)");
+          "above GOOD-lobby estimator margin should fall back to DQPSK");
+
+    recommendDataMode(16.9f, WaveformMode::OFDM_CHIRP, mod, rate, 0.40f);
+    CHECK(mod == Modulation::DQPSK,
+          "good fading in-band SNR=16.9 should fall back to DQPSK");
+    CHECK(rate == CodeRate::R1_2,
+          "good fading below QAM16 floor should keep the existing OFDM R1/2 rate");
+
+    // Moderate/poor fading remain differential.
+    recommendDataMode(20.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.90f);
+    CHECK(mod == Modulation::DQPSK,
+          "moderate fading in-band SNR=20 should stay differential");
+
+    recommendDataMode(25.0f, WaveformMode::OFDM_CHIRP, mod, rate, 1.20f);
+    CHECK(mod == Modulation::DQPSK,
+          "poor fading should stay differential even at high SNR");
 
     // DQPSK guard (good/snr12) preserved — sub-coherent-floor path untouched.
     recommendDataMode(12.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.40f);
@@ -166,25 +195,23 @@ void test_data_mode_policy() {
     // D8PSK gates use the unified in-band meter. AWGN-12 in-band (~22 dB)
     // must remain below all D8PSK promotion thresholds.
 
-    // High-SNR AWGN now selects coherent QAM16 (2026-05-23 P5 wiring) — it
-    // supersedes the differential D8PSK AWGN rungs, which are the leader-matching
-    // target. D8PSK stays reachable on good fading (SNR>=32, fading 0.15-0.65),
-    // covered below.
+    // High-SNR AWGN selects coherent QAM16 (2026-05-23 P5 wiring) and GOOD
+    // fading now selects the same R1/2 measurement rung at SNR >= 17.
     recommendDataMode(37.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.00f);
     CHECK(mod == Modulation::QAM16, "high-SNR AWGN should select coherent QAM16");
     CHECK(rate == CodeRate::R1_2, "high-SNR AWGN QAM16 uses R1/2 (only rung wired so far)");
 
     recommendDataMode(32.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
-    CHECK(mod == Modulation::D8PSK, "good-fading in-band SNR32 should be D8PSK");
-    CHECK(rate == CodeRate::R1_2, "good-fading in-band SNR32 D8PSK uses R1/2");
+    CHECK(mod == Modulation::QAM16, "good-fading in-band SNR32 should select QAM16");
+    CHECK(rate == CodeRate::R1_2, "good-fading in-band SNR32 QAM16 uses R1/2");
 
     recommendDataMode(30.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
-    CHECK(mod == Modulation::DQPSK, "good-fading in-band SNR30 stays DQPSK");
-    CHECK(rate == CodeRate::R1_2, "good-fading in-band SNR30 should use R1/2 with DQPSK");
+    CHECK(mod == Modulation::QAM16, "good-fading in-band SNR30 should select QAM16");
+    CHECK(rate == CodeRate::R1_2, "good-fading in-band SNR30 QAM16 uses R1/2");
 
     recommendDataMode(28.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
-    CHECK(mod == Modulation::DQPSK, "good-fading in-band SNR28 stays DQPSK");
-    CHECK(rate == CodeRate::R1_2, "good-fading in-band SNR28 should use R1/2 with DQPSK");
+    CHECK(mod == Modulation::QAM16, "good-fading in-band SNR28 should select QAM16");
+    CHECK(rate == CodeRate::R1_2, "good-fading in-band SNR28 QAM16 uses R1/2");
 
     // AWGN in-band SNR=21.7 is above the coherent QAM16 AWGN gate (16 dB), so
     // it now selects QAM16 R1/2 (2026-05-23 P5 wiring). Below 16 dB AWGN it
@@ -193,10 +220,14 @@ void test_data_mode_policy() {
     CHECK(mod == Modulation::QAM16, "AWGN in-band SNR=21.7 selects coherent QAM16");
     CHECK(rate == CodeRate::R1_2, "AWGN in-band SNR=21.7 QAM16 uses R1/2");
 
-    // SNR=19 Good fading: above the new R1/2 Good gate of 14 dB.
+    // SNR=19 GOOD fading: above the QAM16 measurement gate.
     recommendDataMode(19.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
-    CHECK(mod == Modulation::DQPSK, "in-band SNR=19 falls back to DQPSK (no D8PSK below 32)");
-    CHECK(rate == CodeRate::R1_2, "in-band SNR=19 good fading should use DQPSK R1/2");
+    CHECK(mod == Modulation::QAM16, "in-band SNR=19 good fading should select QAM16");
+    CHECK(rate == CodeRate::R1_2, "in-band SNR=19 good fading should use QAM16 R1/2");
+
+    recommendDataMode(16.9f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
+    CHECK(mod == Modulation::DQPSK, "in-band SNR=16.9 good fading falls back to DQPSK");
+    CHECK(rate == CodeRate::R1_2, "in-band SNR=16.9 good fading keeps R1/2 DQPSK");
 
     // Just under the R1/2 Good gate at SNR=13.9 dB.
     recommendDataMode(13.9f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
@@ -255,7 +286,7 @@ void test_waveform_factory() {
 int main() {
     test_ofdm_rate_thresholds();
     test_narrow_data_mode();
-    test_qam16_awgn_rung();
+    test_qam16_selection_rung();
     test_bootstrap_caps();
     test_waveform_recommendations();
     test_data_mode_policy();

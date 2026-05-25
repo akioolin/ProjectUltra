@@ -406,17 +406,21 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         (header.type == protocol::v2::FrameType::TURNOVER ||
          header.type == protocol::v2::FrameType::TURN_REQUEST ||
          header.type == protocol::v2::FrameType::FILE_CANCEL);
+    const bool is_mode_change = header.valid &&
+        header.type == protocol::v2::FrameType::MODE_CHANGE;
     if (is_ofdm && connected_ && handshake_complete_ && is_data_frame && streaming_decoder_) {
         streaming_decoder_->clearFullOFDMAnchorExpectation();
     }
 
     // Use light preamble (LTS only) for connected OFDM control turns. A single
     // DATA frame is a new physical DATA turn and carries a full anchor so the
-    // peer can recover after idle or after an ACK/NACK turnaround. TURNOVER and
-    // TURN_REQUEST are link-state transition tokens, so they also carry a full
-    // anchor instead of depending on warm sync across a half-duplex turnaround.
+    // peer can recover after idle or after an ACK/NACK turnaround. TURNOVER,
+    // TURN_REQUEST, FILE_CANCEL, and MODE_CHANGE are link-state transition
+    // tokens, so they also carry a full anchor instead of depending on warm
+    // sync across a half-duplex turnaround or a degraded high-order data mode.
     bool use_light = ((connected_ && handshake_complete_) || is_disconnect_ack) &&
-                     is_ofdm && !is_data_frame && !is_turn_control;
+                     is_ofdm && !is_data_frame && !is_turn_control &&
+                     !is_mode_change;
     auto samples = use_light ? streaming_encoder_->encodeFrameLight(data)
                              : streaming_encoder_->encodeFrame(data);
 

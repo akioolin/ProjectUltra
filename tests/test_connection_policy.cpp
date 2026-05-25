@@ -379,6 +379,76 @@ void test_negotiated_mode_selection() {
           "no common modes should fall back to MC-DPSK (universal floor), never OFDM_COX");
 }
 
+void test_auto_data_mode_boundaries() {
+    const uint8_t all = ModeCapabilities::ALL;
+    Modulation mod = Modulation::AUTO;
+    CodeRate rate = CodeRate::AUTO;
+
+    WaveformMode waveform = selectNegotiatedMode(
+        all, all, WaveformMode::AUTO, WaveformMode::AUTO, WaveformMode::AUTO,
+        20.0f, 0.30f);
+    CHECK(waveform == WaveformMode::OFDM_CHIRP,
+          "GOOD fading SNR20 auto-negotiates OFDM_CHIRP");
+    recommendDataMode(20.0f, waveform, mod, rate, 0.30f);
+    CHECK(mod == Modulation::QAM16, "GOOD fading SNR20 auto data mode selects QAM16");
+    CHECK(rate == CodeRate::R1_2, "GOOD fading SNR20 auto data mode selects R1/2");
+
+    recommendDataMode(20.0f, waveform, mod, rate, 0.79f);
+    CHECK(mod == Modulation::QAM16 && rate == CodeRate::R1_2,
+          "GOOD-lobby estimator spread at SNR20 still selects QAM16 R1/2");
+
+    recommendDataMode(20.0f, waveform, mod, rate, 0.80f);
+    CHECK(mod == Modulation::DQPSK,
+          "above GOOD-lobby estimator margin falls back to DQPSK");
+
+    waveform = selectNegotiatedMode(
+        all, all, WaveformMode::AUTO, WaveformMode::AUTO, WaveformMode::AUTO,
+        16.9f, 0.30f);
+    CHECK(waveform == WaveformMode::OFDM_CHIRP,
+          "GOOD fading SNR16.9 remains above the OFDM floor");
+    recommendDataMode(16.9f, waveform, mod, rate, 0.30f);
+    CHECK(mod == Modulation::DQPSK,
+          "GOOD fading below the QAM16 floor falls back to DQPSK");
+    CHECK(rate == CodeRate::R1_2,
+          "GOOD fading below the QAM16 floor keeps the existing R1/2 OFDM rate");
+
+    waveform = selectNegotiatedMode(
+        all, all, WaveformMode::AUTO, WaveformMode::AUTO, WaveformMode::AUTO,
+        11.9f, 0.30f);
+    CHECK(waveform == WaveformMode::MC_DPSK,
+          "GOOD fading below the OFDM floor keeps MC-DPSK");
+    recommendDataMode(11.9f, waveform, mod, rate, 0.30f);
+    CHECK(mod == Modulation::DQPSK && rate == CodeRate::R1_4,
+          "MC-DPSK floor still uses DQPSK R1/4");
+
+    waveform = selectNegotiatedMode(
+        all, all, WaveformMode::AUTO, WaveformMode::AUTO, WaveformMode::AUTO,
+        20.0f, 0.05f);
+    CHECK(waveform == WaveformMode::OFDM_CHIRP,
+          "AWGN SNR20 auto-negotiates OFDM_CHIRP");
+    recommendDataMode(20.0f, waveform, mod, rate, 0.05f);
+    CHECK(mod == Modulation::QAM16 && rate == CodeRate::R1_2,
+          "AWGN SNR20 remains QAM16 R1/2");
+
+    waveform = selectNegotiatedMode(
+        all, all, WaveformMode::AUTO, WaveformMode::AUTO, WaveformMode::AUTO,
+        20.0f, 0.90f);
+    CHECK(waveform == WaveformMode::OFDM_CHIRP,
+          "Moderate fading SNR20 auto-negotiates OFDM_CHIRP");
+    recommendDataMode(20.0f, waveform, mod, rate, 0.90f);
+    CHECK(mod == Modulation::DQPSK,
+          "Moderate fading SNR20 stays DQPSK");
+
+    waveform = selectNegotiatedMode(
+        all, all, WaveformMode::AUTO, WaveformMode::AUTO, WaveformMode::AUTO,
+        20.0f, 1.20f);
+    CHECK(waveform == WaveformMode::OFDM_CHIRP,
+          "Poor fading SNR20 reaches OFDM_CHIRP only above its floor");
+    recommendDataMode(20.0f, waveform, mod, rate, 1.20f);
+    CHECK(mod == Modulation::DQPSK,
+          "Poor fading SNR20 stays DQPSK");
+}
+
 void test_recommend_cw_count() {
     // Wide OFDM: rate-based promotion (R1/2, R2/3, R3/4 → 8; R1/4 → 4).
     CHECK(recommendCWCount(CodeRate::R1_2, WaveformMode::OFDM_CHIRP) == 8,
@@ -442,6 +512,7 @@ int main() {
     test_mc_dpsk_window_timing();
     test_ofdm_profile_selection();
     test_negotiated_mode_selection();
+    test_auto_data_mode_boundaries();
     test_recommend_cw_count();
     test_variable_frame_payload_capacity();
 

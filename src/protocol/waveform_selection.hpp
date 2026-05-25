@@ -14,6 +14,11 @@
 namespace ultra {
 namespace protocol {
 
+inline constexpr float kQAM16AwgnFadingMax = 0.15f;
+inline constexpr float kQAM16AwgnSnrFloorDb = 16.0f;
+inline constexpr float kQAM16GoodFadingMax = 0.80f;
+inline constexpr float kQAM16GoodSnrFloorDb = 17.0f;
+
 // Waveform + rate recommendation
 struct WaveformRecommendation {
     WaveformMode waveform;
@@ -76,6 +81,19 @@ inline CodeRate selectOFDMCodeRate(float snr_db, float fading_index) {
 
     // Default: R1/4 (most robust)
     return CodeRate::R1_4;
+}
+
+inline bool shouldSelectQAM16R12(float snr_db, float fading_index) {
+    const bool awgn_path =
+        fading_index < kQAM16AwgnFadingMax && snr_db >= kQAM16AwgnSnrFloorDb;
+    // OTASim GOOD fading can estimate just into the Moderate label on a
+    // receiver-local realization. Keep this as a narrow measurement hysteresis
+    // band so Good@20 does not go asymmetric or silently fall to DQPSK.
+    const bool good_fading_measurement_path =
+        fading_index >= kQAM16AwgnFadingMax &&
+        fading_index < kQAM16GoodFadingMax &&
+        snr_db >= kQAM16GoodSnrFloorDb;
+    return awgn_path || good_fading_measurement_path;
 }
 
 // Cap initial OFDM rate during handshake bootstrap using only chirp-era metrics.
@@ -226,20 +244,13 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
     // 1.5× the bits/symbol of DQPSK R2/3 at the same conditions, so
     // the throughput jumps from ~3.4 kbps to ~5 kbps with zero retx.
     //
-    // Coherent QAM16 — AWGN-only, R1/2 only for now (P5 ladder integration,
-    // 2026-05-23). Floor map (docs/COHERENT_LADDER_FLOOR_MAP_2026_05_22.md + the
-    // overnight 16-QAM journal) measured the AWGN R1/2 reliable floor at 14 dB,
-    // matching the industry-leader coherent 16-QAM. Gated to true AWGN
-    // (fading_index < 0.15) with the project's standard +2 dB margin (≥16 dB).
-    // Starting with R1/2 only to first prove coherent QAM16 drives end-to-end;
-    // R2/3 (floor 16 dB) is a follow-up once R1/2 is confirmed. Coherent QAM16
-    // still STORMS on fading, so the full Good-fading coherent selector (8PSK
-    // fallback + hysteresis + ARQ-health, see
-    // docs/COHERENT_LADDER_SELECTOR_DESIGN_2026_05_22.md) is deferred and the
-    // differential DQPSK/D8PSK ladder below remains the fading path. QAM16 is
-    // coherent and higher-order than the D8PSK rungs, so it correctly
-    // supersedes them on clean channels.
-    if (fading_index < 0.15f && snr_db >= 16.0f) {
+    // Coherent QAM16 R1/2. AWGN stays on the 16 dB gate measured during the
+    // 2026-05-23 P5 wiring. GOOD fading is intentionally enabled at 17 dB as
+    // a measurement rung. The GOOD gate allows a small estimator-spread margin
+    // above the nominal 0.65 label boundary because the GUI/OTASim GOOD lobby
+    // can report ~0.68 during handshake. MODERATE/POOR fixtures remain on the
+    // differential fallback.
+    if (shouldSelectQAM16R12(snr_db, fading_index)) {
         mod = Modulation::QAM16;
         rate = CodeRate::R1_2;
         return;
