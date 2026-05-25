@@ -860,6 +860,16 @@ void StreamingDecoder::seedExpectedFrameArrivalAfterSamples(size_t delay_samples
     }
 }
 
+void StreamingDecoder::setAdaptiveShortDataPreamble(bool enable) {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    if (adaptive_short_data_preamble_ == enable) {
+        return;
+    }
+    adaptive_short_data_preamble_ = enable;
+    LOG_MODEM(INFO, "StreamingDecoder: adaptive short data re-anchor %s",
+              enable ? "ENABLED" : "DISABLED");
+}
+
 StreamingDecoder::DecoderConfig StreamingDecoder::getConfig() const {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
 

@@ -61,6 +61,7 @@ public:
 
     Samples generatePreamble() override;
     Samples generateDataPreamble() override;  // Training only, no chirp
+    Samples generateShortDataPreamble(float chirp_duration_ms) override;
     Samples modulate(const Bytes& encoded_data) override;
     void setCarrierMask(uint64_t active_mask) override;
     uint64_t getCarrierMask() const override { return carrier_mask_; }
@@ -73,6 +74,10 @@ public:
     bool detectSync(SampleSpan samples, SyncResult& result, float threshold = 0.15f) override;
     bool detectDataSync(SampleSpan samples, SyncResult& result,
                         float known_cfo_hz = 0.0f, float threshold = 0.3f) override;
+    bool detectShortDataSync(SampleSpan samples, SyncResult& result,
+                             float known_cfo_hz = 0.0f,
+                             float threshold = 0.3f,
+                             float chirp_duration_ms = 200.0f) override;
     bool supportsDataPreamble() const override { return true; }
     void setAbsoluteTrainingPosition(size_t pos) override;
     bool process(SampleSpan samples) override;
@@ -111,6 +116,7 @@ public:
     int getSamplesPerSymbol() const override;
     int getPreambleSamples() const override;
     int getDataPreambleSamples() const override;  // Training only
+    int getShortDataPreambleSamples(float chirp_duration_ms) const override;
     int getMinSamplesForFrame() const override;
     int getMinSamplesForControlFrame() const override;
     int getMinSamplesForCWCount(int num_cw) const override;
@@ -142,12 +148,16 @@ private:
     bool carrierLdpcCodewordCountSupported(size_t codeword_count) const;
     void invalidateDataSyncTemplate();
     bool ensureDataSyncTemplate(int symbol_samples);
+    sync::ChirpConfig getShortReanchorChirpConfig(float chirp_duration_ms) const;
+    sync::ChirpSync* shortReanchorSync(float chirp_duration_ms) const;
 
     protocol::WaveformMode mode_ = protocol::WaveformMode::OFDM_CHIRP;
     ModemConfig config_;
     std::unique_ptr<OFDMModulator> modulator_;
     std::unique_ptr<OFDMDemodulator> demodulator_;
     std::unique_ptr<sync::ChirpSync> chirp_sync_;
+    mutable std::unique_ptr<sync::ChirpSync> short_reanchor_sync_;
+    mutable float short_reanchor_duration_ms_ = 0.0f;
     HilbertTransform data_sync_hilbert_{65};
     std::vector<Complex> data_sync_analytic_scratch_;
     std::vector<Complex> data_sync_template_analytic_;

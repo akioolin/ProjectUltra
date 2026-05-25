@@ -1,5 +1,6 @@
 #include "gui/audio_engine.hpp"
 #include "diagnostics/diagnostics_recorder.hpp"
+#include "gui/modem/adaptive_reanchor_policy.hpp"
 #include "gui/modem/streaming_decoder.hpp"
 #include "gui/modem/streaming_encoder.hpp"
 #include "otasim_client/ota_audio_backend.hpp"
@@ -359,6 +360,8 @@ private:
     Modulation data_modulation_ = Modulation::DQPSK;
     CodeRate data_code_rate_ = CodeRate::R1_4;
     float last_cfo_hz_ = 0.0f;
+    float adaptive_preamble_peer_fading_ = -1.0f;
+    bool adaptive_short_reanchor_active_ = false;
 
     std::atomic<bool> running_{false};
     std::thread decode_thread_;
@@ -461,7 +464,7 @@ private:
                                                   int mc_dpsk_num_carriers,
                                                   int mc_dpsk_samples_per_symbol) {
             (void)peer_snr_db;
-            (void)peer_fading;
+            adaptive_preamble_peer_fading_ = peer_fading;
             if (mc_dpsk_num_carriers > 0 && mc_dpsk_samples_per_symbol > 0) {
                 ultra::MultiCarrierDPSKConfig cfg;
                 cfg.num_carriers = mc_dpsk_num_carriers;
@@ -490,6 +493,7 @@ private:
 
         engine_.setModeNegotiatedCallback([this](WaveformMode mode) {
             negotiated_waveform_ = mode;
+            syncAdaptiveShortReanchorForConnectedMode();
             char fields[128];
             std::snprintf(fields, sizeof(fields),
                           "{\"waveform\":\"%s\"}",
@@ -627,6 +631,7 @@ private:
         encoder_.setMode(mode);
         encoder_.setDataMode(data_modulation_, data_code_rate_);
         encoder_.setMCDPSKCarriers(8);
+        syncAdaptiveShortReanchorForConnectedMode();
         if (connected_ && mode == WaveformMode::OFDM_CHIRP) {
             encoder_.forceNextFrameFullPreamble();
         }
@@ -651,6 +656,31 @@ private:
             decoder_.setOFDMConfig(ofdm_config_);
         }
         decoder_.setDataMode(mod, rate);
+        syncAdaptiveShortReanchorForConnectedMode();
+    }
+
+    bool shouldEnableShortReanchorForConnectedMode() const {
+        return connected_ &&
+               ultra::gui::adaptive_reanchor_policy::shouldUseShortReanchor(
+                   negotiated_waveform_, data_modulation_,
+                   adaptive_preamble_peer_fading_);
+    }
+
+    void syncAdaptiveShortReanchorForConnectedMode() {
+        const bool enable = shouldEnableShortReanchorForConnectedMode();
+        const bool changed = adaptive_short_reanchor_active_ != enable;
+        if (enable || changed) {
+            encoder_.setAdaptiveShortDataPreamble(enable);
+            decoder_.setAdaptiveShortDataPreamble(enable);
+        }
+        if (changed) {
+            adaptive_short_reanchor_active_ = enable;
+            LOG_INFO("OPERATOR",
+                     "Adaptive short data re-anchor %s (peer_fading=%.2f chirp=%.0f ms)",
+                     enable ? "ENABLED" : "DISABLED",
+                     adaptive_preamble_peer_fading_,
+                     ultra::gui::adaptive_reanchor_policy::shortReanchorChirpDurationMs());
+        }
     }
 
     void setConnected(bool connected) {
@@ -684,10 +714,12 @@ private:
                     encoder_.setBurstInterleave(true);
                     decoder_.setBurstInterleave(true);
                 }
+                syncAdaptiveShortReanchorForConnectedMode();
             } else {
                 decoder_.setMode(WaveformMode::MC_DPSK, true);
                 decoder_.setDataMode(data_modulation_, data_code_rate_);
                 decoder_.setKnownCFO(last_cfo_hz_);
+                syncAdaptiveShortReanchorForConnectedMode();
             }
         } else {
             std::lock_guard<std::mutex> lock(input_audio_mutex_);
@@ -702,11 +734,13 @@ private:
             data_modulation_ = Modulation::DQPSK;
             data_code_rate_ = CodeRate::R1_4;
             negotiated_waveform_ = WaveformMode::MC_DPSK;
+            adaptive_preamble_peer_fading_ = -1.0f;
             handshake_complete_ = false;
             ofdm_config_ = base_ofdm_config_;
             setWaveformMode(WaveformMode::MC_DPSK);
             encoder_.setMode(WaveformMode::MC_DPSK);
             encoder_.setDataMode(Modulation::DQPSK, CodeRate::R1_4);
+            syncAdaptiveShortReanchorForConnectedMode();
             last_cfo_hz_ = 0.0f;
             if (cfg_.sim_audio) {
                 drainOtaRxLocked();

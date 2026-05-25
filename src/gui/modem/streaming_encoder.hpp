@@ -152,6 +152,9 @@ public:
     void setBurstInterleaveGroupSize(int size);
     int getBurstInterleaveGroupSize() const { return burst_group_size_; }
 
+    void setAdaptiveShortDataPreamble(bool enable);
+    bool getAdaptiveShortDataPreamble() const { return adaptive_short_data_preamble_; }
+
     void setPaprReductionEnabled(bool enable);
     bool getPaprReductionEnabled() const { return papr_reduction_enabled_; }
     void setPaprReductionThresholdDb(float threshold_db);
@@ -181,6 +184,7 @@ private:
                                     bool is_ofdm,
                                     bool is_control_frame,
                                     const char* label);
+    Samples connectedDataPreambleForFrame(bool is_data_frame);
 
     // ========================================================================
     // STATE (mirrors StreamingDecoder)
@@ -214,6 +218,7 @@ private:
     bool use_burst_interleave_ = false;    // Burst-level long interleaver (N-frame groups)
     int burst_group_size_ = 8;
     bool force_full_preamble_once_ = false;
+    bool adaptive_short_data_preamble_ = false;
     bool papr_reduction_enabled_ = phy::kPaprReductionDefaultEnabled;
     float papr_reduction_threshold_db_ = phy::kOfdmPaprReductionDefaultThresholdDb;
     phy::PaprReductionMeasurement last_papr_reduction_;

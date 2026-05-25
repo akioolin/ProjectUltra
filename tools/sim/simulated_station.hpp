@@ -45,6 +45,7 @@
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "waveform/mc_dpsk_waveform.hpp"
 #include "audio/channel_busy_detector.hpp"
+#include "gui/modem/adaptive_reanchor_policy.hpp"
 #include "psk/multi_carrier_dpsk.hpp"
 #include "gui/modem/streaming_decoder.hpp"
 #include "gui/modem/streaming_encoder.hpp"  // TX encoding (mirrors StreamingDecoder)
@@ -655,6 +656,7 @@ public:
     void setChannelType(ChannelType channel_type) {
         channel_type_ = channel_type;
         syncBurstInterleaveForConnectedMode();
+        syncAdaptiveShortReanchorForConnectedMode();
     }
     void setAutoAccept(bool auto_accept) { protocol_.setAutoAccept(auto_accept); }
     void setForcedModulation(Modulation mod) { protocol_.setForcedModulation(mod); }
@@ -1024,6 +1026,8 @@ private:
     MultiCarrierDPSKConfig mc_dpsk_config_ = mc_dpsk_presets::robust_mid();
     MultiCarrierDPSKConfig control_mc_dpsk_config_ = mc_dpsk_presets::robust_mid();
     ChannelType channel_type_ = ChannelType::AWGN;
+    float adaptive_preamble_peer_fading_ = -1.0f;
+    bool adaptive_short_reanchor_active_ = false;
 
     // Protocol engine
     ProtocolEngine protocol_{ConnectionConfig{}};
@@ -1192,6 +1196,7 @@ private:
         encoder_->setCarrierLdpcInterleaver(carrier_ldpc_interleaver_enabled_);
         encoder_->setBurstInterleaveGroupSize(burst_group_size_);
         encoder_->setPaprReductionEnabled(papr_reduction_enabled_);
+        syncAdaptiveShortReanchorForConnectedMode();
 
         LOG_MODEM(INFO, "[%s] TX encoder: mode=%s, carriers=%d, data_carriers=%d",
                   callsign_.c_str(),
@@ -1212,6 +1217,7 @@ private:
         decoder_->setFixedFrameCodewords(fixed_frame_codewords_);
         decoder_->setCarrierMask(carrier_mask_);
         decoder_->setCarrierLdpcInterleaver(carrier_ldpc_interleaver_enabled_);
+        syncAdaptiveShortReanchorForConnectedMode();
         decoder_->setSoftCombineBuffer(protocol_.softCombineBuffer());
         decoder_->setHarqProvisionalContextCallback([this]() {
             return protocol_.harqProvisionalContext();
@@ -1264,6 +1270,36 @@ private:
             LOG_MODEM(INFO, "[%s] Burst interleaving %s (group=%d)",
                       callsign_.c_str(), enable ? "ENABLED" : "DISABLED",
                       burst_group_size_);
+        }
+    }
+
+    bool shouldEnableShortReanchorForConnectedMode() const {
+        const bool measured_fading =
+            adaptive_reanchor_policy::shouldUseShortReanchor(
+                negotiated_waveform_, data_modulation_,
+                adaptive_preamble_peer_fading_);
+        const bool simulator_fading_class =
+            negotiated_waveform_ == WaveformMode::OFDM_CHIRP &&
+            ofdm_link_adaptation::isCoherentModulation(data_modulation_) &&
+            channel_type_ != ChannelType::AWGN;
+        return connected_.load() && (measured_fading || simulator_fading_class);
+    }
+
+    void syncAdaptiveShortReanchorForConnectedMode() {
+        const bool enable = shouldEnableShortReanchorForConnectedMode();
+        const bool changed = adaptive_short_reanchor_active_ != enable;
+        if (enable || changed) {
+            if (encoder_) encoder_->setAdaptiveShortDataPreamble(enable);
+            if (decoder_) decoder_->setAdaptiveShortDataPreamble(enable);
+        }
+        if (changed) {
+            adaptive_short_reanchor_active_ = enable;
+            LOG_MODEM(INFO,
+                      "[%s] Adaptive short data re-anchor %s (channel=%s peer_fading=%.2f chirp=%.0f ms)",
+                      callsign_.c_str(), enable ? "ENABLED" : "DISABLED",
+                      channelTypeToString(channel_type_),
+                      adaptive_preamble_peer_fading_,
+                      adaptive_reanchor_policy::shortReanchorChirpDurationMs());
         }
     }
 
@@ -1578,6 +1614,7 @@ private:
             decoder_->setDataMode(mod, rate);
         }
         syncBurstInterleaveForConnectedMode();
+        syncAdaptiveShortReanchorForConnectedMode();
 
         LOG_MODEM(INFO, "[%s] Data mode: %s %s (pilots=%d, spacing=%d)",
                   callsign_.c_str(), modulationToString(mod), codeRateToString(rate),
@@ -1619,6 +1656,7 @@ private:
                     encoder_->forceNextFrameFullPreamble();
                 }
                 syncBurstInterleaveForConnectedMode();
+                syncAdaptiveShortReanchorForConnectedMode();
                 LOG_MODEM(INFO, "[%s] Entered CONNECTED state, switched to %s, CFO=%.1f Hz",
                           callsign_.c_str(), waveformModeToString(negotiated_waveform_), last_cfo_hz_);
                 verifyTxRxConfig();
@@ -1642,6 +1680,8 @@ private:
             if (encoder_) encoder_->setBurstInterleave(false);
             if (decoder_) decoder_->setBurstInterleave(false);
             burst_interleave_active_ = false;
+            adaptive_preamble_peer_fading_ = -1.0f;
+            syncAdaptiveShortReanchorForConnectedMode();
             // Reset TX encoder to MC-DPSK
             if (tx_waveform_mode_ != WaveformMode::MC_DPSK) {
                 tx_waveform_mode_ = WaveformMode::MC_DPSK;
@@ -1842,6 +1882,7 @@ private:
                                                     float peer_snr_db, float peer_fading,
                                                     int mc_dpsk_num_carriers,
                                                     int mc_dpsk_samples_per_symbol) {
+            adaptive_preamble_peer_fading_ = peer_fading;
             applyNegotiatedMCDPSKConfig(mod, mc_dpsk_num_carriers,
                                         mc_dpsk_samples_per_symbol);
             setDataMode(mod, rate);

@@ -3,6 +3,7 @@
 // Mirrors StreamingDecoder to ensure TX/RX use identical configurations.
 
 #include "streaming_encoder.hpp"
+#include "adaptive_reanchor_policy.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "waveform/mc_dpsk_waveform.hpp"
 #include "fec/frame_interleaver.hpp"
@@ -140,6 +141,34 @@ void StreamingEncoder::applyPaprReductionIfNeeded(std::vector<float>& samples,
 
 void StreamingEncoder::setBurstInterleaveGroupSize(int size) {
     burst_group_size_ = ofdm_link_adaptation::sanitizeBurstGroupSize(size);
+}
+
+void StreamingEncoder::setAdaptiveShortDataPreamble(bool enable) {
+    if (adaptive_short_data_preamble_ == enable) {
+        return;
+    }
+    adaptive_short_data_preamble_ = enable;
+    LOG_MODEM(INFO, "[%s] Adaptive short data re-anchor %s",
+              log_prefix_.c_str(), enable ? "ENABLED" : "DISABLED");
+}
+
+Samples StreamingEncoder::connectedDataPreambleForFrame(bool is_data_frame) {
+    if (!waveform_) {
+        return {};
+    }
+    if (!waveform_->supportsDataPreamble()) {
+        return waveform_->generatePreamble();
+    }
+    if (adaptive_short_data_preamble_ &&
+        protocol::isOFDMMode(mode_) &&
+        is_data_frame) {
+        const float chirp_ms = adaptive_reanchor_policy::shortReanchorChirpDurationMs();
+        Samples preamble = waveform_->generateShortDataPreamble(chirp_ms);
+        LOG_MODEM(DEBUG, "[%s] Short re-anchor preamble: %.0f ms chirp -> %zu samples",
+                  log_prefix_.c_str(), chirp_ms, preamble.size());
+        return preamble;
+    }
+    return waveform_->generateDataPreamble();
 }
 
 void StreamingEncoder::setCarrierMask(uint64_t active_mask) {
@@ -357,14 +386,9 @@ std::vector<float> StreamingEncoder::encodeFrameLight(const Bytes& frame_data) {
     // Encode frame bytes
     Bytes encoded = encodeFrameBytes(frame_data);
 
-    // Generate light preamble if supported
-    Samples preamble;
-    if (waveform_->supportsDataPreamble()) {
-        preamble = waveform_->generateDataPreamble();
-    } else {
-        // Fall back to full preamble
-        preamble = waveform_->generatePreamble();
-    }
+    const auto header = protocol::v2::parseHeader(frame_data);
+    const bool is_data_frame = header.valid && protocol::v2::isDataFrame(header.type);
+    Samples preamble = connectedDataPreambleForFrame(is_data_frame);
 
     // Modulate
     Samples modulated = waveform_->modulate(encoded);
@@ -500,8 +524,10 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
             // Waveforms without a separate data preamble already use their full preamble.
             preamble = waveform_->generatePreamble();
         } else {
-            // All subsequent frames: LTS data preamble
-            preamble = waveform_->generateDataPreamble();
+            const auto header = protocol::v2::parseHeader(frame_data_list[i]);
+            const bool is_data_frame =
+                header.valid && protocol::v2::isDataFrame(header.type);
+            preamble = connectedDataPreambleForFrame(is_data_frame);
         }
 
         // Negate first LTS symbol for burst-interleaved group starts

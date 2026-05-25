@@ -95,6 +95,13 @@ public:
     // Default: falls back to full preamble for waveforms that don't support it
     virtual Samples generateDataPreamble() { return generatePreamble(); }
 
+    // Generate a short re-anchor preamble for connected data frames in fading:
+    // [short sync chirp][training]. Default preserves legacy light behavior.
+    virtual Samples generateShortDataPreamble(float chirp_duration_ms) {
+        (void)chirp_duration_ms;
+        return generateDataPreamble();
+    }
+
     // Modulate encoded data (LDPC-encoded bits packed as bytes)
     // Returns audio samples ready for transmission
     virtual Samples modulate(const Bytes& encoded_data) = 0;
@@ -124,6 +131,16 @@ public:
                                  float known_cfo_hz = 0.0f, float threshold = 0.3f) {
         (void)known_cfo_hz;  // Unused in default implementation
         return detectSync(samples, result, threshold);
+    }
+
+    // Detect the short re-anchor preamble form. Default falls back to the
+    // training-only detector so non-OFDM waveforms keep existing behavior.
+    virtual bool detectShortDataSync(SampleSpan samples, SyncResult& result,
+                                     float known_cfo_hz = 0.0f,
+                                     float threshold = 0.3f,
+                                     float chirp_duration_ms = 200.0f) {
+        (void)chirp_duration_ms;
+        return detectDataSync(samples, result, known_cfo_hz, threshold);
     }
 
     // Check if this waveform supports light/data preamble mode
@@ -233,6 +250,12 @@ public:
     // Get light preamble duration in samples (training only)
     // Default: same as full preamble for waveforms that don't support light mode
     virtual int getDataPreambleSamples() const { return getPreambleSamples(); }
+
+    // Get short re-anchor preamble samples for connected fading data frames.
+    virtual int getShortDataPreambleSamples(float chirp_duration_ms) const {
+        (void)chirp_duration_ms;
+        return getDataPreambleSamples();
+    }
 
     // Get minimum samples needed AFTER sync detection for one complete frame
     // This includes training, reference, and data for at least one codeword
