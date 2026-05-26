@@ -2517,6 +2517,8 @@ void Connection::tick(uint32_t elapsed_ms) {
                 }
             }
 
+            tickModeChangeAckRepeats(elapsed_ms);
+
             // Handle MODE_CHANGE timeout
             if (mode_change_pending_) {
                 if (elapsed_ms >= mode_change_timeout_ms_) {
@@ -2849,6 +2851,72 @@ uint32_t Connection::modeChangeRetryMs() const {
         static_cast<uint64_t>(connection_policy::kCarrierSenseSackCoalesceMs);
     return static_cast<uint32_t>(
         std::min<uint64_t>(control_round_trip_ms, 0xFFFFFFFFull));
+}
+
+void Connection::scheduleModeChangeAckRepeats(const Bytes& ack_data, uint16_t ack_seq) {
+    if (!isOFDMMode(negotiated_mode_)) {
+        return;
+    }
+
+    const int repeat_count = arq_.getAckRepeatCount();
+    if (repeat_count <= 1) {
+        return;
+    }
+
+    for (auto it = mode_change_ack_repeat_jobs_.begin();
+         it != mode_change_ack_repeat_jobs_.end();) {
+        if (it->seq == ack_seq) {
+            it = mode_change_ack_repeat_jobs_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    constexpr uint32_t kAckPayloadBitmap = 0;
+    for (int copy_index = 2; copy_index <= repeat_count; ++copy_index) {
+        const uint32_t base_delay_ms =
+            selective_repeat_arq_policy::ackRepeatDelayForCopy(
+                arq_.getAckRepeatDelay(), copy_index);
+        const int jitter_ms = selective_repeat_arq_policy::ackRepeatJitterMs(
+            ack_seq, kAckPayloadBitmap, copy_index);
+        int64_t scheduled_ms = static_cast<int64_t>(base_delay_ms) + jitter_ms;
+        if (scheduled_ms < 1) {
+            scheduled_ms = 1;
+        }
+
+        ModeChangeAckRepeatJob job;
+        job.frame_data = ack_data;
+        job.seq = ack_seq;
+        job.timer_ms = static_cast<uint32_t>(scheduled_ms);
+        job.copy_index = copy_index;
+        mode_change_ack_repeat_jobs_.push_back(std::move(job));
+
+        LOG_MODEM(INFO,
+                  "Connection: MODE_CHANGE ACK_REPEAT scheduled seq=%u copy=%d delay=%ums jitter=%dms",
+                  static_cast<unsigned>(ack_seq),
+                  copy_index,
+                  static_cast<unsigned>(scheduled_ms),
+                  jitter_ms);
+    }
+}
+
+void Connection::tickModeChangeAckRepeats(uint32_t elapsed_ms) {
+    for (auto it = mode_change_ack_repeat_jobs_.begin();
+         it != mode_change_ack_repeat_jobs_.end();) {
+        ModeChangeAckRepeatJob& job = *it;
+        if (elapsed_ms >= job.timer_ms) {
+            LOG_MODEM(INFO,
+                      "Connection: MODE_CHANGE ACK_REPEAT sent seq=%u copy=%d",
+                      static_cast<unsigned>(job.seq),
+                      job.copy_index);
+            transmitFrame(job.frame_data);
+            it = mode_change_ack_repeat_jobs_.erase(it);
+            continue;
+        }
+
+        job.timer_ms -= elapsed_ms;
+        ++it;
+    }
 }
 
 void Connection::configureArqForCurrentDataMode() {
@@ -3202,6 +3270,7 @@ void Connection::enterConnected() {
     arq_.reset();
     configureArqForCurrentDataMode();
     resetAdaptiveModeController();
+    mode_change_ack_repeat_jobs_.clear();
 
     LOG_MODEM(INFO, "Connection: Now CONNECTED to %s (mode=%s, data_turn=%s)",
               remote_call_.c_str(), waveformModeToString(negotiated_mode_),
@@ -3227,6 +3296,7 @@ void Connection::enterDisconnected(const std::string& reason) {
     remote_call_.clear();
     pending_remote_call_.clear();
     mode_change_pending_ = false;
+    mode_change_ack_repeat_jobs_.clear();
     disconnect_frame_.clear();
     disconnect_pending_ = false;
     disconnect_ack_frame_.clear();
@@ -3500,6 +3570,7 @@ void Connection::reset() {
     mode_change_timeout_ms_ = 0;
     mode_change_retry_count_ = 0;
     pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
+    mode_change_ack_repeat_jobs_.clear();
     data_modulation_ = Modulation::DQPSK;
     data_code_rate_ = CodeRate::R1_4;
     data_ladder_rung_id_ = LadderRungId::UNKNOWN;

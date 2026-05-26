@@ -291,6 +291,14 @@ struct ConnectionAdaptiveTestAccess {
         return c.arq_.getAckTimeout();
     }
 
+    static int arqAckRepeatCount(const Connection& c) {
+        return c.arq_.getAckRepeatCount();
+    }
+
+    static uint32_t arqAckRepeatDelay(const Connection& c) {
+        return c.arq_.getAckRepeatDelay();
+    }
+
     static void forceCodeRate(Connection& c, CodeRate rate) {
         c.config_.forced_code_rate = rate;
     }
@@ -360,6 +368,41 @@ void test_remote_mode_change_reconfigures_arq() {
           "remote MODE_CHANGE should update ARQ code rate");
     CHECK(ConnectionAdaptiveTestAccess::arqWindow(c) == connection_policy::kWideOFDMWindowFrames,
           "remote MODE_CHANGE should recompute ARQ window");
+}
+
+void test_remote_mode_change_ack_repeats_use_ofdm_ack_diversity() {
+    Connection c;
+    std::vector<Bytes> tx_frames;
+    c.setTransmitCallback([&](const Bytes& data) {
+        tx_frames.push_back(data);
+    });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.48f, Modulation::QPSK);
+
+    const int repeat_count = ConnectionAdaptiveTestAccess::arqAckRepeatCount(c);
+    CHECK(repeat_count > 1, "wide OFDM profile should request ACK time diversity");
+
+    auto frame = v2::ControlFrame::makeModeChange(
+        "K2DEF", "W1ABC", 44, Modulation::QPSK, CodeRate::R1_2,
+        19.8f, 0.48f, v2::ModeChangeReason::CHANNEL_DEGRADED);
+    c.onFrameReceived(frame.serialize());
+
+    CHECK(tx_frames.size() == 1,
+          "remote MODE_CHANGE should send the first ACK immediately");
+
+    const uint32_t drain_ms =
+        selective_repeat_arq_policy::ackRepeatDelayForCopy(
+            ConnectionAdaptiveTestAccess::arqAckRepeatDelay(c), repeat_count) +
+        selective_repeat_arq_policy::kAckRepeatMaxJitterMs;
+    c.tick(drain_ms);
+
+    CHECK(tx_frames.size() == static_cast<size_t>(repeat_count),
+          "remote MODE_CHANGE ACK should reuse the active OFDM ACK repeat count");
+    for (const auto& data : tx_frames) {
+        auto ack = v2::ControlFrame::deserialize(data);
+        CHECK(ack && ack->type == v2::FrameType::ACK && ack->seq == 44,
+              "every MODE_CHANGE ACK diversity copy should acknowledge the request seq");
+    }
 }
 
 void test_wide_ofdm_configures_short_tail_sack_delay() {
@@ -1189,6 +1232,7 @@ int main() {
     test_local_mode_change_ack_reconfigures_arq();
     test_local_mode_change_timeout_keeps_current_arq_mode();
     test_remote_mode_change_reconfigures_arq();
+    test_remote_mode_change_ack_repeats_use_ofdm_ack_diversity();
     test_wide_ofdm_configures_short_tail_sack_delay();
     test_accepted_ofdm_data_sync_keeps_connect_ack_rescue_armed();
     test_accepted_ofdm_data_sync_does_not_clear_non_ofdm_rescue();

@@ -543,7 +543,9 @@ void Connection::handleModeChange(const v2::ControlFrame& frame, const std::stri
 
     // Send ACK for the MODE_CHANGE
     auto ack = v2::ControlFrame::makeAck(local_call_, remote_call_, frame.seq);
-    transmitFrame(ack.serialize());
+    const Bytes ack_data = ack.serialize();
+    transmitFrame(ack_data);
+    scheduleModeChangeAckRepeats(ack_data, frame.seq);
 
     // Notify application of mode change
     notifyDataModeChanged(info.snr_db, info.fading_index);

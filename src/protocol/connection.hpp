@@ -361,6 +361,13 @@ private:
     float pending_fading_index_ = 0.0f;
     uint8_t pending_reason_ = 0;
     static constexpr int MODE_CHANGE_MAX_RETRIES = 2;
+    struct ModeChangeAckRepeatJob {
+        Bytes frame_data;
+        uint16_t seq = 0;
+        uint32_t timer_ms = 0;
+        int copy_index = 0;
+    };
+    std::deque<ModeChangeAckRepeatJob> mode_change_ack_repeat_jobs_;
 
     // ARQ for reliable data transfer (Selective Repeat for higher throughput)
     SelectiveRepeatARQ arq_;
@@ -485,6 +492,8 @@ private:
     uint32_t fileCancelTxGuardMs() const;
     uint32_t fileCancelConfirmDataGuardMs() const;
     uint32_t modeChangeRetryMs() const;
+    void scheduleModeChangeAckRepeats(const Bytes& ack_data, uint16_t ack_seq);
+    void tickModeChangeAckRepeats(uint32_t elapsed_ms);
     uint32_t connectControlFrameAirtimeMs() const;
     uint32_t connectRetryIntervalMs() const;
     uint32_t connectAckRetransmitMs() const;
