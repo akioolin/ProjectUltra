@@ -912,14 +912,7 @@ public:
             return;
         }
         protocol_.tick(elapsed_ms);
-        // File-transfer regime edge-detect: apply the file-class PHY profile
-        // when a transfer starts and revert it when it ends/cancels. No-op at
-        // stage 0 (syncFileProfile leaves pilot_spacing unchanged).
-        const bool xfer = isFileTransferInProgress();
-        if (xfer != file_profile_active_cached_) {
-            file_profile_active_cached_ = xfer;
-            syncFileProfile();
-        }
+        maybeSyncFileProfileOnTransition();
     }
 
     void tickByMs(uint32_t elapsed_ms) {
@@ -927,6 +920,21 @@ public:
             return;
         }
         protocol_.tick(elapsed_ms);
+        // Must run here too: the OTASim sample-clock pump advances stations via
+        // tickByMs(), NOT tick(), so the file-profile edge-detect has to live on
+        // both paths or it never fires during an OTASim file transfer.
+        maybeSyncFileProfileOnTransition();
+    }
+
+    // File-transfer regime edge-detect: apply the file-class PHY profile when a
+    // transfer starts and revert it when it ends/cancels. No-op at stage 0
+    // (syncFileProfile leaves pilot_spacing unchanged).
+    void maybeSyncFileProfileOnTransition() {
+        const bool xfer = isFileTransferInProgress();
+        if (xfer != file_profile_active_cached_) {
+            file_profile_active_cached_ = xfer;
+            syncFileProfile();
+        }
     }
 
     bool startSampleClockPump() {
