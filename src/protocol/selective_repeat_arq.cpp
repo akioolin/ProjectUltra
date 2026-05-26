@@ -833,7 +833,17 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
             LOG_MODEM(INFO, "SR-ARQ: Hole detected for base seq=%d (hole_count=%d, bitmap=0x%08X)",
                       tx_base_seq_, s.hole_ack_count, bitmap);
 
-            if (!s.hole_probe_armed) {
+            // Do not (re)arm the hole-probe while a fast-hole retransmit for this
+            // base seq is still within its in-flight cooldown window. The fast-hole
+            // handler disarms the probe when it fires (see below), but subsequent
+            // hole-confirmation SACKs still show the gap (the repair hasn't landed +
+            // been ACKed across the half-duplex turnaround yet), so without this guard
+            // the probe re-arms and then fires a redundant retx of a frame the
+            // fast-hole repair already recovered. fast_retx_cooldown_ms is RTT-scaled
+            // (ack_timeout/6) and self-clears in tick(); once it expires with the hole
+            // still open (fast-hole genuinely failed), the probe re-arms for legitimate
+            // escalation. Mirrors the "fast_hole already serves that purpose" disarm.
+            if (!s.hole_probe_armed && s.fast_retx_cooldown_ms == 0) {
                 s.hole_probe_armed = true;
                 s.hole_probe_count = 0;
                 s.hole_probe_timer_ms = arq_policy::holeProbeInitialTimerMs(

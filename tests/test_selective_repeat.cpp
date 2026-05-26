@@ -450,6 +450,74 @@ bool test_duplicate_sack_hole_is_suppressed_without_duplicate_retx_accounting() 
     return true;
 }
 
+bool test_hole_probe_not_rearmed_while_fast_hole_in_flight() {
+    TEST("hole-probe is not re-armed while a fast-hole retx is in flight");
+
+    // Regression for the faithful-clock (GUI/hardware) double-retx: a base hole
+    // is repaired by a fast-hole retransmit, but subsequent hole-confirmation
+    // SACKs still show the gap (the repair hasn't landed + been ACKed across the
+    // half-duplex turnaround yet). Before the fix, that re-armed the hole-probe,
+    // which then fired a redundant retransmit of a frame the fast-hole already
+    // recovered. The fix suppresses re-arming while fast_retx_cooldown_ms > 0.
+    // ack_timeout=5000 keeps the per-slot RTO (5000ms) well clear of the
+    // hole-probe timer (clamp(2500,1200,2500)=2500ms) so this test exercises the
+    // probe path, not the RTO. fast-hole cooldown = clamp(833,300,1200)=833ms.
+    ARQConfig config;
+    config.window_size = 8;
+    config.ack_timeout_ms = 5000;
+
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+
+    std::vector<Bytes> transmitted;
+    tx.setTransmitCallback([&](const Bytes& data) { transmitted.push_back(data); });
+
+    for (int i = 0; i < 8; i++) {
+        if (!tx.sendData(Bytes{static_cast<uint8_t>(i)}))
+            FAIL("Failed to send DATA seq=" + std::to_string(i));
+    }
+    if (transmitted.size() != 8)
+        FAIL("Expected 8 initial transmits");
+
+    // Evolving base-hole SACKs (seq0 missing throughout): distinct bitmaps so
+    // each counts as a fresh hole confirmation (not a dedup'd duplicate).
+    tx.onFrameReceived(makeSackAck(0xFFFF, 0x02u).serialize());  // confirm #1 -> arm probe
+    tx.tick(50);
+    tx.onFrameReceived(makeSackAck(0xFFFF, 0x06u).serialize());  // confirm #2 -> fast-hole fires, disarm probe
+
+    auto mid = tx.getStats();
+    if (mid.retransmissions_fast_hole != 1)
+        FAIL("Expected exactly one fast-hole repair, got " +
+             std::to_string(mid.retransmissions_fast_hole));
+
+    // Third confirmation arrives while the fast-hole repair is still in flight
+    // (cooldown active). With the fix this must NOT re-arm the hole-probe.
+    tx.tick(100);  // cooldown 833 -> 733, still active
+    tx.onFrameReceived(makeSackAck(0xFFFF, 0x0Eu).serialize());  // confirm #3 (cooldown still > 0)
+
+    // Tick past the hole-probe timer (2500ms) but short of the RTO (5000ms):
+    // if the probe had been re-armed it would fire a redundant retransmit here.
+    tx.tick(2600);
+
+    auto stats = tx.getStats();
+    if (stats.retransmissions_hole_probe != 0)
+        FAIL("Hole-probe redundantly retransmitted a frame the fast-hole repair "
+             "already covered (retransmissions_hole_probe=" +
+             std::to_string(stats.retransmissions_hole_probe) + ")");
+    if (stats.retransmissions_timeout != 0)
+        FAIL("RTO should not fire within the window (got timeout retx=" +
+             std::to_string(stats.retransmissions_timeout) + ")");
+    if (stats.retransmissions_fast_hole != 1)
+        FAIL("Fast-hole repair count changed unexpectedly: " +
+             std::to_string(stats.retransmissions_fast_hole));
+    if (transmitted.size() != 9)  // 8 initial + 1 fast-hole; NO probe/timeout retx
+        FAIL("Expected 9 transmits (8 + 1 fast-hole), got " +
+             std::to_string(transmitted.size()));
+
+    PASS();
+    return true;
+}
+
 bool test_rx_in_order() {
     TEST("RX delivers in-order frames");
 
@@ -1831,6 +1899,7 @@ int main() {
     test_stale_ack_older_than_base_minus_one_is_ignored();
     test_future_ack_too_far_ahead_is_ignored();
     test_duplicate_sack_hole_is_suppressed_without_duplicate_retx_accounting();
+    test_hole_probe_not_rearmed_while_fast_hole_in_flight();
     test_duplicate_data_is_not_delivered_twice_and_sends_recovery_sack();
     test_timeout_repair_retransmits_only_missing_slot_and_resets_timer();
     test_timeout_window_retransmits_as_one_batch_when_callback_present();
