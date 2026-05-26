@@ -1815,12 +1815,37 @@ CodewordInfo identifyCodeword(const Bytes& cw_data) {
 // Fixed-Codeword Frame Implementation
 // ============================================================================
 
+namespace {
+// Info-block counts of the 24-column 802.11n base matrix (k = info_blocks * Z).
+// Matches LDPCEncoder/Decoder getCodeParams. Used to size the file-class long
+// codeword (Z=81) without touching the rate-only getBytesPerCodeword() used by
+// the default (Z=27) path and its many capacity-math callers.
+inline int infoBlocksForRate(CodeRate r) {
+    switch (r) {
+        case CodeRate::R1_4: return 6;
+        case CodeRate::R1_2: return 12;
+        case CodeRate::R2_3: return 16;
+        case CodeRate::R3_4: return 18;
+        case CodeRate::R5_6: return 20;
+        default:             return 12;
+    }
+}
+// Info bytes per codeword at lifting size Z. Z=27 must equal getBytesPerCodeword().
+inline size_t infoBytesPerCodewordZ(CodeRate r, int lifting_z) {
+    return static_cast<size_t>(infoBlocksForRate(r)) * static_cast<size_t>(lifting_z) / 8;
+}
+constexpr int kLdpcBlockCols = 24;  // n = kLdpcBlockCols * Z (648 @ Z27, 1944 @ Z81)
+}  // namespace
+
 Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, int cw_count,
-                       bool use_channel_interleave, size_t bits_per_symbol) {
+                       bool use_channel_interleave, size_t bits_per_symbol,
+                       int lifting_z) {
     using namespace fec;
 
     cw_count = sanitizeFixedFrameCodewords(cw_count);
-    size_t bytes_per_cw = getBytesPerCodeword(rate);
+    const int codeword_bits = kLdpcBlockCols * lifting_z;  // 648 or 1944
+    size_t bytes_per_cw = (lifting_z == 27) ? getBytesPerCodeword(rate)
+                                            : infoBytesPerCodewordZ(rate, lifting_z);
     size_t total_info_bytes = static_cast<size_t>(cw_count) * bytes_per_cw;
 
     // Pad frame data to exactly N CWs worth of info bytes
@@ -1832,14 +1857,14 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, int cw_count,
     }
 
     // Split into fixed-size info chunks and LDPC encode each
-    LDPCEncoder encoder(rate);
+    LDPCEncoder encoder(rate, lifting_z);
     std::vector<std::vector<uint8_t>> coded_codewords;
     coded_codewords.reserve(static_cast<size_t>(cw_count));
 
     // Create channel interleaver if enabled
     std::unique_ptr<ChannelInterleaver> interleaver;
     if (use_channel_interleave) {
-        interleaver = std::make_unique<ChannelInterleaver>(bits_per_symbol, LDPC_CODEWORD_BITS);
+        interleaver = std::make_unique<ChannelInterleaver>(bits_per_symbol, codeword_bits);
     }
 
     for (int cw = 0; cw < cw_count; ++cw) {
@@ -1859,7 +1884,7 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, int cw_count,
     }
 
     // Apply frame-level interleaving
-    return FrameInterleaver::interleave(coded_codewords, cw_count);
+    return FrameInterleaver::interleave(coded_codewords, cw_count, codeword_bits);
 }
 
 Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, bool use_channel_interleave, size_t bits_per_symbol) {
@@ -1879,13 +1904,16 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate) {
 CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate, int cw_count,
                                 bool use_channel_deinterleave, size_t bits_per_symbol,
                                 fec::SoftCombineBuffer* harq_buffer,
-                                const fec::SoftCombineBuffer::Key* harq_key) {
+                                const fec::SoftCombineBuffer::Key* harq_key,
+                                int lifting_z) {
     using namespace fec;
     ultra::timing::ScopedTimer _profile_(
         ultra::timing::globalDecoderProfile().decode_fixed_frame_total);
 
     cw_count = sanitizeFixedFrameCodewords(cw_count);
-    const size_t total_frame_bits = static_cast<size_t>(FrameInterleaver::totalFrameBits(cw_count));
+    const int codeword_bits = kLdpcBlockCols * lifting_z;  // 648 @ Z27, 1944 @ Z81
+    const size_t total_frame_bits =
+        static_cast<size_t>(FrameInterleaver::totalFrameBits(cw_count, codeword_bits));
 
     CodewordStatus status;
     status.fixed_frame = true;
@@ -1911,19 +1939,30 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
     const bool harq_active = harq_has_key && harq_buffer->enabled();
 
     // Deinterleave to restore original CW order (frame-level)
-    auto cw_soft_bits = FrameInterleaver::deinterleave(interleaved_soft, cw_count);
+    auto cw_soft_bits = FrameInterleaver::deinterleave(interleaved_soft, cw_count, codeword_bits);
 
     // Create channel interleaver for deinterleaving if enabled
     std::unique_ptr<ChannelInterleaver> interleaver;
     if (use_channel_deinterleave) {
-        interleaver = std::make_unique<ChannelInterleaver>(bits_per_symbol, LDPC_CODEWORD_BITS);
+        interleaver = std::make_unique<ChannelInterleaver>(bits_per_symbol, codeword_bits);
     }
 
     // Decode each codeword
     // Use min-sum factor 0.9375 (closer to BP) as default — empirically best
-    // for DQPSK differential LLRs on fading channels.
-    LDPCDecoder& decoder = fixedFrameDecoderForRate(rate);
-    size_t bytes_per_cw = getBytesPerCodeword(rate);
+    // for DQPSK differential LLRs on fading channels. The default Z=27 path uses
+    // the cached per-rate decoder; the file-class long code (Z=81) uses a local
+    // decoder so the cache + every existing caller stay untouched.
+    std::unique_ptr<LDPCDecoder> long_decoder;
+    LDPCDecoder* decoder_ptr;
+    if (lifting_z == 27) {
+        decoder_ptr = &fixedFrameDecoderForRate(rate);
+    } else {
+        long_decoder = std::make_unique<LDPCDecoder>(rate, lifting_z);
+        decoder_ptr = long_decoder.get();
+    }
+    LDPCDecoder& decoder = *decoder_ptr;
+    size_t bytes_per_cw = (lifting_z == 27) ? getBytesPerCodeword(rate)
+                                            : infoBytesPerCodewordZ(rate, lifting_z);
 
     int perturbation_cw_count = 0;  // How many CWs needed perturbation retry
     std::vector<std::vector<float>> decoder_soft_bits(static_cast<size_t>(cw_count));

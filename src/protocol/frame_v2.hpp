@@ -996,7 +996,8 @@ inline size_t getFixedFramePayloadCapacity(CodeRate rate) {
  * @return Interleaved coded bits (N × 648 bits)
  */
 Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, int cw_count,
-                       bool use_channel_interleave, size_t bits_per_symbol = 106);
+                       bool use_channel_interleave, size_t bits_per_symbol = 106,
+                       int lifting_z = 27);  // 27 -> n=648 (default), 81 -> n=1944 (file class)
 Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, bool use_channel_interleave, size_t bits_per_symbol = 106);
 
 /**
@@ -1027,7 +1028,8 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate);
 CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate, int cw_count,
                                 bool use_channel_deinterleave, size_t bits_per_symbol = 106,
                                 fec::SoftCombineBuffer* harq_buffer = nullptr,
-                                const fec::SoftCombineBuffer::Key* harq_key = nullptr);
+                                const fec::SoftCombineBuffer::Key* harq_key = nullptr,
+                                int lifting_z = 27);  // 27 -> n=648 (default), 81 -> n=1944 (file class)
 CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, CodeRate rate, bool use_channel_deinterleave, size_t bits_per_symbol = 106);
 
 /**
