@@ -277,6 +277,13 @@ add_executable(test_multiblock_ldpc test_multiblock_ldpc.cpp)
 target_link_libraries(test_multiblock_ldpc PRIVATE ultra_core)
 add_test(NAME MultiblockLDPC COMMAND test_multiblock_ldpc)
 
+# Long-code lift verifier: proves the n=1944 (Z=81) file-class LDPC expands to
+# valid, girth>=6 codewords and round-trips through the production
+# encoder/decoder, while the n=648 (Z=27) default path stays unchanged.
+add_executable(test_ldpc_long_lift test_ldpc_long_lift.cpp)
+target_link_libraries(test_ldpc_long_lift PRIVATE ultra_core)
+add_test(NAME LongLiftLDPC COMMAND test_ldpc_long_lift)
+
 # Selective Repeat ARQ tests
 add_executable(test_selective_repeat test_selective_repeat.cpp)
 target_link_libraries(test_selective_repeat PRIVATE ultra_core)

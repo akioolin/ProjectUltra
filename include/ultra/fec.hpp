@@ -19,7 +19,10 @@ namespace ultra {
  */
 class LDPCEncoder {
 public:
-    explicit LDPCEncoder(CodeRate rate);
+    // lifting_size Z selects the codeword length: Z=27 -> n=648 (default,
+    // production), Z=81 -> n=1944 (long file-class code). The base matrix and
+    // shifts are identical; the larger Z lifts the same girth->=6 structure.
+    explicit LDPCEncoder(CodeRate rate, int lifting_size = 27);
     ~LDPCEncoder();
 
     // Encode data block, returns coded bits
@@ -47,7 +50,8 @@ private:
  */
 class LDPCDecoder {
 public:
-    explicit LDPCDecoder(CodeRate rate);
+    // lifting_size Z must match the encoder (Z=27 -> n=648 default, Z=81 -> n=1944).
+    explicit LDPCDecoder(CodeRate rate, int lifting_size = 27);
     ~LDPCDecoder();
 
     // Decode from hard bits

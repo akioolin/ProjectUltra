@@ -33,27 +33,29 @@ struct CodeParams {
     int num_check_rows;
 };
 
-CodeParams getCodeParams(CodeRate rate) {
+// Dimensions in units of the lifting size Z (block counts of the 24-column
+// base matrix). info_blocks + parity_blocks = 24 for every rate. Multiplying
+// by Z gives the bit counts: Z=27 -> n=648 (default), Z=81 -> n=1944.
+CodeParams getCodeParams(CodeRate rate, int Z) {
+    int info_blk, par_blk;
     switch (rate) {
-        case CodeRate::R1_4:
-            return {162, 486, 486};
-        case CodeRate::R1_2:
-            return {324, 324, 324};
-        case CodeRate::R2_3:
-            return {432, 216, 216};
-        case CodeRate::R3_4:
-            return {486, 162, 162};
-        case CodeRate::R5_6:
-            return {540, 108, 108};
-        default:
-            return {324, 324, 324};
+        case CodeRate::R1_4: info_blk = 6;  par_blk = 18; break;  // {162,486} @Z27
+        case CodeRate::R1_2: info_blk = 12; par_blk = 12; break;  // {324,324} @Z27
+        case CodeRate::R2_3: info_blk = 16; par_blk = 8;  break;  // {432,216} @Z27
+        case CodeRate::R3_4: info_blk = 18; par_blk = 6;  break;  // {486,162} @Z27
+        case CodeRate::R5_6: info_blk = 20; par_blk = 4;  break;  // {540,108} @Z27
+        default:             info_blk = 12; par_blk = 12; break;
     }
+    const int k = info_blk * Z;
+    const int m = par_blk * Z;
+    return {k, m, m};
 }
 
 } // anonymous namespace
 
 struct LDPCEncoder::Impl {
     CodeRate rate;
+    int lifting_size;
     CodeParams params;
 
     // Encoding matrix: for each parity bit i, encoding_rows[i] lists which
@@ -63,7 +65,7 @@ struct LDPCEncoder::Impl {
     // For random codes (R1/4): same as H_data rows (since H = [H_data | I])
     std::vector<std::vector<int>> encoding_rows;
 
-    Impl(CodeRate r) : rate(r), params(getCodeParams(r)) {
+    Impl(CodeRate r, int Z) : rate(r), lifting_size(Z), params(getCodeParams(r, Z)) {
         buildMatrix();
     }
 
@@ -75,7 +77,7 @@ struct LDPCEncoder::Impl {
         const int* base_data = ldpc_802_11n::getBaseData(rate);
         if (base_data) {
             // Use IEEE 802.11n standard code
-            auto expanded = ldpc_802_11n::expand(rate);
+            auto expanded = ldpc_802_11n::expand(rate, lifting_size);
             encoding_rows = std::move(expanded.enc_rows);
             return;
         }
@@ -126,8 +128,8 @@ struct LDPCEncoder::Impl {
     }
 };
 
-LDPCEncoder::LDPCEncoder(CodeRate rate)
-    : impl_(std::make_unique<Impl>(rate)) {}
+LDPCEncoder::LDPCEncoder(CodeRate rate, int lifting_size)
+    : impl_(std::make_unique<Impl>(rate, lifting_size)) {}
 
 LDPCEncoder::~LDPCEncoder() = default;
 
@@ -217,7 +219,7 @@ void LDPCEncoder::setRate(CodeRate rate) {
     // why this matters — same hot-path issue on the encoder side.
     if (impl_->rate == rate) return;
     impl_->rate = rate;
-    impl_->params = getCodeParams(rate);
+    impl_->params = getCodeParams(rate, impl_->lifting_size);
     impl_->buildMatrix();
 }
 
