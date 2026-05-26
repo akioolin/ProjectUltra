@@ -26,6 +26,7 @@
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+#include "ultra/phy_diagnostics.hpp"
 
 namespace ultra {
 namespace gui {
@@ -805,6 +806,14 @@ void StreamingDecoder::decodeCurrentFrame() {
     bool burst_marker = use_burst_interleave_ && connected_ && is_ofdm
                         && mode_ == protocol::WaveformMode::OFDM_CHIRP
                         && waveform_->wasBurstInterleaved();
+    if (ultra::phyDiagnosticsEnabled() && connected_ && is_ofdm
+        && mode_ == protocol::WaveformMode::OFDM_CHIRP) {
+        std::ostringstream oss;
+        oss << "burst_rx_check use_bi=" << (use_burst_interleave_ ? 1 : 0)
+            << " was_bi=" << (waveform_->wasBurstInterleaved() ? 1 : 0)
+            << " marker=" << (burst_marker ? 1 : 0);
+        ultra::phyDiagLine(oss.str());
+    }
     if (burst_marker) {
         const float burst_timing_offset = waveform_->getLastTimingOffsetSamples();
         constexpr float kBurstFrameRetryThreshold = 64.0f;

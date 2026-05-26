@@ -80,6 +80,10 @@ inline void phyDiagLine(const std::string& line) {
     g_phy_diag_stream << "diag_ms=" << diag_ms
                       << " epoch_ms=" << epoch_ms
                       << ' ' << line << '\n';
+    // Flush each line so a hung/SIGALRM-killed run still leaves a complete trace
+    // on disk. Diagnostics are lab-only (gated by phyDiagnosticsEnabled), so the
+    // per-line flush cost never touches a production/real-time path.
+    g_phy_diag_stream.flush();
 }
 
 }  // namespace ultra

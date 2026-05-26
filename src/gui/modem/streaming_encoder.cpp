@@ -12,8 +12,10 @@
 #include "gui/startup_trace.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
+#include "ultra/phy_diagnostics.hpp"
 #include <algorithm>
 #include <cmath>
+#include <sstream>
 
 namespace ultra {
 namespace gui {
@@ -513,6 +515,15 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
             LOG_MODEM(INFO, "[%s] Burst interleaved group %zu: frames %zu-%zu",
                       log_prefix_.c_str(), g, base, base + BURST_GROUP_SIZE - 1);
         }
+    }
+
+    if (ultra::phyDiagnosticsEnabled()) {
+        std::ostringstream oss;
+        oss << "burst_tx use_bi=" << (use_burst_interleave_ ? 1 : 0)
+            << " group_size=" << BURST_GROUP_SIZE
+            << " in_frames=" << encoded_frames.size()
+            << " groups_formed=" << interleaved_groups;
+        ultra::phyDiagLine(oss.str());
     }
 
     // Phase 3: Modulate with preambles

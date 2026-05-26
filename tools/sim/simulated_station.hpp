@@ -1278,7 +1278,8 @@ private:
         return connected_.load() &&
                negotiated_waveform_ == WaveformMode::OFDM_CHIRP &&
                !no_burst_interleave_ &&
-               ((data_modulation_ == Modulation::QAM16 &&
+               (fileRegimeBurstEnabled() ||
+                (data_modulation_ == Modulation::QAM16 &&
                  channel_type_ != ChannelType::AWGN &&
                  connection_policy::isBurstInterleavedOFDMMode(data_modulation_,
                                                                data_code_rate_)) ||
@@ -1295,13 +1296,40 @@ private:
     // file transfer (and at stage 0) it falls back to the recommended spacing,
     // so the default path is byte-identical to before.
     uint32_t dataPilotSpacingForFileProfile() const {
-        if (file_profile_stage_ >= 1 &&
+        // Pilot thinning is the stage-2 knob: it only becomes safe once the
+        // fade-diversity keystone (burst interleave, stage 1) is present, so it
+        // is gated separately. Stage 1 keeps the recommended dense pilots and
+        // only flips burst interleaving on.
+        if (file_profile_stage_ >= 2 &&
             negotiated_waveform_ == WaveformMode::OFDM_CHIRP &&
             isFileTransferInProgress()) {
             return 10;  // file regime: 6 scattered pilots, 53 data carriers
         }
         return ofdm_link_adaptation::recommendedPilotSpacing(data_modulation_,
                                                              data_code_rate_);
+    }
+
+    // File-transfer regime engages burst interleaving for the coherent QPSK
+    // file rung (R3/4). This bypasses the differential-only gate in
+    // shouldEnableBurstInterleaveForConnectedMode(): coherent QPSK is exactly
+    // the rung we want fade diversity on, and the burst path carries a per-frame
+    // light LTS anchor (getMinSamplesForCWCount includes the 2 training symbols)
+    // so the coherent demod re-estimates the channel each physical frame.
+    bool fileRegimeBurstEnabled() const {
+        // Read the CACHED file-transfer state, not isFileTransferInProgress():
+        // syncBurstInterleaveForConnectedMode() (this predicate's caller) runs
+        // inside setConnected()/setDataMode(), which are invoked from
+        // ProtocolEngine connect/mode callbacks that already hold the engine
+        // mutex_. isFileTransferInProgress() re-locks that (non-recursive) mutex
+        // -> deadlock at CONNECT. file_profile_active_cached_ is refreshed
+        // lock-free in maybeSyncFileProfileOnTransition() after protocol_.tick()
+        // returns, so it is the safe snapshot to consult here.
+        return file_profile_stage_ >= 1 &&
+               connected_.load() &&
+               negotiated_waveform_ == WaveformMode::OFDM_CHIRP &&
+               data_modulation_ == Modulation::QPSK &&
+               !no_burst_interleave_ &&
+               file_profile_active_cached_;
     }
 
     // Apply / revert the file-class PHY regime when the file-transfer state
@@ -1314,17 +1342,20 @@ private:
             negotiated_waveform_ != WaveformMode::OFDM_CHIRP) {
             return;
         }
+        // Pilot spacing (stage 2+). Only re-push the OFDM config when it changes.
         const uint32_t want_spacing = dataPilotSpacingForFileProfile();
-        if (ofdm_config_.pilot_spacing == want_spacing) {
-            return;  // nothing to do (stage 0, or already in the right regime)
+        if (ofdm_config_.pilot_spacing != want_spacing) {
+            ofdm_config_.pilot_spacing = want_spacing;
+            if (encoder_) encoder_->setOFDMConfig(ofdm_config_);
+            if (decoder_) decoder_->setOFDMConfig(ofdm_config_);
+            LOG_MODEM(INFO,
+                      "[%s] File profile: pilot_spacing -> %u (file_xfer=%d stage=%d)",
+                      callsign_.c_str(), want_spacing,
+                      isFileTransferInProgress() ? 1 : 0, file_profile_stage_);
         }
-        ofdm_config_.pilot_spacing = want_spacing;
-        if (encoder_) encoder_->setOFDMConfig(ofdm_config_);
-        if (decoder_) decoder_->setOFDMConfig(ofdm_config_);
-        LOG_MODEM(INFO,
-                  "[%s] File profile: pilot_spacing -> %u (file_xfer=%d stage=%d)",
-                  callsign_.c_str(), want_spacing,
-                  isFileTransferInProgress() ? 1 : 0, file_profile_stage_);
+        // Burst interleaving (stage 1+) flips with the file-transfer regime even
+        // when the pilot map is unchanged, so it must run unconditionally here.
+        syncBurstInterleaveForConnectedMode();
     }
 
     void syncBurstInterleaveForConnectedMode() {
@@ -1337,6 +1368,17 @@ private:
             LOG_MODEM(INFO, "[%s] Burst interleaving %s (group=%d)",
                       callsign_.c_str(), enable ? "ENABLED" : "DISABLED",
                       burst_group_size_);
+            if (ultra::phyDiagnosticsEnabled()) {
+                std::ostringstream oss;
+                oss << "burst_flip station=" << callsign_
+                    << " enable=" << (enable ? 1 : 0)
+                    << " wf=" << static_cast<int>(negotiated_waveform_)
+                    << " mod=" << static_cast<int>(data_modulation_)
+                    << " connected=" << (connected_.load() ? 1 : 0)
+                    << " file_xfer=" << (isFileTransferInProgress() ? 1 : 0)
+                    << " group=" << burst_group_size_;
+                ultra::phyDiagLine(oss.str());
+            }
         }
     }
 
