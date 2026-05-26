@@ -125,6 +125,9 @@ inline constexpr std::array<OFDMCodeRateDescriptor, 4> kOFDMCodeRateDescriptors{
         1,
         {{{kQAM16AwgnFadingMax, kQAM16AwgnR34SnrFloorDb}}},
         1,
+        // QPSK R3/4 has NO Good gate: measured 2026-05-26 that R3/4's thin (25%) FEC
+        // hard-fails Good@20 fade seeds (64-145 CWFAIL, 0 bytes) even WITH the anti-poison
+        // fix — R2/3's 50% FEC survives the same fades. R3/4 not viable at this SNR.
         {},
         0,
     },

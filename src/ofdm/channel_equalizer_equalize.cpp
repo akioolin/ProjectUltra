@@ -79,6 +79,29 @@ bool useSoftGrayZoneCsi(Modulation mod) {
            mod == Modulation::QAM64;
 }
 
+// Relative-depth anti-poison (2026-05-26): the global-noise-var gray-zone (above) never
+// fires on a deep frequency-selective null when the AVERAGE SNR is high — a carrier 27 dB
+// below the frame mean still has |H|² >> global σ², so it reads "clean" and emits a
+// confident-WRONG LLR that poisons the LDPC (measured: QPSK R3/4 fade seeds, |llr|~14 +
+// unsat 25-51). Fix: reference the FRAME's mean |H|², not the global noise floor. A carrier
+// whose |H|² is a fraction `rel` of the frame mean has a ~1/rel less trustworthy channel
+// estimate, so inflate its LLR noise var ~proportionally. On a frequency-FLAT channel
+// (AWGN or flat fade) every rel≈1 → no inflation → no AWGN regression; it acts ONLY on
+// frequency-selective relative nulls, which is exactly the poison source.
+float relativeFadeNoiseInflation(float h_power, float frame_mean_h_power) {
+    if (!std::isfinite(h_power) || !std::isfinite(frame_mean_h_power) ||
+        frame_mean_h_power <= 0.0f || h_power < 0.0f) {
+        return 1.0f;
+    }
+    constexpr float kRelFadeOnset = 0.25f;     // start acting ~6 dB below frame mean
+    constexpr float kMaxRelInflation = 30.0f;  // cap the down-weight (~15 dB)
+    const float rel = h_power / frame_mean_h_power;  // 1.0 = average carrier
+    if (rel >= kRelFadeOnset) {
+        return 1.0f;
+    }
+    return std::clamp(kRelFadeOnset / std::max(rel, 1.0e-6f), 1.0f, kMaxRelInflation);
+}
+
 float softGrayZoneNoiseInflation(float h_power, float noise_var) {
     if (!std::isfinite(h_power) || !std::isfinite(noise_var) ||
         h_power < 0.0f || noise_var <= MIN_CARRIER_NOISE_VAR) {
@@ -444,6 +467,23 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
     const float reliability_noise_var = std::max(noise_variance, MIN_CARRIER_NOISE_VAR);
     const bool soft_gray_zone_csi = useSoftGrayZoneCsi(mod);
 
+    // Relative-depth anti-poison: reference the frame's mean |H|² so deep
+    // frequency-selective nulls (which the global-noise-var gates miss at high avg SNR)
+    // get their LLR confidence cut. Scoped to QPSK/QAM8 — the rungs that had NO gray-zone
+    // weighting. QAM16+ already have softGrayZoneNoiseInflation; stacking the relative one
+    // on top double-counted and regressed AWGN@30 QAM16 (estimation noise on a flat channel
+    // tripped the relative inflation and wrongly down-weighted good carriers). Leave QAM16+
+    // on their existing path; unify into one reliability model in the deferred refactor.
+    const bool apply_relative_csi =
+        (mod == Modulation::QPSK || mod == Modulation::QAM8);
+    float frame_mean_h_power = 0.0f;
+    if (apply_relative_csi && !data_carrier_indices.empty()) {
+        for (int idx : data_carrier_indices) {
+            frame_mean_h_power += std::norm(channel_estimate[idx]);
+        }
+        frame_mean_h_power /= static_cast<float>(data_carrier_indices.size());
+    }
+
     for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
         int idx = data_carrier_indices[i];
         Complex received = freq_domain[idx];
@@ -495,6 +535,12 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
         float h_power = std::norm(channel_estimate[idx]);
         if (soft_gray_zone_csi) {
             carrier_noise_var[i] *= softGrayZoneNoiseInflation(h_power, reliability_noise_var);
+            carrier_noise_var[i] =
+                std::max(MIN_CARRIER_NOISE_VAR,
+                         std::min(MAX_CARRIER_NOISE_VAR, carrier_noise_var[i]));
+        }
+        if (apply_relative_csi && frame_mean_h_power > 0.0f) {
+            carrier_noise_var[i] *= relativeFadeNoiseInflation(h_power, frame_mean_h_power);
             carrier_noise_var[i] =
                 std::max(MIN_CARRIER_NOISE_VAR,
                          std::min(MAX_CARRIER_NOISE_VAR, carrier_noise_var[i]));

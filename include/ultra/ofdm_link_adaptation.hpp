@@ -33,6 +33,14 @@ inline int recommendedPilotSpacing(Modulation mod, CodeRate rate) {
                     return 5;
                 }
                 return 8;
+            // CARRIER-RECOVERY ATTEMPT (2026-05-26) REVERTED: widening R2/3 to spacing 10
+            // (47->53 data, +9% clean goodput) was NET-NEGATIVE multi-seed — the worst
+            // Good fade seeds broke (seed5: 40 CWFAIL, 630 bps, 2 downgrades; mean 1224 <
+            // spacing-5's 1262). PROVEN: pilot density is gated by channel-estimation
+            // quality, not just the delay-spread Nyquist limit — sparser pilots can't
+            // track the deepest frequency-selective nulls with the current Wiener. Carrier
+            // recovery requires the fade-diversity keystone (longer interleaved FEC +
+            // better estimation) FIRST; then sparser pilots become safe. Back to 5.
             case CodeRate::R2_3:
             case CodeRate::R1_2:
             case CodeRate::R1_4:

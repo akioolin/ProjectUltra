@@ -214,6 +214,27 @@ NEXT (pending user fork): channel-estimation work (#123: scattered pilots + 2-D 
 the empirically-proven keystone — OR bank cw=8 and reassess whether 3000 targets a slightly
 higher Good SNR than 19.6 dB.
 
+## ROOT CAUSE FOUND: QPSK deep-null carriers POISON the LDPC (anti-poison gated to QAM16+ only) [2026-05-26]
+Data-grounded via the QPSK R3/4 seed2 failing-frame logs (NOT a guess):
+- per-carrier |H| spread min 0.93 → median 21.6 → max 51.8 = deep ~27 dB frequency-selective
+  nulls present, while avg in_band_snr is fine (~20 dB) and fading_index 0.38-0.62.
+- failing CWs show |llr|=mean ~14 (CONFIDENT), unsat 25-51 (many checks fail), llr_avg biased
+  ~12 → the decoder is fed confident-WRONG bits = POISONING, NOT clean erasure (which would be
+  low |llr|). So it is NOT purely fundamental fade — it is fixable.
+MECHANISM (channel_equalizer_equalize.cpp): per-carrier reliability = MMSE noise var
+σ²/(|H|²+σ²) + erasure (h_power < GAMMA·noise_var) + softGrayZoneNoiseInflation — but ALL
+reference the GLOBAL noise_variance, and `useSoftGrayZoneCsi(mod)` returns true ONLY for
+QAM16/32/64. QPSK and QAM8 get NO gray-zone down-weighting. At avg SNR 20 dB a deep-null
+carrier (|H|=0.93, |H|²=0.86 ≫ global σ²≈0.01, gamma≈86) reads as "clean" → full-confidence
+wrong LLR → poison. R3/4 thin FEC dies on it (145 CWFAIL); R2/3 sags (2/5 seeds → ~600).
+PRINCIPLED FIX (#124): per-carrier reliability must reference the RELATIVE fade depth (|H|² vs
+the frame's mean |H|²), not the global noise floor — a carrier X dB below the frame average has
+a ~X dB less trustworthy estimate, so inflate its LLR noise var ~proportionally. Enable for
+QPSK + QAM8 (QAM16 keeps its version). Expected: stops deep nulls poisoning → helps R2/3 fade
+seeds AND makes R3/4 survivable. GATE: multi-seed Good@20 (R2/3 no-regress on clean seeds +
+improve the 2/5 fade seeds) + AWGN no-regress; revert if it regresses (CSI tweaks have regressed
+before — rounds 10-21 — so MEASURE, don't assume). This is the empirically-located keystone.
+
 ## Workflow
 Iterate: hypothesis (from genie data) → fix → build → GUI multi-seed → measure → keep/revert,
 commit wins branch-only. Hard PHY rounds → Codex collaboration (mandated counter-check).
