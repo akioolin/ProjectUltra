@@ -133,6 +133,65 @@ the RELIABILITY/channel-est lever (#3), NOT thrash.
 NET re-rank of REAL throughput levers: sack_delay ACK-hold trim (dead-air, real, untested) +
 fade reliability (channel-est, the fade seeds) + 8PSK (ceiling). Thrash is OFF the list.
 
+## 8PSK RUNG SWAP — measured, REVERTED, and an honest correction [2026-05-26, in-house]
+Put QAM8 (coherent 8PSK) on the Good workhorse rung in `recommendDataMode` and ran the
+faithful GUI (Good@20, seed1, 10 KB). Result: **8PSK delivered the file CLEAN** (CRC ok,
+0 CW-fail, 8-point ring) but the auto-path selected **R1/2, not R2/3** — because measured
+SNR 19.6 < the R2/3 floor (20.0). 8PSK R1/2 = 1.5 info-bits/sym ≈ QPSK R2/3's 1.33, so this
+was NOT a valid "faster modulation" test. Goodput **900 bps (vs 980 QPSK R2/3)** — a slight
+loss. `RESULT=FAIL` was a HARNESS artifact (`process_exit_before_pass`: EXIT_AFTER=271s killed
+the proc before the PASS sentinel; the file delivered at t≈160s). The reported duty 24.3% is
+DILUTED by ~110s trailing idle after the transfer — do NOT use it as a duty comparison.
+CORRECTION (I overstated): this run did NOT "prove overhead-bound" or "halve the duty." It only
+showed 8PSK works + that at Good@20 the channel sits right at the R2/3 floor and often picks
+R1/2. REVERTED the swap (R1/2 8PSK is a non-win); baseline binary restored; origin still 65acbde.
+
+## STRATEGIC GROUND TRUTH — 3000 needs BOTH levers; efficiency is the dominant one
+The overhead-bound conclusion stands on the EXISTING baseline, not the 8PSK run: a perfectly
+clean QPSK R2/3 seed = 980 bps = **37% of its 2611 raw ceiling**. Math:
+- 8PSK R2/3 (raw 3917) at today's 37% efficiency → ~**1450 bps**. Helps, FAR short of 3086.
+- Leader's 3086 at Good@20 implies **~80% efficiency**.
+- **=> 3000 requires a faster rung (8PSK+) AND ~2× efficiency. Neither alone suffices, and
+  efficiency (~2.1×) is the bigger multiplier AND applies to every rung incl. today's QPSK.**
+So the dominant lever is the dead-air. MECHANISM = half-duplex burst amortization: each cycle
+pays fixed overhead (T/R turnaround + ACK airtime + sack padding), amortized over the burst;
+bigger clean-channel burst → higher duty. CODE-VERIFIED: window_size=4 (NOT 8 as prior doc
+text said), ack_timeout_ms=8000, sack_delay default 2000 but runtime-sized to burst-complete
+(~7.6s) via connection_policy::wideOFDMSlidingSackDelayMs (connection.cpp:3031). CONSTRAINT:
+feedback_arq_window_history — naive window=8 / hold-all-ACKs ALREADY FAILED (fading); must
+understand that failure mode before re-touching the window.
+
+## NEXT DISCIPLINED STEP (do NOT bump constants blind): measure the airtime breakdown
+Before any ARQ change, instrument/measure on a CLEAN seed where the ~55% non-TX time actually
+goes: TX-on vs receiving-the-ACK vs T/R turnaround vs pure idle (sack-hold padding beyond
+decode). The harness already has TX_SECONDS/duty; add the RX-on + idle decomposition. Verify
+(don't trust) the "sack_delay ACK-hold" attribution. THEN: if pure idle/sack-padding dominates
+=> trim it within the half-duplex turn (low risk). If it's the per-cycle fixed overhead =>
+channel-adaptive burst sizing (bigger clean-channel burst) AFTER root-causing the window=8
+fading failure. All gates unchanged (faithful GUI multi-seed, AWGN no-regress, branch-only).
+
+## WIN: cw=8 restored on Good via honest channel-Doppler CW cap [2026-05-26, +38%]
+ROOT CAUSE (user-spotted): overnight commit a1c9c34 "bound coherent frames to Good-channel
+coherence time" capped QPSK R2/3 cw=8→cw=4 on fading, justified by kGoodHFDesignDopplerHz=0.5
+Hz → 846 ms Clarke coherence. But 0.5 Hz is the ITU-R F.1487 *Moderate* Doppler; the real Good
+channel (models.cpp itu_r_f1487::good) is 0.1 Hz → Tc≈4230 ms, inside which a cw=8 frame
+(~1392 ms) fits easily. The 72-CWFAIL a1c9c34 cited at cw=8 was a confounded pre-fix baseline,
+NOT real — it did not reproduce on current HEAD.
+FIX (principled, not the global-constant hack): recommendCWCountForChannel now derives its
+design Doppler from the measured fading_index via designDopplerForFadingIndex() — Good (<0.65)
+→ 0.1 Hz → cw=8; Moderate (<1.10) → 0.5 Hz → cw=4 (protective cap kept); Poor → 1.0 Hz. The
+doppler_hz param is now a -1 sentinel meaning "derive from channel". test_connection_policy
+corrected (846→4230 ms Good, added Moderate cw=4 cap assertion) → ConnectionPolicy 197/197 PASS.
+PROOF (faithful GUI, Good@20 QPSK R2/3, cw=8, 6 seeds across two sweeps): 6/6 PASS, all cw=8,
+goodput ~1350-1360 bps each (+38% vs the cw=4 980 baseline). One seed saw 8 CWFAIL from a single
+deep fade, ARQ-recovered (1 retx) — expected cw=8 fade exposure, net positive (all delivered).
+NEW Good@20 baseline: ~1355 bps = ~52% of the QPSK R2/3 raw ceiling (2611), up from 37%.
+NO-REGRESS STATUS: Moderate provably unchanged (fading_index>0.65 → 0.5 Hz → cw=4 = old global
+behavior; CONNECT is MC-DPSK, untouched). AWGN<25 dB now correctly gets cw=8 (was cw=4 — the old
+isNearAwgnOFDM snr≥25 gate let it fall to the 846 ms cap); AWGN no-regress + full ctest PENDING.
+REMAINING Good gap to 3000: QPSK R2/3 ceiling is 2611 < 3000, so Good@20→3000 needs BOTH (a)
+dead-air efficiency (52%→higher) AND (b) a faster rung (8PSK, now cw=8-enabled, raw 3917).
+
 ## Workflow
 Iterate: hypothesis (from genie data) → fix → build → GUI multi-seed → measure → keep/revert,
 commit wins branch-only. Hard PHY rounds → Codex collaboration (mandated counter-check).

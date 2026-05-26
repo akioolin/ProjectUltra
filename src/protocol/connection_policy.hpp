@@ -30,7 +30,28 @@ inline constexpr uint32_t kWideOFDMFullAnchorExtraMs =
 inline constexpr uint32_t kWideOFDMShortReanchorDefaultMs = 100;
 inline constexpr uint32_t kWideOFDMShortReanchorMinMs = 100;
 inline constexpr uint32_t kWideOFDMShortReanchorMaxMs = 300;
-inline constexpr float kGoodHFDesignDopplerHz = 0.5f;
+// ITU-R F.1487 design Doppler spreads, keyed to the channel class the link is
+// actually operating on. a1c9c34 had set the "Good" constant to 0.5 Hz — but 0.5 Hz
+// is the *Moderate* value (itu_r_f1487::moderate, models.cpp); the real Good channel
+// (itu_r_f1487::good) is 0.1 Hz. That mislabel forced QPSK R2/3 cw=8→cw=4 on Good via
+// a bogus 846ms coherence cap, when a cw=8 frame (1392ms) fits the TRUE Good coherence
+// (Tc≈4230ms) easily. Verified 2026-05-26: cw=8 QPSK R2/3 Good@20 = 3/3 PASS, 0 CWFAIL,
+// goodput ~1355 bps (+38% vs cw=4 980). The CW cap now derives its Doppler from the
+// measured fading_index (designDopplerForFadingIndex) so Good gets cw=8 while Moderate
+// keeps its protective cw=4 cap.
+inline constexpr float kGoodHFDesignDopplerHz = 0.1f;
+inline constexpr float kModerateHFDesignDopplerHz = 0.5f;
+inline constexpr float kPoorHFDesignDopplerHz = 1.0f;
+
+// Map the measured combined fading_index (same scale as waveform_selection.hpp:
+// <0.15 AWGN, <0.65 Good, <1.10 Moderate, else Poor) to the channel class's design
+// Doppler, so the coherence-time CW cap reflects the channel actually in use rather
+// than a fixed worst-case constant.
+inline float designDopplerForFadingIndex(float fading_index) {
+    if (fading_index < 0.65f) return kGoodHFDesignDopplerHz;
+    if (fading_index < 1.10f) return kModerateHFDesignDopplerHz;
+    return kPoorHFDesignDopplerHz;
+}
 inline constexpr float kClarkeCoherenceNumerator = 0.423f;
 inline constexpr uint32_t kNarrowOFDMSymbolSamples = 2240;
 inline constexpr uint32_t kNarrowOFDMCarriers = 21;
@@ -475,7 +496,7 @@ inline int recommendCWCountForChannel(Modulation mod,
                                       WaveformMode waveform,
                                       float fading_index,
                                       float snr_db,
-                                      float doppler_hz = kGoodHFDesignDopplerHz) {
+                                      float doppler_hz = -1.0f) {
     const int baseline = recommendCWCount(mod, rate, waveform);
     if (waveform != WaveformMode::OFDM_CHIRP ||
         !ofdm_link_adaptation::isCoherentModulation(mod) ||
@@ -490,7 +511,12 @@ inline int recommendCWCountForChannel(Modulation mod,
         return baseline;
     }
 
-    const uint32_t coherence_ms = coherenceTimeMsForDoppler(doppler_hz);
+    // Derive the design Doppler from the measured channel class (fading_index)
+    // unless a caller overrides it explicitly (>0). Good→0.1 Hz keeps cw=8;
+    // Moderate→0.5 Hz / Poor→1.0 Hz keep the protective shorter-frame cap.
+    const float effective_doppler =
+        (doppler_hz > 0.0f) ? doppler_hz : designDopplerForFadingIndex(fading_index);
+    const uint32_t coherence_ms = coherenceTimeMsForDoppler(effective_doppler);
     int selected = v2::kDefaultFixedFrameCodewords;
     for (int candidate = baseline; candidate >= v2::kDefaultFixedFrameCodewords; --candidate) {
         const auto timing = wideOFDMFrameTiming(mod, rate, candidate);

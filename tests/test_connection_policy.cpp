@@ -527,11 +527,22 @@ void test_recommend_cw_count() {
               v2::kDefaultFixedFrameCodewords,
           "DBPSK does not alter OFDM CW policy");
 
-    CHECK(coherenceTimeMsForDoppler(kGoodHFDesignDopplerHz) == 846,
-          "Good-HF design Doppler gives ~846 ms Clarke coherence time");
+    // ITU-R F.1487 Good = 0.1 Hz Doppler -> Clarke Tc = 0.423/fD ~= 4230 ms.
+    // (a1c9c34 mislabeled the 0.5 Hz Moderate value as "Good"; corrected 2026-05-26.)
+    CHECK(coherenceTimeMsForDoppler(kGoodHFDesignDopplerHz) == 4230,
+          "Good-HF design Doppler (0.1 Hz) gives ~4230 ms Clarke coherence time");
+    CHECK(coherenceTimeMsForDoppler(kModerateHFDesignDopplerHz) == 846,
+          "Moderate-HF design Doppler (0.5 Hz) gives ~846 ms Clarke coherence time");
+    // Good coherent QPSK R2/3 (fading_index ~0.50): a cw=8 frame (~1392 ms) fits the
+    // ~4230 ms Good coherence, so it keeps the full 8-CW throughput geometry.
     CHECK(recommendCWCountForChannel(Modulation::QPSK, CodeRate::R2_3,
-                                     WaveformMode::OFDM_CHIRP, 0.50f, 20.0f) == 4,
-          "Good coherent QPSK R2/3 caps frame length inside coherence time");
+                                     WaveformMode::OFDM_CHIRP, 0.50f, 20.0f) == 8,
+          "Good coherent QPSK R2/3 keeps cw=8 inside the true Good coherence time");
+    // Moderate (fading_index ~0.90): 0.5 Hz -> 846 ms coherence caps cw=8 (~1392 ms)
+    // down to cw=4 (720 ms) so a single fade event cannot take the whole frame.
+    CHECK(recommendCWCountForChannel(Modulation::QPSK, CodeRate::R2_3,
+                                     WaveformMode::OFDM_CHIRP, 0.90f, 20.0f) == 4,
+          "Moderate coherent QPSK R2/3 caps frame length inside coherence time");
     CHECK(recommendCWCountForChannel(Modulation::QPSK, CodeRate::R2_3,
                                      WaveformMode::OFDM_CHIRP, 0.0f, 27.0f) == 8,
           "near-AWGN coherent QPSK keeps the throughput CW count");
