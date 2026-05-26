@@ -284,6 +284,13 @@ add_executable(test_ldpc_long_lift test_ldpc_long_lift.cpp)
 target_link_libraries(test_ldpc_long_lift PRIVATE ultra_core)
 add_test(NAME LongLiftLDPC COMMAND test_ldpc_long_lift)
 
+# Traffic-class PHY profile selector: locks the FILE vs CHAT vs CONTROL gating
+# (file segments -> aggressive long-LDPC/deep-interleave/thin-pilot profile;
+# DATA chat + ACK/control stay lean) used to reach the Good@20 file throughput.
+add_executable(test_traffic_profile test_traffic_profile.cpp)
+target_link_libraries(test_traffic_profile PRIVATE ultra_core)
+add_test(NAME TrafficProfile COMMAND test_traffic_profile)
+
 # Selective Repeat ARQ tests
 add_executable(test_selective_repeat test_selective_repeat.cpp)
 target_link_libraries(test_selective_repeat PRIVATE ultra_core)
