@@ -797,6 +797,80 @@ void test_adaptive_cooldown_blocks_cascaded_downgrade() {
           "severe downgrade can queue after the settle dwell expires");
 }
 
+void test_adaptive_nonsevere_pressure_does_not_outvote_faster_same_constellation_csi() {
+    TempPayloadFile payload("ultra_adapt_csi_guard", 5000);
+    CHECK(payload.dir.valid(), "temp dir");
+    CHECK(!payload.path.empty(), "large test file");
+
+    Connection c;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R1_2, 20.6f, 0.16f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::startFile(c, payload.path);
+    ConnectionAdaptiveTestAccess::createRetransmissionPressure(
+        c, ConnectionAdaptiveTestAccess::arqWindow(c) / 2);
+    ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
+    ConnectionAdaptiveTestAccess::advanceRetransmissionPressure(c);
+    ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
+
+    CHECK(!ConnectionAdaptiveTestAccess::adaptiveTargetPending(c),
+          "non-severe ARQ holes must not step below QPSK R1/2 when CSI still supports QPSK R2/3");
+    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
+          "non-severe ARQ holes must not emit a deeper MODE_CHANGE against same-constellation CSI");
+
+    Connection severe;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        severe, CodeRate::R1_2, 20.6f, 0.16f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::startFile(severe, payload.path);
+    ConnectionAdaptiveTestAccess::createRetransmissionPressure(
+        severe, ConnectionAdaptiveTestAccess::arqWindow(severe));
+    ConnectionAdaptiveTestAccess::updateAdaptive(severe, 1000);
+
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetPending(severe) ||
+              ConnectionAdaptiveTestAccess::modeChangePending(severe),
+          "full-window ARQ failure should still override faster same-constellation CSI");
+}
+
+void test_adaptive_nonsevere_pressure_preserves_coherent_same_order_step() {
+    TempPayloadFile payload("ultra_adapt_same_order_guard", 5000);
+    CHECK(payload.dir.valid(), "temp dir");
+    CHECK(!payload.path.empty(), "large test file");
+
+    Connection c;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 19.7f, 0.21f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::startFile(c, payload.path);
+    ConnectionAdaptiveTestAccess::createRetransmissionPressure(
+        c, ConnectionAdaptiveTestAccess::arqWindow(c) / 2);
+    ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
+    ConnectionAdaptiveTestAccess::advanceRetransmissionPressure(c);
+    ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
+
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetPending(c) ||
+              ConnectionAdaptiveTestAccess::modeChangePending(c),
+          "non-severe pressure may still step down FEC when CSI asks for more redundancy");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetModulation(c) == Modulation::QPSK ||
+              ConnectionAdaptiveTestAccess::pendingModulation(c) == Modulation::QPSK,
+          "same-order QPSK->DQPSK recommendation must not replace the coherent code-rate step");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(c) == CodeRate::R1_2 ||
+              ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R1_2,
+          "non-severe pressure should step only one descriptor rate down");
+
+    Connection hold;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        hold, CodeRate::R1_2, 19.7f, 0.21f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::startFile(hold, payload.path);
+    ConnectionAdaptiveTestAccess::createRetransmissionPressure(
+        hold, ConnectionAdaptiveTestAccess::arqWindow(hold) / 2);
+    ConnectionAdaptiveTestAccess::updateAdaptive(hold, 1000);
+    ConnectionAdaptiveTestAccess::advanceRetransmissionPressure(hold);
+    ConnectionAdaptiveTestAccess::updateAdaptive(hold, 1000);
+
+    CHECK(!ConnectionAdaptiveTestAccess::adaptiveTargetPending(hold),
+          "same-order modulation-regime advice without a lower code rate needs severe ARQ evidence");
+    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(hold),
+          "same-order modulation-regime advice must not emit a non-severe coherent fallback");
+}
+
 void test_adaptive_downgrade_waits_when_more_than_half_full() {
     TempPayloadFile payload("ultra_adapt_down", 5000);
     CHECK(payload.dir.valid(), "temp dir");
@@ -1130,6 +1204,8 @@ int main() {
     test_adaptive_qam16_r14_is_ladder_floor();
     test_adaptive_full_window_timeout_downgrades_immediately();
     test_adaptive_cooldown_blocks_cascaded_downgrade();
+    test_adaptive_nonsevere_pressure_does_not_outvote_faster_same_constellation_csi();
+    test_adaptive_nonsevere_pressure_preserves_coherent_same_order_step();
     test_adaptive_downgrade_waits_when_more_than_half_full();
     test_adaptive_downgrade_fires_when_window_half_full();
     test_adaptive_modulation_downgrade_waits_for_empty_window();

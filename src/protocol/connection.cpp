@@ -298,6 +298,28 @@ bool downgradeRequiresSeverePressure(Modulation current_mod,
            target.modulation == Modulation::QPSK &&
            target.rate == current_rate;
 }
+
+bool csiSupportsFasterSameConstellation(Modulation recommended_mod,
+                                        CodeRate recommended_rate,
+                                        Modulation current_mod,
+                                        CodeRate current_rate) {
+    return recommended_mod == current_mod &&
+           isFasterRate(recommended_rate, current_rate);
+}
+
+bool isSameConstellationOrderChange(Modulation recommended_mod,
+                                    Modulation current_mod) {
+    return recommended_mod != current_mod &&
+           getBitsPerSymbol(recommended_mod) == getBitsPerSymbol(current_mod);
+}
+
+bool csiOnlyRequestsSameOrderRegimeChange(Modulation recommended_mod,
+                                          CodeRate recommended_rate,
+                                          Modulation current_mod,
+                                          CodeRate current_rate) {
+    return isSameConstellationOrderChange(recommended_mod, current_mod) &&
+           !isMoreRobustRate(recommended_rate, current_rate);
+}
 }
 
 const char* connectionStateToString(ConnectionState state) {
@@ -2250,7 +2272,12 @@ void Connection::updateAdaptiveModeController(uint32_t elapsed_ms) {
         canDowngradeMode(data_modulation_, data_code_rate_)) {
         AdaptiveMode target = oneStepMoreRobustMode(data_modulation_, data_code_rate_);
         const bool severe_required =
-            downgradeRequiresSeverePressure(data_modulation_, data_code_rate_, target);
+            downgradeRequiresSeverePressure(data_modulation_, data_code_rate_, target) ||
+            csiSupportsFasterSameConstellation(recommended_mod, recommended_rate,
+                                               data_modulation_, data_code_rate_) ||
+            (target.modulation == data_modulation_ &&
+             csiOnlyRequestsSameOrderRegimeChange(recommended_mod, recommended_rate,
+                                                  data_modulation_, data_code_rate_));
         const bool downgrade_pressure_ready =
             retry_pressure.severe ||
             (!severe_required &&
@@ -2258,9 +2285,11 @@ void Connection::updateAdaptiveModeController(uint32_t elapsed_ms) {
         if (!downgrade_pressure_ready) {
             if (severe_required) {
                 LOG_MODEM(INFO,
-                          "Connection: Holding %s %s despite retry pressure (severe=%d, pressure_windows=%d); waiting for severe evidence before same-rate coherent fallback",
+                          "Connection: Holding %s %s despite retry pressure (recommended=%s %s, severe=%d, pressure_windows=%d); waiting for severe evidence before overriding CSI",
                           modulationToString(data_modulation_),
                           codeRateToString(data_code_rate_),
+                          modulationToString(recommended_mod),
+                          codeRateToString(recommended_rate),
                           retry_pressure.severe ? 1 : 0,
                           adaptive_pressure_windows_);
             }
@@ -2276,7 +2305,13 @@ void Connection::updateAdaptiveModeController(uint32_t elapsed_ms) {
                 data_modulation_ == Modulation::D8PSK &&
                 target.modulation == data_modulation_ &&
                 recommended_target.modulation != data_modulation_;
+            const bool preserve_same_order_code_rate_step =
+                !retry_pressure.severe &&
+                target.modulation == data_modulation_ &&
+                isSameConstellationOrderChange(recommended_target.modulation,
+                                               data_modulation_);
             if (!preserve_d8psk_rate_ladder &&
+                !preserve_same_order_code_rate_step &&
                 !isMoreRobustMode(recommended_target.modulation, recommended_target.rate,
                                   target.modulation, target.rate)) {
                 target = recommended_target;
