@@ -481,6 +481,7 @@ private:
     uint32_t dataTurnControlGuardMs() const;
     uint32_t turnRequestHoldoffAfterDataMs() const;
     uint32_t turnRequestRetransmitMs() const;
+    uint32_t turnRequestAckEmbeddedRetransmitMs() const;
     uint32_t fileCancelTxGuardMs() const;
     uint32_t fileCancelConfirmDataGuardMs() const;
     uint32_t connectControlFrameAirtimeMs() const;
@@ -599,6 +600,7 @@ private:
     bool dataTurnFairBudgetMet() const;
     bool shouldPauseLocalDataForPeerRequest() const;
     bool shouldRequestDataTurnOnAck() const;
+    bool noteTurnRequestOnAckIfNeeded();
     void resetDataTurnFairness();
     void noteDataTurnPayloadStarted(size_t payload_bytes);
     void sendTurnRequestIfNeeded();

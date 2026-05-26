@@ -346,7 +346,7 @@ Connection::Connection(const ConnectionConfig& config)
         handleArqFrameFailed(seq);
     });
     arq_.setTurnRequestCallback([this]() {
-        return shouldRequestDataTurnOnAck();
+        return noteTurnRequestOnAckIfNeeded();
     });
 
     arq_.setSendCompleteCallback([this](bool success) {
@@ -999,6 +999,23 @@ bool Connection::shouldRequestDataTurnOnAck() const {
            !file_cancel_confirm_pending_ &&
            hasLocalDataWaitingForTurn() &&
            (is_initiator_ || handshake_confirmed_);
+}
+
+bool Connection::noteTurnRequestOnAckIfNeeded() {
+    if (!shouldRequestDataTurnOnAck()) {
+        return false;
+    }
+
+    // A TURN_REQUEST bit riding on an ACK is already an on-air request. The
+    // first standalone retransmission must wait long enough for the peer to
+    // receive that ACK, finish any ACK-diversity guard, and send TURNOVER back
+    // across the half-duplex channel. Otherwise both sides can transmit control
+    // bursts into each other at the ownership change.
+    local_turn_request_pending_ = true;
+    turn_request_retransmit_ms_ = std::max(
+        turn_request_retransmit_ms_,
+        turnRequestAckEmbeddedRetransmitMs());
+    return true;
 }
 
 void Connection::resetDataTurnFairness() {
@@ -2768,6 +2785,14 @@ uint32_t Connection::turnRequestRetransmitMs() const {
         static_cast<uint64_t>(currentControlFrameAirtimeMs());
     return static_cast<uint32_t>(
         std::max<uint64_t>(TURN_REQUEST_RETRANSMIT_FLOOR_MS, guard_ms));
+}
+
+uint32_t Connection::turnRequestAckEmbeddedRetransmitMs() const {
+    const uint64_t guard_ms =
+        static_cast<uint64_t>(turnRequestRetransmitMs()) +
+        static_cast<uint64_t>(dataTurnControlGuardMs());
+    return static_cast<uint32_t>(
+        std::min<uint64_t>(guard_ms, 0xFFFFFFFFull));
 }
 
 uint32_t Connection::fileCancelTxGuardMs() const {
