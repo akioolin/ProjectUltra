@@ -28,7 +28,10 @@ inline constexpr float kQAM16GoodFadingMax = 0.80f;
 inline constexpr float kQAM16GoodSnrFloorDb = 17.0f;
 inline constexpr float kQPSKMultipathFadingMin = kQAM16AwgnFadingMax;
 inline constexpr float kQPSKGoodFadingMax = kQAM16GoodFadingMax;
-inline constexpr float kQPSKGoodR23SnrFloorDb = 20.0f;
+inline constexpr float kProtocolSnrQuantumDb = 0.25f;
+inline constexpr float kQPSKGoodR23MeasuredFloorDb = 20.0f;
+inline constexpr float kQPSKGoodR23SnrFloorDb =
+    kQPSKGoodR23MeasuredFloorDb - kProtocolSnrQuantumDb;
 
 // Waveform + rate recommendation
 struct WaveformRecommendation {
@@ -451,6 +454,9 @@ inline WaveformRecommendation recommendWaveformAndRate(float snr_db, float fadin
 // For OFDM modes: measured coherent rungs first, then DQPSK with rate from
 // selectOFDMCodeRate().
 // QPSK is the Good-fading workhorse rung at the measured Good@20 R2/3 floor.
+// Admit one protocol SNR quantum below the nominal 20 dB floor: CONNECT and
+// MODE_CHANGE carry SNR in 0.25 dB steps, and Phase-1 GUI seeds 4/6 landed
+// at the 19.8 dB gray band where DQPSK R1/2 was selected and failed.
 // D8PSK/QAM16 are clean-channel rungs; too sensitive for Good-fading nulls.
 // For MC-DPSK: Always DQPSK R1/4
 //

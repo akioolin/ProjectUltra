@@ -1789,26 +1789,7 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                     } else if (state_ == ConnectionState::CONNECTED) {
                         // Check if this ACK is for our pending MODE_CHANGE
                         if (mode_change_pending_ && ctrl->seq == mode_change_seq_) {
-                            const bool was_downgrade =
-                                isMoreRobustMode(pending_modulation_, pending_code_rate_,
-                                                 data_modulation_, data_code_rate_);
-                            LOG_MODEM(INFO, "Connection: MODE_CHANGE acknowledged, applying %s %s",
-                                      modulationToString(pending_modulation_),
-                                      codeRateToString(pending_code_rate_));
-                            applyDataMode(pending_modulation_, pending_code_rate_,
-                                          pending_cw_count_, pending_ladder_rung_id_);
-                            if (was_downgrade) {
-                                adaptive_post_downgrade_lockout_ms_ =
-                                    ADAPTIVE_POST_DOWNGRADE_LOCKOUT_MS;
-                                adaptive_clean_windows_ = 0;
-                                adaptive_pressure_windows_ = 0;
-                            }
-                            mode_change_pending_ = false;
-                            pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
-
-                            // Notify application of mode change
-                            notifyDataModeChanged(pending_snr_db_, pending_fading_index_);
-                            runDeferredArqRefill();
+                            commitPendingModeChange("ACKed");
                         } else {
                             // Regular data ACK
                             if (local_data_turn_) {
@@ -2506,13 +2487,10 @@ void Connection::tick(uint32_t elapsed_ms) {
                 if (elapsed_ms >= mode_change_timeout_ms_) {
                     mode_change_retry_count_++;
                     if (mode_change_retry_count_ > MODE_CHANGE_MAX_RETRIES) {
-                        LOG_MODEM(WARN, "Connection: MODE_CHANGE failed after %d attempts, keeping current mode",
+                        LOG_MODEM(WARN,
+                                  "Connection: MODE_CHANGE ACK unresolved after %d retries; committing pending mode to avoid peer split",
                                   MODE_CHANGE_MAX_RETRIES);
-                        mode_change_pending_ = false;
-                        pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
-                        resetAdaptiveModeController();
-                        runDeferredArqRefill();
-                        // Stay at current mode - don't change anything
+                        commitPendingModeChange("ACK unresolved");
                     } else {
                         LOG_MODEM(WARN, "Connection: MODE_CHANGE timeout, retrying (%d/%d)",
                                   mode_change_retry_count_, MODE_CHANGE_MAX_RETRIES);
@@ -2525,7 +2503,7 @@ void Connection::tick(uint32_t elapsed_ms) {
                                                                        pending_cw_count_,
                                                                        pending_ladder_rung_id_);
                         transmitFrame(frame.serialize());
-                        mode_change_timeout_ms_ = MODE_CHANGE_TIMEOUT_MS;
+                        mode_change_timeout_ms_ = modeChangeRetryMs();
                     }
                 } else {
                     mode_change_timeout_ms_ -= elapsed_ms;
@@ -2812,6 +2790,19 @@ uint32_t Connection::fileCancelConfirmDataGuardMs() const {
         static_cast<uint64_t>(currentDataFrameAirtimeMs());
     return static_cast<uint32_t>(
         std::max<uint64_t>(FILE_CANCEL_CONFIRM_DATA_GUARD_FLOOR_MS, guard_ms));
+}
+
+uint32_t Connection::modeChangeRetryMs() const {
+    const uint32_t arq_timeout_ms = arq_.getAckTimeout();
+    if (arq_timeout_ms > 0) {
+        return arq_timeout_ms;
+    }
+
+    const uint64_t control_round_trip_ms =
+        2ULL * static_cast<uint64_t>(dataTurnControlGuardMs()) +
+        static_cast<uint64_t>(connection_policy::kCarrierSenseSackCoalesceMs);
+    return static_cast<uint32_t>(
+        std::min<uint64_t>(control_round_trip_ms, 0xFFFFFFFFull));
 }
 
 void Connection::configureArqForCurrentDataMode() {
@@ -3104,6 +3095,35 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
     if (refill_file) {
         deferred_file_refill_ = true;
     }
+}
+
+void Connection::commitPendingModeChange(const char* outcome) {
+    if (!mode_change_pending_) {
+        return;
+    }
+
+    const bool was_downgrade =
+        isMoreRobustMode(pending_modulation_, pending_code_rate_,
+                         data_modulation_, data_code_rate_);
+    LOG_MODEM(INFO, "Connection: MODE_CHANGE %s, applying %s %s",
+              outcome,
+              modulationToString(pending_modulation_),
+              codeRateToString(pending_code_rate_));
+    applyDataMode(pending_modulation_, pending_code_rate_,
+                  pending_cw_count_, pending_ladder_rung_id_);
+    if (was_downgrade) {
+        adaptive_post_downgrade_lockout_ms_ =
+            ADAPTIVE_POST_DOWNGRADE_LOCKOUT_MS;
+        adaptive_clean_windows_ = 0;
+        adaptive_pressure_windows_ = 0;
+    }
+    mode_change_pending_ = false;
+    mode_change_timeout_ms_ = 0;
+    mode_change_retry_count_ = 0;
+    pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
+
+    notifyDataModeChanged(pending_snr_db_, pending_fading_index_);
+    runDeferredArqRefill();
 }
 
 void Connection::enterConnected() {

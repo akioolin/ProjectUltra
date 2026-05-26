@@ -360,7 +360,6 @@ private:
     float pending_snr_db_ = 15.0f;
     float pending_fading_index_ = 0.0f;
     uint8_t pending_reason_ = 0;
-    static constexpr uint32_t MODE_CHANGE_TIMEOUT_MS = 45000;  // 45s for DPSK round trip
     static constexpr int MODE_CHANGE_MAX_RETRIES = 2;
 
     // ARQ for reliable data transfer (Selective Repeat for higher throughput)
@@ -485,6 +484,7 @@ private:
     uint32_t turnRequestAckEmbeddedRetransmitMs() const;
     uint32_t fileCancelTxGuardMs() const;
     uint32_t fileCancelConfirmDataGuardMs() const;
+    uint32_t modeChangeRetryMs() const;
     uint32_t connectControlFrameAirtimeMs() const;
     uint32_t connectRetryIntervalMs() const;
     uint32_t connectAckRetransmitMs() const;
@@ -504,6 +504,7 @@ private:
     // 1..8 = explicit (used when MODE_CHANGE wire byte specifies a value).
     void applyDataMode(Modulation mod, CodeRate rate, int cw_count = 0,
                        LadderRungId rung_id = LadderRungId::UNKNOWN);
+    void commitPendingModeChange(const char* outcome);
     void notifyDataModeChanged(float snr_db, float peer_fading_index);
     LadderRungId currentLadderRungId() const;
     void resetAdaptiveModeController();

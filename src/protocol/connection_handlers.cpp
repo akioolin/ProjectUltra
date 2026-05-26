@@ -678,7 +678,7 @@ void Connection::requestModeChange(Modulation new_mod, CodeRate new_rate,
     pending_reason_ = reason;
     mode_change_pending_ = true;
     mode_change_retry_count_ = 0;
-    mode_change_timeout_ms_ = MODE_CHANGE_TIMEOUT_MS;
+    mode_change_timeout_ms_ = modeChangeRetryMs();
     pending_ladder_rung_id_ = currentLadderRungId();
 
     // Pick the CW count for the new rate. If the operator forced a CW

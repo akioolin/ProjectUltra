@@ -436,6 +436,14 @@ void test_auto_data_mode_boundaries() {
     CHECK(mod == Modulation::QPSK && rate == CodeRate::R2_3,
           "GOOD-lobby estimator spread at SNR20 still selects QPSK R2/3");
 
+    recommendDataMode(19.8f, waveform, mod, rate, 0.50f);
+    CHECK(mod == Modulation::QPSK && rate == CodeRate::R2_3,
+          "GOOD fading one SNR quantum below SNR20 still selects QPSK R2/3");
+
+    recommendDataMode(19.7f, waveform, mod, rate, 0.50f);
+    CHECK(mod == Modulation::DQPSK,
+          "GOOD fading below the SNR quantum guard falls back to DQPSK");
+
     recommendDataMode(20.0f, waveform, mod, rate, 0.80f);
     CHECK(mod == Modulation::DQPSK,
           "above GOOD-lobby estimator margin falls back to DQPSK");
