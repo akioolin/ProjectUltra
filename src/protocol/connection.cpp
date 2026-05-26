@@ -519,7 +519,8 @@ void Connection::acceptCall() {
     // initiator's view match what we'll actually use locally.
     int negotiated_cw = (pending_forced_cw_count_ != 0)
         ? v2::sanitizeFixedFrameCodewords(pending_forced_cw_count_)
-        : connection_policy::recommendCWCount(rec_mod, rec_rate, negotiated_mode_);
+        : connection_policy::recommendCWCountForChannel(
+              rec_mod, rec_rate, negotiated_mode_, fading_index_, measured_snr_db_);
 
     // Clear pending forced modes
     pending_forced_modulation_ = Modulation::AUTO;

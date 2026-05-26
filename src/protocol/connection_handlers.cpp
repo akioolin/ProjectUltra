@@ -302,7 +302,8 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             ? v2::sanitizeFixedFrameCodewords(frame.data_frame_cw_count)
             : (ladder_selected && selected_rung.waveform == WaveformMode::MC_DPSK
                 ? selected_rung.cw_count
-                : connection_policy::recommendCWCount(rec_mod, rec_rate, negotiated_mode_));
+                : connection_policy::recommendCWCountForChannel(
+                      rec_mod, rec_rate, negotiated_mode_, fading_index_, snr_db));
 
         if (rung_id == LadderRungId::UNKNOWN) {
             if (negotiated_mode_ == WaveformMode::MC_DPSK) {
@@ -687,7 +688,8 @@ void Connection::requestModeChange(Modulation new_mod, CodeRate new_rate,
     // override (caught by Codex, 2026-05-04).
     pending_cw_count_ = static_cast<uint8_t>((config_.forced_cw_count != 0)
         ? v2::sanitizeFixedFrameCodewords(config_.forced_cw_count)
-        : connection_policy::recommendCWCount(new_mod, new_rate, negotiated_mode_));
+        : connection_policy::recommendCWCountForChannel(
+              new_mod, new_rate, negotiated_mode_, fading_index_, measured_snr));
 
     mode_change_seq_++;
     auto frame = v2::ControlFrame::makeModeChange(local_call_, remote_call_,

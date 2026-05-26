@@ -30,6 +30,8 @@ inline constexpr uint32_t kWideOFDMFullAnchorExtraMs =
 inline constexpr uint32_t kWideOFDMShortReanchorDefaultMs = 100;
 inline constexpr uint32_t kWideOFDMShortReanchorMinMs = 100;
 inline constexpr uint32_t kWideOFDMShortReanchorMaxMs = 300;
+inline constexpr float kGoodHFDesignDopplerHz = 0.5f;
+inline constexpr float kClarkeCoherenceNumerator = 0.423f;
 inline constexpr uint32_t kNarrowOFDMSymbolSamples = 2240;
 inline constexpr uint32_t kNarrowOFDMCarriers = 21;
 inline constexpr uint32_t kNarrowOFDMPilotSpacing = 10;
@@ -418,6 +420,15 @@ inline uint32_t wideOFDMSlidingSackDelayMs(
     return static_cast<uint32_t>(std::min<uint64_t>(quiet_interval_ms, 0xFFFFFFFFull));
 }
 
+inline uint32_t coherenceTimeMsForDoppler(float doppler_hz) {
+    if (!std::isfinite(doppler_hz) || doppler_hz <= 0.0f) {
+        return UINT32_MAX;
+    }
+    // Clarke/Jakes 50%-correlation coherence-time approximation: Tc ~= 0.423/fD.
+    const float tc_ms = (kClarkeCoherenceNumerator * 1000.0f) / doppler_hz;
+    return static_cast<uint32_t>(std::max(1.0f, tc_ms) + 0.5f);
+}
+
 // Recommend fixed-frame CW count for a given OFDM data rate + waveform.
 // Inputs are deterministic and shared by both peers (rate is negotiated;
 // waveform is negotiated too) so both peers compute the same CW count
@@ -457,6 +468,38 @@ inline int recommendCWCount(Modulation mod, CodeRate rate, WaveformMode waveform
         return 3;
     }
     return recommendCWCount(rate, waveform);
+}
+
+inline int recommendCWCountForChannel(Modulation mod,
+                                      CodeRate rate,
+                                      WaveformMode waveform,
+                                      float fading_index,
+                                      float snr_db,
+                                      float doppler_hz = kGoodHFDesignDopplerHz) {
+    const int baseline = recommendCWCount(mod, rate, waveform);
+    if (waveform != WaveformMode::OFDM_CHIRP ||
+        !ofdm_link_adaptation::isCoherentModulation(mod) ||
+        isNearAwgnOFDM(fading_index, snr_db)) {
+        return baseline;
+    }
+
+    const auto* descriptor = ofdmCodeRateDescriptor(rate);
+    const auto* coherence_floor = ofdmCodeRateDescriptor(CodeRate::R1_2);
+    if (descriptor == nullptr || coherence_floor == nullptr ||
+        descriptor->code_rate < coherence_floor->code_rate) {
+        return baseline;
+    }
+
+    const uint32_t coherence_ms = coherenceTimeMsForDoppler(doppler_hz);
+    int selected = v2::kDefaultFixedFrameCodewords;
+    for (int candidate = baseline; candidate >= v2::kDefaultFixedFrameCodewords; --candidate) {
+        const auto timing = wideOFDMFrameTiming(mod, rate, candidate);
+        if (timing.data_ms <= coherence_ms) {
+            selected = candidate;
+            break;
+        }
+    }
+    return v2::sanitizeFixedFrameCodewords(selected);
 }
 
 inline uint32_t computeWideOFDMAckTimeoutMs(Modulation mod,

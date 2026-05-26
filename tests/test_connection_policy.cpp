@@ -518,6 +518,18 @@ void test_recommend_cw_count() {
     CHECK(recommendCWCount(Modulation::DBPSK, CodeRate::R1_4, WaveformMode::OFDM_CHIRP) ==
               v2::kDefaultFixedFrameCodewords,
           "DBPSK does not alter OFDM CW policy");
+
+    CHECK(coherenceTimeMsForDoppler(kGoodHFDesignDopplerHz) == 846,
+          "Good-HF design Doppler gives ~846 ms Clarke coherence time");
+    CHECK(recommendCWCountForChannel(Modulation::QPSK, CodeRate::R2_3,
+                                     WaveformMode::OFDM_CHIRP, 0.50f, 20.0f) == 4,
+          "Good coherent QPSK R2/3 caps frame length inside coherence time");
+    CHECK(recommendCWCountForChannel(Modulation::QPSK, CodeRate::R2_3,
+                                     WaveformMode::OFDM_CHIRP, 0.0f, 27.0f) == 8,
+          "near-AWGN coherent QPSK keeps the throughput CW count");
+    CHECK(recommendCWCountForChannel(Modulation::DQPSK, CodeRate::R2_3,
+                                     WaveformMode::OFDM_CHIRP, 0.50f, 20.0f) == 8,
+          "differential OFDM keeps deterministic CW policy");
 }
 
 void test_variable_frame_payload_capacity() {
