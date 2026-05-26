@@ -192,6 +192,28 @@ isNearAwgnOFDM snr≥25 gate let it fall to the 846 ms cap); AWGN no-regress + f
 REMAINING Good gap to 3000: QPSK R2/3 ceiling is 2611 < 3000, so Good@20→3000 needs BOTH (a)
 dead-air efficiency (52%→higher) AND (b) a faster rung (8PSK, now cw=8-enabled, raw 3917).
 
+## CONCLUSIVE: rung axis is EXHAUSTED at Good@20 — channel-est is the keystone [2026-05-26]
+Tested every rung above QPSK R2/3 at Good@20 (~19.6 dB measured), faithful GUI, multi-seed:
+| rung | raw bps | clean-seed goodput | fade-hit seed |
+|------|---------|--------------------|---------------|
+| QPSK R2/3 (cw=8, committed a72c572) | 2611 | 1355, 0 CWFAIL | sags ~600 (2/5), always DELIVERS |
+| 8PSK R2/3 (cw=8) | 3917 | 1730 | ~900-1000, 16 CWFAIL (3-seed 1000/900/1730) |
+| QPSK R3/4 (cw=8, spacing 8, ~51 data) | ~3187 | **1790** (best clean) | **145 CWFAIL, 0 bytes delivered, run TIMED OUT** |
+FINDING (proven 3 ways): at 19.6 dB, every rung above QPSK R2/3 has great clean-seed upside
+(1730-1790) but COLLAPSES on the deep-fade draws — R3/4's thin FEC actually FAILS the transfer
+(worse than R2/3, which always grinds through). The limiter is NOT the rung/pilots/rate — it is
+**fade reliability = channel-estimation quality**. The rung-tuning axis is exhausted.
+CEILING MATH confirms a rung alone can't reach 3000 anyway: even a stable QPSK R3/4 (3187 raw) ×
+realistic 80% efficiency = ~2550 < 3000. 3000 at Good@20 needs the STACK: (1) channel-est quality
+[keystone — stabilizes R3/4 AND enables leaner pilots], (2) more data carriers via scattered/
+fewer pilots [needs (1)], (3) efficiency 52%→~83% [dead-air]. Pilots are ALREADY per-rate
+(recommendedPilotSpacing: coherent R3/4=spacing 8, R2/3=spacing 5).
+ACTION: experimental QAM8 gate + QPSK R3/4 gate STASHED (would regress goal cell). Kept: cw=8
+(committed), GUI auto-close fix (app.cpp/hpp: quit ~8s post scripted-disconnect), tools/good_mod_sweep.sh.
+NEXT (pending user fork): channel-estimation work (#123: scattered pilots + 2-D Wiener + CD3) is
+the empirically-proven keystone — OR bank cw=8 and reassess whether 3000 targets a slightly
+higher Good SNR than 19.6 dB.
+
 ## Workflow
 Iterate: hypothesis (from genie data) → fix → build → GUI multi-seed → measure → keep/revert,
 commit wins branch-only. Hard PHY rounds → Codex collaboration (mandated counter-check).

@@ -191,6 +191,7 @@ private:
     std::chrono::steady_clock::time_point scenario_message_sent_at_;
     std::chrono::steady_clock::time_point scenario_file_done_at_;
     std::chrono::steady_clock::time_point scenario_file_cancel_started_at_;
+    std::chrono::steady_clock::time_point scenario_disconnect_at_;  // when scripted disconnect issued
     void tickScenario();
 
     // Modem/protocol callbacks can run on the RX decode / ARQ path. They must

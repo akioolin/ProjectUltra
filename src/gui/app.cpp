@@ -2687,6 +2687,21 @@ void App::tickScenario() {
         return;
     }
 
+    // Event-driven quit: once the scripted disconnect has been issued, the run is
+    // done — exit after a short grace for the DISCONNECT handshake + final ACKs
+    // instead of idling out the conservative hard exit-after timer. Keeps batch
+    // sweeps from leaving finished GUIs open ~1 min each. The hard timer above
+    // remains the backstop if disconnect never completes.
+    if (scenario_disconnect_issued_ &&
+        now - scenario_disconnect_at_ >= std::chrono::seconds(8)) {
+        guiLog("[scenario] scripted disconnect complete; quitting");
+        scenario_active_ = false;
+        SDL_Event quit_event;
+        quit_event.type = SDL_QUIT;
+        SDL_PushEvent(&quit_event);
+        return;
+    }
+
     // Auto-accept an incoming call (drives the same path as the Accept button).
     if (options_.auto_accept) {
         std::string pending;
@@ -2860,6 +2875,7 @@ void App::tickScenario() {
                    options_.auto_disconnect_after_sec);
             protocol_.disconnect();
             scenario_disconnect_issued_ = true;
+            scenario_disconnect_at_ = now;
         }
     }
 }
