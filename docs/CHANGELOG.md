@@ -10,6 +10,51 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-25: OTASim server clock-offset delivery repair for CPU-paced GUI clients (branch `feat/good-fading-qam16-ladder-2026-05-24`, commit `b921785`)
+
+**What was broken:** during long two-GUI OTASim runs, ALPHA kept emitting
+full-energy TX bursts but BRAVO stopped receiving ALPHA audio after roughly
+58 s. The e2e server log showed ALPHA audio packets still arriving with real
+RMS, but many post-failure packets were not enqueued because ALPHA's local audio
+start sample had drifted far behind the session clock. The observed intra-host
+GUI pacing skew accumulated to about 19 s, so the server treated a still-keyed
+station as stale relative to the global session cursor and silently delivered
+noise to the far end. That is a simulator-fidelity violation: a real keyed radio
+does not become one-way-deaf because the operator's computer render loop is
+slightly late.
+
+**What changed:** `src/ota_simulator_service/ota_simulator_service.cpp` now
+routes non-sample-clock-paced client audio through a per-lease
+`LeaseAudioClockBridge` instead of using the client's local sample index as the
+session sample index directly. `src/ota_simulator_service/audio_plane.cpp` keeps
+the bridge ordered by each client's local audio clock, fills bounded local gaps
+with silence up to the session queue depth, and resynchronizes large gaps to the
+current earliest deliverable session sample. The bound is derived from the
+session queue depth/sample rate via `SessionContext::maxQueuedSamples()`, not a
+tuned wall-clock constant. `src/otasim_client/ota_audio_backend.cpp` keeps a
+client-side RX gap-repair guard so packet reordering or small delivery holes do
+not corrupt the receive stream; this is a secondary symptom layer, not the
+server root cause.
+
+**How it is properly fixed:** the medium now honors each transmitter's local
+sample ordering while mapping it onto the shared session clock at enqueue time.
+A lagging CPU-paced GUI client can still put RF-equivalent audio into the medium
+for the whole QSO; bounded silence preserves clock continuity for small local
+holes, while large gaps degrade by resynchronizing to the current session cursor
+instead of dropping all later bursts.
+
+**Verification:** Good-fading SNR20 coherent QPSK R2/3 GUI seed1, 10 KB file:
+the initial proof run completed CRC OK at `GOODPUT_BPS=440` with
+`ALPHA_RETX_COUNT=20`. A clean post-commit rerun
+(`/tmp/qpsk_gui_good20_seed1_retx_baseline_b921785`) completed with
+`RESULT=PASS`, `FILE_CRC_OK_COUNT=2`, `GOODPUT_BPS=1350`,
+`ALPHA_RETX_COUNT=0`, `BRAVO_CWFAIL_COUNT=0`, and no server `enqueued=0`,
+client RX gap-fill/late-drop, ARQ timeout, retransmit, or out-of-window DATA
+events in the logs. The same keeper set also held the guardrails: AWGN SNR20
+16QAM R3/4 GUI seed1 `RESULT=PASS`, `ALPHA_RETX_COUNT=0`,
+`BRAVO_CWFAIL_COUNT=0`, `GOODPUT_BPS=2950`; Good SNR12 CLI negotiated DQPSK
+R1/4 and completed CRC OK.
+
 ## 2026-05-23: Coherent fading meter honesty (8f2a43f) + airtime-derived ARQ RTO (d182751) + GUI Message Log fixes (5721408)
 
 Three fixes landed on branch `feat/16qam-promotion-2026-05-21` (branch-only,
