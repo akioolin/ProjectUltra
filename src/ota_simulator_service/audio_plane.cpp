@@ -1,5 +1,7 @@
 #include "ota_simulator_service/audio_plane.hpp"
 
+#include "ota_channel_core/session_context.hpp"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -7,6 +9,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <utility>
 
@@ -14,6 +17,28 @@ namespace ultra::ota_simulator_service {
 namespace {
 
 constexpr size_t kMaxDatagramBytes = 8192;
+constexpr size_t kMaxPacketSamples =
+    (kMaxDatagramBytes - kOtaAudioHeaderBytes) / sizeof(float);
+
+int audioSocketBufferBytes() {
+    const uint64_t queued_samples =
+        (static_cast<uint64_t>(ultra::ota_channel_core::kDefaultSampleRate) *
+         ultra::ota_channel_core::kMaxTxQueuedAudioMs) /
+        1000u;
+    const uint64_t datagrams =
+        (queued_samples + kMaxPacketSamples - 1u) / kMaxPacketSamples;
+    const uint64_t bytes = datagrams * kMaxDatagramBytes;
+    return static_cast<int>(std::min<uint64_t>(
+        bytes, static_cast<uint64_t>(std::numeric_limits<int>::max())));
+}
+
+void setSocketBuffer(ultra::tnc::socket_t socket, int option, int bytes) {
+    (void)::setsockopt(socket,
+                       SOL_SOCKET,
+                       option,
+                       reinterpret_cast<const char*>(&bytes),
+                       sizeof(bytes));
+}
 
 bool fillAddress(const std::string& host,
                  uint16_t port,
@@ -46,7 +71,16 @@ void e2eDebugLine(const std::string& line) {
     }
     static std::mutex mutex;
     std::lock_guard<std::mutex> lock(mutex);
-    std::ofstream out(path, std::ios::app);
+    static std::string open_path;
+    static std::ofstream out;
+    if (!out.is_open() || open_path != path) {
+        out.close();
+        open_path = path;
+        out.open(open_path, std::ios::app);
+    }
+    if (!out) {
+        return;
+    }
     const auto now = std::chrono::system_clock::now().time_since_epoch();
     const auto epoch_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
@@ -77,6 +111,33 @@ bool OrderedAudioQueue::push(uint64_t start_sample, std::span<const float> sampl
     auto [_, inserted] = pending_.emplace(
         start_sample, std::vector<float>(samples.begin(), samples.end()));
     return inserted;
+}
+
+bool OrderedAudioQueue::pushSilence(uint64_t start_sample, size_t sample_count) {
+    if (sample_count == 0) {
+        return false;
+    }
+    const uint64_t end_sample = start_sample + sample_count;
+    if (end_sample <= next_sample_ || start_sample < next_sample_) {
+        return false;
+    }
+    auto [_, inserted] = pending_.emplace(
+        start_sample, std::vector<float>(sample_count, 0.0f));
+    return inserted;
+}
+
+void OrderedAudioQueue::skipTo(uint64_t next_sample) {
+    if (next_sample <= next_sample_) {
+        return;
+    }
+    next_sample_ = next_sample;
+    for (auto it = pending_.begin(); it != pending_.end();) {
+        if (it->first + it->second.size() <= next_sample_) {
+            it = pending_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 std::vector<OrderedAudioQueue::Block> OrderedAudioQueue::drainReady() {
@@ -128,8 +189,19 @@ std::vector<float> OrderedAudioQueue::readWindow(uint64_t start_sample, size_t c
 std::vector<ScheduledAudioBlock> LeaseAudioClockBridge::push(
     uint64_t local_start_sample,
     std::span<const float> samples,
-    uint64_t earliest_session_sample) {
+    uint64_t earliest_session_sample,
+    size_t max_gap_fill_samples) {
     std::vector<ScheduledAudioBlock> scheduled;
+    if (local_start_sample > local_queue_.nextSample()) {
+        const uint64_t missing = local_start_sample - local_queue_.nextSample();
+        if (missing <= max_gap_fill_samples) {
+            (void)local_queue_.pushSilence(
+                local_queue_.nextSample(), static_cast<size_t>(missing));
+        } else {
+            local_queue_.skipTo(local_start_sample);
+            next_session_sample_ = std::max(next_session_sample_, earliest_session_sample);
+        }
+    }
     if (!local_queue_.push(local_start_sample, samples)) {
         return scheduled;
     }
@@ -179,6 +251,9 @@ bool UdpAudioPlane::start(const std::string& bind_host,
     const int reuse = 1;
     (void)::setsockopt(socket, SOL_SOCKET, SO_REUSEADDR,
                        reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+    const int audio_buffer_bytes = audioSocketBufferBytes();
+    setSocketBuffer(socket, SO_RCVBUF, audio_buffer_bytes);
+    setSocketBuffer(socket, SO_SNDBUF, audio_buffer_bytes);
     if (::bind(socket, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
         ultra::tnc::closeSocket(socket);
         if (error) {

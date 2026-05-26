@@ -24,6 +24,8 @@ public:
     };
 
     bool push(uint64_t start_sample, std::span<const float> samples);
+    bool pushSilence(uint64_t start_sample, size_t sample_count);
+    void skipTo(uint64_t next_sample);
     std::vector<Block> drainReady();
     std::vector<float> readWindow(uint64_t start_sample, size_t count);
     uint64_t nextSample() const { return next_sample_; }
@@ -42,7 +44,8 @@ class LeaseAudioClockBridge {
 public:
     std::vector<ScheduledAudioBlock> push(uint64_t local_start_sample,
                                           std::span<const float> samples,
-                                          uint64_t earliest_session_sample);
+                                          uint64_t earliest_session_sample,
+                                          size_t max_gap_fill_samples);
     uint64_t nextLocalSample() const { return local_queue_.nextSample(); }
     uint64_t nextSessionSample() const { return next_session_sample_; }
 

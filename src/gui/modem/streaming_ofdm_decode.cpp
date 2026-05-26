@@ -2,6 +2,7 @@
 
 #include "streaming_decoder.hpp"
 #include "streaming_buffer_policy.hpp"
+#include "streaming_control_profile.hpp"
 #include "streaming_decode_policy.hpp"
 #include "streaming_frame_policy.hpp"
 #include "streaming_signal_policy.hpp"
@@ -609,8 +610,9 @@ void StreamingDecoder::decodeCurrentFrame() {
     }
 
     // Connected OFDM control-first hypothesis:
-    // Try demodulating as DQPSK R1/4 control before using data profile.
-    // This protects ACK/NACK decode when data modulation is higher order.
+    // Try the control profile before using the data profile. Coherent data
+    // links use coherent QPSK R1/4 control; differential data links retain
+    // DQPSK R1/4 control.
     const bool first_pass_ofdm_peek = frame_policy::shouldRunControlFirstOFDMPeek(
         pending_total_cw_, is_ofdm, connected_, frame_len,
         getOFDMControlFrameSamplesForCurrentMode());
@@ -618,10 +620,20 @@ void StreamingDecoder::decodeCurrentFrame() {
         constexpr size_t CONTROL_LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;
         Modulation saved_mod = current_modulation_;
         CodeRate saved_rate = code_rate_;
-        bool switched_profile = (saved_mod != Modulation::DQPSK || saved_rate != CodeRate::R1_4);
+        const auto control_profile =
+            streaming_control_profile::profileForDataMode(
+                saved_mod, coherent_ofdm_control_profile_enabled_);
+        bool switched_profile =
+            (saved_mod != control_profile.modulation ||
+             saved_rate != control_profile.rate);
 
         if (switched_profile) {
-            waveform_->configure(Modulation::DQPSK, CodeRate::R1_4);
+            LOG_MODEM(DEBUG, "[%s] OFDM control-first profile: %s %s (data=%s %s)",
+                      log_prefix_.c_str(),
+                      modulationToString(control_profile.modulation),
+                      codeRateToString(control_profile.rate),
+                      modulationToString(saved_mod), codeRateToString(saved_rate));
+            waveform_->configure(control_profile.modulation, control_profile.rate);
         }
 
         waveform_->setFrequencyOffset(decode_cfo);

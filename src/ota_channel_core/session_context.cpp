@@ -14,10 +14,6 @@ namespace ultra::ota_channel_core {
 
 namespace {
 
-constexpr uint32_t kDefaultTickIntervalMs = 10;
-constexpr uint32_t kMaxTxQueuedAudioMs = 20'000;
-constexpr uint32_t kMaxRxQueuedAudioMs = 200;
-
 std::string streamNameForSession(std::string_view session_id,
                                  std::string_view stream_name) {
     std::string name;
@@ -40,7 +36,16 @@ void e2eDebugLine(const std::string& line) {
     }
     static std::mutex mutex;
     std::lock_guard<std::mutex> lock(mutex);
-    std::ofstream out(path, std::ios::app);
+    static std::string open_path;
+    static std::ofstream out;
+    if (!out.is_open() || open_path != path) {
+        out.close();
+        open_path = path;
+        out.open(open_path, std::ios::app);
+    }
+    if (!out) {
+        return;
+    }
     const auto now = std::chrono::system_clock::now().time_since_epoch();
     const auto epoch_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
@@ -69,7 +74,7 @@ bool allZero(std::span<const float> samples) {
 SessionContext::SessionContext(SessionConfig config)
     : config_(std::move(config)),
       rng_root_(config_.seed),
-      tick_samples_(samplesForMs(config_.sample_rate, kDefaultTickIntervalMs)),
+      tick_samples_(samplesForMs(config_.sample_rate, kSessionTickIntervalMs)),
       max_tx_queue_samples_(samplesForMs(config_.sample_rate, kMaxTxQueuedAudioMs)),
       max_rx_queue_samples_(samplesForMs(config_.sample_rate, kMaxRxQueuedAudioMs)) {
     if (config_.session_id.empty()) {
@@ -132,7 +137,7 @@ void SessionContext::setChannel(ChannelConfig config) {
     config_.seed = config.seed;
     config_.sample_rate = config.sample_rate;
     config_.real_hf_loop_noise = std::move(config.real_hf_loop_noise);
-    tick_samples_ = samplesForMs(config_.sample_rate, kDefaultTickIntervalMs);
+    tick_samples_ = samplesForMs(config_.sample_rate, kSessionTickIntervalMs);
     max_tx_queue_samples_ = samplesForMs(config_.sample_rate, kMaxTxQueuedAudioMs);
     max_rx_queue_samples_ = samplesForMs(config_.sample_rate, kMaxRxQueuedAudioMs);
     rng_root_ = RngRoot(config_.seed);

@@ -476,7 +476,7 @@ private:
     uint32_t currentDataFrameAirtimeMs() const;
     uint32_t currentControlFrameAirtimeMs() const;
     uint32_t currentBurstAnchorAirtimeMs() const;
-    uint32_t dataTurnAckDiversityGuardMs() const;
+    uint32_t dataTurnAckDiversityGuardMs(const v2::ControlFrame& ack) const;
     uint32_t dataTurnConnectGuardMs() const;
     uint32_t dataTurnControlGuardMs() const;
     uint32_t turnRequestHoldoffAfterDataMs() const;
@@ -489,6 +489,7 @@ private:
     int connectAckRetxBudget() const;
     uint32_t responderHandshakeFailSafeMs() const;
 
+    void transmitFrameBatch(const std::vector<Bytes>& frame_data_list);
     void flushBurstBuffer();
     void processArqFrame(const Bytes& frame_data);
     void runDeferredArqRefill();

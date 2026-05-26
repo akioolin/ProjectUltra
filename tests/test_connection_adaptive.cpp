@@ -129,6 +129,10 @@ struct ConnectionAdaptiveTestAccess {
         c.transmitFrame(frame);
     }
 
+    static void transmitFrameBatch(Connection& c, const std::vector<Bytes>& frames) {
+        c.transmitFrameBatch(frames);
+    }
+
     static uint32_t connectRetryInterval(Connection& c) {
         return c.connectRetryIntervalMs();
     }
@@ -619,18 +623,28 @@ void test_adaptive_high_order_downgrade_steps_one_rung() {
     ConnectionAdaptiveTestAccess::advanceRetransmissionPressure(qam16);
     ConnectionAdaptiveTestAccess::updateAdaptive(qam16, 1000);
 
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetPending(qam16),
+          "QAM16 retry pressure should queue a measured coherent QPSK workhorse downgrade");
+    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(qam16),
+          "QAM16-to-QPSK modulation-regime downgrade should wait for an empty ARQ boundary");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetModulation(qam16) == Modulation::QPSK,
+          "Good-fading QAM16 retry pressure should land on the measured coherent QPSK workhorse");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(qam16) == CodeRate::R2_3,
+          "Good-fading QAM16 retry pressure should use the descriptor-selected QPSK R2/3 rung");
+    ConnectionAdaptiveTestAccess::abortArqPendingTx(qam16);
+    ConnectionAdaptiveTestAccess::updateAdaptive(qam16, 1000);
     CHECK(ConnectionAdaptiveTestAccess::modeChangePending(qam16),
-          "QAM16 retry pressure should issue a one-rung downgrade");
-    CHECK(ConnectionAdaptiveTestAccess::pendingModulation(qam16) == Modulation::QAM16,
-          "QAM16 code-rate pressure should step down inside the QAM16 ladder first");
-    CHECK(ConnectionAdaptiveTestAccess::pendingRate(qam16) == CodeRate::R1_4,
-          "QAM16 one-rung downgrade should target the active R1/4 rung");
+          "QAM16-to-QPSK modulation-regime downgrade should issue once the ARQ window drains");
+    CHECK(ConnectionAdaptiveTestAccess::pendingModulation(qam16) == Modulation::QPSK,
+          "issued Good-fading QAM16 downgrade should land on coherent QPSK");
+    CHECK(ConnectionAdaptiveTestAccess::pendingRate(qam16) == CodeRate::R2_3,
+          "issued Good-fading QAM16 downgrade should use QPSK R2/3");
     ConnectionAdaptiveTestAccess::acknowledgeModeChange(qam16);
-    CHECK(qam16.getDataModulation() == Modulation::QAM16,
-          "acknowledged QAM16 code-rate downgrade should remain QAM16");
+    CHECK(qam16.getDataModulation() == Modulation::QPSK,
+          "acknowledged Good-fading downgrade should switch QAM16 data to coherent QPSK");
     CHECK(ConnectionAdaptiveTestAccess::postDowngradeLockoutRemaining(qam16) ==
               ConnectionAdaptiveTestAccess::postDowngradeLockoutMs(),
-          "same-rate modulation downgrade should arm upgrade lockout");
+          "coherent QPSK downgrade should arm upgrade lockout before re-entering the QAM16 ladder");
 
     Connection d8psk;
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(
@@ -692,10 +706,10 @@ void test_adaptive_full_window_timeout_downgrades_immediately() {
           "full-window timeout should queue a downgrade after one pressure window");
     CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(qam16),
           "full-window downgrade should still wait for boundary or force dwell");
-    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetModulation(qam16) == Modulation::QAM16,
-          "full-window QAM16 failure should step down within the QAM16 code-rate ladder");
-    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(qam16) == CodeRate::R1_4,
-          "full-window QAM16 failure should target the active R1/4 rung");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetModulation(qam16) == Modulation::QPSK,
+          "full-window Good-fading QAM16 failure should target coherent QPSK");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(qam16) == CodeRate::R2_3,
+          "full-window Good-fading QAM16 failure should use the descriptor-selected QPSK R2/3 rung");
 
     Connection d8psk;
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(
@@ -799,6 +813,47 @@ void test_adaptive_downgrade_fires_when_window_half_full() {
           "issued downgrade should target R1/2");
     CHECK(!ConnectionAdaptiveTestAccess::adaptiveTargetPending(c),
           "issued downgrade should clear the queued adaptive target");
+}
+
+void test_adaptive_modulation_downgrade_waits_for_empty_window() {
+    TempPayloadFile payload("ultra_adapt_mod_down_boundary", 5000);
+    CHECK(payload.dir.valid(), "temp dir");
+    CHECK(!payload.path.empty(), "large test file");
+
+    Connection c;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R1_4, 18.0f, 0.58f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::startFile(c, payload.path);
+    const size_t window = ConnectionAdaptiveTestAccess::arqWindow(c);
+    CHECK(window % 2 == 0, "test expects an even ARQ window");
+    ConnectionAdaptiveTestAccess::createRetransmissionPressure(c, window / 2);
+
+    ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
+    ConnectionAdaptiveTestAccess::advanceRetransmissionPressure(c);
+    ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
+
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetPending(c),
+          "QPSK floor retry pressure should queue a modulation-regime downgrade");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetModulation(c) == Modulation::DQPSK,
+          "QPSK floor retry pressure should target the differential fallback");
+    CHECK(ConnectionAdaptiveTestAccess::adaptiveTargetRate(c) == CodeRate::R1_4,
+          "QPSK floor fallback should keep the robust code rate");
+    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
+          "modulation-regime downgrade should wait for an empty ARQ boundary");
+
+    ConnectionAdaptiveTestAccess::updateAdaptive(
+        c, ConnectionAdaptiveTestAccess::downgradeForceMs() + 1);
+    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
+          "modulation-regime downgrade should not force through in-flight ARQ");
+
+    ConnectionAdaptiveTestAccess::abortArqPendingTx(c);
+    ConnectionAdaptiveTestAccess::updateAdaptive(c, 1000);
+    CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c),
+          "modulation-regime downgrade should issue once the ARQ window drains");
+    CHECK(ConnectionAdaptiveTestAccess::pendingModulation(c) == Modulation::DQPSK,
+          "issued modulation-regime downgrade should use the differential fallback");
+    CHECK(ConnectionAdaptiveTestAccess::pendingRate(c) == CodeRate::R1_4,
+          "issued modulation-regime downgrade should preserve the robust code rate");
 }
 
 void test_adaptive_stuck_downgrade_forces_after_timeout() {
@@ -970,6 +1025,56 @@ void test_forced_rate_disables_adaptive_controller() {
           "forced code rate should suppress adaptive MODE_CHANGE");
 }
 
+void test_fading_timeout_repairs_use_standalone_full_anchors() {
+    Connection c;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.45f, Modulation::QPSK);
+
+    int frame_tx = 0;
+    int burst_tx = 0;
+    c.setTransmitCallback([&](const Bytes&) { ++frame_tx; });
+    c.setTransmitBurstCallback([&](const std::vector<Bytes>&) { ++burst_tx; });
+
+    std::vector<Bytes> frames{
+        v2::makeFixedDataFrame("W1ABC", "K2DEF", 10, Bytes(16, 0x11),
+                               CodeRate::R2_3, 8).serialize(),
+        v2::makeFixedDataFrame("W1ABC", "K2DEF", 11, Bytes(16, 0x22),
+                               CodeRate::R2_3, 8).serialize(),
+    };
+
+    ConnectionAdaptiveTestAccess::transmitFrameBatch(c, frames);
+
+    CHECK(frame_tx == 2,
+          "fading coherent timeout repairs should be standalone full-anchor frames");
+    CHECK(burst_tx == 0,
+          "fading coherent timeout repairs should not share one burst anchor");
+}
+
+void test_clean_timeout_repairs_keep_burst_batching() {
+    Connection c;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 25.0f, 0.05f, Modulation::QPSK);
+
+    int frame_tx = 0;
+    int burst_tx = 0;
+    c.setTransmitCallback([&](const Bytes&) { ++frame_tx; });
+    c.setTransmitBurstCallback([&](const std::vector<Bytes>&) { ++burst_tx; });
+
+    std::vector<Bytes> frames{
+        v2::makeFixedDataFrame("W1ABC", "K2DEF", 10, Bytes(16, 0x11),
+                               CodeRate::R2_3, 8).serialize(),
+        v2::makeFixedDataFrame("W1ABC", "K2DEF", 11, Bytes(16, 0x22),
+                               CodeRate::R2_3, 8).serialize(),
+    };
+
+    ConnectionAdaptiveTestAccess::transmitFrameBatch(c, frames);
+
+    CHECK(frame_tx == 0,
+          "clean coherent timeout repairs should keep batch efficiency");
+    CHECK(burst_tx == 1,
+          "clean coherent timeout repairs should stay in one burst");
+}
+
 } // namespace
 
 int main() {
@@ -992,12 +1097,15 @@ int main() {
     test_adaptive_cooldown_blocks_cascaded_downgrade();
     test_adaptive_downgrade_waits_when_more_than_half_full();
     test_adaptive_downgrade_fires_when_window_half_full();
+    test_adaptive_modulation_downgrade_waits_for_empty_window();
     test_adaptive_stuck_downgrade_forces_after_timeout();
     test_adaptive_upgrade_not_forced_after_timeout();
     test_adaptive_controller_idle_while_mode_change_pending();
     test_adaptive_post_downgrade_lockout_blocks_upgrade();
     test_adaptive_post_downgrade_lockout_expires();
     test_forced_rate_disables_adaptive_controller();
+    test_fading_timeout_repairs_use_standalone_full_anchors();
+    test_clean_timeout_repairs_keep_burst_batching();
 
     if (tests_failed != 0) {
         std::cout << "ConnectionAdaptive: " << tests_failed << "/" << tests_run

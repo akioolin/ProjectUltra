@@ -18,6 +18,18 @@ constexpr const char* kOFDMBurstPadCallsign = "ULPAD";
 constexpr uint16_t kOFDMBurstPadSeq = 0xFFFE;
 constexpr size_t kMaxQueuedPayloads = 32;
 
+Modulation wideOFDMControlModulationForData(Modulation data_modulation) {
+    return ofdm_link_adaptation::isCoherentModulation(data_modulation)
+        ? Modulation::QPSK
+        : Modulation::DQPSK;
+}
+
+uint32_t ackRepeatDelayForControlAirtimeMs(uint32_t control_airtime_ms) {
+    return control_airtime_ms +
+           selective_repeat_arq_policy::kAckRepeatMaxJitterMs +
+           connection_policy::kCarrierSenseSackCoalesceMs;
+}
+
 Bytes makeOFDMBurstPadPayload(CodeRate rate, int cw_count, size_t pad_index) {
     const size_t capacity = v2::getFixedFramePayloadCapacity(rate, cw_count);
     Bytes payload(capacity);
@@ -479,7 +491,7 @@ void Connection::acceptCall() {
 
     // Bootstrap safety: chirp SNR can overestimate first OFDM frame quality.
     if (isOFDMMode(negotiated_mode_)) {
-        CodeRate capped = capInitialOFDMRate(measured_snr_db_, fading_index_, rec_rate);
+        CodeRate capped = capInitialOFDMRate(measured_snr_db_, fading_index_, rec_rate, rec_mod);
         if (capped != rec_rate) {
             LOG_MODEM(INFO, "Connection: Bootstrap cap %s -> %s for initial OFDM setup (SNR=%.1f (%s), fading=%.2f)",
                       codeRateToString(rec_rate), codeRateToString(capped), measured_snr_db_,
@@ -1033,9 +1045,18 @@ bool Connection::maybeYieldDataTurn() {
         return false;
     }
 
+    const bool only_unstarted_file_waiting =
+        queued_file_path_.has_value() &&
+        queued_payloads_.empty() &&
+        file_transfer_.getState() != FileTransferState::SENDING &&
+        pending_tx_fragments_.empty() &&
+        arq_.getTxInFlightBytes() == 0 &&
+        !mode_change_pending_;
+
     if (!data_turn_yield_pending_ &&
         data_turn_payload_bytes_sent_ > 0 &&
         hasLocalDataWaitingForTurn() &&
+        !only_unstarted_file_waiting &&
         !dataTurnFairBudgetMet()) {
         return false;
     }
@@ -1199,13 +1220,17 @@ bool Connection::tryStartQueuedFileIfReady() {
     if (data_turn_tx_guard_ms_ > 0 ||
         hasLocalOutboundDataTurn() ||
         !pending_tx_fragments_.empty() ||
-        !queued_payloads_.empty() ||
         !arq_.isReadyToSend()) {
         return false;
     }
 
     const std::string path = *queued_file_path_;
     queued_file_path_.reset();
+    if (!queued_payloads_.empty()) {
+        LOG_MODEM(INFO,
+                  "Connection: Starting queued file ahead of %zu deferred chat payload(s) after current DATA turn drained",
+                  queued_payloads_.size());
+    }
     LOG_MODEM(INFO, "Connection: Starting queued file transfer on local ISS DATA turn: %s",
               path.c_str());
     if (!startFileTransferNow(path)) {
@@ -1215,8 +1240,11 @@ bool Connection::tryStartQueuedFileIfReady() {
 }
 
 void Connection::sendNextQueuedPayloadIfReady() {
-    if (queued_payloads_.empty()) {
+    if (queued_file_path_) {
         tryStartQueuedFileIfReady();
+        return;
+    }
+    if (queued_payloads_.empty()) {
         return;
     }
     if (state_ != ConnectionState::CONNECTED) {
@@ -1764,7 +1792,7 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                         } else {
                             // Regular data ACK
                             if (local_data_turn_) {
-                                armDataTurnTxGuard(dataTurnAckDiversityGuardMs());
+                                armDataTurnTxGuard(dataTurnAckDiversityGuardMs(*ctrl));
                                 if ((ctrl->flags & v2::Flags::TURN_REQUEST) != 0) {
                                     peer_data_turn_requested_ = true;
                                     LOG_MODEM(INFO,
@@ -1958,9 +1986,26 @@ bool Connection::canIssueAdaptiveModeChange(bool is_downgrade) const {
     const size_t available_slots = arq_.getAvailableSlots();
     const size_t window_size = arq_.getWindowSize();
     if (is_downgrade) {
-        // Downgrades are recovery-oriented. Waiting for a fully drained window
-        // can keep us transmitting into the rate that is already failing, so
-        // allow the MODE_CHANGE once at least half of the ARQ window is free.
+        const bool target_changes_modulation =
+            adaptive_target_.pending &&
+            adaptive_target_.modulation != data_modulation_;
+        if (target_changes_modulation) {
+            // Changing modulation also changes the demodulator, pilot layout,
+            // and coherent-vs-differential control profile. Keep those regime
+            // changes on a fully drained ARQ boundary; only same-regime
+            // code-rate downgrades may use the half-window recovery path.
+            return available_slots == window_size;
+        }
+        // Downgrades are recovery-oriented for sustained backlog, but a file
+        // tail smaller than one ARQ window should drain in the current mode.
+        // Injecting MODE_CHANGE into a short repair tail steals the ACK/DATA
+        // turn and can starve the last few frames. The boundary is derived from
+        // the active ARQ window, not from an SNR/rate constant.
+        const CodeRate target_rate =
+            adaptive_target_.pending ? adaptive_target_.rate : data_code_rate_;
+        if (adaptiveBacklogFrames(target_rate) < window_size) {
+            return available_slots == window_size;
+        }
         return available_slots * 2 >= window_size;
     }
 
@@ -2016,8 +2061,14 @@ bool Connection::tryIssueAdaptiveModeChangeAtBoundary() {
         is_downgrade &&
         adaptive_downgrade_queue_age_ms_ >= ADAPTIVE_DOWNGRADE_FORCE_MS;
     const bool boundary_ready = canIssueAdaptiveModeChange(is_downgrade);
+    const size_t backlog_frames = adaptiveBacklogFrames(adaptive_target_.rate);
+    const bool backlog_can_absorb_mode_change = backlog_frames >= arq_.getWindowSize();
+    const bool target_changes_modulation =
+        adaptive_target_.modulation != data_modulation_;
     const bool force_downgrade =
         downgrade_stuck &&
+        backlog_can_absorb_mode_change &&
+        !target_changes_modulation &&
         !boundary_ready &&
         state_ == ConnectionState::CONNECTED &&
         isOFDMMode(negotiated_mode_) &&
@@ -2032,7 +2083,6 @@ bool Connection::tryIssueAdaptiveModeChangeAtBoundary() {
         return false;
     }
 
-    const size_t backlog_frames = adaptiveBacklogFrames(adaptive_target_.rate);
     if (backlog_frames == 0) {
         adaptive_target_ = AdaptiveModeTarget{};
         adaptive_downgrade_queue_age_ms_ = 0;
@@ -2057,7 +2107,7 @@ bool Connection::tryIssueAdaptiveModeChangeAtBoundary() {
 
     if (force_downgrade) {
         LOG_MODEM(WARN,
-                  "Connection: Forced downgrade after %ums queue age (window state ignored): %s %s -> %s %s",
+                  "Connection: Forced downgrade after %ums queue age (sustained backlog): %s %s -> %s %s",
                   adaptive_downgrade_queue_age_ms_,
                   modulationToString(data_modulation_),
                   codeRateToString(data_code_rate_),
@@ -2221,7 +2271,12 @@ void Connection::updateAdaptiveModeController(uint32_t elapsed_ms) {
             getBitsPerSymbol(recommended_mod) <= getBitsPerSymbol(data_modulation_);
         if (recommended_is_safe_downgrade) {
             AdaptiveMode recommended_target{recommended_mod, recommended_rate};
-            if (!isMoreRobustMode(recommended_target.modulation, recommended_target.rate,
+            const bool preserve_d8psk_rate_ladder =
+                data_modulation_ == Modulation::D8PSK &&
+                target.modulation == data_modulation_ &&
+                recommended_target.modulation != data_modulation_;
+            if (!preserve_d8psk_rate_ladder &&
+                !isMoreRobustMode(recommended_target.modulation, recommended_target.rate,
                                   target.modulation, target.rate)) {
                 target = recommended_target;
             }
@@ -2567,8 +2622,13 @@ uint32_t Connection::currentDataFrameAirtimeMs() const {
 
 uint32_t Connection::currentControlFrameAirtimeMs() const {
     if (negotiated_mode_ == WaveformMode::OFDM_CHIRP) {
-        return connection_policy::wideOFDMFrameTiming(
-            data_modulation_, data_code_rate_, data_frame_cw_count_).ack_ms;
+        uint32_t control_ms = connection_policy::wideOFDMFrameTiming(
+            wideOFDMControlModulationForData(data_modulation_), CodeRate::R1_4).ack_ms;
+        if (connection_policy::shouldUseWideOFDMShortReanchor(
+                negotiated_mode_, data_modulation_, fading_index_)) {
+            control_ms += connection_policy::wideOFDMShortReanchorChirpDurationMs();
+        }
+        return control_ms;
     }
     if (negotiated_mode_ == WaveformMode::OFDM_NARROW) {
         return connection_policy::narrowOFDMFrameTiming(
@@ -2649,10 +2709,32 @@ uint32_t Connection::responderHandshakeFailSafeMs() const {
     return static_cast<uint32_t>(std::min<uint64_t>(failsafe_ms, 0xFFFFFFFFull));
 }
 
-uint32_t Connection::dataTurnAckDiversityGuardMs() const {
-    const uint32_t control_tail_ms =
-        currentControlFrameAirtimeMs() / 2 + connection_policy::kCarrierSenseSackCoalesceMs;
-    return std::max(DATA_TURN_ACK_DIVERSITY_GUARD_FLOOR_MS, control_tail_ms);
+uint32_t Connection::dataTurnAckDiversityGuardMs(const v2::ControlFrame& ack) const {
+    const uint32_t control_airtime_ms = currentControlFrameAirtimeMs();
+    uint64_t guard_ms = static_cast<uint64_t>(control_airtime_ms / 2) +
+                        connection_policy::kCarrierSenseSackCoalesceMs;
+
+    const auto ack_payload = v2::NackPayload::decode(ack.payload);
+    const bool ack_has_final = (ack.flags & v2::Flags::FINAL) != 0;
+    const bool guard_half_duplex_repeat =
+        ack_payload.cw_bitmap == 0 && !ack_has_final;
+    const uint32_t repeat_tail_ms =
+        selective_repeat_arq_policy::ackRepeatTailGuardMs(
+            control_airtime_ms,
+            arq_.getAckRepeatPeerBurstGuardMs(),
+            arq_.getAckRepeatDelay(),
+            arq_.getAckRepeatCount(),
+            guard_half_duplex_repeat);
+    if (repeat_tail_ms > 0) {
+        guard_ms = std::max<uint64_t>(
+            guard_ms,
+            static_cast<uint64_t>(repeat_tail_ms) +
+                connection_policy::kCarrierSenseSackCoalesceMs);
+    }
+
+    return static_cast<uint32_t>(std::min<uint64_t>(
+        std::max<uint64_t>(DATA_TURN_ACK_DIVERSITY_GUARD_FLOOR_MS, guard_ms),
+        0xFFFFFFFFull));
 }
 
 uint32_t Connection::dataTurnConnectGuardMs() const {
@@ -2725,7 +2807,9 @@ void Connection::configureArqForCurrentDataMode() {
         arq_.setSackDelay(connection_policy::kCarrierSenseSackCoalesceMs);
         arq_.setSackDelayShort(0);
         arq_.setAckBatchThroughMoreFrag(true);
+        arq_.setImmediateOutOfOrderSackEnabled(true);
         arq_.setAckRepeatCount(connection_policy::kCarrierSenseAckRepeatCount);
+        arq_.setAckRepeatPeerBurstGuardMs(arq_.getSackDelay());
         uint32_t ack_timeout_ms = connection_policy::computeMCDPSKAckTimeoutMs(
             timing, window_size, arq_.getSackDelay(),
             connection_policy::kCarrierSenseAckRepeatCount);
@@ -2767,7 +2851,9 @@ void Connection::configureArqForCurrentDataMode() {
         arq_.setMaxRetries(15);
         arq_.setSackDelay(connection_policy::kCarrierSenseSackCoalesceMs);
         arq_.setSackDelayShort(0);
+        arq_.setImmediateOutOfOrderSackEnabled(true);
         arq_.setAckRepeatCount(connection_policy::kCarrierSenseAckRepeatCount);
+        arq_.setAckRepeatPeerBurstGuardMs(arq_.getSackDelay());
 
         const auto timing = connection_policy::narrowOFDMFrameTiming(
             data_modulation_, data_frame_cw_count_);
@@ -2791,19 +2877,34 @@ void Connection::configureArqForCurrentDataMode() {
 
         const auto timing = connection_policy::wideOFDMFrameTiming(
             data_modulation_, data_code_rate_, data_frame_cw_count_);
+        const auto control_timing = connection_policy::wideOFDMFrameTiming(
+            wideOFDMControlModulationForData(data_modulation_), CodeRate::R1_4);
+        const bool adaptive_short_reanchor =
+            connection_policy::shouldUseWideOFDMShortReanchor(
+                negotiated_mode_, data_modulation_, fading_index_);
+        const uint32_t continuation_reanchor_ms =
+            adaptive_short_reanchor
+                ? connection_policy::wideOFDMShortReanchorChirpDurationMs()
+                : 0;
+        const uint32_t control_ack_airtime_ms =
+            control_timing.ack_ms + continuation_reanchor_ms;
         const uint32_t burst_airtime_ms = connection_policy::wideOFDMBurstAirtimeMs(
             data_modulation_, data_code_rate_, arq_.getWindowSize(),
-            data_frame_cw_count_);
+            data_frame_cw_count_, continuation_reanchor_ms);
         constexpr int kWideOFDMAckRepeatCount = 3;
         const uint32_t physical_sack_hold_ms = connection_policy::wideOFDMSackDelayMs(
             data_modulation_, data_code_rate_, arq_.getWindowSize(),
-            data_frame_cw_count_);
+            data_frame_cw_count_, continuation_reanchor_ms);
         const uint32_t sack_delay_ms = connection_policy::wideOFDMSlidingSackDelayMs(
             data_modulation_, data_code_rate_, data_frame_cw_count_);
-        arq_.setSackDelay(sack_delay_ms);
+        arq_.setSackDelay(adaptive_short_reanchor ? physical_sack_hold_ms : sack_delay_ms);
         arq_.setSackDelayShort(connection_policy::wideOFDMSackTailDelayMs());
-        arq_.setSackDelaySlidesOnData(true);
+        arq_.setSackDelaySlidesOnData(!adaptive_short_reanchor);
+        arq_.setImmediateOutOfOrderSackEnabled(!adaptive_short_reanchor);
         arq_.setAckRepeatCount(kWideOFDMAckRepeatCount);
+        arq_.setAckRepeatPeerBurstGuardMs(
+            adaptive_short_reanchor ? 0 : arq_.getSackDelay());
+        arq_.setAckRepeatDelay(ackRepeatDelayForControlAirtimeMs(control_ack_airtime_ms));
 
         uint32_t ack_timeout_ms = connection_policy::computeWideOFDMAckTimeoutMs(
             data_modulation_,
@@ -2811,24 +2912,50 @@ void Connection::configureArqForCurrentDataMode() {
             arq_.getWindowSize(),
             arq_.getSackDelay(),
             kWideOFDMAckRepeatCount,
-            data_frame_cw_count_);
+            data_frame_cw_count_,
+            continuation_reanchor_ms);
+        const uint32_t ack_repeat_tail_ms =
+            selective_repeat_arq_policy::ackRepeatTailGuardMs(
+                control_ack_airtime_ms,
+                arq_.getAckRepeatPeerBurstGuardMs(),
+                arq_.getAckRepeatDelay(),
+                kWideOFDMAckRepeatCount,
+                true);
+        const uint32_t decode_jitter_margin_ms =
+            std::max<uint32_t>(700, timing.data_ms / 2) + 700;
+        const uint64_t repeat_covered_timeout_ms =
+            static_cast<uint64_t>(burst_airtime_ms) +
+            static_cast<uint64_t>(physical_sack_hold_ms) +
+            static_cast<uint64_t>(ack_repeat_tail_ms) +
+            static_cast<uint64_t>(decode_jitter_margin_ms);
+        if (adaptive_short_reanchor) {
+            ack_timeout_ms = std::max<uint32_t>(
+                ack_timeout_ms,
+                static_cast<uint32_t>(
+                    std::min<uint64_t>(repeat_covered_timeout_ms, 0xFFFFFFFFull)));
+        }
         arq_.setAckTimeout(ack_timeout_ms);
 
         LOG_MODEM(INFO,
-                  "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, burst=%ums, ack=%ums x%d), max_retries=%d, ack_batch=%u, sliding_sack=%ums, physical_sack_hold=%ums, tail_sack=%ums, ack_repeat=%d, cw=%d (OFDM %s %s)",
+                  "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, burst=%ums, ack=%ums/control=%ums x%d), max_retries=%d, ack_batch=%u, sack_delay=%ums, sack_slides=%d, physical_sack_hold=%ums, tail_sack=%ums, ack_repeat=%d, ack_repeat_delay=%ums, ack_repeat_guard=%ums, cw=%d, continuation_reanchor=%ums (OFDM %s %s)",
                   arq_.getWindowSize(),
                   ack_timeout_ms / 1000.0f,
                   timing.data_ms,
                   burst_airtime_ms,
                   timing.ack_ms,
+                  control_ack_airtime_ms,
                   kWideOFDMAckRepeatCount,
                   arq_.getMaxRetries(),
                   arq_.getAckBatchSize(),
                   arq_.getSackDelay(),
+                  arq_.getSackDelaySlidesOnData() ? 1 : 0,
                   physical_sack_hold_ms,
                   arq_.getSackDelayShort(),
                   kWideOFDMAckRepeatCount,
+                  arq_.getAckRepeatDelay(),
+                  arq_.getAckRepeatPeerBurstGuardMs(),
                   data_frame_cw_count_,
+                  continuation_reanchor_ms,
                   modulationToString(data_modulation_),
                   codeRateToString(data_code_rate_));
     }
@@ -3071,6 +3198,13 @@ void Connection::setTransmitInfoCallback(TransmitInfoCallback cb) {
 
 void Connection::setTransmitBurstCallback(TransmitBurstCallback cb) {
     on_transmit_burst_ = std::move(cb);
+    if (on_transmit_burst_) {
+        arq_.setTransmitBatchCallback([this](const std::vector<Bytes>& frames) {
+            transmitFrameBatch(frames);
+        });
+    } else {
+        arq_.setTransmitBatchCallback(SelectiveRepeatARQ::TransmitBatchCallback{});
+    }
 }
 
 void Connection::setMCDPSKConfig(int num_carriers, int samples_per_symbol) {
@@ -3138,6 +3272,38 @@ void Connection::flushBurstBuffer() {
         }
     }
     burst_tx_buffer_.clear();
+}
+
+void Connection::transmitFrameBatch(const std::vector<Bytes>& frame_data_list) {
+    if (frame_data_list.empty()) {
+        return;
+    }
+
+    const bool burst_capable_mode =
+        isOFDMMode(negotiated_mode_) || negotiated_mode_ == WaveformMode::MC_DPSK;
+    const bool standalone_repair_anchors =
+        negotiated_mode_ == WaveformMode::OFDM_CHIRP &&
+        connection_policy::shouldUseWideOFDMShortReanchor(
+            negotiated_mode_, data_modulation_, fading_index_);
+    if (frame_data_list.size() == 1 || !on_transmit_burst_ || !burst_capable_mode) {
+        for (const auto& frame_data : frame_data_list) {
+            transmitFrame(frame_data);
+        }
+        return;
+    }
+    if (standalone_repair_anchors) {
+        LOG_MODEM(INFO,
+                  "Connection: Flushing ARQ timeout-repair as %zu standalone full-anchor frames",
+                  frame_data_list.size());
+        for (const auto& frame_data : frame_data_list) {
+            transmitFrame(frame_data);
+        }
+        return;
+    }
+
+    LOG_MODEM(INFO, "Connection: Flushing ARQ timeout-repair burst of %zu frames",
+              frame_data_list.size());
+    on_transmit_burst_(frame_data_list);
 }
 
 void Connection::setConnectedCallback(ConnectedCallback cb) {

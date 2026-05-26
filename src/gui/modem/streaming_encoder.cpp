@@ -4,6 +4,7 @@
 
 #include "streaming_encoder.hpp"
 #include "adaptive_reanchor_policy.hpp"
+#include "streaming_control_profile.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "waveform/mc_dpsk_waveform.hpp"
 #include "fec/frame_interleaver.hpp"
@@ -152,7 +153,7 @@ void StreamingEncoder::setAdaptiveShortDataPreamble(bool enable) {
               log_prefix_.c_str(), enable ? "ENABLED" : "DISABLED");
 }
 
-Samples StreamingEncoder::connectedDataPreambleForFrame(bool is_data_frame) {
+Samples StreamingEncoder::connectedDataPreambleForFrame(bool allow_short_reanchor) {
     if (!waveform_) {
         return {};
     }
@@ -161,7 +162,7 @@ Samples StreamingEncoder::connectedDataPreambleForFrame(bool is_data_frame) {
     }
     if (adaptive_short_data_preamble_ &&
         protocol::isOFDMMode(mode_) &&
-        is_data_frame) {
+        allow_short_reanchor) {
         const float chirp_ms = adaptive_reanchor_policy::shortReanchorChirpDurationMs();
         Samples preamble = waveform_->generateShortDataPreamble(chirp_ms);
         LOG_MODEM(DEBUG, "[%s] Short re-anchor preamble: %.0f ms chirp -> %zu samples",
@@ -317,8 +318,11 @@ std::vector<float> StreamingEncoder::encodeFrame(const Bytes& frame_data) {
 
     bool is_ofdm = protocol::isOFDMMode(mode_);
     bool use_control_profile = is_ofdm && isControlFrameBytes(frame_data);
-    Modulation tx_mod = use_control_profile ? Modulation::DQPSK : modulation_;
-    CodeRate tx_rate = use_control_profile ? CodeRate::R1_4 : code_rate_;
+    const auto control_profile =
+        streaming_control_profile::profileForDataMode(
+            modulation_, coherent_ofdm_control_profile_enabled_);
+    Modulation tx_mod = use_control_profile ? control_profile.modulation : modulation_;
+    CodeRate tx_rate = use_control_profile ? control_profile.rate : code_rate_;
 
     if (force_full_preamble_once_ && is_ofdm) {
         force_full_preamble_once_ = false;
@@ -327,8 +331,10 @@ std::vector<float> StreamingEncoder::encodeFrame(const Bytes& frame_data) {
     }
 
     if (use_control_profile) {
-        LOG_MODEM(DEBUG, "[%s] OFDM control profile TX: %s %s",
-                  log_prefix_.c_str(), modulationToString(tx_mod), codeRateToString(tx_rate));
+        LOG_MODEM(INFO, "[%s] OFDM control profile TX: %s %s (data=%s %s)",
+                  log_prefix_.c_str(), modulationToString(tx_mod),
+                  codeRateToString(tx_rate), modulationToString(modulation_),
+                  codeRateToString(code_rate_));
         waveform_->configure(tx_mod, tx_rate);
     }
 
@@ -374,12 +380,17 @@ std::vector<float> StreamingEncoder::encodeFrameLight(const Bytes& frame_data) {
 
     bool is_ofdm = protocol::isOFDMMode(mode_);
     bool use_control_profile = is_ofdm && isControlFrameBytes(frame_data);
-    Modulation tx_mod = use_control_profile ? Modulation::DQPSK : modulation_;
-    CodeRate tx_rate = use_control_profile ? CodeRate::R1_4 : code_rate_;
+    const auto control_profile =
+        streaming_control_profile::profileForDataMode(
+            modulation_, coherent_ofdm_control_profile_enabled_);
+    Modulation tx_mod = use_control_profile ? control_profile.modulation : modulation_;
+    CodeRate tx_rate = use_control_profile ? control_profile.rate : code_rate_;
 
     if (use_control_profile) {
-        LOG_MODEM(DEBUG, "[%s] OFDM control profile TX(light): %s %s",
-                  log_prefix_.c_str(), modulationToString(tx_mod), codeRateToString(tx_rate));
+        LOG_MODEM(INFO, "[%s] OFDM control profile TX(light): %s %s (data=%s %s)",
+                  log_prefix_.c_str(), modulationToString(tx_mod),
+                  codeRateToString(tx_rate), modulationToString(modulation_),
+                  codeRateToString(code_rate_));
         waveform_->configure(tx_mod, tx_rate);
     }
 
@@ -388,7 +399,8 @@ std::vector<float> StreamingEncoder::encodeFrameLight(const Bytes& frame_data) {
 
     const auto header = protocol::v2::parseHeader(frame_data);
     const bool is_data_frame = header.valid && protocol::v2::isDataFrame(header.type);
-    Samples preamble = connectedDataPreambleForFrame(is_data_frame);
+    const bool allow_short_reanchor = is_data_frame || use_control_profile;
+    Samples preamble = connectedDataPreambleForFrame(allow_short_reanchor);
 
     // Modulate
     Samples modulated = waveform_->modulate(encoded);

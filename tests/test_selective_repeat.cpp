@@ -688,6 +688,52 @@ bool test_timeout_repair_retransmits_only_missing_slot_and_resets_timer() {
     return true;
 }
 
+bool test_timeout_window_retransmits_as_one_batch_when_callback_present() {
+    TEST("Timeout window retransmits as one batch when callback present");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.ack_timeout_ms = 100;
+    config.max_retries = 4;
+
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+
+    std::vector<Bytes> transmitted;
+    std::vector<std::vector<Bytes>> batches;
+    tx.setTransmitCallback([&](const Bytes& data) { transmitted.push_back(data); });
+    tx.setTransmitBatchCallback([&](const std::vector<Bytes>& frames) {
+        batches.push_back(frames);
+    });
+
+    for (int i = 0; i < 4; i++) {
+        if (!tx.sendData(Bytes{static_cast<uint8_t>(i)}))
+            FAIL("Failed to send DATA seq=" + std::to_string(i));
+    }
+    if (transmitted.size() != 4)
+        FAIL("Expected four initial DATA transmissions");
+    if (!batches.empty())
+        FAIL("Initial DATA submissions should not use timeout batch callback");
+
+    tx.tick(101);
+
+    if (transmitted.size() != 4)
+        FAIL("Timeout batch should not also transmit frames individually");
+    if (batches.size() != 1 || batches[0].size() != 4)
+        FAIL("Expected one four-frame timeout retransmission batch");
+    for (uint16_t seq = 0; seq < 4; ++seq) {
+        if (!expectDataSeq(batches[0][seq], seq, "timeout batch"))
+            return false;
+    }
+
+    auto stats = tx.getStats();
+    if (stats.timeouts != 4 || stats.retransmissions_timeout != 4)
+        FAIL("Expected four timeout retransmissions in stats");
+
+    PASS();
+    return true;
+}
+
 bool test_max_retries_failure() {
     TEST("Max retries triggers failure");
 
@@ -1220,6 +1266,50 @@ bool test_non_final_ack_repeat_waits_past_peer_burst_guard() {
     return true;
 }
 
+bool test_ack_repeat_peer_guard_can_be_zero_after_physical_hold() {
+    TEST("ACK repeat peer guard can be zero after physical SACK hold");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.sack_delay_ms = 500;
+
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+    rx.setAckRepeatCount(2);
+    rx.setAckRepeatDelay(100);
+    rx.setAckRepeatPeerBurstGuardMs(0);
+
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    for (int i = 0; i < 4; i++) {
+        auto frame = v2::DataFrame::makeData("TX1", "RX1", i, Bytes{static_cast<uint8_t>(i)});
+        rx.onFrameReceived(frame.serialize());
+    }
+
+    if (channel.size() != 1)
+        FAIL("Expected primary ACK only before unguarded repeat timer");
+
+    auto primary = v2::ControlFrame::deserialize(channel.receive());
+    if (!primary || primary->seq != 3)
+        FAIL("Primary non-final ACK did not acknowledge seq=3");
+
+    rx.tick(99);
+    if (channel.size() != 0)
+        FAIL("Unguarded ACK repeat fired before configured delay");
+
+    rx.tick(40);
+    if (channel.size() != 1)
+        FAIL("Expected one delayed ACK repeat without re-applying the physical SACK hold");
+
+    auto repeat = v2::ControlFrame::deserialize(channel.receive());
+    if (!repeat || repeat->seq != 3)
+        FAIL("Unguarded ACK repeat did not acknowledge seq=3");
+
+    PASS();
+    return true;
+}
+
 bool test_hole_sack_repeat_stays_prompt() {
     TEST("hole-bearing SACK repeat stays prompt");
 
@@ -1383,6 +1473,43 @@ bool test_sack_timer_message_boundary_uses_long_without_final() {
     rx.tick(400);
     if (channel.size() != 1)
         FAIL("Long SACK timer did not fire for non-FINAL message boundary");
+
+    PASS();
+    return true;
+}
+
+bool test_out_of_order_sack_can_defer_until_physical_hold() {
+    TEST("out-of-order SACK can defer until physical hold clears");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.sack_delay_ms = 500;
+    SelectiveRepeatARQ rx(config);
+    rx.setCallsigns("RX1", "TX1");
+    rx.setImmediateOutOfOrderSackEnabled(false);
+
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+
+    auto f1 = v2::DataFrame::makeData("TX1", "RX1", 1, Bytes{1});
+    f1.flags |= v2::Flags::MORE_FRAG;
+    rx.onFrameReceived(f1.serialize());
+    if (channel.size() != 0)
+        FAIL("Out-of-order MORE_FRAG frame sent immediate SACK despite physical hold");
+
+    rx.tick(499);
+    if (channel.size() != 0)
+        FAIL("Deferred out-of-order SACK fired before physical hold");
+
+    rx.tick(1);
+    if (channel.size() != 1)
+        FAIL("Deferred out-of-order SACK did not fire after physical hold");
+
+    auto sack = v2::ControlFrame::deserialize(channel.receive());
+    if (!sack || sack->seq != 65535)
+        FAIL("Deferred out-of-order SACK did not report base-1 for missing seq=0");
+    if (v2::NackPayload::decode(sack->payload).cw_bitmap == 0)
+        FAIL("Deferred out-of-order SACK should carry a hole bitmap");
 
     PASS();
     return true;
@@ -1686,12 +1813,14 @@ int main() {
     test_wide_sack_bitmap_serializes_beyond_8_frames();
     test_cumulative_ack_repeats_when_enabled();
     test_non_final_ack_repeat_waits_past_peer_burst_guard();
+    test_ack_repeat_peer_guard_can_be_zero_after_physical_hold();
     test_hole_sack_repeat_stays_prompt();
     test_cumulative_ack_repeat_coalesces_superseded_state();
 
     std::cout << "\nStream-Aware SACK Timer Tests:\n";
     test_sack_timer_final_short_collapses_long();
     test_sack_timer_message_boundary_uses_long_without_final();
+    test_out_of_order_sack_can_defer_until_physical_hold();
     test_sack_timer_more_frag_does_not_extend();
     test_sack_timer_slides_on_more_frag_when_enabled();
     test_sack_delay_short_zero_sentinel_preserves_legacy();
@@ -1704,6 +1833,7 @@ int main() {
     test_duplicate_sack_hole_is_suppressed_without_duplicate_retx_accounting();
     test_duplicate_data_is_not_delivered_twice_and_sends_recovery_sack();
     test_timeout_repair_retransmits_only_missing_slot_and_resets_timer();
+    test_timeout_window_retransmits_as_one_batch_when_callback_present();
 
     std::cout << "\nBasic Tests:\n";
     test_create_sr_arq();

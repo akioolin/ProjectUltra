@@ -423,6 +423,9 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                        options_.auto_cancel_file_after_sec > 0 ||
                        options_.exit_after_sec > 0;
     if (scenario_active_) {
+        if (!options_.auto_send_message.empty() || !options_.auto_send_file.empty()) {
+            tx_text_buffer_[0] = '\0';
+        }
         guiLog("[scenario] scripting active: auto_connect='%s' auto_accept=%d "
                "send_file='%s' send_msg='%s' msg_delay=%ds msg_after_file=%d cancel_file_after=%ds "
                "disconnect_after=%ds exit_after=%ds",
@@ -635,7 +638,8 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     ultra::gui::startupTrace("App", "protocol-callbacks-enter");
     protocol_.setTxDataCallback([this](const Bytes& data,
                                        bool expect_full_ofdm_anchor_after_tx) {
-        if (isInQsoDataFrame(data) && shouldDeferInQsoDataForTx()) {
+        const bool in_qso_data = isInQsoDataFrame(data);
+        if (in_qso_data && shouldDeferInQsoDataForTx()) {
             deferTxFrame(data, "TX audio", expect_full_ofdm_anchor_after_tx);
             return;
         }
@@ -643,7 +647,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         // When protocol layer wants to transmit, convert to audio
         auto samples = modem_.transmit(data);
         if (!samples.empty()) {
-            queueRealTxSamples(samples, "TX audio", false);
+            queueRealTxSamples(samples, "TX audio", in_qso_data);
             if (expect_full_ofdm_anchor_after_tx) {
                 modem_.expectFullOFDMAnchorOnce();
             }
@@ -662,7 +666,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
 
         auto samples = modem_.transmitBurst(frames);
         if (!samples.empty()) {
-            queueRealTxSamples(samples, "TX burst audio", false);
+            queueRealTxSamples(samples, "TX burst audio", in_qso_data);
         }
     });
 
@@ -1532,6 +1536,10 @@ void App::enqueueMessageTxStatus(protocol::ProtocolEngine::MessageTxStatusEvent 
             break;
         case protocol::ProtocolEngine::MessageTxStatus::DELIVERED:
             operator_events_tx_delivered_.fetch_add(1, std::memory_order_relaxed);
+            if (scenario_active_ && !options_.auto_send_message.empty() &&
+                event_status.text.rfind(options_.auto_send_message, 0) == 0) {
+                ++scenario_messages_delivered_;
+            }
             break;
         case protocol::ProtocolEngine::MessageTxStatus::FAILED:
             operator_events_tx_failed_.fetch_add(1, std::memory_order_relaxed);
@@ -2792,7 +2800,10 @@ void App::tickScenario() {
         const bool message_phase_clear =
             message_after_file ||
             options_.auto_send_message.empty() ||
-            (scenario_messages_sent_ >= message_target && !tx_in_progress_ &&
+            (scenario_messages_sent_ >= message_target &&
+             scenario_messages_delivered_ >= message_target &&
+             protocol_.getTxBacklogBytes() == 0 && protocol_.isReadyToSend() &&
+             !tx_in_progress_ &&
              now - scenario_message_sent_at_ >= std::chrono::milliseconds(2000));
         if (!options_.auto_send_file.empty() && !scenario_file_started_ &&
             message_phase_clear) {
@@ -2866,6 +2877,10 @@ bool App::queueRealTxSamples(const std::vector<float>& samples, const char* cont
         deferTxSamples(samples, context, false);
         return true;  // queued (deferred), not dropped
     }
+    if (in_qso_data && tx_in_progress_.load(std::memory_order_relaxed)) {
+        deferTxSamples(samples, context, true, tx_end_time_);
+        return true;
+    }
 
     return doQueueRealTxSamples(samples, context);
 }
@@ -2881,9 +2896,15 @@ uint32_t App::nextInQsoDataBackoffMs() {
 }
 
 void App::deferTxSamples(const std::vector<float>& samples, const char* context,
-                         bool in_qso_data) {
+                         bool in_qso_data,
+                         std::chrono::steady_clock::time_point earliest_flush) {
     const auto now = std::chrono::steady_clock::now();
-    const uint32_t backoff_ms = in_qso_data ? nextInQsoDataBackoffMs() : 0;
+    const bool local_tx_serialized = earliest_flush != std::chrono::steady_clock::time_point{};
+    const uint32_t backoff_ms =
+        (in_qso_data && !local_tx_serialized) ? nextInQsoDataBackoffMs() : 0;
+    if (!local_tx_serialized) {
+        earliest_flush = now + std::chrono::milliseconds(backoff_ms);
+    }
     if (deferred_tx_.empty()) {
         // Start the deadlock-guard clock on the first deferral of a burst.
         deferred_tx_deadline_ = now + std::chrono::milliseconds(kMaxTxDeferMs);
@@ -2899,12 +2920,16 @@ void App::deferTxSamples(const std::vector<float>& samples, const char* context,
                    context ? std::string(context) : std::string("TX audio"),
                    in_qso_data,
                    false,
-                   now + std::chrono::milliseconds(backoff_ms)});
-    guiLog("CCA: deferred %s%s (rms=%.4f thresh=%.4f depth=%zu backoff=%ums)",
+                   earliest_flush});
+    const auto wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        earliest_flush > now ? earliest_flush - now
+                             : std::chrono::steady_clock::duration::zero()).count();
+    guiLog("CCA: deferred %s%s (rms=%.4f thresh=%.4f depth=%zu wait=%lldms%s)",
            context ? context : "TX audio",
            in_qso_data ? " in-QSO DATA" : "",
            modem_.channelRms(), modem_.channelQuietThreshold(),
-           deferred_tx_.size(), backoff_ms);
+           deferred_tx_.size(), static_cast<long long>(wait_ms),
+           local_tx_serialized ? " local-tx-serialize" : "");
 }
 
 void App::deferTxFrame(const Bytes& frame, const char* context,

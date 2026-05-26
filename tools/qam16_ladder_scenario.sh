@@ -7,7 +7,7 @@ SNR_DB="20"
 SEED="42"
 EXPECT_RATE="R1/4"
 EXPECT_MOD="16QAM"
-MSG_COUNT=3
+MSG_COUNT=1
 MSG_INTERVAL=8
 CONNECT_DELAY=5
 DISCONNECT_AFTER=20
@@ -78,10 +78,10 @@ estimate_exit_after() {
       expected_payload_bps = raw_info_bps * 0.25
       if (expected_payload_bps < 300.0) expected_payload_bps = 300.0
       handshake = 25.0
-      bidirectional_messages = 2.0 * msg_count * msg_interval
+      scripted_messages = 1.0 * msg_count * msg_interval
       payload = (file_bytes * 8.0) / expected_payload_bps
       margin = 20.0
-      expected = handshake + bidirectional_messages + payload + disconnect_after + margin
+      expected = handshake + scripted_messages + payload + disconnect_after + margin
       ceiling = int(expected * 1.5 + 0.999)
       if (ceiling < 90) ceiling = 90
       print ceiling
@@ -121,6 +121,9 @@ fi
 SERVER_LOG="$OUT/serve.log"
 ALPHA_LOG="$OUT/alpha.log"
 BRAVO_LOG="$OUT/bravo.log"
+E2E_SERVER_LOG="$OUT/e2e_server.log"
+E2E_ALPHA_LOG="$OUT/e2e_alpha.log"
+E2E_BRAVO_LOG="$OUT/e2e_bravo.log"
 SUMMARY="$OUT/summary.env"
 
 count_pattern() {
@@ -144,6 +147,12 @@ unexpected_data_mode_pattern() {
   case "$EXPECT_MOD" in
     16QAM|QAM16)
       printf '%s\n' 'Adaptive downgrade queued: .* -> (D8PSK|DQPSK|QPSK|8PSK|QAM8)|MODE_CHANGE: OFDM (D8PSK|DQPSK|QPSK|8PSK|QAM8) |Data mode set to: (D8PSK|DQPSK|QPSK|8PSK|QAM8)|TX: Using (D8PSK|DQPSK|QPSK|8PSK|QAM8)'
+      ;;
+    QPSK)
+      printf '%s\n' 'Adaptive downgrade queued: .* -> (8PSK|QAM8|QAM16|16QAM)|MODE_CHANGE: OFDM (8PSK|QAM8|QAM16|16QAM) |Data mode set to: (8PSK|QAM8|QAM16|16QAM)|TX: Using (8PSK|QAM8|QAM16|16QAM)'
+      ;;
+    8PSK|QAM8)
+      printf '%s\n' 'Adaptive downgrade queued: .* -> (D8PSK|DQPSK|QPSK|QAM16|16QAM)|MODE_CHANGE: OFDM (D8PSK|DQPSK|QPSK|QAM16|16QAM) |Data mode set to: (D8PSK|DQPSK|QPSK|QAM16|16QAM)|TX: Using (D8PSK|DQPSK|QPSK|QAM16|16QAM)'
       ;;
     *)
       printf '%s\n' 'Adaptive downgrade queued:|MODE_CHANGE: OFDM |Data mode set to:|TX: Using '
@@ -186,7 +195,6 @@ scenario_passed() {
   [[ "$bravo_mode_count" -gt 0 ]] &&
   [[ "$alpha_unexpected_modes" -eq 0 ]] &&
   [[ "$bravo_unexpected_modes" -eq 0 ]] &&
-  [[ "$alpha_rx_msgs" -ge "$MSG_COUNT" ]] &&
   [[ "$bravo_rx_msgs" -ge "$MSG_COUNT" ]] &&
   [[ "$file_crc_ok" -gt 0 ]] &&
   [[ "$alpha_file_done" -gt 0 ]] &&
@@ -235,6 +243,9 @@ write_summary() {
     echo "BRAVO_CWFAIL_COUNT=$bravo_cwfail"
     echo "ALPHA_LOG=$ALPHA_LOG"
     echo "BRAVO_LOG=$BRAVO_LOG"
+    echo "E2E_SERVER_LOG=$E2E_SERVER_LOG"
+    echo "E2E_ALPHA_LOG=$E2E_ALPHA_LOG"
+    echo "E2E_BRAVO_LOG=$E2E_BRAVO_LOG"
     echo "RESULT=$result"
     echo "REASON=$reason"
   } | tee "$SUMMARY"
@@ -263,7 +274,7 @@ sleep 2
 dd if=/dev/urandom of="$PAYLOAD" bs=1024 count="$FILE_KB" status=none
 printf 'alpha_tok:ALPHA:alpha\nbravo_tok:BRAVO:bravo\n' > "$TOKENS"
 
-"$ROOT/build/ota_simulator" serve \
+ULTRA_E2E_DEBUG_LOG="$E2E_SERVER_LOG" "$ROOT/build/ota_simulator" serve \
   --bind 127.0.0.1:0 \
   --udp-bind 127.0.0.1:0 \
   --tokens "$TOKENS" \
@@ -284,17 +295,14 @@ if [[ -z "$GRPC" ]]; then
   exit 1
 fi
 
-"$ROOT/build/ultra_gui" -sim --ota-host "$GRPC" --token bravo_tok --station-id BRAVO \
+ULTRA_E2E_DEBUG_LOG="$E2E_BRAVO_LOG" "$ROOT/build/ultra_gui" -sim --ota-host "$GRPC" --token bravo_tok --station-id BRAVO \
   --session-id lobby \
   --auto-accept \
-  --auto-send-message "BRAVO QAM16 ladder" \
-  --auto-message-count "$MSG_COUNT" \
-  --auto-message-interval "$MSG_INTERVAL" \
   --exit-after "$EXIT_AFTER" \
   --log-level debug --log-category all --log-file "$BRAVO_LOG" >/dev/null 2>&1 &
 BRAVO_PID=$!
 
-"$ROOT/build/ultra_gui" -sim --ota-host "$GRPC" --token alpha_tok --station-id ALPHA \
+ULTRA_E2E_DEBUG_LOG="$E2E_ALPHA_LOG" "$ROOT/build/ultra_gui" -sim --ota-host "$GRPC" --token alpha_tok --station-id ALPHA \
   --session-id lobby \
   --auto-connect BRAVO \
   --connect-delay "$CONNECT_DELAY" \

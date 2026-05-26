@@ -20,6 +20,9 @@
 namespace ultra::ota_channel_core {
 
 inline constexpr std::string_view kInjectedAudioStationId = "__inject__";
+inline constexpr uint32_t kSessionTickIntervalMs = 10;
+inline constexpr uint32_t kMaxTxQueuedAudioMs = 20'000;
+inline constexpr uint32_t kMaxRxQueuedAudioMs = 200;
 
 struct SessionEvent {
     uint64_t sequence = 0;

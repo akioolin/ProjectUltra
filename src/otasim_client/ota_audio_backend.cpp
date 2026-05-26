@@ -92,7 +92,16 @@ void e2eDebugLine(const std::string& line) {
     }
     static std::mutex mutex;
     std::lock_guard<std::mutex> lock(mutex);
-    std::ofstream out(path, std::ios::app);
+    static std::string open_path;
+    static std::ofstream out;
+    if (!out.is_open() || open_path != path) {
+        out.close();
+        open_path = path;
+        out.open(open_path, std::ios::app);
+    }
+    if (!out) {
+        return;
+    }
     const auto now = std::chrono::system_clock::now().time_since_epoch();
     const auto epoch_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
@@ -209,17 +218,15 @@ std::vector<float> OtaAudioBackend::getRxSamples(size_t max_samples) {
     const size_t count = std::min(max_samples, rx_buffer_.size());
     std::vector<float> out(rx_buffer_.begin(), rx_buffer_.begin() + static_cast<std::ptrdiff_t>(count));
     rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + static_cast<std::ptrdiff_t>(count));
-    if (config_.station_id == "BRAVO") {
-        std::ostringstream oss;
-        oss << "client_get_rx station=" << config_.station_id
-            << " request=" << max_samples
-            << " returned=" << out.size()
-            << " rms=" << rms(out)
-            << " rx_buffer_remaining=" << rx_buffer_.size()
-            << " rx_pending_blocks=" << rx_pending_.size()
-            << " rx_next_sample=" << rx_next_sample_;
-        e2eDebugLine(oss.str());
-    }
+    std::ostringstream oss;
+    oss << "client_get_rx station=" << config_.station_id
+        << " request=" << max_samples
+        << " returned=" << out.size()
+        << " rms=" << rms(out)
+        << " rx_buffer_remaining=" << rx_buffer_.size()
+        << " rx_pending_blocks=" << rx_pending_.size()
+        << " rx_next_sample=" << rx_next_sample_;
+    e2eDebugLine(oss.str());
     return out;
 }
 
@@ -688,19 +695,17 @@ void OtaAudioBackend::rxLoop() {
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (config_.station_id == "BRAVO") {
-                std::ostringstream oss;
-                oss << "client_udp_recv station=" << config_.station_id
-                    << " lease=" << packet->header.lease_id
-                    << " seq=" << packet->header.seq
-                    << " start=" << packet->header.start_sample
-                    << " samples=" << packet->samples.size()
-                    << " bytes=" << n
-                    << " rms=" << rms(packet->samples)
-                    << " rx_buffer=" << rx_buffer_.size()
-                    << " rx_pending_blocks=" << rx_pending_.size();
-                e2eDebugLine(oss.str());
-            }
+            std::ostringstream oss;
+            oss << "client_udp_recv station=" << config_.station_id
+                << " lease=" << packet->header.lease_id
+                << " seq=" << packet->header.seq
+                << " start=" << packet->header.start_sample
+                << " samples=" << packet->samples.size()
+                << " bytes=" << n
+                << " rms=" << rms(packet->samples)
+                << " rx_buffer=" << rx_buffer_.size()
+                << " rx_pending_blocks=" << rx_pending_.size();
+            e2eDebugLine(oss.str());
         }
         pushRxPacket(packet->header.start_sample, packet->samples);
     }
@@ -719,6 +724,13 @@ void OtaAudioBackend::pushRxPacket(uint64_t start_sample, std::span<const float>
 
     const uint64_t end_sample = start_sample + samples.size();
     if (end_sample <= rx_next_sample_) {
+        std::ostringstream oss;
+        oss << "client_rx_late_drop station=" << config_.station_id
+            << " start=" << start_sample
+            << " end=" << end_sample
+            << " expected=" << rx_next_sample_
+            << " samples=" << samples.size();
+        e2eDebugLine(oss.str());
         return;
     }
 
@@ -726,6 +738,23 @@ void OtaAudioBackend::pushRxPacket(uint64_t start_sample, std::span<const float>
     if (start_sample < rx_next_sample_) {
         offset = static_cast<size_t>(rx_next_sample_ - start_sample);
         start_sample = rx_next_sample_;
+    } else if (start_sample > rx_next_sample_) {
+        const uint64_t missing = start_sample - rx_next_sample_;
+        const size_t fill = static_cast<size_t>(
+            std::min<uint64_t>(missing, kMaxRxBufferSamples));
+        if (fill > 0) {
+            rx_buffer_.insert(rx_buffer_.end(), fill, 0.0f);
+        }
+        std::ostringstream oss;
+        oss << "client_rx_gap_fill station=" << config_.station_id
+            << " expected=" << rx_next_sample_
+            << " got=" << start_sample
+            << " missing=" << missing
+            << " filled=" << fill
+            << " rx_buffer=" << rx_buffer_.size()
+            << " rx_pending_blocks=" << rx_pending_.size();
+        e2eDebugLine(oss.str());
+        rx_next_sample_ = start_sample;
     }
 
     std::vector<float> copy(samples.begin() + static_cast<std::ptrdiff_t>(offset), samples.end());

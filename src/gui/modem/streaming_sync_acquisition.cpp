@@ -652,11 +652,21 @@ void StreamingDecoder::searchForSync() {
             const bool light_found = waveform_->detectDataSync(
                 SampleSpan(search_buffer.data(), search_buffer.size()),
                 light_sync_result, known_cfo, CORR_DETECT_THRESHOLD);
+            // In connected OFDM the next frame type is unknown at acquisition time.
+            // Even when the data profile is coherent QPSK/QAM, ACK/SACK/TURN
+            // controls use a hardened R1/4 control profile and are validated
+            // by the downstream control-first LDPC parse. Do not apply the
+            // coherent-data sync threshold to this full-anchor fallback, or
+            // real control frames in Good fading can be rejected before the
+            // robust decoder can see them.
+            const bool unknown_frame_uses_control_sync_threshold = false;
             const auto fallback_thresholds = signal_policy::lightSyncThresholds(
-                is_coherent, is_narrowband, connected_, sync_reject_streak_);
+                unknown_frame_uses_control_sync_threshold, is_narrowband,
+                connected_, sync_reject_streak_);
             auto sync_decision = signal_policy::evaluateLightSyncCandidate(
-                light_found, light_sync_result.correlation, is_coherent,
-                connected_, sync_reject_streak_, fallback_thresholds);
+                light_found, light_sync_result.correlation,
+                unknown_frame_uses_control_sync_threshold, connected_,
+                sync_reject_streak_, fallback_thresholds);
             if (light_found && light_sync_result.correlation < fallback_thresholds.min_confidence) {
                 if (sync_decision.weak_accept) {
                     LOG_MODEM(INFO,

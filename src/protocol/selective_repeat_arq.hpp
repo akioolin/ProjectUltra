@@ -69,6 +69,9 @@ public:
     void setDataReceivedCallback(DataReceivedCallback cb) override;
     void setSendCompleteCallback(SendCompleteCallback cb) override;
 
+    using TransmitBatchCallback = std::function<void(const std::vector<Bytes>&)>;
+    void setTransmitBatchCallback(TransmitBatchCallback cb);
+
     ARQStats getStats() const override { return stats_; }
     void resetStats() override { stats_ = ARQStats{}; }
 
@@ -144,6 +147,16 @@ public:
     void setAckBatchThroughMoreFrag(bool enabled) { ack_batch_through_more_frag_ = enabled; }
     bool getAckBatchThroughMoreFrag() const { return ack_batch_through_more_frag_; }
 
+    // Immediate out-of-order SACKs are the default recovery safety valve. OFDM
+    // physical-hold profiles can defer in-burst hole reports until the sender's
+    // burst airtime has cleared, avoiding a control turn inside DATA.
+    void setImmediateOutOfOrderSackEnabled(bool enabled) {
+        immediate_out_of_order_sack_enabled_ = enabled;
+    }
+    bool getImmediateOutOfOrderSackEnabled() const {
+        return immediate_out_of_order_sack_enabled_;
+    }
+
     // Set max retries before giving up on a frame
     void setMaxRetries(int retries) { config_.max_retries = std::max(1, retries); }
     int getMaxRetries() const { return config_.max_retries; }
@@ -151,8 +164,12 @@ public:
     // ACK repeat: send multiple copies with delay for fading reliability
     void setAckRepeatCount(int count) { ack_repeat_count_ = std::clamp(count, 1, 3); }
     void setAckRepeatDelay(uint32_t ms) { ack_repeat_delay_ms_ = std::max(1u, ms); }
+    void setAckRepeatPeerBurstGuardMs(uint32_t ms) { ack_repeat_peer_burst_guard_ms_ = ms; }
     int getAckRepeatCount() const { return ack_repeat_count_; }
     uint32_t getAckRepeatDelay() const { return ack_repeat_delay_ms_; }
+    uint32_t getAckRepeatPeerBurstGuardMs() const {
+        return ack_repeat_peer_burst_guard_ms_.value_or(config_.sack_delay_ms);
+    }
 
     using ReceiveWindowAdvancedCallback = std::function<void(uint16_t base_seq, size_t window_size)>;
     void setReceiveWindowAdvancedCallback(ReceiveWindowAdvancedCallback cb) {
@@ -258,11 +275,13 @@ private:
     uint32_t sack_delay_short_ms_ = 0;
     bool sack_delay_slides_on_data_ = false;
     bool ack_batch_through_more_frag_ = false;
+    bool immediate_out_of_order_sack_enabled_ = true;
     uint32_t frames_since_ack_ = 0; // Frames received since last ACK sent
 
     // ACK repeat config (time-diversity for fading channels)
     int ack_repeat_count_ = 1;         // Total copies (1=single, 2=double, 3=triple)
     uint32_t ack_repeat_delay_ms_ = 80; // Delay between copies
+    std::optional<uint32_t> ack_repeat_peer_burst_guard_ms_;
 
     // Pending repeat state (queue avoids overwriting repeats during ACK bursts)
     struct AckRepeatJob {
@@ -294,6 +313,7 @@ private:
 
     // Callbacks
     TransmitCallback on_transmit_;
+    TransmitBatchCallback on_transmit_batch_;
     DataReceivedCallback on_data_received_;
     SendCompleteCallback on_send_complete_;
     ReceiveWindowAdvancedCallback on_rx_window_advanced_;
@@ -308,13 +328,16 @@ private:
     bool isInRXWindow(uint16_t seq) const;
 
     void transmitData(const Bytes& data);
+    void transmitDataBatch(const std::vector<Bytes>& frames);
     void handleDataFrame(const v2::DataFrame& frame);
     void handlePartialFrame(const v2::PartialFrameCodewords& partial);
     void handleDataRepairFrame(const v2::DataRepairFrame& repair);
     void handleAckFrame(const v2::ControlFrame& frame);
     void handleNackFrame(const v2::ControlFrame& frame);
 
-    void retransmitFrame(size_t slot, RetransmitCause cause);
+    void retransmitFrame(size_t slot,
+                         RetransmitCause cause,
+                         std::vector<Bytes>* deferred_timeout_batch = nullptr);
     bool sendDataRepair(size_t slot, uint32_t missing_bitmap);
     bool suppressFullRetransmitForRepair(size_t slot, RetransmitCause cause);
     uint32_t computeRepairGuardMs(const TXSlot& slot, size_t repair_frame_codewords) const;

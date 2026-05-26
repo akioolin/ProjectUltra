@@ -178,6 +178,7 @@ private:
     bool scenario_payload_sent_ = false;    // full payload sequence dispatched
     bool scenario_message_sent_ = false;    // chat-message phase fired (if any)
     int scenario_messages_sent_ = 0;        // count of sequential auto-messages sent
+    int scenario_messages_delivered_ = 0;   // scripted local messages ACKed by ARQ
     bool scenario_file_started_ = false;    // file phase started (if any)
     bool scenario_file_done_seen_ = false;  // file phase left in-progress (complete/cancel)
     bool scenario_connected_seen_ = false;
@@ -358,7 +359,8 @@ private:
     bool doQueueRealTxSamples(const std::vector<float>& samples, const char* context);
     bool shouldDeferInQsoDataForTx() const;
     void deferTxSamples(const std::vector<float>& samples, const char* context,
-                        bool in_qso_data);
+                        bool in_qso_data,
+                        std::chrono::steady_clock::time_point earliest_flush = {});
     void deferTxFrame(const Bytes& frame, const char* context,
                       bool expect_full_ofdm_anchor_after_tx);
     void deferTxBurst(const std::vector<Bytes>& frames, const char* context);

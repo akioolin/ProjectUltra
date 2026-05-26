@@ -412,14 +412,21 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         streaming_decoder_->clearFullOFDMAnchorExpectation();
     }
 
-    // Use light preamble (LTS only) for connected OFDM control turns. A single
-    // DATA frame is a new physical DATA turn and carries a full anchor so the
-    // peer can recover after idle or after an ACK/NACK turnaround. TURNOVER,
-    // TURN_REQUEST, FILE_CANCEL, and MODE_CHANGE are link-state transition
-    // tokens, so they also carry a full anchor instead of depending on warm
-    // sync across a half-duplex turnaround or a degraded high-order data mode.
+    // A DATA frame emitted through transmit() is a separate half-duplex turn,
+    // not an in-burst continuation. The peer may have just sent ACK/SACK
+    // control and correctly armed a full-anchor expectation, so DATA repairs
+    // must re-anchor with the full chirp. Short re-anchors are retained for
+    // physically contiguous frames inside transmitBurst().
+    //
+    // Connected OFDM ACK/NACK control frames stay light for turnaround
+    // efficiency. TURNOVER, TURN_REQUEST, FILE_CANCEL, and MODE_CHANGE are
+    // link-state transition tokens, so they carry a full anchor instead of
+    // depending on warm sync across a half-duplex turnaround or a degraded
+    // high-order data mode.
     bool use_light = ((connected_ && handshake_complete_) || is_disconnect_ack) &&
-                     is_ofdm && !is_data_frame && !is_turn_control &&
+                     is_ofdm &&
+                     !is_data_frame &&
+                     !is_turn_control &&
                      !is_mode_change;
     auto samples = use_light ? streaming_encoder_->encodeFrameLight(data)
                              : streaming_encoder_->encodeFrame(data);

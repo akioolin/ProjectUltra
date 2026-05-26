@@ -1485,6 +1485,172 @@ bool test_file_transfer_queues_during_connect_guard() {
     return true;
 }
 
+bool test_queued_file_yields_to_pending_peer_turn_request_before_start() {
+    TEST("Queued file yields to pending peer turn request before start");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+    config.arq.ack_timeout_ms = 200;
+
+    ProtocolEngine stationA(config);
+    ProtocolEngine stationB(config);
+
+    stationA.setLocalCallsign("W1ABC");
+    stationB.setLocalCallsign("K2DEF");
+
+    ultra::test::TempDir temp_dir("ultra_protocol_queued_file_turn_test");
+    if (!temp_dir.valid()) FAIL("Could not create temp test directory");
+    const auto& test_dir = temp_dir.path();
+
+    const size_t FILE_SIZE = 512;
+    std::string src_path = createPseudoRandomTestFile(test_dir, "queued_file.bin", FILE_SIZE);
+    if (src_path.empty()) FAIL("Could not create queued file test source");
+
+    std::string rx_dir = (test_dir / "rx").string();
+    std::filesystem::create_directories(rx_dir);
+    stationB.setReceiveDirectory(rx_dir);
+
+    std::vector<std::string> received_at_a;
+    std::vector<std::string> received_at_b;
+    stationA.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
+        received_at_a.push_back(text);
+    });
+    stationB.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
+        received_at_b.push_back(text);
+    });
+
+    bool file_received = false;
+    bool receive_success = false;
+    std::string received_path;
+    stationB.setFileReceivedCallback([&](const std::string& path, bool success, const std::string&) {
+        file_received = true;
+        receive_success = success;
+        received_path = path;
+    });
+
+    bool file_sent = false;
+    bool send_success = false;
+    stationA.setFileSentCallback([&](bool success, const std::string&) {
+        file_sent = true;
+        send_success = success;
+    });
+
+    SimulatedChannel channel(stationA, stationB);
+    stationA.connect("K2DEF");
+    channel.run(30, 100);
+
+    if (!stationA.isConnected() || !stationB.isConnected()) FAIL("Connection not established");
+    if (!stationA.sendMessage("A first")) FAIL("A sendMessage failed");
+    if (!stationB.sendMessage("B queued before file")) FAIL("B sendMessage should queue");
+
+    // Deliver B's TURN_REQUEST and A's DATA, but queue the file before A sees
+    // the ACK that clears its in-flight message. This reproduces the GUI
+    // stall where queued_file_path_ and peer_data_turn_requested_ blocked each
+    // other.
+    channel.deliver();
+    if (!stationA.sendFile(src_path)) FAIL("A sendFile() should queue behind pending ACK");
+
+    for (int i = 0; i < 400 && received_at_a.empty(); i++) {
+        channel.run(1, 50);
+    }
+    if (channel.getTurnoverCountA() < 1) {
+        FAIL("A did not yield DATA turn for peer request while file was queued");
+    }
+    if (received_at_a.empty() || received_at_a[0] != "B queued before file") {
+        FAIL("A did not receive B's queued message before starting queued file");
+    }
+
+    for (int i = 0; i < 800 && (!file_received || !file_sent); i++) {
+        channel.run(1, 50);
+    }
+
+    if (!file_sent) FAIL("Queued file was not sent after peer turn drained");
+    if (!send_success) FAIL("Queued file send reported failure");
+    if (!file_received) FAIL("Queued file was not received");
+    if (!receive_success) FAIL("Queued file receive reported failure");
+    if (!filesEqual(src_path, received_path)) FAIL("Queued file content mismatch");
+
+    PASS();
+    return true;
+}
+
+bool test_queued_file_preempts_deferred_chat_after_current_payload() {
+    TEST("Queued file starts before deferred chat after current payload drains");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+    config.arq.ack_timeout_ms = 200;
+
+    ProtocolEngine stationA(config);
+    ProtocolEngine stationB(config);
+
+    stationA.setLocalCallsign("W1ABC");
+    stationB.setLocalCallsign("K2DEF");
+
+    ultra::test::TempDir temp_dir("ultra_protocol_file_chat_priority_test");
+    if (!temp_dir.valid()) FAIL("Could not create temp test directory");
+    const auto& test_dir = temp_dir.path();
+
+    const size_t FILE_SIZE = 512;
+    std::string src_path = createPseudoRandomTestFile(test_dir, "priority_file.bin", FILE_SIZE);
+    if (src_path.empty()) FAIL("Could not create test source file");
+
+    std::string rx_dir = (test_dir / "rx").string();
+    std::filesystem::create_directories(rx_dir);
+    stationB.setReceiveDirectory(rx_dir);
+
+    std::vector<std::string> b_events;
+    stationB.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
+        b_events.push_back("msg:" + text);
+    });
+
+    bool file_received = false;
+    bool receive_success = false;
+    std::string received_path;
+    stationB.setFileReceivedCallback([&](const std::string& path, bool success, const std::string&) {
+        file_received = true;
+        receive_success = success;
+        received_path = path;
+        b_events.push_back(success ? "file:ok" : "file:fail");
+    });
+
+    bool file_sent = false;
+    bool send_success = false;
+    stationA.setFileSentCallback([&](bool success, const std::string&) {
+        file_sent = true;
+        send_success = success;
+    });
+
+    SimulatedChannel channel(stationA, stationB);
+    stationA.connect("K2DEF");
+    channel.run(30, 100);
+
+    if (!stationA.isConnected() || !stationB.isConnected()) FAIL("Connection not established");
+    if (!stationA.sendMessage("A current")) FAIL("A current sendMessage failed");
+    if (!stationA.sendMessage("A deferred chat")) FAIL("A deferred chat should queue");
+    if (!stationA.sendFile(src_path)) FAIL("A sendFile() should queue behind current payload");
+
+    for (int i = 0; i < 1200 && (!file_received || !file_sent); i++) {
+        channel.run(1, 50);
+    }
+
+    if (!file_sent) FAIL("Queued file was not sent");
+    if (!send_success) FAIL("Queued file send reported failure");
+    if (!file_received) FAIL("Queued file was not received");
+    if (!receive_success) FAIL("Queued file receive reported failure");
+    if (!filesEqual(src_path, received_path)) FAIL("Queued file content mismatch");
+
+    auto file_it = std::find(b_events.begin(), b_events.end(), "file:ok");
+    auto deferred_it = std::find(b_events.begin(), b_events.end(), "msg:A deferred chat");
+    if (file_it == b_events.end()) FAIL("File event missing from receive order");
+    if (deferred_it != b_events.end() && deferred_it < file_it) {
+        FAIL("Deferred chat was delivered before the queued file");
+    }
+
+    PASS();
+    return true;
+}
+
 bool test_file_transfer_holds_link_and_defers_peer_message() {
     TEST("File transfer holds link and defers peer message");
 
@@ -1905,6 +2071,8 @@ int main() {
     std::cout << "\nFile Transfer Tests:\n";
     test_file_transfer_small();
     test_file_transfer_queues_during_connect_guard();
+    test_queued_file_yields_to_pending_peer_turn_request_before_start();
+    test_queued_file_preempts_deferred_chat_after_current_payload();
     test_file_transfer_holds_link_and_defers_peer_message();
     test_file_transfer_receiver_cancel_propagates_and_frees_link();
     test_file_transfer_receiver_cancel_sender_retains_turn();

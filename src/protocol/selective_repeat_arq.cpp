@@ -534,11 +534,14 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
             sendFrameNack(expected_seq);
         }
 
-        if (out_of_order || (batch_threshold_reached && batch_ack_allowed)) {
+        const bool out_of_order_sack_allowed =
+            out_of_order &&
+            (immediate_out_of_order_sack_enabled_ || !frame_more_frag || frame_final);
+        if (out_of_order_sack_allowed || (batch_threshold_reached && batch_ack_allowed)) {
             // Bump the trigger-reason counter BEFORE sendSack — out_of_order
             // takes priority because it's the immediate safety valve. Each
             // SACK send increments exactly one trigger counter.
-            if (out_of_order) {
+            if (out_of_order_sack_allowed) {
                 stats_.sack_trigger_out_of_order++;
             } else {
                 stats_.sack_trigger_threshold++;
@@ -949,7 +952,12 @@ void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
         ++it;
     }
 
-    // TX side: check for timeouts and retransmit
+    // TX side: check for timeouts and retransmit. When several slots expire
+    // together, defer their physical transmission so OFDM can send one repair
+    // burst instead of N independent full-preamble waveforms.
+    std::vector<Bytes> timeout_retx_batch;
+    std::vector<Bytes>* timeout_retx_batch_ptr =
+        on_transmit_batch_ ? &timeout_retx_batch : nullptr;
     for (size_t i = 0; i < config_.window_size; i++) {
         size_t slot = seqToSlot((tx_base_seq_ + i) & 0xFFFF);
         TXSlot& s = tx_window_[slot];
@@ -1024,13 +1032,15 @@ void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
                         ultra::phyDiagLine(oss.str());
                     }
                     stats_.timeouts++;
-                    retransmitFrame(slot, RetransmitCause::TIMEOUT);
+                    retransmitFrame(slot, RetransmitCause::TIMEOUT,
+                                    timeout_retx_batch_ptr);
                 }
             } else {
                 s.timeout_ms -= elapsed_ms;
             }
         }
     }
+    transmitDataBatch(timeout_retx_batch);
 
     // RX side: delayed SACK for half-duplex burst handling
     if (sack_pending_) {
@@ -1110,7 +1120,9 @@ bool SelectiveRepeatARQ::suppressFullRetransmitForRepair(size_t slot,
     return true;
 }
 
-void SelectiveRepeatARQ::retransmitFrame(size_t slot, RetransmitCause cause) {
+void SelectiveRepeatARQ::retransmitFrame(size_t slot,
+                                         RetransmitCause cause,
+                                         std::vector<Bytes>* deferred_timeout_batch) {
     TXSlot& s = tx_window_[slot];
     if (suppressFullRetransmitForRepair(slot, cause)) {
         return;
@@ -1199,7 +1211,11 @@ void SelectiveRepeatARQ::retransmitFrame(size_t slot, RetransmitCause cause) {
         case RetransmitCause::NACK: stats_.retransmissions_nack++; break;
     }
     s.timeout_ms = currentAckTimeoutMs();
-    transmitData(s.frame_data);
+    if (cause == RetransmitCause::TIMEOUT && deferred_timeout_batch != nullptr) {
+        deferred_timeout_batch->push_back(s.frame_data);
+    } else {
+        transmitData(s.frame_data);
+    }
 }
 
 bool SelectiveRepeatARQ::sendDataRepair(size_t slot, uint32_t missing_bitmap) {
@@ -1528,8 +1544,9 @@ void SelectiveRepeatARQ::sendSack() {
         // deafen the receiver to that burst. Hole-bearing SACK repeats remain
         // prompt because they are repair feedback, not just ACK diversity.
         const bool guard_half_duplex_repeat = (bitmap == 0) && !sack_has_final;
+        const uint32_t peer_burst_guard_ms = getAckRepeatPeerBurstGuardMs();
         uint32_t delay_ms = arq_policy::ackRepeatDelayWithHalfDuplexGuard(
-            base_delay_ms, config_.sack_delay_ms, guard_half_duplex_repeat);
+            base_delay_ms, peer_burst_guard_ms, guard_half_duplex_repeat);
         int jitter_ms = ackRepeatJitterMs(base_seq, bitmap, copy_index);
 
         int64_t scheduled = static_cast<int64_t>(delay_ms) + jitter_ms;
@@ -1551,9 +1568,9 @@ void SelectiveRepeatARQ::sendSack() {
         job.copy_index = copy_index;
         ack_repeat_jobs_.push_back(std::move(job));
 
-        LOG_MODEM(INFO, "SR-ARQ: ACK_REPEAT scheduled copy=%d delay=%ums jitter=%dms enabled=%d queue=%zu",
-                  copy_index, static_cast<uint32_t>(scheduled), jitter_ms, repeat_ack ? 1 : 0,
-                  ack_repeat_jobs_.size());
+        LOG_MODEM(INFO, "SR-ARQ: ACK_REPEAT scheduled copy=%d delay=%ums jitter=%dms peer_guard=%ums enabled=%d queue=%zu",
+                  copy_index, static_cast<uint32_t>(scheduled), jitter_ms,
+                  peer_burst_guard_ms, repeat_ack ? 1 : 0, ack_repeat_jobs_.size());
         if (ultra::phyDiagnosticsEnabled()) {
             std::ostringstream oss;
             oss << "event=arq_ack_repeat_schedule"
@@ -1659,8 +1676,25 @@ void SelectiveRepeatARQ::transmitData(const Bytes& data) {
     }
 }
 
+void SelectiveRepeatARQ::transmitDataBatch(const std::vector<Bytes>& frames) {
+    if (frames.empty()) {
+        return;
+    }
+    if (frames.size() > 1 && on_transmit_batch_) {
+        on_transmit_batch_(frames);
+        return;
+    }
+    for (const auto& frame : frames) {
+        transmitData(frame);
+    }
+}
+
 void SelectiveRepeatARQ::setTransmitCallback(TransmitCallback cb) {
     on_transmit_ = std::move(cb);
+}
+
+void SelectiveRepeatARQ::setTransmitBatchCallback(TransmitBatchCallback cb) {
+    on_transmit_batch_ = std::move(cb);
 }
 
 void SelectiveRepeatARQ::setDataReceivedCallback(DataReceivedCallback cb) {

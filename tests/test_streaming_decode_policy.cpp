@@ -4,6 +4,7 @@
 
 using namespace ultra;
 using namespace ultra::gui::streaming_decode_policy;
+using namespace ultra::gui;
 
 namespace {
 
@@ -24,9 +25,30 @@ void test_robust_ofdm_control_samples() {
     CHECK(estimateRobustOFDMControlSamples(8000, Modulation::DQPSK, CodeRate::R1_4, 59, 1152) == 8000,
           "native DQPSK R1/4 control profile should use waveform default");
 
-    const size_t robust = estimateRobustOFDMControlSamples(
+    const size_t robust_d8psk = estimateRobustOFDMControlSamples(
         8000, Modulation::D8PSK, CodeRate::R2_3, 59, 1152);
-    CHECK(robust == 10368, "high-rate data mode should reserve enough samples for robust DQPSK control");
+    CHECK(robust_d8psk == 10368,
+          "differential high-rate data mode should reserve enough samples for DQPSK control");
+
+    const auto qpsk_control =
+        streaming_control_profile::profileForDataMode(Modulation::QPSK);
+    CHECK(qpsk_control.modulation == Modulation::QPSK,
+          "coherent data should use coherent QPSK control");
+    CHECK(qpsk_control.rate == CodeRate::R1_4,
+          "coherent control should retain hardened R1/4 FEC");
+    const size_t robust_qpsk = estimateRobustOFDMControlSamples(
+        8000, Modulation::QPSK, CodeRate::R2_3, 59, 1152);
+    CHECK(robust_qpsk == 10368,
+          "QPSK R2/3 data should reserve enough samples for QPSK R1/4 control");
+
+    const auto qpsk_control_preconfirm =
+        streaming_control_profile::profileForDataMode(Modulation::QPSK, false);
+    CHECK(qpsk_control_preconfirm.modulation == Modulation::DQPSK,
+          "unconfirmed OFDM handoff should retain legacy DQPSK control");
+    const size_t legacy_preconfirm = estimateRobustOFDMControlSamples(
+        8000, Modulation::QPSK, CodeRate::R2_3, 59, 1152, false);
+    CHECK(legacy_preconfirm == 10368,
+          "pre-confirmation OFDM control sizing should use legacy DQPSK R1/4 sizing");
 
     CHECK(estimateRobustOFDMControlSamples(12000, Modulation::D8PSK, CodeRate::R2_3, 59, 1152) == 12000,
           "robust estimate should never reduce waveform default");
@@ -87,7 +109,7 @@ void test_qam16_control_peek_is_subfixed() {
         qam16_control_default, Modulation::QAM16, CodeRate::R1_2,
         CARRIERS, SAMPLES_PER_SYMBOL);
     CHECK(robust_samples == 10368,
-          "QAM16 data mode should use the robust DQPSK control-sized peek");
+          "QAM16 data mode should use the robust coherent-QPSK control-sized peek");
 
     const size_t data_symbols =
         robust_samples / static_cast<size_t>(SAMPLES_PER_SYMBOL) - 2;

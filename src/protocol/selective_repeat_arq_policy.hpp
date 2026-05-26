@@ -15,6 +15,7 @@ inline constexpr size_t kMaxWindow = 16;
 inline constexpr int kMaxFastRetransmitsPerHole = 1;
 inline constexpr int kMinHoleConfirmations = 2;
 inline constexpr int kMaxHoleProbeRetransmits = 1;
+inline constexpr uint32_t kAckRepeatMaxJitterMs = 30;
 
 inline size_t clampWindowSize(size_t size, size_t max_window = kMaxWindow) {
     return std::clamp<size_t>(size, 1, max_window);
@@ -173,11 +174,32 @@ inline uint32_t ackRepeatDelayWithHalfDuplexGuard(uint32_t repeat_delay_ms,
     return static_cast<uint32_t>(std::min<uint64_t>(guarded_delay, 0xFFFFFFFFull));
 }
 
+inline uint32_t ackRepeatTailGuardMs(uint32_t ack_airtime_ms,
+                                     uint32_t sack_delay_ms,
+                                     uint32_t ack_repeat_delay_ms,
+                                     int ack_repeat_count,
+                                     bool guard_half_duplex_repeat) {
+    if (ack_repeat_count <= 1) {
+        return 0;
+    }
+
+    const uint32_t base_delay =
+        ackRepeatDelayForCopy(ack_repeat_delay_ms, ack_repeat_count);
+    const uint32_t repeat_delay =
+        ackRepeatDelayWithHalfDuplexGuard(base_delay, sack_delay_ms,
+                                          guard_half_duplex_repeat);
+    const uint64_t tail_ms = static_cast<uint64_t>(repeat_delay) +
+                             kAckRepeatMaxJitterMs +
+                             static_cast<uint64_t>(ack_airtime_ms);
+    return static_cast<uint32_t>(std::min<uint64_t>(tail_ms, 0xFFFFFFFFull));
+}
+
 inline int ackRepeatJitterMs(uint16_t base_seq, uint32_t bitmap, int copy_index) {
     uint32_t h = static_cast<uint32_t>(base_seq);
     h = (h * 1103515245u + 12345u) ^ (bitmap << 8) ^ (bitmap >> 16)
         ^ static_cast<uint32_t>(copy_index * 7919);
-    return static_cast<int>(h % 61u) - 30;
+    return static_cast<int>(h % (2u * kAckRepeatMaxJitterMs + 1u)) -
+           static_cast<int>(kAckRepeatMaxJitterMs);
 }
 
 inline uint32_t rttSampleMs(uint64_t now_ms, uint64_t first_tx_ms) {

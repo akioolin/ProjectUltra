@@ -261,7 +261,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // Bootstrap safety: chirp SNR can overestimate first OFDM frame quality.
         // Start one step more robust when channel is borderline.
         if (isOFDMMode(negotiated_mode_)) {
-            CodeRate capped = capInitialOFDMRate(snr_db, fading_index_, rec_rate);
+            CodeRate capped = capInitialOFDMRate(snr_db, fading_index_, rec_rate, rec_mod);
             if (capped != rec_rate) {
                 LOG_MODEM(INFO, "Connection: Bootstrap cap %s -> %s for initial OFDM setup (SNR=%.1f (%s), fading=%.2f)",
                           codeRateToString(rec_rate), codeRateToString(capped), snr_db,

@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cmath>
 
 namespace ultra {
 namespace protocol {
@@ -25,6 +27,9 @@ inline constexpr uint32_t kWideOFDMFullAnchorExtraSamples =
     2 * ((kOFDMSampleRate * kWideOFDMChirpGapMs) / 1000);
 inline constexpr uint32_t kWideOFDMFullAnchorExtraMs =
     (kWideOFDMFullAnchorExtraSamples * 1000 + kOFDMSampleRate - 1) / kOFDMSampleRate;
+inline constexpr uint32_t kWideOFDMShortReanchorDefaultMs = 100;
+inline constexpr uint32_t kWideOFDMShortReanchorMinMs = 100;
+inline constexpr uint32_t kWideOFDMShortReanchorMaxMs = 300;
 inline constexpr uint32_t kNarrowOFDMSymbolSamples = 2240;
 inline constexpr uint32_t kNarrowOFDMCarriers = 21;
 inline constexpr uint32_t kNarrowOFDMPilotSpacing = 10;
@@ -312,6 +317,38 @@ inline uint32_t wideOFDMSymbolsForCodewords(Modulation mod, CodeRate rate, int c
     return 2 + data_symbols;
 }
 
+inline uint32_t wideOFDMShortReanchorChirpDurationMs() {
+    static const uint32_t duration_ms = [] {
+        const char* value = std::getenv("ULTRA_SHORT_REANCHOR_CHIRP_MS");
+        if (!value || value[0] == '\0') {
+            return kWideOFDMShortReanchorDefaultMs;
+        }
+
+        char* end = nullptr;
+        const float parsed = std::strtof(value, &end);
+        if (end == value || !std::isfinite(parsed)) {
+            return kWideOFDMShortReanchorDefaultMs;
+        }
+        const uint32_t rounded = static_cast<uint32_t>(parsed + 0.5f);
+        return std::clamp<uint32_t>(rounded,
+                                    kWideOFDMShortReanchorMinMs,
+                                    kWideOFDMShortReanchorMaxMs);
+    }();
+    return duration_ms;
+}
+
+inline bool shouldUseWideOFDMShortReanchor(WaveformMode waveform,
+                                           Modulation modulation,
+                                           float fading_index) {
+    if (waveform != WaveformMode::OFDM_CHIRP ||
+        !ofdm_link_adaptation::isCoherentModulation(modulation) ||
+        !std::isfinite(fading_index)) {
+        return false;
+    }
+
+    return fading_index >= kQAM16AwgnFadingMax;
+}
+
 inline OFDMFrameTiming wideOFDMFrameTiming(Modulation mod,
                                            CodeRate rate,
                                            int cw_count = v2::kDefaultFixedFrameCodewords) {
@@ -331,7 +368,8 @@ inline OFDMFrameTiming wideOFDMFrameTiming(Modulation mod,
 inline uint32_t wideOFDMBurstAirtimeMs(Modulation mod,
                                        CodeRate rate,
                                        size_t frame_count,
-                                       int cw_count = v2::kDefaultFixedFrameCodewords) {
+                                       int cw_count = v2::kDefaultFixedFrameCodewords,
+                                       uint32_t continuation_reanchor_ms = 0) {
     if (frame_count == 0) {
         return 0;
     }
@@ -340,8 +378,11 @@ inline uint32_t wideOFDMBurstAirtimeMs(Modulation mod,
     uint64_t burst_ms = static_cast<uint64_t>(frame_count) * timing.data_ms;
     if (frame_count > 1) {
         // StreamingEncoder::encodeBurstLight() emits a full chirp anchor on the
-        // first OFDM burst frame, then light LTS-only preambles for continuations.
+        // first OFDM burst frame, then either light LTS-only preambles or
+        // adaptive short chirp+LTS reanchors for continuations.
         burst_ms += kWideOFDMFullAnchorExtraMs;
+        burst_ms += static_cast<uint64_t>(frame_count - 1) *
+                    static_cast<uint64_t>(continuation_reanchor_ms);
     }
     return static_cast<uint32_t>(std::min<uint64_t>(burst_ms, 0xFFFFFFFFull));
 }
@@ -349,9 +390,11 @@ inline uint32_t wideOFDMBurstAirtimeMs(Modulation mod,
 inline uint32_t wideOFDMSackDelayMs(Modulation mod,
                                     CodeRate rate,
                                     size_t window_size,
-                                    int cw_count = v2::kDefaultFixedFrameCodewords) {
+                                    int cw_count = v2::kDefaultFixedFrameCodewords,
+                                    uint32_t continuation_reanchor_ms = 0) {
     const uint32_t burst_ms = wideOFDMBurstAirtimeMs(
-        mod, rate, std::max<size_t>(1, window_size), cw_count);
+        mod, rate, std::max<size_t>(1, window_size), cw_count,
+        continuation_reanchor_ms);
     return burst_ms + kCarrierSenseSackCoalesceMs;
 }
 
@@ -421,17 +464,20 @@ inline uint32_t computeWideOFDMAckTimeoutMs(Modulation mod,
                                             size_t window_size,
                                             uint32_t sack_delay_ms,
                                             int ack_repeat_count,
-                                            int cw_count = v2::kDefaultFixedFrameCodewords) {
+                                            int cw_count = v2::kDefaultFixedFrameCodewords,
+                                            uint32_t continuation_reanchor_ms = 0) {
     const int sanitized_cw_count = v2::sanitizeFixedFrameCodewords(cw_count);
     const OFDMFrameTiming timing = wideOFDMFrameTiming(mod, rate, sanitized_cw_count);
 
     const uint32_t ack_copies = static_cast<uint32_t>(std::clamp(ack_repeat_count, 1, 3));
     const size_t window_frames = std::max<size_t>(1, window_size);
     const uint32_t tx_burst_ms = wideOFDMBurstAirtimeMs(
-        mod, rate, window_frames, sanitized_cw_count);
+        mod, rate, window_frames, sanitized_cw_count,
+        continuation_reanchor_ms);
     const uint32_t physical_sack_hold_ms = std::max<uint32_t>(
         sack_delay_ms,
-        wideOFDMSackDelayMs(mod, rate, window_frames, sanitized_cw_count));
+        wideOFDMSackDelayMs(mod, rate, window_frames, sanitized_cw_count,
+                            continuation_reanchor_ms));
     const uint32_t ack_path_ms = ack_copies * timing.ack_ms + physical_sack_hold_ms;
 
     constexpr uint32_t audio_chain_rtt_margin_ms = 700;

@@ -1,4 +1,5 @@
 #include "protocol/connection_policy.hpp"
+#include "protocol/selective_repeat_arq_policy.hpp"
 
 #include <cmath>
 #include <iostream>
@@ -142,6 +143,21 @@ void test_wide_ofdm_timing_and_timeout() {
     CHECK(w8_sack_delay == w8_burst_ms + kCarrierSenseSackCoalesceMs,
           "wide OFDM SACK delay should hold ACKs through a physical sender window");
 
+    const auto qpsk_r23_8cw = wideOFDMFrameTiming(Modulation::QPSK, CodeRate::R2_3, 8);
+    const uint32_t qpsk_r23_w8_burst_ms = wideOFDMBurstAirtimeMs(
+        Modulation::QPSK, CodeRate::R2_3, 8, 8);
+    const uint32_t qpsk_r23_w8_reanchor_burst_ms = wideOFDMBurstAirtimeMs(
+        Modulation::QPSK, CodeRate::R2_3, 8, 8, kWideOFDMShortReanchorDefaultMs);
+    CHECK(qpsk_r23_w8_burst_ms == 8 * qpsk_r23_8cw.data_ms + kWideOFDMFullAnchorExtraMs,
+          "coherent QPSK R2/3 8-CW burst airtime should include the first-frame chirp anchor");
+    CHECK(qpsk_r23_w8_reanchor_burst_ms ==
+              qpsk_r23_w8_burst_ms + 7 * kWideOFDMShortReanchorDefaultMs,
+          "adaptive short reanchors should extend every continuation frame in the physical burst");
+    CHECK(wideOFDMSackDelayMs(Modulation::QPSK, CodeRate::R2_3, 8, 8,
+                              kWideOFDMShortReanchorDefaultMs) ==
+              qpsk_r23_w8_reanchor_burst_ms + kCarrierSenseSackCoalesceMs,
+          "coherent fading SACK delay should hold through adaptive reanchor burst airtime");
+
     const auto qam16_r14 = wideOFDMFrameTiming(Modulation::QAM16, CodeRate::R1_4);
     CHECK(wideOFDMSlidingSackDelayMs(Modulation::QAM16, CodeRate::R1_4) ==
               qam16_r14.data_ms + qam16_r14.ack_ms + kCarrierSenseSackCoalesceMs,
@@ -149,6 +165,21 @@ void test_wide_ofdm_timing_and_timeout() {
     CHECK(wideOFDMSlidingSackDelayMs(Modulation::QAM16, CodeRate::R1_4) <
               wideOFDMSackDelayMs(Modulation::QAM16, CodeRate::R1_4, 8),
           "wide OFDM sliding SACK delay should be a burst-tail quiet interval, not a full-window hold");
+
+    const uint32_t qam16_ack_repeat_tail =
+        selective_repeat_arq_policy::ackRepeatTailGuardMs(
+            qam16_r14.ack_ms,
+            wideOFDMSlidingSackDelayMs(Modulation::QAM16, CodeRate::R1_4),
+            80,
+            3,
+            true);
+    CHECK(qam16_ack_repeat_tail >=
+              wideOFDMSlidingSackDelayMs(Modulation::QAM16, CodeRate::R1_4) +
+                  240 + selective_repeat_arq_policy::kAckRepeatMaxJitterMs +
+                  qam16_r14.ack_ms,
+          "wide OFDM ACK-diversity guard should cover delayed clean-ACK repeat tail");
+    CHECK(qam16_ack_repeat_tail > 250,
+          "wide OFDM QAM16 ACK-diversity guard must exceed the legacy fixed 250 ms holdoff");
 
     CHECK(computeWideOFDMAckTimeoutMs(Modulation::DQPSK, CodeRate::R1_2, 4, 120, 2) == 9446,
           "wide OFDM window=4 timeout should cover physical burst, ACK copies, and SACK holdoff");
@@ -398,12 +429,12 @@ void test_auto_data_mode_boundaries() {
     CHECK(waveform == WaveformMode::OFDM_CHIRP,
           "GOOD fading SNR20 auto-negotiates OFDM_CHIRP");
     recommendDataMode(20.0f, waveform, mod, rate, 0.30f);
-    CHECK(mod == Modulation::QAM16, "GOOD fading SNR20 auto data mode selects QAM16");
-    CHECK(rate == CodeRate::R1_4, "GOOD fading SNR20 auto data mode selects active QAM16 R1/4 rung");
+    CHECK(mod == Modulation::QPSK, "GOOD fading SNR20 auto data mode selects coherent QPSK");
+    CHECK(rate == CodeRate::R2_3, "GOOD fading SNR20 auto data mode selects measured QPSK R2/3 rung");
 
     recommendDataMode(20.0f, waveform, mod, rate, 0.79f);
-    CHECK(mod == Modulation::QAM16 && rate == CodeRate::R1_4,
-          "GOOD-lobby estimator spread at SNR20 still selects QAM16 R1/4");
+    CHECK(mod == Modulation::QPSK && rate == CodeRate::R2_3,
+          "GOOD-lobby estimator spread at SNR20 still selects QPSK R2/3");
 
     recommendDataMode(20.0f, waveform, mod, rate, 0.80f);
     CHECK(mod == Modulation::DQPSK,
@@ -416,9 +447,9 @@ void test_auto_data_mode_boundaries() {
           "GOOD fading SNR16.9 remains above the OFDM floor");
     recommendDataMode(16.9f, waveform, mod, rate, 0.30f);
     CHECK(mod == Modulation::DQPSK,
-          "GOOD fading below the QAM16 floor falls back to DQPSK");
+          "GOOD fading below the QPSK floor falls back to DQPSK");
     CHECK(rate == CodeRate::R1_2,
-          "GOOD fading below the QAM16 floor keeps the existing R1/2 OFDM rate");
+          "GOOD fading below the QPSK floor keeps the existing R1/2 OFDM rate");
 
     waveform = selectNegotiatedMode(
         all, all, WaveformMode::AUTO, WaveformMode::AUTO, WaveformMode::AUTO,

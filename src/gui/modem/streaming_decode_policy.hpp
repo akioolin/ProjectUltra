@@ -1,5 +1,6 @@
 #pragma once
 
+#include "streaming_control_profile.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
 #include "ultra/types.hpp"
 #include <algorithm>
@@ -13,8 +14,12 @@ inline size_t estimateRobustOFDMControlSamples(size_t default_control_samples,
                                                Modulation data_mod,
                                                CodeRate data_rate,
                                                int carriers,
-                                               int samples_per_symbol) {
-    if (data_mod == Modulation::DQPSK && data_rate == CodeRate::R1_4) {
+                                               int samples_per_symbol,
+                                               bool coherent_control_enabled = true) {
+    const auto control_profile =
+        streaming_control_profile::profileForDataMode(
+            data_mod, coherent_control_enabled);
+    if (control_profile.modulation == data_mod && data_rate == control_profile.rate) {
         return default_control_samples;
     }
 
@@ -22,10 +27,11 @@ inline size_t estimateRobustOFDMControlSamples(size_t default_control_samples,
         return default_control_samples;
     }
 
-    constexpr int kControlPilotSpacing = 10;
     constexpr int kLDPCCodewordBits = 648;
+    const int control_pilot_spacing =
+        streaming_control_profile::pilotSpacingForProfile(control_profile);
     const int bits_per_symbol = ofdm_link_adaptation::bitsPerOFDMSymbol(
-        carriers, true, kControlPilotSpacing, Modulation::DQPSK);
+        carriers, true, control_pilot_spacing, control_profile.modulation);
     if (bits_per_symbol <= 0) {
         return default_control_samples;
     }

@@ -58,7 +58,16 @@ void e2eDebugLine(const std::string& line) {
     }
     static std::mutex mutex;
     std::lock_guard<std::mutex> lock(mutex);
-    std::ofstream out(path, std::ios::app);
+    static std::string open_path;
+    static std::ofstream out;
+    if (!out.is_open() || open_path != path) {
+        out.close();
+        open_path = path;
+        out.open(open_path, std::ios::app);
+    }
+    if (!out) {
+        return;
+    }
     const auto now = std::chrono::system_clock::now().time_since_epoch();
     const auto epoch_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
@@ -951,6 +960,8 @@ void OtaSimulatorService::onAudioPacket(const ReceivedAudioPacket& packet) {
     std::vector<ScheduledAudioBlock> scheduled;
     uint64_t next_local_sample = 0;
     uint64_t next_session_sample = 0;
+    uint64_t local_gap_samples = 0;
+    const size_t max_gap_fill_samples = session->maxQueuedSamples();
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto& bridge = tx_clock_bridges_[packet.lease_id];
@@ -958,9 +969,14 @@ void OtaSimulatorService::onAudioPacket(const ReceivedAudioPacket& packet) {
             bridge.session_id = packet.session_id;
             bridge.station_id = packet.station_id;
         }
+        const uint64_t expected_local_sample = bridge.bridge.nextLocalSample();
+        if (packet.start_sample > expected_local_sample) {
+            local_gap_samples = packet.start_sample - expected_local_sample;
+        }
         scheduled = bridge.bridge.push(packet.start_sample,
                                        packet.samples,
-                                       earliest_session_sample);
+                                       earliest_session_sample,
+                                       max_gap_fill_samples);
         next_local_sample = bridge.bridge.nextLocalSample();
         next_session_sample = bridge.bridge.nextSessionSample();
     }
@@ -989,6 +1005,8 @@ void OtaSimulatorService::onAudioPacket(const ReceivedAudioPacket& packet) {
         << " next_session=" << next_session_sample
         << " samples=" << packet.samples.size()
         << " rms=" << rms(packet.samples)
+        << " local_gap=" << local_gap_samples
+        << " max_gap_fill=" << max_gap_fill_samples
         << " enqueued=" << (enqueued ? 1 : 0);
     e2eDebugLine(oss.str());
     if (!enqueued) {

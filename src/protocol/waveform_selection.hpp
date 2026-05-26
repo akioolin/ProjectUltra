@@ -26,6 +26,9 @@ inline constexpr float kQAM16AwgnR23SnrFloorDb = 19.5f;
 inline constexpr float kQAM16AwgnR34SnrFloorDb = 19.7f;
 inline constexpr float kQAM16GoodFadingMax = 0.80f;
 inline constexpr float kQAM16GoodSnrFloorDb = 17.0f;
+inline constexpr float kQPSKMultipathFadingMin = kQAM16AwgnFadingMax;
+inline constexpr float kQPSKGoodFadingMax = kQAM16GoodFadingMax;
+inline constexpr float kQPSKGoodR23SnrFloorDb = 20.0f;
 
 // Waveform + rate recommendation
 struct WaveformRecommendation {
@@ -57,6 +60,8 @@ struct OFDMCodeRateDescriptor {
     size_t bootstrap_gate_count = 0;
     std::array<OFDMRateGate, 4> qam16_gates{};
     size_t qam16_gate_count = 0;
+    std::array<OFDMRateGate, 4> qpsk_gates{};
+    size_t qpsk_gate_count = 0;
 };
 
 inline constexpr std::array<OFDMCodeRateDescriptor, 4> kOFDMCodeRateDescriptors{{
@@ -70,9 +75,10 @@ inline constexpr std::array<OFDMCodeRateDescriptor, 4> kOFDMCodeRateDescriptors{
         1,
         {{{kAnyFadingIndex, -1000.0f}}},
         1,
-        {{{kQAM16AwgnFadingMax, kQAM16AwgnSnrFloorDb},
-          {kQAM16GoodFadingMax, kQAM16GoodSnrFloorDb}}},
-        2,
+        {{{kQAM16AwgnFadingMax, kQAM16AwgnSnrFloorDb}}},
+        1,
+        {},
+        0,
     },
     {
         CodeRate::R1_2,
@@ -85,6 +91,8 @@ inline constexpr std::array<OFDMCodeRateDescriptor, 4> kOFDMCodeRateDescriptors{
         {{{kAnyFadingIndex, -1000.0f}}},
         1,
         {{{kQAM16AwgnFadingMax, kQAM16AwgnR12SnrFloorDb}}},
+        1,
+        {{{kQPSKGoodFadingMax, kQPSKGoodR23SnrFloorDb}}},
         1,
     },
     {
@@ -99,6 +107,8 @@ inline constexpr std::array<OFDMCodeRateDescriptor, 4> kOFDMCodeRateDescriptors{
         1,
         {{{kQAM16AwgnFadingMax, kQAM16AwgnR23SnrFloorDb}}},
         1,
+        {{{kQPSKGoodFadingMax, kQPSKGoodR23SnrFloorDb}}},
+        1,
     },
     {
         CodeRate::R3_4,
@@ -112,6 +122,8 @@ inline constexpr std::array<OFDMCodeRateDescriptor, 4> kOFDMCodeRateDescriptors{
         1,
         {{{kQAM16AwgnFadingMax, kQAM16AwgnR34SnrFloorDb}}},
         1,
+        {},
+        0,
     },
 }};
 
@@ -154,6 +166,20 @@ inline bool descriptorAllowsQAM16OFDM(const OFDMCodeRateDescriptor& descriptor,
     return false;
 }
 
+inline bool descriptorAllowsQPSKOFDM(const OFDMCodeRateDescriptor& descriptor,
+                                     float snr_db,
+                                     float fading_index) {
+    if (fading_index < kQPSKMultipathFadingMin) {
+        return false;
+    }
+    for (size_t i = 0; i < descriptor.qpsk_gate_count; ++i) {
+        if (rateGateAllows(descriptor.qpsk_gates[i], snr_db, fading_index)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 inline bool descriptorAllowsBootstrapOFDM(const OFDMCodeRateDescriptor& descriptor,
                                           float snr_db,
                                           float fading_index) {
@@ -190,6 +216,13 @@ inline const OFDMCodeRateDescriptor* selectQAM16OFDMRateDescriptor(float snr_db,
                                                                    float fading_index) {
     return selectBestOFDMRateDescriptor([&](const OFDMCodeRateDescriptor& descriptor) {
         return descriptorAllowsQAM16OFDM(descriptor, snr_db, fading_index);
+    });
+}
+
+inline const OFDMCodeRateDescriptor* selectQPSKOFDMRateDescriptor(float snr_db,
+                                                                  float fading_index) {
+    return selectBestOFDMRateDescriptor([&](const OFDMCodeRateDescriptor& descriptor) {
+        return descriptorAllowsQPSKOFDM(descriptor, snr_db, fading_index);
     });
 }
 
@@ -309,8 +342,17 @@ inline CodeRate selectQAM16CodeRate(float snr_db, float fading_index) {
     return descriptor ? descriptor->rate : CodeRate::AUTO;
 }
 
+inline CodeRate selectQPSKCodeRate(float snr_db, float fading_index) {
+    const auto* descriptor = selectQPSKOFDMRateDescriptor(snr_db, fading_index);
+    return descriptor ? descriptor->rate : CodeRate::AUTO;
+}
+
 inline bool shouldSelectQAM16(float snr_db, float fading_index) {
     return selectQAM16OFDMRateDescriptor(snr_db, fading_index) != nullptr;
+}
+
+inline bool shouldSelectQPSK(float snr_db, float fading_index) {
+    return selectQPSKOFDMRateDescriptor(snr_db, fading_index) != nullptr;
 }
 
 // Cap initial OFDM rate during handshake bootstrap using only chirp-era metrics.
@@ -321,6 +363,28 @@ inline CodeRate capInitialOFDMRate(float snr_db, float fading_index, CodeRate ca
         return descriptor->rate;
     }
     return candidate;
+}
+
+inline CodeRate capInitialOFDMRate(float snr_db,
+                                   float fading_index,
+                                   CodeRate candidate,
+                                   Modulation modulation) {
+    const auto* candidate_descriptor = ofdmCodeRateDescriptor(candidate);
+    if (candidate_descriptor == nullptr) {
+        return capInitialOFDMRate(snr_db, fading_index, candidate);
+    }
+
+    const auto* capped = selectBestOFDMRateDescriptor([&](const OFDMCodeRateDescriptor& descriptor) {
+        if (descriptor.code_rate > candidate_descriptor->code_rate) {
+            return false;
+        }
+        if (modulation == Modulation::QPSK &&
+            descriptorAllowsQPSKOFDM(descriptor, snr_db, fading_index)) {
+            return true;
+        }
+        return descriptorAllowsBootstrapOFDM(descriptor, snr_db, fading_index);
+    });
+    return capped ? capped->rate : capInitialOFDMRate(snr_db, fading_index, candidate);
 }
 
 // Recommend waveform and rate based on SNR and fading index
@@ -384,8 +448,10 @@ inline WaveformRecommendation recommendWaveformAndRate(float snr_db, float fadin
 // This is used after waveform negotiation to set the data transmission parameters.
 // Uses selectOFDMCodeRate() for rate selection to stay consistent with recommendWaveformAndRate().
 //
-// For OFDM modes: DQPSK with rate from selectOFDMCodeRate()
-// D8PSK only on clean channels with in-band SNR margin; too sensitive for any fading
+// For OFDM modes: measured coherent rungs first, then DQPSK with rate from
+// selectOFDMCodeRate().
+// QPSK is the Good-fading workhorse rung at the measured Good@20 R2/3 floor.
+// D8PSK/QAM16 are clean-channel rungs; too sensitive for Good-fading nulls.
 // For MC-DPSK: Always DQPSK R1/4
 //
 inline void recommendDataMode(float snr_db, WaveformMode waveform,
@@ -422,7 +488,7 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
         return;
     }
 
-    // OFDM modes: D8PSK gated on conditions, otherwise DQPSK.
+    // OFDM modes: measured coherent rungs gated on conditions, otherwise DQPSK.
     //
     // D8PSK ladder (re-enabled 2026-05-04 after wide cli_simulator
     // sweeps showed it works in fading with the post-2026-03-15 CPE
@@ -443,8 +509,18 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
     // 1.5× the bits/symbol of DQPSK R2/3 at the same conditions, so
     // the throughput jumps from ~3.4 kbps to ~5 kbps with zero retx.
     //
-    // Coherent QAM16 rate ladder. Higher code rates are enabled by descriptor
-    // gate once the GUI scenario proves each rung.
+    // Coherent QPSK Good-fading workhorse. Stage-1 forced Good@20 R2/3 seed1
+    // (2026-05-25) cleared the QAM16 erasure seed with 0 BRAVO frame failures.
+    // Keep this out of near-AWGN so the clean QAM16 ladder remains unchanged,
+    // and keep Moderate+ on DQPSK until a measured QPSK floor exists there.
+    if (shouldSelectQPSK(snr_db, fading_index)) {
+        mod = Modulation::QPSK;
+        rate = selectQPSKCodeRate(snr_db, fading_index);
+        return;
+    }
+
+    // Coherent QAM16 rate ladder. Descriptor gates now keep QAM16 on the
+    // clean-channel path; Good fading uses QPSK or DQPSK.
     if (shouldSelectQAM16(snr_db, fading_index)) {
         mod = Modulation::QAM16;
         rate = selectQAM16CodeRate(snr_db, fading_index);

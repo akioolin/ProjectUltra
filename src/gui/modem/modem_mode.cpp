@@ -138,6 +138,12 @@ void ModemEngine::setConnected(bool connected) {
         // Reset handshake state - we'll complete it when we receive first post-ACK frame
         handshake_complete_ = false;
         use_connected_waveform_once_ = false;  // Clear any leftover flag
+        if (streaming_decoder_) {
+            streaming_decoder_->setCoherentOFDMControlProfileEnabled(false);
+        }
+        if (streaming_encoder_) {
+            streaming_encoder_->setCoherentOFDMControlProfileEnabled(false);
+        }
 
         // Configure OFDM config FIRST so it's correct when propagated to decoder
         config_.modulation = data_modulation_;
@@ -203,10 +209,12 @@ void ModemEngine::setConnected(bool connected) {
             streaming_decoder_->reset();
             streaming_decoder_->setMode(protocol::WaveformMode::MC_DPSK, false);
             streaming_decoder_->setDataMode(Modulation::DQPSK, CodeRate::R1_4);
+            streaming_decoder_->setCoherentOFDMControlProfileEnabled(false);
         }
         if (streaming_encoder_) {
             streaming_encoder_->setMode(protocol::WaveformMode::MC_DPSK);
             streaming_encoder_->setDataMode(Modulation::DQPSK, CodeRate::R1_4);
+            streaming_encoder_->setCoherentOFDMControlProfileEnabled(false);
         }
         data_modulation_ = Modulation::DQPSK;
         data_code_rate_ = CodeRate::R1_4;
@@ -231,6 +239,14 @@ void ModemEngine::setHandshakeComplete(bool complete) {
     if (complete) {
         LOG_MODEM(INFO, "Handshake complete, TX now uses waveform_mode_=%d",
                   static_cast<int>(waveform_mode_));
+    }
+    if (streaming_decoder_) {
+        streaming_decoder_->setCoherentOFDMControlProfileEnabled(
+            complete && connected_ && protocol::isOFDMMode(waveform_mode_));
+    }
+    if (streaming_encoder_) {
+        streaming_encoder_->setCoherentOFDMControlProfileEnabled(
+            complete && connected_ && protocol::isOFDMMode(waveform_mode_));
     }
 }
 

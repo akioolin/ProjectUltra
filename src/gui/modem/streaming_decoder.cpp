@@ -65,9 +65,13 @@ size_t validateBufferCapacity(size_t capacity) {
 }
 
 // Return a conservative 1-CW control-frame sample requirement for connected OFDM.
-// If data profile is high-order, the robust control profile (DQPSK R1/4) may need
-// more symbols than the current data profile.
-size_t getOFDMControlFrameSamples(IWaveform* waveform, Modulation data_mod, CodeRate data_rate) {
+// Coherent data profiles use coherent QPSK R1/4 control; differential data
+// profiles keep DQPSK R1/4 control. Either control profile can require more
+// symbols than the current data profile.
+size_t getOFDMControlFrameSamples(IWaveform* waveform,
+                                  Modulation data_mod,
+                                  CodeRate data_rate,
+                                  bool coherent_control_enabled) {
     if (!waveform) {
         return 0;
     }
@@ -86,7 +90,8 @@ size_t getOFDMControlFrameSamples(IWaveform* waveform, Modulation data_mod, Code
     }
 
     return decode_policy::estimateRobustOFDMControlSamples(
-        default_samples, data_mod, data_rate, carriers, samples_per_symbol);
+        default_samples, data_mod, data_rate, carriers, samples_per_symbol,
+        coherent_control_enabled);
 }
 
 }  // namespace
@@ -319,7 +324,8 @@ size_t StreamingDecoder::wrapCustomRingIndexLocked(size_t value) const {
 }
 
 size_t StreamingDecoder::getOFDMControlFrameSamplesForCurrentMode() const {
-    return getOFDMControlFrameSamples(waveform_.get(), current_modulation_, code_rate_);
+    return getOFDMControlFrameSamples(waveform_.get(), current_modulation_, code_rate_,
+                                      coherent_ofdm_control_profile_enabled_);
 }
 
 // ============================================================================
@@ -867,6 +873,16 @@ void StreamingDecoder::setAdaptiveShortDataPreamble(bool enable) {
     }
     adaptive_short_data_preamble_ = enable;
     LOG_MODEM(INFO, "StreamingDecoder: adaptive short data re-anchor %s",
+              enable ? "ENABLED" : "DISABLED");
+}
+
+void StreamingDecoder::setCoherentOFDMControlProfileEnabled(bool enable) {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    if (coherent_ofdm_control_profile_enabled_ == enable) {
+        return;
+    }
+    coherent_ofdm_control_profile_enabled_ = enable;
+    LOG_MODEM(INFO, "StreamingDecoder: coherent OFDM control profile %s",
               enable ? "ENABLED" : "DISABLED");
 }
 
