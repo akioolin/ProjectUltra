@@ -213,6 +213,52 @@ clock + honest end-to-end goodput; Codex independent review of PHY diffs; revert
 
 ---
 
+## 11b. Implementation plan — file-by-file, ctest-gated (the careful build order)
+
+Scoped 2026-05-26. N=648 is wired into the FEC core; every step is **behavior-preserving and
+full-ctest-gated** before the next. Pre-deployment → wire formats are free to change (no
+back-compat), but the *codebase* must stay green throughout.
+
+Where N=648 lives today (all must become length-aware):
+- `src/fec/ldpc_codec.hpp` — `CODEWORD_BITS=648`, `CODEWORD_BYTES=81` (static constexpr).
+- `src/fec/ldpc_802_11n.hpp` — 802.11n base matrices for **n=648, Z=27** only.
+- `src/fec/burst_interleaver.hpp` — `CODEWORD_BITS=648`, `BITS_PER_FRAME`.
+- `src/fec/carrier_ldpc_interleaver.hpp` — `kLdpcCodewordBits=648`, perm `(307·i) mod 648·Ncw`.
+- `src/fec/frame_interleaver.hpp` — `BITS_PER_CODEWORD=648`.
+- `src/fec/codec_factory.cpp` — 648 in the registry entry.
+- `src/protocol/frame_v2.*` — payload-capacity math assumes 648.
+
+**Step A — parameterize codeword length (behavior-preserving).** Make codeword bits a *codec
+instance property* (default 648), not a global constexpr; thread it through the interleavers
+(perm becomes `(P·i) mod (Nbits·Ncw)` with P chosen coprime per length) and the capacity math.
+NO new length yet. Gate: full ctest green + a Good@20 multi-seed shows byte-identical behavior
+to HEAD (648 unchanged).
+
+**Step B — add the long code (additive).** Add the **802.11n n=1944, Z=81** base matrices
+(reproduced exactly from the IEEE 802.11n standard tables — NOT from memory; cross-check) as a
+second matrix set + a codec variant. Existing 648 path untouched. Gate: encode/decode unit
+test for n=1944 at each rate (round-trip + AWGN BER curve sanity), full ctest green.
+
+**Step C — traffic-class profile + frame signaling.** Add the profile selector
+(control/chat/file) and a frame-header field for codeword-length/profile so RX matches TX.
+Default everything to the *current* profile (648) — no behavior change until selected. Gate:
+ctest + handshake/negotiation tests.
+
+**Step D — deep cross-frame interleaver for the FILE profile (the keystone).** New interleaver
+spanning multiple frames (~1–2 s depth, sized vs fade coherence time + half-duplex burst +
+buffer). TX buffers/spreads, RX de-buffers before decode. Couple to ARQ block boundaries +
+HARQ soft-combine. Gate: Good@20 multi-seed FER + delivered goodput vs the 1350 baseline +
+whole-matrix no-regress; genie channel-est MSE if needed.
+
+**Step E — ARQ/ACK co-design.** ACK stays short/uninterleaved; RTO/sack-delay account for the
+interleaver decode latency; retransmission unit aligned to interleaver blocks. Gate: ARQ unit
+tests + multi-seed file completion under fading.
+
+**Step F — adaptive pilots + efficiency** (Sections 4 & 8), now safe atop the diversity.
+
+Each step is independently committable branch-only; Codex independent review of every PHY/FEC
+diff before merge; revert any step that fails its gate.
+
 ## 12. Honest expectation
 
 - Robust QPSK R2/3 floor (anti-poison + pilots-when-clean + efficiency): ~2400–2500 bps.
