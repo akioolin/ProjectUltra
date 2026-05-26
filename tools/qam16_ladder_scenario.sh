@@ -143,6 +143,28 @@ sum_cw_fail() {
   printf '%s\n' "${sum:-0}"
 }
 
+sum_tx_samples() {
+  local file="$1"
+  { grep -E 'TX(:| Burst:).* -> [0-9]+ samples' "$file" 2>/dev/null || true; } |
+    sed -E 's/.* -> ([0-9]+) samples.*/\1/' |
+    awk '{s += $1} END {printf "%.0f", s + 0}'
+}
+
+tx_seconds_from_samples() {
+  awk -v samples="$1" 'BEGIN { printf "%.3f", samples / 48000.0 }'
+}
+
+tx_duty_pct() {
+  awk -v samples="$1" -v elapsed="$2" '
+    BEGIN {
+      if (elapsed <= 0) {
+        printf "0.0"
+      } else {
+        printf "%.1f", (samples / 48000.0) * 100.0 / elapsed
+      }
+    }'
+}
+
 unexpected_data_mode_pattern() {
   case "$EXPECT_MOD" in
     16QAM|QAM16)
@@ -177,6 +199,12 @@ collect_metrics() {
   bravo_retx="$(count_pattern 'SR-ARQ: Retransmitting' "$BRAVO_LOG")"
   alpha_cwfail="$(sum_cw_fail "$ALPHA_LOG")"
   bravo_cwfail="$(sum_cw_fail "$BRAVO_LOG")"
+  alpha_adaptive_mode_changes="$(count_pattern 'Connection: Adaptive MODE_CHANGE at TX boundary' "$ALPHA_LOG")"
+  bravo_adaptive_mode_changes="$(count_pattern 'Connection: Adaptive MODE_CHANGE at TX boundary' "$BRAVO_LOG")"
+  alpha_advisory_switches="$(count_pattern '\[ADPT\].*hysteresis allows switch' "$ALPHA_LOG")"
+  bravo_advisory_switches="$(count_pattern '\[ADPT\].*hysteresis allows switch' "$BRAVO_LOG")"
+  alpha_tx_samples="$(sum_tx_samples "$ALPHA_LOG")"
+  bravo_tx_samples="$(sum_tx_samples "$BRAVO_LOG")"
 
   goodput_kbps="$(
     grep -E '\[FILE\] (Transfer complete|Received).*[0-9.]+ kbps|FileTransfer: (Transfer complete|Received OK).*[0-9.]+ kbps' "$ALPHA_LOG" "$BRAVO_LOG" 2>/dev/null |
@@ -218,6 +246,22 @@ write_summary() {
   local result="$1"
   local reason="$2"
   local elapsed="$3"
+  local alpha_tx_seconds bravo_tx_seconds alpha_tx_duty_pct bravo_tx_duty_pct max_tx_duty_pct channel_occupancy_pct
+  alpha_tx_seconds="$(tx_seconds_from_samples "${alpha_tx_samples:-0}")"
+  bravo_tx_seconds="$(tx_seconds_from_samples "${bravo_tx_samples:-0}")"
+  alpha_tx_duty_pct="$(tx_duty_pct "${alpha_tx_samples:-0}" "$elapsed")"
+  bravo_tx_duty_pct="$(tx_duty_pct "${bravo_tx_samples:-0}" "$elapsed")"
+  max_tx_duty_pct="$(
+    awk -v a="$alpha_tx_duty_pct" -v b="$bravo_tx_duty_pct" '
+      BEGIN { printf "%.1f", (a > b ? a : b) }'
+  )"
+  channel_occupancy_pct="$(
+    awk -v a="${alpha_tx_samples:-0}" -v b="${bravo_tx_samples:-0}" -v elapsed="$elapsed" '
+      BEGIN {
+        if (elapsed <= 0) printf "0.0"
+        else printf "%.1f", ((a + b) / 48000.0) * 100.0 / elapsed
+      }'
+  )"
   {
     echo "OUT=$OUT"
     echo "CHANNEL=$CHANNEL"
@@ -242,6 +286,20 @@ write_summary() {
     echo "BRAVO_RETX_COUNT=$bravo_retx"
     echo "ALPHA_CWFAIL_COUNT=$alpha_cwfail"
     echo "BRAVO_CWFAIL_COUNT=$bravo_cwfail"
+    echo "ALPHA_ADAPTIVE_MODE_CHANGE_COUNT=$alpha_adaptive_mode_changes"
+    echo "BRAVO_ADAPTIVE_MODE_CHANGE_COUNT=$bravo_adaptive_mode_changes"
+    echo "ADAPTIVE_MODE_CHANGE_COUNT=$((alpha_adaptive_mode_changes + bravo_adaptive_mode_changes))"
+    echo "ALPHA_ADVISORY_SWITCH_COUNT=$alpha_advisory_switches"
+    echo "BRAVO_ADVISORY_SWITCH_COUNT=$bravo_advisory_switches"
+    echo "ADVISORY_SWITCH_COUNT=$((alpha_advisory_switches + bravo_advisory_switches))"
+    echo "ALPHA_TX_SAMPLES=$alpha_tx_samples"
+    echo "BRAVO_TX_SAMPLES=$bravo_tx_samples"
+    echo "ALPHA_TX_SECONDS=$alpha_tx_seconds"
+    echo "BRAVO_TX_SECONDS=$bravo_tx_seconds"
+    echo "ALPHA_TX_DUTY_PCT=$alpha_tx_duty_pct"
+    echo "BRAVO_TX_DUTY_PCT=$bravo_tx_duty_pct"
+    echo "MAX_TX_DUTY_PCT=$max_tx_duty_pct"
+    echo "CHANNEL_OCCUPANCY_PCT=$channel_occupancy_pct"
     echo "ALPHA_LOG=$ALPHA_LOG"
     echo "BRAVO_LOG=$BRAVO_LOG"
     echo "E2E_SERVER_LOG=$E2E_SERVER_LOG"

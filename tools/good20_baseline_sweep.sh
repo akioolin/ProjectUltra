@@ -10,7 +10,7 @@ set -u
 cd "$(dirname "$0")/.."
 SEEDS="${1:-1 3 4 5}"
 TAG="${2:-baseline}"
-printf "%-5s %-7s %-9s %-6s %-8s %-9s %s\n" SEED RESULT CWFAIL RETX GOODPUT DOWNGRADE OUT
+printf "%-5s %-7s %-9s %-6s %-8s %-9s %-5s %-7s %s\n" SEED RESULT CWFAIL RETX GOODPUT DOWNGRADE MC DUTY OUT
 echo "------------------------------------------------------------------------"
 for sd in $SEEDS; do
   out="/tmp/good20_${TAG}_s${sd}"
@@ -22,8 +22,10 @@ for sd in $SEEDS; do
   cw=$(grep -oE 'BRAVO_CWFAIL_COUNT=[0-9]+' "$s" 2>/dev/null | cut -d= -f2)
   rtx=$(grep -oE 'ALPHA_RETX_COUNT=[0-9]+' "$s" 2>/dev/null | cut -d= -f2)
   gp=$(grep -oE 'GOODPUT_BPS=[0-9]+' "$s" 2>/dev/null | cut -d= -f2)
+  duty=$(grep -oE 'MAX_TX_DUTY_PCT=[0-9.]+' "$s" 2>/dev/null | cut -d= -f2)
+  mc=$(grep -oE 'ADAPTIVE_MODE_CHANGE_COUNT=[0-9]+' "$s" 2>/dev/null | cut -d= -f2)
   dg=$(grep -cE 'Forced downgrade|Adaptive downgrade queued' "$out/alpha.log" 2>/dev/null)
-  printf "%-5s %-7s %-9s %-6s %-8s %-9s %s\n" "$sd" "${res:-NONE}" "${cw:-?}" "${rtx:-?}" "${gp:-?}" "${dg:-?}" "$out"
+  printf "%-5s %-7s %-9s %-6s %-8s %-9s %-5s %-7s %s\n" "$sd" "${res:-NONE}" "${cw:-?}" "${rtx:-?}" "${gp:-?}" "${dg:-?}" "${mc:-?}" "${duty:-?}" "$out"
 done
 echo "------------------------------------------------------------------------"
 echo "BASELINE SWEEP DONE ($TAG): seeds=[$SEEDS]"
