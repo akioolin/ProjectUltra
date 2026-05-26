@@ -99,6 +99,20 @@ dwell / N consecutive windows) before switching — ride through estimator wiggl
 on real persistent shifts. Derive dwell from coherence time + estimator variance (no magic).
 Codex's current dead-air round is NOT scoped to this and will not address it.
 
+## MEASURED RESULT — turnaround reclaim is a NULL lever (do NOT re-run) [2026-05-26]
+Codex 5-seed Good@20 GUI sweep with the turnaround_ms reclaim (arq_interface.hpp): goodput
+**UNCHANGED** vs baseline — seeds 980/590/980/980/630, CWFAIL 0/12/0/0/0, **TX duty ≈ 45%**.
+Turnaround (T/R switch time) is NOT the dead-air bottleneck: with big bursts there are only
+~4 turnarounds/transfer, so shaving 480 ms each saves ~2 s of ~98 s (~2%, noise). KEEP the
+500→realistic turnaround only as a hardware-FIDELITY fix; it is NOT a throughput lever — do
+not chase it again.
+NEW GROUND TRUTH: **TX duty cycle ≈ 45%** (the ~55% non-TX is dominated by the receiver's
+ACK-hold `sack_delay` (~7.7 s, far more than decode needs) + half-duplex RX windows + the
+ladder thrash — NOT the T/R turnaround). So the REAL dead-air levers are: (a) trim the
+`sack_delay` ACK-hold to ~what's needed to decode the burst (within the half-duplex turn),
+(b) damp the ladder thrash. (Codex self-measured single sweep; re-verify, but the
+turnaround-null + duty-45% signal is clear.) Codex is now patching the thrash; sack_delay next.
+
 ## Workflow
 Iterate: hypothesis (from genie data) → fix → build → GUI multi-seed → measure → keep/revert,
 commit wins branch-only. Hard PHY rounds → Codex collaboration (mandated counter-check).
