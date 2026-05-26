@@ -83,6 +83,22 @@ reintroducing the half-duplex ACK-collision problem that made sack_delay long
 Must be validated on faithful GUI clock (cli timer is wall-clock-broken). Big win:
 even at the QPSK R2/3 ceiling, recovering dead air ~doubles delivered goodput.
 
+## NEW LEVER (user-spotted 2026-05-26): adaptive ladder THRASH — high priority
+Live BRAVO GUI log on a single 10 KB Good@20 transfer shows the adaptive mode controller
+flipping **QPSK R2/3 ↔ DQPSK R1/2 ~8 times in ~2 min** (`[ADPT] ... hysteresis allows
+switch` every ~10-15 s). It is chasing ESTIMATOR NOISE, not real channel change: fading
+index wiggles 0.28→0.39→0.52→0.28→0.44→0.47 around the coherent/differential crossover and
+SNR wiggles 19.6↔20.2 dB (~0.6 dB). Each flip = a MODE_CHANGE (control exchange + re-anchor
++ data disruption) and half drop to the SLOWER DQPSK R1/2 → this is likely a big reason the
+2/5 fade-hit seeds sag to ~615 bps (controller panic, not the fades). The hysteresis is far
+too weak — it debounces almost nothing.
+FIX (distinct lever, do AFTER turnaround lands for clean attribution; arguably as big for the
+fade seeds): smooth the F.I./SNR estimate feeding the controller (it's noisy per-frame),
+widen the dead-band around the QPSK↔DQPSK crossover, and require a SUSTAINED crossing (longer
+dwell / N consecutive windows) before switching — ride through estimator wiggle, switch only
+on real persistent shifts. Derive dwell from coherence time + estimator variance (no magic).
+Codex's current dead-air round is NOT scoped to this and will not address it.
+
 ## Workflow
 Iterate: hypothesis (from genie data) → fix → build → GUI multi-seed → measure → keep/revert,
 commit wins branch-only. Hard PHY rounds → Codex collaboration (mandated counter-check).
