@@ -47,6 +47,42 @@ goodput + real CW-fail, not inflated on-air); revert any change that loses its g
 5. **Throughput toward leader (after reliability holds):** reclaim dead air (~50%, protocol);
    8PSK rung (raw 3917 > 3086). Per project_onair_vs_endtoend + competitive_benchmark notes.
 
+## MULTI-SEED BASELINE + DATA-DRIVEN RE-RANK (2026-05-26)
+Good@20 QPSK R2/3, clean HEAD + hole-probe fix, faithful GUI, 5 seeds:
+| seed | CWFAIL | retx | goodput | downgrade |
+|------|--------|------|---------|-----------|
+| 1 | 0 | 0 | 980 | 0 |
+| 3 | 0 | 0 | 980 | 0 |
+| 4 | 0 | 0 | 970 | 0 |
+| 5 | 2 | 2 | 630 | 1 |
+| 2 | ~4 | 3 | 600 | 1 |
+**3/5 seeds already clean (~975 bps, 0 retx, 0 downgrade). 2/5 hit deep fades → downgrade → ~615 bps.**
+LOAD-BEARING INSIGHT: a perfectly clean seed still only hits **980 bps = 37% of the
+QPSK R2/3 raw ceiling (2611)**. So the dominant gap to 3000 is NOT reliability (even
+flawless decode = 980); it is **protocol efficiency (dead air) + the rate ceiling**,
+which hit all seeds equally.
+
+**RE-RANKED PLAN (data-driven):**
+1. **Dead-air / protocol efficiency (#1, universal):** clean seeds are at 37% efficiency;
+   recovering dead air ~doubles goodput on EVERY seed. Root cause below. Biggest single lever.
+2. **8PSK rung (#2):** required — QPSK R2/3 caps at 2611 < 3086; 8PSK raw 3917 clears it.
+   Needs reliability support (8PSK ~3-4 dB more fade-fragile).
+3. **Fade reliability (#3):** only 2/5 seeds; downgrade-driven. Genie-guided when reached.
+
+## Dead-air lever — code-grounded scoping (2026-05-26)
+The throughput-efficiency lever (Plan step 5a) is concrete: `Connection::sendNextFragment`
+(connection.cpp:1598) fills the ARQ window then idles — `while (arq_.isReadyToSend() &&
+hasMoreChunks())` sends up to window=8 frames, flushes the burst, then cannot send again
+until ACKs free the window. Measured ARQ config: `window=8, sack_delay=7690ms`. The
+receiver HOLDS its cumulative ACK up to **7.69 s** before returning it → sender window
+stays full → sender idle ~7–10 s per burst = the measured ~50% dead air. Classic
+bandwidth-delay-product starvation. Lever (global, all rates/waveforms): shorten ACK
+return latency / pipeline window refill as slots free, sized to the BDP — WITHOUT
+reintroducing the half-duplex ACK-collision problem that made sack_delay long
+(see feedback_arq_window_history, project_throughput_bottleneck_is_arq_idle, #126).
+Must be validated on faithful GUI clock (cli timer is wall-clock-broken). Big win:
+even at the QPSK R2/3 ceiling, recovering dead air ~doubles delivered goodput.
+
 ## Workflow
 Iterate: hypothesis (from genie data) → fix → build → GUI multi-seed → measure → keep/revert,
 commit wins branch-only. Hard PHY rounds → Codex collaboration (mandated counter-check).
