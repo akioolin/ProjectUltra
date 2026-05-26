@@ -1004,6 +1004,7 @@ public:
     void setBurstInterleaveGroupSize(int n) {
         burst_group_size_ = ofdm_link_adaptation::sanitizeBurstGroupSize(n);
     }
+    void setFileProfileStage(int n) { file_profile_stage_ = std::clamp(n, 0, 3); }
     void setTestBurst(bool v) { test_burst_ = v; }
     void setSeed(uint32_t seed) { seed_ = seed; }
     void setTxCFO(float cfo_hz) { tx_cfo_hz_ = cfo_hz; }
@@ -1229,6 +1230,8 @@ public:
         bravo_->setNoBurstInterleave(no_burst_interleave_);
         alpha_->setBurstInterleaveGroupSize(burst_group_size_);
         bravo_->setBurstInterleaveGroupSize(burst_group_size_);
+        alpha_->setFileProfileStage(file_profile_stage_);
+        bravo_->setFileProfileStage(file_profile_stage_);
         if (no_burst_interleave_) {
             std::cout << "  \033[33mBurst interleaving DISABLED\033[0m\n";
         }
@@ -1416,6 +1419,7 @@ private:
     bool use_channel_interleave_ = true;   // Enabled by default for OFDM fading resistance
     bool no_burst_interleave_ = false;     // --no-burst-interleave for A/B testing
     int burst_group_size_ = 8;             // --burst-group-size N (experimental)
+    int file_profile_stage_ = 0;           // --file-profile-stage N (file-class PHY rollout: 0=off)
     int rx_overfeed_factor_ = 1;           // --rx-overfeed-factor N (decoder overload stress)
     int decode_delay_ms_ = 0;              // --decode-delay-ms N (simulated slow decoder)
     int rx_batch_callbacks_ = 1;           // --rx-batch-callbacks N (batched decoder feed)
@@ -2290,6 +2294,7 @@ private:
         station->setChannelInterleave(use_channel_interleave_);
         station->setNoBurstInterleave(no_burst_interleave_);
         station->setBurstInterleaveGroupSize(burst_group_size_);
+        station->setFileProfileStage(file_profile_stage_);
         station->setCarrierMask(carrier_mask_);
         // forced=true only if user passed --cw-count; otherwise this is
         // boot-time init that should leave protocol-level forced_cw_count=0
@@ -2971,6 +2976,8 @@ int main(int argc, char* argv[]) {
                 sim.setNoBurstInterleave(true);
             } else if (arg == "--burst-group-size" && i + 1 < argc) {
                 sim.setBurstInterleaveGroupSize(std::stoi(argv[++i]));
+            } else if (arg == "--file-profile-stage" && i + 1 < argc) {
+                sim.setFileProfileStage(std::stoi(argv[++i]));
             } else if (arg == "--harq") {
                 sim.setSoftCombiningHARQ(true);
             } else if (arg == "--no-harq") {

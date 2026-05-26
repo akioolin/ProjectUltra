@@ -750,6 +750,9 @@ public:
         if (encoder_) encoder_->setBurstInterleaveGroupSize(burst_group_size_);
         if (decoder_) decoder_->setBurstInterleaveGroupSize(burst_group_size_);
     }
+    // File-class profile rollout stage (0=off/behavior-preserving). See
+    // file_profile_stage_ for the staged-knob meaning.
+    void setFileProfileStage(int stage) { file_profile_stage_ = std::clamp(stage, 0, 3); }
     void setRxOverfeedFactor(int n) { rx_overfeed_factor_ = std::clamp(n, 1, 200); }
     void setDecodeDelayMs(int ms) { decode_delay_ms_ = std::clamp(ms, 0, 500); }
     void setRxBatchCallbacks(int n) { rx_batch_callbacks_ = std::clamp(n, 1, 1000); }
@@ -909,6 +912,14 @@ public:
             return;
         }
         protocol_.tick(elapsed_ms);
+        // File-transfer regime edge-detect: apply the file-class PHY profile
+        // when a transfer starts and revert it when it ends/cancels. No-op at
+        // stage 0 (syncFileProfile leaves pilot_spacing unchanged).
+        const bool xfer = isFileTransferInProgress();
+        if (xfer != file_profile_active_cached_) {
+            file_profile_active_cached_ = xfer;
+            syncFileProfile();
+        }
     }
 
     void tickByMs(uint32_t elapsed_ms) {
@@ -1126,6 +1137,13 @@ private:
     bool no_burst_interleave_ = false;  // Disable burst interleaving for A/B testing
     bool burst_interleave_active_ = false;
     int burst_group_size_ = 8;
+    // File-profile regime rollout control (2026-05-26). The file-class profile
+    // (thin pilots + long LDPC + deep interleave) activates ONLY during a file
+    // transfer. Staged so each PHY knob flips one at a time with a measurement
+    // between: 0=off (behavior-preserving, today's values), 1=+thin pilots
+    // (spacing 10 -> 53 data carriers), 2=+n=1944 long LDPC, 3=+deep interleave.
+    int file_profile_stage_ = 0;
+    bool file_profile_active_cached_ = false;  // last-applied file-xfer state (edge detect)
     int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
     uint64_t carrier_mask_ = UINT64_MAX;
     bool carrier_ldpc_interleaver_enabled_ = false;
@@ -1258,6 +1276,47 @@ private:
                                                                data_code_rate_)) ||
                 connection_policy::isSpeculativeHighRateOFDM(data_modulation_,
                                                              data_code_rate_));
+    }
+
+    // Pilot spacing for the data path, accounting for the file-transfer regime.
+    // During an active file transfer at stage >= 1 the regime thins pilots to
+    // spacing 10 (6 scattered pilots -> 53 data carriers) for ALL frames
+    // (data + the interspersed control/ACK), which is safe at the good SNR
+    // where the file profile is allowed and is what makes a thin-pilot
+    // FILE_CANCEL decode against the receiver's thin-pilot demod. Outside a
+    // file transfer (and at stage 0) it falls back to the recommended spacing,
+    // so the default path is byte-identical to before.
+    uint32_t dataPilotSpacingForFileProfile() const {
+        if (file_profile_stage_ >= 1 &&
+            negotiated_waveform_ == WaveformMode::OFDM_CHIRP &&
+            isFileTransferInProgress()) {
+            return 10;  // file regime: 6 scattered pilots, 53 data carriers
+        }
+        return ofdm_link_adaptation::recommendedPilotSpacing(data_modulation_,
+                                                             data_code_rate_);
+    }
+
+    // Apply / revert the file-class PHY regime when the file-transfer state
+    // changes mid-connection. Re-pushes the OFDM config to both encoder and
+    // decoder so the thin-pilot map is in effect for the duration of the
+    // transfer and reverts cleanly at DATA_END / FILE_CANCEL. Stage 0 keeps
+    // this a no-op (spacing unchanged) so the default path cannot regress.
+    void syncFileProfile() {
+        if (!connected_.load() ||
+            negotiated_waveform_ != WaveformMode::OFDM_CHIRP) {
+            return;
+        }
+        const uint32_t want_spacing = dataPilotSpacingForFileProfile();
+        if (ofdm_config_.pilot_spacing == want_spacing) {
+            return;  // nothing to do (stage 0, or already in the right regime)
+        }
+        ofdm_config_.pilot_spacing = want_spacing;
+        if (encoder_) encoder_->setOFDMConfig(ofdm_config_);
+        if (decoder_) decoder_->setOFDMConfig(ofdm_config_);
+        LOG_MODEM(INFO,
+                  "[%s] File profile: pilot_spacing -> %u (file_xfer=%d stage=%d)",
+                  callsign_.c_str(), want_spacing,
+                  isFileTransferInProgress() ? 1 : 0, file_profile_stage_);
     }
 
     void syncBurstInterleaveForConnectedMode() {

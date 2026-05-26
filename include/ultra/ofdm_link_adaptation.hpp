@@ -107,7 +107,15 @@ inline int recommendedBurstGroupSize(Modulation mod, CodeRate rate, float fading
 }
 
 inline int sanitizeBurstGroupSize(int value) {
-    return std::clamp(value, 2, 8);
+    // Ceiling raised 8 -> 32 (2026-05-26): the burst interleaver is the
+    // file-class fade-diversity keystone, and a Good HF fade (Tc ~= 4 s at
+    // 0.1 Hz Doppler) needs the group to span MULTIPLE coherence times to
+    // convert a slow deep fade into recoverable spread loss. N=8 ~= 1xTc is
+    // insufficient (see docs burst-interleaver diagnosis); the genie depth
+    // sweep (tests/bench_fade_interleave.cpp) shows the FER prize only opens
+    // up at D >= 16-32. Default group size stays 8; deeper groups are
+    // opt-in via setBurstInterleaveGroupSize / --burst-group-size.
+    return std::clamp(value, 2, 32);
 }
 
 // Estimate the maximum payload rate (bits/sec) for the given OFDM geometry,
