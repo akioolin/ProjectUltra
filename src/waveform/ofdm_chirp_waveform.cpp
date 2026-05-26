@@ -6,6 +6,7 @@
 #include "ultra/dsp.hpp"  // FFT class is in here
 #include "ultra/ofdm_link_adaptation.hpp"
 #include "ultra/timing_profiler.hpp"
+#include "ultra/phy_diagnostics.hpp"
 #include <algorithm>
 #include <sstream>
 #include <cmath>
@@ -494,6 +495,13 @@ bool OFDMChirpWaveform::detectSync(SampleSpan samples, SyncResult& result, float
                 const Complex marker_metric = marker_p * cfo_comp;
                 burst_interleaved_detected_ = (marker_metric.real() < 0.0f);
                 burst_interleave_latched_ = burst_interleaved_detected_;
+                if (ultra::phyDiagnosticsEnabled()) {
+                    std::ostringstream oss;
+                    oss << "burst_marker site=chirp re=" << marker_metric.real()
+                        << " im=" << marker_metric.imag()
+                        << " latched=" << (burst_interleave_latched_ ? 1 : 0);
+                    ultra::phyDiagLine(oss.str());
+                }
             }
         }
 
@@ -779,6 +787,14 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
         Complex marker_metric = best_p * cfo_comp;
         burst_interleaved_detected_ = (marker_metric.real() < 0.0f);
         burst_interleave_latched_ = burst_interleaved_detected_;
+        if (ultra::phyDiagnosticsEnabled()) {
+            std::ostringstream oss;
+            oss << "burst_marker site=warm re=" << marker_metric.real()
+                << " im=" << marker_metric.imag()
+                << " sc=" << best_schmidl_corr << " mf=" << best_matched_corr
+                << " latched=" << (burst_interleave_latched_ ? 1 : 0);
+            ultra::phyDiagLine(oss.str());
+        }
 
         LOG_MODEM(INFO,
                   "OFDMChirpWaveform: Data sync detected at %d, corr=%.2f (sc=%.2f mf=%.2f), using CFO=%.1f Hz%s",
@@ -854,6 +870,13 @@ bool OFDMChirpWaveform::detectShortDataSync(SampleSpan samples, SyncResult& resu
                 const Complex marker_metric = marker_p * cfo_comp;
                 burst_interleaved_detected_ = (marker_metric.real() < 0.0f);
                 burst_interleave_latched_ = burst_interleaved_detected_;
+                if (ultra::phyDiagnosticsEnabled()) {
+                    std::ostringstream oss;
+                    oss << "burst_marker site=short re=" << marker_metric.real()
+                        << " im=" << marker_metric.imag()
+                        << " latched=" << (burst_interleave_latched_ ? 1 : 0);
+                    ultra::phyDiagLine(oss.str());
+                }
             }
         }
     }

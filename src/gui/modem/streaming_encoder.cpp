@@ -534,7 +534,18 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
     for (size_t i = 0; i < encoded_frames.size(); i++) {
         // Generate preamble (LTS training symbols)
         Samples preamble;
-        if (i == 0 && (force_first_full_preamble || waveform_->supportsDataPreamble())) {
+        if (frame_is_group_start[i] && protocol::isOFDMMode(mode_) &&
+            waveform_->supportsDataPreamble()) {
+            // Burst-interleaved group start: emit a PURE light LTS preamble (no
+            // chirp anchor, no short re-anchor chirp prefix) so the connected
+            // warm-sync RX — which does not run chirp detection mid-stream —
+            // syncs it and reads the negated-LTS burst marker. A full/chirp
+            // preamble here is invisible to the warm LTS detector, so the marker
+            // is never seen and the RX cannot enter burst accumulation. Warm
+            // timing is already seeded by the pre-burst DATA_START frame, so the
+            // group start does not need its own chirp timing anchor.
+            preamble = connectedDataPreambleForFrame(/*allow_short_reanchor=*/false);
+        } else if (i == 0 && (force_first_full_preamble || waveform_->supportsDataPreamble())) {
             preamble = waveform_->generatePreamble();
             if (force_first_full_preamble) {
                 LOG_MODEM(INFO, "[%s] Full preamble forced for first burst frame OFDM timing anchor",
