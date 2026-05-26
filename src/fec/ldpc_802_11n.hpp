@@ -14,6 +14,9 @@
 #include <vector>
 #include <cassert>
 #include <cstdint>
+#include <set>
+#include <utility>
+#include <algorithm>
 
 namespace ultra {
 namespace ldpc_802_11n {
@@ -153,31 +156,38 @@ inline const int* getBaseData(CodeRate rate) {
 // Expand base matrix into full sparse H + compute encoding matrix
 // ============================================================================
 
-inline ExpandedLDPC expand(CodeRate rate) {
+// Zp = lifting/circulant size for this expansion. Zp==Z (27) reproduces the standard
+// n=648 code byte-identically. Zp=81 lifts the SAME known-good base matrices to n=1944:
+// lifting with the existing shifts (all < 27) preserves girth>=6 — a 4-cycle needs
+// s1-s2+s3-s4 == 0 (mod Zp); the base has none mod 27, and with four shifts <27 the sum
+// lies in (-54,54), so mod 81 it can only vanish if it is exactly 0, which the base
+// already excludes. Verify computationally with hasFourCycle() before trusting a new Zp.
+inline ExpandedLDPC expand(CodeRate rate, int Zp) {
     const int* base = getBaseData(rate);
     int mb = getBaseRows(rate);
     assert(base && mb > 0);
+    const int Nz = Zp * NB;   // codeword bits at this lifting (648 at Z=27, 1944 at Z=81)
 
     ExpandedLDPC result;
-    result.m = mb * Z;        // parity bits
-    result.n = N;             // 648
-    result.k = N - result.m;  // info bits
+    result.m = mb * Zp;       // parity bits
+    result.n = Nz;
+    result.k = Nz - result.m; // info bits
 
     int m = result.m;
     int k = result.k;
 
     // ---- Step 1: Build sparse H matrix from base matrix ----
     result.H_rows.resize(m);
-    result.H_cols.resize(N);
+    result.H_cols.resize(Nz);
 
     for (int br = 0; br < mb; br++) {
         for (int bc = 0; bc < NB; bc++) {
             int shift = base[br * NB + bc];
             if (shift < 0) continue;
 
-            for (int p = 0; p < Z; p++) {
-                int check_idx = br * Z + p;
-                int var_idx = bc * Z + (p + shift) % Z;
+            for (int p = 0; p < Zp; p++) {
+                int check_idx = br * Zp + p;
+                int var_idx = bc * Zp + (p + shift) % Zp;
                 result.H_rows[check_idx].push_back(var_idx);
                 result.H_cols[var_idx].push_back(check_idx);
             }
@@ -238,6 +248,28 @@ inline ExpandedLDPC expand(CodeRate rate) {
     }
 
     return result;
+}
+
+// Behavior-preserving default: the standard n=648 code (Z=27).
+inline ExpandedLDPC expand(CodeRate rate) { return expand(rate, Z); }
+
+// Girth guard: true if H has a 4-cycle (two variable nodes sharing two check nodes).
+// QC-LDPC with 4-cycles is weak (the custom R1/4 code's hidden 4-cycles cost ~3 dB).
+// Used to VERIFY a new lifting (e.g. Z=81 -> n=1944) is sound before trusting it.
+inline bool hasFourCycle(const ExpandedLDPC& e) {
+    std::set<std::pair<int, int>> pair_seen;
+    for (const auto& vars : e.H_rows) {
+        for (size_t a = 0; a < vars.size(); ++a) {
+            for (size_t b = a + 1; b < vars.size(); ++b) {
+                const int lo = std::min(vars[a], vars[b]);
+                const int hi = std::max(vars[a], vars[b]);
+                if (!pair_seen.insert({lo, hi}).second) {
+                    return true;  // this var-pair co-occurs in two checks => 4-cycle
+                }
+            }
+        }
+    }
+    return false;
 }
 
 } // namespace ldpc_802_11n
