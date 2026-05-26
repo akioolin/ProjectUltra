@@ -2523,9 +2523,20 @@ void Connection::tick(uint32_t elapsed_ms) {
                     mode_change_retry_count_++;
                     if (mode_change_retry_count_ > MODE_CHANGE_MAX_RETRIES) {
                         LOG_MODEM(WARN,
-                                  "Connection: MODE_CHANGE ACK unresolved after %d retries; committing pending mode to avoid peer split",
-                                  MODE_CHANGE_MAX_RETRIES);
-                        commitPendingModeChange("ACK unresolved");
+                                  "Connection: MODE_CHANGE ACK unresolved after %d retries; keeping current %s %s because peer ACK was not proven",
+                                  MODE_CHANGE_MAX_RETRIES,
+                                  modulationToString(data_modulation_),
+                                  codeRateToString(data_code_rate_));
+                        mode_change_pending_ = false;
+                        mode_change_timeout_ms_ = 0;
+                        mode_change_retry_count_ = 0;
+                        pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
+                        adaptive_cooldown_ms_ = ADAPTIVE_MODE_CHANGE_COOLDOWN_MS;
+                        adaptive_target_ = AdaptiveModeTarget{};
+                        adaptive_downgrade_queue_age_ms_ = 0;
+                        adaptive_clean_windows_ = 0;
+                        adaptive_pressure_windows_ = 0;
+                        runDeferredArqRefill();
                     } else {
                         LOG_MODEM(WARN, "Connection: MODE_CHANGE timeout, retrying (%d/%d)",
                                   mode_change_retry_count_, MODE_CHANGE_MAX_RETRIES);

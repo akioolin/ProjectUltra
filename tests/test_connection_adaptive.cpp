@@ -320,7 +320,7 @@ void test_local_mode_change_ack_reconfigures_arq() {
           "local MODE_CHANGE ACK should recompute ARQ window");
 }
 
-void test_local_mode_change_timeout_commits_pending_arq_mode() {
+void test_local_mode_change_timeout_keeps_current_arq_mode() {
     Connection c;
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(
         c, CodeRate::R2_3, 20.0f, 0.50f, Modulation::QPSK);
@@ -339,11 +339,11 @@ void test_local_mode_change_timeout_commits_pending_arq_mode() {
     }
 
     CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
-          "unresolved one-phase MODE_CHANGE should not leave peers in a pending split");
-    CHECK(c.getDataCodeRate() == CodeRate::R1_2,
-          "unresolved MODE_CHANGE should commit pending local rate after retries");
-    CHECK(ConnectionAdaptiveTestAccess::arqCodeRate(c) == CodeRate::R1_2,
-          "timeout-committed MODE_CHANGE should update ARQ code rate");
+          "unresolved one-phase MODE_CHANGE should release the pending control state");
+    CHECK(c.getDataCodeRate() == CodeRate::R2_3,
+          "unacknowledged MODE_CHANGE must keep the proven shared data rate");
+    CHECK(ConnectionAdaptiveTestAccess::arqCodeRate(c) == CodeRate::R2_3,
+          "unacknowledged MODE_CHANGE must not reconfigure local ARQ alone");
 }
 
 void test_remote_mode_change_reconfigures_arq() {
@@ -1187,7 +1187,7 @@ void test_clean_timeout_repairs_keep_burst_batching() {
 
 int main() {
     test_local_mode_change_ack_reconfigures_arq();
-    test_local_mode_change_timeout_commits_pending_arq_mode();
+    test_local_mode_change_timeout_keeps_current_arq_mode();
     test_remote_mode_change_reconfigures_arq();
     test_wide_ofdm_configures_short_tail_sack_delay();
     test_accepted_ofdm_data_sync_keeps_connect_ack_rescue_armed();
