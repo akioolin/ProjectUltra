@@ -2797,12 +2797,15 @@ void App::tickScenario() {
         }
         // Phase 2: file, but only after ALL messages have finished transmitting
         // (TX idle) plus a short settle, so the payloads don't collide on the air.
+        // Do not require protocol_.isReadyToSend() here: after the peer has
+        // legitimately taken the half-duplex DATA turn, sendFile() must enter the
+        // protocol queue and request the turn back instead of waiting forever.
         const bool message_phase_clear =
             message_after_file ||
             options_.auto_send_message.empty() ||
             (scenario_messages_sent_ >= message_target &&
              scenario_messages_delivered_ >= message_target &&
-             protocol_.getTxBacklogBytes() == 0 && protocol_.isReadyToSend() &&
+             protocol_.getTxBacklogBytes() == 0 &&
              !tx_in_progress_ &&
              now - scenario_message_sent_at_ >= std::chrono::milliseconds(2000));
         if (!options_.auto_send_file.empty() && !scenario_file_started_ &&
