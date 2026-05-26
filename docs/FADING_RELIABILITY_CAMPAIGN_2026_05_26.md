@@ -113,6 +113,26 @@ ladder thrash — NOT the T/R turnaround). So the REAL dead-air levers are: (a) 
 (b) damp the ladder thrash. (Codex self-measured single sweep; re-verify, but the
 turnaround-null + duty-45% signal is clear.) Codex is now patching the thrash; sack_delay next.
 
+## CRITICAL CORRECTION — the "ladder thrash" is a GUI COSMETIC ARTIFACT, not real [2026-05-26, in-house]
+The `[ADPT] ... hysteresis allows switch QPSK R2/3 <-> DQPSK R1/2` lines flipping every few
+seconds are emitted by a GUI-side VIRTUAL adaptation display in src/gui/app.cpp (~line 2077),
+using `adapt_virtual_mod_/rate_` — variables that are read/written ONLY inside that display
+function and are read by NOTHING in src/protocol or src/gui/modem (verified). It's a "what-if"
+track with its own weak hysteresis, separate from the REAL mode controller
+(connection.cpp::updateAdaptiveModeController, gated by ADAPTIVE_MODE_CHANGE_COOLDOWN_MS=30s).
+The actual modulation on seed2 switched only ~1-2x (the real `[MODE]` / MODE_CHANGE lines),
+NOT the ~6-8 the advisory log implied. The waveform was NOT thrashing — operator instinct
+("waveform looks identical") was correct.
+CONSEQUENCE: the thrash-damp is a NON-PROBLEM at the protocol layer (Codex's 339-line protocol
+dwell was fixing the wrong layer — STASHED/discarded). Do NOT re-chase protocol thrash-damp.
+TWO real follow-ups instead: (a) operator-clarity: the GUI virtual-adaptation log is MISLEADING
+(spams "allows switch" while the real link holds) — make it reflect the real controller's
+cooldown-gated state, or relabel it as advisory; low-risk display fix. (b) seed2/seed5 real
+limiter = the genuine downgrade to R1/2 (correct response to fades) + fade-collapse frames =
+the RELIABILITY/channel-est lever (#3), NOT thrash.
+NET re-rank of REAL throughput levers: sack_delay ACK-hold trim (dead-air, real, untested) +
+fade reliability (channel-est, the fade seeds) + 8PSK (ceiling). Thrash is OFF the list.
+
 ## Workflow
 Iterate: hypothesis (from genie data) → fix → build → GUI multi-seed → measure → keep/revert,
 commit wins branch-only. Hard PHY rounds → Codex collaboration (mandated counter-check).
