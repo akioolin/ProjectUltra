@@ -1034,6 +1034,7 @@ void Connection::sendTurnRequestIfNeeded() {
         local_data_turn_ ||
         file_transfer_.isBusy() ||
         file_cancel_confirm_pending_ ||
+        yielded_data_turn_waiting_for_peer_data_ ||
         !hasLocalDataWaitingForTurn() ||
         local_turn_request_pending_ ||
         turn_request_holdoff_ms_ > 0 ||
@@ -1093,6 +1094,7 @@ bool Connection::maybeYieldDataTurn() {
     local_data_turn_ = false;
     peer_data_turn_requested_ = false;
     local_turn_request_pending_ = false;
+    yielded_data_turn_waiting_for_peer_data_ = true;
     data_turn_yield_pending_ = false;
     turn_request_retransmit_ms_ = 0;
     turn_request_holdoff_ms_ = turnRequestHoldoffAfterDataMs();
@@ -3110,6 +3112,7 @@ void Connection::enterConnected() {
     peer_data_turn_requested_ = false;
     local_turn_request_pending_ = false;
     received_peer_data_since_connect_ = false;
+    yielded_data_turn_waiting_for_peer_data_ = false;
     data_turn_yield_pending_ = false;
     resetDataTurnFairness();
     data_turn_tx_guard_ms_ = 0;
@@ -3170,6 +3173,7 @@ void Connection::enterDisconnected(const std::string& reason) {
     peer_data_turn_requested_ = false;
     local_turn_request_pending_ = false;
     received_peer_data_since_connect_ = false;
+    yielded_data_turn_waiting_for_peer_data_ = false;
     data_turn_yield_pending_ = false;
     resetDataTurnFairness();
     data_turn_tx_guard_ms_ = 0;
@@ -3441,6 +3445,7 @@ void Connection::reset() {
     peer_data_turn_requested_ = false;
     local_turn_request_pending_ = false;
     received_peer_data_since_connect_ = false;
+    yielded_data_turn_waiting_for_peer_data_ = false;
     data_turn_yield_pending_ = false;
     resetDataTurnFairness();
     data_turn_tx_guard_ms_ = 0;

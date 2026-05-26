@@ -559,6 +559,7 @@ void Connection::handleTurnover(const v2::ControlFrame& frame, const std::string
     local_data_turn_ = true;
     peer_data_turn_requested_ = false;
     local_turn_request_pending_ = false;
+    yielded_data_turn_waiting_for_peer_data_ = false;
     data_turn_yield_pending_ = false;
     turn_request_retransmit_ms_ = 0;
     turn_request_holdoff_ms_ = 0;
@@ -574,7 +575,22 @@ void Connection::handleTurnover(const v2::ControlFrame& frame, const std::string
 
 void Connection::handleTurnRequest(const v2::ControlFrame& frame, const std::string& src_call) {
     (void)frame;
-    if (state_ != ConnectionState::CONNECTED || !local_data_turn_) {
+    if (state_ != ConnectionState::CONNECTED) {
+        return;
+    }
+
+    if (!local_data_turn_) {
+        if (yielded_data_turn_waiting_for_peer_data_) {
+            auto turnover = v2::ControlFrame::makeTurnover(local_call_, remote_call_);
+            LOG_MODEM(INFO,
+                      "Connection: RX TURN_REQUEST from %s while waiting for peer DATA; reasserting TURNOVER",
+                      src_call.empty() ? remote_call_.c_str() : src_call.c_str());
+            transmitFrame(turnover.serialize());
+            local_turn_request_pending_ = false;
+            turn_request_retransmit_ms_ = 0;
+            turn_request_holdoff_ms_ = turnRequestHoldoffAfterDataMs();
+            armDataTurnTxGuard(dataTurnControlGuardMs());
+        }
         return;
     }
 
@@ -694,6 +710,7 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data, v2::Fra
         return;
     }
     received_peer_data_since_connect_ = true;
+    yielded_data_turn_waiting_for_peer_data_ = false;
     turn_request_holdoff_ms_ = turnRequestHoldoffAfterDataMs();
 
     const bool binary_payload =

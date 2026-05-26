@@ -450,6 +450,7 @@ private:
     bool peer_data_turn_requested_ = false;
     bool local_turn_request_pending_ = false;
     bool received_peer_data_since_connect_ = false;
+    bool yielded_data_turn_waiting_for_peer_data_ = false;
     bool data_turn_yield_pending_ = false;
     uint64_t data_turn_payload_bytes_sent_ = 0;
     uint32_t data_turn_contended_ms_ = 0;
