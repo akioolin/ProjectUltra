@@ -279,6 +279,32 @@ both require HARQ/ARQ co-design (E) so partial loss soft-combines instead of sta
 existing `BurstInterleaver` is the wrong structure for this — keep it disabled; build the
 codeword-spanning version against the long code.
 
+## 11d. PLAN CORRECTION: the keystone is the ARQ/transport fix, NOT a new LDPC [2026-05-26]
+
+Re-reading `burst_interleaver.hpp`: it already spreads *each codeword's bytes across N physical
+frames* (N=`kBurstInterleaveGroupFrames`=8) → that IS per-codeword fade-diversity, already
+implemented. And `8d37864` disabled it because of **retx/timeouts 32/30 → 4/1**, a TRANSPORT
+problem, not a decode problem: the deinterleaver needs all N frames of a group before it can
+decode any, so on half-duplex with fades one lost/late frame stalls the whole group → retx/
+timeout storm that outweighed the PHY diversity on Good@20.
+
+=> The cheapest, lowest-risk keystone (adapt-what's-there) is **Step E FIRST**: fix the ARQ/
+transport coupling so a deep-interleaved group does not stall —
+- decode each codeword as soon as ITS bits have arrived across the group (don't gate the whole
+  group on the last frame),
+- align the SR-ARQ retransmission unit to the interleaver group + HARQ soft-combine partial
+  groups (we already soft-combine),
+- size the group vs the half-duplex burst so a group = one TX burst (no mid-group turnaround),
+- ACK at group granularity, RTO covering group decode latency.
+Then RE-ENABLE the existing burst interleaver on the FILE class and measure: fade seeds should
+survive (diversity) WITHOUT the retx/timeout storm (transport fixed).
+
+This REORDERS the build: the long LDPC (n=1944) + codeword-spanning interleaver (Steps A/B/D)
+become a *later coding-gain refinement*, NOT the gate. The gate is the ARQ/transport fix +
+re-enabling the diversity infra that already exists. No new LDPC matrices needed to test the
+keystone hypothesis. (And the matrices must be SOURCED correctly if/when we do the long code —
+not fabricated/hand-rolled; the custom R1/4 hand-roll already cost ~3 dB via 4-cycles.)
+
 ## 12. Honest expectation
 
 - Robust QPSK R2/3 floor (anti-poison + pilots-when-clean + efficiency): ~2400–2500 bps.
