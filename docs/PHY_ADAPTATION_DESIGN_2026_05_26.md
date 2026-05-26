@@ -259,6 +259,26 @@ tests + multi-seed file completion under fading.
 Each step is independently committable branch-only; Codex independent review of every PHY/FEC
 diff before merge; revert any step that fails its gate.
 
+## 11c. KEY FINDING: the existing burst interleaver is the WRONG granularity (don't re-enable it)
+
+Scoped 2026-05-26. `src/fec/burst_interleaver.hpp` + the streaming burst-interleave path
+already implement cross-frame interleaving (depth `kBurstInterleaveGroupFrames=8`), but it is
+**disabled by default** — and commit `8d37864` disabled it on Good@20 *because disabling it
+improved throughput*: **20KB Good@20 seed42 went 1814 → 2330 bps, retx/timeouts 32/30 → 4/1.**
+
+Why it hurt (and why there is NO "just re-enable it" shortcut): the existing interleaver
+spreads a **group of independent short (648-bit) codewords** across 8 frames → an
+**all-or-nothing group**: RX must receive all 8 frames before it can deinterleave/decode any,
+and one lost/late frame stalls the whole group → more retx/timeouts on a mostly-good channel.
+The PHY diversity is outweighed by the ARQ/latency coupling.
+
+CONSEQUENCE — this confirms the Step B+D+E coupling: the keystone is **one LONG codeword spread
+across the time span** (diversity *inside a single codeword's FEC*), NOT a group of independent
+short codewords. Long LDPC (B) and the codeword-spanning interleaver (D) are inseparable, and
+both require HARQ/ARQ co-design (E) so partial loss soft-combines instead of stalling. The
+existing `BurstInterleaver` is the wrong structure for this — keep it disabled; build the
+codeword-spanning version against the long code.
+
 ## 12. Honest expectation
 
 - Robust QPSK R2/3 floor (anti-poison + pilots-when-clean + efficiency): ~2400–2500 bps.
