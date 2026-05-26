@@ -184,7 +184,12 @@ Complex OFDMDemodulator::Impl::hardDecision(Complex sym, Modulation mod) const {
 void OFDMDemodulator::Impl::recordFailureAttributionSymbol(
     const std::vector<Complex>& equalized,
     Modulation mod) {
-    if (!failureAttributionEligible(mod) ||
+    const bool deep_diag =
+        qam16FailureAttributionDiagEnabled() ||
+        qam16GenieSigmaEmpiricalEnabled();
+    const bool psk_diag =
+        deep_diag && (mod == Modulation::BPSK || mod == Modulation::QPSK);
+    if (!(failureAttributionEligible(mod) || psk_diag) ||
         equalized.size() != data_carrier_indices.size() ||
         carrier_noise_var.size() != data_carrier_indices.size()) {
         return;
@@ -215,9 +220,6 @@ void OFDMDemodulator::Impl::recordFailureAttributionSymbol(
     std::vector<float> phase_bins;
     const float ce_margin = soft_demap::getCEErrorMargin(mod);
     const float noise_ref = std::max(noise_variance, MIN_CARRIER_NOISE_VAR);
-    const bool deep_diag =
-        qam16FailureAttributionDiagEnabled() ||
-        qam16GenieSigmaEmpiricalEnabled();
     if (deep_diag) {
         phase_errors.reserve(equalized.size());
         phase_bins.reserve(equalized.size());

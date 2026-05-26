@@ -7,7 +7,7 @@ SNR_DB="20"
 SEED="42"
 EXPECT_RATE="R1/4"
 EXPECT_MOD="16QAM"
-MSG_COUNT=1
+MSG_COUNT=3
 MSG_INTERVAL=8
 CONNECT_DELAY=5
 DISCONNECT_AFTER=20
@@ -16,7 +16,7 @@ FILE_KB=10
 OUT=""
 
 usage() {
-  printf 'Usage: %s [--channel awgn] [--snr-db 20] [--seed 42] [--expect-rate R1/4] [--out DIR]\n' "$0"
+  printf 'Usage: %s [--channel awgn] [--snr-db 20] [--seed 42] [--expect-rate R1/4] [--expect-mod 16QAM] [--out DIR]\n' "$0"
   printf '       [--exit-after SEC] [--auto-disconnect-after SEC] [--message-count N]\n'
 }
 
@@ -78,7 +78,7 @@ estimate_exit_after() {
       expected_payload_bps = raw_info_bps * 0.25
       if (expected_payload_bps < 300.0) expected_payload_bps = 300.0
       handshake = 25.0
-      scripted_messages = 1.0 * msg_count * msg_interval
+      scripted_messages = 2.0 * msg_count * msg_interval
       payload = (file_bytes * 8.0) / expected_payload_bps
       margin = 20.0
       expected = handshake + scripted_messages + payload + disconnect_after + margin
@@ -195,6 +195,7 @@ scenario_passed() {
   [[ "$bravo_mode_count" -gt 0 ]] &&
   [[ "$alpha_unexpected_modes" -eq 0 ]] &&
   [[ "$bravo_unexpected_modes" -eq 0 ]] &&
+  [[ "$alpha_rx_msgs" -ge "$MSG_COUNT" ]] &&
   [[ "$bravo_rx_msgs" -ge "$MSG_COUNT" ]] &&
   [[ "$file_crc_ok" -gt 0 ]] &&
   [[ "$alpha_file_done" -gt 0 ]] &&
@@ -298,6 +299,9 @@ fi
 ULTRA_E2E_DEBUG_LOG="$E2E_BRAVO_LOG" "$ROOT/build/ultra_gui" -sim --ota-host "$GRPC" --token bravo_tok --station-id BRAVO \
   --session-id lobby \
   --auto-accept \
+  --auto-send-message "BRAVO QAM16 ladder" \
+  --auto-message-count "$MSG_COUNT" \
+  --auto-message-interval "$MSG_INTERVAL" \
   --exit-after "$EXIT_AFTER" \
   --log-level debug --log-category all --log-file "$BRAVO_LOG" >/dev/null 2>&1 &
 BRAVO_PID=$!
