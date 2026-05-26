@@ -36,8 +36,10 @@ public:
     static constexpr int TOTAL_FRAME_BITS = NUM_CODEWORDS * BITS_PER_CODEWORD;  // 2592
 
     static int sanitizeCodewordCount(int codeword_count);
-    static int totalFrameBits(int codeword_count);
-    static int totalFrameBytes(int codeword_count);
+    // bits_per_codeword defaults to 648 (n=648 LDPC). Pass 1944 for the
+    // file-class long code (Z=81). Default keeps every existing caller identical.
+    static int totalFrameBits(int codeword_count, int bits_per_codeword = BITS_PER_CODEWORD);
+    static int totalFrameBytes(int codeword_count, int bits_per_codeword = BITS_PER_CODEWORD);
 
     /**
      * Interleave coded bits for transmission.
@@ -49,7 +51,8 @@ public:
      * @return Interleaved bytes
      */
     static std::vector<uint8_t> interleave(const std::vector<std::vector<uint8_t>>& coded_codewords,
-                                           int codeword_count);
+                                           int codeword_count,
+                                           int bits_per_codeword = BITS_PER_CODEWORD);
     static std::vector<uint8_t> interleave(const std::vector<std::vector<uint8_t>>& coded_codewords);
 
     /**
@@ -63,7 +66,8 @@ public:
      * @return Vector of N soft bit vectors (648 floats each)
      */
     static std::vector<std::vector<float>> deinterleave(const std::vector<float>& interleaved_soft,
-                                                        int codeword_count);
+                                                        int codeword_count,
+                                                        int bits_per_codeword = BITS_PER_CODEWORD);
     static std::vector<std::vector<float>> deinterleave(const std::vector<float>& interleaved_soft);
 
     /**
@@ -71,13 +75,15 @@ public:
      * Same pattern as byte interleave but operates on soft bits.
      */
     static std::vector<float> interleaveSoft(const std::vector<std::vector<float>>& soft_codewords,
-                                             int codeword_count);
+                                             int codeword_count,
+                                             int bits_per_codeword = BITS_PER_CODEWORD);
     static std::vector<float> interleaveSoft(const std::vector<std::vector<float>>& soft_codewords);
 
 private:
     // Permutation tables (computed once, used many times)
     static void ensureTablesInitialized();
     static void buildTables(int codeword_count,
+                            int bits_per_codeword,
                             std::vector<int>& interleave_table,
                             std::vector<int>& deinterleave_table);
     static std::vector<int> interleave_table_;  // Original index → interleaved index
