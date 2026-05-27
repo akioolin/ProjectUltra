@@ -712,6 +712,19 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 }
                                 setBurstInterleave(bi.burst_interleave);
                                 setCarrierLdpcInterleaver(bi.carrier_ldpc);
+                                // Declare the data size so the immediately-following
+                                // group-start frame is sized as a full data frame
+                                // (PendingCodewords requirement) instead of a
+                                // control-sized peek. This stops the group-start from
+                                // entering the control-first peek path, whose
+                                // control-profile probe double-demodulated the frame
+                                // and poisoned the coherent channel estimate
+                                // (near-erasure LLRs, 0/8 deinterleave — §14.24 bug B).
+                                // The negated-LTS marker still triggers accumulation;
+                                // this only fixes the buffer sizing + decode profile.
+                                if (bi.cw_per_frame >= 1) {
+                                    pending_total_cw_ = bi.cw_per_frame;
+                                }
                                 last_burst_descriptor_ = bi;
                                 have_burst_descriptor_ = true;
                                 LOG_MODEM(INFO,
@@ -842,6 +855,25 @@ void StreamingDecoder::decodeCurrentFrame() {
 
         if (switched_profile) {
             waveform_->configure(saved_mod, saved_rate);
+        }
+
+        // The control-first peek ran and found no valid control frame. In the
+        // self-describing burst regime ALL data is decoded at the descriptor-
+        // declared size (pending_total_cw_), so it never reaches this control-
+        // sized peek — a control-sized frame here that is not a valid control
+        // frame is noise / a false sync, not a data frame to speculatively
+        // decode. Re-search instead of the legacy fall-through to a multi-CW
+        // data decode (whose control-profile probe + double-demod poisoned the
+        // coherent channel estimate — §14.24/§14.25). Gated to the burst regime
+        // so legacy non-burst connected data keeps the speculative fallback.
+        if (use_burst_interleave_ && connected_) {
+            {
+                std::lock_guard<std::mutex> lock(buffer_mutex_);
+                correlation_pos_ = wrapRingIndexLocked(sync_position_ + frame_len);
+                setSearchFloorLocked(frame_sync_abs + frame_len);
+            }
+            state_ = DecoderState::SEARCHING;
+            return;
         }
     }
 
@@ -998,6 +1030,12 @@ void StreamingDecoder::decodeCurrentFrame() {
     if (burst_marker) {
         LOG_MODEM(INFO, "[%s] Burst interleave marker detected, entering accumulation",
                   log_prefix_.c_str());
+
+        // The descriptor set pending_total_cw_ to size THIS group-start frame as a
+        // full data frame (bypassing the control peek). Clear it now: the rest of
+        // the group is sliced by burst_min_block_ in tryDemodulateNextBurstFrame,
+        // and a stale pending count must not leak onto the next post-burst frame.
+        pending_total_cw_ = 0;
 
         // Initialize accumulation state with first frame's soft bits
         burst_soft_buffer_.clear();
