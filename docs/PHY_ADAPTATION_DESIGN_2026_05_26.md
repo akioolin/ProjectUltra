@@ -985,3 +985,40 @@ group-start), then re-enable by default. Quick local repro of the bug:
 `./build/measure_ack_fer --snr 40 --config burst_chunk --channel awgn --mod qpsk \
  --rate r3_4 --group 8 --burst-interleave 1 --burst-descriptor 1 --seed 1 --n 5`
 (currently 0 recovered; `--burst-descriptor 0` gives 40/40).
+
+### 14.22 Defer-until-buffered attempt — the real mechanism + principled fix (2026-05-27)
+
+Took a shot at the §14.21 truncation. Two hypotheses tested on the faithful harness
+(`measure_ack_fer --burst-descriptor 1`), both reverted (no magic-number fix shipped):
+
+1. **Reset warm-timing on descriptor consume** (`resetFrameArrivalTrackingLocked` +
+   `expect_full_ofdm_anchor_`): did NOT change the symbol count. Not a warm-window-bias
+   problem.
+2. **Buffer headroom** (`requirement.samples += getDataPreambleSamples()` for the
+   ConnectedOFDMBurst group-start, in both `decodeCurrentFrame` and
+   `checkIfReadyToDecode`): bare buffer → 27 symbols; +2-LTS-symbol headroom → **29**
+   symbols (target is 28). Reverted — overshoots.
+
+**Real mechanism (now understood):** the group-start (marker) frame is demodulated via
+the variable-buffer path — `OFDMChirpWaveform::process()` → `processPresynced(samples, 2)`
+skips 2 training symbols then demods **all remaining samples** with NO frame-length cap.
+So **output symbol count == buffer size** (1 buffer-symbol = 1 output-symbol, confirmed:
+bare=27, +2sym=29). descriptor-OFF lands on exactly 28 only by feed-cadence luck of how
+much was buffered when `available >= requirement.samples` first held; the descriptor
+shifts that timing by one symbol. `checkIfReadyToDecode`'s `available >= requirement`
+gate is therefore NOT a true "wait for the whole frame" — it waits for a *minimum*, and
+the demod then eats whatever is in the copied buffer.
+
+**Principled fix (do this on the GUI-co-validated session, NOT a magic +1-symbol
+headroom — that violates the no-heuristic-patch rule):** slice the group-start frame at
+an EXACT size, identical to how `tryDemodulateNextBurstFrame` already slices frames
+2..N (it copies exactly `burst_min_block_ = getMinSamplesForCWCount(fixed_frame_codewords_)`
+and demods that — proven correct, 77/80 Good@20). Cleanest form: have the BURST_HEADER
+descriptor-consume intercept **enter BURST_ACCUMULATING directly** with
+`burst_next_pos_` pointing at the first group frame's data, so ALL N frames (including
+the first) go through the exact-slice accumulation path and the negated-LTS marker /
+variable-buffer group-start is retired entirely. This is the "descriptor-triggered
+accumulation" design and it also removes the last dependence on the warm light marker
+(aligns with §14.19 drop-light-sync). Needs the encoder group-start data-start offset
+(descriptor_end + group-start preamble length) computed precisely + GUI two-process
+validation.
