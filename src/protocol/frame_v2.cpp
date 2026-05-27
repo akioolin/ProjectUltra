@@ -479,6 +479,19 @@ ControlFrame ControlFrame::makeGroupAck(const std::string& src, const std::strin
     return f;
 }
 
+ControlFrame ControlFrame::makeGroupNack(const std::string& src, const std::string& dst,
+                                         uint16_t group_seq) {
+    ControlFrame f;
+    f.type = FrameType::GROUP_NACK;
+    f.flags = Flags::VERSION_V2;
+    f.seq = group_seq;
+    f.src_hash = hashCallsign(src);
+    f.dst_hash = hashCallsign(dst);
+    f.payload[0] = static_cast<uint8_t>(group_seq & 0xFF);
+    f.payload[1] = static_cast<uint8_t>((group_seq >> 8) & 0xFF);
+    return f;
+}
+
 ControlFrame ControlFrame::makeBeacon(const std::string& src) {
     ControlFrame f;
     f.type = FrameType::BEACON;

@@ -1789,9 +1789,23 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
     // the sender whole-burst-resends (stop-and-wait, no SACK). Only a fully
     // decoded group is ACKed + delivered.
     if (!all_ok) {
-        LOG_MODEM(INFO,
-                  "Connection: Burst group_seq=%u incomplete; dropping (sender resends whole burst)",
-                  group_seq);
+        // §14.30 fast-NACK: the descriptor decoded (so group_seq is known) but the
+        // interleaved group failed (0/8) — usually a deep fade across the burst.
+        // Tell the sender to resend NOW instead of letting it wait out the ~27 s
+        // group-ACK timeout (which on Good fading costs ~54 s over two blind
+        // cycles). Only NACK the group we are actually still waiting for, so a
+        // failed duplicate of an already-delivered group is not NACKed.
+        if (group_seq == burst_transport_.rxExpectedGroupSeq()) {
+            LOG_MODEM(INFO,
+                      "Connection: Burst group_seq=%u failed (0/8); sending GROUP_NACK (resend now)",
+                      group_seq);
+            transmitFrame(
+                v2::ControlFrame::makeGroupNack(local_call_, remote_call_, group_seq).serialize());
+        } else {
+            LOG_MODEM(INFO,
+                      "Connection: Burst group_seq=%u failed but not the expected group (%u); dropping",
+                      group_seq, burst_transport_.rxExpectedGroupSeq());
+        }
         return;
     }
     // Drop pad frames (addressed to the burst-pad callsign): keep only frames
@@ -2088,6 +2102,18 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                             armDataTurnTxGuard(dataTurnAckDiversityGuardMs(*ctrl));
                         }
                         burst_transport_.onGroupAck(group_seq);
+                    }
+                    break;
+                case v2::FrameType::GROUP_NACK:
+                    // §14.30: receiver couldn't decode the in-flight group — resend
+                    // it immediately instead of waiting out the group-ACK timeout.
+                    if (state_ == ConnectionState::CONNECTED && use_burst_transport_) {
+                        const uint16_t group_seq = ctrl->getGroupNackSeq();
+                        LOG_MODEM(INFO, "Connection: GROUP_NACK group_seq=%u (fast resend)", group_seq);
+                        if (local_data_turn_) {
+                            armDataTurnTxGuard(dataTurnAckDiversityGuardMs(*ctrl));
+                        }
+                        burst_transport_.onGroupNack(group_seq);
                     }
                     break;
                 case v2::FrameType::MODE_CHANGE:

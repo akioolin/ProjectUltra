@@ -431,7 +431,10 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
          // the receiver's coarse post-transfer chirp search, stranding it
          // connected forever (responder never tears down / exits). Send it with a
          // full chirp+LTS anchor so it is robustly acquired, like the GROUP_ACK.
-         header.type == protocol::v2::FrameType::DISCONNECT);
+         header.type == protocol::v2::FrameType::DISCONNECT ||
+         // GROUP_NACK is the fast-resend coordination token (§14.30); like the
+         // GROUP_ACK it crosses the turnaround to a non-warm sender, so full anchor.
+         header.type == protocol::v2::FrameType::GROUP_NACK);
     const bool is_mode_change = header.valid &&
         header.type == protocol::v2::FrameType::MODE_CHANGE;
     if (is_ofdm && connected_ && handshake_complete_ && is_data_frame && streaming_decoder_) {

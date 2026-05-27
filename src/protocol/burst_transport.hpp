@@ -96,6 +96,25 @@ public:
         }
     }
 
+    // Sender received a group-NACK: the receiver decoded the descriptor but the
+    // interleaved group failed (0/8). Resend the in-flight group NOW instead of
+    // waiting out the full ack_timeout — reclaims the dead silence between the
+    // failed burst and the timeout-driven resend (fast fade recovery, §14.30).
+    // Counts as a retry so a persistent deep fade still hits max_retries and the
+    // link is declared dead rather than resending forever. The ~burst-duration
+    // airtime of each resend naturally paces attempts to the fade timescale.
+    void onGroupNack(uint16_t group_seq) {
+        if (!sending_) return;
+        if (group_seq != static_cast<uint16_t>(next_group_)) return;  // stale/dup
+        if (retries_ >= cfg_.max_retries) {
+            sending_ = false;
+            if (tx_done_) tx_done_(false);
+            return;
+        }
+        ++retries_;
+        transmitCurrent();  // resets elapsed_since_tx_ms_
+    }
+
     // Advance the session clock. On ACK timeout, resend the whole current group;
     // after max_retries the link is declared dead and the transfer fails.
     void tick(uint32_t elapsed_ms) {

@@ -128,6 +128,54 @@ void test_stale_ack_ignored() {
     CHECK(sent.size() == 2 && sent[1] == 1, "correct ACK advances");
 }
 
+void test_fast_nack_immediate_resend() {
+    // §14.30: a GROUP_NACK for the in-flight group resends it NOW (no timeout wait).
+    BurstStopAndWaitController::Config cfg;
+    cfg.ack_timeout_ms = 1000;
+    cfg.max_retries = 3;
+    BurstStopAndWaitController c(cfg);
+    std::vector<uint16_t> sent;
+    c.setTransmitGroup([&](uint16_t seq, const Group&) { sent.push_back(seq); });
+
+    c.startTransfer({makeGroup(0), makeGroup(1)});
+    CHECK(sent.size() == 1, "one tx at start");
+    c.tick(200);                 // well under the 1000 ms timeout
+    c.onGroupNack(0);            // receiver couldn't decode group 0
+    CHECK(sent.size() == 2 && sent[1] == 0 && c.retriesForCurrentGroup() == 1,
+          "NACK resends group 0 immediately, before timeout");
+    // The resend reset the timeout: a partial tick must not double-resend.
+    c.tick(200);
+    CHECK(sent.size() == 2, "NACK resend reset the ACK-timeout clock");
+}
+
+void test_stale_nack_ignored() {
+    BurstStopAndWaitController c;
+    std::vector<uint16_t> sent;
+    c.setTransmitGroup([&](uint16_t seq, const Group&) { sent.push_back(seq); });
+    c.startTransfer({makeGroup(0), makeGroup(1)});
+    c.onGroupAck(0);                  // advance to group 1 (sent=2)
+    c.onGroupNack(0);                 // stale NACK for already-acked group 0
+    CHECK(sent.size() == 2 && c.currentGroupSeq() == 1,
+          "stale NACK for a past group is ignored");
+}
+
+void test_nack_respects_max_retries() {
+    BurstStopAndWaitController::Config cfg;
+    cfg.ack_timeout_ms = 100000;     // huge: prove NACK alone drives the retry cap
+    cfg.max_retries = 2;
+    BurstStopAndWaitController c(cfg);
+    int tx = 0; bool done = false, ok = true;
+    c.setTransmitGroup([&](uint16_t, const Group&) { ++tx; });
+    c.setTransferDone([&](bool s) { done = true; ok = s; });
+
+    c.startTransfer({makeGroup(0)});  // tx=1
+    c.onGroupNack(0);                 // retry 1 -> tx=2
+    c.onGroupNack(0);                 // retry 2 -> tx=3
+    c.onGroupNack(0);                 // retries == max -> link dead
+    CHECK(tx == 3, "NACK resends honor max_retries (no infinite resend on a stuck fade)");
+    CHECK(done && !ok && !c.isSending(), "persistent NACK -> link declared dead");
+}
+
 }  // namespace
 
 int main() {
@@ -137,6 +185,9 @@ int main() {
     test_link_dead_after_max_retries();
     test_rx_inorder_delivery_and_duplicate_reack();
     test_stale_ack_ignored();
+    test_fast_nack_immediate_resend();
+    test_stale_nack_ignored();
+    test_nack_respects_max_retries();
 
     if (tests_failed != 0) {
         std::cout << "BurstTransport: " << (tests_run - tests_failed) << "/" << tests_run

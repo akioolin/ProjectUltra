@@ -246,6 +246,8 @@ enum class FrameType : uint8_t {
                          // params (group size, CW/frame, mod/rate, interleave). Fixed-format
                          // 1-CW control frame, non-interleaved, sent before the data group so
                          // the receiver decodes the group from the sender's declaration (§14.17).
+    GROUP_NACK  = 0x27,  // Whole-burst NACK: receiver could not decode group_seq (0/8) — resend
+                         // NOW instead of waiting out the group-ACK timeout (fast loss recovery).
     BEACON      = 0x40,  // CQ broadcast
 
     // Data frames (variable codewords)
@@ -290,6 +292,7 @@ inline bool isControlFrame(FrameType type) {
            type == FrameType::DISCONNECT ||
            type == FrameType::BURST_HEADER ||
            type == FrameType::GROUP_ACK ||
+           type == FrameType::GROUP_NACK ||
            type == FrameType::BEACON;
 }
 
@@ -464,6 +467,11 @@ struct ControlFrame {
     // and resends the whole group on timeout. No per-frame bitmap.
     static ControlFrame makeGroupAck(const std::string& src, const std::string& dst,
                                      uint16_t group_seq);
+    // Whole-burst NACK (§14.30): the receiver decoded the descriptor but the
+    // interleaved group failed (0/8) — tell the sender to resend group_seq NOW
+    // rather than waiting out the group-ACK timeout (fast fade recovery).
+    static ControlFrame makeGroupNack(const std::string& src, const std::string& dst,
+                                      uint16_t group_seq);
     static ControlFrame makeBeacon(const std::string& src);
     static ControlFrame makeKeepalive(const std::string& src, const std::string& dst);
     static ControlFrame makeDisconnect(const std::string& src, const std::string& dst);
@@ -544,6 +552,11 @@ struct ControlFrame {
 
     // Parse a GROUP_ACK payload (§14.26): the acked group sequence number.
     uint16_t getGroupAckSeq() const {
+        return static_cast<uint16_t>(payload[0] | (payload[1] << 8));
+    }
+
+    // Parse a GROUP_NACK payload (§14.30): the group sequence that failed to decode.
+    uint16_t getGroupNackSeq() const {
         return static_cast<uint16_t>(payload[0] | (payload[1] << 8));
     }
 
