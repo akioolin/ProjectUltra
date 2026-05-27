@@ -333,6 +333,11 @@ add_executable(test_waveform_policy test_waveform_policy.cpp)
 target_link_libraries(test_waveform_policy PRIVATE ultra_core)
 add_test(NAME WaveformPolicy COMMAND test_waveform_policy)
 
+# Group-level stop-and-wait burst transport (one-way file path, design §14.16)
+add_executable(test_burst_transport test_burst_transport.cpp)
+target_link_libraries(test_burst_transport PRIVATE ultra_core)
+add_test(NAME BurstTransport COMMAND test_burst_transport)
+
 add_executable(test_ofdm_link_adaptation test_ofdm_link_adaptation.cpp)
 target_link_libraries(test_ofdm_link_adaptation PRIVATE ultra_core)
 add_test(NAME OFDMLinkAdaptation COMMAND test_ofdm_link_adaptation)
