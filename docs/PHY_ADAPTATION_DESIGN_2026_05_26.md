@@ -746,3 +746,36 @@ the PHY. The interleave enablement wired into `ModemEngine::setDataMode` is corr
 3. Prove on the automated GUI file-send (faithful clock): R3/4 Good@20 file delivers across seeds
    (incl. the previously-failing ones).
 4. Then strip chat + shorten handshake + remove turn-taking → the clean one-way sender.
+
+### 14.16 BURST TRANSPORT — implementable design (mapped 2026-05-27 against the real ARQ code)
+
+Landscape confirmed: `Connection` uses `SelectiveRepeatARQ arq_` (connection.hpp:373);
+`StopAndWaitARQ` exists (arq.hpp); SR-ARQ already supports **window=1 stop-and-wait** (used by
+MC-DPSK). The handshake is ALREADY lean (mode folded into CONNECT_ACK; `enterConnected`→
+`applyDataMode`→`sendFile` already reaches one-way file exchange). So no handshake rework needed.
+
+**The model:** stop-and-wait where the ARQ unit is the **interleaved burst** (one group of
+`kBurstInterleaveGroupFrames`=8 frames ≈ 6 s), not a single frame. Send burst → one group-ACK →
+resend the WHOLE burst on timeout. This is mandatory (not just simpler): the RX must have all 8
+frames to deinterleave, so per-frame selective retransmit (SR-ARQ) corrupts the group.
+
+**Why a new controller, not SR-ARQ reuse:** SR-ARQ's core is per-frame selective SACK/retransmit
+— structurally incompatible with whole-group resend. Window=1 gives *frame*-level stop-and-wait,
+not *group*-level. So the file path gets a dedicated **BurstStopAndWaitController** that sits
+above the waveform and bypasses `arq_`:
+- **TX:** chunk file → groups of 8 frames → `ModemEngine::transmitBurst(group)` (interleave on,
+  committed) → T/R turnaround → await group-ACK(seq). ACK → next group; timeout/NACK → resend the
+  same group. One outstanding group at a time (stop-and-wait).
+- **RX:** decode the burst (deinterleave emits the 8 frames — proven in the burst_chunk harness)
+  → all 8 present? → send group-ACK(seq); else → no ACK / NACK(seq) → sender resends the group.
+- **Group-ACK:** a control frame carrying the group sequence (reuse `ControlFrame` ACK with group
+  seq semantics; robust MC-DPSK coordination frame per §14.5).
+- Rate pinned to R3/4 via the selector promotion (committed d7a4ca7).
+
+**File targets:** new `burst_transport` controller; `file_transfer.cpp` (chunk into 8-frame
+groups, drive the controller instead of feeding `arq_`); `connection.cpp` (route file-path TX/RX
+through the burst controller, group-ACK handling); a group-ACK frame in `frame_v2`. Build as a
+PARALLEL file path (keep `arq_` for any non-file use until removed), PHY tests green throughout,
+GUI-prove R3/4 Good@20 delivery across seeds, then remove SR-ARQ/turn-taking/`sendMessage`.
+
+This is the focused next build; the design above is the spec.
