@@ -1213,3 +1213,41 @@ Exact ordered steps:
 
 Resume at step 1. This is the §14 one-way-session rewrite (backlog #143/#147), executed
 flag-gated so the 1210 working state is never at risk.
+
+### 14.28 Controller swap — implementation status (2026-05-27, branch feat/16qam-promotion)
+
+Steps 1-2 (callbacks + tick wiring), 3b (TX), 4a (sender GROUP_ACK), 4b (RX group-as-unit)
+are IMPLEMENTED + committed, **env-gated `ULTRA_BURST_TRANSPORT=1` (default OFF)**. Build clean
+on all targets. The flag-OFF (SR-ARQ 1210) path is byte-for-byte unchanged by construction
+(every new branch is gated on `use_burst_transport_` / decoder `burst_transport_rx_`).
+
+Commits: b4291db (descriptor group_seq) → 0ed1860 (callback ripple) → 5afce4c (TX) →
+1ed6222 (GROUP_ACK) → a4402c4 (RX). Fallback tag burst-1210-working (a27df2b).
+
+Hard-won implementation specifics (read before touching this path):
+- **group_seq on the wire = the BURST_HEADER descriptor FRAME HEADER `seq`** (encoder stamps
+  `burst_group_seq_` there via setBurstGroupSeq; NOT a payload field). RX reads it as `hdr.seq`
+  at the descriptor intercept (streaming_ofdm_decode.cpp ~728) into `last_burst_group_seq_`.
+- **The encoder only interleaves + emits a descriptor for FULL groups** (`encoded_frames.size()
+  / BURST_GROUP_SIZE`); descriptor declares `group_size = BURST_GROUP_SIZE` (fixed, =8). So each
+  controller Group MUST be exactly BURST_GROUP_SIZE serialized frames — `startBurstFileTransfer`
+  pads the final partial group with ULPAD-addressed frames (RX drops them by address filter).
+- **finalizeBurstGroup is SHARED with the SR-ARQ burst path.** Group-as-unit emission is gated
+  on `burst_transport_rx_`: when set it accumulates the decoded frames + emits one
+  BurstGroupCallback(group_seq, frames, all_ok) and SUPPRESSES the per-frame frame_queue_ push
+  (else the file group double-processes through onRxData/SR-ARQ). all_ok = (logical_ok ==
+  group_size) — a partial group is undecodable → dropped → sender whole-burst-resends (no SACK).
+- **Payload extraction**: setGroupDelivered strips each serialized DATA frame header
+  (DataFrame::deserialize) and feeds the payload to the SAME reassembly path as SR-ARQ
+  (handleDataPayload, MORE_FRAG→more_data). Pads filtered in onBurstGroupReceived by dst addr.
+- **Completion accounting**: TX drains ALL chunks up front (chunks_sent_=total, hasMoreChunks
+  false); setTransferDone(true) loops onChunkAcked() while hasPendingChunks() to drive
+  FileTransferController to COMPLETE (one sent-callback for the whole transfer).
+
+NEXT (this branch): GUI-test flag-ON `ULTRA_BURST_TRANSPORT=1 tools/good20_baseline_sweep.sh "3"`
+(seed3 R3/4 Good@20, one msg each way + alpha→bravo file). Expect [descriptor][burst]→[GROUP_ACK],
+no SACK/standalone-repair, FILE_CRC_OK, goodput ≥ 1210. WATCH FOR: (a) data-turn fairness
+yielding mid-transfer (noteDataTurnPayloadStarted(total) called once — may trip a byte-budget
+yield; if so, hold the turn for the whole one-way transfer); (b) GROUP_ACK turnaround timing vs
+the 14 s ack_timeout_ms; (c) group_seq wrap/order on multi-group files. THEN step 6 (delete dead
+SR-ARQ file branches) only after 3-seed green; step 7 (drop GROUP_ACK re-anchor chirp; N=1944).
