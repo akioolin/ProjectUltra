@@ -162,7 +162,9 @@ public:
 
     // Burst mode TX callback - transmits multiple frames as single audio burst.
     // Used for OFDM connected mode and MC-DPSK DATA file-window bursts.
-    using TransmitBurstCallback = std::function<void(const std::vector<Bytes>&)>;
+    // group_seq stamps the burst descriptor (§14.27) for whole-burst GROUP_ACK;
+    // 0 for the legacy arq_ burst path / single-shot.
+    using TransmitBurstCallback = std::function<void(const std::vector<Bytes>&, uint16_t group_seq)>;
     void setTransmitBurstCallback(TransmitBurstCallback cb);
 
     void setConnectedCallback(ConnectedCallback cb);

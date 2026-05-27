@@ -152,6 +152,7 @@ private:
         bool in_qso_data = false;
         bool expect_full_ofdm_anchor_after_tx = false;
         std::chrono::steady_clock::time_point earliest_flush{};
+        uint16_t group_seq = 0;  // §14.27 burst group seq (re-emit stamps descriptor)
     };
     std::deque<DeferredTx> deferred_tx_;
     std::chrono::steady_clock::time_point deferred_tx_deadline_{};
@@ -364,7 +365,8 @@ private:
                         std::chrono::steady_clock::time_point earliest_flush = {});
     void deferTxFrame(const Bytes& frame, const char* context,
                       bool expect_full_ofdm_anchor_after_tx);
-    void deferTxBurst(const std::vector<Bytes>& frames, const char* context);
+    void deferTxBurst(const std::vector<Bytes>& frames, const char* context,
+                      uint16_t group_seq = 0);
     uint32_t nextInQsoDataBackoffMs();
     void flushDeferredTxIfReady();
     ptt::PttConfig pttConfigFromSettings(const AppSettings& settings) const;

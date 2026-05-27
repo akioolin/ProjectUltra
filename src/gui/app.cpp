@@ -655,16 +655,17 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     });
 
     // Burst TX callback - encode multiple frames as a single waveform burst
-    protocol_.setTransmitBurstCallback([this](const std::vector<Bytes>& frames) {
+    protocol_.setTransmitBurstCallback([this](const std::vector<Bytes>& frames,
+                                              uint16_t group_seq) {
         const bool in_qso_data = std::any_of(
             frames.begin(), frames.end(),
             [](const Bytes& frame) { return isInQsoDataFrame(frame); });
         if (in_qso_data && shouldDeferInQsoDataForTx()) {
-            deferTxBurst(frames, "TX burst audio");
+            deferTxBurst(frames, "TX burst audio", group_seq);
             return;
         }
 
-        auto samples = modem_.transmitBurst(frames);
+        auto samples = modem_.transmitBurst(frames, group_seq);
         if (!samples.empty()) {
             queueRealTxSamples(samples, "TX burst audio", in_qso_data);
         }
@@ -2976,7 +2977,8 @@ void App::deferTxFrame(const Bytes& frame, const char* context,
            deferred_tx_.size(), backoff_ms);
 }
 
-void App::deferTxBurst(const std::vector<Bytes>& frames, const char* context) {
+void App::deferTxBurst(const std::vector<Bytes>& frames, const char* context,
+                       uint16_t group_seq) {
     const auto now = std::chrono::steady_clock::now();
     const uint32_t backoff_ms = nextInQsoDataBackoffMs();
     if (deferred_tx_.empty()) {
@@ -2993,7 +2995,8 @@ void App::deferTxBurst(const std::vector<Bytes>& frames, const char* context) {
                    context ? std::string(context) : std::string("TX burst audio"),
                    true,
                    false,
-                   now + std::chrono::milliseconds(backoff_ms)});
+                   now + std::chrono::milliseconds(backoff_ms),
+                   group_seq});
     guiLog("CCA: deferred %s in-QSO DATA pre-encode (frames=%zu rms=%.4f thresh=%.4f depth=%zu backoff=%ums)",
            context ? context : "TX burst audio",
            frames.size(), modem_.channelRms(), modem_.channelQuietThreshold(),
@@ -3071,7 +3074,7 @@ void App::flushDeferredTxIfReady() {
             }
             break;
         case DeferredTxKind::Burst:
-            samples = modem_.transmitBurst(front.frames);
+            samples = modem_.transmitBurst(front.frames, front.group_seq);
             break;
     }
     if (samples.empty()) {

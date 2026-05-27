@@ -442,8 +442,9 @@ private:
             }
         });
 
-        engine_.setTransmitBurstCallback([this](const std::vector<Bytes>& frames) {
-            queueTx(transmitBurst(frames));
+        engine_.setTransmitBurstCallback([this](const std::vector<Bytes>& frames,
+                                                uint16_t group_seq) {
+            queueTx(transmitBurst(frames, group_seq));
         });
 
         engine_.setPingTxCallback([this]() {
@@ -783,7 +784,8 @@ private:
         return samples;
     }
 
-    std::vector<float> transmitBurst(const std::vector<Bytes>& frames) {
+    std::vector<float> transmitBurst(const std::vector<Bytes>& frames,
+                                     uint16_t group_seq = 0) {
         if (frames.empty()) {
             return {};
         }
@@ -791,6 +793,7 @@ private:
             encoder_.setMode(tx_waveform_mode_);
             encoder_.setDataMode(data_modulation_, data_code_rate_);
         }
+        encoder_.setBurstGroupSeq(group_seq);
         return encoder_.encodeBurstLight(frames);
     }
 

@@ -2032,7 +2032,12 @@ private:
         });
 
         // Burst TX callback - encode multiple frames as single OFDM burst
-        protocol_.setTransmitBurstCallback([this](const std::vector<Bytes>& frames) {
+        protocol_.setTransmitBurstCallback([this](const std::vector<Bytes>& frames,
+                                                  uint16_t group_seq) {
+            // cli_simulator path (not the faithful GUI gate). group_seq descriptor
+            // stamping is threaded in the GUI path; TODO thread through queueTxBurst
+            // if cli activates use_burst_transport_.
+            (void)group_seq;
             queueTxBurst(frames, txBurstLabel(frames));
         });
 

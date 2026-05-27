@@ -377,9 +377,11 @@ Connection::Connection(const ConnectionConfig& config)
     // this changes nothing on the 1210bps SR-ARQ path. Activation + RX hook land in
     // later steps behind the flag.
     burst_transport_.setTransmitGroup(
-        [this](uint16_t /*group_seq*/, const BurstStopAndWaitController::Group& frames) {
+        [this](uint16_t group_seq, const BurstStopAndWaitController::Group& frames) {
             if (on_transmit_burst_) {
-                on_transmit_burst_(frames);  // -> ModemEngine::transmitBurst (re-interleaves)
+                // -> ModemEngine::transmitBurst(frames, group_seq); group_seq is
+                // stamped into the descriptor so the RX whole-burst-ACKs this group.
+                on_transmit_burst_(frames, group_seq);
             }
         });
     burst_transport_.setSendGroupAck([this](uint16_t group_seq) {
@@ -3483,7 +3485,7 @@ void Connection::flushBurstBuffer() {
         on_transmit_(burst_tx_buffer_[0]);
     } else if (on_transmit_burst_) {
         LOG_MODEM(INFO, "Connection: Flushing burst of %zu frames", burst_tx_buffer_.size());
-        on_transmit_burst_(burst_tx_buffer_);
+        on_transmit_burst_(burst_tx_buffer_, /*group_seq=*/0);  // legacy arq_ burst path
     } else if (on_transmit_) {
         // Fallback: send individually
         for (const auto& frame : burst_tx_buffer_) {
@@ -3516,7 +3518,7 @@ void Connection::transmitFrameBatch(const std::vector<Bytes>& frame_data_list) {
     // the group, so the resend gets fresh fade diversity at ~1/N the preamble cost.
     LOG_MODEM(INFO, "Connection: Resending ARQ timeout-repair as re-interleaved burst of %zu frames",
               frame_data_list.size());
-    on_transmit_burst_(frame_data_list);
+    on_transmit_burst_(frame_data_list, /*group_seq=*/0);  // legacy arq_ repair burst
 }
 
 void Connection::setConnectedCallback(ConnectedCallback cb) {
