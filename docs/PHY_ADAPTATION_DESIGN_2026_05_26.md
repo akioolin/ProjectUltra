@@ -1349,3 +1349,43 @@ landing on contiguous carrier blocks a single notch can wipe. This is the design
 - Reusable: /tmp/overlap_check.py (A↔B TX overlap detector) — fold into tools/ if kept.
 - Burst geometry (exact): descriptor 67680 smp=1.41s; data group (8 frames) 542560 smp
   =11.30s; total burst 12.71s; group-to-group cadence ~13.2s (burst + ~0.5s turnaround+ACK).
+
+### 14.32 EXPERIMENT (FAILED, instructive): "one BURST_HEADER per file"
+
+Hypothesis: since file chunks self-address (offset in each FILE_DATA) and the
+receiver remembers the format (have_burst_descriptor_/fixed_frame_codewords_ are
+sticky), send the BURST_HEADER only on group 0 and drop it on inner bursts to
+reclaim ~1.4 s/burst. Implemented opt-in: ULTRA_BURST_HEADER_ONCE=1 (commit on
+feat/oneway-arch; default OFF).
+
+**RESULT: FAILED — and it's structural, not tunable.** GUI seed1/21KB: alpha sent
+exactly 1 header (gate works), but the sender **stuck on group 0 forever** —
+bravo decoded every inner group but reported it as group_seq=0 (43/55/82/109/136/
+163 s), re-ACKed seq 0, alpha (waiting seq 1) ignored the stale ACKs, timed out,
+resent → infinite loop.
+
+**Root cause: the BURST_HEADER carries the GROUP SEQUENCE NUMBER** (in the
+descriptor frame's header seq → decoder's last_burst_group_seq_). It is *different
+every burst* and is what the GROUP_ACK matches on. With no header on inner bursts,
+last_burst_group_seq_ stays at group 0's value, so every inner group is mislabeled
+group 0. The header does THREE jobs, not two: (1) format [constant, once-able],
+(2) chirp/sync [every burst — re-acquire after turnaround], (3) **group sequence
+[every burst — needed for ACK]**. (3) is the killer.
+
+Corollary: dropping only the *format* saves almost nothing — the header's airtime
+is ~all chirp + LTS (the sync), not the 1-CW format payload. So "header diet" is
+not a real lever.
+
+**Implication for the roadmap — the real levers are unchanged:**
+- **Shorter bursts** (group_size 8 → ~4): fewer groups ⇒ fewer headers *total*,
+  burst fits one coherence interval (fresh CSI), cheaper retransmit, easier PA
+  duty. Does NOT require touching the per-burst header. Highest-leverage, least
+  entangled.
+- **Frequency diversity** (scatter each codeword across the full band) so a
+  contiguous null punctures instead of wipes (the §14.31 fade limiter).
+- (Only if we ever want to drop the per-burst header: the group seq would have to
+  ride the data frames' existing seq fields and the receiver derive the group from
+  decoded frames — a real redesign, entangled with the fixed-stride accumulation
+  / §14.25. Not worth it vs just shortening the burst.)
+
+ULTRA_BURST_HEADER_ONCE left in as default-OFF + documented dead-end (or revert).
