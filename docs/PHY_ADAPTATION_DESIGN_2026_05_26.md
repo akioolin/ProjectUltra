@@ -779,3 +779,55 @@ PARALLEL file path (keep `arq_` for any non-file use until removed), PHY tests g
 GUI-prove R3/4 Good@20 delivery across seeds, then remove SR-ARQ/turn-taking/`sendMessage`.
 
 This is the focused next build; the design above is the spec.
+
+### 14.17 CORRECTION — protocol + header + ISS removal are COUPLED to the transport (GUI-proven 2026-05-27)
+
+A GUI run (Good@20 seed 2, R3/4, file-only) PROVED the coupling that earlier sections missed.
+Verified from logs: burst interleave DID engage on the real path (`burst_interleave=1`,
+`[BURST-INTERLEAVED]` sync, `Burst interleave marker detected`, `Burst group complete (8 frames)`),
+BUT the very first clean group decoded **0/8 CWs** (not fade, not retransmit — a structural
+decode mismatch). The offline harness got 92% on the same config. The difference is the
+**protocol/decode coupling**: `finalizeBurstGroup` deinterleaves+decodes the group using the
+receiver's *locally configured* `fixed_frame_codewords_` + `burst_group_size_`, and on the real
+path those don't deterministically match what the sender built. There is no per-burst negotiation
+to reconcile it.
+
+**Consequence (user-identified, correct): the burst transport CANNOT be bolted onto the existing
+protocol. The protocol must be reworked WITH it.** Three coupled pieces, one rework:
+
+1. **Burst DATA header declares the group structure.** The header must carry group size, CW
+   count, modulation/rate, and interleave geometry so the one-way receiver decodes the group
+   DETERMINISTICALLY from the bitstream — no negotiation. ⚠️ This CORRECTS §14.16's "no frame_v2
+   change needed" (that was about the *ACK* frame; the *DATA* side needs a header change). This
+   is the direct root of the 0/8 failure.
+2. **Rip out ISS/IRS turn-taking.** `TURNOVER` (0x22), `TURN_REQUEST` (0x23), and the
+   `local_data_turn_`/`peer_data_turn_requested_`/turn-ownership state are obsolete — one-way:
+   initiator transmits, responder only listens + ACKs. Removing it also simplifies the
+   send/receive flow the burst path rides.
+3. **Burst stop-and-wait transport** (BurstStopAndWaitController, already built+tested §14.16) —
+   wired against the new header + the one-way flow, not the SR-ARQ/turn-taking machinery.
+
+These three are not independently shippable — the decode (1) needs the header, the flow needs ISS
+gone (2), and the transport (3) drives both. So the next build is a coherent protocol rework, done
+together and GUI-proven, not the incremental bolt-on §14.16 implied. Build order within it: header
+format first (so RX can decode a sender-declared group → fixes 0/8), then route the one-way file
+path through the controller, then delete ISS/IRS + SR-ARQ for the file path.
+
+**0/8 ROOT CAUSE CONFIRMED = cross-station config mismatch (2026-05-27).** Offline isolation
+(measure_ack_fer burst_chunk, ONE process configuring both ends): 4-CW, 8-CW, carrier-ldpc ON,
+carrier-ldpc OFF — ALL give full recovery (64/64, 80/80) at clean AWGN. The GUI (ALPHA encoder
+and BRAVO decoder in SEPARATE processes, configured via negotiation) ALWAYS gives 0/8. So the
+interleaver/geometry/carrier-ldpc are all FINE — the failure is purely that BRAVO deinterleaves
+against params that don't match what ALPHA built. The self-describing burst header fixes this by
+construction (RX reads the sender's declared params, no reliance on negotiation agreeing).
+
+**HEADER BOOTSTRAP (how RX decodes the header without prior knowledge):** the descriptor is a
+FIXED-FORMAT, non-interleaved control frame (the existing 1-CW robust control encoding — a
+compile-time constant both ends always know), emitted BEFORE the interleaved group. RX always
+decodes it (format never varies), reads the group params, THEN deinterleaves+decodes the bulk.
+On-air: `[fixed descriptor frame | non-interleaved]` then `[interleaved data group]`. Reuses the
+existing control-vs-data split (control = fixed 1-CW; RX already peeks CW0 as a control frame).
+
+**GUI requirement (operator, 2026-05-27):** the decoded burst-header info (group size, CW/frame,
+mod/rate, interleave flags) must be surfaced in the GUI left compact block so the operator can
+SEE what burst type is arriving. Decoder exposes the received descriptor → GUI side-panel display.

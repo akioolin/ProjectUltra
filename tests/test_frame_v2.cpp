@@ -196,6 +196,39 @@ void test_control_frame_roundtrip() {
     }
 }
 
+void test_burst_header_roundtrip() {
+    TEST("burst header descriptor roundtrip (declares group decode params)") {
+        auto original = ControlFrame::makeBurstHeader(
+            "VA2MVR", "W1AW", 7, /*group_size=*/8, /*cw_per_frame=*/8,
+            Modulation::QPSK, CodeRate::R3_4,
+            ControlFrame::BURST_FLAG_INTERLEAVE | ControlFrame::BURST_FLAG_CARRIER_LDPC);
+
+        auto serialized = original.serialize();
+        auto parsed = ControlFrame::deserialize(serialized);
+
+        assert(parsed.has_value());
+        assert(parsed->type == FrameType::BURST_HEADER);
+        auto info = parsed->getBurstHeaderInfo();
+        assert(info.group_size == 8);
+        assert(info.cw_per_frame == 8);
+        assert(info.modulation == Modulation::QPSK);
+        assert(info.code_rate == CodeRate::R3_4);
+        assert(info.burst_interleave == true);
+        assert(info.carrier_ldpc == true);
+
+        // Flags-off variant must read back false.
+        auto plain = ControlFrame::makeBurstHeader("VA2MVR", "W1AW", 0, 4, 4,
+                                                   Modulation::DQPSK, CodeRate::R1_2, 0);
+        auto plain_info = ControlFrame::deserialize(plain.serialize())->getBurstHeaderInfo();
+        assert(!plain_info.burst_interleave && !plain_info.carrier_ldpc);
+        assert(plain_info.group_size == 4 && plain_info.cw_per_frame == 4);
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
 void test_control_frame_crc() {
     TEST("control frame CRC validation") {
         auto probe = ControlFrame::makeProbe("VA2MVR", "W1AW");
@@ -1330,6 +1363,7 @@ int main() {
     test_channel_report_and_quantizers();
     test_control_frame_size();
     test_control_frame_roundtrip();
+    test_burst_header_roundtrip();
     test_control_frame_crc();
     test_control_frame_magic();
     test_phy_mask_header_roundtrip_patterns();

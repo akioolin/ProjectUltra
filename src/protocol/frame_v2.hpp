@@ -241,6 +241,10 @@ enum class FrameType : uint8_t {
     TURNOVER    = 0x22,  // Current ISS yields DATA turn to peer
     TURN_REQUEST = 0x23, // Current IRS requests the next DATA turn
     FILE_CANCEL = 0x24,  // Abort the active file transfer on both peers
+    BURST_HEADER = 0x25, // One-way burst descriptor: declares the following group's decode
+                         // params (group size, CW/frame, mod/rate, interleave). Fixed-format
+                         // 1-CW control frame, non-interleaved, sent before the data group so
+                         // the receiver decodes the group from the sender's declaration (§14.17).
     BEACON      = 0x40,  // CQ broadcast
 
     // Data frames (variable codewords)
@@ -447,6 +451,11 @@ struct ControlFrame {
     static ControlFrame makeTurnover(const std::string& src, const std::string& dst);
     static ControlFrame makeTurnRequest(const std::string& src, const std::string& dst);
     static ControlFrame makeFileCancel(const std::string& src, const std::string& dst);
+    // Burst descriptor (§14.17): declares the decode params of the data group that follows.
+    // interleave_flags: bit0 = burst (cross-frame) interleave, bit1 = carrier-LDPC interleave.
+    static ControlFrame makeBurstHeader(const std::string& src, const std::string& dst,
+                                        uint16_t seq, uint8_t group_size, uint8_t cw_per_frame,
+                                        Modulation mod, CodeRate rate, uint8_t interleave_flags);
     static ControlFrame makeBeacon(const std::string& src);
     static ControlFrame makeKeepalive(const std::string& src, const std::string& dst);
     static ControlFrame makeDisconnect(const std::string& src, const std::string& dst);
@@ -509,6 +518,32 @@ struct ControlFrame {
         info.fading_index = decodeFadingIndex(payload[4]);
         info.data_frame_cw_count = unpackCWCount(payload[5]);
         info.ladder_rung_id = unpackLadderRungId(payload[5]);
+        return info;
+    }
+
+    // Burst-descriptor interleave flag bits (BURST_HEADER payload[4]).
+    static constexpr uint8_t BURST_FLAG_INTERLEAVE = 0x01;    // cross-frame burst interleave
+    static constexpr uint8_t BURST_FLAG_CARRIER_LDPC = 0x02;  // carrier-LDPC interleave
+
+    struct BurstHeaderInfo {
+        uint8_t group_size = 0;     // frames in the interleaved group
+        uint8_t cw_per_frame = 0;   // codewords per data frame
+        Modulation modulation = Modulation::DQPSK;
+        CodeRate code_rate = CodeRate::R1_4;
+        bool burst_interleave = false;  // cross-frame interleave applied
+        bool carrier_ldpc = false;      // carrier-LDPC interleave applied
+    };
+
+    // Parse a BURST_HEADER payload (§14.17). The receiver decodes the data group
+    // that follows from THESE declared params, not from local config.
+    BurstHeaderInfo getBurstHeaderInfo() const {
+        BurstHeaderInfo info;
+        info.group_size = payload[0];
+        info.cw_per_frame = payload[1];
+        info.modulation = static_cast<Modulation>(payload[2]);
+        info.code_rate = static_cast<CodeRate>(payload[3]);
+        info.burst_interleave = (payload[4] & BURST_FLAG_INTERLEAVE) != 0;
+        info.carrier_ldpc = (payload[4] & BURST_FLAG_CARRIER_LDPC) != 0;
         return info;
     }
 };

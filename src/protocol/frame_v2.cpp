@@ -447,6 +447,25 @@ ControlFrame ControlFrame::makeFileCancel(const std::string& src, const std::str
     return f;
 }
 
+ControlFrame ControlFrame::makeBurstHeader(const std::string& src, const std::string& dst,
+                                           uint16_t seq, uint8_t group_size,
+                                           uint8_t cw_per_frame, Modulation mod, CodeRate rate,
+                                           uint8_t interleave_flags) {
+    ControlFrame f;
+    f.type = FrameType::BURST_HEADER;
+    f.flags = Flags::VERSION_V2;
+    f.seq = seq;
+    f.src_hash = hashCallsign(src);
+    f.dst_hash = hashCallsign(dst);
+    f.payload[0] = group_size;
+    f.payload[1] = cw_per_frame;
+    f.payload[2] = static_cast<uint8_t>(mod);
+    f.payload[3] = static_cast<uint8_t>(rate);
+    f.payload[4] = interleave_flags;
+    f.payload[5] = 0;  // reserved
+    return f;
+}
+
 ControlFrame ControlFrame::makeBeacon(const std::string& src) {
     ControlFrame f;
     f.type = FrameType::BEACON;
