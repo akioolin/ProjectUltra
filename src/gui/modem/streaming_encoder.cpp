@@ -490,6 +490,14 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
     // Track which groups are burst-interleaved (for LTS marker)
     const int BURST_GROUP_SIZE = std::max(2, burst_group_size_);
     std::vector<bool> frame_is_group_start(encoded_frames.size(), false);
+    // Frames that belong to a formed burst-interleaved group (start + members).
+    // The RX accumulates these at a FIXED stride (burst_min_block_ =
+    // getMinSamplesForCWCount = [LTS + data]), so every group frame must be
+    // exactly that — no per-frame short re-anchor chirp prefix, which would push
+    // each frame past the stride and progressively misalign the FFT window
+    // (timing offset ~360 samples -> guard-bin leakage -> noise_var blow-up ->
+    // 0/8 deinterleave). See §14.25.
+    std::vector<bool> frame_in_burst_group(encoded_frames.size(), false);
     size_t interleaved_groups = 0;
 
     if (use_burst_interleave_) {
@@ -508,6 +516,7 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
             // Replace in-place
             for (int i = 0; i < BURST_GROUP_SIZE; i++) {
                 encoded_frames[base + i] = interleaved[i];
+                frame_in_burst_group[base + i] = true;
             }
             frame_is_group_start[base] = true;
             interleaved_groups++;
@@ -593,6 +602,13 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
         } else if (i == 0) {
             // Waveforms without a separate data preamble already use their full preamble.
             preamble = waveform_->generatePreamble();
+        } else if (frame_in_burst_group[i]) {
+            // Burst-interleaved group MEMBER (not the start): plain light LTS, NO
+            // short re-anchor chirp. The RX accumulates the group at a fixed
+            // burst_min_block_ = [LTS + data] stride, so a per-frame chirp prefix
+            // would push every member past the stride and progressively misalign
+            // the FFT window. MUST match the group-start preamble above. (§14.25)
+            preamble = connectedDataPreambleForFrame(/*allow_short_reanchor=*/false);
         } else {
             const auto header = protocol::v2::parseHeader(frame_data_list[i]);
             const bool is_data_frame =

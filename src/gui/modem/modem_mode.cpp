@@ -139,11 +139,28 @@ void ModemEngine::setConnected(bool connected) {
         // Reset handshake state - we'll complete it when we receive first post-ACK frame
         handshake_complete_ = false;
         use_connected_waveform_once_ = false;  // Clear any leftover flag
+
+        // The OFDM control profile (DQPSK-on-OFDM vs coherent-QPSK-on-OFDM) is a
+        // RECEIVE-decode setting that must follow the NEGOTIATED MODE, which both
+        // stations know the moment CONNECT_ACK is exchanged — the initiator on
+        // receive, the responder on send — i.e. right here at setConnected().
+        // Previously it was gated on handshake_complete_ ("first valid frame
+        // received from initiator"), which deadlocked the responder: the
+        // initiator's first OFDM frame (the burst descriptor) is sent on the
+        // coherent profile, but the responder — still pinned to the legacy
+        // DQPSK-OFDM profile until handshake_complete_ — could not decode it, so
+        // it never received the frame that would have flipped the profile.
+        // CONNECT/CONNECT_ACK ride MC-DPSK (control_waveform_, a separate decoder),
+        // so they are unaffected by this OFDM-control profile. Enabling it now lets
+        // the responder decode the initiator's coherent control/descriptor frames
+        // immediately. profileForDataMode() still resolves to DQPSK for a
+        // differential data regime, so this is a no-op for DQPSK/D8PSK links.
+        const bool ofdm_control_follows_data = protocol::isOFDMMode(waveform_mode_);
         if (streaming_decoder_) {
-            streaming_decoder_->setCoherentOFDMControlProfileEnabled(false);
+            streaming_decoder_->setCoherentOFDMControlProfileEnabled(ofdm_control_follows_data);
         }
         if (streaming_encoder_) {
-            streaming_encoder_->setCoherentOFDMControlProfileEnabled(false);
+            streaming_encoder_->setCoherentOFDMControlProfileEnabled(ofdm_control_follows_data);
         }
 
         // Configure OFDM config FIRST so it's correct when propagated to decoder

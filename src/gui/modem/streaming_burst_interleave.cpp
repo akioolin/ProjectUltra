@@ -345,9 +345,20 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     captureConstellationSnapshot();
 
     const float timing_offset = waveform_->getLastTimingOffsetSamples();
+    // Per-frame timing correction is DISABLED within a burst group. The group is
+    // contiguous and sliced at a FIXED stride (burst_min_block_) off the single
+    // group-start anchor, so each frame's own LTS phase-slope timing estimate —
+    // unreliable on a faded frame — must NOT re-slice that frame. A noisy estimate
+    // on a deep-fade frame re-sliced the FFT window to a wrong position, corrupting
+    // that physical frame; across several faded frames it took down the whole
+    // interleaved group (0/8) and caused ~50% burst loss on Good fading (§14.25).
+    // Trusting the fixed stride instead turns a faded frame into a clean zero-LLR
+    // erasure that the burst interleaver + LDPC are designed to absorb.
+    constexpr bool kBurstPerFrameTimingRetry = false;
     constexpr float kBurstContinuationRetryThreshold = 48.0f;
     constexpr float kBurstContinuationRetryMax = 320.0f;
-    if (std::abs(timing_offset) >= kBurstContinuationRetryThreshold &&
+    if (kBurstPerFrameTimingRetry &&
+        std::abs(timing_offset) >= kBurstContinuationRetryThreshold &&
         std::abs(timing_offset) <= kBurstContinuationRetryMax) {
         const int sample_correction = static_cast<int>(std::lround(timing_offset));
         const size_t corrected_pos = wrapRingIndexLocked(
