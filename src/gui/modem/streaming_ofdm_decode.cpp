@@ -727,19 +727,25 @@ void StreamingDecoder::decodeCurrentFrame() {
                             if (resetDuringDecode()) {
                                 return;
                             }
-                            // Advance past the descriptor frame so the search
-                            // resumes at the data group that follows — otherwise
-                            // the LTS detector re-locks the descriptor anchor and
-                            // re-decodes it forever, never reaching the group.
-                            //
-                            // The descriptor's own full anchor must NOT seed the
-                            // warm-timing window the burst group relies on: a warm
-                            // prediction biased by the descriptor's (shorter) frame
-                            // length lands the group sync at a wrong sub-symbol
-                            // offset, so fixed-offset slicing cascades into weak
-                            // mis-aligned frames (27 vs 28 symbols → 0/4 CWs). Reset
-                            // frame-arrival tracking and expect the group's anchor
-                            // fresh — identical to the no-descriptor sync path.
+                            // CRITICAL: restore the data waveform profile. Decoding
+                            // the descriptor switched the waveform to the 1-CW control
+                            // profile (control modulation/pilots). If we return without
+                            // restoring, the following group-start DATA frame is sized
+                            // and demodulated with the control-profile pilot geometry,
+                            // so getMinSamplesForCWCount() is one OFDM symbol short
+                            // (e.g. 31104 vs 32256) → the group-start demodulates 27
+                            // symbols instead of 28 → deinterleave fails 0/4 on every
+                            // logical frame. This mirrors the normal control-decode
+                            // path's profile restore.
+                            if (switched_profile) {
+                                waveform_->configure(saved_mod, saved_rate);
+                            }
+                            // Advance past the descriptor frame so the search resumes
+                            // at the data group that follows — otherwise the LTS
+                            // detector re-locks the descriptor anchor and re-decodes it
+                            // forever. Reset frame-arrival tracking and expect the
+                            // group's anchor fresh, identical to the no-descriptor sync
+                            // path (mirrors the FILE_CANCEL control handling).
                             {
                                 std::lock_guard<std::mutex> lock(buffer_mutex_);
                                 sync_from_warm_timed_window_ = false;

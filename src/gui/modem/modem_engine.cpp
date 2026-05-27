@@ -486,15 +486,14 @@ std::vector<float> ModemEngine::transmitBurst(const std::vector<Bytes>& frame_da
     // Self-describing burst (design §14.17/§14.19): the BURST_HEADER descriptor is
     // emitted INSIDE encodeBurstLight — a full-anchor 1-CW control frame at the head
     // of the interleaved group — so the receiver configures its group decode from
-    // the SENDER's declared params (fixing the cross-station 0/8). The descriptor
-    // DECODE + RECONFIGURE path is proven (measure_ack_fer --burst-descriptor), but a
-    // residual feed-cadence interaction can truncate the group-start frame by one
-    // symbol (28→27) when the descriptor consumes the buffered lead, so it stays
-    // OFF in the shipping path and is gated behind ULTRA_BURST_DESCRIPTOR=1 for live
-    // GUI validation until the truncation is resolved. See §14.17/§14.21.
+    // the SENDER's declared params (fixing the cross-station 0/8). Proven on the
+    // faithful harness incl. a deliberately mis-configured decoder
+    // (measure_ack_fer --burst-descriptor 1: AWGN40 40/40, Good@20 recovers to
+    // baseline) once the descriptor-consume profile-restore (§14.23) was added.
+    // Enabled by default; set ULTRA_BURST_DESCRIPTOR=0 to disable as an escape hatch.
     static const bool kBurstDescriptorEnabled = [] {
         const char* env = std::getenv("ULTRA_BURST_DESCRIPTOR");
-        return env && *env && env[0] != '0';
+        return !(env && env[0] == '0');  // default ON; "0" disables
     }();
     if (kBurstDescriptorEnabled && protocol::isOFDMMode(waveform_mode_)) {
         streaming_encoder_->setBurstDescriptorEnabled(true);

@@ -430,15 +430,17 @@ void test_auto_data_mode_boundaries() {
           "GOOD fading SNR20 auto-negotiates OFDM_CHIRP");
     recommendDataMode(20.0f, waveform, mod, rate, 0.30f);
     CHECK(mod == Modulation::QPSK, "GOOD fading SNR20 auto data mode selects coherent QPSK");
-    CHECK(rate == CodeRate::R2_3, "GOOD fading SNR20 auto data mode selects measured QPSK R2/3 rung");
+    // R3/4 promotion (kQPSKGoodR34MeasuredFloorDb=20): the selector promotes the
+    // QPSK R3/4 rung at Good@20 (see test_waveform_policy + waveform_selection.hpp).
+    CHECK(rate == CodeRate::R3_4, "GOOD fading SNR20 auto data mode selects measured QPSK R3/4 rung");
 
     recommendDataMode(20.0f, waveform, mod, rate, 0.79f);
-    CHECK(mod == Modulation::QPSK && rate == CodeRate::R2_3,
-          "GOOD-lobby estimator spread at SNR20 still selects QPSK R2/3");
+    CHECK(mod == Modulation::QPSK && rate == CodeRate::R3_4,
+          "GOOD-lobby estimator spread at SNR20 still selects QPSK R3/4");
 
     recommendDataMode(19.8f, waveform, mod, rate, 0.50f);
-    CHECK(mod == Modulation::QPSK && rate == CodeRate::R2_3,
-          "GOOD fading one SNR quantum below SNR20 still selects QPSK R2/3");
+    CHECK(mod == Modulation::QPSK && rate == CodeRate::R3_4,
+          "GOOD fading one SNR quantum below SNR20 still selects QPSK R3/4");
 
     recommendDataMode(19.7f, waveform, mod, rate, 0.50f);
     CHECK(mod == Modulation::DQPSK,
