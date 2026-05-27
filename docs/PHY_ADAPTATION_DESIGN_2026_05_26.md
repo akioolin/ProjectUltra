@@ -1246,11 +1246,14 @@ Hard-won implementation specifics (read before touching this path):
 
 ### 14.29 Burst transport GUI-PROVEN end-to-end (2026-05-27)
 
-**RESULT=PASS** — the one-way burst file transport delivers a 10 KB file CRC-clean on
-the faithful GUI (seed3 R3/4 Good@20, file-only): `ULTRA_BURST_TRANSPORT=1
-tools/good20_baseline_sweep.sh "3" tag R3/4 0` → FILE_CRC_OK, ALPHA_FILE_DONE=1,
-GOODPUT=780 bps, RETX=0, clean disconnect, all 3 groups decoded 8/8. The
-`[descriptor][burst]→[GROUP_ACK]` flow (no SACK, whole-burst stop-and-wait) works.
+**Core PROVEN, but MARGINAL on time (2/3 seeds).** The one-way burst file transport
+delivers a 10 KB file CRC-clean on the faithful GUI via `[descriptor][burst]→
+[GROUP_ACK]` (no SACK, whole-burst stop-and-wait): `ULTRA_BURST_TRANSPORT=1
+tools/good20_baseline_sweep.sh "3" tag R3/4 0` (file-only, msg=0). Multi-seed
+[1,3,5] R3/4 Good@20: **seed1 PASS 440bps, seed3 PASS 510bps, seed5 FAIL** (file
+CRC-clean when it completes, every group decodes 8/8, RETX=0 — but seed5 ran out of
+the scenario time budget before finishing). The limiter is NOT decode reliability;
+it is the **group-ACK latency** below.
 
 Two real bugs found + fixed via the GUI (both committed):
 1. **Responder handshake-confirm bypass** — the burst group-as-unit RX path skipped
@@ -1263,14 +1266,20 @@ Two real bugs found + fixed via the GUI (both committed):
    resent before the ACK landed. Fixed: setAckTimeoutMs(arq_.getAckTimeout()) — the
    same burst-aware budget the SR-ARQ window=8 path computes.
 
-**RESIDUAL (optimization, not a blocker):** group 0's ACK still takes ~3-4 resend
-cycles to land (bravo re-decodes group 0 at 43/70/97/124s before the initiator
-catches the ACK), but groups 1 & 2 are clean (one cycle, ~12 s each). So steady-state
-turnaround is healthy; only the FIRST group-ACK round trip is slow (link still warming
-from the handshake/CONNECT_ACK-rescue transient). Goodput 780 is held down by those
-~80 s of wasted group-0 cycles — fixing the first-ACK latency would roughly double it.
-Likely causes to probe next: initiator RX not settled right after MODE_CHANGE; bravo's
-CONNECT_ACK-rescue still armed; or the first GROUP_ACK racing the initiator's TX tail.
+**THE LIMITER — group-0 ACK latency (next task, makes it reliable + ~2x goodput):**
+group 0's GROUP_ACK takes ~3-4 resend cycles to land (bravo re-decodes group 0 at
+43/70/97/124s before the initiator catches the ACK), but groups 1 & 2 are clean (one
+cycle, ~12 s each). So steady-state turnaround is healthy; only the FIRST group-ACK
+round trip is slow → ~80 s wasted → marginal vs the time budget (seed5 ran out).
+Diagnostic clue: during/right after its own ~11 s group-0 TX (31.6→~42.9 s), the
+initiator's RX churns low-corr junk syncs ("Data sync detected corr=0.27 SNR=0.9 dB
+[BURST-INTERLEAVED]" at 38.6 s — i.e. WHILE still transmitting), and doesn't cleanly
+acquire bravo's GROUP_ACK until the link settles by group 1. Root cause is a
+half-duplex RX-during/after-TX-tail acquisition issue (initiator RX confused by its
+own TX tail / OTASim loopback timing / CONNECT_ACK-rescue transient), NOT the burst
+PHY or the ACK timeout. This is subtle half-duplex timing — needs focused analysis,
+not a blind tweak. Fixing it converts seed5→PASS and roughly doubles goodput
+(440-510 → ~1000+). This is the clear next work item on the branch.
 
 NEXT (this branch): GUI-test flag-ON `ULTRA_BURST_TRANSPORT=1 tools/good20_baseline_sweep.sh "3"`
 (seed3 R3/4 Good@20, one msg each way + alpha→bravo file). Expect [descriptor][burst]→[GROUP_ACK],
