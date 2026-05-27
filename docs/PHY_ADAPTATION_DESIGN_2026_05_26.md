@@ -1288,3 +1288,64 @@ yielding mid-transfer (noteDataTurnPayloadStarted(total) called once — may tri
 yield; if so, hold the turn for the whole one-way transfer); (b) GROUP_ACK turnaround timing vs
 the 14 s ack_timeout_ms; (c) group_seq wrap/order on multi-group files. THEN step 6 (delete dead
 SR-ARQ file branches) only after 3-seed green; step 7 (drop GROUP_ACK re-anchor chirp; N=1944).
+
+### 14.31 SESSION STATE + NEXT STEPS (2026-05-27, branch feat/oneway-arch-2026-05-27)
+
+**Where we are: the one-way burst file transport WORKS end-to-end and is GUI-proven.**
+Env-gated `ULTRA_BURST_TRANSPORT=1` (default OFF — SR-ARQ shipping path untouched).
+Clean Good@20 R3/4: ~3.1 kbps, file CRC-clean, clean two-sided teardown. Fading
+transfers recover CRC-clean via whole-burst ARQ (goodput dips to ~1.3-2.2 kbps when a
+group lands in a rough patch — see the limiter below).
+
+Commits this session (all branch-only, NOT pushed): 85ba6ca → d3824f0
+1. 85ba6ca disarm CONNECT_ACK rescue on first decoded burst group
+2. 80b5b4a disarm CONNECT_ACK rescue on first accepted OFDM data sync (kill pre-decode collision)
+3. b4a0cae GROUP_ACK carries full chirp+LTS anchor (robust ACK)
+4. be7c168 sender runs full-chirp WIDE acquisition for GROUP_ACK (bypass warm-sync narrow window)
+5. 0fbac38 DISCONNECT carries full chirp+LTS anchor (fix responder teardown hang — was orphaning bravo)
+6. d3824f0 fast-NACK (GROUP_NACK=0x27): receiver NACKs a 0/8 group → sender resends now (not 27s timeout). 9/9 unit tests.
+(Earlier in session: TX/RX group transport, GROUP_ACK, group_seq plumbing, handshake-confirm, burst-budget ack timeout — see §14.28/14.29.)
+
+**THE THROUGHPUT LIMITER (root-caused this session, GUI + waterfall confirmed):**
+On Good@20, ~one group per transfer lands in a **frequency-selective multipath null**
+and decodes 0/8, then recovers when the null sweeps off. KEY EVIDENCE:
+- Bravo waterfall (seed1, failing burst): a BROAD deep null parked over ~900-1500 Hz
+  (≈20% of the data carriers dead/dark) while the rest of the band is strong; on the
+  recovering burst the null has swept away (just the normal center/DC notch remains).
+- During the failure window the LTS/pilot SNR reads **18-20 dB the whole time** (power
+  is fine) yet decode is 0/8 — because the un-nulled carriers are strong (SNR meter
+  happy) but the nulled ~20% carry near-zero data and R3/4 (~25% parity) can't fill them.
+- Bravo fading index rose 0.3 (clean groups) → 0.48-0.59 (failure window); side-panel
+  flipped Good→Moderate. Confirmed: **R3/4 is at its fading cusp** — when the channel
+  realization dips toward Moderate, R3/4 has no margin. Matches the floor table
+  ("R3/4 Good = marginal, seed-dependent"). Failure moves with the seed (seed1 group5,
+  seed2 group0) → it's the seeded channel, not a code position.
+- Fast-NACK (#6) is mechanically confirmed (halves the resend gap 27s→~13.5s burst time)
+  but NEUTRAL on these LONG rough patches: recovery is patch-duration-limited (the null
+  must sweep off), not ACK-timing-limited. It will help SHORT fades (< the 27s timeout).
+
+**NEXT STEP (the real lever — FREQUENCY DIVERSITY for Good):** spread each LDPC codeword's
+coded bits across the FULL ~1.4 kHz band so a contiguous null only PUNCTURES a fraction
+of every codeword (FEC recovers it) instead of WIPING whole codewords/frames → turns a
+0/8 group into a clean decode, no resend. Concrete first task: audit the burst carrier
+mapping / carrier-LDPC interleaver (descriptor flag 0x02 BURST_FLAG_CARRIER_LDPC is ON)
+— verify whether a codeword's bits are actually scattered across the whole band or
+landing on contiguous carrier blocks a single notch can wipe. This is the design's
+"FREQ interleave for Good" diversity axis ([[project_two_channel_oneway_architecture]]).
+(Reproduce: `ULTRA_BURST_TRANSPORT=1 tools/qam16_ladder_scenario.sh --channel good
+--snr-db 20 --seed 1 --expect-rate R3/4 --expect-mod QPSK --message-count 0 --file-kb 21
+--out /tmp/X`. seed1 fades ~109-163s on group 5; seed2 fades group 0 ~43-97s.)
+
+**Open caveats / honest unknowns:**
+- A ~50 s persistently-elevated-selectivity stretch is longer than the ~4-5 s coherence
+  time at 0.1 Hz Doppler predicts → possible Watterson "Good" sim-fidelity question about
+  how it time-varies selectivity. Verify the channel-gain trace if frequency diversity
+  doesn't fully fix it. (Don't assume the sim is right.)
+- PRE-EXISTING branch bug (NOT this work): seed3 R3/4 Good@20 with a chat message
+  (msg=1) fails identically flag-on/flag-off — the chat message doesn't LDPC-decode on
+  bravo, blocking the queued file. Use msg=0 (file-only) to exercise the burst path.
+- Multi-seed: only seeds 1 & 2 run at 20-21KB (both PASS, CRC-clean, recover). Broader
+  multi-seed confirmation still TODO.
+- Reusable: /tmp/overlap_check.py (A↔B TX overlap detector) — fold into tools/ if kept.
+- Burst geometry (exact): descriptor 67680 smp=1.41s; data group (8 frames) 542560 smp
+  =11.30s; total burst 12.71s; group-to-group cadence ~13.2s (burst + ~0.5s turnaround+ACK).
