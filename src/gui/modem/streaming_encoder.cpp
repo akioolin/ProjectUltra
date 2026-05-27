@@ -553,7 +553,7 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
             flags |= protocol::v2::ControlFrame::BURST_FLAG_CARRIER_LDPC;
         }
         auto descriptor = protocol::v2::ControlFrame::makeBurstHeader(
-            burst_descriptor_src_, burst_descriptor_dst_, /*seq=*/0,
+            burst_descriptor_src_, burst_descriptor_dst_, /*seq=*/burst_group_seq_,
             static_cast<uint8_t>(BURST_GROUP_SIZE),
             static_cast<uint8_t>(fixed_frame_codewords_),
             modulation_, code_rate_, flags);

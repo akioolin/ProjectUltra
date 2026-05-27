@@ -157,6 +157,10 @@ public:
     // group so the receiver decodes the group from the sender's declared params
     // (group size, cw/frame, mod/rate, interleave flags) — not from local config.
     // Identity is non-addressing; the RX consumes the descriptor by payload.
+    // §14.27: group sequence stamped into the BURST_HEADER descriptor so the RX
+    // can ACK the right group (whole-burst stop-and-wait). Set per burst by the
+    // transmit path; defaults 0 (single-shot / legacy).
+    void setBurstGroupSeq(uint16_t group_seq) { burst_group_seq_ = group_seq; }
     void setBurstDescriptorEnabled(bool enable) { emit_burst_descriptor_ = enable; }
     bool getBurstDescriptorEnabled() const { return emit_burst_descriptor_; }
     void setBurstDescriptorIdentity(const std::string& src, const std::string& dst) {
@@ -233,6 +237,7 @@ private:
     bool use_burst_interleave_ = false;    // Burst-level long interleaver (N-frame groups)
     int burst_group_size_ = 8;
     bool emit_burst_descriptor_ = false;   // §14.17 self-describing BURST_HEADER head
+    uint16_t burst_group_seq_ = 0;         // §14.27 group seq stamped into descriptor
     std::string burst_descriptor_src_;
     std::string burst_descriptor_dst_;
     bool force_full_preamble_once_ = false;

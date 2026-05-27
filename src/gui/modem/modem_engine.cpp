@@ -465,8 +465,12 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 // PING/PONG PROBE (minimal presence check)
 // ============================================================================
 
-std::vector<float> ModemEngine::transmitBurst(const std::vector<Bytes>& frame_data_list) {
+std::vector<float> ModemEngine::transmitBurst(const std::vector<Bytes>& frame_data_list,
+                                              uint16_t group_seq) {
     if (frame_data_list.empty()) return {};
+    // §14.27: stamp the group sequence into the burst descriptor so the RX can
+    // whole-burst-ACK the right group. 0 for legacy/single-shot callers.
+    streaming_encoder_->setBurstGroupSeq(group_seq);
 
     // Burst mode is for connected OFDM and MC-DPSK DATA windows.
     streaming_encoder_->setMode(waveform_mode_);

@@ -68,7 +68,8 @@ public:
 
     // Transmit multiple frames as a single waveform burst.
     // Used for connected OFDM and MC-DPSK DATA windows.
-    std::vector<float> transmitBurst(const std::vector<Bytes>& frame_data_list);
+    std::vector<float> transmitBurst(const std::vector<Bytes>& frame_data_list,
+                                     uint16_t group_seq = 0);
 
     // Minimal ping/pong probe (fast presence check, ~1 sec vs ~16 sec CONNECT)
     // Returns: preamble + raw DPSK "ULTR" bytes (no LDPC encoding)
