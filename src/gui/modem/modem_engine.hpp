@@ -139,6 +139,7 @@ public:
         burst_group_callback_ = std::move(callback);
     }
     void setBurstTransportRxEnabled(bool enabled) {
+        burst_transport_rx_enabled_ = enabled;
         if (streaming_decoder_) streaming_decoder_->setBurstTransportRxEnabled(enabled);
     }
 
@@ -368,6 +369,7 @@ private:
     DataCallback data_callback_;
     RawDataCallback raw_data_callback_;
     BurstGroupCallback burst_group_callback_;
+    bool burst_transport_rx_enabled_ = false;
     DataSyncAcceptedCallback data_sync_accepted_callback_;
     StatusCallback status_callback_;
     PingReceivedCallback ping_received_callback_;

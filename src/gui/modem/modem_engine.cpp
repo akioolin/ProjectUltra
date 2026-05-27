@@ -539,6 +539,20 @@ std::vector<float> ModemEngine::transmitBurst(const std::vector<Bytes>& frame_da
         const size_t turn_samples =
             static_cast<size_t>(48000ULL * static_cast<uint64_t>(turnaround_delay_ms_) / 1000ULL);
         streaming_decoder_->seedExpectedFrameArrivalAfterSamples(processed.size() + turn_samples);
+
+        // §14.27: in the one-way burst transport, after we send a group the reply
+        // is a FULL chirp+LTS anchor GROUP_ACK that arrives after a long, variable
+        // group decode — NOT a quick warm-sync light reply at a predictable offset.
+        // The warm-sync narrow reply-prediction window (sized/placed for a light
+        // LTS) mis-times it and the batched fallback chirp search runs after the
+        // chirp has passed (strong rms, ~0.16 corr → rejected → group resent on
+        // timeout). Arm full-anchor wide acquisition so the sender catches the
+        // GROUP_ACK's chirp cleanly. This OVERRIDES the warm-sync narrow window
+        // (use_full_ofdm_anchor_search disables use_light_search). Gated on the
+        // burst transport so the normal QSO warm-sync turnaround is unchanged.
+        if (burst_transport_rx_enabled_ && connected_ && handshake_complete_) {
+            streaming_decoder_->expectFullOFDMAnchorOnce();
+        }
     }
     return processed;
 }
