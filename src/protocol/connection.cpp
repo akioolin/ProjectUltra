@@ -2161,6 +2161,19 @@ bool Connection::tryIssueAdaptiveModeChangeAtBoundary() {
 }
 
 void Connection::updateAdaptiveModeController(uint32_t elapsed_ms) {
+    // DISABLED for the one-way burst file design (§14.20/§14.25). Mid-transfer
+    // adaptive rate renegotiation (MODE_CHANGE on backlog) is old interactive-era
+    // machinery that actively FIGHTS the target: it downgraded R3/4 -> R2/3 on a
+    // transient burst backlog, defeating the whole point of the burst-interleaver
+    // rework (make R3/4 survive Good fading). The negotiated rate is now fixed for
+    // the session; the self-describing burst descriptor declares per-burst params,
+    // and deep-fade bursts are recovered by interleave depth + whole-burst ARQ, NOT
+    // by retreating in rate. Reliability on R3/4 is a PHY/interleave problem, not a
+    // rate-selection one.
+    (void)elapsed_ms;
+    resetAdaptiveModeController();
+    return;
+
     if (adaptive_cooldown_ms_ > 0) {
         if (elapsed_ms >= adaptive_cooldown_ms_) {
             adaptive_cooldown_ms_ = 0;
