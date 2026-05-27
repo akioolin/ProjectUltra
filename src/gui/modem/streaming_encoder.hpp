@@ -152,6 +152,18 @@ public:
     void setBurstInterleaveGroupSize(int size);
     int getBurstInterleaveGroupSize() const { return burst_group_size_; }
 
+    // Self-describing burst (§14.17/§14.19): when enabled, encodeBurstLight emits
+    // a full-anchor 1-CW BURST_HEADER descriptor at the head of an interleaved
+    // group so the receiver decodes the group from the sender's declared params
+    // (group size, cw/frame, mod/rate, interleave flags) — not from local config.
+    // Identity is non-addressing; the RX consumes the descriptor by payload.
+    void setBurstDescriptorEnabled(bool enable) { emit_burst_descriptor_ = enable; }
+    bool getBurstDescriptorEnabled() const { return emit_burst_descriptor_; }
+    void setBurstDescriptorIdentity(const std::string& src, const std::string& dst) {
+        burst_descriptor_src_ = src;
+        burst_descriptor_dst_ = dst;
+    }
+
     void setAdaptiveShortDataPreamble(bool enable);
     bool getAdaptiveShortDataPreamble() const { return adaptive_short_data_preamble_; }
     void setCoherentOFDMControlProfileEnabled(bool enable) {
@@ -220,6 +232,9 @@ private:
     int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
     bool use_burst_interleave_ = false;    // Burst-level long interleaver (N-frame groups)
     int burst_group_size_ = 8;
+    bool emit_burst_descriptor_ = false;   // §14.17 self-describing BURST_HEADER head
+    std::string burst_descriptor_src_;
+    std::string burst_descriptor_dst_;
     bool force_full_preamble_once_ = false;
     bool adaptive_short_data_preamble_ = false;
     bool coherent_ofdm_control_profile_enabled_ = false;

@@ -287,6 +287,7 @@ inline bool isControlFrame(FrameType type) {
            type == FrameType::TURNOVER || type == FrameType::TURN_REQUEST ||
            type == FrameType::FILE_CANCEL ||
            type == FrameType::DISCONNECT ||
+           type == FrameType::BURST_HEADER ||
            type == FrameType::BEACON;
 }
 

@@ -91,8 +91,10 @@ void test_burst_group_clamps_match() {
 
     encoder.setBurstInterleaveGroupSize(99);
     decoder.setBurstInterleaveGroupSize(99);
-    CHECK(encoder.getBurstInterleaveGroupSize() == 8, "encoder burst group should clamp high values");
-    CHECK(decoder.getBurstInterleaveGroupSize() == 8, "decoder burst group should clamp high values");
+    // Ceiling raised 8 -> 32 (2026-05-26): deep burst groups span multiple
+    // coherence times for file-class fade diversity (see sanitizeBurstGroupSize).
+    CHECK(encoder.getBurstInterleaveGroupSize() == 32, "encoder burst group should clamp high values");
+    CHECK(decoder.getBurstInterleaveGroupSize() == 32, "decoder burst group should clamp high values");
 
     encoder.setBurstInterleaveGroupSize(6);
     decoder.setBurstInterleaveGroupSize(6);

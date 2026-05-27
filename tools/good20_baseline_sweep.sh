@@ -1,21 +1,38 @@
 #!/usr/bin/env bash
-# Trustworthy multi-seed baseline for the fading-reliability campaign.
-# Current binaries (clean HEAD + hole-probe fix; NO sigma2, NO Wiener), faithful
-# real-time GUI auto-path. Records FER proxy (BRAVO CWFAIL), retx, goodput, R1/2
-# downgrades per seed so every later change is judged against the multi-seed mean,
-# not a single noisy run (same cell has varied 4/12/20 CWfail).
+# Good@20 fading-reliability gate, faithful real-time GUI auto-path. Records FER
+# proxy (BRAVO CWFAIL), retx, goodput, downgrades per seed so every change is
+# judged against the multi-run mean, not a single noisy run (same cell has
+# varied 4/12/20 CWfail).
 #
-# Usage: tools/good20_baseline_sweep.sh "<seed_list>"
+# Defaults are the SIMPLE QSO R3/4 probe: seed 3, --expect-rate R3/4, and
+# --message-count 1 — one message each way (alpha->bravo, bravo->alpha) then an
+# alpha->bravo file transfer. This is the minimal realistic exchange, kept small
+# on purpose: the heavy default ladder sends 3 chat messages each way AND the
+# PASS gate (qam16_ladder_scenario.sh:226-227) requires every one delivered both
+# directions, so on a marginal rung a single dropped chat message fails the run
+# even when the file was clean, and the extra two-way chat adds half-duplex
+# turn-taking contention unrelated to the file. One message each keeps a real
+# handshake-into-data exchange without burying the file result in chat noise.
+#
+# Usage: tools/good20_baseline_sweep.sh "[seeds]" "[tag]" "[expect_rate]" "[msg_count]"
+#   default (seed3, R3/4, 1 msg each + file):  tools/good20_baseline_sweep.sh
+#   repeat seed3 5x:                           tools/good20_baseline_sweep.sh "3 3 3 3 3"
+#   legacy heavy R2/3 (3 msgs each):           tools/good20_baseline_sweep.sh "1 3 4 5" baseline R2/3 3
 set -u
 cd "$(dirname "$0")/.."
-SEEDS="${1:-1 3 4 5}"
-TAG="${2:-baseline}"
+SEEDS="${1:-3}"
+TAG="${2:-seed3_r34_simpleqso}"
+RATE="${3:-R3/4}"
+MSGS="${4:-1}"
+echo "Good@20 probe: rate=$RATE  message-count=$MSGS  seeds=[$SEEDS]"
 printf "%-5s %-7s %-9s %-6s %-8s %-9s %-5s %-7s %s\n" SEED RESULT CWFAIL RETX GOODPUT DOWNGRADE MC DUTY OUT
 echo "------------------------------------------------------------------------"
+run_idx=0
 for sd in $SEEDS; do
-  out="/tmp/good20_${TAG}_s${sd}"
+  run_idx=$((run_idx + 1))
+  out="/tmp/good20_${TAG}_s${sd}_r${run_idx}"
   ./tools/qam16_ladder_scenario.sh --channel good --snr-db 20 --seed "$sd" \
-    --expect-rate R2/3 --expect-mod QPSK --message-count 2 --out "$out" \
+    --expect-rate "$RATE" --expect-mod QPSK --message-count "$MSGS" --out "$out" \
     > "$out.run" 2>&1
   s="$out/summary.env"
   res=$(grep -oE 'RESULT=[A-Z]+' "$s" 2>/dev/null | cut -d= -f2)

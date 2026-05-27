@@ -56,6 +56,8 @@ struct Args {
     int group = 0;               // frames per burst group (chunk length); clamps to [2,8]
     int frame_cw = static_cast<int>(v2::kDefaultFixedFrameCodewords);  // codewords per frame
     bool burst_interleave = true; // cross-frame deep interleave ON/OFF (the A/B)
+    bool burst_descriptor = false; // §14.17: emit BURST_HEADER descriptor + mis-set
+                                   // decoder group size to prove the descriptor fixes it
 };
 
 struct Counts {
@@ -189,6 +191,8 @@ Args parseArgs(int argc, char** argv) {
             args.frame_cw = std::stoi(requireValue("--frame-cw"));
         } else if (key == "--burst-interleave") {
             args.burst_interleave = std::stoi(requireValue("--burst-interleave")) != 0;
+        } else if (key == "--burst-descriptor") {
+            args.burst_descriptor = std::stoi(requireValue("--burst-descriptor")) != 0;
         } else if (key == "--help" || key == "-h") {
             usage(argv[0]);
             std::exit(0);
@@ -518,6 +522,19 @@ BurstCounts measureBurst(const Args& args) {
         decoder.setBurstInterleaveGroupSize(group);
         decoder.expectFullOFDMAnchorOnce();
 
+        // §14.17 self-describing burst: when enabled, the encoder emits a full-anchor
+        // BURST_HEADER descriptor declaring the group params. To prove the descriptor
+        // actually drives the decoder (the cross-station 0/8 fix), deliberately
+        // mis-configure the decoder here: wrong group size + interleave OFF. If the
+        // descriptor works, the RX reconfigures itself and still recovers the group.
+        if (args.burst_descriptor) {
+            encoder.setBurstDescriptorEnabled(true);
+            encoder.setBurstDescriptorIdentity("ALPHA", "BRAVO");
+            const int wrong_group = (group >= 4) ? 2 : 8;
+            decoder.setBurstInterleaveGroupSize(wrong_group);
+            decoder.setBurstInterleave(false);
+        }
+
         const int clamped = encoder.getBurstInterleaveGroupSize();  // [2,8]
         std::vector<Bytes> frames;
         std::vector<Bytes> expected;
@@ -591,7 +608,11 @@ BurstCounts measureBurst(const Args& args) {
 
 int main(int argc, char** argv) {
     try {
-        ultra::setLogLevel(ultra::LogLevel::ERROR);
+        ultra::LogLevel log_level = ultra::LogLevel::ERROR;
+        if (const char* env = std::getenv("ULTRA_LOG_LEVEL")) {
+            ultra::parseLogLevel(env, log_level);
+        }
+        ultra::setLogLevel(log_level);
         const Args args = parseArgs(argc, argv);
 
         if (args.config == MeasureConfig::BurstChunk) {

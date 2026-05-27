@@ -114,7 +114,7 @@ void test_rate_estimate_uses_shared_geometry() {
 void test_burst_group_policy() {
     CHECK(sanitizeBurstGroupSize(1) == 2, "burst group should clamp low values");
     CHECK(sanitizeBurstGroupSize(4) == 4, "burst group should preserve valid values");
-    CHECK(sanitizeBurstGroupSize(99) == 8, "burst group should clamp high values");
+    CHECK(sanitizeBurstGroupSize(99) == 32, "burst group should clamp high values");
     CHECK(recommendedBurstGroupSize(Modulation::D8PSK, CodeRate::R2_3, 0.5f) == 8,
           "D8PSK high-fading profile should use full burst groups");
     CHECK(recommendedBurstGroupSize(Modulation::DQPSK, CodeRate::R1_2, 0.5f) == 8,

@@ -528,6 +528,42 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
 
     // Phase 3: Modulate with preambles
     std::vector<float> result;
+
+    // Self-describing burst head (§14.17/§14.19): for an interleaved OFDM group,
+    // emit a full-anchor 1-CW BURST_HEADER descriptor that DECLARES the group's
+    // decode params (group size, cw/frame, mod/rate, interleave flags). The RX
+    // configures itself from this declaration, fixing the cross-station 0/8 where
+    // the receiver's local config did not match the sender's. The descriptor is a
+    // control frame (DQPSK control profile via encodeFrame), so it carries its own
+    // full chirp+LTS anchor and seeds the warm timing the group-start marker rides.
+    if (emit_burst_descriptor_ && interleaved_groups > 0 && use_burst_interleave_ &&
+        protocol::isOFDMMode(mode_) && waveform_->supportsDataPreamble()) {
+        uint8_t flags = 0;
+        flags |= protocol::v2::ControlFrame::BURST_FLAG_INTERLEAVE;  // groups are interleaved here
+        if (use_carrier_ldpc_interleaver_) {
+            flags |= protocol::v2::ControlFrame::BURST_FLAG_CARRIER_LDPC;
+        }
+        auto descriptor = protocol::v2::ControlFrame::makeBurstHeader(
+            burst_descriptor_src_, burst_descriptor_dst_, /*seq=*/0,
+            static_cast<uint8_t>(BURST_GROUP_SIZE),
+            static_cast<uint8_t>(fixed_frame_codewords_),
+            modulation_, code_rate_, flags);
+        Bytes descriptor_bytes = descriptor.serialize();
+        std::vector<float> descriptor_samples = encodeFrame(descriptor_bytes);
+        if (!descriptor_samples.empty()) {
+            result.insert(result.end(), descriptor_samples.begin(), descriptor_samples.end());
+            LOG_MODEM(INFO,
+                      "[%s] TX Burst descriptor: group=%d cw/frame=%d %s %s flags=0x%02x "
+                      "(%zu samples ahead of group)",
+                      log_prefix_.c_str(), BURST_GROUP_SIZE, fixed_frame_codewords_,
+                      modulationToString(modulation_), codeRateToString(code_rate_),
+                      flags, descriptor_samples.size());
+        } else {
+            LOG_MODEM(WARN, "[%s] TX Burst descriptor: encodeFrame returned empty (skipping)",
+                      log_prefix_.c_str());
+        }
+    }
+
     const bool force_first_full_preamble = force_full_preamble_once_;
     force_full_preamble_once_ = false;
 

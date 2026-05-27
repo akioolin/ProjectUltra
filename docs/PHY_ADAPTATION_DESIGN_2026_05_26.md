@@ -928,3 +928,60 @@ burst working first.
 
 **SEPARATE WORKSTREAMS (deferred, after the burst path delivers):** faster sync (lean re-anchor),
 faster ACK (#144 tiny FSK), n=1944 long LDPC coding gain, adaptive pilots, rate-picker simplify.
+
+### 14.21 BURST_HEADER descriptor — implemented + the residual truncation bug (2026-05-27)
+
+**Status: descriptor DECODE + RECONFIGURE proven; one residual feed-cadence bug; gated OFF in shipping.**
+
+The self-describing burst from §14.17 is built end-to-end and the core mechanism is
+proven on the faithful in-process harness (`measure_ack_fer --burst-descriptor 1`,
+which deliberately mis-configures the decoder's group size + interleave to simulate
+the cross-station mismatch that causes the GUI 0/8):
+
+- **TX** (`StreamingEncoder::encodeBurstLight`, gated by `emit_burst_descriptor_`):
+  emits a full-anchor 1-CW `BURST_HEADER` control frame at the head of an interleaved
+  OFDM group, declaring `{group_size, cw_per_frame, mod, rate, interleave_flags}` from
+  the encoder's own config. `BURST_HEADER` is now a control frame (`isControlFrame`),
+  so it rides the robust DQPSK control profile.
+- **RX** (`streaming_ofdm_decode.cpp` control-first intercept): decodes the descriptor
+  (no address filtering — magic + CRC only), applies `setBurstInterleaveGroupSize /
+  setFixedFrameCodewords / setBurstInterleave / setCarrierLdpcInterleaver`, stashes it
+  in `last_burst_descriptor_`, and consumes the frame. **Proven**: with the decoder
+  deliberately mis-set (group=2, interleave OFF), the log shows
+  `Burst descriptor RX: group=8 cw/frame=4 bi=1 cldpc=0` — the receiver reconfigures
+  itself from the sender's declaration. This is the fix for the cross-station 0/8.
+
+**Two decoder bugs found + fixed during validation:**
+1. The intercept consumed the descriptor but did not advance `correlation_pos_`, so the
+   LTS detector re-locked the same anchor and re-decoded the descriptor forever. Fixed
+   by advancing past the descriptor frame (`correlation_pos_ = sync_position_+frame_len`,
+   `setSearchFloorLocked`).
+2. The descriptor's full anchor seeded the warm-timing window, biasing the group sync.
+   Mitigated by `resetFrameArrivalTrackingLocked()` + `expect_full_ofdm_anchor_=true` in
+   the intercept (mirrors the FILE_CANCEL control path).
+
+**RESIDUAL BUG (deterministic, faithfully reproducible at clean AWGN40):** with the
+descriptor ON, the group-start frame is demodulated **one symbol short (28 → 27)** and
+the deinterleave yields 0/4 CWs on every logical frame. Root-caused precisely:
+- The encoded burst samples are **byte-identical** with/without the descriptor (the
+  descriptor is simply prepended). So this is NOT an encoder-layout or fade problem.
+- In `streaming_ofdm_decode.cpp`, `frame_len = std::min(frame_len, available)` processes
+  whatever is buffered rather than waiting. When the descriptor precedes the burst it
+  consumes the buffered lead, so at the moment the group-start frame is processed
+  `available` is one symbol short → truncated frame → wrong bit count → deinterleave
+  garbage. In the no-descriptor path the feed cadence happens to have the full frame
+  buffered, so it works.
+- This is **feed-cadence-dependent**: the fast `measure_ack_fer` pump exposes it; the
+  real-time GUI feeds differently and may not reproduce it. That uncertainty is exactly
+  why it must be validated on the GUI before enabling in the shipping path.
+
+**Therefore the descriptor is gated OFF in `transmitBurst`** behind
+`ULTRA_BURST_DESCRIPTOR=1` (env), so the working file path is byte-unchanged. To
+validate live: run both GUI stations with `ULTRA_BURST_DESCRIPTOR=1` and watch BRAVO's
+log for `Burst descriptor RX:` followed by `Burst group complete` + recovered frames
+(instead of 0/8). The proper fix for the truncation is to make the group-start frame
+**defer** until `available >= full_frame_samples` (don't process a truncated burst
+group-start), then re-enable by default. Quick local repro of the bug:
+`./build/measure_ack_fer --snr 40 --config burst_chunk --channel awgn --mod qpsk \
+ --rate r3_4 --group 8 --burst-interleave 1 --burst-descriptor 1 --seed 1 --n 5`
+(currently 0 recovered; `--burst-descriptor 0` gives 40/40).

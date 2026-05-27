@@ -727,6 +727,30 @@ void StreamingDecoder::decodeCurrentFrame() {
                             if (resetDuringDecode()) {
                                 return;
                             }
+                            // Advance past the descriptor frame so the search
+                            // resumes at the data group that follows — otherwise
+                            // the LTS detector re-locks the descriptor anchor and
+                            // re-decodes it forever, never reaching the group.
+                            //
+                            // The descriptor's own full anchor must NOT seed the
+                            // warm-timing window the burst group relies on: a warm
+                            // prediction biased by the descriptor's (shorter) frame
+                            // length lands the group sync at a wrong sub-symbol
+                            // offset, so fixed-offset slicing cascades into weak
+                            // mis-aligned frames (27 vs 28 symbols → 0/4 CWs). Reset
+                            // frame-arrival tracking and expect the group's anchor
+                            // fresh — identical to the no-descriptor sync path.
+                            {
+                                std::lock_guard<std::mutex> lock(buffer_mutex_);
+                                sync_from_warm_timed_window_ = false;
+                                resetFrameArrivalTrackingLocked();
+                                expect_full_ofdm_anchor_ = true;
+                                sync_reject_streak_ = 0;
+                                correlation_pos_ = wrapRingIndexLocked(sync_position_ + frame_len);
+                                setSearchFloorLocked(frame_sync_abs + frame_len);
+                                last_decoded_sync_pos_ = sync_position_;
+                            }
+                            state_ = DecoderState::SEARCHING;
                             return;  // consumed; the data group follows next
                         }
                         DecodeResult control_result;
