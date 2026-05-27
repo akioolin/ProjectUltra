@@ -139,15 +139,17 @@ void test_qam16_selection_rung() {
     CHECK(mod == Modulation::DQPSK,
           "AWGN in-band SNR=15.9 (just under QAM16 gate) stays differential");
 
-    // GOOD fading at the measured QPSK floor selects coherent QPSK R2/3.
+    // GOOD fading at the measured QPSK floor selects coherent QPSK, PROMOTED to
+    // R3/4 (file-class cross-frame burst interleave, design §14.14 — the picker
+    // selects R3/4, the burst transport makes it deliver).
     recommendDataMode(20.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.40f);
     CHECK(mod == Modulation::QPSK,
           "good fading in-band SNR=20 should select coherent QPSK");
-    CHECK(rate == CodeRate::R2_3, "good fading QPSK workhorse rung uses R2/3");
+    CHECK(rate == CodeRate::R3_4, "good fading QPSK promotes to R3/4 at SNR=20");
 
     recommendDataMode(19.8f, WaveformMode::OFDM_CHIRP, mod, rate, 0.50f);
-    CHECK(mod == Modulation::QPSK && rate == CodeRate::R2_3,
-          "good fading SNR=19.8 should select QPSK inside the SNR-quantum guard");
+    CHECK(mod == Modulation::QPSK && rate == CodeRate::R3_4,
+          "good fading SNR=19.8 selects QPSK R3/4 inside the SNR-quantum guard");
 
     recommendDataMode(19.7f, WaveformMode::OFDM_CHIRP, mod, rate, 0.50f);
     CHECK(mod == Modulation::DQPSK,
@@ -158,8 +160,8 @@ void test_qam16_selection_rung() {
           "good fading in-band SNR=17 should stay differential below the QPSK floor");
 
     recommendDataMode(20.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.79f);
-    CHECK(mod == Modulation::QPSK && rate == CodeRate::R2_3,
-          "GOOD-lobby estimator spread should still allow QPSK R2/3");
+    CHECK(mod == Modulation::QPSK && rate == CodeRate::R3_4,
+          "GOOD-lobby estimator spread promotes to QPSK R3/4");
 
     recommendDataMode(20.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.80f);
     CHECK(mod == Modulation::DQPSK,
@@ -243,15 +245,15 @@ void test_data_mode_policy() {
 
     recommendDataMode(32.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
     CHECK(mod == Modulation::QPSK, "good-fading in-band SNR32 should select coherent QPSK");
-    CHECK(rate == CodeRate::R2_3, "good-fading in-band SNR32 QPSK uses R2/3");
+    CHECK(rate == CodeRate::R3_4, "good-fading in-band SNR32 QPSK promotes to R3/4");
 
     recommendDataMode(30.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
     CHECK(mod == Modulation::QPSK, "good-fading in-band SNR30 should select coherent QPSK");
-    CHECK(rate == CodeRate::R2_3, "good-fading in-band SNR30 QPSK uses R2/3");
+    CHECK(rate == CodeRate::R3_4, "good-fading in-band SNR30 QPSK promotes to R3/4");
 
     recommendDataMode(28.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
     CHECK(mod == Modulation::QPSK, "good-fading in-band SNR28 should select coherent QPSK");
-    CHECK(rate == CodeRate::R2_3, "good-fading in-band SNR28 QPSK uses R2/3");
+    CHECK(rate == CodeRate::R3_4, "good-fading in-band SNR28 QPSK promotes to R3/4");
 
     // AWGN in-band SNR=21.7 is above the coherent QAM16 R3/4 AWGN gate. Below
     // 16 dB AWGN it remains differential.

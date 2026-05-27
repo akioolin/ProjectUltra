@@ -715,3 +715,34 @@ restores §6/§14.7 (deep interleave keystone) for Good, with the refinement tha
 mechanism is cross-frame (not within-frame frequency, Finding 1) and that ~3–6 s chunks already
 capture most of it. Next: multi-seed group=4, fix/understand the group=2 bug, the Moderate axis,
 then the GUI cross-check.
+
+### 14.15 TRANSPORT MODEL — burst stop-and-wait (user-specified 2026-05-27; SUPERSEDES SR-ARQ for the file path)
+
+The one-way file transport is **group-level stop-and-wait on big interleaved bursts**, NOT
+selective-repeat. This is the leader's model and the correct fit for half-duplex.
+
+- **A burst = one ~6–8 s interleaved chunk** = the validated cross-frame group (~8 frames at
+  QPSK R3/4 ≈ 6 s). The whole burst is the ARQ unit.
+- **Sender:** TX burst *k* → T/R turnaround → RX, wait for one ACK. ACK → burst *k+1*; no ACK
+  (timeout/NACK) → **resend the entire burst *k*** (no partial/selective retransmit).
+- **Receiver:** decode the full burst (deinterleave + LDPC), send **one** burst-ACK.
+- **Rate PINNED to R3/4** for the file burst — the composite is what makes R3/4 hold, so the
+  adaptive ladder must NOT downgrade it (the downgrade-to-R2/3 is what invalidated the first GUI
+  attempt). No `recommendDataMode`/`capInitialOFDMRate`/adaptive-downgrade on the file path.
+- **ACK** is the robust MC-DPSK coordination frame (§14.5).
+
+**REMOVED for the one-way file path (do NOT carry forward):** selective repeat, SACK bitmaps,
+fast-hole repair, "fast blocks", ack-repeat jobs, per-frame windowing — the entire
+`selective_repeat_arq` complexity. Replaced by dumb-robust whole-burst stop-and-wait.
+
+**KEPT:** the cross-frame burst interleave (the chunk itself, validated §14.14), `transmitBurst`,
+the PHY. The interleave enablement wired into `ModemEngine::setDataMode` is correct; the
+**transport around it** is what gets rebuilt.
+
+**Rebuild increments (file path, parallel to the working modem, GUI-gated):**
+1. **Pin R3/4 + coherent QPSK** for the one-way file transfer — bypass the rate downgrade.
+2. **Group stop-and-wait transport** — chunk the file into 8-frame interleaved bursts, send one,
+   wait one burst-ACK, resend the whole burst on timeout. Bypass/replace SR-ARQ for the file path.
+3. Prove on the automated GUI file-send (faithful clock): R3/4 Good@20 file delivers across seeds
+   (incl. the previously-failing ones).
+4. Then strip chat + shorten handshake + remove turn-taking → the clean one-way sender.

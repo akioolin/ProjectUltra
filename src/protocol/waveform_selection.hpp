@@ -32,6 +32,14 @@ inline constexpr float kProtocolSnrQuantumDb = 0.25f;
 inline constexpr float kQPSKGoodR23MeasuredFloorDb = 20.0f;
 inline constexpr float kQPSKGoodR23SnrFloorDb =
     kQPSKGoodR23MeasuredFloorDb - kProtocolSnrQuantumDb;
+// R3/4 is PROMOTED on Good fading (selected, not forced) once the file-class
+// composite — cross-frame burst interleave (design §14.14) — makes its thin 25%
+// FEC survive Good@20 (offline harness: ~92% chunk recovery vs ~33% without).
+// Reliability is delivered by the burst transport, not this gate; the gate only
+// lets the ladder choose R3/4 when SNR/fading warrant it.
+inline constexpr float kQPSKGoodR34MeasuredFloorDb = 20.0f;
+inline constexpr float kQPSKGoodR34SnrFloorDb =
+    kQPSKGoodR34MeasuredFloorDb - kProtocolSnrQuantumDb;
 
 // Waveform + rate recommendation
 struct WaveformRecommendation {
@@ -125,11 +133,13 @@ inline constexpr std::array<OFDMCodeRateDescriptor, 4> kOFDMCodeRateDescriptors{
         1,
         {{{kQAM16AwgnFadingMax, kQAM16AwgnR34SnrFloorDb}}},
         1,
-        // QPSK R3/4 has NO Good gate: measured 2026-05-26 that R3/4's thin (25%) FEC
-        // hard-fails Good@20 fade seeds (64-145 CWFAIL, 0 bytes) even WITH the anti-poison
-        // fix — R2/3's 50% FEC survives the same fades. R3/4 not viable at this SNR.
-        {},
-        0,
+        // QPSK R3/4 Good gate (PROMOTION): the 2026-05-26 "R3/4 hard-fails Good@20"
+        // result held for the NON-interleaved path. With the file-class cross-frame
+        // burst interleave (design §14.14) the thin 25% FEC survives Good@20 fades
+        // (offline ~92% chunk recovery). The ladder may now promote to R3/4 here;
+        // the burst stop-and-wait transport is what makes it deliver.
+        {{{kQPSKGoodFadingMax, kQPSKGoodR34SnrFloorDb}}},
+        1,
     },
 }};
 

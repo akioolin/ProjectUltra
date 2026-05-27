@@ -5,6 +5,7 @@
 #include "ultra/logging.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
 #include "protocol/frame_v2.hpp"
+#include "protocol/connection_policy.hpp"
 #include <cstdio>
 
 namespace ultra {
@@ -296,8 +297,29 @@ void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
         streaming_encoder_->setDataMode(mod, rate);
     }
 
-    LOG_MODEM(INFO, "Data mode set to: %s (pilots=%d, spacing=%d)",
-              getModeDescription(mod, rate), config_.use_pilots ? 1 : 0, config_.pilot_spacing);
+    // File-class composite (design §14.14): enable cross-frame burst interleave
+    // for connected coherent-QPSK OFDM data. Validated offline — R3/4 Good@20
+    // frame recovery ~33%->~92% at group=8. Coherent QPSK uses the wide
+    // (kWideOFDMWindowFrames=8) ARQ window, which equals kBurstInterleaveGroupFrames,
+    // so a steady-state window fills exactly one interleave group. Both TX and RX
+    // run setDataMode from negotiation, keeping the de-interleave matched.
+    const bool file_class_composite =
+        connected_ && protocol::isOFDMMode(waveform_mode_) &&
+        mod == Modulation::QPSK;
+    const int burst_group =
+        static_cast<int>(protocol::connection_policy::kBurstInterleaveGroupFrames);
+    if (streaming_encoder_) {
+        streaming_encoder_->setBurstInterleaveGroupSize(burst_group);
+        streaming_encoder_->setBurstInterleave(file_class_composite);
+    }
+    if (streaming_decoder_) {
+        streaming_decoder_->setBurstInterleaveGroupSize(burst_group);
+        streaming_decoder_->setBurstInterleave(file_class_composite);
+    }
+
+    LOG_MODEM(INFO, "Data mode set to: %s (pilots=%d, spacing=%d, burst_interleave=%d)",
+              getModeDescription(mod, rate), config_.use_pilots ? 1 : 0,
+              config_.pilot_spacing, file_class_composite ? 1 : 0);
     syncAdaptiveShortDataPreamble();
 }
 
