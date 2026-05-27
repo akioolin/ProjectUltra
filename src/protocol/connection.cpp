@@ -3460,27 +3460,21 @@ void Connection::transmitFrameBatch(const std::vector<Bytes>& frame_data_list) {
 
     const bool burst_capable_mode =
         isOFDMMode(negotiated_mode_) || negotiated_mode_ == WaveformMode::MC_DPSK;
-    const bool standalone_repair_anchors =
-        negotiated_mode_ == WaveformMode::OFDM_CHIRP &&
-        connection_policy::shouldUseWideOFDMShortReanchor(
-            negotiated_mode_, data_modulation_, fading_index_);
     if (frame_data_list.size() == 1 || !on_transmit_burst_ || !burst_capable_mode) {
         for (const auto& frame_data : frame_data_list) {
             transmitFrame(frame_data);
         }
         return;
     }
-    if (standalone_repair_anchors) {
-        LOG_MODEM(INFO,
-                  "Connection: Flushing ARQ timeout-repair as %zu standalone full-anchor frames",
-                  frame_data_list.size());
-        for (const auto& frame_data : frame_data_list) {
-            transmitFrame(frame_data);
-        }
-        return;
-    }
 
-    LOG_MODEM(INFO, "Connection: Flushing ARQ timeout-repair burst of %zu frames",
+    // A timed-out burst is resent as a WHOLE RE-INTERLEAVED BURST on one anchor —
+    // NOT as N standalone full-anchor frames (the old SR-ARQ "standalone repair
+    // anchors" path, §14.20 throw). Standalone repair frames threw away the
+    // cross-frame burst interleaving (so the resend had no fade diversity and was
+    // just as likely to fail on the next fade) AND paid N chirp anchors instead of
+    // one — the dominant goodput sink on Good fading. encodeBurstLight re-interleaves
+    // the group, so the resend gets fresh fade diversity at ~1/N the preamble cost.
+    LOG_MODEM(INFO, "Connection: Resending ARQ timeout-repair as re-interleaved burst of %zu frames",
               frame_data_list.size());
     on_transmit_burst_(frame_data_list);
 }
