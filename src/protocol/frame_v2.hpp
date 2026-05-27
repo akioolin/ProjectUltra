@@ -242,6 +242,7 @@ enum class FrameType : uint8_t {
     TURN_REQUEST = 0x23, // Current IRS requests the next DATA turn
     FILE_CANCEL = 0x24,  // Abort the active file transfer on both peers
     BURST_HEADER = 0x25, // One-way burst descriptor: declares the following group's decode
+    GROUP_ACK   = 0x26,  // Whole-burst ACK: acks one interleaved group by group_seq (stop-and-wait)
                          // params (group size, CW/frame, mod/rate, interleave). Fixed-format
                          // 1-CW control frame, non-interleaved, sent before the data group so
                          // the receiver decodes the group from the sender's declaration (§14.17).
@@ -288,6 +289,7 @@ inline bool isControlFrame(FrameType type) {
            type == FrameType::FILE_CANCEL ||
            type == FrameType::DISCONNECT ||
            type == FrameType::BURST_HEADER ||
+           type == FrameType::GROUP_ACK ||
            type == FrameType::BEACON;
 }
 
@@ -457,6 +459,11 @@ struct ControlFrame {
     static ControlFrame makeBurstHeader(const std::string& src, const std::string& dst,
                                         uint16_t seq, uint8_t group_size, uint8_t cw_per_frame,
                                         Modulation mod, CodeRate rate, uint8_t interleave_flags);
+    // Whole-burst ACK (§14.26): acks one interleaved group as a unit. group_seq
+    // identifies the group; the sender (stop-and-wait) advances on a matching ACK
+    // and resends the whole group on timeout. No per-frame bitmap.
+    static ControlFrame makeGroupAck(const std::string& src, const std::string& dst,
+                                     uint16_t group_seq);
     static ControlFrame makeBeacon(const std::string& src);
     static ControlFrame makeKeepalive(const std::string& src, const std::string& dst);
     static ControlFrame makeDisconnect(const std::string& src, const std::string& dst);
@@ -534,6 +541,11 @@ struct ControlFrame {
         bool burst_interleave = false;  // cross-frame interleave applied
         bool carrier_ldpc = false;      // carrier-LDPC interleave applied
     };
+
+    // Parse a GROUP_ACK payload (§14.26): the acked group sequence number.
+    uint16_t getGroupAckSeq() const {
+        return static_cast<uint16_t>(payload[0] | (payload[1] << 8));
+    }
 
     // Parse a BURST_HEADER payload (§14.17). The receiver decodes the data group
     // that follows from THESE declared params, not from local config.
