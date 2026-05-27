@@ -3983,32 +3983,14 @@ void App::renderOperateTab() {
         send_btn_log_would_enable_ = would_enable_send;
     }
 
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 90);
-    bool send = ImGui::InputText("##txinput", tx_text_buffer_, sizeof(tx_text_buffer_),
-                                  ImGuiInputTextFlags_EnterReturnsTrue);
-    ImGui::SameLine();
-
-    ImVec4 send_color = can_send ? ImVec4(0.3f, 0.6f, 0.3f, 1.0f) : ImVec4(0.4f, 0.4f, 0.4f, 1.0f);
-    ImGui::PushStyleColor(ImGuiCol_Button, send_color);
-    ImGui::BeginDisabled(!can_send);
-    const bool send_clicked = ImGui::Button("Send##msg", ImVec2(80, 0));
-    if (file_transfer_busy && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-        ImGui::SetTooltip("File transfer in progress — cancel to send a message.");
-    }
-    if (send_clicked || (send && can_send)) {
-        std::string text(tx_text_buffer_);
-        const bool ready_now = protocol_.isReadyToSend();
-        if (protocol_.sendMessage(text)) {
-            if (file_transfer_busy) {
-                appendRxLogLine("[INFO] Message queued - file transfer in progress, will send after.");
-            } else if (!ready_now) {
-                appendRxLogLine("[INFO] Message queued - waiting for DATA turn.");
-            }
-            tx_text_buffer_[0] = '\0';
-        }
-    }
-    ImGui::EndDisabled();
-    ImGui::PopStyleColor();
+    // Chat compose REMOVED (leader-style rework, design §14): the station is a
+    // one-way FILE SENDER — no interactive text messaging. The protocol-level
+    // sendMessage path remains for now but is no longer reachable from the GUI;
+    // it is removed in the protocol cleanup pass. (void) the chat-only locals so
+    // the build stays warning-clean now that the Send-message button is gone.
+    (void)can_send;
+    (void)tx_inprog;
+    (void)would_enable_send;
 
     // File Transfer (compact row)
     if (protocol_.isFileTransferInProgress()) {
