@@ -424,7 +424,14 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
          // 100 ms chirp only correlates ~0.88 and is rejected by the 0.90 data-sync
          // gate. Carry a full chirp+LTS anchor (corr ~0.93+, reliably accepted),
          // exactly like the other link-state transition tokens above.
-         header.type == protocol::v2::FrameType::GROUP_ACK);
+         header.type == protocol::v2::FrameType::GROUP_ACK ||
+         // DISCONNECT is the session-ending link-state transition — the most
+         // important one to land. After a one-way burst transfer the receiver is
+         // NOT warm, and a light-preamble DISCONNECT's short chirp is missed by
+         // the receiver's coarse post-transfer chirp search, stranding it
+         // connected forever (responder never tears down / exits). Send it with a
+         // full chirp+LTS anchor so it is robustly acquired, like the GROUP_ACK.
+         header.type == protocol::v2::FrameType::DISCONNECT);
     const bool is_mode_change = header.valid &&
         header.type == protocol::v2::FrameType::MODE_CHANGE;
     if (is_ofdm && connected_ && handshake_complete_ && is_data_frame && streaming_decoder_) {
