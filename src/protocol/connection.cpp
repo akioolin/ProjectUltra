@@ -1988,6 +1988,20 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                         processArqFrame(frame_data);
                     }
                     break;
+                case v2::FrameType::GROUP_ACK:
+                    // §14.27: whole-burst ACK for the one-way burst transport.
+                    // Advances the group stop-and-wait sender by one group; no
+                    // SACK, no per-frame retransmit. Only meaningful when the
+                    // burst transport drives the file path.
+                    if (state_ == ConnectionState::CONNECTED && use_burst_transport_) {
+                        const uint16_t group_seq = ctrl->getGroupAckSeq();
+                        LOG_MODEM(INFO, "Connection: GROUP_ACK group_seq=%u", group_seq);
+                        if (local_data_turn_) {
+                            armDataTurnTxGuard(dataTurnAckDiversityGuardMs(*ctrl));
+                        }
+                        burst_transport_.onGroupAck(group_seq);
+                    }
+                    break;
                 case v2::FrameType::MODE_CHANGE:
                     handleModeChange(*ctrl, src_call);
                     break;
