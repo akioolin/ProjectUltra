@@ -398,12 +398,21 @@ Connection::Connection(const ConnectionConfig& config)
             }
         });
     burst_transport_.setTransferDone([this](bool success) {
-        if (file_transfer_.getState() == FileTransferState::SENDING) {
-            if (success) {
+        if (file_transfer_.getState() != FileTransferState::SENDING) {
+            return;
+        }
+        if (success) {
+            // startBurstFileTransfer() drained every chunk up front (so
+            // hasMoreChunks() is already false). Drive the chunk-ack count to
+            // chunks_sent_ so FileTransferController fires its sent-callback once
+            // for the whole burst transfer and resets TX state (resetTxState()).
+            while (file_transfer_.getState() == FileTransferState::SENDING &&
+                   file_transfer_.hasPendingChunks()) {
                 file_transfer_.onChunkAcked();
-            } else {
-                file_transfer_.onSendFailed();
             }
+        } else {
+            // Link declared dead after max group retries.
+            file_transfer_.onSendFailed();
         }
     });
 
@@ -1537,6 +1546,16 @@ bool Connection::startFileTransferNow(const std::string& filepath) {
         return false;
     }
 
+    // §14.27: one-way burst stop-and-wait path (flag-gated, OFDM only). Drains
+    // the whole file into interleaved groups and runs group-level ARQ — no
+    // SR-ARQ window, no SACK. Default OFF until GUI-proven.
+    if (use_burst_transport_ && is_ofdm) {
+        if (startBurstFileTransfer()) {
+            return true;
+        }
+        LOG_MODEM(WARN, "Connection: Burst file transfer start failed; falling back to SR-ARQ");
+    }
+
     if (is_ofdm && shouldUseSingleOFDMFileBlock(fading_index_, measured_snr_db_, data_code_rate_)) {
         Bytes block = file_transfer_.getSingleBlockPayload(kOFDMFileBlockPayloadLimit);
         if (!block.empty()) {
@@ -1656,6 +1675,106 @@ void Connection::sendNextFileChunk() {
     if ((is_ofdm || is_mc_dpsk) && on_transmit_burst_) {
         burst_mode_active_ = false;
         flushBurstBuffer();
+    }
+}
+
+bool Connection::startBurstFileTransfer() {
+    // §14.27: drain the whole file into serialized fixed DATA frames, slice into
+    // BURST_GROUP_SIZE-frame interleaved groups, and hand them to the group
+    // stop-and-wait controller. No SR-ARQ window, no per-frame SACK — one group
+    // is the ARQ unit (whole-burst resend on group-ACK timeout).
+    if (!on_transmit_burst_) {
+        LOG_MODEM(ERROR, "Connection: Burst file transfer requires the burst callback");
+        return false;
+    }
+    const size_t group_size = connection_policy::kBurstInterleaveGroupFrames;
+
+    // Drain all chunk payloads first (so we can mark FINAL on the last real
+    // frame and know the total chunk count for completion accounting).
+    std::vector<Bytes> chunk_payloads;
+    size_t total_payload_bytes = 0;
+    while (file_transfer_.hasMoreChunks()) {
+        Bytes chunk = file_transfer_.getNextChunk();
+        if (chunk.empty()) {
+            break;
+        }
+        total_payload_bytes += chunk.size();
+        chunk_payloads.push_back(std::move(chunk));
+    }
+    if (chunk_payloads.empty()) {
+        LOG_MODEM(WARN, "Connection: Burst file transfer produced no chunks");
+        return false;
+    }
+
+    // Wrap each payload into a serialized fixed DATA frame (same construction the
+    // SR-ARQ path uses, minus the window bookkeeping). FINAL marks the stream tail.
+    std::vector<Bytes> frames;
+    frames.reserve(chunk_payloads.size());
+    uint16_t seq = 0;
+    for (size_t i = 0; i < chunk_payloads.size(); ++i) {
+        const bool is_last = (i + 1 == chunk_payloads.size());
+        auto frame = v2::makeFixedDataFrame(local_call_, remote_call_, seq++,
+                                            chunk_payloads[i], data_code_rate_,
+                                            data_frame_cw_count_);
+        frame.type = v2::FrameType::DATA;
+        frame.flags = is_last ? v2::Flags::FINAL : v2::Flags::MORE_FRAG;
+        frames.push_back(frame.serialize());
+    }
+
+    // The encoder only interleaves + emits a descriptor for FULL groups
+    // (encoded_frames.size() / BURST_GROUP_SIZE). Pad the final partial group to
+    // group_size so it forms a full interleaved burst. Pad frames are addressed
+    // to kOFDMBurstPadCallsign, which the RX address filter drops before
+    // reassembly — so they cost airtime but never corrupt the file.
+    if (frames.size() % group_size != 0) {
+        const size_t pad = group_size - (frames.size() % group_size);
+        for (size_t i = 0; i < pad; ++i) {
+            frames.push_back(v2::makeFixedDataFrame(
+                local_call_, kOFDMBurstPadCallsign,
+                static_cast<uint16_t>(kOFDMBurstPadSeq - i),
+                makeOFDMBurstPadPayload(data_code_rate_, data_frame_cw_count_, i),
+                data_code_rate_, data_frame_cw_count_).serialize());
+        }
+    }
+
+    // Slice into groups of exactly group_size frames.
+    std::vector<BurstStopAndWaitController::Group> groups;
+    groups.reserve(frames.size() / group_size);
+    for (size_t i = 0; i < frames.size(); i += group_size) {
+        groups.emplace_back(frames.begin() + i, frames.begin() + i + group_size);
+    }
+
+    LOG_MODEM(INFO,
+              "Connection: Burst file transfer: %zu chunks (%zu B) -> %zu groups x %zu frames "
+              "(cw=%d, rate=%s)",
+              chunk_payloads.size(), total_payload_bytes, groups.size(), group_size,
+              data_frame_cw_count_, codeRateToString(data_code_rate_));
+
+    noteDataTurnPayloadStarted(total_payload_bytes);
+    burst_transport_.startTransfer(std::move(groups));
+    return true;
+}
+
+void Connection::collectBurstGroupFrame(uint16_t group_seq, const Bytes& frame_data,
+                                        bool group_complete) {
+    // RX group assembly for the burst transport. Decoded burst frames arrive in
+    // order; group_complete marks the last frame of an interleaved group. On a
+    // complete group we hand the accumulated frames to the controller, which
+    // delivers (once) and emits a single GROUP_ACK.
+    if (!use_burst_transport_) {
+        return;
+    }
+    if (!burst_rx_group_open_ || group_seq != burst_rx_group_seq_) {
+        burst_rx_group_open_ = true;
+        burst_rx_group_seq_ = group_seq;
+        burst_rx_group_frames_.clear();
+    }
+    burst_rx_group_frames_.push_back(frame_data);
+
+    if (group_complete) {
+        burst_transport_.onGroupReceived(group_seq, burst_rx_group_frames_);
+        burst_rx_group_open_ = false;
+        burst_rx_group_frames_.clear();
     }
 }
 

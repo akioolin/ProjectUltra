@@ -451,6 +451,12 @@ private:
     // until GUI-proven. Group-ACK reuses the ACK control frame (seq=group_seq).
     BurstStopAndWaitController burst_transport_;
     bool use_burst_transport_ = false;
+    // RX group assembly for the burst transport: frames of the in-flight group
+    // accumulate here (keyed by the descriptor group_seq) until the group is
+    // complete, then are handed to burst_transport_.onGroupReceived().
+    uint16_t burst_rx_group_seq_ = 0;
+    bool burst_rx_group_open_ = false;
+    std::vector<Bytes> burst_rx_group_frames_;
 
     // ARQ ACK callbacks can acknowledge several slots from one cumulative ACK.
     // Defer window refill until ARQ finishes freeing all slots so OFDM stays
@@ -650,6 +656,16 @@ private:
     WaveformMode negotiateMode(uint8_t remote_caps, WaveformMode remote_pref);
     void sendNextFileChunk();
     void sendNextFragment();
+
+    // One-way burst transport (design §14.27). startBurstFileTransfer drains the
+    // whole file into BURST_GROUP_SIZE-frame interleaved groups and hands them to
+    // burst_transport_ (group stop-and-wait, no SR-ARQ). collectBurstGroupFrame
+    // feeds a decoded burst frame into RX group assembly; on a complete group it
+    // calls burst_transport_.onGroupReceived(). Both are gated by
+    // use_burst_transport_.
+    bool startBurstFileTransfer();
+    void collectBurstGroupFrame(uint16_t group_seq, const Bytes& frame_data,
+                                bool group_complete);
 };
 
 } // namespace protocol
