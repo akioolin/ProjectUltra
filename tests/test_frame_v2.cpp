@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 #include "../src/protocol/frame_v2.hpp"
+#include "../src/protocol/file_stream_header.hpp"
 
 using namespace ultra::protocol;
 using namespace ultra::protocol::v2;
@@ -222,6 +223,54 @@ void test_burst_header_roundtrip() {
         auto plain_info = ControlFrame::deserialize(plain.serialize())->getBurstHeaderInfo();
         assert(!plain_info.burst_interleave && !plain_info.carrier_ldpc);
         assert(plain_info.group_size == 4 && plain_info.cw_per_frame == 4);
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
+void test_file_stream_header_roundtrip() {
+    TEST("file stream header roundtrip (optional compression)") {
+        // Compressed file.
+        FileStreamHeader h;
+        h.codec = FileStreamHeader::Codec::Deflate;
+        h.original_size = 100000;
+        h.payload_size = 41234;
+        h.crc32 = 0xDEADBEEF;
+        h.name = "report.txt";
+        auto bytes = h.serialize();
+        // Append fake payload to prove wireSize() locates it correctly.
+        bytes.insert(bytes.end(), {0xAA, 0xBB, 0xCC});
+
+        auto parsed = FileStreamHeader::deserialize(bytes);
+        assert(parsed.has_value());
+        assert(parsed->isCompressed());
+        assert(parsed->codec == FileStreamHeader::Codec::Deflate);
+        assert(parsed->original_size == 100000);
+        assert(parsed->payload_size == 41234);
+        assert(parsed->crc32 == 0xDEADBEEF);
+        assert(parsed->name == "report.txt");
+        assert(parsed->wireSize() == FileStreamHeader::kFixedSize + 10);
+        assert(bytes[parsed->wireSize()] == 0xAA);  // payload starts right after
+
+        // Raw (uncompressed) file — the optional path.
+        FileStreamHeader raw;
+        raw.codec = FileStreamHeader::Codec::None;
+        raw.original_size = 2048;
+        raw.payload_size = 2048;  // == original when not compressed
+        raw.name = "x";
+        auto raw_parsed = FileStreamHeader::deserialize(raw.serialize());
+        assert(raw_parsed.has_value() && !raw_parsed->isCompressed());
+        assert(raw_parsed->original_size == raw_parsed->payload_size);
+
+        // Malformed: bad magic, and truncated.
+        Bytes ser = h.serialize();
+        Bytes bad = ser;
+        bad[0] = 0x00;
+        assert(!FileStreamHeader::deserialize(bad).has_value());
+        Bytes truncated(ser.begin(), ser.begin() + 5);  // same vector's iterators
+        assert(!FileStreamHeader::deserialize(truncated).has_value());
 
         PASS();
     } catch (const std::exception& e) {
@@ -1364,6 +1413,7 @@ int main() {
     test_control_frame_size();
     test_control_frame_roundtrip();
     test_burst_header_roundtrip();
+    test_file_stream_header_roundtrip();
     test_control_frame_crc();
     test_control_frame_magic();
     test_phy_mask_header_roundtrip_patterns();

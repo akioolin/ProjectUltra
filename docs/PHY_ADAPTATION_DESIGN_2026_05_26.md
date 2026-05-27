@@ -831,3 +831,46 @@ existing control-vs-data split (control = fixed 1-CW; RX already peeks CW0 as a 
 **GUI requirement (operator, 2026-05-27):** the decoded burst-header info (group size, CW/frame,
 mod/rate, interleave flags) must be surfaced in the GUI left compact block so the operator can
 SEE what burst type is arriving. Decoder exposes the received descriptor → GUI side-panel display.
+
+### 14.18 OPTIMAL FILE FRAMING — two layers, minimize air bytes (design 2026-05-27)
+
+Goal: pack [per-burst decode info] + [file metadata] + [file bytes] so the receiver has
+everything, with minimum air bytes. The optimization that matters most is **fewest bytes on air**
+(compression), not framing micro-overhead.
+
+**Layer 1 — PHY descriptor (per burst, fixed-format, decoded FIRST):** `BURST_HEADER` carries
+`seq, group_size, cw/frame, mod, rate, interleave_flags, START/END`. ~1 CW inside the keyup
+(~1-2%), repeated per burst (near-free, enables per-burst rate adaptation). Already built (§14.17).
+
+**Layer 2 — transfer header (ONCE, in the front of burst #0's decoded data):** after PHY decode
+the byte stream is `[FileStreamHeader][payload bytes]`. Compact binary, ~15 B + name:
+```
+FileStreamHeader:
+  version       1B
+  flags         1B   bit0 = compressed; bits1-3 = codec id (none/deflate/zstd…)
+  original_size 4B   uncompressed file size (progress + decompress buffer)
+  payload_size  4B   bytes actually transmitted (= compressed size if compressed) → drives done
+  crc32         4B   checksum of the ORIGINAL (decompressed) file
+  (reserved)    4B   start_offset for future RESUME after a dead link (re-send tail only)
+  name_len      1B
+  name          name_len B
+```
+
+**Compression is OPTIONAL and per-file (user, 2026-05-27):** TX compresses the whole file once
+(best ratio) ONLY when it shrinks it; for incompressible input (.jpg/.zip/already-compressed) it
+sends `codec=none` raw — never wastes effort. `flags` bit0 + codec id tell the RX whether/how to
+decompress. RX: accumulate `payload_size` bytes → if compressed, inflate to `original_size` →
+verify `crc32` → write as `name`.
+
+**Why optimal (first principles):**
+- Compression (when beneficial) is the real throughput multiplier — fewer air bytes beats any
+  framing tweak; and it's free when it doesn't help (raw fallback).
+- **Size-driven completion** (`payload_size`) — no wasted END frame/burst; the END flag is a hint.
+- Header sent ONCE (front of burst #0); made reliable by stop-and-wait resending burst #0 if
+  lost — not repeated per burst (only the cheap PHY descriptor repeats).
+- Two integrity levels, no overlap: per-burst LDPC+frame-CRC (drives resend) vs whole-file `crc32`
+  (final correctness gate after assemble+decompress).
+- `start_offset` reserved now → resume-after-dead-link later without a format change.
+
+On-air: `burst0 = [preamble][DESC START][{FileStreamHeader}{payload…}]`; `burstK =
+[preamble][DESC][{payload…}]`; RX stops when bytes == payload_size → decompress → crc32 → write.
