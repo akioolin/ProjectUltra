@@ -417,7 +417,14 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     const bool is_turn_control = header.valid &&
         (header.type == protocol::v2::FrameType::TURNOVER ||
          header.type == protocol::v2::FrameType::TURN_REQUEST ||
-         header.type == protocol::v2::FrameType::FILE_CANCEL);
+         header.type == protocol::v2::FrameType::FILE_CANCEL ||
+         // §14.27: the GROUP_ACK is the one-way burst transport's whole-burst
+         // coordination token. It crosses a half-duplex turnaround AFTER an ~11 s
+         // data burst, so the initiator is NOT warm — a light preamble's short
+         // 100 ms chirp only correlates ~0.88 and is rejected by the 0.90 data-sync
+         // gate. Carry a full chirp+LTS anchor (corr ~0.93+, reliably accepted),
+         // exactly like the other link-state transition tokens above.
+         header.type == protocol::v2::FrameType::GROUP_ACK);
     const bool is_mode_change = header.valid &&
         header.type == protocol::v2::FrameType::MODE_CHANGE;
     if (is_ofdm && connected_ && handshake_complete_ && is_data_frame && streaming_decoder_) {
