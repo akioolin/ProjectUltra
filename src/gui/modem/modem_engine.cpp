@@ -140,6 +140,18 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
     });
     startupTrace("ModemEngine", "decoder-set-frame-callback-exit");
 
+    // §14.27: forward a decoded interleaved burst (delivered as a unit) to the
+    // protocol layer's burst transport. Only fires when burst-transport RX is
+    // enabled on the decoder.
+    streaming_decoder_->setBurstGroupCallback(
+        [this](uint16_t group_seq, const std::vector<Bytes>& frames, bool all_ok) {
+            updateStats([&](LoopbackStats& s) { s.synced = all_ok; });
+            if (burst_group_callback_) {
+                burst_group_callback_(group_seq, frames, all_ok);
+            }
+            last_rx_complete_time_ = std::chrono::steady_clock::now();
+        });
+
     streaming_decoder_->setDataSyncAcceptedCallback([this](float sync_correlation) {
         if (data_sync_accepted_callback_) {
             data_sync_accepted_callback_(sync_correlation);

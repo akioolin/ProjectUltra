@@ -346,6 +346,14 @@ Connection::Connection(const ConnectionConfig& config)
     config_.fixed_frame_codewords = data_frame_cw_count_;
     arq_.setFixedFrameCodewords(data_frame_cw_count_);
 
+    // §14.27: one-way burst stop-and-wait file transport (default OFF). Enabled
+    // via env ULTRA_BURST_TRANSPORT=1 for GUI proving before it becomes default.
+    // Both ends must enable it (TX routes the file through groups; RX must also
+    // run the decoder's group-as-unit path — wired in app.cpp via the same env).
+    if (const char* bt = std::getenv("ULTRA_BURST_TRANSPORT"); bt && bt[0] == '1') {
+        use_burst_transport_ = true;
+    }
+
     // Wire up ARQ callbacks
     arq_.setTransmitCallback([this](const Bytes& data) {
         transmitFrame(data);
@@ -391,10 +399,17 @@ Connection::Connection(const ConnectionConfig& config)
     });
     burst_transport_.setGroupDelivered(
         [this](uint16_t /*group_seq*/, const BurstStopAndWaitController::Group& frames) {
-            // Reassemble: each group frame's payload feeds the file reassembler.
-            // (Payload extraction refined when the RX group hook lands, step 4.)
+            // Each group frame is a serialized fixed DATA frame; strip the header
+            // and feed the payload to the SAME reassembly path as SR-ARQ DATA
+            // frames (handleDataPayload). more_data follows MORE_FRAG; the stream
+            // tail carries FINAL (no MORE_FRAG) so the reassembler finalizes.
             for (const auto& frame : frames) {
-                file_transfer_.processPayload(frame, /*more_data=*/true);
+                auto df = v2::DataFrame::deserialize(frame);
+                if (!df) {
+                    continue;
+                }
+                const bool more_data = (df->flags & v2::Flags::MORE_FRAG) != 0;
+                handleDataPayload(df->payload, more_data, df->type);
             }
         });
     burst_transport_.setTransferDone([this](bool success) {
@@ -1753,6 +1768,39 @@ bool Connection::startBurstFileTransfer() {
     noteDataTurnPayloadStarted(total_payload_bytes);
     burst_transport_.startTransfer(std::move(groups));
     return true;
+}
+
+void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Bytes>& frames,
+                                      bool all_ok) {
+    if (!use_burst_transport_) {
+        return;
+    }
+    // A partial group cannot be deinterleaved/reassembled, so it is dropped and
+    // the sender whole-burst-resends (stop-and-wait, no SACK). Only a fully
+    // decoded group is ACKed + delivered.
+    if (!all_ok) {
+        LOG_MODEM(INFO,
+                  "Connection: Burst group_seq=%u incomplete; dropping (sender resends whole burst)",
+                  group_seq);
+        return;
+    }
+    // Drop pad frames (addressed to the burst-pad callsign): keep only frames
+    // addressed to us for reassembly. Pads exist only to fill a partial group so
+    // the encoder forms a full interleaved burst.
+    std::vector<Bytes> real_frames;
+    real_frames.reserve(frames.size());
+    for (const auto& frame : frames) {
+        auto hdr = v2::parseHeader(frame);
+        if (hdr.valid && !v2::isAddressedToCallsign(hdr, local_call_)) {
+            continue;
+        }
+        real_frames.push_back(frame);
+    }
+    LOG_MODEM(INFO, "Connection: Burst group_seq=%u complete: %zu real frames -> deliver+GROUP_ACK",
+              group_seq, real_frames.size());
+    // Controller delivers once + emits one GROUP_ACK (dedup re-ACKs a duplicate
+    // group whose prior ACK was lost without re-delivering).
+    burst_transport_.onGroupReceived(group_seq, real_frames);
 }
 
 void Connection::collectBurstGroupFrame(uint16_t group_seq, const Bytes& frame_data,

@@ -334,6 +334,12 @@ void ProtocolEngine::onAcceptedOFDMDataSync(float sync_correlation) {
     connection_.onAcceptedOFDMDataSync(sync_correlation);
 }
 
+void ProtocolEngine::onBurstGroupReceived(uint16_t group_seq,
+                                          const std::vector<Bytes>& frames, bool all_ok) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.onBurstGroupReceived(group_seq, frames, all_ok);
+}
+
 void ProtocolEngine::processRxBuffer() {
     // Look for v2 frame magic (2 bytes: 0x554C = "UL")
     while (!rx_buffer_.empty()) {

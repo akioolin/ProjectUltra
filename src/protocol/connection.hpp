@@ -153,6 +153,15 @@ public:
     void onMCDPSKPartialFrame(const v2::PartialFrameCodewords& partial);
     void onAcceptedOFDMDataSync(float sync_correlation);
 
+    // §14.27: a decoded interleaved burst delivered as a UNIT by the decoder
+    // (group_seq, ordered serialized DATA frames, all-logical-frames-decoded).
+    // Drops pad frames (addressed to the burst-pad callsign) and, only when the
+    // whole group decoded, hands the real frames to the group stop-and-wait
+    // controller (deliver-once + single GROUP_ACK). A partial group is dropped
+    // so the sender whole-burst-resends. Inert unless use_burst_transport_.
+    void onBurstGroupReceived(uint16_t group_seq, const std::vector<Bytes>& frames,
+                              bool all_ok);
+
     void tick(uint32_t elapsed_ms);
 
     // --- Callbacks ---

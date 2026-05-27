@@ -577,6 +577,20 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     });
     ultra::gui::startupTrace("App", "set-raw-callback-exit");
 
+    // §14.27: a decoded interleaved burst delivered as a unit goes to the
+    // protocol burst transport (deliver-once + single GROUP_ACK). Inert unless
+    // the burst transport is enabled (env ULTRA_BURST_TRANSPORT=1).
+    modem_.setBurstGroupCallback(
+        [this](uint16_t group_seq, const std::vector<Bytes>& frames, bool all_ok) {
+            protocol_.onBurstGroupReceived(group_seq, frames, all_ok);
+        });
+    {
+        const char* bt = std::getenv("ULTRA_BURST_TRANSPORT");
+        if (bt && bt[0] == '1') {
+            modem_.setBurstTransportRxEnabled(true);
+        }
+    }
+
     modem_.setDataSyncAcceptedCallback([this](float sync_correlation) {
         protocol_.onAcceptedOFDMDataSync(sync_correlation);
     });

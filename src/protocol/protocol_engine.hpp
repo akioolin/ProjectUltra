@@ -117,6 +117,10 @@ public:
     void onRxData(const Bytes& data);
     void onMCDPSKPartialFrame(const v2::PartialFrameCodewords& partial);
     void onAcceptedOFDMDataSync(float sync_correlation);
+    // §14.27: a decoded interleaved burst delivered as a unit (group_seq, ordered
+    // DATA frames, all-logical-frames-decoded) for the one-way burst transport.
+    void onBurstGroupReceived(uint16_t group_seq, const std::vector<Bytes>& frames,
+                              bool all_ok);
     void tick(uint32_t elapsed_ms);
 
     // --- State ---

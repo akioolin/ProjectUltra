@@ -458,6 +458,10 @@ void StreamingDecoder::finalizeBurstGroup() {
 
     int logical_ok = 0;
     int logical_fail = 0;
+    // §14.27 burst-transport RX: accumulate the group's decoded DATA frames so the
+    // whole interleaved burst is delivered as a unit (the SR-ARQ per-frame path is
+    // suppressed below when burst_transport_rx_ is set).
+    std::vector<Bytes> burst_group_frames;
     int physical_erasures = 0;
     int physical_process_fail = 0;
     float min_physical_llr = std::numeric_limits<float>::max();
@@ -510,7 +514,14 @@ void StreamingDecoder::finalizeBurstGroup() {
             ++logical_fail;
         }
 
-        if (result.success || result.codewords_ok > 0) {
+        if (burst_transport_rx_) {
+            // §14.27: collect the group; deliver as a unit after the loop. Suppress
+            // the per-frame SR-ARQ delivery so the file group does not also
+            // double-process through onRxData/processArqFrame.
+            if (result.success) {
+                burst_group_frames.push_back(result.frame_data);
+            }
+        } else if (result.success || result.codewords_ok > 0) {
             {
                 std::lock_guard<std::mutex> qlock(queue_mutex_);
                 frame_queue_.push(result);
@@ -548,6 +559,18 @@ void StreamingDecoder::finalizeBurstGroup() {
                 << " sync_corr=" << result.sync_correlation;
             ultra::phyDiagLine(oss.str());
         }
+    }
+
+    if (burst_transport_rx_ && burst_group_callback_) {
+        // Deliver the whole interleaved burst as a unit. all_ok requires every
+        // logical frame of the group to have decoded — a partial group is
+        // undecodable for reassembly and must be whole-burst-resent (no SACK).
+        const bool all_ok = (logical_ok == burst_group_size);
+        LOG_MODEM(INFO,
+                  "[%s] Burst group_seq=%u delivered as unit: %d/%d logical OK (all_ok=%d)",
+                  log_prefix_.c_str(), last_burst_group_seq_, logical_ok,
+                  burst_group_size, all_ok ? 1 : 0);
+        burst_group_callback_(last_burst_group_seq_, burst_group_frames, all_ok);
     }
 
     if (diagnostics_enabled) {

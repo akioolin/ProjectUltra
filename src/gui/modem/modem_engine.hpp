@@ -131,6 +131,17 @@ public:
     using RawDataCallback = std::function<void(const Bytes&)>;
     void setRawDataCallback(RawDataCallback callback) { raw_data_callback_ = callback; }
 
+    // §14.27 one-way burst transport: a decoded interleaved burst delivered as a
+    // unit (group_seq, ordered DATA frames, all-logical-frames-decoded flag).
+    using BurstGroupCallback =
+        std::function<void(uint16_t group_seq, const std::vector<Bytes>& frames, bool all_ok)>;
+    void setBurstGroupCallback(BurstGroupCallback callback) {
+        burst_group_callback_ = std::move(callback);
+    }
+    void setBurstTransportRxEnabled(bool enabled) {
+        if (streaming_decoder_) streaming_decoder_->setBurstTransportRxEnabled(enabled);
+    }
+
     using DataSyncAcceptedCallback = std::function<void(float sync_correlation)>;
     void setDataSyncAcceptedCallback(DataSyncAcceptedCallback callback) {
         data_sync_accepted_callback_ = callback;
@@ -356,6 +367,7 @@ private:
     // Callbacks
     DataCallback data_callback_;
     RawDataCallback raw_data_callback_;
+    BurstGroupCallback burst_group_callback_;
     DataSyncAcceptedCallback data_sync_accepted_callback_;
     StatusCallback status_callback_;
     PingReceivedCallback ping_received_callback_;

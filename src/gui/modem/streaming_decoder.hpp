@@ -149,6 +149,14 @@ struct DecoderStats {
 using FrameDecodedCallback = std::function<void(const DecodeResult&)>;
 using StreamingPingCallback = std::function<void(float snr_db, float cfo_hz)>;
 using DataSyncAcceptedCallback = std::function<void(float sync_correlation)>;
+// §14.27 one-way burst transport: a decoded interleaved burst is delivered as a
+// UNIT (the group either deinterleaves whole or fails whole). frames carries the
+// serialized DATA frames of the group in order; all_ok is true only if every
+// logical frame of the group decoded (a partial group is undecodable and must be
+// whole-burst-resent). Only emitted when burst-transport RX is enabled; the
+// SR-ARQ burst path keeps its per-frame delivery.
+using BurstGroupCallback =
+    std::function<void(uint16_t group_seq, const std::vector<Bytes>& frames, bool all_ok)>;
 
 // StreamingDecoder - Unified RX decoder for all waveform types
 class StreamingDecoder {
@@ -284,6 +292,11 @@ public:
     // ========================================================================
 
     void setFrameCallback(FrameDecodedCallback callback) { frame_callback_ = callback; }
+    void setBurstGroupCallback(BurstGroupCallback callback) { burst_group_callback_ = callback; }
+    // Enable §14.27 burst-transport RX: finalizeBurstGroup emits the group as a
+    // unit via the burst-group callback and suppresses per-frame queue delivery
+    // (so the file group does not also double-process through the SR-ARQ path).
+    void setBurstTransportRxEnabled(bool enabled) { burst_transport_rx_ = enabled; }
     void setPingCallback(StreamingPingCallback callback) { ping_callback_ = callback; }
     void setDataSyncAcceptedCallback(DataSyncAcceptedCallback callback) { data_sync_accepted_callback_ = callback; }
     void setLogPrefix(const std::string& prefix) { log_prefix_ = prefix; }
@@ -576,6 +589,10 @@ private:
     // applies it to the group decode config; kept here for GUI display.
     v2::ControlFrame::BurstHeaderInfo last_burst_descriptor_{};
     bool have_burst_descriptor_ = false;
+    // §14.27: group_seq of the in-flight burst (from the descriptor frame header
+    // seq), and whether burst-transport RX group-as-unit delivery is enabled.
+    uint16_t last_burst_group_seq_ = 0;
+    bool burst_transport_rx_ = false;
 
     // FEC codec (uses ICodec interface)
     fec::CodecPtr codec_;
@@ -588,6 +605,7 @@ private:
 
     // Callbacks
     FrameDecodedCallback frame_callback_;
+    BurstGroupCallback burst_group_callback_;
     StreamingPingCallback ping_callback_;
     DataSyncAcceptedCallback data_sync_accepted_callback_;
 

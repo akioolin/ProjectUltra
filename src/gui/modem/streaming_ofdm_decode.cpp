@@ -727,6 +727,11 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 }
                                 last_burst_descriptor_ = bi;
                                 have_burst_descriptor_ = true;
+                                // §14.27: the descriptor frame header seq carries
+                                // the burst group_seq (encoder stamps it via
+                                // setBurstGroupSeq). The following group's
+                                // logical frames inherit it for whole-burst ACK.
+                                last_burst_group_seq_ = hdr.seq;
                                 LOG_MODEM(INFO,
                                     "[%s] Burst descriptor RX: group=%u cw/frame=%u bi=%d cldpc=%d",
                                     log_prefix_.c_str(), bi.group_size, bi.cw_per_frame,
