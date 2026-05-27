@@ -1057,3 +1057,41 @@ sync (the real 0/8 cause) is solved end-to-end on the faithful harness. **Remain
 cross-station GUI two-process validation** — run both stations (default on) and
 confirm BRAVO logs `Burst descriptor RX:` → `Burst group complete` → recovered
 frames, with a real file delivering CRC-clean at Good@20 R3/4.
+
+### 14.24 First cross-station GUI validation (2026-05-27) — header RX confirmed + 2 follow-on bugs
+
+Ran the file-only Good@20 path (`good20_baseline_sweep.sh "3" <tag> R3/4 0`, message-count
+0 = no chat, straight to file). Two-process `ultra_gui -sim` via OTASim, descriptor ON by
+default.
+
+**GOAL 1 ACHIEVED — the descriptor is received and interpreted correctly cross-station:**
+```
+[221.959] BRAVO Burst descriptor RX: group=8 cw/frame=8 bi=1 cldpc=1   (== ALPHA's send)
+[224.356] BRAVO Burst interleave marker detected, entering accumulation
+[232.640] BRAVO Burst group complete (8 frames), deinterleaving...
+```
+The header decodes, the declared params match the sender, and it drives accumulation +
+group assembly on the real two-process GUI. The §14.23 profile-restore fix holds here.
+
+**Follow-on bug A — coherent-control-profile ENABLE SKEW (breaks early bursts):**
+ALPHA logs `coherent OFDM control profile ENABLED` at 29.4s; BRAVO not until 61.2s. The
+descriptor rides the control profile, so in that window ALPHA encodes it as coherent QPSK
+control (`OFDM control profile TX: QPSK R1/4`) while BRAVO decodes control-first as DQPSK
+R1/4 → coherent-vs-differential mismatch → the early descriptor (and its burst) fails to
+decode. The first burst at 31.5s failed for exactly this reason; a later burst at ~221s
+(after both sides coherent-enabled) decoded the header fine. Fix axis: synchronize the
+coherent-control-profile enable across stations (tie it to a confirmed handshake state both
+peers agree on), or make the control-first decoder try both profiles during the transition.
+
+**Follow-on bug B — assembled group decodes 0/8 with near-erasure LLRs on the live path:**
+Even the burst whose header decoded (221s) failed the group decode: all 8 CWs FAIL with
+`|llr| mean ~2.0, p50 0.00, p90 ~8` — near-erasure, not the strong LLRs the offline harness
+sees (where the same group decodes 70-80/80). So the DATA group demodulated to garbage on
+the live coherent/warm-sync/real-time path despite correct header + accumulation. This is a
+data-path timing/config issue distinct from the descriptor and from the offline harness;
+needs its own diagnosis (candidate: group-frame slicing/CFO/timing under the live warm-sync
+path, or the R2/3 downgrade interacting with the burst geometry).
+
+Net: the self-describing-burst CONTROL plane is validated cross-station (header RX works);
+the DATA plane on the live GUI path is not yet decoding (bugs A + B). Both are now the
+gating items for an actual file delivery.
