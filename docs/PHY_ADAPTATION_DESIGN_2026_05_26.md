@@ -1022,3 +1022,38 @@ accumulation" design and it also removes the last dependence on the warm light m
 (aligns with §14.19 drop-light-sync). Needs the encoder group-start data-start offset
 (descriptor_end + group-start preamble length) computed precisely + GUI two-process
 validation.
+
+### 14.23 PROPER FIX — descriptor-consume profile restore (2026-05-27)
+
+The §14.21/§14.22 group-start truncation is **fixed**, root cause found with a
+targeted `req.mode`/`full_frame` diagnostic rather than more theorizing:
+
+**Root cause:** decoding the BURST_HEADER descriptor switches the waveform to the
+1-CW **control profile** (control modulation + pilot geometry). Every normal
+control-decode path restores the data profile afterward
+(`if (switched_profile) waveform_->configure(saved_mod, saved_rate)`), but the
+BURST_HEADER intercept `return`ed *before* that restore. So the following
+group-start DATA frame was sized/demodulated with the control-profile pilots →
+`getMinSamplesForCWCount(4)` came back **31104 instead of 32256** (one OFDM symbol
+short) → the group-start demodulated 27 symbols instead of 28 → deinterleave 0/4 on
+every logical frame. (The earlier "feed-cadence / buffer headroom" reads in §14.22
+were wrong; the buffer size differed because the *waveform config* differed.)
+
+**Fix:** restore the data waveform profile in the BURST_HEADER intercept before
+returning. One line, mirrors the existing control path, no magic numbers.
+
+**Proof** (`measure_ack_fer --burst-descriptor 1`, decoder DELIBERATELY mis-set to
+group=2 / interleave-off to simulate the cross-station mismatch that causes the GUI
+0/8):
+- AWGN40: **40/40 frames, 5/5 chunks, 3 seeds** == descriptor-off baseline.
+- Good@20: 70/80, 80/80, 62/80 == descriptor-off baseline (77/74/75); per-seed
+  spread is fade-phase variation (the descriptor adds ~1.4 s ahead of the group).
+- descriptor-OFF path unchanged (AWGN 40/40, Good 77/74/75); non-burst data4_full
+  20/20. No regression.
+
+**Status:** descriptor **enabled by default** in `transmitBurst`
+(`ULTRA_BURST_DESCRIPTOR=0` disables as an escape hatch). The cross-station config
+sync (the real 0/8 cause) is solved end-to-end on the faithful harness. **Remaining:
+cross-station GUI two-process validation** — run both stations (default on) and
+confirm BRAVO logs `Burst descriptor RX:` → `Burst group complete` → recovered
+frames, with a real file delivering CRC-clean at Good@20 R3/4.
