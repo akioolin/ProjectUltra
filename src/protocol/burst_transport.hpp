@@ -51,6 +51,16 @@ public:
     BurstStopAndWaitController() = default;
     explicit BurstStopAndWaitController(Config cfg) : cfg_(cfg) {}
 
+    // Set the group-ACK timeout. One group is a full interleaved burst (~11 s at
+    // QPSK R3/4), so this must cover burst airtime + T/R turnaround + the GROUP_ACK
+    // airtime + decode margin. The protocol layer feeds the same burst-aware value
+    // the SR-ARQ window=8 path computes; too small and the sender resends before
+    // the ACK can land (its listen window collapses) — wasting whole-burst airtime.
+    void setAckTimeoutMs(uint32_t timeout_ms) {
+        if (timeout_ms > 0) cfg_.ack_timeout_ms = timeout_ms;
+    }
+    uint32_t ackTimeoutMs() const { return cfg_.ack_timeout_ms; }
+
     // ----------------------------------------------------------------- sender
     void setTransmitGroup(TransmitGroupFn fn) { tx_group_ = std::move(fn); }
     void setTransferDone(TransferDoneFn fn) { tx_done_ = std::move(fn); }

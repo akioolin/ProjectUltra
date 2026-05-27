@@ -1765,6 +1765,16 @@ bool Connection::startBurstFileTransfer() {
               chunk_payloads.size(), total_payload_bytes, groups.size(), group_size,
               data_frame_cw_count_, codeRateToString(data_code_rate_));
 
+    // Match the group-ACK timeout to the SR-ARQ window=8 burst timeout: one group
+    // IS that 8-frame burst, so the same burst-airtime + turnaround + ACK budget
+    // applies. The hardcoded 14 s default is shorter than a single QPSK R3/4 burst
+    // (~11 s) + turnaround, collapsing the listen window so the sender resends
+    // before the GROUP_ACK can land.
+    burst_transport_.setAckTimeoutMs(arq_.getAckTimeout());
+
+    LOG_MODEM(INFO, "Connection: Burst group-ACK timeout=%ums (from SR-ARQ burst budget)",
+              burst_transport_.ackTimeoutMs());
+
     noteDataTurnPayloadStarted(total_payload_bytes);
     burst_transport_.startTransfer(std::move(groups));
     return true;
