@@ -371,6 +371,40 @@ Connection::Connection(const ConnectionConfig& config)
         return noteTurnRequestOnAckIfNeeded();
     });
 
+    // §14.27 Stage 1: wire the one-way burst stop-and-wait controller callbacks.
+    // INERT until use_burst_transport_ is enabled for the file path (default OFF):
+    // startTransfer() is never called and tick()/onGroupReceived() are gated, so
+    // this changes nothing on the 1210bps SR-ARQ path. Activation + RX hook land in
+    // later steps behind the flag.
+    burst_transport_.setTransmitGroup(
+        [this](uint16_t /*group_seq*/, const BurstStopAndWaitController::Group& frames) {
+            if (on_transmit_burst_) {
+                on_transmit_burst_(frames);  // -> ModemEngine::transmitBurst (re-interleaves)
+            }
+        });
+    burst_transport_.setSendGroupAck([this](uint16_t group_seq) {
+        // One whole-burst ACK — no SACK bitmap, no per-frame selective repeat.
+        transmitFrame(
+            v2::ControlFrame::makeGroupAck(local_call_, remote_call_, group_seq).serialize());
+    });
+    burst_transport_.setGroupDelivered(
+        [this](uint16_t /*group_seq*/, const BurstStopAndWaitController::Group& frames) {
+            // Reassemble: each group frame's payload feeds the file reassembler.
+            // (Payload extraction refined when the RX group hook lands, step 4.)
+            for (const auto& frame : frames) {
+                file_transfer_.processPayload(frame, /*more_data=*/true);
+            }
+        });
+    burst_transport_.setTransferDone([this](bool success) {
+        if (file_transfer_.getState() == FileTransferState::SENDING) {
+            if (success) {
+                file_transfer_.onChunkAcked();
+            } else {
+                file_transfer_.onSendFailed();
+            }
+        }
+    });
+
     arq_.setSendCompleteCallback([this](bool success) {
         if (file_transfer_.getState() == FileTransferState::SENDING) {
             if (success) {
