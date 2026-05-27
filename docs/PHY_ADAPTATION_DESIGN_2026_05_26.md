@@ -313,3 +313,405 @@ not fabricated/hand-rolled; the custom R1/4 hand-roll already cost ~3 dB via 4-c
   multi-week, and the real distance to the leader.
 - "3000" is a file-transfer (latency-tolerant) target; the leader's table is PHY-net (~3230),
   their delivered file speed is lower (~2700–2900) — clarify which we're matching.
+
+## 13. FOLLOW-UP 2026-05-26 (evening) — measured reality + leader architecture blueprint
+
+### 13.1 What the faithful GUI measurements actually showed (this session)
+- **R3/4 Good@20 is seed-dependent / marginal**, NOT reliable: seed1 PASS ~1780, seed3 PASS
+  ~1780, **seed2 FAIL** (40 CWfail, 0 bytes — never delivered the first data frame).
+- **Discriminator (same seed-2, only rate changed):** R2/3 (33% FEC) decodes seed-2's fade with
+  **0 CWfail**; R3/4 (25% FEC) gets 40. ⇒ R3/4's failure is **FEC margin, NOT a broken
+  equalizer/σ²/CSI** (estimator is fine; ruled out empirically). Do NOT chase equalizer tweaks.
+- **R2/3 20-seed reliability:** file delivered **18/20**, full-pass **17/20**, **goodput mean
+  ~963 bps** (clean ~1350, fade-stressed 570–870). The 3 fails = 1 real PHY fade (seed20) +
+  2 PROTOCOL bugs independent of rate: seed14 disconnect-teardown (file actually delivered
+  clean!), seed16 half-duplex turn/ACK stall. So even the reliable rung is ~⅓ of goal AND has
+  rate-independent protocol reliability gaps.
+- **cli_simulator is NOT faithful for fade reliability** (same seed passes cli / fails GUI;
+  CPU-paced protocol timing samples a different fade phase). Use the GUI for ALL fade work.
+- **HARQ soft-combine is architecturally blocked**: it keys the combine by decoding CW0's
+  header (`streaming_ofdm_decode.cpp` buildHarqKey peek), which fails on exactly the deep-fade
+  frames that need combining → fires once, never accumulates. A provisional-key shortcut was
+  already tried and reverted (false combines). Needs a fade-robust frame ID to work.
+
+### 13.2 Leader architecture blueprint (the proven shape of reliable 3000 @ Good@20)
+Public description of the industry-leader OFDM modem: **data blocks of ~196 OFDM symbols
+(~5.2 s)**, each followed by a **small FSK ACK** that commands **speed-up / slow-down / resend**.
+Three structural elements we lack, and why each matters (maps to our failures):
+1. **Multi-second data block (~5.2 s).** At Good 0.1 Hz Doppler, coherence time Tc≈4 s. A 5.2 s
+   block **spans >1 full fade cycle**, so interleaving over the block gives REAL fade diversity
+   (a deep null only nicks each codeword instead of killing a frame). **Our ~1.2–1.8 s frames
+   are SHORTER than the fade** → interleaving them buys ~nothing; the whole short frame sits in
+   one fade (this is exactly why seed2 dies). **CORRECTION to earlier plan: the lever is BLOCK
+   LENGTH (multi-second, >Tc), not "burst-interleave depth-N of short frames."** Bonus: one
+   preamble + one T/R turnaround per 5.2 s amortizes overhead ~4× → on-air approaches raw
+   (most of our 1780-on-air-vs-3250-raw efficiency gap).
+2. **Robust out-of-band FSK ACK.** FSK survives fades that kill OFDM, so the **reverse-link ACK
+   doesn't die** — dissolves our seed-2 reverse-link asymmetry, the OFDM-control fragility, AND
+   the HARQ "can't ID a faded frame" catch-22 (the robust ACK channel carries the frame ID +
+   rate command). This is the right answer to every ACK/control reliability problem we hit.
+3. **Per-block adaptive rate** (speed-up/slow-down via the ACK) — **never grind a fixed thin code
+   into a fade**; back off when it deepens, climb when it clears. seed2 would trigger a
+   slow-down, not a 40-CWfail wipeout. We have only a hint of this (seed7 auto-dropped to R1/2
+   and delivered); it must become the core loop driven by the robust feedback channel.
+
+### 13.3 Revised path to 3000 (structural, multi-day → multi-week; de-risked by the blueprint)
+Reliable 3000 @ Good@20 = **long interleaved block + robust (FSK/heavily-coded) ACK channel +
+per-block adaptive rate**, working together. NOT a code-rate tweak. Ordered follow-up steps:
+- **Step 1 (most leverage, attacks seed-2 directly):** grow the data block to MULTI-SECOND with
+  interleave spanning the whole block (long-LDPC n=1944+ AND/OR multi-frame block + deep
+  cross-block interleaver sized to >Tc). Gate: does seed-2 go FAIL→deliver on the faithful GUI?
+- **Step 2:** robust out-of-band ACK/feedback channel (FSK or heavily-coded narrowband) carrying
+  ack + frame-ID + rate command — fixes ACK fragility and unblocks HARQ-combine.
+- **Step 3:** per-block closed-loop rate adaptation driven by Step 2's feedback.
+- **Step 4:** efficiency (preamble/turnaround amortized by the long block) to convert on-air→3000.
+- **Parallel, cheap, rate-independent:** fix the two protocol reliability bugs found this session
+  — seed14 disconnect/teardown (file delivered but ALPHA never saw disconnect) and seed16
+  half-duplex message turn/ACK stall. These cost ~2/20 reliability at ANY rate.
+
+### 13.4 Banked this session (branch feat/good-fading-qam16-ladder-2026-05-24, NOT pushed)
+- Burst-marker keystone FIXED (commits fc4bbf2 connect-deadlock + 469b60b light-LTS marker);
+  phyDiagLine per-line flush. Equalizer ruled OUT as the seed-2 cause. R3/4-marginality,
+  R2/3 20-seed stats, HARQ catch-22, and this blueprint recorded in memory
+  `project_burst_keystone_broken_on_real_path` and `project_cli_not_faithful_for_fade_reliability`.
+
+---
+
+## 14. ARCHITECTURE DECISION 2026-05-26/27 — two-channel, one-way, sender-driven session
+
+This section supersedes the framing of §6/§13 where it conflicts. It is the agreed
+architecture after working through the *whole exchange cycle* (not just the file PHY). The
+modem is redesigned at the **session/ARQ/orchestration layer only** — every PHY block
+(MC-DPSK modem, OFDM modem, LDPC codec incl. n=1944, burst interleaver, chirp/LTS sync, CFO,
+equalizer) is **reused**, and the MC-DPSK↔OFDM switch already exists (the handshake does it).
+It is NOT a PHY rewrite. The ~25% being rebuilt is the connected-data engine, which today is
+"negotiate→OFDM→selective-repeat window=8→DATA frames."
+
+### 14.1 The two channels (TDD, role-fixed for a session)
+- **Forward = OFDM bulk traffic.** Long interleaved data blocks, sender→receiver only.
+- **Reverse = coordination channel only.** Robust, narrow, lean. Carries block-ACK/NACK,
+  resend requests, per-block rate commands (speed-up/slow-down), and CANCEL. **It NEVER carries
+  bulk data.** Because of the one-way rule (14.2) the reverse link can stay the lean robust
+  waveform for the entire session — it never has to switch to an OFDM bulk block.
+
+The handshake is already MC-DPSK, and with chat dropped (14.3) there is nothing between CONNECT
+and the file, so the link **stays MC-DPSK from PING until the file-mode MODE_CHANGE**, switches
+to OFDM-bulk for the forward link only, and the reverse stays MC-DPSK/FSK throughout.
+
+### 14.2 One-way, sender-driven session (user-specified, 2026-05-27) — the big simplifier
+A session is **strictly unidirectional bulk transfer.** Alpha holds the floor and sends to
+Bravo until one of three terminal states: **completion** (DATA_END acked), **cancellation**
+(either side), or **HF link dead** (sender loses N consecutive block-ACKs → declares dead).
+**There is no mid-session role swap and no bidirectional bulk transfer.** If Bravo wants to
+send, it waits until **both stations are idle**, then initiates its *own* one-way session the
+same way Alpha did (symmetric at the session level, one-way within a session).
+
+Why this is the keystone simplification (designs out bug classes, not patches them):
+- **Kills the bidirectional-data contention class entirely** — the seed16 half-duplex turn/ACK
+  stall (#145) was a *bidirectional chat collision*. With one floor owner and the receiver only
+  ever ACKing, that ambiguity cannot exist. The hardest part of the control-plane hardening is
+  removed by construction.
+- **Reverse channel is permanently coordination-only** — never needs to carry/serve an OFDM
+  block, so it stays a fixed lean robust signaling channel for the whole session.
+- **Floor ownership is explicit and trivial within a session** — strictly alternating
+  sender-block / receiver-ACK, one originator.
+
+Floor acquisition between sessions = carrier-sense idle → initiate (the same cold handshake).
+Contention (both grab at once) resolves by a **deterministic tiebreaker** (initiator/callsign
+priority or asymmetric backoff) so no symmetric livelock can persist. Both stations converge to
+idle on a **timeout** when the link dies, so a dead link never leaves a station hung (this also
+covers the seed14 teardown bug: bounded DISCONNECT retransmit + unilateral teardown after N
+tries → return to idle).
+
+### 14.3 Chat dropped for now (scope cut, deliberate)
+Interactive chat is **not supported in the redesign initially.** Chat is what introduced the
+bidirectional turn-taking complexity and the OFDM-control-path deadlocks. A pure
+handshake→one-way-file→teardown link has none of it. Chat can return later as a degenerate
+one-way session (a 1-block transfer) once the spine is proven.
+
+### 14.4 The exchange cycle (session state machine)
+```
+IDLE ──carrier-sense clear + traffic to send──▶ ACQUIRE FLOOR (tiebreaker on collision)
+ACQUIRE ──▶ COLD HANDSHAKE (MC-DPSK, full chirp): CONNECT carries proposed file-mode params
+            (rate, block length, interleave depth); CONNECT_ACK confirms/counters.
+            [MODE_CHANGE folded into CONNECT_ACK; PING/PONG sounding folded into CONNECT]
+HANDSHAKE ──▶ TRANSFER LOOP (forward OFDM bulk / reverse MC-DPSK coordination):
+   repeat:
+     SENDER:   TX one long interleaved OFDM block  ──▶ T/R turnaround ──▶ RX
+     RECEIVER: (buffer+decode block) TX coalesced block-ACK/NACK + rate command (warm MC-DPSK/FSK)
+     SENDER:   apply rate command; resend NACKed blocks (HARQ soft-combine); advance
+   until  DATA_END-acked (completion) | CANCEL (either side) | N missed ACKs (link dead)
+TRANSFER ──▶ TEARDOWN: bounded DISCONNECT retransmit + unilateral teardown after N ──▶ IDLE
+```
+
+### 14.5 Coordination-channel design (cold vs warm — the right split)
+The reverse/coordination channel has **two jobs with opposite needs**; do not force one
+waveform to do both:
+- **Cold acquire (handshake, once/session):** no prior timing/freq lock → must search time +
+  estimate CFO from scratch. A **chirp is the correct primitive** (sharp time localization +
+  CFO in one shot). **MC-DPSK full-chirp is right here — keep it.** Robustness > speed for a
+  once-per-session cost.
+- **Warm ACK (every block, frequent):** timing + CFO already known from the just-received block
+  → a full chirp is pure waste. Want a **short warm-synced burst** found in a narrow predicted
+  window, **coalesced** (one cumulative block-ACK per block → minimize turnarounds, the
+  half-duplex efficiency lever).
+
+**THE N=648 TRAP (do NOT "make the control frame send fewer bytes"):** a control frame is
+already 1 codeword and **LDPC N=648 is fixed at every rate** — the codeword is the same airtime
+whether filled with 20 bytes or 2. Shrinking payload buys **zero** airtime. The real levers are
+**(a) fewer handshake round-trips** (fold MODE_CHANGE into CONNECT_ACK, fold PING sounding into
+CONNECT → 3 round-trips → ~2, ~halves cold-handshake airtime) and **(b) warm + coalesced ACK**
+(attacks preamble + turnaround count). Bytes are not a lever; preamble and turnaround count are.
+
+**Warm-ACK waveform — decide with data, not up front:**
+- *Ideal endgame:* a tiny **non-coherent FSK** burst — the most robust way to send a few bits
+  with no channel estimate, tolerant of CFO/timing slop, Goertzel-detectable in a known window
+  (~4 dB worse than coherent, worth it at the floor). This is the leader's small-FSK-ACK and the
+  right answer to every ACK/control-fragility problem we hit. BUT MFSK is "reserved only" today →
+  new work (this is task #144).
+- *Pragmatic interim (CORRECTED 2026-05-27 after code audit):* **full-chirp MC-DPSK ACK,
+  coalesced** (one cumulative block-ACK per block). This is the TRUE zero-new-work interim — it
+  exists today. ⚠️ MC-DPSK has **NO** warm/short/light-preamble path (verified
+  `mc_dpsk_waveform.cpp:98-102` — always full dual-chirp; only OFDM has a short data preamble).
+  So "warm-MC-DPSK" is NOT free; warm-MC-DPSK AND FSK are BOTH new PHY work. Ship full-chirp
+  coalesced first (~1 s/ACK, ~17% overhead at a ~5 s block), measure whether ACK overhead is
+  actually limiting, and only then build warm-MC-DPSK or FSK (#144). Do not block on this choice.
+
+### 14.6 CORRECTION — diversity axis is channel-specific (frequency for Good, time for Moderate/Poor)
+A key error in §6/§13 to fix: "long time-interleaved block" is the diversity lever for
+**Moderate/Poor**, NOT for **Good**. Coherence time Tc≈0.42/f_D:
+
+| Channel | Doppler | Tc | Delay τ | Bc≈1/(2πτ) | indep. freq bins / 2.8 kHz |
+|---------|---------|-----|---------|------------|-----------------------------|
+| Good | 0.1 Hz | **~4 s** | 0.5 ms | ~318 Hz | **~9** |
+| Moderate | 0.5 Hz | ~0.85 s | 1.0 ms | ~159 Hz | ~17 |
+| Poor | 1.0 Hz | ~0.42 s | 2.0 ms | ~80 Hz | ~35 |
+
+- **Time diversity** ≈ `block_duration / Tc`. At **Good** (slow fade) you'd need an
+  **8–12 s block** (2–3× Tc) for real time diversity — which **violates PA duty cycle** and
+  goes **stale-CSI** across the block. So time interleaving has **diminishing returns at Good**.
+  *This is exactly why the measurement said "burst doesn't help at Good@20" — physics, not a bug.*
+- **Frequency diversity** is available NOW at Good: ~9 independent bins across the band, every
+  symbol, **no duty-cycle cost**. The right Good@20 diversity tool is **frequency interleaving
+  across carriers** (a frequency-selective null nicks each codeword instead of killing a frame)
+  + FEC margin + rate adaptation. **NOT the time/burst interleaver.**
+- **Moderate/Poor** decorrelate fast (Tc ≤ ~0.85 s), so a multi-second block spans several Tc →
+  **time/burst interleaving is the right tool there**, and the block is sized for the *slowest*
+  fade you support (a Good-sized block over-serves Moderate diversity automatically).
+
+⇒ The depth-sweep harness must sweep **both axes**: carrier-spread (frequency) at Good, and
+block-length (time) at Moderate — size each diversity tool against the channel where it works.
+For the **Good@20 3000 target specifically**, the multi-second block's payoff is mostly
+**EFFICIENCY** (one preamble + one turnaround per ~5 s amortizes overhead ~4×, closing the
+on-air↔raw gap) + **frequency interleave** for diversity + **rate adaptation** to avoid grinding
+a thin code into a deep null — NOT time interleaving.
+
+### 14.7 How long-LDPC + burst interleaver fit under this architecture
+- **Long LDPC (n=1944+, Step B):** serves the bulk-file class. At Good its value is coding gain
+  + efficiency (longer codeword amortizes overhead) more than time diversity; at Moderate/Poor a
+  long codeword spread over the multi-second block IS the time-diversity vehicle. Source matrices
+  from the IEEE standard, never hand-roll (the R1/4 hand-roll cost ~3 dB via 4-cycles).
+- **Burst interleaver (existing):** it is a **time-diversity** tool → its home is
+  **Moderate/Poor / fragile rungs**, not Good@20 (confirmed by measurement *and* by 14.6).
+  Keystone fixes (connect-deadlock fc4bbf2, light-LTS marker 469b60b) are done; it is ready for
+  the Moderate/Poor file class. Per §11c/§11d its ARQ/transport coupling (all-or-nothing group
+  stall) must be fixed before re-enabling: decode per-codeword as bits arrive, align retransmit
+  unit to the group, HARQ soft-combine partial groups, size group = one TX burst.
+- **Frequency interleaver (carrier-domain):** NEW emphasis from 14.6 — this is the **Good@20**
+  diversity tool and may be the cheaper win for the stated target than the time block.
+
+### 14.8 Master build order (incremental, parallel-path, GUI-gated — never a dead modem)
+Build the new engine **alongside** the working one; prove each step on the GUI faithful clock;
+do not remove the SR-window-8 engine until the new path beats it.
+
+0. **Tc-aware diversity depth-sweep harness** (offline, deterministic, cheap) — sweep
+   carrier-spread@Good and block-length@Moderate to find the REAL "long" before building the
+   engine around a guess. *Highest information per effort; do first.*
+1. **One-way session state machine + floor acquisition** (14.2/14.4): roles, terminal states,
+   carrier-sense + tiebreaker, timeout→idle convergence, bounded teardown. Arm the file-mode
+   transition **lock-free** (cached snapshot — the fc4bbf2 deadlock lesson), never a re-entrant
+   mutex call. Designs out seed16; fixes seed14. cli is fine for this (transport mechanics).
+2. **Lean handshake**: fold MODE_CHANGE→CONNECT_ACK, PING sounding→CONNECT (round-trip cut).
+3. **Forward OFDM bulk block** (single long interleaved block) + **reverse coalesced warm ACK**
+   (warm-MC-DPSK interim). Verify **per-turnaround MC-DPSK↔OFDM re-sync** early — RX dual-listen
+   exists but per-turnaround switching under load is untested.
+4. **Multi-block transfer + block-ARQ + HARQ** on the GUI faithful clock. **Gate: seed-2
+   FAIL→deliver** (the discriminator). Apply the right diversity axis per channel (14.6).
+5. **Per-block adaptive rate** driven by the reverse rate command (never grind a thin code into a
+   fade; seed-2 should slow-down, not wipe out).
+6. **Efficiency** (amortized preamble/turnaround from the long block; adaptive ack cadence) to
+   convert on-air→3000.
+7. **(Later) FSK reverse channel** (#144) if warm-MC-DPSK ACK overhead proves limiting.
+8. **(Later) long LDPC n=1944** (Steps A/B) as coding-gain/efficiency refinement; **(later)
+   chat** as a degenerate 1-block session.
+
+Each step: GUI multi-seed (≥5) + whole-matrix (Good/Moderate/AWGN, no regression) + faithful
+clock + honest end-to-end goodput; Codex independent review of PHY/FEC diffs; revert losers.
+
+### 14.9 Bug classes this architecture eliminates by construction (not by patch)
+- Bidirectional data contention / turn-stall (seed16) — one floor owner, receiver only ACKs.
+- Reverse channel switching to fragile OFDM control — reverse is coordination-only, always lean.
+- File-regime activation re-entrant deadlock — single deliberate lock-free MODE_CHANGE boundary.
+- Hung station on dead link — timeout→idle convergence + bounded unilateral teardown (seed14).
+
+### 14.10 Honest ceiling (restated)
+This architecture delivers **reliable one-way file transfer** at Good@20 (the diversity block +
+rate adaptation make the high rung survivable — the thing that's been failing). That is the real
+milestone. **3000** then depends on block-length + R3/4 + dead-air *adding up*; the architecture
+*enables* it but does not guarantee it. Ship reliable-transfer first; 3000 falls out (or doesn't)
+from the efficiency/rate math on top. Multi-day → multi-week, built incrementally, never holding
+a dead modem.
+
+### 14.11 Prerequisite audit (2026-05-27, verified against code — what exists vs what to build)
+Before building, an Explore pass verified each capability §14 leans on. Result: the plan is
+directionally complete but **not build-ready as written** — 2 foundational pieces are missing, 1
+needs wiring, 1 needs verification. Two assumptions were wrong and are corrected here.
+
+| # | Capability | Verdict | Where | Action |
+|---|------------|---------|-------|--------|
+| 1 | **Long OFDM block as a TX unit** | 🔴 **DOES NOT EXIST** | OFDM TX hardcoded 4-CW (`frame_v2.hpp:932`); burst path *groups* separate 4-CW frames, doesn't merge | **Foundational build.** Default approach: use the **burst-group AS the block** (reuse `encodeBurstLight` `streaming_encoder.cpp:426` + keystone-fixed marker path) and fix its all-or-nothing transport (§11d), rather than rewriting the 4-CW frame core. |
+| 2 | **Warm/short MC-DPSK ACK** | 🔴 **DOES NOT EXIST** | `mc_dpsk_waveform.cpp:98-102` always full dual-chirp; only OFDM has a short data preamble | **Corrected:** interim ACK = **full-chirp coalesced** (exists today, ~1 s, ~17% at 5 s block). warm-MC-DPSK and FSK are BOTH new work → later (#144). |
+| 3 | **Production carrier-sense** | 🟡 **NOT IN MODEM** (exists one layer up) | `ModemEngine` has no busy-check (`modem_carrier_sense.cpp` is turnaround *timing* only); real detector is `AudioPort::isChannelIdleFor` / `ChannelBusyDetector` | **Wire**, don't build: Step-1 floor acquisition calls the AudioPort idle check. |
+| 4 | **n=1944 long LDPC** | 🟡 **PARTIAL / unverified** | No IEEE n=1944 tables — code *lifts* n=648 base with Z=81 (`ldpc_802_11n.hpp:160-164`); girth-≥6 argued, not BER-proven; R1/4 is the known hand-rolled weak matrix | **Verify** with a BER curve before trusting at R3/4 (Step 8, deferred). |
+| 5 | **Fade-faithful offline FER harness** | ✅ **EXISTS** | `tools/measure_ack_fer.cpp` runs frames through Watterson, no protocol | Step-0 tool ready. *Being protocol-free, it sidesteps the cli fade-unfaithfulness cause (CPU-paced protocol timing).* Needs extending to emit a long block (loops to #1). |
+| 6 | **Frequency (carrier) interleaver** | ✅ **EXISTS** (fixed) | `carrier_ldpc_interleaver.cpp` spreads one codeword's bits across carriers; 307-multiplier **fixed**, opt-in | Step-0 freq axis = **ON/OFF A/B**, not a depth sweep. The Good@20 diversity tool. |
+
+**HARQ catch-22 RESOLVED by the one-way model (was §13.1 blocker):** HARQ no longer needs to
+decode a faded frame's CW0 header to key the combine — in the one-way sender-driven model the
+**sender assigns block sequence numbers** and the receiver requests "resend block N" over the
+coordination channel, so block identity is **positional/signaled, not decoded from the faded
+payload**. Retransmissions of block N soft-combine by signaled ID. This removes a blocker the
+plan was carrying into Step 4. (Requires the reverse coordination channel to carry block IDs —
+which it does by design.)
+
+### 14.12 BUILD-READY step map (file entry points, no open decisions)
+Each step: branch-only, full-ctest-gated, GUI multi-seed where it touches fade, Codex review of
+PHY/FEC diffs, revert losers. Default decisions are baked in below so building can start now.
+
+- **Step 0 — Tc-aware diversity sweep** (#146). Extend `tools/measure_ack_fer.cpp` to (a) emit a
+  multi-frame burst-group block (the §14.11-#1 long-block path), (b) toggle
+  `carrier_ldpc_interleaver` ON/OFF. Sweep QPSK R3/4 over Watterson: **Good** = freq-interleaver
+  ON/OFF A/B (the ~9-bin diversity claim); **Moderate** = block-length sweep (1×→3× Tc). Output:
+  where each diversity axis actually buys FER margin. *Pure offline, deterministic, cheap. START HERE.*
+- **Step 1 — one-way session SM + floor acquisition** (#147). New session state machine
+  (roles, terminal states completion/cancel/link-dead, timeout→idle, bounded teardown) in the
+  protocol layer. Wire floor acquisition to `AudioPort::isChannelIdleFor` (§14.11-#3) + a
+  deterministic tiebreaker. Arm the file-mode MODE_CHANGE **lock-free** via the cached-snapshot
+  pattern already in `tools/sim/simulated_station.hpp` (`file_profile_active_cached_` — the
+  fc4bbf2 deadlock fix). Designs out seed16; fixes seed14. cli OK (transport mechanics).
+- **Step 2 — lean handshake.** Fold MODE_CHANGE into CONNECT_ACK and PING-sounding into CONNECT
+  in `frame_v2.*` + protocol engine (round-trip cut; pre-deployment wire formats are free).
+- **Step 3 — forward block + reverse ACK.** Forward = burst-group-as-block (`encodeBurstLight`,
+  marker path fc4bbf2/469b60b). Reverse = **full-chirp MC-DPSK coalesced block-ACK** (exists).
+  Verify the **per-turnaround MC-DPSK↔OFDM re-sync** early (RX dual-listen exists; per-turnaround
+  switching under load untested).
+- **Step 4 — multi-block + block-ARQ + HARQ.** Positional/signaled block ID keys HARQ (§14.11
+  resolution); fix burst all-or-nothing transport (decode-per-CW-as-arrives, align retransmit to
+  group, soft-combine partials, §11d); frequency interleaver ON for Good diversity. **GATE:
+  seed-2 FAIL→deliver on the faithful GUI.**
+- **Step 5 — per-block adaptive rate** driven by the reverse rate command (reuse adaptive-downgrade
+  machinery; never grind a thin code into a fade — seed-2 slows down, not wipes out).
+- **Step 6 — efficiency** (amortized preamble/turnaround from the long block; adaptive ack cadence).
+- **Later — Step 7 FSK reverse channel** (#144, new waveform; MFSK is reserved-only today);
+  **Step 8 long LDPC n=1944** (BER-verify the Z=81 lift first, §14.11-#4); **chat as 1-block session.**
+
+**Critical-path build order:** Step 0 (harness, also delivers the long-block emitter prototype) →
+Step 1 (session SM, the hardening win) → Step 3/4 (the block + the seed-2 gate). Steps 2/5/6 and
+the "later" items stack after the gate is green.
+
+### 14.13 STEP 0 RESULTS (2026-05-27, branch feat/oneway-arch-2026-05-27) — harness validated + first finding REDIRECTS §14.6
+
+Extended `tools/measure_ack_fer.cpp` (branch-only): added `--channel good|moderate|poor`,
+`--mod`, `--rate`, `--carrier-interleave`, and a `data4_full` config (4-CW DATA frame, full
+chirp preamble admitted as an anchor on the CONNECTED decoder so sync succeeds at *any* fade
+depth — isolating decode-diversity from light-sync acquisition). In-process `SimulatedChannel`,
+no OTASim transport → not subject to the cli clock-drift fade-distortion.
+
+**HARNESS VALIDATED.** With sync isolated (sync_fail=0), it reproduces the GUI-known direction
+on Good@20 (in-band 20 dB), n=150, coherent QPSK:
+- R2/3: 7/150 = **4.7% decode FER**
+- R3/4: 23/150 = **15.3% decode FER** (~3.3× worse)
+AWGN@25 is 0% for both rates (failures are fade-driven, not a harness artifact). → fast,
+deterministic, faithful PHY fade-diversity ground. Cold light-preamble runs are sync-dominated
+(~45% sync_fail) and selection-biased — do NOT use the light path for decode-diversity.
+
+**FINDING 1 — frequency interleaving is NOT the Good@20 R3/4 lever (REDIRECTS §14.6).**
+Carrier-LDPC interleaver OFF vs ON, R3/4 Good@20, 3 seeds: 23↔22, 27↔28, 34↔35 — **within noise,
+zero benefit.** Verified the toggle is genuinely applied (not a no-op): `carrierLdpcPlumbingEligible`
+true (OFDM_CHIRP, 59 carriers == CARRIER_LDPC_MASK_CARRIERS, fft 1024), 4 CW ∈ [2,8] supported,
+`carrier_ldpc_interleaver_enabled_` set, decoder `connected_`=true → `applyCarrierLdpcForward/Inverse`
+run on both ends. So §14.6's claim that "frequency interleaving is the Good@20 diversity tool" is
+**not supported by measurement.**
+
+Most likely why (hypothesis, untested): a 4-CW frame's bits are ALREADY spread across all 59
+carriers by the natural bit→carrier mapping, so each codeword already samples the ~9 independent
+freq bins — the 307-permutation just reshuffles an already-spread set. If so, frequency diversity
+is *already exhausted* and R3/4 still fails ~15% → the residual failures are NOT
+frequency-selective-null losses (flat/slow Doppler amplitude fades + thin 25% FEC margin), which
+neither freq nor (practical) time interleaving fixes.
+
+**Architectural consequence:** at Good@20, R3/4 is **FEC-margin-limited**, matching the GUI
+discriminator (R2/3 clean / R3/4 fragile). The realistic 3000 levers are therefore **R2/3-class
+reliability (proven) + per-block rate adaptation (opportunistic R3/4 only when momentarily clean)
++ EFFICIENCY** — NOT interleaving diversity. The long interleaved block stays valuable for
+**Moderate/Poor** (time axis, untested here) and for **efficiency** (preamble/turnaround
+amortization), but it is not the mechanism that makes R3/4 reliable on Good.
+
+**Step 0 still-open (cheap, same harness):** (a) does LONGER LDPC (n=1944 coding gain) cut R3/4
+Good@20 FER — the distinct §14.7 lever, not yet wired into the harness; (b) Moderate time-block
+axis; (c) confirm the "codeword already spans carriers" hypothesis. Item (a) is the highest-value
+next measurement: it tests whether ~0.5–1.5 dB coding gain meaningfully helps the margin-limited
+rung before any engine is built.
+
+### 14.14 STEP 0 FINDING 2 — the CROSS-FRAME (burst) interleaver DOES rescue R3/4 on Good (REVERSES Finding 1's pessimism)
+
+Per user redirect: the keystone test is **chunk recoverability**, not single-frame FER — send a
+chunk of N file frames as one burst (full chirp anchor + N-1 light, via `encodeBurstLight`), deep
+**cross-frame** interleave ON vs OFF, through Good fade, measure how many frames recover. Added
+`burst_chunk` config + `--group`/`--burst-interleave` to the harness (branch-only). Fresh
+encoder+decoder per chunk (full anchor → reliable sync), persistent channel (fade advances).
+
+**RESULT — R3/4 Good@20, coherent QPSK, deep cross-frame interleave OFF vs ON:**
+
+| group (chunk) | ~dur | OFF recovery | ON recovery | note |
+|---------------|------|--------------|-------------|------|
+| 2 | ~1.5 s | 50% | **0% — BROKEN** (all 40 chunks `chunk_sync_fail`) | min-clamp interleave bug, NOT data |
+| 4 | ~3 s | 38% | **89%** | clean (sync_fail 0) |
+| 8 | ~6 s | 34% | **92%** (3 seeds: 92/91/92%, chunks-complete ~88%) | clean |
+
+Reference: isolated full-preamble single frame (`data4_full`) = **85%** recovery (15% FER).
+
+**Reading (honest, three numbers):** the interleaved chunk delivers **~92% frame recovery** on
+R3/4 Good@20. Compared to a *non-interleaved chunk* (same framing) it's 33%→92% — huge; compared
+to *isolated full-preamble frames* (85%) it's a modest +7 pts. So the interleave does two things:
+(1) compensates for the light-preamble fragility of in-chunk frames, and (2) adds genuine
+cross-frame fade diversity over isolated frames. Either way the **deliverable number is ~92%**,
+which makes R3/4 a *usable* rung on Good with ARQ resending the ~8% — **reopening R3/4 as the
+Good@20 path**, reversing §14.13's "FEC-margin-limited, R2/3-only" conclusion.
+
+**Why this does NOT contradict Finding 1 (frequency interleave = no help):** within-frame
+frequency spreading can't help (one frame = one fade epoch). **Cross-frame** spreading puts each
+codeword across multiple frames' independent-ish fade states — that's the diversity that works.
+Different axis, opposite result, both correct.
+
+**Why this does NOT contradict the prior "burst doesn't help Good@20" memo:** that cli run had
+`full_groups=0` — the interleaver never engaged (ARQ batched 7 then 4 < group 8). It was a
+non-test. This harness *forces* a full group every chunk, so it actually engages.
+
+**Caveats before this is load-bearing (NOT yet GUI-confirmed):**
+- **group=2 + interleave ON is BROKEN** (0% recovery, 100% sync-fail) — a real min-clamp bug to
+  investigate; it makes group=2 unusable as the "<Tc baseline," so the scaling evidence is only
+  group 4 vs 8 (89%→92%, weakly positive). Diversity is mostly "combine a few frame-fades per
+  codeword," not a clean Tc-span law (group=4 ≈ 3 s < Tc≈4 s already gives 89%).
+- OFF baseline (33%) is degraded by light-frame fragility, so the 33%→92% headline overstates the
+  *pure-diversity* gain (which is the 85%→92% figure). Both are real; cite the right one for the
+  claim.
+- Offline isolated-chunk harness; the GUI faithful-clock end-to-end (with ARQ, turnaround,
+  warm-state continuity) is the final gate — still pending.
+
+**Architectural consequence:** the long **cross-frame-interleaved chunk IS the Good@20 R3/4
+lever** — the file-class composite's core premise is validated in the offline harness. This
+restores §6/§14.7 (deep interleave keystone) for Good, with the refinement that the working
+mechanism is cross-frame (not within-frame frequency, Finding 1) and that ~3–6 s chunks already
+capture most of it. Next: multi-seed group=4, fix/understand the group=2 bug, the Moderate axis,
+then the GUI cross-check.
