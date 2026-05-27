@@ -354,12 +354,19 @@ if [[ -z "$GRPC" ]]; then
   exit 1
 fi
 
+# File-only mode (message-count 0): omit chat entirely — the station is a one-way
+# FILE SENDER (design §14). Only pass auto-message args when messages are requested.
+MSG_ARGS_BRAVO=()
+MSG_ARGS_ALPHA=()
+if [[ "$MSG_COUNT" -gt 0 ]]; then
+  MSG_ARGS_BRAVO=(--auto-send-message "BRAVO QAM16 ladder" --auto-message-count "$MSG_COUNT" --auto-message-interval "$MSG_INTERVAL")
+  MSG_ARGS_ALPHA=(--auto-send-message "ALPHA QAM16 ladder" --auto-message-count "$MSG_COUNT" --auto-message-interval "$MSG_INTERVAL")
+fi
+
 ULTRA_E2E_DEBUG_LOG="$E2E_BRAVO_LOG" "$ROOT/build/ultra_gui" -sim --ota-host "$GRPC" --token bravo_tok --station-id BRAVO \
   --session-id lobby \
   --auto-accept \
-  --auto-send-message "BRAVO QAM16 ladder" \
-  --auto-message-count "$MSG_COUNT" \
-  --auto-message-interval "$MSG_INTERVAL" \
+  ${MSG_ARGS_BRAVO[@]+"${MSG_ARGS_BRAVO[@]}"} \
   --exit-after "$EXIT_AFTER" \
   --log-level debug --log-category all --log-file "$BRAVO_LOG" >/dev/null 2>&1 &
 BRAVO_PID=$!
@@ -368,9 +375,7 @@ ULTRA_E2E_DEBUG_LOG="$E2E_ALPHA_LOG" "$ROOT/build/ultra_gui" -sim --ota-host "$G
   --session-id lobby \
   --auto-connect BRAVO \
   --connect-delay "$CONNECT_DELAY" \
-  --auto-send-message "ALPHA QAM16 ladder" \
-  --auto-message-count "$MSG_COUNT" \
-  --auto-message-interval "$MSG_INTERVAL" \
+  ${MSG_ARGS_ALPHA[@]+"${MSG_ARGS_ALPHA[@]}"} \
   --auto-send-file "$PAYLOAD" \
   --auto-disconnect-after "$DISCONNECT_AFTER" \
   --exit-after "$EXIT_AFTER" \

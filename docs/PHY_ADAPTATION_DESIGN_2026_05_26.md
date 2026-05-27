@@ -874,3 +874,57 @@ verify `crc32` → write as `name`.
 
 On-air: `burst0 = [preamble][DESC START][{FileStreamHeader}{payload…}]`; `burstK =
 [preamble][DESC][{payload…}]`; RX stops when bytes == payload_size → decompress → crc32 → write.
+
+### 14.19 DROP LIGHT SYNC — one full anchor per burst (decision 2026-05-27)
+
+**Decision (user): the new burst model does NOT need light/warm sync. Each burst self-syncs with
+ONE full chirp+LTS anchor.** Light sync existed to avoid re-sending the chirp on every short frame
+in the old fast-frame protocol (reusing warm timing state frame-to-frame). In the new model frames
+are batched into 6–8 s bursts and a full anchor is ~0.4 s → ~5–7% per burst, amortized and ROBUST.
+Light sync's saving is tiny on a long burst while its cost is fragility (the documented 100%
+cold-light FER, warm-state staleness, cross-burst timing dependence). Trade the fragile ~5% for
+robustness + simplicity.
+
+**Clean burst structure (one anchor, descriptor + group under it):**
+```
+[ full chirp+LTS anchor ][ BURST_HEADER (1-CW, non-interleaved) ][ interleaved data group ]
+```
+RX syncs on the anchor → control-first peek decodes the descriptor → applies its declared config →
+decodes the group. One anchor kills the double-anchor waste AND the RX-skip bug (a *light*
+descriptor before the burst got skipped because the RX waits for a full anchor — proven in the
+GUI log: ALPHA emitted the descriptor 2×, BRAVO decoded it 0×, syncing on the burst's full anchor
+instead). So the descriptor moves INSIDE the burst keyup, right after the anchor.
+
+**SEPARATE WORKSTREAM (after the burst path works): faster sync + faster ACK.** Once robust
+full-anchor bursts deliver, optimize: a leaner re-sync (cheaper than a full chirp) and a tiny
+FSK/short ACK (#144). These are efficiency layers, deliberately deferred so we get the robust
+burst working first.
+
+### 14.20 CLEANUP MAP — what to THROW vs KEEP for the one-way burst file modem
+
+**THROW (old tech, remove during cleanup — replaced by the new burst path):**
+- **Light/warm sync** machinery: light-preamble data path, warm-timing prediction,
+  `expectFullOFDMAnchorOnce` dance, `seedExpectedFrameArrivalAfterSamples`, continuation-reanchor.
+  Replaced by full-anchor-per-burst (§14.19).
+- **ISS/IRS turn-taking**: `TURNOVER` (0x22), `TURN_REQUEST` (0x23),
+  `local_data_turn_`/`peer_data_turn_requested_`/turn-ownership/`noteTurnRequestOnAckIfNeeded`.
+  One-way: ALPHA sends, BRAVO listens + ACKs.
+- **Selective-repeat ARQ** for the file path: SACK bitmaps, fast-hole repair, ack-repeat jobs,
+  windowing, `sack_delay`, the whole `selective_repeat_arq` complexity. Replaced by group
+  stop-and-wait (`BurstStopAndWaitController`).
+- **Chat / interactive**: GUI chat compose (done), `protocol_.sendMessage`, fragment-message
+  machinery, auto-message scenario paths.
+- **Adaptive mid-session rate churn** + the over-engineered rate picker (selectOFDMCodeRate →
+  capInitialOFDMRate → adaptive 3-pass) — simplify to one table AFTER 3000 (separate workstream).
+
+**KEEP (reused substrate — the genuinely valuable, hard-won parts):**
+- **PHY**: OFDM mod/demod, LDPC codec (incl. n=1944 lift), full chirp+LTS sync + CFO flow,
+  channel estimation / MMSE equalizer, the burst (cross-frame) interleaver, carrier-LDPC.
+- **MC-DPSK handshake** (PING/PONG/CONNECT/CONNECT_ACK) — but leaned (fold MODE_CHANGE in; already
+  lean). Robust low-SNR coordination.
+- **The full chirp anchor** — now used per-burst.
+- **New pieces (this session)**: `BurstStopAndWaitController`, `BURST_HEADER` descriptor,
+  `FileStreamHeader`, R3/4 promotion gate, OTASim + the GUI faithful-clock test path.
+
+**SEPARATE WORKSTREAMS (deferred, after the burst path delivers):** faster sync (lean re-anchor),
+faster ACK (#144 tiny FSK), n=1944 long LDPC coding gain, adaptive pilots, rate-picker simplify.

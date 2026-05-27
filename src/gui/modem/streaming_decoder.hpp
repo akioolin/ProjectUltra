@@ -249,6 +249,12 @@ public:
     void setBurstInterleaveGroupSize(int size);
     int getBurstInterleaveGroupSize() const { return burst_group_size_; }
 
+    // Last received burst descriptor (§14.17), for GUI display of the burst type.
+    bool hasBurstDescriptor() const { return have_burst_descriptor_; }
+    v2::ControlFrame::BurstHeaderInfo lastBurstDescriptor() const {
+        return last_burst_descriptor_;
+    }
+
     // Get current mode
     protocol::WaveformMode getMode() const { return mode_; }
     bool isConnected() const { return connected_; }
@@ -565,6 +571,11 @@ private:
     bool use_carrier_ldpc_interleaver_ = false;
     int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
     bool fixed_frame_header_discovery_ = false;
+
+    // Last received self-describing burst descriptor (§14.17). The decode path
+    // applies it to the group decode config; kept here for GUI display.
+    v2::ControlFrame::BurstHeaderInfo last_burst_descriptor_{};
+    bool have_burst_descriptor_ = false;
 
     // FEC codec (uses ICodec interface)
     fec::CodecPtr codec_;

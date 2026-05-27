@@ -483,6 +483,10 @@ std::vector<float> ModemEngine::transmitBurst(const std::vector<Bytes>& frame_da
         }
     }
 
+    // Self-describing burst (design §14.17/§14.19): the BURST_HEADER descriptor is
+    // emitted INSIDE encodeBurstLight — right after the single burst anchor, before
+    // the interleaved group — so the whole burst rides one full chirp anchor (no
+    // light sync). The encoder builds the descriptor from its own config there.
     auto samples = streaming_encoder_->encodeBurstLight(frame_data_list);
 
     if (samples.empty()) {

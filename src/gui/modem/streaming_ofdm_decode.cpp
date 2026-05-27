@@ -695,6 +695,40 @@ void StreamingDecoder::decodeCurrentFrame() {
                     if (data_r14.size() > bpc_r14) data_r14.resize(bpc_r14);
                     auto hdr = v2::parseHeader(data_r14);
                     if (hdr.valid && hdr.total_cw == 1 && v2::isControlFrame(hdr.type)) {
+                        // Self-describing burst (design §14.17): a BURST_HEADER
+                        // descriptor configures THIS receiver's group decode from
+                        // the SENDER's declaration (group size, CW/frame, interleave
+                        // flags), then is consumed internally — not surfaced as a
+                        // user frame. This is the fix for the cross-station 0/8: the
+                        // receiver stops guessing the structure from local config.
+                        if (hdr.type == v2::FrameType::BURST_HEADER) {
+                            if (auto cf = v2::ControlFrame::deserialize(data_r14)) {
+                                const auto bi = cf->getBurstHeaderInfo();
+                                if (bi.group_size >= 2) {
+                                    setBurstInterleaveGroupSize(bi.group_size);
+                                }
+                                if (bi.cw_per_frame >= 1) {
+                                    setFixedFrameCodewords(bi.cw_per_frame);
+                                }
+                                setBurstInterleave(bi.burst_interleave);
+                                setCarrierLdpcInterleaver(bi.carrier_ldpc);
+                                last_burst_descriptor_ = bi;
+                                have_burst_descriptor_ = true;
+                                LOG_MODEM(INFO,
+                                    "[%s] Burst descriptor RX: group=%u cw/frame=%u bi=%d cldpc=%d",
+                                    log_prefix_.c_str(), bi.group_size, bi.cw_per_frame,
+                                    bi.burst_interleave ? 1 : 0, bi.carrier_ldpc ? 1 : 0);
+                            }
+                            {
+                                std::lock_guard<std::mutex> slock(stats_mutex_);
+                                stats_.frames_decoded++;
+                            }
+                            noteFrameArrivalSuccess(frame_sync_abs, frame_sync_abs + frame_len);
+                            if (resetDuringDecode()) {
+                                return;
+                            }
+                            return;  // consumed; the data group follows next
+                        }
                         DecodeResult control_result;
                         control_result.success = true;
                         control_result.frame_data = data_r14;

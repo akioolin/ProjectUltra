@@ -54,6 +54,7 @@ struct Args {
     std::string channel_name = "awgn";
     // Burst-chunk (file-class keystone) parameters.
     int group = 0;               // frames per burst group (chunk length); clamps to [2,8]
+    int frame_cw = static_cast<int>(v2::kDefaultFixedFrameCodewords);  // codewords per frame
     bool burst_interleave = true; // cross-frame deep interleave ON/OFF (the A/B)
 };
 
@@ -184,6 +185,8 @@ Args parseArgs(int argc, char** argv) {
             args.carrier_interleave = std::stoi(requireValue("--carrier-interleave")) != 0;
         } else if (key == "--group") {
             args.group = std::stoi(requireValue("--group"));
+        } else if (key == "--frame-cw") {
+            args.frame_cw = std::stoi(requireValue("--frame-cw"));
         } else if (key == "--burst-interleave") {
             args.burst_interleave = std::stoi(requireValue("--burst-interleave")) != 0;
         } else if (key == "--help" || key == "-h") {
@@ -224,7 +227,7 @@ void configureEncoder(gui::StreamingEncoder& encoder, const Args& args) {
     encoder.setMode(protocol::WaveformMode::OFDM_CHIRP);
     encoder.setOFDMConfig(ofdm);
     encoder.setDataMode(args.mod, args.rate);
-    encoder.setFixedFrameCodewords(v2::kDefaultFixedFrameCodewords);
+    encoder.setFixedFrameCodewords(args.frame_cw);
     encoder.setCarrierLdpcInterleaver(args.carrier_interleave);
 }
 
@@ -246,7 +249,7 @@ void configureDecoder(gui::StreamingDecoder& decoder, const Args& args) {
                                      args.mod,
                                      args.rate);
     }
-    decoder.setFixedFrameCodewords(v2::kDefaultFixedFrameCodewords);
+    decoder.setFixedFrameCodewords(args.frame_cw);
     decoder.setCarrierLdpcInterleaver(args.carrier_interleave);
 }
 
@@ -272,7 +275,7 @@ FrameTrial makeFrame(gui::StreamingEncoder& encoder,
         const Bytes payload = randomPayload(rng, 20);
         auto frame = v2::makeFixedDataFrame("ALPHA", "BRAVO", seq, payload,
                                             args.rate,
-                                            v2::kDefaultFixedFrameCodewords);
+                                            args.frame_cw);
         trial.frame_bytes = frame.serialize();
         trial.tx_samples = config == MeasureConfig::Data4Full
             ? encoder.encodeFrame(trial.frame_bytes)
@@ -526,7 +529,7 @@ BurstCounts measureBurst(const Args& args) {
             const uint16_t seq = static_cast<uint16_t>((c * clamped + f) & 0xFFFFu);
             auto frame = v2::makeFixedDataFrame("ALPHA", "BRAVO", seq, payload,
                                                 args.rate,
-                                                v2::kDefaultFixedFrameCodewords);
+                                                args.frame_cw);
             Bytes ser = frame.serialize();
             frames.push_back(ser);
             expected.push_back(std::move(ser));
