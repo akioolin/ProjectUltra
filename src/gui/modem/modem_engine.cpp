@@ -528,9 +528,27 @@ std::vector<float> ModemEngine::transmitBurst(const std::vector<Bytes>& frame_da
         const char* env = std::getenv("ULTRA_BURST_DESCRIPTOR");
         return !(env && env[0] == '0');  // default ON; "0" disables
     }();
-    if (kBurstDescriptorEnabled && protocol::isOFDMMode(waveform_mode_)) {
+    // §14.32 experiment: "one BURST_HEADER per file". The format (group size,
+    // cw/frame, mod/rate, interleave) is identical for every group in a transfer,
+    // and the receiver remembers it (have_burst_descriptor_/fixed_frame_codewords_
+    // are sticky). Under stop-and-wait, group 0 (+ its header) is ACKed before
+    // group 1 ships — and resends of group 0 keep group_seq==0 — so the receiver
+    // always has the format before any header-less inner burst. Emitting the
+    // header only on group 0 drops ~1.4 s of redundant re-announcement per inner
+    // burst. RISK: inner bursts then carry no chirp, so the receiver must re-acquire
+    // them by warm-sync timing prediction + the group-start LTS marker alone.
+    // Opt-in via ULTRA_BURST_HEADER_ONCE=1 (default OFF = header every burst).
+    static const bool kBurstHeaderOnce = [] {
+        const char* env = std::getenv("ULTRA_BURST_HEADER_ONCE");
+        return env && env[0] == '1';
+    }();
+    const bool emit_descriptor_this_burst =
+        kBurstDescriptorEnabled && (!kBurstHeaderOnce || group_seq == 0);
+    if (emit_descriptor_this_burst && protocol::isOFDMMode(waveform_mode_)) {
         streaming_encoder_->setBurstDescriptorEnabled(true);
         streaming_encoder_->setBurstDescriptorIdentity("", "");
+    } else {
+        streaming_encoder_->setBurstDescriptorEnabled(false);
     }
     auto samples = streaming_encoder_->encodeBurstLight(frame_data_list);
 
