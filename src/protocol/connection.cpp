@@ -2630,6 +2630,12 @@ void Connection::tick(uint32_t elapsed_ms) {
             }
 
             arq_.tick(elapsed_ms);
+            if (use_burst_transport_) {
+                // §14.27 Stage 2: drive the burst stop-and-wait controller clock
+                // (ACK-timeout -> whole-burst resend). Inert unless the file path
+                // activated it; arq_ still ticks for messages.
+                burst_transport_.tick(elapsed_ms);
+            }
             updateAdaptiveModeController(elapsed_ms);
             maybeYieldDataTurn();
             runDeferredArqRefill();
