@@ -1796,6 +1796,22 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
         }
         real_frames.push_back(frame);
     }
+    // Responder handshake confirmation: the burst group is the first valid
+    // connected frame the responder decodes from the initiator. The normal
+    // per-frame RX path (onFrameReceived) confirms the handshake here, but the
+    // burst group-as-unit path bypasses it — so confirm it now, BEFORE the
+    // GROUP_ACK is emitted. Without this, handshake_complete_ stays false and the
+    // GROUP_ACK is transmitted with the handshake (MC-DPSK) waveform, which the
+    // OFDM-mode initiator cannot decode → the sender never advances past group 0.
+    if (state_ == ConnectionState::CONNECTED && !is_initiator_ && !handshake_confirmed_) {
+        LOG_MODEM(INFO, "Connection: Handshake confirmed (first burst group from initiator)");
+        handshake_confirmed_ = true;
+        responder_handshake_wait_ms_ = 0;
+        if (on_handshake_confirmed_) {
+            on_handshake_confirmed_();
+        }
+    }
+
     LOG_MODEM(INFO, "Connection: Burst group_seq=%u complete: %zu real frames -> deliver+GROUP_ACK",
               group_seq, real_frames.size());
     // Controller delivers once + emits one GROUP_ACK (dedup re-ACKs a duplicate
