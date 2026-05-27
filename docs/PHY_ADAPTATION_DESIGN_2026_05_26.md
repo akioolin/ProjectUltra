@@ -1126,3 +1126,49 @@ b. **Protocol cruft (§14.20 cleanup, NOT yet done)**: the session layer still r
    bursts land. The clean replacement (BurstStopAndWaitController) is built but NOT wired
    into the file path. Wiring it + removing SR-ARQ/SACK + adaptive MODE_CHANGE so the wire
    is only [descriptor][burst] -> [whole-burst ACK] is the next workstream.
+
+### 14.26 §14.20 protocol cleanup — staged migration plan to BurstStopAndWaitController (2026-05-27)
+
+Fallback tag: `burst-1210-working` = commit a27df2b (locked-R3/4 Good@20 file
+delivers, FILE_CRC_OK=2, GOODPUT_BPS=1210). Every stage below must keep a working
+GUI file transfer; if a stage regresses, revert to the tag.
+
+**Why staged, not one-pass:** `arq_` (SelectiveRepeatARQ) is the load-bearing data
+path for BOTH file and messages — transmit cb, data-received cb, sendComplete ->
+file_transfer_.onChunkAcked, sendFixedDataWithTypeAndFlags, every isBusy/hasPendingTx
+check, ACK + retransmit. ~40+ call sites in connection.cpp (3500 lines). A blind delete
+breaks the build AND the 1210 working state and is untestable until fully reconnected.
+
+**Target wire (one-way file path only; messaging/handshake unchanged for now):**
+`[descriptor][interleaved burst] -> [single whole-burst ACK]`; resend whole burst on
+ACK timeout; no SACK, no per-frame window, no adaptive MODE_CHANGE (already disabled),
+no chat turn-taking on the file path.
+
+**BurstStopAndWaitController contract (from burst_transport.hpp):**
+- TX: setTransmitGroup -> ModemEngine::transmitBurst(group); onGroupAck(seq) <- decoded
+  group-ACK; tick(elapsed_ms) <- session clock; startTransfer(groups).
+- RX: onGroupReceived(seq, frames) <- fully-decoded deinterleaved burst;
+  setSendGroupAck -> emit ONE group-ACK control frame; setGroupDelivered -> reassemble.
+
+**RIP list (§14.20 throw, file path):** SR-ARQ window + SACK (sendSACK / "SACK timer
+expired"), per-frame selective retransmit, the file-chunk -> arq_ fragment path,
+adaptive MODE_CHANGE controller (already no-op'd), chat TURNOVER/TURN_REQUEST on the
+file path. KEEP: arq_ for MESSAGES + handshake control for now (don't boil the ocean);
+the file path is the first consumer of the new controller.
+
+**Staging order (each builds + GUI-tests green before the next):**
+1. **RX whole-burst-ACK (contained, do first):** when a burst group fully decodes,
+   emit ONE group-ACK control frame (new GroupAck control type, carries group_seq) and
+   stop the SACK timer/SACK send for the file-data path. Sender still on arq_ — but it
+   now sees a clean single ACK per group. Verify file still delivers; SACK gone from
+   the wire (the "short OFDM + half chirp" BRAVO spam disappears).
+2. **TX file -> controller:** file send pre-chunks into groups; startTransfer(groups);
+   setTransmitGroup -> transmitBurst; onGroupAck <- decoded GroupAck; tick <- clock.
+   Bypass arq_ for file DATA (messages still use arq_). Whole-burst resend on timeout.
+3. **Delete dead file-path SR-ARQ/SACK** once 1+2 are green: remove the file branches
+   from setSendCompleteCallback, the SACK send, transmitFrameBatch repair, etc.
+4. **(later) GroupAck without re-anchor chirp** + ACK profile tidy.
+
+Stage 1 is the surgical, immediately-testable cut that also kills the visible SACK
+spam. Stages 2-3 are the real controller swap. Do NOT proceed to a stage until the
+prior one shows a green GUI file delivery.
