@@ -2177,6 +2177,24 @@ void Connection::onAcceptedOFDMDataSync(float sync_correlation) {
         return;
     }
 
+    // §14.27: in the one-way burst transport, an ACCEPTED OFDM data sync from the
+    // initiator proves it received our CONNECT_ACK — it only transmits OFDM data
+    // after the handshake completes. Disarm the CONNECT_ACK rescue NOW (before the
+    // first full group decodes ~5 s into the burst), so it cannot fire an 8.3 s
+    // MC-DPSK / OFDM CONNECT_ACK blast INTO the initiator's in-flight group burst.
+    // That collision (both stations keyed at once) summed on the medium and
+    // corrupted/serialized-behind the GROUP_ACK round trip — the root cause of the
+    // group-0 ACK latency. Gated on use_burst_transport_ so the normal OFDM
+    // handshake (which keeps the rescue armed until a decoded frame) is unchanged.
+    if (use_burst_transport_) {
+        LOG_MODEM(INFO,
+                  "Connection: Accepted OFDM DATA sync (corr=%.2f); disarming CONNECT_ACK rescue (burst transport)",
+                  sync_correlation);
+        connect_ack_frame_.clear();
+        connect_ack_retx_remaining_ = 0;
+        return;
+    }
+
     LOG_MODEM(INFO,
               "Connection: Accepted OFDM DATA sync (corr=%.2f); keeping CONNECT_ACK rescue armed until decoded initiator frame",
               sync_correlation);
