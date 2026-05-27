@@ -3,6 +3,7 @@
 #include "frame_v2.hpp"
 #include "arq.hpp"
 #include "selective_repeat_arq.hpp"
+#include "burst_transport.hpp"
 #include "file_transfer.hpp"
 #include "ultra/types.hpp"
 #include "fec/soft_combine.hpp"
@@ -441,6 +442,13 @@ private:
     std::vector<Bytes> burst_tx_buffer_;
     bool burst_mode_active_ = false;
     TransmitBurstCallback on_transmit_burst_;
+
+    // One-way file-path group stop-and-wait transport (design §14.16). Parallel
+    // to the SR-ARQ file path: inert until use_burst_transport_ is enabled and
+    // the file TX/RX is routed through it, so it cannot affect the existing modem
+    // until GUI-proven. Group-ACK reuses the ACK control frame (seq=group_seq).
+    BurstStopAndWaitController burst_transport_;
+    bool use_burst_transport_ = false;
 
     // ARQ ACK callbacks can acknowledge several slots from one cumulative ACK.
     // Defer window refill until ARQ finishes freeing all slots so OFDM stays
