@@ -1821,6 +1821,20 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
             on_handshake_confirmed_();
         }
     }
+    // Disarm the CONNECT_ACK rescue: a decoded burst group proves the initiator
+    // got our CONNECT_ACK and moved to data. onFrameReceived does this on the first
+    // decoded frame, but the burst group-as-unit path bypasses it — so the rescue
+    // stayed armed and bravo kept blasting an 8.3 s MC-DPSK CONNECT_ACK every ~17 s,
+    // COLLIDING with the initiator's in-flight group bursts (half-duplex violation:
+    // both stations transmitting at once). That collision corrupts the initiator's
+    // GROUP_ACK reception and wastes airtime — the dominant cause of the group-0 ACK
+    // latency. Mirrors onFrameReceived's rescue clear.
+    if (state_ == ConnectionState::CONNECTED && !is_initiator_ &&
+        !connect_ack_frame_.empty()) {
+        LOG_MODEM(INFO, "Connection: CONNECT_ACK rescue disarmed (burst group decoded)");
+        connect_ack_frame_.clear();
+        connect_ack_retx_remaining_ = 0;
+    }
 
     LOG_MODEM(INFO, "Connection: Burst group_seq=%u complete: %zu real frames -> deliver+GROUP_ACK",
               group_seq, real_frames.size());
