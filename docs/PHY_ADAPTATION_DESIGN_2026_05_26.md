@@ -1095,3 +1095,34 @@ path, or the R2/3 downgrade interacting with the burst geometry).
 Net: the self-describing-burst CONTROL plane is validated cross-station (header RX works);
 the DATA plane on the live GUI path is not yet decoding (bugs A + B). Both are now the
 gating items for an actual file delivery.
+
+### 14.25 Burst file transfer WORKS on the live GUI — 0% → 95% (2026-05-27)
+
+Full causal chain fixed (commit set: §14.23 profile-restore, §14.24 descriptor,
+bug A, re-anchor stride, per-frame timing). On the file-only Good@20 R3/4 GUI path
+(`good20_baseline_sweep.sh "3" <tag> R3/4 0`):
+- Clean-fade-phase bursts decode **8/8 (64/64 CWs)** — was **0/8 on every burst** before.
+- Fade-dependent burst success ~50–60%; stop-and-wait ARQ resends the rest.
+- **~95% of the file delivered** (FILE_CRC_OK=0 only because the last ~5% didn't land
+  before the run ended — not a decode failure).
+
+The three coupled fixes (all GUI-proven, committed branch-only):
+1. **Bug A — coherent-control-profile enable deadlock**: enable at setConnected()
+   (negotiated mode known) instead of handshake_complete_'s "first frame" gate.
+   Descriptor RXs ~30s earlier.
+2. **Re-anchor stride**: all burst-group MEMBER frames use plain light LTS (no 100ms
+   re-anchor chirp), matching the fixed burst_min_block_ accumulation stride.
+3. **Per-frame timing retry disabled within a burst**: trust the fixed stride off the
+   single group anchor; a faded frame becomes a clean erasure, not mis-sliced garbage.
+
+**Gap to 100% — two levers, both above the (now-correct) PHY:**
+a. **Rate margin**: R3/4 is the highest code rate / thinnest FEC; a burst with 3–4
+   deeply-faded physical frames exceeds interleaver+R3/4 recovery. R2/3 or R1/2 (or a
+   per-burst descriptor-declared rate) carries the deep-fade bursts.
+b. **Protocol cruft (§14.20 cleanup, NOT yet done)**: the session layer still runs the
+   interactive-era machinery — SR-ARQ/SACK config, adaptive MODE_CHANGE renegotiation
+   mid-transfer (observed R3/4->R2/3 on backlog=18), chat-style turn-taking. This wastes
+   airtime and silently changes the tested rate, so the run times out before the last
+   bursts land. The clean replacement (BurstStopAndWaitController) is built but NOT wired
+   into the file path. Wiring it + removing SR-ARQ/SACK + adaptive MODE_CHANGE so the wire
+   is only [descriptor][burst] -> [whole-burst ACK] is the next workstream.
