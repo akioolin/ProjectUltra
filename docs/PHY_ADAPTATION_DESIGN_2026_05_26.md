@@ -1172,3 +1172,44 @@ the file path is the first consumer of the new controller.
 Stage 1 is the surgical, immediately-testable cut that also kills the visible SACK
 spam. Stages 2-3 are the real controller swap. Do NOT proceed to a stage until the
 prior one shows a green GUI file delivery.
+
+### 14.27 Controller swap — exact execution checklist (Stage A done 2026-05-27)
+
+Stage A DONE + committed: FrameType::GROUP_ACK (0x26) + makeGroupAck/getGroupAckSeq,
+isControlFrame=true (frame_v2). Additive, builds clean, frame_v2 test green. No behavior
+change. Member `burst_transport_` (BurstStopAndWaitController) + `use_burst_transport_=false`
+already exist in connection.hpp:450-451 (inert). Types: Frame=Bytes, Group=vector<Bytes>.
+
+Approach: build the controller path ALONGSIDE arq_ behind `use_burst_transport_` (flag OFF
+by default → build-safe, zero behavior change), activate the flag for the FILE path only,
+GUI-test, THEN delete the dead arq_ file branches. Messages/handshake stay on arq_. Fallback
+tag burst-1210-working (a27df2b). Each step builds + (where it changes behavior) GUI-tests
+green before the next.
+
+Exact ordered steps:
+1. **Wire controller callbacks** in Connection ctor (near arq_ cb setup, ~line 374), inert:
+   - setTransmitGroup(seq, frames) -> on_transmit_burst_(frames)  [reuse existing burst TX cb]
+   - setSendGroupAck(seq) -> transmitFrame(ControlFrame::makeGroupAck(local_call_, remote_call_, seq).serialize())
+   - setGroupDelivered(seq, frames) -> for each frame payload: file_transfer_.processPayload(...) (reassemble)
+   - setTransferDone(success) -> file_transfer_ onSendComplete/onSendFailed
+   - Config{ack_timeout_ms ~= burst airtime + T/R + ACK; max_retries ~= existing 15}.
+2. **tick wiring**: call burst_transport_.tick(elapsed_ms) from the Connection update/tick path
+   (same place arq_.update is driven) when use_burst_transport_.
+3. **TX activation (file send)**: when starting a file send AND OFDM burst regime, set
+   use_burst_transport_=true; pre-chunk the whole file into groups (loop getNextChunk() into
+   N=group_size frames per Group) and burst_transport_.startTransfer(groups). Bypass the
+   arq_ file-chunk path (sendNextFileChunk / setSendCompleteCallback file branch) when the
+   flag is on.
+4. **RX**: hook the decoded burst group -> burst_transport_.onGroupReceived(group_seq, frames).
+   The decoder already delivers a finalized group (finalizeBurstGroup -> frame_callback_ per
+   frame); collect the group's frames and feed onGroupReceived once. Needs a group_seq on the
+   wire — carry it in the BURST_HEADER descriptor (add group_seq field; descriptor already
+   precedes every burst) so RX knows which group it is for dup-ACK suppression.
+5. **GUI-test** with flag ON (file-only Good@20 R3/4): expect [descriptor][burst]->[GROUP_ACK],
+   no SACK, no standalone repairs; file delivers CRC-clean, goodput >= 1210.
+6. **Delete dead file-path SR-ARQ/SACK** once 3-5 green: file branch of setSendCompleteCallback,
+   the SACK send for file data, transmitFrameBatch repair. (Messages keep arq_.)
+7. **(later)** drop the re-anchor chirp on GROUP_ACK; group_seq dedupe; N=1944 blocklength.
+
+Resume at step 1. This is the §14 one-way-session rewrite (backlog #143/#147), executed
+flag-gated so the 1210 working state is never at risk.
