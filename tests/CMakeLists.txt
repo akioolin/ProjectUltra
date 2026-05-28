@@ -643,6 +643,11 @@ add_executable(test_tone_burst_ack_payload test_tone_burst_ack_payload.cpp)
 target_link_libraries(test_tone_burst_ack_payload PRIVATE ultra_core)
 add_test(NAME ToneBurstAckPayload COMMAND test_tone_burst_ack_payload)
 
+# Tone-burst ACK encode/decode round-trip + AWGN cells (§15 step 2)
+add_executable(test_tone_burst_ack_roundtrip test_tone_burst_ack_roundtrip.cpp)
+target_link_libraries(test_tone_burst_ack_roundtrip PRIVATE ultra_core)
+add_test(NAME ToneBurstAckRoundTrip COMMAND test_tone_burst_ack_roundtrip)
+
 if(TARGET decode_bench)
     add_executable(test_decode_bench_replay test_decode_bench_replay.cpp)
     add_test(NAME DecodeBenchReplay
