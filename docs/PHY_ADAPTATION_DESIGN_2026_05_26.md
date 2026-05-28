@@ -1554,3 +1554,24 @@ next burst's encoder rate (TX) — the self-describing BURST_HEADER already re-d
 code_rate, so mid-transfer rate switches need no extra plumbing; (5) flag-gate
 ULTRA_ADAPTIVE_RATE=1 (default OFF); (6) GUI multi-seed verify on Good@20 (does the
 average sit near 3000 with brief dips, no thrash, CRC-clean).
+
+**Phase 5c GUI verification #1 (2026-05-27) — loop CORRECT, transport BLOCKER found.**
+Ran Good@20 R3/4 QPSK 21KB, seed 1, ULTRA_BURST_TRANSPORT=1 ULTRA_ADAPTIVE_RATE=1.
+- Loop brain VERIFIED correct: quality measured cleanly (groups 0-4 q≈0.96-0.99 at
+  R3/4; group 5 hit the fade -> q=0.00), and the controller stepped exactly as designed
+  on successive NACKs: R3/4 -> R2/3 -> R1/2 -> R1/4.
+- BUT the transfer FAILED (CRC=0, stuck on group 5 to timeout) — strictly WORSE than
+  baseline (which recovered group 5 at 163s at fixed R3/4).
+- ROOT CAUSE: groups are PRE-CHUNKED at the start rate. `startBurstFileTransfer` drains
+  the whole file into R3/4-sized frames (8 CW × 486 = 486 B/frame) up front. The rate
+  drop DID reach the wire (ALPHA encoded the resend "QPSK R1/4", verified in TX
+  descriptor log), but an R1/4 frame holds only ~162 B for 8 CW — the 486 B R3/4 payload
+  overflows → malformed resend → 0/8 at any SNR → never recovers.
+- FIX REQUIRED (next increment): **chunk-at-rate.** The burst transport must hold the
+  remaining file payload (raw chunk bytes) and form each group's frames at the CURRENT
+  data_code_rate_ at send time, not pre-chunk all groups at the start rate. Then both a
+  proactive drop (next group) and a NACK re-rate (re-form the stuck group at the new
+  rate) produce correctly-sized frames. Until then Phase 5c is non-functional; flag stays
+  default-OFF (shipping path unaffected — the loop is inert unless ULTRA_ADAPTIVE_RATE=1).
+- The control loop (RateController + GROUP_ACK quality feedback + sender controller) is
+  done and proven; only the transport's chunk-at-rate refactor remains to make it work.
