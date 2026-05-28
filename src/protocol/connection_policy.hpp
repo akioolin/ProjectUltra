@@ -61,15 +61,16 @@ inline constexpr uint32_t kFixedFrameCodewords = v2::kDefaultFixedFrameCodewords
 inline constexpr uint32_t kOFDMBurstAckBatchFrames = 4;
 inline constexpr size_t kWideOFDMWindowFrames = 8;
 inline constexpr size_t kHighThroughputOFDMWindowFrames = 16;
-inline constexpr size_t kBurstInterleaveGroupFrames = 8;
+inline constexpr size_t kBurstInterleaveGroupFrames = 16;
 
 // Runtime burst-interleave group size. Defaults to kBurstInterleaveGroupFrames
-// (8 = the shipping value, ~3xTc on Good HF) but is overridable via the
-// ULTRA_BURST_GROUP_FRAMES env var for A/B experiments (e.g. group=4 to trade
-// time-diversity depth for cheaper retx + better "all-must-pass" odds on short
-// time-localized fades). Clamped to the interleaver's sane range [2,32]. Read
-// at the chunk/pad/config sites so TX file-chunking, padding, and the encoder's
-// declared group_size all agree (the RX self-describes from the descriptor).
+// (bumped 8 -> 16 on 2026-05-28 after Phase D sweep: g16 SS = 1862 bps
+// end-to-end Good@20 vs g8 SS = 1735, with 6/6 PASS on g16 Good@20. The
+// larger group amortizes the fixed descriptor+GROUP_ACK overhead over more
+// data frames. Still overridable via the ULTRA_BURST_GROUP_FRAMES env var.
+// Clamped to the interleaver's sane range [2,32]. Read at the chunk/pad/config
+// sites so TX file-chunking, padding, and the encoder's declared group_size
+// all agree (the RX self-describes from the descriptor).
 inline size_t burstInterleaveGroupFrames() {
     if (const char* env = std::getenv("ULTRA_BURST_GROUP_FRAMES")) {
         const int v = std::atoi(env);
