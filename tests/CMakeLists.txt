@@ -638,6 +638,11 @@ add_executable(test_throughput ../tools/test_throughput.cpp)
 target_link_libraries(test_throughput PRIVATE ultra_core)
 add_test(NAME Throughput COMMAND test_throughput)
 
+# Tone-burst ACK payload + CRC-12 + (15,11) Hamming (PHY_ADAPTATION_DESIGN §15)
+add_executable(test_tone_burst_ack_payload test_tone_burst_ack_payload.cpp)
+target_link_libraries(test_tone_burst_ack_payload PRIVATE ultra_core)
+add_test(NAME ToneBurstAckPayload COMMAND test_tone_burst_ack_payload)
+
 if(TARGET decode_bench)
     add_executable(test_decode_bench_replay test_decode_bench_replay.cpp)
     add_test(NAME DecodeBenchReplay
