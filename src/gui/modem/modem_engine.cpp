@@ -558,9 +558,15 @@ std::vector<float> ModemEngine::transmitBurst(const std::vector<Bytes>& frame_da
     // for fast handshake / ACK turnaround. Today's opt-in is the env knob
     // ULTRA_LDPC_Z=81 (off by default = pre-flip behavior preserved). When
     // a connection-layer policy gates this, it can be replaced with a
-    // member flag set from the connection state. The chosen z is announced
-    // in BURST_HEADER payload[5] and used to size data-frame airtime; the
-    // RX configures its decoder + interleaver + waveform to match.
+    // member flag set from the connection state.
+    //
+    // ARCHITECTURAL COUPLING: z=81 implies cw_per_frame=1. Each frame carries
+    // exactly one 1944-bit codeword (vs the legacy 8 codewords of 648 bits).
+    // This keeps frame airtime BELOW the legacy frame (~1944 bits/frame instead
+    // of ~5184) so the group/ack timeout stays valid, AND it makes the burst
+    // interleaver spread one full codeword across the group_size frames —
+    // strongest fade diversity. Decoupling z from cw produces 8x1944=15552 bit
+    // frames that blow past ack_timeout, which the user surfaced empirically.
     if (protocol::isOFDMMode(waveform_mode_)) {
         static const uint8_t kBurstLiftingZ = []() -> uint8_t {
             if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
@@ -569,6 +575,11 @@ std::vector<float> ModemEngine::transmitBurst(const std::vector<Bytes>& frame_da
             return 27;
         }();
         streaming_encoder_->setLDPCLiftingZ(kBurstLiftingZ);
+        if (kBurstLiftingZ == 81) {
+            streaming_encoder_->setFixedFrameCodewords(1);
+        }
+        // At z=27, leave fixed_frame_codewords_ at whatever the connection
+        // layer / data-mode policy set (typically 4 or 8) — legacy behavior.
     } else {
         streaming_encoder_->setLDPCLiftingZ(27);  // MC-DPSK always short
     }

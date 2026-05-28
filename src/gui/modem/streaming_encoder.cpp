@@ -574,10 +574,11 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
         if (!descriptor_samples.empty()) {
             result.insert(result.end(), descriptor_samples.begin(), descriptor_samples.end());
             LOG_MODEM(INFO,
-                      "[%s] TX Burst descriptor: group=%d cw/frame=%d %s %s flags=0x%02x "
+                      "[%s] TX Burst descriptor: group=%d cw/frame=%d %s %s z=%u flags=0x%02x "
                       "(%zu samples ahead of group)",
                       log_prefix_.c_str(), BURST_GROUP_SIZE, fixed_frame_codewords_,
                       modulationToString(modulation_), codeRateToString(code_rate_),
+                      static_cast<unsigned>(ldpc_lifting_z_),
                       flags, descriptor_samples.size());
         } else {
             LOG_MODEM(WARN, "[%s] TX Burst descriptor: encodeFrame returned empty (skipping)",

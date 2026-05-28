@@ -767,8 +767,9 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 // logical frames inherit it for whole-burst ACK.
                                 last_burst_group_seq_ = hdr.seq;
                                 LOG_MODEM(INFO,
-                                    "[%s] Burst descriptor RX: group=%u cw/frame=%u bi=%d cldpc=%d",
+                                    "[%s] Burst descriptor RX: group=%u cw/frame=%u z=%u bi=%d cldpc=%d",
                                     log_prefix_.c_str(), bi.group_size, bi.cw_per_frame,
+                                    static_cast<unsigned>(bi.lifting_z),
                                     bi.burst_interleave ? 1 : 0, bi.carrier_ldpc ? 1 : 0);
                             }
                             {
