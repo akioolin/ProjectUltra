@@ -775,8 +775,22 @@ void StreamingDecoder::setConnectedOFDMMode(protocol::WaveformMode mode,
 }
 
 void StreamingDecoder::setDataMode(Modulation mod, CodeRate rate) {
+    // §14.36 crash fix v2 (2026-05-28): processBuffer RELEASES buffer_mutex_
+    // before calling searchForSync (line 493). If we apply configure() here
+    // (which replaces modulator_/demodulator_/chirp_sync_ unique_ptrs), the
+    // RX thread mid-searchForSync runs with stale pointers -> SIGSEGV in
+    // HilbertTransform::process (ultra_gui-2026-05-28-005140.ips, alpha
+    // adaptive R3/4->R2/3 at 45.138s, crashed at 45.142s).
+    //
+    // Route ALL configure() calls through the defer-pending channel — the
+    // actual configure() runs at the TOP of processBuffer (post-wait, before
+    // any decode work). Same channel the BURST_HEADER intercept uses; setting
+    // the same fields from setDataMode is correct (last write wins, the
+    // controller's latest decision is what we want for the next iteration).
     std::lock_guard<std::mutex> lock(buffer_mutex_);
-    applyDataModeUnlocked(mod, rate);
+    pending_descriptor_mod_ = mod;
+    pending_descriptor_rate_ = rate;
+    pending_descriptor_rate_change_ = true;
 }
 
 void StreamingDecoder::applyPendingDescriptorDataMode() {
