@@ -224,6 +224,30 @@ void test_burst_header_roundtrip() {
         assert(!plain_info.burst_interleave && !plain_info.carrier_ldpc);
         assert(plain_info.group_size == 4 && plain_info.cw_per_frame == 4);
 
+        // 2026-05-28: lifting_z field round-trip + backward-compat semantics.
+        // Default (no lifting_z arg) wire-encodes as legacy Z=27.
+        assert(info.lifting_z == 27);
+        assert(plain_info.lifting_z == 27);
+
+        // Explicit Z=27 round-trips.
+        auto z27 = ControlFrame::makeBurstHeader("VA2MVR", "W1AW", 1, 4, 4,
+                                                 Modulation::DQPSK, CodeRate::R1_4, 0, 27);
+        auto z27_info = ControlFrame::deserialize(z27.serialize())->getBurstHeaderInfo();
+        assert(z27_info.lifting_z == 27);
+
+        // Explicit Z=81 round-trips (long LDPC for OFDM data path).
+        auto z81 = ControlFrame::makeBurstHeader("VA2MVR", "W1AW", 2, 4, 4,
+                                                 Modulation::QPSK, CodeRate::R3_4, 0, 81);
+        auto z81_info = ControlFrame::deserialize(z81.serialize())->getBurstHeaderInfo();
+        assert(z81_info.lifting_z == 81);
+
+        // Backward-compat: a peer that wrote payload[5]==0 ("unspecified") MUST
+        // be interpreted as legacy Z=27 by the receiver.
+        auto legacy = ControlFrame::makeBurstHeader("VA2MVR", "W1AW", 3, 4, 4,
+                                                    Modulation::DQPSK, CodeRate::R1_4, 0, 0);
+        auto legacy_info = ControlFrame::deserialize(legacy.serialize())->getBurstHeaderInfo();
+        assert(legacy_info.lifting_z == 27);
+
         PASS();
     } catch (const std::exception& e) {
         FAIL(e.what());

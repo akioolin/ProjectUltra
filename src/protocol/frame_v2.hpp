@@ -459,9 +459,13 @@ struct ControlFrame {
     static ControlFrame makeFileCancel(const std::string& src, const std::string& dst);
     // Burst descriptor (§14.17): declares the decode params of the data group that follows.
     // interleave_flags: bit0 = burst (cross-frame) interleave, bit1 = carrier-LDPC interleave.
+    // lifting_z (2026-05-28): LDPC lifting size for the data group. 27 -> n=648
+    // (legacy, short LDPC); 81 -> n=1944 (long LDPC for OFDM data). 0 / default
+    // is wire-encoded as legacy 27 for backward compatibility with older peers.
     static ControlFrame makeBurstHeader(const std::string& src, const std::string& dst,
                                         uint16_t seq, uint8_t group_size, uint8_t cw_per_frame,
-                                        Modulation mod, CodeRate rate, uint8_t interleave_flags);
+                                        Modulation mod, CodeRate rate, uint8_t interleave_flags,
+                                        uint8_t lifting_z = 27);
     // Whole-burst ACK (§14.26): acks one interleaved group as a unit. group_seq
     // identifies the group; the sender (stop-and-wait) advances on a matching ACK
     // and resends the whole group on timeout. No per-frame bitmap.
@@ -553,6 +557,13 @@ struct ControlFrame {
         CodeRate code_rate = CodeRate::R1_4;
         bool burst_interleave = false;  // cross-frame interleave applied
         bool carrier_ldpc = false;      // carrier-LDPC interleave applied
+        // LDPC lifting size Z for the data group's codewords (2026-05-28).
+        //   27 -> n=648 (legacy short LDPC, fast handshake / ACK class)
+        //   81 -> n=1944 (long LDPC for OFDM data, ~3 dB more FEC margin)
+        // Wire byte: payload[5]. payload[5]==0 means "unspecified/legacy" and
+        // the receiver MUST treat it as Z=27 for backward compatibility with
+        // peers that predate the lifting_z field.
+        uint8_t lifting_z = 27;
     };
 
     // Parse a GROUP_ACK payload (§14.26): the acked group sequence number.
@@ -582,6 +593,11 @@ struct ControlFrame {
         info.code_rate = static_cast<CodeRate>(payload[3]);
         info.burst_interleave = (payload[4] & BURST_FLAG_INTERLEAVE) != 0;
         info.carrier_ldpc = (payload[4] & BURST_FLAG_CARRIER_LDPC) != 0;
+        // payload[5] == 0 -> legacy/unspecified -> Z=27 (n=648).
+        // payload[5] == 81 -> long LDPC (n=1944). Any other unexpected value
+        // also falls back to 27 (defensive: we'd rather decode a control-size
+        // codeword and fail than try N=1944 with the wrong base matrix).
+        info.lifting_z = (payload[5] == 81) ? 81 : 27;
         return info;
     }
 };

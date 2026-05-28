@@ -450,7 +450,8 @@ ControlFrame ControlFrame::makeFileCancel(const std::string& src, const std::str
 ControlFrame ControlFrame::makeBurstHeader(const std::string& src, const std::string& dst,
                                            uint16_t seq, uint8_t group_size,
                                            uint8_t cw_per_frame, Modulation mod, CodeRate rate,
-                                           uint8_t interleave_flags) {
+                                           uint8_t interleave_flags,
+                                           uint8_t lifting_z) {
     ControlFrame f;
     f.type = FrameType::BURST_HEADER;
     f.flags = Flags::VERSION_V2;
@@ -462,7 +463,9 @@ ControlFrame ControlFrame::makeBurstHeader(const std::string& src, const std::st
     f.payload[2] = static_cast<uint8_t>(mod);
     f.payload[3] = static_cast<uint8_t>(rate);
     f.payload[4] = interleave_flags;
-    f.payload[5] = 0;  // reserved
+    // 2026-05-28 LDPC lifting Z for the data group. Wire-encoded as the literal
+    // Z value (27 or 81); 0 = legacy "unspecified" (RX falls back to Z=27).
+    f.payload[5] = (lifting_z == 81) ? 81 : (lifting_z == 27 ? 27 : 0);
     return f;
 }
 
