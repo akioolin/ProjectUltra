@@ -53,8 +53,14 @@ public:
     RateController() : RateController(Config{}) {}
     explicit RateController(Config cfg) : cfg_(std::move(cfg)) {
         if (cfg_.ladder.empty()) {
-            cfg_.ladder = {CodeRate::R1_4, CodeRate::R1_2,
-                           CodeRate::R2_3, CodeRate::R3_4};
+            // §14.36 toward-3000 ladder: R5/6 added as a climb target above R3/4
+            // (2026-05-28). LDPC encoder/decoder fully support R5/6 (802.11n
+            // base matrix, 540 info bits / 648 coded). +11% bytes/frame vs R3/4
+            // when the channel permits; controller drops back automatically when
+            // headroom shrinks. Adds NO risk on faded channels (it just never
+            // climbs that high if quality stays low), real win on clean stretches.
+            cfg_.ladder = {CodeRate::R1_4, CodeRate::R1_2, CodeRate::R2_3,
+                           CodeRate::R3_4, CodeRate::R5_6};
         }
     }
 

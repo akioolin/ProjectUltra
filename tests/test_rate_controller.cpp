@@ -34,6 +34,7 @@ void test_failed_group_drops_immediately() {
 
 void test_drop_is_one_rung_at_a_time() {
     RateController c;
+    CHECK(c.update(CodeRate::R5_6, 0.10f) == CodeRate::R3_4, "from top: R5/6 -> R3/4");
     CHECK(c.update(CodeRate::R3_4, 0.10f) == CodeRate::R2_3, "low quality -> one rung down");
     CHECK(c.update(CodeRate::R2_3, 0.10f) == CodeRate::R1_2, "again one rung down");
     CHECK(c.update(CodeRate::R1_2, 0.10f) == CodeRate::R1_4, "again one rung down");
@@ -41,7 +42,7 @@ void test_drop_is_one_rung_at_a_time() {
 }
 
 void test_climb_is_slow_needs_consecutive_good() {
-    RateController c;  // climb_streak default 3
+    RateController c;  // climb_streak default 3; ladder {R1/4,R1/2,R2/3,R3/4,R5/6}
     // 1st and 2nd comfortable groups: hold (streak < 3)
     CHECK(c.update(CodeRate::R1_2, 0.95f) == CodeRate::R1_2, "1 good group: hold");
     CHECK(c.update(CodeRate::R1_2, 0.95f) == CodeRate::R1_2, "2 good groups: still hold");
@@ -50,8 +51,11 @@ void test_climb_is_slow_needs_consecutive_good() {
     CHECK(c.update(CodeRate::R2_3, 0.95f) == CodeRate::R2_3, "streak reset after climb: hold");
     CHECK(c.update(CodeRate::R2_3, 0.95f) == CodeRate::R2_3, "2 good after reset: still hold");
     CHECK(c.update(CodeRate::R2_3, 0.95f) == CodeRate::R3_4, "3 good: climb R2/3 -> R3/4");
-    CHECK(c.update(CodeRate::R3_4, 0.95f) == CodeRate::R3_4, "ceiling: cannot climb above R3/4");
-    CHECK(c.update(CodeRate::R3_4, 0.95f) == CodeRate::R3_4, "ceiling: still R3/4");
+    CHECK(c.update(CodeRate::R3_4, 0.95f) == CodeRate::R3_4, "1 good at R3/4: hold");
+    CHECK(c.update(CodeRate::R3_4, 0.95f) == CodeRate::R3_4, "2 good at R3/4: hold");
+    CHECK(c.update(CodeRate::R3_4, 0.95f) == CodeRate::R5_6, "3 good: climb R3/4 -> R5/6 (top)");
+    CHECK(c.update(CodeRate::R5_6, 0.95f) == CodeRate::R5_6, "ceiling: cannot climb above R5/6");
+    CHECK(c.update(CodeRate::R5_6, 0.95f) == CodeRate::R5_6, "ceiling: still R5/6");
 }
 
 void test_midzone_holds_and_breaks_climb_streak() {
