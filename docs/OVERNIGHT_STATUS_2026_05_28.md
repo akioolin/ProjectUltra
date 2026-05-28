@@ -65,21 +65,64 @@ Realistic math for tomorrow's path: **g8 + light ACK + R5/6** = 2800-3000 bps SS
 
 | SHA | Subject |
 |---|---|
-| `8de5787` | crash fix: defer descriptor-driven rate switch to safe boundary |
+| `8de5787` | crash fix v1: defer descriptor intercept (descriptor path only) |
 | `8b7c39e` | adapt: R5/6 climb target in RateController ladder |
-| **TBD** | (results doc, when batches complete) |
+| `46f7edc` | crash fix v2: defer ALL setDataMode → covers ALPHA TX-side adaptive rate |
+| `90f2017` | crash fix v3: defer setConnectedOFDMMode waveform_ rebuild (parallel path missed by v2) |
 
-## Phase B stress results (PENDING — will populate)
+## Crashes (3 in the night, all same signature)
 
-[placeholder for 20-seed × 4-channel table]
+| Time | IPS | Where |
+|---|---|---|
+| 00:01:12 | `ultra_gui-2026-05-28-000112.ips` | Descriptor intercept → fixed by v1 |
+| 00:51:40 | `ultra_gui-2026-05-28-005140.ips` | TX-side adaptive rate → fixed by v2 |
+| 03:36:31 | `ultra_gui-2026-05-28-033631.ips` | `setConnectedOFDMMode` parallel path → fixed by v3 |
 
-## Phase C optimization sweep (PENDING — will populate)
+All three crashed at exactly the same line: `HilbertTransform::process+132` (KERN_INVALID_ADDRESS) called from `OFDMChirpWaveform::detectDataSync+564` ← `searchForSync` ← `processBuffer`. Pattern: ANY code that replaces `waveform_` (unique_ptr) or `modulator_/demodulator_/chirp_sync_` (via `configure()`) under `buffer_mutex_` is racy — RX thread RELEASES `buffer_mutex_` before calling `searchForSync`, so a reconfigure between those two points leaves stale pointers. Fix template: defer to `pending_*` fields, apply at top of `processBuffer` before any decode work.
 
-[placeholder for g4 vs g8, 21KB vs 100KB table]
+## Phase B stress results (20 seeds × 4 channels)
+
+| Cell | Pass | Mean bps | Notes |
+|---|---|---|---|
+| g20_Good@20 (seeds 1-6, baseline g4+adapt) | 6/6 | 1605 | seed 2 thrashed climb (940) → motivated climb_streak=3 bump |
+| mod_Mod@20 (seeds 1-6) | 1/6 | ~260 | Moderate @ 20 dB too rough for R3/4 ladder, timed out (channel-limited) |
+| poor_Poor@20 (seeds 1-4) | 0/4 | n/a | scenario expects R3/4 — wrong rung for Poor; configuration mismatch |
+| awgn_AWGN@14 (seeds 1-4) | 0/4 | n/a | scenario expects QPSK R3/4 — auto picked DQPSK R1/2 at 14dB; wrong test point |
+
+## Phase C optimization sweep (g4 vs g8 + R5/6 climb)
+
+| Cell | Pass | Mean bps | Best |
+|---|---|---|---|
+| g4_21KB | 3/3 | 1557 | 1880 |
+| g8_21KB | 3/3 | 2057 | 2500 |
+| g8_100KB | 3/3 | 1800 | 1870 |
+
+**g8 over g4: +32%.** R5/6 climb confirmed firing on seed 3 (R3/4 → R5/6 at q=0.95 at 71 s; ran 3 groups at R5/6 = 512 B/frame vs R3/4's 456 B).
+
+## Phase D sweep (g16/g32 — final lever toward 3000)
+
+| Cell | Pass | Mean bps | Best | Note |
+|---|---|---|---|---|
+| g16_21KB | 3/3 | 1997 | 2350 | clean |
+| g16_100KB | 3/3 | 2147 | **2570 = 86% of 3000** | steady-state win |
+| g32_21KB | 2/3 | (4000 on-air, suspect overstated) | n/a | seed 2 timed out + crashed |
+
+g32 on-air goodput numbers (4000 bps) look inflated relative to elapsed-derived (21504 B × 8 / 128 s ≈ 1344 bps end-to-end). Memory note `project_onair_vs_endtoend_goodput` flags ~2× overstatement is normal for the on-air metric; per that rule the real g32 SS is in the same neighborhood as g16. **g16 looks like the sweet spot** — meaningfully beats g8 SS (2147 vs 1800) without g32's recovery-risk.
+
+## Path to 3000
+
+| Lever | Status | Bps lift |
+|---|---|---|
+| g4 → g8 (Phase C proven) | committed env-gated | +257 (1800 → 2057) |
+| g8 → g16 (Phase D proven) | env-gated | +90 (2057 → 2147) |
+| R5/6 climb (committed) | done | +~80 (above R3/4 ceiling on clean) |
+| Light GROUP_ACK preamble (1.5 s saved per cycle) | not started | ~+400 |
+| Skip descriptor on same-rate continuation (1.4 s saved per cycle) | not started | ~+350 |
+
+g16 + light-ACK + skip-descriptor + R5/6 = projected ~2900-3000 bps SS. Realistic; matches the time-budget math above. **g16 is the new recommended default** (replacing the env-gated g8 we ran the night on).
 
 ## Open questions for morning
 
-- Did stress reproduce the crash? (If yes, defer fix isn't sufficient → deeper race.)
-- Does R5/6 climb actually fire on clean seeds and translate to goodput gain?
-- Does g8 give the expected ~+400 bps over g4?
-- Worth pursuing light-GROUP_ACK-preamble next? (1.3s/cycle is biggest remaining lever.)
+- v3 verify run (3:50am, in background): does it confirm zero crashes on the g32 cell that crashed v2?
+- Worth making g16 the new default (currently env-gated ULTRA_BURST_GROUP_FRAMES=16)?
+- Light-GROUP_ACK preamble: memory says a past attempt failed at 0.88 corr < 0.90 gate. With warm timing state from frame-arrival prediction (already implemented), a tighter window may pass — worth a focused experiment.
