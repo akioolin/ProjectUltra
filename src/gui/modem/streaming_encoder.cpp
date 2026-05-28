@@ -1034,13 +1034,27 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
         ofdm_config_.use_pilots,
         static_cast<int>(ofdm_config_.pilot_spacing),
         modulation_));
-    Bytes encoded = v2::encodeFixedFrame(tx_data, code_rate_, frame_cw_count,
-                                         use_channel_interleave_, bps);
+    // 2026-05-28: ULTRA_LDPC_Z env knob to test N=1944 long LDPC on the data
+    // path (z=81 lifts the same 802.11n base matrices). Control frames are
+    // encoded via encodeFrameWithLDPC and stay at z=27 (kept lean for ACK
+    // turnaround). Default 27 = no behavior change.
+    static const int ldpc_z = []() {
+        if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
+            const int v = std::atoi(env);
+            if (v == 81) return 81;
+        }
+        return 27;
+    }();
 
-    LOG_MODEM(DEBUG, "[%s] OFDM data: %zu bytes -> %d CWs (%zu coded, frame_interleave=%s, channel_interleave=%s)",
+    Bytes encoded = v2::encodeFixedFrame(tx_data, code_rate_, frame_cw_count,
+                                         use_channel_interleave_, bps,
+                                         ldpc_z);
+
+    LOG_MODEM(DEBUG, "[%s] OFDM data: %zu bytes -> %d CWs (%zu coded, frame_interleave=%s, channel_interleave=%s, ldpc_z=%d)",
               log_prefix_.c_str(), tx_data.size(), frame_cw_count, encoded.size(),
               use_frame_interleave_ ? "yes" : "no",
-              use_channel_interleave_ ? "yes" : "no");
+              use_channel_interleave_ ? "yes" : "no",
+              ldpc_z);
 
     return encoded;
 }

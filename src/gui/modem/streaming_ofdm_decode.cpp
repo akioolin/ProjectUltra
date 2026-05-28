@@ -2747,9 +2747,18 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                     .harq_key_build_failed.fetch_add(
                         1, std::memory_order_relaxed);
             }
+            // 2026-05-28: must match the encoder's ULTRA_LDPC_Z (default 27).
+            // Both ends read the same env so the lifting matches end-to-end.
+            static const int ldpc_z = []() {
+                if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
+                    const int v = std::atoi(env);
+                    if (v == 81) return 81;
+                }
+                return 27;
+            }();
             return v2::decodeFixedFrame(soft_bits, rate, cw_count,
                                         apply_channel_deinterleave, bps,
-                                        harq_buffer, harq_key_ptr);
+                                        harq_buffer, harq_key_ptr, ldpc_z);
         };
         auto cw_status = decodeFixed(decode_cw_count);
 
