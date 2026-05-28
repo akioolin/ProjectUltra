@@ -1575,3 +1575,553 @@ Ran Good@20 R3/4 QPSK 21KB, seed 1, ULTRA_BURST_TRANSPORT=1 ULTRA_ADAPTIVE_RATE=
   default-OFF (shipping path unaffected — the loop is inert unless ULTRA_ADAPTIVE_RATE=1).
 - The control loop (RateController + GROUP_ACK quality feedback + sender controller) is
   done and proven; only the transport's chunk-at-rate refactor remains to make it work.
+
+## 15. Tone-burst ACK / control plane (2026-05-28)
+
+### 15.1 Motivation — measured overhead is the keystone
+
+Multi-seed validation of 8PSK R3/4 Good@20 (5 seeds, ULTRA_BURST_TRANSPORT=1,
+ULTRA_LDPC_Z=81, group=6, cw=8) delivered ~1634 bps wall-clock, range
+1520-1810 (matches QPSK R3/4 baseline ~1500-1700 — the +50% rung ceiling was
+fully eaten by fade-induced resends because every "hard" seed ran at the LDPC
+convergence cliff with mean q=0.5-0.6). 8PSK R3/4 with the current burst
+transport is NOT a baseline upgrade by itself.
+
+**Group-cadence forensics at 8.6 s/group** (8PSK cw=8, 6 frames). Code refs:
+`streaming_encoder.cpp:595-643` (preamble emission per frame),
+`ofdm_chirp_waveform.cpp:336-362` (full chirp+LTS = ~1.4s, light LTS = 2
+training symbols = ~48 ms each at FFT=1024).
+
+| Component | Time | % of cadence | Notes |
+|---|---|---|---|
+| Pure 8PSK data symbols | ~3.6 s | 42% | the only payload time |
+| Chirp + LTS anchor at group start (frame 1) | ~1.4 s | 16% | wideband sync acquire (the `Costs ~1.4 s` comment in `streaming_encoder.cpp:612` is exact) |
+| Inter-frame LIGHT LTS (5 × 48 ms; frames 2–6) | ~0.24 s | 3% | 2 training symbols, NO chirp |
+| Half-duplex turnaround × 2 | ~1.0 s | 12% | physical floor ~100 ms total |
+| **Group ACK airtime (full 1-CW OFDM frame)** | **~1.5 s** | **17%** | **dominated by chirp+LTS preamble, not the 20-bit payload** |
+| Decode/CCA jitter slack | ~0.5 s | 6% | schedule safety margin |
+| Misc unaccounted | ~0.36 s | 4% | small gaps/buffering |
+
+**Correction vs earlier drafts of this section**: the inter-frame stride is
+NOT ~1.5 s — it's the light LTS preamble at ~48 ms per member frame, 5 frames
+× 48 ms = ~240 ms total per group. The earlier ~1.5 s estimate was wrong by
+~5×. This means the "continuous burst within group" lever is much smaller
+than I claimed (~240 ms reclaimable, not 1.5 s).
+
+**Group ACK** remains the single fattest fixed-overhead component, AND it
+carries ~20 bits of useful info — so ~99% of its airtime is preamble. That
+remains the right primary target.
+
+**Group-start chirp+LTS (~1.4 s)** is the second-fattest component and is
+ALSO mostly sync overhead. After the first group lands cleanly, the receiver
+has perfectly-tracked timing/CFO — re-acquiring a full chirp+LTS at every
+subsequent group start is conservative. Code comment in
+`streaming_encoder.cpp:597-615` flags this: two lighter alternatives were
+tried (pure light LTS at group start, 500 ms short chirp+LTS) and both
+regressed. So this is fragile work that needs careful warm-sync hand-off
+improvements before it can shrink. Likely path: keep the full chirp+LTS for
+group 0 only; for groups 1+, use a tightened short re-anchor (~500 ms) once
+the warm-sync state machine is more robust.
+
+**Realistic ceiling on overhead reduction** for the current architecture:
+~5 s → ~2.5–3 s per group with the levers in §15.9, NOT down to 1.5 s as
+earlier drafts implied. That means QPSK R3/4 alone reaches ~2700–2870 bps;
+hitting 3000 bps reliably needs 8PSK promotion on top OR larger groups.
+
+### 15.2 The information-theoretic absurdity
+
+A group ACK encodes:
+- ACK / NACK bit (1)
+- Group sequence number (6-8)
+- Per-frame failure mask (6 bits for a 6-frame group)
+- Recommended-rate hint (3) — RateController feedback (§14.43)
+- CRC (12-16) — integrity
+- **Total: 28-34 bits**
+
+Shipping that as a full 1-CW OFDM frame (162 info bits in 648 coded bits, plus
+~1300 ms of chirp+LTS preamble for sync) is information-theoretically absurd.
+The OFDM ACK can NEVER beat the chirp+LTS preamble floor (~1 s) because that's
+what sync acquisition costs at full bandwidth from cold. The ACK isn't slow
+because the bits are slow; it's slow because **we re-acquire sync just to deliver
+20 bits**.
+
+### 15.3 Processing-gain physics — what tone-burst ACK unlocks
+
+A matched-filter (or FFT-bin) detector on a fixed-frequency tone in a narrow
+subband gets **processing gain = 10·log₁₀(2·T·BW)** for tone duration T and
+detection bandwidth BW. This is the lever the OFDM ACK cannot use, because OFDM
+spreads its symbol energy across the full 2.4 kHz data band.
+
+| Tone duration | Detection BW | Processing gain |
+|---|---|---|
+| 100 ms | 200 Hz | **+16 dB** |
+| 200 ms | 200 Hz | **+19 dB** |
+| 500 ms | 200 Hz | **+23 dB** |
+| 1000 ms | 100 Hz | **+23 dB** |
+
+This is exactly why weak-signal modes (FT8, JT9, JT65, WSPR) use narrowband
+tone schemes — they reliably decode down to -20 to -25 dB in-band SNR. We
+need ~30 bits, not their 75-bit message payloads, so the airtime can be
+much shorter than theirs.
+
+### 15.4 Detection-floor comparison
+
+| ACK type | Airtime | Floor (in-band SNR) | Why it fails below the floor |
+|---|---|---|---|
+| **OFDM 1-CW ACK (today)** | 1500 ms | ~3-5 dB | LDPC convergence on the 1-CW payload |
+| 4-FSK tone burst, 200 ms | 200 ms | ~-2 dB | 4-tone discrimination noise floor |
+| 2-FSK tone burst, 200 ms | 200 ms | ~-5 dB | single-bit-per-tone decision |
+| 2-FSK tone burst, 500 ms | 500 ms | ~-9 dB | longer integration |
+| 2-FSK tone burst, 1000 ms (~JT9 territory) | 1000 ms | ~-15 dB | weak-signal-mode regime |
+
+**Tone-burst ACK is both ~5-10× faster AND ~8 dB more robust than the OFDM
+ACK at every operating point.** The OFDM ACK has no crossover where it
+becomes the better choice — its chirp+LTS preamble floor dominates regardless
+of channel quality.
+
+### 15.5 Adaptive "staircase" ACK — scaling with SNR
+
+The control plane must be at LEAST as robust as the most-robust data rate. As
+the modem ladders down toward weak-signal data modes (SNR < 10 dB), the OFDM
+ACK collapses (its 3-5 dB floor is ABOVE the MC-DPSK data floor of 5 dB AWGN
+and OFDM R1/4 10 dB AWGN). A tone-burst ACK with adaptive integration time
+gracefully extends:
+
+| Negotiated SNR | Tone duration | Detection floor | Win vs OFDM ACK |
+|---|---|---|---|
+| ≥ 18 dB | 100-150 ms | ~+5 dB | 10-15× faster |
+| 12-18 dB | 200-300 ms | ~0 dB | 5-7× faster |
+| 5-12 dB | 400-600 ms | ~-5 dB | 2.5-4× faster + 5 dB margin |
+| -5 to 5 dB | 800-1200 ms | ~-12 dB | OFDM ACK is DEAD here; tone still works |
+| < -5 dB | 1500+ ms | ~-20 dB | OFDM ACK unusable; tone is the only path |
+
+Every cell on this table is a wall-clock win, AND the win gets bigger as SNR
+drops. This is the right inversion: today's protocol gets fragile at low SNR;
+the tone-burst path becomes the lifeline.
+
+### 15.6 Four-perspective validation
+
+**PHY theorist.** Shannon capacity for 30 bits in 1 s of 200 Hz subband at
+SNR=-10 dB (in-band) = C = BW·log₂(1+SNR) = 200·log₂(1.1) = 27 bits/s. So 30
+bits in 1.1 s is theoretically achievable at SNR=-10 dB in-band — ample
+headroom. The tone-burst ACK is operating well inside the Shannon ceiling at
+every cell of §15.5.
+
+**DSP systems engineer.** Receiver runs an always-on small FFT on the ACK
+subband. Cost: ~512-point FFT at ~10 Hz update rate over 200 Hz subband =
+~0.05% CPU. The detection state machine is a constant tone-pair-presence
+test; no sync acquisition needed because the tones are at known fixed
+frequencies. Integrates cleanly into the existing audio thread without a
+separate channel.
+
+**HF veteran operator.** This is exactly how 40+ years of HF link establishment
+(ALE), weak-signal modes (FT8, JT9, JT65, WSPR), and selective calling have
+worked. SSB radios pass narrowband tones perfectly — it's literally how voice
+works. Atmospheric/manmade impulsive noise (HF's dominant noise source)
+is rejected better by narrowband FSK than by wideband OFDM symbol detection.
+A real-radio's PA handles short tone bursts (~100-500 ms) with negligible
+thermal stress.
+
+**First principles.** Processing gain is intrinsic to matched-filter
+detection on a known tone in a narrow band. The OFDM ACK cannot capture it
+because OFDM spreads symbol energy across the full band. The chirp+LTS
+preamble dominates the OFDM ACK airtime regardless of channel — that's the
+floor we're below, not the LDPC payload.
+
+### 15.7 Protocol design — what an "ACK packet" actually looks like
+
+Open design questions (to be locked in before implementation):
+
+1. **Semantic granularity.** Two options:
+   - **Cumulative ACK** ("all groups through N delivered"). Payload ~8 bits
+     (one seq), simpler, but a failed group requires full-group resend, no
+     per-frame mask.
+   - **Per-frame mask** within latest group (6 bits + seq). Lets sender
+     resend only failed frames. More bits = slightly longer tone burst.
+2. **Sync pattern.** A short Costas-like sync prefix (~50 ms) at the start of
+   the ACK lets the receiver distinguish "real ACK arriving" from "noise that
+   happens to have energy at the ACK tones." JT65/JT9 do this.
+3. **Subband allocation.** Where in the 300-2700 Hz audio band do the ACK
+   tones live? Options:
+   - **High edge (2400-2700 Hz)**: leaves all 300-2400 Hz for data; SSB rolloff
+     is steeper here but still passes.
+   - **Center (1400-1600 Hz)**: best SSB response; competes with data carrier
+     placement.
+   - **Low edge (300-600 Hz)**: SSB rolloff is steeper, but isolated from
+     data.
+   - Probably **high edge** is the right tradeoff — minimal data interference,
+     acceptable SSB response.
+4. **Frequency diversity.** Place ACK tones in 2-3 sub-bands? Receiver picks
+   the strongest. Costs more bandwidth but survives frequency-selective fades
+   (which Good HF nulls can land on a tone). Likely **needed for Moderate+
+   fading**, possibly optional for Good.
+5. **Sender's no-ACK detection.** If sender's FFT detector doesn't see an
+   ACK at the expected window:
+   - Wait for next expected ACK slot (group ACK is timed by group cadence)
+   - After N missed ACKs, fall back to OFDM ACK as escalation
+   - This gives a graceful degradation: clean channel → tone-burst,
+     pathological channel → falls back to today's OFDM ACK (no worse).
+6. **NACK semantics.** Is a NACK a different tone-burst pattern, or is it
+   "no ACK detected" → assumed NACK? The latter is cleaner but ambiguous
+   with channel loss; the former adds a tone or symbol but is unambiguous.
+   Likely **distinct NACK tone** is correct for clarity.
+7. **Forward-rate hint** (§14.43 RateController integration). The 3-bit
+   recommended-rate hint must fit into the ACK payload. With per-frame mask
+   (6 bits) + seq (6 bits) + rate hint (3 bits) + CRC (12 bits) = 27 bits,
+   which fits cleanly in 5-7 FSK symbols.
+
+### 15.8 Implementation sequence (proposed, NOT scheduled)
+
+1. **Spec the wire format** (sync pattern, payload bit layout, CRC poly, tone
+   frequencies, baud, FEC if any). Single doc, locks in before code.
+2. **Build the receiver-side detector** as a standalone unit-tested module:
+   small always-on FFT on the ACK subband, Costas-sync detection, tone-pair
+   demap, CRC check. Validate with synthetic test vectors at SNR -15 to +20
+   dB across AWGN and Watterson channels.
+3. **Build the encoder-side ACK emitter** — given an ACK payload + duration
+   knob, emit the tone burst. Validate that round-trip TX→encode→channel→
+   decode→RX reproduces the payload at every SNR cell of §15.5.
+4. **Plumb into Connection** — when the burst transport schedules a group
+   ACK, route it through the tone-burst emitter (with OFDM fallback). Match
+   the sender's RTO to the new (shorter) airtime.
+5. **Adaptive integration-time** — duration knob driven by negotiated SNR
+   (per the §15.5 staircase). Default conservative on uncertain SNR.
+6. **GUI multi-seed verification** at Good@20 → Moderate@15 → AWGN@5 to lock
+   in the airtime savings vs current OFDM ACK across the operating envelope.
+7. **Fallback plumbing** — sender's "N missed ACKs → re-request via OFDM ACK"
+   path. Ensures we never get stuck in a tone-detection failure mode.
+
+### 15.9 Throughput projection — tone-burst ACK on the §15.1 cadence (corrected)
+
+Replacing the ~1500 ms OFDM ACK with an adaptive ~150-300 ms tone-burst ACK
+saves ~1.2-1.35 s per group. Other levers from the corrected §15.1 breakdown:
+short anchor between groups (~300 ms, needs warm-sync hand-off work first);
+continuous burst within group (~240 ms, NOT 1.5 s — the inter-frame stride
+is just light LTS at 48 ms × 5); tightened decode/CCA slack (~300 ms).
+
+| Lever stack | Group cadence | Goodput (QPSK R3/4) | Goodput (8PSK R3/4) |
+|---|---|---|---|
+| Today | 8.6 s | ~1500-1700 bps | ~1500-1810 bps (resend-eaten) |
+| + Tone-burst ACK (200 ms, -1.3 s) | 7.3 s | ~2360 bps | ~2400 bps |
+| + Short anchor between groups (-300 ms) | 7.0 s | ~2460 bps | ~2510 bps |
+| + Tighten decode/CCA slack (-300 ms) | 6.7 s | ~2570 bps | ~2620 bps |
+| + Continuous burst within group (-240 ms) | 6.5 s | ~2660 bps | ~2710 bps |
+| + Shorter group-start preamble (-500 ms, warm-sync fix) | 6.0 s | **~2870 bps** | **~2920 bps** |
+
+**Realistic ceiling at current architecture with all levers: ~2870 bps for
+QPSK R3/4, ~2920 bps for 8PSK R3/4.** Both fall ~3-5% short of the 3000 bps
+target. To clear 3000 bps reliably:
+
+- Option A: **Larger groups** — group=8 frames instead of 6 amortizes the
+  fixed overhead (group-start preamble + ACK + turnarounds) over 33% more
+  payload bits. Combined with all §15.9 levers: ~3200 bps. The cost is
+  longer time between ACKs (more bits exposed to a single fade event), so
+  reliability needs validation.
+- Option B: **8PSK R3/4 with channel-est improvements** (§14 Wiener pilots,
+  task #123) — bring the fade-induced resends down toward zero so the
+  full +50% rung ceiling translates to wall-clock. Combined with §15.9:
+  ~3100-3300 bps.
+- Option C: **Both** — group=8 + 8PSK R3/4 + Wiener pilots: ~3500-3700 bps
+  ceiling. Most ambitious but plausible path.
+
+This is a real path to 3000 bps Good@20, but it requires multiple coupled
+levers — not just the tone-burst ACK alone. Earlier drafts of this table
+were too optimistic about the continuous-burst lever (1.5 s vs the actual
+~240 ms savings).
+
+### 15.10 Lower-SNR roadmap implications
+
+The control plane robustness gap at low SNR is the bigger story than the
+Good@20 throughput number. Today's OFDM ACK floor (~3-5 dB) is ABOVE the
+MC-DPSK R1/4 AWGN floor (5 dB) — meaning a Marg/Low-SNR data session can
+deliver frames the protocol can't ACK. That's a class of failure we haven't
+exposed in current testing because we've been measuring at SNR ≥ 14 dB.
+
+The tone-burst ACK at 500-1000 ms duration works at SNR=-5 to -15 dB, opening
+the door to:
+- Weak-signal data modes (MC-DPSK variants below the current 5 dB floor)
+- Reliable ARQ at the MC-DPSK floor itself (today's ACK is marginal there)
+- Forward path to ALE-style link establishment and beacon modes
+
+This is a strategic capability beyond the immediate 3000 bps Good@20 target.
+
+### 15.11 Status
+
+- DECISION: tone-burst ACK is the right control-plane architecture under all
+  four perspectives (PHY / DSP / operator / first-principles).
+- NOT YET DESIGNED: §15.7 open questions need a wire-format spec doc before
+  any code lands.
+- NOT YET SCHEDULED: implementation sequence §15.8 is sketched, not committed.
+- DEFAULT-OFF UNTIL PROVEN: when implementation lands, must be flag-gated
+  (e.g. ULTRA_TONE_ACK=1) until multi-seed verified end-to-end across the
+  SNR envelope. Sender must always be able to fall back to the OFDM ACK.
+
+## 16. Short anchor between groups (2026-05-28) — the second-biggest lever
+
+### 16.1 Current state and the gap
+
+Code refs: `connection_policy.hpp:23-32`, `streaming_encoder.cpp:595-643`,
+`ofdm_chirp_waveform.cpp:336-382`.
+
+| Parameter | Value | Component |
+|---|---|---|
+| `kWideOFDMChirpDurationMs` | 500 ms | Full chirp duration |
+| `kWideOFDMChirpGapMs` | 100 ms | Inter-chirp gap |
+| Full anchor (2 × chirp + 2 × gap + LTS) | **~1.4 s** | Used at EVERY burst-group start today |
+| `kWideOFDMShortReanchorDefaultMs` | 100 ms | Short reanchor chirp duration (range 100-300 ms) |
+| `generateShortDataPreamble()` payload | ~150 ms chirp + LTS | EXISTS but NOT used for burst-group starts |
+| Inter-frame light LTS (within a group) | ~48 ms | 2 training symbols, used today for frames 2-N within a group |
+
+So the code already supports a "short reanchor" preamble shape, but the
+**burst transport unconditionally uses the full ~1.4 s anchor at every
+group start.** Replacing that with the existing short reanchor (~200 ms
+total) would save ~1.2 s per group; replacing it with a pure light LTS
+(~48 ms) would save ~1.35 s per group. Both are larger than the §15.9
+estimate of -300 ms used in earlier drafts.
+
+### 16.2 Why two previous attempts failed
+
+From the inline comment at `streaming_encoder.cpp:597-615`:
+
+> *"500 ms short re-anchor (chirp prefix + LTS): broke frame-stride timing
+> on group members — bravo's LTS phase slope drifted 47°→126° per carrier
+> over 4 frames, the demod produced ~50% zero LLRs, and bravo died silently
+> in the demod code on frame 5/6."*
+>
+> *"pure light LTS: stalled Group 1+ because bravo's warm-sync went
+> DEGRADED across the half-duplex BURST_HEADER → data gap and the data
+> sync corr stayed <0.52 (full-anchor threshold), so bravo never
+> re-acquired sync."*
+
+The phase-slope drift signature is classic **residual CFO error after the
+chirp's CFO re-estimate**. CFO precision scales inversely with chirp
+integration time:
+
+| Chirp duration | CFO precision (rough) | Drift per OFDM symbol (24 ms) |
+|---|---|---|
+| 500 ms (full) | ~±2 Hz | ~±17° |
+| 200 ms (short) | ~±5 Hz | ~±43° |
+| 100 ms (short) | ~±10 Hz | ~±86° |
+
+The receiver's per-symbol pilot tracking absorbs ±17°/sym but slips past
+~±40°. A 500 ms standalone re-anchor chirp gives a CFO estimate too noisy
+for the subsequent 4-6 frames to track without progressive phase rotation
+poisoning the LLRs.
+
+The pure-light-LTS attempt failed for the OPPOSITE reason — it didn't
+re-estimate CFO at all, but the receiver's warm CFO state had **degraded**
+across the inter-group gap (BURST_HEADER decode + half-duplex turnaround
++ wait), so the LTS alone couldn't find sync.
+
+So the lesson: **the failure is in the CFO/timing state continuity across
+the inter-group gap, NOT in the preamble length itself.**
+
+### 16.3 The real fix — warm-sync hand-off across the inter-group gap
+
+The fundamental insight: **at the end of group N, the receiver has perfectly
+tracked CFO/timing.** Re-estimating it from a short chirp at group N+1 is
+strictly worse than carrying the state across the gap. The right fix is
+to preserve the warm state THROUGH the gap, then use a minimal preamble
+to refine (not re-acquire).
+
+Required components:
+
+1. **Warm-state TTL audit.** What state does the receiver hold at end-of-group
+   (last_cfo_, last_timing_offset_, per-symbol pilot tracking IIR, etc.)?
+   How long does it remain valid?
+   - At Watterson Good (0.1 Hz Doppler): coherence time ~5-10 s; warm CFO
+     valid for many seconds.
+   - At Watterson Moderate (0.5 Hz Doppler): coherence time ~1-2 s;
+     warm CFO valid only ~1 s.
+   - Inter-group gap (BURST_HEADER + turnarounds + ACK + wait) is typically
+     ~3-5 s. So warm state SHOULD be valid for Good fading; it's marginal
+     for Moderate.
+
+2. **Diagnose what currently degrades the warm state.** The pure-light-LTS
+   failure note in §16.2 says "bravo's warm-sync went DEGRADED" — need to
+   trace exactly which mechanism does that. Suspect candidates:
+   - CFO tracking IIR has a decay constant that effectively forgets state
+     after a few seconds with no input.
+   - StreamingDecoder's correlation_pos_ reset between groups (the comment
+     in CLAUDE.md mentions "Mode switches reset correlation_pos_").
+   - The chirp detector explicitly invalidates last_cfo_ on miss.
+   - The BURST_HEADER decode itself disturbs state (e.g. re-runs LTS
+     processing with control-frame parameters, leaving stale data-frame
+     state).
+
+3. **Explicit warm-sync state preservation across BURST_HEADER + turnaround.**
+   Treat the receiver's end-of-group CFO/timing/channel state as a "puck"
+   that gets explicitly saved before the BURST_HEADER decode and restored
+   when scanning for the next group's preamble. No automatic decay.
+
+4. **Use BURST_HEADER's own LTS to REFINE (not replace) the warm state.**
+   The BURST_HEADER decode itself contains LTS symbols that can refine
+   CFO/timing without doing a cold re-acquisition. This is fine-tuning,
+   not anchoring.
+
+5. **Group-start preamble becomes minimal in the warm path.** Once warm-sync
+   hand-off is solid, the new group-start preamble is essentially the same
+   as inter-frame stride within a group: just 2 LTS symbols (~48 ms). No
+   chirp.
+
+### 16.4 Tiered fallback — graceful degradation when warm-sync fails
+
+A single preamble shape isn't right for every situation. The hand-off
+needs to degrade gracefully:
+
+| Tier | Trigger | Preamble shape | Airtime |
+|---|---|---|---|
+| **0 (cold)** | First group of session OR mode-change recovery | Full chirp+LTS (current default) | ~1.4 s |
+| **1 (warm, healthy)** | Previous group decoded cleanly (quality ≥ 0.9) AND fading_index < 0.65 (Good or AWGN) AND coherence-time budget OK | Light LTS only | **~48 ms** |
+| **2 (warm, marginal)** | Previous group decoded but quality 0.5-0.9, or fading_index 0.65-0.85 (Moderate) | Short chirp (200 ms) + LTS | ~250 ms |
+| **3 (sync lost)** | 2 consecutive group-start light-LTS failures, or detected fade burst, or fading_index > 0.85 | Full chirp+LTS (fall back to current default) | ~1.4 s |
+
+The trip-wires:
+- If a Tier-1 group-start fails to decode, escalate to Tier 2 for next group.
+- If a Tier-2 group-start fails, escalate to Tier 3.
+- If a Tier-3 group-start succeeds, gradually probe back down: Tier 3 → 2 → 1
+  over successive clean groups.
+
+This is the same self-tuning pattern as the rate ladder controller (§14.43),
+applied to preamble strength instead of code rate.
+
+### 16.5 Throughput projection (corrected vs §15.9)
+
+Assuming the warm-sync hand-off lands cleanly and Tier 1 is the steady-state
+preamble for Good@20:
+
+| Lever stack | Group cadence | Goodput (QPSK R3/4) |
+|---|---|---|
+| Today | 8.6 s | ~1500-1700 bps |
+| + Tone-burst ACK (-1.3 s) | 7.3 s | ~2360 bps |
+| + Tighten decode/CCA slack (-300 ms) | 7.0 s | ~2460 bps |
+| + Continuous burst within group (-240 ms) | 6.8 s | ~2530 bps |
+| **+ Short anchor between groups, Tier 1 (-1.35 s)** | **5.5 s** | **~3130 bps** |
+| + 8PSK R3/4 adaptive promotion | 5.0 s (typical) | ~3450 bps |
+
+So **short anchor between groups is the lever that puts us cleanly over
+3000 bps** at QPSK R3/4 Good@20, BEFORE 8PSK is needed. The earlier §15.9
+table understated the savings of this lever — it's the second-biggest after
+tone-burst ACK, not a tertiary one.
+
+Realistic with margin (account for Tier-2/3 fallbacks on marginal channels,
+multi-seed variance): **~2800-3100 bps for QPSK R3/4 with this lever +
+tone-burst ACK + the small levers**. The competitive 3000 bps target is
+in reach without 8PSK if both keystone levers land.
+
+### 16.6 Four-perspective validation
+
+**PHY theorist.** The receiver's CFO/timing state at end-of-group is a
+SUFFICIENT STATISTIC for the channel up to that point — there is no
+information in a fresh chirp acquisition that isn't already captured in
+the warm state, ASSUMING the channel hasn't decohered. The decoherence
+condition is exactly the Doppler coherence time, which is much longer
+than the inter-group gap for Good fading (5-10 s vs 3-5 s gap). On
+Moderate/Poor fading the coherence time shrinks and Tier 2/3 fallbacks
+become routine — that's correct behavior, not a regression.
+
+**DSP systems engineer.** Preserving warm state across a ~3-5 s gap with
+no new audio input is straightforward — it's already done within a group
+between frames. The challenge is that the BURST_HEADER decode currently
+runs the same StreamingDecoder code path as data frames, which may reset
+or perturb data-frame-specific state. The fix is bookkeeping (snapshot
+state before BURST_HEADER processing, restore after) rather than new
+algorithms.
+
+**HF veteran operator.** A real radio's CFO has TWO components — local
+oscillator drift (very slow, ppm range) and Doppler (fast on disturbed
+ionosphere). LO drift is preserved across ANY gap; Doppler decoheres on
+the channel coherence-time scale. So warm-sync hand-off works exactly
+as well on real hardware as in simulation, FOR Good-class channels.
+For Poor/Disturbed channels (which we're not targeting at 3000 bps anyway),
+the tiered fallback kicks in.
+
+**First principles.** Cold re-acquisition discards information that the
+receiver has earned. The minimum-airtime preamble that re-anchors a
+known-good warm state is exactly the LTS (a few training symbols for
+channel-estimate refinement). Anything longer is wasted airtime.
+
+### 16.7 Open design questions
+
+1. **Where does warm-sync state actually live in the current code?** Need
+   to inventory: `last_cfo_`, correlation_pos_, per-symbol pilot tracker
+   state, channel_estimate_ buffer. Which ones are explicitly reset between
+   groups? Which decay naturally? Which are protected?
+2. **Does the BURST_HEADER decode currently snapshot/restore data-mode
+   state?** If not, that's the first place to add bookkeeping.
+3. **What's the right warm-state TTL?** Should be derived from fading_index
+   (proxy for Doppler), not a fixed constant. For Good (fading<0.65):
+   ~10 s. For Moderate (0.65-0.85): ~2 s. For Poor (>0.85): force
+   re-acquisition.
+4. **Does the LTS-only group-start need a "burst marker" signature** like
+   today's negated-first-LTS-symbol trick (`streaming_encoder.cpp:647-656`)?
+   The current marker tells the decoder "this is a group start, not an
+   inter-frame stride." Likely still needed.
+5. **How does the trip-wire interact with file-level retry?** If 2
+   consecutive Tier-1 attempts fail and we escalate, do we lose data, or
+   does the ARQ machinery cleanly re-request the failed groups at the
+   stronger preamble tier?
+6. **Hardware sample-clock ppm interaction.** Across a 100 s file
+   transfer with ±50 ppm clock drift, timing offset accumulates by
+   ±5 ms = ±240 samples. Warm-sync needs to handle that without
+   re-acquiring. Cross-host (Mac↔Pi5) testing is critical.
+
+### 16.8 Implementation sequence (proposed)
+
+1. **Instrumentation phase**: add detailed warm-sync state diagnostics
+   (log CFO/timing/correlation/quality at every group boundary). Run a
+   baseline file transfer and chart the state evolution. Identify
+   exactly where warm-sync degrades today.
+2. **State preservation across BURST_HEADER**: add the
+   snapshot/restore bookkeeping in `streaming_decoder.cpp` so data-mode
+   state survives the control-frame decode. Validate with a
+   pure-light-LTS group-start test — does it now work where it failed
+   before? (Expected: yes for Good@20 with no Doppler).
+3. **Tier 1 (light LTS) for clean Good channels**: gate the preamble
+   choice on `(quality_last ≥ 0.9) && (fading_index < 0.65) &&
+   warm_sync_ttl_ok()`. Default-OFF flag (e.g. ULTRA_LIGHT_GROUP_START=1).
+   Multi-seed GUI verify on Good@20.
+4. **Tier 2 (short chirp + LTS)**: add the intermediate fallback. Gate
+   on marginal quality or Moderate fading.
+5. **Tier 3 (full chirp+LTS) and trip-wire escalation**: wire the
+   self-tuning state machine that promotes/demotes preamble tier based
+   on observed quality.
+6. **Hardware validation**: Mac↔Pi5 multi-seed across Good/Moderate at
+   target SNR cells. Watch for sample-clock-drift edge cases that
+   weren't visible in OTASim.
+
+### 16.9 Order of operations relative to §15 (tone-burst ACK)
+
+**Tone-burst ACK (§15) first**, then short anchor between groups (§16).
+Why:
+
+- §15 is more isolated (control plane only; doesn't touch the warm-sync
+  state machine). Easier to land cleanly.
+- §15 has well-understood physics (40+ years of weak-signal mode
+  practice). §16 needs an investigation phase to find what currently
+  degrades warm-sync — open-ended risk.
+- §15 alone gets us to ~2530 bps; §16 alone gets us to ~2900 bps; the
+  combination gets us to ~3100 bps. So §15 already shows real progress
+  before §16 starts.
+- The two are independent levers — neither blocks the other. But
+  sequencing §15 first means the throughput climb is visible at every
+  step rather than waiting on the more uncertain §16 to land.
+
+### 16.10 Status
+
+- DECIDED: short-anchor-between-groups is a real ~1.35 s lever; the
+  fundamental fix is warm-sync hand-off across the inter-group gap,
+  not a shorter chirp.
+- NOT YET DESIGNED: §16.7 open questions need the instrumentation phase
+  (§16.8 step 1) to answer empirically before code lands.
+- NOT YET SCHEDULED: planned AFTER tone-burst ACK (§15) lands and is
+  verified.
+- DEFAULT-OFF UNTIL PROVEN: flag-gated (e.g.
+  ULTRA_LIGHT_GROUP_START=1) with full-chirp Tier 0/3 always available
+  as fallback. The current ~1.4 s anchor stays the default until
+  multi-seed verification across Good/Moderate confirms the tiered
+  hand-off is robust.
+- HISTORICAL CONTEXT: two previous attempts (pure light LTS, 500 ms
+  short reanchor) failed for understood reasons (warm-sync degradation
+  across inter-group gap, short-chirp CFO precision). The new approach
+  fixes the warm-sync hand-off rather than tuning chirp duration.
