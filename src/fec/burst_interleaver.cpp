@@ -10,22 +10,23 @@ int BurstInterleaver::sanitizeCodewordCount(int codeword_count) {
     return std::clamp(codeword_count, 1, 8);
 }
 
-int BurstInterleaver::bytesPerFrame(int codeword_count) {
-    return sanitizeCodewordCount(codeword_count) * CODEWORD_BYTES;
+int BurstInterleaver::bytesPerFrame(int codeword_count, int bytes_per_cw) {
+    return sanitizeCodewordCount(codeword_count) * bytes_per_cw;
 }
 
-int BurstInterleaver::bitsPerFrame(int codeword_count) {
-    return sanitizeCodewordCount(codeword_count) * CODEWORD_BITS;
+int BurstInterleaver::bitsPerFrame(int codeword_count, int bytes_per_cw) {
+    return sanitizeCodewordCount(codeword_count) * bytes_per_cw * 8;
 }
 
 std::vector<std::vector<uint8_t>> BurstInterleaver::interleave(
     const std::vector<std::vector<uint8_t>>& logical_frames,
-    int codeword_count)
+    int codeword_count,
+    int bytes_per_cw)
 {
     const int N = static_cast<int>(logical_frames.size());
     if (N < 2) return logical_frames;  // Nothing to interleave
 
-    const int B = bytesPerFrame(codeword_count);
+    const int B = bytesPerFrame(codeword_count, bytes_per_cw);
 
     // Validate input sizes
     for (int f = 0; f < N; f++) {
@@ -58,13 +59,14 @@ std::vector<std::vector<uint8_t>> BurstInterleaver::interleave(
 
 std::vector<std::vector<float>> BurstInterleaver::deinterleave(
     const std::vector<std::vector<float>>& physical_soft,
-    int codeword_count)
+    int codeword_count,
+    int bytes_per_cw)
 {
     const int N = static_cast<int>(physical_soft.size());
     if (N < 2) return physical_soft;  // Nothing to deinterleave
 
-    const int B = bytesPerFrame(codeword_count);
-    const int BITS = bitsPerFrame(codeword_count);
+    const int B = bytesPerFrame(codeword_count, bytes_per_cw);
+    const int BITS = bitsPerFrame(codeword_count, bytes_per_cw);
 
     // Validate input sizes
     for (int pf = 0; pf < N; pf++) {

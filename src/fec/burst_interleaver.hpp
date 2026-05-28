@@ -28,14 +28,15 @@ namespace fec {
 class BurstInterleaver {
 public:
     static constexpr int DEFAULT_CODEWORDS_PER_FRAME = 4;
-    static constexpr int CODEWORD_BYTES = 81;
+    static constexpr int CODEWORD_BYTES = 81;        // N=648 default
     static constexpr int CODEWORD_BITS = 648;
     static constexpr int BYTES_PER_FRAME = DEFAULT_CODEWORDS_PER_FRAME * CODEWORD_BYTES;
     static constexpr int BITS_PER_FRAME = DEFAULT_CODEWORDS_PER_FRAME * CODEWORD_BITS;
 
     static int sanitizeCodewordCount(int codeword_count);
-    static int bytesPerFrame(int codeword_count);
-    static int bitsPerFrame(int codeword_count);
+    // Backwards-compat: bytes_per_cw defaults to 81 (N=648). Pass 243 for N=1944.
+    static int bytesPerFrame(int codeword_count, int bytes_per_cw = CODEWORD_BYTES);
+    static int bitsPerFrame(int codeword_count, int bytes_per_cw = CODEWORD_BYTES);
 
     /**
      * TX: Interleave coded bytes across N physical frames.
@@ -46,7 +47,8 @@ public:
      */
     static std::vector<std::vector<uint8_t>> interleave(
         const std::vector<std::vector<uint8_t>>& logical_frames,
-        int codeword_count);
+        int codeword_count,
+        int bytes_per_cw = CODEWORD_BYTES);
     static std::vector<std::vector<uint8_t>> interleave(
         const std::vector<std::vector<uint8_t>>& logical_frames);
 
@@ -59,7 +61,8 @@ public:
      */
     static std::vector<std::vector<float>> deinterleave(
         const std::vector<std::vector<float>>& physical_soft,
-        int codeword_count);
+        int codeword_count,
+        int bytes_per_cw = CODEWORD_BYTES);
     static std::vector<std::vector<float>> deinterleave(
         const std::vector<std::vector<float>>& physical_soft);
 };

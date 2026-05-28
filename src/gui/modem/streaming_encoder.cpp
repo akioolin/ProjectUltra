@@ -509,9 +509,18 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
             std::vector<Bytes> group(encoded_frames.begin() + base,
                                      encoded_frames.begin() + base + BURST_GROUP_SIZE);
 
-            // Burst-interleave the coded bytes
+            // Burst-interleave the coded bytes. At z=81 (N=1944) each codeword
+            // is 243 bytes instead of 81. Read the env once and pass through
+            // so the interleaver's size check matches.
+            static const int ldpc_z_for_burst = []() {
+                if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
+                    if (std::atoi(env) == 81) return 81;
+                }
+                return 27;
+            }();
+            const int bytes_per_cw = (ldpc_z_for_burst == 81) ? 243 : 81;
             auto interleaved = fec::BurstInterleaver::interleave(
-                group, fixed_frame_codewords_);
+                group, fixed_frame_codewords_, bytes_per_cw);
 
             // Replace in-place
             for (int i = 0; i < BURST_GROUP_SIZE; i++) {

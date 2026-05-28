@@ -453,8 +453,16 @@ void StreamingDecoder::finalizeBurstGroup() {
     LOG_MODEM(INFO, "[%s] Burst group complete (%d frames), deinterleaving...",
               log_prefix_.c_str(), burst_group_size);
 
+    // Match the encoder's bytes-per-codeword: 243 at z=81 (N=1944), 81 at z=27.
+    static const int ldpc_z_for_burst = []() {
+        if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
+            if (std::atoi(env) == 81) return 81;
+        }
+        return 27;
+    }();
+    const int bytes_per_cw_rx = (ldpc_z_for_burst == 81) ? 243 : 81;
     auto logical_soft = fec::BurstInterleaver::deinterleave(
-        burst_soft_buffer_, fixed_frame_codewords_);
+        burst_soft_buffer_, fixed_frame_codewords_, bytes_per_cw_rx);
 
     int logical_ok = 0;
     int logical_fail = 0;
