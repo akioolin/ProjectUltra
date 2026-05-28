@@ -320,9 +320,17 @@ void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
     // (kWideOFDMWindowFrames=8) ARQ window, which equals kBurstInterleaveGroupFrames,
     // so a steady-state window fills exactly one interleave group. Both TX and RX
     // run setDataMode from negotiation, keeping the de-interleave matched.
+    //
+    // 2026-05-28: extended to coherent 8PSK (QAM8) for the throughput-rung
+    // probe. Same OFDM machinery as QPSK; the burst interleaver operates on
+    // post-LDPC bits and is constellation-agnostic. Without this, forcing
+    // QAM8 + ULTRA_BURST_TRANSPORT=1 left the encoder NOT interleaving while
+    // the burst transport (BURST_HEADER, group ack, chunker) was active —
+    // every CW failed because the bit order didn't match what the receiver
+    // expected after the burst header was consumed.
     const bool file_class_composite =
         connected_ && protocol::isOFDMMode(waveform_mode_) &&
-        mod == Modulation::QPSK;
+        (mod == Modulation::QPSK || mod == Modulation::QAM8);
     const int burst_group =
         static_cast<int>(protocol::connection_policy::burstInterleaveGroupFrames());
     if (streaming_encoder_) {

@@ -15,6 +15,8 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
+#include <string>
 
 namespace ultra {
 namespace protocol {
@@ -385,6 +387,13 @@ inline CodeRate capInitialOFDMRate(float snr_db,
                                    float fading_index,
                                    CodeRate candidate,
                                    Modulation modulation) {
+    // 2026-05-28 test-only: if ULTRA_FORCE_DATA_RATE is set, the operator is
+    // explicitly probing a specific rung — do NOT apply the bootstrap-safety
+    // demotion. Mirrors the recommendDataMode override.
+    if (std::getenv("ULTRA_FORCE_DATA_RATE") != nullptr) {
+        return candidate;
+    }
+
     const auto* candidate_descriptor = ofdmCodeRateDescriptor(candidate);
     if (candidate_descriptor == nullptr) {
         return capInitialOFDMRate(snr_db, fading_index, candidate);
@@ -475,6 +484,39 @@ inline WaveformRecommendation recommendWaveformAndRate(float snr_db, float fadin
 //
 inline void recommendDataMode(float snr_db, WaveformMode waveform,
                                Modulation& mod, CodeRate& rate, float fading_index = 0.0f) {
+    // 2026-05-28 test-only override: ULTRA_FORCE_DATA_MOD / ULTRA_FORCE_DATA_RATE
+    // bypass the ladder ENTIRELY (including MC-DPSK / OFDM_NARROW / ladder rungs)
+    // so we can probe decode reliability of a specific (mod, rate) rung on a live
+    // channel. Placed at the top so every return path is short-circuited.
+    {
+        bool forced_any = false;
+        if (const char* env = std::getenv("ULTRA_FORCE_DATA_MOD")) {
+            const std::string s(env);
+            Modulation forced = Modulation::AUTO;
+            if      (s == "DBPSK")                       forced = Modulation::DBPSK;
+            else if (s == "BPSK")                        forced = Modulation::BPSK;
+            else if (s == "DQPSK")                       forced = Modulation::DQPSK;
+            else if (s == "QPSK")                        forced = Modulation::QPSK;
+            else if (s == "D8PSK")                       forced = Modulation::D8PSK;
+            else if (s == "QAM8" || s == "8PSK")         forced = Modulation::QAM8;
+            else if (s == "QAM16" || s == "16QAM")       forced = Modulation::QAM16;
+            else if (s == "QAM32" || s == "32QAM")       forced = Modulation::QAM32;
+            if (forced != Modulation::AUTO) { mod = forced; forced_any = true; }
+        }
+        if (const char* env = std::getenv("ULTRA_FORCE_DATA_RATE")) {
+            const std::string s(env);
+            CodeRate forced = CodeRate::AUTO;
+            if      (s == "R1_4" || s == "r1_4") forced = CodeRate::R1_4;
+            else if (s == "R1_3" || s == "r1_3") forced = CodeRate::R1_3;
+            else if (s == "R1_2" || s == "r1_2") forced = CodeRate::R1_2;
+            else if (s == "R2_3" || s == "r2_3") forced = CodeRate::R2_3;
+            else if (s == "R3_4" || s == "r3_4") forced = CodeRate::R3_4;
+            else if (s == "R5_6" || s == "r5_6") forced = CodeRate::R5_6;
+            if (forced != CodeRate::AUTO) { rate = forced; forced_any = true; }
+        }
+        if (forced_any) return;
+    }
+
     // MC-DPSK always uses DQPSK R1/4 for robustness
     if (waveform == WaveformMode::MC_DPSK) {
         mod = Modulation::DQPSK;
