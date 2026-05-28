@@ -490,6 +490,13 @@ void StreamingDecoder::processBuffer() {
         if (shutdown_.load()) return;
         if (!woke_with_data) return;  // Timeout with no new audio; avoid stale re-search churn
         new_data_available_ = false;  // Clear flag after waking
+        // §14.36: apply any pending descriptor-driven rate switch BEFORE any decode
+        // work in this processBuffer iteration. The actual configure() (which
+        // replaces modulator_/demodulator_/chirp_sync_ unique_ptrs) runs here at
+        // a clean boundary — never mid-decode. Without this defer the configure
+        // ran inside a downstream scoped lock and other parts of the loop ran
+        // with stale internal pointers, crashing in HilbertTransform::process.
+        applyPendingDescriptorDataMode();
     }
 
     switch (state_) {
@@ -769,6 +776,26 @@ void StreamingDecoder::setConnectedOFDMMode(protocol::WaveformMode mode,
 
 void StreamingDecoder::setDataMode(Modulation mod, CodeRate rate) {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
+    applyDataModeUnlocked(mod, rate);
+}
+
+void StreamingDecoder::applyPendingDescriptorDataMode() {
+    // Caller already holds buffer_mutex_. Apply the deferred descriptor-driven
+    // rate switch, if any (set by the BURST_HEADER intercept). This runs at the
+    // top of processBuffer — between iterations — so the configure() can swap
+    // modulator_/demodulator_/chirp_sync_ unique_ptrs without any concurrent
+    // decode work using them. Idempotent + no-op when nothing's pending.
+    if (!pending_descriptor_rate_change_) return;
+    pending_descriptor_rate_change_ = false;
+    const Modulation mod = pending_descriptor_mod_;
+    const CodeRate rate = pending_descriptor_rate_;
+    if (mod == current_modulation_ && rate == code_rate_) {
+        return;  // already matches, nothing to do
+    }
+    LOG_MODEM(INFO,
+              "StreamingDecoder: applying deferred descriptor rate change %s %s -> %s %s",
+              modulationToString(current_modulation_), codeRateToString(code_rate_),
+              modulationToString(mod), codeRateToString(rate));
     applyDataModeUnlocked(mod, rate);
 }
 

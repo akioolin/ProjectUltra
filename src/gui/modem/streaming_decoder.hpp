@@ -419,6 +419,20 @@ private:
     // declaration mid-transfer for per-block rate adaptation.
     void applyDataModeUnlocked(Modulation mod, CodeRate rate);
 
+    // §14.36 crash-safe descriptor-driven rate switch: the descriptor intercept
+    // sets these (under the local buffer_mutex_ scope it already holds) instead
+    // of calling applyDataModeUnlocked() directly. The actual reconfigure (which
+    // replaces modulator_/demodulator_/chirp_sync_ unique_ptrs) runs at the TOP
+    // of the NEXT processBuffer call — a clean boundary where no decode state
+    // is mid-flight. Without this defer, the configure() ran inside processBuffer
+    // and the rest of the loop continued with internal state that the configure()
+    // had just replaced, crashing in HilbertTransport::process (SIGSEGV at
+    // /Users/mathieuvachon/.../ultra_gui-2026-05-28-000112.ips).
+    bool pending_descriptor_rate_change_ = false;
+    Modulation pending_descriptor_mod_ = Modulation::DQPSK;
+    CodeRate pending_descriptor_rate_ = CodeRate::R1_4;
+    void applyPendingDescriptorDataMode();  // called at top of processBuffer
+
     // Search for sync in recent samples
     void searchForSync();
 

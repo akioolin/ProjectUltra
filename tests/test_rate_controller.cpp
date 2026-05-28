@@ -41,24 +41,28 @@ void test_drop_is_one_rung_at_a_time() {
 }
 
 void test_climb_is_slow_needs_consecutive_good() {
-    RateController c;  // climb_streak default 2
-    // one comfortable group is NOT enough to climb
-    CHECK(c.update(CodeRate::R1_2, 0.95f) == CodeRate::R1_2, "1 good group: hold (no climb yet)");
-    // second consecutive comfortable group -> climb
-    CHECK(c.update(CodeRate::R1_2, 0.95f) == CodeRate::R2_3, "2 good groups: climb R1/2 -> R2/3");
+    RateController c;  // climb_streak default 3
+    // 1st and 2nd comfortable groups: hold (streak < 3)
+    CHECK(c.update(CodeRate::R1_2, 0.95f) == CodeRate::R1_2, "1 good group: hold");
+    CHECK(c.update(CodeRate::R1_2, 0.95f) == CodeRate::R1_2, "2 good groups: still hold");
+    // 3rd consecutive comfortable group -> climb
+    CHECK(c.update(CodeRate::R1_2, 0.95f) == CodeRate::R2_3, "3 good groups: climb R1/2 -> R2/3");
     CHECK(c.update(CodeRate::R2_3, 0.95f) == CodeRate::R2_3, "streak reset after climb: hold");
-    CHECK(c.update(CodeRate::R2_3, 0.95f) == CodeRate::R3_4, "2 more good: climb R2/3 -> R3/4");
+    CHECK(c.update(CodeRate::R2_3, 0.95f) == CodeRate::R2_3, "2 good after reset: still hold");
+    CHECK(c.update(CodeRate::R2_3, 0.95f) == CodeRate::R3_4, "3 good: climb R2/3 -> R3/4");
     CHECK(c.update(CodeRate::R3_4, 0.95f) == CodeRate::R3_4, "ceiling: cannot climb above R3/4");
     CHECK(c.update(CodeRate::R3_4, 0.95f) == CodeRate::R3_4, "ceiling: still R3/4");
 }
 
 void test_midzone_holds_and_breaks_climb_streak() {
-    RateController c;
+    RateController c;  // climb_streak default 3
     CHECK(c.update(CodeRate::R1_2, 0.95f) == CodeRate::R1_2, "1 good (streak=1)");
+    CHECK(c.update(CodeRate::R1_2, 0.95f) == CodeRate::R1_2, "2 good (streak=2)");
     // a mid-zone group (decoding fine, no margin) must RESET the climb streak
-    CHECK(c.update(CodeRate::R1_2, 0.50f) == CodeRate::R1_2, "mid-zone holds");
+    CHECK(c.update(CodeRate::R1_2, 0.50f) == CodeRate::R1_2, "mid-zone holds, streak reset");
     CHECK(c.update(CodeRate::R1_2, 0.95f) == CodeRate::R1_2, "1 good after reset (streak=1, no climb)");
-    CHECK(c.update(CodeRate::R1_2, 0.95f) == CodeRate::R2_3, "2 consecutive good -> climb");
+    CHECK(c.update(CodeRate::R1_2, 0.95f) == CodeRate::R1_2, "2 good after reset (streak=2, no climb)");
+    CHECK(c.update(CodeRate::R1_2, 0.95f) == CodeRate::R2_3, "3 consecutive good -> climb");
 }
 
 void test_no_thrash_in_hysteresis_gap() {

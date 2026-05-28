@@ -1773,12 +1773,31 @@ bool Connection::startBurstFileTransfer() {
             [this](uint16_t group_seq, bool is_resend) {
                 return formAndSendBurstGroup(group_seq, is_resend);
             });
-        burst_transport_.setAckTimeoutMs(arq_.getAckTimeout());
+        // §14.36 drop-on-timeout: when no NACK/ACK arrives in time, the receiver's
+        // feedback didn't survive the same fade as the data. Treat silence as
+        // quality=0 so the controller steps down before the timeout-driven resend
+        // — otherwise the sender keeps hammering at the failed rate, blind.
+        burst_transport_.setOnAckTimeout([this]() {
+            applyAdaptiveRateFeedback(0.0f);
+        });
+        // §14.36 group-aware ACK timeout: arq_.getAckTimeout() is sized for the
+        // SR-ARQ window=8 burst. With a smaller burst_group_size (env-overridable)
+        // we're actually sending a SHORTER burst whose reply lands sooner. Holding
+        // the 27s budget on a ~6s burst wastes ~21s of dead air per failed group
+        // (the seed-2 88s NACK-blind stall). Scale proportionally; clamp floor to
+        // a safe minimum so we don't false-timeout on transient ACK losses.
+        const size_t group_size = connection_policy::burstInterleaveGroupFrames();
+        const uint32_t base_timeout = arq_.getAckTimeout();
+        const uint32_t scaled_timeout = static_cast<uint32_t>(
+            (static_cast<uint64_t>(base_timeout) * group_size + 4) / 8);
+        const uint32_t timeout_ms = std::max<uint32_t>(scaled_timeout, 6000u);
+        burst_transport_.setAckTimeoutMs(timeout_ms);
         LOG_MODEM(INFO,
                   "Connection: Burst file transfer (chunk-at-rate): %zu metadata chunks + "
-                  "%zu B raw payload, ack_timeout=%ums, start_rate=%s",
+                  "%zu B raw payload, ack_timeout=%ums (scaled from %ums for group=%zu), "
+                  "start_rate=%s",
                   metadata_chunks.size(), burst_file_payload_.size(),
-                  burst_transport_.ackTimeoutMs(),
+                  burst_transport_.ackTimeoutMs(), base_timeout, group_size,
                   codeRateToString(data_code_rate_));
         noteDataTurnPayloadStarted(total_payload_bytes);
         burst_transport_.startTransfer();

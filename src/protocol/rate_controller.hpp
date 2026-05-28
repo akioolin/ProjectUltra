@@ -37,7 +37,13 @@ public:
         // quality in [0,1]: 1 = lots of decode headroom, 0 = group failed.
         float drop_below = 0.25f;   // below this -> step down immediately
         float climb_above = 0.70f;  // at/above this for climb_streak groups -> step up
-        int climb_streak = 2;       // consecutive comfortable groups required to climb
+        // Climbs are deliberately SLOWER than drops. Bumped 2 -> 3 (2026-05-28)
+        // after the g4+adapt seed-2 thrash: climb_streak=2 climbed back to R3/4
+        // ~17 s after escaping a fade and immediately dropped into the next one;
+        // 940 bps net. Three consecutive comfortable groups (~20 s at group=4)
+        // gives the recovering channel a longer "rest" before risking a climb
+        // back into freshly-arrived fade activity.
+        int climb_streak = 3;
         // Ordered ladder of SUPPORTED rates, lowest throughput first. If left empty
         // the controller fills it with the production OFDM ladder (skips the
         // unsupported R1_3/R5_6/R7_8 enum holes).

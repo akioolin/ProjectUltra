@@ -719,13 +719,25 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 // must reconfigure the decoder to that rate before
                                 // demodulating the group, or it decodes at the wrong
                                 // K and fails 0/8 on every adapted resend.
-                                if (bi.code_rate != code_rate_) {
+                                if (bi.code_rate != code_rate_ ||
+                                    bi.modulation != current_modulation_) {
+                                    // §14.36 crash fix: DEFER the configure() to
+                                    // the top of the NEXT processBuffer call via
+                                    // pending_descriptor_*. Calling configure()
+                                    // here (inside a downstream scoped lock that
+                                    // doesn't cover the rest of the loop) swapped
+                                    // modulator_/demodulator_/chirp_sync_ while
+                                    // other paths still held references —
+                                    // SIGSEGV in HilbertTransform::process
+                                    // (ultra_gui-2026-05-28-000112.ips).
                                     LOG_MODEM(INFO,
-                                        "[%s] Burst descriptor rate change: %s -> %s",
+                                        "[%s] Burst descriptor rate change pending: %s -> %s",
                                         log_prefix_.c_str(),
                                         codeRateToString(code_rate_),
                                         codeRateToString(bi.code_rate));
-                                    applyDataModeUnlocked(bi.modulation, bi.code_rate);
+                                    pending_descriptor_mod_ = bi.modulation;
+                                    pending_descriptor_rate_ = bi.code_rate;
+                                    pending_descriptor_rate_change_ = true;
                                 }
                                 // Declare the data size so the immediately-following
                                 // group-start frame is sized as a full data frame

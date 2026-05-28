@@ -50,6 +50,12 @@ public:
     // owns the file cursor and advances it only on ACK.
     using FormAndSendGroupFn = std::function<bool(uint16_t group_seq, bool is_resend)>;
 
+    // §14.36: fired right BEFORE a timeout-driven resend, so the connection can
+    // feed quality=0 to the rate controller (the receiver's NACK couldn't survive
+    // the same fade as the data, so silence is itself the bad-channel signal).
+    // Not fired for NACK-driven resends — those already carry quality information.
+    using AckTimeoutFn = std::function<void()>;
+
     struct Config {
         // One burst is ~6 s; allow the burst airtime + T/R turnaround + the ACK
         // burst before declaring the group lost. Tuned per channel later.
@@ -75,6 +81,7 @@ public:
     // ----------------------------------------------------------------- sender
     void setTransmitGroup(TransmitGroupFn fn) { tx_group_ = std::move(fn); }
     void setFormAndSendGroup(FormAndSendGroupFn fn) { form_send_ = std::move(fn); }
+    void setOnAckTimeout(AckTimeoutFn fn) { on_ack_timeout_ = std::move(fn); }
     void setTransferDone(TransferDoneFn fn) { tx_done_ = std::move(fn); }
 
     // Begin a transfer: the file pre-chunked into groups (each group = the frame
@@ -162,6 +169,12 @@ public:
             if (tx_done_) tx_done_(false);
             return;
         }
+        // §14.36: tell the connection a timeout fired (no NACK either, so the
+        // far-end either decoded fine and the ACK was lost OR the channel ate
+        // both directions). Either way the controller should treat it as bad
+        // channel evidence and step down — fast-down/slow-up climbs back when
+        // quality returns, so over-dropping costs only a brief slow burst.
+        if (on_ack_timeout_) on_ack_timeout_();
         ++retries_;
         transmitCurrent();
     }
@@ -231,6 +244,7 @@ private:
     bool sending_ = false;
     TransmitGroupFn tx_group_;
     FormAndSendGroupFn form_send_;
+    AckTimeoutFn on_ack_timeout_;
     TransferDoneFn tx_done_;
 
     // receiver state
