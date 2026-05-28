@@ -551,6 +551,28 @@ std::vector<float> ModemEngine::transmitBurst(const std::vector<Bytes>& frame_da
     } else {
         streaming_encoder_->setBurstDescriptorEnabled(false);
     }
+
+    // 2026-05-28 Phase 4: per-burst LDPC lifting Z selection. The OFDM data
+    // path opts in to long LDPC (Z=81, n=1944) for ~3 dB more FEC margin;
+    // MC-DPSK and OFDM control frames stay at the legacy short Z=27 (n=648)
+    // for fast handshake / ACK turnaround. Today's opt-in is the env knob
+    // ULTRA_LDPC_Z=81 (off by default = pre-flip behavior preserved). When
+    // a connection-layer policy gates this, it can be replaced with a
+    // member flag set from the connection state. The chosen z is announced
+    // in BURST_HEADER payload[5] and used to size data-frame airtime; the
+    // RX configures its decoder + interleaver + waveform to match.
+    if (protocol::isOFDMMode(waveform_mode_)) {
+        static const uint8_t kBurstLiftingZ = []() -> uint8_t {
+            if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
+                if (std::atoi(env) == 81) return 81;
+            }
+            return 27;
+        }();
+        streaming_encoder_->setLDPCLiftingZ(kBurstLiftingZ);
+    } else {
+        streaming_encoder_->setLDPCLiftingZ(27);  // MC-DPSK always short
+    }
+
     auto samples = streaming_encoder_->encodeBurstLight(frame_data_list);
 
     if (samples.empty()) {
