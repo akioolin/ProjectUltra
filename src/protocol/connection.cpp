@@ -1538,6 +1538,8 @@ size_t Connection::getTxBacklogBytes() const {
 // =============================================================================
 
 bool Connection::sendFile(const std::string& filepath) {
+    LOG_MODEM(WARN, "Connection::sendFile() called path=%s state=%d use_burst=%d",
+              filepath.c_str(), static_cast<int>(state_), use_burst_transport_ ? 1 : 0);
     if (state_ != ConnectionState::CONNECTED) {
         LOG_MODEM(WARN, "Connection: Cannot send file, not connected");
         return false;
@@ -1549,15 +1551,16 @@ bool Connection::sendFile(const std::string& filepath) {
     }
 
     // 2026-05-28: bypass the legacy ISS-turn-taking gate when burst transport
-    // is active. Burst transport is one-way sender-driven (design §14.27) —
-    // the sender owns the turn for the whole transfer and the receiver's only
-    // protocol response is GROUP_ACK/NACK. The legacy gate was for the SR-ARQ
-    // bidirectional chat path and held things up unnecessarily here — it also
-    // sometimes never cleared (e.g. with N=1944 frame-size mismatches in
-    // arq_.isReadyToSend()) leaving file transfers permanently queued.
+    // is active. Burst transport is one-way sender-driven (design §14.27).
+    LOG_MODEM(WARN, "sendFile: about to check ISS bypass use_burst=%d ofdm=%d mode=%d",
+              use_burst_transport_ ? 1 : 0,
+              isOFDMMode(negotiated_mode_) ? 1 : 0,
+              static_cast<int>(negotiated_mode_));
     if (use_burst_transport_ && isOFDMMode(negotiated_mode_)) {
+        LOG_MODEM(WARN, "sendFile: ISS-bypass taken, calling startFileTransferNow");
         return startFileTransferNow(filepath);
     }
+    LOG_MODEM(WARN, "sendFile: falling through to legacy ISS gate");
 
     if (!local_data_turn_ ||
         peer_data_turn_requested_ ||
@@ -1581,23 +1584,34 @@ bool Connection::sendFile(const std::string& filepath) {
 }
 
 bool Connection::startFileTransferNow(const std::string& filepath) {
+    LOG_MODEM(WARN, "startFileTransferNow ENTER path=%s use_burst=%d ofdm=%d data_rate=%s cw=%d",
+              filepath.c_str(), use_burst_transport_ ? 1 : 0,
+              isOFDMMode(negotiated_mode_) ? 1 : 0,
+              codeRateToString(data_code_rate_), data_frame_cw_count_);
+    LOG_MODEM(WARN, "TRACE A: about to call arq_.isReadyToSend()");
     if (!arq_.isReadyToSend()) {
         LOG_MODEM(WARN, "Connection: ARQ busy, cannot start file transfer");
         return false;
     }
+    LOG_MODEM(WARN, "TRACE B: arq ready, checking ofdm mode");
 
     // Set chunk size to match frame capacity for bounded frame geometries.
     bool is_ofdm = isOFDMMode(negotiated_mode_);
     const bool bounded_variable_mc_dpsk = usesBoundedVariableMCDPSKFrames();
+    LOG_MODEM(WARN, "TRACE C: is_ofdm=%d bounded_var_mc=%d", is_ofdm ? 1 : 0, bounded_variable_mc_dpsk ? 1 : 0);
     if (is_ofdm || bounded_variable_mc_dpsk) {
+        LOG_MODEM(WARN, "TRACE D: about to call currentDataPayloadCapacity()");
         size_t capacity = currentDataPayloadCapacity();
+        LOG_MODEM(WARN, "TRACE E: capacity = %zu", capacity);
         if (capacity <= FileTransferController::FILE_DATA_OVERHEAD) {
             LOG_MODEM(ERROR,
                       "Connection: File chunk payload capacity %zu is too small for FILE_DATA overhead",
                       capacity);
             return false;
         }
+        LOG_MODEM(WARN, "TRACE F: about to call file_transfer_.setMaxChunkPayload(%zu)", capacity);
         file_transfer_.setMaxChunkPayload(capacity);
+        LOG_MODEM(WARN, "TRACE G: setMaxChunkPayload returned");
         LOG_MODEM(INFO, "Connection: File chunk payload limited to %zu bytes (%s %s, cw=%d)",
                   capacity,
                   is_ofdm ? "OFDM fixed-frame" : "MC-DPSK variable-frame",
@@ -1605,18 +1619,22 @@ bool Connection::startFileTransferNow(const std::string& filepath) {
                   data_frame_cw_count_);
     }
 
+    LOG_MODEM(WARN, "TRACE H: about to call file_transfer_.startSend()");
     LOG_MODEM(INFO, "Connection: Starting file transfer: %s", filepath.c_str());
 
     if (!file_transfer_.startSend(filepath)) {
         LOG_MODEM(ERROR, "Connection: Failed to start file transfer");
         return false;
     }
+    LOG_MODEM(WARN, "TRACE I: file_transfer_.startSend returned true");
 
     // §14.27: one-way burst stop-and-wait path (flag-gated, OFDM only). Drains
     // the whole file into interleaved groups and runs group-level ARQ — no
     // SR-ARQ window, no SACK. Default OFF until GUI-proven.
     if (use_burst_transport_ && is_ofdm) {
+        LOG_MODEM(WARN, "TRACE J: about to call startBurstFileTransfer()");
         if (startBurstFileTransfer()) {
+            LOG_MODEM(WARN, "TRACE K: startBurstFileTransfer returned true");
             return true;
         }
         LOG_MODEM(WARN, "Connection: Burst file transfer start failed; falling back to SR-ARQ");
@@ -1749,24 +1767,37 @@ bool Connection::startBurstFileTransfer() {
     // BURST_GROUP_SIZE-frame interleaved groups, and hand them to the group
     // stop-and-wait controller. No SR-ARQ window, no per-frame SACK — one group
     // is the ARQ unit (whole-burst resend on group-ACK timeout).
+    LOG_MODEM(WARN, "TRACE BF1: startBurstFileTransfer ENTER");
     if (!on_transmit_burst_) {
         LOG_MODEM(ERROR, "Connection: Burst file transfer requires the burst callback");
         return false;
     }
+    LOG_MODEM(WARN, "TRACE BF2: on_transmit_burst_ is set");
     const size_t group_size = connection_policy::burstInterleaveGroupFrames();
+    LOG_MODEM(WARN, "TRACE BF3: group_size=%zu", group_size);
 
     // Drain all chunk payloads first (so we can mark FINAL on the last real
     // frame and know the total chunk count for completion accounting).
     std::vector<Bytes> chunk_payloads;
     size_t total_payload_bytes = 0;
+    int chunk_iter = 0;
     while (file_transfer_.hasMoreChunks()) {
+        chunk_iter++;
+        if (chunk_iter <= 3 || chunk_iter % 20 == 0) {
+            LOG_MODEM(WARN, "TRACE BF4: iter=%d about to getNextChunk()", chunk_iter);
+        }
         Bytes chunk = file_transfer_.getNextChunk();
+        if (chunk_iter <= 3 || chunk_iter % 20 == 0) {
+            LOG_MODEM(WARN, "TRACE BF5: iter=%d got chunk size=%zu", chunk_iter, chunk.size());
+        }
         if (chunk.empty()) {
             break;
         }
         total_payload_bytes += chunk.size();
         chunk_payloads.push_back(std::move(chunk));
     }
+    LOG_MODEM(WARN, "TRACE BF6: drained %zu chunks, total=%zu B (iter=%d)",
+              chunk_payloads.size(), total_payload_bytes, chunk_iter);
     if (chunk_payloads.empty()) {
         LOG_MODEM(WARN, "Connection: Burst file transfer produced no chunks");
         return false;
@@ -1778,7 +1809,10 @@ bool Connection::startBurstFileTransfer() {
     // re-chunks at the CURRENT rate on every (re)send. Required for adaptation
     // because a mid-transfer rate change would otherwise overflow the in-flight
     // group's R3/4-sized frames into a smaller (R1/2 / R1/4) frame capacity.
+    LOG_MODEM(WARN, "TRACE BF7: about to enter adaptive_rate path, adaptive_rate_enabled_=%d",
+              adaptive_rate_enabled_ ? 1 : 0);
     if (adaptive_rate_enabled_) {
+        LOG_MODEM(WARN, "TRACE BF8: in adaptive path, clearing burst_file_payload_");
         // The first chunk(s) from file_transfer_ are FILE_START (metadata: TYPE +
         // FLAGS + SIZE + CRC32 + NAME — a DIFFERENT header from FILE_DATA's
         // TYPE+OFFSET). They must arrive intact so the receiver enters RECEIVING
@@ -1834,6 +1868,7 @@ bool Connection::startBurstFileTransfer() {
             (static_cast<uint64_t>(base_timeout) * group_size + 4) / 8);
         const uint32_t timeout_ms = std::max<uint32_t>(scaled_timeout, 6000u);
         burst_transport_.setAckTimeoutMs(timeout_ms);
+        LOG_MODEM(WARN, "TRACE BF9: setAckTimeoutMs(%u) returned, calling startTransfer", timeout_ms);
         LOG_MODEM(INFO,
                   "Connection: Burst file transfer (chunk-at-rate): %zu metadata chunks + "
                   "%zu B raw payload, ack_timeout=%ums (scaled from %ums for group=%zu), "
@@ -1843,6 +1878,7 @@ bool Connection::startBurstFileTransfer() {
                   codeRateToString(data_code_rate_));
         noteDataTurnPayloadStarted(total_payload_bytes);
         burst_transport_.startTransfer();
+        LOG_MODEM(WARN, "TRACE BF10: startTransfer returned, returning true");
         return true;
     }
 
