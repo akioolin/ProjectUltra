@@ -877,9 +877,22 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     prev_pilot_logical_indices = pilot_logical_carrier_indices;
 
     // Interpolate between pilots
+    // 2026-05-28 REVERTED: QPSK DD attempted but regressed baseline (sp5 12-pilot
+    // went FAIL on seed 2 with DD on — bad hard decisions during fades poison
+    // the channel estimate and cascade). DD is only safe on QAM8/QAM16 today.
+    // Worth re-attempting with a reliability gate (only DD a symbol when its
+    // EVM is well inside the 95% Gaussian noise radius), but that's bigger work.
+    // Optional opt-in via ULTRA_QPSK_DD=1 for further experimentation.
+    const bool qpsk_dd_optin = []() {
+        if (const char* env = std::getenv("ULTRA_QPSK_DD")) {
+            return std::atoi(env) == 1;
+        }
+        return false;
+    }();
     const bool use_coherent_dd =
         (config.modulation == Modulation::QAM8 ||
-         config.modulation == Modulation::QAM16);
+         config.modulation == Modulation::QAM16 ||
+         (config.modulation == Modulation::QPSK && qpsk_dd_optin));
     const bool have_qam16_dd =
         use_coherent_dd &&
         dd_qam16_channel_observations_.size() == config.fft_size &&
