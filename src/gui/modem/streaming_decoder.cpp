@@ -490,12 +490,15 @@ void StreamingDecoder::processBuffer() {
         if (shutdown_.load()) return;
         if (!woke_with_data) return;  // Timeout with no new audio; avoid stale re-search churn
         new_data_available_ = false;  // Clear flag after waking
-        // §14.36: apply any pending descriptor-driven rate switch BEFORE any decode
-        // work in this processBuffer iteration. The actual configure() (which
-        // replaces modulator_/demodulator_/chirp_sync_ unique_ptrs) runs here at
-        // a clean boundary — never mid-decode. Without this defer the configure
-        // ran inside a downstream scoped lock and other parts of the loop ran
-        // with stale internal pointers, crashing in HilbertTransform::process.
+        // §14.36: apply pending waveform changes BEFORE any decode work in
+        // this processBuffer iteration. The actual configure() / waveform_
+        // reconstruction (replaces modulator_/demodulator_/chirp_sync_
+        // unique_ptrs) runs here at a clean boundary — never mid-decode.
+        // Connected-OFDM-mode rebuild MUST run before descriptor-driven rate
+        // change (it constructs the waveform_ that the rate change then
+        // reconfigures). Both routes through deferred pending so RX never
+        // crashes in HilbertTransform::process when ALPHA adapts its rate.
+        applyPendingConnectedOFDMMode();
         applyPendingDescriptorDataMode();
     }
 
@@ -714,7 +717,28 @@ void StreamingDecoder::setConnectedOFDMMode(protocol::WaveformMode mode,
                                             const ModemConfig& config,
                                             Modulation mod,
                                             CodeRate rate) {
+    // §14.36 crash fix v3 (2026-05-28): defer the waveform_ reconstruction
+    // to the safe top-of-processBuffer boundary. Inline construction races
+    // the RX thread (which releases buffer_mutex_ before searchForSync) and
+    // SIGSEGVs in HilbertTransform::process — same root cause as v2 setDataMode.
     std::lock_guard<std::mutex> lock(buffer_mutex_);
+    pending_connected_ofdm_mode_ = mode;
+    pending_connected_ofdm_config_ = config;
+    pending_connected_ofdm_mod_ = mod;
+    pending_connected_ofdm_rate_ = rate;
+    pending_connected_ofdm_change_ = true;
+}
+
+void StreamingDecoder::applyPendingConnectedOFDMMode() {
+    // Caller already holds buffer_mutex_ and we are at the safe boundary
+    // (top of processBuffer, before any decode work in this iteration).
+    if (!pending_connected_ofdm_change_) return;
+    pending_connected_ofdm_change_ = false;
+    const protocol::WaveformMode mode = pending_connected_ofdm_mode_;
+    const ModemConfig& config = pending_connected_ofdm_config_;
+    const Modulation mod = pending_connected_ofdm_mod_;
+    const CodeRate rate = pending_connected_ofdm_rate_;
+
     const bool preserve_full_anchor =
         expect_full_ofdm_anchor_ || mode == protocol::WaveformMode::OFDM_CHIRP;
 

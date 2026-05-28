@@ -433,6 +433,19 @@ private:
     CodeRate pending_descriptor_rate_ = CodeRate::R1_4;
     void applyPendingDescriptorDataMode();  // called at top of processBuffer
 
+    // §14.36 crash fix v3 (2026-05-28): setConnectedOFDMMode also replaces
+    // waveform_ (constructs a new OFDMChirpWaveform). Same race as v2 — if
+    // it runs while RX is mid-searchForSync (which releases buffer_mutex_
+    // for the work), the destructor of the old waveform_ invalidates state
+    // the RX thread is still using -> SIGSEGV in HilbertTransform::process
+    // (ultra_gui-2026-05-28-033631.ips). Defer to safe boundary like v2.
+    bool pending_connected_ofdm_change_ = false;
+    protocol::WaveformMode pending_connected_ofdm_mode_ = protocol::WaveformMode::OFDM_CHIRP;
+    ModemConfig pending_connected_ofdm_config_;
+    Modulation pending_connected_ofdm_mod_ = Modulation::DQPSK;
+    CodeRate pending_connected_ofdm_rate_ = CodeRate::R1_4;
+    void applyPendingConnectedOFDMMode();  // called at top of processBuffer
+
     // Search for sync in recent samples
     void searchForSync();
 
