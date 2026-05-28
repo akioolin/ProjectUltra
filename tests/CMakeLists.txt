@@ -648,6 +648,11 @@ add_executable(test_tone_burst_ack_roundtrip test_tone_burst_ack_roundtrip.cpp)
 target_link_libraries(test_tone_burst_ack_roundtrip PRIVATE ultra_core)
 add_test(NAME ToneBurstAckRoundTrip COMMAND test_tone_burst_ack_roundtrip)
 
+# Tone-burst ACK across Watterson Good/Moderate fading (§15 step 3)
+add_executable(test_tone_burst_ack_watterson test_tone_burst_ack_watterson.cpp)
+target_link_libraries(test_tone_burst_ack_watterson PRIVATE ultra_core ota_channel_core)
+add_test(NAME ToneBurstAckWatterson COMMAND test_tone_burst_ack_watterson)
+
 if(TARGET decode_bench)
     add_executable(test_decode_bench_replay test_decode_bench_replay.cpp)
     add_test(NAME DecodeBenchReplay
