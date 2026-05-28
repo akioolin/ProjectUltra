@@ -1506,3 +1506,51 @@ a long block**, exactly the levers on our fork. Not the OFDM layout.
   real hardware: our clipper is fixed-threshold (≠ constant PAPR across QPSK/8PSK/QAM),
   so without constant-PAPR-across-rungs an adaptive ladder would pump a gateway's power
   on every level change. Track alongside the PA-peak-limit OTASim fidelity gap.
+
+---
+
+### §14.36 — Phase 5c: BER-driven per-block rate adaptation (design + build) — 2026-05-27
+
+The #1 lever toward 3000-on-Good (§14.33-35): hold R3/4 when carriers are up, dip a
+rung only while the ~20% deep-fade carriers exceed the parity budget, climb straight
+back. NOT the old global downgrader — fast/fine/per-block, climbs back in seconds.
+
+**Steering signal — pre-FEC BER, not SNR, not post-FEC BER.**
+- SNR lies on frequency-selective channels (failing group was 20.4 dB, §14.33).
+- Post-FEC BER (`ldpc_codec.cpp:120`, heuristic-from-iters) is ~binary (0 on success,
+  0.5 on fail) — reactive only, no graduation, can't say "room to climb".
+- **Pre-FEC BER** (raw hard-decision errors the LDPC had to fix) is graduated +
+  predictive: it measures how hard the code worked → whether a higher rate survives.
+  Cheap: count sign(received_LLR) != decoded_bit over the codeword after a successful
+  decode. Its soft equivalent is the LLR/erasure margin (§14.33). Audit
+  (MAJOR_ARCHITECTURE_GAPS, Phase 5c): "SNR is a proxy; BER is the truth."
+
+**Loop (half-duplex forces it):** sender is deaf while transmitting; only the RECEIVER
+sees channel quality. So: receiver decodes group → computes a normalized headroom
+`quality∈[0,1]` (0=failed) from pre-FEC BER (+ iters) → runs the RateController locally
+→ stamps the **recommended rate** on the GROUP_ACK → sender obeys it on the next burst.
+We send the *recommended rate* (absolute, ~3 bits), not raw BER: receiver has the
+per-CW stats, it's leaner, and an absolute rate self-corrects if one ACK is lost
+(a lost "step-down" delta would not). One round-trip stale — fine at 0.1 Hz (fades
+last seconds), the bet weakens at higher Doppler.
+
+**RateController (pure state machine, `src/protocol/rate_controller.hpp`, unit-tested):**
+- Ladder = ordered supported rates {R1/4, R1/2, R2/3, R3/4} (skips unsupported R1_3 etc).
+- **Fast-down:** quality < drop_below → step down one rung immediately, reset climb streak.
+- **Slow-up:** quality ≥ climb_above for `climb_streak` consecutive groups → step up one,
+  reset. Mid-zone holds and resets the streak (must earn climb with fresh consecutive good).
+- Asymmetric because costs are asymmetric: a failed burst loses the whole burst + a retx;
+  running one rung slow costs a little rate. Hysteresis gap (drop_below ≪ climb_above)
+  kills thrash (prior scar: a damp that still flipped at 3 s — fixed by streak + gap).
+
+**Metric mapping (at the measurement site, v1):** failed group → quality 0.0; success →
+quality = 1 − avg_iters/max_iters (iteration headroom, rate-normalized, available today),
+later refined to 1 − prefec_ber/correctable_ber(rate). Both measure the same headroom.
+
+**Build order:** (1) RateController + unit tests [THIS STEP]; (2) decoder emits quality
+on the burst-group callback; (3) GROUP_ACK gains a rate-hint byte (frame_v2); (4) connection
+maps quality→rate via the controller, stamps GROUP_ACK (RX) and applies the hint to the
+next burst's encoder rate (TX) — the self-describing BURST_HEADER already re-declares
+code_rate, so mid-transfer rate switches need no extra plumbing; (5) flag-gate
+ULTRA_ADAPTIVE_RATE=1 (default OFF); (6) GUI multi-seed verify on Good@20 (does the
+average sit near 3000 with brief dips, no thrash, CRC-clean).

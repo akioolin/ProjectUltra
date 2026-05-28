@@ -338,6 +338,10 @@ add_executable(test_burst_transport test_burst_transport.cpp)
 target_link_libraries(test_burst_transport PRIVATE ultra_core)
 add_test(NAME BurstTransport COMMAND test_burst_transport)
 
+add_executable(test_rate_controller test_rate_controller.cpp)
+target_link_libraries(test_rate_controller PRIVATE ultra_core)
+add_test(NAME RateController COMMAND test_rate_controller)
+
 add_executable(test_ofdm_link_adaptation test_ofdm_link_adaptation.cpp)
 target_link_libraries(test_ofdm_link_adaptation PRIVATE ultra_core)
 add_test(NAME OFDMLinkAdaptation COMMAND test_ofdm_link_adaptation)
