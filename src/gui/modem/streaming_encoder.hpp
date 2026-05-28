@@ -167,6 +167,14 @@ public:
         burst_descriptor_src_ = src;
         burst_descriptor_dst_ = dst;
     }
+    // 2026-05-28 Phase 2: LDPC lifting size Z for the OFDM data path. 27 -> n=648
+    // (legacy short LDPC), 81 -> n=1944 (long LDPC, ~3 dB more FEC margin). Set
+    // per-burst by the connection layer; the value is announced in BURST_HEADER
+    // payload[5] so the RX configures the LDPC decoder at the right N. Default 27.
+    void setLDPCLiftingZ(uint8_t z) {
+        ldpc_lifting_z_ = (z == 81) ? 81 : 27;  // defensive — only 27/81 allowed
+    }
+    uint8_t getLDPCLiftingZ() const { return ldpc_lifting_z_; }
 
     void setAdaptiveShortDataPreamble(bool enable);
     bool getAdaptiveShortDataPreamble() const { return adaptive_short_data_preamble_; }
@@ -240,6 +248,11 @@ private:
     uint16_t burst_group_seq_ = 0;         // §14.27 group seq stamped into descriptor
     std::string burst_descriptor_src_;
     std::string burst_descriptor_dst_;
+    // 2026-05-28 Phase 2: LDPC lifting Z for the OFDM data path (27 -> n=648,
+    // 81 -> n=1944). Announced in BURST_HEADER payload[5]. Default 27 keeps
+    // pre-flip behavior; the connection layer sets 81 when the OFDM data burst
+    // should use long LDPC.
+    uint8_t ldpc_lifting_z_ = 27;
     bool force_full_preamble_once_ = false;
     bool adaptive_short_data_preamble_ = false;
     bool coherent_ofdm_control_profile_enabled_ = false;

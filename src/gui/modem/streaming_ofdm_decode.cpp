@@ -2761,12 +2761,20 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                     .harq_key_build_failed.fetch_add(
                         1, std::memory_order_relaxed);
             }
-            // 2026-05-28: must match the encoder's ULTRA_LDPC_Z (default 27).
-            // Both ends read the same env so the lifting matches end-to-end.
-            static const int ldpc_z = []() {
+            // 2026-05-28 Phase 2: LDPC lifting Z sourced from BURST_HEADER
+            // payload[5] (cached on last_burst_descriptor_.lifting_z). When the
+            // sender announced Z=81, the data group's codewords are N=1944
+            // and the decoder must be configured to match. Falls back to env
+            // override (legacy experimentation knob) and then to Z=27 outside a
+            // burst.
+            const int ldpc_z = [this]() {
                 if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
                     const int v = std::atoi(env);
                     if (v == 81) return 81;
+                }
+                if (have_burst_descriptor_ &&
+                    last_burst_descriptor_.lifting_z == 81) {
+                    return 81;
                 }
                 return 27;
             }();

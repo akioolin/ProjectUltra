@@ -510,13 +510,15 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
                                      encoded_frames.begin() + base + BURST_GROUP_SIZE);
 
             // Burst-interleave the coded bytes. At z=81 (N=1944) each codeword
-            // is 243 bytes instead of 81. Read the env once and pass through
-            // so the interleaver's size check matches.
-            static const int ldpc_z_for_burst = []() {
+            // is 243 bytes instead of 81. 2026-05-28 Phase 2: sourced from the
+            // ldpc_lifting_z_ member set by the connection layer per-burst (and
+            // wire-announced in BURST_HEADER payload[5]); env override kept for
+            // ad-hoc experimentation only.
+            const int ldpc_z_for_burst = [this]() {
                 if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
                     if (std::atoi(env) == 81) return 81;
                 }
-                return 27;
+                return static_cast<int>(ldpc_lifting_z_);
             }();
             const int bytes_per_cw = (ldpc_z_for_burst == 81) ? 243 : 81;
             auto interleaved = fec::BurstInterleaver::interleave(
@@ -565,7 +567,8 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
             burst_descriptor_src_, burst_descriptor_dst_, /*seq=*/burst_group_seq_,
             static_cast<uint8_t>(BURST_GROUP_SIZE),
             static_cast<uint8_t>(fixed_frame_codewords_),
-            modulation_, code_rate_, flags);
+            modulation_, code_rate_, flags,
+            /*lifting_z=*/ldpc_lifting_z_);
         Bytes descriptor_bytes = descriptor.serialize();
         std::vector<float> descriptor_samples = encodeFrame(descriptor_bytes);
         if (!descriptor_samples.empty()) {
@@ -836,12 +839,14 @@ void StreamingEncoder::updateInterleaver() {
         modulation_);
 
     // Create channel interleaver. At z=81 (N=1944) each LDPC codeword is 1944 bits
-    // instead of 648, so the interleaver block size must match.
-    static const size_t ldpc_codeword_bits_ci = []() -> size_t {
+    // instead of 648, so the interleaver block size must match the active z.
+    // 2026-05-28 Phase 2: sourced from ldpc_lifting_z_ (set per-burst by the
+    // connection layer); env override kept for ad-hoc experimentation only.
+    const size_t ldpc_codeword_bits_ci = [this]() -> size_t {
         if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
             if (std::atoi(env) == 81) return 1944;
         }
-        return v2::LDPC_CODEWORD_BITS;
+        return (ldpc_lifting_z_ == 81) ? size_t{1944} : v2::LDPC_CODEWORD_BITS;
     }();
     channel_interleaver_ = std::make_unique<ChannelInterleaver>(
         bits_per_symbol, ldpc_codeword_bits_ci);
@@ -1050,16 +1055,17 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
         ofdm_config_.use_pilots,
         static_cast<int>(ofdm_config_.pilot_spacing),
         modulation_));
-    // 2026-05-28: ULTRA_LDPC_Z env knob to test N=1944 long LDPC on the data
-    // path (z=81 lifts the same 802.11n base matrices). Control frames are
-    // encoded via encodeFrameWithLDPC and stay at z=27 (kept lean for ACK
-    // turnaround). Default 27 = no behavior change.
-    static const int ldpc_z = []() {
+    // 2026-05-28 Phase 2: LDPC lifting Z is now sourced from the active member
+    // ldpc_lifting_z_ (27 or 81) set by the connection layer per-burst, and
+    // announced in BURST_HEADER payload[5] so the RX matches. The legacy
+    // ULTRA_LDPC_Z env override is still honored for ad-hoc experimentation
+    // when the connection layer hasn't set a value (the setter defaults to 27).
+    const int ldpc_z = [this]() {
         if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
             const int v = std::atoi(env);
             if (v == 81) return 81;
         }
-        return 27;
+        return static_cast<int>(ldpc_lifting_z_);
     }();
 
     Bytes encoded = v2::encodeFixedFrame(tx_data, code_rate_, frame_cw_count,
