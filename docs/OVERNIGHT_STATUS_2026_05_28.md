@@ -70,6 +70,8 @@ Realistic math for tomorrow's path: **g8 + light ACK + R5/6** = 2800-3000 bps SS
 | `46f7edc` | crash fix v2: defer ALL setDataMode → covers ALPHA TX-side adaptive rate |
 | `90f2017` | crash fix v3: defer setConnectedOFDMMode waveform_ rebuild (parallel path missed by v2) |
 | `c574e00` | burst: promote g16 to default group size (Phase D win) |
+| `266a526` | burst: light preamble for BURST_HEADER descriptor — **REVERTED** below |
+| `6c62843` | revert light-descriptor: regressed short transfers (seed 2 21KB 840 bps vs ~2000 baseline) |
 
 ## Crashes (3 in the night, all same signature)
 
@@ -154,6 +156,48 @@ Per memory `project_onair_vs_endtoend_goodput`: on-air goodput overstates real t
 | g16_100KB seed 2 (best) | 2570 | 102400×8/440 ≈ **1862** end-to-end | needs +61% |
 
 Real end-to-end ceiling is **~1900 bps**. To hit 3000 end-to-end need 61% improvement. Combining light-ACK (~+25%) + skip-descriptor (~+25%) compounds to ×1.56 → 1862 × 1.56 ≈ **2900 bps end-to-end**. Math closes.
+
+## Attempted: light descriptor preamble (REVERTED, 6c62843)
+
+Tried `encodeFrame(descriptor) → encodeFrameLight(descriptor)` at streaming_encoder.cpp:561. Single-seed probe looked good (PASS, descriptor went from 67680 → 17280 samples). Multi-seed exposed the failure mode:
+
+| Cell | Seed | Result | bps | Notes |
+|---|---|---|---|---|
+| g16_lite_21KB  | 1 | PASS | 1900 | clean |
+| g16_lite_21KB  | 2 | PASS | **840**  | 5 rate drops, 9 descriptor retx — light descriptor missed during a fade |
+| g16_lite_21KB  | 3 | PASS | **860**  | similar cascade |
+| g16_lite_100KB | 1 | PASS | 2380 | (more groups → first-burst miss amortized) |
+| g16_lite_100KB | 2 | PASS | 2530 | as above |
+
+The failure mode is exactly what the codebase warning suggests: missed light descriptor → receiver decodes the group with stale rate → all CWs fail → no GROUP_ACK → drop-on-timeout cascade. For 21KB transfers (~4 groups) one missed descriptor kills 25% of the transfer; for 100KB (~12 groups) it's only ~8% and the win shows up. Net mean across all cells: WORSE than baseline.
+
+Reverted to ship the proven wins instead. A robust descriptor-light needs one of:
+- **Rate-state contract** so receiver knows the rate without the descriptor (skip-descriptor variant)
+- **Wider warm-sync window** for the descriptor's light LTS (fights the 0.88<0.90 gate)
+- **Fall-back retry**: TX emits full-anchor descriptor if the prior GROUP_ACK was a NACK or timed out
+
+Each is non-trivial protocol surgery — user judgment territory.
+
+## Honest gap accounting (Good@20, 3000 bps target)
+
+End-to-end steady-state on 100KB Good@20 (the meaningful metric for "match leader speed"):
+- **Verified best:** 1862 bps (Phase D seed 2 g16_100KB)
+- **Verified mean:** 1734 bps (g16-default 3-seed verify)
+- **Target:** 3000 bps
+- **Gap:** +61% best / +73% mean
+
+What's left to close it:
+
+| Lever | Estimated lift | Status |
+|---|---|---|
+| Light GROUP_ACK preamble | +25% | BLOCKED — codified at modem_engine.cpp:421-428 (0.88<0.90 gate) |
+| Skip descriptor on same-rate continuation | +25% | TOO RISKY autonomously (rate-state contract) |
+| Light descriptor (attempted) | +5% on clean, -50% on short | REVERTED |
+| 8PSK R1/2 climb above R5/6 | sideways (same raw bits) | research |
+| Wider OFDM bandwidth (2.4kHz, more carriers) | +20-30% | architectural |
+| LDPC blocklength N=648→1944 | -3 dB SNR → maybe enables R5/6 more often | task #122 backlog |
+
+The arithmetic: even stacking light-ACK + skip-descriptor (both blocked autonomously) lands at ~2700 bps end-to-end — not 3000. Closing the last 300 bps probably requires the wider-bandwidth lever or substantive PHY work (the leader's HF modem uses ~2.4kHz BW vs our ~2.8kHz, with tighter spacing and longer symbols — different architecture).
 
 ## Open questions for morning
 
