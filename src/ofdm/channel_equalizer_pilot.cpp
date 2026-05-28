@@ -20,8 +20,25 @@ using namespace demod_constants;
 
 namespace {
 
-constexpr float kRobustDelaySpreadS = 1.0e-3f;
-constexpr float kRobustDopplerHz = 0.5f;
+// 2026-05-28: these are MODERATE-HF assumptions baked into the Wiener
+// correlation model. Good HF is 0.5 ms / 0.1 Hz — the time-correlation
+// model was throwing away older pilot observations 5x too aggressively
+// on Good, hurting sparse-pilot performance. Env-tunable so we can
+// test the Good-tuned values against the failing sp10_s2 seed.
+inline float robustDelaySpreadS() {
+    if (const char* env = std::getenv("ULTRA_WIENER_DELAY_SPREAD_S")) {
+        const float v = static_cast<float>(std::atof(env));
+        if (v > 0.0f && v < 0.01f) return v;
+    }
+    return 1.0e-3f;
+}
+inline float robustDopplerHz() {
+    if (const char* env = std::getenv("ULTRA_WIENER_DOPPLER_HZ")) {
+        const float v = static_cast<float>(std::atof(env));
+        if (v > 0.0f && v < 10.0f) return v;
+    }
+    return 0.5f;
+}
 constexpr size_t kWienerMaxHistoryPerCarrier = 6;
 constexpr size_t kWienerMaxTimeObs = 4;
 constexpr size_t kWienerMaxFreqObs = 16;
@@ -219,7 +236,7 @@ Complex OFDMDemodulator::Impl::estimateWienerChannel(size_t logical_carrier,
                 kWienerMaxTimeObs,
                 [&](float delta_symbols) {
                     return ofdm_wiener::timeCorrelation(
-                        delta_symbols, symbol_period_s, kRobustDopplerHz);
+                        delta_symbols, symbol_period_s, robustDopplerHz());
                 });
             if (estimate.valid) {
                 wiener_time_estimate_[logical] = estimate.value;
@@ -263,7 +280,7 @@ Complex OFDMDemodulator::Impl::estimateWienerChannel(size_t logical_carrier,
         kWienerMaxFreqObs,
         [&](float delta_logical) {
             return ofdm_wiener::frequencyCorrelation(
-                delta_logical, carrier_spacing_hz, kRobustDelaySpreadS);
+                delta_logical, carrier_spacing_hz, robustDelaySpreadS());
         });
     if (!freq_estimate.valid) {
         if (out_error_var) {

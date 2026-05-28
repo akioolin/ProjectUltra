@@ -270,6 +270,20 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             }
         }
 
+        // 2026-05-28: ULTRA_MAX_OFDM_RATE responder-side bootstrap cap.
+        if (const char* env = std::getenv("ULTRA_MAX_OFDM_RATE")) {
+            const std::string s(env);
+            const CodeRate cap = (s == "R1_2" || s == "r1_2") ? CodeRate::R1_2
+                               : (s == "R2_3" || s == "r2_3") ? CodeRate::R2_3
+                               : (s == "R3_4" || s == "r3_4") ? CodeRate::R3_4
+                               : CodeRate::R5_6;
+            if (cap != CodeRate::R5_6 && rec_rate > cap) {
+                LOG_MODEM(INFO, "Connection: ULTRA_MAX_OFDM_RATE responder cap %s -> %s",
+                          codeRateToString(rec_rate), codeRateToString(cap));
+                rec_rate = cap;
+            }
+        }
+
         // Override with forced values if specified
         if (forced_mod != Modulation::AUTO) {
             rec_mod = forced_mod;
@@ -397,6 +411,24 @@ void Connection::handleConnectAck(const v2::ConnectFrame& frame, const std::stri
     CodeRate init_rate = static_cast<CodeRate>(frame.initial_code_rate);
     float snr_db = v2::decodeSNR(frame.measured_snr);
     float peer_fading = v2::decodeFadingIndex(frame.mode_capabilities);
+
+    // 2026-05-28: ULTRA_MAX_OFDM_RATE initiator cap. Apply locally even if the
+    // responder's CONNECT_ACK proposed a higher rate. Ensures alpha and bravo
+    // both clamp consistently when the env is set on both ends.
+    if (isOFDMMode(negotiated_mode_)) {
+        if (const char* env = std::getenv("ULTRA_MAX_OFDM_RATE")) {
+            const std::string s(env);
+            const CodeRate cap = (s == "R1_2" || s == "r1_2") ? CodeRate::R1_2
+                               : (s == "R2_3" || s == "r2_3") ? CodeRate::R2_3
+                               : (s == "R3_4" || s == "r3_4") ? CodeRate::R3_4
+                               : CodeRate::R5_6;
+            if (cap != CodeRate::R5_6 && init_rate > cap) {
+                LOG_MODEM(INFO, "Connection: ULTRA_MAX_OFDM_RATE initiator cap %s -> %s",
+                          codeRateToString(init_rate), codeRateToString(cap));
+                init_rate = cap;
+            }
+        }
+    }
 
     // Negotiated CW count from responder. Falls back to recommendCWCount(rate)
     // if responder advertised 0 (interoperability with un-upgraded peer that
