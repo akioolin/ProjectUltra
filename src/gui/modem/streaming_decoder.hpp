@@ -228,6 +228,12 @@ public:
     // Called when connection is established with negotiated settings
     void setDataMode(Modulation mod, CodeRate rate);
 
+    // §14.36 live GUI display: the decoder's CURRENT rate/modulation, including
+    // any mid-transfer descriptor-driven switch (applyDataModeUnlocked). Reads
+    // are safe without a lock (single-word atomics-equivalent on assignment).
+    CodeRate getCodeRate() const { return code_rate_; }
+    Modulation getModulation() const { return current_modulation_; }
+
     // Set FEC codec type (for dynamic codec switching based on SNR)
     // Recreates the codec if type changes
     void setCodecType(fec::CodecType type);

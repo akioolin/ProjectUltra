@@ -123,6 +123,15 @@ public:
                               bool all_ok, float quality);
     void tick(uint32_t elapsed_ms);
 
+    // §14.36 Phase 5c live GUI surface: the sender's most recent decode-headroom
+    // sample and the last adaptive action (e.g. "rate R3/4 -> R2/3 (q=0.18)" or
+    // "hold R3/4 (q=0.85)"). lastGroupQuality < 0 means no sample yet. Safe to
+    // call from the GUI thread; both proxy the Connection getters under the
+    // protocol engine mutex.
+    bool adaptiveRateEnabled() const;
+    float lastGroupQuality() const;
+    std::string lastAdaptiveAction() const;
+
     // --- State ---
 
     ConnectionState getState() const;

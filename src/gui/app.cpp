@@ -3578,8 +3578,22 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
             int carriers = modem_.getMCDPSKCarriers();
             ImGui::Text("%d carriers", carriers);
         } else {
-            // For OFDM modes, show negotiated modulation/rate
-            ImGui::Text("%s %s", modulationToString(data_mod), codeRateToString(data_rate));
+            // §14.36: show the LIVE decoder rate/mod (reflects the descriptor-
+            // driven mid-transfer switch from adaptive bursts). When it differs
+            // from the negotiated baseline (data_mod / data_rate), highlight the
+            // drop in yellow so the operator can SEE the modem adapting in real
+            // time — restores to normal color when it climbs back.
+            const Modulation live_mod = modem_.getDecoderModulation();
+            const CodeRate live_rate = modem_.getDecoderCodeRate();
+            const bool adapted = (live_mod != data_mod) || (live_rate != data_rate);
+            if (adapted) {
+                ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f),
+                                   "%s %s", modulationToString(live_mod),
+                                   codeRateToString(live_rate));
+            } else {
+                ImGui::Text("%s %s", modulationToString(live_mod),
+                            codeRateToString(live_rate));
+            }
         }
         ImGui::SameLine();
         ImGui::TextColored(mode_quality_color, "[%s]", mode_quality);
@@ -3623,6 +3637,59 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
         ImGui::ProgressBar(snr_normalized, ImVec2(-1, 16), snr_text);
         ImGui::PopStyleColor();
+
+        // §14.36 Phase 5c adaptive-rate observability: pre-FEC decode headroom
+        // (quality 0..1; we show it as a green→red bar + the % "headroom") plus
+        // the most recent adaptive action ("rate R3/4 -> R2/3 (q=0.18)" / "hold
+        // R3/4 (q=0.85)"). Only drawn while adaptation is enabled and connected,
+        // so the panel stays quiet on the non-adaptive shipping path.
+        if (protocol_.adaptiveRateEnabled()) {
+            const float q = protocol_.lastGroupQuality();    // <0 = no sample yet
+            const std::string action = protocol_.lastAdaptiveAction();
+            ImGui::TextDisabled("Adapt:");
+            ImGui::SameLine();
+            if (q < 0.0f) {
+                ImGui::TextDisabled("waiting for first group...");
+            } else {
+                // Map headroom -> color: green=lots of room (q>=0.7), yellow=okay
+                // (0.25-0.7), red=at the cliff (<0.25). Same thresholds the
+                // RateController uses to decide climb/drop, so the bar shows
+                // operationally where the link is sitting on the rate ladder.
+                ImVec4 q_color;
+                if (q >= 0.70f)      q_color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);
+                else if (q >= 0.25f) q_color = ImVec4(1.0f, 0.85f, 0.2f, 1.0f);
+                else                 q_color = ImVec4(1.0f, 0.4f, 0.3f, 1.0f);
+                ImGui::PushStyleColor(ImGuiCol_PlotHistogram, q_color);
+                char qtxt[40];
+                snprintf(qtxt, sizeof(qtxt), "%.0f%% headroom", q * 100.0f);
+                ImGui::ProgressBar(std::max(0.0f, std::min(1.0f, q)),
+                                   ImVec2(-1, 12), qtxt);
+                ImGui::PopStyleColor();
+                if (!action.empty()) {
+                    // Color the line by whether the controller dropped, held,
+                    // or climbed — a glanceable "what just happened" cue.
+                    ImVec4 act_color;
+                    if (action.find("-> R1_4") != std::string::npos ||
+                        action.find("-> R1/4") != std::string::npos ||
+                        action.find("-> R1/2") != std::string::npos ||
+                        action.find("-> R2/3") != std::string::npos) {
+                        // "rate X -> Y" — direction depends on ladder order.
+                        // Detect drop vs climb by which rate appears second.
+                        const auto arrow = action.find("->");
+                        const bool to_lower = (arrow != std::string::npos) &&
+                            (action.find("R1/4", arrow) != std::string::npos ||
+                             action.find("R1/2", arrow) != std::string::npos);
+                        act_color = to_lower ? ImVec4(1.0f, 0.6f, 0.2f, 1.0f)   // dropping (orange)
+                                             : ImVec4(0.5f, 1.0f, 0.6f, 1.0f);  // climbing (green)
+                    } else if (action.rfind("hold", 0) == 0) {
+                        act_color = ImVec4(0.6f, 0.7f, 0.9f, 1.0f);             // holding (blue)
+                    } else {
+                        act_color = ImVec4(0.7f, 0.7f, 0.7f, 1.0f);
+                    }
+                    ImGui::TextColored(act_color, "%s", action.c_str());
+                }
+            }
+        }
     }
 
     // Row 2: Waveform + Mode (for non-connected states only)

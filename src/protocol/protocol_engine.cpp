@@ -341,6 +341,21 @@ void ProtocolEngine::onBurstGroupReceived(uint16_t group_seq,
     connection_.onBurstGroupReceived(group_seq, frames, all_ok, quality);
 }
 
+bool ProtocolEngine::adaptiveRateEnabled() const {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    return connection_.adaptiveRateEnabled();
+}
+
+float ProtocolEngine::lastGroupQuality() const {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    return connection_.lastGroupQuality();
+}
+
+std::string ProtocolEngine::lastAdaptiveAction() const {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    return connection_.lastAdaptiveAction();
+}
+
 void ProtocolEngine::processRxBuffer() {
     // Look for v2 frame magic (2 bytes: 0x554C = "UL")
     while (!rx_buffer_.empty()) {

@@ -235,6 +235,15 @@ public:
 
     // MC-DPSK configuration
     int getMCDPSKCarriers() const { return mc_dpsk_config_.num_carriers; }
+
+    // §14.36 live decoder state for the GUI's RX panel. Reflects the descriptor-
+    // driven rate switch from adaptive bursts (not just the negotiated rate).
+    CodeRate getDecoderCodeRate() const {
+        return streaming_decoder_ ? streaming_decoder_->getCodeRate() : CodeRate::AUTO;
+    }
+    Modulation getDecoderModulation() const {
+        return streaming_decoder_ ? streaming_decoder_->getModulation() : Modulation::DQPSK;
+    }
     float getMCDPSKThroughput() const { return mc_dpsk_config_.getRawBitRate() * 0.25f; } // R1/4 FEC
     void setMCDPSKConfig(const MultiCarrierDPSKConfig& config);
     void setMCDPSKProfile(int num_carriers, int samples_per_symbol, int bits_per_symbol) {
