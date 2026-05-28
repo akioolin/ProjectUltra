@@ -27,26 +27,31 @@ inline int recommendedPilotSpacing(Modulation mod, CodeRate rate) {
     const bool coherent = isCoherentModulation(mod);
 
     if (coherent) {
+        // 2026-05-28: env knob to retest sparser pilots on coherent QPSK with
+        // scattered_pilots + 2-D Wiener (now default). Earlier 2026-05-26
+        // spacing-10 attempt regressed worst-Good seed because the estimator
+        // could not track deep nulls with sparse pilots; that estimator is
+        // smarter now. ULTRA_COH_PILOT_SPACING applies to all non-R3/4 coherent
+        // rates (R1/4, R1/2, R2/3); ULTRA_COH_PILOT_SPACING_R34 overrides R3/4.
+        const auto envSpacing = [](const char* name, int default_value) {
+            if (const char* env = std::getenv(name)) {
+                const int v = std::atoi(env);
+                if (v >= 5 && v <= 20) return v;
+            }
+            return default_value;
+        };
         switch (rate) {
             case CodeRate::R3_4:
                 if (mod == Modulation::QAM32 || mod == Modulation::QAM64) {
                     return 5;
                 }
-                return 8;
-            // CARRIER-RECOVERY ATTEMPT (2026-05-26) REVERTED: widening R2/3 to spacing 10
-            // (47->53 data, +9% clean goodput) was NET-NEGATIVE multi-seed — the worst
-            // Good fade seeds broke (seed5: 40 CWFAIL, 630 bps, 2 downgrades; mean 1224 <
-            // spacing-5's 1262). PROVEN: pilot density is gated by channel-estimation
-            // quality, not just the delay-spread Nyquist limit — sparser pilots can't
-            // track the deepest frequency-selective nulls with the current Wiener. Carrier
-            // recovery requires the fade-diversity keystone (longer interleaved FEC +
-            // better estimation) FIRST; then sparser pilots become safe. Back to 5.
+                return envSpacing("ULTRA_COH_PILOT_SPACING_R34", 8);
             case CodeRate::R2_3:
             case CodeRate::R1_2:
             case CodeRate::R1_4:
             case CodeRate::R1_3:
             default:
-                return 5;
+                return envSpacing("ULTRA_COH_PILOT_SPACING", 5);
         }
     }
 
