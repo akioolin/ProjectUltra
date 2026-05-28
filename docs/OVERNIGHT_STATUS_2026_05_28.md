@@ -199,6 +199,48 @@ What's left to close it:
 
 The arithmetic: even stacking light-ACK + skip-descriptor (both blocked autonomously) lands at ~2700 bps end-to-end — not 3000. Closing the last 300 bps probably requires the wider-bandwidth lever or substantive PHY work (the leader's HF modem uses ~2.4kHz BW vs our ~2.8kHz, with tighter spacing and longer symbols — different architecture).
 
+## Ceiling analysis — why 3000 bps needs your call
+
+The data-phase end-to-end (excluding the ~8 s handshake/teardown):
+
+```
+g16_100KB best run:   102400 × 8 / (440 - 8) = 1896 bps
+g16_100KB mean run:   102400 × 8 / (470 - 8) = 1773 bps
+```
+
+So even isolating the data-transfer phase, the verified ceiling on the current
+OFDM_CHIRP stack is ~1900 bps. 3000 bps requires +58% gain INSIDE the data
+phase — and the safe per-cycle math (g16 R3/4 burst 20.3 s + descriptor 1.41 s
++ GROUP_ACK 1.82 s = 23.5 s, carrying 7296 bytes) caps on-air at:
+
+```
+on-air ceiling  = 7296 × 8 / 23.5 = 2484 bps
+end-to-end ceiling = on-air × ~0.85 (dead-air/T-R) = 2111 bps
+```
+
+Even an *infinitely lucky* clean channel with zero retransmits caps end-to-end
+at ~2110 bps on this stack. 3000 bps is **architecturally unreachable** without
+one of:
+
+1. **Wider OFDM bandwidth** — more data carriers in the same audio band (the
+   leader uses ~2.4 kHz with tighter spacing; we use ~2.8 kHz with our current
+   carrier layout). +25-35% raw rate. Requires waveform-level rewire.
+2. **N=1944 LDPC** (task #122) — same rate at -3 dB SNR threshold, enabling
+   R5/6 more frequently and possibly QAM rungs. Multi-subsystem rewire
+   (interleaver, frame format, MTU calc, soft-bit buffers).
+3. **Light GROUP_ACK** — saves 1.5 s/cycle ≈ +13%. Codified-blocked at
+   `modem_engine.cpp:421-428` with the 0.88<0.90 corr gate.
+4. **Skip descriptor on same-rate continuation** — saves 1.41 s/cycle ≈ +9%.
+   Needs rate-state contract between TX and RX (skip-descriptor variant);
+   attempting it without that contract regresses short transfers (this
+   session's light-descriptor commit `266a526` → revert `6c62843`).
+
+Stacking the three "softer" levers (light-ACK + skip-descriptor + N=1944)
+projects to ~2900 bps end-to-end if all three land cleanly. None is safe
+autonomously per the standing brainstorm-then-implement rule — each touches
+load-bearing protocol invariants. **The remaining gap to 3000 is genuinely
+your call.**
+
 ## Open questions for morning
 
 - Worth promoting g16 to the new default (currently env-gated ULTRA_BURST_GROUP_FRAMES=16)?
