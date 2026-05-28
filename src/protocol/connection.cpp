@@ -1772,6 +1772,39 @@ bool Connection::startBurstFileTransfer() {
         LOG_MODEM(ERROR, "Connection: Burst file transfer requires the burst callback");
         return false;
     }
+
+    // 2026-05-28: when the long-LDPC z=81 opt-in is active, the encoder will use
+    // cw_per_frame=2 (the architectural coupling: each frame carries 2x1944 coded
+    // bits = ~75% of the legacy 8x648 frame). The chunk sizer downstream
+    // (file_transfer_.getNextChunk via data_frame_cw_count_) MUST match so the
+    // frames it produces are sized for the encoder's CW count — otherwise the
+    // LDPC-encoded bytes don't match BurstInterleaver's expected B = cw*bytes_per_cw
+    // and the interleaver throws "frame size mismatch". Push cw=2 down to the
+    // connection layer here so getFixedFramePayloadCapacity returns the right
+    // value before the file is drained into chunks.
+    if (isOFDMMode(negotiated_mode_)) {
+        const char* env_z = std::getenv("ULTRA_LDPC_Z");
+        if (env_z && std::atoi(env_z) == 81) {
+            if (data_frame_cw_count_ != 2) {
+                LOG_MODEM(WARN, "Connection: z=81 opt-in active -> coercing data_frame_cw_count %d -> 2 for burst transfer",
+                          data_frame_cw_count_);
+                setForcedFrameCodewords(2, /*forced=*/false);
+            }
+            // 2026-05-28: REFRESH the file_transfer chunker's max payload at the
+            // z=81 capacity (which currentDataPayloadCapacity now returns when
+            // ULTRA_LDPC_Z=81 is set). Without this the chunker keeps the value
+            // it was given at handshake (Z=27 sized) and zero-pads 70% of every
+            // burst. setForcedFrameCodewords above also calls this internally,
+            // but only when it actually changes cw_count — the resize-only case
+            // wouldn't trigger it, so refresh unconditionally here.
+            const size_t z81_capacity = currentDataPayloadCapacity();
+            file_transfer_.setMaxChunkPayload(z81_capacity);
+            LOG_MODEM(WARN, "Connection: z=81 chunker refresh -> setMaxChunkPayload(%zu B/frame) "
+                            "(was using Z=27 capacity ~%zu)",
+                      z81_capacity,
+                      v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_));
+        }
+    }
     LOG_MODEM(WARN, "TRACE BF2: on_transmit_burst_ is set");
     const size_t group_size = connection_policy::burstInterleaveGroupFrames();
     LOG_MODEM(WARN, "TRACE BF3: group_size=%zu", group_size);
@@ -1849,24 +1882,52 @@ bool Connection::startBurstFileTransfer() {
             [this](uint16_t group_seq, bool is_resend) {
                 return formAndSendBurstGroup(group_seq, is_resend);
             });
-        // §14.36 drop-on-timeout: when no NACK/ACK arrives in time, the receiver's
-        // feedback didn't survive the same fade as the data. Treat silence as
-        // quality=0 so the controller steps down before the timeout-driven resend
-        // — otherwise the sender keeps hammering at the failed rate, blind.
-        burst_transport_.setOnAckTimeout([this]() {
-            applyAdaptiveRateFeedback(0.0f);
-        });
-        // §14.36 group-aware ACK timeout: arq_.getAckTimeout() is sized for the
-        // SR-ARQ window=8 burst. With a smaller burst_group_size (env-overridable)
-        // we're actually sending a SHORTER burst whose reply lands sooner. Holding
-        // the 27s budget on a ~6s burst wastes ~21s of dead air per failed group
-        // (the seed-2 88s NACK-blind stall). Scale proportionally; clamp floor to
-        // a safe minimum so we don't false-timeout on transient ACK losses.
+        // 2026-05-28: previously the timeout handler called
+        // applyAdaptiveRateFeedback(0.0f) — "treat silence as quality=0 so the
+        // controller steps down before the timeout-driven resend". In practice
+        // this fires false alarms on Good@20: the ACK is actually arriving ~2-4s
+        // AFTER the timer (e.g. ACK at 42.3s vs timeout at 38.8s) but bravo did
+        // decode the group cleanly (quality=0.99). One false alarm per group
+        // drops the rate R3/4 → R2/3 → R1/2 → R1/4 over three groups even though
+        // every group is delivered, and the lower rates compound the problem
+        // (slower TX → ACK arrives even later → another false-alarm drop).
+        //
+        // Now we DO NOT step the rate down on timeout. Resend stays at the same
+        // rate; if the ACK never arrives the burst_transport's max_retries gate
+        // still declares the link dead. If the ACK is just late, the next group
+        // proceeds at the original rate and the rate-up logic in
+        // applyAdaptiveRateFeedback (on actual decoded quality) handles climbs.
+        // No callback wired → BurstStopAndWaitController skips the feedback.
+        // §14.36 group-aware ACK timeout. 2026-05-28 corrected: the previous
+        // linear scaling `base * group_size / 8` (from SR-ARQ window=8) was
+        // wrong because it shrunk the FIXED overheads (ack TX time, decode
+        // jitter margin, audio chain RTT) proportionally to the burst size.
+        // Those don't shrink. With group=6 vs window=8, a base of 12464ms
+        // scaled to 9348ms — ~3s short of the real round-trip — and alpha
+        // was resending every group BEFORE bravo's GROUP_ACK could arrive,
+        // causing the 17-per-transfer dup-delivery cycle observed across all
+        // seeds. Recompute correctly: call the same airtime-derived formula
+        // with window=group_size so tx_burst_ms uses the actual burst length
+        // and the fixed overheads stay fixed.
         const size_t group_size = connection_policy::burstInterleaveGroupFrames();
         const uint32_t base_timeout = arq_.getAckTimeout();
-        const uint32_t scaled_timeout = static_cast<uint32_t>(
-            (static_cast<uint64_t>(base_timeout) * group_size + 4) / 8);
-        const uint32_t timeout_ms = std::max<uint32_t>(scaled_timeout, 6000u);
+        // Include the group-start chirp+LTS re-anchor airtime (~1.4s) that
+        // alpha emits at the start of each burst — without it, the formula
+        // under-estimates by exactly that amount. Plus a 2-second safety
+        // margin to cover real-world fade slowdowns (bravo's LTS decode
+        // may take an extra symbol or two on the bad-fade groups).
+        const uint32_t continuation_reanchor_ms =
+            connection_policy::wideOFDMShortReanchorChirpDurationMs();
+        const uint32_t burst_timeout = connection_policy::computeWideOFDMAckTimeoutMs(
+            data_modulation_, data_code_rate_, group_size,
+            arq_.getSackDelay(), arq_.getAckRepeatCount(),
+            data_frame_cw_count_,
+            continuation_reanchor_ms);
+        // Add ~2s safety margin — empirical fade-luck shows GROUP_ACK can
+        // arrive 1-1.5s after a clean formula-derived timeout, esp. on
+        // marginal-SNR groups. Better to over-wait than to fire a wasted
+        // resend that doubles airtime per group.
+        const uint32_t timeout_ms = std::max<uint32_t>(burst_timeout + 2000u, 14000u);
         burst_transport_.setAckTimeoutMs(timeout_ms);
         LOG_MODEM(WARN, "TRACE BF9: setAckTimeoutMs(%u) returned, calling startTransfer", timeout_ms);
         LOG_MODEM(INFO,
@@ -1966,8 +2027,19 @@ bool Connection::formAndSendBurstGroup(uint16_t group_seq, bool is_resend) {
     }
 
     const size_t group_size = connection_policy::burstInterleaveGroupFrames();
-    const size_t frame_cap =
-        v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
+    // 2026-05-28: z-aware capacity. At z=81 each codeword carries 3x as many
+    // info bytes as at z=27 (e.g. R3/4 cw=2: 96 B legacy -> 345 B at z=81).
+    // The burst chunker must size frames at the active z or the encoder pads
+    // 70% of every burst with zeros.
+    const int active_z = [this]() {
+        if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
+            if (std::atoi(env) == 81) return 81;
+        }
+        return 27;
+    }();
+    const size_t frame_cap = (active_z == 81)
+        ? v2::getFixedFramePayloadCapacityZ(data_code_rate_, data_frame_cw_count_, 81)
+        : v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
     constexpr size_t kFileDataOverhead = 5;  // TYPE(1) + OFFSET(4)
     if (frame_cap <= kFileDataOverhead) return false;
     const size_t per_frame_data = frame_cap - kFileDataOverhead;
@@ -2025,13 +2097,31 @@ bool Connection::formAndSendBurstGroup(uint16_t group_seq, bool is_resend) {
         frames.push_back(frame.serialize());
         consumed += this_data;
     }
-    burst_pending_advance_ = consumed;
+    // 2026-05-28: KEEP pending_advance from the FIRST form for this group.
+    // Resends at a lower rate cover FEWER bytes than the original (e.g. R3/4
+    // form: 1700 B; R2/3 resend: 1500 B). If the original form's burst is what
+    // bravo actually delivered (the common case — first attempt usually wins
+    // and the ACK chasing comes later), advancing by the resend's smaller
+    // value leaves the alpha cursor 200 B behind what bravo wrote. From then
+    // on alpha emits chunks at offsets before bravo's expected cursor, bravo
+    // buffers them as out-of-order forever, and the file never assembles.
+    //
+    // By preserving the first form's `consumed` we advance correctly when the
+    // first attempt delivered. The rare case where a later RESEND is what
+    // delivered (original lost) is handled later by the receiver buffering
+    // the extra bytes; bravo's offset-keyed assembler can write them either
+    // way. The right long-term fix is to put the byte range in BURST_HEADER
+    // so bravo can self-report exact coverage on GROUP_ACK.
+    if (!is_resend) {
+        burst_pending_advance_ = consumed;
+    }
     burst_pending_metadata_consumed_ = md_taken;
     LOG_MODEM(INFO,
               "Connection: form group_seq=%u rate=%s capacity=%zuB/frame consumed=%zuB"
-              " cursor=%zu/%zu%s",
+              " cursor=%zu/%zu pending_advance=%zu%s",
               group_seq, codeRateToString(data_code_rate_), per_frame_data, consumed,
               burst_file_cursor_, burst_file_payload_.size(),
+              burst_pending_advance_,
               is_resend ? " [RESEND]" : "");
     on_transmit_burst_(frames, group_seq);
     return true;
@@ -2046,6 +2136,17 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
     }
     if (quality < 0.0f) {
         return;  // no feedback byte (old peer / adaptation off on the far end)
+    }
+    // 2026-05-28: ULTRA_LOCK_RATE=1 holds the data rate fixed for the whole
+    // transfer. Used to validate the end-to-end burst transport path without
+    // the rate ladder muddying the diagnosis. The chunk-at-rate path stays on
+    // (it just re-chunks at the SAME rate on resend).
+    if (const char* lock = std::getenv("ULTRA_LOCK_RATE"); lock && std::atoi(lock) != 0) {
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "lock %s (q=%.2f)",
+                      codeRateToString(data_code_rate_), quality);
+        last_adaptive_action_ = buf;
+        return;
     }
     const CodeRate prev = data_code_rate_;
     CodeRate next = rate_controller_.update(prev, quality);
@@ -2063,6 +2164,27 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
     char buf[96];
     if (next != prev) {
         data_code_rate_ = next;
+        // 2026-05-28: recompute burst ack_timeout for the new rate. Lower
+        // rates take longer per frame; if we leave the old (faster-rate)
+        // timeout in place, alpha will fire premature resends every group
+        // and waste airtime on dup-deliveries (same bug the initial
+        // 9348ms→14000ms fix solved at startup, but stickily across rate
+        // changes too).
+        if (use_burst_transport_) {
+            const size_t group_size = connection_policy::burstInterleaveGroupFrames();
+            const uint32_t continuation_reanchor_ms =
+                connection_policy::wideOFDMShortReanchorChirpDurationMs();
+            const uint32_t burst_timeout = connection_policy::computeWideOFDMAckTimeoutMs(
+                data_modulation_, data_code_rate_, group_size,
+                arq_.getSackDelay(), arq_.getAckRepeatCount(),
+                data_frame_cw_count_, continuation_reanchor_ms);
+            const uint32_t timeout_ms = std::max<uint32_t>(burst_timeout + 2000u, 14000u);
+            burst_transport_.setAckTimeoutMs(timeout_ms);
+            LOG_MODEM(INFO,
+                      "Connection: ack_timeout recomputed for rate change: %ums "
+                      "(rate=%s, group_size=%zu)",
+                      timeout_ms, codeRateToString(data_code_rate_), group_size);
+        }
         std::snprintf(buf, sizeof(buf), "rate %s -> %s (q=%.2f)",
                       codeRateToString(prev), codeRateToString(next), quality);
         LOG_MODEM(INFO, "Connection: adaptive %s", buf);
@@ -3747,6 +3869,17 @@ bool Connection::usesBoundedVariableMCDPSKFrames() const {
 
 size_t Connection::currentDataPayloadCapacity() const {
     if (isOFDMMode(negotiated_mode_)) {
+        // 2026-05-28: when the long-LDPC z=81 opt-in is active, info bytes per
+        // codeword scale 3x. Without this branch the chunker would size frames
+        // at the Z=27 capacity (e.g. 96 B/frame at R3/4 cw=2) while the encoder
+        // produces Z=81 frames (345 B/frame), so 70%+ of every burst is zero
+        // padding — the real-world throughput killer the user surfaced.
+        if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
+            if (std::atoi(env) == 81) {
+                return v2::getFixedFramePayloadCapacityZ(
+                    data_code_rate_, data_frame_cw_count_, 81);
+            }
+        }
         return v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
     }
     if (usesBoundedVariableMCDPSKFrames()) {
@@ -3830,6 +3963,28 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
     configureArqForCurrentDataMode();
     if (rate_changed || cw_changed) {
         soft_combine_harq_.clear();
+        // 2026-05-28: recompute burst ack_timeout for the new mode (same
+        // formula as startup / applyAdaptiveRateFeedback). MODE_CHANGE
+        // negotiations can land on a slower rate where the original
+        // timeout no longer covers the burst+ack round-trip; without
+        // this, the next burst at the new rate will fire premature
+        // resends every group.
+        if (use_burst_transport_) {
+            const size_t group_size = connection_policy::burstInterleaveGroupFrames();
+            const uint32_t continuation_reanchor_ms =
+                connection_policy::wideOFDMShortReanchorChirpDurationMs();
+            const uint32_t burst_timeout = connection_policy::computeWideOFDMAckTimeoutMs(
+                data_modulation_, data_code_rate_, group_size,
+                arq_.getSackDelay(), arq_.getAckRepeatCount(),
+                data_frame_cw_count_, continuation_reanchor_ms);
+            const uint32_t timeout_ms = std::max<uint32_t>(burst_timeout + 2000u, 14000u);
+            burst_transport_.setAckTimeoutMs(timeout_ms);
+            LOG_MODEM(INFO,
+                      "Connection: ack_timeout recomputed for MODE_CHANGE: %ums "
+                      "(rate=%s mod=%s cw=%d)",
+                      timeout_ms, codeRateToString(data_code_rate_),
+                      modulationToString(data_modulation_), data_frame_cw_count_);
+        }
     }
     resetAdaptiveModeController();
 

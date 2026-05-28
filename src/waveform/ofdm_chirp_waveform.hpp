@@ -68,6 +68,14 @@ public:
     void setCarrierLdpcInterleaverEnabled(bool enabled) override;
     void setActiveLDPCLiftingZ(uint8_t z) override {
         ldpc_lifting_z_ = (z == 81) ? 81 : 27;  // only 27/81 allowed; defensive
+        // 2026-05-28: propagate to the OFDM demodulator so its "we have a
+        // codeword" gate (active_ldpc_block_size) waits for the FULL Z=81
+        // codeword (1944 bits) instead of returning after Z=27 (648 bits).
+        // Without this the burst deinterleaver gets 1296 bits per frame
+        // (2x648) when it expects 3888 (2x1944) and throws.
+        if (demodulator_) {
+            demodulator_->setActiveLDPCBlockSize(ldpc_lifting_z_ == 81 ? 1944 : 648);
+        }
     }
 
     // ========================================================================

@@ -514,9 +514,9 @@ bool OFDMDemodulator::process(SampleSpan samples) {
 
             // Break early once we have enough for a codeword
             // This prevents processing multiple frames in one call
-            if (impl_->soft_bits.size() >= LDPC_BLOCK_SIZE) {
+            if (impl_->soft_bits.size() >= impl_->active_ldpc_block_size) {
                 LOG_DEMOD(DEBUG, "Have %zu soft bits (>= %zu), returning early",
-                          impl_->soft_bits.size(), LDPC_BLOCK_SIZE);
+                          impl_->soft_bits.size(), impl_->active_ldpc_block_size);
                 break;
             }
 
@@ -526,7 +526,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 impl_->state.store(Impl::State::SEARCHING);
                 impl_->synced_symbol_count.store(0);
                 impl_->idle_call_count.store(0);
-                return impl_->soft_bits.size() >= LDPC_BLOCK_SIZE;
+                return impl_->soft_bits.size() >= impl_->active_ldpc_block_size;
             }
         }
 
@@ -549,13 +549,13 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 impl_->state.store(Impl::State::SEARCHING);
                 impl_->synced_symbol_count.store(0);
                 impl_->idle_call_count.store(0);
-                return impl_->soft_bits.size() >= LDPC_BLOCK_SIZE;
+                return impl_->soft_bits.size() >= impl_->active_ldpc_block_size;
             }
         } else {
             impl_->idle_call_count.store(0);
         }
 
-        bool has_codeword = impl_->soft_bits.size() >= LDPC_BLOCK_SIZE;
+        bool has_codeword = impl_->soft_bits.size() >= impl_->active_ldpc_block_size;
 
         // Frame completion detection
         bool truly_idle = samples.empty() && symbols_processed == 0;
@@ -612,17 +612,31 @@ std::vector<float> OFDMDemodulator::getSoftBits() {
         LOG_DEMOD(TRACE, "First 24 LLRs: %s", buf);
     }
 
-    if (impl_->soft_bits.size() <= LDPC_BLOCK_SIZE) {
+    // 2026-05-28: use runtime active_ldpc_block_size (default 648; set to 1944
+    // by the streaming decoder when a burst announces Z=81) so we return one
+    // full codeword's worth, not the legacy 648 chunk that BurstInterleaver
+    // then rejects for "soft bits size mismatch".
+    const size_t block = impl_->active_ldpc_block_size;
+    if (impl_->soft_bits.size() <= block) {
         auto bits = std::move(impl_->soft_bits);
         impl_->soft_bits.clear();
         return bits;
     } else {
         std::vector<float> bits(impl_->soft_bits.begin(),
-                                impl_->soft_bits.begin() + LDPC_BLOCK_SIZE);
+                                impl_->soft_bits.begin() + block);
         impl_->soft_bits.erase(impl_->soft_bits.begin(),
-                               impl_->soft_bits.begin() + LDPC_BLOCK_SIZE);
+                               impl_->soft_bits.begin() + block);
         return bits;
     }
+}
+
+void OFDMDemodulator::setActiveLDPCBlockSize(size_t bits) {
+    if (bits == 0) return;
+    impl_->active_ldpc_block_size = bits;
+}
+
+size_t OFDMDemodulator::getActiveLDPCBlockSize() const {
+    return impl_->active_ldpc_block_size;
 }
 
 ChannelQuality OFDMDemodulator::getChannelQuality() const {
@@ -892,7 +906,7 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     impl_->constellation_capacity_air_bits_ = complete_data_symbols * bits_per_symbol;
     impl_->constellation_valid_air_bits_ =
         (bits_per_symbol > 0)
-            ? (impl_->constellation_capacity_air_bits_ / LDPC_BLOCK_SIZE) * LDPC_BLOCK_SIZE
+            ? (impl_->constellation_capacity_air_bits_ / impl_->active_ldpc_block_size) * impl_->active_ldpc_block_size
             : 0;
 
     while (remaining - data_offset >= impl_->symbol_samples) {
@@ -955,9 +969,9 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     }
 
     LOG_DEMOD(DEBUG, "OFDM processPresynced: %d symbols, %zu soft bits, need %d",
-              impl_->synced_symbol_count.load(), impl_->soft_bits.size(), LDPC_BLOCK_SIZE);
+              impl_->synced_symbol_count.load(), impl_->soft_bits.size(), impl_->active_ldpc_block_size);
 
-    return impl_->soft_bits.size() >= LDPC_BLOCK_SIZE;
+    return impl_->soft_bits.size() >= impl_->active_ldpc_block_size;
 }
 
 void OFDMDemodulator::reset() {

@@ -948,20 +948,28 @@ bool OFDMChirpWaveform::process(SampleSpan samples) {
     }
 
     if (ready) {
-        // Retrieve ALL soft bits from demodulator
-        // getSoftBits() returns LDPC_BLOCK_SIZE (648) bits at a time,
-        // so we need to call it multiple times to get all available bits
+        // Retrieve ALL soft bits from demodulator. getSoftBits() returns one
+        // codeword-sized chunk per call — 648 bits at Z=27, 1944 at Z=81.
+        // 2026-05-28: was hardcoded `chunk.size() != LDPC_CODEWORD_BITS` (==648)
+        // → ANY chunk produced at Z=81 (1944 bits) failed the check and the
+        // loop bailed without collecting anything, surfacing as
+        // "getSoftBits() returned empty" upstream and stalling burst data
+        // frame processing. Compare against the demod's runtime block size
+        // instead so both Z=27 and Z=81 paths work.
+        const size_t codeword_bits =
+            demodulator_ ? demodulator_->getActiveLDPCBlockSize()
+                         : LDPC_CODEWORD_BITS;
         soft_bits_.clear();
         while (demodulator_->hasPendingData()) {
             auto chunk = demodulator_->getSoftBits();
-            if (chunk.size() != LDPC_CODEWORD_BITS) break;
+            if (chunk.size() != codeword_bits) break;
             soft_bits_.insert(soft_bits_.end(), chunk.begin(), chunk.end());
         }
 
-        const size_t codeword_count = soft_bits_.size() / LDPC_CODEWORD_BITS;
+        const size_t codeword_count = soft_bits_.size() / codeword_bits;
         const bool eligible = carrierLdpcPlumbingEligible() &&
             !soft_bits_.empty() &&
-            (soft_bits_.size() % LDPC_CODEWORD_BITS == 0);
+            (soft_bits_.size() % codeword_bits == 0);
         const bool masked_carriers =
             !isAllOnMask(carrier_mask_, CARRIER_LDPC_MASK_CARRIERS);
         const bool carrier_ldpc_active = eligible &&

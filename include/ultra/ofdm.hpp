@@ -129,6 +129,16 @@ public:
     // Positive = start symbols later, Negative = start symbols earlier
     void setTimingOffset(int offset);
 
+    // 2026-05-28: runtime-settable LDPC codeword bit count used as the
+    // "we have a codeword's worth of soft bits" gate inside processPresynced
+    // and getSoftBits. Default 648 (Z=27 legacy); set to 1944 when the
+    // active burst announces Z=81 (n=1944) so the demod waits for the full
+    // long-LDPC codeword before returning. Without this, processPresynced
+    // returns after 648 bits of a 1944-bit codeword and the BurstInterleaver
+    // throws "soft bits size mismatch" downstream.
+    void setActiveLDPCBlockSize(size_t bits);
+    size_t getActiveLDPCBlockSize() const;
+
     // Process pre-synced samples (bypass Schmidl-Cox preamble detection)
     // Use when external timing sync is provided (e.g., chirp preamble)
     //

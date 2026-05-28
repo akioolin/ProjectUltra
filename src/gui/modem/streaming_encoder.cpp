@@ -594,15 +594,29 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
         Samples preamble;
         if (frame_is_group_start[i] && protocol::isOFDMMode(mode_) &&
             waveform_->supportsDataPreamble()) {
-            // Burst-interleaved group start: emit a PURE light LTS preamble (no
-            // chirp anchor, no short re-anchor chirp prefix) so the connected
-            // warm-sync RX — which does not run chirp detection mid-stream —
-            // syncs it and reads the negated-LTS burst marker. A full/chirp
-            // preamble here is invisible to the warm LTS detector, so the marker
-            // is never seen and the RX cannot enter burst accumulation. Warm
-            // timing is already seeded by the pre-burst DATA_START frame, so the
-            // group start does not need its own chirp timing anchor.
-            preamble = connectedDataPreambleForFrame(/*allow_short_reanchor=*/false);
+            // 2026-05-28: FULL chirp+LTS preamble at group-start.
+            //
+            // Earlier we tried two lighter alternatives, neither worked:
+            //   - pure light LTS: stalled Group 1+ because bravo's warm-sync
+            //     went DEGRADED across the half-duplex BURST_HEADER → data
+            //     gap and the data sync corr stayed <0.52 (full-anchor
+            //     threshold), so bravo never re-acquired sync.
+            //   - 500 ms short re-anchor (chirp prefix + LTS): broke frame-
+            //     stride timing on group members — bravo's LTS phase slope
+            //     drifted 47°→126° per carrier over 4 frames, the demod
+            //     produced ~50% zero LLRs, and bravo died silently in the
+            //     demod code on frame 5/6.
+            //
+            // Full preamble (the legacy waveform_->generatePreamble() that
+            // every CONTROL frame uses) gives bravo a deterministic chirp+LTS
+            // anchor per group. Costs ~1.4 s airtime per group; we accept that
+            // for reliability and will reclaim the overhead later (likely via
+            // a proper FSK ACK channel + tightened warm-sync hand-off so the
+            // group-start can shrink back to light LTS).
+            preamble = waveform_->generatePreamble();
+            LOG_MODEM(INFO,
+                      "[%s] Full chirp+LTS preamble emitted for burst group-start (reliability mode)",
+                      log_prefix_.c_str());
         } else if (i == 0 && (force_first_full_preamble || waveform_->supportsDataPreamble())) {
             preamble = waveform_->generatePreamble();
             if (force_first_full_preamble) {

@@ -468,8 +468,48 @@ void StreamingDecoder::finalizeBurstGroup() {
         return 27;
     }();
     const int bytes_per_cw_rx = (ldpc_z_for_burst == 81) ? 243 : 81;
-    auto logical_soft = fec::BurstInterleaver::deinterleave(
-        burst_soft_buffer_, fixed_frame_codewords_, bytes_per_cw_rx);
+
+    // 2026-05-28: wrap the deinterleave call so a size-mismatch throw (e.g.,
+    // the OFDM stream processor's LDPC_BLOCK_SIZE=648 gate returned the
+    // demodulator early at z=81 and the per-frame buffer is only 1326 bits
+    // instead of the 3888 needed for 2x1944 at z=81) is surfaced as a logged
+    // ERROR instead of an uncaught exception killing the audio thread.
+    //
+    // Logs every input parameter we need to diagnose the actual mismatch:
+    // expected vs received bits per frame, per-frame buffer sizes, z, cw.
+    std::vector<std::vector<float>> logical_soft;
+    try {
+        logical_soft = fec::BurstInterleaver::deinterleave(
+            burst_soft_buffer_, fixed_frame_codewords_, bytes_per_cw_rx);
+    } catch (const std::exception& e) {
+        const int expected_bits =
+            fec::BurstInterleaver::bitsPerFrame(fixed_frame_codewords_, bytes_per_cw_rx);
+        const int n_frames = static_cast<int>(burst_soft_buffer_.size());
+        size_t min_size = burst_soft_buffer_.empty() ? 0 : SIZE_MAX;
+        size_t max_size = 0;
+        for (const auto& f : burst_soft_buffer_) {
+            min_size = std::min(min_size, f.size());
+            max_size = std::max(max_size, f.size());
+        }
+        LOG_MODEM(ERROR,
+                  "[%s] BurstInterleaver::deinterleave THREW '%s' — "
+                  "z=%d cw=%d bytes_per_cw=%d expected_bits_per_frame=%d "
+                  "n_frames=%d soft_buffer_min=%zu max=%zu — group dropped",
+                  log_prefix_.c_str(), e.what(),
+                  ldpc_z_for_burst, fixed_frame_codewords_, bytes_per_cw_rx,
+                  expected_bits, n_frames, min_size, max_size);
+        // Bail out — finalize as a 0/N group failure so the burst transport
+        // controller resends. Without this catch the thread dies silently
+        // and the entire RX side stops responding.
+        burst_soft_buffer_.clear();
+        return;
+    } catch (...) {
+        LOG_MODEM(ERROR,
+                  "[%s] BurstInterleaver::deinterleave threw UNKNOWN exception — group dropped",
+                  log_prefix_.c_str());
+        burst_soft_buffer_.clear();
+        return;
+    }
 
     int logical_ok = 0;
     int logical_fail = 0;
@@ -602,6 +642,19 @@ void StreamingDecoder::finalizeBurstGroup() {
                   log_prefix_.c_str(), last_burst_group_seq_, logical_ok,
                   burst_group_size, all_ok ? 1 : 0, group_max_iters, quality);
         burst_group_callback_(last_burst_group_seq_, burst_group_frames, all_ok, quality);
+    }
+
+    // 2026-05-28: snap the waveform's active LDPC lifting back to legacy z=27
+    // now that the data group is delivered. The descriptor's z=81 was applied
+    // to the waveform on BURST_HEADER decode (Phase 3) so getMinSamplesForCWCount
+    // returned the right airtime for the N=1944 data frames during the group.
+    // But the SAME accessor is queried by sync-acquisition for the NEXT
+    // BURST_HEADER (which is always a 1-CW short LDPC control frame at z=27).
+    // Without this reset, the receiver searches for a ~3x oversized next header
+    // and never re-acquires sync, stalling the multi-group transfer. The next
+    // BURST_HEADER will re-set z=81 when it decodes.
+    if (waveform_) {
+        waveform_->setActiveLDPCLiftingZ(27);
     }
 
     if (diagnostics_enabled) {

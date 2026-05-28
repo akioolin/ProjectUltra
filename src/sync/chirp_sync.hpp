@@ -489,6 +489,7 @@ public:
             return result;  // success = false
         }
 
+
         // Apply position correction for CFO-induced chirp peak shift.
         //
         // The complex correlation is CFO-tolerant in amplitude but the peak

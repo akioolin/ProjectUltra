@@ -95,6 +95,14 @@ struct OFDMDemodulator::Impl {
     mutable float last_pilot_temporal_cv = 0.0f;
     mutable float last_pilot_symbol_mean_cv = 0.0f;
 
+    // 2026-05-28: runtime LDPC codeword block size. Default 648 (Z=27 legacy).
+    // Set to 1944 via OFDMDemodulator::setActiveLDPCBlockSize when a burst
+    // descriptor announces Z=81 so the "we have a codeword's worth" gate inside
+    // processPresynced waits for the full 1944-bit codeword instead of returning
+    // after 648 bits. Source of truth replaces the demod_constants::LDPC_BLOCK_SIZE
+    // constexpr at the gate sites; the constant is kept for non-data sync paths.
+    size_t active_ldpc_block_size = 648;
+
     // Output data
     Bytes demod_data;
     std::vector<float> soft_bits;

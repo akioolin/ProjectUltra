@@ -560,13 +560,14 @@ std::vector<float> ModemEngine::transmitBurst(const std::vector<Bytes>& frame_da
     // a connection-layer policy gates this, it can be replaced with a
     // member flag set from the connection state.
     //
-    // ARCHITECTURAL COUPLING: z=81 implies cw_per_frame=1. Each frame carries
-    // exactly one 1944-bit codeword (vs the legacy 8 codewords of 648 bits).
-    // This keeps frame airtime BELOW the legacy frame (~1944 bits/frame instead
-    // of ~5184) so the group/ack timeout stays valid, AND it makes the burst
-    // interleaver spread one full codeword across the group_size frames —
-    // strongest fade diversity. Decoupling z from cw produces 8x1944=15552 bit
-    // frames that blow past ack_timeout, which the user surfaced empirically.
+    // ARCHITECTURAL COUPLING: z=81 implies cw_per_frame=2. Each frame carries
+    // two 1944-bit codewords (vs the legacy 8 of 648 bits). At QPSK R3/4 on
+    // 58 carriers this gives frame airtime ~75% of legacy (3888 vs 5184 coded
+    // bits/frame) and a 16-frame burst spans ~1.8x coherence time at 0.1 Hz
+    // Doppler — strong fade diversity. Earlier choice of cw=1 produced a
+    // burst that fit inside one coherence interval (worse diversity) and
+    // amortized the per-group overhead badly; cw=2 is the actual sweet
+    // spot per the rung math the user derived empirically.
     if (protocol::isOFDMMode(waveform_mode_)) {
         static const uint8_t kBurstLiftingZ = []() -> uint8_t {
             if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
@@ -576,7 +577,10 @@ std::vector<float> ModemEngine::transmitBurst(const std::vector<Bytes>& frame_da
         }();
         streaming_encoder_->setLDPCLiftingZ(kBurstLiftingZ);
         if (kBurstLiftingZ == 81) {
-            streaming_encoder_->setFixedFrameCodewords(1);
+            streaming_encoder_->setFixedFrameCodewords(2);
+            // 2026-05-28: reverted adaptive short-re-anchor — broke frame-stride
+            // timing on group members. Pure light LTS at group-start until the
+            // turnaround sync hand-off is hardened properly.
         }
         // At z=27, leave fixed_frame_codewords_ at whatever the connection
         // layer / data-mode policy set (typically 4 or 8) — legacy behavior.
@@ -584,7 +588,29 @@ std::vector<float> ModemEngine::transmitBurst(const std::vector<Bytes>& frame_da
         streaming_encoder_->setLDPCLiftingZ(27);  // MC-DPSK always short
     }
 
-    auto samples = streaming_encoder_->encodeBurstLight(frame_data_list);
+    // 2026-05-28: wrap the encoder TX path so any uncaught exception (e.g. a
+    // BurstInterleaver / FrameInterleaver size mismatch on a not-yet-validated
+    // (z, cw) combination) is surfaced as a WARN log rather than propagating
+    // through the audio thread and silently killing the process. The earlier
+    // z=81/cw=1 silent abort had no IPS crash dump because it was an uncaught
+    // throw, not SIGSEGV — this catch turns "alpha disappears" into "ERROR:
+    // <message>" so the actual failure point is visible.
+    std::vector<float> samples;
+    try {
+        samples = streaming_encoder_->encodeBurstLight(frame_data_list);
+    } catch (const std::exception& e) {
+        LOG_MODEM(ERROR, "[%s] TX Burst: encodeBurstLight THREW '%s' (frames=%zu, z=%u, cw=%d, mod=%s, rate=%s) — TX aborted, no samples",
+                  log_prefix_.c_str(), e.what(), frame_data_list.size(),
+                  static_cast<unsigned>(streaming_encoder_->getLDPCLiftingZ()),
+                  streaming_encoder_->getFixedFrameCodewords(),
+                  modulationToString(data_modulation_),
+                  codeRateToString(data_code_rate_));
+        return {};
+    } catch (...) {
+        LOG_MODEM(ERROR, "[%s] TX Burst: encodeBurstLight threw UNKNOWN exception — TX aborted",
+                  log_prefix_.c_str());
+        return {};
+    }
 
     if (samples.empty()) {
         LOG_MODEM(ERROR, "[%s] TX Burst: encodeBurstLight returned empty", log_prefix_.c_str());

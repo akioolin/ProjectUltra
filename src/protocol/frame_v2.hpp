@@ -1040,6 +1040,45 @@ inline size_t getFixedFramePayloadCapacity(CodeRate rate, int cw_count) {
     return total_info_bytes - FIXED_FRAME_OVERHEAD;
 }
 
+// 2026-05-28: number of info-block columns in the 802.11n base matrix per rate.
+//   k_per_lifting = infoBlocksForRate(rate) * Z.
+// Mirrors the Codex-built helper at frame_v2.cpp::infoBlocksForRate (file-local).
+// Exposed here so capacity callers in the connection layer can size chunks at
+// the active lifting (Z=27 -> legacy k; Z=81 -> 3x k for the long-LDPC path).
+inline int infoBlocksForRateBaseMatrix(CodeRate r) {
+    switch (r) {
+        case CodeRate::R1_4: return 6;
+        case CodeRate::R1_2: return 12;
+        case CodeRate::R2_3: return 16;
+        case CodeRate::R3_4: return 18;
+        case CodeRate::R5_6: return 20;
+        default:             return 12;
+    }
+}
+
+// Z-aware info bytes per codeword. Lifting Z=27 reproduces getBytesPerCodeword.
+// Z=81 gives 3x as many info bytes per CW — the actual long-LDPC capacity.
+inline size_t getBytesPerCodewordZ(CodeRate rate, int lifting_z) {
+    return static_cast<size_t>(infoBlocksForRateBaseMatrix(rate))
+           * static_cast<size_t>(lifting_z) / 8;
+}
+
+/**
+ * Z-aware payload capacity for a fixed frame. The legacy getFixedFramePayloadCapacity
+ * computes from getBytesPerCodeword() which uses hardcoded Z=27 info bit counts —
+ * that's correct only on the legacy z=27 ladder. The long-LDPC z=81 path produces
+ * frames with ~3x more info bytes per CW (e.g. R3/4 cw=2: 96 B legacy -> 345 B at z=81).
+ * Pass lifting_z=27 for legacy; pass 81 for the long-LDPC data path so the chunker
+ * fills the full frame instead of zero-padding 70% of every burst.
+ */
+inline size_t getFixedFramePayloadCapacityZ(CodeRate rate, int cw_count, int lifting_z) {
+    cw_count = sanitizeFixedFrameCodewords(cw_count);
+    size_t total_info_bytes = static_cast<size_t>(cw_count) * getBytesPerCodewordZ(rate, lifting_z);
+    return total_info_bytes > FIXED_FRAME_OVERHEAD
+        ? total_info_bytes - FIXED_FRAME_OVERHEAD
+        : 0;
+}
+
 /**
  * Get payload capacity for a variable LDPC data frame at a target CW count.
  *

@@ -799,6 +799,15 @@ void StreamingDecoder::decodeCurrentFrame() {
                             // forever. Reset frame-arrival tracking and expect the
                             // group's anchor fresh, identical to the no-descriptor sync
                             // path (mirrors the FILE_CANCEL control handling).
+                            //
+                            // 2026-05-28: reliability first — keep expect_full_ofdm_anchor_
+                            // armed so bravo waits for the full chirp+LTS that alpha now
+                            // emits at the start of each burst group (see streaming_encoder
+                            // group-start preamble change). The light-LTS-only path was
+                            // dropping Group 1+ because warm-sync goes DEGRADED across the
+                            // BURST_HEADER→data gap and the data sync corr stays <0.52.
+                            // Airtime overhead from the per-group full chirp is acceptable
+                            // until the warm-sync hand-off across the gap is hardened.
                             {
                                 std::lock_guard<std::mutex> lock(buffer_mutex_);
                                 sync_from_warm_timed_window_ = false;
