@@ -228,6 +228,42 @@ void test_moderate_snr5_100ms_aligned() {
 // quantify the fading "cost" vs the AWGN baseline
 // ============================================================================
 
+void test_good_snr0_100ms_aligned() {
+    std::printf("[test] good_snr0_100ms_aligned\n");
+    auto cfg = itu::good(0.0f);
+    const auto r = runWattersonCell(cfg, kSymbolMsMargSNR, 50, 0xA401);
+    printCell("Good@0   / 100ms / aligned", r);
+    EXPECT_EQ(r.decoded_wrong, 0);
+    EXPECT(r.decoded_ok >= 45);   // ≥ 90% — should hold per the staircase
+}
+
+void test_good_snr_minus5_200ms_aligned() {
+    std::printf("[test] good_snr_minus5_200ms_aligned\n");
+    auto cfg = itu::good(-5.0f);
+    const auto r = runWattersonCell(cfg, kSymbolMsWeakSNR, 50, 0xA501);
+    printCell("Good@-5  / 200ms / aligned", r);
+    EXPECT_EQ(r.decoded_wrong, 0);
+    EXPECT(r.decoded_ok >= 40);   // ≥ 80% — weak-signal floor
+}
+
+void test_moderate_snr0_100ms_aligned() {
+    std::printf("[test] moderate_snr0_100ms_aligned\n");
+    auto cfg = itu::moderate(0.0f);
+    const auto r = runWattersonCell(cfg, kSymbolMsMargSNR, 50, 0xB301);
+    printCell("Moderate@0  / 100ms / aligned", r);
+    EXPECT_EQ(r.decoded_wrong, 0);
+    EXPECT(r.decoded_ok >= 42);   // ≥ 84%
+}
+
+void test_moderate_snr_minus5_200ms_aligned() {
+    std::printf("[test] moderate_snr_minus5_200ms_aligned\n");
+    auto cfg = itu::moderate(-5.0f);
+    const auto r = runWattersonCell(cfg, kSymbolMsWeakSNR, 50, 0xB401);
+    printCell("Moderate@-5 / 200ms / aligned", r);
+    EXPECT_EQ(r.decoded_wrong, 0);
+    EXPECT(r.decoded_ok >= 35);   // ≥ 70% — pushing the floor on Moderate
+}
+
 void test_good_no_fading_snr10_25ms_reference() {
     std::printf("[test] good_no_fading_snr10_25ms_reference\n");
     auto cfg = itu::good(10.0f);
@@ -249,6 +285,10 @@ int main() {
     test_moderate_snr20_25ms_aligned();
     test_moderate_snr10_50ms_aligned();
     test_moderate_snr5_100ms_aligned();
+    test_good_snr0_100ms_aligned();
+    test_good_snr_minus5_200ms_aligned();
+    test_moderate_snr0_100ms_aligned();
+    test_moderate_snr_minus5_200ms_aligned();
     test_good_no_fading_snr10_25ms_reference();
 
     if (g_failures > 0) {
