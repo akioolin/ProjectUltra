@@ -69,6 +69,7 @@ Realistic math for tomorrow's path: **g8 + light ACK + R5/6** = 2800-3000 bps SS
 | `8b7c39e` | adapt: R5/6 climb target in RateController ladder |
 | `46f7edc` | crash fix v2: defer ALL setDataMode → covers ALPHA TX-side adaptive rate |
 | `90f2017` | crash fix v3: defer setConnectedOFDMMode waveform_ rebuild (parallel path missed by v2) |
+| `c574e00` | burst: promote g16 to default group size (Phase D win) |
 
 ## Crashes (3 in the night, all same signature)
 
@@ -120,6 +121,15 @@ g32 on-air goodput numbers (4000 bps) look inflated relative to elapsed-derived 
 | Skip descriptor on same-rate continuation (1.4 s saved per cycle) | not started | ~+350 |
 
 g16 + light-ACK + skip-descriptor + R5/6 = projected ~2900-3000 bps SS. Realistic; matches the time-budget math above. **g16 is the new recommended default** (replacing the env-gated g8 we ran the night on).
+
+## g16-default smoke verify (4:30am, post commit `c574e00`)
+
+| Cell | Pass | On-air mean | End-to-end mean |
+|---|---|---|---|
+| g16def_21KB  | 3/3 | 2197 bps | 1055 bps |
+| g16def_100KB | 3/3 | 2130 bps | **1734 bps** SS |
+
+6/6 PASS. Zero crashes. The new g16 default matches Phase D's g16 numbers — no regression from removing the env-gate. **g16 is now the shipping default.**
 
 ## v3 fix verification (3:55am)
 
