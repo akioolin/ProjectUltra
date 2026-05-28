@@ -1548,6 +1548,17 @@ bool Connection::sendFile(const std::string& filepath) {
         return false;
     }
 
+    // 2026-05-28: bypass the legacy ISS-turn-taking gate when burst transport
+    // is active. Burst transport is one-way sender-driven (design §14.27) —
+    // the sender owns the turn for the whole transfer and the receiver's only
+    // protocol response is GROUP_ACK/NACK. The legacy gate was for the SR-ARQ
+    // bidirectional chat path and held things up unnecessarily here — it also
+    // sometimes never cleared (e.g. with N=1944 frame-size mismatches in
+    // arq_.isReadyToSend()) leaving file transfers permanently queued.
+    if (use_burst_transport_ && isOFDMMode(negotiated_mode_)) {
+        return startFileTransferNow(filepath);
+    }
+
     if (!local_data_turn_ ||
         peer_data_turn_requested_ ||
         file_cancel_confirm_pending_ ||
