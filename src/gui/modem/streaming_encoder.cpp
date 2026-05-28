@@ -835,9 +835,16 @@ void StreamingEncoder::updateInterleaver() {
         static_cast<int>(ofdm_config_.pilot_spacing),
         modulation_);
 
-    // Create channel interleaver
+    // Create channel interleaver. At z=81 (N=1944) each LDPC codeword is 1944 bits
+    // instead of 648, so the interleaver block size must match.
+    static const size_t ldpc_codeword_bits_ci = []() -> size_t {
+        if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
+            if (std::atoi(env) == 81) return 1944;
+        }
+        return v2::LDPC_CODEWORD_BITS;
+    }();
     channel_interleaver_ = std::make_unique<ChannelInterleaver>(
-        bits_per_symbol, v2::LDPC_CODEWORD_BITS);
+        bits_per_symbol, ldpc_codeword_bits_ci);
 
     LOG_MODEM(INFO, "[%s] Channel interleaver: %d data carriers × %d bits = %d bits/symbol",
               log_prefix_.c_str(), data_carriers, bits_per_carrier, bits_per_symbol);

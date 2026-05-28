@@ -565,7 +565,14 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
         if (protocol::isOFDMMode(mode)) {
             bps = 60;
         }
-        interleaver_ = std::make_unique<ChannelInterleaver>(bps, v2::LDPC_CODEWORD_BITS);
+        // Match the encoder's z=81-aware interleaver block size.
+        static const size_t ldpc_codeword_bits_ci = []() -> size_t {
+            if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
+                if (std::atoi(env) == 81) return 1944;
+            }
+            return v2::LDPC_CODEWORD_BITS;
+        }();
+        interleaver_ = std::make_unique<ChannelInterleaver>(bps, ldpc_codeword_bits_ci);
     }
 
     state_ = DecoderState::SEARCHING;

@@ -2602,7 +2602,14 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 }
 
                 if (apply_channel_deinterleave) {
-                    ChannelInterleaver channel_deinterleaver(bps, v2::LDPC_CODEWORD_BITS);
+                    // Match the encoder's z=81-aware interleaver block size.
+                    static const size_t ldpc_codeword_bits_cw0 = []() -> size_t {
+                        if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
+                            if (std::atoi(env) == 81) return 1944;
+                        }
+                        return v2::LDPC_CODEWORD_BITS;
+                    }();
+                    ChannelInterleaver channel_deinterleaver(bps, ldpc_codeword_bits_cw0);
                     cw0_bits = channel_deinterleaver.deinterleave(cw0_bits);
                 }
 
@@ -2689,7 +2696,14 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
 
             std::vector<float> cw0_bits = std::move(cw_soft[0]);
             if (apply_channel_deinterleave) {
-                ChannelInterleaver channel_deinterleaver(bps, v2::LDPC_CODEWORD_BITS);
+                // Match the encoder's z=81-aware interleaver block size.
+                static const size_t ldpc_codeword_bits_cw0b = []() -> size_t {
+                    if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
+                        if (std::atoi(env) == 81) return 1944;
+                    }
+                    return v2::LDPC_CODEWORD_BITS;
+                }();
+                ChannelInterleaver channel_deinterleaver(bps, ldpc_codeword_bits_cw0b);
                 cw0_bits = channel_deinterleaver.deinterleave(cw0_bits);
             }
 
