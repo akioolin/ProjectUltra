@@ -324,7 +324,7 @@ void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
         connected_ && protocol::isOFDMMode(waveform_mode_) &&
         mod == Modulation::QPSK;
     const int burst_group =
-        static_cast<int>(protocol::connection_policy::kBurstInterleaveGroupFrames);
+        static_cast<int>(protocol::connection_policy::burstInterleaveGroupFrames());
     if (streaming_encoder_) {
         streaming_encoder_->setBurstInterleaveGroupSize(burst_group);
         streaming_encoder_->setBurstInterleave(file_class_composite);

@@ -62,6 +62,23 @@ inline constexpr uint32_t kOFDMBurstAckBatchFrames = 4;
 inline constexpr size_t kWideOFDMWindowFrames = 8;
 inline constexpr size_t kHighThroughputOFDMWindowFrames = 16;
 inline constexpr size_t kBurstInterleaveGroupFrames = 8;
+
+// Runtime burst-interleave group size. Defaults to kBurstInterleaveGroupFrames
+// (8 = the shipping value, ~3xTc on Good HF) but is overridable via the
+// ULTRA_BURST_GROUP_FRAMES env var for A/B experiments (e.g. group=4 to trade
+// time-diversity depth for cheaper retx + better "all-must-pass" odds on short
+// time-localized fades). Clamped to the interleaver's sane range [2,32]. Read
+// at the chunk/pad/config sites so TX file-chunking, padding, and the encoder's
+// declared group_size all agree (the RX self-describes from the descriptor).
+inline size_t burstInterleaveGroupFrames() {
+    if (const char* env = std::getenv("ULTRA_BURST_GROUP_FRAMES")) {
+        const int v = std::atoi(env);
+        if (v >= 2) {
+            return static_cast<size_t>(std::clamp(v, 2, 32));
+        }
+    }
+    return kBurstInterleaveGroupFrames;
+}
 inline constexpr uint32_t kResponderHandshakeFailSafeMs = 2200;
 inline constexpr uint32_t kMCDPSKDualChirpPreambleMs = 1200;
 inline constexpr uint32_t kMCDPSKInterFrameGuardMs = 100;
@@ -308,14 +325,14 @@ inline bool shouldPadHighRateFadingBurst(Modulation mod,
         return false;
     }
 
-    return (burst_frames % kBurstInterleaveGroupFrames) != 0;
+    return (burst_frames % burstInterleaveGroupFrames()) != 0;
 }
 
 inline bool shouldPadBurstInterleaveGroup(size_t burst_frames) {
     if (burst_frames <= 1) {
         return false;
     }
-    return (burst_frames % kBurstInterleaveGroupFrames) != 0;
+    return (burst_frames % burstInterleaveGroupFrames()) != 0;
 }
 
 inline uint32_t ofdmAckBatchSize(bool near_awgn_ofdm) {

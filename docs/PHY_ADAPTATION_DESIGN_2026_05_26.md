@@ -1389,3 +1389,77 @@ not a real lever.
   / §14.25. Not worth it vs just shortening the burst.)
 
 ULTRA_BURST_HEADER_ONCE left in as default-OFF + documented dead-end (or revert).
+
+---
+
+### §14.33 — Accurate measurement of a failing burst group (the wide-null limiter, quantified) — 2026-05-27
+
+Mined the LLRs going INTO the LDPC decoder for one reproducible failing group
+(seed 1, group 5, the 0/8 that ARQ later recovered at 163s) vs. a clean group,
+to settle "is R3/4 truly maxed (→ N=1944) or is a diversity tool under-performing?"
+
+| metric (avg over 64 CWs) | failing group (109s) | clean group (163s) |
+|---|---|---|
+| overall LTS SNR | 20.4 dB | 19.8 dB |
+| pilot \|H\| spread across band | 6.2→38.3 (≈16 dB) | flat |
+| \|llr\| mean into decoder (clamp=20) | **15.46** | 19.95 |
+| \|llr\| p10 (weakest 10%) | **2.11** | 15.20 |
+| implied erasure-grade fraction (1−mean/20) | **~23%** | ~0% |
+| outcome | all 64 CWs FAIL (unsat 22–59) | all 64 OK (0–1 iters) |
+
+**Conclusions (measured, not assumed):**
+1. The **carrier-LDPC frequency interleaver IS active and working** — all 8 frames ×
+   8 CWs fail *uniformly* (every CW ≈23% damaged), the signature of the interleaver
+   spreading the band-null evenly. Without it you'd see some CWs clean + some wiped.
+2. The **anti-poison soft-CSI IS working** — the weakest 10% of LLRs arrive at ≈2
+   (honest erasures), NOT at 20-with-wrong-sign (confident-wrong poison). Nulled
+   carriers are correctly down-weighted to "don't know."
+3. **So the failure is information-theoretic, not a bug:** ~23% of the band is nulled
+   and R3/4 has only ~25% redundancy. The interleaver spread the damage perfectly
+   evenly → every codeword sits at the cliff edge at once → uniform total failure.
+4. **N=1944 is NOT the answer** for this null: same ~25% erasure ceiling. A longer
+   code sharpens the waterfall (≈1–2 dB, a few % closer to the limit) but does not
+   raise the 25% wall. A 23% null is already at the wall.
+5. **Pilots are not a lever in either direction.** Spacing=10 carriers is ≈Nyquist
+   for a ~12-carrier null; FEWER pilots under-samples the null → soft-CSI mis-targets →
+   poison returns. MORE pilots sharpens null resolution but soft-CSI already resolves
+   it adequately (p10≈2). Throughput payoff of fewer pilots is ~3% and lost to worse
+   decoding. The wall is the code rate vs the null width, not channel-estimate quality.
+
+The remaining wide-null levers are **partial survival** (interleave-off + per-CW ARQ
+to deliver the ~77% un-nulled carriers DURING the notch) or **surgical notch-escape
+rate drop** on a stuck group — NOT more diversity (the cheap diversity lever is
+already pulled and measured working).
+
+### §14.34 — Burst group size 8→4 A/B: REJECTED (group size is not the lever) — 2026-05-27
+
+Env-gated the burst group size (`ULTRA_BURST_GROUP_FRAMES`, default 8 = shipping;
+accessor `connection_policy::burstInterleaveGroupFrames()` routes file-chunk +
+padding + encoder-declared group_size; RX self-describes from the descriptor).
+Tested group=4 vs group=8, Good@20 R3/4 QPSK 21KB, GUI auto-path, seeds 1–3:
+
+| seed | group=4 | group=8 |
+|---|---|---|
+| 1 | PASS 1750 bps, 0 retx | PASS 1290 bps (group-5 stuck ~50s) |
+| 2 | **FAIL — CRC=0, link-dead at 333s** | PASS 2170 bps |
+| 3 | PASS 1740 bps | PASS **2170 bps** |
+
+**Verdict: group=4 loses — keep group=8.** 2/3 pass vs 3/3; lower goodput even on
+passing seeds (extra ACK turnarounds cost more on clean stretches than they save).
+The seed-1 "+36%" was favorable fade-alignment (a 7s burst threaded between the
+deepest null instants on that one seed) — the multi-seed rule caught it.
+
+**Valuable byproduct — a real reliability cliff (latent at group=8 too):** under
+whole-burst stop-and-wait, a frequency notch that *recurs* across the ~27s NACK
+retry cadence can pin a group, burn the entire `max_retries=15` budget, and **kill
+the whole file transfer** ("max retries exceeded", CRC=0). Seed-2 group=4 stuck on
+group_seq=0 for 119→309s and died. `max_retries=15 × ~27s ≈ 7 min` hang before death.
+This re-confirms §14.33: group size doesn't beat the wide null; it only changes which
+seed gets unlucky. Real fixes = partial survival (§14.33 lever 1) or notch-escape
+rate drop (lever 2). Two side-bugs to log: GROUP_NACK message hardcodes "0/8" even
+when group=4 (cosmetic; grep for a hardcoded-8 smell), and the link-death-after-7min
+is bad operator UX (a stuck transfer should degrade/recover, not silently hang).
+
+Apparatus kept (default-8, shipping untouched): env accessor + two stale-test compile
+fixes (test_connection_adaptive burst-callback lambdas gained the uint16_t group_seq
+param). test_simulator_determinism remains pre-existing-broken (not touched).

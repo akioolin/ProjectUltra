@@ -1702,7 +1702,7 @@ bool Connection::startBurstFileTransfer() {
         LOG_MODEM(ERROR, "Connection: Burst file transfer requires the burst callback");
         return false;
     }
-    const size_t group_size = connection_policy::kBurstInterleaveGroupFrames;
+    const size_t group_size = connection_policy::burstInterleaveGroupFrames();
 
     // Drain all chunk payloads first (so we can mark FINAL on the last real
     // frame and know the total chunk count for completion accounting).
@@ -3726,9 +3726,9 @@ void Connection::flushBurstBuffer() {
                                   file_transfer_.getState(),
                                   real_frame_count)) {
         const size_t remainder =
-            real_frame_count % connection_policy::kBurstInterleaveGroupFrames;
+            real_frame_count % connection_policy::burstInterleaveGroupFrames();
         const size_t pad_count =
-            connection_policy::kBurstInterleaveGroupFrames - remainder;
+            connection_policy::burstInterleaveGroupFrames() - remainder;
         for (size_t i = 0; i < pad_count; ++i) {
             auto pad_frame = v2::makeFixedDataFrame(
                 local_call_,
