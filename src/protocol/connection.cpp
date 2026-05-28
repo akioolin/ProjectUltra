@@ -591,6 +591,25 @@ void Connection::acceptCall() {
         }
     }
 
+    // 2026-05-28 experiment (env-gated): the industry leader's tactical ladder
+    // picks QPSK R2/3 (~3230 bps net) as its 3000 bps speed slot, not R3/4
+    // or R5/6. Stronger FEC -> fewer drop-on-timeout cascades -> higher
+    // *effective* e2e throughput. ULTRA_MAX_OFDM_RATE=R2_3 caps both initial
+    // selection AND adaptive climb at R2/3 to test this hypothesis. No-op when
+    // the env is unset (default ladder unchanged).
+    if (const char* env = std::getenv("ULTRA_MAX_OFDM_RATE")) {
+        const std::string s(env);
+        const CodeRate cap = (s == "R1_2" || s == "r1_2") ? CodeRate::R1_2
+                           : (s == "R2_3" || s == "r2_3") ? CodeRate::R2_3
+                           : (s == "R3_4" || s == "r3_4") ? CodeRate::R3_4
+                           : CodeRate::R5_6;  // anything else = no cap
+        if (cap != CodeRate::R5_6 && rec_rate > cap) {
+            LOG_MODEM(INFO, "Connection: ULTRA_MAX_OFDM_RATE cap %s -> %s",
+                      codeRateToString(rec_rate), codeRateToString(cap));
+            rec_rate = cap;
+        }
+    }
+
     if (pending_forced_modulation_ != Modulation::AUTO) {
         // Initiator forced a specific modulation - honor it
         rec_mod = pending_forced_modulation_;
@@ -1970,7 +1989,18 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
         return;  // no feedback byte (old peer / adaptation off on the far end)
     }
     const CodeRate prev = data_code_rate_;
-    const CodeRate next = rate_controller_.update(prev, quality);
+    CodeRate next = rate_controller_.update(prev, quality);
+    // 2026-05-28 experiment: ULTRA_MAX_OFDM_RATE caps climbs at a chosen rung.
+    if (const char* env = std::getenv("ULTRA_MAX_OFDM_RATE")) {
+        const std::string s(env);
+        const CodeRate cap = (s == "R1_2" || s == "r1_2") ? CodeRate::R1_2
+                           : (s == "R2_3" || s == "r2_3") ? CodeRate::R2_3
+                           : (s == "R3_4" || s == "r3_4") ? CodeRate::R3_4
+                           : CodeRate::R5_6;
+        if (cap != CodeRate::R5_6 && next > cap) {
+            next = cap;
+        }
+    }
     char buf[96];
     if (next != prev) {
         data_code_rate_ = next;

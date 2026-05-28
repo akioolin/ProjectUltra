@@ -59,12 +59,13 @@ public:
             // when the channel permits; controller drops back automatically when
             // headroom shrinks. Adds NO risk on faded channels (it just never
             // climbs that high if quality stays low), real win on clean stretches.
-            // 2026-05-28 experiment: the industry leader's tactical ladder picks
-            // QPSK R2/3 (~3230 bps net) for the 3000 bps speed slot, not R3/4 or
-            // R5/6. The stronger FEC means fewer drop-on-timeout cycles -> higher
-            // *effective* e2e throughput even though raw rate is lower. Cap ladder
-            // at R2/3 to test this hypothesis.
-            cfg_.ladder = {CodeRate::R1_4, CodeRate::R1_2, CodeRate::R2_3};
+            // §14.36 toward-3000 ladder: R5/6 added as a climb target above R3/4
+            // (2026-05-28). LDPC encoder/decoder fully support R5/6 (802.11n base
+            // matrix, 540 info bits / 648 coded). +11% bytes/frame vs R3/4 when
+            // the channel permits; controller drops back automatically when
+            // headroom shrinks.
+            cfg_.ladder = {CodeRate::R1_4, CodeRate::R1_2, CodeRate::R2_3,
+                           CodeRate::R3_4, CodeRate::R5_6};
         }
     }
 
