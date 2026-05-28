@@ -1463,3 +1463,46 @@ is bad operator UX (a stuck transfer should degrade/recover, not silently hang).
 Apparatus kept (default-8, shipping untouched): env accessor + two stale-test compile
 fixes (test_connection_adaptive burst-callback lambdas gained the uint16_t group_seq
 param). test_simulator_determinism remains pre-existing-broken (not touched).
+
+---
+
+### §14.35 — Competitive teardown: the leader's HF modem (web research) + why PAPR is a real-radio-only lever — 2026-05-27
+
+Pulled the leader's published spec (OFDM HF modem, 2.4 kHz SSB). Recorded here so
+we stop re-deriving it. **Refer to it as "the leader" outside this doc.**
+
+**PHY geometry — nearly identical to ours (so the gap is NOT carrier layout):**
+- 52 carriers in 2.4 kHz; 37.5 baud; cyclic prefix 5.33 ms; useful symbol ~21.3 ms
+  → carrier spacing **~46.9 Hz**. Ours: 53 data carriers, 41.7 baud, ~46.9 Hz spacing.
+  Their CP (5.33 ms) is ~2× ours (2.67 ms) → more delay-spread margin.
+
+**FEC + framing — the real edge #1:**
+- **Turbo code** over a DATA frame of **196 OFDM symbols = 5225 ms** (the "5.2 s burst").
+  One turbo codeword spanning ~5.2 s × full band = deep time+freq interleave built
+  INTO the FEC block, and turbo is ~0.5–1 dB closer to Shannon than our N=648 LDPC.
+  Their 5.2 s is SHORTER than our 11 s group yet gets more diversity/sec.
+
+**Adaptation — the real edge #2:**
+- **11 net-data-rate levels**, levels 1–8 differential PSK, 9–11 QAM. **Net** range
+  **35 → 6782 bps**, adapting continuously to power + link conditions (demo rode
+  7k→3k→7k as QRM came and went). Per-frame ARQ (ISS/IRS), not whole-group.
+
+This CONFIRMS our first-principles conclusion: same carriers/band/spacing as us; they
+reach ~3 kbps on Multipath-Good via **(a) per-block rate/mod adaptation + (b) turbo over
+a long block**, exactly the levers on our fork. Not the OFDM layout.
+
+**PAPR (spec §2.4) — REAL-RADIO-ONLY lever, PARKED for sim work:**
+- They pin **9 dB PAPR constant across ALL 11 levels** (DATA), **6 dB for ACK bursts**.
+  Two payoffs, both at the PA, not the PHY: (1) low PAPR → more *average* power under a
+  fixed *peak* ceiling → far-end SNR → ladder rungs; (2) *constant across levels* → a
+  gateway sets ALC/drive ONCE and it's valid at every level (no power swing on adapt).
+- **Why it can't help our current (sim) performance work:** OTASim does NOT model a
+  peak-limited PA, so lowering PAPR yields ZERO sim throughput. Our floors were even
+  measured PAPR-OFF (`waveform_selection.hpp`: PAPR-ON adds "IMD-vs-headroom asymmetry
+  on simulator paths"). So PAPR is a genuine real-hardware edge the leader has that is
+  **invisible/penalized in our numbers** — a documented simulator-fidelity gap, not a
+  current lever. **Decision (user, 2026-05-27): park PAPR as a hardware-phase item.**
+- **BUT** it becomes a hard *requirement* once we build the adaptive ladder AND run on
+  real hardware: our clipper is fixed-threshold (≠ constant PAPR across QPSK/8PSK/QAM),
+  so without constant-PAPR-across-rungs an adaptive ladder would pump a gateway's power
+  on every level change. Track alongside the PA-peak-limit OTASim fidelity gap.
