@@ -199,7 +199,25 @@ What's left to close it:
 
 The arithmetic: even stacking light-ACK + skip-descriptor (both blocked autonomously) lands at ~2700 bps end-to-end — not 3000. Closing the last 300 bps probably requires the wider-bandwidth lever or substantive PHY work (the leader's HF modem uses ~2.4kHz BW vs our ~2.8kHz, with tighter spacing and longer symbols — different architecture).
 
-## Ceiling analysis — why 3000 bps needs your call
+## Morning correction: the ceiling analysis was wrong
+
+User shared the industry leader's published modulation ladder. The 3000 bps
+speed slot in their tactical (~2.75 kHz) profile is **Level 12: 4PSK / 42 baud /
+59 carriers / net rate 3230 bps** — that's *QPSK at R2/3*, not R3/4 or R5/6.
+Level 11 (R~1/2) = 2423 bps. Level 13 (R~3/4) = 3877 bps.
+
+Re-derived our PHY honestly (FFT=1024, 48 kHz sample rate, CP ≈ 25%):
+- Symbol period ≈ 26.7 ms → **~37.5 baud** (matches leader's 42)
+- Raw at QPSK R2/3: 59 × 37.5 × 2 × 0.667 = **2950 bps raw** (already at 3000-ish)
+- Raw at QPSK R3/4: 59 × 37.5 × 2 × 0.75 = **3320 bps raw**
+
+We measure ~2500 on-air / 1862 end-to-end at R3/4. So the PHY is fine — the gap is the e2e overhead (descriptor + ACK preambles, dead air on drop-on-timeout cascades).
+
+**The hypothesis the leader's ladder suggests:** at Good@20, *staying at R2/3 may give higher e2e throughput than climbing to R3/4*, because the stronger FEC eats fade events without triggering drop-on-timeout cascades. We've been chasing raw rate; the leader chose code redundancy.
+
+Currently testing: cap the RateController ladder at R2/3 (one-line change), run 3×21KB + 3×100KB Good@20, measure e2e. If it lands ~2900 e2e → that's our 3000 path without protocol surgery.
+
+## Ceiling analysis (PRE-CORRECTION — kept for posterity)
 
 The data-phase end-to-end (excluding the ~8 s handshake/teardown):
 
