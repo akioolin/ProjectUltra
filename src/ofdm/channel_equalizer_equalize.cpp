@@ -93,8 +93,26 @@ float relativeFadeNoiseInflation(float h_power, float frame_mean_h_power) {
         frame_mean_h_power <= 0.0f || h_power < 0.0f) {
         return 1.0f;
     }
-    constexpr float kRelFadeOnset = 0.25f;     // start acting ~6 dB below frame mean
-    constexpr float kMaxRelInflation = 30.0f;  // cap the down-weight (~15 dB)
+    // 2026-05-28: env-tunable for sparse-pilot experiment. Default kRelFadeOnset
+    // 0.25 (~6 dB below mean) and kMaxRelInflation 30 (cap at 15 dB down-weight)
+    // were tuned for the dense 12-pilot baseline. With 6 pilots the Wiener may
+    // smooth THROUGH deep nulls so h_power looks normal — pushing the onset
+    // higher (e.g. 0.50 = -3 dB) makes the down-weight act earlier on borderline
+    // carriers, and a higher cap lets really-bad carriers turn into near-erasures.
+    static const float kRelFadeOnset = []() {
+        if (const char* env = std::getenv("ULTRA_REL_FADE_ONSET")) {
+            const float v = static_cast<float>(std::atof(env));
+            if (v > 0.0f && v < 1.0f) return v;
+        }
+        return 0.25f;
+    }();
+    static const float kMaxRelInflation = []() {
+        if (const char* env = std::getenv("ULTRA_REL_FADE_MAX")) {
+            const float v = static_cast<float>(std::atof(env));
+            if (v >= 1.0f && v <= 1000.0f) return v;
+        }
+        return 30.0f;
+    }();
     const float rel = h_power / frame_mean_h_power;  // 1.0 = average carrier
     if (rel >= kRelFadeOnset) {
         return 1.0f;
