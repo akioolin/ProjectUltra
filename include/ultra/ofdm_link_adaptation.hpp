@@ -27,12 +27,15 @@ inline int recommendedPilotSpacing(Modulation mod, CodeRate rate) {
     const bool coherent = isCoherentModulation(mod);
 
     if (coherent) {
-        // 2026-05-28: env knob to retest sparser pilots on coherent QPSK with
-        // scattered_pilots + 2-D Wiener (now default). Earlier 2026-05-26
-        // spacing-10 attempt regressed worst-Good seed because the estimator
-        // could not track deep nulls with sparse pilots; that estimator is
-        // smarter now. ULTRA_COH_PILOT_SPACING applies to all non-R3/4 coherent
-        // rates (R1/4, R1/2, R2/3); ULTRA_COH_PILOT_SPACING_R34 overrides R3/4.
+        // 2026-05-28 ADAPTIVE PILOT DENSITY: pilot density is now tied to rate.
+        // - High rate (R3/4 + R2/3): try sparser pilots (~6-8) for higher data
+        //   carrier count; rate controller already gates these to clean channels.
+        // - Low rate (R1/2 + R1/4): drop back to dense pilots (5/12). When the
+        //   adaptive controller falls to these rates the channel is rough, so
+        //   the pilot-density saving is the WRONG trade — we want robust tracking.
+        // Earlier ULTRA_COH_PILOT_SPACING covered all non-R3/4 rates, which
+        // meant a rate-drop also lost pilot density on the bumpy channel. Now
+        // ULTRA_R23_PILOT_SPACING only applies at R2/3; rates below stay dense.
         const auto envSpacing = [](const char* name, int default_value) {
             if (const char* env = std::getenv(name)) {
                 const int v = std::atoi(env);
@@ -45,13 +48,19 @@ inline int recommendedPilotSpacing(Modulation mod, CodeRate rate) {
                 if (mod == Modulation::QAM32 || mod == Modulation::QAM64) {
                     return 5;
                 }
-                return envSpacing("ULTRA_COH_PILOT_SPACING_R34", 8);
+                return envSpacing("ULTRA_R34_PILOT_SPACING", 8);
             case CodeRate::R2_3:
+                // Per the industry-leader's L12 (3000 bps slot at R2/3), the
+                // production target wants the sparsest pilots that still hold
+                // the worst-fade-seed within the rate's FEC margin.
+                return envSpacing("ULTRA_R23_PILOT_SPACING", 5);
             case CodeRate::R1_2:
             case CodeRate::R1_4:
             case CodeRate::R1_3:
             default:
-                return envSpacing("ULTRA_COH_PILOT_SPACING", 5);
+                // Rate-adaptation fell to these because channel is rough — dense
+                // pilots are mandatory for robust tracking on the bumpy channel.
+                return 5;
         }
     }
 
