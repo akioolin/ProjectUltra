@@ -465,8 +465,13 @@ struct ControlFrame {
     // Whole-burst ACK (§14.26): acks one interleaved group as a unit. group_seq
     // identifies the group; the sender (stop-and-wait) advances on a matching ACK
     // and resends the whole group on timeout. No per-frame bitmap.
+    // quality_q (§14.36, Phase 5c): the receiver's decode-headroom feedback for the
+    // group it just decoded, quantized to a byte (round(quality*254); 0xFF = none).
+    // The SENDER runs the rate controller on it (it knows its own current rate) and
+    // picks the next burst's rate. Honored only when adaptation is on; 0xFF / lost
+    // ACK -> sender holds rate.
     static ControlFrame makeGroupAck(const std::string& src, const std::string& dst,
-                                     uint16_t group_seq);
+                                     uint16_t group_seq, uint8_t quality_q = 0xFF);
     // Whole-burst NACK (§14.30): the receiver decoded the descriptor but the
     // interleaved group failed (0/8) — tell the sender to resend group_seq NOW
     // rather than waiting out the group-ACK timeout (fast fade recovery).
@@ -553,6 +558,13 @@ struct ControlFrame {
     // Parse a GROUP_ACK payload (§14.26): the acked group sequence number.
     uint16_t getGroupAckSeq() const {
         return static_cast<uint16_t>(payload[0] | (payload[1] << 8));
+    }
+
+    // Parse the GROUP_ACK quality feedback (§14.36): receiver's decode headroom for
+    // the acked group, in [0,1]; returns <0 when absent (0xFF = no feedback).
+    float getGroupAckQuality() const {
+        if (payload[2] == 0xFF) return -1.0f;
+        return static_cast<float>(payload[2]) / 254.0f;
     }
 
     // Parse a GROUP_NACK payload (§14.30): the group sequence that failed to decode.

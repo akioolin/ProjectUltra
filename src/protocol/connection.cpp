@@ -353,6 +353,11 @@ Connection::Connection(const ConnectionConfig& config)
     if (const char* bt = std::getenv("ULTRA_BURST_TRANSPORT"); bt && bt[0] == '1') {
         use_burst_transport_ = true;
     }
+    // §14.36 Phase 5c: BER-driven per-block rate adaptation. Default OFF; opt in via
+    // ULTRA_ADAPTIVE_RATE=1. Only meaningful on the burst transport file path.
+    if (const char* ar = std::getenv("ULTRA_ADAPTIVE_RATE"); ar && ar[0] == '1') {
+        adaptive_rate_enabled_ = true;
+    }
 
     // Wire up ARQ callbacks
     arq_.setTransmitCallback([this](const Bytes& data) {
@@ -394,8 +399,12 @@ Connection::Connection(const ConnectionConfig& config)
         });
     burst_transport_.setSendGroupAck([this](uint16_t group_seq) {
         // One whole-burst ACK — no SACK bitmap, no per-frame selective repeat.
+        // §14.36: carry the just-decoded group's quantized decode headroom so the
+        // SENDER can run the rate controller. 0xFF when adaptation is off / no sample.
+        const uint8_t quality_q = pending_ack_quality_q_;
         transmitFrame(
-            v2::ControlFrame::makeGroupAck(local_call_, remote_call_, group_seq).serialize());
+            v2::ControlFrame::makeGroupAck(local_call_, remote_call_, group_seq, quality_q)
+                .serialize());
     });
     burst_transport_.setGroupDelivered(
         [this](uint16_t /*group_seq*/, const BurstStopAndWaitController::Group& frames) {
@@ -1780,11 +1789,44 @@ bool Connection::startBurstFileTransfer() {
     return true;
 }
 
+void Connection::applyAdaptiveRateFeedback(float quality) {
+    // §14.36 Phase 5c: the SENDER runs the rate controller on the receiver's
+    // decode-headroom feedback (carried on the GROUP_ACK; a GROUP_NACK feeds 0).
+    // It owns the rate, so data_code_rate_ is the rate the just-acked group used.
+    if (!adaptive_rate_enabled_ || !use_burst_transport_) {
+        return;
+    }
+    if (quality < 0.0f) {
+        return;  // no feedback byte (old peer / adaptation off on the far end)
+    }
+    const CodeRate prev = data_code_rate_;
+    const CodeRate next = rate_controller_.update(prev, quality);
+    char buf[96];
+    if (next != prev) {
+        data_code_rate_ = next;
+        std::snprintf(buf, sizeof(buf), "rate %s -> %s (q=%.2f)",
+                      codeRateToString(prev), codeRateToString(next), quality);
+        LOG_MODEM(INFO, "Connection: adaptive %s", buf);
+        notifyDataModeChanged(measured_snr_db_, fading_index_);
+    } else {
+        std::snprintf(buf, sizeof(buf), "hold %s (q=%.2f)", codeRateToString(prev), quality);
+    }
+    last_adaptive_action_ = buf;
+}
+
 void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Bytes>& frames,
-                                      bool all_ok) {
+                                      bool all_ok, float quality) {
     if (!use_burst_transport_) {
         return;
     }
+    // §14.36 Phase 5c: stash the decode headroom so the GROUP_ACK for this group
+    // carries it back to the sender (which runs the rate controller). Quantize
+    // [0,1] -> 0..254; 0xFF means "no feedback" when adaptation is off.
+    last_group_quality_ = quality;
+    pending_ack_quality_q_ =
+        adaptive_rate_enabled_
+            ? static_cast<uint8_t>(std::lround(std::clamp(quality, 0.0f, 1.0f) * 254.0f))
+            : 0xFF;
     // A partial group cannot be deinterleaved/reassembled, so it is dropped and
     // the sender whole-burst-resends (stop-and-wait, no SACK). Only a fully
     // decoded group is ACKed + delivered.
@@ -2101,6 +2143,9 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                         if (local_data_turn_) {
                             armDataTurnTxGuard(dataTurnAckDiversityGuardMs(*ctrl));
                         }
+                        // §14.36: the receiver fed back its decode headroom; run the
+                        // rate controller (sender owns rate) and pick the next rate.
+                        applyAdaptiveRateFeedback(ctrl->getGroupAckQuality());
                         burst_transport_.onGroupAck(group_seq);
                     }
                     break;
@@ -2113,6 +2158,9 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                         if (local_data_turn_) {
                             armDataTurnTxGuard(dataTurnAckDiversityGuardMs(*ctrl));
                         }
+                        // §14.36: a NACK is a failed group -> quality 0 -> controller
+                        // steps the rate down before the resend.
+                        applyAdaptiveRateFeedback(0.0f);
                         burst_transport_.onGroupNack(group_seq);
                     }
                     break;

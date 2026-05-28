@@ -4,6 +4,7 @@
 #include "arq.hpp"
 #include "selective_repeat_arq.hpp"
 #include "burst_transport.hpp"
+#include "rate_controller.hpp"
 #include "file_transfer.hpp"
 #include "ultra/types.hpp"
 #include "fec/soft_combine.hpp"
@@ -160,7 +161,14 @@ public:
     // controller (deliver-once + single GROUP_ACK). A partial group is dropped
     // so the sender whole-burst-resends. Inert unless use_burst_transport_.
     void onBurstGroupReceived(uint16_t group_seq, const std::vector<Bytes>& frames,
-                              bool all_ok);
+                              bool all_ok, float quality);
+
+    // §14.36 Phase 5c GUI observability: decode headroom of the most recent burst
+    // group [0,1] (<0 = none yet) and a short human-readable adaptive action
+    // ("rate R3/4 -> R2/3 (q=0.18)" / "hold R3/4 (q=0.85)"). Empty when off.
+    bool adaptiveRateEnabled() const { return adaptive_rate_enabled_; }
+    float lastGroupQuality() const { return last_group_quality_; }
+    const std::string& lastAdaptiveAction() const { return last_adaptive_action_; }
 
     void tick(uint32_t elapsed_ms);
 
@@ -460,6 +468,16 @@ private:
     // until GUI-proven. Group-ACK reuses the ACK control frame (seq=group_seq).
     BurstStopAndWaitController burst_transport_;
     bool use_burst_transport_ = false;
+
+    // §14.36 Phase 5c BER-driven per-block rate adaptation. Env ULTRA_ADAPTIVE_RATE=1,
+    // default OFF. The SENDER runs the controller on the receiver's per-group decode
+    // headroom (carried on the GROUP_ACK; a GROUP_NACK feeds quality 0 -> step down).
+    void applyAdaptiveRateFeedback(float quality);
+    bool adaptive_rate_enabled_ = false;
+    RateController rate_controller_;
+    uint8_t pending_ack_quality_q_ = 0xFF;  // RX: byte to stamp on the next GROUP_ACK
+    float last_group_quality_ = -1.0f;      // GUI: most recent group decode headroom
+    std::string last_adaptive_action_;      // GUI: short human-readable action
     // RX group assembly for the burst transport: frames of the in-flight group
     // accumulate here (keyed by the descriptor group_seq) until the group is
     // complete, then are handed to burst_transport_.onGroupReceived().

@@ -467,7 +467,7 @@ ControlFrame ControlFrame::makeBurstHeader(const std::string& src, const std::st
 }
 
 ControlFrame ControlFrame::makeGroupAck(const std::string& src, const std::string& dst,
-                                        uint16_t group_seq) {
+                                        uint16_t group_seq, uint8_t quality_q) {
     ControlFrame f;
     f.type = FrameType::GROUP_ACK;
     f.flags = Flags::VERSION_V2;
@@ -476,6 +476,7 @@ ControlFrame ControlFrame::makeGroupAck(const std::string& src, const std::strin
     f.dst_hash = hashCallsign(dst);
     f.payload[0] = static_cast<uint8_t>(group_seq & 0xFF);
     f.payload[1] = static_cast<uint8_t>((group_seq >> 8) & 0xFF);
+    f.payload[2] = quality_q;  // §14.36 decode-headroom feedback (0xFF = none)
     return f;
 }
 

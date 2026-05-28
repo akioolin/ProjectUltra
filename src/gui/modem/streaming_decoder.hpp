@@ -155,8 +155,11 @@ using DataSyncAcceptedCallback = std::function<void(float sync_correlation)>;
 // logical frame of the group decoded (a partial group is undecodable and must be
 // whole-burst-resent). Only emitted when burst-transport RX is enabled; the
 // SR-ARQ burst path keeps its per-frame delivery.
+// quality (§14.36): decode headroom of the group in [0,1] (0 = failed) — drives
+// the receiver's BER-driven rate recommendation. Worst-codeword iteration headroom.
 using BurstGroupCallback =
-    std::function<void(uint16_t group_seq, const std::vector<Bytes>& frames, bool all_ok)>;
+    std::function<void(uint16_t group_seq, const std::vector<Bytes>& frames, bool all_ok,
+                       float quality)>;
 
 // StreamingDecoder - Unified RX decoder for all waveform types
 class StreamingDecoder {

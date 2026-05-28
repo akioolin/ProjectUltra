@@ -134,7 +134,8 @@ public:
     // §14.27 one-way burst transport: a decoded interleaved burst delivered as a
     // unit (group_seq, ordered DATA frames, all-logical-frames-decoded flag).
     using BurstGroupCallback =
-        std::function<void(uint16_t group_seq, const std::vector<Bytes>& frames, bool all_ok)>;
+        std::function<void(uint16_t group_seq, const std::vector<Bytes>& frames, bool all_ok,
+                           float quality)>;
     void setBurstGroupCallback(BurstGroupCallback callback) {
         burst_group_callback_ = std::move(callback);
     }

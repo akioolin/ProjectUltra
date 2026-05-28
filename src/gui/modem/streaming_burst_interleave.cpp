@@ -458,6 +458,10 @@ void StreamingDecoder::finalizeBurstGroup() {
 
     int logical_ok = 0;
     int logical_fail = 0;
+    // §14.36 Phase 5c: track the worst codeword's LDPC iteration count across the
+    // whole group — the group needs ALL frames, so its decode headroom = the weakest
+    // frame's. Mapped to a quality in [0,1] for the receiver's rate feedback.
+    int group_max_iters = 0;
     // §14.27 burst-transport RX: accumulate the group's decoded DATA frames so the
     // whole interleaved burst is delivered as a unit (the SR-ARQ per-frame path is
     // suppressed below when burst_transport_rx_ is set).
@@ -513,6 +517,9 @@ void StreamingDecoder::finalizeBurstGroup() {
         } else {
             ++logical_fail;
         }
+        for (int it : result.cw_iterations) {
+            group_max_iters = std::max(group_max_iters, it);
+        }
 
         if (burst_transport_rx_) {
             // §14.27: collect the group; deliver as a unit after the loop. Suppress
@@ -566,11 +573,20 @@ void StreamingDecoder::finalizeBurstGroup() {
         // logical frame of the group to have decoded — a partial group is
         // undecodable for reassembly and must be whole-burst-resent (no SACK).
         const bool all_ok = (logical_ok == burst_group_size);
+        // §14.36: quality = decode headroom in [0,1]; 0 if the group failed. Worst-CW
+        // iteration headroom against a fixed reference (clean decodes ~0-2 iters,
+        // marginal ~40-70). The sender maps this to a rate via the controller.
+        constexpr float kIterRef = 80.0f;
+        const float quality =
+            all_ok ? std::clamp(1.0f - static_cast<float>(group_max_iters) / kIterRef,
+                                0.0f, 1.0f)
+                   : 0.0f;
         LOG_MODEM(INFO,
-                  "[%s] Burst group_seq=%u delivered as unit: %d/%d logical OK (all_ok=%d)",
+                  "[%s] Burst group_seq=%u delivered as unit: %d/%d logical OK (all_ok=%d) "
+                  "max_iters=%d quality=%.2f",
                   log_prefix_.c_str(), last_burst_group_seq_, logical_ok,
-                  burst_group_size, all_ok ? 1 : 0);
-        burst_group_callback_(last_burst_group_seq_, burst_group_frames, all_ok);
+                  burst_group_size, all_ok ? 1 : 0, group_max_iters, quality);
+        burst_group_callback_(last_burst_group_seq_, burst_group_frames, all_ok, quality);
     }
 
     if (diagnostics_enabled) {

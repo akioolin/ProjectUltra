@@ -335,9 +335,10 @@ void ProtocolEngine::onAcceptedOFDMDataSync(float sync_correlation) {
 }
 
 void ProtocolEngine::onBurstGroupReceived(uint16_t group_seq,
-                                          const std::vector<Bytes>& frames, bool all_ok) {
+                                          const std::vector<Bytes>& frames, bool all_ok,
+                                          float quality) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
-    connection_.onBurstGroupReceived(group_seq, frames, all_ok);
+    connection_.onBurstGroupReceived(group_seq, frames, all_ok, quality);
 }
 
 void ProtocolEngine::processRxBuffer() {
