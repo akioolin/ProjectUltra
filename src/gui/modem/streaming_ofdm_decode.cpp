@@ -754,6 +754,13 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 }
                                 last_burst_descriptor_ = bi;
                                 have_burst_descriptor_ = true;
+                                // 2026-05-28 Phase 3: propagate the announced
+                                // lifting_z to the waveform so
+                                // getMinSamplesForCWCount returns the right
+                                // airtime for z=81 (n=1944) data frames.
+                                if (waveform_) {
+                                    waveform_->setActiveLDPCLiftingZ(bi.lifting_z);
+                                }
                                 // §14.27: the descriptor frame header seq carries
                                 // the burst group_seq (encoder stamps it via
                                 // setBurstGroupSeq). The following group's
@@ -1806,7 +1813,13 @@ void StreamingDecoder::decodeCurrentFrame() {
             // collapse to |LLR|_avg < 1. See hardware-test analysis in
             // commit message — saves ~600ms per lost frame which lets
             // chirp-search lock on to the next real frame promptly.
-            const size_t burst_llr_n = std::min(next_soft_bits.size(), size_t(648));
+            // 2026-05-28 Phase 3: probe size = one codeword (648 at z=27,
+            // 1944 at z=81). Sourced from the active descriptor's lifting_z
+            // so the LLR-quality heuristic samples the right span per CW.
+            const size_t probe_cw_bits =
+                (have_burst_descriptor_ && last_burst_descriptor_.lifting_z == 81)
+                    ? size_t{1944} : size_t{648};
+            const size_t burst_llr_n = std::min(next_soft_bits.size(), probe_cw_bits);
             const float burst_llr_avg = signal_policy::meanAbsLLR(
                 next_soft_bits.data(), burst_llr_n);
             if (burst_llr_avg < signal_policy::kMinBurstContinuationLLR) {

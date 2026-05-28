@@ -1214,7 +1214,13 @@ int OFDMChirpWaveform::getMinSamplesForCWCount(int num_cw) const {
     // Training symbols + data for num_cw codewords
     int training_samples = 2 * getSamplesPerSymbol();  // 2 OFDM training symbols
 
-    int frame_bits = num_cw * 648;
+    // 2026-05-28 Phase 3: active codeword length is the lifted N for the
+    // current burst. ldpc_lifting_z_ is set per-burst (default 27 -> n=648,
+    // 81 -> n=1944). At z=81 the frame airtime is ~3x the legacy z=27 frame
+    // for the same num_cw — callers that care about wall-clock should pair
+    // num_cw and lifting_z carefully (typically cw=1 at z=81).
+    const int codeword_bits = (ldpc_lifting_z_ == 81) ? 1944 : 648;
+    int frame_bits = num_cw * codeword_bits;
 
     const int bits_per_symbol = ofdm_link_adaptation::bitsPerOFDMSymbol(
         static_cast<int>(config_.num_carriers),

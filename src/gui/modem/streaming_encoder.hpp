@@ -171,8 +171,11 @@ public:
     // (legacy short LDPC), 81 -> n=1944 (long LDPC, ~3 dB more FEC margin). Set
     // per-burst by the connection layer; the value is announced in BURST_HEADER
     // payload[5] so the RX configures the LDPC decoder at the right N. Default 27.
+    // Phase 3 also propagates to the waveform so getMinSamplesForCWCount returns
+    // the right airtime for z=81 codewords.
     void setLDPCLiftingZ(uint8_t z) {
         ldpc_lifting_z_ = (z == 81) ? 81 : 27;  // defensive — only 27/81 allowed
+        if (waveform_) waveform_->setActiveLDPCLiftingZ(ldpc_lifting_z_);
     }
     uint8_t getLDPCLiftingZ() const { return ldpc_lifting_z_; }
 

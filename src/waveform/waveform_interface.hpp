@@ -116,6 +116,14 @@ public:
     // LDPC decode. Non-OFDM waveforms ignore it.
     virtual void setCarrierLdpcInterleaverEnabled(bool enabled) { (void)enabled; }
 
+    // 2026-05-28 Phase 3: active LDPC lifting size Z for OFDM data-frame sizing.
+    //   27 -> n=648 coded bits per codeword (legacy short LDPC, default)
+    //   81 -> n=1944 coded bits per codeword (long LDPC for OFDM data path)
+    // OFDM waveforms use this to compute frame airtime in getMinSamplesForCWCount.
+    // MC-DPSK and other waveforms ignore (they always use short LDPC). Set per
+    // burst by the connection layer; the value is wire-announced via BURST_HEADER.
+    virtual void setActiveLDPCLiftingZ(uint8_t z) { (void)z; }
+
     // ========================================================================
     // RX PATH
     // ========================================================================

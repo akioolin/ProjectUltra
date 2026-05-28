@@ -1932,7 +1932,15 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, int cw_count,
         coded_codewords.push_back(std::move(coded));
     }
 
-    // Apply frame-level interleaving
+    // Apply frame-level interleaving — spreads bits ACROSS the frame's codewords.
+    // 2026-05-28: when cw_count==1 (long-LDPC z=81 path), there is no other
+    // codeword to spread bits across, so the frame-level interleaver step is
+    // omitted entirely (the result is just the lone codeword's coded bytes).
+    // BurstInterleaver (cross-frame) and ChannelInterleaver (within-CW across
+    // OFDM symbols) still apply — they protect different impairments.
+    if (cw_count == 1) {
+        return coded_codewords.empty() ? Bytes{} : coded_codewords[0];
+    }
     return FrameInterleaver::interleave(coded_codewords, cw_count, codeword_bits);
 }
 
@@ -1987,8 +1995,18 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
         harq_buffer && harq_key && harq_key->sender_hash != 0;
     const bool harq_active = harq_has_key && harq_buffer->enabled();
 
-    // Deinterleave to restore original CW order (frame-level)
-    auto cw_soft_bits = FrameInterleaver::deinterleave(interleaved_soft, cw_count, codeword_bits);
+    // Deinterleave to restore original CW order (frame-level). 2026-05-28:
+    // symmetric with the encoder — when cw_count==1 the frame-level interleaver
+    // was skipped, so the incoming soft bits ARE the lone codeword's soft bits.
+    std::vector<std::vector<float>> cw_soft_bits;
+    if (cw_count == 1) {
+        cw_soft_bits.emplace_back(interleaved_soft.begin(),
+                                  interleaved_soft.begin() + std::min(
+                                      interleaved_soft.size(),
+                                      static_cast<size_t>(codeword_bits)));
+    } else {
+        cw_soft_bits = FrameInterleaver::deinterleave(interleaved_soft, cw_count, codeword_bits);
+    }
 
     // Create channel interleaver for deinterleaving if enabled
     std::unique_ptr<ChannelInterleaver> interleaver;

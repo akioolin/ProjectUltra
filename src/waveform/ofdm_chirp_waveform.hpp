@@ -66,6 +66,9 @@ public:
     void setCarrierMask(uint64_t active_mask) override;
     uint64_t getCarrierMask() const override { return carrier_mask_; }
     void setCarrierLdpcInterleaverEnabled(bool enabled) override;
+    void setActiveLDPCLiftingZ(uint8_t z) override {
+        ldpc_lifting_z_ = (z == 81) ? 81 : 27;  // only 27/81 allowed; defensive
+    }
 
     // ========================================================================
     // IWaveform - RX
@@ -170,6 +173,11 @@ private:
     float last_cfo_ = 0.0f;
     uint64_t carrier_mask_ = UINT64_MAX;
     bool carrier_ldpc_interleaver_enabled_ = false;
+    // 2026-05-28 Phase 3: active LDPC lifting Z for OFDM data-frame sizing.
+    // Set per-burst by the connection layer; consumed by getMinSamplesForCWCount
+    // (frame_bits = num_cw * (z==81 ? 1944 : 648)). Default 27 keeps the
+    // legacy short-LDPC airtime accounting for pre-burst / non-burst frames.
+    uint8_t ldpc_lifting_z_ = 27;
     bool rx_carrier_erasure_enabled_ = false;
     bool synced_ = false;
     std::vector<float> soft_bits_;
