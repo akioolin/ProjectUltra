@@ -331,6 +331,15 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             }
         }
 
+        // 2026-05-28: ULTRA_FRAME_CW env override (responder bootstrap path).
+        if (const char* env = std::getenv("ULTRA_FRAME_CW")) {
+            const int v = std::atoi(env);
+            if (v >= v2::kMinFixedFrameCodewords && v <= v2::kMaxFixedFrameCodewords) {
+                LOG_MODEM(INFO, "Connection: ULTRA_FRAME_CW responder override %d -> %d",
+                          negotiated_cw, v);
+                negotiated_cw = v;
+            }
+        }
         applyDataMode(rec_mod, rec_rate, negotiated_cw, rung_id);
         const uint8_t cw_byte = static_cast<uint8_t>(data_frame_cw_count_);
 
@@ -438,6 +447,15 @@ void Connection::handleConnectAck(const v2::ConnectFrame& frame, const std::stri
         : connection_policy::recommendCWCount(init_mod, init_rate, negotiated_mode_);
 
     // Apply the initial data mode immediately.
+    // 2026-05-28: ULTRA_FRAME_CW env override (initiator CONNECT_ACK path).
+    if (const char* env = std::getenv("ULTRA_FRAME_CW")) {
+        const int v = std::atoi(env);
+        if (v >= v2::kMinFixedFrameCodewords && v <= v2::kMaxFixedFrameCodewords) {
+            LOG_MODEM(INFO, "Connection: ULTRA_FRAME_CW initiator override %d -> %d",
+                      negotiated_cw, v);
+            negotiated_cw = v;
+        }
+    }
     applyDataMode(init_mod, init_rate, negotiated_cw, frame.ladder_rung_id);
 
     // Update remote callsign if we got it from the frame

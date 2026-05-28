@@ -648,6 +648,18 @@ void Connection::acceptCall() {
         rung_id = LadderRungId::OFDM_NARROW;
     }
 
+    // 2026-05-28: ULTRA_FRAME_CW env override for reliability sweep. Allows
+    // pinning cw count per frame in [1, kMaxFixedFrameCodewords]. Default unset
+    // = use the negotiated value as before.
+    if (const char* env = std::getenv("ULTRA_FRAME_CW")) {
+        const int v = std::atoi(env);
+        if (v >= v2::kMinFixedFrameCodewords && v <= v2::kMaxFixedFrameCodewords) {
+            LOG_MODEM(INFO, "Connection: ULTRA_FRAME_CW override %d -> %d",
+                      negotiated_cw, v);
+            negotiated_cw = v;
+        }
+    }
+
     // Set our local data mode immediately.
     applyDataMode(rec_mod, rec_rate, negotiated_cw, rung_id);
 
