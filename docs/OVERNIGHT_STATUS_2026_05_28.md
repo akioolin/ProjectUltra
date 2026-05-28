@@ -121,8 +121,33 @@ g32 on-air goodput numbers (4000 bps) look inflated relative to elapsed-derived 
 
 g16 + light-ACK + skip-descriptor + R5/6 = projected ~2900-3000 bps SS. Realistic; matches the time-budget math above. **g16 is the new recommended default** (replacing the env-gated g8 we ran the night on).
 
+## v3 fix verification (3:55am)
+
+3/3 PASS, ZERO new crash IPS files since `90f2017`:
+
+| Cell | Seed | Result | bps (on-air) | Note |
+|---|---|---|---|---|
+| g8  | 1 | PASS | 2100 | control (worked under v2) |
+| g32 | 2 | PASS | 3680 | **same seed that crashed at 03:36** — now clean |
+| g32 | 1 | PASS | 4000 | clean baseline |
+
+v3 fix confirmed. Both the descriptor-driven setDataMode path (v2) AND the connection-driven setConnectedOFDMMode path (v3) now defer waveform reconstruction to the safe top-of-`processBuffer` boundary.
+
+## End-to-end vs on-air honesty correction
+
+Per memory `project_onair_vs_endtoend_goodput`: on-air goodput overstates real throughput by ~2-3× because it excludes connect, disconnect, dead-air, retx airtime. The numbers below convert each run's reported on-air bps back to end-to-end (file bytes ÷ total elapsed):
+
+| Cell | On-air mean | End-to-end mean | Gap |
+|---|---|---|---|
+| g8_100KB  | 1800 | 102400×8/(440s mean) ≈ 1850 (on-par at SS) | — |
+| g16_100KB | 2147 | 102400×8/(473s mean) ≈ **1735** end-to-end | needs +73% to hit 3000 |
+| g16_100KB seed 2 (best) | 2570 | 102400×8/440 ≈ **1862** end-to-end | needs +61% |
+
+Real end-to-end ceiling is **~1900 bps**. To hit 3000 end-to-end need 61% improvement. Combining light-ACK (~+25%) + skip-descriptor (~+25%) compounds to ×1.56 → 1862 × 1.56 ≈ **2900 bps end-to-end**. Math closes.
+
 ## Open questions for morning
 
-- v3 verify run (3:50am, in background): does it confirm zero crashes on the g32 cell that crashed v2?
-- Worth making g16 the new default (currently env-gated ULTRA_BURST_GROUP_FRAMES=16)?
+- Worth promoting g16 to the new default (currently env-gated ULTRA_BURST_GROUP_FRAMES=16)?
 - Light-GROUP_ACK preamble: memory says a past attempt failed at 0.88 corr < 0.90 gate. With warm timing state from frame-arrival prediction (already implemented), a tighter window may pass — worth a focused experiment.
+- Skip-descriptor on same-rate continuation: needs receiver-side de-anchor protection so a missed-descriptor doesn't desync the deinterleaver across groups.
+- 3 crashes overnight all had the same HilbertTransform signature. Worth a one-pass architectural audit of ALL `waveform_->configure()` / `waveform_ = make_unique(...)` sites under the new "always defer to processBuffer top" rule, not just the two that have crashed.
