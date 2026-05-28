@@ -407,6 +407,12 @@ private:
     // INTERNAL HELPERS
     // ========================================================================
 
+    // §14.36: setDataMode body without acquiring buffer_mutex_. Callable from
+    // contexts that already hold it (the BURST_HEADER intercept inside
+    // processBuffer) so the receiver can switch rate from the descriptor's
+    // declaration mid-transfer for per-block rate adaptation.
+    void applyDataModeUnlocked(Modulation mod, CodeRate rate);
+
     // Search for sync in recent samples
     void searchForSync();
 

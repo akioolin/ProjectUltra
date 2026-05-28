@@ -769,6 +769,13 @@ void StreamingDecoder::setConnectedOFDMMode(protocol::WaveformMode mode,
 
 void StreamingDecoder::setDataMode(Modulation mod, CodeRate rate) {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
+    applyDataModeUnlocked(mod, rate);
+}
+
+void StreamingDecoder::applyDataModeUnlocked(Modulation mod, CodeRate rate) {
+    // §14.36: callable from contexts that already hold buffer_mutex_ (e.g. the
+    // BURST_HEADER intercept inside processBuffer), so the receiver can switch
+    // rate from the descriptor's declaration mid-transfer.
     code_rate_ = rate;
     current_modulation_ = mod;
     if (waveform_) waveform_->configure(mod, rate);

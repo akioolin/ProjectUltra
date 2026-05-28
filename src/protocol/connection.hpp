@@ -473,11 +473,30 @@ private:
     // default OFF. The SENDER runs the controller on the receiver's per-group decode
     // headroom (carried on the GROUP_ACK; a GROUP_NACK feeds quality 0 -> step down).
     void applyAdaptiveRateFeedback(float quality);
+    // Chunk-at-rate: form (or re-form) the in-flight burst group's frames at the
+    // CURRENT data_code_rate_ from the raw file payload + cursor. The cursor only
+    // advances on a fresh group (after the previous one was acked); a resend
+    // re-forms at the new rate from the same cursor.
+    bool formAndSendBurstGroup(uint16_t group_seq, bool is_resend);
     bool adaptive_rate_enabled_ = false;
     RateController rate_controller_;
     uint8_t pending_ack_quality_q_ = 0xFF;  // RX: byte to stamp on the next GROUP_ACK
     float last_group_quality_ = -1.0f;      // GUI: most recent group decode headroom
     std::string last_adaptive_action_;      // GUI: short human-readable action
+    // Raw file payload (TYPE+OFFSET headers stripped) + a byte cursor used by the
+    // chunk-at-rate form fn. Populated by startBurstFileTransfer when adaptive
+    // rate is on; the cursor advances by burst_pending_advance_ only on ACK.
+    std::vector<uint8_t> burst_file_payload_;
+    size_t burst_file_cursor_ = 0;
+    size_t burst_pending_advance_ = 0;
+    uint16_t burst_chunk_seq_ = 0;
+    // FILE_START / FILE_BLOCK metadata chunks held intact (different header from
+    // FILE_DATA's TYPE+OFFSET — must NOT be byte-stripped or chunked at-rate).
+    // Drained into the FIRST burst group's frame slots (one chunk per frame) so
+    // the receiver picks them up via the same burst-deinterleave path as file
+    // data — file_transfer_ enters RECEIVING before any FILE_DATA arrives.
+    std::deque<Bytes> burst_metadata_queue_;
+    size_t burst_pending_metadata_consumed_ = 0;
     // RX group assembly for the burst transport: frames of the in-flight group
     // accumulate here (keyed by the descriptor group_seq) until the group is
     // complete, then are handed to burst_transport_.onGroupReceived().

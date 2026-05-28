@@ -1730,6 +1730,61 @@ bool Connection::startBurstFileTransfer() {
         return false;
     }
 
+    // §14.36 chunk-at-rate path: if adaptive rate is on, do NOT pre-frame at the
+    // start rate. Strip the 5 B TYPE+OFFSET headers from each drained chunk to
+    // recover the raw file payload bytes, hand them to formAndSendBurstGroup which
+    // re-chunks at the CURRENT rate on every (re)send. Required for adaptation
+    // because a mid-transfer rate change would otherwise overflow the in-flight
+    // group's R3/4-sized frames into a smaller (R1/2 / R1/4) frame capacity.
+    if (adaptive_rate_enabled_) {
+        // The first chunk(s) from file_transfer_ are FILE_START (metadata: TYPE +
+        // FLAGS + SIZE + CRC32 + NAME — a DIFFERENT header from FILE_DATA's
+        // TYPE+OFFSET). They must arrive intact so the receiver enters RECEIVING
+        // state; only THEN does processFileData store FILE_DATA bytes. Strip-5-
+        // bytes works for FILE_DATA only — for FILE_START we send the chunk as-is
+        // via a normal DATA frame before the burst transport starts. burst_file_
+        // payload_ holds only file-body bytes (FILE_DATA data portions).
+        burst_file_payload_.clear();
+        burst_file_payload_.reserve(total_payload_bytes);
+        std::vector<Bytes> metadata_chunks;
+        for (const auto& chunk : chunk_payloads) {
+            if (chunk.empty()) continue;
+            const uint8_t ptype = chunk[0];
+            if (ptype == static_cast<uint8_t>(PayloadType::FILE_DATA) && chunk.size() > 5) {
+                burst_file_payload_.insert(burst_file_payload_.end(),
+                                           chunk.begin() + 5, chunk.end());
+            } else {
+                // FILE_START / FILE_BLOCK / etc. — keep as-is to send before the burst.
+                metadata_chunks.push_back(chunk);
+            }
+        }
+
+        // Hand the metadata chunks to the form fn so they ride the FIRST burst
+        // group's frames (one chunk per frame slot) on the SAME interleaved path
+        // as file data. Sending them as separate non-burst frames RACED the
+        // burst descriptor in the audio queue and lost — embedding them in the
+        // burst itself is deterministic and reuses the descriptor-driven decode.
+        burst_metadata_queue_.assign(metadata_chunks.begin(), metadata_chunks.end());
+        burst_pending_metadata_consumed_ = 0;
+        burst_file_cursor_ = 0;
+        burst_pending_advance_ = 0;
+        burst_chunk_seq_ = 0;
+        burst_transport_.setFormAndSendGroup(
+            [this](uint16_t group_seq, bool is_resend) {
+                return formAndSendBurstGroup(group_seq, is_resend);
+            });
+        burst_transport_.setAckTimeoutMs(arq_.getAckTimeout());
+        LOG_MODEM(INFO,
+                  "Connection: Burst file transfer (chunk-at-rate): %zu metadata chunks + "
+                  "%zu B raw payload, ack_timeout=%ums, start_rate=%s",
+                  metadata_chunks.size(), burst_file_payload_.size(),
+                  burst_transport_.ackTimeoutMs(),
+                  codeRateToString(data_code_rate_));
+        noteDataTurnPayloadStarted(total_payload_bytes);
+        burst_transport_.startTransfer();
+        return true;
+    }
+
     // Wrap each payload into a serialized fixed DATA frame (same construction the
     // SR-ARQ path uses, minus the window bookkeeping). FINAL marks the stream tail.
     std::vector<Bytes> frames;
@@ -1786,6 +1841,102 @@ bool Connection::startBurstFileTransfer() {
 
     noteDataTurnPayloadStarted(total_payload_bytes);
     burst_transport_.startTransfer(std::move(groups));
+    return true;
+}
+
+bool Connection::formAndSendBurstGroup(uint16_t group_seq, bool is_resend) {
+    // §14.36 chunk-at-rate: build the in-flight burst group's frames at the CURRENT
+    // data_code_rate_ from the raw file payload + cursor. On a NEW group (is_resend=
+    // false) the cursor advances by the previous group's consumed bytes; on a resend
+    // we re-form from the SAME cursor at whatever rate the controller picked since
+    // (so a dropped rate produces correctly-sized smaller frames).
+    if (!on_transmit_burst_) return false;
+    if (!is_resend) {
+        // Commit the previous group's progress: file cursor + any metadata chunks
+        // we drained in the last form. (Resends re-form from the same state, so
+        // these advances are skipped — the new rate may consume different bytes.)
+        burst_file_cursor_ += burst_pending_advance_;
+        burst_pending_advance_ = 0;
+        for (size_t i = 0; i < burst_pending_metadata_consumed_ &&
+                            !burst_metadata_queue_.empty(); ++i) {
+            burst_metadata_queue_.pop_front();
+        }
+        burst_pending_metadata_consumed_ = 0;
+    }
+    if (burst_metadata_queue_.empty() &&
+        burst_file_cursor_ >= burst_file_payload_.size()) {
+        return false;  // file fully drained -> transport will mark done(success)
+    }
+
+    const size_t group_size = connection_policy::burstInterleaveGroupFrames();
+    const size_t frame_cap =
+        v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
+    constexpr size_t kFileDataOverhead = 5;  // TYPE(1) + OFFSET(4)
+    if (frame_cap <= kFileDataOverhead) return false;
+    const size_t per_frame_data = frame_cap - kFileDataOverhead;
+
+    BurstStopAndWaitController::Group frames;
+    frames.reserve(group_size);
+    size_t consumed = 0;
+    size_t md_taken = 0;  // metadata chunks consumed in THIS form attempt
+    for (size_t i = 0; i < group_size; ++i) {
+        // 1) Metadata chunks (FILE_START / FILE_BLOCK) ride the first frame slots
+        //    of the first burst group, as-is — the receiver's handleDataPayload
+        //    routes them via file_transfer_.processPayload which enters RECEIVING
+        //    before any FILE_DATA arrives. Same path the legacy pre-chunked file
+        //    transfer used; reusing it keeps the receiver code unchanged.
+        if (md_taken < burst_metadata_queue_.size()) {
+            const Bytes& chunk = burst_metadata_queue_[md_taken];
+            const uint16_t seq = burst_chunk_seq_++;
+            auto frame = v2::makeFixedDataFrame(local_call_, remote_call_, seq, chunk,
+                                                data_code_rate_, data_frame_cw_count_);
+            frame.type = v2::FrameType::DATA;
+            frame.flags = v2::Flags::MORE_FRAG;  // metadata is never the file tail
+            frames.push_back(frame.serialize());
+            ++md_taken;
+            continue;
+        }
+        const size_t offset_in_file = burst_file_cursor_ + consumed;
+        const size_t total = burst_file_payload_.size();
+        if (offset_in_file >= total) {
+            // File drained mid-group — pad the rest of the group.
+            frames.push_back(v2::makeFixedDataFrame(
+                local_call_, kOFDMBurstPadCallsign,
+                static_cast<uint16_t>(kOFDMBurstPadSeq - i),
+                makeOFDMBurstPadPayload(data_code_rate_, data_frame_cw_count_, i),
+                data_code_rate_, data_frame_cw_count_).serialize());
+            continue;
+        }
+        const size_t this_data = std::min(per_frame_data, total - offset_in_file);
+        Bytes chunk;
+        chunk.reserve(kFileDataOverhead + this_data);
+        chunk.push_back(static_cast<uint8_t>(PayloadType::FILE_DATA));
+        const uint32_t off32 = static_cast<uint32_t>(offset_in_file);
+        chunk.push_back(static_cast<uint8_t>((off32 >> 24) & 0xFF));
+        chunk.push_back(static_cast<uint8_t>((off32 >> 16) & 0xFF));
+        chunk.push_back(static_cast<uint8_t>((off32 >> 8) & 0xFF));
+        chunk.push_back(static_cast<uint8_t>(off32 & 0xFF));
+        chunk.insert(chunk.end(),
+                     burst_file_payload_.begin() + offset_in_file,
+                     burst_file_payload_.begin() + offset_in_file + this_data);
+        const uint16_t seq = burst_chunk_seq_++;
+        auto frame = v2::makeFixedDataFrame(local_call_, remote_call_, seq, chunk,
+                                            data_code_rate_, data_frame_cw_count_);
+        frame.type = v2::FrameType::DATA;
+        const bool finishes_file = (offset_in_file + this_data >= total);
+        frame.flags = finishes_file ? v2::Flags::FINAL : v2::Flags::MORE_FRAG;
+        frames.push_back(frame.serialize());
+        consumed += this_data;
+    }
+    burst_pending_advance_ = consumed;
+    burst_pending_metadata_consumed_ = md_taken;
+    LOG_MODEM(INFO,
+              "Connection: form group_seq=%u rate=%s capacity=%zuB/frame consumed=%zuB"
+              " cursor=%zu/%zu%s",
+              group_seq, codeRateToString(data_code_rate_), per_frame_data, consumed,
+              burst_file_cursor_, burst_file_payload_.size(),
+              is_resend ? " [RESEND]" : "");
+    on_transmit_burst_(frames, group_seq);
     return true;
 }
 

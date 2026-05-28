@@ -712,6 +712,21 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 }
                                 setBurstInterleave(bi.burst_interleave);
                                 setCarrierLdpcInterleaver(bi.carrier_ldpc);
+                                // §14.36 Phase 5c: the descriptor's declared rate is
+                                // authoritative — when the sender adapts mid-transfer
+                                // (chunk-at-rate), the next group's frames are sized
+                                // for bi.code_rate, NOT our negotiated start rate. We
+                                // must reconfigure the decoder to that rate before
+                                // demodulating the group, or it decodes at the wrong
+                                // K and fails 0/8 on every adapted resend.
+                                if (bi.code_rate != code_rate_) {
+                                    LOG_MODEM(INFO,
+                                        "[%s] Burst descriptor rate change: %s -> %s",
+                                        log_prefix_.c_str(),
+                                        codeRateToString(code_rate_),
+                                        codeRateToString(bi.code_rate));
+                                    applyDataModeUnlocked(bi.modulation, bi.code_rate);
+                                }
                                 // Declare the data size so the immediately-following
                                 // group-start frame is sized as a full data frame
                                 // (PendingCodewords requirement) instead of a

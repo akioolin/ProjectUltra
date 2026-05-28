@@ -39,6 +39,17 @@ public:
     using SendGroupAckFn = std::function<void(uint16_t group_seq)>;
     using GroupDeliveredFn = std::function<void(uint16_t group_seq, const Group& frames)>;
 
+    // §14.36 chunk-at-rate: form (or re-form) the next group at the connection's
+    // CURRENT data rate and transmit it. The transport doesn't store frames; it
+    // just runs the stop-and-wait state machine and calls back when it needs a
+    // (re)send. Returns false when there is no more payload to send (transfer
+    // complete). is_resend=true when this is a retry of the in-flight group
+    // (NACK or timeout) — the connection re-forms from the SAME file offset
+    // (the rate may have changed since the last send, so the byte count may
+    // differ). The transport tracks "in-flight / retries / done"; the connection
+    // owns the file cursor and advances it only on ACK.
+    using FormAndSendGroupFn = std::function<bool(uint16_t group_seq, bool is_resend)>;
+
     struct Config {
         // One burst is ~6 s; allow the burst airtime + T/R turnaround + the ACK
         // burst before declaring the group lost. Tuned per channel later.
@@ -63,12 +74,14 @@ public:
 
     // ----------------------------------------------------------------- sender
     void setTransmitGroup(TransmitGroupFn fn) { tx_group_ = std::move(fn); }
+    void setFormAndSendGroup(FormAndSendGroupFn fn) { form_send_ = std::move(fn); }
     void setTransferDone(TransferDoneFn fn) { tx_done_ = std::move(fn); }
 
     // Begin a transfer: the file pre-chunked into groups (each group = the frame
     // payloads of one interleaved burst). Empty transfer completes immediately.
     void startTransfer(std::vector<Group> groups) {
         groups_ = std::move(groups);
+        chunk_at_rate_ = false;
         next_group_ = 0;
         retries_ = 0;
         elapsed_since_tx_ms_ = 0;
@@ -80,6 +93,24 @@ public:
         }
     }
 
+    // §14.36 chunk-at-rate transfer: the connection forms each group at the current
+    // rate via setFormAndSendGroup; the transport just tracks in-flight/retries/done.
+    // The form fn returns false when the file payload is fully drained -> transfer
+    // completes successfully. Used by the adaptive-rate path (default OFF).
+    void startTransfer() {
+        groups_.clear();
+        chunk_at_rate_ = true;
+        next_group_ = 0;
+        retries_ = 0;
+        elapsed_since_tx_ms_ = 0;
+        sending_ = true;
+        if (!transmitCurrent()) {
+            // Form fn returned false immediately -> empty payload -> done.
+            sending_ = false;
+            if (tx_done_) tx_done_(true);
+        }
+    }
+
     // Sender received a group-ACK. Advances only on the in-flight group; stale or
     // duplicate ACKs are ignored (stop-and-wait has exactly one group in flight).
     void onGroupAck(uint16_t group_seq) {
@@ -88,11 +119,16 @@ public:
         ++next_group_;
         retries_ = 0;
         elapsed_since_tx_ms_ = 0;
-        if (next_group_ >= groups_.size()) {
+        // Done condition differs by mode: pre-chunked = index past end; chunk-at-rate
+        // = form fn returns false (file payload drained).
+        if (!chunk_at_rate_ && next_group_ >= groups_.size()) {
             sending_ = false;
             if (tx_done_) tx_done_(true);
-        } else {
-            transmitCurrent();
+            return;
+        }
+        if (!transmitCurrent()) {
+            sending_ = false;
+            if (tx_done_) tx_done_(true);
         }
     }
 
@@ -160,11 +196,22 @@ public:
     uint16_t rxExpectedGroupSeq() const { return static_cast<uint16_t>(rx_next_group_); }
 
 private:
-    void transmitCurrent() {
+    bool transmitCurrent() {
+        const bool is_resend = (retries_ > 0);
+        return doTransmit(is_resend);
+    }
+
+    bool doTransmit(bool is_resend) {
         elapsed_since_tx_ms_ = 0;
+        if (chunk_at_rate_) {
+            if (!form_send_) return false;
+            return form_send_(static_cast<uint16_t>(next_group_), is_resend);
+        }
         if (tx_group_ && next_group_ < groups_.size()) {
             tx_group_(static_cast<uint16_t>(next_group_), groups_[next_group_]);
+            return true;
         }
+        return false;
     }
 
     // True if a < b in 16-bit sequence space (no wrap within a single transfer,
@@ -176,12 +223,14 @@ private:
     Config cfg_;
 
     // sender state
-    std::vector<Group> groups_;
+    std::vector<Group> groups_;          // legacy pre-chunked path (back-compat, tests)
+    bool chunk_at_rate_ = false;          // §14.36: form-at-send via form_send_
     size_t next_group_ = 0;
     uint32_t retries_ = 0;
     uint32_t elapsed_since_tx_ms_ = 0;
     bool sending_ = false;
     TransmitGroupFn tx_group_;
+    FormAndSendGroupFn form_send_;
     TransferDoneFn tx_done_;
 
     // receiver state
