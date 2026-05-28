@@ -558,7 +558,14 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
             static_cast<uint8_t>(fixed_frame_codewords_),
             modulation_, code_rate_, flags);
         Bytes descriptor_bytes = descriptor.serialize();
-        std::vector<float> descriptor_samples = encodeFrame(descriptor_bytes);
+        // §14.36 optimization (2026-05-28): light preamble for the burst descriptor.
+        // The full chirp+LTS anchor here was seeding warm timing for the group-start
+        // marker, but warm timing is ALREADY seeded by the immediately-prior frame
+        // (CONNECT_ACK, GROUP_ACK, etc.) — the descriptor's redundant 1.5 s anchor
+        // is the single biggest per-cycle overhead. encodeFrameLight honors
+        // force_full_preamble_once_ (line 371), so the first burst after a long
+        // gap still gets a full anchor automatically.
+        std::vector<float> descriptor_samples = encodeFrameLight(descriptor_bytes);
         if (!descriptor_samples.empty()) {
             result.insert(result.end(), descriptor_samples.begin(), descriptor_samples.end());
             LOG_MODEM(INFO,
