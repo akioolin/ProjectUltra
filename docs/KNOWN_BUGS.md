@@ -42,6 +42,33 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
     `connect_timeout_ms = 60000` is far longer than the cli_simulator harness's
     30s PHASE 1 budget, so harness exposure of this case looks like seed noise.
 
+### BUG-NACK-001: Burst GROUP_NACK sent over MC-DPSK handshake waveform, not the tone-burst
+- Status: FIXED (2026-05-29, branch feat/oneway-arch-2026-05-27, commit pending). Verified
+  seed 2 Good@20 warm-ON: tone-burst NACK emits=1, MC-DPSK NACK=0, MC-DPSK TX post-connect=0,
+  file PASS 11/11 CRC-clean, run ~34 s faster (171 s vs 205 s).
+- Area: burst transport failure path (`Connection::onGroupReceived`, the `!all_ok` branch)
+- Reported by operator (waterfall observation), seed 2 Good@20 file transfer:
+  - "Bravo issues a NACK using the old NACK system, not the tone-burst."
+  - "After group 0's initial failure there is a weird MC-DPSK signal repassing on the waterfall."
+- Root cause (BOTH symptoms are one bug): on a failed group the receiver sent
+  `transmitFrame(makeGroupNack(...))`, a 20-byte control frame over the CURRENT
+  waveform. For group 0 `handshake_complete_` is still false (it is set later, in
+  the `all_ok` path the NACK branch `return`s before reaching), so the frame went
+  out as the **MC-DPSK handshake waveform = 149760 samples ≈ 3.1 s** on the air —
+  the "weird MC-DPSK signal" — instead of the §15 tone-burst (675 ms). The §15
+  work routed the success GROUP_ACK to the tone-burst but left the failure
+  GROUP_NACK on the legacy control-frame path.
+- Impact:
+  - ~4.6× slower NACK (3.1 s vs 675 ms) → slower deep-fade resend recovery (a chunk
+    of seed 2's latency); off-waveform MC-DPSK energy mid-OFDM transfer.
+- Fix: emit a NACK-type tone-burst (`AckType::Nack`, whole-group missing mask) from
+  the `!all_ok` branch, mirroring `setSendGroupAck`. The sender's `onToneBurstAck`
+  already maps a NACK-type tone-burst to `burst_transport_.onGroupNack` (resend
+  now), so the entire receive path already existed — only the emit was wrong.
+  Falls back to the OFDM `makeGroupNack` frame if the tone-burst callback is absent.
+- Verification: seed 2 warm-ON GUI re-run — expect 0 MC-DPSK TX bursts after
+  connect and tone-burst NACK emits > 0, file still CRC-clean.
+
 ### BUG-CFO-001: OFDM two-stage CFO refinement remains incomplete
 - Status: OPEN
 - Area: `src/ofdm/demodulator.cpp`

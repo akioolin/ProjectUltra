@@ -2371,11 +2371,34 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
         // cycles). Only NACK the group we are actually still waiting for, so a
         // failed duplicate of an already-delivered group is not NACKed.
         if (group_seq == burst_transport_.rxExpectedGroupSeq()) {
-            LOG_MODEM(INFO,
-                      "Connection: Burst group_seq=%u failed (0/8); sending GROUP_NACK (resend now)",
-                      group_seq);
-            transmitFrame(
-                v2::ControlFrame::makeGroupNack(local_call_, remote_call_, group_seq).serialize());
+            // 2026-05-29 fix: emit the NACK over the §15 TONE-BURST path, same as
+            // the GROUP_ACK. The old transmitFrame(makeGroupNack) sent a 20-byte
+            // control frame over the CURRENT waveform — and on group 0
+            // handshake_complete_ is still false (it is set later, in the all_ok
+            // path this NACK branch returns before reaching), so the frame went
+            // out as the MC-DPSK HANDSHAKE waveform: a ~3.1 s MC-DPSK burst on the
+            // air (the "weird MC-DPSK signal" on the waterfall), ~4.6× slower than
+            // the 675 ms tone-burst and bypassing §15 entirely. The sender's
+            // onToneBurstAck already maps a NACK-type tone-burst to
+            // burst_transport_.onGroupNack (resend now), so the whole receive path
+            // already exists — only the emit was wrong.
+            if (on_transmit_tone_burst_ack_) {
+                LOG_MODEM(INFO,
+                          "Connection: Burst group_seq=%u failed (0/8); sending tone-burst GROUP_NACK (resend now)",
+                          group_seq);
+                ultra::waveform::tone_burst_ack::ToneBurstAckPayload tba;
+                tba.group_seq = static_cast<uint8_t>(group_seq & 0x3F);
+                tba.frame_mask = 0x00;  // whole group missing (0/8); sender whole-burst-resends
+                tba.type = ultra::waveform::tone_burst_ack::AckType::Nack;
+                tba.rate_hint = 0;      // quality 0 (group failed)
+                on_transmit_tone_burst_ack_(tba);
+            } else {
+                LOG_MODEM(INFO,
+                          "Connection: Burst group_seq=%u failed (0/8); sending GROUP_NACK (resend now)",
+                          group_seq);
+                transmitFrame(
+                    v2::ControlFrame::makeGroupNack(local_call_, remote_call_, group_seq).serialize());
+            }
         } else {
             LOG_MODEM(INFO,
                       "Connection: Burst group_seq=%u failed but not the expected group (%u); dropping",
