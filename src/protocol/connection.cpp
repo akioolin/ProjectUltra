@@ -1762,6 +1762,66 @@ void Connection::sendNextFileChunk() {
     }
 }
 
+// §15 step 4d-ii: receiver-side tone-burst ACK handoff. Mirrors the OFDM
+// GROUP_ACK arrival path at connection.cpp:2516, but takes a ToneBurstAckDetection
+// (already decoded by the StreamingDecoder's monitor — no frame parse needed).
+//
+// Quality mapping for the rate controller:
+//   - ACK  -> quality 1.0 (clean decode; the receiver couldn't have CRC-verified
+//             a tone-burst payload otherwise). The 3-bit rate_hint field in the
+//             payload is NOT consumed yet — that's a future refinement; for v1
+//             the ACK/NACK semantic is all we use.
+//   - NACK -> quality 0.0 (receiver couldn't decode -> step rate down).
+//
+// group_seq is 6 bits on the wire (mod 64). For files with <= 64 groups (~1 MB
+// at QPSK R3/4) this matches the in-flight group exactly. Beyond that, the
+// caller must extend the wire format; not gated for v1.
+bool Connection::onToneBurstAck(
+    const ultra::waveform::tone_burst_ack::ToneBurstAckDetection& detection) {
+    if (state_ != ConnectionState::CONNECTED) return false;
+    if (!use_burst_transport_) return false;
+
+    const uint8_t tba_seq6 = detection.payload.group_seq;
+    const size_t expected_next = burst_transport_.groupsAcked();
+    const uint16_t expected_seq16 = static_cast<uint16_t>(expected_next);
+    const uint8_t expected_seq6 =
+        static_cast<uint8_t>(expected_seq16 & 0x3F);
+
+    if (tba_seq6 != expected_seq6) {
+        LOG_MODEM(DEBUG,
+                  "Connection: tone-burst ACK ignored: seq6=%u != expected_seq6=%u (next_group=%u type=%s)",
+                  static_cast<unsigned>(tba_seq6),
+                  static_cast<unsigned>(expected_seq6),
+                  static_cast<unsigned>(expected_seq16),
+                  detection.payload.type ==
+                          ultra::waveform::tone_burst_ack::AckType::Nack
+                      ? "NACK"
+                      : "ACK");
+        return false;
+    }
+
+    const bool is_nack = (detection.payload.type ==
+                          ultra::waveform::tone_burst_ack::AckType::Nack);
+    LOG_MODEM(INFO,
+              "Connection: tone-burst %s matched group_seq=%u "
+              "(frame_mask=0x%02X rate_hint=%u peak=%.1f symbol_ms=%u)",
+              is_nack ? "NACK" : "ACK",
+              static_cast<unsigned>(expected_seq16),
+              static_cast<unsigned>(detection.payload.frame_mask),
+              static_cast<unsigned>(detection.payload.rate_hint),
+              detection.correlation_peak,
+              static_cast<unsigned>(detection.symbol_ms_used));
+
+    if (is_nack) {
+        applyAdaptiveRateFeedback(0.0f);
+        burst_transport_.onGroupNack(expected_seq16);
+    } else {
+        applyAdaptiveRateFeedback(1.0f);
+        burst_transport_.onGroupAck(expected_seq16);
+    }
+    return true;
+}
+
 bool Connection::startBurstFileTransfer() {
     // §14.27: drain the whole file into serialized fixed DATA frames, slice into
     // BURST_GROUP_SIZE-frame interleaved groups, and hand them to the group

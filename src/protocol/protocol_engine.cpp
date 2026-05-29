@@ -334,6 +334,12 @@ void ProtocolEngine::onAcceptedOFDMDataSync(float sync_correlation) {
     connection_.onAcceptedOFDMDataSync(sync_correlation);
 }
 
+bool ProtocolEngine::onToneBurstAck(
+    const ultra::waveform::tone_burst_ack::ToneBurstAckDetection& detection) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    return connection_.onToneBurstAck(detection);
+}
+
 void ProtocolEngine::onBurstGroupReceived(uint16_t group_seq,
                                           const std::vector<Bytes>& frames, bool all_ok,
                                           float quality) {

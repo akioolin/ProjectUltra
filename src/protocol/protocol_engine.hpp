@@ -121,6 +121,13 @@ public:
     // DATA frames, all-logical-frames-decoded) for the one-way burst transport.
     void onBurstGroupReceived(uint16_t group_seq, const std::vector<Bytes>& frames,
                               bool all_ok, float quality);
+
+    // §15 step 4d-ii: hand a tone-burst ACK detection from the receiver's
+    // always-on ToneBurstAckMonitor (installed in StreamingDecoder) to the
+    // protocol layer. Delegates to Connection::onToneBurstAck. Returns
+    // true iff the detection matched an in-flight burst-transport group.
+    bool onToneBurstAck(
+        const ultra::waveform::tone_burst_ack::ToneBurstAckDetection& detection);
     void tick(uint32_t elapsed_ms);
 
     // §14.36 Phase 5c live GUI surface: the sender's most recent decode-headroom

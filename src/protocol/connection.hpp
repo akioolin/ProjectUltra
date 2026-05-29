@@ -4,6 +4,7 @@
 #include "arq.hpp"
 #include "selective_repeat_arq.hpp"
 #include "burst_transport.hpp"
+#include "waveform/tone_burst_ack/tone_burst_ack_monitor.hpp"
 #include "rate_controller.hpp"
 #include "file_transfer.hpp"
 #include "ultra/types.hpp"
@@ -197,6 +198,17 @@ public:
     void setPingReceivedCallback(PingReceivedCallback cb) { on_ping_received_ = cb; }
     void setStateChangedCallback(StateChangedCallback cb) { on_state_changed_ = cb; }
     void onPongReceived();  // Call when modem detects response to our PING
+
+    // §15 step 4d-ii: hand a decoded tone-burst ACK to the protocol. Mirrors
+    // the OFDM GROUP_ACK arrival path (connection.cpp:2516) but skips the
+    // OFDM frame parse — the payload is already decoded by the receiver's
+    // ToneBurstAckMonitor. Safe to call from the audio thread; method
+    // resolves group_seq against the in-flight burst (lower-6-bit match)
+    // and advances burst_transport_ if the ACK is for the expected group.
+    // Returns true iff the detection matched an in-flight group; false if
+    // the detection was stale/out-of-context (silently dropped).
+    bool onToneBurstAck(
+        const ultra::waveform::tone_burst_ack::ToneBurstAckDetection& detection);
 
     void setFileProgressCallback(FileProgressCallback cb);
     void setFileReceivedCallback(FileReceivedCallback cb);

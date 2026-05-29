@@ -596,6 +596,18 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         protocol_.onAcceptedOFDMDataSync(sync_correlation);
     });
 
+    // §15 step 4d-ii: route tone-burst ACK detections from the receiver's
+    // always-on monitor to the protocol layer. The callback fires on the
+    // audio thread; ProtocolEngine takes its own mutex so this is safe to
+    // call across threads. Connection::onToneBurstAck does the matching
+    // against the in-flight burst-transport group and either advances
+    // (ACK) or triggers a fast resend (NACK).
+    modem_.setToneBurstAckCallback(
+        [this](
+            const ultra::waveform::tone_burst_ack::ToneBurstAckDetection& d) {
+            protocol_.onToneBurstAck(d);
+        });
+
     // Set up status callback to show codeword progress in RX log
     ultra::gui::startupTrace("App", "set-status-callback-enter");
     modem_.setStatusCallback([this](const std::string& status) {
