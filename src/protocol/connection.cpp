@@ -405,6 +405,36 @@ Connection::Connection(const ConnectionConfig& config)
         transmitFrame(
             v2::ControlFrame::makeGroupAck(local_call_, remote_call_, group_seq, quality_q)
                 .serialize());
+
+        // §15 step 4d-iii: emit a tone-burst ACK alongside the OFDM frame ACK.
+        // BOTH go on the wire; the sender's tone-burst monitor will catch the
+        // tone-burst first (much shorter integration time) and advance its
+        // burst_transport_ via Connection::onToneBurstAck. The OFDM ACK
+        // arrives later and is silently no-op'd by burst_transport_.onGroupAck
+        // (seq mismatch since we already advanced). Once the tone-burst path
+        // has multi-seed GUI verification, a follow-up commit will drop the
+        // OFDM ACK emit to actually capture the goodput delta.
+        if (on_transmit_tone_burst_ack_) {
+            ultra::waveform::tone_burst_ack::ToneBurstAckPayload tba;
+            tba.group_seq = static_cast<uint8_t>(group_seq & 0x3F);
+            tba.frame_mask = 0x3F;  // all frames in the group ACK'd (no
+                                    // per-frame mask path used yet — v1
+                                    // uses cumulative ACK semantic)
+            tba.type =
+                ultra::waveform::tone_burst_ack::AckType::Ack;
+            // Map the quality_q byte back into a 3-bit rate hint. Today's
+            // semantic: quality_q is 0..254 (255 = no feedback). Bin into
+            // 8 levels: 0 -> hint=0 (slowest), 254 -> hint=7 (fastest).
+            // The receiver doesn't consume rate_hint yet (step 4d-late),
+            // so this is informational only for now.
+            if (quality_q == 0xFF) {
+                tba.rate_hint = 0;  // unknown -> conservative
+            } else {
+                tba.rate_hint = static_cast<uint8_t>(
+                    (static_cast<uint32_t>(quality_q) * 7u) / 254u);
+            }
+            on_transmit_tone_burst_ack_(tba);
+        }
     });
     burst_transport_.setGroupDelivered(
         [this](uint16_t /*group_seq*/, const BurstStopAndWaitController::Group& frames) {

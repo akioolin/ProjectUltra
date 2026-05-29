@@ -81,6 +81,14 @@ public:
     using TransmitCallback = std::function<void(const Bytes&)>;
     using TransmitInfoCallback =
         std::function<void(const Bytes&, bool expect_full_ofdm_anchor_after_tx)>;
+    // §15 step 4d-iii: parallel emit path for tone-burst ACK. Carries the
+    // decoded payload, not raw bytes — the modem layer encodes it to audio
+    // via StreamingEncoder::encodeToneBurstAck() (step 4c) and queues the
+    // samples on the audio output. Fires alongside the OFDM GROUP_ACK
+    // transmitFrame() so both paths are on the wire; the receiver's
+    // monitor wins on speed.
+    using TransmitToneBurstAckCallback = std::function<void(
+        const ultra::waveform::tone_burst_ack::ToneBurstAckPayload&)>;
     using ConnectedCallback = std::function<void()>;
     using DisconnectedCallback = std::function<void(const std::string& reason)>;
     using MessageReceivedCallback = std::function<void(const std::string& text)>;
@@ -177,6 +185,9 @@ public:
 
     void setTransmitCallback(TransmitCallback cb);
     void setTransmitInfoCallback(TransmitInfoCallback cb);
+    void setTransmitToneBurstAckCallback(TransmitToneBurstAckCallback cb) {
+        on_transmit_tone_burst_ack_ = std::move(cb);
+    }
 
     // Burst mode TX callback - transmits multiple frames as single audio burst.
     // Used for OFDM connected mode and MC-DPSK DATA file-window bursts.
@@ -622,6 +633,7 @@ private:
     // Callbacks
     TransmitCallback on_transmit_;
     TransmitInfoCallback on_transmit_info_;
+    TransmitToneBurstAckCallback on_transmit_tone_burst_ack_;
     ConnectedCallback on_connected_;
     DisconnectedCallback on_disconnected_;
     MessageReceivedCallback on_message_received_;

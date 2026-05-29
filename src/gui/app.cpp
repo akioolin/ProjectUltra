@@ -698,6 +698,23 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         }
     });
 
+    // §15 step 4d-iii: parallel tone-burst ACK emit. Fires from Connection's
+    // setSendGroupAck callback (alongside the existing OFDM GROUP_ACK
+    // transmitFrame). The OFDM ACK + tone-burst both go on the wire;
+    // receiver's tone-burst monitor wins on speed. After multi-seed GUI
+    // verification, a later commit drops the OFDM ACK emit to capture
+    // the actual goodput delta.
+    protocol_.setTransmitToneBurstAckCallback(
+        [this](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& tba) {
+            auto samples = modem_.transmitToneBurstAck(tba);
+            if (!samples.empty()) {
+                // Carry the same in_qso_data flag as the OFDM ACK (false —
+                // ACKs are control frames, not in-QSO data).
+                queueRealTxSamples(samples, "TX tone-burst ACK audio",
+                                   /*in_qso_data=*/false);
+            }
+        });
+
     ultra::gui::startupTrace("App", "protocol-callbacks-mid1");
 
     protocol_.setMessageReceivedCallback([this](const std::string& from, const std::string& text) {

@@ -218,6 +218,16 @@ public:
     using TransmitBurstCallback = Connection::TransmitBurstCallback;
     void setTransmitBurstCallback(TransmitBurstCallback cb);
 
+    // §15 step 4d-iii: parallel emit path for the tone-burst ACK. Fires
+    // ALONGSIDE the OFDM GROUP_ACK on every group ACK; the receiver's
+    // monitor decodes whichever arrives first. The OFDM ACK stays in
+    // place as the existing baseline path until the tone-burst route
+    // is multi-seed verified.
+    using TransmitToneBurstAckCallback = Connection::TransmitToneBurstAckCallback;
+    void setTransmitToneBurstAckCallback(TransmitToneBurstAckCallback cb) {
+        connection_.setTransmitToneBurstAckCallback(std::move(cb));
+    }
+
     using PingTxCallback = Connection::PingTxCallback;
     void setPingTxCallback(PingTxCallback cb);
 

@@ -76,6 +76,15 @@ public:
     std::vector<float> transmitPing();
     std::vector<float> transmitPong();  // Same as ping, context determines meaning
 
+    // §15 step 4d-iii: encode a tone-burst ACK to raw audio samples (4-FSK
+    // in the 2400-2700 Hz subband). Delegates to StreamingEncoder::
+    // encodeToneBurstAck (step 4c). The caller queues the returned samples
+    // on the audio output ring just like any other transmit*() result.
+    std::vector<float> transmitToneBurstAck(
+        const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& payload,
+        uint32_t symbol_ms =
+            ultra::waveform::tone_burst_ack::kBaselineSymbolMs);
+
     // Test signal generation
     std::vector<float> generateTestTone(float duration_sec = 1.0f);
     std::vector<float> transmitTestPattern(int pattern = 0);

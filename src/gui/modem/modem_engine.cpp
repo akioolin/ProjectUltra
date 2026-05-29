@@ -654,6 +654,32 @@ std::vector<float> ModemEngine::transmitPing() {
     return postProcessTx(samples);
 }
 
+std::vector<float> ModemEngine::transmitToneBurstAck(
+    const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& payload,
+    uint32_t symbol_ms) {
+    // §15 step 4d-iii. Delegate to StreamingEncoder::encodeToneBurstAck (4c).
+    // Returned samples flow through the same postProcessTx pipeline as every
+    // other TX (peak normalization, etc.) so the audio output amplitude
+    // matches what the rest of the modem produces.
+    if (!streaming_encoder_) {
+        LOG_MODEM(ERROR, "[%s] transmitToneBurstAck: no streaming encoder",
+                  log_prefix_.c_str());
+        return {};
+    }
+    auto samples = streaming_encoder_->encodeToneBurstAck(payload, symbol_ms);
+    LOG_MODEM(INFO,
+              "[%s] TX ToneBurstAck: group_seq=%u type=%s frame_mask=0x%02X "
+              "samples=%zu",
+              log_prefix_.c_str(),
+              static_cast<unsigned>(payload.group_seq),
+              payload.type == ultra::waveform::tone_burst_ack::AckType::Nack
+                  ? "NACK"
+                  : "ACK",
+              static_cast<unsigned>(payload.frame_mask),
+              samples.size());
+    return postProcessTx(samples);
+}
+
 std::vector<float> ModemEngine::transmitPong() {
     // Pong is identical to ping - context determines meaning
     // (Ping = initiator probe, Pong = responder reply)
