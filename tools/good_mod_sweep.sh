@@ -20,7 +20,7 @@ printf "%-5s %-7s %-9s %-6s %-8s %-9s %-7s %-22s %s\n" SEED RESULT CWFAIL RETX G
 echo "---------------------------------------------------------------------------------------------"
 for sd in $SEEDS; do
   out="/tmp/good_${TAG}_s${sd}"
-  ./tools/qam16_ladder_scenario.sh --channel good --snr-db "$SNR" --seed "$sd" \
+  ./tools/gui_qso_scenario.sh --channel good --snr-db "$SNR" --seed "$sd" \
     --expect-rate "$EXPECT_RATE" --expect-mod "$EXPECT_MOD" --message-count 2 --out "$out" \
     > "$out.run" 2>&1
   s="$out/summary.env"

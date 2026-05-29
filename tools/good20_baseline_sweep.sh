@@ -8,7 +8,7 @@
 # --message-count 1 — one message each way (alpha->bravo, bravo->alpha) then an
 # alpha->bravo file transfer. This is the minimal realistic exchange, kept small
 # on purpose: the heavy default ladder sends 3 chat messages each way AND the
-# PASS gate (qam16_ladder_scenario.sh:226-227) requires every one delivered both
+# PASS gate (gui_qso_scenario.sh PASS gate) requires every one delivered both
 # directions, so on a marginal rung a single dropped chat message fails the run
 # even when the file was clean, and the extra two-way chat adds half-duplex
 # turn-taking contention unrelated to the file. One message each keeps a real
@@ -31,7 +31,7 @@ run_idx=0
 for sd in $SEEDS; do
   run_idx=$((run_idx + 1))
   out="/tmp/good20_${TAG}_s${sd}_r${run_idx}"
-  ./tools/qam16_ladder_scenario.sh --channel good --snr-db 20 --seed "$sd" \
+  ./tools/gui_qso_scenario.sh --channel good --snr-db 20 --seed "$sd" \
     --expect-rate "$RATE" --expect-mod QPSK --message-count "$MSGS" --out "$out" \
     > "$out.run" 2>&1
   s="$out/summary.env"

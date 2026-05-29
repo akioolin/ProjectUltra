@@ -1,4 +1,27 @@
 #!/usr/bin/env bash
+#
+# gui_qso_scenario.sh — the FAITHFUL real-time GUI test harness.
+# (Renamed 2026-05-29 from the misleading "qam16_ladder_scenario.sh"; it is not
+#  QAM16- or ladder-specific.)
+#
+# Drives two real `ultra_gui -sim` instances (ALPHA, BRAVO) through a live
+# `ota_simulator serve` channel for a full connected one-way file transfer:
+# PING/PONG -> CONNECT -> MODE_CHANGE -> ALPHA->BRAVO file transfer -> DISCONNECT.
+# (Chat messaging was removed 2026-05-29 — the GUI is a one-way FILE SENDER per
+# design §14; this harness is file-transfer-only.) This is the real-time path
+# (audio-clock paced), so it is the trustworthy reliability/throughput gate —
+# unlike cli_simulator, which is CPU-paced and not faithful for fade reliability.
+#
+# Goodput reported (summary.env GOODPUT_BPS) is ALPHA's (sender) on-air goodput
+# only — the honest full-transfer number. BRAVO's "Received OK kbps" is NOT used
+# (it spans only first->last decode and over-reports; see the goodput block).
+#
+# Common usage (warm-handoff burst-transport file transfer, Good@20 R3/4):
+#   export ULTRA_BURST_TRANSPORT=1 ULTRA_ADAPTIVE_RATE=1 ULTRA_LOCK_RATE=1 \
+#          ULTRA_LDPC_Z=81 ULTRA_BURST_GROUP_FRAMES=6 [ULTRA_S16_WARM_HANDOFF=1]
+#   tools/gui_qso_scenario.sh --channel good --snr-db 20 --seed N \
+#       --expect-rate R3/4 --expect-mod QPSK --file-kb 21 --out /tmp/X
+# Multi-seed: loop this script over seeds (it is the single test harness).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -7,8 +30,6 @@ SNR_DB="20"
 SEED="42"
 EXPECT_RATE="R1/4"
 EXPECT_MOD="16QAM"
-MSG_COUNT=3
-MSG_INTERVAL=8
 CONNECT_DELAY=5
 DISCONNECT_AFTER=20
 EXIT_AFTER=""
@@ -17,7 +38,7 @@ OUT=""
 
 usage() {
   printf 'Usage: %s [--channel awgn] [--snr-db 20] [--seed 42] [--expect-rate R1/4] [--expect-mod 16QAM] [--out DIR]\n' "$0"
-  printf '       [--exit-after SEC] [--auto-disconnect-after SEC] [--message-count N]\n'
+  printf '       [--exit-after SEC] [--auto-disconnect-after SEC] [--file-kb KB]\n'
 }
 
 modulation_bits() {
@@ -60,8 +81,6 @@ estimate_exit_after() {
   pilot_spacing="$(rate_descriptor "$EXPECT_RATE" pilot_spacing)"
   bits_per_carrier="$(modulation_bits "$EXPECT_MOD")"
   awk -v file_bytes="$FILE_BYTES" \
-      -v msg_count="$MSG_COUNT" \
-      -v msg_interval="$MSG_INTERVAL" \
       -v disconnect_after="$DISCONNECT_AFTER" \
       -v code_rate="$code_rate" \
       -v pilot_spacing="$pilot_spacing" \
@@ -78,10 +97,9 @@ estimate_exit_after() {
       expected_payload_bps = raw_info_bps * 0.25
       if (expected_payload_bps < 300.0) expected_payload_bps = 300.0
       handshake = 25.0
-      scripted_messages = 2.0 * msg_count * msg_interval
       payload = (file_bytes * 8.0) / expected_payload_bps
       margin = 20.0
-      expected = handshake + scripted_messages + payload + disconnect_after + margin
+      expected = handshake + payload + disconnect_after + margin
       ceiling = int(expected * 1.5 + 0.999)
       if (ceiling < 90) ceiling = 90
       print ceiling
@@ -98,8 +116,6 @@ while [[ $# -gt 0 ]]; do
     --out) OUT="${2:?}"; shift 2 ;;
     --exit-after) EXIT_AFTER="${2:?}"; shift 2 ;;
     --auto-disconnect-after) DISCONNECT_AFTER="${2:?}"; shift 2 ;;
-    --message-count) MSG_COUNT="${2:?}"; shift 2 ;;
-    --message-interval) MSG_INTERVAL="${2:?}"; shift 2 ;;
     --file-kb) FILE_KB="${2:?}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -189,8 +205,6 @@ collect_metrics() {
   bravo_mode_count="$(count_pattern "$mode_pattern" "$BRAVO_LOG")"
   alpha_unexpected_modes="$(count_pattern "$unexpected_mode_pattern" "$ALPHA_LOG")"
   bravo_unexpected_modes="$(count_pattern "$unexpected_mode_pattern" "$BRAVO_LOG")"
-  alpha_rx_msgs="$(count_pattern '\[RX[^]]*BRAVO[^]]*\].*BRAVO QAM16 ladder' "$ALPHA_LOG")"
-  bravo_rx_msgs="$(count_pattern '\[RX[^]]*ALPHA[^]]*\].*ALPHA QAM16 ladder' "$BRAVO_LOG")"
   file_crc_ok="$(count_pattern "\\[FILE\\] Received .*\\(${FILE_BYTES} bytes, CRC ok|FileTransfer: Received OK \\(${FILE_BYTES} bytes|Received OK .*${FILE_BYTES} bytes.*CRC" "$BRAVO_LOG")"
   alpha_file_done="$(count_pattern '\[FILE\] Transfer complete|FileTransfer: Transfer complete' "$ALPHA_LOG")"
   alpha_disconnected="$(count_pattern '\[SYS\] Disconnected|Connection state changed: 0|Disconnected from' "$ALPHA_LOG")"
@@ -206,8 +220,15 @@ collect_metrics() {
   alpha_tx_samples="$(sum_tx_samples "$ALPHA_LOG")"
   bravo_tx_samples="$(sum_tx_samples "$BRAVO_LOG")"
 
+  # ALPHA (sender) goodput ONLY — this is the honest on-air throughput. ALPHA's
+  # "Transfer complete" timer spans the entire transfer (TX start -> done),
+  # including every resend, escalation, and turnaround. BRAVO's "Received OK"
+  # timer only spans its first-decode -> last-decode window, which is roughly
+  # constant (~86 s for 21 KB) regardless of how many resends ALPHA paid, so it
+  # OVER-reports and hides deep-fade cost (e.g. seed 2: BRAVO 2.0 kbps vs ALPHA
+  # 1.04 kbps before the NACK fix). Never grep BRAVO_LOG for goodput.
   goodput_kbps="$(
-    grep -E '\[FILE\] (Transfer complete|Received).*[0-9.]+ kbps|FileTransfer: (Transfer complete|Received OK).*[0-9.]+ kbps' "$ALPHA_LOG" "$BRAVO_LOG" 2>/dev/null |
+    grep -E '\[FILE\] Transfer complete.*[0-9.]+ kbps|FileTransfer: Transfer complete.*[0-9.]+ kbps' "$ALPHA_LOG" 2>/dev/null |
       tail -1 |
       sed -E 's/.* ([0-9]+([.][0-9]+)?) kbps.*/\1/' || true
   )"
@@ -223,8 +244,6 @@ scenario_passed() {
   [[ "$bravo_mode_count" -gt 0 ]] &&
   [[ "$alpha_unexpected_modes" -eq 0 ]] &&
   [[ "$bravo_unexpected_modes" -eq 0 ]] &&
-  [[ "$alpha_rx_msgs" -ge "$MSG_COUNT" ]] &&
-  [[ "$bravo_rx_msgs" -ge "$MSG_COUNT" ]] &&
   [[ "$file_crc_ok" -gt 0 ]] &&
   [[ "$alpha_file_done" -gt 0 ]] &&
   [[ "$alpha_disconnected" -gt 0 ]] &&
@@ -275,8 +294,6 @@ write_summary() {
     echo "BRAVO_MODE_COUNT=$bravo_mode_count"
     echo "ALPHA_UNEXPECTED_MODE_COUNT=$alpha_unexpected_modes"
     echo "BRAVO_UNEXPECTED_MODE_COUNT=$bravo_unexpected_modes"
-    echo "ALPHA_RX_MSGS=$alpha_rx_msgs"
-    echo "BRAVO_RX_MSGS=$bravo_rx_msgs"
     echo "FILE_CRC_OK_COUNT=$file_crc_ok"
     echo "ALPHA_FILE_DONE_COUNT=$alpha_file_done"
     echo "ALPHA_DISCONNECTED_COUNT=$alpha_disconnected"
@@ -354,19 +371,11 @@ if [[ -z "$GRPC" ]]; then
   exit 1
 fi
 
-# File-only mode (message-count 0): omit chat entirely — the station is a one-way
-# FILE SENDER (design §14). Only pass auto-message args when messages are requested.
-MSG_ARGS_BRAVO=()
-MSG_ARGS_ALPHA=()
-if [[ "$MSG_COUNT" -gt 0 ]]; then
-  MSG_ARGS_BRAVO=(--auto-send-message "BRAVO QAM16 ladder" --auto-message-count "$MSG_COUNT" --auto-message-interval "$MSG_INTERVAL")
-  MSG_ARGS_ALPHA=(--auto-send-message "ALPHA QAM16 ladder" --auto-message-count "$MSG_COUNT" --auto-message-interval "$MSG_INTERVAL")
-fi
-
+# One-way FILE SENDER (design §14): BRAVO auto-accepts and receives; ALPHA
+# connects and sends the file. No chat messaging (removed 2026-05-29).
 ULTRA_E2E_DEBUG_LOG="$E2E_BRAVO_LOG" "$ROOT/build/ultra_gui" -sim --ota-host "$GRPC" --token bravo_tok --station-id BRAVO \
   --session-id lobby \
   --auto-accept \
-  ${MSG_ARGS_BRAVO[@]+"${MSG_ARGS_BRAVO[@]}"} \
   --exit-after "$EXIT_AFTER" \
   --log-level debug --log-category all --log-file "$BRAVO_LOG" >/dev/null 2>&1 &
 BRAVO_PID=$!
@@ -375,7 +384,6 @@ ULTRA_E2E_DEBUG_LOG="$E2E_ALPHA_LOG" "$ROOT/build/ultra_gui" -sim --ota-host "$G
   --session-id lobby \
   --auto-connect BRAVO \
   --connect-delay "$CONNECT_DELAY" \
-  ${MSG_ARGS_ALPHA[@]+"${MSG_ARGS_ALPHA[@]}"} \
   --auto-send-file "$PAYLOAD" \
   --auto-disconnect-after "$DISCONNECT_AFTER" \
   --exit-after "$EXIT_AFTER" \
