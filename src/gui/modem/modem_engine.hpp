@@ -180,6 +180,16 @@ public:
         }
     }
 
+    // §15 step 4d-late: arm the receiver's tone-burst ACK monitor for an
+    // expected ACK arrival. Connection calls this right after queueing a
+    // data burst; the monitor runs detection at a tight cadence until a
+    // successful decode fires or the window elapses.
+    void armToneBurstAckMonitor(uint32_t window_ms) {
+        if (streaming_decoder_) {
+            streaming_decoder_->armToneBurstMonitor(window_ms);
+        }
+    }
+
     // Check if last detected chirp was narrowband (valid after ping callback)
     bool isNarrowbandDetected() const;
 

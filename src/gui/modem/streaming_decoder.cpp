@@ -167,29 +167,33 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
 
     LOG_MODEM(INFO, "StreamingDecoder: Initialized (buffer=%zu samples)", buffer_capacity_samples_);
 
-    // §15 step 4b: tone-burst ACK monitor. Production-tuned config keeps
-    // the audio-thread CPU bounded:
-    //   - Detection cadence 1.5 s (72,000 samples @ 48 kHz). The burst is
-    //     675 ms baseline so a 1.5 s cadence still guarantees the buffer
-    //     contains a complete burst between ticks; we don't need finer.
-    //   - Single symbol duration {25 ms} for now. The 50 ms / 100 ms low-SNR
-    //     rungs are deferred until SNR negotiation tells us we need them
-    //     (step 4d-late). Each extra duration roughly doubles per-tick CPU.
-    //   - Coarse sweep step 32 samples (vs the test default 8). At 4× the
-    //     stride the detector still finds the burst (the burst is 32400
-    //     samples; missing by 32 samples is < 0.1% of a symbol — Goertzel
-    //     barely notices). 4× less work per tick.
-    //   - Tighter buffer (90 k samples ≈ 1.9 s) since we only need to hold
-    //     one burst + margin at the chosen cadence.
+    // §15 step 4d-late: event-driven tone-burst ACK monitor. Detection
+    // runs ONLY when the protocol layer arms the monitor (via
+    // armToneBurstMonitor() — invoked from Connection right after queueing
+    // a data burst). Outside the armed window the monitor is idle: zero
+    // audio-thread CPU, no waterfall jitter.
     //
-    // Combined: ~16× CPU reduction vs the prior config. Audio thread no
-    // longer jitters during a transfer.
-    //
-    // Default callback logs only; step 4d-iii routes detections to the
-    // protocol layer.
+    // Tuning:
+    //   - armed_only=true: production mode (unit tests with always-on
+    //     polling use the default config).
+    //   - detect_interval_samples_armed = 4800 (~100 ms @ 48 kHz). At a
+    //     100 ms cadence, average detection latency = burst airtime (675
+    //     ms) + cadence wait (~50 ms avg) + processing (~30 ms) = ~755 ms.
+    //     Compare to 1592 ms measured under the previous 1.5 s polling
+    //     config — ~830 ms faster per ACK round-trip.
+    //   - detect_interval_samples = 0 (background polling disabled).
+    //     If the protocol forgets to arm, the monitor stays idle and the
+    //     existing ack_timeout retransmit path handles recovery.
+    //   - Single symbol duration {25 ms} for now. The 50 ms / 100 ms
+    //     low-SNR rungs are deferred until SNR-aware ACK is wired.
+    //   - Coarse sweep step 32 (vs test default 8): 4× less work per
+    //     detection pass with negligible accuracy loss.
+    //   - Buffer capacity 90k samples (~1.9 s): one burst + margin.
     {
         ultra::waveform::tone_burst_ack::ToneBurstAckMonitor::Config tba_cfg;
-        tba_cfg.detect_interval_samples = 72000;  // 1.5 s @ 48 kHz
+        tba_cfg.armed_only = true;
+        tba_cfg.detect_interval_samples = 0;          // polling off
+        tba_cfg.detect_interval_samples_armed = 4800; // 100 ms when armed
         tba_cfg.symbol_durations_ms = {
             ultra::waveform::tone_burst_ack::kBaselineSymbolMs,  // 25 ms only
         };

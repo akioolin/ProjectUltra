@@ -437,6 +437,20 @@ public:
         return tone_burst_monitor_.detectionsEmitted();
     }
 
+    // §15 step 4d-late: arm the tone-burst monitor for an expected ACK
+    // arrival window. The Connection layer calls this right after queueing
+    // a data burst on the TX path; the monitor then runs detection at a
+    // tight cadence until either a successful decode fires or the window
+    // elapses. Outside the armed window, detection idles and the audio
+    // thread carries zero monitor CPU cost — the fix for the always-on
+    // polling jitter that was visible in step 4d-iv.
+    void armToneBurstMonitor(uint32_t window_ms) {
+        const size_t window_samples =
+            static_cast<size_t>(ultra::waveform::tone_burst_ack::kSampleRate) *
+            window_ms / 1000u;
+        tone_burst_monitor_.arm(window_samples);
+    }
+
 private:
     // ========================================================================
     // INTERNAL HELPERS

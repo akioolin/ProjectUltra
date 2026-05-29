@@ -715,6 +715,16 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             }
         });
 
+    // §15 step 4d-late: when Connection just queued a data burst, arm
+    // the receiver's tone-burst monitor for the ACK window. The monitor
+    // runs detection at a tight cadence during the armed window and is
+    // idle otherwise — no audio-thread CPU outside the window, no
+    // waterfall jitter.
+    protocol_.setArmToneBurstAckMonitorCallback(
+        [this](uint32_t window_ms) {
+            modem_.armToneBurstAckMonitor(window_ms);
+        });
+
     ultra::gui::startupTrace("App", "protocol-callbacks-mid1");
 
     protocol_.setMessageReceivedCallback([this](const std::string& from, const std::string& text) {

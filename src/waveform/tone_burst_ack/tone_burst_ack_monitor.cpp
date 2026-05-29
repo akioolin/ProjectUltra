@@ -2,6 +2,8 @@
 
 #include "tone_burst_ack_monitor.hpp"
 
+#include "ultra/logging.hpp"
+
 #include <algorithm>
 #include <cstring>
 
@@ -27,6 +29,31 @@ void ToneBurstAckMonitor::reset() {
     buffer_start_stream_offset_ = total_samples_fed_;
     last_detect_pos_in_buffer_ = 0;
     last_detection_stream_offset_ = static_cast<uint64_t>(-1);
+    armed_ = false;
+    arm_deadline_stream_offset_ = 0;
+}
+
+void ToneBurstAckMonitor::arm(size_t window_samples) {
+    const uint64_t new_deadline = total_samples_fed_ + window_samples;
+    if (armed_ && new_deadline < arm_deadline_stream_offset_) {
+        // Calling arm() with a SHORTER window than current — keep the
+        // larger one (the caller may already be expecting an ACK from a
+        // previous burst with a later deadline).
+        return;
+    }
+    armed_ = true;
+    arm_deadline_stream_offset_ = new_deadline;
+    LOG_MODEM(DEBUG, "ToneBurstAckMonitor armed: window_samples=%zu fed=%llu deadline=%llu buf_size=%zu",
+              window_samples, (unsigned long long)total_samples_fed_,
+              (unsigned long long)arm_deadline_stream_offset_, buffer_.size());
+    // Reset the cadence counter so the FIRST detection pass happens at the
+    // current sample position + armed-cadence interval, not whenever the
+    // background cadence next fires. This gives the first detection a
+    // bounded latency right after arm().
+    last_detect_pos_in_buffer_ =
+        (total_samples_fed_ >= buffer_start_stream_offset_)
+            ? static_cast<size_t>(total_samples_fed_ - buffer_start_stream_offset_)
+            : 0;
 }
 
 void ToneBurstAckMonitor::feedAudio(const float* samples, size_t count) {
@@ -51,18 +78,38 @@ void ToneBurstAckMonitor::feedAudio(const float* samples, size_t count) {
         }
     }
 
-    // Trigger detection passes at the configured cadence. The "position"
-    // we compare against is the cumulative samples fed (cadence is
-    // absolute, not buffer-relative, so backlogged audio doesn't trigger
-    // a flood of passes).
+    // §15 step 4d-late: pick the active cadence based on armed state.
+    //   armed:    detect_interval_samples_armed (tight, low latency)
+    //   not armed (and armed_only): no cadence — runDetectionPass is gated
+    //   not armed (always-on): detect_interval_samples (background polling)
+    if (armed_ && total_samples_fed_ >= arm_deadline_stream_offset_) {
+        // Window elapsed without a successful decode — disarm. The
+        // protocol layer's existing ack_timeout will handle the
+        // retransmit; we go idle until armed again.
+        armed_ = false;
+    }
+    if (!armed_ && cfg_.armed_only) {
+        // Idle: skip detection entirely. No CPU work on the audio thread.
+        return;
+    }
+    const size_t cadence = armed_ ? cfg_.detect_interval_samples_armed
+                                   : cfg_.detect_interval_samples;
+    if (cadence == 0) return;
+
+    // Trigger detection passes at the active cadence. The "position" we
+    // compare against is the cumulative samples fed (absolute, not
+    // buffer-relative, so backlogged audio doesn't trigger a flood).
     while (true) {
         const uint64_t next_trigger_stream =
             buffer_start_stream_offset_ + last_detect_pos_in_buffer_ +
-            cfg_.detect_interval_samples;
+            cadence;
         if (next_trigger_stream > total_samples_fed_) break;
         last_detect_pos_in_buffer_ =
             next_trigger_stream - buffer_start_stream_offset_;
         runDetectionPass();
+        // If a successful decode disarmed us inside runDetectionPass(), or
+        // the window elapsed, stop the inner loop here.
+        if (cfg_.armed_only && !armed_) break;
     }
 }
 
@@ -106,6 +153,11 @@ void ToneBurstAckMonitor::runDetectionPass() {
 
         last_detection_stream_offset_ = detected_stream_offset;
         ++detections_emitted_;
+
+        // §15 step 4d-late: disarm on successful decode. The protocol
+        // layer's burst transport advances and will arm() again before
+        // the next expected ACK.
+        armed_ = false;
 
         if (callback_) {
             ToneBurstAckDetection d;

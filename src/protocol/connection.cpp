@@ -396,6 +396,17 @@ Connection::Connection(const ConnectionConfig& config)
                 // stamped into the descriptor so the RX whole-burst-ACKs this group.
                 on_transmit_burst_(frames, group_seq);
             }
+            // §15 step 4d-late: arm the receiver-side tone-burst monitor
+            // for the expected ACK. The window = burst_transport_'s
+            // ack_timeout (already computed from rung timing in
+            // applyAdaptiveRateFeedback / applyDataMode / startBurstFileTransfer).
+            // The monitor wakes up, runs detection at a tight cadence, and
+            // disarms automatically on a successful decode or window expiry.
+            // Outside this window the monitor idles — no audio-thread CPU.
+            if (on_arm_tone_burst_ack_monitor_) {
+                const uint32_t window_ms = burst_transport_.ackTimeoutMs();
+                on_arm_tone_burst_ack_monitor_(window_ms);
+            }
         });
     burst_transport_.setSendGroupAck([this](uint16_t group_seq) {
         // §15 step 4d-iv: tone-burst ACK is now the SOLE GROUP_ACK transport
@@ -2228,6 +2239,19 @@ bool Connection::formAndSendBurstGroup(uint16_t group_seq, bool is_resend) {
               burst_pending_advance_,
               is_resend ? " [RESEND]" : "");
     on_transmit_burst_(frames, group_seq);
+    // §15 step 4d-late: arm the receiver-side tone-burst monitor for the
+    // ACK that should arrive after this group's airtime + T/R + ACK airtime.
+    // Path covers BOTH burst_transport_.setTransmitGroup (legacy tx_group_)
+    // and the §14.36 chunk-at-rate form_send_ path that fires
+    // formAndSendBurstGroup directly. Arming HERE — at TX dispatch — gives
+    // the monitor the full burst-airtime window to be in armed state when
+    // BRAVO's tone-burst lands. During ALPHA's TX, its own RX is muted by
+    // OTASim's mixer (own-TX excluded), so the cadence runs on silence and
+    // costs ~zero CPU until ACK arrival.
+    if (on_arm_tone_burst_ack_monitor_) {
+        const uint32_t window_ms = burst_transport_.ackTimeoutMs();
+        on_arm_tone_burst_ack_monitor_(window_ms);
+    }
     return true;
 }
 

@@ -228,6 +228,11 @@ public:
         connection_.setTransmitToneBurstAckCallback(std::move(cb));
     }
 
+    using ArmToneBurstAckMonitorCallback = Connection::ArmToneBurstAckMonitorCallback;
+    void setArmToneBurstAckMonitorCallback(ArmToneBurstAckMonitorCallback cb) {
+        connection_.setArmToneBurstAckMonitorCallback(std::move(cb));
+    }
+
     using PingTxCallback = Connection::PingTxCallback;
     void setPingTxCallback(PingTxCallback cb);
 

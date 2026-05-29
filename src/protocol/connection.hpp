@@ -89,6 +89,11 @@ public:
     // monitor wins on speed.
     using TransmitToneBurstAckCallback = std::function<void(
         const ultra::waveform::tone_burst_ack::ToneBurstAckPayload&)>;
+    // §15 step 4d-late: arm-the-monitor callback. Fires right after a
+    // data burst is queued for transmission so the receiver-side tone-
+    // burst ACK monitor wakes up for the duration of the expected ACK
+    // window. window_ms = the ack_timeout duration (sender's RTO).
+    using ArmToneBurstAckMonitorCallback = std::function<void(uint32_t window_ms)>;
     using ConnectedCallback = std::function<void()>;
     using DisconnectedCallback = std::function<void(const std::string& reason)>;
     using MessageReceivedCallback = std::function<void(const std::string& text)>;
@@ -187,6 +192,9 @@ public:
     void setTransmitInfoCallback(TransmitInfoCallback cb);
     void setTransmitToneBurstAckCallback(TransmitToneBurstAckCallback cb) {
         on_transmit_tone_burst_ack_ = std::move(cb);
+    }
+    void setArmToneBurstAckMonitorCallback(ArmToneBurstAckMonitorCallback cb) {
+        on_arm_tone_burst_ack_monitor_ = std::move(cb);
     }
 
     // Burst mode TX callback - transmits multiple frames as single audio burst.
@@ -634,6 +642,7 @@ private:
     TransmitCallback on_transmit_;
     TransmitInfoCallback on_transmit_info_;
     TransmitToneBurstAckCallback on_transmit_tone_burst_ack_;
+    ArmToneBurstAckMonitorCallback on_arm_tone_burst_ack_monitor_;
     ConnectedCallback on_connected_;
     DisconnectedCallback on_disconnected_;
     MessageReceivedCallback on_message_received_;

@@ -57,11 +57,29 @@ public:
             kSymbolMsLowSNR,    // 50 ms
             kSymbolMsMargSNR,   // 100 ms
         };
+        // §15 step 4d-late: when armed_only=true, detection only runs while
+        // the monitor is "armed" (via arm()). Outside the armed window,
+        // runDetectionPass() returns immediately with zero work. This makes
+        // the audio-thread CPU cost bounded by the active ACK window
+        // (typically ~3 s out of every ~10 s in the burst transport),
+        // eliminating the always-on polling jitter that the test-default
+        // configuration accepts.
+        //
+        // armed_only=false (default) preserves the original polling
+        // behavior — required by the unit tests, which don't have a
+        // protocol layer to arm the monitor.
+        bool armed_only = false;
         // Run detection every `detect_interval_samples` samples (cadence-
         // limiter). Default: every 240 samples = 5 ms at 48 kHz. Detection
         // window is ~675 ms (kTotalSymbols × kBaselineSymbolMs), so we
         // overlap windows densely without re-scanning at sample granularity.
         size_t detect_interval_samples = 240;
+        // §15 step 4d-late: cadence to use WHILE armed. Defaults to the
+        // same value as detect_interval_samples so callers that only set
+        // armed_only get sensible behavior. Production overrides this to
+        // a tight value (~100 ms = 4800 samples) so detection latency is
+        // dominated by the burst airtime (~675 ms) not the cadence wait.
+        size_t detect_interval_samples_armed = 240;
         // Coarse sweep step inside the detector for each cadence-triggered
         // pass. 8 samples is the default; smaller = finer + slower.
         uint32_t sweep_step_samples = 8;
@@ -106,6 +124,24 @@ public:
     // Install the callback. May be called once; subsequent calls replace.
     void setCallback(ToneBurstAckCallback cb) { callback_ = std::move(cb); }
 
+    // §15 step 4d-late: arm the detector for an expected ACK arrival.
+    // While armed, detection runs every detect_interval_samples_armed (the
+    // tight production cadence). When the armed window elapses without a
+    // successful decode, the monitor disarms automatically and goes idle.
+    // Calling arm() while already armed extends the window to the larger
+    // of (current deadline, new deadline).
+    //
+    // window_samples is relative to the current stream offset. Pass
+    // (window_ms × kSampleRate / 1000) for a duration-based window.
+    //
+    // Has no effect when Config.armed_only is false (the always-on
+    // polling configuration; arm() is a no-op there).
+    void arm(size_t window_samples);
+
+    // True iff a successful decode has not yet fired AND the armed window
+    // has not yet elapsed. Always false when Config.armed_only is false.
+    bool isArmed() const { return armed_; }
+
     // Reset internal state — drops the audio buffer + suppression window.
     // Use between protocol sessions.
     void reset();
@@ -142,6 +178,13 @@ private:
 
     uint64_t detections_emitted_ = 0;
     uint64_t suppressed_attempts_ = 0;
+
+    // §15 step 4d-late: armed-window state. When armed_, runDetectionPass()
+    // runs at cfg_.detect_interval_samples_armed cadence. When unset,
+    // detection is gated by cfg_.armed_only (false = original always-on;
+    // true = idle until armed again).
+    bool armed_ = false;
+    uint64_t arm_deadline_stream_offset_ = 0;
 };
 
 }  // namespace tone_burst_ack
