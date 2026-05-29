@@ -122,6 +122,24 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 - Fix direction: when rate is not locked/forced, treat `--expect-mod` as advisory
   (accept the auto-selected mode) instead of hard-aborting.
 
+### BUG-HARNESS-002: measure_ack_fer fidelity defects (under-piloting + broken AWGN burst path)
+- Status: PARTIALLY FIXED (2026-05-29). The pilot-spacing defect is fixed; the AWGN
+  burst_chunk defect is documented, not yet fixed.
+- Defect 1 (FIXED): `makeOFDMConfig` hardcoded `cfg.pilot_spacing = 10`, while
+  production uses `ofdm_link_adaptation::recommendedPilotSpacing(mod,rate)` = 5 for
+  R1/2 & R2/3, 8 for R3/4. This under-piloted coherent high-order mods by ~2× and
+  made 16QAM look structurally worse than production would. Fixed to call
+  `recommendedPilotSpacing` (`tools/measure_ack_fer.cpp`). NOTE: re-test showed the
+  under-piloting was NOT the cause of 16QAM folding (folds at spacing 5 too) — but
+  the harness should still match production.
+- Defect 2 (KNOWN): `--config burst_chunk --channel awgn` returns 0 frames recovered
+  for all mods (qpsk/qam8/qam16, all DD modes) — the offline AWGN burst path does not
+  match the GUI/OTASim AWGN path (where these mods decode fine). So measure_ack_fer
+  AWGN burst_chunk numbers are not usable; use the GUI for AWGN.
+- Impact: measure_ack_fer is a fast *screen* for relative offline comparisons on the
+  Good path, but its absolute results and its AWGN path are not faithful. Confirm any
+  fade/throughput conclusion on the real-time GUI per the project's standing rule.
+
 ### BUG-CFO-001: OFDM two-stage CFO refinement remains incomplete
 - Status: OPEN
 - Area: `src/ofdm/demodulator.cpp`

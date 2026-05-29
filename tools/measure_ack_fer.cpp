@@ -3,6 +3,7 @@
 #include "ota_channel_core/channel.hpp"
 #include "protocol/frame_v2.hpp"
 #include "ultra/logging.hpp"
+#include "ultra/ofdm_link_adaptation.hpp"
 #include "ultra/types.hpp"
 
 #include <algorithm>
@@ -218,7 +219,10 @@ ultra::ModemConfig makeOFDMConfig(ultra::Modulation mod, ultra::CodeRate rate) {
     cfg.modulation = mod;
     cfg.code_rate = rate;
     cfg.use_pilots = true;
-    cfg.pilot_spacing = 10;
+    // 2026-05-29: use the PRODUCTION adaptive pilot spacing (was hardcoded 10,
+    // which under-piloted coherent high-order mods by ~2x vs production's 5/8 and
+    // made 16QAM look structurally broken on fading — a harness-fidelity bug).
+    cfg.pilot_spacing = ultra::ofdm_link_adaptation::recommendedPilotSpacing(mod, rate);
     return cfg;
 }
 

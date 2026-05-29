@@ -120,3 +120,84 @@ multi-seed faithful (GUI) gates, no single-cell claims.
   (payload vs overhead vs resend) to size lever #2 precisely.
 - Harness: `exit-after` budget too tight for slow marginal transfers → false
   FAIL on delivered files (BUG-HARNESS-001 family); score on CRC-clean delivery.
+
+## 8. Throughput north star + the bit-loading history (2026-05-29)
+
+### The target
+
+Reference industry-leader curve at **Multipath-Good** (operator-supplied):
+
+| SNR (dB) | bytes/min | ≈ effective bps |
+|---|---|---|
+| 40 | 28120 | 3749 |
+| 30 | 27385 | 3651 |
+| **20** | **23142** | **3086** |
+| 10 | 5973 | 796 |
+| 0 | 1752 | 234 |
+
+**North star: ~3086 bps effective at Multipath-Good SNR 20.** This is physical
+(Shannon at SNR 20 in 2.8 kHz ≈ 18 kbps; 3086 is well within). The leader runs
+near its own MPG ceiling (~3749) at SNR 20, i.e. high-order modulation at high
+efficiency. Our current Good@20: QPSK ~1820 clean, 8PSK marginal 610–710.
+
+### Why uniform QPSK cannot reach it
+
+QPSK R3/4 **raw** ceiling ≈ 3190 bps; the leader's *effective* 3086 is 97% of
+that. Overhead alone forbids reaching 3086 effective on a rung whose raw ceiling
+is 3190. So the target **requires higher-order modulation** working on Good —
+retreating to uniform QPSK caps us below the leader by construction.
+
+### The prior bit-loading attempt and its hard finding (re-examined)
+
+Branch `experimental/per-carrier-bit-loading` (2026-05-05/06) tried **closed-loop
+dynamic per-carrier TX masks** (RX measures per-carrier γ_k, signals TX which
+carriers to load). Killed (commit `35997a9`, Codex 2026-05-06 review + hardware
+test): *"per-carrier γ_k swings on sub-second timescales while mask propagation
+has 1–2 frame (1.5–3 s) latency → any TX-supplied mask is stale by the time it
+reaches the RX; feature ENABLED on Good caused 117 retx / 120 timeouts."*
+Redirected to RX-side per-carrier **erasure** (no TX adaptation — the
+carrier-erasure / anti-poison now in the tree), which makes the existing rung
+robust but adds **no** throughput.
+
+**Re-examination with the current big picture (two corrections):**
+1. **The wall is real but was inflated by a channel bug.** The 2026-05-05 test
+   predates the 2026-05-26 discovery that "Good" was mislabeled with **Moderate's
+   0.5 Hz Doppler** (`kGoodHFDesignDopplerHz`, now 0.1 Hz). At 0.5 Hz, coherence
+   time ≈ 0.85 s ≪ the 1.5–3 s feedback latency → closed-loop is hopeless. At
+   *true* Good (0.1 Hz, ~4 s coherence) it is merely marginal. So the finding was
+   sound *for the channel they tested*, but harsher than true Good.
+2. **The right conclusion is not "redirect to erasure" — it's "don't use
+   feedback-driven per-carrier loading at all."** Closed-loop CSI is
+   fundamentally stale on any fading HF channel (feedback latency vs coherence).
+   Per-carrier bit-loading is the wrong tool for HF for this reason. The leader
+   almost certainly does **not** use it.
+
+### The no-feedback path to 3086 (the reframe)
+
+Get high-order throughput by **absorbing** the notch with redundancy, not
+**routing around** it with stale CSI:
+
+- **Uniform higher-order modulation (16QAM) at a lower code rate (e.g. R1/2)**
+  with **strong long-block FEC** + frequency interleave. 16QAM R1/2 = 2.0 info
+  bits/sym (vs QPSK R3/4's 1.5) and 50% redundancy comfortably exceeds the ~23%
+  notch — no fast CSI feedback needed. Raw ceiling ≈ 4250 > 3086.
+- **Per-burst adaptive mod-cod (AMC)** — pick the uniform rung from a *slow*
+  channel-quality estimate. Slow adaptation matches slow feedback (no staleness
+  wall); this is the leader's "adaptation," coarse not per-carrier.
+- **Stronger/longer FEC** — long-block (we have N=1944 via Z=81; the leader's
+  turbo-long-block has more coding gain) to maximize what redundancy buys.
+- **Airtime efficiency** — the separate ~2× lever (49% of ceiling on a perfect
+  channel).
+
+**Verdict on the lever — UPDATED 2026-05-29 (this section's first take was wrong;
+measured):** the "uniform high-order + low rate" idea was tested and **failed** —
+uniform 16QAM folds on Good@20 at every rate (rung sweep), and the deeper cause is
+that **16QAM does not decode on frequency-selective Good@20 at all** (GUI-confirmed:
+256 codeword failures, 0 delivery), despite 85% of carriers being 16QAM-capable
+(channel headroom is fine; genie ceiling 3764 > 3086). The real gate is a **16QAM
+receiver-decodability wall** (~10–14 dB structural penalty; not pilots/Wiener/DD/
+erasure/SNR — root cause un-isolated, suspects phase/CFO + amplitude sensitivity).
+This blocks BOTH uniform-16QAM AND per-carrier bit-loading (bit-loading still needs
+16QAM to decode on the carriers it places it on). **So the path to 3086 is: first
+fix 16QAM decodability on fading, then choose uniform-high-order vs bit-loading.**
+Full diagnosis: `docs/16QAM_DECODABILITY_DIAGNOSIS_2026_05_29.md`.
