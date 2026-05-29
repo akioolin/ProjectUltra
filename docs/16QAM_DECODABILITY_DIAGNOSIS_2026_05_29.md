@@ -190,6 +190,36 @@ genie + a CFO-disabled run.
 16QAM on fading — NOT the frequency-domain estimate, pilots, Wiener, DD, erasure, or
 SNR.** Fix lives in the phase/CFO tracking or the 16QAM demap, not the estimator.
 
+## Static-multipath resolver — INCONCLUSIVE (different confound) + correction
+
+To remove the LTS-freeze temporal-staleness confound, ran a static-multipath test
+(`ULTRA_CHANNEL_DOPPLER_HZ=0`: Good 2-path, no fading drift, so a frozen H is
+exactly perfect). Result (Good, n=100, seed7): QPSK@60 static **41** (vs **92**
+fading!), 16QAM@60 static **0** (genie on AND off), 16QAM@20 static 13, 16QAM@60
+fading 45.
+
+The static channel is HARDER than fading: with Doppler=0 the seed-7 equal-2-path
+(0.707/0.707) null is a FIXED near-perfect cancellation → |H|≈0 on a fixed band →
+those carriers carry no energy, unrecoverable even with perfect H, even noiselessly
+(genie on=off=0). Fading's MOVING null is diversity (no carrier stays dead) — which
+is why QPSK does 92 on fading but 41 static. So the static test is confounded by a
+fixed dead band and does NOT cleanly resolve estimation-vs-post-eq.
+
+**Correction:** both cheap genie proxies are confounded — LTS-freeze (temporally
+stale on the fading channel; note there is NO CFO in the offline good channel, so
+the per-symbol effect is fading-induced H drift, not CFO) and static (fixed dead
+band). So the earlier "post-equalization" verdict is NOT settled. The clean split
+requires a **true per-symbol genie** (inject the exact per-symbol per-carrier H):
+either data-aided `H[k] = Y[k]/X_true[k]` with the known TX symbols threaded to the
+decoder (no passband math, but encoder→decoder plumbing), or tap-based from the
+Watterson fading taps (`fadingTap1/2ForDiagnostics`, but passband-phase care +
+validate vs channel_probe). That is the next real work item.
+
+**Solid regardless:** the 16QAM wall is structural, 16QAM-specific (QPSK rides the
+same channel at 92%), overconfident-LLR-flavored, and NOT pilots / Wiener / DD /
+erasure / SNR-margin / frozen-frequency-H. Fading's moving null is diversity, not
+the enemy; 16QAM's per-symbol sensitivity is.
+
 ## Next diagnostic (to isolate the root cause)
 
 The invalid "genie" hook must be replaced with a **true genie** — inject the channel

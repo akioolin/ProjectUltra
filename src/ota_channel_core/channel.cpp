@@ -10,6 +10,7 @@
 #include "pocketfft/pocketfft_hdronly.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <complex>
 #include <utility>
@@ -170,6 +171,16 @@ void SimulatedChannel::rebuildModels() {
         auto cfg = configForWatterson(path_config.type, path_config.snr_db,
                                       path_config.sample_rate);
         cfg.cfo_hz = 0.0f;
+        // 2026-05-29 diag (ULTRA_CHANNEL_DOPPLER_HZ): override the fading Doppler,
+        // e.g. 0 for a STATIC-multipath test that freezes the fading drift so a
+        // frozen channel estimate is exactly perfect — isolates temporal H-tracking
+        // (estimation) from post-equalization. Default: keep the model's Doppler.
+        if (const char* env = std::getenv("ULTRA_CHANNEL_DOPPLER_HZ")) {
+            const float v = static_cast<float>(std::atof(env));
+            if (v >= 0.0f && v < 50.0f) {
+                cfg.doppler_spread_hz = v;
+            }
+        }
         channel_a_to_b_ = std::make_unique<WattersonChannelModel>(cfg, seed_);
         channel_b_to_a_ = std::make_unique<WattersonChannelModel>(cfg, seed_ + 1);
     } else {
