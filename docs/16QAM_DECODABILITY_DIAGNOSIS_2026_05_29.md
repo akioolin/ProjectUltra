@@ -134,6 +134,28 @@ handling, not the 16QAM chain itself.
 - **Channel has the headroom** (genie ceiling 3764 > 3086) — worth solving, but it is
   a genuine receiver-engineering problem, not a config tweak.
 
+## Near-noiseless sweep — verdict: STRUCTURAL, noise-independent, 16QAM-specific
+
+16QAM R1/2 Good (n=100, seed7): SNR 36→51, 44→50, 52→47, **60→45** /100.
+QPSK R3/4 @60 → **92/100**; 16QAM R2/3 @60 → 38/100.
+
+- QPSK reaches 92% at high SNR ⇒ the burst path can hit high completion; the 16QAM
+  ~50% cap is **16QAM-specific, not a harness ceiling**.
+- 16QAM **plateaus ~50% even noiselessly** ⇒ NOT noise/margin.
+- 16QAM **peaks at ~36 dB then declines** (51→45 toward 60 dB) ⇒ the classic
+  **overconfident-LLR** signature: at high SNR the noise estimate → 0, LLRs → huge,
+  and any channel-*estimate* error (wrong phase near the null) becomes a
+  confident-WRONG bit with enormous weight that poisons the LDPC.
+
+**Refined root cause:** channel-estimate interpolation error near the null —
+specifically PHASE error — converted into confident-wrong 16QAM LLRs, amplified at
+high SNR. Explains the flat erasure/anti-poison tests: the **magnitude-based**
+erasure can't catch these carriers (fine |H|, wrong *interpolated phase*); QPSK's
+45° margin rides through, 16QAM cannot. ⇒ an **estimation (interpolation)** problem
+expressed at the **LLR** stage. Likely contributor: the equalizer interpolating
+data-symbol H from sparse pilots instead of using the full-band LTS estimate already
+measured from the preamble (on frozen Good the LTS H is valid for the whole burst).
+
 ## Next diagnostic (to isolate the root cause)
 
 The invalid "genie" hook must be replaced with a **true genie** — inject the channel
