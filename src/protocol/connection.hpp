@@ -201,7 +201,13 @@ public:
     // Used for OFDM connected mode and MC-DPSK DATA file-window bursts.
     // group_seq stamps the burst descriptor (§14.27) for whole-burst GROUP_ACK;
     // 0 for the legacy arq_ burst path / single-shot.
-    using TransmitBurstCallback = std::function<void(const std::vector<Bytes>&, uint16_t group_seq)>;
+    // force_full_preamble=true asks the encoder to emit a full chirp+LTS anchor
+    // for this burst's group-start instead of warm light LTS. Set on RESENDS so
+    // a fade-hit group re-acquires deterministically (§16.4 escalation): the
+    // first attempt stays light (goodput), the retry pays the chirp (reliability).
+    using TransmitBurstCallback =
+        std::function<void(const std::vector<Bytes>&, uint16_t group_seq,
+                           bool force_full_preamble)>;
     void setTransmitBurstCallback(TransmitBurstCallback cb);
 
     void setConnectedCallback(ConnectedCallback cb);

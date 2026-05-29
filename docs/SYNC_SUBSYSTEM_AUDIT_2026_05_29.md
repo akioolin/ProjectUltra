@@ -60,6 +60,9 @@ The sync state lives in `StreamingDecoder`. Twelve variables interact:
 
 ### 1.3 The four `last_cfo_` writers
 
+> ⚠ **Line numbers below are wrong — corrected in §8.2.3.** Actual pilot-CFO store sites:
+> ofdm_decode 1191/1238/1642/1931 + burst_interleave 436. Count of 5 is correct.
+
 | # | Path | Location | Input source |
 |---|---|---|---|
 | 1 | Chirp detection (handshake / cold) | `ofdm_chirp_waveform.cpp:452` and `mc_dpsk_waveform.cpp:129` | `chirp_result.cfo_hz` (from up/down gap error) |
@@ -74,6 +77,10 @@ The sync state lives in `StreamingDecoder`. Twelve variables interact:
 ---
 
 ### 1.4 The nine `expect_full_ofdm_anchor_` flip locations
+
+> ⚠ **There are 11 sites, not 9 — corrected in §8.2.2.** Line 655 is double-listed (single
+> `=false`; connect-`true` is at 700); decoder:861 (`=preserve_full_anchor` keeper) and
+> decoder:1180 (hard reset) are missing.
 
 | File:line | From → To | Trigger |
 |---|---|---|
@@ -134,16 +141,27 @@ Six distinct advance patterns:
 
 **Observation 1.6.b:** The narrow-window threshold reduction (lines 138-150) only applies to `!is_coherent && connected && !is_narrowband`. Coherent QPSK never gets the narrow-window discount. This is the root cause of the §16 v1 failure: the 0.90 threshold persists even when the window narrows by 41× (LIGHT_SEARCH_SIZE/candidate_span ≈ 9600/4416 ≈ 2.2× → 3.4 dB threshold reduction would be physically justified).
 
+> ⚠ **Both window-reduction figures are wrong — corrected in §8.2.1.** Actual `candidate_span=2176`,
+> so reduction ≈ **4.41×** → ~**6.4 dB**, and the `√r` law would drop 0.90 → ~0.43 (below the 0.52
+> differential floor). The "41×" is also self-inconsistent with "3.4 dB." See §8.4 on why the `√r`
+> law itself is suspect, and §8.3.2 (path-5 already gives coherent the 0.52 threshold when
+> `expect_full_ofdm_anchor_=true`, so the 0.90 wall is not universal).
+
 **Observation 1.6.c:** Three separate "give up" thresholds: relax (5), rescue (8), and the implicit infinite via `warm_sync_phase_=RECOVERY` (which deactivates warm-sync entirely after 4 misses per `kWarmSyncMissesBeforeRecovery`). They use different state vars (`sync_reject_streak_` vs `consecutive_sync_misses_`) tracking similar events.
 
 ---
 
 ### 1.7 The four `noteFrameArrival*` call sites
 
+> ⚠ **There are 4 success sites, not 3 — corrected in §8.2.4.** Missing `ofdm_decode:1978`, which
+> fires per-block in the burst-continuation loop. Obs 1.7.a's "only the last frame arrival fires"
+> is therefore only half-true.
+
 **Success (writes phase=WARM, conf, next_expected):**
 - After BURST_HEADER decode (`streaming_ofdm_decode.cpp:780`)
 - After valid control frame (`streaming_ofdm_decode.cpp:947`)
 - After burst-interleave multi-frame success (`streaming_ofdm_decode.cpp:1816`)
+- Per block in the burst-continuation loop (`streaming_ofdm_decode.cpp:1978`)
 
 **Miss (decays phase, conf, increments misses):**
 - In the light-search loop when no LTS found (`streaming_sync_acquisition.cpp:929`)
@@ -289,6 +307,10 @@ This is a multi-session workstream. Suggested order:
 
 **Phase 2: Collapse the miss-counter state machines.** One `consecutive_sync_misses_` field; delete `sync_reject_streak_`. Verify the relax progression (5/8 thresholds) translates 1:1 from streak-based to miss-based. The `evaluateLightSyncCandidate` function shrinks to ~10 lines.
 
+> ⚠ **Unsafe as written — see §8.5.** The two counters run on different clocks (per-candidate-reject
+> vs per-frame-miss) and `sync_reject_streak_` drives a third knob (the RMS gate @sync_acquisition:469)
+> with no warm-phase equivalent. There is no 1:1 translation. They are not redundant (§6 Q1).
+
 **Phase 3: Explicit SyncMode enum.** Replace `expect_full_ofdm_anchor_ + warm_sync_active_ + warm_sync_phase_` with `SyncMode`. Map each of the 9 flip locations to a named state transition. The §16 warm-handoff knob becomes a transition rule, not an override.
 
 **Phase 4: Unify the noteFrameArrival* calls into a single `recordFrameOutcome(success_or_miss, position, quality)` API**. Hides the state-machine updates from callers. The burst-group case (§16.11 finding 1) becomes a single `recordFrameOutcome(success, group_start_sample, group_end_sample, quality)` call.
@@ -327,4 +349,219 @@ This is a multi-session workstream. Suggested order:
 - Production path unchanged. §15 tone-burst ACK (1.60 kbps Good@20) is the current shipping lever.
 - Safe revert tag: `safe-revert-pre-s16-2026-05-28` (commit `3ac74f1`).
 - §16.8 step 2 v1/v2/v3 work env-gated default-OFF, committed as `9861b26` for record.
-- Next: Codex independent review of this doc (§6 questions), then Phase 1 refactor proposal.
+- Independent re-review done in-house (Opus 4.8) instead of Codex — see §8. Inventory corrected;
+  architecture thesis stands.
+- Next: Phase 1 refactor proposal, built on the §8-corrected inventory (re-derive §1.3/§1.4/§1.7
+  line numbers from the file first), with the §8.4 detection-theory law replacing the `√r` heuristic.
+
+---
+
+## 8. Re-review and corrections (2026-05-29, Opus 4.8)
+
+Independent re-verification of §1–§5 against the code at HEAD. Confirmed the audit
+commit (`e81cc11`) was docs-only and `git diff e81cc11 HEAD -- src` is empty, so the
+code is byte-identical to what the original audit read — every discrepancy below is an
+audit inaccuracy, not version drift.
+
+**Verdict:** the architecture thesis (§2 four intents, the implicit `expect_full_ofdm_anchor_`
+state machine, the two parallel re-acquire mechanisms, the SyncMode-enum / unified-threshold
+proposal) is sound and should drive the refactor. But the quantitative inventory in §1.3, §1.4,
+§1.6, §1.7 is unreliable and **must be re-read, not trusted, before executing §5.** Acting on the
+numbers as written would silently drop live behavior.
+
+### 8.1 Confirmed correct
+
+- §1.6 threshold table: line numbers exact against `streaming_signal_policy.hpp`
+  (0.90/0.85 @128-129, 0.52/0.45 @134-135, relax/rescue 5/8 @97-100) and
+  `streaming_frame_arrival_policy.hpp` (0.25/0.05 @16-17). The actual filenames are
+  `streaming_signal_policy.hpp` / `streaming_frame_arrival_policy.hpp` (the table abbreviates).
+- **Obs 1.6.a (coherent `weak_floor=0.85` is dead): confirmed strongly.** `weak_floor` has
+  *zero* read sites outside the policy header, and `evaluateLightSyncCandidate`'s weak-accept
+  branch is gated `!is_coherent` (signal_policy:196). For coherent, corr=0.85 is rejected
+  identically to corr=0.20.
+- **Obs 1.6.b core (coherent excluded from window-narrowing): confirmed** — signal_policy:138
+  gates the discount on `!is_coherent`. (The *numbers* are wrong — see §8.2.)
+- §16 band-aid: `kS16WarmHandoffMinCorrelation = 0.55f` @sync_acquisition:660 is exact, and is
+  indeed a hand-coded patch for the coherent-exclusion gap.
+- Obs 1.3.a pilot-CFO writer **count** (5 sites) is correct: 4 in `streaming_ofdm_decode.cpp`
+  + 1 in `streaming_burst_interleave.cpp`.
+
+### 8.2 Verified errors (do not act on the original numbers)
+
+1. **Window-reduction math (Obs 1.6.b and §6 Q2) is wrong twice.** WARM
+   `candidate_span = kDefaultTightWindowSamples·2 + kWarmSearchSlackSamples = 960·2 + 256 = 2176`
+   (frame_arrival_policy:13,15,175), so the reduction is `LIGHT_SEARCH_SIZE/2176 = 9600/2176 ≈
+   **4.41×** → 10·log10(4.41) ≈ **6.4 dB**`, not "9600/4416 ≈ 2.2×" and not "41×" (which is
+   self-inconsistent with the "3.4 dB" beside it — 41× would be 16 dB). The code's law
+   `deriveNarrowWindowMagnitudeThreshold` reduces algebraically to **`τ_narrow = τ_wide/√r`**, so
+   applying it to coherent would drop 0.90 → 0.90/√4.41 ≈ **0.43** — *below* the 0.52 differential
+   floor (see §8.4 for why that law is itself suspect).
+
+2. **§1.4 flip-site count is 9; actual is 11.** `expect_full_ofdm_anchor_ =` assigns at
+   decoder:655(false), 696(false), **700(true)**, 710(false), **861(`=preserve_full_anchor`)**,
+   **1180(false, hard reset)**, ofdm_decode:866(false), 875(true), 954(true), 1819(false),
+   1829(true). The audit double-lists 655 (it is a single `=false`; the connect-`true` is at 700)
+   and **misses decoder:861 and decoder:1180.** Note 861 is the actual reconfigure-time warm-handoff
+   *keeper* (`preserve_full_anchor`); the audit attributed the keeper role to ofdm_decode:866.
+
+3. **§1.3 pilot-CFO writer line numbers are all wrong.** Actual `last_cfo_.store(...)` pilot sites:
+   **1191, 1238, 1642, 1931** in `streaming_ofdm_decode.cpp` + **436** in
+   `streaming_burst_interleave.cpp` (audit said 1108/1155/1559/1848 + 435 — off by ~80 lines each).
+   The count of 5 holds; the line numbers do not.
+
+4. **§1.7 success-arrival count is 3; actual is 4** — missing `ofdm_decode:1978`. And **Obs 1.7.a
+   is only half-true:** line 1816 fires once for the deinterleaved group, but the burst-continuation
+   loop (sync_acquisition... ofdm_decode:1849-1988) fires `noteFrameArrivalSuccess` **per block**
+   at 1978. The per-frame state machine *is* driven during the continuation body.
+
+### 8.3 Missed entirely
+
+1. **A third `sync_reject_streak_` knob** at `streaming_sync_acquisition.cpp:469`: at streak≥8 it
+   relaxes the **RMS activity gate** (the silence-skip pre-gate), not the correlation threshold —
+   and unlike the signal_policy relax(5)/rescue(8), it is **not** gated `!is_coherent`, so it is
+   live for coherent QPSK. So `sync_reject_streak_` drives *three* knobs (min_confidence,
+   weak_floor, RMS gate), only the first two of which are differential-only.
+
+2. **Path-5 already mitigates the coherent-0.90 problem.** The full-anchor fallback
+   (sync_acquisition:739, `unknown_frame_uses_control_sync_threshold=false`) passes
+   `is_coherent=false`, so coherent frames get the **0.52** differential threshold whenever
+   `expect_full_ofdm_anchor_=true`. The 0.90 wall bites only on the *pure warm path* (path 2),
+   not universally as Obs 1.6.b implies.
+
+### 8.4 PHY point not raised in §1–§5
+
+`deriveNarrowWindowMagnitudeThreshold` implements `τ_narrow = τ_wide/√r`. §3 calls window-narrowing
+"correct in principle," but detection theory for a normalized correlation statistic says holding
+per-window P_fa constant under an r-fold reduction in trials gives a **subtractive** shift in the
+*squared* threshold, `τ_narrow² ≈ τ_wide² − ln(r)/(c·L)`, not a divisive `√r`. The `√r` law is an
+unvalidated heuristic that likely **over-relaxes** (0.90→0.43 at r=4.4, into false-lock territory).
+Phase 1 ("unify window-narrowing across modulations") would propagate this law to coherent. The
+principled fix is to fit the threshold-vs-r law to the empirical ρ-under-noise distribution, then
+unify — not to widen the existing `if` scope around a suspect formula.
+
+### 8.5 Impact on the §5 refactor plan
+
+- **Phase 2 ("delete `sync_reject_streak_`, translates 1:1 to `consecutive_sync_misses_`") is
+  unsafe as written.** The two counters run on different clocks (per-candidate-reject inside the
+  detector loop vs per-frame-miss in the arrival policy); `sync_reject_streak_` drives three knobs
+  including the RMS gate (§8.3.1) with no warm-phase equivalent; and for coherent the two
+  threshold-relax mechanisms are not both active. Answer to §6 Q1: they are **not** redundant.
+- **Phase 3 must map 11 flip sites, not 9** — including the easily-missed conditional keeper
+  (decoder:861) and hard reset (decoder:1180).
+- **Phase 4's premise (burst group = one arrival event) is incomplete** — the continuation body
+  fires per-block (ofdm_decode:1978).
+
+### 8.6 Status
+
+- Re-review verified by re-reading the code at HEAD; no code changes in this commit.
+- The §5 phase ordering is still the right shape; the corrected inventory above is the input to
+  Phase 1. Recommend re-deriving every §1.3/§1.4/§1.7 line number from the file before Phase 3.
+
+---
+
+## 9. Sync consolidation refactor — objective, empirical 5-head map, plan (2026-05-29)
+
+This section supersedes the "is the refactor needed?" question with an empirical answer: a
+single-session attempt to make warm-handoff (§16) clean by point-fixing produced **five distinct
+failure heads**, each fix exposing the next — the v1/v2/v3 pattern, reproduced and now mapped.
+Decision (user, 2026-05-29): **do the consolidation refactor**, keeping the warm-handoff objective.
+
+### 9.1 Objective (do NOT lose this)
+
+**Shorten per-group airtime.** A burst group is `[BURST_HEADER descriptor (control frame, carries a
+full chirp+LTS)] + [group-start DATA] + [body DATA]`. The descriptor's chirp is on the wire **every
+group** regardless. The win is to stop sending a *second* full chirp+LTS as the **group-start DATA**
+preamble and use **light LTS** there, anchored on the descriptor's chirp. Saving ≈ one full
+chirp+LTS (~1.4 s) per group on the ~9.4 s group cycle. Reliability-first: clean first attempts go
+light; fades fall back to a full anchor (escalation). This is the right objective; the refactor must
+deliver it without the multi-path thrash below.
+
+### 9.2 The empirical 5-head map (seed 1 Good@20, warm-handoff ON, file-only)
+
+Seed 1 is normally trivial (seed 2 is the rough one), so every degradation below is a warm-handoff
+state/path bug, NOT fade.
+
+1. **Cadence misprediction.** `next_expected` pinned at the BURST_HEADER end (gap term
+   `expected_frame_gap_samples_` is **never set** — no caller of `setExpectedFrameGapSamples`), so
+   the next group was predicted ~8.4 s early (`error=403288`). Confirmed in BRAVO log.
+2. **Coherent 0.90 gate (Obs 1.6.b).** Real warm group-start DATA arrived at corr 0.54 and was
+   rejected; the 0.55 warm override missed by 0.01. Lowering to 0.50 → 11/11 but **640 bps / 319 s**
+   (vs ~1600 bps baseline): a slow mask, not a fix.
+3. **Descriptor-chirp re-arm (PROVEN GOOD).** `expect_full_ofdm_anchor_` was set false after group 0
+   and never re-armed, so BRAVO stopped looking for the per-group descriptor chirp. Re-arming it
+   after each delivered group (`streaming_burst_interleave.cpp` end-of-group) made BRAVO catch the
+   chirp anchor again (0.83–0.88) — **keep this in the refactor.**
+4. **Legacy 100 ms short re-anchor (commit `66db2d8`).** The superseded §16.2 group-boundary
+   strategy, enabled by fading-class negotiation *concurrently* with warm-handoff; its detector
+   fired on noise (corr≈0.16) — 10 garbage fires/run. Disabled under warm-handoff at the live
+   chokepoint `ModemEngine::syncAdaptiveShortDataPreamble`. **Mutually exclusive with warm-handoff —
+   the refactor must own the group boundary with one strategy.**
+5. **Chirp-detector group-boundary unreliability (THE DEEP ONE).** Even with re-arm and the short
+   re-anchor gone, `detectSync` repeatedly logged `Full OFDM anchor not found` for a descriptor
+   chirp that IS on the wire, falling to path-5 light at 0.61–0.79 (35 path-5 fires/run). This is
+   the audit's Phase 5 — the chirp/LTS detector does not reliably return the descriptor-chirp peak
+   at a connected group boundary. **This is the crux the refactor must solve; it is not a threshold
+   or competing-path issue.** Investigate: is the connected-data control-profile `generatePreamble`
+   chirp the same dual-chirp `detectSync` is tuned for? Is the 120 k search window aligned to the
+   descriptor arrival after the inter-group gap? Is the peak interpolation off (§5 Phase 5 note)?
+
+### 9.3 What's proven and reusable
+
+- Re-arm descriptor chirp per group (head 3) — correct mechanism.
+- Short re-anchor disabled under warm-handoff (head 4) — correct; the path is legacy.
+- §16.4 escalation + resend-full-chirp (Fix A/B) — correct as the deep-fade safety net; maps to the
+  `RE_ACQUIRE` SyncMode state.
+- All committed env-gated behind `ULTRA_S16_WARM_HANDOFF` (default OFF) as the **v4 checkpoint**;
+  production (§15 tone-burst, 1.60 kbps) is unaffected.
+
+### 9.4 Refactor design (per §4) + tonight's targets
+
+**Core move (user, 2026-05-29): REDUCE the sync entry points, don't reconcile them.** The §1.1
+inventory has SIX entry paths; the 5 failure heads are mostly *competition between these paths*.
+For the one-way burst transport (SR-ARQ ripped, short re-anchor legacy) the minimal set is **two
+detectors**:
+
+| Keep | Role |
+|---|---|
+| `detectSync` (chirp+LTS) | COLD handshake **and** the per-group BURST_HEADER descriptor anchor (one detector, two callers) |
+| `detectDataSync` (light LTS) | contiguous data within a group only |
+
+Cut / fold the rest:
+- `detectShortDataSync` (path 3, short re-anchor): **delete** from the burst path — legacy `66db2d8`.
+- Full-anchor fallback (path 5): **becomes the defined `WARM_RELAXED` transition**, not a 0.52
+  catch-all that fires 35×/run.
+- Control-first peek (path 6): **fold** into the descriptor-anchor decode (the §14.27 descriptor
+  already declares the next group's params; the peek's defensive role shrinks).
+- `narrow_waveform` (path 4): orthogonal (OFDM_NARROW only); leave untouched.
+
+Then build the `SyncMode {COLD, WARM, WARM_RELAXED, RE_ACQUIRE}` machine and one
+`syncThresholds(mode, mod_class, expected_window)` policy (§4) over that 2-detector base. Specific
+to the objective:
+
+- **One group-boundary strategy:** descriptor chirp = the per-group anchor (WARM→re-acquire the
+  chirp each group), light LTS = contiguous data only. Delete/disable the short re-anchor and
+  constrain path-5 to a defined role (not a catch-all).
+- **Warm-regime coherent threshold:** 0.90 only for COLD; a noise-floor-aware threshold for
+  WARM/contiguous data, derived (§8.4) rather than the √r over-relaxation or a magic 0.50.
+- **Fix the chirp detector at the boundary (Phase 5, head 5):** this is now the top-priority
+  unknown; the SyncMode work is wasted if `detectSync` can't reliably catch the descriptor chirp.
+- Collapse the 11 `expect_full_ofdm_anchor_` flips + 3 miss counters into explicit transitions.
+
+### 9.5 Phase order (revised from §5 by tonight's evidence)
+
+1. **Phase 5 FIRST (was last): chirp-detector group-boundary reliability.** Head 5 is load-bearing;
+   prove `detectSync` reliably returns the descriptor-chirp peak at a connected boundary before any
+   state-machine work. Build an offline harness if needed.
+2. Centralize threshold policy (warm-regime coherent threshold; remove the magic floors).
+3. SyncMode enum replacing `expect_full_ofdm_anchor_` + `warm_sync_active_` + `warm_sync_phase_`;
+   descriptor-chirp anchor as the WARM per-group transition; RE_ACQUIRE = escalation.
+4. Remove legacy competing paths (short re-anchor) entirely on the burst path; SR-ARQ is already
+   ripped — verify no dead enable paths remain.
+5. Collapse miss counters; unify `noteFrameArrival*` (audit Phase 4; remember the 4th site @1978).
+6. Multi-seed GUI verification: **seed 1 must go clean AND fast (> baseline 1600 bps), seed 2** as
+   the hard gate; AWGN no-regress.
+
+### 9.6 Status
+
+- v4 checkpoint committed env-gated (default OFF); production safe.
+- Next session starts at Phase 5 (chirp-detector reliability), the proven crux.

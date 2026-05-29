@@ -679,9 +679,26 @@ void StreamingDecoder::finalizeBurstGroup() {
                     frame_arrival_confidence_, 0.5f);
                 warm_sync_phase_ =
                     arrival_policy::WarmSyncPhase::WARM;
+                // 2026-05-29 ROOT-CAUSE FIX: re-arm the full-chirp anchor
+                // expectation for the NEXT group's BURST_HEADER. The encoder
+                // emits a chirp-bearing descriptor at the start of EVERY burst
+                // group (a control frame via encodeFrame), so a precise chirp
+                // timing anchor is always on the wire. Without re-arming,
+                // warm-handoff left expect_full_ofdm_anchor_=false after the
+                // first group, so bravo searched LIGHT-only and never used the
+                // descriptor's chirp — its data LTS then correlated at ~0.54
+                // (vs ~0.91 right after a chirp anchor on group 0), forcing
+                // low-threshold marginal decodes + retries (640 bps vs ~1600
+                // baseline on an easy seed). Re-arming makes bravo acquire each
+                // descriptor's chirp precisely; the BURST_HEADER-consume keeper
+                // then flips this back to false so the CONTIGUOUS group data
+                // stays light — that light group-start preamble is the real
+                // warm-handoff airtime saving, not dropping the descriptor.
+                expect_full_ofdm_anchor_ = true;
                 LOG_MODEM(INFO,
                     "[%s] s16-warm-handoff: refreshed warm-sync state on "
-                    "delivered group_seq=%u (conf=%.2f phase=WARM misses=0)",
+                    "delivered group_seq=%u (conf=%.2f phase=WARM misses=0, "
+                    "re-armed descriptor chirp anchor for next group)",
                     log_prefix_.c_str(),
                     static_cast<unsigned>(last_burst_group_seq_),
                     frame_arrival_confidence_);

@@ -443,7 +443,12 @@ private:
         });
 
         engine_.setTransmitBurstCallback([this](const std::vector<Bytes>& frames,
-                                                uint16_t group_seq) {
+                                                uint16_t group_seq,
+                                                bool force_full_preamble) {
+            // §16.4 escalation: resend → full chirp+LTS group-start anchor.
+            // TODO: honor in ultra_tnc once its local transmitBurst exposes the
+            // encoder latch; ultra_tnc is not the warm-handoff validation gate.
+            (void)force_full_preamble;
             queueTx(transmitBurst(frames, group_seq));
         });
 

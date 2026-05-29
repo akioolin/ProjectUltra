@@ -71,6 +71,14 @@ public:
     std::vector<float> transmitBurst(const std::vector<Bytes>& frame_data_list,
                                      uint16_t group_seq = 0);
 
+    // §16.4 escalation: latch a full chirp+LTS group-start anchor for the next
+    // burst (consumed once by the encoder). Called on RESENDS so a fade-hit
+    // group re-acquires deterministically even under warm-sync. No-op if the
+    // encoder is absent.
+    void forceNextBurstFullPreamble() {
+        if (streaming_encoder_) streaming_encoder_->forceNextFrameFullPreamble();
+    }
+
     // Minimal ping/pong probe (fast presence check, ~1 sec vs ~16 sec CONNECT)
     // Returns: preamble + raw DPSK "ULTR" bytes (no LDPC encoding)
     std::vector<float> transmitPing();

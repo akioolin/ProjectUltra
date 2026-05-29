@@ -354,8 +354,20 @@ void ModemEngine::setAdaptivePreamblePeerFading(float peer_fading_index) {
 }
 
 void ModemEngine::syncAdaptiveShortDataPreamble() {
-    const bool enable = adaptive_reanchor_policy::shouldUseShortReanchor(
+    bool enable = adaptive_reanchor_policy::shouldUseShortReanchor(
         waveform_mode_, data_modulation_, adaptive_preamble_peer_fading_);
+    // §16.4: the adaptive 100 ms short re-anchor (commit 66db2d8) is the
+    // SUPERSEDED group-boundary strategy — the §16.2 "short re-anchor that
+    // broke frame-stride timing". It is mutually exclusive with the warm-sync
+    // hand-off: with both active its detector fires on noise (corr≈0.16) at
+    // group boundaries and competes with the descriptor-chirp + warm-light
+    // path, stalling transfers (seed 1 Good@20: 10 garbage fires + 35 path-5
+    // fallbacks, 2/11 groups). When warm-handoff is on it owns the group
+    // boundary, so force the legacy short re-anchor OFF on both TX and RX.
+    if (const char* s16 = std::getenv("ULTRA_S16_WARM_HANDOFF");
+        s16 && std::atoi(s16) != 0) {
+        enable = false;
+    }
     const bool changed = adaptive_short_reanchor_active_ != enable;
     if (enable || changed) {
         if (streaming_encoder_) {

@@ -302,7 +302,9 @@ struct TncIntegrationPair {
             enqueueAudio(peer_queue, tx.station.testTransmitFrame(data));
         });
         tx.engine.setTransmitBurstCallback([this, &tx, &peer_queue](
-                                               const std::vector<ultra::Bytes>& frames) {
+                                               const std::vector<ultra::Bytes>& frames,
+                                               uint16_t /*group_seq*/,
+                                               bool /*force_full_preamble*/) {
             enqueueAudio(peer_queue, tx.station.testTransmitBurst(frames));
         });
         tx.engine.setPingTxCallback([this, &tx, &peer_queue]() {

@@ -99,6 +99,18 @@ inline constexpr uint64_t kConnectedOFDMLightSyncRescueStreak = 8;
 inline constexpr float kConnectedOFDMLightSyncRelaxFloor = 0.40f;
 inline constexpr float kConnectedOFDMLightSyncRescueFloor = 0.35f;
 
+// §16.4 escalation: after this many consecutive light-LTS rejects at a group
+// boundary, the warm/light path has clearly failed to re-acquire (e.g. coherent
+// QPSK stuck at the 0.90 gate, or the next group simply isn't where warm
+// predicted). Arm a full chirp+LTS re-anchor so the receiver catches the
+// sender's RESEND anchor (the sender sets force_full_preamble on resends) and,
+// via the full-anchor path, also drops to the 0.52 differential threshold that
+// can admit a still-arriving first-attempt light frame. Chosen well above the
+// relax/rescue streaks (5/8) so warm relaxation gets its chance first, and far
+// below the airtime of one ACK-timeout cycle so the receiver is armed before
+// the resend lands.
+inline constexpr uint64_t kConnectedOFDMReanchorEscalateStreak = 12;
+
 inline float deriveNarrowWindowMagnitudeThreshold(float wide_window_threshold,
                                                   size_t wide_window_samples,
                                                   size_t narrow_window_samples) {

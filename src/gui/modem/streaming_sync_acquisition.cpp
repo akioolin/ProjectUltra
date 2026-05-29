@@ -646,13 +646,15 @@ void StreamingDecoder::searchForSync() {
                 sync_reject_streak_, light_sync_thresholds);
             // §16.8 step 2 (ULTRA_S16_WARM_HANDOFF): the coherent-QPSK
             // sync threshold is 0.90 because stale LTS phases can't be
-            // recovered by DD tracking alone. In the warm-handoff regime
-            // we are NOT stale — the BURST_HEADER just decoded with a
-            // fresh full chirp+LTS anchor and seeded last_cfo_. A 0.83
-            // light-LTS correlation immediately after a known-good
-            // BURST_HEADER is real signal, not noise. Override the
-            // rejection: if knob ON AND warm-sync is WARM AND corr is
-            // above a relaxed warm floor (0.55), accept.
+            // recovered by DD tracking alone. In the warm-handoff regime we
+            // are NOT stale — the BURST_HEADER just decoded with a fresh full
+            // chirp+LTS anchor and seeded last_cfo_. This override is a
+            // BACKSTOP for a group-start DATA frame whose light-LTS dips just
+            // under 0.90 right after a known-good anchor. The PRIMARY fix for
+            // group-boundary acquisition is re-arming the descriptor chirp
+            // anchor every group (streaming_burst_interleave.cpp end-of-group),
+            // which keeps the contiguous data correlating high (~0.91); this
+            // override should rarely fire once that anchor is used.
             const char* s16_env =
                 std::getenv("ULTRA_S16_WARM_HANDOFF");
             const bool s16_warm_handoff =
@@ -705,6 +707,37 @@ void StreamingDecoder::searchForSync() {
                 if (data_sync_accepted_callback_) {
                     data_sync_accepted_callback_(sync_result.correlation);
                 }
+            }
+
+            // §16.4 escalation: warm/light group-start acquisition has failed
+            // for many consecutive candidates. On a coherent-QPSK Good@20
+            // transfer the next group's light LTS sits below the 0.90 gate
+            // (Obs 1.6.b) or simply isn't where warm predicted, so bravo
+            // rejects forever and the transfer stalls. Arm a full chirp+LTS
+            // re-anchor: the sender pays for a chirp on its RESEND
+            // (force_full_preamble), and the full-anchor search path also
+            // applies the 0.52 differential threshold that can admit a
+            // still-arriving first-attempt light frame. expect_full_ofdm_anchor_
+            // is cleared again after the next clean data decode, so this is a
+            // one-group escalation, not a permanent revert to per-group chirps.
+            const char* s16_escalate_env =
+                std::getenv("ULTRA_S16_WARM_HANDOFF");
+            const bool s16_escalate_on =
+                s16_escalate_env && std::atoi(s16_escalate_env) != 0;
+            if (s16_escalate_on && !found && connected_ &&
+                mode_ == protocol::WaveformMode::OFDM_CHIRP &&
+                !expect_full_ofdm_anchor_ &&
+                sync_reject_streak_ >=
+                    signal_policy::kConnectedOFDMReanchorEscalateStreak) {
+                std::lock_guard<std::mutex> lock(buffer_mutex_);
+                expect_full_ofdm_anchor_ = true;
+                sync_reject_streak_ = 0;
+                LOG_MODEM(INFO,
+                    "[%s] §16.4 escalation: %llu light rejects at group boundary; "
+                    "arming full chirp+LTS re-anchor for sender RESEND",
+                    log_prefix_.c_str(),
+                    static_cast<unsigned long long>(
+                        signal_policy::kConnectedOFDMReanchorEscalateStreak));
             }
         }
         // Short re-anchor fallback is enabled only by negotiated fading class;

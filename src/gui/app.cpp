@@ -683,7 +683,14 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
 
     // Burst TX callback - encode multiple frames as a single waveform burst
     protocol_.setTransmitBurstCallback([this](const std::vector<Bytes>& frames,
-                                              uint16_t group_seq) {
+                                              uint16_t group_seq,
+                                              bool force_full_preamble) {
+        // §16.4 escalation: latch the full chirp+LTS group-start anchor BEFORE the
+        // defer check so it survives a carrier-sense defer and is consumed by the
+        // next actual encode (the encoder flag is a one-shot latch).
+        if (force_full_preamble) {
+            modem_.forceNextBurstFullPreamble();
+        }
         const bool in_qso_data = std::any_of(
             frames.begin(), frames.end(),
             [](const Bytes& frame) { return isInQsoDataFrame(frame); });

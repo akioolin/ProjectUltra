@@ -2033,11 +2033,14 @@ private:
 
         // Burst TX callback - encode multiple frames as single OFDM burst
         protocol_.setTransmitBurstCallback([this](const std::vector<Bytes>& frames,
-                                                  uint16_t group_seq) {
+                                                  uint16_t group_seq,
+                                                  bool force_full_preamble) {
             // cli_simulator path (not the faithful GUI gate). group_seq descriptor
             // stamping is threaded in the GUI path; TODO thread through queueTxBurst
-            // if cli activates use_burst_transport_.
+            // if cli activates use_burst_transport_. force_full_preamble (§16.4
+            // resend escalation) is honored only on the faithful GUI path.
             (void)group_seq;
+            (void)force_full_preamble;
             queueTxBurst(frames, txBurstLabel(frames));
         });
 

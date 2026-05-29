@@ -1184,7 +1184,7 @@ void test_fading_timeout_repairs_use_standalone_full_anchors() {
     int frame_tx = 0;
     int burst_tx = 0;
     c.setTransmitCallback([&](const Bytes&) { ++frame_tx; });
-    c.setTransmitBurstCallback([&](const std::vector<Bytes>&, uint16_t) { ++burst_tx; });
+    c.setTransmitBurstCallback([&](const std::vector<Bytes>&, uint16_t, bool) { ++burst_tx; });
 
     std::vector<Bytes> frames{
         v2::makeFixedDataFrame("W1ABC", "K2DEF", 10, Bytes(16, 0x11),
@@ -1209,7 +1209,7 @@ void test_clean_timeout_repairs_keep_burst_batching() {
     int frame_tx = 0;
     int burst_tx = 0;
     c.setTransmitCallback([&](const Bytes&) { ++frame_tx; });
-    c.setTransmitBurstCallback([&](const std::vector<Bytes>&, uint16_t) { ++burst_tx; });
+    c.setTransmitBurstCallback([&](const std::vector<Bytes>&, uint16_t, bool) { ++burst_tx; });
 
     std::vector<Bytes> frames{
         v2::makeFixedDataFrame("W1ABC", "K2DEF", 10, Bytes(16, 0x11),

@@ -394,7 +394,9 @@ Connection::Connection(const ConnectionConfig& config)
             if (on_transmit_burst_) {
                 // -> ModemEngine::transmitBurst(frames, group_seq); group_seq is
                 // stamped into the descriptor so the RX whole-burst-ACKs this group.
-                on_transmit_burst_(frames, group_seq);
+                // Legacy tx_group_ path does not carry is_resend; the active
+                // chunk-at-rate path (formAndSendBurstGroup) sets the resend anchor.
+                on_transmit_burst_(frames, group_seq, /*force_full_preamble=*/false);
             }
             // §15 step 4d-late: arm the receiver-side tone-burst monitor
             // for the expected ACK. The window = burst_transport_'s
@@ -2254,7 +2256,13 @@ bool Connection::formAndSendBurstGroup(uint16_t group_seq, bool is_resend) {
               burst_file_cursor_, burst_file_payload_.size(),
               burst_pending_advance_,
               is_resend ? " [RESEND]" : "");
-    on_transmit_burst_(frames, group_seq);
+    // §16.4 escalation: a RESEND means the previous attempt did not deliver —
+    // pay for a full chirp+LTS group-start anchor so bravo re-acquires
+    // deterministically even when warm-sync is enabled. First attempts stay
+    // light (warm-handoff goodput); only retries carry the anchor. When the
+    // warm-handoff knob is OFF the group-start is already full, so this is a
+    // no-op there.
+    on_transmit_burst_(frames, group_seq, /*force_full_preamble=*/is_resend);
     // §15 step 4d-late: arm the receiver-side tone-burst monitor for the
     // ACK that should arrive after this group's airtime + T/R + ACK airtime.
     // Path covers BOTH burst_transport_.setTransmitGroup (legacy tx_group_)
@@ -4356,7 +4364,8 @@ void Connection::flushBurstBuffer() {
         on_transmit_(burst_tx_buffer_[0]);
     } else if (on_transmit_burst_) {
         LOG_MODEM(INFO, "Connection: Flushing burst of %zu frames", burst_tx_buffer_.size());
-        on_transmit_burst_(burst_tx_buffer_, /*group_seq=*/0);  // legacy arq_ burst path
+        on_transmit_burst_(burst_tx_buffer_, /*group_seq=*/0,
+                           /*force_full_preamble=*/false);  // legacy arq_ burst path
     } else if (on_transmit_) {
         // Fallback: send individually
         for (const auto& frame : burst_tx_buffer_) {
@@ -4389,7 +4398,8 @@ void Connection::transmitFrameBatch(const std::vector<Bytes>& frame_data_list) {
     // the group, so the resend gets fresh fade diversity at ~1/N the preamble cost.
     LOG_MODEM(INFO, "Connection: Resending ARQ timeout-repair as re-interleaved burst of %zu frames",
               frame_data_list.size());
-    on_transmit_burst_(frame_data_list, /*group_seq=*/0);  // legacy arq_ repair burst
+    on_transmit_burst_(frame_data_list, /*group_seq=*/0,
+                       /*force_full_preamble=*/false);  // legacy arq_ repair burst
 }
 
 void Connection::setConnectedCallback(ConnectedCallback cb) {
