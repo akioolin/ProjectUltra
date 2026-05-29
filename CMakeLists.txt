@@ -449,6 +449,7 @@ add_library(ultra_core STATIC
     src/waveform/tone_burst_ack/tone_burst_payload.cpp
     src/waveform/tone_burst_ack/tone_burst_encoder.cpp
     src/waveform/tone_burst_ack/tone_burst_detector.cpp
+    src/waveform/tone_burst_ack/tone_burst_ack_monitor.cpp
     # miniz compression library (public domain)
     thirdparty/miniz/miniz.c
     thirdparty/miniz/miniz_tdef.c

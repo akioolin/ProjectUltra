@@ -653,6 +653,11 @@ add_executable(test_tone_burst_ack_watterson test_tone_burst_ack_watterson.cpp)
 target_link_libraries(test_tone_burst_ack_watterson PRIVATE ultra_core ota_channel_core)
 add_test(NAME ToneBurstAckWatterson COMMAND test_tone_burst_ack_watterson)
 
+# Tone-burst ACK sliding-window monitor (§15 step 4a)
+add_executable(test_tone_burst_ack_monitor test_tone_burst_ack_monitor.cpp)
+target_link_libraries(test_tone_burst_ack_monitor PRIVATE ultra_core)
+add_test(NAME ToneBurstAckMonitor COMMAND test_tone_burst_ack_monitor)
+
 if(TARGET decode_bench)
     add_executable(test_decode_bench_replay test_decode_bench_replay.cpp)
     add_test(NAME DecodeBenchReplay
