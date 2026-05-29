@@ -435,6 +435,22 @@ Connection::Connection(const ConnectionConfig& config)
         // rate_hint as a continuous quality signal is a follow-up.
         const uint8_t quality_q = pending_ack_quality_q_;
 
+        // A/B-comparison knob (TEMPORARY, will be removed once §15 is
+        // validated multi-seed). ULTRA_LEGACY_OFDM_GROUP_ACK=1 emits the
+        // pre-4d-iv OFDM 1-CW GROUP_ACK frame instead of the tone-burst.
+        // Used to measure apples-to-apples goodput delta between the two
+        // ACK transports at the same HEAD commit.
+        const char* legacy_env = std::getenv("ULTRA_LEGACY_OFDM_GROUP_ACK");
+        const bool use_legacy_ofdm_ack =
+            (legacy_env && std::atoi(legacy_env) != 0);
+        if (use_legacy_ofdm_ack) {
+            transmitFrame(
+                v2::ControlFrame::makeGroupAck(local_call_, remote_call_,
+                                                group_seq, quality_q)
+                    .serialize());
+            return;
+        }
+
         if (on_transmit_tone_burst_ack_) {
             ultra::waveform::tone_burst_ack::ToneBurstAckPayload tba;
             tba.group_seq = static_cast<uint8_t>(group_seq & 0x3F);

@@ -2125,3 +2125,101 @@ Why:
   short reanchor) failed for understood reasons (warm-sync degradation
   across inter-group gap, short-chirp CFO precision). The new approach
   fixes the warm-sync hand-off rather than tuning chirp duration.
+
+## §17  Measured airtime accounting after §15 lands (2026-05-28)
+
+Empirical decomposition of the per-group dead-air budget after §15
+tone-burst ACK is wired (4d-late, event-driven monitor armed at TX
+dispatch). Single-seed Good@20 QPSK R3/4 burst-transport file transfer,
+21 KB payload, 11 groups, 0 retx, ULTRA_LDPC_Z=81 ULTRA_BURST_GROUP_FRAMES=6.
+
+### 17.1 Apples-to-apples ACK transport delta
+
+Same seed, same channel, same HEAD commit, ULTRA_LEGACY_OFDM_GROUP_ACK env
+knob toggles between OFDM 1-CW GROUP_ACK and 4-FSK tone-burst:
+
+| Metric                  | OFDM 1-CW ACK  | Tone-burst ACK | Δ            |
+|-------------------------|----------------|----------------|--------------|
+| ALPHA Transfer time     | 115.3 s        | 107.8 s        | -7.5 s       |
+| ALPHA goodput           | 1.49 kbps      | 1.60 kbps      | +7.4 %       |
+| BRAVO Received goodput  | (n/a in log)   | 1.76 kbps      | —            |
+| ALPHA_RETX              | 0              | 0              | =            |
+| FILE_CRC_OK             | 2              | 2              | =            |
+
+Saves ~680 ms per group on QPSK R3/4. Theoretical: OFDM 1-CW ACK at QPSK
+R3/4 ≈ 1.4 s airtime vs tone-burst 675 ms = 725 ms/group; measured
+7.5 s / 11 groups = 682 ms. Matches. The lever opens up further on slower
+rungs (R1/4, R1/2, MC-DPSK fallback) where the 1-CW OFDM ACK takes 2-3×
+longer but the tone-burst stays at 675 ms.
+
+### 17.2 Per-group dead-air decomposition (tone-burst path)
+
+Measured from the alpha + bravo logs of the same seed-42 run:
+
+| Component                                  | Time      | Notes                                              |
+|--------------------------------------------|-----------|----------------------------------------------------|
+| Bravo: data decoded → ACK queued           | ~1 ms     | negligible; sendGroupAck fires immediately         |
+| Tone-burst on wire                         | 675 ms    | the ACK itself                                     |
+| Alpha: tone-burst end on wire → match log  | ~270 ms   | armed cadence wait (avg 50 ms) + Goertzel/decode + cli sample-clock-vs-wall-clock skew (cli-only artifact; real-time GUI expects ~50-100 ms here) |
+| Alpha: ACK matched → next-burst queued     | ~145 ms   | **LDPC-encode 6 frames + OFDM modulate + chirp/light-preamble + queue audio** (real CPU work) |
+| **Total post-data-end dead air per cycle** | **~416 ms** | **of ~9440 ms group cycle (4.4 %)**             |
+
+Numbers are tight (σ ≈ 5 ms across the 11 groups in the run).
+
+### 17.3 Levers for the post-ACK dead air
+
+1. **Pre-encode next group during current TX** (~145 ms saved).
+   Each burst is ~8.35 s on the wire but only needs ~145 ms of LDPC +
+   modulate CPU. Form group N+1 the moment group N is dispatched; on
+   ACK match, just queue pre-rendered audio (~0 ms). 56× compute-vs-
+   airtime slack. Saves ~145 ms × N groups per file. On the 21 KB /
+   11-group baseline this is ~1.6 s / 108 s = +1.5 % goodput.
+   Larger files scale linearly. Trade-off: precluded if the rate or
+   payload changes after the ACK (e.g. §14.36 rate adaptation feedback
+   from the just-received ACK) — fallback is to discard the pre-encoded
+   buffer and re-encode at the new rate. Implementation lives in
+   Connection::formAndSendBurstGroup (split into form / send phases).
+
+2. **Tighten armed-cadence on the receiver-side monitor** (~25 ms saved).
+   ToneBurstAckMonitor's armed cadence is currently 4800 samples
+   (100 ms → avg 50 ms wait between detection passes). Drop to 2400
+   (50 ms cadence → avg 25 ms wait) or 1440 (30 ms / avg 15 ms).
+   Cost is more Goertzel passes during the armed window, but the
+   monitor is only armed during the ACK-listen window and runs on
+   silence/noise during own TX (Costas peak gate rejects fast), so the
+   CPU cost is bounded. Worth measuring waterfall-jitter before
+   committing to <50 ms cadence.
+
+3. **Reduce LDPC-encode wall-clock cost** (long-tail).
+   At ULTRA_LDPC_Z=81 / N=1944, the LDPC encoder is the dominant
+   per-burst CPU. Profiling target: see how much of the 145 ms is
+   LDPC vs OFDM IFFT vs framing. Possible follow-ups: better sparse
+   row representation, parallel-encode across frames, SIMD.
+
+### 17.4 Honest framing vs §16
+
+The §17.2 budget is ~416 ms/group of dead air. §16 (short anchor between
+groups) targets the ~1.4 s full chirp+LTS anchor that lives INSIDE each
+data burst — that lever is ~3.4× larger than §17.3 combined. §17.3 is
+worth doing because:
+
+- it's mostly local refactors (no protocol or warm-sync changes), and
+- it's diagnostic instrumentation that §16 will benefit from (the same
+  per-stage timing breakdown applies to the warm-sync hand-off).
+
+But §16 remains the bigger throughput lever. Order of operations remains
+§15 ✓ → §16 → §17 small-levers.
+
+### 17.5 cli-only measurement caveat
+
+The 270 ms "tone-burst-end → match" component above is partly a cli
+artifact: cli_simulator runs CPU-accelerated relative to the audio
+sample clock, so wall-clock log timestamps drift from on-wire timing.
+On a real-time GUI run, expect this component to compress to ~50-
+100 ms (cadence + decode compute only). The 145 ms encode component
+is the same on cli and GUI (CPU work, not sample-clock dependent).
+
+Reproduce: `/tmp/run_tone_burst_smoke.sh` (tone-burst path) and
+`/tmp/run_ofdm_ack_baseline.sh` (OFDM ACK baseline, sets
+ULTRA_LEGACY_OFDM_GROUP_ACK=1). Logs at
+`/tmp/tone_burst_smoke/seed42/` and `/tmp/ofdm_ack_baseline/seed42/`.
