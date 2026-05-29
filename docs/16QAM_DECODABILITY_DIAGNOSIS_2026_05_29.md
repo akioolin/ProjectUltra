@@ -156,6 +156,40 @@ expressed at the **LLR** stage. Likely contributor: the equalizer interpolating
 data-symbol H from sparse pilots instead of using the full-band LTS estimate already
 measured from the preamble (on frozen Good the LTS H is valid for the whole burst).
 
+## TRUE-GENIE split (LTS full-band H freeze) — verdict: POST-EQUALIZATION, not estimation
+
+Built a low-risk genie (`ULTRA_GENIE_LTS_FREEZE`): freeze the data-symbol
+`channel_estimate` to the full-band LTS H (the demod's own per-carrier
+`Y_LTS/X_LTS`, refreshed per frame). On frozen/near-noiseless Good the LTS H is the
+exact true frequency-domain H — so this isolates frequency-estimation from
+post-equalization. Result (Good, n=100, seed7):
+
+| Cell | genie | chunks/100 |
+|---|---|---|
+| QPSK R3/4 @60 | on | 90 (sanity — genie does not break QPSK) |
+| 16QAM R1/2 @60 | off | 45 |
+| 16QAM R1/2 @60 | **on** | **44** (perfect full-band H — NO improvement) |
+| 16QAM R2/3 @60 | on | 33 |
+| 16QAM R1/2 @20 | on | 18 |
+
+**A perfect full-band frequency-domain channel estimate does NOT unlock 16QAM.**
+So the wall is **post-equalization, not the channel estimate / interpolation.**
+Sharper: at noiseless SNR with exact frequency H, equalization should yield
+near-perfect symbols ⇒ 16QAM ~100%; it's 44%. The one thing a frozen *frequency*
+H cannot capture is a **per-symbol phase rotation** — residual **CFO / common-phase
+error** accumulating across the data symbols after the LTS. 16QAM (tight phase) can't
+absorb it; QPSK's 45° margin can (→ 90%). That also explains the overconfident-LLR
+high-SNR decline (a rotated symbol with a huge LLR = confident-wrong).
+
+Rigor caveat: this genie freezes frequency H *and* overwrites the per-symbol CPE
+correction, so it brackets rather than perfectly isolates. The logic holds (perfect
+frequency-H, even minus CPE, didn't help). Clean confirmation = a CPE-preserving
+genie + a CFO-disabled run.
+
+**Revised root-cause: per-symbol phase tracking (residual CFO / CPE) inadequate for
+16QAM on fading — NOT the frequency-domain estimate, pilots, Wiener, DD, erasure, or
+SNR.** Fix lives in the phase/CFO tracking or the 16QAM demap, not the estimator.
+
 ## Next diagnostic (to isolate the root cause)
 
 The invalid "genie" hook must be replaced with a **true genie** — inject the channel

@@ -61,6 +61,10 @@ bool OFDMDemodulator::Impl::qam16GenieChannelTwoPathEnabled() const {
     return envFlagEnabled("ULTRA_QAM16_GENIE_CHANNEL_TWOPATH_LS");
 }
 
+bool OFDMDemodulator::Impl::genieLtsFreezeEnabled() const {
+    return envFlagEnabled("ULTRA_GENIE_LTS_FREEZE");
+}
+
 std::string OFDMDemodulator::Impl::getFailureAttributionDiagnosticsText() const {
     auto percentile = [](std::vector<float> values, double q) -> float {
         if (values.empty()) {

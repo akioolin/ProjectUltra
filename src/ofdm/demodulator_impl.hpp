@@ -59,6 +59,12 @@ struct OFDMDemodulator::Impl {
 
     // Channel estimate (per carrier)
     std::vector<Complex> channel_estimate;
+    // 2026-05-29 diag (ULTRA_GENIE_LTS_FREEZE): a frozen copy of the full-band LTS
+    // channel estimate, re-applied to every data symbol to bypass sparse-pilot
+    // re-interpolation. On a frozen/noiseless channel the LTS H is the exact true H
+    // (measured through the demod's own frontend), so this is a true genie that
+    // isolates estimation/interpolation from post-equalization for 16QAM.
+    std::vector<Complex> genie_lts_h_;
     float noise_variance = 0.1f;
 
     // SNR estimation (from pilots)
@@ -355,6 +361,7 @@ struct OFDMDemodulator::Impl {
     bool qam16FailureAttributionDiagEnabled() const;
     bool qam16GenieSigmaEmpiricalEnabled() const;
     bool qam16GenieChannelTwoPathEnabled() const;
+    bool genieLtsFreezeEnabled() const;
     void applyDiagnosticTwoPathChannelOracle(const std::vector<Complex>& h_ls_all);
     void lmsUpdate(int idx, Complex received, Complex reference);
     void rlsUpdate(int idx, Complex received, Complex reference);

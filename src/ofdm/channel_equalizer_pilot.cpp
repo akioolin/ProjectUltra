@@ -1113,6 +1113,15 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
 
     applyDiagnosticTwoPathChannelOracle(h_ls_all);
 
+    // 2026-05-29 diag (ULTRA_GENIE_LTS_FREEZE): overwrite the sparse-pilot-interpolated
+    // data-symbol estimate with the frozen full-band LTS H. Splits the 16QAM wall:
+    // genie -> 16QAM decodes => sparse-pilot interpolation was the limiter (estimation);
+    // genie -> still fails    => post-equalization (demap/CFO). On a noiseless frozen
+    // channel the stored LTS H is the exact true H, so this is a true genie.
+    if (genieLtsFreezeEnabled() && genie_lts_h_.size() == channel_estimate.size()) {
+        channel_estimate = genie_lts_h_;
+    }
+
     if (have_qam16_dd) {
         std::fill(dd_qam16_reliability_.begin(), dd_qam16_reliability_.end(), 0.0f);
     }

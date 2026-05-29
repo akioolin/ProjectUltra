@@ -508,6 +508,13 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     LOG_DEMOD(INFO, "LTS channel estimate: %zu data + %zu pilot carriers",
               data_carrier_indices.size(), pilot_carrier_indices.size());
 
+    // 2026-05-29 diag (ULTRA_GENIE_LTS_FREEZE): snapshot the full-band LTS channel
+    // estimate so the genie test can hold it across this frame's data symbols
+    // instead of re-interpolating from sparse pilots. See demodulator_impl.hpp.
+    if (genieLtsFreezeEnabled()) {
+        genie_lts_h_ = channel_estimate;
+    }
+
     // Compute average channel response for logging
     Complex h_avg(0, 0);
     float h_mag_sum = 0;
