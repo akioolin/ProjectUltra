@@ -69,6 +69,46 @@ are the dangerous middle — they look principled and aren't.
   diagnosis in `docs/8PSK_GOOD_FADING_DIAGNOSIS_2026_05_29.md`; bug entry
   BUG-8PSK-001 in `docs/KNOWN_BUGS.md`.
 
+## Case #2: MMSE / Wiener channel estimator — narrow-view found (2026-05-29)
+
+Audited as the "estimator lever" for fading survivability. Findings:
+
+- **On?** Yes — the shared channel-estimation core for all coherent mods
+  (QPSK, 8PSK, 16QAM) when scattered pilots are active.
+- **Math correct?** Yes, textbook MMSE: normal equations `R·w = r` (Gaussian
+  elimination w/ pivoting in `wiener_interpolator.hpp`), Jakes/Clarke time
+  correlation `J0(2π·fd·t)`, uniform-PDP frequency correlation `sinc(π·df·τ)`,
+  correct MMSE residual variance. Not broken.
+- **Adaptive?** **NO** — the correlation model is hardcoded to **Moderate-HF**
+  (`robustDelaySpreadS()` default 1.0 ms, `robustDopplerHz()` default 0.5 Hz,
+  `channel_equalizer_pilot.cpp:28-41`) and applied unchanged on every channel.
+  On Good (0.5 ms / 0.1 Hz) this is 2× too pessimistic in frequency and 5× too
+  pessimistic in time — the code comment itself says it "was throwing away older
+  pilot observations 5× too aggressively on Good." So it under-weights pilots
+  that are still correlated → a noisier estimate than it could produce. Currently
+  only overridable via `ULTRA_WIENER_DELAY_SPREAD_S` / `ULTRA_WIENER_DOPPLER_HZ`
+  test knobs — not derived at runtime.
+- **Optimal?** No — mis-tuned (above), plus it is *separable 1D* (time then
+  frequency) rather than joint 2D. Structure right, parameterization wrong.
+- **Fix direction:** derive `delay_spread` and `Doppler` from the **measured**
+  channel (fading index is already computed; delay spread is estimable from the
+  CIR, Doppler from temporal variation) and feed those into the correlation
+  model. Because it's the shared estimator, this should lift QPSK/8PSK/16QAM
+  together — part of maximizing fading survivability (see note below).
+- **Status:** quantifying the contribution offline (Moderate-default vs
+  Good-tuned params, `measure_ack_fer` qam8/qpsk Good@20) before committing.
+
+**Sequencing note — survivability before airtime:** maximizing fading
+survivability is the prerequisite, not a parallel track, because the two are
+coupled: a frame that doesn't survive a fade is retransmitted, and a resend
+costs a full frame + turnaround of airtime. So improving survivability
+(adaptive estimation + frequency diversity + erasure-aware LLR) *also* reclaims
+the resend airtime, and it unlocks running a higher modulation rung reliably —
+which is where the throughput toward 3000 actually comes from. Pure-protocol
+airtime waste (handshake, ACK gaps, dead air) is a separate lever attacked
+after, with proper measurement tooling. This matches the project's documented
+"reliability first, then throughput" methodology.
+
 ## Audit register (subsystems to sweep)
 
 Status: ⬜ not started · 🔶 in progress · ✅ confirmed adaptive · ⚠️ narrow-view found
@@ -82,7 +122,7 @@ Status: ⬜ not started · 🔶 in progress · ✅ confirmed adaptive · ⚠️ 
 | Interleaver depth (burst group frames) | `streaming_burst_interleave.cpp` | ⬜ | Depth vs coherence time is channel-specific (FREQ for Good, TIME/burst for Mod/Poor). Currently env-knob `ULTRA_BURST_GROUP_FRAMES`. |
 | LDPC codeword length | `fec/`, `ULTRA_LDPC_Z` | ⬜ | Length-vs-interleave coupling; N currently fixed/knob-driven, not channel-derived. |
 | ARQ / ACK RTO timers | `protocol/connection.cpp` | ⬜ | Airtime-derived RTO (good); confirm it scales with mode/rate, not magic clamp. |
-| Pilot spacing / Wiener interpolation | `channel_equalizer_pilot.cpp` | ⬜ | Pilot gap vs delay-spread (coherence BW); Wiener delay/Doppler currently env-knobs. |
+| MMSE/Wiener channel estimator | `wiener_interpolator.hpp`, `channel_equalizer_pilot.cpp` | ⚠️ | **Narrow-view found** — math is textbook-correct but the correlation model is hardcoded to Moderate-HF (delay 1 ms / Doppler 0.5 Hz) and run on every channel; on Good (0.5 ms / 0.1 Hz) that under-uses correlated pilots (5× too aggressive in time). Fix = derive delay/Doppler from the measured channel. Shared by QPSK/8PSK/16QAM. See Case #2 below. |
 | AGC / carrier-sense thresholds | `modem_engine.cpp`, GUI | ⬜ | Energy-detection floor (~+6 dB); OFDM-gated. Band/sample selection per mode? |
 
 ## How this ties to the rest of the plan

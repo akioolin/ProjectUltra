@@ -10,6 +10,56 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-29: Channel-adaptive DD gate (BUG-8PSK-001) + estimator/diversity audit (branch `feat/oneway-arch-2026-05-27`)
+
+**What was broken:** decision-directed (DD) channel tracking
+(`use_coherent_dd`, on for QAM8/QAM16) corrupted the 8PSK channel estimate on
+Good fading. Root cause (physics): Good HF is ~0.1 Hz Doppler → frozen over a
+burst (coherence time ~4 s, nothing to time-track) and ~0.5 ms delay spread →
+a frequency-selective null in band. In the null, per-carrier SNR is low, 8PSK's
+tight (22.5°) decisions go wrong, and DD feeds those confident-wrong decisions
+back into H → poison → cascade of confident-wrong bits → LDPC fails. Measured:
+DD-on FAILs 8PSK Good@20 (83–125 CW fails, no delivery); DD-off delivers.
+
+**What was changed (`src/ofdm/channel_equalizer_pilot.cpp`):** `use_coherent_dd`
+now also requires `last_fading_index < dd_fading_max` (default 0.15, env
+`ULTRA_DD_FADING_MAX`). DD runs only on frequency-flat frames (AWGN, or a
+momentarily-flat fade) where hard decisions are reliable; it is gated off on
+faded frames. Threshold derived from measured data (AWGN reads ≤0.07, Good ~0.34
+median) and equals the codebase's existing LLR-scaling "faded" boundary. Adapts
+per-frame and per-modulation by construction (no per-mode special-case). Kept
+`ULTRA_COHERENT_DD_OFF=1` force-off and the QAM8 genie-channel hook as env-gated
+diagnostics. Removed a tried-and-rejected per-symbol pilot-anchor innovation
+gate (ineffective: a wrong-decision rotation and a legit between-pilot
+interpolation error are indistinguishable per-symbol — flat across a 4×
+tightness sweep) and a spent PHASE-TRACE diagnostic log in
+`channel_equalizer_equalize.cpp`.
+
+**Why it's properly fixed:** DD is the wrong tool on a frozen, frequency-
+selective channel — there is no time variation to track, and its null-carrier
+wrong decisions are exactly what poisons H. Gating on measured frequency-
+selectivity restricts DD to where it is safe and beneficial (flat channels),
+and is fail-safe (degrades to pilot-only = the proven DD-off behavior). DD
+remains correct for genuinely fast-fading (high-Doppler) channels.
+
+**Test verification:**
+- GUI (`tools/gui_qso_scenario.sh`, forced 8PSK R3/4): AWGN30 PASS 2330 bps, 0
+  CW fail (DD stays on — no regression); Good@20 cascade removed (seed 42 PASS
+  710 bps, seed 43 delivered CRC-clean). `ULTRA_FORCE_DATA_MOD=8PSK
+  ULTRA_FORCE_DATA_RATE=R3_4 tools/gui_qso_scenario.sh --channel good|awgn
+  --snr-db 20|30 --seed N --expect-mod 8PSK --expect-rate R3/4 --file-kb 21`.
+- Offline (`measure_ack_fer --config burst_chunk --mod qam8 --rate r3_4
+  --channel good --group 6 --burst-interleave 1`): adaptive == DD-off (46/120
+  chunks) vs DD-on 41/120.
+
+**Audit findings documented (no code change):** the MMSE/Wiener channel
+estimator is textbook-correct but non-adaptive (Moderate-HF baked); re-tuning it
+to Good is FLAT (measured) — it is NOT the fading-survivability lever (can't
+interpolate energy that isn't in a null). 8PSK is too marginal a rung for
+Good@20 (QPSK ~2× more survivable). Full system synthesis in
+`docs/SYSTEM_PICTURE_FADE_SURVIVABILITY_2026_05_29.md` and the subsystem register
+`docs/ADAPTIVITY_AUDIT_2026_05_29.md`.
+
 ## 2026-05-29: Warm-handoff made to work (§16 Phase 2) + tone-burst NACK fix (branch `feat/oneway-arch-2026-05-27`, commits `ef2fa4f`, `39aec3a`; env-gated default OFF)
 
 **What was broken:** the warm-handoff lever (drop the redundant per-group

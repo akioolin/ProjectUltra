@@ -70,8 +70,29 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   connect and tone-burst NACK emits > 0, file still CRC-clean.
 
 ### BUG-8PSK-001: Decision-directed tracking corrupts the 8PSK channel estimate on fading
-- Status: DIAGNOSED (2026-05-29, root cause confirmed; fix pending). See
-  `docs/8PSK_GOOD_FADING_DIAGNOSIS_2026_05_29.md`.
+- Status: FIXED (2026-05-29, channel-adaptive DD gate). DD cascade removed; see
+  `docs/8PSK_GOOD_FADING_DIAGNOSIS_2026_05_29.md` and
+  `docs/SYSTEM_PICTURE_FADE_SURVIVABILITY_2026_05_29.md`.
+- Fix: `use_coherent_dd` now also requires `last_fading_index < 0.15`
+  (`channel_equalizer_pilot.cpp`) — DD off on frequency-selective/faded frames
+  (where its wrong decisions poison H), on for AWGN/flat frames (where it's
+  safe). Threshold from measured data (AWGN ≤0.07, Good ~0.34 median) and equal
+  to the existing LLR-scaling "faded" boundary. Env override `ULTRA_DD_FADING_MAX`
+  (default 0.15); `ULTRA_COHERENT_DD_OFF=1` force-off. A per-symbol pilot-anchor
+  innovation gate was tried first and removed — ineffective (a wrong-decision
+  rotation and a legit between-pilot interpolation error are indistinguishable
+  per-symbol; flat across a 4× tightness sweep).
+- Verification: GUI 8PSK AWGN30 PASS 2330 bps 0 CW fail (DD stays on, no
+  regression); Good@20 cascade gone (DD-on 83–125 CW fails/no delivery →
+  adaptive: seed 42 PASS, seed 43 delivered CRC-clean). Offline (measure_ack_fer
+  qam8 Good@20): adaptive == DD-off (46/120 chunks) vs DD-on 41/120.
+- RESIDUAL (separate, NOT this bug): 8PSK is too marginal a rung for Good@20 —
+  delivers slowly with heavy resends and fails on hard fades (seed 44: 0
+  delivery). QPSK is ~2× more survivable there (offline 106/150 vs 52/150
+  chunks). This is a rung-selection design item (adaptive mod choice per
+  channel), tracked in `docs/SYSTEM_PICTURE_FADE_SURVIVABILITY_2026_05_29.md`,
+  not a DD bug.
+- Original diagnosis (root-cause history):
 - Area: `src/ofdm/channel_equalizer_pilot.cpp` (`use_coherent_dd`, ON for QAM8/QAM16)
 - Symptom: forced 8PSK (QAM8) R3/4 delivers perfectly on clean AWGN (2330 bps) but
   fails on Good@20 fading — heavy resends, frequently no delivery, confident-WRONG

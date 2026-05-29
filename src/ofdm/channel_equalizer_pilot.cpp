@@ -129,8 +129,12 @@ void OFDMDemodulator::Impl::seedWienerPilotHistoryFromCurrentChannel(int64_t sym
 
 void OFDMDemodulator::Impl::applyDiagnosticTwoPathChannelOracle(
         const std::vector<Complex>& h_ls_all) {
+    // 2026-05-29: extend the genie two-path channel oracle to QAM8 as well, so we
+    // can A/B whether the LTS+pilot H estimate is what breaks 8PSK on Good fading
+    // (test-only, env-gated by ULTRA_QAM16_GENIE_CHANNEL_TWOPATH_LS).
     if (!qam16GenieChannelTwoPathEnabled() ||
-        config.modulation != Modulation::QAM16 ||
+        (config.modulation != Modulation::QAM16 &&
+         config.modulation != Modulation::QAM8) ||
         h_ls_all.size() != pilot_carrier_indices.size() ||
         h_ls_all.size() < 2) {
         return;
@@ -889,7 +893,47 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
         }
         return false;
     }();
+    // 2026-05-29 test knob: ULTRA_COHERENT_DD_OFF=1 disables decision-directed
+    // channel tracking, to A/B whether DD error-propagation on fading is what
+    // breaks 8PSK on Good@20 (the comment above warns DD poisons H on bad
+    // decisions; this lets us test that hypothesis directly).
+    const bool dd_force_off = []() {
+        if (const char* env = std::getenv("ULTRA_COHERENT_DD_OFF")) {
+            return std::atoi(env) == 1;
+        }
+        return false;
+    }();
+    // 2026-05-29 BUG-8PSK-001 — channel-adaptive DD gating. Decision-directed (DD)
+    // channel tracking is the WRONG TOOL on a slowly-fading, frequency-selective
+    // channel. Good HF (~0.1 Hz Doppler) is frozen over the whole burst (coherence
+    // time ~4 s), so there is no time variation for DD to track; its ~0.5 ms delay
+    // spread instead puts a frequency-selective NULL in the band. In the null,
+    // per-carrier SNR is low, hard decisions go wrong (tight for QAM8/QAM16), and DD
+    // feeds those confident-wrong decisions back into H — poisoning it and cascading
+    // into confident-wrong bits. Measured: DD-on FAILs 8PSK Good@20 while DD-off
+    // delivers (1010 bps). A per-symbol innovation gate is ineffective here: a
+    // wrong-decision rotation and a legitimate between-pilot interpolation error both
+    // produce large innovations, so no per-symbol test separates them (verified — a
+    // 4x gate-tightness sweep was flat). DD only earns its keep where hard decisions
+    // are reliable: a frequency-FLAT channel (AWGN, or a momentarily-flat fade). So
+    // gate it on the measured frequency-selectivity (last_fading_index, pilot
+    // magnitude CV): AWGN reads ~0.02 (max ~0.07), Good ~0.34 (median), so 0.15
+    // cleanly separates and matches the codebase's existing "faded" boundary (LLR
+    // scaling onset). Adapts per-frame and per-modulation by construction — no
+    // per-mode special-case. See docs/ADAPTIVITY_AUDIT_2026_05_29.md. Env-overridable
+    // while validating; 0.15 is the principled default. DD remains the right tool for
+    // a genuinely fast-fading channel (high Doppler) — that is its proper domain.
+    const float dd_fading_max = []() {
+        if (const char* env = std::getenv("ULTRA_DD_FADING_MAX")) {
+            const float v = static_cast<float>(std::atof(env));
+            if (v > 0.0f) return v;
+        }
+        return 0.15f;
+    }();
+    const bool channel_flat_enough_for_dd = last_fading_index < dd_fading_max;
     const bool use_coherent_dd =
+        !dd_force_off &&
+        channel_flat_enough_for_dd &&
         (config.modulation == Modulation::QAM8 ||
          config.modulation == Modulation::QAM16 ||
          (config.modulation == Modulation::QPSK && qpsk_dd_optin));
