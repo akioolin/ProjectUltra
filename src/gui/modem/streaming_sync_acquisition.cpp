@@ -757,6 +757,21 @@ void StreamingDecoder::searchForSync() {
         }
 
         if (!found && use_full_ofdm_anchor_search) {
+            // §16 Phase 5 instrumentation: detectSync failed to lock the
+            // descriptor chirp. sync_result.correlation holds the peak dual-chirp
+            // correlation (max up/down) even on failure. Logging it disambiguates
+            // a THRESHOLD miss (peak just under 0.15 → SNR/window-edge) from a
+            // NO-CHIRP-IN-WINDOW miss (peak ≈ 0 → search window misaligned with
+            // the descriptor arrival). ULTRA_S16_TRACE_WARM_WINDOW gates it.
+            if (const char* t = std::getenv("ULTRA_S16_TRACE_WARM_WINDOW");
+                t && std::atoi(t) != 0) {
+                LOG_MODEM(INFO,
+                    "[%s] s16-phase5: detectSync MISS chirp_peak=%.3f (thr=%.2f) "
+                    "corr_pos=%zu total=%zu search_start=%zu min_search=%zu",
+                    log_prefix_.c_str(), sync_result.correlation,
+                    CORR_DETECT_THRESHOLD, correlation_pos_, total_fed_,
+                    search_start, min_search);
+            }
             SyncResult light_sync_result;
             const float known_cfo = last_cfo_.load();
             const bool light_found = waveform_->detectDataSync(

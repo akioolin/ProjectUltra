@@ -564,4 +564,49 @@ to the objective:
 ### 9.6 Status
 
 - v4 checkpoint committed env-gated (default OFF); production safe.
-- Next session starts at Phase 5 (chirp-detector reliability), the proven crux.
+- Phase 5 investigation DONE (§9.7).
+
+### 9.7 Phase 5 findings (2026-05-29) — root cause fully traced
+
+Instrumented `detectSync` to log the peak dual-chirp correlation on failure, plus the
+descriptor→data handoff. Definitive trace, seed 1 Good@20 (in-band SNR 20.6 dB — easy):
+
+1. **Chirp detector is healthy.** Missed-chirp peaks are strictly bimodal: ≤0.10 (no/partial chirp
+   in window) or 0.74–0.96 (locks). Nothing at the 0.11–0.15 threshold edge → NOT a sensitivity or
+   threshold problem.
+2. **`detectDualChirp` requires BOTH halves windowed.** It logs a high *single*-chirp correlation
+   (e.g. 0.833) as a MISS for ~3 iterations until the window slides to include up+down+gap, then
+   locks (0.88). Minor inefficiency; not the blocker.
+3. **The descriptor chirp IS found, every group** (re-arm works). ~8+ finds at 0.74–0.96 in an
+   11-group run.
+4. **Window alignment is CORRECT.** Descriptor data spans `[abs_start, abs_start+frame_len]`,
+   `next_expected = descriptor_end`, and the warm narrow window lands on the contiguous group-start
+   data (`Data sync detected at ~975` ≈ predicted).
+5. **THE BLOCKER: the group-start DATA's own LTS sync correlation is fade-variable.** Group 0 data:
+   `corr=0.91 (sc=0.91 mf=0.40)` → delivered. Group 1 data: `corr=0.55 (sc=0.55 mf=0.10)` →
+   rejected by the cold coherent **0.90** gate. The Schmidl-Cox term itself drops 0.91→0.55 frame to
+   frame — fade variation of the light group-start LTS. The detector already tries both LTS
+   polarities (ofdm_chirp_waveform.cpp:644/646), so the §14.25 negation marker is NOT the cause.
+
+**Conclusion / refactor design lock-in.** The full-chirp baseline survives this because each
+group-start carries a *robust chirp*; warm-handoff makes the group-start *light (LTS-only)*, so a
+faded LTS (0.55) is killed by a gate meant for COLD acquisition. But the group-start data is
+**contiguous with a just-decoded chirp anchor (the descriptor)** — its timing is already known.
+
+→ **`WARM` mode must PROCESS the predicted-position frame and let LDPC validate it, NOT re-acquire it
+through an LTS-correlation gate.** The LTS provides channel estimation (H), not an acquisition
+decision. Confidence = (fresh anchor) + (position match) + (downstream LDPC), not LTS corr. This is
+why the 0.50 override "worked" 11/11 (it crudely bypassed the gate) and why the principled fix is
+position-gating, not another threshold number. Threshold-policy Phase (§9.5 step 2) becomes:
+*coherent WARM contiguous-data acceptance is position+LDPC gated; the 0.90 corr gate applies only to
+COLD/RE_ACQUIRE.*
+
+Separately, the 640 bps slowness seen with the 0.50 override (vs ~1600 baseline) is the chirp
+multi-iteration lock (finding 2) + inter-group gap, an efficiency item AFTER reliability lands.
+
+### 9.8 Status
+
+- Phase 5 closed: detector ✓, acquisition ✓, alignment ✓; blocker = WARM contiguous-data wrongly
+  correlation-gated. `WARM` = process-at-predicted-position + LDPC-validate.
+- Next: Phase 2 (threshold policy) implementing the position+LDPC WARM acceptance, then Phase 3
+  (SyncMode enum) with `WARM` defined as above.
