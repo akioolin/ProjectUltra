@@ -25,6 +25,7 @@
 
 #include "waveform/waveform_interface.hpp"
 #include "waveform/waveform_factory.hpp"
+#include "waveform/tone_burst_ack/tone_burst_ack_monitor.hpp"
 #include "protocol/frame_v2.hpp"
 #include "ultra/fec.hpp"
 #include "ultra/papr_reduction.hpp"
@@ -101,6 +102,23 @@ public:
 
     // Encode PING (chirp preamble only, no data)
     std::vector<float> encodePing();
+
+    // §15 step 4c: encode a tone-burst ACK (narrowband 4-FSK in the
+    // 2400-2700 Hz subband). Replaces the 1500 ms OFDM 1-CW ACK with
+    // a 675 ms-baseline tone burst (≥10 dB lower SNR floor, ~5× faster
+    // at high SNR). Per §15.5 the symbol_ms picks a duration on the
+    // SNR-adaptive staircase: 12 ms (≥18 dB SNR) through 200 ms
+    // (< -5 dB SNR). The payload carries group_seq, per-frame mask,
+    // rate hint, ACK/NACK type, all wrapped in CRC-12 + (15,11) Hamming.
+    //
+    // This produces RAW audio (no chirp preamble, no LTS, no OFDM
+    // structure — the Costas pattern at the start is its own sync).
+    // Caller is responsible for queueing the samples on the audio
+    // output ring at the right time after the burst-data turnaround.
+    std::vector<float> encodeToneBurstAck(
+        const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& payload,
+        uint32_t symbol_ms =
+            ultra::waveform::tone_burst_ack::kBaselineSymbolMs);
 
     // Encode just the data portion (no preamble) - for testing
     std::vector<float> encodeDataOnly(const Bytes& frame_data);

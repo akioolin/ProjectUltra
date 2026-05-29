@@ -7,6 +7,7 @@
 // embedded in the StreamingDecoder's real feedAudio() path.
 
 #include "gui/modem/streaming_decoder.hpp"
+#include "gui/modem/streaming_encoder.hpp"
 #include "waveform/tone_burst_ack/tone_burst_constants.hpp"
 #include "waveform/tone_burst_ack/tone_burst_encoder.hpp"
 #include "waveform/tone_burst_ack/tone_burst_payload.hpp"
@@ -110,6 +111,63 @@ void test_streaming_decoder_fires_tone_burst_callback_on_baseline_burst() {
     }
 }
 
+void test_streaming_encoder_to_decoder_loopback() {
+    std::printf("[test] streaming_encoder_to_decoder_loopback\n");
+    // §15 step 4c: prove the sender API can produce tone-burst audio AND the
+    // receiver's monitor decodes it correctly. Real ACK loopback in miniature.
+
+    ultra::gui::StreamingEncoder enc;
+    ultra::gui::StreamingDecoder dec;
+
+    std::mutex mtx;
+    std::vector<tba::ToneBurstAckDetection> events;
+    dec.setToneBurstAckCallback([&](const tba::ToneBurstAckDetection& d) {
+        std::lock_guard<std::mutex> lk(mtx);
+        events.push_back(d);
+    });
+
+    const auto orig = makePayload();
+    const auto tx = enc.encodeToneBurstAck(orig, tba::kBaselineSymbolMs);
+    EXPECT(tx.size() > 0);
+    // 27 symbols × 1200 samples/symbol = 32400 samples at baseline.
+    EXPECT_EQ(tx.size(),
+              static_cast<size_t>(tba::kTotalSymbols) *
+                  (tba::kSampleRate * tba::kBaselineSymbolMs / 1000u));
+
+    // Feed: silence, then the encoded burst, then more silence (so the
+    // monitor's cadence-gated detection definitely triggers after the burst
+    // is fully buffered).
+    const size_t chunk_samples = 1024;
+    std::vector<float> silence(chunk_samples, 0.0f);
+    const size_t pad_chunks =
+        (static_cast<size_t>(tba::kSampleRate) * 200u / 1000u) / chunk_samples;
+    for (size_t i = 0; i < pad_chunks; ++i) {
+        dec.feedAudio(silence.data(), silence.size());
+    }
+    size_t off = 0;
+    while (off < tx.size()) {
+        const size_t n = std::min(chunk_samples, tx.size() - off);
+        dec.feedAudio(tx.data() + off, n);
+        off += n;
+    }
+    const size_t tail_chunks = pad_chunks + 24;
+    for (size_t i = 0; i < tail_chunks; ++i) {
+        dec.feedAudio(silence.data(), silence.size());
+    }
+
+    std::lock_guard<std::mutex> lk(mtx);
+    EXPECT_EQ(events.size(), static_cast<size_t>(1));
+    if (events.size() >= 1) {
+        const auto& d = events[0];
+        EXPECT_EQ(d.payload.group_seq, orig.group_seq);
+        EXPECT_EQ(d.payload.frame_mask, orig.frame_mask);
+        EXPECT_EQ(d.payload.rate_hint, orig.rate_hint);
+        EXPECT_EQ(static_cast<int>(d.payload.type), static_cast<int>(orig.type));
+        std::printf("  encoded->decoded round-trip OK: peak=%.1f\n",
+                    d.correlation_peak);
+    }
+}
+
 void test_streaming_decoder_pure_silence_does_not_fire_monitor() {
     std::printf("[test] streaming_decoder_pure_silence_does_not_fire_monitor\n");
 
@@ -135,6 +193,7 @@ void test_streaming_decoder_pure_silence_does_not_fire_monitor() {
 
 int main() {
     test_streaming_decoder_fires_tone_burst_callback_on_baseline_burst();
+    test_streaming_encoder_to_decoder_loopback();
     test_streaming_decoder_pure_silence_does_not_fire_monitor();
 
     if (g_failures > 0) {

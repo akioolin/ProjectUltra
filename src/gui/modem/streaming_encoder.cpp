@@ -7,6 +7,7 @@
 #include "streaming_control_profile.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "waveform/mc_dpsk_waveform.hpp"
+#include "waveform/tone_burst_ack/tone_burst_encoder.hpp"
 #include "fec/frame_interleaver.hpp"
 #include "fec/burst_interleaver.hpp"
 #include "gui/startup_trace.hpp"
@@ -680,6 +681,33 @@ std::vector<float> StreamingEncoder::encodePing() {
 
     auto preamble = control_waveform_->generatePreamble();
     return std::vector<float>(preamble.begin(), preamble.end());
+}
+
+std::vector<float> StreamingEncoder::encodeToneBurstAck(
+    const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& payload,
+    uint32_t symbol_ms) {
+    // PHY_ADAPTATION_DESIGN §15 step 4c. Build the tone-burst ACK audio by
+    // delegating to the standalone ToneBurstEncoder. Local instance: encoder
+    // state is just a phase accumulator that wraps every ~675 ms (one burst),
+    // so there's no benefit to caching across calls and a fresh instance
+    // avoids any cross-call phase leak.
+    ultra::waveform::tone_burst_ack::ToneBurstEncoder enc;
+    auto samples = enc.encode(payload, symbol_ms);
+    LOG_MODEM(INFO,
+              "[%s] ToneBurstAck encoded: group_seq=%u type=%s frame_mask=0x%02X "
+              "rate_hint=%u symbol_ms=%u samples=%zu (%.0f ms airtime)",
+              log_prefix_.c_str(),
+              static_cast<unsigned>(payload.group_seq),
+              payload.type == ultra::waveform::tone_burst_ack::AckType::Nack
+                  ? "NACK"
+                  : "ACK",
+              static_cast<unsigned>(payload.frame_mask),
+              static_cast<unsigned>(payload.rate_hint),
+              static_cast<unsigned>(symbol_ms),
+              samples.size(),
+              static_cast<float>(samples.size()) * 1000.0f /
+                  static_cast<float>(ultra::waveform::tone_burst_ack::kSampleRate));
+    return samples;
 }
 
 std::vector<float> StreamingEncoder::encodeDataOnly(const Bytes& frame_data) {
