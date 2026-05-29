@@ -519,6 +519,12 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod,
                                                             active_carrier_mask,
                                                             carrier_mask_enabled,
                                                             /*genie_capture=*/true);
+        if (ultra::genie::txCapture().enabled && std::getenv("ULTRA_GENIE_DEBUG") &&
+            symbol_index < 30) {
+            std::fprintf(stderr, "[genie-tx] push symbol_index=%zu nData=%zu (total pushed=%zu)\n",
+                         symbol_index, impl_->data_carrier_indices.size(),
+                         ultra::genie::txCapture().symbols.size());
+        }
 
         // Convert to real signal
         const auto& real_symbol = impl_->complexToReal(complex_symbol);

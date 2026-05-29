@@ -416,31 +416,22 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
     // Aligns by data-symbol order (one capture per data OFDM symbol == one equalize()).
     {
         auto& cap = ultra::genie::txCapture();
-        // FIFO cursor: the modulator now captures DATA symbols only (LTS/probe are
-        // gated out), so the encoder push order == the decoder equalize order, and a
-        // simple in-order read-cursor aligns one-to-one.
+        // In-order FIFO cursor: the modulator captures DATA symbols only (LTS/probe
+        // gated out) in continuous wire order, so for a decode path that processes the
+        // frame in ONE continuous presynced pass (e.g. a 1-codeword frame, which does
+        // not trigger the per-codeword active_ldpc_block_size break + chunked re-sync)
+        // the encoder push order == the decoder equalize order and this aligns 1:1.
+        // NOTE: a 4-CW frame-interleaved frame decodes as re-synced chunks whose
+        // per-chunk carrier-pattern reset diverges from the continuous push order, so
+        // the FIFO drifts there — use --frame-cw 1 for the genie. See diagnosis doc.
         if (cap.enabled && cap.read_index < cap.symbols.size()) {
-            const std::size_t this_read = cap.read_index;
             const std::vector<Complex>& tx = cap.symbols[cap.read_index++];
             if (tx.size() == channel_estimate.size()) {
-                const bool dbg = (this_read == 0) && std::getenv("ULTRA_GENIE_DEBUG");
-                double sumdiff = 0.0, sumref = 0.0; int nseen = 0;
                 for (int idx : data_carrier_indices) {
-                    if (std::norm(tx[idx]) > 1.0e-12f) {
-                        const Complex h_genie = freq_domain[idx] / tx[idx];
-                        if (dbg) { sumdiff += std::abs(h_genie - channel_estimate[idx]);
-                                   sumref += std::abs(channel_estimate[idx]); ++nseen; }
-                        channel_estimate[idx] = h_genie;
-                    }
+                    if (std::norm(tx[idx]) > 1.0e-12f) channel_estimate[idx] = freq_domain[idx] / tx[idx];
                 }
                 for (int idx : pilot_carrier_indices) {
-                    if (std::norm(tx[idx]) > 1.0e-12f) {
-                        channel_estimate[idx] = freq_domain[idx] / tx[idx];
-                    }
-                }
-                if (dbg && sumref > 0.0) {
-                    std::fprintf(stderr, "[genie] sym0 relDiff(genieH vs prodH)=%.3f over %d carriers\n",
-                                 sumdiff / sumref, nseen);
+                    if (std::norm(tx[idx]) > 1.0e-12f) channel_estimate[idx] = freq_domain[idx] / tx[idx];
                 }
             }
         }

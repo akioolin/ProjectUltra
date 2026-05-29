@@ -136,9 +136,29 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   for all mods (qpsk/qam8/qam16, all DD modes) — the offline AWGN burst path does not
   match the GUI/OTASim AWGN path (where these mods decode fine). So measure_ack_fer
   AWGN burst_chunk numbers are not usable; use the GUI for AWGN.
+- Defect 3 (KNOWN, 2026-05-29): the **Z=81 / N=1944 (long-LDPC burst keystone) path
+  decodes to 0% in measure_ack_fer — even noiseless QPSK** — on BOTH the frame path
+  (`--config data4_full` + `ULTRA_LDPC_Z=81`) and the burst path
+  (`--config burst_chunk` + `ULTRA_LDPC_Z=81`). Verified Good@60: qpsk/qam16 = 0/100
+  at Z=81 vs 91/84 at Z=27; confirmed pre-existing (reproduces with all genie edits
+  git-stashed). ROOT CAUSE: `ULTRA_LDPC_Z=81` changes the ENCODER codeword size and
+  the decoder's *block size* (→1944, `streaming_decoder.cpp:641`), but
+  `decodeFixedFrame`'s `ldpc_z` argument is sourced ONLY from the burst descriptor
+  (`last_burst_descriptor_.lifting_z`, `streaming_ofdm_decode.cpp:2876-2889`), NOT
+  from the env. With no BURST_HEADER on the wire (frame path never sends one; the
+  burst_chunk harness only enables the descriptor in its `wrong_group` branch), the
+  decoder accumulates 1944 soft bits but decodes them with a **Z=27 matrix** →
+  guaranteed failure. Production (GUI burst transport) IS unaffected: it transmits the
+  BURST_HEADER with `lifting_z=81`, so the decoder learns Z and decodes correctly
+  (GUI-proven CRC-clean ~3.1 kbps Good@20). CONSEQUENCE: **measure_ack_fer cannot
+  validly screen the production burst config (Z=81); all offline Z=81 numbers are
+  garbage.** The valid offline data is Z=27 only. FIX options: (a) honor `ULTRA_LDPC_Z`
+  as an `ldpc_z` fallback inside the decode path, or (b) make the burst_chunk harness
+  enable the burst descriptor so the decoder learns Z from the wire (matches the GUI).
 - Impact: measure_ack_fer is a fast *screen* for relative offline comparisons on the
-  Good path, but its absolute results and its AWGN path are not faithful. Confirm any
-  fade/throughput conclusion on the real-time GUI per the project's standing rule.
+  Good path at **Z=27 only**; its AWGN path and its entire Z=81 path are not faithful.
+  Confirm any fade/throughput conclusion — and ANY 16QAM-on-production-burst claim —
+  on the real-time GUI per the project's standing rule.
 
 ### BUG-CFO-001: OFDM two-stage CFO refinement remains incomplete
 - Status: OPEN

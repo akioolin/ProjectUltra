@@ -26,6 +26,15 @@ struct TxCapture {
     // (fft_size bins; data on data carriers, pilots on pilot carriers, else 0).
     std::vector<std::vector<Complex>> symbols;
     std::size_t read_index = 0;
+    // ALIGNMENT CAVEAT (2026-05-29): the in-order FIFO read aligns 1:1 ONLY when the
+    // decoder processes the frame in a SINGLE continuous presynced pass (e.g. a 1-CW
+    // frame). A 4-CW frame-interleaved frame decodes as re-synced chunks whose
+    // per-chunk carrier-pattern reset diverges from the encoder's continuous push
+    // order, so the FIFO read_index drifts +1 per codeword and the genie mispairs.
+    // Self-aligning best-match (min frequency-jaggedness of H=Y/tx) was tried and is
+    // too weak a discriminator (timing-ramp + 53-vs-51 carrier-pattern mismatch
+    // flatten the contrast). Use --frame-cw 1 for genie measurements. See
+    // docs/16QAM_DECODABILITY_DIAGNOSIS_2026_05_29.md.
 
     void reset() {
         symbols.clear();
