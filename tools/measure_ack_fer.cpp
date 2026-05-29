@@ -60,6 +60,11 @@ struct Args {
     bool burst_interleave = true; // cross-frame deep interleave ON/OFF (the A/B)
     bool burst_descriptor = false; // §14.17: emit BURST_HEADER descriptor + mis-set
                                    // decoder group size to prove the descriptor fixes it
+    int ldpc_z = 27;               // LDPC lifting size: 27 (N=648) or 81 (N=1944, burst
+                                   // long-LDPC keystone). Sets the encoder member via
+                                   // setLDPCLiftingZ so the codeword size AND the
+                                   // BURST_HEADER descriptor agree; the RX learns Z=81
+                                   // from the wire descriptor (BUG-HARNESS-002 Defect 3).
 };
 
 struct Counts {
@@ -195,6 +200,8 @@ Args parseArgs(int argc, char** argv) {
             args.burst_interleave = std::stoi(requireValue("--burst-interleave")) != 0;
         } else if (key == "--burst-descriptor") {
             args.burst_descriptor = std::stoi(requireValue("--burst-descriptor")) != 0;
+        } else if (key == "--ldpc-z") {
+            args.ldpc_z = std::stoi(requireValue("--ldpc-z"));
         } else if (key == "--help" || key == "-h") {
             usage(argv[0]);
             std::exit(0);
@@ -238,6 +245,10 @@ void configureEncoder(gui::StreamingEncoder& encoder, const Args& args) {
     encoder.setDataMode(args.mod, args.rate);
     encoder.setFixedFrameCodewords(args.frame_cw);
     encoder.setCarrierLdpcInterleaver(args.carrier_interleave);
+    // Sets the member so the actual codeword size AND the BURST_HEADER descriptor's
+    // announced lifting_z agree (the production API the connection layer uses
+    // per-burst). Without this, Z=81 codewords get announced/decoded as Z=27 → 0%.
+    encoder.setLDPCLiftingZ(static_cast<uint8_t>(args.ldpc_z == 81 ? 81 : 27));
 }
 
 void configureDecoder(gui::StreamingDecoder& decoder, const Args& args) {
@@ -548,9 +559,20 @@ BurstCounts measureBurst(const Args& args) {
         // actually drives the decoder (the cross-station 0/8 fix), deliberately
         // mis-configure the decoder here: wrong group size + interleave OFF. If the
         // descriptor works, the RX reconfigures itself and still recovers the group.
-        if (args.burst_descriptor) {
+        // The BURST_HEADER descriptor is REQUIRED for Z=81: the RX learns the lifting
+        // size only from the wire descriptor (decodeFixedFrame ldpc_z <- last_burst_
+        // descriptor_.lifting_z). With Z=81 and no descriptor the RX decodes N=1944
+        // soft bits with a Z=27 matrix → 0% (BUG-HARNESS-002 Defect 3). So force the
+        // descriptor on whenever Z=81 (production always sends it for burst), and also
+        // when the §14.17 descriptor-proof test is requested.
+        const bool emit_descriptor = args.burst_descriptor || args.ldpc_z == 81;
+        if (emit_descriptor) {
             encoder.setBurstDescriptorEnabled(true);
             encoder.setBurstDescriptorIdentity("ALPHA", "BRAVO");
+        }
+        if (args.burst_descriptor) {
+            // §14.17 proof: deliberately mis-config the RX; if the descriptor works
+            // the RX reconfigures itself and still recovers the group.
             const int wrong_group = (group >= 4) ? 2 : 8;
             decoder.setBurstInterleaveGroupSize(wrong_group);
             decoder.setBurstInterleave(false);
@@ -635,6 +657,17 @@ int main(int argc, char** argv) {
         }
         ultra::setLogLevel(log_level);
         const Args args = parseArgs(argc, argv);
+
+        // 2026-05-29 (BUG-HARNESS-002 Defect 3 fix): the decoder learns the LDPC
+        // lifting size ONLY from the env ULTRA_LDPC_Z or the burst descriptor; the
+        // descriptor-consume path does not fire reliably in this harness, so for a
+        // controlled Z=81 (N=1944 long-LDPC burst keystone) screen we set the env
+        // here (decoder block-size getter + decodeFixedFrame ldpc_z both read it) to
+        // match the encoder member set via setLDPCLiftingZ in configureEncoder. This
+        // mirrors production, where the connection layer fixes Z on BOTH ends.
+        if (args.ldpc_z == 81) {
+            setenv("ULTRA_LDPC_Z", "81", /*overwrite=*/1);
+        }
 
         // 2026-05-29 diag: enable the true per-symbol data-aided channel genie
         // (H=Y/X) process-wide. Off unless ULTRA_GENIE_DATA_AIDED=1. Both the

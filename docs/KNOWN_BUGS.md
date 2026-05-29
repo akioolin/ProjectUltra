@@ -152,9 +152,33 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   BURST_HEADER with `lifting_z=81`, so the decoder learns Z and decodes correctly
   (GUI-proven CRC-clean ~3.1 kbps Good@20). CONSEQUENCE: **measure_ack_fer cannot
   validly screen the production burst config (Z=81); all offline Z=81 numbers are
-  garbage.** The valid offline data is Z=27 only. FIX options: (a) honor `ULTRA_LDPC_Z`
-  as an `ldpc_z` fallback inside the decode path, or (b) make the burst_chunk harness
-  enable the burst descriptor so the decoder learns Z from the wire (matches the GUI).
+  garbage.** The valid offline data is Z=27 only.
+- DEEPER ROOT CAUSE (2026-05-29, attempted fix found it is MULTI-LAYER — NOT a quick
+  fix): even with the encoder emitting Z=81 (via `setLDPCLiftingZ`, added as
+  `--ldpc-z 81`) AND the decoder env-forced to Z=81 (block-size getter +
+  `decodeFixedFrame` ldpc_z both read `ULTRA_LDPC_Z`), Z=81 STILL decodes 0% — even a
+  1-CW frame, noiseless. Two more layers:
+  (1) the waveform's soft-bit-grab size (`active_ldpc_block_size`, used by
+      `getSoftBits`) is bumped to 1944 ONLY by `setActiveLDPCLiftingZ()`, which fires
+      ONLY on descriptor-consume (streaming_ofdm_decode.cpp:763). With no descriptor
+      the decoder grabs 648 bits of a 1944-bit codeword ("Got 648 soft bits,
+      proceeding to decode") → garbage.
+  (2) the descriptor-consume itself does not fire in the harness: the BURST_HEADER (a
+      DQPSK-R1/4 control frame) is routed to the DATA decode path (line 1124), not the
+      CONTROL path (line 661, which recognizes `FrameType::BURST_HEADER`), so it is
+      mis-decoded as a failed data frame and dropped — never consumed (verified:
+      `--burst-descriptor 1` gives 0% at BOTH Z=27 and Z=81 on Good@60).
+  KEY INSIGHT (user): the BURST_HEADER is the SINGLE self-describing conveyor of
+  lifting_z AND cw_per_frame AND group_size AND interleave flags together — the
+  decoder is designed to learn the whole burst geometry from the wire in one shot, so
+  piecemeal patching (env for Z, setFixedFrameCodewords for cw) cannot reproduce
+  production. The ONLY faithful fix is to make descriptor-consume fire in the harness
+  (route the BURST_HEADER to the control decode path). That is real plumbing across
+  the control-detection + block-size + descriptor-consume layers — deferred. The
+  `--ldpc-z 81` scaffolding (encoder emits + announces Z=81; env wires the decoder
+  decode matrix + block-size getter) is committed as a correct PARTIAL toward that fix.
+- Impact (updated): characterize ANY 16QAM-on-production-burst (Z=81) claim on the
+  real-time GUI; the offline harness cannot do it until descriptor-consume is fixed.
 - Impact: measure_ack_fer is a fast *screen* for relative offline comparisons on the
   Good path at **Z=27 only**; its AWGN path and its entire Z=81 path are not faithful.
   Confirm any fade/throughput conclusion — and ANY 16QAM-on-production-burst claim —
