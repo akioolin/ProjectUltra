@@ -111,6 +111,19 @@ inline constexpr float kConnectedOFDMLightSyncRescueFloor = 0.35f;
 // the resend lands.
 inline constexpr uint64_t kConnectedOFDMReanchorEscalateStreak = 12;
 
+// §9.7 Phase 2: WARM contiguous-data position floor. A coherent group-start
+// frame in the warm narrow window is contiguous with a just-decoded chirp
+// anchor (the descriptor), so its timing is already known — the cold 0.90 gate
+// (which guards against stale-phase / high-false-alarm COLD acquisition) does
+// not apply. The frame's own light LTS correlation is fade-variable (measured
+// 0.55-0.91 on Good@20 seed 1); the narrow predicted window has tiny
+// false-alarm volume, so acceptance is position + LDPC gated, floored just
+// above the data-autocorrelation noise ceiling (~0.45; real faded group-start
+// data sits at 0.52-0.61). Deeper fades (< floor) are handled by the §16.4
+// chirp re-anchor escalation. This is the principled replacement for the
+// hand-tuned warm-handoff override.
+inline constexpr float kWarmWindowCoherentFloor = 0.50f;
+
 inline float deriveNarrowWindowMagnitudeThreshold(float wide_window_threshold,
                                                   size_t wide_window_samples,
                                                   size_t narrow_window_samples) {
@@ -147,19 +160,29 @@ inline LightSyncThresholds lightSyncThresholds(bool is_coherent,
         thresholds.weak_floor = 0.45f;
     }
 
-    if (!is_coherent && connected && !is_narrowband && narrow_expected_window &&
+    if (connected && !is_narrowband && narrow_expected_window &&
         wide_window_samples > narrow_window_samples && narrow_window_samples > 0) {
-        const float wide_threshold = thresholds.min_confidence;
-        const float narrowed_threshold = deriveNarrowWindowMagnitudeThreshold(
-            wide_threshold, wide_window_samples, narrow_window_samples);
-        thresholds.min_confidence = narrowed_threshold;
-        thresholds.weak_floor = std::min(thresholds.weak_floor, narrowed_threshold);
         thresholds.narrow_expected_window = true;
         thresholds.false_positive_window_reduction =
             static_cast<float>(wide_window_samples) /
             static_cast<float>(narrow_window_samples);
         thresholds.threshold_reduction_db =
             10.0f * std::log10(thresholds.false_positive_window_reduction);
+        if (is_coherent) {
+            // §9.7 Phase 2: position + LDPC gated WARM acceptance for the
+            // contiguous coherent group-start frame. NOT the √r narrowing law
+            // (which over-relaxes 0.90→0.43, below the noise ceiling — see audit
+            // §8.4); a noise-floor-aware floor justified by the predicted-window
+            // context + downstream LDPC validation.
+            thresholds.min_confidence = kWarmWindowCoherentFloor;
+            thresholds.weak_floor = kWarmWindowCoherentFloor;
+            return thresholds;
+        }
+        const float wide_threshold = thresholds.min_confidence;
+        const float narrowed_threshold = deriveNarrowWindowMagnitudeThreshold(
+            wide_threshold, wide_window_samples, narrow_window_samples);
+        thresholds.min_confidence = narrowed_threshold;
+        thresholds.weak_floor = std::min(thresholds.weak_floor, narrowed_threshold);
         return thresholds;
     }
 

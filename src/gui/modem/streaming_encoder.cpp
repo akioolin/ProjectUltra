@@ -587,8 +587,14 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
         }
     }
 
-    const bool force_first_full_preamble = force_full_preamble_once_;
+    // §16.4: the group-start full-chirp anchor fires for a session's first burst
+    // (force_full_preamble_once_) OR a RESEND (force_burst_group_start_full_preamble_,
+    // which the descriptor's encodeFrame above cannot consume). Either forces the
+    // group-start preamble below to the full chirp+LTS instead of warm light LTS.
+    const bool force_first_full_preamble =
+        force_full_preamble_once_ || force_burst_group_start_full_preamble_;
     force_full_preamble_once_ = false;
+    force_burst_group_start_full_preamble_ = false;
 
     for (size_t i = 0; i < encoded_frames.size(); i++) {
         // Generate preamble (LTS training symbols)

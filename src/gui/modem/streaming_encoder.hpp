@@ -95,6 +95,17 @@ public:
     // OFDM-specific timing anchor before switching to LTS-only warm sync.
     void forceNextFrameFullPreamble() { force_full_preamble_once_ = true; }
 
+    // §16.4 escalation latch, consumed by the burst GROUP-START loop only.
+    // Distinct from force_full_preamble_once_, which the BURST_HEADER descriptor
+    // (a control frame routed through encodeFrame) consumes first — eating the
+    // latch before the group-start loop reads it. This one is read solely at the
+    // group-start preamble decision so a RESEND reliably emits a full chirp+LTS
+    // group-start anchor (the proven deep-fade recovery), while first attempts
+    // stay light (warm-handoff airtime saving).
+    void forceNextBurstGroupStartFullPreamble() {
+        force_burst_group_start_full_preamble_ = true;
+    }
+
     // Encode multiple frames as a single burst with one LTS preamble
     // Each frame gets its own training symbols for per-block channel estimation
     // Returns: [LTS] + [train+data_0] + [train+data_1] + ... + [train+data_N]
@@ -275,6 +286,10 @@ private:
     // should use long LDPC.
     uint8_t ldpc_lifting_z_ = 27;
     bool force_full_preamble_once_ = false;
+    // §16.4: group-start-only full-chirp latch (RESEND deep-fade recovery).
+    // Read solely by the burst group-start preamble decision; never consumed by
+    // the descriptor's encodeFrame. See forceNextBurstGroupStartFullPreamble().
+    bool force_burst_group_start_full_preamble_ = false;
     bool adaptive_short_data_preamble_ = false;
     bool coherent_ofdm_control_profile_enabled_ = false;
     bool papr_reduction_enabled_ = phy::kPaprReductionDefaultEnabled;

@@ -76,7 +76,9 @@ public:
     // group re-acquires deterministically even under warm-sync. No-op if the
     // encoder is absent.
     void forceNextBurstFullPreamble() {
-        if (streaming_encoder_) streaming_encoder_->forceNextFrameFullPreamble();
+        // Use the group-start-only latch so the BURST_HEADER descriptor's
+        // encodeFrame does not consume it before the group-start loop reads it.
+        if (streaming_encoder_) streaming_encoder_->forceNextBurstGroupStartFullPreamble();
     }
 
     // Minimal ping/pong probe (fast presence check, ~1 sec vs ~16 sec CONNECT)
