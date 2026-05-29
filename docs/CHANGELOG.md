@@ -10,6 +10,42 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-29: Warm-handoff made to work (§16 Phase 2) + tone-burst NACK fix (branch `feat/oneway-arch-2026-05-27`, commits `ef2fa4f`, `39aec3a`; env-gated default OFF)
+
+**What was broken:** the warm-handoff lever (drop the redundant per-group
+group-start chirp to shorten airtime) stalled — point-fixing hit a 5-head sync
+hydra (docs/SYNC_SUBSYSTEM_AUDIT_2026_05_29.md §9.7). Traced: the contiguous
+group-start DATA was re-acquired through the COLD coherent 0.90 LTS gate, but its
+light LTS correlation is fade-variable (0.55–0.91), so faded-but-real
+group-starts were rejected; and on deep fades the recovery resends were still
+light (the Fix-A latch was consumed by the BURST_HEADER descriptor's encodeFrame
+before the group-start loop read it).
+
+**What was changed:**
+- `streaming_signal_policy.hpp`: WARM position-gating — in the warm narrow window
+  (position-predicted, contiguous with a just-decoded chirp anchor) coherent data
+  is accepted down to `kWarmWindowCoherentFloor=0.50` and validated by LDPC, not
+  re-acquired via 0.90. Not the √r narrowing law (over-relaxes per audit §8.4).
+- `streaming_encoder.{hpp,cpp}` + `modem_engine.hpp`: dedicated
+  `forceNextBurstGroupStartFullPreamble()` latch read only by the group-start
+  loop, so RESENDS emit a full chirp+LTS group-start (proven deep-fade recovery).
+- `connection.cpp` (BUG-NACK-001): emit a NACK-type tone-burst from the burst
+  `!all_ok` branch instead of `transmitFrame(makeGroupNack)`, which on group 0
+  went out as the 3.1 s MC-DPSK handshake waveform.
+
+**Why it works:** WARM frames ride the just-decoded chirp anchor's timing (LTS →
+channel estimate, not an acquisition gate); §16.4 escalation + resend-chirp is the
+deep-fade safety net; the sender's `onToneBurstAck` already routed NACK-type
+tone-bursts to `onGroupNack`.
+
+**Test verification:** `tools/qam16_ladder_scenario.sh --channel good --snr-db 20
+--seed {1,2,3} --expect-rate R3/4 --expect-mod QPSK --message-count 0 --file-kb 21`
+with `ULTRA_BURST_TRANSPORT=1 ULTRA_ADAPTIVE_RATE=1 ULTRA_LOCK_RATE=1
+ULTRA_LDPC_Z=81 ULTRA_BURST_GROUP_FRAMES=6 ULTRA_S16_WARM_HANDOFF=1`: seeds 1/2/3
+PASS 11/11 at ~2000 bps (warm-OFF baseline 1400–1580 → +27–43%); warm-OFF seed 1
+still PASS 11/11 (no production regression). NACK fix: seed 2 tone-burst NACK=1,
+MC-DPSK NACK=0, MC-DPSK TX post-connect=0, PASS 11/11.
+
 ## 2026-05-25: OTASim server clock-offset delivery repair for CPU-paced GUI clients (branch `feat/good-fading-qam16-ladder-2026-05-24`, commit `b921785`)
 
 **What was broken:** during long two-GUI OTASim runs, ALPHA kept emitting
