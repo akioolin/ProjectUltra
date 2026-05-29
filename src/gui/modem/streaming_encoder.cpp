@@ -614,10 +614,35 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
             // for reliability and will reclaim the overhead later (likely via
             // a proper FSK ACK channel + tightened warm-sync hand-off so the
             // group-start can shrink back to light LTS).
-            preamble = waveform_->generatePreamble();
-            LOG_MODEM(INFO,
-                      "[%s] Full chirp+LTS preamble emitted for burst group-start (reliability mode)",
-                      log_prefix_.c_str());
+            //
+            // §16.8 step 2 (ULTRA_S16_WARM_HANDOFF): the design hypothesis
+            // is that the historical "pure light LTS" failure was caused by
+            // bravo throwing away the BURST_HEADER's warm-sync state in
+            // resetFrameArrivalTrackingLocked. With the matching bravo-side
+            // change in streaming_ofdm_decode.cpp (skip the reset, keep
+            // expect_full_ofdm_anchor_=false), the BURST_HEADER itself
+            // becomes the per-group anchor — no need for a second full
+            // chirp+LTS right after it. Saves ~1.4 s per group. Knob is
+            // default-OFF until multi-seed Good@20 verifies; expected
+            // benefit ~+16% goodput on the §17.1 baseline (1.60 → ~1.85
+            // kbps). Falls back to full anchor on the first group of a
+            // session (force_first_full_preamble) regardless of knob.
+            const char* warm_handoff_env =
+                std::getenv("ULTRA_S16_WARM_HANDOFF");
+            const bool warm_handoff_enabled =
+                warm_handoff_env && std::atoi(warm_handoff_env) != 0;
+            if (warm_handoff_enabled && !force_first_full_preamble) {
+                preamble = connectedDataPreambleForFrame(/*allow_short_reanchor=*/false);
+                LOG_MODEM(INFO,
+                          "[%s] s16-warm-handoff: light LTS preamble for burst group-start "
+                          "(skipping full chirp+LTS; BURST_HEADER anchor still emitted)",
+                          log_prefix_.c_str());
+            } else {
+                preamble = waveform_->generatePreamble();
+                LOG_MODEM(INFO,
+                          "[%s] Full chirp+LTS preamble emitted for burst group-start (reliability mode)",
+                          log_prefix_.c_str());
+            }
         } else if (i == 0 && (force_first_full_preamble || waveform_->supportsDataPreamble())) {
             preamble = waveform_->generatePreamble();
             if (force_first_full_preamble) {

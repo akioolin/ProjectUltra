@@ -598,7 +598,38 @@ void StreamingDecoder::searchForSync() {
             auto sync_decision = signal_policy::evaluateLightSyncCandidate(
                 found, sync_result.correlation, is_coherent, connected_,
                 sync_reject_streak_, light_sync_thresholds);
-            if (found && sync_result.correlation < light_sync_thresholds.min_confidence) {
+            // §16.8 step 2 (ULTRA_S16_WARM_HANDOFF): the coherent-QPSK
+            // sync threshold is 0.90 because stale LTS phases can't be
+            // recovered by DD tracking alone. In the warm-handoff regime
+            // we are NOT stale — the BURST_HEADER just decoded with a
+            // fresh full chirp+LTS anchor and seeded last_cfo_. A 0.83
+            // light-LTS correlation immediately after a known-good
+            // BURST_HEADER is real signal, not noise. Override the
+            // rejection: if knob ON AND warm-sync is WARM AND corr is
+            // above a relaxed warm floor (0.55), accept.
+            const char* s16_env =
+                std::getenv("ULTRA_S16_WARM_HANDOFF");
+            const bool s16_warm_handoff =
+                s16_env && std::atoi(s16_env) != 0;
+            constexpr float kS16WarmHandoffMinCorrelation = 0.55f;
+            const bool s16_warm_override =
+                s16_warm_handoff && is_coherent &&
+                warm_sync_phase_ ==
+                    arrival_policy::WarmSyncPhase::WARM &&
+                sync_decision.rejected && found &&
+                sync_result.correlation >= kS16WarmHandoffMinCorrelation;
+            if (s16_warm_override) {
+                LOG_MODEM(INFO,
+                    "[%s] s16-warm-handoff: ACCEPT light-LTS sync corr=%.2f "
+                    "(WARM phase, conf=%.2f, threshold-floor=%.2f); coherent "
+                    "0.90 gate bypassed",
+                    log_prefix_.c_str(), sync_result.correlation,
+                    frame_arrival_confidence_,
+                    kS16WarmHandoffMinCorrelation);
+                sync_decision.found = true;
+                sync_decision.rejected = false;
+                sync_decision.next_reject_streak = 0;
+            } else if (found && sync_result.correlation < light_sync_thresholds.min_confidence) {
                 if (sync_decision.weak_accept) {
                     LOG_MODEM(INFO, "[%s] DATA sync weak-accepted (corr=%.2f < %.2f, streak=%llu)",
                               log_prefix_.c_str(), sync_result.correlation,

@@ -2233,10 +2233,106 @@ fallback.
 
 - §16.8 step 1 (instrumentation) — **DONE**. Snapshots wired,
   reproducer exists, trace captured + analyzed.
-- §16.8 step 2 (state preservation across BURST_HEADER) — **NEXT**.
-  Implementation plan above; flag-gated default-OFF until multi-seed
-  GUI verify on Good@20.
+- §16.8 step 2 (state preservation across BURST_HEADER) — **PARTIAL**.
+  See §16.12 below for the first attempt findings.
 - §16.8 steps 3-6 (tier 1/2/3 gating, hardware validation) — UNCHANGED.
+
+### 16.12 §16.8 step 2 first attempt — findings + path forward (2026-05-28)
+
+Env-gated minimum-viable warm-handoff (ULTRA_S16_WARM_HANDOFF=1,
+default OFF) wired in three places:
+
+1. **streaming_encoder.cpp**: when knob ON, group-start data frames
+   use light LTS instead of full chirp+LTS preamble (saves ~1.4 s
+   airtime per group on the wire).
+2. **streaming_ofdm_decode.cpp (BURST_HEADER consume)**: when knob ON
+   AND warm_sync_phase_ == WARM AND conf > 0, SKIP the
+   resetFrameArrivalTrackingLocked + skip setting
+   expect_full_ofdm_anchor_=true. Keep the warm state seeded by the
+   BURST_HEADER's noteFrameArrivalSuccess.
+3. **streaming_sync_acquisition.cpp**: when knob ON AND warm-sync is
+   WARM AND coherent QPSK, override the 0.90 light-LTS rejection
+   threshold to a relaxed warm-floor of 0.55 (the 0.90 gate exists
+   because stale coherent LTS phases can't be DD-recovered; with a
+   fresh BURST_HEADER anchor we're not stale).
+
+Smoke test on Good@20 QPSK R3/4 (single seed):
+
+- BURST_HEADER decodes cleanly: LTS phase slope -1.57°/carrier
+  (timing offset ~4.5 samples).
+- warm-handoff KEPT fires correctly (phase=WARM conf=0.35 cfo=-0.10
+  carried across the BURST_HEADER consume).
+- s16-warm-handoff: ACCEPT fires multiple times — corr=0.83 to 0.89,
+  bypassing the 0.90 coherent gate. The light LTS IS being detected.
+- **BUT data group does not deliver** (groups=0 after 6 ACCEPT events).
+
+Root cause: the accepted sync position is OFF by ~30-450 samples. LTS
+phase slope at accepted sync ranges from -11°/carrier (33-sample
+offset, just barely recoverable) to -160°/carrier (456-sample offset,
+unrecoverable). The downstream OFDM demod can't track that much
+timing drift; LDPC sees garbage LLRs.
+
+Specifically: at 32.677 a sync was accepted with corr~0.89 SNR=24.8 dB
+but LTS phase slope was -11.72°/carrier (33 samples). The next decode
+at 33.072 found sync at SNR=0.9 dB with LTS phase slope -160°/carrier
+(456 samples). The detector finds the right LTS magnitude but the
+peak interpolation lands on the wrong sample.
+
+#### What's missing for step 2 v2
+
+The coherent threshold drop (0.90 → 0.55) was necessary but not
+sufficient. The non-coherent path has a complementary lever the
+coherent path lacks: `narrow_expected_window`. When non-coherent
+warm-sync is good, the sync detector narrows its search window AROUND
+next_expected_frame_sample_, which both lowers the threshold AND
+constrains where the peak can be detected (window-reduction-driven
+false-positive math).
+
+For coherent warm-handoff, we need the same TWO levers together:
+1. Lower threshold (done in this attempt)
+2. **Narrow expected-arrival search window** (~±15 samples around
+   frame_sync_abs + BURST_HEADER frame_len; rejects peaks outside
+   the window even if their correlation is high).
+
+That second lever requires:
+- Plumbing next_expected_frame_sample_ from the BURST_HEADER's
+  noteFrameArrivalSuccess through the warm-handoff branch (preserving
+  it in the BURST_HEADER consume block instead of just keeping
+  phase/conf).
+- Teaching the light-LTS detector (waveform_->detectDataSync) to
+  honor a tight expected-position window. May need a new
+  parameter or a wrapper that re-runs detection in a narrower
+  range.
+- Possibly seeding the sync_position output from the expected position
+  directly when corr is high enough (skip the peak interpolation,
+  trust the expected position ± a few samples).
+
+#### Alternative: half-step §16.8 (keep BURST_HEADER chirp, drop only its outer chirp)
+
+If the position-narrowing turns out to be deep DSP work, an
+intermediate lever exists: keep alpha emitting a full anchor at every
+group start, but make the anchor SHORTER — use a 300 ms chirp instead
+of the current 500 ms × 2 + gap = ~1.2 s. The CFO precision drops
+(±2 Hz → ±5 Hz) but the receiver's per-symbol pilot tracking can
+absorb the slack on Good@20. Saves ~900 ms per group → +10 % goodput
+without the warm-handoff search-window machinery.
+
+The full warm-handoff per §16.3 is still the right end-state. The
+short-chirp half-step would be the §17-style small lever, with the
+warm-handoff being the bigger principled fix.
+
+#### Status
+
+- §16.8 step 2 v1 — env-gated infrastructure landed but does not
+  pass end-to-end. ULTRA_S16_WARM_HANDOFF stays default-OFF; the §15
+  tone-burst ACK path remains the only landed throughput lever
+  (1.60 kbps Good@20).
+- Safe revert point unchanged: `safe-revert-pre-s16-2026-05-28` tag
+  (commit 3ac74f1, §15 + §17.1 only).
+- v2 work scoped: add coherent-side narrow_expected_window equivalent
+  + plumb next_expected_frame_sample_ through warm-handoff branch.
+  Estimated effort: 1-2 sessions of careful DSP work + multi-seed
+  GUI validation.
 
 ## §17  Measured airtime accounting after §15 lands (2026-05-28)
 

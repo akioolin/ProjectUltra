@@ -834,15 +834,61 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 expect_full_ofdm_anchor_ ? 1 : 0,
                                 static_cast<unsigned long long>(frame_sync_abs),
                                 frame_len);
+                            // §16.8 step 2 (ULTRA_S16_WARM_HANDOFF): if the knob is
+                            // ON AND the BURST_HEADER's noteFrameArrivalSuccess
+                            // promoted warm-sync to WARM (which §16.11 confirmed
+                            // happens every group on Good@20), SKIP the reset.
+                            // The warm timing seeded by the BURST_HEADER (which
+                            // arrived inside its own full chirp+LTS anchor) carries
+                            // into the data group that immediately follows. Matching
+                            // alpha-side change in streaming_encoder.cpp uses light
+                            // LTS for group-start data instead of a redundant
+                            // second full chirp+LTS. Falls back to the legacy
+                            // reset path when the knob is OFF, when warm-sync
+                            // wasn't actually WARM (sync miss path), or when
+                            // expect_full_ofdm_anchor_ was already true going in
+                            // (handshake / cold acquisition still pending).
+                            const char* s16_env =
+                                std::getenv("ULTRA_S16_WARM_HANDOFF");
+                            const bool s16_warm_handoff =
+                                s16_env && std::atoi(s16_env) != 0;
+                            const bool warm_handoff_eligible =
+                                s16_warm_handoff &&
+                                warm_sync_phase_ ==
+                                    arrival_policy::WarmSyncPhase::WARM &&
+                                frame_arrival_confidence_ > 0.0f;
                             {
                                 std::lock_guard<std::mutex> lock(buffer_mutex_);
-                                sync_from_warm_timed_window_ = false;
-                                resetFrameArrivalTrackingLocked();
-                                expect_full_ofdm_anchor_ = true;
-                                sync_reject_streak_ = 0;
-                                correlation_pos_ = wrapRingIndexLocked(sync_position_ + frame_len);
-                                setSearchFloorLocked(frame_sync_abs + frame_len);
-                                last_decoded_sync_pos_ = sync_position_;
+                                if (warm_handoff_eligible) {
+                                    // KEEP warm state. Just advance the search
+                                    // window past the BURST_HEADER so the data
+                                    // group is picked up next.
+                                    expect_full_ofdm_anchor_ = false;
+                                    sync_reject_streak_ = 0;
+                                    correlation_pos_ = wrapRingIndexLocked(
+                                        sync_position_ + frame_len);
+                                    setSearchFloorLocked(frame_sync_abs + frame_len);
+                                    last_decoded_sync_pos_ = sync_position_;
+                                } else {
+                                    sync_from_warm_timed_window_ = false;
+                                    resetFrameArrivalTrackingLocked();
+                                    expect_full_ofdm_anchor_ = true;
+                                    sync_reject_streak_ = 0;
+                                    correlation_pos_ = wrapRingIndexLocked(
+                                        sync_position_ + frame_len);
+                                    setSearchFloorLocked(frame_sync_abs + frame_len);
+                                    last_decoded_sync_pos_ = sync_position_;
+                                }
+                            }
+                            if (warm_handoff_eligible) {
+                                LOG_MODEM(INFO,
+                                    "[%s] s16-warm-handoff: KEPT warm state across "
+                                    "BURST_HEADER consume (phase=%s conf=%.2f cfo=%.2f); "
+                                    "expecting light LTS for data group",
+                                    log_prefix_.c_str(),
+                                    arrival_policy::warmSyncPhaseName(warm_sync_phase_),
+                                    frame_arrival_confidence_,
+                                    last_cfo_.load());
                             }
                             // §16.8 step 1: post-reset snapshot. What did we throw
                             // away?
