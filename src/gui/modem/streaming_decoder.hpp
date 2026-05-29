@@ -34,6 +34,7 @@
 //   decoder.stop();  // Wakes decode thread to exit
 
 #include "waveform/waveform_interface.hpp"
+#include "waveform/tone_burst_ack/tone_burst_ack_monitor.hpp"
 #include "idle_noise_snr_estimator.hpp"
 #include "ultra/dsp.hpp"
 #include "waveform/waveform_factory.hpp"
@@ -408,6 +409,34 @@ public:
     // Check if decoder is running (not stopped)
     bool isRunning() const { return !shutdown_.load(); }
 
+    // ========================================================================
+    // TONE-BURST ACK MONITOR (§15 step 4b)
+    // ========================================================================
+    //
+    // Always-on detector running in parallel with the OFDM decode path. Fed
+    // the same audio chunks as the OFDM buffer (call before the buffer
+    // mutex_ guard so OFDM decode timing is unaffected). When a tone-burst
+    // ACK is detected, the installed callback fires synchronously on the
+    // audio thread.
+    //
+    // In step 4b the default callback is log-only; step 4d will replace it
+    // with a hook into Connection::onGroupAck(group_seq, quality_q,
+    // frame_mask) to make the tone-burst path the authoritative ACK source.
+    using ToneBurstAckCallback =
+        ultra::waveform::tone_burst_ack::ToneBurstAckCallback;
+    using ToneBurstAckDetection =
+        ultra::waveform::tone_burst_ack::ToneBurstAckDetection;
+
+    // Replace the tone-burst detection callback. Default callback emits an
+    // INFO log line summarizing the detection.
+    void setToneBurstAckCallback(ToneBurstAckCallback cb);
+
+    // For tests + diagnostics: how many tone-burst ACKs has the always-on
+    // monitor decoded since construction or last reset.
+    uint64_t toneBurstAcksDetected() const {
+        return tone_burst_monitor_.detectionsEmitted();
+    }
+
 private:
     // ========================================================================
     // INTERNAL HELPERS
@@ -746,6 +775,12 @@ private:
     static constexpr float CORR_DETECT_THRESHOLD = 0.15f;   // At/above = detected
     static constexpr float ENERGY_GATE_MULTIPLIER = 0.0f;   // Disabled - noise floor estimation is inaccurate
     static constexpr float PING_ENERGY_RATIO = 0.3f;        // Post-chirp/chirp energy ratio
+
+    // §15 step 4b: always-on tone-burst ACK monitor. Construction-time tuned
+    // for production cadence (longer detect_interval than the unit-test
+    // default to bound CPU; a burst is 675+ ms so a 480 ms cadence still
+    // guarantees full coverage). See constructor body.
+    ultra::waveform::tone_burst_ack::ToneBurstAckMonitor tone_burst_monitor_;
 };
 
 } // namespace gui

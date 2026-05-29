@@ -166,7 +166,52 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
     startupTrace("StreamingDecoder", "codec-created");
 
     LOG_MODEM(INFO, "StreamingDecoder: Initialized (buffer=%zu samples)", buffer_capacity_samples_);
+
+    // §15 step 4b: tone-burst ACK monitor. Production-tuned cadence (480 ms
+    // detect interval bounds CPU to ~1 detection pass per burst-airtime
+    // window; a real burst is 675+ ms so coverage is still complete).
+    // Default callback logs only — step 4d will replace it with the
+    // protocol hook.
+    {
+        ultra::waveform::tone_burst_ack::ToneBurstAckMonitor::Config tba_cfg;
+        // Detection cadence: every 480 ms (~23,000 samples at 48 kHz).
+        // Cheap enough to keep the audio thread idle the rest of the time.
+        tba_cfg.detect_interval_samples = 23040;
+        // Only scan the 25 ms and 50 ms staircase rungs by default — the
+        // baseline + low-SNR cases that production sees on Good@20+.
+        // Step 4d will widen this when SNR negotiation is plumbed.
+        tba_cfg.symbol_durations_ms = {
+            ultra::waveform::tone_burst_ack::kBaselineSymbolMs,  // 25 ms
+            ultra::waveform::tone_burst_ack::kSymbolMsLowSNR,    // 50 ms
+        };
+        tone_burst_monitor_ =
+            ultra::waveform::tone_burst_ack::ToneBurstAckMonitor(tba_cfg);
+        // Install default log-only callback. Step 4d replaces.
+        tone_burst_monitor_.setCallback(
+            [this](const ultra::waveform::tone_burst_ack::ToneBurstAckDetection& d) {
+                LOG_MODEM(INFO,
+                          "[%s] ToneBurstAck monitor: detected group_seq=%u type=%s "
+                          "frame_mask=0x%02X rate_hint=%u peak=%.1f symbol_ms=%u "
+                          "hamming_corrected=%d stream_offset=%llu",
+                          log_prefix_.c_str(),
+                          static_cast<unsigned>(d.payload.group_seq),
+                          d.payload.type ==
+                                  ultra::waveform::tone_burst_ack::AckType::Nack
+                              ? "NACK"
+                              : "ACK",
+                          static_cast<unsigned>(d.payload.frame_mask),
+                          static_cast<unsigned>(d.payload.rate_hint),
+                          d.correlation_peak,
+                          static_cast<unsigned>(d.symbol_ms_used),
+                          d.hamming_corrected_blocks,
+                          static_cast<unsigned long long>(d.detected_stream_offset));
+            });
+    }
     startupTrace("StreamingDecoder", "ctor-exit");
+}
+
+void StreamingDecoder::setToneBurstAckCallback(ToneBurstAckCallback cb) {
+    tone_burst_monitor_.setCallback(std::move(cb));
 }
 
 StreamingDecoder::~StreamingDecoder() {
@@ -334,6 +379,14 @@ size_t StreamingDecoder::getOFDMControlFrameSamplesForCurrentMode() const {
 
 void StreamingDecoder::feedAudio(const float* samples, size_t count) {
     if (!samples || count == 0) return;
+
+    // §15 step 4b: feed the always-on tone-burst ACK monitor. Runs BEFORE
+    // the OFDM buffer_mutex_ lock so the monitor never blocks OFDM decode
+    // (and the monitor has its own internal storage; no mutex needed since
+    // feedAudio is called from a single audio thread). The monitor's
+    // callback fires synchronously here on the audio thread — keep it
+    // cheap (log-only in 4b, lightweight queue-push in 4d).
+    tone_burst_monitor_.feedAudio(samples, count);
 
     // Audio-activity instrumentation: detect "transmission arrived" events
     // independent of the chirp-search path. We measure RMS over each incoming

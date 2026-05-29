@@ -658,6 +658,19 @@ add_executable(test_tone_burst_ack_monitor test_tone_burst_ack_monitor.cpp)
 target_link_libraries(test_tone_burst_ack_monitor PRIVATE ultra_core)
 add_test(NAME ToneBurstAckMonitor COMMAND test_tone_burst_ack_monitor)
 
+# StreamingDecoder ↔ tone-burst monitor integration (§15 step 4b)
+add_executable(test_streaming_decoder_tone_burst_monitor
+    test_streaming_decoder_tone_burst_monitor.cpp
+    ${ULTRA_STREAMING_DECODER_SOURCES}
+)
+target_include_directories(test_streaming_decoder_tone_burst_monitor PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+target_link_libraries(test_streaming_decoder_tone_burst_monitor PRIVATE
+    ultra_core ota_channel_core)
+add_test(NAME StreamingDecoderToneBurstMonitor
+         COMMAND test_streaming_decoder_tone_burst_monitor)
+
 if(TARGET decode_bench)
     add_executable(test_decode_bench_replay test_decode_bench_replay.cpp)
     add_test(NAME DecodeBenchReplay
