@@ -1,6 +1,7 @@
 #include "gui/modem/streaming_decoder.hpp"
 #include "gui/modem/streaming_encoder.hpp"
 #include "ota_channel_core/channel.hpp"
+#include "ofdm/genie_tx_capture.hpp"
 #include "protocol/frame_v2.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
@@ -461,6 +462,13 @@ Counts measure(const Args& args) {
     Counts counts;
 
     for (int i = 0; i < args.n; ++i) {
+        if (ultra::genie::txCapture().enabled) {
+            if (std::getenv("ULTRA_GENIE_DEBUG") && !ultra::genie::txCapture().symbols.empty()) {
+                std::cerr << "[genie] prev frame pushed=" << ultra::genie::txCapture().symbols.size()
+                          << " read=" << ultra::genie::txCapture().read_index << "\n";
+            }
+            ultra::genie::txCapture().reset();
+        }
         const auto trial = makeFrame(encoder, args, payload_rng, i);
         if (args.config == MeasureConfig::WarmSyncLight) {
             const uint16_t anchor_seq =
@@ -512,6 +520,15 @@ BurstCounts measureBurst(const Args& args) {
     BurstCounts bc;
 
     for (int c = 0; c < args.n; ++c) {
+        // Fresh capture per chunk: encoder pushes during encode, decoder reads in the
+        // same data-symbol order during decode.
+        if (ultra::genie::txCapture().enabled) {
+            if (std::getenv("ULTRA_GENIE_DEBUG") && !ultra::genie::txCapture().symbols.empty()) {
+                std::cerr << "[genie] prev chunk pushed=" << ultra::genie::txCapture().symbols.size()
+                          << " read=" << ultra::genie::txCapture().read_index << "\n";
+            }
+            ultra::genie::txCapture().reset();
+        }
         // Fresh encoder + decoder per chunk → each chunk starts from idle, so
         // encodeBurstLight emits a FULL chirp anchor (reliable sync at any fade
         // depth); the channel persists (fade keeps advancing).
@@ -618,6 +635,14 @@ int main(int argc, char** argv) {
         }
         ultra::setLogLevel(log_level);
         const Args args = parseArgs(argc, argv);
+
+        // 2026-05-29 diag: enable the true per-symbol data-aided channel genie
+        // (H=Y/X) process-wide. Off unless ULTRA_GENIE_DATA_AIDED=1. Both the
+        // frame path (measure) and burst path (measureBurst) reset per iteration.
+        {
+            const char* env = std::getenv("ULTRA_GENIE_DATA_AIDED");
+            ultra::genie::txCapture().enabled = (env && std::atoi(env) == 1);
+        }
 
         if (args.config == MeasureConfig::BurstChunk) {
             const BurstCounts bc = measureBurst(args);

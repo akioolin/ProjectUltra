@@ -270,6 +270,31 @@ to nail it definitively.
 - **Next, if pursued:** build the data-aided per-symbol genie for the definitive
   estimation-vs-demap split, then attack the estimator (the likely lever).
 
+## Data-aided per-symbol genie (H=Y/X) — BUILT, alignment UNSOLVED (WIP)
+
+Built the unconfounded genie: the OFDM modulator captures the exact transmitted
+freq-domain symbol X[k] (`genie_tx_capture.hpp`, pushed in `modulator.cpp`); the
+equalizer overrides channel_estimate with H[k]=Y[k]/X[k]
+(`channel_equalizer_equalize.cpp`); harness enables/resets per iteration
+(`measure_ack_fer.cpp`, env `ULTRA_GENIE_DATA_AIDED`). Env-gated, default OFF,
+not in any production path.
+
+**Blocker — symbol alignment.** The QPSK@60 sanity (which must be ~92 if H=Y/X is
+exact) comes out 0–76, and a direct check shows the genie H is essentially RANDOM
+vs the production H for symbol 0 (relDiff ≈ 1.3). Root cause: the modulator
+modulates the **LTS via the same `freq_domain[data_carrier_indices]` path** as data
+(`lts_data_scratch`), so the capture pushes **LTS + data** symbols, while the
+decoder handles the LTS separately (`estimateChannelFromLTS`) and runs `equalize()`
+on **data only** → a content offset (push[0]=LTS ≠ decoder's first data symbol).
+The offset isn't a clean constant (per-frame push counts vary, 30 vs 28). Two
+keying attempts (FIFO read-cursor; `current_data_symbol_index_`) did not resolve it.
+**Fix (focused, future):** capture ONLY data symbols (gate the push on a not-LTS
+flag in the modulate path), or trace and match the exact encode/decode data-symbol
+sequences. Then QPSK@60 genie must be ~92 before trusting the 16QAM result.
+
+This does NOT change the verdict below — it would only confirm/refine
+estimation-vs-demap. The convergent evidence already points at estimation accuracy.
+
 ## Earlier "next diagnostic" notes (superseded by the above)
 
 The invalid "genie" hook must be replaced with a **true genie** — inject the channel

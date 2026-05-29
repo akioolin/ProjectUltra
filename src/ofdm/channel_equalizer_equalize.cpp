@@ -8,6 +8,7 @@
 #include <limits>
 #include "demodulator_impl.hpp"
 #include "demodulator_constants.hpp"
+#include "genie_tx_capture.hpp"
 #include "soft_demap.hpp"
 #include "ultra/logging.hpp"
 
@@ -405,6 +406,46 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
     equalized.resize(data_carrier_indices.size());
     carrier_noise_var.resize(data_carrier_indices.size());
     carrier_erasure_flags_.assign(data_carrier_indices.size(), 0);
+
+    // 2026-05-29 diag (ULTRA_GENIE_DATA_AIDED): true per-symbol channel genie.
+    // Overwrite channel_estimate with the EXACT effective channel H[k] = Y[k]/X[k]
+    // using the actual transmitted constellation captured from the modulator (see
+    // genie_tx_capture.hpp). No model, no interpolation, no temporal staleness — the
+    // only unconfounded genie. Splits the 16QAM wall: genie -> 16QAM decodes =>
+    // estimation is the limiter; genie -> still fails => post-equalization (demap).
+    // Aligns by data-symbol order (one capture per data OFDM symbol == one equalize()).
+    {
+        auto& cap = ultra::genie::txCapture();
+        // Key by the decoder's own data-symbol index (set before demod), NOT a FIFO
+        // read-cursor: the decoder may run equalize() on a probe/non-data symbol
+        // first, which would offset a cursor. The modulator pushes in data-symbol
+        // order, so symbols[current_data_symbol_index_] is the matching TX symbol.
+        const std::size_t sidx = static_cast<std::size_t>(current_data_symbol_index_);
+        if (cap.enabled && sidx < cap.symbols.size()) {
+            const std::vector<Complex>& tx = cap.symbols[sidx];
+            if (tx.size() == channel_estimate.size()) {
+                const bool dbg = (sidx == 0) && std::getenv("ULTRA_GENIE_DEBUG");
+                double sumdiff = 0.0, sumref = 0.0; int nseen = 0;
+                for (int idx : data_carrier_indices) {
+                    if (std::norm(tx[idx]) > 1.0e-12f) {
+                        const Complex h_genie = freq_domain[idx] / tx[idx];
+                        if (dbg) { sumdiff += std::abs(h_genie - channel_estimate[idx]);
+                                   sumref += std::abs(channel_estimate[idx]); ++nseen; }
+                        channel_estimate[idx] = h_genie;
+                    }
+                }
+                for (int idx : pilot_carrier_indices) {
+                    if (std::norm(tx[idx]) > 1.0e-12f) {
+                        channel_estimate[idx] = freq_domain[idx] / tx[idx];
+                    }
+                }
+                if (dbg && sumref > 0.0) {
+                    std::fprintf(stderr, "[genie] sym0 relDiff(genieH vs prodH)=%.3f over %d carriers\n",
+                                 sumdiff / sumref, nseen);
+                }
+            }
+        }
+    }
 
     // For differential modulation: apply pilot_phase_correction to track common phase drift
     // This is updated after each symbol via decision-directed tracking

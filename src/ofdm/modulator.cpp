@@ -5,6 +5,7 @@
 #include "ultra/logging.hpp"
 #include "demodulator_constants.hpp"
 #include "pilot_pattern.hpp"
+#include "genie_tx_capture.hpp"
 #include <algorithm>
 #include <random>
 
@@ -269,6 +270,14 @@ struct OFDMModulator::Impl {
                          data_carrier_indices[2], freq_domain[data_carrier_indices[2]].real(), freq_domain[data_carrier_indices[2]].imag());
                 g_logged_tx_pilots = true;
             }
+        }
+
+        // 2026-05-29 diag (ULTRA_GENIE_DATA_AIDED): capture the exact transmitted
+        // freq-domain symbol so the decoder can form the true per-symbol channel
+        // H[k] = Y[k]/X[k]. One push per data OFDM symbol, in TX order. See
+        // genie_tx_capture.hpp. No effect unless explicitly enabled.
+        if (ultra::genie::txCapture().enabled) {
+            ultra::genie::txCapture().symbols.push_back(freq_domain);
         }
 
         // IFFT to time domain
