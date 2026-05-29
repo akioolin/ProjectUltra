@@ -157,6 +157,20 @@ public:
     using PingReceivedCallback = std::function<void(float measured_snr)>;
     void setPingReceivedCallback(PingReceivedCallback callback) { ping_received_callback_ = callback; }
 
+    // §15 step 4d-i: Tone-burst ACK detection callback. Delegates to the
+    // StreamingDecoder's always-on tone-burst ACK monitor (installed in
+    // step 4b). The owner of ModemEngine (typically the GUI / ProtocolEngine)
+    // installs this to bridge tone-burst detections to the protocol layer
+    // — step 4d-ii will translate the detection into a synthetic GROUP_ACK
+    // for Connection's ACK-arrived handler.
+    using ToneBurstAckCallback =
+        ultra::waveform::tone_burst_ack::ToneBurstAckCallback;
+    void setToneBurstAckCallback(ToneBurstAckCallback callback) {
+        if (streaming_decoder_) {
+            streaming_decoder_->setToneBurstAckCallback(std::move(callback));
+        }
+    }
+
     // Check if last detected chirp was narrowband (valid after ping callback)
     bool isNarrowbandDetected() const;
 
