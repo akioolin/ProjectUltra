@@ -2126,6 +2126,118 @@ Why:
   across inter-group gap, short-chirp CFO precision). The new approach
   fixes the warm-sync hand-off rather than tuning chirp duration.
 
+### 16.11 §16.8 step 1 instrumentation findings (2026-05-28)
+
+Per-group warm-sync state snapshots (three per group cycle: end-of-group,
+BURST_HEADER consume pre-reset, BURST_HEADER consume post-reset) added in
+`streaming_burst_interleave.cpp::finalizeBurstGroup` and
+`streaming_ofdm_decode.cpp` (BURST_HEADER intercept). Trace from
+single-seed Good@20 QPSK R3/4 21 KB file, 11 groups, 0 retx, FILE_CRC_OK.
+
+Reproducer: `bash /tmp/run_tone_burst_smoke.sh` then
+`python3 /tmp/analyze_s16_snapshots.py`. Source log:
+`/tmp/tone_burst_smoke/seed42/bravo.log`.
+
+#### Key findings
+
+**1. End-of-group `warm_sync_phase_` is COLD (conf=0.00) on every group.**
+
+Cause: the 6 frames inside a burst group decode as a *unit* via
+deinterleaving — they don't fire individual `noteFrameArrivalSuccess`
+events. So the per-frame state machine never advances during the data
+body. The phase only ticks at frame-boundary events (BURST_HEADER decode,
+non-burst frames).
+
+Implication: today's "warm-sync state" at end-of-group is a fiction. The
+machinery exists but isn't being driven by the data path. Any §16 design
+that relies on end-of-group warm state needs to first hook the per-frame
+events into the burst-group decode.
+
+**2. CFO state survives the reset; timing state does not.**
+
+`resetFrameArrivalTrackingLocked` wipes `warm_sync_phase_`,
+`frame_arrival_confidence_`, `next_expected_frame_sample_`,
+`consecutive_sync_misses_` (all reset to COLD / 0). But `last_cfo_`
+is NOT inside the reset — it's preserved.
+
+On Good@20 the surviving CFO is rock-solid: drift across all 11 groups is
+±0.15 Hz of zero (bravo log: `last_cfo=-0.10, +0.05, +0.15, +0.10, +0.05,
+0.00, +0.10, -0.05, 0.00, 0.00, 0.00`). The CFO is already a warm hand-off
+asset — we just need to add the timing-state hand-off alongside it.
+
+**3. BURST_HEADER arrival briefly promotes COLD → WARM (conf=0.35), then
+the reset throws it away immediately.**
+
+Sequence per group cycle:
+- End-of-group N: `phase=COLD conf=0.00`
+- Inter-group gap (~2720 ms): tone-burst ACK on wire + alpha's full
+  chirp+LTS + bravo's chirp detect + BURST_HEADER decode
+- Just before reset (BURST_HEADER consumed): `phase=WARM conf=0.35`
+  (the BURST_HEADER decode fires `noteFrameArrivalSuccess`)
+- Post-reset (data group N+1 starts): `phase=COLD conf=0.00`
+- Data group N+1 deinterleaves; phase stays COLD throughout
+- End-of-group N+1: `phase=COLD conf=0.00`
+
+The reset is a one-line kill of state that was JUST detected good. This is
+the §16.3 "warm hand-off" target: the receiver IS tracking warm-sync at
+the moment the data group is about to start; the code currently throws
+the result away.
+
+**4. Inter-group gap is ~2720 ms wall-clock (consistent across all 11
+groups).**
+
+Decomposition:
+- Tone-burst ACK on wire: 675 ms (from §17.2)
+- Alpha's full chirp+LTS preamble: ~1400 ms (the §16 target)
+- BURST_HEADER decode and processing: <100 ms
+- Misc protocol latencies (form, queue, T/R): ~545 ms
+
+If §16 drops the per-group chirp+LTS anchor (the ~1400 ms component), the
+inter-group gap drops to ~1320 ms. On the 11-group / 21 KB baseline that
+saves ~14.4 s wall-clock — projected goodput **1.60 kbps → ~1.85 kbps**
+(+16 % above the §17.1 tone-burst result).
+
+#### What §16.8 step 2 needs to do
+
+Per §16.3, the snapshot/restore plan looks tractable:
+
+a. Capture per-frame state at end-of-group via an explicit
+   `noteBurstGroupArrivalSuccess` hook (since data-body frames don't fire
+   the per-frame events today). State to capture: `next_expected_frame_sample_`
+   (computed from last data-frame end + expected_frame_gap_samples_),
+   `frame_arrival_confidence_`, `warm_sync_phase_`.
+
+b. Stop calling `resetFrameArrivalTrackingLocked` at the BURST_HEADER
+   consume. Instead, treat the BURST_HEADER arrival as REFINING the warm
+   state (just like a regular data frame would).
+
+c. Stop hard-coding `expect_full_ofdm_anchor_ = true`. Gate it on warm
+   state quality (`frame_arrival_confidence_ >= threshold` AND
+   `fading_index < threshold`). Falls back to full anchor when warm-sync
+   goes cold (Tier-3 escalation per §16.4).
+
+d. Update streaming_encoder so alpha STOPS emitting the full chirp+LTS
+   prefix on the warm path. This is the airtime save. Need a way to
+   signal alpha that the receiver is warm — possibly via the rate_hint
+   bits in the tone-burst ACK payload (§17.3 lever #1 piggyback).
+
+The historical failure mode noted in §16.2 ("pure light LTS: stalled
+Group 1+ because bravo's warm-sync went DEGRADED") was likely caused by
+exactly the issue this instrumentation just revealed: end-of-group state
+was COLD because no per-frame events fired during the data body, so the
+light LTS at group N+1 start was actually a cold-acquire with no warm
+anchor. Hooking step (a) fixes that without needing a short-chirp
+fallback.
+
+#### Status
+
+- §16.8 step 1 (instrumentation) — **DONE**. Snapshots wired,
+  reproducer exists, trace captured + analyzed.
+- §16.8 step 2 (state preservation across BURST_HEADER) — **NEXT**.
+  Implementation plan above; flag-gated default-OFF until multi-seed
+  GUI verify on Good@20.
+- §16.8 steps 3-6 (tier 1/2/3 gating, hardware validation) — UNCHANGED.
+
 ## §17  Measured airtime accounting after §15 lands (2026-05-28)
 
 Empirical decomposition of the per-group dead-air budget after §15

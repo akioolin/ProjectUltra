@@ -33,6 +33,7 @@ namespace buffer_policy = streaming_buffer_policy;
 namespace decode_policy = streaming_decode_policy;
 namespace frame_policy = streaming_frame_policy;
 namespace signal_policy = streaming_signal_policy;
+namespace arrival_policy = streaming_frame_arrival_policy;
 
 namespace {
 
@@ -641,6 +642,23 @@ void StreamingDecoder::finalizeBurstGroup() {
                   "max_iters=%d quality=%.2f",
                   log_prefix_.c_str(), last_burst_group_seq_, logical_ok,
                   burst_group_size, all_ok ? 1 : 0, group_max_iters, quality);
+        // §16.8 step 1: end-of-group warm-sync snapshot. Logs the
+        // state we have RIGHT NOW, before the inter-group gap erodes
+        // it. Pair with the BURST_HEADER-consume snapshot at
+        // streaming_ofdm_decode.cpp to chart what survives the gap.
+        LOG_MODEM(INFO,
+                  "[%s] s16-snapshot end-of-group group_seq=%u phase=%s misses=%d "
+                  "conf=%.2f last_cfo=%.2f next_expected=%llu last_frame_end=%llu "
+                  "expect_full_anchor=%d quality=%.2f",
+                  log_prefix_.c_str(), last_burst_group_seq_,
+                  arrival_policy::warmSyncPhaseName(warm_sync_phase_),
+                  consecutive_sync_misses_,
+                  frame_arrival_confidence_,
+                  last_cfo_.load(),
+                  static_cast<unsigned long long>(next_expected_frame_sample_),
+                  static_cast<unsigned long long>(last_frame_end_sample_),
+                  expect_full_ofdm_anchor_ ? 1 : 0,
+                  quality);
         burst_group_callback_(last_burst_group_seq_, burst_group_frames, all_ok, quality);
     }
 

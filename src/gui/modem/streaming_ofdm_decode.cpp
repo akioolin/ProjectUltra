@@ -36,6 +36,7 @@ namespace buffer_policy = streaming_buffer_policy;
 namespace decode_policy = streaming_decode_policy;
 namespace frame_policy = streaming_frame_policy;
 namespace signal_policy = streaming_signal_policy;
+namespace arrival_policy = streaming_frame_arrival_policy;
 
 namespace {
 
@@ -808,6 +809,31 @@ void StreamingDecoder::decodeCurrentFrame() {
                             // BURST_HEADER→data gap and the data sync corr stays <0.52.
                             // Airtime overhead from the per-group full chirp is acceptable
                             // until the warm-sync hand-off across the gap is hardened.
+                            //
+                            // §16.8 step 1: BURST_HEADER-consume snapshot (instrumentation).
+                            // Logs the warm-sync state we held when the next group's
+                            // BURST_HEADER arrived (just before we throw it away with
+                            // resetFrameArrivalTrackingLocked + expect_full_ofdm_anchor_).
+                            // Pair with the end-of-group snapshot in
+                            // streaming_burst_interleave.cpp to compute the gap delta
+                            // (Δphase, Δconf, Δcfo, elapsed samples). Multi-group
+                            // file transfer trace = the §16.8 instrumentation deliverable.
+                            LOG_MODEM(INFO,
+                                "[%s] s16-snapshot pre-reset (BURST_HEADER consumed) "
+                                "group_seq=%u phase=%s misses=%d conf=%.2f "
+                                "last_cfo=%.2f next_expected=%llu last_frame_end=%llu "
+                                "expect_full_anchor=%d frame_sync_abs=%llu frame_len=%zu",
+                                log_prefix_.c_str(),
+                                static_cast<unsigned>(last_burst_group_seq_),
+                                arrival_policy::warmSyncPhaseName(warm_sync_phase_),
+                                consecutive_sync_misses_,
+                                frame_arrival_confidence_,
+                                last_cfo_.load(),
+                                static_cast<unsigned long long>(next_expected_frame_sample_),
+                                static_cast<unsigned long long>(last_frame_end_sample_),
+                                expect_full_ofdm_anchor_ ? 1 : 0,
+                                static_cast<unsigned long long>(frame_sync_abs),
+                                frame_len);
                             {
                                 std::lock_guard<std::mutex> lock(buffer_mutex_);
                                 sync_from_warm_timed_window_ = false;
@@ -818,6 +844,17 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 setSearchFloorLocked(frame_sync_abs + frame_len);
                                 last_decoded_sync_pos_ = sync_position_;
                             }
+                            // §16.8 step 1: post-reset snapshot. What did we throw
+                            // away?
+                            LOG_MODEM(INFO,
+                                "[%s] s16-snapshot post-reset phase=%s misses=%d "
+                                "conf=%.2f last_cfo=%.2f expect_full_anchor=%d",
+                                log_prefix_.c_str(),
+                                arrival_policy::warmSyncPhaseName(warm_sync_phase_),
+                                consecutive_sync_misses_,
+                                frame_arrival_confidence_,
+                                last_cfo_.load(),
+                                expect_full_ofdm_anchor_ ? 1 : 0);
                             state_ = DecoderState::SEARCHING;
                             return;  // consumed; the data group follows next
                         }
