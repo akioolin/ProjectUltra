@@ -69,6 +69,38 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 - Verification: seed 2 warm-ON GUI re-run — expect 0 MC-DPSK TX bursts after
   connect and tone-burst NACK emits > 0, file still CRC-clean.
 
+### BUG-8PSK-001: Decision-directed tracking corrupts the 8PSK channel estimate on fading
+- Status: DIAGNOSED (2026-05-29, root cause confirmed; fix pending). See
+  `docs/8PSK_GOOD_FADING_DIAGNOSIS_2026_05_29.md`.
+- Area: `src/ofdm/channel_equalizer_pilot.cpp` (`use_coherent_dd`, ON for QAM8/QAM16)
+- Symptom: forced 8PSK (QAM8) R3/4 delivers perfectly on clean AWGN (2330 bps) but
+  fails on Good@20 fading — heavy resends, frequently no delivery, confident-WRONG
+  bits (strong |llr|≈15-20, LDPC parity fails 50-99 unsat). Bimodal per group (6/6
+  or 0/6, never partial).
+- Root cause (experimentally confirmed by five-way elimination — chain/fade/demap/
+  static-H all ruled out): decision-directed channel tracking feeds 8PSK's occasional
+  wrong hard-decisions (its 22.5° boundaries are tight on a fading channel) back into
+  the H estimate, poisoning it → cascade of confident-wrong bits. `ULTRA_COHERENT_DD_OFF=1`
+  flips 8PSK Good@20 from FAIL → PASS. The base LTS+pilot H is fine (DD-off uses it and
+  delivers); a genie perfect-H with DD *on* still failed (DD corrupts even a perfect H).
+  Matches the code's own comment warning DD "poisons H on bad decisions during fades."
+- Impact: 8PSK is the promotion lever toward 3000 bps; this blocks it on fading.
+- Fix direction: reliability-gate DD (only DD a symbol whose EVM is well inside the
+  95% noise radius — the code comment's own proposal), or gate DD off for 8PSK on
+  fading; pair with channel-adaptive promotion (8PSK on clean/mild, QPSK on deep fade).
+- Residual after DD-off: still marginal (heavy resends) — irreducible
+  frequency-selective phase near spectral nulls; ARQ/adaptive-rate handles the tail.
+
+### BUG-HARNESS-001: gui_qso_scenario.sh hard-aborts on auto-negotiated mode != --expect-mod
+- Status: KNOWN (2026-05-29; harness limitation, not a modem bug).
+- Symptom: on a channel where the auto rate-ladder legitimately promotes (e.g. AWGN30
+  → 16QAM), running with `--expect-mod QPSK` makes `hard_failure_reason` abort the run
+  at the MODE_CHANGE (`REASON=unexpected_data_mode`), ~25 s in, 0 file-transfer
+  attempts. Falsely looks like a QPSK/AWGN modem failure (it is not — forced QPSK on
+  AWGN30 delivers fine).
+- Fix direction: when rate is not locked/forced, treat `--expect-mod` as advisory
+  (accept the auto-selected mode) instead of hard-aborting.
+
 ### BUG-CFO-001: OFDM two-stage CFO refinement remains incomplete
 - Status: OPEN
 - Area: `src/ofdm/demodulator.cpp`
