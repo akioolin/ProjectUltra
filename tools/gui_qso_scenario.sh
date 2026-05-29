@@ -16,11 +16,13 @@
 # only — the honest full-transfer number. BRAVO's "Received OK kbps" is NOT used
 # (it spans only first->last decode and over-reports; see the goodput block).
 #
-# Common usage (warm-handoff burst-transport file transfer, Good@20 R3/4):
-#   export ULTRA_BURST_TRANSPORT=1 ULTRA_ADAPTIVE_RATE=1 ULTRA_LOCK_RATE=1 \
-#          ULTRA_LDPC_Z=81 ULTRA_BURST_GROUP_FRAMES=6 [ULTRA_S16_WARM_HANDOFF=1]
+# The warm-handoff burst-transport config is BAKED IN below (overridable
+# defaults) — a bare run is the warm test, no env exports needed:
 #   tools/gui_qso_scenario.sh --channel good --snr-db 20 --seed N \
 #       --expect-rate R3/4 --expect-mod QPSK --file-kb 21 --out /tmp/X
+# Override any knob inline, e.g.:
+#   ULTRA_S16_WARM_HANDOFF=0 tools/gui_qso_scenario.sh ...   (full-chirp baseline)
+#   ULTRA_LOCK_RATE=0 tools/gui_qso_scenario.sh ...          (adaptive rate ladder)
 # Multi-seed: loop this script over seeds (it is the single test harness).
 set -euo pipefail
 
@@ -121,6 +123,23 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+# ---------------------------------------------------------------------------
+# Warm-handoff burst-transport config — the "warm thing" this harness exists to
+# test (§16 warm-handoff + one-way burst transport, 2026-05-29). Baked in here so
+# the single harness IS the warm test: a bare run no longer falls back to the
+# full-chirp-every-group reliability baseline (warm OFF). Each is an OVERRIDABLE
+# default (`:=`), so the caller can still flip any of them — e.g.
+#   ULTRA_S16_WARM_HANDOFF=0  (measure the full-chirp baseline)
+#   ULTRA_LOCK_RATE=0         (let the adaptive rate ladder drop/promote)
+#   ULTRA_FORCE_DATA_MOD=8PSK ULTRA_FORCE_DATA_RATE=R3_4  (force a rung)
+: "${ULTRA_BURST_TRANSPORT:=1}"      ; export ULTRA_BURST_TRANSPORT
+: "${ULTRA_ADAPTIVE_RATE:=1}"        ; export ULTRA_ADAPTIVE_RATE
+: "${ULTRA_LOCK_RATE:=1}"            ; export ULTRA_LOCK_RATE
+: "${ULTRA_LDPC_Z:=81}"              ; export ULTRA_LDPC_Z
+: "${ULTRA_BURST_GROUP_FRAMES:=6}"   ; export ULTRA_BURST_GROUP_FRAMES
+: "${ULTRA_S16_WARM_HANDOFF:=1}"     ; export ULTRA_S16_WARM_HANDOFF
+echo "warm-handoff config: BURST_TRANSPORT=$ULTRA_BURST_TRANSPORT ADAPTIVE_RATE=$ULTRA_ADAPTIVE_RATE LOCK_RATE=$ULTRA_LOCK_RATE LDPC_Z=$ULTRA_LDPC_Z GROUP_FRAMES=$ULTRA_BURST_GROUP_FRAMES S16_WARM_HANDOFF=$ULTRA_S16_WARM_HANDOFF${ULTRA_FORCE_DATA_MOD:+ FORCE_MOD=$ULTRA_FORCE_DATA_MOD}${ULTRA_FORCE_DATA_RATE:+ FORCE_RATE=$ULTRA_FORCE_DATA_RATE}"
 
 if [[ -z "$OUT" ]]; then
   stamp="$(date +%Y%m%d_%H%M%S)"
