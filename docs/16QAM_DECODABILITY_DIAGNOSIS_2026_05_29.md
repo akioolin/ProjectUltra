@@ -288,9 +288,21 @@ decoder handles the LTS separately (`estimateChannelFromLTS`) and runs `equalize
 on **data only** → a content offset (push[0]=LTS ≠ decoder's first data symbol).
 The offset isn't a clean constant (per-frame push counts vary, 30 vs 28). Two
 keying attempts (FIFO read-cursor; `current_data_symbol_index_`) did not resolve it.
-**Fix (focused, future):** capture ONLY data symbols (gate the push on a not-LTS
-flag in the modulate path), or trace and match the exact encode/decode data-symbol
-sequences. Then QPSK@60 genie must be ~92 before trusting the 16QAM result.
+**Fix attempt 1 (done):** gated the capture to DATA symbols only — `createOFDMSymbol`
+gained a `genie_capture` flag, set true only at the data caller (modulator.cpp:515),
+false for the LTS (582/637) and probe (665) callers. This removed the LTS symbols
+from the FIFO (push count 30→26) and improved QPSK@60 genie from 0 → **56** — real
+progress, but still < 91, so a RESIDUAL misalignment remains.
+
+**Residual (still open):** QPSK@60 genie = 56 (< 91) ⇒ the per-symbol X still doesn't
+fully correspond to the decoded Y. Likely a decoder probe / control-first peek that
+calls `equalize()` out of band, consuming the FIFO cursor for a symbol the encoder
+didn't push as data. (Note: the relDiff genie-vs-production metric is a CONFOUNDED
+alignment check — true-H and interpolated-production-H differ even when aligned — so
+QPSK pass rate is the validator.) **Fix (focused, future):** trace the decoder's
+exact data-symbol equalize sequence vs the encoder's push sequence (account for any
+probe/peek), or key the capture by a shared frame+symbol identity. QPSK@60 genie must
+read ~92 before trusting any 16QAM genie result.
 
 This does NOT change the verdict below — it would only confirm/refine
 estimation-vs-demap. The convergent evidence already points at estimation accuracy.

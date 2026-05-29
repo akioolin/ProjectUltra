@@ -416,15 +416,14 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
     // Aligns by data-symbol order (one capture per data OFDM symbol == one equalize()).
     {
         auto& cap = ultra::genie::txCapture();
-        // Key by the decoder's own data-symbol index (set before demod), NOT a FIFO
-        // read-cursor: the decoder may run equalize() on a probe/non-data symbol
-        // first, which would offset a cursor. The modulator pushes in data-symbol
-        // order, so symbols[current_data_symbol_index_] is the matching TX symbol.
-        const std::size_t sidx = static_cast<std::size_t>(current_data_symbol_index_);
-        if (cap.enabled && sidx < cap.symbols.size()) {
-            const std::vector<Complex>& tx = cap.symbols[sidx];
+        // FIFO cursor: the modulator now captures DATA symbols only (LTS/probe are
+        // gated out), so the encoder push order == the decoder equalize order, and a
+        // simple in-order read-cursor aligns one-to-one.
+        if (cap.enabled && cap.read_index < cap.symbols.size()) {
+            const std::size_t this_read = cap.read_index;
+            const std::vector<Complex>& tx = cap.symbols[cap.read_index++];
             if (tx.size() == channel_estimate.size()) {
-                const bool dbg = (sidx == 0) && std::getenv("ULTRA_GENIE_DEBUG");
+                const bool dbg = (this_read == 0) && std::getenv("ULTRA_GENIE_DEBUG");
                 double sumdiff = 0.0, sumref = 0.0; int nseen = 0;
                 for (int idx : data_carrier_indices) {
                     if (std::norm(tx[idx]) > 1.0e-12f) {

@@ -232,7 +232,8 @@ struct OFDMModulator::Impl {
     const std::vector<Complex>& createOFDMSymbol(const std::vector<Complex>& data_symbols,
                                                 bool include_pilots = true,
                                                 uint64_t active_carrier_mask = UINT64_MAX,
-                                                bool carrier_mask_enabled = false) {
+                                                bool carrier_mask_enabled = false,
+                                                bool genie_capture = false) {
         auto& freq_domain = freq_domain_scratch;
         freq_domain.resize(config.fft_size);
         std::fill(freq_domain.begin(), freq_domain.end(), Complex(0, 0));
@@ -274,9 +275,11 @@ struct OFDMModulator::Impl {
 
         // 2026-05-29 diag (ULTRA_GENIE_DATA_AIDED): capture the exact transmitted
         // freq-domain symbol so the decoder can form the true per-symbol channel
-        // H[k] = Y[k]/X[k]. One push per data OFDM symbol, in TX order. See
-        // genie_tx_capture.hpp. No effect unless explicitly enabled.
-        if (ultra::genie::txCapture().enabled) {
+        // H[k] = Y[k]/X[k]. ONLY for DATA symbols (genie_capture=true at the data
+        // caller) — NOT for LTS/probe symbols, which the decoder handles separately
+        // and does not equalize, so capturing them would offset the alignment. One
+        // push per data OFDM symbol, in TX order. See genie_tx_capture.hpp.
+        if (genie_capture && ultra::genie::txCapture().enabled) {
             ultra::genie::txCapture().symbols.push_back(freq_domain);
         }
 
@@ -514,7 +517,8 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod,
         // Create OFDM symbol
         const auto& complex_symbol = impl_->createOFDMSymbol(symbol_data, true,
                                                             active_carrier_mask,
-                                                            carrier_mask_enabled);
+                                                            carrier_mask_enabled,
+                                                            /*genie_capture=*/true);
 
         // Convert to real signal
         const auto& real_symbol = impl_->complexToReal(complex_symbol);
