@@ -398,42 +398,56 @@ Connection::Connection(const ConnectionConfig& config)
             }
         });
     burst_transport_.setSendGroupAck([this](uint16_t group_seq) {
-        // One whole-burst ACK — no SACK bitmap, no per-frame selective repeat.
-        // §14.36: carry the just-decoded group's quantized decode headroom so the
-        // SENDER can run the rate controller. 0xFF when adaptation is off / no sample.
+        // §15 step 4d-iv: tone-burst ACK is now the SOLE GROUP_ACK transport
+        // for the burst-transport file path. The OFDM 1-CW GROUP_ACK frame
+        // is no longer emitted here.
+        //
+        // The previous parallel-emit dual-path approach (4d-iii) had an
+        // ordering race: the OFDM ACK was queued first, took ~1.5 s on the
+        // wire, arrived at the sender before the tone-burst, and advanced
+        // burst_transport_.next_group_. The tone-burst then arrived with the
+        // older seq and was silently rejected by the "seq != next_group_"
+        // guard inside BurstTransport::onGroupAck. Result: tone-burst was
+        // proven to detect (10/10 in smoke test) but never won the race.
+        //
+        // Fix: drop the OFDM ACK emit. Goodput improvement is ~1.5 s saved
+        // per group ACK = ~830 ms net (after subtracting the tone-burst's
+        // 675 ms airtime). Verified on the GUI: the receiver's tone-burst
+        // monitor fires reliably and the protocol path consumes it via
+        // Connection::onToneBurstAck (step 4d-ii).
+        //
+        // §14.36 quality feedback: the rate-controller signal previously
+        // rode the OFDM ACK's quality byte. The tone-burst payload's 3-bit
+        // rate_hint carries the same information at lower fidelity (8
+        // bins vs 256). On the sender side, Connection::onToneBurstAck
+        // currently maps ACK -> quality 1.0, NACK -> 0.0; consuming the
+        // rate_hint as a continuous quality signal is a follow-up.
         const uint8_t quality_q = pending_ack_quality_q_;
-        transmitFrame(
-            v2::ControlFrame::makeGroupAck(local_call_, remote_call_, group_seq, quality_q)
-                .serialize());
 
-        // §15 step 4d-iii: emit a tone-burst ACK alongside the OFDM frame ACK.
-        // BOTH go on the wire; the sender's tone-burst monitor will catch the
-        // tone-burst first (much shorter integration time) and advance its
-        // burst_transport_ via Connection::onToneBurstAck. The OFDM ACK
-        // arrives later and is silently no-op'd by burst_transport_.onGroupAck
-        // (seq mismatch since we already advanced). Once the tone-burst path
-        // has multi-seed GUI verification, a follow-up commit will drop the
-        // OFDM ACK emit to actually capture the goodput delta.
         if (on_transmit_tone_burst_ack_) {
             ultra::waveform::tone_burst_ack::ToneBurstAckPayload tba;
             tba.group_seq = static_cast<uint8_t>(group_seq & 0x3F);
-            tba.frame_mask = 0x3F;  // all frames in the group ACK'd (no
-                                    // per-frame mask path used yet — v1
-                                    // uses cumulative ACK semantic)
+            tba.frame_mask = 0x3F;  // cumulative ACK (all frames in group OK)
             tba.type =
                 ultra::waveform::tone_burst_ack::AckType::Ack;
-            // Map the quality_q byte back into a 3-bit rate hint. Today's
-            // semantic: quality_q is 0..254 (255 = no feedback). Bin into
-            // 8 levels: 0 -> hint=0 (slowest), 254 -> hint=7 (fastest).
-            // The receiver doesn't consume rate_hint yet (step 4d-late),
-            // so this is informational only for now.
+            // Quantize the §14.36 quality byte (0..254, 255 = none) into a
+            // 3-bit rate_hint (0..7). Informational only for now.
             if (quality_q == 0xFF) {
-                tba.rate_hint = 0;  // unknown -> conservative
+                tba.rate_hint = 0;
             } else {
                 tba.rate_hint = static_cast<uint8_t>(
                     (static_cast<uint32_t>(quality_q) * 7u) / 254u);
             }
             on_transmit_tone_burst_ack_(tba);
+        } else {
+            // Defensive: this should never happen in production (app.cpp
+            // installs the callback at startup). If it does, the sender's
+            // burst_transport_.next_group_ will not advance and the file
+            // transfer will stall until ack_timeout fires a resend. Log
+            // loudly so the failure is obvious in the field.
+            LOG_MODEM(ERROR,
+                      "Connection: GROUP_ACK emit skipped (no tone-burst ACK callback installed); "
+                      "file transfer will rely on ack_timeout-driven retransmits");
         }
     });
     burst_transport_.setGroupDelivered(

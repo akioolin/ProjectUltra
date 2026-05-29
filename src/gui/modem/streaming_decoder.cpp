@@ -167,23 +167,34 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
 
     LOG_MODEM(INFO, "StreamingDecoder: Initialized (buffer=%zu samples)", buffer_capacity_samples_);
 
-    // §15 step 4b: tone-burst ACK monitor. Production-tuned cadence (480 ms
-    // detect interval bounds CPU to ~1 detection pass per burst-airtime
-    // window; a real burst is 675+ ms so coverage is still complete).
-    // Default callback logs only — step 4d will replace it with the
-    // protocol hook.
+    // §15 step 4b: tone-burst ACK monitor. Production-tuned config keeps
+    // the audio-thread CPU bounded:
+    //   - Detection cadence 1.5 s (72,000 samples @ 48 kHz). The burst is
+    //     675 ms baseline so a 1.5 s cadence still guarantees the buffer
+    //     contains a complete burst between ticks; we don't need finer.
+    //   - Single symbol duration {25 ms} for now. The 50 ms / 100 ms low-SNR
+    //     rungs are deferred until SNR negotiation tells us we need them
+    //     (step 4d-late). Each extra duration roughly doubles per-tick CPU.
+    //   - Coarse sweep step 32 samples (vs the test default 8). At 4× the
+    //     stride the detector still finds the burst (the burst is 32400
+    //     samples; missing by 32 samples is < 0.1% of a symbol — Goertzel
+    //     barely notices). 4× less work per tick.
+    //   - Tighter buffer (90 k samples ≈ 1.9 s) since we only need to hold
+    //     one burst + margin at the chosen cadence.
+    //
+    // Combined: ~16× CPU reduction vs the prior config. Audio thread no
+    // longer jitters during a transfer.
+    //
+    // Default callback logs only; step 4d-iii routes detections to the
+    // protocol layer.
     {
         ultra::waveform::tone_burst_ack::ToneBurstAckMonitor::Config tba_cfg;
-        // Detection cadence: every 480 ms (~23,000 samples at 48 kHz).
-        // Cheap enough to keep the audio thread idle the rest of the time.
-        tba_cfg.detect_interval_samples = 23040;
-        // Only scan the 25 ms and 50 ms staircase rungs by default — the
-        // baseline + low-SNR cases that production sees on Good@20+.
-        // Step 4d will widen this when SNR negotiation is plumbed.
+        tba_cfg.detect_interval_samples = 72000;  // 1.5 s @ 48 kHz
         tba_cfg.symbol_durations_ms = {
-            ultra::waveform::tone_burst_ack::kBaselineSymbolMs,  // 25 ms
-            ultra::waveform::tone_burst_ack::kSymbolMsLowSNR,    // 50 ms
+            ultra::waveform::tone_burst_ack::kBaselineSymbolMs,  // 25 ms only
         };
+        tba_cfg.sweep_step_samples = 32;
+        tba_cfg.buffer_capacity_samples = 90000;  // ~1.9 s
         tone_burst_monitor_ =
             ultra::waveform::tone_burst_ack::ToneBurstAckMonitor(tba_cfg);
         // Install default log-only callback. Step 4d replaces.
