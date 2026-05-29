@@ -659,6 +659,34 @@ void StreamingDecoder::finalizeBurstGroup() {
                   static_cast<unsigned long long>(last_frame_end_sample_),
                   expect_full_ofdm_anchor_ ? 1 : 0,
                   quality);
+        // §16.8 step 2 v2: refresh warm-sync state on successful group
+        // delivery. The per-frame arrival state machine doesn't fire
+        // during the 6-frame deinterleaved burst body (§16.11 finding 1),
+        // so frame_arrival_confidence_ decays via sync-miss events between
+        // groups. After ~2 groups it drops below kMinWarmWindowConfidence
+        // (0.25) and the narrow warm window deactivates → next group fails
+        // → catastrophic stall. The burst delivered all-OK is the strongest
+        // possible evidence of warm sync; reset misses + bump conf back to
+        // a healthy value. Knob-gated default OFF.
+        if (all_ok) {
+            const char* s16_env_g =
+                std::getenv("ULTRA_S16_WARM_HANDOFF");
+            const bool s16_warm_handoff_g =
+                s16_env_g && std::atoi(s16_env_g) != 0;
+            if (s16_warm_handoff_g) {
+                consecutive_sync_misses_ = 0;
+                frame_arrival_confidence_ = std::max(
+                    frame_arrival_confidence_, 0.5f);
+                warm_sync_phase_ =
+                    arrival_policy::WarmSyncPhase::WARM;
+                LOG_MODEM(INFO,
+                    "[%s] s16-warm-handoff: refreshed warm-sync state on "
+                    "delivered group_seq=%u (conf=%.2f phase=WARM misses=0)",
+                    log_prefix_.c_str(),
+                    static_cast<unsigned>(last_burst_group_seq_),
+                    frame_arrival_confidence_);
+            }
+        }
         burst_group_callback_(last_burst_group_seq_, burst_group_frames, all_ok, quality);
     }
 

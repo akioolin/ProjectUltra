@@ -2334,6 +2334,98 @@ warm-handoff being the bigger principled fix.
   Estimated effort: 1-2 sessions of careful DSP work + multi-seed
   GUI validation.
 
+### 16.13 §16.8 step 2 v2 + v3 findings (2026-05-28 later session)
+
+Continued the §16.8 step 2 DSP work in three sub-iterations after
+v1. Each fixed the previous failure mode but exposed the next.
+
+#### v1 → v2: activate the narrow warm window
+
+v1 instrumentation revealed `warm_plan.active = 0` even though all
+the WARM-state preconditions were met. Root cause: the legacy
+`expected_sync_search_sample` computation shifted the search window
+BACK by `short_reanchor_lead_samples` (~8160 samples), expecting an
+adaptive short re-anchor chirp prefix. The warm-handoff path uses
+pure light LTS with NO chirp lead, so the back-shift placed
+`correlation_abs` PAST `search_end_abs` → `!current_step_intersects`
+→ window inactive.
+
+v2 fix (streaming_sync_acquisition.cpp): when
+`ULTRA_S16_WARM_HANDOFF` is on AND `warm_sync_phase_ == WARM` AND
+`!expect_full_ofdm_anchor_`, skip the short-reanchor back-shift.
+`expected_sync_search_sample = next_expected_frame_sample_`
+directly.
+
+v2 result: narrow window NOW activates (`active=1
+lower_threshold=1`, window correctly centered at expected position
+±20 ms). But only 2 of 11 groups delivered before stall. Root cause:
+`frame_arrival_confidence_` decays via `confidenceAfterSyncMiss`
+(× 0.65) on every sync miss between successful groups. After ~2
+groups, conf drops from 0.35 → 0.227 → 0.148, below the
+`kMinWarmWindowConfidence` (0.25) activation floor. Warm window
+deactivates → next group's sync search returns to the wide-window
+0.90 threshold → fails to admit the real light-LTS at corr ~0.7.
+
+#### v2 → v3: refresh warm state on each delivered group
+
+The per-frame arrival state machine doesn't fire during the
+6-frame deinterleaved burst body (§16.11 finding 1), so
+`noteFrameArrivalSuccess` never refreshes confidence between
+groups. The successful burst delivery itself is unambiguous
+evidence of warm sync — strongest possible signal.
+
+v3 fix (streaming_burst_interleave.cpp::finalizeBurstGroup): when
+the burst delivers all-OK AND warm-handoff knob is on, reset
+`consecutive_sync_misses_ = 0`, bump
+`frame_arrival_confidence_ = max(current, 0.5)`, and force
+`warm_sync_phase_ = WARM`.
+
+v3 result: **8 of 11 groups deliver via warm-handoff path**
+(73% of file via the new code path). Each successful group
+correctly logs `refreshed warm-sync state` and the next group's
+warm window activates cleanly.
+
+Remaining failure mode (v3): the test stalls at group 8/11 for
+multiple minutes. When warm-handoff misses on a specific group
+(e.g. sync detected at wrong sample position, LDPC fails), the
+burst transport's ack_timeout fires a retransmit, but the retry
+also goes through the warm-handoff path with similar uncertainty
+→ doesn't recover. There's no fallback that says "if N
+consecutive warm-handoff retries fail, escalate to full chirp+LTS
+on the next group, then probe back down to warm".
+
+This is exactly the Tier 0/1/2/3 escalation pattern §16.4 described.
+Step 2 v3 reveals that the full warm-handoff lever needs the
+escalation state machine to ship — without it, warm-handoff is a
+"try once, succeed-or-stall" lever.
+
+#### Sync subsystem complexity caveat
+
+The user noted that the sync acquisition subsystem has accumulated
+significant complexity through 18+ rounds of AI iteration (Codex
+R1-R18 on sync work). The behaviour observed in v1/v2/v3 — partial
+success, intermittent stalls, "the same threshold drop sometimes
+works and sometimes doesn't" — is consistent with multiple sync
+layers competing (chirp_sync background scanning, light LTS
+detector, short re-anchor fallback, control-first profile peek).
+Each layer has its own threshold, its own search window, and its
+own state assumptions. The §16.4 tiered fallback is the right
+end-state, but landing it cleanly will likely require a sync-layer
+audit/refactor — likely a multi-session workstream of its own.
+
+#### Status
+
+- §16.8 step 2 v1/v2/v3 — env-gated checkpoint progress, all
+  default OFF. v3 delivers 8/11 groups; v1 delivered 3/11 via
+  fallback paths. Real progress on the principled fix without
+  affecting the production path.
+- Path forward identified: Tier 0/1/2/3 escalation state machine
+  (§16.4) to handle warm-handoff failures gracefully + sync-layer
+  audit to consolidate the competing detection paths.
+- Safe revert point unchanged: `safe-revert-pre-s16-2026-05-28`
+  (commit 3ac74f1, §15 + §17.1 only). The §15 tone-burst ACK
+  remains the only landed throughput lever (1.60 kbps Good@20).
+
 ## §17  Measured airtime accounting after §15 lands (2026-05-28)
 
 Empirical decomposition of the per-group dead-air budget after §15

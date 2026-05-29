@@ -269,8 +269,27 @@ void StreamingDecoder::searchForSync() {
             ? (total_fed_ - buffer_capacity_samples_)
             : 0;
         const size_t correlation_abs = ringPosToAbsoluteLocked(correlation_pos_);
+        // §16.8 step 2 v2: when warm-handoff is on AND we're in
+        // post-BURST_HEADER warm state, the data group uses pure light
+        // LTS (no short-chirp re-anchor lead). The legacy code shifts
+        // the search expectation BACK by short_reanchor_lead_samples
+        // because the adaptive short re-anchor preamble starts with a
+        // short chirp at -150ms; in our warm-handoff path the LTS is
+        // exactly at next_expected_frame_sample_ with no lead. The
+        // shift-back put correlation_pos_ PAST the search window's end
+        // → !current_step_intersects → warm_plan.active stayed false.
+        const char* s16_env_w =
+            std::getenv("ULTRA_S16_WARM_HANDOFF");
+        const bool s16_warm_handoff_w =
+            s16_env_w && std::atoi(s16_env_w) != 0;
+        const bool s16_skip_short_lead =
+            s16_warm_handoff_w &&
+            warm_sync_phase_ ==
+                arrival_policy::WarmSyncPhase::WARM &&
+            !expect_full_ofdm_anchor_;
         const size_t expected_sync_search_sample =
-            (use_short_reanchor_search &&
+            (!s16_skip_short_lead &&
+             use_short_reanchor_search &&
              next_expected_frame_sample_valid_ &&
              next_expected_frame_sample_ > short_reanchor_lead_samples)
                 ? next_expected_frame_sample_ - short_reanchor_lead_samples
@@ -330,6 +349,33 @@ void StreamingDecoder::searchForSync() {
             warm_narrow_candidate_span_samples = warm_plan.candidate_span_samples;
             min_search = warm_plan.search_size_samples;
             search_start = absoluteToRingLocked(warm_plan.search_start_abs);
+        }
+        // §16.8 step 2 v2 diagnostic: log warm-window decision once per
+        // search invocation. ULTRA_S16_TRACE_WARM_WINDOW=1 enables.
+        {
+            const char* trace = std::getenv("ULTRA_S16_TRACE_WARM_WINDOW");
+            if (trace && std::atoi(trace) != 0) {
+                LOG_MODEM(INFO,
+                    "[%s] s16-warm-window: active=%d wait=%d lower_threshold=%d "
+                    "phase=%s active_flag=%d has_pred=%d expected=%llu "
+                    "conf=%.2f misses=%d use_light=%d total=%llu "
+                    "search[%llu..%llu] span=%zu",
+                    log_prefix_.c_str(),
+                    warm_plan.active ? 1 : 0,
+                    warm_plan.wait_for_more_samples ? 1 : 0,
+                    warm_plan.lower_threshold ? 1 : 0,
+                    arrival_policy::warmSyncPhaseName(warm_sync_phase_),
+                    warm_sync_active_ ? 1 : 0,
+                    next_expected_frame_sample_valid_ ? 1 : 0,
+                    static_cast<unsigned long long>(next_expected_frame_sample_),
+                    frame_arrival_confidence_,
+                    consecutive_sync_misses_,
+                    use_light_search ? 1 : 0,
+                    static_cast<unsigned long long>(total_fed_),
+                    static_cast<unsigned long long>(warm_plan.search_start_abs),
+                    static_cast<unsigned long long>(warm_plan.search_end_abs),
+                    warm_plan.candidate_span_samples);
+            }
         }
 
         // Need minimum samples before we can search
