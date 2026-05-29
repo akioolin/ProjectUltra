@@ -220,7 +220,57 @@ same channel at 92%), overconfident-LLR-flavored, and NOT pilots / Wiener / DD /
 erasure / SNR-margin / frozen-frequency-H. Fading's moving null is diversity, not
 the enemy; 16QAM's per-symbol sensitivity is.
 
-## Next diagnostic (to isolate the root cause)
+## Noiseless 2-tap per-symbol genie — confounded too; CONVERGENT verdict
+
+Ran the existing 2-tap genie (`ULTRA_QAM16_GENIE_CHANNEL_TWOPATH_LS`, fits
+tap0+tap1·e^{-j2πkD/N}, D=24, per symbol) at noiseless (snr 60). Result (Good,
+n=100, seed7): QPSK@60 **92**; 16QAM@60 genie-off **45**, genie-on **5**;
+16QAM R2/3 genie-on 5. The 2-tap genie made 16QAM far WORSE (45→5) — so the 2-tap
+model is NOT exact even noiselessly (real channel = 2 paths + receive FIR +
+analytic-signal shaping → more than 2 taps; production pilot-interp is a *better*
+estimate than the 2-tap fit). Confounded.
+
+**Convergent verdict across all three estimates fed to the demod (Good@60):**
+
+| Channel estimate | 16QAM | QPSK |
+|---|---|---|
+| 2-tap LS (worst) | 5 | 92 |
+| pilot-interp (production) | 45 | 92 |
+| LTS-freeze (full-band) | 44 | 92 |
+
+16QAM tracks H-estimate quality and is **exquisitely sensitive to per-carrier H
+error**; QPSK is immune (92 throughout). No pilot-based estimate exceeds ~45 for
+16QAM, and denser pilots were flat. **The 16QAM wall is per-carrier channel-estimate
+ACCURACY** — a precision pilot-based estimation can't deliver on a frequency-
+selective *fading* channel; QPSK's 45° margin tolerates the achievable accuracy.
+
+HONEST CAVEAT: not cleanly proven that *truly-perfect* H → 16QAM works. All three
+genie proxies were confounded (temporal staleness / fixed dead null / 2-tap model
+error); the one unconfounded test — data-aided `H[k]=Y[k]/X_true[k]` with the known
+TX symbols threaded encoder→decoder — was not built. The convergent evidence
+(hypersensitivity, every estimator insufficient, pilots flat) points firmly at
+estimation accuracy, not the demap, but the data-aided genie is the remaining way
+to nail it definitively.
+
+## FINAL diagnosis verdict (2026-05-29)
+
+- **16QAM is the single gate to the leader's 3086 bps @ Multipath-Good SNR20.**
+- It fails on Good fading because it demands **per-carrier channel-estimate accuracy
+  beyond what pilot-based estimation achieves on a frequency-selective fading
+  channel.** GUI-confirmed real (256 CW fails). 16QAM-specific (QPSK 92% same
+  channel). Overconfident-LLR-flavored.
+- **All cheap levers exhausted:** pilots/density, Wiener-tuning, DD, erasure, SNR,
+  frozen-frequency-H — none fix it.
+- **Channel headroom exists** (genie ceiling 3764 > 3086); fading's moving null is
+  diversity, not the enemy — 16QAM's per-symbol H-error sensitivity is.
+- **Path to 3086 is a genuine receiver-DSP frontier:** a materially better channel
+  estimator for high-order modulation (iterative/data-aided done right, longer
+  training, per-carrier refinement) and/or a more robust 16QAM demap. QPSK alone
+  caps ~1820–2250, short of 3086. This is the industry leader's edge, now scoped.
+- **Next, if pursued:** build the data-aided per-symbol genie for the definitive
+  estimation-vs-demap split, then attack the estimator (the likely lever).
+
+## Earlier "next diagnostic" notes (superseded by the above)
 
 The invalid "genie" hook must be replaced with a **true genie** — inject the channel
 model's *actual* per-carrier H (the OTASim/Watterson state knows it), not a 2-tap
