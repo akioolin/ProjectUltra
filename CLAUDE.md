@@ -99,10 +99,10 @@ Expected raw levels: Pi→Mac RMS ~`0.124` peak ~`0.303`; Mac→Pi RMS ~`0.249` 
 The modem has distinct operating modes selected by SNR/channel. **Never mix their machinery.**
 
 ### Mode 1: MC-DPSK (below wide-OFDM floor, or heavy fading)
-- Multi-Carrier DPSK + chirp sync. ARQ stop-and-wait (window=1). Variable CWs, simple sequential. Control frames 20 B encoded as-is (no patching). Interleaving: NONE. Preamble: ALWAYS full chirp (no light sync). Key: `decodeMCDPSKFrame()` in streaming_decoder.cpp.
+- Multi-Carrier DPSK + chirp sync. ARQ selective-repeat with a **timing-derived window (1–5)** via `mcDpskWindowSizeForTiming` (not fixed window=1). Variable CWs, simple sequential. Control frames 20 B encoded as-is (no patching). Interleaving: NONE. Preamble: ALWAYS full chirp (no light sync). Key: `decodeMCDPSKFrame()` in streaming_decoder.cpp.
 
 ### Mode 2: OFDM (wideband; AWGN ≥10, Good ≥12, Moderate ≥14, Poor ≥18 dB)
-- OFDM + chirp or Schmidl-Cox sync. ARQ selective-repeat (window up to 8). Fixed 4-CW data frames, 1-CW control. Data frames frame-interleaved (+optional channel interleaving); control 1 CW, no interleaving (fast ACK). Preamble: light (LTS only) for data after handshake. Key: `decodeFixedFrame()` in frame_v2.cpp.
+- OFDM + chirp sync (Schmidl-Cox removed as a mode; only the S-C correlation primitive remains for warm-LTS). ARQ selective-repeat: **window 8 default (`kWideOFDMWindowFrames`), up to 16 (`kHighThroughputOFDMWindowFrames`) on near-AWGN DQPSK/D8PSK ≥R1/2**. Fixed 4-CW data frames, 1-CW control. Data frames frame-interleaved (+optional channel interleaving); control 1 CW, no interleaving (fast ACK). Preamble: light (LTS only) for data after handshake. Key: `decodeFixedFrame()` in frame_v2.cpp.
 
 ### Mode 3: OFDM_NARROW (narrowband chirp 1250-1750 Hz, 500 Hz BW, low SNR)
 - OFDM, FFT=2048, 21 carriers, 492 Hz BW. Same frame format as wideband (4-CW data, 1-CW control), frame + optional channel interleaving, light preamble for data. Dual-listen: idle RX listens for both wideband and narrowband chirps. ARQ selective-repeat **window=3** (ACK timeout ~14 s). ~200 bps (R1/4) to ~450 bps (R1/2) — ~5× slower than wideband but works ~7.5 dB lower SNR.
@@ -111,14 +111,14 @@ The modem has distinct operating modes selected by SNR/channel. **Never mix thei
 1. Connection starts in MC-DPSK for PING/PONG/CONNECT (wideband or narrowband chirp).
 2. Dual-listen detects chirp type → sets BandwidthMode (WIDE/NARROW).
 3. After CONNECT_ACK, SNR measured, mode negotiated: wideband SNR<10 stay MC-DPSK; ≥10 → OFDM_CHIRP R1/4 (Good/Moderate/Poor entry floors 12/14/18); narrowband → OFDM_NARROW.
-4. `enterConnected()` sets ARQ window per mode (1 for MC-DPSK/NARROW, up to 8 for wideband OFDM).
+4. `enterConnected()` → `configureArqForCurrentDataMode()` sets ARQ window per mode: MC-DPSK timing-derived 1–5, OFDM_NARROW 3, wideband OFDM 8 default / up to 16. (Only `BurstStopAndWaitController` on the burst-transport path is true window=1.)
 5. StreamingEncoder/Decoder check `mode_`; `isOFDMMode()` unifies the OFDM family.
 
 ### NEVER MIX THESE:
 - MC-DPSK frames through OFDM encoder (corrupts control frames)
 - OFDM interleaving on MC-DPSK data
 - Light preamble with MC-DPSK
-- Window > 1 with MC-DPSK
+- OFDM's large SR window (8/16) on MC-DPSK — MC-DPSK uses its own timing-derived 1–5 window, not OFDM's high-throughput window machinery
 
 ---
 
@@ -154,10 +154,12 @@ Boundary tests: `tests/test_waveform_policy.cpp`, `tests/test_connection_policy.
 - Per-symbol pilot tracking is active in `channel_equalizer.cpp` (LS pilot H update,
   alpha-smoothed, residual CFO + timing recovery; pilots ~every 10 carriers).
 - **Recommendation:** OFDM_CHIRP with DQPSK; rate auto via `selectOFDMCodeRate()`.
-- **OFDM_COX:** forceable/legacy only — not in the auto ladder. **OTFS/MFSK:**
-  reserved enum/wire values only — no production implementation; do not advertise or
-  negotiate. `ModeCapabilities::ALL` advertises OFDM_COX/MC_DPSK/OFDM_CHIRP/OFDM_NARROW
-  (a capability bitmap, not the auto ladder).
+- **OFDM_COX:** REMOVED — enum value `0x00` is reserved (`frame_v2.hpp:30` "formerly
+  OFDM_COX — removed"); it was a Schmidl-Cox experiment never auto-selected and is **not
+  selectable**. Only the low-level Schmidl-Cox *correlation primitive* survives (reused by
+  warm-LTS sync), not a waveform. **OTFS/MFSK:** reserved enum/wire values only — no
+  production implementation; do not advertise or negotiate. `ModeCapabilities::ALL` =
+  MC_DPSK/OFDM_CHIRP/OFDM_NARROW (a capability bitmap, not the auto ladder; OFDM_COX is NOT in it).
 - FFT: PocketFFT vendored in `thirdparty/pocketfft/` (header-only, BSD-3, no runtime dep).
 
 ---
@@ -251,6 +253,17 @@ Boundary tests: `tests/test_waveform_policy.cpp`, `tests/test_connection_policy.
   before changing critical code. Follow `docs/QUALITY_STRATEGY.md` for Tier 0/1
   changes (no fake coverage).
 
+- **MANDATORY: keep `docs/MODEM_INFRASTRUCTURE_MAP.md` LIVE.** It is the single
+  authoritative, file:line-verified map of every modem stage / env-knob / waveform,
+  classified 🟢 ACTIVE / 🟡 EXPERIMENTAL / 🟠 LEGACY-FORCED / 🔴 DEAD — and it is THE
+  reference for the alpha-release code cleanup (decide nothing about deletion without
+  it). Whenever you add/remove/rename a stage, flip an env-knob default, change a
+  classification, kill a dead path, or land a new env knob, **update the map in the
+  SAME change** (file:line accurate), plus its §7 cleanup register and §8 stale-doc
+  list. A wrong 🟢/🔴 here causes a wrong deletion later, so an out-of-date map is a
+  bug. If you ever find the map disagrees with the code, fix the MAP first, then
+  proceed. When you fix a stale fact, also correct CLAUDE.md / MEMORY.md to match.
+
 - **Local quality gate before committing critical code:**
   `cmake --build build -j4 && ctest --test-dir build --output-on-failure -j4 && ./tests/regression_matrix.sh --quick && ./scripts/coverage_report.sh`
 
@@ -286,7 +299,7 @@ unvalidated on hardware" caveat.
 
 ## Essential Documentation
 
-**Priority 1 (read first):** `docs/PROJECT_GOALS.md` · `docs/AGENT_CURRENT_STATE.md` · `docs/QUALITY_STRATEGY.md` · `docs/QUALITY_AUDIT.md` · `docs/KNOWN_BUGS.md` · `docs/INVARIANTS.md` · `docs/ALPHA_RELEASE_GATE.md` · `docs/CHANGELOG.md`
+**Priority 1 (read first):** `docs/PROJECT_GOALS.md` · `docs/AGENT_CURRENT_STATE.md` · `docs/QUALITY_STRATEGY.md` · `docs/QUALITY_AUDIT.md` · `docs/KNOWN_BUGS.md` · `docs/INVARIANTS.md` · `docs/ALPHA_RELEASE_GATE.md` · `docs/CHANGELOG.md` · `docs/MODEM_INFRASTRUCTURE_MAP.md` (**live** stage/knob/waveform map — current valid infra; keep it current per the MANDATORY rule above)
 
 **Priority 2 (per subsystem):** `docs/CFO_CORRECTION_FLOW.md` (**CRITICAL** — 4-stage CFO, fading fix, feedback loop) · `docs/PROTOCOL_V2.md` · `docs/GUI_ARCHITECTURE.md` · `docs/AUDIO_SYSTEM.md` · `docs/CONFIGURATION_SYSTEM.md` · `docs/BUILD_SYSTEM.md` · `docs/AGENTIC_DEVELOPMENT.md` · `docs/ADAPTIVITY_AUDIT_2026_05_29.md` (subsystem adaptivity register)
 
@@ -353,13 +366,14 @@ Key files: `src/sync/chirp_sync.hpp` (dual-chirp detect + CFO), `src/gui/modem/m
 | MC-DPSK | dual chirp | 5 dB AWGN | 938 | ±50 Hz | Good |
 | OFDM_NARROW | NB chirp + LTS | ~17 dB AWGN | ~450 (R1/2, w=3) | ±50 Hz | Good (R1/4) |
 | OFDM_CHIRP R1/4 | dual chirp + LTS anchor, warm LTS data | 10 dB AWGN / 15 dB Good | 3.4 k | ±50 Hz | Good (R1/4) |
-| OFDM_COX | Schmidl-Cox | forced only | 7.9 k | TBD | Poor |
 | SC-DPSK | Barker-13 | -8 to -3 dB | 125 | N/A | Good |
 
-Selection: Poor HF (2 ms delay) → MC-DPSK; low SNR 5-10 dB AWGN → MC-DPSK (to 5 dB), OFDM_CHIRP R1/4 from 10 dB; Moderate/Good → OFDM_CHIRP; OFDM_NARROW for narrowband-detected paths. OFDM_COX forced/legacy only; OTFS/MFSK reserved only.
+(OFDM_COX removed — enum `0x00` reserved; was Schmidl-Cox, never auto-selected. Only the S-C sync primitive remains.)
+
+Selection: Poor HF (2 ms delay) → MC-DPSK; low SNR 5-10 dB AWGN → MC-DPSK (to 5 dB), OFDM_CHIRP R1/4 from 10 dB; Moderate/Good → OFDM_CHIRP; OFDM_NARROW for narrowband-detected paths. OFDM_COX removed (enum 0x00 reserved); OTFS/MFSK reserved only.
 
 ## Known Limitations
-1. OFDM_COX not in the auto ladder (forceable only).
+1. OFDM_COX removed from the protocol enum (0x00 reserved); only the Schmidl-Cox sync primitive remains. Poor HF needs MC-DPSK (see #2).
 2. Poor HF (2 ms delay): OFDM fails — use MC-DPSK.
 3. MC-DPSK floor in-band 5 dB AWGN; sub-0 dB is future work.
 4. File transfer: DATA_START/DATA_END not fully implemented.
@@ -373,6 +387,6 @@ PING/PONG (DPSK) → CONNECT/CONNECT_ACK (DPSK) → MODE_CHANGE/ACK (SNR-negotia
 
 **Before:** read `docs/PROJECT_GOALS.md` (align with mission), `docs/INVARIANTS.md` (subsystem you touch), `docs/KNOWN_BUGS.md` (related issues); for agent work use `docs/AGENT_TASK_BACKLOG.md` + one queued task.
 
-**After:** run `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test 2>&1 | tee /tmp/test_output.log` (and the GUI gate for fade/throughput claims); update `docs/CHANGELOG.md` (fix), `docs/KNOWN_BUGS.md` (new bug), and `docs/AGENT_CURRENT_STATE.md`/`QUALITY_AUDIT.md`/`AGENT_TASK_BACKLOG.md` if state changed materially.
+**After:** run `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test 2>&1 | tee /tmp/test_output.log` (and the GUI gate for fade/throughput claims); update `docs/CHANGELOG.md` (fix), `docs/KNOWN_BUGS.md` (new bug), `docs/MODEM_INFRASTRUCTURE_MAP.md` if you touched any stage/env-knob/waveform/classification (MANDATORY — keep the map live), and `docs/AGENT_CURRENT_STATE.md`/`QUALITY_AUDIT.md`/`AGENT_TASK_BACKLOG.md` if state changed materially.
 
 **Commit message:** imperative summary line; what + why bullets; `Fixes: BUG-XXX` when applicable.
