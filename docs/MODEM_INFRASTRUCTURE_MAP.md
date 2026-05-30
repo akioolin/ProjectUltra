@@ -209,7 +209,7 @@ Buckets per the env-knobs→runtime-derivation workstream: **[FEAT]** in-flight 
 | `ULTRA_LOCK_RATE` | hold data rate fixed for transfer | OFF | `connection.cpp:2342` | FEAT |
 | `ULTRA_MAX_OFDM_RATE` | cap initial+adaptive rate | unset | `connection.cpp:673` | FEAT |
 | `ULTRA_FRAME_CW` | override CW/frame | unset | `connection.cpp:727` | FEAT |
-| `ULTRA_LDPC_Z` | Z=81→n=1944 vs 27→n=648 (**12 read sites**) | 27 | `streaming_encoder.cpp:524` (+11) | FEAT (consolidate) |
+| `ULTRA_LDPC_Z` | Z=81→n=1944 vs 27→n=648. **16→3 sites (2026-05-30)**: RX via descriptor (`activeBurstLiftingZ()`), TX consumers via `ldpc_lifting_z_`, connection chunker via `Connection::selectBurstLiftingZ()`. Remaining: 1 discovery override (in `selectBurstLiftingZ`) + `frame_v2:2563` + `modem_engine:574` (final increment) | 27 | `connection.cpp:4341` (the override) | FEAT (consolidating, see LDPC_Z design doc) |
 | `ULTRA_LEGACY_OFDM_GROUP_ACK` | old OFDM GROUP_ACK vs tone-burst | OFF | `connection.cpp:445` | FEAT (A/B) |
 | `ULTRA_SHORT_REANCHOR_CHIRP_MS` | short re-anchor chirp ms [100,300] | 100 | `connection_policy.hpp:380` | FEAT |
 | `ULTRA_WIENER_DELAY_SPREAD_S` | Wiener freq-corr delay spread | **hardcoded 1e-3 (Moderate-HF) — NOT derived; adaptivity gap** | `channel_equalizer_pilot.cpp:28` | ADAPT |
@@ -245,8 +245,12 @@ Buckets per the env-knobs→runtime-derivation workstream: **[FEAT]** in-flight 
 5. Rate→K table — 5 copies (§3). One source.
 6. Entry-SNR floor table (10/12/14/18) — 2 copies: `waveform_selection.hpp:458` vs
    `connection_policy.hpp:212`.
-7. `ULTRA_LDPC_Z` — 12 read sites with identical `atoi==81` logic; now superseded by per-burst
-   `ldpc_lifting_z_`, env is "ad-hoc only".
+7. `ULTRA_LDPC_Z` — **IN PROGRESS 2026-05-30** (`docs/LDPC_Z_DERIVATION_DESIGN_2026_05_30.md`).
+   16 scattered reads → 3: RX trusts the BURST_HEADER descriptor (`activeBurstLiftingZ()`), TX
+   consumers trust `ldpc_lifting_z_`, the connection chunker trusts `selectBurstLiftingZ()`.
+   Final increment (C-policy, behavior-changing + atomic): thread Z to `makeFixedDataFrame`'s 10
+   callers, add the `modem_engine` setter + app push, flip the policy to traffic-class
+   (bulk/file→81). Needs faithful GUI proof + Codex.
 8. Rate picker (`selectOFDMCodeRate`/`recommendDataMode`) — the "4 gate arrays × 3 passes"
    over-complexity is real (4 gate arrays/descriptor + QPSK/QAM16/D8PSK/DQPSK passes +
    bootstrap cap + adaptive climb). Per-channel hardcoded D8PSK `if`s `waveform_selection.hpp:612`
