@@ -10,6 +10,52 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-29: Warm-sync stabilization — a fade no longer collapses warm-sync (commits `8a75385` env-gated → `949664b` shipped default, branch `feat/oneway-arch-2026-05-27`)
+
+**What was broken (symptom + root cause):** QPSK R3/4 Good@20 burst file transfer was
+UNRELIABLE at 40 KB (20 KB masked it — only reaches ~group 9). A single deep-fade group
+fails to decode (0/6), which COLLAPSED the warm-sync state machine into a
+WARM↔DEGRADED↔RECOVERY oscillation that never re-stabilized: a ~4 s physical fade (Good
+coherence) became a ~90 s stall or a DEAD transfer (seed 777 delivered 0 bytes; seed 1
+stalled at group 14). NOT a deterministic group bug — which group jams is fade-dependent
+(seeds 44/777 → grp 8, seed 1 → grp 14). The tone-burst ACK/NACK works perfectly
+throughout; `BRAVO_CWFAIL_COUNT` is a LYING counter (doesn't count burst-group 0/6 fails)
+— use the NACK count for the true decode-failure measure. Root causes: (1)
+`kWarmSyncMissesBeforeDegraded=1` collapsed WARM on a SINGLE miss (no hysteresis); (2)
+the warm-sync refresh fired only on `all_ok`, so a faded group left
+`frame_arrival_confidence_` decaying until the narrow warm window deactivated → next
+group's acquisition collapsed.
+
+**What was changed:**
+- `src/gui/modem/streaming_frame_arrival_policy.hpp`: hysteresis —
+  `kWarmSyncMissesBeforeDegraded` 1 → **2** (recovery stays 4; "2/4"), so a single miss
+  no longer flips WARM→DEGRADED.
+- `src/gui/modem/streaming_burst_interleave.cpp`: refresh warm-sync on ANY acquired
+  group, not just `all_ok`. Reaching "delivered as unit" proves the descriptor chirp was
+  found + all 6 frames demodulated → warm sync WORKED, even when the LDPC then failed the
+  DATA (deep-fade group; ARQ resends). **This is the change that does the work.**
+- (`streaming_ofdm_decode.cpp` got a 3rd "decode-fail ≠ sync-miss" change in `8a75385`
+  but it never fired — burst groups recover via the burst-refresh path — so it was
+  REVERTED in `949664b`; not shipped.)
+
+**How it's properly fixed (why it works):** a faded group is NORMAL — ARQ resends it and
+the descriptor chirp re-anchors EVERY group — so a transient decode failure must NOT be
+treated as sync loss. Keeping warm timing healthy through a fade means the group
+re-decodes in a couple resends instead of the state machine thrashing for ~90 s. The
+thrash was BOTH a reliability bug (dead transfers) AND the throughput limiter. INVARIANT:
+a 0-CW group decode failure is DATA loss (ARQ's job), not SYNC loss (the state machine's
+job); warm sync cools only on a genuinely un-acquired group (no chirp found).
+
+**Test verification (40 KB QPSK R3/4 Good@20, GUI faithful, shipped default):**
+`ULTRA_FORCE_DATA_MOD=QPSK ULTRA_FORCE_DATA_RATE=R3_4 tools/gui_qso_scenario.sh --channel good --snr-db 20 --seed <S> --expect-mod QPSK --expect-rate R3/4 --file-kb 40`
+Before→after: seed 777 DIED/0bps → PASS/1260; seed 1 stalled@grp14 → PASS/1810; seed 44
+930bps(94 s stall) → PASS/1390. Robustness sweep (9 of 15 seeds before manual stop; seeds
+3/7/19/33/50/71/100/142/200): **8 PASS / 1 FAIL, WARM↔DEGRADED = 0 on ALL 9.** PASS
+goodput 1420–1820 bps (clean runs hit the ~1820 R3/4 ceiling). The one FAIL (seed 7) had
+**0 thrash** — a genuine deep Good-fade on groups 2–3 that exhausted `max_retries`=15
+(irreducible fading + retry cap, a SEPARATE lever — not this bug). AWGN@20 no-regression:
+PASS/1840, 0 thrash.
+
 ## 2026-05-29: Channel-adaptive DD gate (BUG-8PSK-001) + estimator/diversity audit (branch `feat/oneway-arch-2026-05-27`)
 
 **What was broken:** decision-directed (DD) channel tracking
