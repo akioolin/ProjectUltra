@@ -66,10 +66,18 @@ inline bool hasSubFixedFrameSoftBits(size_t soft_bits,
     return soft_bits >= ldpc_block_bits && soft_bits < fixed_frame_bits;
 }
 
+// 2026-05-29 channel-adaptive interleaver: burst_regime_active means "in a burst
+// file-transfer" (interleave-INDEPENDENT — use_burst_interleave_ || burst_transport_rx_),
+// NOT "byte interleave enabled". burst_latched means "the negated-LTS group-start
+// marker was detected". A group-start data frame is sized as a FULL data frame (not a
+// control peek) whenever a marker is latched in the burst regime — this holds whether
+// or not the group's bytes are interleaved, because the encoder emits the marker for
+// every group regardless. (Pre-decouple this branch was gated on the interleave flag,
+// which silently mis-sized interleave-off groups as control peeks → they never decoded.)
 inline DecodeSampleRequirement selectDecodeSampleRequirement(int pending_total_cw,
                                                              bool is_ofdm,
                                                              bool connected,
-                                                             bool burst_interleave_enabled,
+                                                             bool burst_regime_active,
                                                              bool burst_latched,
                                                              size_t pending_cw_samples,
                                                              size_t ofdm_control_samples,
@@ -80,7 +88,7 @@ inline DecodeSampleRequirement selectDecodeSampleRequirement(int pending_total_c
     }
 
     if (is_ofdm && connected) {
-        if (burst_interleave_enabled && burst_latched) {
+        if (burst_regime_active && burst_latched) {
             return {full_frame_samples, DecodeSampleMode::ConnectedOFDMBurst};
         }
         return {ofdm_control_samples, DecodeSampleMode::ConnectedOFDMPeek};

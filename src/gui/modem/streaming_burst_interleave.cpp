@@ -479,6 +479,19 @@ void StreamingDecoder::finalizeBurstGroup() {
     // Logs every input parameter we need to diagnose the actual mismatch:
     // expected vs received bits per frame, per-frame buffer sizes, z, cw.
     std::vector<std::vector<float>> logical_soft;
+    if (!use_burst_interleave_) {
+        // 2026-05-29 channel-adaptive interleaver (RX decouple): the descriptor
+        // declared BURST_FLAG_INTERLEAVE=0, so the encoder applied NO byte
+        // permutation across the group (TX decouple, d5d8eaa). Each accumulated
+        // physical frame's soft bits ARE one logical frame, already in transmission
+        // order — pass them straight through. The consequence the SR-ARQ-on-Good
+        // plan depends on: per-frame LDPC success is now INDEPENDENT (a 1-3 s Good
+        // fade kills a couple of frames, not the whole 6-frame group), so a
+        // per-frame frame_mask is meaningful and the sender can resend only the dead
+        // frames + refill instead of whole-burst-resending. Interleave is reserved
+        // for Moderate/Poor, where the de-permutation buys real time/freq diversity.
+        logical_soft = std::move(burst_soft_buffer_);
+    } else {
     try {
         logical_soft = fec::BurstInterleaver::deinterleave(
             burst_soft_buffer_, fixed_frame_codewords_, bytes_per_cw_rx);
@@ -511,6 +524,7 @@ void StreamingDecoder::finalizeBurstGroup() {
         burst_soft_buffer_.clear();
         return;
     }
+    }  // end interleave-on deinterleave branch
 
     int logical_ok = 0;
     int logical_fail = 0;

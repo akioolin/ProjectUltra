@@ -380,7 +380,15 @@ void StreamingDecoder::decodeCurrentFrame() {
     // - Connected OFDM, first pass: control-sized peek, then configured fixed-CW data buffer
     // - MC-DPSK: 1-CW for peek (MC-DPSK getMinSamplesForFrame() == 1 CW by design)
     // - Disconnected: full frame (always MC-DPSK for handshake)
-    const bool burst_latched = use_burst_interleave_ && waveform_ && waveform_->wasBurstInterleaved();
+    // 2026-05-29 channel-adaptive interleaver (RX decouple): burst_latched = "group-start
+    // marker detected" (NOT gated on the interleave flag). The descriptor's
+    // pending_total_cw_ is cleared during the SEARCH→sync transition, so the group-start
+    // frame is sized via the ConnectedOFDMBurst fallback (full data frame) keyed on this
+    // latch + the burst regime. Without dropping the use_burst_interleave_ gate here, an
+    // interleave-off group-start sized as a control peek, never decoded as data, and never
+    // reached the burst-accumulation path — the whole group stalled (verified bi0_s1).
+    const bool burst_latched = waveform_ && waveform_->wasBurstInterleaved();
+    const bool burst_regime_active = use_burst_interleave_ || burst_transport_rx_;
     const size_t pending_samples = pending_total_cw_ > 0
         ? static_cast<size_t>(waveform_->getMinSamplesForCWCount(pending_total_cw_))
         : 0;
@@ -396,7 +404,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         pending_total_cw_,
         is_ofdm,
         connected_,
-        use_burst_interleave_,
+        burst_regime_active,
         burst_latched,
         pending_samples,
         ofdm_control_samples,
@@ -998,7 +1006,9 @@ void StreamingDecoder::decodeCurrentFrame() {
         // data decode (whose control-profile probe + double-demod poisoned the
         // coherent channel estimate — §14.24/§14.25). Gated to the burst regime
         // so legacy non-burst connected data keeps the speculative fallback.
-        if (use_burst_interleave_ && connected_) {
+        // 2026-05-29: regime is interleave-INDEPENDENT (a bi=0 burst transfer is
+        // still the burst regime), so gate on burst_transport_rx_ too.
+        if ((use_burst_interleave_ || burst_transport_rx_) && connected_) {
             {
                 std::lock_guard<std::mutex> lock(buffer_mutex_);
                 correlation_pos_ = wrapRingIndexLocked(sync_position_ + frame_len);
@@ -1031,9 +1041,20 @@ void StreamingDecoder::decodeCurrentFrame() {
     // If the LTS detector locked early on a marked burst group, the first
     // physical block is the one most likely to poison the deinterleaver. Retry
     // that block from the timing-slope-corrected origin before collecting LLRs.
-    bool burst_marker = use_burst_interleave_ && connected_ && is_ofdm
+    // 2026-05-29 channel-adaptive interleaver (RX decouple): the negated-LTS marker
+    // signals a burst GROUP-START, which the encoder emits for EVERY group regardless
+    // of whether the group's bytes are byte-interleaved (TX decouple, d5d8eaa). So the
+    // group-accumulation path must trigger on the marker ALONE within the burst-transport
+    // regime — NOT on use_burst_interleave_. The interleave flag now gates ONLY the byte
+    // de-permutation in finalizeBurstGroup; with it OFF each physical frame is one logical
+    // frame, so per-frame survival is meaningful (the SR-ARQ-on-Good path). The regime
+    // guard (use_burst_interleave_ || burst_transport_rx_) preserves the exact pre-decouple
+    // behavior when interleave is on, and only extends accumulation to interleave-off
+    // groups inside an actual burst file transfer (never a stray non-file frame).
+    bool burst_marker = connected_ && is_ofdm
                         && mode_ == protocol::WaveformMode::OFDM_CHIRP
-                        && waveform_->wasBurstInterleaved();
+                        && waveform_->wasBurstInterleaved()
+                        && (use_burst_interleave_ || burst_transport_rx_);
     if (ultra::phyDiagnosticsEnabled() && connected_ && is_ofdm
         && mode_ == protocol::WaveformMode::OFDM_CHIRP) {
         std::ostringstream oss;

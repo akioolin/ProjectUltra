@@ -10,6 +10,59 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-29: Channel-adaptive interleaver — RX-side decouple of burst transport from byte-interleave (branch `feat/oneway-arch-2026-05-27`, env-gated `ULTRA_BURST_INTERLEAVE=0`, default unchanged)
+
+**Goal / why:** the industry leader is faster on Multipath-Moderate than on Multipath-Good
+because Good is a flat, slow fade (small delay spread, ~0.1 Hz Doppler → no time/freq
+diversity), so the N=6 burst byte-interleaver (~1×Tc on Good) buys ~0 diversity yet still
+forces a WHOLE-group resend on any fade nick. The plan: turn the byte-interleave OFF on
+Good/AWGN and revive per-frame SR-ARQ (resend only the dead frames + refill the burst);
+keep interleave ON for Moderate/Poor where the de-permutation buys real diversity. The TX
+side was decoupled first (commit `d5d8eaa`); this is the matching RX side.
+
+**What was broken (for the bi=0 path):** with the descriptor's `BURST_FLAG_INTERLEAVE=0`,
+the receiver decoded the descriptor (`bi=0`) and detected the group-start marker
+(`[BURST-INTERLEAVED]`, corr 0.92) but the group never decoded — `hard_failure_marker`,
+0 goodput, ALPHA whole-group-resent group 0 to exhaustion. Two RX gates were still keyed
+on `use_burst_interleave_`:
+1. Group-accumulation trigger (`burst_marker`, `streaming_ofdm_decode.cpp`).
+2. Group-start frame SIZING — the descriptor's `pending_total_cw_` is cleared during the
+   SEARCH→sync transition (in BOTH bi modes), so the group-start relies on the
+   `burst_latched → ConnectedOFDMBurst` full-frame fallback. That fallback was gated on
+   the interleave flag, so bi=0 sized the group-start as a CONTROL PEEK → it never decoded
+   as data → never reached accumulation. (The bi=1 path survived only because the same
+   fallback fired.) This was the actual stall root cause.
+
+**What was changed (RX, all interleave-OFF only — bi=1 path is byte-identical):**
+- `streaming_ofdm_decode.cpp`: `burst_marker` triggers on the group-start marker within
+  the burst regime (`use_burst_interleave_ || burst_transport_rx_`), not on the interleave
+  flag. `burst_latched` now means "marker detected" (interleave-independent); added
+  `burst_regime_active`; broadened the between-group re-search gate to the regime.
+- `streaming_decode_policy.hpp`: the `ConnectedOFDMBurst` full-frame sizing branch keys on
+  `burst_regime_active && burst_latched` (param renamed from the misleading
+  `burst_interleave_enabled`). This is the fix for the control-peek mis-sizing.
+- `streaming_sync_acquisition.cpp`: mirror the `burst_latched`/regime change (second caller
+  of the policy).
+- `streaming_burst_interleave.cpp` `finalizeBurstGroup`: when `!use_burst_interleave_`, pass
+  the accumulated per-frame soft buffers straight through as logical frames (no byte
+  de-permutation) — each physical frame is one logical frame, so per-frame LDPC success is
+  INDEPENDENT (the precondition for a meaningful per-frame frame_mask / SR-ARQ).
+
+**Test verification (GUI, the faithful fade gate):**
+`ULTRA_BURST_INTERLEAVE=0 ULTRA_FORCE_DATA_MOD=QPSK ULTRA_FORCE_DATA_RATE=R3_4
+tools/gui_qso_scenario.sh --channel good --snr-db 20 --seed {1,44} --file-kb 40` →
+both RESULT=PASS, FILE_CRC_OK, 0 retx-exhaustion (seed 1 = 1560 bps, seed 44 = 1130 bps).
+`test_streaming_decode_policy` 24/24. **Go/no-go for SR-ARQ = GO:** faded Good groups show
+PARTIAL per-frame survival (seed 1: 5/6, 3/6; seed 44: 5/6, 4/6, 2/6, 1/6 — plus 4× deep
+0/6), confirming a per-frame frame_mask is meaningful. NOTE: bi=0 goodput is currently
+BELOW the bi=1 baseline (~1810/1390) — EXPECTED, because the group-ACK is still whole-group
+(`all_ok`), so bi=0 whole-resends partial groups while losing the interleave's marginal
+shallow-fade recovery. The throughput win requires the SR-ARQ per-frame resend (next step:
+`BurstGroupCallback` carries a per-frame mask; `BurstStopAndWaitController` resends only the
+NACK'd frames + refills the burst to 6).
+
+---
+
 ## 2026-05-29: Warm-sync stabilization — a fade no longer collapses warm-sync (commits `8a75385` env-gated → `949664b` shipped default, branch `feat/oneway-arch-2026-05-27`)
 
 **What was broken (symptom + root cause):** QPSK R3/4 Good@20 burst file transfer was

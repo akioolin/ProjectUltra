@@ -1013,7 +1013,11 @@ void StreamingDecoder::checkIfReadyToDecode() {
 
     // Calculate how much we need — must match decodeCurrentFrame() buffer sizing.
     bool is_ofdm_here = protocol::isOFDMMode(mode_);
-    bool burst_latched = use_burst_interleave_ && waveform_ && waveform_->wasBurstInterleaved();
+    // 2026-05-29 channel-adaptive interleaver (RX decouple): mirror streaming_ofdm_decode —
+    // burst_latched = group-start marker detected (interleave-independent); the
+    // ConnectedOFDMBurst full-frame sizing is keyed on the marker + the burst regime.
+    bool burst_latched = waveform_ && waveform_->wasBurstInterleaved();
+    const bool burst_regime_active = use_burst_interleave_ || burst_transport_rx_;
     const size_t pending_samples = pending_total_cw_ > 0
         ? static_cast<size_t>(waveform_->getMinSamplesForCWCount(pending_total_cw_))
         : 0;
@@ -1029,7 +1033,7 @@ void StreamingDecoder::checkIfReadyToDecode() {
         pending_total_cw_,
         is_ofdm_here,
         connected_,
-        use_burst_interleave_,
+        burst_regime_active,
         burst_latched,
         pending_samples,
         ofdm_control_samples,

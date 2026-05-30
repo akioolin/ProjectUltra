@@ -80,7 +80,7 @@ void test_decode_sample_requirement_selection() {
     auto burst_disabled = selectDecodeSampleRequirement(
         0, true, true, false, true,
         0, 11000, 50000, 9000);
-    CHECK(burst_disabled.samples == 11000, "burst marker should be ignored when burst interleave is disabled");
+    CHECK(burst_disabled.samples == 11000, "burst marker should be ignored when not in the burst-transport regime");
 
     auto mcdpsk = selectDecodeSampleRequirement(
         0, false, true, false, false,
