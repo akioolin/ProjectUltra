@@ -2055,9 +2055,11 @@ bool Connection::startBurstFileTransfer() {
         burst_inflight_is_pad_.clear();
         burst_transport_.setFormAndSendGroup(
             [this](uint16_t group_seq, bool is_resend) {
-                // SR form drains the resend queue + refills (ignores is_resend); the
-                // whole-group form re-creates the same group from the cursor on resend.
-                return burst_interleave_off_ ? formAndSendBurstGroupSR(group_seq)
+                // SR form drains the resend queue + refills; on a TIMEOUT resend
+                // (is_resend with an empty resend queue — no ACK came back to populate
+                // it) it must re-queue the un-acked in-flight burst instead of advancing
+                // the cursor. The whole-group form re-creates the group from the cursor.
+                return burst_interleave_off_ ? formAndSendBurstGroupSR(group_seq, is_resend)
                                              : formAndSendBurstGroup(group_seq, is_resend);
             });
         // 2026-05-28: previously the timeout handler called
@@ -2628,8 +2630,24 @@ bool Connection::formOneNewBurstFrame(Bytes& out_frame, bool& is_pad,
     return true;
 }
 
-bool Connection::formAndSendBurstGroupSR(uint16_t group_seq) {
+bool Connection::formAndSendBurstGroupSR(uint16_t group_seq, bool is_resend) {
     if (!on_transmit_burst_) return false;
+    // Timeout resend (no ACK came back): the failed frames were never re-queued by
+    // onToneBurstAck, so re-queue the un-acked in-flight burst's REAL frames now —
+    // otherwise the refill below would advance the cursor and skip this group's
+    // bytes (the seed-7 stall: a missed group 3 became "group 4 sent as seq 3" and
+    // group 3's bytes were lost). A NACK-driven resend has already populated the
+    // resend queue, so the empty-queue check distinguishes the two without double-
+    // queuing.
+    if (is_resend && burst_resend_frames_.empty() && !burst_inflight_frames_.empty()) {
+        for (size_t i = 0; i < burst_inflight_frames_.size(); ++i) {
+            const bool pad = (i < burst_inflight_is_pad_.size()) && burst_inflight_is_pad_[i];
+            if (!pad) burst_resend_frames_.push_back(burst_inflight_frames_[i]);
+        }
+        LOG_MODEM(INFO,
+                  "Connection: SR timeout resend group_seq=%u — re-queued %zu in-flight frame(s)",
+                  group_seq, burst_resend_frames_.size());
+    }
     const size_t group_size = connection_policy::burstInterleaveGroupFrames();
     const int active_z = []() {
         if (const char* env = std::getenv("ULTRA_LDPC_Z")) {

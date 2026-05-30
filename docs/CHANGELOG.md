@@ -57,6 +57,30 @@ the prior entry's stale "~1810/1390" (a best-case memory): default bi=1 is 1280/
 Default path unchanged by construction (the `!interleaved` branch is skipped and
 `burst_interleave_off_=false` routes to the untouched whole-group form).
 
+**Second correctness fix (the seed-7 stall):** on a TIMEOUT (no ACK at all), the
+controller resends the group, but re-queuing of failed frames only happens in
+`onToneBurstAck` — which never ran (no ACK). So the SR form found an empty resend
+queue and ADVANCED THE CURSOR, sending the NEXT group's bytes under the timed-out
+seq → the missed group's bytes were skipped → permanent gap → dead link. Fix:
+`formAndSendBurstGroupSR(group_seq, is_resend)` — on a resend with an empty resend
+queue (= a timeout, not a NACK), re-queue the un-acked in-flight burst's real frames.
+
+**HONEST multi-seed verdict (5 seeds, paired vs default bi=1): SR-ARQ is NOT a
+Good-channel win.** Default bi=1 PASSes all 5 (810/1280/1480/1590/1670 — no
+regression). SR-ARQ: 4/5 PASS, goodput roughly TIED on the passers (wins seed 1,
+ties 33, slightly under 44/100), and FAILS seed 7 — a group hit a persistent
+marginal-fade window and failed 0/6 ~15× to max_retries. The finding that matters:
+**the byte-interleave provides REAL recovery on Good** for medium-duration fades
+(it spreads the fade across all 6 codewords so FEC recovers the whole group), which
+SR-ARQ's independent per-frame decode CANNOT do — so on Good the interleave is
+competitive and more robust, and SR-ARQ adds tail-risk. SR-ARQ's per-frame
+resend+refill only pays where partial fades are FREQUENT and the interleave's
+spreading would instead push every codeword past FEC capacity — i.e. **Moderate/Poor,
+its intended home**, not Good. Conclusion: keep interleave-ON whole-group as the
+Good default; SR-ARQ (interleave-off) is the Moderate/Poor candidate, to be
+validated there next. The Good throughput lever remains efficiency/airtime
+(warm-handoff, leaner ACKs), not the ARQ structure.
+
 ---
 
 ## 2026-05-29: Channel-adaptive interleaver — RX-side decouple of burst transport from byte-interleave (branch `feat/oneway-arch-2026-05-27`, env-gated `ULTRA_BURST_INTERLEAVE=0`, default unchanged)

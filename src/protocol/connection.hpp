@@ -528,7 +528,7 @@ private:
     // new frames from the cursor (advancing it immediately — failed frames are tracked
     // separately, not via the cursor). Records burst_inflight_frames_ for the next
     // ACK's frame_mask. Returns false when nothing is left to send (transfer done).
-    bool formAndSendBurstGroupSR(uint16_t group_seq);
+    bool formAndSendBurstGroupSR(uint16_t group_seq, bool is_resend);
     // §SR-ARQ: form ONE new file/metadata/pad frame at the current cursor, advancing
     // cursor/metadata. Sets is_pad. Returns false when the file+metadata are drained.
     bool formOneNewBurstFrame(Bytes& out_frame, bool& is_pad, size_t per_frame_data);
