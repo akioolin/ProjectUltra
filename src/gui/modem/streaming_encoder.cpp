@@ -520,12 +520,7 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
                 // each codeword is 243 bytes instead of 81.
                 std::vector<Bytes> group(encoded_frames.begin() + base,
                                          encoded_frames.begin() + base + BURST_GROUP_SIZE);
-                const int ldpc_z_for_burst = [this]() {
-                    if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
-                        if (std::atoi(env) == 81) return 81;
-                    }
-                    return static_cast<int>(ldpc_lifting_z_);
-                }();
+                const int ldpc_z_for_burst = static_cast<int>(ldpc_lifting_z_);
                 const int bytes_per_cw = (ldpc_z_for_burst == 81) ? 243 : 81;
                 auto interleaved = fec::BurstInterleaver::interleave(
                     group, fixed_frame_codewords_, bytes_per_cw);
@@ -930,14 +925,10 @@ void StreamingEncoder::updateInterleaver() {
 
     // Create channel interleaver. At z=81 (N=1944) each LDPC codeword is 1944 bits
     // instead of 648, so the interleaver block size must match the active z.
-    // 2026-05-28 Phase 2: sourced from ldpc_lifting_z_ (set per-burst by the
-    // connection layer); env override kept for ad-hoc experimentation only.
-    const size_t ldpc_codeword_bits_ci = [this]() -> size_t {
-        if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
-            if (std::atoi(env) == 81) return 1944;
-        }
-        return (ldpc_lifting_z_ == 81) ? size_t{1944} : v2::LDPC_CODEWORD_BITS;
-    }();
+    // Sourced from ldpc_lifting_z_ — the single TX source of truth, set per-burst
+    // by the connection-layer policy and announced in BURST_HEADER payload[5].
+    const size_t ldpc_codeword_bits_ci =
+        (ldpc_lifting_z_ == 81) ? size_t{1944} : v2::LDPC_CODEWORD_BITS;
     channel_interleaver_ = std::make_unique<ChannelInterleaver>(
         bits_per_symbol, ldpc_codeword_bits_ci);
 
@@ -1145,18 +1136,10 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
         ofdm_config_.use_pilots,
         static_cast<int>(ofdm_config_.pilot_spacing),
         modulation_));
-    // 2026-05-28 Phase 2: LDPC lifting Z is now sourced from the active member
-    // ldpc_lifting_z_ (27 or 81) set by the connection layer per-burst, and
-    // announced in BURST_HEADER payload[5] so the RX matches. The legacy
-    // ULTRA_LDPC_Z env override is still honored for ad-hoc experimentation
-    // when the connection layer hasn't set a value (the setter defaults to 27).
-    const int ldpc_z = [this]() {
-        if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
-            const int v = std::atoi(env);
-            if (v == 81) return 81;
-        }
-        return static_cast<int>(ldpc_lifting_z_);
-    }();
+    // LDPC lifting Z sourced from the active member ldpc_lifting_z_ (27 or 81) —
+    // the single TX source of truth, set per-burst by the connection-layer policy
+    // and announced in BURST_HEADER payload[5] so the RX matches.
+    const int ldpc_z = static_cast<int>(ldpc_lifting_z_);
 
     Bytes encoded = v2::encodeFixedFrame(tx_data, code_rate_, frame_cw_count,
                                          use_channel_interleave_, bps,

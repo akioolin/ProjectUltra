@@ -278,6 +278,19 @@ public:
         return last_burst_descriptor_;
     }
 
+    // Single RX source of truth for the active LDPC lifting Z: the value the
+    // sender announced in the BURST_HEADER descriptor (payload[5], cached on
+    // last_burst_descriptor_.lifting_z). 81 (n=1944) inside a long-LDPC burst,
+    // else 27 (n=648) — legacy / cold-start / control. NO env: the descriptor
+    // is the wire contract. A frame decoded before its group's descriptor
+    // arrives correctly falls back to 27 (invariant #4 of the Z-derivation
+    // design). Replaces 5 scattered getenv("ULTRA_LDPC_Z") reads.
+    int activeBurstLiftingZ() const {
+        return (have_burst_descriptor_ && last_burst_descriptor_.lifting_z == 81)
+                   ? 81
+                   : 27;
+    }
+
     // Get current mode
     protocol::WaveformMode getMode() const { return mode_; }
     bool isConnected() const { return connected_; }

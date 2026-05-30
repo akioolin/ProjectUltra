@@ -633,19 +633,11 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
         if (protocol::isOFDMMode(mode)) {
             bps = 60;
         }
-        // Match the encoder's z-aware interleaver block size. 2026-05-28 Phase 2:
-        // primary source is the active burst descriptor's lifting_z; falls back
-        // to env override and then v2::LDPC_CODEWORD_BITS (648) when no descriptor
-        // has been seen yet (cold start / no active burst).
-        const size_t ldpc_codeword_bits_ci = [this]() -> size_t {
-            if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
-                if (std::atoi(env) == 81) return 1944;
-            }
-            if (have_burst_descriptor_ && last_burst_descriptor_.lifting_z == 81) {
-                return 1944;
-            }
-            return v2::LDPC_CODEWORD_BITS;
-        }();
+        // Z-aware interleaver block size from the active burst descriptor's
+        // lifting_z (single RX source of truth — activeBurstLiftingZ()); falls
+        // back to 648 when no descriptor has been seen yet (cold start).
+        const size_t ldpc_codeword_bits_ci =
+            (activeBurstLiftingZ() == 81) ? size_t{1944} : v2::LDPC_CODEWORD_BITS;
         interleaver_ = std::make_unique<ChannelInterleaver>(bps, ldpc_codeword_bits_ci);
     }
 

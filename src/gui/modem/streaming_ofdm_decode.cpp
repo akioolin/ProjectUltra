@@ -2729,13 +2729,13 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 }
 
                 if (apply_channel_deinterleave) {
-                    // Match the encoder's z=81-aware interleaver block size.
-                    static const size_t ldpc_codeword_bits_cw0 = []() -> size_t {
-                        if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
-                            if (std::atoi(env) == 81) return 1944;
-                        }
-                        return v2::LDPC_CODEWORD_BITS;
-                    }();
+                    // Z-aware interleaver block size from the active BURST_HEADER
+                    // descriptor (single RX source of truth — activeBurstLiftingZ()).
+                    // Was env-only: a latent mismatch if a Z=81 descriptor arrived
+                    // without ULTRA_LDPC_Z set.
+                    const size_t ldpc_codeword_bits_cw0 =
+                        (activeBurstLiftingZ() == 81) ? size_t{1944}
+                                                      : v2::LDPC_CODEWORD_BITS;
                     ChannelInterleaver channel_deinterleaver(bps, ldpc_codeword_bits_cw0);
                     cw0_bits = channel_deinterleaver.deinterleave(cw0_bits);
                 }
@@ -2823,13 +2823,11 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
 
             std::vector<float> cw0_bits = std::move(cw_soft[0]);
             if (apply_channel_deinterleave) {
-                // Match the encoder's z=81-aware interleaver block size.
-                static const size_t ldpc_codeword_bits_cw0b = []() -> size_t {
-                    if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
-                        if (std::atoi(env) == 81) return 1944;
-                    }
-                    return v2::LDPC_CODEWORD_BITS;
-                }();
+                // Z-aware interleaver block size from the active BURST_HEADER
+                // descriptor (single RX source of truth — activeBurstLiftingZ()).
+                const size_t ldpc_codeword_bits_cw0b =
+                    (activeBurstLiftingZ() == 81) ? size_t{1944}
+                                                  : v2::LDPC_CODEWORD_BITS;
                 ChannelInterleaver channel_deinterleaver(bps, ldpc_codeword_bits_cw0b);
                 cw0_bits = channel_deinterleaver.deinterleave(cw0_bits);
             }
@@ -2888,23 +2886,11 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                     .harq_key_build_failed.fetch_add(
                         1, std::memory_order_relaxed);
             }
-            // 2026-05-28 Phase 2: LDPC lifting Z sourced from BURST_HEADER
-            // payload[5] (cached on last_burst_descriptor_.lifting_z). When the
-            // sender announced Z=81, the data group's codewords are N=1944
-            // and the decoder must be configured to match. Falls back to env
-            // override (legacy experimentation knob) and then to Z=27 outside a
-            // burst.
-            const int ldpc_z = [this]() {
-                if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
-                    const int v = std::atoi(env);
-                    if (v == 81) return 81;
-                }
-                if (have_burst_descriptor_ &&
-                    last_burst_descriptor_.lifting_z == 81) {
-                    return 81;
-                }
-                return 27;
-            }();
+            // LDPC lifting Z sourced from BURST_HEADER payload[5] (cached on
+            // last_burst_descriptor_.lifting_z). When the sender announced Z=81,
+            // the data group's codewords are N=1944 and the decoder must match;
+            // falls back to Z=27 outside a burst. Single RX source of truth.
+            const int ldpc_z = activeBurstLiftingZ();
             return v2::decodeFixedFrame(soft_bits, rate, cw_count,
                                         apply_channel_deinterleave, bps,
                                         harq_buffer, harq_key_ptr, ldpc_z);

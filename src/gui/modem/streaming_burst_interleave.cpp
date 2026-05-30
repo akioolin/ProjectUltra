@@ -454,20 +454,11 @@ void StreamingDecoder::finalizeBurstGroup() {
     LOG_MODEM(INFO, "[%s] Burst group complete (%d frames), deinterleaving...",
               log_prefix_.c_str(), burst_group_size);
 
-    // Match the encoder's bytes-per-codeword: 243 at z=81 (N=1944), 81 at z=27.
-    // 2026-05-28 Phase 2: the active z is announced by the sender in BURST_HEADER
-    // payload[5] and cached on last_burst_descriptor_.lifting_z; this is the
-    // single source of truth for the group decode. Falls back to env override
-    // (legacy experimentation knob) and then to z=27 if no descriptor decoded.
-    const int ldpc_z_for_burst = [this]() {
-        if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
-            if (std::atoi(env) == 81) return 81;
-        }
-        if (have_burst_descriptor_ && last_burst_descriptor_.lifting_z == 81) {
-            return 81;
-        }
-        return 27;
-    }();
+    // Bytes-per-codeword: 243 at z=81 (N=1944), 81 at z=27. The active z is
+    // announced by the sender in BURST_HEADER payload[5] and cached on
+    // last_burst_descriptor_.lifting_z — the single RX source of truth
+    // (activeBurstLiftingZ()); falls back to z=27 if no descriptor decoded.
+    const int ldpc_z_for_burst = activeBurstLiftingZ();
     const int bytes_per_cw_rx = (ldpc_z_for_burst == 81) ? 243 : 81;
 
     // 2026-05-28: wrap the deinterleave call so a size-mismatch throw (e.g.,
