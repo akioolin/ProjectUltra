@@ -601,6 +601,36 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
         }
     }
 
+    // 2026-05-29 DIAG (ULTRA_LLR_NOISE_EMP_FLOOR): empirical post-eq noise-variance
+    // FLOOR. The analytic MMSE carrier_noise_var above is a |H|²/thermal model; the
+    // FAILURE_ATTRIBUTION eq_diag showed it under-estimates the true post-eq residual
+    // by ~4-14x on Good@20 (un-modeled phase ramp / residual CFO / ISI / estimate
+    // error), so demapQAM16 (scale=2/noise_var) emits over-confident, confident-WRONG
+    // LLRs that poison the LDPC — fatal for tight 16QAM, absorbed by QPSK's margins.
+    // Floor noise_var at k*|equalized - hardDecision|^2: on a clean carrier this ≈
+    // the true residual (calibrates the LLR); on a deep null the equalized point lands
+    // far from EVERY constellation point so the residual is huge → auto-erasure. Only
+    // RAISES noise_var (never lowers), so it cannot make a well-calibrated carrier
+    // over-confident. Default off (k=0). If this rescues 16QAM on Good@20 the
+    // over-confident-LLR diagnosis is proven; the production form is a smoothed
+    // per-carrier empirical estimate (pilot-anchored), not single-symbol hard-decision.
+    static const float kLLREmpFloor = []() {
+        if (const char* env = std::getenv("ULTRA_LLR_NOISE_EMP_FLOOR")) {
+            const float v = static_cast<float>(std::atof(env));
+            if (v > 0.0f) return v;
+        }
+        return 0.0f;
+    }();
+    if (kLLREmpFloor > 0.0f && equalized.size() == carrier_noise_var.size()) {
+        for (size_t i = 0; i < equalized.size(); ++i) {
+            const Complex dec = hardDecision(equalized[i], mod);
+            const float emp = std::norm(equalized[i] - dec);  // |eq - decision|^2
+            carrier_noise_var[i] = std::min(
+                MAX_CARRIER_NOISE_VAR,
+                std::max(carrier_noise_var[i], kLLREmpFloor * emp));
+        }
+    }
+
     recordFailureAttributionSymbol(equalized, mod);
 
     // Coherent 8PSK/16-QAM decision-directed channel observations. The noise
