@@ -354,9 +354,12 @@ void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
         streaming_decoder_->setBurstInterleave(burst_interleave_on);
     }
 
+    // burst_interleave reports the ACTUAL byte-permutation decision (burst_interleave_on),
+    // not file_class_composite — the latter is only "is this a burst-eligible QPSK/QAM8
+    // file frame" and is 1 even when ULTRA_BURST_INTERLEAVE=0 turns the permutation off.
     LOG_MODEM(INFO, "Data mode set to: %s (pilots=%d, spacing=%d, burst_interleave=%d)",
               getModeDescription(mod, rate), config_.use_pilots ? 1 : 0,
-              config_.pilot_spacing, file_class_composite ? 1 : 0);
+              config_.pilot_spacing, burst_interleave_on ? 1 : 0);
     syncAdaptiveShortDataPreamble();
 }
 

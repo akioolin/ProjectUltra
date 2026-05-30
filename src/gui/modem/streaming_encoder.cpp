@@ -706,9 +706,13 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
         result.insert(result.end(), modulated.begin(), modulated.end());
     }
 
+    // burst_interleave reports the ACTUAL byte-permutation flag (use_burst_interleave_),
+    // NOT the group count — interleaved_groups is the number of 6-frame transport groups
+    // formed (always ≥1 for a file burst, whether or not the bytes were permuted), so
+    // printing it here read as "interleave=yes" even on the interleave-OFF SR-ARQ path.
     LOG_MODEM(INFO, "[%s] Encoded burst: %zu blocks -> %zu samples (burst_interleave=%s groups=%zu)",
               log_prefix_.c_str(), frame_data_list.size(), result.size(),
-              interleaved_groups > 0 ? "yes" : "no", interleaved_groups);
+              use_burst_interleave_ ? "yes" : "no", interleaved_groups);
 
     applyPaprReductionIfNeeded(result, protocol::isOFDMMode(mode_), false, "burst-light");
 

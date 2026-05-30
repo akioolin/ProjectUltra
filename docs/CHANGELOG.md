@@ -10,6 +10,35 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-30: Fix two misleading `burst_interleave=` log labels (reported the wrong proxy)
+
+**What was broken:** two INFO logs printed `burst_interleave=` from a proxy value, not the
+actual byte-interleave flag, so an interleave-OFF SR-ARQ run logged `burst_interleave=yes`/`=1`
+and looked like the interleaver was still on. This actively misled a live SR-ARQ debugging
+session on the Good@20 path.
+- `streaming_encoder.cpp:709` (`Encoded burst: … burst_interleave=%s`) printed
+  `interleaved_groups > 0 ? "yes" : "no"` — that's the count of 6-frame transport *groups*
+  (always ≥1 for a file burst, whether or not the bytes were permuted), NOT the permutation flag.
+- `modem_mode.cpp:357` (`Data mode set to: … burst_interleave=%d`) printed `file_class_composite`,
+  which is only "is this a burst-eligible QPSK/QAM8 file frame" and is 1 even when
+  `ULTRA_BURST_INTERLEAVE=0` disables the permutation.
+
+**What changed:** both now print the real flag — `use_burst_interleave_` (encoder) and
+`burst_interleave_on` (modem_mode). No behavioral change; display-only.
+
+**Why it's correct:** these match the authoritative sources already in the logs — the encoder
+phy-diag `burst_tx use_bi=%d` and the BURST_HEADER descriptor `bi=%d` (BRAVO RX), both of which
+correctly showed `0` on the interleave-off path. The byte-permutation itself
+(`fec::BurstInterleaver::interleave`, `streaming_encoder.cpp:530`) only runs inside
+`if (use_burst_interleave_)`, and its `Burst interleaved group N` log had 0 occurrences on the
+Good SR-ARQ run — confirming the run was genuinely interleave-off (also proven physically by
+partial group masks 5/6, 3/4, impossible under cross-frame interleave).
+
+**Test verification:** `cmake --build build -j4 --target ultra_gui` — clean. Next GUI run on the
+`ULTRA_BURST_INTERLEAVE=0` path now logs `burst_interleave=no` / `burst_interleave=0`.
+
+---
+
 ## 2026-05-29: Channel-adaptive SR-ARQ — per-frame Selective-Repeat on the interleave-off (Good/AWGN) burst path (branch `feat/oneway-arch-2026-05-27`, env-gated `ULTRA_BURST_INTERLEAVE=0`, default unchanged)
 
 **Goal / why:** with the byte-interleave OFF (the RX decouple below), each burst frame
