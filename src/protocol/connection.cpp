@@ -1948,8 +1948,7 @@ bool Connection::startBurstFileTransfer() {
     // connection layer here so getFixedFramePayloadCapacity returns the right
     // value before the file is drained into chunks.
     if (isOFDMMode(negotiated_mode_)) {
-        const char* env_z = std::getenv("ULTRA_LDPC_Z");
-        if (env_z && std::atoi(env_z) == 81) {
+        if (selectBurstLiftingZ() == 81) {
             if (data_frame_cw_count_ != 2) {
                 LOG_MODEM(WARN, "Connection: z=81 opt-in active -> coercing data_frame_cw_count %d -> 2 for burst transfer",
                           data_frame_cw_count_);
@@ -2206,16 +2205,10 @@ bool Connection::formAndSendBurstGroup(uint16_t group_seq, bool is_resend) {
     }
 
     const size_t group_size = connection_policy::burstInterleaveGroupFrames();
-    // 2026-05-28: z-aware capacity. At z=81 each codeword carries 3x as many
-    // info bytes as at z=27 (e.g. R3/4 cw=2: 96 B legacy -> 345 B at z=81).
-    // The burst chunker must size frames at the active z or the encoder pads
-    // 70% of every burst with zeros.
-    const int active_z = [this]() {
-        if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
-            if (std::atoi(env) == 81) return 81;
-        }
-        return 27;
-    }();
+    // Z-aware capacity. At z=81 each codeword carries 3x as many info bytes as at
+    // z=27 (R3/4 cw=2: 96 B legacy -> 345 B at z=81). The burst chunker must size
+    // frames at the active z (selectBurstLiftingZ) or the encoder pads 70% zeros.
+    const int active_z = selectBurstLiftingZ();
     const size_t frame_cap = (active_z == 81)
         ? v2::getFixedFramePayloadCapacityZ(data_code_rate_, data_frame_cw_count_, 81)
         : v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
@@ -2683,12 +2676,7 @@ bool Connection::formAndSendBurstGroupSR(uint16_t group_seq, bool is_resend) {
                   group_seq, burst_resend_frames_.size());
     }
     const size_t group_size = connection_policy::burstInterleaveGroupFrames();
-    const int active_z = []() {
-        if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
-            if (std::atoi(env) == 81) return 81;
-        }
-        return 27;
-    }();
+    const int active_z = selectBurstLiftingZ();
     const size_t frame_cap = (active_z == 81)
         ? v2::getFixedFramePayloadCapacityZ(data_code_rate_, data_frame_cw_count_, 81)
         : v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
@@ -4345,18 +4333,25 @@ bool Connection::usesBoundedVariableMCDPSKFrames() const {
     return negotiated_mode_ == WaveformMode::MC_DPSK;
 }
 
+int Connection::selectBurstLiftingZ() const {
+    // C-plumbing (byte-neutral): today's behavior — the ULTRA_LDPC_Z discovery
+    // override, else 27. The SINGLE remaining env read for the connection-layer Z.
+    // C-policy (next): add `|| (isOFDMMode(negotiated_mode_) && file_transfer_
+    // SENDING)` here to flip bulk/file bursts to long LDPC. See LDPC_Z design doc.
+    if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
+        if (std::atoi(env) == 81) return 81;
+    }
+    return 27;
+}
+
 size_t Connection::currentDataPayloadCapacity() const {
     if (isOFDMMode(negotiated_mode_)) {
-        // 2026-05-28: when the long-LDPC z=81 opt-in is active, info bytes per
-        // codeword scale 3x. Without this branch the chunker would size frames
-        // at the Z=27 capacity (e.g. 96 B/frame at R3/4 cw=2) while the encoder
-        // produces Z=81 frames (345 B/frame), so 70%+ of every burst is zero
-        // padding — the real-world throughput killer the user surfaced.
-        if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
-            if (std::atoi(env) == 81) {
-                return v2::getFixedFramePayloadCapacityZ(
-                    data_code_rate_, data_frame_cw_count_, 81);
-            }
+        // Z-aware capacity: at z=81 info bytes per codeword scale 3x. Sizing the
+        // chunker at the active z (selectBurstLiftingZ) keeps the encoder from
+        // zero-padding 70%+ of every burst (the real-world throughput killer).
+        if (selectBurstLiftingZ() == 81) {
+            return v2::getFixedFramePayloadCapacityZ(
+                data_code_rate_, data_frame_cw_count_, 81);
         }
         return v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
     }

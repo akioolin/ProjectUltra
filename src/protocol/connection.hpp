@@ -669,6 +669,19 @@ private:
     uint32_t pingTimeoutMsForCurrentProfile() const;
     bool usesBoundedVariableMCDPSKFrames() const;
     size_t currentDataPayloadCapacity() const;
+
+    // Single TX-side source of truth for the per-burst LDPC lifting Z (27 -> n=648,
+    // 81 -> n=1944). The connection owns this because it owns traffic class. Result
+    // is announced on the wire in BURST_HEADER payload[5] (encoder reads the same
+    // value) so the RX matches via the descriptor. See docs/LDPC_Z_DERIVATION_DESIGN.
+    //
+    // C-plumbing (current): returns today's behavior — the ULTRA_LDPC_Z discovery
+    // override else 27 — so routing every chunker site through here is byte-neutral.
+    // C-policy (next, validated): add the traffic-class rule
+    //   if (isOFDMMode(negotiated_mode_) && file_transfer_ is SENDING) -> 81
+    // i.e. long LDPC for bulk/file bursts (fade diversity), short for control /
+    // interactive / MC-DPSK. The env stays as the SINGLE discovery escape hatch.
+    int selectBurstLiftingZ() const;
     // Apply a new data mode. cw_count: 0 = compute via recommendCWCount(rate),
     // 1..8 = explicit (used when MODE_CHANGE wire byte specifies a value).
     void applyDataMode(Modulation mod, CodeRate rate, int cw_count = 0,

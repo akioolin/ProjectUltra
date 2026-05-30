@@ -64,6 +64,32 @@ RX:  descriptor decode ─► last_burst_descriptor_.lifting_z (cached)
 | `streaming_burst_interleave.cpp:463` | RX deinterleave | `last_burst_descriptor_.lifting_z` |
 | `streaming_encoder.cpp:584` | TX descriptor | already uses member ✅ |
 
+## Step-C findings (investigated 2026-05-30 — read before implementing)
+1. **Dual TX architecture.** The GUI encodes via `ModemEngine`/`StreamingEncoder`
+   (`modem_engine.cpp:573` sets Z); `cli_simulator` uses `StreamingEncoder` directly and
+   sets NO Z (stays default 27 — its short `--test` msgs never hit the Z=81 burst path).
+   This is *why* the 16 env reads exist: each path re-derived Z from the global env because
+   there was no shared plumbed value. The connection is shared; the TX encoder is not.
+2. **Step C is a BEHAVIOR CHANGE, not neutral.** Real no-env GUI today uses **Z=27 for files**
+   (modem_engine static→27, chunker env→27). Z=81 only happens *with the harness env=81*. So
+   the traffic-class policy *flips* real GUI files 27→81 — the intended change, but it must be
+   validated on the faithful GUI, not assumed neutral. (A+B were neutral; C is not.)
+3. **Step C is ATOMIC.** The chunker capacity (`connection.cpp` 1951/2214/2687/4355 +
+   `makeFixedDataFrame` capacity) and the GUI encoder Z (`modem_engine:573`) must move off the
+   SAME policy together. Split them and real no-env file transfers truncate/zero-pad 70% (the
+   exact bug the 2563/4355 comments describe).
+4. **Wiring surface:** `makeFixedDataFrame` has **10 callers** (all `connection.cpp` + 1 in
+   `selective_repeat_arq.cpp`) — add a `lifting_z` param, pass `selectBurstLiftingZ()`.
+   `modem_engine` needs a `setBurstLiftingZ()` setter + member; the **app** pushes
+   `protocol_.currentBurstLiftingZ()` → `modem_.setBurstLiftingZ()` on change (guarded), since
+   the connection has no encoder handle. The single env override lives ONLY inside
+   `selectBurstLiftingZ()`.
+5. **Decomposition to stay provable:** land **C-plumbing** first — `selectBurstLiftingZ()`
+   returns *today's* env-behavior (`env==81?81:27`, no traffic class yet), wire all sites + the
+   app push, prove byte-identical (neutral, like A+B). THEN **C-policy** — add
+   `|| (isOFDM && file_transfer_ SENDING)` to the policy; prove the 27→81 flip on the GUI file
+   transfer (multi-seed) + an interactive OFDM msg stays 27. Codex counter-check the C-policy diff.
+
 ## Build order (separately provable)
 - **Step A — RX trust-the-wire (lowest risk).** RX consumers read the cached descriptor Z
   instead of env. Behavior-neutral in the harness (descriptor==env==81); strictly *more*
