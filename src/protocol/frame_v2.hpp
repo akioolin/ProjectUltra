@@ -1186,7 +1186,8 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
  */
 DataFrame makeFixedDataFrame(const std::string& src, const std::string& dst,
                               uint16_t seq, const Bytes& payload, CodeRate rate,
-                              int cw_count = kDefaultFixedFrameCodewords);
+                              int cw_count = kDefaultFixedFrameCodewords,
+                              int lifting_z = 27);  // 27 -> n=648, 81 -> n=1944
 
 } // namespace v2
 

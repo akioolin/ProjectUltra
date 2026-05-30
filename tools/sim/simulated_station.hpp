@@ -1887,6 +1887,15 @@ private:
             encoder_->setDataMode(data_modulation_, data_code_rate_);
         }
 
+        // Match the encoder Z AND cw/frame to the connection's per-burst policy
+        // (long LDPC for file/bulk bursts) so encoder Z/cw == chunker == descriptor.
+        // cli's analogue of the GUI's modem_engine.cpp:573 (which sets both Z and
+        // the z=81 ⟹ cw=2 coupling). getForcedFrameCodewords() returns the value
+        // the connection coerced (2 at z=81) so the descriptor + RX match.
+        encoder_->setLDPCLiftingZ(
+            static_cast<uint8_t>(protocol_.selectBurstLiftingZ()));
+        encoder_->setFixedFrameCodewords(protocol_.getForcedFrameCodewords());
+
         auto result = encoder_->encodeBurstLight(frame_data_list);
 
         LOG_MODEM(INFO, "[%s] TX burst: %zu frames -> %zu samples (mode=%s)",

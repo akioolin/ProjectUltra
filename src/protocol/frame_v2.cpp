@@ -2550,23 +2550,17 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
 
 DataFrame makeFixedDataFrame(const std::string& src, const std::string& dst,
                               uint16_t seq, const Bytes& payload, CodeRate rate,
-                              int cw_count) {
+                              int cw_count, int lifting_z) {
     cw_count = sanitizeFixedFrameCodewords(cw_count);
-    // 2026-05-28: z-aware capacity. The legacy getFixedFramePayloadCapacity
-    // returns the Z=27 size (~96 B at R3/4 cw=2) even when the encoder runs
-    // at z=81 (real capacity ~340 B). Without this branch the burst chunker
-    // gives makeFixedDataFrame a correctly-sized 340-byte FILE_DATA chunk,
-    // it gets SILENTLY TRUNCATED to 96 bytes here, and the receiver's
-    // file_transfer assembler skips ~244 bytes per frame — file never assembles
-    // even though bravo's PHY decode succeeds on every group.
-    size_t capacity = [&]() -> size_t {
-        if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
-            if (std::atoi(env) == 81) {
-                return getFixedFramePayloadCapacityZ(rate, cw_count, 81);
-            }
-        }
-        return getFixedFramePayloadCapacity(rate, cw_count);
-    }();
+    // Z-aware capacity. The legacy getFixedFramePayloadCapacity returns the Z=27
+    // size (~96 B at R3/4 cw=2) even when the encoder runs at z=81 (real capacity
+    // ~340 B). The caller passes the active lifting_z (Connection::selectBurstLiftingZ);
+    // without it a z=81 FILE_DATA chunk gets SILENTLY TRUNCATED to 96 B and the
+    // receiver's assembler skips ~244 B/frame — file never assembles even though
+    // PHY decode succeeds on every group.
+    const size_t capacity = (lifting_z == 81)
+        ? getFixedFramePayloadCapacityZ(rate, cw_count, 81)
+        : getFixedFramePayloadCapacity(rate, cw_count);
 
     // Truncate or use as-is
     Bytes actual_payload = payload;

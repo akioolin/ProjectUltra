@@ -106,6 +106,10 @@ public:
     void setReceiveDirectory(const std::string& dir);
     void cancelFileTransfer();
     bool isFileTransferInProgress() const;
+    // Per-burst LDPC lifting Z from the connection traffic-class policy (27/81).
+    // The app pushes this to ModemEngine::setBurstLiftingZ so the TX encoder Z
+    // matches the chunker. Forwards to Connection::selectBurstLiftingZ().
+    int selectBurstLiftingZ() const { return connection_.selectBurstLiftingZ(); }
     FileTransferProgress getFileProgress() const;
     BurstActivity getBurstActivity() const;
 

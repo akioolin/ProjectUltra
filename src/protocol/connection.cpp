@@ -2130,7 +2130,7 @@ bool Connection::startBurstFileTransfer() {
         const bool is_last = (i + 1 == chunk_payloads.size());
         auto frame = v2::makeFixedDataFrame(local_call_, remote_call_, seq++,
                                             chunk_payloads[i], data_code_rate_,
-                                            data_frame_cw_count_);
+                                            data_frame_cw_count_, selectBurstLiftingZ());
         frame.type = v2::FrameType::DATA;
         frame.flags = is_last ? v2::Flags::FINAL : v2::Flags::MORE_FRAG;
         frames.push_back(frame.serialize());
@@ -2230,7 +2230,8 @@ bool Connection::formAndSendBurstGroup(uint16_t group_seq, bool is_resend) {
             const Bytes& chunk = burst_metadata_queue_[md_taken];
             const uint16_t seq = burst_chunk_seq_++;
             auto frame = v2::makeFixedDataFrame(local_call_, remote_call_, seq, chunk,
-                                                data_code_rate_, data_frame_cw_count_);
+                                                data_code_rate_, data_frame_cw_count_,
+                                                selectBurstLiftingZ());
             frame.type = v2::FrameType::DATA;
             frame.flags = v2::Flags::MORE_FRAG;  // metadata is never the file tail
             frames.push_back(frame.serialize());
@@ -2262,7 +2263,8 @@ bool Connection::formAndSendBurstGroup(uint16_t group_seq, bool is_resend) {
                      burst_file_payload_.begin() + offset_in_file + this_data);
         const uint16_t seq = burst_chunk_seq_++;
         auto frame = v2::makeFixedDataFrame(local_call_, remote_call_, seq, chunk,
-                                            data_code_rate_, data_frame_cw_count_);
+                                            data_code_rate_, data_frame_cw_count_,
+                                            selectBurstLiftingZ());
         frame.type = v2::FrameType::DATA;
         const bool finishes_file = (offset_in_file + this_data >= total);
         frame.flags = finishes_file ? v2::Flags::FINAL : v2::Flags::MORE_FRAG;
@@ -2623,7 +2625,8 @@ bool Connection::formOneNewBurstFrame(Bytes& out_frame, bool& is_pad,
         const Bytes& chunk = burst_metadata_queue_.front();
         const uint16_t seq = burst_chunk_seq_++;
         auto frame = v2::makeFixedDataFrame(local_call_, remote_call_, seq, chunk,
-                                            data_code_rate_, data_frame_cw_count_);
+                                            data_code_rate_, data_frame_cw_count_,
+                                            selectBurstLiftingZ());
         frame.type = v2::FrameType::DATA;
         frame.flags = v2::Flags::MORE_FRAG;  // metadata is never the file tail
         out_frame = frame.serialize();
@@ -2648,7 +2651,8 @@ bool Connection::formOneNewBurstFrame(Bytes& out_frame, bool& is_pad,
                  burst_file_payload_.begin() + offset_in_file + this_data);
     const uint16_t seq = burst_chunk_seq_++;
     auto frame = v2::makeFixedDataFrame(local_call_, remote_call_, seq, chunk,
-                                        data_code_rate_, data_frame_cw_count_);
+                                        data_code_rate_, data_frame_cw_count_,
+                                        selectBurstLiftingZ());
     frame.type = v2::FrameType::DATA;
     const bool finishes_file = (offset_in_file + this_data >= total);
     frame.flags = finishes_file ? v2::Flags::FINAL : v2::Flags::MORE_FRAG;
@@ -4334,12 +4338,26 @@ bool Connection::usesBoundedVariableMCDPSKFrames() const {
 }
 
 int Connection::selectBurstLiftingZ() const {
-    // C-plumbing (byte-neutral): today's behavior — the ULTRA_LDPC_Z discovery
-    // override, else 27. The SINGLE remaining env read for the connection-layer Z.
-    // C-policy (next): add `|| (isOFDMMode(negotiated_mode_) && file_transfer_
-    // SENDING)` here to flip bulk/file bursts to long LDPC. See LDPC_Z design doc.
+    // ULTRA_LDPC_Z is the SINGLE discovery override (force long LDPC for sweeps).
     if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
         if (std::atoi(env) == 81) return 81;
+    }
+    // Traffic-class policy (C-policy): long LDPC (Z=81, n=1944) for bulk/file OFDM
+    // bursts — a 1944-bit codeword spans ~1.8x the coherence interval at 0.1 Hz
+    // Doppler, buying fade diversity where latency is free. Short (Z=27, n=648) for
+    // control, interactive messages, and MC-DPSK (fast ACK turnaround).
+    //
+    // GATED ON use_burst_transport_: long LDPC needs the burst-group machinery —
+    // the BURST_HEADER descriptor (so the RX learns Z=81 off the wire) and the
+    // z=81 ⟹ cw=2 coupling. The default SelectiveRepeatARQ file path
+    // (use_burst_transport_=false) emits NO descriptor, so it MUST stay Z=27 or the
+    // RX can't know Z and the chunker/frame sizes diverge. The app/cli pushes this
+    // Z to the TX encoder so its Z matches the chunker.
+    // See docs/LDPC_Z_DERIVATION_DESIGN_2026_05_30.md.
+    if (isOFDMMode(negotiated_mode_) &&
+        use_burst_transport_ &&
+        file_transfer_.getState() == FileTransferState::SENDING) {
+        return 81;
     }
     return 27;
 }

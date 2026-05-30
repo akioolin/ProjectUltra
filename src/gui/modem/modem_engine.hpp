@@ -322,6 +322,10 @@ public:
         if (streaming_encoder_) streaming_encoder_->setFixedFrameCodewords(cw_count);
         if (streaming_decoder_) streaming_decoder_->setFixedFrameCodewords(cw_count);
     }
+    // Per-burst LDPC lifting Z for the TX encoder, pushed from the connection
+    // policy (Connection::selectBurstLiftingZ) by the app. The encoder writes it
+    // into the BURST_HEADER descriptor so the RX matches via the wire. Default 27.
+    void setBurstLiftingZ(uint8_t z) { burst_lifting_z_ = (z == 81) ? 81 : 27; }
     void expectFullOFDMAnchorOnce() {
         if (streaming_decoder_) streaming_decoder_->expectFullOFDMAnchorOnce();
     }
@@ -349,6 +353,9 @@ private:
     // Waveform mode state
     protocol::WaveformMode waveform_mode_ = protocol::WaveformMode::OFDM_CHIRP;
     protocol::WaveformMode connect_waveform_ = protocol::WaveformMode::MC_DPSK;
+
+    // Per-burst LDPC lifting Z, pushed from the connection policy (default 27).
+    uint8_t burst_lifting_z_ = 27;
     protocol::WaveformMode last_rx_waveform_ = protocol::WaveformMode::MC_DPSK;
     protocol::WaveformMode disconnect_waveform_ = protocol::WaveformMode::MC_DPSK;  // Saved for ACK
     bool connected_ = false;

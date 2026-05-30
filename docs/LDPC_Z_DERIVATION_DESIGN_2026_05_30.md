@@ -64,6 +64,27 @@ RX:  descriptor decode ─► last_burst_descriptor_.lifting_z (cached)
 | `streaming_burst_interleave.cpp:463` | RX deinterleave | `last_burst_descriptor_.lifting_z` |
 | `streaming_encoder.cpp:584` | TX descriptor | already uses member ✅ |
 
+## C-policy LANDED 2026-05-30 — and the path-scoping that fell out of it
+The flip is **gated on `use_burst_transport_`**, not just "file SENDING". Why: the file
+transfer has TWO TX paths — the **default `SelectiveRepeatARQ`** path
+(`use_burst_transport_=false`, `arq_.sendFixedDataWithFlags`) which emits **NO BURST_HEADER
+descriptor**, and the **burst-group** path (`use_burst_transport_=true`, `formAndSendBurstGroup`)
+which does. Long LDPC needs the descriptor (so RX learns Z=81) and the z=81⟹cw=2 coupling, so it
+can ONLY ride the burst path. The first cut (gate = "file SENDING") broke the default path: the
+chunker sized at Z=81 while the SR-ARQ frame builder stayed Z=27 → truncation. Adding
+`&& use_burst_transport_` keeps the default path at Z=27 (its only consistent mode) and turns on
+Z=81 only where the machinery exists.
+
+**Proven:** 16→1 getenv (the 1 = the discovery override inside `selectBurstLiftingZ`). No
+regression — `cli_simulator` short-msg PASS, `cli --file` default (use_burst=0) PASS at Z=27.
+**Still pending the faithful GUI proof:** the Z=81 *burst-path* flip. `cli`'s burst harness
+(`SimulatedStation`) is explicitly "not the faithful GUI gate" (it `(void)group_seq`s the
+descriptor) and never set the encoder Z — so cli can't validate burst-Z81 (it was already
+broken there by A+B; cli short-msgs never exercised it). The GUI burst path emits/decodes the
+descriptor (the validated ~3.1 kbps path); the C-policy just changes the *trigger* env→policy on
+that same machinery. Run `gui_qso_scenario.sh` WITHOUT `ULTRA_LDPC_Z` (so the policy decides) +
+`ULTRA_BURST_TRANSPORT=1` to confirm the 27→81 flip delivers a file byte-exact before relying on it.
+
 ## Step-C findings (investigated 2026-05-30 — read before implementing)
 1. **Dual TX architecture.** The GUI encodes via `ModemEngine`/`StreamingEncoder`
    (`modem_engine.cpp:573` sets Z); `cli_simulator` uses `StreamingEncoder` directly and

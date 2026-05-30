@@ -700,6 +700,10 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             return;
         }
 
+        // Match the TX encoder Z to the connection's per-burst traffic-class policy
+        // (long LDPC for file/bulk bursts) so the encoder Z == the chunker Z and the
+        // BURST_HEADER descriptor it writes. Same thread as the encode below.
+        modem_.setBurstLiftingZ(static_cast<uint8_t>(protocol_.selectBurstLiftingZ()));
         auto samples = modem_.transmitBurst(frames, group_seq);
         if (!samples.empty()) {
             queueRealTxSamples(samples, "TX burst audio", in_qso_data);
@@ -3141,6 +3145,9 @@ void App::flushDeferredTxIfReady() {
             }
             break;
         case DeferredTxKind::Burst:
+            // Keep the encoder Z aligned to the connection policy (see the live
+            // transmitBurst path) for deferred bursts too.
+            modem_.setBurstLiftingZ(static_cast<uint8_t>(protocol_.selectBurstLiftingZ()));
             samples = modem_.transmitBurst(front.frames, front.group_seq);
             break;
     }

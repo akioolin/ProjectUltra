@@ -570,14 +570,12 @@ std::vector<float> ModemEngine::transmitBurst(const std::vector<Bytes>& frame_da
     // amortized the per-group overhead badly; cw=2 is the actual sweet
     // spot per the rung math the user derived empirically.
     if (protocol::isOFDMMode(waveform_mode_)) {
-        static const uint8_t kBurstLiftingZ = []() -> uint8_t {
-            if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
-                if (std::atoi(env) == 81) return 81;
-            }
-            return 27;
-        }();
-        streaming_encoder_->setLDPCLiftingZ(kBurstLiftingZ);
-        if (kBurstLiftingZ == 81) {
+        // Per-burst Z is decided by the connection-layer traffic-class policy
+        // (Connection::selectBurstLiftingZ) and pushed here via setBurstLiftingZ
+        // — no env read. The encoder writes it into the BURST_HEADER descriptor
+        // so the RX matches. z=81 ⟹ cw_per_frame=2 (the coupling lives here).
+        streaming_encoder_->setLDPCLiftingZ(burst_lifting_z_);
+        if (burst_lifting_z_ == 81) {
             streaming_encoder_->setFixedFrameCodewords(2);
             // 2026-05-28: reverted adaptive short-re-anchor — broke frame-stride
             // timing on group members. Pure light LTS at group-start until the
