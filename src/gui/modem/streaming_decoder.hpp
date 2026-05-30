@@ -158,9 +158,14 @@ using DataSyncAcceptedCallback = std::function<void(float sync_correlation)>;
 // SR-ARQ burst path keeps its per-frame delivery.
 // quality (§14.36): decode headroom of the group in [0,1] (0 = failed) — drives
 // the receiver's BER-driven rate recommendation. Worst-codeword iteration headroom.
+// frame_mask (2026-05-29 channel-adaptive SR-ARQ): bit i = logical frame i of the group
+// decoded OK. interleaved = the group's bytes were byte-interleaved. When interleaved,
+// only all_ok is meaningful (a partial group is undecodable → whole-burst resend); when
+// NOT interleaved, frame_mask is a true per-frame SACK and the sender resends only the
+// 0-bit frames + refills the burst (the Good/AWGN SR-ARQ path).
 using BurstGroupCallback =
     std::function<void(uint16_t group_seq, const std::vector<Bytes>& frames, bool all_ok,
-                       float quality)>;
+                       float quality, uint8_t frame_mask, bool interleaved)>;
 
 // StreamingDecoder - Unified RX decoder for all waveform types
 class StreamingDecoder {

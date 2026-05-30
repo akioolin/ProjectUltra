@@ -168,14 +168,18 @@ public:
     void onMCDPSKPartialFrame(const v2::PartialFrameCodewords& partial);
     void onAcceptedOFDMDataSync(float sync_correlation);
 
-    // §14.27: a decoded interleaved burst delivered as a UNIT by the decoder
-    // (group_seq, ordered serialized DATA frames, all-logical-frames-decoded).
-    // Drops pad frames (addressed to the burst-pad callsign) and, only when the
-    // whole group decoded, hands the real frames to the group stop-and-wait
-    // controller (deliver-once + single GROUP_ACK). A partial group is dropped
-    // so the sender whole-burst-resends. Inert unless use_burst_transport_.
+    // §14.27 / §SR-ARQ: a decoded burst delivered by the decoder (group_seq, ordered
+    // serialized DATA frames that decoded, all-logical-frames-decoded flag, per-frame
+    // SACK mask, interleaved flag). Two channel-adaptive modes:
+    //   - interleaved (Moderate/Poor): a partial group is undecodable → only all_ok is
+    //     delivered+ACKed; a partial is NACKed for a whole-burst resend.
+    //   - NOT interleaved (Good/AWGN SR-ARQ): each decoded frame is delivered immediately
+    //     (offset-keyed assembler) and the tone-burst ACK carries the true frame_mask so
+    //     the sender resends only the 0-bit frames + refills the burst.
+    // Inert unless use_burst_transport_.
     void onBurstGroupReceived(uint16_t group_seq, const std::vector<Bytes>& frames,
-                              bool all_ok, float quality);
+                              bool all_ok, float quality, uint8_t frame_mask = 0x3F,
+                              bool interleaved = true);
 
     // §14.36 Phase 5c GUI observability: decode headroom of the most recent burst
     // group [0,1] (<0 = none yet) and a short human-readable adaptive action
@@ -515,6 +519,19 @@ private:
     // advances on a fresh group (after the previous one was acked); a resend
     // re-forms at the new rate from the same cursor.
     bool formAndSendBurstGroup(uint16_t group_seq, bool is_resend);
+    // §SR-ARQ RX: deliver each decoded frame of an interleave-OFF burst (offset-keyed,
+    // dedup-safe) and emit a tone-burst ACK carrying the true per-frame frame_mask.
+    void onBurstGroupReceivedSR(uint16_t group_seq, const std::vector<Bytes>& frames,
+                                uint8_t frame_mask);
+    // §SR-ARQ: form the next burst when the byte-interleave is OFF. Drains
+    // burst_resend_frames_ (failed frames, identical bytes) first, then refills with
+    // new frames from the cursor (advancing it immediately — failed frames are tracked
+    // separately, not via the cursor). Records burst_inflight_frames_ for the next
+    // ACK's frame_mask. Returns false when nothing is left to send (transfer done).
+    bool formAndSendBurstGroupSR(uint16_t group_seq);
+    // §SR-ARQ: form ONE new file/metadata/pad frame at the current cursor, advancing
+    // cursor/metadata. Sets is_pad. Returns false when the file+metadata are drained.
+    bool formOneNewBurstFrame(Bytes& out_frame, bool& is_pad, size_t per_frame_data);
     bool adaptive_rate_enabled_ = false;
     RateController rate_controller_;
     uint8_t pending_ack_quality_q_ = 0xFF;  // RX: byte to stamp on the next GROUP_ACK
@@ -534,6 +551,30 @@ private:
     // data — file_transfer_ enters RECEIVING before any FILE_DATA arrives.
     std::deque<Bytes> burst_metadata_queue_;
     size_t burst_pending_metadata_consumed_ = 0;
+    // §SR-ARQ (2026-05-29, channel-adaptive): when the byte-interleave is OFF
+    // (Good/AWGN), each burst frame is independently decodable, so the transport
+    // runs Selective-Repeat at the FRAME granularity instead of whole-group
+    // stop-and-wait. burst_interleave_off_ selects that path (set at transfer
+    // start from ULTRA_BURST_INTERLEAVE). burst_inflight_frames_ are the exact
+    // serialized frames of the in-flight burst (position-aligned with the
+    // receiver's frame_mask); on a partial mask the 0-bit positions are pushed
+    // (identical bytes — no re-chunk/re-offset bookkeeping) into
+    // burst_resend_frames_ and drained into the next burst before new frames, so
+    // every burst stays full. Pads (filler) are never re-queued.
+    bool burst_interleave_off_ = false;
+    std::deque<Bytes> burst_resend_frames_;
+    std::vector<Bytes> burst_inflight_frames_;
+    std::vector<bool> burst_inflight_is_pad_;
+    // §SR-ARQ correctness: the receiver's file assembler SILENTLY DROPS FILE_DATA
+    // that arrives before the FILE_START metadata establishes RECEIVING. In a
+    // partial burst the metadata frame can fail while data frames in the SAME burst
+    // decode — acking those (per the decoder's frame_mask) tells the sender they
+    // landed when they were dropped → a permanent gap (the offset-0 loss that
+    // stalled seed 44). So the RX must NOT ack a burst delivered before RECEIVING;
+    // it NACKs the whole burst until metadata establishes the stream. This latch
+    // distinguishes "not receiving yet" (NACK) from "already finalized" (a late dup
+    // after our final ACK was lost → ack so the sender completes, not retries to death).
+    bool burst_rx_ever_receiving_ = false;
     // RX group assembly for the burst transport: frames of the in-flight group
     // accumulate here (keyed by the descriptor group_seq) until the group is
     // complete, then are handed to burst_transport_.onGroupReceived().

@@ -10,6 +10,55 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-29: Channel-adaptive SR-ARQ — per-frame Selective-Repeat on the interleave-off (Good/AWGN) burst path (branch `feat/oneway-arch-2026-05-27`, env-gated `ULTRA_BURST_INTERLEAVE=0`, default unchanged)
+
+**Goal / why:** with the byte-interleave OFF (the RX decouple below), each burst frame
+is INDEPENDENTLY decodable, so a 1–3 s Good fade kills only 1–3 of a 6-frame group, not the
+whole group (measured: seed 1 saw 5/6 & 3/6; seed 44 saw 5/6, 4/6, 2/6, 1/6). Whole-group
+stop-and-wait wastes a full 6-frame resend on every such partial. SR-ARQ resends ONLY the
+failed frames and refills the burst to 6 with new frames, so the pipe stays full — the
+industry-leader model (§14.15), now revived on the interleave-off path. (Interleave-ON
+Moderate/Poor keeps whole-group stop-and-wait, where a partial group is genuinely
+undecodable.) The infra was already built for it: the tone-burst ACK `frame_mask` is
+spec'd as a per-frame SACK, and the receiver's file assembler already buffers out-of-order
+by offset, dedups overlaps, and finalizes by byte-count (not the FINAL flag), so reordered
+partial delivery needed ZERO receiver-reassembly changes.
+
+**What was changed:**
+- RX `streaming_burst_interleave.cpp`: `finalizeBurstGroup` computes the true per-frame
+  `frame_mask`; `BurstGroupCallback` carries `frame_mask` + `interleaved` (threaded through
+  modem_engine → app → protocol_engine → connection).
+- `connection.cpp` (sender): `formAndSendBurstGroupSR` drains a resend queue (failed frames
+  as IDENTICAL serialized bytes — no offset/length/rate re-derivation) then refills to 6
+  with new frames from the cursor (advanced immediately); records the in-flight position→
+  frame map. `onToneBurstAck` SR branch re-queues the 0-bit real frames (skips pads),
+  advances + refills if any frame landed, NACKs only a fully-dead burst (so the controller's
+  `max_retries` still guards liveness). `form_send_` dispatches to the SR path when
+  `burst_interleave_off_` (from `ULTRA_BURST_INTERLEAVE`).
+- `connection.cpp` (receiver): `onBurstGroupReceivedSR` delivers each decoded frame
+  immediately (offset-keyed assembler) and ACKs the per-frame mask.
+
+**Correctness bug found + fixed (the seed-44 stall):** the assembler SILENTLY DROPS
+FILE_DATA delivered before the FILE_START metadata establishes RECEIVING. In burst 0 the
+metadata frame (position 0) can fail while data frames in the SAME burst decode — acking
+those per the decode mask told the sender they landed when they were DROPPED → a permanent
+gap at offset 0 → the file never assembled (seed 44: ALPHA done, BRAVO CRC fail, 719 s).
+Fix: the receiver ACKs DELIVERY, not DECODE — until RECEIVING is established it NACKs the
+whole burst (sender resends metadata + data together); a `burst_rx_ever_receiving_` latch
+lets a post-finalization duplicate be ACKed (so a lost final ACK doesn't retry to death).
+
+**Test verification (GUI faithful fade gate):** `ULTRA_BURST_INTERLEAVE=0 QPSK R3/4 Good@20
+40KB`. Pre-fix: seed 1 PASS/1740, seed 44 FAIL (offset-0 loss). Post-fix: seed 1 PASS/1700,
+seed 44 PASS/1380, both CRC-clean. SR-ARQ strictly beats interleave-off whole-group
+(1560/1130) on both seeds and beats the default interleave-ON bi=1 (1280/1480 on this
+binary) on seed 1 (+33%); seed 44 is slightly under bi=1 (high single-seed variance — a
+multi-seed sweep is the firm-claim gate, pending). The honest same-binary baselines correct
+the prior entry's stale "~1810/1390" (a best-case memory): default bi=1 is 1280/1480.
+Default path unchanged by construction (the `!interleaved` branch is skipped and
+`burst_interleave_off_=false` routes to the untouched whole-group form).
+
+---
+
 ## 2026-05-29: Channel-adaptive interleaver — RX-side decouple of burst transport from byte-interleave (branch `feat/oneway-arch-2026-05-27`, env-gated `ULTRA_BURST_INTERLEAVE=0`, default unchanged)
 
 **Goal / why:** the industry leader is faster on Multipath-Moderate than on Multipath-Good

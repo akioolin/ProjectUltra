@@ -120,7 +120,8 @@ public:
     // §14.27: a decoded interleaved burst delivered as a unit (group_seq, ordered
     // DATA frames, all-logical-frames-decoded) for the one-way burst transport.
     void onBurstGroupReceived(uint16_t group_seq, const std::vector<Bytes>& frames,
-                              bool all_ok, float quality);
+                              bool all_ok, float quality, uint8_t frame_mask = 0x3F,
+                              bool interleaved = true);
 
     // §15 step 4d-ii: hand a tone-burst ACK detection from the receiver's
     // always-on ToneBurstAckMonitor (installed in StreamingDecoder) to the

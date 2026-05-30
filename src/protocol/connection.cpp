@@ -1885,6 +1885,38 @@ bool Connection::onToneBurstAck(
               detection.correlation_peak,
               static_cast<unsigned>(detection.symbol_ms_used));
 
+    // §SR-ARQ: interpret the per-frame mask. Re-queue the 0-bit REAL frames (skip
+    // pads) of the in-flight burst for resend, then advance + refill if ANY real
+    // frame was delivered. A fully-dead burst (0 real acked) is a NACK so the
+    // controller's max_retries liveness still declares a dead link.
+    if (burst_interleave_off_) {
+        const uint8_t mask = detection.payload.frame_mask;
+        int real_total = 0, real_acked = 0;
+        for (size_t i = 0; i < burst_inflight_frames_.size(); ++i) {
+            const bool pad = (i < burst_inflight_is_pad_.size()) && burst_inflight_is_pad_[i];
+            if (pad) continue;
+            ++real_total;
+            const bool acked = (i < 8) && (((mask >> i) & 1u) != 0);
+            if (acked) {
+                ++real_acked;
+            } else {
+                burst_resend_frames_.push_back(burst_inflight_frames_[i]);
+            }
+        }
+        LOG_MODEM(INFO,
+                  "Connection: SR-ARQ ACK seq=%u mask=0x%02X real_acked=%d/%d resend_queue=%zu",
+                  static_cast<unsigned>(expected_seq16), static_cast<unsigned>(mask),
+                  real_acked, real_total, burst_resend_frames_.size());
+        if (real_acked > 0) {
+            applyAdaptiveRateFeedback(1.0f);
+            burst_transport_.onGroupAck(expected_seq16);   // advance -> form next (resends+new)
+        } else {
+            applyAdaptiveRateFeedback(0.0f);
+            burst_transport_.onGroupNack(expected_seq16);  // retry same burst (liveness)
+        }
+        return true;
+    }
+
     if (is_nack) {
         applyAdaptiveRateFeedback(0.0f);
         burst_transport_.onGroupNack(expected_seq16);
@@ -2011,9 +2043,22 @@ bool Connection::startBurstFileTransfer() {
         burst_file_cursor_ = 0;
         burst_pending_advance_ = 0;
         burst_chunk_seq_ = 0;
+        // §SR-ARQ (channel-adaptive): when the byte-interleave is OFF (Good/AWGN), run
+        // Selective-Repeat at the frame granularity (resend only the failed frames +
+        // refill). Same ULTRA_BURST_INTERLEAVE knob that gates the encoder/decoder.
+        burst_interleave_off_ = [] {
+            const char* env = std::getenv("ULTRA_BURST_INTERLEAVE");
+            return env && env[0] == '0';
+        }();
+        burst_resend_frames_.clear();
+        burst_inflight_frames_.clear();
+        burst_inflight_is_pad_.clear();
         burst_transport_.setFormAndSendGroup(
             [this](uint16_t group_seq, bool is_resend) {
-                return formAndSendBurstGroup(group_seq, is_resend);
+                // SR form drains the resend queue + refills (ignores is_resend); the
+                // whole-group form re-creates the same group from the cursor on resend.
+                return burst_interleave_off_ ? formAndSendBurstGroupSR(group_seq)
+                                             : formAndSendBurstGroup(group_seq, is_resend);
             });
         // 2026-05-28: previously the timeout handler called
         // applyAdaptiveRateFeedback(0.0f) — "treat silence as quality=0 so the
@@ -2348,7 +2393,8 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
 }
 
 void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Bytes>& frames,
-                                      bool all_ok, float quality) {
+                                      bool all_ok, float quality, uint8_t frame_mask,
+                                      bool interleaved) {
     if (!use_burst_transport_) {
         return;
     }
@@ -2360,6 +2406,15 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
         adaptive_rate_enabled_
             ? static_cast<uint8_t>(std::lround(std::clamp(quality, 0.0f, 1.0f) * 254.0f))
             : 0xFF;
+
+    // §SR-ARQ (channel-adaptive): an interleave-OFF group is a set of INDEPENDENTLY
+    // decodable frames. Deliver every frame that decoded (the offset-keyed assembler
+    // handles reorder + dedup) and ACK the TRUE per-frame frame_mask so the sender
+    // resends only the 0-bit frames + refills — no whole-group resend on a partial fade.
+    if (!interleaved) {
+        onBurstGroupReceivedSR(group_seq, frames, frame_mask);
+        return;
+    }
     // A partial group cannot be deinterleaved/reassembled, so it is dropped and
     // the sender whole-burst-resends (stop-and-wait, no SACK). Only a fully
     // decoded group is ACKed + delivered.
@@ -2453,6 +2508,202 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
     // Controller delivers once + emits one GROUP_ACK (dedup re-ACKs a duplicate
     // group whose prior ACK was lost without re-delivering).
     burst_transport_.onGroupReceived(group_seq, real_frames);
+}
+
+void Connection::onBurstGroupReceivedSR(uint16_t group_seq,
+                                        const std::vector<Bytes>& frames,
+                                        uint8_t frame_mask) {
+    // Responder handshake confirmation + CONNECT_ACK rescue disarm — the burst
+    // group-as-unit path bypasses onFrameReceived, so mirror it here (identical to
+    // the whole-group all_ok path) on the first decoded burst.
+    if (state_ == ConnectionState::CONNECTED && !is_initiator_ && !handshake_confirmed_) {
+        LOG_MODEM(INFO, "Connection: Handshake confirmed (first SR burst from initiator)");
+        handshake_confirmed_ = true;
+        responder_handshake_wait_ms_ = 0;
+        if (on_handshake_confirmed_) on_handshake_confirmed_();
+    }
+    if (state_ == ConnectionState::CONNECTED && !is_initiator_ &&
+        !connect_ack_frame_.empty()) {
+        LOG_MODEM(INFO, "Connection: CONNECT_ACK rescue disarmed (SR burst decoded)");
+        connect_ack_frame_.clear();
+        connect_ack_retx_remaining_ = 0;
+    }
+
+    // Deliver every decoded REAL frame (drop pads addressed to the burst-pad
+    // callsign). FileTransferController's assembler writes each chunk at its
+    // embedded offset, buffers out-of-order, dedups overlaps, and finalizes by
+    // byte count (not the FINAL flag) — so partial/reordered delivery is already
+    // correct, including a FINAL-tail frame that arrives before earlier gaps fill.
+    int delivered = 0;
+    for (const auto& frame : frames) {
+        auto df = v2::DataFrame::deserialize(frame);
+        if (!df) continue;
+        auto hdr = v2::parseHeader(frame);
+        if (hdr.valid && !v2::isAddressedToCallsign(hdr, local_call_)) continue;  // pad
+        const bool more_data = (df->flags & v2::Flags::MORE_FRAG) != 0;
+        handleDataPayload(df->payload, more_data, df->type);
+        ++delivered;
+    }
+
+    // Correctness guard (the seed-44 offset-0 loss): the assembler drops FILE_DATA
+    // delivered before FILE_START establishes RECEIVING. The decoder's frame_mask
+    // says "decoded", but un-RECEIVING delivery DROPS it — so ack DELIVERY, not
+    // DECODE. Until the stream is established we NACK the whole burst (the sender
+    // resends metadata + data together); once established, every decoded frame is
+    // safely written/buffered/deduped so the true mask is the right ACK. A late
+    // duplicate after finalization (ever-receiving but no longer RECEIVING) is acked
+    // so the sender completes instead of resending to death.
+    const bool receiving_now =
+        (file_transfer_.getState() == FileTransferState::RECEIVING);
+    if (receiving_now) {
+        burst_rx_ever_receiving_ = true;
+    }
+    const uint8_t ack_mask =
+        (receiving_now || burst_rx_ever_receiving_) ? frame_mask : 0;
+
+    // ACK the delivery-safe mask. type=Ack when any frame is acked (forward
+    // progress); Nack only on a fully-undelivered burst (0/N) so the sender's
+    // max_retries liveness still fires on a genuinely dead link.
+    if (on_transmit_tone_burst_ack_) {
+        ultra::waveform::tone_burst_ack::ToneBurstAckPayload tba;
+        tba.group_seq = static_cast<uint8_t>(group_seq & 0x3F);
+        tba.frame_mask = ack_mask;
+        tba.type = (ack_mask == 0)
+                       ? ultra::waveform::tone_burst_ack::AckType::Nack
+                       : ultra::waveform::tone_burst_ack::AckType::Ack;
+        const uint8_t q = pending_ack_quality_q_;
+        tba.rate_hint = (q == 0xFF)
+                            ? 0
+                            : static_cast<uint8_t>((static_cast<uint32_t>(q) * 7u) / 254u);
+        on_transmit_tone_burst_ack_(tba);
+        LOG_MODEM(INFO,
+                  "Connection: SR-ARQ burst group_seq=%u delivered %d frame(s); "
+                  "tone-burst %s ack_mask=0x%02X (decode_mask=0x%02X receiving=%d)",
+                  group_seq, delivered, ack_mask == 0 ? "NACK" : "ACK",
+                  static_cast<unsigned>(ack_mask), static_cast<unsigned>(frame_mask),
+                  receiving_now ? 1 : 0);
+    }
+}
+
+bool Connection::formOneNewBurstFrame(Bytes& out_frame, bool& is_pad,
+                                      size_t per_frame_data) {
+    is_pad = false;
+    constexpr size_t kFileDataOverhead = 5;  // TYPE(1) + OFFSET(4)
+    // Metadata chunks (FILE_START / FILE_BLOCK) ride the first new slots, as-is.
+    if (!burst_metadata_queue_.empty()) {
+        const Bytes& chunk = burst_metadata_queue_.front();
+        const uint16_t seq = burst_chunk_seq_++;
+        auto frame = v2::makeFixedDataFrame(local_call_, remote_call_, seq, chunk,
+                                            data_code_rate_, data_frame_cw_count_);
+        frame.type = v2::FrameType::DATA;
+        frame.flags = v2::Flags::MORE_FRAG;  // metadata is never the file tail
+        out_frame = frame.serialize();
+        burst_metadata_queue_.pop_front();
+        return true;
+    }
+    const size_t total = burst_file_payload_.size();
+    if (burst_file_cursor_ >= total) {
+        return false;  // file + metadata drained
+    }
+    const size_t offset_in_file = burst_file_cursor_;
+    const size_t this_data = std::min(per_frame_data, total - offset_in_file);
+    Bytes chunk;
+    chunk.reserve(kFileDataOverhead + this_data);
+    chunk.push_back(static_cast<uint8_t>(PayloadType::FILE_DATA));
+    const uint32_t off32 = static_cast<uint32_t>(offset_in_file);
+    chunk.push_back(static_cast<uint8_t>((off32 >> 24) & 0xFF));
+    chunk.push_back(static_cast<uint8_t>((off32 >> 16) & 0xFF));
+    chunk.push_back(static_cast<uint8_t>((off32 >> 8) & 0xFF));
+    chunk.push_back(static_cast<uint8_t>(off32 & 0xFF));
+    chunk.insert(chunk.end(), burst_file_payload_.begin() + offset_in_file,
+                 burst_file_payload_.begin() + offset_in_file + this_data);
+    const uint16_t seq = burst_chunk_seq_++;
+    auto frame = v2::makeFixedDataFrame(local_call_, remote_call_, seq, chunk,
+                                        data_code_rate_, data_frame_cw_count_);
+    frame.type = v2::FrameType::DATA;
+    const bool finishes_file = (offset_in_file + this_data >= total);
+    frame.flags = finishes_file ? v2::Flags::FINAL : v2::Flags::MORE_FRAG;
+    out_frame = frame.serialize();
+    burst_file_cursor_ += this_data;
+    return true;
+}
+
+bool Connection::formAndSendBurstGroupSR(uint16_t group_seq) {
+    if (!on_transmit_burst_) return false;
+    const size_t group_size = connection_policy::burstInterleaveGroupFrames();
+    const int active_z = []() {
+        if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
+            if (std::atoi(env) == 81) return 81;
+        }
+        return 27;
+    }();
+    const size_t frame_cap = (active_z == 81)
+        ? v2::getFixedFramePayloadCapacityZ(data_code_rate_, data_frame_cw_count_, 81)
+        : v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
+    constexpr size_t kFileDataOverhead = 5;
+    if (frame_cap <= kFileDataOverhead) return false;
+    const size_t per_frame_data = frame_cap - kFileDataOverhead;
+
+    // Done: nothing queued to resend AND the file+metadata are fully drained.
+    const bool drained = burst_resend_frames_.empty() &&
+                         burst_metadata_queue_.empty() &&
+                         burst_file_cursor_ >= burst_file_payload_.size();
+    if (drained) return false;  // transport marks done(success)
+
+    BurstStopAndWaitController::Group frames;
+    std::vector<bool> is_pad;
+    frames.reserve(group_size);
+    is_pad.reserve(group_size);
+
+    // 1) Resends first (identical serialized bytes — no offset/length/rate
+    //    re-derivation, so the receiver's offset-keyed assembler always lines up).
+    int resent = 0;
+    while (frames.size() < group_size && !burst_resend_frames_.empty()) {
+        frames.push_back(std::move(burst_resend_frames_.front()));
+        burst_resend_frames_.pop_front();
+        is_pad.push_back(false);
+        ++resent;
+    }
+    // 2) Refill the rest with NEW frames from the cursor (advanced immediately;
+    //    failed frames are tracked in burst_resend_frames_, not via the cursor).
+    int new_frames = 0;
+    while (frames.size() < group_size) {
+        Bytes nf;
+        bool pad = false;
+        if (!formOneNewBurstFrame(nf, pad, per_frame_data)) break;
+        frames.push_back(std::move(nf));
+        is_pad.push_back(pad);
+        if (!pad) ++new_frames;
+    }
+    // 3) Pad the remainder to a full burst (filler; never re-queued on NACK).
+    while (frames.size() < group_size) {
+        const size_t i = frames.size();
+        frames.push_back(v2::makeFixedDataFrame(
+            local_call_, kOFDMBurstPadCallsign,
+            static_cast<uint16_t>(kOFDMBurstPadSeq - i),
+            makeOFDMBurstPadPayload(data_code_rate_, data_frame_cw_count_, i),
+            data_code_rate_, data_frame_cw_count_).serialize());
+        is_pad.push_back(true);
+    }
+
+    // Record the in-flight burst so the next frame_mask maps positions -> frames.
+    burst_inflight_frames_ = frames;
+    burst_inflight_is_pad_ = is_pad;
+
+    LOG_MODEM(INFO,
+              "Connection: SR form group_seq=%u rate=%s cap=%zuB/frame resent=%d new=%d "
+              "resend_left=%zu cursor=%zu/%zu",
+              group_seq, codeRateToString(data_code_rate_), per_frame_data, resent,
+              new_frames, burst_resend_frames_.size(), burst_file_cursor_,
+              burst_file_payload_.size());
+
+    // A burst carrying resends follows a fade — pay the full chirp+LTS anchor so
+    // bravo re-acquires deterministically (mirrors the whole-group resend anchor).
+    on_transmit_burst_(frames, group_seq, /*force_full_preamble=*/resent > 0);
+    if (on_arm_tone_burst_ack_monitor_) {
+        on_arm_tone_burst_ack_monitor_(burst_transport_.ackTimeoutMs());
+    }
+    return true;
 }
 
 void Connection::collectBurstGroupFrame(uint16_t group_seq, const Bytes& frame_data,

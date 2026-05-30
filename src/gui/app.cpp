@@ -582,8 +582,9 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     // the burst transport is enabled (env ULTRA_BURST_TRANSPORT=1).
     modem_.setBurstGroupCallback(
         [this](uint16_t group_seq, const std::vector<Bytes>& frames, bool all_ok,
-               float quality) {
-            protocol_.onBurstGroupReceived(group_seq, frames, all_ok, quality);
+               float quality, uint8_t frame_mask, bool interleaved) {
+            protocol_.onBurstGroupReceived(group_seq, frames, all_ok, quality, frame_mask,
+                                           interleaved);
         });
     {
         const char* bt = std::getenv("ULTRA_BURST_TRANSPORT");
