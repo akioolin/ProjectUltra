@@ -659,31 +659,23 @@ void StreamingDecoder::finalizeBurstGroup() {
                   static_cast<unsigned long long>(last_frame_end_sample_),
                   expect_full_ofdm_anchor_ ? 1 : 0,
                   quality);
-        // §16.8 step 2 v2: refresh warm-sync state on successful group
-        // delivery. The per-frame arrival state machine doesn't fire
-        // during the 6-frame deinterleaved burst body (§16.11 finding 1),
-        // so frame_arrival_confidence_ decays via sync-miss events between
-        // groups. After ~2 groups it drops below kMinWarmWindowConfidence
-        // (0.25) and the narrow warm window deactivates → next group fails
-        // → catastrophic stall. The burst delivered all-OK is the strongest
-        // possible evidence of warm sync; reset misses + bump conf back to
-        // a healthy value. Knob-gated default OFF.
-        // §SyncV2 root-2: refresh warm-sync on ANY acquired group, not just all_ok.
-        // Reaching "delivered as unit" means BRAVO found this group's descriptor
-        // chirp + demodulated all 6 frames — i.e. warm sync WORKED — even when the
-        // LDPC then failed the data (a deep-fade group). The legacy `if (all_ok)`
-        // refreshes only on success, so a faded group leaves confidence decaying +
-        // the per-frame state machine degrades it → the next group's warm window
-        // deactivates → stall. Under v2, an acquired-but-decode-failed group keeps
-        // warm sync HEALTHY (ARQ resends the data); only a genuinely un-acquired
-        // group (no chirp found — never reaches here) should cool warmth.
-        const bool sync_v2_refresh = arrival_policy::syncV2Enabled();
-        if (all_ok || sync_v2_refresh) {
-            const char* s16_env_g =
-                std::getenv("ULTRA_S16_WARM_HANDOFF");
-            const bool s16_warm_handoff_g =
-                s16_env_g && std::atoi(s16_env_g) != 0;
-            if (s16_warm_handoff_g || sync_v2_refresh) {
+        // Refresh warm-sync on ANY acquired group, not just all_ok (2026-05-29,
+        // shipped from the SyncV2 stabilization — this is the change that does the
+        // work). Reaching "delivered as unit" means BRAVO found this group's
+        // descriptor chirp AND demodulated all 6 frames — i.e. warm sync WORKED — even
+        // when the LDPC then failed the DATA (a deep-fade group; ARQ resends it). The
+        // old code refreshed only on all_ok, so a faded group left
+        // frame_arrival_confidence_ decaying (the per-frame state machine doesn't fire
+        // during the deinterleaved burst body, §16.11) until the narrow warm window
+        // deactivated → the next group's acquisition collapsed → ~90s stall or a dead
+        // transfer. An acquired-but-decode-failed group keeps warm sync HEALTHY; only
+        // a genuinely un-acquired group (no chirp found — never reaches here) cools it.
+        const char* s16_env_g =
+            std::getenv("ULTRA_S16_WARM_HANDOFF");
+        const bool s16_warm_handoff_g =
+            s16_env_g && std::atoi(s16_env_g) != 0;
+        {
+            if (s16_warm_handoff_g) {
                 consecutive_sync_misses_ = 0;
                 frame_arrival_confidence_ = std::max(
                     frame_arrival_confidence_, 0.5f);

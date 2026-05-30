@@ -15,28 +15,19 @@ static constexpr size_t kDegradedWindowSamples = kSampleRateHz / 20; // 50 ms
 static constexpr size_t kWarmSearchSlackSamples = 256;
 static constexpr float kMinWarmWindowConfidence = 0.25f;
 static constexpr float kMinDegradedWindowConfidence = 0.05f;
-static constexpr int kWarmSyncMissesBeforeDegraded = 1;
+// HYSTERESIS (2026-05-29, shipped from the SyncV2 stabilization). The old thresholds
+// (degrade after 1 miss, recover after 4) collapsed WARM on a SINGLE miss; a partial
+// success flipped it back -> the WARM<->DEGRADED oscillation that stalled/killed 40KB
+// Good@20 QPSK file transfers (a faded group stuck 0/6 for ~90s, or a dead transfer;
+// 20KB masked it). A faded group is NORMAL — ARQ resends it and the descriptor chirp
+// re-anchors every group — so a transient decode/search miss must NOT collapse warm
+// timing. Tolerate sustained misses before degrading; reserve RECOVERY for genuinely
+// lost sync. (40KB Good@20 3/3 seeds: thrash -> 0; dead->1260, stalled->1810, 930->1390.)
+// 2/4 (not the old 1/4, not 4/8): 2 still kills the single-miss WARM<->DEGRADED bounce,
+// but stays RESPONSIVE to a genuine multi-miss sync loss (and the burst-refresh resets
+// the counter on every acquired group, so it rarely climbs anyway).
+static constexpr int kWarmSyncMissesBeforeDegraded = 2;
 static constexpr int kWarmSyncMissesBeforeRecovery = 4;
-
-// §SyncV2 (ULTRA_SYNC_V2): HYSTERESIS for the warm-sync state machine. The legacy
-// thresholds (degrade after 1 miss, recover after 4) collapse WARM on a SINGLE
-// miss, so a faded group + one mispredicted-window search miss flips WARM->DEGRADED
-// instantly; a partial success flips it back; the result is the WARM<->DEGRADED
-// oscillation measured on 40 KB transfers (group stuck 0/6 for ~90 s, or transfer
-// death). A faded group is NORMAL (ARQ resends it) and the descriptor chirp is on
-// the wire every group, so a transient decode/search miss must NOT collapse warm
-// timing. Tolerate sustained misses before degrading, and reserve RECOVERY (full
-// re-acquire) for genuinely lost sync.
-static constexpr int kWarmSyncMissesBeforeDegradedV2 = 4;
-static constexpr int kWarmSyncMissesBeforeRecoveryV2 = 8;
-
-inline bool syncV2Enabled() {
-    static const bool enabled = [] {
-        const char* env = std::getenv("ULTRA_SYNC_V2");
-        return env && env[0] == '1';
-    }();
-    return enabled;
-}
 
 enum class WarmSyncPhase {
     COLD,
@@ -60,14 +51,10 @@ inline WarmSyncPhase phaseAfterSuccessfulFrame() {
 }
 
 inline WarmSyncPhase phaseAfterSyncMiss(int consecutive_misses) {
-    const int degraded_at = syncV2Enabled() ? kWarmSyncMissesBeforeDegradedV2
-                                            : kWarmSyncMissesBeforeDegraded;
-    const int recovery_at = syncV2Enabled() ? kWarmSyncMissesBeforeRecoveryV2
-                                            : kWarmSyncMissesBeforeRecovery;
-    if (consecutive_misses >= recovery_at) {
+    if (consecutive_misses >= kWarmSyncMissesBeforeRecovery) {
         return WarmSyncPhase::RECOVERY;
     }
-    if (consecutive_misses >= degraded_at) {
+    if (consecutive_misses >= kWarmSyncMissesBeforeDegraded) {
         return WarmSyncPhase::DEGRADED;
     }
     return WarmSyncPhase::WARM;
