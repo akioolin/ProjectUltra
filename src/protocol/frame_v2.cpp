@@ -1897,10 +1897,26 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, int cw_count,
                                             : infoBytesPerCodewordZ(rate, lifting_z);
     size_t total_info_bytes = static_cast<size_t>(cw_count) * bytes_per_cw;
 
-    // Pad frame data to exactly N CWs worth of info bytes
+    // Pad frame data to exactly N CWs worth of info bytes.
     Bytes padded = frame_data;
     if (padded.size() < total_info_bytes) {
-        padded.resize(total_info_bytes, 0);
+        // WHITEN THE PAD with a deterministic PRBS, NOT zeros. A zero pad makes a mostly-
+        // empty frame (e.g. the ~90%-padding FILE_START) LDPC-encode to long runs of the
+        // SAME 16QAM constellation point; a systematic channel-estimate error then hits all
+        // of them the same way -> correlated symbol errors that LDPC (built for RANDOM
+        // errors) cannot fix. Measured 2026-05-30: FILE_START failed with biased LLRs
+        // (llr_avg≈4-6, high unsat) while random-data frames in the SAME group decoded clean
+        // -- purely a payload-entropy effect. Whitening the pad gives every frame diverse
+        // symbols. RX-transparent: the receiver reads payload_len bytes and ignores the pad,
+        // so no de-whitening and no compat bit are needed. (The general fix is a full data
+        // scrambler over all frames; this whitens the pad region only.)
+        const size_t pad_start = padded.size();
+        padded.resize(total_info_bytes);
+        uint32_t r = 0x9E3779B9u;  // fixed nonzero seed -> deterministic xorshift32 PRBS
+        for (size_t i = pad_start; i < total_info_bytes; ++i) {
+            r ^= r << 13; r ^= r >> 17; r ^= r << 5;
+            padded[i] = static_cast<uint8_t>(r);
+        }
     } else if (padded.size() > total_info_bytes) {
         padded.resize(total_info_bytes);  // Truncate (caller should have chunked)
     }
