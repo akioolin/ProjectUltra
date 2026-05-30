@@ -1820,17 +1820,40 @@ void StreamingDecoder::decodeCurrentFrame() {
         }
     } else if (!result.success && result.codewords_ok == 0 && connected_ && is_ofdm) {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
-        if (sync_from_warm_timed_window_) {
-            noteFrameArrivalSyncMissLocked();
+        if (arrival_policy::syncV2Enabled()) {
+            // §SyncV2 root-3: a 0-CW DECODE failure on a frame we SYNCED and
+            // demodulated is NOT a sync miss — timing/CFO were good enough to lock
+            // and demodulate; the LDPC just couldn't recover the DATA (a deep-fade
+            // group; ARQ will resend it). The legacy path treats it as a sync miss
+            // (noteFrameArrivalSyncMiss -> degrade) AND nukes warm tracking
+            // (resetFrameArrivalTracking) AND forces a full chirp re-anchor — so a
+            // single faded group collapses warm-sync into the WARM<->DEGRADED thrash
+            // (40KB: group stuck 0/6 ~90s, or transfer death). Instead: keep warm
+            // timing fully intact, do NOT degrade, and only re-arm the descriptor
+            // chirp anchor so the ARQ RESEND (which carries its own chirp every
+            // group) is re-acquired cleanly at WARM. Sync was fine; only the data
+            // failed — let ARQ, not the sync state machine, handle it.
             sync_from_warm_timed_window_ = false;
-        }
-        if (mode_ == protocol::WaveformMode::OFDM_CHIRP) {
-            resetFrameArrivalTrackingLocked();
-            expect_full_ofdm_anchor_ = true;
-            sync_reject_streak_ = 0;
-            LOG_MODEM(WARN,
-                      "[%s] OFDM decode failed with 0/%d CWs; forcing full chirp+LTS re-anchor",
-                      log_prefix_.c_str(), result.codewords_failed);
+            if (mode_ == protocol::WaveformMode::OFDM_CHIRP) {
+                expect_full_ofdm_anchor_ = true;  // catch the resend's chirp
+                LOG_MODEM(INFO,
+                          "[%s] SyncV2: 0/%d CW decode fail = data loss, NOT sync loss; "
+                          "warm timing preserved, re-arm chirp for ARQ resend",
+                          log_prefix_.c_str(), result.codewords_failed);
+            }
+        } else {
+            if (sync_from_warm_timed_window_) {
+                noteFrameArrivalSyncMissLocked();
+                sync_from_warm_timed_window_ = false;
+            }
+            if (mode_ == protocol::WaveformMode::OFDM_CHIRP) {
+                resetFrameArrivalTrackingLocked();
+                expect_full_ofdm_anchor_ = true;
+                sync_reject_streak_ = 0;
+                LOG_MODEM(WARN,
+                          "[%s] OFDM decode failed with 0/%d CWs; forcing full chirp+LTS re-anchor",
+                          log_prefix_.c_str(), result.codewords_failed);
+            }
         }
     }
 

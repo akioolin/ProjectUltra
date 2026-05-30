@@ -18,6 +18,26 @@ static constexpr float kMinDegradedWindowConfidence = 0.05f;
 static constexpr int kWarmSyncMissesBeforeDegraded = 1;
 static constexpr int kWarmSyncMissesBeforeRecovery = 4;
 
+// §SyncV2 (ULTRA_SYNC_V2): HYSTERESIS for the warm-sync state machine. The legacy
+// thresholds (degrade after 1 miss, recover after 4) collapse WARM on a SINGLE
+// miss, so a faded group + one mispredicted-window search miss flips WARM->DEGRADED
+// instantly; a partial success flips it back; the result is the WARM<->DEGRADED
+// oscillation measured on 40 KB transfers (group stuck 0/6 for ~90 s, or transfer
+// death). A faded group is NORMAL (ARQ resends it) and the descriptor chirp is on
+// the wire every group, so a transient decode/search miss must NOT collapse warm
+// timing. Tolerate sustained misses before degrading, and reserve RECOVERY (full
+// re-acquire) for genuinely lost sync.
+static constexpr int kWarmSyncMissesBeforeDegradedV2 = 4;
+static constexpr int kWarmSyncMissesBeforeRecoveryV2 = 8;
+
+inline bool syncV2Enabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("ULTRA_SYNC_V2");
+        return env && env[0] == '1';
+    }();
+    return enabled;
+}
+
 enum class WarmSyncPhase {
     COLD,
     WARM,
@@ -40,10 +60,14 @@ inline WarmSyncPhase phaseAfterSuccessfulFrame() {
 }
 
 inline WarmSyncPhase phaseAfterSyncMiss(int consecutive_misses) {
-    if (consecutive_misses >= kWarmSyncMissesBeforeRecovery) {
+    const int degraded_at = syncV2Enabled() ? kWarmSyncMissesBeforeDegradedV2
+                                            : kWarmSyncMissesBeforeDegraded;
+    const int recovery_at = syncV2Enabled() ? kWarmSyncMissesBeforeRecoveryV2
+                                            : kWarmSyncMissesBeforeRecovery;
+    if (consecutive_misses >= recovery_at) {
         return WarmSyncPhase::RECOVERY;
     }
-    if (consecutive_misses >= kWarmSyncMissesBeforeDegraded) {
+    if (consecutive_misses >= degraded_at) {
         return WarmSyncPhase::DEGRADED;
     }
     return WarmSyncPhase::WARM;
