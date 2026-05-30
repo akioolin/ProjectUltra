@@ -80,6 +80,23 @@ inline size_t burstInterleaveGroupFrames() {
     }
     return kBurstInterleaveGroupFrames;
 }
+
+// 2026-05-30: SINGLE source of truth for the cross-frame burst-interleave profile.
+// OFF by default. Rationale: SR-ARQ per-frame resend (interleave OFF) is the proven
+// robustness lever on Good/AWGN, and deriving the TX encoder flag, the TX ARQ semantics,
+// AND the on-wire BURST_HEADER descriptor bit all from THIS one function makes them
+// impossible to disagree. They disagreed before (the encoder turned interleave OFF for
+// QAM16 via a QPSK||QAM8 hardcode, but the ARQ stayed whole-group from the env default)
+// -> ALPHA ignored BRAVO's per-frame masks and skipped partial-group holes (the QAM16
+// offset-skip bug). Invariant: interleave OFF -> per-frame SR masks; ON -> whole-group
+// ACK/NACK. Default OFF for ALL modulations/rates "for now"; re-enable for Moderate/Poor
+// time-diversity later. Override: ULTRA_BURST_INTERLEAVE=1 (force ON), =0 (force OFF).
+inline bool burstCrossFrameInterleaveOn() {
+    if (const char* env = std::getenv("ULTRA_BURST_INTERLEAVE")) {
+        return env[0] == '1';
+    }
+    return false;  // default OFF — the SR-ARQ per-frame profile
+}
 inline constexpr uint32_t kResponderHandshakeFailSafeMs = 2200;
 inline constexpr uint32_t kMCDPSKDualChirpPreambleMs = 1200;
 inline constexpr uint32_t kMCDPSKInterFrameGuardMs = 100;

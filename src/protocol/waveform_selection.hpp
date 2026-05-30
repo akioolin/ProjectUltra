@@ -77,7 +77,7 @@ struct OFDMCodeRateDescriptor {
     size_t qpsk_gate_count = 0;
 };
 
-inline constexpr std::array<OFDMCodeRateDescriptor, 4> kOFDMCodeRateDescriptors{{
+inline constexpr std::array<OFDMCodeRateDescriptor, 5> kOFDMCodeRateDescriptors{{
     {
         CodeRate::R1_4,
         0.25f,
@@ -142,6 +142,25 @@ inline constexpr std::array<OFDMCodeRateDescriptor, 4> kOFDMCodeRateDescriptors{
         // the burst stop-and-wait transport is what makes it deliver.
         {{{kQPSKGoodFadingMax, kQPSKGoodR34SnrFloorDb}}},
         1,
+    },
+    {
+        // 2026-05-30: R5/6 (540/648 = 0.833) — the top 802.11n LDPC rung. All gates are
+        // EMPTY (count 0) so the AUTO ladder never selects it; R5/6 is forced/locked-only
+        // for now (a fixed ~+10% over R3/4 on Good@20, GUI-validated). Present so any
+        // ofdmCodeRateDescriptor(R5_6) lookup returns a valid descriptor, not nullptr.
+        CodeRate::R5_6,
+        5.0f / 6.0f,
+        540,
+        v2::LDPC_CODEWORD_BITS,
+        8,
+        {},
+        0,
+        {},
+        0,
+        {},
+        0,
+        {},
+        0,
     },
 }};
 

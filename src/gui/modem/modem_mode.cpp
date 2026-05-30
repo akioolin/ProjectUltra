@@ -321,28 +321,20 @@ void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
     // so a steady-state window fills exactly one interleave group. Both TX and RX
     // run setDataMode from negotiation, keeping the de-interleave matched.
     //
-    // 2026-05-28: extended to coherent 8PSK (QAM8) for the throughput-rung
-    // probe. Same OFDM machinery as QPSK; the burst interleaver operates on
-    // post-LDPC bits and is constellation-agnostic. Without this, forcing
-    // QAM8 + ULTRA_BURST_TRANSPORT=1 left the encoder NOT interleaving while
-    // the burst transport (BURST_HEADER, group ack, chunker) was active —
-    // every CW failed because the bit order didn't match what the receiver
-    // expected after the burst header was consumed.
+    // 2026-05-28: extended to coherent 8PSK (QAM8). 2026-05-30: extended to ALL OFDM
+    // data modulations (incl. QAM16) — the burst interleaver + SR-ARQ chunker operate on
+    // post-LDPC bits and are constellation-agnostic, so there is NO reason to special-case
+    // the modulation here. The previous QPSK||QAM8 hardcode silently excluded QAM16: the
+    // encoder left it un-interleaved while the connection's ARQ stayed whole-group, so
+    // ALPHA skipped partial-group holes (the QAM16 offset-skip bug). file_class_composite
+    // now means "OFDM file-class data of any modulation".
     const bool file_class_composite =
-        connected_ && protocol::isOFDMMode(waveform_mode_) &&
-        (mod == Modulation::QPSK || mod == Modulation::QAM8);
-    // 2026-05-29 step-1 foundation check (ULTRA_BURST_INTERLEAVE=0): turn OFF the
-    // cross-frame burst interleave while KEEPING the group size, so a fade hits only
-    // some of the 6 frames and each frame decodes INDEPENDENTLY -> the tone-burst
-    // frame_mask can show a PARTIAL group (some frames OK, some NACK). That proves
-    // per-frame SACK is physically possible — the go/no-go for reviving SR-ARQ +
-    // granular resend on Good (where the N=6 interleaver gives ~0 diversity anyway).
-    // Default ON (the interleaver stays the shipped behavior; this is a test knob).
-    const bool burst_interleave_disabled = [] {
-        const char* env = std::getenv("ULTRA_BURST_INTERLEAVE");
-        return env && env[0] == '0';
-    }();
-    const bool burst_interleave_on = file_class_composite && !burst_interleave_disabled;
+        connected_ && protocol::isOFDMMode(waveform_mode_);
+    // Cross-frame byte-interleave is a SINGLE shared profile (default OFF -> per-frame
+    // SR-ARQ), the same source of truth the connection's ARQ semantics and the on-wire
+    // descriptor bit derive from, so encoder/ARQ/descriptor can never disagree.
+    const bool burst_interleave_on =
+        file_class_composite && protocol::connection_policy::burstCrossFrameInterleaveOn();
     const int burst_group =
         static_cast<int>(protocol::connection_policy::burstInterleaveGroupFrames());
     if (streaming_encoder_) {

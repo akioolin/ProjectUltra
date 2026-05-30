@@ -2043,13 +2043,12 @@ bool Connection::startBurstFileTransfer() {
         burst_file_cursor_ = 0;
         burst_pending_advance_ = 0;
         burst_chunk_seq_ = 0;
-        // §SR-ARQ (channel-adaptive): when the byte-interleave is OFF (Good/AWGN), run
-        // Selective-Repeat at the frame granularity (resend only the failed frames +
-        // refill). Same ULTRA_BURST_INTERLEAVE knob that gates the encoder/decoder.
-        burst_interleave_off_ = [] {
-            const char* env = std::getenv("ULTRA_BURST_INTERLEAVE");
-            return env && env[0] == '0';
-        }();
+        // §SR-ARQ profile: interleave OFF -> per-frame Selective-Repeat (the default now,
+        // for ALL modulations). ONE source of truth shared with the encoder + the on-wire
+        // descriptor bit (connection_policy::burstCrossFrameInterleaveOn) so the TX ARQ
+        // semantics, the encoder byte-interleave, and the descriptor bi bit can never
+        // disagree — the QAM16 offset-skip bug was exactly that disagreement.
+        burst_interleave_off_ = !connection_policy::burstCrossFrameInterleaveOn();
         burst_resend_frames_.clear();
         burst_inflight_frames_.clear();
         burst_inflight_is_pad_.clear();

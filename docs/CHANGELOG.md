@@ -10,6 +10,43 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-30: Unify the burst interleave/ARQ profile (fixes QAM16 offset-skip) + wire R5/6
+
+**What was broken (Codex-diagnosed, Claude-verified):** the cross-frame burst-interleave
+decision had THREE inconsistent sources of truth, so QAM16 silently fell into whole-group
+ACK semantics while its frames were transmitted un-interleaved. ALPHA then ignored BRAVO's
+per-frame SACK masks and skipped partial-group holes -> BRAVO stuck missing a byte offset,
+CRC fail (Codex repro: forced QAM16 R1/2 Good@20 seed 42, stuck at offset 10900). The three:
+- `modem_mode.cpp` encoder flag: gated on a `(QPSK || QAM8)` modulation hardcode -> QAM16
+  got interleave OFF at the encoder;
+- `connection.cpp` ARQ mode (`burst_interleave_off_`): derived from the `ULTRA_BURST_INTERLEAVE`
+  env, defaulting to whole-group;
+- RX: already used the on-wire descriptor `interleaved` bit.
+Encoder said "independent frames", ARQ said "whole group" -> the skip.
+
+**What changed:** one source of truth — `connection_policy::burstCrossFrameInterleaveOn()`
+(default OFF; `ULTRA_BURST_INTERLEAVE=1` forces ON for future Moderate/Poor diversity). All
+three now derive from it: `modem_mode.cpp` drops the `QPSK||QAM8` hardcode (file-class =
+ANY OFDM data, interleaver is constellation-agnostic) and sets the encoder flag from the
+policy; `connection.cpp` sets `burst_interleave_off_ = !policy()`; the descriptor bit
+follows the encoder flag. Invariant: descriptor `bi=0` -> per-frame SR masks; `bi=1` ->
+whole-group ACK/NACK. Default OFF makes SR-ARQ the profile for every modulation, so QAM16
+works with no env knob. Also added R5/6 to the `ofdmCodeRateDescriptor` table (4->5 entries,
+empty gates = forced/locked-only, never auto-selected) so `ofdmCodeRateDescriptor(R5_6)`
+returns a valid descriptor; the on-wire `BURST_HEADER` already round-trips any CodeRate
+(`payload[3] = static_cast<uint8_t>(rate)`), which is why forced R5/6 already decoded.
+
+**Why it works:** the encoder byte-interleave, the TX ARQ unit, and the RX descriptor bit
+can no longer disagree — they read the same function. "Decode failure = DATA loss (ARQ's
+job)" stays intact; QAM16 now uses the per-frame SACK its un-interleaved frames support.
+
+**Test verification:** `cmake --build build -j4 --target ultra_gui` clean. Forced QAM16 R1/2
+Good@20 seed 42 WITHOUT `ULTRA_BURST_INTERLEAVE`: descriptor `bi=0`, ALPHA on the SR form
+path, decode 6x6/6 + partials, cursor sailed PAST offset 10900 (Codex's stuck point) — bug
+fixed. QPSK path unchanged (interleave OFF was already the SR-ARQ default it shipped with).
+Note: 16QAM is decode-gated above R1/2 on Good@20 fades (separate equalizer gate, see
+KNOWN_BUGS / memory project_16qam_gate_is_two_parts), not affected by this transport fix.
+
 ## 2026-05-30: Fix two misleading `burst_interleave=` log labels (reported the wrong proxy)
 
 **What was broken:** two INFO logs printed `burst_interleave=` from a proxy value, not the
