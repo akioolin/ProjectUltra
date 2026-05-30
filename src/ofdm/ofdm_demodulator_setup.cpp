@@ -4,6 +4,7 @@
 #define _USE_MATH_DEFINES
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <random>
 #include "ultra/ofdm.hpp"
 #include "ultra/dsp.hpp"
@@ -26,6 +27,19 @@ OFDMDemodulator::Impl::Impl(const ModemConfig& cfg)
     , mixer(cfg.center_freq, cfg.sample_rate)
     , sync_threshold(cfg.sync_threshold)
 {
+    // Initialize the LTS DFT-denoise gate + tap window from the environment so
+    // DEFAULT behavior is identical to the prior static-env read. A test can
+    // override these via OFDMDemodulator::setLtsDftDenoise().
+    {
+        const char* e = std::getenv("ULTRA_LTS_DFT_DENOISE");
+        dft_denoise_enabled_ = (e && e[0] == '1');
+        const char* taps = std::getenv("ULTRA_LTS_DFT_DENOISE_TAPS");
+        dft_denoise_taps_ = taps ? std::atoi(taps) : 0;
+        // Lever ① CFO-clean 2-LTS averaging gate (default off).
+        const char* avg = std::getenv("ULTRA_LTS_CFO_AVG");
+        lts_cfo_avg_enabled_ = (avg && avg[0] == '1');
+    }
+
     symbol_samples = cfg.getSymbolDuration();
     baseband_scratch.resize(symbol_samples);
     symbol_scratch.resize(cfg.fft_size);

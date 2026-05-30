@@ -772,6 +772,30 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
     )
     target_link_libraries(test_waveform_simple PRIVATE ultra_core ota_channel_core)
+
+    # Offline LTS channel-estimate MSE harness: measures ||H_hat - H_true|| with
+    # and without the DFT-domain LTS denoise, in isolation from the GUI.
+    add_executable(lts_estimate_mse
+        tools/lts_estimate_mse.cpp
+    )
+    ultra_enable_tool_test_warnings(tools/lts_estimate_mse.cpp)
+    target_include_directories(lts_estimate_mse PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
+    )
+    target_link_libraries(lts_estimate_mse PRIVATE ultra_core ota_channel_core)
+
+    # Controlled frequency-null decode test: proves causally whether a fade null
+    # (not the estimate) is what breaks 16QAM R2/3 decode. Genie/perfect CSI.
+    add_executable(null_decode_test
+        tools/null_decode_test.cpp
+    )
+    ultra_enable_tool_test_warnings(tools/null_decode_test.cpp)
+    target_include_directories(null_decode_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
+    )
+    target_link_libraries(null_decode_test PRIVATE ultra_core)
 endif()
 
 # GUI Application

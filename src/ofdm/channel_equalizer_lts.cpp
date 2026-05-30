@@ -207,6 +207,10 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     // and residual-CFO estimation.
     std::vector<std::vector<Complex>> h_per_symbol(num_symbols);
     for (auto& v : h_per_symbol) v.resize(data_carrier_indices.size());
+    // Per-symbol PILOT estimates too, so CFO-clean averaging (lever ①) can average
+    // pilots aligned to the same last-symbol phase frame as the data carriers.
+    std::vector<std::vector<Complex>> h_per_symbol_pilot(num_symbols);
+    for (auto& v : h_per_symbol_pilot) v.resize(pilot_carrier_indices.size());
 
     // Accumulate channel estimates from each training symbol
     std::vector<Complex> h_sum_data(data_carrier_indices.size(), Complex(0, 0));
@@ -287,6 +291,7 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
                 Complex h_ls = rx / tx;
                 h_sum_pilot[i] += h_ls;
                 h_last_pilot[i] = h_ls;  // Keep last symbol's estimate
+                h_per_symbol_pilot[sym][i] = h_ls;
             }
 
             // DEBUG: Log raw pilot values for each training symbol
@@ -401,6 +406,7 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
                 // Recompute phase increment with corrected CFO
                 const float* ptr2 = training_samples;
                 for (auto& v : h_per_symbol) std::fill(v.begin(), v.end(), Complex(0, 0));
+                for (auto& v : h_per_symbol_pilot) std::fill(v.begin(), v.end(), Complex(0, 0));
                 std::fill(h_sum_data.begin(), h_sum_data.end(), Complex(0, 0));
                 std::fill(h_sum_pilot.begin(), h_sum_pilot.end(), Complex(0, 0));
                 guard_noise_power_sum = 0.0;
@@ -431,6 +437,7 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
                             Complex h_ls = rx / tx;
                             h_sum_pilot[i] += h_ls;
                             h_last_pilot[i] = h_ls;
+                            h_per_symbol_pilot[sym][i] = h_ls;
                         }
                     }
                     ptr2 += symbol_samples;
@@ -449,26 +456,62 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
         }
     }
 
-    // For data carriers: use LAST symbol's H estimate
-    // This is closest in time to the first data symbol, minimizing CFO-induced phase mismatch
-    // Using the first symbol caused decode failures at CFO=30 Hz due to 2-symbol phase drift
-    if (valid_symbols > 0) {
+    // === COMBINE PER-SYMBOL LTS ESTIMATES INTO THE FINAL H ===
+    //
+    // DEFAULT (lts_cfo_avg_enabled_ == false): use the LAST symbol's H for both data and
+    // pilot carriers. The last symbol is closest in time to the first data symbol, which
+    // minimizes CFO-induced phase mismatch; naive (un-aligned) averaging of the two symbols
+    // caused decode failures at CFO=30 Hz from 2-symbol phase drift, which is why the
+    // original code threw the first symbol away. Pilots use the last symbol too so pilot and
+    // data H share one phase reference (complex pilot interpolation needs that).
+    //
+    // LEVER ① CFO-clean averaging (ULTRA_LTS_CFO_AVG): the N LTS symbols are IDENTICAL
+    // training, so after a (coherent-over-48ms) channel they differ ONLY by a common
+    // per-symbol phase from residual CFO — a TIME rotation, identical on every carrier (data
+    // AND pilot). So we estimate that rotation as the magnitude-weighted cross-correlation to
+    // the LAST symbol, align each earlier symbol[s] -> exp(jφ_s)·h[s], then average. That
+    // averages down the per-carrier LS noise by ~10·log10(N) dB (−3 dB for N=2) WITHOUT any
+    // phase mismatch, because the average is taken in the LAST symbol's frame — so it stays
+    // consistent with the first data symbol and with the pilots, removing the exact reason
+    // last-symbol-only was used. Magnitude weighting is the ML estimate of the common phase
+    // (strong carriers dominate, nulled carriers contribute ~nothing) and is robust at low
+    // SNR (averaged over ~47 data carriers). Design lever ①:
+    // docs/CHANNEL_ESTIMATE_REINFORCEMENT_DESIGN_2026_05_30.md.
+    const bool cfo_clean_average = lts_cfo_avg_enabled_ && valid_symbols >= 2;
+    if (cfo_clean_average) {
+        const size_t last = num_symbols - 1;
+        // Common per-symbol alignment phasor exp(jφ_s) bringing symbol s into the last
+        // symbol's frame. Derived from the DATA carriers (most of them, most robust) and
+        // reused for pilots, since the CFO rotation is common to all carriers.
+        std::vector<Complex> align(num_symbols, Complex(1.0f, 0.0f));
+        for (size_t s = 0; s + 1 < num_symbols; ++s) {
+            Complex cross(0, 0);
+            for (size_t j = 0; j < data_carrier_indices.size(); ++j)
+                cross += h_per_symbol[last][j] * std::conj(h_per_symbol[s][j]);
+            const float m = std::abs(cross);
+            align[s] = (m > 1e-9f) ? cross / m : Complex(1.0f, 0.0f);
+        }
+        const float inv_n = 1.0f / static_cast<float>(num_symbols);
         for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
-            int idx = data_carrier_indices[i];
-            // Use last symbol's H estimate (minimize phase mismatch with first data symbol)
-            channel_estimate[idx] = h_per_symbol[num_symbols - 1][i];
+            Complex acc = h_per_symbol[last][i];
+            for (size_t s = 0; s + 1 < num_symbols; ++s)
+                acc += h_per_symbol[s][i] * align[s];
+            channel_estimate[data_carrier_indices[i]] = acc * inv_n;
         }
-    }
-
-    // Store last training symbol's channel estimate for pilot carriers
-    // Must use LAST symbol (same as data carriers) so pilot and data H are phase-consistent.
-    // Using the average causes phase mismatch when there's any residual CFO, because
-    // data carriers use last-symbol H. This mismatch breaks complex interpolation.
-    if (valid_symbols > 0) {
         for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
-            int idx = pilot_carrier_indices[i];
-            channel_estimate[idx] = h_last_pilot[i];
+            Complex acc = h_per_symbol_pilot[last][i];
+            for (size_t s = 0; s + 1 < num_symbols; ++s)
+                acc += h_per_symbol_pilot[s][i] * align[s];
+            channel_estimate[pilot_carrier_indices[i]] = acc * inv_n;
         }
+        LOG_DEMOD(INFO, "LTS CFO-clean avg: N=%zu symbols, align[0]=%.3f rad",
+                  num_symbols,
+                  num_symbols >= 2 ? std::atan2(align[0].imag(), align[0].real()) : 0.0f);
+    } else if (valid_symbols > 0) {
+        for (size_t i = 0; i < data_carrier_indices.size(); ++i)
+            channel_estimate[data_carrier_indices[i]] = h_per_symbol[num_symbols - 1][i];
+        for (size_t i = 0; i < pilot_carrier_indices.size(); ++i)
+            channel_estimate[pilot_carrier_indices[i]] = h_last_pilot[i];
     }
 
     // Estimate per-carrier phase slope from LTS (timing offset effect).
@@ -505,6 +548,68 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
         }
     }
 
+    // 2026-05-30 (ULTRA_LTS_DFT_DENOISE): frequency-domain denoise of the LTS H by
+    // Gaussian neighbor-smoothing across carriers. The channel impulse response is short
+    // (delay spread << OFDM symbol), so the channel is smooth in frequency (coherence BW >>
+    // carrier spacing) — adjacent carriers' H are highly correlated and a weighted average
+    // over neighbors averages down the per-carrier LS noise without touching the (slowly
+    // varying) real channel. The offline H-MSE harness (tools/lts_estimate_mse) proves this
+    // at the PRODUCTION 1024/59 geometry: 3-6x lower normalized H-MSE across SNR 12/16/20
+    // with self_distortion ~1e-4 (a clean channel passes through untouched).
+    //
+    // This REPLACED an earlier DFT-window approach (IFFT -> zero taps beyond a delay window
+    // -> FFT) that the SAME harness disproved: a finite N-of-1024-bin sub-band slice IDFTs to
+    // a sinc that cannot be cleanly windowed, leaving a ~14% self-distortion FLOOR (it threw
+    // away real channel energy). Smoothing has no transform/leakage and degrades gracefully at
+    // band edges (the window just shrinks). The half-width W is a CHANNEL property (set by the
+    // coherence bandwidth / delay spread), NOT an SNR-tuned constant — it must stay well below
+    // the channel's frequency-ripple period or it washes out real selectivity. Harness optimum
+    // for Good (~0.5 ms delay) is W~3 and is SNR-INDEPENDENT, confirming W is geometry- not
+    // noise-driven; a longer-delay channel (Moderate/Poor) wiggles faster in frequency and
+    // needs a SMALLER W (future: derive W = f(negotiated delay spread)). Tunable via
+    // ULTRA_LTS_DFT_DENOISE_TAPS. Design: docs/CHANNEL_ESTIMATE_REINFORCEMENT_DESIGN_2026_05_30.md
+    // (lever 2). Default off. Gate + W come from Impl members (env-initialized in the
+    // constructor, overridable from a test via OFDMDemodulator::setLtsDftDenoise) so the
+    // offline harness can flip denoise on/off per call without re-reading the env.
+    if (dft_denoise_enabled_ && valid_symbols > 0 && all_carrier_fft_indices.size() >= 4) {
+        // Frequency-domain Gaussian neighbor-smoothing of the LTS H. The channel is smooth
+        // in frequency (coherence BW >> carrier spacing on Good), so adjacent carriers' H are
+        // highly correlated -> a weighted average over neighbors averages down the per-carrier
+        // LS noise. This REPLACES an earlier sub-band DFT-window denoise that the offline
+        // H-MSE harness (tools/lts_estimate_mse) proved corrupts the estimate (~14%
+        // self-distortion FLOOR: a finite 48-of-512-bin slice IDFTs to a sinc that cannot be
+        // cleanly windowed). Smoothing has no transform/leakage and handles band edges by
+        // shrinking the window. Half-width W (carriers) must stay << the channel's
+        // frequency-ripple period so it does not wash out real selectivity; it is a CHANNEL
+        // property (coherence bandwidth), tunable via ULTRA_LTS_DFT_DENOISE_TAPS. SNR-adaptive
+        // by construction: same W removes proportionally more noise at low SNR.
+        const size_t M = all_carrier_fft_indices.size();
+        int W = dft_denoise_taps_ > 0 ? dft_denoise_taps_ : 2;  // half-width; W=2 is the harness-proven
+                                                                // SAFE width (preserves deep nulls <=1.2x;
+                                                                // W>=3 smears them -> 16QAM poison). Interim
+                                                                // smoother; principled estimator is delay-domain LS.
+        W = std::max(1, std::min<int>(W, static_cast<int>(M) / 4));
+        const float sigma = std::max(0.5f, static_cast<float>(W) / 1.5f);
+        std::vector<Complex> H_in(M);
+        for (size_t i = 0; i < M; ++i)
+            H_in[i] = channel_estimate[all_carrier_fft_indices[i]];
+        for (size_t i = 0; i < M; ++i) {
+            Complex acc(0, 0);
+            float wsum = 0.0f;
+            for (int d = -W; d <= W; ++d) {
+                const long j = static_cast<long>(i) + d;
+                if (j < 0 || j >= static_cast<long>(M)) continue;
+                const float w =
+                    std::exp(-static_cast<float>(d * d) / (2.0f * sigma * sigma));
+                acc += w * H_in[static_cast<size_t>(j)];
+                wsum += w;
+            }
+            if (wsum > 0.0f)
+                channel_estimate[all_carrier_fft_indices[i]] = acc / wsum;
+        }
+        LOG_DEMOD(INFO, "LTS H freq-smooth: M=%zu W=%d sigma=%.2f", M, W, sigma);
+    }
+
     LOG_DEMOD(INFO, "LTS channel estimate: %zu data + %zu pilot carriers",
               data_carrier_indices.size(), pilot_carrier_indices.size());
 
@@ -539,7 +644,23 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     // With 2 training symbols, noise = (H1 - H2) / 2, variance = E[|H1-H2|²] / 4
     // At 0.1 Hz Doppler, channel barely changes between training symbols (~0.001 coherence),
     // so H1-H2 is almost entirely noise.
+    //
+    // Lever ① (ULTRA_LTS_CFO_AVG): a residual inter-symbol CFO φ surviving the stage-2 refine
+    // puts a SIGNAL-dependent term H·(1−e^{jφ}) (≈ |H|·φ) into the raw H1−H0, biasing σ² HIGH.
+    // That biased σ² then under-confidences the LLRs and is INCONSISTENT with the CFO-cleaned
+    // averaged H produced above. So when ① is on we de-rotate symbol 0 into symbol 1's frame
+    // (the SAME magnitude-weighted phasor the averaging uses) before differencing → the H term
+    // cancels and the difference is pure noise (n1 − n0·e^{jφ}, still 2σ²). Gated on the flag so
+    // ① OFF reproduces the exact prior σ² (clean A/B).
     if (valid_symbols >= 2) {
+        Complex noise_align(1.0f, 0.0f);
+        if (lts_cfo_avg_enabled_) {
+            Complex cross(0, 0);
+            for (size_t i = 0; i < data_carrier_indices.size(); ++i)
+                cross += h_per_symbol[1][i] * std::conj(h_per_symbol[0][i]);
+            const float m = std::abs(cross);
+            if (m > 1e-9f) noise_align = cross / m;  // exp(jφ): h0·noise_align ≈ h1
+        }
         float noise_sum = 0.0f;
         float signal_sum = 0.0f;
         int count = 0;
@@ -547,7 +668,7 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
             Complex h0 = h_per_symbol[0][i];
             Complex h1 = h_per_symbol[1][i];
             if (std::abs(h0) > 1e-6f && std::abs(h1) > 1e-6f) {
-                Complex diff = h1 - h0;
+                Complex diff = h1 - h0 * noise_align;  // CFO-aligned (lever ①) or raw (φ=0)
                 noise_sum += std::norm(diff);  // |H1-H2|²
                 signal_sum += (std::norm(h0) + std::norm(h1)) / 2.0f;
                 count++;

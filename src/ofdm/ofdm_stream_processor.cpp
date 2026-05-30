@@ -699,6 +699,38 @@ std::string OFDMDemodulator::getFailureAttributionDiagnosticsText() const {
     return impl_->getFailureAttributionDiagnosticsText();
 }
 
+// ============================================================================
+// OFFLINE TEST HOOKS (tools/lts_estimate_mse.cpp)
+// ============================================================================
+
+void OFDMDemodulator::setLtsDftDenoise(bool on, int taps) {
+    impl_->dft_denoise_enabled_ = on;
+    impl_->dft_denoise_taps_ = taps;
+}
+
+void OFDMDemodulator::setLtsCfoAvg(bool on) {
+    impl_->lts_cfo_avg_enabled_ = on;
+}
+
+void OFDMDemodulator::estimateChannelFromLTSTest(const float* samples,
+                                                 size_t num_symbols) {
+    impl_->estimateChannelFromLTS(samples, num_symbols);
+}
+
+std::vector<Complex> OFDMDemodulator::getActiveChannelEstimate() const {
+    std::vector<Complex> out;
+    out.reserve(impl_->all_carrier_fft_indices.size());
+    for (int fft_idx : impl_->all_carrier_fft_indices) {
+        if (fft_idx >= 0 &&
+            static_cast<size_t>(fft_idx) < impl_->channel_estimate.size()) {
+            out.push_back(impl_->channel_estimate[fft_idx]);
+        } else {
+            out.push_back(Complex(0, 0));
+        }
+    }
+    return out;
+}
+
 void OFDMDemodulator::setRXCarrierErasureEnabled(bool enabled) {
     impl_->rx_carrier_erasure_enabled_ = enabled;
 }

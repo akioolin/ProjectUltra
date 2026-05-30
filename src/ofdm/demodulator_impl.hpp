@@ -57,6 +57,19 @@ struct OFDMDemodulator::Impl {
     std::vector<Complex> interp_idft_phasors;
     std::vector<Complex> interp_dft_phasors;
 
+    // LTS DFT-denoise gate + tap window. Initialized from env in the constructor
+    // so DEFAULT behavior is unchanged, but settable from a test via
+    // OFDMDemodulator::setLtsDftDenoise() so the offline H-MSE harness can flip
+    // it on/off without re-reading the environment.
+    bool dft_denoise_enabled_ = false;
+    int dft_denoise_taps_ = 0;
+
+    // Lever ① CFO-clean 2-LTS averaging (ULTRA_LTS_CFO_AVG): align all LTS symbols to
+    // the LAST symbol's phase frame (common per-symbol CFO rotation), then average ->
+    // -10log10(N) dB H-noise (-3 dB for N=2) with no phase mismatch. Settable from a
+    // test via OFDMDemodulator::setLtsCfoAvg(). Default off until harness+GUI-proven.
+    bool lts_cfo_avg_enabled_ = false;
+
     // Channel estimate (per carrier)
     std::vector<Complex> channel_estimate;
     // 2026-05-29 diag (ULTRA_GENIE_LTS_FREEZE): a frozen copy of the full-band LTS

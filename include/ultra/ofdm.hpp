@@ -183,6 +183,25 @@ public:
     // frame. Intended for failure attribution logging only.
     std::string getFailureAttributionDiagnosticsText() const;
 
+    // ==========================================================================
+    // OFFLINE TEST HOOKS (tools/lts_estimate_mse.cpp)
+    // ==========================================================================
+    // These bypass the streaming state machine to exercise the LTS channel
+    // estimator in isolation. Not used by the production path.
+
+    // Override the LTS DFT-denoise gate + tap window (normally env-initialized).
+    void setLtsDftDenoise(bool on, int taps);
+
+    // Override the CFO-clean 2-LTS averaging gate (normally env-initialized).
+    void setLtsCfoAvg(bool on);
+
+    // Run estimateChannelFromLTS() directly on raw passband training samples.
+    void estimateChannelFromLTSTest(const float* samples, size_t num_symbols);
+
+    // Return the per-active-carrier channel estimate (gathered at the active
+    // carrier FFT bins, in frequency order) from the last LTS estimate.
+    std::vector<Complex> getActiveChannelEstimate() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
