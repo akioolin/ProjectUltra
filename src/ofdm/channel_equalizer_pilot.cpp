@@ -25,19 +25,31 @@ namespace {
 // model was throwing away older pilot observations 5x too aggressively
 // on Good, hurting sparse-pilot performance. Env-tunable so we can
 // test the Good-tuned values against the failing sp10_s2 seed.
+// Read-once: these are called inside the per-carrier Wiener interpolation loop
+// (lines ~243/287). getenv() is a linear scan of environ and not thread-safe, so
+// re-reading per carrier is a real-time hazard on the equalizer hot path. The env
+// is set at process start only (no mid-run putenv of PHY knobs), so a function-
+// local static cache is behavior-neutral — same value, read once. Matches the
+// read-once idiom in channel_equalizer_equalize.cpp (kRelFadeOnset).
 inline float robustDelaySpreadS() {
-    if (const char* env = std::getenv("ULTRA_WIENER_DELAY_SPREAD_S")) {
-        const float v = static_cast<float>(std::atof(env));
-        if (v > 0.0f && v < 0.01f) return v;
-    }
-    return 1.0e-3f;
+    static const float cached = []() {
+        if (const char* env = std::getenv("ULTRA_WIENER_DELAY_SPREAD_S")) {
+            const float v = static_cast<float>(std::atof(env));
+            if (v > 0.0f && v < 0.01f) return v;
+        }
+        return 1.0e-3f;
+    }();
+    return cached;
 }
 inline float robustDopplerHz() {
-    if (const char* env = std::getenv("ULTRA_WIENER_DOPPLER_HZ")) {
-        const float v = static_cast<float>(std::atof(env));
-        if (v > 0.0f && v < 10.0f) return v;
-    }
-    return 0.5f;
+    static const float cached = []() {
+        if (const char* env = std::getenv("ULTRA_WIENER_DOPPLER_HZ")) {
+            const float v = static_cast<float>(std::atof(env));
+            if (v > 0.0f && v < 10.0f) return v;
+        }
+        return 0.5f;
+    }();
+    return cached;
 }
 constexpr size_t kWienerMaxHistoryPerCarrier = 6;
 constexpr size_t kWienerMaxTimeObs = 4;
@@ -59,16 +71,20 @@ bool coherentPublicFadingUsesLTS(Modulation mod) {
 }
 
 int diagnosticTwoPathDelaySamples() {
-    const char* value = std::getenv("ULTRA_QAM16_GENIE_CHANNEL_DELAY_SAMPLES");
-    if (!value || value[0] == '\0') {
-        return 24;  // Good channel: 0.5 ms at 48 kHz.
-    }
-    char* end = nullptr;
-    const long parsed = std::strtol(value, &end, 10);
-    if (end == value || parsed < 0 || parsed > 512) {
-        return 24;
-    }
-    return static_cast<int>(parsed);
+    // Read-once (genie/diag oracle, off by default). See robustDelaySpreadS note.
+    static const int cached = []() {
+        const char* value = std::getenv("ULTRA_QAM16_GENIE_CHANNEL_DELAY_SAMPLES");
+        if (!value || value[0] == '\0') {
+            return 24;  // Good channel: 0.5 ms at 48 kHz.
+        }
+        char* end = nullptr;
+        const long parsed = std::strtol(value, &end, 10);
+        if (end == value || parsed < 0 || parsed > 512) {
+            return 24;
+        }
+        return static_cast<int>(parsed);
+    }();
+    return cached;
 }
 
 }  // namespace

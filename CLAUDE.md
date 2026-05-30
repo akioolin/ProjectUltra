@@ -131,7 +131,7 @@ Floors are **in-band SNR (3 kHz noise BW)**. Full table, methodology, and histor
 |------|---------|---------------|-------|
 | MC-DPSK R1/4 | AWGN | **5 dB** | 3/3 seeds + OTASim fixture |
 | OFDM_CHIRP R1/4 | AWGN | **10 dB** | warm-sync LTS FER 4.875% @10, 0% @14-20 |
-| OFDM_CHIRP R1/4 | Good | **15 dB** | locked in DecodeBenchReplay |
+| OFDM_CHIRP R1/4 | Good | **15 dB** | was "locked in DecodeBenchReplay" — that CTest is RED on HEAD (stale harness, NOT a prod regression; `cli_simulator`/GUI are the trusted floor gates). See MODEM_INFRASTRUCTURE_MAP §8. |
 | OFDM_CHIRP R1/2 | AWGN / Good | **14 dB** | 1-seed locator |
 | OFDM_NARROW R1/4 | AWGN / Good | ~17.6 | pre-audit |
 

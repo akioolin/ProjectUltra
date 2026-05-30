@@ -10,6 +10,46 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-30: Cleanup — equalizer hot-path getenv → read-once; map/CLAUDE.md stale-fact corrections
+
+**Workstream:** env-knobs→runtime-derivation / alpha-release code cleanup (not a PHY change).
+
+**What was wrong (real-time hazard):** `channel_equalizer_pilot.cpp` read `ULTRA_WIENER_DELAY_SPREAD_S`
+/ `ULTRA_WIENER_DOPPLER_HZ` via `getenv()` *inside the per-carrier Wiener interpolation loop*
+(`:243`/`:287`), and the DD knobs (`ULTRA_QPSK_DD`/`ULTRA_COHERENT_DD_OFF`/`ULTRA_DD_FADING_MAX`)
+once per pilot-interp call. `getenv()` is a linear scan of `environ` and not thread-safe — calling
+it per-carrier-per-symbol on the equalizer hot path is a latent real-time/perf hazard. (The
+`REL_FADE` knobs in `channel_equalizer_equalize.cpp` were already read-once via `static`.)
+
+**What changed:** converted the hot-path reads to the read-once `static const = []{…}()` idiom
+already used in `channel_equalizer_equalize.cpp` (`kRelFadeOnset`). Same for the genie helper
+`diagnosticTwoPathDelaySamples()`. Env is set at process start only (verified: the only `putenv`
+in `src/` is `ULTRA_STARTUP_LOG`), so caching is behavior-neutral — same value, read once.
+
+**Why it's correct / behavior-neutral:** the cached value is identical to the per-call value (no
+mid-run `setenv` of PHY knobs). Proven: `OFDMWienerInterpolator` (directly exercises the changed
+Wiener helpers) 3/3 PASS with the change compiled in; `cli_simulator --snr 25 --fading none --rate
+r1_4 --test` = TEST PASSED, 7/7 messages, `decode_fixed_frame_total n=16`.
+
+**Doc corrections (standing rule — fix the map when it disagrees with code):**
+- `MODEM_INFRASTRUCTURE_MAP.md §6`: `ULTRA_WIENER_*` were labeled "code-derived" — they are NOT.
+  `robustDelaySpreadS()`/`robustDopplerHz()` return hardcoded **Moderate-HF** constants (1e-3 s /
+  0.5 Hz) with no channel input; the in-code comment admits this is wrong on Good HF. Relabeled
+  "hardcoded Moderate const — NOT derived; adaptivity gap." §7 #10 now states "codify" = *derive
+  from negotiated coherence time/BW* (proof-gated PHY change, blocked on tasks #8/#9), NOT freeze
+  the env default into a constant.
+- **`DecodeBenchReplay` (CTest #97) is RED on HEAD** — `frames_decoded=0` on every fixture incl. the
+  clean one; the `decode_bench` replay tool never enters the 4-CW data path. **Production decode is
+  healthy** (`cli_simulator` PASSED above), so it's a **stale/divergent harness, not a regression**.
+  CLAUDE.md's "OFDM_CHIRP R1/4 Good 15 dB locked in DecodeBenchReplay" is now annotated as unbacked
+  by that test; `cli_simulator`/GUI are the trusted floor gates. Recorded in map §8.
+
+**Test verification:** `cmake --build build --target ultra_core` clean; `ctest -R
+OFDMWienerInterpolator` 3/3 PASS; `cli_simulator` AWGN R1/4 TEST PASSED 7/7. (Pre-existing red:
+`DecodeBenchReplay` #97, `test_simulator_determinism` — both unrelated to this change.)
+
+---
+
 ## 2026-05-30: Unify the burst interleave/ARQ profile (fixes QAM16 offset-skip) + wire R5/6
 
 **What was broken (Codex-diagnosed, Claude-verified):** the cross-frame burst-interleave

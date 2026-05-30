@@ -212,8 +212,8 @@ Buckets per the env-knobs→runtime-derivation workstream: **[FEAT]** in-flight 
 | `ULTRA_LDPC_Z` | Z=81→n=1944 vs 27→n=648 (**12 read sites**) | 27 | `streaming_encoder.cpp:524` (+11) | FEAT (consolidate) |
 | `ULTRA_LEGACY_OFDM_GROUP_ACK` | old OFDM GROUP_ACK vs tone-burst | OFF | `connection.cpp:445` | FEAT (A/B) |
 | `ULTRA_SHORT_REANCHOR_CHIRP_MS` | short re-anchor chirp ms [100,300] | 100 | `connection_policy.hpp:380` | FEAT |
-| `ULTRA_WIENER_DELAY_SPREAD_S` | Wiener freq-corr delay spread | code-derived | `channel_equalizer_pilot.cpp:29` | ADAPT |
-| `ULTRA_WIENER_DOPPLER_HZ` | Wiener time-corr Doppler | code-derived | `channel_equalizer_pilot.cpp:36` | ADAPT |
+| `ULTRA_WIENER_DELAY_SPREAD_S` | Wiener freq-corr delay spread | **hardcoded 1e-3 (Moderate-HF) — NOT derived; adaptivity gap** | `channel_equalizer_pilot.cpp:28` | ADAPT |
+| `ULTRA_WIENER_DOPPLER_HZ` | Wiener time-corr Doppler | **hardcoded 0.5 Hz (Moderate-HF) — NOT derived; adaptivity gap** | `channel_equalizer_pilot.cpp:35` | ADAPT |
 | `ULTRA_DD_FADING_MAX` | fading-index gate for DD (BUG-8PSK-001) | 0.15 | `channel_equalizer_pilot.cpp:927` | ADAPT |
 | `ULTRA_QPSK_DD` | opt-in DD tracking for QPSK | OFF | `channel_equalizer_pilot.cpp:891` | ADAPT |
 | `ULTRA_COHERENT_DD_OFF` | disable all coherent DD | DD on | `channel_equalizer_pilot.cpp:901` | DIAG/AB |
@@ -257,8 +257,20 @@ Buckets per the env-knobs→runtime-derivation workstream: **[FEAT]** in-flight 
    16QAM-named (`channel_equalizer_equalize.cpp:648`, `channel_equalizer_pilot.cpp:940`).
 
 **Codify (env scaffolding → code-derived, per ADAPT bucket):**
-10. `ULTRA_WIENER_*`, `ULTRA_REL_FADE_*`, `ULTRA_DD_FADING_MAX` — channel-adaptive params that
-    should be derived from negotiated channel, not env-gated. Codify after validation.
+10. `ULTRA_WIENER_*`, `ULTRA_REL_FADE_*`, `ULTRA_DD_FADING_MAX` — channel-adaptive params. NOTE
+    (2026-05-30): their *defaults* are NOT derived today — `robustDelaySpreadS()`/`robustDopplerHz()`
+    return hardcoded Moderate-HF constants (1e-3 s / 0.5 Hz) with no channel input; the comment in
+    `channel_equalizer_pilot.cpp:23` admits this is wrong on Good HF (0.5 ms / 0.1 Hz). So "codify"
+    here means *replace the constant with a derivation* `f(negotiated coherence time/BW)` — NOT
+    freeze the env default into a `constexpr`. This is a proof-gated PHY change, not mechanical
+    cleanup; blocked on the estimate work (tasks #8/#9). Until then they stay env-overridable.
+
+**Hot-path getenv (DONE 2026-05-30, behavior-neutral):** `robustDelaySpreadS()`/`robustDopplerHz()`
+were called per-carrier inside the Wiener loop (`:243/:287`), and the DD knobs per pilot-interp call
+— `getenv()` is a linear `environ` scan and not thread-safe, a real-time hazard. Converted to the
+read-once `static` idiom already used in `channel_equalizer_equalize.cpp` (`kRelFadeOnset`). Proven
+neutral: `OFDMWienerInterpolator` passes, `cli_simulator` AWGN R1/4 7/7. The remaining ~90 getenv
+sites are read at config/handshake time (not hot) — no further hot-path work needed.
 
 ---
 
@@ -276,3 +288,13 @@ These are wrong in the current top-level docs and should be fixed:
   `recommendedPilotSpacing(mod,rate)`.
 - **SC-DPSK** is listed in the CLAUDE.md waveform table but is not an `IWaveform` and not in the
   factory.
+- **`DecodeBenchReplay` (CTest #97) is RED on HEAD** (2026-05-30): `frames_decoded=0` on *every*
+  fixture incl. the clean DQPSK one — the `decode_bench` replay tool never enters the 4-CW data
+  path (`decode_fixed_frame_total (0 calls)`), only control 1-CW. **Production decode is healthy**
+  (`cli_simulator` AWGN R1/4 = TEST PASSED, 7/7, `decode_fixed_frame_total n=16`), so this is a
+  **stale/divergent harness, not a production regression** — the `decode_bench` replay path has
+  drifted from the live streaming decoder. So CLAUDE.md's "OFDM_CHIRP R1/4 Good 15 dB **locked in
+  DecodeBenchReplay**" floor claim is currently UNBACKED by that test. Fate: either repair the
+  bench replay path to match the production decoder, or retire it in favor of the GUI/`cli_simulator`
+  floor gates (the trusted paths per `feedback_skip_full_ctest_legacy`). Tracked as cleanup, not a
+  PHY bug.
