@@ -331,15 +331,27 @@ void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
     const bool file_class_composite =
         connected_ && protocol::isOFDMMode(waveform_mode_) &&
         (mod == Modulation::QPSK || mod == Modulation::QAM8);
+    // 2026-05-29 step-1 foundation check (ULTRA_BURST_INTERLEAVE=0): turn OFF the
+    // cross-frame burst interleave while KEEPING the group size, so a fade hits only
+    // some of the 6 frames and each frame decodes INDEPENDENTLY -> the tone-burst
+    // frame_mask can show a PARTIAL group (some frames OK, some NACK). That proves
+    // per-frame SACK is physically possible — the go/no-go for reviving SR-ARQ +
+    // granular resend on Good (where the N=6 interleaver gives ~0 diversity anyway).
+    // Default ON (the interleaver stays the shipped behavior; this is a test knob).
+    const bool burst_interleave_disabled = [] {
+        const char* env = std::getenv("ULTRA_BURST_INTERLEAVE");
+        return env && env[0] == '0';
+    }();
+    const bool burst_interleave_on = file_class_composite && !burst_interleave_disabled;
     const int burst_group =
         static_cast<int>(protocol::connection_policy::burstInterleaveGroupFrames());
     if (streaming_encoder_) {
         streaming_encoder_->setBurstInterleaveGroupSize(burst_group);
-        streaming_encoder_->setBurstInterleave(file_class_composite);
+        streaming_encoder_->setBurstInterleave(burst_interleave_on);
     }
     if (streaming_decoder_) {
         streaming_decoder_->setBurstInterleaveGroupSize(burst_group);
-        streaming_decoder_->setBurstInterleave(file_class_composite);
+        streaming_decoder_->setBurstInterleave(burst_interleave_on);
     }
 
     LOG_MODEM(INFO, "Data mode set to: %s (pilots=%d, spacing=%d, burst_interleave=%d)",

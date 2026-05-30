@@ -499,42 +499,50 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
     // (timing offset ~360 samples -> guard-bin leakage -> noise_var blow-up ->
     // 0/8 deinterleave). See §14.25.
     std::vector<bool> frame_in_burst_group(encoded_frames.size(), false);
-    size_t interleaved_groups = 0;
+    size_t interleaved_groups = 0;  // burst GROUPS formed (whether or not byte-permuted)
 
-    if (use_burst_interleave_) {
+    // 2026-05-29: form the burst GROUP structure (descriptor + group-start anchor +
+    // group-ACK) for the file burst REGARDLESS of interleave — cross-frame interleave
+    // is now a per-burst FLAG carried in the BURST_HEADER, not a precondition for the
+    // transport. The actual byte permutation is applied only when use_burst_interleave_
+    // (ON for Moderate/Poor where the faster/selective fade gives the N-frame group real
+    // diversity; OFF for Good/AWGN where N≈1×Tc buys ~nothing and per-frame SACK is the
+    // lever). The RX reads the flag from the descriptor (setBurstInterleave(
+    // bi.burst_interleave)) and deinterleaves only when set, so TX/RX stay matched
+    // per burst — and flipping the flag is how we'd activate interleave on Moderate.
+    {
         size_t full_groups = encoded_frames.size() / BURST_GROUP_SIZE;
         for (size_t g = 0; g < full_groups; g++) {
             size_t base = g * BURST_GROUP_SIZE;
 
-            // Extract the group
-            std::vector<Bytes> group(encoded_frames.begin() + base,
-                                     encoded_frames.begin() + base + BURST_GROUP_SIZE);
-
-            // Burst-interleave the coded bytes. At z=81 (N=1944) each codeword
-            // is 243 bytes instead of 81. 2026-05-28 Phase 2: sourced from the
-            // ldpc_lifting_z_ member set by the connection layer per-burst (and
-            // wire-announced in BURST_HEADER payload[5]); env override kept for
-            // ad-hoc experimentation only.
-            const int ldpc_z_for_burst = [this]() {
-                if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
-                    if (std::atoi(env) == 81) return 81;
+            if (use_burst_interleave_) {
+                // Burst-interleave the coded bytes across the group. At z=81 (N=1944)
+                // each codeword is 243 bytes instead of 81.
+                std::vector<Bytes> group(encoded_frames.begin() + base,
+                                         encoded_frames.begin() + base + BURST_GROUP_SIZE);
+                const int ldpc_z_for_burst = [this]() {
+                    if (const char* env = std::getenv("ULTRA_LDPC_Z")) {
+                        if (std::atoi(env) == 81) return 81;
+                    }
+                    return static_cast<int>(ldpc_lifting_z_);
+                }();
+                const int bytes_per_cw = (ldpc_z_for_burst == 81) ? 243 : 81;
+                auto interleaved = fec::BurstInterleaver::interleave(
+                    group, fixed_frame_codewords_, bytes_per_cw);
+                for (int i = 0; i < BURST_GROUP_SIZE; i++) {
+                    encoded_frames[base + i] = interleaved[i];
                 }
-                return static_cast<int>(ldpc_lifting_z_);
-            }();
-            const int bytes_per_cw = (ldpc_z_for_burst == 81) ? 243 : 81;
-            auto interleaved = fec::BurstInterleaver::interleave(
-                group, fixed_frame_codewords_, bytes_per_cw);
+                LOG_MODEM(INFO, "[%s] Burst interleaved group %zu: frames %zu-%zu",
+                          log_prefix_.c_str(), g, base, base + BURST_GROUP_SIZE - 1);
+            }
 
-            // Replace in-place
+            // Group MARKING — always, whether or not the bytes were permuted, so the
+            // descriptor + group-start anchor + group-ACK fire either way.
             for (int i = 0; i < BURST_GROUP_SIZE; i++) {
-                encoded_frames[base + i] = interleaved[i];
                 frame_in_burst_group[base + i] = true;
             }
             frame_is_group_start[base] = true;
             interleaved_groups++;
-
-            LOG_MODEM(INFO, "[%s] Burst interleaved group %zu: frames %zu-%zu",
-                      log_prefix_.c_str(), g, base, base + BURST_GROUP_SIZE - 1);
         }
     }
 
@@ -557,10 +565,14 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
     // the receiver's local config did not match the sender's. The descriptor is a
     // control frame (DQPSK control profile via encodeFrame), so it carries its own
     // full chirp+LTS anchor and seeds the warm timing the group-start marker rides.
-    if (emit_burst_descriptor_ && interleaved_groups > 0 && use_burst_interleave_ &&
+    if (emit_burst_descriptor_ && interleaved_groups > 0 &&
         protocol::isOFDMMode(mode_) && waveform_->supportsDataPreamble()) {
         uint8_t flags = 0;
-        flags |= protocol::v2::ControlFrame::BURST_FLAG_INTERLEAVE;  // groups are interleaved here
+        if (use_burst_interleave_) {
+            // per-burst flag: groups in THIS burst are cross-frame interleaved (the RX
+            // deinterleaves iff this is set). OFF on Good/AWGN -> per-frame decode.
+            flags |= protocol::v2::ControlFrame::BURST_FLAG_INTERLEAVE;
+        }
         if (use_carrier_ldpc_interleaver_) {
             flags |= protocol::v2::ControlFrame::BURST_FLAG_CARRIER_LDPC;
         }
