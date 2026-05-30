@@ -284,6 +284,7 @@ private:
     bool file_browser_open_ = false;
     int last_progress_milestone_ = 0;  // Last logged milestone (0, 25, 50, 75)
     std::chrono::steady_clock::time_point file_transfer_start_time_;  // For duration display
+    bool rx_transfer_clock_armed_ = false;  // RX throughput clock started (at first burst, not FILE_START)
     uint32_t pending_file_tx_payload_bytes_ = 0;  // Original file size for TX goodput
     std::string pending_file_tx_path_;
     float last_effective_goodput_bps_ = 0.0f;  // Last completed file transfer goodput

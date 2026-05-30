@@ -31,6 +31,20 @@ enum class ConnectionState {
 
 const char* connectionStateToString(ConnectionState state);
 
+// Live "a burst is arriving" status for the GUI — surfaced BEFORE a file transfer is
+// established (FILE_START), so the operator can see the modem is actually working: the
+// group number advances and the per-group decoded-frame count climbs, instead of a dead
+// UI that only wakes up once metadata finally decodes. Once a real file transfer is
+// RECEIVING, the GUI swaps this flashing indicator for the file progress bar (and can
+// still show the group # alongside it).
+struct BurstActivity {
+    bool active = false;          // a burst is currently being received
+    uint32_t group_seq = 0;       // latest burst group number (advances = progress)
+    uint8_t frames_decoded = 0;   // frames that decoded in the latest group (X)
+    uint8_t frames_in_group = 0;  // group size from the burst descriptor (Y)
+    uint32_t groups_seen = 0;     // running count of group receptions (liveness)
+};
+
 // Connection configuration
 struct ConnectionConfig {
     ARQConfig arq;
@@ -160,6 +174,9 @@ public:
     void cancelFileTransfer();
     bool isFileTransferInProgress() const;
     FileTransferProgress getFileProgress() const;
+    // Live burst-arrival status (group #, X/Y frames) for the "incoming burst" GUI
+    // indicator, valid before a file transfer is established.
+    BurstActivity getBurstActivity() const { return burst_activity_; }
 
     // --- Frame Processing ---
 
@@ -581,6 +598,9 @@ private:
     uint16_t burst_rx_group_seq_ = 0;
     bool burst_rx_group_open_ = false;
     std::vector<Bytes> burst_rx_group_frames_;
+
+    // Live "incoming burst" status for the GUI (see BurstActivity above).
+    BurstActivity burst_activity_;
 
     // ARQ ACK callbacks can acknowledge several slots from one cumulative ACK.
     // Defer window refill until ARQ finishes freeing all slots so OFDM stays

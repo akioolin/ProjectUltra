@@ -1063,9 +1063,12 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
 
     // File transfer callbacks
     protocol_.setFileProgressCallback([this](const protocol::FileTransferProgress& p) {
-        // Start timing on first progress (for receiving files)
-        if (last_progress_milestone_ == 0 && !p.is_sending && p.transferred_bytes == 0) {
+        // Start timing on first progress (for receiving files) — unless the RX clock
+        // was already armed earlier at the first incoming burst (the honest start).
+        if (!rx_transfer_clock_armed_ && last_progress_milestone_ == 0 && !p.is_sending &&
+            p.transferred_bytes == 0) {
             file_transfer_start_time_ = std::chrono::steady_clock::now();
+            rx_transfer_clock_armed_ = true;
             if (p.total_bytes > 0 && p.transferred_bytes == 0) {
                 appendRxLogLine("[FILE] Receiving " + p.filename + " (" +
                                 std::to_string(p.total_bytes) + " bytes)...");
@@ -1089,6 +1092,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     protocol_.setFileReceivedCallback([this](const std::string& path, bool success,
                                              const std::string& error) {
         last_progress_milestone_ = 0;  // Reset for next transfer
+        rx_transfer_clock_armed_ = false;  // re-arm RX clock on the next incoming burst
         auto duration = std::chrono::steady_clock::now() - file_transfer_start_time_;
         float seconds = std::chrono::duration<float>(duration).count();
         uint32_t file_bytes = success ? safeFileSizeBytes(path) : 0;
@@ -1139,6 +1143,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
 
     protocol_.setFileSentCallback([this](bool success, const std::string& error) {
         last_progress_milestone_ = 0;  // Reset for next transfer
+        rx_transfer_clock_armed_ = false;  // re-arm RX clock on the next incoming burst
         auto duration = std::chrono::steady_clock::now() - file_transfer_start_time_;
         float seconds = std::chrono::duration<float>(duration).count();
 
@@ -4130,22 +4135,63 @@ void App::renderOperateTab() {
         ImGui::TextColored(progress.is_sending ? ImVec4(0.5f, 0.8f, 1.0f, 1.0f) : ImVec4(0.5f, 1.0f, 0.5f, 1.0f),
             "%s: %s", progress.is_sending ? "TX" : "RX", progress.filename.c_str());
         ImGui::SameLine();
-        ImGui::ProgressBar(progress.percentage() / 100.0f, ImVec2(100, 16));
+        // Bar reflects the TRUE received total (contiguous + SR-ARQ out-of-order buffered).
+        ImGui::ProgressBar(progress.receivedPercentage() / 100.0f, ImVec2(100, 16));
         ImGui::SameLine();
-        // Show bytes transferred / total with appropriate units
-        if (progress.total_bytes >= 1024) {
-            ImGui::Text("%.1f/%.1f KB (%.0f%%)",
-                progress.transferred_bytes / 1024.0f,
-                progress.total_bytes / 1024.0f,
-                progress.percentage());
+        const float kKB = 1024.0f;
+        if (progress.is_sending) {
+            // TX: received == transferred (sender's acked offset).
+            if (progress.total_bytes >= 1024)
+                ImGui::Text("%.1f/%.1f KB (%.0f%%)",
+                    progress.transferred_bytes / kKB, progress.total_bytes / kKB,
+                    progress.percentage());
+            else
+                ImGui::Text("%u/%u B (%.0f%%)",
+                    progress.transferred_bytes, progress.total_bytes,
+                    progress.percentage());
         } else {
-            ImGui::Text("%u/%u B (%.0f%%)",
-                progress.transferred_bytes, progress.total_bytes,
-                progress.percentage());
+            // RX: actual bytes received, with the contiguous (file-safe) % alongside —
+            // the gap between "rcvd" and "asm" is the SR-ARQ recovery in flight.
+            if (progress.total_bytes >= 1024)
+                ImGui::Text("%.1f/%.1f KB (%.0f%% rcvd, %.0f%% asm)",
+                    progress.received_bytes / kKB, progress.total_bytes / kKB,
+                    progress.receivedPercentage(), progress.percentage());
+            else
+                ImGui::Text("%u/%u B (%.0f%% rcvd, %.0f%% asm)",
+                    progress.received_bytes, progress.total_bytes,
+                    progress.receivedPercentage(), progress.percentage());
         }
         ImGui::SameLine();
         if (ImGui::SmallButton("Cancel")) cancelActiveFileTransfer();
+        // Live burst group # alongside the bar, so you can watch it advance.
+        {
+            auto burst = protocol_.getBurstActivity();
+            if (burst.active && burst.groups_seen > 0) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("grp %u", burst.group_seq);
+            }
+        }
     } else {
+        // "Incoming burst, please hold..." — a burst is arriving but no file transfer is
+        // established yet (FILE_START not decoded). Flash liveness so the operator doesn't
+        // think the modem is dead: the group # advances and X/Y frames decode in real time.
+        {
+            auto burst = protocol_.getBurstActivity();
+            if (burst.active) {
+                // Start the RX throughput clock HERE — at the first burst — not at the
+                // late FILE_START decode, so the receiver's kbps measures the real window.
+                if (!rx_transfer_clock_armed_) {
+                    file_transfer_start_time_ = std::chrono::steady_clock::now();
+                    rx_transfer_clock_armed_ = true;
+                }
+                const float pulse =
+                    0.55f + 0.45f * std::sin(static_cast<float>(ImGui::GetTime()) * 5.0f);
+                ImGui::TextColored(
+                    ImVec4(1.0f, 0.82f, 0.25f, pulse),
+                    ">> INCOMING BURST - group %u, %u/%u frames decoded  (receiving, hold...)",
+                    burst.group_seq, burst.frames_decoded, burst.frames_in_group);
+            }
+        }
         ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 160);
         ImGui::InputText("##filepath", file_path_buffer_, sizeof(file_path_buffer_));
         ImGui::SameLine();

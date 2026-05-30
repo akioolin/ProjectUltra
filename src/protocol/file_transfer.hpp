@@ -28,11 +28,20 @@ namespace FileFlags {
 struct FileTransferProgress {
     std::string filename;
     uint32_t total_bytes = 0;
-    uint32_t transferred_bytes = 0;
+    uint32_t transferred_bytes = 0;   // RX: contiguous bytes safely assembled to file
+    uint32_t received_bytes = 0;      // RX: ALL unique bytes received incl. out-of-order
+                                      //     (SR-ARQ buffered, awaiting an earlier gap to fill).
+                                      //     TX: == transferred_bytes.
     bool is_sending = false;
 
+    // Contiguous (file-safe) progress — what is actually written/assembled in order.
     float percentage() const {
         return total_bytes > 0 ? (100.0f * transferred_bytes / total_bytes) : 0.0f;
+    }
+    // True received progress — contiguous + out-of-order buffered. >= percentage();
+    // the gap between them is the SR-ARQ recovery currently in flight.
+    float receivedPercentage() const {
+        return total_bytes > 0 ? (100.0f * received_bytes / total_bytes) : 0.0f;
     }
 };
 
@@ -143,6 +152,14 @@ public:
     FileTransferProgress getProgress() const;
     bool isBusy() const;
 
+    // True when decoded FILE_DATA was safely STAGED ahead of FILE_START (and within
+    // bounds). The connection may then ACK those frames instead of NACKing the whole
+    // burst — staging guarantees they survive until FILE_START drains them, so we are
+    // never ACKing data that gets silently dropped.
+    bool hasHealthyStagedData() const {
+        return !rx_prestart_chunks_.empty() && !rx_prestart_overflow_;
+    }
+
     // Cancel current transfer
     void cancel(const std::string& error = "Transfer cancelled");
 
@@ -179,6 +196,20 @@ private:
     bool rx_final_chunk_seen_ = false;
     std::map<uint32_t, Bytes> rx_pending_chunks_;  // Out-of-order chunks buffered by offset
 
+    // FILE_DATA decoded BEFORE FILE_START established RECEIVING. The BURST_HEADER has
+    // already announced an inbound bulk burst, and every FILE_DATA frame carries its
+    // own ABSOLUTE byte offset + length, so we STAGE these (keyed by offset) instead
+    // of dropping them, then DRAIN them when FILE_START arrives — saving a re-send of
+    // frames that already decoded. ADAPTIVE BY CONSTRUCTION: the staging is purely
+    // offset/length based and reads NOTHING from the BURST_HEADER (not group size, cw,
+    // mod, rate, or Z), so it stays correct if the descriptor changes between/within
+    // bursts (e.g. adaptive rate). Bounded: on overflow we stop staging and the
+    // connection falls back to NACK, so we never ACK data we cannot retain.
+    std::map<uint32_t, Bytes> rx_prestart_chunks_;
+    bool rx_prestart_final_seen_ = false;
+    bool rx_prestart_overflow_ = false;
+    static constexpr size_t MAX_PRESTART_STAGE_BYTES = 256u * 1024u;
+
     // Callbacks
     ProgressCallback on_progress_;
     ReceivedCallback on_received_;
@@ -191,6 +222,7 @@ private:
     bool processFileStart(const Bytes& payload);
     bool processFileData(const Bytes& payload, bool more_data);
     bool processFileBlock(const Bytes& payload);
+    void checkAndFinalizeReceive();  // CRC-check + write + callback once data is complete
     uint32_t calculateCRC32(std::istream& stream);
     uint32_t calculateCRC32File(const std::string& filepath);
     void resetTxState();

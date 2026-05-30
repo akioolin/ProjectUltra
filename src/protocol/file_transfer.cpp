@@ -299,11 +299,19 @@ FileTransferProgress FileTransferController::getProgress() const {
         progress.filename = tx_filename_;
         progress.total_bytes = static_cast<uint32_t>(tx_data_.size());
         progress.transferred_bytes = tx_offset_;
+        progress.received_bytes = tx_offset_;
         progress.is_sending = true;
     } else if (state_ == FileTransferState::RECEIVING) {
         progress.filename = rx_filename_;
         progress.total_bytes = rx_expected_size_;
         progress.transferred_bytes = static_cast<uint32_t>(rx_data_.size());
+        // True received total = contiguous + every out-of-order chunk still buffered
+        // (SR-ARQ keeps these; they drain into rx_data_ when the earlier gap fills).
+        // No double-count: draining moves bytes pending->rx_data_, sum is invariant.
+        uint64_t buffered = 0;
+        for (const auto& kv : rx_pending_chunks_) buffered += kv.second.size();
+        progress.received_bytes =
+            static_cast<uint32_t>(rx_data_.size() + buffered);
         progress.is_sending = false;
     }
 
@@ -450,6 +458,14 @@ bool FileTransferController::processFileStart(const Bytes& payload) {
         return true;  // Malformed
     }
 
+    // Idempotent: a re-sent FILE_START (e.g. its ACK was lost) must NOT wipe an
+    // in-progress receive. Only the FIRST FILE_START sets up the buffers / drains the
+    // pre-start staging. (CRC is validated at completion, so a stale duplicate here is
+    // safely ignored.)
+    if (state_ == FileTransferState::RECEIVING) {
+        return true;
+    }
+
     rx_flags_ = payload[1];
 
     // Parse original size (big-endian)
@@ -468,12 +484,34 @@ bool FileTransferController::processFileStart(const Bytes& payload) {
     rx_filepath_ = uniqueReceivePath(rx_dir_, rx_filename_);
 
     rx_data_.clear();
-    rx_pending_chunks_.clear();
-    rx_final_chunk_seen_ = false;
     rx_data_.reserve(std::min<uint32_t>(rx_expected_size_, 1024u * 1024u));
     state_ = FileTransferState::RECEIVING;
 
+    // DRAIN (do NOT clear) any FILE_DATA staged before this FILE_START. Those frames
+    // already decoded (the BURST_HEADER told us a bulk burst was inbound) and carry
+    // absolute offsets, so adopt them as the out-of-order buffer and stitch in whatever
+    // is now contiguous from offset 0 — saving a re-send of already-decoded frames.
+    // Offset-based, so it is correct regardless of the descriptor used to carry them.
+    rx_pending_chunks_ = std::move(rx_prestart_chunks_);
+    rx_prestart_chunks_.clear();
+    rx_final_chunk_seen_ = rx_prestart_final_seen_;
+    rx_prestart_final_seen_ = false;
+    rx_prestart_overflow_ = false;
+    while (!rx_pending_chunks_.empty()) {
+        uint32_t next_expected = static_cast<uint32_t>(rx_data_.size());
+        auto it = rx_pending_chunks_.find(next_expected);
+        if (it == rx_pending_chunks_.end()) break;
+        rx_data_.insert(rx_data_.end(), it->second.begin(), it->second.end());
+        LOG_MODEM(INFO,
+                  "FileTransfer: Drained STAGED chunk offset=%u len=%zu (total=%zu)",
+                  next_expected, it->second.size(), rx_data_.size());
+        rx_pending_chunks_.erase(it);
+    }
+
     notifyProgress();
+    // A tiny file whose final chunk was staged ahead of FILE_START is already complete
+    // after the drain — finalize now instead of waiting for a data frame that won't come.
+    checkAndFinalizeReceive();
     return true;
 }
 
@@ -482,19 +520,46 @@ bool FileTransferController::processFileData(const Bytes& payload, bool more_dat
         return true;
     }
 
-    if (state_ != FileTransferState::RECEIVING) {
-        return true;
-    }
-
-    // Parse 32-bit chunk offset (big-endian).
+    // Parse 32-bit ABSOLUTE chunk offset (big-endian) + data (skip type+offset bytes).
+    // The offset is self-describing per frame — independent of the BURST_HEADER's group
+    // size / cw / mod / rate / Z — which is what makes both the out-of-order buffer and
+    // the pre-FILE_START staging below adaptive to descriptor changes.
     uint32_t offset = (static_cast<uint32_t>(payload[1]) << 24) |
                       (static_cast<uint32_t>(payload[2]) << 16) |
                       (static_cast<uint32_t>(payload[3]) << 8) |
                       static_cast<uint32_t>(payload[4]);
-
-    // Append data (skip type and offset bytes)
     const uint8_t* data = payload.data() + 5;
     size_t data_len = payload.size() - 5;
+
+    // PRE-START STAGING: this FILE_DATA decoded before FILE_START set up the transfer.
+    // The BURST_HEADER already told us a bulk burst is inbound and the offset is
+    // absolute, so KEEP it (drained when FILE_START arrives) instead of dropping it and
+    // forcing a whole-group re-send. Bounded; on overflow we give up staging and let
+    // the connection NACK so we never ACK data we cannot retain.
+    if (state_ != FileTransferState::RECEIVING) {
+        if (rx_prestart_overflow_) {
+            return true;  // staging disabled this transfer; connection will NACK
+        }
+        size_t staged = 0;
+        for (const auto& kv : rx_prestart_chunks_) staged += kv.second.size();
+        const bool is_new = rx_prestart_chunks_.find(offset) == rx_prestart_chunks_.end();
+        if (staged + (is_new ? data_len : 0) > MAX_PRESTART_STAGE_BYTES) {
+            rx_prestart_overflow_ = true;
+            LOG_MODEM(WARN,
+                      "FileTransfer: pre-FILE_START staging overflow (%zu B staged); "
+                      "falling back to NACK-until-FILE_START",
+                      staged);
+            return true;
+        }
+        rx_prestart_chunks_[offset] = Bytes(data, data + data_len);
+        if (!more_data) rx_prestart_final_seen_ = true;
+        LOG_MODEM(INFO,
+                  "FileTransfer: STAGED pre-FILE_START chunk offset=%u len=%zu "
+                  "(%zu staged) — will drain on FILE_START",
+                  offset, data_len, rx_prestart_chunks_.size());
+        return true;
+    }
+
     if (!more_data) {
         rx_final_chunk_seen_ = true;
     }
@@ -510,11 +575,14 @@ bool FileTransferController::processFileData(const Bytes& payload, bool more_dat
     }
 
     if (offset > expected_offset) {
-        // Out-of-order: buffer for later insertion
+        // Out-of-order: buffer for later insertion. The bytes ARE received and kept
+        // (SR-ARQ), they just can't be written until the earlier gap fills. Notify so
+        // the bar reflects the true received total now, not only when the gap closes.
         rx_pending_chunks_[offset] = Bytes(data, data + data_len);
         LOG_MODEM(INFO,
                   "FileTransfer: Buffered out-of-order chunk offset=%u len=%zu (expected=%u, pending=%zu)",
                   offset, data_len, expected_offset, rx_pending_chunks_.size());
+        notifyProgress();
         return true;
     }
 
@@ -534,16 +602,29 @@ bool FileTransferController::processFileData(const Bytes& payload, bool more_dat
 
     notifyProgress();
 
-    const bool compressed = (rx_flags_ & FileFlags::COMPRESSED) != 0;
-    const bool size_reached = !compressed && rx_data_.size() >= rx_expected_size_;
-    const bool compressed_complete = compressed && rx_final_chunk_seen_ && rx_pending_chunks_.empty();
-
     // For uncompressed files, trust explicit expected size more than MORE_FRAG.
-    if (!compressed && !more_data && rx_data_.size() < rx_expected_size_) {
+    if (((rx_flags_ & FileFlags::COMPRESSED) == 0) && !more_data &&
+        rx_data_.size() < rx_expected_size_) {
         LOG_MODEM(WARN,
                   "FileTransfer: Premature final chunk ignored (%zu/%u bytes)",
                   rx_data_.size(), rx_expected_size_);
     }
+
+    checkAndFinalizeReceive();
+    return true;
+}
+
+// Finalize the receive once the data is complete: decompress (if needed), verify CRC,
+// write the file, fire the callback. Shared by the normal in-order path AND the
+// FILE_START staging drain (a tiny file whose final chunk was staged before FILE_START
+// completes on the drain, not on a later data frame). Completion is decided by byte
+// count / final-chunk flag, NOT by frame index or descriptor, so it is correct
+// regardless of how the chunks were carried over the air.
+void FileTransferController::checkAndFinalizeReceive() {
+    const bool compressed = (rx_flags_ & FileFlags::COMPRESSED) != 0;
+    const bool size_reached = !compressed && rx_data_.size() >= rx_expected_size_;
+    const bool compressed_complete =
+        compressed && rx_final_chunk_seen_ && rx_pending_chunks_.empty();
 
     // Finalization trigger:
     // - Compressed: still rely on MORE_FRAG (we don't know compressed size a priori)
@@ -562,7 +643,7 @@ bool FileTransferController::processFileData(const Bytes& payload, bool more_dat
                     on_received_("", false, "Decompression failed");
                 }
                 resetRxState();
-                return true;
+                return;
             }
             final_data = std::move(*decompressed);
         } else {
@@ -610,8 +691,6 @@ bool FileTransferController::processFileData(const Bytes& payload, bool more_dat
 
         resetRxState();
     }
-
-    return true;
 }
 
 bool FileTransferController::processFileBlock(const Bytes& payload) {
@@ -740,6 +819,9 @@ void FileTransferController::resetRxState() {
     rx_filename_.clear();
     rx_data_.clear();
     rx_pending_chunks_.clear();
+    rx_prestart_chunks_.clear();
+    rx_prestart_final_seen_ = false;
+    rx_prestart_overflow_ = false;
     rx_expected_size_ = 0;
     rx_expected_crc_ = 0;
     rx_flags_ = 0;

@@ -2399,6 +2399,30 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
     if (!use_burst_transport_) {
         return;
     }
+
+    // Live "incoming burst" status for the GUI. Updated for EVERY group (SR or
+    // interleaved), so the operator sees the modem working — group # advancing, X/Y
+    // frames decoding — even before FILE_START establishes the file. frames.size() is
+    // the group size (failed slots are present but undeserializable); frame_mask is the
+    // decoded bitmap.
+    {
+        unsigned decoded = 0;
+        for (uint8_t m = frame_mask; m; m &= (m - 1)) ++decoded;  // popcount (X)
+        // Group size (Y) = bit-length of the decode mask: the decoder builds an N-bit
+        // mask for the N-frame group (failed frames are 0-bits), so the highest slot
+        // gives N. frames.size() is decoded-only (== X), so NOT the total. Robust for
+        // full and partial-last groups; only cosmetically low if a group's *trailing*
+        // frame fails (rare). For frame 0 (FILE_START) missing, mask=0x3E -> Y=6.
+        unsigned group_bits = 0;
+        for (uint8_t m = frame_mask; m; m >>= 1) ++group_bits;
+        burst_activity_.active = true;
+        burst_activity_.group_seq = group_seq;
+        burst_activity_.frames_decoded = static_cast<uint8_t>(decoded);
+        burst_activity_.frames_in_group =
+            static_cast<uint8_t>(group_bits > decoded ? group_bits : decoded);
+        ++burst_activity_.groups_seen;
+    }
+
     // §14.36 Phase 5c: stash the decode headroom so the GROUP_ACK for this group
     // carries it back to the sender (which runs the rate controller). Quantize
     // [0,1] -> 0..254; 0xFF means "no feedback" when adaptation is off.
@@ -2559,8 +2583,19 @@ void Connection::onBurstGroupReceivedSR(uint16_t group_seq,
     if (receiving_now) {
         burst_rx_ever_receiving_ = true;
     }
-    const uint8_t ack_mask =
-        (receiving_now || burst_rx_ever_receiving_) ? frame_mask : 0;
+    // Pre-RECEIVING, decoded FILE_DATA is now STAGED (not dropped) by the file
+    // controller — the BURST_HEADER already told us a bulk burst is inbound — so it is
+    // safe to ACK the decode mask as soon as we have a live file context: RECEIVING,
+    // ever-received, OR healthy staged data. Staged frames survive until FILE_START
+    // drains them, so this can no longer ACK data that gets silently dropped (the
+    // seed-44 hazard). A burst that retained NOTHING (no staging, never receiving — or
+    // staging overflowed) is still NACKed so the sender's liveness fires. This is what
+    // lets group 0 ACK its decoded data frames and re-send only the missing FILE_START
+    // frame, instead of re-sending the whole group.
+    const bool safe_to_ack =
+        receiving_now || burst_rx_ever_receiving_ ||
+        file_transfer_.hasHealthyStagedData();
+    const uint8_t ack_mask = safe_to_ack ? frame_mask : 0;
 
     // ACK the delivery-safe mask. type=Ack when any frame is acked (forward
     // progress); Nack only on a fully-undelivered burst (0/N) so the sender's
@@ -4515,6 +4550,7 @@ void Connection::enterDisconnected(const std::string& reason) {
     state_ = ConnectionState::DISCONNECTED;
     is_initiator_ = false;
     handshake_confirmed_ = false;
+    burst_activity_ = BurstActivity{};  // clear the "incoming burst" GUI indicator
     setPhyMaskV1Negotiated(false);
     narrowband_override_ = WaveformMode::AUTO;  // Clear session-scoped narrowband override
     std::string old_remote = remote_call_;
@@ -4726,7 +4762,14 @@ void Connection::setFileProgressCallback(FileProgressCallback cb) {
 }
 
 void Connection::setFileReceivedCallback(FileReceivedCallback cb) {
-    file_transfer_.setReceivedCallback(std::move(cb));
+    // Wrap so the "incoming burst" GUI indicator clears the moment the file finishes
+    // (success or fail), not only on disconnect.
+    file_transfer_.setReceivedCallback(
+        [this, cb = std::move(cb)](const std::string& path, bool success,
+                                   const std::string& error) {
+            burst_activity_ = BurstActivity{};
+            if (cb) cb(path, success, error);
+        });
 }
 
 void Connection::setFileSentCallback(FileSentCallback cb) {

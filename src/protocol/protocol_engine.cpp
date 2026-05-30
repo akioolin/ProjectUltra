@@ -283,6 +283,11 @@ FileTransferProgress ProtocolEngine::getFileProgress() const {
     return connection_.getFileProgress();
 }
 
+BurstActivity ProtocolEngine::getBurstActivity() const {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    return connection_.getBurstActivity();
+}
+
 void ProtocolEngine::setFileProgressCallback(FileProgressCallback cb) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setFileProgressCallback(std::move(cb));

@@ -107,6 +107,7 @@ public:
     void cancelFileTransfer();
     bool isFileTransferInProgress() const;
     FileTransferProgress getFileProgress() const;
+    BurstActivity getBurstActivity() const;
 
     void setFileProgressCallback(FileProgressCallback cb);
     void setFileReceivedCallback(FileReceivedCallback cb);
