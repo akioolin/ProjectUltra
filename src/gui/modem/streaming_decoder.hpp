@@ -630,13 +630,8 @@ private:
     bool adaptive_short_data_preamble_ = false;
     bool sync_from_warm_timed_window_ = false;
     bool sync_from_full_anchor_fallback_ = false;
-    sync::frame_arrival_policy::WarmSyncPhase warm_sync_phase_ =
-        sync::frame_arrival_policy::WarmSyncPhase::COLD;
-    bool last_frame_arrival_valid_ = false;
-    size_t last_frame_start_sample_ = 0;
-    size_t last_frame_end_sample_ = 0;
-    bool last_frame_arrival_error_valid_ = false;
-    int64_t last_frame_arrival_error_samples_ = 0;
+    // warm_sync_phase_ + last_frame_* relocated into sync_controller_ (§7.4 shell-move A1,
+    // 2026-05-31); accessed as sync_controller_.<field> until A2 moves the transition logic in.
 
     // The single owner of OFDM sync + burst-z state (refactor §7). Sync state is
     // being migrated into it member-by-member (shell-move §7.5#1); already holds the

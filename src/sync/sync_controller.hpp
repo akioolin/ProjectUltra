@@ -27,9 +27,11 @@
 
 #include "waveform/waveform_interface.hpp"   // IWaveform, SyncResult, SampleSpan
 #include "protocol/frame_v2.hpp"             // protocol::WaveformMode
+#include "sync/frame_arrival_policy.hpp"     // WarmSyncPhase + warm-sync timing helpers
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 
 namespace ultra {
 namespace sync {
@@ -107,6 +109,19 @@ public:
                                                      // (the 11-flip flag; becomes SyncMode in Phase D)
     bool     warm_sync_active_ = false;              // in the warm (locked+predicting) regime
                                                      // (collapses into SyncMode::WARM in Phase D)
+
+    // Warm-sync phase machine + last-frame arrival memory (shell-moved 2026-05-31, §7.4
+    // un-defer: possible now that frame_arrival_policy lives in src/sync). Still the 4-state
+    // WarmSyncPhase; collapses into SyncMode in the behavioral phase (A2/Phase D). The
+    // noteFrameArrival* transition logic that drives these still lives on StreamingDecoder
+    // for now (A1 is storage-only; A2 moves the bodies into reportFrameOutcome()).
+    frame_arrival_policy::WarmSyncPhase warm_sync_phase_ =
+        frame_arrival_policy::WarmSyncPhase::COLD;
+    bool     last_frame_arrival_valid_ = false;
+    size_t   last_frame_start_sample_ = 0;
+    size_t   last_frame_end_sample_ = 0;
+    bool     last_frame_arrival_error_valid_ = false;
+    int64_t  last_frame_arrival_error_samples_ = 0;
     // CFO acquisition state (§7.7#1). ATOMIC — touched by RX + control threads; the
     // CFO feedback loop (.load()/.store()) routes through here.
     std::atomic<float> last_cfo_{0.0f};

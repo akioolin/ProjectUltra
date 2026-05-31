@@ -284,7 +284,7 @@ void StreamingDecoder::searchForSync() {
             s16_env_w && std::atoi(s16_env_w) != 0;
         const bool s16_skip_short_lead =
             s16_warm_handoff_w &&
-            warm_sync_phase_ ==
+            sync_controller_.warm_sync_phase_ ==
                 arrival_policy::WarmSyncPhase::WARM &&
             !sync_controller_.expect_full_ofdm_anchor_;
         const size_t expected_sync_search_sample =
@@ -302,7 +302,7 @@ void StreamingDecoder::searchForSync() {
             expected_sync_search_sample,
             sync_controller_.frame_arrival_confidence_,
             sync_controller_.consecutive_sync_misses_,
-            warm_sync_phase_,
+            sync_controller_.warm_sync_phase_,
             total_fed_,
             oldest_abs,
             search_floor_abs_valid_,
@@ -364,7 +364,7 @@ void StreamingDecoder::searchForSync() {
                     warm_plan.active ? 1 : 0,
                     warm_plan.wait_for_more_samples ? 1 : 0,
                     warm_plan.lower_threshold ? 1 : 0,
-                    arrival_policy::warmSyncPhaseName(warm_sync_phase_),
+                    arrival_policy::warmSyncPhaseName(sync_controller_.warm_sync_phase_),
                     sync_controller_.warm_sync_active_ ? 1 : 0,
                     sync_controller_.next_expected_frame_sample_valid_ ? 1 : 0,
                     static_cast<unsigned long long>(sync_controller_.next_expected_frame_sample_),
@@ -662,7 +662,7 @@ void StreamingDecoder::searchForSync() {
             constexpr float kS16WarmHandoffMinCorrelation = 0.55f;
             const bool s16_warm_override =
                 s16_warm_handoff && is_coherent &&
-                warm_sync_phase_ ==
+                sync_controller_.warm_sync_phase_ ==
                     arrival_policy::WarmSyncPhase::WARM &&
                 sync_decision.rejected && found &&
                 sync_result.correlation >= kS16WarmHandoffMinCorrelation;
@@ -705,7 +705,7 @@ void StreamingDecoder::searchForSync() {
             // the frame's LDPC simply fails → existing NACK / §16.4 full-chirp escalation handles
             // it. Flag-gated by ULTRA_S16_WARM_HANDOFF.
             if (s16_warm_handoff && !sync_decision.found &&
-                warm_sync_phase_ == arrival_policy::WarmSyncPhase::WARM &&
+                sync_controller_.warm_sync_phase_ == arrival_policy::WarmSyncPhase::WARM &&
                 light_sync_thresholds.narrow_expected_window &&
                 sync_controller_.next_expected_frame_sample_valid_ &&
                 sync_controller_.next_expected_frame_sample_ >= search_start &&

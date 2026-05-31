@@ -662,12 +662,12 @@ void StreamingDecoder::finalizeBurstGroup() {
                   "conf=%.2f last_cfo=%.2f next_expected=%llu last_frame_end=%llu "
                   "expect_full_anchor=%d quality=%.2f",
                   log_prefix_.c_str(), last_burst_group_seq_,
-                  arrival_policy::warmSyncPhaseName(warm_sync_phase_),
+                  arrival_policy::warmSyncPhaseName(sync_controller_.warm_sync_phase_),
                   sync_controller_.consecutive_sync_misses_,
                   sync_controller_.frame_arrival_confidence_,
                   sync_controller_.last_cfo_.load(),
                   static_cast<unsigned long long>(sync_controller_.next_expected_frame_sample_),
-                  static_cast<unsigned long long>(last_frame_end_sample_),
+                  static_cast<unsigned long long>(sync_controller_.last_frame_end_sample_),
                   sync_controller_.expect_full_ofdm_anchor_ ? 1 : 0,
                   quality);
         // Refresh warm-sync on ANY acquired group, not just all_ok (2026-05-29,
@@ -690,7 +690,7 @@ void StreamingDecoder::finalizeBurstGroup() {
                 sync_controller_.consecutive_sync_misses_ = 0;
                 sync_controller_.frame_arrival_confidence_ = std::max(
                     sync_controller_.frame_arrival_confidence_, 0.5f);
-                warm_sync_phase_ =
+                sync_controller_.warm_sync_phase_ =
                     arrival_policy::WarmSyncPhase::WARM;
                 // 2026-05-29 ROOT-CAUSE FIX: re-arm the full-chirp anchor
                 // expectation for the NEXT group's BURST_HEADER. The encoder
