@@ -61,16 +61,21 @@ inline constexpr uint32_t kFixedFrameCodewords = v2::kDefaultFixedFrameCodewords
 inline constexpr uint32_t kOFDMBurstAckBatchFrames = 4;
 inline constexpr size_t kWideOFDMWindowFrames = 8;
 inline constexpr size_t kHighThroughputOFDMWindowFrames = 16;
-inline constexpr size_t kBurstInterleaveGroupFrames = 16;
+// Burst group size. 6 is the canonical default — it is MASK-WIDTH-MATCHED to the
+// 6-bit per-frame SACK `frame_mask` (0x3F, connection.cpp:459), which is what the
+// DEFAULT interleave-OFF SR path uses to selectively ACK frames. A group larger
+// than 6 leaves frames 7+ un-addressable by the SR mask, so they can never be
+// ACKed (the 16 default that lived here 2026-05-28..05-30 only "worked" with
+// interleave-ON whole-group ACK — the g16=1862bps Phase-D sweep was that path —
+// and the GUI harness papered over the default by pinning 6). The wideband
+// interleave-OFF SR path is the production default, so the default group is 6.
+// For the interleave-ON whole-group-ACK path you can still set a larger group via
+// ULTRA_BURST_GROUP_FRAMES (clamped [2,32]) — but note the 6-bit SACK ceiling.
+inline constexpr size_t kBurstInterleaveGroupFrames = 6;
 
-// Runtime burst-interleave group size. Defaults to kBurstInterleaveGroupFrames
-// (bumped 8 -> 16 on 2026-05-28 after Phase D sweep: g16 SS = 1862 bps
-// end-to-end Good@20 vs g8 SS = 1735, with 6/6 PASS on g16 Good@20. The
-// larger group amortizes the fixed descriptor+GROUP_ACK overhead over more
-// data frames. Still overridable via the ULTRA_BURST_GROUP_FRAMES env var.
-// Clamped to the interleaver's sane range [2,32]. Read at the chunk/pad/config
-// sites so TX file-chunking, padding, and the encoder's declared group_size
-// all agree (the RX self-describes from the descriptor).
+// Runtime burst group size. Read at the chunk/pad/config sites so TX file-chunking,
+// padding, and the encoder's declared group_size all agree (the RX self-describes
+// from the descriptor). Overridable via ULTRA_BURST_GROUP_FRAMES, clamped [2,32].
 inline size_t burstInterleaveGroupFrames() {
     if (const char* env = std::getenv("ULTRA_BURST_GROUP_FRAMES")) {
         const int v = std::atoi(env);

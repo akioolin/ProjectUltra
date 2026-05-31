@@ -355,16 +355,19 @@ void test_ofdm_profile_selection() {
           "non-speculative DQPSK R1/2 should keep existing burst-interleave behavior");
     CHECK(!isBurstInterleavedOFDMMode(Modulation::QPSK, CodeRate::R2_3),
           "non-QAM16 coherent modes should not inherit the QAM16 burst-interleave gate");
+    // Burst group size is 6 (mask-width-matched to the 6-bit SACK frame_mask).
     CHECK(!shouldPadHighRateFadingBurst(Modulation::DQPSK, CodeRate::R2_3, false, 1),
           "single high-rate fading frame should not be padded");
     CHECK(shouldPadHighRateFadingBurst(Modulation::DQPSK, CodeRate::R2_3, false, 2),
           "partial high-rate fading burst should be padded");
+    CHECK(shouldPadHighRateFadingBurst(Modulation::DQPSK, CodeRate::R2_3, false, 5),
+          "short high-rate fading burst (<6) should be padded to fill the group");
+    CHECK(!shouldPadHighRateFadingBurst(Modulation::DQPSK, CodeRate::R2_3, false, 6),
+          "full high-rate fading burst (one 6-frame group) should not be padded");
     CHECK(shouldPadHighRateFadingBurst(Modulation::DQPSK, CodeRate::R2_3, false, 7),
-          "short high-rate fading burst should fill the interleaver group");
-    CHECK(!shouldPadHighRateFadingBurst(Modulation::DQPSK, CodeRate::R2_3, false, 8),
-          "full high-rate fading burst should not be padded");
-    CHECK(shouldPadHighRateFadingBurst(Modulation::DQPSK, CodeRate::R2_3, false, 9),
-          "multi-group high-rate fading tail should be padded");
+          "multi-group high-rate fading tail (6+1) should be padded");
+    CHECK(!shouldPadHighRateFadingBurst(Modulation::DQPSK, CodeRate::R2_3, false, 12),
+          "two full 6-frame groups should not be padded");
     CHECK(!shouldPadHighRateFadingBurst(Modulation::DQPSK, CodeRate::R2_3, true, 7),
           "near-AWGN high-rate burst should not be padded");
     CHECK(!shouldPadHighRateFadingBurst(Modulation::DQPSK, CodeRate::R1_2, false, 7),

@@ -201,7 +201,7 @@ Buckets per the env-knobs→runtime-derivation workstream: **[FEAT]** in-flight 
 | `ULTRA_BURST_TRANSPORT` | one-way burst stop-and-wait transport | OFF | `connection.cpp:353` | FEAT |
 | `ULTRA_ADAPTIVE_RATE` | BER-driven per-block rate adaptation | OFF | `connection.cpp:358` | FEAT |
 | `ULTRA_BURST_INTERLEAVE` | cross-frame interleave ON→whole-group ACK / OFF→SR masks | **OFF** | `connection_policy.hpp:95` | FEAT |
-| `ULTRA_BURST_GROUP_FRAMES` | burst group size, clamp [2,32] | code **16** (`kBurstInterleaveGroupFrames` `:64`); `gui_qso_scenario.sh` overrides to **6** at runtime | `connection_policy.hpp:75` | FEAT |
+| `ULTRA_BURST_GROUP_FRAMES` | burst group size, clamp [2,32] | code **6** (`kBurstInterleaveGroupFrames` `:64`, reconciled 16→6 on 2026-05-30 — mask-width-matched to the 6-bit SACK frame_mask; the old 16 was un-SR-addressable on the default interleave-OFF path) | `connection_policy.hpp:74` | FEAT |
 | `ULTRA_BURST_DESCRIPTOR` | emit BURST_HEADER descriptor | **ON** (escape hatch) | `modem_engine.cpp:530` | FEAT |
 | `ULTRA_BURST_HEADER_ONCE` | descriptor only on group 0 | OFF | `modem_engine.cpp:544` | FEAT |
 | `ULTRA_S16_WARM_HANDOFF` | warm light-LTS group-start (8 call sites) | OFF | `streaming_encoder.cpp:649` | FEAT |

@@ -10,6 +10,27 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-30: Reconcile the burst group-size default (16 → 6, mask-width-matched)
+
+**What was wrong:** `kBurstInterleaveGroupFrames` was **16**, but the DEFAULT interleave-OFF
+SR path selectively ACKs frames with a **6-bit `frame_mask` (0x3F)** — so frames 7-16 of a
+16-frame group were un-addressable and could never be SR-ACKed. The 16 "worked" only on the
+interleave-ON whole-group-ACK path (the g16=1862 bps Phase-D sweep was that path); the GUI
+harness papered over the default by pinning `ULTRA_BURST_GROUP_FRAMES=6`. Three different
+numbers for one thing: code default 16, GUI harness 6, `test_connection_policy` expecting 8.
+
+**Fix:** set the default to **6** (mask-width-matched, = the GUI-validated value). Larger groups
+remain reachable via `ULTRA_BURST_GROUP_FRAMES` for the interleave-ON path (with the 6-bit SACK
+ceiling noted). Updated `test_connection_policy` pad assertions for a 6-frame group (N=6 full →
+no pad, N=7 tail → pad, N=12 two groups → no pad).
+
+**Behavior:** no change on the GUI path (already ran 6 via the harness); a *fix* on the default
+(no-env) path, which was previously running a broken 16. Verified: `ConnectionPolicy` 189/189
+PASS, `WaveformPolicy` PASS; no other test assumes the group size. (Found while verifying the
+entry-floor de-dup — the `ConnectionPolicy` failure was this stale default, not the de-dup.)
+
+---
+
 ## 2026-05-30: De-dup the OFDM entry-SNR floor + delete 3 dead dev files (alpha cleanup)
 
 **Entry-floor de-dup:** the OFDM "is wideband viable?" entry floor (AWGN 10 / Good 12 /
