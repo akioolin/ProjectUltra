@@ -500,6 +500,7 @@ target_link_libraries(ota_simulator_service PUBLIC ultra_tool_wav_io)
 # Shared GUI/modem runtime source lists. Keep these centralized so CLI tools,
 # TNC, simulator, and GUI builds cannot silently drift apart.
 set(ULTRA_STREAMING_DECODER_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/sync/sync_controller.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/idle_noise_snr_estimator.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/streaming_decoder.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/streaming_sync_acquisition.cpp
