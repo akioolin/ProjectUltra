@@ -408,9 +408,13 @@ void test_negotiated_mode_selection() {
                                WaveformMode::AUTO, 20.0f, 0.0f) == WaveformMode::MC_DPSK,
           "remote explicit preference should win when common");
 
+    // OFDM_NARROW DISABLED (thread A, 2026-05-31 — dropped from ModeCapabilities::ALL):
+    // a narrowband override can no longer select it (not a common capability), so it
+    // falls back to the supported local preference. Restore the OFDM_NARROW expectation
+    // when OFDM_NARROW returns as coherent (REMOVAL_BACKLOG R3).
     CHECK(selectNegotiatedMode(all, all, WaveformMode::AUTO, WaveformMode::OFDM_NARROW,
-                               WaveformMode::OFDM_CHIRP, 20.0f, 0.0f) == WaveformMode::OFDM_NARROW,
-          "narrowband override should outrank local preference");
+                               WaveformMode::OFDM_CHIRP, 20.0f, 0.0f) == WaveformMode::OFDM_CHIRP,
+          "narrowband override is moot while OFDM_NARROW is disabled (falls back to OFDM_CHIRP)");
 
     CHECK(selectNegotiatedMode(all, all, WaveformMode::AUTO, WaveformMode::AUTO,
                                WaveformMode::OFDM_CHIRP, 20.0f, 0.0f) == WaveformMode::OFDM_CHIRP,

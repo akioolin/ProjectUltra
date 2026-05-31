@@ -45,10 +45,15 @@ namespace ModeCapabilities {
     constexpr uint8_t OTFS_RAW   = 0x04;  // Reserved; not in ALL
     constexpr uint8_t MFSK       = 0x08;  // Reserved; not in ALL
     constexpr uint8_t MC_DPSK    = 0x10;  // Multi-Carrier DPSK for low SNR with fading (0-10 dB)
-    constexpr uint8_t OFDM_CHIRP = 0x20;  // OFDM with chirp sync + DQPSK (fading)
+    constexpr uint8_t OFDM_CHIRP = 0x20;  // OFDM with chirp sync, coherent QPSK (fading)
     constexpr uint8_t OFDM_NARROW = 0x40; // Narrowband OFDM (500 Hz, 3-10 dB)
     constexpr uint8_t PHY_MASK_V1 = 0x80; // Optional per-frame PHY carrier mask header
-    constexpr uint8_t ALL        = MC_DPSK | OFDM_CHIRP | OFDM_NARROW;
+    // OFDM_NARROW DISABLED (thread A, 2026-05-31): dropped from ALL so it is never
+    // advertised/negotiated/constructed. This makes the differential OFDM demod dead
+    // (the only OFDM mode still on DQPSK) so it can be removed; OFDM_NARROW returns
+    // later as COHERENT OFDM with a narrowband config (separate re-validation — see
+    // docs/REMOVAL_BACKLOG.md R3). The bit value 0x40 stays reserved for that return.
+    constexpr uint8_t ALL        = MC_DPSK | OFDM_CHIRP;
 }
 
 const char* waveformModeToString(WaveformMode mode);
