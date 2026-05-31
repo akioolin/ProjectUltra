@@ -20,14 +20,45 @@ not merely "decodable".
 
 | Channel | In-band SNR | Efficient rung | Confidence | Notes |
 |---------|-------------|----------------|------------|-------|
-| AWGN | 20 dB | **DQPSK (4PSK) R3/4** | covered = sure; most-efficient = observed | lowest resends at this SNR; multi-seed lock pending |
-| Good fading | 20 dB | **DQPSK (4PSK) R3/4** | covered = sure; most-efficient = observed | same as AWGN @20 — fading absorbed at this SNR; multi-seed lock pending |
+| AWGN | 20 dB | **QPSK (coherent 4PSK) R3/4** | covered = sure; most-efficient = observed | lowest resends at this SNR; multi-seed lock pending |
+| Good fading | 20 dB | **QPSK (coherent 4PSK) R3/4** | covered = sure; most-efficient = observed | same as AWGN @20 — fading absorbed at this SNR; multi-seed lock pending |
 
-**Next to fill in:** formal multi-seed lock of the two above; then the SNR *boundaries* —
-where DQPSK R3/4 stops being most-efficient (step down R1/2 → R1/4 as SNR drops) and where it
-stops being decodable (the floor); whether a **denser** rung (QAM8/QAM16) wins **above** 20 dB;
-then Moderate / Poor channels. Folds into `selectOFDMCodeRate()` + the `connection_policy.hpp`
-entry floors once locked.
+**Path decision (2026-05-30):** committing to the **COHERENT** OFDM data path (coherent
+QPSK / QAM8 / QAM16 with pilot+LTS channel estimation) — not differential DPSK — as the
+efficient family going forward. Floor probes use coherent mods (`ULTRA_FORCE_DATA_MOD=QPSK`).
+
+### ⚠ KEY FINDING (2026-05-31): the burst-group **acquisition** floor is HIGHER than the PHY floor
+
+Forced low-SNR floor probes (`ULTRA_FORCE_WAVEFORM=OFDM_CHIRP ULTRA_FORCE_DATA_MOD=… R1_4`,
+seed 42, 10 KB, `gui_qso_scenario.sh`) on **DQPSK R1/4**:
+
+| Channel | SNR | **Burst** (default) | **Legacy SR-ARQ** (`ULTRA_BURST_TRANSPORT=0`) |
+|---------|-----|---------------------|----------------------------------------------|
+| AWGN | 10 dB | **FAIL** — group never acquired (BRAVO 4 CW = handshake only; cursor frozen 480/10240; max-retries) | **PASS** — file CRC-OK, 210 bps, 50 retx, **776 data CW OK / 12 fail (~1.5% FER)** |
+| Good | 10 dB | FAIL (acquisition) | not yet run |
+
+**What this means:**
+- The PHY *decodes* DQPSK R1/4 fine at 10 dB AWGN (776 CW, ~1.5% FER — matches the documented
+  "10 dB AWGN" floor, which was a **known-position FER** measurement, *not* end-to-end).
+- **Burst transport can't ACQUIRE at SNR 10.** Legacy acquires **per-frame** (every frame
+  self-syncs; grinds through with retries); burst acquires **per-group** (one group-start anchor
+  for 6 frames) and that single anchor isn't robust at low SNR — one miss loses the whole group.
+- → **Making burst the default RAISED the low-SNR reach floor.** Burst is the high-SNR efficiency
+  play; it currently sacrifices the low-SNR reach legacy still has. This **vindicates keeping the
+  legacy fallback** (REMOVAL_BACKLOG R1 stays BLOCKED — removing it would have lost AWGN@10).
+- **Coherent QPSK R1/4 at Good@10 also fails** (acquisition + no-channel-estimate-at-low-SNR);
+  differential is the right low-SNR mod, but the *transport acquisition* is the wall, not the mod.
+
+**Fix targets (next):** harden burst group-start acquisition at low SNR (repeated/stronger group
+anchors, or per-frame re-anchor *inside* the group so a missed anchor isn't fatal); OR auto-fall
+back to legacy/per-frame acquisition below an SNR threshold. Tooling added this session:
+`ULTRA_FORCE_WAVEFORM` (pin the negotiated waveform below its auto entry-SNR) + a harness
+watchdog fix (don't false-abort forced-rung probes).
+
+**Next to fill in:** legacy floor sweep (where does per-frame acquisition give out — 8/6 dB AWGN?);
+multi-seed lock of the SNR-20 coherent rungs; the SNR *boundaries* where coherent QPSK R3/4 steps
+down R1/2 → R1/4; whether QAM8/QAM16 wins **above** 20 dB; Moderate / Poor. Folds into
+`selectOFDMCodeRate()` + the `connection_policy.hpp` entry floors once locked.
 
 ---
 
