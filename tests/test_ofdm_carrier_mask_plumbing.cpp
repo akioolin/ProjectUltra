@@ -18,7 +18,7 @@ namespace {
 
 constexpr size_t kLdpcBits = 648;
 constexpr size_t kLdpcBytes = kLdpcBits / 8;
-constexpr int kMaskCarrier = 31;  // 30 is a pilot in the current DQPSK R1/2 profile.
+constexpr int kMaskCarrier = 31;  // 30 is a pilot in the current QPSK R1/2 profile.
 
 int tests_passed = 0;
 int tests_failed = 0;
@@ -49,9 +49,15 @@ ModemConfig makeWideChirpConfig() {
     cfg.center_freq = 1500.0f;
     cfg.cp_mode = CyclicPrefixMode::LONG;
     cfg.symbol_guard = 0;
-    cfg.modulation = Modulation::DQPSK;
+    cfg.modulation = Modulation::QPSK;
     cfg.code_rate = CodeRate::R1_2;
     cfg.use_pilots = true;
+    // Fixed pilot comb: the CarrierLDPC mask geometry below assumes a static
+    // data-carrier layout. Coherent modes default to scattered (rotating) pilots,
+    // which would make the per-symbol layout time-varying; pin the comb so the
+    // interleaver/erasure geometry is deterministic (this is a plumbing test, not
+    // a pilot-pattern test — OFDMPilotPattern covers scattered pilots).
+    cfg.scattered_pilots = false;
     cfg.pilot_spacing = ofdm_link_adaptation::recommendedPilotSpacing(
         cfg.modulation, cfg.code_rate);
     return cfg;

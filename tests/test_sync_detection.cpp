@@ -46,7 +46,7 @@ bool test_sync_accuracy_basic() {
     TEST("Sync Detection Accuracy (Basic)");
 
     ModemConfig config;
-    config.modulation = Modulation::DQPSK;
+    config.modulation = Modulation::QPSK;
     config.code_rate = CodeRate::R1_2;
 
     OFDMModulator mod(config);
@@ -176,7 +176,7 @@ bool test_sync_with_noise() {
     TEST("Sync Detection with Leading Noise");
 
     ModemConfig config;
-    config.modulation = Modulation::DQPSK;
+    config.modulation = Modulation::QPSK;
     config.code_rate = CodeRate::R1_2;
 
     OFDMModulator mod(config);

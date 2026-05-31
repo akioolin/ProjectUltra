@@ -87,13 +87,13 @@ bool test_ofdm_chirp_full_preamble_loopback() {
     cfg.fft_size = 512;
     cfg.num_carriers = 30;
     cfg.cp_mode = CyclicPrefixMode::LONG;
-    cfg.modulation = Modulation::DQPSK;
+    cfg.modulation = Modulation::QPSK;
     cfg.code_rate = CodeRate::R1_2;
     cfg.use_pilots = true;
     cfg.pilot_spacing = 10;
 
     OFDMChirpWaveform waveform(cfg);
-    waveform.configure(Modulation::DQPSK, CodeRate::R1_2);
+    waveform.configure(Modulation::QPSK, CodeRate::R1_2);
 
     Samples audio;
     append(audio, waveform.generatePreamble());
@@ -115,13 +115,13 @@ bool test_ofdm_chirp_data_preamble_loopback() {
     cfg.fft_size = 512;
     cfg.num_carriers = 30;
     cfg.cp_mode = CyclicPrefixMode::LONG;
-    cfg.modulation = Modulation::DQPSK;
+    cfg.modulation = Modulation::QPSK;
     cfg.code_rate = CodeRate::R1_2;
     cfg.use_pilots = true;
     cfg.pilot_spacing = 10;
 
     OFDMChirpWaveform waveform(cfg);
-    waveform.configure(Modulation::DQPSK, CodeRate::R1_2);
+    waveform.configure(Modulation::QPSK, CodeRate::R1_2);
 
     Samples audio;
     append(audio, waveform.generateDataPreamble());
@@ -145,13 +145,13 @@ bool test_ofdm_chirp_data_preamble_awgn_warm_sync() {
     cfg.fft_size = 1024;
     cfg.num_carriers = 59;
     cfg.cp_mode = CyclicPrefixMode::LONG;
-    cfg.modulation = Modulation::DQPSK;
+    cfg.modulation = Modulation::QPSK;
     cfg.code_rate = CodeRate::R1_4;
     cfg.use_pilots = true;
     cfg.pilot_spacing = 10;
 
     OFDMChirpWaveform tx(cfg);
-    tx.configure(Modulation::DQPSK, CodeRate::R1_4);
+    tx.configure(Modulation::QPSK, CodeRate::R1_4);
     tx.setTxFrequencyOffset(4.0f);
 
     Samples audio;
@@ -161,7 +161,7 @@ bool test_ofdm_chirp_data_preamble_awgn_warm_sync() {
     addAwgn(audio, 10.0f, 0x20260525u);
 
     OFDMChirpWaveform rx(cfg);
-    rx.configure(Modulation::DQPSK, CodeRate::R1_4);
+    rx.configure(Modulation::QPSK, CodeRate::R1_4);
 
     constexpr size_t wide_window_samples = 9600;
     constexpr size_t narrow_candidate_span = 2176;
@@ -185,13 +185,13 @@ bool test_ofdm_chirp_data_preamble_noise_false_sync_rate() {
     cfg.fft_size = 512;
     cfg.num_carriers = 30;
     cfg.cp_mode = CyclicPrefixMode::LONG;
-    cfg.modulation = Modulation::DQPSK;
+    cfg.modulation = Modulation::QPSK;
     cfg.code_rate = CodeRate::R1_4;
     cfg.use_pilots = true;
     cfg.pilot_spacing = 10;
 
     OFDMChirpWaveform waveform(cfg);
-    waveform.configure(Modulation::DQPSK, CodeRate::R1_4);
+    waveform.configure(Modulation::QPSK, CodeRate::R1_4);
 
     constexpr size_t wide_window_samples = 9600;
     constexpr size_t narrow_candidate_span = 2176;

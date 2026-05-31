@@ -141,10 +141,10 @@ bool readWav(const std::string& filename, std::vector<float>& samples, int& samp
     return true;
 }
 
-// Generate test signal: preamble + LDPC-encoded all-zeros (DQPSK)
+// Generate test signal: preamble + LDPC-encoded all-zeros (coherent QPSK)
 std::vector<float> generateTestSignal(ModemConfig& config) {
-    // Use DQPSK, R1/4 - 2x throughput of DBPSK, immune to phase distortion
-    config.modulation = Modulation::DQPSK;
+    // Coherent-only OFDM: QPSK, R1/4. (Differential lives in MC-DPSK now.)
+    config.modulation = Modulation::QPSK;
     config.code_rate = CodeRate::R1_4;
     config.pilot_spacing = 2;  // Dense pilots for robustness
 
@@ -214,7 +214,7 @@ bool decodeWavFile(const std::string& filename) {
 
     // Setup demodulator
     ModemConfig config;
-    config.modulation = Modulation::DQPSK;  // DQPSK for link frames
+    config.modulation = Modulation::QPSK;  // coherent QPSK for link frames
     config.code_rate = CodeRate::R1_4;
     config.pilot_spacing = 2;
 

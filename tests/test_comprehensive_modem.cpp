@@ -393,7 +393,7 @@ bool test_full_chain_awgn(float snr_db) {
     config.fft_size = 512;
     config.num_carriers = 30;
     config.pilot_spacing = 2;
-    config.modulation = Modulation::DQPSK;
+    config.modulation = Modulation::QPSK;
     config.code_rate = CodeRate::R1_4;
 
     OFDMModulator mod(config);
@@ -525,7 +525,7 @@ bool test_cfo_estimation(float cfo_hz) {
     tx_config.fft_size = 512;
     tx_config.num_carriers = 30;
     tx_config.pilot_spacing = 2;
-    tx_config.modulation = Modulation::DQPSK;
+    tx_config.modulation = Modulation::QPSK;
     tx_config.code_rate = CodeRate::R1_4;
 
     // RX at nominal frequency
