@@ -77,6 +77,13 @@ public:
     bool isWarm() const { return mode_ == SyncMode::WARM; }
     float lastCfo() const { return last_cfo_.load(); }
 
+    // Burst declared-z (§7.6): the single RX source of truth for "what LDPC lifting
+    // size did this transfer's BURST_HEADER declare?". The per-frame extraction z is
+    // DERIVED from (frame-class, declared-z) in the behavioral phase — never toggled.
+    int activeBurstLiftingZ() const {
+        return (have_burst_descriptor_ && last_burst_descriptor_.lifting_z == 81) ? 81 : 27;
+    }
+
     // --- migration accessors (shell-move §7.5#1) ---------------------------------
     // Temporary getters/setters so StreamingDecoder can move its state in member-by-
     // member while the orchestration still lives there. Each folds into
@@ -101,6 +108,13 @@ public:
     // CFO acquisition state (§7.7#1). ATOMIC — touched by RX + control threads; the
     // CFO feedback loop (.load()/.store()) routes through here.
     std::atomic<float> last_cfo_{0.0f};
+
+    // Burst z-state (§7.6): the transfer's declared LDPC-lifting descriptor. Latch
+    // PERSISTS across the transfer (a fade-lost descriptor still decodes at the
+    // declared z); reset() → COLD clears it. The per-frame extraction z is DERIVED
+    // from (frame-class, this) in the behavioral phase, not a standalone toggle.
+    bool have_burst_descriptor_ = false;
+    protocol::v2::ControlFrame::BurstHeaderInfo last_burst_descriptor_{};
 
 private:
     // --- migrated from StreamingDecoder (audit §1.2) — the single home for this state ---

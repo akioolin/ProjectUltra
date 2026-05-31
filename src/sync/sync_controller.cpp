@@ -24,6 +24,8 @@ void SyncController::reset(protocol::WaveformMode mode, IWaveform* wf, bool is_c
     next_expected_frame_sample_ = 0;
     next_expected_frame_sample_valid_ = false;
     expected_frame_gap_samples_ = 0;
+    have_burst_descriptor_ = false;
+    last_burst_descriptor_ = {};
 }
 
 SyncDecision SyncController::detect(SampleSpan buffer, size_t buffer_len, size_t buffer_abs_start) {

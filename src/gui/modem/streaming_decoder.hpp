@@ -274,23 +274,19 @@ public:
     int getBurstInterleaveGroupSize() const { return burst_group_size_; }
 
     // Last received burst descriptor (§14.17), for GUI display of the burst type.
-    bool hasBurstDescriptor() const { return have_burst_descriptor_; }
+    // The burst z-state lives in the SyncController (refactor §7.6); these forward.
+    bool hasBurstDescriptor() const { return sync_controller_.have_burst_descriptor_; }
     v2::ControlFrame::BurstHeaderInfo lastBurstDescriptor() const {
-        return last_burst_descriptor_;
+        return sync_controller_.last_burst_descriptor_;
     }
 
     // Single RX source of truth for the active LDPC lifting Z: the value the
-    // sender announced in the BURST_HEADER descriptor (payload[5], cached on
-    // last_burst_descriptor_.lifting_z). 81 (n=1944) inside a long-LDPC burst,
-    // else 27 (n=648) — legacy / cold-start / control. NO env: the descriptor
-    // is the wire contract. A frame decoded before its group's descriptor
-    // arrives correctly falls back to 27 (invariant #4 of the Z-derivation
-    // design). Replaces 5 scattered getenv("ULTRA_LDPC_Z") reads.
-    int activeBurstLiftingZ() const {
-        return (have_burst_descriptor_ && last_burst_descriptor_.lifting_z == 81)
-                   ? 81
-                   : 27;
-    }
+    // sender announced in the BURST_HEADER descriptor (payload[5]). 81 (n=1944)
+    // inside a long-LDPC burst, else 27 (n=648) — legacy / cold-start / control.
+    // NO env: the descriptor is the wire contract. A frame decoded before its
+    // group's descriptor arrives correctly falls back to 27. Owned by the
+    // SyncController (§7.6); replaces 5 scattered getenv("ULTRA_LDPC_Z") reads.
+    int activeBurstLiftingZ() const { return sync_controller_.activeBurstLiftingZ(); }
 
     // Get current mode
     protocol::WaveformMode getMode() const { return mode_; }
@@ -687,10 +683,8 @@ private:
     int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
     bool fixed_frame_header_discovery_ = false;
 
-    // Last received self-describing burst descriptor (§14.17). The decode path
-    // applies it to the group decode config; kept here for GUI display.
-    v2::ControlFrame::BurstHeaderInfo last_burst_descriptor_{};
-    bool have_burst_descriptor_ = false;
+    // Burst descriptor / z-state (§14.17) now lives in sync_controller_ (refactor
+    // §7.6): have_burst_descriptor_ / last_burst_descriptor_ / activeBurstLiftingZ().
     // §14.27: group_seq of the in-flight burst (from the descriptor frame header
     // seq), and whether burst-transport RX group-as-unit delivery is enabled.
     uint16_t last_burst_group_seq_ = 0;

@@ -759,8 +759,8 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 if (bi.cw_per_frame >= 1) {
                                     pending_total_cw_ = bi.cw_per_frame;
                                 }
-                                last_burst_descriptor_ = bi;
-                                have_burst_descriptor_ = true;
+                                sync_controller_.last_burst_descriptor_ = bi;
+                                sync_controller_.have_burst_descriptor_ = true;
                                 // 2026-05-28 Phase 3: propagate the announced
                                 // lifting_z to the waveform so
                                 // getMinSamplesForCWCount returns the right
@@ -1929,7 +1929,7 @@ void StreamingDecoder::decodeCurrentFrame() {
             // 1944 at z=81). Sourced from the active descriptor's lifting_z
             // so the LLR-quality heuristic samples the right span per CW.
             const size_t probe_cw_bits =
-                (have_burst_descriptor_ && last_burst_descriptor_.lifting_z == 81)
+                (sync_controller_.have_burst_descriptor_ && sync_controller_.last_burst_descriptor_.lifting_z == 81)
                     ? size_t{1944} : size_t{648};
             const size_t burst_llr_n = std::min(next_soft_bits.size(), probe_cw_bits);
             const float burst_llr_avg = signal_policy::meanAbsLLR(
@@ -2885,7 +2885,7 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                         1, std::memory_order_relaxed);
             }
             // LDPC lifting Z sourced from BURST_HEADER payload[5] (cached on
-            // last_burst_descriptor_.lifting_z). When the sender announced Z=81,
+            // sync_controller_.last_burst_descriptor_.lifting_z). When the sender announced Z=81,
             // the data group's codewords are N=1944 and the decoder must match;
             // falls back to Z=27 outside a burst. Single RX source of truth.
             const int ldpc_z = activeBurstLiftingZ();
