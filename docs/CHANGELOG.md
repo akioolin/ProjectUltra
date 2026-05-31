@@ -10,6 +10,62 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-31: A3 — delete dead differential OFDM demod/control (coherent-only OFDM)
+
+**What changed (not a bug — planned dead-code removal):** with OFDM_CHIRP coherent
+(A2, `4c72a51`), OFDM_NARROW disabled (`d490524`), and the default OFDMChirpWaveform
+config flipped DQPSK→QPSK (`4d586c6`), the differential demod/control branches were
+DEAD on the shipping path but still exercised by ~6 DQPSK-OFDM test vehicles. A3
+removes them so the OFDM RX is provably coherent-only.
+
+**What changed (files):**
+1. **Test vehicles → QPSK** (`9b20d91`): test_sync_detection, test_wav_loopback,
+   test_comprehensive_modem (full-chain + CFO), test_waveform_loopback,
+   test_ofdm_carrier_mask_plumbing (DQPSK→QPSK; pinned `scattered_pilots=false` so the
+   CarrierLDPC mask geometry stays a deterministic fixed comb — coherent modes default
+   to scattered pilots). Kept: the pilot-pattern differential-comb test and the
+   hand-rolled DQPSK-LLR-math test (both cover kept code).
+2. **Coherent-only control profile + flag removal** (`469ee8b`): `profileForDataMode()`
+   always returns {QPSK, R1/4}; `coherent_ofdm_control_profile_enabled_` and its setter
+   + 3 modem_mode call sites removed; `estimateRobustOFDMControlSamples` /
+   `getOFDMControlFrameSamples` drop the flag param + the dead DQPSK R1/4 early-out.
+3. **Reject differential + delete dead demod/channel-est** (`19f3df8`):
+   `isSupportedChirpModulation` drops DBPSK/DQPSK/D8PSK; `configure()` falls back to
+   QPSK (was DQPSK); `caps.supports_differential=false`. Deleted: the
+   DBPSK/DQPSK/D8PSK demap cases + differential DD phase tracking +
+   `demodulateD8PSKTwoPass`/`demodulateDQPSKTwoPass` + callerless `computeFadingIndex`
+   (`ofdm_symbol_demap.cpp`, −527 lines); the `is_differential` MMSE early-return
+   (`channel_equalizer_equalize.cpp`); every `is_differential` branch in
+   `updateChannelEstimate` (alpha, carrier-phase recovery, CPE ±15° clamp,
+   magnitude-only |H| update, magnitude-only interpolation, the coherent-DD/SNR guards)
+   in `channel_equalizer_pilot.cpp`; the LTS `is_differential` check +
+   `dbpsk_prev_equalized`/`differential_prev_erased_` clear sites
+   (`ofdm_stream_processor.cpp`); and the differential member state in
+   `demodulator_impl.hpp` / `ofdm_demodulator_setup.cpp`.
+
+**Why it's correct:** rejecting differential in `isSupportedChirpModulation` (+ the
+QPSK `configure()` fallback) makes `config.modulation` for any OFDM waveform never
+differential, so `is_differential` is provably false on every demod/channel-est path —
+the deleted branches were unreachable. The coherent arm was kept verbatim at each
+woven branch. **KEPT:** the coherent `dd_qam16_*` tracker, carrier-LDPC, MC-DPSK's
+differential machinery, the `Modulation` enum, and `soft_demap`'s differential inline
+helpers. The OFDM **TX** differential encoder (`modulator.cpp:454`) is now dead-for-OFDM
+too but out of this scope — tracked as the R3 follow-up in REMOVAL_BACKLOG.
+
+**Test verification:** full build clean (no `-Wunused`). `ctest` green across OFDM,
+SyncDetection, WaveformLoopback, ComprehensiveModem (coherent-QPSK CFO + full-chain),
+WavLoopback, OFDMCarrierMaskPlumbing, OFDMPilotPattern, StreamingDecodePolicy,
+ToneBurstAck{Monitor,Watterson}. The 4 pre-existing red tests (Protocol, StreamingConfig,
+StreamingBufferPolicy, StreamingDecoderToneBurstMonitor) fail identically on the parent
+(verified by stash+rebuild) — not caused by A3. **GUI faithful gate** (coherent OFDM_CHIRP
+QPSK R1/4 forced via `ULTRA_FORCE_WAVEFORM=OFDM_CHIRP`, AWGN@10, seed 42): **39/39 burst
+groups delivered 6/6 logical OK (all_ok=1), ZERO decode failures** — 27× `max_iters=0
+quality=1.00`, 11× `max_iters=1 quality=0.99`, 1× `quality=0.69` (one fade dip, still
+decoded). Live-observed clean coherent decode confirms the channel estimator is unbroken by
+the deletion (a broken estimator would show CW failures / `max_iters=50`). Run stopped
+mid-transfer once confirmed; the full multi-seed Good@10 / Moderate@14 / harsh-Mod floor
+proof belongs to thread C (ladder rework), not this dead-code removal.
+
 ## 2026-05-31: Carrier-LDPC RX air-block miscount (z=81 file decode) + Z/LDPC lifecycle doc
 
 **What was broken:** z=81 (1944-bit) burst DATA frames decoded to garbage on the

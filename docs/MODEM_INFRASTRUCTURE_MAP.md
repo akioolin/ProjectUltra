@@ -46,10 +46,10 @@ it's post-decode delivery/routing only.
 | Pilot interpolation (de-sloped linear) | pilots→data carriers, phase-slope compensated | `channel_equalizer_pilot.cpp:1209` / `:945` | per symbol | 🟢 |
 | Wiener/LMMSE 2-D interpolation | time-then-freq 1D LMMSE | `channel_equalizer_pilot.cpp:201` (`estimateWienerChannel`) | when scattered pilots negotiated | 🟢 (params env-overridable `ULTRA_WIENER_*`) |
 | Decision-directed channel tracking | DD refine on flat carriers only (95% χ², 9:1 odds) | build `channel_equalizer_equalize.cpp:646`; merge `channel_equalizer_pilot.cpp:934` | QAM8/QAM16 flat | 🟢 (gate `last_fading_index<0.15`, BUG-8PSK-001). **`dd_qam16_*` naming = adaptivity "tell", rename candidate** |
-| MMSE equalize (differential / coherent) | `conj(H)·rx/(|H|²+σ²)` + per-carrier post-eq var | `channel_equalizer_equalize.cpp:444` / `:536` | per symbol | 🟢 (LMS/RLS branch `:540` gated by `config.adaptive_eq_enabled` → cold on default path) |
+| MMSE equalize (coherent) | `conj(H)·rx/(|H|²+σ²)` + per-carrier post-eq var | `channel_equalizer_equalize.cpp:444` | per symbol | 🟢 (coherent-only since thread A — the differential MMSE early-return was deleted; LMS/RLS branch gated by `config.adaptive_eq_enabled` → cold on default path) |
 | DD per-carrier phase tracking | QPSK/BPSK phase corrections | `channel_equalizer_equalize.cpp:730` | coherent | 🟢 |
-| Per-carrier adaptive LLR scaling | mag-EMA var tracking, fading carriers inflate noise | `ofdm_symbol_demap.cpp:278` | per symbol | 🟢 |
-| Soft demap → LLRs | dispatch to `soft_demap::demap{…}`; 2-pass D8PSK on fade | `ofdm_symbol_demap.cpp:458` | per symbol | 🟢 |
+| Per-carrier adaptive LLR scaling | mag-EMA var tracking, fading carriers inflate noise | `ofdm_symbol_demap.cpp:303` | per symbol | 🟢 |
+| Soft demap → LLRs | dispatch to `soft_demap::demap{…}` (coherent: BPSK/QPSK/QAM8–256) | `ofdm_symbol_demap.cpp:373` | per symbol | 🟢 (coherent-only since thread A — the differential DBPSK/DQPSK/D8PSK cases, the DD phase tracking, and the 2-pass D8PSK/DQPSK helpers were deleted) |
 | Noise-variance estimate | guard-bin / `|H1−H2|²/4`; empirical floor off | `channel_equalizer_lts.cpp:662` | preamble + carried | 🟢 (`ULTRA_LLR_NOISE_EMP_FLOOR` diag, off) |
 | MC-DPSK soft decode (Mode 1) | differential demod → LLRs → LDPC | `streaming_ofdm_decode.cpp:2290` (`decodeMCDPSKFrame`) | below-OFDM-floor/heavy fade | 🟢 (INVARIANT: `reset()`+`setCFO(frame.cfo_hz)` per frame) |
 
@@ -72,7 +72,7 @@ it's post-decode delivery/routing only.
 | Component | Where | When | Class |
 |-----------|-------|------|-------|
 | Constellation mapper (BPSK/QPSK/QAM8/16/32/64/256) | `modulator.cpp:85` (`mapBits`) | TX coherent | 🟢 QPSK/QAM8/QAM16; 🔴 QAM32/64/256 (no auto rung reaches them) |
-| Differential encoder (DBPSK/DQPSK/D8PSK) | `modulator.cpp:454` | TX differential | 🟢 (INVARIANT: reset `dbpsk_prev_symbols`=+1 at start) |
+| Differential encoder (DBPSK/DQPSK/D8PSK) | `modulator.cpp:454` | TX differential | 🔴 **DEAD (OFDM TX)** since thread A — OFDM is coherent-only (`isSupportedChirpModulation` rejects differential → QPSK); MC-DPSK uses its own modulator (`multi_carrier_dpsk.hpp`), not this. RX differential demod already deleted; this TX counterpart is the follow-up deletion (REMOVAL_BACKLOG R3). Keep the `dbpsk_prev_symbols`=+1 INVARIANT until removed. |
 | OFDM symbol builder (map→pilots→IFFT→CP) | `modulator.cpp:232` (`createOFDMSymbol`) | every TX symbol | 🟢 |
 | `generateTrainingSymbols(count)` — **production LTS source** | `modulator.cpp:608` | preamble gen, always **count=2** | 🟢 |
 | `generatePreamble()` — Schmidl-Cox STS×4+LTS×2 | `modulator.cpp:551` | — | 🔴 **DEAD** (test tools only; OFDM_COX legacy) |

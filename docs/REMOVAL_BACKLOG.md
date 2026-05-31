@@ -53,7 +53,7 @@ here causes a wrong deletion later. Move finished items to *Completed* with the 
 - **Blocker:** none hard; do after the burst/file path is settled so we don't churn the
   shared frame plumbing twice.
 
-### R3. Differential SELECTION on the OFDM_CHIRP path — `DONE` (selection); code removal `BLOCKED on OFDM_NARROW`
+### R3. Differential on the OFDM band — `DONE` (selection + RX demod/control code removal); TX-modulator differential is the remaining follow-up
 - **What:** retire differential modulation from the **wideband OFDM_CHIRP** band. SNR ≥ 10
   (AWGN/Good/Moderate) → coherent QPSK; Poor → MC-DPSK.
 - **Why:** mode selection routes SNR<10 / Poor → MC-DPSK (differential, its real home) and SNR≥10 →
@@ -64,31 +64,32 @@ here causes a wrong deletion later. Move finished items to *Completed* with the 
   `recommendDataMode` OFDM default DQPSK→QPSK, D8PSK rungs deleted, Poor routes to MC-DPSK
   (`kOFDMEntryFloorPoorDb` unreachable), OFDM_CHIRP ladder rung mod→QPSK, policy tests updated. The
   bug-causing coherent-vs-differential *ambiguity* on OFDM_CHIRP is GONE (no path forks on it).
-- **⚠ BLOCKED — the differential CODE cannot be deleted yet (verified 2026-05-31):** **OFDM_NARROW
-  uses the SAME `OFDMChirpWaveform` + `ofdm_stream_processor` demod and is still DQPSK**
-  (`streaming_decoder.cpp:788/847`, `waveform_selection.hpp:575`). So the `is_differential` demod
-  branches, the magnitude-only `|H|` path, `differential_prev_erased_`, AND the
-  `profileForDataMode(DQPSK)→DQPSK` control switch are **LIVE for OFDM_NARROW** — deleting them
-  breaks narrowband. The **carrier-LDPC is LIVE for coherent** OFDM_CHIRP (`cldpc=1` in the coherent
-  runs; the air-block fix `9189b70` serves it) — also not deletable.
-- **PLAN for code deletion (user-chosen 2026-05-31): DISABLE OFDM_NARROW now → remove the differential
-  code → REVAMP OFDM_NARROW as coherent later.**
-  1. **Disable** OFDM_NARROW by dropping it from `ModeCapabilities::ALL` (`frame_v2.hpp:51`) — a single
-     clean lever: it stops being advertised/negotiated/constructed (the narrow handlers in
-     `connection.cpp` become harmless dead branches). The narrowband mode is secondary to the wideband
-     burst focus, so losing it temporarily is acceptable.
-  2. **Verify** no OFDM path ever holds a DQPSK/D8PSK config (default/transient/fallback) — only then
-     are the `is_differential` demod branches + `profileForDataMode(DQPSK)→DQPSK` control switch truly
-     dead. (OFDM_CHIRP is coherent QPSK incl. its control profile; MC-DPSK uses a SEPARATE demod.)
-  3. **Remove** the now-dead differential demod/control branches (NOT carrier-LDPC — still live for
-     coherent). KEEP the coherent `dd_qam16` tracker + MC-DPSK + the `Modulation` enum.
-  4. **Later — revamp OFDM_NARROW as COHERENT** (reuses the coherent OFDM machinery with a narrowband
-     config; no differential code needed). **⚠ This is a real PHY re-validation, NOT a config flip:**
-     narrowband ~17 dB / 500 Hz is where differential's no-phase-reference robustness is the point, so
-     coherent narrow may land at a HIGHER SNR floor (fewer carriers for the equalizer to track phase
-     across). Don't assume it reaches the differential floor.
+- **✅ DONE — RX demod/control code removed (2026-05-31, commits `9b20d91` + `469ee8b` + `19f3df8`):**
+  the disable-narrow-then-remove plan executed in full.
+  1. ✅ **Disabled** OFDM_NARROW (`d490524`, dropped from `ModeCapabilities::ALL`) so no OFDM path is DQPSK.
+  2. ✅ **Made differential impossible:** `isSupportedChirpModulation` rejects DBPSK/DQPSK/D8PSK and
+     `configure()` falls back to QPSK (was DQPSK) → `config.modulation` for any OFDM waveform is never
+     differential → `is_differential` provably false on every demod/channel-est path.
+  3. ✅ **Removed** the now-dead differential demod/control: the DBPSK/DQPSK/D8PSK demap cases + DD phase
+     tracking + `demodulateD8PSKTwoPass`/`demodulateDQPSKTwoPass` + callerless `computeFadingIndex`
+     (`ofdm_symbol_demap.cpp`); the `is_differential` MMSE early-return (`channel_equalizer_equalize.cpp`);
+     all `is_differential` branches in `updateChannelEstimate` (`channel_equalizer_pilot.cpp`); the LTS
+     check + `dbpsk_prev_equalized`/`differential_prev_erased_` clear sites (`ofdm_stream_processor.cpp`);
+     the differential members (`demodulator_impl.hpp`/`ofdm_demodulator_setup.cpp`); and the
+     `profileForDataMode(DQPSK)→DQPSK` control switch + `coherent_ofdm_control_profile_enabled_` flag.
+     **KEPT** carrier-LDPC, the coherent `dd_qam16` tracker, MC-DPSK, the `Modulation` enum, and
+     `soft_demap`'s differential inline helpers.
+- **▶ FOLLOW-UP (TX side, not yet done):** the OFDM **TX** differential encoder (`modulator.cpp:454`,
+  DBPSK/DQPSK/D8PSK) is now dead-for-OFDM too (coherent-only; MC-DPSK uses `multi_carrier_dpsk.hpp`,
+  not this). RX is gone; delete the TX counterpart + any now-dead differential constellation/training
+  in `modulator.cpp`. KEEP: the `dbpsk_prev_symbols`=+1 INVARIANT until removed; MC-DPSK's own modulator.
+- **▶ LATER — revamp OFDM_NARROW as COHERENT** (reuses the coherent OFDM machinery with a narrowband
+  config; no differential code needed). **⚠ real PHY re-validation, NOT a config flip:** narrowband
+  ~17 dB / 500 Hz is where differential's no-phase-reference robustness is the point, so coherent narrow
+  may land at a HIGHER SNR floor (fewer carriers to track phase across). Don't assume it reaches the
+  differential floor.
 - **⚠ KEEP regardless:** MC-DPSK differential (`multi_carrier_dpsk.hpp`); the `Modulation` enum
-  `DQPSK/DBPSK/D8PSK`; the **COHERENT** DD tracker `dd_qam16_*` (`channel_equalizer_equalize.cpp:636+`).
+  `DQPSK/DBPSK/D8PSK`; the **COHERENT** DD tracker `dd_qam16_*` (`channel_equalizer_equalize.cpp:646`).
 
 ---
 
