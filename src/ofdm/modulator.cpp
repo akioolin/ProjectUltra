@@ -139,9 +139,6 @@ struct OFDMModulator::Impl {
     std::vector<bool> is_pilot_logical;
     Symbol last_data_carrier_symbols_for_testing;
 
-    // DBPSK state: previous symbol per data carrier for differential encoding
-    std::vector<Complex> dbpsk_prev_symbols;
-
     // Reused OFDM hot-path scratch. The modulator is used serially by one
     // waveform instance, so member scratch removes per-symbol heap churn
     // without changing the transmitted samples.
@@ -391,18 +388,6 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod,
     size_t bits_per_carrier = getBitsPerSymbol(mod);
     size_t carriers_per_symbol = impl_->data_carrier_indices.size();
 
-    // DEBUG: Check DBPSK reference state at start of modulate
-    if (mod == Modulation::DQPSK || mod == Modulation::D8PSK || mod == Modulation::DBPSK) {
-        LOG_DEBUG("MOD", "modulate() entry: dbpsk_prev_symbols.size()=%zu, first 3: (%.2f,%.2f) (%.2f,%.2f) (%.2f,%.2f)",
-                 impl_->dbpsk_prev_symbols.size(),
-                 impl_->dbpsk_prev_symbols.size() > 0 ? impl_->dbpsk_prev_symbols[0].real() : 0,
-                 impl_->dbpsk_prev_symbols.size() > 0 ? impl_->dbpsk_prev_symbols[0].imag() : 0,
-                 impl_->dbpsk_prev_symbols.size() > 1 ? impl_->dbpsk_prev_symbols[1].real() : 0,
-                 impl_->dbpsk_prev_symbols.size() > 1 ? impl_->dbpsk_prev_symbols[1].imag() : 0,
-                 impl_->dbpsk_prev_symbols.size() > 2 ? impl_->dbpsk_prev_symbols[2].real() : 0,
-                 impl_->dbpsk_prev_symbols.size() > 2 ? impl_->dbpsk_prev_symbols[2].imag() : 0);
-    }
-
     Samples output;
     const size_t bits_per_symbol = carriers_per_symbol * bits_per_carrier;
     if (bits_per_symbol > 0) {
@@ -450,54 +435,11 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod,
             }
             if (c == carriers_per_symbol - 1) symbol_count++;
 
-            // Differential encoding: multiply previous symbol by phase rotation
-            if (mod == Modulation::DBPSK) {
-                // 1 bit: 0 → 0° (+1), 1 → 180° (-1)
-                Complex phase_change = (bits & 1) ? Complex(-1, 0) : Complex(1, 0);
-                Complex new_symbol = impl_->dbpsk_prev_symbols[c] * phase_change;
-                impl_->dbpsk_prev_symbols[c] = new_symbol;
-                symbol_data.push_back(new_symbol);
-            } else if (mod == Modulation::DQPSK) {
-                // 2 bits: 00→0°, 01→90°, 10→180°, 11→270°
-                // Phase rotations: +1, +j, -1, -j
-                static const Complex dqpsk_phases[4] = {
-                    Complex(1, 0),   // 00 → 0°
-                    Complex(0, 1),   // 01 → 90°
-                    Complex(-1, 0),  // 10 → 180°
-                    Complex(0, -1)   // 11 → 270°
-                };
-                Complex phase_change = dqpsk_phases[bits & 3];
-                Complex new_symbol = impl_->dbpsk_prev_symbols[c] * phase_change;
-
-                // Debug: log first few DQPSK encodings
-                if (symbol_count < 2 && c < 3) {
-                    LOG_DEBUG("MOD", "DQPSK Sym %zu Car %zu: bits=%d -> phase=(%.2f,%.2f), prev=(%.2f,%.2f), new=(%.2f,%.2f)",
-                             symbol_count, c, bits & 3,
-                             phase_change.real(), phase_change.imag(),
-                             impl_->dbpsk_prev_symbols[c].real(), impl_->dbpsk_prev_symbols[c].imag(),
-                             new_symbol.real(), new_symbol.imag());
-                }
-
-                impl_->dbpsk_prev_symbols[c] = new_symbol;
-                symbol_data.push_back(new_symbol);
-            } else if (mod == Modulation::D8PSK) {
-                // 3 bits: Gray-coded phase changes in 45° increments with 22.5° offset
-                // Gray code: adjacent phases differ by exactly 1 bit (critical for soft decoding)
-                // data_to_phase maps 3-bit data → phase index via gray_to_binary conversion
-                //   000→idx0(22.5°) 001→idx1(67.5°) 010→idx3(157.5°) 011→idx2(112.5°)
-                //   100→idx7(337.5°) 101→idx6(292.5°) 110→idx4(202.5°) 111→idx5(247.5°)
-                static const int data_to_phase[8] = {0, 1, 3, 2, 7, 6, 4, 5};
-                static const float pi = 3.14159265358979f;
-                float angle = data_to_phase[bits & 7] * (pi / 4.0f) + pi / 8.0f;
-                Complex phase_change(std::cos(angle), std::sin(angle));
-                Complex new_symbol = impl_->dbpsk_prev_symbols[c] * phase_change;
-                impl_->dbpsk_prev_symbols[c] = new_symbol;
-                symbol_data.push_back(new_symbol);
-            } else {
-                Complex sym = mapBits(bits, mod);
-                symbol_data.push_back(sym);
-
-                }
+            // Coherent constellation mapping (OFDM is coherent-only; the
+            // differential DBPSK/DQPSK/D8PSK TX encoder was removed — differential
+            // lives in MC-DPSK, which uses its own modulator).
+            Complex sym = mapBits(bits, mod);
+            symbol_data.push_back(sym);
         }
 
         // Pad if needed
@@ -556,9 +498,7 @@ Samples OFDMModulator::generatePreamble() {
     // Reset TX pilot logging flag for new transmission
     g_logged_tx_pilots = false;
 
-    // Initialize DBPSK state: all carriers start at +1 (reference symbol)
     impl_->activateCarrierPattern(0);
-    impl_->dbpsk_prev_symbols.assign(impl_->data_carrier_indices.size(), Complex(1, 0));
 
     // Preamble structure (Schmidl-Cox):
     // 0. Guard prefix - silence before signal for sync detector headroom
@@ -616,9 +556,8 @@ Samples OFDMModulator::generateTrainingSymbols(int count) {
 
     impl_->mixer.reset();
 
-    // Initialize DBPSK state for differential modes
+    // Set up the symbol-0 carrier pattern; data_carrier_indices feeds LTS generation.
     impl_->activateCarrierPattern(0);
-    impl_->dbpsk_prev_symbols.assign(impl_->data_carrier_indices.size(), Complex(1, 0));
 
     // DEBUG: Print carrier indices
     {
