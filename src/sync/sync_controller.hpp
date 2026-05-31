@@ -100,6 +100,13 @@ public:
     void noteFrameArrivalSuccess(size_t frame_start_abs, size_t frame_end_abs);
     void noteFrameArrivalSyncMiss();
 
+    // Seed the WARM cadence from a known local-TX turnaround (the predicted next frame
+    // arrives `delay_samples` after `total_fed_abs`) — used when this station's own TX
+    // tells us when the peer's reply group will land. Sibling to the noteFrameArrival*
+    // trio; moved verbatim from StreamingDecoder::seedExpectedFrameArrivalAfterSamples (the
+    // connected_/OFDM_CHIRP guard + lock stay in the decoder forwarder).
+    void seedArrivalAfterDelay(size_t total_fed_abs, size_t delay_samples, float confidence);
+
     // The connected-data light-LTS acceptance decision (§7.4 chunk B; moved verbatim from
     // StreamingDecoder::searchForSync). Folds signal_policy::evaluateLightSyncCandidate, the
     // ULTRA_S16_WARM_HANDOFF warm-override, and the WARM position-gating into one verdict, and
@@ -146,6 +153,15 @@ public:
     size_t expectedFrameGapSamples() const { return expected_frame_gap_samples_; }
     void setExpectedFrameGapSamples(size_t samples) { expected_frame_gap_samples_ = samples; }
 
+    // Last-frame arrival memory (read-only; written only by noteFrameArrival* / seedArrivalAfterDelay
+    // / resetFrameArrivalTracking). Accessors let the decoder build its FrameArrivalSnapshot and log
+    // without touching the now-private fields.
+    bool    lastFrameArrivalValid() const { return last_frame_arrival_valid_; }
+    size_t  lastFrameStartSample() const { return last_frame_start_sample_; }
+    size_t  lastFrameEndSample() const { return last_frame_end_sample_; }
+    bool    lastFrameArrivalErrorValid() const { return last_frame_arrival_error_valid_; }
+    int64_t lastFrameArrivalErrorSamples() const { return last_frame_arrival_error_samples_; }
+
     // --- TRANSITIONAL PUBLIC shell-move state (refactor §7.5#1) -------------------
     // These were StreamingDecoder members; relocated here verbatim so the (still-
     // external) orchestration reads/writes them as `sync_controller_.<name>`. They
@@ -163,18 +179,13 @@ public:
     bool     warm_sync_active_ = false;              // in the warm (locked+predicting) regime
                                                      // (collapses into SyncMode::WARM in Phase D)
 
-    // Warm-sync phase machine + last-frame arrival memory (shell-moved 2026-05-31, §7.4
-    // un-defer: possible now that frame_arrival_policy lives in src/sync). Still the 4-state
-    // WarmSyncPhase; collapses into SyncMode in the behavioral phase (A2/Phase D). The
-    // noteFrameArrival* transition logic that drives these still lives on StreamingDecoder
-    // for now (A1 is storage-only; A2 moves the bodies into reportFrameOutcome()).
+    // Warm-sync phase machine (shell-moved 2026-05-31, §7.4 un-defer). Still the 4-state
+    // WarmSyncPhase; collapses into SyncMode in the behavioral phase (Phase D). The transition
+    // logic that drives it lives on the controller (noteFrameArrival* / seedArrivalAfterDelay);
+    // the decoder still reads it for the snapshot + trace-log, so it stays public until Phase D.
     frame_arrival_policy::WarmSyncPhase warm_sync_phase_ =
         frame_arrival_policy::WarmSyncPhase::COLD;
-    bool     last_frame_arrival_valid_ = false;
-    size_t   last_frame_start_sample_ = 0;
-    size_t   last_frame_end_sample_ = 0;
-    bool     last_frame_arrival_error_valid_ = false;
-    int64_t  last_frame_arrival_error_samples_ = 0;
+    // (last-frame arrival memory is now PRIVATE — see below — read via the lastFrame* accessors.)
     // CFO acquisition state (§7.7#1). ATOMIC — touched by RX + control threads; the
     // CFO feedback loop (.load()/.store()) routes through here.
     std::atomic<float> last_cfo_{0.0f};
@@ -187,6 +198,15 @@ public:
     protocol::v2::ControlFrame::BurstHeaderInfo last_burst_descriptor_{};
 
 private:
+    // Last-frame arrival memory (RE-PRIVATIZED §7.4: written only by noteFrameArrival* /
+    // seedArrivalAfterDelay / resetFrameArrivalTracking; read by the decoder via the lastFrame*
+    // accessors). NOT Phase-D-collapsing — this is genuine arrival state the controller keeps.
+    bool     last_frame_arrival_valid_ = false;
+    size_t   last_frame_start_sample_ = 0;
+    size_t   last_frame_end_sample_ = 0;
+    bool     last_frame_arrival_error_valid_ = false;
+    int64_t  last_frame_arrival_error_samples_ = 0;
+
     // --- migrated from StreamingDecoder (audit §1.2) — the single home for this state ---
     SyncMode mode_ = SyncMode::COLD;
     protocol::WaveformMode waveform_mode_ = protocol::WaveformMode::OFDM_CHIRP;

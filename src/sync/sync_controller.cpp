@@ -252,6 +252,31 @@ LightSyncAcceptance SyncController::acceptLightSyncCandidate(
     return result;
 }
 
+void SyncController::seedArrivalAfterDelay(size_t total_fed_abs, size_t delay_samples,
+                                           float confidence) {
+    const auto previous_phase = warm_sync_phase_;
+    warm_sync_active_ = true;
+    warm_sync_phase_ = frame_arrival_policy::WarmSyncPhase::WARM;
+    next_expected_frame_sample_valid_ = true;
+    next_expected_frame_sample_ = total_fed_abs + delay_samples;
+    frame_arrival_confidence_ =
+        frame_arrival_policy::clampConfidence(std::max(frame_arrival_confidence_, confidence));
+    consecutive_sync_misses_ = 0;
+    last_frame_arrival_error_valid_ = false;
+    last_frame_arrival_error_samples_ = 0;
+
+    LOG_MODEM(DEBUG,
+              "[%s] warm-sync arrival seeded from local TX: now=%zu delay=%zu next=%zu confidence=%.2f",
+              log_prefix_.c_str(), total_fed_abs, delay_samples,
+              next_expected_frame_sample_, frame_arrival_confidence_);
+    if (previous_phase != warm_sync_phase_) {
+        LOG_MODEM(INFO, "[%s] warm-sync state: %s -> %s",
+                  log_prefix_.c_str(),
+                  frame_arrival_policy::warmSyncPhaseName(previous_phase),
+                  frame_arrival_policy::warmSyncPhaseName(warm_sync_phase_));
+    }
+}
+
 // --- warm-window planning (§7.4 chunk-B tail) ------------------------------------------------
 // Moved verbatim from StreamingDecoder::searchForSync (the s16_skip_short_lead +
 // expected_sync_search_sample + planWarmSearchWindow + short-reanchor-lead adjustment). Same

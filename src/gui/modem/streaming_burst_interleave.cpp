@@ -667,7 +667,7 @@ void StreamingDecoder::finalizeBurstGroup() {
                   sync_controller_.frame_arrival_confidence_,
                   sync_controller_.last_cfo_.load(),
                   static_cast<unsigned long long>(sync_controller_.next_expected_frame_sample_),
-                  static_cast<unsigned long long>(sync_controller_.last_frame_end_sample_),
+                  static_cast<unsigned long long>(sync_controller_.lastFrameEndSample()),
                   sync_controller_.expect_full_ofdm_anchor_ ? 1 : 0,
                   quality);
         // Refresh warm-sync on ANY acquired group, not just all_ok (2026-05-29,

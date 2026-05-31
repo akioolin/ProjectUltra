@@ -42,7 +42,6 @@ namespace gui {
 namespace v2 = protocol::v2;
 namespace buffer_policy = streaming_buffer_policy;
 namespace decode_policy = streaming_decode_policy;
-namespace arrival_policy = ::ultra::sync::frame_arrival_policy;
 namespace frame_policy = streaming_frame_policy;
 namespace signal_policy = ::ultra::sync::signal_policy;
 
@@ -900,11 +899,11 @@ StreamingDecoder::FrameArrivalSnapshot StreamingDecoder::getFrameArrivalSnapshot
     snapshot.next_expected_frame_sample = sync_controller_.next_expected_frame_sample_;
     snapshot.frame_arrival_confidence = sync_controller_.frame_arrival_confidence_;
     snapshot.consecutive_sync_misses = sync_controller_.consecutive_sync_misses_;
-    snapshot.has_last_frame = sync_controller_.last_frame_arrival_valid_;
-    snapshot.last_frame_start_sample = sync_controller_.last_frame_start_sample_;
-    snapshot.last_frame_end_sample = sync_controller_.last_frame_end_sample_;
-    snapshot.has_last_arrival_error = sync_controller_.last_frame_arrival_error_valid_;
-    snapshot.last_arrival_error_samples = sync_controller_.last_frame_arrival_error_samples_;
+    snapshot.has_last_frame = sync_controller_.lastFrameArrivalValid();
+    snapshot.last_frame_start_sample = sync_controller_.lastFrameStartSample();
+    snapshot.last_frame_end_sample = sync_controller_.lastFrameEndSample();
+    snapshot.has_last_arrival_error = sync_controller_.lastFrameArrivalErrorValid();
+    snapshot.last_arrival_error_samples = sync_controller_.lastFrameArrivalErrorSamples();
     snapshot.expected_frame_gap_samples = sync_controller_.expectedFrameGapSamples();
     return snapshot;
 }
@@ -920,28 +919,7 @@ void StreamingDecoder::seedExpectedFrameArrivalAfterSamples(size_t delay_samples
     if (!connected_ || mode_ != protocol::WaveformMode::OFDM_CHIRP) {
         return;
     }
-
-    const auto previous_phase = sync_controller_.warm_sync_phase_;
-    sync_controller_.warm_sync_active_ = true;
-    sync_controller_.warm_sync_phase_ = arrival_policy::WarmSyncPhase::WARM;
-    sync_controller_.next_expected_frame_sample_valid_ = true;
-    sync_controller_.next_expected_frame_sample_ = total_fed_ + delay_samples;
-    sync_controller_.frame_arrival_confidence_ =
-        arrival_policy::clampConfidence(std::max(sync_controller_.frame_arrival_confidence_, confidence));
-    sync_controller_.consecutive_sync_misses_ = 0;
-    sync_controller_.last_frame_arrival_error_valid_ = false;
-    sync_controller_.last_frame_arrival_error_samples_ = 0;
-
-    LOG_MODEM(DEBUG,
-              "[%s] warm-sync arrival seeded from local TX: now=%zu delay=%zu next=%zu confidence=%.2f",
-              log_prefix_.c_str(), total_fed_, delay_samples,
-              sync_controller_.next_expected_frame_sample_, sync_controller_.frame_arrival_confidence_);
-    if (previous_phase != sync_controller_.warm_sync_phase_) {
-        LOG_MODEM(INFO, "[%s] warm-sync state: %s -> %s",
-                  log_prefix_.c_str(),
-                  arrival_policy::warmSyncPhaseName(previous_phase),
-                  arrival_policy::warmSyncPhaseName(sync_controller_.warm_sync_phase_));
-    }
+    sync_controller_.seedArrivalAfterDelay(total_fed_, delay_samples, confidence);
 }
 
 void StreamingDecoder::setAdaptiveShortDataPreamble(bool enable) {
