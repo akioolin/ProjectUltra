@@ -619,6 +619,22 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     mode_ = mode;
     connected_ = connected;
 
+    // Clear the burst BURST_HEADER z-latch (have_burst_descriptor_ /
+    // activeBurstLiftingZ) when the session ends. The latch deliberately PERSISTS
+    // across groups + ACKs within a transfer (single RX source of truth for the
+    // descriptor-declared z=81, set at streaming_ofdm_decode.cpp:765, otherwise
+    // never cleared). But it must not survive into the NEXT connection: a later
+    // z=27-only transfer that opens before its first descriptor decodes would
+    // inherit a stale z=81 and mis-size its data demod. `connected` never goes
+    // false mid-transfer, so this cannot defeat the in-transfer persistence (the
+    // risky mid-transfer paths — adaptive rate changes via applyPendingConnected-
+    // OFDMMode — are deliberately NOT touched). A new burst transfer self-corrects
+    // anyway because its descriptor rewrites last_burst_descriptor_. See
+    // docs/BURST_Z_LDPC_LIFECYCLE_2026_05_31.md §6.
+    if (!connected) {
+        have_burst_descriptor_ = false;
+    }
+
     if (waveform_mode_changed) {
         if (mode == protocol::WaveformMode::MC_DPSK) {
             waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);

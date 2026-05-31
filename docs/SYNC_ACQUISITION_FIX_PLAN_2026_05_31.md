@@ -203,6 +203,114 @@ dual-listen (path 4).
 Net: a smeared 4-layer, 6-entry, 12-variable sprawl → **one `SyncController`, 3 states, 2 detectors,
 1 rulebook** — with the low-SNR bug fixed by construction inside it.
 
+### 7.6 Burst LDPC `z`-state — consolidate into the SAME owner (parallel scattered-state machine)
+
+Full model + file:line map: **`docs/BURST_Z_LDPC_LIFECYCLE_2026_05_31.md`**. The burst `z` is a
+*second* scattered state machine running alongside sync, and it leaked the same class of bug. It
+belongs in the same refactor, under the same single owner.
+
+**Objective (sharp):** eliminate the **dual source of truth** for the burst LDPC `z`. Today:
+- the **decode + assembly** side reads the persisted, descriptor-declared z via
+  `activeBurstLiftingZ()` (latched by `have_burst_descriptor_`), but
+- the **soft-bit extraction** side reads a *separately toggled* `active_ldpc_block_size`
+  (lifted at `streaming_ofdm_decode.cpp:771`, hard-reset to z=27 at
+  `streaming_burst_interleave.cpp:734`).
+
+These **can diverge** — a fade-lost BURST_HEADER leaves extraction stuck at z=27 while the decode
+latch still says z=81 → `1296` vs `3888` mismatch → group `0/6` (CHANGELOG 2026-05-31 §5B). The cure
+is the same as for sync: **make `z` single-owned and DERIVED, never toggled.**
+
+**End-state:** the `SyncController` (or a small `BurstZState` it owns) holds the transfer's declared z
+(set in `noteGroupBoundary()` from the descriptor; reset to z=27 in `reset()` → COLD). The per-frame
+**extraction z is DERIVED at demod time from `(frame-class, declared-z)`** — never a standalone toggle:
+
+| Frame class (known at demod time) | extraction z |
+|-----------------------------------|--------------|
+| control / ACK / BURST_HEADER (control-first peek) | **27** (always) |
+| burst DATA inside a transfer | **declared z** (`activeBurstLiftingZ()`) |
+
+With that, extraction and decode **cannot disagree by construction**, and the
+`setActiveLDPCLiftingZ(27)` group-end toggle disappears.
+
+**Bonus — closes §5B for free (principled, not a hack):** because the declared-z latch *persists*
+across the transfer, a data frame whose own descriptor was fade-lost still extracts at the latched
+z=81 and decodes. The fade-lost-descriptor `0/6` is fixed **because the z is owned, not guessed** —
+which is exactly why the rejected "retry z=81 without a descriptor" hack was wrong (it guessed; this
+derives from the descriptor the transfer already established).
+
+**Already done — do NOT redo (regression baseline):**
+- Carrier-LDPC RX counts 648-bit air-blocks, commit `9189b70` (the actual low-SNR decode bug).
+- Latch cleared at disconnect: `have_burst_descriptor_ = false` in `StreamingDecoder::setMode(...,
+  connected=false)` — the latent cross-connection staleness. Maps to the `(any) → COLD` transition
+  (§7.2); folds into `SyncController::reset()`.
+- Decode/assembly already trusts `activeBurstLiftingZ()` (the single-source pattern to extend).
+
+**Moves into the controller (delete from old site):**
+- `have_burst_descriptor_` / `last_burst_descriptor_` (`streaming_decoder.hpp:694`) → controller
+  state; `activeBurstLiftingZ()` → a controller accessor (the declared z).
+- The `setActiveLDPCLiftingZ` lift (`:771`) + group-end drop-back (`:734`) toggle → replaced by the
+  derived per-frame z; `ldpc_lifting_z_` / `active_ldpc_block_size` become pure **outputs** of the
+  derivation, not independently writable state.
+
+**The one design subtlety:** extraction z must be set *before* `process()` demods (it sizes
+`soft_bits_`), but control-vs-data is only known *after* the control-first peek. Resolve by keeping
+the peek at z=27 (cheap, fixed) and having the **data path re-derive z** from the controller before
+its decode — see the dispatch in the lifecycle doc §3. This is the crux to get right; everything else
+is mechanical.
+
+**Acceptance gate (adds to §5):** **DQPSK R1/4 Good@10** — fade-lost-descriptor groups decode without
+a fresh descriptor (the `Got 1296` events disappear); **AWGN@10 stays PASS**; **coherent QPSK
+byte-identical**. The `have_burst_descriptor_`-never-cleared latent item (lifecycle §6) is closed by
+`reset()` ownership.
+
+### 7.7 Also in scope / explicit non-scope / pre-flight
+
+Scoping the whole tangle BEFORE starting, so nothing load-bearing is left split across two owners.
+
+**IN scope (tangled — breaks if omitted):**
+1. **CFO lifecycle (load-bearing — do NOT under-scope to "cache last_cfo").** CFO is a 4-stage loop
+   wired through the exact code this refactor touches: chirp-detect → coarse CFO; LTS residual →
+   per-frame refine; corrected CFO **feeds back** to `last_cfo_` (the "NEVER remove the feedback"
+   invariant, `docs/CFO_CORRECTION_FLOW.md`, `ofdm_chirp_waveform.cpp:process()` +
+   `streaming_decoder.cpp`). The controller must own the **CFO acquisition lifecycle + feedback**, or
+   the loop gets split across two owners and the feedback is the thing that accidentally gets severed
+   (→ progressive phase drift → CW failures).
+2. **Frame-class → CONFIG is one decision, not just z.** §7.6's "what z?" generalizes: control vs data
+   determines **z AND modulation AND code-rate (the control-first `configure(control_profile)`) AND
+   interleave AND carrier-LDPC** together. Consolidate into one `frameConfigFor(class, descriptor)` —
+   fixing only the z half leaves the profile-switch half scattered with the same divergence risk.
+3. **Descriptor-consume seam.** `streaming_ofdm_decode.cpp:764-771` applies the BURST_HEADER's whole
+   declared config (z, cw/frame, interleave, cldpc, profile restore) **and** the §16.8 warm-handoff-
+   across-consume. It is the single point where sync-state meets z-state → it becomes one clean
+   `noteGroupBoundary(descriptor)` carrying *all* of that, not just the anchor expectation.
+4. **Thread-safety / lifecycle discipline (real SIGSEGV history).** Sync state is touched by the RX +
+   control threads under `buffer_mutex_` + `reset_generation_`, and waveform reconstruction is
+   **deferred to a safe boundary** to avoid a race (`§14.36 crash fix v3`, `applyPendingConnected-
+   OFDMMode`). The controller's state mutation + any waveform swap MUST respect that discipline by
+   design — retrofitting locking is how that crash returns.
+
+**Explicit NON-scope (define the seam, do NOT absorb):**
+5. **Burst group assembler / SR-ARQ / SACK** (`burst_soft_buffer_`, `finalizeBurstGroup`, group ACK).
+   The controller ends at "frame found + decoded + boundary noted"; the assembler/ARQ is a separate
+   layer reached via `noteGroupBoundary()` / `reportFrameOutcome()`.
+6. **Fine timing** — per-symbol pilot residual-CFO + sample-timing lives in `channel_equalizer`; sync
+   owns only coarse frame position. Draw the line so both don't claim timing.
+7. **MC-DPSK invariants survive explicitly** — `reset()` every `rxDecodeDPSK`, `setCFO` per frame,
+   timing-derived window 1–5; and the narrowband dual-listen is a COLD-detector variant, not a 7th
+   orphan entry point. "Handled by construction" must be *verified*, not assumed.
+
+**PRE-FLIGHT (do before the first line of refactor — "refactoring a working path IS the risk"):**
+8. **Capture a multi-cell byte-identical baseline** — AWGN@10/@20, Good@10/@20, **coherent +
+   differential**, narrowband — so the §7.5 step-1 "prove byte-identical" has a reference. Without it
+   the shell-move is unverifiable.
+9. **Adaptivity sweep on surviving magic thresholds** (standing CLAUDE.md mandate). WARM becomes
+   position+LDPC (no magic — good); COLD/RE_ACQUIRE keep `0.90 coh / 0.15 chirp` and narrow `0.50`.
+   Derive them (constellation geometry / noise-model χ²) or document why they are genuinely
+   channel-independent — don't carry magic numbers across unexamined.
+
+**Priority:** #1 (CFO) and #4 (thread-safety) bite hardest if omitted — load-bearing invariants with a
+history of subtle breakage. #2/#3 are the natural extension of the z-work. #5–#9 are guardrails.
+
 ---
 
 ## 8. Status (2026-05-31) — sync fix landed; the remaining blocker is a SEPARATE z-state bug
