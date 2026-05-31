@@ -226,6 +226,15 @@ collect_metrics() {
   bravo_mode_count="$(count_pattern "$mode_pattern" "$BRAVO_LOG")"
   alpha_unexpected_modes="$(count_pattern "$unexpected_mode_pattern" "$ALPHA_LOG")"
   bravo_unexpected_modes="$(count_pattern "$unexpected_mode_pattern" "$BRAVO_LOG")"
+  # Forced-rung floor probes (ULTRA_FORCE_DATA_MOD / ULTRA_FORCE_WAVEFORM) PIN the
+  # mod/waveform — the modem cannot adapt away, so the "unexpected data mode" watchdog is
+  # meaningless. Worse, the per-EXPECT_MOD pattern's catch-all (e.g. DQPSK -> the '*' case)
+  # false-matches the NORMAL "Data mode set to:" / "MODE_CHANGE: OFDM" lines, so the live
+  # poll loop kills the run ~2 s after handshake before any data flows. Disable when forced.
+  if [[ -n "${ULTRA_FORCE_DATA_MOD:-}" || -n "${ULTRA_FORCE_WAVEFORM:-}" ]]; then
+    alpha_unexpected_modes=0
+    bravo_unexpected_modes=0
+  fi
   file_crc_ok="$(count_pattern "\\[FILE\\] Received .*\\(${FILE_BYTES} bytes, CRC ok|FileTransfer: Received OK \\(${FILE_BYTES} bytes|Received OK .*${FILE_BYTES} bytes.*CRC" "$BRAVO_LOG")"
   alpha_file_done="$(count_pattern '\[FILE\] Transfer complete|FileTransfer: Transfer complete' "$ALPHA_LOG")"
   alpha_disconnected="$(count_pattern '\[SYS\] Disconnected|Connection state changed: 0|Disconnected from' "$ALPHA_LOG")"

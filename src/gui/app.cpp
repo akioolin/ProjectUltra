@@ -1297,10 +1297,21 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
 
     // Apply initial expert settings from loaded config
     ultra::gui::startupTrace("App", "apply-expert-enter");
-    protocol_.setPreferredMode(static_cast<protocol::WaveformMode>(settings_.forced_waveform));
+    // FLOOR-PROBE override (test/diag, FORCE bucket): ULTRA_FORCE_WAVEFORM pins the REQUESTED
+    // data waveform into the CONNECT so negotiation honors it BELOW the auto entry-SNR — where
+    // the ladder would otherwise drop to MC-DPSK. Pairs with ULTRA_FORCE_DATA_MOD/RATE (which
+    // only force the mod/rate, not the mode). Both stations read the same env. NOT production.
+    uint8_t forced_wf = settings_.forced_waveform;
+    if (const char* fw = std::getenv("ULTRA_FORCE_WAVEFORM")) {
+        const std::string s(fw);
+        if      (s == "OFDM_CHIRP")  forced_wf = static_cast<uint8_t>(protocol::WaveformMode::OFDM_CHIRP);
+        else if (s == "OFDM_NARROW") forced_wf = static_cast<uint8_t>(protocol::WaveformMode::OFDM_NARROW);
+        else if (s == "MC_DPSK")     forced_wf = static_cast<uint8_t>(protocol::WaveformMode::MC_DPSK);
+    }
+    protocol_.setPreferredMode(static_cast<protocol::WaveformMode>(forced_wf));
     protocol_.setForcedModulation(static_cast<Modulation>(settings_.forced_modulation));
     protocol_.setForcedCodeRate(static_cast<CodeRate>(settings_.forced_code_rate));
-    modem_.setNarrowbandControl(settings_.forced_waveform == static_cast<uint8_t>(protocol::WaveformMode::OFDM_NARROW));
+    modem_.setNarrowbandControl(forced_wf == static_cast<uint8_t>(protocol::WaveformMode::OFDM_NARROW));
     ultra::gui::startupTrace("App", "apply-expert-exit");
 
     // Apply initial filter settings from loaded config

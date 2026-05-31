@@ -223,6 +223,7 @@ Buckets per the env-knobs→runtime-derivation workstream: **[FEAT]** in-flight 
 | `ULTRA_LTS_DFT_DENOISE` / `_TAPS` | LTS H freq denoise (interim smoother) | OFF | `ofdm_demodulator_setup.cpp:34` | FEAT (task #8, in-flight) |
 | `ULTRA_LTS_CFO_AVG` | CFO-clean 2-LTS averaging (lever ①) | OFF | `ofdm_demodulator_setup.cpp:39` | FEAT (task #9, in-flight) |
 | `ULTRA_FORCE_DATA_MOD` / `_RATE` | force mod/rate, bypass ladder | unset | `waveform_selection.hpp:512/525` | FORCE |
+| `ULTRA_FORCE_WAVEFORM` | pin the NEGOTIATED data waveform (`OFDM_CHIRP`/`OFDM_NARROW`/`MC_DPSK`) below its auto entry-SNR — floor probing; both ends set it | unset | `app.cpp:1303` (GUI forced-waveform apply) | FORCE |
 | `ULTRA_CHANNEL_DOPPLER_HZ` | override Watterson Doppler (sim) | code default | `ota_channel_core/channel.cpp:178` | FORCE/DIAG |
 | `ULTRA_*GENIE*` (data-aided, timing/CFO, channel, sigma) | genie oracles for QAM16 isolation | OFF | `channel_equalizer_pilot.cpp:62/134`, `streaming_ofdm_decode.cpp:103`, `modulator.cpp:276` | DIAG (oracle) |
 | `ULTRA_FAILURE_ATTRIBUTION`, `ULTRA_CONSTELLATION_DIAG`, `ULTRA_CFO_DEBUG_LOG`, `ULTRA_HARQ_DEBUG_LOG*`, `ULTRA_DUMP_CFO_*`, `ULTRA_CARRIER_SENSE_DEBUG`, `ULTRA_STARTUP_LOG`, `ULTRA_E2E_DEBUG_LOG`, `ULTRA_DIAGNOSTICS_DIR` | logging / dumps | off/unset | various | DIAG |
