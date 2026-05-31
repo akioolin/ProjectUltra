@@ -311,6 +311,22 @@ Scoping the whole tangle BEFORE starting, so nothing load-bearing is left split 
 **Priority:** #1 (CFO) and #4 (thread-safety) bite hardest if omitted — load-bearing invariants with a
 history of subtle breakage. #2/#3 are the natural extension of the z-work. #5–#9 are guardrails.
 
+### 7.8 Sequencing — do the coherent-only OFDM removal BEFORE this refactor
+
+This refactor (call it **B**) shares seams with two other in-flight threads:
+- **A — coherent-only OFDM** (`docs/OFDM_COHERENT_ONLY_DECISION_2026_05_31.md`): retire
+  differential-OFDM; OFDM band (SNR ≥ 10) becomes coherent QPSK→8PSK→16QAM. Differential relocates to
+  MC-DPSK (sub-10 / Poor), its real home.
+- **C — ladder / mode-selection rework**: entry floors, the SNR<10→MC-DPSK boundary, rate selection.
+
+**Recommended order: A → C → B.** A is the lever for B: it collapses the coherent-vs-differential axis,
+which makes **§7.7 #2 (frame-class → config) trivial** (one OFDM modulation family — no differential
+fork), removes the **differential control-profile** switch from the control-first peek seam (§7.7 #3),
+and deletes the **carrier-LDPC coherent/differential fork** (the bug class from this session's z-work).
+B is the riskiest thread (rewriting working sync); running A first shrinks B's surface and removes a
+known bug class *before* the refactor instead of carrying the fork through it. See the coherent-only
+doc §5 for the full seam map and the A→C→B rationale.
+
 ---
 
 ## 8. Status (2026-05-31) — sync fix landed; the remaining blocker is a SEPARATE z-state bug

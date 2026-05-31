@@ -53,6 +53,32 @@ here causes a wrong deletion later. Move finished items to *Completed* with the 
 - **Blocker:** none hard; do after the burst/file path is settled so we don't churn the
   shared frame plumbing twice.
 
+### R3. Differential modulation on the **OFDM path** (DQPSK-on-OFDM) — `GATED`
+- **What:** differential modulation handling inside the **OFDM** demod/equalizer/control/
+  carrier-LDPC paths. The OFDM band (SNR ≥ 10) becomes **coherent-only** (QPSK→8PSK→16QAM).
+- **Why dead:** mode selection routes SNR<10 / Poor → MC-DPSK (differential, its real home)
+  and SNR≥10 → OFDM (`connection_policy.hpp:selectLadderRung:249`). Coherent beats differential
+  across the whole OFDM band — GUI-measured clean-group rate **81% (Good@10) / 89% (Moderate@14)
+  vs differential 32% (Good@10)**, with `max_iters` holding 1–5 as fading sped up (phase tracking
+  keeps up). Differential-OFDM is squeezed out from both sides. Full rationale + evidence:
+  `docs/OFDM_COHERENT_ONLY_DECISION_2026_05_31.md`.
+- **Scope (delete):** the ~41 differential branches in `ofdm_stream_processor.cpp` +
+  `channel_equalizer_*` (`is_differential` gating `:342/:388`, the magnitude-only `|H|`
+  channel-est branch, `differential_prev_erased_` + clear sites `:379/:472/:844/:928/:1045`);
+  the differential **control profile** switch in the control-first peek
+  (`streaming_ofdm_decode.cpp:633-647`, `profileForDataMode`, `coherent_ofdm_control_profile_enabled_`);
+  the carrier-LDPC coherent/differential **fork**; the DQPSK option on the OFDM ladder rungs
+  (`connection_policy.hpp:181`, `recommendDataMode`).
+- **⚠ KEEP (do not over-cut):**
+  - **MC-DPSK keeps ALL its differential machinery** (`multi_carrier_dpsk.hpp`) — untouched.
+  - **`Modulation` enum `DQPSK/DBPSK/D8PSK` stay** — MC-DPSK uses them.
+  - **The DD tracker `dd_qam16_*` STAYS** (`channel_equalizer_equalize.cpp:636+`) — it is the
+    **COHERENT** 8PSK/16-QAM channel tracker, not differential; coherent-only OFDM relies on it.
+- **Blocker (GATE):** Tier-0 removal — needs the multi-seed proof in the decision doc §6
+  (**3 seeds × {Good@10, Moderate@14, harsh-Moderate ~fading 1.0}** + no AWGN regression) BEFORE
+  any deletion. Sequencing: do this (thread **A**) before the SyncController refactor (thread **B**)
+  — it collapses the coherent/differential axis that `SYNC_ACQUISITION_FIX_PLAN §7.8` depends on.
+
 ---
 
 ## Dead code — audit-confirmed (verify no test-tool dependency, then cut)
