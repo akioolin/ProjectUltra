@@ -60,8 +60,20 @@ differential* comparison became measurable — and coherent won.
 
 ## 3. What simplifies in the code (file:line, grounded)
 
-Removing differential from the OFDM path collapses **one whole axis of variation** off the hot path —
-the same axis that produced BUG-8PSK-001 *and* this session's carrier-LDPC bug.
+> **⚠ CORRECTION (2026-05-31, post-A2 verification).** The list below was the *intended* deletion, but
+> verification while doing thread A found it **over-scoped**: **OFDM_NARROW uses the SAME
+> `OFDMChirpWaveform` + `ofdm_stream_processor` demod and stays DQPSK** (`streaming_decoder.cpp:788`).
+> So items **#1 (demod branches), #2 (control-profile switch)** are **LIVE for OFDM_NARROW** and CANNOT
+> be deleted, and **#3 (carrier-LDPC)** is **LIVE for coherent** OFDM_CHIRP (`cldpc=1` in the coherent
+> runs). What A2 *did* remove is the differential **SELECTION** on OFDM_CHIRP (#4) — which is what
+> killed the bug-causing *ambiguity*. The code-deletion items are **GATED on converting OFDM_NARROW to
+> coherent** (§5 revisit); until then the differential code stays but is no longer an ambiguity source
+> (OFDM_CHIRP is unambiguously coherent, OFDM_NARROW unambiguously differential — neither forks). See
+> `REMOVAL_BACKLOG.md` R3.
+
+The *intended* full collapse (most of which is gated on OFDM_NARROW per the correction above) removes
+**one whole axis of variation** off the hot path — the same axis that produced BUG-8PSK-001 *and* this
+session's carrier-LDPC bug.
 
 1. **~41 differential branches in the OFDM demod/equalizer** (`ofdm_stream_processor.cpp` +
    `channel_equalizer_*`): the `is_differential` gating (`:342, :388`), the **magnitude-only `|H|`
