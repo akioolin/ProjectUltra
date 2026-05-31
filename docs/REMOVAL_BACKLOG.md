@@ -71,11 +71,22 @@ here causes a wrong deletion later. Move finished items to *Completed* with the 
   `profileForDataMode(DQPSK)→DQPSK` control switch are **LIVE for OFDM_NARROW** — deleting them
   breaks narrowband. The **carrier-LDPC is LIVE for coherent** OFDM_CHIRP (`cldpc=1` in the coherent
   runs; the air-block fix `9189b70` serves it) — also not deletable.
-- **GATE for code deletion:** convert **OFDM_NARROW → coherent** (see new revisit task). Narrowband
-  runs ~17 dB low-SNR where differential's no-phase-reference robustness is exactly the point, so this
-  is a separate validation and may not be worth it — revisit later. Until then the differential OFDM
-  *code* stays; it is no longer a bug source (OFDM_CHIRP is unambiguously coherent, OFDM_NARROW
-  unambiguously differential — neither forks).
+- **PLAN for code deletion (user-chosen 2026-05-31): DISABLE OFDM_NARROW now → remove the differential
+  code → REVAMP OFDM_NARROW as coherent later.**
+  1. **Disable** OFDM_NARROW by dropping it from `ModeCapabilities::ALL` (`frame_v2.hpp:51`) — a single
+     clean lever: it stops being advertised/negotiated/constructed (the narrow handlers in
+     `connection.cpp` become harmless dead branches). The narrowband mode is secondary to the wideband
+     burst focus, so losing it temporarily is acceptable.
+  2. **Verify** no OFDM path ever holds a DQPSK/D8PSK config (default/transient/fallback) — only then
+     are the `is_differential` demod branches + `profileForDataMode(DQPSK)→DQPSK` control switch truly
+     dead. (OFDM_CHIRP is coherent QPSK incl. its control profile; MC-DPSK uses a SEPARATE demod.)
+  3. **Remove** the now-dead differential demod/control branches (NOT carrier-LDPC — still live for
+     coherent). KEEP the coherent `dd_qam16` tracker + MC-DPSK + the `Modulation` enum.
+  4. **Later — revamp OFDM_NARROW as COHERENT** (reuses the coherent OFDM machinery with a narrowband
+     config; no differential code needed). **⚠ This is a real PHY re-validation, NOT a config flip:**
+     narrowband ~17 dB / 500 Hz is where differential's no-phase-reference robustness is the point, so
+     coherent narrow may land at a HIGHER SNR floor (fewer carriers for the equalizer to track phase
+     across). Don't assume it reaches the differential floor.
 - **⚠ KEEP regardless:** MC-DPSK differential (`multi_carrier_dpsk.hpp`); the `Modulation` enum
   `DQPSK/DBPSK/D8PSK`; the **COHERENT** DD tracker `dd_qam16_*` (`channel_equalizer_equalize.cpp:636+`).
 
