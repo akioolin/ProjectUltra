@@ -8,8 +8,7 @@ cites an archived file.
 
 ## Start Here
 
-- `docs/PROJECT_GOALS.md`: Mission, priorities, throughput/reliability targets, and agent task filter.
-- `docs/AGENT_CURRENT_STATE.md`: Current agent-system handoff and dedicated-machine context.
+- `docs/PROJECT_GOALS.md`: Mission, priorities, throughput/reliability targets, and task filter.
 - `docs/INVARIANTS.md`: Critical modem invariants that must not be weakened.
 - `docs/KNOWN_BUGS.md`: Current open reliability/throughput issues only.
 
@@ -21,16 +20,13 @@ cites an archived file.
 
 ## Diagnostic / Lab Tools
 
-- `tools/cli_simulator.cpp`: Full-protocol simulator and hardware-audio test harness.
+- `tools/gui_qso_scenario.sh`: **faithful full-protocol + fade/throughput gate** (two real `ultra_gui -sim` stations over `ota_simulator serve`).
 - `tools/decode_bench.cpp`: Deterministic fixture generation/replay for decoder regressions.
-- `tools/session_decode.cpp`: Offline decode of recorded full sessions.
-- `tools/test_waveform_simple.cpp` and `ultra ptx/prx`: raw waveform/frame diagnostics.
+- `tools/measure_ack_fer.cpp`: ACK/FER measurement over the real StreamingEncoder/Decoder.
+- `ultra ptx/prx`: raw waveform/frame diagnostics.
 
-## Agent And Quality Workflow
+## Quality Workflow
 
-- `docs/AGENTIC_DEVELOPMENT.md`: Bounded agent workflow, permissions, gates, and review process.
-- `docs/AGENT_TASK_BACKLOG.md`: Approved bounded task candidates for agents.
-- `docs/AGENT_DEDICATED_ENV_MACOS.md`: Dedicated-user isolation setup for macOS agent hosts.
 - `docs/QUALITY_STRATEGY.md`: Critical-software test, coverage, CI, and refactor policy.
 - `docs/QUALITY_AUDIT.md`: Current quality baseline, coverage gaps, and hardening backlog.
 - `docs/COVERAGE_MAP.md`: Module-specific critical coverage expectations and test priorities.

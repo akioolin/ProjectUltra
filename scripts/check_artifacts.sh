@@ -16,75 +16,13 @@ add_finding() {
   fail=1
 }
 
-is_allowed_agent_path() {
+# Local AI-tooling config must never be committed (the agents/ autonomous system
+# was retired 2026-05-30, so its queue/report artifact checks went with it).
+is_local_ai_artifact_path() {
   local path="$1"
 
   case "$path" in
-    agents/queue/.gitignore|agents/queue/.gitkeep|agents/queue/README.md)
-      return 0
-      ;;
-    agents/archive/.gitignore|agents/archive/.gitkeep)
-      return 0
-      ;;
-    agents/reports/.gitignore|agents/reports/.gitkeep)
-      return 0
-      ;;
-    agents/tmp/.gitignore|agents/tmp/.gitkeep)
-      return 0
-      ;;
-    agents/planner/proposals/.gitignore|agents/planner/proposals/.gitkeep)
-      return 0
-      ;;
-    agents/planner/reports/.gitignore|agents/planner/reports/.gitkeep)
-      return 0
-      ;;
-  esac
-
-  return 1
-}
-
-is_agent_artifact_path() {
-  local path="$1"
-
-  case "$path" in
-    agents/queue/*|agents/archive/*|agents/reports/*|agents/tmp/*|agents/planner/proposals/*|agents/planner/reports/*)
-      ! is_allowed_agent_path "$path"
-      return
-      ;;
     .claude/*|.codex|.codex/*)
-      return 0
-      ;;
-  esac
-
-  return 1
-}
-
-is_allowed_hw_log_path_file() {
-  local path="$1"
-
-  # Documentation and templates may reference the /tmp/ultra_hw_ prefix
-  # in prose without containing actual log content. Real hardware log
-  # files live under /tmp/ outside the repo and never reach this scanner.
-  case "$path" in
-    CLAUDE.md|tools/run_hw_test.sh|scripts/check_artifacts.sh)
-      return 0
-      ;;
-    docs/*.md|docs/**/*.md)
-      return 0
-      ;;
-    .github/ISSUE_TEMPLATE/*.yml|.github/ISSUE_TEMPLATE/*.yaml|.github/PULL_REQUEST_TEMPLATE.md)
-      return 0
-      ;;
-    agents/queue/*.md|agents/archive/*.md|agents/planner/proposals/*.md|agents/planner/reports/*.md)
-      return 0
-      ;;
-    README.md)
-      return 0
-      ;;
-    .github/ISSUE_TEMPLATE/agent_followup.yml|.github/ISSUE_TEMPLATE/hardware_followup.yml)
-      return 0
-      ;;
-    docs/AI_COLLABORATION.md|docs/CHANGELOG.md|docs/SESSION_2026-05-05_NIGHT.md)
       return 0
       ;;
   esac
@@ -110,14 +48,13 @@ private_key_re='-----BEGIN ((OPENSSH|RSA|DSA|EC|ED25519|ENCRYPTED) )?PRIVATE KEY
 putty_private_key_re='^PuTTY-User-Key-File-[0-9]+: ssh-'
 github_classic_token_re='gh[pousr]_[[:alnum:]_]{30,}'
 github_fine_grained_token_re='github_pat_[[:alnum:]_]{50,}'
-hw_log_prefix="/tmp/ultra""_hw_"
 
 while IFS= read -r -d '' path; do
   [[ -f "$path" ]] || continue
   scanned=$((scanned + 1))
 
-  if is_agent_artifact_path "$path"; then
-    add_finding "$path" "local agent artifact or metadata"
+  if is_local_ai_artifact_path "$path"; then
+    add_finding "$path" "local AI-tooling artifact or metadata"
   fi
 
   if has_match "$private_key_re" "$path" || has_match "$putty_private_key_re" "$path"; then
@@ -126,10 +63,6 @@ while IFS= read -r -d '' path; do
 
   if has_match "$github_classic_token_re" "$path" || has_match "$github_fine_grained_token_re" "$path"; then
     add_finding "$path" "GitHub token"
-  fi
-
-  if has_fixed_match "$hw_log_prefix" "$path" && ! is_allowed_hw_log_path_file "$path"; then
-    add_finding "$path" "hardware log path"
   fi
 done < <(git ls-files --cached --others --exclude-standard -z)
 

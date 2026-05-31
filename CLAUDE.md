@@ -4,15 +4,14 @@
 
 **If this is a new/fresh session, do this FIRST before any work:**
 
-1. `cat docs/AI_COLLABORATION.md` — **MANDATORY** — how to work with Codex (the other AI), brief format, verification gates, autonomous-mode rules
+1. `cat docs/AI_COLLABORATION.md` — **MANDATORY** — how to work with Codex (the other AI), brief format, verification gates
 2. `cat docs/PROJECT_GOALS.md` — mission, priorities, throughput/reliability targets, task filter
-3. `cat docs/AGENT_CURRENT_STATE.md` — current automation and handoff context
-4. `cat docs/KNOWN_BUGS.md` — active bugs you must not re-discover
-5. `git log --oneline -10` — recent commits
+3. `cat docs/KNOWN_BUGS.md` — active bugs you must not re-discover
+4. `git log --oneline -10` — recent commits
 
 **Before modifying ANY code:** read `docs/AI_COLLABORATION.md`, `docs/PROJECT_GOALS.md`, and `docs/INVARIANTS.md` (critical rules — violating them causes subtle bugs).
 
-**Autonomous agent work:** use `docs/AGENTIC_DEVELOPMENT.md` + one task file in `agents/queue/` (never an open-ended prompt); `docs/AGENT_TASK_BACKLOG.md` for candidates + acceptance criteria; `docs/AGENT_DEDICATED_ENV_MACOS.md` for MacBook setup; `docs/AGENT_CURRENT_STATE.md` to recover lost context. Run `./agents/run_local_gate.sh` before claiming done; `./agents/run_hardware_smoke.sh` for PHY/ARQ/audio changes (respect the hardware lock). No unrestricted shell — use repo-scoped allowlists in `agents/permissions/`.
+**Gate before claiming done:** `cmake --build build -j4 && ctest --test-dir build --output-on-failure -j4`; for any PHY/ARQ/throughput/fade claim, the faithful gate `tools/gui_qso_scenario.sh` (see Testing below). (The autonomous `agents/` task-runner + the Mac↔Pi5 hardware-cable rig were retired 2026-05-30 — superseded by OTASim/the GUI sim path.)
 
 **This project has durable documentation files.** They exist because context was lost repeatedly, causing rework. USE THEM.
 
@@ -39,30 +38,6 @@ with no general formula; a threshold that "works" only at one SNR/channel; a gat
 with a single reference and no independent cross-check. Tracked sweep + register:
 `docs/ADAPTIVITY_AUDIT_2026_05_29.md`. This is the production form of the
 runtime-config-derivation refactor (env knobs → code-derived adaptive PHY).
-
----
-
-## Hardware Audio Calibration — Mac ↔ Pi 5 Test Rig
-
-**Current known-good calibration (2026-04-29):**
-- Mac USB soundcard: `Sound Blaster Play! 3`; Pi USB soundcard: ALSA card 0, `USB Audio Device`
-- Mac volume: output `71`, input `60`
-- Pi mixer: `Speaker` 65% (`-13.00 dB`), `Mic Capture` 57% (`+8.00 dB`), `Auto Gain Control` off
-- Synthetic-channel hardware tests: `--inject --inject-gain 0.70`
-
-```bash
-# Apply calibration before hardware tests
-osascript -e 'set volume input volume 60' -e 'set volume output volume 70'
-ssh -i "$HOME/.ssh/id_pi5" math@pi5tester \
-  "amixer -D default sset 'Auto Gain Control' off && \
-   amixer -D default sset 'Speaker' 65% && amixer -D default sset 'Mic' capture 57%"
-# Verify raw audio
-SSH_KEY="$HOME/.ssh/id_pi5" ./tools/check_hw_audio_path.sh
-```
-
-Expected raw levels: Pi→Mac RMS ~`0.124` peak ~`0.303`; Mac→Pi RMS ~`0.249` peak ~`0.408` (per-channel ~1 kHz). Acceptable RMS `0.05-0.25`, peak `0.15-0.80`. Too hot: peak >`0.90` (ADC/DAC clip → invalid fading tests). Too low: RMS ≤`0.0003` (check cable/device).
-
-**Important:** hardware gain staging does NOT replace injected-channel headroom — the Watterson injector can exceed full scale before the soundcard. Keep `--inject-gain 0.70` unless a new calibration sweep proves otherwise. Calibration run logs and the 2026-04-29 robustness interpretation: `docs/PERFORMANCE_HISTORY.md`.
 
 ---
 
@@ -308,9 +283,9 @@ unvalidated on hardware" caveat.
 
 ## Essential Documentation
 
-**Priority 1 (read first):** `docs/PROJECT_GOALS.md` · `docs/AGENT_CURRENT_STATE.md` · `docs/QUALITY_STRATEGY.md` · `docs/QUALITY_AUDIT.md` · `docs/KNOWN_BUGS.md` · `docs/INVARIANTS.md` · `docs/ALPHA_RELEASE_GATE.md` · `docs/CHANGELOG.md` · `docs/MODEM_INFRASTRUCTURE_MAP.md` (**live** stage/knob/waveform map — current valid infra; keep it current per the MANDATORY rule above)
+**Priority 1 (read first):** `docs/PROJECT_GOALS.md` · `docs/QUALITY_STRATEGY.md` · `docs/QUALITY_AUDIT.md` · `docs/KNOWN_BUGS.md` · `docs/INVARIANTS.md` · `docs/ALPHA_RELEASE_GATE.md` · `docs/CHANGELOG.md` · `docs/MODEM_INFRASTRUCTURE_MAP.md` (**live** stage/knob/waveform map — current valid infra; keep it current per the MANDATORY rule above)
 
-**Priority 2 (per subsystem):** `docs/CFO_CORRECTION_FLOW.md` (**CRITICAL** — 4-stage CFO, fading fix, feedback loop) · `docs/PROTOCOL_V2.md` · `docs/GUI_ARCHITECTURE.md` · `docs/AUDIO_SYSTEM.md` · `docs/CONFIGURATION_SYSTEM.md` · `docs/BUILD_SYSTEM.md` · `docs/AGENTIC_DEVELOPMENT.md` · `docs/ADAPTIVITY_AUDIT_2026_05_29.md` (subsystem adaptivity register)
+**Priority 2 (per subsystem):** `docs/CFO_CORRECTION_FLOW.md` (**CRITICAL** — 4-stage CFO, fading fix, feedback loop) · `docs/PROTOCOL_V2.md` · `docs/GUI_ARCHITECTURE.md` · `docs/AUDIO_SYSTEM.md` · `docs/CONFIGURATION_SYSTEM.md` · `docs/BUILD_SYSTEM.md` · `docs/ADAPTIVITY_AUDIT_2026_05_29.md` (subsystem adaptivity register)
 
 **Priority 3 (reference):** `docs/ADDING_NEW_WAVEFORM.md` · `docs/GIT_WORKFLOW.md` · `docs/PERFORMANCE_HISTORY.md` (floor/calibration archive) · `docs/README.md`
 
@@ -394,12 +369,12 @@ PING/PONG (DPSK) → CONNECT/CONNECT_ACK (DPSK) → MODE_CHANGE/ACK (SNR-negotia
 
 ## Development Workflow
 
-**Before:** read `docs/PROJECT_GOALS.md` (align with mission), `docs/INVARIANTS.md` (subsystem you touch), `docs/KNOWN_BUGS.md` (related issues); for agent work use `docs/AGENT_TASK_BACKLOG.md` + one queued task.
+**Before:** read `docs/PROJECT_GOALS.md` (align with mission), `docs/INVARIANTS.md` (subsystem you touch), `docs/KNOWN_BUGS.md` (related issues).
 
 **After:** run `ctest --test-dir build --output-on-failure -j4` for unit/regression, and
 `tools/gui_qso_scenario.sh ... 2>&1 | tee /tmp/test_output.log` (the faithful gate) for any
 fade/throughput/full-protocol claim; update `docs/CHANGELOG.md` (fix), `docs/KNOWN_BUGS.md`
 (new bug), `docs/MODEM_INFRASTRUCTURE_MAP.md` if you touched any stage/env-knob/waveform/
-classification (MANDATORY — keep the map live), and `docs/AGENT_CURRENT_STATE.md`/`QUALITY_AUDIT.md`/`AGENT_TASK_BACKLOG.md` if state changed materially.
+classification (MANDATORY — keep the map live), and `docs/QUALITY_AUDIT.md` if state changed materially.
 
 **Commit message:** imperative summary line; what + why bullets; `Fixes: BUG-XXX` when applicable.

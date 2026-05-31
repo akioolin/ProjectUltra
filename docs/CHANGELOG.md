@@ -10,6 +10,41 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-30: Retire the agents/ autonomous system + Mac↔Pi5 hardware-cable rig (alpha cleanup)
+
+**Why:** the `agents/` autonomous task-runner (planner/queue/approval/watchdogs) and the
+Mac↔Pi5 hardware-audio-cable test rig are no longer used — OTASim + `tools/gui_qso_scenario.sh`
+(two real `ultra_gui -sim` stations over a simulated channel) supersede both the hardware rig
+and the autonomous-execution scaffolding.
+
+**Deleted:** the entire `agents/` directory (run_next_task/run_planner/watchdogs/
+run_hardware_smoke/run_hardware_sentinel/run_local_gate/hardware_watchdog/create_followup_issue/
+process_approved_proposals/publish_planner_proposals + planner/queue/permissions/launchd/reports/
+README/templates); the hardware-cable scripts `tools/run_hw_test.sh`, `tools/check_hw_audio_path.sh`,
+`tools/tnc_loopback_test.sh`; the agent docs `AGENTIC_DEVELOPMENT.md`, `AGENT_CURRENT_STATE.md`,
+`AGENT_TASK_BACKLOG.md`, `AGENT_DEDICATED_ENV_MACOS.md`; and the GitHub issue templates
+`agent_followup.yml` + `hardware_followup.yml`.
+
+**CI / build adapted:** removed the `ULTRA_BUILD_HARDWARE_TESTS` option + the `HardwareSmoke`
+ctest (it ran `agents/run_hardware_smoke.sh`); rewrote `PULL_REQUEST_TEMPLATE.md` (gates now point
+at `ctest` + `gui_qso_scenario.sh`, agent/hardware checklist dropped); trimmed `check_artifacts.sh`
+(dropped the agents/ artifact + hardware-log-path scans, kept the private-key/token/`.claude`/`.codex`
+secret scans). The **core CI** (`.github/workflows/build-matrix.yml` build/test/sanitizer/coverage
+matrix) was already independent of agents/hardware — untouched.
+
+**Kept:** `ultra_gui`, `ota_simulator serve`, `measure_ack_fer`, `decode_bench`, the core CI,
+`bug_report.yml`, and `AI_COLLABORATION.md` (the Codex multi-AI *review* workflow — separate from
+the retired autonomous queue). Updated CLAUDE.md (removed the FRESH-SESSION agent bullet, the
+"Autonomous agent work" paragraph, the "Hardware Audio Calibration" section, and the agent-doc
+references; the gate is now ctest + gui_qso_scenario.sh), `docs/README.md`, `README.md`.
+
+**Verification:** CMake reconfigures clean; `scripts/check_artifacts.sh` passes; no tracked
+code/CI reference to any deleted script remains. (NOTE: `agents/reports/*.log` were untracked
+gitignored local artifacts — `git rm` removed the tracked files; a manual `rm -rf agents/` clears
+the local dir.)
+
+---
+
 ## 2026-05-30: Retire cli_simulator + test_waveform_simple + SimulatedStation (alpha cleanup)
 
 **Why:** `cli_simulator` and `SimulatedStation` were a *divergent TX wrapper* around the shared

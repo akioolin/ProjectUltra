@@ -639,14 +639,6 @@ if(TARGET ota_simulator)
     endif()
 endif()
 
-if(ULTRA_BUILD_HARDWARE_TESTS)
-    add_test(NAME HardwareSmoke
-        COMMAND ${CMAKE_SOURCE_DIR}/agents/run_hardware_smoke.sh)
-    set_tests_properties(HardwareSmoke PROPERTIES
-        LABELS hardware
-        TIMEOUT 900)
-endif()
-
 ultra_enable_test_warnings(
     test_layers.cpp
     test_fft.cpp

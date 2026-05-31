@@ -91,12 +91,12 @@ on measured SNR and fading.
 
 Throughput rises with payload size as the fixed ~5 s handshake (PING/PONG → CONNECT → MODE_CHANGE) amortizes. The 1.83-1.90 kbps wall-clock asymptote at R1/2 SNR=15 sits below the 2208 bps raw-PHY ceiling because the 8-CW frame carries 301 useful payload bytes inside 51 OFDM symbols (`2 LTS + ceil(8*648/(53*2))` = 1.224 s) — that effective single-frame payload rate is ~1967 bps before ARQ overhead, and ACK turnaround takes the rest. Beyond ~50 KB, throughput is bounded by per-frame airtime + ACK roundtrip, not handshake.
 
-End-to-end throughput is wall-clock measured by `tools/run_hw_test.sh`
-between A's `Connection: Starting file transfer` and the final ACK
-received at A. Includes handshake + ACK turnaround latency (what an
-operator actually waits for). The Mac↔Pi5 hardware harness is the
-two-machine synthetic-channel test rig described in
-`docs/AGENT_DEDICATED_ENV_MACOS.md`.
+End-to-end throughput is wall-clock measured between A's `Connection: Starting
+file transfer` and the final ACK received at A — handshake + ACK turnaround
+latency included (what an operator actually waits for). The faithful gate is now
+`tools/gui_qso_scenario.sh` (two real `ultra_gui -sim` stations over an
+`ota_simulator serve` channel); the older Mac↔Pi5 hardware-cable rig was retired
+2026-05-30 (superseded by OTASim). The table above is historical hardware-rig data.
 
 End-to-end results match or exceed real-world numbers reported for
 existing commercial HF data modems in equivalent conditions. The 500 KB
