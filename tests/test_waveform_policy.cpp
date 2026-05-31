@@ -134,10 +134,10 @@ void test_qam16_selection_rung() {
     CHECK(mod == Modulation::QAM16 && rate == CodeRate::R3_4,
           "AWGN in-band SNR=19.7 should promote to QAM16 R3/4");
 
-    // Just under the gate stays differential.
+    // Just under the QAM16 gate -> coherent QPSK default (OFDM band is coherent-only).
     recommendDataMode(15.9f, WaveformMode::OFDM_CHIRP, mod, rate, 0.05f);
-    CHECK(mod == Modulation::DQPSK,
-          "AWGN in-band SNR=15.9 (just under QAM16 gate) stays differential");
+    CHECK(mod == Modulation::QPSK,
+          "AWGN in-band SNR=15.9 (just under QAM16 gate) selects coherent QPSK");
 
     // GOOD fading at the measured QPSK floor selects coherent QPSK, PROMOTED to
     // R3/4 (file-class cross-frame burst interleave, design §14.14 — the picker
@@ -152,39 +152,43 @@ void test_qam16_selection_rung() {
           "good fading SNR=19.8 selects QPSK R3/4 inside the SNR-quantum guard");
 
     recommendDataMode(19.7f, WaveformMode::OFDM_CHIRP, mod, rate, 0.50f);
-    CHECK(mod == Modulation::DQPSK,
-          "good fading SNR=19.7 should stay differential below the SNR-quantum guard");
+    CHECK(mod == Modulation::QPSK,
+          "good fading SNR=19.7 selects coherent QPSK (OFDM band is coherent-only)");
 
     recommendDataMode(17.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.40f);
-    CHECK(mod == Modulation::DQPSK && rate == CodeRate::R1_2,
-          "good fading in-band SNR=17 should stay differential below the QPSK floor");
+    CHECK(mod == Modulation::QPSK && rate == CodeRate::R1_2,
+          "good fading in-band SNR=17 selects coherent QPSK at the existing R1/2 rate");
 
     recommendDataMode(20.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.79f);
     CHECK(mod == Modulation::QPSK && rate == CodeRate::R3_4,
           "GOOD-lobby estimator spread promotes to QPSK R3/4");
 
     recommendDataMode(20.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.80f);
-    CHECK(mod == Modulation::DQPSK,
-          "above GOOD-lobby estimator margin should fall back to DQPSK");
+    CHECK(mod == Modulation::QPSK,
+          "above the gated-QPSK margin still selects coherent QPSK (default)");
 
     recommendDataMode(16.9f, WaveformMode::OFDM_CHIRP, mod, rate, 0.40f);
-    CHECK(mod == Modulation::DQPSK,
-          "good fading in-band SNR=16.9 should fall back to DQPSK");
+    CHECK(mod == Modulation::QPSK,
+          "good fading in-band SNR=16.9 selects coherent QPSK (default)");
     CHECK(rate == CodeRate::R1_2,
-          "good fading below QPSK floor should keep the existing OFDM R1/2 rate");
+          "good fading below the gated-QPSK floor keeps the existing OFDM R1/2 rate");
 
-    // Moderate/poor fading remain differential.
+    // Moderate fading on OFDM is now coherent QPSK (coherent-only band).
     recommendDataMode(20.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.90f);
-    CHECK(mod == Modulation::DQPSK,
-          "moderate fading in-band SNR=20 should stay differential");
+    CHECK(mod == Modulation::QPSK,
+          "moderate fading in-band SNR=20 selects coherent QPSK");
 
+    // Poor fading routes to MC-DPSK at the SELECTION layer (kOFDMEntryFloorPoorDb is
+    // unreachable; verified in the ConnectionPolicy test), so OFDM+Poor never actually
+    // happens. recommendDataMode given OFDM+Poor still returns coherent — the OFDM band
+    // has no differential left — a defensive don't-happen case.
     recommendDataMode(25.0f, WaveformMode::OFDM_CHIRP, mod, rate, 1.20f);
-    CHECK(mod == Modulation::DQPSK,
-          "poor fading should stay differential even at high SNR");
+    CHECK(mod == Modulation::QPSK,
+          "OFDM+Poor (a don't-happen: Poor routes to MC-DPSK) is coherent, not differential");
 
-    // DQPSK guard (good/snr12) preserved — sub-coherent-floor path untouched.
+    // good/snr12: the OFDM band selects coherent QPSK down to its entry floor.
     recommendDataMode(12.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.40f);
-    CHECK(mod == Modulation::DQPSK, "good/snr12 guard: differential preserved");
+    CHECK(mod == Modulation::QPSK, "good/snr12: OFDM band selects coherent QPSK");
 }
 
 void test_bootstrap_caps() {
@@ -261,25 +265,24 @@ void test_data_mode_policy() {
     CHECK(mod == Modulation::QAM16, "AWGN in-band SNR=21.7 selects coherent QAM16");
     CHECK(rate == CodeRate::R3_4, "AWGN in-band SNR=21.7 QAM16 uses R3/4");
 
-    // SNR=19 GOOD fading: below the measured QPSK R2/3 gate plus one
-    // protocol SNR quantum, and no longer allowed to select QAM16 on
-    // the multipath path.
+    // SNR=19 GOOD fading: below the gated QPSK-R2/3 rung, so the coherent QPSK
+    // default takes it at the existing R1/2 rate (no longer QAM16 on multipath).
     recommendDataMode(19.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
-    CHECK(mod == Modulation::DQPSK, "in-band SNR=19 good fading should fall back to DQPSK");
-    CHECK(rate == CodeRate::R1_2, "in-band SNR=19 good fading should keep R1/2 DQPSK");
+    CHECK(mod == Modulation::QPSK, "in-band SNR=19 good fading selects coherent QPSK");
+    CHECK(rate == CodeRate::R1_2, "in-band SNR=19 good fading keeps R1/2");
 
     recommendDataMode(16.9f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
-    CHECK(mod == Modulation::DQPSK, "in-band SNR=16.9 good fading falls back to DQPSK");
-    CHECK(rate == CodeRate::R1_2, "in-band SNR=16.9 good fading keeps R1/2 DQPSK");
+    CHECK(mod == Modulation::QPSK, "in-band SNR=16.9 good fading selects coherent QPSK");
+    CHECK(rate == CodeRate::R1_2, "in-band SNR=16.9 good fading keeps R1/2");
 
     // Just under the R1/2 Good gate at SNR=13.9 dB.
     recommendDataMode(13.9f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
     CHECK(rate == CodeRate::R1_4, "in-band SNR=13.9 good fading should stay R1/4");
 
-    // Moderate fading: D8PSK rejected even at high SNR - falls back to DQPSK.
+    // Moderate fading at high SNR: D8PSK retired (differential), coherent QPSK default.
     recommendDataMode(30.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.90f);
-    CHECK(mod == Modulation::DQPSK, "moderate fading should reject D8PSK");
-    CHECK(rate == CodeRate::R1_2, "DQPSK moderate fading uses R1/2");
+    CHECK(mod == Modulation::QPSK, "moderate fading high-SNR selects coherent QPSK (D8PSK retired)");
+    CHECK(rate == CodeRate::R1_2, "moderate fading coherent QPSK uses R1/2");
 
     recommendDataMode(12.0f, WaveformMode::MC_DPSK, mod, rate, 0.90f);
     CHECK(mod == Modulation::DQPSK, "MC-DPSK should use DQPSK");

@@ -177,8 +177,11 @@ inline LadderRung ladderRungForId(LadderRungId id) {
                     Modulation::DQPSK, CodeRate::R1_4, 8, 512,
                     v2::kDefaultFixedFrameCodewords};
         case LadderRungId::OFDM_CHIRP:
+            // Coherent-only wideband OFDM (thread A, 2026-05-31). Nominal mod is
+            // QPSK; the real data mod still comes from recommendDataMode(). NARROW
+            // below stays DQPSK — narrowband/low-SNR is a robust differential regime.
             return {id, "OFDM_CHIRP", WaveformMode::OFDM_CHIRP,
-                    Modulation::DQPSK, CodeRate::R1_4, 0, 0,
+                    Modulation::QPSK, CodeRate::R1_4, 0, 0,
                     v2::kDefaultFixedFrameCodewords};
         case LadderRungId::OFDM_NARROW:
             return {id, "OFDM_NARROW", WaveformMode::OFDM_NARROW,

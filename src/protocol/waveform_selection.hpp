@@ -29,7 +29,13 @@ namespace protocol {
 inline constexpr float kOFDMEntryFloorAwgnDb = 10.0f;
 inline constexpr float kOFDMEntryFloorGoodDb = 12.0f;
 inline constexpr float kOFDMEntryFloorModerateDb = 14.0f;
-inline constexpr float kOFDMEntryFloorPoorDb = 18.0f;
+// Poor HF (fading >= 1.10: fast Doppler / heavy multipath) routes to MC-DPSK, NEVER
+// OFDM (thread A, 2026-05-31). Coherent OFDM phase tracking breaks on fast fading and
+// the OFDM band is now coherent-only; the decision doc + the long-standing "Poor HF:
+// OFDM fails — use MC-DPSK" limitation both say Poor is MC-DPSK's. An unreachable floor
+// expresses "no OFDM at Poor" in the single source both selection paths consult, so the
+// retired Poor-OFDM corner can't reappear. (Was 18.0f.)
+inline constexpr float kOFDMEntryFloorPoorDb = 1.0e9f;
 
 inline constexpr float kQAM16AwgnFadingMax = 0.15f;
 inline constexpr float kQAM16AwgnSnrFloorDb = 16.0f;
@@ -617,55 +623,21 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
         return;
     }
 
-    // D8PSK R3/4 — only on near-AWGN with very high SNR. Sweep showed
-    // 6 retx at SNR=20 good fading (borderline) so reserve for AWGN.
-    if (fading_index < 0.15f && snr_db >= 34.0f) {
-        mod = Modulation::D8PSK;
-        rate = CodeRate::R3_4;
-        return;
-    }
+    // D8PSK (Differential 8PSK) rungs RETIRED (thread A, 2026-05-31). They were
+    // near-AWGN-only throughput rungs (SNR >= 28-34 dB, rarely hit on real HF);
+    // differential is now MC-DPSK-only on the OFDM-band. Coherent QAM16 (above)
+    // covers clean-channel throughput; restoring coherent 8PSK is a thread-C
+    // question. Measurement history in git + docs/OFDM_COHERENT_ONLY_DECISION_2026_05_31.md.
 
-    // D8PSK R2/3 — gated to AWGN-only after Mac↔Pi5 hardware A/B
-    // showed the simulator's "good fading" promotion path destabilizes
-    // on real audio. SNR=20 good fading auto-rate: adaptive promoted
-    // to D8PSK R2/3, hit 15 retx, dropped throughput from 1595 bps
-    // (forced R1/2) down to 486 bps (auto with R2/3 promotion attempt).
-    // Restricting R2/3 to fading<0.15 keeps the adaptive ladder from
-    // chasing R2/3 on the rougher channels where it reliably fails.
-    const bool d8psk_r23_clean = (fading_index < 0.10f && snr_db >= 28.0f);
-    const bool d8psk_r23_awgn  = (fading_index < 0.15f && snr_db >= 32.0f);
-    if (d8psk_r23_clean || d8psk_r23_awgn) {
-        mod = Modulation::D8PSK;
-        rate = CodeRate::R2_3;
-        return;
-    }
-
-    // D8PSK R1/2 — gated on the hardware-measured cliff. Mac↔Pi5 audio
-    // loopback 10-seed sweep at SNR=20/22/24 good fading injected
-    // (2026-05-04, post-CW=8 wire negotiation) showed:
-    //   SNR=20 good: D8PSK retx-hit 38 % (3/8 storms incl. 270 bps)
-    //                mean 1448 bps ≈ DQPSK alt 1444 bps — wash with
-    //                catastrophic tail.
-    //   SNR=22 good: D8PSK retx-hit 17 % (1/6 single retx, no storms)
-    //                mean 1783 bps vs DQPSK 1450 bps — +23 % real win.
-    //   SNR=24 good: D8PSK retx-hit 43 % (3/7 incl. 2 FAILs at 320-374 bps,
-    //                17-78 retx). Counterintuitively WORSE than 22:
-    //                higher SNR doesn't fix the soundcard/Doppler-induced
-    //                phase glitches that cliff D8PSK; it just promotes
-    //                D8PSK in more conditions where those glitches hit.
-    // The single-seed CLAUDE.md datapoint (SNR=20 D8PSK 1595 bps clean)
-    // was unrepresentative — variance hidden in single-seed measurements.
-    // Conclusion: SNR=22 is the floor where D8PSK is net-positive.
-    // Storms aren't predictable from bulk fading_index, so tightening
-    // fading further doesn't help.
-    if (fading_index < 0.65f && snr_db >= 32.0f) {
-        mod = Modulation::D8PSK;
-        rate = CodeRate::R1_2;
-        return;
-    }
-
-    // Default: DQPSK with the existing wide ladder.
-    mod = Modulation::DQPSK;  // Always differential for HF phase stability
+    // Default (thread A, 2026-05-31): COHERENT QPSK. The OFDM band is coherent-only —
+    // differential DQPSK/D8PSK retired from OFDM and relocated to MC-DPSK (sub-10 SNR /
+    // Poor, its home; Poor now routes to MC-DPSK via kOFDMEntryFloorPoorDb, so this
+    // function is never reached with OFDM + Poor fading). Coherent is the more reliable
+    // choice across the OFDM band — GUI-measured clean-rate 81% Good@10 / 89-90%
+    // Moderate@14 vs differential 32%, and phase tracking holds as fading speeds up.
+    // Rate via the existing ladder; rate-table cleanup is thread C.
+    // See docs/OFDM_COHERENT_ONLY_DECISION_2026_05_31.md.
+    mod = Modulation::QPSK;
     rate = selectOFDMCodeRate(snr_db, fading_index);
 }
 
