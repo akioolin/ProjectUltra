@@ -10,6 +10,42 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-30: Make burst-transport the DEFAULT OFDM file path + drop the harness LDPC_Z/BURST pins
+
+**What changed:** `use_burst_transport_` flips **false → true** (`connection.hpp:539`); the env
+knob now *opts out* on `ULTRA_BURST_TRANSPORT=0` instead of opting in on `=1`
+(`connection.cpp:353`). RX matches: `burst_transport_rx_enabled_ = true`
+(`modem_engine.hpp:432`), app wiring `setBurstTransportRxEnabled(!(bt=="0"))`
+(`app.cpp:593`). The GUI harness (`gui_qso_scenario.sh`) drops its now-redundant
+`ULTRA_BURST_TRANSPORT=1` **and** `ULTRA_LDPC_Z=81` pins — both are now the code default /
+policy-derived (LDPC-Z via the traffic-class policy + BURST_HEADER descriptor, 16→1 getenv
+done earlier this session). Stale "inert unless env" comment in `app.cpp` corrected.
+
+**Why:** the one-way burst stop-and-wait transport is the intended production OFDM file path;
+keeping it env-gated-OFF meant the no-env default ran the legacy SR-ARQ path while every
+validated run pinned the env — classic "the harness pins the real value, the code default is
+stale" scaffolding (same pattern as the group-size 16→6 reconcile). Flipping the default makes
+the validated path the default; the legacy path stays reachable via `ULTRA_BURST_TRANSPORT=0`
+(both ends must flip together).
+
+**Verification (no new regressions — proven, not assumed):** full `ctest` shows the SAME
+pre-existing failures with the flip ON and OFF (`ULTRA_BURST_TRANSPORT=0`) — **zero new
+failures from the flip**. Every current red (Protocol, TNCSession, Streaming*, DecodeBenchReplay)
+was reproduced **identically at the pre-session parent `c384b6a`** via a worktree rebuild → all
+pre-existing legacy drift, none caused by this flip. Build clean.
+
+**Honest caveat — default-path throughput NOT freshly GUI-validated:** the auto rate ladder is
+mid-rework (new code rates; entry floors not yet re-established), which **confounds the GUI
+throughput/rate gate**. A no-env default run reported `unexpected_data_mode` / goodput 0, but
+that was a harness-expectation artifact: omitting `--expect-rate` defaulted the harness to R1/4,
+forcing a slow rate that can't finish a 21 KB file inside the disconnect window — not a transport
+failure. The flip changes only a *default + env polarity*; the burst code path itself is
+unchanged and was GUI-proven earlier this session **with** the pins (~3.1 kbps CRC-clean
+Good@20). A clean no-env end-to-end throughput re-validation is **deferred to the ladder
+rework**. Opt-out remains `ULTRA_BURST_TRANSPORT=0`.
+
+---
+
 ## 2026-05-30: Drop the drifted adaptive-rate-ladder cases from test_connection_adaptive
 
 **What was wrong:** `ConnectionAdaptive` reported **14/281 checks RED**. Investigation

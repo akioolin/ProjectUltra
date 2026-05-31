@@ -530,12 +530,13 @@ private:
     bool burst_mode_active_ = false;
     TransmitBurstCallback on_transmit_burst_;
 
-    // One-way file-path group stop-and-wait transport (design §14.16). Parallel
-    // to the SR-ARQ file path: inert until use_burst_transport_ is enabled and
-    // the file TX/RX is routed through it, so it cannot affect the existing modem
-    // until GUI-proven. Group-ACK reuses the ACK control frame (seq=group_seq).
+    // One-way file-path group stop-and-wait transport (design §14.16). The DEFAULT
+    // production OFDM file path as of 2026-05-30 (GUI-proven byte-exact, RESULT=PASS);
+    // opt OUT to the legacy SR-ARQ file path via ULTRA_BURST_TRANSPORT=0. Gated on
+    // isOFDMMode at the call sites, so MC-DPSK/narrowband files are unaffected.
+    // Group-ACK reuses the ACK control frame (seq=group_seq).
     BurstStopAndWaitController burst_transport_;
-    bool use_burst_transport_ = false;
+    bool use_burst_transport_ = true;
 
     // §14.36 Phase 5c BER-driven per-block rate adaptation. Env ULTRA_ADAPTIVE_RATE=1,
     // default OFF. The SENDER runs the controller on the receiver's per-group decode

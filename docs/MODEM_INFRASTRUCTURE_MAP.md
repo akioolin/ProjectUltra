@@ -156,7 +156,8 @@ SR-ARQ masks; ON → whole-group ACK/NACK.** They disagreeing was the QAM16 offs
   `mcDpskWindowSizeForTiming` (1–5), OFDM_NARROW **3** (hardcoded), OFDM wideband
   `ofdmWindowSizeForChannel` **8 default, up to 16** on near-AWGN DQPSK/D8PSK ≥R1/2. 🟢
 - `BurstStopAndWaitController burst_transport_` (`connection.hpp:510`): true one-way
-  stop-and-wait, **🟡 env-gated `ULTRA_BURST_TRANSPORT`**. SR dispatch `formAndSendBurstGroupSR`
+  stop-and-wait, **🟢 DEFAULT ON (2026-05-30; `use_burst_transport_=true`); `ULTRA_BURST_TRANSPORT=0`
+  opts out** to the legacy SR-ARQ file path. SR dispatch `formAndSendBurstGroupSR`
   (`connection.cpp:2632`) when `burst_interleave_off_` (`connection.cpp:2051`, default true).
   GROUP_ACK is now **tone-burst** (`connection.cpp:413`); OFDM 1-CW GROUP_ACK only behind
   `ULTRA_LEGACY_OFDM_GROUP_ACK`.
@@ -198,7 +199,7 @@ Buckets per the env-knobs→runtime-derivation workstream: **[FEAT]** in-flight 
 
 | Knob | Effect | Default | Key site | Bucket |
 |------|--------|---------|----------|--------|
-| `ULTRA_BURST_TRANSPORT` | one-way burst stop-and-wait transport | OFF | `connection.cpp:353` | FEAT |
+| `ULTRA_BURST_TRANSPORT` | one-way burst stop-and-wait transport (the production OFDM file path) | **ON** (default 2026-05-30; `=0` opts out to legacy SR-ARQ) | `connection.cpp:353` (TX), `app.cpp:593` (RX) | FEAT |
 | `ULTRA_ADAPTIVE_RATE` | BER-driven per-block rate adaptation | OFF | `connection.cpp:358` | FEAT |
 | `ULTRA_BURST_INTERLEAVE` | cross-frame interleave ON→whole-group ACK / OFF→SR masks | **OFF** | `connection_policy.hpp:95` | FEAT |
 | `ULTRA_BURST_GROUP_FRAMES` | burst group size, clamp [2,32] | code **6** (`kBurstInterleaveGroupFrames` `:64`, reconciled 16→6 on 2026-05-30 — mask-width-matched to the 6-bit SACK frame_mask; the old 16 was un-SR-addressable on the default interleave-OFF path) | `connection_policy.hpp:74` | FEAT |
@@ -209,7 +210,7 @@ Buckets per the env-knobs→runtime-derivation workstream: **[FEAT]** in-flight 
 | `ULTRA_LOCK_RATE` | hold data rate fixed for transfer | OFF | `connection.cpp:2342` | FEAT |
 | `ULTRA_MAX_OFDM_RATE` | cap initial+adaptive rate | unset | `connection.cpp:673` | FEAT |
 | `ULTRA_FRAME_CW` | override CW/frame | unset | `connection.cpp:727` | FEAT |
-| `ULTRA_LDPC_Z` | Z=81→n=1944 vs 27→n=648. **16→1 sites (2026-05-30, DONE)**: RX via descriptor (`activeBurstLiftingZ()`), TX consumers via `ldpc_lifting_z_`, chunker + `makeFixedDataFrame` + `modem_engine` via `Connection::selectBurstLiftingZ()` (app/cli push it to the encoder). Z is now code-derived (traffic-class: bulk/file burst→81, gated on `use_burst_transport_`), written to the descriptor, read back. The 1 remaining read is the discovery override INSIDE the policy. | 27 (policy) | `connection.cpp:4342` (override only) | FEAT (derived; Z=81 burst flip = GUI-proof-pending) |
+| `ULTRA_LDPC_Z` | Z=81→n=1944 vs 27→n=648. **16→1 sites (2026-05-30, DONE)**: RX via descriptor (`activeBurstLiftingZ()`), TX consumers via `ldpc_lifting_z_`, chunker + `makeFixedDataFrame` + `modem_engine` via `Connection::selectBurstLiftingZ()` (app/cli push it to the encoder). Z is now code-derived (traffic-class: bulk/file burst→81, gated on `use_burst_transport_`), written to the descriptor, read back. The 1 remaining read is the discovery override INSIDE the policy. The GUI harness no longer pins `ULTRA_LDPC_Z=81` (dropped 2026-05-30) — the traffic-class policy derives it (81 for file bursts, now that burst transport is the default). | 27 (policy) | `connection.cpp:4342` (override only) | FEAT (derived) |
 | `ULTRA_LEGACY_OFDM_GROUP_ACK` | old OFDM GROUP_ACK vs tone-burst | OFF | `connection.cpp:445` | FEAT (A/B) |
 | `ULTRA_SHORT_REANCHOR_CHIRP_MS` | short re-anchor chirp ms [100,300] | 100 | `connection_policy.hpp:380` | FEAT |
 | `ULTRA_WIENER_DELAY_SPREAD_S` | Wiener freq-corr delay spread | **hardcoded 1e-3 (Moderate-HF) — NOT derived; adaptivity gap** | `channel_equalizer_pilot.cpp:28` | ADAPT |

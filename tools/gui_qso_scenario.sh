@@ -133,14 +133,15 @@ done
 #   ULTRA_S16_WARM_HANDOFF=0  (measure the full-chirp baseline)
 #   ULTRA_LOCK_RATE=0         (let the adaptive rate ladder drop/promote)
 #   ULTRA_FORCE_DATA_MOD=8PSK ULTRA_FORCE_DATA_RATE=R3_4  (force a rung)
-: "${ULTRA_BURST_TRANSPORT:=1}"      ; export ULTRA_BURST_TRANSPORT
 : "${ULTRA_ADAPTIVE_RATE:=1}"        ; export ULTRA_ADAPTIVE_RATE
 : "${ULTRA_LOCK_RATE:=1}"            ; export ULTRA_LOCK_RATE
-: "${ULTRA_LDPC_Z:=81}"              ; export ULTRA_LDPC_Z
-# ULTRA_BURST_GROUP_FRAMES no longer pinned — the code default is now 6
-# (mask-width-matched, reconciled 2026-05-30). Override via env if you need it.
 : "${ULTRA_S16_WARM_HANDOFF:=1}"     ; export ULTRA_S16_WARM_HANDOFF
-echo "warm-handoff config: BURST_TRANSPORT=$ULTRA_BURST_TRANSPORT ADAPTIVE_RATE=$ULTRA_ADAPTIVE_RATE LOCK_RATE=$ULTRA_LOCK_RATE LDPC_Z=$ULTRA_LDPC_Z S16_WARM_HANDOFF=$ULTRA_S16_WARM_HANDOFF${ULTRA_BURST_GROUP_FRAMES:+ GROUP_FRAMES=$ULTRA_BURST_GROUP_FRAMES}${ULTRA_FORCE_DATA_MOD:+ FORCE_MOD=$ULTRA_FORCE_DATA_MOD}${ULTRA_FORCE_DATA_RATE:+ FORCE_RATE=$ULTRA_FORCE_DATA_RATE}"
+# No longer pinned (now code defaults, reconciled 2026-05-30):
+#   ULTRA_BURST_TRANSPORT  -> default ON (the production OFDM file path)
+#   ULTRA_LDPC_Z           -> derived by the traffic-class policy (81 for file bursts)
+#   ULTRA_BURST_GROUP_FRAMES -> default 6 (mask-width-matched)
+# All three remain overridable via env (=0 / value); shown in the echo only when set.
+echo "config: ADAPTIVE_RATE=$ULTRA_ADAPTIVE_RATE LOCK_RATE=$ULTRA_LOCK_RATE S16_WARM_HANDOFF=$ULTRA_S16_WARM_HANDOFF${ULTRA_BURST_TRANSPORT:+ BURST_TRANSPORT=$ULTRA_BURST_TRANSPORT}${ULTRA_LDPC_Z:+ LDPC_Z=$ULTRA_LDPC_Z}${ULTRA_BURST_GROUP_FRAMES:+ GROUP_FRAMES=$ULTRA_BURST_GROUP_FRAMES}${ULTRA_FORCE_DATA_MOD:+ FORCE_MOD=$ULTRA_FORCE_DATA_MOD}${ULTRA_FORCE_DATA_RATE:+ FORCE_RATE=$ULTRA_FORCE_DATA_RATE}"
 
 if [[ -z "$OUT" ]]; then
   stamp="$(date +%Y%m%d_%H%M%S)"

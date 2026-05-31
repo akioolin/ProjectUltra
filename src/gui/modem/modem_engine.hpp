@@ -429,7 +429,7 @@ private:
     DataCallback data_callback_;
     RawDataCallback raw_data_callback_;
     BurstGroupCallback burst_group_callback_;
-    bool burst_transport_rx_enabled_ = false;
+    bool burst_transport_rx_enabled_ = true;  // default ON (2026-05-30); ULTRA_BURST_TRANSPORT=0 opts out
     DataSyncAcceptedCallback data_sync_accepted_callback_;
     StatusCallback status_callback_;
     PingReceivedCallback ping_received_callback_;

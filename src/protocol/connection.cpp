@@ -347,11 +347,11 @@ Connection::Connection(const ConnectionConfig& config)
     arq_.setFixedFrameCodewords(data_frame_cw_count_);
 
     // §14.27: one-way burst stop-and-wait file transport (default OFF). Enabled
-    // via env ULTRA_BURST_TRANSPORT=1 for GUI proving before it becomes default.
-    // Both ends must enable it (TX routes the file through groups; RX must also
-    // run the decoder's group-as-unit path — wired in app.cpp via the same env).
-    if (const char* bt = std::getenv("ULTRA_BURST_TRANSPORT"); bt && bt[0] == '1') {
-        use_burst_transport_ = true;
+    // Burst transport is the DEFAULT OFDM file path (2026-05-30). Opt OUT to the
+    // legacy SR-ARQ file path via ULTRA_BURST_TRANSPORT=0. Both ends flip together
+    // (RX group-as-unit path wired in app.cpp via the same env).
+    if (const char* bt = std::getenv("ULTRA_BURST_TRANSPORT"); bt && bt[0] == '0') {
+        use_burst_transport_ = false;
     }
     // §14.36 Phase 5c: BER-driven per-block rate adaptation. Default OFF; opt in via
     // ULTRA_ADAPTIVE_RATE=1. Only meaningful on the burst transport file path.
