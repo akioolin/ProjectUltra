@@ -43,6 +43,7 @@
 #include "fec/codec_factory.hpp"  // ICodec for FEC decoding
 #include "fec/soft_combine.hpp"
 #include "streaming_frame_arrival_policy.hpp"
+#include "sync/sync_controller.hpp"   // SyncController — sync/z state owner (refactor §7)
 #include <vector>
 #include <queue>
 #include <mutex>
@@ -646,7 +647,12 @@ private:
     size_t last_frame_end_sample_ = 0;
     bool last_frame_arrival_error_valid_ = false;
     int64_t last_frame_arrival_error_samples_ = 0;
-    size_t expected_frame_gap_samples_ = 0;
+
+    // The single owner of OFDM sync + burst-z state (refactor §7). Sync state is
+    // being migrated into it member-by-member (shell-move §7.5#1); already holds the
+    // cadence gap. Eventually owns the SyncMode, prediction, confidence, misses,
+    // last_cfo, and the burst declared-z.
+    sync::SyncController sync_controller_;
 
     // Reset generation counter - incremented on reset(), checked after slow operations
     // to detect if state was reset mid-operation (e.g., during correlation)

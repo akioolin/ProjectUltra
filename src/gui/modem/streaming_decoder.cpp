@@ -279,7 +279,7 @@ void StreamingDecoder::noteFrameArrivalSuccessLocked(size_t frame_start_abs,
     }
     if (!next_expected_frame_sample_valid_ &&
         !expect_full_ofdm_anchor_ &&
-        expected_frame_gap_samples_ == 0) {
+        sync_controller_.expectedFrameGapSamples() == 0) {
         return;
     }
 
@@ -290,7 +290,7 @@ void StreamingDecoder::noteFrameArrivalSuccessLocked(size_t frame_start_abs,
         frame_arrival_confidence_,
         frame_start_abs,
         frame_end_abs,
-        expected_frame_gap_samples_);
+        sync_controller_.expectedFrameGapSamples());
 
     next_expected_frame_sample_valid_ = true;
     warm_sync_active_ = true;
@@ -335,7 +335,7 @@ void StreamingDecoder::noteFrameArrivalSyncMissLocked() {
             last_frame_end_sample_ >= last_frame_start_sample_
                 ? (last_frame_end_sample_ - last_frame_start_sample_)
                 : 0;
-        const size_t cadence = last_duration + expected_frame_gap_samples_;
+        const size_t cadence = last_duration + sync_controller_.expectedFrameGapSamples();
         if (cadence > 0) {
             next_expected_frame_sample_ += cadence;
         }
@@ -984,13 +984,13 @@ StreamingDecoder::FrameArrivalSnapshot StreamingDecoder::getFrameArrivalSnapshot
     snapshot.last_frame_end_sample = last_frame_end_sample_;
     snapshot.has_last_arrival_error = last_frame_arrival_error_valid_;
     snapshot.last_arrival_error_samples = last_frame_arrival_error_samples_;
-    snapshot.expected_frame_gap_samples = expected_frame_gap_samples_;
+    snapshot.expected_frame_gap_samples = sync_controller_.expectedFrameGapSamples();
     return snapshot;
 }
 
 void StreamingDecoder::setExpectedFrameGapSamples(size_t samples) {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
-    expected_frame_gap_samples_ = samples;
+    sync_controller_.setExpectedFrameGapSamples(samples);
 }
 
 void StreamingDecoder::seedExpectedFrameArrivalAfterSamples(size_t delay_samples,

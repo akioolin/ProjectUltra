@@ -76,6 +76,13 @@ public:
     bool isWarm() const { return mode_ == SyncMode::WARM; }
     float lastCfo() const { return last_cfo_; }
 
+    // --- migration accessors (shell-move §7.5#1) ---------------------------------
+    // Temporary getters/setters so StreamingDecoder can move its state in member-by-
+    // member while the orchestration still lives there. Each folds into
+    // detect()/reportFrameOutcome()/noteGroupBoundary() as that logic migrates.
+    size_t expectedFrameGapSamples() const { return expected_frame_gap_; }
+    void setExpectedFrameGapSamples(size_t samples) { expected_frame_gap_ = samples; }
+
 private:
     // --- migrated from StreamingDecoder (audit §1.2) — the single home for this state ---
     SyncMode mode_ = SyncMode::COLD;
