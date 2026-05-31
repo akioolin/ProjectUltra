@@ -72,7 +72,7 @@ it's post-decode delivery/routing only.
 | Component | Where | When | Class |
 |-----------|-------|------|-------|
 | Constellation mapper (BPSK/QPSK/QAM8/16/32/64/256) | `modulator.cpp:85` (`mapBits`) | TX coherent | 🟢 QPSK/QAM8/QAM16; 🔴 QAM32/64/256 (no auto rung reaches them) |
-| Differential encoder (DBPSK/DQPSK/D8PSK) | `modulator.cpp:454` | TX differential | 🔴 **DEAD (OFDM TX)** since thread A — OFDM is coherent-only (`isSupportedChirpModulation` rejects differential → QPSK); MC-DPSK uses its own modulator (`multi_carrier_dpsk.hpp`), not this. RX differential demod already deleted; this TX counterpart is the follow-up deletion (REMOVAL_BACKLOG R3). Keep the `dbpsk_prev_symbols`=+1 INVARIANT until removed. |
+| ~~Differential encoder (DBPSK/DQPSK/D8PSK)~~ | ~~`modulator.cpp:454`~~ | — | ❌ **REMOVED** thread A (commit `65b27b6`) — OFDM is coherent-only; the TX differential branches + `dbpsk_prev_symbols` are gone (the RX twin `lts_carrier_phases`/`lts_phase_offset` removed in `2f3c2ce`). MC-DPSK keeps its own differential modulator (`multi_carrier_dpsk.hpp`). |
 | OFDM symbol builder (map→pilots→IFFT→CP) | `modulator.cpp:232` (`createOFDMSymbol`) | every TX symbol | 🟢 |
 | `generateTrainingSymbols(count)` — **production LTS source** | `modulator.cpp:608` | preamble gen, always **count=2** | 🟢 |
 | `generatePreamble()` — Schmidl-Cox STS×4+LTS×2 | `modulator.cpp:551` | — | 🔴 **DEAD** (test tools only; OFDM_COX legacy) |

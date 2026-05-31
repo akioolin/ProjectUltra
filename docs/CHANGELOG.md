@@ -10,6 +10,27 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-31: A3 follow-up — delete dead OFDM TX + RX-LTS differential code
+
+**What changed:** with the OFDM RX differential demod gone (A3, `19f3df8`), its TX and
+RX-LTS counterparts were dead too and are now removed.
+- **TX** (`65b27b6`, `modulator.cpp`): the per-carrier DBPSK/DQPSK/D8PSK differential
+  branches in `modulate()` (kept the coherent `mapBits` path), the `dbpsk_prev_symbols`
+  member, and its `.assign((1,0))` init sites in `generatePreamble`/`generateTrainingSymbols`
+  (kept the load-bearing `activateCarrierPattern(0)`). The only caller passes
+  `config_.modulation`, which `isSupportedChirpModulation` keeps coherent.
+- **RX-LTS** (`2f3c2ce`, `channel_equalizer_lts.cpp`): the `=== DQPSK PER-CARRIER PHASE
+  REFERENCES ===` block — `lts_carrier_phases = conj(H)/|H|`, `phase_advance`, and
+  `lts_phase_offset` — was consumed only by the deleted differential demap, leaving it
+  write-only (debug-read) and recomputed every LTS estimation on the hot path. Removed the
+  block, the two members, and the `lts_phase_offset` resets in `ofdm_stream_processor.cpp`.
+
+**Why correct:** coherent decode never read any of these. **Test verification:** build clean
+(no `-Wunused`); ctest green on the modulator/LTS/loopback paths (WaveformLoopback,
+ComprehensiveModem, WavLoopback, SyncDetection, OFDM, OFDMCarrierMaskPlumbing,
+OFDMPilotPattern, StreamingDecodePolicy) — coherent TX→RX loopbacks unaffected. OFDM is now
+differential-free end-to-end (TX, channel-est, demod, control).
+
 ## 2026-05-31: A3 — delete dead differential OFDM demod/control (coherent-only OFDM)
 
 **What changed (not a bug — planned dead-code removal):** with OFDM_CHIRP coherent

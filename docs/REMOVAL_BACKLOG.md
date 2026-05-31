@@ -79,10 +79,12 @@ here causes a wrong deletion later. Move finished items to *Completed* with the 
      `profileForDataMode(DQPSK)→DQPSK` control switch + `coherent_ofdm_control_profile_enabled_` flag.
      **KEPT** carrier-LDPC, the coherent `dd_qam16` tracker, MC-DPSK, the `Modulation` enum, and
      `soft_demap`'s differential inline helpers.
-- **▶ FOLLOW-UP (TX side, not yet done):** the OFDM **TX** differential encoder (`modulator.cpp:454`,
-  DBPSK/DQPSK/D8PSK) is now dead-for-OFDM too (coherent-only; MC-DPSK uses `multi_carrier_dpsk.hpp`,
-  not this). RX is gone; delete the TX counterpart + any now-dead differential constellation/training
-  in `modulator.cpp`. KEEP: the `dbpsk_prev_symbols`=+1 INVARIANT until removed; MC-DPSK's own modulator.
+- **✅ DONE — TX + RX-LTS differential removed (2026-05-31, commits `65b27b6` + `2f3c2ce`):** the OFDM
+  **TX** differential encoder (`modulator.cpp`, DBPSK/DQPSK/D8PSK branches + `dbpsk_prev_symbols`) was
+  deleted (the only caller passes `config_.modulation`, never differential; MC-DPSK uses its own
+  modulator). The RX twin — the dead `lts_carrier_phases` / `lts_phase_offset` / `phase_advance` DQPSK
+  reference computation in `estimateChannelFromLTS` (write-only after A3) — was deleted too. The OFDM
+  TX+RX path is now differential-free end-to-end.
 - **▶ LATER — revamp OFDM_NARROW as COHERENT** (reuses the coherent OFDM machinery with a narrowband
   config; no differential code needed). **⚠ real PHY re-validation, NOT a config flip:** narrowband
   ~17 dB / 500 Hz is where differential's no-phase-reference robustness is the point, so coherent narrow
