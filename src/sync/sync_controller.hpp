@@ -28,6 +28,7 @@
 #include "waveform/waveform_interface.hpp"   // IWaveform, SyncResult, SampleSpan
 #include "protocol/frame_v2.hpp"             // protocol::WaveformMode
 #include "sync/frame_arrival_policy.hpp"     // WarmSyncPhase + warm-sync timing helpers
+#include "sync/signal_policy.hpp"            // LightSyncThresholds + light-sync acceptance
 
 #include <atomic>
 #include <cstddef>
@@ -54,6 +55,18 @@ struct SyncDecision {
     size_t pos       = 0;      // absolute sample position where the frame starts
     float  cfo       = 0.0f;   // carrier-frequency offset to apply
     SyncMode mode    = SyncMode::COLD;
+};
+
+// The connected-data ("light LTS") acceptance verdict for one detect tick.
+// Returned by acceptLightSyncCandidate(): folds signal_policy::evaluateLightSyncCandidate,
+// the ULTRA_S16_WARM_HANDOFF warm-override, and the WARM position-gating into one decision.
+// When position_gated, the decoder maps position_gate_abs → sync_result.start_sample
+// (= position_gate_abs - search_start), applies position_gate_cfo, and zeroes correlation.
+struct LightSyncAcceptance {
+    bool   found = false;             // accept this candidate as a frame start
+    bool   position_gated = false;    // WARM position-gating fired (light-LTS corr at noise)
+    size_t position_gate_abs = 0;     // absolute sample to process at (when position_gated)
+    float  position_gate_cfo = 0.0f;  // known CFO to apply at the gated position
 };
 
 class SyncController {
@@ -86,6 +99,18 @@ public:
     void resetFrameArrivalTracking();
     void noteFrameArrivalSuccess(size_t frame_start_abs, size_t frame_end_abs);
     void noteFrameArrivalSyncMiss();
+
+    // The connected-data light-LTS acceptance decision (§7.4 chunk B; moved verbatim from
+    // StreamingDecoder::searchForSync). Folds signal_policy::evaluateLightSyncCandidate, the
+    // ULTRA_S16_WARM_HANDOFF warm-override, and the WARM position-gating into one verdict, and
+    // updates the owned sync_reject_streak_. The decoder still runs the detector and builds the
+    // search buffer; it hands the candidate (detector_found, correlation) + window geometry
+    // (search_start, search_window_len) here, then applies the returned position gate to
+    // sync_result. `connected`/`is_coherent` mirror the decoder's connected_ / coherent-data flag.
+    LightSyncAcceptance acceptLightSyncCandidate(
+        bool detector_found, float correlation, bool is_coherent, bool connected,
+        float known_cfo, size_t search_start, size_t search_window_len,
+        const signal_policy::LightSyncThresholds& thresholds);
 
     void setLogPrefix(const std::string& prefix) { log_prefix_ = prefix; }
 

@@ -640,92 +640,23 @@ void StreamingDecoder::searchForSync() {
                 SampleSpan(search_buffer.data(), search_buffer.size()),
                 sync_result, known_cfo, CORR_DETECT_THRESHOLD);
 
-            // Reject clear false positives (noise floor is ~0.2-0.4)
-            auto sync_decision = signal_policy::evaluateLightSyncCandidate(
+            // §7.4 chunk B: the connected-data light-LTS acceptance decision
+            // (evaluateLightSyncCandidate + the ULTRA_S16_WARM_HANDOFF warm-override
+            // + the WARM position-gating) now lives on the controller, which owns the
+            // sync_reject_streak_. The decoder still ran the detector above; here it
+            // hands the candidate + window geometry to the controller and applies the
+            // returned position gate to sync_result.
+            auto accept = sync_controller_.acceptLightSyncCandidate(
                 found, sync_result.correlation, is_coherent, connected_,
-                sync_controller_.sync_reject_streak_, light_sync_thresholds);
-            // §16.8 step 2 (ULTRA_S16_WARM_HANDOFF): the coherent-QPSK
-            // sync threshold is 0.90 because stale LTS phases can't be
-            // recovered by DD tracking alone. In the warm-handoff regime we
-            // are NOT stale — the BURST_HEADER just decoded with a fresh full
-            // chirp+LTS anchor and seeded sync_controller_.last_cfo_. This override is a
-            // BACKSTOP for a group-start DATA frame whose light-LTS dips just
-            // under 0.90 right after a known-good anchor. The PRIMARY fix for
-            // group-boundary acquisition is re-arming the descriptor chirp
-            // anchor every group (streaming_burst_interleave.cpp end-of-group),
-            // which keeps the contiguous data correlating high (~0.91); this
-            // override should rarely fire once that anchor is used.
-            const char* s16_env =
-                std::getenv("ULTRA_S16_WARM_HANDOFF");
-            const bool s16_warm_handoff =
-                s16_env && std::atoi(s16_env) != 0;
-            constexpr float kS16WarmHandoffMinCorrelation = 0.55f;
-            const bool s16_warm_override =
-                s16_warm_handoff && is_coherent &&
-                sync_controller_.warm_sync_phase_ ==
-                    arrival_policy::WarmSyncPhase::WARM &&
-                sync_decision.rejected && found &&
-                sync_result.correlation >= kS16WarmHandoffMinCorrelation;
-            if (s16_warm_override) {
-                LOG_MODEM(INFO,
-                    "[%s] s16-warm-handoff: ACCEPT light-LTS sync corr=%.2f "
-                    "(WARM phase, conf=%.2f, threshold-floor=%.2f); coherent "
-                    "0.90 gate bypassed",
-                    log_prefix_.c_str(), sync_result.correlation,
-                    sync_controller_.frame_arrival_confidence_,
-                    kS16WarmHandoffMinCorrelation);
-                sync_decision.found = true;
-                sync_decision.rejected = false;
-                sync_decision.next_reject_streak = 0;
-            } else if (found && sync_result.correlation < light_sync_thresholds.min_confidence) {
-                if (sync_decision.weak_accept) {
-                    LOG_MODEM(INFO, "[%s] DATA sync weak-accepted (corr=%.2f < %.2f, streak=%llu)",
-                              log_prefix_.c_str(), sync_result.correlation,
-                              light_sync_thresholds.min_confidence,
-                              static_cast<unsigned long long>(sync_controller_.sync_reject_streak_));
-                } else if (sync_decision.rejected) {
-                    LOG_MODEM(INFO, "[%s] DATA sync rejected (corr=%.2f < %.2f, streak=%llu)",
-                              log_prefix_.c_str(), sync_result.correlation,
-                              light_sync_thresholds.min_confidence,
-                              static_cast<unsigned long long>(sync_decision.next_reject_streak));
-                }
-            }
-
-            // §16.8 WARM position-gating (low-SNR fix, 2026-05-31 — see
-            // docs/SYNC_ACQUISITION_FIX_PLAN_2026_05_31.md). At low SNR the warm light-LTS
-            // correlation floors at NOISE (~0.15 measured at DQPSK R1/4 AWGN@10), so the frame is
-            // UNFINDABLE by search and the normal gate rejects it — even though the cadence
-            // prediction is correct (descriptor-seeded, contiguous frames) and the data decodes
-            // (legacy: 776 CW on the same signal). The audit §9.7 fix: in WARM with the narrow
-            // predicted window, do NOT gate on LTS correlation — PROCESS at the predicted position
-            // and let LDPC be the acceptance decision (the LTS there still gives the channel
-            // estimate H). detectDataSync's reported position is noise here, so we use
-            // next_expected. Engages ONLY when the normal correlation path already failed, so
-            // higher-SNR locks (which find the true peak) are byte-identical. On a misprediction
-            // the frame's LDPC simply fails → existing NACK / §16.4 full-chirp escalation handles
-            // it. Flag-gated by ULTRA_S16_WARM_HANDOFF.
-            if (s16_warm_handoff && !sync_decision.found &&
-                sync_controller_.warm_sync_phase_ == arrival_policy::WarmSyncPhase::WARM &&
-                light_sync_thresholds.narrow_expected_window &&
-                sync_controller_.next_expected_frame_sample_valid_ &&
-                sync_controller_.next_expected_frame_sample_ >= search_start &&
-                (sync_controller_.next_expected_frame_sample_ - search_start) < search_buffer.size()) {
+                known_cfo, search_start, search_buffer.size(),
+                light_sync_thresholds);
+            if (accept.position_gated) {
                 sync_result.start_sample =
-                    static_cast<int>(sync_controller_.next_expected_frame_sample_ - search_start);
-                sync_result.cfo_hz = known_cfo;
+                    static_cast<int>(accept.position_gate_abs - search_start);
+                sync_result.cfo_hz = accept.position_gate_cfo;
                 sync_result.correlation = 0.0f;  // position-gated, not correlation-found
-                sync_decision.found = true;
-                sync_decision.rejected = false;
-                sync_decision.next_reject_streak = 0;
-                LOG_MODEM(INFO,
-                    "[%s] WARM position-gated: processing predicted frame at abs=%llu "
-                    "(light-LTS corr below noise floor; cadence-located, LDPC validates)",
-                    log_prefix_.c_str(),
-                    static_cast<unsigned long long>(sync_controller_.next_expected_frame_sample_));
             }
-
-            found = sync_decision.found;
-            sync_controller_.sync_reject_streak_ = sync_decision.next_reject_streak;
+            found = accept.found;
 
             if (found) {
                 if (light_sync_thresholds.narrow_expected_window) {
