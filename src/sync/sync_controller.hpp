@@ -112,6 +112,20 @@ public:
         float known_cfo, size_t search_start, size_t search_window_len,
         const signal_policy::LightSyncThresholds& thresholds);
 
+    // The warm-window PLANNING decision (§7.4 chunk-B tail; moved verbatim from
+    // StreamingDecoder::searchForSync). Computes the s16 skip-short-lead + the expected
+    // search anchor from the owned warm-sync state, calls frame_arrival_policy::
+    // planWarmSearchWindow, and applies the short-reanchor-lead adjustment — returning the
+    // window plan the decoder acts on (wait / activate / build buffer). The decoder still
+    // owns the ring buffer: it derives oldest_abs / correlation_abs and does the actual
+    // extraction. Caller holds StreamingDecoder::buffer_mutex_ (reads the same warm-sync
+    // fields the noteFrameArrival* trio writes under that lock); this does not lock.
+    frame_arrival_policy::WarmSearchWindowPlan planWarmSearch(
+        bool use_light_search, bool use_short_reanchor_search,
+        size_t short_reanchor_lead_samples, size_t total_fed, size_t oldest_abs,
+        bool search_floor_valid, size_t search_floor_abs, size_t correlation_abs,
+        size_t symbol_samples, size_t correlation_step);
+
     void setLogPrefix(const std::string& prefix) { log_prefix_ = prefix; }
 
     SyncMode mode() const { return mode_; }

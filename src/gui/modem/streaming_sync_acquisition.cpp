@@ -269,40 +269,15 @@ void StreamingDecoder::searchForSync() {
             ? (total_fed_ - buffer_capacity_samples_)
             : 0;
         const size_t correlation_abs = ringPosToAbsoluteLocked(correlation_pos_);
-        // §16.8 step 2 v2: when warm-handoff is on AND we're in
-        // post-BURST_HEADER warm state, the data group uses pure light
-        // LTS (no short-chirp re-anchor lead). The legacy code shifts
-        // the search expectation BACK by short_reanchor_lead_samples
-        // because the adaptive short re-anchor preamble starts with a
-        // short chirp at -150ms; in our warm-handoff path the LTS is
-        // exactly at sync_controller_.next_expected_frame_sample_ with no lead. The
-        // shift-back put correlation_pos_ PAST the search window's end
-        // → !current_step_intersects → warm_plan.active stayed false.
-        const char* s16_env_w =
-            std::getenv("ULTRA_S16_WARM_HANDOFF");
-        const bool s16_warm_handoff_w =
-            s16_env_w && std::atoi(s16_env_w) != 0;
-        const bool s16_skip_short_lead =
-            s16_warm_handoff_w &&
-            sync_controller_.warm_sync_phase_ ==
-                arrival_policy::WarmSyncPhase::WARM &&
-            !sync_controller_.expect_full_ofdm_anchor_;
-        const size_t expected_sync_search_sample =
-            (!s16_skip_short_lead &&
-             use_short_reanchor_search &&
-             sync_controller_.next_expected_frame_sample_valid_ &&
-             sync_controller_.next_expected_frame_sample_ > short_reanchor_lead_samples)
-                ? sync_controller_.next_expected_frame_sample_ - short_reanchor_lead_samples
-                : sync_controller_.next_expected_frame_sample_;
-
-        auto warm_plan = arrival_policy::planWarmSearchWindow(
+        // §7.4 chunk-B tail: the warm-window PLANNING decision (s16 skip-short-lead +
+        // expected search anchor + planWarmSearchWindow + short-reanchor-lead adjustment)
+        // now lives on the controller, which owns the warm-sync state it reads. The decoder
+        // still owns the ring buffer — it derived oldest_abs / correlation_abs above and does
+        // the wait / activate / extraction below from the returned plan.
+        auto warm_plan = sync_controller_.planWarmSearch(
             use_light_search,
-            sync_controller_.warm_sync_active_,
-            sync_controller_.next_expected_frame_sample_valid_,
-            expected_sync_search_sample,
-            sync_controller_.frame_arrival_confidence_,
-            sync_controller_.consecutive_sync_misses_,
-            sync_controller_.warm_sync_phase_,
+            use_short_reanchor_search,
+            short_reanchor_lead_samples,
             total_fed_,
             oldest_abs,
             search_floor_abs_valid_,
@@ -310,13 +285,6 @@ void StreamingDecoder::searchForSync() {
             correlation_abs,
             data_symbol_samples,
             CORRELATION_STEP);
-
-        if (use_short_reanchor_search &&
-            short_reanchor_lead_samples > 0 &&
-            (warm_plan.active || warm_plan.wait_for_more_samples)) {
-            warm_plan.search_size_samples += short_reanchor_lead_samples;
-            warm_plan.search_end_abs += short_reanchor_lead_samples;
-        }
 
         if (warm_plan.wait_for_more_samples) {
             static int warm_wait_count = 0;
