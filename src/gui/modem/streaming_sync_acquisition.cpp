@@ -690,6 +690,40 @@ void StreamingDecoder::searchForSync() {
                               static_cast<unsigned long long>(sync_decision.next_reject_streak));
                 }
             }
+
+            // §16.8 WARM position-gating (low-SNR fix, 2026-05-31 — see
+            // docs/SYNC_ACQUISITION_FIX_PLAN_2026_05_31.md). At low SNR the warm light-LTS
+            // correlation floors at NOISE (~0.15 measured at DQPSK R1/4 AWGN@10), so the frame is
+            // UNFINDABLE by search and the normal gate rejects it — even though the cadence
+            // prediction is correct (descriptor-seeded, contiguous frames) and the data decodes
+            // (legacy: 776 CW on the same signal). The audit §9.7 fix: in WARM with the narrow
+            // predicted window, do NOT gate on LTS correlation — PROCESS at the predicted position
+            // and let LDPC be the acceptance decision (the LTS there still gives the channel
+            // estimate H). detectDataSync's reported position is noise here, so we use
+            // next_expected. Engages ONLY when the normal correlation path already failed, so
+            // higher-SNR locks (which find the true peak) are byte-identical. On a misprediction
+            // the frame's LDPC simply fails → existing NACK / §16.4 full-chirp escalation handles
+            // it. Flag-gated by ULTRA_S16_WARM_HANDOFF.
+            if (s16_warm_handoff && !sync_decision.found &&
+                warm_sync_phase_ == arrival_policy::WarmSyncPhase::WARM &&
+                light_sync_thresholds.narrow_expected_window &&
+                next_expected_frame_sample_valid_ &&
+                next_expected_frame_sample_ >= search_start &&
+                (next_expected_frame_sample_ - search_start) < search_buffer.size()) {
+                sync_result.start_sample =
+                    static_cast<int>(next_expected_frame_sample_ - search_start);
+                sync_result.cfo_hz = known_cfo;
+                sync_result.correlation = 0.0f;  // position-gated, not correlation-found
+                sync_decision.found = true;
+                sync_decision.rejected = false;
+                sync_decision.next_reject_streak = 0;
+                LOG_MODEM(INFO,
+                    "[%s] WARM position-gated: processing predicted frame at abs=%llu "
+                    "(light-LTS corr below noise floor; cadence-located, LDPC validates)",
+                    log_prefix_.c_str(),
+                    static_cast<unsigned long long>(next_expected_frame_sample_));
+            }
+
             found = sync_decision.found;
             sync_reject_streak_ = sync_decision.next_reject_streak;
 

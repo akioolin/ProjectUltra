@@ -34,6 +34,14 @@ decodes **776 codewords** and delivers. The data was always fine — the doorman
   *acquisition decision*. Acceptance confidence = (fresh anchor) + (position match) + (downstream
   **LDPC**), NOT LTS correlation. The correlation gate applies only to COLD / RE_ACQUIRE.
 
+- **CRITICAL CONSTRAINT (measured 2026-05-31, AWGN@10 DQPSK R1/4):** the warm light-LTS correlation
+  there is **0.15–0.16 — the noise floor** (`DATA sync rejected (corr=0.16 < 0.52)`), not a dipped
+  0.55. So the fix **cannot** be "lower the threshold" (0.15 *is* noise → accept-everywhere). The LTS
+  is still usable for H once positioned (legacy decoded 776 CW on the same signal), but its
+  correlation peak is **unfindable by search**. The frame must be located **entirely by the cadence
+  prediction**, then demod+LDPC. This makes **Phase A (accurate cadence) load-bearing** — WARM
+  processes at `next_expected` with NO correlation search at all, not a relaxed one.
+
 ## 3. Path ownership — VERIFIED in code (2026-05-31)
 
 | Waveform | Connected-data sync path | Affected? |
@@ -194,3 +202,37 @@ dual-listen (path 4).
 
 Net: a smeared 4-layer, 6-entry, 12-variable sprawl → **one `SyncController`, 3 states, 2 detectors,
 1 rulebook** — with the low-SNR bug fixed by construction inside it.
+
+---
+
+## 8. Status (2026-05-31) — sync fix landed; the remaining blocker is a SEPARATE z-state bug
+
+**Sync position-gating fix DONE** (`streaming_sync_acquisition.cpp`, behind `ULTRA_S16_WARM_HANDOFF`):
+in WARM, at the predicted position, accept + process even when the light-LTS correlation is at the
+noise floor (~0.15 at DQPSK R1/4 AWGN@10) — don't gate on correlation, let LDPC decide. Verified:
+AWGN@10 now **syncs at the predicted spot → demods real data → reaches LDPC → assembles the 6-frame
+group** (was: never even attempted the data, stuck in chirp search). The sync layer is no longer the
+wall.
+
+**REMAINING BLOCKER — a separate, deeper z-state desync bug (the burst group decodes 0/6,
+`max_iters=0`):** the per-group `setActiveLDPCLiftingZ(27)` reset
+(`streaming_burst_interleave.cpp:734`, added only to size the *next* 1-CW z=27 BURST_HEADER search)
+toggles the demod's `active_ldpc_block_size` back to 648. So the demod populates `soft_bits_` at
+**z=27 (1296 = 2×648)** while the data is **z=81 (3888 = 2×1944)** → wrong-length codewords → LDPC
+bails instantly → `0/6`. Measured smoking gun: descriptor sets z=81, `processPresynced` reads
+`need 1944`, yet `getSoftBits` yields `1296`. There are **≥3 z-state copies** (`ldpc_lifting_z_`,
+demod `active_ldpc_block_size`, the interleaver size) set/reset from scattered sites.
+
+**Why coherent QPSK R3/4 AWGN@20 works:** it delivers every group fast and never desyncs the toggle.
+
+**The fix (user's model — proven correct):** z=81 is a **FILE-TRANSFER mode** that persists for the
+whole transfer; the reset to z=27 belongs at **transfer-end**, not group-end. Decouple the two uses:
+the descriptor *search* uses a **fixed-local z=27** (the next BURST_HEADER is always 1-CW z=27 — a
+constant, not a toggled variable); the **data** uses the descriptor's declared z=81 for the whole
+transfer. Must touch the demod's `active_ldpc_block_size` **lifecycle** (establish z=81 BEFORE the
+data demod and hold it through the group) — a patch at the soft-bit *extraction* point was
+insufficient because the buffer is already built at the wrong z during `process()`.
+
+**Next task:** the file-transfer-z-mode decoupling above. Well-specified, single-purpose. The
+SyncController scaffold (commit `4061f44`) is the eventual home for the consolidated z-state, but the
+decoupling can land first as a targeted fix.
