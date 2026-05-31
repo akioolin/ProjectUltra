@@ -223,6 +223,36 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 - Next steps:
   - Implement and validate two-stage CFO refinement with seeded regression + OTA logs.
 
+### BUG-TEARDOWN-001: RX decode thread UAF crash on disconnect/shutdown (SIGSEGV in HilbertTransform::process)
+- Status: OPEN (surfaced 2026-05-31; PRE-EXISTING — identical faulting stack in crash
+  reports from 2026-05-28, predating the SyncController work).
+- Symptom: `ultra_gui` (receiver side) SIGSEGVs at end-of-transfer / disconnect / shutdown.
+  EXC_BAD_ACCESS / KERN_INVALID_ADDRESS. Faulting thread = the RX decode thread:
+  `HilbertTransform::process` ← `OFDMChirpWaveform::detectDataSync` ← `StreamingDecoder::
+  searchForSync` ← `processBuffer` ← `ModemEngine::rxDecodeLoop`. The receiver's log ends
+  abruptly right after `Disconnected ... (Remote disconnected)` + `SR-ARQ: Reset`, with NO
+  `RX decode thread stopped` line (cf. the sender, which tears down cleanly).
+- Does NOT corrupt results: the file delivers CRC-clean BEFORE teardown (e.g. QPSK R1/4
+  AWGN@10 seed42 → RESULT=PASS, GOODPUT=380, 0 retx, then crash on teardown).
+- Root cause (hypothesis, high-confidence): the disconnect path reconfigures the OFDM
+  waveform (control thread) while the RX decode thread is concurrently inside
+  `detectDataSync`/`HilbertTransform::process`, freeing/resizing the Hilbert buffers
+  underneath it → use-after-free. The §14.36 "crash fix v3" (`applyPendingConnectedOFDMMode`)
+  deferred only CONNECTED-mode reconstruction to a safe boundary in the RX loop; the
+  DISCONNECT/shutdown reconfig is NOT synchronized with the RX thread. `stopRxDecodeThread()`
+  sets `rx_decode_running_=false` + `streaming_decoder_->stop()` then `join()`s, but the
+  waveform reconfig races the still-running `detectDataSync` before the join lands.
+- Why it matters for the SyncController refactor: this is exactly the §7.7#4 lifecycle-
+  discipline scope the refactor must own. It also POLLUTES the GUI gate's crash signal —
+  every gate run crashes at teardown, so a refactor-introduced crash can't be cleanly
+  distinguished from this one. Fixing it first gives the behavioral phase a clean crash
+  baseline.
+- Fix direction: synchronize disconnect/shutdown waveform reconfig with the RX thread —
+  either stop+join (or quiesce under `reset_generation_` + `buffer_mutex_`) BEFORE the
+  waveform/HilbertTransform is reconfigured on disconnect, or route the disconnect reconfig
+  through the same deferred safe-boundary the connected path uses. Fold into the
+  SyncController lifecycle ownership (`reset()` discipline).
+
 ## Release Blockers
 
 An issue is release-blocking if it causes any of:

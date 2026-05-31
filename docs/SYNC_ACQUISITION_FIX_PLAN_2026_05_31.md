@@ -388,3 +388,28 @@ AWGN@10 + Good@10 (see `docs/BURST_Z_LDPC_LIFECYCLE_2026_05_31.md` for the full 
 **Corrected next step:** the `z`-state is still scattered (≥3 copies; only `active_ldpc_block_size`
 is not yet driven by the `activeBurstLiftingZ()` source-of-truth — §1 of the lifecycle doc). That
 consolidation belongs in the SyncController refactor, NOT as a "persist z=81" point patch.
+
+---
+
+## ⚠️ CORRECTION (2026-05-31, post-A3) — the floor-probe gate is COHERENT now, not DQPSK
+
+§5 and §8 specify the floor probe as **DQPSK R1/4 AWGN@10** (`ULTRA_FORCE_DATA_MOD=DQPSK`). That
+predates thread **A (coherent-only OFDM, `OFDM_COHERENT_ONLY_DECISION_2026_05_31.md`)**, which retired
+differential-OFDM and made `isSupportedChirpModulation` REJECT differential → fall back to QPSK. Forcing
+`ULTRA_FORCE_DATA_MOD=DQPSK` on `OFDM_CHIRP` now yields a **self-contradictory config** (PHY runs coherent
+QPSK while the mode label still says DQPSK) — a meaningless test. The 776-CW legacy evidence was
+DQPSK-specific and is historical.
+
+**Corrected Phase B floor gate: `QPSK R1/4 AWGN@10` must DELIVER** (`ULTRA_FORCE_WAVEFORM=OFDM_CHIRP
+ULTRA_FORCE_DATA_MOD=QPSK ULTRA_FORCE_DATA_RATE=R1_4 ... --expect-mod QPSK --expect-rate R1/4`). Two
+harness notes: (1) pass `--expect-mod/--expect-rate` matching the forced rung or `scenario_passed()` fails
+on `mode_count` even when the file delivers CRC-clean; (2) run ONE scenario (=2 GUIs) at a time, never
+concurrent — 4 GUIs trip the OTASim clock-drift stale-drop and distort fidelity.
+
+**Also note (status reconciliation):** the WARM position+LDPC acceptance §8 describes ALREADY LANDED
+behind `ULTRA_S16_WARM_HANDOFF`. So Phase B's remaining work is **consolidation** — relocating that
+working logic into the controller's `detect()`/`reportFrameOutcome()` + the 4→3 `SyncMode` collapse —
+preserving behavior, not inventing the fix. The 4→3 collapse is NOT mechanical: the s16 overrides gate on
+`warm_sync_phase_==WARM` (false in DEGRADED), and DEGRADED's wide-window is load-bearing Good@20 hysteresis
+(`streaming_frame_arrival_policy.hpp:18-30`). Map DEGRADED→WARM-with-derived-wide-window and
+RECOVERY→RE_ACQUIRE, preserving the 2/4 miss thresholds exactly.

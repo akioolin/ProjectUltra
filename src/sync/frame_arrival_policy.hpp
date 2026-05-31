@@ -1,13 +1,23 @@
 #pragma once
 
+// Frame-arrival / warm-sync timing policy — PURE helpers (no I/O, no gui deps).
+//
+// Relocated 2026-05-31 from src/gui/modem/streaming_frame_arrival_policy.hpp into src/sync as
+// part of the SyncController refactor (docs/SYNC_ACQUISITION_FIX_PLAN_2026_05_31.md §7.4): this is
+// sync logic, and it must be reachable from src/sync/sync_controller.{hpp,cpp} (which cannot include
+// gui/modem). The content is byte-identical to the old gui header; only the namespace/location moved
+// (ultra::gui::streaming_frame_arrival_policy -> ultra::sync::frame_arrival_policy). The gui call
+// sites keep their `namespace arrival_policy = sync::frame_arrival_policy;` alias, so the ~50
+// `arrival_policy::` use-sites are unchanged.
+
 #include <algorithm>
 #include <cstdint>
 #include <cstddef>
 #include <limits>
 
 namespace ultra {
-namespace gui {
-namespace streaming_frame_arrival_policy {
+namespace sync {
+namespace frame_arrival_policy {
 
 static constexpr size_t kSampleRateHz = 48000;
 static constexpr size_t kDefaultTightWindowSamples = kSampleRateHz / 50; // 20 ms
@@ -224,6 +234,6 @@ inline WarmSearchWindowPlan planWarmSearchWindow(
     return plan;
 }
 
-}  // namespace streaming_frame_arrival_policy
-}  // namespace gui
+}  // namespace frame_arrival_policy
+}  // namespace sync
 }  // namespace ultra

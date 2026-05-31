@@ -42,7 +42,7 @@
 #include "ultra/fec.hpp"
 #include "fec/codec_factory.hpp"  // ICodec for FEC decoding
 #include "fec/soft_combine.hpp"
-#include "streaming_frame_arrival_policy.hpp"
+#include "sync/frame_arrival_policy.hpp"
 #include "sync/sync_controller.hpp"   // SyncController — sync/z state owner (refactor §7)
 #include <vector>
 #include <queue>
@@ -372,8 +372,8 @@ public:
 
     struct FrameArrivalSnapshot {
         bool warm_sync_active = false;
-        streaming_frame_arrival_policy::WarmSyncPhase warm_sync_phase =
-            streaming_frame_arrival_policy::WarmSyncPhase::COLD;
+        sync::frame_arrival_policy::WarmSyncPhase warm_sync_phase =
+            sync::frame_arrival_policy::WarmSyncPhase::COLD;
         bool has_prediction = false;
         size_t next_expected_frame_sample = 0;
         float frame_arrival_confidence = 0.0f;
@@ -630,8 +630,8 @@ private:
     bool adaptive_short_data_preamble_ = false;
     bool sync_from_warm_timed_window_ = false;
     bool sync_from_full_anchor_fallback_ = false;
-    streaming_frame_arrival_policy::WarmSyncPhase warm_sync_phase_ =
-        streaming_frame_arrival_policy::WarmSyncPhase::COLD;
+    sync::frame_arrival_policy::WarmSyncPhase warm_sync_phase_ =
+        sync::frame_arrival_policy::WarmSyncPhase::COLD;
     bool last_frame_arrival_valid_ = false;
     size_t last_frame_start_sample_ = 0;
     size_t last_frame_end_sample_ = 0;

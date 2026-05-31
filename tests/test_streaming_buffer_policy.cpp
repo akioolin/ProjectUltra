@@ -1,11 +1,11 @@
 #include "gui/modem/streaming_buffer_policy.hpp"
-#include "gui/modem/streaming_frame_arrival_policy.hpp"
+#include "sync/frame_arrival_policy.hpp"
 
 #include <cmath>
 #include <iostream>
 
 using namespace ultra::gui::streaming_buffer_policy;
-namespace arrival_policy = ultra::gui::streaming_frame_arrival_policy;
+namespace arrival_policy = ultra::sync::frame_arrival_policy;
 
 namespace {
 
