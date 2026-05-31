@@ -17,7 +17,7 @@ cmake -S "$REPO_ROOT" -B "$BUILD_DIR" \
 
 cmake --build "$BUILD_DIR" --parallel "$(sysctl -n hw.ncpu)" --target \
   ultra ultra_tnc ultra_gui \
-  cli_simulator threaded_simulator test_waveform_simple decode_bench session_decode
+  ota_simulator measure_ack_fer
 
 "$SCRIPT_DIR/package_operator_bundle.sh" "$BUILD_DIR" macos "dist/macos"
 

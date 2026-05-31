@@ -294,18 +294,18 @@ These are wrong in the current top-level docs and should be fixed:
   `recommendedPilotSpacing(mod,rate)`.
 - **SC-DPSK** is listed in the CLAUDE.md waveform table but is not an `IWaveform` and not in the
   factory.
-- **`DecodeBenchReplay` (CTest #97) is RED on HEAD** (2026-05-30): `frames_decoded=0` on *every*
-  fixture incl. the clean DQPSK one — the `decode_bench` replay tool never enters the 4-CW data
-  path (`decode_fixed_frame_total (0 calls)`), only control 1-CW. **Production decode is healthy**
-  (`cli_simulator` AWGN R1/4 = TEST PASSED, 7/7, `decode_fixed_frame_total n=16`), so this is a
-  **stale/divergent harness, not a production regression** — the `decode_bench` replay path has
-  drifted from the live streaming decoder. So CLAUDE.md's "OFDM_CHIRP R1/4 Good 15 dB **locked in
-  DecodeBenchReplay**" floor claim is currently UNBACKED by that test. Fate: either repair the
-  bench replay path to match the production decoder, or retire it in favor of the
-  `tools/gui_qso_scenario.sh` floor gate (the trusted path). Tracked as cleanup, not a PHY bug.
+- **`decode_bench` + `DecodeBenchReplay` RETIRED 2026-05-30** (commit pending): the headless
+  WAV-fixture A/B tool + its replay CTest are gone, along with the 6 `fixtures/ofdm_chirp_*dqpsk*.wav`
+  fixtures. The replay path had drifted from the live streaming decoder (`frames_decoded=0` on
+  *every* fixture — it never entered the 4-CW data path) and all testing is now done on
+  `tools/gui_qso_scenario.sh` (live GUI feedback), the trusted floor gate. Consequence: the old
+  "OFDM_CHIRP R1/4 Good 15 dB **locked in DecodeBenchReplay**" floor claim is now UNBACKED —
+  re-establish that floor on the GUI gate during the ladder rework. (`fixtures/ota_test_r14_15s.wav`,
+  a self-contained manual OTA listening fixture, survives.)
 - **`cli_simulator` + `test_waveform_simple` + `SimulatedStation` RETIRED 2026-05-30** (commit
   `207a0af`, ~14k lines). They were a divergent TX wrapper around the shared StreamingEncoder/
   Decoder PHY; the GUI's `ModemEngine` path is the production wrapper and `tools/gui_qso_scenario.sh`
-  is now THE faithful full-protocol + fade/throughput gate. `measure_ack_fer`/`ota_simulator serve`/
-  `decode_bench` survive (the `ultra_sim_station` lib was un-bundled — it had glued SimulatedStation
-  to the PHY sources). Historical `cli_simulator` proof-notes above are kept as record.
+  is now THE faithful full-protocol + fade/throughput gate. `measure_ack_fer`/`ota_simulator serve`
+  survive (the `ultra_sim_station` lib was un-bundled — it had glued SimulatedStation to the PHY
+  sources; `decode_bench` later retired 2026-05-30, see above). Historical `cli_simulator`
+  proof-notes above are kept as record.

@@ -523,13 +523,8 @@ target_link_libraries(test_streaming_decoder_tone_burst_monitor PRIVATE
 add_test(NAME StreamingDecoderToneBurstMonitor
          COMMAND test_streaming_decoder_tone_burst_monitor)
 
-if(TARGET decode_bench)
-    add_executable(test_decode_bench_replay test_decode_bench_replay.cpp)
-    add_test(NAME DecodeBenchReplay
-        COMMAND test_decode_bench_replay $<TARGET_FILE:decode_bench> ${CMAKE_SOURCE_DIR})
-else()
-    message(STATUS "DecodeBenchReplay disabled: decode_bench target is not built")
-endif()
+# (DecodeBenchReplay + test_decode_bench_replay retired 2026-05-30 with the
+# decode_bench tool — headless WAV-fixture replay superseded by GUI testing.)
 
 if(TARGET ota_simulator)
     add_test(NAME OtasimServeSmoke
@@ -713,5 +708,4 @@ ultra_enable_test_warnings(
     test_modem_snr_meter_calibration.cpp
     test_idle_noise_snr_calibration.cpp
     ../tools/test_throughput.cpp
-    test_decode_bench_replay.cpp
 )

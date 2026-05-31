@@ -651,9 +651,8 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             modem_.setDataMode(mod, rate);
             modem_.setWaveformMode(wf);
             modem_.setConnected(true);  // forces decoder into connected OFDM data path
-            // Match what cli_simulator + decode_bench do post-handshake:
-            // OFDM data frames are fixed 4-CW. Without this the decoder
-            // treats incoming as 1-CW control frames and falsely rejects
+            // Post-handshake, OFDM data frames are fixed 4-CW. Without this the
+            // decoder treats incoming as 1-CW control frames and falsely rejects
             // the data symbols past the first ~9 OFDM symbols as noise.
             modem_.setFixedFrameCodewords(4);
             appendRxLogLine("[monitor] " + options_.monitor_mode + " forced; "

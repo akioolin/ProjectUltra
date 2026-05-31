@@ -49,7 +49,7 @@ Interpretation of the 2026-04-29 robustness work:
 | MC-DPSK R1/4 | AWGN | **5 dB** | 3/3 seeds cli_simulator + OTASim fixture `OTASimulatorTwoEndpointMCDPSKLowSNR` |
 | MC-DPSK R1/4 | Moderate fading | 19.6 | pre-audit, not re-measured |
 | OFDM_CHIRP R1/4 | AWGN | **10 dB** | warm-sync LTS FER: 4.875% @10 (n=800), 0.167% @12 (n=600), 0% @14-20 |
-| OFDM_CHIRP R1/4 | Good fading | **15 dB** | 3/3 seeds cli_simulator + `DecodeBenchReplay` fixture |
+| OFDM_CHIRP R1/4 | Good fading | **15 dB** | historical: 3/3 seeds cli_simulator + DecodeBenchReplay fixture — **both retired**; re-establish on `gui_qso_scenario.sh` during the ladder rework |
 | OFDM_CHIRP R1/4 | Moderate fading | **15 dB** | 1-seed OTASim (Mod ≈ Good at this rate — FEC absorbs the difference) |
 | OFDM_CHIRP R1/2 | AWGN | **14 dB** | 1-seed OTASim (boundary, ~40 retx but ARQ recovers) |
 | OFDM_CHIRP R1/2 | Good fading | **14 dB** | 1-seed OTASim |
@@ -84,7 +84,7 @@ server, walking SNR down to a `TEST FAILED` cell.
 ### Floor moves from the 2026-05-19 audit + 2026-05-20 warm-sync LTS work
 
 - MC-DPSK R1/4 AWGN: 18 → **5 dB**; OFDM R1/4 AWGN: 18 → **10 dB**
-- OFDM R1/4 Good: 18 → **15 dB** (locked in DecodeBenchReplay); Moderate: 24.6 → **15 dB** (1-seed)
+- OFDM R1/4 Good: 18 → **15 dB** (was locked in DecodeBenchReplay — now retired, re-establish on GUI gate); Moderate: 24.6 → **15 dB** (1-seed)
 - OFDM R1/2 AWGN: 24.6 → **14 dB** (1-seed); Good: 24.6 → **14 dB** (1-seed); Moderate: 24.6 → **18-22 dB** (1-seed, unrefined)
 
 Verification (2026-05-19): `ctest` 86/86 PASS; multi-seed cli_simulator 9/9 PASS

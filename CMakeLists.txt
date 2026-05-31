@@ -654,19 +654,8 @@ if(ULTRA_BUILD_TOOLS)
         message(STATUS "ultra_tnc disabled: SDL2 not found")
     endif()
 
-    # Decode bench - generate + decode deterministic WAV fixtures so
-    # AI agents and humans can A/B decoder changes against bit-identical
-    # input. No SDL, no real-time pacing, runs as fast as possible.
-    add_executable(decode_bench
-        tools/decode_bench.cpp
-        ${ULTRA_STREAMING_MODEM_SOURCES}
-    )
-    ultra_enable_tool_test_warnings(tools/decode_bench.cpp)
-    target_include_directories(decode_bench PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/tools
-    )
-    target_link_libraries(decode_bench PRIVATE ultra_tool_wav_io ota_channel_core)
+    # (decode_bench retired 2026-05-30 — headless WAV-fixture A/B superseded by
+    # GUI live-feedback testing; its DecodeBenchReplay CTest had drifted RED.)
 
     # otasim_audio_demo - generates a ~60s WAV of channel-model audio
     # for human listening (sanity check / iCloud sample).

@@ -53,7 +53,6 @@ results; see docs/CHANGELOG.md):
   → reads `summary.env` (`RESULT=PASS`, `FILE_CRC_OK_COUNT`, `GOODPUT_BPS`). Run in background.
 - `ctest --test-dir build --output-on-failure -j4` — unit/regression gate (the real PHY,
   not a divergent harness); `tests/regression_matrix.sh` wraps it.
-- `decode_bench` — fast headless WAV-fixture decode A/B (no real-time pacing).
 - `measure_ack_fer` — ACK/FER measurement (drives the real StreamingEncoder/Decoder).
 - **ALWAYS `| tee /tmp/...log`** — runs take minutes; full output needed for debugging.
 
@@ -312,7 +311,6 @@ mkdir build && cd build && cmake .. && make -j4
 | Tool | Purpose | Example |
 |------|---------|---------|
 | `tools/gui_qso_scenario.sh` | **PRIMARY** full protocol + **faithful fade/throughput gate** (two real GUI stations) | `tools/gui_qso_scenario.sh --channel good --snr-db 20 --seed 42 --file-kb 21 --out /tmp/X` |
-| `decode_bench` | fast headless WAV-fixture decode A/B | `./build/decode_bench ...` |
 | `measure_ack_fer` | ACK/FER measurement (real StreamingEncoder/Decoder) | `./build/measure_ack_fer ...` |
 | `tests/regression_matrix.sh` | CTest wrapper | `./tests/regression_matrix.sh --quick` |
 
@@ -328,7 +326,7 @@ src/fec/         LDPC encoder/decoder
 src/protocol/    Protocol v2 (PING/CONNECT/DATA/DISCONNECT), waveform selection
 src/sync/        ChirpSync, Schmidl-Cox sync
 src/waveform/    IWaveform interface + implementations
-tools/           gui_qso_scenario.sh (faithful gate), decode_bench, measure_ack_fer, ota_simulator
+tools/           gui_qso_scenario.sh (faithful gate), measure_ack_fer, ota_simulator
 ```
 Key files: `src/sync/chirp_sync.hpp` (dual-chirp detect + CFO), `src/gui/modem/modem_rx_decode.cpp` (RX decode), `src/psk/multi_carrier_dpsk.hpp` (MC-DPSK), `src/ofdm/channel_equalizer_pilot.cpp` + `channel_equalizer_equalize.cpp` (pilot tracking + DD).
 

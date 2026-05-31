@@ -91,8 +91,7 @@ make -j4
 ### Unit/Integration Test Targets (`tests/`)
 
 `tests/CMakeLists.txt` defines the maintained CTest targets, including
-the `Throughput` target backed by `tools/test_throughput.cpp` and
-`DecodeBenchReplay` for committed `decode_bench` WAV fixtures.
+the `Throughput` target backed by `tools/test_throughput.cpp`.
 
 Run all registered tests:
 

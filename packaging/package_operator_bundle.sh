@@ -153,11 +153,8 @@ require_binary ultra_tnc "$operator_root"
 require_binary ultra_gui "$operator_root"
 require_binary ultra_report "$operator_root"
 
-optional_binary cli_simulator "$dev_root"
-optional_binary threaded_simulator "$dev_root"
-optional_binary test_waveform_simple "$dev_root"
-optional_binary decode_bench "$dev_root"
-optional_binary session_decode "$dev_root"
+optional_binary ota_simulator "$dev_root"
+optional_binary measure_ack_fer "$dev_root"
 optional_binary ultra_replay "$dev_root"
 
 if ! compgen -G "$dev_root/*" >/dev/null; then
@@ -300,11 +297,8 @@ This artifact is for simulation, bench, and decode diagnostics. It is not the
 default operator download.
 
 Included developer programs (when built):
-- cli_simulator       Two-station modem regression harness
-- threaded_simulator  Threaded variant for stress testing
-- test_waveform_simple  Single-frame waveform sanity check
-- decode_bench        Decode benchmarking
-- session_decode      Single-mode WAV replay through StreamingDecoder
+- ota_simulator       Over-the-air channel simulator (serve + scenarios)
+- measure_ack_fer     ACK/FER measurement over the real StreamingEncoder/Decoder
 - ultra_replay        Event-aware bundle replay + divergence report
                       (consumes report.zip emailed by an operator;
                        replays audio against the live JSONL timeline

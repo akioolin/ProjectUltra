@@ -10,6 +10,40 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-30: Retire the decode_bench tool + DecodeBenchReplay (superseded by GUI testing)
+
+**What changed:** removed `tools/decode_bench.cpp` (headless WAV-fixture A/B decoder), the
+`DecodeBenchReplay` CTest + `tests/test_decode_bench_replay.cpp`, and the 6 decode_bench replay
+fixtures (`fixtures/ofdm_chirp_*dqpsk*.wav`). CMake targets dropped from `CMakeLists.txt` +
+`tests/CMakeLists.txt` (incl. the `ultra_enable_test_warnings` source list).
+
+**Why:** all decoder testing is now done on the live GUI path (`tools/gui_qso_scenario.sh`, two
+real `ultra_gui -sim` stations over `ota_simulator serve`) for real-time feedback. The
+`DecodeBenchReplay` replay path had **drifted from the live streaming decoder** (`frames_decoded=0`
+on every fixture — it never entered the 4-CW data path) and was pre-existing RED; keeping a stale
+divergent harness around is exactly the trap the cli_simulator retirement removed. Its
+"OFDM_CHIRP R1/4 Good **15 dB locked in DecodeBenchReplay**" floor claim is now UNBACKED —
+flagged in PERFORMANCE_HISTORY + the infra map to re-establish on the GUI gate during the ladder
+rework.
+
+**Also fixed (stale since the cli_simulator retirement):** `packaging/package_macos.sh` and
+`package_linux.sh` hard-built `--target cli_simulator threaded_simulator test_waveform_simple
+decode_bench session_decode` — **all retired targets**, so those packaging builds would have
+*failed*. Replaced with the surviving lab tools (`ota_simulator`, `measure_ack_fer`).
+`package_operator_bundle.sh` optional-binary list + manifest text updated to match. Kept
+`fixtures/ota_test_r14_15s.wav` (self-contained manual/OTA listening fixture); rewrote
+`fixtures/README.md` to decode via the GUI / `ultra prx` instead of decode_bench.
+
+**Doc sweep:** CLAUDE.md (tool table + tools/ list), README, docs/README, BUILD_SYSTEM,
+RESOURCE_MANIFEST, PERFORMANCE_HISTORY, MODEM_INFRASTRUCTURE_MAP §8, and a stale
+`app.cpp` comment that referenced cli_simulator/decode_bench. Dated audit/investigation docs
+(CALIBRATION_AUDIT, RATE_LADDER_INVESTIGATION, QAM16_*) left as historical records.
+
+**Verification:** build clean without decode_bench; `DecodeBenchReplay` no longer in CTest
+(`grep -c DecodeBenchReplay build/**/CTestTestfile.cmake` = 0).
+
+---
+
 ## 2026-05-30: Mark off the TNC tests (pending TNC→OTASim rework) + triage the remaining ctest reds
 
 **What changed:** `TNCSession` and `UltraTncSimAudio` are marked `DISABLED TRUE` in

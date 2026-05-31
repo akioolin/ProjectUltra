@@ -19,8 +19,8 @@ operator path is:
   waterfall, constellation, message log, and ARQ health view.
 
 The same repo also contains the modem core and diagnostic / lab tools
-(`cli_simulator`, `decode_bench`, `session_decode`, raw frame CLI). Those are
-for validation, profiling, replay, and development; they are not the first-run
+(`ota_simulator`, `measure_ack_fer`, `tools/gui_qso_scenario.sh`, raw frame CLI).
+Those are for validation, profiling, and development; they are not the first-run
 operator path.
 
 [![Build Matrix](https://github.com/secup/ProjectUltra/actions/workflows/build-matrix.yml/badge.svg?branch=main)](https://github.com/secup/ProjectUltra/actions/workflows/build-matrix.yml)
@@ -472,10 +472,9 @@ cmake --build build -j 4
 ctest --test-dir build --output-on-failure -j 4
 ```
 
-38 tests covering modem primitives, protocol/ARQ, TNC parser, TNC TCP
-reactor, TNC bridge, and deterministic `decode_bench` replay fixtures.
-CI runs the full matrix on Linux + macOS + Windows with ASAN/UBSAN and
-coverage gates.
+The suite covers modem primitives, protocol/ARQ, TNC parser, TNC TCP
+reactor, and TNC bridge. CI runs the full matrix on Linux + macOS + Windows
+with ASAN/UBSAN and coverage gates.
 
 Hardware smoke remains opt-in. Configure with either
 `ULTRA_HARDWARE_TESTS=1 cmake -S . -B build-hw` or

@@ -21,7 +21,6 @@ cites an archived file.
 ## Diagnostic / Lab Tools
 
 - `tools/gui_qso_scenario.sh`: **faithful full-protocol + fade/throughput gate** (two real `ultra_gui -sim` stations over `ota_simulator serve`).
-- `tools/decode_bench.cpp`: Deterministic fixture generation/replay for decoder regressions.
 - `tools/measure_ack_fer.cpp`: ACK/FER measurement over the real StreamingEncoder/Decoder.
 - `ultra ptx/prx`: raw waveform/frame diagnostics.
 
