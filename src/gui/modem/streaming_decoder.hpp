@@ -630,7 +630,6 @@ private:
     bool adaptive_short_data_preamble_ = false;
     bool sync_from_warm_timed_window_ = false;
     bool sync_from_full_anchor_fallback_ = false;
-    bool warm_sync_active_ = false;
     streaming_frame_arrival_policy::WarmSyncPhase warm_sync_phase_ =
         streaming_frame_arrival_policy::WarmSyncPhase::COLD;
     bool last_frame_arrival_valid_ = false;

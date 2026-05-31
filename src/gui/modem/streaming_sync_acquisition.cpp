@@ -297,7 +297,7 @@ void StreamingDecoder::searchForSync() {
 
         auto warm_plan = arrival_policy::planWarmSearchWindow(
             use_light_search,
-            warm_sync_active_,
+            sync_controller_.warm_sync_active_,
             sync_controller_.next_expected_frame_sample_valid_,
             expected_sync_search_sample,
             sync_controller_.frame_arrival_confidence_,
@@ -365,7 +365,7 @@ void StreamingDecoder::searchForSync() {
                     warm_plan.wait_for_more_samples ? 1 : 0,
                     warm_plan.lower_threshold ? 1 : 0,
                     arrival_policy::warmSyncPhaseName(warm_sync_phase_),
-                    warm_sync_active_ ? 1 : 0,
+                    sync_controller_.warm_sync_active_ ? 1 : 0,
                     sync_controller_.next_expected_frame_sample_valid_ ? 1 : 0,
                     static_cast<unsigned long long>(sync_controller_.next_expected_frame_sample_),
                     sync_controller_.frame_arrival_confidence_,

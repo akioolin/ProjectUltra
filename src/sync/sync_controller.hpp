@@ -105,6 +105,8 @@ public:
     size_t   expected_frame_gap_samples_ = 0;        // cadence gap (§1.2 never-set bug)
     bool     expect_full_ofdm_anchor_ = false;       // force a full chirp on the next anchor
                                                      // (the 11-flip flag; becomes SyncMode in Phase D)
+    bool     warm_sync_active_ = false;              // in the warm (locked+predicting) regime
+                                                     // (collapses into SyncMode::WARM in Phase D)
     // CFO acquisition state (§7.7#1). ATOMIC — touched by RX + control threads; the
     // CFO feedback loop (.load()/.store()) routes through here.
     std::atomic<float> last_cfo_{0.0f};

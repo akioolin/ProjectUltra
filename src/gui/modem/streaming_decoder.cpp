@@ -253,7 +253,7 @@ void StreamingDecoder::observeIdleNoiseCandidate(const float* samples, size_t co
 }
 
 void StreamingDecoder::resetFrameArrivalTrackingLocked() {
-    warm_sync_active_ = false;
+    sync_controller_.warm_sync_active_ = false;
     warm_sync_phase_ = arrival_policy::WarmSyncPhase::COLD;
     sync_controller_.next_expected_frame_sample_valid_ = false;
     sync_controller_.next_expected_frame_sample_ = 0;
@@ -293,7 +293,7 @@ void StreamingDecoder::noteFrameArrivalSuccessLocked(size_t frame_start_abs,
         sync_controller_.expectedFrameGapSamples());
 
     sync_controller_.next_expected_frame_sample_valid_ = true;
-    warm_sync_active_ = true;
+    sync_controller_.warm_sync_active_ = true;
     warm_sync_phase_ = arrival_policy::phaseAfterSuccessfulFrame();
     sync_controller_.next_expected_frame_sample_ = update.next_expected_frame_sample;
     sync_controller_.frame_arrival_confidence_ = update.confidence;
@@ -343,7 +343,7 @@ void StreamingDecoder::noteFrameArrivalSyncMissLocked() {
 
     warm_sync_phase_ = arrival_policy::phaseAfterSyncMiss(sync_controller_.consecutive_sync_misses_);
     if (warm_sync_phase_ == arrival_policy::WarmSyncPhase::RECOVERY) {
-        warm_sync_active_ = false;
+        sync_controller_.warm_sync_active_ = false;
         sync_controller_.next_expected_frame_sample_valid_ = false;
         sync_controller_.frame_arrival_confidence_ = 0.0f;
     }
@@ -973,7 +973,7 @@ StreamingDecoder::FrameArrivalSnapshot StreamingDecoder::getFrameArrivalSnapshot
     std::lock_guard<std::mutex> lock(buffer_mutex_);
 
     FrameArrivalSnapshot snapshot;
-    snapshot.warm_sync_active = warm_sync_active_;
+    snapshot.warm_sync_active = sync_controller_.warm_sync_active_;
     snapshot.warm_sync_phase = warm_sync_phase_;
     snapshot.has_prediction = sync_controller_.next_expected_frame_sample_valid_;
     snapshot.next_expected_frame_sample = sync_controller_.next_expected_frame_sample_;
@@ -1001,7 +1001,7 @@ void StreamingDecoder::seedExpectedFrameArrivalAfterSamples(size_t delay_samples
     }
 
     const auto previous_phase = warm_sync_phase_;
-    warm_sync_active_ = true;
+    sync_controller_.warm_sync_active_ = true;
     warm_sync_phase_ = arrival_policy::WarmSyncPhase::WARM;
     sync_controller_.next_expected_frame_sample_valid_ = true;
     sync_controller_.next_expected_frame_sample_ = total_fed_ + delay_samples;
