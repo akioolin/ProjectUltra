@@ -966,10 +966,20 @@ bool OFDMChirpWaveform::process(SampleSpan samples) {
             soft_bits_.insert(soft_bits_.end(), chunk.begin(), chunk.end());
         }
 
-        const size_t codeword_count = soft_bits_.size() / codeword_bits;
+        // CarrierLDPC interleaves in 648-bit AIR-BLOCK units (kLdpcCodewordBits),
+        // NOT LDPC z-codewords. TX computes Ncw = encoded_bytes / 81 (line 393),
+        // so a z=81 (1944-bit) codeword is THREE 648-bit air blocks. RX MUST count
+        // the same way or the de-interleave length + permutation diverge from TX:
+        // z=81 2-CW frame is 3888 air bits = Ncw 6 (NOT 2). The old `/ codeword_bits`
+        // (=1944) gave Ncw 2 → applyCarrierLdpcInverse built out(1296) and dropped
+        // 2/3 of the LLRs with the wrong permutation → z=81 differential data was
+        // silently mangled (coherent QPSK took a different eligibility path and was
+        // unaffected, which is why only differential failed). For z=27 this is
+        // identical to the old value (soft_bits / 648).
+        const size_t codeword_count = soft_bits_.size() / LDPC_CODEWORD_BITS;
         const bool eligible = carrierLdpcPlumbingEligible() &&
             !soft_bits_.empty() &&
-            (soft_bits_.size() % codeword_bits == 0);
+            (soft_bits_.size() % LDPC_CODEWORD_BITS == 0);
         const bool masked_carriers =
             !isAllOnMask(carrier_mask_, CARRIER_LDPC_MASK_CARRIERS);
         const bool carrier_ldpc_active = eligible &&
