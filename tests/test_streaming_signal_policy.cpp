@@ -1,11 +1,11 @@
-#include "gui/modem/streaming_signal_policy.hpp"
+#include "sync/signal_policy.hpp"
 
 #include <cmath>
 #include <iostream>
 #include <limits>
 #include <vector>
 
-using namespace ultra::gui::streaming_signal_policy;
+using namespace ultra::sync::signal_policy;
 
 namespace {
 

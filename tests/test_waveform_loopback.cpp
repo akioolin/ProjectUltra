@@ -1,5 +1,5 @@
 #include "waveform/ofdm_chirp_waveform.hpp"
-#include "gui/modem/streaming_signal_policy.hpp"
+#include "sync/signal_policy.hpp"
 #include "protocol/frame_v2.hpp"
 #include "sim/awgn.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
@@ -12,7 +12,7 @@
 #include <vector>
 
 using namespace ultra;
-namespace signal_policy = ultra::gui::streaming_signal_policy;
+namespace signal_policy = ultra::sync::signal_policy;
 
 namespace {
 

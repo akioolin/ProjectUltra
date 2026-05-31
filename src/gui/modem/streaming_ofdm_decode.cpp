@@ -5,7 +5,7 @@
 #include "streaming_control_profile.hpp"
 #include "streaming_decode_policy.hpp"
 #include "streaming_frame_policy.hpp"
-#include "streaming_signal_policy.hpp"
+#include "sync/signal_policy.hpp"
 #include "gui/startup_trace.hpp"
 #include "waveform/mc_dpsk_waveform.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
@@ -35,7 +35,7 @@ namespace v2 = protocol::v2;
 namespace buffer_policy = streaming_buffer_policy;
 namespace decode_policy = streaming_decode_policy;
 namespace frame_policy = streaming_frame_policy;
-namespace signal_policy = streaming_signal_policy;
+namespace signal_policy = ::ultra::sync::signal_policy;
 namespace arrival_policy = ::ultra::sync::frame_arrival_policy;
 
 namespace {

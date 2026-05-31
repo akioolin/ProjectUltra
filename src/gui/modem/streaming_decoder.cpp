@@ -18,7 +18,7 @@
 #include "streaming_decoder_debug.hpp"
 #include "sync/frame_arrival_policy.hpp"
 #include "streaming_frame_policy.hpp"
-#include "streaming_signal_policy.hpp"
+#include "sync/signal_policy.hpp"
 #include "gui/startup_trace.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "fec/frame_interleaver.hpp"  // Frame-level interleaving for fixed-CW frames
@@ -44,7 +44,7 @@ namespace buffer_policy = streaming_buffer_policy;
 namespace decode_policy = streaming_decode_policy;
 namespace arrival_policy = ::ultra::sync::frame_arrival_policy;
 namespace frame_policy = streaming_frame_policy;
-namespace signal_policy = streaming_signal_policy;
+namespace signal_policy = ::ultra::sync::signal_policy;
 
 namespace {
 

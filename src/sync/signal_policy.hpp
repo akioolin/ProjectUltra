@@ -6,8 +6,8 @@
 #include <cstdint>
 
 namespace ultra {
-namespace gui {
-namespace streaming_signal_policy {
+namespace sync {
+namespace signal_policy {
 
 inline constexpr float kMinLLRForSingleCWDecode = 1.5f;
 inline constexpr float kMinLLRForEscalation = 1.5f;
@@ -302,6 +302,6 @@ inline PilotCFOUpdate combinePilotCFO(float pre_correction_cfo,
     return update;
 }
 
-}  // namespace streaming_signal_policy
-}  // namespace gui
+}  // namespace signal_policy
+}  // namespace sync
 }  // namespace ultra

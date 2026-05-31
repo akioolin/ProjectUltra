@@ -234,14 +234,19 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   `RX decode thread stopped` line (cf. the sender, which tears down cleanly).
 - Does NOT corrupt results: the file delivers CRC-clean BEFORE teardown (e.g. QPSK R1/4
   AWGN@10 seed42 → RESULT=PASS, GOODPUT=380, 0 retx, then crash on teardown).
-- Root cause (hypothesis, high-confidence): the disconnect path reconfigures the OFDM
-  waveform (control thread) while the RX decode thread is concurrently inside
-  `detectDataSync`/`HilbertTransform::process`, freeing/resizing the Hilbert buffers
-  underneath it → use-after-free. The §14.36 "crash fix v3" (`applyPendingConnectedOFDMMode`)
-  deferred only CONNECTED-mode reconstruction to a safe boundary in the RX loop; the
-  DISCONNECT/shutdown reconfig is NOT synchronized with the RX thread. `stopRxDecodeThread()`
-  sets `rx_decode_running_=false` + `streaming_decoder_->stop()` then `join()`s, but the
-  waveform reconfig races the still-running `detectDataSync` before the join lands.
+- Root cause (CONFIRMED from both racer stacks 2026-05-31): on disconnect, the MAIN thread
+  synchronously rebuilds the waveform while the RX decode thread is mid-demod on the old one:
+  - WRITER (main thread, frees/rebuilds): `Connection::enterDisconnected` → `ModemEngine::
+    setConnected(false)` → `StreamingEncoder::setDataMode` → `MCDPSKWaveform::initComponents`
+    → `new MultiCarrierDPSKModulator` → `new ChirpSync` → `ChirpSync::generateTemplate`.
+  - READER (Thread 22, faults): `rxDecodeLoop` → `StreamingDecoder::searchForSync` →
+    `OFDMChirpWaveform::detectDataSync` → `HilbertTransform::process` → UAF (`KERN_INVALID_
+    ADDRESS`, small offset = deref into freed/rebuilt waveform memory).
+  The §14.36 "crash fix v3" (`applyPendingConnectedOFDMMode`) deferred only CONNECTED-mode
+  reconstruction to a safe boundary in the RX loop; the DISCONNECT reconfig
+  (`setConnected(false)`→`setDataMode`→waveform rebuild) is NOT synchronized with the RX
+  thread at all. `stopRxDecodeThread()` joins, but `enterDisconnected` runs the rebuild on the
+  protocol/main thread WITHOUT first quiescing the still-running RX `detectDataSync`.
 - Why it matters for the SyncController refactor: this is exactly the §7.7#4 lifecycle-
   discipline scope the refactor must own. It also POLLUTES the GUI gate's crash signal —
   every gate run crashes at teardown, so a refactor-introduced crash can't be cleanly
