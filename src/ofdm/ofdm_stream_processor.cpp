@@ -836,7 +836,6 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     impl_->resetFailureAttributionDiagnostics();
     impl_->carrier_phase_initialized = false;
     impl_->carrier_phase_correction = Complex(1, 0);
-    impl_->lts_phase_offset = Complex(1, 0);  // Will be updated by estimateChannelFromLTS
     impl_->constellation_air_bit_index_ = 0;
     impl_->constellation_valid_air_bits_ = static_cast<size_t>(-1);
     impl_->constellation_capacity_air_bits_ = 0;
@@ -1015,7 +1014,6 @@ void OFDMDemodulator::reset() {
     impl_->prev_pilot_phases.clear();
     impl_->prev_pilot_logical_indices.clear();
     impl_->pilot_phase_correction = Complex(1, 0);
-    impl_->lts_phase_offset = Complex(1, 0);
 
     // Reset mixer phase - critical for OFDM_CHIRP which calls reset() between frames
     impl_->mixer.reset();

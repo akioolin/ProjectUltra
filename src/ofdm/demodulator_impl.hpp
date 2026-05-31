@@ -180,9 +180,6 @@ struct OFDMDemodulator::Impl {
     Complex carrier_phase_correction = Complex(1, 0);
     bool carrier_phase_initialized = false;
 
-    // Per-carrier phase from LTS
-    std::vector<Complex> lts_carrier_phases;
-
     // Per-carrier phase slope from timing offset (radians per carrier index)
     // Estimated from LTS, used to de-slope pilot H before complex interpolation
     float lts_phase_slope = 0.0f;
@@ -266,9 +263,6 @@ struct OFDMDemodulator::Impl {
 
     // Manual timing offset adjustment
     int manual_timing_offset = 0;
-
-    // Phase offset from LTS (residual phase between training and data).
-    Complex lts_phase_offset = Complex(1, 0);
 
     // Adaptive equalizer state
     std::vector<Complex> lms_weights;

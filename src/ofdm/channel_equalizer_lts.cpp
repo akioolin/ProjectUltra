@@ -731,108 +731,6 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
         LOG_DEMOD(DEBUG, "LTS H from sym%zu (last, first 5): %s", num_symbols - 1, hn_buf);
     }
 
-    // === DQPSK PER-CARRIER PHASE REFERENCES ===
-    // TX sends LTS with sync_sequence (Zadoff-Chu), BUT initializes dbpsk_prev_symbols to (1,0).
-    // So the first data symbol is encoded as: TX_data = (1,0) × DQPSK_phase, NOT sync_seq × DQPSK.
-    //
-    // With CFO and timing errors, different carriers have different phase offsets (φ) in H_est.
-    // RX needs a reference that has the SAME phase error as the equalized data symbol.
-    //
-    // Derivation:
-    //   1. TX first data: (1,0) × DQPSK_phase
-    //   2. RX received: (1,0) × DQPSK_phase × H
-    //   3. RX equalized: (1,0) × DQPSK_phase × H / H_est = (1,0) × DQPSK_phase × e^{-jφ}
-    //   4. RX reference: (1,0) × e^{-jφ} = conj(H) / |H| = conj(h_unit)
-    //   5. Differential: diff = eq_data × conj(eq_ref)
-    //      = (1,0) × DQPSK_phase × e^{-jφ} × conj((1,0) × e^{-jφ})
-    //      = DQPSK_phase  ✓  (phase errors cancel!)
-    //
-    // CRITICAL: The RX reference must be (1,0) × e^{-jφ} = conj(h_unit), NOT sync_seq × e^{-jφ}.
-    // This was a bug that caused first symbol decode errors when interleaving was enabled.
-
-    lts_carrier_phases.resize(data_carrier_indices.size());
-
-    // Compute the DQPSK reference for each carrier.
-    //
-    // Key insight: channel_estimate now uses LAST training symbol's H for consistency.
-    // The first DATA symbol is 1 symbol after the last training symbol.
-    // With CFO correction, there's a phase advance of 1 symbol between them.
-    //
-    // The equalized first data symbol has:
-    //   eq_data = FFT(corrected_data0) / H_last
-    //   = TX_data × H × e^{j×φ_data0} / (H × e^{j×φ_last})
-    //   = TX_data × e^{j×(φ_data0 - φ_last)}
-    //   = TX_data × e^{j×phase_per_symbol}  (1 symbol of phase advance)
-    //
-    // For DQPSK to work, the reference must have the same phase:
-    //   eq_ref = (1,0) × e^{j×phase_per_symbol}
-
-    float phase_inc = -2.0f * M_PI * freq_offset_hz / config.sample_rate;
-    float phase_per_symbol = phase_inc * symbol_samples;
-
-    // Phase advance from last training to first data: 1 symbol
-    Complex phase_advance(std::cos(phase_per_symbol), std::sin(phase_per_symbol));
-
-    LOG_DEMOD(DEBUG, "LTS CFO=%.1f Hz, phase_per_sym=%.0f deg, phase_advance=(%.3f,%.3f)",
-              freq_offset_hz, phase_per_symbol * 180.0f / M_PI,
-              phase_advance.real(), phase_advance.imag());
-
-    for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
-        // For DQPSK with pilots, the differential reference must account for
-        // per-carrier phase errors in the channel estimate.
-        //
-        // Equalization produces: eq = rx × conj(H_est) / |H_est|²
-        // If H_est has phase error φ (from noise, timing, etc.):
-        //   eq = TX × H_true × conj(H_est) / |H_est|²
-        //      = TX × |H_true| × e^{jθ} × |H_est| × e^{-j(θ+φ)} / |H_est|²
-        //      ≈ TX × e^{-jφ}  (approximately, when |H_true| ≈ |H_est|)
-        //
-        // For differential decoding: diff = eq[n] × conj(ref)
-        // If ref = (1,0), then diff = TX × e^{-jφ} which has the wrong phase!
-        //
-        // Fix: Set ref to match the phase error that will appear in equalized symbols.
-        // ref[i] = unit_phase(H_est[i])^* = conj(H_est[i]) / |H_est[i]|
-        //
-        // Then: diff = TX × e^{-jφ} × conj(e^{-jφ}) = TX × e^{-jφ} × e^{+jφ} = TX ✓
-        //
-        int idx = data_carrier_indices[i];
-        Complex h = channel_estimate[idx];
-        float h_mag = std::abs(h);
-        if (h_mag > 0.01f) {
-            // Reference = unit vector in direction of conj(H)
-            // This matches the phase that equalization will produce
-            lts_carrier_phases[i] = std::conj(h) / h_mag;
-        } else {
-            lts_carrier_phases[i] = Complex(1.0f, 0.0f);
-        }
-
-        // Debug: log first 3 carrier H phases
-        if (i < 3) {
-            LOG_DEMOD(DEBUG, "LTS carrier %zu: H=%.1f∠%.0f° -> ref=%.0f°",
-                      i, h_mag, std::arg(h) * 180.0f / M_PI,
-                      std::arg(lts_carrier_phases[i]) * 180.0f / M_PI);
-        }
-    }
-
-    // Also compute a single phase offset for backwards compatibility
-    // (used if lts_carrier_phases is empty)
-    Complex avg_h(0, 0);
-    for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
-        int idx = data_carrier_indices[i];
-        avg_h += channel_estimate[idx] / std::abs(channel_estimate[idx] + Complex(1e-10f, 0));
-    }
-    avg_h /= static_cast<float>(data_carrier_indices.size());
-    lts_phase_offset = avg_h / std::abs(avg_h + Complex(1e-10f, 0));
-
-    {
-        char phase_buf[128] = "";
-        int pp = 0;
-        for (size_t i = 0; i < std::min(size_t(5), lts_carrier_phases.size()); ++i) {
-            pp += snprintf(phase_buf + pp, sizeof(phase_buf) - pp, "%.0f deg ", std::arg(lts_carrier_phases[i]) * 180.0f / M_PI);
-        }
-        LOG_DEMOD(DEBUG, "LTS DQPSK ref phases (first 5): %s(H avg phase=%.0f deg)", phase_buf, std::arg(lts_phase_offset) * 180.0f / M_PI);
-    }
-
     // DON'T set carrier_phase_initialized here - let updateChannelEstimate() do it
     // on the first data symbol. This ensures we use fresh pilot data for phase
     // recovery instead of potentially noisy LTS estimates.
@@ -842,10 +740,8 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
 
     // Compute fading index from the LTS channel estimate. Use the averaged LTS
     // H for measurement to reduce AWGN estimator variance, but keep the
-    // last-symbol H above for equalization phase consistency.
-    // This is critical for differential modes (DQPSK, DBPSK, D8PSK) which skip
-    // updateChannelEstimate() — without this, last_fading_index stays at 0 and
-    // LLR fading scaling + two-pass decoding never activate on fading channels.
+    // last-symbol H above for equalization phase consistency. Feeds last_fading_index
+    // (LLR fading scaling, DD gating).
     {
         float h_mag_mean = 0.0f;
         size_t h_mag_count = 0;
