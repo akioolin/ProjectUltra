@@ -45,11 +45,6 @@ struct OFDMDemodulator::Impl {
     std::vector<Complex> freq_domain_scratch;
     std::vector<Complex> equalized_scratch;
     std::vector<Complex> constellation_update_scratch;
-    std::vector<Complex> differential_symbols_scratch;
-    std::vector<float> differential_signal_power_scratch;
-    std::vector<Complex> d8psk_constellation_update_scratch;
-    std::vector<Complex> dqpsk_constellation_update_scratch;
-    std::vector<float> dqpsk_valid_errors_scratch;
     std::vector<Complex> interp_h_full_scratch;
     std::vector<Complex> interp_h_cir_scratch;
     std::vector<Complex> interp_h_clean_scratch;
@@ -272,13 +267,7 @@ struct OFDMDemodulator::Impl {
     // Manual timing offset adjustment
     int manual_timing_offset = 0;
 
-    // DBPSK state
-    std::vector<Complex> dbpsk_prev_equalized;
-    bool dbpsk_first_symbol = true;
-    bool dqpsk_skip_first_symbol = false;
-
-    // Phase offset from LTS for DQPSK initialization
-    // This captures any residual phase between training and data
+    // Phase offset from LTS (residual phase between training and data).
     Complex lts_phase_offset = Complex(1, 0);
 
     // Adaptive equalizer state
@@ -294,21 +283,11 @@ struct OFDMDemodulator::Impl {
     // demodulateSymbol() to write exact zero LLRs.
     bool rx_carrier_erasure_enabled_ = false;
     std::vector<uint8_t> carrier_erasure_flags_;
-    std::vector<uint8_t> differential_prev_erased_;
 
     // Per-carrier adaptive LLR scaling: track |equalized| stability over symbols
     // Stable carriers keep full LLR confidence; fading carriers get inflated noise
     std::vector<float> carrier_eq_mag_ema_;   // EMA of |equalized[i]| per carrier
     std::vector<float> carrier_eq_mag_var_;   // EMA of (|eq| - ema)² per carrier
-
-    // Two-pass D8PSK decoding (DQPSK-assisted phase correction)
-    // Uses embedded DQPSK grid (45° margins) for robust phase estimation
-    bool d8psk_two_pass_enabled_ = true;
-    static constexpr float TWO_PASS_FADING_THRESHOLD = 0.30f;  // Above AWGN noise floor (~0.12-0.28)
-
-    // Two-pass DQPSK decoding is disabled in the symbol path; the helper is
-    // retained only for supervised experiments because it compressed LLRs in
-    // the production DQPSK fading cells.
 
     // ==========================================================================
     // CONSTRUCTOR
@@ -389,9 +368,6 @@ struct OFDMDemodulator::Impl {
     // new modulation) whenever `mod` differs from the last batch — keeps the GUI
     // constellation homogeneous per modulation instead of a mixed cloud.
     void appendConstellationSymbols(const std::vector<Complex>& update, Modulation mod);
-    bool demodulateD8PSKTwoPass(const std::vector<Complex>& equalized, float noise_variance);
-    void demodulateDQPSKTwoPass(const std::vector<Complex>& equalized, float noise_variance);
-    float computeFadingIndex() const;
     void updateQuality();
 };
 

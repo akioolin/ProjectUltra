@@ -338,13 +338,6 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                     impl_->last_sync_offset = 0;
                 }
 
-                // Check if differential mode for LTS phase extraction
-                bool is_differential = (impl_->config.modulation == Modulation::DQPSK ||
-                                        impl_->config.modulation == Modulation::D8PSK ||
-                                        impl_->config.modulation == Modulation::DBPSK);
-                LOG_SYNC(DEBUG, "LTS phase check: is_differential=%d, use_pilots=%d",
-                        is_differential, impl_->config.use_pilots);
-
                 // Consume preamble up through last LTS. With second-LTS lock, data starts
                 // one symbol after refined_lts_start.
                 size_t consume = refined_lts_start + preamble_symbol_len + impl_->manual_timing_offset;
@@ -374,9 +367,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 std::fill(impl_->last_decisions.begin(), impl_->last_decisions.end(), Complex(0, 0));
                 std::fill(impl_->rls_P.begin(), impl_->rls_P.end(), 1.0f);
 
-                impl_->dbpsk_prev_equalized.clear();
                 impl_->carrier_erasure_flags_.clear();
-                impl_->differential_prev_erased_.clear();
                 impl_->carrier_eq_mag_ema_.clear();
                 impl_->carrier_eq_mag_var_.clear();
                 impl_->dd_qam16_channel_observations_.clear();
@@ -385,11 +376,8 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 impl_->dd_qam16_channel_var_.clear();
                 impl_->resetWienerPilotHistory();
                 impl_->resetFailureAttributionDiagnostics();
-                if (!is_differential || impl_->config.use_pilots) {
-                    impl_->carrier_phase_initialized = false;
-                    impl_->carrier_phase_correction = Complex(1, 0);
-                }
-                impl_->dqpsk_skip_first_symbol = false;
+                impl_->carrier_phase_initialized = false;
+                impl_->carrier_phase_correction = Complex(1, 0);
                 impl_->timing_offset_samples = 0.0f;
                 LOG_SYNC(INFO, "Schmidl-Cox sync complete, CFO=%.1f Hz, ready for data", coarse_cfo);
             }
@@ -467,9 +455,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                     std::fill(impl_->last_decisions.begin(), impl_->last_decisions.end(), Complex(0, 0));
                     std::fill(impl_->rls_P.begin(), impl_->rls_P.end(), 1.0f);
 
-                    impl_->dbpsk_prev_equalized.clear();
                     impl_->carrier_erasure_flags_.clear();
-                    impl_->differential_prev_erased_.clear();
                     impl_->carrier_eq_mag_ema_.clear();
                     impl_->carrier_eq_mag_var_.clear();
                     impl_->dd_qam16_channel_observations_.clear();
@@ -839,9 +825,7 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     std::fill(impl_->last_decisions.begin(), impl_->last_decisions.end(), Complex(0, 0));
     std::fill(impl_->rls_P.begin(), impl_->rls_P.end(), 1.0f);
 
-    impl_->dbpsk_prev_equalized.clear();
     impl_->carrier_erasure_flags_.clear();
-    impl_->differential_prev_erased_.clear();
     impl_->carrier_eq_mag_ema_.clear();
     impl_->carrier_eq_mag_var_.clear();
     impl_->dd_qam16_channel_observations_.clear();
@@ -921,11 +905,6 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
         remaining -= training_samples_count;
         impl_->synced_symbol_count = training_symbols;
     }
-
-    // Initialize reference for differential demodulation to (1,0)
-    // Same as Schmidl-Cox path does
-    impl_->dbpsk_prev_equalized.clear();  // Will be initialized in demodulateSymbol
-    impl_->differential_prev_erased_.clear();
 
     LOG_SYNC(INFO, "processPresynced: skipped %d training symbols, %zu samples remaining",
              training_symbols, remaining);
@@ -1040,9 +1019,7 @@ void OFDMDemodulator::reset() {
 
     // Reset mixer phase - critical for OFDM_CHIRP which calls reset() between frames
     impl_->mixer.reset();
-    impl_->dbpsk_prev_equalized.clear();
     impl_->carrier_erasure_flags_.clear();
-    impl_->differential_prev_erased_.clear();
     impl_->carrier_eq_mag_ema_.clear();
     impl_->carrier_eq_mag_var_.clear();
     impl_->dd_qam16_channel_observations_.clear();

@@ -46,11 +46,6 @@ OFDMDemodulator::Impl::Impl(const ModemConfig& cfg)
     freq_domain_scratch.resize(cfg.fft_size);
     equalized_scratch.resize(static_cast<size_t>(cfg.num_carriers));
     constellation_update_scratch.reserve(static_cast<size_t>(cfg.num_carriers));
-    differential_symbols_scratch.resize(static_cast<size_t>(cfg.num_carriers));
-    differential_signal_power_scratch.resize(static_cast<size_t>(cfg.num_carriers));
-    d8psk_constellation_update_scratch.reserve(static_cast<size_t>(cfg.num_carriers));
-    dqpsk_constellation_update_scratch.reserve(static_cast<size_t>(cfg.num_carriers));
-    dqpsk_valid_errors_scratch.reserve(static_cast<size_t>(cfg.num_carriers));
     interp_h_full_scratch.resize(static_cast<size_t>(cfg.num_carriers));
     interp_h_cir_scratch.resize(static_cast<size_t>(cfg.num_carriers));
     interp_h_clean_scratch.resize(static_cast<size_t>(cfg.num_carriers));

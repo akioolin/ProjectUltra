@@ -22,10 +22,12 @@ constexpr size_t CARRIER_LDPC_MAX_CODEWORDS = 8;
 constexpr uint64_t ALL_ON_CARRIER_MASK = UINT64_MAX;
 
 bool isSupportedChirpModulation(Modulation mod) {
-    return mod == Modulation::DBPSK ||
-           mod == Modulation::DQPSK ||
-           mod == Modulation::D8PSK ||
-           mod == Modulation::QPSK ||
+    // Coherent-only OFDM (thread A 2026-05-31): differential modulations
+    // (DBPSK/DQPSK/D8PSK) are no longer accepted on the OFDM_CHIRP path — they
+    // live in MC-DPSK. Rejecting them here makes is_differential provably false
+    // for every OFDM demod/channel-est path; a differential config falls back to
+    // coherent QPSK (see the constructors and configure()).
+    return mod == Modulation::QPSK ||
            mod == Modulation::BPSK ||
            mod == Modulation::QAM8 ||
            mod == Modulation::QAM16 ||
@@ -260,9 +262,9 @@ sync::ChirpSync* OFDMChirpWaveform::shortReanchorSync(float chirp_duration_ms) c
 WaveformCapabilities OFDMChirpWaveform::getCapabilities() const {
     WaveformCapabilities caps;
     caps.supports_cfo_correction = true;    // Via dual chirp
-    caps.supports_doppler_correction = true; // OFDM with differential
+    caps.supports_doppler_correction = true; // Pilot + DD tracking
     caps.requires_pilots = config_.use_pilots;
-    caps.supports_differential = true;
+    caps.supports_differential = false;     // Coherent-only OFDM (thread A); differential lives in MC-DPSK
     caps.min_snr_db = 10.0f;                // Lower than Schmidl-Cox
     caps.max_snr_db = 20.0f;                // Above this, prefer a higher-order modulation
     caps.max_throughput_bps = getThroughput(CodeRate::R2_3);
@@ -292,11 +294,12 @@ bool OFDMChirpWaveform::carrierLdpcCodewordCountSupported(size_t codeword_count)
 }
 
 void OFDMChirpWaveform::configure(Modulation mod, CodeRate rate) {
-    // Allow differential and selected coherent modulations.
+    // Coherent-only OFDM: any unsupported modulation (incl. differential) falls
+    // back to coherent QPSK, consistent with the constructors.
     if (!isSupportedChirpModulation(mod)) {
-        LOG_MODEM(WARN, "OFDMChirpWaveform: Unsupported modulation %d, using DQPSK",
+        LOG_MODEM(WARN, "OFDMChirpWaveform: Unsupported modulation %d, using QPSK",
                   static_cast<int>(mod));
-        mod = Modulation::DQPSK;
+        mod = Modulation::QPSK;
     }
 
     config_.modulation = mod;

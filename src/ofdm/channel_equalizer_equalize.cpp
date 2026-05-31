@@ -437,81 +437,10 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
         }
     }
 
-    // For differential modulation: apply pilot_phase_correction to track common phase drift
-    // This is updated after each symbol via decision-directed tracking
-    bool is_differential = (mod == Modulation::DBPSK || mod == Modulation::DQPSK || mod == Modulation::D8PSK);
-
-    if (is_differential) {
-        // For differential modes on fading channels, use MMSE equalization.
-        //
-        // Key insight: ZF equalization (divide by H) amplifies noise on deeply
-        // faded carriers. MMSE adds noise variance to the denominator, limiting
-        // noise boost while accepting some signal distortion on weak carriers.
-        //
-        // MMSE: equalized = conj(H) * rx / (|H|² + σ²)
-        // ZF:   equalized = conj(H) * rx / |H|²
-        //
-        // For deep fades: |H|² << σ², MMSE ≈ conj(H) * rx / σ² (bounded)
-        //                           ZF  ≈ conj(H) * rx / tiny  (explodes)
-
-        // First pass: compute average channel power for fade detection
-        float avg_h_power = 0.0f;
-        for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
-            int idx = data_carrier_indices[i];
-            avg_h_power += std::norm(channel_estimate[idx]);
-        }
-        avg_h_power /= data_carrier_indices.size();
-        // Noise variance for MMSE equalization and LLR computation
-        // Uses global average from LTS (per-carrier estimates are too noisy with only 2 samples)
-        float scaled_noise_var = noise_variance;
-        if (scaled_noise_var < 1e-6f) {
-            scaled_noise_var = avg_h_power / DEFAULT_SNR_LINEAR;
-        }
-        scaled_noise_var = std::max(scaled_noise_var, MIN_CARRIER_NOISE_VAR);
-
-        // Debug: log first symbol equalization details
-        static int eq_log_count = 0;
-
-        for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
-            int idx = data_carrier_indices[i];
-            Complex received = freq_domain[idx];
-            Complex h = channel_estimate[idx];
-            float h_power = std::norm(h);
-
-            // MMSE equalization: conj(H) / (|H|² + σ²)
-            float mmse_denom = h_power + scaled_noise_var;
-            if (mmse_denom < 1e-10f) {
-                equalized[i] = Complex(0, 0);
-                carrier_noise_var[i] = MAX_CARRIER_NOISE_VAR;
-            } else {
-                equalized[i] = received * std::conj(h) / mmse_denom;
-
-                if (eq_log_count < 3 && i < 3) {
-                    float rx_phase = std::arg(received) * 180.0f / M_PI;
-                    float h_phase = std::arg(h) * 180.0f / M_PI;
-                    float eq_phase = std::arg(equalized[i]) * 180.0f / M_PI;
-                    LOG_DEMOD(INFO, "EQ car %zu: rx=%.1f∠%.0f° H=%.1f∠%.0f° -> eq=%.2f∠%.0f° (rx-H=%.0f°)",
-                              i, std::abs(received), rx_phase, std::abs(h), h_phase,
-                              std::abs(equalized[i]), eq_phase, rx_phase - h_phase);
-                }
-                // MMSE output noise variance: σ² / (|H|² + σ²) after equalization
-                carrier_noise_var[i] = scaled_noise_var / (h_power + scaled_noise_var);
-            }
-
-            // RX-local hard erasure: below the configured per-carrier gamma
-            // floor, the demapper must contribute no evidence to LDPC.
-            if (rx_carrier_erasure_enabled_ &&
-                h_power < RX_ERASURE_GAMMA_FLOOR_LINEAR * scaled_noise_var) {
-                carrier_erasure_flags_[i] = 1;
-                carrier_noise_var[i] = MAX_CARRIER_NOISE_VAR;
-            }
-
-            carrier_noise_var[i] = std::max(MIN_CARRIER_NOISE_VAR, std::min(MAX_CARRIER_NOISE_VAR, carrier_noise_var[i]));
-        }
-        eq_log_count++;
-        return equalized;
-    }
-
+    // Coherent-only OFDM (thread A 2026-05-31): the differential MMSE-equalize
+    // early-return (magnitude-tracked |H|, frozen LTS phase) was removed here —
+    // OFDM never carries a differential modulation now. Coherent equalization
+    // (pilot/LMS/RLS MMSE + soft-CSI + coherent DD) follows.
     bool use_adaptive = config.adaptive_eq_enabled;
     const float reliability_noise_var = std::max(noise_variance, MIN_CARRIER_NOISE_VAR);
     const bool soft_gray_zone_csi = useSoftGrayZoneCsi(mod);

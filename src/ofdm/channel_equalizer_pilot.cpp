@@ -527,22 +527,10 @@ void OFDMDemodulator::Impl::updatePilotFadingStats(const std::vector<Complex>& h
 }
 
 void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& freq_domain) {
-    // Smoothing factor for channel estimate update:
-    // - First symbol: alpha=1.0 (use pilot estimate directly)
-    // - Subsequent symbols: depends on modulation type and pilot availability
-    //
-    // For DIFFERENTIAL modes (DQPSK, D8PSK, DBPSK):
-    //   WITHOUT pilots: Use low alpha (0.1) to keep H stable
-    //   WITH pilots: Use higher alpha (0.5) to track fading - pilots provide
-    //                reliable per-symbol phase reference that makes differential
-    //                decoding robust even with faster tracking
-    //
-    // For COHERENT modes (QPSK, QAM):
-    //   Use high alpha (0.9) to track channel changes quickly.
-    //
-    bool is_differential = (config.modulation == Modulation::DBPSK ||
-                            config.modulation == Modulation::DQPSK ||
-                            config.modulation == Modulation::D8PSK);
+    // Smoothing factor for channel estimate update (coherent-only OFDM):
+    // - First data symbol: alpha=1.0 (use the pilot estimate directly; the channel
+    //   has changed since the LTS).
+    // - Subsequent symbols: alpha=0.9 to track channel changes quickly.
     bool has_pilots = !pilot_carrier_indices.empty();
     if (!has_pilots) {
         pilot_phase_correction = Complex(1, 0);
@@ -558,11 +546,6 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     float alpha;
     if (is_first_data_symbol) {
         alpha = 1.0f;  // First data symbol: use pilot estimate directly (channel changed since LTS)
-    } else if (is_differential) {
-        // Magnitude-only tracking: updates |H| to track fading depth for MMSE,
-        // while phase stays frozen from LTS. Alpha=0.5 balances fading tracking
-        // vs noise smoothing (fading at 0.1Hz Doppler changes ~5%/symbol).
-        alpha = has_pilots ? 0.5f : 0.1f;
     } else {
         alpha = 0.9f;  // Coherent: track channel changes
     }
@@ -584,18 +567,9 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     // the correct channel phase. MMSE equalization (conj(H)*rx / |H|²+σ²) naturally
     // removes the phase. Applying carrier_phase_correction removes phase from H but NOT
     // from the received signal, leaving a residual rotation in the equalized output.
-    if (!is_differential && !carrier_phase_initialized && !pilot_carrier_indices.empty()) {
+    if (!carrier_phase_initialized && !pilot_carrier_indices.empty()) {
         carrier_phase_initialized = true;  // Mark as done (identity correction)
         LOG_DEMOD(DEBUG, "Carrier phase recovery: SKIPPED for coherent mode (LTS provides accurate H)");
-    } else if (is_differential && !carrier_phase_initialized && !pilot_carrier_indices.empty()) {
-        Complex h_avg = h_sum / float(pilot_carrier_indices.size());
-        float avg_mag = std::abs(h_avg);
-        if (avg_mag > 0.01f) {
-            carrier_phase_correction = std::conj(h_avg) / avg_mag;
-            carrier_phase_initialized = true;
-            LOG_DEMOD(DEBUG, "Carrier phase recovery: avg_phase=%.1f°, applying correction",
-                      std::arg(h_avg) * 180.0f / M_PI);
-        }
     }
 
     // Apply carrier phase correction to all H estimates (identity for coherent modes)
@@ -604,16 +578,10 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     }
     h_sum *= carrier_phase_correction;
 
-    // CPE (Common Phase Error) correction for ALL modes (coherent and differential).
-    // Estimate average phase drift from pilot LS vs current H, apply to all carriers.
-    // This tracks residual CFO and slow oscillator drift without modifying freq_offset_hz.
-    // Standard approach used in WiFi 802.11a/g/n receivers.
-    //
-    // For differential modes (DQPSK/D8PSK): CPE keeps channel_estimate phase tracking
-    // the actual channel, improving MMSE equalization quality. The differential decoding
-    // is unaffected because both eq[n] and eq[n-1] use CPE-corrected H, so the common
-    // phase cancels in diff = eq[n] * conj(eq[n-1]). The residual (CPE change between
-    // consecutive symbols) is small (~5° at 0.5 Hz Doppler) — well within DQPSK's 45° margin.
+    // CPE (Common Phase Error) correction. Estimate average phase drift from pilot
+    // LS vs current H, apply to all carriers. This tracks residual CFO and slow
+    // oscillator drift without modifying freq_offset_hz. Standard approach used in
+    // WiFi 802.11a/g/n receivers.
     {
         Complex cpe_sum(0, 0);
         float cpe_weight_sum = 0.0f;
@@ -634,16 +602,6 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
         if (cpe_weight_sum > 0.01f) {
             float cpe_phase = std::arg(cpe_sum);
 
-            // For differential modes, clamp CPE to ±15° per symbol to prevent
-            // overcorrection from noisy pilot estimates on deep fading.
-            // At 6 pilots, phase estimation noise is ~4° at SNR=15; 15° gives ~3.5σ margin.
-            // This still tracks up to ~560°/s of phase drift (15° × 37.5 sym/s),
-            // covering Doppler up to ~1.5 Hz.
-            if (is_differential) {
-                constexpr float MAX_DIFF_CPE_RAD = 0.262f;  // ~15 degrees
-                cpe_phase = std::max(-MAX_DIFF_CPE_RAD, std::min(MAX_DIFF_CPE_RAD, cpe_phase));
-            }
-
             if (std::abs(cpe_phase) > 0.001f) {  // Skip if negligible
                 Complex cpe_correction = std::exp(Complex(0.0f, cpe_phase));
                 // Apply CPE to ALL carrier H estimates (pilot + data)
@@ -655,8 +613,7 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
                 }
                 static int cpe_log_count = 0;
                 if (cpe_log_count < 10) {
-                    LOG_DEMOD(DEBUG, "CPE correction%s: %.2f° (from %zu pilots)",
-                              is_differential ? " [diff]" : "",
+                    LOG_DEMOD(DEBUG, "CPE correction: %.2f° (from %zu pilots)",
                               cpe_phase * 180.0f / M_PI, pilot_carrier_indices.size());
                     cpe_log_count++;
                 }
@@ -809,18 +766,9 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
             }
         }
 
-        // Update smoothed channel estimate
+        // Update smoothed channel estimate (coherent complex LS smoothing)
         Complex h_old = channel_estimate[idx];
-        if (is_differential) {
-            // Magnitude-only update: track fading depth for MMSE scaling
-            // while preserving the LTS phase that differential decoding needs.
-            // new_mag = alpha * |H_pilot| + (1-alpha) * |H_old|
-            float new_mag = alpha * std::abs(h_ls_all[i]) + (1.0f - alpha) * std::abs(h_old);
-            float old_phase = std::arg(h_old);
-            channel_estimate[idx] = std::polar(new_mag, old_phase);
-        } else {
-            channel_estimate[idx] = alpha * h_ls_all[i] + (1.0f - alpha) * h_old;
-        }
+        channel_estimate[idx] = alpha * h_ls_all[i] + (1.0f - alpha) * h_old;
     }
 
     // First symbol fallback: assume 15 dB SNR
@@ -958,8 +906,9 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
         dd_qam16_channel_observations_.size() == config.fft_size &&
         dd_qam16_measurement_var_.size() == config.fft_size &&
         dd_qam16_reliability_.size() == config.fft_size;
-    if (!is_differential) {
-        // Coherent modes: phase-slope-compensated complex interpolation.
+    {
+        // Coherent pilot interpolation: phase-slope-compensated complex interpolation
+        // (OFDM is coherent-only; the differential magnitude-only branch was removed).
         // The timing offset introduces a phase gradient across carriers; de-sloping before
         // interpolation prevents phase wrapping. When slope is near zero (good timing),
         // de-slope is identity — complex interpolation still preserves phase info that
@@ -1107,24 +1056,6 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
                 channel_estimate[info.fft_idx] = pilot_h;
             }
         }
-    } else {
-        // Differential modes or no slope: magnitude-only interpolation.
-        // Preserves LTS phases that differential decoding relies on.
-        for (size_t dc = 0; dc < interp_table.size(); ++dc) {
-            const auto& info = interp_table[dc];
-            float interp_mag = 0.0f;
-            if (info.lower_pilot >= 0 && info.upper_pilot >= 0) {
-                float m1 = std::abs(channel_estimate[info.lower_pilot]);
-                float m2 = std::abs(channel_estimate[info.upper_pilot]);
-                interp_mag = (1.0f - info.alpha) * m1 + info.alpha * m2;
-            } else if (info.lower_pilot >= 0) {
-                interp_mag = std::abs(channel_estimate[info.lower_pilot]);
-            } else if (info.upper_pilot >= 0) {
-                interp_mag = std::abs(channel_estimate[info.upper_pilot]);
-            }
-            float old_phase = std::arg(channel_estimate[info.fft_idx]);
-            channel_estimate[info.fft_idx] = std::polar(interp_mag, old_phase);
-        }
     }
 
     applyDiagnosticTwoPathChannelOracle(h_ls_all);
@@ -1147,7 +1078,7 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     // Applied after interpolation so both pilot-based and DD tracking contribute:
     // - Interpolation: fresh magnitude + phase baseline from 6 pilots
     // - DD corrections: per-carrier phase refinement from 53 data decisions
-    if (!is_differential && dd_phase_corrections.size() == data_carrier_indices.size()
+    if (dd_phase_corrections.size() == data_carrier_indices.size()
         && snr_symbol_count >= 3 &&
         !ofdm_pilots::scatteredPilotsActive(config)) {
         float dd_blend = 0.3f;
@@ -1199,16 +1130,15 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
               pilot_residual_count);
 
     if (noise_count > 0 && noise_power_sum > 0.0f) {
-        // Noise variance strategy: preserve LTS-based estimate for ALL modes.
+        // Noise variance strategy: preserve the LTS-based estimate.
         //
         // The LTS estimate (from 2 training symbols, averaged over ~53 carriers) is accurate
         // and reliable. The temporal pilot comparison (curr_h - prev_h) is problematic because:
-        // - Differential: includes fading variation → massively overestimated noise
         // - Coherent first symbol: fallback to 15 dB overwrites accurate LTS (e.g., at SNR=20+)
         // - Coherent subsequent: includes fading variation on fading channels
         //
         // Only update estimated_snr_linear for display/rate-adaptation purposes.
-        if (!is_differential && noise_count > 1) {
+        if (noise_count > 1) {
             float instantaneous_snr = signal_power / std::max(noise_variance, 1e-6f);
             instantaneous_snr = std::max(0.1f, std::min(10000.0f, instantaneous_snr));
             estimated_snr_linear = snr_alpha * instantaneous_snr + (1.0f - snr_alpha) * estimated_snr_linear;
