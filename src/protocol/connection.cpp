@@ -384,11 +384,15 @@ Connection::Connection(const ConnectionConfig& config)
         return noteTurnRequestOnAckIfNeeded();
     });
 
-    // §14.27 Stage 1: wire the one-way burst stop-and-wait controller callbacks.
-    // INERT until use_burst_transport_ is enabled for the file path (default OFF):
-    // startTransfer() is never called and tick()/onGroupReceived() are gated, so
-    // this changes nothing on the 1210bps SR-ARQ path. Activation + RX hook land in
-    // later steps behind the flag.
+    // §14.27: wire the one-way burst stop-and-wait controller callbacks.
+    // Burst transport is the DEFAULT OFDM-wideband file path as of 2026-05-30
+    // (`use_burst_transport_ = true`). NOTE: burst is itself selective-repeat (GROUP_ACK
+    // carries the 6-bit SACK frame_mask; resend-failed-only + refill) — it is NOT "non-ARQ".
+    // What is transitional / slated for removal is only the LEGACY wideband-file ROUTING:
+    // the `!use_burst_transport_` branches that push a wideband file through the windowed
+    // `arq_` instead of `burst_transport_`, plus the `ULTRA_BURST_TRANSPORT=0` opt-out.
+    // The `SelectiveRepeatARQ arq_` controller stays — it still serves MC-DPSK / OFDM_NARROW
+    // data and all control ACKs. See docs/REMOVAL_BACKLOG.md.
     burst_transport_.setTransmitGroup(
         [this](uint16_t group_seq, const BurstStopAndWaitController::Group& frames) {
             if (on_transmit_burst_) {

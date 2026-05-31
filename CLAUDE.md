@@ -112,7 +112,7 @@ Floors are **in-band SNR (3 kHz noise BW)**. Full table, methodology, and histor
 |------|---------|---------------|-------|
 | MC-DPSK R1/4 | AWGN | **5 dB** | 3/3 seeds + OTASim fixture |
 | OFDM_CHIRP R1/4 | AWGN | **10 dB** | warm-sync LTS FER 4.875% @10, 0% @14-20 |
-| OFDM_CHIRP R1/4 | Good | **15 dB** | was "locked in DecodeBenchReplay" — that CTest is RED on HEAD (stale harness, NOT a prod regression; `gui_qso_scenario.sh` is the trusted floor gate). See MODEM_INFRASTRUCTURE_MAP §8. |
+| OFDM_CHIRP R1/4 | Good | **15 dB** | was "locked in DecodeBenchReplay" — that tool + CTest are now RETIRED (2026-05-30); the floor is UNBACKED, re-establish on `gui_qso_scenario.sh` (the trusted floor gate) during the ladder rework. |
 | OFDM_CHIRP R1/2 | AWGN / Good | **14 dB** | 1-seed locator |
 | OFDM_NARROW R1/4 | AWGN / Good | ~17.6 | pre-audit |
 
@@ -245,6 +245,15 @@ Boundary tests: `tests/test_waveform_policy.cpp`, `tests/test_connection_policy.
   bug. If you ever find the map disagrees with the code, fix the MAP first, then
   proceed. When you fix a stale fact, also correct CLAUDE.md / MEMORY.md to match.
 
+- **MANDATORY: log decided-dead code in `docs/REMOVAL_BACKLOG.md`** (the demolition
+  list). The moment a model/feature/experiment is decided-dead (superseded, failed,
+  abandoned), add it there with **scope** (what to delete) and **KEEP** (the anti-footgun
+  — what must NOT be over-cut). The map's §7 covers all cleanup (incl. consolidate/rename);
+  REMOVAL_BACKLOG is the focused *deletion* tracker. Burst transport is THE OFDM-wideband
+  file method — the legacy windowed-file routing + `ULTRA_BURST_TRANSPORT` opt-out are
+  slated for removal (R1), but **burst is itself selective-repeat** and `SelectiveRepeatARQ`
+  still serves MC-DPSK/narrow/control — never frame this as "remove SR-ARQ".
+
 - **Local quality gate before committing critical code:**
   `cmake --build build -j4 && ctest --test-dir build --output-on-failure -j4 && ./tests/regression_matrix.sh --quick && ./scripts/coverage_report.sh`
 
@@ -282,7 +291,7 @@ unvalidated on hardware" caveat.
 
 ## Essential Documentation
 
-**Priority 1 (read first):** `docs/PROJECT_GOALS.md` · `docs/QUALITY_STRATEGY.md` · `docs/QUALITY_AUDIT.md` · `docs/KNOWN_BUGS.md` · `docs/INVARIANTS.md` · `docs/ALPHA_RELEASE_GATE.md` · `docs/CHANGELOG.md` · `docs/MODEM_INFRASTRUCTURE_MAP.md` (**live** stage/knob/waveform map — current valid infra; keep it current per the MANDATORY rule above)
+**Priority 1 (read first):** `docs/PROJECT_GOALS.md` · `docs/QUALITY_STRATEGY.md` · `docs/QUALITY_AUDIT.md` · `docs/KNOWN_BUGS.md` · `docs/INVARIANTS.md` · `docs/ALPHA_RELEASE_GATE.md` · `docs/CHANGELOG.md` · `docs/MODEM_INFRASTRUCTURE_MAP.md` (**live** stage/knob/waveform map — current valid infra; keep it current per the MANDATORY rule above) · `docs/REMOVAL_BACKLOG.md` (the demolition list — decided-dead code/features/experiments slated for deletion)
 
 **Priority 2 (per subsystem):** `docs/CFO_CORRECTION_FLOW.md` (**CRITICAL** — 4-stage CFO, fading fix, feedback loop) · `docs/PROTOCOL_V2.md` · `docs/GUI_ARCHITECTURE.md` · `docs/AUDIO_SYSTEM.md` · `docs/CONFIGURATION_SYSTEM.md` · `docs/BUILD_SYSTEM.md` · `docs/ADAPTIVITY_AUDIT_2026_05_29.md` (subsystem adaptivity register)
 

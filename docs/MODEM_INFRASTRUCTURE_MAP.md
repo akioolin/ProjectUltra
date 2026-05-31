@@ -231,6 +231,11 @@ Buckets per the env-knobs→runtime-derivation workstream: **[FEAT]** in-flight 
 
 ## 7. Cleanup register (actionable — current valid infra vs removable)
 
+> Deletions are tracked as a focused action list in **`docs/REMOVAL_BACKLOG.md`** (the
+> demolition list). This §7 covers ALL cleanup (incl. consolidate/rename/codify, which are
+> not deletions). When an item here becomes a decided deletion, add it to the backlog with
+> its scope + KEEP caveat.
+
 **Safe-to-remove / dead (verify no test-tool dependency first):**
 1. Schmidl-Cox TX: `modulator.cpp` `generatePreamble()` `:551`, `createSchmidlCoxSTS()` `:332`,
    `g_logged_tx_pilots` `:122` — test-tool-only, OFDM_COX is gone. `generateProbe()` `:662`

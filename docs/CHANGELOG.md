@@ -10,6 +10,30 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-30: Add the Removal Backlog (demolition list) + scope the legacy-file removal precisely
+
+**What changed:** new `docs/REMOVAL_BACKLOG.md` — a tracked list of decided-dead code /
+features / experiments slated for **deletion** (distinct from the infra-map §7 register, which
+also covers consolidate/rename/codify). Wired into CLAUDE.md (Priority-1 doc list + a MANDATORY
+"log decided-dead code here" rule) and cross-linked from §7. Burst transport is now affirmed as
+THE OFDM-wideband file method (no going back to the windowed-file model).
+
+**Precise scoping (avoids a real footgun):** the removal target is **only the legacy
+OFDM-wideband file *routing*** — the `!use_burst_transport_` branches that push a wideband file
+through the continuous windowed `SelectiveRepeatARQ arq_` instead of `burst_transport_`, plus the
+`ULTRA_BURST_TRANSPORT=0` opt-out. It is **NOT** "remove SR-ARQ":
+- **Burst transport is itself selective-repeat** — the GROUP_ACK carries the 6-bit SACK
+  `frame_mask` and the sender resends only failed frames + refills.
+- **`SelectiveRepeatARQ arq_` stays** — it still serves MC-DPSK data, OFDM_NARROW data, and all
+  control ACKs.
+Captured as backlog item **R1** (BLOCKED on the ladder rework — keep the `=0` fallback until burst
+is throughput-proven end-to-end). Chat-message removal is **R2**. Fixed the stale "default OFF"
+comment at `connection.cpp:387` and a stale CLAUDE.md floor note (DecodeBenchReplay → retired).
+
+**Verification:** `ultra_core` builds clean (comment + doc changes only).
+
+---
+
 ## 2026-05-30: Retire the decode_bench tool + DecodeBenchReplay (superseded by GUI testing)
 
 **What changed:** removed `tools/decode_bench.cpp` (headless WAV-fixture A/B decoder), the
