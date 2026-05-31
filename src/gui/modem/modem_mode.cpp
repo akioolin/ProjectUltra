@@ -140,28 +140,10 @@ void ModemEngine::setConnected(bool connected) {
         handshake_complete_ = false;
         use_connected_waveform_once_ = false;  // Clear any leftover flag
 
-        // The OFDM control profile (DQPSK-on-OFDM vs coherent-QPSK-on-OFDM) is a
-        // RECEIVE-decode setting that must follow the NEGOTIATED MODE, which both
-        // stations know the moment CONNECT_ACK is exchanged — the initiator on
-        // receive, the responder on send — i.e. right here at setConnected().
-        // Previously it was gated on handshake_complete_ ("first valid frame
-        // received from initiator"), which deadlocked the responder: the
-        // initiator's first OFDM frame (the burst descriptor) is sent on the
-        // coherent profile, but the responder — still pinned to the legacy
-        // DQPSK-OFDM profile until handshake_complete_ — could not decode it, so
-        // it never received the frame that would have flipped the profile.
-        // CONNECT/CONNECT_ACK ride MC-DPSK (control_waveform_, a separate decoder),
-        // so they are unaffected by this OFDM-control profile. Enabling it now lets
-        // the responder decode the initiator's coherent control/descriptor frames
-        // immediately. profileForDataMode() still resolves to DQPSK for a
-        // differential data regime, so this is a no-op for DQPSK/D8PSK links.
-        const bool ofdm_control_follows_data = protocol::isOFDMMode(waveform_mode_);
-        if (streaming_decoder_) {
-            streaming_decoder_->setCoherentOFDMControlProfileEnabled(ofdm_control_follows_data);
-        }
-        if (streaming_encoder_) {
-            streaming_encoder_->setCoherentOFDMControlProfileEnabled(ofdm_control_follows_data);
-        }
+        // OFDM is coherent-only (thread A 2026-05-31): OFDM control frames always
+        // ride coherent QPSK R1/4 (profileForDataMode), so there is no longer a
+        // DQPSK-vs-coherent control profile to negotiate at setConnected().
+        // CONNECT/CONNECT_ACK ride MC-DPSK (control_waveform_, a separate decoder).
 
         // Configure OFDM config FIRST so it's correct when propagated to decoder
         config_.modulation = data_modulation_;
@@ -227,12 +209,10 @@ void ModemEngine::setConnected(bool connected) {
             streaming_decoder_->reset();
             streaming_decoder_->setMode(protocol::WaveformMode::MC_DPSK, false);
             streaming_decoder_->setDataMode(Modulation::DQPSK, CodeRate::R1_4);
-            streaming_decoder_->setCoherentOFDMControlProfileEnabled(false);
         }
         if (streaming_encoder_) {
             streaming_encoder_->setMode(protocol::WaveformMode::MC_DPSK);
             streaming_encoder_->setDataMode(Modulation::DQPSK, CodeRate::R1_4);
-            streaming_encoder_->setCoherentOFDMControlProfileEnabled(false);
         }
         data_modulation_ = Modulation::DQPSK;
         data_code_rate_ = CodeRate::R1_4;
@@ -257,14 +237,6 @@ void ModemEngine::setHandshakeComplete(bool complete) {
     if (complete) {
         LOG_MODEM(INFO, "Handshake complete, TX now uses waveform_mode_=%d",
                   static_cast<int>(waveform_mode_));
-    }
-    if (streaming_decoder_) {
-        streaming_decoder_->setCoherentOFDMControlProfileEnabled(
-            complete && connected_ && protocol::isOFDMMode(waveform_mode_));
-    }
-    if (streaming_encoder_) {
-        streaming_encoder_->setCoherentOFDMControlProfileEnabled(
-            complete && connected_ && protocol::isOFDMMode(waveform_mode_));
     }
 }
 

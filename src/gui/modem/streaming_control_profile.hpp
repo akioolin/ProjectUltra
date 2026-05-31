@@ -12,25 +12,14 @@ struct OFDMControlProfile {
     CodeRate rate = CodeRate::R1_4;
 };
 
-inline OFDMControlProfile profileForDataMode(Modulation data_mod,
-                                             bool coherent_control_enabled = true) {
-    // Control frames keep the robust R1/4 LDPC payload. The modulation follows
-    // the data regime only after the OFDM handshake is confirmed. Until then,
-    // preserve the legacy DQPSK control profile so CONNECT/CONNECT_ACK and the
-    // responder's unconfirmed handoff cannot inherit coherent-data sizing.
-    if (!coherent_control_enabled) {
-        return {Modulation::DQPSK, CodeRate::R1_4};
-    }
-
-    // Coherent links use coherent QPSK control so warm sync, equalization, and
-    // pilot tracking stay in the same receiver family; differential links keep
-    // the existing DQPSK control profile.
-    return {
-        ofdm_link_adaptation::isCoherentModulation(data_mod)
-            ? Modulation::QPSK
-            : Modulation::DQPSK,
-        CodeRate::R1_4
-    };
+inline OFDMControlProfile profileForDataMode(Modulation /*data_mod*/) {
+    // Coherent-only OFDM (thread A 2026-05-31): OFDM control frames always ride
+    // coherent QPSK R1/4, keeping warm sync, equalization, and pilot tracking in
+    // the same receiver family as the (coherent) data. The robust R1/4 LDPC
+    // payload is preserved. The legacy DQPSK control profile is gone — differential
+    // lives in MC-DPSK, which has its own control path and does not use this
+    // profile (CONNECT/CONNECT_ACK ride MC-DPSK control, a separate decoder).
+    return {Modulation::QPSK, CodeRate::R1_4};
 }
 
 inline int pilotSpacingForProfile(const OFDMControlProfile& profile) {

@@ -70,19 +70,17 @@ size_t validateBufferCapacity(size_t capacity) {
 // symbols than the current data profile.
 size_t getOFDMControlFrameSamples(IWaveform* waveform,
                                   Modulation data_mod,
-                                  CodeRate data_rate,
-                                  bool coherent_control_enabled) {
+                                  CodeRate data_rate) {
     if (!waveform) {
         return 0;
     }
 
     size_t default_samples = static_cast<size_t>(waveform->getMinSamplesForControlFrame());
-    if (data_mod == Modulation::DQPSK && data_rate == CodeRate::R1_4) {
-        return default_samples;
-    }
 
     // Avoid waveform reconfigure here (it recreates internal DSP state and can
     // clear constellation history). Estimate robust control size analytically.
+    // OFDM control is always coherent QPSK R1/4; when the data profile already
+    // matches that, estimateRobustOFDMControlSamples returns the default.
     const int carriers = waveform->getCarrierCount();
     const int samples_per_symbol = waveform->getSamplesPerSymbol();
     if (carriers <= 0 || samples_per_symbol <= 0) {
@@ -90,8 +88,7 @@ size_t getOFDMControlFrameSamples(IWaveform* waveform,
     }
 
     return decode_policy::estimateRobustOFDMControlSamples(
-        default_samples, data_mod, data_rate, carriers, samples_per_symbol,
-        coherent_control_enabled);
+        default_samples, data_mod, data_rate, carriers, samples_per_symbol);
 }
 
 }  // namespace
@@ -384,8 +381,7 @@ size_t StreamingDecoder::wrapCustomRingIndexLocked(size_t value) const {
 }
 
 size_t StreamingDecoder::getOFDMControlFrameSamplesForCurrentMode() const {
-    return getOFDMControlFrameSamples(waveform_.get(), current_modulation_, code_rate_,
-                                      coherent_ofdm_control_profile_enabled_);
+    return getOFDMControlFrameSamples(waveform_.get(), current_modulation_, code_rate_);
 }
 
 // ============================================================================
@@ -1034,16 +1030,6 @@ void StreamingDecoder::setAdaptiveShortDataPreamble(bool enable) {
     }
     adaptive_short_data_preamble_ = enable;
     LOG_MODEM(INFO, "StreamingDecoder: adaptive short data re-anchor %s",
-              enable ? "ENABLED" : "DISABLED");
-}
-
-void StreamingDecoder::setCoherentOFDMControlProfileEnabled(bool enable) {
-    std::lock_guard<std::mutex> lock(buffer_mutex_);
-    if (coherent_ofdm_control_profile_enabled_ == enable) {
-        return;
-    }
-    coherent_ofdm_control_profile_enabled_ = enable;
-    LOG_MODEM(INFO, "StreamingDecoder: coherent OFDM control profile %s",
               enable ? "ENABLED" : "DISABLED");
 }
 

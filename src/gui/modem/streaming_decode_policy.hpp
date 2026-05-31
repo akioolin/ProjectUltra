@@ -14,11 +14,9 @@ inline size_t estimateRobustOFDMControlSamples(size_t default_control_samples,
                                                Modulation data_mod,
                                                CodeRate data_rate,
                                                int carriers,
-                                               int samples_per_symbol,
-                                               bool coherent_control_enabled = true) {
+                                               int samples_per_symbol) {
     const auto control_profile =
-        streaming_control_profile::profileForDataMode(
-            data_mod, coherent_control_enabled);
+        streaming_control_profile::profileForDataMode(data_mod);
     if (control_profile.modulation == data_mod && data_rate == control_profile.rate) {
         return default_control_samples;
     }

@@ -620,9 +620,8 @@ void StreamingDecoder::decodeCurrentFrame() {
     }
 
     // Connected OFDM control-first hypothesis:
-    // Try the control profile before using the data profile. Coherent data
-    // links use coherent QPSK R1/4 control; differential data links retain
-    // DQPSK R1/4 control.
+    // Try the control profile before using the data profile. OFDM is coherent-only,
+    // so control always rides coherent QPSK R1/4 (same receiver family as the data).
     const bool first_pass_ofdm_peek = frame_policy::shouldRunControlFirstOFDMPeek(
         pending_total_cw_, is_ofdm, connected_, frame_len,
         getOFDMControlFrameSamplesForCurrentMode());
@@ -631,8 +630,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         Modulation saved_mod = current_modulation_;
         CodeRate saved_rate = code_rate_;
         const auto control_profile =
-            streaming_control_profile::profileForDataMode(
-                saved_mod, coherent_ofdm_control_profile_enabled_);
+            streaming_control_profile::profileForDataMode(saved_mod);
         bool switched_profile =
             (saved_mod != control_profile.modulation ||
              saved_rate != control_profile.rate);

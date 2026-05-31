@@ -397,7 +397,6 @@ public:
     void seedExpectedFrameArrivalAfterSamples(size_t delay_samples,
                                               float confidence = 0.50f);
     void setAdaptiveShortDataPreamble(bool enable);
-    void setCoherentOFDMControlProfileEnabled(bool enable);
 
     // Get number of samples in buffer
     size_t samplesInBuffer() const;
@@ -664,7 +663,6 @@ private:
     std::unique_ptr<IWaveform> waveform_;
     protocol::WaveformMode mode_ = protocol::WaveformMode::MC_DPSK;
     bool connected_ = false;
-    bool coherent_ofdm_control_profile_enabled_ = false;
 
     // Dual-listen: narrowband waveform for detecting narrowband chirps when disconnected
     // Lazy-initialized on first search to avoid startup cost

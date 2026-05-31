@@ -210,9 +210,6 @@ public:
 
     void setAdaptiveShortDataPreamble(bool enable);
     bool getAdaptiveShortDataPreamble() const { return adaptive_short_data_preamble_; }
-    void setCoherentOFDMControlProfileEnabled(bool enable) {
-        coherent_ofdm_control_profile_enabled_ = enable;
-    }
 
     void setPaprReductionEnabled(bool enable);
     bool getPaprReductionEnabled() const { return papr_reduction_enabled_; }
@@ -291,7 +288,6 @@ private:
     // the descriptor's encodeFrame. See forceNextBurstGroupStartFullPreamble().
     bool force_burst_group_start_full_preamble_ = false;
     bool adaptive_short_data_preamble_ = false;
-    bool coherent_ofdm_control_profile_enabled_ = false;
     bool papr_reduction_enabled_ = phy::kPaprReductionDefaultEnabled;
     float papr_reduction_threshold_db_ = phy::kOfdmPaprReductionDefaultThresholdDb;
     phy::PaprReductionMeasurement last_papr_reduction_;

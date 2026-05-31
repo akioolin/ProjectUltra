@@ -22,39 +22,32 @@ int tests_failed = 0;
     } while (0)
 
 void test_robust_ofdm_control_samples() {
-    CHECK(estimateRobustOFDMControlSamples(8000, Modulation::DQPSK, CodeRate::R1_4, 59, 1152) == 8000,
-          "native DQPSK R1/4 control profile should use waveform default");
-
-    const size_t robust_d8psk = estimateRobustOFDMControlSamples(
-        8000, Modulation::D8PSK, CodeRate::R2_3, 59, 1152);
-    CHECK(robust_d8psk == 10368,
-          "differential high-rate data mode should reserve enough samples for DQPSK control");
-
+    // OFDM is coherent-only (thread A): control frames always ride coherent
+    // QPSK R1/4, regardless of the (coherent) data modulation.
     const auto qpsk_control =
         streaming_control_profile::profileForDataMode(Modulation::QPSK);
     CHECK(qpsk_control.modulation == Modulation::QPSK,
-          "coherent data should use coherent QPSK control");
+          "OFDM control should always be coherent QPSK");
     CHECK(qpsk_control.rate == CodeRate::R1_4,
-          "coherent control should retain hardened R1/4 FEC");
+          "OFDM control should retain hardened R1/4 FEC");
+
+    // Native QPSK R1/4 data: the control profile already matches the data
+    // profile, so the robust estimate is exactly the waveform default.
+    CHECK(estimateRobustOFDMControlSamples(8000, Modulation::QPSK, CodeRate::R1_4, 59, 1152) == 8000,
+          "native QPSK R1/4 data should use the waveform control default");
+
+    // Higher coherent rungs differ from the QPSK R1/4 control profile, so the
+    // peek is sized for a full QPSK R1/4 control codeword.
     const size_t robust_qpsk = estimateRobustOFDMControlSamples(
         8000, Modulation::QPSK, CodeRate::R2_3, 59, 1152);
     CHECK(robust_qpsk == 10368,
           "QPSK R2/3 data should reserve enough samples for QPSK R1/4 control");
 
-    const auto qpsk_control_preconfirm =
-        streaming_control_profile::profileForDataMode(Modulation::QPSK, false);
-    CHECK(qpsk_control_preconfirm.modulation == Modulation::DQPSK,
-          "unconfirmed OFDM handoff should retain legacy DQPSK control");
-    const size_t legacy_preconfirm = estimateRobustOFDMControlSamples(
-        8000, Modulation::QPSK, CodeRate::R2_3, 59, 1152, false);
-    CHECK(legacy_preconfirm == 10368,
-          "pre-confirmation OFDM control sizing should use legacy DQPSK R1/4 sizing");
-
-    CHECK(estimateRobustOFDMControlSamples(12000, Modulation::D8PSK, CodeRate::R2_3, 59, 1152) == 12000,
+    CHECK(estimateRobustOFDMControlSamples(12000, Modulation::QAM16, CodeRate::R2_3, 59, 1152) == 12000,
           "robust estimate should never reduce waveform default");
-    CHECK(estimateRobustOFDMControlSamples(8000, Modulation::D8PSK, CodeRate::R2_3, 0, 1152) == 8000,
+    CHECK(estimateRobustOFDMControlSamples(8000, Modulation::QAM16, CodeRate::R2_3, 0, 1152) == 8000,
           "invalid carrier count should fall back to waveform default");
-    CHECK(estimateRobustOFDMControlSamples(8000, Modulation::D8PSK, CodeRate::R2_3, 59, 0) == 8000,
+    CHECK(estimateRobustOFDMControlSamples(8000, Modulation::QAM16, CodeRate::R2_3, 59, 0) == 8000,
           "invalid symbol size should fall back to waveform default");
 }
 

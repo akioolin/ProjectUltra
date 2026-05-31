@@ -322,8 +322,7 @@ std::vector<float> StreamingEncoder::encodeFrame(const Bytes& frame_data) {
     bool is_ofdm = protocol::isOFDMMode(mode_);
     bool use_control_profile = is_ofdm && isControlFrameBytes(frame_data);
     const auto control_profile =
-        streaming_control_profile::profileForDataMode(
-            modulation_, coherent_ofdm_control_profile_enabled_);
+        streaming_control_profile::profileForDataMode(modulation_);
     Modulation tx_mod = use_control_profile ? control_profile.modulation : modulation_;
     CodeRate tx_rate = use_control_profile ? control_profile.rate : code_rate_;
 
@@ -384,8 +383,7 @@ std::vector<float> StreamingEncoder::encodeFrameLight(const Bytes& frame_data) {
     bool is_ofdm = protocol::isOFDMMode(mode_);
     bool use_control_profile = is_ofdm && isControlFrameBytes(frame_data);
     const auto control_profile =
-        streaming_control_profile::profileForDataMode(
-            modulation_, coherent_ofdm_control_profile_enabled_);
+        streaming_control_profile::profileForDataMode(modulation_);
     Modulation tx_mod = use_control_profile ? control_profile.modulation : modulation_;
     CodeRate tx_rate = use_control_profile ? control_profile.rate : code_rate_;
 
