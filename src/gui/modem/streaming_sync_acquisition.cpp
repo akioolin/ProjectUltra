@@ -616,7 +616,7 @@ void StreamingDecoder::searchForSync() {
         light_sync_candidate_window_samples);
 
     if (use_light_search) {
-        float known_cfo = last_cfo_.load();
+        float known_cfo = sync_controller_.last_cfo_.load();
 
         if (use_short_reanchor_search) {
             found = waveform_->detectShortDataSync(
@@ -648,7 +648,7 @@ void StreamingDecoder::searchForSync() {
             // sync threshold is 0.90 because stale LTS phases can't be
             // recovered by DD tracking alone. In the warm-handoff regime we
             // are NOT stale — the BURST_HEADER just decoded with a fresh full
-            // chirp+LTS anchor and seeded last_cfo_. This override is a
+            // chirp+LTS anchor and seeded sync_controller_.last_cfo_. This override is a
             // BACKSTOP for a group-start DATA frame whose light-LTS dips just
             // under 0.90 right after a known-good anchor. The PRIMARY fix for
             // group-boundary acquisition is re-arming the descriptor chirp
@@ -807,7 +807,7 @@ void StreamingDecoder::searchForSync() {
                     search_start, min_search);
             }
             SyncResult light_sync_result;
-            const float known_cfo = last_cfo_.load();
+            const float known_cfo = sync_controller_.last_cfo_.load();
             const bool light_found = waveform_->detectDataSync(
                 SampleSpan(search_buffer.data(), search_buffer.size()),
                 light_sync_result, known_cfo, CORR_DETECT_THRESHOLD);
@@ -959,7 +959,7 @@ void StreamingDecoder::searchForSync() {
         // by multipath (peaks shift differently for up vs down chirp).
         // When connected, trust the established CFO and limit drift.
         float new_cfo = sync_result.cfo_hz;
-        float known_cfo = last_cfo_.load();
+        float known_cfo = sync_controller_.last_cfo_.load();
 
         const auto cfo_decision = signal_policy::limitConnectedCFODrift(
             connected_, new_cfo, known_cfo);
@@ -988,7 +988,7 @@ void StreamingDecoder::searchForSync() {
         state_ = DecoderState::SYNC_FOUND;
 
         last_snr_.store(sync_snr_);
-        last_cfo_.store(sync_cfo_);
+        sync_controller_.last_cfo_.store(sync_cfo_);
 
         LOG_MODEM(INFO, "[%s] SYNC at pos=%zu, CFO=%.1f Hz, SNR=%.1f dB (%s)",
                   log_prefix_.c_str(), sync_position_, sync_cfo_, sync_snr_,

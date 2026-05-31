@@ -28,6 +28,7 @@
 #include "waveform/waveform_interface.hpp"   // IWaveform, SyncResult, SampleSpan
 #include "protocol/frame_v2.hpp"             // protocol::WaveformMode
 
+#include <atomic>
 #include <cstddef>
 
 namespace ultra {
@@ -74,7 +75,7 @@ public:
 
     SyncMode mode() const { return mode_; }
     bool isWarm() const { return mode_ == SyncMode::WARM; }
-    float lastCfo() const { return last_cfo_; }
+    float lastCfo() const { return last_cfo_.load(); }
 
     // --- migration accessors (shell-move §7.5#1) ---------------------------------
     // Temporary getters/setters so StreamingDecoder can move its state in member-by-
@@ -97,6 +98,9 @@ public:
     size_t   expected_frame_gap_samples_ = 0;        // cadence gap (§1.2 never-set bug)
     bool     expect_full_ofdm_anchor_ = false;       // force a full chirp on the next anchor
                                                      // (the 11-flip flag; becomes SyncMode in Phase D)
+    // CFO acquisition state (§7.7#1). ATOMIC — touched by RX + control threads; the
+    // CFO feedback loop (.load()/.store()) routes through here.
+    std::atomic<float> last_cfo_{0.0f};
 
 private:
     // --- migrated from StreamingDecoder (audit §1.2) — the single home for this state ---
@@ -104,7 +108,6 @@ private:
     protocol::WaveformMode waveform_mode_ = protocol::WaveformMode::OFDM_CHIRP;
     IWaveform* waveform_ = nullptr;        // borrowed; detectors live here (NOT owned)
     bool  is_coherent_ = false;
-    float last_cfo_ = 0.0f;                // was StreamingDecoder::last_cfo_ (atomic move pending)
 
     // WARM→RE_ACQUIRE escalation threshold (consecutive predicted-position LDPC failures).
     static constexpr int kReacquireAfterMisses = 2;

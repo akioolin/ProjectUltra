@@ -338,10 +338,10 @@ public:
     float getLastSyncQualityDb() const { return last_snr_.load(); }
 
     // Get last measured CFO
-    float getLastCFO() const { return last_cfo_.load(); }
+    float getLastCFO() const { return sync_controller_.last_cfo_.load(); }
 
     // Set known CFO (for testing or when CFO is known from other source)
-    void setKnownCFO(float cfo_hz) { last_cfo_.store(cfo_hz); }
+    void setKnownCFO(float cfo_hz) { sync_controller_.last_cfo_.store(cfo_hz); }
 
     // Expect the next connected OFDM frame to carry full chirp+LTS preamble.
     // This bootstraps OFDM-specific timing after an MC-DPSK handshake.
@@ -720,7 +720,6 @@ private:
     mutable std::atomic<bool> last_ofdm_broadband_snr_db_valid_{false};
     mutable std::atomic<float> last_ofdm_broadband_snr_db_{0.0f};
     IdleNoiseSNREstimator idle_noise_snr_estimator_;
-    std::atomic<float> last_cfo_{0.0f};
     std::atomic<float> last_fading_index_{0.0f};
     float noise_floor_ = 0.001f;
     float pre_correction_cfo_ = 0.0f;  // CFO used for last pre-correction (for feedback adjustment)

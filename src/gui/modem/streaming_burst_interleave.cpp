@@ -433,7 +433,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     const auto cfo_update = signal_policy::combinePilotCFO(
         burst_pre_cfo, residual_cfo, burst_cfo_, /*clamp_drift=*/true);
     burst_cfo_ = cfo_update.accepted_cfo;
-    last_cfo_.store(cfo_update.accepted_cfo);
+    sync_controller_.last_cfo_.store(cfo_update.accepted_cfo);
     last_fading_index_.store(waveform_->getFadingIndex());
 
     burst_soft_buffer_.push_back(std::move(soft));
@@ -665,7 +665,7 @@ void StreamingDecoder::finalizeBurstGroup() {
                   arrival_policy::warmSyncPhaseName(warm_sync_phase_),
                   sync_controller_.consecutive_sync_misses_,
                   sync_controller_.frame_arrival_confidence_,
-                  last_cfo_.load(),
+                  sync_controller_.last_cfo_.load(),
                   static_cast<unsigned long long>(sync_controller_.next_expected_frame_sample_),
                   static_cast<unsigned long long>(last_frame_end_sample_),
                   sync_controller_.expect_full_ofdm_anchor_ ? 1 : 0,

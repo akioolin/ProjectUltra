@@ -834,7 +834,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 arrival_policy::warmSyncPhaseName(warm_sync_phase_),
                                 sync_controller_.consecutive_sync_misses_,
                                 sync_controller_.frame_arrival_confidence_,
-                                last_cfo_.load(),
+                                sync_controller_.last_cfo_.load(),
                                 static_cast<unsigned long long>(sync_controller_.next_expected_frame_sample_),
                                 static_cast<unsigned long long>(last_frame_end_sample_),
                                 sync_controller_.expect_full_ofdm_anchor_ ? 1 : 0,
@@ -894,7 +894,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                                     log_prefix_.c_str(),
                                     arrival_policy::warmSyncPhaseName(warm_sync_phase_),
                                     sync_controller_.frame_arrival_confidence_,
-                                    last_cfo_.load());
+                                    sync_controller_.last_cfo_.load());
                             }
                             // §16.8 step 1: post-reset snapshot. What did we throw
                             // away?
@@ -905,7 +905,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 arrival_policy::warmSyncPhaseName(warm_sync_phase_),
                                 sync_controller_.consecutive_sync_misses_,
                                 sync_controller_.frame_arrival_confidence_,
-                                last_cfo_.load(),
+                                sync_controller_.last_cfo_.load(),
                                 sync_controller_.expect_full_ofdm_anchor_ ? 1 : 0);
                             state_ = DecoderState::SEARCHING;
                             return;  // consumed; the data group follows next
@@ -1204,10 +1204,10 @@ void StreamingDecoder::decodeCurrentFrame() {
         DecodeResult first_metrics;
         populateDecodeMetrics(first_metrics, is_ofdm, residual_cfo);
         burst_metric_templates_.push_back(first_metrics);
-        const float current_cfo = last_cfo_.load();
+        const float current_cfo = sync_controller_.last_cfo_.load();
         const auto cfo_update = signal_policy::combinePilotCFO(
             pre_correction_cfo_, residual_cfo, current_cfo, /*clamp_drift=*/true);
-        last_cfo_.store(cfo_update.accepted_cfo);
+        sync_controller_.last_cfo_.store(cfo_update.accepted_cfo);
         burst_cfo_ = cfo_update.accepted_cfo;
         beginBurstDiagnosticsGroup(frame_sync_abs, burst_soft_buffer_.back(),
                                    sampleRMS(frame_buffer),
@@ -1240,7 +1240,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         // waveform_->estimatedCFO() returns the RESIDUAL (pre-correction error).
         // Add back the pre-correction amount to get the true total CFO.
         const float residual_cfo = waveform_->estimatedCFO();
-        const float current_cfo = last_cfo_.load();
+        const float current_cfo = sync_controller_.last_cfo_.load();
         const auto cfo_update = signal_policy::combinePilotCFO(
             pre_correction_cfo_, residual_cfo, current_cfo, connected_);
         if (cfo_update.clamped) {
@@ -1254,7 +1254,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                       log_prefix_.c_str(), current_cfo, cfo_update.accepted_cfo,
                       pre_correction_cfo_, residual_cfo);
         }
-        last_cfo_.store(cfo_update.accepted_cfo);
+        sync_controller_.last_cfo_.store(cfo_update.accepted_cfo);
         sync_cfo_ = cfo_update.accepted_cfo;
     }
 
@@ -1655,10 +1655,10 @@ void StreamingDecoder::decodeCurrentFrame() {
 
                 // Keep CFO tracking consistent with the accepted retry candidate.
                 const float residual_cfo = waveform_->estimatedCFO();
-                const float current_cfo = last_cfo_.load();
+                const float current_cfo = sync_controller_.last_cfo_.load();
                 const auto cfo_update = signal_policy::combinePilotCFO(
                     pre_correction_cfo_, residual_cfo, current_cfo, connected_);
-                last_cfo_.store(cfo_update.accepted_cfo);
+                sync_controller_.last_cfo_.store(cfo_update.accepted_cfo);
                 sync_cfo_ = cfo_update.accepted_cfo;
 
                 sync_position_ = retry_sync;
@@ -1947,7 +1947,7 @@ void StreamingDecoder::decodeCurrentFrame() {
             const auto cfo_update = signal_policy::combinePilotCFO(
                 0.0f, residual_cfo, sync_cfo_, /*clamp_drift=*/true);
             sync_cfo_ = cfo_update.accepted_cfo;
-            last_cfo_.store(cfo_update.accepted_cfo);
+            sync_controller_.last_cfo_.store(cfo_update.accepted_cfo);
 
             // Decode the continuation block
             DecodeResult next_result = decodeFrame(next_soft_bits, sync_snr_, sync_cfo_);

@@ -1207,7 +1207,7 @@ void StreamingDecoder::reset() {
     last_snr_.store(0.0f);
     last_ofdm_broadband_snr_db_valid_.store(false);
     last_ofdm_broadband_snr_db_.store(0.0f);
-    last_cfo_.store(0.0f);
+    sync_controller_.last_cfo_.store(0.0f);
     last_fading_index_.store(0.0f);
 }
 
