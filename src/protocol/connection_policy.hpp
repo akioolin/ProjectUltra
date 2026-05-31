@@ -214,24 +214,28 @@ inline LadderRung selectLadderRung(float snr_db, ChannelClassification channel) 
     float robust_floor = 13.0f;
     float robust_mid_floor = 5.0f;
 
+    // OFDM entry floors are the SINGLE source in waveform_selection.hpp
+    // (kOFDMEntryFloor*Db) so this enum-keyed path and the fading-index-keyed
+    // recommendWaveformAndRate() can't drift. robust_*/robust_mid_* are the
+    // MC-DPSK fallback floors, local to this ladder.
     switch (channel) {
         case ChannelClassification::AWGN:
-            ofdm_floor = 10.0f;
+            ofdm_floor = kOFDMEntryFloorAwgnDb;
             robust_floor = 13.0f;
             robust_mid_floor = 5.0f;
             break;
         case ChannelClassification::GOOD:
-            ofdm_floor = 12.0f;
+            ofdm_floor = kOFDMEntryFloorGoodDb;
             robust_floor = 14.0f;
             robust_mid_floor = 6.0f;
             break;
         case ChannelClassification::MODERATE:
-            ofdm_floor = 14.0f;
+            ofdm_floor = kOFDMEntryFloorModerateDb;
             robust_floor = 15.0f;
             robust_mid_floor = 7.0f;
             break;
         case ChannelClassification::POOR:
-            ofdm_floor = 18.0f;
+            ofdm_floor = kOFDMEntryFloorPoorDb;
             robust_floor = 17.0f;
             robust_mid_floor = 9.0f;
             break;

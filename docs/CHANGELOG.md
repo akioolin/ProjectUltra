@@ -10,6 +10,25 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-30: De-dup the OFDM entry-SNR floor + delete 3 dead dev files (alpha cleanup)
+
+**Entry-floor de-dup:** the OFDM "is wideband viable?" entry floor (AWGN 10 / Good 12 /
+Moderate 14 / Poor 18 dB) was hardcoded TWICE — `connection_policy.hpp::selectLadderRung`
+(enum-keyed) and `waveform_selection.hpp::recommendWaveformAndRate` (fading-index-keyed). Same
+decision, two literal copies that could silently drift. Extracted to single-source constants
+`kOFDMEntryFloor{Awgn,Good,Moderate,Poor}Db` in `waveform_selection.hpp` (included by
+connection_policy); both sites now reference them. Behavior-neutral (named constants == the
+literals). Verified: `WaveformPolicy` PASS; `ConnectionPolicy` 188/189 (the 1 fail —
+`shouldPadHighRateFadingBurst(...,8)` — is a PRE-EXISTING stale-default drift: the test assumes
+burst group size 8, the code default `kBurstInterleaveGroupFrames` is 16; fails identically at
+HEAD without this change). NOTE for follow-up: reconcile that group-size default vs the 6 the
+GUI harness pins and the 8 the test expects.
+
+**Deleted 3 dead dev files** (no build target, only historical doc mentions): `tools/channel_probe.cpp`
++ `tools/analyze_channel_probe.py` (one-off Watterson-validation oracle), `tools/sweep_coherent_ladder.py`.
+
+---
+
 ## 2026-05-30: Retire the agents/ autonomous system + Mac↔Pi5 hardware-cable rig (alpha cleanup)
 
 **Why:** the `agents/` autonomous task-runner (planner/queue/approval/watchdogs) and the

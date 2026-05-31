@@ -21,6 +21,16 @@
 namespace ultra {
 namespace protocol {
 
+// OFDM "is the wideband waveform viable?" ENTRY floors (in-band SNR, dB), keyed by
+// channel class. SINGLE source of truth: both recommendWaveformAndRate() below
+// (fading-index-keyed) and connection_policy::selectLadderRung() (enum-keyed)
+// reference these, so the OFDM-vs-MC-DPSK entry decision cannot drift between the
+// two call sites. Classification thresholds: <0.15 AWGN, <0.65 Good, <1.10 Moderate.
+inline constexpr float kOFDMEntryFloorAwgnDb = 10.0f;
+inline constexpr float kOFDMEntryFloorGoodDb = 12.0f;
+inline constexpr float kOFDMEntryFloorModerateDb = 14.0f;
+inline constexpr float kOFDMEntryFloorPoorDb = 18.0f;
+
 inline constexpr float kQAM16AwgnFadingMax = 0.15f;
 inline constexpr float kQAM16AwgnSnrFloorDb = 16.0f;
 inline constexpr float kQAM16AwgnR12SnrFloorDb = 19.0f;
@@ -456,9 +466,9 @@ inline CodeRate capInitialOFDMRate(float snr_db,
 inline WaveformRecommendation recommendWaveformAndRate(float snr_db, float fading_index) {
     WaveformRecommendation rec;
     const float ofdm_floor =
-        (fading_index < 0.15f) ? 10.0f :
-        (fading_index < 0.65f) ? 12.0f :
-        (fading_index < 1.10f) ? 14.0f : 18.0f;
+        (fading_index < 0.15f) ? kOFDMEntryFloorAwgnDb :
+        (fading_index < 0.65f) ? kOFDMEntryFloorGoodDb :
+        (fading_index < 1.10f) ? kOFDMEntryFloorModerateDb : kOFDMEntryFloorPoorDb;
 
     if (snr_db < ofdm_floor) {
         // Low SNR: MC-DPSK 8 carriers is most robust
