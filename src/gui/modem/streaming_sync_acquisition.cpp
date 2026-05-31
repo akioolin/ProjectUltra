@@ -466,9 +466,9 @@ void StreamingDecoder::searchForSync() {
             // Typical OTA values observed around 0.02-0.04 RMS; keep floor low enough
             // to avoid starving detectDataSync() while still skipping true silence.
             rms_gate = std::clamp(noise_floor_ * 2.2f, 0.015f, 0.040f);
-            if (sync_reject_streak_ >= 8) {
+            if (sync_controller_.sync_reject_streak_ >= 8) {
                 float relax = std::min(0.010f,
-                                       0.001f * static_cast<float>(sync_reject_streak_ - 7));
+                                       0.001f * static_cast<float>(sync_controller_.sync_reject_streak_ - 7));
                 rms_gate = std::max(0.012f, rms_gate - relax);
             }
         }
@@ -611,7 +611,7 @@ void StreamingDecoder::searchForSync() {
     const size_t light_sync_candidate_window_samples =
         used_warm_narrow_window ? warm_narrow_candidate_span_samples : LIGHT_SEARCH_SIZE;
     const auto light_sync_thresholds = signal_policy::lightSyncThresholds(
-        is_coherent, is_narrowband, connected_, sync_reject_streak_,
+        is_coherent, is_narrowband, connected_, sync_controller_.sync_reject_streak_,
         used_warm_narrow_window, LIGHT_SEARCH_SIZE,
         light_sync_candidate_window_samples);
 
@@ -624,7 +624,7 @@ void StreamingDecoder::searchForSync() {
                 sync_result, known_cfo, CORR_DETECT_THRESHOLD,
                 short_reanchor_chirp_ms);
             if (found) {
-                sync_reject_streak_ = 0;
+                sync_controller_.sync_reject_streak_ = 0;
                 LOG_MODEM(INFO,
                           "[%s] DATA sync detected by short re-anchor (chirp=%.0f ms, known CFO=%.1f Hz, corr=%.2f)",
                           log_prefix_.c_str(), short_reanchor_chirp_ms,
@@ -643,7 +643,7 @@ void StreamingDecoder::searchForSync() {
             // Reject clear false positives (noise floor is ~0.2-0.4)
             auto sync_decision = signal_policy::evaluateLightSyncCandidate(
                 found, sync_result.correlation, is_coherent, connected_,
-                sync_reject_streak_, light_sync_thresholds);
+                sync_controller_.sync_reject_streak_, light_sync_thresholds);
             // §16.8 step 2 (ULTRA_S16_WARM_HANDOFF): the coherent-QPSK
             // sync threshold is 0.90 because stale LTS phases can't be
             // recovered by DD tracking alone. In the warm-handoff regime we
@@ -682,7 +682,7 @@ void StreamingDecoder::searchForSync() {
                     LOG_MODEM(INFO, "[%s] DATA sync weak-accepted (corr=%.2f < %.2f, streak=%llu)",
                               log_prefix_.c_str(), sync_result.correlation,
                               light_sync_thresholds.min_confidence,
-                              static_cast<unsigned long long>(sync_reject_streak_));
+                              static_cast<unsigned long long>(sync_controller_.sync_reject_streak_));
                 } else if (sync_decision.rejected) {
                     LOG_MODEM(INFO, "[%s] DATA sync rejected (corr=%.2f < %.2f, streak=%llu)",
                               log_prefix_.c_str(), sync_result.correlation,
@@ -725,7 +725,7 @@ void StreamingDecoder::searchForSync() {
             }
 
             found = sync_decision.found;
-            sync_reject_streak_ = sync_decision.next_reject_streak;
+            sync_controller_.sync_reject_streak_ = sync_decision.next_reject_streak;
 
             if (found) {
                 if (light_sync_thresholds.narrow_expected_window) {
@@ -761,11 +761,11 @@ void StreamingDecoder::searchForSync() {
             if (s16_escalate_on && !found && connected_ &&
                 mode_ == protocol::WaveformMode::OFDM_CHIRP &&
                 !expect_full_ofdm_anchor_ &&
-                sync_reject_streak_ >=
+                sync_controller_.sync_reject_streak_ >=
                     signal_policy::kConnectedOFDMReanchorEscalateStreak) {
                 std::lock_guard<std::mutex> lock(buffer_mutex_);
                 expect_full_ofdm_anchor_ = true;
-                sync_reject_streak_ = 0;
+                sync_controller_.sync_reject_streak_ = 0;
                 LOG_MODEM(INFO,
                     "[%s] §16.4 escalation: %llu light rejects at group boundary; "
                     "arming full chirp+LTS re-anchor for sender RESEND",
@@ -821,18 +821,18 @@ void StreamingDecoder::searchForSync() {
             const bool unknown_frame_uses_control_sync_threshold = false;
             const auto fallback_thresholds = signal_policy::lightSyncThresholds(
                 unknown_frame_uses_control_sync_threshold, is_narrowband,
-                connected_, sync_reject_streak_);
+                connected_, sync_controller_.sync_reject_streak_);
             auto sync_decision = signal_policy::evaluateLightSyncCandidate(
                 light_found, light_sync_result.correlation,
                 unknown_frame_uses_control_sync_threshold, connected_,
-                sync_reject_streak_, fallback_thresholds);
+                sync_controller_.sync_reject_streak_, fallback_thresholds);
             if (light_found && light_sync_result.correlation < fallback_thresholds.min_confidence) {
                 if (sync_decision.weak_accept) {
                     LOG_MODEM(INFO,
                               "[%s] Full-anchor wait fell back to weak DATA sync (corr=%.2f < %.2f, streak=%llu)",
                               log_prefix_.c_str(), light_sync_result.correlation,
                               fallback_thresholds.min_confidence,
-                              static_cast<unsigned long long>(sync_reject_streak_));
+                              static_cast<unsigned long long>(sync_controller_.sync_reject_streak_));
                 } else if (sync_decision.rejected) {
                     LOG_MODEM(INFO,
                               "[%s] Full-anchor wait rejected DATA fallback (corr=%.2f < %.2f, streak=%llu)",
@@ -841,7 +841,7 @@ void StreamingDecoder::searchForSync() {
                               static_cast<unsigned long long>(sync_decision.next_reject_streak));
                 }
             }
-            sync_reject_streak_ = sync_decision.next_reject_streak;
+            sync_controller_.sync_reject_streak_ = sync_decision.next_reject_streak;
             if (sync_decision.found) {
                 found = true;
                 sync_result = light_sync_result;

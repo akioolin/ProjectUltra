@@ -730,7 +730,6 @@ private:
     float noise_floor_ = 0.001f;
     float pre_correction_cfo_ = 0.0f;  // CFO used for last pre-correction (for feedback adjustment)
     uint64_t overflow_events_ = 0;
-    uint64_t sync_reject_streak_ = 0;
 
     // Constellation cache (protected by buffer_mutex_)
     mutable std::vector<std::complex<float>> constellation_cache_;

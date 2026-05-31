@@ -83,6 +83,14 @@ public:
     size_t expectedFrameGapSamples() const { return expected_frame_gap_; }
     void setExpectedFrameGapSamples(size_t samples) { expected_frame_gap_ = samples; }
 
+    // --- TRANSITIONAL PUBLIC shell-move state (refactor §7.5#1) -------------------
+    // These were StreamingDecoder members; relocated here verbatim so the (still-
+    // external) orchestration reads/writes them as `sync_controller_.<name>`. They
+    // are public ONLY during the shell-move and get re-privatized behind
+    // detect()/reportFrameOutcome()/noteGroupBoundary() in the behavioral phase.
+    // KEEP names identical to the old StreamingDecoder members (mechanical move).
+    uint64_t sync_reject_streak_ = 0;   // consecutive COLD/RE_ACQUIRE light-sync rejects
+
 private:
     // --- migrated from StreamingDecoder (audit §1.2) — the single home for this state ---
     SyncMode mode_ = SyncMode::COLD;

@@ -870,7 +870,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                                     // window past the BURST_HEADER so the data
                                     // group is picked up next.
                                     expect_full_ofdm_anchor_ = false;
-                                    sync_reject_streak_ = 0;
+                                    sync_controller_.sync_reject_streak_ = 0;
                                     correlation_pos_ = wrapRingIndexLocked(
                                         sync_position_ + frame_len);
                                     setSearchFloorLocked(frame_sync_abs + frame_len);
@@ -879,7 +879,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                                     sync_from_warm_timed_window_ = false;
                                     resetFrameArrivalTrackingLocked();
                                     expect_full_ofdm_anchor_ = true;
-                                    sync_reject_streak_ = 0;
+                                    sync_controller_.sync_reject_streak_ = 0;
                                     correlation_pos_ = wrapRingIndexLocked(
                                         sync_position_ + frame_len);
                                     setSearchFloorLocked(frame_sync_abs + frame_len);
@@ -958,7 +958,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                             if (file_cancel_control) {
                                 resetFrameArrivalTrackingLocked();
                                 expect_full_ofdm_anchor_ = true;
-                                sync_reject_streak_ = 0;
+                                sync_controller_.sync_reject_streak_ = 0;
                             } else {
                                 // A pending connected full-anchor request is for
                                 // the next DATA burst after a turn/control
@@ -1846,7 +1846,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         if (mode_ == protocol::WaveformMode::OFDM_CHIRP) {
             resetFrameArrivalTrackingLocked();
             expect_full_ofdm_anchor_ = true;
-            sync_reject_streak_ = 0;
+            sync_controller_.sync_reject_streak_ = 0;
             LOG_MODEM(WARN,
                       "[%s] OFDM decode failed with 0/%d CWs; forcing full chirp+LTS re-anchor",
                       log_prefix_.c_str(), result.codewords_failed);

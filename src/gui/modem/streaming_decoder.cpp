@@ -655,7 +655,7 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
 
     state_ = DecoderState::SEARCHING;
     pending_total_cw_ = 0;
-    sync_reject_streak_ = 0;
+    sync_controller_.sync_reject_streak_ = 0;
     expect_full_ofdm_anchor_ = false;
     sync_from_warm_timed_window_ = false;
     resetFrameArrivalTrackingLocked();
@@ -702,7 +702,7 @@ void StreamingDecoder::expectFullOFDMAnchorOnce() {
     }
 
     expect_full_ofdm_anchor_ = true;
-    sync_reject_streak_ = 0;
+    sync_controller_.sync_reject_streak_ = 0;
     LOG_MODEM(INFO, "StreamingDecoder: expecting full OFDM chirp+LTS timing anchor");
 }
 
@@ -861,7 +861,7 @@ void StreamingDecoder::applyPendingConnectedOFDMMode() {
 
     state_ = DecoderState::SEARCHING;
     pending_total_cw_ = 0;
-    sync_reject_streak_ = 0;
+    sync_controller_.sync_reject_streak_ = 0;
     expect_full_ofdm_anchor_ = preserve_full_anchor;
     sync_from_warm_timed_window_ = false;
     resetFrameArrivalTrackingLocked();
@@ -1170,7 +1170,7 @@ void StreamingDecoder::reset() {
     total_fed_ = 0;
     feed_iter_ = 0;
     overflow_events_ = 0;
-    sync_reject_streak_ = 0;
+    sync_controller_.sync_reject_streak_ = 0;
     expect_full_ofdm_anchor_ = false;
     sync_from_warm_timed_window_ = false;
     resetFrameArrivalTrackingLocked();
