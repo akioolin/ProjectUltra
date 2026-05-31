@@ -208,7 +208,7 @@ void StreamingDecoder::searchForSync() {
     size_t chirp_min_search = std::min(preamble + 65000, CHIRP_MAX_SEARCH);
     bool connected_data_preamble = connected_ && waveform_->supportsDataPreamble();
     bool use_full_ofdm_anchor_search =
-        connected_data_preamble && expect_full_ofdm_anchor_ &&
+        connected_data_preamble && sync_controller_.expect_full_ofdm_anchor_ &&
         mode_ == protocol::WaveformMode::OFDM_CHIRP;
     bool use_light_search = connected_data_preamble && !use_full_ofdm_anchor_search;
     bool used_full_anchor_fallback = false;
@@ -286,7 +286,7 @@ void StreamingDecoder::searchForSync() {
             s16_warm_handoff_w &&
             warm_sync_phase_ ==
                 arrival_policy::WarmSyncPhase::WARM &&
-            !expect_full_ofdm_anchor_;
+            !sync_controller_.expect_full_ofdm_anchor_;
         const size_t expected_sync_search_sample =
             (!s16_skip_short_lead &&
              use_short_reanchor_search &&
@@ -751,7 +751,7 @@ void StreamingDecoder::searchForSync() {
             // re-anchor: the sender pays for a chirp on its RESEND
             // (force_full_preamble), and the full-anchor search path also
             // applies the 0.52 differential threshold that can admit a
-            // still-arriving first-attempt light frame. expect_full_ofdm_anchor_
+            // still-arriving first-attempt light frame. sync_controller_.expect_full_ofdm_anchor_
             // is cleared again after the next clean data decode, so this is a
             // one-group escalation, not a permanent revert to per-group chirps.
             const char* s16_escalate_env =
@@ -760,11 +760,11 @@ void StreamingDecoder::searchForSync() {
                 s16_escalate_env && std::atoi(s16_escalate_env) != 0;
             if (s16_escalate_on && !found && connected_ &&
                 mode_ == protocol::WaveformMode::OFDM_CHIRP &&
-                !expect_full_ofdm_anchor_ &&
+                !sync_controller_.expect_full_ofdm_anchor_ &&
                 sync_controller_.sync_reject_streak_ >=
                     signal_policy::kConnectedOFDMReanchorEscalateStreak) {
                 std::lock_guard<std::mutex> lock(buffer_mutex_);
-                expect_full_ofdm_anchor_ = true;
+                sync_controller_.expect_full_ofdm_anchor_ = true;
                 sync_controller_.sync_reject_streak_ = 0;
                 LOG_MODEM(INFO,
                     "[%s] §16.4 escalation: %llu light rejects at group boundary; "

@@ -95,6 +95,8 @@ public:
     float    frame_arrival_confidence_ = 0.0f;
     int      consecutive_sync_misses_ = 0;
     size_t   expected_frame_gap_samples_ = 0;        // cadence gap (§1.2 never-set bug)
+    bool     expect_full_ofdm_anchor_ = false;       // force a full chirp on the next anchor
+                                                     // (the 11-flip flag; becomes SyncMode in Phase D)
 
 private:
     // --- migrated from StreamingDecoder (audit §1.2) — the single home for this state ---

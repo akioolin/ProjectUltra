@@ -278,7 +278,7 @@ void StreamingDecoder::noteFrameArrivalSuccessLocked(size_t frame_start_abs,
         return;
     }
     if (!sync_controller_.next_expected_frame_sample_valid_ &&
-        !expect_full_ofdm_anchor_ &&
+        !sync_controller_.expect_full_ofdm_anchor_ &&
         sync_controller_.expectedFrameGapSamples() == 0) {
         return;
     }
@@ -656,7 +656,7 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     state_ = DecoderState::SEARCHING;
     pending_total_cw_ = 0;
     sync_controller_.sync_reject_streak_ = 0;
-    expect_full_ofdm_anchor_ = false;
+    sync_controller_.expect_full_ofdm_anchor_ = false;
     sync_from_warm_timed_window_ = false;
     resetFrameArrivalTrackingLocked();
     constellation_cache_.clear();
@@ -697,26 +697,26 @@ void StreamingDecoder::setCarrierLdpcInterleaver(bool enable) {
 void StreamingDecoder::expectFullOFDMAnchorOnce() {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
     if (!connected_ || mode_ != protocol::WaveformMode::OFDM_CHIRP) {
-        expect_full_ofdm_anchor_ = false;
+        sync_controller_.expect_full_ofdm_anchor_ = false;
         return;
     }
 
-    expect_full_ofdm_anchor_ = true;
+    sync_controller_.expect_full_ofdm_anchor_ = true;
     sync_controller_.sync_reject_streak_ = 0;
     LOG_MODEM(INFO, "StreamingDecoder: expecting full OFDM chirp+LTS timing anchor");
 }
 
 void StreamingDecoder::clearFullOFDMAnchorExpectation() {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
-    if (expect_full_ofdm_anchor_) {
+    if (sync_controller_.expect_full_ofdm_anchor_) {
         LOG_MODEM(INFO, "StreamingDecoder: clearing pending full OFDM DATA anchor");
     }
-    expect_full_ofdm_anchor_ = false;
+    sync_controller_.expect_full_ofdm_anchor_ = false;
 }
 
 bool StreamingDecoder::expectsFullOFDMAnchorForTesting() const {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
-    return expect_full_ofdm_anchor_;
+    return sync_controller_.expect_full_ofdm_anchor_;
 }
 
 void StreamingDecoder::setMCDPSKCarriers(int n) {
@@ -825,7 +825,7 @@ void StreamingDecoder::applyPendingConnectedOFDMMode() {
     const CodeRate rate = pending_connected_ofdm_rate_;
 
     const bool preserve_full_anchor =
-        expect_full_ofdm_anchor_ || mode == protocol::WaveformMode::OFDM_CHIRP;
+        sync_controller_.expect_full_ofdm_anchor_ || mode == protocol::WaveformMode::OFDM_CHIRP;
 
     mode_ = mode;
     connected_ = true;
@@ -862,7 +862,7 @@ void StreamingDecoder::applyPendingConnectedOFDMMode() {
     state_ = DecoderState::SEARCHING;
     pending_total_cw_ = 0;
     sync_controller_.sync_reject_streak_ = 0;
-    expect_full_ofdm_anchor_ = preserve_full_anchor;
+    sync_controller_.expect_full_ofdm_anchor_ = preserve_full_anchor;
     sync_from_warm_timed_window_ = false;
     resetFrameArrivalTrackingLocked();
     constellation_cache_.clear();
@@ -878,7 +878,7 @@ void StreamingDecoder::applyPendingConnectedOFDMMode() {
               protocol::waveformModeToString(mode_),
               modulationToString(mod), codeRateToString(rate),
               ofdm_carriers_, ofdm_data_carriers_, bps);
-    if (expect_full_ofdm_anchor_) {
+    if (sync_controller_.expect_full_ofdm_anchor_) {
         LOG_MODEM(INFO, "StreamingDecoder: connected OFDM config armed full chirp+LTS timing anchor");
     }
 }
@@ -1171,7 +1171,7 @@ void StreamingDecoder::reset() {
     feed_iter_ = 0;
     overflow_events_ = 0;
     sync_controller_.sync_reject_streak_ = 0;
-    expect_full_ofdm_anchor_ = false;
+    sync_controller_.expect_full_ofdm_anchor_ = false;
     sync_from_warm_timed_window_ = false;
     resetFrameArrivalTrackingLocked();
     state_ = DecoderState::SEARCHING;

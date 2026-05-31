@@ -807,7 +807,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                             // group's anchor fresh, identical to the no-descriptor sync
                             // path (mirrors the FILE_CANCEL control handling).
                             //
-                            // 2026-05-28: reliability first — keep expect_full_ofdm_anchor_
+                            // 2026-05-28: reliability first — keep sync_controller_.expect_full_ofdm_anchor_
                             // armed so bravo waits for the full chirp+LTS that alpha now
                             // emits at the start of each burst group (see streaming_encoder
                             // group-start preamble change). The light-LTS-only path was
@@ -819,7 +819,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                             // §16.8 step 1: BURST_HEADER-consume snapshot (instrumentation).
                             // Logs the warm-sync state we held when the next group's
                             // BURST_HEADER arrived (just before we throw it away with
-                            // resetFrameArrivalTrackingLocked + expect_full_ofdm_anchor_).
+                            // resetFrameArrivalTrackingLocked + sync_controller_.expect_full_ofdm_anchor_).
                             // Pair with the end-of-group snapshot in
                             // streaming_burst_interleave.cpp to compute the gap delta
                             // (Δphase, Δconf, Δcfo, elapsed samples). Multi-group
@@ -837,7 +837,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 last_cfo_.load(),
                                 static_cast<unsigned long long>(sync_controller_.next_expected_frame_sample_),
                                 static_cast<unsigned long long>(last_frame_end_sample_),
-                                expect_full_ofdm_anchor_ ? 1 : 0,
+                                sync_controller_.expect_full_ofdm_anchor_ ? 1 : 0,
                                 static_cast<unsigned long long>(frame_sync_abs),
                                 frame_len);
                             // §16.8 step 2 (ULTRA_S16_WARM_HANDOFF): if the knob is
@@ -852,7 +852,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                             // second full chirp+LTS. Falls back to the legacy
                             // reset path when the knob is OFF, when warm-sync
                             // wasn't actually WARM (sync miss path), or when
-                            // expect_full_ofdm_anchor_ was already true going in
+                            // sync_controller_.expect_full_ofdm_anchor_ was already true going in
                             // (handshake / cold acquisition still pending).
                             const char* s16_env =
                                 std::getenv("ULTRA_S16_WARM_HANDOFF");
@@ -869,7 +869,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                                     // KEEP warm state. Just advance the search
                                     // window past the BURST_HEADER so the data
                                     // group is picked up next.
-                                    expect_full_ofdm_anchor_ = false;
+                                    sync_controller_.expect_full_ofdm_anchor_ = false;
                                     sync_controller_.sync_reject_streak_ = 0;
                                     correlation_pos_ = wrapRingIndexLocked(
                                         sync_position_ + frame_len);
@@ -878,7 +878,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 } else {
                                     sync_from_warm_timed_window_ = false;
                                     resetFrameArrivalTrackingLocked();
-                                    expect_full_ofdm_anchor_ = true;
+                                    sync_controller_.expect_full_ofdm_anchor_ = true;
                                     sync_controller_.sync_reject_streak_ = 0;
                                     correlation_pos_ = wrapRingIndexLocked(
                                         sync_position_ + frame_len);
@@ -906,7 +906,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 sync_controller_.consecutive_sync_misses_,
                                 sync_controller_.frame_arrival_confidence_,
                                 last_cfo_.load(),
-                                expect_full_ofdm_anchor_ ? 1 : 0);
+                                sync_controller_.expect_full_ofdm_anchor_ ? 1 : 0);
                             state_ = DecoderState::SEARCHING;
                             return;  // consumed; the data group follows next
                         }
@@ -957,7 +957,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                             sync_from_warm_timed_window_ = false;
                             if (file_cancel_control) {
                                 resetFrameArrivalTrackingLocked();
-                                expect_full_ofdm_anchor_ = true;
+                                sync_controller_.expect_full_ofdm_anchor_ = true;
                                 sync_controller_.sync_reject_streak_ = 0;
                             } else {
                                 // A pending connected full-anchor request is for
@@ -965,7 +965,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 // boundary. ACK/NACK/control repeats may arrive
                                 // first; decoding them must not consume that
                                 // DATA re-anchor latch.
-                                if (expect_full_ofdm_anchor_) {
+                                if (sync_controller_.expect_full_ofdm_anchor_) {
                                     LOG_MODEM(INFO,
                                               "[%s] OFDM control %s decoded; preserving pending full DATA anchor",
                                               log_prefix_.c_str(),
@@ -1835,7 +1835,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         noteFrameArrivalSuccess(frame_sync_abs, next_search_abs);
         std::lock_guard<std::mutex> lock(buffer_mutex_);
         if (!is_non_data_frame) {
-            expect_full_ofdm_anchor_ = false;
+            sync_controller_.expect_full_ofdm_anchor_ = false;
         }
     } else if (!result.success && result.codewords_ok == 0 && connected_ && is_ofdm) {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
@@ -1845,7 +1845,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         }
         if (mode_ == protocol::WaveformMode::OFDM_CHIRP) {
             resetFrameArrivalTrackingLocked();
-            expect_full_ofdm_anchor_ = true;
+            sync_controller_.expect_full_ofdm_anchor_ = true;
             sync_controller_.sync_reject_streak_ = 0;
             LOG_MODEM(WARN,
                       "[%s] OFDM decode failed with 0/%d CWs; forcing full chirp+LTS re-anchor",
