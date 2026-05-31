@@ -832,10 +832,10 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 log_prefix_.c_str(),
                                 static_cast<unsigned>(last_burst_group_seq_),
                                 arrival_policy::warmSyncPhaseName(warm_sync_phase_),
-                                consecutive_sync_misses_,
-                                frame_arrival_confidence_,
+                                sync_controller_.consecutive_sync_misses_,
+                                sync_controller_.frame_arrival_confidence_,
                                 last_cfo_.load(),
-                                static_cast<unsigned long long>(next_expected_frame_sample_),
+                                static_cast<unsigned long long>(sync_controller_.next_expected_frame_sample_),
                                 static_cast<unsigned long long>(last_frame_end_sample_),
                                 expect_full_ofdm_anchor_ ? 1 : 0,
                                 static_cast<unsigned long long>(frame_sync_abs),
@@ -862,7 +862,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 s16_warm_handoff &&
                                 warm_sync_phase_ ==
                                     arrival_policy::WarmSyncPhase::WARM &&
-                                frame_arrival_confidence_ > 0.0f;
+                                sync_controller_.frame_arrival_confidence_ > 0.0f;
                             {
                                 std::lock_guard<std::mutex> lock(buffer_mutex_);
                                 if (warm_handoff_eligible) {
@@ -893,7 +893,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                                     "expecting light LTS for data group",
                                     log_prefix_.c_str(),
                                     arrival_policy::warmSyncPhaseName(warm_sync_phase_),
-                                    frame_arrival_confidence_,
+                                    sync_controller_.frame_arrival_confidence_,
                                     last_cfo_.load());
                             }
                             // §16.8 step 1: post-reset snapshot. What did we throw
@@ -903,8 +903,8 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 "conf=%.2f last_cfo=%.2f expect_full_anchor=%d",
                                 log_prefix_.c_str(),
                                 arrival_policy::warmSyncPhaseName(warm_sync_phase_),
-                                consecutive_sync_misses_,
-                                frame_arrival_confidence_,
+                                sync_controller_.consecutive_sync_misses_,
+                                sync_controller_.frame_arrival_confidence_,
                                 last_cfo_.load(),
                                 expect_full_ofdm_anchor_ ? 1 : 0);
                             state_ = DecoderState::SEARCHING;

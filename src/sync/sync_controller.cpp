@@ -19,11 +19,11 @@ void SyncController::reset(protocol::WaveformMode mode, IWaveform* wf, bool is_c
     waveform_ = wf;
     is_coherent_ = is_coherent;
     last_cfo_ = 0.0f;
-    arrival_confidence_ = 0.0f;
-    consecutive_misses_ = 0;
-    next_expected_abs_ = 0;
-    next_expected_valid_ = false;
-    expected_frame_gap_ = 0;
+    frame_arrival_confidence_ = 0.0f;
+    consecutive_sync_misses_ = 0;
+    next_expected_frame_sample_ = 0;
+    next_expected_frame_sample_valid_ = false;
+    expected_frame_gap_samples_ = 0;
 }
 
 SyncDecision SyncController::detect(SampleSpan buffer, size_t buffer_len, size_t buffer_abs_start) {
@@ -43,9 +43,9 @@ void SyncController::reportFrameOutcome(bool ldpc_ok, size_t frame_end_abs) {
 }
 
 void SyncController::noteGroupBoundary(size_t descriptor_end_abs, size_t expected_frame_gap_samples) {
-    next_expected_abs_ = descriptor_end_abs;
-    expected_frame_gap_ = expected_frame_gap_samples;
-    next_expected_valid_ = true;
+    next_expected_frame_sample_ = descriptor_end_abs;
+    expected_frame_gap_samples_ = expected_frame_gap_samples;
+    next_expected_frame_sample_valid_ = true;
 }
 
 }  // namespace sync

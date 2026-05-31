@@ -80,8 +80,8 @@ public:
     // Temporary getters/setters so StreamingDecoder can move its state in member-by-
     // member while the orchestration still lives there. Each folds into
     // detect()/reportFrameOutcome()/noteGroupBoundary() as that logic migrates.
-    size_t expectedFrameGapSamples() const { return expected_frame_gap_; }
-    void setExpectedFrameGapSamples(size_t samples) { expected_frame_gap_ = samples; }
+    size_t expectedFrameGapSamples() const { return expected_frame_gap_samples_; }
+    void setExpectedFrameGapSamples(size_t samples) { expected_frame_gap_samples_ = samples; }
 
     // --- TRANSITIONAL PUBLIC shell-move state (refactor §7.5#1) -------------------
     // These were StreamingDecoder members; relocated here verbatim so the (still-
@@ -90,6 +90,11 @@ public:
     // detect()/reportFrameOutcome()/noteGroupBoundary() in the behavioral phase.
     // KEEP names identical to the old StreamingDecoder members (mechanical move).
     uint64_t sync_reject_streak_ = 0;   // consecutive COLD/RE_ACQUIRE light-sync rejects
+    size_t   next_expected_frame_sample_ = 0;        // predicted next-frame absolute sample
+    bool     next_expected_frame_sample_valid_ = false;
+    float    frame_arrival_confidence_ = 0.0f;
+    int      consecutive_sync_misses_ = 0;
+    size_t   expected_frame_gap_samples_ = 0;        // cadence gap (§1.2 never-set bug)
 
 private:
     // --- migrated from StreamingDecoder (audit §1.2) — the single home for this state ---
@@ -97,13 +102,7 @@ private:
     protocol::WaveformMode waveform_mode_ = protocol::WaveformMode::OFDM_CHIRP;
     IWaveform* waveform_ = nullptr;        // borrowed; detectors live here (NOT owned)
     bool  is_coherent_ = false;
-
-    float  last_cfo_ = 0.0f;               // was StreamingDecoder::last_cfo_
-    float  arrival_confidence_ = 0.0f;     // was frame_arrival_confidence_
-    int    consecutive_misses_ = 0;        // was consecutive_sync_misses_
-    size_t next_expected_abs_ = 0;         // was next_expected_frame_sample_
-    bool   next_expected_valid_ = false;   // was next_expected_frame_sample_valid_
-    size_t expected_frame_gap_ = 0;        // was expected_frame_gap_samples_ (the never-set cadence bug)
+    float last_cfo_ = 0.0f;                // was StreamingDecoder::last_cfo_ (atomic move pending)
 
     // WARM→RE_ACQUIRE escalation threshold (consecutive predicted-position LDPC failures).
     static constexpr int kReacquireAfterMisses = 2;

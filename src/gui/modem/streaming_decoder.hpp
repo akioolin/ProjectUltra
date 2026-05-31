@@ -638,10 +638,6 @@ private:
     bool warm_sync_active_ = false;
     streaming_frame_arrival_policy::WarmSyncPhase warm_sync_phase_ =
         streaming_frame_arrival_policy::WarmSyncPhase::COLD;
-    bool next_expected_frame_sample_valid_ = false;
-    size_t next_expected_frame_sample_ = 0;
-    float frame_arrival_confidence_ = 0.0f;
-    int consecutive_sync_misses_ = 0;
     bool last_frame_arrival_valid_ = false;
     size_t last_frame_start_sample_ = 0;
     size_t last_frame_end_sample_ = 0;

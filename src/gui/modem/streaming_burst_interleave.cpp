@@ -663,10 +663,10 @@ void StreamingDecoder::finalizeBurstGroup() {
                   "expect_full_anchor=%d quality=%.2f",
                   log_prefix_.c_str(), last_burst_group_seq_,
                   arrival_policy::warmSyncPhaseName(warm_sync_phase_),
-                  consecutive_sync_misses_,
-                  frame_arrival_confidence_,
+                  sync_controller_.consecutive_sync_misses_,
+                  sync_controller_.frame_arrival_confidence_,
                   last_cfo_.load(),
-                  static_cast<unsigned long long>(next_expected_frame_sample_),
+                  static_cast<unsigned long long>(sync_controller_.next_expected_frame_sample_),
                   static_cast<unsigned long long>(last_frame_end_sample_),
                   expect_full_ofdm_anchor_ ? 1 : 0,
                   quality);
@@ -676,7 +676,7 @@ void StreamingDecoder::finalizeBurstGroup() {
         // descriptor chirp AND demodulated all 6 frames — i.e. warm sync WORKED — even
         // when the LDPC then failed the DATA (a deep-fade group; ARQ resends it). The
         // old code refreshed only on all_ok, so a faded group left
-        // frame_arrival_confidence_ decaying (the per-frame state machine doesn't fire
+        // sync_controller_.frame_arrival_confidence_ decaying (the per-frame state machine doesn't fire
         // during the deinterleaved burst body, §16.11) until the narrow warm window
         // deactivated → the next group's acquisition collapsed → ~90s stall or a dead
         // transfer. An acquired-but-decode-failed group keeps warm sync HEALTHY; only
@@ -687,9 +687,9 @@ void StreamingDecoder::finalizeBurstGroup() {
             s16_env_g && std::atoi(s16_env_g) != 0;
         {
             if (s16_warm_handoff_g) {
-                consecutive_sync_misses_ = 0;
-                frame_arrival_confidence_ = std::max(
-                    frame_arrival_confidence_, 0.5f);
+                sync_controller_.consecutive_sync_misses_ = 0;
+                sync_controller_.frame_arrival_confidence_ = std::max(
+                    sync_controller_.frame_arrival_confidence_, 0.5f);
                 warm_sync_phase_ =
                     arrival_policy::WarmSyncPhase::WARM;
                 // 2026-05-29 ROOT-CAUSE FIX: re-arm the full-chirp anchor
@@ -714,7 +714,7 @@ void StreamingDecoder::finalizeBurstGroup() {
                     "re-armed descriptor chirp anchor for next group)",
                     log_prefix_.c_str(),
                     static_cast<unsigned>(last_burst_group_seq_),
-                    frame_arrival_confidence_);
+                    sync_controller_.frame_arrival_confidence_);
             }
         }
         burst_group_callback_(last_burst_group_seq_, burst_group_frames, all_ok, quality,

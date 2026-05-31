@@ -275,7 +275,7 @@ void StreamingDecoder::searchForSync() {
         // the search expectation BACK by short_reanchor_lead_samples
         // because the adaptive short re-anchor preamble starts with a
         // short chirp at -150ms; in our warm-handoff path the LTS is
-        // exactly at next_expected_frame_sample_ with no lead. The
+        // exactly at sync_controller_.next_expected_frame_sample_ with no lead. The
         // shift-back put correlation_pos_ PAST the search window's end
         // → !current_step_intersects → warm_plan.active stayed false.
         const char* s16_env_w =
@@ -290,18 +290,18 @@ void StreamingDecoder::searchForSync() {
         const size_t expected_sync_search_sample =
             (!s16_skip_short_lead &&
              use_short_reanchor_search &&
-             next_expected_frame_sample_valid_ &&
-             next_expected_frame_sample_ > short_reanchor_lead_samples)
-                ? next_expected_frame_sample_ - short_reanchor_lead_samples
-                : next_expected_frame_sample_;
+             sync_controller_.next_expected_frame_sample_valid_ &&
+             sync_controller_.next_expected_frame_sample_ > short_reanchor_lead_samples)
+                ? sync_controller_.next_expected_frame_sample_ - short_reanchor_lead_samples
+                : sync_controller_.next_expected_frame_sample_;
 
         auto warm_plan = arrival_policy::planWarmSearchWindow(
             use_light_search,
             warm_sync_active_,
-            next_expected_frame_sample_valid_,
+            sync_controller_.next_expected_frame_sample_valid_,
             expected_sync_search_sample,
-            frame_arrival_confidence_,
-            consecutive_sync_misses_,
+            sync_controller_.frame_arrival_confidence_,
+            sync_controller_.consecutive_sync_misses_,
             warm_sync_phase_,
             total_fed_,
             oldest_abs,
@@ -324,7 +324,7 @@ void StreamingDecoder::searchForSync() {
                 LOG_MODEM(INFO,
                           "[%s] warm-sync: wait for expected window, need_abs=%zu total=%zu expected=%zu",
                           log_prefix_.c_str(), warm_plan.search_end_abs, total_fed_,
-                          next_expected_frame_sample_);
+                          sync_controller_.next_expected_frame_sample_);
             }
             return;
         }
@@ -337,7 +337,7 @@ void StreamingDecoder::searchForSync() {
                 LOG_MODEM(INFO,
                           "[%s] warm-sync: wait for short re-anchor window, need_abs=%zu total=%zu expected_training=%zu",
                           log_prefix_.c_str(), warm_plan.search_end_abs, total_fed_,
-                          next_expected_frame_sample_);
+                          sync_controller_.next_expected_frame_sample_);
             }
             return;
         }
@@ -366,10 +366,10 @@ void StreamingDecoder::searchForSync() {
                     warm_plan.lower_threshold ? 1 : 0,
                     arrival_policy::warmSyncPhaseName(warm_sync_phase_),
                     warm_sync_active_ ? 1 : 0,
-                    next_expected_frame_sample_valid_ ? 1 : 0,
-                    static_cast<unsigned long long>(next_expected_frame_sample_),
-                    frame_arrival_confidence_,
-                    consecutive_sync_misses_,
+                    sync_controller_.next_expected_frame_sample_valid_ ? 1 : 0,
+                    static_cast<unsigned long long>(sync_controller_.next_expected_frame_sample_),
+                    sync_controller_.frame_arrival_confidence_,
+                    sync_controller_.consecutive_sync_misses_,
                     use_light_search ? 1 : 0,
                     static_cast<unsigned long long>(total_fed_),
                     static_cast<unsigned long long>(warm_plan.search_start_abs),
@@ -547,9 +547,9 @@ void StreamingDecoder::searchForSync() {
                       "[%s] warm-sync: %s LTS search expected=%zu start_abs=%zu size=%zu confidence=%.2f",
                       log_prefix_.c_str(),
                       used_warm_narrow_window ? "narrow" : "degraded",
-                      next_expected_frame_sample_,
+                      sync_controller_.next_expected_frame_sample_,
                       warm_plan.search_start_abs, min_search,
-                      frame_arrival_confidence_);
+                      sync_controller_.frame_arrival_confidence_);
         } else {
             // Advance by small step (100ms = 4800 samples) for accurate detection
             correlation_pos_ = wrapRingIndexLocked(correlation_pos_ + CORRELATION_STEP);
@@ -672,7 +672,7 @@ void StreamingDecoder::searchForSync() {
                     "(WARM phase, conf=%.2f, threshold-floor=%.2f); coherent "
                     "0.90 gate bypassed",
                     log_prefix_.c_str(), sync_result.correlation,
-                    frame_arrival_confidence_,
+                    sync_controller_.frame_arrival_confidence_,
                     kS16WarmHandoffMinCorrelation);
                 sync_decision.found = true;
                 sync_decision.rejected = false;
@@ -707,11 +707,11 @@ void StreamingDecoder::searchForSync() {
             if (s16_warm_handoff && !sync_decision.found &&
                 warm_sync_phase_ == arrival_policy::WarmSyncPhase::WARM &&
                 light_sync_thresholds.narrow_expected_window &&
-                next_expected_frame_sample_valid_ &&
-                next_expected_frame_sample_ >= search_start &&
-                (next_expected_frame_sample_ - search_start) < search_buffer.size()) {
+                sync_controller_.next_expected_frame_sample_valid_ &&
+                sync_controller_.next_expected_frame_sample_ >= search_start &&
+                (sync_controller_.next_expected_frame_sample_ - search_start) < search_buffer.size()) {
                 sync_result.start_sample =
-                    static_cast<int>(next_expected_frame_sample_ - search_start);
+                    static_cast<int>(sync_controller_.next_expected_frame_sample_ - search_start);
                 sync_result.cfo_hz = known_cfo;
                 sync_result.correlation = 0.0f;  // position-gated, not correlation-found
                 sync_decision.found = true;
@@ -721,7 +721,7 @@ void StreamingDecoder::searchForSync() {
                     "[%s] WARM position-gated: processing predicted frame at abs=%llu "
                     "(light-LTS corr below noise floor; cadence-located, LDPC validates)",
                     log_prefix_.c_str(),
-                    static_cast<unsigned long long>(next_expected_frame_sample_));
+                    static_cast<unsigned long long>(sync_controller_.next_expected_frame_sample_));
             }
 
             found = sync_decision.found;
@@ -918,10 +918,10 @@ void StreamingDecoder::searchForSync() {
             current_modulation_ == Modulation::QAM16 &&
             use_light_search &&
             used_warm_timed_window &&
-            next_expected_frame_sample_valid_;
+            sync_controller_.next_expected_frame_sample_valid_;
         if (timing_cfo_genie) {
             const size_t detected_abs = ringPosToAbsoluteLocked(sync_position_);
-            const size_t expected_abs = next_expected_frame_sample_;
+            const size_t expected_abs = sync_controller_.next_expected_frame_sample_;
             sync_position_ = absoluteToRingLocked(expected_abs);
             LOG_MODEM(WARN,
                       "[%s] DIAG genie-timing-cfo: overriding light-LTS sync "
@@ -1013,8 +1013,8 @@ void StreamingDecoder::searchForSync() {
                       "[%s] warm-sync: no LTS in %s expected window, misses=%d confidence=%.2f",
                       log_prefix_.c_str(),
                       used_warm_narrow_window ? "narrow" : "degraded",
-                      consecutive_sync_misses_,
-                      frame_arrival_confidence_);
+                      sync_controller_.consecutive_sync_misses_,
+                      sync_controller_.frame_arrival_confidence_);
         }
         const size_t idle_count = std::min(search_buffer.size(), CORRELATION_STEP);
         observeIdleNoiseCandidate(search_buffer.data(), idle_count);
