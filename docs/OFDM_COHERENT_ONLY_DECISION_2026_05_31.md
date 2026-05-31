@@ -97,7 +97,8 @@ undo another.
 ```
 A. Coherent-only OFDM        (this doc)        — collapse the coherent/differential axis
 B. SyncController refactor   (SYNC_ACQUISITION_FIX_PLAN §7) — consolidate sync + z-state + CFO
-C. Ladder / mode-selection rework  (pending)   — entry floors, SNR<10→MC-DPSK, rate selection
+C. Ladder + ARQ-completion rework  (pending)   — entry floors, SNR<10→MC-DPSK, rate selection,
+                                                  AND the transfer-close handshake (BUG-FINACK-001)
 ```
 
 **Shared seams (where they touch):**
@@ -112,7 +113,10 @@ C. Ladder / mode-selection rework  (pending)   — entry floors, SNR<10→MC-DPS
 1. **A first** (lowest risk, highest leverage): lock with §6 multi-seed, flip rungs to coherent,
    delete the differential-OFDM branches. Now the OFDM path has one modulation axis.
 2. **C next**: the broader ladder/floor rework (entry floors, the SNR<10 MC-DPSK boundary, rate
-   selection) on the simplified rungs.
+   selection) on the simplified rungs — **plus the transfer-close handshake** (`BUG-FINACK-001`:
+   group-level duplicate re-ACK + a FILE_END/completion handshake, so a fade-lost final ACK doesn't
+   leave the sender infinite-resending the last group). Surfaced 2026-05-31 on coherent QPSK
+   Moderate@14 seed 777 — the file delivered CRC-clean but the close never fired.
 3. **B last** (riskiest — refactoring working sync): the SyncController consolidation, built on the
    already-simplified base. B's frame-class→config, control profile, and carrier-LDPC are all cleaner
    because A ran first.

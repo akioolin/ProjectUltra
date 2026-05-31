@@ -8,6 +8,35 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-FINACK-001: Final-group ACK loss → sender infinite-resends the last group; no clean transfer close
+- Status: OPEN (2026-05-31). Folded into thread C (ladder/ARQ rework) — see
+  `docs/OFDM_COHERENT_ONLY_DECISION_2026_05_31.md §5`. Pre-existing (NOT introduced by the
+  2026-05-31 carrier-LDPC / z-latch work); exposed by a fade landing on the completion ACK.
+- Area: burst completion handshake — `Connection` GROUP_ACK path + the "payload drained →
+  auto-disconnect" trigger; receiver duplicate-group handling in `onGroupReceived` / burst assembler.
+- Reported by operator (live GUI), coherent QPSK R1/4 Moderate@14 seed 777:
+  "it received the file and alpha is still sending."
+- Repro / evidence (`/tmp/zmode_mod14_qpsk_s777b`): Bravo logs `Received …10240 bytes, CRC ok`
+  at 282 s (file COMPLETE). Alpha sits at `cursor=10240/10240, resent=1, resend_left=0` and
+  re-emits `TX Burst: 6 frames` for `group_seq=18` every ~10 s (ack_timeout) indefinitely; the
+  scenario only ends via `exit_after`. seed 42 escaped it solely because its final ACK happened
+  to land and `auto-disconnect (payload drained)` fired.
+- Root cause: the completion handshake has no robust close. The last group's **GROUP_ACK was lost
+  in a fade**, so the sender never learns the receiver has it and resends forever; "payload drained
+  → disconnect" never triggers because the sender still considers the final group unacked. When the
+  sender resends an **already-delivered** group, the receiver does **not re-ACK** — it tries to
+  re-decode the duplicate (which here also hits the fade-lost-descriptor z=27 path →
+  `0/6 max_iters=0`, a red herring) and stays silent. The file delivered fine; only the close fails.
+- Impact: on real hardware, wasted airtime (sender keeps keying the last group) and a transfer that
+  never cleanly terminates without an external timeout. Half-duplex final-ACK fragility.
+- Fix (thread C): group-level **duplicate detection + re-ACK** — a resend of an already-delivered
+  group re-emits the GROUP_ACK **without** re-decoding. Plus a proper **FILE_END / completion
+  handshake** so the transfer terminates on "receiver has the whole file" (FILE_END → FILE_END_ACK →
+  DISCONNECT), not on a single per-group ACK happening to land. (Note: §7.6 z-consolidation would
+  *partly* help IF the re-ACK were decode-gated — but the robust fix is decode-independent.)
+- Verification: a fade-timed seed where the last GROUP_ACK is lost (seed 777 Moderate@14) must still
+  reach a clean DISCONNECT (no infinite group-18 resend); `ALPHA_DISCONNECTED_COUNT>0`, RESULT=PASS.
+
 ### BUG-CTRL-001: Control path is still the bottleneck in aggressive fading profiles
 - Status: IN_PROGRESS (handshake leg fixed 2026-04-26)
 - Area: OFDM connected mode (ACK/SACK/control reliability)
