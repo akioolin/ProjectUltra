@@ -300,6 +300,11 @@ These are wrong in the current top-level docs and should be fixed:
   **stale/divergent harness, not a production regression** — the `decode_bench` replay path has
   drifted from the live streaming decoder. So CLAUDE.md's "OFDM_CHIRP R1/4 Good 15 dB **locked in
   DecodeBenchReplay**" floor claim is currently UNBACKED by that test. Fate: either repair the
-  bench replay path to match the production decoder, or retire it in favor of the GUI/`cli_simulator`
-  floor gates (the trusted paths per `feedback_skip_full_ctest_legacy`). Tracked as cleanup, not a
-  PHY bug.
+  bench replay path to match the production decoder, or retire it in favor of the
+  `tools/gui_qso_scenario.sh` floor gate (the trusted path). Tracked as cleanup, not a PHY bug.
+- **`cli_simulator` + `test_waveform_simple` + `SimulatedStation` RETIRED 2026-05-30** (commit
+  `207a0af`, ~14k lines). They were a divergent TX wrapper around the shared StreamingEncoder/
+  Decoder PHY; the GUI's `ModemEngine` path is the production wrapper and `tools/gui_qso_scenario.sh`
+  is now THE faithful full-protocol + fade/throughput gate. `measure_ack_fer`/`ota_simulator serve`/
+  `decode_bench` survive (the `ultra_sim_station` lib was un-bundled — it had glued SimulatedStation
+  to the PHY sources). Historical `cli_simulator` proof-notes above are kept as record.
