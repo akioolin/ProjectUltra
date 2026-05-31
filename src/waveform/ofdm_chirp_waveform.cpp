@@ -139,7 +139,7 @@ OFDMChirpWaveform::OFDMChirpWaveform() {
     // Default OFDM_CHIRP configuration
     config_.fft_size = 512;
     config_.num_carriers = 30;
-    config_.modulation = Modulation::DQPSK;  // Differential for fading
+    config_.modulation = Modulation::QPSK;  // Coherent-only OFDM (thread A 2026-05-31); differential lives in MC-DPSK
     config_.code_rate = CodeRate::R1_2;
     configurePilotsForCodeRate(config_.code_rate);
     initComponents();
@@ -148,9 +148,11 @@ OFDMChirpWaveform::OFDMChirpWaveform() {
 OFDMChirpWaveform::OFDMChirpWaveform(const ModemConfig& config)
     : config_(config)
 {
-    // Allow differential and selected coherent modulations for chirp mode.
+    // Coherent-only OFDM (thread A 2026-05-31): default any unsupported modulation to
+    // coherent QPSK (was DQPSK). Differential lives in MC-DPSK; OFDM_NARROW (the last
+    // OFDM-DQPSK user) is disabled and returns later as coherent.
     if (!isSupportedChirpModulation(config_.modulation)) {
-        config_.modulation = Modulation::DQPSK;
+        config_.modulation = Modulation::QPSK;
     }
     configurePilotsForCodeRate(config_.code_rate);
     initComponents();
@@ -159,9 +161,11 @@ OFDMChirpWaveform::OFDMChirpWaveform(const ModemConfig& config)
 OFDMChirpWaveform::OFDMChirpWaveform(const ModemConfig& config, protocol::WaveformMode mode)
     : mode_(mode), config_(config)
 {
-    // Allow differential and selected coherent modulations for chirp mode.
+    // Coherent-only OFDM (thread A 2026-05-31): default any unsupported modulation to
+    // coherent QPSK (was DQPSK). Differential lives in MC-DPSK; OFDM_NARROW (the last
+    // OFDM-DQPSK user) is disabled and returns later as coherent.
     if (!isSupportedChirpModulation(config_.modulation)) {
-        config_.modulation = Modulation::DQPSK;
+        config_.modulation = Modulation::QPSK;
     }
     configurePilotsForCodeRate(config_.code_rate);
     initComponents();
