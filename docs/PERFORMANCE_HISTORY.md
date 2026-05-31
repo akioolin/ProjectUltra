@@ -9,6 +9,28 @@ entries are floor *locators*, not statistical floors.
 
 ---
 
+## Ladder rework — confirmed efficient rungs (2026-05-30, IN PROGRESS)
+
+Re-establishing the auto rate ladder under the **NEW architecture: burst transport default
++ long LDPC (Z=81, n=1944)**. The old entry floors (10/12/14/18 dB) and per-rate floors
+**predate** this and need re-measurement on `gui_qso_scenario.sh` (the trusted gate). This
+table accumulates `(channel, in-band SNR) → the rung that is both *covered* and *most
+efficient*` — densest modulation/rate whose resend+timeout rate stays low (best goodput),
+not merely "decodable".
+
+| Channel | In-band SNR | Efficient rung | Confidence | Notes |
+|---------|-------------|----------------|------------|-------|
+| AWGN | 20 dB | **DQPSK (4PSK) R3/4** | covered = sure; most-efficient = observed | lowest resends at this SNR; multi-seed lock pending |
+| Good fading | 20 dB | **DQPSK (4PSK) R3/4** | covered = sure; most-efficient = observed | same as AWGN @20 — fading absorbed at this SNR; multi-seed lock pending |
+
+**Next to fill in:** formal multi-seed lock of the two above; then the SNR *boundaries* —
+where DQPSK R3/4 stops being most-efficient (step down R1/2 → R1/4 as SNR drops) and where it
+stops being decodable (the floor); whether a **denser** rung (QAM8/QAM16) wins **above** 20 dB;
+then Moderate / Poor channels. Folds into `selectOFDMCodeRate()` + the `connection_policy.hpp`
+entry floors once locked.
+
+---
+
 ## Hardware Mac↔Pi5 rig — calibration run logs (2026-04-29)
 
 Calibrated raw captures:
