@@ -60,6 +60,21 @@ void SyncController::noteGroupBoundary(size_t descriptor_end_abs, size_t expecte
 // noteFrameArrivalSyncMissLocked}. Same computations, same order, same log format/prefix → the
 // behavior + log output are byte-identical; only the home moved.
 
+// Phase-D prep (TEMPORARY): assert warm_sync_phase_ == derivePhase() after every transition.
+// Should NEVER log. Confirms the 4-state enum is a pure function of (active, misses) before the
+// collapse removes the stored enum. Removed once empirically validated on a fading channel.
+void SyncController::debugCheckPhaseInvariant(const char* where) const {
+    const auto derived = derivePhase();
+    if (warm_sync_phase_ != derived) {
+        LOG_MODEM(WARN,
+                  "[%s] PHASE-DERIVE-MISMATCH @%s stored=%s derived=%s active=%d misses=%d",
+                  log_prefix_.c_str(), where,
+                  frame_arrival_policy::warmSyncPhaseName(warm_sync_phase_),
+                  frame_arrival_policy::warmSyncPhaseName(derived),
+                  warm_sync_active_ ? 1 : 0, consecutive_sync_misses_);
+    }
+}
+
 void SyncController::resetFrameArrivalTracking() {
     warm_sync_active_ = false;
     warm_sync_phase_ = frame_arrival_policy::WarmSyncPhase::COLD;
@@ -72,6 +87,7 @@ void SyncController::resetFrameArrivalTracking() {
     last_frame_end_sample_ = 0;
     last_frame_arrival_error_valid_ = false;
     last_frame_arrival_error_samples_ = 0;
+    debugCheckPhaseInvariant("reset");
 }
 
 void SyncController::noteFrameArrivalSuccess(size_t frame_start_abs, size_t frame_end_abs) {
@@ -120,6 +136,7 @@ void SyncController::noteFrameArrivalSuccess(size_t frame_start_abs, size_t fram
                   frame_arrival_policy::warmSyncPhaseName(previous_phase),
                   frame_arrival_policy::warmSyncPhaseName(warm_sync_phase_));
     }
+    debugCheckPhaseInvariant("success");
 }
 
 void SyncController::noteFrameArrivalSyncMiss() {
@@ -153,6 +170,7 @@ void SyncController::noteFrameArrivalSyncMiss() {
                   frame_arrival_policy::warmSyncPhaseName(warm_sync_phase_),
                   consecutive_sync_misses_);
     }
+    debugCheckPhaseInvariant("miss");
 }
 
 // --- connected-data light-LTS acceptance (§7.4 chunk B) --------------------------------------
@@ -275,6 +293,7 @@ void SyncController::seedArrivalAfterDelay(size_t total_fed_abs, size_t delay_sa
                   frame_arrival_policy::warmSyncPhaseName(previous_phase),
                   frame_arrival_policy::warmSyncPhaseName(warm_sync_phase_));
     }
+    debugCheckPhaseInvariant("seed");
 }
 
 // --- warm-window planning (§7.4 chunk-B tail) ------------------------------------------------

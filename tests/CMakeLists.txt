@@ -414,6 +414,20 @@ target_include_directories(test_streaming_signal_policy PRIVATE
 target_link_libraries(test_streaming_signal_policy PRIVATE ultra_core)
 add_test(NAME StreamingSignalPolicy COMMAND test_streaming_signal_policy)
 
+# Phase-D equivalence guard: warm_sync_phase_ == derivePhase() across all 4 states.
+# sync_controller.cpp lives in ULTRA_STREAMING_DECODER_SOURCES (not ultra_core), so compile
+# it directly into the test (it needs only logging from ultra_core; the test passes a null
+# waveform, so no IWaveform vtable is referenced).
+add_executable(test_sync_controller_phase
+    test_sync_controller_phase.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/sync/sync_controller.cpp
+)
+target_include_directories(test_sync_controller_phase PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+target_link_libraries(test_sync_controller_phase PRIVATE ultra_core)
+add_test(NAME SyncControllerPhase COMMAND test_sync_controller_phase)
+
 add_executable(test_snr_source_routing test_snr_source_routing.cpp)
 target_include_directories(test_snr_source_routing PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../src
@@ -700,6 +714,7 @@ ultra_enable_test_warnings(
     test_streaming_frame_policy.cpp
     test_ping_detector.cpp
     test_streaming_signal_policy.cpp
+    test_sync_controller_phase.cpp
     test_snr_source_routing.cpp
     test_tx_burst_normalization.cpp
     test_hardware_tx_normalization.cpp

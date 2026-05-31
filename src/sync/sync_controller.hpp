@@ -139,6 +139,27 @@ public:
     bool isWarm() const { return mode_ == SyncMode::WARM; }
     float lastCfo() const { return last_cfo_.load(); }
 
+    // Phase-D prep: the 4-state WarmSyncPhase is provably a PURE FUNCTION of (warm_sync_active_,
+    // consecutive_sync_misses_) — the transitions set it via phaseAfterSyncMiss(misses)/
+    // phaseAfterSuccessfulFrame(), and active is cleared exactly when misses hits
+    // kWarmSyncMissesBeforeRecovery. derivePhase() recomputes it; the equivalence
+    // (stored == derivePhase()) is asserted after every transition and validated deterministically
+    // by test_sync_controller_phase. The §7 collapse removes the stored enum and keeps this as the
+    // basis for the 3-state SyncMode (phase==WARM ⟺ active && misses<kWarmSyncMissesBeforeDegraded;
+    // DEGRADED wide-window ⟺ misses>=that; RECOVERY ⟺ !active && misses>=kWarmSyncMissesBeforeRecovery).
+    frame_arrival_policy::WarmSyncPhase derivePhase() const {
+        if (!warm_sync_active_) {
+            return consecutive_sync_misses_ >= frame_arrival_policy::kWarmSyncMissesBeforeRecovery
+                       ? frame_arrival_policy::WarmSyncPhase::RECOVERY
+                       : frame_arrival_policy::WarmSyncPhase::COLD;
+        }
+        if (consecutive_sync_misses_ >= frame_arrival_policy::kWarmSyncMissesBeforeRecovery)
+            return frame_arrival_policy::WarmSyncPhase::RECOVERY;
+        if (consecutive_sync_misses_ >= frame_arrival_policy::kWarmSyncMissesBeforeDegraded)
+            return frame_arrival_policy::WarmSyncPhase::DEGRADED;
+        return frame_arrival_policy::WarmSyncPhase::WARM;
+    }
+
     // Burst declared-z (§7.6): the single RX source of truth for "what LDPC lifting
     // size did this transfer's BURST_HEADER declare?". The per-frame extraction z is
     // DERIVED from (frame-class, declared-z) in the behavioral phase — never toggled.
@@ -215,6 +236,12 @@ private:
 
     // WARM→RE_ACQUIRE escalation threshold (consecutive predicted-position LDPC failures).
     static constexpr int kReacquireAfterMisses = 2;
+
+    // --- Phase-D prep (TEMPORARY validation, §7 collapse) ------------------------------------
+    // debugCheckPhaseInvariant() asserts the stored warm_sync_phase_ == derivePhase() after every
+    // transition (logs a one-line PHASE-DERIVE-MISMATCH WARN on divergence — should NEVER fire).
+    // derivePhase() is public (see above) so test_sync_controller_phase can drive all four states.
+    void debugCheckPhaseInvariant(const char* where) const;
 
     // Log prefix mirrored from StreamingDecoder (e.g. "[BRAVO]") so warm-sync log lines keep
     // their station tag now that the transition logic emits them from here.
