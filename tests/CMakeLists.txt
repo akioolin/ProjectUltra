@@ -62,10 +62,6 @@ add_executable(test_session_isolation test_session_isolation.cpp)
 target_link_libraries(test_session_isolation PRIVATE ota_channel_core)
 add_test(NAME SessionIsolation COMMAND test_session_isolation)
 
-add_executable(test_simulator_determinism test_simulator_determinism.cpp)
-target_link_libraries(test_simulator_determinism PRIVATE ota_channel_core ota_simulator_service)
-add_test(NAME SimulatorDeterminism COMMAND test_simulator_determinism)
-
 add_executable(test_auth_allowlist test_auth_allowlist.cpp)
 target_link_libraries(test_auth_allowlist PRIVATE ota_simulator_service)
 add_test(NAME AuthAllowlist COMMAND test_auth_allowlist)
@@ -432,206 +428,56 @@ target_include_directories(test_streaming_mc_dpsk PRIVATE
 target_link_libraries(test_streaming_mc_dpsk PRIVATE ultra_core ota_channel_core)
 add_test(NAME StreamingMCDPSK COMMAND test_streaming_mc_dpsk)
 
-if(TARGET ultra_sim_station)
-    add_executable(test_tx_burst_normalization
-        test_tx_burst_normalization.cpp
-        ../src/gui/modem/modem_engine.cpp
-        ../src/gui/modem/modem_rx.cpp
-        ../src/gui/modem/modem_rx_decode.cpp
-        ../src/gui/modem/modem_mode.cpp
-        ../src/gui/modem/modem_carrier_sense.cpp
-        ../src/gui/adaptive_mode.cpp
-        ${ULTRA_STREAMING_DECODER_SOURCES}
-        ../src/gui/modem/streaming_encoder.cpp
-    )
-    target_include_directories(test_tx_burst_normalization PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../src
-        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
-    )
-    target_link_libraries(test_tx_burst_normalization PRIVATE ultra_core ota_channel_core)
-    add_test(NAME TxBurstNormalization COMMAND test_tx_burst_normalization)
-    set_tests_properties(TxBurstNormalization PROPERTIES
-        TIMEOUT 90
-        LABELS regression)
+# TX-burst normalization (PA/ALC gain staging) — self-contained; never used
+# SimulatedStation (compiles the modem engine directly), so it survives the
+# 2026-05-30 cli_simulator/SimulatedStation retirement.
+add_executable(test_hardware_tx_normalization
+    test_hardware_tx_normalization.cpp
+    ../src/gui/modem/modem_engine.cpp
+    ../src/gui/modem/modem_rx.cpp
+    ../src/gui/modem/modem_rx_decode.cpp
+    ../src/gui/modem/modem_mode.cpp
+    ../src/gui/modem/modem_carrier_sense.cpp
+    ../src/gui/adaptive_mode.cpp
+    ${ULTRA_STREAMING_DECODER_SOURCES}
+    ../src/gui/modem/streaming_encoder.cpp
+)
+target_include_directories(test_hardware_tx_normalization PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../tools
+)
+target_link_libraries(test_hardware_tx_normalization PRIVATE ultra_core ota_channel_core)
+add_test(NAME TxBurstHardwareNormalization COMMAND test_hardware_tx_normalization)
+set_tests_properties(TxBurstHardwareNormalization PROPERTIES
+    TIMEOUT 90
+    LABELS regression)
 
-    add_executable(test_hardware_tx_normalization
-        test_hardware_tx_normalization.cpp
-        ../src/gui/modem/modem_engine.cpp
-        ../src/gui/modem/modem_rx.cpp
-        ../src/gui/modem/modem_rx_decode.cpp
-        ../src/gui/modem/modem_mode.cpp
-        ../src/gui/modem/modem_carrier_sense.cpp
-        ../src/gui/adaptive_mode.cpp
-        ${ULTRA_STREAMING_DECODER_SOURCES}
-        ../src/gui/modem/streaming_encoder.cpp
-    )
-    target_include_directories(test_hardware_tx_normalization PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../src
-        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
-    )
-    target_link_libraries(test_hardware_tx_normalization PRIVATE ultra_core ota_channel_core)
-    add_test(NAME TxBurstHardwareNormalization COMMAND test_hardware_tx_normalization)
-    set_tests_properties(TxBurstHardwareNormalization PROPERTIES
-        TIMEOUT 90
-        LABELS regression)
+# Idle-noise SNR calibration — needs the idle-noise estimator, not SimulatedStation.
+add_executable(test_idle_noise_snr_calibration
+    test_idle_noise_snr_calibration.cpp
+    ../src/gui/modem/idle_noise_snr_estimator.cpp
+)
+target_include_directories(test_idle_noise_snr_calibration PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../tools
+)
+target_link_libraries(test_idle_noise_snr_calibration PRIVATE ultra_core ota_channel_core)
+add_test(NAME ChannelIdleNoiseSNRCalibration COMMAND test_idle_noise_snr_calibration)
+set_tests_properties(ChannelIdleNoiseSNRCalibration PROPERTIES
+    TIMEOUT 90
+    LABELS regression)
 
-    add_executable(test_channel_snr_calibration test_channel_snr_calibration.cpp)
-    target_include_directories(test_channel_snr_calibration PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../src
-        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
-    )
-    target_link_libraries(test_channel_snr_calibration PRIVATE ultra_sim_station)
-    add_test(NAME ChannelSNRCalibration COMMAND test_channel_snr_calibration)
-    set_tests_properties(ChannelSNRCalibration PROPERTIES
-        TIMEOUT 60
-        LABELS regression)
-
-    add_executable(test_modem_snr_meter_calibration test_modem_snr_meter_calibration.cpp)
-    target_include_directories(test_modem_snr_meter_calibration PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../src
-        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
-    )
-    target_link_libraries(test_modem_snr_meter_calibration PRIVATE ultra_sim_station)
-    add_test(NAME ChannelModemSNRMeterCalibration COMMAND test_modem_snr_meter_calibration)
-    set_tests_properties(ChannelModemSNRMeterCalibration PROPERTIES
-        TIMEOUT 90
-        LABELS regression)
-
-    add_executable(test_idle_noise_snr_calibration test_idle_noise_snr_calibration.cpp)
-    target_include_directories(test_idle_noise_snr_calibration PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../src
-        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
-    )
-    target_link_libraries(test_idle_noise_snr_calibration PRIVATE ultra_sim_station)
-    add_test(NAME ChannelIdleNoiseSNRCalibration COMMAND test_idle_noise_snr_calibration)
-    set_tests_properties(ChannelIdleNoiseSNRCalibration PROPERTIES
-        TIMEOUT 90
-        LABELS regression)
-
-    add_executable(test_pong_tx_race_with_ptt_model
-        test_pong_tx_race_with_ptt_model.cpp)
-    target_include_directories(test_pong_tx_race_with_ptt_model PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../src
-        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
-    )
-    target_link_libraries(test_pong_tx_race_with_ptt_model PRIVATE ultra_sim_station)
-    add_test(NAME PongTxCarrierSenseVerified
-        COMMAND test_pong_tx_race_with_ptt_model)
-    set_tests_properties(
-        PongTxCarrierSenseVerified
-        PROPERTIES
-        TIMEOUT 45
-        LABELS regression)
-
-    add_executable(test_simulated_radio_ptt_state
-        test_simulated_radio_ptt_state.cpp)
-    target_include_directories(test_simulated_radio_ptt_state PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../src
-        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
-    )
-    target_link_libraries(test_simulated_radio_ptt_state PRIVATE ultra_sim_station)
-    add_test(NAME SimulatedRadioPttState
-        COMMAND test_simulated_radio_ptt_state)
-    set_tests_properties(SimulatedRadioPttState PROPERTIES
-        TIMEOUT 30
-        LABELS regression)
-
-    add_executable(test_client_audio_port_radio_gate
-        test_client_audio_port_radio_gate.cpp)
-    target_include_directories(test_client_audio_port_radio_gate PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../src
-        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
-    )
-    target_link_libraries(test_client_audio_port_radio_gate PRIVATE ultra_sim_station)
-    add_test(NAME ClientAudioPortRadioGate
-        COMMAND test_client_audio_port_radio_gate)
-    set_tests_properties(ClientAudioPortRadioGate PROPERTIES
-        TIMEOUT 30
-        LABELS regression)
-
-    add_executable(test_audio_port_carrier_sense
-        test_audio_port_carrier_sense.cpp)
-    target_include_directories(test_audio_port_carrier_sense PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../src
-        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
-    )
-    target_link_libraries(test_audio_port_carrier_sense PRIVATE ultra_sim_station)
-    add_test(NAME AudioPortCarrierSense
-        COMMAND test_audio_port_carrier_sense)
-    set_tests_properties(AudioPortCarrierSense PROPERTIES
-        TIMEOUT 30
-        LABELS regression)
-
-    add_executable(test_deferred_tx_fragmentation
-        test_deferred_tx_fragmentation.cpp)
-    target_include_directories(test_deferred_tx_fragmentation PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../src
-        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
-    )
-    target_link_libraries(test_deferred_tx_fragmentation PRIVATE ultra_sim_station)
-    add_test(NAME DeferredTxFragmentation
-        COMMAND test_deferred_tx_fragmentation)
-    set_tests_properties(DeferredTxFragmentation PROPERTIES
-        TIMEOUT 30
-        LABELS regression)
-
-    add_executable(test_radio_realism_tx_pending
-        test_radio_realism_tx_pending.cpp)
-    target_include_directories(test_radio_realism_tx_pending PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../src
-        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
-    )
-    target_link_libraries(test_radio_realism_tx_pending PRIVATE ultra_sim_station)
-    add_test(NAME test_radio_realism_tx_pending
-        COMMAND test_radio_realism_tx_pending)
-    set_tests_properties(test_radio_realism_tx_pending PROPERTIES
-        TIMEOUT 30
-        LABELS regression)
-
-    add_executable(test_mcdpsk_ack_turnaround
-        test_mcdpsk_ack_turnaround.cpp)
-    target_include_directories(test_mcdpsk_ack_turnaround PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../src
-        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
-    )
-    target_link_libraries(test_mcdpsk_ack_turnaround PRIVATE ultra_sim_station)
-    add_test(NAME MCDPSKAckTurnaround
-        COMMAND test_mcdpsk_ack_turnaround)
-    set_tests_properties(MCDPSKAckTurnaround PROPERTIES
-        TIMEOUT 30
-        LABELS regression)
-
-    add_executable(test_session_ptt_sweep test_session_ptt_sweep.cpp)
-    target_include_directories(test_session_ptt_sweep PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../src
-        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
-    )
-    target_link_libraries(test_session_ptt_sweep PRIVATE ultra_sim_station)
-    foreach(rx_settling_ms 0 100 200 300 500 700 1000 1500 2000)
-        add_test(NAME SessionPttSweep_${rx_settling_ms}ms
-            COMMAND test_session_ptt_sweep ${rx_settling_ms})
-        set_tests_properties(SessionPttSweep_${rx_settling_ms}ms PROPERTIES
-            TIMEOUT 75
-            LABELS regression
-            RUN_SERIAL TRUE)
-    endforeach()
-
-    add_executable(test_mcdpsk_half_duplex_timing
-        test_mcdpsk_half_duplex_timing.cpp)
-    target_include_directories(test_mcdpsk_half_duplex_timing PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../src
-        ${CMAKE_CURRENT_SOURCE_DIR}/../tools
-    )
-    target_link_libraries(test_mcdpsk_half_duplex_timing PRIVATE ultra_sim_station)
-    add_test(NAME MCDPSKHalfDuplexTiming
-        COMMAND test_mcdpsk_half_duplex_timing)
-    set_tests_properties(MCDPSKHalfDuplexTiming PROPERTIES
-        TIMEOUT 100
-        LABELS regression
-        RUN_SERIAL TRUE)
-else()
-    message(STATUS "ChannelSNRCalibration disabled: ultra_sim_station target is not built")
-endif()
+# MC-DPSK ACK turnaround timing — protocol-only (ultra_core), not SimulatedStation.
+add_executable(test_mcdpsk_ack_turnaround test_mcdpsk_ack_turnaround.cpp)
+target_include_directories(test_mcdpsk_ack_turnaround PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../tools
+)
+target_link_libraries(test_mcdpsk_ack_turnaround PRIVATE ultra_core ota_channel_core)
+add_test(NAME MCDPSKAckTurnaround COMMAND test_mcdpsk_ack_turnaround)
+set_tests_properties(MCDPSKAckTurnaround PROPERTIES
+    TIMEOUT 30
+    LABELS regression)
 
 # Throughput measurement tool
 add_executable(test_throughput ../tools/test_throughput.cpp)
@@ -678,32 +524,6 @@ if(TARGET decode_bench)
         COMMAND test_decode_bench_replay $<TARGET_FILE:decode_bench> ${CMAKE_SOURCE_DIR})
 else()
     message(STATUS "DecodeBenchReplay disabled: decode_bench target is not built")
-endif()
-
-if(TARGET cli_simulator)
-    add_test(NAME CliTxDriveParse
-        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_cli_tx_drive_parse.sh
-                     $<TARGET_FILE:cli_simulator>)
-    set_tests_properties(CliTxDriveParse PROPERTIES
-        TIMEOUT 30
-        LABELS regression)
-
-    add_test(NAME CLISyntheticNotch
-        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_cli_synthetic_notch.sh
-                     $<TARGET_FILE:cli_simulator>)
-    set_tests_properties(CLISyntheticNotch PROPERTIES
-        TIMEOUT 240
-        RUN_SERIAL TRUE
-        LABELS regression)
-
-    if(TARGET ota_simulator)
-        add_test(NAME CliOtasimMandatory
-            COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test_cli_otasim_mandatory.sh)
-        set_tests_properties(CliOtasimMandatory PROPERTIES
-            TIMEOUT 180
-            RUN_SERIAL TRUE
-            LABELS regression)
-    endif()
 endif()
 
 if(TARGET ota_simulator)

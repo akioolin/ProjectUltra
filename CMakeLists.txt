@@ -310,9 +310,9 @@ configure_file(
     @ONLY
 )
 
-# SDL2 detection — used by both ultra_gui (always required) and cli_simulator
-# (optional, for hardware audio I/O in --role A|B mode). Detect once at the
-# top level so both targets share the same libs.
+# SDL2 detection — used by ultra_gui (always required) and ultra_tnc (optional,
+# for live hardware audio I/O). Detect once at the top level so both targets
+# share the same libs.
 find_package(SDL2 QUIET)
 if(NOT SDL2_FOUND)
     find_package(PkgConfig QUIET)
@@ -321,9 +321,9 @@ if(NOT SDL2_FOUND)
     endif()
 endif()
 if(SDL2_FOUND)
-    message(STATUS "Found SDL2: cli_simulator hardware audio enabled")
+    message(STATUS "Found SDL2: ultra_tnc hardware audio enabled")
 else()
-    message(STATUS "SDL2 not found: cli_simulator --role A|B will be unavailable")
+    message(STATUS "SDL2 not found: ultra_tnc live-audio mode will be unavailable")
 endif()
 
 add_library(ota_channel_core STATIC
@@ -548,18 +548,6 @@ set(ULTRA_MODEM_ENGINE_SOURCES
 
 # Command-line modem tool
 if(ULTRA_BUILD_TOOLS)
-    add_library(ultra_sim_station STATIC
-        tools/sim/simulated_station.cpp
-        ${ULTRA_STREAMING_MODEM_SOURCES}
-    )
-    ultra_enable_tool_test_warnings(tools/sim/simulated_station.cpp)
-    target_include_directories(ultra_sim_station PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/tools
-    )
-    target_link_libraries(ultra_sim_station PUBLIC ultra_core)
-    target_link_libraries(ultra_sim_station PUBLIC ota_channel_core)
-
     add_executable(ultra
         src/main.cpp
         ${ULTRA_MODEM_ENGINE_SOURCES}
@@ -570,17 +558,6 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_link_libraries(ultra PRIVATE ultra_core ota_channel_core)
 
-    # CLI Simulator - Uses IWaveform + StreamingDecoder/Encoder directly (NOT ModemEngine)
-    add_executable(cli_simulator
-        tools/cli_simulator.cpp
-    )
-    ultra_enable_tool_test_warnings(tools/cli_simulator.cpp)
-    target_include_directories(cli_simulator PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/tools
-    )
-    target_link_libraries(cli_simulator PRIVATE ultra_sim_station ultra_otasim_client)
-
     # otasim_ctl - admin CLI for the OTASim server (SetChannel etc.)
     add_executable(otasim_ctl
         tools/otasim_ctl.cpp
@@ -588,45 +565,16 @@ if(ULTRA_BUILD_TOOLS)
     ultra_enable_tool_test_warnings(tools/otasim_ctl.cpp)
     target_link_libraries(otasim_ctl PRIVATE ultra_otasim_client)
 
-    add_executable(session_decode
-        tools/session_decode.cpp
-    )
-    ultra_enable_tool_test_warnings(tools/session_decode.cpp)
-    target_include_directories(session_decode PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/tools
-    )
-    target_link_libraries(session_decode PRIVATE ultra_sim_station ultra_tool_wav_io)
-
-    add_executable(ofdm_snr_probe
-        tools/ofdm_snr_probe.cpp
-    )
-    ultra_enable_tool_test_warnings(tools/ofdm_snr_probe.cpp)
-    target_include_directories(ofdm_snr_probe PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/tools
-    )
-    target_link_libraries(ofdm_snr_probe PRIVATE ultra_sim_station)
-
     add_executable(measure_ack_fer
         tools/measure_ack_fer.cpp
+        ${ULTRA_STREAMING_MODEM_SOURCES}
     )
     ultra_enable_tool_test_warnings(tools/measure_ack_fer.cpp)
     target_include_directories(measure_ack_fer PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
     )
-    target_link_libraries(measure_ack_fer PRIVATE ultra_sim_station)
-
-    add_executable(idle_snr_probe
-        tools/idle_snr_probe.cpp
-    )
-    ultra_enable_tool_test_warnings(tools/idle_snr_probe.cpp)
-    target_include_directories(idle_snr_probe PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/tools
-    )
-    target_link_libraries(idle_snr_probe PRIVATE ultra_sim_station)
+    target_link_libraries(measure_ack_fer PRIVATE ultra_core ota_channel_core)
 
     add_library(ultra_replay_lib STATIC
         src/replay/bundle_loader.cpp
@@ -657,21 +605,19 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_link_libraries(ultra_replay PRIVATE ultra_replay_lib)
 
+    # serve (gate channel server) + gen (clip gen). The scripted-scenario `run`
+    # path (runner*/scripted_audio_port, which drove the retired SimulatedStation)
+    # was removed 2026-05-30 with the cli_simulator retirement.
     add_executable(ota_simulator
         tools/ota_simulator.cpp
         tools/ota_simulator/scenario.cpp
-        tools/ota_simulator/scripted_audio_port.cpp
-        tools/ota_simulator/runner.cpp
-        tools/ota_simulator/runner_v2.cpp
         tools/ota_simulator/clip_gen.cpp
         tools/ota_simulator/session_log.cpp
+        ${ULTRA_STREAMING_MODEM_SOURCES}
     )
     ultra_enable_tool_test_warnings(
         tools/ota_simulator.cpp
         tools/ota_simulator/scenario.cpp
-        tools/ota_simulator/scripted_audio_port.cpp
-        tools/ota_simulator/runner.cpp
-        tools/ota_simulator/runner_v2.cpp
         tools/ota_simulator/clip_gen.cpp
         tools/ota_simulator/session_log.cpp
     )
@@ -680,7 +626,7 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
         ${CMAKE_CURRENT_BINARY_DIR}/generated/include
     )
-    target_link_libraries(ota_simulator PRIVATE ultra_sim_station ultra_tool_wav_io ota_simulator_service)
+    target_link_libraries(ota_simulator PRIVATE ultra_core ota_channel_core ultra_tool_wav_io ota_simulator_service)
 
     add_executable(ultra_report
         tools/ultra_report.cpp
@@ -691,28 +637,6 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
     )
     target_link_libraries(ultra_report PRIVATE ultra_core)
-
-    # Optional hardware-audio support (--role A|B). Reuses the GUI's
-    # AudioEngine class; SDL2 is detected at top level above.
-    if(SDL2_FOUND)
-        target_sources(cli_simulator PRIVATE
-            ${ULTRA_AUDIO_ENGINE_SOURCE}
-        )
-        # SDL_MAIN_HANDLED tells SDL.h not to rename our int main() to
-        # SDL_main. Required for CLI tools on Windows; otherwise the linker
-        # can't find main() and reports LNK2019 / LNK1120. ultra_gui keeps
-        # SDL's main wrapping because it's a windowed SDL app.
-        target_compile_definitions(cli_simulator PRIVATE
-            ULTRA_HAVE_SDL2
-            SDL_MAIN_HANDLED
-        )
-        if(TARGET SDL2::SDL2)
-            target_link_libraries(cli_simulator PRIVATE SDL2::SDL2)
-        else()
-            target_include_directories(cli_simulator PRIVATE ${SDL2_INCLUDE_DIRS})
-            target_link_libraries(cli_simulator PRIVATE ${SDL2_LIBRARIES})
-        endif()
-    endif()
 
     if(SDL2_FOUND)
         add_executable(ultra_tnc
@@ -760,19 +684,6 @@ if(ULTRA_BUILD_TOOLS)
     target_link_libraries(otasim_audio_demo PRIVATE
         ultra_tool_wav_io ota_channel_core)
 
-    # Simple waveform test (clean TX/RX with consistent config)
-    # Decoder-only by design; do not pull in the encoder runtime here.
-    add_executable(test_waveform_simple
-        tools/test_waveform_simple.cpp
-        ${ULTRA_STREAMING_DECODER_SOURCES}
-    )
-    ultra_enable_tool_test_warnings(tools/test_waveform_simple.cpp)
-    target_include_directories(test_waveform_simple PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/tools
-    )
-    target_link_libraries(test_waveform_simple PRIVATE ultra_core ota_channel_core)
-
     # Offline LTS channel-estimate MSE harness: measures ||H_hat - H_true|| with
     # and without the DFT-domain LTS denoise, in isolation from the GUI.
     add_executable(lts_estimate_mse
@@ -800,7 +711,7 @@ endif()
 
 # GUI Application
 if(ULTRA_BUILD_GUI)
-    # SDL2 detection is done at top level (shared with cli_simulator).
+    # SDL2 detection is done at top level (shared with ultra_tnc).
 
     find_package(OpenGL QUIET)
 

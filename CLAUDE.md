@@ -68,12 +68,19 @@ Expected raw levels: Pi→Mac RMS ~`0.124` peak ~`0.303`; Mac→Pi RMS ~`0.249` 
 
 ## CRITICAL RULES (Never Violate)
 
-**Test binaries:**
-- ALWAYS run from `build/`: `./build/cli_simulator`, NOT `./cli_simulator`
-- `cli_simulator` — **PRIMARY** full-protocol test (PING/PONG → CONNECT → MODE_CHANGE → DATA 4CW interleaved → DISCONNECT), light preamble, two-station, connected-mode. `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test 2>&1 | tee /tmp/test_output.log`
-- `test_waveform_simple` — quick single-frame sanity only (NOT connected mode)
-- `ctest --test-dir build` — default unit/regression gate; `tests/regression_matrix.sh` wraps it (`--full` adds the light-sync sweep when `cli_simulator` exists)
-- **ALWAYS `| tee /tmp/test_output.log`** — tests take minutes; full output needed for debugging
+**Test gates** (cli_simulator + test_waveform_simple were RETIRED 2026-05-30 — they
+diverged from the production ModemEngine PHY wrapper and kept producing misleading
+results; see docs/CHANGELOG.md):
+- `tools/gui_qso_scenario.sh` — **PRIMARY full-protocol + faithful fade/throughput gate.**
+  Two real `ultra_gui -sim` instances over a live `ota_simulator serve` channel:
+  PING/PONG → CONNECT → MODE_CHANGE → ALPHA→BRAVO file transfer → DISCONNECT, real-time.
+  `tools/gui_qso_scenario.sh --channel good --snr-db 20 --seed 42 --expect-rate R3/4 --file-kb 21 --out /tmp/X`
+  → reads `summary.env` (`RESULT=PASS`, `FILE_CRC_OK_COUNT`, `GOODPUT_BPS`). Run in background.
+- `ctest --test-dir build --output-on-failure -j4` — unit/regression gate (the real PHY,
+  not a divergent harness); `tests/regression_matrix.sh` wraps it.
+- `decode_bench` — fast headless WAV-fixture decode A/B (no real-time pacing).
+- `measure_ack_fer` — ACK/FER measurement (drives the real StreamingEncoder/Decoder).
+- **ALWAYS `| tee /tmp/...log`** — runs take minutes; full output needed for debugging.
 
 **MC-DPSK invariants:**
 - ALWAYS call `mc_dpsk_demodulator_->reset()` at start of `rxDecodeDPSK()`
@@ -90,7 +97,7 @@ Expected raw levels: Pi→Mac RMS ~`0.124` peak ~`0.303`; Mac→Pi RMS ~`0.249` 
 - SINGLE ModemEngine instance for the entire audio stream (continuous RX)
 - Buffer limit: `MAX_PENDING_SAMPLES = 960000` (20 s at 48 kHz)
 - DEFAULT gate: `ctest --test-dir build --output-on-failure -j4`
-- `cli_simulator` is the ONLY tool that tests the full protocol with light preamble + two-station interaction. NOTE: it is **CPU-paced and NOT faithful for fade reliability** — use the real-time GUI (`tools/gui_qso_scenario.sh`) for fade/throughput claims.
+- `tools/gui_qso_scenario.sh` is the faithful full-protocol + fade/throughput gate (two real `ultra_gui -sim` stations over `ota_simulator serve`, real-time). It REPLACED `cli_simulator` (retired 2026-05-30), which was CPU-paced AND used a divergent PHY wrapper (SimulatedStation) — both made it unfaithful. ALL fade/throughput/full-protocol claims go through the GUI gate.
 
 ---
 
@@ -131,7 +138,7 @@ Floors are **in-band SNR (3 kHz noise BW)**. Full table, methodology, and histor
 |------|---------|---------------|-------|
 | MC-DPSK R1/4 | AWGN | **5 dB** | 3/3 seeds + OTASim fixture |
 | OFDM_CHIRP R1/4 | AWGN | **10 dB** | warm-sync LTS FER 4.875% @10, 0% @14-20 |
-| OFDM_CHIRP R1/4 | Good | **15 dB** | was "locked in DecodeBenchReplay" — that CTest is RED on HEAD (stale harness, NOT a prod regression; `cli_simulator`/GUI are the trusted floor gates). See MODEM_INFRASTRUCTURE_MAP §8. |
+| OFDM_CHIRP R1/4 | Good | **15 dB** | was "locked in DecodeBenchReplay" — that CTest is RED on HEAD (stale harness, NOT a prod regression; `gui_qso_scenario.sh` is the trusted floor gate). See MODEM_INFRASTRUCTURE_MAP §8. |
 | OFDM_CHIRP R1/2 | AWGN / Good | **14 dB** | 1-seed locator |
 | OFDM_NARROW R1/4 | AWGN / Good | ~17.6 | pre-audit |
 
@@ -271,8 +278,10 @@ Boundary tests: `tests/test_waveform_policy.cpp`, `tests/test_connection_policy.
 
 ## SIMULATOR FIDELITY — Non-Negotiable
 
-cli_simulator, OTASim, and the channel models exist to test the modem **AS IF WE
-WERE A RADIO**. Every change must survive: *"would a real radio behave this way?"*
+The GUI sim path (`gui_qso_scenario.sh`), OTASim, and the channel models exist to
+test the modem **AS IF WE WERE A RADIO**. Every change must survive: *"would a real
+radio behave this way?"* (The retired `cli_simulator` was the cautionary tale — a
+divergent harness that drifted from the production PHY and produced misleading passes.)
 When fidelity breaks, every protocol fix ships with a hidden "works in simulator,
 unvalidated on hardware" caveat.
 
@@ -327,9 +336,9 @@ mkdir build && cd build && cmake .. && make -j4
 
 | Tool | Purpose | Example |
 |------|---------|---------|
-| `cli_simulator` | **PRIMARY** full protocol, two-station | `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test` |
-| `tools/gui_qso_scenario.sh` | GUI QSO / file transfer — **faithful fade gate** | `tools/gui_qso_scenario.sh --channel good --snr-db 20 --seed 42` |
-| `test_waveform_simple` | quick single-frame sanity | `./build/test_waveform_simple -w ofdm_chirp --snr 15` |
+| `tools/gui_qso_scenario.sh` | **PRIMARY** full protocol + **faithful fade/throughput gate** (two real GUI stations) | `tools/gui_qso_scenario.sh --channel good --snr-db 20 --seed 42 --file-kb 21 --out /tmp/X` |
+| `decode_bench` | fast headless WAV-fixture decode A/B | `./build/decode_bench ...` |
+| `measure_ack_fer` | ACK/FER measurement (real StreamingEncoder/Decoder) | `./build/measure_ack_fer ...` |
 | `tests/regression_matrix.sh` | CTest wrapper | `./tests/regression_matrix.sh --quick` |
 
 ---
@@ -344,7 +353,7 @@ src/fec/         LDPC encoder/decoder
 src/protocol/    Protocol v2 (PING/CONNECT/DATA/DISCONNECT), waveform selection
 src/sync/        ChirpSync, Schmidl-Cox sync
 src/waveform/    IWaveform interface + implementations
-tools/           cli_simulator, test_waveform_simple, gui_qso_scenario.sh
+tools/           gui_qso_scenario.sh (faithful gate), decode_bench, measure_ack_fer, ota_simulator
 ```
 Key files: `src/sync/chirp_sync.hpp` (dual-chirp detect + CFO), `src/gui/modem/modem_rx_decode.cpp` (RX decode), `src/psk/multi_carrier_dpsk.hpp` (MC-DPSK), `src/ofdm/channel_equalizer_pilot.cpp` + `channel_equalizer_equalize.cpp` (pilot tracking + DD).
 
@@ -387,6 +396,10 @@ PING/PONG (DPSK) → CONNECT/CONNECT_ACK (DPSK) → MODE_CHANGE/ACK (SNR-negotia
 
 **Before:** read `docs/PROJECT_GOALS.md` (align with mission), `docs/INVARIANTS.md` (subsystem you touch), `docs/KNOWN_BUGS.md` (related issues); for agent work use `docs/AGENT_TASK_BACKLOG.md` + one queued task.
 
-**After:** run `./build/cli_simulator --snr 15 --fading good --rate r1_4 --test 2>&1 | tee /tmp/test_output.log` (and the GUI gate for fade/throughput claims); update `docs/CHANGELOG.md` (fix), `docs/KNOWN_BUGS.md` (new bug), `docs/MODEM_INFRASTRUCTURE_MAP.md` if you touched any stage/env-knob/waveform/classification (MANDATORY — keep the map live), and `docs/AGENT_CURRENT_STATE.md`/`QUALITY_AUDIT.md`/`AGENT_TASK_BACKLOG.md` if state changed materially.
+**After:** run `ctest --test-dir build --output-on-failure -j4` for unit/regression, and
+`tools/gui_qso_scenario.sh ... 2>&1 | tee /tmp/test_output.log` (the faithful gate) for any
+fade/throughput/full-protocol claim; update `docs/CHANGELOG.md` (fix), `docs/KNOWN_BUGS.md`
+(new bug), `docs/MODEM_INFRASTRUCTURE_MAP.md` if you touched any stage/env-knob/waveform/
+classification (MANDATORY — keep the map live), and `docs/AGENT_CURRENT_STATE.md`/`QUALITY_AUDIT.md`/`AGENT_TASK_BACKLOG.md` if state changed materially.
 
 **Commit message:** imperative summary line; what + why bullets; `Fixes: BUG-XXX` when applicable.

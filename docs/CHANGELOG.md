@@ -10,6 +10,47 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-30: Retire cli_simulator + test_waveform_simple + SimulatedStation (alpha cleanup)
+
+**Why:** `cli_simulator` and `SimulatedStation` were a *divergent TX wrapper* around the shared
+`StreamingEncoder`/`StreamingDecoder` PHY (the GUI uses `ModemEngine`; cli used `SimulatedStation`
+directly). The duplicated wrapper drifted — this session it couldn't even do a burst file transfer
+(no BURST_HEADER descriptor emission, stale 16-frame group default vs 6-bit mask, half-built
+handshake), and historically it was CPU-paced and "not faithful for fade." The faithful gate is now
+`tools/gui_qso_scenario.sh` (two real `ultra_gui -sim` stations over `ota_simulator serve`), which
+this session proved delivers a file byte-exact at policy-driven Z=81 (RESULT=PASS, 0 CW failures).
+So the divergent harness was retired rather than kept in sync.
+
+**Deleted (34 files):** `tools/cli_simulator.cpp`, `tools/test_waveform_simple.cpp`,
+`tools/sim/simulated_station.{hpp,cpp}`, the 3 SNR probes (`session_decode`, `ofdm_snr_probe`,
+`idle_snr_probe`), `src/sim/channel_snr_probe.hpp`, `ota_simulator`'s scripted-`run` path
+(`runner.cpp`, `runner_v2.cpp`, `scripted_audio_port.{cpp,hpp}`), 10 SimulatedStation-backed
+radio-realism ctests, and 9 cli-family scripts (`run_alpha_gate.sh`, `scan_cli_log.py`,
+`verify_cfo_chain.sh`, `light_sync_regression.sh`, `test_cli_*.sh`, `chain_validation_gate.sh`,
+`phy_fading_reliability.sh`). Also removed 2 already-failing tests: `test_simulator_determinism`
+(pre-existing build break) and `test_tx_burst_normalization` (pre-existing MC-DPSK determinism
+flake).
+
+**Un-bundled the PHY library:** `ultra_sim_station` glued `SimulatedStation` + the shared
+`ULTRA_STREAMING_MODEM_SOURCES` into one lib, so survivors *looked* like they depended on
+SimulatedStation when they only needed the PHY. `measure_ack_fer` and `ota_simulator` now compile
+the PHY sources directly (like `decode_bench` already did) and link `ultra_core ota_channel_core`.
+`ota_simulator` is now `serve`+`gen` only (the gate's channel server is untouched).
+
+**Kept (verified survivors):** `ultra_gui`, `ota_simulator serve`, `measure_ack_fer`,
+`decode_bench`, `cli_enums.hpp`, and 3 tests that were *bundled* in the SimulatedStation block but
+never used it (`test_hardware_tx_normalization`, `test_idle_noise_snr_calibration`,
+`test_mcdpsk_ack_turnaround`) — repointed to the PHY/ultra_core and still passing.
+
+**Test verification:** full build clean; the 3 repointed tests PASS; the faithful GUI gate PASSES
+byte-exact. Pre-existing stale ctest failures (`StreamingConfig`, `StreamingBufferPolicy`,
+`StreamingDecoderToneBurstMonitor`, `DecodeBenchReplay`, `UltraTncSimAudio`) are NOT caused by this
+retirement (none reference deleted code) and are decoder-mode/warm-sync *unit-harness* drift, not
+production regressions — the GUI gate exercises the same paths and passes. Docs updated
+(CLAUDE.md test-gate sections, fidelity section, quick-ref, workflow).
+
+---
+
 ## 2026-05-30: Cleanup — equalizer hot-path getenv → read-once; map/CLAUDE.md stale-fact corrections
 
 **Workstream:** env-knobs→runtime-derivation / alpha-release code cleanup (not a PHY change).

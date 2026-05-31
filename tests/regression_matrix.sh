@@ -33,11 +33,6 @@ echo
 
 ctest --test-dir "$BUILD_DIR" --output-on-failure -j "$CTEST_JOBS"
 
-if [[ "$MODE" == "--full" ]]; then
-  CLI_BIN="${BIN:-$BUILD_DIR/cli_simulator}"
-  if [[ -x "$CLI_BIN" ]]; then
-    BIN="$CLI_BIN" "$SCRIPT_DIR/light_sync_regression.sh"
-  else
-    echo "skip: cli_simulator not found at $CLI_BIN"
-  fi
-fi
+# Note: the legacy cli_simulator light-sync sweep (the old --full extra) was
+# retired 2026-05-30 with cli_simulator. The faithful fade/throughput gate is now
+# tools/gui_qso_scenario.sh (two real ultra_gui -sim instances over ota_simulator).
