@@ -236,3 +236,31 @@ insufficient because the buffer is already built at the wrong z during `process(
 **Next task:** the file-transfer-z-mode decoupling above. Well-specified, single-purpose. The
 SyncController scaffold (commit `4061f44`) is the eventual home for the consolidated z-state, but the
 decoupling can land first as a targeted fix.
+
+---
+
+## ⚠️ CORRECTION (2026-05-31, post-debug) — the "z-mode decoupling / persist-z=81" above was a MISDIAGNOSIS
+
+The text above predates the actual root-cause. Two things were learned debugging DQPSK R1/4
+AWGN@10 + Good@10 (see `docs/BURST_Z_LDPC_LIFECYCLE_2026_05_31.md` for the full model, and the
+2026-05-31 CHANGELOG entry):
+
+1. **The real low-SNR decode bug was NOT a z-state desync.** z=81 *was* correctly active at the
+   data demod (`processPresynced` read `need 1944`). The data was mangled one stage later: the
+   **carrier-LDPC RX inverse miscounted air-blocks** (counted z=81 codewords `3888/1944=2`
+   instead of 648-bit air-blocks `3888/648=6`), truncating 3888→1296. **Fixed, commit `9189b70`**
+   (`ofdm_chirp_waveform.cpp:969`). AWGN@10 now PASSES (CRC-OK, 0 retx).
+
+2. **"Persist z=81 across the transfer" is WRONG — do NOT implement it.** Control/ACK/BURST_HEADER
+   frames decode through `getSoftBits()` sized by `active_ldpc_block_size` (control-first peek,
+   `streaming_ofdm_decode.cpp:626-704`), so they **require** z=27. Persisting z=81 breaks the whole
+   control plane. The post-burst drop-back to z=27 (`streaming_burst_interleave.cpp:734`) is
+   **mandatory and correct** — the invariant is "small z=27 is default; lift to z=81 only on a
+   decoded BURST_HEADER; drop back at group-end."
+
+3. **The residual Good@10 `0/6` is fade physics, not a z bug:** a deep fade kills the BURST_HEADER
+   (the sole z=81 declaration) → its data has no lift → z=27 demod → ARQ resends. Irreducible.
+
+**Corrected next step:** the `z`-state is still scattered (≥3 copies; only `active_ldpc_block_size`
+is not yet driven by the `activeBurstLiftingZ()` source-of-truth — §1 of the lifecycle doc). That
+consolidation belongs in the SyncController refactor, NOT as a "persist z=81" point patch.

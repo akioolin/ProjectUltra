@@ -10,6 +10,57 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-31: Carrier-LDPC RX air-block miscount (z=81 file decode) + Z/LDPC lifecycle doc
+
+**What was broken:** z=81 (1944-bit) burst DATA frames decoded to garbage on the
+**differential (DQPSK)** path — RX produced **1296** soft bits instead of **3888**, LDPC
+bailed `max_iters=0`, burst groups delivered `0/6`. The DQPSK R1/4 file transfer never
+delivered at AWGN@10 or Good@10. **Coherent QPSK was unaffected** (it takes a different
+carrier-LDPC eligibility branch and skips the inverse), which masked the bug as a
+coherent-vs-differential split — that contrast was the diagnostic key.
+
+**Root cause:** the carrier-LDPC interleaver is a fixed permutation over
+`kLdpcCodewordBits (648)`-sized **air-blocks**, not LDPC z-codewords. TX counts
+`Ncw = encoded_bytes / 81` correctly (`ofdm_chirp_waveform.cpp:393`) → **6** air-blocks
+for a 2-CW z=81 frame. RX computed `Ncw = soft_bits / active_block_size` (`= 3888/1944 = 2`)
+so `applyCarrierLdpcInverse` built `out(2*648 = 1296)` and dropped 2/3 of the LLRs with the
+wrong permutation. TX shuffled 6 blocks, RX un-shuffled 2 → total mismatch.
+
+**What changed:** RX now counts the carrier-LDPC block count in 648-bit air-block units
+(`soft_bits_.size() / LDPC_CODEWORD_BITS`, `ofdm_chirp_waveform.cpp:969`), matching TX.
+Identical to the old value for z=27 (no regression); yields 6 (not 2) for z=81. Commit
+`9189b70`.
+
+**Why it's properly fixed:** the carrier-LDPC permutation is defined over 648-bit blocks on
+**both** sides (`carrier_ldpc_interleaver.cpp:14-19`); counting in those units is the only
+TX/RX-consistent choice. The forward path already counted this way; the inverse was the lone
+divergence.
+
+**Also rejected (important):** "persist z=81 for the whole transfer" — would break the entire
+control plane, because the control-first peek (`streaming_ofdm_decode.cpp:626-704`) decodes
+ACKs/BURST_HEADERs through `getSoftBits()`, which is sized by `active_ldpc_block_size`. Control
+**must** be z=27. The post-burst drop-back to z=27 (`streaming_burst_interleave.cpp:734`) is
+mandatory, not a bug.
+
+**Remaining (PHYSICS, not a bug):** a deep fade that destroys a group's BURST_HEADER leaves its
+z=81 data with no lift → demod'd at the z=27 default → `1296` → group `0/6` → ARQ resends. The
+descriptor is the sole z-declaration; losing it loses the group. Not fixable by drop-back timing.
+
+**New doc:** `docs/BURST_Z_LDPC_LIFECYCLE_2026_05_31.md` — the full two-LDPC-flow model, the `z`
+state lifecycle (≥3 copies + sites), the control-must-be-z=27 invariant, the carrier-LDPC
+air-block model, and the fade-lost-descriptor failure mode. Feeds the sync refactor (shared
+scattered-state problem). Corrected the stale "next task = persist-z=81 decoupling" guidance in
+`docs/SYNC_ACQUISITION_FIX_PLAN_2026_05_31.md` (that was a misdiagnosis).
+
+**Test verification:** GUI faithful gate, forced DQPSK R1/4 OFDM below auto-entry SNR
+(`ULTRA_FORCE_WAVEFORM=OFDM_CHIRP ULTRA_FORCE_DATA_MOD=DQPSK ULTRA_FORCE_DATA_RATE=R1_4
+ULTRA_LOCK_RATE=1 tools/gui_qso_scenario.sh --channel awgn --snr-db 10 --expect-mod DQPSK
+--expect-rate R1/4 --file-kb 10`): `RESULT=PASS, FILE_CRC_OK_COUNT=2, GOODPUT_BPS=420,
+BRAVO_RETX_COUNT=0` (was: 0/6, file never delivered). Good@10: burst groups now decode 6/6
+(were 0/6); residual failures are fade physics + the fade-lost-descriptor case above.
+
+---
+
 ## 2026-05-30: Add the Removal Backlog (demolition list) + scope the legacy-file removal precisely
 
 **What changed:** new `docs/REMOVAL_BACKLOG.md` — a tracked list of decided-dead code /
