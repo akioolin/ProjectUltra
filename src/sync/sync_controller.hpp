@@ -32,6 +32,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace ultra {
 namespace sync {
@@ -74,6 +75,19 @@ public:
 
     // A new burst group started (fresh descriptor anchor expected); seeds the WARM cadence.
     void noteGroupBoundary(size_t descriptor_end_abs, size_t expected_frame_gap_samples);
+
+    // --- arrival-tracking transition logic (§7.4 A2; moved verbatim from StreamingDecoder) ---
+    // These own the warm-sync phase machine + cadence prediction + confidence. They fold into
+    // detect()/reportFrameOutcome() in the detect-dispatch chunk; kept as a faithful trio for now.
+    // Callers hold StreamingDecoder::buffer_mutex_ (the *Locked convention); these do not lock.
+    //   resetFrameArrivalTracking : connection/mode reset → COLD, clears prediction + memory.
+    //   noteFrameArrivalSuccess   : a frame decoded at (start,end) → advance prediction, WARM.
+    //   noteFrameArrivalSyncMiss  : a predicted frame missed → decay confidence, escalate phase.
+    void resetFrameArrivalTracking();
+    void noteFrameArrivalSuccess(size_t frame_start_abs, size_t frame_end_abs);
+    void noteFrameArrivalSyncMiss();
+
+    void setLogPrefix(const std::string& prefix) { log_prefix_ = prefix; }
 
     SyncMode mode() const { return mode_; }
     bool isWarm() const { return mode_ == SyncMode::WARM; }
@@ -142,6 +156,10 @@ private:
 
     // WARM→RE_ACQUIRE escalation threshold (consecutive predicted-position LDPC failures).
     static constexpr int kReacquireAfterMisses = 2;
+
+    // Log prefix mirrored from StreamingDecoder (e.g. "[BRAVO]") so warm-sync log lines keep
+    // their station tag now that the transition logic emits them from here.
+    std::string log_prefix_ = "StreamingDecoder";
 };
 
 }  // namespace sync

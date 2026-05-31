@@ -324,7 +324,10 @@ public:
     void setBurstTransportRxEnabled(bool enabled) { burst_transport_rx_ = enabled; }
     void setPingCallback(StreamingPingCallback callback) { ping_callback_ = callback; }
     void setDataSyncAcceptedCallback(DataSyncAcceptedCallback callback) { data_sync_accepted_callback_ = callback; }
-    void setLogPrefix(const std::string& prefix) { log_prefix_ = prefix; }
+    void setLogPrefix(const std::string& prefix) {
+        log_prefix_ = prefix;
+        sync_controller_.setLogPrefix(prefix);  // warm-sync logs now emit from the controller
+    }
 
     // ========================================================================
     // STATUS

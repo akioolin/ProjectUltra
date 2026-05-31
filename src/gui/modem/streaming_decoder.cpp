@@ -252,18 +252,12 @@ void StreamingDecoder::observeIdleNoiseCandidate(const float* samples, size_t co
     idle_noise_snr_estimator_.observeIdleAudio(samples, count);
 }
 
+// §7.4 A2: the warm-sync transition logic now lives in SyncController. These three
+// StreamingDecoder methods are thin forwarders, preserving their callers (the *Locked
+// convention: caller holds buffer_mutex_). The connected_/OFDM_CHIRP eligibility guard stays
+// here (it reads decoder state the controller does not own).
 void StreamingDecoder::resetFrameArrivalTrackingLocked() {
-    sync_controller_.warm_sync_active_ = false;
-    sync_controller_.warm_sync_phase_ = arrival_policy::WarmSyncPhase::COLD;
-    sync_controller_.next_expected_frame_sample_valid_ = false;
-    sync_controller_.next_expected_frame_sample_ = 0;
-    sync_controller_.frame_arrival_confidence_ = 0.0f;
-    sync_controller_.consecutive_sync_misses_ = 0;
-    sync_controller_.last_frame_arrival_valid_ = false;
-    sync_controller_.last_frame_start_sample_ = 0;
-    sync_controller_.last_frame_end_sample_ = 0;
-    sync_controller_.last_frame_arrival_error_valid_ = false;
-    sync_controller_.last_frame_arrival_error_samples_ = 0;
+    sync_controller_.resetFrameArrivalTracking();
 }
 
 void StreamingDecoder::noteFrameArrivalSuccess(size_t frame_start_abs,
@@ -277,84 +271,11 @@ void StreamingDecoder::noteFrameArrivalSuccessLocked(size_t frame_start_abs,
     if (!connected_ || mode_ != protocol::WaveformMode::OFDM_CHIRP) {
         return;
     }
-    if (!sync_controller_.next_expected_frame_sample_valid_ &&
-        !sync_controller_.expect_full_ofdm_anchor_ &&
-        sync_controller_.expectedFrameGapSamples() == 0) {
-        return;
-    }
-
-    const auto previous_phase = sync_controller_.warm_sync_phase_;
-    const auto update = arrival_policy::updateOnSuccessfulFrame(
-        sync_controller_.next_expected_frame_sample_valid_,
-        sync_controller_.next_expected_frame_sample_,
-        sync_controller_.frame_arrival_confidence_,
-        frame_start_abs,
-        frame_end_abs,
-        sync_controller_.expectedFrameGapSamples());
-
-    sync_controller_.next_expected_frame_sample_valid_ = true;
-    sync_controller_.warm_sync_active_ = true;
-    sync_controller_.warm_sync_phase_ = arrival_policy::phaseAfterSuccessfulFrame();
-    sync_controller_.next_expected_frame_sample_ = update.next_expected_frame_sample;
-    sync_controller_.frame_arrival_confidence_ = update.confidence;
-    sync_controller_.consecutive_sync_misses_ = update.consecutive_sync_misses;
-    sync_controller_.last_frame_arrival_valid_ = true;
-    sync_controller_.last_frame_start_sample_ = frame_start_abs;
-    sync_controller_.last_frame_end_sample_ = frame_end_abs;
-    sync_controller_.last_frame_arrival_error_valid_ = update.has_arrival_error;
-    sync_controller_.last_frame_arrival_error_samples_ = update.arrival_error_samples;
-
-    if (update.has_arrival_error) {
-        LOG_MODEM(DEBUG, "[%s] warm-sync arrival: start=%zu end=%zu next=%zu error=%lld confidence=%.2f",
-                  log_prefix_.c_str(), frame_start_abs, frame_end_abs,
-                  sync_controller_.next_expected_frame_sample_,
-                  static_cast<long long>(sync_controller_.last_frame_arrival_error_samples_),
-                  sync_controller_.frame_arrival_confidence_);
-    } else {
-        LOG_MODEM(DEBUG, "[%s] warm-sync arrival seeded: start=%zu end=%zu next=%zu confidence=%.2f",
-                  log_prefix_.c_str(), frame_start_abs, frame_end_abs,
-                  sync_controller_.next_expected_frame_sample_, sync_controller_.frame_arrival_confidence_);
-    }
-
-    if (previous_phase != sync_controller_.warm_sync_phase_) {
-        LOG_MODEM(INFO, "[%s] warm-sync state: %s -> %s",
-                  log_prefix_.c_str(),
-                  arrival_policy::warmSyncPhaseName(previous_phase),
-                  arrival_policy::warmSyncPhaseName(sync_controller_.warm_sync_phase_));
-    }
+    sync_controller_.noteFrameArrivalSuccess(frame_start_abs, frame_end_abs);
 }
 
 void StreamingDecoder::noteFrameArrivalSyncMissLocked() {
-    const auto previous_phase = sync_controller_.warm_sync_phase_;
-    sync_controller_.consecutive_sync_misses_ = arrival_policy::incrementSyncMisses(sync_controller_.consecutive_sync_misses_);
-    sync_controller_.frame_arrival_confidence_ =
-        arrival_policy::confidenceAfterSyncMiss(sync_controller_.frame_arrival_confidence_);
-
-    if (sync_controller_.next_expected_frame_sample_valid_ && sync_controller_.last_frame_arrival_valid_) {
-        const size_t last_duration =
-            sync_controller_.last_frame_end_sample_ >= sync_controller_.last_frame_start_sample_
-                ? (sync_controller_.last_frame_end_sample_ - sync_controller_.last_frame_start_sample_)
-                : 0;
-        const size_t cadence = last_duration + sync_controller_.expectedFrameGapSamples();
-        if (cadence > 0) {
-            sync_controller_.next_expected_frame_sample_ += cadence;
-        }
-    }
-
-    sync_controller_.warm_sync_phase_ = arrival_policy::phaseAfterSyncMiss(sync_controller_.consecutive_sync_misses_);
-    if (sync_controller_.warm_sync_phase_ == arrival_policy::WarmSyncPhase::RECOVERY) {
-        sync_controller_.warm_sync_active_ = false;
-        sync_controller_.next_expected_frame_sample_valid_ = false;
-        sync_controller_.frame_arrival_confidence_ = 0.0f;
-    }
-
-    if (previous_phase != sync_controller_.warm_sync_phase_) {
-        LOG_MODEM(INFO, "[%s] warm-sync state: %s -> %s (misses=%d)",
-                  log_prefix_.c_str(),
-                  arrival_policy::warmSyncPhaseName(previous_phase),
-                  arrival_policy::warmSyncPhaseName(sync_controller_.warm_sync_phase_),
-                  sync_controller_.consecutive_sync_misses_);
-    }
+    sync_controller_.noteFrameArrivalSyncMiss();
 }
 
 void StreamingDecoder::writeSamplesToRingLocked(const float* samples, size_t count) {
