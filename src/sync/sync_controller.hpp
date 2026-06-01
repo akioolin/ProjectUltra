@@ -91,6 +91,16 @@ struct SearchWindowResult {
     size_t warm_narrow_candidate_span_samples = 0;
 };
 
+// The full-anchor fallback verdict (§7 C3 Phase 3b). When a connected full-chirp re-anchor search
+// misses the descriptor chirp, the controller tries a light-LTS DATA fallback; this reports whether
+// that accepted (found) and whether it was the fallback path (used_full_anchor_fallback, which the
+// decoder surfaces as sync_from_full_anchor_fallback_). On found, sync_result is overwritten with the
+// fallback result; the decoder fires its data_sync_accepted_callback_.
+struct FullAnchorFallbackResult {
+    bool found = false;
+    bool used_full_anchor_fallback = false;
+};
+
 class SyncController {
 public:
     // §7 C3: the controller OWNS the shared audio ring. Sized at construction from the decoder's
@@ -183,6 +193,18 @@ public:
         IWaveform* waveform, const float* search_data, size_t search_len, size_t search_start,
         bool is_coherent, bool connected, protocol::WaveformMode mode,
         const signal_policy::LightSyncThresholds& thresholds, float corr_detect_threshold,
+        SyncResult& sync_result);
+
+    // The connected full-anchor light-LTS fallback (§7 C3 Phase 3b; moved verbatim from the
+    // `if (!found && use_full_ofdm_anchor_search)` block of searchForSync's else branch). Runs after
+    // a full-chirp re-anchor detectSync miss: tries detectDataSync, evaluates it with the control
+    // (non-coherent) threshold, updates the owned sync_reject_streak_, and accepts a weak DATA sync
+    // so real control frames in fading aren't rejected before the robust decoder sees them. The
+    // waveform is PASSED; sync_result carries the failed-chirp correlation in (for the §16 phase-5
+    // trace) and the accepted fallback out. The decoder fires its callback when found.
+    FullAnchorFallbackResult detectFullAnchorFallback(
+        IWaveform* waveform, const float* search_data, size_t search_len, size_t search_start,
+        size_t min_search, bool is_narrowband, bool connected, float corr_detect_threshold,
         SyncResult& sync_result);
 
     void setLogPrefix(const std::string& prefix) { log_prefix_ = prefix; }

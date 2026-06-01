@@ -288,64 +288,16 @@ void StreamingDecoder::searchForSync() {
         }
 
         if (!found && use_full_ofdm_anchor_search) {
-            // §16 Phase 5 instrumentation: detectSync failed to lock the
-            // descriptor chirp. sync_result.correlation holds the peak dual-chirp
-            // correlation (max up/down) even on failure. Logging it disambiguates
-            // a THRESHOLD miss (peak just under 0.15 → SNR/window-edge) from a
-            // NO-CHIRP-IN-WINDOW miss (peak ≈ 0 → search window misaligned with
-            // the descriptor arrival). ULTRA_S16_TRACE_WARM_WINDOW gates it.
-            if (const char* t = std::getenv("ULTRA_S16_TRACE_WARM_WINDOW");
-                t && std::atoi(t) != 0) {
-                LOG_MODEM(INFO,
-                    "[%s] s16-phase5: detectSync MISS chirp_peak=%.3f (thr=%.2f) "
-                    "corr_pos=%zu total=%zu search_start=%zu min_search=%zu",
-                    log_prefix_.c_str(), sync_result.correlation,
-                    CORR_DETECT_THRESHOLD, sync_controller_.ring_.correlation_pos_, sync_controller_.ring_.total_fed_,
-                    search_start, min_search);
-            }
-            SyncResult light_sync_result;
-            const float known_cfo = sync_controller_.last_cfo_.load();
-            const bool light_found = waveform_->detectDataSync(
-                SampleSpan(search_buffer.data(), search_buffer.size()),
-                light_sync_result, known_cfo, CORR_DETECT_THRESHOLD);
-            // In connected OFDM the next frame type is unknown at acquisition time.
-            // Even when the data profile is coherent QPSK/QAM, ACK/SACK/TURN
-            // controls use a hardened R1/4 control profile and are validated
-            // by the downstream control-first LDPC parse. Do not apply the
-            // coherent-data sync threshold to this full-anchor fallback, or
-            // real control frames in Good fading can be rejected before the
-            // robust decoder can see them.
-            const bool unknown_frame_uses_control_sync_threshold = false;
-            const auto fallback_thresholds = signal_policy::lightSyncThresholds(
-                unknown_frame_uses_control_sync_threshold, is_narrowband,
-                connected_, sync_controller_.sync_reject_streak_);
-            auto sync_decision = signal_policy::evaluateLightSyncCandidate(
-                light_found, light_sync_result.correlation,
-                unknown_frame_uses_control_sync_threshold, connected_,
-                sync_controller_.sync_reject_streak_, fallback_thresholds);
-            if (light_found && light_sync_result.correlation < fallback_thresholds.min_confidence) {
-                if (sync_decision.weak_accept) {
-                    LOG_MODEM(INFO,
-                              "[%s] Full-anchor wait fell back to weak DATA sync (corr=%.2f < %.2f, streak=%llu)",
-                              log_prefix_.c_str(), light_sync_result.correlation,
-                              fallback_thresholds.min_confidence,
-                              static_cast<unsigned long long>(sync_controller_.sync_reject_streak_));
-                } else if (sync_decision.rejected) {
-                    LOG_MODEM(INFO,
-                              "[%s] Full-anchor wait rejected DATA fallback (corr=%.2f < %.2f, streak=%llu)",
-                              log_prefix_.c_str(), light_sync_result.correlation,
-                              fallback_thresholds.min_confidence,
-                              static_cast<unsigned long long>(sync_decision.next_reject_streak));
-                }
-            }
-            sync_controller_.sync_reject_streak_ = sync_decision.next_reject_streak;
-            if (sync_decision.found) {
+            // §7 C3 Phase 3b: the full-anchor light-LTS fallback (the §16 phase-5 trace +
+            // detectDataSync + control-threshold evaluation + streak update + weak-accept) lives on
+            // the controller; the decoder passes its waveform + the search window and fires the
+            // data-sync-accepted callback on success.
+            auto fb = sync_controller_.detectFullAnchorFallback(
+                waveform_.get(), search_buffer.data(), search_buffer.size(), search_start,
+                min_search, is_narrowband, connected_, CORR_DETECT_THRESHOLD, sync_result);
+            if (fb.found) {
                 found = true;
-                sync_result = light_sync_result;
-                used_full_anchor_fallback = true;
-                LOG_MODEM(INFO,
-                          "[%s] Full OFDM anchor not found; accepted connected DATA sync fallback (corr=%.2f)",
-                          log_prefix_.c_str(), sync_result.correlation);
+                used_full_anchor_fallback = fb.used_full_anchor_fallback;
                 if (data_sync_accepted_callback_) {
                     data_sync_accepted_callback_(sync_result.correlation);
                 }
