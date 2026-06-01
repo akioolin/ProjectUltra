@@ -332,7 +332,7 @@ void StreamingDecoder::searchForSync() {
                     warm_plan.active ? 1 : 0,
                     warm_plan.wait_for_more_samples ? 1 : 0,
                     warm_plan.lower_threshold ? 1 : 0,
-                    arrival_policy::warmSyncPhaseName(sync_controller_.warm_sync_phase_),
+                    arrival_policy::warmSyncPhaseName(sync_controller_.derivePhase()),
                     sync_controller_.warm_sync_active_ ? 1 : 0,
                     sync_controller_.next_expected_frame_sample_valid_ ? 1 : 0,
                     static_cast<unsigned long long>(sync_controller_.next_expected_frame_sample_),

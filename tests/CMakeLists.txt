@@ -414,7 +414,7 @@ target_include_directories(test_streaming_signal_policy PRIVATE
 target_link_libraries(test_streaming_signal_policy PRIVATE ultra_core)
 add_test(NAME StreamingSignalPolicy COMMAND test_streaming_signal_policy)
 
-# Phase-D equivalence guard: warm_sync_phase_ == derivePhase() across all 4 states.
+# Phase-D guard: derivePhase() returns the right state across all 4 (COLD/WARM/DEGRADED/RECOVERY).
 # sync_controller.cpp lives in ULTRA_STREAMING_DECODER_SOURCES (not ultra_core), so compile
 # it directly into the test (it needs only logging from ultra_core; the test passes a null
 # waveform, so no IWaveform vtable is referenced).

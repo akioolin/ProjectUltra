@@ -60,24 +60,8 @@ void SyncController::noteGroupBoundary(size_t descriptor_end_abs, size_t expecte
 // noteFrameArrivalSyncMissLocked}. Same computations, same order, same log format/prefix → the
 // behavior + log output are byte-identical; only the home moved.
 
-// Phase-D prep (TEMPORARY): assert warm_sync_phase_ == derivePhase() after every transition.
-// Should NEVER log. Confirms the 4-state enum is a pure function of (active, misses) before the
-// collapse removes the stored enum. Removed once empirically validated on a fading channel.
-void SyncController::debugCheckPhaseInvariant(const char* where) const {
-    const auto derived = derivePhase();
-    if (warm_sync_phase_ != derived) {
-        LOG_MODEM(WARN,
-                  "[%s] PHASE-DERIVE-MISMATCH @%s stored=%s derived=%s active=%d misses=%d",
-                  log_prefix_.c_str(), where,
-                  frame_arrival_policy::warmSyncPhaseName(warm_sync_phase_),
-                  frame_arrival_policy::warmSyncPhaseName(derived),
-                  warm_sync_active_ ? 1 : 0, consecutive_sync_misses_);
-    }
-}
-
 void SyncController::resetFrameArrivalTracking() {
     warm_sync_active_ = false;
-    warm_sync_phase_ = frame_arrival_policy::WarmSyncPhase::COLD;
     next_expected_frame_sample_valid_ = false;
     next_expected_frame_sample_ = 0;
     frame_arrival_confidence_ = 0.0f;
@@ -87,7 +71,6 @@ void SyncController::resetFrameArrivalTracking() {
     last_frame_end_sample_ = 0;
     last_frame_arrival_error_valid_ = false;
     last_frame_arrival_error_samples_ = 0;
-    debugCheckPhaseInvariant("reset");
 }
 
 void SyncController::noteFrameArrivalSuccess(size_t frame_start_abs, size_t frame_end_abs) {
@@ -97,7 +80,7 @@ void SyncController::noteFrameArrivalSuccess(size_t frame_start_abs, size_t fram
         return;
     }
 
-    const auto previous_phase = warm_sync_phase_;
+    const auto previous_phase = derivePhase();
     const auto update = frame_arrival_policy::updateOnSuccessfulFrame(
         next_expected_frame_sample_valid_,
         next_expected_frame_sample_,
@@ -108,7 +91,6 @@ void SyncController::noteFrameArrivalSuccess(size_t frame_start_abs, size_t fram
 
     next_expected_frame_sample_valid_ = true;
     warm_sync_active_ = true;
-    warm_sync_phase_ = frame_arrival_policy::phaseAfterSuccessfulFrame();
     next_expected_frame_sample_ = update.next_expected_frame_sample;
     frame_arrival_confidence_ = update.confidence;
     consecutive_sync_misses_ = update.consecutive_sync_misses;
@@ -130,17 +112,17 @@ void SyncController::noteFrameArrivalSuccess(size_t frame_start_abs, size_t fram
                   next_expected_frame_sample_, frame_arrival_confidence_);
     }
 
-    if (previous_phase != warm_sync_phase_) {
+    const auto new_phase = derivePhase();
+    if (previous_phase != new_phase) {
         LOG_MODEM(INFO, "[%s] warm-sync state: %s -> %s",
                   log_prefix_.c_str(),
                   frame_arrival_policy::warmSyncPhaseName(previous_phase),
-                  frame_arrival_policy::warmSyncPhaseName(warm_sync_phase_));
+                  frame_arrival_policy::warmSyncPhaseName(new_phase));
     }
-    debugCheckPhaseInvariant("success");
 }
 
 void SyncController::noteFrameArrivalSyncMiss() {
-    const auto previous_phase = warm_sync_phase_;
+    const auto previous_phase = derivePhase();
     consecutive_sync_misses_ = frame_arrival_policy::incrementSyncMisses(consecutive_sync_misses_);
     frame_arrival_confidence_ =
         frame_arrival_policy::confidenceAfterSyncMiss(frame_arrival_confidence_);
@@ -156,21 +138,20 @@ void SyncController::noteFrameArrivalSyncMiss() {
         }
     }
 
-    warm_sync_phase_ = frame_arrival_policy::phaseAfterSyncMiss(consecutive_sync_misses_);
-    if (warm_sync_phase_ == frame_arrival_policy::WarmSyncPhase::RECOVERY) {
+    if (consecutive_sync_misses_ >= frame_arrival_policy::kWarmSyncMissesBeforeRecovery) {
         warm_sync_active_ = false;
         next_expected_frame_sample_valid_ = false;
         frame_arrival_confidence_ = 0.0f;
     }
 
-    if (previous_phase != warm_sync_phase_) {
+    const auto new_phase = derivePhase();
+    if (previous_phase != new_phase) {
         LOG_MODEM(INFO, "[%s] warm-sync state: %s -> %s (misses=%d)",
                   log_prefix_.c_str(),
                   frame_arrival_policy::warmSyncPhaseName(previous_phase),
-                  frame_arrival_policy::warmSyncPhaseName(warm_sync_phase_),
+                  frame_arrival_policy::warmSyncPhaseName(new_phase),
                   consecutive_sync_misses_);
     }
-    debugCheckPhaseInvariant("miss");
 }
 
 // --- connected-data light-LTS acceptance (§7.4 chunk B) --------------------------------------
@@ -206,7 +187,7 @@ LightSyncAcceptance SyncController::acceptLightSyncCandidate(
     constexpr float kS16WarmHandoffMinCorrelation = 0.55f;
     const bool s16_warm_override =
         s16_warm_handoff && is_coherent &&
-        warm_sync_phase_ == frame_arrival_policy::WarmSyncPhase::WARM &&
+        derivePhase() == frame_arrival_policy::WarmSyncPhase::WARM &&
         sync_decision.rejected && detector_found &&
         correlation >= kS16WarmHandoffMinCorrelation;
     if (s16_warm_override) {
@@ -247,7 +228,7 @@ LightSyncAcceptance SyncController::acceptLightSyncCandidate(
     // the frame's LDPC simply fails → existing NACK / §16.4 full-chirp escalation handles
     // it. Flag-gated by ULTRA_S16_WARM_HANDOFF.
     if (s16_warm_handoff && !sync_decision.found &&
-        warm_sync_phase_ == frame_arrival_policy::WarmSyncPhase::WARM &&
+        derivePhase() == frame_arrival_policy::WarmSyncPhase::WARM &&
         thresholds.narrow_expected_window &&
         next_expected_frame_sample_valid_ &&
         next_expected_frame_sample_ >= search_start &&
@@ -272,9 +253,8 @@ LightSyncAcceptance SyncController::acceptLightSyncCandidate(
 
 void SyncController::seedArrivalAfterDelay(size_t total_fed_abs, size_t delay_samples,
                                            float confidence) {
-    const auto previous_phase = warm_sync_phase_;
+    const auto previous_phase = derivePhase();
     warm_sync_active_ = true;
-    warm_sync_phase_ = frame_arrival_policy::WarmSyncPhase::WARM;
     next_expected_frame_sample_valid_ = true;
     next_expected_frame_sample_ = total_fed_abs + delay_samples;
     frame_arrival_confidence_ =
@@ -287,13 +267,13 @@ void SyncController::seedArrivalAfterDelay(size_t total_fed_abs, size_t delay_sa
               "[%s] warm-sync arrival seeded from local TX: now=%zu delay=%zu next=%zu confidence=%.2f",
               log_prefix_.c_str(), total_fed_abs, delay_samples,
               next_expected_frame_sample_, frame_arrival_confidence_);
-    if (previous_phase != warm_sync_phase_) {
+    const auto new_phase = derivePhase();
+    if (previous_phase != new_phase) {
         LOG_MODEM(INFO, "[%s] warm-sync state: %s -> %s",
                   log_prefix_.c_str(),
                   frame_arrival_policy::warmSyncPhaseName(previous_phase),
-                  frame_arrival_policy::warmSyncPhaseName(warm_sync_phase_));
+                  frame_arrival_policy::warmSyncPhaseName(new_phase));
     }
-    debugCheckPhaseInvariant("seed");
 }
 
 // --- warm-window planning (§7.4 chunk-B tail) ------------------------------------------------
@@ -319,7 +299,7 @@ frame_arrival_policy::WarmSearchWindowPlan SyncController::planWarmSearch(
     const bool s16_warm_handoff_w = s16_env_w && std::atoi(s16_env_w) != 0;
     const bool s16_skip_short_lead =
         s16_warm_handoff_w &&
-        warm_sync_phase_ == frame_arrival_policy::WarmSyncPhase::WARM &&
+        derivePhase() == frame_arrival_policy::WarmSyncPhase::WARM &&
         !expect_full_ofdm_anchor_;
     const size_t expected_sync_search_sample =
         (!s16_skip_short_lead &&
@@ -336,7 +316,6 @@ frame_arrival_policy::WarmSearchWindowPlan SyncController::planWarmSearch(
         expected_sync_search_sample,
         frame_arrival_confidence_,
         consecutive_sync_misses_,
-        warm_sync_phase_,
         total_fed,
         oldest_abs,
         search_floor_valid,

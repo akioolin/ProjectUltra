@@ -162,13 +162,19 @@ struct WarmSearchWindowPlan {
     bool active = false;
     bool wait_for_more_samples = false;
     bool lower_threshold = false;
-    WarmSyncPhase phase = WarmSyncPhase::COLD;
     size_t search_start_abs = 0;
     size_t candidate_span_samples = 0;
     size_t search_size_samples = 0;
     size_t search_end_abs = 0;
 };
 
+// §7 Phase-D collapse: the 4-state WarmSyncPhase param was removed — it was a pure function
+// of (warm_sync_active, consecutive_sync_misses) (see SyncController::derivePhase). The two
+// behavioral distinctions it encoded are derived directly here, byte-identically:
+//   degraded  ⟺ phase==DEGRADED ⟺ active && misses>=kWarmSyncMissesBeforeDegraded
+//              (active ⟹ misses<kWarmSyncMissesBeforeRecovery, so this is exactly 2<=misses<4)
+//   the COLD/RECOVERY early-return is subsumed by !warm_sync_active (both imply !active)
+//   lower_threshold ⟺ phase==WARM && misses==0 ⟺ active && misses==0
 inline WarmSearchWindowPlan planWarmSearchWindow(
     bool use_light_search,
     bool warm_sync_active,
@@ -176,7 +182,6 @@ inline WarmSearchWindowPlan planWarmSearchWindow(
     size_t next_expected_frame_sample,
     float frame_arrival_confidence,
     int consecutive_sync_misses,
-    WarmSyncPhase warm_sync_phase,
     size_t total_fed_samples,
     size_t oldest_available_abs,
     bool search_floor_valid,
@@ -186,9 +191,9 @@ inline WarmSearchWindowPlan planWarmSearchWindow(
     size_t correlation_step_samples) {
 
     WarmSearchWindowPlan plan;
-    plan.phase = warm_sync_phase;
     const size_t safe_symbol_samples = std::max<size_t>(1, symbol_samples);
-    const bool degraded = warm_sync_phase == WarmSyncPhase::DEGRADED;
+    const bool degraded =
+        warm_sync_active && consecutive_sync_misses >= kWarmSyncMissesBeforeDegraded;
     const size_t half_window_samples =
         degraded ? kDegradedWindowSamples : kDefaultTightWindowSamples;
     const float min_confidence =
@@ -203,8 +208,6 @@ inline WarmSearchWindowPlan planWarmSearchWindow(
     plan.search_end_abs = plan.search_start_abs + plan.search_size_samples;
 
     if (!use_light_search || !warm_sync_active || !has_prediction ||
-        warm_sync_phase == WarmSyncPhase::COLD ||
-        warm_sync_phase == WarmSyncPhase::RECOVERY ||
         frame_arrival_confidence < min_confidence) {
         return plan;
     }
@@ -229,8 +232,7 @@ inline WarmSearchWindowPlan planWarmSearchWindow(
     }
 
     plan.active = true;
-    plan.lower_threshold = warm_sync_phase == WarmSyncPhase::WARM &&
-        consecutive_sync_misses == 0;
+    plan.lower_threshold = warm_sync_active && consecutive_sync_misses == 0;
     return plan;
 }
 

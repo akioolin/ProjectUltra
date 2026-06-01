@@ -831,7 +831,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 "expect_full_anchor=%d frame_sync_abs=%llu frame_len=%zu",
                                 log_prefix_.c_str(),
                                 static_cast<unsigned>(last_burst_group_seq_),
-                                arrival_policy::warmSyncPhaseName(sync_controller_.warm_sync_phase_),
+                                arrival_policy::warmSyncPhaseName(sync_controller_.derivePhase()),
                                 sync_controller_.consecutive_sync_misses_,
                                 sync_controller_.frame_arrival_confidence_,
                                 sync_controller_.last_cfo_.load(),
@@ -860,7 +860,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 s16_env && std::atoi(s16_env) != 0;
                             const bool warm_handoff_eligible =
                                 s16_warm_handoff &&
-                                sync_controller_.warm_sync_phase_ ==
+                                sync_controller_.derivePhase() ==
                                     arrival_policy::WarmSyncPhase::WARM &&
                                 sync_controller_.frame_arrival_confidence_ > 0.0f;
                             {
@@ -892,7 +892,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                                     "BURST_HEADER consume (phase=%s conf=%.2f cfo=%.2f); "
                                     "expecting light LTS for data group",
                                     log_prefix_.c_str(),
-                                    arrival_policy::warmSyncPhaseName(sync_controller_.warm_sync_phase_),
+                                    arrival_policy::warmSyncPhaseName(sync_controller_.derivePhase()),
                                     sync_controller_.frame_arrival_confidence_,
                                     sync_controller_.last_cfo_.load());
                             }
@@ -902,7 +902,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 "[%s] s16-snapshot post-reset phase=%s misses=%d "
                                 "conf=%.2f last_cfo=%.2f expect_full_anchor=%d",
                                 log_prefix_.c_str(),
-                                arrival_policy::warmSyncPhaseName(sync_controller_.warm_sync_phase_),
+                                arrival_policy::warmSyncPhaseName(sync_controller_.derivePhase()),
                                 sync_controller_.consecutive_sync_misses_,
                                 sync_controller_.frame_arrival_confidence_,
                                 sync_controller_.last_cfo_.load(),

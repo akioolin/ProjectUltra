@@ -34,12 +34,11 @@ const char* name(Phase p) { return sync::frame_arrival_policy::warmSyncPhaseName
         }                                                      \
     } while (0)
 
-// After every transition: the stored phase MUST equal the derived phase, AND the
-// derived phase must be the expected one for the known (active, misses) sequence.
+// §7 collapse: the stored 4-state field is gone; the phase is DERIVED from
+// (warm_sync_active_, consecutive_sync_misses_). This guards the derived machine —
+// derivePhase() must return the expected state for the known miss sequence, incl.
+// the exact 2/4 boundaries.
 void expectPhase(SyncController& sc, Phase expected, const char* where) {
-    CHECK(sc.warm_sync_phase_ == sc.derivePhase(),
-          std::string("equivalence broken @") + where + ": stored=" +
-              name(sc.warm_sync_phase_) + " derived=" + name(sc.derivePhase()));
     CHECK(sc.derivePhase() == expected,
           std::string("wrong phase @") + where + ": got=" + name(sc.derivePhase()) +
               " expected=" + name(expected));

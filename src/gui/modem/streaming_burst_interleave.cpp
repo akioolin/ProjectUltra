@@ -662,7 +662,7 @@ void StreamingDecoder::finalizeBurstGroup() {
                   "conf=%.2f last_cfo=%.2f next_expected=%llu last_frame_end=%llu "
                   "expect_full_anchor=%d quality=%.2f",
                   log_prefix_.c_str(), last_burst_group_seq_,
-                  arrival_policy::warmSyncPhaseName(sync_controller_.warm_sync_phase_),
+                  arrival_policy::warmSyncPhaseName(sync_controller_.derivePhase()),
                   sync_controller_.consecutive_sync_misses_,
                   sync_controller_.frame_arrival_confidence_,
                   sync_controller_.last_cfo_.load(),
@@ -687,11 +687,13 @@ void StreamingDecoder::finalizeBurstGroup() {
             s16_env_g && std::atoi(s16_env_g) != 0;
         {
             if (s16_warm_handoff_g) {
+                // Force WARM: misses=0 + active=true ⇒ derivePhase()==WARM (§7 collapse —
+                // verified byte-identical: active was always already true here, so this is
+                // the faithful translation of the old `warm_sync_phase_ = WARM`).
                 sync_controller_.consecutive_sync_misses_ = 0;
                 sync_controller_.frame_arrival_confidence_ = std::max(
                     sync_controller_.frame_arrival_confidence_, 0.5f);
-                sync_controller_.warm_sync_phase_ =
-                    arrival_policy::WarmSyncPhase::WARM;
+                sync_controller_.warm_sync_active_ = true;
                 // 2026-05-29 ROOT-CAUSE FIX: re-arm the full-chirp anchor
                 // expectation for the NEXT group's BURST_HEADER. The encoder
                 // emits a chirp-bearing descriptor at the start of EVERY burst

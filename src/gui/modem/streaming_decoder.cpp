@@ -894,7 +894,7 @@ StreamingDecoder::FrameArrivalSnapshot StreamingDecoder::getFrameArrivalSnapshot
 
     FrameArrivalSnapshot snapshot;
     snapshot.warm_sync_active = sync_controller_.warm_sync_active_;
-    snapshot.warm_sync_phase = sync_controller_.warm_sync_phase_;
+    snapshot.warm_sync_phase = sync_controller_.derivePhase();
     snapshot.has_prediction = sync_controller_.next_expected_frame_sample_valid_;
     snapshot.next_expected_frame_sample = sync_controller_.next_expected_frame_sample_;
     snapshot.frame_arrival_confidence = sync_controller_.frame_arrival_confidence_;

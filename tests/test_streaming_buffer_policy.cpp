@@ -157,9 +157,7 @@ void test_warm_search_window_planning() {
     constexpr size_t half_window = 960;
 
     auto active = arrival_policy::planWarmSearchWindow(
-        true, true, true, expected, 0.6f, 0,
-        arrival_policy::WarmSyncPhase::WARM,
-        expected + 6000, expected - 20000,
+        true, true, true, expected, 0.6f, 0,        expected + 6000, expected - 20000,
         true, expected - 4000,
         expected - 1200,
         symbol_samples, step_samples);
@@ -176,18 +174,17 @@ void test_warm_search_window_planning() {
           "warm window should include candidate span plus two LTS symbols");
 
     auto wait = arrival_policy::planWarmSearchWindow(
-        true, true, true, expected, 0.6f, 0,
-        arrival_policy::WarmSyncPhase::WARM,
-        expected + 1000, expected - 20000,
+        true, true, true, expected, 0.6f, 0,        expected + 1000, expected - 20000,
         true, expected - 4000,
         expected - 1200,
         symbol_samples, step_samples);
     CHECK(!wait.active && wait.wait_for_more_samples,
           "warm window should wait until enough post-LTS samples are buffered");
 
+    // §7 collapse: DEGRADED is derived from misses>=kWarmSyncMissesBeforeDegraded (2), not a
+    // phase arg — so drive it with misses=2 (the old call forced phase=DEGRADED at misses=1).
     auto degraded = arrival_policy::planWarmSearchWindow(
-        true, true, true, expected, 0.2f, 1,
-        arrival_policy::WarmSyncPhase::DEGRADED,
+        true, true, true, expected, 0.2f, 2,
         expected + 6000, expected - 20000,
         true, expected - 4000,
         expected - 1200,
@@ -199,9 +196,10 @@ void test_warm_search_window_planning() {
               arrival_policy::kWarmSearchSlackSamples,
           "degraded warm-sync should widen the timed window");
 
+    // §7 collapse: RECOVERY ⟺ !warm_sync_active (the controller clears active at misses>=4),
+    // so drive it with active=false — the old call forced phase=RECOVERY while passing active=true.
     auto recovery = arrival_policy::planWarmSearchWindow(
-        true, true, true, expected, 0.2f, 4,
-        arrival_policy::WarmSyncPhase::RECOVERY,
+        true, false, true, expected, 0.2f, 4,
         expected + 6000, expected - 20000,
         true, expected - 4000,
         expected - 1200,
@@ -210,9 +208,7 @@ void test_warm_search_window_planning() {
           "recovery state should fall back to cold wide search");
 
     auto far = arrival_policy::planWarmSearchWindow(
-        true, true, true, expected, 0.6f, 0,
-        arrival_policy::WarmSyncPhase::WARM,
-        expected + 6000, expected - 20000,
+        true, true, true, expected, 0.6f, 0,        expected + 6000, expected - 20000,
         true, expected - 4000,
         expected + 12000,
         symbol_samples, step_samples);

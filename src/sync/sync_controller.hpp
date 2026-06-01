@@ -200,12 +200,10 @@ public:
     bool     warm_sync_active_ = false;              // in the warm (locked+predicting) regime
                                                      // (collapses into SyncMode::WARM in Phase D)
 
-    // Warm-sync phase machine (shell-moved 2026-05-31, §7.4 un-defer). Still the 4-state
-    // WarmSyncPhase; collapses into SyncMode in the behavioral phase (Phase D). The transition
-    // logic that drives it lives on the controller (noteFrameArrival* / seedArrivalAfterDelay);
-    // the decoder still reads it for the snapshot + trace-log, so it stays public until Phase D.
-    frame_arrival_policy::WarmSyncPhase warm_sync_phase_ =
-        frame_arrival_policy::WarmSyncPhase::COLD;
+    // §7 Phase-D collapse (2026-05-31): the stored 4-state warm_sync_phase_ field is GONE.
+    // The phase is now DERIVED on demand from (warm_sync_active_, consecutive_sync_misses_) via
+    // derivePhase() — proven equivalent (test_sync_controller_phase + Good@12 0-mismatch run), so
+    // it can never drift from the miss counter. The decoder reads it via derivePhase().
     // (last-frame arrival memory is now PRIVATE — see below — read via the lastFrame* accessors.)
     // CFO acquisition state (§7.7#1). ATOMIC — touched by RX + control threads; the
     // CFO feedback loop (.load()/.store()) routes through here.
@@ -236,12 +234,6 @@ private:
 
     // WARM→RE_ACQUIRE escalation threshold (consecutive predicted-position LDPC failures).
     static constexpr int kReacquireAfterMisses = 2;
-
-    // --- Phase-D prep (TEMPORARY validation, §7 collapse) ------------------------------------
-    // debugCheckPhaseInvariant() asserts the stored warm_sync_phase_ == derivePhase() after every
-    // transition (logs a one-line PHASE-DERIVE-MISMATCH WARN on divergence — should NEVER fire).
-    // derivePhase() is public (see above) so test_sync_controller_phase can drive all four states.
-    void debugCheckPhaseInvariant(const char* where) const;
 
     // Log prefix mirrored from StreamingDecoder (e.g. "[BRAVO]") so warm-sync log lines keep
     // their station tag now that the transition logic emits them from here.
