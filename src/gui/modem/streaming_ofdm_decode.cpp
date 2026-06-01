@@ -361,7 +361,7 @@ void StreamingDecoder::decodeCurrentFrame() {
     if (!waveform_) {
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
-            correlation_pos_ = wrapRingIndexLocked(sync_position_ + 4800);
+            ring_.correlation_pos_ = wrapRingIndexLocked(sync_position_ + 4800);
         }
         state_ = DecoderState::SEARCHING;
         return;
@@ -459,7 +459,7 @@ void StreamingDecoder::decodeCurrentFrame() {
     if (frame_buffer.empty()) {
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
-            correlation_pos_ = wrapRingIndexLocked(sync_position_ + 4800);
+            ring_.correlation_pos_ = wrapRingIndexLocked(sync_position_ + 4800);
             setSearchFloorLocked(frame_sync_abs + 4800);
         }
         state_ = DecoderState::SEARCHING;
@@ -475,7 +475,7 @@ void StreamingDecoder::decodeCurrentFrame() {
             frame_len, data_preamble);
 
         std::lock_guard<std::mutex> lock(buffer_mutex_);
-        correlation_pos_ = wrapRingIndexLocked(sync_position_ + advance);
+        ring_.correlation_pos_ = wrapRingIndexLocked(sync_position_ + advance);
         setSearchFloorLocked(frame_sync_abs + advance);
         if (sync_from_warm_timed_window_) {
             noteFrameArrivalSyncMissLocked();
@@ -568,7 +568,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
             size_t min_frame = static_cast<size_t>(waveform_->getMinSamplesForFrame());
-            correlation_pos_ = wrapRingIndexLocked(sync_position_ + min_frame);
+            ring_.correlation_pos_ = wrapRingIndexLocked(sync_position_ + min_frame);
             setSearchFloorLocked(frame_sync_abs + min_frame);
             last_decoded_sync_pos_ = sync_position_;
         }
@@ -866,7 +866,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                                     // group is picked up next.
                                     sync_controller_.expect_full_ofdm_anchor_ = false;
                                     sync_controller_.sync_reject_streak_ = 0;
-                                    correlation_pos_ = wrapRingIndexLocked(
+                                    ring_.correlation_pos_ = wrapRingIndexLocked(
                                         sync_position_ + frame_len);
                                     setSearchFloorLocked(frame_sync_abs + frame_len);
                                     last_decoded_sync_pos_ = sync_position_;
@@ -875,7 +875,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                                     resetFrameArrivalTrackingLocked();
                                     sync_controller_.expect_full_ofdm_anchor_ = true;
                                     sync_controller_.sync_reject_streak_ = 0;
-                                    correlation_pos_ = wrapRingIndexLocked(
+                                    ring_.correlation_pos_ = wrapRingIndexLocked(
                                         sync_position_ + frame_len);
                                     setSearchFloorLocked(frame_sync_abs + frame_len);
                                     last_decoded_sync_pos_ = sync_position_;
@@ -967,7 +967,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                                               v2::frameTypeToString(hdr.type));
                                 }
                             }
-                            correlation_pos_ = wrapRingIndexLocked(sync_position_ + frame_len);
+                            ring_.correlation_pos_ = wrapRingIndexLocked(sync_position_ + frame_len);
                             setSearchFloorLocked(frame_sync_abs + frame_len);
                             last_decoded_sync_pos_ = sync_position_;
                         }
@@ -1004,7 +1004,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         if ((use_burst_interleave_ || burst_transport_rx_) && connected_) {
             {
                 std::lock_guard<std::mutex> lock(buffer_mutex_);
-                correlation_pos_ = wrapRingIndexLocked(sync_position_ + frame_len);
+                ring_.correlation_pos_ = wrapRingIndexLocked(sync_position_ + frame_len);
                 setSearchFloorLocked(frame_sync_abs + frame_len);
             }
             state_ = DecoderState::SEARCHING;
@@ -1024,7 +1024,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         LOG_MODEM(DEBUG, "[%s] process() failed", log_prefix_.c_str());
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
-            correlation_pos_ = wrapRingIndexLocked(sync_position_ + frame_len);
+            ring_.correlation_pos_ = wrapRingIndexLocked(sync_position_ + frame_len);
             setSearchFloorLocked(frame_sync_abs + frame_len);
         }
         state_ = DecoderState::SEARCHING;
@@ -1140,7 +1140,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         LOG_MODEM(DEBUG, "[%s] getSoftBits() returned empty", log_prefix_.c_str());
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
-            correlation_pos_ = wrapRingIndexLocked(sync_position_ + frame_len);
+            ring_.correlation_pos_ = wrapRingIndexLocked(sync_position_ + frame_len);
             setSearchFloorLocked(frame_sync_abs + frame_len);
         }
         state_ = DecoderState::SEARCHING;
@@ -1992,7 +1992,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                 noteFrameArrivalSuccess(next_search_abs, next_search_abs + min_block);
             }
 
-            // Advance position for next iteration (or final correlation_pos_)
+            // Advance position for next iteration (or final ring_.correlation_pos_)
             sync_position_ = next_block_pos;
             next_block_pos = wrapRingIndexLocked(next_block_pos + min_block);
             next_search_abs += min_block;
@@ -2022,7 +2022,7 @@ void StreamingDecoder::decodeCurrentFrame() {
     burst_blocks_decoded_ = 0;
     {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
-        correlation_pos_ = wrapRingIndexLocked(next_block_pos);
+        ring_.correlation_pos_ = wrapRingIndexLocked(next_block_pos);
         setSearchFloorLocked(next_search_abs);
         last_decoded_sync_pos_ = sync_position_;
     }
@@ -2053,7 +2053,7 @@ void StreamingDecoder::finishMCDPSKBurstContinuation(size_t search_pos, size_t s
 
     {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
-        correlation_pos_ = search_pos;
+        ring_.correlation_pos_ = search_pos;
         setSearchFloorLocked(search_abs);
         last_decoded_sync_pos_ = sync_position_;
     }

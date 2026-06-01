@@ -146,7 +146,8 @@ static void dumpBufferSnapshot(const std::vector<float>& buffer, size_t write_po
 }
 
 StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
-    : buffer_capacity_samples_(validateBufferCapacity(buffer_capacity_samples)),
+    : ring_(validateBufferCapacity(buffer_capacity_samples)),
+      buffer_capacity_samples_(validateBufferCapacity(buffer_capacity_samples)),
       uses_default_buffer_capacity_(buffer_capacity_samples_ == kDefaultBufferSamples) {
     startupTrace("StreamingDecoder", "ctor-enter");
     buffer_.resize(buffer_capacity_samples_, 0.0f);
@@ -349,11 +350,11 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
     size_t prev_total = total_fed_;
 
     auto overflow = buffer_policy::planOverflowRecovery(
-        write_pos_, correlation_pos_, total_fed_, count, buffer_capacity_samples_,
+        write_pos_, ring_.correlation_pos_, total_fed_, count, buffer_capacity_samples_,
         CORR_INVARIANT_GUARD, OVERFLOW_RECOVERY_KEEP);
 
     if (overflow.pointer_drift_detected) {
-        correlation_pos_ = write_pos_;
+        ring_.correlation_pos_ = write_pos_;
         setSearchFloorLocked(total_fed_);
         LOG_MODEM(WARN, "[%s] Correlation pointer drift detected, resetting search cursor",
                   log_prefix_.c_str());
@@ -362,8 +363,8 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
     // If adding these samples would overflow, drop backlog aggressively enough
     // to recover in one step. Small drops (~1k) cause repeated overflow storms.
     if (overflow.overflow) {
-        correlation_pos_ = overflow.new_correlation_pos;
-        setSearchFloorLocked(ringPosToAbsoluteLocked(correlation_pos_));
+        ring_.correlation_pos_ = overflow.new_correlation_pos;
+        setSearchFloorLocked(ringPosToAbsoluteLocked(ring_.correlation_pos_));
 
         // Once overloaded, any in-flight frame context is stale. Force a clean
         // resync from current audio instead of chasing old sync positions.
@@ -390,7 +391,7 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
         }
         if (overflow_events_ <= 3 || (overflow_events_ % 25) == 0) {
             LOG_MODEM(WARN, "[%s] Buffer overflow, dropped %zu unsearched samples (corr_pos=%zu, keep=%zu, state_reset=%d, total=%llu)",
-                      log_prefix_.c_str(), overflow.samples_to_drop, correlation_pos_,
+                      log_prefix_.c_str(), overflow.samples_to_drop, ring_.correlation_pos_,
                       overflow.target_after_write,
                       reset_decode_state ? 1 : 0,
                       static_cast<unsigned long long>(overflow_events_));
@@ -403,7 +404,7 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
 
     // Update backlog telemetry for UI/CLI diagnostics.
     const auto backlog = buffer_policy::computeBacklog(
-        write_pos_, correlation_pos_, total_fed_, buffer_capacity_samples_, 48000.0f);
+        write_pos_, ring_.correlation_pos_, total_fed_, buffer_capacity_samples_, 48000.0f);
     {
         std::lock_guard<std::mutex> slock(stats_mutex_);
         stats_.current_unsearched_samples = backlog.unsearched_samples;
@@ -587,13 +588,13 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     mc_burst_pending_soft_bits_.clear();
     use_burst_interleave_ = false;  // Re-enabled by caller if needed
 
-    // CRITICAL: Reset correlation_pos_ to current write position
+    // CRITICAL: Reset ring_.correlation_pos_ to current write position
     // Otherwise we'll search old data from previous mode
-    correlation_pos_ = write_pos_;
+    ring_.correlation_pos_ = write_pos_;
     setSearchFloorLocked(total_fed_);
 
     LOG_MODEM(INFO, "StreamingDecoder: Mode=%s (%s), reset corr_pos=%zu",
-              protocol::waveformModeToString(mode), connected ? "connected" : "disconnected", correlation_pos_);
+              protocol::waveformModeToString(mode), connected ? "connected" : "disconnected", ring_.correlation_pos_);
 }
 
 void StreamingDecoder::setCarrierMask(uint64_t active_mask) {
@@ -789,7 +790,7 @@ void StreamingDecoder::applyPendingConnectedOFDMMode() {
     burst_metric_templates_.clear();
     mc_burst_pending_frame_ = false;
     mc_burst_pending_soft_bits_.clear();
-    correlation_pos_ = write_pos_;
+    ring_.correlation_pos_ = write_pos_;
     setSearchFloorLocked(total_fed_);
 
     LOG_MODEM(INFO, "StreamingDecoder: connected OFDM mode=%s, mod=%s, rate=%s, carriers=%d data=%d bps=%zu",
@@ -1050,7 +1051,7 @@ void StreamingDecoder::reset() {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
 
     write_pos_ = 0;
-    correlation_pos_ = 0;
+    ring_.correlation_pos_ = 0;
     sync_position_ = 0;
     sync_correlation_ = 0.0f;
     sync_gap_error_samples_ = 0.0f;
@@ -1091,7 +1092,7 @@ void StreamingDecoder::reset() {
         stats_ = DecoderStats{};
     }
 
-    noise_floor_ = 0.001f;
+    ring_.noise_floor_ = 0.001f;
     last_snr_.store(0.0f);
     last_ofdm_broadband_snr_db_valid_.store(false);
     last_ofdm_broadband_snr_db_.store(0.0f);

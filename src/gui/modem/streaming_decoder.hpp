@@ -44,6 +44,7 @@
 #include "fec/soft_combine.hpp"
 #include "sync/frame_arrival_policy.hpp"
 #include "sync/sync_controller.hpp"   // SyncController — sync/z state owner (refactor §7)
+#include "sync/sync_ring_buffer.hpp"  // SyncRingBuffer — the shared audio ring (refactor §7 C3)
 #include <vector>
 #include <queue>
 #include <mutex>
@@ -609,7 +610,10 @@ private:
     // STATE
     // ========================================================================
 
-    // Circular buffer for audio samples
+    // Circular buffer for audio samples.
+    // §7 C3 (Phase 1): the ring cluster is migrating into the cohesive SyncRingBuffer below.
+    // Members still declared here are not yet moved; once empty this whole block collapses to ring_.
+    sync::SyncRingBuffer ring_;
     std::vector<float> buffer_;
     const size_t buffer_capacity_samples_ = kDefaultBufferSamples;
     const bool uses_default_buffer_capacity_ = true;
@@ -625,7 +629,6 @@ private:
     float sync_snr_ = 0.0f;           // Chirp sync-quality score
     float sync_correlation_ = 0.0f;   // LTS/light-sync confidence for current frame
     float sync_gap_error_samples_ = 0.0f; // Dual-chirp timing error for current frame
-    size_t correlation_pos_ = 0;      // Current position for correlation search
     size_t last_decoded_sync_pos_ = SIZE_MAX;  // Last successfully decoded sync position (to prevent duplicates)
     size_t search_floor_abs_ = 0;     // Earliest absolute sample search may inspect
     bool search_floor_abs_valid_ = false;
@@ -710,7 +713,6 @@ private:
     mutable std::atomic<float> last_ofdm_broadband_snr_db_{0.0f};
     IdleNoiseSNREstimator idle_noise_snr_estimator_;
     std::atomic<float> last_fading_index_{0.0f};
-    float noise_floor_ = 0.001f;
     float pre_correction_cfo_ = 0.0f;  // CFO used for last pre-correction (for feedback adjustment)
     uint64_t overflow_events_ = 0;
 

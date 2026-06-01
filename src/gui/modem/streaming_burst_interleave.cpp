@@ -194,7 +194,7 @@ void StreamingDecoder::accumulateBurstFrames() {
         clearBurstDiagnostics();
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
-            correlation_pos_ = burst_next_pos_;
+            ring_.correlation_pos_ = burst_next_pos_;
         }
         state_ = DecoderState::SEARCHING;
         return;
@@ -217,7 +217,7 @@ void StreamingDecoder::accumulateBurstFrames() {
         clearBurstDiagnostics();
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
-            correlation_pos_ = burst_next_pos_;
+            ring_.correlation_pos_ = burst_next_pos_;
         }
         state_ = DecoderState::SEARCHING;
         return;
@@ -235,7 +235,7 @@ void StreamingDecoder::accumulateBurstFrames() {
         clearBurstDiagnostics();
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
-            correlation_pos_ = burst_next_pos_;
+            ring_.correlation_pos_ = burst_next_pos_;
         }
         state_ = DecoderState::SEARCHING;
     }

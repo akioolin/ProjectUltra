@@ -229,19 +229,19 @@ void StreamingDecoder::searchForSync() {
 
         float audio_sec = total_fed_ / 48000.0f;
 
-        // Initialize correlation_pos_ if needed
-        if (correlation_pos_ == 0 && total_fed_ > 0) {
+        // Initialize ring_.correlation_pos_ if needed
+        if (ring_.correlation_pos_ == 0 && total_fed_ > 0) {
             if (total_fed_ < buffer_capacity_samples_) {
-                correlation_pos_ = 0;
+                ring_.correlation_pos_ = 0;
             } else {
-                correlation_pos_ = write_pos_;
+                ring_.correlation_pos_ = write_pos_;
             }
         }
 
         const size_t oldest_abs = (total_fed_ > buffer_capacity_samples_)
             ? (total_fed_ - buffer_capacity_samples_)
             : 0;
-        const size_t correlation_abs = ringPosToAbsoluteLocked(correlation_pos_);
+        const size_t correlation_abs = ringPosToAbsoluteLocked(ring_.correlation_pos_);
         // §7.4 chunk-B tail: the warm-window PLANNING decision (s16 skip-short-lead +
         // expected search anchor + planWarmSearchWindow + short-reanchor-lead adjustment)
         // now lives on the controller, which owns the warm-sync state it reads. The decoder
@@ -315,10 +315,10 @@ void StreamingDecoder::searchForSync() {
 
         // Calculate unsearched data available
         size_t unsearched;
-        if (write_pos_ >= correlation_pos_) {
-            unsearched = write_pos_ - correlation_pos_;
+        if (write_pos_ >= ring_.correlation_pos_) {
+            unsearched = write_pos_ - ring_.correlation_pos_;
         } else {
-            unsearched = buffer_capacity_samples_ - correlation_pos_ + write_pos_;
+            unsearched = buffer_capacity_samples_ - ring_.correlation_pos_ + write_pos_;
         }
 
         // Need at least min_search unsearched samples
@@ -326,7 +326,7 @@ void StreamingDecoder::searchForSync() {
             static int skip_count2 = 0;
             if (++skip_count2 % 50 == 1)
                 LOG_MODEM(INFO, "[%s] searchForSync: SKIP unsearched=%zu < min=%zu, total=%.2fs, corr_pos=%zu",
-                          log_prefix_.c_str(), unsearched, min_search, audio_sec, correlation_pos_);
+                          log_prefix_.c_str(), unsearched, min_search, audio_sec, ring_.correlation_pos_);
             return;
         }
 
@@ -335,7 +335,7 @@ void StreamingDecoder::searchForSync() {
         // Watterson notch can erase one narrow chirp segment while the rest of
         // the sweep remains detectable; the correlator is the real detector,
         // this gate only keeps silence from burning CPU.
-        const size_t rms_probe_pos = used_warm_timed_window ? search_start : correlation_pos_;
+        const size_t rms_probe_pos = used_warm_timed_window ? search_start : ring_.correlation_pos_;
         float rms = 0.0f;
         for (size_t i = 0; i < 1000; i++) {
             float s = buffer_[wrapRingIndexLocked(rms_probe_pos + i)];
@@ -367,31 +367,31 @@ void StreamingDecoder::searchForSync() {
         // defaults. Use an adaptive gate so valid low-level frames are not skipped.
         float rms_gate = CORR_NOISE_THRESHOLD;
         if (disconnected_mc_dpsk) {
-            float noise_floor = std::max(0.0005f, noise_floor_);
+            float noise_floor = std::max(0.0005f, ring_.noise_floor_);
             if (rms < CORR_NOISE_THRESHOLD) {
-                noise_floor_ = 0.98f * noise_floor + 0.02f * rms;
+                ring_.noise_floor_ = 0.98f * noise_floor + 0.02f * rms;
             } else {
-                noise_floor_ = 0.995f * noise_floor + 0.005f * rms;
+                ring_.noise_floor_ = 0.995f * noise_floor + 0.005f * rms;
             }
 
             // Before sync there is no SNR estimate. Use the measured audio
             // floor, but never raise the historical 0.025 gate; this only
             // relaxes acquisition when high-SNR fading leaves low absolute RMS.
-            rms_gate = std::clamp(noise_floor_ * 3.0f, 0.006f, CORR_NOISE_THRESHOLD);
+            rms_gate = std::clamp(ring_.noise_floor_ * 3.0f, 0.006f, CORR_NOISE_THRESHOLD);
             if (audio_activity_.load(std::memory_order_relaxed)) {
                 rms_gate = std::min(rms_gate, 0.012f);
             }
         } else if (connected_data_preamble) {
-            float noise_floor = std::max(0.001f, noise_floor_);
+            float noise_floor = std::max(0.001f, ring_.noise_floor_);
             if (rms < noise_floor * 3.0f) {
-                noise_floor_ = 0.98f * noise_floor + 0.02f * rms;
+                ring_.noise_floor_ = 0.98f * noise_floor + 0.02f * rms;
             } else {
-                noise_floor_ = 0.995f * noise_floor + 0.005f * rms;
+                ring_.noise_floor_ = 0.995f * noise_floor + 0.005f * rms;
             }
 
             // Typical OTA values observed around 0.02-0.04 RMS; keep floor low enough
             // to avoid starving detectDataSync() while still skipping true silence.
-            rms_gate = std::clamp(noise_floor_ * 2.2f, 0.015f, 0.040f);
+            rms_gate = std::clamp(ring_.noise_floor_ * 2.2f, 0.015f, 0.040f);
             if (sync_controller_.sync_reject_streak_ >= 8) {
                 float relax = std::min(0.010f,
                                        0.001f * static_cast<float>(sync_controller_.sync_reject_streak_ - 7));
@@ -404,8 +404,8 @@ void StreamingDecoder::searchForSync() {
             static int rms_skip_count = 0;
             if (++rms_skip_count % 10 == 1)
                 LOG_MODEM(INFO, "[%s] searchForSync: RMS skip, rms=%.4f < %.3f, corr_pos=%zu, total=%.2fs",
-                          log_prefix_.c_str(), rms, rms_gate, correlation_pos_, audio_sec);
-            correlation_pos_ = wrapRingIndexLocked(correlation_pos_ + CORRELATION_STEP);
+                          log_prefix_.c_str(), rms, rms_gate, ring_.correlation_pos_, audio_sec);
+            ring_.correlation_pos_ = wrapRingIndexLocked(ring_.correlation_pos_ + CORRELATION_STEP);
             return;
         }
 
@@ -413,7 +413,7 @@ void StreamingDecoder::searchForSync() {
         static int run_log_count = 0;
         if (++run_log_count % 10 == 1) {
             LOG_MODEM(INFO, "[%s] searchForSync: RUNNING correlation, rms=%.4f, corr_pos=%zu, total=%.2fs",
-                      log_prefix_.c_str(), rms, correlation_pos_, audio_sec);
+                      log_prefix_.c_str(), rms, ring_.correlation_pos_, audio_sec);
         }
 
         // Signal present - back up search start to catch chirp that might have started
@@ -423,14 +423,14 @@ void StreamingDecoder::searchForSync() {
         constexpr size_t SEARCH_BACKTRACK = 9600; // Back up slightly more than lead-in
 
         if (!used_warm_timed_window) {
-            if (correlation_pos_ >= SEARCH_BACKTRACK) {
-                search_start = correlation_pos_ - SEARCH_BACKTRACK;
+            if (ring_.correlation_pos_ >= SEARCH_BACKTRACK) {
+                search_start = ring_.correlation_pos_ - SEARCH_BACKTRACK;
             } else if (total_fed_ < buffer_capacity_samples_) {
                 // Buffer hasn't wrapped yet, start from beginning
                 search_start = 0;
             } else {
                 // Buffer wrapped, handle underflow
-                search_start = wrapRingIndexLocked(buffer_capacity_samples_ + correlation_pos_ - SEARCH_BACKTRACK);
+                search_start = wrapRingIndexLocked(buffer_capacity_samples_ + ring_.correlation_pos_ - SEARCH_BACKTRACK);
             }
         }
 
@@ -468,7 +468,7 @@ void StreamingDecoder::searchForSync() {
         }
 
         if (used_warm_timed_window) {
-            correlation_pos_ = absoluteToRingLocked(warm_narrow_end_abs);
+            ring_.correlation_pos_ = absoluteToRingLocked(warm_narrow_end_abs);
             LOG_MODEM(INFO,
                       "[%s] warm-sync: %s LTS search expected=%zu start_abs=%zu size=%zu confidence=%.2f",
                       log_prefix_.c_str(),
@@ -478,7 +478,7 @@ void StreamingDecoder::searchForSync() {
                       sync_controller_.frame_arrival_confidence_);
         } else {
             // Advance by small step (100ms = 4800 samples) for accurate detection
-            correlation_pos_ = wrapRingIndexLocked(correlation_pos_ + CORRELATION_STEP);
+            ring_.correlation_pos_ = wrapRingIndexLocked(ring_.correlation_pos_ + CORRELATION_STEP);
         }
     }
 
@@ -640,7 +640,7 @@ void StreamingDecoder::searchForSync() {
                     "[%s] s16-phase5: detectSync MISS chirp_peak=%.3f (thr=%.2f) "
                     "corr_pos=%zu total=%zu search_start=%zu min_search=%zu",
                     log_prefix_.c_str(), sync_result.correlation,
-                    CORR_DETECT_THRESHOLD, correlation_pos_, total_fed_,
+                    CORR_DETECT_THRESHOLD, ring_.correlation_pos_, total_fed_,
                     search_start, min_search);
             }
             SyncResult light_sync_result;
@@ -781,7 +781,7 @@ void StreamingDecoder::searchForSync() {
                 LOG_MODEM(INFO, "[%s] Anti-replay: duplicate sync at pos=%zu (prev=%zu), skipping",
                           log_prefix_.c_str(), sync_position_, last_decoded_sync_pos_);
                 constexpr size_t SEARCH_BACKTRACK = 9600;
-                correlation_pos_ = wrapRingIndexLocked(sync_position_ + SEARCH_BACKTRACK + CORRELATION_STEP);
+                ring_.correlation_pos_ = wrapRingIndexLocked(sync_position_ + SEARCH_BACKTRACK + CORRELATION_STEP);
                 return;
             }
         }
@@ -814,7 +814,7 @@ void StreamingDecoder::searchForSync() {
         }
 
         sync_cfo_ = new_cfo;
-        sync_snr_ = chirpSyncQualityDb(sync_result.correlation, noise_floor_);
+        sync_snr_ = chirpSyncQualityDb(sync_result.correlation, ring_.noise_floor_);
         sync_correlation_ = sync_result.correlation;
         sync_gap_error_samples_ = sync_result.gap_error_samples;
         sync_start_time_ = std::chrono::steady_clock::now();
@@ -831,12 +831,12 @@ void StreamingDecoder::searchForSync() {
                   log_prefix_.c_str(), sync_position_, sync_cfo_, sync_snr_,
                   snrSourceToString(SNRSource::SYNC_QUALITY));
 
-        // NOTE: Do NOT advance correlation_pos_ past the frame here.
+        // NOTE: Do NOT advance ring_.correlation_pos_ past the frame here.
         // It was already advanced by CORRELATION_STEP at line 323 during search.
         // The post-decode skip at decodeCurrentFrame() line 718 handles advancing
         // past the decoded frame when we return to SEARCHING.
         //
-        // Previously, this code jumped correlation_pos_ past the entire frame,
+        // Previously, this code jumped ring_.correlation_pos_ past the entire frame,
         // which could place it AHEAD of write_pos_ in circular buffer space
         // (especially after buffer wraps). This caused feedAudio()'s overflow
         // check to compute unsearched ≈ buffer_size, triggering spurious
