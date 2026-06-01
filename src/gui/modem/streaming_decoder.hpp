@@ -46,6 +46,7 @@
 #include "sync/sync_controller.hpp"   // SyncController — sync/z state owner (refactor §7)
 #include "sync/sync_ring_buffer.hpp"  // SyncRingBuffer — the shared audio ring (refactor §7 C3)
 #include "sync/cfo_tracker.hpp"       // CFOTracker — the tracked-CFO state (refactor §7 C-CFO)
+#include "frame_demodulator.hpp"      // FrameDemodulator — per-frame demod stage(s) (refactor §7 C-FD)
 #include <vector>
 #include <queue>
 #include <mutex>
@@ -541,8 +542,6 @@ private:
     // Uses Hilbert transform → analytic signal → complex rotation → real part.
     // After pre-correction, waveform should be told CFO=0.
     // Returns the CFO value used for pre-correction (for feedback adjustment).
-    float applyCFOPreCorrection(std::vector<float>& samples, float cfo_hz,
-                                 size_t absolute_start_sample);
     void populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
                                float residual_cfo_hz) const;
     void observeIdleNoiseCandidate(const float* samples, size_t count);
@@ -630,6 +629,9 @@ private:
     // last_cfo_). The chirp/LTS/pilot estimators feed it; acquisition reads it as the known CFO and
     // the per-frame demod feedback stores the pilot-corrected value back (the feedback invariant).
     sync::CFOTracker cfo_tracker_;
+    // §7 C-FD-1: the per-frame demod stage(s). Currently owns the CFO pre-correction (the Hilbert
+    // pre-corrector + pre_correction_cfo_); grows to own the frame decode orchestration.
+    FrameDemodulator frame_demodulator_;
 
     // Reset generation counter - incremented on reset(), checked after slow operations
     // to detect if state was reset mid-operation (e.g., during correlation)
@@ -701,7 +703,7 @@ private:
     mutable std::atomic<float> last_ofdm_broadband_snr_db_{0.0f};
     IdleNoiseSNREstimator idle_noise_snr_estimator_;
     std::atomic<float> last_fading_index_{0.0f};
-    float pre_correction_cfo_ = 0.0f;  // CFO used for last pre-correction (for feedback adjustment)
+    // (§7 C-FD-1: pre_correction_cfo_ moved into frame_demodulator_ — read via preCorrectionCfo().)
     uint64_t overflow_events_ = 0;
 
     // Constellation cache (protected by buffer_mutex_)

@@ -33,7 +33,6 @@
 #include "sync/signal_policy.hpp"            // LightSyncThresholds + light-sync acceptance
 #include "sync/sync_ring_buffer.hpp"         // SyncRingBuffer — the owned audio ring (refactor §7 C3)
 
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string>

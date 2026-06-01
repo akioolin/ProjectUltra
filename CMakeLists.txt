@@ -504,6 +504,7 @@ set(ULTRA_STREAMING_DECODER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/sync/cfo_tracker.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/sync/sync_controller.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/idle_noise_snr_estimator.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/frame_demodulator.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/streaming_decoder.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/streaming_sync_acquisition.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/streaming_ofdm_decode.cpp

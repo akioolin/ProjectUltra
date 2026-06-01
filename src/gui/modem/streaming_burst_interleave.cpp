@@ -319,7 +319,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     bool is_ofdm_burst = protocol::isOFDMMode(mode_);
     float burst_pre_cfo = 0.0f;
     if (is_ofdm_burst) {
-        burst_pre_cfo = applyCFOPreCorrection(block, burst_cfo_, abs_burst);
+        burst_pre_cfo = frame_demodulator_.applyCFOPreCorrection(block, burst_cfo_, abs_burst, log_prefix_.c_str());
     }
 
     // Demodulate (CFO=0 after pre-correction, or original burst_cfo_ if no pre-correction)
@@ -387,7 +387,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         }
 
         if (have_corrected_block) {
-            burst_pre_cfo = is_ofdm_burst ? applyCFOPreCorrection(block, burst_cfo_, corrected_abs) : 0.0f;
+            burst_pre_cfo = is_ofdm_burst ? frame_demodulator_.applyCFOPreCorrection(block, burst_cfo_, corrected_abs, log_prefix_.c_str()) : 0.0f;
             burst_decode_cfo = (std::abs(burst_pre_cfo) > 0.01f) ? 0.0f : burst_cfo_;
             waveform_->setAbsoluteTrainingPosition(corrected_abs);
             waveform_->setFrequencyOffset(burst_decode_cfo);

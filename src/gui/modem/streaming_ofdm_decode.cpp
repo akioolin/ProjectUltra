@@ -442,19 +442,19 @@ void StreamingDecoder::decodeCurrentFrame() {
         connected_ &&
         current_modulation_ == Modulation::QAM16;
     if (timing_cfo_genie) {
-        pre_correction_cfo_ = 0.0f;
+        frame_demodulator_.resetPreCorrection();
         LOG_MODEM(WARN,
                   "[%s] DIAG genie-timing-cfo: bypassing CFO pre-correction "
                   "and forcing demod CFO to 0 Hz",
                   log_prefix_.c_str());
     } else if (is_ofdm && !frame_buffer.empty()) {
-        applyCFOPreCorrection(frame_buffer, sync_cfo_, frame_sync_abs);
+        frame_demodulator_.applyCFOPreCorrection(frame_buffer, sync_cfo_, frame_sync_abs, log_prefix_.c_str());
     }
 
     // After pre-correction, tell waveform CFO=0 (already removed from samples).
     // For non-OFDM (MC-DPSK), no pre-correction — pass original sync_cfo_.
     const float decode_cfo = timing_cfo_genie ? 0.0f
-        : ((is_ofdm && std::abs(pre_correction_cfo_) > 0.01f) ? 0.0f : sync_cfo_);
+        : ((is_ofdm && std::abs(frame_demodulator_.preCorrectionCfo()) > 0.01f) ? 0.0f : sync_cfo_);
 
     if (frame_buffer.empty()) {
         {
@@ -1091,7 +1091,7 @@ void StreamingDecoder::decodeCurrentFrame() {
             }
 
             if (have_corrected_frame) {
-                applyCFOPreCorrection(frame_buffer, sync_cfo_, corrected_sync_abs);
+                frame_demodulator_.applyCFOPreCorrection(frame_buffer, sync_cfo_, corrected_sync_abs, log_prefix_.c_str());
 
                 // The marker flag was consumed by the first process() call.
                 // Normalize the first LTS symbol manually for this retry so
@@ -1201,11 +1201,11 @@ void StreamingDecoder::decodeCurrentFrame() {
         burst_metric_templates_.push_back(first_metrics);
         const float current_cfo = cfo_tracker_.tracked();
         const auto cfo_update = cfo_tracker_.ingestPilotResidual(
-            pre_correction_cfo_, residual_cfo, current_cfo, /*clamp_drift=*/true);
+            frame_demodulator_.preCorrectionCfo(), residual_cfo, current_cfo, /*clamp_drift=*/true);
         burst_cfo_ = cfo_update.accepted_cfo;
         beginBurstDiagnosticsGroup(frame_sync_abs, burst_soft_buffer_.back(),
                                    sampleRMS(frame_buffer),
-                                   pre_correction_cfo_, residual_cfo,
+                                   frame_demodulator_.preCorrectionCfo(), residual_cfo,
                                    cfo_update.accepted_cfo);
 
         // LTS autocorrelation can lock early on later marked groups inside a
@@ -1236,7 +1236,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         const float residual_cfo = waveform_->estimatedCFO();
         const float current_cfo = cfo_tracker_.tracked();
         const auto cfo_update = cfo_tracker_.ingestPilotResidual(
-            pre_correction_cfo_, residual_cfo, current_cfo, connected_);
+            frame_demodulator_.preCorrectionCfo(), residual_cfo, current_cfo, connected_);
         if (cfo_update.clamped) {
             LOG_MODEM(WARN, "[%s] Pilot CFO drift clamped: %.2f → %.2f Hz (drift=%.2f, max=%.1f)",
                       log_prefix_.c_str(), current_cfo, cfo_update.unclamped_cfo,
@@ -1246,7 +1246,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         if (std::abs(cfo_update.accepted_cfo - current_cfo) > 0.1f) {
             LOG_MODEM(INFO, "[%s] CFO updated: %.2f → %.2f Hz (pre_corr=%.2f + residual=%.2f)",
                       log_prefix_.c_str(), current_cfo, cfo_update.accepted_cfo,
-                      pre_correction_cfo_, residual_cfo);
+                      frame_demodulator_.preCorrectionCfo(), residual_cfo);
         }
         sync_cfo_ = cfo_update.accepted_cfo;
     }
@@ -1614,8 +1614,8 @@ void StreamingDecoder::decodeCurrentFrame() {
                 }
 
                 // Pre-correct CFO on retry buffer too
-                if (is_ofdm && std::abs(pre_correction_cfo_) > 0.01f) {
-                    applyCFOPreCorrection(retry_buffer, sync_cfo_, ringPosToAbsolute(retry_sync));
+                if (is_ofdm && std::abs(frame_demodulator_.preCorrectionCfo()) > 0.01f) {
+                    frame_demodulator_.applyCFOPreCorrection(retry_buffer, sync_cfo_, ringPosToAbsolute(retry_sync), log_prefix_.c_str());
                 }
 
                 waveform_->reset();
@@ -1650,7 +1650,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                 const float residual_cfo = waveform_->estimatedCFO();
                 const float current_cfo = cfo_tracker_.tracked();
                 const auto cfo_update = cfo_tracker_.ingestPilotResidual(
-                    pre_correction_cfo_, residual_cfo, current_cfo, connected_);
+                    frame_demodulator_.preCorrectionCfo(), residual_cfo, current_cfo, connected_);
                 sync_cfo_ = cfo_update.accepted_cfo;
 
                 sync_position_ = retry_sync;
