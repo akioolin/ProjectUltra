@@ -10,6 +10,57 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-01 — §7 C3: SyncController owns the audio ring + the connected-acquisition decisions
+
+**What was the situation (not a bug — a refactor):** The §7 SyncController consolidation had moved
+all sync STATE + policy into `SyncController`, but the audio ring buffer still lived on
+`StreamingDecoder` and the acquisition ORCHESTRATION (`searchForSync`) still ran in the decoder. To
+give a clean, testable seam for upcoming sync-acquisition work, C3 moves the ring + the connected
+acquisition decisions into the controller.
+
+**What changed (5 commits, all byte-identical, on `feat/oneway-arch-2026-05-27`):**
+- **Phase 1 (`b7fcf7a`,`8bb9208`,`34ccb02`):** Extracted the ring cluster into a cohesive
+  `sync::SyncRingBuffer` (`src/sync/sync_ring_buffer.{hpp,cpp}`): `buffer_`/`write_pos_`/
+  `correlation_pos_`/`total_fed_`/`buffer_capacity_samples_`/`buffer_mutex_`+`data_cv_`/
+  `search_floor_*`/`noise_floor_` + the 6 ring helpers. The decoder's STATE block collapses to one
+  `sync::SyncRingBuffer ring_;`. kDefault/kMinimumBufferSamples → aliases to SyncRingBuffer::*.
+- **Phase 2 (`37d1472`):** Re-homed `ring_` INTO `SyncController` (its new capacity ctor;
+  StreamingDecoder forwards `sync_controller_(buffer_capacity_samples)`). The decoder now reaches
+  audio as `sync_controller_.ring_.*` (producer feedAudio + both consumers). Added
+  sync_ring_buffer.cpp to the test_sync_controller_phase target.
+- **Phase 3a (`6a32d72`):** `SyncController::acquireSearchWindow()` — the lock-held search-window
+  production (ring extract + planWarmSearch + RMS gate + post-frame floor + 5 early-returns) moved
+  out of searchForSync (verbatim via a transform script).
+- **Phase 3b (`6272e9d`,`fcabcc4`):** `detectConnectedLightSync()` (the hot connected light-LTS
+  data path + §16.4 re-anchor escalation) and `detectFullAnchorFallback()` (the §16 full-anchor
+  light fallback) moved into the controller; only the `data_sync_accepted_callback_` fire stays in
+  the decoder.
+
+**Why correct / design:** Pure code-motion — every step keeps the same computations, log strings,
+order, and early-return semantics → behavior + log output byte-identical. Chosen design is
+**focused controller methods, NOT one fat detect()**: the cold/disconnected acquisition (wideband
+chirp detectSync + the dual-listen narrowband `waveform_` swap) deliberately stays decoder-side
+because the narrowband swap is NOT exercised by the wideband gates — moving it would be an
+untested-regression risk. The decoder passes its current waveform into each method (no stale
+controller-member trap). **Not done:** C4 re-privatization is blocked — every transitional-public
+controller field is still decoder-accessed (and several decoder-WRITTEN) by the decode/burst/CFO
+paths, which would have to be consolidated first (out of C3 scope).
+
+**Test:** cmake build clean; ctest red-set byte-identical to baseline (4 FAILED {Protocol,
+StreamingConfig, StreamingBufferPolicy, StreamingDecoderToneBurstMonitor} + 2 Disabled),
+SyncControllerPhase PASS. Per step: GUI floor R1/4 AWGN@10 PASS byte-for-byte (380 bps / 0 retx /
+CRC ×2) + GUI Good@12 PASS clean (CRC ×2 / 0 retx / 0 cwfail) each step; no-regress R3/4 AWGN@20 on
+the final state PASS byte-for-byte (1840 bps / 133 s = baseline / 0 retx / 0 cwfail). (Noted a Good@12
+harness flake: a slow fade realization can push the DISCONNECT past the scenario's ~8 s grace →
+`process_exit_before_pass` on a CLEAN transfer + no crash; re-run passes deterministically.)
+
+**Map note:** several `MODEM_INFRASTRUCTURE_MAP.md` rows reference searchForSync line numbers that
+shifted in C3; the moved stages (ring write, RMS gate, search-window, light/full-anchor dispatch)
+were updated by method name (stable), but a full file:line re-verification pass of the map is still
+warranted.
+
+---
+
 ## 2026-05-31 — Warm-sync hand-off promoted to PRODUCTION DEFAULT (ULTRA_S16_WARM_HANDOFF removed)
 
 **What was the situation:** The §16 warm-sync hand-off (light-LTS group-start preamble +

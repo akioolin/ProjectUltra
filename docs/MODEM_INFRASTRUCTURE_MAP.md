@@ -29,11 +29,13 @@ it's post-decode delivery/routing only.
 
 | Stage | Purpose | Where | When | Class |
 |------|---------|-------|------|-------|
-| Ring-buffer write + overflow recovery | audio→buffer, force-reset on overflow | `streaming_decoder.cpp:395` (`feedAudio`), `:437/:457` | every callback | 🟢 |
+| Ring-buffer write + overflow recovery | audio→buffer, force-reset on overflow | `streaming_decoder.cpp` (`feedAudio`) → `sync_controller_.ring_.writeSamplesToRingLocked`; **ring now owned by `sync::SyncRingBuffer` inside SyncController** (§7 C3) | every callback | 🟢 |
 | Activity RMS gate | presence detector (HIGH 0.030/LOW 0.010) | `streaming_decoder.cpp:412` | every callback | 🟢 (instrumentation) |
 | Tone-burst ACK monitor | reverse-channel FSK ACK detect (armed-only) | `streaming_decoder.cpp:404` | event-gated | 🟢 (§15 ACK) |
-| RMS/signal-presence search gate | per-mode adaptive gate w/ noise-floor tracker | `streaming_sync_acquisition.cpp:413` | SEARCHING hop (~100 ms) | 🟢 |
-| Warm/light search-window planning | predict next-frame arrival, shrink LTS window | `sync_controller.cpp::planWarmSearch` → `arrival_policy::planWarmSearchWindow` | connected light preamble | 🟢 core (warm-handoff now default; flag removed) |
+| RMS/signal-presence search gate | per-mode adaptive gate w/ noise-floor tracker | `sync_controller.cpp::acquireSearchWindow` (§7 C3: moved out of searchForSync) | SEARCHING hop (~100 ms) | 🟢 |
+| Warm/light search-window planning | predict next-frame arrival, shrink LTS window | `sync_controller.cpp::acquireSearchWindow` → `::planWarmSearch` → `arrival_policy::planWarmSearchWindow` | connected light preamble | 🟢 core (warm-handoff now default; flag removed) |
+| Connected light-LTS dispatch + §16.4 re-anchor | run detectDataSync, accept (pos-gate), arm full-chirp on reject streak | `sync_controller.cpp::detectConnectedLightSync` (§7 C3: moved from searchForSync) | connected data acq | 🟢 |
+| Full-anchor light-LTS fallback | descriptor-chirp miss → control-threshold light DATA fallback | `sync_controller.cpp::detectFullAnchorFallback` (§7 C3) | connected re-anchor | 🟢 |
 | **Cold dual-chirp sync (wideband)** | up+down chirp matched filter → timing+coarse CFO | `chirp_sync.hpp:353` (`detectDualChirp`) ← `ofdm_chirp_waveform.cpp:433` | cold acq / MC-DPSK handshake | 🟢 |
 | Dual-listen narrowband chirp | 1250–1750 Hz chirp → `BandwidthMode::NARROW` | `streaming_sync_acquisition.cpp:824` | cold, disconnected | 🟢 (OFDM_NARROW entry) |
 | Warm/light LTS data sync | LTS autocorrelation, no chirp, trusts `last_cfo_` | `ofdm_chirp_waveform.cpp:517` (`detectDataSync`) | connected data | 🟢 |
