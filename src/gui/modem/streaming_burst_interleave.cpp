@@ -29,9 +29,6 @@ namespace ultra {
 namespace gui {
 
 namespace v2 = protocol::v2;
-namespace buffer_policy = streaming_buffer_policy;
-namespace decode_policy = streaming_decode_policy;
-namespace frame_policy = streaming_frame_policy;
 namespace signal_policy = ::ultra::sync::signal_policy;
 namespace arrival_policy = ::ultra::sync::frame_arrival_policy;
 

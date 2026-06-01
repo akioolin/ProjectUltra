@@ -93,6 +93,27 @@ here causes a wrong deletion later. Move finished items to *Completed* with the 
 - **⚠ KEEP regardless:** MC-DPSK differential (`multi_carrier_dpsk.hpp`); the `Modulation` enum
   `DQPSK/DBPSK/D8PSK`; the **COHERENT** DD tracker `dd_qam16_*` (`channel_equalizer_equalize.cpp:646`).
 
+### R4. Adaptive 100 ms short data re-anchor (§16.2/§16.4 superseded) — `QUEUED`
+- **What:** the adaptive short-chirp re-anchor group-boundary strategy (the "§16.2 short re-anchor
+  that broke frame-stride timing").
+- **Why dead:** mutually exclusive with the warm-sync hand-off, which is now the PRODUCTION DEFAULT
+  (§16.8, flag removed 2026-05-31, commit `5535fd2`). `ModemEngine::syncAdaptiveShortDataPreamble`
+  (`modem_mode.cpp`) now FORCES `enable = false` unconditionally — warm-handoff owns the group
+  boundary via the descriptor chirp + warm-light path — so `adaptive_short_data_preamble_` is always
+  false and the entire short-reanchor search/preamble path is unreachable.
+- **Scope (delete, VERIFY file:line first):** `adaptive_reanchor_policy::shouldUseShortReanchor` +
+  `shortReanchorChirpDurationMs` (if no other live caller); the `adaptive_short_data_preamble_` /
+  `adaptive_short_reanchor_active_` / `adaptive_preamble_peer_fading_` members + `setAdaptiveShort
+  DataPreamble` / `setAdaptivePreamblePeerFading` plumbing (encoder + decoder); the
+  `use_short_reanchor_search` / `detectShortDataSync` / `getShortDataPreambleSamples` /
+  `short_reanchor_lead_samples` paths in `streaming_sync_acquisition.cpp` + the waveform; the
+  now-dead-store `shouldUseShortReanchor` call in `modem_mode.cpp` (replace with `bool enable=false`).
+- **⚠ KEEP (do not over-cut):** the FULL chirp+LTS preamble (`generatePreamble`); the warm-handoff
+  LIGHT group-start preamble; the BURST_HEADER descriptor chirp anchor — these REPLACE the short
+  re-anchor, they are not part of the deletion.
+- **Blocker:** none — warm-handoff is default + GUI-proven. Mechanical dead-path removal.
+- **Status:** QUEUED. Gate on ctest byte-identical + GUI floor/Good@12.
+
 ---
 
 ## Dead code — audit-confirmed (verify no test-tool dependency, then cut)
