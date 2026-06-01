@@ -16,7 +16,6 @@ namespace ultra {
 namespace sync {
 
 void SyncController::reset(protocol::WaveformMode mode, IWaveform* wf, bool is_coherent) {
-    mode_ = SyncMode::COLD;
     waveform_mode_ = mode;
     waveform_ = wf;
     is_coherent_ = is_coherent;
@@ -36,7 +35,7 @@ SyncDecision SyncController::detect(SampleSpan buffer, size_t buffer_len, size_t
     (void)buffer_len;
     (void)buffer_abs_start;
     SyncDecision d;
-    d.mode = mode_;
+    d.mode = mode();
     return d;
 }
 

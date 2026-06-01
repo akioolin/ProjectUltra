@@ -40,9 +40,11 @@
 namespace ultra {
 namespace sync {
 
-// The three (and only three) acquisition states. Replaces the streaming_frame_arrival_policy::
-// WarmSyncPhase {COLD,WARM,DEGRADED,RECOVERY} + warm_sync_active_ + expect_full_ofdm_anchor_
-// tangle with one explicit machine.
+// The three (and only three) acquisition states. Collapses the frame_arrival_policy::WarmSyncPhase
+// {COLD,WARM,DEGRADED,RECOVERY} 4-state machine (DEGRADED→WARM, RECOVERY→RE_ACQUIRE) — derived by
+// mode() from (warm_sync_active_, consecutive_sync_misses_). NOTE: expect_full_ofdm_anchor_ is a
+// SEPARATE "next search uses the full chirp anchor" flag — it is set in HEALTHY per-group contexts
+// (the BURST_HEADER descriptor re-arm), NOT only on sync loss, so it does NOT fold into RE_ACQUIRE.
 enum class SyncMode {
     COLD,        // no timing lock — full chirp+LTS, wide window, strict threshold
     WARM,        // locked + predicting — group boundary re-anchors on the descriptor chirp;
@@ -135,8 +137,20 @@ public:
 
     void setLogPrefix(const std::string& prefix) { log_prefix_ = prefix; }
 
-    SyncMode mode() const { return mode_; }
-    bool isWarm() const { return mode_ == SyncMode::WARM; }
+    // The live 3-state acquisition mode (§7 target machine), DERIVED from the same
+    // (warm_sync_active_, consecutive_sync_misses_) state as derivePhase() — the 4-state
+    // WarmSyncPhase collapses COLD→COLD, (WARM|DEGRADED)→WARM, RECOVERY→RE_ACQUIRE. No stored
+    // mode_ field: like the phase, it can never drift from the miss counter.
+    SyncMode mode() const {
+        switch (derivePhase()) {
+            case frame_arrival_policy::WarmSyncPhase::COLD:     return SyncMode::COLD;
+            case frame_arrival_policy::WarmSyncPhase::WARM:
+            case frame_arrival_policy::WarmSyncPhase::DEGRADED: return SyncMode::WARM;
+            case frame_arrival_policy::WarmSyncPhase::RECOVERY: return SyncMode::RE_ACQUIRE;
+        }
+        return SyncMode::COLD;
+    }
+    bool isWarm() const { return mode() == SyncMode::WARM; }
     float lastCfo() const { return last_cfo_.load(); }
 
     // Phase-D prep: the 4-state WarmSyncPhase is provably a PURE FUNCTION of (warm_sync_active_,
@@ -227,7 +241,7 @@ private:
     int64_t  last_frame_arrival_error_samples_ = 0;
 
     // --- migrated from StreamingDecoder (audit §1.2) — the single home for this state ---
-    SyncMode mode_ = SyncMode::COLD;
+    // (C2: the stored SyncMode mode_ field was removed — mode() derives it, like the phase.)
     protocol::WaveformMode waveform_mode_ = protocol::WaveformMode::OFDM_CHIRP;
     IWaveform* waveform_ = nullptr;        // borrowed; detectors live here (NOT owned)
     bool  is_coherent_ = false;
