@@ -1,7 +1,6 @@
 // modem_mode.cpp - Waveform and mode control for ModemEngine
 
 #include "modem_engine.hpp"
-#include "adaptive_reanchor_policy.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
 #include "protocol/frame_v2.hpp"
@@ -106,7 +105,6 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
                       connected_ ? "connected" : "disconnected");
             break;
     }
-    syncAdaptiveShortDataPreamble();
 }
 
 void ModemEngine::setConnectWaveform(protocol::WaveformMode mode) {
@@ -226,7 +224,6 @@ void ModemEngine::setConnected(bool connected) {
                   static_cast<int>(disconnect_waveform_));
         handshake_complete_ = false;  // Reset for next connection
     }
-    syncAdaptiveShortDataPreamble();
 }
 
 void ModemEngine::setHandshakeComplete(bool complete) {
@@ -324,47 +321,10 @@ void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
     LOG_MODEM(INFO, "Data mode set to: %s (pilots=%d, spacing=%d, burst_interleave=%d)",
               getModeDescription(mod, rate), config_.use_pilots ? 1 : 0,
               config_.pilot_spacing, burst_interleave_on ? 1 : 0);
-    syncAdaptiveShortDataPreamble();
 }
 
-void ModemEngine::setAdaptivePreamblePeerFading(float peer_fading_index) {
-    adaptive_preamble_peer_fading_ = peer_fading_index;
-    syncAdaptiveShortDataPreamble();
-}
-
-void ModemEngine::syncAdaptiveShortDataPreamble() {
-    bool enable = adaptive_reanchor_policy::shouldUseShortReanchor(
-        waveform_mode_, data_modulation_, adaptive_preamble_peer_fading_);
-    // §16.4: the adaptive 100 ms short re-anchor (commit 66db2d8) is the
-    // SUPERSEDED group-boundary strategy — the §16.2 "short re-anchor that
-    // broke frame-stride timing". It is mutually exclusive with the warm-sync
-    // hand-off: with both active its detector fires on noise (corr≈0.16) at
-    // group boundaries and competes with the descriptor-chirp + warm-light
-    // path, stalling transfers (seed 1 Good@20: 10 garbage fires + 35 path-5
-    // fallbacks, 2/11 groups). Warm-handoff is now ALWAYS on (promoted past
-    // ULTRA_S16_WARM_HANDOFF) and owns the group boundary, so the legacy short
-    // re-anchor is permanently forced OFF on both TX and RX.
-    enable = false;
-    const bool changed = adaptive_short_reanchor_active_ != enable;
-    if (enable || changed) {
-        if (streaming_encoder_) {
-            streaming_encoder_->setAdaptiveShortDataPreamble(enable);
-        }
-        if (streaming_decoder_) {
-            streaming_decoder_->setAdaptiveShortDataPreamble(enable);
-        }
-    }
-    if (changed) {
-        adaptive_short_reanchor_active_ = enable;
-        LOG_MODEM(INFO,
-                  "Adaptive short data re-anchor %s (waveform=%s mod=%s peer_fading=%.2f chirp=%.0f ms)",
-                  enable ? "ENABLED" : "DISABLED",
-                  protocol::waveformModeToString(waveform_mode_),
-                  modulationToString(data_modulation_),
-                  adaptive_preamble_peer_fading_,
-                  adaptive_reanchor_policy::shortReanchorChirpDurationMs());
-    }
-}
+// R4: setAdaptivePreamblePeerFading + syncAdaptiveShortDataPreamble removed — the adaptive
+// short-chirp re-anchor was superseded by the warm-sync hand-off (now the production default).
 
 // NOTE: recommendDataMode() removed - use protocol::recommendDataMode() from waveform_selection.hpp
 

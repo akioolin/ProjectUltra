@@ -178,8 +178,6 @@ void OFDMChirpWaveform::initComponents() {
     demodulator_ = std::make_unique<OFDMDemodulator>(config_);
     demodulator_->setRXCarrierErasureEnabled(rx_carrier_erasure_enabled_);
     chirp_sync_ = std::make_unique<sync::ChirpSync>(getChirpConfig());
-    short_reanchor_sync_.reset();
-    short_reanchor_duration_ms_ = 0.0f;
     invalidateDataSyncTemplate();
 }
 
@@ -240,24 +238,6 @@ sync::ChirpConfig OFDMChirpWaveform::getChirpConfig() const {
     return cfg;
 }
 
-sync::ChirpConfig OFDMChirpWaveform::getShortReanchorChirpConfig(
-        float chirp_duration_ms) const {
-    sync::ChirpConfig cfg = getChirpConfig();
-    cfg.duration_ms = chirp_duration_ms;
-    cfg.gap_ms = 50.0f;
-    cfg.use_dual_chirp = false;
-    return cfg;
-}
-
-sync::ChirpSync* OFDMChirpWaveform::shortReanchorSync(float chirp_duration_ms) const {
-    if (!short_reanchor_sync_ ||
-        std::abs(short_reanchor_duration_ms_ - chirp_duration_ms) > 0.5f) {
-        short_reanchor_sync_ = std::make_unique<sync::ChirpSync>(
-            getShortReanchorChirpConfig(chirp_duration_ms));
-        short_reanchor_duration_ms_ = chirp_duration_ms;
-    }
-    return short_reanchor_sync_.get();
-}
 
 WaveformCapabilities OFDMChirpWaveform::getCapabilities() const {
     WaveformCapabilities caps;
@@ -368,25 +348,6 @@ Samples OFDMChirpWaveform::generateDataPreamble() {
     return modulator_->generateTrainingSymbols(2);
 }
 
-Samples OFDMChirpWaveform::generateShortDataPreamble(float chirp_duration_ms) {
-    if (!modulator_) {
-        return Samples();
-    }
-
-    sync::ChirpSync* sync = shortReanchorSync(chirp_duration_ms);
-    if (!sync) {
-        return generateDataPreamble();
-    }
-
-    Samples chirp = sync->generate();
-    Samples training = modulator_->generateTrainingSymbols(2);
-
-    Samples preamble;
-    preamble.reserve(chirp.size() + training.size());
-    preamble.insert(preamble.end(), chirp.begin(), chirp.end());
-    preamble.insert(preamble.end(), training.begin(), training.end());
-    return preamble;
-}
 
 Samples OFDMChirpWaveform::modulate(const Bytes& encoded_data) {
     if (!modulator_) {
@@ -812,90 +773,6 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
     return result.detected;
 }
 
-bool OFDMChirpWaveform::detectShortDataSync(SampleSpan samples, SyncResult& result,
-                                            float known_cfo_hz, float threshold,
-                                            float chirp_duration_ms) {
-    result.detected = false;
-    result.correlation = 0.0f;
-    result.cfo_hz = known_cfo_hz;
-    result.gap_error_samples = 0.0f;
-    result.has_training = true;
-
-    sync::ChirpSync* sync = shortReanchorSync(chirp_duration_ms);
-    if (!sync) {
-        return false;
-    }
-
-    const size_t short_sync_samples = sync->getTotalSamples();
-    const size_t training_samples = static_cast<size_t>(std::max(1, getSamplesPerSymbol())) * 2;
-    if (samples.size() < short_sync_samples + training_samples) {
-        return false;
-    }
-
-    auto chirp_result = sync->detectDualChirp(samples, threshold);
-    result.correlation = chirp_result.up_correlation;
-    if (!chirp_result.success || chirp_result.up_chirp_start < 0) {
-        return false;
-    }
-
-    const int training_start = chirp_result.up_chirp_start +
-        static_cast<int>(short_sync_samples);
-    if (training_start < 0 ||
-        static_cast<size_t>(training_start) + training_samples > samples.size()) {
-        return false;
-    }
-
-    result.detected = true;
-    result.start_sample = training_start;
-    training_start_sample_ = static_cast<size_t>(training_start);
-    synced_ = true;
-    last_cfo_ = known_cfo_hz;
-    burst_interleave_latched_ = false;
-    burst_interleaved_detected_ = false;
-
-    const int symbol_samples = getSamplesPerSymbol();
-    if (symbol_samples > 0) {
-        const size_t training = static_cast<size_t>(training_start);
-        const size_t lts_samples = static_cast<size_t>(symbol_samples) * 2;
-        if (training + lts_samples <= samples.size()) {
-            data_sync_hilbert_.reset();
-            auto& analytic = data_sync_analytic_scratch_;
-            data_sync_hilbert_.process(samples, analytic);
-
-            if (training + lts_samples <= analytic.size()) {
-                Complex marker_p(0.0f, 0.0f);
-                for (int n = 0; n < symbol_samples; ++n) {
-                    const size_t idx1 = training + static_cast<size_t>(n);
-                    const size_t idx2 = idx1 + static_cast<size_t>(symbol_samples);
-                    marker_p += std::conj(analytic[idx1]) * analytic[idx2];
-                }
-
-                const float cfo_phase =
-                    2.0f * static_cast<float>(M_PI) * known_cfo_hz *
-                    static_cast<float>(symbol_samples) / config_.sample_rate;
-                const Complex cfo_comp(std::cos(-cfo_phase), std::sin(-cfo_phase));
-                const Complex marker_metric = marker_p * cfo_comp;
-                burst_interleaved_detected_ = (marker_metric.real() < 0.0f);
-                burst_interleave_latched_ = burst_interleaved_detected_;
-                if (ultra::phyDiagnosticsEnabled()) {
-                    std::ostringstream oss;
-                    oss << "burst_marker site=short re=" << marker_metric.real()
-                        << " im=" << marker_metric.imag()
-                        << " latched=" << (burst_interleave_latched_ ? 1 : 0);
-                    ultra::phyDiagLine(oss.str());
-                }
-            }
-        }
-    }
-
-    LOG_MODEM(INFO,
-              "OFDMChirpWaveform: Short data re-anchor detected chirp=%d training=%d corr=%.2f using CFO=%.1f Hz%s",
-              chirp_result.up_chirp_start, result.start_sample,
-              result.correlation, known_cfo_hz,
-              burst_interleaved_detected_ ? " [BURST-INTERLEAVED]" : "");
-
-    return true;
-}
 
 void OFDMChirpWaveform::setAbsoluteTrainingPosition(size_t pos) {
     absolute_training_start_sample_ = pos;
@@ -1219,13 +1096,6 @@ int OFDMChirpWaveform::getDataPreambleSamples() const {
     return 2 * getSamplesPerSymbol();
 }
 
-int OFDMChirpWaveform::getShortDataPreambleSamples(float chirp_duration_ms) const {
-    const sync::ChirpSync* sync = shortReanchorSync(chirp_duration_ms);
-    const int short_sync_samples = sync
-        ? static_cast<int>(sync->getTotalSamples())
-        : static_cast<int>(config_.sample_rate * (chirp_duration_ms + 50.0f) / 1000.0f);
-    return short_sync_samples + getDataPreambleSamples();
-}
 
 int OFDMChirpWaveform::getMinSamplesForFrame() const {
     return getMinSamplesForCWCount(4);

@@ -1,7 +1,6 @@
 // StreamingDecoder module
 
 #include "streaming_decoder.hpp"
-#include "adaptive_reanchor_policy.hpp"
 #include "streaming_buffer_policy.hpp"
 #include "streaming_decode_policy.hpp"
 #include "streaming_decoder_debug.hpp"
@@ -210,33 +209,9 @@ void StreamingDecoder::searchForSync() {
         mode_ == protocol::WaveformMode::OFDM_CHIRP;
     bool use_light_search = connected_data_preamble && !use_full_ofdm_anchor_search;
     bool used_full_anchor_fallback = false;
-    const bool use_short_reanchor_search =
-        use_light_search &&
-        adaptive_short_data_preamble_ &&
-        mode_ == protocol::WaveformMode::OFDM_CHIRP;
-    const float short_reanchor_chirp_ms =
-        use_short_reanchor_search
-            ? adaptive_reanchor_policy::shortReanchorChirpDurationMs()
-            : 0.0f;
-    const size_t light_data_preamble_samples =
-        (use_short_reanchor_search && waveform_)
-            ? static_cast<size_t>(std::max(0, waveform_->getDataPreambleSamples()))
-            : 0;
-    const size_t short_data_preamble_samples =
-        (use_short_reanchor_search && waveform_)
-            ? static_cast<size_t>(std::max(
-                  0, waveform_->getShortDataPreambleSamples(short_reanchor_chirp_ms)))
-            : 0;
-    const size_t short_reanchor_lead_samples =
-        short_data_preamble_samples > light_data_preamble_samples
-            ? short_data_preamble_samples - light_data_preamble_samples
-            : 0;
-    size_t min_search = use_light_search
-        ? (use_short_reanchor_search
-            ? std::max(LIGHT_SEARCH_SIZE,
-                       short_data_preamble_samples + LIGHT_SEARCH_SIZE)
-            : LIGHT_SEARCH_SIZE)
-        : chirp_min_search;
+    // (R4: the adaptive short-chirp re-anchor was removed — superseded by warm-handoff,
+    // which is now the default. The light/full-anchor search are the only group-boundary paths.)
+    size_t min_search = use_light_search ? LIGHT_SEARCH_SIZE : chirp_min_search;
     const size_t data_symbol_samples =
         (use_light_search && waveform_)
             ? static_cast<size_t>(std::max(1, waveform_->getSamplesPerSymbol()))
@@ -274,8 +249,6 @@ void StreamingDecoder::searchForSync() {
         // the wait / activate / extraction below from the returned plan.
         auto warm_plan = sync_controller_.planWarmSearch(
             use_light_search,
-            use_short_reanchor_search,
-            short_reanchor_lead_samples,
             total_fed_,
             oldest_abs,
             search_floor_abs_valid_,
@@ -289,19 +262,6 @@ void StreamingDecoder::searchForSync() {
             if (++warm_wait_count % 50 == 1) {
                 LOG_MODEM(INFO,
                           "[%s] warm-sync: wait for expected window, need_abs=%zu total=%zu expected=%zu",
-                          log_prefix_.c_str(), warm_plan.search_end_abs, total_fed_,
-                          sync_controller_.next_expected_frame_sample_);
-            }
-            return;
-        }
-
-        if (use_short_reanchor_search &&
-            warm_plan.active &&
-            total_fed_ < warm_plan.search_end_abs) {
-            static int warm_short_wait_count = 0;
-            if (++warm_short_wait_count % 50 == 1) {
-                LOG_MODEM(INFO,
-                          "[%s] warm-sync: wait for short re-anchor window, need_abs=%zu total=%zu expected_training=%zu",
                           log_prefix_.c_str(), warm_plan.search_end_abs, total_fed_,
                           sync_controller_.next_expected_frame_sample_);
             }
@@ -583,23 +543,6 @@ void StreamingDecoder::searchForSync() {
 
     if (use_light_search) {
         float known_cfo = sync_controller_.last_cfo_.load();
-
-        if (use_short_reanchor_search) {
-            found = waveform_->detectShortDataSync(
-                SampleSpan(search_buffer.data(), search_buffer.size()),
-                sync_result, known_cfo, CORR_DETECT_THRESHOLD,
-                short_reanchor_chirp_ms);
-            if (found) {
-                sync_controller_.sync_reject_streak_ = 0;
-                LOG_MODEM(INFO,
-                          "[%s] DATA sync detected by short re-anchor (chirp=%.0f ms, known CFO=%.1f Hz, corr=%.2f)",
-                          log_prefix_.c_str(), short_reanchor_chirp_ms,
-                          known_cfo, sync_result.correlation);
-                if (data_sync_accepted_callback_) {
-                    data_sync_accepted_callback_(sync_result.correlation);
-                }
-            }
-        }
 
         if (!found) {
             found = waveform_->detectDataSync(

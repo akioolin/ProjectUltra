@@ -396,7 +396,6 @@ public:
     void setExpectedFrameGapSamples(size_t samples);
     void seedExpectedFrameArrivalAfterSamples(size_t delay_samples,
                                               float confidence = 0.50f);
-    void setAdaptiveShortDataPreamble(bool enable);
 
     // Get number of samples in buffer
     size_t samplesInBuffer() const;
@@ -630,7 +629,6 @@ private:
     size_t last_decoded_sync_pos_ = SIZE_MAX;  // Last successfully decoded sync position (to prevent duplicates)
     size_t search_floor_abs_ = 0;     // Earliest absolute sample search may inspect
     bool search_floor_abs_valid_ = false;
-    bool adaptive_short_data_preamble_ = false;
     bool sync_from_warm_timed_window_ = false;
     bool sync_from_full_anchor_fallback_ = false;
     // warm_sync_phase_ + last_frame_* relocated into sync_controller_ (§7.4 shell-move A1,

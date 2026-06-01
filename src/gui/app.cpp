@@ -937,7 +937,6 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         }
         // Update modem engine with new data mode
         modem_.setDataMode(mod, rate);
-        modem_.setAdaptivePreamblePeerFading(peer_fading);
         connected_peer_snr_valid_ = std::isfinite(snr_db) && snr_db >= 0.0f;
         if (connected_peer_snr_valid_) {
             connected_peer_snr_db_ = snr_db;

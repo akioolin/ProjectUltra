@@ -260,7 +260,6 @@ public:
     void setDataMode(Modulation mod, CodeRate rate);
     Modulation getDataModulation() const { return data_modulation_; }
     CodeRate getDataCodeRate() const { return data_code_rate_; }
-    void setAdaptivePreamblePeerFading(float peer_fading_index);
 
     // NOTE: For modulation/rate selection, use protocol::recommendDataMode()
     // from waveform_selection.hpp instead
@@ -361,8 +360,6 @@ private:
     bool connected_ = false;
     bool handshake_complete_ = false;
     bool use_connected_waveform_once_ = false;
-    float adaptive_preamble_peer_fading_ = -1.0f;
-    bool adaptive_short_reanchor_active_ = false;
 
     // Data frame modulation (negotiated after probing)
     Modulation data_modulation_ = Modulation::DBPSK;
@@ -414,7 +411,6 @@ private:
     void deliverFrame(const Bytes& frame_data);
     void notifyFrameParsed(const Bytes& frame_data, protocol::v2::FrameType frame_type);
     void updateStats(std::function<void(LoopbackStats&)> updater);
-    void syncAdaptiveShortDataPreamble();
 
     // Buffer limit
     static constexpr size_t MAX_PENDING_SAMPLES = 960000;

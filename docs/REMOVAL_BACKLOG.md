@@ -93,7 +93,22 @@ here causes a wrong deletion later. Move finished items to *Completed* with the 
 - **⚠ KEEP regardless:** MC-DPSK differential (`multi_carrier_dpsk.hpp`); the `Modulation` enum
   `DQPSK/DBPSK/D8PSK`; the **COHERENT** DD tracker `dd_qam16_*` (`channel_equalizer_equalize.cpp:646`).
 
-### R4. Adaptive 100 ms short data re-anchor (§16.2/§16.4 superseded) — `QUEUED`
+### R4. Adaptive 100 ms short data re-anchor (§16.2/§16.4 superseded) — `DONE` (gui/modem subsystem)
+- **DONE 2026-05-31:** deleted the whole gui/modem short-reanchor subsystem (−379 lines, 14 files):
+  the search path (`streaming_sync_acquisition`), `SyncController::planWarmSearch` short-lead params,
+  the encoder light/short preamble branch + `adaptive_short_data_preamble_`, the decoder member, the
+  engine `syncAdaptiveShortDataPreamble`/`setAdaptivePreamblePeerFading`/members, app.cpp call, the 3
+  waveform virtuals (`generateShortDataPreamble`/`detectShortDataSync`/`getShortDataPreambleSamples`)
+  + ofdm impls + `shortReanchorSync`/`getShortReanchorChirpConfig`/members, `ultra_tnc.cpp`'s mirror,
+  and the `adaptive_reanchor_policy.hpp` file. Build clean; ctest red-set byte-identical to baseline.
+- **⚠ FOLLOW-UP (separate subsystem, NOT done):** `connection.cpp` still has
+  `connection_policy::shouldUseWideOFDMShortReanchor` driving ARQ SACK/continuation-reanchor TIMING
+  (`connection.cpp:4238`). It is independent of the deleted preamble machinery (still builds), but
+  since the modem no longer EMITS a short re-anchor preamble, its airtime budget may now be stale —
+  review whether `continuation_reanchor_ms` should go to 0 post-warm-handoff. Load-bearing ARQ timing;
+  needs its own analysis + GUI gate, NOT a mechanical delete.
+
+### R4-historical. (original scope, now done — kept for reference)
 - **What:** the adaptive short-chirp re-anchor group-boundary strategy (the "§16.2 short re-anchor
   that broke frame-stride timing").
 - **Why dead:** mutually exclusive with the warm-sync hand-off, which is now the PRODUCTION DEFAULT

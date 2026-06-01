@@ -208,8 +208,6 @@ public:
     }
     uint8_t getLDPCLiftingZ() const { return ldpc_lifting_z_; }
 
-    void setAdaptiveShortDataPreamble(bool enable);
-    bool getAdaptiveShortDataPreamble() const { return adaptive_short_data_preamble_; }
 
     void setPaprReductionEnabled(bool enable);
     bool getPaprReductionEnabled() const { return papr_reduction_enabled_; }
@@ -240,7 +238,7 @@ private:
                                     bool is_ofdm,
                                     bool is_control_frame,
                                     const char* label);
-    Samples connectedDataPreambleForFrame(bool is_data_frame);
+    Samples connectedDataPreambleForFrame();
 
     // ========================================================================
     // STATE (mirrors StreamingDecoder)
@@ -287,7 +285,6 @@ private:
     // Read solely by the burst group-start preamble decision; never consumed by
     // the descriptor's encodeFrame. See forceNextBurstGroupStartFullPreamble().
     bool force_burst_group_start_full_preamble_ = false;
-    bool adaptive_short_data_preamble_ = false;
     bool papr_reduction_enabled_ = phy::kPaprReductionDefaultEnabled;
     float papr_reduction_threshold_db_ = phy::kOfdmPaprReductionDefaultThresholdDb;
     phy::PaprReductionMeasurement last_papr_reduction_;
