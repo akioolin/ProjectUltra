@@ -33,7 +33,7 @@ it's post-decode delivery/routing only.
 | Activity RMS gate | presence detector (HIGH 0.030/LOW 0.010) | `streaming_decoder.cpp:412` | every callback | 🟢 (instrumentation) |
 | Tone-burst ACK monitor | reverse-channel FSK ACK detect (armed-only) | `streaming_decoder.cpp:404` | event-gated | 🟢 (§15 ACK) |
 | RMS/signal-presence search gate | per-mode adaptive gate w/ noise-floor tracker | `streaming_sync_acquisition.cpp:413` | SEARCHING hop (~100 ms) | 🟢 |
-| Warm/light search-window planning | predict next-frame arrival, shrink LTS window | `arrival_policy::planWarmSearchWindow` `streaming_sync_acquisition.cpp:298` | connected light preamble | 🟢 core; `ULTRA_S16_WARM_HANDOFF` extras 🟡 |
+| Warm/light search-window planning | predict next-frame arrival, shrink LTS window | `sync_controller.cpp::planWarmSearch` → `arrival_policy::planWarmSearchWindow` | connected light preamble | 🟢 core (warm-handoff now default; flag removed) |
 | **Cold dual-chirp sync (wideband)** | up+down chirp matched filter → timing+coarse CFO | `chirp_sync.hpp:353` (`detectDualChirp`) ← `ofdm_chirp_waveform.cpp:433` | cold acq / MC-DPSK handshake | 🟢 |
 | Dual-listen narrowband chirp | 1250–1750 Hz chirp → `BandwidthMode::NARROW` | `streaming_sync_acquisition.cpp:824` | cold, disconnected | 🟢 (OFDM_NARROW entry) |
 | Warm/light LTS data sync | LTS autocorrelation, no chirp, trusts `last_cfo_` | `ofdm_chirp_waveform.cpp:517` (`detectDataSync`) | connected data | 🟢 |
@@ -162,8 +162,9 @@ SR-ARQ masks; ON → whole-group ACK/NACK.** They disagreeing was the QAM16 offs
   GROUP_ACK is now **tone-burst** (`connection.cpp:413`); OFDM 1-CW GROUP_ACK only behind
   `ULTRA_LEGACY_OFDM_GROUP_ACK`.
 
-**Warm-handoff (§16)** 🟡 `ULTRA_S16_WARM_HANDOFF` — light LTS at group-start, BURST_HEADER as
-anchor (`streaming_encoder.cpp:648`); mutually exclusive with §16.4 short re-anchor.
+**Warm-handoff (§16)** 🟢 PRODUCTION DEFAULT (the `ULTRA_S16_WARM_HANDOFF` flag was removed
+2026-05-31; behavior is now unconditional) — light LTS at group-start, BURST_HEADER as anchor
+(`streaming_encoder.cpp`); supersedes (and permanently disables) the §16.4 short re-anchor.
 
 **Frame flow:** PING/PONG → CONNECT/CONNECT_ACK → MODE_CHANGE/ACK → DATA/ACK → DISCONNECT/ACK
 (all handshake/control in MC-DPSK).
@@ -205,7 +206,7 @@ Buckets per the env-knobs→runtime-derivation workstream: **[FEAT]** in-flight 
 | `ULTRA_BURST_GROUP_FRAMES` | burst group size, clamp [2,32] | code **6** (`kBurstInterleaveGroupFrames` `:64`, reconciled 16→6 on 2026-05-30 — mask-width-matched to the 6-bit SACK frame_mask; the old 16 was un-SR-addressable on the default interleave-OFF path) | `connection_policy.hpp:74` | FEAT |
 | `ULTRA_BURST_DESCRIPTOR` | emit BURST_HEADER descriptor | **ON** (escape hatch) | `modem_engine.cpp:530` | FEAT |
 | `ULTRA_BURST_HEADER_ONCE` | descriptor only on group 0 | OFF | `modem_engine.cpp:544` | FEAT |
-| `ULTRA_S16_WARM_HANDOFF` | warm light-LTS group-start (8 call sites) | OFF | `streaming_encoder.cpp:649` | FEAT |
+| ~~`ULTRA_S16_WARM_HANDOFF`~~ | warm light-LTS group-start | **REMOVED 2026-05-31** — promoted to production default (always on); all 7 gate sites unconditional | — | ✅ codified |
 | `ULTRA_S16_TRACE_WARM_WINDOW` | trace warm-sync window | off | `streaming_sync_acquisition.cpp:356` | DIAG |
 | `ULTRA_LOCK_RATE` | hold data rate fixed for transfer | OFF | `connection.cpp:2342` | FEAT |
 | `ULTRA_MAX_OFDM_RATE` | cap initial+adaptive rate | unset | `connection.cpp:673` | FEAT |

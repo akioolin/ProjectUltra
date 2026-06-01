@@ -840,26 +840,22 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 sync_controller_.expect_full_ofdm_anchor_ ? 1 : 0,
                                 static_cast<unsigned long long>(frame_sync_abs),
                                 frame_len);
-                            // §16.8 step 2 (ULTRA_S16_WARM_HANDOFF): if the knob is
-                            // ON AND the BURST_HEADER's noteFrameArrivalSuccess
-                            // promoted warm-sync to WARM (which §16.11 confirmed
-                            // happens every group on Good@20), SKIP the reset.
-                            // The warm timing seeded by the BURST_HEADER (which
-                            // arrived inside its own full chirp+LTS anchor) carries
-                            // into the data group that immediately follows. Matching
-                            // alpha-side change in streaming_encoder.cpp uses light
-                            // LTS for group-start data instead of a redundant
-                            // second full chirp+LTS. Falls back to the legacy
-                            // reset path when the knob is OFF, when warm-sync
-                            // wasn't actually WARM (sync miss path), or when
+                            // §16.8 step 2 (warm-handoff, now always on): if the
+                            // BURST_HEADER's noteFrameArrivalSuccess promoted warm-sync
+                            // to WARM (which §16.11 confirmed happens every group on
+                            // Good@20), SKIP the reset. The warm timing seeded by the
+                            // BURST_HEADER (which arrived inside its own full chirp+LTS
+                            // anchor) carries into the data group that immediately
+                            // follows. Matching alpha-side change in streaming_encoder.cpp
+                            // uses light LTS for group-start data instead of a redundant
+                            // second full chirp+LTS. Falls back to the legacy reset path
+                            // when warm-sync wasn't actually WARM (sync miss path), or when
                             // sync_controller_.expect_full_ofdm_anchor_ was already true going in
                             // (handshake / cold acquisition still pending).
-                            const char* s16_env =
-                                std::getenv("ULTRA_S16_WARM_HANDOFF");
-                            const bool s16_warm_handoff =
-                                s16_env && std::atoi(s16_env) != 0;
+                            // Warm-handoff BURST_HEADER-consume keeper — now unconditional
+                            // (promoted past ULTRA_S16_WARM_HANDOFF). Still gated on actually
+                            // being WARM with positive confidence (else fall to the reset path).
                             const bool warm_handoff_eligible =
-                                s16_warm_handoff &&
                                 sync_controller_.derivePhase() ==
                                     arrival_policy::WarmSyncPhase::WARM &&
                                 sync_controller_.frame_arrival_confidence_ > 0.0f;

@@ -653,11 +653,8 @@ void StreamingDecoder::searchForSync() {
             // still-arriving first-attempt light frame. sync_controller_.expect_full_ofdm_anchor_
             // is cleared again after the next clean data decode, so this is a
             // one-group escalation, not a permanent revert to per-group chirps.
-            const char* s16_escalate_env =
-                std::getenv("ULTRA_S16_WARM_HANDOFF");
-            const bool s16_escalate_on =
-                s16_escalate_env && std::atoi(s16_escalate_env) != 0;
-            if (s16_escalate_on && !found && connected_ &&
+            // §16.4 escalation — now unconditional (promoted past ULTRA_S16_WARM_HANDOFF).
+            if (!found && connected_ &&
                 mode_ == protocol::WaveformMode::OFDM_CHIRP &&
                 !sync_controller_.expect_full_ofdm_anchor_ &&
                 sync_controller_.sync_reject_streak_ >=

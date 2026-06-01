@@ -341,12 +341,10 @@ void ModemEngine::syncAdaptiveShortDataPreamble() {
     // hand-off: with both active its detector fires on noise (corr≈0.16) at
     // group boundaries and competes with the descriptor-chirp + warm-light
     // path, stalling transfers (seed 1 Good@20: 10 garbage fires + 35 path-5
-    // fallbacks, 2/11 groups). When warm-handoff is on it owns the group
-    // boundary, so force the legacy short re-anchor OFF on both TX and RX.
-    if (const char* s16 = std::getenv("ULTRA_S16_WARM_HANDOFF");
-        s16 && std::atoi(s16) != 0) {
-        enable = false;
-    }
+    // fallbacks, 2/11 groups). Warm-handoff is now ALWAYS on (promoted past
+    // ULTRA_S16_WARM_HANDOFF) and owns the group boundary, so the legacy short
+    // re-anchor is permanently forced OFF on both TX and RX.
+    enable = false;
     const bool changed = adaptive_short_reanchor_active_ != enable;
     if (enable || changed) {
         if (streaming_encoder_) {

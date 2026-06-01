@@ -10,6 +10,35 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-31 — Warm-sync hand-off promoted to PRODUCTION DEFAULT (ULTRA_S16_WARM_HANDOFF removed)
+
+**What was the situation:** The §16 warm-sync hand-off (light-LTS group-start preamble +
+warm-light acceptance + position-gating + force-WARM refresh + §16.4 escalation; mutually
+exclusive with the superseded §16.4 short re-anchor) shipped behind `ULTRA_S16_WARM_HANDOFF`,
+**default OFF** (env unset → `getenv` null). So bare `./ultra_gui` ran the fix DISABLED; only the
+test harness (which forced the flag on) exercised it. The fix was validated but not live.
+
+**What changed:** Removed the flag entirely — warm-hand-off is now unconditional. The 7 gate
+sites (`streaming_encoder.cpp` light preamble, `streaming_sync_acquisition.cpp` §16.4 escalation,
+`streaming_ofdm_decode.cpp` BURST_HEADER-consume keeper, `modem_mode.cpp` short-reanchor force-off,
+`streaming_burst_interleave.cpp` force-WARM refresh, `sync_controller.cpp` s16-override +
+position-gating + skip-short-lead) all became unconditional (the `flag &&` guards were always true
+on the ON path, so removal is byte-identical to ON). Dropped `<cstdlib>` from sync_controller.cpp;
+removed the now-no-op flag from `tools/gui_qso_scenario.sh`; updated `MODEM_INFRASTRUCTURE_MAP.md`
+(env-knob register → REMOVED/codified; warm-handoff stage 🟡→🟢).
+
+**Why correct:** All session GUI gates ran with the flag ON (harness default), so always-on ==
+the well-tested path. Decision logged (user, 2026-05-31): skip a fresh multi-seed ON/OFF sweep
+(trust the §16 dev history), remove the flag (no opt-out kept). Bonus A/B confirms ON ≥ OFF at the
+floor: OFF QPSK R1/4 AWGN@10 = 340 bps / 554 s, ON = 380 bps / 493 s (both PASS CRC-clean) — the
+light preamble saves airtime.
+
+**Test:** cmake build clean; ctest red-set byte-identical to baseline 16ead4d (4 FAILED
+{Protocol, StreamingConfig, StreamingBufferPolicy, StreamingDecoderToneBurstMonitor} + 2 Disabled).
+GUI floor + Good@12 + no-regress (warm path) re-confirmed on the promoted code.
+
+---
+
 ## 2026-05-31: A3 follow-up — delete dead OFDM TX + RX-LTS differential code
 
 **What changed:** with the OFDM RX differential demod gone (A3, `19f3df8`), its TX and

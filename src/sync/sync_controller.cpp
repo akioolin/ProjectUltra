@@ -2,8 +2,6 @@
 
 #include "ultra/logging.hpp"   // LOG_MODEM (shared logging header; src/sync already uses LOG_SYNC)
 
-#include <cstdlib>             // std::getenv / std::atoi (ULTRA_S16_WARM_HANDOFF gate)
-
 // SyncController — SCAFFOLD implementation (2026-05-31).
 //
 // These are intentionally inert stubs: the object exists and compiles, but it is NOT yet wired
@@ -182,11 +180,9 @@ LightSyncAcceptance SyncController::acceptLightSyncCandidate(
     // anchor every group (streaming_burst_interleave.cpp end-of-group),
     // which keeps the contiguous data correlating high (~0.91); this
     // override should rarely fire once that anchor is used.
-    const char* s16_env = std::getenv("ULTRA_S16_WARM_HANDOFF");
-    const bool s16_warm_handoff = s16_env && std::atoi(s16_env) != 0;
     constexpr float kS16WarmHandoffMinCorrelation = 0.55f;
     const bool s16_warm_override =
-        s16_warm_handoff && is_coherent &&
+        is_coherent &&
         derivePhase() == frame_arrival_policy::WarmSyncPhase::WARM &&
         sync_decision.rejected && detector_found &&
         correlation >= kS16WarmHandoffMinCorrelation;
@@ -226,8 +222,8 @@ LightSyncAcceptance SyncController::acceptLightSyncCandidate(
     // next_expected. Engages ONLY when the normal correlation path already failed, so
     // higher-SNR locks (which find the true peak) are byte-identical. On a misprediction
     // the frame's LDPC simply fails → existing NACK / §16.4 full-chirp escalation handles
-    // it. Flag-gated by ULTRA_S16_WARM_HANDOFF.
-    if (s16_warm_handoff && !sync_decision.found &&
+    // it. (§16.8 warm-handoff — now unconditional; promoted past ULTRA_S16_WARM_HANDOFF.)
+    if (!sync_decision.found &&
         derivePhase() == frame_arrival_policy::WarmSyncPhase::WARM &&
         thresholds.narrow_expected_window &&
         next_expected_frame_sample_valid_ &&
@@ -286,19 +282,14 @@ frame_arrival_policy::WarmSearchWindowPlan SyncController::planWarmSearch(
     size_t short_reanchor_lead_samples, size_t total_fed, size_t oldest_abs,
     bool search_floor_valid, size_t search_floor_abs, size_t correlation_abs,
     size_t symbol_samples, size_t correlation_step) {
-    // §16.8 step 2 v2: when warm-handoff is on AND we're in
-    // post-BURST_HEADER warm state, the data group uses pure light
-    // LTS (no short-chirp re-anchor lead). The legacy code shifts
-    // the search expectation BACK by short_reanchor_lead_samples
-    // because the adaptive short re-anchor preamble starts with a
-    // short chirp at -150ms; in our warm-handoff path the LTS is
-    // exactly at next_expected_frame_sample_ with no lead. The
-    // shift-back put correlation_pos_ PAST the search window's end
-    // → !current_step_intersects → warm_plan.active stayed false.
-    const char* s16_env_w = std::getenv("ULTRA_S16_WARM_HANDOFF");
-    const bool s16_warm_handoff_w = s16_env_w && std::atoi(s16_env_w) != 0;
+    // §16.8 step 2 v2: in post-BURST_HEADER warm state, the data group uses pure light
+    // LTS (no short-chirp re-anchor lead). The legacy code shifts the search expectation
+    // BACK by short_reanchor_lead_samples because the adaptive short re-anchor preamble
+    // starts with a short chirp at -150ms; in the warm-handoff path the LTS is exactly at
+    // next_expected_frame_sample_ with no lead. The shift-back put correlation_pos_ PAST the
+    // search window's end → !current_step_intersects → warm_plan.active stayed false.
+    // (Now unconditional — promoted past ULTRA_S16_WARM_HANDOFF.)
     const bool s16_skip_short_lead =
-        s16_warm_handoff_w &&
         derivePhase() == frame_arrival_policy::WarmSyncPhase::WARM &&
         !expect_full_ofdm_anchor_;
     const size_t expected_sync_search_sample =

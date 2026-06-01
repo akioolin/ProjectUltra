@@ -21,7 +21,6 @@
 #   tools/gui_qso_scenario.sh --channel good --snr-db 20 --seed N \
 #       --expect-rate R3/4 --expect-mod QPSK --file-kb 21 --out /tmp/X
 # Override any knob inline, e.g.:
-#   ULTRA_S16_WARM_HANDOFF=0 tools/gui_qso_scenario.sh ...   (full-chirp baseline)
 #   ULTRA_LOCK_RATE=0 tools/gui_qso_scenario.sh ...          (adaptive rate ladder)
 # Multi-seed: loop this script over seeds (it is the single test harness).
 set -euo pipefail
@@ -127,21 +126,19 @@ done
 # ---------------------------------------------------------------------------
 # Warm-handoff burst-transport config — the "warm thing" this harness exists to
 # test (§16 warm-handoff + one-way burst transport, 2026-05-29). Baked in here so
-# the single harness IS the warm test: a bare run no longer falls back to the
-# full-chirp-every-group reliability baseline (warm OFF). Each is an OVERRIDABLE
-# default (`:=`), so the caller can still flip any of them — e.g.
-#   ULTRA_S16_WARM_HANDOFF=0  (measure the full-chirp baseline)
+# Each is an OVERRIDABLE default (`:=`), so the caller can still flip any of them — e.g.
 #   ULTRA_LOCK_RATE=0         (let the adaptive rate ladder drop/promote)
 #   ULTRA_FORCE_DATA_MOD=8PSK ULTRA_FORCE_DATA_RATE=R3_4  (force a rung)
+# (warm-sync hand-off is now the PRODUCTION DEFAULT — the ULTRA_S16_WARM_HANDOFF flag was
+#  removed 2026-05-31; there is no longer a full-chirp-every-group OFF baseline to select.)
 : "${ULTRA_ADAPTIVE_RATE:=1}"        ; export ULTRA_ADAPTIVE_RATE
 : "${ULTRA_LOCK_RATE:=1}"            ; export ULTRA_LOCK_RATE
-: "${ULTRA_S16_WARM_HANDOFF:=1}"     ; export ULTRA_S16_WARM_HANDOFF
 # No longer pinned (now code defaults, reconciled 2026-05-30):
 #   ULTRA_BURST_TRANSPORT  -> default ON (the production OFDM file path)
 #   ULTRA_LDPC_Z           -> derived by the traffic-class policy (81 for file bursts)
 #   ULTRA_BURST_GROUP_FRAMES -> default 6 (mask-width-matched)
 # All three remain overridable via env (=0 / value); shown in the echo only when set.
-echo "config: ADAPTIVE_RATE=$ULTRA_ADAPTIVE_RATE LOCK_RATE=$ULTRA_LOCK_RATE S16_WARM_HANDOFF=$ULTRA_S16_WARM_HANDOFF${ULTRA_BURST_TRANSPORT:+ BURST_TRANSPORT=$ULTRA_BURST_TRANSPORT}${ULTRA_LDPC_Z:+ LDPC_Z=$ULTRA_LDPC_Z}${ULTRA_BURST_GROUP_FRAMES:+ GROUP_FRAMES=$ULTRA_BURST_GROUP_FRAMES}${ULTRA_FORCE_DATA_MOD:+ FORCE_MOD=$ULTRA_FORCE_DATA_MOD}${ULTRA_FORCE_DATA_RATE:+ FORCE_RATE=$ULTRA_FORCE_DATA_RATE}"
+echo "config: ADAPTIVE_RATE=$ULTRA_ADAPTIVE_RATE LOCK_RATE=$ULTRA_LOCK_RATE${ULTRA_BURST_TRANSPORT:+ BURST_TRANSPORT=$ULTRA_BURST_TRANSPORT}${ULTRA_LDPC_Z:+ LDPC_Z=$ULTRA_LDPC_Z}${ULTRA_BURST_GROUP_FRAMES:+ GROUP_FRAMES=$ULTRA_BURST_GROUP_FRAMES}${ULTRA_FORCE_DATA_MOD:+ FORCE_MOD=$ULTRA_FORCE_DATA_MOD}${ULTRA_FORCE_DATA_RATE:+ FORCE_RATE=$ULTRA_FORCE_DATA_RATE}"
 
 if [[ -z "$OUT" ]]; then
   stamp="$(date +%Y%m%d_%H%M%S)"

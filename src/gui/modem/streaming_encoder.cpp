@@ -633,16 +633,11 @@ std::vector<float> StreamingEncoder::encodeBurstLight(const std::vector<Bytes>& 
             // change in streaming_ofdm_decode.cpp (skip the reset, keep
             // expect_full_ofdm_anchor_=false), the BURST_HEADER itself
             // becomes the per-group anchor — no need for a second full
-            // chirp+LTS right after it. Saves ~1.4 s per group. Knob is
-            // default-OFF until multi-seed Good@20 verifies; expected
-            // benefit ~+16% goodput on the §17.1 baseline (1.60 → ~1.85
-            // kbps). Falls back to full anchor on the first group of a
-            // session (force_first_full_preamble) regardless of knob.
-            const char* warm_handoff_env =
-                std::getenv("ULTRA_S16_WARM_HANDOFF");
-            const bool warm_handoff_enabled =
-                warm_handoff_env && std::atoi(warm_handoff_env) != 0;
-            if (warm_handoff_enabled && !force_first_full_preamble) {
+            // chirp+LTS right after it. Saves ~1.4 s per group. Now UNCONDITIONAL
+            // (promoted past ULTRA_S16_WARM_HANDOFF, 2026-05-31; ~+16% goodput on the
+            // §17.1 baseline). Falls back to full anchor on the first group of a
+            // session (force_first_full_preamble).
+            if (!force_first_full_preamble) {
                 preamble = connectedDataPreambleForFrame(/*allow_short_reanchor=*/false);
                 LOG_MODEM(INFO,
                           "[%s] s16-warm-handoff: light LTS preamble for burst group-start "

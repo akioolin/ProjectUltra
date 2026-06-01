@@ -20,10 +20,12 @@
 // 0.90/0.52/0.50 correlation thresholds apply only to COLD / RE_ACQUIRE. MC-DPSK needs no special
 // case: supportsDataPreamble()==false ⇒ the WARM "light LTS" call falls back to the full chirp.
 //
-// MIGRATION STATUS: SCAFFOLD (2026-05-31). Declarations + state only; not yet wired into the
-// decode loop. Subsequent flag-gated steps move the state in, wrap the existing logic byte-
-// identical, then land the WARM position+LDPC acceptance, then delete the dead paths. The whole
-// migration is behind ULTRA_S16_WARM_HANDOFF until the AWGN@10 floor probe + no-regress pass.
+// MIGRATION STATUS (2026-05-31): the controller OWNS the sync state + the policy decisions
+// (acceptLightSyncCandidate / planWarmSearch / the noteFrameArrival* + seedArrivalAfterDelay
+// transition machine + the derived phase). The decode loop still calls these from
+// StreamingDecoder::searchForSync (detect()/reportFrameOutcome() remain the future single-entry
+// dispatch). The warm-handoff path is now the PRODUCTION DEFAULT — promoted past the
+// ULTRA_S16_WARM_HANDOFF flag (removed 2026-05-31, validated on the AWGN floor + Good@12 + no-regress).
 
 #include "waveform/waveform_interface.hpp"   // IWaveform, SyncResult, SampleSpan
 #include "protocol/frame_v2.hpp"             // protocol::WaveformMode

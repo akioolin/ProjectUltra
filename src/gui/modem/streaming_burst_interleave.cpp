@@ -681,12 +681,10 @@ void StreamingDecoder::finalizeBurstGroup() {
         // deactivated → the next group's acquisition collapsed → ~90s stall or a dead
         // transfer. An acquired-but-decode-failed group keeps warm sync HEALTHY; only
         // a genuinely un-acquired group (no chirp found — never reaches here) cools it.
-        const char* s16_env_g =
-            std::getenv("ULTRA_S16_WARM_HANDOFF");
-        const bool s16_warm_handoff_g =
-            s16_env_g && std::atoi(s16_env_g) != 0;
+        // Refresh warm-sync state on every delivered group — now unconditional
+        // (promoted past ULTRA_S16_WARM_HANDOFF).
         {
-            if (s16_warm_handoff_g) {
+            {
                 // Force WARM: misses=0 + active=true ⇒ derivePhase()==WARM (§7 collapse —
                 // verified byte-identical: active was always already true here, so this is
                 // the faithful translation of the old `warm_sync_phase_ = WARM`).
