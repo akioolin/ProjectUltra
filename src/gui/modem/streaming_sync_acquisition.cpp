@@ -261,74 +261,15 @@ void StreamingDecoder::searchForSync() {
         light_sync_candidate_window_samples);
 
     if (use_light_search) {
-        float known_cfo = sync_controller_.last_cfo_.load();
-
-        if (!found) {
-            found = waveform_->detectDataSync(
-                SampleSpan(search_buffer.data(), search_buffer.size()),
-                sync_result, known_cfo, CORR_DETECT_THRESHOLD);
-
-            // §7.4 chunk B: the connected-data light-LTS acceptance decision
-            // (evaluateLightSyncCandidate + the ULTRA_S16_WARM_HANDOFF warm-override
-            // + the WARM position-gating) now lives on the controller, which owns the
-            // sync_reject_streak_. The decoder still ran the detector above; here it
-            // hands the candidate + window geometry to the controller and applies the
-            // returned position gate to sync_result.
-            auto accept = sync_controller_.acceptLightSyncCandidate(
-                found, sync_result.correlation, is_coherent, connected_,
-                known_cfo, search_start, search_buffer.size(),
-                light_sync_thresholds);
-            if (accept.position_gated) {
-                sync_result.start_sample =
-                    static_cast<int>(accept.position_gate_abs - search_start);
-                sync_result.cfo_hz = accept.position_gate_cfo;
-                sync_result.correlation = 0.0f;  // position-gated, not correlation-found
-            }
-            found = accept.found;
-
-            if (found) {
-                if (light_sync_thresholds.narrow_expected_window) {
-                    LOG_MODEM(INFO,
-                              "[%s] DATA sync detected in warm window (known CFO=%.1f Hz, corr=%.2f, threshold=%.2f, window_reduction=%.2fx)",
-                              log_prefix_.c_str(), known_cfo, sync_result.correlation,
-                              light_sync_thresholds.min_confidence,
-                              light_sync_thresholds.false_positive_window_reduction);
-                } else {
-                    LOG_MODEM(INFO, "[%s] DATA sync detected (training only, known CFO=%.1f Hz, corr=%.2f)",
-                              log_prefix_.c_str(), known_cfo, sync_result.correlation);
-                }
-                if (data_sync_accepted_callback_) {
-                    data_sync_accepted_callback_(sync_result.correlation);
-                }
-            }
-
-            // §16.4 escalation: warm/light group-start acquisition has failed
-            // for many consecutive candidates. On a coherent-QPSK Good@20
-            // transfer the next group's light LTS sits below the 0.90 gate
-            // (Obs 1.6.b) or simply isn't where warm predicted, so bravo
-            // rejects forever and the transfer stalls. Arm a full chirp+LTS
-            // re-anchor: the sender pays for a chirp on its RESEND
-            // (force_full_preamble), and the full-anchor search path also
-            // applies the 0.52 differential threshold that can admit a
-            // still-arriving first-attempt light frame. sync_controller_.expect_full_ofdm_anchor_
-            // is cleared again after the next clean data decode, so this is a
-            // one-group escalation, not a permanent revert to per-group chirps.
-            // §16.4 escalation — now unconditional (promoted past ULTRA_S16_WARM_HANDOFF).
-            if (!found && connected_ &&
-                mode_ == protocol::WaveformMode::OFDM_CHIRP &&
-                !sync_controller_.expect_full_ofdm_anchor_ &&
-                sync_controller_.sync_reject_streak_ >=
-                    signal_policy::kConnectedOFDMReanchorEscalateStreak) {
-                std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
-                sync_controller_.expect_full_ofdm_anchor_ = true;
-                sync_controller_.sync_reject_streak_ = 0;
-                LOG_MODEM(INFO,
-                    "[%s] §16.4 escalation: %llu light rejects at group boundary; "
-                    "arming full chirp+LTS re-anchor for sender RESEND",
-                    log_prefix_.c_str(),
-                    static_cast<unsigned long long>(
-                        signal_policy::kConnectedOFDMReanchorEscalateStreak));
-            }
+        // §7 C3 Phase 3b: the connected-data light-LTS DETECTION + acceptance + §16.4 escalation
+        // now lives on the controller (detectConnectedLightSync); the decoder passes its current
+        // waveform + the search window and fires the data-sync-accepted callback on success.
+        found = sync_controller_.detectConnectedLightSync(
+            waveform_.get(), search_buffer.data(), search_buffer.size(), search_start,
+            is_coherent, connected_, mode_, light_sync_thresholds, CORR_DETECT_THRESHOLD,
+            sync_result);
+        if (found && data_sync_accepted_callback_) {
+            data_sync_accepted_callback_(sync_result.correlation);
         }
         // Short re-anchor fallback is enabled only by negotiated fading class;
         // otherwise the connected path remains LTS-only.

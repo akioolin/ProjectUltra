@@ -172,6 +172,19 @@ public:
         size_t min_search, size_t data_symbol_samples, bool audio_active,
         size_t correlation_step, float corr_noise_threshold);
 
+    // The connected-data light-LTS DETECTION + acceptance + §16.4 re-anchor escalation (§7 C3
+    // Phase 3b; moved verbatim from the `if (use_light_search)` branch of searchForSync). Runs the
+    // passed waveform's detectDataSync, applies acceptLightSyncCandidate's verdict + the WARM
+    // position-gate to sync_result, and — on a sustained reject streak — arms the full-chirp
+    // re-anchor (owns expect_full_ofdm_anchor_ / sync_reject_streak_). The waveform is PASSED (the
+    // decoder's current one — the controller's own member could be stale across dual-listen swaps).
+    // Returns found; the decoder fires its data_sync_accepted_callback_ when found.
+    bool detectConnectedLightSync(
+        IWaveform* waveform, const float* search_data, size_t search_len, size_t search_start,
+        bool is_coherent, bool connected, protocol::WaveformMode mode,
+        const signal_policy::LightSyncThresholds& thresholds, float corr_detect_threshold,
+        SyncResult& sync_result);
+
     void setLogPrefix(const std::string& prefix) { log_prefix_ = prefix; }
 
     // The live 3-state acquisition mode (§7 target machine), DERIVED from the same

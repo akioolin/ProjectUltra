@@ -586,5 +586,68 @@ SearchWindowResult SyncController::acquireSearchWindow(
     return result;
 }
 
+// §7 C3 Phase 3b: the connected-data light-LTS dispatch, moved verbatim from the
+// `if (use_light_search)` branch of StreamingDecoder::searchForSync. Same detector call, same
+// acceptance + position-gate, same logs + §16.4 escalation, same order → byte-identical; only the
+// data_sync_accepted_callback_ fire stays in the decoder (this returns found, the decoder fires it).
+bool SyncController::detectConnectedLightSync(
+    IWaveform* waveform, const float* search_data, size_t search_len, size_t search_start,
+    bool is_coherent, bool connected, protocol::WaveformMode mode,
+    const signal_policy::LightSyncThresholds& thresholds, float corr_detect_threshold,
+    SyncResult& sync_result) {
+    float known_cfo = last_cfo_.load();
+
+    bool found = waveform->detectDataSync(
+        SampleSpan(search_data, search_len),
+        sync_result, known_cfo, corr_detect_threshold);
+
+    auto accept = acceptLightSyncCandidate(
+        found, sync_result.correlation, is_coherent, connected,
+        known_cfo, search_start, search_len,
+        thresholds);
+    if (accept.position_gated) {
+        sync_result.start_sample =
+            static_cast<int>(accept.position_gate_abs - search_start);
+        sync_result.cfo_hz = accept.position_gate_cfo;
+        sync_result.correlation = 0.0f;  // position-gated, not correlation-found
+    }
+    found = accept.found;
+
+    if (found) {
+        if (thresholds.narrow_expected_window) {
+            LOG_MODEM(INFO,
+                      "[%s] DATA sync detected in warm window (known CFO=%.1f Hz, corr=%.2f, threshold=%.2f, window_reduction=%.2fx)",
+                      log_prefix_.c_str(), known_cfo, sync_result.correlation,
+                      thresholds.min_confidence,
+                      thresholds.false_positive_window_reduction);
+        } else {
+            LOG_MODEM(INFO, "[%s] DATA sync detected (training only, known CFO=%.1f Hz, corr=%.2f)",
+                      log_prefix_.c_str(), known_cfo, sync_result.correlation);
+        }
+    }
+
+    // §16.4 escalation: warm/light group-start acquisition has failed for many consecutive
+    // candidates; arm a full chirp+LTS re-anchor (the sender pays for a chirp on its RESEND).
+    // expect_full_ofdm_anchor_ is cleared again after the next clean data decode — a one-group
+    // escalation, not a permanent revert to per-group chirps. Unconditional (promoted past
+    // ULTRA_S16_WARM_HANDOFF).
+    if (!found && connected &&
+        mode == protocol::WaveformMode::OFDM_CHIRP &&
+        !expect_full_ofdm_anchor_ &&
+        sync_reject_streak_ >= signal_policy::kConnectedOFDMReanchorEscalateStreak) {
+        std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+        expect_full_ofdm_anchor_ = true;
+        sync_reject_streak_ = 0;
+        LOG_MODEM(INFO,
+            "[%s] §16.4 escalation: %llu light rejects at group boundary; "
+            "arming full chirp+LTS re-anchor for sender RESEND",
+            log_prefix_.c_str(),
+            static_cast<unsigned long long>(
+                signal_policy::kConnectedOFDMReanchorEscalateStreak));
+    }
+
+    return found;
+}
+
 }  // namespace sync
 }  // namespace ultra
