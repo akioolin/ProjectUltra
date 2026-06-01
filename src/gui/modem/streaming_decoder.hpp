@@ -174,8 +174,10 @@ class StreamingDecoder {
 public:
     // Robust-Low MC-DPSK (2048 sps DBPSK) can produce 30s+ multi-CW data
     // frames; the streaming ring must hold the full frame plus scheduler slack.
-    static constexpr size_t kDefaultBufferSamples = 2400000; // 50 seconds at 48 kHz
-    static constexpr size_t kMinimumBufferSamples = 120000;  // Must cover largest sync search window
+    // Source of truth lives in SyncRingBuffer (§7 C3); aliased here for the public ctor
+    // default arg + external refs (e.g. test_streaming_config).
+    static constexpr size_t kDefaultBufferSamples = sync::SyncRingBuffer::kDefaultBufferSamples;
+    static constexpr size_t kMinimumBufferSamples = sync::SyncRingBuffer::kMinimumBufferSamples;
 
     explicit StreamingDecoder(size_t buffer_capacity_samples = kDefaultBufferSamples);
     ~StreamingDecoder();
@@ -400,7 +402,7 @@ public:
 
     // Get number of samples in buffer
     size_t samplesInBuffer() const;
-    size_t bufferCapacitySamples() const { return buffer_capacity_samples_; }
+    size_t bufferCapacitySamples() const { return ring_.buffer_capacity_samples_; }
 
     // Check if waveform is synchronized
     bool isSynced() const;
@@ -548,18 +550,8 @@ private:
     void noteFrameArrivalSuccessLocked(size_t frame_start_abs, size_t frame_end_abs);
     void noteFrameArrivalSyncMissLocked();
 
-    // Ring/absolute sample helpers. Call only while buffer_mutex_ is held.
-    size_t wrapCustomRingIndexLocked(size_t value) const;
-    size_t wrapRingIndexLocked(size_t value) const {
-        if (uses_default_buffer_capacity_) {
-            return value % kDefaultBufferSamples;
-        }
-        return wrapCustomRingIndexLocked(value);
-    }
-    void writeSamplesToRingLocked(const float* samples, size_t count);
-    size_t ringPosToAbsoluteLocked(size_t ring_pos) const;
-    size_t absoluteToRingLocked(size_t abs_pos) const;
-    void setSearchFloorLocked(size_t abs_pos);
+    // Ring/absolute sample helpers moved to SyncRingBuffer (ring_.*); call only while
+    // ring_.buffer_mutex_ is held.
 
     // Burst interleave accumulation
     enum class BurstFrameResult {
@@ -610,16 +602,9 @@ private:
     // STATE
     // ========================================================================
 
-    // Circular buffer for audio samples.
-    // §7 C3 (Phase 1): the ring cluster is migrating into the cohesive SyncRingBuffer below.
-    // Members still declared here are not yet moved; once empty this whole block collapses to ring_.
+    // Circular audio ring + its write/search cursors, search floor, noise floor, and the
+    // buffer_mutex_/data_cv_ pair — all owned by SyncRingBuffer (§7 C3). Reached as ring_.*.
     sync::SyncRingBuffer ring_;
-    std::vector<float> buffer_;
-    const size_t buffer_capacity_samples_ = kDefaultBufferSamples;
-    const bool uses_default_buffer_capacity_ = true;
-    size_t write_pos_ = 0;          // Next position to write (only pointer we need)
-    mutable std::mutex buffer_mutex_;
-    std::condition_variable data_cv_;
 
     // Continuous correlation state machine (like real receivers)
     DecoderState state_ = DecoderState::SEARCHING;
@@ -630,8 +615,6 @@ private:
     float sync_correlation_ = 0.0f;   // LTS/light-sync confidence for current frame
     float sync_gap_error_samples_ = 0.0f; // Dual-chirp timing error for current frame
     size_t last_decoded_sync_pos_ = SIZE_MAX;  // Last successfully decoded sync position (to prevent duplicates)
-    size_t search_floor_abs_ = 0;     // Earliest absolute sample search may inspect
-    bool search_floor_abs_valid_ = false;
     bool sync_from_warm_timed_window_ = false;
     bool sync_from_full_anchor_fallback_ = false;
     // warm_sync_phase_ + last_frame_* relocated into sync_controller_ (§7.4 shell-move A1,
@@ -727,7 +710,6 @@ private:
 
     // Logging
     std::string log_prefix_ = "StreamingDecoder";
-    size_t total_fed_ = 0;      // Total samples fed (per-instance)
     int feed_iter_ = 0;         // Feed counter (per-instance)
 
     // Burst mode continuation (OFDM only)

@@ -154,37 +154,6 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
     }
 }
 
-size_t StreamingDecoder::ringPosToAbsoluteLocked(size_t ring_pos) const {
-    if (total_fed_ < buffer_capacity_samples_) {
-        return ring_pos;
-    }
-
-    const size_t oldest_abs = total_fed_ - buffer_capacity_samples_;
-    const size_t oldest_pos = write_pos_;
-    const size_t offset = (ring_pos >= oldest_pos)
-        ? (ring_pos - oldest_pos)
-        : (buffer_capacity_samples_ - oldest_pos + ring_pos);
-    return oldest_abs + offset;
-}
-
-size_t StreamingDecoder::absoluteToRingLocked(size_t abs_pos) const {
-    if (total_fed_ < buffer_capacity_samples_) {
-        return wrapRingIndexLocked(std::min(abs_pos, total_fed_));
-    }
-
-    const size_t oldest_abs = total_fed_ - buffer_capacity_samples_;
-    abs_pos = std::clamp(abs_pos, oldest_abs, total_fed_);
-    return wrapRingIndexLocked(write_pos_ + (abs_pos - oldest_abs));
-}
-
-void StreamingDecoder::setSearchFloorLocked(size_t abs_pos) {
-    const size_t oldest_abs = (total_fed_ > buffer_capacity_samples_)
-        ? (total_fed_ - buffer_capacity_samples_)
-        : 0;
-    search_floor_abs_ = std::clamp(abs_pos, oldest_abs, total_fed_);
-    search_floor_abs_valid_ = true;
-}
-
 void StreamingDecoder::searchForSync() {
     if (!waveform_) return;
 
@@ -225,23 +194,23 @@ void StreamingDecoder::searchForSync() {
     size_t warm_narrow_candidate_span_samples = 0;
 
     {
-        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
 
-        float audio_sec = total_fed_ / 48000.0f;
+        float audio_sec = ring_.total_fed_ / 48000.0f;
 
         // Initialize ring_.correlation_pos_ if needed
-        if (ring_.correlation_pos_ == 0 && total_fed_ > 0) {
-            if (total_fed_ < buffer_capacity_samples_) {
+        if (ring_.correlation_pos_ == 0 && ring_.total_fed_ > 0) {
+            if (ring_.total_fed_ < ring_.buffer_capacity_samples_) {
                 ring_.correlation_pos_ = 0;
             } else {
-                ring_.correlation_pos_ = write_pos_;
+                ring_.correlation_pos_ = ring_.write_pos_;
             }
         }
 
-        const size_t oldest_abs = (total_fed_ > buffer_capacity_samples_)
-            ? (total_fed_ - buffer_capacity_samples_)
+        const size_t oldest_abs = (ring_.total_fed_ > ring_.buffer_capacity_samples_)
+            ? (ring_.total_fed_ - ring_.buffer_capacity_samples_)
             : 0;
-        const size_t correlation_abs = ringPosToAbsoluteLocked(ring_.correlation_pos_);
+        const size_t correlation_abs = ring_.ringPosToAbsoluteLocked(ring_.correlation_pos_);
         // §7.4 chunk-B tail: the warm-window PLANNING decision (s16 skip-short-lead +
         // expected search anchor + planWarmSearchWindow + short-reanchor-lead adjustment)
         // now lives on the controller, which owns the warm-sync state it reads. The decoder
@@ -249,10 +218,10 @@ void StreamingDecoder::searchForSync() {
         // the wait / activate / extraction below from the returned plan.
         auto warm_plan = sync_controller_.planWarmSearch(
             use_light_search,
-            total_fed_,
+            ring_.total_fed_,
             oldest_abs,
-            search_floor_abs_valid_,
-            search_floor_abs_,
+            ring_.search_floor_abs_valid_,
+            ring_.search_floor_abs_,
             correlation_abs,
             data_symbol_samples,
             CORRELATION_STEP);
@@ -262,7 +231,7 @@ void StreamingDecoder::searchForSync() {
             if (++warm_wait_count % 50 == 1) {
                 LOG_MODEM(INFO,
                           "[%s] warm-sync: wait for expected window, need_abs=%zu total=%zu expected=%zu",
-                          log_prefix_.c_str(), warm_plan.search_end_abs, total_fed_,
+                          log_prefix_.c_str(), warm_plan.search_end_abs, ring_.total_fed_,
                           sync_controller_.next_expected_frame_sample_);
             }
             return;
@@ -274,7 +243,7 @@ void StreamingDecoder::searchForSync() {
             warm_narrow_end_abs = warm_plan.search_end_abs;
             warm_narrow_candidate_span_samples = warm_plan.candidate_span_samples;
             min_search = warm_plan.search_size_samples;
-            search_start = absoluteToRingLocked(warm_plan.search_start_abs);
+            search_start = ring_.absoluteToRingLocked(warm_plan.search_start_abs);
         }
         // §16.8 step 2 v2 diagnostic: log warm-window decision once per
         // search invocation. ULTRA_S16_TRACE_WARM_WINDOW=1 enables.
@@ -297,7 +266,7 @@ void StreamingDecoder::searchForSync() {
                     sync_controller_.frame_arrival_confidence_,
                     sync_controller_.consecutive_sync_misses_,
                     use_light_search ? 1 : 0,
-                    static_cast<unsigned long long>(total_fed_),
+                    static_cast<unsigned long long>(ring_.total_fed_),
                     static_cast<unsigned long long>(warm_plan.search_start_abs),
                     static_cast<unsigned long long>(warm_plan.search_end_abs),
                     warm_plan.candidate_span_samples);
@@ -305,7 +274,7 @@ void StreamingDecoder::searchForSync() {
         }
 
         // Need minimum samples before we can search
-        if (total_fed_ < min_search) {
+        if (ring_.total_fed_ < min_search) {
             static int skip_count = 0;
             if (++skip_count % 50 == 1)
                 LOG_MODEM(INFO, "[%s] searchForSync: SKIP not enough samples, total=%.2fs, need=%.2fs",
@@ -315,10 +284,10 @@ void StreamingDecoder::searchForSync() {
 
         // Calculate unsearched data available
         size_t unsearched;
-        if (write_pos_ >= ring_.correlation_pos_) {
-            unsearched = write_pos_ - ring_.correlation_pos_;
+        if (ring_.write_pos_ >= ring_.correlation_pos_) {
+            unsearched = ring_.write_pos_ - ring_.correlation_pos_;
         } else {
-            unsearched = buffer_capacity_samples_ - ring_.correlation_pos_ + write_pos_;
+            unsearched = ring_.buffer_capacity_samples_ - ring_.correlation_pos_ + ring_.write_pos_;
         }
 
         // Need at least min_search unsearched samples
@@ -338,7 +307,7 @@ void StreamingDecoder::searchForSync() {
         const size_t rms_probe_pos = used_warm_timed_window ? search_start : ring_.correlation_pos_;
         float rms = 0.0f;
         for (size_t i = 0; i < 1000; i++) {
-            float s = buffer_[wrapRingIndexLocked(rms_probe_pos + i)];
+            float s = ring_.buffer_[ring_.wrapRingIndexLocked(rms_probe_pos + i)];
             rms += s * s;
         }
         rms = std::sqrt(rms / 1000.0f);
@@ -353,7 +322,7 @@ void StreamingDecoder::searchForSync() {
                  off += RMS_SLICE_SAMPLES) {
                 float slice_sum = 0.0f;
                 for (size_t i = 0; i < RMS_SLICE_SAMPLES; ++i) {
-                    float s = buffer_[wrapRingIndexLocked(rms_probe_pos + off + i)];
+                    float s = ring_.buffer_[ring_.wrapRingIndexLocked(rms_probe_pos + off + i)];
                     slice_sum += s * s;
                 }
                 max_slice_rms = std::max(
@@ -405,7 +374,7 @@ void StreamingDecoder::searchForSync() {
             if (++rms_skip_count % 10 == 1)
                 LOG_MODEM(INFO, "[%s] searchForSync: RMS skip, rms=%.4f < %.3f, corr_pos=%zu, total=%.2fs",
                           log_prefix_.c_str(), rms, rms_gate, ring_.correlation_pos_, audio_sec);
-            ring_.correlation_pos_ = wrapRingIndexLocked(ring_.correlation_pos_ + CORRELATION_STEP);
+            ring_.correlation_pos_ = ring_.wrapRingIndexLocked(ring_.correlation_pos_ + CORRELATION_STEP);
             return;
         }
 
@@ -425,12 +394,12 @@ void StreamingDecoder::searchForSync() {
         if (!used_warm_timed_window) {
             if (ring_.correlation_pos_ >= SEARCH_BACKTRACK) {
                 search_start = ring_.correlation_pos_ - SEARCH_BACKTRACK;
-            } else if (total_fed_ < buffer_capacity_samples_) {
+            } else if (ring_.total_fed_ < ring_.buffer_capacity_samples_) {
                 // Buffer hasn't wrapped yet, start from beginning
                 search_start = 0;
             } else {
                 // Buffer wrapped, handle underflow
-                search_start = wrapRingIndexLocked(buffer_capacity_samples_ + ring_.correlation_pos_ - SEARCH_BACKTRACK);
+                search_start = ring_.wrapRingIndexLocked(ring_.buffer_capacity_samples_ + ring_.correlation_pos_ - SEARCH_BACKTRACK);
             }
         }
 
@@ -439,36 +408,36 @@ void StreamingDecoder::searchForSync() {
         // just-decoded 1-CW control frame can find false LTS-like peaks; those
         // false locks then escalate into expensive fixed-frame LDPC attempts and delay
         // real ACKs long enough to trigger ARQ retransmission storms.
-        if (!used_warm_timed_window && search_floor_abs_valid_) {
-            if (search_floor_abs_ < oldest_abs) {
-                search_floor_abs_ = oldest_abs;
+        if (!used_warm_timed_window && ring_.search_floor_abs_valid_) {
+            if (ring_.search_floor_abs_ < oldest_abs) {
+                ring_.search_floor_abs_ = oldest_abs;
             }
-            if (search_floor_abs_ > total_fed_) {
-                search_floor_abs_ = total_fed_;
+            if (ring_.search_floor_abs_ > ring_.total_fed_) {
+                ring_.search_floor_abs_ = ring_.total_fed_;
             }
 
-            size_t search_start_abs = ringPosToAbsoluteLocked(search_start);
-            if (search_start_abs < search_floor_abs_) {
-                if (total_fed_ - search_floor_abs_ < min_search) {
+            size_t search_start_abs = ring_.ringPosToAbsoluteLocked(search_start);
+            if (search_start_abs < ring_.search_floor_abs_) {
+                if (ring_.total_fed_ - ring_.search_floor_abs_ < min_search) {
                     static int floor_wait_count = 0;
                     if (++floor_wait_count % 50 == 1) {
                         LOG_MODEM(INFO,
                                   "[%s] searchForSync: SKIP post-frame floor, available=%zu < min=%zu",
-                                  log_prefix_.c_str(), total_fed_ - search_floor_abs_, min_search);
+                                  log_prefix_.c_str(), ring_.total_fed_ - ring_.search_floor_abs_, min_search);
                     }
                     return;
                 }
-                search_start = absoluteToRingLocked(search_floor_abs_);
+                search_start = ring_.absoluteToRingLocked(ring_.search_floor_abs_);
             }
         }
 
         search_buffer.resize(min_search);
         for (size_t i = 0; i < min_search; i++) {
-            search_buffer[i] = buffer_[wrapRingIndexLocked(search_start + i)];
+            search_buffer[i] = ring_.buffer_[ring_.wrapRingIndexLocked(search_start + i)];
         }
 
         if (used_warm_timed_window) {
-            ring_.correlation_pos_ = absoluteToRingLocked(warm_narrow_end_abs);
+            ring_.correlation_pos_ = ring_.absoluteToRingLocked(warm_narrow_end_abs);
             LOG_MODEM(INFO,
                       "[%s] warm-sync: %s LTS search expected=%zu start_abs=%zu size=%zu confidence=%.2f",
                       log_prefix_.c_str(),
@@ -478,7 +447,7 @@ void StreamingDecoder::searchForSync() {
                       sync_controller_.frame_arrival_confidence_);
         } else {
             // Advance by small step (100ms = 4800 samples) for accurate detection
-            ring_.correlation_pos_ = wrapRingIndexLocked(ring_.correlation_pos_ + CORRELATION_STEP);
+            ring_.correlation_pos_ = ring_.wrapRingIndexLocked(ring_.correlation_pos_ + CORRELATION_STEP);
         }
     }
 
@@ -600,7 +569,7 @@ void StreamingDecoder::searchForSync() {
                 !sync_controller_.expect_full_ofdm_anchor_ &&
                 sync_controller_.sync_reject_streak_ >=
                     signal_policy::kConnectedOFDMReanchorEscalateStreak) {
-                std::lock_guard<std::mutex> lock(buffer_mutex_);
+                std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
                 sync_controller_.expect_full_ofdm_anchor_ = true;
                 sync_controller_.sync_reject_streak_ = 0;
                 LOG_MODEM(INFO,
@@ -640,7 +609,7 @@ void StreamingDecoder::searchForSync() {
                     "[%s] s16-phase5: detectSync MISS chirp_peak=%.3f (thr=%.2f) "
                     "corr_pos=%zu total=%zu search_start=%zu min_search=%zu",
                     log_prefix_.c_str(), sync_result.correlation,
-                    CORR_DETECT_THRESHOLD, ring_.correlation_pos_, total_fed_,
+                    CORR_DETECT_THRESHOLD, ring_.correlation_pos_, ring_.total_fed_,
                     search_start, min_search);
             }
             SyncResult light_sync_result;
@@ -737,17 +706,17 @@ void StreamingDecoder::searchForSync() {
         return;
     }
 
-    // Log timing: total_fed_ tells us how much audio has arrived
-    float audio_sec = total_fed_ / 48000.0f;
+    // Log timing: ring_.total_fed_ tells us how much audio has arrived
+    float audio_sec = ring_.total_fed_ / 48000.0f;
     if (found || search_ms > 100) {  // Log if found or if search was slow
         LOG_MODEM(INFO, "[%s] searchForSync: audio=%.2fs, search=%.1fms, found=%d, corr=%.3f",
                   log_prefix_.c_str(), audio_sec, search_ms, found ? 1 : 0, sync_result.correlation);
     }
 
     if (found) {
-        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
 
-        sync_position_ = wrapRingIndexLocked(search_start + sync_result.start_sample);
+        sync_position_ = ring_.wrapRingIndexLocked(search_start + sync_result.start_sample);
 
         const bool timing_cfo_genie =
             qam16GenieTimingCfoEnabled() &&
@@ -757,9 +726,9 @@ void StreamingDecoder::searchForSync() {
             used_warm_timed_window &&
             sync_controller_.next_expected_frame_sample_valid_;
         if (timing_cfo_genie) {
-            const size_t detected_abs = ringPosToAbsoluteLocked(sync_position_);
+            const size_t detected_abs = ring_.ringPosToAbsoluteLocked(sync_position_);
             const size_t expected_abs = sync_controller_.next_expected_frame_sample_;
-            sync_position_ = absoluteToRingLocked(expected_abs);
+            sync_position_ = ring_.absoluteToRingLocked(expected_abs);
             LOG_MODEM(WARN,
                       "[%s] DIAG genie-timing-cfo: overriding light-LTS sync "
                       "detected_abs=%zu expected_abs=%zu delta=%lld corr=%.3f",
@@ -775,20 +744,20 @@ void StreamingDecoder::searchForSync() {
         if (last_decoded_sync_pos_ != SIZE_MAX) {
             size_t d1 = (sync_position_ >= last_decoded_sync_pos_)
                 ? (sync_position_ - last_decoded_sync_pos_)
-                : (buffer_capacity_samples_ - last_decoded_sync_pos_ + sync_position_);
-            size_t dist = std::min(d1, buffer_capacity_samples_ - d1);
+                : (ring_.buffer_capacity_samples_ - last_decoded_sync_pos_ + sync_position_);
+            size_t dist = std::min(d1, ring_.buffer_capacity_samples_ - d1);
             if (dist < 200) {
                 LOG_MODEM(INFO, "[%s] Anti-replay: duplicate sync at pos=%zu (prev=%zu), skipping",
                           log_prefix_.c_str(), sync_position_, last_decoded_sync_pos_);
                 constexpr size_t SEARCH_BACKTRACK = 9600;
-                ring_.correlation_pos_ = wrapRingIndexLocked(sync_position_ + SEARCH_BACKTRACK + CORRELATION_STEP);
+                ring_.correlation_pos_ = ring_.wrapRingIndexLocked(sync_position_ + SEARCH_BACKTRACK + CORRELATION_STEP);
                 return;
             }
         }
 
         // Provide absolute training position to waveform so initial CFO phase is aligned.
         if (waveform_) {
-            const size_t abs_training_pos = ringPosToAbsoluteLocked(sync_position_);
+            const size_t abs_training_pos = ring_.ringPosToAbsoluteLocked(sync_position_);
             waveform_->setAbsoluteTrainingPosition(abs_training_pos);
         }
 
@@ -837,14 +806,14 @@ void StreamingDecoder::searchForSync() {
         // past the decoded frame when we return to SEARCHING.
         //
         // Previously, this code jumped ring_.correlation_pos_ past the entire frame,
-        // which could place it AHEAD of write_pos_ in circular buffer space
+        // which could place it AHEAD of ring_.write_pos_ in circular buffer space
         // (especially after buffer wraps). This caused feedAudio()'s overflow
         // check to compute unsearched ≈ buffer_size, triggering spurious
         // buffer overflows and data loss during async decode.
     } else if (!search_buffer.empty()) {
         if (used_warm_timed_window) {
-            std::lock_guard<std::mutex> lock(buffer_mutex_);
-            setSearchFloorLocked(warm_narrow_end_abs);
+            std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+            ring_.setSearchFloorLocked(warm_narrow_end_abs);
             noteFrameArrivalSyncMissLocked();
             LOG_MODEM(INFO,
                       "[%s] warm-sync: no LTS in %s expected window, misses=%d confidence=%.2f",
@@ -867,12 +836,12 @@ void StreamingDecoder::checkIfReadyToDecode() {
     // How many samples do we have from sync position?
     size_t available;
     {
-        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
 
-        if (write_pos_ >= sync_position_) {
-            available = write_pos_ - sync_position_;
+        if (ring_.write_pos_ >= sync_position_) {
+            available = ring_.write_pos_ - sync_position_;
         } else {
-            available = buffer_capacity_samples_ - sync_position_ + write_pos_;
+            available = ring_.buffer_capacity_samples_ - sync_position_ + ring_.write_pos_;
         }
     }
 
