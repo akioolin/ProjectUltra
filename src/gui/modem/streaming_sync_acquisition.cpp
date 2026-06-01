@@ -267,7 +267,7 @@ void StreamingDecoder::searchForSync() {
         found = sync_controller_.detectConnectedLightSync(
             waveform_.get(), search_buffer.data(), search_buffer.size(), search_start,
             is_coherent, connected_, mode_, light_sync_thresholds, CORR_DETECT_THRESHOLD,
-            sync_result);
+            cfo_tracker_.tracked(), sync_result);
         if (found && data_sync_accepted_callback_) {
             data_sync_accepted_callback_(sync_result.correlation);
         }
@@ -294,7 +294,8 @@ void StreamingDecoder::searchForSync() {
             // data-sync-accepted callback on success.
             auto fb = sync_controller_.detectFullAnchorFallback(
                 waveform_.get(), search_buffer.data(), search_buffer.size(), search_start,
-                min_search, is_narrowband, connected_, CORR_DETECT_THRESHOLD, sync_result);
+                min_search, is_narrowband, connected_, CORR_DETECT_THRESHOLD,
+                cfo_tracker_.tracked(), sync_result);
             if (fb.found) {
                 found = true;
                 used_full_anchor_fallback = fb.used_full_anchor_fallback;
@@ -408,7 +409,7 @@ void StreamingDecoder::searchForSync() {
         // by multipath (peaks shift differently for up vs down chirp).
         // When connected, trust the established CFO and limit drift.
         float new_cfo = sync_result.cfo_hz;
-        float known_cfo = sync_controller_.last_cfo_.load();
+        float known_cfo = cfo_tracker_.tracked();
 
         const auto cfo_decision = signal_policy::limitConnectedCFODrift(
             connected_, new_cfo, known_cfo);
@@ -437,7 +438,7 @@ void StreamingDecoder::searchForSync() {
         state_ = DecoderState::SYNC_FOUND;
 
         last_snr_.store(sync_snr_);
-        sync_controller_.last_cfo_.store(sync_cfo_);
+        cfo_tracker_.store(sync_cfo_);
 
         LOG_MODEM(INFO, "[%s] SYNC at pos=%zu, CFO=%.1f Hz, SNR=%.1f dB (%s)",
                   log_prefix_.c_str(), sync_position_, sync_cfo_, sync_snr_,

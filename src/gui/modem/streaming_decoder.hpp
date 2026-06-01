@@ -45,6 +45,7 @@
 #include "sync/frame_arrival_policy.hpp"
 #include "sync/sync_controller.hpp"   // SyncController — sync/z state owner (refactor §7)
 #include "sync/sync_ring_buffer.hpp"  // SyncRingBuffer — the shared audio ring (refactor §7 C3)
+#include "sync/cfo_tracker.hpp"       // CFOTracker — the tracked-CFO state (refactor §7 C-CFO)
 #include <vector>
 #include <queue>
 #include <mutex>
@@ -340,10 +341,10 @@ public:
     float getLastSyncQualityDb() const { return last_snr_.load(); }
 
     // Get last measured CFO
-    float getLastCFO() const { return sync_controller_.last_cfo_.load(); }
+    float getLastCFO() const { return cfo_tracker_.tracked(); }
 
     // Set known CFO (for testing or when CFO is known from other source)
-    void setKnownCFO(float cfo_hz) { sync_controller_.last_cfo_.store(cfo_hz); }
+    void setKnownCFO(float cfo_hz) { cfo_tracker_.store(cfo_hz); }
 
     // Expect the next connected OFDM frame to carry full chirp+LTS preamble.
     // This bootstraps OFDM-specific timing after an MC-DPSK handshake.
@@ -625,6 +626,10 @@ private:
     // cadence gap. Eventually owns the SyncMode, prediction, confidence, misses,
     // last_cfo, and the burst declared-z.
     sync::SyncController sync_controller_;
+    // §7 C-CFO-1: the tracked RX carrier-frequency-offset, relocated out of SyncController (it was
+    // last_cfo_). The chirp/LTS/pilot estimators feed it; acquisition reads it as the known CFO and
+    // the per-frame demod feedback stores the pilot-corrected value back (the feedback invariant).
+    sync::CFOTracker cfo_tracker_;
 
     // Reset generation counter - incremented on reset(), checked after slow operations
     // to detect if state was reset mid-operation (e.g., during correlation)

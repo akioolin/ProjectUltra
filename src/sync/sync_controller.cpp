@@ -24,7 +24,7 @@ void SyncController::reset(protocol::WaveformMode mode, IWaveform* wf, bool is_c
     waveform_mode_ = mode;
     waveform_ = wf;
     is_coherent_ = is_coherent;
-    last_cfo_ = 0.0f;
+    // (§7 C-CFO-1: last_cfo_ relocated to the decoder's CFOTracker, reset via cfo_tracker_.reset().)
     frame_arrival_confidence_ = 0.0f;
     consecutive_sync_misses_ = 0;
     next_expected_frame_sample_ = 0;
@@ -620,8 +620,8 @@ bool SyncController::detectConnectedLightSync(
     IWaveform* waveform, const float* search_data, size_t search_len, size_t search_start,
     bool is_coherent, bool connected, protocol::WaveformMode mode,
     const signal_policy::LightSyncThresholds& thresholds, float corr_detect_threshold,
-    SyncResult& sync_result) {
-    float known_cfo = last_cfo_.load();
+    float known_cfo, SyncResult& sync_result) {
+    // known_cfo is the tracked CFO (§7 C-CFO-1: passed in from the decoder's CFOTracker).
 
     bool found = waveform->detectDataSync(
         SampleSpan(search_data, search_len),
@@ -682,7 +682,7 @@ bool SyncController::detectConnectedLightSync(
 FullAnchorFallbackResult SyncController::detectFullAnchorFallback(
     IWaveform* waveform, const float* search_data, size_t search_len, size_t search_start,
     size_t min_search, bool is_narrowband, bool connected, float corr_detect_threshold,
-    SyncResult& sync_result) {
+    float known_cfo, SyncResult& sync_result) {
     FullAnchorFallbackResult result;
 
     // §16 Phase 5 instrumentation: detectSync failed to lock the descriptor chirp.
@@ -699,7 +699,7 @@ FullAnchorFallbackResult SyncController::detectFullAnchorFallback(
             search_start, min_search);
     }
     SyncResult light_sync_result;
-    const float known_cfo = last_cfo_.load();
+    // known_cfo is the tracked CFO (§7 C-CFO-1: passed in from the decoder's CFOTracker).
     const bool light_found = waveform->detectDataSync(
         SampleSpan(search_data, search_len),
         light_sync_result, known_cfo, corr_detect_threshold);

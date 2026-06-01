@@ -200,7 +200,7 @@ public:
         IWaveform* waveform, const float* search_data, size_t search_len, size_t search_start,
         bool is_coherent, bool connected, protocol::WaveformMode mode,
         const signal_policy::LightSyncThresholds& thresholds, float corr_detect_threshold,
-        SyncResult& sync_result);
+        float known_cfo, SyncResult& sync_result);
 
     // The connected full-anchor light-LTS fallback (§7 C3 Phase 3b; moved verbatim from the
     // `if (!found && use_full_ofdm_anchor_search)` block of searchForSync's else branch). Runs after
@@ -212,7 +212,7 @@ public:
     FullAnchorFallbackResult detectFullAnchorFallback(
         IWaveform* waveform, const float* search_data, size_t search_len, size_t search_start,
         size_t min_search, bool is_narrowband, bool connected, float corr_detect_threshold,
-        SyncResult& sync_result);
+        float known_cfo, SyncResult& sync_result);
 
     void setLogPrefix(const std::string& prefix) { log_prefix_ = prefix; }
 
@@ -230,7 +230,6 @@ public:
         return SyncMode::COLD;
     }
     bool isWarm() const { return mode() == SyncMode::WARM; }
-    float lastCfo() const { return last_cfo_.load(); }
 
     // Phase-D prep: the 4-state WarmSyncPhase is provably a PURE FUNCTION of (warm_sync_active_,
     // consecutive_sync_misses_) — the transitions set it via phaseAfterSyncMiss(misses)/
@@ -312,9 +311,9 @@ public:
     // derivePhase() — proven equivalent (test_sync_controller_phase + Good@12 0-mismatch run), so
     // it can never drift from the miss counter. The decoder reads it via derivePhase().
     // (last-frame arrival memory is now PRIVATE — see below — read via the lastFrame* accessors.)
-    // CFO acquisition state (§7.7#1). ATOMIC — touched by RX + control threads; the
-    // CFO feedback loop (.load()/.store()) routes through here.
-    std::atomic<float> last_cfo_{0.0f};
+    // (§7 C-CFO-1: the CFO acquisition state `last_cfo_` was relocated OUT of here into the decoder's
+    // sync::CFOTracker. The detect* methods take the known CFO as a param now; the chirp seed +
+    // pilot feedback store route through CFOTracker.)
 
     // Burst z-state (§7.6): the transfer's declared LDPC-lifting descriptor. Latch
     // PERSISTS across the transfer (a fade-lost descriptor still decodes at the
