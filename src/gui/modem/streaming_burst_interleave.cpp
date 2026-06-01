@@ -427,10 +427,9 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
 
     // Update CFO from pilot tracking (add pre-correction amount back)
     const float residual_cfo = waveform_->estimatedCFO();
-    const auto cfo_update = signal_policy::combinePilotCFO(
+    const auto cfo_update = cfo_tracker_.ingestPilotResidual(
         burst_pre_cfo, residual_cfo, burst_cfo_, /*clamp_drift=*/true);
     burst_cfo_ = cfo_update.accepted_cfo;
-    cfo_tracker_.store(cfo_update.accepted_cfo);
     last_fading_index_.store(waveform_->getFadingIndex());
 
     burst_soft_buffer_.push_back(std::move(soft));

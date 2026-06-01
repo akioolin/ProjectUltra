@@ -1200,9 +1200,8 @@ void StreamingDecoder::decodeCurrentFrame() {
         populateDecodeMetrics(first_metrics, is_ofdm, residual_cfo);
         burst_metric_templates_.push_back(first_metrics);
         const float current_cfo = cfo_tracker_.tracked();
-        const auto cfo_update = signal_policy::combinePilotCFO(
+        const auto cfo_update = cfo_tracker_.ingestPilotResidual(
             pre_correction_cfo_, residual_cfo, current_cfo, /*clamp_drift=*/true);
-        cfo_tracker_.store(cfo_update.accepted_cfo);
         burst_cfo_ = cfo_update.accepted_cfo;
         beginBurstDiagnosticsGroup(frame_sync_abs, burst_soft_buffer_.back(),
                                    sampleRMS(frame_buffer),
@@ -1236,7 +1235,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         // Add back the pre-correction amount to get the true total CFO.
         const float residual_cfo = waveform_->estimatedCFO();
         const float current_cfo = cfo_tracker_.tracked();
-        const auto cfo_update = signal_policy::combinePilotCFO(
+        const auto cfo_update = cfo_tracker_.ingestPilotResidual(
             pre_correction_cfo_, residual_cfo, current_cfo, connected_);
         if (cfo_update.clamped) {
             LOG_MODEM(WARN, "[%s] Pilot CFO drift clamped: %.2f → %.2f Hz (drift=%.2f, max=%.1f)",
@@ -1249,7 +1248,6 @@ void StreamingDecoder::decodeCurrentFrame() {
                       log_prefix_.c_str(), current_cfo, cfo_update.accepted_cfo,
                       pre_correction_cfo_, residual_cfo);
         }
-        cfo_tracker_.store(cfo_update.accepted_cfo);
         sync_cfo_ = cfo_update.accepted_cfo;
     }
 
@@ -1651,9 +1649,8 @@ void StreamingDecoder::decodeCurrentFrame() {
                 // Keep CFO tracking consistent with the accepted retry candidate.
                 const float residual_cfo = waveform_->estimatedCFO();
                 const float current_cfo = cfo_tracker_.tracked();
-                const auto cfo_update = signal_policy::combinePilotCFO(
+                const auto cfo_update = cfo_tracker_.ingestPilotResidual(
                     pre_correction_cfo_, residual_cfo, current_cfo, connected_);
-                cfo_tracker_.store(cfo_update.accepted_cfo);
                 sync_cfo_ = cfo_update.accepted_cfo;
 
                 sync_position_ = retry_sync;
@@ -1939,10 +1936,9 @@ void StreamingDecoder::decodeCurrentFrame() {
 
             // Update CFO from pilot tracking
             const float residual_cfo = waveform_->estimatedCFO();
-            const auto cfo_update = signal_policy::combinePilotCFO(
+            const auto cfo_update = cfo_tracker_.ingestPilotResidual(
                 0.0f, residual_cfo, sync_cfo_, /*clamp_drift=*/true);
             sync_cfo_ = cfo_update.accepted_cfo;
-            cfo_tracker_.store(cfo_update.accepted_cfo);
 
             // Decode the continuation block
             DecodeResult next_result = decodeFrame(next_soft_bits, sync_snr_, sync_cfo_);

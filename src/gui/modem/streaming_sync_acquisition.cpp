@@ -408,17 +408,10 @@ void StreamingDecoder::searchForSync() {
         // CFO handling: On fading channels, chirp-based CFO measurement can be corrupted
         // by multipath (peaks shift differently for up vs down chirp).
         // When connected, trust the established CFO and limit drift.
-        float new_cfo = sync_result.cfo_hz;
-        float known_cfo = cfo_tracker_.tracked();
-
-        const auto cfo_decision = signal_policy::limitConnectedCFODrift(
-            connected_, new_cfo, known_cfo);
-        if (cfo_decision.clamped) {
-            LOG_MODEM(INFO, "[%s] CFO sanity: measured=%.1f, known=%.1f, diff=%.1f > %.1f, using known",
-                      log_prefix_.c_str(), new_cfo, known_cfo, cfo_decision.diff_hz,
-                      signal_policy::kMaxSyncCFODriftHz);
-            new_cfo = cfo_decision.accepted_cfo;  // Trust established CFO over noisy measurement
-        }
+        // §7 C-CFO-2: the chirp-CFO drift clamp now lives on the tracker — it reads its own tracked
+        // value as `known` and logs the clamp. On fading a multipath-distorted chirp can read a false
+        // CFO, so the per-frame drift is clamped to the established estimate.
+        float new_cfo = cfo_tracker_.seedFromChirp(sync_result.cfo_hz, connected_, log_prefix_.c_str());
         if (timing_cfo_genie) {
             LOG_MODEM(WARN,
                       "[%s] DIAG genie-timing-cfo: forcing sync CFO %.2f Hz -> 0.00 Hz",

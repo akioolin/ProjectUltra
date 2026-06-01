@@ -1,5 +1,7 @@
 #pragma once
 
+#include "sync/signal_policy.hpp"   // PilotCFOUpdate (return type of ingestPilotResidual)
+
 #include <atomic>
 
 namespace ultra {
@@ -28,6 +30,20 @@ class CFOTracker {
 public:
     // The current tracked CFO (Hz). Read on acquisition (as the known CFO) and before each demod.
     float tracked() const { return cfo_.load(); }
+
+    // §7 C-CFO-2: arbitrate a chirp-measured CFO against the tracked value. On a connected link a
+    // multipath-distorted chirp can read a false CFO, so the per-frame drift is clamped to the
+    // established estimate (signal_policy::limitConnectedCFODrift, logging the clamp). Returns the
+    // accepted CFO; does NOT store (the caller applies any diag override, then stores the final value).
+    float seedFromChirp(float measured_cfo, bool connected, const char* log_prefix) const;
+
+    // §7 C-CFO-3: ingest the per-frame pilot/LTS residual — combine it (and the pre-correction that
+    // was applied to the demod) with `current` via signal_policy::combinePilotCFO, then STORE the
+    // accepted result as the new tracked CFO (this IS the feedback invariant — centralized here so a
+    // call site can't drop the store). Returns the full update so the caller does its own logging /
+    // sync_cfo_ / burst_cfo_ tail. `current` is the per-site baseline (tracked()/burst_cfo_/sync_cfo_).
+    signal_policy::PilotCFOUpdate ingestPilotResidual(
+        float pre_correction, float residual, float current, bool clamp_drift);
 
     // Store a CFO value — the chirp seed, or the post-demod pilot-corrected feedback (the invariant).
     // ATOMIC: touched by the RX + control threads, exactly like the former SyncController::last_cfo_.
