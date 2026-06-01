@@ -256,7 +256,7 @@ void StreamingDecoder::searchForSync() {
     const size_t light_sync_candidate_window_samples =
         used_warm_narrow_window ? warm_narrow_candidate_span_samples : LIGHT_SEARCH_SIZE;
     const auto light_sync_thresholds = signal_policy::lightSyncThresholds(
-        is_coherent, is_narrowband, connected_, sync_controller_.sync_reject_streak_,
+        is_coherent, is_narrowband, connected_, sync_controller_.syncRejectStreak(),
         used_warm_narrow_window, LIGHT_SEARCH_SIZE,
         light_sync_candidate_window_samples);
 
@@ -462,8 +462,8 @@ void StreamingDecoder::searchForSync() {
                       "[%s] warm-sync: no LTS in %s expected window, misses=%d confidence=%.2f",
                       log_prefix_.c_str(),
                       used_warm_narrow_window ? "narrow" : "degraded",
-                      sync_controller_.consecutive_sync_misses_,
-                      sync_controller_.frame_arrival_confidence_);
+                      sync_controller_.consecutiveSyncMisses(),
+                      sync_controller_.frameArrivalConfidence());
         }
         const size_t idle_count = std::min(search_buffer.size(), CORRELATION_STEP);
         observeIdleNoiseCandidate(search_buffer.data(), idle_count);

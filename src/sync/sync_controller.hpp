@@ -127,6 +127,13 @@ public:
     // A new burst group started (fresh descriptor anchor expected); seeds the WARM cadence.
     void noteGroupBoundary(size_t descriptor_end_abs, size_t expected_frame_gap_samples);
 
+    // A burst group was DELIVERED as a unit (descriptor chirp acquired + all frames demodulated —
+    // i.e. warm sync WORKED — even if LDPC then failed the DATA and ARQ resends). Refreshes warm-sync
+    // to HEALTHY (force WARM: misses=0 + active, confidence ≥0.5) and re-arms the full-chirp anchor for
+    // the NEXT group's BURST_HEADER. The owner of these four warm-sync-prediction fields (§7 C4: moved
+    // verbatim from streaming_burst_interleave.cpp so the decoder stops writing them directly).
+    void noteGroupDelivered(uint32_t group_seq);
+
     // --- arrival-tracking transition logic (§7.4 A2; moved verbatim from StreamingDecoder) ---
     // These own the warm-sync phase machine + cadence prediction + confidence. They fold into
     // detect()/reportFrameOutcome() in the detect-dispatch chunk; kept as a faithful trio for now.
@@ -269,6 +276,16 @@ public:
     bool    lastFrameArrivalErrorValid() const { return last_frame_arrival_error_valid_; }
     int64_t lastFrameArrivalErrorSamples() const { return last_frame_arrival_error_samples_; }
 
+    // Warm-sync prediction state (§7 C4: now PRIVATE — the decoder no longer writes these; it reads
+    // them via these getters for diagnostics/snapshot, and mutates them only through the controller's
+    // methods: noteGroupDelivered (force-WARM refresh), noteFrameArrival* (the cadence machine), and
+    // clearRejectStreak (clear the COLD/RE_ACQUIRE light-sync reject counter on a fresh lock/reset)).
+    uint64_t syncRejectStreak() const { return sync_reject_streak_; }
+    int      consecutiveSyncMisses() const { return consecutive_sync_misses_; }
+    float    frameArrivalConfidence() const { return frame_arrival_confidence_; }
+    bool     warmSyncActive() const { return warm_sync_active_; }
+    void     clearRejectStreak() { sync_reject_streak_ = 0; }
+
     // --- TRANSITIONAL PUBLIC shell-move state (refactor §7.5#1) -------------------
     // These were StreamingDecoder members; relocated here verbatim so the (still-
     // external) orchestration reads/writes them as `sync_controller_.<name>`. They
@@ -282,16 +299,13 @@ public:
     // detect() absorbs the search loop (Phase 3). Constructed first (the ctor sizes it from capacity).
     SyncRingBuffer ring_;
 
-    uint64_t sync_reject_streak_ = 0;   // consecutive COLD/RE_ACQUIRE light-sync rejects
+    // (§7 C4: sync_reject_streak_ / frame_arrival_confidence_ / consecutive_sync_misses_ /
+    // warm_sync_active_ moved to PRIVATE below — the decoder no longer writes them.)
     size_t   next_expected_frame_sample_ = 0;        // predicted next-frame absolute sample
     bool     next_expected_frame_sample_valid_ = false;
-    float    frame_arrival_confidence_ = 0.0f;
-    int      consecutive_sync_misses_ = 0;
     size_t   expected_frame_gap_samples_ = 0;        // cadence gap (§1.2 never-set bug)
     bool     expect_full_ofdm_anchor_ = false;       // force a full chirp on the next anchor
-                                                     // (the 11-flip flag; becomes SyncMode in Phase D)
-    bool     warm_sync_active_ = false;              // in the warm (locked+predicting) regime
-                                                     // (collapses into SyncMode::WARM in Phase D)
+                                                     // (the 11-flip flag; toggled by the burst decode path)
 
     // §7 Phase-D collapse (2026-05-31): the stored 4-state warm_sync_phase_ field is GONE.
     // The phase is now DERIVED on demand from (warm_sync_active_, consecutive_sync_misses_) via
@@ -310,6 +324,15 @@ public:
     protocol::v2::ControlFrame::BurstHeaderInfo last_burst_descriptor_{};
 
 private:
+    // Warm-sync prediction state (§7 C4 RE-PRIVATIZED: the decoder no longer writes these — it reads
+    // them via syncRejectStreak()/consecutiveSyncMisses()/frameArrivalConfidence()/warmSyncActive(),
+    // and mutates them only through noteGroupDelivered / the noteFrameArrival* cadence machine /
+    // clearRejectStreak). The controller's own methods + derivePhase() use them directly.
+    uint64_t sync_reject_streak_ = 0;        // consecutive COLD/RE_ACQUIRE light-sync rejects
+    float    frame_arrival_confidence_ = 0.0f;
+    int      consecutive_sync_misses_ = 0;
+    bool     warm_sync_active_ = false;      // in the warm (locked+predicting) regime
+
     // Last-frame arrival memory (RE-PRIVATIZED §7.4: written only by noteFrameArrival* /
     // seedArrivalAfterDelay / resetFrameArrivalTracking; read by the decoder via the lastFrame*
     // accessors). NOT Phase-D-collapsing — this is genuine arrival state the controller keeps.

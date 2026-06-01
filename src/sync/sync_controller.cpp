@@ -56,6 +56,32 @@ void SyncController::noteGroupBoundary(size_t descriptor_end_abs, size_t expecte
     next_expected_frame_sample_valid_ = true;
 }
 
+// §7 C4: moved verbatim from streaming_burst_interleave.cpp (the "refresh warm-sync state on every
+// delivered group" block) so the decoder no longer writes consecutive_sync_misses_ /
+// frame_arrival_confidence_ / warm_sync_active_ / expect_full_ofdm_anchor_ directly. Same writes,
+// same log, same order → byte-identical.
+void SyncController::noteGroupDelivered(uint32_t group_seq) {
+    // Force WARM: misses=0 + active=true ⇒ derivePhase()==WARM (§7 collapse — verified byte-identical:
+    // active was always already true here, the faithful translation of the old warm_sync_phase_=WARM).
+    consecutive_sync_misses_ = 0;
+    frame_arrival_confidence_ = std::max(frame_arrival_confidence_, 0.5f);
+    warm_sync_active_ = true;
+    // 2026-05-29 ROOT-CAUSE FIX: re-arm the full-chirp anchor expectation for the NEXT group's
+    // BURST_HEADER. The encoder emits a chirp-bearing descriptor at the start of EVERY burst group, so
+    // a precise chirp timing anchor is always on the wire. Without re-arming, warm-handoff left this
+    // false after the first group, so bravo searched LIGHT-only, its data LTS correlated at ~0.54 (vs
+    // ~0.91 right after a chirp anchor), forcing low-threshold marginal decodes + retries. The
+    // BURST_HEADER-consume keeper then flips this back to false so the CONTIGUOUS group data stays light.
+    expect_full_ofdm_anchor_ = true;
+    LOG_MODEM(INFO,
+        "[%s] s16-warm-handoff: refreshed warm-sync state on "
+        "delivered group_seq=%u (conf=%.2f phase=WARM misses=0, "
+        "re-armed descriptor chirp anchor for next group)",
+        log_prefix_.c_str(),
+        static_cast<unsigned>(group_seq),
+        frame_arrival_confidence_);
+}
+
 // --- arrival-tracking transition logic (§7.4 A2) ---------------------------------------------
 // Moved verbatim from StreamingDecoder::{resetFrameArrivalTrackingLocked, noteFrameArrival
 // SuccessLocked (minus the connected_/OFDM_CHIRP guard, which stays in the decoder forwarder),

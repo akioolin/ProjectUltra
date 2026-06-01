@@ -831,8 +831,8 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 log_prefix_.c_str(),
                                 static_cast<unsigned>(last_burst_group_seq_),
                                 arrival_policy::warmSyncPhaseName(sync_controller_.derivePhase()),
-                                sync_controller_.consecutive_sync_misses_,
-                                sync_controller_.frame_arrival_confidence_,
+                                sync_controller_.consecutiveSyncMisses(),
+                                sync_controller_.frameArrivalConfidence(),
                                 sync_controller_.last_cfo_.load(),
                                 static_cast<unsigned long long>(sync_controller_.next_expected_frame_sample_),
                                 static_cast<unsigned long long>(sync_controller_.lastFrameEndSample()),
@@ -857,7 +857,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                             const bool warm_handoff_eligible =
                                 sync_controller_.derivePhase() ==
                                     arrival_policy::WarmSyncPhase::WARM &&
-                                sync_controller_.frame_arrival_confidence_ > 0.0f;
+                                sync_controller_.frameArrivalConfidence() > 0.0f;
                             {
                                 std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
                                 if (warm_handoff_eligible) {
@@ -865,7 +865,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                                     // window past the BURST_HEADER so the data
                                     // group is picked up next.
                                     sync_controller_.expect_full_ofdm_anchor_ = false;
-                                    sync_controller_.sync_reject_streak_ = 0;
+                                    sync_controller_.clearRejectStreak();
                                     sync_controller_.ring_.correlation_pos_ = sync_controller_.ring_.wrapRingIndexLocked(
                                         sync_position_ + frame_len);
                                     sync_controller_.ring_.setSearchFloorLocked(frame_sync_abs + frame_len);
@@ -874,7 +874,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                                     sync_from_warm_timed_window_ = false;
                                     resetFrameArrivalTrackingLocked();
                                     sync_controller_.expect_full_ofdm_anchor_ = true;
-                                    sync_controller_.sync_reject_streak_ = 0;
+                                    sync_controller_.clearRejectStreak();
                                     sync_controller_.ring_.correlation_pos_ = sync_controller_.ring_.wrapRingIndexLocked(
                                         sync_position_ + frame_len);
                                     sync_controller_.ring_.setSearchFloorLocked(frame_sync_abs + frame_len);
@@ -888,7 +888,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                                     "expecting light LTS for data group",
                                     log_prefix_.c_str(),
                                     arrival_policy::warmSyncPhaseName(sync_controller_.derivePhase()),
-                                    sync_controller_.frame_arrival_confidence_,
+                                    sync_controller_.frameArrivalConfidence(),
                                     sync_controller_.last_cfo_.load());
                             }
                             // §16.8 step 1: post-reset snapshot. What did we throw
@@ -898,8 +898,8 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 "conf=%.2f last_cfo=%.2f expect_full_anchor=%d",
                                 log_prefix_.c_str(),
                                 arrival_policy::warmSyncPhaseName(sync_controller_.derivePhase()),
-                                sync_controller_.consecutive_sync_misses_,
-                                sync_controller_.frame_arrival_confidence_,
+                                sync_controller_.consecutiveSyncMisses(),
+                                sync_controller_.frameArrivalConfidence(),
                                 sync_controller_.last_cfo_.load(),
                                 sync_controller_.expect_full_ofdm_anchor_ ? 1 : 0);
                             state_ = DecoderState::SEARCHING;
@@ -953,7 +953,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                             if (file_cancel_control) {
                                 resetFrameArrivalTrackingLocked();
                                 sync_controller_.expect_full_ofdm_anchor_ = true;
-                                sync_controller_.sync_reject_streak_ = 0;
+                                sync_controller_.clearRejectStreak();
                             } else {
                                 // A pending connected full-anchor request is for
                                 // the next DATA burst after a turn/control
@@ -1841,7 +1841,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         if (mode_ == protocol::WaveformMode::OFDM_CHIRP) {
             resetFrameArrivalTrackingLocked();
             sync_controller_.expect_full_ofdm_anchor_ = true;
-            sync_controller_.sync_reject_streak_ = 0;
+            sync_controller_.clearRejectStreak();
             LOG_MODEM(WARN,
                       "[%s] OFDM decode failed with 0/%d CWs; forcing full chirp+LTS re-anchor",
                       log_prefix_.c_str(), result.codewords_failed);

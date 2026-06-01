@@ -541,7 +541,7 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
 
     state_ = DecoderState::SEARCHING;
     pending_total_cw_ = 0;
-    sync_controller_.sync_reject_streak_ = 0;
+    sync_controller_.clearRejectStreak();
     sync_controller_.expect_full_ofdm_anchor_ = false;
     sync_from_warm_timed_window_ = false;
     resetFrameArrivalTrackingLocked();
@@ -588,7 +588,7 @@ void StreamingDecoder::expectFullOFDMAnchorOnce() {
     }
 
     sync_controller_.expect_full_ofdm_anchor_ = true;
-    sync_controller_.sync_reject_streak_ = 0;
+    sync_controller_.clearRejectStreak();
     LOG_MODEM(INFO, "StreamingDecoder: expecting full OFDM chirp+LTS timing anchor");
 }
 
@@ -747,7 +747,7 @@ void StreamingDecoder::applyPendingConnectedOFDMMode() {
 
     state_ = DecoderState::SEARCHING;
     pending_total_cw_ = 0;
-    sync_controller_.sync_reject_streak_ = 0;
+    sync_controller_.clearRejectStreak();
     sync_controller_.expect_full_ofdm_anchor_ = preserve_full_anchor;
     sync_from_warm_timed_window_ = false;
     resetFrameArrivalTrackingLocked();
@@ -859,12 +859,12 @@ StreamingDecoder::FrameArrivalSnapshot StreamingDecoder::getFrameArrivalSnapshot
     std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
 
     FrameArrivalSnapshot snapshot;
-    snapshot.warm_sync_active = sync_controller_.warm_sync_active_;
+    snapshot.warm_sync_active = sync_controller_.warmSyncActive();
     snapshot.warm_sync_phase = sync_controller_.derivePhase();
     snapshot.has_prediction = sync_controller_.next_expected_frame_sample_valid_;
     snapshot.next_expected_frame_sample = sync_controller_.next_expected_frame_sample_;
-    snapshot.frame_arrival_confidence = sync_controller_.frame_arrival_confidence_;
-    snapshot.consecutive_sync_misses = sync_controller_.consecutive_sync_misses_;
+    snapshot.frame_arrival_confidence = sync_controller_.frameArrivalConfidence();
+    snapshot.consecutive_sync_misses = sync_controller_.consecutiveSyncMisses();
     snapshot.has_last_frame = sync_controller_.lastFrameArrivalValid();
     snapshot.last_frame_start_sample = sync_controller_.lastFrameStartSample();
     snapshot.last_frame_end_sample = sync_controller_.lastFrameEndSample();
@@ -1026,7 +1026,7 @@ void StreamingDecoder::reset() {
     sync_controller_.ring_.total_fed_ = 0;
     feed_iter_ = 0;
     overflow_events_ = 0;
-    sync_controller_.sync_reject_streak_ = 0;
+    sync_controller_.clearRejectStreak();
     sync_controller_.expect_full_ofdm_anchor_ = false;
     sync_from_warm_timed_window_ = false;
     resetFrameArrivalTrackingLocked();

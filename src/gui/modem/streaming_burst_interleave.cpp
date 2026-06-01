@@ -660,8 +660,8 @@ void StreamingDecoder::finalizeBurstGroup() {
                   "expect_full_anchor=%d quality=%.2f",
                   log_prefix_.c_str(), last_burst_group_seq_,
                   arrival_policy::warmSyncPhaseName(sync_controller_.derivePhase()),
-                  sync_controller_.consecutive_sync_misses_,
-                  sync_controller_.frame_arrival_confidence_,
+                  sync_controller_.consecutiveSyncMisses(),
+                  sync_controller_.frameArrivalConfidence(),
                   sync_controller_.last_cfo_.load(),
                   static_cast<unsigned long long>(sync_controller_.next_expected_frame_sample_),
                   static_cast<unsigned long long>(sync_controller_.lastFrameEndSample()),
@@ -673,47 +673,16 @@ void StreamingDecoder::finalizeBurstGroup() {
         // descriptor chirp AND demodulated all 6 frames — i.e. warm sync WORKED — even
         // when the LDPC then failed the DATA (a deep-fade group; ARQ resends it). The
         // old code refreshed only on all_ok, so a faded group left
-        // sync_controller_.frame_arrival_confidence_ decaying (the per-frame state machine doesn't fire
+        // sync_controller_.frameArrivalConfidence() decaying (the per-frame state machine doesn't fire
         // during the deinterleaved burst body, §16.11) until the narrow warm window
         // deactivated → the next group's acquisition collapsed → ~90s stall or a dead
         // transfer. An acquired-but-decode-failed group keeps warm sync HEALTHY; only
         // a genuinely un-acquired group (no chirp found — never reaches here) cools it.
         // Refresh warm-sync state on every delivered group — now unconditional
         // (promoted past ULTRA_S16_WARM_HANDOFF).
-        {
-            {
-                // Force WARM: misses=0 + active=true ⇒ derivePhase()==WARM (§7 collapse —
-                // verified byte-identical: active was always already true here, so this is
-                // the faithful translation of the old `warm_sync_phase_ = WARM`).
-                sync_controller_.consecutive_sync_misses_ = 0;
-                sync_controller_.frame_arrival_confidence_ = std::max(
-                    sync_controller_.frame_arrival_confidence_, 0.5f);
-                sync_controller_.warm_sync_active_ = true;
-                // 2026-05-29 ROOT-CAUSE FIX: re-arm the full-chirp anchor
-                // expectation for the NEXT group's BURST_HEADER. The encoder
-                // emits a chirp-bearing descriptor at the start of EVERY burst
-                // group (a control frame via encodeFrame), so a precise chirp
-                // timing anchor is always on the wire. Without re-arming,
-                // warm-handoff left sync_controller_.expect_full_ofdm_anchor_=false after the
-                // first group, so bravo searched LIGHT-only and never used the
-                // descriptor's chirp — its data LTS then correlated at ~0.54
-                // (vs ~0.91 right after a chirp anchor on group 0), forcing
-                // low-threshold marginal decodes + retries (640 bps vs ~1600
-                // baseline on an easy seed). Re-arming makes bravo acquire each
-                // descriptor's chirp precisely; the BURST_HEADER-consume keeper
-                // then flips this back to false so the CONTIGUOUS group data
-                // stays light — that light group-start preamble is the real
-                // warm-handoff airtime saving, not dropping the descriptor.
-                sync_controller_.expect_full_ofdm_anchor_ = true;
-                LOG_MODEM(INFO,
-                    "[%s] s16-warm-handoff: refreshed warm-sync state on "
-                    "delivered group_seq=%u (conf=%.2f phase=WARM misses=0, "
-                    "re-armed descriptor chirp anchor for next group)",
-                    log_prefix_.c_str(),
-                    static_cast<unsigned>(last_burst_group_seq_),
-                    sync_controller_.frame_arrival_confidence_);
-            }
-        }
+        // §7 C4: the warm-sync refresh + next-group anchor re-arm now lives on the controller
+        // (it owns those four warm-sync-prediction fields).
+        sync_controller_.noteGroupDelivered(last_burst_group_seq_);
         burst_group_callback_(last_burst_group_seq_, burst_group_frames, all_ok, quality,
                               frame_mask, use_burst_interleave_);
     }
