@@ -360,8 +360,8 @@ bool StreamingDecoder::processWaveformForCodewords(SampleSpan samples,
 void StreamingDecoder::decodeCurrentFrame() {
     if (!waveform_) {
         {
-            std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
-            ring_.correlation_pos_ = ring_.wrapRingIndexLocked(sync_position_ + 4800);
+            std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+            sync_controller_.ring_.correlation_pos_ = sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + 4800);
         }
         state_ = DecoderState::SEARCHING;
         return;
@@ -415,21 +415,21 @@ void StreamingDecoder::decodeCurrentFrame() {
     std::vector<float> frame_buffer;
     size_t frame_sync_abs = 0;
     {
-        std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
-        frame_sync_abs = ring_.ringPosToAbsoluteLocked(sync_position_);
+        std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+        frame_sync_abs = sync_controller_.ring_.ringPosToAbsoluteLocked(sync_position_);
 
         size_t available;
-        if (ring_.write_pos_ >= sync_position_) {
-            available = ring_.write_pos_ - sync_position_;
+        if (sync_controller_.ring_.write_pos_ >= sync_position_) {
+            available = sync_controller_.ring_.write_pos_ - sync_position_;
         } else {
-            available = ring_.buffer_capacity_samples_ - sync_position_ + ring_.write_pos_;
+            available = sync_controller_.ring_.buffer_capacity_samples_ - sync_position_ + sync_controller_.ring_.write_pos_;
         }
 
         frame_len = std::min(frame_len, available);
 
         frame_buffer.resize(frame_len);
         for (size_t i = 0; i < frame_len; i++) {
-            frame_buffer[i] = ring_.buffer_[ring_.wrapRingIndexLocked(sync_position_ + i)];
+            frame_buffer[i] = sync_controller_.ring_.buffer_[sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + i)];
         }
     }
 
@@ -458,9 +458,9 @@ void StreamingDecoder::decodeCurrentFrame() {
 
     if (frame_buffer.empty()) {
         {
-            std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
-            ring_.correlation_pos_ = ring_.wrapRingIndexLocked(sync_position_ + 4800);
-            ring_.setSearchFloorLocked(frame_sync_abs + 4800);
+            std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+            sync_controller_.ring_.correlation_pos_ = sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + 4800);
+            sync_controller_.ring_.setSearchFloorLocked(frame_sync_abs + 4800);
         }
         state_ = DecoderState::SEARCHING;
         return;
@@ -474,9 +474,9 @@ void StreamingDecoder::decodeCurrentFrame() {
         const size_t advance = frame_policy::falseOFDMLockAdvanceSamples(
             frame_len, data_preamble);
 
-        std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
-        ring_.correlation_pos_ = ring_.wrapRingIndexLocked(sync_position_ + advance);
-        ring_.setSearchFloorLocked(frame_sync_abs + advance);
+        std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+        sync_controller_.ring_.correlation_pos_ = sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + advance);
+        sync_controller_.ring_.setSearchFloorLocked(frame_sync_abs + advance);
         if (sync_from_warm_timed_window_) {
             noteFrameArrivalSyncMissLocked();
             sync_from_warm_timed_window_ = false;
@@ -566,10 +566,10 @@ void StreamingDecoder::decodeCurrentFrame() {
 
         // Skip past the PING.
         {
-            std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+            std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
             size_t min_frame = static_cast<size_t>(waveform_->getMinSamplesForFrame());
-            ring_.correlation_pos_ = ring_.wrapRingIndexLocked(sync_position_ + min_frame);
-            ring_.setSearchFloorLocked(frame_sync_abs + min_frame);
+            sync_controller_.ring_.correlation_pos_ = sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + min_frame);
+            sync_controller_.ring_.setSearchFloorLocked(frame_sync_abs + min_frame);
             last_decoded_sync_pos_ = sync_position_;
         }
 
@@ -859,25 +859,25 @@ void StreamingDecoder::decodeCurrentFrame() {
                                     arrival_policy::WarmSyncPhase::WARM &&
                                 sync_controller_.frame_arrival_confidence_ > 0.0f;
                             {
-                                std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+                                std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
                                 if (warm_handoff_eligible) {
                                     // KEEP warm state. Just advance the search
                                     // window past the BURST_HEADER so the data
                                     // group is picked up next.
                                     sync_controller_.expect_full_ofdm_anchor_ = false;
                                     sync_controller_.sync_reject_streak_ = 0;
-                                    ring_.correlation_pos_ = ring_.wrapRingIndexLocked(
+                                    sync_controller_.ring_.correlation_pos_ = sync_controller_.ring_.wrapRingIndexLocked(
                                         sync_position_ + frame_len);
-                                    ring_.setSearchFloorLocked(frame_sync_abs + frame_len);
+                                    sync_controller_.ring_.setSearchFloorLocked(frame_sync_abs + frame_len);
                                     last_decoded_sync_pos_ = sync_position_;
                                 } else {
                                     sync_from_warm_timed_window_ = false;
                                     resetFrameArrivalTrackingLocked();
                                     sync_controller_.expect_full_ofdm_anchor_ = true;
                                     sync_controller_.sync_reject_streak_ = 0;
-                                    ring_.correlation_pos_ = ring_.wrapRingIndexLocked(
+                                    sync_controller_.ring_.correlation_pos_ = sync_controller_.ring_.wrapRingIndexLocked(
                                         sync_position_ + frame_len);
-                                    ring_.setSearchFloorLocked(frame_sync_abs + frame_len);
+                                    sync_controller_.ring_.setSearchFloorLocked(frame_sync_abs + frame_len);
                                     last_decoded_sync_pos_ = sync_position_;
                                 }
                             }
@@ -948,7 +948,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                             noteFrameArrivalSuccess(frame_sync_abs, frame_sync_abs + frame_len);
                         }
                         {
-                            std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+                            std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
                             sync_from_warm_timed_window_ = false;
                             if (file_cancel_control) {
                                 resetFrameArrivalTrackingLocked();
@@ -967,8 +967,8 @@ void StreamingDecoder::decodeCurrentFrame() {
                                               v2::frameTypeToString(hdr.type));
                                 }
                             }
-                            ring_.correlation_pos_ = ring_.wrapRingIndexLocked(sync_position_ + frame_len);
-                            ring_.setSearchFloorLocked(frame_sync_abs + frame_len);
+                            sync_controller_.ring_.correlation_pos_ = sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + frame_len);
+                            sync_controller_.ring_.setSearchFloorLocked(frame_sync_abs + frame_len);
                             last_decoded_sync_pos_ = sync_position_;
                         }
 
@@ -1003,9 +1003,9 @@ void StreamingDecoder::decodeCurrentFrame() {
         // still the burst regime), so gate on burst_transport_rx_ too.
         if ((use_burst_interleave_ || burst_transport_rx_) && connected_) {
             {
-                std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
-                ring_.correlation_pos_ = ring_.wrapRingIndexLocked(sync_position_ + frame_len);
-                ring_.setSearchFloorLocked(frame_sync_abs + frame_len);
+                std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+                sync_controller_.ring_.correlation_pos_ = sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + frame_len);
+                sync_controller_.ring_.setSearchFloorLocked(frame_sync_abs + frame_len);
             }
             state_ = DecoderState::SEARCHING;
             return;
@@ -1023,9 +1023,9 @@ void StreamingDecoder::decodeCurrentFrame() {
     if (!ok) {
         LOG_MODEM(DEBUG, "[%s] process() failed", log_prefix_.c_str());
         {
-            std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
-            ring_.correlation_pos_ = ring_.wrapRingIndexLocked(sync_position_ + frame_len);
-            ring_.setSearchFloorLocked(frame_sync_abs + frame_len);
+            std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+            sync_controller_.ring_.correlation_pos_ = sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + frame_len);
+            sync_controller_.ring_.setSearchFloorLocked(frame_sync_abs + frame_len);
         }
         state_ = DecoderState::SEARCHING;
         return;
@@ -1063,8 +1063,8 @@ void StreamingDecoder::decodeCurrentFrame() {
         if (std::abs(burst_timing_offset) >= kBurstFrameRetryThreshold &&
             std::abs(burst_timing_offset) <= kBurstFrameRetryMax) {
             const int sample_correction = static_cast<int>(std::lround(burst_timing_offset));
-            const size_t corrected_sync_pos = ring_.wrapRingIndexLocked(
-                sync_position_ + ring_.buffer_capacity_samples_ + sample_correction);
+            const size_t corrected_sync_pos = sync_controller_.ring_.wrapRingIndexLocked(
+                sync_position_ + sync_controller_.ring_.buffer_capacity_samples_ + sample_correction);
             const size_t corrected_sync_abs =
                 (sample_correction >= 0)
                     ? frame_sync_abs + static_cast<size_t>(sample_correction)
@@ -1074,18 +1074,18 @@ void StreamingDecoder::decodeCurrentFrame() {
 
             bool have_corrected_frame = false;
             {
-                std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+                std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
                 size_t corrected_available;
-                if (ring_.write_pos_ >= corrected_sync_pos) {
-                    corrected_available = ring_.write_pos_ - corrected_sync_pos;
+                if (sync_controller_.ring_.write_pos_ >= corrected_sync_pos) {
+                    corrected_available = sync_controller_.ring_.write_pos_ - corrected_sync_pos;
                 } else {
-                    corrected_available = ring_.buffer_capacity_samples_ - corrected_sync_pos + ring_.write_pos_;
+                    corrected_available = sync_controller_.ring_.buffer_capacity_samples_ - corrected_sync_pos + sync_controller_.ring_.write_pos_;
                 }
                 have_corrected_frame = corrected_available >= frame_len;
                 if (have_corrected_frame) {
                     frame_buffer.assign(frame_len, 0.0f);
                     for (size_t i = 0; i < frame_len; i++) {
-                        frame_buffer[i] = ring_.buffer_[ring_.wrapRingIndexLocked(corrected_sync_pos + i)];
+                        frame_buffer[i] = sync_controller_.ring_.buffer_[sync_controller_.ring_.wrapRingIndexLocked(corrected_sync_pos + i)];
                     }
                 }
             }
@@ -1139,9 +1139,9 @@ void StreamingDecoder::decodeCurrentFrame() {
     if (soft_bits.empty()) {
         LOG_MODEM(DEBUG, "[%s] getSoftBits() returned empty", log_prefix_.c_str());
         {
-            std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
-            ring_.correlation_pos_ = ring_.wrapRingIndexLocked(sync_position_ + frame_len);
-            ring_.setSearchFloorLocked(frame_sync_abs + frame_len);
+            std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+            sync_controller_.ring_.correlation_pos_ = sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + frame_len);
+            sync_controller_.ring_.setSearchFloorLocked(frame_sync_abs + frame_len);
         }
         state_ = DecoderState::SEARCHING;
         return;
@@ -1189,7 +1189,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         burst_soft_buffer_.push_back(std::move(soft_bits));
         burst_min_block_ = static_cast<size_t>(
             waveform_->getMinSamplesForCWCount(fixed_frame_codewords_));
-        burst_next_pos_ = ring_.wrapRingIndexLocked(sync_position_ + frame_len);
+        burst_next_pos_ = sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + frame_len);
         burst_snr_ = sync_snr_;
         burst_cfo_ = sync_cfo_;
         burst_start_time_ = std::chrono::steady_clock::now();
@@ -1218,8 +1218,8 @@ void StreamingDecoder::decodeCurrentFrame() {
         if (std::abs(burst_timing_offset) >= kBurstTimingCorrectionThreshold &&
             std::abs(burst_timing_offset) <= kBurstMaxTimingCorrection) {
             const int sample_correction = static_cast<int>(std::lround(burst_timing_offset));
-            burst_next_pos_ = ring_.wrapRingIndexLocked(
-                burst_next_pos_ + ring_.buffer_capacity_samples_ + sample_correction);
+            burst_next_pos_ = sync_controller_.ring_.wrapRingIndexLocked(
+                burst_next_pos_ + sync_controller_.ring_.buffer_capacity_samples_ + sample_correction);
             LOG_MODEM(WARN, "[%s] Burst group timing correction: %.1f samples, next_pos=%zu",
                       log_prefix_.c_str(), burst_timing_offset, burst_next_pos_);
         }
@@ -1574,36 +1574,36 @@ void StreamingDecoder::decodeCurrentFrame() {
         }
 
         auto ringPosToAbsolute = [this](size_t ring_pos) -> size_t {
-            if (ring_.total_fed_ < ring_.buffer_capacity_samples_) {
+            if (sync_controller_.ring_.total_fed_ < sync_controller_.ring_.buffer_capacity_samples_) {
                 return ring_pos;
             }
-            const size_t oldest_abs = ring_.total_fed_ - ring_.buffer_capacity_samples_;
-            const size_t oldest_pos = ring_.write_pos_;
+            const size_t oldest_abs = sync_controller_.ring_.total_fed_ - sync_controller_.ring_.buffer_capacity_samples_;
+            const size_t oldest_pos = sync_controller_.ring_.write_pos_;
             const size_t offset = (ring_pos >= oldest_pos)
                 ? (ring_pos - oldest_pos)
-                : (ring_.buffer_capacity_samples_ - oldest_pos + ring_pos);
+                : (sync_controller_.ring_.buffer_capacity_samples_ - oldest_pos + ring_pos);
             return oldest_abs + offset;
         };
 
         if (allow_sync_recovery) {
             for (size_t retry_idx = 0; retry_idx < retry_delta_count; ++retry_idx) {
                 const int delta = retry_deltas[retry_idx];
-                if (delta < 0 && ring_.total_fed_ < ring_.buffer_capacity_samples_ &&
+                if (delta < 0 && sync_controller_.ring_.total_fed_ < sync_controller_.ring_.buffer_capacity_samples_ &&
                     sync_position_ < static_cast<size_t>(-delta)) {
                     continue;
                 }
                 recovery_attempts++;
-                size_t retry_sync = ring_.wrapRingIndexLocked(sync_position_ + ring_.buffer_capacity_samples_ + delta);
+                size_t retry_sync = sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + sync_controller_.ring_.buffer_capacity_samples_ + delta);
 
                 std::vector<float> retry_buffer;
                 size_t retry_len = frame_len;
                 {
-                    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+                    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
                     size_t available;
-                    if (ring_.write_pos_ >= retry_sync) {
-                        available = ring_.write_pos_ - retry_sync;
+                    if (sync_controller_.ring_.write_pos_ >= retry_sync) {
+                        available = sync_controller_.ring_.write_pos_ - retry_sync;
                     } else {
-                        available = ring_.buffer_capacity_samples_ - retry_sync + ring_.write_pos_;
+                        available = sync_controller_.ring_.buffer_capacity_samples_ - retry_sync + sync_controller_.ring_.write_pos_;
                     }
                     retry_len = std::min(retry_len, available);
                     if (retry_len == 0) {
@@ -1611,7 +1611,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                     }
                     retry_buffer.resize(retry_len);
                     for (size_t i = 0; i < retry_len; ++i) {
-                        retry_buffer[i] = ring_.buffer_[ring_.wrapRingIndexLocked(retry_sync + i)];
+                        retry_buffer[i] = sync_controller_.ring_.buffer_[sync_controller_.ring_.wrapRingIndexLocked(retry_sync + i)];
                     }
                 }
 
@@ -1785,7 +1785,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         }
 
         if (result.success && connected_ && is_ofdm) {
-            std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+            std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
             sync_from_warm_timed_window_ = false;
         }
 
@@ -1823,17 +1823,17 @@ void StreamingDecoder::decodeCurrentFrame() {
             }
         }
     }
-    size_t next_block_pos = ring_.wrapRingIndexLocked(sync_position_ + consumed);
+    size_t next_block_pos = sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + consumed);
     size_t next_search_abs = frame_sync_abs + consumed;
 
     if (result.success && connected_ && is_ofdm) {
         noteFrameArrivalSuccess(frame_sync_abs, next_search_abs);
-        std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+        std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
         if (!is_non_data_frame) {
             sync_controller_.expect_full_ofdm_anchor_ = false;
         }
     } else if (!result.success && result.codewords_ok == 0 && connected_ && is_ofdm) {
-        std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+        std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
         if (sync_from_warm_timed_window_) {
             noteFrameArrivalSyncMissLocked();
             sync_from_warm_timed_window_ = false;
@@ -1864,11 +1864,11 @@ void StreamingDecoder::decodeCurrentFrame() {
             // Check if there are enough samples for another block
             size_t next_available;
             {
-                std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
-                if (ring_.write_pos_ >= next_block_pos) {
-                    next_available = ring_.write_pos_ - next_block_pos;
+                std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+                if (sync_controller_.ring_.write_pos_ >= next_block_pos) {
+                    next_available = sync_controller_.ring_.write_pos_ - next_block_pos;
                 } else {
-                    next_available = ring_.buffer_capacity_samples_ - next_block_pos + ring_.write_pos_;
+                    next_available = sync_controller_.ring_.buffer_capacity_samples_ - next_block_pos + sync_controller_.ring_.write_pos_;
                 }
             }
 
@@ -1877,9 +1877,9 @@ void StreamingDecoder::decodeCurrentFrame() {
             // Copy next block samples
             std::vector<float> next_block(min_block);
             {
-                std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+                std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
                 for (size_t i = 0; i < min_block; i++) {
-                    next_block[i] = ring_.buffer_[ring_.wrapRingIndexLocked(next_block_pos + i)];
+                    next_block[i] = sync_controller_.ring_.buffer_[sync_controller_.ring_.wrapRingIndexLocked(next_block_pos + i)];
                 }
             }
 
@@ -1992,9 +1992,9 @@ void StreamingDecoder::decodeCurrentFrame() {
                 noteFrameArrivalSuccess(next_search_abs, next_search_abs + min_block);
             }
 
-            // Advance position for next iteration (or final ring_.correlation_pos_)
+            // Advance position for next iteration (or final sync_controller_.ring_.correlation_pos_)
             sync_position_ = next_block_pos;
-            next_block_pos = ring_.wrapRingIndexLocked(next_block_pos + min_block);
+            next_block_pos = sync_controller_.ring_.wrapRingIndexLocked(next_block_pos + min_block);
             next_search_abs += min_block;
 
             // If decode failed completely, stop the burst
@@ -2021,9 +2021,9 @@ void StreamingDecoder::decodeCurrentFrame() {
     }
     burst_blocks_decoded_ = 0;
     {
-        std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
-        ring_.correlation_pos_ = ring_.wrapRingIndexLocked(next_block_pos);
-        ring_.setSearchFloorLocked(next_search_abs);
+        std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+        sync_controller_.ring_.correlation_pos_ = sync_controller_.ring_.wrapRingIndexLocked(next_block_pos);
+        sync_controller_.ring_.setSearchFloorLocked(next_search_abs);
         last_decoded_sync_pos_ = sync_position_;
     }
 
@@ -2052,9 +2052,9 @@ void StreamingDecoder::finishMCDPSKBurstContinuation(size_t search_pos, size_t s
     mc_burst_frames_decoded_ = 0;
 
     {
-        std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
-        ring_.correlation_pos_ = search_pos;
-        ring_.setSearchFloorLocked(search_abs);
+        std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+        sync_controller_.ring_.correlation_pos_ = search_pos;
+        sync_controller_.ring_.setSearchFloorLocked(search_abs);
         last_decoded_sync_pos_ = sync_position_;
     }
     state_ = DecoderState::SEARCHING;
@@ -2079,18 +2079,18 @@ void StreamingDecoder::continueMCDPSKBurst() {
     const size_t one_cw_samples = static_cast<size_t>(one_cw_samples_i);
 
     auto availableFrom = [&](size_t pos) -> size_t {
-        std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
-        if (ring_.write_pos_ >= pos) {
-            return ring_.write_pos_ - pos;
+        std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+        if (sync_controller_.ring_.write_pos_ >= pos) {
+            return sync_controller_.ring_.write_pos_ - pos;
         }
-        return ring_.buffer_capacity_samples_ - pos + ring_.write_pos_;
+        return sync_controller_.ring_.buffer_capacity_samples_ - pos + sync_controller_.ring_.write_pos_;
     };
 
     auto copyFrom = [&](size_t pos, size_t len) -> std::vector<float> {
         std::vector<float> out(len);
-        std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+        std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
         for (size_t i = 0; i < len; ++i) {
-            out[i] = ring_.buffer_[ring_.wrapRingIndexLocked(pos + i)];
+            out[i] = sync_controller_.ring_.buffer_[sync_controller_.ring_.wrapRingIndexLocked(pos + i)];
         }
         return out;
     };
@@ -2202,7 +2202,7 @@ void StreamingDecoder::continueMCDPSKBurst() {
             mc_waveform->getDataOnlySamplesForCWCount(hdr.total_cw));
         mc_burst_pending_consumed_samples_ = one_cw_samples;
         mc_burst_pending_soft_bits_ = std::move(soft);
-        mc_burst_next_pos_ = ring_.wrapRingIndexLocked(mc_burst_next_pos_ + one_cw_samples);
+        mc_burst_next_pos_ = sync_controller_.ring_.wrapRingIndexLocked(mc_burst_next_pos_ + one_cw_samples);
         mc_burst_next_abs_ += one_cw_samples;
         mc_burst_wait_start_time_ = std::chrono::steady_clock::now();
     }
@@ -2236,7 +2236,7 @@ void StreamingDecoder::continueMCDPSKBurst() {
         auto rest_soft = mc_waveform->getSoftBits();
         mc_burst_pending_soft_bits_.insert(mc_burst_pending_soft_bits_.end(),
                                           rest_soft.begin(), rest_soft.end());
-        mc_burst_next_pos_ = ring_.wrapRingIndexLocked(mc_burst_next_pos_ + remaining_samples);
+        mc_burst_next_pos_ = sync_controller_.ring_.wrapRingIndexLocked(mc_burst_next_pos_ + remaining_samples);
         mc_burst_next_abs_ += remaining_samples;
     }
 

@@ -421,6 +421,7 @@ add_test(NAME StreamingSignalPolicy COMMAND test_streaming_signal_policy)
 add_executable(test_sync_controller_phase
     test_sync_controller_phase.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/sync/sync_controller.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/sync/sync_ring_buffer.cpp  # SyncController now owns a SyncRingBuffer (§7 C3 Phase 2)
 )
 target_include_directories(test_sync_controller_phase PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../src

@@ -139,7 +139,7 @@ static void dumpBufferSnapshot(const std::vector<float>& buffer, size_t write_po
 }
 
 StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
-    : ring_(buffer_capacity_samples) {  // ring_ ctor validates capacity + sizes the buffer
+    : sync_controller_(buffer_capacity_samples) {  // owns sync_controller_.ring_; its ctor validates + sizes the buffer
     startupTrace("StreamingDecoder", "ctor-enter");
     startupTrace("StreamingDecoder", "buffer-resized");
     waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
@@ -150,7 +150,7 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
     codec_ = fec::CodecFactory::create(fec::CodecType::LDPC, CodeRate::R1_4);
     startupTrace("StreamingDecoder", "codec-created");
 
-    LOG_MODEM(INFO, "StreamingDecoder: Initialized (buffer=%zu samples)", ring_.buffer_capacity_samples_);
+    LOG_MODEM(INFO, "StreamingDecoder: Initialized (buffer=%zu samples)", sync_controller_.ring_.buffer_capacity_samples_);
 
     // §15 step 4d-late: event-driven tone-burst ACK monitor. Detection
     // runs ONLY when the protocol layer arms the monitor (via
@@ -242,7 +242,7 @@ void StreamingDecoder::observeIdleNoiseCandidate(const float* samples, size_t co
 
 // §7.4 A2: the warm-sync transition logic now lives in SyncController. These three
 // StreamingDecoder methods are thin forwarders, preserving their callers (the *Locked
-// convention: caller holds ring_.buffer_mutex_). The connected_/OFDM_CHIRP eligibility guard stays
+// convention: caller holds sync_controller_.ring_.buffer_mutex_). The connected_/OFDM_CHIRP eligibility guard stays
 // here (it reads decoder state the controller does not own).
 void StreamingDecoder::resetFrameArrivalTrackingLocked() {
     sync_controller_.resetFrameArrivalTracking();
@@ -250,7 +250,7 @@ void StreamingDecoder::resetFrameArrivalTrackingLocked() {
 
 void StreamingDecoder::noteFrameArrivalSuccess(size_t frame_start_abs,
                                                size_t frame_end_abs) {
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     noteFrameArrivalSuccessLocked(frame_start_abs, frame_end_abs);
 }
 
@@ -278,7 +278,7 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
     if (!samples || count == 0) return;
 
     // §15 step 4b: feed the always-on tone-burst ACK monitor. Runs BEFORE
-    // the OFDM ring_.buffer_mutex_ lock so the monitor never blocks OFDM decode
+    // the OFDM sync_controller_.ring_.buffer_mutex_ lock so the monitor never blocks OFDM decode
     // (and the monitor has its own internal storage; no mutex needed since
     // feedAudio is called from a single audio thread). The monitor's
     // callback fires synchronously here on the audio thread — keep it
@@ -305,24 +305,24 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
                       log_prefix_.c_str(),
                       static_cast<unsigned long long>(evt),
                       chunk_rms,
-                      ring_.total_fed_ / 48000.0f);
+                      sync_controller_.ring_.total_fed_ / 48000.0f);
         } else if (was_active && chunk_rms < ACTIVITY_GATE_LOW) {
             audio_activity_.store(false, std::memory_order_relaxed);
             // No log on departure to keep noise down — "arrived" events are enough.
         }
     }
 
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
 
-    size_t prev_total = ring_.total_fed_;
+    size_t prev_total = sync_controller_.ring_.total_fed_;
 
     auto overflow = buffer_policy::planOverflowRecovery(
-        ring_.write_pos_, ring_.correlation_pos_, ring_.total_fed_, count, ring_.buffer_capacity_samples_,
+        sync_controller_.ring_.write_pos_, sync_controller_.ring_.correlation_pos_, sync_controller_.ring_.total_fed_, count, sync_controller_.ring_.buffer_capacity_samples_,
         CORR_INVARIANT_GUARD, OVERFLOW_RECOVERY_KEEP);
 
     if (overflow.pointer_drift_detected) {
-        ring_.correlation_pos_ = ring_.write_pos_;
-        ring_.setSearchFloorLocked(ring_.total_fed_);
+        sync_controller_.ring_.correlation_pos_ = sync_controller_.ring_.write_pos_;
+        sync_controller_.ring_.setSearchFloorLocked(sync_controller_.ring_.total_fed_);
         LOG_MODEM(WARN, "[%s] Correlation pointer drift detected, resetting search cursor",
                   log_prefix_.c_str());
     }
@@ -330,8 +330,8 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
     // If adding these samples would overflow, drop backlog aggressively enough
     // to recover in one step. Small drops (~1k) cause repeated overflow storms.
     if (overflow.overflow) {
-        ring_.correlation_pos_ = overflow.new_correlation_pos;
-        ring_.setSearchFloorLocked(ring_.ringPosToAbsoluteLocked(ring_.correlation_pos_));
+        sync_controller_.ring_.correlation_pos_ = overflow.new_correlation_pos;
+        sync_controller_.ring_.setSearchFloorLocked(sync_controller_.ring_.ringPosToAbsoluteLocked(sync_controller_.ring_.correlation_pos_));
 
         // Once overloaded, any in-flight frame context is stale. Force a clean
         // resync from current audio instead of chasing old sync positions.
@@ -358,20 +358,20 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
         }
         if (overflow_events_ <= 3 || (overflow_events_ % 25) == 0) {
             LOG_MODEM(WARN, "[%s] Buffer overflow, dropped %zu unsearched samples (corr_pos=%zu, keep=%zu, state_reset=%d, total=%llu)",
-                      log_prefix_.c_str(), overflow.samples_to_drop, ring_.correlation_pos_,
+                      log_prefix_.c_str(), overflow.samples_to_drop, sync_controller_.ring_.correlation_pos_,
                       overflow.target_after_write,
                       reset_decode_state ? 1 : 0,
                       static_cast<unsigned long long>(overflow_events_));
         }
     }
 
-    ring_.writeSamplesToRingLocked(samples, count);
+    sync_controller_.ring_.writeSamplesToRingLocked(samples, count);
 
-    ring_.total_fed_ += count;
+    sync_controller_.ring_.total_fed_ += count;
 
     // Update backlog telemetry for UI/CLI diagnostics.
     const auto backlog = buffer_policy::computeBacklog(
-        ring_.write_pos_, ring_.correlation_pos_, ring_.total_fed_, ring_.buffer_capacity_samples_, 48000.0f);
+        sync_controller_.ring_.write_pos_, sync_controller_.ring_.correlation_pos_, sync_controller_.ring_.total_fed_, sync_controller_.ring_.buffer_capacity_samples_, 48000.0f);
     {
         std::lock_guard<std::mutex> slock(stats_mutex_);
         stats_.current_unsearched_samples = backlog.unsearched_samples;
@@ -387,27 +387,27 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
     // Chirp structure: 7200 lead-in + 24000 up + 4800 gap + 24000 down + 4800 trail = 64800
     // So we should have full chirp around 72000 samples (64800 + margin)
     auto crossedThreshold = [prev_total, this](size_t threshold) {
-        return prev_total < threshold && ring_.total_fed_ >= threshold;
+        return prev_total < threshold && sync_controller_.ring_.total_fed_ >= threshold;
     };
 
     if (crossedThreshold(24000)) {
-        dumpBufferSnapshot(ring_.buffer_, ring_.write_pos_, ring_.total_fed_, "early_24k");
+        dumpBufferSnapshot(sync_controller_.ring_.buffer_, sync_controller_.ring_.write_pos_, sync_controller_.ring_.total_fed_, "early_24k");
     }
     if (crossedThreshold(48000)) {
-        dumpBufferSnapshot(ring_.buffer_, ring_.write_pos_, ring_.total_fed_, "mid_48k");
+        dumpBufferSnapshot(sync_controller_.ring_.buffer_, sync_controller_.ring_.write_pos_, sync_controller_.ring_.total_fed_, "mid_48k");
     }
     if (crossedThreshold(72000)) {
-        dumpBufferSnapshot(ring_.buffer_, ring_.write_pos_, ring_.total_fed_, "full_chirp_72k");
+        dumpBufferSnapshot(sync_controller_.ring_.buffer_, sync_controller_.ring_.write_pos_, sync_controller_.ring_.total_fed_, "full_chirp_72k");
     }
     if (crossedThreshold(96000)) {
-        dumpBufferSnapshot(ring_.buffer_, ring_.write_pos_, ring_.total_fed_, "late_96k");
+        dumpBufferSnapshot(sync_controller_.ring_.buffer_, sync_controller_.ring_.write_pos_, sync_controller_.ring_.total_fed_, "late_96k");
     }
 
     // Log at key thresholds to track audio arrival
-    float audio_sec = ring_.total_fed_ / 48000.0f;
+    float audio_sec = sync_controller_.ring_.total_fed_ / 48000.0f;
     auto crossedSecond = [prev_total, this](float sec) {
         size_t threshold = static_cast<size_t>(sec * 48000);
-        return prev_total < threshold && ring_.total_fed_ >= threshold;
+        return prev_total < threshold && sync_controller_.ring_.total_fed_ >= threshold;
     };
 
     // Log every 0.5 seconds of audio
@@ -422,7 +422,7 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
 
     // Wake up decode thread
     new_data_available_ = true;
-    ring_.data_cv_.notify_one();
+    sync_controller_.ring_.data_cv_.notify_one();
 }
 
 // ============================================================================
@@ -433,8 +433,8 @@ void StreamingDecoder::processBuffer() {
     // Wait for new data or timeout
     bool woke_with_data = false;
     {
-        std::unique_lock<std::mutex> lock(ring_.buffer_mutex_);
-        woke_with_data = ring_.data_cv_.wait_for(lock, std::chrono::milliseconds(50), [this] {
+        std::unique_lock<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+        woke_with_data = sync_controller_.ring_.data_cv_.wait_for(lock, std::chrono::milliseconds(50), [this] {
             return shutdown_.load() || new_data_available_;
         });
         if (shutdown_.load()) return;
@@ -493,7 +493,7 @@ DecodeResult StreamingDecoder::getFrame() {
 // ============================================================================
 
 void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
 
     if (mode_ == mode && connected_ == connected) return;
 
@@ -555,17 +555,17 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     mc_burst_pending_soft_bits_.clear();
     use_burst_interleave_ = false;  // Re-enabled by caller if needed
 
-    // CRITICAL: Reset ring_.correlation_pos_ to current write position
+    // CRITICAL: Reset sync_controller_.ring_.correlation_pos_ to current write position
     // Otherwise we'll search old data from previous mode
-    ring_.correlation_pos_ = ring_.write_pos_;
-    ring_.setSearchFloorLocked(ring_.total_fed_);
+    sync_controller_.ring_.correlation_pos_ = sync_controller_.ring_.write_pos_;
+    sync_controller_.ring_.setSearchFloorLocked(sync_controller_.ring_.total_fed_);
 
     LOG_MODEM(INFO, "StreamingDecoder: Mode=%s (%s), reset corr_pos=%zu",
-              protocol::waveformModeToString(mode), connected ? "connected" : "disconnected", ring_.correlation_pos_);
+              protocol::waveformModeToString(mode), connected ? "connected" : "disconnected", sync_controller_.ring_.correlation_pos_);
 }
 
 void StreamingDecoder::setCarrierMask(uint64_t active_mask) {
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     carrier_mask_ = active_mask;
     if (waveform_) {
         waveform_->setCarrierMask(active_mask);
@@ -573,7 +573,7 @@ void StreamingDecoder::setCarrierMask(uint64_t active_mask) {
 }
 
 void StreamingDecoder::setCarrierLdpcInterleaver(bool enable) {
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     use_carrier_ldpc_interleaver_ = enable;
     if (waveform_) {
         waveform_->setCarrierLdpcInterleaverEnabled(enable);
@@ -581,7 +581,7 @@ void StreamingDecoder::setCarrierLdpcInterleaver(bool enable) {
 }
 
 void StreamingDecoder::expectFullOFDMAnchorOnce() {
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     if (!connected_ || mode_ != protocol::WaveformMode::OFDM_CHIRP) {
         sync_controller_.expect_full_ofdm_anchor_ = false;
         return;
@@ -593,7 +593,7 @@ void StreamingDecoder::expectFullOFDMAnchorOnce() {
 }
 
 void StreamingDecoder::clearFullOFDMAnchorExpectation() {
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     if (sync_controller_.expect_full_ofdm_anchor_) {
         LOG_MODEM(INFO, "StreamingDecoder: clearing pending full OFDM DATA anchor");
     }
@@ -601,12 +601,12 @@ void StreamingDecoder::clearFullOFDMAnchorExpectation() {
 }
 
 bool StreamingDecoder::expectsFullOFDMAnchorForTesting() const {
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     return sync_controller_.expect_full_ofdm_anchor_;
 }
 
 void StreamingDecoder::setMCDPSKCarriers(int n) {
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     if (mc_dpsk_carriers_ == n) return;
     mc_dpsk_carriers_ = n;
     mc_dpsk_config_.num_carriers = n;
@@ -618,7 +618,7 @@ void StreamingDecoder::setMCDPSKCarriers(int n) {
 }
 
 void StreamingDecoder::setMCDPSKConfig(const MultiCarrierDPSKConfig& config) {
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     const bool changed =
         mc_dpsk_config_.num_carriers != config.num_carriers ||
         mc_dpsk_config_.samples_per_symbol != config.samples_per_symbol ||
@@ -645,7 +645,7 @@ void StreamingDecoder::setMCDPSKConfig(const MultiCarrierDPSKConfig& config) {
 }
 
 void StreamingDecoder::setOFDMConfig(const ModemConfig& config) {
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
 
     // Store carrier counts regardless of current mode (used when switching to OFDM later)
     ofdm_carriers_ = config.num_carriers;
@@ -690,9 +690,9 @@ void StreamingDecoder::setConnectedOFDMMode(protocol::WaveformMode mode,
                                             CodeRate rate) {
     // §14.36 crash fix v3 (2026-05-28): defer the waveform_ reconstruction
     // to the safe top-of-processBuffer boundary. Inline construction races
-    // the RX thread (which releases ring_.buffer_mutex_ before searchForSync) and
+    // the RX thread (which releases sync_controller_.ring_.buffer_mutex_ before searchForSync) and
     // SIGSEGVs in HilbertTransform::process — same root cause as v2 setDataMode.
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     pending_connected_ofdm_mode_ = mode;
     pending_connected_ofdm_config_ = config;
     pending_connected_ofdm_mod_ = mod;
@@ -701,7 +701,7 @@ void StreamingDecoder::setConnectedOFDMMode(protocol::WaveformMode mode,
 }
 
 void StreamingDecoder::applyPendingConnectedOFDMMode() {
-    // Caller already holds ring_.buffer_mutex_ and we are at the safe boundary
+    // Caller already holds sync_controller_.ring_.buffer_mutex_ and we are at the safe boundary
     // (top of processBuffer, before any decode work in this iteration).
     if (!pending_connected_ofdm_change_) return;
     pending_connected_ofdm_change_ = false;
@@ -757,8 +757,8 @@ void StreamingDecoder::applyPendingConnectedOFDMMode() {
     burst_metric_templates_.clear();
     mc_burst_pending_frame_ = false;
     mc_burst_pending_soft_bits_.clear();
-    ring_.correlation_pos_ = ring_.write_pos_;
-    ring_.setSearchFloorLocked(ring_.total_fed_);
+    sync_controller_.ring_.correlation_pos_ = sync_controller_.ring_.write_pos_;
+    sync_controller_.ring_.setSearchFloorLocked(sync_controller_.ring_.total_fed_);
 
     LOG_MODEM(INFO, "StreamingDecoder: connected OFDM mode=%s, mod=%s, rate=%s, carriers=%d data=%d bps=%zu",
               protocol::waveformModeToString(mode_),
@@ -770,7 +770,7 @@ void StreamingDecoder::applyPendingConnectedOFDMMode() {
 }
 
 void StreamingDecoder::setDataMode(Modulation mod, CodeRate rate) {
-    // §14.36 crash fix v2 (2026-05-28): processBuffer RELEASES ring_.buffer_mutex_
+    // §14.36 crash fix v2 (2026-05-28): processBuffer RELEASES sync_controller_.ring_.buffer_mutex_
     // before calling searchForSync (line 493). If we apply configure() here
     // (which replaces modulator_/demodulator_/chirp_sync_ unique_ptrs), the
     // RX thread mid-searchForSync runs with stale pointers -> SIGSEGV in
@@ -782,14 +782,14 @@ void StreamingDecoder::setDataMode(Modulation mod, CodeRate rate) {
     // any decode work). Same channel the BURST_HEADER intercept uses; setting
     // the same fields from setDataMode is correct (last write wins, the
     // controller's latest decision is what we want for the next iteration).
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     pending_descriptor_mod_ = mod;
     pending_descriptor_rate_ = rate;
     pending_descriptor_rate_change_ = true;
 }
 
 void StreamingDecoder::applyPendingDescriptorDataMode() {
-    // Caller already holds ring_.buffer_mutex_. Apply the deferred descriptor-driven
+    // Caller already holds sync_controller_.ring_.buffer_mutex_. Apply the deferred descriptor-driven
     // rate switch, if any (set by the BURST_HEADER intercept). This runs at the
     // top of processBuffer — between iterations — so the configure() can swap
     // modulator_/demodulator_/chirp_sync_ unique_ptrs without any concurrent
@@ -809,7 +809,7 @@ void StreamingDecoder::applyPendingDescriptorDataMode() {
 }
 
 void StreamingDecoder::applyDataModeUnlocked(Modulation mod, CodeRate rate) {
-    // §14.36: callable from contexts that already hold ring_.buffer_mutex_ (e.g. the
+    // §14.36: callable from contexts that already hold sync_controller_.ring_.buffer_mutex_ (e.g. the
     // BURST_HEADER intercept inside processBuffer), so the receiver can switch
     // rate from the descriptor's declaration mid-transfer.
     code_rate_ = rate;
@@ -834,7 +834,7 @@ void StreamingDecoder::applyDataModeUnlocked(Modulation mod, CodeRate rate) {
 }
 
 void StreamingDecoder::setCodecType(fec::CodecType type) {
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     if (codec_type_ == type) return;
     codec_type_ = type;
     codec_ = fec::CodecFactory::create(type, code_rate_);
@@ -845,9 +845,9 @@ void StreamingDecoder::setCodecType(fec::CodecType type) {
 // ============================================================================
 
 float StreamingDecoder::getBufferFillPercent() const {
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
-    size_t used = std::min(ring_.total_fed_, ring_.buffer_capacity_samples_);
-    return 100.0f * used / ring_.buffer_capacity_samples_;
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+    size_t used = std::min(sync_controller_.ring_.total_fed_, sync_controller_.ring_.buffer_capacity_samples_);
+    return 100.0f * used / sync_controller_.ring_.buffer_capacity_samples_;
 }
 
 DecoderStats StreamingDecoder::getStats() const {
@@ -856,7 +856,7 @@ DecoderStats StreamingDecoder::getStats() const {
 }
 
 StreamingDecoder::FrameArrivalSnapshot StreamingDecoder::getFrameArrivalSnapshot() const {
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
 
     FrameArrivalSnapshot snapshot;
     snapshot.warm_sync_active = sync_controller_.warm_sync_active_;
@@ -875,22 +875,22 @@ StreamingDecoder::FrameArrivalSnapshot StreamingDecoder::getFrameArrivalSnapshot
 }
 
 void StreamingDecoder::setExpectedFrameGapSamples(size_t samples) {
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     sync_controller_.setExpectedFrameGapSamples(samples);
 }
 
 void StreamingDecoder::seedExpectedFrameArrivalAfterSamples(size_t delay_samples,
                                                             float confidence) {
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     if (!connected_ || mode_ != protocol::WaveformMode::OFDM_CHIRP) {
         return;
     }
-    sync_controller_.seedArrivalAfterDelay(ring_.total_fed_, delay_samples, confidence);
+    sync_controller_.seedArrivalAfterDelay(sync_controller_.ring_.total_fed_, delay_samples, confidence);
 }
 
 
 StreamingDecoder::DecoderConfig StreamingDecoder::getConfig() const {
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
 
     DecoderConfig cfg;
     cfg.mode = mode_;
@@ -918,19 +918,19 @@ StreamingDecoder::DecoderConfig StreamingDecoder::getConfig() const {
 }
 
 size_t StreamingDecoder::samplesInBuffer() const {
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
-    return std::min(ring_.total_fed_, ring_.buffer_capacity_samples_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+    return std::min(sync_controller_.ring_.total_fed_, sync_controller_.ring_.buffer_capacity_samples_);
 }
 
 bool StreamingDecoder::isSynced() const {
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     return state_ == DecoderState::SYNC_FOUND || state_ == DecoderState::DECODING
         || state_ == DecoderState::BURST_ACCUMULATING
         || state_ == DecoderState::MCDPSK_BURST_CONTINUING;
 }
 
 void StreamingDecoder::captureConstellationSnapshot() {
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     if (!waveform_) {
         return;
     }
@@ -943,7 +943,7 @@ void StreamingDecoder::captureConstellationSnapshot() {
 }
 
 std::vector<std::complex<float>> StreamingDecoder::getConstellationSymbols() const {
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     auto now = std::chrono::steady_clock::now();
 
     if (waveform_) {
@@ -1000,7 +1000,7 @@ std::vector<std::complex<float>> StreamingDecoder::getConstellationSymbols() con
 }
 
 Modulation StreamingDecoder::getConstellationModulation() const {
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     if (waveform_) {
         return waveform_->getConstellationModulation();
     }
@@ -1015,15 +1015,15 @@ void StreamingDecoder::reset() {
     // Increment generation BEFORE acquiring lock - any ongoing search will see new value
     reset_generation_.fetch_add(1);
 
-    std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
 
-    ring_.write_pos_ = 0;
-    ring_.correlation_pos_ = 0;
+    sync_controller_.ring_.write_pos_ = 0;
+    sync_controller_.ring_.correlation_pos_ = 0;
     sync_position_ = 0;
     sync_correlation_ = 0.0f;
     sync_gap_error_samples_ = 0.0f;
     samples_since_sync_ = 0;
-    ring_.total_fed_ = 0;
+    sync_controller_.ring_.total_fed_ = 0;
     feed_iter_ = 0;
     overflow_events_ = 0;
     sync_controller_.sync_reject_streak_ = 0;
@@ -1042,10 +1042,10 @@ void StreamingDecoder::reset() {
     use_burst_interleave_ = false;
     new_data_available_ = false;
     last_decoded_sync_pos_ = SIZE_MAX;
-    ring_.search_floor_abs_ = 0;
-    ring_.search_floor_abs_valid_ = false;
+    sync_controller_.ring_.search_floor_abs_ = 0;
+    sync_controller_.ring_.search_floor_abs_valid_ = false;
 
-    std::fill(ring_.buffer_.begin(), ring_.buffer_.end(), 0.0f);
+    std::fill(sync_controller_.ring_.buffer_.begin(), sync_controller_.ring_.buffer_.end(), 0.0f);
     if (waveform_) waveform_->reset();
     idle_noise_snr_estimator_.reset();
 
@@ -1059,7 +1059,7 @@ void StreamingDecoder::reset() {
         stats_ = DecoderStats{};
     }
 
-    ring_.noise_floor_ = 0.001f;
+    sync_controller_.ring_.noise_floor_ = 0.001f;
     last_snr_.store(0.0f);
     last_ofdm_broadband_snr_db_valid_.store(false);
     last_ofdm_broadband_snr_db_.store(0.0f);
@@ -1069,7 +1069,7 @@ void StreamingDecoder::reset() {
 
 void StreamingDecoder::stop() {
     shutdown_.store(true);
-    ring_.data_cv_.notify_all();
+    sync_controller_.ring_.data_cv_.notify_all();
 }
 
 } // namespace gui

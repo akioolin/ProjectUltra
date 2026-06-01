@@ -31,6 +31,7 @@
 #include "protocol/frame_v2.hpp"             // protocol::WaveformMode
 #include "sync/frame_arrival_policy.hpp"     // WarmSyncPhase + warm-sync timing helpers
 #include "sync/signal_policy.hpp"            // LightSyncThresholds + light-sync acceptance
+#include "sync/sync_ring_buffer.hpp"         // SyncRingBuffer — the owned audio ring (refactor §7 C3)
 
 #include <atomic>
 #include <cstddef>
@@ -75,6 +76,12 @@ struct LightSyncAcceptance {
 
 class SyncController {
 public:
+    // §7 C3: the controller OWNS the shared audio ring. Sized at construction from the decoder's
+    // buffer capacity (StreamingDecoder forwards its ctor arg as sync_controller_(capacity)); the
+    // default keeps standalone/test construction (`SyncController sc;`) at the production 50 s buffer.
+    explicit SyncController(size_t ring_capacity = SyncRingBuffer::kDefaultBufferSamples)
+        : ring_(ring_capacity) {}
+
     // Reset to COLD for a new connection / mode change. `wf` is the active waveform whose detectors
     // we call; `is_coherent` selects the COLD/RE_ACQUIRE strict thresholds.
     void reset(protocol::WaveformMode mode, IWaveform* wf, bool is_coherent);
@@ -203,6 +210,13 @@ public:
     // are public ONLY during the shell-move and get re-privatized behind
     // detect()/reportFrameOutcome()/noteGroupBoundary() in the behavioral phase.
     // KEEP names identical to the old StreamingDecoder members (mechanical move).
+    //
+    // §7 C3 Phase 2: the controller now OWNS the shared 48 kHz audio ring (producer =
+    // StreamingDecoder::feedAudio, consumers = searchForSync + the decode path). Transitional-public —
+    // the decoder still reaches buffer/cursors/floor/helpers as sync_controller_.ring_.X until
+    // detect() absorbs the search loop (Phase 3). Constructed first (the ctor sizes it from capacity).
+    SyncRingBuffer ring_;
+
     uint64_t sync_reject_streak_ = 0;   // consecutive COLD/RE_ACQUIRE light-sync rejects
     size_t   next_expected_frame_sample_ = 0;        // predicted next-frame absolute sample
     bool     next_expected_frame_sample_valid_ = false;

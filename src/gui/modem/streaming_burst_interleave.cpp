@@ -193,8 +193,8 @@ void StreamingDecoder::accumulateBurstFrames() {
         burst_metric_templates_.clear();
         clearBurstDiagnostics();
         {
-            std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
-            ring_.correlation_pos_ = burst_next_pos_;
+            std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+            sync_controller_.ring_.correlation_pos_ = burst_next_pos_;
         }
         state_ = DecoderState::SEARCHING;
         return;
@@ -216,8 +216,8 @@ void StreamingDecoder::accumulateBurstFrames() {
         burst_metric_templates_.clear();
         clearBurstDiagnostics();
         {
-            std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
-            ring_.correlation_pos_ = burst_next_pos_;
+            std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+            sync_controller_.ring_.correlation_pos_ = burst_next_pos_;
         }
         state_ = DecoderState::SEARCHING;
         return;
@@ -234,8 +234,8 @@ void StreamingDecoder::accumulateBurstFrames() {
         burst_metric_templates_.clear();
         clearBurstDiagnostics();
         {
-            std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
-            ring_.correlation_pos_ = burst_next_pos_;
+            std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+            sync_controller_.ring_.correlation_pos_ = burst_next_pos_;
         }
         state_ = DecoderState::SEARCHING;
     }
@@ -253,11 +253,11 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     // Check available samples at burst_next_pos_
     size_t next_available;
     {
-        std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
-        if (ring_.write_pos_ >= burst_next_pos_) {
-            next_available = ring_.write_pos_ - burst_next_pos_;
+        std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+        if (sync_controller_.ring_.write_pos_ >= burst_next_pos_) {
+            next_available = sync_controller_.ring_.write_pos_ - burst_next_pos_;
         } else {
-            next_available = ring_.buffer_capacity_samples_ - burst_next_pos_ + ring_.write_pos_;
+            next_available = sync_controller_.ring_.buffer_capacity_samples_ - burst_next_pos_ + sync_controller_.ring_.write_pos_;
         }
     }
 
@@ -269,19 +269,19 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     std::vector<float> block(burst_min_block_);
     size_t block_start_pos = burst_next_pos_;
     {
-        std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+        std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
         for (size_t i = 0; i < burst_min_block_; i++) {
-            block[i] = ring_.buffer_[ring_.wrapRingIndexLocked(burst_next_pos_ + i)];
+            block[i] = sync_controller_.ring_.buffer_[sync_controller_.ring_.wrapRingIndexLocked(burst_next_pos_ + i)];
         }
     }
 
     size_t abs_burst = burst_next_pos_;
-    if (ring_.total_fed_ >= ring_.buffer_capacity_samples_) {
-        const size_t oldest_abs = ring_.total_fed_ - ring_.buffer_capacity_samples_;
-        const size_t oldest_pos = ring_.write_pos_;
+    if (sync_controller_.ring_.total_fed_ >= sync_controller_.ring_.buffer_capacity_samples_) {
+        const size_t oldest_abs = sync_controller_.ring_.total_fed_ - sync_controller_.ring_.buffer_capacity_samples_;
+        const size_t oldest_pos = sync_controller_.ring_.write_pos_;
         const size_t offset = (burst_next_pos_ >= oldest_pos)
             ? (burst_next_pos_ - oldest_pos)
-            : (ring_.buffer_capacity_samples_ - oldest_pos + burst_next_pos_);
+            : (sync_controller_.ring_.buffer_capacity_samples_ - oldest_pos + burst_next_pos_);
         abs_burst = oldest_abs + offset;
     }
 
@@ -311,7 +311,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         appendBurstPhysicalDiagnostics(abs_burst, burst_soft_buffer_.back(), next_rms,
                                        0.0f, 0.0f, burst_cfo_,
                                        /*erasure=*/true, /*process_ok=*/false);
-        burst_next_pos_ = ring_.wrapRingIndexLocked(burst_next_pos_ + burst_min_block_);
+        burst_next_pos_ = sync_controller_.ring_.wrapRingIndexLocked(burst_next_pos_ + burst_min_block_);
         return BurstFrameResult::SUCCESS;
     }
 
@@ -337,7 +337,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         appendBurstPhysicalDiagnostics(abs_burst, burst_soft_buffer_.back(), next_rms,
                                        burst_pre_cfo, 0.0f, burst_cfo_,
                                        /*erasure=*/true, /*process_ok=*/false);
-        burst_next_pos_ = ring_.wrapRingIndexLocked(burst_next_pos_ + burst_min_block_);
+        burst_next_pos_ = sync_controller_.ring_.wrapRingIndexLocked(burst_next_pos_ + burst_min_block_);
         return BurstFrameResult::SUCCESS;
     }
     captureConstellationSnapshot();
@@ -359,8 +359,8 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         std::abs(timing_offset) >= kBurstContinuationRetryThreshold &&
         std::abs(timing_offset) <= kBurstContinuationRetryMax) {
         const int sample_correction = static_cast<int>(std::lround(timing_offset));
-        const size_t corrected_pos = ring_.wrapRingIndexLocked(
-            block_start_pos + ring_.buffer_capacity_samples_ + sample_correction);
+        const size_t corrected_pos = sync_controller_.ring_.wrapRingIndexLocked(
+            block_start_pos + sync_controller_.ring_.buffer_capacity_samples_ + sample_correction);
         const size_t corrected_abs =
             (sample_correction >= 0)
                 ? abs_burst + static_cast<size_t>(sample_correction)
@@ -370,18 +370,18 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
 
         bool have_corrected_block = false;
         {
-            std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+            std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
             size_t corrected_available;
-            if (ring_.write_pos_ >= corrected_pos) {
-                corrected_available = ring_.write_pos_ - corrected_pos;
+            if (sync_controller_.ring_.write_pos_ >= corrected_pos) {
+                corrected_available = sync_controller_.ring_.write_pos_ - corrected_pos;
             } else {
-                corrected_available = ring_.buffer_capacity_samples_ - corrected_pos + ring_.write_pos_;
+                corrected_available = sync_controller_.ring_.buffer_capacity_samples_ - corrected_pos + sync_controller_.ring_.write_pos_;
             }
             have_corrected_block = corrected_available >= burst_min_block_;
             if (have_corrected_block) {
                 block.assign(burst_min_block_, 0.0f);
                 for (size_t i = 0; i < burst_min_block_; i++) {
-                    block[i] = ring_.buffer_[ring_.wrapRingIndexLocked(corrected_pos + i)];
+                    block[i] = sync_controller_.ring_.buffer_[sync_controller_.ring_.wrapRingIndexLocked(corrected_pos + i)];
                 }
             }
         }
@@ -421,7 +421,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
                                        waveform_ ? waveform_->estimatedCFO() : 0.0f,
                                        burst_cfo_,
                                        /*erasure=*/true, /*process_ok=*/true);
-        burst_next_pos_ = ring_.wrapRingIndexLocked(burst_next_pos_ + burst_min_block_);
+        burst_next_pos_ = sync_controller_.ring_.wrapRingIndexLocked(burst_next_pos_ + burst_min_block_);
         return BurstFrameResult::SUCCESS;
     }
 
@@ -438,7 +438,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     appendBurstPhysicalDiagnostics(abs_burst, burst_soft_buffer_.back(), next_rms,
                                    burst_pre_cfo, residual_cfo, cfo_update.accepted_cfo,
                                    /*erasure=*/false, /*process_ok=*/true);
-    burst_next_pos_ = ring_.wrapRingIndexLocked(block_start_pos + burst_min_block_);
+    burst_next_pos_ = sync_controller_.ring_.wrapRingIndexLocked(block_start_pos + burst_min_block_);
 
     LOG_MODEM(INFO, "[%s] Burst frame %zu/%d demodulated, RMS=%.4f",
               log_prefix_.c_str(), burst_soft_buffer_.size(),

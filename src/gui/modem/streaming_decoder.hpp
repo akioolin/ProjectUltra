@@ -402,7 +402,7 @@ public:
 
     // Get number of samples in buffer
     size_t samplesInBuffer() const;
-    size_t bufferCapacitySamples() const { return ring_.buffer_capacity_samples_; }
+    size_t bufferCapacitySamples() const { return sync_controller_.ring_.buffer_capacity_samples_; }
 
     // Check if waveform is synchronized
     bool isSynced() const;
@@ -550,8 +550,8 @@ private:
     void noteFrameArrivalSuccessLocked(size_t frame_start_abs, size_t frame_end_abs);
     void noteFrameArrivalSyncMissLocked();
 
-    // Ring/absolute sample helpers moved to SyncRingBuffer (ring_.*); call only while
-    // ring_.buffer_mutex_ is held.
+    // Ring/absolute sample helpers moved to SyncRingBuffer (sync_controller_.ring_.*); call only
+    // while sync_controller_.ring_.buffer_mutex_ is held.
 
     // Burst interleave accumulation
     enum class BurstFrameResult {
@@ -602,9 +602,9 @@ private:
     // STATE
     // ========================================================================
 
-    // Circular audio ring + its write/search cursors, search floor, noise floor, and the
-    // buffer_mutex_/data_cv_ pair — all owned by SyncRingBuffer (§7 C3). Reached as ring_.*.
-    sync::SyncRingBuffer ring_;
+    // The circular audio ring + its cursors/floor/noise + buffer_mutex_/data_cv_ are owned by
+    // SyncRingBuffer, which now lives INSIDE sync_controller_ (§7 C3 Phase 2). Reached as
+    // sync_controller_.ring_.* — the controller owns the buffer it searches.
 
     // Continuous correlation state machine (like real receivers)
     DecoderState state_ = DecoderState::SEARCHING;
