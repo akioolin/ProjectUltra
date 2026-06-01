@@ -37,6 +37,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace ultra {
 namespace sync {
@@ -72,6 +73,22 @@ struct LightSyncAcceptance {
     bool   position_gated = false;    // WARM position-gating fired (light-LTS corr at noise)
     size_t position_gate_abs = 0;     // absolute sample to process at (when position_gated)
     float  position_gate_cfo = 0.0f;  // known CFO to apply at the gated position
+};
+
+// The extracted search window for one searchForSync tick (§7 C3 Phase 3a). Produced by
+// acquireSearchWindow() from the controller-owned ring: the slice of audio the decoder then runs
+// detectors over, plus the warm-window geometry. ready=false ⇒ no search this tick (the caller
+// returns); the ring-state side effects (correlation_pos_ advance, noise_floor_/search_floor_
+// updates) already happened inside the call.
+struct SearchWindowResult {
+    bool   ready = false;
+    std::vector<float> search_buffer;
+    size_t search_start = 0;
+    size_t min_search = 0;
+    bool   used_warm_timed_window = false;
+    bool   used_warm_narrow_window = false;
+    size_t warm_narrow_end_abs = 0;
+    size_t warm_narrow_candidate_span_samples = 0;
 };
 
 class SyncController {
@@ -141,6 +158,19 @@ public:
         bool use_light_search, size_t total_fed, size_t oldest_abs,
         bool search_floor_valid, size_t search_floor_abs, size_t correlation_abs,
         size_t symbol_samples, size_t correlation_step);
+
+    // The lock-held search-window PRODUCTION (§7 C3 Phase 3a; moved verbatim from
+    // StreamingDecoder::searchForSync). Locks the owned ring, runs planWarmSearch + the RMS gate +
+    // the post-frame search-floor logic, advances correlation_pos_, and extracts the next slice the
+    // decoder runs detectors over. Returns SearchWindowResult{ready=false} for the wait/skip ticks
+    // (the ring side effects already applied). The decoder passes the inputs it derives from the
+    // waveform/connection: use_light_search / connected_data_preamble / disconnected_mc_dpsk, the
+    // initial min_search, data_symbol_samples, an audio-activity snapshot, and the step/threshold
+    // constants. This LOCKS ring_.buffer_mutex_ internally (unlike the *Locked helpers).
+    SearchWindowResult acquireSearchWindow(
+        bool use_light_search, bool connected_data_preamble, bool disconnected_mc_dpsk,
+        size_t min_search, size_t data_symbol_samples, bool audio_active,
+        size_t correlation_step, float corr_noise_threshold);
 
     void setLogPrefix(const std::string& prefix) { log_prefix_ = prefix; }
 

@@ -2,6 +2,11 @@
 
 #include "ultra/logging.hpp"   // LOG_MODEM (shared logging header; src/sync already uses LOG_SYNC)
 
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <utility>
+
 // SyncController — SCAFFOLD implementation (2026-05-31).
 //
 // These are intentionally inert stubs: the object exists and compiles, but it is NOT yet wired
@@ -296,6 +301,289 @@ frame_arrival_policy::WarmSearchWindowPlan SyncController::planWarmSearch(
         correlation_abs,
         symbol_samples,
         correlation_step);
+}
+
+// §7 C3 Phase 3a: search-window PRODUCTION moved verbatim out of StreamingDecoder::searchForSync.
+// The controller owns the ring, so it owns extracting the next search window from it (ring access
+// + planWarmSearch + RMS gate + post-frame floor). Same computations, logs, order, and early-return
+// semantics -> byte-identical; the decoder still runs the detector dispatch on the returned window.
+SearchWindowResult SyncController::acquireSearchWindow(
+    bool use_light_search, bool connected_data_preamble, bool disconnected_mc_dpsk,
+    size_t min_search, size_t data_symbol_samples, bool audio_active,
+    size_t correlation_step, float corr_noise_threshold) {
+    SearchWindowResult result;
+    std::vector<float> search_buffer;
+    size_t search_start = 0;
+    bool used_warm_timed_window = false;
+    bool used_warm_narrow_window = false;
+    size_t warm_narrow_end_abs = 0;
+    size_t warm_narrow_candidate_span_samples = 0;
+
+    {
+        std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);
+
+        float audio_sec = ring_.total_fed_ / 48000.0f;
+
+        // Initialize ring_.correlation_pos_ if needed
+        if (ring_.correlation_pos_ == 0 && ring_.total_fed_ > 0) {
+            if (ring_.total_fed_ < ring_.buffer_capacity_samples_) {
+                ring_.correlation_pos_ = 0;
+            } else {
+                ring_.correlation_pos_ = ring_.write_pos_;
+            }
+        }
+
+        const size_t oldest_abs = (ring_.total_fed_ > ring_.buffer_capacity_samples_)
+            ? (ring_.total_fed_ - ring_.buffer_capacity_samples_)
+            : 0;
+        const size_t correlation_abs = ring_.ringPosToAbsoluteLocked(ring_.correlation_pos_);
+        // §7.4 chunk-B tail: the warm-window PLANNING decision (s16 skip-short-lead +
+        // expected search anchor + planWarmSearchWindow + short-reanchor-lead adjustment)
+        // now lives on the controller, which owns the warm-sync state it reads. The decoder
+        // still owns the ring buffer — it derived oldest_abs / correlation_abs above and does
+        // the wait / activate / extraction below from the returned plan.
+        auto warm_plan = planWarmSearch(
+            use_light_search,
+            ring_.total_fed_,
+            oldest_abs,
+            ring_.search_floor_abs_valid_,
+            ring_.search_floor_abs_,
+            correlation_abs,
+            data_symbol_samples,
+            correlation_step);
+
+        if (warm_plan.wait_for_more_samples) {
+            static int warm_wait_count = 0;
+            if (++warm_wait_count % 50 == 1) {
+                LOG_MODEM(INFO,
+                          "[%s] warm-sync: wait for expected window, need_abs=%zu total=%zu expected=%zu",
+                          log_prefix_.c_str(), warm_plan.search_end_abs, ring_.total_fed_,
+                          next_expected_frame_sample_);
+            }
+            return result;
+        }
+
+        if (warm_plan.active) {
+            used_warm_timed_window = true;
+            used_warm_narrow_window = warm_plan.lower_threshold;
+            warm_narrow_end_abs = warm_plan.search_end_abs;
+            warm_narrow_candidate_span_samples = warm_plan.candidate_span_samples;
+            min_search = warm_plan.search_size_samples;
+            search_start = ring_.absoluteToRingLocked(warm_plan.search_start_abs);
+        }
+        // §16.8 step 2 v2 diagnostic: log warm-window decision once per
+        // search invocation. ULTRA_S16_TRACE_WARM_WINDOW=1 enables.
+        {
+            const char* trace = std::getenv("ULTRA_S16_TRACE_WARM_WINDOW");
+            if (trace && std::atoi(trace) != 0) {
+                LOG_MODEM(INFO,
+                    "[%s] s16-warm-window: active=%d wait=%d lower_threshold=%d "
+                    "phase=%s active_flag=%d has_pred=%d expected=%llu "
+                    "conf=%.2f misses=%d use_light=%d total=%llu "
+                    "search[%llu..%llu] span=%zu",
+                    log_prefix_.c_str(),
+                    warm_plan.active ? 1 : 0,
+                    warm_plan.wait_for_more_samples ? 1 : 0,
+                    warm_plan.lower_threshold ? 1 : 0,
+                    frame_arrival_policy::warmSyncPhaseName(derivePhase()),
+                    warm_sync_active_ ? 1 : 0,
+                    next_expected_frame_sample_valid_ ? 1 : 0,
+                    static_cast<unsigned long long>(next_expected_frame_sample_),
+                    frame_arrival_confidence_,
+                    consecutive_sync_misses_,
+                    use_light_search ? 1 : 0,
+                    static_cast<unsigned long long>(ring_.total_fed_),
+                    static_cast<unsigned long long>(warm_plan.search_start_abs),
+                    static_cast<unsigned long long>(warm_plan.search_end_abs),
+                    warm_plan.candidate_span_samples);
+            }
+        }
+
+        // Need minimum samples before we can search
+        if (ring_.total_fed_ < min_search) {
+            static int skip_count = 0;
+            if (++skip_count % 50 == 1)
+                LOG_MODEM(INFO, "[%s] searchForSync: SKIP not enough samples, total=%.2fs, need=%.2fs",
+                          log_prefix_.c_str(), audio_sec, min_search / 48000.0f);
+            return result;
+        }
+
+        // Calculate unsearched data available
+        size_t unsearched;
+        if (ring_.write_pos_ >= ring_.correlation_pos_) {
+            unsearched = ring_.write_pos_ - ring_.correlation_pos_;
+        } else {
+            unsearched = ring_.buffer_capacity_samples_ - ring_.correlation_pos_ + ring_.write_pos_;
+        }
+
+        // Need at least min_search unsearched samples
+        if (!used_warm_timed_window && unsearched < min_search) {
+            static int skip_count2 = 0;
+            if (++skip_count2 % 50 == 1)
+                LOG_MODEM(INFO, "[%s] searchForSync: SKIP unsearched=%zu < min=%zu, total=%.2fs, corr_pos=%zu",
+                          log_prefix_.c_str(), unsearched, min_search, audio_sec, ring_.correlation_pos_);
+            return result;
+        }
+
+        // Quick RMS check for signal presence. For disconnected MC-DPSK chirps,
+        // use the strongest 20ms slice across the next 100ms search step. A
+        // Watterson notch can erase one narrow chirp segment while the rest of
+        // the sweep remains detectable; the correlator is the real detector,
+        // this gate only keeps silence from burning CPU.
+        const size_t rms_probe_pos = used_warm_timed_window ? search_start : ring_.correlation_pos_;
+        float rms = 0.0f;
+        for (size_t i = 0; i < 1000; i++) {
+            float s = ring_.buffer_[ring_.wrapRingIndexLocked(rms_probe_pos + i)];
+            rms += s * s;
+        }
+        rms = std::sqrt(rms / 1000.0f);
+
+        if (disconnected_mc_dpsk) {
+            float max_slice_rms = rms;
+            constexpr size_t RMS_SLICE_SAMPLES = 1000;
+            for (size_t off = RMS_SLICE_SAMPLES;
+                 off + RMS_SLICE_SAMPLES <= correlation_step;
+                 off += RMS_SLICE_SAMPLES) {
+                float slice_sum = 0.0f;
+                for (size_t i = 0; i < RMS_SLICE_SAMPLES; ++i) {
+                    float s = ring_.buffer_[ring_.wrapRingIndexLocked(rms_probe_pos + off + i)];
+                    slice_sum += s * s;
+                }
+                max_slice_rms = std::max(
+                    max_slice_rms,
+                    std::sqrt(slice_sum / static_cast<float>(RMS_SLICE_SAMPLES)));
+            }
+            rms = max_slice_rms;
+        }
+
+        // OTA-connected mode can run at lower absolute amplitudes than simulator
+        // defaults. Use an adaptive gate so valid low-level frames are not skipped.
+        float rms_gate = corr_noise_threshold;
+        if (disconnected_mc_dpsk) {
+            float noise_floor = std::max(0.0005f, ring_.noise_floor_);
+            if (rms < corr_noise_threshold) {
+                ring_.noise_floor_ = 0.98f * noise_floor + 0.02f * rms;
+            } else {
+                ring_.noise_floor_ = 0.995f * noise_floor + 0.005f * rms;
+            }
+
+            // Before sync there is no SNR estimate. Use the measured audio
+            // floor, but never raise the historical 0.025 gate; this only
+            // relaxes acquisition when high-SNR fading leaves low absolute RMS.
+            rms_gate = std::clamp(ring_.noise_floor_ * 3.0f, 0.006f, corr_noise_threshold);
+            if (audio_active) {
+                rms_gate = std::min(rms_gate, 0.012f);
+            }
+        } else if (connected_data_preamble) {
+            float noise_floor = std::max(0.001f, ring_.noise_floor_);
+            if (rms < noise_floor * 3.0f) {
+                ring_.noise_floor_ = 0.98f * noise_floor + 0.02f * rms;
+            } else {
+                ring_.noise_floor_ = 0.995f * noise_floor + 0.005f * rms;
+            }
+
+            // Typical OTA values observed around 0.02-0.04 RMS; keep floor low enough
+            // to avoid starving detectDataSync() while still skipping true silence.
+            rms_gate = std::clamp(ring_.noise_floor_ * 2.2f, 0.015f, 0.040f);
+            if (sync_reject_streak_ >= 8) {
+                float relax = std::min(0.010f,
+                                       0.001f * static_cast<float>(sync_reject_streak_ - 7));
+                rms_gate = std::max(0.012f, rms_gate - relax);
+            }
+        }
+
+        if (rms < rms_gate) {
+            // No signal - advance by small step (100ms = 4800 samples)
+            static int rms_skip_count = 0;
+            if (++rms_skip_count % 10 == 1)
+                LOG_MODEM(INFO, "[%s] searchForSync: RMS skip, rms=%.4f < %.3f, corr_pos=%zu, total=%.2fs",
+                          log_prefix_.c_str(), rms, rms_gate, ring_.correlation_pos_, audio_sec);
+            ring_.correlation_pos_ = ring_.wrapRingIndexLocked(ring_.correlation_pos_ + correlation_step);
+            return result;
+        }
+
+        // Signal detected - log before running correlation (only occasionally to reduce spam)
+        static int run_log_count = 0;
+        if (++run_log_count % 10 == 1) {
+            LOG_MODEM(INFO, "[%s] searchForSync: RUNNING correlation, rms=%.4f, corr_pos=%zu, total=%.2fs",
+                      log_prefix_.c_str(), rms, ring_.correlation_pos_, audio_sec);
+        }
+
+        // Signal present - back up search start to catch chirp that might have started
+        // in the lead-in silence. The TX lead-in is ~150ms (7200 samples), so we should
+        // back up at least that much to ensure the chirp START is in our search window.
+        // FIX: We may have skipped past the chirp start during low-RMS phases.
+        constexpr size_t SEARCH_BACKTRACK = 9600; // Back up slightly more than lead-in
+
+        if (!used_warm_timed_window) {
+            if (ring_.correlation_pos_ >= SEARCH_BACKTRACK) {
+                search_start = ring_.correlation_pos_ - SEARCH_BACKTRACK;
+            } else if (ring_.total_fed_ < ring_.buffer_capacity_samples_) {
+                // Buffer hasn't wrapped yet, start from beginning
+                search_start = 0;
+            } else {
+                // Buffer wrapped, handle underflow
+                search_start = ring_.wrapRingIndexLocked(ring_.buffer_capacity_samples_ + ring_.correlation_pos_ - SEARCH_BACKTRACK);
+            }
+        }
+
+        // Do not let the backtrack window re-enter audio that a previous decode
+        // already consumed. On sustained OFDM ACK traffic, searching the tail of a
+        // just-decoded 1-CW control frame can find false LTS-like peaks; those
+        // false locks then escalate into expensive fixed-frame LDPC attempts and delay
+        // real ACKs long enough to trigger ARQ retransmission storms.
+        if (!used_warm_timed_window && ring_.search_floor_abs_valid_) {
+            if (ring_.search_floor_abs_ < oldest_abs) {
+                ring_.search_floor_abs_ = oldest_abs;
+            }
+            if (ring_.search_floor_abs_ > ring_.total_fed_) {
+                ring_.search_floor_abs_ = ring_.total_fed_;
+            }
+
+            size_t search_start_abs = ring_.ringPosToAbsoluteLocked(search_start);
+            if (search_start_abs < ring_.search_floor_abs_) {
+                if (ring_.total_fed_ - ring_.search_floor_abs_ < min_search) {
+                    static int floor_wait_count = 0;
+                    if (++floor_wait_count % 50 == 1) {
+                        LOG_MODEM(INFO,
+                                  "[%s] searchForSync: SKIP post-frame floor, available=%zu < min=%zu",
+                                  log_prefix_.c_str(), ring_.total_fed_ - ring_.search_floor_abs_, min_search);
+                    }
+                    return result;
+                }
+                search_start = ring_.absoluteToRingLocked(ring_.search_floor_abs_);
+            }
+        }
+
+        search_buffer.resize(min_search);
+        for (size_t i = 0; i < min_search; i++) {
+            search_buffer[i] = ring_.buffer_[ring_.wrapRingIndexLocked(search_start + i)];
+        }
+
+        if (used_warm_timed_window) {
+            ring_.correlation_pos_ = ring_.absoluteToRingLocked(warm_narrow_end_abs);
+            LOG_MODEM(INFO,
+                      "[%s] warm-sync: %s LTS search expected=%zu start_abs=%zu size=%zu confidence=%.2f",
+                      log_prefix_.c_str(),
+                      used_warm_narrow_window ? "narrow" : "degraded",
+                      next_expected_frame_sample_,
+                      warm_plan.search_start_abs, min_search,
+                      frame_arrival_confidence_);
+        } else {
+            // Advance by small step (100ms = 4800 samples) for accurate detection
+            ring_.correlation_pos_ = ring_.wrapRingIndexLocked(ring_.correlation_pos_ + correlation_step);
+        }
+    }
+
+    result.ready = true;
+    result.search_buffer = std::move(search_buffer);
+    result.search_start = search_start;
+    result.min_search = min_search;
+    result.used_warm_timed_window = used_warm_timed_window;
+    result.used_warm_narrow_window = used_warm_narrow_window;
+    result.warm_narrow_end_abs = warm_narrow_end_abs;
+    result.warm_narrow_candidate_span_samples = warm_narrow_candidate_span_samples;
+    return result;
 }
 
 }  // namespace sync
