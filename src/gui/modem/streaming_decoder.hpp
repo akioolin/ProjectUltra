@@ -47,6 +47,7 @@
 #include "sync/sync_ring_buffer.hpp"  // SyncRingBuffer — the shared audio ring (refactor §7 C3)
 #include "sync/cfo_tracker.hpp"       // CFOTracker — the tracked-CFO state (refactor §7 C-CFO)
 #include "frame_demodulator.hpp"      // FrameDemodulator — per-frame demod stage(s) (refactor §7 C-FD)
+#include "frame_decoder.hpp"          // FrameDecoder — soft-bits→frame FEC decode (refactor §7 C-FDec)
 #include <vector>
 #include <queue>
 #include <mutex>
@@ -629,9 +630,11 @@ private:
     // last_cfo_). The chirp/LTS/pilot estimators feed it; acquisition reads it as the known CFO and
     // the per-frame demod feedback stores the pilot-corrected value back (the feedback invariant).
     sync::CFOTracker cfo_tracker_;
-    // §7 C-FD-1: the per-frame demod stage(s). Currently owns the CFO pre-correction (the Hilbert
-    // pre-corrector + pre_correction_cfo_); grows to own the frame decode orchestration.
+    // §7 C-FD-1: the per-frame demod stage (CFO pre-correction; grows to own the demod orchestration).
     FrameDemodulator frame_demodulator_;
+    // §7 C-FDec-1: the FEC decode stage. Owns the decode primitives (codec + channel interleaver);
+    // grows to own decodeFrame/decodeMCDPSKFrame. Distinct concern from FrameDemodulator.
+    FrameDecoder frame_decoder_;
 
     // Reset generation counter - incremented on reset(), checked after slow operations
     // to detect if state was reset mid-operation (e.g., during correlation)

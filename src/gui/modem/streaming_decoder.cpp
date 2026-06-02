@@ -144,10 +144,10 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
     startupTrace("StreamingDecoder", "buffer-resized");
     waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
     startupTrace("StreamingDecoder", "waveform-created");
-    frame_demodulator_.interleaver_ = std::make_unique<ChannelInterleaver>(
+    frame_decoder_.interleaver_ = std::make_unique<ChannelInterleaver>(
         mcDpskBitsPerSymbol(mc_dpsk_config_), v2::LDPC_CODEWORD_BITS);
     startupTrace("StreamingDecoder", "interleaver-created");
-    frame_demodulator_.codec_ = fec::CodecFactory::create(fec::CodecType::LDPC, CodeRate::R1_4);
+    frame_decoder_.codec_ = fec::CodecFactory::create(fec::CodecType::LDPC, CodeRate::R1_4);
     startupTrace("StreamingDecoder", "codec-created");
 
     LOG_MODEM(INFO, "StreamingDecoder: Initialized (buffer=%zu samples)", sync_controller_.ring_.buffer_capacity_samples_);
@@ -536,7 +536,7 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
         // back to 648 when no descriptor has been seen yet (cold start).
         const size_t ldpc_codeword_bits_ci =
             (activeBurstLiftingZ() == 81) ? size_t{1944} : v2::LDPC_CODEWORD_BITS;
-        frame_demodulator_.interleaver_ = std::make_unique<ChannelInterleaver>(bps, ldpc_codeword_bits_ci);
+        frame_decoder_.interleaver_ = std::make_unique<ChannelInterleaver>(bps, ldpc_codeword_bits_ci);
     }
 
     state_ = DecoderState::SEARCHING;
@@ -612,7 +612,7 @@ void StreamingDecoder::setMCDPSKCarriers(int n) {
     mc_dpsk_config_.num_carriers = n;
     if (mode_ == protocol::WaveformMode::MC_DPSK) {
         waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
-        frame_demodulator_.interleaver_ = std::make_unique<ChannelInterleaver>(
+        frame_decoder_.interleaver_ = std::make_unique<ChannelInterleaver>(
             mcDpskBitsPerSymbol(mc_dpsk_config_), v2::LDPC_CODEWORD_BITS);
     }
 }
@@ -635,7 +635,7 @@ void StreamingDecoder::setMCDPSKConfig(const MultiCarrierDPSKConfig& config) {
     mc_dpsk_carriers_ = config.num_carriers;
     if (mode_ == protocol::WaveformMode::MC_DPSK) {
         waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
-        frame_demodulator_.interleaver_ = std::make_unique<ChannelInterleaver>(
+        frame_decoder_.interleaver_ = std::make_unique<ChannelInterleaver>(
             mcDpskBitsPerSymbol(mc_dpsk_config_), v2::LDPC_CODEWORD_BITS);
     }
 
@@ -681,7 +681,7 @@ void StreamingDecoder::setOFDMConfig(const ModemConfig& config) {
 
     // Update interleaver for new carrier count (using current modulation)
     size_t bps = static_cast<size_t>(ofdm_data_carriers_) * getBitsPerSymbol(current_modulation_);
-    frame_demodulator_.interleaver_ = std::make_unique<ChannelInterleaver>(bps, v2::LDPC_CODEWORD_BITS);
+    frame_decoder_.interleaver_ = std::make_unique<ChannelInterleaver>(bps, v2::LDPC_CODEWORD_BITS);
 }
 
 void StreamingDecoder::setConnectedOFDMMode(protocol::WaveformMode mode,
@@ -743,7 +743,7 @@ void StreamingDecoder::applyPendingConnectedOFDMMode() {
 
     size_t bps = static_cast<size_t>(ofdm_link_adaptation::bitsPerOFDMSymbol(
         ofdm_carriers_, pilot_spacing > 0, pilot_spacing, mod));
-    frame_demodulator_.interleaver_ = std::make_unique<ChannelInterleaver>(bps, v2::LDPC_CODEWORD_BITS);
+    frame_decoder_.interleaver_ = std::make_unique<ChannelInterleaver>(bps, v2::LDPC_CODEWORD_BITS);
 
     state_ = DecoderState::SEARCHING;
     pending_total_cw_ = 0;
@@ -828,7 +828,7 @@ void StreamingDecoder::applyDataModeUnlocked(Modulation mod, CodeRate rate) {
     // Use data carriers (not total) to account for pilot overhead
     int carriers = (mode_ == protocol::WaveformMode::MC_DPSK) ? mc_dpsk_carriers_ : ofdm_data_carriers_;
     size_t bps = static_cast<size_t>(carriers) * getBitsPerSymbol(mod);
-    frame_demodulator_.interleaver_ = std::make_unique<ChannelInterleaver>(bps, v2::LDPC_CODEWORD_BITS);
+    frame_decoder_.interleaver_ = std::make_unique<ChannelInterleaver>(bps, v2::LDPC_CODEWORD_BITS);
     LOG_MODEM(INFO, "StreamingDecoder: interleaver updated for %s (%zu bits/symbol)",
               modulationToString(mod), bps);
 }
@@ -837,7 +837,7 @@ void StreamingDecoder::setCodecType(fec::CodecType type) {
     std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     if (codec_type_ == type) return;
     codec_type_ = type;
-    frame_demodulator_.codec_ = fec::CodecFactory::create(type, code_rate_);
+    frame_decoder_.codec_ = fec::CodecFactory::create(type, code_rate_);
 }
 
 // ============================================================================

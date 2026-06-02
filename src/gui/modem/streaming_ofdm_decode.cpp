@@ -1261,8 +1261,8 @@ void StreamingDecoder::decodeCurrentFrame() {
 
     if (pending_total_cw_ == 0 && !is_ofdm && soft_bits.size() >= LDPC_BLOCK) {
         std::vector<float> cw0(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
-        frame_demodulator_.codec_->setRate(rate);
-        auto [peek_ok, peek_data] = frame_demodulator_.codec_->decode(cw0);
+        frame_decoder_.codec_->setRate(rate);
+        auto [peek_ok, peek_data] = frame_decoder_.codec_->decode(cw0);
 
         if (peek_ok && peek_data.size() >= 4 && peek_data[0] == 0x55 && peek_data[1] == 0x4C) {
             auto hdr = v2::parseHeader(peek_data);
@@ -1327,11 +1327,11 @@ void StreamingDecoder::decodeCurrentFrame() {
         // Large OFDM FILE_BLOCK frames use variable-CW encoding without the
         // fixed-frame interleaver. Give raw CW0 one chance to declare the
         // true frame length before defaulting to the fixed-frame path.
-        frame_demodulator_.codec_->setRate(rate);
+        frame_decoder_.codec_->setRate(rate);
         {
             ultra::timing::ScopedTimer _profile_(
                 ultra::timing::globalDecoderProfile().ofdm_cw0_probe_decode);
-            auto [peek_ok, peek_data] = frame_demodulator_.codec_->decode(
+            auto [peek_ok, peek_data] = frame_decoder_.codec_->decode(
                 std::vector<float>(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK));
             const size_t bytes_per_cw = v2::getBytesPerCodeword(rate);
             if (peek_ok && peek_data.size() >= bytes_per_cw) {
@@ -2163,9 +2163,9 @@ void StreamingDecoder::continueMCDPSKBurst() {
             return;
         }
 
-        frame_demodulator_.codec_->setRate(code_rate_);
+        frame_decoder_.codec_->setRate(code_rate_);
         std::vector<float> cw0_bits(soft.begin(), soft.begin() + LDPC_BLOCK);
-        auto [peek_ok, peek_data] = frame_demodulator_.codec_->decode(cw0_bits);
+        auto [peek_ok, peek_data] = frame_decoder_.codec_->decode(cw0_bits);
         const size_t bytes_per_cw = v2::getBytesPerCodeword(code_rate_);
         if (!peek_ok || peek_data.size() < bytes_per_cw ||
             peek_data[0] != 0x55 || peek_data[1] != 0x4C) {
@@ -2289,7 +2289,7 @@ DecodeResult StreamingDecoder::decodeMCDPSKFrame(const std::vector<float>& soft_
 
     if (soft_bits.size() < LDPC_BLOCK) return result;
 
-    frame_demodulator_.codec_->setRate(rate);
+    frame_decoder_.codec_->setRate(rate);
 
     auto tryFixedConnectFrame = [&]() -> DecodeResult {
         DecodeResult fixed;
@@ -2334,7 +2334,7 @@ DecodeResult StreamingDecoder::decodeMCDPSKFrame(const std::vector<float>& soft_
 
     // Decode CW0 (header codeword)
     std::vector<float> cw0_bits(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
-    auto [ok0, data0] = frame_demodulator_.codec_->decode(cw0_bits);
+    auto [ok0, data0] = frame_decoder_.codec_->decode(cw0_bits);
 
     if (!ok0 || data0.size() < 2 || data0[0] != 0x55 || data0[1] != 0x4C) {
         auto fixed = tryFixedConnectFrame();
@@ -2418,7 +2418,7 @@ DecodeResult StreamingDecoder::decodeMCDPSKFrame(const std::vector<float>& soft_
             const int cw_num = i + 1;
             const size_t off = static_cast<size_t>(cw_num) * LDPC_BLOCK;
             std::vector<float> bits(soft_bits.begin() + off, soft_bits.begin() + off + LDPC_BLOCK);
-            auto [ok, data] = frame_demodulator_.codec_->decode(bits);
+            auto [ok, data] = frame_decoder_.codec_->decode(bits);
             const uint8_t original_cw = repair_indices[static_cast<size_t>(i)];
             if (ok && data.size() >= bytes_per_cw) {
                 data.resize(bytes_per_cw);
@@ -2495,7 +2495,7 @@ DecodeResult StreamingDecoder::decodeMCDPSKFrame(const std::vector<float>& soft_
         size_t off = i * LDPC_BLOCK;
         std::vector<float> bits(soft_bits.begin() + off, soft_bits.begin() + off + LDPC_BLOCK);
 
-        auto [ok, data] = frame_demodulator_.codec_->decode(bits);
+        auto [ok, data] = frame_decoder_.codec_->decode(bits);
         if (ok && data.size() >= bytes_per_cw) {
             data.resize(bytes_per_cw);
             cw_status.decoded[i] = true;
@@ -2534,7 +2534,7 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
 
     CodeRate rate = connected_ ? code_rate_ : CodeRate::R1_4;
     size_t bytes_per_cw = v2::getBytesPerCodeword(rate);
-    frame_demodulator_.codec_->setRate(rate);
+    frame_decoder_.codec_->setRate(rate);
 
     // Channel interleaving only applies to OFDM modes, NOT MC-DPSK
     bool is_ofdm = protocol::isOFDMMode(mode_);
@@ -2543,7 +2543,7 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     // Helper to deinterleave a codeword if needed
     auto deinterleave_cw = [&](const std::vector<float>& cw) -> std::vector<float> {
         if (apply_channel_deinterleave) {
-            return frame_demodulator_.interleaver_->deinterleave(cw);
+            return frame_decoder_.interleaver_->deinterleave(cw);
         }
         return cw;
     };
@@ -2578,13 +2578,13 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
     // R1/4 fast-path: control frames are always encoded at R1/4 (hardened)
     // Try R1/4 first — if it's a valid 1-CW control frame, return immediately.
     if (!known_fixed_cw && rate != CodeRate::R1_4 && soft_bits.size() >= LDPC_BLOCK) {
-        frame_demodulator_.codec_->setRate(CodeRate::R1_4);
+        frame_decoder_.codec_->setRate(CodeRate::R1_4);
         std::vector<float> cw0_r14(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
         std::pair<bool, Bytes> probe;
         {
             ultra::timing::ScopedTimer _profile_(
                 ultra::timing::globalDecoderProfile().ofdm_cw0_probe_decode);
-            probe = frame_demodulator_.codec_->decode(cw0_r14);
+            probe = frame_decoder_.codec_->decode(cw0_r14);
         }
         auto [ok_r14, data_r14] = probe;
         size_t bpc_r14 = v2::getBytesPerCodeword(CodeRate::R1_4);
@@ -2603,7 +2603,7 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
             }
         }
         // Restore rate for remaining decode paths
-        frame_demodulator_.codec_->setRate(rate);
+        frame_decoder_.codec_->setRate(rate);
     }
 
     // Step 1: Try to decode CW0 RAW (no channel deinterleave)
@@ -2628,7 +2628,7 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
         {
             ultra::timing::ScopedTimer _profile_(
                 ultra::timing::globalDecoderProfile().ofdm_cw0_probe_decode);
-            raw_probe = frame_demodulator_.codec_->decode(cw0_bits);
+            raw_probe = frame_decoder_.codec_->decode(cw0_bits);
         }
         ok0 = raw_probe.first;
         data0 = std::move(raw_probe.second);
@@ -3026,7 +3026,7 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 bits = deinterleave_cw(bits);
             }
 
-            auto [ok, data] = frame_demodulator_.codec_->decode(bits);
+            auto [ok, data] = frame_decoder_.codec_->decode(bits);
             if (ok && data.size() >= bytes_per_cw) {
                 data.resize(bytes_per_cw);
                 cw_status.decoded[i] = true;

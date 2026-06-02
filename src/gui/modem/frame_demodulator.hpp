@@ -1,10 +1,6 @@
 #pragma once
 
-#include "ultra/fec.hpp"             // ChannelInterleaver
-#include "fec/codec_factory.hpp"     // fec::CodecPtr (ICodec)
-
 #include <cstddef>
-#include <memory>
 #include <vector>
 
 namespace ultra {
@@ -34,14 +30,6 @@ public:
     // back by the pilot feedback. Zeroed at frame boundaries where no pre-correction ran.
     float preCorrectionCfo() const { return pre_correction_cfo_; }
     void  resetPreCorrection() { pre_correction_cfo_ = 0.0f; }
-
-    // --- decode primitives (§7 C-FD-2a: relocated from StreamingDecoder) ----------------------
-    // TRANSITIONAL PUBLIC during the carve: the decode methods (decodeFrame/decodeMCDPSKFrame) still
-    // live on the decoder and drive these as frame_demodulator_.codec_/interleaver_, and the
-    // mode/rate machinery reconfigures them in place. They privatize behind FrameDemodulator methods
-    // once decodeFrame moves in (FD-2b). The LDPC codec (rate-switchable) + the channel interleaver.
-    fec::CodecPtr codec_;
-    std::unique_ptr<ChannelInterleaver> interleaver_;
 
 private:
     float pre_correction_cfo_ = 0.0f;  // CFO used for last pre-correction (for feedback adjustment)
