@@ -20,7 +20,7 @@
 #
 set -euo pipefail
 
-CSV_HEADER='channel,snr_db,mod,rate,file_kb,result,crc_ok,goodput_bps,elapsed_s,uniq_groups,attempts,damaged,damage_pct,nacks,it_min,it_med,it_max,tx_duty_pct'
+CSV_HEADER='channel,snr_db,seed,mod,rate,file_kb,result,crc_ok,goodput_bps,elapsed_s,uniq_groups,attempts,damaged,damage_pct,nacks,it_min,it_med,it_max,tx_duty_pct'
 
 MODE=human
 case "${1:-}" in
@@ -66,11 +66,11 @@ CRC_OK=$([[ "${FILE_CRC_OK_COUNT:-0}" -ge 1 ]] && echo 1 || echo 0)
 GOODPUT="${GOODPUT_BPS:-0}"
 ELAPSED="${ELAPSED_SEC:-0}"
 DUTY="${MAX_TX_DUTY_PCT:-0}"
-MOD="${EXPECT_MOD:-?}"; RATE="${EXPECT_RATE:-?}"; CH="${CHANNEL:-?}"; SNR="${SNR_DB:-?}"
+MOD="${EXPECT_MOD:-?}"; RATE="${EXPECT_RATE:-?}"; CH="${CHANNEL:-?}"; SNR="${SNR_DB:-?}"; SEED="${SEED:-?}"
 
 if [[ "$MODE" == csv ]]; then
-  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-    "$CH" "$SNR" "$MOD" "$RATE" "$FILE_KB" "${RESULT:-?}" "$CRC_OK" "$GOODPUT" "$ELAPSED" \
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    "$CH" "$SNR" "$SEED" "$MOD" "$RATE" "$FILE_KB" "${RESULT:-?}" "$CRC_OK" "$GOODPUT" "$ELAPSED" \
     "$UNIQ" "$ATTEMPTS" "$DAMAGED" "$DAMAGE_PCT" "$NACKS" "$IT_MIN" "$IT_MED" "$IT_MAX" "$DUTY"
   exit 0
 fi
@@ -78,7 +78,7 @@ fi
 # Human block
 verdict="$RESULT"
 [[ "$CRC_OK" == 1 ]] || verdict="$RESULT (file NOT delivered)"
-printf '=== QSO run: %s @ %s dB — %s %s — %s KB ===\n' "$CH" "$SNR" "$MOD" "$RATE" "$FILE_KB"
+printf '=== QSO run: %s @ %s dB — %s %s — %s KB (seed %s) ===\n' "$CH" "$SNR" "$MOD" "$RATE" "$FILE_KB" "$SEED"
 printf '  result   : %s  (%s)\n' "$verdict" "${REASON:-?}"
 printf '  file CRC : %s\n' "$([[ "$CRC_OK" == 1 ]] && echo OK || echo MISSING)"
 printf '  goodput  : %s bps   elapsed %ss   TX duty %s%%\n' "$GOODPUT" "$ELAPSED" "$DUTY"

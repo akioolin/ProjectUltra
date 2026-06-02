@@ -26,13 +26,14 @@ SCENARIO="$HERE/gui_qso_scenario.sh"
 ANALYZE="$HERE/analyze_qso_run.sh"
 
 OUT_ROOT="/tmp/qso_sweep_$$"
-SEED=42
+SEEDS="42"          # one or more seeds; each spec runs once per seed
 DEFAULT_FKB=20
 CONFIG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --out-root) OUT_ROOT="$2"; shift 2 ;;
-    --seed)     SEED="$2"; shift 2 ;;
+    --seed)     SEEDS="$2"; shift 2 ;;       # single seed (back-compat)
+    --seeds)    SEEDS="$2"; shift 2 ;;       # e.g. --seeds "42 7 123"
     --file-kb)  DEFAULT_FKB="$2"; shift 2 ;;
     --config)   CONFIG="$2"; shift 2 ;;
     -h|--help)  sed -n '2,20p' "$0"; exit 0 ;;
@@ -55,26 +56,28 @@ while read -r ch snr mod rate fkb _rest || [[ -n "${ch:-}" ]]; do
   [[ -z "${ch:-}" || "${ch:0:1}" == "#" ]] && { ch=""; continue; }
   fkb="${fkb:-$DEFAULT_FKB}"
   rate_us="${rate//\//_}"          # R3/4 -> R3_4 for the force knob
-  i=$((i+1))
-  tag="$(printf '%02d' "$i")_${ch}${snr}_${mod}_${rate_us}_${fkb}k"
-  dir="$OUT_ROOT/$tag"
-  echo ">>> [$i] $ch @ ${snr} dB  $mod $rate  ${fkb} KB  (seed $SEED)" >&2
+  for sd in $SEEDS; do
+    i=$((i+1))
+    tag="$(printf '%02d' "$i")_${ch}${snr}_${mod}_${rate_us}_${fkb}k_s${sd}"
+    dir="$OUT_ROOT/$tag"
+    echo ">>> [$i] $ch @ ${snr} dB  $mod $rate  ${fkb} KB  (seed $sd)" >&2
 
-  ULTRA_FORCE_WAVEFORM=OFDM_CHIRP \
-  ULTRA_FORCE_DATA_MOD="$mod" \
-  ULTRA_FORCE_DATA_RATE="$rate_us" \
-    "$SCENARIO" --channel "$ch" --snr-db "$snr" --seed "$SEED" \
-                --expect-mod "$mod" --expect-rate "$rate" \
-                --file-kb "$fkb" --out "$dir" \
-                > "$dir.scenario.log" 2>&1 || true
+    ULTRA_FORCE_WAVEFORM=OFDM_CHIRP \
+    ULTRA_FORCE_DATA_MOD="$mod" \
+    ULTRA_FORCE_DATA_RATE="$rate_us" \
+      "$SCENARIO" --channel "$ch" --snr-db "$snr" --seed "$sd" \
+                  --expect-mod "$mod" --expect-rate "$rate" \
+                  --file-kb "$fkb" --out "$dir" \
+                  > "$dir.scenario.log" 2>&1 || true
 
-  if [[ -f "$dir/summary.env" ]]; then
-    "$ANALYZE" --csv "$dir" >> "$CSV"
-    "$ANALYZE" "$dir" 2>/dev/null | sed 's/^/    /' >&2
-  else
-    echo "    !! no summary.env (run crashed early — see $dir.scenario.log)" >&2
-    echo "$ch,$snr,$mod,$rate,$fkb,RUN_ERROR,0,0,0,0,0,0,0,0,0,0,0,0" >> "$CSV"
-  fi
+    if [[ -f "$dir/summary.env" ]]; then
+      "$ANALYZE" --csv "$dir" >> "$CSV"
+      "$ANALYZE" "$dir" 2>/dev/null | sed 's/^/    /' >&2
+    else
+      echo "    !! no summary.env (run crashed early — see $dir.scenario.log)" >&2
+      echo "$ch,$snr,$sd,$mod,$rate,$fkb,RUN_ERROR,0,0,0,0,0,0,0,0,0,0,0,0" >> "$CSV"
+    fi
+  done
   ch=""
 done <<< "$SPECS"
 

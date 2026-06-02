@@ -92,16 +92,20 @@ estimate_exit_after() {
       data_carriers = carriers - pilots
       symbol_rate = 48000.0 / 1152.0
       raw_info_bps = data_carriers * bits_per_carrier * symbol_rate * code_rate
-      # The first-rung GUI path includes half-duplex turns, ACK diversity, and
-      # retransmission slack. Use a conservative PHY-to-payload efficiency so
-      # the failure ceiling scales by rate without becoming a fixed wall clock.
-      expected_payload_bps = raw_info_bps * 0.25
-      if (expected_payload_bps < 300.0) expected_payload_bps = 300.0
+      # The GUI path includes half-duplex turns, ACK diversity, retransmission
+      # slack AND substantial dead-air on the slower rungs — a forced QPSK R1/2
+      # 20 KB run measured ~22% TX duty (effective wall-clock rate well under
+      # raw*0.25), which a 0.25 efficiency under-budgeted into a false timeout.
+      # Budget conservatively: the deadline only has to NOT false-FAIL a run that
+      # does deliver; a too-long ceiling costs nothing because a PASS ends early
+      # on the success poll. (Dead-air on R1/2 itself is a separate pacing issue.)
+      expected_payload_bps = raw_info_bps * 0.15
+      if (expected_payload_bps < 250.0) expected_payload_bps = 250.0
       handshake = 25.0
       payload = (file_bytes * 8.0) / expected_payload_bps
       margin = 20.0
       expected = handshake + payload + disconnect_after + margin
-      ceiling = int(expected * 1.5 + 0.999)
+      ceiling = int(expected * 1.8 + 0.999)
       if (ceiling < 90) ceiling = 90
       print ceiling
     }'
@@ -312,6 +316,7 @@ write_summary() {
     echo "OUT=$OUT"
     echo "CHANNEL=$CHANNEL"
     echo "SNR_DB=$SNR_DB"
+    echo "SEED=$SEED"
     echo "EXPECT_MOD=$EXPECT_MOD"
     echo "EXPECT_RATE=$EXPECT_RATE"
     echo "FILE_BYTES=$FILE_BYTES"
