@@ -663,8 +663,8 @@ private:
     fec::CodecType codec_type_ = fec::CodecType::LDPC;  // FEC codec type
     size_t mode_switch_write_pos_ = 0;  // write_pos at mode switch (skip old data)
 
-    // Interleaver (matches TX)
-    std::unique_ptr<ChannelInterleaver> interleaver_;
+    // Interleaver + FEC codec moved into frame_demodulator_ (§7 C-FD-2a) — accessed as
+    // frame_demodulator_.interleaver_ / .codec_.
     bool use_channel_interleave_ = true;
     uint64_t carrier_mask_ = UINT64_MAX;
     bool use_carrier_ldpc_interleaver_ = false;
@@ -678,8 +678,6 @@ private:
     uint16_t last_burst_group_seq_ = 0;
     bool burst_transport_rx_ = false;
 
-    // FEC codec (uses ICodec interface)
-    fec::CodecPtr codec_;
     fec::SoftCombineBuffer* harq_buffer_ = nullptr;  // Non-owning; Connection owns lifecycle.
     HarqProvisionalContextCallback harq_context_callback_;
 
