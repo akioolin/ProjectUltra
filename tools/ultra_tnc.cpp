@@ -7,7 +7,6 @@
 #include "psk/multi_carrier_dpsk.hpp"
 #include "protocol/frame_v2.hpp"
 #include "protocol/protocol_engine.hpp"
-#include "sim/channel_calibration.hpp"
 #include "tnc/tnc_bridge.hpp"
 #include "tnc/tnc_server.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
@@ -31,7 +30,6 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
-#include <random>
 #include <string>
 #include <thread>
 #include <utility>
@@ -176,8 +174,7 @@ public:
         : cfg_(cfg),
           engine_(engine),
           audio_(audio),
-          bridge_(bridge),
-          rng_(12345) {
+          bridge_(bridge) {
         configureModem();
         setupCallbacks();
     }
@@ -384,8 +381,6 @@ private:
     OtaAudioConnectionState last_ota_state_ = OtaAudioConnectionState::Disconnected;
     std::string last_ota_text_;
     bool ota_status_seen_ = false;
-
-    std::mt19937 rng_;
 
     ModemConfig createOFDMConfig() const {
         // A default-constructed ModemConfig already carries the canonical OFDM
@@ -784,10 +779,6 @@ private:
             return;
         }
 
-        if (cfg_.inject_channel) {
-            applyAwgn(samples);
-        }
-
         const auto measurement =
             ultra::sim::normalizeTxBurstForHardware(samples, cfg_.tx_drive);
         if (measurement.burst_fragment_warning) {
@@ -831,19 +822,6 @@ private:
         last_ota_text_ = status.text;
         std::cerr << "[otasim] " << status.text << "\n";
         LOG_INFO("AUDIO", "OTASim: %s", status.text.c_str());
-    }
-
-    void applyAwgn(std::vector<float>& samples) {
-        // Continuous AWGN sized to the calibrated modem-reference RMS so
-        // --snr means the same in-band SNR as SimulatedChannel and the GUI
-        // simulator. Was previously addAWGN(activeSignalPower), which made
-        // silence between bursts artificially quiet.
-        const float sigma =
-            ultra::sim::modemReferenceNoiseStddev(cfg_.snr_db);
-        std::normal_distribution<float> noise(0.0f, sigma);
-        for (float& s : samples) {
-            s = std::clamp(s + noise(rng_), -1.0f, 1.0f);
-        }
     }
 
 };

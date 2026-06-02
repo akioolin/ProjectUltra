@@ -145,10 +145,7 @@ void printUsage(std::ostream& out) {
         << "  --port <N>                  TNC command port (default: 8300; data=N+1)\n"
         << "  --bind <addr>               Bind address (default: 127.0.0.1)\n"
         << "  --callsign <call>           Default callsign (default: NOCALL)\n"
-        << "  --inject-channel [awgn]     Apply simple TX-side AWGN before audio output\n"
-        << "                              (only awgn is implemented; other types rejected)\n"
-        << "  --no-inject-channel         Override config inject_channel=true back to false\n"
-        << "  --snr <db>                  SNR for channel injection and mode reports\n"
+        << "  --snr <db>                  SNR for mode reports (channel comes from OTASim)\n"
         << "  --tx-drive <0.05..0.70>     Hardware TX target peak (default: 0.50)\n"
         << "  --papr-reduction <on|off>   OFDM data PAPR reduction (default: on)\n"
         << "  --rate <auto|r1_4|r1_2|r2_3|r3_4>\n"
@@ -242,23 +239,6 @@ bool applyConfigKey(const std::string& key, const std::string& value, Config& cf
     } else if (key == "callsign") {
         cfg.callsign = ultra::protocol::sanitizeCallsign(value);
         if (cfg.callsign.empty()) return false;
-    } else if (key == "inject_channel" || key == "inject-channel") {
-        if (parseBoolStrict(value, cfg.inject_channel)) {
-            // Plain boolean, done.
-        } else {
-            // Channel-type values are accepted as a synonym for "true"
-            // for forward-compat with cli_simulator's spelling, but
-            // only AWGN is actually implemented here. Reject anything
-            // else loudly rather than silently using AWGN.
-            const std::string lc = lower(value);
-            if (lc != "awgn") {
-                std::cerr << "ultra_tnc only supports inject_channel=awgn|true|false; "
-                             "got '" << value << "'\n";
-                return false;
-            }
-            cfg.inject_channel = true;
-            cfg.inject_channel_type = lc;
-        }
     } else if (key == "snr" || key == "snr_db") {
         auto parsed = parseFloat(value);
         if (!parsed) return false;
@@ -502,19 +482,6 @@ bool parseArgs(int argc, char** argv, Config& cfg) {
                 std::cerr << "Invalid --callsign value\n";
                 return false;
             }
-        } else if (arg == "--inject-channel") {
-            cfg.inject_channel = true;
-            if (i + 1 < argc && argv[i + 1][0] != '-') {
-                const std::string type = lower(argv[++i]);
-                if (type != "awgn") {
-                    std::cerr << "ultra_tnc --inject-channel only supports awgn; "
-                                 "got '" << type << "'\n";
-                    return false;
-                }
-                cfg.inject_channel_type = type;
-            }
-        } else if (arg == "--no-inject-channel") {
-            cfg.inject_channel = false;
         } else if (arg == "--snr") {
             auto value = requireValue("--snr");
             auto parsed = value ? parseFloat(*value) : std::nullopt;

@@ -10,6 +10,28 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-02 — remove ultra_tnc in-process AWGN injector (REMOVAL_BACKLOG R7)
+
+**What/why:** `ultra_tnc` carried a divergent third channel — an in-process TX-side AWGN
+injector (`applyAwgn`, gated by `--inject-channel`) separate from OTASim and the GUI's
+`SimulatedChannel`. OTASim is THE single channel (shared Watterson + real-HF noise beds);
+a private AWGN path is exactly the "works in simulator, unvalidated" footgun. Now that the
+TNC is migrated onto ModemEngine and the re-enabled `UltraTncSimAudio` test exercises the
+channel through OTASim, the injector is dead weight and safe to delete.
+
+**Removed:** `applyAwgn()` + its call site in `queueTx` (hardware branch); the `rng_`
+(`std::mt19937`) member and its seed; the `inject_channel` / `inject_channel_type` config
+fields; `--inject-channel` / `--no-inject-channel` argv parsing + the `inject_channel`
+config-file key + the help text; now-unused `#include <random>` and
+`#include "sim/channel_calibration.hpp"`. Kept `--snr` / `snr_db` (still used for the
+operator-facing mode/SNR reports — `setMeasuredSNR`, MODE_CHANGE telemetry), help text
+updated to "SNR for mode reports (channel comes from OTASim)".
+
+**Verification:** `ultra_tnc` + `test_tnc_session` build clean; `UltraTncSimAudio` 8 KB
+file transfer still CRC-clean over OTASim. Docs: REMOVAL_BACKLOG R7 → Completed.
+
+---
+
 ## 2026-06-02 — ultra_tnc migrated onto ModemEngine; TNC↔OTASim file transfer now CRC-clean
 
 **Symptom:** `ultra_tnc` over OTASim connected fine but never delivered a multi-group

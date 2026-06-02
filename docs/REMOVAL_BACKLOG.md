@@ -164,10 +164,7 @@ Sourced from `MODEM_INFRASTRUCTURE_MAP.md §7` (file:line authoritative there):
 
 ## Deprecate (divergent, not yet removed)
 
-- **R7. `ultra_tnc` in-process `--inject-channel` AWGN (`applyAwgn`)** — a divergent 3rd
-  channel; OTASim is THE single channel (shared Watterson + real-HF noise beds). Route
-  ultra_tnc's channel through OTASim, then delete the in-process injector. (See memory:
-  *OTASim is the single channel*.)
+_(none currently — R7 done, see Completed removals)_
 
 ## Doc-only stale (not a code deletion)
 
@@ -183,4 +180,5 @@ Sourced from `MODEM_INFRASTRUCTURE_MAP.md §7` (file:line authoritative there):
 | 2026-05-30 | `decode_bench` tool + `DecodeBenchReplay` CTest + 6 replay fixtures | `bdee556` |
 | 2026-05-30 | `agents/` autonomous system + Mac↔Pi5 hardware-cable rig + CI adaptation | `833725d` |
 | 2026-05-30 | `cli_simulator` + `test_waveform_simple` + `SimulatedStation` (~14k lines) | `207a0af` |
+| 2026-06-02 | **R7** `ultra_tnc` in-process AWGN: `applyAwgn`, `rng_`, `inject_channel*` config + `--inject-channel`/`--no-inject-channel` flags. OTASim is now the TNC's only channel (covered by the re-enabled `UltraTncSimAudio` 8 KB file test). | _pending_ |
 | (earlier) | OFDM_COX as a selectable mode (enum `0x00` now reserved; S-C primitive kept) | — |

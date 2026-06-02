@@ -36,8 +36,6 @@ struct Config {
     std::string bind_address = "127.0.0.1";
     uint16_t port = 8300;
     std::string callsign = "NOCALL";
-    bool inject_channel = false;
-    std::string inject_channel_type = "awgn";
     float snr_db = 20.0f;
     float tx_drive = ultra::sim::kHardwareTxDefaultPeakTarget;
     bool papr_reduction = ultra::phy::kPaprReductionDefaultEnabled;

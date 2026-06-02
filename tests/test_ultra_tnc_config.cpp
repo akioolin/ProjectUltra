@@ -238,19 +238,6 @@ void test_applyConfigKey_callsign_sanitized() {
     pass("applyConfigKey: callsign sanitized + empty rejected");
 }
 
-void test_applyConfigKey_inject_channel_modes() {
-    Config cfg;
-    CHECK(applyConfigKey("inject_channel", "true", cfg) && cfg.inject_channel,
-          "inject_channel=true");
-    CHECK(applyConfigKey("inject_channel", "false", cfg) && !cfg.inject_channel,
-          "inject_channel=false");
-    CHECK(applyConfigKey("inject_channel", "awgn", cfg) && cfg.inject_channel,
-          "awgn synonym for true");
-    CHECK(cfg.inject_channel_type == "awgn", "channel type recorded");
-    CHECK(!applyConfigKey("inject_channel", "rayleigh", cfg),
-          "non-AWGN channel rejected (only AWGN implemented)");
-    pass("applyConfigKey: inject_channel accepts bool + 'awgn', rejects others");
-}
 
 void test_applyConfigKey_tx_drive_clamped() {
     Config cfg;
@@ -463,17 +450,6 @@ void test_parseArgs_cli_overrides_config() {
     pass("parseArgs: CLI flags override config values");
 }
 
-void test_parseArgs_no_inject_channel_overrides_config_true() {
-    // Codex review #5: config-set inject_channel=true must be
-    // overridable from CLI back to false via --no-inject-channel.
-    TempFile cfg_file("inject_channel = true\n");
-    Argv argv({"ultra_tnc", "--config", cfg_file.str().c_str(),
-               "--no-inject-channel"});
-    Config cfg;
-    CHECK(parseArgs(argv.argc(), argv.data(), cfg), "parse ok");
-    CHECK(!cfg.inject_channel, "--no-inject-channel must override config true");
-    pass("parseArgs: --no-inject-channel overrides config inject_channel=true");
-}
 
 void test_parseArgs_ptt_active_high_overrides_config_true() {
     TempFile cfg_file("ptt_inactive_high = true\n");
@@ -648,7 +624,6 @@ int main() {
     test_applyConfigKey_sim_audio();
     test_applyConfigKey_port_bounds();
     test_applyConfigKey_callsign_sanitized();
-    test_applyConfigKey_inject_channel_modes();
     test_applyConfigKey_tx_drive_clamped();
     test_applyConfigKey_papr_reduction();
     test_applyConfigKey_ptt_baud_strict();
@@ -672,7 +647,6 @@ int main() {
     test_parseArgs_help_skips_bad_config();
     test_parseArgs_list_audio_skips_bad_config();
     test_parseArgs_cli_overrides_config();
-    test_parseArgs_no_inject_channel_overrides_config_true();
     test_parseArgs_ptt_active_high_overrides_config_true();
     test_parseArgs_no_ptt_inactive_high_alias();
     test_parseArgs_ptt_cat_flags();
