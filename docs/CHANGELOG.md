@@ -10,6 +10,35 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-02 — Shared `wireModemToProtocol()` binding (consolidation step 1/4: kill the GUI↔TNC modem-wiring divergence)
+
+**What was the situation (not a bug — an architecture fix):** the modem→protocol forwarding
+(HARQ context, RX-data, burst-group delivery, data-sync acceptance, tone-burst GROUP_ACK) lived
+*inline in `app.cpp` only*. `ultra_tnc` re-wired a subset by hand against its raw decoder and
+silently MISSED `setBurstGroupCallback` + `setToneBurstAckCallback` — the divergence that caused
+two bugs this session (burst-RX default, then burst-group delivery). Per the user: this belongs in
+shared modem infra so both frontends bind identically.
+
+**What changed:** new `src/gui/modem/modem_protocol_binding.hpp` — `wireModemToProtocol(ModemEngine&,
+ProtocolEngine&, hooks)` sets all five forwarding callbacks in ONE place. `app.cpp` now calls it; the
+GUI's frame-observation extras (monitor-mode log + adaptive advisory) ride an optional
+`after_rx_data` hook instead of being baked into the callback. Ping/status stay frontend-owned (genuinely
+UI-specific). Pure refactor — no behavior change for the GUI.
+
+**Why it's correct:** the binding is the single source of truth for modem↔protocol wiring; adding a
+forwarding once gives both frontends (GUI + the upcoming ultra_tnc migration) the same behavior, making
+the divergence-bug class structurally impossible.
+
+**Test verification:**
+- `ctest -j4` → byte-identical red-set (4 pre-existing fails, no new). 
+- GUI `gui_qso_scenario.sh` 16QAM R3/4 passthrough → **PASS, CRC-clean, 2700 bps, 11 groups 6/6** — identical to pre-refactor.
+
+**Next (steps 2-4):** migrate `ultra_tnc` off the raw `StreamingEncoder`/`StreamingDecoder` onto
+`ModemEngine` (+ ~7 thin pass-through methods), have it call `wireModemToProtocol(modem_, engine_)`, then
+re-enable `UltraTncSimAudio`. Gate: the 8 KB TNC-over-OTASim file transfer delivers.
+
+---
+
 ## 2026-06-02 — Burst transport is unconditional: remove the `ULTRA_BURST_TRANSPORT` env gate (fixes ultra_tnc file transfer)
 
 **What was broken (symptom + root cause):** `ultra_tnc` could not transfer files over OTASim.

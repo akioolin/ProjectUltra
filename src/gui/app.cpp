@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include "gui/modem/modem_protocol_binding.hpp"
 #include "diagnostics/diagnostics_recorder.hpp"
 #include "startup_trace.hpp"
 #include "imgui.h"
@@ -523,19 +524,18 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
 
     protocol_.setSoftCombiningHARQ(true);
     modem_.setSoftCombineBuffer(protocol_.softCombineBuffer());
-    modem_.setHarqProvisionalContextCallback([this]() {
-        return protocol_.harqProvisionalContext();
-    });
-
-    // Set up raw data callback for protocol layer
+    // All modem->protocol forwarding (HARQ ctx, RX-data, burst-group delivery, data-sync,
+    // tone-burst GROUP_ACK) lives in the SHARED wireModemToProtocol() so the GUI and
+    // ultra_tnc bind identically (gui/modem/modem_protocol_binding.hpp). GUI-specific
+    // reactions to a decoded frame (monitor-mode log + adaptive advisory) ride the
+    // after_rx_data hook; ping/status stay GUI-owned below.
     ultra::gui::startupTrace("App", "set-raw-callback-enter");
-    modem_.setRawDataCallback([this](const Bytes& data) {
-        auto modem_stats = modem_.getStats();
-        // Monitor mode: surface every decoded frame's payload in the
-        // RX log regardless of addressing. The protocol layer would
-        // otherwise drop frames whose dst hash doesn't match local
-        // call, which makes the GUI silent on OTA captures from
-        // peers we have no relationship with.
+    ModemProtocolFrontendHooks modem_hooks;
+    modem_hooks.after_rx_data = [this](const Bytes& data, float snr_db, float fading,
+                                       SNRSource snr_source, bool used_for_quality) {
+        // Monitor mode: surface every decoded frame's payload in the RX log regardless of
+        // addressing (the protocol layer would otherwise drop frames whose dst hash doesn't
+        // match local call, making the GUI silent on OTA captures from peers).
         if (!options_.monitor_mode.empty()) {
             if (auto df = protocol::v2::DataFrame::deserialize(data)) {
                 std::string text;
@@ -558,52 +558,14 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                 appendRxLogLine(buf);
             }
         }
-        // SNR is per decoded frame. Fading is a channel-quality sample only
-        // for addressed data/handshake frames after the PHY meter has accepted
-        // the measurement.
-        float snr_db = modem_stats.snr_db;
-        SNRSource snr_source = modem_stats.snr_source;
-        float fading = modem_.getFadingIndex();
-        const bool use_quality_sample =
-            protocol_.shouldUseRxFrameForChannelQuality(data);
-        protocol_.setMeasuredSNR(snr_db, snr_source);
-        if (use_quality_sample) {
-            protocol_.setChannelQuality(snr_db, fading, snr_source);
-        }
-        protocol_.onRxData(data);
-        if (use_quality_sample) {
+        // Fading is a channel-quality sample only for addressed data/handshake frames the
+        // PHY meter accepted (used_for_quality); the advisory tracks that same gate.
+        if (used_for_quality) {
             updateAdaptiveAdvisory(snr_db, fading, snr_source);
         }
-    });
+    };
+    ultra::gui::wireModemToProtocol(modem_, protocol_, std::move(modem_hooks));
     ultra::gui::startupTrace("App", "set-raw-callback-exit");
-
-    // §14.27: a decoded interleaved burst delivered as a unit goes to the
-    // protocol burst transport (deliver-once + single GROUP_ACK). Burst transport is
-    // THE OFDM file path — unconditional (2026-06-02; ULTRA_BURST_TRANSPORT removed).
-    modem_.setBurstGroupCallback(
-        [this](uint16_t group_seq, const std::vector<Bytes>& frames, bool all_ok,
-               float quality, uint8_t frame_mask, bool interleaved) {
-            protocol_.onBurstGroupReceived(group_seq, frames, all_ok, quality, frame_mask,
-                                           interleaved);
-        });
-    // Burst-transport RX is unconditional — the StreamingDecoder defaults it on; no
-    // enable call (and no env gate) needed.
-
-    modem_.setDataSyncAcceptedCallback([this](float sync_correlation) {
-        protocol_.onAcceptedOFDMDataSync(sync_correlation);
-    });
-
-    // §15 step 4d-ii: route tone-burst ACK detections from the receiver's
-    // always-on monitor to the protocol layer. The callback fires on the
-    // audio thread; ProtocolEngine takes its own mutex so this is safe to
-    // call across threads. Connection::onToneBurstAck does the matching
-    // against the in-flight burst-transport group and either advances
-    // (ACK) or triggers a fast resend (NACK).
-    modem_.setToneBurstAckCallback(
-        [this](
-            const ultra::waveform::tone_burst_ack::ToneBurstAckDetection& d) {
-            protocol_.onToneBurstAck(d);
-        });
 
     // Set up status callback to show codeword progress in RX log
     ultra::gui::startupTrace("App", "set-status-callback-enter");
