@@ -346,13 +346,13 @@ Connection::Connection(const ConnectionConfig& config)
     config_.fixed_frame_codewords = data_frame_cw_count_;
     arq_.setFixedFrameCodewords(data_frame_cw_count_);
 
-    // §14.27: one-way burst stop-and-wait file transport (default OFF). Enabled
-    // Burst transport is the DEFAULT OFDM file path (2026-05-30). Opt OUT to the
-    // legacy SR-ARQ file path via ULTRA_BURST_TRANSPORT=0. Both ends flip together
-    // (RX group-as-unit path wired in app.cpp via the same env).
-    if (const char* bt = std::getenv("ULTRA_BURST_TRANSPORT"); bt && bt[0] == '0') {
-        use_burst_transport_ = false;
-    }
+    // §14.27: burst transport is THE OFDM-wideband file path — UNCONDITIONAL, no env
+    // gate (2026-06-02; the ULTRA_BURST_TRANSPORT opt-out was removed — burst is the
+    // only valid file method now). `use_burst_transport_` stays initialized true; the
+    // legacy windowed-file `!use_burst_transport_` branches are now dead code (R1
+    // deletion follow-up). NOTE: burst is itself selective-repeat (GROUP_ACK carries
+    // the 6-bit SACK frame_mask) — SelectiveRepeatARQ (`arq_`) still serves MC-DPSK/
+    // narrow/control; this is NOT "remove SR-ARQ".
     // §14.36 Phase 5c: BER-driven per-block rate adaptation. Default OFF; opt in via
     // ULTRA_ADAPTIVE_RATE=1. Only meaningful on the burst transport file path.
     if (const char* ar = std::getenv("ULTRA_ADAPTIVE_RATE"); ar && ar[0] == '1') {

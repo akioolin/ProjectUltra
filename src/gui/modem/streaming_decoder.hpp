@@ -676,10 +676,14 @@ private:
 
     // Burst descriptor / z-state (§14.17) now lives in sync_controller_ (refactor
     // §7.6): have_burst_descriptor_ / last_burst_descriptor_ / activeBurstLiftingZ().
-    // §14.27: group_seq of the in-flight burst (from the descriptor frame header
-    // seq), and whether burst-transport RX group-as-unit delivery is enabled.
+    // §14.27: group_seq of the in-flight burst (from the descriptor frame header seq).
+    // Burst-transport RX group-as-unit delivery is UNCONDITIONAL — burst is THE
+    // OFDM-wideband file path (2026-06-02; ULTRA_BURST_TRANSPORT gate removed). The
+    // default is true so every StreamingDecoder owner (GUI ModemEngine, raw ultra_tnc/
+    // measure_ack_fer) gets it without a separate enable call. The field + setter are
+    // slated to fold away with the legacy windowed-file routing (R1 deletion).
     uint16_t last_burst_group_seq_ = 0;
-    bool burst_transport_rx_ = false;
+    bool burst_transport_rx_ = true;
 
     fec::SoftCombineBuffer* harq_buffer_ = nullptr;  // Non-owning; Connection owns lifecycle.
     HarqProvisionalContextCallback harq_context_callback_;

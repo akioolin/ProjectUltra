@@ -10,6 +10,52 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-02 — Burst transport is unconditional: remove the `ULTRA_BURST_TRANSPORT` env gate (fixes ultra_tnc file transfer)
+
+**What was broken (symptom + root cause):** `ultra_tnc` could not transfer files over OTASim.
+The handshake (PING→CONNECT→MODE_CHANGE) completed cleanly, but every data-burst was rejected at
+the receiver — `Full-anchor wait rejected DATA fallback (corr≈0.25 < 0.52)` — and the transfer
+timed out. **Root cause:** the burst-transport enable was a *separately-set flag with three
+inconsistent defaults*, reconciled only by an env-gated setter the GUI happened to call and the TNC
+did not. `connection.cpp` defaulted TX `use_burst_transport_ = true`, `ModemEngine` defaulted RX
+`burst_transport_rx_enabled_ = true`, but the **raw `StreamingDecoder` defaulted
+`burst_transport_rx_ = false`**. The GUI enabled RX via an env-gated `setBurstTransportRxEnabled()`
+call in `app.cpp` (`getenv("ULTRA_BURST_TRANSPORT")`); `ultra_tnc` owns a *raw* `StreamingDecoder`
+(not via `ModemEngine`) and never made that call — so it **transmitted burst-interleaved data frames
+it could not decode**. The GUI worked only by accident of the env-gated wiring.
+
+**What changed (files, code):** burst transport is now **unconditional** — burst is THE OFDM-wideband
+file method; there is no env gate. Removed all three `ULTRA_BURST_TRANSPORT` reads
+(`connection.cpp:353` TX opt-out, `app.cpp:592-593` RX enable, comment in `modem_engine.hpp:428`) and
+flipped the RX default `streaming_decoder.hpp:682 burst_transport_rx_ false→true` so every decoder
+owner (GUI, raw `ultra_tnc`/`measure_ack_fer`) gets burst-RX without a separate call. The legacy
+`!use_burst_transport_` windowed-file branches are now dead code (R1 deletion follow-up — kept in-tree
+for now). This is the env-knobs→code-derivation direction: the production path no longer depends on an
+env var. **NOTE:** burst is itself selective-repeat (GROUP_ACK 6-bit SACK `frame_mask`);
+`SelectiveRepeatARQ` (`arq_`) still serves MC-DPSK/narrow/control — this is NOT "remove SR-ARQ."
+
+**How it's properly fixed (why it works, invariants):** the change makes the unconditional state match
+what the GUI already ran in (burst-on by default), so it is behaviorally identical on the proven GUI
+path while making the raw-decoder default correct-by-construction. No caller can leave burst-RX off.
+
+**Test verification:**
+- `ctest --test-dir build --output-on-failure -j4` → byte-identical red-set (4 failed of 78:
+  Protocol/StreamingConfig/StreamingBufferPolicy/ToneBurstMonitor pre-existing; TNCSession/UltraTncSimAudio
+  disabled) — no new failures. Build clean.
+- TNC-over-OTASim (no env vars): data-burst sync went **reject@corr=0.25 → accept@corr=0.99** — burst-RX
+  now live on the bare TNC path.
+- GUI `gui_qso_scenario.sh` 16QAM R3/4 / passthrough: **RESULT=PASS, CRC-clean, 2700 bps** (full-protocol
+  no-regression with the fix built in).
+- (TNC file transfer still WIP separately: the disabled `UltraTncSimAudio` test ships only a 37-byte
+  payload — one tiny burst group with no ARQ-recovery room on a deterministic channel — being extended
+  to a real multi-KB file next.)
+
+**Docs:** `MODEM_INFRASTRUCTURE_MAP.md` (burst-transport row + env-knob table: `ULTRA_BURST_TRANSPORT`
+marked REMOVED), `REMOVAL_BACKLOG.md` R1 (env gate removed; supersedes the BLOCKED caution per user
+directive; dead-branch deletion remaining).
+
+---
+
 ## 2026-06-01 — §7 C3: SyncController owns the audio ring + the connected-acquisition decisions
 
 **What was the situation (not a bug — a refactor):** The §7 SyncController consolidation had moved

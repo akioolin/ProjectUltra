@@ -158,8 +158,12 @@ SR-ARQ masks; ON → whole-group ACK/NACK.** They disagreeing was the QAM16 offs
   `mcDpskWindowSizeForTiming` (1–5), OFDM_NARROW **3** (hardcoded), OFDM wideband
   `ofdmWindowSizeForChannel` **8 default, up to 16** on near-AWGN DQPSK/D8PSK ≥R1/2. 🟢
 - `BurstStopAndWaitController burst_transport_` (`connection.hpp:510`): true one-way
-  stop-and-wait, **🟢 DEFAULT ON (2026-05-30; `use_burst_transport_=true`); `ULTRA_BURST_TRANSPORT=0`
-  opts out** to the legacy SR-ARQ file path. SR dispatch `formAndSendBurstGroupSR`
+  stop-and-wait, **🟢 UNCONDITIONAL — burst is THE OFDM-wideband file path (2026-06-02; the
+  `ULTRA_BURST_TRANSPORT` env gate was REMOVED). `use_burst_transport_=true` always; the RX
+  default `burst_transport_rx_` is now `true` (was `false`) so every StreamingDecoder owner
+  (GUI ModemEngine, raw ultra_tnc/measure_ack_fer) gets burst-RX without a separate enable
+  call.** The legacy `!use_burst_transport_` windowed-file branches are now dead (R1 deletion
+  follow-up). SR dispatch `formAndSendBurstGroupSR`
   (`connection.cpp:2632`) when `burst_interleave_off_` (`connection.cpp:2051`, default true).
   GROUP_ACK is now **tone-burst** (`connection.cpp:413`); OFDM 1-CW GROUP_ACK only behind
   `ULTRA_LEGACY_OFDM_GROUP_ACK`.
@@ -202,7 +206,7 @@ Buckets per the env-knobs→runtime-derivation workstream: **[FEAT]** in-flight 
 
 | Knob | Effect | Default | Key site | Bucket |
 |------|--------|---------|----------|--------|
-| `ULTRA_BURST_TRANSPORT` | one-way burst stop-and-wait transport (the production OFDM file path) | **ON** (default 2026-05-30; `=0` opts out to legacy SR-ARQ) | `connection.cpp:353` (TX), `app.cpp:593` (RX) | FEAT |
+| ~~`ULTRA_BURST_TRANSPORT`~~ | **REMOVED 2026-06-02** — burst transport is now unconditional (THE OFDM file path); the `=0` opt-out was deleted, no env read remains. RX default `burst_transport_rx_` flipped `false→true`. | (gone) | (removed from `connection.cpp`/`app.cpp`/`modem_engine.hpp`) | — |
 | `ULTRA_ADAPTIVE_RATE` | BER-driven per-block rate adaptation | OFF | `connection.cpp:358` | FEAT |
 | `ULTRA_BURST_INTERLEAVE` | cross-frame interleave ON→whole-group ACK / OFF→SR masks | **OFF** | `connection_policy.hpp:95` | FEAT |
 | `ULTRA_BURST_GROUP_FRAMES` | burst group size, clamp [2,32] | code **6** (`kBurstInterleaveGroupFrames` `:64`, reconciled 16→6 on 2026-05-30 — mask-width-matched to the 6-bit SACK frame_mask; the old 16 was un-SR-addressable on the default interleave-OFF path) | `connection_policy.hpp:74` | FEAT |

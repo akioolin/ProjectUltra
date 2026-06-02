@@ -578,20 +578,16 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     ultra::gui::startupTrace("App", "set-raw-callback-exit");
 
     // §14.27: a decoded interleaved burst delivered as a unit goes to the
-    // protocol burst transport (deliver-once + single GROUP_ACK). ON by default
-    // (2026-05-30); the legacy SR-ARQ file path is opt-in via ULTRA_BURST_TRANSPORT=0.
+    // protocol burst transport (deliver-once + single GROUP_ACK). Burst transport is
+    // THE OFDM file path — unconditional (2026-06-02; ULTRA_BURST_TRANSPORT removed).
     modem_.setBurstGroupCallback(
         [this](uint16_t group_seq, const std::vector<Bytes>& frames, bool all_ok,
                float quality, uint8_t frame_mask, bool interleaved) {
             protocol_.onBurstGroupReceived(group_seq, frames, all_ok, quality, frame_mask,
                                            interleaved);
         });
-    {
-        // Burst-transport RX is ON by default (matches the connection-layer default);
-        // ULTRA_BURST_TRANSPORT=0 opts out to the legacy SR-ARQ file path.
-        const char* bt = std::getenv("ULTRA_BURST_TRANSPORT");
-        modem_.setBurstTransportRxEnabled(!(bt && bt[0] == '0'));
-    }
+    // Burst-transport RX is unconditional — the StreamingDecoder defaults it on; no
+    // enable call (and no env gate) needed.
 
     modem_.setDataSyncAcceptedCallback([this](float sync_correlation) {
         protocol_.onAcceptedOFDMDataSync(sync_correlation);

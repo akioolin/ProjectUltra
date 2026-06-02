@@ -18,7 +18,22 @@ here causes a wrong deletion later. Move finished items to *Completed* with the 
 
 ## Decided removals (architecture direction — confirmed)
 
-### R1. Legacy OFDM-wideband **file routing** (NOT "SR-ARQ") — `BLOCKED`
+### R1. Legacy OFDM-wideband **file routing** (NOT "SR-ARQ") — `IN-PROGRESS` (env gate removed 2026-06-02; dead-branch deletion remaining)
+
+> **2026-06-02 — env gate REMOVED (user directive).** Per the user ("burst transport is the
+> only valid way to transfer files now … we shouldn't gate it"), the `ULTRA_BURST_TRANSPORT`
+> opt-out was deleted (all 3 env reads: `connection.cpp:353`, `app.cpp:593`,
+> `modem_engine.hpp`) and the inconsistent RX default `burst_transport_rx_` flipped
+> `false→true`. **This SUPERSEDES the BLOCKED rationale below** — the "keep the `=0` fallback
+> until burst is throughput-proven post-ladder-rework" caution is overridden by the product
+> decision that burst is the only file method. Motivating bug fixed: `ultra_tnc` owns a raw
+> `StreamingDecoder` and never enabled burst-RX, so it transmitted bursts (TX default ON) it
+> couldn't decode (RX default was OFF) → TNC file transfer failed; data-burst sync went
+> reject@0.25 → accept@0.99 after the flip. **Remaining R1 scope:** delete the now-DEAD
+> `!use_burst_transport_` windowed-file branches + the `use_burst_transport_` member (kept as
+> dead code for now so the low-SNR fallback stays in-tree until burst is floor-proven
+> post-ladder; delete in a focused follow-up). KEEP section below still holds.
+
 - **What:** the legacy path that sends a wideband OFDM **file** through the continuous
   windowed `SelectiveRepeatARQ arq_` instead of the burst transport.
 - **Why dead:** burst transport (`BurstStopAndWaitController burst_transport_`) is THE
