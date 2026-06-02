@@ -291,19 +291,22 @@ public:
             reportOtaStatus(false);
             if (input_enabled_ && ota_audio_) {
                 std::lock_guard<std::mutex> lock(input_audio_mutex_);
-                // Feed ONLY real OTA samples — match the GUI (app.cpp::pollOtaRx).
-                // OTASim returns empty during silence (the shared medium carries no
-                // samples when nobody is transmitting). The old path padded each tick
-                // up to target_samples with zeros, which INSERTED the half-duplex turn
-                // gap (group→ACK→next group, ~6.5 s) into the decoder stream as silence.
-                // That displaces the next burst group by ~312k samples from the warm-sync
-                // anchor (next_expected = previous-group-end), so SyncController's warm
-                // window misses and it falls to a cold full-chirp search that false-locks
-                // on the light-LTS group start (spurious CFO, group decode fails). The GUI
-                // elides silence so consecutive transmissions stay contiguous and the warm
-                // hand-off carries across the turn. ARQ timeouts run off wall-clock ticks
-                // (engine_/bridge_.tick), not the audio sample-clock, so eliding silence is
-                // safe. SyncController owns cold/warm; the TNC just feeds real audio.
+                // Feed ONLY what OTASim delivers — match the GUI (app.cpp::pollOtaRx);
+                // never fabricate filler. OTASim already serves a continuous, wall-clock-
+                // faithful RX line (measured: receiver sample-timeline tracks wall-clock on
+                // BOTH channels — silence is delivered as zero blocks on a clean channel and
+                // as noise on a faded one; zero client-side gap-fills). getRxSamples is a
+                // real-time PULL: it returns only samples up to the current medium position,
+                // so a poll that has caught up returns empty ("nothing new yet"), NOT
+                // "silence withheld". The old path padded each tick up to target_samples with
+                // zeros on every short/empty read — fabricating extra samples ON TOP of that
+                // continuous stream, so the decoder's sample-clock ran AHEAD of the session
+                // clock; burst boundaries drifted off the warm-sync anchor (next_expected =
+                // previous-group-end) → cold full-chirp false-lock on the light-LTS group
+                // start (spurious CFO on a zero-CFO channel, group decode fails). Draining
+                // only the real samples keeps the decoder clock locked to the session clock.
+                // ARQ timeouts run off wall-clock ticks (engine_/bridge_.tick), not the audio
+                // sample-clock. SyncController owns cold/warm; the TNC just feeds real audio.
                 constexpr size_t kChunkSamples = 2048;
                 constexpr int kMaxChunksPerTick = 8;
                 for (int i = 0; i < kMaxChunksPerTick; ++i) {

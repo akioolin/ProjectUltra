@@ -28,27 +28,33 @@ ALICE resent group 1 to the retry cap.
    ACK" when the next group is seconds out. `ModemEngine::transmit()/transmitBurst()`
    already seed this internally (`modem_engine.cpp:490/628`, using `turnaround_delay_ms_`);
    the GUI seeds *nowhere*. The TNC's call was a second, conflicting seed.
-2. **Zero-padded RX feed (the decisive one).** The TNC tick read `getRxSamples(target)`
-   then `samples.resize(target, 0.0f)` — padding each tick to `target_samples` with
-   zeros. OTASim returns *empty* during silence (the shared medium carries no samples
-   when nobody transmits), so the pad **inserted the ~6.5 s half-duplex turn gap
-   (group→ACK→next group) into BOB's decoder stream as silence**, displacing group 1
-   by ~312k samples past the warm-sync anchor (`next_expected = previous-group-end`).
-   The warm window missed → cold full-chirp search → false-lock on the light-LTS group
-   start (the bogus CFO is the audio stream being stretched by phantom zeros).
+2. **Fabricated RX filler (the decisive one).** The TNC tick read `getRxSamples(target)`
+   then `samples.resize(target, 0.0f)` — padding each tick up to `target_samples` with
+   zeros on every short/empty read. OTASim is NOT empty during silence: it serves a
+   continuous, wall-clock-faithful RX line — measured, the receiver sample-timeline
+   tracks wall-clock on both channels (silence delivered as zero blocks on clean
+   passthrough, as noise on good@20; zero client-side gap-fills). `getRxSamples` is a
+   real-time PULL — a poll that has caught up to the current medium position returns
+   empty ("nothing new *yet*"), not "silence withheld." The pad therefore fabricated
+   extra samples **on top of** that already-continuous stream, so the decoder's
+   sample-clock ran **ahead** of the session clock; burst boundaries drifted off the
+   warm-sync anchor (`next_expected = previous-group-end`) → cold full-chirp false-lock
+   on the light-LTS group start (the bogus CFO on a zero-CFO channel is the tell).
 
 **Fix (`tools/ultra_tnc.cpp`):** (1) removed both external
 `seedExpectedFrameArrivalAfterSamples` calls in `queueTx` — `ModemEngine` owns the seed.
-(2) The sim RX feed now drains **only real OTA samples** (2048-sample chunks ×8,
-break-on-empty, **no zero-pad**), matching the GUI's `App::pollOtaRx`. Eliding silence
-keeps consecutive transmissions contiguous so the warm hand-off carries across the
-turn. ARQ timeouts run off wall-clock ticks (`engine_/bridge_.tick`), not the audio
-sample-clock, so eliding silence is safe. Also dropped now-unused includes.
+(2) The sim RX feed now drains **only what OTASim delivers** (2048-sample chunks ×8,
+break-on-empty, **no zero-pad / no fabrication**), matching the GUI's `App::pollOtaRx`.
+OTASim already serves a continuous, wall-clock-faithful stream; consuming it verbatim
+keeps the decoder sample-clock locked to the session clock. ARQ timeouts run off
+wall-clock ticks (`engine_/bridge_.tick`), not the audio sample-clock. Also dropped
+now-unused includes.
 
-**Why it works (invariant):** the TNC must feed audio **exactly like the GUI** (only
-real OTA samples, never zero-pad) and must **not** hand-seed expected-arrival —
-`SyncController` (the §7 refactor) owns cold/warm acquisition. A non-zero CFO on a
-clean channel is the tell that the audio sample-stream is being stretched.
+**Why it works (invariant):** the TNC must feed audio **exactly like the GUI** (only the
+samples OTASim delivers, never fabricate filler) and must **not** hand-seed
+expected-arrival — `SyncController` (the §7 refactor) owns cold/warm acquisition. A
+non-zero CFO on a clean (zero-CFO) channel is the tell that the decoder sample-clock has
+been pushed off the session clock by injected samples.
 
 **Collateral test updates** (the migration intentionally changed two behaviours):
 - TNC bulk data-port bytes now ship as a **file via burst transport** (`sendFile`),
