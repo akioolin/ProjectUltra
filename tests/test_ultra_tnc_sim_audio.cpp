@@ -17,6 +17,7 @@ int main() {
 #include <chrono>
 #include <csignal>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -166,6 +167,38 @@ std::string valueFor(const std::string& line, const std::string& key) {
 ChildProcess startDaemon(const std::string& binary,
                          const std::filesystem::path& token_path,
                          const std::filesystem::path& capture_root) {
+    // Default to a REAL channel — AWGN @ 15 dB, fixed seed. Passthrough (noiseless) is
+    // not a channel any radio sees, so the gate exercises real auto-negotiation +
+    // burst-transport ARQ over noise. The 8 KB byte match stays robust because the
+    // file-transfer layer only delivers CRC-clean, fully-reassembled data — ARQ
+    // retransmits whatever the noise corrupts, so the assertion holds regardless of how
+    // many groups it takes (the fixed seed keeps the noise reproducible). Override with
+    // ULTRA_TNC_TEST_CHANNEL=passthrough (exact-PHY debug) / ULTRA_TNC_TEST_SNR_DB /
+    // ULTRA_TNC_TEST_SEED to sweep other channels.
+    const char* chan_env = std::getenv("ULTRA_TNC_TEST_CHANNEL");
+    const std::string channel = chan_env ? chan_env : "awgn";
+    const char* snr_env = std::getenv("ULTRA_TNC_TEST_SNR_DB");
+    const std::string snr_db = snr_env ? snr_env : "15";
+    const char* seed_env = std::getenv("ULTRA_TNC_TEST_SEED");
+    const std::string seed = seed_env ? seed_env : "42";
+    const std::string token_str = token_path.string();
+    const std::string capture_str = capture_root.string();
+    std::vector<std::string> arg_strings = {
+        binary,         "serve",
+        "--bind",       "127.0.0.1:0",
+        "--udp-bind",   "127.0.0.1:0",
+        "--tokens",     token_str,
+        "--captures-root", capture_str,
+        "--lobby-channel", channel,
+        "--lobby-snr-db",  snr_db,
+        "--lobby-seed",    seed,
+        "--shutdown-deadline-sec", "2",
+    };
+    std::vector<char*> daemon_argv;
+    daemon_argv.reserve(arg_strings.size() + 1);
+    for (auto& s : arg_strings) daemon_argv.push_back(const_cast<char*>(s.c_str()));
+    daemon_argv.push_back(nullptr);
+
     int pipe_fds[2] = {-1, -1};
     check(::pipe(pipe_fds) == 0, "pipe failed");
 
@@ -176,16 +209,7 @@ ChildProcess startDaemon(const std::string& binary,
         ::dup2(pipe_fds[1], STDERR_FILENO);
         ::close(pipe_fds[0]);
         ::close(pipe_fds[1]);
-        ::execl(binary.c_str(),
-                binary.c_str(),
-                "serve",
-                "--bind", "127.0.0.1:0",
-                "--udp-bind", "127.0.0.1:0",
-                "--tokens", token_path.c_str(),
-                "--captures-root", capture_root.c_str(),
-                "--lobby-channel", "passthrough",
-                "--shutdown-deadline-sec", "2",
-                nullptr);
+        ::execv(binary.c_str(), daemon_argv.data());
         ::_exit(127);
     }
 
@@ -205,10 +229,33 @@ ChildProcess startTnc(const std::string& binary,
                       const std::string& station_id,
                       const std::string& callsign,
                       uint16_t port) {
+    const std::string port_text = std::to_string(port);
+    std::vector<std::string> arg_strings = {
+        binary,           "--sim-audio",
+        "--ota-host",     grpc_target,
+        "--token",        token,
+        "--station-id",   station_id,
+        "--session-id",   "lobby",
+        "--callsign",     callsign,
+        "--bind",         "127.0.0.1",
+        "--port",         port_text,
+        "--log-level",    "info",
+        "--log-category", "operator,audio,modem",
+    };
+    // Preserve per-station logs (mode negotiation, rate picks) to files when
+    // ULTRA_TNC_TEST_LOG_DIR is set — invaluable when probing a real channel.
+    if (const char* dir = std::getenv("ULTRA_TNC_TEST_LOG_DIR")) {
+        arg_strings.push_back("--log-file");
+        arg_strings.push_back(std::string(dir) + "/" + station_id + ".log");
+    }
+    std::vector<char*> tnc_argv;
+    tnc_argv.reserve(arg_strings.size() + 1);
+    for (auto& s : arg_strings) tnc_argv.push_back(const_cast<char*>(s.c_str()));
+    tnc_argv.push_back(nullptr);
+
     int pipe_fds[2] = {-1, -1};
     check(::pipe(pipe_fds) == 0, "pipe failed");
 
-    const std::string port_text = std::to_string(port);
     const pid_t pid = ::fork();
     check(pid >= 0, "fork failed");
     if (pid == 0) {
@@ -216,19 +263,7 @@ ChildProcess startTnc(const std::string& binary,
         ::dup2(pipe_fds[1], STDERR_FILENO);
         ::close(pipe_fds[0]);
         ::close(pipe_fds[1]);
-        ::execl(binary.c_str(),
-                binary.c_str(),
-                "--sim-audio",
-                "--ota-host", grpc_target.c_str(),
-                "--token", token.c_str(),
-                "--station-id", station_id.c_str(),
-                "--session-id", "lobby",
-                "--callsign", callsign.c_str(),
-                "--bind", "127.0.0.1",
-                "--port", port_text.c_str(),
-                "--log-level", "info",
-                "--log-category", "operator,audio,modem",
-                nullptr);
+        ::execv(binary.c_str(), tnc_argv.data());
         ::_exit(127);
     }
 
