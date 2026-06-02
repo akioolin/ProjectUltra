@@ -7,8 +7,11 @@
 #include <charconv>
 #include <cctype>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <sstream>
+#include <system_error>
 #include <string>
 #include <string_view>
 
@@ -292,6 +295,11 @@ void TNCSession::onModemDisconnected() {
         pending_inbound_ = false;
         state_ = isReadyAfterDisconnect(mycall_) ? State::READY : State::IDLE;
         data_tx_buffer_.clear();
+        if (!last_tx_temp_path_.empty()) {
+            std::error_code ec;
+            std::filesystem::remove(last_tx_temp_path_, ec);
+            last_tx_temp_path_.clear();
+        }
         data_tx_quiet_ms_ = 0;
         emitDisconnected();
     }
@@ -436,13 +444,44 @@ std::vector<uint8_t> TNCSession::encodePayloadForWire(
 }
 
 void TNCSession::flushDataTxBuffer() {
-    auto wire = encodePayloadForWire(data_tx_buffer_, compression_enabled_);
-    if (modem_.sendBinary(wire)) {
-        data_tx_buffer_.clear();
+    if (data_tx_buffer_.empty()) {
+        data_tx_quiet_ms_ = 0;
+        return;
     }
-    // On engine refusal (queue full / not CONNECTED) we keep
-    // data_tx_buffer_ intact so the next quiet-period flush retries.
-    // Pat will see BUFFER N stay nonzero and back off accordingly.
+    auto wire = encodePayloadForWire(data_tx_buffer_, compression_enabled_);
+
+    // Ship the accumulated stream as ONE modem FILE TRANSFER (Z=81 burst-file path) rather
+    // than the Z=27 message path — this is how the TNC's bulk transfer matches what the GUI
+    // does (file_transfer_ SENDING -> selectBurstLiftingZ()==81). Stage `wire` to a temp
+    // file (the FileTransferController reads it whole into its tx buffer at startSend) and
+    // hand the far side back the same wire bytes, which TNCSession::onModemDataReceived
+    // decodes + delivers out its data port. The callsign keeps the name unique across the
+    // two ultra_tnc processes that may share /tmp (e.g. the OTASim test rig).
+    std::error_code ec;
+    if (!last_tx_temp_path_.empty()) {
+        std::filesystem::remove(last_tx_temp_path_, ec);
+        last_tx_temp_path_.clear();
+    }
+    const std::string call = mycall_.empty() ? "tnc" : mycall_;
+    const std::string temp_path =
+        (std::filesystem::temp_directory_path() /
+         ("ultra_tnc_tx_" + call + "_" + std::to_string(tx_file_counter_++) + ".bin"))
+            .string();
+    {
+        std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
+        if (out.good()) {
+            out.write(reinterpret_cast<const char*>(wire.data()),
+                      static_cast<std::streamsize>(wire.size()));
+        }
+    }
+    if (modem_.sendFile(temp_path)) {
+        data_tx_buffer_.clear();
+        last_tx_temp_path_ = temp_path;
+    } else {
+        // Engine refused (queue full / not CONNECTED): keep data_tx_buffer_ intact so the
+        // next quiet-period flush retries. Pat sees BUFFER N stay nonzero and backs off.
+        std::filesystem::remove(temp_path, ec);
+    }
     data_tx_quiet_ms_ = 0;
 }
 

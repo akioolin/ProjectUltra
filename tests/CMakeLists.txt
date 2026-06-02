@@ -117,6 +117,7 @@ if(SDL2_FOUND)
         ../src/gui/audio_engine.cpp
         ${ULTRA_STREAMING_DECODER_SOURCES}
         ../src/gui/modem/streaming_encoder.cpp
+        ${ULTRA_MODEM_ENGINE_SOURCES}
     )
     target_include_directories(test_tnc_session PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../src
@@ -562,9 +563,9 @@ if(TARGET ota_simulator)
                     $<TARGET_FILE:ota_simulator>
                     $<TARGET_FILE:ultra_tnc>)
         set_tests_properties(UltraTncSimAudio PROPERTIES
-            # Marked off 2026-05-30 — pending the TNC->OTASim rework (see TNCSession).
-            DISABLED TRUE
-            TIMEOUT 90
+            # Re-enabled 2026-06-02 — TNC migrated onto ModemEngine (shared with the GUI)
+            # and now delivers an 8 KB file CRC-clean over OTASim via burst transport.
+            TIMEOUT 300
             RUN_SERIAL TRUE
             LABELS regression)
     endif()

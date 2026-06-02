@@ -44,6 +44,13 @@ public:
     // retry on the next quiet period rather than dropping the bytes.
     virtual bool sendBinary(const std::vector<uint8_t>& bytes) = 0;
 
+    // Send a staged payload as a modem FILE TRANSFER (the Z=81 burst-file path with the
+    // BURST_HEADER descriptor + deep interleave). The TNC accumulates the client's
+    // data-port stream and flushes it as one transport unit through here, so a bulk
+    // transfer rides the same efficient path the GUI's sendFile() uses. Returns true if
+    // accepted (same retry semantics as sendBinary).
+    virtual bool sendFile(const std::string& path) = 0;
+
     virtual int getTxBackloggBytes() const = 0;
     virtual int getCurrentSNR_db() const = 0;
     virtual int getCurrentBitrate_bps() const = 0;

@@ -339,6 +339,31 @@ public:
         if (streaming_decoder_) streaming_decoder_->setCarrierLdpcInterleaver(enable);
     }
 
+    // Pass-throughs so the headless ultra_tnc can drive the modem through ModemEngine
+    // (rather than owning a raw StreamingEncoder/StreamingDecoder) — thin forwarders that
+    // mirror the wrappers above, giving both frontends one shared modem object.
+    void setOFDMConfig(const ModemConfig& config) {
+        if (streaming_encoder_) streaming_encoder_->setOFDMConfig(config);
+        if (streaming_decoder_) streaming_decoder_->setOFDMConfig(config);
+    }
+    void setConnectedOFDMMode(protocol::WaveformMode mode, const ModemConfig& config,
+                              Modulation mod, CodeRate rate) {
+        if (streaming_decoder_)
+            streaming_decoder_->setConnectedOFDMMode(mode, config, mod, rate);
+    }
+    void seedExpectedFrameArrivalAfterSamples(size_t delay_samples,
+                                              float confidence = 0.50f) {
+        if (streaming_decoder_)
+            streaming_decoder_->seedExpectedFrameArrivalAfterSamples(delay_samples, confidence);
+    }
+    BandwidthMode getDetectedBandwidth() const {
+        return streaming_decoder_ ? streaming_decoder_->getDetectedBandwidth()
+                                  : BandwidthMode::WIDE;
+    }
+    void forceNextFrameFullPreamble() {
+        if (streaming_encoder_) streaming_encoder_->forceNextFrameFullPreamble();
+    }
+
     // FEC codec control
     void setCodecType(fec::CodecType type);
     fec::CodecType getCodecType() const { return codec_type_; }

@@ -8,8 +8,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <limits>
+#include <system_error>
 #include <utility>
+#include <vector>
 
 namespace ultra::tnc {
 
@@ -46,6 +51,10 @@ public:
 
     bool sendBinary(const ultra::Bytes& data) override {
         return engine_.sendBinary(data);
+    }
+
+    bool sendFile(const std::string& path) override {
+        return engine_.sendFile(path);
     }
 
     size_t getTxBacklogBytes() const override {
@@ -98,6 +107,10 @@ public:
 
     void setDataReceivedCallback(DataReceivedCallback cb) override {
         engine_.setDataReceivedCallback(std::move(cb));
+    }
+
+    void setFileReceivedCallback(FileReceivedCallback cb) override {
+        engine_.setFileReceivedCallback(std::move(cb));
     }
 
 private:
@@ -302,6 +315,10 @@ bool TNCBridge::sendBinary(const std::vector<uint8_t>& bytes) {
     return engine_.sendBinary(bytes);
 }
 
+bool TNCBridge::sendFile(const std::string& path) {
+    return engine_.sendFile(path);
+}
+
 int TNCBridge::getTxBackloggBytes() const {
     return getTxBacklogBytes();
 }
@@ -401,6 +418,10 @@ void TNCBridge::wirePECallbacks() {
     engine_.setDataReceivedCallback([this](const ultra::Bytes& bytes, bool more_data) {
         onDataReceived(bytes, more_data);
     });
+    engine_.setFileReceivedCallback(
+        [this](const std::string& path, bool success, const std::string& error) {
+            onFileReceived(path, success, error);
+        });
     engine_.setIncomingCallCallback([this](const std::string& peer) {
         onIncomingCall(peer);
     });
@@ -409,6 +430,7 @@ void TNCBridge::wirePECallbacks() {
 void TNCBridge::clearPECallbacks() {
     engine_.setConnectionChangedCallback({});
     engine_.setDataReceivedCallback({});
+    engine_.setFileReceivedCallback({});
     engine_.setIncomingCallCallback({});
 }
 
@@ -480,6 +502,38 @@ void TNCBridge::onDataReceived(const ultra::Bytes& bytes, bool more_data) {
 
     if (auto sink = snapshotEventSink()) {
         sink->postModemDataReceived(bytes);
+    }
+}
+
+void TNCBridge::onFileReceived(const std::string& path, bool success,
+                               const std::string& error) {
+    (void)error;
+    if (!success || path.empty()) {
+        return;
+    }
+    // Read the reconstructed transport unit (the wire bytes the far TNC staged for this
+    // bulk flush) and hand it to the SAME sink streamed bytes use, so TNCSession decodes
+    // (deflate/raw marker) and delivers it out the data port. Then drop the temp file —
+    // the transfer is complete.
+    std::vector<uint8_t> wire;
+    {
+        std::ifstream in(path, std::ios::binary | std::ios::ate);
+        if (in.good()) {
+            const std::streamoff size = in.tellg();
+            in.seekg(0, std::ios::beg);
+            if (size > 0) {
+                wire.resize(static_cast<size_t>(size));
+                in.read(reinterpret_cast<char*>(wire.data()), size);
+            }
+        }
+    }
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    if (wire.empty()) {
+        return;
+    }
+    if (auto sink = snapshotEventSink()) {
+        sink->postModemDataReceived(std::move(wire));
     }
 }
 

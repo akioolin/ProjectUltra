@@ -144,6 +144,18 @@ void checkSourceContains(const std::string& source,
 }
 
 void checkGuiHarqWiring() {
+    // The modem->protocol provisional-HARQ-context callback used to be an inline
+    // lambda duplicated in app.cpp and ultra_tnc.cpp. It is now wired ONCE in the
+    // shared wireModemToProtocol() (modem_protocol_binding.hpp) that both frontends
+    // call — so the guard checks: (1) each frontend enables the HARQ default +
+    // forwards the soft-combine buffer, (2) each frontend invokes the shared binding,
+    // (3) the shared binding wires the provisional context. This keeps the wiring
+    // from silently dropping without re-pinning it to a duplicated inline lambda.
+    const auto binding = readSourceFile("src/gui/modem/modem_protocol_binding.hpp");
+    checkSourceContains(binding,
+                        "return protocol.harqProvisionalContext();",
+                        "shared wireModemToProtocol() does not wire the provisional HARQ context");
+
     const auto gui_app = readSourceFile("src/gui/app.cpp");
     checkSourceContains(gui_app,
                         "protocol_.setSoftCombiningHARQ(true);",
@@ -152,8 +164,8 @@ void checkGuiHarqWiring() {
                         "modem_.setSoftCombineBuffer(protocol_.softCombineBuffer());",
                         "GUI modem decoder is not wired to protocol HARQ buffer");
     checkSourceContains(gui_app,
-                        "return protocol_.harqProvisionalContext();",
-                        "GUI modem decoder is not wired to provisional HARQ context");
+                        "wireModemToProtocol(modem_, protocol_",
+                        "GUI does not invoke the shared modem<->protocol binding");
 
     const auto modem_engine = readSourceFile("src/gui/modem/modem_engine.cpp");
     checkSourceContains(modem_engine,
@@ -165,11 +177,11 @@ void checkGuiHarqWiring() {
                         "engine_.setSoftCombiningHARQ(true);",
                         "ultra_tnc HARQ production default is not enabled");
     checkSourceContains(ultra_tnc,
-                        "decoder_.setSoftCombineBuffer(engine_.softCombineBuffer());",
-                        "ultra_tnc decoder is not wired to protocol HARQ buffer");
+                        "modem_.setSoftCombineBuffer(engine_.softCombineBuffer());",
+                        "ultra_tnc modem decoder is not wired to protocol HARQ buffer");
     checkSourceContains(ultra_tnc,
-                        "return engine_.harqProvisionalContext();",
-                        "ultra_tnc decoder is not wired to provisional HARQ context");
+                        "wireModemToProtocol(modem_, engine_",
+                        "ultra_tnc does not invoke the shared modem<->protocol binding");
 }
 
 std::string valueFor(const std::string& line, const std::string& key) {

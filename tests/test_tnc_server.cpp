@@ -5,8 +5,10 @@
 #include <chrono>
 #include <csignal>
 #include <cstring>
+#include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -79,6 +81,7 @@ struct FakeModemAdapter : ModemAdapter {
     int disconnect_calls = 0;
     int abort_calls = 0;
     std::vector<std::vector<uint8_t>> send_binary_calls;
+    std::vector<std::string> send_file_calls;
     int backlog_bytes = 0;
     int snr_db = 0;
     int bitrate_bps = 0;
@@ -120,6 +123,12 @@ struct FakeModemAdapter : ModemAdapter {
         return true;
     }
 
+    bool sendFile(const std::string& path) override {
+        std::lock_guard<std::mutex> lock(mutex);
+        send_file_calls.push_back(path);
+        return true;
+    }
+
     int getTxBackloggBytes() const override {
         std::lock_guard<std::mutex> lock(mutex);
         return backlog_bytes;
@@ -151,6 +160,24 @@ struct FakeModemAdapter : ModemAdapter {
             return {};
         }
         return send_binary_calls.back();
+    }
+
+    size_t sendFileCount() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return send_file_calls.size();
+    }
+
+    // Reads the bytes staged into the last sendFile() temp path. The TNC bulk
+    // data path ships accumulated data-port bytes as a file (burst transport),
+    // not as an inline sendBinary message.
+    std::vector<uint8_t> lastFileBytes() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (send_file_calls.empty()) {
+            return {};
+        }
+        std::ifstream in(send_file_calls.back(), std::ios::binary);
+        return std::vector<uint8_t>(std::istreambuf_iterator<char>(in),
+                                    std::istreambuf_iterator<char>());
     }
 
     size_t connectCallCount() const {
@@ -606,13 +633,16 @@ int main() {
         TestClient data(harness.server.getDataPort());
         data.writeBytes({1, 2, 3});
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
-        expect(harness.modem.sendBinaryCount() == 0, "READY/IDLE data should be discarded");
+        expect(harness.modem.sendFileCount() == 0, "READY/IDLE data should be discarded");
         enterConnected(harness, cmd);
         data.writeBytes({4, 5, 6});
-        waitUntil([&] { return harness.modem.sendBinaryCount() == 1; }, 500, "sendBinary not called");
+        // Bulk data-port bytes are accumulated (kDataTxFlushQuietMs idle) and shipped
+        // as a FILE via burst transport — the only valid file path now — not as an
+        // inline sendBinary message. The wire bytes are staged to a temp file.
+        waitUntil([&] { return harness.modem.sendFileCount() == 1; }, 2000, "sendFile not called");
         // 0x00 = raw payload marker (compression is OFF by default).
-        expect(harness.modem.lastBinary() == std::vector<uint8_t>({0x00, 4, 5, 6}),
-               "sendBinary payload mismatch");
+        expect(harness.modem.lastFileBytes() == std::vector<uint8_t>({0x00, 4, 5, 6}),
+               "sendFile payload mismatch");
     });
 
     runner.run("modem data post reaches data socket while connected", [] {

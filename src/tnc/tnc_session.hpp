@@ -75,6 +75,11 @@ private:
     uint32_t data_tx_quiet_ms_ = 0;
     static constexpr uint32_t kDataTxFlushQuietMs = 200;
     static constexpr size_t kDataTxFlushSizeBytes = 64 * 1024;
+    // The accumulated buffer is flushed as ONE modem file-transfer unit (Z=81 burst path),
+    // staged to a temp file. Counter keeps each flush's temp name unique; last path is
+    // cleaned up on the next flush / disconnect (its transfer has progressed by then).
+    uint64_t tx_file_counter_ = 0;
+    std::string last_tx_temp_path_;
 
     static std::pair<std::string, std::string> parseCommand(std::string_view line);
 

@@ -80,6 +80,12 @@ struct FakeModemAdapter : ModemAdapter {
         return !send_binary_should_fail;
     }
 
+    std::vector<std::string> send_file_calls;
+    bool sendFile(const std::string& path) override {
+        send_file_calls.push_back(path);
+        return !send_binary_should_fail;
+    }
+
     int getTxBackloggBytes() const override {
         return backlog_bytes;
     }

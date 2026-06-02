@@ -38,6 +38,7 @@ public:
     using ConnectionChangedCallback = protocol::ProtocolEngine::ConnectionChangedCallback;
     using IncomingCallCallback = protocol::ProtocolEngine::IncomingCallCallback;
     using DataReceivedCallback = protocol::ProtocolEngine::DataReceivedCallback;
+    using FileReceivedCallback = protocol::ProtocolEngine::FileReceivedCallback;
 
     virtual ~ProtocolEnginePort() = default;
 
@@ -48,6 +49,7 @@ public:
     virtual void disconnect() = 0;
     virtual void abortTxNow() = 0;
     virtual bool sendBinary(const ultra::Bytes& data) = 0;
+    virtual bool sendFile(const std::string& path) = 0;
     virtual size_t getTxBacklogBytes() const = 0;
     virtual protocol::ConnectionState getState() const = 0;
     virtual std::string getRemoteCallsign() const = 0;
@@ -62,6 +64,7 @@ public:
     virtual void setConnectionChangedCallback(ConnectionChangedCallback cb) = 0;
     virtual void setIncomingCallCallback(IncomingCallCallback cb) = 0;
     virtual void setDataReceivedCallback(DataReceivedCallback cb) = 0;
+    virtual void setFileReceivedCallback(FileReceivedCallback cb) = 0;
 };
 
 class TNCBridge : public ModemAdapter {
@@ -91,6 +94,7 @@ public:
     void disconnect() override;
     void abort() override;
     bool sendBinary(const std::vector<uint8_t>& bytes) override;
+    bool sendFile(const std::string& path) override;
 
     int getTxBackloggBytes() const override;
     int getTxBacklogBytes() const;
@@ -108,6 +112,11 @@ private:
     void clearPECallbacks();
     void onConnectionChanged(protocol::ConnectionState state, const std::string& info);
     void onDataReceived(const ultra::Bytes& bytes, bool more_data);
+    // A modem FILE TRANSFER completed inbound: the reconstructed file (the wire bytes the
+    // far TNC staged) lands on disk; we read it, hand it to the same data-received sink as
+    // streamed bytes (so the session decodes + delivers it out the data port), then remove
+    // the temp file. This is the RX half of the bulk-stream-over-file-transport path.
+    void onFileReceived(const std::string& path, bool success, const std::string& error);
     void onIncomingCall(const std::string& peer);
     void onAudioQueueState(bool active, uint32_t elapsed_ms);
 

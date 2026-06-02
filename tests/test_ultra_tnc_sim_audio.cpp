@@ -592,12 +592,23 @@ int main(int argc, char** argv) {
         check(bob_connected.find("ALICE BOB") != std::string::npos,
               "bob CONNECTED line mismatch: " + bob_connected);
 
-        const std::string text = "ProjectUltra ultra_tnc OTASim payload";
-        const std::vector<uint8_t> payload(text.begin(), text.end());
+        // Real file transfer over OTASim: a multi-KB deterministic payload exercises
+        // burst-group transport + GROUP_ACK/ARQ recovery across MANY groups — the former
+        // 37-byte payload was a single tiny burst group with no recovery room (it timed
+        // out even on a clean channel). The pattern is reproducible for exact byte
+        // verification (no PRNG state to share).
+        constexpr size_t kFileBytes = 8192;
+        std::vector<uint8_t> payload(kFileBytes);
+        for (size_t i = 0; i < kFileBytes; ++i) {
+            payload[i] = static_cast<uint8_t>((i * 37u + 11u) ^ (i >> 5));
+        }
         alice_data.writeBytes(payload);
 
-        const std::vector<uint8_t> received = bob_data.readBytes(payload.size(), children);
-        check(received == payload, "payload mismatch over ultra_tnc --sim-audio");
+        const std::vector<uint8_t> received =
+            bob_data.readBytes(payload.size(), children, std::chrono::seconds(240));
+        check(received == payload,
+              "file payload mismatch over ultra_tnc --sim-audio (" +
+                  std::to_string(kFileBytes) + " bytes)");
 
         alice_data.close();
         bob_data.close();
@@ -608,7 +619,8 @@ int main(int argc, char** argv) {
         bob.terminateCleanly();
         daemon.terminateCleanly();
 
-        std::cout << "ultra_tnc OTASim client delivered payload and shut down cleanly\n";
+        std::cout << "ultra_tnc OTASim client delivered " << kFileBytes
+                  << "-byte file (CRC-clean byte match) and shut down cleanly\n";
         return 0;
     } catch (const std::exception& e) {
         alice.killNow();

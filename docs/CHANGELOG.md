@@ -10,6 +10,69 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-02 — ultra_tnc migrated onto ModemEngine; TNC↔OTASim file transfer now CRC-clean
+
+**Symptom:** `ultra_tnc` over OTASim connected fine but never delivered a multi-group
+file. After the TNC was migrated from raw `StreamingEncoder`/`StreamingDecoder` onto
+the shared `ModemEngine` (so it drives the identical PHY the GUI does), group 0 of an
+8 KB burst transfer delivered but group 1+ failed: BOB false-locked a *chirp* on the
+light-LTS group start at corr≈0.6 with a **spurious CFO of −18.9/−32.8 Hz on a
+zero-CFO passthrough channel**, every subsequent group's data sync stayed <0.52, and
+ALICE resent group 1 to the retry cap.
+
+**Root cause (two TNC-vs-GUI divergences — both the TNC hand-poking sync state that
+`SyncController` is supposed to own):**
+1. **External expected-arrival seed.** `ultra_tnc.cpp::queueTx` called
+   `modem_.seedExpectedFrameArrivalAfterSamples(samples.size()+50ms)` after *every*
+   TX, including BOB's tone-burst ACK — dead-reckoning "next frame ~725 ms after my
+   ACK" when the next group is seconds out. `ModemEngine::transmit()/transmitBurst()`
+   already seed this internally (`modem_engine.cpp:490/628`, using `turnaround_delay_ms_`);
+   the GUI seeds *nowhere*. The TNC's call was a second, conflicting seed.
+2. **Zero-padded RX feed (the decisive one).** The TNC tick read `getRxSamples(target)`
+   then `samples.resize(target, 0.0f)` — padding each tick to `target_samples` with
+   zeros. OTASim returns *empty* during silence (the shared medium carries no samples
+   when nobody transmits), so the pad **inserted the ~6.5 s half-duplex turn gap
+   (group→ACK→next group) into BOB's decoder stream as silence**, displacing group 1
+   by ~312k samples past the warm-sync anchor (`next_expected = previous-group-end`).
+   The warm window missed → cold full-chirp search → false-lock on the light-LTS group
+   start (the bogus CFO is the audio stream being stretched by phantom zeros).
+
+**Fix (`tools/ultra_tnc.cpp`):** (1) removed both external
+`seedExpectedFrameArrivalAfterSamples` calls in `queueTx` — `ModemEngine` owns the seed.
+(2) The sim RX feed now drains **only real OTA samples** (2048-sample chunks ×8,
+break-on-empty, **no zero-pad**), matching the GUI's `App::pollOtaRx`. Eliding silence
+keeps consecutive transmissions contiguous so the warm hand-off carries across the
+turn. ARQ timeouts run off wall-clock ticks (`engine_/bridge_.tick`), not the audio
+sample-clock, so eliding silence is safe. Also dropped now-unused includes.
+
+**Why it works (invariant):** the TNC must feed audio **exactly like the GUI** (only
+real OTA samples, never zero-pad) and must **not** hand-seed expected-arrival —
+`SyncController` (the §7 refactor) owns cold/warm acquisition. A non-zero CFO on a
+clean channel is the tell that the audio sample-stream is being stretched.
+
+**Collateral test updates** (the migration intentionally changed two behaviours):
+- TNC bulk data-port bytes now ship as a **file via burst transport** (`sendFile`),
+  not an inline `sendBinary` (file-transfer redirect in `tnc_session.cpp`). Updated
+  `tests/test_tnc_server.cpp` "data socket bytes reach modem only while connected" to
+  expect `sendFile` + verify the staged temp-file bytes.
+- The modem↔protocol provisional-HARQ-context wiring moved from duplicated inline
+  lambdas into the shared `wireModemToProtocol()` (`modem_protocol_binding.hpp`).
+  Updated the `UltraGuiOtaClient` HARQ source-guard to verify the consolidated binding
+  (both frontends enable HARQ + forward the soft-combine buffer + invoke the shared
+  binding; the binding wires the provisional context).
+
+**Test verification:**
+- `./build/tests/test_ultra_tnc_sim_audio ./build/ota_simulator ./build/ultra_tnc`
+  → "delivered 8192-byte file (CRC-clean byte match)", EXIT=0, **3/3 stable**.
+  Re-enabled as ctest `UltraTncSimAudio` (was DISABLED; TIMEOUT 90→300, RUN_SERIAL).
+- `ctest --test-dir build -j4` → 4 failed of 78 = the pre-existing baseline
+  {Protocol, StreamingConfig, StreamingBufferPolicy, StreamingDecoderToneBurstMonitor}
+  (broken by the committed §7 `SyncController` refactor; the 8 KB transfer proves the
+  *production* warm-sync + tone-burst-ACK paths work — those unit tests are stale vs
+  the refactored code, tracked separately). No new regressions.
+
+---
+
 ## 2026-06-02 — Shared `wireModemToProtocol()` binding (consolidation step 1/4: kill the GUI↔TNC modem-wiring divergence)
 
 **What was the situation (not a bug — an architecture fix):** the modem→protocol forwarding

@@ -1,7 +1,7 @@
 #include "gui/audio_engine.hpp"
 #include "diagnostics/diagnostics_recorder.hpp"
-#include "gui/modem/streaming_decoder.hpp"
-#include "gui/modem/streaming_encoder.hpp"
+#include "gui/modem/modem_engine.hpp"
+#include "gui/modem/modem_protocol_binding.hpp"
 #include "otasim_client/ota_audio_backend.hpp"
 #include "ptt/ptt_driver_factory.hpp"
 #include "psk/multi_carrier_dpsk.hpp"
@@ -19,13 +19,14 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <filesystem>
+#include <system_error>
 #include <csignal>
 #include <cerrno>
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <cctype>
-#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -42,9 +43,8 @@ using ultra::Bytes;
 using ultra::CodeRate;
 using ultra::ModemConfig;
 using ultra::Modulation;
-using ultra::gui::DecodeResult;
-using ultra::gui::StreamingDecoder;
-using ultra::gui::StreamingEncoder;
+using ultra::gui::ModemEngine;
+using ultra::gui::ModemProtocolFrontendHooks;
 using ultra::otasim_client::OtaAudioBackend;
 using ultra::otasim_client::OtaAudioBackendConfig;
 using ultra::otasim_client::OtaAudioConnectionState;
@@ -212,7 +212,6 @@ public:
             input_enabled_ = true;
             output_enabled_ = true;
             running_.store(true);
-            decode_thread_ = std::thread(&UltraTNCStation::decodeLoop, this);
             reportOtaStatus(true);
             return true;
         }
@@ -252,7 +251,6 @@ public:
         }
 
         running_.store(true);
-        decode_thread_ = std::thread(&UltraTNCStation::decodeLoop, this);
         return true;
     }
 
@@ -261,10 +259,7 @@ public:
             return;
         }
 
-        decoder_.stop();
-        if (decode_thread_.joinable()) {
-            decode_thread_.join();
-        }
+        // ModemEngine owns + joins its decode thread in its destructor; nothing to stop here.
 
         if (cfg_.sim_audio) {
             if (ota_audio_) {
@@ -296,19 +291,34 @@ public:
             reportOtaStatus(false);
             if (input_enabled_ && ota_audio_) {
                 std::lock_guard<std::mutex> lock(input_audio_mutex_);
-                const size_t target_samples = std::clamp<size_t>(
-                    (static_cast<size_t>(elapsed_ms) * kSampleRate) / 1000,
-                    1,
-                    4096);
-                auto samples = ota_audio_->getRxSamples(target_samples);
-                samples.resize(target_samples, 0.0f);
-                decoder_.feedAudio(samples);
+                // Feed ONLY real OTA samples — match the GUI (app.cpp::pollOtaRx).
+                // OTASim returns empty during silence (the shared medium carries no
+                // samples when nobody is transmitting). The old path padded each tick
+                // up to target_samples with zeros, which INSERTED the half-duplex turn
+                // gap (group→ACK→next group, ~6.5 s) into the decoder stream as silence.
+                // That displaces the next burst group by ~312k samples from the warm-sync
+                // anchor (next_expected = previous-group-end), so SyncController's warm
+                // window misses and it falls to a cold full-chirp search that false-locks
+                // on the light-LTS group start (spurious CFO, group decode fails). The GUI
+                // elides silence so consecutive transmissions stay contiguous and the warm
+                // hand-off carries across the turn. ARQ timeouts run off wall-clock ticks
+                // (engine_/bridge_.tick), not the audio sample-clock, so eliding silence is
+                // safe. SyncController owns cold/warm; the TNC just feeds real audio.
+                constexpr size_t kChunkSamples = 2048;
+                constexpr int kMaxChunksPerTick = 8;
+                for (int i = 0; i < kMaxChunksPerTick; ++i) {
+                    auto samples = ota_audio_->getRxSamples(kChunkSamples);
+                    if (samples.empty()) {
+                        break;
+                    }
+                    modem_.feedAudio(samples);
+                }
             }
         } else if (input_enabled_) {
             std::lock_guard<std::mutex> lock(input_audio_mutex_);
             auto samples = audio_.getRxSamples(4096);
             if (!samples.empty()) {
-                decoder_.feedAudio(samples);
+                modem_.feedAudio(samples);
             }
         }
 
@@ -329,15 +339,15 @@ public:
     }
 
     void testFeedAudio(const float* samples, size_t count) {
-        decoder_.feedAudio(samples, count);
+        modem_.feedAudio(samples, count);
     }
 
     void testProcessDecoder() {
-        decoder_.processBuffer();
+        modem_.processRxBuffer();
     }
 
     ultra::gui::DecoderStats testDecoderStats() const {
-        return decoder_.getStats();
+        return modem_.getDecoderStats();
     }
 #endif
 
@@ -349,8 +359,10 @@ private:
     ultra::gui::AudioEngine& audio_;
     ultra::tnc::TNCBridge& bridge_;
 
-    StreamingEncoder encoder_;
-    StreamingDecoder decoder_;
+    // The shared modem integration layer (same class the GUI uses), replacing the raw
+    // StreamingEncoder/StreamingDecoder the TNC used to own. ModemEngine owns the encoder +
+    // decoder + its own decode thread; ultra_tnc feeds it audio and consumes its callbacks.
+    ModemEngine modem_;
 
     ModemConfig base_ofdm_config_;
     ModemConfig ofdm_config_;
@@ -358,16 +370,13 @@ private:
     WaveformMode negotiated_waveform_ = WaveformMode::MC_DPSK;
     Modulation data_modulation_ = Modulation::DQPSK;
     CodeRate data_code_rate_ = CodeRate::R1_4;
-    float last_cfo_hz_ = 0.0f;
 
     std::atomic<bool> running_{false};
-    std::thread decode_thread_;
     std::mutex input_audio_mutex_;
     bool input_enabled_ = false;
     bool output_enabled_ = false;
     bool handshake_complete_ = false;
     bool connected_ = false;
-    int consecutive_decode_failures_ = 0;
     std::unique_ptr<OtaAudioBackend> ota_audio_;
     OtaAudioConnectionState last_ota_state_ = OtaAudioConnectionState::Disconnected;
     std::string last_ota_text_;
@@ -395,6 +404,18 @@ private:
     void configureModem() {
         engine_.setLocalCallsign(cfg_.callsign);
         engine_.setMeasuredSNR(cfg_.snr_db, ultra::SNRSource::NONE);
+        // Inbound bulk transfers (the peer's accumulated data-port stream, shipped as a
+        // modem file transfer) reconstruct here; TNCBridge::onFileReceived reads the wire
+        // bytes, delivers them out the data port, and removes the file. Per-process dir
+        // (callsign) so two ultra_tnc sharing /tmp (the OTASim test rig) don't collide.
+        {
+            std::error_code ec;
+            const auto rx_dir =
+                std::filesystem::temp_directory_path() /
+                ("ultra_tnc_rx_" + (cfg_.callsign.empty() ? std::string("tnc") : cfg_.callsign));
+            std::filesystem::create_directories(rx_dir, ec);
+            engine_.setReceiveDirectory(rx_dir.string());
+        }
         if (cfg_.forced_mod != Modulation::AUTO) {
             engine_.setForcedModulation(cfg_.forced_mod);
         }
@@ -412,21 +433,39 @@ private:
         base_ofdm_config_ = createOFDMConfig();
         ofdm_config_ = base_ofdm_config_;
 
-        encoder_.setOFDMConfig(ofdm_config_);
-        encoder_.setMode(tx_waveform_mode_);
-        encoder_.setDataMode(data_modulation_, data_code_rate_);
-        encoder_.setMCDPSKCarriers(8);
-        encoder_.setFixedFrameCodewords(v2::kDefaultFixedFrameCodewords);
-        encoder_.setPaprReductionEnabled(cfg_.papr_reduction);
+        // Drive the SHARED ModemEngine exactly the way the GUI's app.cpp does: ModemEngine
+        // owns the encoder + decoder, ultra_tnc feeds it OTASim/SDL audio and consumes its
+        // callbacks. setSynchronousMode(false) -> ModemEngine runs its own decode thread
+        // (the TNC no longer owns a decodeLoop), proven on OTASim by the GUI floor gate.
+        modem_.setLogPrefix(cfg_.callsign);
+        modem_.setSynchronousMode(false);
+        modem_.setOFDMConfig(ofdm_config_);
+        modem_.setWaveformMode(tx_waveform_mode_);
+        modem_.setConnectWaveform(WaveformMode::MC_DPSK);
+        modem_.setDataMode(data_modulation_, data_code_rate_);
+        modem_.setMCDPSKCarriers(8);
+        modem_.setFixedFrameCodewords(v2::kDefaultFixedFrameCodewords);
+        modem_.setPaprReductionEnabled(cfg_.papr_reduction);
+        modem_.setSoftCombineBuffer(engine_.softCombineBuffer());
 
-        decoder_.setLogPrefix(cfg_.callsign);
-        decoder_.setMode(WaveformMode::MC_DPSK, false);
-        decoder_.setMCDPSKCarriers(8);
-        decoder_.setFixedFrameCodewords(v2::kDefaultFixedFrameCodewords);
-        decoder_.setSoftCombineBuffer(engine_.softCombineBuffer());
-        decoder_.setHarqProvisionalContextCallback([this]() {
-            return engine_.harqProvisionalContext();
-        });
+        // The SINGLE shared modem->protocol binding (same one the GUI calls). This is what
+        // wires burst-group delivery + tone-burst GROUP_ACK + HARQ ctx that the old raw-
+        // decoder TNC silently missed. The after_rx_data hook keeps the TNC's per-frame
+        // success telemetry (frame.rx); decode-failure telemetry is dropped with the
+        // DecodeResult path (observability only).
+        ultra::gui::ModemProtocolFrontendHooks hooks;
+        hooks.after_rx_data = [](const Bytes& data, float snr_db, float fading,
+                                 ultra::SNRSource snr_source, bool used_for_quality) {
+            char fields[224];
+            std::snprintf(fields, sizeof(fields),
+                          "{\"bytes\":%zu,\"snr_db\":%.1f,\"snr_source\":\"%s\","
+                          "\"fading\":%.2f,\"quality_sample\":%s}",
+                          data.size(), snr_db, ultra::snrSourceToString(snr_source), fading,
+                          used_for_quality ? "true" : "false");
+            ultra::diagnostics::DiagnosticsRecorder::instance().emitText("phy", "frame.rx",
+                                                                         fields);
+        };
+        ultra::gui::wireModemToProtocol(modem_, engine_, std::move(hooks));
     }
 
     void setupCallbacks() {
@@ -435,7 +474,7 @@ private:
             auto samples = transmitFrame(data);
             queueTx(samples);
             if (!samples.empty() && expect_full_ofdm_anchor_after_tx) {
-                decoder_.expectFullOFDMAnchorOnce();
+                modem_.expectFullOFDMAnchorOnce();
             }
         });
 
@@ -443,10 +482,22 @@ private:
                                                 uint16_t group_seq,
                                                 bool force_full_preamble) {
             // §16.4 escalation: resend → full chirp+LTS group-start anchor.
-            // TODO: honor in ultra_tnc once its local transmitBurst exposes the
-            // encoder latch; ultra_tnc is not the warm-handoff validation gate.
-            (void)force_full_preamble;
+            if (force_full_preamble) {
+                modem_.forceNextBurstFullPreamble();
+            }
             queueTx(transmitBurst(frames, group_seq));
+        });
+
+        // The protocol->modem TX direction for the tone-burst GROUP_ACK — the half the
+        // raw-decoder TNC was ALSO missing. Mirrors the GUI (app.cpp): the protocol asks
+        // ModemEngine to encode the tone-burst ACK and we queue it to the audio sink; and
+        // the protocol arms the always-on RX monitor to listen for the reply.
+        engine_.setTransmitToneBurstAckCallback(
+            [this](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& tba) {
+                queueTx(modem_.transmitToneBurstAck(tba));
+            });
+        engine_.setArmToneBurstAckMonitorCallback([this](uint32_t window_ms) {
+            modem_.armToneBurstAckMonitor(window_ms);
         });
 
         engine_.setPingTxCallback([this]() {
@@ -473,8 +524,7 @@ private:
                 cfg.samples_per_symbol = mc_dpsk_samples_per_symbol;
                 cfg.bits_per_symbol = (mod == Modulation::DBPSK) ? 1 :
                                       (mod == Modulation::D8PSK) ? 3 : 2;
-                encoder_.setMCDPSKConfig(cfg);
-                decoder_.setMCDPSKConfig(cfg);
+                modem_.setMCDPSKConfig(cfg);
             }
             setDataMode(mod, rate);
             LOG_INFO("OPERATOR", "Mode: %s %s cw=%d",
@@ -489,8 +539,7 @@ private:
             // protocol layer from CONNECT_ACK / MODE_CHANGE wire bytes).
             // Direct calls only — DO NOT re-enter ProtocolEngine here, the
             // engine mutex is held while this callback fires.
-            encoder_.setFixedFrameCodewords(cw_count);
-            decoder_.setFixedFrameCodewords(cw_count);
+            modem_.setFixedFrameCodewords(cw_count);
         });
 
         engine_.setModeNegotiatedCallback([this](WaveformMode mode) {
@@ -505,12 +554,13 @@ private:
 
         engine_.setConnectWaveformChangedCallback([this](WaveformMode mode) {
             if (mode == WaveformMode::OFDM_NARROW) {
-                encoder_.setNarrowbandControl(true);
+                modem_.setNarrowbandControl(true);
             }
         });
 
         engine_.setHandshakeConfirmedCallback([this]() {
             handshake_complete_ = true;
+            modem_.setHandshakeComplete(true);
         });
 
         bridge_.setConnectionChangedCallback([this](ConnectionState state, const std::string& info) {
@@ -552,88 +602,37 @@ private:
         });
 
         bridge_.setPreferredWaveformChangedCallback([this](WaveformMode mode) {
-            encoder_.setNarrowbandControl(mode == WaveformMode::OFDM_NARROW);
+            modem_.setNarrowbandControl(mode == WaveformMode::OFDM_NARROW);
         });
 
-        decoder_.setFrameCallback([this](const DecodeResult& result) {
-            handleDecodedFrame(result);
-        });
-
-        decoder_.setDataSyncAcceptedCallback([this](float sync_correlation) {
-            engine_.onAcceptedOFDMDataSync(sync_correlation);
-        });
-
-        decoder_.setPingCallback([this](float snr_db, float cfo_hz) {
+        // RX-side modem->protocol forwarding (raw-data delivery, burst-group delivery,
+        // data-sync acceptance, tone-burst ACK detection, HARQ ctx) is wired by the SHARED
+        // wireModemToProtocol() in configureModem(). Only the ping handling stays here — it
+        // is genuinely frontend-specific (narrowband override + ping.rx diagnostics).
+        modem_.setPingReceivedCallback([this](float snr_db) {
             engine_.setMeasuredSNR(snr_db, ultra::SNRSource::SYNC_QUALITY);
-            last_cfo_hz_ = cfo_hz;
             char fields[176];
             std::snprintf(fields, sizeof(fields),
-                          "{\"snr_db\":%.1f,\"snr_source\":\"%s\",\"cfo_hz\":%.1f}",
-                          snr_db, ultra::snrSourceToString(ultra::SNRSource::SYNC_QUALITY),
-                          cfo_hz);
+                          "{\"snr_db\":%.1f,\"snr_source\":\"%s\"}",
+                          snr_db, ultra::snrSourceToString(ultra::SNRSource::SYNC_QUALITY));
             ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
                 "protocol", "ping.rx", fields);
-            if (decoder_.getDetectedBandwidth() == ultra::BandwidthMode::NARROW) {
-                encoder_.setNarrowbandControl(true);
+            if (modem_.getDetectedBandwidth() == ultra::BandwidthMode::NARROW) {
+                modem_.setNarrowbandControl(true);
                 engine_.setNarrowbandOverride(WaveformMode::OFDM_NARROW);
             }
             engine_.onPingReceived();
         });
     }
 
-    void handleDecodedFrame(const DecodeResult& result) {
-        if (!result.success) {
-            consecutive_decode_failures_++;
-            char fields[160];
-            std::snprintf(fields, sizeof(fields),
-                          "{\"consecutive\":%d,\"cw_failed\":%d}",
-                          consecutive_decode_failures_, result.codewords_failed);
-            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
-                "phy", "decode.fail", fields);
-            if (consecutive_decode_failures_ == 5) {
-                ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
-                    "fault", "fault.triggered",
-                    "{\"reason\":\"repeated_decode_failures\",\"policy\":\"emit_only\"}");
-            }
-            return;
-        }
-        consecutive_decode_failures_ = 0;
-        if (result.is_ping || result.frame_data.empty()) {
-            return;
-        }
-
-        last_cfo_hz_ = result.cfo_hz;
-        auto header = v2::parseHeader(result.frame_data);
-        if (header.valid && !v2::isAddressedToCallsign(header, engine_.getLocalCallsign())) {
-            return;
-        }
-
-        const float fading_index = decoder_.getLastFadingIndex();
-        const bool use_quality_sample =
-            engine_.shouldUseRxFrameForChannelQuality(result.frame_data);
-        if (use_quality_sample) {
-            engine_.setChannelQuality(result.snr_db, fading_index, result.snr_source);
-        }
-        char fields[224];
-        std::snprintf(fields, sizeof(fields),
-                      "{\"bytes\":%zu,\"snr_db\":%.1f,\"snr_source\":\"%s\","
-                      "\"fading\":%.2f,\"quality_sample\":%s}",
-                      result.frame_data.size(), result.snr_db,
-                      ultra::snrSourceToString(result.snr_source), fading_index,
-                      use_quality_sample ? "true" : "false");
-        ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
-            "phy", "frame.rx", fields);
-        engine_.onRxData(result.frame_data);
-    }
-
     void setWaveformMode(WaveformMode mode) {
         tx_waveform_mode_ = mode;
-        encoder_.setOFDMConfig(ofdm_config_);
-        encoder_.setMode(mode);
-        encoder_.setDataMode(data_modulation_, data_code_rate_);
-        encoder_.setMCDPSKCarriers(8);
+        modem_.setOFDMConfig(ofdm_config_);
+        modem_.setWaveformMode(mode);
+        modem_.setDataMode(data_modulation_, data_code_rate_);
+        modem_.setMCDPSKCarriers(8);
         if (connected_ && mode == WaveformMode::OFDM_CHIRP) {
-            encoder_.forceNextFrameFullPreamble();
+            modem_.forceNextFrameFullPreamble();
         }
     }
 
@@ -647,15 +646,10 @@ private:
         ofdm_config_.pilot_spacing = ultra::ofdm_link_adaptation::recommendedPilotSpacing(mod, rate);
 
         if (tx_waveform_mode_ != WaveformMode::MC_DPSK) {
-            encoder_.setOFDMConfig(ofdm_config_);
-            encoder_.setMode(tx_waveform_mode_);
+            modem_.setOFDMConfig(ofdm_config_);
+            modem_.setWaveformMode(tx_waveform_mode_);
         }
-        encoder_.setDataMode(mod, rate);
-
-        if (negotiated_waveform_ != WaveformMode::MC_DPSK) {
-            decoder_.setOFDMConfig(ofdm_config_);
-        }
-        decoder_.setDataMode(mod, rate);
+        modem_.setDataMode(mod, rate);
     }
 
     // R4: short re-anchor removed (superseded by warm-handoff, now the production default).
@@ -666,6 +660,7 @@ private:
         }
 
         connected_ = connected;
+        modem_.setConnected(connected_);
         if (connected_) {
             if (negotiated_waveform_ == WaveformMode::OFDM_NARROW) {
                 ofdm_config_ = ultra::presets::narrowbandOFDM();
@@ -680,41 +675,38 @@ private:
 
             if (negotiated_waveform_ != WaveformMode::MC_DPSK) {
                 setWaveformMode(negotiated_waveform_);
-                decoder_.setConnectedOFDMMode(negotiated_waveform_, ofdm_config_,
-                                              data_modulation_, data_code_rate_);
-                decoder_.setKnownCFO(last_cfo_hz_);
+                // ModemEngine tracks chirp CFO internally (like the GUI) — no explicit
+                // setKnownCFO seeding from the ping is needed.
+                modem_.setConnectedOFDMMode(negotiated_waveform_, ofdm_config_,
+                                            data_modulation_, data_code_rate_);
                 if (negotiated_waveform_ == WaveformMode::OFDM_CHIRP) {
-                    decoder_.expectFullOFDMAnchorOnce();
-                    encoder_.forceNextFrameFullPreamble();
-                }
-                if (negotiated_waveform_ == WaveformMode::OFDM_CHIRP) {
-                    encoder_.setBurstInterleave(true);
-                    decoder_.setBurstInterleave(true);
+                    modem_.expectFullOFDMAnchorOnce();
+                    modem_.forceNextFrameFullPreamble();
+                    // NOTE: do NOT force setBurstInterleave here. ModemEngine's mode logic
+                    // (modem_mode.cpp) derives burst_interleave_on from the traffic-class
+                    // policy as the SINGLE source of truth shared by encoder/ARQ/the on-wire
+                    // descriptor — forcing it true (the old raw-decoder TNC did) clamps it ON
+                    // even on clean channels where the policy + descriptor say OFF, so the RX
+                    // decodes the group on the wrong path (0/6). The GUI never forces it.
                 }
             } else {
-                decoder_.setMode(WaveformMode::MC_DPSK, true);
-                decoder_.setDataMode(data_modulation_, data_code_rate_);
-                decoder_.setKnownCFO(last_cfo_hz_);
+                modem_.setWaveformMode(WaveformMode::MC_DPSK);
+                modem_.setDataMode(data_modulation_, data_code_rate_);
             }
         } else {
             std::lock_guard<std::mutex> lock(input_audio_mutex_);
             if (!cfg_.sim_audio) {
                 audio_.pauseInput();
             }
-            decoder_.reset();
-            decoder_.setMode(WaveformMode::MC_DPSK, false);
-            decoder_.setDataMode(Modulation::DQPSK, CodeRate::R1_4);
-            encoder_.setBurstInterleave(false);
-            decoder_.setBurstInterleave(false);
+            modem_.reset();
+            modem_.setWaveformMode(WaveformMode::MC_DPSK);
+            modem_.setDataMode(Modulation::DQPSK, CodeRate::R1_4);
             data_modulation_ = Modulation::DQPSK;
             data_code_rate_ = CodeRate::R1_4;
             negotiated_waveform_ = WaveformMode::MC_DPSK;
             handshake_complete_ = false;
             ofdm_config_ = base_ofdm_config_;
             setWaveformMode(WaveformMode::MC_DPSK);
-            encoder_.setMode(WaveformMode::MC_DPSK);
-            encoder_.setDataMode(Modulation::DQPSK, CodeRate::R1_4);
-            last_cfo_hz_ = 0.0f;
             if (cfg_.sim_audio) {
                 drainOtaRxLocked();
             } else {
@@ -724,53 +716,27 @@ private:
         }
     }
 
+    // TX is delegated to ModemEngine, which owns the full stateful TX decision (waveform
+    // by connection state, modulation/rate, light-vs-full preamble incl. the GROUP_ACK/
+    // DISCONNECT full-anchor rules, handshake-mode handling, expected-arrival seeding).
+    // This replaces the TNC's former hand-rolled encoder save/restore logic — the GUI
+    // drives the identical ModemEngine path.
     std::vector<float> transmitFrame(const Bytes& data) {
-        if (data.empty()) {
-            return {};
-        }
-
-        bool is_handshake_frame = false;
-        if (data.size() >= 3) {
-            const uint8_t frame_type = data[2];
-            is_handshake_frame = (frame_type == 0x12 || frame_type == 0x13);
-        }
-
-        const WaveformMode saved_mode = encoder_.getMode();
-        const CodeRate saved_rate = encoder_.getCodeRate();
-
-        if (is_handshake_frame) {
-            encoder_.setMode(WaveformMode::MC_DPSK);
-            encoder_.setDataMode(Modulation::DQPSK, CodeRate::R1_4);
-        }
-
-        const bool is_mc_dpsk = encoder_.getMode() == WaveformMode::MC_DPSK;
-        const bool use_light = !is_handshake_frame && !is_mc_dpsk && connected_ && handshake_complete_;
-        std::vector<float> samples = use_light ? encoder_.encodeFrameLight(data)
-                                               : encoder_.encodeFrame(data);
-
-        if (is_handshake_frame) {
-            encoder_.setMode(saved_mode);
-            encoder_.setDataMode(data_modulation_, saved_rate);
-        }
-
-        return samples;
+        return modem_.transmit(data);
     }
 
     std::vector<float> transmitBurst(const std::vector<Bytes>& frames,
                                      uint16_t group_seq = 0) {
-        if (frames.empty()) {
-            return {};
-        }
-        if (tx_waveform_mode_ != WaveformMode::MC_DPSK) {
-            encoder_.setMode(tx_waveform_mode_);
-            encoder_.setDataMode(data_modulation_, data_code_rate_);
-        }
-        encoder_.setBurstGroupSeq(group_seq);
-        return encoder_.encodeBurstLight(frames);
+        // Match the encoder Z to the connection's per-burst traffic-class policy (Z=81 /
+        // n=1944 for file bursts) so encoder-Z == chunker-Z == the BURST_HEADER descriptor.
+        // The GUI does the identical push (app.cpp); without it file bursts ship at the
+        // default Z=27 and the receiver group-decodes 0/6.
+        modem_.setBurstLiftingZ(static_cast<uint8_t>(engine_.selectBurstLiftingZ()));
+        return modem_.transmitBurst(frames, group_seq);
     }
 
     std::vector<float> transmitPing() {
-        return encoder_.encodePing();
+        return modem_.transmitPing();
     }
 
     void queueTx(std::vector<float> samples) {
@@ -803,10 +769,15 @@ private:
                 LOG_WARN("AUDIO", "OTASim TX failed: %s", error.c_str());
                 std::cerr << "[otasim] TX failed: " << error << "\n";
             }
-            if (queued && tx_waveform_mode_ == WaveformMode::OFDM_CHIRP) {
-                constexpr size_t kReplyTurnaroundSamples = kSampleRate * 50 / 1000;
-                decoder_.seedExpectedFrameArrivalAfterSamples(samples.size() + kReplyTurnaroundSamples);
-            }
+            // NOTE: do NOT seed expected-frame-arrival here. ModemEngine::transmit()/
+            // transmitBurst() already seed the decoder's next-expected window internally
+            // (modem_engine.cpp) using the modem's own turnaround_delay_ms_ — SyncController
+            // owns cold/warm hand-off. The old raw-decoder TNC dead-reckoned a second seed
+            // at the audio-sink layer; fired again here (after the modem's correct internal
+            // seed) it OVERWRITES it — and on the file receiver it seeds "next frame ~725ms
+            // after my tone-burst ACK" when the next group is seconds out, pushing warm-sync
+            // DEGRADED so the group-start light-LTS falls to a cold full-chirp false-lock
+            // (corr~0.6, garbage CFO). The GUI seeds nowhere; the TNC must match.
             return;
         }
 
@@ -827,10 +798,8 @@ private:
         }
 
         audio_.queueTxSamples(samples);
-        if (tx_waveform_mode_ == WaveformMode::OFDM_CHIRP) {
-            constexpr size_t kReplyTurnaroundSamples = kSampleRate * 50 / 1000;
-            decoder_.seedExpectedFrameArrivalAfterSamples(samples.size() + kReplyTurnaroundSamples);
-        }
+        // No external expected-arrival seed: ModemEngine seeds it internally on transmit
+        // (see the OTASim branch above). SyncController owns the cold/warm hand-off.
     }
 
     void drainOtaRxLocked() {
@@ -874,11 +843,6 @@ private:
         }
     }
 
-    void decodeLoop() {
-        while (running_.load()) {
-            decoder_.processBuffer();
-        }
-    }
 };
 
 } // namespace

@@ -39,6 +39,7 @@ struct FakeProtocolEngine : ProtocolEnginePort {
     int abort_calls = 0;
     int set_preferred_calls = 0;
     std::vector<Bytes> sent_binary;
+    std::vector<std::string> sent_files;
     size_t backlog_bytes = 0;
     float measured_snr = 12.4f;
     SNRSource measured_snr_source = SNRSource::OFDM_BROADBAND;
@@ -49,6 +50,7 @@ struct FakeProtocolEngine : ProtocolEnginePort {
     ConnectionChangedCallback connection_cb;
     IncomingCallCallback incoming_cb;
     DataReceivedCallback data_cb;
+    FileReceivedCallback file_cb;
 
     void setLocalCallsign(const std::string& call) override {
         ++set_local_calls;
@@ -83,6 +85,11 @@ struct FakeProtocolEngine : ProtocolEnginePort {
 
     bool sendBinary(const Bytes& data) override {
         sent_binary.push_back(data);
+        return true;
+    }
+
+    bool sendFile(const std::string& path) override {
+        sent_files.push_back(path);
         return true;
     }
 
@@ -141,6 +148,10 @@ struct FakeProtocolEngine : ProtocolEnginePort {
 
     void setDataReceivedCallback(DataReceivedCallback cb) override {
         data_cb = std::move(cb);
+    }
+
+    void setFileReceivedCallback(FileReceivedCallback cb) override {
+        file_cb = std::move(cb);
     }
 
     void emitConnection(ConnectionState next, const std::string& info) {

@@ -513,7 +513,7 @@ set(ULTRA_STREAMING_DECODER_SOURCES
 
 set(ULTRA_STREAMING_MODEM_SOURCES
     ${ULTRA_STREAMING_DECODER_SOURCES}
-    src/gui/modem/streaming_encoder.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/streaming_encoder.cpp
 )
 
 set(ULTRA_AUDIO_ENGINE_SOURCE
@@ -535,13 +535,13 @@ if(HAMLIB_FOUND)
 endif()
 
 set(ULTRA_MODEM_ENGINE_SOURCES
-    src/gui/modem/modem_engine.cpp
-    src/gui/modem/modem_rx.cpp
-    src/gui/modem/modem_rx_decode.cpp
-    src/gui/modem/modem_mode.cpp
-    src/gui/modem/modem_carrier_sense.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/modem_engine.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/modem_rx.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/modem_rx_decode.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/modem_mode.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/modem_carrier_sense.cpp
     ${ULTRA_STREAMING_MODEM_SOURCES}
-    src/gui/adaptive_mode.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/adaptive_mode.cpp
 )
 
 # Command-line modem tool
@@ -643,6 +643,7 @@ if(ULTRA_BUILD_TOOLS)
             ${ULTRA_AUDIO_ENGINE_SOURCE}
             ${ULTRA_PTT_SOURCES}
             ${ULTRA_STREAMING_MODEM_SOURCES}
+            ${ULTRA_MODEM_ENGINE_SOURCES}
         )
         target_include_directories(ultra_tnc PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
