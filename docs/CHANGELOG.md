@@ -10,6 +10,31 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-02 — share the OTASim RX drain pump between GUI and TNC; TNC test defaults to AWGN
+
+Two follow-ups closing the last TNC-vs-GUI divergence risk from the ModemEngine migration:
+
+**Shared RX pump.** The "drain only real OTASim samples, never fabricate filler" discipline
+lived in two copies — `App::pollOtaRx` (GUI) and the `ultra_tnc` tick loop. They were
+behaviorally aligned after the group-1 fix but could silently drift again. Extracted the
+drain loop into `src/otasim_client/ota_rx_pump.hpp` (`drainOtaRx(ota, consume)` — chunked,
+break-on-empty, no padding); both frontends now call it, with their per-chunk work (GUI:
+record/waterfall/monitor; TNC: feedAudio) in the consumer lambda. The feed discipline is
+now structurally single-sourced. Verified: GUI good@20 PASS (1500 bps CRC-clean), TNC 8 KB
+CRC-clean — both unchanged.
+
+**TNC test default → AWGN.** `test_ultra_tnc_sim_audio` defaulted to `--lobby-channel
+passthrough` (noiseless — not a channel any radio sees). Now defaults to AWGN @ 15 dB,
+fixed seed 42, exercising real auto-negotiation (the TNC auto-picks OFDM QPSK R1/2 at 15 dB
+vs 16QAM R3/4 on passthrough) + burst-transport ARQ over noise. The 8 KB byte-match stays
+robust because the file layer only delivers CRC-clean, fully-reassembled data (ARQ
+retransmits whatever the noise corrupts; the fixed seed keeps it reproducible).
+Channel/SNR/seed and per-station log files are env-overridable
+(`ULTRA_TNC_TEST_CHANNEL` / `_SNR_DB` / `_SEED` / `_LOG_DIR`; default unchanged for ctest).
+Verified: AWGN@15 default 3/3 CRC-clean, all groups 6/6 quality=1.00 max_iters=0, 0 retx.
+
+---
+
 ## 2026-06-02 — remove ultra_tnc in-process AWGN injector (REMOVAL_BACKLOG R7)
 
 **What/why:** `ultra_tnc` carried a divergent third channel — an in-process TX-side AWGN

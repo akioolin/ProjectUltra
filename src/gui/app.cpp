@@ -1,5 +1,6 @@
 #include "app.hpp"
 #include "gui/modem/modem_protocol_binding.hpp"
+#include "otasim_client/ota_rx_pump.hpp"
 #include "diagnostics/diagnostics_recorder.hpp"
 #include "startup_trace.hpp"
 #include "imgui.h"
@@ -1476,18 +1477,16 @@ void App::pollOtaRx() {
         return;
     }
 
-    constexpr size_t kChunkSamples = 2048;
-    constexpr int kMaxChunksPerFrame = 8;
-    for (int i = 0; i < kMaxChunksPerFrame; ++i) {
-        auto samples = ota_audio_->getRxSamples(kChunkSamples);
-        if (samples.empty()) {
-            break;
-        }
+    // Shared OTASim RX drain — the SAME discipline the headless ultra_tnc uses
+    // (ultra::otasim_client::drainOtaRx): drain only real samples, never fabricate
+    // filler. GUI-specific per-chunk work (record, waterfall, monitor) lives in the
+    // consumer below; the drain loop itself is shared so it cannot drift.
+    ultra::otasim_client::drainOtaRx(*ota_audio_, [this](const std::vector<float>& samples) {
         if (recording_enabled_) {
             recorded_rx_samples_.insert(recorded_rx_samples_.end(), samples.begin(), samples.end());
         }
         if (isFileCancelAudioDrainActive()) {
-            continue;
+            return;  // drain the medium but don't feed the modem during a cancel
         }
         modem_.feedAudio(samples);
         if (modem_.isSynchronousMode()) {
@@ -1506,7 +1505,7 @@ void App::pollOtaRx() {
                            samples.data(),
                            static_cast<Uint32>(samples.size() * sizeof(float)));
         }
-    }
+    });
 }
 
 void App::initAudio() {

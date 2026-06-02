@@ -3,6 +3,7 @@
 #include "gui/modem/modem_engine.hpp"
 #include "gui/modem/modem_protocol_binding.hpp"
 #include "otasim_client/ota_audio_backend.hpp"
+#include "otasim_client/ota_rx_pump.hpp"
 #include "ptt/ptt_driver_factory.hpp"
 #include "psk/multi_carrier_dpsk.hpp"
 #include "protocol/frame_v2.hpp"
@@ -288,31 +289,14 @@ public:
             reportOtaStatus(false);
             if (input_enabled_ && ota_audio_) {
                 std::lock_guard<std::mutex> lock(input_audio_mutex_);
-                // Feed ONLY what OTASim delivers — match the GUI (app.cpp::pollOtaRx);
-                // never fabricate filler. OTASim already serves a continuous, wall-clock-
-                // faithful RX line (measured: receiver sample-timeline tracks wall-clock on
-                // BOTH channels — silence is delivered as zero blocks on a clean channel and
-                // as noise on a faded one; zero client-side gap-fills). getRxSamples is a
-                // real-time PULL: it returns only samples up to the current medium position,
-                // so a poll that has caught up returns empty ("nothing new yet"), NOT
-                // "silence withheld". The old path padded each tick up to target_samples with
-                // zeros on every short/empty read — fabricating extra samples ON TOP of that
-                // continuous stream, so the decoder's sample-clock ran AHEAD of the session
-                // clock; burst boundaries drifted off the warm-sync anchor (next_expected =
-                // previous-group-end) → cold full-chirp false-lock on the light-LTS group
-                // start (spurious CFO on a zero-CFO channel, group decode fails). Draining
-                // only the real samples keeps the decoder clock locked to the session clock.
-                // ARQ timeouts run off wall-clock ticks (engine_/bridge_.tick), not the audio
-                // sample-clock. SyncController owns cold/warm; the TNC just feeds real audio.
-                constexpr size_t kChunkSamples = 2048;
-                constexpr int kMaxChunksPerTick = 8;
-                for (int i = 0; i < kMaxChunksPerTick; ++i) {
-                    auto samples = ota_audio_->getRxSamples(kChunkSamples);
-                    if (samples.empty()) {
-                        break;
-                    }
-                    modem_.feedAudio(samples);
-                }
+                // Shared OTASim RX drain — the SAME code the GUI's App::pollOtaRx uses
+                // (ultra::otasim_client::drainOtaRx): drain only real samples, never
+                // fabricate filler. Rationale + the regression it prevents are documented
+                // in ota_rx_pump.hpp; sharing the loop makes it structurally impossible for
+                // the two frontends' feed discipline to drift. SyncController owns cold/warm.
+                ultra::otasim_client::drainOtaRx(
+                    *ota_audio_,
+                    [this](const std::vector<float>& samples) { modem_.feedAudio(samples); });
             }
         } else if (input_enabled_) {
             std::lock_guard<std::mutex> lock(input_audio_mutex_);
