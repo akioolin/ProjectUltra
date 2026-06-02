@@ -10,6 +10,26 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-02 — QSO sweep + analysis tooling (true fade/decode metrics)
+
+Added two companion scripts so rung/channel capability can be probed in bulk with
+**honest** metrics (the good@15 QPSK R3/4 probe showed summary.env's RETX/CWFAIL=0 is
+misleading — it doesn't count burst-transport whole-group GROUP_NACK fade recovery):
+
+- **`tools/analyze_qso_run.sh <out_dir>`** — parses a `gui_qso_scenario.sh --out` dir for
+  the REAL per-group truth from the receiver log (`Burst group_seq=N delivered as unit:
+  K/6 ... max_iters=M`): unique groups, reception attempts, fade-damaged count + %, ARQ
+  NACK/resend requests, and the LDPC iteration spread (min/median/max over clean decodes —
+  a direct margin proxy; 50 = cap = fail). Human block or `--csv` row.
+- **`tools/qso_sweep.sh`** — runs a matrix of forced-rung tests back-to-back (specs from
+  `--config FILE` or stdin: `<channel> <snr> <mod> <rate> [file_kb]`), pinning each rung
+  via `ULTRA_FORCE_WAVEFORM/_DATA_MOD/_DATA_RATE`, and tabulates the results + writes a CSV.
+
+Verified: forced QPSK R3/4 good@20 4 KB → PASS, analyzed to PASS/CRC-ok/1230 bps/33%
+fade-damaged/iters 2-4. No production code touched (tooling only).
+
+---
+
 ## 2026-06-02 — share the OTASim RX drain pump between GUI and TNC; TNC test defaults to AWGN
 
 Two follow-ups closing the last TNC-vs-GUI divergence risk from the ModemEngine migration:
