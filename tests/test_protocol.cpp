@@ -1109,8 +1109,9 @@ bool test_protocol_rate_upgrade() {
     stationA.setLocalCallsign("W1ABC");
     stationB.setLocalCallsign("K2DEF");
 
-    // Station B measures clean high in-band SNR. The AWGN top rung is now
-    // coherent QAM16 R1/2, superseding the differential D8PSK AWGN rungs.
+    // Station B measures clean high in-band SNR. The OFDM band is coherent-only;
+    // on AWGN the QAM16 and QPSK >R1/2 rungs are disabled pending clean-channel
+    // measurement, so the AWGN top rung is currently coherent QPSK R1/2.
     stationB.setMeasuredSNR(32.0f);
 
     bool a_mode_changed = false;
@@ -1142,18 +1143,18 @@ bool test_protocol_rate_upgrade() {
 
     // Verify MODE_CHANGE was received
     if (!a_mode_changed) FAIL("No MODE_CHANGE received at A");
-    if (a_new_mod != ultra::Modulation::QAM16) {
+    if (a_new_mod != ultra::Modulation::QPSK) {
         std::cout << "(got " << ultra::modulationToString(a_new_mod) << ") ";
-        FAIL("Expected QAM16 at 32 dB in-band SNR");
+        FAIL("Expected coherent QPSK at 32 dB in-band AWGN SNR (QAM16 disabled)");
     }
     if (a_new_rate != ultra::CodeRate::R1_2) {
         std::cout << "(got " << ultra::codeRateToString(a_new_rate) << ") ";
-        FAIL("Expected QAM16 R1/2 at 32 dB in-band SNR");
+        FAIL("Expected QPSK R1/2 at 32 dB in-band AWGN SNR");
     }
 
     // Verify both stations report same mode
-    if (stationA.getDataModulation() != ultra::Modulation::QAM16) FAIL("A has wrong modulation");
-    if (stationB.getDataModulation() != ultra::Modulation::QAM16) FAIL("B has wrong modulation");
+    if (stationA.getDataModulation() != ultra::Modulation::QPSK) FAIL("A has wrong modulation");
+    if (stationB.getDataModulation() != ultra::Modulation::QPSK) FAIL("B has wrong modulation");
     if (stationA.getDataCodeRate() != ultra::CodeRate::R1_2) FAIL("A has wrong code rate");
     if (stationB.getDataCodeRate() != ultra::CodeRate::R1_2) FAIL("B has wrong code rate");
 
@@ -1221,7 +1222,8 @@ bool test_adaptive_bidirectional() {
     stationA.setLocalCallsign("W1ABC");
     stationB.setLocalCallsign("K2DEF");
 
-    // Excellent AWGN in-band SNR should use the coherent QAM16 R1/2 top rung.
+    // Excellent AWGN in-band SNR. Coherent-only band with QAM16 / QPSK >R1/2
+    // disabled on AWGN pending clean-channel measurement → top rung is QPSK R1/2.
     stationB.setMeasuredSNR(37.0f);
 
     std::vector<std::string> received_at_a;
@@ -1241,15 +1243,16 @@ bool test_adaptive_bidirectional() {
 
     if (!stationA.isConnected()) FAIL("Not connected");
 
-    // Verify high-rate mode. QAM16 R1/2 now supersedes the differential D8PSK
-    // AWGN rungs, including at very high SNR.
-    if (stationA.getDataModulation() != ultra::Modulation::QAM16) {
+    // Verify high-rate mode. On AWGN the coherent-only band currently tops at
+    // QPSK R1/2 (QAM16 / QPSK >R1/2 disabled until clean-channel-measured), even
+    // at very high SNR.
+    if (stationA.getDataModulation() != ultra::Modulation::QPSK) {
         std::cout << "(got " << ultra::modulationToString(stationA.getDataModulation()) << ") ";
-        FAIL("Expected QAM16 at 37 dB in-band SNR");
+        FAIL("Expected coherent QPSK at 37 dB in-band AWGN SNR (QAM16 disabled)");
     }
     if (stationA.getDataCodeRate() != ultra::CodeRate::R1_2) {
         std::cout << "(got " << ultra::codeRateToString(stationA.getDataCodeRate()) << ") ";
-        FAIL("Expected QAM16 R1/2 at 37 dB in-band SNR");
+        FAIL("Expected QPSK R1/2 at 37 dB in-band AWGN SNR");
     }
 
     // Bidirectional transfer
