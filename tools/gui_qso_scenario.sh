@@ -271,14 +271,22 @@ collect_metrics() {
 }
 
 scenario_passed() {
+  # PASS = the file delivered CRC-clean both ways (BRAVO verified the file +
+  # ALPHA finalized the transfer), on the expected mode. We intentionally do NOT
+  # gate on the disconnect bookkeeping: the disconnect INITIATOR (ALPHA, on the
+  # payload-drained auto-disconnect) quits during teardown at "Connection state
+  # changed: 4" / "[SYS] Disconnecting..." and never logs a "Disconnected" /
+  # "state changed: 0" string, so requiring alpha_disconnected>0 false-negatived
+  # clean runs — scenario_passed never fired, the poll sat to exit-after, and the
+  # receiver GUI lingered. The *_disconnected counts stay in summary.env for info.
+  # (A delivered-but-no-clean-close run, e.g. BUG-FINACK-001, still PASSes here —
+  # delivery is the verdict; close cleanliness is tracked separately.)
   [[ "$alpha_mode_count" -gt 0 ]] &&
   [[ "$bravo_mode_count" -gt 0 ]] &&
   [[ "$alpha_unexpected_modes" -eq 0 ]] &&
   [[ "$bravo_unexpected_modes" -eq 0 ]] &&
   [[ "$file_crc_ok" -gt 0 ]] &&
-  [[ "$alpha_file_done" -gt 0 ]] &&
-  [[ "$alpha_disconnected" -gt 0 ]] &&
-  [[ "$bravo_disconnected" -gt 0 ]]
+  [[ "$alpha_file_done" -gt 0 ]]
 }
 
 hard_failure_reason() {
