@@ -568,6 +568,12 @@ private:
     // yields (TURNOVER) so the two directions serialize. Set true by ultra_tnc;
     // false for the GUI one-way file transfer.
     bool half_duplex_interactive_ = false;
+    // Half-duplex INTERACTIVE: VARA-HF convention — the ISS with an empty TX buffer
+    // turns the link over to the IRS. For Winlink-B2F the connecting station (initiator/
+    // ISS) has nothing to send first (the answering station sends the SID), so it yields
+    // the DATA turn to the responder once connected + settled. Done once per session.
+    bool interactive_initiator_yield_done_ = false;
+    uint32_t interactive_yield_log_throttle_ms_ = 0;
 
     // §14.36 Phase 5c BER-driven per-block rate adaptation. Env ULTRA_ADAPTIVE_RATE=1,
     // default OFF. The SENDER runs the controller on the receiver's per-group decode

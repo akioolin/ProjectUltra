@@ -1095,6 +1095,10 @@ bool Connection::sendPayload(const Bytes& data, bool binary_payload) {
     }
 
     const uint64_t message_token = binary_payload ? 0 : createOutboundMessageRecord(data);
+    LOG_MODEM(DEBUG, "Connection: B2F-DBG sendPayload %zuB queue=%d (local_turn=%d is_init=%d hs_conf=%d yield_pend=%d peer_req=%d guard=%u)",
+              data.size(), shouldQueuePayloadForLinkTurn() ? 1 : 0,
+              local_data_turn_ ? 1 : 0, is_initiator_ ? 1 : 0, handshake_confirmed_ ? 1 : 0,
+              data_turn_yield_pending_ ? 1 : 0, peer_data_turn_requested_ ? 1 : 0, data_turn_tx_guard_ms_);
     if (shouldQueuePayloadForLinkTurn()) {
         if (queued_payloads_.size() >= kMaxQueuedPayloads) {
             dropOutboundMessageRecord(queued_payloads_.front().message_token);
@@ -3697,6 +3701,41 @@ void Connection::tick(uint32_t elapsed_ms) {
             if (local_data_turn_ && peer_data_turn_requested_) {
                 data_turn_contended_ms_ += elapsed_ms;
             }
+            // VARA-HF turnaround: the interactive ISS with an empty TX buffer yields to the
+            // IRS so the B2F responder can send its SID. Fire once, ~1.5 s after connect.
+            if (half_duplex_interactive_ && is_initiator_ && !interactive_initiator_yield_done_) {
+                const bool ready = local_data_turn_ && connected_time_ms_ >= 1500 &&
+                                   data_turn_tx_guard_ms_ == 0 &&
+                                   !hasLocalDataWaitingForTurn() && !file_transfer_.isBusy() &&
+                                   arq_.isReadyToSend();
+                if (ready) {
+                    // Force a full chirp+LTS anchor on this TURNOVER — it is our first OFDM
+                    // frame after the MC-DPSK handshake, so the peer hasn't tracked our OFDM
+                    // timing and a light preamble won't decode (BUG-TNC-B2F-001).
+                    if (on_data_turn_acquired_) {
+                        on_data_turn_acquired_();
+                    }
+                    auto turnover = v2::ControlFrame::makeTurnover(local_call_, remote_call_);
+                    transmitFrame(turnover.serialize());
+                    local_data_turn_ = false;
+                    yielded_data_turn_waiting_for_peer_data_ = true;
+                    received_peer_data_since_connect_ = false;
+                    resetDataTurnFairness();
+                    armDataTurnTxGuard(dataTurnControlGuardMs());
+                    interactive_initiator_yield_done_ = true;
+                    LOG_MODEM(INFO, "Connection: interactive ISS yielded first DATA turn to %s (B2F responder speaks first)",
+                              remote_call_.c_str());
+                } else {
+                    interactive_yield_log_throttle_ms_ += elapsed_ms;
+                    if (interactive_yield_log_throttle_ms_ >= 2000) {
+                        interactive_yield_log_throttle_ms_ = 0;
+                        LOG_MODEM(DEBUG, "Connection: interactive yield WAIT: turn=%d conn_ms=%u guard=%u data_waiting=%d file_busy=%d arq_ready=%d",
+                                  local_data_turn_ ? 1 : 0, connected_time_ms_, data_turn_tx_guard_ms_,
+                                  hasLocalDataWaitingForTurn() ? 1 : 0, file_transfer_.isBusy() ? 1 : 0,
+                                  arq_.isReadyToSend() ? 1 : 0);
+                    }
+                }
+            }
             if (file_cancel_confirm_pending_ &&
                 data_turn_tx_guard_ms_ == 0 &&
                 arq_.isReadyToSend()) {
@@ -4545,6 +4584,8 @@ void Connection::enterConnected() {
     if (half_duplex_interactive_ && !is_initiator_) {
         handshake_confirmed_ = true;
     }
+    interactive_initiator_yield_done_ = false;
+    interactive_yield_log_throttle_ms_ = 0;
     local_data_turn_ = is_initiator_;
     peer_data_turn_requested_ = false;
     local_turn_request_pending_ = false;
@@ -4577,6 +4618,9 @@ void Connection::enterConnected() {
     LOG_MODEM(INFO, "Connection: Now CONNECTED to %s (mode=%s, data_turn=%s)",
               remote_call_.c_str(), waveformModeToString(negotiated_mode_),
               local_data_turn_ ? "ISS" : "IRS");
+    LOG_MODEM(DEBUG, "Connection: B2F-DBG connect state: is_initiator=%d local_data_turn=%d handshake_confirmed=%d interactive=%d",
+              is_initiator_ ? 1 : 0, local_data_turn_ ? 1 : 0,
+              handshake_confirmed_ ? 1 : 0, half_duplex_interactive_ ? 1 : 0);
 
     if (on_mode_negotiated_) {
         on_mode_negotiated_(negotiated_mode_);
