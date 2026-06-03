@@ -10,6 +10,35 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-02 — BUG-FINACK-001 decode-independent re-ACK + scenario CRC pass-gate
+
+Two fixes for the final-group-ACK-loss close failure surfaced while probing low-SNR fading
+(it fires ~100% at Good@10: we hit it on both R2/3 and R1/2 runs).
+
+**Protocol fix (`connection.cpp::onBurstGroupReceived`) — BUG-FINACK-001 [LANDED, UNVALIDATED]:**
+when a burst arrives and the data frames fail to decode but the descriptor identifies an
+ALREADY-DELIVERED group (`group_seq != rxExpectedGroupSeq`), the `!all_ok` `else` branch used
+to just log "dropping" and return — so a fade-damaged resend of the (already-delivered) final
+group never got re-ACKed, and the sender resent it forever (transfer delivered but never closed).
+Fix: route that duplicate into the controller's existing decode-independent re-ACK path
+(`burst_transport_.onGroupReceived(group_seq, {})` → `seqLess` → re-emit GROUP_ACK, no
+re-delivery, frames untouched). Builds; burst/ARQ unit tests pass. NOT yet validated on a
+triggering run (the post-fix runs' final ACK happened to land, re-ACK fired 0×) — see
+KNOWN_BUGS BUG-FINACK-001. A FILE_END completion handshake is the remaining robust-close TODO.
+
+**Harness fix (`tools/gui_qso_scenario.sh::scenario_passed`):** the pass-gate required
+`alpha_disconnected>0`, but the disconnect INITIATOR (ALPHA, on payload-drained auto-disconnect)
+quits during teardown at `Connection state changed: 4` / `[SYS] Disconnecting...` and never logs
+a `Disconnected` / `state changed: 0` string — so clean runs never satisfied the gate, the poll
+sat to `exit-after`, and the receiver GUI lingered (the "GUI won't close" we kept hitting). Now
+PASS = file delivered CRC-clean both ways (`file_crc_ok` + `alpha_file_done`) on the expected
+mode; the `*_disconnected` counts stay in `summary.env` for info. The poll now fires the moment
+the file lands and `pkill`s the GUIs — no lingering, and a FINACK-stuck run (delivered, no clean
+close) is also quick-killed rather than stalling an unattended sweep. (Masks BUG-FINACK-001 in
+the harness — production still shows it; tracked.)
+
+---
+
 ## 2026-06-02 — QSO sweep + analysis tooling (true fade/decode metrics)
 
 Added two companion scripts so rung/channel capability can be probed in bulk with

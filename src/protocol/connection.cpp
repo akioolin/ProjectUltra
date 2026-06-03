@@ -2479,9 +2479,19 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
                     v2::ControlFrame::makeGroupNack(local_call_, remote_call_, group_seq).serialize());
             }
         } else {
+            // BUG-FINACK-001: this is a resend of an ALREADY-DELIVERED group — our
+            // prior GROUP_ACK was fade-lost, so the sender is stuck resending the
+            // final group forever and the transfer never cleanly closes (esp. at
+            // low SNR / heavy fading, where the final ACK is frequently nulled).
+            // Re-ACK it DECODE-INDEPENDENTLY: route it into the controller's existing
+            // duplicate path (onGroupReceived → seqLess → re-emit GROUP_ACK, no
+            // re-delivery), which does NOT need the (failed) data frames. Previously
+            // this branch just dropped the duplicate, so the re-ACK never fired.
             LOG_MODEM(INFO,
-                      "Connection: Burst group_seq=%u failed but not the expected group (%u); dropping",
+                      "Connection: Burst group_seq=%u failed but already delivered "
+                      "(expected %u); re-ACKing decode-independently (FINACK close)",
                       group_seq, burst_transport_.rxExpectedGroupSeq());
+            burst_transport_.onGroupReceived(group_seq, {});
         }
         return;
     }

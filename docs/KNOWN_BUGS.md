@@ -9,9 +9,21 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 ## Active Issues
 
 ### BUG-FINACK-001: Final-group ACK loss → sender infinite-resends the last group; no clean transfer close
-- Status: OPEN (2026-05-31). Folded into thread C (ladder/ARQ rework) — see
-  `docs/OFDM_COHERENT_ONLY_DECISION_2026_05_31.md §5`. Pre-existing (NOT introduced by the
-  2026-05-31 carrier-LDPC / z-latch work); exposed by a fade landing on the completion ACK.
+- Status: **FIX LANDED, UNVALIDATED** (2026-06-02). Decode-independent re-ACK implemented
+  in `connection.cpp::onBurstGroupReceived` (the `!all_ok` else branch now routes a resent
+  ALREADY-DELIVERED group into the controller's existing `onGroupReceived`→`seqLess`→re-ACK
+  path instead of dropping it). Builds; burst/ARQ unit tests pass (StopWaitARQ,
+  SelectiveRepeatARQ, ConnectionAdaptive, ToneBurstAckMonitor/Watterson). **NOT yet validated
+  on a triggering run** — needs a fade-timed seed where the final GROUP_ACK is genuinely lost
+  so the re-ACK actually fires and the transfer closes cleanly on-air (re-ACK fired 0× on the
+  post-fix runs because their final ACK happened to land). PRODUCTION-VISIBLE: the GUI/sweep
+  quick-kill (scenario_passed now PASSes on delivery + pkills) MASKS this in the harness, but
+  real hardware will still show the wasted-airtime infinite last-group resend until validated.
+  Was OPEN since 2026-05-31, folded into thread C (`docs/OFDM_COHERENT_ONLY_DECISION_2026_05_31.md §5`).
+  Pre-existing; exposed by a fade landing on the completion ACK.
+- **Still TODO for the robust fix:** a FILE_END / completion handshake (FILE_END → FILE_END_ACK
+  → DISCONNECT) so the close doesn't depend on a single per-group ACK landing at all. The re-ACK
+  breaks the infinite loop; the handshake is the belt-and-suspenders close.
 - Area: burst completion handshake — `Connection` GROUP_ACK path + the "payload drained →
   auto-disconnect" trigger; receiver duplicate-group handling in `onGroupReceived` / burst assembler.
 - Reported by operator (live GUI), coherent QPSK R1/4 Moderate@14 seed 777:
