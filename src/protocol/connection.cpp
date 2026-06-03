@@ -1629,15 +1629,21 @@ bool Connection::sendFile(const std::string& filepath) {
 
     // 2026-05-28: bypass the legacy ISS-turn-taking gate when burst transport
     // is active. Burst transport is one-way sender-driven (design §14.27).
-    LOG_MODEM(WARN, "sendFile: about to check ISS bypass use_burst=%d ofdm=%d mode=%d",
+    // 2026-06-03: but NOT in half-duplex INTERACTIVE mode (TNC / Winlink B2F).
+    // There BOTH stations alternately transmit; the bypass would let them key up
+    // uncoordinated and collide. Keep the turn gate below so the burst only starts
+    // when this station holds the DATA turn (else queue + TURN_REQUEST; the peer
+    // yields TURNOVER and the directions serialize).
+    LOG_MODEM(WARN, "sendFile: about to check ISS bypass use_burst=%d ofdm=%d mode=%d interactive=%d",
               use_burst_transport_ ? 1 : 0,
               isOFDMMode(negotiated_mode_) ? 1 : 0,
-              static_cast<int>(negotiated_mode_));
-    if (use_burst_transport_ && isOFDMMode(negotiated_mode_)) {
-        LOG_MODEM(WARN, "sendFile: ISS-bypass taken, calling startFileTransferNow");
+              static_cast<int>(negotiated_mode_),
+              half_duplex_interactive_ ? 1 : 0);
+    if (use_burst_transport_ && isOFDMMode(negotiated_mode_) && !half_duplex_interactive_) {
+        LOG_MODEM(WARN, "sendFile: ISS-bypass taken (one-way), calling startFileTransferNow");
         return startFileTransferNow(filepath);
     }
-    LOG_MODEM(WARN, "sendFile: falling through to legacy ISS gate");
+    LOG_MODEM(WARN, "sendFile: turn-gated path (interactive or non-burst)");
 
     if (!local_data_turn_ ||
         peer_data_turn_requested_ ||

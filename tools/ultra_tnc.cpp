@@ -451,6 +451,13 @@ private:
     }
 
     void setupCallbacks() {
+        // The TNC bridges an interactive client (PAT/Winlink B2F): both stations
+        // alternately transmit. Keep the half-duplex ISS/IRS turn gate on burst
+        // sends so the two directions serialize instead of colliding (the default
+        // one-way burst path bypasses the gate — correct only for ALPHA->BRAVO file
+        // push, wrong for bidirectional exchange).
+        engine_.setHalfDuplexInteractive(true);
+
         engine_.setTxDataCallback([this](const Bytes& data,
                                          bool expect_full_ofdm_anchor_after_tx) {
             auto samples = transmitFrame(data);

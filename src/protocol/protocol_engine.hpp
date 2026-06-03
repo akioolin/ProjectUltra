@@ -239,6 +239,11 @@ public:
         connection_.setArmToneBurstAckMonitorCallback(std::move(cb));
     }
 
+    // Half-duplex INTERACTIVE (bidirectional) data path — the TNC / Winlink-B2F
+    // case where both stations alternately transmit. Keeps the ISS/IRS turn gate
+    // on burst sends so the directions serialize instead of colliding.
+    void setHalfDuplexInteractive(bool v) { connection_.setHalfDuplexInteractive(v); }
+
     using PingTxCallback = Connection::PingTxCallback;
     void setPingTxCallback(PingTxCallback cb);
 

@@ -203,6 +203,13 @@ public:
     // ("rate R3/4 -> R2/3 (q=0.18)" / "hold R3/4 (q=0.85)"). Empty when off.
     bool adaptiveRateEnabled() const { return adaptive_rate_enabled_; }
     float lastGroupQuality() const { return last_group_quality_; }
+
+    // Enable half-duplex INTERACTIVE (bidirectional) data: the TNC/B2F path where
+    // both stations alternately transmit. Keeps the ISS/IRS turn gate on burst
+    // file sends so the two directions serialize instead of colliding. See the
+    // half_duplex_interactive_ member for the full rationale.
+    void setHalfDuplexInteractive(bool v) { half_duplex_interactive_ = v; }
+    bool halfDuplexInteractive() const { return half_duplex_interactive_; }
     const std::string& lastAdaptiveAction() const { return last_adaptive_action_; }
 
     void tick(uint32_t elapsed_ms);
@@ -537,6 +544,17 @@ private:
     // Group-ACK reuses the ACK control frame (seq=group_seq).
     BurstStopAndWaitController burst_transport_;
     bool use_burst_transport_ = true;
+
+    // Half-duplex INTERACTIVE mode (the TNC / Winlink-B2F path). The default
+    // one-way burst file push lets the sole sender bypass the ISS/IRS turn gate
+    // (design §14.27: ALPHA sends, BRAVO only listens+ACKs). That is WRONG for a
+    // bidirectional B2F exchange where BOTH stations alternately transmit — they
+    // key up uncoordinated and collide on the half-duplex channel. When this flag
+    // is set, sendFile() keeps the turn gate: a station only starts its burst when
+    // it holds local_data_turn_, otherwise it queues + TURN_REQUESTs, and the peer
+    // yields (TURNOVER) so the two directions serialize. Set true by ultra_tnc;
+    // false for the GUI one-way file transfer.
+    bool half_duplex_interactive_ = false;
 
     // §14.36 Phase 5c BER-driven per-block rate adaptation. Env ULTRA_ADAPTIVE_RATE=1,
     // default OFF. The SENDER runs the controller on the receiver's per-group decode
