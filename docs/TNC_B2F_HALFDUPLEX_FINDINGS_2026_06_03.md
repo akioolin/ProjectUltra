@@ -72,6 +72,41 @@ timing sensitivity; whether the yielded station is allowed to TX its GROUP_ACK p
   it cannot lock. The fix is **full chirp+LTS anchor on every turn-flip**, independent of which
   transport carries the bytes.
 
+## Update 2 (2026-06-03): the full layer stack — 3 fixed, responder-first turn is the frontier
+
+Working the bidirectional B2F revealed a STACK of layers, each hiding the next. Fixed +
+committed (all CI-safe — `UltraTncSimAudio` one-way file test stays green):
+1. **Collision** (`c27aa45`): one-way burst bypass → both stations key up uncoordinated.
+   Fixed with `half_duplex_interactive_` turn-gating.
+2. **Traffic class** (`c177b74`): tiny B2F control was shipped as a z=81 burst file. Fixed by
+   routing ≤4 KB to the non-burst z=27 SR-ARQ path (`sendBinary`).
+3. **Anchor on turn-flip** (`d3ea1fe`): new sender must re-anchor (full chirp+LTS) so the
+   receiver can acquire it after a flip. Added `on_data_turn_acquired_` →
+   `forceNextFrameFullPreamble()`; the yielding peer already arms `expectFullOFDMAnchorOnce()`.
+4. **Responder handshake** (`d3ea1fe`): Winlink B2F has the RESPONDER speak first, but the
+   modem's one-way flow makes the responder wait for the initiator's first DATA frame before
+   it may transmit → deadlock. Pre-confirm `handshake_confirmed_` for the interactive responder.
+
+**REMAINING FRONTIER — responder-first turn acquisition.** Even with 1-4, the message still
+does not deliver, and the turn state is the unresolved knot:
+- The modem turn model is **initiator-first** (initiator = ISS at connect). Winlink B2F is
+  **responder-first**. The IRS requests the DATA turn piggybacked on an ACK — but the B2F
+  responder has nothing to ACK yet, so it can't cleanly request the turn.
+- Tried: the interactive INITIATOR proactively yields the turn to the responder right after
+  connect (TURNOVER → responder force-full → initiator expect-anchor). **The yield did not
+  fire** and observed turn state is contradictory (BRAVO transmits without queuing AND without
+  holding the turn per the logs). This needs **targeted per-tick turn-state logging**
+  (`local_data_turn_`, `handshake_confirmed_`, `shouldQueuePayloadForLinkTurn`, guard ms) on
+  both stations to see who actually holds the turn and why BRAVO sends, plus a check of the
+  **VARA-HF turn convention** (does the connecting station send an empty first frame so the
+  answering station gets the turn for its SID?). The proactive-yield change was reverted as
+  unproven; the mechanism (initiator yields first for interactive) is still the likely answer.
+
+This is a multi-session protocol integration (cf. the README note that the audio-cable B2F
+bring-up found "five real bugs"). The committed layers are real progress and the next step is
+well-scoped: resolve the turn-state with instrumentation, then make the responder reliably
+take the first turn.
+
 ## Next steps
 1. Confirm hypothesis: log whether BRAVO's post-turnover burst carries a full anchor and
    whether ALPHA has `expect_full_ofdm_anchor_` set when it starts receiving it.
