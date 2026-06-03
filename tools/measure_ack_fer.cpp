@@ -666,7 +666,11 @@ int main(int argc, char** argv) {
         // match the encoder member set via setLDPCLiftingZ in configureEncoder. This
         // mirrors production, where the connection layer fixes Z on BOTH ends.
         if (args.ldpc_z == 81) {
+#ifdef _WIN32
+            _putenv_s("ULTRA_LDPC_Z", "81");
+#else
             setenv("ULTRA_LDPC_Z", "81", /*overwrite=*/1);
+#endif
         }
 
         // 2026-05-29 diag: enable the true per-symbol data-aided channel genie
