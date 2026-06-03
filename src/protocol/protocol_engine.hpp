@@ -244,6 +244,14 @@ public:
     // on burst sends so the directions serialize instead of colliding.
     void setHalfDuplexInteractive(bool v) { connection_.setHalfDuplexInteractive(v); }
 
+    // Invoked when this station acquires the half-duplex DATA turn — the TNC wires
+    // it to ModemEngine::forceNextFrameFullPreamble() so the first post-turn-flip
+    // transmission re-anchors the new receiver (BUG-TNC-B2F-001).
+    using DataTurnAcquiredCallback = Connection::DataTurnAcquiredCallback;
+    void setDataTurnAcquiredCallback(DataTurnAcquiredCallback cb) {
+        connection_.setDataTurnAcquiredCallback(std::move(cb));
+    }
+
     using PingTxCallback = Connection::PingTxCallback;
     void setPingTxCallback(PingTxCallback cb);
 

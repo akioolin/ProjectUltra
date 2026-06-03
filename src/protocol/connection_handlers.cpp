@@ -622,6 +622,16 @@ void Connection::handleTurnover(const v2::ControlFrame& frame, const std::string
 
     LOG_MODEM(INFO, "Connection: RX TURNOVER from %s; local station is now ISS",
               src_call.empty() ? remote_call_.c_str() : src_call.c_str());
+
+    // We just took the DATA turn. Our first transmission must carry a full
+    // chirp+LTS anchor so the peer (which has only tracked the previous sender's
+    // timing) can re-acquire us — without it the half-duplex B2F exchange stalls
+    // on endless "burst marker timing retry" (BUG-TNC-B2F-001). Set the encoder's
+    // one-shot full-preamble BEFORE draining any queued payload below.
+    if (on_data_turn_acquired_) {
+        on_data_turn_acquired_();
+    }
+
     runDeferredArqRefill();
     sendNextQueuedPayloadIfReady();
 }

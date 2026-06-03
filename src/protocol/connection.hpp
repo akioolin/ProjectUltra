@@ -334,6 +334,19 @@ public:
         on_full_ofdm_anchor_expected_ = std::move(cb);
     }
 
+    // Callback when this station has just ACQUIRED the half-duplex DATA turn
+    // (received a TURNOVER → now ISS). The new sender's first burst must carry a
+    // FULL chirp+LTS anchor: the new receiver has been tracking only the PREVIOUS
+    // sender's timing and cannot warm-sync to us, so without this it logs endless
+    // "burst marker timing retry" and never decodes (BUG-TNC-B2F-001). The TNC
+    // wires this to ModemEngine::forceNextFrameFullPreamble(); the peer that
+    // yielded already armed expectFullOFDMAnchorOnce() (expectsFullOFDMAnchorAfterTx
+    // returns true for TURNOVER/TURN_REQUEST), so the two sides meet.
+    using DataTurnAcquiredCallback = std::function<void()>;
+    void setDataTurnAcquiredCallback(DataTurnAcquiredCallback cb) {
+        on_data_turn_acquired_ = std::move(cb);
+    }
+
     // Callback when the connection-attempt waveform changes.
     using ConnectWaveformChangedCallback = std::function<void(WaveformMode mode)>;
     void setConnectWaveformChangedCallback(ConnectWaveformChangedCallback cb) { on_connect_waveform_changed_ = cb; }
@@ -752,6 +765,7 @@ private:
     PhyMaskV1NegotiatedCallback on_phy_mask_v1_negotiated_;
     HandshakeConfirmedCallback on_handshake_confirmed_;
     FullOFDMAnchorExpectedCallback on_full_ofdm_anchor_expected_;
+    DataTurnAcquiredCallback on_data_turn_acquired_;
     PingTxCallback on_ping_tx_;
     PingReceivedCallback on_ping_received_;
     StateChangedCallback on_state_changed_;

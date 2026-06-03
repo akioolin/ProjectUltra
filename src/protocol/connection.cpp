@@ -4536,6 +4536,15 @@ void Connection::commitPendingModeChange(const char* outcome) {
 void Connection::enterConnected() {
     state_ = ConnectionState::CONNECTED;
     connected_time_ms_ = 0;
+    // Half-duplex INTERACTIVE (TNC/Winlink-B2F): the RESPONDER speaks first (it sends
+    // the SID banner), so it must be able to transmit immediately. The normal one-way
+    // flow makes the responder wait for the initiator's first DATA frame to confirm the
+    // handshake (handshake_confirmed_) — but in B2F that never comes first, so the
+    // responder deadlocks (it can't even request the DATA turn). The CONNECT/CONNECT_ACK
+    // exchange already validated BOTH directions, so pre-confirm the handshake here.
+    if (half_duplex_interactive_ && !is_initiator_) {
+        handshake_confirmed_ = true;
+    }
     local_data_turn_ = is_initiator_;
     peer_data_turn_requested_ = false;
     local_turn_request_pending_ = false;

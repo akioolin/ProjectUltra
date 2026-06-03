@@ -458,6 +458,14 @@ private:
         // push, wrong for bidirectional exchange).
         engine_.setHalfDuplexInteractive(true);
 
+        // On a turn-flip (we just took the DATA turn), force the next transmission
+        // to a full chirp+LTS anchor so the peer can re-acquire our timing — the
+        // fix for the half-duplex B2F stall (BUG-TNC-B2F-001). The yielding peer
+        // already arms expectFullOFDMAnchorOnce() via the TURNOVER it sent.
+        engine_.setDataTurnAcquiredCallback([this]() {
+            modem_.forceNextFrameFullPreamble();
+        });
+
         engine_.setTxDataCallback([this](const Bytes& data,
                                          bool expect_full_ofdm_anchor_after_tx) {
             auto samples = transmitFrame(data);
