@@ -56,3 +56,18 @@ fragility on a drifting channel → **anchor Good@15 = QPSK R2/3.** R3/4 stays f
 (peak rate, verified-stable channel only).
 
 Raw runs: `/tmp/sweep_good15_ms/results.csv` (this session).
+
+### Good@10 → OFDM is RELIABLE below the current floor — MEASURED 2026-06-02 (not yet a decided anchor)
+The current Good OFDM entry floor is 12 dB; it came from a 2026-05-21 *forced-waveform,
+PAPR-OFF* recalibration (flagged "auto re-verification deferred, ±1 dB, pre-burst-transport")
+— stale-scar-tissue vintage, slated for revalidation. Forced QPSK R1/2, 20 KB, 5 seeds
+(42/7/123/99/256), CRC-verdict + sample-space:
+- **5/5 CRC-clean** — even the worst-fade seed (99: 54% damaged, 9 NACKs, it_max 40) delivered.
+- goodput **400–490 bps (avg 456, ~20% spread)** — tight despite 12–54% damage, because at
+  Good@10 you're fade-recovery-bound (SR resends only failed frames, so heavy damage ≈ modest
+  throughput cost). R2/3 @ Good 10 also delivered (~450 bps, 1 seed) — same fade-recovery floor.
+- So OFDM does NOT run out at 10 dB; the floor rung (R1/4) will go lower still. The 12 dB
+  entry floor is **conservative** vs the PHY. WHETHER to lower it is a separate call (OFDM
+  ~450 bps at Good@10 may or may not beat whatever MC-DPSK does there — MC-DPSK unmeasured/
+  unworked, deliberately out of scope for now). Floor decision: USER, when ready.
+Raw runs: `/tmp/sweep_r12_good10_var/results.csv`.
