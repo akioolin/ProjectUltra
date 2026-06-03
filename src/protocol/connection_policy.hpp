@@ -416,7 +416,7 @@ inline bool shouldUseWideOFDMShortReanchor(WaveformMode waveform,
         return false;
     }
 
-    return fading_index >= kQAM16AwgnFadingMax;
+    return fading_index >= kFadingAwgnMax;
 }
 
 inline OFDMFrameTiming wideOFDMFrameTiming(Modulation mod,

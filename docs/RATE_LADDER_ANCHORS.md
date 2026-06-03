@@ -30,14 +30,23 @@ code-rate)` rung, per fading class. **Anchors come from MEASUREMENT, not hand-tu
 
 `—` = TBD (sweep it). `x` = disabled / never auto-selected (still forceable for probing).
 
+**IMPLEMENTED 2026-06-02** in `kCoherentLadder` (`src/protocol/waveform_selection.hpp`) — the
+single ladder replacing the old 4-gate-array machinery. Current table:
+
 | rung        | AWGN | GOOD | MODERATE | basis |
 |-------------|------|------|----------|-------|
-| QPSK R1/4   | 10   | 12   | 14       | = OFDM entry floors (the floor rung) |
-| QPSK R1/2   | 12   | 14   | 18       | measured 2026-05-21 (+2 dB margin) |
+| QPSK R1/4   | 8    | 10   | 14       | = OFDM entry floors (the floor rung) |
+| QPSK R1/2   | 10   | 10   | 18       | Good@10 measured + AWGN≤Good monotonicity (was 12/14) |
 | QPSK R2/3   | —    | **15** | —      | **Good@15 measured 2026-06-02 (below)** |
-| QPSK R3/4   | —    | cliff | —       | Good = fade-matched cliff (below) |
+| QPSK R3/4   | —    | cliff | —       | Good = fade-matched cliff (below); SNR-20 probe TODO |
 | QAM16 …     | —    | —    | —        | clean-channel throughput; TBD |
 | 8PSK / QAM8 | x    | x    | x        | retired from the OFDM band (thread C to restore) |
+
+Floor lowering (2026-06-02): AWGN entry 10→8 (R1/4 clean @ AWGN 8: 0% dmg, it_max 4 — floor
+likely lower, single seed); GOOD entry 12→10 (R1/2 reliable @ Good 10, 5/5 multi-seed). R1/2
+AWGN/GOOD 12/14→10 (monotonicity: R1/2 @ Good 10 reliable ⇒ ≤10 on AWGN, the easier channel).
+At AWGN/Good 8–9 the floor rung is R1/4; R1/2 from 10. MODERATE untouched (unmeasured-lower).
+Sub-8 AWGN + sub-10-Good R1/4 (marginal @ Good 8, it_max 48) = further-probe TODO.
 
 ## Findings
 

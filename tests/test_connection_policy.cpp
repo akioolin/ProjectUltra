@@ -88,18 +88,20 @@ void test_ladder_rung_selection() {
               LadderRungId::OFDM_CHIRP,
           "Moderate in-band 14 dB boundary selects OFDM_CHIRP");
 
-    CHECK(selectLadderRung(9.9f, ChannelClassification::AWGN).id ==
+    // AWGN entry floor lowered 10->8 (R1/4 clean @ AWGN 8, measured 2026-06-02).
+    CHECK(selectLadderRung(7.9f, ChannelClassification::AWGN).id ==
               LadderRungId::ROBUST_MID,
-          "AWGN below in-band 10 dB stays MC-DPSK");
-    CHECK(selectLadderRung(10.0f, ChannelClassification::AWGN).id ==
+          "AWGN below in-band 8 dB stays MC-DPSK");
+    CHECK(selectLadderRung(8.0f, ChannelClassification::AWGN).id ==
               LadderRungId::OFDM_CHIRP,
-          "AWGN in-band 10 dB boundary selects OFDM_CHIRP");
-    CHECK(selectLadderRung(11.9f, ChannelClassification::GOOD).id ==
+          "AWGN in-band 8 dB boundary selects OFDM_CHIRP");
+    // Good entry floor lowered 12->10 (R1/2 reliable @ Good 10, measured).
+    CHECK(selectLadderRung(9.9f, ChannelClassification::GOOD).id ==
               LadderRungId::ROBUST_MID,
-          "Good fading below in-band 12 dB stays MC-DPSK");
-    CHECK(selectLadderRung(12.0f, ChannelClassification::GOOD).id ==
+          "Good fading below in-band 10 dB stays MC-DPSK");
+    CHECK(selectLadderRung(10.0f, ChannelClassification::GOOD).id ==
               LadderRungId::OFDM_CHIRP,
-          "Good fading in-band 12 dB boundary selects OFDM_CHIRP");
+          "Good fading in-band 10 dB boundary selects OFDM_CHIRP");
     CHECK(selectLadderRung(16.9f, ChannelClassification::POOR).id ==
               LadderRungId::ROBUST_MID,
           "Poor fading keeps extra margin before Robust");
@@ -443,25 +445,26 @@ void test_auto_data_mode_boundaries() {
           "GOOD fading SNR20 auto-negotiates OFDM_CHIRP");
     recommendDataMode(20.0f, waveform, mod, rate, 0.30f);
     CHECK(mod == Modulation::QPSK, "GOOD fading SNR20 auto data mode selects coherent QPSK");
-    // R3/4 promotion (kQPSKGoodR34MeasuredFloorDb=20): the selector promotes the
-    // QPSK R3/4 rung at Good@20 (see test_waveform_policy + waveform_selection.hpp).
-    CHECK(rate == CodeRate::R3_4, "GOOD fading SNR20 auto data mode selects measured QPSK R3/4 rung");
+    // COHERENT-ONLY LADDER (2026-06-02): QPSK R3/4 is DISABLED on auto. GOOD fading
+    // tops out at the QPSK R2/3 rung (>=15 dB), never R3/4.
+    CHECK(rate == CodeRate::R2_3, "GOOD fading SNR20 auto data mode tops out at QPSK R2/3 (R3/4 disabled)");
 
+    // fading 0.79 is MODERATE class (>= 0.65), where R2/3 is disabled -> QPSK R1/2.
     recommendDataMode(20.0f, waveform, mod, rate, 0.79f);
-    CHECK(mod == Modulation::QPSK && rate == CodeRate::R3_4,
-          "GOOD-lobby estimator spread at SNR20 still selects QPSK R3/4");
+    CHECK(mod == Modulation::QPSK && rate == CodeRate::R1_2,
+          "moderate-lobby estimator spread (fading 0.79) at SNR20 selects QPSK R1/2 (R2/3 disabled)");
 
     recommendDataMode(19.8f, waveform, mod, rate, 0.50f);
-    CHECK(mod == Modulation::QPSK && rate == CodeRate::R3_4,
-          "GOOD fading one SNR quantum below SNR20 still selects QPSK R3/4");
+    CHECK(mod == Modulation::QPSK && rate == CodeRate::R2_3,
+          "GOOD fading one SNR quantum below SNR20 still selects QPSK R2/3");
 
-    recommendDataMode(19.7f, waveform, mod, rate, 0.50f);
-    CHECK(mod == Modulation::QPSK,
-          "GOOD fading below the gated-QPSK guard still selects coherent QPSK (default)");
+    recommendDataMode(15.0f, waveform, mod, rate, 0.50f);
+    CHECK(mod == Modulation::QPSK && rate == CodeRate::R2_3,
+          "GOOD fading at the R2/3 gate (>=15) selects QPSK R2/3");
 
-    recommendDataMode(20.0f, waveform, mod, rate, 0.80f);
-    CHECK(mod == Modulation::QPSK,
-          "above the gated-QPSK margin still selects coherent QPSK (default)");
+    recommendDataMode(14.9f, waveform, mod, rate, 0.50f);
+    CHECK(mod == Modulation::QPSK && rate == CodeRate::R1_2,
+          "GOOD fading just under the R2/3 gate selects coherent QPSK R1/2");
 
     waveform = selectNegotiatedMode(
         all, all, WaveformMode::AUTO, WaveformMode::AUTO, WaveformMode::AUTO,
@@ -470,16 +473,16 @@ void test_auto_data_mode_boundaries() {
           "GOOD fading SNR16.9 remains above the OFDM floor");
     recommendDataMode(16.9f, waveform, mod, rate, 0.30f);
     CHECK(mod == Modulation::QPSK,
-          "GOOD fading below the gated-QPSK floor still selects coherent QPSK (default)");
-    CHECK(rate == CodeRate::R1_2,
-          "GOOD fading below the QPSK floor keeps the existing R1/2 OFDM rate");
+          "GOOD fading SNR16.9 selects coherent QPSK");
+    CHECK(rate == CodeRate::R2_3,
+          "GOOD fading SNR16.9 is above the R2/3 gate (>=15)");
 
     waveform = selectNegotiatedMode(
         all, all, WaveformMode::AUTO, WaveformMode::AUTO, WaveformMode::AUTO,
-        11.9f, 0.30f);
+        9.9f, 0.30f);
     CHECK(waveform == WaveformMode::MC_DPSK,
-          "GOOD fading below the OFDM floor keeps MC-DPSK");
-    recommendDataMode(11.9f, waveform, mod, rate, 0.30f);
+          "GOOD fading below the OFDM floor (10) keeps MC-DPSK");
+    recommendDataMode(9.9f, waveform, mod, rate, 0.30f);
     CHECK(mod == Modulation::DQPSK && rate == CodeRate::R1_4,
           "MC-DPSK floor still uses DQPSK R1/4");
 
@@ -489,8 +492,10 @@ void test_auto_data_mode_boundaries() {
     CHECK(waveform == WaveformMode::OFDM_CHIRP,
           "AWGN SNR20 auto-negotiates OFDM_CHIRP");
     recommendDataMode(20.0f, waveform, mod, rate, 0.05f);
-    CHECK(mod == Modulation::QAM16 && rate == CodeRate::R3_4,
-          "AWGN SNR20 selects active QAM16 R3/4 rung");
+    // COHERENT-ONLY LADDER (2026-06-02): QAM16 is DISABLED on auto. AWGN tops out at
+    // QPSK R1/2 (R2/3/R3/4 also disabled on AWGN), never QAM16.
+    CHECK(mod == Modulation::QPSK && rate == CodeRate::R1_2,
+          "AWGN SNR20 selects coherent QPSK R1/2 (QAM16/R2/3/R3/4 disabled on auto)");
 
     waveform = selectNegotiatedMode(
         all, all, WaveformMode::AUTO, WaveformMode::AUTO, WaveformMode::AUTO,
@@ -498,8 +503,8 @@ void test_auto_data_mode_boundaries() {
     CHECK(waveform == WaveformMode::OFDM_CHIRP,
           "Moderate fading SNR20 auto-negotiates OFDM_CHIRP");
     recommendDataMode(20.0f, waveform, mod, rate, 0.90f);
-    CHECK(mod == Modulation::QPSK,
-          "Moderate fading SNR20 selects coherent QPSK (OFDM band is coherent-only)");
+    CHECK(mod == Modulation::QPSK && rate == CodeRate::R1_2,
+          "Moderate fading SNR20 selects coherent QPSK R1/2 (R2/3 disabled on moderate)");
 
     // Coherent-only OFDM (thread A, 2026-05-31): Poor fading routes to MC-DPSK at ALL
     // SNRs (OFDM retired from Poor). MC-DPSK is differential — so Poor stays differential,

@@ -10,6 +10,35 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-02 — rate picker rework: one coherent ladder + measured/lowered floors
+
+Replaced the over-engineered OFDM rate picker (`waveform_selection.hpp` — 4 gate-arrays
+× 3 passes, the documented "scar tissue") with ONE coherent ladder, `kCoherentLadder`:
+an ordered list of `(modulation, code_rate, min_snr_db[AWGN/GOOD/MODERATE])` rungs walked
+high→low; `recommendDataMode`/`selectOFDMCodeRate`/`capInitialOFDMRate` all use it. The
+`OFDMCodeRateDescriptor` is slimmed to pure metadata (rate/K/coded-bits/cw-count, kept for
+frame sizing + the adaptive next/previous walk); `OFDMRateGate`, the 4 gate arrays, all the
+`descriptorAllows*`/`select*OFDMRateDescriptor`/`shouldSelect*` helpers, and the stale
+`kQAM16*`/`kQPSK*Gate` constants are deleted (~200 lines). The band is coherent-only, so
+`mod` is always QPSK now (QAM16/8PSK/R3/4 rungs `kRungDisabledDb` = never auto, still
+ULTRA_FORCE-able for measurement).
+
+Anchors are MEASURED (docs/RATE_LADDER_ANCHORS.md), not hand-tuned:
+- QPSK R1/4 = entry floors; QPSK R1/2 = AWGN 10 / Good 10 / Mod 18; QPSK R2/3 = Good 15.
+- **Floors lowered** from the stale 2026-05-21 forced-waveform recalibration: AWGN entry
+  **10→8** (R1/4 clean @ AWGN 8 — 0% damage, it_max 4), Good entry **12→10** (R1/2 reliable
+  @ Good 10, 5/5 multi-seed). R1/2 AWGN/Good **12/14→10** by monotonicity (R1/2 @ Good 10
+  reliable ⇒ ≤10 on the easier AWGN channel). So AWGN/Good 8–9 → R1/4, ≥10 → R1/2, Good ≥15
+  → R2/3. Behavior change: high-SNR AWGN now caps at QPSK R1/2 (16QAM/R3/4 disabled until
+  measured) and AWGN@10 picks R1/2 (was R1/4).
+
+**Test verification:** `tests/test_waveform_policy.cpp` + `tests/test_connection_policy.cpp`
+rewritten to the new ladder (mod-always-QPSK, the new per-class anchors, disabled-rung
+confirmations) — both PASS. Full build clean; `ctest -j4` back to the documented baseline
+(4 pre-existing §7 reds), no new regressions.
+
+---
+
 ## 2026-06-02 — BUG-FINACK-001 decode-independent re-ACK + scenario CRC pass-gate
 
 Two fixes for the final-group-ACK-loss close failure surfaced while probing low-SNR fading

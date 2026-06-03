@@ -26,8 +26,8 @@ namespace protocol {
 // (fading-index-keyed) and connection_policy::selectLadderRung() (enum-keyed)
 // reference these, so the OFDM-vs-MC-DPSK entry decision cannot drift between the
 // two call sites. Classification thresholds: <0.15 AWGN, <0.65 Good, <1.10 Moderate.
-inline constexpr float kOFDMEntryFloorAwgnDb = 10.0f;
-inline constexpr float kOFDMEntryFloorGoodDb = 12.0f;
+inline constexpr float kOFDMEntryFloorAwgnDb = 8.0f;    // 2026-06-02: lowered 10->8 (R1/4 clean @ AWGN 8, 0% dmg; floor likely lower)
+inline constexpr float kOFDMEntryFloorGoodDb = 10.0f;   // 2026-06-02: lowered 12->10 (R1/2 reliable @ Good 10; R1/4 @ Good 8 marginal/cliff)
 inline constexpr float kOFDMEntryFloorModerateDb = 14.0f;
 // Poor HF (fading >= 1.10: fast Doppler / heavy multipath) routes to MC-DPSK, NEVER
 // OFDM (thread A, 2026-05-31). Coherent OFDM phase tracking breaks on fast fading and
@@ -37,27 +37,23 @@ inline constexpr float kOFDMEntryFloorModerateDb = 14.0f;
 // retired Poor-OFDM corner can't reappear. (Was 18.0f.)
 inline constexpr float kOFDMEntryFloorPoorDb = 1.0e9f;
 
-inline constexpr float kQAM16AwgnFadingMax = 0.15f;
-inline constexpr float kQAM16AwgnSnrFloorDb = 16.0f;
-inline constexpr float kQAM16AwgnR12SnrFloorDb = 19.0f;
-inline constexpr float kQAM16AwgnR23SnrFloorDb = 19.5f;
-inline constexpr float kQAM16AwgnR34SnrFloorDb = 19.7f;
-inline constexpr float kQAM16GoodFadingMax = 0.80f;
-inline constexpr float kQAM16GoodSnrFloorDb = 17.0f;
-inline constexpr float kQPSKMultipathFadingMin = kQAM16AwgnFadingMax;
-inline constexpr float kQPSKGoodFadingMax = kQAM16GoodFadingMax;
-inline constexpr float kProtocolSnrQuantumDb = 0.25f;
-inline constexpr float kQPSKGoodR23MeasuredFloorDb = 20.0f;
-inline constexpr float kQPSKGoodR23SnrFloorDb =
-    kQPSKGoodR23MeasuredFloorDb - kProtocolSnrQuantumDb;
-// R3/4 is PROMOTED on Good fading (selected, not forced) once the file-class
-// composite — cross-frame burst interleave (design §14.14) — makes its thin 25%
-// FEC survive Good@20 (offline harness: ~92% chunk recovery vs ~33% without).
-// Reliability is delivered by the burst transport, not this gate; the gate only
-// lets the ladder choose R3/4 when SNR/fading warrant it.
-inline constexpr float kQPSKGoodR34MeasuredFloorDb = 20.0f;
-inline constexpr float kQPSKGoodR34SnrFloorDb =
-    kQPSKGoodR34MeasuredFloorDb - kProtocolSnrQuantumDb;
+// Fading-class boundaries (combined freq_cv + temporal_cv). Poor (>= kFadingModerateMax)
+// routes to MC-DPSK upstream (kOFDMEntryFloorPoorDb), so the coherent OFDM ladder below
+// only ever classifies AWGN / GOOD / MODERATE.
+inline constexpr float kFadingAwgnMax = 0.15f;
+inline constexpr float kFadingGoodMax = 0.65f;
+inline constexpr float kFadingModerateMax = 1.10f;
+
+enum class FadingClass { AWGN = 0, GOOD = 1, MODERATE = 2 };
+inline FadingClass classifyFading(float fading_index) {
+    if (fading_index < kFadingAwgnMax) return FadingClass::AWGN;
+    if (fading_index < kFadingGoodMax) return FadingClass::GOOD;
+    return FadingClass::MODERATE;
+}
+
+// A rung whose per-class auto-select SNR anchor is this value is "never auto-selected
+// on that fading class" — still reachable via ULTRA_FORCE_DATA_MOD/RATE for measurement.
+inline constexpr float kRungDisabledDb = 1.0e9f;
 
 // Waveform + rate recommendation
 struct WaveformRecommendation {
@@ -72,112 +68,24 @@ inline constexpr uint32_t kOFDMWideSampleRate = 48000;
 inline constexpr uint32_t kOFDMWideSymbolSamples = 1024 + 128;
 inline constexpr uint32_t kOFDMWideCarriers = 59;
 
-struct OFDMRateGate {
-    float max_fading_index = 0.0f;
-    float required_snr_db = kNoRateSnrDb;
-};
-
+// Per-rate METADATA only — selection is the coherent ladder below, not per-rate gates.
+// Kept for frame sizing (info/coded bits, cw count) and the adaptive climb/drop
+// (next/previousOFDMRateDescriptor walk these by code_rate).
 struct OFDMCodeRateDescriptor {
     CodeRate rate = CodeRate::R1_4;
     float code_rate = 0.25f;
     uint32_t info_bits_per_codeword = 162;
     uint32_t coded_bits_per_codeword = v2::LDPC_CODEWORD_BITS;
     int wide_cw_count = v2::kDefaultFixedFrameCodewords;
-    std::array<OFDMRateGate, 4> differential_gates{};
-    size_t differential_gate_count = 0;
-    std::array<OFDMRateGate, 4> bootstrap_gates{};
-    size_t bootstrap_gate_count = 0;
-    std::array<OFDMRateGate, 4> qam16_gates{};
-    size_t qam16_gate_count = 0;
-    std::array<OFDMRateGate, 4> qpsk_gates{};
-    size_t qpsk_gate_count = 0;
 };
 
 inline constexpr std::array<OFDMCodeRateDescriptor, 5> kOFDMCodeRateDescriptors{{
-    {
-        CodeRate::R1_4,
-        0.25f,
-        162,
-        v2::LDPC_CODEWORD_BITS,
-        v2::kDefaultFixedFrameCodewords,
-        {{{kAnyFadingIndex, -1000.0f}}},
-        1,
-        {{{kAnyFadingIndex, -1000.0f}}},
-        1,
-        {{{kQAM16AwgnFadingMax, kQAM16AwgnSnrFloorDb}}},
-        1,
-        {},
-        0,
-    },
-    {
-        CodeRate::R1_2,
-        0.50f,
-        324,
-        v2::LDPC_CODEWORD_BITS,
-        8,
-        {{{0.15f, 12.0f}, {0.65f, 14.0f}, {1.10f, 18.0f}}},
-        3,
-        {{{kAnyFadingIndex, -1000.0f}}},
-        1,
-        {{{kQAM16AwgnFadingMax, kQAM16AwgnR12SnrFloorDb}}},
-        1,
-        {{{kQPSKGoodFadingMax, kQPSKGoodR23SnrFloorDb}}},
-        1,
-    },
-    {
-        CodeRate::R2_3,
-        2.0f / 3.0f,
-        432,
-        v2::LDPC_CODEWORD_BITS,
-        8,
-        {{{0.15f, 25.0f}}},
-        1,
-        {{{0.10f, kQAM16AwgnR23SnrFloorDb}}},
-        1,
-        {{{kQAM16AwgnFadingMax, kQAM16AwgnR23SnrFloorDb}}},
-        1,
-        {{{kQPSKGoodFadingMax, kQPSKGoodR23SnrFloorDb}}},
-        1,
-    },
-    {
-        CodeRate::R3_4,
-        0.75f,
-        486,
-        v2::LDPC_CODEWORD_BITS,
-        8,
-        {{{0.10f, 25.0f}}},
-        1,
-        {{{0.05f, kQAM16AwgnR34SnrFloorDb}}},
-        1,
-        {{{kQAM16AwgnFadingMax, kQAM16AwgnR34SnrFloorDb}}},
-        1,
-        // QPSK R3/4 Good gate (PROMOTION): the 2026-05-26 "R3/4 hard-fails Good@20"
-        // result held for the NON-interleaved path. With the file-class cross-frame
-        // burst interleave (design §14.14) the thin 25% FEC survives Good@20 fades
-        // (offline ~92% chunk recovery). The ladder may now promote to R3/4 here;
-        // the burst stop-and-wait transport is what makes it deliver.
-        {{{kQPSKGoodFadingMax, kQPSKGoodR34SnrFloorDb}}},
-        1,
-    },
-    {
-        // 2026-05-30: R5/6 (540/648 = 0.833) — the top 802.11n LDPC rung. All gates are
-        // EMPTY (count 0) so the AUTO ladder never selects it; R5/6 is forced/locked-only
-        // for now (a fixed ~+10% over R3/4 on Good@20, GUI-validated). Present so any
-        // ofdmCodeRateDescriptor(R5_6) lookup returns a valid descriptor, not nullptr.
-        CodeRate::R5_6,
-        5.0f / 6.0f,
-        540,
-        v2::LDPC_CODEWORD_BITS,
-        8,
-        {},
-        0,
-        {},
-        0,
-        {},
-        0,
-        {},
-        0,
-    },
+    // rate           code_rate    K    coded                    cw
+    {CodeRate::R1_4, 0.25f,       162, v2::LDPC_CODEWORD_BITS, v2::kDefaultFixedFrameCodewords},
+    {CodeRate::R1_2, 0.50f,       324, v2::LDPC_CODEWORD_BITS, 8},
+    {CodeRate::R2_3, 2.0f / 3.0f, 432, v2::LDPC_CODEWORD_BITS, 8},
+    {CodeRate::R3_4, 0.75f,       486, v2::LDPC_CODEWORD_BITS, 8},
+    {CodeRate::R5_6, 5.0f / 6.0f, 540, v2::LDPC_CODEWORD_BITS, 8},
 }};
 
 inline const OFDMCodeRateDescriptor* ofdmCodeRateDescriptor(CodeRate rate) {
@@ -193,103 +101,57 @@ inline const OFDMCodeRateDescriptor& fallbackOFDMCodeRateDescriptor() {
     return kOFDMCodeRateDescriptors.front();
 }
 
-inline bool rateGateAllows(const OFDMRateGate& gate, float snr_db, float fading_index) {
-    return fading_index < gate.max_fading_index && snr_db >= gate.required_snr_db;
-}
+// ============================================================================
+// COHERENT OFDM RATE LADDER — the single source of truth for auto (mod, rate)
+// selection (replaces the old 4-gate-array × 3-pass machinery).
+//
+// The OFDM band is coherent-only (differential retired to MC-DPSK). One ordered
+// ladder of (modulation, code-rate) rungs, each with a per-fading-class minimum
+// in-band SNR "anchor" (dB). recommendDataMode() walks it HIGH throughput → LOW
+// and picks the first rung the (snr, fading_class) clears; the floor rung
+// (QPSK R1/4) anchors at the OFDM entry floors, so once OFDM is selected at all it
+// always qualifies. Anchors come from MEASUREMENT, not hand-tuning — see
+// docs/RATE_LADDER_ANCHORS.md. kRungDisabledDb = not auto-selected yet (forceable).
+// ============================================================================
+struct CoherentRung {
+    Modulation mod;
+    CodeRate rate;
+    float min_snr_db[3];  // indexed by FadingClass: [AWGN, GOOD, MODERATE]
+};
 
-inline bool descriptorAllowsDifferentialOFDM(const OFDMCodeRateDescriptor& descriptor,
-                                             float snr_db,
-                                             float fading_index) {
-    for (size_t i = 0; i < descriptor.differential_gate_count; ++i) {
-        if (rateGateAllows(descriptor.differential_gates[i], snr_db, fading_index)) {
-            return true;
+inline constexpr CoherentRung kCoherentLadder[] = {
+    // mod              rate            AWGN             GOOD             MODERATE
+    {Modulation::QAM16, CodeRate::R3_4, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},
+    {Modulation::QAM16, CodeRate::R2_3, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},
+    {Modulation::QAM16, CodeRate::R1_2, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},
+    {Modulation::QPSK,  CodeRate::R3_4, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},
+    {Modulation::QPSK,  CodeRate::R2_3, {kRungDisabledDb, 15.0f,           kRungDisabledDb}},  // Good@15 measured 2026-06-02
+    {Modulation::QPSK,  CodeRate::R1_2, {10.0f,           10.0f,           18.0f}},            // AWGN/Good 10: Good@10 measured + AWGN≤Good monotonicity (was 12/14); MOD 18 unmeasured-lower
+    {Modulation::QPSK,  CodeRate::R1_4, {kOFDMEntryFloorAwgnDb,            // FLOOR = OFDM entry floors
+                                         kOFDMEntryFloorGoodDb,
+                                         kOFDMEntryFloorModerateDb}},
+};
+
+struct CoherentPick {
+    Modulation mod;
+    CodeRate rate;
+};
+
+// Highest ladder rung whose per-class anchor the (snr, fading) clears. Falls back
+// to the QPSK R1/4 floor (the last entry always qualifies once above the entry floor).
+inline CoherentPick selectCoherentOFDM(float snr_db, float fading_index) {
+    // Poor (>= kFadingModerateMax) routes to MC-DPSK upstream and OFDM is never
+    // selected there; hold the QPSK R1/4 floor defensively if ever reached.
+    if (fading_index >= kFadingModerateMax) {
+        return {Modulation::QPSK, CodeRate::R1_4};
+    }
+    const int cls = static_cast<int>(classifyFading(fading_index));
+    for (const auto& rung : kCoherentLadder) {
+        if (snr_db >= rung.min_snr_db[cls]) {
+            return {rung.mod, rung.rate};
         }
     }
-    return false;
-}
-
-inline bool descriptorAllowsQAM16OFDM(const OFDMCodeRateDescriptor& descriptor,
-                                      float snr_db,
-                                      float fading_index) {
-    for (size_t i = 0; i < descriptor.qam16_gate_count; ++i) {
-        if (rateGateAllows(descriptor.qam16_gates[i], snr_db, fading_index)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-inline bool descriptorAllowsQPSKOFDM(const OFDMCodeRateDescriptor& descriptor,
-                                     float snr_db,
-                                     float fading_index) {
-    if (fading_index < kQPSKMultipathFadingMin) {
-        return false;
-    }
-    for (size_t i = 0; i < descriptor.qpsk_gate_count; ++i) {
-        if (rateGateAllows(descriptor.qpsk_gates[i], snr_db, fading_index)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-inline bool descriptorAllowsBootstrapOFDM(const OFDMCodeRateDescriptor& descriptor,
-                                          float snr_db,
-                                          float fading_index) {
-    for (size_t i = 0; i < descriptor.bootstrap_gate_count; ++i) {
-        if (rateGateAllows(descriptor.bootstrap_gates[i], snr_db, fading_index)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-template <typename Predicate>
-inline const OFDMCodeRateDescriptor* selectBestOFDMRateDescriptor(Predicate allows) {
-    const OFDMCodeRateDescriptor* best = nullptr;
-    for (const auto& descriptor : kOFDMCodeRateDescriptors) {
-        if (!allows(descriptor)) {
-            continue;
-        }
-        if (best == nullptr || descriptor.code_rate > best->code_rate) {
-            best = &descriptor;
-        }
-    }
-    return best;
-}
-
-inline const OFDMCodeRateDescriptor* selectDifferentialOFDMRateDescriptor(float snr_db,
-                                                                          float fading_index) {
-    return selectBestOFDMRateDescriptor([&](const OFDMCodeRateDescriptor& descriptor) {
-        return descriptorAllowsDifferentialOFDM(descriptor, snr_db, fading_index);
-    });
-}
-
-inline const OFDMCodeRateDescriptor* selectQAM16OFDMRateDescriptor(float snr_db,
-                                                                   float fading_index) {
-    return selectBestOFDMRateDescriptor([&](const OFDMCodeRateDescriptor& descriptor) {
-        return descriptorAllowsQAM16OFDM(descriptor, snr_db, fading_index);
-    });
-}
-
-inline const OFDMCodeRateDescriptor* selectQPSKOFDMRateDescriptor(float snr_db,
-                                                                  float fading_index) {
-    return selectBestOFDMRateDescriptor([&](const OFDMCodeRateDescriptor& descriptor) {
-        return descriptorAllowsQPSKOFDM(descriptor, snr_db, fading_index);
-    });
-}
-
-inline const OFDMCodeRateDescriptor* selectBootstrapOFDMRateDescriptor(float snr_db,
-                                                                       float fading_index,
-                                                                       CodeRate candidate) {
-    const auto* candidate_descriptor = ofdmCodeRateDescriptor(candidate);
-    if (candidate_descriptor == nullptr) {
-        return nullptr;
-    }
-    return selectBestOFDMRateDescriptor([&](const OFDMCodeRateDescriptor& descriptor) {
-        return descriptor.code_rate <= candidate_descriptor->code_rate &&
-               descriptorAllowsBootstrapOFDM(descriptor, snr_db, fading_index);
-    });
+    return {Modulation::QPSK, CodeRate::R1_4};
 }
 
 inline float estimateWideOFDMRawBps(Modulation mod, CodeRate rate) {
@@ -385,66 +247,35 @@ inline float ofdmCodeRateValue(CodeRate rate) {
 // R2/3 verified (2026-03-15) — not re-measured:
 //   10KB Good fading SNR=15: 1485 bps, 33% retx
 //   Demoted from Good: R1/2 gives similar throughput with half the retx.
+// Rate for the coherent OFDM ladder at (snr, fading). SINGLE SOURCE OF TRUTH for
+// rate selection — both recommendDataMode() and recommendWaveformAndRate() use it.
 inline CodeRate selectOFDMCodeRate(float snr_db, float fading_index) {
-    const auto* descriptor = selectDifferentialOFDMRateDescriptor(snr_db, fading_index);
-    return descriptor ? descriptor->rate : fallbackOFDMCodeRateDescriptor().rate;
+    return selectCoherentOFDM(snr_db, fading_index).rate;
 }
 
-inline CodeRate selectQAM16CodeRate(float snr_db, float fading_index) {
-    const auto* descriptor = selectQAM16OFDMRateDescriptor(snr_db, fading_index);
-    return descriptor ? descriptor->rate : CodeRate::AUTO;
-}
-
-inline CodeRate selectQPSKCodeRate(float snr_db, float fading_index) {
-    const auto* descriptor = selectQPSKOFDMRateDescriptor(snr_db, fading_index);
-    return descriptor ? descriptor->rate : CodeRate::AUTO;
-}
-
-inline bool shouldSelectQAM16(float snr_db, float fading_index) {
-    return selectQAM16OFDMRateDescriptor(snr_db, fading_index) != nullptr;
-}
-
-inline bool shouldSelectQPSK(float snr_db, float fading_index) {
-    return selectQPSKOFDMRateDescriptor(snr_db, fading_index) != nullptr;
-}
-
-// Cap initial OFDM rate during handshake bootstrap using only chirp-era metrics.
-// This avoids optimistic R2/3 starts when first post-connect OFDM quality is unknown.
+// Cap the initial OFDM rate during handshake bootstrap (before post-connect quality
+// is known): never start above what the ladder supports for (snr, fading), and never
+// above R1/2 — the adaptive loop climbs from there once burst-ACK quality arrives.
 inline CodeRate capInitialOFDMRate(float snr_db, float fading_index, CodeRate candidate) {
-    if (const auto* descriptor =
-            selectBootstrapOFDMRateDescriptor(snr_db, fading_index, candidate)) {
-        return descriptor->rate;
+    const CodeRate ladder_rate = selectOFDMCodeRate(snr_db, fading_index);
+    CodeRate capped =
+        (ofdmCodeRateValue(candidate) < ofdmCodeRateValue(ladder_rate)) ? candidate : ladder_rate;
+    if (ofdmCodeRateValue(capped) > ofdmCodeRateValue(CodeRate::R1_2)) {
+        capped = CodeRate::R1_2;
     }
-    return candidate;
+    return capped;
 }
 
 inline CodeRate capInitialOFDMRate(float snr_db,
                                    float fading_index,
                                    CodeRate candidate,
-                                   Modulation modulation) {
-    // 2026-05-28 test-only: if ULTRA_FORCE_DATA_RATE is set, the operator is
-    // explicitly probing a specific rung — do NOT apply the bootstrap-safety
-    // demotion. Mirrors the recommendDataMode override.
+                                   Modulation /*modulation*/) {
+    // ULTRA_FORCE_DATA_RATE: the operator is probing a specific rung — no demotion.
     if (std::getenv("ULTRA_FORCE_DATA_RATE") != nullptr) {
         return candidate;
     }
-
-    const auto* candidate_descriptor = ofdmCodeRateDescriptor(candidate);
-    if (candidate_descriptor == nullptr) {
-        return capInitialOFDMRate(snr_db, fading_index, candidate);
-    }
-
-    const auto* capped = selectBestOFDMRateDescriptor([&](const OFDMCodeRateDescriptor& descriptor) {
-        if (descriptor.code_rate > candidate_descriptor->code_rate) {
-            return false;
-        }
-        if (modulation == Modulation::QPSK &&
-            descriptorAllowsQPSKOFDM(descriptor, snr_db, fading_index)) {
-            return true;
-        }
-        return descriptorAllowsBootstrapOFDM(descriptor, snr_db, fading_index);
-    });
-    return capped ? capped->rate : capInitialOFDMRate(snr_db, fading_index, candidate);
+    // Coherent-only band: modulation no longer changes the cap.
+    return capInitialOFDMRate(snr_db, fading_index, candidate);
 }
 
 // Recommend waveform and rate based on SNR and fading index
@@ -605,40 +436,14 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
     // 1.5× the bits/symbol of DQPSK R2/3 at the same conditions, so
     // the throughput jumps from ~3.4 kbps to ~5 kbps with zero retx.
     //
-    // Coherent QPSK Good-fading workhorse. Stage-1 forced Good@20 R2/3 seed1
-    // (2026-05-25) cleared the QAM16 erasure seed with 0 BRAVO frame failures.
-    // Keep this out of near-AWGN so the clean QAM16 ladder remains unchanged,
-    // and keep Moderate+ on DQPSK until a measured QPSK floor exists there.
-    if (shouldSelectQPSK(snr_db, fading_index)) {
-        mod = Modulation::QPSK;
-        rate = selectQPSKCodeRate(snr_db, fading_index);
-        return;
-    }
-
-    // Coherent QAM16 rate ladder. Descriptor gates now keep QAM16 on the
-    // clean-channel path; Good fading uses QPSK or DQPSK.
-    if (shouldSelectQAM16(snr_db, fading_index)) {
-        mod = Modulation::QAM16;
-        rate = selectQAM16CodeRate(snr_db, fading_index);
-        return;
-    }
-
-    // D8PSK (Differential 8PSK) rungs RETIRED (thread A, 2026-05-31). They were
-    // near-AWGN-only throughput rungs (SNR >= 28-34 dB, rarely hit on real HF);
-    // differential is now MC-DPSK-only on the OFDM-band. Coherent QAM16 (above)
-    // covers clean-channel throughput; restoring coherent 8PSK is a thread-C
-    // question. Measurement history in git + docs/OFDM_COHERENT_ONLY_DECISION_2026_05_31.md.
-
-    // Default (thread A, 2026-05-31): COHERENT QPSK. The OFDM band is coherent-only —
-    // differential DQPSK/D8PSK retired from OFDM and relocated to MC-DPSK (sub-10 SNR /
-    // Poor, its home; Poor now routes to MC-DPSK via kOFDMEntryFloorPoorDb, so this
-    // function is never reached with OFDM + Poor fading). Coherent is the more reliable
-    // choice across the OFDM band — GUI-measured clean-rate 81% Good@10 / 89-90%
-    // Moderate@14 vs differential 32%, and phase tracking holds as fading speeds up.
-    // Rate via the existing ladder; rate-table cleanup is thread C.
-    // See docs/OFDM_COHERENT_ONLY_DECISION_2026_05_31.md.
-    mod = Modulation::QPSK;
-    rate = selectOFDMCodeRate(snr_db, fading_index);
+    // OFDM band is COHERENT-ONLY (differential DQPSK/D8PSK retired to MC-DPSK; Poor
+    // routes to MC-DPSK upstream via kOFDMEntryFloorPoorDb, so OFDM never reaches
+    // this with Poor fading). The single coherent ladder picks BOTH modulation and
+    // rate from the measured per-fading-class anchors (kCoherentLadder) — no more
+    // shouldSelectQPSK/QAM16 branches. See docs/RATE_LADDER_ANCHORS.md.
+    const CoherentPick pick = selectCoherentOFDM(snr_db, fading_index);
+    mod = pick.mod;
+    rate = pick.rate;
 }
 
 // Conservative raw-PHY bitrate estimate per waveform mode. Used by
