@@ -124,7 +124,7 @@ inline constexpr CoherentRung kCoherentLadder[] = {
     {Modulation::QAM16, CodeRate::R3_4, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},
     {Modulation::QAM16, CodeRate::R2_3, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},
     {Modulation::QAM16, CodeRate::R1_2, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},
-    {Modulation::QPSK,  CodeRate::R3_4, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},
+    {Modulation::QPSK,  CodeRate::R3_4, {kRungDisabledDb, 20.0f,           kRungDisabledDb}},  // Good@20 measured 2026-06-02 (5/5 clean, beats R5/6 + 16QAM)
     {Modulation::QPSK,  CodeRate::R2_3, {kRungDisabledDb, 15.0f,           kRungDisabledDb}},  // Good@15 measured 2026-06-02
     {Modulation::QPSK,  CodeRate::R1_2, {10.0f,           10.0f,           18.0f}},            // AWGN/Good 10: Good@10 measured + AWGN≤Good monotonicity (was 12/14); MOD 18 unmeasured-lower
     {Modulation::QPSK,  CodeRate::R1_4, {kOFDMEntryFloorAwgnDb,            // FLOOR = OFDM entry floors

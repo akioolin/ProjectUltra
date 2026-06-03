@@ -29,7 +29,7 @@ void test_ofdm_rate_thresholds() {
     // auto (kRungDisabledDb), so they are NEVER auto-selected. The only enabled
     // rungs per class are:
     //   AWGN     : R1/4 (>=8), R1/2 (>=10). R2/3 / R3/4 / QAM16 disabled.
-    //   GOOD     : R1/2 (>=10), R2/3 (>=15). R1/4 below 10. R3/4 / QAM16 disabled.
+    //   GOOD     : R1/2 (>=10), R2/3 (>=15), R3/4 (>=20). R1/4 below 10. QAM16 disabled.
     //   MODERATE : R1/4 (>=14), R1/2 (>=18). R2/3 / R3/4 / QAM16 disabled.
     //   POOR (>=1.10): R1/4 always (defensive; Poor routes to MC-DPSK upstream).
 
@@ -61,8 +61,10 @@ void test_ofdm_rate_thresholds() {
           "good fading in-band SNR=14.9 should stay R1/2 (just under R2/3 gate)");
     CHECK(selectOFDMCodeRate(15.0f, 0.30f) == CodeRate::R2_3,
           "good fading in-band SNR=15 should promote to QPSK R2/3 (measured 2026-06-02)");
-    CHECK(selectOFDMCodeRate(20.0f, 0.30f) == CodeRate::R2_3,
-          "good fading in-band SNR=20 should use R2/3 (well above gate, R3/4 disabled)");
+    CHECK(selectOFDMCodeRate(19.9f, 0.30f) == CodeRate::R2_3,
+          "good fading in-band SNR=19.9 stays R2/3 (just under the R3/4 gate)");
+    CHECK(selectOFDMCodeRate(20.0f, 0.30f) == CodeRate::R3_4,
+          "good fading in-band SNR=20 promotes to QPSK R3/4 (measured 2026-06-02, 5/5 clean)");
 
     // Moderate fading gate at SNR >= 18 dB; R2/3 disabled on moderate.
     CHECK(selectOFDMCodeRate(17.9f, 0.90f) == CodeRate::R1_4,
@@ -142,12 +144,11 @@ void test_coherent_ladder_selection() {
     CHECK(mod == Modulation::QPSK && rate == CodeRate::R1_2,
           "AWGN in-band SNR=10 promotes to coherent QPSK R1/2");
 
-    // --- GOOD class (0.15 <= fading < 0.65): R1/2 (>=10), R2/3 (>=15); R1/4 below 10 ---
-    // The OLD behavior promoted QPSK R3/4 at Good@20; NEW tops out at QPSK R2/3.
+    // --- GOOD class (0.15 <= fading < 0.65): R1/2 (>=10), R2/3 (>=15), R3/4 (>=20) ---
     recommendDataMode(20.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.40f);
     CHECK(mod == Modulation::QPSK, "good fading in-band SNR=20 selects coherent QPSK");
-    CHECK(rate == CodeRate::R2_3,
-          "good fading in-band SNR=20 tops out at QPSK R2/3 (R3/4 disabled, was R3/4 on old ladder)");
+    CHECK(rate == CodeRate::R3_4,
+          "good fading in-band SNR=20 promotes to QPSK R3/4 (measured 2026-06-02; beats R5/6 + 16QAM)");
 
     recommendDataMode(15.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.40f);
     CHECK(mod == Modulation::QPSK && rate == CodeRate::R2_3,
@@ -267,15 +268,15 @@ void test_data_mode_policy() {
     // High-SNR GOOD fading: R3/4 disabled -> tops out at QPSK R2/3.
     recommendDataMode(32.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
     CHECK(mod == Modulation::QPSK, "good-fading in-band SNR32 selects coherent QPSK");
-    CHECK(rate == CodeRate::R2_3, "good-fading in-band SNR32 tops out at QPSK R2/3 (R3/4 disabled)");
+    CHECK(rate == CodeRate::R3_4, "good-fading in-band SNR32 selects QPSK R3/4 (>=20 gate)");
 
     recommendDataMode(30.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
     CHECK(mod == Modulation::QPSK, "good-fading in-band SNR30 selects coherent QPSK");
-    CHECK(rate == CodeRate::R2_3, "good-fading in-band SNR30 tops out at QPSK R2/3");
+    CHECK(rate == CodeRate::R3_4, "good-fading in-band SNR30 selects QPSK R3/4 (>=20 gate)");
 
     recommendDataMode(28.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
     CHECK(mod == Modulation::QPSK, "good-fading in-band SNR28 selects coherent QPSK");
-    CHECK(rate == CodeRate::R2_3, "good-fading in-band SNR28 tops out at QPSK R2/3");
+    CHECK(rate == CodeRate::R3_4, "good-fading in-band SNR28 selects QPSK R3/4 (>=20 gate)");
 
     // AWGN in-band SNR=21.7: QAM16 never auto-selected, AWGN tops out at QPSK R1/2.
     recommendDataMode(21.7f, WaveformMode::OFDM_CHIRP, mod, rate, 0.04f);

@@ -447,7 +447,7 @@ void test_auto_data_mode_boundaries() {
     CHECK(mod == Modulation::QPSK, "GOOD fading SNR20 auto data mode selects coherent QPSK");
     // COHERENT-ONLY LADDER (2026-06-02): QPSK R3/4 is DISABLED on auto. GOOD fading
     // tops out at the QPSK R2/3 rung (>=15 dB), never R3/4.
-    CHECK(rate == CodeRate::R2_3, "GOOD fading SNR20 auto data mode tops out at QPSK R2/3 (R3/4 disabled)");
+    CHECK(rate == CodeRate::R3_4, "GOOD fading SNR20 auto data mode promotes to QPSK R3/4 (measured 2026-06-02)");
 
     // fading 0.79 is MODERATE class (>= 0.65), where R2/3 is disabled -> QPSK R1/2.
     recommendDataMode(20.0f, waveform, mod, rate, 0.79f);
