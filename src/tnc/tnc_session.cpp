@@ -450,13 +450,30 @@ void TNCSession::flushDataTxBuffer() {
     }
     auto wire = encodePayloadForWire(data_tx_buffer_, compression_enabled_);
 
-    // Ship the accumulated stream as ONE modem FILE TRANSFER (Z=81 burst-file path) rather
-    // than the Z=27 message path — this is how the TNC's bulk transfer matches what the GUI
-    // does (file_transfer_ SENDING -> selectBurstLiftingZ()==81). Stage `wire` to a temp
-    // file (the FileTransferController reads it whole into its tx buffer at startSend) and
-    // hand the far side back the same wire bytes, which TNCSession::onModemDataReceived
-    // decodes + delivers out its data port. The callsign keeps the name unique across the
-    // two ultra_tnc processes that may share /tmp (e.g. the OTASim test rig).
+    // TRAFFIC-CLASS ROUTING (PHY_ADAPTATION_DESIGN §3/§7). Small interactive blocks — the
+    // Winlink-B2F control exchange and short messages — go on the NON-BURST short-LDPC
+    // (z=27) SelectiveRepeatARQ path via sendBinary(). That path uses the ISS/IRS turn gate
+    // (queued_payloads_ / TURN_REQUEST / TURNOVER) so the two stations alternate cleanly,
+    // and per-frame sync handles each turn-flip — unlike the burst file path, whose group
+    // anchor can't re-acquire timing when the link flips for every tiny B2F message. The RX
+    // side already delivers both transports to the data port (TNCBridge wires BOTH
+    // setDataReceivedCallback and setFileReceivedCallback to postModemDataReceived).
+    if (wire.size() <= kInteractiveMaxBytes) {
+        if (modem_.sendBinary(wire)) {
+            data_tx_buffer_.clear();
+        }
+        // else: engine refused (queue full / not CONNECTED) — keep data_tx_buffer_ for the
+        // next quiet-period retry (Pat sees BUFFER N stay nonzero and backs off).
+        data_tx_quiet_ms_ = 0;
+        return;
+    }
+
+    // BULK (> kInteractiveMaxBytes): ship as ONE modem FILE TRANSFER (Z=81 burst-file path),
+    // matching what the GUI does (file_transfer_ SENDING -> selectBurstLiftingZ()==81). Stage
+    // `wire` to a temp file (FileTransferController reads it whole at startSend) and hand the
+    // far side back the same wire bytes, which TNCSession::onModemDataReceived decodes +
+    // delivers out its data port. The callsign keeps the name unique across the two ultra_tnc
+    // processes that may share /tmp (e.g. the OTASim test rig).
     std::error_code ec;
     if (!last_tx_temp_path_.empty()) {
         std::filesystem::remove(last_tx_temp_path_, ec);

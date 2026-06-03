@@ -75,6 +75,14 @@ private:
     uint32_t data_tx_quiet_ms_ = 0;
     static constexpr uint32_t kDataTxFlushQuietMs = 200;
     static constexpr size_t kDataTxFlushSizeBytes = 64 * 1024;
+    // Traffic-class boundary (PHY_ADAPTATION_DESIGN §3/§7). A flushed block at or below
+    // this size is treated as INTERACTIVE (Winlink-B2F control exchange — banners,
+    // proposals, FS answers — and short messages) and sent on the NON-BURST short-LDPC
+    // (z=27) SelectiveRepeatARQ path with the ISS/IRS turn gate: low latency, survives by
+    // brevity. A larger block is a BULK transfer and pays for the burst + long-LDPC (z=81)
+    // + deep-interleave file path. The burst path's group/anchor machinery is wrong for
+    // tiny alternating messages (it can't re-acquire burst timing on every turn-flip).
+    static constexpr size_t kInteractiveMaxBytes = 4096;
     // The accumulated buffer is flushed as ONE modem file-transfer unit (Z=81 burst path),
     // staged to a temp file. Counter keeps each flush's temp name unique; last path is
     // cleaned up on the next flush / disconnect (its transfer has progressed by then).
