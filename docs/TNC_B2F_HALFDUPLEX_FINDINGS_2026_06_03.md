@@ -198,9 +198,25 @@ The Update-4 "decoder deaf after local burst TX" hypothesis was an artifact of t
 (burst) path. The remaining burst turn-flip re-acquisition (Issue 2) is real but **off the B2F
 message path** — Winlink messages are small → non-burst — so it does not block B2F messaging.
 
+## Update 6 (2026-06-03): real PAT↔PAT Winlink B2F DELIVERED end-to-end (single machine)
+
+Full stack, same machine: `ota_simulator serve` (lobby awgn@30) → `ultra_tnc` ALPHA :8300 +
+BRAVO :8302 (both `--sim-audio`) → PAT ALPHA + PAT BRAVO (both `http`, `listen:[varahf]`).
+ALPHA composed a P2P message to BRAVO and ran `pat connect varahf:///BRAVO`. The **entire B2F
+exchange completed clean**:
+`Connected (vara)` → BRAVO SID banner `[Pat-1.0.0-B2FHMG$]` → ALPHA proposal `>FD EM … 422 334`
+→ `FS +` / "Remote accepted" → body **0%→100%** → `FF` / `>FQ` → `Disconnected`. BRAVO's inbox
+now holds the message (From: ALPHA, To: BRAVO, Subject "B2F test 1845", body intact).
+
+This is the capstone proof: the two fixes above (non-burst RX re-search gate + responder OFDM-ACK
+notify) carry the **real Winlink B2F protocol**, not just a synthetic payload. Every leg of the
+exchange (banner, proposal, accept, body, completion) rides the non-burst short path that was
+previously dead. The prior session stalled at the proposal; it now runs to `>FQ`.
+
 ## Next steps
-1. Re-run the real PAT↔PAT B2F (single-machine, then Mac↔Pi) — the modem transport is now proven;
-   what remains is PAT-layer B2F timing over the ~15–25 s/turn real-time link.
+1. (Optional) Cross-machine Mac↔Pi rerun to re-confirm under real ppm clock drift (the
+   single-machine run shares a clock; the modem fixes are clock-independent, so this is a
+   belt-and-suspenders check, not a blocker).
 2. (Later) Issue 2: full chirp+LTS anchor re-acquisition on burst turn-flips, if bidirectional
    *bulk* over one connection is ever needed.
 

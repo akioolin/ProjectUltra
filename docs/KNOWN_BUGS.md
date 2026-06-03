@@ -38,6 +38,10 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 - Verified: `tests/test_ultra_tnc_sim_audio` (two real `ultra_tnc --sim-audio` over OTASim).
   Default = bulk burst file (8192 B, CRC-clean — no regression). `ULTRA_TNC_TEST_NONBURST=1` =
   bidirectional 300 B short message, **CRC-clean BOTH directions** (was: forward dropped entirely).
+- **End-to-end VERIFIED (2026-06-03):** real PAT↔PAT Winlink B2F, single machine
+  (OTASim → 2×`ultra_tnc` → 2×PAT). `pat connect varahf:///BRAVO` ran the FULL exchange clean —
+  banner → proposal → `FS +` → body 0%→100% → `FF`/`>FQ` → disconnect — and the message landed in
+  BRAVO's inbox. The prior session stalled at the proposal; now it delivers.
 - Root cause (Issue 2, still open): the BURST path needs full chirp+LTS **anchor re-acquisition
   on every turn-flip**; a burst transfer whose turn flips mid-stream re-acquires at corr~0.27.
   Not on the message path; relevant only to bidirectional *bulk* over one connection.
