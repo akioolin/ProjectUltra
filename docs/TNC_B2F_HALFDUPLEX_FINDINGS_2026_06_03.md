@@ -136,6 +136,32 @@ decodes the other's OFDM frames after the MC-DPSK→OFDM switch: ALPHA never dec
   isolation. A pragmatic A/B: temporarily route B2F through the robust burst path to confirm the
   decode gap is non-burst-specific vs general bidirectional-OFDM.
 
+## Update 4 (2026-06-03): root cause LOCALIZED — decoder goes deaf after a local burst TX
+
+Burst A/B (route all B2F through the burst path) gets the furthest yet — the **full B2F
+handshake works**: BRAVO's SID banner decodes at ALPHA, capabilities + GZIP negotiate, ALPHA
+sends its proposal (`>FD … >F>`). It then stalls when BRAVO must receive ALPHA's proposal.
+
+**Root cause (isolated): a station goes deaf for OFDM RX after it sends its own burst.**
+BRAVO's banner reaches ALPHA (TX works), but BRAVO never decodes ALPHA's subsequent proposal
+burst. Ruled out:
+- NOT the audio feed — the TNC drains OTASim RX every tick unconditionally (`ultra_tnc.cpp:297`).
+- NOT the anchor alone — wired `FullOFDMAnchorExpected` → `expectFullOFDMAnchorOnce` and re-armed
+  it every ~400 ms while yielded-waiting (`connection.cpp` tick); the stall persists.
+- NOT turn logic — that's solved (yield fires, banner queues, roles correct).
+It's the **decoder STATE after a local burst TX**. The one-way file test never hits this: its
+receiver only ever emits short ACKs, never a full data burst, then keeps receiving.
+
+**Diagnosis aid for next time:** MODEM-category INFO logs are filtered from the TNC log file —
+only WARN+ appears. Bump decoder sync logs to WARN (or run the TNC with the right log category)
+before instrumenting, or you'll chase ghosts (cost ~2 cycles here).
+
+**Concrete next step:** instrument the decoder's sync state across a local burst-TX → RX
+transition (search floor / `correlation_pos_` / `total_fed_` / mode / `expect_full_ofdm_anchor_`).
+Likely fix: after `burst_transport_.setTransferDone` in the interactive case, re-prime the RX
+sync path (reset the search floor so it re-acquires the peer's new burst) — a targeted reset,
+not the full `StreamingDecoder::reset()` which also clears the ring.
+
 ## Next steps
 1. Confirm hypothesis: log whether BRAVO's post-turnover burst carries a full anchor and
    whether ALPHA has `expect_full_ofdm_anchor_` set when it starts receiving it.
