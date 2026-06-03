@@ -2,7 +2,7 @@
 
 **High-performance HF modem for amateur radio**
 
-*Last updated: 2026-05-07*
+*Last updated: 2026-06-03*
 
 > **EXPERIMENTAL SOFTWARE — WORK IN PROGRESS**
 >
@@ -27,6 +27,40 @@ operator path.
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Status: Experimental](https://img.shields.io/badge/Status-Experimental-orange.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)]()
+
+---
+
+## Current direction (2026-06)
+
+ProjectUltra is converging on a focused, measurement-driven design. Three things are driving
+the work right now:
+
+**The OFDM band is going coherent-only.** We retired differential modulation (DQPSK/D8PSK)
+from the wideband and narrowband OFDM modes and moved the band to a clean coherent ladder
+(QPSK → 16QAM). Side-by-side on the faithful simulator, coherent held a ~81% clean-frame
+rate on Good fading at 10 dB and ~89% on Moderate at 14 dB, versus ~32% for the differential
+equivalent — coherent tracks the channel far better at rate. Differential isn't gone; it
+moves to where it actually shines: **MC-DPSK**, the low-SNR / heavy-multipath workhorse below
+the OFDM floor. One mode for each job, instead of one mode stretched across all of them.
+
+**Rate anchors come from measurement, not hand-tuning.** Every rung in the auto-rate ladder
+is being re-established by running real file transfers over a real channel on the faithful
+two-station gate (`tools/gui_qso_scenario.sh`), judged on CRC-clean delivery across multiple
+fade seeds — not a guessed SNR threshold. The Good-fading column is anchored and multi-seed
+verified (QPSK R1/2 @ 10 dB → R2/3 @ 15 dB → R3/4 @ 20 dB); the AWGN clean-channel and
+Moderate columns are next. The payoff is a ladder you can trust to pick a rung that actually
+delivers, with the evidence written down.
+
+**Airtime efficiency is the next big lever.** Picking the right rung is half the battle; the
+other half is spending less air per delivered byte. HF is half-duplex — you cannot pipeline
+data across the ACK gap the way TCP does over a wire — so the real wins come from fewer
+turnarounds (longer, coalesced bursts), leaner ACKs (the new lightweight tone-burst ACK), and
+trimming per-frame overhead. The goal is to drive measured goodput toward each rung's
+information-theoretic ceiling, not to chase physically impossible duty cycles.
+
+Near-term focus is reliable **file transfer**; interactive chat has been retired so the PHY
+can specialize. The throughput tables below are historical hardware-rig data and are being
+re-measured under the coherent ladder.
 
 ---
 
@@ -71,6 +105,12 @@ Production geometry used below:
 never selects. Numbers above are now derived directly from
 `recommendedPilotSpacing()` and the production CP setting.)
 
+(2026-06: the OFDM-CHIRP rows above show the **retired differential** (DQPSK)
+geometry. The band is now coherent (QPSK → 16QAM), which uses a different
+pilot spacing and therefore a different data-carrier count per rung — the
+coherent raw-PHY re-tabulation lands alongside the measured-anchor work in
+*Current direction*. Differential DQPSK now runs on MC-DPSK, not OFDM.)
+
 ### End-to-end measured (real hardware)
 
 What a user actually sees over the cable / air, including handshake,
@@ -105,14 +145,17 @@ bound given a clean channel.
 
 ### Features
 
-**Waveforms.** MC-DPSK (chirp sync, low-SNR robust), OFDM-CHIRP
-(wideband 2.8 kHz, 59 carriers), OFDM-NARROW (500 Hz crowded-band
-mode), OFDM-COX (Schmidl-Cox sync, forceable/legacy only),
-SC-DPSK (very low SNR).
+**Waveforms.** MC-DPSK (chirp sync, low-SNR / heavy-multipath
+workhorse — also the home for differential DQPSK/D8PSK), OFDM-CHIRP
+(wideband 2.8 kHz, 59 carriers, coherent QPSK → 16QAM), OFDM-NARROW
+(500 Hz crowded-band mode), SC-DPSK (very low SNR). (OFDM-COX was
+removed — only its Schmidl-Cox sync primitive survives, reused for
+warm-LTS in-session sync.)
 
-**Modulation + FEC.** DBPSK / DQPSK / D8PSK / BPSK / QPSK with
-802.11n LDPC at four code rates (R1/4, R1/2, R2/3, R3/4).
-Min-sum belief-propagation decoder.
+**Modulation + FEC.** Coherent QPSK / 16QAM on the OFDM band;
+differential DBPSK / DQPSK / D8PSK on MC-DPSK. 802.11n LDPC at four
+code rates (R1/4, R1/2, R2/3, R3/4) with a min-sum belief-propagation
+decoder.
 
 **Synchronization.** Dual-chirp detection with PocketFFT-accelerated
 correlation, Schmidl-Cox training, light-preamble (LTS-only) for
@@ -185,9 +228,8 @@ SNR         Waveform              Reason
 ─────────────────────────────────────────────────────────────────────
 -5 to +9 dB MC-DPSK (auto-rung)   DBPSK→DQPSK + variable SPS, adaptive
 5–10 dB     OFDM-NARROW (500 Hz)  Crowded bands, low SNR
-10+ dB      OFDM-CHIRP (1024)     Production auto ladder
-forced      OFDM-COX (1024)       Implemented, not auto-selected
-forced      OFDM 16QAM            Coherent + pilot tracking
+10+ dB      OFDM-CHIRP (1024)     Production auto ladder, coherent QPSK
+forced      OFDM 16QAM            Coherent; clean-channel rung (measuring)
 ```
 
 Selection happens during CONNECT (peer-advertised SNR + fading index)
@@ -558,9 +600,13 @@ necessary. Be ready to QSY.
 
 ### Solid (hardware-validated)
 
-- MC-DPSK baseline (5+ dB SNR, ±50 Hz CFO tolerance).
-- OFDM-CHIRP DQPSK R1/4 -> R3/4 with adaptive ladder
-  (`selectOFDMCodeRate()` is the exact threshold source).
+- MC-DPSK baseline (5+ dB SNR, ±50 Hz CFO tolerance) — also the
+  home for differential DQPSK/D8PSK after the coherent-only move.
+- OFDM-CHIRP wideband PHY pipeline: dual-chirp sync, LTS warm-sync,
+  per-symbol pilot tracking, adaptive-rate ladder
+  (`selectCoherentOFDM()` is the rung source). The band is now
+  coherent (QPSK → 16QAM); rungs are being re-anchored on the
+  faithful gate — see *Current direction*.
 - OFDM-NARROW (500 Hz) for crowded bands or low-SNR conditions.
 - Per-carrier RX erasure with CarrierLDPC v1 interleaver
   (deep notch / QRM survival on OFDM-CHIRP).
@@ -586,31 +632,36 @@ necessary. Be ready to QSY.
   in place; broader CW0-fail integration is on
   `experimental/harq-audit-2026-05-06` pending further
   hardware validation.
-- D8PSK on fading channels: variable run-to-run, gated to
-  high SNR + AWGN-class fading only.
-- Coherent QPSK / 16QAM / 32QAM: stable-path only (NVIS,
-  ground wave, clean cable).
+- 16QAM as a production OFDM rung: the constellation works, but its
+  clean-channel anchors (AWGN + stable paths) are still being
+  measured before it joins the auto ladder. On Good fading it
+  currently loses to QPSK R3/4 (frequency-selective-null
+  decodability), so it stays a forceable rung for now.
+- Lightweight tone-burst ACK: detector + encoder landed; wiring it
+  as the authoritative low-latency ACK source is in progress (part
+  of the airtime-efficiency push).
 
 ### Active work
 
+- **Re-anchoring the coherent rate ladder by measurement.** The
+  Good-fading column is done (QPSK R1/2 @ 10 dB → R2/3 @ 15 dB →
+  R3/4 @ 20 dB, multi-seed CRC-verified); the AWGN clean-channel and
+  Moderate columns are next, plus where 16QAM earns a rung.
+- **Airtime efficiency.** Closing the gap between measured goodput
+  and each rung's information-theoretic ceiling — fewer turnarounds,
+  leaner tone-burst ACKs, lower per-frame overhead.
 - Long-running stability soak (multi-hour `ultra_tnc` uptime).
-- Bootstrap-rate cap relaxation: short transfers can't yet
-  reach R3/4 even on clean AWGN because the initial-rate
-  cap requires SNR ≥ 24; hardware validation needed before
-  lowering.
-- Real over-the-air validation expansion: the 2026-05-07
-  KiwiSDR replay path works for full sessions; the remaining
-  work is broader live two-way coverage and better low-SNR
-  OTA margins.
+- Real over-the-air validation expansion: the 2026-05-07 KiwiSDR
+  replay path works for full sessions; the remaining work is broader
+  live two-way coverage and better low-SNR OTA margins.
 
 ### Deliberately deferred
 
-- Higher-order constellations (16/32/64-QAM) as production
-  ladder rungs: enum reserved, no production code. Real
-  capacity headroom (~2× peak throughput) but needs proper
-  EVM gating, coherent phase tracking, IQ-imbalance
-  handling, and a new auto-rate policy layer — multi-week
-  scope, not autonomous-friendly.
+- Highest-order constellations (32/64-QAM) as production ladder
+  rungs: enum reserved, no production code. Real capacity headroom
+  but needs proper EVM gating, coherent phase tracking, and
+  IQ-imbalance handling — multi-week scope. (16QAM is a step closer
+  — see *Experimental*.)
 - Iterative LDPC ↔ equalizer (turbo) loops.
 - OTFS / MFSK: enum reserved for wire compatibility, no
   production implementation.
