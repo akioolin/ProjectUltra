@@ -55,18 +55,24 @@ here causes a wrong deletion later. Move finished items to *Completed* with the 
   `=0` fallback until burst is proven post-ladder-rework, THEN delete the legacy routing
   + knob. (Tracking: the burst-default flip itself already shipped regression-free.)
 
-### R2. Operator chat-message (free-text) feature — `QUEUED`
+### R2. Operator chat-message (free-text) feature — `IN-PROGRESS` (tests removed 2026-06-02; API removal remaining)
 - **What:** interactive operator chat / free-text message sending.
 - **Why dead:** long LDPC (n=1944) + the burst interleaver make short interactive chat
   impractical; the modem is specializing for **file transfer**. Decision 2026-05-30.
-- **Scope (delete):** `ProtocolEngine::sendMessage` path, message fragmentation /
-  reassembly, message-level ARQ, and the chat-message test cases in `test_protocol.cpp`
-  ("Long fragmented message…", "Post-cancel sender message…", short-message status).
+- **Done so far (2026-06-02, commits `95982c0` + `b3835a9`):** removed all chat-message
+  test cases from `test_protocol.cpp` (the 7 pure chat tests + 3 file-vs-chat scheduling
+  scenarios; the "Long fragmented…" / "Post-cancel sender message…" reds went with them).
+  File-cancel tests kept with their chat tails excised. The `sendMessage()` **API still
+  exists** in `ProtocolEngine` — only the tests are gone.
+- **Scope (remaining — delete):** `ProtocolEngine::sendMessage` + `sendMessages` (batch),
+  `setMessageReceivedCallback` / the `MessageReceivedCallback` delivery path, message
+  fragmentation / reassembly, message-level ARQ, and any GUI/TNC wiring that calls them.
 - **⚠ KEEP:** control-frame text inside the protocol (callsign, status) is not chat —
-  don't remove protocol control plumbing. Verify the file-transfer path shares nothing
-  with the message fragmenter before cutting.
-- **Blocker:** none hard; do after the burst/file path is settled so we don't churn the
-  shared frame plumbing twice.
+  don't remove protocol control plumbing. `sendBinary` (TNC binary/data path) and `sendFile`
+  STAY. The binary-fragment-reassembly test asserts binary does NOT route through the message
+  callback — verify the file/binary path shares nothing with the message fragmenter before cutting.
+- **Blocker:** none hard; sequence after CI is green + the test binary ships, so we don't
+  churn the shared frame plumbing on the release branch.
 
 ### R3. Differential on the OFDM band — `DONE` (selection + RX demod/control code removal); TX-modulator differential is the remaining follow-up
 - **What:** retire differential modulation from the **wideband OFDM_CHIRP** band. SNR ≥ 10
