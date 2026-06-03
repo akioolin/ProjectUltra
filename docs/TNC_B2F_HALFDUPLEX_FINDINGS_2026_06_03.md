@@ -107,6 +107,35 @@ bring-up found "five real bugs"). The committed layers are real progress and the
 well-scoped: resolve the turn-state with instrumentation, then make the responder reliably
 take the first turn.
 
+## Update 3 (2026-06-03): turn handoff SOLVED; blocker is now bidirectional OFDM decode
+
+The turn-handoff layer is **done and verified** on the single-machine PAT↔PAT rig (instrumented,
+B2F-DBG logs at DEBUG). Commits `d3ea1fe` + `90181f6`:
+- The interactive INITIATOR (ISS, empty TX buffer) **proactively yields** the DATA turn to the
+  responder ~1.5 s after connect (VARA-HF turnaround). Verified: "interactive ISS yielded first
+  DATA turn to BRAVO".
+- The RESPONDER **queues its SID banner** correctly (IRS, handshake pre-confirmed): `B2F-DBG
+  sendPayload 53B queue=1`.
+- The yield's TURNOVER and the post-acquire first frame **force a full chirp+LTS anchor**
+  (`on_data_turn_acquired_` → `forceNextFrameFullPreamble`; verified it reaches non-burst frames
+  via `encodeFrameLight`→`encodeFrame`).
+
+**REMAINING — bidirectional OFDM decode (PHY frontier).** Despite all the above, neither station
+decodes the other's OFDM frames after the MC-DPSK→OFDM switch: ALPHA never decodes BRAVO's frames
+(0 decoded, continuous `burst marker timing retry ±70–300`), and BRAVO never receives ALPHA's
+(full-anchored) TURNOVER. No collision (verified: BRAVO was idle/RX when the TURNOVER arrived).
+- **Key asymmetry:** the one-way `UltraTncSimAudio` test only ever has the RESPONDER *receive*
+  OFDM (and it works). The **INITIATOR-receives-OFDM** path (BRAVO→ALPHA) is untested and is a
+  failing direction here.
+- **Leading hypothesis:** `expectFullOFDMAnchorOnce` is a ONE-SHOT armed at connect for both
+  sides (`modem_mode.cpp:57,174` — symmetric, no is_initiator gate). The responder's interim TX
+  (turn-requests) and/or a noise false-trigger likely consumes or resets that one-shot before the
+  peer's first OFDM frame arrives, so neither cold-acquires. Next: instrument the decoder's
+  expect-anchor state across TX→RX transitions; make the anchor expectation robust (re-arm on
+  every turn-flip / don't consume on a failed detect); verify the initiator-RX-OFDM path in
+  isolation. A pragmatic A/B: temporarily route B2F through the robust burst path to confirm the
+  decode gap is non-burst-specific vs general bidirectional-OFDM.
+
 ## Next steps
 1. Confirm hypothesis: log whether BRAVO's post-turnover burst carries a full anchor and
    whether ALPHA has `expect_full_ofdm_anchor_` set when it starts receiving it.
