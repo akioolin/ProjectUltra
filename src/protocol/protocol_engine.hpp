@@ -252,6 +252,15 @@ public:
         connection_.setDataTurnAcquiredCallback(std::move(cb));
     }
 
+    // Arm the RX decoder to cold-acquire a full chirp+LTS anchor — the TNC wires it
+    // to ModemEngine::expectFullOFDMAnchorOnce(). Re-armed each tick while yielded and
+    // waiting for the peer's first burst, so the expectation survives the turn-flip gap
+    // (BUG-TNC-B2F-001).
+    using FullOFDMAnchorExpectedCallback = Connection::FullOFDMAnchorExpectedCallback;
+    void setFullOFDMAnchorExpectedCallback(FullOFDMAnchorExpectedCallback cb) {
+        connection_.setFullOFDMAnchorExpectedCallback(std::move(cb));
+    }
+
     using PingTxCallback = Connection::PingTxCallback;
     void setPingTxCallback(PingTxCallback cb);
 

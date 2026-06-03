@@ -3701,6 +3701,21 @@ void Connection::tick(uint32_t elapsed_ms) {
             if (local_data_turn_ && peer_data_turn_requested_) {
                 data_turn_contended_ms_ += elapsed_ms;
             }
+            // Half-duplex INTERACTIVE: while we've yielded and are waiting for the peer's
+            // first burst, keep the decoder armed to COLD-acquire its full chirp+LTS anchor.
+            // The one-shot armed on the yield-TURNOVER gets consumed in the gap (stray
+            // detect / warm-sync DEGRADED), so re-arm periodically until the peer's data
+            // actually arrives (yielded_data_turn_waiting_for_peer_data_ clears). The peer
+            // force-fulls its first frame on turn-acquire, so this meets it (BUG-TNC-B2F-001).
+            if (half_duplex_interactive_ && yielded_data_turn_waiting_for_peer_data_ &&
+                !local_data_turn_ && on_full_ofdm_anchor_expected_) {
+                if (elapsed_ms >= interactive_anchor_rearm_ms_) {
+                    interactive_anchor_rearm_ms_ = 400;
+                    on_full_ofdm_anchor_expected_();
+                } else {
+                    interactive_anchor_rearm_ms_ -= elapsed_ms;
+                }
+            }
             // VARA-HF turnaround: the interactive ISS with an empty TX buffer yields to the
             // IRS so the B2F responder can send its SID. Fire once, ~1.5 s after connect.
             if (half_duplex_interactive_ && is_initiator_ && !interactive_initiator_yield_done_) {

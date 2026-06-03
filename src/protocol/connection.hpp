@@ -574,6 +574,7 @@ private:
     // the DATA turn to the responder once connected + settled. Done once per session.
     bool interactive_initiator_yield_done_ = false;
     uint32_t interactive_yield_log_throttle_ms_ = 0;
+    uint32_t interactive_anchor_rearm_ms_ = 0;
 
     // §14.36 Phase 5c BER-driven per-block rate adaptation. Env ULTRA_ADAPTIVE_RATE=1,
     // default OFF. The SENDER runs the controller on the receiver's per-group decode

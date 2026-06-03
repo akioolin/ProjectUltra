@@ -465,6 +465,11 @@ private:
         engine_.setDataTurnAcquiredCallback([this]() {
             modem_.forceNextFrameFullPreamble();
         });
+        // Keep the RX decoder armed to cold-acquire the peer's full-anchored first burst
+        // across the turn-flip gap (re-armed each tick by Connection while waiting).
+        engine_.setFullOFDMAnchorExpectedCallback([this]() {
+            modem_.expectFullOFDMAnchorOnce();
+        });
 
         engine_.setTxDataCallback([this](const Bytes& data,
                                          bool expect_full_ofdm_anchor_after_tx) {
