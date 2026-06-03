@@ -8,21 +8,40 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
-### BUG-TNC-B2F-001: bidirectional B2F stalls — receiver can't decode the new sender's burst after a turn-flip
-- Status: **OPEN** (2026-06-03). Issue 1 (collision) FIXED in `c27aa45`; Issue 2 OPEN.
+### BUG-TNC-B2F-001: bidirectional B2F stalls — the NON-BURST short path (the actual message path) was dead at RX + ACK
+- Status: **FIXED for the message path** (2026-06-03). Issues 1, 3, 4 fixed; Issue 2 (burst
+  turn-flip) remains but is **off the B2F message path** (Winlink messages are small → non-burst).
 - Symptom: PAT↔PAT Winlink message over `ultra_tnc`/OTASim connects + completes the B2F
-  handshake + proposal, then stalls — after the half-duplex turn flips, the new receiver
-  logs `Burst marker frame timing retry: ±100–313 samples` forever and never GROUP_ACKs, so
-  the sender retransmits and the message never delivers. **Reproduces single-machine** (shared
-  clock) → NOT cross-machine timing. The one-way file path (receiver decodes ALPHA) works.
-- Root cause (Issue 1, fixed): the one-way burst path bypassed the ISS/IRS turn gate, so both
-  B2F stations keyed up uncoordinated and collided. Fixed via `half_duplex_interactive_`
-  turn-gating (`c27aa45`) — the serialization is verified correct.
-- Root cause (Issue 2, open): the bidirectional path needs full chirp+LTS **anchor
-  re-acquisition on every turn-flip** (new sender sends a full anchor, new receiver
-  `expectFullOFDMAnchorOnce()`); the one-way-derived code anchors once and the post-turnover
-  receiver warm-syncs against a timing reference it never set → unconvergent marker retries.
-- Full diagnosis + repro + next steps: `docs/TNC_B2F_HALFDUPLEX_FINDINGS_2026_06_03.md`.
+  handshake, then never delivers. **Reproduces single-machine** (shared clock) → NOT a
+  cross-machine timing problem. (Earlier framing chased the burst path because an A/B test
+  forced `kInteractiveMaxBytes=0`; the DESIGN routes small messages to the non-burst path.)
+- Root cause (Issue 1, fixed `c27aa45`): the one-way burst bypass skipped the ISS/IRS turn
+  gate → both B2F stations keyed up uncoordinated and collided. Fixed via `half_duplex_interactive_`
+  turn-gating. Serialization verified correct.
+- **Root cause (Issue 3, fixed 2026-06-03): the receiver synced cleanly (corr=1.0, SNR 28 dB)
+  yet DROPPED every non-burst DATA frame.** When `burst_transport_rx_` became the unconditional
+  default (ULTRA_BURST_TRANSPORT removed 2026-06-02), the §14.24 control-peek-fail re-search at
+  `streaming_ofdm_decode.cpp:~1004` started discarding ALL non-burst multi-CW DATA as
+  "burst-regime noise": a non-burst `sendBinary` frame carries no BURST_HEADER descriptor →
+  `pending_total_cw_=0` → it enters the 1-CW control peek, fails it, and was re-searched away.
+  Fix: gate the re-search on `sync_controller_.have_burst_descriptor_` (only mid-burst, where a
+  real burst's SHARED channel estimate is at risk); a standalone non-burst frame falls through
+  to the legacy data decode → delivered via SR-ARQ.
+- **Root cause (Issue 4, fixed 2026-06-03): the responder ACK'd in the wrong waveform.** The B2F
+  responder pre-confirms `handshake_confirmed_` in `enterConnected` (so it can speak first),
+  which skipped the only site that fires `on_handshake_confirmed_()` → the modem's
+  `handshake_complete_` stayed false (reset by `setConnected()`, with `setWaveformMode`→OFDM
+  landing afterwards), so BOB keyed its SR-ARQ ACK in **MC-DPSK** while ALICE listened in OFDM
+  → ACK never landed → ALICE retransmitted to the retry cap. Fix: re-fire `on_handshake_confirmed_()`
+  once on the responder's first decoded frame (guaranteed past `setConnected`+`setWaveformMode`),
+  switching TX onto the negotiated OFDM data waveform.
+- Verified: `tests/test_ultra_tnc_sim_audio` (two real `ultra_tnc --sim-audio` over OTASim).
+  Default = bulk burst file (8192 B, CRC-clean — no regression). `ULTRA_TNC_TEST_NONBURST=1` =
+  bidirectional 300 B short message, **CRC-clean BOTH directions** (was: forward dropped entirely).
+- Root cause (Issue 2, still open): the BURST path needs full chirp+LTS **anchor re-acquisition
+  on every turn-flip**; a burst transfer whose turn flips mid-stream re-acquires at corr~0.27.
+  Not on the message path; relevant only to bidirectional *bulk* over one connection.
+- Full diagnosis + repro: `docs/TNC_B2F_HALFDUPLEX_FINDINGS_2026_06_03.md`.
 
 ### BUG-FINACK-001: Final-group ACK loss → sender infinite-resends the last group; no clean transfer close
 - Status: **FIX LANDED, UNVALIDATED** (2026-06-02). Decode-independent re-ACK implemented

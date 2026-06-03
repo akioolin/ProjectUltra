@@ -575,6 +575,14 @@ private:
     bool interactive_initiator_yield_done_ = false;
     uint32_t interactive_yield_log_throttle_ms_ = 0;
     uint32_t interactive_anchor_rearm_ms_ = 0;
+    // BUG-TNC-B2F-001: one-shot — the interactive responder pre-confirms handshake_confirmed_
+    // in enterConnected (so it can speak first), which skips the onFrameReceived site that
+    // fires on_handshake_confirmed_(). But the modem's setConnected() reset its
+    // handshake_complete_ to false (and setWaveformMode set OFDM only afterwards), so the
+    // modem stays in MC-DPSK TX. We re-fire on_handshake_confirmed_() on the first decoded
+    // frame (guaranteed past setConnected + setWaveformMode → waveform_mode_ is OFDM) to
+    // switch TX onto the negotiated data waveform. This guard makes it fire exactly once.
+    bool interactive_responder_modem_notified_ = false;
 
     // §14.36 Phase 5c BER-driven per-block rate adaptation. Env ULTRA_ADAPTIVE_RATE=1,
     // default OFF. The SENDER runs the controller on the receiver's per-group decode

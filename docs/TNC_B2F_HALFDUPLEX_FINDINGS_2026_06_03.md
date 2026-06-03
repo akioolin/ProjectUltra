@@ -162,13 +162,47 @@ Likely fix: after `burst_transport_.setTransferDone` in the interactive case, re
 sync path (reset the search floor so it re-acquires the peer's new burst) — a targeted reset,
 not the full `StreamingDecoder::reset()` which also clears the ring.
 
+## Update 5 (2026-06-03): ROOT CAUSE FOUND + FIXED — it was the NON-BURST path all along
+
+Update 4 chased the **burst** path because the A/B forced `kInteractiveMaxBytes=0`. That was a
+red herring: the DESIGN routes small B2F messages (SID banner, proposal, body) to the **non-burst
+short path** (`sendBinary` → SR-ARQ z=27). A direct, faithful test — two real `ultra_tnc --sim-audio`
+stations over OTASim, a **300 B non-burst** message each way, WARN-level probes on RX/ACK — showed
+the non-burst path was **completely dead**, in two independent ways:
+
+**Bug 1 — receiver synced cleanly but DROPPED every non-burst DATA frame.** BOB logged
+`Accepted OFDM DATA sync (corr=1.00) … SNR=28.3 dB` yet `onFrameReceived` never fired. Cause:
+`burst_transport_rx_` became the unconditional decoder default (2026-06-02), so the §14.24
+control-peek-fail re-search (`streaming_ofdm_decode.cpp:~1004`) discarded every non-burst multi-CW
+DATA frame as "burst-regime noise" — a non-burst frame has no BURST_HEADER descriptor →
+`pending_total_cw_=0` → it enters the 1-CW control peek, fails, and re-searches away. Burst data
+never hits this (the descriptor sizes it as full data and skips the peek).
+- **Fix:** gate the re-search on `have_burst_descriptor_` (only mid-burst). Standalone non-burst
+  frames fall through to the legacy data decode → SR-ARQ delivery.
+
+**Bug 2 — responder ACK'd in MC-DPSK while the peer listened in OFDM.** Once Bug 1 was fixed BOB
+received + delivered the message and sent a SACK — but in MC-DPSK (`TX: Handshake mode →
+last_rx_waveform_=4`), so ALICE (OFDM) never heard it and retransmitted every ~27 s to the cap.
+Cause: the B2F responder pre-confirms `handshake_confirmed_` in `enterConnected` (to speak first),
+which skips the only site that fires `on_handshake_confirmed_()` → the modem's `handshake_complete_`
+stayed false (reset by `setConnected()`, with `setWaveformMode`→OFDM landing afterwards).
+- **Fix:** re-fire `on_handshake_confirmed_()` once on the responder's first decoded frame
+  (`interactive_responder_modem_notified_` one-shot) → modem TX flips to OFDM.
+
+**Verified (faithful gate, `tests/test_ultra_tnc_sim_audio`, awgn@30 seed 42):**
+- `ULTRA_TNC_TEST_NONBURST=1`: 300 B ALICE→BOB **and** BOB→ALICE — CRC-clean BOTH directions.
+- default (burst, 8192 B): CRC-clean, 7 groups, 6 tone-burst ACKs — **no regression**.
+- 29/29 touched-area unit tests pass.
+
+The Update-4 "decoder deaf after local burst TX" hypothesis was an artifact of testing the wrong
+(burst) path. The remaining burst turn-flip re-acquisition (Issue 2) is real but **off the B2F
+message path** — Winlink messages are small → non-burst — so it does not block B2F messaging.
+
 ## Next steps
-1. Confirm hypothesis: log whether BRAVO's post-turnover burst carries a full anchor and
-   whether ALPHA has `expect_full_ofdm_anchor_` set when it starts receiving it.
-2. Wire full-anchor send + expect on each TURNOVER (both directions) for the interactive path.
-3. Re-test single-machine PAT↔PAT first (fast, deterministic), then cross-machine Mac↔Pi.
-4. Only after delivery works: tune B2F turnaround latency (each turn ≈ 15–25 s on the
-   real-time link; the full B2F exchange is ~5 turnarounds — watch PAT's B2F timeouts).
+1. Re-run the real PAT↔PAT B2F (single-machine, then Mac↔Pi) — the modem transport is now proven;
+   what remains is PAT-layer B2F timing over the ~15–25 s/turn real-time link.
+2. (Later) Issue 2: full chirp+LTS anchor re-acquisition on burst turn-flips, if bidirectional
+   *bulk* over one connection is ever needed.
 
 ## Repro
 - Single-machine: OTASim `awgn@30`; `ultra_tnc` ALPHA :8300 + BRAVO :8302 on the lobby;

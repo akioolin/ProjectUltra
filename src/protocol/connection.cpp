@@ -2910,6 +2910,21 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
             on_handshake_confirmed_();
         }
         // Initial data mode is already carried in CONNECT_ACK.
+    } else if (state_ == ConnectionState::CONNECTED && !is_initiator_ &&
+               half_duplex_interactive_ && !duplicate_connect_retry &&
+               !interactive_responder_modem_notified_) {
+        // BUG-TNC-B2F-001: the B2F responder pre-confirmed handshake_confirmed_ in
+        // enterConnected (so it could speak first), which skipped the block above — the
+        // ONLY site that fires on_handshake_confirmed_(). But the modem's setConnected()
+        // had reset handshake_complete_ to false and setWaveformMode set OFDM only
+        // afterwards, leaving the modem keying TX in MC-DPSK. We are now decoding a real
+        // frame, so we are guaranteed past both → fire the notify once to switch the
+        // modem's TX onto the negotiated OFDM data waveform (else the SR-ARQ ACK rides
+        // MC-DPSK while the peer listens in OFDM and never hears it).
+        interactive_responder_modem_notified_ = true;
+        if (on_handshake_confirmed_) {
+            on_handshake_confirmed_();
+        }
     }
 
     // Resolve source callsign from hash if possible
@@ -4599,6 +4614,7 @@ void Connection::enterConnected() {
     if (half_duplex_interactive_ && !is_initiator_) {
         handshake_confirmed_ = true;
     }
+    interactive_responder_modem_notified_ = false;
     interactive_initiator_yield_done_ = false;
     interactive_yield_log_throttle_ms_ = 0;
     local_data_turn_ = is_initiator_;

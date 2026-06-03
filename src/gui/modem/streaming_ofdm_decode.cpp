@@ -990,18 +990,28 @@ void StreamingDecoder::decodeCurrentFrame() {
             waveform_->configure(saved_mod, saved_rate);
         }
 
-        // The control-first peek ran and found no valid control frame. In the
-        // self-describing burst regime ALL data is decoded at the descriptor-
-        // declared size (pending_total_cw_), so it never reaches this control-
-        // sized peek — a control-sized frame here that is not a valid control
-        // frame is noise / a false sync, not a data frame to speculatively
-        // decode. Re-search instead of the legacy fall-through to a multi-CW
-        // data decode (whose control-profile probe + double-demod poisoned the
-        // coherent channel estimate — §14.24/§14.25). Gated to the burst regime
-        // so legacy non-burst connected data keeps the speculative fallback.
-        // 2026-05-29: regime is interleave-INDEPENDENT (a bi=0 burst transfer is
-        // still the burst regime), so gate on burst_transport_rx_ too.
-        if ((use_burst_interleave_ || burst_transport_rx_) && connected_) {
+        // The control-first peek ran and found no valid control frame. INSIDE an
+        // active burst group ALL data is decoded at the descriptor-declared size
+        // (pending_total_cw_, set on BURST_HEADER), so it never reaches this
+        // control-sized peek — a control-sized frame here that is not a valid
+        // control frame is noise / a false sync, not a data frame to
+        // speculatively decode. Re-search instead of the legacy fall-through to
+        // a multi-CW data decode (whose control-profile probe + double-demod
+        // poisoned the *burst's shared* coherent channel estimate — §14.24/§14.25).
+        //
+        // 2026-06-03 (BUG-TNC-B2F-001): gate on have_burst_descriptor_, NOT merely
+        // burst_transport_rx_. burst_transport_rx_ became the unconditional default
+        // (ULTRA_BURST_TRANSPORT gate removed 2026-06-02), which made EVERY connected
+        // station treat its non-burst interactive DATA (sendBinary → SR-ARQ z=27 short
+        // LDPC, the chat/B2F path) as burst-regime noise: a non-burst multi-CW DATA
+        // frame carries no descriptor → pending_total_cw_=0 → it enters the control
+        // peek, fails it (it is DATA, not control), and was re-searched away here →
+        // the receiver synced cleanly (corr=1.0) yet delivered NOTHING. The poisoning
+        // hazard is specifically a burst's SHARED estimate; a standalone non-burst
+        // frame has no group to poison, so it must fall through to the data decode.
+        // Only re-search when we are genuinely mid-burst (a descriptor is active).
+        if ((use_burst_interleave_ || burst_transport_rx_) && connected_ &&
+            sync_controller_.have_burst_descriptor_) {
             {
                 std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
                 sync_controller_.ring_.correlation_pos_ = sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + frame_len);

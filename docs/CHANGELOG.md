@@ -10,6 +10,58 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-03 — BUG-TNC-B2F-001: the non-burst short path (the actual Winlink-B2F / chat message path) was dead at RX + ACK
+
+**What was broken:** A small interactive message over `ultra_tnc` (≤ `kInteractiveMaxBytes`,
+routed to `sendBinary` → SR-ARQ z=27 short LDPC — NOT the burst/tone-burst path) never
+delivered. The receiver synced cleanly on the sender's OFDM frame (corr=1.0, SNR 28 dB) yet
+delivered NOTHING, and once the RX was fixed the responder's ACK never reached the sender.
+Two independent root causes, both surfaced by the fact that the *non-burst* path — the path
+Winlink-B2F messages actually use — had zero end-to-end test coverage.
+
+**Root cause A — receiver dropped every non-burst DATA frame (burst-regime re-search).**
+When `burst_transport_rx_` became the unconditional decoder default (ULTRA_BURST_TRANSPORT
+gate removed 2026-06-02), the §14.24 "control-peek failed → re-search instead of speculative
+data decode" guard at `streaming_ofdm_decode.cpp` started applying to ALL connected stations.
+A non-burst frame carries no BURST_HEADER descriptor → `pending_total_cw_=0` → it enters the
+1-CW control peek, fails it (it is multi-CW DATA, not control), and was re-searched away as
+"burst-regime noise". Real burst data never hits this path (the descriptor sizes it as full
+data and skips the peek), so only the non-burst path was affected.
+- Fix: gate the re-search on `sync_controller_.have_burst_descriptor_` — only discard-as-noise
+  when genuinely mid-burst (where a burst's SHARED coherent channel estimate is the thing
+  §14.24 protected). A standalone non-burst frame (no active descriptor) falls through to the
+  legacy data decode → `frame_callback_` → `deliverFrame` → `onFrameReceived` → SR-ARQ.
+
+**Root cause B — responder keyed its SR-ARQ ACK in the wrong waveform.** The B2F responder
+pre-confirms `handshake_confirmed_` in `enterConnected` (so it can speak first per VARA/B2F
+responder-first), which short-circuits the only site that fires `on_handshake_confirmed_()`.
+That callback is what drives `ModemEngine::setHandshakeComplete(true)` (TNC), switching TX off
+MC-DPSK handshake mode onto the negotiated OFDM data waveform. The modem's `setConnected()`
+had just reset `handshake_complete_` to false, and `setWaveformMode`→OFDM landed *afterwards*,
+so the responder kept keying its ACK in MC-DPSK while the peer listened in OFDM → ACK never
+landed → sender retransmitted to the retry cap.
+- Fix: re-fire `on_handshake_confirmed_()` exactly once on the responder's first decoded frame
+  (a one-shot `interactive_responder_modem_notified_`), guaranteed past `setConnected` +
+  `setWaveformMode`, so `waveform_mode_` is the OFDM data mode when the modem flips.
+
+**Files:** `src/gui/modem/streaming_ofdm_decode.cpp` (have_burst_descriptor_ gate),
+`src/protocol/connection.cpp` + `connection.hpp` (responder modem-notify one-shot; reverted the
+racy enterConnected fire), `tests/test_ultra_tnc_sim_audio.cpp` (added the non-burst bidirectional
+gate behind `ULTRA_TNC_TEST_NONBURST=1`).
+
+**Verification:** `tests/test_ultra_tnc_sim_audio` — two real `ultra_tnc --sim-audio` stations
+over `ota_simulator serve`, awgn@30 seed 42.
+- default (burst): 8192 B bulk file, 7 groups, 6 tone-burst ACKs matched — CRC-clean, clean
+  shutdown (NO regression from the decode-routing change).
+- `ULTRA_TNC_TEST_NONBURST=1`: 300 B short message ALICE→BOB AND BOB→ALICE — CRC-clean BOTH
+  directions (was: forward leg dropped entirely, BRAVO received nothing).
+- Touched-area unit tests: 29/29 pass (OFDM, Protocol, Connection*, SR-ARQ, FrameV2, Waveform,
+  BurstTransport, Streaming*, ToneBurstAck*, SyncController).
+
+Still open (off the message path): BUG-TNC-B2F-001 Issue 2 — bidirectional *bulk burst* over a
+single connection needs full chirp+LTS anchor re-acquisition on each turn-flip (re-acquires at
+corr~0.27). Winlink messages are small → non-burst, so this does not gate B2F messaging.
+
 ## 2026-06-02 — green CI: fix the 3 pre-existing §7-carve test reds
 
 All three were stale tests asserting behavior that deliberate refactors had changed — code

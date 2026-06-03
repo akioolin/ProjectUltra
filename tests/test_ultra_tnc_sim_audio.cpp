@@ -627,23 +627,68 @@ int main(int argc, char** argv) {
         check(bob_connected.find("ALICE BOB") != std::string::npos,
               "bob CONNECTED line mismatch: " + bob_connected);
 
-        // Real file transfer over OTASim: a multi-KB deterministic payload exercises
-        // burst-group transport + GROUP_ACK/ARQ recovery across MANY groups — the former
-        // 37-byte payload was a single tiny burst group with no recovery room (it timed
-        // out even on a clean channel). The pattern is reproducible for exact byte
-        // verification (no PRNG state to share).
-        constexpr size_t kFileBytes = 8192;
-        std::vector<uint8_t> payload(kFileBytes);
-        for (size_t i = 0; i < kFileBytes; ++i) {
-            payload[i] = static_cast<uint8_t>((i * 37u + 11u) ^ (i >> 5));
-        }
-        alice_data.writeBytes(payload);
+        // Two mutually-exclusive transport gates (the OTASim TNC harness is wall-clock
+        // paced, so we run ONE per invocation rather than chaining them on a single
+        // connection — chaining burst→non-burst trips the orthogonal burst turn-flip
+        // re-acquisition path, BUG-TNC-B2F-001 Issue 2, which is not what either gate
+        // is measuring):
+        //   default                    → BULK file transfer over the burst path
+        //   ULTRA_TNC_TEST_NONBURST=1   → SHORT interactive message over the non-burst path
+        const bool nonburst_mode = std::getenv("ULTRA_TNC_TEST_NONBURST") != nullptr;
 
-        const std::vector<uint8_t> received =
-            bob_data.readBytes(payload.size(), children, std::chrono::seconds(240));
-        check(received == payload,
-              "file payload mismatch over ultra_tnc --sim-audio (" +
-                  std::to_string(kFileBytes) + " bytes)");
+        if (!nonburst_mode) {
+            // ===== BULK file transfer (burst path) =====
+            // A multi-KB deterministic payload (> kInteractiveMaxBytes) exercises burst-group
+            // transport + tone-burst GROUP_ACK/ARQ recovery across MANY groups — the former
+            // 37-byte payload was a single tiny burst group with no recovery room (it timed
+            // out even on a clean channel). Reproducible for exact byte verification.
+            constexpr size_t kFileBytes = 8192;
+            std::vector<uint8_t> payload(kFileBytes);
+            for (size_t i = 0; i < kFileBytes; ++i) {
+                payload[i] = static_cast<uint8_t>((i * 37u + 11u) ^ (i >> 5));
+            }
+            std::cout << "[burst] BULK transfer: ALICE -> BOB (" << kFileBytes
+                      << " B, > kInteractiveMaxBytes)\n";
+            alice_data.writeBytes(payload);
+            const std::vector<uint8_t> received =
+                bob_data.readBytes(payload.size(), children, std::chrono::seconds(240));
+            check(received == payload,
+                  "BULK burst payload mismatch over ultra_tnc --sim-audio (" +
+                      std::to_string(kFileBytes) + " bytes)");
+            std::cout << "[burst] BULK transfer DELIVERED ok\n";
+        } else {
+            // ===== SHORT interactive message (non-burst SR-ARQ path), BIDIRECTIONAL =====
+            // A small message (<= kInteractiveMaxBytes) routes through sendBinary → SR-ARQ
+            // z=27 short LDPC — a DIFFERENT transport + ACK mechanism than the burst path
+            // (no tone-burst ACK; cumulative/selective SR-ARQ control-frame ACK). This is the
+            // Winlink-B2F / chat path. Regression guard for BUG-TNC-B2F-001: the receiver used
+            // to sync cleanly yet drop every non-burst DATA frame (burst-regime re-search),
+            // and the responder keyed its ACK in MC-DPSK while the peer listened in OFDM.
+            // The reverse leg exercises the half-duplex turn-handoff + REVERSE non-burst ACK.
+            constexpr size_t kMsgBytes = 300;
+            std::vector<uint8_t> msg(kMsgBytes);
+            for (size_t i = 0; i < kMsgBytes; ++i) {
+                msg[i] = static_cast<uint8_t>((i * 37u + 11u) ^ (i >> 5));
+            }
+            std::cout << "[nonburst] SHORT: ALICE -> BOB (" << kMsgBytes << " B)\n";
+            alice_data.writeBytes(msg);
+            const std::vector<uint8_t> msg_rx =
+                bob_data.readBytes(msg.size(), children, std::chrono::seconds(120));
+            check(msg_rx == msg, "FORWARD non-burst (short-path) payload mismatch");
+            std::cout << "[nonburst] forward DELIVERED ok\n";
+
+            // Reverse leg: BOB -> ALICE. Requires the turn to hand over (ALICE ISS yields).
+            std::vector<uint8_t> reply(kMsgBytes);
+            for (size_t i = 0; i < kMsgBytes; ++i) {
+                reply[i] = static_cast<uint8_t>((i * 53u + 7u) ^ (i >> 4));
+            }
+            std::cout << "[nonburst] SHORT: BOB -> ALICE (" << kMsgBytes << " B)\n";
+            bob_data.writeBytes(reply);
+            const std::vector<uint8_t> reply_rx =
+                alice_data.readBytes(reply.size(), children, std::chrono::seconds(120));
+            check(reply_rx == reply, "REVERSE non-burst (short-path) payload mismatch");
+            std::cout << "[nonburst] reverse DELIVERED ok -- bidirectional short-path WORKS\n";
+        }
 
         alice_data.close();
         bob_data.close();
@@ -654,8 +699,10 @@ int main(int argc, char** argv) {
         bob.terminateCleanly();
         daemon.terminateCleanly();
 
-        std::cout << "ultra_tnc OTASim client delivered " << kFileBytes
-                  << "-byte file (CRC-clean byte match) and shut down cleanly\n";
+        std::cout << "ultra_tnc OTASim client delivered "
+                  << (nonburst_mode ? "bidirectional short non-burst message"
+                                    : "bulk burst file")
+                  << " (CRC-clean byte match) and shut down cleanly\n";
         return 0;
     } catch (const std::exception& e) {
         alice.killNow();
