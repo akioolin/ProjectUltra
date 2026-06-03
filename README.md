@@ -32,34 +32,18 @@ operator path.
 
 ## Current direction (2026-06)
 
-ProjectUltra is converging on a focused, measurement-driven design. Three things are driving
-the work right now:
+Three things drive the work right now:
 
-**The OFDM band is going coherent-only.** We retired differential modulation (DQPSK/D8PSK)
-from the wideband and narrowband OFDM modes and moved the band to a clean coherent ladder
-(QPSK → 16QAM). Side-by-side on the faithful simulator, coherent held a ~81% clean-frame
-rate on Good fading at 10 dB and ~89% on Moderate at 14 dB, versus ~32% for the differential
-equivalent — coherent tracks the channel far better at rate. Differential isn't gone; it
-moves to where it actually shines: **MC-DPSK**, the low-SNR / heavy-multipath workhorse below
-the OFDM floor. One mode for each job, instead of one mode stretched across all of them.
+- **OFDM goes coherent-only.** Differential (DQPSK/D8PSK) is retired from the OFDM modes in
+  favor of a clean coherent ladder (QPSK → 16QAM) — ~81%/89% clean-frame rate on Good@10 /
+  Mod@14 vs ~32% differential. Differential moves to **MC-DPSK**, its low-SNR home.
+- **Measured anchors, not hand-tuning.** Each rung is set from real file transfers on the
+  faithful two-station gate (CRC-clean across fade seeds). Good is anchored
+  (R1/2@10 → R2/3@15 → R3/4@20); AWGN and Moderate are next.
+- **Airtime efficiency next.** Spend less air per byte — fewer turnarounds, leaner
+  tone-burst ACKs — pushing goodput toward each rung's ceiling within half-duplex limits.
 
-**Rate anchors come from measurement, not hand-tuning.** Every rung in the auto-rate ladder
-is being re-established by running real file transfers over a real channel on the faithful
-two-station gate (`tools/gui_qso_scenario.sh`), judged on CRC-clean delivery across multiple
-fade seeds — not a guessed SNR threshold. The Good-fading column is anchored and multi-seed
-verified (QPSK R1/2 @ 10 dB → R2/3 @ 15 dB → R3/4 @ 20 dB); the AWGN clean-channel and
-Moderate columns are next. The payoff is a ladder you can trust to pick a rung that actually
-delivers, with the evidence written down.
-
-**Airtime efficiency is the next big lever.** Picking the right rung is half the battle; the
-other half is spending less air per delivered byte. HF is half-duplex — you cannot pipeline
-data across the ACK gap the way TCP does over a wire — so the real wins come from fewer
-turnarounds (longer, coalesced bursts), leaner ACKs (the new lightweight tone-burst ACK), and
-trimming per-frame overhead. The goal is to drive measured goodput toward each rung's
-information-theoretic ceiling, not to chase physically impossible duty cycles.
-
-Near-term focus is reliable **file transfer**; interactive chat has been retired so the PHY
-can specialize. The throughput tables below are historical hardware-rig data and are being
+Near-term focus is reliable **file transfer**; the tables below are historical and are being
 re-measured under the coherent ladder.
 
 ---
