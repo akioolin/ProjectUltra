@@ -10,6 +10,32 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-02 — test hygiene: drop in-process rate-negotiation + chat-message tests
+
+Two retired-product-decision casualties cleaned out of `tests/test_protocol.cpp`:
+
+- **Rate-negotiation tests** (`test_protocol_rate_upgrade`, `test_adaptive_data_transfer`,
+  `test_adaptive_bidirectional`): they asserted a specific `(modulation, code-rate)` ladder
+  pick by driving negotiation over the in-process `SimulatedChannel` — the divergent-harness
+  style we no longer use. Rate selection is validated on the faithful GUI gate and unit-tested
+  directly in `test_waveform_policy.cpp` / `test_connection_policy.cpp`.
+- **Chat-message tests** (10): chat is retired (file-only), so `sendMessage()`-driven tests
+  are obsolete — the 7 pure chat tests plus 3 file-vs-chat scheduling scenarios. The 3
+  file-cancel tests were kept (FILE_CANCEL propagation / turn-retention / cancel-reassert
+  cores are real coverage); only their trailing chat-message assertions were excised. This
+  also retired the last two pre-existing Protocol §7 reds ("Long fragmented", "Post-cancel
+  sender message"), which lived in the removed chat paths.
+
+Recovered `test_phy_mask_v1_negotiation` (a capability-negotiation test, not chat) after it
+was briefly caught in a delete range — its `v1` digit had slipped a `[a-zA-Z_]+` planning grep.
+
+**Test verification:** Protocol 20/20 green (was 28/33 with 2 chat reds). `ctest -j4` baseline
+improved 4→3 §7 reds (StreamingConfig / StreamingBufferPolicy / StreamingDecoderToneBurstMonitor
+remain — unrelated sync/decoder carve). Kept: frame/CRC/callsign, connect/disconnect/manual-accept,
+nonphysical-SNR gating, PHY_MASK_V1, the binary/TNC-API (sendBinary) path, file transfer, compression.
+
+---
+
 ## 2026-06-02 — ladder: enable QPSK R3/4 @ Good 20 (closes the GOOD column)
 
 **What:** the GOOD column of `kCoherentLadder` was R1/2@10 → R2/3@15 with R3/4 still
