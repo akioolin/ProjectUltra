@@ -30,7 +30,13 @@ target_link_libraries(test_watterson_proof PRIVATE ota_channel_core)
 target_include_directories(test_watterson_proof PRIVATE
     ${CMAKE_SOURCE_DIR}/thirdparty/pocketfft)
 add_test(NAME WattersonProof COMMAND test_watterson_proof)
-set_tests_properties(WattersonProof PROPERTIES TIMEOUT 60)
+# This statistical channel proof runs ~30 s locally; CI runners (esp. Windows and
+# the ASAN/UBSAN + coverage builds, which can be 5-10x slower on this FFT-heavy
+# numerical code) blew past the old 60 s ceiling — the lone red that has kept main's
+# matrix failing on every platform since May. Raise to 600 s: the test is
+# deterministic so a generous backstop won't mask a real hang, and the margin kills
+# the flaky timeout. (Heavy siblings use 300-360 s; ASAN warrants more headroom.)
+set_tests_properties(WattersonProof PROPERTIES TIMEOUT 600)
 
 add_executable(test_papr_reduction test_papr_reduction.cpp)
 target_link_libraries(test_papr_reduction PRIVATE ota_channel_core)
