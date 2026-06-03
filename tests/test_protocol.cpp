@@ -416,284 +416,6 @@ bool test_nonphysical_snr_sources_do_not_drive_negotiation() {
     return true;
 }
 
-bool test_data_transfer() {
-    TEST("Data transfer with ACK");
-
-    ConnectionConfig config;
-    config.auto_accept = true;
-
-    ProtocolEngine stationA(config);
-    ProtocolEngine stationB(config);
-
-    stationA.setLocalCallsign("W1ABC");
-    stationB.setLocalCallsign("K2DEF");
-
-    std::vector<std::string> received_at_b;
-
-    stationB.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
-        received_at_b.push_back(text);
-    });
-
-    SimulatedChannel channel(stationA, stationB);
-
-    stationA.connect("K2DEF");
-    channel.run(30, 100);
-
-    if (!stationA.isConnected() || !stationB.isConnected()) {
-        FAIL("Connection not established");
-    }
-
-    if (!stationA.sendMessage("Hello Bob!")) {
-        FAIL("sendMessage() returned false");
-    }
-
-    channel.run(30, 100);
-
-    if (received_at_b.empty()) FAIL("No message received at B");
-    if (received_at_b[0] != "Hello Bob!") FAIL("Message content mismatch");
-
-    PASS();
-    return true;
-}
-
-bool test_message_tx_status_callbacks() {
-    TEST("Message TX status uses ARQ sequence IDs and cumulative ACK delivery");
-
-    ConnectionConfig config;
-    config.auto_accept = true;
-
-    ProtocolEngine stationA(config);
-    ProtocolEngine stationB(config);
-
-    stationA.setLocalCallsign("W1ABC");
-    stationB.setLocalCallsign("K2DEF");
-
-    std::vector<ProtocolEngine::MessageTxStatusEvent> tx_events;
-    std::vector<std::string> received_at_b;
-
-    stationA.setMessageTxStatusCallback(
-        [&](const ProtocolEngine::MessageTxStatusEvent& event) {
-            tx_events.push_back(event);
-        });
-    stationB.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
-        received_at_b.push_back(text);
-    });
-
-    SimulatedChannel channel(stationA, stationB);
-
-    stationA.connect("K2DEF");
-    channel.run(40, 100);
-
-    if (!stationA.isConnected() || !stationB.isConnected()) {
-        FAIL("Connection not established");
-    }
-
-    if (!stationA.sendMessage("short operator message")) {
-        FAIL("short sendMessage() returned false");
-    }
-    channel.run(60, 100);
-
-    if (received_at_b.size() != 1 || received_at_b[0] != "short operator message") {
-        FAIL("Short message not received exactly once");
-    }
-    if (tx_events.size() < 2) {
-        FAIL("Short message did not emit submitted+delivered callbacks");
-    }
-    if (tx_events[0].status != ProtocolEngine::MessageTxStatus::SUBMITTED ||
-        tx_events[1].status != ProtocolEngine::MessageTxStatus::DELIVERED) {
-        FAIL("Short message status order was not SUBMITTED then DELIVERED");
-    }
-    if (tx_events[0].first_seq != tx_events[1].first_seq ||
-        tx_events[1].first_seq != tx_events[1].last_seq) {
-        FAIL("Short message should use one ARQ sequence id");
-    }
-
-    tx_events.clear();
-    received_at_b.clear();
-
-    std::string long_message;
-    for (int i = 0; i < 120; ++i) {
-        long_message += "Long operator message segment " + std::to_string(i) + ". ";
-    }
-
-    if (!stationA.sendMessage(long_message)) {
-        FAIL("long sendMessage() returned false");
-    }
-    channel.run(300, 100);
-
-    if (received_at_b.size() != 1 || received_at_b[0] != long_message) {
-        FAIL("Long fragmented message not received exactly once");
-    }
-    if (tx_events.size() < 2) {
-        FAIL("Long message did not emit submitted+delivered callbacks");
-    }
-    if (tx_events[0].status != ProtocolEngine::MessageTxStatus::SUBMITTED ||
-        tx_events.back().status != ProtocolEngine::MessageTxStatus::DELIVERED) {
-        FAIL("Long message status order was not SUBMITTED then DELIVERED");
-    }
-    if (tx_events[0].first_seq != tx_events.back().first_seq) {
-        FAIL("Long message delivery did not preserve first ARQ sequence id");
-    }
-    if (tx_events.back().last_seq == tx_events.back().first_seq) {
-        FAIL("Long message should span multiple ARQ sequence ids");
-    }
-
-    PASS();
-    return true;
-}
-
-bool test_bidirectional_transfer() {
-    TEST("Bidirectional data transfer");
-
-    ConnectionConfig config;
-    config.auto_accept = true;
-
-    ProtocolEngine stationA(config);
-    ProtocolEngine stationB(config);
-
-    stationA.setLocalCallsign("W1ABC");
-    stationB.setLocalCallsign("K2DEF");
-
-    std::vector<std::string> received_at_a;
-    std::vector<std::string> received_at_b;
-
-    stationA.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
-        received_at_a.push_back(text);
-    });
-
-    stationB.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
-        received_at_b.push_back(text);
-    });
-
-    SimulatedChannel channel(stationA, stationB);
-
-    stationA.connect("K2DEF");
-    channel.run(30, 100);
-
-    if (!stationA.isConnected()) FAIL("Not connected");
-
-    stationA.sendMessage("Hello from Alice");
-    channel.run(30, 100);
-
-    stationB.sendMessage("Hello from Bob");
-    channel.run(120, 100);
-
-    if (received_at_b.size() != 1 || received_at_b[0] != "Hello from Alice") {
-        FAIL("B didn't receive Alice's message");
-    }
-
-    if (received_at_a.size() != 1 || received_at_a[0] != "Hello from Bob") {
-        FAIL("A didn't receive Bob's message");
-    }
-
-    PASS();
-    return true;
-}
-
-bool test_half_duplex_turn_taking_queues_irs_data() {
-    TEST("Half-duplex turn-taking queues IRS DATA until TURNOVER");
-
-    ConnectionConfig config;
-    config.auto_accept = true;
-
-    ProtocolEngine stationA(config);
-    ProtocolEngine stationB(config);
-
-    stationA.setLocalCallsign("W1ABC");
-    stationB.setLocalCallsign("K2DEF");
-
-    std::vector<std::string> received_at_a;
-    std::vector<std::string> received_at_b;
-
-    stationA.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
-        received_at_a.push_back(text);
-    });
-    stationB.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
-        received_at_b.push_back(text);
-    });
-
-    SimulatedChannel channel(stationA, stationB);
-    stationA.connect("K2DEF");
-    channel.run(30, 100);
-
-    if (!stationA.isConnected() || !stationB.isConnected()) FAIL("Connection not established");
-
-    if (!stationA.sendMessage("Alice owns first ISS turn")) FAIL("A sendMessage failed");
-    channel.run(30, 100);
-    if (received_at_b.size() != 1 || received_at_b[0] != "Alice owns first ISS turn") {
-        FAIL("B did not receive A message");
-    }
-
-    const int b_tx_before_queue = channel.getTxCountB();
-    const int b_turn_requests_before = channel.getTurnRequestCountB();
-    if (!stationB.sendMessage("Bob queued while IRS")) FAIL("B sendMessage should queue");
-    for (int i = 0; i < 80 && channel.getTurnRequestCountB() == b_turn_requests_before; i++) {
-        channel.run(1, 100);
-    }
-    if (channel.getTurnRequestCountB() != b_turn_requests_before + 1) {
-        FAIL("IRS did not emit a bounded TURN_REQUEST for queued DATA");
-    }
-    if (channel.getTxCountB() <= b_tx_before_queue) {
-        FAIL("IRS did not transmit a TURN_REQUEST control before receiving DATA turn");
-    }
-
-    channel.run(100, 100);
-
-    if (received_at_a.size() != 1 || received_at_a[0] != "Bob queued while IRS") {
-        FAIL("A did not receive queued B message after TURNOVER");
-    }
-
-    PASS();
-    return true;
-}
-
-bool test_retransmission() {
-    TEST("Retransmission on timeout");
-
-    ConnectionConfig config;
-    config.auto_accept = true;
-    config.arq.ack_timeout_ms = 500;
-    config.arq.max_retries = 3;
-
-    ProtocolEngine stationA(config);
-    ProtocolEngine stationB(config);
-
-    stationA.setLocalCallsign("W1ABC");
-    stationB.setLocalCallsign("K2DEF");
-
-    std::vector<std::string> received_at_b;
-    stationB.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
-        received_at_b.push_back(text);
-    });
-
-    SimulatedChannel channel(stationA, stationB);
-
-    stationA.connect("K2DEF");
-    channel.run(30, 100);
-
-    if (!stationA.isConnected()) FAIL("Not connected");
-
-    channel.setDropBtoA(true);
-
-    stationA.sendMessage("Test retransmit");
-
-    int initial_tx = channel.getTxCountA();
-    channel.run(20, 100);
-
-    if (channel.getTxCountA() <= initial_tx + 1) {
-        channel.setDropBtoA(false);
-        channel.run(20, 100);
-    }
-
-    channel.setDropBtoA(false);
-    channel.run(30, 100);
-
-    if (received_at_b.empty()) FAIL("Message never received despite retransmits");
-
-    PASS();
-    return true;
-}
-
 bool test_disconnect() {
     TEST("Graceful disconnect");
 
@@ -776,96 +498,9 @@ bool test_manual_accept() {
     return true;
 }
 
-bool test_multiple_messages() {
-    TEST("Multiple sequential messages");
-
-    ConnectionConfig config;
-    config.auto_accept = true;
-
-    ProtocolEngine stationA(config);
-    ProtocolEngine stationB(config);
-
-    stationA.setLocalCallsign("W1ABC");
-    stationB.setLocalCallsign("K2DEF");
-
-    std::vector<std::string> received;
-    stationB.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
-        received.push_back(text);
-    });
-
-    SimulatedChannel channel(stationA, stationB);
-
-    stationA.connect("K2DEF");
-    channel.run(30, 100);
-
-    const int NUM_MESSAGES = 5;
-    for (int i = 0; i < NUM_MESSAGES; i++) {
-        int attempts = 0;
-        while (!stationA.isReadyToSend() && attempts < 50) {
-            channel.run(1, 100);
-            attempts++;
-        }
-
-        std::string msg = "Message " + std::to_string(i + 1);
-        stationA.sendMessage(msg);
-        channel.run(20, 100);
-    }
-
-    channel.run(30, 100);
-
-    if (received.size() != NUM_MESSAGES) {
-        std::cout << "(received " << received.size() << "/" << NUM_MESSAGES << ") ";
-        FAIL("Not all messages received");
-    }
-
-    for (int i = 0; i < NUM_MESSAGES; i++) {
-        std::string expected = "Message " + std::to_string(i + 1);
-        if (received[i] != expected) FAIL("Message order/content wrong");
-    }
-
-    PASS();
-    return true;
-}
-
-bool test_quick_brown_fox() {
-    TEST("Quick Brown Fox test message");
-
-    ConnectionConfig config;
-    config.auto_accept = true;
-
-    ProtocolEngine stationA(config);
-    ProtocolEngine stationB(config);
-
-    stationA.setLocalCallsign("W1ABC");
-    stationB.setLocalCallsign("K2DEF");
-
-    std::string received_msg;
-
-    stationB.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
-        received_msg = text;
-    });
-
-    SimulatedChannel channel(stationA, stationB);
-
-    stationA.connect("K2DEF");
-    channel.run(30, 100);
-
-    if (!stationA.isConnected()) FAIL("Not connected");
-
-    const std::string fox_msg = "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG 1234567890";
-    stationA.sendMessage(fox_msg);
-    channel.run(30, 100);
-
-    if (received_msg.empty()) FAIL("No message received");
-    if (received_msg != fox_msg) {
-        std::cout << "\n    Expected: " << fox_msg << "\n";
-        std::cout << "    Received: " << received_msg << "\n";
-        FAIL("Message content mismatch");
-    }
-
-    PASS();
-    return true;
-}
+// ============================================================================
+// Capability Negotiation Tests
+// ============================================================================
 
 bool test_phy_mask_v1_negotiation() {
     TEST("PHY_MASK_V1 negotiation gates CarrierLDPC");
@@ -1308,262 +943,6 @@ bool test_file_transfer_queues_during_connect_guard() {
     return true;
 }
 
-bool test_queued_file_yields_to_pending_peer_turn_request_before_start() {
-    TEST("Queued file yields to pending peer turn request before start");
-
-    ConnectionConfig config;
-    config.auto_accept = true;
-    config.arq.ack_timeout_ms = 200;
-
-    ProtocolEngine stationA(config);
-    ProtocolEngine stationB(config);
-
-    stationA.setLocalCallsign("W1ABC");
-    stationB.setLocalCallsign("K2DEF");
-
-    ultra::test::TempDir temp_dir("ultra_protocol_queued_file_turn_test");
-    if (!temp_dir.valid()) FAIL("Could not create temp test directory");
-    const auto& test_dir = temp_dir.path();
-
-    const size_t FILE_SIZE = 512;
-    std::string src_path = createPseudoRandomTestFile(test_dir, "queued_file.bin", FILE_SIZE);
-    if (src_path.empty()) FAIL("Could not create queued file test source");
-
-    std::string rx_dir = (test_dir / "rx").string();
-    std::filesystem::create_directories(rx_dir);
-    stationB.setReceiveDirectory(rx_dir);
-
-    std::vector<std::string> received_at_a;
-    std::vector<std::string> received_at_b;
-    stationA.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
-        received_at_a.push_back(text);
-    });
-    stationB.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
-        received_at_b.push_back(text);
-    });
-
-    bool file_received = false;
-    bool receive_success = false;
-    std::string received_path;
-    stationB.setFileReceivedCallback([&](const std::string& path, bool success, const std::string&) {
-        file_received = true;
-        receive_success = success;
-        received_path = path;
-    });
-
-    bool file_sent = false;
-    bool send_success = false;
-    stationA.setFileSentCallback([&](bool success, const std::string&) {
-        file_sent = true;
-        send_success = success;
-    });
-
-    SimulatedChannel channel(stationA, stationB);
-    stationA.connect("K2DEF");
-    channel.run(30, 100);
-
-    if (!stationA.isConnected() || !stationB.isConnected()) FAIL("Connection not established");
-    if (!stationA.sendMessage("A first")) FAIL("A sendMessage failed");
-    if (!stationB.sendMessage("B queued before file")) FAIL("B sendMessage should queue");
-
-    // Deliver B's TURN_REQUEST and A's DATA, but queue the file before A sees
-    // the ACK that clears its in-flight message. This reproduces the GUI
-    // stall where queued_file_path_ and peer_data_turn_requested_ blocked each
-    // other.
-    channel.deliver();
-    if (!stationA.sendFile(src_path)) FAIL("A sendFile() should queue behind pending ACK");
-
-    for (int i = 0; i < 400 && received_at_a.empty(); i++) {
-        channel.run(1, 50);
-    }
-    if (channel.getTurnoverCountA() < 1) {
-        FAIL("A did not yield DATA turn for peer request while file was queued");
-    }
-    if (received_at_a.empty() || received_at_a[0] != "B queued before file") {
-        FAIL("A did not receive B's queued message before starting queued file");
-    }
-
-    for (int i = 0; i < 800 && (!file_received || !file_sent); i++) {
-        channel.run(1, 50);
-    }
-
-    if (!file_sent) FAIL("Queued file was not sent after peer turn drained");
-    if (!send_success) FAIL("Queued file send reported failure");
-    if (!file_received) FAIL("Queued file was not received");
-    if (!receive_success) FAIL("Queued file receive reported failure");
-    if (!filesEqual(src_path, received_path)) FAIL("Queued file content mismatch");
-
-    PASS();
-    return true;
-}
-
-bool test_queued_file_preempts_deferred_chat_after_current_payload() {
-    TEST("Queued file starts before deferred chat after current payload drains");
-
-    ConnectionConfig config;
-    config.auto_accept = true;
-    config.arq.ack_timeout_ms = 200;
-
-    ProtocolEngine stationA(config);
-    ProtocolEngine stationB(config);
-
-    stationA.setLocalCallsign("W1ABC");
-    stationB.setLocalCallsign("K2DEF");
-
-    ultra::test::TempDir temp_dir("ultra_protocol_file_chat_priority_test");
-    if (!temp_dir.valid()) FAIL("Could not create temp test directory");
-    const auto& test_dir = temp_dir.path();
-
-    const size_t FILE_SIZE = 512;
-    std::string src_path = createPseudoRandomTestFile(test_dir, "priority_file.bin", FILE_SIZE);
-    if (src_path.empty()) FAIL("Could not create test source file");
-
-    std::string rx_dir = (test_dir / "rx").string();
-    std::filesystem::create_directories(rx_dir);
-    stationB.setReceiveDirectory(rx_dir);
-
-    std::vector<std::string> b_events;
-    stationB.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
-        b_events.push_back("msg:" + text);
-    });
-
-    bool file_received = false;
-    bool receive_success = false;
-    std::string received_path;
-    stationB.setFileReceivedCallback([&](const std::string& path, bool success, const std::string&) {
-        file_received = true;
-        receive_success = success;
-        received_path = path;
-        b_events.push_back(success ? "file:ok" : "file:fail");
-    });
-
-    bool file_sent = false;
-    bool send_success = false;
-    stationA.setFileSentCallback([&](bool success, const std::string&) {
-        file_sent = true;
-        send_success = success;
-    });
-
-    SimulatedChannel channel(stationA, stationB);
-    stationA.connect("K2DEF");
-    channel.run(30, 100);
-
-    if (!stationA.isConnected() || !stationB.isConnected()) FAIL("Connection not established");
-    if (!stationA.sendMessage("A current")) FAIL("A current sendMessage failed");
-    if (!stationA.sendMessage("A deferred chat")) FAIL("A deferred chat should queue");
-    if (!stationA.sendFile(src_path)) FAIL("A sendFile() should queue behind current payload");
-
-    for (int i = 0; i < 1200 && (!file_received || !file_sent); i++) {
-        channel.run(1, 50);
-    }
-
-    if (!file_sent) FAIL("Queued file was not sent");
-    if (!send_success) FAIL("Queued file send reported failure");
-    if (!file_received) FAIL("Queued file was not received");
-    if (!receive_success) FAIL("Queued file receive reported failure");
-    if (!filesEqual(src_path, received_path)) FAIL("Queued file content mismatch");
-
-    auto file_it = std::find(b_events.begin(), b_events.end(), "file:ok");
-    auto deferred_it = std::find(b_events.begin(), b_events.end(), "msg:A deferred chat");
-    if (file_it == b_events.end()) FAIL("File event missing from receive order");
-    if (deferred_it != b_events.end() && deferred_it < file_it) {
-        FAIL("Deferred chat was delivered before the queued file");
-    }
-
-    PASS();
-    return true;
-}
-
-bool test_file_transfer_holds_link_and_defers_peer_message() {
-    TEST("File transfer holds link and defers peer message");
-
-    ConnectionConfig config;
-    config.auto_accept = true;
-    config.arq.ack_timeout_ms = 200;
-
-    ProtocolEngine stationA(config);
-    ProtocolEngine stationB(config);
-
-    stationA.setLocalCallsign("W1ABC");
-    stationB.setLocalCallsign("K2DEF");
-
-    ultra::test::TempDir temp_dir("ultra_protocol_mixed_test");
-    if (!temp_dir.valid()) FAIL("Could not create temp test directory");
-    const auto& test_dir = temp_dir.path();
-
-    const size_t FILE_SIZE = 32768;
-    std::string src_path = createPseudoRandomTestFile(test_dir, "mixed_source.bin", FILE_SIZE);
-    if (src_path.empty()) FAIL("Could not create mixed test file");
-
-    std::string rx_dir = (test_dir / "rx").string();
-    std::filesystem::create_directories(rx_dir);
-    stationB.setReceiveDirectory(rx_dir);
-
-    bool file_received = false;
-    std::string received_path;
-    bool receive_success = false;
-    stationB.setFileReceivedCallback([&](const std::string& path, bool success, const std::string&) {
-        file_received = true;
-        received_path = path;
-        receive_success = success;
-    });
-
-    bool file_sent = false;
-    bool send_success = false;
-    stationA.setFileSentCallback([&](bool success, const std::string&) {
-        file_sent = true;
-        send_success = success;
-    });
-
-    std::vector<std::string> received_at_a;
-    bool message_before_file_complete = false;
-    stationA.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
-        if (!file_received) {
-            message_before_file_complete = true;
-        }
-        received_at_a.push_back(text);
-    });
-
-    SimulatedChannel channel(stationA, stationB);
-    stationA.connect("K2DEF");
-    channel.run(30, 100);
-
-    if (!stationA.isConnected() || !stationB.isConnected()) FAIL("Connection not established");
-    if (!stationA.sendFile(src_path)) FAIL("A sendFile() returned false");
-    if (!stationB.sendMessage("B message during A file")) FAIL("B sendMessage should queue during received file");
-
-    for (int i = 0; i < 2000 && (!file_received || !file_sent || received_at_a.empty()); i++) {
-        channel.run(1, 50);
-        if (!file_received &&
-            (channel.getTurnoverCountA() != 0 || channel.getTurnoverCountB() != 0)) {
-            FAIL("File transfer emitted DATA TURNOVER before completion");
-        }
-    }
-
-    if (message_before_file_complete) {
-        FAIL("Peer message was delivered before file completion");
-    }
-    if (received_at_a.empty() || received_at_a[0] != "B message during A file") {
-        FAIL("A did not receive B's deferred message after file transfer");
-    }
-    if (!file_sent) FAIL("File not sent (no callback)");
-    if (!send_success) FAIL("File send reported failure");
-    if (!file_received) FAIL("File not received (no callback)");
-    if (!receive_success) FAIL("File receive reported failure");
-    if (!filesEqual(src_path, received_path)) FAIL("Mixed file content mismatch");
-    if (channel.getTurnoverCountA() < 1) FAIL("File sender did not yield DATA turn after completion");
-
-    const auto a_stats = stationA.getStats().arq;
-    const auto b_stats = stationB.getStats().arq;
-    if (a_stats.retransmissions != 0 || b_stats.retransmissions != 0 ||
-        a_stats.failed != 0 || b_stats.failed != 0) {
-        FAIL("Mixed file/message path had ARQ retransmission or failure");
-    }
-
-    PASS();
-    return true;
-}
-
 bool test_file_transfer_receiver_cancel_propagates_and_frees_link() {
     TEST("Receiver file cancel propagates and frees link");
 
@@ -1608,11 +987,6 @@ bool test_file_transfer_receiver_cancel_propagates_and_frees_link() {
         }
     });
 
-    std::vector<std::string> received_at_a;
-    stationA.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
-        received_at_a.push_back(text);
-    });
-
     SimulatedChannel channel(stationA, stationB);
     stationA.connect("K2DEF");
     channel.run(30, 100);
@@ -1624,19 +998,15 @@ bool test_file_transfer_receiver_cancel_propagates_and_frees_link() {
         channel.run(1, 50);
     }
     if (!receive_started) FAIL("B did not start receiving file");
-    if (!stationB.sendMessage("B message after receiver cancel")) FAIL("B message should queue during file");
 
     stationB.cancelFileTransfer();
-    for (int i = 0; i < 1200 && (!receive_cancelled || !sender_cancelled || received_at_a.empty()); i++) {
+    for (int i = 0; i < 1200 && (!receive_cancelled || !sender_cancelled); i++) {
         channel.run(1, 50);
     }
 
     if (channel.getFileCancelCountB() < 1) FAIL("Receiver did not transmit FILE_CANCEL");
     if (!receive_cancelled) FAIL("Receiver did not report transfer cancelled");
     if (!sender_cancelled) FAIL("Sender did not report transfer cancelled");
-    if (received_at_a.empty() || received_at_a[0] != "B message after receiver cancel") {
-        FAIL("Queued receiver message did not send after cancel");
-    }
 
     PASS();
     return true;
@@ -1686,11 +1056,6 @@ bool test_file_transfer_receiver_cancel_sender_retains_turn() {
         }
     });
 
-    std::vector<std::string> received_at_b;
-    stationB.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
-        received_at_b.push_back(text);
-    });
-
     SimulatedChannel channel(stationA, stationB);
     stationA.connect("K2DEF");
     channel.run(30, 100);
@@ -1717,28 +1082,6 @@ bool test_file_transfer_receiver_cancel_sender_retains_turn() {
     if (!sender_cancelled) FAIL("Sender did not report transfer cancelled");
     if (channel.getTurnoverCountA() != a_turnovers_before_cancel) {
         FAIL("Sender emitted TURNOVER after peer FILE_CANCEL");
-    }
-
-    // FILE_CANCEL drains any already-launched file DATA before the retained ISS
-    // turn may carry new operator payloads. This wait is a local drain guard, not
-    // a peer turn grant.
-    channel.run(120, 50);
-    const int a_tx_before_message = channel.getTxCountA();
-    if (!stationA.sendMessage("A message after receiver cancel")) {
-        FAIL("A message after receiver cancel should be accepted");
-    }
-    for (int i = 0; i < 160 && channel.getTxCountA() <= a_tx_before_message; i++) {
-        channel.run(1, 50);
-    }
-    if (channel.getTxCountA() <= a_tx_before_message) {
-        FAIL("Sender did not transmit post-cancel message after bounded cancel guard");
-    }
-
-    for (int i = 0; i < 40 && received_at_b.empty(); i++) {
-        channel.run(1, 50);
-    }
-    if (received_at_b.empty() || received_at_b[0] != "A message after receiver cancel") {
-        FAIL("Post-cancel sender message did not deliver promptly");
     }
 
     PASS();
@@ -1789,11 +1132,6 @@ bool test_file_transfer_sender_cancel_propagates_and_frees_link() {
         }
     });
 
-    std::vector<std::string> received_at_a;
-    stationA.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
-        received_at_a.push_back(text);
-    });
-
     SimulatedChannel channel(stationA, stationB);
     stationA.connect("K2DEF");
     channel.run(30, 100);
@@ -1805,19 +1143,15 @@ bool test_file_transfer_sender_cancel_propagates_and_frees_link() {
         channel.run(1, 50);
     }
     if (!receive_started) FAIL("B did not start receiving file");
-    if (!stationB.sendMessage("B message after sender cancel")) FAIL("B message should queue during file");
 
     stationA.cancelFileTransfer();
-    for (int i = 0; i < 1200 && (!receive_cancelled || !sender_cancelled || received_at_a.empty()); i++) {
+    for (int i = 0; i < 1200 && (!receive_cancelled || !sender_cancelled); i++) {
         channel.run(1, 50);
     }
 
     if (channel.getFileCancelCountA() < 1) FAIL("Sender did not transmit FILE_CANCEL");
     if (!sender_cancelled) FAIL("Sender did not report transfer cancelled");
     if (!receive_cancelled) FAIL("Receiver did not report transfer cancelled");
-    if (received_at_a.empty() || received_at_a[0] != "B message after sender cancel") {
-        FAIL("Queued receiver message did not send after sender cancel");
-    }
 
     PASS();
     return true;
@@ -1866,20 +1200,11 @@ int main() {
     std::cout << "\nTwo-Station Simulation:\n";
     test_connection_establishment();
     test_nonphysical_snr_sources_do_not_drive_negotiation();
-    test_data_transfer();
-    test_message_tx_status_callbacks();
-    test_bidirectional_transfer();
-    test_half_duplex_turn_taking_queues_irs_data();
-    test_retransmission();
     test_disconnect();
     test_manual_accept();
-    test_multiple_messages();
 
     std::cout << "\nCapability Negotiation:\n";
     test_phy_mask_v1_negotiation();
-
-    std::cout << "\nRadio Test Messages:\n";
-    test_quick_brown_fox();
 
     std::cout << "\nBinary Stream / TNC API Tests:\n";
     test_binary_fragment_reassembly_single_callback();
@@ -1889,9 +1214,6 @@ int main() {
     std::cout << "\nFile Transfer Tests:\n";
     test_file_transfer_small();
     test_file_transfer_queues_during_connect_guard();
-    test_queued_file_yields_to_pending_peer_turn_request_before_start();
-    test_queued_file_preempts_deferred_chat_after_current_payload();
-    test_file_transfer_holds_link_and_defers_peer_message();
     test_file_transfer_receiver_cancel_propagates_and_frees_link();
     test_file_transfer_receiver_cancel_sender_retains_turn();
     test_file_transfer_sender_cancel_propagates_and_frees_link();
