@@ -30,13 +30,15 @@ target_link_libraries(test_watterson_proof PRIVATE ota_channel_core)
 target_include_directories(test_watterson_proof PRIVATE
     ${CMAKE_SOURCE_DIR}/thirdparty/pocketfft)
 add_test(NAME WattersonProof COMMAND test_watterson_proof)
-# This statistical channel proof runs ~30 s locally; CI runners (esp. Windows and
-# the ASAN/UBSAN + coverage builds, which can be 5-10x slower on this FFT-heavy
-# numerical code) blew past the old 60 s ceiling — the lone red that has kept main's
-# matrix failing on every platform since May. Raise to 600 s: the test is
-# deterministic so a generous backstop won't mask a real hang, and the margin kills
-# the flaky timeout. (Heavy siblings use 300-360 s; ASAN warrants more headroom.)
-set_tests_properties(WattersonProof PROPERTIES TIMEOUT 600)
+# This statistical channel proof runs ~30 s locally but is FAR slower on CI runners:
+# measured 508 s on the macOS CI runner and >600 s on Linux; the ASAN/UBSAN + coverage
+# builds add another 3-5x on top of this FFT-heavy numerical code. 60 s, then 600 s,
+# both timed out on CI — the lone red keeping main's matrix failing since May. The test
+# is deterministic, so a large backstop won't mask a real hang (a genuine hang is still
+# bounded by the 6 h job default); the margin just kills the flaky timeout. Its heaviest
+# siblings (ToneBurstAckWatterson ~1985 s) carry no explicit timeout at all. Follow-up:
+# the Monte-Carlo sample counts are over-provisioned and could be cut to run in ~1 min.
+set_tests_properties(WattersonProof PROPERTIES TIMEOUT 5400)
 
 add_executable(test_papr_reduction test_papr_reduction.cpp)
 target_link_libraries(test_papr_reduction PRIVATE ota_channel_core)
@@ -490,8 +492,10 @@ target_include_directories(test_idle_noise_snr_calibration PRIVATE
 )
 target_link_libraries(test_idle_noise_snr_calibration PRIVATE ultra_core ota_channel_core)
 add_test(NAME ChannelIdleNoiseSNRCalibration COMMAND test_idle_noise_snr_calibration)
+# 90 s fits normal runs but times out under ASAN/UBSAN (3-5x slower) on CI — the second
+# sanitizer-only red alongside WattersonProof. Raise to an ASAN-safe backstop.
 set_tests_properties(ChannelIdleNoiseSNRCalibration PROPERTIES
-    TIMEOUT 90
+    TIMEOUT 1800
     LABELS regression)
 
 # MC-DPSK ACK turnaround timing — protocol-only (ultra_core), not SimulatedStation.
