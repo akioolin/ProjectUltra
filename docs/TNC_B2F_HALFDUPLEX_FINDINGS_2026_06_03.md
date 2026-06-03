@@ -57,6 +57,21 @@ retries that never converge. The `expectFullOFDMAnchorOnce` mechanism exists but
 armed/sent correctly across turn-flips. (Secondary suspects to rule out: z=81 long-LDPC burst
 timing sensitivity; whether the yielded station is allowed to TX its GROUP_ACK promptly.)
 
+## Update (later 2026-06-03): traffic-class routing landed; blocker confirmed transport-independent
+- **Routing fix (committed).** `tnc_session.cpp::flushDataTxBuffer()` now routes by size: a
+  block ≤ `kInteractiveMaxBytes` (4096) goes on the NON-BURST short-LDPC (z=27) `sendBinary`
+  path (SR-ARQ + ISS/IRS turn gate); larger → the burst (z=81) file path. This is the
+  design-correct class split (§3/§7). Verified: a B2F connect now takes the non-burst path
+  (BRAVO `sendFile() called` = 0). One-way TNC file test (`UltraTncSimAudio`) still passes.
+- **But the message still does not deliver, and the failure is identical** — so Issue 2 is
+  **NOT** about burst vs non-burst. With BRAVO on the non-burst path, ALPHA STILL logs
+  `burst marker frame timing retry ±70–313 samples` and decodes **zero** frames. (The OFDM
+  data-frame RX uses "burst marker" timing recovery for both transports.) So the root cause is
+  confirmed: **the receiver cannot acquire the new sender's frame timing on a turn-flip** —
+  BRAVO transmits a light/warm preamble, ALPHA never established BRAVO's timing reference, so
+  it cannot lock. The fix is **full chirp+LTS anchor on every turn-flip**, independent of which
+  transport carries the bytes.
+
 ## Next steps
 1. Confirm hypothesis: log whether BRAVO's post-turnover burst carries a full anchor and
    whether ALPHA has `expect_full_ofdm_anchor_` set when it starts receiving it.
