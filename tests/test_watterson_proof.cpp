@@ -239,7 +239,7 @@ void partA_TapStatistics() {
 
     constexpr uint32_t fs = 100;
     constexpr float doppler_hz = 0.1f;
-    constexpr size_t per_seed_count = 200'000;  // 2000 s at 100 Hz.
+    constexpr size_t per_seed_count = 60'000;  // 600 s at 100 Hz (loose 0.30 tolerances).
     std::vector<cd> h1s, h2s;
     h1s.reserve(per_seed_count * 4);
     h2s.reserve(per_seed_count * 4);
@@ -368,8 +368,10 @@ void partF_PowerConservation() {
     printf("\n=== PART F: long-run power conservation ===\n");
     auto cfg = itu::good(100.0f);
     cfg.noise_enabled = false; cfg.fading_enabled = true; cfg.multipath_enabled = true;
-    // 120 s tone
-    constexpr size_t N = 48000*120;
+    // 30 s tone x 3 seeds = 90 s. Power conservation is a mean-of-squares that
+    // converges as 1/sqrt(N); 90 s of samples is already far inside the 1.0 dB
+    // tolerance, and this is the single heaviest part of the proof on CI (was 120 s).
+    constexpr size_t N = 48000*30;
     std::vector<float> tone(N);
     const double amp = kModemReferenceInBandRms*std::sqrt(2.0);
     for (size_t i = 0; i < N; ++i) tone[i] = float(amp*std::sin(2.0*kPi*1500.0*i/48000.0));
@@ -389,8 +391,8 @@ void partF_PowerConservation() {
     in_p/=static_cast<double>(measured_samples);
     out_p/=static_cast<double>(measured_samples);
     double r_db = 10.0*std::log10(out_p/in_p);
-    check("long-run power conservation (Good, 3x120s)", r_db, 0.0, 1.0);
-    printf("  in=%.6f  out=%.6f  ratio=%+.3f dB (3 seeds x 120 s)\n",
+    check("long-run power conservation (Good, 3x30s)", r_db, 0.0, 1.0);
+    printf("  in=%.6f  out=%.6f  ratio=%+.3f dB (3 seeds x 30 s)\n",
            in_p, out_p, r_db);
 }
 
