@@ -10,6 +10,28 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-02 — ladder: enable QPSK R3/4 @ Good 20 (closes the GOOD column)
+
+**What:** the GOOD column of `kCoherentLadder` was R1/2@10 → R2/3@15 with R3/4 still
+`kRungDisabledDb`. Multi-seed measurement closed the gap: QPSK R3/4 @ Good 20 GOOD anchor
+`kRungDisabledDb → 20.0f`.
+
+**Why it's the right rung (MEASURED, 5 seeds, 20 KB, forced, CRC + sample-space):**
+QPSK R3/4 @ Good 20 = **5/5 CRC-clean, 1240–1750 bps (avg 1630), damage 0–18% (avg 8%),
+it_max ≤10.** The extra 5 dB over Good@15 moves R3/4 OFF the cliff (Good@15 had a
+50%-damage/it_max-40 seed; Good@20 stays clean across seeds). It beats both Good@20
+alternatives: R5/6 (1480 bps, 33% damage — 17% redundancy < ~23% fade-erasure, below the
+cliff) and 16QAM R1/2 (1190 bps, it_max 29 — the Good-fading decodability gate). Principle:
+redundancy(1-rate) vs ~23% Good fade-erasure → R5/6=17% broken < R3/4=25% clears < R2/3=33%
+comfortable. GOOD ladder is now R1/2@10 → R2/3@15 → R3/4@20.
+
+**Test verification:** `tests/test_waveform_policy.cpp` + `tests/test_connection_policy.cpp`
+boundary assertions updated (Good 19.9 → R2/3, Good ≥20 → R3/4; the high-SNR Good 28/30/32
+cases → R3/4) — both PASS. docs/RATE_LADDER_ANCHORS.md has the finding + raw-run paths.
+Refine TODO: bracket Good@18 (anchor may drop 20→~18).
+
+---
+
 ## 2026-06-02 — rate picker rework: one coherent ladder + measured/lowered floors
 
 Replaced the over-engineered OFDM rate picker (`waveform_selection.hpp` — 4 gate-arrays
