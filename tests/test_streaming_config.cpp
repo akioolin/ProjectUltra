@@ -52,6 +52,7 @@ void checkMatchingOFDMGeometry(Modulation mod,
 
     StreamingDecoder decoder;
     decoder.setConnectedOFDMMode(protocol::WaveformMode::OFDM_CHIRP, cfg, mod, rate);
+    decoder.applyPendingConfigForTesting();  // §14.36: connected-OFDM apply is deferred to processBuffer
 
     auto tx = encoder.getConfig();
     auto rx = decoder.getConfig();
@@ -69,12 +70,11 @@ void checkMatchingOFDMGeometry(Modulation mod,
     CHECK(rx.bits_per_symbol == expected_bits_per_symbol, "decoder bits/symbol should match geometry");
 }
 
-void test_differential_ofdm_config_match() {
-    checkMatchingOFDMGeometry(Modulation::DQPSK, CodeRate::R1_2, 10, 53, 106);
-    checkMatchingOFDMGeometry(Modulation::DQPSK, CodeRate::R3_4, 15, 55, 110);
-    checkMatchingOFDMGeometry(Modulation::D8PSK, CodeRate::R2_3, 8, 51, 153);
-}
-
+// NOTE: the OFDM band is coherent-only (differential DQPSK/D8PSK retired from OFDM
+// and relocated to MC-DPSK — see OFDM_COHERENT_ONLY_DECISION). The waveform now
+// applies coherent pilot geometry to every OFDM mode, so the old differential-OFDM
+// geometry expectations (spacing 10/15/8) no longer describe a live path. The
+// coherent cases below validate the geometry helper on the modes the ladder selects.
 void test_coherent_ofdm_config_match() {
     checkMatchingOFDMGeometry(Modulation::QPSK, CodeRate::R1_2, 5, 47, 94);
     checkMatchingOFDMGeometry(Modulation::QPSK, CodeRate::R3_4, 8, 51, 102);
@@ -203,6 +203,7 @@ void test_connected_ofdm_config_arms_full_anchor() {
     StreamingDecoder decoder;
     decoder.setConnectedOFDMMode(protocol::WaveformMode::OFDM_CHIRP,
                                  cfg, Modulation::DQPSK, CodeRate::R1_4);
+    decoder.applyPendingConfigForTesting();  // §14.36: deferred to processBuffer
     CHECK(decoder.expectsFullOFDMAnchorForTesting(),
           "connected OFDM entry should arm full chirp+LTS acquisition");
 
@@ -210,6 +211,7 @@ void test_connected_ofdm_config_arms_full_anchor() {
     auto promoted = makeOFDMConfig(Modulation::QAM16, CodeRate::R1_2);
     decoder.setConnectedOFDMMode(protocol::WaveformMode::OFDM_CHIRP,
                                  promoted, Modulation::QAM16, CodeRate::R1_2);
+    decoder.applyPendingConfigForTesting();  // §14.36: deferred to processBuffer
     CHECK(decoder.expectsFullOFDMAnchorForTesting(),
           "connected OFDM reconfiguration must not clear a pending full-anchor expectation");
 
@@ -223,7 +225,6 @@ void test_connected_ofdm_config_arms_full_anchor() {
 int main() {
     setLogLevel(LogLevel::ERROR);
 
-    test_differential_ofdm_config_match();
     test_coherent_ofdm_config_match();
     test_burst_group_clamps_match();
     test_decoder_buffer_capacity_policy();

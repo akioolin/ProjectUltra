@@ -65,6 +65,12 @@ void test_streaming_decoder_fires_tone_burst_callback_on_baseline_burst() {
         events.push_back(d);
     });
 
+    // Production runs the monitor in armed_only mode (CPU/jitter): detection
+    // is idle until the protocol arms it right after queueing a data burst.
+    // Mirror that here — arm a window comfortably covering the full fed audio
+    // (~1.6 s) so the monitor is listening when the burst arrives.
+    dec.armToneBurstMonitor(3000);
+
     // Encode a clean 25 ms/sym tone-burst.
     tba::ToneBurstEncoder enc;
     const auto orig = makePayload();
@@ -125,6 +131,9 @@ void test_streaming_encoder_to_decoder_loopback() {
         std::lock_guard<std::mutex> lk(mtx);
         events.push_back(d);
     });
+
+    // Arm the armed_only production monitor (see note in the baseline test).
+    dec.armToneBurstMonitor(3000);
 
     const auto orig = makePayload();
     const auto tx = enc.encodeToneBurstAck(orig, tba::kBaselineSymbolMs);

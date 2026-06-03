@@ -10,6 +10,41 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-02 — green CI: fix the 3 pre-existing §7-carve test reds
+
+All three were stale tests asserting behavior that deliberate refactors had changed — code
+was correct, tests lagged. `ctest -j4` is now 100% green (0/79 fail; only the intentionally
+disabled `TNCSession` #24 doesn't run). This unblocks merge + the on-air test binary.
+
+1. **StreamingDecoderToneBurstMonitor (#77)** — integration test fed a tone-burst through
+   `feedAudio()` and expected the monitor to fire, getting 0 events. Production runs the
+   monitor in `armed_only` mode (step 4d-late: detection idles until the protocol arms it
+   right after queueing a data burst — zero audio-thread CPU/jitter otherwise). The test
+   never armed it. Fix: the integration tests now call `armToneBurstMonitor()` before
+   feeding, mirroring production. (The pure-silence test stays un-armed → still 0 events.)
+
+2. **StreamingConfig (#60)** — (a) `setConnectedOFDMMode()` is DEFERRED to the safe
+   top-of-`processBuffer` boundary (§14.36 crash fix — it rebuilds `waveform_` and must not
+   race the RX thread); the test read config synchronously with no decode thread, so the
+   pending change never applied. Added a test-only `StreamingDecoder::applyPendingConfigForTesting()`
+   (single-threaded flush of the deferred connected-OFDM + descriptor changes) and call it
+   after `setConnectedOFDMMode`. (b) Retired `test_differential_ofdm_config_match`: the OFDM
+   band is coherent-only (differential DQPSK/D8PSK relocated to MC-DPSK), so the waveform now
+   applies coherent pilot geometry to all OFDM modes — the old differential-OFDM spacing
+   expectations (10/15/8) describe a dead path. TX/RX still agree; only the live coherent
+   geometry case is kept.
+
+3. **StreamingBufferPolicy (#61)** — `test_warm_sync_phase_transitions` still asserted
+   `phaseAfterSyncMiss(1) == DEGRADED` (degrade-on-one-miss). The §7 collapse + oscillation
+   fix moved the threshold to 2/4 (`kWarmSyncMissesBeforeDegraded=2`): single-miss degrade
+   caused the WARM<->DEGRADED bounce that stalled/killed 40 KB transfers. Updated to the 2/4
+   semantics (1 miss → WARM, 2-3 → DEGRADED, ≥4 → RECOVERY); the sibling `planWarmSearchWindow`
+   cases in the same file were already on 2/4.
+
+**Test verification:** `cmake --build build -j4 && ctest -j4` → 100% passed, 0 failed out of 79.
+
+---
+
 ## 2026-06-02 — test hygiene: drop in-process rate-negotiation + chat-message tests
 
 Two retired-product-decision casualties cleaned out of `tests/test_protocol.cpp`:

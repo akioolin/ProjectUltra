@@ -217,10 +217,16 @@ void test_warm_search_window_planning() {
 }
 
 void test_warm_sync_phase_transitions() {
+    // §7 collapse + 2026 oscillation fix: degrade threshold is 2 misses, not 1.
+    // A single miss must stay WARM — degrading on one miss caused the
+    // WARM<->DEGRADED bounce that stalled/killed 40 KB transfers
+    // (kWarmSyncMissesBeforeDegraded=2, kWarmSyncMissesBeforeRecovery=4).
     CHECK(arrival_policy::phaseAfterSuccessfulFrame() == arrival_policy::WarmSyncPhase::WARM,
           "successful frame should enter warm sync");
-    CHECK(arrival_policy::phaseAfterSyncMiss(1) == arrival_policy::WarmSyncPhase::DEGRADED,
-          "first missed expected window should degrade warm sync");
+    CHECK(arrival_policy::phaseAfterSyncMiss(1) == arrival_policy::WarmSyncPhase::WARM,
+          "a single missed window should tolerate and stay warm (no single-miss bounce)");
+    CHECK(arrival_policy::phaseAfterSyncMiss(2) == arrival_policy::WarmSyncPhase::DEGRADED,
+          "the second consecutive miss should degrade warm sync");
     CHECK(arrival_policy::phaseAfterSyncMiss(3) == arrival_policy::WarmSyncPhase::DEGRADED,
           "short outages should remain in degraded warm sync");
     CHECK(arrival_policy::phaseAfterSyncMiss(4) == arrival_policy::WarmSyncPhase::RECOVERY,

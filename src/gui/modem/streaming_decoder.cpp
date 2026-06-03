@@ -605,6 +605,12 @@ bool StreamingDecoder::expectsFullOFDMAnchorForTesting() const {
     return sync_controller_.expect_full_ofdm_anchor_;
 }
 
+void StreamingDecoder::applyPendingConfigForTesting() {
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+    applyPendingConnectedOFDMMode();
+    applyPendingDescriptorDataMode();
+}
+
 void StreamingDecoder::setMCDPSKCarriers(int n) {
     std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     if (mc_dpsk_carriers_ == n) return;

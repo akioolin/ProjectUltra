@@ -354,6 +354,13 @@ public:
     void clearFullOFDMAnchorExpectation();
     bool expectsFullOFDMAnchorForTesting() const;
 
+    // §14.36: setConnectedOFDMMode / descriptor rate changes are DEFERRED to the
+    // safe top-of-processBuffer boundary (they rebuild waveform_ and must not race
+    // the RX decode thread). Production flushes them on the next processBuffer()
+    // cycle. Tests that assert config state synchronously (no audio thread running)
+    // call this to apply pending changes immediately — single-threaded only.
+    void applyPendingConfigForTesting();
+
     // Get last measured fading index (from per-carrier magnitude variance)
     // 0-1 range, > 0.4 indicates significant fading
     float getLastFadingIndex() const { return last_fading_index_.load(); }
