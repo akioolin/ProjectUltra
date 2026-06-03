@@ -1,0 +1,72 @@
+# TNC ↔ Winlink-B2F half-duplex bidirectional exchange — findings (2026-06-03)
+
+Live cross-machine test (Mac ALPHA ↔ Pi5 BRAVO, real PAT 1.0.0 clients over `ultra_tnc`
+over `ota_simulator serve`). Goal: deliver a Winlink P2P message ALPHA→BRAVO through the
+modem. Outcome: **connection + B2F handshake succeed; the message exchange stalls and does
+not deliver.** Two distinct issues found — one fixed, one open.
+
+## The chain (verified up)
+`PAT(ALPHA) --varahf TCP--> ultra_tnc(ALPHA) --OTASim--> ultra_tnc(BRAVO) --varahf--> PAT(BRAVO)`
+- ultra_tnc emulates the VARA-HF cmd(8300)/data(8301) interface; PAT's `varahf` transport
+  connects to it. Both PAT configs: `mycall` ALPHA/BRAVO, `varahf.addr localhost:8300`.
+- OTASim serve LAN-bound (`--bind 0.0.0.0:52001 --udp-bind 0.0.0.0:52002`), both TNCs
+  `--sim-audio --ota-host <mac>:52001`. Cross-machine OTASim works.
+- B2F handshake completes: CONNECT (~24 s), callsign banners, `[Pat-1.0.0-B2FHMG$]`, GZIP
+  negotiated. ALPHA proposes: `>FD EM <mid> 425 333 0`.
+
+## Issue 1 — FIXED: one-way burst bypass → half-duplex collision
+**Root cause.** This branch is `feat/oneway-arch` — strictly one-way sender-driven file push.
+`Connection::sendFile()` (connection.cpp:1636) bypasses the ISS/IRS turn gate when
+`use_burst_transport_ && isOFDMMode` (design §14.27: "ALPHA sends, BRAVO listens+ACKs").
+For B2F **both** stations alternately transmit, so both hit the bypass and key up
+uncoordinated → collide on the half-duplex channel. Confirmed in logs: both ALPHA and BRAVO
+log `sendFile: ISS-bypass taken` and transmit independently.
+
+**Fix (commit `c27aa45`).** Added `Connection::half_duplex_interactive_` (forwarded via
+`ProtocolEngine::setHalfDuplexInteractive`; `ultra_tnc` sets it true). When set, `sendFile()`
+keeps the turn gate: a station starts its burst only while it holds `local_data_turn_`,
+else it queues + `TURN_REQUEST`s and the peer yields `TURNOVER`. GUI one-way path unchanged
+(flag default false).
+
+**Verified.** The collision is gone — BRAVO correctly waits for the turn, ALPHA (holding the
+turn with no data) yields, BRAVO sends its banner burst while ALPHA receives. Single-machine
+one-way TNC test (`UltraTncSimAudio`, 8 KB file) still passes — CI-safe.
+
+## Issue 2 — OPEN: receiver cannot decode the new sender's burst after a turn-flip
+**Symptom.** After the turn flips and BRAVO transmits its banner burst, ALPHA (now the
+receiver) logs a continuous stream of `Burst marker frame timing retry: ±100–313 samples`
+and **never completes the decode → never sends a GROUP_ACK → BRAVO retransmits the same
+burst every ~17 s forever**; BRAVO's "responder handshake still unconfirmed". The message
+never delivers.
+
+**NOT cross-machine timing.** Reproduced **single-machine** (both TNCs + both PATs on one Mac,
+one OTASim, shared clock): identical `±97–280 sample` timing retries and identical stall. So
+it is not the independent-clock drift first suspected.
+
+**Asymmetry is the clue.** The one-way path (BRAVO *receives* ALPHA) decodes fine — the 8 KB
+file delivers byte-exact. The failure is specifically ALPHA *receiving* BRAVO **after a
+turn-flip**. The receiver that has not been the sender cannot lock the new sender's burst
+frame timing.
+
+**Leading hypothesis.** The bidirectional path needs **full chirp+LTS anchor re-acquisition
+on every turn-flip**. The one-way design only ever anchors once (ALPHA's first burst), so the
+receiver tracks one sender's timing. When the turn flips, the new sender must send a FULL
+anchor and the new receiver must `expectFullOFDMAnchorOnce()` — otherwise it warm-syncs
+(light preamble) against a timing reference it never established → the ±200-sample marker
+retries that never converge. The `expectFullOFDMAnchorOnce` mechanism exists but is not
+armed/sent correctly across turn-flips. (Secondary suspects to rule out: z=81 long-LDPC burst
+timing sensitivity; whether the yielded station is allowed to TX its GROUP_ACK promptly.)
+
+## Next steps
+1. Confirm hypothesis: log whether BRAVO's post-turnover burst carries a full anchor and
+   whether ALPHA has `expect_full_ofdm_anchor_` set when it starts receiving it.
+2. Wire full-anchor send + expect on each TURNOVER (both directions) for the interactive path.
+3. Re-test single-machine PAT↔PAT first (fast, deterministic), then cross-machine Mac↔Pi.
+4. Only after delivery works: tune B2F turnaround latency (each turn ≈ 15–25 s on the
+   real-time link; the full B2F exchange is ~5 turnarounds — watch PAT's B2F timeouts).
+
+## Repro
+- Single-machine: OTASim `awgn@30`; `ultra_tnc` ALPHA :8300 + BRAVO :8302 on the lobby;
+  PAT ALPHA (default cfg) + PAT BRAVO (`--config` with `varahf.addr localhost:8302`, own
+  `--mbox`) `http`; `pat connect varahf:///BRAVO`.
+- Cross-machine: same but BRAVO TNC+PAT on the Pi, `--ota-host <mac-ip>:52001`.

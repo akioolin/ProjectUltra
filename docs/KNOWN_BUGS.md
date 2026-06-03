@@ -8,6 +8,22 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-TNC-B2F-001: bidirectional B2F stalls — receiver can't decode the new sender's burst after a turn-flip
+- Status: **OPEN** (2026-06-03). Issue 1 (collision) FIXED in `c27aa45`; Issue 2 OPEN.
+- Symptom: PAT↔PAT Winlink message over `ultra_tnc`/OTASim connects + completes the B2F
+  handshake + proposal, then stalls — after the half-duplex turn flips, the new receiver
+  logs `Burst marker frame timing retry: ±100–313 samples` forever and never GROUP_ACKs, so
+  the sender retransmits and the message never delivers. **Reproduces single-machine** (shared
+  clock) → NOT cross-machine timing. The one-way file path (receiver decodes ALPHA) works.
+- Root cause (Issue 1, fixed): the one-way burst path bypassed the ISS/IRS turn gate, so both
+  B2F stations keyed up uncoordinated and collided. Fixed via `half_duplex_interactive_`
+  turn-gating (`c27aa45`) — the serialization is verified correct.
+- Root cause (Issue 2, open): the bidirectional path needs full chirp+LTS **anchor
+  re-acquisition on every turn-flip** (new sender sends a full anchor, new receiver
+  `expectFullOFDMAnchorOnce()`); the one-way-derived code anchors once and the post-turnover
+  receiver warm-syncs against a timing reference it never set → unconvergent marker retries.
+- Full diagnosis + repro + next steps: `docs/TNC_B2F_HALFDUPLEX_FINDINGS_2026_06_03.md`.
+
 ### BUG-FINACK-001: Final-group ACK loss → sender infinite-resends the last group; no clean transfer close
 - Status: **FIX LANDED, UNVALIDATED** (2026-06-02). Decode-independent re-ACK implemented
   in `connection.cpp::onBurstGroupReceived` (the `!all_ok` else branch now routes a resent

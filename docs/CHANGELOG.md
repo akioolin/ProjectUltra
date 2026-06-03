@@ -71,6 +71,25 @@ nonphysical-SNR gating, PHY_MASK_V1, the binary/TNC-API (sendBinary) path, file 
 
 ---
 
+## 2026-06-03 — TNC half-duplex interactive mode (B2F bidirectional) — Issue 1 fixed, Issue 2 open
+
+Live cross-machine test (Mac↔Pi5, real PAT 1.0.0 clients over `ultra_tnc`/OTASim) of a
+Winlink P2P message. The chain works (connect + B2F handshake + proposal) but the message
+exchange stalls. Two issues; details in `docs/TNC_B2F_HALFDUPLEX_FINDINGS_2026_06_03.md` and
+`KNOWN_BUGS.md` BUG-TNC-B2F-001.
+
+- **Issue 1 (FIXED, `c27aa45`):** the one-way burst path bypassed the ISS/IRS turn gate, so a
+  bidirectional B2F exchange had both stations key up uncoordinated and collide. Added
+  `Connection::half_duplex_interactive_` (forwarded through `ProtocolEngine`; `ultra_tnc` sets
+  it true) which keeps the turn gate on burst sends so the directions serialize. Verified: no
+  more collision; the single-machine one-way TNC test (`UltraTncSimAudio`) still passes.
+- **Issue 2 (OPEN):** after a turn-flip the new receiver can't lock the new sender's burst
+  frame timing (`Burst marker timing retry ±100–313 samples`, no GROUP_ACK, endless resend).
+  Reproduces single-machine → not cross-machine drift. Hypothesis: bidirectional needs full
+  chirp+LTS anchor re-acquisition on each turn-flip (the one-way code anchors once).
+
+---
+
 ## 2026-06-02 — ladder: enable QPSK R3/4 @ Good 20 (closes the GOOD column)
 
 **What:** the GOOD column of `kCoherentLadder` was R1/2@10 → R2/3@15 with R3/4 still
