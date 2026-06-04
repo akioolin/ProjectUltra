@@ -632,11 +632,39 @@ int main(int argc, char** argv) {
         // connection — chaining burst→non-burst trips the orthogonal burst turn-flip
         // re-acquisition path, BUG-TNC-B2F-001 Issue 2, which is not what either gate
         // is measuring):
-        //   default                    → BULK file transfer over the burst path
-        //   ULTRA_TNC_TEST_NONBURST=1   → SHORT interactive message over the non-burst path
+        //   default                     → one-way BULK file transfer over the burst path
+        //   ULTRA_TNC_TEST_NONBURST=1    → SHORT interactive message over the non-burst path
+        //   ULTRA_TNC_TEST_BURST_BIDIR=1 → BIDIRECTIONAL burst file (role-swap, BUG Issue 2)
         const bool nonburst_mode = std::getenv("ULTRA_TNC_TEST_NONBURST") != nullptr;
+        const bool bidir_burst_mode = std::getenv("ULTRA_TNC_TEST_BURST_BIDIR") != nullptr;
 
-        if (!nonburst_mode) {
+        if (bidir_burst_mode) {
+            // ===== BIDIRECTIONAL burst file (the role-swap case) =====
+            // ALICE sends a bulk file, then BOB sends one back IN THE SAME SESSION. The
+            // turn-flip between the two bursts is BUG-TNC-B2F-001 Issue 2: after a station
+            // finishes a burst and the turn hands over, the new receiver must re-acquire the
+            // new sender's full chirp+LTS anchor. The one-way arch never swaps burst roles,
+            // so this is the first test that exercises it.
+            constexpr size_t kBytes = 8192;
+            std::vector<uint8_t> fwd(kBytes), rev(kBytes);
+            for (size_t i = 0; i < kBytes; ++i) {
+                fwd[i] = static_cast<uint8_t>((i * 37u + 11u) ^ (i >> 5));
+                rev[i] = static_cast<uint8_t>((i * 53u + 7u) ^ (i >> 4));
+            }
+            std::cout << "[bidir-burst] ALICE -> BOB (" << kBytes << " B burst)\n";
+            alice_data.writeBytes(fwd);
+            const std::vector<uint8_t> fwd_rx =
+                bob_data.readBytes(fwd.size(), children, std::chrono::seconds(240));
+            check(fwd_rx == fwd, "FORWARD bidir-burst payload mismatch");
+            std::cout << "[bidir-burst] forward DELIVERED ok\n";
+
+            std::cout << "[bidir-burst] BOB -> ALICE (" << kBytes << " B burst, role-swap)\n";
+            bob_data.writeBytes(rev);
+            const std::vector<uint8_t> rev_rx =
+                alice_data.readBytes(rev.size(), children, std::chrono::seconds(240));
+            check(rev_rx == rev, "REVERSE bidir-burst payload mismatch (Issue 2: role-swap re-acquire)");
+            std::cout << "[bidir-burst] reverse DELIVERED ok -- bidirectional BURST WORKS\n";
+        } else if (!nonburst_mode) {
             // ===== BULK file transfer (burst path) =====
             // A multi-KB deterministic payload (> kInteractiveMaxBytes) exercises burst-group
             // transport + tone-burst GROUP_ACK/ARQ recovery across MANY groups — the former
