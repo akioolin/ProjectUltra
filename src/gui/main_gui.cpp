@@ -219,6 +219,8 @@ void printGuiUsage(const char* prog) {
     std::printf("  --auto-cancel-file-after <s>  Cancel active file transfer N seconds after first observed\n");
     std::printf("  --auto-disconnect-after <s>   Disconnect N seconds after CONNECTED\n");
     std::printf("  --exit-after <s>              Quit N seconds after startup\n");
+    std::printf("  --half-duplex                 Bidirectional role-swap: both stations send (B2F).\n");
+    std::printf("                                Pass --auto-send-file on BOTH for an A->B then B->A exchange.\n");
     std::printf("  --log-level <error|warn|info|debug|trace>\n");
     std::printf("                               Console verbosity (default: info)\n");
     std::printf("  --log-category <list>         Comma list: operator,audio,tnc,modem,\n");
@@ -652,6 +654,8 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             opts.exit_after_sec = std::atoi(argv[++i]);
+        } else if (arg == "--half-duplex") {
+            opts.half_duplex_interactive = true;
         } else if (arg == "--log-level") {
             if (i + 1 >= argc) {
                 std::fprintf(stderr, "Missing value for --log-level\n");

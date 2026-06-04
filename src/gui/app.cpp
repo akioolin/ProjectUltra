@@ -695,6 +695,20 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             modem_.armToneBurstAckMonitor(window_ms);
         });
 
+    // Half-duplex INTERACTIVE (bidirectional file / B2F role-swap): the same three
+    // callbacks ultra_tnc wires. setHalfDuplexInteractive keeps the ISS/IRS turn gate on
+    // burst sends so the two directions serialize (A->B then B->A) instead of colliding;
+    // setDataTurnAcquiredCallback forces a full chirp+LTS anchor on our first frame after
+    // we acquire the turn (so the peer re-acquires across the swap); setFullOFDMAnchor-
+    // ExpectedCallback arms our decoder to cold-acquire the peer's full anchor after we
+    // yield. Default OFF — the GUI is one-way (A->B) unless --half-duplex is passed.
+    if (options_.half_duplex_interactive) {
+        protocol_.setHalfDuplexInteractive(true);
+        protocol_.setDataTurnAcquiredCallback([this]() { modem_.forceNextFrameFullPreamble(); });
+        protocol_.setFullOFDMAnchorExpectedCallback([this]() { modem_.expectFullOFDMAnchorOnce(); });
+        guiLog("[scenario] half-duplex interactive enabled (bidirectional role-swap)");
+    }
+
     ultra::gui::startupTrace("App", "protocol-callbacks-mid1");
 
     protocol_.setMessageReceivedCallback([this](const std::string& from, const std::string& text) {

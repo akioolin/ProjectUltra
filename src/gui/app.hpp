@@ -75,6 +75,7 @@ public:
         int auto_cancel_file_after_sec = 0;   // cancel active file N s after first observing it
         int auto_disconnect_after_sec = 0;    // 0 = never; else disconnect N s after CONNECTED
         int exit_after_sec = 0;               // 0 = never; else push SDL_QUIT after N s
+        bool half_duplex_interactive = false; // bidirectional role-swap (both stations send)
     };
 
     App();  // Default constructor
