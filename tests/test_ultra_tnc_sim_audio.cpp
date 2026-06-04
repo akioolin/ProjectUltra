@@ -585,10 +585,34 @@ int main(int argc, char** argv) {
             std::ofstream out(token_path);
             out << "alice_token:ALICE:Alice station\n";
             out << "bob_token:BOB:Bob station\n";
+            out << "cap_admin:CAPADMIN:capture:admin\n";  // admin role for StartCapture
         }
 
-        daemon = startDaemon(argv[1], token_path, temp.child("captures"));
+        // ULTRA_TNC_TEST_CAPTURE=1 records the over-the-air exchange to per-station WAVs
+        // (post-channel _rx + clean _tx, 48k f32) under a SURVIVING dir for the waterfall
+        // viewer. Default /tmp/b2f_capture, override with ULTRA_TNC_TEST_CAPTURE_DIR.
+        const bool capture_enabled = std::getenv("ULTRA_TNC_TEST_CAPTURE") != nullptr;
+        const char* capture_dir_env = std::getenv("ULTRA_TNC_TEST_CAPTURE_DIR");
+        const std::filesystem::path capture_root =
+            capture_enabled
+                ? std::filesystem::path(capture_dir_env ? capture_dir_env : "/tmp/b2f_capture")
+                : temp.child("captures");
+        if (capture_enabled) {
+            std::error_code ec;
+            std::filesystem::create_directories(capture_root, ec);
+        }
+        const std::string otasim_ctl_path =
+            (std::filesystem::path(argv[1]).parent_path() / "otasim_ctl").string();
+
+        daemon = startDaemon(argv[1], token_path, capture_root);
         const ReadyBanner ready = waitForReady(daemon);
+
+        auto runCtl = [&](const std::string& subcmd) {
+            const std::string cmd = otasim_ctl_path + " --server " + ready.grpc_target +
+                                    " --token cap_admin --session lobby " + subcmd +
+                                    " > /dev/null 2>&1";
+            std::system(cmd.c_str());
+        };
 
         const uint16_t alice_port = reservePortPair();
         uint16_t bob_port = reservePortPair();
@@ -605,6 +629,11 @@ int main(int argc, char** argv) {
         waitForOutput(bob, "ultra_tnc listening", children, std::chrono::seconds(10));
         waitForOutput(alice, "[otasim] Connected", children, std::chrono::seconds(10));
         waitForOutput(bob, "[otasim] Connected", children, std::chrono::seconds(10));
+
+        if (capture_enabled) {
+            runCtl("start-capture");
+            std::cout << "[capture] recording started -> " << capture_root.string() << "/lobby/\n";
+        }
 
         TcpClient alice_cmd;
         TcpClient bob_cmd;
@@ -716,6 +745,12 @@ int main(int argc, char** argv) {
                 alice_data.readBytes(reply.size(), children, std::chrono::seconds(120));
             check(reply_rx == reply, "REVERSE non-burst (short-path) payload mismatch");
             std::cout << "[nonburst] reverse DELIVERED ok -- bidirectional short-path WORKS\n";
+        }
+
+        if (capture_enabled) {
+            runCtl("stop-capture");
+            std::cout << "[capture] recording stopped; WAVs in " << capture_root.string()
+                      << "/lobby/ (ALICE/BOB _tx_48k_f32.wav, _rx_48k_f32.wav)\n";
         }
 
         alice_data.close();

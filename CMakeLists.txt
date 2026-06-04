@@ -684,6 +684,20 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_link_libraries(lts_estimate_mse PRIVATE ultra_core ota_channel_core)
 
+    # waterfall_viewer - debug spectrogram of a recorded OTASim exchange.
+    # --png renders headless; default opens an interactive SDL2 window (when available).
+    add_executable(ultra_waterfall_viewer tools/waterfall_viewer.cpp)
+    target_include_directories(ultra_waterfall_viewer PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty
+    )
+    target_link_libraries(ultra_waterfall_viewer PRIVATE ultra_core ultra_tool_wav_io)
+    if(NOT SDL2_FOUND)
+        target_compile_definitions(ultra_waterfall_viewer PRIVATE WATERFALL_NO_SDL)
+    endif()
+
     # Controlled frequency-null decode test: proves causally whether a fade null
     # (not the estimate) is what breaks 16QAM R2/3 decode. Genie/perfect CSI.
     add_executable(null_decode_test
