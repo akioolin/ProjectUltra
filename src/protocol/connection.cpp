@@ -1638,16 +1638,9 @@ bool Connection::sendFile(const std::string& filepath) {
     // uncoordinated and collide. Keep the turn gate below so the burst only starts
     // when this station holds the DATA turn (else queue + TURN_REQUEST; the peer
     // yields TURNOVER and the directions serialize).
-    LOG_MODEM(WARN, "sendFile: about to check ISS bypass use_burst=%d ofdm=%d mode=%d interactive=%d",
-              use_burst_transport_ ? 1 : 0,
-              isOFDMMode(negotiated_mode_) ? 1 : 0,
-              static_cast<int>(negotiated_mode_),
-              half_duplex_interactive_ ? 1 : 0);
     if (use_burst_transport_ && isOFDMMode(negotiated_mode_) && !half_duplex_interactive_) {
-        LOG_MODEM(WARN, "sendFile: ISS-bypass taken (one-way), calling startFileTransferNow");
         return startFileTransferNow(filepath);
     }
-    LOG_MODEM(WARN, "sendFile: turn-gated path (interactive or non-burst)");
 
     if (!local_data_turn_ ||
         peer_data_turn_requested_ ||
@@ -2903,6 +2896,13 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
     // means the initiator received our ACK and switched to data/control exchange.
     if (state_ == ConnectionState::CONNECTED && !is_initiator_ && !handshake_confirmed_ &&
         !duplicate_connect_retry) {
+        // First valid frame from the initiator confirms the handshake. This is the single
+        // site that flips a responder's handshake_confirmed_ and fires on_handshake_confirmed_()
+        // (→ the modem switches TX onto the negotiated OFDM data waveform). It fires at the
+        // right time for ALL regimes: a decoded OFDM frame is guaranteed past the modem's
+        // setConnected()/setWaveformMode(). In B2F the initiator proactively yields a TURNOVER
+        // (see tick()), so that TURNOVER is the responder's "first valid frame" — no special
+        // pre-confirm needed.
         LOG_MODEM(INFO, "Connection: Handshake confirmed (received first valid frame from initiator)");
         handshake_confirmed_ = true;
         responder_handshake_wait_ms_ = 0;
@@ -2910,21 +2910,6 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
             on_handshake_confirmed_();
         }
         // Initial data mode is already carried in CONNECT_ACK.
-    } else if (state_ == ConnectionState::CONNECTED && !is_initiator_ &&
-               half_duplex_interactive_ && !duplicate_connect_retry &&
-               !interactive_responder_modem_notified_) {
-        // BUG-TNC-B2F-001: the B2F responder pre-confirmed handshake_confirmed_ in
-        // enterConnected (so it could speak first), which skipped the block above — the
-        // ONLY site that fires on_handshake_confirmed_(). But the modem's setConnected()
-        // had reset handshake_complete_ to false and setWaveformMode set OFDM only
-        // afterwards, leaving the modem keying TX in MC-DPSK. We are now decoding a real
-        // frame, so we are guaranteed past both → fire the notify once to switch the
-        // modem's TX onto the negotiated OFDM data waveform (else the SR-ARQ ACK rides
-        // MC-DPSK while the peer listens in OFDM and never hears it).
-        interactive_responder_modem_notified_ = true;
-        if (on_handshake_confirmed_) {
-            on_handshake_confirmed_();
-        }
     }
 
     // Resolve source callsign from hash if possible
@@ -4605,16 +4590,12 @@ void Connection::commitPendingModeChange(const char* outcome) {
 void Connection::enterConnected() {
     state_ = ConnectionState::CONNECTED;
     connected_time_ms_ = 0;
-    // Half-duplex INTERACTIVE (TNC/Winlink-B2F): the RESPONDER speaks first (it sends
-    // the SID banner), so it must be able to transmit immediately. The normal one-way
-    // flow makes the responder wait for the initiator's first DATA frame to confirm the
-    // handshake (handshake_confirmed_) — but in B2F that never comes first, so the
-    // responder deadlocks (it can't even request the DATA turn). The CONNECT/CONNECT_ACK
-    // exchange already validated BOTH directions, so pre-confirm the handshake here.
-    if (half_duplex_interactive_ && !is_initiator_) {
-        handshake_confirmed_ = true;
-    }
-    interactive_responder_modem_notified_ = false;
+    // Half-duplex INTERACTIVE (TNC/Winlink-B2F): the RESPONDER speaks first (the SID banner).
+    // It does NOT need a pre-confirmed handshake to do so — the initiator proactively yields a
+    // TURNOVER ~1.5 s after connect (see tick()), and receiving that TURNOVER is the responder's
+    // "first valid frame" → it flips handshake_confirmed_ AND fires the modem-waveform switch
+    // (onFrameReceived), both at the correct time, then handleTurnover makes it ISS. So the
+    // responder enters as a normal IRS and the turn falls to it naturally.
     interactive_initiator_yield_done_ = false;
     interactive_yield_log_throttle_ms_ = 0;
     local_data_turn_ = is_initiator_;

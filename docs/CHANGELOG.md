@@ -10,6 +10,32 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-03 — cleanup: de-hack the half_duplex_interactive_ handshake (remove the compensating patch chain)
+
+Follow-up to the BUG-TNC-B2F-001 fix below. Root-cause-B's fix had left a smell: the B2F
+responder pre-confirmed `handshake_confirmed_` in `enterConnected` (so it could speak first),
+which skipped the only site that fires `on_handshake_confirmed_()`, which I then re-patched with
+a one-shot `interactive_responder_modem_notified_` in `onFrameReceived`. Classic
+fix-A-creates-B-patch-B (one concept — "responder ready to TX in the data waveform" — split into
+a pre-set that broke a side effect, plus a patch to restore it).
+
+Insight: the pre-set was **redundant**. The initiator already proactively yields a TURNOVER
+~1.5 s after connect (tick()), and receiving that TURNOVER is the responder's "first valid frame"
+→ the *existing* `onFrameReceived` path flips `handshake_confirmed_` AND fires the modem-waveform
+switch, both at the correct time (a decoded OFDM frame is guaranteed past the modem's
+`setConnected()`/`setWaveformMode()`). So the whole pre-set → skip → re-fire chain just deletes.
+
+Removed: the `enterConnected` pre-set, the `onFrameReceived` else-if re-fire, the
+`interactive_responder_modem_notified_` member, and leftover `WARN` debug logs in `sendFile`.
+Net −19 lines of code, +0 (additions are comments). `half_duplex_interactive_` drops from 5
+branch sites to 3, and the self-compensating overload of `handshake_confirmed_` is gone.
+
+Verified (all three gates, awgn@30 seed 42): non-burst B2F bidirectional CRC-clean both ways;
+burst 8192 B CRC-clean / 7 groups / 6 tone-burst ACKs (no regression); **real PAT↔PAT B2F
+delivered end-to-end** with the responder now confirming via the clean natural path
+(`RX << TURNOVER → Handshake confirmed → waveform_mode_=5`). Foundation for the bidirectional-burst
+(role-swap) work.
+
 ## 2026-06-03 — BUG-TNC-B2F-001: the non-burst short path (the actual Winlink-B2F / chat message path) was dead at RX + ACK
 
 **What was broken:** A small interactive message over `ultra_tnc` (≤ `kInteractiveMaxBytes`,
