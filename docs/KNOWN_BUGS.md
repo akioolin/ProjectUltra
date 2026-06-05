@@ -17,17 +17,25 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
     connection, so the trailing FF is no longer gated as mid-burst. The FF now REACHES the decoder
     (`Chirp detected … escalating to N CWs`). Verified no multi-group regression: gui_bidir AWGN@20
     7/7 each way, 0 CWfail.
-  - LAYER 2 (frame geometry — **REMAINING**): the post-burst FF arrives with a FULL preamble
-    (dual chirp; `training_start≈63839`), but `getMinSamplesForCWCount` (ofdm_chirp_waveform.cpp:1108)
-    returns only `training + data` samples (NO dual-chirp preamble), so the frame buffer (~17920) is
-    built from the chirp position but is far too short to reach the data → the demod reads the
-    preamble region as data → confident-but-garbage LLRs (|llr|=20 saturated, sign random, llr_avg≈0)
-    → `CW FAIL`. Also the CW0 header peek can't read past the garbage → falls back to
-    `fixed_frame_codewords_` (2) while ALPHA sent 1 CW @ QPSK R1/2 (22 B). Fix candidates: (a) size
-    the full-anchor frame buffer to include the dual-chirp preamble offset (`training_start`), and/or
-    (b) have the interactive FF use a LIGHT preamble so it sizes as a normal connected data frame
-    (but post-burst BRAVO expects a full anchor — interacts with LAYER 0). Trace shows it at
-    `streaming_ofdm_decode.cpp` data path after `escalating to N CWs`.
+  - LAYER 2 (post-burst mode-revert — **REMAINING**): the FF demodulates to garbage — saturated
+    magnitude, random sign (`CW FAIL, llr_avg≈0.3, |llr|=20`). RULED OUT as root (traced 2026-06-05):
+    NOT a buffer/coordinate bug — `process()` calls `processPresynced(samples, 2)` which skips 2
+    training symbols from the buffer START, and `sync_position_ = search_start + start_sample` points
+    AT the training (the `training_start=63839` in the log is only the CFO phase ref, and cfo=0 here);
+    NOT the CW-count (2 vs sent 1) — that fallback is a SYMPTOM: the CW0 header peek can't read a
+    valid header BECAUSE the demod is already garbage. ROOT: post-burst, BRAVO does not fully revert
+    to NON-burst interactive mode. The FF is a small non-burst interactive frame that on the normal
+    (no-preceding-burst) path delivers fine via LIGHT-LTS + the proven non-burst decode; but here it
+    is sent with a FULL preamble (post-burst `forceNextFrameFullPreamble` / `expect_full_ofdm_anchor_`
+    re-anchor) and decoded through the full-anchor burst-data path, which mis-estimates/mis-structures
+    it → garbage soft bits. LAYER 1's latch-clear reverted ONE piece of burst state
+    (`have_burst_descriptor_`); the remaining burst-data-mode state (the full-anchor expectation, the
+    data-decode profile, `fixed_frame_codewords_`) is not reverted, so the trailing FF is treated as
+    burst data. Fix = complete the post-burst revert so the trailing interactive frame decodes as a
+    normal non-burst frame — a COORDINATED encoder+decoder change (both ends must agree the burst is
+    over and drop back to the light-LTS interactive PHY). This is the production form of the
+    declared-but-unwired `traffic_profile.hpp` TrafficClass system (File vs Chat/Control). Deliberate
+    work, must not regress the burst path; do not land blind against hanging-run verification.
 - Symptom: with `ULTRA_TNC_BULK_ACCUM=1`, a PAT B2F body now bursts (z=81) and decodes CRC-clean,
   but the trailing non-burst `FF` terminator never reaches PAT (`Receiving … offset 0`, mailbox
   empty). PAT retries the whole message (`100%→0%→100%`) → the run HANGS instead of disconnecting.
