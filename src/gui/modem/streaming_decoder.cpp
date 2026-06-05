@@ -453,9 +453,42 @@ void StreamingDecoder::processBuffer() {
     }
 
     switch (state_) {
-        case DecoderState::SEARCHING:
-            searchForSync();
+        case DecoderState::SEARCHING: {
+            // SEARCH CATCH-UP DRAIN. processBuffer runs once per audio-chunk wake-up
+            // (single new_data_available_ flag) and a plain searchForSync() advances
+            // correlation_pos_ by one correlation_step (~100 ms). Since audio also
+            // arrives at ~real time, the search position advances at the SAME rate as
+            // incoming audio: once it falls behind it never catches up. After a burst
+            // it trails live audio by ~2.4 s, so a post-burst full-anchor frame's
+            // up-chirp lands at the search window's trailing edge BEFORE its down-chirp
+            // has been received → detectDualChirp reports "down NOT found" and MISSes
+            // (stranded the Winlink-B2F FF/turnaround frame). Drain the unsearched
+            // backlog by stepping repeatedly this wake-up until the search is tracking
+            // live audio again (searchForSync self-limits at min_search unsearched
+            // samples, so backlog stops shrinking at the structural floor) or sync is
+            // found. Warm-sync (normal in-burst group boundaries) keeps the backlog
+            // small, so this loop is a no-op there and does not change burst behavior.
+            constexpr int kMaxSearchCatchupSteps = 64;
+            size_t prev_backlog = SIZE_MAX;
+            for (int step = 0; step < kMaxSearchCatchupSteps; ++step) {
+                searchForSync();
+                if (state_ != DecoderState::SEARCHING) break;  // sync acquired
+                size_t backlog;
+                {
+                    std::lock_guard<std::mutex> lk(sync_controller_.ring_.buffer_mutex_);
+                    const size_t corr_abs = sync_controller_.ring_.ringPosToAbsoluteLocked(
+                        sync_controller_.ring_.correlation_pos_);
+                    backlog = sync_controller_.ring_.total_fed_ > corr_abs
+                                  ? sync_controller_.ring_.total_fed_ - corr_abs
+                                  : 0;
+                }
+                // No further progress (reached the structural floor or waiting for
+                // more samples) → done draining for this wake-up.
+                if (backlog >= prev_backlog) break;
+                prev_backlog = backlog;
+            }
             break;
+        }
 
         case DecoderState::SYNC_FOUND:
             checkIfReadyToDecode();

@@ -135,7 +135,20 @@ void StreamingDecoder::searchForSync() {
     bool used_full_anchor_fallback = false;
     // (R4: the adaptive short-chirp re-anchor was removed — superseded by warm-handoff,
     // which is now the default. The light/full-anchor search are the only group-boundary paths.)
-    size_t min_search = use_light_search ? LIGHT_SEARCH_SIZE : chirp_min_search;
+    //
+    // Buffer sizing by search type:
+    //  - light LTS: small (latency-optimized; the LTS is ~1k samples).
+    //  - full dual-chirp anchor: MUST be the full chirp search size. The reduced
+    //    connected window (preamble+65k ≈ 96k) is a light-LTS latency optimization and
+    //    is WRONG for dual-chirp detection: when the search position lags live audio
+    //    (e.g. after a burst group, BRAVO trails ~2.4s), the up-chirp lands deep in the
+    //    window and the down-chirp (≈28.8k samples later) falls outside a 96k buffer →
+    //    detectDualChirp reports "down NOT found" and MISSes despite a 0.99 up-chirp.
+    //    This stranded the post-burst Winlink-B2F FF/turnaround frame (BUG-TNC-B2F turnaround).
+    //  - disconnected chirp: the existing chirp_min_search (no lag at connect time).
+    size_t min_search = use_light_search
+                            ? LIGHT_SEARCH_SIZE
+                            : (use_full_ofdm_anchor_search ? CHIRP_MAX_SEARCH : chirp_min_search);
     const size_t data_symbol_samples =
         (use_light_search && waveform_)
             ? static_cast<size_t>(std::max(1, waveform_->getSamplesPerSymbol()))

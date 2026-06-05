@@ -10,6 +10,66 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-04 — fix(sync): post-burst full-anchor re-acquisition (search catch-up drain + full-anchor buffer); env-gated TNC bulk-accumulate-to-burst
+
+**Symptom.** When a sender transmits a full-preamble (dual-chirp) OFDM frame *after a burst*
+in the same direction — e.g. the Winlink-B2F `FF` terminator following a burst-delivered body
+on the TNC path — the receiver never acquires it. The chirp arrives at near-perfect correlation
+(0.997–0.998) yet `detectDualChirp` reports "Down chirp NOT found" and MISSes.
+
+**Root cause (two independent bugs).**
+1. *Search lag.* `StreamingDecoder::processBuffer()` runs exactly one `searchForSync()` per
+   audio-chunk wake-up (single `new_data_available_` flag), and `searchForSync` advances
+   `correlation_pos_` by one `correlation_step`. Since audio also arrives at ~real time, the
+   search advances at the SAME rate as incoming audio — once it falls behind it never catches
+   up. After a burst it trailed live audio by ~2.4 s (trace: `corr_pos` and `total_fed` both
+   +4800/iteration, constant ~115 k lag), so the post-burst up-chirp landed at the search
+   window's trailing edge *before its down-chirp had been received*.
+2. *Wrong buffer.* The connected full-anchor search used the REDUCED connected-mode buffer
+   (`preamble+65 k ≈ 96 k`) — a light-LTS latency optimization mis-applied to dual-chirp
+   detection. A full dual chirp spans ~52.8 k samples, so a late up-chirp truncated the down.
+   Proven by `up_pos`: successful dual chirps had `up_pos≈6–8 k`, failures `up_pos≈67–95 k`.
+
+**Changed.**
+- `src/gui/modem/streaming_decoder.cpp` `processBuffer()` SEARCHING case: SEARCH CATCH-UP
+  DRAIN — loop `searchForSync()` this wake-up until the unsearched backlog
+  (`total_fed_ - corr_pos_abs`) stops shrinking (structural floor = `min_search`) or sync is
+  found; bounded by `kMaxSearchCatchupSteps=64`.
+- `src/gui/modem/streaming_sync_acquisition.cpp`: `use_full_ofdm_anchor_search` now sizes
+  `min_search = CHIRP_MAX_SEARCH` (the full dual-chirp buffer) instead of the reduced
+  connected window.
+
+**Why it's correct / invariants.** Both are independent correct invariants: (a) the search
+must drain its backlog to track live audio, not advance at the audio rate; (b) full dual-chirp
+detection needs the full chirp search buffer, not the light-LTS-reduced one. Warm-sync (normal
+in-burst group boundaries) keeps the backlog small, so the catch-up loop is a no-op there and
+does NOT change burst behavior. With catch-up the up-chirp is detected ~0.2 s after its
+down-chirp arrives, at `up_pos≤43 k`, fitting even the original buffer.
+
+**Also (env-gated, default OFF): TNC bulk-accumulate-to-burst** (`ULTRA_TNC_BULK_ACCUM`,
+`src/tnc/tnc_session.cpp/.hpp`). PAT's VARA flow control (conn.go: `bufferCount.incr(len(b))`,
+stall at `7×blocksize≈1.8 KB`; `Flush()` 60 s timeout) trickles a B2F body in <4 KB chunks, so
+it always routed to the short-LDPC (z=27) path. With the knob set, the TNC under-reports
+`BUFFER` to a cap (50) while hoarding the body so PAT keeps feeding, then flushes the whole body
+as ONE z=81 burst-file; a 20 s `BUFFER` keepalive survives the burst's group-ACK stalls
+(PAT's `Flush` 60 s timer). Result: the 12 KB JPEG body now bursts and decodes CRC-clean. NOT
+production-on: the trailing non-burst `FF` does not yet deliver — see BUG-TNC-B2F-002.
+
+**Test verification.**
+- No regression (the always-on PHY changes), `tools/gui_bidir_scenario.sh`:
+  - AWGN @20: 7/7 groups each way, 0 CW fail.
+  - AWGN @30: 7/7 each way, 0 CW fail.
+  - Good fading @20: 8/7 each way, 0 CW fail.
+- Acquisition fix MEASURED on the PAT B2F image rig (`ULTRA_TNC_BULK_ACCUM=1`): post-burst
+  `up_pos` now 8–27 k (was 67–95 k), ~14 post-burst chirp acquisitions (was ~0), normal burst
+  10/10 groups clean. (End-to-end PAT delivery still blocked by BUG-TNC-B2F-002.)
+
+**Cleanup.** Removed stale compiled artifacts of tools retired 2026-05-30 (`test_waveform_simple`,
+`cli_simulator` binaries, `libultra_sim_station.a`) that lingered in the build trees — sources
+were already gone (not git-tracked / not in CMake / not in ctest).
+
+---
+
 ## 2026-06-03 — cleanup: de-hack the half_duplex_interactive_ handshake (remove the compensating patch chain)
 
 Follow-up to the BUG-TNC-B2F-001 fix below. Root-cause-B's fix had left a smell: the B2F

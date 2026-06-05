@@ -8,6 +8,31 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-TNC-B2F-002: post-burst non-burst FF frame decoded with burst-data geometry → never delivered (blocks bulk-accum-to-burst B2F)
+- Status: **OPEN** (2026-06-04). Surfaces ONLY on the env-gated `ULTRA_TNC_BULK_ACCUM` path
+  (default OFF); default behavior unaffected. The *sync-acquisition* half is FIXED (see CHANGELOG
+  2026-06-04 catch-up drain + full-anchor buffer); this is the remaining *frame-decode* half.
+- Symptom: with `ULTRA_TNC_BULK_ACCUM=1`, a PAT B2F body now bursts (z=81) and decodes CRC-clean,
+  but the trailing non-burst `FF` terminator never reaches PAT (`Receiving … offset 0`, mailbox
+  empty). PAT retries the whole message (`100%→0%→100%`) → the run HANGS instead of disconnecting.
+- Root cause: after acquiring the post-burst full-anchor chirp (now succeeds, `up_pos` small),
+  BRAVO does a control-first peek (1 CW) then processes the frame with the **burst-data geometry**
+  it's still holding — `samples=10080` (burst frame size), reconfigures to the QPSK R1/2 *data*
+  profile — but ALPHA's `FF` is a NON-burst frame (29 B → 106880 samples, full preamble, ~2 CW at
+  R1/4). Geometry/profile mismatch → the FF never completes → not routed to the data port. The
+  plain non-burst path WORKS when NOT preceded by a burst (the pre-bulk-accum image delivered),
+  so the burst-left decoder state (`have_burst_descriptor_` set per group at
+  `streaming_ofdm_decode.cpp:762`, the burst frame geometry, warm-sync next-group expectation) is
+  what mis-decodes the trailing non-burst frame. There is no end-of-burst signal, so the receiver
+  stays in burst-decode mode.
+- Fix direction (NOT yet done — delicate, must not regress burst group decode): when a full-anchor
+  acquisition's control-first peek decodes a **non-`BURST_HEADER`** frame, clear the burst-RX state
+  (`have_burst_descriptor_` / burst frame geometry) and decode per the peeked header's
+  type/total_cw as a normal non-burst frame. Gate carefully so a legitimate next-group descriptor
+  is not mistaken for end-of-burst. Repro: `ULTRA_TNC_BULK_ACCUM=1 /tmp/b2f_pat/run_image_sync.sh`
+  (BOUND it with a timeout — it hangs). Diagnostic: `ULTRA_S16_TRACE_WARM_WINDOW=1` + BRAVO
+  `--log-category …,sync`.
+
 ### BUG-TNC-B2F-001: bidirectional B2F stalls — the NON-BURST short path (the actual message path) was dead at RX + ACK
 - Status: **FIXED for the message path** (2026-06-03). Issues 1, 3, 4 fixed; Issue 2 (burst
   turn-flip) remains but is **off the B2F message path** (Winlink messages are small → non-burst).
