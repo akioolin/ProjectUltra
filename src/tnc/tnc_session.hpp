@@ -103,6 +103,15 @@ private:
     // files), so we resume reporting the real draining count and Pat's Flush()
     // — which blocks on BUFFER 0 with a 1-min timeout — still terminates.
     bool bulk_accum_ = false;
+    // Once a BULK body has been flushed as a burst-file in this session, keep the
+    // TRAILING flushes (the Winlink-B2F FF terminator, any small frame after the
+    // body) on the BURST path too — even though they are < kInteractiveMaxBytes.
+    // Reason (BUG-TNC-B2F-002): the burst→non-burst transition strands the trailing
+    // frame (the receiver, just out of burst RX, mis-decodes a non-burst full-anchor
+    // frame). Routing it as a tiny burst reuses the PROVEN burst descriptor+group
+    // decode (same path that delivers the body 10/10) — no transition. Reset per
+    // connection. Only active under bulk_accum_.
+    bool bulk_burst_started_ = false;
     static constexpr int kAbsorbReportCap = 50;
     static constexpr uint32_t kDataTxBulkQuietMs = 1500;
     // Pat's Flush() aborts if it receives no BUFFER command for 60 s (conn.go).

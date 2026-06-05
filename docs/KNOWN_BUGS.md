@@ -9,8 +9,10 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 ## Active Issues
 
 ### BUG-TNC-B2F-002: post-burst non-burst FF frame not delivered (blocks bulk-accum-to-burst B2F) — LAYERED
-- Status: **PARTIALLY FIXED** (2026-06-05). Surfaces ONLY on the env-gated `ULTRA_TNC_BULK_ACCUM`
-  path (default OFF); default behavior unaffected. Three layers, peeled in order:
+- Status: **IMAGE NOW DELIVERS over burst** (2026-06-05) — the 20 KB JPEG transfers byte-intact via
+  burst (`.b2f` 12191 B, JPEG 11782 B md5 a811c535, == the non-burst delivery, reproducible 3×).
+  REMAINING: the sender's session does not close cleanly (churn — see LAYER 3). Env-gated
+  `ULTRA_TNC_BULK_ACCUM` only; default OFF unaffected. Layers, peeled in order:
   - LAYER 0 (sync acquisition): FIXED 2026-06-04 (catch-up drain + full-anchor buffer, CHANGELOG).
   - LAYER 1 (§14.24 gate drop): **FIXED 2026-06-05** — `have_burst_descriptor_` now drops at
     group-end (`finalizeBurstGroup`, streaming_burst_interleave.cpp) instead of persisting the whole
@@ -36,6 +38,24 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
     over and drop back to the light-LTS interactive PHY). This is the production form of the
     declared-but-unwired `traffic_profile.hpp` TrafficClass system (File vs Chat/Control). Deliberate
     work, must not regress the burst path; do not land blind against hanging-run verification.
+  - LAYER 2 SIDESTEPPED (2026-06-05): rather than fix the broken non-burst full-anchor demod, the
+    TNC now ROUTES the trailing FF through the BURST path too (`bulk_burst_started_`,
+    tnc_session.cpp): once a body has bursted, trailing flushes stay burst, reusing the PROVEN
+    burst descriptor+group decode (same path that delivers the body 10/10). This made the image
+    deliver byte-intact over burst.
+  - LAYER 3 (clean teardown — **REMAINING**): the FF is a tiny (3-byte) 1-frame burst. It DELIVERS
+    (BRAVO `Received OK (3 bytes)`), but its tone-burst GROUP-ACK does not get back to ALPHA
+    (`group-ACK timeout`), so ALPHA's `file_transfer_` stays SENDING/busy. The next trailing flush
+    then fails `sendFile` "already in progress" and the bulk-accum retries every quiet period (~65
+    wasted re-stages of the same 3 bytes) → the sender's `connect` never exits cleanly (the message
+    IS delivered; only the sender-side close hangs). Root: tiny / turn-flip-boundary 1-frame burst
+    groups don't ARQ-complete on the sender side (related to the old "Issue 2 turn-flip" ACK
+    reliability). Fix candidates: (a) make tiny/last-group tone-burst ACKs reliable at the turn
+    boundary; (b) coalesce body+FF into ONE burst (under-report BUFFER 0 early so PAT writes the FF
+    before the body transmits, then burst both — risk: premature Flush close); (c) the LAYER-2 PHY
+    fix so the FF can go non-burst. An idle-gated flush (only flush when `getTxBackloggBytes()==0`)
+    was added but does NOT cover this (a tiny burst reports ~0 remaining bytes while file_transfer_
+    is still busy on the ARQ).
 - Symptom: with `ULTRA_TNC_BULK_ACCUM=1`, a PAT B2F body now bursts (z=81) and decodes CRC-clean,
   but the trailing non-burst `FF` terminator never reaches PAT (`Receiving … offset 0`, mailbox
   empty). PAT retries the whole message (`100%→0%→100%`) → the run HANGS instead of disconnecting.

@@ -279,6 +279,7 @@ void TNCSession::handleDataBytes(const std::vector<uint8_t>& bytes) {
 }
 
 void TNCSession::onModemConnected(const std::string& src, const std::string& dst, int bw) {
+    bulk_burst_started_ = false;  // fresh per connection
     if (state_ == State::LISTENING) {
         if (!pending_inbound_) {
             emitPending();
@@ -450,7 +451,15 @@ void TNCSession::tick(uint32_t elapsed_ms) {
         // arrives in bursts of ~7 blocks with brief throttle stalls between)
         // coalesces into ONE burst-file rather than flushing each sub-group.
         const uint32_t quiet_thresh = bulk_accum_ ? kDataTxBulkQuietMs : kDataTxFlushQuietMs;
-        if (data_tx_quiet_ms_ >= quiet_thresh) {
+        // In bulk mode the trailing flushes route to the burst-file path
+        // (bulk_burst_started_); a sendFile while the modem is still transmitting
+        // the PREVIOUS burst fails ("file transfer in progress") and the flush
+        // retries every quiet period — dozens of wasted sendFile attempts that
+        // serialize the tiny B2F-tail frames and stall clean session teardown.
+        // Only flush when the modem TX path is idle, so the tail writes accumulate
+        // and coalesce into one burst per idle window instead of churning.
+        const bool modem_ready = !bulk_accum_ || modem_.getTxBackloggBytes() == 0;
+        if (data_tx_quiet_ms_ >= quiet_thresh && modem_ready) {
             flushDataTxBuffer();
         }
     }
@@ -497,7 +506,12 @@ void TNCSession::flushDataTxBuffer() {
     // anchor can't re-acquire timing when the link flips for every tiny B2F message. The RX
     // side already delivers both transports to the data port (TNCBridge wires BOTH
     // setDataReceivedCallback and setFileReceivedCallback to postModemDataReceived).
-    if (wire.size() <= kInteractiveMaxBytes) {
+    // Keep trailing post-body flushes on the burst path (see bulk_burst_started_): once the
+    // body has bursted, the FF terminator + any small frame stay burst, avoiding the
+    // burst→non-burst transition that strands them (BUG-TNC-B2F-002).
+    const bool route_burst =
+        wire.size() > kInteractiveMaxBytes || (bulk_accum_ && bulk_burst_started_);
+    if (!route_burst) {
         if (modem_.sendBinary(wire)) {
             data_tx_buffer_.clear();
         }
@@ -533,6 +547,7 @@ void TNCSession::flushDataTxBuffer() {
     if (modem_.sendFile(temp_path)) {
         data_tx_buffer_.clear();
         last_tx_temp_path_ = temp_path;
+        if (bulk_accum_) bulk_burst_started_ = true;  // keep trailing flushes on the burst path
     } else {
         // Engine refused (queue full / not CONNECTED): keep data_tx_buffer_ intact so the
         // next quiet-period flush retries. Pat sees BUFFER N stay nonzero and backs off.
