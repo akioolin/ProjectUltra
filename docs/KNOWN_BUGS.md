@@ -8,10 +8,26 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
-### BUG-TNC-B2F-002: post-burst non-burst FF frame decoded with burst-data geometry → never delivered (blocks bulk-accum-to-burst B2F)
-- Status: **OPEN** (2026-06-04). Surfaces ONLY on the env-gated `ULTRA_TNC_BULK_ACCUM` path
-  (default OFF); default behavior unaffected. The *sync-acquisition* half is FIXED (see CHANGELOG
-  2026-06-04 catch-up drain + full-anchor buffer); this is the remaining *frame-decode* half.
+### BUG-TNC-B2F-002: post-burst non-burst FF frame not delivered (blocks bulk-accum-to-burst B2F) — LAYERED
+- Status: **PARTIALLY FIXED** (2026-06-05). Surfaces ONLY on the env-gated `ULTRA_TNC_BULK_ACCUM`
+  path (default OFF); default behavior unaffected. Three layers, peeled in order:
+  - LAYER 0 (sync acquisition): FIXED 2026-06-04 (catch-up drain + full-anchor buffer, CHANGELOG).
+  - LAYER 1 (§14.24 gate drop): **FIXED 2026-06-05** — `have_burst_descriptor_` now drops at
+    group-end (`finalizeBurstGroup`, streaming_burst_interleave.cpp) instead of persisting the whole
+    connection, so the trailing FF is no longer gated as mid-burst. The FF now REACHES the decoder
+    (`Chirp detected … escalating to N CWs`). Verified no multi-group regression: gui_bidir AWGN@20
+    7/7 each way, 0 CWfail.
+  - LAYER 2 (frame geometry — **REMAINING**): the post-burst FF arrives with a FULL preamble
+    (dual chirp; `training_start≈63839`), but `getMinSamplesForCWCount` (ofdm_chirp_waveform.cpp:1108)
+    returns only `training + data` samples (NO dual-chirp preamble), so the frame buffer (~17920) is
+    built from the chirp position but is far too short to reach the data → the demod reads the
+    preamble region as data → confident-but-garbage LLRs (|llr|=20 saturated, sign random, llr_avg≈0)
+    → `CW FAIL`. Also the CW0 header peek can't read past the garbage → falls back to
+    `fixed_frame_codewords_` (2) while ALPHA sent 1 CW @ QPSK R1/2 (22 B). Fix candidates: (a) size
+    the full-anchor frame buffer to include the dual-chirp preamble offset (`training_start`), and/or
+    (b) have the interactive FF use a LIGHT preamble so it sizes as a normal connected data frame
+    (but post-burst BRAVO expects a full anchor — interacts with LAYER 0). Trace shows it at
+    `streaming_ofdm_decode.cpp` data path after `escalating to N CWs`.
 - Symptom: with `ULTRA_TNC_BULK_ACCUM=1`, a PAT B2F body now bursts (z=81) and decodes CRC-clean,
   but the trailing non-burst `FF` terminator never reaches PAT (`Receiving … offset 0`, mailbox
   empty). PAT retries the whole message (`100%→0%→100%`) → the run HANGS instead of disconnecting.

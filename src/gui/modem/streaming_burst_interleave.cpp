@@ -699,6 +699,20 @@ void StreamingDecoder::finalizeBurstGroup() {
         waveform_->setActiveLDPCLiftingZ(27);
     }
 
+    // 2026-06-05 (BUG-TNC-B2F-002): drop the BURST_HEADER descriptor latch at group-end too,
+    // mirroring the waveform z snap-back above. have_burst_descriptor_ is BOTH the §14.24
+    // "mid-burst" gate (streaming_ofdm_decode.cpp:1013) AND the source of truth for
+    // activeBurstLiftingZ() (sync_controller.hpp:258). It was made to persist for the WHOLE
+    // connection, which diverged from the per-group z lifecycle: after a burst the latch stayed
+    // set, so every trailing NON-burst frame (the Winlink-B2F FF terminator, any interactive
+    // frame after a file transfer) was gated as mid-burst noise and/or mis-sized as z=81/1944
+    // and never delivered. The correct lifecycle (BURST_Z_LDPC_LIFECYCLE): default z=27; lift on
+    // BURST_HEADER; drop at group-end. Each next group's BURST_HEADER re-sets the latch (it is
+    // emitted per-group while the file transfer is active); after the LAST group it stays clear,
+    // so the trailing short-LDPC frame falls through the gate and decodes. Same decode thread as
+    // the set at streaming_ofdm_decode.cpp:762, so no extra lock.
+    sync_controller_.have_burst_descriptor_ = false;
+
     if (diagnostics_enabled) {
         std::ostringstream oss;
         oss << "event=burst_group_end"

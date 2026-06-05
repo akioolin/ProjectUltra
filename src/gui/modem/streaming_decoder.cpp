@@ -534,18 +534,16 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     mode_ = mode;
     connected_ = connected;
 
-    // Clear the burst BURST_HEADER z-latch (sync_controller_.have_burst_descriptor_ /
-    // activeBurstLiftingZ) when the session ends. The latch deliberately PERSISTS
-    // across groups + ACKs within a transfer (single RX source of truth for the
-    // descriptor-declared z=81, set at streaming_ofdm_decode.cpp:765, otherwise
-    // never cleared). But it must not survive into the NEXT connection: a later
-    // z=27-only transfer that opens before its first descriptor decodes would
-    // inherit a stale z=81 and mis-size its data demod. `connected` never goes
-    // false mid-transfer, so this cannot defeat the in-transfer persistence (the
-    // risky mid-transfer paths — adaptive rate changes via applyPendingConnected-
-    // OFDMMode — are deliberately NOT touched). A new burst transfer self-corrects
-    // anyway because its descriptor rewrites sync_controller_.last_burst_descriptor_. See
-    // docs/BURST_Z_LDPC_LIFECYCLE_2026_05_31.md §6.
+    // Disconnect backstop for the burst BURST_HEADER z-latch
+    // (sync_controller_.have_burst_descriptor_ / activeBurstLiftingZ). 2026-06-05
+    // (BUG-TNC-B2F-002): the latch is now cleared PER GROUP at group-end
+    // (finalizeBurstGroup, streaming_burst_interleave.cpp) — the correct z lifecycle
+    // is default z=27, lift on BURST_HEADER, drop at group-end (each next group's
+    // BURST_HEADER re-sets it; set at streaming_ofdm_decode.cpp:762). The old
+    // whole-connection persistence wrongly kept post-burst non-burst frames (the
+    // Winlink-B2F FF terminator, any interactive frame after a file transfer) gated
+    // as mid-burst and mis-sized as z=81. This `!connected` clear remains as a
+    // backstop for a session that ends before a group finalizes.
     if (!connected) {
         sync_controller_.have_burst_descriptor_ = false;
     }
