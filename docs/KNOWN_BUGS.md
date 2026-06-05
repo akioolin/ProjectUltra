@@ -25,13 +25,23 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   `streaming_ofdm_decode.cpp:762`, the burst frame geometry, warm-sync next-group expectation) is
   what mis-decodes the trailing non-burst frame. There is no end-of-burst signal, so the receiver
   stays in burst-decode mode.
-- Fix direction (NOT yet done — delicate, must not regress burst group decode): when a full-anchor
-  acquisition's control-first peek decodes a **non-`BURST_HEADER`** frame, clear the burst-RX state
-  (`have_burst_descriptor_` / burst frame geometry) and decode per the peeked header's
-  type/total_cw as a normal non-burst frame. Gate carefully so a legitimate next-group descriptor
-  is not mistaken for end-of-burst. Repro: `ULTRA_TNC_BULK_ACCUM=1 /tmp/b2f_pat/run_image_sync.sh`
-  (BOUND it with a timeout — it hangs). Diagnostic: `ULTRA_S16_TRACE_WARM_WINDOW=1` + BRAVO
-  `--log-category …,sync`.
+- EXACT mechanism (traced 2026-06-04): post-sync OFDM frame-sizing at
+  `streaming_ofdm_decode.cpp:1334-1396`. The CW0 peek (`:1344`, `codec_->decode` at `setRate(rate)`)
+  is supposed to read the FF header and set `pending_total_cw_ = hdr.total_cw` (`:1354`). For the
+  post-burst FF that peek's `parseHeader` FAILS its conditions, so it falls through to the
+  fixed-frame escalation `pending_total_cw_ = fixed_frame_codewords_` (`:1391`) = the BURST frame
+  geometry (10080 samples / R1/2 data profile). Net: the FF is decoded as a burst data frame.
+  Likely cause: the peek decodes CW0 at the burst's `code_rate_`/profile, not the rate the FF was
+  actually sent at (rate/profile handoff across the burst→non-burst boundary) → CW0 garbage →
+  header parse fails → fixed-frame fallback.
+- Fix direction (NOT yet done — delicate, must not regress burst group decode): make the post-burst
+  full-anchor frame peek at the correct rate/profile (or, when the chirp is detected NON-burst-
+  interleaved — marker>0, already known at `detectSync`/`ofdm_chirp_waveform.cpp:464` — clear the
+  burst-RX state `have_burst_descriptor_`/`fixed_frame_codewords_` and decode per the peeked header).
+  Gate carefully so a legitimate next-group descriptor (burst-interleaved, marker<0) is NOT mistaken
+  for end-of-burst. Repro: `ULTRA_TNC_BULK_ACCUM=1 /tmp/b2f_pat/run_image_sync.sh` (BOUND it with a
+  timeout — it HANGS, PAT retries forever). Diagnostic: `ULTRA_S16_TRACE_WARM_WINDOW=1` + BRAVO
+  `--log-category …,sync`; check `bravo_pat.log` mailbox `/tmp/pat_bravo_mbox/BRAVO/in/*.b2f`.
 
 ### BUG-TNC-B2F-001: bidirectional B2F stalls — the NON-BURST short path (the actual message path) was dead at RX + ACK
 - Status: **FIXED for the message path** (2026-06-03). Issues 1, 3, 4 fixed; Issue 2 (burst
