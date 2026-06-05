@@ -7,6 +7,7 @@
 #include <charconv>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -166,7 +167,9 @@ const char* stateToString(State state) {
 TNCSession::TNCSession(ModemAdapter& modem, EmitFn cmd_emit, DataOutFn data_out)
     : modem_(modem),
       cmd_emit_(std::move(cmd_emit)),
-      data_out_(std::move(data_out)) {}
+      data_out_(std::move(data_out)) {
+    bulk_accum_ = std::getenv("ULTRA_TNC_BULK_ACCUM") != nullptr;
+}
 
 bool TNCSession::handleControlLine(std::string_view line) {
     const bool has_cr_or_lf = line.find_first_of("\r\n") != std::string_view::npos;
@@ -261,6 +264,17 @@ void TNCSession::handleDataBytes(const std::vector<uint8_t>& bytes) {
     data_tx_quiet_ms_ = 0;
     if (data_tx_buffer_.size() >= kDataTxFlushSizeBytes) {
         flushDataTxBuffer();
+    } else if (bulk_accum_ && modem_.getTxBackloggBytes() == 0) {
+        // BULK ABSORPTION: we're hoarding this block (engine backlog still 0)
+        // to coalesce the whole B2F body into one burst-file. Pat self-increments
+        // its flow counter by len(b) per write and stalls at 7*blocksize; reset
+        // it NOW with a low BUFFER so it keeps feeding. Bypass the rate-limit and
+        // dedup — Pat may be blocked waiting for exactly this reset, and the
+        // reset value is constant so the normal dedup would suppress it.
+        emitBuffer(kAbsorbReportCap);
+        last_buffer_level_ = kAbsorbReportCap;
+        last_buffer_emit_ms_ = 0;
+        pending_buffer_level_ = -1;
     }
 }
 
@@ -342,12 +356,23 @@ void TNCSession::onModemBufferLevel(int bytes) {
     if (bytes < 0) {
         bytes = 0;
     }
+    // BULK ABSORPTION (bytes==0 means the engine TX path is idle and the body
+    // is still hoarded in data_tx_buffer_): under-report so Pat keeps feeding
+    // the rest of the body. Once the burst is handed to the engine, bytes>0
+    // (getTxBacklogBytes counts the queued/sending file) so we fall through to
+    // the real-count path below and Pat's Flush() drains to 0 normally.
+    const bool absorbing = bulk_accum_ && bytes == 0 && !data_tx_buffer_.empty();
+
     // Pat's Flush() trusts BUFFER 0 to mean "every byte I wrote has
     // been transmitted". Our 200 ms TX staging buffer is invisible to
     // the engine's backlog count, so we add it here. Without this,
     // BUFFER 0 can fire while data_tx_buffer_ still has unsent bytes,
     // letting Pat close the session before transmission completes.
     bytes += static_cast<int>(data_tx_buffer_.size());
+
+    if (absorbing) {
+        bytes = std::min(bytes, kAbsorbReportCap);
+    }
 
     if (bytes == last_buffer_level_ && pending_buffer_level_ < 0) {
         return;
@@ -409,9 +434,23 @@ void TNCSession::tick(uint32_t elapsed_ms) {
         emitBuffer(bytes);
     }
 
+    // BUFFER keepalive (bulk mode): while a transfer is pending (last reported
+    // level > 0) but the backlog has been frozen long enough that no fresh
+    // BUFFER update has gone out, re-emit the current level so Pat's Flush()
+    // 60 s timer keeps resetting through burst-path group-ACK stalls. Without
+    // this the burst delivers correctly but Pat aborts the exchange mid-send.
+    if (bulk_accum_ && state_ == State::CONNECTED && last_buffer_level_ > 0 &&
+        last_buffer_emit_ms_ >= kBufferKeepaliveMs) {
+        emitBuffer(last_buffer_level_);
+    }
+
     if (state_ == State::CONNECTED && !data_tx_buffer_.empty()) {
         data_tx_quiet_ms_ += elapsed_ms;
-        if (data_tx_quiet_ms_ >= kDataTxFlushQuietMs) {
+        // In bulk-accumulate mode wait longer so a flow-controlled body (which
+        // arrives in bursts of ~7 blocks with brief throttle stalls between)
+        // coalesces into ONE burst-file rather than flushing each sub-group.
+        const uint32_t quiet_thresh = bulk_accum_ ? kDataTxBulkQuietMs : kDataTxFlushQuietMs;
+        if (data_tx_quiet_ms_ >= quiet_thresh) {
             flushDataTxBuffer();
         }
     }

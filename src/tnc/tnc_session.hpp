@@ -89,6 +89,29 @@ private:
     uint64_t tx_file_counter_ = 0;
     std::string last_tx_temp_path_;
 
+    // BULK-ACCUMULATE (env ULTRA_TNC_BULK_ACCUM, prototype): coalesce a flow-
+    // controlled Winlink-B2F body into ONE z=81 burst-file instead of letting
+    // Pat's VARA flow control trickle it as sub-4KB short-LDPC chunks. Pat
+    // self-increments its own flow counter by len(b) per write (conn.go:246)
+    // and stalls at 7*blocksize (~1750 B), un-stalling only when WE send a
+    // BUFFER command resetting it. So while the body is hoarded in
+    // data_tx_buffer_ (engine backlog still 0) we (a) promptly under-report
+    // BUFFER to kAbsorbReportCap on every block so Pat keeps feeding, and
+    // (b) wait kDataTxBulkQuietMs for Pat to finish dumping before flushing the
+    // whole hoard as one burst. The instant the burst hits the engine the
+    // backlog jumps to the true size (getTxBacklogBytes counts queued/sending
+    // files), so we resume reporting the real draining count and Pat's Flush()
+    // — which blocks on BUFFER 0 with a 1-min timeout — still terminates.
+    bool bulk_accum_ = false;
+    static constexpr int kAbsorbReportCap = 50;
+    static constexpr uint32_t kDataTxBulkQuietMs = 1500;
+    // Pat's Flush() aborts if it receives no BUFFER command for 60 s (conn.go).
+    // The burst-file path can freeze the engine backlog for >60 s during a
+    // group-ACK timeout/retransmit; re-emit the current level this often so the
+    // flush timer stays alive (a real VARA modem reports buffer state
+    // continuously, so this is faithful, not a workaround). 3x margin vs 60 s.
+    static constexpr uint32_t kBufferKeepaliveMs = 20000;
+
     static std::pair<std::string, std::string> parseCommand(std::string_view line);
 
     void emitOK();
