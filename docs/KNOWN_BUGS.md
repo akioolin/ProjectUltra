@@ -25,23 +25,38 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   `streaming_ofdm_decode.cpp:762`, the burst frame geometry, warm-sync next-group expectation) is
   what mis-decodes the trailing non-burst frame. There is no end-of-burst signal, so the receiver
   stays in burst-decode mode.
-- EXACT mechanism (traced 2026-06-04): post-sync OFDM frame-sizing at
-  `streaming_ofdm_decode.cpp:1334-1396`. The CW0 peek (`:1344`, `codec_->decode` at `setRate(rate)`)
-  is supposed to read the FF header and set `pending_total_cw_ = hdr.total_cw` (`:1354`). For the
-  post-burst FF that peek's `parseHeader` FAILS its conditions, so it falls through to the
-  fixed-frame escalation `pending_total_cw_ = fixed_frame_codewords_` (`:1391`) = the BURST frame
-  geometry (10080 samples / R1/2 data profile). Net: the FF is decoded as a burst data frame.
-  Likely cause: the peek decodes CW0 at the burst's `code_rate_`/profile, not the rate the FF was
-  actually sent at (rate/profile handoff across the burst→non-burst boundary) → CW0 garbage →
-  header parse fails → fixed-frame fallback.
-- Fix direction (NOT yet done — delicate, must not regress burst group decode): make the post-burst
-  full-anchor frame peek at the correct rate/profile (or, when the chirp is detected NON-burst-
-  interleaved — marker>0, already known at `detectSync`/`ofdm_chirp_waveform.cpp:464` — clear the
-  burst-RX state `have_burst_descriptor_`/`fixed_frame_codewords_` and decode per the peeked header).
-  Gate carefully so a legitimate next-group descriptor (burst-interleaved, marker<0) is NOT mistaken
-  for end-of-burst. Repro: `ULTRA_TNC_BULK_ACCUM=1 /tmp/b2f_pat/run_image_sync.sh` (BOUND it with a
-  timeout — it HANGS, PAT retries forever). Diagnostic: `ULTRA_S16_TRACE_WARM_WINDOW=1` + BRAVO
-  `--log-category …,sync`; check `bravo_pat.log` mailbox `/tmp/pat_bravo_mbox/BRAVO/in/*.b2f`.
+- SURGICAL root cause (fully traced 2026-06-05, with debug logging since reverted):
+  1. The BODY delivers fine. Confirmed via temporary logs in `onFileReceived`/`onModemDataReceived`:
+     the burst body decodes CRC-clean and BRAVO-TNC delivers all 12215 bytes out its data port to
+     PAT-BRAVO (`state=CONNECTED, marker=raw, data_out=1`). The POLLOUT flush is correct. In B2F the
+     sender writes body → `Flush()` → THEN the `FF` terminator, so PAT-BRAVO HAS the body and is
+     waiting only for the FF (its `offset 0` line is just stale; VARA `Read` has no deadline so it
+     waits forever, no timeout).
+  2. The FF (a 1-CW non-burst frame after the burst) is DROPPED at the §14.24 gate
+     `streaming_ofdm_decode.cpp:1013-1022`: `if ((use_burst_interleave_ || burst_transport_rx_) &&
+     connected_ && have_burst_descriptor_) { re-search; return; }`. The control-first peek decodes
+     the FF's CW0 at R1/4-control profile → garbage (the FF is DATA, not control) → reaches this
+     gate → re-searched away.
+  3. THE LATCH: `have_burst_descriptor_` is set on the first BURST_HEADER
+     (`streaming_ofdm_decode.cpp:762`) and PERSISTS for the WHOLE connection — by deliberate design
+     it is cleared ONLY on disconnect (`streaming_decoder.cpp:537-551`; it is the RX source-of-truth
+     for the descriptor-declared z=81, must survive across groups+ACKs within a transfer). So after
+     the body burst it stays set forever and the gate drops EVERY post-burst non-burst frame.
+- Fix direction (NOT done — deliberate cross-engine change, must not regress §14.24 / z-lifecycle):
+  clear `have_burst_descriptor_` when the burst FILE TRANSFER COMPLETES (the clean "burst is over"
+  signal — preserves in-burst z-sizing). The completion signal lives in the ProtocolEngine
+  (`FileTransferController::on_received_` → `Connection::setFileReceivedCallback`), but the latch
+  lives in the ModemEngine's `StreamingDecoder`; there is no existing ProtocolEngine→ModemEngine
+  path, so this needs new wiring (e.g. a `StreamingDecoder::clearBurstDescriptor()` invoked from the
+  file-received callback at the app/TNC layer that holds both engines). Do NOT shortcut with
+  `&& waveform_->wasBurstInterleaved()` on the gate — mid-burst noise has a ~50/50 marker and would
+  fall through to the data decode, re-introducing the §14.24 shared-estimate poisoning.
+- BONUS bug found: bulk-accum (BRAVO side) also hoards PAT-BRAVO's small CONTROL sends (BUFFER 50 on
+  its SID/FS+) — the cap should apply only to bulk bodies, not tiny control writes.
+- Repro: `ULTRA_TNC_BULK_ACCUM=1 /tmp/b2f_pat/run_image.sh` (BOUND with a timeout — it HANGS, PAT
+  retries 100%→0%→100% forever). Diagnostics: VARA_DEBUG=1 on PAT for its data RX;
+  `ULTRA_S16_TRACE_WARM_WINDOW=1` + BRAVO `--log-category …,sync`; mailbox
+  `/tmp/pat_bravo_mbox/BRAVO/in/*.b2f`.
 
 ### BUG-TNC-B2F-001: bidirectional B2F stalls — the NON-BURST short path (the actual message path) was dead at RX + ACK
 - Status: **FIXED for the message path** (2026-06-03). Issues 1, 3, 4 fixed; Issue 2 (burst
