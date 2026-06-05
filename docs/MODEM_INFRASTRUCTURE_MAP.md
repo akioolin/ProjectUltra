@@ -212,6 +212,7 @@ Buckets per the env-knobs→runtime-derivation workstream: **[FEAT]** in-flight 
 | `ULTRA_BURST_GROUP_FRAMES` | burst group size, clamp [2,32] | code **6** (`kBurstInterleaveGroupFrames` `:64`, reconciled 16→6 on 2026-05-30 — mask-width-matched to the 6-bit SACK frame_mask; the old 16 was un-SR-addressable on the default interleave-OFF path) | `connection_policy.hpp:74` | FEAT |
 | `ULTRA_BURST_DESCRIPTOR` | emit BURST_HEADER descriptor | **ON** (escape hatch) | `modem_engine.cpp:530` | FEAT |
 | `ULTRA_BURST_HEADER_ONCE` | descriptor only on group 0 | OFF | `modem_engine.cpp:544` | FEAT |
+| `ULTRA_TNC_BULK_ACCUM` | TNC: hoard a flow-controlled PAT/B2F body (under-report BUFFER to cap 50 while absorbing so PAT keeps feeding past its 7×blocksize throttle, + 20 s BUFFER keepalive vs PAT's 60 s Flush timeout) → flush the whole body as ONE z=81 burst-file instead of <4 KB short-LDPC chunks. Body bursts+decodes CRC-clean; trailing FF blocked on BUG-TNC-B2F-002 | **OFF** (default; experiment) | `tnc_session.cpp` ctor + `onModemBufferLevel`/`tick`/`handleDataBytes` | FEAT (blocked on BUG-TNC-B2F-002) |
 | ~~`ULTRA_S16_WARM_HANDOFF`~~ | warm light-LTS group-start | **REMOVED 2026-05-31** — promoted to production default (always on); all 7 gate sites unconditional | — | ✅ codified |
 | `ULTRA_S16_TRACE_WARM_WINDOW` | trace warm-sync window | off | `streaming_sync_acquisition.cpp:356` | DIAG |
 | `ULTRA_LOCK_RATE` | hold data rate fixed for transfer | OFF | `connection.cpp:2342` | FEAT |
