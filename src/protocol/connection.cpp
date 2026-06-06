@@ -18,6 +18,13 @@ constexpr const char* kOFDMBurstPadCallsign = "ULPAD";
 constexpr uint16_t kOFDMBurstPadSeq = 0xFFFE;
 constexpr size_t kMaxQueuedPayloads = 32;
 
+// TRANSPORT MERGE (step 1): opt-in tone-burst ACK on the interactive SR-ARQ path.
+constexpr uint32_t kInteractiveToneAckWindowMs = 8000;  // monitor arm window for the ack
+bool kInteractiveToneAckEnabled() {
+    static const bool v = std::getenv("ULTRA_TONE_ACK_INTERACTIVE") != nullptr;
+    return v;
+}
+
 Modulation wideOFDMControlModulationForData(Modulation data_modulation) {
     return ofdm_link_adaptation::isCoherentModulation(data_modulation)
         ? Modulation::QPSK
@@ -373,6 +380,13 @@ Connection::Connection(const ConnectionConfig& config)
     });
     arq_.setTxFrameSubmittedCallback([this](uint16_t seq) {
         handleArqFrameSubmitted(seq);
+        // TRANSPORT MERGE (step 1): after submitting interactive DATA, arm the
+        // tone-burst monitor so we hear the peer's tone-burst ACK (it will emit one
+        // instead of a SACK frame). Re-arming on each frame just extends the window;
+        // the monitor auto-disarms on a successful decode.
+        if (kInteractiveToneAckEnabled() && on_arm_tone_burst_ack_monitor_) {
+            on_arm_tone_burst_ack_monitor_(kInteractiveToneAckWindowMs);
+        }
     });
     arq_.setTxBaseAdvancedCallback([this](uint16_t base_seq) {
         handleArqTxBaseAdvanced(base_seq);
@@ -383,6 +397,26 @@ Connection::Connection(const ConnectionConfig& config)
     arq_.setTurnRequestCallback([this]() {
         return noteTurnRequestOnAckIfNeeded();
     });
+
+    // TRANSPORT MERGE (step 1, env ULTRA_TONE_ACK_INTERACTIVE): route the interactive
+    // SACK through the same tone-burst transport the burst path uses. When enabled, the
+    // receiver emits the ack as a tone-burst (base_seq + low-6 RX bitmap) instead of a
+    // SACK control frame; the sender arms its monitor (above) and consumes it in
+    // onToneBurstAck(). Default off — the legacy SACK-frame path is unchanged.
+    if (kInteractiveToneAckEnabled()) {
+        arq_.setEmitToneBurstSackCallback(
+            [this](uint16_t base_seq, uint32_t bitmap, bool /*has_final*/) {
+                if (!on_transmit_tone_burst_ack_) {
+                    return;
+                }
+                ultra::waveform::tone_burst_ack::ToneBurstAckPayload tba;
+                tba.group_seq = static_cast<uint8_t>(base_seq & 0x3F);
+                tba.frame_mask = static_cast<uint8_t>(bitmap & 0x3F);
+                tba.type = ultra::waveform::tone_burst_ack::AckType::Ack;
+                tba.rate_hint = 0;
+                on_transmit_tone_burst_ack_(tba);
+            });
+    }
 
     // §14.27: wire the one-way burst stop-and-wait controller callbacks.
     // Burst transport is the DEFAULT OFDM-wideband file path as of 2026-05-30
@@ -1843,6 +1877,15 @@ void Connection::sendNextFileChunk() {
 bool Connection::onToneBurstAck(
     const ultra::waveform::tone_burst_ack::ToneBurstAckDetection& detection) {
     if (state_ != ConnectionState::CONNECTED) return false;
+
+    // TRANSPORT MERGE (step 1): when interactive tone-burst acks are enabled and we have
+    // interactive SR-ARQ frames in flight (no active burst owns this ack), route it to
+    // the ARQ window. The ARQ reconstructs the seq and drives its normal ack path.
+    if (kInteractiveToneAckEnabled() && arq_.getTxInFlightBytes() > 0) {
+        arq_.onToneBurstAck(detection.payload.group_seq, detection.payload.frame_mask);
+        return true;
+    }
+
     if (!use_burst_transport_) return false;
 
     const uint8_t tba_seq6 = detection.payload.group_seq;
@@ -3045,6 +3088,25 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
 }
 
 void Connection::processArqFrame(const Bytes& frame_data) {
+    // TEST HOOK (env ULTRA_DROP_RX_SEQ=N): drop the FIRST receipt of the DATA frame with
+    // seq=N to prove SELECTIVE repeat — the ack bitmap must then show only that hole and
+    // the sender must resend ONLY that frame. One-shot: the resend is accepted.
+    static const long kDropRxSeq = [] {
+        const char* e = std::getenv("ULTRA_DROP_RX_SEQ");
+        return e ? std::atol(e) : -1L;
+    }();
+    if (kDropRxSeq >= 0) {
+        static bool dropped_once = false;
+        auto hdr = v2::parseHeader(frame_data);
+        if (!dropped_once && hdr.valid && !hdr.is_control &&
+            hdr.seq == static_cast<uint16_t>(kDropRxSeq)) {
+            dropped_once = true;
+            LOG_MODEM(WARN, "Connection: TEST-DROP RX DATA seq=%u (one-shot, proving selective repeat)",
+                      hdr.seq);
+            return;
+        }
+    }
+
     const bool outermost = !arq_callback_defer_refill_;
     if (outermost) {
         arq_callback_defer_refill_ = true;
@@ -4264,6 +4326,17 @@ void Connection::configureArqForCurrentDataMode() {
             connection_policy::isNearAwgnOFDM(fading_index_, measured_snr_db_);
         arq_.setWindowSize(connection_policy::ofdmWindowSizeForChannel(
             data_modulation_, data_code_rate_, fading_index_, measured_snr_db_));
+        // TRANSPORT MERGE (step 1): the tone-burst ack carries a 6-bit frame_mask, so cap
+        // the in-flight window to 6. An N-frame message then streams as ≤6-frame windows
+        // (e.g. 8 frames → 6 then 2), each fully covered by one tone-burst snapshot — no
+        // mask truncation, no spurious resend of frames past the 6th. (MC-DPSK 1-5 and
+        // OFDM_NARROW 3 are already within 6.) The timing math below then sizes timeouts
+        // for the capped window.
+        if (kInteractiveToneAckEnabled() && arq_.getWindowSize() > 6) {
+            LOG_MODEM(INFO, "Connection: capped ARQ window %zu -> 6 (tone-burst 6-bit mask)",
+                      arq_.getWindowSize());
+            arq_.setWindowSize(6);
+        }
         arq_.setMaxRetries(15);
         arq_.setAckBatchSize(connection_policy::ofdmAckBatchSize(near_awgn_ofdm));
 

@@ -72,6 +72,22 @@ public:
     using TransmitBatchCallback = std::function<void(const std::vector<Bytes>&)>;
     void setTransmitBatchCallback(TransmitBatchCallback cb);
 
+    // TRANSPORT MERGE (step 1): tone-burst ACK on the interactive path. When this
+    // callback is installed, sendSack() emits the ack as a fast tone-burst —
+    // base_seq + the (low 6 bits of the) RX bitmap — via the callback instead of a
+    // SACK control frame. Installed only when the feature is enabled; otherwise the
+    // legacy SACK-frame path is used unchanged. has_final mirrors the FINAL flag the
+    // SACK would have carried.
+    using ToneBurstSackCallback =
+        std::function<void(uint16_t base_seq, uint32_t bitmap, bool has_final)>;
+    void setEmitToneBurstSackCallback(ToneBurstSackCallback cb) {
+        on_emit_tone_burst_sack_ = std::move(cb);
+    }
+    // Sender side: consume an incoming tone-burst ACK. Reconstructs the full 16-bit
+    // ack base from the 6-bit group_seq (nearest to tx_base-1) and drives the standard
+    // ack path (handleAckFrame), so selective-repeat behaves identically to a SACK.
+    void onToneBurstAck(uint8_t group_seq6, uint32_t bitmap);
+
     ARQStats getStats() const override { return stats_; }
     void resetStats() override { stats_ = ARQStats{}; }
 
@@ -314,6 +330,7 @@ private:
     // Callbacks
     TransmitCallback on_transmit_;
     TransmitBatchCallback on_transmit_batch_;
+    ToneBurstSackCallback on_emit_tone_burst_sack_;
     DataReceivedCallback on_data_received_;
     SendCompleteCallback on_send_complete_;
     ReceiveWindowAdvancedCallback on_rx_window_advanced_;

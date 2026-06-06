@@ -463,6 +463,7 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
         uint16_t expected_seq = rx_base_seq_;
         size_t slot = seqToSlot(seq);
         bool new_frame = false;
+        const uint16_t rx_base_before_frame = rx_base_seq_;
         bool out_of_order = false;
 
         if (!rx_window_[slot].received) {
@@ -488,6 +489,11 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
         } else {
             LOG_MODEM(DEBUG, "SR-ARQ: Duplicate DATA seq=%d", seq);
         }
+        // How far the receive window jumped forward on this frame: 1 for an ordinary
+        // in-order frame, >1 when an in-order frame filled a hole and caught up to
+        // already-buffered out-of-order frames (a repair completing).
+        const int rx_base_advance =
+            static_cast<int>(static_cast<uint16_t>(rx_base_seq_ - rx_base_before_frame));
 
         if (ultra::phyDiagnosticsEnabled()) {
             std::ostringstream oss;
@@ -537,7 +543,30 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
         const bool out_of_order_sack_allowed =
             out_of_order &&
             (immediate_out_of_order_sack_enabled_ || !frame_more_frag || frame_final);
-        if (out_of_order_sack_allowed || (batch_threshold_reached && batch_ack_allowed)) {
+
+        // HALF-DUPLEX tone-burst ack: each ack is a full keyup + T/R turnaround, so we
+        // must NOT ack per frame (the "3 bursts in a row" the operator saw). Coalesce to
+        // ONE tone-burst per received burst — emit only at the message tail (no more
+        // fragments / FINAL), or when an in-order frame fills a hole and the window jumps
+        // forward (a repair completed). Mid-burst in-order frames and standalone
+        // out-of-order frames are silent; the bitmap is a cumulative snapshot so one
+        // burst conveys the whole window. A dropped TAIL is recovered by the sender's
+        // RTO (it resends, the tail re-arrives, and that tail-ack fires) — so we
+        // deliberately do NOT arm the legacy delayed-SACK timer here, which would fire
+        // mid-burst between the widely-spaced physical frames.
+        bool immediate_ack;
+        bool arm_delayed_timer;
+        if (on_emit_tone_burst_sack_) {
+            const bool tail = !frame_more_frag || frame_final;
+            const bool hole_filled = new_frame && !out_of_order && rx_base_advance > 1;
+            immediate_ack = new_frame && (tail || hole_filled);
+            arm_delayed_timer = false;
+        } else {
+            immediate_ack =
+                out_of_order_sack_allowed || (batch_threshold_reached && batch_ack_allowed);
+            arm_delayed_timer = new_frame;
+        }
+        if (immediate_ack) {
             // Bump the trigger-reason counter BEFORE sendSack — out_of_order
             // takes priority because it's the immediate safety valve. Each
             // SACK send increments exactly one trigger counter.
@@ -550,7 +579,7 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
             sack_pending_ = false;
             sack_timer_ms_ = 0;
             frames_since_ack_ = 0;
-        } else if (new_frame) {
+        } else if (arm_delayed_timer) {
             sack_pending_ = true;
             if (sack_delay_slides_on_data_) {
                 // OFDM physical bursts decode frames in cadence. Re-arming on
@@ -1467,10 +1496,57 @@ void SelectiveRepeatARQ::maybeSendCwNack(size_t slot_index, uint32_t missing_bit
     slot.cw_nack_cooldown_ms = std::max<uint32_t>(config_.sack_delay_ms, 1000u);
 }
 
+void SelectiveRepeatARQ::onToneBurstAck(uint8_t group_seq6, uint32_t bitmap) {
+    // Reconstruct the full 16-bit ack base from the 6-bit group_seq, picking the value
+    // whose low 6 bits match and that is nearest to (tx_base_seq_ - 1) — the seq a SACK
+    // would carry. The interactive window is far smaller than 64, so this is unambiguous.
+    const uint16_t ref = static_cast<uint16_t>((tx_base_seq_ - 1) & 0xFFFF);
+    uint16_t base = static_cast<uint16_t>((ref & 0xFFC0) | (group_seq6 & 0x3F));
+    const int16_t diff = static_cast<int16_t>(base - ref);
+    if (diff > 32) {
+        base -= 64;
+    } else if (diff < -32) {
+        base += 64;
+    }
+
+    // Drive the standard ack path so selective-repeat (cumulative advance + hole
+    // detection + retransmit + send-complete) behaves identically to a SACK frame.
+    auto ack = v2::ControlFrame::makeNack(local_call_, remote_call_, base, bitmap);
+    ack.type = v2::FrameType::ACK;
+    LOG_MODEM(INFO, "SR-ARQ: TONE-BURST ack RX group_seq6=%u -> base=%d bitmap=0x%08X",
+              group_seq6, base, bitmap);
+    handleAckFrame(ack);
+}
+
 void SelectiveRepeatARQ::sendSack() {
     uint32_t bitmap = buildRXBitmap();
     uint16_t base_seq = (rx_base_seq_ - 1) & 0xFFFF;
     const bool sack_has_final = rx_final_delivered_since_sack_;
+
+    // TRANSPORT MERGE (step 1): emit the ack as a fast tone-burst instead of a SACK
+    // control frame when the feature is wired. The tone-burst carries base_seq (low 6
+    // bits) + the low-6 RX bitmap, enough to selectively ack a small interactive window.
+    if (on_emit_tone_burst_sack_) {
+        stats_.sacks_sent++;
+        stats_.acks_sent++;
+        rx_final_delivered_since_sack_ = false;
+        last_sack_base_valid_ = true;
+        last_sack_base_ = base_seq;
+        LOG_MODEM(INFO, "SR-ARQ: Sent TONE-BURST ack base=%d bitmap=0x%08X final=%d",
+                  base_seq, bitmap, sack_has_final ? 1 : 0);
+        if (ultra::phyDiagnosticsEnabled()) {
+            std::ostringstream oss;
+            oss << "event=arq_ack_tx_toneburst"
+                << " local=" << local_call_ << " remote=" << remote_call_
+                << " ack_seq=" << base_seq
+                << " bitmap=0x" << std::hex << bitmap << std::dec
+                << " final=" << boolDigit(sack_has_final) << " rx_base=" << rx_base_seq_;
+            ultra::phyDiagLine(oss.str());
+        }
+        on_emit_tone_burst_sack_(base_seq, bitmap, sack_has_final);
+        return;
+    }
+
     const bool turn_requested = should_request_turn_ && should_request_turn_();
 
     // Use NACK with bitmap as SACK
