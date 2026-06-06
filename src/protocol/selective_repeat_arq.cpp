@@ -557,10 +557,32 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
         bool immediate_ack;
         bool arm_delayed_timer;
         if (on_emit_tone_burst_sack_) {
+            // One tone-burst per received WINDOW/turn: the message tail, an in-order
+            // frame that fills a hole, OR a full window-worth of frames since the last
+            // ack — so a MULTI-WINDOW transfer (a file) acks each window instead of
+            // stalling waiting for a tail that is many windows away. No per-out-of-order
+            // acks (half-duplex: one keyup per turn).
             const bool tail = !frame_more_frag || frame_final;
             const bool hole_filled = new_frame && !out_of_order && rx_base_advance > 1;
-            immediate_ack = new_frame && (tail || hole_filled);
-            arm_delayed_timer = false;
+            const bool window_worth =
+                new_frame && frames_since_ack_ >= config_.window_size;
+            // Burst-aware path: while feeding a decoded group, SUPPRESS the per-frame
+            // ack entirely — the caller emits exactly one ack at the group boundary
+            // (endGroupReceiveAndAck), which is the real "the burst ended" signal a
+            // sub-window burst can't convey through frames_since_ack_.
+            immediate_ack = !group_ack_deferred_ && new_frame &&
+                            (tail || hole_filled || window_worth);
+            // SELECTIVE REPEAT on a PARTIAL burst: an out-of-order new frame means we now
+            // hold frames the sender thinks are missing. On bi=0 (no cross-frame
+            // interleave) a fade can drop frame N while N+1/N+2 decode independently — so
+            // the surviving frames arrive out-of-order past the hole. Without telling the
+            // sender, it times out and resends the WHOLE burst (re-sending frames we
+            // already have). Arm a short, sliding delayed SACK so ONE tone-burst
+            // (cumulative base + out-of-order bitmap) goes back after the burst settles,
+            // and the sender resends ONLY the hole. Suppressed inside an explicit group
+            // (endGroupReceiveAndAck carries it) and when an immediate ack already fired.
+            arm_delayed_timer =
+                !group_ack_deferred_ && new_frame && out_of_order && !immediate_ack;
         } else {
             immediate_ack =
                 out_of_order_sack_allowed || (batch_threshold_reached && batch_ack_allowed);
@@ -581,7 +603,15 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
             frames_since_ack_ = 0;
         } else if (arm_delayed_timer) {
             sack_pending_ = true;
-            if (sack_delay_slides_on_data_) {
+            if (on_emit_tone_burst_sack_) {
+                // Tone-burst partial-burst SACK: short SLIDING delay (re-armed on each
+                // out-of-order frame, so it fires ~this long after the LAST hole frame —
+                // coalescing the burst's holes into ONE tone-burst). Kept well under the
+                // sender's retransmit timeout so the selective SACK reaches it before it
+                // would blindly resend the whole burst.
+                constexpr uint32_t kToneBurstPartialSackDelayMs = 1500;
+                sack_timer_ms_ = kToneBurstPartialSackDelayMs;
+            } else if (sack_delay_slides_on_data_) {
                 // OFDM physical bursts decode frames in cadence. Re-arming on
                 // each decoded frame turns the SACK timer into a burst-tail
                 // quiet detector while the delay itself still comes from the
@@ -614,12 +644,21 @@ void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
                 << " window=" << config_.window_size;
             ultra::phyDiagLine(oss.str());
         }
-        // Out-of-window: send SACK immediately to help sender recover
+        // Out-of-window: normally send a SACK immediately to help the sender recover.
+        // BUT while feeding a decoded BURST GROUP (group_ack_deferred_), suppress it —
+        // a single group commonly contains frames that became duplicates mid-group (an
+        // earlier frame filled a hole and advanced rx_base past them: the "delivered 3,4,5
+        // then seq=4,5 outside window" cascade). Each such frame would otherwise emit its
+        // own tone-burst → 3 acks for one group (the multi-ack regression on fading). The
+        // single endGroupReceiveAndAck() at the group boundary carries the correct
+        // cumulative state, so defer to it: ONE tone-burst per group.
         stats_.sack_trigger_out_of_window++;
-        sendSack();
-        sack_pending_ = false;
-        sack_timer_ms_ = 0;
-        frames_since_ack_ = 0;
+        if (!group_ack_deferred_) {
+            sendSack();
+            sack_pending_ = false;
+            sack_timer_ms_ = 0;
+            frames_since_ack_ = 0;
+        }
     }
 }
 
@@ -852,7 +891,18 @@ void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
     // --- Hole-based fast retransmit for base gap frame ---
     // Trigger: ACK aligned to base (seq == tx_base-1), bit0=0, any higher bit set.
     // This means the receiver is missing the base frame but has later frames.
-    if (arq_policy::isAlignedBaseHoleAck(seq, tx_base_seq_, bitmap)) {
+    //
+    // DISABLED on the tone-burst / stop-and-wait burst path (on_emit_tone_burst_sack_).
+    // Fast-retx + hole-probe are PIPELINING mechanisms: they resend a lost frame
+    // mid-stream while later frames are still flowing, before a timeout. Half-duplex
+    // burst is stop-and-wait — you key down a whole group, turn around, and get ONE
+    // tone-burst back, then form the next burst ([remaining holes] + [new]). There is
+    // nothing to pipeline; fast-retx only adds cooldowns, 2-confirmation latency, and
+    // spurious duplicate resends to an inherently one-turn loop. Resends here are
+    // timeout-only (the single burst-level ack timeout), driven by forming the next
+    // coalesced burst on the one ack/timeout per turn.
+    if (!on_emit_tone_burst_sack_ &&
+        arq_policy::isAlignedBaseHoleAck(seq, tx_base_seq_, bitmap)) {
         size_t base_slot = seqToSlot(tx_base_seq_);
         TXSlot& s = tx_window_[base_slot];
 
@@ -1516,6 +1566,61 @@ void SelectiveRepeatARQ::onToneBurstAck(uint8_t group_seq6, uint32_t bitmap) {
     LOG_MODEM(INFO, "SR-ARQ: TONE-BURST ack RX group_seq6=%u -> base=%d bitmap=0x%08X",
               group_seq6, base, bitmap);
     handleAckFrame(ack);
+}
+
+void SelectiveRepeatARQ::endGroupReceiveAndAck() {
+    group_ack_deferred_ = false;
+    // EXACTLY ONE tone-burst ack for the whole received burst: cumulative base + hole
+    // bitmap (sendSack snapshots rx_base_seq_/buildRXBitmap). Emit UNCONDITIONALLY —
+    // even an all-duplicate group re-confirms the receiver's window state so a sender
+    // retransmit can never deadlock waiting for an ack it will never get. One keyup per
+    // received burst = the half-duplex-correct cadence.
+    stats_.sack_trigger_threshold++;
+    sendSack();
+    sack_pending_ = false;
+    sack_timer_ms_ = 0;
+    frames_since_ack_ = 0;
+}
+
+size_t SelectiveRepeatARQ::retransmitInFlightUnacked(size_t max_frames) {
+    if (max_frames == 0) {
+        return 0;
+    }
+    // Snapshot the holes first (retransmitFrame can drop a frame on max_retries, which
+    // shifts the window — don't iterate the window while mutating it).
+    std::vector<size_t> holes;
+    for (size_t i = 0; i < config_.window_size && holes.size() < max_frames; i++) {
+        size_t slot = seqToSlot((tx_base_seq_ + i) & 0xFFFF);
+        const TXSlot& s = tx_window_[slot];
+        if (s.active && !s.acked) {
+            holes.push_back(slot);
+        }
+    }
+    size_t resent = 0;
+    for (size_t slot : holes) {
+        // Re-check: a prior fail-out could have cleared/advanced this slot.
+        if (tx_window_[slot].active && !tx_window_[slot].acked) {
+            // NACK cause: this is a turn-driven (ack-revealed) hole resend, not a blind
+            // timeout. retransmitFrame resets the slot's timeout and routes the frame
+            // through transmitData → the connection buffers it into the open burst group.
+            retransmitFrame(slot, RetransmitCause::NACK);
+            if (tx_window_[slot].active) {  // still active => actually resent (not failed out)
+                ++resent;
+            }
+        }
+    }
+    return resent;
+}
+
+size_t SelectiveRepeatARQ::bufferedRxFrameCount() const {
+    size_t count = 0;
+    for (size_t i = 0; i < config_.window_size; i++) {
+        size_t slot = seqToSlot((rx_base_seq_ + i) & 0xFFFF);
+        if (rx_window_[slot].received) {
+            ++count;  // out-of-order buffered (a hole below blocks in-order delivery)
+        }
+    }
+    return count;
 }
 
 void SelectiveRepeatARQ::sendSack() {

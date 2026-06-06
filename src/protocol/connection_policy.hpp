@@ -56,7 +56,15 @@ inline constexpr float kClarkeCoherenceNumerator = 0.423f;
 inline constexpr uint32_t kNarrowOFDMSymbolSamples = 2240;
 inline constexpr uint32_t kNarrowOFDMCarriers = 21;
 inline constexpr uint32_t kNarrowOFDMPilotSpacing = 10;
-inline constexpr uint32_t kLDPCBitsPerCodeword = 648;
+inline constexpr uint32_t kLDPCBitsPerCodeword = 648;  // z=27 (n=648) short LDPC
+
+// Coded bits per LDPC codeword for a given lifting size. The 802.11n base matrix has
+// 24 columns, so N = z × 24: z=27 → 648 (short, default), z=81 → 1944 (long, ~3 dB more
+// FEC margin for fading). Airtime scales with TOTAL coded bits (cw × N), so any airtime/
+// timeout derived from codeword count MUST know z or it under-counts a z=81 frame ~3×.
+inline constexpr uint32_t ldpcCodewordBits(int lifting_z) {
+    return (lifting_z == 81) ? 1944u : kLDPCBitsPerCodeword;
+}
 inline constexpr uint32_t kFixedFrameCodewords = v2::kDefaultFixedFrameCodewords;
 inline constexpr uint32_t kOFDMBurstAckBatchFrames = 4;
 inline constexpr size_t kWideOFDMWindowFrames = 8;
@@ -378,11 +386,15 @@ inline uint32_t bitsPerOFDMSymbol(uint32_t carriers,
         static_cast<int>(carriers), include_pilots, pilot_spacing, mod));
 }
 
-inline uint32_t wideOFDMSymbolsForCodewords(Modulation mod, CodeRate rate, int codewords) {
+inline uint32_t wideOFDMSymbolsForCodewords(Modulation mod, CodeRate rate, int codewords,
+                                            int lifting_z = 27) {
     const int pilot_spacing = ofdm_link_adaptation::recommendedPilotSpacing(mod, rate);
     const uint32_t bits_per_symbol = bitsPerOFDMSymbol(
         kWideOFDMCarriers, true, pilot_spacing, mod);
-    const uint32_t frame_bits = static_cast<uint32_t>(codewords) * kLDPCBitsPerCodeword;
+    // z-AWARE: coded bits per codeword is N = z×24 (648 at z=27, 1944 at z=81). A z=81
+    // frame carries ~3× the coded bits per codeword, so it occupies ~3× the data symbols.
+    const uint32_t frame_bits =
+        static_cast<uint32_t>(codewords) * ldpcCodewordBits(lifting_z);
     const uint32_t data_symbols = (frame_bits + bits_per_symbol - 1) / bits_per_symbol;
     return 2 + data_symbols;
 }
@@ -421,15 +433,18 @@ inline bool shouldUseWideOFDMShortReanchor(WaveformMode waveform,
 
 inline OFDMFrameTiming wideOFDMFrameTiming(Modulation mod,
                                            CodeRate rate,
-                                           int cw_count = v2::kDefaultFixedFrameCodewords) {
+                                           int cw_count = v2::kDefaultFixedFrameCodewords,
+                                           int data_lifting_z = 27) {
     cw_count = v2::sanitizeFixedFrameCodewords(cw_count);
     constexpr float symbol_ms =
         (1000.0f * static_cast<float>(kWideOFDMSymbolSamples)) /
         static_cast<float>(kOFDMSampleRate);
 
     OFDMFrameTiming timing;
-    timing.data_symbols = wideOFDMSymbolsForCodewords(mod, rate, cw_count);
-    timing.ack_symbols = wideOFDMSymbolsForCodewords(mod, rate, 1);
+    // DATA frames carry the negotiated lifting z (27 short / 81 long); the ACK/control
+    // frame is ALWAYS a 1-CW short (z=27) frame, so its airtime is z-independent.
+    timing.data_symbols = wideOFDMSymbolsForCodewords(mod, rate, cw_count, data_lifting_z);
+    timing.ack_symbols = wideOFDMSymbolsForCodewords(mod, rate, 1, /*lifting_z=*/27);
     timing.data_ms = static_cast<uint32_t>(timing.data_symbols * symbol_ms + 0.5f);
     timing.ack_ms = static_cast<uint32_t>(timing.ack_symbols * symbol_ms + 0.5f);
     return timing;
@@ -439,12 +454,14 @@ inline uint32_t wideOFDMBurstAirtimeMs(Modulation mod,
                                        CodeRate rate,
                                        size_t frame_count,
                                        int cw_count = v2::kDefaultFixedFrameCodewords,
-                                       uint32_t continuation_reanchor_ms = 0) {
+                                       uint32_t continuation_reanchor_ms = 0,
+                                       int data_lifting_z = 27) {
     if (frame_count == 0) {
         return 0;
     }
 
-    const OFDMFrameTiming timing = wideOFDMFrameTiming(mod, rate, cw_count);
+    const OFDMFrameTiming timing =
+        wideOFDMFrameTiming(mod, rate, cw_count, data_lifting_z);
     uint64_t burst_ms = static_cast<uint64_t>(frame_count) * timing.data_ms;
     if (frame_count > 1) {
         // StreamingEncoder::encodeBurstLight() emits a full chirp anchor on the

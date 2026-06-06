@@ -88,6 +88,31 @@ public:
     // ack path (handleAckFrame), so selective-repeat behaves identically to a SACK.
     void onToneBurstAck(uint8_t group_seq6, uint32_t bitmap);
 
+    // Receiver side, BURST-AWARE ACK (transport merge): the unified path delivers a
+    // whole decoded burst (group) at once. The receiver knows the group boundary, so
+    // instead of the per-frame coalescing heuristic (which can't see "the group ended"
+    // and stalls a sub-window burst), bracket the group's frames with these:
+    //   beginGroupReceive() — suppress the per-frame ack decision while feeding frames;
+    //   endGroupReceiveAndAck() — emit EXACTLY ONE tone-burst ack (cumulative base +
+    //     hole bitmap) for the whole burst. Always emits, even for an all-duplicate
+    //     group, so a sender retransmit can never get stuck waiting for an ack.
+    void beginGroupReceive() { group_ack_deferred_ = true; }
+    void endGroupReceiveAndAck();
+
+    // STOP-AND-WAIT burst sender: resend the in-flight UNACKED frames (the holes the
+    // receiver is missing) on demand, in seq order from the window base, up to
+    // max_frames. The caller invokes this with burst buffering open so the holes land in
+    // the SAME group as the new frames that fill the rest of the budget ([holes]+[new]),
+    // keeping the pipe full instead of sending a lonely 1-frame resend. Returns how many
+    // were actually resent (a frame that hits max_retries is dropped, not counted).
+    size_t retransmitInFlightUnacked(size_t max_frames);
+
+    // Frames received OUT OF ORDER and buffered in the RX window past the current base
+    // (a hole below them blocks in-order delivery). The unified path delivers in order,
+    // so these aren't visible to file_transfer_ yet; surface the count so the GUI's
+    // "received" progress advances on ANY frame, not just contiguous ones.
+    size_t bufferedRxFrameCount() const;
+
     ARQStats getStats() const override { return stats_; }
     void resetStats() override { stats_ = ARQStats{}; }
 
@@ -283,6 +308,9 @@ private:
     uint8_t last_rx_flags_ = 0;
     v2::FrameType last_rx_frame_type_ = v2::FrameType::DATA;
     bool rx_final_delivered_since_sack_ = false;
+    // Burst-aware ack (transport merge): while true, handleDataFrame suppresses the
+    // per-frame ack decision; endGroupReceiveAndAck() emits one ack for the group.
+    bool group_ack_deferred_ = false;
 
     // Delayed SACK for half-duplex (wait for burst to complete)
     bool sack_pending_ = false;     // SACK waiting to be sent

@@ -7,6 +7,7 @@
 #include "waveform_selection.hpp"
 #include "ultra/logging.hpp"
 #include <algorithm>
+#include <limits>
 #include <filesystem>
 
 namespace ultra {
@@ -19,11 +20,17 @@ constexpr uint16_t kOFDMBurstPadSeq = 0xFFFE;
 constexpr size_t kMaxQueuedPayloads = 32;
 
 // TRANSPORT MERGE (step 1): opt-in tone-burst ACK on the interactive SR-ARQ path.
-constexpr uint32_t kInteractiveToneAckWindowMs = 8000;  // monitor arm window for the ack
-bool kInteractiveToneAckEnabled() {
-    static const bool v = std::getenv("ULTRA_TONE_ACK_INTERACTIVE") != nullptr;
-    return v;
-}
+constexpr uint32_t kInteractiveToneAckWindowMs = 8000;  // floor: monitor arm window for the ack
+// TRANSPORT MERGE (2026-06-06): the unified arq_ path is now THE OFDM file/message
+// transport — one 16-bit seq space, one tone-burst ack, one retransmit window. The
+// file still bursts+interleaves via sendNextFileChunk()->flushBurstBuffer(); arq_ owns
+// sequencing/dedup/retransmit and the RX delivers through processArqFrame. The legacy
+// burst_transport_ group controller (BurstStopAndWaitController) is removed — there is
+// exactly ONE group-generation path. These two helpers are now unconditionally true
+// (kept as named call sites during the cleanup; inline + delete in a follow-up).
+// Proof: /tmp/unified_multiseed.sh — AWGN R3/4+R2/3, Good R2/3 CRC-clean, legacy_calls=0.
+bool kInteractiveToneAckEnabled() { return true; }
+bool kUnifiedSeqEnabled() { return true; }
 
 Modulation wideOFDMControlModulationForData(Modulation data_modulation) {
     return ofdm_link_adaptation::isCoherentModulation(data_modulation)
@@ -384,9 +391,17 @@ Connection::Connection(const ConnectionConfig& config)
         // tone-burst monitor so we hear the peer's tone-burst ACK (it will emit one
         // instead of a SACK frame). Re-arming on each frame just extends the window;
         // the monitor auto-disarms on a successful decode.
-        if (kInteractiveToneAckEnabled() && on_arm_tone_burst_ack_monitor_) {
-            on_arm_tone_burst_ack_monitor_(kInteractiveToneAckWindowMs);
-        }
+        //
+        // The window must cover the FULL round-trip from TX-start, and the ack does NOT
+        // arrive until the peer has fully RECEIVED the burst (real-time airtime) AND
+        // LDPC-decoded it — for a multi-frame OFDM burst that is many seconds, far past
+        // the fixed 8 s floor (which only ever fit a 1-2 frame interactive message). The
+        // exact, already-derived bound is the ARQ retransmit timeout: listen for the ack
+        // for as long as we'd wait before resending. It is burst-aware (burst airtime +
+        // decode-jitter margin + ack tail), so the monitor can never expire mid-round-
+        // trip; it auto-disarms the instant the ack decodes. Floor at the interactive
+        // value so short MC-DPSK/interactive sends are unchanged.
+        armToneBurstAckListenWindow();
     });
     arq_.setTxBaseAdvancedCallback([this](uint16_t base_seq) {
         handleArqTxBaseAdvanced(base_seq);
@@ -417,139 +432,6 @@ Connection::Connection(const ConnectionConfig& config)
                 on_transmit_tone_burst_ack_(tba);
             });
     }
-
-    // §14.27: wire the one-way burst stop-and-wait controller callbacks.
-    // Burst transport is the DEFAULT OFDM-wideband file path as of 2026-05-30
-    // (`use_burst_transport_ = true`). NOTE: burst is itself selective-repeat (GROUP_ACK
-    // carries the 6-bit SACK frame_mask; resend-failed-only + refill) — it is NOT "non-ARQ".
-    // What is transitional / slated for removal is only the LEGACY wideband-file ROUTING:
-    // the `!use_burst_transport_` branches that push a wideband file through the windowed
-    // `arq_` instead of `burst_transport_`, plus the `ULTRA_BURST_TRANSPORT=0` opt-out.
-    // The `SelectiveRepeatARQ arq_` controller stays — it still serves MC-DPSK / OFDM_NARROW
-    // data and all control ACKs. See docs/REMOVAL_BACKLOG.md.
-    burst_transport_.setTransmitGroup(
-        [this](uint16_t group_seq, const BurstStopAndWaitController::Group& frames) {
-            if (on_transmit_burst_) {
-                // -> ModemEngine::transmitBurst(frames, group_seq); group_seq is
-                // stamped into the descriptor so the RX whole-burst-ACKs this group.
-                // Legacy tx_group_ path does not carry is_resend; the active
-                // chunk-at-rate path (formAndSendBurstGroup) sets the resend anchor.
-                on_transmit_burst_(frames, group_seq, /*force_full_preamble=*/false);
-            }
-            // §15 step 4d-late: arm the receiver-side tone-burst monitor
-            // for the expected ACK. The window = burst_transport_'s
-            // ack_timeout (already computed from rung timing in
-            // applyAdaptiveRateFeedback / applyDataMode / startBurstFileTransfer).
-            // The monitor wakes up, runs detection at a tight cadence, and
-            // disarms automatically on a successful decode or window expiry.
-            // Outside this window the monitor idles — no audio-thread CPU.
-            if (on_arm_tone_burst_ack_monitor_) {
-                const uint32_t window_ms = burst_transport_.ackTimeoutMs();
-                on_arm_tone_burst_ack_monitor_(window_ms);
-            }
-        });
-    burst_transport_.setSendGroupAck([this](uint16_t group_seq) {
-        // §15 step 4d-iv: tone-burst ACK is now the SOLE GROUP_ACK transport
-        // for the burst-transport file path. The OFDM 1-CW GROUP_ACK frame
-        // is no longer emitted here.
-        //
-        // The previous parallel-emit dual-path approach (4d-iii) had an
-        // ordering race: the OFDM ACK was queued first, took ~1.5 s on the
-        // wire, arrived at the sender before the tone-burst, and advanced
-        // burst_transport_.next_group_. The tone-burst then arrived with the
-        // older seq and was silently rejected by the "seq != next_group_"
-        // guard inside BurstTransport::onGroupAck. Result: tone-burst was
-        // proven to detect (10/10 in smoke test) but never won the race.
-        //
-        // Fix: drop the OFDM ACK emit. Goodput improvement is ~1.5 s saved
-        // per group ACK = ~830 ms net (after subtracting the tone-burst's
-        // 675 ms airtime). Verified on the GUI: the receiver's tone-burst
-        // monitor fires reliably and the protocol path consumes it via
-        // Connection::onToneBurstAck (step 4d-ii).
-        //
-        // §14.36 quality feedback: the rate-controller signal previously
-        // rode the OFDM ACK's quality byte. The tone-burst payload's 3-bit
-        // rate_hint carries the same information at lower fidelity (8
-        // bins vs 256). On the sender side, Connection::onToneBurstAck
-        // currently maps ACK -> quality 1.0, NACK -> 0.0; consuming the
-        // rate_hint as a continuous quality signal is a follow-up.
-        const uint8_t quality_q = pending_ack_quality_q_;
-
-        // A/B-comparison knob (TEMPORARY, will be removed once §15 is
-        // validated multi-seed). ULTRA_LEGACY_OFDM_GROUP_ACK=1 emits the
-        // pre-4d-iv OFDM 1-CW GROUP_ACK frame instead of the tone-burst.
-        // Used to measure apples-to-apples goodput delta between the two
-        // ACK transports at the same HEAD commit.
-        const char* legacy_env = std::getenv("ULTRA_LEGACY_OFDM_GROUP_ACK");
-        const bool use_legacy_ofdm_ack =
-            (legacy_env && std::atoi(legacy_env) != 0);
-        if (use_legacy_ofdm_ack) {
-            transmitFrame(
-                v2::ControlFrame::makeGroupAck(local_call_, remote_call_,
-                                                group_seq, quality_q)
-                    .serialize());
-            return;
-        }
-
-        if (on_transmit_tone_burst_ack_) {
-            ultra::waveform::tone_burst_ack::ToneBurstAckPayload tba;
-            tba.group_seq = static_cast<uint8_t>(group_seq & 0x3F);
-            tba.frame_mask = 0x3F;  // cumulative ACK (all frames in group OK)
-            tba.type =
-                ultra::waveform::tone_burst_ack::AckType::Ack;
-            // Quantize the §14.36 quality byte (0..254, 255 = none) into a
-            // 3-bit rate_hint (0..7). Informational only for now.
-            if (quality_q == 0xFF) {
-                tba.rate_hint = 0;
-            } else {
-                tba.rate_hint = static_cast<uint8_t>(
-                    (static_cast<uint32_t>(quality_q) * 7u) / 254u);
-            }
-            on_transmit_tone_burst_ack_(tba);
-        } else {
-            // Defensive: this should never happen in production (app.cpp
-            // installs the callback at startup). If it does, the sender's
-            // burst_transport_.next_group_ will not advance and the file
-            // transfer will stall until ack_timeout fires a resend. Log
-            // loudly so the failure is obvious in the field.
-            LOG_MODEM(ERROR,
-                      "Connection: GROUP_ACK emit skipped (no tone-burst ACK callback installed); "
-                      "file transfer will rely on ack_timeout-driven retransmits");
-        }
-    });
-    burst_transport_.setGroupDelivered(
-        [this](uint16_t /*group_seq*/, const BurstStopAndWaitController::Group& frames) {
-            // Each group frame is a serialized fixed DATA frame; strip the header
-            // and feed the payload to the SAME reassembly path as SR-ARQ DATA
-            // frames (handleDataPayload). more_data follows MORE_FRAG; the stream
-            // tail carries FINAL (no MORE_FRAG) so the reassembler finalizes.
-            for (const auto& frame : frames) {
-                auto df = v2::DataFrame::deserialize(frame);
-                if (!df) {
-                    continue;
-                }
-                const bool more_data = (df->flags & v2::Flags::MORE_FRAG) != 0;
-                handleDataPayload(df->payload, more_data, df->type);
-            }
-        });
-    burst_transport_.setTransferDone([this](bool success) {
-        if (file_transfer_.getState() != FileTransferState::SENDING) {
-            return;
-        }
-        if (success) {
-            // startBurstFileTransfer() drained every chunk up front (so
-            // hasMoreChunks() is already false). Drive the chunk-ack count to
-            // chunks_sent_ so FileTransferController fires its sent-callback once
-            // for the whole burst transfer and resets TX state (resetTxState()).
-            while (file_transfer_.getState() == FileTransferState::SENDING &&
-                   file_transfer_.hasPendingChunks()) {
-                file_transfer_.onChunkAcked();
-            }
-        } else {
-            // Link declared dead after max group retries.
-            file_transfer_.onSendFailed();
-        }
-    });
 
     arq_.setSendCompleteCallback([this](bool success) {
         if (file_transfer_.getState() == FileTransferState::SENDING) {
@@ -1729,15 +1611,9 @@ bool Connection::startFileTransferNow(const std::string& filepath) {
         return false;
     }
 
-    // §14.27: one-way burst stop-and-wait path (OFDM only). Drains the whole file
-    // into interleaved groups and runs group-level ARQ — no SR-ARQ window, no SACK.
-    if (use_burst_transport_ && is_ofdm) {
-        if (startBurstFileTransfer()) {
-            return true;
-        }
-        LOG_MODEM(WARN, "Connection: Burst file transfer start failed; falling back to SR-ARQ");
-    }
-
+    // TRANSPORT MERGE (2026-06-06): the unified arq_ path is the only OFDM file transport —
+    // it bursts + interleaves via sendNextFileChunk() -> flushBurstBuffer() over ONE 16-bit
+    // seq space, one tone-burst ack, one retransmit window (legacy burst_transport_ removed).
     if (is_ofdm && shouldUseSingleOFDMFileBlock(fading_index_, measured_snr_db_, data_code_rate_)) {
         Bytes block = file_transfer_.getSingleBlockPayload(kOFDMFileBlockPayloadLimit);
         if (!block.empty()) {
@@ -1812,7 +1688,27 @@ bool Connection::isFileTransferInProgress() const {
 }
 
 FileTransferProgress Connection::getFileProgress() const {
-    return file_transfer_.getProgress();
+    FileTransferProgress p = file_transfer_.getProgress();
+    // UNIFIED PATH: out-of-order frames are buffered inside the ARQ rx window and not yet
+    // handed to file_transfer_ (which assembles in order). Add them to received_bytes so
+    // the GUI's "received" count + progress bar advance on ANY frame, not just contiguous
+    // ones — matching the old offset-assembler feedback (received_bytes >= transferred).
+    // Estimate by frame count × the data-chunk payload size (uniform except the tail).
+    if (kUnifiedSeqEnabled() && p.is_sending == false && p.total_bytes > 0) {
+        const size_t buffered_frames = arq_.bufferedRxFrameCount();
+        if (buffered_frames > 0) {
+            const size_t cap = currentDataPayloadCapacity();
+            const size_t chunk_bytes =
+                (cap > FileTransferController::FILE_DATA_OVERHEAD)
+                    ? cap - FileTransferController::FILE_DATA_OVERHEAD
+                    : 0;
+            const uint32_t buffered_bytes =
+                static_cast<uint32_t>(buffered_frames * chunk_bytes);
+            p.received_bytes = std::min(p.total_bytes,
+                                        p.transferred_bytes + buffered_bytes);
+        }
+    }
+    return p;
 }
 
 void Connection::sendNextFileChunk() {
@@ -1830,9 +1726,32 @@ void Connection::sendNextFileChunk() {
         burst_tx_buffer_.clear();
     }
 
-    // Fill the ARQ window with as many chunks as possible
-    // Selective Repeat ARQ can have multiple frames in flight
+    // Bound ONE burst (key-down) to the half-duplex airtime ceiling: cap the frames
+    // submitted this turn to burstAirtimeBudgetFrames(window) so a single transmission
+    // can't run too long (PA duty, ack latency, and — the bug this fixes — a burst
+    // outliving its own tone-burst ack window). DERIVED per rung (mod/rate/cw/fading),
+    // not a fixed count. OFDM only (the airtime model is OFDM); MC-DPSK keeps its own
+    // timing-derived window. Gated to the unified path for now (default build unchanged).
+    const size_t burst_frame_cap = prepareUnifiedBurstWindow();
+
+    // STOP-AND-WAIT, keep-the-pipe-full: this burst = [in-flight holes] + [new chunks],
+    // filled to the budget, as ONE group. First RESEND the frames the receiver is still
+    // missing (holes), then top up with new chunks. A partial burst's surviving frames
+    // were SACKed, so the holes are few — they ride the next group instead of going out
+    // as a lonely 1-frame resend, and the rest of the key-down carries new data. (Unified
+    // OFDM only; the resend buffers into the open burst via transmitFrame.)
+    if (is_ofdm && kUnifiedSeqEnabled() && burst_mode_active_) {
+        arq_.retransmitInFlightUnacked(burst_frame_cap);
+    }
+
+    // Fill the remainder of the budget with new chunks. The budget counts the whole
+    // group, so burst_tx_buffer_.size() (holes already buffered) is the running total.
     while (arq_.isReadyToSend() && file_transfer_.hasMoreChunks()) {
+        const size_t in_burst =
+            burst_mode_active_ ? burst_tx_buffer_.size() : 0;
+        if (in_burst >= burst_frame_cap) {
+            break;
+        }
         Bytes chunk = file_transfer_.getNextChunk();
         if (chunk.empty()) {
             break;
@@ -1881,459 +1800,41 @@ bool Connection::onToneBurstAck(
     // TRANSPORT MERGE (step 1): when interactive tone-burst acks are enabled and we have
     // interactive SR-ARQ frames in flight (no active burst owns this ack), route it to
     // the ARQ window. The ARQ reconstructs the seq and drives its normal ack path.
-    if (kInteractiveToneAckEnabled() && arq_.getTxInFlightBytes() > 0) {
-        arq_.onToneBurstAck(detection.payload.group_seq, detection.payload.frame_mask);
-        return true;
-    }
-
-    if (!use_burst_transport_) return false;
-
-    const uint8_t tba_seq6 = detection.payload.group_seq;
-    const size_t expected_next = burst_transport_.groupsAcked();
-    const uint16_t expected_seq16 = static_cast<uint16_t>(expected_next);
-    const uint8_t expected_seq6 =
-        static_cast<uint8_t>(expected_seq16 & 0x3F);
-
-    if (tba_seq6 != expected_seq6) {
-        LOG_MODEM(DEBUG,
-                  "Connection: tone-burst ACK ignored: seq6=%u != expected_seq6=%u (next_group=%u type=%s)",
-                  static_cast<unsigned>(tba_seq6),
-                  static_cast<unsigned>(expected_seq6),
-                  static_cast<unsigned>(expected_seq16),
-                  detection.payload.type ==
-                          ultra::waveform::tone_burst_ack::AckType::Nack
-                      ? "NACK"
-                      : "ACK");
-        return false;
-    }
-
-    const bool is_nack = (detection.payload.type ==
-                          ultra::waveform::tone_burst_ack::AckType::Nack);
-    LOG_MODEM(INFO,
-              "Connection: tone-burst %s matched group_seq=%u "
-              "(frame_mask=0x%02X rate_hint=%u peak=%.1f symbol_ms=%u)",
-              is_nack ? "NACK" : "ACK",
-              static_cast<unsigned>(expected_seq16),
-              static_cast<unsigned>(detection.payload.frame_mask),
-              static_cast<unsigned>(detection.payload.rate_hint),
-              detection.correlation_peak,
-              static_cast<unsigned>(detection.symbol_ms_used));
-
-    // §SR-ARQ: interpret the per-frame mask. Re-queue the 0-bit REAL frames (skip
-    // pads) of the in-flight burst for resend, then advance + refill if ANY real
-    // frame was delivered. A fully-dead burst (0 real acked) is a NACK so the
-    // controller's max_retries liveness still declares a dead link.
-    if (burst_interleave_off_) {
-        const uint8_t mask = detection.payload.frame_mask;
-        int real_total = 0, real_acked = 0;
-        for (size_t i = 0; i < burst_inflight_frames_.size(); ++i) {
-            const bool pad = (i < burst_inflight_is_pad_.size()) && burst_inflight_is_pad_[i];
-            if (pad) continue;
-            ++real_total;
-            const bool acked = (i < 8) && (((mask >> i) & 1u) != 0);
-            if (acked) {
-                ++real_acked;
-            } else {
-                burst_resend_frames_.push_back(burst_inflight_frames_[i]);
-            }
-        }
-        LOG_MODEM(INFO,
-                  "Connection: SR-ARQ ACK seq=%u mask=0x%02X real_acked=%d/%d resend_queue=%zu",
-                  static_cast<unsigned>(expected_seq16), static_cast<unsigned>(mask),
-                  real_acked, real_total, burst_resend_frames_.size());
-        if (real_acked > 0) {
-            applyAdaptiveRateFeedback(1.0f);
-            burst_transport_.onGroupAck(expected_seq16);   // advance -> form next (resends+new)
-        } else {
-            applyAdaptiveRateFeedback(0.0f);
-            burst_transport_.onGroupNack(expected_seq16);  // retry same burst (liveness)
-        }
-        return true;
-    }
-
-    if (is_nack) {
-        applyAdaptiveRateFeedback(0.0f);
-        burst_transport_.onGroupNack(expected_seq16);
-    } else {
-        applyAdaptiveRateFeedback(1.0f);
-        burst_transport_.onGroupAck(expected_seq16);
-    }
-    return true;
-}
-
-bool Connection::startBurstFileTransfer() {
-    // §14.27: drain the whole file into serialized fixed DATA frames, slice into
-    // BURST_GROUP_SIZE-frame interleaved groups, and hand them to the group
-    // stop-and-wait controller. No SR-ARQ window, no per-frame SACK — one group
-    // is the ARQ unit (whole-burst resend on group-ACK timeout).
-    if (!on_transmit_burst_) {
-        LOG_MODEM(ERROR, "Connection: Burst file transfer requires the burst callback");
-        return false;
-    }
-
-    // 2026-05-28: when the long-LDPC z=81 opt-in is active, the encoder will use
-    // cw_per_frame=2 (the architectural coupling: each frame carries 2x1944 coded
-    // bits = ~75% of the legacy 8x648 frame). The chunk sizer downstream
-    // (file_transfer_.getNextChunk via data_frame_cw_count_) MUST match so the
-    // frames it produces are sized for the encoder's CW count — otherwise the
-    // LDPC-encoded bytes don't match BurstInterleaver's expected B = cw*bytes_per_cw
-    // and the interleaver throws "frame size mismatch". Push cw=2 down to the
-    // connection layer here so getFixedFramePayloadCapacity returns the right
-    // value before the file is drained into chunks.
-    if (isOFDMMode(negotiated_mode_)) {
-        if (selectBurstLiftingZ() == 81) {
-            if (data_frame_cw_count_ != 2) {
-                LOG_MODEM(WARN, "Connection: z=81 opt-in active -> coercing data_frame_cw_count %d -> 2 for burst transfer",
-                          data_frame_cw_count_);
-                setForcedFrameCodewords(2, /*forced=*/false);
-            }
-            // 2026-05-28: REFRESH the file_transfer chunker's max payload at the
-            // z=81 capacity (which currentDataPayloadCapacity now returns when
-            // ULTRA_LDPC_Z=81 is set). Without this the chunker keeps the value
-            // it was given at handshake (Z=27 sized) and zero-pads 70% of every
-            // burst. setForcedFrameCodewords above also calls this internally,
-            // but only when it actually changes cw_count — the resize-only case
-            // wouldn't trigger it, so refresh unconditionally here.
-            const size_t z81_capacity = currentDataPayloadCapacity();
-            file_transfer_.setMaxChunkPayload(z81_capacity);
-            LOG_MODEM(WARN, "Connection: z=81 chunker refresh -> setMaxChunkPayload(%zu B/frame) "
-                            "(was using Z=27 capacity ~%zu)",
-                      z81_capacity,
-                      v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_));
-        }
-    }
-    const size_t group_size = connection_policy::burstInterleaveGroupFrames();
-
-    // Drain all chunk payloads first (so we can mark FINAL on the last real
-    // frame and know the total chunk count for completion accounting).
-    std::vector<Bytes> chunk_payloads;
-    size_t total_payload_bytes = 0;
-    while (file_transfer_.hasMoreChunks()) {
-        Bytes chunk = file_transfer_.getNextChunk();
-        if (chunk.empty()) {
-            break;
-        }
-        total_payload_bytes += chunk.size();
-        chunk_payloads.push_back(std::move(chunk));
-    }
-    if (chunk_payloads.empty()) {
-        LOG_MODEM(WARN, "Connection: Burst file transfer produced no chunks");
-        return false;
-    }
-
-    // §14.36 chunk-at-rate path: if adaptive rate is on, do NOT pre-frame at the
-    // start rate. Strip the 5 B TYPE+OFFSET headers from each drained chunk to
-    // recover the raw file payload bytes, hand them to formAndSendBurstGroup which
-    // re-chunks at the CURRENT rate on every (re)send. Required for adaptation
-    // because a mid-transfer rate change would otherwise overflow the in-flight
-    // group's R3/4-sized frames into a smaller (R1/2 / R1/4) frame capacity.
-    if (adaptive_rate_enabled_) {
-        // The first chunk(s) from file_transfer_ are FILE_START (metadata: TYPE +
-        // FLAGS + SIZE + CRC32 + NAME — a DIFFERENT header from FILE_DATA's
-        // TYPE+OFFSET). They must arrive intact so the receiver enters RECEIVING
-        // state; only THEN does processFileData store FILE_DATA bytes. Strip-5-
-        // bytes works for FILE_DATA only — for FILE_START we send the chunk as-is
-        // via a normal DATA frame before the burst transport starts. burst_file_
-        // payload_ holds only file-body bytes (FILE_DATA data portions).
-        burst_file_payload_.clear();
-        burst_file_payload_.reserve(total_payload_bytes);
-        std::vector<Bytes> metadata_chunks;
-        for (const auto& chunk : chunk_payloads) {
-            if (chunk.empty()) continue;
-            const uint8_t ptype = chunk[0];
-            if (ptype == static_cast<uint8_t>(PayloadType::FILE_DATA) && chunk.size() > 5) {
-                burst_file_payload_.insert(burst_file_payload_.end(),
-                                           chunk.begin() + 5, chunk.end());
-            } else {
-                // FILE_START / FILE_BLOCK / etc. — keep as-is to send before the burst.
-                metadata_chunks.push_back(chunk);
-            }
-        }
-
-        // Hand the metadata chunks to the form fn so they ride the FIRST burst
-        // group's frames (one chunk per frame slot) on the SAME interleaved path
-        // as file data. Sending them as separate non-burst frames RACED the
-        // burst descriptor in the audio queue and lost — embedding them in the
-        // burst itself is deterministic and reuses the descriptor-driven decode.
-        burst_metadata_queue_.assign(metadata_chunks.begin(), metadata_chunks.end());
-        burst_pending_metadata_consumed_ = 0;
-        burst_file_cursor_ = 0;
-        burst_pending_advance_ = 0;
-        burst_chunk_seq_ = 0;
-        // §SR-ARQ profile: interleave OFF -> per-frame Selective-Repeat (the default now,
-        // for ALL modulations). ONE source of truth shared with the encoder + the on-wire
-        // descriptor bit (connection_policy::burstCrossFrameInterleaveOn) so the TX ARQ
-        // semantics, the encoder byte-interleave, and the descriptor bi bit can never
-        // disagree — the QAM16 offset-skip bug was exactly that disagreement.
-        burst_interleave_off_ = !connection_policy::burstCrossFrameInterleaveOn();
-        burst_resend_frames_.clear();
-        burst_inflight_frames_.clear();
-        burst_inflight_is_pad_.clear();
-        burst_transport_.setFormAndSendGroup(
-            [this](uint16_t group_seq, bool is_resend) {
-                // SR form drains the resend queue + refills; on a TIMEOUT resend
-                // (is_resend with an empty resend queue — no ACK came back to populate
-                // it) it must re-queue the un-acked in-flight burst instead of advancing
-                // the cursor. The whole-group form re-creates the group from the cursor.
-                return burst_interleave_off_ ? formAndSendBurstGroupSR(group_seq, is_resend)
-                                             : formAndSendBurstGroup(group_seq, is_resend);
-            });
-        // 2026-05-28: previously the timeout handler called
-        // applyAdaptiveRateFeedback(0.0f) — "treat silence as quality=0 so the
-        // controller steps down before the timeout-driven resend". In practice
-        // this fires false alarms on Good@20: the ACK is actually arriving ~2-4s
-        // AFTER the timer (e.g. ACK at 42.3s vs timeout at 38.8s) but bravo did
-        // decode the group cleanly (quality=0.99). One false alarm per group
-        // drops the rate R3/4 → R2/3 → R1/2 → R1/4 over three groups even though
-        // every group is delivered, and the lower rates compound the problem
-        // (slower TX → ACK arrives even later → another false-alarm drop).
-        //
-        // Now we DO NOT step the rate down on timeout. Resend stays at the same
-        // rate; if the ACK never arrives the burst_transport's max_retries gate
-        // still declares the link dead. If the ACK is just late, the next group
-        // proceeds at the original rate and the rate-up logic in
-        // applyAdaptiveRateFeedback (on actual decoded quality) handles climbs.
-        // No callback wired → BurstStopAndWaitController skips the feedback.
-        // §14.36 group-aware ACK timeout. 2026-05-28 corrected: the previous
-        // linear scaling `base * group_size / 8` (from SR-ARQ window=8) was
-        // wrong because it shrunk the FIXED overheads (ack TX time, decode
-        // jitter margin, audio chain RTT) proportionally to the burst size.
-        // Those don't shrink. With group=6 vs window=8, a base of 12464ms
-        // scaled to 9348ms — ~3s short of the real round-trip — and alpha
-        // was resending every group BEFORE bravo's GROUP_ACK could arrive,
-        // causing the 17-per-transfer dup-delivery cycle observed across all
-        // seeds. Recompute correctly: call the same airtime-derived formula
-        // with window=group_size so tx_burst_ms uses the actual burst length
-        // and the fixed overheads stay fixed.
-        const size_t group_size = connection_policy::burstInterleaveGroupFrames();
-        const uint32_t base_timeout = arq_.getAckTimeout();
-        // Include the group-start chirp+LTS re-anchor airtime (~1.4s) that
-        // alpha emits at the start of each burst — without it, the formula
-        // under-estimates by exactly that amount. Plus a 2-second safety
-        // margin to cover real-world fade slowdowns (bravo's LTS decode
-        // may take an extra symbol or two on the bad-fade groups).
-        const uint32_t continuation_reanchor_ms =
-            connection_policy::wideOFDMShortReanchorChirpDurationMs();
-        const uint32_t burst_timeout = connection_policy::computeWideOFDMAckTimeoutMs(
-            data_modulation_, data_code_rate_, group_size,
-            arq_.getSackDelay(), arq_.getAckRepeatCount(),
-            data_frame_cw_count_,
-            continuation_reanchor_ms);
-        // Add ~2s safety margin — empirical fade-luck shows GROUP_ACK can
-        // arrive 1-1.5s after a clean formula-derived timeout, esp. on
-        // marginal-SNR groups. Better to over-wait than to fire a wasted
-        // resend that doubles airtime per group.
-        const uint32_t timeout_ms = std::max<uint32_t>(burst_timeout + 2000u, 14000u);
-        burst_transport_.setAckTimeoutMs(timeout_ms);
-        LOG_MODEM(INFO,
-                  "Connection: Burst file transfer (chunk-at-rate): %zu metadata chunks + "
-                  "%zu B raw payload, ack_timeout=%ums (scaled from %ums for group=%zu), "
-                  "start_rate=%s",
-                  metadata_chunks.size(), burst_file_payload_.size(),
-                  burst_transport_.ackTimeoutMs(), base_timeout, group_size,
-                  codeRateToString(data_code_rate_));
-        noteDataTurnPayloadStarted(total_payload_bytes);
-        burst_transport_.startTransfer();
-        return true;
-    }
-
-    // Wrap each payload into a serialized fixed DATA frame (same construction the
-    // SR-ARQ path uses, minus the window bookkeeping). FINAL marks the stream tail.
-    std::vector<Bytes> frames;
-    frames.reserve(chunk_payloads.size());
-    uint16_t seq = 0;
-    for (size_t i = 0; i < chunk_payloads.size(); ++i) {
-        const bool is_last = (i + 1 == chunk_payloads.size());
-        auto frame = v2::makeFixedDataFrame(local_call_, remote_call_, seq++,
-                                            chunk_payloads[i], data_code_rate_,
-                                            data_frame_cw_count_, selectBurstLiftingZ());
-        frame.type = v2::FrameType::DATA;
-        frame.flags = is_last ? v2::Flags::FINAL : v2::Flags::MORE_FRAG;
-        frames.push_back(frame.serialize());
-    }
-
-    // The encoder only interleaves + emits a descriptor for FULL groups
-    // (encoded_frames.size() / BURST_GROUP_SIZE). Pad the final partial group to
-    // group_size so it forms a full interleaved burst. Pad frames are addressed
-    // to kOFDMBurstPadCallsign, which the RX address filter drops before
-    // reassembly — so they cost airtime but never corrupt the file.
-    if (frames.size() % group_size != 0) {
-        const size_t pad = group_size - (frames.size() % group_size);
-        for (size_t i = 0; i < pad; ++i) {
-            frames.push_back(v2::makeFixedDataFrame(
-                local_call_, kOFDMBurstPadCallsign,
-                static_cast<uint16_t>(kOFDMBurstPadSeq - i),
-                makeOFDMBurstPadPayload(data_code_rate_, data_frame_cw_count_, i),
-                data_code_rate_, data_frame_cw_count_).serialize());
-        }
-    }
-
-    // Slice into groups of exactly group_size frames.
-    std::vector<BurstStopAndWaitController::Group> groups;
-    groups.reserve(frames.size() / group_size);
-    for (size_t i = 0; i < frames.size(); i += group_size) {
-        groups.emplace_back(frames.begin() + i, frames.begin() + i + group_size);
-    }
-
-    LOG_MODEM(INFO,
-              "Connection: Burst file transfer: %zu chunks (%zu B) -> %zu groups x %zu frames "
-              "(cw=%d, rate=%s)",
-              chunk_payloads.size(), total_payload_bytes, groups.size(), group_size,
-              data_frame_cw_count_, codeRateToString(data_code_rate_));
-
-    // Match the group-ACK timeout to the SR-ARQ window=8 burst timeout: one group
-    // IS that 8-frame burst, so the same burst-airtime + turnaround + ACK budget
-    // applies. The hardcoded 14 s default is shorter than a single QPSK R3/4 burst
-    // (~11 s) + turnaround, collapsing the listen window so the sender resends
-    // before the GROUP_ACK can land.
-    burst_transport_.setAckTimeoutMs(arq_.getAckTimeout());
-
-    LOG_MODEM(INFO, "Connection: Burst group-ACK timeout=%ums (from SR-ARQ burst budget)",
-              burst_transport_.ackTimeoutMs());
-
-    noteDataTurnPayloadStarted(total_payload_bytes);
-    burst_transport_.startTransfer(std::move(groups));
-    return true;
-}
-
-bool Connection::formAndSendBurstGroup(uint16_t group_seq, bool is_resend) {
-    // §14.36 chunk-at-rate: build the in-flight burst group's frames at the CURRENT
-    // data_code_rate_ from the raw file payload + cursor. On a NEW group (is_resend=
-    // false) the cursor advances by the previous group's consumed bytes; on a resend
-    // we re-form from the SAME cursor at whatever rate the controller picked since
-    // (so a dropped rate produces correctly-sized smaller frames).
-    if (!on_transmit_burst_) return false;
-    if (!is_resend) {
-        // Commit the previous group's progress: file cursor + any metadata chunks
-        // we drained in the last form. (Resends re-form from the same state, so
-        // these advances are skipped — the new rate may consume different bytes.)
-        burst_file_cursor_ += burst_pending_advance_;
-        burst_pending_advance_ = 0;
-        for (size_t i = 0; i < burst_pending_metadata_consumed_ &&
-                            !burst_metadata_queue_.empty(); ++i) {
-            burst_metadata_queue_.pop_front();
-        }
-        burst_pending_metadata_consumed_ = 0;
-    }
-    if (burst_metadata_queue_.empty() &&
-        burst_file_cursor_ >= burst_file_payload_.size()) {
-        return false;  // file fully drained -> transport will mark done(success)
-    }
-
-    const size_t group_size = connection_policy::burstInterleaveGroupFrames();
-    // Z-aware capacity. At z=81 each codeword carries 3x as many info bytes as at
-    // z=27 (R3/4 cw=2: 96 B legacy -> 345 B at z=81). The burst chunker must size
-    // frames at the active z (selectBurstLiftingZ) or the encoder pads 70% zeros.
-    const int active_z = selectBurstLiftingZ();
-    const size_t frame_cap = (active_z == 81)
-        ? v2::getFixedFramePayloadCapacityZ(data_code_rate_, data_frame_cw_count_, 81)
-        : v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
-    constexpr size_t kFileDataOverhead = 5;  // TYPE(1) + OFFSET(4)
-    if (frame_cap <= kFileDataOverhead) return false;
-    const size_t per_frame_data = frame_cap - kFileDataOverhead;
-
-    BurstStopAndWaitController::Group frames;
-    frames.reserve(group_size);
-    size_t consumed = 0;
-    size_t md_taken = 0;  // metadata chunks consumed in THIS form attempt
-    for (size_t i = 0; i < group_size; ++i) {
-        // 1) Metadata chunks (FILE_START / FILE_BLOCK) ride the first frame slots
-        //    of the first burst group, as-is — the receiver's handleDataPayload
-        //    routes them via file_transfer_.processPayload which enters RECEIVING
-        //    before any FILE_DATA arrives. Same path the legacy pre-chunked file
-        //    transfer used; reusing it keeps the receiver code unchanged.
-        if (md_taken < burst_metadata_queue_.size()) {
-            const Bytes& chunk = burst_metadata_queue_[md_taken];
-            const uint16_t seq = burst_chunk_seq_++;
-            auto frame = v2::makeFixedDataFrame(local_call_, remote_call_, seq, chunk,
-                                                data_code_rate_, data_frame_cw_count_,
-                                                selectBurstLiftingZ());
-            frame.type = v2::FrameType::DATA;
-            frame.flags = v2::Flags::MORE_FRAG;  // metadata is never the file tail
-            frames.push_back(frame.serialize());
-            ++md_taken;
-            continue;
-        }
-        const size_t offset_in_file = burst_file_cursor_ + consumed;
-        const size_t total = burst_file_payload_.size();
-        if (offset_in_file >= total) {
-            // File drained mid-group — pad the rest of the group.
-            frames.push_back(v2::makeFixedDataFrame(
-                local_call_, kOFDMBurstPadCallsign,
-                static_cast<uint16_t>(kOFDMBurstPadSeq - i),
-                makeOFDMBurstPadPayload(data_code_rate_, data_frame_cw_count_, i),
-                data_code_rate_, data_frame_cw_count_).serialize());
-            continue;
-        }
-        const size_t this_data = std::min(per_frame_data, total - offset_in_file);
-        Bytes chunk;
-        chunk.reserve(kFileDataOverhead + this_data);
-        chunk.push_back(static_cast<uint8_t>(PayloadType::FILE_DATA));
-        const uint32_t off32 = static_cast<uint32_t>(offset_in_file);
-        chunk.push_back(static_cast<uint8_t>((off32 >> 24) & 0xFF));
-        chunk.push_back(static_cast<uint8_t>((off32 >> 16) & 0xFF));
-        chunk.push_back(static_cast<uint8_t>((off32 >> 8) & 0xFF));
-        chunk.push_back(static_cast<uint8_t>(off32 & 0xFF));
-        chunk.insert(chunk.end(),
-                     burst_file_payload_.begin() + offset_in_file,
-                     burst_file_payload_.begin() + offset_in_file + this_data);
-        const uint16_t seq = burst_chunk_seq_++;
-        auto frame = v2::makeFixedDataFrame(local_call_, remote_call_, seq, chunk,
-                                            data_code_rate_, data_frame_cw_count_,
-                                            selectBurstLiftingZ());
-        frame.type = v2::FrameType::DATA;
-        const bool finishes_file = (offset_in_file + this_data >= total);
-        frame.flags = finishes_file ? v2::Flags::FINAL : v2::Flags::MORE_FRAG;
-        frames.push_back(frame.serialize());
-        consumed += this_data;
-    }
-    // 2026-05-28: KEEP pending_advance from the FIRST form for this group.
-    // Resends at a lower rate cover FEWER bytes than the original (e.g. R3/4
-    // form: 1700 B; R2/3 resend: 1500 B). If the original form's burst is what
-    // bravo actually delivered (the common case — first attempt usually wins
-    // and the ACK chasing comes later), advancing by the resend's smaller
-    // value leaves the alpha cursor 200 B behind what bravo wrote. From then
-    // on alpha emits chunks at offsets before bravo's expected cursor, bravo
-    // buffers them as out-of-order forever, and the file never assembles.
     //
-    // By preserving the first form's `consumed` we advance correctly when the
-    // first attempt delivered. The rare case where a later RESEND is what
-    // delivered (original lost) is handled later by the receiver buffering
-    // the extra bytes; bravo's offset-keyed assembler can write them either
-    // way. The right long-term fix is to put the byte range in BURST_HEADER
-    // so bravo can self-report exact coverage on GROUP_ACK.
-    if (!is_resend) {
-        burst_pending_advance_ = consumed;
+    // COALESCE THE REFILL: a cumulative ack of N frames fires on_send_complete_ N times,
+    // each of which would otherwise call sendNextFileChunk() immediately — fragmenting
+    // the next window into N tiny bursts (the "3+1+1+1" / shorter-burst chains observed).
+    // Bracket the ack with the SAME arq_callback_defer_refill_ guard processArqFrame uses
+    // so all N completions defer to ONE runDeferredArqRefill() → ONE budget-sized burst.
+    if (kInteractiveToneAckEnabled() && arq_.getTxInFlightBytes() > 0) {
+        const bool outermost = !arq_callback_defer_refill_;
+        if (outermost) arq_callback_defer_refill_ = true;
+        arq_.onToneBurstAck(detection.payload.group_seq, detection.payload.frame_mask);
+        // Feed the rate controller: a NACK (group lost) steps the rate down; an ACK/SACK
+        // (any progress) feeds clean quality. Replaces the legacy GROUP_ACK/NACK feedback,
+        // now on the unified tone-burst path so mid-transfer rate adaptation survives.
+        applyAdaptiveRateFeedback(
+            detection.payload.type == ultra::waveform::tone_burst_ack::AckType::Nack
+                ? 0.0f
+                : 1.0f);
+        if (outermost) {
+            arq_callback_defer_refill_ = false;
+            // STOP-AND-WAIT: every tone-burst ack is a TURN boundary — it's now our turn
+            // to send the next burst (resend remaining holes + new frames). Trigger the
+            // refill even when the cumulative base did NOT advance: a SACK with a hole at
+            // base (e.g. "I have 4,5, missing 3") doesn't fire on_send_complete_, but it's
+            // still our turn to re-send the hole. sendNextFileChunk() coalesces
+            // [holes]+[new] into one budget burst; an empty turn (nothing to send) no-ops.
+            if (file_transfer_.getState() == FileTransferState::SENDING) {
+                deferred_file_refill_ = true;
+            }
+            runDeferredArqRefill();
+        }
+        return true;
     }
-    burst_pending_metadata_consumed_ = md_taken;
-    LOG_MODEM(INFO,
-              "Connection: form group_seq=%u rate=%s capacity=%zuB/frame consumed=%zuB"
-              " cursor=%zu/%zu pending_advance=%zu%s",
-              group_seq, codeRateToString(data_code_rate_), per_frame_data, consumed,
-              burst_file_cursor_, burst_file_payload_.size(),
-              burst_pending_advance_,
-              is_resend ? " [RESEND]" : "");
-    // §16.4 escalation: a RESEND means the previous attempt did not deliver —
-    // pay for a full chirp+LTS group-start anchor so bravo re-acquires
-    // deterministically even when warm-sync is enabled. First attempts stay
-    // light (warm-handoff goodput); only retries carry the anchor. When the
-    // warm-handoff knob is OFF the group-start is already full, so this is a
-    // no-op there.
-    on_transmit_burst_(frames, group_seq, /*force_full_preamble=*/is_resend);
-    // §15 step 4d-late: arm the receiver-side tone-burst monitor for the
-    // ACK that should arrive after this group's airtime + T/R + ACK airtime.
-    // Path covers BOTH burst_transport_.setTransmitGroup (legacy tx_group_)
-    // and the §14.36 chunk-at-rate form_send_ path that fires
-    // formAndSendBurstGroup directly. Arming HERE — at TX dispatch — gives
-    // the monitor the full burst-airtime window to be in armed state when
-    // BRAVO's tone-burst lands. During ALPHA's TX, its own RX is muted by
-    // OTASim's mixer (own-TX excluded), so the cadence runs on silence and
-    // costs ~zero CPU until ACK arrival.
-    if (on_arm_tone_burst_ack_monitor_) {
-        const uint32_t window_ms = burst_transport_.ackTimeoutMs();
-        on_arm_tone_burst_ack_monitor_(window_ms);
-    }
-    return true;
+
+    // Ack arrived with no in-flight ARQ bytes (nothing to advance) → nothing to do.
+    return false;
 }
 
 void Connection::applyAdaptiveRateFeedback(float quality) {
@@ -2379,21 +1880,6 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
         // and waste airtime on dup-deliveries (same bug the initial
         // 9348ms→14000ms fix solved at startup, but stickily across rate
         // changes too).
-        if (use_burst_transport_) {
-            const size_t group_size = connection_policy::burstInterleaveGroupFrames();
-            const uint32_t continuation_reanchor_ms =
-                connection_policy::wideOFDMShortReanchorChirpDurationMs();
-            const uint32_t burst_timeout = connection_policy::computeWideOFDMAckTimeoutMs(
-                data_modulation_, data_code_rate_, group_size,
-                arq_.getSackDelay(), arq_.getAckRepeatCount(),
-                data_frame_cw_count_, continuation_reanchor_ms);
-            const uint32_t timeout_ms = std::max<uint32_t>(burst_timeout + 2000u, 14000u);
-            burst_transport_.setAckTimeoutMs(timeout_ms);
-            LOG_MODEM(INFO,
-                      "Connection: ack_timeout recomputed for rate change: %ums "
-                      "(rate=%s, group_size=%zu)",
-                      timeout_ms, codeRateToString(data_code_rate_), group_size);
-        }
         std::snprintf(buf, sizeof(buf), "rate %s -> %s (q=%.2f)",
                       codeRateToString(prev), codeRateToString(next), quality);
         LOG_MODEM(INFO, "Connection: adaptive %s", buf);
@@ -2411,391 +1897,45 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
         return;
     }
 
-    // Live "incoming burst" status for the GUI. Updated for EVERY group (SR or
-    // interleaved), so the operator sees the modem working — group # advancing, X/Y
-    // frames decoding — even before FILE_START establishes the file. frames.size() is
-    // the group size (failed slots are present but undeserializable); frame_mask is the
-    // decoded bitmap.
-    {
-        unsigned decoded = 0;
-        for (uint8_t m = frame_mask; m; m &= (m - 1)) ++decoded;  // popcount (X)
-        // Group size (Y) = bit-length of the decode mask: the decoder builds an N-bit
-        // mask for the N-frame group (failed frames are 0-bits), so the highest slot
-        // gives N. frames.size() is decoded-only (== X), so NOT the total. Robust for
-        // full and partial-last groups; only cosmetically low if a group's *trailing*
-        // frame fails (rare). For frame 0 (FILE_START) missing, mask=0x3E -> Y=6.
-        unsigned group_bits = 0;
-        for (uint8_t m = frame_mask; m; m >>= 1) ++group_bits;
-        burst_activity_.active = true;
-        burst_activity_.group_seq = group_seq;
-        burst_activity_.frames_decoded = static_cast<uint8_t>(decoded);
-        burst_activity_.frames_in_group =
-            static_cast<uint8_t>(group_bits > decoded ? group_bits : decoded);
-        ++burst_activity_.groups_seen;
-    }
-
-    // §14.36 Phase 5c: stash the decode headroom so the GROUP_ACK for this group
-    // carries it back to the sender (which runs the rate controller). Quantize
-    // [0,1] -> 0..254; 0xFF means "no feedback" when adaptation is off.
-    last_group_quality_ = quality;
-    pending_ack_quality_q_ =
-        adaptive_rate_enabled_
-            ? static_cast<uint8_t>(std::lround(std::clamp(quality, 0.0f, 1.0f) * 254.0f))
-            : 0xFF;
-
-    // §SR-ARQ (channel-adaptive): an interleave-OFF group is a set of INDEPENDENTLY
-    // decodable frames. Deliver every frame that decoded (the offset-keyed assembler
-    // handles reorder + dedup) and ACK the TRUE per-frame frame_mask so the sender
-    // resends only the 0-bit frames + refills — no whole-group resend on a partial fade.
-    if (!interleaved) {
-        onBurstGroupReceivedSR(group_seq, frames, frame_mask);
-        return;
-    }
-    // A partial group cannot be deinterleaved/reassembled, so it is dropped and
-    // the sender whole-burst-resends (stop-and-wait, no SACK). Only a fully
-    // decoded group is ACKed + delivered.
-    if (!all_ok) {
-        // §14.30 fast-NACK: the descriptor decoded (so group_seq is known) but the
-        // interleaved group failed (0/8) — usually a deep fade across the burst.
-        // Tell the sender to resend NOW instead of letting it wait out the ~27 s
-        // group-ACK timeout (which on Good fading costs ~54 s over two blind
-        // cycles). Only NACK the group we are actually still waiting for, so a
-        // failed duplicate of an already-delivered group is not NACKed.
-        if (group_seq == burst_transport_.rxExpectedGroupSeq()) {
-            // 2026-05-29 fix: emit the NACK over the §15 TONE-BURST path, same as
-            // the GROUP_ACK. The old transmitFrame(makeGroupNack) sent a 20-byte
-            // control frame over the CURRENT waveform — and on group 0
-            // handshake_complete_ is still false (it is set later, in the all_ok
-            // path this NACK branch returns before reaching), so the frame went
-            // out as the MC-DPSK HANDSHAKE waveform: a ~3.1 s MC-DPSK burst on the
-            // air (the "weird MC-DPSK signal" on the waterfall), ~4.6× slower than
-            // the 675 ms tone-burst and bypassing §15 entirely. The sender's
-            // onToneBurstAck already maps a NACK-type tone-burst to
-            // burst_transport_.onGroupNack (resend now), so the whole receive path
-            // already exists — only the emit was wrong.
-            if (on_transmit_tone_burst_ack_) {
-                LOG_MODEM(INFO,
-                          "Connection: Burst group_seq=%u failed (0/8); sending tone-burst GROUP_NACK (resend now)",
-                          group_seq);
-                ultra::waveform::tone_burst_ack::ToneBurstAckPayload tba;
-                tba.group_seq = static_cast<uint8_t>(group_seq & 0x3F);
-                tba.frame_mask = 0x00;  // whole group missing (0/8); sender whole-burst-resends
-                tba.type = ultra::waveform::tone_burst_ack::AckType::Nack;
-                tba.rate_hint = 0;      // quality 0 (group failed)
-                on_transmit_tone_burst_ack_(tba);
-            } else {
-                LOG_MODEM(INFO,
-                          "Connection: Burst group_seq=%u failed (0/8); sending GROUP_NACK (resend now)",
-                          group_seq);
-                transmitFrame(
-                    v2::ControlFrame::makeGroupNack(local_call_, remote_call_, group_seq).serialize());
+    // TRANSPORT MERGE (increment 1): one seq space END-TO-END. The sender formed these
+    // frames through arq_ (unified TX), so feed each decoded REAL frame back through the
+    // ARQ window (processArqFrame) instead of the burst-group delivery + group_seq ack.
+    // arq_ dedups/reorders by the frames' own seqs, delivers in order, and emits the
+    // tone-burst ack itself — which the sender's arq_ consumes (seqs match), driving
+    // selective repeat over the unified space. Skips the burst controller entirely.
+    if (kUnifiedSeqEnabled()) {
+        (void)all_ok; (void)quality; (void)frame_mask; (void)interleaved; (void)group_seq;
+        // BURST-AWARE ACK: this callback IS the group boundary the operator pointed to —
+        // "whatever ALPHA sends as a burst, BRAVO must ack, it knows the group ended."
+        // Bracket the group's frames so arq_ suppresses its per-frame ack heuristic
+        // (which can't ack a sub-window burst) and emits EXACTLY ONE tone-burst ack for
+        // the whole burst at the end — cumulative base + hole bitmap, every burst.
+        arq_.beginGroupReceive();
+        for (const auto& frame : frames) {
+            auto hdr = v2::parseHeader(frame);
+            if (hdr.valid && !v2::isAddressedToCallsign(hdr, local_call_)) {
+                continue;  // burst pad — addressed to the pad callsign
             }
-        } else {
-            // BUG-FINACK-001: this is a resend of an ALREADY-DELIVERED group — our
-            // prior GROUP_ACK was fade-lost, so the sender is stuck resending the
-            // final group forever and the transfer never cleanly closes (esp. at
-            // low SNR / heavy fading, where the final ACK is frequently nulled).
-            // Re-ACK it DECODE-INDEPENDENTLY: route it into the controller's existing
-            // duplicate path (onGroupReceived → seqLess → re-emit GROUP_ACK, no
-            // re-delivery), which does NOT need the (failed) data frames. Previously
-            // this branch just dropped the duplicate, so the re-ACK never fired.
-            LOG_MODEM(INFO,
-                      "Connection: Burst group_seq=%u failed but already delivered "
-                      "(expected %u); re-ACKing decode-independently (FINACK close)",
-                      group_seq, burst_transport_.rxExpectedGroupSeq());
-            burst_transport_.onGroupReceived(group_seq, {});
+            processArqFrame(frame);
+        }
+        arq_.endGroupReceiveAndAck();
+        // Live "incoming burst" status for the GUI — the flashing partial-group
+        // indicator. The unified branch returns here before the shared status update
+        // below, so set it too: group #, X (decoded) / Y (group size) from frame_mask,
+        // so the operator sees frames arriving even on a partially-decoded group.
+        {
+            unsigned decoded = 0;
+            for (uint8_t m = frame_mask; m; m &= (m - 1)) ++decoded;       // popcount = X
+            unsigned group_bits = 0;
+            for (uint8_t m = frame_mask; m; m >>= 1) ++group_bits;         // bit-length = Y
+            burst_activity_.active = true;
+            burst_activity_.group_seq = group_seq;
+            burst_activity_.frames_decoded = static_cast<uint8_t>(decoded);
+            burst_activity_.frames_in_group =
+                static_cast<uint8_t>(group_bits > decoded ? group_bits : decoded);
+            ++burst_activity_.groups_seen;
         }
         return;
-    }
-    // Drop pad frames (addressed to the burst-pad callsign): keep only frames
-    // addressed to us for reassembly. Pads exist only to fill a partial group so
-    // the encoder forms a full interleaved burst.
-    std::vector<Bytes> real_frames;
-    real_frames.reserve(frames.size());
-    for (const auto& frame : frames) {
-        auto hdr = v2::parseHeader(frame);
-        if (hdr.valid && !v2::isAddressedToCallsign(hdr, local_call_)) {
-            continue;
-        }
-        real_frames.push_back(frame);
-    }
-    // Responder handshake confirmation: the burst group is the first valid
-    // connected frame the responder decodes from the initiator. The normal
-    // per-frame RX path (onFrameReceived) confirms the handshake here, but the
-    // burst group-as-unit path bypasses it — so confirm it now, BEFORE the
-    // GROUP_ACK is emitted. Without this, handshake_complete_ stays false and the
-    // GROUP_ACK is transmitted with the handshake (MC-DPSK) waveform, which the
-    // OFDM-mode initiator cannot decode → the sender never advances past group 0.
-    if (state_ == ConnectionState::CONNECTED && !is_initiator_ && !handshake_confirmed_) {
-        LOG_MODEM(INFO, "Connection: Handshake confirmed (first burst group from initiator)");
-        handshake_confirmed_ = true;
-        responder_handshake_wait_ms_ = 0;
-        if (on_handshake_confirmed_) {
-            on_handshake_confirmed_();
-        }
-    }
-    // Disarm the CONNECT_ACK rescue: a decoded burst group proves the initiator
-    // got our CONNECT_ACK and moved to data. onFrameReceived does this on the first
-    // decoded frame, but the burst group-as-unit path bypasses it — so the rescue
-    // stayed armed and bravo kept blasting an 8.3 s MC-DPSK CONNECT_ACK every ~17 s,
-    // COLLIDING with the initiator's in-flight group bursts (half-duplex violation:
-    // both stations transmitting at once). That collision corrupts the initiator's
-    // GROUP_ACK reception and wastes airtime — the dominant cause of the group-0 ACK
-    // latency. Mirrors onFrameReceived's rescue clear.
-    if (state_ == ConnectionState::CONNECTED && !is_initiator_ &&
-        !connect_ack_frame_.empty()) {
-        LOG_MODEM(INFO, "Connection: CONNECT_ACK rescue disarmed (burst group decoded)");
-        connect_ack_frame_.clear();
-        connect_ack_retx_remaining_ = 0;
-    }
-
-    LOG_MODEM(INFO, "Connection: Burst group_seq=%u complete: %zu real frames -> deliver+GROUP_ACK",
-              group_seq, real_frames.size());
-    // Controller delivers once + emits one GROUP_ACK (dedup re-ACKs a duplicate
-    // group whose prior ACK was lost without re-delivering).
-    burst_transport_.onGroupReceived(group_seq, real_frames);
-}
-
-void Connection::onBurstGroupReceivedSR(uint16_t group_seq,
-                                        const std::vector<Bytes>& frames,
-                                        uint8_t frame_mask) {
-    // Responder handshake confirmation + CONNECT_ACK rescue disarm — the burst
-    // group-as-unit path bypasses onFrameReceived, so mirror it here (identical to
-    // the whole-group all_ok path) on the first decoded burst.
-    if (state_ == ConnectionState::CONNECTED && !is_initiator_ && !handshake_confirmed_) {
-        LOG_MODEM(INFO, "Connection: Handshake confirmed (first SR burst from initiator)");
-        handshake_confirmed_ = true;
-        responder_handshake_wait_ms_ = 0;
-        if (on_handshake_confirmed_) on_handshake_confirmed_();
-    }
-    if (state_ == ConnectionState::CONNECTED && !is_initiator_ &&
-        !connect_ack_frame_.empty()) {
-        LOG_MODEM(INFO, "Connection: CONNECT_ACK rescue disarmed (SR burst decoded)");
-        connect_ack_frame_.clear();
-        connect_ack_retx_remaining_ = 0;
-    }
-
-    // Deliver every decoded REAL frame (drop pads addressed to the burst-pad
-    // callsign). FileTransferController's assembler writes each chunk at its
-    // embedded offset, buffers out-of-order, dedups overlaps, and finalizes by
-    // byte count (not the FINAL flag) — so partial/reordered delivery is already
-    // correct, including a FINAL-tail frame that arrives before earlier gaps fill.
-    int delivered = 0;
-    for (const auto& frame : frames) {
-        auto df = v2::DataFrame::deserialize(frame);
-        if (!df) continue;
-        auto hdr = v2::parseHeader(frame);
-        if (hdr.valid && !v2::isAddressedToCallsign(hdr, local_call_)) continue;  // pad
-        const bool more_data = (df->flags & v2::Flags::MORE_FRAG) != 0;
-        handleDataPayload(df->payload, more_data, df->type);
-        ++delivered;
-    }
-
-    // Correctness guard (the seed-44 offset-0 loss): the assembler drops FILE_DATA
-    // delivered before FILE_START establishes RECEIVING. The decoder's frame_mask
-    // says "decoded", but un-RECEIVING delivery DROPS it — so ack DELIVERY, not
-    // DECODE. Until the stream is established we NACK the whole burst (the sender
-    // resends metadata + data together); once established, every decoded frame is
-    // safely written/buffered/deduped so the true mask is the right ACK. A late
-    // duplicate after finalization (ever-receiving but no longer RECEIVING) is acked
-    // so the sender completes instead of resending to death.
-    const bool receiving_now =
-        (file_transfer_.getState() == FileTransferState::RECEIVING);
-    if (receiving_now) {
-        burst_rx_ever_receiving_ = true;
-    }
-    // Pre-RECEIVING, decoded FILE_DATA is now STAGED (not dropped) by the file
-    // controller — the BURST_HEADER already told us a bulk burst is inbound — so it is
-    // safe to ACK the decode mask as soon as we have a live file context: RECEIVING,
-    // ever-received, OR healthy staged data. Staged frames survive until FILE_START
-    // drains them, so this can no longer ACK data that gets silently dropped (the
-    // seed-44 hazard). A burst that retained NOTHING (no staging, never receiving — or
-    // staging overflowed) is still NACKed so the sender's liveness fires. This is what
-    // lets group 0 ACK its decoded data frames and re-send only the missing FILE_START
-    // frame, instead of re-sending the whole group.
-    const bool safe_to_ack =
-        receiving_now || burst_rx_ever_receiving_ ||
-        file_transfer_.hasHealthyStagedData();
-    const uint8_t ack_mask = safe_to_ack ? frame_mask : 0;
-
-    // ACK the delivery-safe mask. type=Ack when any frame is acked (forward
-    // progress); Nack only on a fully-undelivered burst (0/N) so the sender's
-    // max_retries liveness still fires on a genuinely dead link.
-    if (on_transmit_tone_burst_ack_) {
-        ultra::waveform::tone_burst_ack::ToneBurstAckPayload tba;
-        tba.group_seq = static_cast<uint8_t>(group_seq & 0x3F);
-        tba.frame_mask = ack_mask;
-        tba.type = (ack_mask == 0)
-                       ? ultra::waveform::tone_burst_ack::AckType::Nack
-                       : ultra::waveform::tone_burst_ack::AckType::Ack;
-        const uint8_t q = pending_ack_quality_q_;
-        tba.rate_hint = (q == 0xFF)
-                            ? 0
-                            : static_cast<uint8_t>((static_cast<uint32_t>(q) * 7u) / 254u);
-        on_transmit_tone_burst_ack_(tba);
-        LOG_MODEM(INFO,
-                  "Connection: SR-ARQ burst group_seq=%u delivered %d frame(s); "
-                  "tone-burst %s ack_mask=0x%02X (decode_mask=0x%02X receiving=%d)",
-                  group_seq, delivered, ack_mask == 0 ? "NACK" : "ACK",
-                  static_cast<unsigned>(ack_mask), static_cast<unsigned>(frame_mask),
-                  receiving_now ? 1 : 0);
-    }
-}
-
-bool Connection::formOneNewBurstFrame(Bytes& out_frame, bool& is_pad,
-                                      size_t per_frame_data) {
-    is_pad = false;
-    constexpr size_t kFileDataOverhead = 5;  // TYPE(1) + OFFSET(4)
-    // Metadata chunks (FILE_START / FILE_BLOCK) ride the first new slots, as-is.
-    if (!burst_metadata_queue_.empty()) {
-        const Bytes& chunk = burst_metadata_queue_.front();
-        const uint16_t seq = burst_chunk_seq_++;
-        auto frame = v2::makeFixedDataFrame(local_call_, remote_call_, seq, chunk,
-                                            data_code_rate_, data_frame_cw_count_,
-                                            selectBurstLiftingZ());
-        frame.type = v2::FrameType::DATA;
-        frame.flags = v2::Flags::MORE_FRAG;  // metadata is never the file tail
-        out_frame = frame.serialize();
-        burst_metadata_queue_.pop_front();
-        return true;
-    }
-    const size_t total = burst_file_payload_.size();
-    if (burst_file_cursor_ >= total) {
-        return false;  // file + metadata drained
-    }
-    const size_t offset_in_file = burst_file_cursor_;
-    const size_t this_data = std::min(per_frame_data, total - offset_in_file);
-    Bytes chunk;
-    chunk.reserve(kFileDataOverhead + this_data);
-    chunk.push_back(static_cast<uint8_t>(PayloadType::FILE_DATA));
-    const uint32_t off32 = static_cast<uint32_t>(offset_in_file);
-    chunk.push_back(static_cast<uint8_t>((off32 >> 24) & 0xFF));
-    chunk.push_back(static_cast<uint8_t>((off32 >> 16) & 0xFF));
-    chunk.push_back(static_cast<uint8_t>((off32 >> 8) & 0xFF));
-    chunk.push_back(static_cast<uint8_t>(off32 & 0xFF));
-    chunk.insert(chunk.end(), burst_file_payload_.begin() + offset_in_file,
-                 burst_file_payload_.begin() + offset_in_file + this_data);
-    const uint16_t seq = burst_chunk_seq_++;
-    auto frame = v2::makeFixedDataFrame(local_call_, remote_call_, seq, chunk,
-                                        data_code_rate_, data_frame_cw_count_,
-                                        selectBurstLiftingZ());
-    frame.type = v2::FrameType::DATA;
-    const bool finishes_file = (offset_in_file + this_data >= total);
-    frame.flags = finishes_file ? v2::Flags::FINAL : v2::Flags::MORE_FRAG;
-    out_frame = frame.serialize();
-    burst_file_cursor_ += this_data;
-    return true;
-}
-
-bool Connection::formAndSendBurstGroupSR(uint16_t group_seq, bool is_resend) {
-    if (!on_transmit_burst_) return false;
-    // Timeout resend (no ACK came back): the failed frames were never re-queued by
-    // onToneBurstAck, so re-queue the un-acked in-flight burst's REAL frames now —
-    // otherwise the refill below would advance the cursor and skip this group's
-    // bytes (the seed-7 stall: a missed group 3 became "group 4 sent as seq 3" and
-    // group 3's bytes were lost). A NACK-driven resend has already populated the
-    // resend queue, so the empty-queue check distinguishes the two without double-
-    // queuing.
-    if (is_resend && burst_resend_frames_.empty() && !burst_inflight_frames_.empty()) {
-        for (size_t i = 0; i < burst_inflight_frames_.size(); ++i) {
-            const bool pad = (i < burst_inflight_is_pad_.size()) && burst_inflight_is_pad_[i];
-            if (!pad) burst_resend_frames_.push_back(burst_inflight_frames_[i]);
-        }
-        LOG_MODEM(INFO,
-                  "Connection: SR timeout resend group_seq=%u — re-queued %zu in-flight frame(s)",
-                  group_seq, burst_resend_frames_.size());
-    }
-    const size_t group_size = connection_policy::burstInterleaveGroupFrames();
-    const int active_z = selectBurstLiftingZ();
-    const size_t frame_cap = (active_z == 81)
-        ? v2::getFixedFramePayloadCapacityZ(data_code_rate_, data_frame_cw_count_, 81)
-        : v2::getFixedFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
-    constexpr size_t kFileDataOverhead = 5;
-    if (frame_cap <= kFileDataOverhead) return false;
-    const size_t per_frame_data = frame_cap - kFileDataOverhead;
-
-    // Done: nothing queued to resend AND the file+metadata are fully drained.
-    const bool drained = burst_resend_frames_.empty() &&
-                         burst_metadata_queue_.empty() &&
-                         burst_file_cursor_ >= burst_file_payload_.size();
-    if (drained) return false;  // transport marks done(success)
-
-    BurstStopAndWaitController::Group frames;
-    std::vector<bool> is_pad;
-    frames.reserve(group_size);
-    is_pad.reserve(group_size);
-
-    // 1) Resends first (identical serialized bytes — no offset/length/rate
-    //    re-derivation, so the receiver's offset-keyed assembler always lines up).
-    int resent = 0;
-    while (frames.size() < group_size && !burst_resend_frames_.empty()) {
-        frames.push_back(std::move(burst_resend_frames_.front()));
-        burst_resend_frames_.pop_front();
-        is_pad.push_back(false);
-        ++resent;
-    }
-    // 2) Refill the rest with NEW frames from the cursor (advanced immediately;
-    //    failed frames are tracked in burst_resend_frames_, not via the cursor).
-    int new_frames = 0;
-    while (frames.size() < group_size) {
-        Bytes nf;
-        bool pad = false;
-        if (!formOneNewBurstFrame(nf, pad, per_frame_data)) break;
-        frames.push_back(std::move(nf));
-        is_pad.push_back(pad);
-        if (!pad) ++new_frames;
-    }
-    // 3) Pad the remainder to a full burst (filler; never re-queued on NACK).
-    while (frames.size() < group_size) {
-        const size_t i = frames.size();
-        frames.push_back(v2::makeFixedDataFrame(
-            local_call_, kOFDMBurstPadCallsign,
-            static_cast<uint16_t>(kOFDMBurstPadSeq - i),
-            makeOFDMBurstPadPayload(data_code_rate_, data_frame_cw_count_, i),
-            data_code_rate_, data_frame_cw_count_).serialize());
-        is_pad.push_back(true);
-    }
-
-    // Record the in-flight burst so the next frame_mask maps positions -> frames.
-    burst_inflight_frames_ = frames;
-    burst_inflight_is_pad_ = is_pad;
-
-    LOG_MODEM(INFO,
-              "Connection: SR form group_seq=%u rate=%s cap=%zuB/frame resent=%d new=%d "
-              "resend_left=%zu cursor=%zu/%zu",
-              group_seq, codeRateToString(data_code_rate_), per_frame_data, resent,
-              new_frames, burst_resend_frames_.size(), burst_file_cursor_,
-              burst_file_payload_.size());
-
-    // A burst carrying resends follows a fade — pay the full chirp+LTS anchor so
-    // bravo re-acquires deterministically (mirrors the whole-group resend anchor).
-    on_transmit_burst_(frames, group_seq, /*force_full_preamble=*/resent > 0);
-    if (on_arm_tone_burst_ack_monitor_) {
-        on_arm_tone_burst_ack_monitor_(burst_transport_.ackTimeoutMs());
-    }
-    return true;
-}
-
-void Connection::collectBurstGroupFrame(uint16_t group_seq, const Bytes& frame_data,
-                                        bool group_complete) {
-    // RX group assembly for the burst transport. Decoded burst frames arrive in
-    // order; group_complete marks the last frame of an interleaved group. On a
-    // complete group we hand the accumulated frames to the controller, which
-    // delivers (once) and emits a single GROUP_ACK.
-    if (!use_burst_transport_) {
-        return;
-    }
-    if (!burst_rx_group_open_ || group_seq != burst_rx_group_seq_) {
-        burst_rx_group_open_ = true;
-        burst_rx_group_seq_ = group_seq;
-        burst_rx_group_frames_.clear();
-    }
-    burst_rx_group_frames_.push_back(frame_data);
-
-    if (group_complete) {
-        burst_transport_.onGroupReceived(group_seq, burst_rx_group_frames_);
-        burst_rx_group_open_ = false;
-        burst_rx_group_frames_.clear();
     }
 }
 
@@ -2809,8 +1949,16 @@ void Connection::sendNextFragment() {
         burst_tx_buffer_.clear();
     }
 
+    // UNIFIED PATH: bound a message burst to the SAME airtime budget as a file burst
+    // (one budget-sized group per key-down, ack timeout sized to it) — so a large
+    // message and a file transfer key down identically. SIZE_MAX (no cap) off the
+    // unified OFDM path, preserving legacy fill-the-window message behavior.
+    const size_t burst_frame_cap = prepareUnifiedBurstWindow();
     size_t submitted_this_call = 0;
     while (arq_.isReadyToSend() && next_fragment_idx_ < pending_tx_fragments_.size()) {
+        if (submitted_this_call >= burst_frame_cap) {
+            break;  // one budget-sized group per burst (unified path)
+        }
         const Bytes& chunk = pending_tx_fragments_[next_fragment_idx_];
 
         // Use pre-computed flags if available (from sendMessages batch),
@@ -3014,38 +2162,6 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                 case v2::FrameType::NACK:
                     if (state_ == ConnectionState::CONNECTED) {
                         processArqFrame(frame_data);
-                    }
-                    break;
-                case v2::FrameType::GROUP_ACK:
-                    // §14.27: whole-burst ACK for the one-way burst transport.
-                    // Advances the group stop-and-wait sender by one group; no
-                    // SACK, no per-frame retransmit. Only meaningful when the
-                    // burst transport drives the file path.
-                    if (state_ == ConnectionState::CONNECTED && use_burst_transport_) {
-                        const uint16_t group_seq = ctrl->getGroupAckSeq();
-                        LOG_MODEM(INFO, "Connection: GROUP_ACK group_seq=%u", group_seq);
-                        if (local_data_turn_) {
-                            armDataTurnTxGuard(dataTurnAckDiversityGuardMs(*ctrl));
-                        }
-                        // §14.36: the receiver fed back its decode headroom; run the
-                        // rate controller (sender owns rate) and pick the next rate.
-                        applyAdaptiveRateFeedback(ctrl->getGroupAckQuality());
-                        burst_transport_.onGroupAck(group_seq);
-                    }
-                    break;
-                case v2::FrameType::GROUP_NACK:
-                    // §14.30: receiver couldn't decode the in-flight group — resend
-                    // it immediately instead of waiting out the group-ACK timeout.
-                    if (state_ == ConnectionState::CONNECTED && use_burst_transport_) {
-                        const uint16_t group_seq = ctrl->getGroupNackSeq();
-                        LOG_MODEM(INFO, "Connection: GROUP_NACK group_seq=%u (fast resend)", group_seq);
-                        if (local_data_turn_) {
-                            armDataTurnTxGuard(dataTurnAckDiversityGuardMs(*ctrl));
-                        }
-                        // §14.36: a NACK is a failed group -> quality 0 -> controller
-                        // steps the rate down before the resend.
-                        applyAdaptiveRateFeedback(0.0f);
-                        burst_transport_.onGroupNack(group_seq);
                     }
                     break;
                 case v2::FrameType::MODE_CHANGE:
@@ -3898,12 +3014,6 @@ void Connection::tick(uint32_t elapsed_ms) {
             }
 
             arq_.tick(elapsed_ms);
-            if (use_burst_transport_) {
-                // §14.27 Stage 2: drive the burst stop-and-wait controller clock
-                // (ACK-timeout -> whole-burst resend). Inert unless the file path
-                // activated it; arq_ still ticks for messages.
-                burst_transport_.tick(elapsed_ms);
-            }
             updateAdaptiveModeController(elapsed_ms);
             maybeYieldDataTurn();
             runDeferredArqRefill();
@@ -4356,7 +3466,13 @@ void Connection::configureArqForCurrentDataMode() {
         const uint32_t burst_airtime_ms = connection_policy::wideOFDMBurstAirtimeMs(
             data_modulation_, data_code_rate_, arq_.getWindowSize(),
             data_frame_cw_count_, continuation_reanchor_ms);
-        constexpr int kWideOFDMAckRepeatCount = 3;
+        // ACK diversity (repeat the ack N times) protects a single fade-lost ack on a
+        // SACK-frame path. The tone-burst group-ack is different: it fires ONE prompt ack
+        // per received burst, and a lost ack is already backstopped by the sender's ARQ
+        // retransmit (which re-sends the group → the receiver re-acks). Repeating it just
+        // keys the receiver down for ~5 s of redundant acks (deaf to the sender that whole
+        // time) — the "4-5 ack chain" the operator saw. So: ONE ack on the tone-burst path.
+        const int kWideOFDMAckRepeatCount = kInteractiveToneAckEnabled() ? 1 : 3;
         const uint32_t physical_sack_hold_ms = connection_policy::wideOFDMSackDelayMs(
             data_modulation_, data_code_rate_, arq_.getWindowSize(),
             data_frame_cw_count_, continuation_reanchor_ms);
@@ -4467,12 +3583,114 @@ int Connection::selectBurstLiftingZ() const {
     // RX can't know Z and the chunker/frame sizes diverge. The app/cli pushes this
     // Z to the TX encoder so its Z matches the chunker.
     // See docs/LDPC_Z_DERIVATION_DESIGN_2026_05_30.md.
+    //
+    // TRANSPORT MERGE (increment 1, ULTRA_UNIFIED_SEQ): the unified path sends the
+    // file as REGULAR arq_ DATA frames (sendNextFileChunk → flushBurstBuffer), NOT
+    // through burst_transport_'s long-LDPC group machinery. Those frames are
+    // serialized declaring cw=data_frame_cw_count_ at the connection's data geometry;
+    // forcing z=81 would re-couple the encoder to cw=2, so the RX reassembles 2
+    // codewords where the frame header claims 4 → frame parse fails → 0/N decode.
+    // Keeping Z at the DEFAULT 27 makes z/cw consistent end-to-end AND makes the
+    // descriptor's z=27 itself the on-wire "regular frames, not a file" signal the RX
+    // routes on (operator's keystone — no extra descriptor bit needed).
     if (isOFDMMode(negotiated_mode_) &&
         use_burst_transport_ &&
+        !kUnifiedSeqEnabled() &&
         file_transfer_.getState() == FileTransferState::SENDING) {
         return 81;
     }
     return 27;
+}
+
+size_t Connection::burstAirtimeBudgetFrames(size_t max_frames) const {
+    if (max_frames <= 1) {
+        return std::max<size_t>(1, max_frames);
+    }
+    // Soft half-duplex airtime ceiling for ONE key-down. A real 100 W PA derates on
+    // long key-downs and the T/R turnaround must catch air, so a single burst can't run
+    // arbitrarily long; it also must not outlive its own tone-burst ack window. SOFT:
+    // we just want "not ~10 s straight" — a burst that lands a touch over the nominal
+    // 6 s (e.g. one more frame at ~6.8 s) is fine. This is the ONLY fixed number — the
+    // frame count is DERIVED from the live per-frame airtime below, so it adapts across
+    // modulation (bits/carrier), code rate (pilot spacing — N=648 coded bits is
+    // rate-invariant, only pilots move), cw count, and fading (re-anchor) by construction.
+    constexpr uint32_t kMaxBurstAirtimeMs = 7000;
+    const uint32_t reanchor_ms =
+        connection_policy::shouldUseWideOFDMShortReanchor(
+            negotiated_mode_, data_modulation_, fading_index_)
+            ? connection_policy::wideOFDMShortReanchorChirpDurationMs()
+            : 0;
+    // Grow n until the NEXT frame would breach the ceiling. Uses the same airtime
+    // formula the ARQ timeout is derived from, so budget and timeout stay coherent.
+    size_t n = 1;
+    while (n < max_frames) {
+        const uint32_t airtime_ms = connection_policy::wideOFDMBurstAirtimeMs(
+            data_modulation_, data_code_rate_, n + 1, data_frame_cw_count_,
+            reanchor_ms, selectBurstLiftingZ());
+        if (airtime_ms > kMaxBurstAirtimeMs) {
+            break;
+        }
+        ++n;
+    }
+    return n;
+}
+
+uint32_t Connection::unifiedBurstAckTimeoutMs(size_t burst_frames) const {
+    const uint32_t reanchor_ms =
+        connection_policy::shouldUseWideOFDMShortReanchor(
+            negotiated_mode_, data_modulation_, fading_index_)
+            ? connection_policy::wideOFDMShortReanchorChirpDurationMs()
+            : 0;
+    // DATA frames carry the negotiated lifting z (z=81 long-LDPC ≈ 3× the coded bits/
+    // codeword → ~3× the per-frame airtime); the control/ack frame is always short (z=27).
+    const int data_z = selectBurstLiftingZ();
+    const auto timing = connection_policy::wideOFDMFrameTiming(
+        data_modulation_, data_code_rate_, data_frame_cw_count_, data_z);
+    const auto control_timing = connection_policy::wideOFDMFrameTiming(
+        wideOFDMControlModulationForData(data_modulation_), CodeRate::R1_4);
+    // The ack cannot arrive until the peer has fully RECEIVED the burst (real-time
+    // airtime) AND decoded it, then keyed up to return the tone-burst:
+    //   burst airtime (actual frames) + peer LDPC decode jitter + ack-return airtime.
+    const uint32_t burst_ms = connection_policy::wideOFDMBurstAirtimeMs(
+        data_modulation_, data_code_rate_, std::max<size_t>(1, burst_frames),
+        data_frame_cw_count_, reanchor_ms, data_z);
+    // Decode-jitter envelope — same model the legacy timeout uses (line ~4419): a
+    // floor plus half a data-frame, so it scales with frame size.
+    const uint32_t decode_margin_ms =
+        std::max<uint32_t>(700, timing.data_ms / 2) + 700;
+    // ONE prompt group-ack returns (diversity repeats are extra and don't gate the
+    // timeout); 1-CW control airtime + any re-anchor.
+    const uint32_t ack_return_ms = control_timing.ack_ms + reanchor_ms;
+    constexpr uint32_t kRoundTripSlackMs = 1500;  // T/R turnaround + jitter cushion
+    return burst_ms + decode_margin_ms + ack_return_ms + kRoundTripSlackMs;
+}
+
+size_t Connection::prepareUnifiedBurstWindow() {
+    if (!(isOFDMMode(negotiated_mode_) && kUnifiedSeqEnabled())) {
+        return std::numeric_limits<size_t>::max();  // legacy: fill the whole window
+    }
+    const size_t cap = burstAirtimeBudgetFrames(arq_.getWindowSize());
+    // Size the ARQ retransmit timeout (→ the tone-burst ack-listen window, which floors
+    // to it) to THIS burst's frame count under the prompt group-ack model. Set BEFORE
+    // the submit loop so the per-frame arm reads the new value.
+    arq_.setAckTimeout(unifiedBurstAckTimeoutMs(cap));
+    return cap;
+}
+
+void Connection::armToneBurstAckListenWindow() {
+    if (!(kInteractiveToneAckEnabled() && on_arm_tone_burst_ack_monitor_)) {
+        return;
+    }
+    // Listen for the ack as long as we'd wait before resending — the ARQ ack timeout is
+    // burst-aware (it covers the burst airtime + decode jitter + ack return), so the
+    // monitor can never expire mid-round-trip. Floor at the interactive value for short
+    // MC-DPSK/interactive sends. (Re-armed per (re)send; the monitor keeps the later
+    // deadline and auto-disarms the instant an ack decodes.)
+    uint32_t window_ms = kInteractiveToneAckWindowMs;
+    if (isOFDMMode(negotiated_mode_)) {
+        window_ms = std::max(window_ms, arq_.getAckTimeout());
+    }
+    on_arm_tone_burst_ack_monitor_(window_ms);
 }
 
 size_t Connection::currentDataPayloadCapacity() const {
@@ -4573,22 +3791,6 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
         // timeout no longer covers the burst+ack round-trip; without
         // this, the next burst at the new rate will fire premature
         // resends every group.
-        if (use_burst_transport_) {
-            const size_t group_size = connection_policy::burstInterleaveGroupFrames();
-            const uint32_t continuation_reanchor_ms =
-                connection_policy::wideOFDMShortReanchorChirpDurationMs();
-            const uint32_t burst_timeout = connection_policy::computeWideOFDMAckTimeoutMs(
-                data_modulation_, data_code_rate_, group_size,
-                arq_.getSackDelay(), arq_.getAckRepeatCount(),
-                data_frame_cw_count_, continuation_reanchor_ms);
-            const uint32_t timeout_ms = std::max<uint32_t>(burst_timeout + 2000u, 14000u);
-            burst_transport_.setAckTimeoutMs(timeout_ms);
-            LOG_MODEM(INFO,
-                      "Connection: ack_timeout recomputed for MODE_CHANGE: %ums "
-                      "(rate=%s mod=%s cw=%d)",
-                      timeout_ms, codeRateToString(data_code_rate_),
-                      modulationToString(data_modulation_), data_frame_cw_count_);
-        }
     }
     resetAdaptiveModeController();
 
@@ -4864,6 +4066,12 @@ void Connection::transmitFrameBatch(const std::vector<Bytes>& frame_data_list) {
               frame_data_list.size());
     on_transmit_burst_(frame_data_list, /*group_seq=*/0,
                        /*force_full_preamble=*/false);  // legacy arq_ repair burst
+    // RE-ARM the ack monitor for THIS resend's ack. The initial send arms via the
+    // tx-frame-submitted hook, but a timeout RESEND comes through here (arq_ retransmit →
+    // transmitDataBatch) and would otherwise leave the sender deaf after the first
+    // window expired — the half-duplex phase lock on fading (resend forever, never hear
+    // the ack). Mirrors the original burst sender, which re-armed per group (re)send.
+    armToneBurstAckListenWindow();
 }
 
 void Connection::setConnectedCallback(ConnectedCallback cb) {

@@ -492,10 +492,10 @@ void test_auto_data_mode_boundaries() {
     CHECK(waveform == WaveformMode::OFDM_CHIRP,
           "AWGN SNR20 auto-negotiates OFDM_CHIRP");
     recommendDataMode(20.0f, waveform, mod, rate, 0.05f);
-    // COHERENT-ONLY LADDER (2026-06-02): QAM16 is DISABLED on auto. AWGN tops out at
-    // QPSK R1/2 (R2/3/R3/4 also disabled on AWGN), never QAM16.
-    CHECK(mod == Modulation::QPSK && rate == CodeRate::R1_2,
-          "AWGN SNR20 selects coherent QPSK R1/2 (QAM16/R2/3/R3/4 disabled on auto)");
+    // COHERENT-ONLY LADDER: QAM16 is DISABLED on auto. AWGN R2/3/R3/4 enabled 2026-06-06
+    // (measure_ack_fer floors), so AWGN@20 -> QPSK R3/4 (top enabled rung), never QAM16.
+    CHECK(mod == Modulation::QPSK && rate == CodeRate::R3_4,
+          "AWGN SNR20 selects coherent QPSK R3/4 (top enabled rung; QAM16 disabled)");
 
     waveform = selectNegotiatedMode(
         all, all, WaveformMode::AUTO, WaveformMode::AUTO, WaveformMode::AUTO,

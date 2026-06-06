@@ -124,8 +124,8 @@ inline constexpr CoherentRung kCoherentLadder[] = {
     {Modulation::QAM16, CodeRate::R3_4, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},
     {Modulation::QAM16, CodeRate::R2_3, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},
     {Modulation::QAM16, CodeRate::R1_2, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},
-    {Modulation::QPSK,  CodeRate::R3_4, {kRungDisabledDb, 20.0f,           kRungDisabledDb}},  // Good@20 measured 2026-06-02 (5/5 clean, beats R5/6 + 16QAM)
-    {Modulation::QPSK,  CodeRate::R2_3, {kRungDisabledDb, 15.0f,           kRungDisabledDb}},  // Good@15 measured 2026-06-02
+    {Modulation::QPSK,  CodeRate::R3_4, {15.0f,           20.0f,           kRungDisabledDb}},  // AWGN@15 measure_ack_fer 2026-06-06 (data4_full floor ~12 dB + ~3 margin); Good@20 measured 2026-06-02
+    {Modulation::QPSK,  CodeRate::R2_3, {12.0f,           15.0f,           kRungDisabledDb}},  // AWGN@12 measure_ack_fer 2026-06-06 (floor ~8 dB + ~4 margin); Good@15 measured 2026-06-02
     {Modulation::QPSK,  CodeRate::R1_2, {10.0f,           10.0f,           18.0f}},            // AWGN/Good 10: Good@10 measured + AWGN≤Good monotonicity (was 12/14); MOD 18 unmeasured-lower
     {Modulation::QPSK,  CodeRate::R1_4, {kOFDMEntryFloorAwgnDb,            // FLOOR = OFDM entry floors
                                          kOFDMEntryFloorGoodDb,
@@ -253,17 +253,19 @@ inline CodeRate selectOFDMCodeRate(float snr_db, float fading_index) {
     return selectCoherentOFDM(snr_db, fading_index).rate;
 }
 
-// Cap the initial OFDM rate during handshake bootstrap (before post-connect quality
-// is known): never start above what the ladder supports for (snr, fading), and never
-// above R1/2 — the adaptive loop climbs from there once burst-ACK quality arrives.
+// Initial OFDM rate at handshake bootstrap: start at the LADDER rate for the measured
+// (snr, fading) — never above what the ladder supports, but no more conservative either.
+// The per-class anchors (kCoherentLadder: AWGN measure_ack_fer 2026-06-06, GOOD measured
+// 2026-06-02) ARE the measured connect-time reliability for that channel, so the
+// connect-time SNR+fading already picks the right starting rung. (Removed the old "on
+// fading, pin to R1/2 and climb" rule: with adaptive rate off it permanently froze
+// fading channels at R1/2 even where the ladder has a measured R2/3+ — e.g. Good@15
+// crawled at R1/2 instead of the measured R2/3.)
 inline CodeRate capInitialOFDMRate(float snr_db, float fading_index, CodeRate candidate) {
     const CodeRate ladder_rate = selectOFDMCodeRate(snr_db, fading_index);
-    CodeRate capped =
-        (ofdmCodeRateValue(candidate) < ofdmCodeRateValue(ladder_rate)) ? candidate : ladder_rate;
-    if (ofdmCodeRateValue(capped) > ofdmCodeRateValue(CodeRate::R1_2)) {
-        capped = CodeRate::R1_2;
-    }
-    return capped;
+    return (ofdmCodeRateValue(candidate) < ofdmCodeRateValue(ladder_rate))
+               ? candidate
+               : ladder_rate;
 }
 
 inline CodeRate capInitialOFDMRate(float snr_db,
@@ -293,7 +295,9 @@ inline CodeRate capInitialOFDMRate(float snr_db,
 // - In-band SNR >= 12 dB + good fading: OFDM_CHIRP R1/4 with extra fading margin
 // - In-band SNR >= 14 dB + moderate fading: OFDM_CHIRP R1/4 with extra fading margin
 // - In-band SNR >= 18 dB + heavy fading: OFDM_CHIRP R1/4 with extra fading margin
-// - In-band SNR >= 30 dB + AWGN: OFDM_CHIRP R3/4 (~3438 bps raw)
+// - In-band SNR >= 12 dB + AWGN: OFDM_CHIRP QPSK R2/3; >= 15 dB: R3/4 (measure_ack_fer
+//   2026-06-06 data4_full floors R2/3 ~8 dB, R3/4 ~12 dB + margin; the OLD ">= 30 dB
+//   for AWGN R3/4" was a stale, never-measured estimate — AWGN R3/4 closes far lower)
 // - In-band SNR >= 30 dB + good fading: OFDM_CHIRP R2/3 (~2944 bps raw)
 // - In-band SNR >= 25 dB + good/moderate fading: OFDM_CHIRP R1/2 (~2208 bps raw)
 // - Heavy+ fading (>= 1.10): R1/4 only (~1104 bps raw)

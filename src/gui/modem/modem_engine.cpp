@@ -523,6 +523,24 @@ std::vector<float> ModemEngine::transmitBurst(const std::vector<Bytes>& frame_da
     // Burst mode is for connected OFDM and MC-DPSK DATA windows.
     streaming_encoder_->setMode(waveform_mode_);
     streaming_encoder_->setDataMode(data_modulation_, data_code_rate_);
+
+    // TRANSPORT MERGE (ULTRA_UNIFIED_SEQ): the unified path sizes each burst to the
+    // half-duplex airtime BUDGET, which is often SMALLER than the configured burst
+    // group size (e.g. 4 frames vs a group of 6). encodeBurstLight forms groups as
+    // floor(frames / group_size), so a sub-group-size burst yields ZERO groups → it
+    // emits NO BURST_HEADER → the RX never group-decodes (falls to the per-frame path,
+    // where my group-boundary ack can't run). Each transmitBurst() IS exactly one
+    // logical burst, so declare the group size = this burst's frame count: encodeBurst
+    // then forms one self-describing group and stamps a BURST_HEADER(group=N). The RX
+    // adapts its own group size from that descriptor (streaming_ofdm_decode.cpp:713-714).
+    // TRANSPORT MERGE (2026-06-06): unified is THE OFDM path now — always size the group to
+    // this burst's frame count so encodeBurstLight forms exactly one self-describing group +
+    // BURST_HEADER(group=N), which the RX adapts to (streaming_ofdm_decode.cpp:713-714).
+    if (protocol::isOFDMMode(waveform_mode_) && !frame_data_list.empty()) {
+        streaming_encoder_->setBurstInterleaveGroupSize(
+            static_cast<int>(frame_data_list.size()));
+    }
+
     if (protocol::isOFDMMode(waveform_mode_) && connected_ && handshake_complete_ && streaming_decoder_) {
         const bool has_data_frame = std::any_of(
             frame_data_list.begin(), frame_data_list.end(),

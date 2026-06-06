@@ -10,6 +10,91 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-06 — refactor(transport): unify OFDM file/message transport onto one path; delete the legacy `burst_transport_` group controller
+
+**What it was:** the OFDM-wideband file path had **two** group-generation transports living side by
+side — the unified `SelectiveRepeatARQ arq_` path (`sendNextFileChunk`/`sendNextFragment` →
+`flushBurstBuffer` → `transmitFrameBatch` → `encodeBurstLight` + BURST_HEADER, RX
+`onBurstGroupReceived` → `processArqFrame` → `endGroupReceiveAndAck` → tone-burst ack) and the legacy
+`BurstStopAndWaitController burst_transport_` (separate group seq space, group-level stop-and-wait,
+GROUP_ACK/GROUP_NACK control frames, `formAndSendBurstGroup`/`SR` TX formation). The unified path was
+`ULTRA_UNIFIED_SEQ`/`ULTRA_TONE_ACK_INTERACTIVE`-gated (default OFF) → the default build used the legacy
+controller. Two ways to form/sequence/ack a group is exactly the duplication CLAUDE.md warns against.
+
+**Changed (files):**
+- `connection.cpp`: `kUnifiedSeqEnabled()` / `kInteractiveToneAckEnabled()` → `return true`
+  (unconditional). Deleted ~1000 lines: `startBurstFileTransfer`, `formAndSendBurstGroup`,
+  `formAndSendBurstGroupSR`, `formOneNewBurstFrame`, `onBurstGroupReceivedSR`, `collectBurstGroupFrame`,
+  the 4 `burst_transport_.set*` callbacks, the legacy branches of `onBurstGroupReceived`/`onToneBurstAck`,
+  the `GROUP_ACK`/`GROUP_NACK` switch cases, the two dead `burst_transport_.setAckTimeoutMs` blocks +
+  `burst_transport_.tick`, and the legacy route fork in `startFileTransferNow`. Wired
+  `applyAdaptiveRateFeedback` into the unified `onToneBurstAck` branch (NACK→0, ACK/SACK→1) so
+  mid-transfer rate adaptation survives. Made `onAcceptedOFDMDataSync`'s CONNECT_ACK-rescue-disarm
+  unconditional (was gated on the controller flag; load-bearing for the unified responder).
+- `modem_engine.cpp` + `streaming_burst_interleave.cpp`: the two other `ULTRA_UNIFIED_SEQ` reads
+  (group-sizing = burst frame count; fast-NACK failed-group delivery on accumulation timeout) → made
+  unconditional. **This was the bug** that made the first default-build run stall: flipping only the
+  connection.cpp gates left the modem half-unified (no BURST_HEADER for sub-group bursts).
+- `connection.hpp`: removed the `BurstStopAndWaitController burst_transport_` member + the deleted-fn
+  decls + `#include "burst_transport.hpp"`. `use_burst_transport_` bool kept as always-true
+  ("burst framing on" — gates Z/descriptor/rescue/rate); collapsing it is a follow-up.
+- Deleted `src/protocol/burst_transport.hpp` + `tests/test_burst_transport.cpp` (+ tests/CMakeLists).
+- `tests/test_protocol.cpp`: removed the 4 in-process `SimulatedChannel` file/binary-send tests
+  (small-file, queue-during-guard, tx-backlog, receiver-cancel-retains-turn) — a frame-level
+  SimulatedChannel can't carry the modem burst path; file transfer is gated on the GUI/OTASim path.
+  Recovered the `createPseudoRandomTestFile` helper (it lived inside the deleted range, used by the
+  two kept cancel tests).
+
+**Why it's correct:** with the gates unconditional, `startFileTransferNow`'s legacy route
+(`&& !kUnifiedSeqEnabled()`) is never taken → the controller is never started → all its code was dead.
+The unified path's handshake-confirm rides `onFrameReceived`, and the rescue-disarm rides
+`onAcceptedOFDMDataSync` (now unconditional) — both verified firing on a default-build run. KEPT: `arq_`
+(also serves MC-DPSK/narrow/control), `encodeBurstLight`/BURST_HEADER, `burst_transport_rx_`,
+`flushBurstBuffer`, `transmitFrameBatch`, tone-burst ack.
+
+**Test verification:** `ctest -R "Protocol|ConnectionPolicy|WaveformPolicy|RateController"` → 4/4 PASS.
+GUI gate, DEFAULT build (no env): same seed (Good@15 seed 42) is **byte-identical** to the proven
+env-gated run — CRC ok, 3 retx, 3 timeouts, 3-frame budget bursts at ~6.6 s cadence, auto R2/3. Tracked:
+docs/REMOVAL_BACKLOG.md R1b (DONE), docs/TRANSPORT_MERGE_DESIGN_2026_06_06.md.
+
+## 2026-06-06 — feat(rate): enable AWGN QPSK R2/3 + R3/4 (were disabled → AWGN crawled at R1/2)
+
+**Broken (symptom):** auto-negotiation on a clean **AWGN 28 dB** channel selected **QPSK R1/2** —
+nonsensical for a flat channel that trivially carries R3/4. **Root cause (two compounding):**
+(1) `kCoherentLadder` (waveform_selection.hpp) had **every AWGN rung above QPSK R1/2 set to
+`kRungDisabledDb`** — R2/3/R3/4 were only ever populated for the GOOD column (measured 2026-06-02);
+the AWGN cells were never measured, so they stayed disabled and the ladder topped out at R1/2.
+(2) `capInitialOFDMRate` hard-capped the *bootstrap* rate at R1/2 for ALL channels, and the climb
+only runs with `ULTRA_ADAPTIVE_RATE` (off by default) — so even had the table allowed more, a
+non-adaptive connection froze at R1/2.
+
+**Changed (files):**
+- `waveform_selection.hpp kCoherentLadder`: AWGN column QPSK **R2/3 = 12 dB, R3/4 = 15 dB**
+  (was both `kRungDisabledDb`). R1/2 stays 10. Staircase: R1/4(<10) → R1/2[10,12) → R2/3[12,15)
+  → R3/4[≥15]. QAM16 still disabled everywhere (unmeasured).
+- `waveform_selection.hpp capInitialOFDMRate`: the conservative R1/2 bootstrap pin now applies
+  **only on FADING** channels (`fading_index >= kFadingAwgnMax`). On flat AWGN the measured SNR is
+  stable and the per-rung floors are reliable, so it starts at the ladder rate. Good/Moderate
+  bootstrap behavior unchanged (still R1/2 → climb).
+- Stale comment fixed (the "AWGN R3/4 needs ≥30 dB" estimate).
+- `tests/test_waveform_policy.cpp`, `tests/test_connection_policy.cpp`: updated the AWGN
+  assertions to the new staircase.
+
+**How it's proper (measured floors, not guessed):** `build/measure_ack_fer --config data4_full
+--channel awgn --mod qpsk` (2 seeds × 40 frames, clean ceiling ≈ 78/80): QPSK **R1/2 floor ~6 dB,
+R2/3 ~8 dB, R3/4 ~12 dB**. Table thresholds = floor + ~3–4 dB margin, keeping the staircase
+ordering (R3/4 > R2/3 > R1/2). AWGN sits *below* the Good column (flat is easier than fading).
+
+**Test verification:**
+- `build/tests/test_waveform_policy` → 110/110; `build/tests/test_connection_policy` → 204/204.
+- GUI auto-negotiation `unified_file.sh awgn 18` → `Data mode set to: QPSK R3/4` (auto, no force),
+  `CRC ok, 44.9s, 2.19 kbps`, 0 retransmits (~1.7× the R1/2 1.26 kbps). The unified burst path
+  (variable group, descriptor, group-ack) carried R3/4 unchanged — confirming rate-adaptivity.
+
+**KEEP / NOTE:** this is the **rate-ladder** workstream, separate from the transport merge (which is
+rate-agnostic and already worked). AWGN R2/3/R3/4 are now *measured-and-enabled*; the Moderate/Poor
+and QAM16 cells remain unmeasured/disabled. Fading rungs still bootstrap conservatively at R1/2.
+
 ## 2026-06-05 — fix(B2F): encoder z-revert + honest VARA BUFFER (file across reliably); feat: interactive tone-burst ACK (transport-merge step 1)
 
 **1. Encoder z-revert (BUG-TNC-B2F-002 root cause).** A burst lifts the encoder to z=81; nothing

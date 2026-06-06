@@ -18,7 +18,16 @@ here causes a wrong deletion later. Move finished items to *Completed* with the 
 
 ## Decided removals (architecture direction — confirmed)
 
-### R1. Legacy OFDM-wideband **file routing** (NOT "SR-ARQ") — `IN-PROGRESS` (env gate removed 2026-06-02; dead-branch deletion remaining)
+### R1. Legacy OFDM-wideband **file routing** (NOT "SR-ARQ") — `SUPERSEDED 2026-06-06 by the Transport Merge — see R1b`
+
+> **2026-06-06 — REVERSED by the Transport Merge (R1b).** This entry wanted to KEEP
+> `burst_transport_` (the `BurstStopAndWaitController` group controller) and DELETE the
+> wideband-file routing through `arq_`. The Transport Merge inverts that decision: the
+> **unified `arq_` path is now THE keeper** (one 16-bit seq space, one tone-burst ack, one
+> retransmit window — it still bursts+interleaves via `encodeBurstLight`), and the
+> **`burst_transport_` controller is the legacy to delete.** So R1's "scope (delete)" below is
+> VOID (those `arq_`-file branches survive as the unified path). The live deletion is **R1b**.
+> R1 kept here only for history.
 
 > **2026-06-02 — env gate REMOVED (user directive).** Per the user ("burst transport is the
 > only valid way to transfer files now … we shouldn't gate it"), the `ULTRA_BURST_TRANSPORT`
@@ -54,6 +63,76 @@ here causes a wrong deletion later. Move finished items to *Completed* with the 
   burst default path is not yet throughput-proven end-to-end on the GUI gate. Keep the
   `=0` fallback until burst is proven post-ladder-rework, THEN delete the legacy routing
   + knob. (Tracking: the burst-default flip itself already shipped regression-free.)
+
+### R1b. Legacy `burst_transport_` group-burst controller (Transport Merge) — `DONE 2026-06-06` (unified is the default; controller deleted)
+
+> **DONE 2026-06-06 (uncommitted, NOT pushed).** Flipped `kUnifiedSeqEnabled()`/
+> `kInteractiveToneAckEnabled()` (connection.cpp) + the two modem-side reads (`modem_engine.cpp`,
+> `streaming_burst_interleave.cpp`) to unconditional → unified is the default, no env needed.
+> Deleted (~1000 lines from connection.cpp): `startBurstFileTransfer`, `formAndSendBurstGroup`,
+> `formAndSendBurstGroupSR`, `formOneNewBurstFrame`, `onBurstGroupReceivedSR`, `collectBurstGroupFrame`,
+> the 4 `burst_transport_` callbacks, the legacy `onBurstGroupReceived`/`onToneBurstAck` branches, the
+> GROUP_ACK/NACK switch cases + their `setAckTimeoutMs`/`tick` plumbing, the route fork in
+> `startFileTransferNow`, the `BurstStopAndWaitController burst_transport_` member, and the whole
+> `src/protocol/burst_transport.hpp` + `tests/test_burst_transport.cpp` (+ CMake). Wired
+> `applyAdaptiveRateFeedback` into the unified `onToneBurstAck` branch so rate adaptation survives.
+> Removed the 4 in-process `SimulatedChannel` file/binary-send tests from `test_protocol.cpp` (they
+> can't carry the modem burst path; file transfer is gated on the GUI/OTASim path). KEPT `arq_`,
+> `encodeBurstLight`/BURST_HEADER, `burst_transport_rx_`, `flushBurstBuffer`, `transmitFrameBatch`,
+> tone-burst ack, and `onAcceptedOFDMDataSync` (made unconditional). **FOLLOW-UPS:** (1) `use_burst_transport_`
+> bool is now always-true — collapse to a constant / inline its gates; (2) orphaned TX members
+> (`burst_resend_frames_`, `burst_inflight_frames_`/`_is_pad_`, `burst_file_payload_`,
+> `burst_rx_group_frames_`, etc.) are now unused — sweep them.
+
+> **Supersedes R1 (reversed).** The Transport Merge unifies the 3 SR-ARQ-over-OFDM transports
+> (interactive SR-ARQ / SR-on-burst / burst-file) onto ONE path: the unified `arq_` selective-repeat
+> window, where "burst" is just TX framing (`encodeBurstLight` + BURST_HEADER descriptor) + RX group
+> assembly that `arq_` drives. The separate `BurstStopAndWaitController burst_transport_` becomes a
+> SECOND, redundant way to form/sequence/ack a group → delete it so there is exactly ONE group-gen path.
+
+- **What:** the legacy OFDM-wideband file/group transport built on `BurstStopAndWaitController
+  burst_transport_` — a separate group seq space, group-level stop-and-wait, GROUP_ACK/GROUP_NACK
+  control frames, and its own TX group-formation (`formAndSendBurstGroup` z=81 / `formAndSendBurstGroupSR`).
+- **Why dead:** the unified `arq_` path (`sendNextFileChunk`/`sendNextFragment` → `flushBurstBuffer` →
+  `transmitFrameBatch` → `encodeBurstLight`, RX `onBurstGroupReceived` unified branch → `processArqFrame`
+  → `endGroupReceiveAndAck` → tone-burst ack) does the same bursting+interleaving with ONE seq space,
+  one ack, one retransmit window. Half-duplex stop-and-wait + coalesced `[holes]+[new]` resends live in
+  `arq_` now (`retransmitInFlightUnacked` + `prepareUnifiedBurstWindow`). Validated CRC-clean AWGN
+  (R1/2,R3/4) + Good@15 (R1/2,R2/3); multi-seed proof = `/tmp/unified_multiseed.sh` (gate for the flip).
+- **Scope (delete, VERIFY file:line first — connection.cpp/.hpp unless noted):**
+  - TX group-formation: `startBurstFileTransfer()`, `formAndSendBurstGroup()`, `formAndSendBurstGroupSR()`.
+  - RX: `onBurstGroupReceivedSR()`; the LEGACY (`!kUnifiedSeqEnabled()`) branch of `onBurstGroupReceived()`
+    (the `interleaved`/`all_ok`/fast-NACK-control-frame block at ~2540–2682) — KEEP the unified branch.
+  - The `BurstStopAndWaitController burst_transport_` member + `use_burst_transport_` member/default + all
+    its callback wiring (`setTransmitGroup`/`setSendGroupAck`/`setGroupDelivered`/`setTransferDone`/
+    `setFormAndSendGroup`/`setAckTimeoutMs`/`startTransfer`/`onGroupAck`/`onGroupNack`/`onGroupReceived`/
+    `rxExpectedGroupSeq`/`groupsAcked`/`ackTimeoutMs`/`tick`) in connection.cpp.
+  - The `!use_burst_transport_` / `use_burst_transport_` route forks (incl. `startFileTransferNow`
+    `&& !kUnifiedSeqEnabled()` branch at ~1755, and the GROUP_ACK/GROUP_NACK handlers ~3158–3182, ~3298).
+  - GROUP_ACK / GROUP_NACK control frames (`ControlFrame::makeGroupNack`/`makeGroupAck`) IF no other caller.
+  - `src/protocol/burst_transport.hpp` (the header-only `BurstStopAndWaitController` class) once unreferenced.
+  - The `kUnifiedSeqEnabled()` / `kInteractiveToneAckEnabled()` env gates themselves (make unconditional)
+    + the 3 env reads (`connection.cpp:34`, `modem_engine.cpp:537`, `streaming_burst_interleave.cpp:195`).
+- **⚠ KEEP (do not over-cut — anti-footgun):**
+  - **`SelectiveRepeatARQ arq_` stays** — the unified keeper; also still serves MC-DPSK data, OFDM_NARROW
+    data, and ALL control ACKs. This is NOT "remove SR-ARQ".
+  - **`encodeBurstLight` + BURST_HEADER descriptor** (self-describing group_size/cw/mod/rate/z) — the ONE
+    group TX framing. **`burst_transport_rx_`** (modem RX group collector) + `flushBurstBuffer` +
+    `transmitFrameBatch` + `onBurstGroupReceived` **unified branch** + tone-burst ack — all stay.
+  - **`onAcceptedOFDMDataSync()` rescue-disarm is LOAD-BEARING for the unified path** (verified 2026-06-06:
+    bravo log line 452 "Accepted OFDM DATA sync … disarming CONNECT_ACK rescue (burst transport)"). It is
+    gated `if (use_burst_transport_)` (connection.cpp:3300). When `use_burst_transport_` is deleted, make
+    this disarm **UNCONDITIONAL** — do NOT delete it. Without it the responder keeps blasting an 8.3 s
+    CONNECT_ACK rescue INTO the initiator's in-flight burst (half-duplex collision → group-0 ACK latency).
+  - The responder handshake-confirm rides `Connection::onFrameReceived` (connection.cpp:3049, "received
+    first valid frame from initiator"), NOT the legacy `onBurstGroupReceived` branches — so deleting those
+    branches does not lose it. Keep `onFrameReceived` on the RX path (re-verify on the post-delete gate).
+  - Burst is itself selective-repeat — SACK/`frame_mask`/resend-failed-only semantics are shared; don't
+    rip them out.
+- **Blocker:** unified must be the DEFAULT (gate flip) and pass the multi-seed proof first. Sequence:
+  (1) prove `/tmp/unified_multiseed.sh` green → (2) make unified unconditional → (3) delete legacy above
+  → re-gate. Doing the delete before (1) is the "single-cell pass ≠ proof" trap.
+- **Design:** `docs/TRANSPORT_MERGE_DESIGN_2026_06_06.md`.
 
 ### R2. Operator chat-message (free-text) feature — `IN-PROGRESS` (tests removed 2026-06-02; API removal remaining)
 - **What:** interactive operator chat / free-text message sending.

@@ -24,33 +24,38 @@ int tests_failed = 0;
     } while (0)
 
 void test_ofdm_rate_thresholds() {
-    // COHERENT-ONLY LADDER (kCoherentLadder, 2026-06-02). Auto rate selection is
-    // one ladder walked high->low; QAM16 and the QPSK R3/4 rung are DISABLED on
-    // auto (kRungDisabledDb), so they are NEVER auto-selected. The only enabled
-    // rungs per class are:
-    //   AWGN     : R1/4 (>=8), R1/2 (>=10). R2/3 / R3/4 / QAM16 disabled.
+    // COHERENT-ONLY LADDER (kCoherentLadder). Auto rate selection is one ladder
+    // walked high->low; QAM16 is DISABLED on auto (kRungDisabledDb). Enabled rungs
+    // per class:
+    //   AWGN     : R1/4 (>=8 floor), R1/2 (>=10), R2/3 (>=12), R3/4 (>=15). QAM16 off.
     //   GOOD     : R1/2 (>=10), R2/3 (>=15), R3/4 (>=20). R1/4 below 10. QAM16 disabled.
     //   MODERATE : R1/4 (>=14), R1/2 (>=18). R2/3 / R3/4 / QAM16 disabled.
     //   POOR (>=1.10): R1/4 always (defensive; Poor routes to MC-DPSK upstream).
+    // AWGN R2/3/R3/4 enabled 2026-06-06 (measure_ack_fer data4_full floors R2/3~8,
+    // R3/4~12 dB + margin); AWGN is flat so it sits BELOW the Good thresholds.
 
-    // AWGN: R2/3 and R3/4 are disabled, so even high SNR tops out at R1/2.
-    CHECK(selectOFDMCodeRate(25.0f, 0.00f) == CodeRate::R1_2,
-          "AWGN in-band SNR25 tops out at R1/2 (R2/3 / R3/4 disabled on auto)");
-    CHECK(selectOFDMCodeRate(40.0f, 0.00f) == CodeRate::R1_2,
-          "AWGN even at very high SNR stays R1/2 (no QAM16/R3/4 auto promotion)");
-    // Near-AWGN slight fading (0.12 < 0.15) is still AWGN class -> R1/2, not R2/3.
-    CHECK(selectOFDMCodeRate(25.0f, 0.12f) == CodeRate::R1_2,
-          "near-AWGN (fading 0.12, AWGN class) in-band SNR25 stays R1/2, not R2/3");
+    // AWGN: high SNR now promotes through R2/3 to R3/4 (the top enabled QPSK rung).
+    CHECK(selectOFDMCodeRate(25.0f, 0.00f) == CodeRate::R3_4,
+          "AWGN in-band SNR25 -> R3/4 (top enabled QPSK rung)");
+    CHECK(selectOFDMCodeRate(40.0f, 0.00f) == CodeRate::R3_4,
+          "AWGN very high SNR -> R3/4 (QAM16 still disabled)");
+    // Near-AWGN slight fading (0.12 < 0.15) is still AWGN class -> uses AWGN column.
+    CHECK(selectOFDMCodeRate(25.0f, 0.12f) == CodeRate::R3_4,
+          "near-AWGN (fading 0.12, AWGN class) in-band SNR25 -> R3/4 (AWGN column)");
 
-    // R1/2 transition gates (2026-06-02 monotonicity update): AWGN 10, GOOD 10, MODERATE 18.
-    //
-    // AWGN gate at SNR >= 10 dB (R1/4 below):
+    // AWGN staircase: R1/4 (<10), R1/2 [10,12), R2/3 [12,15), R3/4 [15,inf).
     CHECK(selectOFDMCodeRate(9.9f, 0.00f) == CodeRate::R1_4,
           "AWGN in-band SNR=9.9 should stay R1/4 (just under R1/2 gate)");
     CHECK(selectOFDMCodeRate(10.0f, 0.00f) == CodeRate::R1_2,
-          "AWGN in-band SNR=10 should promote to R1/2 (R1/2 reliable @ AWGN 10, monotonicity)");
-    CHECK(selectOFDMCodeRate(21.7f, 0.00f) == CodeRate::R1_2,
-          "AWGN in-band SNR=21.7 should use R1/2 (well above gate)");
+          "AWGN in-band SNR=10 should promote to R1/2");
+    CHECK(selectOFDMCodeRate(11.9f, 0.00f) == CodeRate::R1_2,
+          "AWGN in-band SNR=11.9 should stay R1/2 (just under R2/3 gate)");
+    CHECK(selectOFDMCodeRate(12.0f, 0.00f) == CodeRate::R2_3,
+          "AWGN in-band SNR=12 should promote to R2/3 (measure_ack_fer floor ~8 + margin)");
+    CHECK(selectOFDMCodeRate(14.9f, 0.00f) == CodeRate::R2_3,
+          "AWGN in-band SNR=14.9 should stay R2/3 (just under R3/4 gate)");
+    CHECK(selectOFDMCodeRate(15.0f, 0.00f) == CodeRate::R3_4,
+          "AWGN in-band SNR=15 should promote to R3/4 (measure_ack_fer floor ~12 + margin)");
 
     // Good fading gate at SNR >= 10 dB; R2/3 enabled at >= 15 dB.
     CHECK(selectOFDMCodeRate(9.9f, 0.30f) == CodeRate::R1_4,
@@ -121,20 +126,23 @@ void test_coherent_ladder_selection() {
     Modulation mod;
     CodeRate rate;
 
-    // --- AWGN class (fading < 0.15): R1/4 (>=8), R1/2 (>=10); R2/3/R3/4/QAM16 OFF ---
-    // The OLD behavior promoted QAM16 R1/4/R1/2/R2/3/R3/4 at AWGN 16/19/19.5/19.7.
-    // The NEW behavior NEVER auto-selects QAM16 and tops out at QPSK R1/2.
+    // --- AWGN class (fading < 0.15): R1/4 (>=8), R1/2 (>=10), R2/3 (>=12), R3/4 (>=15);
+    //     QAM16 still OFF (2026-06-06 AWGN R2/3/R3/4 enable). ---
     recommendDataMode(20.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.05f);
     CHECK(mod == Modulation::QPSK, "AWGN in-band SNR=20 selects coherent QPSK (never QAM16)");
-    CHECK(rate == CodeRate::R1_2, "AWGN in-band SNR=20 tops out at QPSK R1/2 (R2/3/R3/4 disabled)");
+    CHECK(rate == CodeRate::R3_4, "AWGN in-band SNR=20 -> QPSK R3/4 (top enabled rung)");
 
     recommendDataMode(25.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.05f);
-    CHECK(mod == Modulation::QPSK && rate == CodeRate::R1_2,
-          "AWGN in-band SNR=25 stays QPSK R1/2 (no QAM16/R3/4 auto promotion)");
+    CHECK(mod == Modulation::QPSK && rate == CodeRate::R3_4,
+          "AWGN in-band SNR=25 -> QPSK R3/4 (no QAM16 auto promotion)");
 
     recommendDataMode(16.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.05f);
-    CHECK(mod == Modulation::QPSK && rate == CodeRate::R1_2,
-          "AWGN in-band SNR=16 is coherent QPSK R1/2 (was QAM16 R1/4 on old ladder)");
+    CHECK(mod == Modulation::QPSK && rate == CodeRate::R3_4,
+          "AWGN in-band SNR=16 -> QPSK R3/4 (>=15 gate)");
+
+    recommendDataMode(13.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.05f);
+    CHECK(mod == Modulation::QPSK && rate == CodeRate::R2_3,
+          "AWGN in-band SNR=13 -> QPSK R2/3 (>=12, <15)");
 
     recommendDataMode(9.9f, WaveformMode::OFDM_CHIRP, mod, rate, 0.05f);
     CHECK(mod == Modulation::QPSK && rate == CodeRate::R1_4,
@@ -194,27 +202,38 @@ void test_coherent_ladder_selection() {
 }
 
 void test_bootstrap_caps() {
-    // Bootstrap cap = min(candidate, ladder_rate_for(snr,fading)) by code-rate value,
-    // then never above R1/2 (the adaptive loop climbs from R1/2 once ACK quality
-    // arrives). On the coherent-only ladder the auto rate never exceeds R2/3, and the
-    // bootstrap ceiling pins everything to R1/2 — so QAM16/R3/4 can never be a start
-    // rate. The 4-arg overload no longer depends on modulation (returns candidate only
-    // when ULTRA_FORCE_DATA_RATE is set, which the tests do not set).
-    CHECK(capInitialOFDMRate(19.6f, 0.04f, CodeRate::R3_4) == CodeRate::R1_2,
-          "initial R3/4 caps to the R1/2 bootstrap ceiling on AWGN");
-    CHECK(capInitialOFDMRate(19.7f, 0.04f, CodeRate::R3_4) == CodeRate::R1_2,
-          "initial R3/4 caps to R1/2 (QAM16/R3/4 never an auto start rate)");
-    CHECK(capInitialOFDMRate(20.0f, 0.05f, CodeRate::R2_3) == CodeRate::R1_2,
-          "initial R2/3 caps to the R1/2 bootstrap ceiling on AWGN");
-    CHECK(capInitialOFDMRate(30.0f, 0.12f, CodeRate::R2_3) == CodeRate::R1_2,
-          "initial R2/3 caps to R1/2 with near-AWGN evidence");
+    // Bootstrap cap = min(candidate, ladder_rate_for(snr,fading)) by code-rate value.
+    // FADING channels then also pin to R1/2 (the adaptive loop climbs from there once
+    // ACK quality arrives — the chirp SNR can be optimistic on a fading channel). FLAT
+    // AWGN (fading < kFadingAwgnMax) has NO R1/2 pin: the measured SNR is stable and the
+    // per-rung floors are reliable, so it starts at the ladder rate (2026-06-06). The
+    // 4-arg overload returns candidate only when ULTRA_FORCE_DATA_RATE is set (unset here).
+
+    // AWGN: starts at the ladder rate (no R1/2 pin) — ladder gives R3/4 at >=15.
+    CHECK(capInitialOFDMRate(19.6f, 0.04f, CodeRate::R3_4) == CodeRate::R3_4,
+          "AWGN initial R3/4 starts at R3/4 (ladder rate, no fading R1/2 pin)");
+    CHECK(capInitialOFDMRate(15.0f, 0.04f, CodeRate::R3_4) == CodeRate::R3_4,
+          "AWGN@15 initial R3/4 starts at R3/4 (ladder enables R3/4 at 15)");
+    // Candidate below ladder still wins (min): R2/3 candidate on AWGN@20 -> R2/3.
+    CHECK(capInitialOFDMRate(20.0f, 0.05f, CodeRate::R2_3) == CodeRate::R2_3,
+          "AWGN initial R2/3 starts at R2/3 (min(candidate, ladder R3/4))");
+    CHECK(capInitialOFDMRate(30.0f, 0.12f, CodeRate::R2_3) == CodeRate::R2_3,
+          "near-AWGN (fading 0.12, AWGN class) initial R2/3 starts at R2/3");
+    // Just below the AWGN R2/3 gate (12): ladder is R1/2, so the cap follows it.
+    CHECK(capInitialOFDMRate(11.0f, 0.04f, CodeRate::R3_4) == CodeRate::R1_2,
+          "AWGN@11 caps R3/4 down to the ladder rate R1/2");
+    // FADING now starts at the LADDER rate too (no R1/2 pin): Good@20 ladder is R3/4,
+    // candidate R2/3 -> min = R2/3 (start at the measured Good rung, not R1/2).
     CHECK(capInitialOFDMRate(20.0f, 0.40f, CodeRate::R2_3, Modulation::QPSK) ==
-              CodeRate::R1_2,
-          "initial QPSK R2/3 caps to the R1/2 bootstrap ceiling on good fading");
+              CodeRate::R2_3,
+          "good fading initial QPSK R2/3 starts at R2/3 (ladder rate, no R1/2 pin)");
+    CHECK(capInitialOFDMRate(15.0f, 0.40f, CodeRate::R3_4, Modulation::QPSK) ==
+              CodeRate::R2_3,
+          "good fading @15 caps R3/4 down to the ladder rate R2/3 (Good@15 measured)");
     CHECK(capInitialOFDMRate(20.0f, 0.40f, CodeRate::R2_3, Modulation::DQPSK) ==
-              CodeRate::R1_2,
-          "coherent-only band: modulation no longer changes the bootstrap cap");
-    // Below the R1/2 gate (AWGN 10) the cap follows the ladder floor (R1/4), not the ceiling.
+              CodeRate::R2_3,
+          "good fading: modulation no longer changes the bootstrap cap");
+    // Below the AWGN R1/2 gate (10) the cap follows the ladder floor (R1/4).
     CHECK(capInitialOFDMRate(9.5f, 0.05f, CodeRate::R3_4) == CodeRate::R1_4,
           "AWGN below the R1/2 gate caps to the QPSK R1/4 ladder floor");
 }
@@ -260,10 +279,10 @@ void test_data_mode_policy() {
     // longer climbs into QAM16; it tops out per-class at R1/2 (AWGN/Moderate) or
     // R2/3 (Good).
 
-    // High-SNR AWGN: R2/3 and R3/4 disabled on AWGN -> tops out at QPSK R1/2.
+    // High-SNR AWGN: R3/4 is the top enabled QPSK rung (QAM16 still disabled).
     recommendDataMode(37.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.00f);
     CHECK(mod == Modulation::QPSK, "high-SNR AWGN selects coherent QPSK (never QAM16)");
-    CHECK(rate == CodeRate::R1_2, "high-SNR AWGN tops out at QPSK R1/2 (R2/3/R3/4 disabled)");
+    CHECK(rate == CodeRate::R3_4, "high-SNR AWGN -> QPSK R3/4 (top enabled rung)");
 
     // High-SNR GOOD fading: R3/4 disabled -> tops out at QPSK R2/3.
     recommendDataMode(32.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
@@ -278,10 +297,10 @@ void test_data_mode_policy() {
     CHECK(mod == Modulation::QPSK, "good-fading in-band SNR28 selects coherent QPSK");
     CHECK(rate == CodeRate::R3_4, "good-fading in-band SNR28 selects QPSK R3/4 (>=20 gate)");
 
-    // AWGN in-band SNR=21.7: QAM16 never auto-selected, AWGN tops out at QPSK R1/2.
+    // AWGN in-band SNR=21.7: QAM16 never auto-selected; AWGN top rung is QPSK R3/4.
     recommendDataMode(21.7f, WaveformMode::OFDM_CHIRP, mod, rate, 0.04f);
     CHECK(mod == Modulation::QPSK, "AWGN in-band SNR=21.7 selects coherent QPSK (never QAM16)");
-    CHECK(rate == CodeRate::R1_2, "AWGN in-band SNR=21.7 stays QPSK R1/2");
+    CHECK(rate == CodeRate::R3_4, "AWGN in-band SNR=21.7 -> QPSK R3/4");
 
     // SNR=19 GOOD fading: above the R2/3 gate (>=15) -> coherent QPSK R2/3.
     recommendDataMode(19.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);

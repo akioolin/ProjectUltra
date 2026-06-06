@@ -153,20 +153,23 @@ SR-ARQ masks; ON → whole-group ACK/NACK.** They disagreeing was the QAM16 offs
 (`connection.cpp:654`) → `capInitialOFDMRate` → `recommendCWCountForChannel` →
 `enterConnected` (`connection.cpp:4468`) → `configureArqForCurrentDataMode` (`connection.cpp:4114`).
 
-**ARQ — two subsystems:**
-- `SelectiveRepeatARQ arq_` (`connection.hpp:434`, non-burst): window per mode — MC-DPSK
-  `mcDpskWindowSizeForTiming` (1–5), OFDM_NARROW **3** (hardcoded), OFDM wideband
-  `ofdmWindowSizeForChannel` **8 default, up to 16** on near-AWGN DQPSK/D8PSK ≥R1/2. 🟢
-- `BurstStopAndWaitController burst_transport_` (`connection.hpp:510`): true one-way
-  stop-and-wait, **🟢 UNCONDITIONAL — burst is THE OFDM-wideband file path (2026-06-02; the
-  `ULTRA_BURST_TRANSPORT` env gate was REMOVED). `use_burst_transport_=true` always; the RX
-  default `burst_transport_rx_` is now `true` (was `false`) so every StreamingDecoder owner
-  (GUI ModemEngine, raw ultra_tnc/measure_ack_fer) gets burst-RX without a separate enable
-  call.** The legacy `!use_burst_transport_` windowed-file branches are now dead (R1 deletion
-  follow-up). SR dispatch `formAndSendBurstGroupSR`
-  (`connection.cpp:2632`) when `burst_interleave_off_` (`connection.cpp:2051`, default true).
-  GROUP_ACK is now **tone-burst** (`connection.cpp:413`); OFDM 1-CW GROUP_ACK only behind
-  `ULTRA_LEGACY_OFDM_GROUP_ACK`.
+**ARQ — ONE subsystem (Transport Merge, 2026-06-06):**
+- `SelectiveRepeatARQ arq_` (`connection.hpp`): the SINGLE data transport for ALL modes — MC-DPSK
+  data, OFDM_NARROW data, OFDM-wideband file/message, and all control ACKs. Window per mode —
+  MC-DPSK `mcDpskWindowSizeForTiming` (1–5), OFDM_NARROW **3** (hardcoded), OFDM wideband
+  `ofdmWindowSizeForChannel` **8 default, up to 16** on near-AWGN ≥R1/2, with the unified file/message
+  burst bounded per-key-down to a ~7 s airtime budget (`prepareUnifiedBurstWindow` →
+  `burstAirtimeBudgetFrames`, e.g. 3 frames at QPSK R2/3). 🟢
+- **The OFDM file/message burst** = TX framing (`sendNextFileChunk`/`sendNextFragment` →
+  `flushBurstBuffer` → `transmitFrameBatch` → `encodeBurstLight` + BURST_HEADER descriptor) + RX
+  group assembly (`burst_transport_rx_` collector, default `true` → `onBurstGroupReceived` →
+  `processArqFrame` → `endGroupReceiveAndAck`) that **`arq_` drives**. ACK is a **tone-burst**
+  (`connection.cpp` `setEmitToneBurstSackCallback` + `onToneBurstAck`). 🟢
+- **REMOVED 2026-06-06 (R1b):** the separate `BurstStopAndWaitController burst_transport_` group
+  controller (own seq space, group stop-and-wait, GROUP_ACK/GROUP_NACK control frames,
+  `formAndSendBurstGroup`/`SR`, `startBurstFileTransfer`, `burst_transport.hpp`). `use_burst_transport_`
+  remains a bool = "burst framing on" (always true; gates Z/descriptor/rescue/rate — collapse is a
+  follow-up). GROUP_ACK/GROUP_NACK frame types are now unhandled (no emitter).
 
 **Warm-handoff (§16)** 🟢 PRODUCTION DEFAULT (the `ULTRA_S16_WARM_HANDOFF` flag was removed
 2026-05-31; behavior is now unconditional) — light LTS at group-start, BURST_HEADER as anchor
@@ -218,7 +221,7 @@ Buckets per the env-knobs→runtime-derivation workstream: **[FEAT]** in-flight 
 | `ULTRA_LOCK_RATE` | hold data rate fixed for transfer | OFF | `connection.cpp:2342` | FEAT |
 | `ULTRA_MAX_OFDM_RATE` | cap initial+adaptive rate | unset | `connection.cpp:673` | FEAT |
 | `ULTRA_FRAME_CW` | override CW/frame | unset | `connection.cpp:727` | FEAT |
-| `ULTRA_LDPC_Z` | Z=81→n=1944 vs 27→n=648. **16→1 sites (2026-05-30, DONE)**: RX via descriptor (`activeBurstLiftingZ()`), TX consumers via `ldpc_lifting_z_`, chunker + `makeFixedDataFrame` + `modem_engine` via `Connection::selectBurstLiftingZ()` (app/cli push it to the encoder). Z is now code-derived (traffic-class: bulk/file burst→81, gated on `use_burst_transport_`), written to the descriptor, read back. The 1 remaining read is the discovery override INSIDE the policy. The GUI harness no longer pins `ULTRA_LDPC_Z=81` (dropped 2026-05-30) — the traffic-class policy derives it (81 for file bursts, now that burst transport is the default). | 27 (policy) | `connection.cpp:4342` (override only) | FEAT (derived) |
+| `ULTRA_LDPC_Z` | Z=81→n=1944 vs 27→n=648. **16→1 sites (2026-05-30, DONE)**: RX via descriptor (`activeBurstLiftingZ()`), TX consumers via `ldpc_lifting_z_`, chunker + `makeFixedDataFrame` + `modem_engine` via `Connection::selectBurstLiftingZ()` (app/cli push it to the encoder). Z is code-derived, written to the descriptor, read back. **Transport Merge 2026-06-06: the unified file path uses z=27** — `selectBurstLiftingZ` gates z=81 on `!kUnifiedSeqEnabled()` (always false) so z=81 long-LDPC is now dead (was the legacy `burst_transport_` file behavior); z=27 doubles as the descriptor's "regular frames" signal. The 1 remaining read is the discovery override INSIDE the policy. | 27 (always) | `connection.cpp` (override only) | FEAT (derived) |
 | `ULTRA_LEGACY_OFDM_GROUP_ACK` | old OFDM GROUP_ACK vs tone-burst | OFF | `connection.cpp:445` | FEAT (A/B) |
 | `ULTRA_SHORT_REANCHOR_CHIRP_MS` | short re-anchor chirp ms [100,300] | 100 | `connection_policy.hpp:380` | FEAT |
 | `ULTRA_WIENER_DELAY_SPREAD_S` | Wiener freq-corr delay spread | **hardcoded 1e-3 (Moderate-HF) — NOT derived; adaptivity gap** | `channel_equalizer_pilot.cpp:28` | ADAPT |
@@ -261,9 +264,13 @@ Buckets per the env-knobs→runtime-derivation workstream: **[FEAT]** in-flight 
 6. Entry-SNR floor table (10/12/14/18) — 2 copies: `waveform_selection.hpp:458` vs
    `connection_policy.hpp:212`.
 7. `ULTRA_LDPC_Z` — **DONE 2026-05-30, 16→1** (`docs/LDPC_Z_DERIVATION_DESIGN_2026_05_30.md`).
-   Z is code-derived via `Connection::selectBurstLiftingZ()` (traffic-class: bulk/file OFDM
-   burst→81, gated on `use_burst_transport_`), written to the BURST_HEADER descriptor, read back
-   by RX (`activeBurstLiftingZ()`); the app/cli push it to the TX encoder. The 1 remaining read is
+   Z is code-derived via `Connection::selectBurstLiftingZ()`, written to the BURST_HEADER descriptor,
+   read back by RX (`activeBurstLiftingZ()`); the app/cli push it to the TX encoder. **NOTE (Transport
+   Merge 2026-06-06):** the unified file path uses **z=27** (n=648) — the z=81 long-LDPC branch was the
+   legacy `burst_transport_` file behavior and is now dead (`selectBurstLiftingZ` gates z=81 on
+   `!kUnifiedSeqEnabled()`, always false → always returns 27; z=27 is also the descriptor's
+   "regular frames, not a separate file-burst" signal). Dropping z=81 long-LDPC is a known merge
+   trade-off (fewer FEC margin for fade diversity); revisit if file FER on fading regresses. The 1 remaining read is
    the discovery override inside the policy. No-regression proven (cli short-msg + default
    `--file` at Z=27). **REMAINING: faithful GUI proof of the Z=81 burst flip** (use_burst=1) +
    Codex — cli's burst harness is "not the faithful gate".
@@ -303,7 +310,9 @@ These are wrong in the current top-level docs and should be fixed:
   still call it forced/legacy.
 - **ARQ windows:** CLAUDE.md says "window=1 for MC-DPSK" and wideband "up to 8." Actual:
   MC-DPSK is timing-derived **1–5**, OFDM_NARROW is **3**, wideband OFDM is **8 default and up
-  to 16** on near-AWGN DQPSK/D8PSK ≥R1/2. Only `BurstStopAndWaitController` is true window=1.
+  to 16** on near-AWGN ≥R1/2, with the unified file/message burst bounded to a ~7 s airtime budget
+  per key-down (`prepareUnifiedBurstWindow`). (`BurstStopAndWaitController` was REMOVED 2026-06-06 —
+  R1b transport merge; there is no longer a separate window=1 group controller.)
 - **pilot_spacing=10 is a default, not a constant** — overwritten per-rung by
   `recommendedPilotSpacing(mod,rate)`.
 - **SC-DPSK** is listed in the CLAUDE.md waveform table but is not an `IWaveform` and not in the

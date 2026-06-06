@@ -3,7 +3,6 @@
 #include "frame_v2.hpp"
 #include "arq.hpp"
 #include "selective_repeat_arq.hpp"
-#include "burst_transport.hpp"
 #include "waveform/tone_burst_ack/tone_burst_ack_monitor.hpp"
 #include "rate_controller.hpp"
 #include "file_transfer.hpp"
@@ -312,6 +311,36 @@ public:
     // override. See docs/LDPC_Z_DERIVATION_DESIGN_2026_05_30.md.
     int selectBurstLiftingZ() const;
 
+    // Half-duplex airtime ceiling for ONE key-down: bound the per-burst frame count
+    // so a single transmission can't run too long (PA duty/thermal, T/R turnaround,
+    // and ack latency — the burst must not outlive its own tone-burst ack window).
+    // FULLY DERIVED, not a per-mode constant: the frame count falls out of the live
+    // per-frame airtime (wideOFDMBurstAirtimeMs at the active modulation/rate/cw/
+    // fading), so it adapts across the whole rung family by construction. Returns a
+    // count in [1, max_frames]. The only fixed input is the ~6 s airtime ceiling.
+    size_t burstAirtimeBudgetFrames(size_t max_frames) const;
+
+    // Adaptive ACK timeout for the unified group-ack burst path, sized to the ACTUAL
+    // burst frame count (NOT the full window) under the PROMPT-ack model: the receiver
+    // group-acks at the burst boundary, so there is NO SACK-coalesce hold to wait out.
+    // = burst_airtime(frames) + peer LDPC decode margin + ack-return airtime + slack.
+    // Scales with frames/modulation/rate/cw/fading — a 3-4 frame burst waits ~9-11 s,
+    // not the ~21 s a full-window + coalesce-hold estimate produced.
+    uint32_t unifiedBurstAckTimeoutMs(size_t burst_frames) const;
+
+    // Prepare ONE unified burst window, SHARED by the file (sendNextFileChunk) and
+    // message (sendNextFragment) paths so both key down as one budget-sized group:
+    // returns the per-burst frame cap (= airtime budget) AND sizes the ARQ ack timeout
+    // to it (so the per-frame ack-monitor arm reads the right value). Returns SIZE_MAX
+    // (no cap, legacy behavior) off the unified OFDM path. Call BEFORE the submit loop.
+    size_t prepareUnifiedBurstWindow();
+
+    // Arm the receiver-side tone-burst ACK monitor for the ack of a data burst we just
+    // (re)sent. Must fire on EVERY burst that expects an ack — the INITIAL send AND each
+    // timeout RESEND — or the listen window expires after the first send and the sender
+    // goes deaf to every subsequent ack (the original burst sender re-armed per group).
+    void armToneBurstAckListenWindow();
+
     void setSoftCombiningHARQ(bool enable);
     bool getSoftCombiningHARQ() const { return soft_combine_harq_.enabled(); }
     fec::SoftCombineBuffer* softCombineBuffer() { return &soft_combine_harq_; }
@@ -550,12 +579,11 @@ private:
     bool burst_mode_active_ = false;
     TransmitBurstCallback on_transmit_burst_;
 
-    // One-way file-path group stop-and-wait transport (design §14.16). The DEFAULT
-    // production OFDM file path as of 2026-05-30 (GUI-proven byte-exact, RESULT=PASS);
-    // opt OUT to the legacy SR-ARQ file path via ULTRA_BURST_TRANSPORT=0. Gated on
-    // isOFDMMode at the call sites, so MC-DPSK/narrowband files are unaffected.
-    // Group-ACK reuses the ACK control frame (seq=group_seq).
-    BurstStopAndWaitController burst_transport_;
+    // TRANSPORT MERGE (2026-06-06): "burst framing on" — the unified arq_ path always
+    // bursts+interleaves OFDM data (encodeBurstLight + BURST_HEADER descriptor). The
+    // legacy BurstStopAndWaitController group controller is removed. This flag stays true
+    // (it gates Z-selection / descriptor / CONNECT_ACK-rescue / rate); collapsing it to a
+    // constant is a follow-up cleanup (docs/REMOVAL_BACKLOG.md R1b).
     bool use_burst_transport_ = true;
 
     // Half-duplex INTERACTIVE mode (the TNC / Winlink-B2F path). The default
@@ -580,24 +608,6 @@ private:
     // default OFF. The SENDER runs the controller on the receiver's per-group decode
     // headroom (carried on the GROUP_ACK; a GROUP_NACK feeds quality 0 -> step down).
     void applyAdaptiveRateFeedback(float quality);
-    // Chunk-at-rate: form (or re-form) the in-flight burst group's frames at the
-    // CURRENT data_code_rate_ from the raw file payload + cursor. The cursor only
-    // advances on a fresh group (after the previous one was acked); a resend
-    // re-forms at the new rate from the same cursor.
-    bool formAndSendBurstGroup(uint16_t group_seq, bool is_resend);
-    // §SR-ARQ RX: deliver each decoded frame of an interleave-OFF burst (offset-keyed,
-    // dedup-safe) and emit a tone-burst ACK carrying the true per-frame frame_mask.
-    void onBurstGroupReceivedSR(uint16_t group_seq, const std::vector<Bytes>& frames,
-                                uint8_t frame_mask);
-    // §SR-ARQ: form the next burst when the byte-interleave is OFF. Drains
-    // burst_resend_frames_ (failed frames, identical bytes) first, then refills with
-    // new frames from the cursor (advancing it immediately — failed frames are tracked
-    // separately, not via the cursor). Records burst_inflight_frames_ for the next
-    // ACK's frame_mask. Returns false when nothing is left to send (transfer done).
-    bool formAndSendBurstGroupSR(uint16_t group_seq, bool is_resend);
-    // §SR-ARQ: form ONE new file/metadata/pad frame at the current cursor, advancing
-    // cursor/metadata. Sets is_pad. Returns false when the file+metadata are drained.
-    bool formOneNewBurstFrame(Bytes& out_frame, bool& is_pad, size_t per_frame_data);
     bool adaptive_rate_enabled_ = false;
     RateController rate_controller_;
     uint8_t pending_ack_quality_q_ = 0xFF;  // RX: byte to stamp on the next GROUP_ACK
@@ -852,16 +862,6 @@ private:
     WaveformMode negotiateMode(uint8_t remote_caps, WaveformMode remote_pref);
     void sendNextFileChunk();
     void sendNextFragment();
-
-    // One-way burst transport (design §14.27). startBurstFileTransfer drains the
-    // whole file into BURST_GROUP_SIZE-frame interleaved groups and hands them to
-    // burst_transport_ (group stop-and-wait, no SR-ARQ). collectBurstGroupFrame
-    // feeds a decoded burst frame into RX group assembly; on a complete group it
-    // calls burst_transport_.onGroupReceived(). Both are gated by
-    // use_burst_transport_.
-    bool startBurstFileTransfer();
-    void collectBurstGroupFrame(uint16_t group_seq, const Bytes& frame_data,
-                                bool group_complete);
 };
 
 } // namespace protocol

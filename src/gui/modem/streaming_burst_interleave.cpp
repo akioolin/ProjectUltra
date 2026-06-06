@@ -184,6 +184,19 @@ void StreamingDecoder::accumulateBurstFrames() {
         LOG_MODEM(WARN, "[%s] Burst group timeout: got %zu/%d frames",
                   log_prefix_.c_str(), burst_soft_buffer_.size(), burst_group_size);
         logBurstDiagnosticsAbort("timeout", burst_soft_buffer_.size());
+        // FAST-NACK (ULTRA_UNIFIED_SEQ): a timed-out group means we decoded the
+        // BURST_HEADER but couldn't acquire/decode the data frames behind it (a fade
+        // landed on the data-frame window). DELIVER a FAILED group (0 frames) so the
+        // connection re-emits its current SACK and the sender resends NOW — instead of
+        // silently discarding and leaving the sender to eat its FULL ack timeout (the
+        // "missing logic from the original burst path"). Drop the descriptor latch so the
+        // next BURST_HEADER re-sets it.
+        if (burst_transport_rx_ && burst_group_callback_) {
+            sync_controller_.have_burst_descriptor_ = false;
+            burst_group_callback_(last_burst_group_seq_, std::vector<Bytes>{},
+                                  /*all_ok=*/false, /*quality=*/0.0f, /*frame_mask=*/0,
+                                  use_burst_interleave_);
+        }
         // Discard — TX used 4-frame interleaving, partial is undecodable
         {
             std::lock_guard<std::mutex> slock(stats_mutex_);
