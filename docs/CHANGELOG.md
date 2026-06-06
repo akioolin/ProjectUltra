@@ -10,6 +10,38 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-06 — fix(gui): responder auto-close on remote disconnect + burst-activity flash lingering after file completion
+
+Two GUI/RX fixes found while watching live Good@15 file transfers (both verified on the GUI sim).
+
+**1. BRAVO (responder) didn't auto-close after a remote disconnect.**
+- *Symptom:* in a scripted run, after ALPHA disconnects + quits, BRAVO stays open (idle) until its
+  hard `--exit-after` timer; the operator had to close the window by hand.
+- *Root cause:* the event-driven scenario quit (`tickScenario`) only fires for the station that
+  ISSUES the disconnect (`scenario_disconnect_issued_`, e.g. ALPHA). A station that RECEIVES a remote
+  disconnect had no trigger.
+- *Fix (`app.cpp`, DISCONNECTED state handler):* when a real session ends (was-connected →
+  now-disconnected, via the existing `wrap_audio_quiesce` predicate) during a scripted run, set
+  `scenario_disconnect_issued_`/`scenario_disconnect_at_` so the same grace-then-quit runs. Gated on
+  `scenario_active_` — a real interactive station still stays up after a QSO (correct; a station
+  shouldn't self-close). Never fires on a failed/timed-out connect that was never established.
+
+**2. "received group X/Y" flash kept pulsing after "File Received".**
+- *Symptom:* the partial-group flash indicator lingered ~2.5 s after completion, looking like a late/
+  duplicate group arrived. (Protocol was clean — logs show the last group delivered + acked exactly
+  once and CRC ok at the same instant, nothing after.)
+- *Root cause (ordering):* in the unified `onBurstGroupReceived`, the `burst_activity_` status block
+  ran AFTER the `processArqFrame` loop. A file-completing frame fires the file-received callback
+  (`setFileReceivedCallback` → `burst_activity_ = {}`) DURING that loop, then the status block
+  immediately RE-activated the indicator. With no file-transfer UI active post-completion, the GUI
+  fell into the pulsing "Incoming burst…" else-branch.
+- *Fix (`connection.cpp`):* move the `burst_activity_` status set to BEFORE the `processArqFrame`
+  loop, so the completion clear runs last and wins. Mid-transfer groups still light the indicator;
+  the file-completing group leaves it cleared.
+
+**Verification:** GUI sim, Good@15 seed42 → R2/3: flash clears the instant "File Received" appears;
+BRAVO self-closes ~8 s after the disconnect; no manual X needed. `ctest -R Protocol` PASS.
+
 ## 2026-06-06 — refactor(transport): unify OFDM file/message transport onto one path; delete the legacy `burst_transport_` group controller
 
 **What it was:** the OFDM-wideband file path had **two** group-generation transports living side by

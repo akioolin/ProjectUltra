@@ -1910,19 +1910,13 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
         // Bracket the group's frames so arq_ suppresses its per-frame ack heuristic
         // (which can't ack a sub-window burst) and emits EXACTLY ONE tone-burst ack for
         // the whole burst at the end — cumulative base + hole bitmap, every burst.
-        arq_.beginGroupReceive();
-        for (const auto& frame : frames) {
-            auto hdr = v2::parseHeader(frame);
-            if (hdr.valid && !v2::isAddressedToCallsign(hdr, local_call_)) {
-                continue;  // burst pad — addressed to the pad callsign
-            }
-            processArqFrame(frame);
-        }
-        arq_.endGroupReceiveAndAck();
         // Live "incoming burst" status for the GUI — the flashing partial-group
-        // indicator. The unified branch returns here before the shared status update
-        // below, so set it too: group #, X (decoded) / Y (group size) from frame_mask,
-        // so the operator sees frames arriving even on a partially-decoded group.
+        // indicator (group #, X decoded / Y group size from frame_mask). Set this BEFORE
+        // processing the frames: if this group completes the file, the file-received
+        // callback (setFileReceivedCallback -> burst_activity_ = {}) fires DURING
+        // processArqFrame and must WIN. Previously this block ran after the loop and
+        // re-activated the indicator post-completion, so it kept flashing "received
+        // group X/Y" after the "File Received" toast (looked like an extra/late group).
         {
             unsigned decoded = 0;
             for (uint8_t m = frame_mask; m; m &= (m - 1)) ++decoded;       // popcount = X
@@ -1935,6 +1929,15 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
                 static_cast<uint8_t>(group_bits > decoded ? group_bits : decoded);
             ++burst_activity_.groups_seen;
         }
+        arq_.beginGroupReceive();
+        for (const auto& frame : frames) {
+            auto hdr = v2::parseHeader(frame);
+            if (hdr.valid && !v2::isAddressedToCallsign(hdr, local_call_)) {
+                continue;  // burst pad — addressed to the pad callsign
+            }
+            processArqFrame(frame);  // a file-completing frame clears burst_activity_ (wins)
+        }
+        arq_.endGroupReceiveAndAck();
         return;
     }
 }

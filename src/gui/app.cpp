@@ -790,6 +790,21 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             case protocol::ConnectionState::DISCONNECTED:
                 resetAdaptiveAdvisory();
                 connected_peer_snr_valid_ = false;
+                // Scripted responder auto-quit. The event-driven scenario quit only fires
+                // for the station that ISSUES the disconnect (scenario_disconnect_issued_,
+                // e.g. ALPHA). A station that RECEIVES a remote disconnect (e.g. BRAVO) had
+                // no trigger, so it idled until the conservative hard exit-after timer and
+                // the operator had to close the window by hand. Mirror the initiator path:
+                // once a real session ends (was-connected -> now-disconnected) during a
+                // scripted run, schedule the same grace-then-quit in tickScenario().
+                // wrap_audio_quiesce == (was connected && now disconnected), so this never
+                // fires on a failed/timed-out connect that was never established. Gated on
+                // scenario_active_ — a real interactive station stays up after a QSO.
+                if (scenario_active_ && !scenario_disconnect_issued_ && wrap_audio_quiesce) {
+                    scenario_disconnect_issued_ = true;
+                    scenario_disconnect_at_ = std::chrono::steady_clock::now();
+                    guiLog("[scenario] remote disconnect received; quitting after grace");
+                }
                 if (info.find("timeout") != std::string::npos) {
                     msg = "[FAILED] " + info;  // Make failures more visible
                 } else {
