@@ -168,7 +168,16 @@ TNCSession::TNCSession(ModemAdapter& modem, EmitFn cmd_emit, DataOutFn data_out)
     : modem_(modem),
       cmd_emit_(std::move(cmd_emit)),
       data_out_(std::move(data_out)) {
-    bulk_accum_ = std::getenv("ULTRA_TNC_BULK_ACCUM") != nullptr;
+    // Size-target + idle accumulation is the DEFAULT: pull the body in (under-reporting
+    // BUFFER to keep PAT feeding past its ~7×blocksize throttle) and flush at a
+    // burst-worth (kBurstFlushTargetBytes) or when PAT goes idle. Opt out with
+    // ULTRA_TNC_ACCUM_DISABLE for the legacy per-chunk 200 ms flush.
+    bulk_accum_ = std::getenv("ULTRA_TNC_ACCUM_DISABLE") == nullptr;
+    accum_probe_ = std::getenv("ULTRA_TNC_ACCUM_PROBE") != nullptr;
+    flush_log_ = std::getenv("ULTRA_TNC_FLUSH_LOG") != nullptr;
+    if (accum_probe_) {
+        bulk_accum_ = true;  // measuring the bulk-accumulate body size requires bulk mode
+    }
 }
 
 bool TNCSession::handleControlLine(std::string_view line) {
@@ -262,24 +271,27 @@ void TNCSession::handleDataBytes(const std::vector<uint8_t>& bytes) {
     }
     data_tx_buffer_.insert(data_tx_buffer_.end(), bytes.begin(), bytes.end());
     data_tx_quiet_ms_ = 0;
+    const bool modem_ready = modem_.getTxBackloggBytes() == 0;
     if (data_tx_buffer_.size() >= kDataTxFlushSizeBytes) {
+        flushDataTxBuffer();  // hard ceiling — bound the staging buffer
+    } else if (bulk_accum_ && modem_ready &&
+               data_tx_buffer_.size() >= kBurstFlushTargetBytes) {
+        // Accumulated a burst-worth and the TX path is free: ship it now as one burst
+        // transport unit rather than waiting for the idle timer. The next chunk
+        // accumulates while this one transmits.
         flushDataTxBuffer();
-    } else if (bulk_accum_ && modem_.getTxBackloggBytes() == 0) {
-        // BULK ABSORPTION: we're hoarding this block (engine backlog still 0)
-        // to coalesce the whole B2F body into one burst-file. Pat self-increments
-        // its flow counter by len(b) per write and stalls at 7*blocksize; reset
-        // it NOW with a low BUFFER so it keeps feeding. Bypass the rate-limit and
-        // dedup — Pat may be blocked waiting for exactly this reset, and the
-        // reset value is constant so the normal dedup would suppress it.
-        emitBuffer(kAbsorbReportCap);
-        last_buffer_level_ = kAbsorbReportCap;
-        last_buffer_emit_ms_ = 0;
-        pending_buffer_level_ = -1;
     }
+    // HONEST BUFFER (VARA-HF spec: "BUFFER <bytes> ... Sent when VARA adds data to
+    // queue"). Report the TRUE transmit-queue depth — bytes the host has handed us that
+    // are not yet ACKed away (our staging buffer + the engine's unacked backlog). ANY
+    // conformant host paces itself on this; its own flow control bounds how far ahead it
+    // runs, so we never under-report to coax more data out of it (which would both lie
+    // about queue depth and be a host-specific hack).
+    onModemBufferLevel(modem_.getTxBackloggBytes());
 }
 
 void TNCSession::onModemConnected(const std::string& src, const std::string& dst, int bw) {
-    bulk_burst_started_ = false;  // fresh per connection
+    bulk_burst_started_ = false;  // fresh transport decision per connection
     if (state_ == State::LISTENING) {
         if (!pending_inbound_) {
             emitPending();
@@ -357,23 +369,14 @@ void TNCSession::onModemBufferLevel(int bytes) {
     if (bytes < 0) {
         bytes = 0;
     }
-    // BULK ABSORPTION (bytes==0 means the engine TX path is idle and the body
-    // is still hoarded in data_tx_buffer_): under-report so Pat keeps feeding
-    // the rest of the body. Once the burst is handed to the engine, bytes>0
-    // (getTxBacklogBytes counts the queued/sending file) so we fall through to
-    // the real-count path below and Pat's Flush() drains to 0 normally.
-    const bool absorbing = bulk_accum_ && bytes == 0 && !data_tx_buffer_.empty();
-
-    // Pat's Flush() trusts BUFFER 0 to mean "every byte I wrote has
-    // been transmitted". Our 200 ms TX staging buffer is invisible to
-    // the engine's backlog count, so we add it here. Without this,
-    // BUFFER 0 can fire while data_tx_buffer_ still has unsent bytes,
-    // letting Pat close the session before transmission completes.
+    // HONEST queue depth (VARA-HF spec): the engine's unacked backlog
+    // (getTxBacklogBytes already excludes ACKed ARQ slots, so it decrements on ACK as
+    // the spec's "VARA removes acked bytes from queue" requires) PLUS our not-yet-
+    // shipped staging buffer. data_tx_buffer_ holds bytes the host wrote that we have
+    // not handed to the engine yet — they're in the queue, so an honest modem counts
+    // them. The host's Flush() trusts BUFFER 0 to mean fully delivered; including the
+    // staging bytes keeps us from signalling 0 while data is still unsent.
     bytes += static_cast<int>(data_tx_buffer_.size());
-
-    if (absorbing) {
-        bytes = std::min(bytes, kAbsorbReportCap);
-    }
 
     if (bytes == last_buffer_level_ && pending_buffer_level_ < 0) {
         return;
@@ -447,19 +450,18 @@ void TNCSession::tick(uint32_t elapsed_ms) {
 
     if (state_ == State::CONNECTED && !data_tx_buffer_.empty()) {
         data_tx_quiet_ms_ += elapsed_ms;
-        // In bulk-accumulate mode wait longer so a flow-controlled body (which
-        // arrives in bursts of ~7 blocks with brief throttle stalls between)
-        // coalesces into ONE burst-file rather than flushing each sub-group.
-        const uint32_t quiet_thresh = bulk_accum_ ? kDataTxBulkQuietMs : kDataTxFlushQuietMs;
-        // In bulk mode the trailing flushes route to the burst-file path
-        // (bulk_burst_started_); a sendFile while the modem is still transmitting
-        // the PREVIOUS burst fails ("file transfer in progress") and the flush
-        // retries every quiet period — dozens of wasted sendFile attempts that
-        // serialize the tiny B2F-tail frames and stall clean session teardown.
-        // Only flush when the modem TX path is idle, so the tail writes accumulate
-        // and coalesce into one burst per idle window instead of churning.
+        // Flush only when the modem TX path is free — a sendFile while the previous
+        // burst is still transmitting fails ("file transfer in progress") and would
+        // retry every tick, churning. Two triggers fire it in bulk mode: a burst-worth
+        // is ready (SIZE TARGET), or PAT has gone idle (kDataTxBulkQuietMs) meaning the
+        // body/message is complete — flush whatever remains (the sub-target tail, or a
+        // small interactive message). Legacy (bulk off) keeps the per-chunk 200 ms flush.
         const bool modem_ready = !bulk_accum_ || modem_.getTxBackloggBytes() == 0;
-        if (data_tx_quiet_ms_ >= quiet_thresh && modem_ready) {
+        const uint32_t idle_thresh = bulk_accum_ ? kDataTxBulkQuietMs : kDataTxFlushQuietMs;
+        const bool have_burst_worth =
+            bulk_accum_ && data_tx_buffer_.size() >= kBurstFlushTargetBytes;
+        const bool idle_done = data_tx_quiet_ms_ >= idle_thresh;
+        if (modem_ready && (have_burst_worth || idle_done)) {
             flushDataTxBuffer();
         }
     }
@@ -506,11 +508,36 @@ void TNCSession::flushDataTxBuffer() {
     // anchor can't re-acquire timing when the link flips for every tiny B2F message. The RX
     // side already delivers both transports to the data port (TNCBridge wires BOTH
     // setDataReceivedCallback and setFileReceivedCallback to postModemDataReceived).
-    // Keep trailing post-body flushes on the burst path (see bulk_burst_started_): once the
-    // body has bursted, the FF terminator + any small frame stay burst, avoiding the
-    // burst→non-burst transition that strands them (BUG-TNC-B2F-002).
+    // Route to burst when this flush is a burst-worth (> kInteractiveMaxBytes) OR the
+    // current feed already bursted (ORDERING INVARIANT: keep the whole body on one
+    // transport — a sub-target body tail must NOT drop to the interactive sendBinary
+    // path, or it reassembles out of order against the bursted prefix → corruption).
     const bool route_burst =
         wire.size() > kInteractiveMaxBytes || (bulk_accum_ && bulk_burst_started_);
+
+    if (accum_probe_ || flush_log_) {
+        // STEP-1: report what PAT handed us at this flush. Interactive (handshake)
+        // flushes still go to the modem so the B2F proposal reaches the responder
+        // and PAT releases the body; under accum_probe_ the BODY's burst-flush is
+        // short-circuited (fast-exit). Under flush_log_ alone, nothing is forced or
+        // skipped — it just observes every flush size + route in the live path.
+        static size_t probe_flush_n = 0;
+        std::fprintf(stderr,
+            "[ACCUM-PROBE] flush #%zu: accumulated raw=%zu B, wire(after-compress)=%zu B, "
+            "route=%s\n",
+            ++probe_flush_n, data_tx_buffer_.size(), wire.size(),
+            route_burst ? "BURST" : "interactive");
+        std::fflush(stderr);
+        if (accum_probe_ && route_burst) {
+            std::fprintf(stderr,
+                "[ACCUM-PROBE] ===== WOULD BURST: %zu wire bytes (%zu raw body bytes) as ONE "
+                "z=81 file transfer. Fast-exit before air TX. =====\n",
+                wire.size(), data_tx_buffer_.size());
+            std::fflush(stderr);
+            std::_Exit(0);
+        }
+    }
+
     if (!route_burst) {
         if (modem_.sendBinary(wire)) {
             data_tx_buffer_.clear();
@@ -547,7 +574,8 @@ void TNCSession::flushDataTxBuffer() {
     if (modem_.sendFile(temp_path)) {
         data_tx_buffer_.clear();
         last_tx_temp_path_ = temp_path;
-        if (bulk_accum_) bulk_burst_started_ = true;  // keep trailing flushes on the burst path
+        // Lock the rest of this feed onto the burst transport (ordering invariant).
+        if (bulk_accum_) bulk_burst_started_ = true;
     } else {
         // Engine refused (queue full / not CONNECTED): keep data_tx_buffer_ intact so the
         // next quiet-period flush retries. Pat sees BUFFER N stay nonzero and backs off.

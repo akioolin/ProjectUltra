@@ -459,6 +459,23 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
                      !is_data_frame &&
                      !is_turn_control &&
                      !is_mode_change;
+
+    // BUG-TNC-B2F-002: revert the encoder's LDPC lifting Z to the non-burst default
+    // (27) before encoding ANY frame on this transmit() path. A burst lifts the
+    // encoder to z=81 (n=1944) via setLDPCLiftingZ(81) in transmitBurst(), but
+    // nothing reverted it for the NEXT non-burst frame. So after a file transfer an
+    // interactive/SR-ARQ DATA frame — the Winlink-B2F FF terminator, a chat line, an
+    // ARQ repair — was still encoded at z=81 (~106880 samples) while the receiver,
+    // which DOES revert at group-end (finalizeBurstGroup → setActiveLDPCLiftingZ(27)),
+    // decoded it as z=27 (~17920 samples). BRAVO read the first ~17% of a z=81 frame
+    // as a z=27 frame → saturated-magnitude/random-sign LLRs (|H|≈0) → LDPC 0/CW →
+    // never ACKed → ALPHA retransmits forever → transfer stalls. EVERY frame emitted
+    // through transmit() is non-burst (burst DATA rides transmitBurst()/encodeBurstLight),
+    // so z=27 is always correct here; the burst path re-lifts to 81 itself per group.
+    if (is_ofdm && streaming_encoder_) {
+        streaming_encoder_->setLDPCLiftingZ(27);
+    }
+
     auto samples = use_light ? streaming_encoder_->encodeFrameLight(data)
                              : streaming_encoder_->encodeFrame(data);
 

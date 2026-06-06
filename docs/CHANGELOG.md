@@ -10,6 +10,35 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-05 — fix(B2F): encoder z-revert + honest VARA BUFFER (file across reliably); feat: interactive tone-burst ACK (transport-merge step 1)
+
+**1. Encoder z-revert (BUG-TNC-B2F-002 root cause).** A burst lifts the encoder to z=81; nothing
+reverted it, so the next NON-burst frame (FF terminator / chat / SR-ARQ repair) on the `transmit()`
+path was encoded at z=81 (~106 880 samples) while the receiver decoded z=27 (~17 920) → it read the
+first ~17 % of a z=81 frame as z=27 → saturated-magnitude/random-sign LLRs (`|llr|=20`,`llr_avg≈0`)
+→ 0/CW → stall. Fix: `modem_engine.cpp` transmit() now sets `setLDPCLiftingZ(27)` before encoding any
+non-burst frame (burst DATA re-lifts itself per group). Verified: zero `active=106879` non-burst
+frames; post-burst frames encode z=27.
+
+**2. Honest VARA BUFFER (TNC, protocol-agnostic).** The TNC accumulation reported a FAKE low BUFFER
+(`kAbsorbReportCap=50`) to coax PAT past its flow-control window — a host-specific lie that violated
+the VARA spec (`BUFFER <bytes>` = true TX-queue depth, decremented on ACK; `n8jja/pat-vara conn.go`
+throttles at `7×len(b)`, `len(b)=125` B B2F blocks → 889 B window). It also let the body stripe
+across burst+interactive transports → out-of-order reassembly → `Unexpected byte in compressed
+stream`. Fix (`tnc_session.cpp`): report the TRUE queue depth (`getTxBacklogBytes()` is already
+ACK-aware via SR-ARQ `getTxInFlightBytes` skipping acked slots) + `data_tx_buffer_`; accumulate with
+size-target (4 KB) OR idle flush; sticky-transport ordering invariant (one continuous send = one
+transport). 20 KB JPEG delivers byte-identical (`fd24dd6cada3` == sender) with clean teardown on the
+plain path, no `bulk_accum` hack. Honest finding: PAT's 889 B window can't be honestly widened, so
+bursting PAT/B2F is impossible without lying — accept the reliable interactive ceiling.
+
+**3. Interactive tone-burst ACK (transport-merge step 1, env `ULTRA_TONE_ACK_INTERACTIVE`).** The
+interactive SR-ARQ path can now ack via the same tone-burst the burst path uses, instead of a SACK
+control frame (`selective_repeat_arq.cpp` sendSack/onToneBurstAck; `connection.cpp` wiring + arm +
+route). GUI-verified: single message + multi-frame selective repeat (drop seq=1 → only seq=1 resent)
++ coalesced to ONE tone-burst per turn (no per-frame/out-of-order bursts) + window capped to 6 (the
+6-bit `frame_mask`). First brick of unifying the three SR-ARQ-over-OFDM transports.
+
 ## 2026-06-04 — fix(sync): post-burst full-anchor re-acquisition (search catch-up drain + full-anchor buffer); env-gated TNC bulk-accumulate-to-burst
 
 **Symptom.** When a sender transmits a full-preamble (dual-chirp) OFDM frame *after a burst*

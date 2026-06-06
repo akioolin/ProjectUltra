@@ -89,36 +89,37 @@ private:
     uint64_t tx_file_counter_ = 0;
     std::string last_tx_temp_path_;
 
-    // BULK-ACCUMULATE (env ULTRA_TNC_BULK_ACCUM, prototype): coalesce a flow-
-    // controlled Winlink-B2F body into ONE z=81 burst-file instead of letting
-    // Pat's VARA flow control trickle it as sub-4KB short-LDPC chunks. Pat
-    // self-increments its own flow counter by len(b) per write (conn.go:246)
-    // and stalls at 7*blocksize (~1750 B), un-stalling only when WE send a
-    // BUFFER command resetting it. So while the body is hoarded in
-    // data_tx_buffer_ (engine backlog still 0) we (a) promptly under-report
-    // BUFFER to kAbsorbReportCap on every block so Pat keeps feeding, and
-    // (b) wait kDataTxBulkQuietMs for Pat to finish dumping before flushing the
-    // whole hoard as one burst. The instant the burst hits the engine the
-    // backlog jumps to the true size (getTxBacklogBytes counts queued/sending
-    // files), so we resume reporting the real draining count and Pat's Flush()
-    // — which blocks on BUFFER 0 with a 1-min timeout — still terminates.
+    // ACCUMULATION (default on; opt out with ULTRA_TNC_ACCUM_DISABLE for the legacy
+    // per-chunk flush). The VARA data port delivers the host's byte stream in many small
+    // TCP writes; rather than shipping each as its own short frame, we accumulate and
+    // flush larger units — a burst-worth (kBurstFlushTargetBytes) when the TX path is
+    // free, or whatever remains once the host goes idle. We report HONEST BUFFER
+    // throughout (the host's own VARA flow control then paces how far ahead it runs), so
+    // this is protocol-AGNOSTIC: it works for any VARA-HF host, not just Winlink/PAT.
     bool bulk_accum_ = false;
-    // Once a BULK body has been flushed as a burst-file in this session, keep the
-    // TRAILING flushes (the Winlink-B2F FF terminator, any small frame after the
-    // body) on the BURST path too — even though they are < kInteractiveMaxBytes.
-    // Reason (BUG-TNC-B2F-002): the burst→non-burst transition strands the trailing
-    // frame (the receiver, just out of burst RX, mis-decodes a non-burst full-anchor
-    // frame). Routing it as a tiny burst reuses the PROVEN burst descriptor+group
-    // decode (same path that delivers the body 10/10) — no transition. Reset per
-    // connection. Only active under bulk_accum_.
+    // SIZE TARGET for the burst-flush: once the staging buffer reaches this AND the modem
+    // TX path is free, ship it as one burst transport unit instead of waiting for the
+    // idle gap. Tunable; ~4 KB ≈ a few burst groups.
+    static constexpr size_t kBurstFlushTargetBytes = 4096;
+    // ORDERING INVARIANT: a single continuous host send must traverse ONE transport. The
+    // burst path (sendFile) and interactive path (sendBinary) are independent ARQ
+    // mechanisms with no shared sequence space, so striping one byte stream across both
+    // reassembles out of order → corruption. Once any chunk of the current feed has
+    // bursted, force ALL remaining chunks onto the burst path. Reset per connection.
     bool bulk_burst_started_ = false;
-    static constexpr int kAbsorbReportCap = 50;
+    // FLUSH PROBES (diagnostics): ULTRA_TNC_ACCUM_PROBE logs each flush size + route then
+    // fast-exits at the first burst (isolates the accumulation layer, no air TX);
+    // ULTRA_TNC_FLUSH_LOG just logs every flush size + route in the live path.
+    bool accum_probe_ = false;
+    bool flush_log_ = false;
+    // Idle gap meaning "the host has paused" — flush whatever remains (the sub-target
+    // tail of a send, or a short message).
     static constexpr uint32_t kDataTxBulkQuietMs = 1500;
-    // Pat's Flush() aborts if it receives no BUFFER command for 60 s (conn.go).
-    // The burst-file path can freeze the engine backlog for >60 s during a
-    // group-ACK timeout/retransmit; re-emit the current level this often so the
-    // flush timer stays alive (a real VARA modem reports buffer state
-    // continuously, so this is faithful, not a workaround). 3x margin vs 60 s.
+    // A real VARA modem reports buffer state continuously. onModemBufferLevel emits on
+    // enqueue/ACK events, but if the engine backlog sits unchanged for a long stretch
+    // (e.g. a slow burst between group ACKs) no event fires; re-emit the current honest
+    // level this often so a host's Flush() inactivity timer (VARA's is ~60 s) never
+    // starves. 3x margin.
     static constexpr uint32_t kBufferKeepaliveMs = 20000;
 
     static std::pair<std::string, std::string> parseCommand(std::string_view line);

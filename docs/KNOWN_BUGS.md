@@ -9,10 +9,17 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 ## Active Issues
 
 ### BUG-TNC-B2F-002: post-burst non-burst FF frame not delivered (blocks bulk-accum-to-burst B2F) — LAYERED
-- Status: **IMAGE NOW DELIVERS over burst** (2026-06-05) — the 20 KB JPEG transfers byte-intact via
-  burst (`.b2f` 12191 B, JPEG 11782 B md5 a811c535, == the non-burst delivery, reproducible 3×).
-  REMAINING: the sender's session does not close cleanly (churn — see LAYER 3). Env-gated
-  `ULTRA_TNC_BULK_ACCUM` only; default OFF unaffected. Layers, peeled in order:
+- Status: **FIXED 2026-06-05.** ROOT CAUSE (LAYER 2, finally isolated): the ENCODER did not revert
+  its LDPC lifting-z after a burst. A burst lifts the encoder to z=81 (`setLDPCLiftingZ(81)` in
+  transmitBurst); nothing reverted it, so the next non-burst frame on the `transmit()` path (the FF
+  terminator, a chat line, an SR-ARQ repair) was still encoded at **z=81 (~106 880 samples)** while
+  the receiver — which DOES revert at group-end — decoded it as **z=27 (~17 920 samples)**. BRAVO
+  read the first ~17 % of a z=81 frame as a z=27 frame → saturated-magnitude/random-sign LLRs
+  (`|llr|=20`, `llr_avg≈0`) → LDPC 0/CW → never ACKed → stall. Fix: revert the encoder to z=27 for
+  every non-burst frame (`modem_engine.cpp` transmit() dispatch). Plus the TNC accumulation was made
+  spec-correct (honest VARA `BUFFER` — see CHANGELOG 2026-06-05) so the body no longer striped across
+  burst+interactive transports (the out-of-order corruption). 20 KB JPEG now delivers byte-identical
+  with a CLEAN teardown on the plain (no-bulk) path, GUI-verified. Layers, peeled in order:
   - LAYER 0 (sync acquisition): FIXED 2026-06-04 (catch-up drain + full-anchor buffer, CHANGELOG).
   - LAYER 1 (§14.24 gate drop): **FIXED 2026-06-05** — `have_burst_descriptor_` now drops at
     group-end (`finalizeBurstGroup`, streaming_burst_interleave.cpp) instead of persisting the whole
