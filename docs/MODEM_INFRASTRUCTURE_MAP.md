@@ -158,8 +158,11 @@ SR-ARQ masks; ON → whole-group ACK/NACK.** They disagreeing was the QAM16 offs
   data, OFDM_NARROW data, OFDM-wideband file/message, and all control ACKs. Window per mode —
   MC-DPSK `mcDpskWindowSizeForTiming` (1–5), OFDM_NARROW **3** (hardcoded), OFDM wideband
   `ofdmWindowSizeForChannel` **8 default, up to 16** on near-AWGN ≥R1/2, with the unified file/message
-  burst bounded per-key-down to a ~7 s airtime budget (`prepareUnifiedBurstWindow` →
-  `burstAirtimeBudgetFrames`, e.g. 3 frames at QPSK R2/3). 🟢
+  burst bounded per-key-down to an **8.6 s** airtime budget (`prepareUnifiedBurstWindow` →
+  `burstAirtimeBudgetFrames`; `kMaxBurstAirtimeMs` 7000→**8600** on 2026-06-07 = **5 frames** at
+  QPSK R2/3, derived from live per-frame airtime; env `ULTRA_MAX_BURST_AIRTIME_MS` overrides). A
+  timeout-repair RESEND re-anchors with a **full chirp+LTS** (`force_full_preamble=true`, 2026-06-07)
+  so a missed warm-handoff group re-acquires deterministically. 🟢
 - **The OFDM file/message burst** = TX framing (`sendNextFileChunk`/`sendNextFragment` →
   `flushBurstBuffer` → `transmitFrameBatch` → `encodeBurstLight` + BURST_HEADER descriptor) + RX
   group assembly (`burst_transport_rx_` collector, default `true` → `onBurstGroupReceived` →
@@ -213,6 +216,8 @@ Buckets per the env-knobs→runtime-derivation workstream: **[FEAT]** in-flight 
 | `ULTRA_ADAPTIVE_RATE` | BER-driven per-block rate adaptation | OFF | `connection.cpp:358` | FEAT |
 | `ULTRA_BURST_INTERLEAVE` | cross-frame interleave ON→whole-group ACK / OFF→SR masks | **OFF** | `connection_policy.hpp:95` | FEAT |
 | `ULTRA_BURST_GROUP_FRAMES` | burst group size, clamp [2,32] | code **6** (`kBurstInterleaveGroupFrames` `:64`, reconciled 16→6 on 2026-05-30 — mask-width-matched to the 6-bit SACK frame_mask; the old 16 was un-SR-addressable on the default interleave-OFF path) | `connection_policy.hpp:74` | FEAT |
+| `ULTRA_MAX_BURST_AIRTIME_MS` | per-key-down burst airtime ceiling → group size (frame count DERIVED from live per-frame airtime), clamp [5000,12000] | code **8600** (= **5 frames** at QPSK R2/3; 7000→8600 codified 2026-06-07 after a 20-seed Good@16 sweep tied groups 5/6 on goodput, 5 wins on key-down/SACK margin) | `connection.cpp` `burstAirtimeBudgetFrames` | FEAT |
+| `ULTRA_RATE_ADAPT` | ACT on the §14.43 closed-loop quality feedback (receiver LDPC headroom→`rate_hint`→sender RateController). The loop is always WIRED (drives the GUI Adapt bars + diagnostics); this knob gates the actual rate CHANGE. | **OFF** (2026-06-07 — wired+validated, but the adaptation POLICY churns/freefalls to R1/4; ship visibility, not auto-adapt) | `connection.cpp` `applyAdaptiveRateFeedback` | FEAT |
 | `ULTRA_BURST_DESCRIPTOR` | emit BURST_HEADER descriptor | **ON** (escape hatch) | `modem_engine.cpp:530` | FEAT |
 | `ULTRA_BURST_HEADER_ONCE` | descriptor only on group 0 | OFF | `modem_engine.cpp:544` | FEAT |
 | `ULTRA_TNC_BULK_ACCUM` | TNC: hoard a flow-controlled PAT/B2F body (under-report BUFFER to cap 50 while absorbing so PAT keeps feeding past its 7×blocksize throttle, + 20 s BUFFER keepalive vs PAT's 60 s Flush timeout) → flush the whole body as ONE z=81 burst-file instead of <4 KB short-LDPC chunks. Body bursts+decodes CRC-clean; trailing FF blocked on BUG-TNC-B2F-002 | **OFF** (default; experiment) | `tnc_session.cpp` ctor + `onModemBufferLevel`/`tick`/`handleDataBytes` | FEAT (blocked on BUG-TNC-B2F-002) |

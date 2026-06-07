@@ -10,6 +10,61 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-07 — burst session fixes: full-chirp resend re-anchor, group-5 default, closed-loop quality feedback
+
+Three connected `src/protocol/connection.cpp` changes from a burst-reliability/throughput investigation
+on the GUI sim (`gui_qso_scenario.sh`, Good@16, 40 KB, 20-seed sweeps). All proven; full ctest 100%.
+
+**1. Full chirp+LTS re-anchor on timeout-repair resends (RELIABILITY — the big one).**
+- *Broken:* on a fading channel a burst group's BURST_HEADER decodes but the receiver MISSES the
+  warm-handoff LIGHT-LTS acquisition for the data frames (`no LTS in narrow expected window` →
+  §16.4 escalation), never completes the group, never acks. ALPHA waits the full ~13 s RTO and then
+  resent the group ALSO with light-LTS (`force_full_preamble=false`, hardcoded by the unification —
+  "legacy arq_ repair burst") → re-misses the same preamble. On the tail group this exhausted
+  max_retries=15 and LOST the file (seed 18: all `cause=timeout` on seq=96). The legacy
+  burst_transport_ path passed `true` here; the merge dropped the coupling.
+- *Fix:* timeout-repair resend now passes `force_full_preamble=true` (connection.cpp ~4116) → a full
+  chirp+LTS anchor the receiver re-acquires DETERMINISTICALLY (it already arms `expect_full_anchor=1`
+  after the miss). +~1.2 s/resend airtime, but ONLY on resends (rare); first-attempt groups keep warm
+  light-LTS. Restores the pre-unification reliability coupling.
+- *Proof:* 20-seed Good@16 sweep — the two genuine failures (17 file-CRC, 18 stuck-tail-frame) both go
+  LOST→DELIVERED, `max-retries-exceeded` = 0 on all 20 (was 15/15 on seed 18), zero data regressions.
+
+**2. Burst group default 3 → 5 frames (THROUGHPUT/key-down).**
+- The `burstAirtimeBudgetFrames` ceiling `kMaxBurstAirtimeMs` 7000 → **8600 ms** (still env-overridable
+  via ULTRA_MAX_BURST_AIRTIME_MS, clamped [5000,12000]). The frame count stays DERIVED from live
+  per-frame airtime; 8600 ms = 5 frames at the nominal z=27 QPSK-R2/3-cw8 rung (5 = 8560 ms; 6 =
+  10052 ms). The old 7000 ms packed only 3 frames (4th = 7068 ms, 68 ms over), re-paying the 1.2 s
+  anchor + a T/R turnaround every 3 frames.
+- *Why 5:* a 20-seed sweep showed groups 5 and 6 TIE on goodput (~1400 bps, within run-to-run noise) and
+  both deliver reliably WITH fix #1 — so the smaller group wins on non-speed grounds: shorter 8.6 s
+  key-down (vs group 6's ~10 s; easier on a real PA), fewer frames lost per fade, and one frame below
+  the 6-bit SACK frame_mask ceiling instead of at it.
+
+**3. Closed-loop rate-quality feedback wired end-to-end — but rate ADAPTATION stays OFF by default.**
+- *Broken:* the receiver measured a graded per-group decode headroom (`1 - worst_CW_LDPC_iters/80` ∈
+  [0,1]) but `onBurstGroupReceived` did `(void)quality`, the tone-burst ack hardcoded `rate_hint=0`,
+  and the sender's `applyAdaptiveRateFeedback` got a BINARY ack(1)/nack(0). So the §14.43 loop was dead
+  (the unification cut it) and the GUI "Adapt:" headroom bar never populated (`last_group_quality_`
+  was never assigned — stuck on "waiting for first group...", and only on the SENDER).
+- *Fix (4 points):* (a) receiver `onBurstGroupReceived` records `last_group_quality_ = quality` — feeds
+  the RECEIVER's Adapt bar + the ack; (b) tone-burst ack encodes `rate_hint = round(quality*7)`
+  (3-bit); (c) sender `onToneBurstAck` feeds `rate_hint/7` (graded) to `applyAdaptiveRateFeedback`
+  (NACK still 0); (d) the actual rate CHANGE is gated behind `ULTRA_RATE_ADAPT=1` — **DEFAULT OFF**.
+- *Why off:* validation (ULTRA_RATE_ADAPT=1, LOCK_RATE=0) showed the adaptation POLICY is unstable —
+  two un-reconciled rate drivers (the quality controller AND the fading-index "degrading" logic that
+  read a Good@16 seed as F.I.=0.69 Moderate) ping-pong the rate via MODE_CHANGE churn, the receiver
+  loses lock, q collapses to 0, freefall to R1/4 → transfer FAILS (0 bps). Default-off path: rate
+  HOLDS (0 changes), clean PASS 1610 bps, `rate_hint` carries real graded values (7/6/5, was 0), bars
+  populate. So we ship the visibility + foundation; the adaptation policy (hysteresis, reconcile the
+  two drivers, no churn) is a separate future task.
+
+**Test verification:** `cmake --build build -j4 && ctest --test-dir build --parallel 4` → 100% (78,
+0 failed). Reliability/throughput proven on `gui_qso_scenario.sh` 20-seed sweeps (above). KNOWN:
+seed-12-class intermittent PING/PONG handshake flake is pre-existing, unrelated (passes on re-run).
+
+---
+
 ## 2026-06-07 — fix(gui-harness): PASS verdict was an exact-rate match, not delivery — false-failed delivered transfers
 
 **What was broken:** `gui_qso_scenario.sh::scenario_passed()` required

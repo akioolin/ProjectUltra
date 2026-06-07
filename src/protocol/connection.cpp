@@ -437,7 +437,13 @@ Connection::Connection(const ConnectionConfig& config)
                 tba.group_seq = static_cast<uint8_t>(base_seq & 0x3F);
                 tba.frame_mask = static_cast<uint8_t>(bitmap & 0x3F);
                 tba.type = ultra::waveform::tone_burst_ack::AckType::Ack;
-                tba.rate_hint = 0;
+                // §14.43: carry the receiver's last measured group decode headroom [0,1] back to
+                // the sender, quantized into the 3-bit rate_hint (0..7). The sender de-quantizes it
+                // in onToneBurstAck and feeds its RateController. -1 (no sample yet) -> 0.
+                tba.rate_hint = (last_group_quality_ >= 0.0f)
+                    ? static_cast<uint8_t>(std::lround(
+                          std::clamp(last_group_quality_, 0.0f, 1.0f) * 7.0f))
+                    : 0;
                 on_transmit_tone_burst_ack_(tba);
             });
     }
@@ -1819,13 +1825,15 @@ bool Connection::onToneBurstAck(
         const bool outermost = !arq_callback_defer_refill_;
         if (outermost) arq_callback_defer_refill_ = true;
         arq_.onToneBurstAck(detection.payload.group_seq, detection.payload.frame_mask);
-        // Feed the rate controller: a NACK (group lost) steps the rate down; an ACK/SACK
-        // (any progress) feeds clean quality. Replaces the legacy GROUP_ACK/NACK feedback,
-        // now on the unified tone-burst path so mid-transfer rate adaptation survives.
-        applyAdaptiveRateFeedback(
+        // §14.43: feed the RateController the RECEIVER's GRADED decode headroom carried in
+        // rate_hint (0..7 -> [0,1]), not a binary ack/nack — restoring the closed loop the
+        // unification cut. A NACK (group lost) still feeds 0. (Replaces the legacy GROUP_ACK
+        // quality byte; same controller, now on the unified tone-burst path.)
+        const float fed_quality =
             detection.payload.type == ultra::waveform::tone_burst_ack::AckType::Nack
                 ? 0.0f
-                : 1.0f);
+                : static_cast<float>(detection.payload.rate_hint) / 7.0f;
+        applyAdaptiveRateFeedback(fed_quality);
         if (outermost) {
             arq_callback_defer_refill_ = false;
             // STOP-AND-WAIT: every tone-burst ack is a TURN boundary — it's now our turn
@@ -1856,14 +1864,32 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
     if (quality < 0.0f) {
         return;  // no feedback byte (old peer / adaptation off on the far end)
     }
-    // 2026-05-28: ULTRA_LOCK_RATE=1 holds the data rate fixed for the whole
-    // transfer. Used to validate the end-to-end burst transport path without
-    // the rate ladder muddying the diagnosis. The chunk-at-rate path stays on
-    // (it just re-chunks at the SAME rate on resend).
-    if (const char* lock = std::getenv("ULTRA_LOCK_RATE"); lock && std::atoi(lock) != 0) {
+    // GUI "Adapt:" headroom bar reads lastGroupQuality(). Record EVERY valid sample here —
+    // before the lock-rate / rate-change branches below each return — or the bar stays at the
+    // init -1.0 forever ("waiting for first group..."). The unification dropped this assignment
+    // (only last_adaptive_action_ text was kept), so the bar never populated mid-transfer.
+    // NOTE: on the unified tone-burst path `quality` is currently the binary ack(1.0)/nack(0.0)
+    // signal; a graded decode-headroom would need the tone-burst rate_hint field wired through
+    // (TODO) — but binary already drives the green/red bar instead of "waiting" all run.
+    last_group_quality_ = quality;
+    // Rate ADAPTATION is OFF BY DEFAULT (2026-06-07). The §14.43 closed-loop quality feedback is
+    // now wired end-to-end (receiver LDPC headroom -> rate_hint -> here), but the sender does NOT
+    // auto-change the data rate until the loop is validated and explicitly enabled with
+    // ULTRA_RATE_ADAPT=1. Until then the graded quality still drives the GUI "Adapt:" bar
+    // (last_group_quality_, set above) + the action text, so we can SEE what the controller WOULD
+    // do without it moving the rate. ULTRA_LOCK_RATE=1 also pins it (legacy lock; kept).
+    const bool rate_adapt_active = [] {
+        const char* e = std::getenv("ULTRA_RATE_ADAPT");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    const bool rate_locked = [] {
+        const char* l = std::getenv("ULTRA_LOCK_RATE");
+        return l != nullptr && std::atoi(l) != 0;
+    }();
+    if (!rate_adapt_active || rate_locked) {
         char buf[96];
-        std::snprintf(buf, sizeof(buf), "lock %s (q=%.2f)",
-                      codeRateToString(data_code_rate_), quality);
+        std::snprintf(buf, sizeof(buf), "%s %s (q=%.2f)",
+                      rate_locked ? "lock" : "off", codeRateToString(data_code_rate_), quality);
         last_adaptive_action_ = buf;
         return;
     }
@@ -1913,7 +1939,15 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
     // tone-burst ack itself — which the sender's arq_ consumes (seqs match), driving
     // selective repeat over the unified space. Skips the burst controller entirely.
     if (kUnifiedSeqEnabled()) {
-        (void)all_ok; (void)quality; (void)frame_mask; (void)interleaved; (void)group_seq;
+        (void)all_ok; (void)frame_mask; (void)interleaved; (void)group_seq;
+        // §14.43 closed-loop rate feedback + RECEIVER GUI "Adapt:" bar. THIS callback is where the
+        // graded per-group decode headroom [0,1] is MEASURED (streaming_burst_interleave:
+        // 1 - worst_CW_LDPC_iters/80). Record it so (a) BRAVO's Adapt bar shows it — the sender's
+        // bar is fed via applyAdaptiveRateFeedback(), which the RECEIVER never runs — and (b) the
+        // next tone-burst ack carries it back to ALPHA in rate_hint (the loop the unification cut).
+        if (quality >= 0.0f) {
+            last_group_quality_ = quality;
+        }
         // BURST-AWARE ACK: this callback IS the group boundary the operator pointed to —
         // "whatever ALPHA sends as a burst, BRAVO must ack, it knows the group ended."
         // Bracket the group's frames so arq_ suppresses its per-frame ack heuristic
@@ -3636,7 +3670,27 @@ size_t Connection::burstAirtimeBudgetFrames(size_t max_frames) const {
     // frame count is DERIVED from the live per-frame airtime below, so it adapts across
     // modulation (bits/carrier), code rate (pilot spacing — N=648 coded bits is
     // rate-invariant, only pilots move), cw count, and fading (re-anchor) by construction.
-    constexpr uint32_t kMaxBurstAirtimeMs = 7000;
+    //
+    // GROUP SIZE is this airtime ceiling for ONE key-down; the frame count is DERIVED from the
+    // live per-frame airtime above. Default 8600 ms = a 5-frame group at the nominal z=27
+    // QPSK-R2/3-cw8 rung (1392 ms/frame + 1200 ms dual-chirp anchor: 5 frames = 8560 ms <= 8600;
+    // a 6th would be 10052 ms). Codified from a 20-seed Good@16 sweep (2026-06-07): groups 5 and
+    // 6 TIE on goodput (~1400 bps, within run-to-run noise) and both deliver reliably with the
+    // full-chirp-on-resend fix (maxretry=0; the two genuine failures recovered) — so the smaller
+    // group wins on NON-speed grounds: shorter 8.6 s key-down (easier on a real PA than group 6's
+    // ~10 s), fewer frames lost per fade, and one frame below the 6-bit SACK frame_mask ceiling
+    // instead of right at it. Replaces the 3-frame 7000 ms default that re-paid the 1.2 s anchor +
+    // turnaround every 3 frames. Still env-overridable for sweeps (clamped [5000, 12000]).
+    static const uint32_t kMaxBurstAirtimeMs = [] {
+        uint32_t v = 8600;  // group 5 (see above); ULTRA_MAX_BURST_AIRTIME_MS overrides
+        if (const char* env = std::getenv("ULTRA_MAX_BURST_AIRTIME_MS")) {
+            const long parsed = std::strtol(env, nullptr, 10);
+            if (parsed >= 5000 && parsed <= 12000) {
+                v = static_cast<uint32_t>(parsed);
+            }
+        }
+        return v;
+    }();
     const uint32_t reanchor_ms =
         connection_policy::shouldUseWideOFDMShortReanchor(
             negotiated_mode_, data_modulation_, fading_index_)
@@ -4084,10 +4138,19 @@ void Connection::transmitFrameBatch(const std::vector<Bytes>& frame_data_list) {
     // just as likely to fail on the next fade) AND paid N chirp anchors instead of
     // one — the dominant goodput sink on Good fading. encodeBurstLight re-interleaves
     // the group, so the resend gets fresh fade diversity at ~1/N the preamble cost.
-    LOG_MODEM(INFO, "Connection: Resending ARQ timeout-repair as re-interleaved burst of %zu frames",
+    //
+    // RESEND USES A FULL CHIRP+LTS ANCHOR (force_full_preamble=true), not warm light-LTS.
+    // A timeout almost always means the receiver MISSED the group's light-LTS acquisition at
+    // the warm-handoff boundary — it never completed the group, so it never acked. On that
+    // miss the RX side ALREADY arms expect_full_anchor=1 ("waiting for a full chirp on the
+    // resend", §16.4 escalation). Resending with light-LTS again just re-misses the same
+    // preamble; a full chirp re-acquires deterministically. Costs ~1.4 s extra airtime ONLY
+    // on resends (rare) — first-attempt groups keep warm light-LTS (+goodput). Restores the
+    // pre-unification reliability coupling the merge dropped when it hardcoded this to false.
+    LOG_MODEM(INFO, "Connection: Resending ARQ timeout-repair as re-interleaved burst of %zu frames (full anchor)",
               frame_data_list.size());
     on_transmit_burst_(frame_data_list, /*group_seq=*/0,
-                       /*force_full_preamble=*/false);  // legacy arq_ repair burst
+                       /*force_full_preamble=*/true);  // full chirp re-anchor: deterministic re-acquire
     // RE-ARM the ack monitor for THIS resend's ack. The initial send arms via the
     // tx-frame-submitted hook, but a timeout RESEND comes through here (arq_ retransmit →
     // transmitDataBatch) and would otherwise leave the sender deaf after the first
