@@ -10,6 +10,45 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-06 — fix(tests): reconcile ConnectionAdaptive + TNCServer with transport-merge behavior (main CI was red)
+
+**What was broken (symptom + root cause):** after the transport merge landed on `main`, the Build
+Matrix CI went red — `Run CTest (Linux/macOS)` exit 8 and the Coverage Gate (which runs the same full
+ctest under `set -e`) aborted on it. Two suites had STALE expectations encoding pre-merge invariants the
+merge intentionally changed (verified each is intended, not a regression):
+- **ConnectionAdaptive 4/40:** the merge made `kInteractiveToneAckEnabled()` always-true, which (a) caps
+  the OFDM ARQ window to 6 (the tone-burst ack carries a 6-bit SACK `frame_mask`, 0x3F — a window >6
+  leaves frames 7+ un-ackable) and (b) sets the OFDM ack-repeat to 1 (the tone-burst group-ack fires
+  ONE prompt ack; repeating it keys the receiver deaf ~5 s — the operator-observed "4-5 ack chain";
+  sender ARQ retransmit is the backstop). The 4 asserts expected the pre-merge window (16/8), ack
+  diversity (>1), and the repeat=3-derived ack timeout. (The `CHECK` macro early-returns, so each test
+  stopped at its first stale assert — that masked the later ones, not "passes".)
+- **TNCServer 1/19:** the merge added the traffic-class split (`kInteractiveMaxBytes`=4 KB): a small
+  data-port block (≤4 KB) is INTERACTIVE → `sendBinary` (non-burst short-LDPC); only a burst-worth
+  (>4 KB) bulk block takes `sendFile`. The test wrote 3 bytes and waited for `sendFile` (the old
+  "everything is a file" behavior) → timed out.
+
+**What was changed (files, code):**
+- `connection_policy.hpp`: named the cap — `kToneBurstAckWindowCapFrames = 6` (single source of truth
+  for the 6-bit `frame_mask` window limit, tying code + tests to the wire constraint).
+- `connection.cpp` (configureArqForCurrentDataMode): use the named constant instead of the literal 6.
+- `tests/test_connection_adaptive.cpp`: window asserts → `kToneBurstAckWindowCapFrames`; ack-diversity
+  assert → `repeat_count == 1` (single prompt ack); ack-timeout expectation derives the repeat count
+  from `arqAckRepeatCount(c)` instead of a hardcoded 3.
+- `tests/test_tnc_server.cpp`: the small-block test now asserts the interactive route
+  (`sendBinaryCount==1`, `lastBinary=={0x00,4,5,6}`, `sendFileCount==0`); ADDED a bulk test (8 KB →
+  `sendFile`, never interactive) to preserve `sendFile`-path coverage for the gate.
+
+**How it's properly fixed (why it works):** the new asserts encode the CURRENT intended invariants
+(tone-burst 6-frame window cap; single prompt ack; size-keyed interactive-vs-burst routing), each
+cross-checked against the production code paths and their documented rationale — not loosened to pass.
+
+**Test verification:** `./build/tests/test_connection_adaptive` → 46/46 passed;
+`./build/tests/test_tnc_server` → 20 run / 0 failures; full `ctest --test-dir build --parallel 4`
+green; coverage gate passes (sendFile path still covered by the new bulk test).
+
+---
+
 ## 2026-06-06 — fix(gui-harness): cw_fail metric was blind to the burst (file) decode path
 
 **What was broken (symptom + root cause):** `gui_qso_scenario.sh` reported `ALPHA_CWFAIL_COUNT` /

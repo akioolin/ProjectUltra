@@ -322,8 +322,10 @@ namespace {
 void test_local_mode_change_ack_reconfigures_arq() {
     Connection c;
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 15.0f, 0.30f);
-    CHECK(ConnectionAdaptiveTestAccess::arqWindow(c) == connection_policy::kHighThroughputOFDMWindowFrames,
-          "R1/2 should start with high-throughput ARQ window");
+    // R1/2 selects the high-throughput window (16), but the unified tone-burst ack carries
+    // a 6-bit SACK frame_mask, so the in-flight window is capped to 6.
+    CHECK(ConnectionAdaptiveTestAccess::arqWindow(c) == connection_policy::kToneBurstAckWindowCapFrames,
+          "R1/2 high-throughput window is capped to the tone-burst SACK mask");
 
     c.requestModeChange(Modulation::DQPSK, CodeRate::R1_4, 12.0f,
                         v2::ModeChangeReason::CHANNEL_DEGRADED);
@@ -334,8 +336,8 @@ void test_local_mode_change_ack_reconfigures_arq() {
     CHECK(c.getDataCodeRate() == CodeRate::R1_4, "local MODE_CHANGE ACK should apply pending rate");
     CHECK(ConnectionAdaptiveTestAccess::arqCodeRate(c) == CodeRate::R1_4,
           "local MODE_CHANGE ACK should update ARQ code rate");
-    CHECK(ConnectionAdaptiveTestAccess::arqWindow(c) == connection_policy::kWideOFDMWindowFrames,
-          "local MODE_CHANGE ACK should recompute ARQ window");
+    CHECK(ConnectionAdaptiveTestAccess::arqWindow(c) == connection_policy::kToneBurstAckWindowCapFrames,
+          "local MODE_CHANGE ACK should recompute ARQ window (capped to tone-burst SACK mask)");
 }
 
 void test_local_mode_change_timeout_keeps_current_arq_mode() {
@@ -376,8 +378,8 @@ void test_remote_mode_change_reconfigures_arq() {
     CHECK(c.getDataCodeRate() == CodeRate::R1_4, "remote MODE_CHANGE should apply requested rate");
     CHECK(ConnectionAdaptiveTestAccess::arqCodeRate(c) == CodeRate::R1_4,
           "remote MODE_CHANGE should update ARQ code rate");
-    CHECK(ConnectionAdaptiveTestAccess::arqWindow(c) == connection_policy::kWideOFDMWindowFrames,
-          "remote MODE_CHANGE should recompute ARQ window");
+    CHECK(ConnectionAdaptiveTestAccess::arqWindow(c) == connection_policy::kToneBurstAckWindowCapFrames,
+          "remote MODE_CHANGE should recompute ARQ window (capped to tone-burst SACK mask)");
 }
 
 void test_remote_mode_change_ack_repeats_use_ofdm_ack_diversity() {
@@ -389,8 +391,12 @@ void test_remote_mode_change_ack_repeats_use_ofdm_ack_diversity() {
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(
         c, CodeRate::R2_3, 20.0f, 0.48f, Modulation::QPSK);
 
+    // Tone-burst OFDM path: ONE prompt ack per burst — NOT a redundant ack-diversity chain.
+    // The tone-burst group-ack fires once; a lost ack is backstopped by the sender's ARQ
+    // retransmit (re-sends the group -> the receiver re-acks). Repeating it would key the
+    // receiver deaf for ~5 s. See configureArqForCurrentDataMode (kWideOFDMAckRepeatCount).
     const int repeat_count = ConnectionAdaptiveTestAccess::arqAckRepeatCount(c);
-    CHECK(repeat_count > 1, "wide OFDM profile should request ACK time diversity");
+    CHECK(repeat_count == 1, "tone-burst OFDM path uses a single prompt ack (no diversity chain)");
 
     auto frame = v2::ControlFrame::makeModeChange(
         "K2DEF", "W1ABC", 44, Modulation::QPSK, CodeRate::R1_2,
@@ -440,7 +446,9 @@ void test_wide_ofdm_configures_short_tail_sack_delay() {
               connection_policy::computeWideOFDMAckTimeoutMs(
                   Modulation::DQPSK, CodeRate::R1_4,
                   ConnectionAdaptiveTestAccess::arqWindow(c),
-                  sliding_delay, 3, v2::kDefaultFixedFrameCodewords),
+                  sliding_delay,
+                  ConnectionAdaptiveTestAccess::arqAckRepeatCount(c),
+                  v2::kDefaultFixedFrameCodewords),
           "wide OFDM ACK timeout should remain derived from the long physical SACK hold");
 }
 

@@ -633,16 +633,40 @@ int main() {
         TestClient data(harness.server.getDataPort());
         data.writeBytes({1, 2, 3});
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
-        expect(harness.modem.sendFileCount() == 0, "READY/IDLE data should be discarded");
+        expect(harness.modem.sendBinaryCount() == 0 && harness.modem.sendFileCount() == 0,
+               "READY/IDLE data should be discarded");
         enterConnected(harness, cmd);
         data.writeBytes({4, 5, 6});
-        // Bulk data-port bytes are accumulated (kDataTxFlushQuietMs idle) and shipped
-        // as a FILE via burst transport — the only valid file path now — not as an
-        // inline sendBinary message. The wire bytes are staged to a temp file.
-        waitUntil([&] { return harness.modem.sendFileCount() == 1; }, 2000, "sendFile not called");
+        // TRAFFIC-CLASS ROUTING (PHY_ADAPTATION_DESIGN §3/§7): a small interactive block
+        // (<= kInteractiveMaxBytes) is accumulated for the bulk quiet gap (kDataTxBulkQuietMs)
+        // then shipped on the NON-burst short-LDPC SelectiveRepeatARQ path via sendBinary() —
+        // the Winlink-B2F control exchange / short-message route. Only a burst-worth (> 4 KB)
+        // bulk block takes the sendFile burst-file path (see the bulk test below).
+        waitUntil([&] { return harness.modem.sendBinaryCount() == 1; }, 3000, "sendBinary not called");
         // 0x00 = raw payload marker (compression is OFF by default).
-        expect(harness.modem.lastFileBytes() == std::vector<uint8_t>({0x00, 4, 5, 6}),
-               "sendFile payload mismatch");
+        expect(harness.modem.lastBinary() == std::vector<uint8_t>({0x00, 4, 5, 6}),
+               "sendBinary payload mismatch");
+        expect(harness.modem.sendFileCount() == 0,
+               "small interactive block must not take the burst-file path");
+    });
+
+    runner.run("bulk data block routes to the burst-file path", [] {
+        ServerHarness harness;
+        TestClient cmd(harness.server.getCmdPort());
+        TestClient data(harness.server.getDataPort());
+        enterConnected(harness, cmd);
+        // A burst-worth (> kInteractiveMaxBytes = 4 KB) accumulated block is a BULK transfer:
+        // staged to a temp file and shipped via sendFile() (Z=81 burst-file path), NOT the
+        // interactive sendBinary route. 8 KB clears the threshold with margin so a single
+        // recv chunk already trips the size trigger.
+        std::vector<uint8_t> bulk(8192, 0xAB);
+        data.writeBytes(bulk);
+        waitUntil([&] { return harness.modem.sendFileCount() >= 1; }, 3000, "sendFile not called for bulk block");
+        // Bulk must NEVER take the interactive path (ordering invariant: one body, one transport).
+        expect(harness.modem.sendBinaryCount() == 0, "bulk block must not take the interactive path");
+        // Staged file carries the raw marker + the bulk payload.
+        auto staged = harness.modem.lastFileBytes();
+        expect(!staged.empty() && staged.front() == 0x00, "bulk staged file should start with the raw marker");
     });
 
     runner.run("modem data post reaches data socket while connected", [] {

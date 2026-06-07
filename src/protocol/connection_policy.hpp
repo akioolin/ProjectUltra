@@ -69,6 +69,14 @@ inline constexpr uint32_t kFixedFrameCodewords = v2::kDefaultFixedFrameCodewords
 inline constexpr uint32_t kOFDMBurstAckBatchFrames = 4;
 inline constexpr size_t kWideOFDMWindowFrames = 8;
 inline constexpr size_t kHighThroughputOFDMWindowFrames = 16;
+// Hard cap on the in-flight OFDM ARQ window when the interactive tone-burst ack is the
+// ack mechanism: the tone-burst carries a 6-bit per-frame SACK `frame_mask` (0x3F,
+// connection.cpp:438), so it can selectively acknowledge at most 6 in-flight frames.
+// A window > 6 leaves frames 7+ outside the mask — un-ackable, hence falsely "lost" and
+// resent forever. The wide/high-throughput windows above are therefore capped to this on
+// the unified tone-burst path (an N-frame message streams as ≤6-frame windows). SINGLE
+// source of truth for the 6 — code (configureArqForCurrentDataMode) and tests reference it.
+inline constexpr size_t kToneBurstAckWindowCapFrames = 6;
 // Burst group size. 6 is the canonical default — it is MASK-WIDTH-MATCHED to the
 // 6-bit per-frame SACK `frame_mask` (0x3F, connection.cpp:459), which is what the
 // DEFAULT interleave-OFF SR path uses to selectively ACK frames. A group larger

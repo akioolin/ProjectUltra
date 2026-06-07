@@ -3462,10 +3462,12 @@ void Connection::configureArqForCurrentDataMode() {
         // mask truncation, no spurious resend of frames past the 6th. (MC-DPSK 1-5 and
         // OFDM_NARROW 3 are already within 6.) The timing math below then sizes timeouts
         // for the capped window.
-        if (kInteractiveToneAckEnabled() && arq_.getWindowSize() > 6) {
-            LOG_MODEM(INFO, "Connection: capped ARQ window %zu -> 6 (tone-burst 6-bit mask)",
-                      arq_.getWindowSize());
-            arq_.setWindowSize(6);
+        if (kInteractiveToneAckEnabled() &&
+            arq_.getWindowSize() > connection_policy::kToneBurstAckWindowCapFrames) {
+            LOG_MODEM(INFO, "Connection: capped ARQ window %zu -> %zu (tone-burst 6-bit mask)",
+                      arq_.getWindowSize(),
+                      connection_policy::kToneBurstAckWindowCapFrames);
+            arq_.setWindowSize(connection_policy::kToneBurstAckWindowCapFrames);
         }
         arq_.setMaxRetries(15);
         arq_.setAckBatchSize(connection_policy::ofdmAckBatchSize(near_awgn_ofdm));
