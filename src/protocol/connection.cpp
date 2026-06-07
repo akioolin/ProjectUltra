@@ -376,6 +376,15 @@ Connection::Connection(const ConnectionConfig& config)
     // Wire up ARQ callbacks
     arq_.setTransmitCallback([this](const Bytes& data) {
         transmitFrame(data);
+        // A TIMEOUT-RETRANSMIT of a single in-flight DATA frame goes out right here but
+        // does NOT hit setTxFrameSubmittedCallback (that fires only on NEW submits), so
+        // without this it never (re)arms the tone-burst ack monitor → we can't hear the
+        // peer's ack for the resend → we time out and resend AGAIN (observed: a faded
+        // message fragment resent 3× while BRAVO acked each time). Arm here too so every
+        // transmitted DATA frame — new or retransmit — listens for its tone-burst ack.
+        // (Redundant for new burst frames, which also arm via setTxFrameSubmittedCallback;
+        // re-arming only extends the window and the monitor auto-disarms on decode.)
+        armToneBurstAckListenWindow();
     });
 
     arq_.setDataReceivedCallback([this](const Bytes& data) {
@@ -1892,7 +1901,7 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
 
 void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Bytes>& frames,
                                       bool all_ok, float quality, uint8_t frame_mask,
-                                      bool interleaved) {
+                                      bool interleaved, uint8_t group_size) {
     if (!use_burst_transport_) {
         return;
     }
@@ -1920,13 +1929,21 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
         {
             unsigned decoded = 0;
             for (uint8_t m = frame_mask; m; m &= (m - 1)) ++decoded;       // popcount = X
+            // Y = the REAL group size from the descriptor (modem passes burst_group_size).
+            // The old bit-length-of-frame_mask trick UNDERCOUNTS when the group's TRAILING
+            // frame(s) fail (a failed frame is a 0 bit, so it's invisible to bit-length) —
+            // e.g. a 3-frame group with seq 2 faded showed "2/2" instead of "2/3". Fall
+            // back to that heuristic only if group_size wasn't supplied (group_size==0).
             unsigned group_bits = 0;
-            for (uint8_t m = frame_mask; m; m >>= 1) ++group_bits;         // bit-length = Y
+            for (uint8_t m = frame_mask; m; m >>= 1) ++group_bits;         // bit-length
+            unsigned Y = group_size > 0
+                             ? group_size
+                             : (group_bits > decoded ? group_bits : decoded);
+            if (Y < decoded) Y = decoded;
             burst_activity_.active = true;
             burst_activity_.group_seq = group_seq;
             burst_activity_.frames_decoded = static_cast<uint8_t>(decoded);
-            burst_activity_.frames_in_group =
-                static_cast<uint8_t>(group_bits > decoded ? group_bits : decoded);
+            burst_activity_.frames_in_group = static_cast<uint8_t>(Y);
             ++burst_activity_.groups_seen;
         }
         arq_.beginGroupReceive();

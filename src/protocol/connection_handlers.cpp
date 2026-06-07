@@ -796,6 +796,14 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data, v2::Fra
         return;
     }
 
+    // The payload stream is complete here (FINAL / single frame). Clear the "incoming
+    // burst" GUI indicator — files clear via setFileReceivedCallback, but a MESSAGE or
+    // binary payload completes on THIS path, so without this the flash kept pulsing
+    // "received group X/Y" after the message was already delivered (the resend of a faded
+    // final fragment arrives on the per-frame path, which never re-sets the indicator, so
+    // it sat at the last group's stale value).
+    burst_activity_ = BurstActivity{};
+
     // Final or single frame
     Bytes complete_payload;
     if (!rx_reassembly_buffer_.empty()) {

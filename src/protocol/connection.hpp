@@ -195,7 +195,7 @@ public:
     // Inert unless use_burst_transport_.
     void onBurstGroupReceived(uint16_t group_seq, const std::vector<Bytes>& frames,
                               bool all_ok, float quality, uint8_t frame_mask = 0x3F,
-                              bool interleaved = true);
+                              bool interleaved = true, uint8_t group_size = 0);
 
     // §14.36 Phase 5c GUI observability: decode headroom of the most recent burst
     // group [0,1] (<0 = none yet) and a short human-readable adaptive action

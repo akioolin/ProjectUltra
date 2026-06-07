@@ -65,9 +65,9 @@ inline void wireModemToProtocol(ModemEngine& modem,
     // (deliver-once + single GROUP_ACK). THIS is the forwarding ultra_tnc was missing.
     modem.setBurstGroupCallback(
         [&protocol](uint16_t group_seq, const std::vector<Bytes>& frames, bool all_ok,
-                    float quality, uint8_t frame_mask, bool interleaved) {
+                    float quality, uint8_t frame_mask, bool interleaved, uint8_t group_size) {
             protocol.onBurstGroupReceived(group_seq, frames, all_ok, quality, frame_mask,
-                                          interleaved);
+                                          interleaved, group_size);
         });
 
     // Accepted OFDM data-sync -> protocol (warm-sync / burst-cadence bookkeeping).

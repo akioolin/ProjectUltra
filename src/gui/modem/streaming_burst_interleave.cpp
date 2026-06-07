@@ -195,7 +195,8 @@ void StreamingDecoder::accumulateBurstFrames() {
             sync_controller_.have_burst_descriptor_ = false;
             burst_group_callback_(last_burst_group_seq_, std::vector<Bytes>{},
                                   /*all_ok=*/false, /*quality=*/0.0f, /*frame_mask=*/0,
-                                  use_burst_interleave_);
+                                  use_burst_interleave_,
+                                  static_cast<uint8_t>(burst_group_size));
         }
         // Discard — TX used 4-frame interleaving, partial is undecodable
         {
@@ -696,7 +697,8 @@ void StreamingDecoder::finalizeBurstGroup() {
         // (it owns those four warm-sync-prediction fields).
         sync_controller_.noteGroupDelivered(last_burst_group_seq_);
         burst_group_callback_(last_burst_group_seq_, burst_group_frames, all_ok, quality,
-                              frame_mask, use_burst_interleave_);
+                              frame_mask, use_burst_interleave_,
+                              static_cast<uint8_t>(burst_group_size));
     }
 
     // 2026-05-28: snap the waveform's active LDPC lifting back to legacy z=27

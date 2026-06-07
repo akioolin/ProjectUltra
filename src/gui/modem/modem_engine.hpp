@@ -154,7 +154,8 @@ public:
     // unit (group_seq, ordered DATA frames, all-logical-frames-decoded flag).
     using BurstGroupCallback =
         std::function<void(uint16_t group_seq, const std::vector<Bytes>& frames, bool all_ok,
-                           float quality, uint8_t frame_mask, bool interleaved)>;
+                           float quality, uint8_t frame_mask, bool interleaved,
+                           uint8_t group_size)>;
     void setBurstGroupCallback(BurstGroupCallback callback) {
         burst_group_callback_ = std::move(callback);
     }

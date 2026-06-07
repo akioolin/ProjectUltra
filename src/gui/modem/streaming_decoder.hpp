@@ -170,7 +170,8 @@ using DataSyncAcceptedCallback = std::function<void(float sync_correlation)>;
 // 0-bit frames + refills the burst (the Good/AWGN SR-ARQ path).
 using BurstGroupCallback =
     std::function<void(uint16_t group_seq, const std::vector<Bytes>& frames, bool all_ok,
-                       float quality, uint8_t frame_mask, bool interleaved)>;
+                       float quality, uint8_t frame_mask, bool interleaved,
+                       uint8_t group_size)>;
 
 // StreamingDecoder - Unified RX decoder for all waveform types
 class StreamingDecoder {

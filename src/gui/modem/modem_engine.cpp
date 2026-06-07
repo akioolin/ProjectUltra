@@ -145,11 +145,11 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
     // enabled on the decoder.
     streaming_decoder_->setBurstGroupCallback(
         [this](uint16_t group_seq, const std::vector<Bytes>& frames, bool all_ok,
-               float quality, uint8_t frame_mask, bool interleaved) {
+               float quality, uint8_t frame_mask, bool interleaved, uint8_t group_size) {
             updateStats([&](LoopbackStats& s) { s.synced = all_ok; });
             if (burst_group_callback_) {
                 burst_group_callback_(group_seq, frames, all_ok, quality, frame_mask,
-                                      interleaved);
+                                      interleaved, group_size);
             }
             last_rx_complete_time_ = std::chrono::steady_clock::now();
         });
