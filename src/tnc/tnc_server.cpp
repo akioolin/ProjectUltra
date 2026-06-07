@@ -1,5 +1,7 @@
 #include "tnc/tnc_server.hpp"
 
+#include "ultra/logging.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <csignal>
@@ -554,6 +556,15 @@ void TNCServer::emitToCmdClient(std::string_view line) {
     if (isInvalidSocket(cmd_client_fd_) || line.empty()) {
         return;
     }
+    // Trace the host<-TNC side of the VARA-HF command dialogue for debugging Winlink/Pat.
+    // (matches the host->TNC trace in processControlBytes). Strip the trailing CR/LF.
+    std::string_view shown = line;
+    while (!shown.empty() && (shown.back() == '\r' || shown.back() == '\n')) {
+        shown.remove_suffix(1);
+    }
+    if (!shown.empty()) {
+        LOG_INFO("TNC", "tnc->host: %.*s", static_cast<int>(shown.size()), shown.data());
+    }
     cmd_tx_buffer_.insert(cmd_tx_buffer_.end(), line.begin(), line.end());
 }
 
@@ -755,6 +766,12 @@ void TNCServer::processControlBytes(const uint8_t* bytes, size_t size) {
     for (size_t i = 0; i < size; ++i) {
         const char ch = static_cast<char>(bytes[i]);
         if (ch == '\r') {
+            // Trace every host->TNC command (VARA-HF host commands from Winlink Express / Pat)
+            // for debugging the dialogue. Low volume (a few per connection); INFO so it shows
+            // under the "TNC" log category without --log-level debug.
+            if (!cmd_line_buffer_.empty()) {
+                LOG_INFO("TNC", "host->tnc: %s", cmd_line_buffer_.c_str());
+            }
             session_->handleControlLine(cmd_line_buffer_);
             cmd_line_buffer_.clear();
             continue;

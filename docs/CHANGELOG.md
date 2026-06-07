@@ -10,6 +10,44 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-07 — feat(tnc): config auto-discovery beside the binary + Windows paths, and host↔TNC command-dialogue logging
+
+**Need:** Winlink Express launches the TNC executable with NO arguments and an unknown working
+directory, so it must read all its options (callsign, OTASim `sim_audio`/`ota_host`/`token`/
+`station_id`/`session_id`, port, PTT, …) from a config file it can find on its own.
+
+**What existed:** `ultra_tnc` already had `--config <path>`, a full key=value loader
+(`loadConfigFile`/`applyConfigKey` covering every CLI option incl. all OTASim keys), and
+`findDefaultConfigFile()` auto-discovery — but it only searched `./ultra_tnc.conf` (relative to the
+**cwd**) and the Unix `$XDG_CONFIG_HOME` / `$HOME/.config` paths. When Winlink Express launches
+`tnc.exe`, the cwd is *Winlink's* dir (no config there) and `HOME`/`XDG` are unset on Windows → the
+config was never found on a bare launch.
+
+**What changed (`tools/ultra_tnc_config.cpp`):**
+- Added a cross-platform `executableDir()` (Win `GetModuleFileNameA`, macOS `_NSGetExecutablePath`,
+  Linux `/proc/self/exe`).
+- `findDefaultConfigFile()` now searches, in order: `./ultra_tnc.conf` (cwd override) → **next to the
+  binary** (`<exe_dir>/ultra_tnc.conf` — the cwd-independent spot Winlink Express needs) → `$XDG…` →
+  `~/.config…` → **`%APPDATA%\ultra_tnc\config`** + `%USERPROFILE%\.config\…` (Windows).
+- `printUsage` documents the bare-launch auto-load. Added `tools/ultra_tnc.otasim.conf.example`
+  (sim_audio/ota_host/token/station_id/session_id) + updated `ultra_tnc.conf.example` header.
+
+**Verification:** `test_ultra_tnc_config` 52/52 pass. Ran the binary from a FOREIGN cwd (`/tmp`) with
+NO args and a config placed beside the binary → `Loaded config: <build>/ultra_tnc.conf`,
+`callsign=ALPHA`, port 8300 (all from the file). Confirms the Winlink-Express bare-launch path.
+
+**Also — host↔TNC command-dialogue logging (debug aid).** `tnc_server.cpp` now logs every VARA-HF
+host command and the TNC's response at the I/O layer (`processControlBytes` → `host->tnc: <cmd>`;
+`emitToCmdClient` → `tnc->host: <resp>`), `LOG_INFO` under the `TNC` category (case-insensitive,
+on by default; filter with `--log-category tnc` / `log_category = tnc`). The session/server stay
+logging-free internally (unit-test purity) — the trace lives only at the socket boundary. Low volume
+(a few per connection). Verified bare-launched over OTASim + a raw command probe:
+`host->tnc: VERSION` / `tnc->host: VERSION 0.3.5`, `host->tnc: MYCALL TEST` / `tnc->host: OK`, etc. —
+including `WRONG` responses, so rejected/unexpected Winlink commands are visible. `test_tnc_server`
+20/20 still pass.
+
+---
+
 ## 2026-06-07 — burst session fixes: full-chirp resend re-anchor, group-5 default, closed-loop quality feedback
 
 Three connected `src/protocol/connection.cpp` changes from a burst-reliability/throughput investigation

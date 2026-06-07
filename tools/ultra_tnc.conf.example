@@ -1,13 +1,19 @@
 # ultra_tnc — sample config file
 #
-# Copy this file to one of:
-#   ./ultra_tnc.conf                       (cwd of where ultra_tnc runs)
-#   $XDG_CONFIG_HOME/ultra_tnc/config      (Linux)
-#   ~/.config/ultra_tnc/config             (Linux/macOS)
+# ultra_tnc AUTO-LOADS a default config when launched with NO arguments (e.g. by Winlink
+# Express / Pat). Copy this file to `ultra_tnc.conf` in one of these (searched in order):
+#   ./ultra_tnc.conf                       current working directory (local override)
+#   <next to the ultra_tnc / tnc.exe>      RECOMMENDED when another app launches it (any CWD)
+#   %APPDATA%\ultra_tnc\config             Windows per-user
+#   $XDG_CONFIG_HOME/ultra_tnc/config      Linux
+#   ~/.config/ultra_tnc/config             Linux/macOS
 #
 # Or pass --config /path/to/file on the command line.
 # Lines are key = value. Anything after '#' is a comment.
 # CLI flags override config-file values.
+#
+# For OTASim (software-loopback) testing without a radio, see ultra_tnc.otasim.conf.example
+# (sim_audio / ota_host / token / station_id / session_id).
 
 # --- Identity ---
 callsign     = N0CALL          # Your amateur radio callsign

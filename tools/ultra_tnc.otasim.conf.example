@@ -1,0 +1,32 @@
+# ultra_tnc — OTASim test config (software loopback, NO radio/soundcard).
+#
+# Connects to a running `ota_simulator serve` instead of audio hardware, so you can drive
+# Winlink Express / Pat over the simulated HF channel. Winlink Express launches tnc.exe with
+# NO arguments and an unknown working directory, so ultra_tnc AUTO-DISCOVERS this file when it
+# is named `ultra_tnc.conf` and placed in any of (searched in this order):
+#   1. ./ultra_tnc.conf                       current working directory (local override)
+#   2. <next to the ultra_tnc / tnc.exe>      RECOMMENDED for Winlink Express (CWD-independent)
+#   3. %APPDATA%\ultra_tnc\config             Windows per-user
+#   4. ~/.config/ultra_tnc/config             Linux / macOS per-user
+# Or pass --config <path> explicitly. CLI flags override config-file values.
+#
+# To use: copy this file to `ultra_tnc.conf` next to the binary and edit the values.
+
+# --- OTASim transport (replaces a soundcard) ---
+sim_audio   = true                 # use OTASim, not a real audio device
+ota_host    = 127.0.0.1:52001      # ota_simulator gRPC host:port
+# ota_udp_host = 127.0.0.1:52002   # optional; derived from ota_host if omitted
+token       = alpha_tok            # OTASim auth token (matches the serve --tokens file)
+station_id  = alpha                # OTASim station id
+session_id  = lobby                # OTASim session / channel
+
+# --- Identity ---
+callsign    = ALPHA                # your callsign (Winlink / Pat sees this)
+
+# --- TCP TNC API (where Pat / Winlink Express connect) ---
+port        = 8300                 # cmd port; data port = port + 1
+bind        = 127.0.0.1            # 0.0.0.0 to accept LAN clients
+
+# --- Logging (optional) ---
+# log_level   = info
+# log_file    = ultra_tnc.log

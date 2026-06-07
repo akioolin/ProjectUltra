@@ -13,7 +13,42 @@
 #include <ostream>
 #include <vector>
 
+#if defined(_WIN32)
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#else
+#include <unistd.h>
+#endif
+
 namespace ultra::tnc::config {
+
+namespace {
+
+// Directory containing THIS executable (cross-platform; empty on failure). Used to find a
+// config sitting next to the binary — the reliable location when another program (e.g. Winlink
+// Express) launches tnc.exe with no args and an unknown working directory.
+std::string executableDir() {
+    std::string full;
+#if defined(_WIN32)
+    char buf[1024] = {};
+    const DWORD n = GetModuleFileNameA(nullptr, buf, static_cast<DWORD>(sizeof(buf)));
+    if (n > 0 && n < sizeof(buf)) full.assign(buf, n);
+#elif defined(__APPLE__)
+    char buf[4096] = {};
+    uint32_t size = sizeof(buf);
+    if (_NSGetExecutablePath(buf, &size) == 0) full = buf;
+#else
+    char buf[4096] = {};
+    const ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n > 0) { buf[n] = '\0'; full = buf; }
+#endif
+    if (full.empty()) return {};
+    const auto slash = full.find_last_of("/\\");
+    return (slash == std::string::npos) ? std::string{} : full.substr(0, slash);
+}
+
+}  // namespace
 
 std::string lower(std::string s) {
     for (char& c : s) {
@@ -132,8 +167,10 @@ bool parseForcedModulation(const std::string& value,
 void printUsage(std::ostream& out) {
     out << "ultra_tnc [options]\n"
         << "  --config <path>             Read options from a config file\n"
-        << "                              (key = value, # comments). CLI\n"
-        << "                              flags override config-file values.\n"
+        << "                              (key = value, # comments). CLI flags override.\n"
+        << "                              With NO args, auto-loads ultra_tnc.conf from the\n"
+        << "                              cwd, next to the binary, or the per-user config\n"
+        << "                              dir (so Winlink Express / Pat can launch it bare).\n"
         << "  --audio-output <name>       SDL audio output device, or none\n"
         << "  --audio-input <name>        SDL audio input device, or none\n"
         << "  --sim-audio                 Use OTASim audio instead of SDL devices\n"
@@ -342,12 +379,26 @@ bool loadConfigFile(const std::string& path, Config& cfg) {
 }
 
 std::string findDefaultConfigFile() {
-    std::vector<std::string> candidates = {"ultra_tnc.conf"};
+    // Search order: a local override in the CWD first, then NEXT TO THE EXECUTABLE (the
+    // reliable spot when Winlink Express / Pat launch tnc.exe with no args and an unknown
+    // working directory), then the per-user config dirs (Unix XDG/HOME and Windows APPDATA/
+    // USERPROFILE — the Unix ones are usually unset on Windows and vice-versa).
+    std::vector<std::string> candidates = {"ultra_tnc.conf"};  // cwd-local override
+    if (const std::string exe_dir = executableDir(); !exe_dir.empty()) {
+        candidates.push_back(exe_dir + "/ultra_tnc.conf");      // beside the binary
+    }
     if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
         candidates.push_back(std::string(xdg) + "/ultra_tnc/config");
     }
     if (const char* home = std::getenv("HOME")) {
         candidates.push_back(std::string(home) + "/.config/ultra_tnc/config");
+    }
+    if (const char* appdata = std::getenv("APPDATA")) {        // Windows: %APPDATA%\ultra_tnc\
+        candidates.push_back(std::string(appdata) + "/ultra_tnc/config");
+        candidates.push_back(std::string(appdata) + "/ultra_tnc/ultra_tnc.conf");
+    }
+    if (const char* userprofile = std::getenv("USERPROFILE")) {  // Windows home fallback
+        candidates.push_back(std::string(userprofile) + "/.config/ultra_tnc/config");
     }
     for (const auto& path : candidates) {
         std::ifstream in(path);
