@@ -10,6 +10,30 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-07 — fix(build): ultra_waterfall_viewer Windows link error (LNK2019 unresolved main)
+
+**What was broken:** the `Build (windows)` CI job (release-artifact bundle) failed with
+`LNK2019: unresolved external symbol main` / `LNK1120` on `ultra_waterfall_viewer.vcxproj`. The
+ctest jobs (Test linux/windows/macos) and Build (linux/macos) all passed — Windows-link only.
+Pre-existing since the tool landed in the transport merge (commit 5262977); unrelated to the
+ConnectionAdaptive/TNCServer test fixes.
+
+**Root cause:** `tools/waterfall_viewer.cpp` includes `<SDL.h>` and defines `int main`. On Windows,
+SDL's header macro-renames `main`→`SDL_main` and expects `SDL2main.lib` to supply the real entry
+(WinMain→main→SDL_main). The target owns `main()` and does not link `SDL2main`, so the CRT startup
+can't find `main`. Linux/macOS never rename `main`, so they linked fine (and the GUI/ultra_tnc
+targets already avoid this via `SDL_MAIN_HANDLED`).
+
+**Fix:** mirror the project's existing pattern — define `SDL_MAIN_HANDLED` on the target when
+`SDL2_FOUND` (CMakeLists.txt) so SDL leaves `main` alone, and call `SDL_SetMainReady()` before
+`SDL_Init` (waterfall_viewer.cpp) as that mode requires. Cross-platform safe (`SDL_SetMainReady`
+is a no-op flag when SDL owns main).
+
+**Verification:** `ultra_waterfall_viewer` builds+links clean on macOS (SDL2 present → the changed
+path is exercised); Windows link resolves because `main` is no longer renamed. Confirmed on CI.
+
+---
+
 ## 2026-06-06 — fix(tests): reconcile ConnectionAdaptive + TNCServer with transport-merge behavior (main CI was red)
 
 **What was broken (symptom + root cause):** after the transport merge landed on `main`, the Build

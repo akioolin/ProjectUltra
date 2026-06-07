@@ -159,6 +159,9 @@ int renderPng(const Spectrogram& s, float fmax, float db_min, float db_max,
 #ifndef WATERFALL_NO_SDL
 // ---- Interactive SDL2 mode ----
 int runInteractive(const Spectrogram& s, float fmax, float db_min, float db_max) {
+    // We own main() (SDL_MAIN_HANDLED), so SDL did not run its startup shim — tell SDL the
+    // main-thread setup is done before SDL_Init, or SDL_Init fails. No-op when SDL manages main.
+    SDL_SetMainReady();
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;

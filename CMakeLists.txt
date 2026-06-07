@@ -694,7 +694,14 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty
     )
     target_link_libraries(ultra_waterfall_viewer PRIVATE ultra_core ultra_tool_wav_io)
-    if(NOT SDL2_FOUND)
+    if(SDL2_FOUND)
+        # SDL renames main->SDL_main on Windows and expects SDL2main.lib to supply the real
+        # entry point; this target owns main() and does not link SDL2main, so the Windows
+        # release build failed with LNK2019 (unresolved external 'main'). Tell SDL to keep its
+        # hands off main (matches ultra_tnc / ultra_gui) — the source calls SDL_SetMainReady()
+        # before SDL_Init. Linux/macOS never rename main, which is why only Windows broke.
+        target_compile_definitions(ultra_waterfall_viewer PRIVATE SDL_MAIN_HANDLED)
+    else()
         target_compile_definitions(ultra_waterfall_viewer PRIVATE WATERFALL_NO_SDL)
     endif()
 
