@@ -1665,6 +1665,22 @@ void App::drainOperatorEvents(bool flush_all) {
                 break;
             case OperatorEventKind::MessageReceived:
                 appendRxLogLineNow("[RX " + event.from + "] " + event.text);
+                // Scripted bidirectional test: a responder configured with
+                // --auto-reply-message sends ONE reply after it receives a message.
+                // sendMessage() queues + TURN_REQUESTs if we don't hold the DATA turn,
+                // so this also exercises the half-duplex turn reversal (the peer must
+                // yield TURNOVER). Fires once per run (scenario_reply_sent_ latch).
+                if (scenario_active_ && !options_.auto_reply_message.empty() &&
+                    !scenario_reply_sent_) {
+                    scenario_reply_sent_ = true;
+                    guiLog("[scenario] auto-reply: sending %zu-byte reply after receiving a message",
+                           options_.auto_reply_message.size());
+                    if (protocol_.sendMessage(options_.auto_reply_message)) {
+                        if (!protocol_.isReadyToSend()) {
+                            appendRxLogLineNow("[INFO] Auto-reply queued - waiting for DATA turn.");
+                        }
+                    }
+                }
                 break;
             case OperatorEventKind::MessageTxStatus:
                 switch (event.tx_status.status) {

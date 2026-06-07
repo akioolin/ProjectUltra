@@ -72,6 +72,8 @@ public:
         int auto_message_interval_sec = 8;    // gap between sequential auto-messages
         bool auto_message_vary_len = false;   // randomize each auto-message length (mix short+long)
         bool auto_message_after_file = false; // if file+message are set, send message after file clears
+        std::string auto_reply_message;       // responder: send this ONCE after a message is RECEIVED
+                                              // (tests bidirectional reply + half-duplex turn reversal)
         int auto_cancel_file_after_sec = 0;   // cancel active file N s after first observing it
         int auto_disconnect_after_sec = 0;    // 0 = never; else disconnect N s after CONNECTED
         int exit_after_sec = 0;               // 0 = never; else push SDL_QUIT after N s
@@ -179,6 +181,7 @@ private:
     bool scenario_connect_issued_ = false;  // connect() fired once
     bool scenario_payload_sent_ = false;    // full payload sequence dispatched
     bool scenario_message_sent_ = false;    // chat-message phase fired (if any)
+    bool scenario_reply_sent_ = false;      // auto-reply-on-receive fired (if any)
     int scenario_messages_sent_ = 0;        // count of sequential auto-messages sent
     int scenario_messages_delivered_ = 0;   // scripted local messages ACKed by ARQ
     bool scenario_file_started_ = false;    // file phase started (if any)
