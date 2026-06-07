@@ -10,6 +10,43 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-07 — fix(gui-harness): PASS verdict was an exact-rate match, not delivery — false-failed delivered transfers
+
+**What was broken:** `gui_qso_scenario.sh::scenario_passed()` required
+`alpha_mode_count>0 && bravo_mode_count>0`, where the count is of the literal string
+`"configured for <EXPECT_MOD> <EXPECT_RATE>"`. So a transfer that **delivered the file
+CRC-clean** but negotiated a rate different from `--expect-rate` was stamped `RESULT=FAIL`
+(REASON=`process_exit_before_pass`). This is common and CORRECT on a fading channel: at
+`good --snr-db 16` the MEASURED fading varies seed-to-seed and many seeds land in the
+Moderate class (>=0.65), where the rate ladder rightly picks QPSK **R1/4**, not the **R2/3**
+a caller guessed. In a 20-seed group-size sweep, **3 of 5 "failures" (seeds 6/13/20) had
+actually delivered the file CRC-clean** (FILE_CRC_OK=2, ALPHA_FILE_DONE=1, ARQ never past
+attempt 2–4 of 15) — the sweep's headline "15/20 PASS / 25% fail" was wrong; the truth is
+**18/20 delivered**. (The 2 real fails: seed 17 file-CRC mismatch, seed 18 stuck-tail-frame
+ARQ exhaustion.)
+
+**What was changed (`tools/gui_qso_scenario.sh`):**
+- `scenario_passed()` is now DELIVERY-authoritative: `file_crc_ok>0 && alpha_file_done>0`,
+  plus the existing UNEXPECTED-MODULATION guard (drift to e.g. QAM16 when probing QPSK is
+  still a real "wrong rung" fail — distinct from a benign rate change within the same mod).
+  Dropped the `*_mode_count>0` exact-(mod,rate) requirement.
+- Added `ACTUAL_DATA_MODE` to summary.env (last `Data mode set to: <MOD> <RATE>`), so sweeps
+  record the rate each seed REALLY ran instead of assuming EXPECT_RATE. EXPECT_RATE now only
+  sizes the timeout budget, not the verdict. `*_MODE_COUNT` stay in summary for info.
+
+**Why it's correct:** delivery (BRAVO CRC-verifies + ALPHA finalizes) is the only sound
+PASS criterion for a reliability sweep; the negotiated rate is an outcome to RECORD, not a
+precondition to gate on. Genuine failures still fail: a non-delivery has FILE_CRC_OK=0, and
+real abort markers (max retries exceeded, CRC mismatch) are caught by hard_failure_reason.
+
+**Verification:** re-classified the existing 20-seed group-6 run with the new rule →
+**18 PASS / 2 FAIL** (seeds 6/13/20 corrected FAIL→PASS; 17/18 stay FAIL; the 15 prior
+passes unchanged). `bash -n` clean. Methodology note: to compare GROUP SIZE cleanly the rate
+must be forced (ULTRA_FORCE_DATA_RATE), else seed-dependent Good/Moderate classification mixes
+R2/3 and R1/4 runs and confounds the comparison.
+
+---
+
 ## 2026-06-07 — fix(build): ultra_waterfall_viewer Windows link error (LNK2019 unresolved main)
 
 **What was broken:** the `Build (windows)` CI job (release-artifact bundle) failed with

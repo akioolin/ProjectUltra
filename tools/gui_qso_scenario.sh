@@ -235,6 +235,14 @@ collect_metrics() {
   unexpected_mode_pattern="$(unexpected_data_mode_pattern)"
   alpha_mode_count="$(count_pattern "$mode_pattern" "$ALPHA_LOG")"
   bravo_mode_count="$(count_pattern "$mode_pattern" "$BRAVO_LOG")"
+  # The mode the run ACTUALLY negotiated (last "Data mode set to: <MOD> <RATE>"), recorded
+  # for diagnostics — on a fading channel the rate is seed-dependent (Good vs Moderate
+  # classification), so a sweep must read this rather than assume EXPECT_RATE.
+  actual_data_mode="$(
+    grep -Eo 'Data mode set to: [A-Z0-9]+ R[0-9]+/[0-9]+' "$ALPHA_LOG" 2>/dev/null |
+      tail -1 | sed -E 's/Data mode set to: //' || true
+  )"
+  [[ -z "$actual_data_mode" ]] && actual_data_mode="unknown"
   alpha_unexpected_modes="$(count_pattern "$unexpected_mode_pattern" "$ALPHA_LOG")"
   bravo_unexpected_modes="$(count_pattern "$unexpected_mode_pattern" "$BRAVO_LOG")"
   # Forced-rung floor probes (ULTRA_FORCE_DATA_MOD / ULTRA_FORCE_WAVEFORM) PIN the
@@ -290,18 +298,28 @@ collect_metrics() {
 }
 
 scenario_passed() {
-  # PASS = the file delivered CRC-clean both ways (BRAVO verified the file +
-  # ALPHA finalized the transfer), on the expected mode. We intentionally do NOT
-  # gate on the disconnect bookkeeping: the disconnect INITIATOR (ALPHA, on the
-  # payload-drained auto-disconnect) quits during teardown at "Connection state
-  # changed: 4" / "[SYS] Disconnecting..." and never logs a "Disconnected" /
-  # "state changed: 0" string, so requiring alpha_disconnected>0 false-negatived
-  # clean runs — scenario_passed never fired, the poll sat to exit-after, and the
-  # receiver GUI lingered. The *_disconnected counts stay in summary.env for info.
-  # (A delivered-but-no-clean-close run, e.g. BUG-FINACK-001, still PASSes here —
-  # delivery is the verdict; close cleanliness is tracked separately.)
-  [[ "$alpha_mode_count" -gt 0 ]] &&
-  [[ "$bravo_mode_count" -gt 0 ]] &&
+  # PASS = the file delivered CRC-clean (BRAVO verified the file + ALPHA finalized the
+  # transfer). DELIVERY is the verdict.
+  #
+  # We do NOT require the run to have hit the EXACT expected (mod, rate). The old gate
+  # `alpha_mode_count>0 && bravo_mode_count>0` counted the literal string
+  # "configured for <EXPECT_MOD> <EXPECT_RATE>" and so FALSE-FAILED any delivered transfer
+  # whose negotiated rate differed from --expect-rate. That is common and correct on a
+  # fading channel: at `good --snr-db 16` the MEASURED fading varies seed-to-seed and many
+  # seeds land in the Moderate class (>=0.65), where the ladder rightly picks QPSK R1/4 —
+  # not the R2/3 a caller guessed. Those runs delivered CRC-clean but were stamped FAIL
+  # (REASON=process_exit_before_pass), corrupting reliability sweeps. The actual negotiated
+  # mode is recorded as ACTUAL_DATA_MODE in summary.env for diagnostics; EXPECT_RATE is
+  # only used to size the timeout budget, not to gate PASS.
+  #
+  # We still reject drift to an UNEXPECTED MODULATION (e.g. QAM16 when probing QPSK) — that
+  # is a real "wrong rung" signal, distinct from a benign rate change within the same mod.
+  #
+  # We intentionally do NOT gate on disconnect bookkeeping: the disconnect INITIATOR (ALPHA,
+  # on the payload-drained auto-disconnect) quits during teardown and never logs a
+  # "Disconnected" string, so requiring alpha_disconnected>0 false-negatived clean runs.
+  # (A delivered-but-no-clean-close run, e.g. BUG-FINACK-001, still PASSes — delivery is the
+  # verdict; close cleanliness is tracked separately.)
   [[ "$alpha_unexpected_modes" -eq 0 ]] &&
   [[ "$bravo_unexpected_modes" -eq 0 ]] &&
   [[ "$file_crc_ok" -gt 0 ]] &&
@@ -349,6 +367,7 @@ write_summary() {
     echo "FILE_BYTES=$FILE_BYTES"
     echo "EXIT_AFTER=$EXIT_AFTER"
     echo "ELAPSED_SEC=$elapsed"
+    echo "ACTUAL_DATA_MODE=$actual_data_mode"
     echo "ALPHA_MODE_COUNT=$alpha_mode_count"
     echo "BRAVO_MODE_COUNT=$bravo_mode_count"
     echo "ALPHA_UNEXPECTED_MODE_COUNT=$alpha_unexpected_modes"
