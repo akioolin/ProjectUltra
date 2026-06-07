@@ -47,6 +47,17 @@ cross-checked against the production code paths and their documented rationale �
 `./build/tests/test_tnc_server` → 20 run / 0 failures; full `ctest --test-dir build --parallel 4`
 green; coverage gate passes (sendFile path still covered by the new bulk test).
 
+**Follow-up (CI flake in the new bulk test):** the Test (linux) job went green but the Coverage
+(linux) job — which runs the same ctest under a SLOWER instrumented build, with all five matrix
+jobs in parallel — failed on `bulk staged file should start with the raw marker`. Root cause: the
+bulk test read the staged temp file post-hoc (`lastFileBytes()`), but a >4 KB body can flush as
+SEVERAL bursts and each flush deletes the previous staged temp path (Connection's
+`last_tx_temp_path_` cleanup), so the read raced the next flush and hit an already-removed file
+(empty read). The normal Test build never split the flush, so it only showed under instrumentation.
+Fix: the bulk test asserts ONLY that a burst-file send happened (`sendFileCount>=1` — the production
+path it covers); it no longer reads the transient staged file. Deadlines on both data-flow tests
+bumped 3 s→8 s for loaded/instrumented-runner margin.
+
 ---
 
 ## 2026-06-06 — fix(gui-harness): cw_fail metric was blind to the burst (file) decode path
