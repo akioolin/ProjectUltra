@@ -745,7 +745,8 @@ the PHY. The interleave enablement wired into `ModemEngine::setDataMode` is corr
    wait one burst-ACK, resend the whole burst on timeout. Bypass/replace SR-ARQ for the file path.
 3. Prove on the automated GUI file-send (faithful clock): R3/4 Good@20 file delivers across seeds
    (incl. the previously-failing ones).
-4. Then strip chat + shorten handshake + remove turn-taking → the clean one-way sender.
+4. Then strip chat + shorten handshake + ~~remove turn-taking~~ → the clean one-way sender.
+   (⚠ turn-taking REMOVAL **CANCELLED 2026-06-06** — bidirectional messaging needs it; see §14.17.2.)
 
 ### 14.16 BURST TRANSPORT — implementable design (mapped 2026-05-27 against the real ARQ code)
 
@@ -776,7 +777,9 @@ above the waveform and bypasses `arq_`:
 groups, drive the controller instead of feeding `arq_`); `connection.cpp` (route file-path TX/RX
 through the burst controller, group-ACK handling); a group-ACK frame in `frame_v2`. Build as a
 PARALLEL file path (keep `arq_` for any non-file use until removed), PHY tests green throughout,
-GUI-prove R3/4 Good@20 delivery across seeds, then remove SR-ARQ/turn-taking/`sendMessage`.
+GUI-prove R3/4 Good@20 delivery across seeds, then ~~remove SR-ARQ/turn-taking/`sendMessage`~~.
+(⚠ **CANCELLED 2026-06-06**: SR-ARQ, turn-taking, AND `sendMessage` are all KEPT — bidirectional
+TNC/B2F messaging depends on them; see §14.17.2.)
 
 This is the focused next build; the design above is the spec.
 
@@ -800,10 +803,17 @@ protocol. The protocol must be reworked WITH it.** Three coupled pieces, one rew
    DETERMINISTICALLY from the bitstream — no negotiation. ⚠️ This CORRECTS §14.16's "no frame_v2
    change needed" (that was about the *ACK* frame; the *DATA* side needs a header change). This
    is the direct root of the 0/8 failure.
-2. **Rip out ISS/IRS turn-taking.** `TURNOVER` (0x22), `TURN_REQUEST` (0x23), and the
-   `local_data_turn_`/`peer_data_turn_requested_`/turn-ownership state are obsolete — one-way:
-   initiator transmits, responder only listens + ACKs. Removing it also simplifies the
-   send/receive flow the burst path rides.
+2. ~~**Rip out ISS/IRS turn-taking.**~~ **❌ CANCELLED 2026-06-06 — KEEP IT.** The "one-way only,
+   responder just listens+ACKs" premise was WRONG. The modem needs **bidirectional messaging**
+   (TNC / Winlink-B2F exchanges, and the GUI `--auto-reply-message` test). The ISS/IRS turn-taking
+   — `TURNOVER` (0x22), `TURN_REQUEST` (0x23), `local_data_turn_`/`peer_data_turn_requested_` and the
+   turn gate — is **load-bearing and PROVEN working 2026-06-06**: ALPHA sends a message → BRAVO
+   auto-replies → `TURN_REQUEST` → ALPHA `TURNOVER` → BRAVO becomes ISS → reply delivered to ALPHA
+   (`[RX BRAVO]…`), no `--half-duplex-interactive` needed. The burst FILE transport is still one-way
+   (the sender *bypasses* the turn gate while it holds the data turn, §14.27), but that bypass
+   **coexists** with the turn machinery — it does not delete it. So §14.15.4 and §14.16's "remove
+   turn-taking" and §14.17.3's "delete ISS/IRS" are **VOID**. (KEEP `arq_`/SR-ARQ too — same reason,
+   plus MC-DPSK / OFDM_NARROW / control depend on it; REMOVAL_BACKLOG R1b already enshrines this.)
 3. **Burst stop-and-wait transport** (BurstStopAndWaitController, already built+tested §14.16) —
    wired against the new header + the one-way flow, not the SR-ARQ/turn-taking machinery.
 
@@ -811,7 +821,8 @@ These three are not independently shippable — the decode (1) needs the header,
 gone (2), and the transport (3) drives both. So the next build is a coherent protocol rework, done
 together and GUI-proven, not the incremental bolt-on §14.16 implied. Build order within it: header
 format first (so RX can decode a sender-declared group → fixes 0/8), then route the one-way file
-path through the controller, then delete ISS/IRS + SR-ARQ for the file path.
+path through the controller, ~~then delete ISS/IRS + SR-ARQ for the file path~~ (⚠ delete-ISS/IRS
+**CANCELLED 2026-06-06**; the file path bypasses the turn gate but the machinery stays — §14.17.2).
 
 **0/8 ROOT CAUSE CONFIRMED = cross-station config mismatch (2026-05-27).** Offline isolation
 (measure_ack_fer burst_chunk, ONE process configuring both ends): 4-CW, 8-CW, carrier-ldpc ON,
