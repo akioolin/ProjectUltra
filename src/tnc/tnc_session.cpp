@@ -168,10 +168,12 @@ TNCSession::TNCSession(ModemAdapter& modem, EmitFn cmd_emit, DataOutFn data_out)
     : modem_(modem),
       cmd_emit_(std::move(cmd_emit)),
       data_out_(std::move(data_out)) {
-    // Size-target + idle accumulation is the DEFAULT: pull the body in (under-reporting
-    // BUFFER to keep PAT feeding past its ~7×blocksize throttle) and flush at a
-    // burst-worth (kBurstFlushTargetBytes) or when PAT goes idle. Opt out with
-    // ULTRA_TNC_ACCUM_DISABLE for the legacy per-chunk 200 ms flush.
+    // Flush-batching is the DEFAULT: accumulate the host's data-port stream and flush at a
+    // burst-worth (kBurstFlushTargetBytes) or when the host goes idle, so a multi-frame body
+    // ships as fuller bursts instead of one tiny burst per host chunk. The BUFFER level is
+    // ALWAYS reported HONESTLY (handleDataBytes -> onModemBufferLevel = true backlog); the old
+    // under-report-to-milk-PAT trick is GONE. Opt out with ULTRA_TNC_ACCUM_DISABLE for the
+    // legacy per-chunk 200 ms flush (each host chunk bursts on its own via the unified path).
     bulk_accum_ = std::getenv("ULTRA_TNC_ACCUM_DISABLE") == nullptr;
     accum_probe_ = std::getenv("ULTRA_TNC_ACCUM_PROBE") != nullptr;
     flush_log_ = std::getenv("ULTRA_TNC_FLUSH_LOG") != nullptr;
