@@ -181,6 +181,16 @@ sum_cw_fail() {
   printf '%s\n' "${sum:-0}"
 }
 
+# Burst-path (OFDM FILE) decode failures. The file path does NOT emit `cw_fail=`:
+# it reconstructs each frame-interleaved group through the deinterleaver and logs
+# "Frame deinterleave decode FAILED (n/m CWs)" per failed frame (SUCCESS on the good
+# ones). So on a file transfer `cw_fail` is structurally ~always 0 and is BLIND to the
+# real decode trouble — this counter is the burst-path equivalent (the per-frame
+# erasure the channel inflicts under fading, all recovered by ARQ). Count both logs
+# (the receiver emits these; the sender stays 0) so the metric is side-symmetric.
+count_deinterleave_fail() { count_pattern 'Frame deinterleave decode FAILED' "$1"; }
+count_deinterleave_ok()   { count_pattern 'Frame deinterleave decode SUCCESS' "$1"; }
+
 sum_tx_samples() {
   local file="$1"
   { grep -E 'TX(:| Burst:).* -> [0-9]+ samples' "$file" 2>/dev/null || true; } |
@@ -244,6 +254,15 @@ collect_metrics() {
   bravo_retx="$(count_pattern 'SR-ARQ: Retransmitting' "$BRAVO_LOG")"
   alpha_cwfail="$(sum_cw_fail "$ALPHA_LOG")"
   bravo_cwfail="$(sum_cw_fail "$BRAVO_LOG")"
+  alpha_deint_fail="$(count_deinterleave_fail "$ALPHA_LOG")"
+  bravo_deint_fail="$(count_deinterleave_fail "$BRAVO_LOG")"
+  alpha_deint_ok="$(count_deinterleave_ok "$ALPHA_LOG")"
+  bravo_deint_ok="$(count_deinterleave_ok "$BRAVO_LOG")"
+  # Honest TOTAL decode failures = partial-CW failures (cw_fail=, control/non-burst path)
+  # + whole-frame burst deinterleave failures (the file path). CWFAIL alone reads ~0 on a
+  # file transfer even when fading erased a large fraction of frames (all ARQ-recovered).
+  alpha_decode_fail=$((alpha_cwfail + alpha_deint_fail))
+  bravo_decode_fail=$((bravo_cwfail + bravo_deint_fail))
   alpha_adaptive_mode_changes="$(count_pattern 'Connection: Adaptive MODE_CHANGE at TX boundary' "$ALPHA_LOG")"
   bravo_adaptive_mode_changes="$(count_pattern 'Connection: Adaptive MODE_CHANGE at TX boundary' "$BRAVO_LOG")"
   alpha_advisory_switches="$(count_pattern '\[ADPT\].*hysteresis allows switch' "$ALPHA_LOG")"
@@ -343,6 +362,12 @@ write_summary() {
     echo "BRAVO_RETX_COUNT=$bravo_retx"
     echo "ALPHA_CWFAIL_COUNT=$alpha_cwfail"
     echo "BRAVO_CWFAIL_COUNT=$bravo_cwfail"
+    echo "ALPHA_DEINTERLEAVE_FAIL_COUNT=$alpha_deint_fail"
+    echo "BRAVO_DEINTERLEAVE_FAIL_COUNT=$bravo_deint_fail"
+    echo "ALPHA_DEINTERLEAVE_OK_COUNT=$alpha_deint_ok"
+    echo "BRAVO_DEINTERLEAVE_OK_COUNT=$bravo_deint_ok"
+    echo "ALPHA_DECODE_FAIL_COUNT=$alpha_decode_fail"
+    echo "BRAVO_DECODE_FAIL_COUNT=$bravo_decode_fail"
     echo "ALPHA_ADAPTIVE_MODE_CHANGE_COUNT=$alpha_adaptive_mode_changes"
     echo "BRAVO_ADAPTIVE_MODE_CHANGE_COUNT=$bravo_adaptive_mode_changes"
     echo "ADAPTIVE_MODE_CHANGE_COUNT=$((alpha_adaptive_mode_changes + bravo_adaptive_mode_changes))"

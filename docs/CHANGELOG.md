@@ -10,6 +10,37 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-06 — fix(gui-harness): cw_fail metric was blind to the burst (file) decode path
+
+**What was broken (symptom + root cause):** `gui_qso_scenario.sh` reported `ALPHA_CWFAIL_COUNT` /
+`BRAVO_CWFAIL_COUNT` as the decode-failure metric, computed by summing `cw_fail=N` log tokens. But the
+OFDM **FILE** path (the unified burst transport) never emits `cw_fail=` — it reconstructs each
+frame-interleaved group through the deinterleaver and logs `Frame deinterleave decode FAILED (n/m CWs)`
+per failed frame (`...SUCCESS...` on the good ones). So on every file transfer `CWFAIL` is structurally
+~0 and reads as "zero decode trouble" even when fading erased a large fraction of frames. Found on a
+40 KB Good@16 QPSK R2/3 run: summary said `BRAVO_CWFAIL_COUNT=0` while the receiver had actually failed
+**30 of 132** first-pass deinterleave decodes (22.7% FER, all ARQ-recovered → 38 retx, clean delivery).
+`cw_fail` only ever populates on the control / non-burst single-frame path.
+
+**What was changed (files, code):** `tools/gui_qso_scenario.sh` —
+- added `count_deinterleave_fail()` / `count_deinterleave_ok()` (grep `Frame deinterleave decode
+  FAILED|SUCCESS`), counted on both logs (receiver populates; sender stays 0, side-symmetric);
+- `collect_metrics` now also computes `*_DEINTERLEAVE_FAIL/OK_COUNT` and an honest union
+  `*_DECODE_FAIL_COUNT = cw_fail_sum + deinterleave_fail` (never blind to the burst path);
+- `write_summary` emits the six new fields. `CWFAIL` is retained as the granular control/non-burst signal.
+
+**How it's properly fixed (why it works):** the two RX paths log decode outcomes differently
+(`cw_fail=` partial-CW on single frames vs `Frame deinterleave decode FAILED` whole-frame on the burst
+group path); the metric now reads BOTH and exposes the union, so a file transfer's real per-frame
+erasure rate is visible. Relies on the harness's pinned `--log-level debug` (where the FAILED line
+lives); the SUCCESS line is INFO.
+
+**Test verification:** replayed the new greps against the seed-42 logs →
+`BRAVO_DEINTERLEAVE_FAIL_COUNT=30 BRAVO_DEINTERLEAVE_OK_COUNT=102 BRAVO_DECODE_FAIL_COUNT=30`
+(22.7% first-pass FER, matching the validated ~23% Good-fading carrier-null rate); `bash -n` clean.
+
+---
+
 ## 2026-06-06 — fix(gui): responder auto-close on remote disconnect + burst-activity flash lingering after file completion
 
 Two GUI/RX fixes found while watching live Good@15 file transfers (both verified on the GUI sim).
