@@ -137,6 +137,9 @@ using LogFileHandle = std::unique_ptr<std::FILE, LogFileCloser>;
 
 bool configureLogging(const Config& cfg, LogFileHandle& log_file) {
     ultra::setOperatorLogProfile();
+    // Console app: when no --log-file is set, logs go to the cmd window (Windows would
+    // otherwise drop them — its log() has no implicit stderr fallback, unlike the POSIX build).
+    ultra::setLogConsoleFallback(true);
     ultra::setLogLevel(cfg.log_level);
 
     if (cfg.log_level_set && cfg.log_level >= ultra::LogLevel::DEBUG &&

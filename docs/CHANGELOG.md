@@ -10,6 +10,39 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-08 — fix(tnc/logging): host<->TNC dialogue flushes live + Windows console fallback
+
+**What was broken:** debugging the Winlink Express <-> ultra_tnc command dialogue on Windows, the
+`[TNC] host->tnc:` / `tnc->host:` lines were INVISIBLE even with `log_category = operator,tnc` and a
+`log_file` set. Two root causes: (1) INFO logs ride the stdio buffer (only WARN/ERROR flush per-line —
+the 2026-05-23 "logging distorts processing" hot-path fix), so the low-volume control dialogue stayed
+buffered and never reached the file until clean exit; the earlier `[OPERATOR]` startup lines had
+already filled+flushed a buffer, so the user saw operator-but-no-tnc and concluded "no TNC traffic".
+(2) On Windows `ultra::log` has NO implicit stderr fallback (`if (!out) return;` — correct for the
+windowless GUI subsystem), so a console TNC launched WITHOUT a `--log-file` shows nothing in its cmd
+window. Also note: a *relative* `log_file` lands in the launcher's CWD (Winlink's dir), not next to the
+config — a separate "wrong file" foot-gun (advise an absolute path).
+
+**What was changed:**
+- `include/ultra/logging.hpp`: added `g_log_console_fallback` (default false) + `setLogConsoleFallback(bool)`;
+  Windows `log()` now uses `g_log_file ? g_log_file : (g_log_console_fallback ? stderr : nullptr)`.
+  Added `flushLog()` — fflush the active sink, lock-guarded — for low-volume latency-sensitive lines.
+- `src/tnc/tnc_server.cpp`: `ultra::flushLog()` after each `host->tnc:` / `tnc->host:` LOG_INFO.
+- `tools/ultra_tnc.cpp` (`configureLogging`): `setLogConsoleFallback(true)` so the console TNC shows
+  logs in its cmd window when no `--log-file` is given. GUI build leaves the flag false (no console).
+
+**How it's fixed (why it works):** the hot-path buffering rule is preserved (still only WARN/ERROR
+auto-flush); we explicitly flush ONLY the host command dialogue, which is a few control lines per
+connection — zero hot-path cost. The console fallback is opt-in per-binary, so the windowless GUI is
+untouched while the console TNC gets stderr output.
+
+**Test verification:** `/tmp/flush_verify.sh` — isolated OTASim + bare-launched ultra_tnc; a raw socket
+sends `VERSION/MYCALL/BW2300/LISTEN ON` and the script greps the log file *while the TNC is still
+running*: all 4 `host->tnc:` + matching `tnc->host:` (incl. `VERSION 0.3.5`, `OK`) lines are present
+live (old binary: buffered until exit). `cmake --build build --target ultra_tnc` clean.
+
+---
+
 ## 2026-06-07 — fix(gui): Windows waterfall — probe GL capability instead of assuming software
 
 **What was broken:** on Windows the GUI defaulted to the SDL_Renderer ("software") path

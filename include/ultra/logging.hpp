@@ -27,6 +27,9 @@ inline auto g_log_start_time = std::chrono::steady_clock::now();
 
 // Log output file (nullptr = stderr)
 inline FILE* g_log_file = nullptr;
+// Console apps (e.g. ultra_tnc) opt in: when no --log-file is set, fall back to stderr so the
+// cmd window still shows logs. The windowless GUI build leaves this false (it has no console).
+inline bool g_log_console_fallback = false;
 #ifdef _WIN32
 inline SRWLOCK g_log_lock = SRWLOCK_INIT;
 #else
@@ -257,6 +260,25 @@ inline void setLogFile(FILE* file) {
 #endif
 }
 
+// Console apps call this so logs reach the cmd window when no --log-file is set (Windows
+// otherwise drops them — there is no implicit stderr fallback there, for the windowless GUI).
+inline void setLogConsoleFallback(bool enabled) { g_log_console_fallback = enabled; }
+
+// Force-flush the active log sink. Per-line flush stalls the real-time hot path, so the normal
+// path buffers INFO/DEBUG; call this ONLY for low-volume latency-sensitive lines (e.g. the TNC
+// host<->modem command dialogue) so they reach the file/console live instead of riding the buffer.
+inline void flushLog() {
+#ifdef _WIN32
+    AcquireSRWLockShared(&g_log_lock);
+    FILE* out = g_log_file ? g_log_file : (g_log_console_fallback ? stderr : nullptr);
+    if (out) fflush(out);
+    ReleaseSRWLockShared(&g_log_lock);
+#else
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    fflush(g_log_file ? g_log_file : stderr);
+#endif
+}
+
 // Core logging function
 inline void log(LogLevel level, const char* category, const char* format, ...) {
     if (level > g_log_level) return;
@@ -264,7 +286,9 @@ inline void log(LogLevel level, const char* category, const char* format, ...) {
 
 #ifdef _WIN32
     AcquireSRWLockShared(&g_log_lock);
-    FILE* out = g_log_file;  // No stderr fallback on GUI subsystem builds.
+    // GUI subsystem builds are windowless -> no implicit stderr fallback. Console apps
+    // (ultra_tnc) opt in via setLogConsoleFallback(true) so logs reach the cmd window.
+    FILE* out = g_log_file ? g_log_file : (g_log_console_fallback ? stderr : nullptr);
     if (!out) {
         ReleaseSRWLockShared(&g_log_lock);
         return;

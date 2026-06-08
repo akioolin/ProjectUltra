@@ -564,6 +564,7 @@ void TNCServer::emitToCmdClient(std::string_view line) {
     }
     if (!shown.empty()) {
         LOG_INFO("TNC", "tnc->host: %.*s", static_cast<int>(shown.size()), shown.data());
+        ultra::flushLog();  // low-volume control dialogue -> flush so it's visible live for debugging
     }
     cmd_tx_buffer_.insert(cmd_tx_buffer_.end(), line.begin(), line.end());
 }
@@ -771,6 +772,7 @@ void TNCServer::processControlBytes(const uint8_t* bytes, size_t size) {
             // under the "TNC" log category without --log-level debug.
             if (!cmd_line_buffer_.empty()) {
                 LOG_INFO("TNC", "host->tnc: %s", cmd_line_buffer_.c_str());
+                ultra::flushLog();  // low-volume control dialogue -> flush so it's visible live
             }
             session_->handleControlLine(cmd_line_buffer_);
             cmd_line_buffer_.clear();
