@@ -19,7 +19,6 @@
 #include "sync/frame_arrival_policy.hpp"
 #include "streaming_frame_policy.hpp"
 #include "sync/signal_policy.hpp"
-#include "gui/startup_trace.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "fec/frame_interleaver.hpp"  // Frame-level interleaving for fixed-CW frames
 #include "fec/burst_interleaver.hpp"  // Burst-level long interleaver
@@ -140,15 +139,10 @@ static void dumpBufferSnapshot(const std::vector<float>& buffer, size_t write_po
 
 StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
     : sync_controller_(buffer_capacity_samples) {  // owns sync_controller_.ring_; its ctor validates + sizes the buffer
-    startupTrace("StreamingDecoder", "ctor-enter");
-    startupTrace("StreamingDecoder", "buffer-resized");
     waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
-    startupTrace("StreamingDecoder", "waveform-created");
     frame_decoder_.interleaver_ = std::make_unique<ChannelInterleaver>(
         mcDpskBitsPerSymbol(mc_dpsk_config_), v2::LDPC_CODEWORD_BITS);
-    startupTrace("StreamingDecoder", "interleaver-created");
     frame_decoder_.codec_ = fec::CodecFactory::create(fec::CodecType::LDPC, CodeRate::R1_4);
-    startupTrace("StreamingDecoder", "codec-created");
 
     LOG_MODEM(INFO, "StreamingDecoder: Initialized (buffer=%zu samples)", sync_controller_.ring_.buffer_capacity_samples_);
 
@@ -207,7 +201,6 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
                           static_cast<unsigned long long>(d.detected_stream_offset));
             });
     }
-    startupTrace("StreamingDecoder", "ctor-exit");
 }
 
 void StreamingDecoder::setToneBurstAckCallback(ToneBurstAckCallback cb) {

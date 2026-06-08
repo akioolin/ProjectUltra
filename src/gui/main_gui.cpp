@@ -2,7 +2,6 @@
 // Uses Dear ImGui with SDL2 + OpenGL 2.1 for maximum compatibility
 
 #include "app.hpp"
-#include "startup_trace.hpp"
 
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
@@ -944,9 +943,7 @@ int main(int argc, char* argv[]) {
 
     // Create application with parsed options
     writeStartupLog("Constructing App");
-    ultra::gui::startupTrace("main_gui", "before-app-construction");
     ultra::gui::App app(opts);
-    ultra::gui::startupTrace("main_gui", "after-app-construction");
     writeStartupLog("App initialized");
 
     // Main loop
@@ -954,7 +951,6 @@ int main(int argc, char* argv[]) {
     bool first_frame = true;
     while (running) {
         if (first_frame) {
-            ultra::gui::startupTrace("main_gui", "first-frame-loop-enter");
         }
         // Poll events
         SDL_Event event;
@@ -973,7 +969,6 @@ int main(int argc, char* argv[]) {
 
         // Start ImGui frame
         if (first_frame) {
-            ultra::gui::startupTrace("main_gui", "first-frame-begin-backend");
         }
         if (using_software_renderer) {
             ImGui_ImplSDLRenderer2_NewFrame();
@@ -984,21 +979,17 @@ int main(int argc, char* argv[]) {
         }
         ImGui::NewFrame();
         if (first_frame) {
-            ultra::gui::startupTrace("main_gui", "first-frame-newframe-ok");
         }
 
         // Render application UI
         if (first_frame) {
-            ultra::gui::startupTrace("main_gui", "first-frame-app-render-enter");
         }
         app.render();
         if (first_frame) {
-            ultra::gui::startupTrace("main_gui", "first-frame-app-render-exit");
         }
 
         // Rendering
         if (first_frame) {
-            ultra::gui::startupTrace("main_gui", "first-frame-render-submit-enter");
         }
         ImGui::Render();
         if (using_software_renderer) {
@@ -1014,7 +1005,6 @@ int main(int argc, char* argv[]) {
             SDL_GL_SwapWindow(window);
         }
         if (first_frame) {
-            ultra::gui::startupTrace("main_gui", "first-frame-render-submit-exit");
             first_frame = false;
         }
     }

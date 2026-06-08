@@ -1,13 +1,11 @@
 #include "constellation.hpp"
 #include "imgui.h"
-#include "gui/startup_trace.hpp"
 #include <cmath>
 
 namespace ultra {
 namespace gui {
 
 ConstellationWidget::ConstellationWidget() {
-    startupTrace("ConstellationWidget", "ctor");
 }
 
 void ConstellationWidget::render(const std::vector<std::complex<float>>& symbols,

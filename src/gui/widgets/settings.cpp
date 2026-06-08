@@ -1,6 +1,5 @@
 #include "settings.hpp"
 #include "imgui.h"
-#include "gui/startup_trace.hpp"
 #ifdef ULTRA_HAVE_LIBHAMLIB
 #include "ptt/hamlib_rig_list.hpp"
 #endif
@@ -29,7 +28,6 @@ namespace ultra {
 namespace gui {
 
 AppSettings::AppSettings() {
-    startupTrace("AppSettings", "ctor");
 }
 
 // Get default settings file path
@@ -478,7 +476,6 @@ bool AppSettings::load(const std::string& path) {
 }
 
 SettingsWindow::SettingsWindow() {
-    startupTrace("SettingsWindow", "ctor");
 }
 
 bool SettingsWindow::render(AppSettings& settings) {

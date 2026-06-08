@@ -1,7 +1,6 @@
 #include "protocol_engine.hpp"
 #include "protocol/waveform_selection.hpp"
 #include "diagnostics/diagnostics_recorder.hpp"
-#include "gui/startup_trace.hpp"
 #include "ultra/logging.hpp"
 #include <algorithm>
 #include <cstdio>
@@ -13,7 +12,6 @@ namespace protocol {
 ProtocolEngine::ProtocolEngine(const ConnectionConfig& config)
     : connection_(config)
 {
-    ultra::gui::startupTrace("ProtocolEngine", "ctor-enter");
     // Wire up Connection callbacks
     connection_.setTransmitInfoCallback([this](const Bytes& data,
                                                bool expect_full_ofdm_anchor_after_tx) {
@@ -78,16 +76,13 @@ ProtocolEngine::ProtocolEngine(const ConnectionConfig& config)
             on_connection_changed_(state, info);
         }
     });
-    ultra::gui::startupTrace("ProtocolEngine", "ctor-exit");
 }
 
 void ProtocolEngine::setLocalCallsign(const std::string& call) {
 #ifdef _WIN32
-    ultra::gui::startupTrace("ProtocolEngine", "setLocalCallsign-enter");
     // Win10 startup hardening: avoid std::mutex path in early GUI bring-up.
     // Called from UI thread during app construction.
     connection_.setLocalCallsign(call);
-    ultra::gui::startupTrace("ProtocolEngine", "setLocalCallsign-exit");
 #else
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setLocalCallsign(call);

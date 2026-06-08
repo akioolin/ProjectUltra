@@ -2,7 +2,6 @@
 #include <cmath>
 #include "audio_engine.hpp"
 #include "diagnostics/diagnostics_recorder.hpp"
-#include "gui/startup_trace.hpp"
 #include "sim/awgn.hpp"
 #include "ultra/logging.hpp"
 #include <cstring>
@@ -13,7 +12,6 @@ namespace ultra {
 namespace gui {
 
 AudioEngine::AudioEngine() {
-    startupTrace("AudioEngine", "ctor");
 }
 
 AudioEngine::~AudioEngine() {
@@ -23,28 +21,23 @@ AudioEngine::~AudioEngine() {
 bool AudioEngine::initialize() {
     if (initialized_) return true;
 
-    startupTrace("AudioEngine", "initialize-enter");
 
     if (SDL_WasInit(SDL_INIT_AUDIO) & SDL_INIT_AUDIO) {
         initialized_ = true;
         owns_audio_subsystem_ = false;
-        startupTrace("AudioEngine", "initialize-already-initialized");
         return true;
     }
 
     if (SDL_InitSubSystem(SDL_INIT_AUDIO) < 0) {
-        startupTrace("AudioEngine", "initialize-fail");
         return false;
     }
 
     initialized_ = true;
     owns_audio_subsystem_ = true;
-    startupTrace("AudioEngine", "initialize-exit");
     return true;
 }
 
 void AudioEngine::shutdown() {
-    startupTrace("AudioEngine", "shutdown-enter");
     closeOutput();
     closeInput();
 
@@ -53,7 +46,6 @@ void AudioEngine::shutdown() {
     }
     initialized_ = false;
     owns_audio_subsystem_ = false;
-    startupTrace("AudioEngine", "shutdown-exit");
 }
 
 std::vector<std::string> AudioEngine::getOutputDevices() {

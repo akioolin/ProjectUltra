@@ -1,7 +1,6 @@
 // MCDPSKWaveform - Implementation
 
 #include "mc_dpsk_waveform.hpp"
-#include "gui/startup_trace.hpp"
 #include "ultra/logging.hpp"
 #include <cmath>
 
@@ -25,21 +24,14 @@ MCDPSKWaveform::MCDPSKWaveform(const MultiCarrierDPSKConfig& config)
 }
 
 void MCDPSKWaveform::initComponents() {
-    gui::startupTrace("MCDPSKWaveform", "init-components-enter");
     modulator_ = std::make_unique<MultiCarrierDPSKModulator>(config_);
-    gui::startupTrace("MCDPSKWaveform", "modulator-created");
     demodulator_ = std::make_unique<MultiCarrierDPSKDemodulator>(config_);
-    gui::startupTrace("MCDPSKWaveform", "demodulator-created");
     chirp_sync_ = std::make_unique<sync::ChirpSync>(config_.getChirpConfig());
-    gui::startupTrace("MCDPSKWaveform", "chirp-sync-created");
 
     // Keep constructor logging allocation-light for older Windows runtimes.
-    gui::startupTrace("MCDPSKWaveform", "pre-created-log");
     // Avoid LOG_MODEM in this early constructor path on older Win10 runtimes.
     (void)config_.num_carriers;
     (void)config_.samples_per_symbol;
-    gui::startupTrace("MCDPSKWaveform", "post-created-log");
-    gui::startupTrace("MCDPSKWaveform", "init-components-exit");
 }
 
 WaveformCapabilities MCDPSKWaveform::getCapabilities() const {

@@ -2,7 +2,6 @@
 #include "gui/modem/modem_protocol_binding.hpp"
 #include "otasim_client/ota_rx_pump.hpp"
 #include "diagnostics/diagnostics_recorder.hpp"
-#include "startup_trace.hpp"
 #include "imgui.h"
 #include "ptt/ptt_driver_factory.hpp"
 #include "ultra/build_info.hpp"
@@ -411,10 +410,7 @@ static const char* adaptationDirection(Modulation from_mod, CodeRate from_rate,
 App::App() : App(Options{}) {}
 
 App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_sim) {
-    ultra::gui::startupTrace("App", "ctor-body-enter");
-    ultra::gui::startupTrace("App", "gui-log-enter");
     guiLog("=== GUI Started ===");
-    ultra::gui::startupTrace("App", "gui-log-exit");
     if (options_.record_audio) {
         recording_enabled_ = true;
         guiLog("Recording enabled (-rec): base path '%s'", options_.record_path.c_str());
@@ -458,14 +454,12 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                MAX_OPERATOR_EVENTS);
     }
     // Load persistent settings
-    ultra::gui::startupTrace("App", "settings-load-enter");
     settings_.load();
     LOG_INFO("AUDIO",
              "TX drive (tx_drive=%.3f) now controls per-burst peak target, "
              "not post-mix attenuation. Previous tx_drive = 0.8 behavior is "
              "replaced by per-burst peak normalization to tx_drive's value.",
              settings_.tx_drive);
-    ultra::gui::startupTrace("App", "settings-load-exit");
 
     ultra::diagnostics::SessionMeta diag_meta;
     diag_meta.app_name = "ultra_gui";
@@ -483,17 +477,13 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         appendRxLogLine("[FAULT] Previous-session crash detected: " + tombstone->signal_name);
     }
 
-    ultra::gui::startupTrace("App", "presets-balanced-enter");
     config_ = presets::balanced();
-    ultra::gui::startupTrace("App", "presets-balanced-exit");
 
     // Use dedicated RX decode thread by default.
     modem_.setSynchronousMode(false);
 
     if (!options_.disable_waterfall) {
-        ultra::gui::startupTrace("App", "waterfall-create-begin");
         waterfall_ = std::make_unique<WaterfallWidget>();
-        ultra::gui::startupTrace("App", "waterfall-create-end");
     } else {
         guiLog("Waterfall disabled by startup option");
     }
@@ -503,7 +493,6 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     // level (the GUI's "Connect to <remote>" passes the station id); so
     // force the modem's local callsign to match, otherwise deliverFrame()
     // would drop every incoming frame as "different station".
-    ultra::gui::startupTrace("App", "callsign-init-enter");
     std::string local_call;
     if (simulation_enabled_ && !options_.station_id.empty()) {
         local_call = options_.station_id;
@@ -514,14 +503,9 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         }
     }
     if (!local_call.empty()) {
-        ultra::gui::startupTrace("App", "callsign-set-protocol-enter");
         protocol_.setLocalCallsign(local_call);
-        ultra::gui::startupTrace("App", "callsign-set-protocol-exit");
-        ultra::gui::startupTrace("App", "callsign-set-modem-enter");
         modem_.setLogPrefix(local_call);
-        ultra::gui::startupTrace("App", "callsign-set-modem-exit");
     }
-    ultra::gui::startupTrace("App", "callsign-init-exit");
 
     protocol_.setSoftCombiningHARQ(true);
     modem_.setSoftCombineBuffer(protocol_.softCombineBuffer());
@@ -530,7 +514,6 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     // ultra_tnc bind identically (gui/modem/modem_protocol_binding.hpp). GUI-specific
     // reactions to a decoded frame (monitor-mode log + adaptive advisory) ride the
     // after_rx_data hook; ping/status stay GUI-owned below.
-    ultra::gui::startupTrace("App", "set-raw-callback-enter");
     ModemProtocolFrontendHooks modem_hooks;
     modem_hooks.after_rx_data = [this](const Bytes& data, float snr_db, float fading,
                                        SNRSource snr_source, bool used_for_quality) {
@@ -566,14 +549,11 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         }
     };
     ultra::gui::wireModemToProtocol(modem_, protocol_, std::move(modem_hooks));
-    ultra::gui::startupTrace("App", "set-raw-callback-exit");
 
     // Set up status callback to show codeword progress in RX log
-    ultra::gui::startupTrace("App", "set-status-callback-enter");
     modem_.setStatusCallback([this](const std::string& status) {
         enqueueOperatorLogLine(status);
     });
-    ultra::gui::startupTrace("App", "set-status-callback-exit");
 
     // Monitor-mode override: if --monitor-ofdm / --monitor-mcdpsk was
     // passed on the CLI, skip the normal PING/CONNECT handshake and
@@ -621,7 +601,6 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     }
 
     // Set up protocol engine callbacks
-    ultra::gui::startupTrace("App", "protocol-callbacks-enter");
     protocol_.setTxDataCallback([this](const Bytes& data,
                                        bool expect_full_ofdm_anchor_after_tx) {
         const bool in_qso_data = isInQsoDataFrame(data);
@@ -709,7 +688,6 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         guiLog("[scenario] half-duplex interactive enabled (bidirectional role-swap)");
     }
 
-    ultra::gui::startupTrace("App", "protocol-callbacks-mid1");
 
     protocol_.setMessageReceivedCallback([this](const std::string& from, const std::string& text) {
         if (text.empty()) {
@@ -720,7 +698,6 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     protocol_.setMessageTxStatusCallback([this](const protocol::ProtocolEngine::MessageTxStatusEvent& event) {
         enqueueMessageTxStatus(event);
     });
-    ultra::gui::startupTrace("App", "protocol-callbacks-mid2");
 
     protocol_.setConnectionChangedCallback([this](protocol::ConnectionState state, const std::string& info) {
         // Cache for the carrier-sense gate (read on the TX-callback path where
@@ -845,7 +822,6 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         }
         appendRxLogLine(msg);
     });
-    ultra::gui::startupTrace("App", "protocol-callbacks-mid3");
 
     protocol_.setIncomingCallCallback([this](const std::string& from) {
         {
@@ -855,7 +831,6 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         std::string msg = "[SYS] Incoming call from " + from;
         appendRxLogLine(msg);
     });
-    ultra::gui::startupTrace("App", "protocol-callbacks-mid4");
 
     // PING TX callback - protocol wants to send a fast presence probe
     protocol_.setPingTxCallback([this]() {
@@ -878,7 +853,6 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             queueRealTxSamples(samples, "PONG audio");
         }
     });
-    ultra::gui::startupTrace("App", "protocol-callbacks-mid5");
 
     // Wire up modem ping detection to protocol
     modem_.setPingReceivedCallback([this](float snr) {
@@ -910,7 +884,6 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         }
         protocol_.onPingReceived();
     });
-    ultra::gui::startupTrace("App", "protocol-callbacks-mid6");
 
     protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate,
                                                  int cw_count,
@@ -1007,7 +980,6 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     protocol_.setPhyMaskV1NegotiatedCallback([this](bool enabled) {
         modem_.setCarrierLdpcInterleaver(enabled);
     });
-    ultra::gui::startupTrace("App", "protocol-callbacks-mid7");
 
     // Waveform mode negotiation callback.
     protocol_.setModeNegotiatedCallback([this](protocol::WaveformMode mode) {
@@ -1034,7 +1006,6 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         std::string msg = "[WAVEFORM] " + mode_name;
         appendRxLogLine(msg);
     });
-    ultra::gui::startupTrace("App", "protocol-callbacks-mid8");
 
     // Connect waveform callback.
     protocol_.setConnectWaveformChangedCallback([this](protocol::WaveformMode mode) {
@@ -1042,14 +1013,12 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         guiLog("CONNECT_WAVEFORM: Switching to %s for connection attempts", mode_name);
         modem_.setConnectWaveform(mode);
     });
-    ultra::gui::startupTrace("App", "protocol-callbacks-mid9");
 
     // Handshake confirmed callback - now safe to use negotiated waveform
     protocol_.setHandshakeConfirmedCallback([this]() {
         guiLog("HANDSHAKE: Confirmed, switching to negotiated waveform");
         modem_.setHandshakeComplete(true);
     });
-    ultra::gui::startupTrace("App", "protocol-callbacks-mid10");
 
     // File transfer callbacks
     protocol_.setFileProgressCallback([this](const protocol::FileTransferProgress& p) {
@@ -1077,7 +1046,6 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             appendRxLogLine(msg);
         }
     });
-    ultra::gui::startupTrace("App", "protocol-callbacks-mid11");
 
     protocol_.setFileReceivedCallback([this](const std::string& path, bool success,
                                              const std::string& error) {
@@ -1129,7 +1097,6 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         }
         appendRxLogLine(msg);
     });
-    ultra::gui::startupTrace("App", "protocol-callbacks-mid12");
 
     protocol_.setFileSentCallback([this](bool success, const std::string& error) {
         last_progress_milestone_ = 0;  // Reset for next transfer
@@ -1181,24 +1148,18 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         pending_file_tx_path_.clear();
         appendRxLogLine(msg);
     });
-    ultra::gui::startupTrace("App", "protocol-callbacks-exit");
 
     // Set receive directory from settings (defaults to Downloads folder)
-    ultra::gui::startupTrace("App", "set-rx-dir-enter");
     protocol_.setReceiveDirectory(settings_.getReceiveDirectory());
-    ultra::gui::startupTrace("App", "set-rx-dir-exit");
 
     // Configure waterfall display
-    ultra::gui::startupTrace("App", "waterfall-config-enter");
     if (waterfall_) {
         waterfall_->setSampleRate(48000.0f);
         waterfall_->setFrequencyRange(0.0f, 3000.0f);
         waterfall_->setDynamicRange(-60.0f, 0.0f);
     }
-    ultra::gui::startupTrace("App", "waterfall-config-exit");
 
     // Settings window callbacks
-    ultra::gui::startupTrace("App", "settings-callbacks-enter");
     settings_window_.setCallsignChangedCallback([this](const std::string& call) {
         protocol_.setLocalCallsign(call);
         modem_.setLogPrefix(call);
@@ -1280,10 +1241,8 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     settings_window_.setCatTestCallback([this](const AppSettings& snapshot) {
         return testCat(snapshot);
     });
-    ultra::gui::startupTrace("App", "settings-callbacks-exit");
 
     // Apply initial expert settings from loaded config
-    ultra::gui::startupTrace("App", "apply-expert-enter");
     // FLOOR-PROBE override (test/diag, FORCE bucket): ULTRA_FORCE_WAVEFORM pins the REQUESTED
     // data waveform into the CONNECT so negotiation honors it BELOW the auto entry-SNR — where
     // the ladder would otherwise drop to MC-DPSK. Pairs with ULTRA_FORCE_DATA_MOD/RATE (which
@@ -1299,10 +1258,8 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     protocol_.setForcedModulation(static_cast<Modulation>(settings_.forced_modulation));
     protocol_.setForcedCodeRate(static_cast<CodeRate>(settings_.forced_code_rate));
     modem_.setNarrowbandControl(forced_wf == static_cast<uint8_t>(protocol::WaveformMode::OFDM_NARROW));
-    ultra::gui::startupTrace("App", "apply-expert-exit");
 
     // Apply initial filter settings from loaded config
-    ultra::gui::startupTrace("App", "apply-filter-enter");
     FilterConfig initial_filter;
     initial_filter.enabled = settings_.filter_enabled;
     initial_filter.center_freq = settings_.filter_center;
@@ -1311,18 +1268,14 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     modem_.setFilterConfig(initial_filter);
     modem_.setPaprReductionEnabled(settings_.papr_reduction_enabled);
     audio_.setOutputGain(1.0f);
-    ultra::gui::startupTrace("App", "apply-filter-exit");
 
     if (simulation_enabled_) {
-        ultra::gui::startupTrace("App", "init-ota-audio-enter");
         initOtaAudio();
-        ultra::gui::startupTrace("App", "init-ota-audio-exit");
     }
 
     // Auto-initialize audio on startup unless safe-startup mode is requested.
     // This avoids crashing on fragile audio stacks during process bring-up.
     if (!options_.safe_startup && !simulation_enabled_) {
-        ultra::gui::startupTrace("App", "init-audio-enter");
         initAudio();
         if (audio_initialized_) {
             deferred_radio_rx_start_pending_ = true;
@@ -1332,18 +1285,15 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             deferred_radio_rx_start_attempts_ = 0;
             guiLog("Startup audio stage 1/2 complete: core ready, starting RX capture ASAP (timeout=3000ms)");
         }
-        ultra::gui::startupTrace("App", "init-audio-exit");
     } else if (!simulation_enabled_) {
         guiLog("Safe startup enabled: deferred audio/simulator initialization");
         deferred_audio_auto_init_pending_ = true;
         deferred_audio_auto_init_deadline_ms_ = SDL_GetTicks() + 300;
         deferred_audio_auto_init_attempts_ = 0;
         deferred_audio_wait_logged_ = false;
-        ultra::gui::startupTrace("App", "deferred-audio-scheduled");
     } else {
         guiLog("OTASim mode enabled: SDL audio device initialization skipped");
     }
-    ultra::gui::startupTrace("App", "ctor-body-exit");
 }
 
 App::~App() {
@@ -1540,20 +1490,13 @@ void App::pollOtaRx() {
 void App::initAudio() {
     if (audio_initialized_) return;
 
-    ultra::gui::startupTrace("App", "initAudio-enter");
     if (!audio_.initialize()) {
-        ultra::gui::startupTrace("App", "initAudio-audio-initialize-fail");
         return;
     }
-    ultra::gui::startupTrace("App", "initAudio-audio-initialize-ok");
 
     // Enumerate devices
-    ultra::gui::startupTrace("App", "initAudio-enum-input-enter");
     input_devices_ = audio_.getInputDevices();
-    ultra::gui::startupTrace("App", "initAudio-enum-input-exit");
-    ultra::gui::startupTrace("App", "initAudio-enum-output-enter");
     output_devices_ = audio_.getOutputDevices();
-    ultra::gui::startupTrace("App", "initAudio-enum-output-exit");
 
     // Populate settings window device lists
     settings_window_.input_devices = input_devices_;
@@ -1562,7 +1505,6 @@ void App::initAudio() {
            input_devices_.size(), output_devices_.size());
 
     audio_initialized_ = true;
-    ultra::gui::startupTrace("App", "initAudio-exit");
 }
 
 void App::enqueueOperatorEvent(OperatorEvent event) {
@@ -2175,15 +2117,12 @@ void App::render() {
     static bool first_render = true;
     render_frames_seen_++;
     if (first_render) {
-        ultra::gui::startupTrace("App", "render-enter");
     }
     // TX drive is embedded per burst; keep AudioEngine output at unity.
     if (first_render) {
-        ultra::gui::startupTrace("App", "render-set-output-gain-enter");
     }
     audio_.setOutputGain(1.0f);
     if (first_render) {
-        ultra::gui::startupTrace("App", "render-set-output-gain-exit");
     }
 
     // Process captured RX audio in the main thread.
@@ -2209,20 +2148,16 @@ void App::render() {
             deferred_audio_wait_logged_ = false;
             uint32_t now_ms = SDL_GetTicks();
             if (now_ms >= deferred_audio_auto_init_deadline_ms_) {
-                ultra::gui::startupTrace("App", "deferred-audio-init-enter");
                 initAudio();
                 if (audio_initialized_) {
-                    ultra::gui::startupTrace("App", "deferred-audio-open-output-enter");
                     deferred_radio_rx_start_pending_ = true;
                     deferred_radio_rx_start_deadline_ms_ = now_ms;
                     deferred_radio_rx_start_timeout_ms_ = now_ms + 3000;
                     deferred_radio_rx_start_attempts_ = 0;
                     guiLog("Deferred audio stage 1/2 complete: core ready, starting RX capture ASAP (timeout=3000ms)");
-                    ultra::gui::startupTrace("App", "deferred-audio-open-output-exit");
                     deferred_audio_auto_init_pending_ = false;
                 } else {
                     deferred_audio_auto_init_attempts_++;
-                    ultra::gui::startupTrace("App", "deferred-audio-init-fail");
                     if (deferred_audio_auto_init_attempts_ >= 3) {
                         guiLog("Deferred audio auto-init failed after %d attempts, manual init required",
                                deferred_audio_auto_init_attempts_);
@@ -2321,7 +2256,6 @@ void App::render() {
 
     // Create main window
     if (first_render) {
-        ultra::gui::startupTrace("App", "render-main-window-enter");
     }
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
@@ -2454,7 +2388,6 @@ void App::render() {
 
     ImGui::End();
     if (first_render) {
-        ultra::gui::startupTrace("App", "render-main-window-exit");
     }
 
     // Render settings window
@@ -2475,7 +2408,6 @@ void App::render() {
     }
     renderDiagnosticsDialogs();
     if (first_render) {
-        ultra::gui::startupTrace("App", "render-exit");
         first_render = false;
     }
 }

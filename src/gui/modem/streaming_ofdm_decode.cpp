@@ -6,7 +6,6 @@
 #include "streaming_decode_policy.hpp"
 #include "streaming_frame_policy.hpp"
 #include "sync/signal_policy.hpp"
-#include "gui/startup_trace.hpp"
 #include "waveform/mc_dpsk_waveform.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "fec/frame_interleaver.hpp"

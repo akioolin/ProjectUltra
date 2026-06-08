@@ -29,7 +29,13 @@ that's deliberate crash diagnostics, not the trace file. Deleted the stale empty
 
 **Verification:** `cmake --build build --target ultra_gui` clean; no `startup_trace.log` is created
 on launch (the only `fopen` that made it is gone, and the tracer no longer opens any handle).
-Follow-up (optional): sweep the ~150 now-no-op `startupTrace(...)` call sites for a full removal.
+
+**Follow-up (done, same day):** full sweep of the instrumentation — deleted all 154 `startupTrace(...)`
+call sites + 18 `#include "…/startup_trace.hpp"` lines across 18 files and removed
+`src/gui/startup_trace.hpp` entirely (204 deletions, 0 insertions). The `ERROR`-macro shield it
+incidentally provided is covered by `logging.hpp` (which all `LOG_*`-using TUs include and which
+`#undef ERROR`s); the non-`LOG_*` widgets have no `ERROR` conflict. The separate
+`writeStartupLog`/crash-dump machinery is untouched. Full build clean.
 
 ---
 

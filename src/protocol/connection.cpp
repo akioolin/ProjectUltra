@@ -3,7 +3,6 @@
 
 #include "connection.hpp"
 #include "connection_policy.hpp"
-#include "gui/startup_trace.hpp"
 #include "waveform_selection.hpp"
 #include "ultra/logging.hpp"
 #include <algorithm>
@@ -355,7 +354,6 @@ Connection::Connection(const ConnectionConfig& config)
     : config_(config)
     , arq_(config.arq)
 {
-    ultra::gui::startupTrace("Connection", "ctor-enter");
     data_frame_cw_count_ = v2::sanitizeFixedFrameCodewords(config_.fixed_frame_codewords);
     config_.fixed_frame_codewords = data_frame_cw_count_;
     arq_.setFixedFrameCodewords(data_frame_cw_count_);
@@ -507,7 +505,6 @@ Connection::Connection(const ConnectionConfig& config)
             }
         }
     });
-    ultra::gui::startupTrace("Connection", "ctor-exit");
 }
 
 // =============================================================================
@@ -515,9 +512,7 @@ Connection::Connection(const ConnectionConfig& config)
 // =============================================================================
 
 void Connection::setLocalCallsign(const std::string& call) {
-    ultra::gui::startupTrace("Connection", "setLocalCallsign-enter");
     local_call_ = sanitizeCallsign(call);
-    ultra::gui::startupTrace("Connection", "setLocalCallsign-exit");
 }
 
 // =============================================================================

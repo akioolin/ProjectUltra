@@ -3,7 +3,6 @@
 
 #include "modem_engine.hpp"
 #include "diagnostics/diagnostics_recorder.hpp"
-#include "gui/startup_trace.hpp"
 #include "ultra/logging.hpp"
 #include <cstring>
 #include <algorithm>
@@ -40,9 +39,7 @@ ModemEngine::ModemEngine()
 }
 
 ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
-    startupTrace("ModemEngine", "ctor-enter");
     config_ = presets::balanced();
-    startupTrace("ModemEngine", "presets-balanced");
 
     // CRITICAL: Disable pilots for DQPSK mode - uses all 30 carriers for data
     // This doubles throughput (30 data carriers vs 15 with pilots)
@@ -66,7 +63,6 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
     chirp_cfg.use_dual_chirp = true; // Enable dual chirp for CFO estimation
     chirp_cfg.tx_cfo_hz = config_.tx_cfo_hz;  // Pass TX CFO for simulation
     chirp_sync_ = std::make_unique<sync::ChirpSync>(chirp_cfg);
-    startupTrace("ModemEngine", "chirp-sync-created");
 
     // Multi-Carrier DPSK (for fading channels - frequency diversity)
     // Default cold-call PHY is Robust-Mid: 8 carriers, 46.875 baud, DBPSK.
@@ -82,25 +78,19 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
 
     // Initialize StreamingEncoder (unified TX path)
     streaming_encoder_ = std::make_unique<StreamingEncoder>();
-    startupTrace("ModemEngine", "streaming-encoder-created");
     streaming_encoder_->setOFDMConfig(config_);
     streaming_encoder_->setMCDPSKConfig(mc_dpsk_config_);
     streaming_encoder_->setDataMode(mcDpskModulationForConfig(mc_dpsk_config_), CodeRate::R1_4);
-    startupTrace("ModemEngine", "streaming-encoder-configured");
 
     // Initialize audio filters
     rebuildFilters();
-    startupTrace("ModemEngine", "filters-built");
 
     // ========================================================================
     // Initialize StreamingDecoder (primary RX path)
     // ========================================================================
     streaming_decoder_ = std::make_unique<StreamingDecoder>();
-    startupTrace("ModemEngine", "streaming-decoder-created");
-    startupTrace("ModemEngine", "decoder-set-log-prefix-skip");
 
     // Set callbacks to wire into existing ModemEngine callbacks
-    startupTrace("ModemEngine", "decoder-set-frame-callback-enter");
     streaming_decoder_->setFrameCallback([this](const DecodeResult& result) {
         // Update SNR/sync stats before delivering frame so downstream callbacks
         // (ProtocolEngine via raw_data_callback_) read fresh channel estimates.
@@ -138,7 +128,6 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
         }
         last_rx_complete_time_ = std::chrono::steady_clock::now();
     });
-    startupTrace("ModemEngine", "decoder-set-frame-callback-exit");
 
     // §14.27: forward a decoded interleaved burst (delivered as a unit) to the
     // protocol layer's burst transport. Only fires when burst-transport RX is
@@ -160,7 +149,6 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
         }
     });
 
-    startupTrace("ModemEngine", "decoder-set-ping-callback-enter");
     streaming_decoder_->setPingCallback([this](float snr_db, float cfo_hz) {
         // If narrowband chirp detected, switch control waveform for PONG/CONNECT_ACK
         if (streaming_decoder_->getDetectedBandwidth() == BandwidthMode::NARROW) {
@@ -181,36 +169,28 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
         });
         last_rx_complete_time_ = std::chrono::steady_clock::now();
     });
-    startupTrace("ModemEngine", "decoder-set-ping-callback-exit");
 
     // Sync StreamingDecoder with initial waveform mode
     // When disconnected, use MC_DPSK for PING detection (chirp-based sync)
     // When connected, use the negotiated waveform
     protocol::WaveformMode decoder_mode = connected_ ? waveform_mode_ : protocol::WaveformMode::MC_DPSK;
-    startupTrace("ModemEngine", "decoder-set-mode-enter");
     if (connected_ || decoder_mode != protocol::WaveformMode::MC_DPSK) {
         streaming_decoder_->setMode(decoder_mode, connected_);
-        startupTrace("ModemEngine", "decoder-mode-set");
     } else {
         // StreamingDecoder ctor already initializes MC_DPSK disconnected defaults.
-        startupTrace("ModemEngine", "decoder-mode-skip-default");
     }
 
     // Sync MC-DPSK carrier count with ModemEngine's config
-    startupTrace("ModemEngine", "decoder-set-carriers-enter");
     if (mc_dpsk_config_.num_carriers != 8 ||
         mc_dpsk_config_.samples_per_symbol != 512 ||
         mc_dpsk_config_.bits_per_symbol != 2) {
         streaming_decoder_->setMCDPSKConfig(mc_dpsk_config_);
         streaming_decoder_->setDataMode(mcDpskModulationForConfig(mc_dpsk_config_), CodeRate::R1_4);
-        startupTrace("ModemEngine", "decoder-carriers-set");
     } else {
-        startupTrace("ModemEngine", "decoder-carriers-skip-default");
     }
 
     // Defer RX decode thread startup until audio is actually fed.
     // This reduces startup-time failure surface on low-end systems.
-    startupTrace("ModemEngine", "ctor-exit");
 }
 
 ModemEngine::~ModemEngine() {
