@@ -10,6 +10,29 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-08 — chore(gui): stop creating startup_trace.log (retire the cold-start tracer)
+
+**What it was:** `startupTrace()` (`src/gui/startup_trace.hpp`) was Windows-only instrumentation
+that appended `[STARTUP][component] phase` lines to a `startup_trace.log` in the GUI's working
+directory, sprinkled across ~150 call sites in the GUI/modem/waveform layers. It was added to
+diagnose a GUI cold-start hang on Windows; that hang is long resolved, so the file was just
+debug litter created on every launch.
+
+**What changed:** reduced `startupTrace()` to a no-op (kept as a stub so the ~150 historical call
+sites — and `connection.cpp`/`protocol_engine.cpp` which include the header — still compile, and the
+header's `#ifdef _WIN32` block still shields `LOG_*` from the Windows `ERROR` macro). Removed the
+`startup_trace.log` file creation + `ULTRA_STARTUP_LOG` env wiring in `main_gui.cpp`
+(`g_startup_trace_path` and its `fopen(...,"w")`/`_putenv_s` setup). The separate
+`writeStartupLog`/crash-dump machinery (vectored-exception + minidump handlers) is **untouched** —
+that's deliberate crash diagnostics, not the trace file. Deleted the stale empty
+`logs/startup_trace.log` artifact.
+
+**Verification:** `cmake --build build --target ultra_gui` clean; no `startup_trace.log` is created
+on launch (the only `fopen` that made it is gone, and the tracer no longer opens any handle).
+Follow-up (optional): sweep the ~150 now-no-op `startupTrace(...)` call sites for a full removal.
+
+---
+
 ## 2026-06-08 — fix(modem): RX address filter must track the LIVE callsign (BUG-CALLSIGN-FILTER)
 
 **What was broken (found on the live Mac↔Windows Winlink/PAT test):** a Winlink Express station
