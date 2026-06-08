@@ -350,6 +350,25 @@ grpc::Status OtaSimulatorService::NegotiateAudio(
                             "station must join the session before negotiating audio");
     }
 
+    // One audio lease per (session, station). A TNC that dies or is relaunched without a clean
+    // LeaveSession (e.g. Winlink relaunching the modem, a crash, or a dropped link) otherwise
+    // leaves a stale lease behind whose dead UDP endpoint keeps receiving the channel fan-out —
+    // scattering this station's RX audio across every prior endpoint so the live socket starves.
+    // Evict the station's prior lease(s) (and their TX-clock bridges) before granting a fresh one,
+    // mirroring LeaveSession's cleanup, so exactly one live endpoint is ever served per station.
+    audio_plane_.removeLeases(request->session_id(), station_id);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto it = tx_clock_bridges_.begin(); it != tx_clock_bridges_.end();) {
+            if (it->second.session_id == request->session_id() &&
+                it->second.station_id == station_id) {
+                it = tx_clock_bridges_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
     const uint64_t lease_id = audio_plane_.addLease(request->session_id(), station_id);
     const uint64_t negotiate_session_sample = session->sessionClockSamples();
     {

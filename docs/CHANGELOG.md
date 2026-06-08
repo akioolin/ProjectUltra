@@ -10,6 +10,36 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-08 — fix(otasim): evict stale audio leases per (session, station) — stop RX-audio spray
+
+**What was broken (found on the live Mac↔Windows cross-machine TNC test):** ALPHA (Windows) connected
+to BRAVO over OTASim but its modem never heard BRAVO back — connect timed out. `tcpdump` on the Mac
+showed the server fanning ALPHA's RX audio out to ~8 **different** stale UDP ports
+(`52002 > 177.64266 / .64267 / .63445 / .54173 / .62825 / .54815 / .64264 / .64265 …`). Root cause:
+`UdpAudioPlane` leases were removed **only** on an explicit `LeaveSession` RPC
+(`ota_simulator_service.cpp:534`). A TNC that dies, crashes, drops its link, or is **relaunched by
+Winlink** never sends `LeaveSession`, so every prior instance left a live lease behind whose dead
+endpoint kept receiving the channel fan-out. The live socket's audio was lost in the spray.
+
+**What was changed (`src/ota_simulator_service/ota_simulator_service.cpp`, `NegotiateAudio`):** before
+`addLease`, evict the station's existing lease(s) for that session (`audio_plane_.removeLeases(...)`)
+and erase their `tx_clock_bridges_` — mirroring `LeaveSession`'s cleanup. Invariant: **one audio lease
+per (session, station)**; re-acquiring replaces the dead endpoint instead of piling on.
+
+**How it's fixed (why it works):** a relaunched/reconnected station re-runs `NegotiateAudio`, which now
+atomically retires its old endpoint, so the server only ever serves the one current UDP endpoint.
+Verified on the wire: after the fix the Mac sends RX to a **single** port and ALPHA replies from the
+same port (clean bidirectional UDP) — the 8-port spray is gone. `cmake --build build --target
+ota_simulator` clean.
+
+**Still open (next layer, not this fix):** with transport now clean, ALPHA's **Windows** modem RX still
+fails to decode BRAVO's CONNECT_ACK (BRAVO/Mac decodes ALPHA fine). BRAVO logs `Responder handshake
+still unconfirmed … waiting for initiator frame` + burst-marker timing retries of ±100–300 samples on
+AWGN30 — the two-physical-machine sample-clock-drift signature. Needs ALPHA-side modem RX logs + likely
+cross-machine clock-drift handling (cf. the GUI stale-drop fix, which was server-side only).
+
+---
+
 ## 2026-06-08 — fix(tnc/logging): host<->TNC dialogue flushes live + Windows console fallback
 
 **What was broken:** debugging the Winlink Express <-> ultra_tnc command dialogue on Windows, the
