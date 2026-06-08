@@ -163,6 +163,7 @@ if ! compgen -G "$dev_root/*" >/dev/null; then
 fi
 
 cp "$REPO_ROOT/tools/ultra_tnc.conf.example" "$operator_root/tools/"
+cp "$REPO_ROOT/tools/ultra_tnc.otasim.conf.example" "$operator_root/tools/"
 cp "$REPO_ROOT/README.md" "$operator_root/"
 cp "$REPO_ROOT/docs/TNC_INTERFACE.md" "$operator_root/docs/"
 cp "$REPO_ROOT/docs/README.md" "$operator_root/docs/"
@@ -347,6 +348,7 @@ Operator docs:
 - docs/TNC_INTERFACE.md
 - docs/README.md
 - tools/ultra_tnc.conf.example
+- tools/ultra_tnc.otasim.conf.example  (OTASim software-loopback test config)
 
 Developer simulators and bench tools are packaged separately in dev-tools-$TARGET.
 EOF
