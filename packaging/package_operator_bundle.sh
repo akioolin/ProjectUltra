@@ -265,6 +265,67 @@ if [[ "$TARGET" == "windows" ]]; then
       cp "$license_src" "$dev_root/THIRD_PARTY_LICENSES/$pkg-LICENSE.txt"
     fi
   done
+
+  # --- Hamlib runtime (CAT/PTT) — extract the DLLs from the vendored zip so the bundle is
+  #     self-contained. ultra_gui/ultra_tnc link libhamlib, which pulls in the MinGW runtime
+  #     (libgcc_s_seh-1.dll, libwinpthread-1.dll) and libusb. Without these the app won't start.
+  hamlib_zip="$REPO_ROOT/thirdparty/hamlib-windows/hamlib-w64-4.7.1.zip"
+  if [[ ! -f "$hamlib_zip" ]]; then
+    echo "Hamlib windows zip not found at $hamlib_zip" >&2
+    exit 1
+  fi
+  hamlib_tmp=$(mktemp -d)
+  unzip -q -o "$hamlib_zip" -d "$hamlib_tmp"
+  hamlib_bin=$(find "$hamlib_tmp" -type d -name bin | head -1)
+  hamlib_found=0
+  for dll in libhamlib-4.dll libgcc_s_seh-1.dll libwinpthread-1.dll libusb-1.0.dll; do
+    if [[ -f "$hamlib_bin/$dll" ]]; then
+      cp "$hamlib_bin/$dll" "$operator_root/"
+      cp "$hamlib_bin/$dll" "$dev_root/"
+      hamlib_found=1
+    else
+      echo "WARNING: hamlib DLL $dll not found in $hamlib_zip" >&2
+    fi
+  done
+  rm -rf "$hamlib_tmp"
+  if [[ "$hamlib_found" -eq 0 ]]; then
+    echo "No hamlib DLLs were bundled from $hamlib_zip" >&2
+    exit 1
+  fi
+
+  # --- MSVC runtime — the app is built /MD against vcpkg's x64-windows triplet, so it needs
+  #     the Visual C++ redistributable DLLs at runtime (vcruntime140*.dll, msvcp140*.dll). A
+  #     FRESH Windows 11 does not ship VCRUNTIME140_1.dll, so ultra_gui.exe fails with
+  #     "VCRUNTIME140_1.dll was not found". Bundle them so no VC++ Redist install is required.
+  #     Source: the VS redist dir if the dev env is active, else System32 (both are the
+  #     Microsoft-redistributable runtime).
+  declare -a vcrt_dirs=()
+  if [[ -n "${VCToolsRedistDir:-}" ]]; then
+    vcredist_u="$VCToolsRedistDir"
+    command -v cygpath >/dev/null 2>&1 && vcredist_u=$(cygpath -u "$VCToolsRedistDir")
+    while IFS= read -r d; do vcrt_dirs+=("$d"); done \
+      < <(find "$vcredist_u" -type d -iname 'Microsoft.VC*.CRT' -ipath '*x64*' 2>/dev/null)
+  fi
+  vcrt_dirs+=("/c/Windows/System32")
+  vcrt_required=(vcruntime140.dll vcruntime140_1.dll msvcp140.dll)
+  vcrt_optional=(msvcp140_1.dll msvcp140_2.dll concrt140.dll)
+  for dll in "${vcrt_required[@]}" "${vcrt_optional[@]}"; do
+    is_required=0
+    for r in "${vcrt_required[@]}"; do [[ "$r" == "$dll" ]] && is_required=1; done
+    copied=0
+    for d in "${vcrt_dirs[@]}"; do
+      if [[ -f "$d/$dll" ]]; then
+        cp "$d/$dll" "$operator_root/"
+        cp "$d/$dll" "$dev_root/"
+        copied=1
+        break
+      fi
+    done
+    if [[ "$copied" -eq 0 && "$is_required" -eq 1 ]]; then
+      echo "Required MSVC runtime DLL not found: $dll (searched ${vcrt_dirs[*]})" >&2
+      exit 1
+    fi
+  done
 fi
 
 bundle_sdl2_runtime

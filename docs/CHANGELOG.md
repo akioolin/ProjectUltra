@@ -10,6 +10,35 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-07 — fix(packaging): Windows bundle missing hamlib + MSVC runtime DLLs (won't run on a fresh Win11)
+
+**What was broken:** the CI Windows operator/dev bundle ran fine only on machines that already had
+the right DLLs. On a FRESH Windows 11: (a) the app couldn't start because the hamlib runtime wasn't
+included — `libhamlib-4.dll` and its MinGW deps `libgcc_s_seh-1.dll` / `libwinpthread-1.dll` (the
+"pthread") / `libusb-1.0.dll`; and (b) after dropping in hamlib by hand, `ultra_gui.exe` failed with
+`VCRUNTIME140_1.dll was not found` — the app is built `/MD` against vcpkg's `x64-windows` triplet, so
+it needs the Visual C++ redistributable runtime, which a clean Win11 does not ship.
+
+**Root cause:** `packaging/package_operator_bundle.sh` copied SDL2 + gRPC/protobuf DLLs but never
+the hamlib DLLs (the vendored `thirdparty/hamlib-windows/hamlib-w64-4.7.1.zip`) or the MSVC runtime.
+
+**What was changed (`packaging/package_operator_bundle.sh`, Windows branch):**
+- Extract `libhamlib-4.dll`, `libgcc_s_seh-1.dll`, `libwinpthread-1.dll`, `libusb-1.0.dll` from the
+  vendored hamlib zip into both bundles (fail if none found).
+- Bundle the MSVC runtime (`vcruntime140.dll`, `vcruntime140_1.dll`, `msvcp140.dll` required;
+  `msvcp140_1/_2`, `concrt140` optional) from `%VCToolsRedistDir%\...\Microsoft.VC*.CRT\x64` if the
+  dev env is active, else `C:\Windows\System32` (both are the Microsoft-redistributable runtime).
+
+**How it's fixed:** the bundle is now self-contained — a fresh Windows 11 can run `ultra_gui.exe` /
+`ultra_tnc.exe` with no VC++ Redist install and no manual DLL copying.
+
+**Verification:** `bash -n` clean; hamlib extraction verified against the actual zip (all 4 DLLs
+found). MSVC-runtime branch verified on the next CI Build (windows) run. Immediate workaround for an
+already-copied bundle: copy all 4 hamlib DLLs next to the exes + install the VC++ 2015-2022 x64
+Redistributable (https://aka.ms/vs/17/release/vc_redist.x64.exe).
+
+---
+
 ## 2026-06-07 — feat(tnc): config auto-discovery beside the binary + Windows paths, and host↔TNC command-dialogue logging
 
 **Need:** Winlink Express launches the TNC executable with NO arguments and an unknown working
