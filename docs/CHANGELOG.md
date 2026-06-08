@@ -10,6 +10,31 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-07 — fix(gui): Windows waterfall — probe GL capability instead of assuming software
+
+**What was broken:** on Windows the GUI defaulted to the SDL_Renderer ("software") path
+(`main_gui.cpp`: `#ifdef _WIN32 force_software_renderer = true`, "Win10/older GPUs"), and that path
+DISABLES the waterfall (safe-startup). So even on capable hardware a fresh Windows install showed
+"Waterfall disabled". `--opengl` re-enabled it, but the default was conservative-for-everyone.
+
+**What was changed (`src/gui/main_gui.cpp`):** added a one-shot **GL capability probe** right after
+`SDL_Init` (Windows only, skipped if the operator passed `--software`/`--opengl`): create a tiny
+hidden `SDL_WINDOW_OPENGL` window, try `SDL_GL_CreateContext` + `SDL_GL_MakeCurrent`, tear it down. If
+it succeeds → take the OpenGL path with the **waterfall ENABLED**; if it fails → fall back to the
+SDL_Renderer software path with the waterfall disabled (the VM/RDP/no-GPU safety net). The decision is
+now by ACTUAL capability, not a blanket platform assumption.
+
+**How it's fixed (why it works):** the probe exercises the exact failure mode that no-GPU machines hit
+(GL context creation), so capable boxes get the accelerated renderer + waterfall by default while
+incapable ones still fall back safely. Non-Windows is untouched (already defaults to the GL path).
+Residual edge: if the probe passes but the full GL/ImGui init later fails, startup still aborts rather
+than falling back (rare; the probe catches the common case).
+
+**Verification:** macOS build clean (the `_WIN32` probe is excluded there; surrounding code + the
+`[[maybe_unused]]` explicit-choice flag compile). Actual probe behavior verifies on the Windows build.
+
+---
+
 ## 2026-06-07 — fix(packaging): Windows bundle missing hamlib + MSVC runtime DLLs (won't run on a fresh Win11)
 
 **What was broken:** the CI Windows operator/dev bundle ran fine only on machines that already had

@@ -478,10 +478,11 @@ int main(int argc, char* argv[]) {
     std::string log_categories;
     std::string log_file_path;
 #ifdef _WIN32
-    bool force_software_renderer = true;   // Win10/older GPUs: prefer SDL renderer path by default
+    bool force_software_renderer = true;   // Win default: conservative until the GL probe below
 #else
     bool force_software_renderer = false;
 #endif
+    [[maybe_unused]] bool renderer_explicitly_chosen = false;  // true if --software/--opengl -> skip GL probe (read only on _WIN32)
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "-sim") {
@@ -554,10 +555,12 @@ int main(int argc, char* argv[]) {
             force_software_renderer = true;
             opts.safe_startup = true;
             opts.disable_waterfall = true;
+            renderer_explicitly_chosen = true;
         } else if (arg == "--opengl" || arg == "--gl") {
             force_software_renderer = false;
             opts.safe_startup = false;
             opts.disable_waterfall = false;
+            renderer_explicitly_chosen = true;
         } else if (arg == "--no-waterfall") {
             opts.disable_waterfall = true;
         } else if (arg == "--waterfall") {
@@ -762,6 +765,40 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     writeStartupLog("SDL initialized");
+
+#ifdef _WIN32
+    // GL CAPABILITY PROBE (Windows). The old default assumed software on every Windows machine
+    // (which disables the waterfall). Instead, decide by ACTUAL capability: spin up a tiny hidden
+    // window, try to create + make-current an OpenGL context, tear it down. If it works, take the
+    // OpenGL path (waterfall ENABLED); if not, fall back to the SDL_Renderer software path
+    // (waterfall disabled) — the safety net for VMs / RDP / no-GPU boxes. Skipped when the operator
+    // explicitly chose --software / --opengl.
+    if (!renderer_explicitly_chosen) {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+        bool gl_ok = false;
+        SDL_Window* probe_win = SDL_CreateWindow(
+            "gl-probe", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 16, 16,
+            SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
+        if (probe_win) {
+            SDL_GLContext probe_ctx = SDL_GL_CreateContext(probe_win);
+            if (probe_ctx) {
+                gl_ok = (SDL_GL_MakeCurrent(probe_win, probe_ctx) == 0);
+                SDL_GL_MakeCurrent(probe_win, nullptr);
+                SDL_GL_DeleteContext(probe_ctx);
+            }
+            SDL_DestroyWindow(probe_win);
+        }
+        writeStartupLog("Windows GL probe: %s",
+                        gl_ok ? "OpenGL available -> GL renderer + waterfall ENABLED"
+                              : "OpenGL unavailable -> software renderer, waterfall disabled");
+        force_software_renderer = !gl_ok;
+        if (gl_ok) {
+            opts.disable_waterfall = false;  // override the conservative pre-SDL default
+            opts.safe_startup = false;
+        }
+    }
+#endif
 
     SDL_Window* window = nullptr;
     SDL_GLContext gl_context = nullptr;
