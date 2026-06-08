@@ -224,6 +224,15 @@ void ModemEngine::setLogPrefix(const std::string& prefix) {
     }
 }
 
+void ModemEngine::setLocalCallsign(const std::string& call) {
+    // The RX address filter in deliverFrame() must match against the operator's LIVE
+    // callsign, which can change after construction (e.g. a VARA host issuing MYCALL).
+    // log_prefix_ is only a logging label seeded from the config callsign; relying on it
+    // silently dropped inbound frames once the live callsign diverged from the label
+    // (a TNC config callsign of ALPHA vs a Winlink MYCALL of VA2MVR — BUG-CALLSIGN-FILTER).
+    filter_callsign_ = call;
+}
+
 void ModemEngine::setSoftCombineBuffer(fec::SoftCombineBuffer* buffer) {
     if (streaming_decoder_) {
         streaming_decoder_->setSoftCombineBuffer(buffer);

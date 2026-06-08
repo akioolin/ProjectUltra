@@ -222,6 +222,22 @@ void TNCBridge::setPttChangedCallback(PttChangedCallback cb) {
     ptt_changed_cb_ = std::move(cb);
 }
 
+void TNCBridge::setLocalCallChangedCallback(LocalCallChangedCallback cb) {
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    local_call_changed_cb_ = std::move(cb);
+}
+
+void TNCBridge::notifyLocalCallChanged(const std::string& call) {
+    LocalCallChangedCallback cb;
+    {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        cb = local_call_changed_cb_;
+    }
+    if (cb) {
+        cb(call);
+    }
+}
+
 void TNCBridge::setMyCall(const std::vector<std::string>& calls) {
     if (calls.empty()) {
         return;
@@ -238,6 +254,7 @@ void TNCBridge::setMyCall(const std::vector<std::string>& calls) {
         std::lock_guard<std::mutex> lock(state_mutex_);
         local_call_ = primary;
     }
+    notifyLocalCallChanged(primary);
     state_.store(State::READY, std::memory_order_release);
 }
 
@@ -279,6 +296,7 @@ void TNCBridge::startConnect(const std::string& src, const std::string& dst) {
         local_call_ = local;
         remote_call_ = remote;
     }
+    notifyLocalCallChanged(local);
 
     state_.store(State::CONNECTING, std::memory_order_release);
     if (!engine_.connect(remote)) {

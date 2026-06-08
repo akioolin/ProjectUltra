@@ -15,8 +15,14 @@ namespace v2 = protocol::v2;
 // ============================================================================
 
 void ModemEngine::deliverFrame(const Bytes& frame_data) {
+    // Prefer the LIVE local callsign (tracks runtime MYCALL changes); fall back to the logging
+    // label only when it was never set (preserves prior GUI behavior where label == callsign).
+    // Using the stale label here silently dropped inbound frames addressed to the operator's
+    // current callsign when it diverged from the config label (BUG-CALLSIGN-FILTER).
     const std::string local_call =
-        (log_prefix_.empty() || log_prefix_ == "MODEM") ? std::string{} : log_prefix_;
+        !filter_callsign_.empty()
+            ? filter_callsign_
+            : ((log_prefix_.empty() || log_prefix_ == "MODEM") ? std::string{} : log_prefix_);
     auto header = v2::parseHeader(frame_data);
     if (header.valid && !v2::isAddressedToCallsign(header, local_call)) {
         LOG_MODEM(TRACE, "[%s] deliverFrame: dropping frame for different station",

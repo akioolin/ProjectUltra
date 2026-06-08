@@ -75,6 +75,9 @@ public:
     // binary (e.g. ultra_tnc) can drive a hardware PTT line without
     // routing through the TCP cmd port.
     using PttChangedCallback = std::function<void(bool on)>;
+    // Fires when the local callsign changes (MYCALL / startConnect) so a host binary can keep
+    // the modem's RX address filter in sync with the operator's live callsign.
+    using LocalCallChangedCallback = std::function<void(const std::string& call)>;
 
     TNCBridge(protocol::ProtocolEngine& engine, gui::AudioEngine& audio);
     TNCBridge(ProtocolEnginePort& engine, gui::AudioEngine& audio);
@@ -86,6 +89,7 @@ public:
     void setConnectionChangedCallback(ConnectionChangedCallback cb);
     void setPreferredWaveformChangedCallback(PreferredWaveformChangedCallback cb);
     void setPttChangedCallback(PttChangedCallback cb);
+    void setLocalCallChangedCallback(LocalCallChangedCallback cb);
 
     void setMyCall(const std::vector<std::string>& calls) override;
     void setBandwidth(int hz) override;
@@ -110,6 +114,7 @@ public:
 private:
     void wirePECallbacks();
     void clearPECallbacks();
+    void notifyLocalCallChanged(const std::string& call);
     void onConnectionChanged(protocol::ConnectionState state, const std::string& info);
     void onDataReceived(const ultra::Bytes& bytes, bool more_data);
     // A modem FILE TRANSFER completed inbound: the reconstructed file (the wire bytes the
@@ -171,6 +176,7 @@ private:
     ConnectionChangedCallback connection_changed_cb_;
     PreferredWaveformChangedCallback preferred_waveform_changed_cb_;
     PttChangedCallback ptt_changed_cb_;
+    LocalCallChangedCallback local_call_changed_cb_;
 
     static constexpr uint32_t kPttTailMs = 200;
 };

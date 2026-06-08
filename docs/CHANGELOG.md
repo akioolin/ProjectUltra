@@ -10,6 +10,44 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-08 — fix(modem): RX address filter must track the LIVE callsign (BUG-CALLSIGN-FILTER)
+
+**What was broken (found on the live Mac↔Windows Winlink/PAT test):** a Winlink Express station
+(`MYCALL VA2MVR`) connected to a PAT station over OTASim, the RF link was clean (chirp_corr 0.998,
+30 dB SNR), and the initiator **decoded BRAVO's CONNECT_ACK perfectly (4/4 CWs)** — yet it never
+completed the handshake, looping `Connect timeout, retrying`. Root cause: `ModemEngine::deliverFrame`
+filtered inbound frames with `local_call = log_prefix_`, and `ultra_tnc` seeds `log_prefix_` from the
+**config** callsign (`setLogPrefix(cfg_.callsign)` = "ALPHA"). When the VARA host later issued
+`MYCALL VA2MVR`, that updated only the ProtocolEngine/Connection callsign (so CONNECT went out as
+VA2MVR and BRAVO addressed CONNECT_ACK to VA2MVR) — **not** the modem's filter. `isAddressedToCallsign`
+then did `hash(VA2MVR) == hash("ALPHA")` → false → the frame was dropped at TRACE level (invisible),
+before ever reaching `connection.cpp` (0 "Connection: Received" lines in the initiator log). BRAVO
+worked only because its config callsign `BRAVO1` happened to equal PAT's `MYCALL BRAVO1`. The
+single-host GUI gate never hit it (label == callsign there).
+
+**What was changed:**
+- `modem_engine.{hpp,cpp}`: added `setLocalCallsign()` + a `filter_callsign_` member — the LIVE local
+  callsign for the RX address filter, distinct from the logging label.
+- `modem_rx_decode.cpp` (`deliverFrame`): use `filter_callsign_` when set; fall back to the
+  `log_prefix_`-derived value otherwise (preserves prior GUI behavior where label == callsign).
+- `tnc_bridge.{hpp,cpp}`: new `LocalCallChangedCallback`, fired from `setMyCall()` and `startConnect()`
+  whenever the local callsign changes.
+- `ultra_tnc.cpp`: seed `modem_.setLocalCallsign(cfg_.callsign)` at init and register the bridge
+  callback to call `modem_.setLocalCallsign(call)` on every MYCALL/connect — keeping the modem filter
+  in lock-step with the operator's live callsign.
+
+**How it's fixed (why it works):** the audio-layer RX filter now sees exactly the callsign the
+protocol layer uses, so a runtime MYCALL no longer strands the modem on a stale label. Empty
+`filter_callsign_` keeps the GUI path byte-identical.
+
+**Test verification:** reproduced locally with the exact mismatch — `ultra_tnc --callsign ALPHA`,
+driven `MYCALL VA2MVR` then `CONNECT VA2MVR BRAVO1` against a live BRAVO1/PAT over OTASim loopback.
+Before: decode SUCCESS → dropped → timeout. **After: `MC-DPSK fixed CONNECT decode SUCCESS (4/4 CWs)
+→ Connection: Now CONNECTED to BRAVO1` → both sides `CONNECTED VA2MVR BRAVO1 2300`.** Touched-area
+ctest (TNC/Connection/Bridge/Modem/Session) 13/13 pass; full build clean.
+
+---
+
 ## 2026-06-08 — fix(otasim): evict stale audio leases per (session, station) — stop RX-audio spray
 
 **What was broken (found on the live Mac↔Windows cross-machine TNC test):** ALPHA (Windows) connected

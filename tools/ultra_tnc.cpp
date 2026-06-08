@@ -423,6 +423,7 @@ private:
         // callbacks. setSynchronousMode(false) -> ModemEngine runs its own decode thread
         // (the TNC no longer owns a decodeLoop), proven on OTASim by the GUI floor gate.
         modem_.setLogPrefix(cfg_.callsign);
+        modem_.setLocalCallsign(cfg_.callsign);  // RX address filter; updated live on MYCALL
         modem_.setSynchronousMode(false);
         modem_.setOFDMConfig(ofdm_config_);
         modem_.setWaveformMode(tx_waveform_mode_);
@@ -608,6 +609,14 @@ private:
 
         bridge_.setPreferredWaveformChangedCallback([this](WaveformMode mode) {
             modem_.setNarrowbandControl(mode == WaveformMode::OFDM_NARROW);
+        });
+
+        // Keep the modem's RX address filter in sync with the operator's live callsign. A VARA
+        // host (e.g. Winlink Express) issues MYCALL after launch, which can differ from the
+        // config callsign the log prefix was seeded with; without this the modem silently drops
+        // inbound frames addressed to the new callsign (BUG-CALLSIGN-FILTER).
+        bridge_.setLocalCallChangedCallback([this](const std::string& call) {
+            modem_.setLocalCallsign(call);
         });
 
         // RX-side modem->protocol forwarding (raw-data delivery, burst-group delivery,

@@ -43,6 +43,10 @@ public:
     // Set a name/prefix for logging (e.g., "OUR" or "SIM")
     void setLogPrefix(const std::string& prefix);
     const std::string& getLogPrefix() const { return log_prefix_; }
+    // Set the LIVE local callsign used by the RX address filter (deliverFrame). Distinct from
+    // the logging prefix: this tracks runtime callsign changes (e.g. a VARA host MYCALL) so
+    // inbound frames addressed to the operator's current callsign are not dropped.
+    void setLocalCallsign(const std::string& call);
     void setSoftCombineBuffer(fec::SoftCombineBuffer* buffer);
     void setHarqProvisionalContextCallback(
         StreamingDecoder::HarqProvisionalContextCallback cb);
@@ -374,6 +378,9 @@ public:
 private:
     ModemConfig config_;
     std::string log_prefix_ = "MODEM";
+    // Live local callsign for the RX address filter (deliverFrame). Empty => fall back to the
+    // log_prefix_-derived label (preserves existing GUI behavior where label == callsign).
+    std::string filter_callsign_;
 
     // Waveform mode state
     protocol::WaveformMode waveform_mode_ = protocol::WaveformMode::OFDM_CHIRP;
