@@ -795,6 +795,78 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
                   last_snr_db_estimate_valid ? last_snr_db_estimate : 0.0f);
     }
 
+    // ── Frequency-selectivity (delay spread) from the LTS channel estimate (2026-06-08) ──
+    // The fading_index above is the across-carrier CV of |H| — it measures fade DEPTH,
+    // which is identical for the equal-gain 2-path Good/Moderate/Poor presets, so it
+    // cannot discriminate delay spread (measured: Good 0.55 == Moderate 0.58). The
+    // discriminating quantity is the COHERENCE BANDWIDTH of H(f): how fast the channel
+    // decorrelates across frequency. Measure the frequency correlation rho(L) (the FT of
+    // the power-delay profile), averaged over ALL carrier pairs at lag L — noise-suppressed
+    // ~sqrt(N), no IDFT sidelobes — find the 0.5-correlation bandwidth Bc, map to RMS delay
+    // spread. Single-snapshot, receiver-side, from the connect frame; feeds
+    // last_delay_spread_ms as the frequency-selectivity base for rate selection.
+    {
+        const float df_hz = static_cast<float>(config.sample_rate) /
+                            static_cast<float>(config.fft_size);
+        const int n_fft = static_cast<int>(config.fft_size);
+        // Carriers sit AROUND DC: negative-frequency carriers are high FFT bins (wrap). Convert
+        // each bin to SIGNED baseband frequency and sort by frequency so adjacent entries are
+        // adjacent in frequency (required for the lag-based correlation to be valid).
+        std::vector<std::pair<float, Complex>> car;  // (freq_hz, averaged H)
+        car.reserve(data_carrier_indices.size());
+        for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
+            Complex h = channel_estimate[data_carrier_indices[i]];
+            if (valid_symbols > 0 && i < h_sum_data.size()) {
+                h = h_sum_data[i] / static_cast<float>(valid_symbols);
+            }
+            if (!(std::isfinite(h.real()) && std::isfinite(h.imag()) && std::abs(h) > 1e-6f)) {
+                continue;
+            }
+            int bin = static_cast<int>(data_carrier_indices[i]);
+            if (bin > n_fft / 2) bin -= n_fft;        // unwrap to signed frequency
+            car.emplace_back(static_cast<float>(bin) * df_hz, h);
+        }
+        std::sort(car.begin(), car.end(),
+                  [](const std::pair<float, Complex>& a, const std::pair<float, Complex>& b) {
+                      return a.first < b.first;
+                  });
+        float delay_spread_ms = 0.0f, coh_bw_hz = 0.0f;
+        if (car.size() >= 8) {
+            // Average carrier spacing in Hz (now positive; absorbs DC + pilot gaps).
+            const float avg_df = (car.back().first - car.front().first) /
+                                 static_cast<float>(car.size() - 1);
+            // |rho(L)| = |sum_i H_i conj(H_{i+L})| / sum_i |H_i|^2  -> first 0.5 crossing.
+            const int Lmax = std::min<int>(static_cast<int>(car.size()) - 1, 24);
+            float prev = 1.0f;
+            float L_star = static_cast<float>(Lmax);  // default: never decorrelates (very flat)
+            for (int L = 1; L <= Lmax; ++L) {
+                Complex num(0.0f, 0.0f);
+                float den = 0.0f;
+                for (size_t i = 0; i + static_cast<size_t>(L) < car.size(); ++i) {
+                    num += car[i].second * std::conj(car[i + static_cast<size_t>(L)].second);
+                    den += std::norm(car[i].second);
+                }
+                const float rho = (den > 1e-9f) ? std::abs(num) / den : 0.0f;
+                if (rho < 0.5f) {
+                    const float frac = (prev - 0.5f) / std::max(1e-6f, prev - rho);
+                    L_star = static_cast<float>(L - 1) + frac;  // interpolated 0.5-crossing lag
+                    break;
+                }
+                prev = rho;
+            }
+            coh_bw_hz = L_star * avg_df;  // 0.5-correlation coherence bandwidth
+            // tau_rms ~ 1/(2 pi Bc): standard rough relation. Absolute scale is approximate;
+            // what matters for classification is that Bc (hence tau_rms) SEPARATES the classes.
+            delay_spread_ms = (coh_bw_hz > 1e-3f)
+                                  ? 1000.0f / (2.0f * static_cast<float>(M_PI) * coh_bw_hz)
+                                  : 0.0f;
+        }
+        last_delay_spread_ms = delay_spread_ms;
+        LOG_DEMOD(INFO, "LTS delay spread: tau_rms=%.3f ms coh_bw=%.0f Hz carriers=%zu "
+                  "[vs fading_index=%.3f]",
+                  delay_spread_ms, coh_bw_hz, car.size(), last_fading_index);
+    }
+
     // Mark that we have a valid channel estimate (for smoothing factor selection)
     seedWienerPilotHistoryFromCurrentChannel(-1);
     snr_symbol_count = num_symbols;

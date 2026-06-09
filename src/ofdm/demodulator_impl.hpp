@@ -100,6 +100,10 @@ struct OFDMDemodulator::Impl {
     // payload-independent LTS estimate; differential modes can use pilot-only
     // frequency CV plus temporal CV.
     float public_fading_index = 0.0f;
+    // RMS delay spread (ms) from the LTS channel impulse response (IFFT of H(f)).
+    // Frequency-selectivity base for rate selection — single-snapshot from the connect
+    // frame, and (unlike fading_index) actually discriminates the delay-spread classes.
+    float last_delay_spread_ms = 0.0f;
     std::vector<float> pilot_mag_sum_;
     std::vector<float> pilot_mag_sq_sum_;
     float pilot_symbol_mean_sum_ = 0.0f;
