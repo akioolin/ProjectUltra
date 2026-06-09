@@ -10,6 +10,49 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-06-09 — fix(cfo): reject a fade-manufactured phantom chirp CFO by flowing correlation into the CFOTracker
+
+**What was broken:** on a fading channel a multipath-distorted (low-correlation) chirp jitters the
+up/down correlation peaks, and the gap→CFO estimate (`gap_error/(2·cfo_to_samples)`, sensitivity
+~1 Hz per 20 samples) MANUFACTURES a phantom CFO. Measured on a ZERO-CFO OTASim channel: a `corr=0.78`
+chirp gave `gap_error=-25 → -1.25 Hz`, while a `corr=0.95` chirp gave `gap_error=0 → 0.0 Hz`. The
+phantom was applied as the pre-correction, rotating the QPSK constellation across the frame into
+near-erasure LLRs (CW0 `min_abs≈0.01`, sign split ~50/50) → LDPC iteration-cap on all 8 CWs →
+`0/8 CWs`, the whole burst group lost. On `good --snr-db 20 --seed 2` this failed the file transfer
+(or wasted 2-3 retransmits recovering). The existing protection (`limitConnectedCFODrift`) could not
+catch it: it was gated on `|known_cfo| > epsilon` so it never fired at the zero-offset steady state,
+AND the phantom was first established by the pre-connect PING chirp (run at `connected=false`, never
+clamped) — so by the time we were connected `known` was already poisoned. Root cause: the `CFOTracker`
+arbitrated chirp seeds BLIND — `seedFromChirp(measured, connected, log)` never received the chirp's
+correlation, so it could not tell a phantom (corr 0.78) from a real lock (corr 0.95).
+
+**What changed:** flow the chirp confidence into the tracker.
+- `signal_policy.hpp`: new `kChirpTrustCorr = 0.85f`; `limitConnectedCFODrift(...)` now takes
+  `correlation` and rejects a `>kMaxSyncCFODriftHz` jump to the tracked value when EITHER the chirp is
+  low-confidence (`correlation < kChirpTrustCorr`) — gated at *every* stage including the PING, so a
+  phantom never establishes — OR a connected link has an already-established CFO (the original clamp).
+- `cfo_tracker.{hpp,cpp}`: `seedFromChirp(measured_cfo, correlation, connected, log)` threads the
+  correlation through and logs it in the "CFO sanity" clamp line.
+- `streaming_sync_acquisition.cpp`: passes `sync_result.correlation` to `seedFromChirp`.
+- `tests/test_streaming_signal_policy.cpp`: 4 existing drift-clamp calls take the new `correlation`
+  arg (high-corr, semantics preserved) + 2 new cases (low-corr phantom rejected even at PING; a
+  trusted large real dial offset at acquisition is accepted).
+- `tools/qso_sweep.sh`: seed 2 added to the default `SEEDS` as the standing CFO-phantom regression guard.
+
+**Why it works:** the phantom is recognized by its low correlation and rejected before it can move
+`known` (at the PING, so it never poisons the session) — `known` stays at the true ~0. Hardware-safe:
+a clean high-corr chirp with a genuine large dial offset is NOT gated (no established CFO to clamp to
++ trusted chirp), so a real CFO is acquired; only low-confidence jumps and established-CFO drift are
+rejected (slow real drift rides the pilot path, `kMaxPilotCFODriftHz`).
+
+**Test verification:** `ctest -R StreamingSignalPolicy` PASS (incl. the 2 new cases). On the faithful
+gate, `gui_qso_scenario.sh --channel good --snr-db 20 --seed 2 --expect-mod QPSK --expect-rate R2/3
+--file-kb 5` (run ALONE — parallel runs are a sim-pacing artifact): rejects the phantom at the PING
+(`CFO sanity: measured=-1.2, known=0.0, corr=0.78 ... using known`), `last_cfo` stays ~0 (was −1.25),
+group 0 decodes, goodput 830→1560 bps, **3/3 PASS**; no-regression seeds {1,3,5,7} 4/4 PASS CRC-clean.
+
+---
+
 ## 2026-06-08 — chore(gui): stop creating startup_trace.log (retire the cold-start tracer)
 
 **What it was:** `startupTrace()` (`src/gui/startup_trace.hpp`) was Windows-only instrumentation

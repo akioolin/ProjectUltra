@@ -11,14 +11,17 @@ namespace sync {
 // Same policy call, same log, same return (measured when un-clamped, accepted when clamped) →
 // byte-identical; only the home moved. The caller still applies the genie-timing diag override and
 // stores the final value back into the tracker.
-float CFOTracker::seedFromChirp(float measured_cfo, bool connected, const char* log_prefix) const {
+float CFOTracker::seedFromChirp(float measured_cfo, float correlation, bool connected,
+                                const char* log_prefix) const {
     const float known = cfo_.load();
-    const auto decision = signal_policy::limitConnectedCFODrift(connected, measured_cfo, known);
+    const auto decision =
+        signal_policy::limitConnectedCFODrift(connected, measured_cfo, known, correlation);
     if (decision.clamped) {
-        LOG_MODEM(INFO, "[%s] CFO sanity: measured=%.1f, known=%.1f, diff=%.1f > %.1f, using known",
-                  log_prefix, measured_cfo, known, decision.diff_hz,
+        LOG_MODEM(INFO,
+                  "[%s] CFO sanity: measured=%.1f, known=%.1f, corr=%.2f, diff=%.1f > %.1f, using known",
+                  log_prefix, measured_cfo, known, correlation, decision.diff_hz,
                   signal_policy::kMaxSyncCFODriftHz);
-        return decision.accepted_cfo;  // Trust established CFO over noisy measurement
+        return decision.accepted_cfo;  // low-confidence or established-drift -> trust tracked CFO
     }
     return measured_cfo;
 }

@@ -20,6 +20,11 @@ inline constexpr float kMinLTSChannelMagnitude = 5.0e-2f;
 inline constexpr float kMaxSyncCFODriftHz = 1.0f;
 inline constexpr float kMaxPilotCFODriftHz = 2.0f;
 inline constexpr float kKnownCFOEpsilonHz = 0.01f;
+// Chirp correlation below which the gap-derived CFO is peak-jitter-dominated (a fade manufactures
+// a phantom offset, e.g. -1.25 Hz at corr 0.78 on a zero-CFO channel) and must NOT be trusted to
+// MOVE the tracked CFO. Separates measured phantoms (corr ~0.73-0.79) from clean locks (~0.92-0.95).
+// PROTOTYPE value; principled form derives it from a peak-position-variance significance test.
+inline constexpr float kChirpTrustCorr = 0.85f;
 
 inline float meanAbsLLR(const float* bits, size_t count) {
     if (!bits || count == 0) {
@@ -259,15 +264,27 @@ struct CFODriftDecision {
 inline CFODriftDecision limitConnectedCFODrift(bool connected,
                                                float measured_cfo,
                                                float known_cfo,
+                                               float correlation,
                                                float max_drift_hz = kMaxSyncCFODriftHz,
-                                               float known_cfo_epsilon_hz = kKnownCFOEpsilonHz) {
+                                               float known_cfo_epsilon_hz = kKnownCFOEpsilonHz,
+                                               float min_trust_corr = kChirpTrustCorr) {
     CFODriftDecision decision;
     decision.accepted_cfo = measured_cfo;
     decision.diff_hz = measured_cfo - known_cfo;
 
-    if (connected &&
-        std::abs(known_cfo) > known_cfo_epsilon_hz &&
-        std::abs(decision.diff_hz) > max_drift_hz) {
+    // Reject a large CFO jump we cannot trust and KEEP the tracked value. Two triggers:
+    //  (1) LOW-CONFIDENCE chirp (correlation < kChirpTrustCorr): a fade-jittered chirp peak
+    //      manufactures a phantom CFO. Gated at EVERY stage, INCLUDING the connected=false PING,
+    //      so the phantom never ESTABLISHES in `known` — the root the connected-only clamp could
+    //      not reach (by the time we are connected the PING already poisoned `known`).
+    //  (2) the original connected clamp: an established (|known|>eps) CFO is protected from a
+    //      drifting chirp even at high correlation.
+    // A genuine first acquisition (clean high-corr chirp, even a large real dial offset) is NOT
+    // gated: low_confidence is false and there is no established CFO to clamp to, so it's accepted.
+    const bool large_drift = std::abs(decision.diff_hz) > max_drift_hz;
+    const bool low_confidence = correlation < min_trust_corr;
+    const bool established = connected && std::abs(known_cfo) > known_cfo_epsilon_hz;
+    if (large_drift && (low_confidence || established)) {
         decision.accepted_cfo = known_cfo;
         decision.clamped = true;
     }

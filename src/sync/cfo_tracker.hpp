@@ -31,11 +31,14 @@ public:
     // The current tracked CFO (Hz). Read on acquisition (as the known CFO) and before each demod.
     float tracked() const { return cfo_.load(); }
 
-    // §7 C-CFO-2: arbitrate a chirp-measured CFO against the tracked value. On a connected link a
-    // multipath-distorted chirp can read a false CFO, so the per-frame drift is clamped to the
-    // established estimate (signal_policy::limitConnectedCFODrift, logging the clamp). Returns the
-    // accepted CFO; does NOT store (the caller applies any diag override, then stores the final value).
-    float seedFromChirp(float measured_cfo, bool connected, const char* log_prefix) const;
+    // §7 C-CFO-2: arbitrate a chirp-measured CFO against the tracked value, using the chirp's
+    // CORRELATION as confidence. A multipath-distorted (low-correlation) chirp reads a false CFO,
+    // so a large jump is rejected to the tracked value — at EVERY stage including the pre-connect
+    // PING, so a phantom never establishes — and an already-established CFO is additionally
+    // protected on a connected link (signal_policy::limitConnectedCFODrift, logging the clamp).
+    // Returns the accepted CFO; does NOT store (the caller applies any diag override, then stores).
+    float seedFromChirp(float measured_cfo, float correlation, bool connected,
+                        const char* log_prefix) const;
 
     // §7 C-CFO-3: ingest the per-frame pilot/LTS residual — combine it (and the pre-correction that
     // was applied to the demod) with `current` via signal_policy::combinePilotCFO, then STORE the

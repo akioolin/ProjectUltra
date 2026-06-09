@@ -26,7 +26,10 @@ SCENARIO="$HERE/gui_qso_scenario.sh"
 ANALYZE="$HERE/analyze_qso_run.sh"
 
 OUT_ROOT="/tmp/qso_sweep_$$"
-SEEDS="42"          # one or more seeds; each spec runs once per seed
+SEEDS="42 2"        # one or more seeds; each spec runs once per seed.
+                    # seed 2 = standing CFO-phantom guard (good/20 fade jitters the chirp peak
+                    # -> phantom -1.25 Hz CFO -> group-0 smear; regression case for the
+                    # confidence-into-CFOTracker fix, 2026-06-08). Keep it in the default set.
 DEFAULT_FKB=20
 CONFIG=""
 while [[ $# -gt 0 ]]; do

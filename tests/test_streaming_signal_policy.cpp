@@ -154,22 +154,36 @@ void test_light_sync_decision() {
 }
 
 void test_cfo_drift_limit() {
-    auto disconnected = limitConnectedCFODrift(false, 10.0f, 1.0f);
-    CHECK(!disconnected.clamped, "disconnected CFO should not clamp");
+    // High-correlation (trusted) chirps: behaviour is the original drift clamp.
+    constexpr float kHi = 1.0f;
+    auto disconnected = limitConnectedCFODrift(false, 10.0f, 1.0f, kHi);
+    CHECK(!disconnected.clamped, "disconnected trusted CFO should not clamp");
     CHECK_CLOSE(disconnected.accepted_cfo, 10.0f, 0.0001f, "disconnected CFO accepted");
 
-    auto unknown = limitConnectedCFODrift(true, 10.0f, 0.0f);
-    CHECK(!unknown.clamped, "near-zero known CFO should not clamp");
+    auto unknown = limitConnectedCFODrift(true, 10.0f, 0.0f, kHi);
+    CHECK(!unknown.clamped, "near-zero known + trusted chirp should not clamp");
     CHECK_CLOSE(unknown.accepted_cfo, 10.0f, 0.0001f, "unknown CFO accepted");
 
-    auto small_drift = limitConnectedCFODrift(true, 10.9f, 10.0f);
+    auto small_drift = limitConnectedCFODrift(true, 10.9f, 10.0f, kHi);
     CHECK(!small_drift.clamped, "small CFO drift should not clamp");
     CHECK_CLOSE(small_drift.accepted_cfo, 10.9f, 0.0001f, "small drift accepted");
 
-    auto large_drift = limitConnectedCFODrift(true, 12.0f, 10.0f);
+    auto large_drift = limitConnectedCFODrift(true, 12.0f, 10.0f, kHi);
     CHECK(large_drift.clamped, "large CFO drift should clamp");
     CHECK_CLOSE(large_drift.accepted_cfo, 10.0f, 0.0001f, "large drift should use known CFO");
     CHECK_CLOSE(large_drift.diff_hz, 2.0f, 0.0001f, "CFO diff telemetry");
+
+    // Low-confidence (fade-jittered) chirp: a large jump is rejected to the tracked value at
+    // EVERY stage, including the pre-connect PING (so a phantom never establishes in `known`).
+    auto phantom_ping = limitConnectedCFODrift(false, -1.25f, 0.0f, 0.73f);
+    CHECK(phantom_ping.clamped, "low-corr phantom must clamp even at PING (disconnected)");
+    CHECK_CLOSE(phantom_ping.accepted_cfo, 0.0f, 0.0001f, "phantom rejected to tracked 0");
+
+    // Genuine first acquisition: a clean high-corr chirp with a large real dial offset is accepted
+    // (no established CFO to clamp to, and the chirp is trusted).
+    auto real_acq = limitConnectedCFODrift(false, 30.0f, 0.0f, 0.95f);
+    CHECK(!real_acq.clamped, "trusted large real CFO at acquisition must be accepted");
+    CHECK_CLOSE(real_acq.accepted_cfo, 30.0f, 0.0001f, "real dial offset acquired");
 }
 
 void test_pilot_cfo_update() {

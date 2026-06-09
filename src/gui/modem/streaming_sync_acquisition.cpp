@@ -379,7 +379,8 @@ void StreamingDecoder::searchForSync() {
         // §7 C-CFO-2: the chirp-CFO drift clamp now lives on the tracker — it reads its own tracked
         // value as `known` and logs the clamp. On fading a multipath-distorted chirp can read a false
         // CFO, so the per-frame drift is clamped to the established estimate.
-        float new_cfo = cfo_tracker_.seedFromChirp(sync_result.cfo_hz, connected_, log_prefix_.c_str());
+        float new_cfo = cfo_tracker_.seedFromChirp(sync_result.cfo_hz, sync_result.correlation,
+                                                   connected_, log_prefix_.c_str());
         if (timing_cfo_genie) {
             LOG_MODEM(WARN,
                       "[%s] DIAG genie-timing-cfo: forcing sync CFO %.2f Hz -> 0.00 Hz",
